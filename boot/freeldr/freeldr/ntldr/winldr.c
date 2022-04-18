@@ -1299,7 +1299,7 @@ LoadAndBootWindows(
     }
 
     /* Append boot-time options */
-    AppendBootTimeOptions(BootOptions);
+    AppendBootTimeOptions(BootOptions, sizeof(BootOptions));
 
     /* Post-process the boot options */
     NtLdrNormalizeOptions(BootOptions);
