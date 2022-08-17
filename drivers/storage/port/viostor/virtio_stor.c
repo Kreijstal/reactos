@@ -29,6 +29,11 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+ 
+#ifdef __REACTOS__
+#define lastRedirectionMessageNumber LastRedirectionMessageNumber
+#endif
+ 
 #include "virtio_stor.h"
 #if defined(EVENT_TRACING)
 #include "virtio_stor.tmh"
@@ -488,8 +493,13 @@ VirtIoFindAdapter(
     ConfigInfo->NumberOfPhysicalBreaks++;
     adaptExt->max_tx_length = ConfigInfo->MaximumTransferLength;
 
+#ifndef __REACTOS__ /* Im not fixing this fucking call, i have these functions properly implemented but no */
     num_cpus = KeQueryActiveProcessorCountEx(ALL_PROCESSOR_GROUPS);
     max_cpus = KeQueryMaximumProcessorCountEx(ALL_PROCESSOR_GROUPS);
+#else
+    num_cpus = 0;
+    max_cpus = 0;
+#endif
     /* Set num_cpus and max_cpus to some sane values, to keep Static Driver Verification happy */
     num_cpus = max(1, num_cpus);
     max_cpus = max(1, max_cpus);
