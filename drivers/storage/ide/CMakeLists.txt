@@ -1,5 +1,4 @@
 
-add_subdirectory(atapi)
 if(ARCH STREQUAL "i386" AND NOT ENABLE_UNIATA)
     add_subdirectory(legide)
 endif()
