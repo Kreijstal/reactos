@@ -66,6 +66,7 @@ BaseGetNamedObjectDirectory(VOID)
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
     HANDLE DirHandle, BnoHandle, Token, NewToken;
+    UNICODE_STRING Temp;
 
     if (BaseNamedObjectDirectory) return BaseNamedObjectDirectory;
 
@@ -96,8 +97,12 @@ BaseGetNamedObjectDirectory(VOID)
     RtlAcquirePebLock();
     if (BaseNamedObjectDirectory) goto Quickie;
 
+    Temp.Length = BaseStaticServerData->NamedObjectDirectory.Length;
+    Temp.MaximumLength = BaseStaticServerData->NamedObjectDirectory.MaximumLength;
+    Temp.Buffer = (PVOID)BaseStaticServerData->NamedObjectDirectory.Buffer;
+
     InitializeObjectAttributes(&ObjectAttributes,
-                               &BaseStaticServerData->NamedObjectDirectory,
+                               &Temp,
                                OBJ_CASE_INSENSITIVE,
                                NULL,
                                NULL);
