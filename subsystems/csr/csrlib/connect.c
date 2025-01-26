@@ -100,7 +100,7 @@ CsrpConnectToServer(
 
     /* Set up the port view structures to match them with the section */
     LpcWrite.Length = sizeof(LpcWrite);
-    LpcWrite.SectionHandle = CsrSectionHandle;
+    LpcWrite.SectionHandle = (LPC_HANDLE)(ULONG_PTR)CsrSectionHandle;
     LpcWrite.SectionOffset = 0;
     LpcWrite.ViewSize = CsrSectionViewSize.u.LowPart;
     LpcWrite.ViewBase = 0;
@@ -161,16 +161,16 @@ CsrpConnectToServer(
                          (ULONG_PTR)LpcWrite.ViewBase;
 
     /* Save the Process */
-    CsrProcessId = ConnectionInfo.ServerProcessId;
+    CsrProcessId = (HANDLE)ConnectionInfo.ServerProcessId;
 
     /* Save CSR Section data */
-    NtCurrentPeb()->ReadOnlySharedMemoryBase = ConnectionInfo.SharedSectionBase;
-    NtCurrentPeb()->ReadOnlySharedMemoryHeap = ConnectionInfo.SharedSectionHeap;
-    NtCurrentPeb()->ReadOnlyStaticServerData = ConnectionInfo.SharedStaticServerData;
+    NtCurrentPeb()->ReadOnlySharedMemoryBase = (PVOID)ConnectionInfo.SharedSectionBase;
+    NtCurrentPeb()->ReadOnlySharedMemoryHeap = (PVOID)ConnectionInfo.SharedSectionHeap;
+    NtCurrentPeb()->ReadOnlyStaticServerData = (PVOID)ConnectionInfo.SharedStaticServerData;
 
     /* Create the port heap */
     CsrPortHeap = RtlCreateHeap(0,
-                                LpcWrite.ViewBase,
+                                (PVOID)LpcWrite.ViewBase,
                                 LpcWrite.ViewSize,
                                 PAGE_SIZE,
                                 0,
@@ -296,10 +296,10 @@ CsrClientConnectToServer(
         }
 
         /* Capture the connection info data */
-        CsrCaptureMessageBuffer(CaptureBuffer,
-                                ConnectionInfo,
-                                ClientConnect->ConnectionInfoSize,
-                                &ClientConnect->ConnectionInfo);
+        CsrCaptureMessageBufferNative(CaptureBuffer,
+                                      ConnectionInfo,
+                                      ClientConnect->ConnectionInfoSize,
+                                      &ClientConnect->ConnectionInfo);
 
         /* Return the allocated length */
         *ConnectionInfoSize = ClientConnect->ConnectionInfoSize;
@@ -312,7 +312,7 @@ CsrClientConnectToServer(
 
         /* Copy the updated connection info data back into the user buffer */
         RtlMoveMemory(ConnectionInfo,
-                      ClientConnect->ConnectionInfo,
+                      (PVOID)ClientConnect->ConnectionInfo,
                       *ConnectionInfoSize);
 
         /* Free the capture buffer */
@@ -390,7 +390,7 @@ CsrClientCallServer(
 
     /* Fill out the CSR Header */
     ApiMessage->ApiNumber = ApiNumber;
-    ApiMessage->CsrCaptureData = NULL;
+    ApiMessage->CsrCaptureData = (LPC_PVOID)NULL;
 
     DPRINT("API: %lx, u1.s1.DataLength: %x, u1.s1.TotalLength: %x\n",
            ApiNumber,
@@ -401,7 +401,7 @@ CsrClientCallServer(
     if (!InsideCsrProcess)
     {
         ULONG PointerCount;
-        PULONG_PTR OffsetPointer;
+        LPC_ULONG_PTR* OffsetPointer;
 
         /* Check if we got a Capture Buffer */
         if (CaptureBuffer)
@@ -410,11 +410,11 @@ CsrClientCallServer(
              * We have to convert from our local (client) view
              * to the remote (server) view.
              */
-            ApiMessage->CsrCaptureData = (PCSR_CAPTURE_BUFFER)
+            ApiMessage->CsrCaptureData = (LPC_PVOID)
                 ((ULONG_PTR)CaptureBuffer + CsrPortMemoryDelta);
 
             /* Lock the buffer */
-            CaptureBuffer->BufferEnd = NULL;
+            CaptureBuffer->BufferEnd = (LPC_PVOID)NULL;
 
             /*
              * Each client pointer inside the CSR message is converted into
@@ -427,7 +427,7 @@ CsrClientCallServer(
             {
                 if (*OffsetPointer != 0)
                 {
-                    *(PULONG_PTR)*OffsetPointer += CsrPortMemoryDelta;
+                    *(LPC_ULONG_PTR*)*OffsetPointer += CsrPortMemoryDelta;
                     *OffsetPointer -= (ULONG_PTR)ApiMessage;
                 }
                 ++OffsetPointer;
@@ -446,7 +446,7 @@ CsrClientCallServer(
              * We have to convert back from the remote (server) view
              * to our local (client) view.
              */
-            ApiMessage->CsrCaptureData = (PCSR_CAPTURE_BUFFER)
+            ApiMessage->CsrCaptureData = (LPC_PVOID)
                 ((ULONG_PTR)ApiMessage->CsrCaptureData - CsrPortMemoryDelta);
 
             /*
@@ -461,7 +461,7 @@ CsrClientCallServer(
                 if (*OffsetPointer != 0)
                 {
                     *OffsetPointer += (ULONG_PTR)ApiMessage;
-                    *(PULONG_PTR)*OffsetPointer -= CsrPortMemoryDelta;
+                    *(LPC_ULONG_PTR*)*OffsetPointer -= CsrPortMemoryDelta;
                 }
                 ++OffsetPointer;
             }
@@ -481,7 +481,8 @@ CsrClientCallServer(
         DPRINT("Server-to-server call\n");
 
         /* Save our CID; we check this equality inside CsrValidateMessageBuffer */
-        ApiMessage->Header.ClientId = NtCurrentTeb()->ClientId;
+        ApiMessage->Header.ClientId.UniqueProcess = (LPC_HANDLE)NtCurrentTeb()->ClientId.UniqueProcess;
+        ApiMessage->Header.ClientId.UniqueThread = (LPC_HANDLE)NtCurrentTeb()->ClientId.UniqueThread;
 
         /* Do a direct call */
         Status = CsrServerApiRoutine(ApiMessage, ApiMessage);
