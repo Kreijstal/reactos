@@ -1370,7 +1370,7 @@ AllocConsole(VOID)
     CONSOLE_START_INFO ConsoleStartInfo;
 
     PWCHAR ConsoleTitle;
-    PWCHAR Desktop;
+    LPC_PTRTYPE(PWCHAR) Desktop;
     PWCHAR AppName;
     PWCHAR CurDir;
 
@@ -1411,7 +1411,7 @@ AllocConsole(VOID)
 
     Success = IntAllocConsole(ConsoleTitle,
                               TitleLength,
-                              Desktop,
+                              (PVOID)Desktop,
                               DesktopLength,
                               CurDir,
                               CurDirLength,
