@@ -49,7 +49,7 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
                    + params->ShellInfo.MaximumLength
                    + ((params->RuntimeData.MaximumLength + 1) & ~1));
 
-    status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, 31, &size,
+    status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, 32, &size,
                                       MEM_COMMIT, PAGE_READWRITE );
     ASSERT( !status );
 
@@ -243,7 +243,76 @@ NTSTATUS WINAPI wow64_NtQueryInformationProcess( UINT *args )
     }
 }
 
-/* END OF WINEFUNCS */
+NTSTATUS Wow64WinHandler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
+{
+    ANSI_STRING ImportStr = RTL_CONSTANT_STRING("sdwhwin32");
+    static PSYSTEM_SERVICE_TABLE pServiceTable = NULL; 
+    static PVOID Wow64WinDll = NULL;
+    UNICODE_STRING Wow64WinDllStr = RTL_CONSTANT_STRING(L"wow64win.dll");
+    NTSTATUS Status;
+        
+    ULONG_PTR *HandlerTable = NULL;
+    NTSTATUS (*Service)(ULONG* pArgs) = NULL;
+    
+    static const char* mapping[] = 
+    {
+#define SVC_(name, argc) ""#name ,
+#include "../../../win32ss/w32ksvc32.h"   
+#undef SVC_
+    };
+    
+    if (syscallNum < sizeof(mapping) / sizeof(*mapping))
+    {
+        DPRINT1("[Win32ss Syscall %lX:%hs]\n", syscallNum, mapping[syscallNum]);
+    }
+    
+    /* Make sure wow64win.dll is loaded. */
+    if (pServiceTable == NULL)
+    {
+        Status = LdrLoadDll(NULL, 0, &Wow64WinDllStr, &Wow64WinDll);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Couldn't load wow64win.dll.\n");
+            return Status;
+        }
+        
+        Status = LdrGetProcedureAddress(Wow64WinDll, &ImportStr, 0, (PVOID*)&pServiceTable);
+        if (!NT_SUCCESS(Status)) 
+        {
+            DPRINT1("Couldn't find %hs in wow64win.dll.\n", ImportStr.Buffer);
+            ASSERT(FALSE);
+        }
+        
+        DPRINT1("Loaded service table %p from %p.\n", pServiceTable, Wow64WinDll);
+    }
+    
+    HandlerTable = pServiceTable->ServiceTable;
+    if (HandlerTable == NULL)
+    {
+        DPRINT1("Wow64Win service table is empty.\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
+    
+    if (HandlerTable[syscallNum] == 0)
+    {
+        DPRINT1("Wow64Win service table doesn't define service %lX:%s.\n", 
+                syscallNum, mapping[syscallNum]);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+    
+    if (pServiceTable->ArgumentTable != NULL)
+    {
+        if (pServiceTable->ArgumentTable[syscallNum] != numArgs)
+        {
+            DPRINT1("WARNING: Wow64Win service expects a different number of "
+                    "arguments than %d for %lX:%s.\n", 
+                    numArgs, syscallNum, mapping[syscallNum]);
+        }
+    }
+    
+    Service = (PVOID)HandlerTable[syscallNum];
+    return Service(pArgs);
+}
 
 NTSTATUS handler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
 {   
@@ -258,8 +327,11 @@ NTSTATUS handler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
     
     status = STATUS_NOT_IMPLEMENTED;
 
-    DPRINT1("[Syscall %lX:%hs]\n", syscallNum, mapping[syscallNum]);
-
+    if (syscallNum < sizeof(mapping) / sizeof(*mapping))
+    {
+        DPRINT1("[Syscall %lX:%hs]\n", syscallNum, mapping[syscallNum]);
+    }
+    
     switch (syscallNum)
     {
         /* file.c */
@@ -389,6 +461,7 @@ NTSTATUS handler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
         WINE_WOW_IMPL_CASE(AddAtom);
         WINE_WOW_IMPL_CASE(AllocateLocallyUniqueId);
         WINE_WOW_IMPL_CASE(AllocateUuids);
+        WINE_WOW_IMPL_CASE(CallbackReturn);
         WINE_WOW_IMPL_CASE(Close);
         WINE_WOW_IMPL_CASE(DeleteAtom);
         WINE_WOW_IMPL_CASE(FindAtom);
@@ -449,6 +522,11 @@ NTSTATUS handler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
         
         default:
         {
+            if (syscallNum >= 0x1000)
+            {
+                return Wow64WinHandler(syscallNum - 0x1000, numArgs, pArgs);
+            }
+            
             DPRINT1("WARNING: Unhandled 32-bit syscall 0x%lX(%ld args at %p)\n", syscallNum, numArgs, pArgs);
             status = STATUS_NOT_IMPLEMENTED;
         }
@@ -468,6 +546,13 @@ DllMain(HANDLE hDll,
     return TRUE;
 }
 
+/* PEB Data */
+static USHORT UnicodeCopy[2048];
+static UCHAR AnsiCopy[512], OemCopy[512];
+static ULONG_PTR FixmeProcessHeaps[100]; /* FIXME */
+static UNICODE_STRING NtDll32Str = RTL_CONSTANT_STRING(L"" TMP_WOW_DIR "\\ntdll.dll");
+static ANSI_STRING ImportStr = RTL_CONSTANT_STRING("LdrInitializeThunk");
+
 static
 VOID 
 Wow64InitProcess(VOID)
@@ -477,10 +562,6 @@ Wow64InitProcess(VOID)
     PRTL_USER_PROCESS_PARAMETERS32 ProcParams32 = NULL;
     PPEB Peb = NtCurrentPeb();
     SIZE_T Size;
-    NLS_FILE_HEADER AnsiCopy, OemCopy;
-    ULONG_PTR FixmeProcessHeaps[100]; /* FIXME */
-    UNICODE_STRING NtDll32Str = RTL_CONSTANT_STRING(L"" TMP_WOW_DIR "\\ntdll.dll");
-    ANSI_STRING ImportStr = RTL_CONSTANT_STRING("LdrInitializeThunk");
     
     Status = LdrLoadDll(L"" TMP_WOW_DIR "\\ntdll.dll", 0, &NtDll32Str, &NtDll32);
     if (!NT_SUCCESS(Status))
@@ -509,8 +590,10 @@ Wow64InitProcess(VOID)
     /* CHECKME */
     WowPeb->OemCodePageData = PtrToUlong(&OemCopy);
     WowPeb->AnsiCodePageData = PtrToUlong(&AnsiCopy);
+    WowPeb->UnicodeCaseTableData = PtrToUlong(&UnicodeCopy);
     RtlCopyMemory(&OemCopy, Peb->OemCodePageData, sizeof(OemCopy));
     RtlCopyMemory(&AnsiCopy, Peb->AnsiCodePageData, sizeof(AnsiCopy));
+    RtlCopyMemory(&UnicodeCopy, Peb->UnicodeCaseTableData, sizeof(UnicodeCopy));
     
     /* TODO: Check types - _WOW64_PROCESS has only one field, is this supposed to be the PEB?
        According to https://stackoverflow.com/a/69171561 - yes, it is. This is, however, quite a hacky way 
@@ -547,7 +630,6 @@ Wow64InitThread(VOID)
     PPEB32 WowPeb = NULL;
     PTEB Teb = NtCurrentTeb();
     IMAGE_NT_HEADERS32* NtHeaders = NULL;
-    WCHAR FixmeStaticUnicodeString[256];
     PPEB Peb = NtCurrentPeb();
 
     DPRINT("Current TEB %p\n", Teb);
@@ -574,8 +656,8 @@ Wow64InitThread(VOID)
     WowTeb->NtTib.Self = PtrToUlong(WowTeb);
     
     WowTeb->StaticUnicodeString.Length = 0;
-    WowTeb->StaticUnicodeString.MaximumLength = sizeof(FixmeStaticUnicodeString);
-    WowTeb->StaticUnicodeString.Buffer = PtrToUlong(FixmeStaticUnicodeString);
+    WowTeb->StaticUnicodeString.MaximumLength = sizeof(WowTeb->StaticUnicodeBuffer);
+    WowTeb->StaticUnicodeString.Buffer = PtrToUlong(WowTeb->StaticUnicodeBuffer);
     
     Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information, &WowPeb, sizeof(WowPeb), NULL);
     if (!NT_SUCCESS(Status))
