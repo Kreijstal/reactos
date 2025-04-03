@@ -1823,7 +1823,9 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     ULONG ComSectionSize;
     ANSI_STRING BaseProcessInitPostImportName = RTL_CONSTANT_STRING("BaseProcessInitPostImport");
     ANSI_STRING BaseQueryModuleDataName = RTL_CONSTANT_STRING("BaseQueryModuleData");
+#if defined(_WOW64) && defined(_WIN64) 
     ANSI_STRING Wow64LdrpInitializeImportName = RTL_CONSTANT_STRING("Wow64LdrpInitialize");
+#endif
     PVOID OldShimData;
     OBJECT_ATTRIBUTES ObjectAttributes;
     //UNICODE_STRING LocalFileName, FullImageName;
