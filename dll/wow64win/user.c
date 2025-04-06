@@ -357,21 +357,7 @@ struct client_menu_name32
     ULONG nameUS;
 };
 
-#ifdef __REACTOS__
-
-typedef struct _WINDOWPROC_CALLBACK_ARGUMENTS32
-{
-    ULONG Proc;
-    ULONG IsAnsiProc;
-    ULONG Wnd;
-    UINT Msg;
-    ULONG wParam;
-    ULONG lParam;
-    INT lParamBufferSize;
-    ULONG Result;
-} WINDOWPROC_CALLBACK_ARGUMENTS32, *PWINDOWPROC_CALLBACK_ARGUMENTS32;
-
-#else
+#ifndef __REACTOS__
 struct win_proc_params32
 {
     ULONG func;
@@ -546,6 +532,25 @@ WndProcParams64To32(PWINDOWPROC_CALLBACK_ARGUMENTS CallbackArgs,
     Arguments32->lParam = (ULONG)CallbackArgs->lParam;
     Arguments32->lParamBufferSize = CallbackArgs->lParamBufferSize;
     Arguments32->Result = CallbackArgs->Result;
+}
+
+static 
+void 
+WndProcParams32To64(PWINDOWPROC_CALLBACK_ARGUMENTS OutArguments, 
+                    PWINDOWPROC_CALLBACK_ARGUMENTS32 CallbackArgs)
+{
+    WINDOWPROC_CALLBACK_ARGUMENTS Data = { 0 }, *Arguments = &Data;
+    
+    Arguments->Proc = UlongToPtr(CallbackArgs->Proc);
+    Arguments->IsAnsiProc = CallbackArgs->IsAnsiProc;
+    Arguments->Wnd = UlongToHandle(CallbackArgs->Wnd);
+    Arguments->Msg = CallbackArgs->Msg;
+    Arguments->wParam = CallbackArgs->wParam;
+    Arguments->lParam = CallbackArgs->lParam;
+    Arguments->lParamBufferSize = CallbackArgs->lParamBufferSize;
+    Arguments->Result = CallbackArgs->Result;
+    
+    *OutArguments = *Arguments;
 }
 #endif
 
@@ -917,8 +922,16 @@ static size_t packed_message_64to32( UINT message, WPARAM wparam,
     return size;
 }
 
+#ifndef __REACTOS__
 static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *params32,
                                     size_t size, void *params64 )
+#else
+static size_t packed_message_32to64(UINT message,
+                                    WPARAM wparam,
+                                    void *params64, 
+                                    const void *params32, 
+                                    size_t size)
+#endif
 {
     if (!size) return 0;
 
@@ -929,7 +942,16 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
         if (size >= sizeof(CREATESTRUCT32))
         {
             const CREATESTRUCT32 *cs32 = params32;
+#ifndef __REACTOS__
             CREATESTRUCTW *cs64 = params64;
+#else
+            /* Due to how it was implemented in Wine, these fields could 
+               overlap! ReactOS returns the same address it was given for WndProc,
+               so fields of these structures do overlap. This goes for all the
+               cases here. */
+            CREATESTRUCT cs64Data;
+            CREATESTRUCT *cs64 = &cs64Data, *outCs64 = params64;
+#endif
 
             cs64->lpCreateParams = UlongToPtr( cs32->lpCreateParams );
             cs64->hInstance      = UlongToPtr( cs32->hInstance );
@@ -941,6 +963,9 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
             cs64->x              = cs32->x;
             cs64->style          = cs32->style;
             cs64->dwExStyle      = cs32->dwExStyle;
+#ifdef __REACTOS__
+            *outCs64 = cs64Data;
+#endif
             return sizeof(*cs64);
         }
         break;
@@ -949,12 +974,19 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
         if (wparam)
         {
             const NCCALCSIZE_PARAMS32 *ncp32 = params32;
+#ifndef __REACTOS__
             NCCALCSIZE_PARAMS *ncp64 = params64;
+#else
+            NCCALCSIZE_PARAMS ncp64Data, *ncp64 = &ncp64Data, *outNcp64 = params64;
+#endif
 
             ncp64->rgrc[0] = ncp32->rgrc[0];
             ncp64->rgrc[1] = ncp32->rgrc[1];
             ncp64->rgrc[2] = ncp32->rgrc[2];
             winpos_32to64( (WINDOWPOS *)(ncp64 + 1), (const WINDOWPOS32 *)(ncp32 + 1) );
+#ifdef __REACTOS__
+            *outNcp64 = ncp64Data;
+#endif
             return sizeof(*ncp64) + sizeof(WINDOWPOS);
         }
         break;
@@ -962,7 +994,11 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
     case WM_MEASUREITEM:
         {
             const MEASUREITEMSTRUCT32 *mis32 = params32;
+#ifndef __REACTOS__
             MEASUREITEMSTRUCT *mis64 = params64;
+#else
+            MEASUREITEMSTRUCT mis64Data, *mis64 = &mis64Data, *outMis64 = params64;
+#endif
 
             mis64->CtlType    = mis32->CtlType;
             mis64->CtlID      = mis32->CtlID;
@@ -970,29 +1006,50 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
             mis64->itemWidth  = mis32->itemWidth;
             mis64->itemHeight = mis32->itemHeight;
             mis64->itemData   = mis32->itemData;
+#ifdef __REACTOS__
+            *outMis64 = mis64Data;
+#endif
             return sizeof(*mis64);
         }
 
     case WM_WINDOWPOSCHANGING:
     case WM_WINDOWPOSCHANGED:
+#ifndef __REACTOS__
         winpos_32to64( params64, params32 );
         return sizeof(WINDOWPOS);
+#else
+        WINDOWPOS wpos64, *outWpos64 = params64;
+        winpos_32to64(&wpos64, params32);
+        *outWpos64 = wpos64;
+        return sizeof(WINDOWPOS);
+#endif
 
     case WM_NEXTMENU:
         {
             const MDINEXTMENU32 *next32 = params32;
+#ifndef __REACTOS__
             MDINEXTMENU *next64 = params64;
+#else
+            MDINEXTMENU next64Data, *next64 = &next64Data, *outNext64 = params64;
+#endif
 
             next64->hmenuIn   = LongToHandle( next32->hmenuIn );
             next64->hmenuNext = LongToHandle( next32->hmenuNext );
             next64->hwndNext  = LongToHandle( next32->hwndNext );
+#ifdef __REACTOS__
+            *outNext64 = next64Data;
+#endif
             return sizeof(*next64);
         }
 
     case CB_GETCOMBOBOXINFO:
         {
             const COMBOBOXINFO32 *ci32 = params32;
+#ifndef __REACTOS__
             COMBOBOXINFO *ci64 = params64;
+#else
+            COMBOBOXINFO ci64Data, *ci64 = &ci64Data, *outCi64 = params64;
+#endif
 
             ci64->cbSize      = sizeof(*ci32);
             ci64->rcItem      = ci32->rcItem;
@@ -1001,6 +1058,9 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
             ci64->hwndCombo   = LongToHandle( ci32->hwndCombo );
             ci64->hwndItem    = LongToHandle( ci32->hwndItem );
             ci64->hwndList    = LongToHandle( ci32->hwndList );
+#ifdef __REACTOS__
+            *outCi64 = ci64Data;
+#endif
             return sizeof(*ci64);
         }
 
@@ -1032,7 +1092,13 @@ static size_t packed_result_32to64( UINT message, WPARAM wparam, const void *par
         return 0;
     }
 
+#ifndef __REACTOS__
     if (size) memcpy( params64, params32, size );
+#else
+    /* Parameter buffers most likely overlap because of how this was 
+       implemented in Wine */
+    if (size) memmove(params64, params32, size);
+#endif
     return size;
 }
 
@@ -1046,7 +1112,9 @@ NTSTATUS WINAPI wow64_NtUserCallWinProc( void *arg, ULONG size )
     PWINDOWPROC_CALLBACK_ARGUMENTS32 params32 = arg;
 #endif
     size_t lparam_size = 0, offset32 = sizeof(*params32);
+#ifndef __REACTOS__
     LRESULT result = 0;
+#endif
     void *ret_ptr;
     ULONG ret_len;
     NTSTATUS status;
@@ -1073,28 +1141,41 @@ NTSTATUS WINAPI wow64_NtUserCallWinProc( void *arg, ULONG size )
 #ifndef __REACTOS__
     status = Wow64KiUserCallbackDispatcher( NtUserCallWinProc, params32,
 #else
-    params32->lParamBufferSize = lparam_size;
-
+    if (params32->lParamBufferSize >= 0)
+    {
+        params32->lParamBufferSize = lparam_size;
+    }
+    
     status = Wow64KiUserCallbackDispatcher( NumUser32CallWindowProcFromKernel, params32,
 #endif
                                             offset32 + lparam_size,
                                             &ret_ptr, &ret_len );
 
+#ifndef __REACTOS__
     if (ret_len >= sizeof(LONG))
     {
         LRESULT *result_ptr = arg;
         result = *(LONG *)ret_ptr;
-#ifndef __REACTOS__
         ret_len = packed_result_32to64( params32->msg, params32->wparam, (LONG *)ret_ptr + 1,
-#else
-        ret_len = packed_result_32to64( params32->Msg, params32->wParam, (LONG *)ret_ptr + 1,
-#endif
                                        ret_len - sizeof(LONG), result_ptr + 1 );
         *result_ptr = result;
         return NtCallbackReturn( result_ptr, sizeof(*result_ptr) + ret_len, status );
     }
 
     return NtCallbackReturn( &result, sizeof(result), status );
+#else
+    const size_t offset64 = (sizeof(*params) + 15) & ~15;
+    ret_len = packed_message_32to64(params32->Msg, params32->wParam, 
+                                    (char *)params + offset64,
+                                    (char *)params32 + offset32,
+                                    size - offset64);
+        
+    ret_len += offset64;
+    
+    WndProcParams32To64(params, params32);
+        
+    return NtCallbackReturn(ret_ptr, ret_len, status);
+#endif
 }
 
 #ifndef __REACTOS__
@@ -1630,6 +1711,7 @@ NTSTATUS WINAPI wow64_NtUserAttachThreadInput( UINT *args )
 
     return NtUserAttachThreadInput( from, to, attach );
 }
+#endif
 
 NTSTATUS WINAPI wow64_NtUserBeginPaint( UINT *args )
 {
@@ -1649,6 +1731,7 @@ NTSTATUS WINAPI wow64_NtUserBeginPaint( UINT *args )
     return HandleToUlong( ret );
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserBuildHimcList( UINT *args )
 {
     ULONG thread_id = get_ulong( &args );
@@ -2108,6 +2191,7 @@ NTSTATUS WINAPI wow64_NtUserDestroyMenu( UINT *args )
 
     return NtUserDestroyMenu( handle );
 }
+#endif
 
 NTSTATUS WINAPI wow64_NtUserDestroyWindow( UINT *args )
 {
@@ -2131,6 +2215,7 @@ NTSTATUS WINAPI wow64_NtUserDispatchMessage( UINT *args )
     return NtUserDispatchMessage( msg_32to64( &msg, msg32 ));
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserDragDetect( UINT *args )
 {
     HWND hwnd = get_handle( &args );
@@ -2232,6 +2317,7 @@ NTSTATUS WINAPI wow64_NtUserEndMenu( UINT *args )
 {
     return NtUserEndMenu();
 }
+#endif
 
 NTSTATUS WINAPI wow64_NtUserEndPaint( UINT *args )
 {
@@ -2242,6 +2328,7 @@ NTSTATUS WINAPI wow64_NtUserEndPaint( UINT *args )
     return NtUserEndPaint( hwnd, paintstruct_32to64( &ps, ps32 ));
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserEnumDisplayDevices( UINT *args )
 {
     UNICODE_STRING32 *device32 = get_ptr( &args );
@@ -2284,6 +2371,7 @@ NTSTATUS WINAPI wow64_NtUserExcludeUpdateRgn( UINT *args )
 
     return NtUserExcludeUpdateRgn( hdc, hwnd );
 }
+#endif
 
 NTSTATUS WINAPI wow64_NtUserFindExistingCursorIcon( UINT *args )
 {
@@ -2300,6 +2388,7 @@ NTSTATUS WINAPI wow64_NtUserFindExistingCursorIcon( UINT *args )
     return HandleToUlong( ret );
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserFindWindowEx( UINT *args )
 {
     HWND parent = get_handle( &args );
@@ -3467,6 +3556,10 @@ NTSTATUS WINAPI wow64_NtUserMenuItemFromPoint( UINT *args )
 
     return NtUserMenuItemFromPoint( hwnd, handle, x, y );
 }
+#endif
+
+#define NtUserMessageCall(hWnd, Msg, wParam, lParam, pResult, dwType, bAnsi) \
+    NtUserMessageCall(hWnd, Msg, wParam, lParam, (ULONG_PTR)pResult, dwType, bAnsi)
 
 static LRESULT message_call_32to64( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
                                     void *result_info, DWORD type, BOOL ansi )
@@ -3716,6 +3809,7 @@ NTSTATUS WINAPI wow64_NtUserMessageCall( UINT *args )
     UINT type = get_ulong ( &args );
     BOOL ansi = get_ulong( &args );
 
+#ifndef __REACTOS__
     switch (type)
     {
     case NtUserGetDispatchParams:
@@ -3855,8 +3949,14 @@ NTSTATUS WINAPI wow64_NtUserMessageCall( UINT *args )
             return NtUserMessageCall( hwnd, msg, wparam, lparam, result_info, type, ansi );
         }
     }
-
     return message_call_32to64( hwnd, msg, wparam, lparam, result_info, type, ansi );
+#else
+    /* FIXME */
+    BYTE bigStupidBuffer[256];
+    NTSTATUS Status = message_call_32to64(hwnd, msg, wparam, lparam, bigStupidBuffer, type, ansi);
+    RtlCopyMemory(result_info, bigStupidBuffer, 4);
+    return Status;
+#endif
 }
 
 NTSTATUS WINAPI wow64_NtUserMoveWindow( UINT *args )
@@ -3871,6 +3971,7 @@ NTSTATUS WINAPI wow64_NtUserMoveWindow( UINT *args )
     return NtUserMoveWindow( hwnd, x, y, cx, cy, repaint );
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserMsgWaitForMultipleObjectsEx( UINT *args )
 {
     DWORD count = get_ulong( &args );
@@ -4345,6 +4446,7 @@ NTSTATUS WINAPI wow64_NtUserSetCursorPos( UINT *args )
 
     return NtUserSetCursorPos( x, y );
 }
+#endif
 
 NTSTATUS WINAPI wow64_NtUserSetFocus( UINT *args )
 {
@@ -4353,6 +4455,7 @@ NTSTATUS WINAPI wow64_NtUserSetFocus( UINT *args )
     return HandleToUlong( NtUserSetFocus( hwnd ));
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserSetInternalWindowPos( UINT *args )
 {
     HWND hwnd = get_handle( &args );
@@ -4788,6 +4891,7 @@ NTSTATUS WINAPI wow64_NtUserThunkedMenuInfo( UINT *args )
 
     return NtUserThunkedMenuInfo( menu, info32 ? &info : NULL );
 }
+#endif
 
 NTSTATUS WINAPI wow64_NtUserThunkedMenuItemInfo( UINT *args )
 {
@@ -4805,10 +4909,15 @@ NTSTATUS WINAPI wow64_NtUserThunkedMenuItemInfo( UINT *args )
     {
         info.cbSize = sizeof(info);
         info.fMask = info32->fMask;
+#ifndef __REACTOS__
         switch (method)
         {
         case NtUserSetMenuItemInfo:
         case NtUserInsertMenuItem:
+#else
+        if (method)
+        {
+#endif
             info.fType = info32->fType;
             info.fState = info32->fState;
             info.wID = info32->wID;
@@ -4819,16 +4928,26 @@ NTSTATUS WINAPI wow64_NtUserThunkedMenuItemInfo( UINT *args )
             info.dwTypeData = UlongToPtr( info32->dwTypeData );
             info.cch = info32->cch;
             info.hbmpItem = UlongToHandle( info32->hbmpItem );
+#ifndef __REACTOS__
             break;
         case NtUserCheckMenuRadioItem:
             info.cch = info32->cch;
             break;
         case NtUserGetMenuItemInfoA:
         case NtUserGetMenuItemInfoW:
+#else
+        }
+        else
+        {
+#endif
             info.dwTypeData = UlongToPtr( info32->dwTypeData );
             info.cch = info32->cch;
+#ifndef __REACTOS__
             break;
         }
+#else
+        }
+#endif 
         info_ptr = &info;
     }
     else info_ptr = NULL;
@@ -4838,10 +4957,15 @@ NTSTATUS WINAPI wow64_NtUserThunkedMenuItemInfo( UINT *args )
 
     if (info_ptr)
     {
+#ifndef __REACTOS__
         switch (method)
         {
         case NtUserGetMenuItemInfoA:
         case NtUserGetMenuItemInfoW:
+#else
+        if (method)
+        {
+#endif
             if (info.fMask & (MIIM_TYPE | MIIM_STRING | MIIM_FTYPE))
                 info32->fType = info.fType;
             if (info.fMask & (MIIM_TYPE | MIIM_BITMAP))
@@ -4860,13 +4984,18 @@ NTSTATUS WINAPI wow64_NtUserThunkedMenuItemInfo( UINT *args )
                 info32->hbmpUnchecked = HandleToUlong( info.hbmpUnchecked );
             }
             if (info.fMask & MIIM_DATA) info32->dwItemData = info.dwItemData;
+#ifndef __REACTOS__
             break;
         }
+#else
+        }
+#endif
     }
 
     return ret;
 }
 
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserToUnicodeEx( UINT *args )
 {
     UINT virt = get_ulong( &args );

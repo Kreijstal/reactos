@@ -53,7 +53,7 @@ static void* win32_syscalls[] =
 #endif
 {
 #ifdef __REACTOS__
-#define SVC_(name, argc) wow64win_Unimplemented,
+#define SVC_(name, argc) NULL,
 #include "../../../win32ss/w32ksvc32.h"
 #undef SVC_
 #else
@@ -104,94 +104,57 @@ static VOID InitServiceTable(VOID)
     IMPLEMENT_SERVICE(UserProcessConnect);
     IMPLEMENT_SERVICE(UserInitializeClientPfnArrays);
     IMPLEMENT_SERVICE(GdiInit);
+    IMPLEMENT_SERVICE(GdiCreateBitmap);
+    IMPLEMENT_SERVICE(GdiCreateCompatibleDC);
+    IMPLEMENT_SERVICE(GdiDeleteObjectApp);
     IMPLEMENT_SERVICE(UserCallNoParam);
     IMPLEMENT_SERVICE(UserCallOneParam);
+    IMPLEMENT_SERVICE(UserCallHwndLock);
+    IMPLEMENT_SERVICE(UserGetThreadState);
+    IMPLEMENT_SERVICE(UserGetMessage);
+    IMPLEMENT_SERVICE(UserMessageCall);
     IMPLEMENT_SERVICE(UserRegisterClassExWOW);
     IMPLEMENT_SERVICE(UserGetClassInfo);
     IMPLEMENT_SERVICE(UserCreateWindowEx);
     IMPLEMENT_SERVICE(UserShowWindow);
     IMPLEMENT_SERVICE(UserGetMessage);
-
+    IMPLEMENT_SERVICE(UserDispatchMessage);
+    IMPLEMENT_SERVICE(UserFindExistingCursorIcon);
+    IMPLEMENT_SERVICE(UserBeginPaint);
+    IMPLEMENT_SERVICE(UserEndPaint);
+    IMPLEMENT_SERVICE(GdiPatBlt);
+    IMPLEMENT_SERVICE(UserSetFocus);
+    IMPLEMENT_SERVICE(GdiSelectBitmap);
+    IMPLEMENT_SERVICE(GdiStretchDIBitsInternal);
+    IMPLEMENT_SERVICE(GdiGetDeviceCaps);
+    IMPLEMENT_SERVICE(GdiCreateCompatibleBitmap);
+    IMPLEMENT_SERVICE(GdiGetAppClipBox);
+    IMPLEMENT_SERVICE(GdiFlush);
+    IMPLEMENT_SERVICE(UserDestroyWindow);
+    IMPLEMENT_SERVICE(UserThunkedMenuItemInfo);
+    
 #undef IMPLEMENT_SERVICE
 }
 
-typedef struct _WNDMSG32
-{
-    DWORD maxMsgs;
-    ULONG abMsgs;
-} WNDMSG32, *PWNDMSG32;
-
-static void 
-CopyWndMsg32To64(OUT PWNDMSG pWndMsg64,
-                 IN PWNDMSG32 pWndMsg32)
-{
-    pWndMsg64->maxMsgs = pWndMsg32->maxMsgs;
-    pWndMsg64->abMsgs = UlongToPtr(pWndMsg32->abMsgs);
-}
-
-typedef struct _SHAREDINFO32
-{
-    ULONG psi;
-    ULONG aheList;
-    ULONG pDispInfo;
-    ULONG ulSharedDelta;
-    WNDMSG32 awmControl[FNID_NUM];
-    WNDMSG32 DefWindowMsgs;
-    WNDMSG32 DefWindowSpecMsgs;
-} SHAREDINFO32, *PSHAREDINFO32;
-
-typedef struct _USERCONNECT32
-{
-    ULONG ulVersion;
-    ULONG ulCurrentVersion;
-    DWORD dwDispatchCount;
-    SHAREDINFO32 siClient;
-} USERCONNECT32, *PUSERCONNECT32;
-
 NTSTATUS WINAPI wow64_NtUserProcessConnect(UINT* pArgs)
-{
-    NTSTATUS Status;
-    USERCONNECT UserConnect64;
-        
+{  
     HANDLE ProcessHandle = get_handle(&pArgs);    
-    PUSERCONNECT32 pUserConnect32 = get_ptr(&pArgs);
+    PUSERCONNECT pUserConnect = get_ptr(&pArgs);
     ULONG Size = get_ulong(&pArgs);
+    /* Copy the memory manually to prevent the kernel complaining about 
+       misaligned memory. */
+    USERCONNECT UserConnect;
     
-    RtlZeroMemory(&UserConnect64, sizeof(UserConnect64));
-    UserConnect64.ulVersion = pUserConnect32->ulVersion;
+    NTSTATUS Status;
     
-    if (Size != sizeof(USERCONNECT32) || pUserConnect32 == NULL)
+    if (Size != sizeof(USERCONNECT) || pUserConnect == NULL)
     {
         return STATUS_UNSUCCESSFUL;
     }
     
-    Status = NtUserProcessConnect(ProcessHandle, &UserConnect64, sizeof(UserConnect64));
+    Status = NtUserProcessConnect(ProcessHandle, &UserConnect, sizeof(UserConnect));
     
-    if (NT_SUCCESS(Status))
-    {
-        PSHAREDINFO32 si32;
-        PSHAREDINFO si64;
-        
-        pUserConnect32->ulCurrentVersion = UserConnect64.ulCurrentVersion;
-        pUserConnect32->dwDispatchCount = UserConnect64.dwDispatchCount;
-        
-        si32 = &pUserConnect32->siClient;
-        si64 = &UserConnect64.siClient;
-        
-        si32->psi = PtrToUlong(si64->psi);
-        si32->aheList = PtrToUlong(si64->aheList);
-        si32->pDispInfo = PtrToUlong(si64->pDispInfo);
-        si32->ulSharedDelta = si64->ulSharedDelta;
-        
-        for (int i = 0; i < FNID_NUM; i++)
-        {
-            CopyWndMsg32To64(&si64->awmControl[i], &si32->awmControl[i]);
-        }
-        
-        CopyWndMsg32To64(&si64->DefWindowMsgs, &si32->DefWindowMsgs);
-        CopyWndMsg32To64(&si64->DefWindowSpecMsgs, &si32->DefWindowSpecMsgs);
-    }
-    
+    *pUserConnect = UserConnect;
     return Status;
 }
 

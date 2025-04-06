@@ -93,11 +93,15 @@ Call32(ULONG Address, ULONG nArgc, PULONG Args)
     
     typedef ULONG_PTR(*Enter32ImplType)(struct Enter32* enter);
     
+    Enter32ImplType pfnEnter32 = (Enter32ImplType)Enter32Impl;
+    struct Leave32* leave;
+    struct Enter32* enter;
+        
     BYTE StackBuffer[sizeof(struct Enter32) + sizeof(struct Leave32) + MAX_ARGS * sizeof(ULONG)];
     
-    Enter32ImplType pfnEnter32 = (Enter32ImplType)Enter32Impl;
-    struct Leave32* leave = (struct Leave32*)(StackBuffer + sizeof(ULONG) * nArgc + sizeof(struct Enter32));
-    struct Enter32* enter = (struct Enter32*)StackBuffer;
+    leave = (struct Leave32*)(StackBuffer + sizeof(StackBuffer) - sizeof(*leave));
+    enter = (struct Enter32*)(StackBuffer + sizeof(StackBuffer) - sizeof(*leave) 
+                              - sizeof(*enter) - sizeof(ULONG) * nArgc);
 #pragma pack(pop)
     
     ASSERT(nArgc <= MAX_ARGS);
