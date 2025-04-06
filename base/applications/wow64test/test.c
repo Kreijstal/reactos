@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <stdio.h>
 
 static HWND (WINAPI *pCreateWindowExW)(ULONG, LPCWSTR className, LPCWSTR windowName, ULONG windowStyle, int, int, int, int, PVOID, PVOID, HINSTANCE, PVOID) = NULL;
 static ATOM (WINAPI *pRegisterClassW)(WNDCLASSW* pClass) = NULL;
@@ -7,6 +8,9 @@ static BOOL (WINAPI *pShowWindow)(HWND, int);
 static BOOL (WINAPI *pUpdateWindow)(HWND);
 static BOOL (WINAPI *pGetMessageW)(MSG*, HWND, UINT, UINT);
 static BOOL (WINAPI *pDispatchMessageW)(MSG*);
+static HDC (WINAPI *pBeginPaint)(HWND, PAINTSTRUCT*);
+static void (WINAPI *pFillRect)(HDC, RECT*, HBRUSH);
+static void (WINAPI *pEndPaint)(HWND, PAINTSTRUCT*);
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -25,6 +29,10 @@ void DelayLoadUser32()
     pShowWindow       = (PVOID)GetProcAddress(hUser32, "ShowWindow");
     pGetMessageW      = (PVOID)GetProcAddress(hUser32, "GetMessageW");
     pDispatchMessageW = (PVOID)GetProcAddress(hUser32, "DispatchMessageW");
+    
+    pBeginPaint  = (PVOID)GetProcAddress(hUser32, "BeginPaint");
+    pEndPaint    = (PVOID)GetProcAddress(hUser32, "EndPaint");
+    pFillRect    = (PVOID)GetProcAddress(hUser32, "FillRect");
 }
 
 void Print(const wchar_t* wszBuffer)
@@ -53,6 +61,8 @@ int wmainCRTStartup()
     wndClass.hInstance = (HINSTANCE)GetModuleHandle(NULL);
     wndClass.lpszClassName = wszHello;
     wndClass.lpfnWndProc = WndProc;
+    wndClass.style = CS_HREDRAW | CS_VREDRAW;
+    wndClass.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     
     pRegisterClassW(&wndClass);
     
@@ -71,6 +81,7 @@ int wmainCRTStartup()
     MSG msg;
     
     Print(L"Hello3\n");
+    
     while(pGetMessageW(&msg, 0, 0, 0))
     {
         pDispatchMessageW(&msg);

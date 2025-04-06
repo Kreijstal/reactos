@@ -294,3 +294,10 @@
     SVC_(QueryPortInformationProcess, 0)
     SVC_(GetCurrentProcessorNumber, 0)
     SVC_(WaitForMultipleObjects32, 5)
+#ifdef _WOW64
+#ifdef _M_IX86
+    SVC_(Wow64AllocateVirtualMemory64, 7)
+    SVC_(Wow64ReadVirtualMemory64, 7)
+    SVC_(Wow64WriteVirtualMemory64, 7)
+#endif
+#endif
