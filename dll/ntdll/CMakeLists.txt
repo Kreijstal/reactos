@@ -49,6 +49,10 @@ else()
     list(APPEND SOURCE dispatch/dispatch.c)
 endif()
 
+if(ARCH STREQUAL "i386")
+    list(APPEND SOURCE wow64/memory.c)
+endif()
+
 add_asm_files(ntdll_asm ${ASM_SOURCE})
 
 list(APPEND PCH_SKIP_SOURCE
