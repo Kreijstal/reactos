@@ -261,11 +261,6 @@ NTSTATUS Wow64WinHandler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
 #undef SVC_
     };
     
-    if (syscallNum < sizeof(mapping) / sizeof(*mapping))
-    {
-        DPRINT1("[Win32ss Syscall %lX:%hs]\n", syscallNum, mapping[syscallNum]);
-    }
-    
     /* Make sure wow64win.dll is loaded. */
     if (pServiceTable == NULL)
     {
@@ -327,10 +322,12 @@ NTSTATUS handler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
     
     status = STATUS_NOT_IMPLEMENTED;
 
+#if 0
     if (syscallNum < sizeof(mapping) / sizeof(*mapping))
     {
         DPRINT1("[Syscall %lX:%hs]\n", syscallNum, mapping[syscallNum]);
     }
+#endif
     
     switch (syscallNum)
     {
@@ -486,6 +483,9 @@ NTSTATUS handler(ULONG syscallNum, ULONG numArgs, ULONG* pArgs)
         WINE_WOW_IMPL_CASE(MapViewOfSection);
         WINE_WOW_IMPL_CASE(ProtectVirtualMemory);
         WINE_WOW_IMPL_CASE(QueryVirtualMemory);
+        WINE_WOW_IMPL_CASE(Wow64AllocateVirtualMemory64);
+        WINE_WOW_IMPL_CASE(Wow64ReadVirtualMemory64);
+        WINE_WOW_IMPL_CASE(Wow64WriteVirtualMemory64);
         WINE_WOW_IMPL_CASE(ReadVirtualMemory);
         WINE_WOW_IMPL_CASE(ResetWriteWatch);
         WINE_WOW_IMPL_CASE(UnlockVirtualMemory);
@@ -632,7 +632,7 @@ Wow64InitThread(VOID)
     IMAGE_NT_HEADERS32* NtHeaders = NULL;
     PPEB Peb = NtCurrentPeb();
 
-    DPRINT("Current TEB %p\n", Teb);
+    //DPRINT("Current TEB %p\n", Teb);
 
     WowTeb = NULL;
     
@@ -652,7 +652,7 @@ Wow64InitThread(VOID)
        free for now. */
     Teb->TlsSlots[1] = WowTeb;
     
-    DPRINT("Initializing TEB32\n");
+    //DPRINT("Initializing TEB32\n");
     WowTeb->NtTib.Self = PtrToUlong(WowTeb);
     
     WowTeb->StaticUnicodeString.Length = 0;
@@ -666,18 +666,22 @@ Wow64InitThread(VOID)
         ASSERT(FALSE);
     }
     
-    DPRINT("Got PEB32 address: %p, TEB32 %p\n", WowPeb, WowTeb);
+    //DPRINT("Got PEB32 address: %p, TEB32 %p\n", WowPeb, WowTeb);
     WowTeb->ProcessEnvironmentBlock = PtrToUlong(WowPeb);
     
     SetupFs(0x0053);
     
-    DPRINT("Setting WOW32Reserved to local handler %p\n", handler);
+    //DPRINT("Setting WOW32Reserved to local handler %p\n", handler);
     ASSERT((((ULONG_PTR)handler) & ~0xFFFFFFFF) == 0);
     WowTeb->WOW32Reserved = (ULONG)(ULONG_PTR)handler;
     
+    WowTeb->ClientId.UniqueProcess = HandleToULong(Teb->ClientId.UniqueProcess);
+    WowTeb->ClientId.UniqueThread = HandleToULong(Teb->ClientId.UniqueThread);
+    
     NtHeaders = (IMAGE_NT_HEADERS32*)RtlImageNtHeader(Peb->ImageBaseAddress);
     
-    DPRINT("Entering\n");
+    DPRINT("Entering %p at %p to %p, headers %p\n", NtDll32LdrpRoutine, NtDll32, Peb->ImageBaseAddress, NtHeaders);
+    //DPRINT("Access successful %X\n",(ULONG_PTR)NtHeaders->OptionalHeader.AddressOfEntryPoint);
     Enter32(NtDll32LdrpRoutine, 
             (ULONG_PTR)NtDll32, 
             (ULONG_PTR)Peb->ImageBaseAddress + (ULONG_PTR)NtHeaders->OptionalHeader.AddressOfEntryPoint);
@@ -690,8 +694,6 @@ Wow64LdrpInitialize(PCONTEXT Context)
 {
     static LONG ProcessInitialized = 0;
     
-    __debugbreak();
-    
     if (_InterlockedCompareExchange(&ProcessInitialized,
                                     1,
                                     0) == 0)
@@ -700,4 +702,6 @@ Wow64LdrpInitialize(PCONTEXT Context)
     }
     
     Wow64InitThread();
+    
+    ASSERT(FALSE);
 }
