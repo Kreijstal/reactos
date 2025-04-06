@@ -497,5 +497,7 @@ typedef struct
     ULONG  hIconSm;
 } WNDCLASSEXW32;
 
+#include "callback32.h"
+
 #endif
 #endif /* __WOW64WIN_PRIVATE_H */
