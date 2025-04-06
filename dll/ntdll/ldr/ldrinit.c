@@ -13,7 +13,9 @@
 #include <compat_undoc.h>
 #include <compatguid_undoc.h>
 
+#ifndef _M_IX86
 #define NDEBUG
+#endif
 #include <debug.h>
 
 
@@ -2411,6 +2413,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         }
         
         _InterlockedIncrement(&LdrpProcessInitialized);
+        NtTestAlert();
         pWow64LdrpInitialize(Context);
     }
     /* Do not load subsystem DLLs, if this is a WOW64 image */
@@ -2677,6 +2680,12 @@ LdrpInit(PCONTEXT Context,
     MEMORY_BASIC_INFORMATION MemoryBasicInfo;
     PPEB Peb = NtCurrentPeb();
 
+#if 0
+#ifdef _M_IX86
+    NtTerminateProcess(NtCurrentProcess(), 0);
+#endif
+#endif
+
     DPRINT("LdrpInit() %p/%p\n",
         NtCurrentTeb()->RealClientId.UniqueProcess,
         NtCurrentTeb()->RealClientId.UniqueThread);
@@ -2750,6 +2759,8 @@ LdrpInit(PCONTEXT Context,
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
+            __debugbreak();
+            
             /* Fail with the SEH error */
             LoaderStatus = _SEH2_GetExceptionCode();
         }
