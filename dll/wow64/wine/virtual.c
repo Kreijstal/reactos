@@ -275,7 +275,7 @@ NTSTATUS WINAPI wow64_NtFlushVirtualMemory( UINT *args )
     ULONG unknown = get_ulong( &args );
 #else
     IO_STATUS_BLOCK32* pIosb32 = get_ptr(&args);
-    IO_STATUS_BLOCK iosb64;
+    IO_STATUS_BLOCK iosb64 = { 0 };
     iosb_32to64(&iosb64, pIosb32);
 #endif
 
