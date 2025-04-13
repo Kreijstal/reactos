@@ -1628,6 +1628,12 @@ NTSTATUS WINAPI wow64_NtSetTimer( UINT *args )
     BOOLEAN resume = get_ulong( &args );
     ULONG period = get_ulong( &args );
     BOOLEAN *state = get_ptr( &args );
+#ifdef __REACTOS__
+    /* To make it compatible with file IO APC handling. */
+    HANDLE event = NULL;
+    IO_STATUS_BLOCK io = { 0 };
+    IO_STATUS_BLOCK32 *io32 = NULL;
+#endif
 
     return NtSetTimer( handle, when, apc_32to64( apc ), apc_param_32to64( apc, apc_param ),
                        resume, period, state );
