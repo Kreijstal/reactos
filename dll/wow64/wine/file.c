@@ -209,7 +209,11 @@ NTSTATUS WINAPI wow64_NtCancelIoFile( UINT *args )
     HANDLE handle = get_handle( &args );
     IO_STATUS_BLOCK32 *io32 = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtCancelIoFile( handle, iosb_32to64( &io, io32 ));
@@ -228,7 +232,11 @@ NTSTATUS WINAPI wow64_NtCancelIoFileEx( UINT *args )
     IO_STATUS_BLOCK32 *io_ptr = get_ptr( &args );
     IO_STATUS_BLOCK32 *io32 = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtCancelIoFileEx( handle, (IO_STATUS_BLOCK *)io_ptr, iosb_32to64( &io, io32 ));
@@ -246,7 +254,11 @@ NTSTATUS WINAPI wow64_NtCancelSynchronousIoFile( UINT *args )
     IO_STATUS_BLOCK32 *io_ptr = get_ptr( &args );
     IO_STATUS_BLOCK32 *io32 = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtCancelSynchronousIoFile( handle, (IO_STATUS_BLOCK *)io_ptr, iosb_32to64( &io, io32 ));
@@ -278,7 +290,11 @@ NTSTATUS WINAPI wow64_NtCreateFile( UINT *args )
 #endif
 
     struct object_attr64 attr;
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     HANDLE handle = 0;
     NTSTATUS status;
 
@@ -311,7 +327,11 @@ NTSTATUS WINAPI wow64_NtCreateMailslotFile( UINT *args )
 #endif
 
     struct object_attr64 attr;
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     HANDLE handle = 0;
     NTSTATUS status;
 
@@ -349,7 +369,11 @@ NTSTATUS WINAPI wow64_NtCreateNamedPipeFile( UINT *args )
 #endif
 
     struct object_attr64 attr;
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     HANDLE handle = 0;
     NTSTATUS status;
 
@@ -417,7 +441,11 @@ NTSTATUS WINAPI wow64_NtDeviceIoControlFile( UINT *args )
     void *out_buf = get_ptr( &args );
     ULONG out_len = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtDeviceIoControlFile( handle, event, apc_32to64( apc ), apc_param_32to64( apc, apc_param ),
@@ -435,7 +463,11 @@ NTSTATUS WINAPI wow64_NtFlushBuffersFile( UINT *args )
     HANDLE handle = get_handle( &args );
     IO_STATUS_BLOCK32 *io32 = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtFlushBuffersFile( handle, iosb_32to64( &io, io32 ));
@@ -456,7 +488,11 @@ NTSTATUS WINAPI wow64_NtFlushBuffersFileEx( UINT *args )
     ULONG size = get_ulong( &args );
     IO_STATUS_BLOCK32 *io32 = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtFlushBuffersFileEx( handle, flags, params, size, iosb_32to64( &io, io32 ) );
@@ -482,7 +518,11 @@ NTSTATUS WINAPI wow64_NtFsControlFile( UINT *args )
     void *out_buf = get_ptr( &args );
     ULONG out_len = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtFsControlFile( handle, event, apc_32to64( apc ), apc_param_32to64( apc, apc_param ),
@@ -512,7 +552,11 @@ NTSTATUS WINAPI wow64_NtLockFile( UINT *args )
     BOOLEAN dont_wait = get_ulong( &args );
     BOOLEAN exclusive = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtLockFile( handle, event, apc_32to64( apc ), apc_param_32to64( apc, apc_param ),
@@ -537,7 +581,11 @@ NTSTATUS WINAPI wow64_NtNotifyChangeDirectoryFile( UINT *args )
     ULONG filter = get_ulong( &args );
     BOOLEAN subtree = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtNotifyChangeDirectoryFile( handle, event, apc_32to64( apc ),
@@ -561,7 +609,11 @@ NTSTATUS WINAPI wow64_NtOpenFile( UINT *args )
     ULONG options = get_ulong( &args );
 
     struct object_attr64 attr;
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     HANDLE handle = 0;
     NTSTATUS status;
 
@@ -615,7 +667,11 @@ NTSTATUS WINAPI wow64_NtQueryDirectoryFile( UINT *args )
     BOOLEAN restart_scan = get_ulong( &args );
 
     UNICODE_STRING mask;
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtQueryDirectoryFile( handle, event, apc_32to64( apc ), apc_param_32to64( apc, apc_param ),
@@ -641,7 +697,11 @@ NTSTATUS WINAPI wow64_NtQueryEaFile( UINT *args )
     ULONG *index = get_ptr( &args );
     BOOLEAN restart = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtQueryEaFile( handle, iosb_32to64( &io, io32 ), buffer, len,
@@ -680,7 +740,11 @@ NTSTATUS WINAPI wow64_NtQueryInformationFile( UINT *args )
     ULONG len = get_ulong( &args );
     FILE_INFORMATION_CLASS class = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtQueryInformationFile( handle, iosb_32to64( &io, io32 ), info, len, class );
@@ -700,7 +764,11 @@ NTSTATUS WINAPI wow64_NtQueryVolumeInformationFile( UINT *args )
     ULONG len = get_ulong( &args );
     FS_INFORMATION_CLASS class = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtQueryVolumeInformationFile( handle, iosb_32to64( &io, io32 ), buffer, len, class );
@@ -724,7 +792,11 @@ NTSTATUS WINAPI wow64_NtReadFile( UINT *args )
     LARGE_INTEGER *offset = get_ptr( &args );
     ULONG *key = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
 #ifndef __REACTOS__
@@ -736,6 +808,7 @@ NTSTATUS WINAPI wow64_NtReadFile( UINT *args )
     if (pBTCpuNotifyReadFile) pBTCpuNotifyReadFile( handle, buffer, len, TRUE, status );
 #endif
 
+#if 0
 #ifdef __REACTOS__
     /* FIXME: Implement proper handling of asynchronous IO. 
        This hack is done to try to make taskmgr work. */
@@ -749,6 +822,7 @@ NTSTATUS WINAPI wow64_NtReadFile( UINT *args )
             return status;
         }
     }
+#endif
 #endif
 
     put_iosb( io32, &io );
@@ -771,7 +845,11 @@ NTSTATUS WINAPI wow64_NtReadFileScatter( UINT *args )
     LARGE_INTEGER *offset = get_ptr( &args );
     ULONG *key = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtReadFileScatter( handle, event, apc_32to64( apc ), apc_param_32to64( apc, apc_param ),
@@ -797,7 +875,11 @@ NTSTATUS WINAPI wow64_NtRemoveIoCompletion( UINT *args )
     IO_STATUS_BLOCK32 *io32 = get_ptr( &args );
     LARGE_INTEGER *timeout = get_ptr( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
 #ifndef __REACTOS__
     ULONG_PTR key, value;
 #else
@@ -856,7 +938,11 @@ NTSTATUS WINAPI wow64_NtSetEaFile( UINT *args )
     void *ptr = get_ptr( &args );
     ULONG len = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtSetEaFile( handle, iosb_32to64( &io, io32 ), ptr, len );
@@ -876,7 +962,11 @@ NTSTATUS WINAPI wow64_NtSetInformationFile( UINT *args )
     ULONG len = get_ulong( &args );
     FILE_INFORMATION_CLASS class = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     switch (class)
@@ -968,7 +1058,11 @@ NTSTATUS WINAPI wow64_NtSetVolumeInformationFile( UINT *args )
     ULONG len = get_ulong( &args );
     FS_INFORMATION_CLASS class = get_ulong( &args );
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtSetVolumeInformationFile( handle, iosb_32to64( &io, io32 ), ptr, len, class );
@@ -992,7 +1086,11 @@ NTSTATUS WINAPI wow64_NtUnlockFile( UINT *args )
     ULONG key = get_ulong( &args );
 #endif
 
+#ifndef __REACTOS__
     IO_STATUS_BLOCK io;
+#else
+    IO_STATUS_BLOCK io = { 0 };
+#endif
     NTSTATUS status;
 
     status = NtUnlockFile( handle, iosb_32to64( &io, io32 ), offset, count, key );
