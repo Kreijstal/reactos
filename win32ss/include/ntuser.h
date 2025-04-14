@@ -13,8 +13,6 @@ struct tagPOPUPMENU;
 #define HANDLEENTRY_DESTROY 1
 #define HANDLEENTRY_INDESTROY 2
 
-#define _WOW64
-
 typedef struct _USER_HANDLE_ENTRY
 {
 #if defined(_M_IX86) && defined(_WOW64)
