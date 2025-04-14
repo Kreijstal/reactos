@@ -217,15 +217,7 @@ KiSwapContextResume(
        ENewProcess = (PEPROCESS) NewProcess; 
        if (ENewProcess->Wow64Process != NULL) 
        {
-          /* FIXME: for now, we plop TEB32 into TEB64->TlsSlots[1]. 
-             This is where WINE puts WOW64 cpu context. 
-             
-             However, this is not a security problem at least - accessing 
-             NewThread->Teb is safe, and as such, the worst case scenario 
-             is that a bogus value is written to the GDT descriptor - this 
-             is not a problem, as virtual memory is still protected, and no
-             illegal usermode access is made possible here. */
-          ULONG_PTR base = (ULONG_PTR)NewThread->Teb->TlsSlots[1];
+          ULONG_PTR base = ROUND_TO_PAGES((ULONG_PTR)(NewThread->Teb + 1));
           
           PKGDTENTRY64 CmTebEntry = KiGetGdtEntry(Pcr->GdtBase, KGDT64_R3_CMTEB);
           CmTebEntry->LimitLow = 0xFFFF;
