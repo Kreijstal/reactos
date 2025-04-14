@@ -3520,7 +3520,6 @@ StartScan:
         }
     }
 
-#define _WOW64
 #if defined(_WOW64)
     /* Allow x86_32 */
     if (ImageInformation.Machine == IMAGE_FILE_MACHINE_I386) {}
