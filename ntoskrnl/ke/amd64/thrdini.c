@@ -234,7 +234,6 @@ KiSwapContextResume(
           CmTebEntry->BaseLow = base & 0xFFFF;
           CmTebEntry->Bits.BaseMiddle = (base & 0xFF0000) >> 16;
           CmTebEntry->Bits.BaseHigh = (base & 0xFF000000) >> 24;
-          
        }
     }
 
