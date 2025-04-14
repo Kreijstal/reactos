@@ -35,6 +35,11 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     ULONG_PTR HighestAddress, RandomBase;
     ULONG AlignedSize;
     LARGE_INTEGER CurrentTime;
+    BOOLEAN IsWow64;
+    BOOLEAN IsPeb;
+
+    ASSERT(sizeof(TEB) != sizeof(PEB));
+    IsPeb = (sizeof(PEB) == Size);
 
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
@@ -66,23 +71,47 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     Vad->ControlArea = NULL; // For Memory-Area hack
     Vad->FirstPrototypePte = NULL;
 
-    /* Check if this is a PEB creation */
-    ASSERT(sizeof(TEB) != sizeof(PEB));
-    if (Size == sizeof(PEB))
+    HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
+    IsWow64 = FALSE;
+
+#ifdef _M_AMD64
+    if (Process->SectionBaseAddress != NULL)
     {
+        if (RtlImageNtHeader(Process->SectionBaseAddress)->FileHeader.Machine != 0x8664)
+        {
+            IsWow64 = TRUE;
+        }
+    }
+#endif
+
+    if (IsWow64)
+    {
+        /* Make sure the structure resides in the 32-bit address space */
+        HighestAddress &= ROUND_DOWN(0xFFFFFFFFULL, PAGE_SIZE);
+    }
+    
+    /* Check if this is a PEB creation */
+    if (IsPeb)
+    {
+        /* If this is a WOW64 process, allocate enough space for the 32 bit PEB */
+        if (IsWow64)
+        {
+            Size += ROUND_TO_PAGES(sizeof(PEB32));
+        }
+
         /* Create a random value to select one page in a 64k region */
         KeQueryTickCount(&CurrentTime);
         CurrentTime.LowPart &= (_64K / PAGE_SIZE) - 1;
 
         /* Calculate a random base address */
-        RandomBase = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1;
+        RandomBase = HighestAddress + 1;
         RandomBase -= CurrentTime.LowPart << PAGE_SHIFT;
 
         /* Make sure the base address is not too high */
         AlignedSize = ROUND_TO_PAGES(Size);
-        if ((RandomBase + AlignedSize) > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1)
+        if ((RandomBase + AlignedSize) > HighestAddress + 1)
         {
-            RandomBase = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1 - AlignedSize;
+            RandomBase = HighestAddress + 1 - AlignedSize;
         }
 
         /* Calculate the highest allowed address */
@@ -90,7 +119,11 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     }
     else
     {
-        HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
+        /* If this is a WOW64 process, allocate enough space for the 32 bit TEB */
+        if (IsWow64)
+        {
+            Size += ROUND_TO_PAGES(sizeof(TEB32));
+        }
     }
 
     *BaseAddress = 0;
@@ -107,6 +140,16 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
         goto FailPath;
     }
 
+    if (IsPeb && IsWow64)
+    {
+        /* TODO: Check types - _WOW64_PROCESS has only one field, is this
+           supposed to be the PEB?
+           According to https://stackoverflow.com/a/69171561 - it is.
+
+           Wow64Process should be allocated, and it is its member that should
+           be set to WOW64 PEB instead. */
+        Process->Wow64Process = (PVOID)(*BaseAddress + ROUND_TO_PAGES(sizeof(PEB)));
+    }
 
     /* Success */
     return STATUS_SUCCESS;
@@ -130,6 +173,12 @@ MmDeleteTeb(IN PEPROCESS Process,
 
     /* TEB is one page */
     TebEnd = (ULONG_PTR)Teb + ROUND_TO_PAGES(sizeof(TEB)) - 1;
+
+    /* If this is a WOW64 process, the TEB is followed by a TEB32 */
+    if (Process->Wow64Process)
+    {
+        TebEnd += ROUND_TO_PAGES(sizeof(TEB32));
+    }
 
     /* Attach to the process */
     KeAttachProcess(&Process->Pcb);
