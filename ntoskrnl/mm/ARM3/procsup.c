@@ -77,7 +77,8 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 #ifdef _M_AMD64
     if (Process->SectionBaseAddress != NULL)
     {
-        if (RtlImageNtHeader(Process->SectionBaseAddress)->FileHeader.Machine != 0x8664)
+        if (RtlImageNtHeader(Process->SectionBaseAddress)->FileHeader.Machine
+             != IMAGE_FILE_MACHINE_AMD64)
         {
             IsWow64 = TRUE;
         }
@@ -142,13 +143,21 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 
     if (IsPeb && IsWow64)
     {
-        /* TODO: Check types - _WOW64_PROCESS has only one field, is this
-           supposed to be the PEB?
-           According to https://stackoverflow.com/a/69171561 - it is.
+        PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
 
-           Wow64Process should be allocated, and it is its member that should
-           be set to WOW64 PEB instead. */
-        Process->Wow64Process = (PVOID)(*BaseAddress + ROUND_TO_PAGES(sizeof(PEB)));
+        Process->Wow64Process = ExAllocatePoolWithTag(NonPagedPool,
+                                                      sizeof(WOW64_PROCESS),
+                                                      'PWOW');
+        if (!Process->Wow64Process)
+        {
+            ExFreePoolWithTag(Vad, 'ldaV');
+            Status = STATUS_NO_MEMORY;
+
+            PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
+            goto FailPath;
+        }
+
+        Process->Wow64Process->Wow64 = (PVOID)(*BaseAddress + ROUND_TO_PAGES(sizeof(PEB)));
     }
 
     /* Success */

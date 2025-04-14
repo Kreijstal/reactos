@@ -378,6 +378,15 @@ PspDeleteProcess(IN PVOID ObjectBody)
     /* Dereference the Device Map */
     ObDereferenceDeviceMap(Process);
 
+    /* Check if this is a WOW64 process  */
+    if (Process->Wow64Process)
+    {
+        /* Free WOW64_PROCESS structure */
+        ExFreePoolWithTag(Process->Wow64Process, 'PWOW');
+
+        PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
+    }
+
     /*
      * Dereference the quota block, the function
      * will invoke a quota block cleanup if the
