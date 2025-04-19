@@ -233,6 +233,43 @@ IopCleanupIrp(IN PIRP Irp,
     IoFreeIrp(Irp);
 }
 
+static
+VOID
+IopUpdateUserIosb(PIRP Irp)
+{
+#ifdef _M_AMD64
+    PIO_STATUS_BLOCK32 Iosb32 = NULL;
+    PEPROCESS pEprocess = CONTAINING_RECORD(KeGetCurrentThread()->Process,
+                                            EPROCESS,
+                                            Pcb);
+
+    /* Is this a usermode, WOW64 status block? */
+    /* FIXME: This feels wrong, but this is (more or less) how Wine does that.
+       Wow64 processes use IO in their initialization before wow64.dll is loaed,
+       this is why this code checks if Wow PEB is in an initialized state
+       (if Ldr != NULL). Investigate. */
+    if (pEprocess->Wow64Process &&
+        ((PEB32*)pEprocess->Wow64Process->Wow64)->Ldr != 0 &&
+        (PVOID)Irp->UserIosb <= MmHighestUserAddress)
+    {
+        /* The UserIosb pointer points to a 32-bit IOSB */
+        Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
+
+        if (Iosb32 == NULL)
+        {
+            return;
+        }
+
+        Iosb32->Information = Irp->IoStatus.Information;
+        Iosb32->Status = Irp->IoStatus.Status;
+    }
+    else
+#endif
+    {
+        *Irp->UserIosb = Irp->IoStatus;
+    }
+}
+
 VOID
 NTAPI
 IopCompleteRequest(IN PKAPC Apc,
@@ -346,8 +383,7 @@ IopCompleteRequest(IN PKAPC Apc,
             /* Use SEH to make sure we don't write somewhere invalid */
             _SEH2_TRY
             {
-                /*  Save the IOSB Information */
-                *Irp->UserIosb = Irp->IoStatus;
+                IopUpdateUserIosb(Irp);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
