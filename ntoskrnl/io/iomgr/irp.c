@@ -233,43 +233,6 @@ IopCleanupIrp(IN PIRP Irp,
     IoFreeIrp(Irp);
 }
 
-static
-VOID
-IopUpdateUserIosb(PIRP Irp)
-{
-#ifdef _M_AMD64
-    PIO_STATUS_BLOCK32 Iosb32 = NULL;
-    PEPROCESS pEprocess = CONTAINING_RECORD(KeGetCurrentThread()->Process,
-                                            EPROCESS,
-                                            Pcb);
-
-    /* Is this a usermode, WOW64 status block? */
-    /* FIXME: This feels wrong, but this is (more or less) how Wine does that.
-       Wow64 processes use IO in their initialization before wow64.dll is loaed,
-       this is why this code checks if Wow PEB is in an initialized state
-       (if Ldr != NULL). Investigate. */
-    if (pEprocess->Wow64Process &&
-        ((PEB32*)pEprocess->Wow64Process->Wow64)->Ldr != 0 &&
-        (PVOID)Irp->UserIosb <= MmHighestUserAddress)
-    {
-        /* The UserIosb pointer points to a 32-bit IOSB */
-        Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
-
-        if (Iosb32 == NULL)
-        {
-            return;
-        }
-
-        Iosb32->Information = Irp->IoStatus.Information;
-        Iosb32->Status = Irp->IoStatus.Status;
-    }
-    else
-#endif
-    {
-        *Irp->UserIosb = Irp->IoStatus;
-    }
-}
-
 VOID
 NTAPI
 IopCompleteRequest(IN PKAPC Apc,
@@ -283,6 +246,9 @@ IopCompleteRequest(IN PKAPC Apc,
     PMDL Mdl, NextMdl;
     PVOID Port = NULL, Key = NULL;
     BOOLEAN SignaledCreateRequest = FALSE;
+#ifdef _WIN64
+    PIO_STATUS_BLOCK32 Iosb32 = NULL;
+#endif
 
     /* Get data from the APC */
     FileObject = (PFILE_OBJECT)*SystemArgument1;
@@ -383,7 +349,29 @@ IopCompleteRequest(IN PKAPC Apc,
             /* Use SEH to make sure we don't write somewhere invalid */
             _SEH2_TRY
             {
-                IopUpdateUserIosb(Irp);
+#ifdef _WIN64
+                /* This is an APC - we're running in the correct thread context,
+                   and Irp->Tail is trashed. Don't bother with getting the thread
+                   from the IRP then. We should still check for the processor
+                   mode though. */
+                if (Irp->RequestorMode == UserMode && IoIs32bitProcess(NULL))
+                {
+                    /* The UserIosb pointer points to a 32-bit IOSB */
+                    Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
+
+                    if (Iosb32 == NULL)
+                    {
+                        return;
+                    }
+
+                    Iosb32->Information = Irp->IoStatus.Information;
+                    Iosb32->Status = Irp->IoStatus.Status;
+                }
+                else
+#endif
+                {
+                    *Irp->UserIosb = Irp->IoStatus;
+                }
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -2045,7 +2033,28 @@ NTAPI
 IoIs32bitProcess(
     IN PIRP Irp OPTIONAL)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    PETHREAD pThread, pCurrentThread;
+    PEPROCESS pProcess;
+
+    pCurrentThread = CONTAINING_RECORD(KeGetCurrentThread(), ETHREAD, Tcb);
+
+    if (Irp == NULL)
+    {
+        pThread = pCurrentThread;
+    }
+    else
+    {
+        if (Irp->RequestorMode == KernelMode ||
+            (PVOID)Irp->UserIosb > MmHighestUserAddress)
+        {
+            return FALSE;
+        }
+
+        pThread = Irp->Tail.Overlay.Thread;
+    }
+
+    pProcess = CONTAINING_RECORD(pThread->Tcb.Process, EPROCESS, Pcb);
+
+    return pProcess->Wow64Process != NULL;
 }
 #endif
