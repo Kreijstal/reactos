@@ -145,9 +145,8 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     {
         PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
 
-        Process->Wow64Process = ExAllocatePoolWithTag(NonPagedPool,
-                                                      sizeof(WOW64_PROCESS),
-                                                      'PWOW');
+        Process->Wow64Process = ExAllocatePool(NonPagedPool,
+                                               sizeof(WOW64_PROCESS));
         if (!Process->Wow64Process)
         {
             ExFreePoolWithTag(Vad, 'ldaV');
