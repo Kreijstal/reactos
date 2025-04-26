@@ -144,6 +144,9 @@ set REMAINING=%*
                 set CMAKE_ARCH=-A ARM64
             )
         ) else if /I "!PARAM:~0,2!" == "-D" (
+            if /I "!PARAM!" == "-DSARCH=wow64" (
+                set WOW64_BUILD=1
+            )
             REM User is passing a switch to CMake
             set "CMAKE_PARAMS=%CMAKE_PARAMS% !PARAM!"
         ) else (
@@ -165,6 +168,10 @@ echo Configuring a new ReactOS build on:
 
 REM Create directories
 set REACTOS_OUTPUT_PATH=output-%BUILD_ENVIRONMENT%-%ARCH%
+
+if "%WOW64_BUILD%" == "1" (
+    set REACTOS_OUTPUT_PATH=%REACTOS_OUTPUT_PATH%-wow64
+)
 
 if "%VS_SOLUTION%" == "1" (
     set REACTOS_OUTPUT_PATH=%REACTOS_OUTPUT_PATH%-sln
