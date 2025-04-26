@@ -1,2 +1,3 @@
-
-add_subdirectory(basesrv)
+if(NOT SARCH STREQUAL "wow64")
+    add_subdirectory(basesrv)
+endif()
