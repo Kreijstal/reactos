@@ -2028,6 +2028,9 @@ IoSetTopLevelIrp(IN PIRP Irp)
 }
 
 #if defined (_WIN64)
+/*
+ * @implemented 
+ */
 BOOLEAN
 NTAPI
 IoIs32bitProcess(
@@ -2044,6 +2047,7 @@ IoIs32bitProcess(
     }
     else
     {
+        /* If it's a kernel mode IRP, it could not have originated from WOW64 */
         if (Irp->RequestorMode == KernelMode ||
             (PVOID)Irp->UserIosb > MmHighestUserAddress)
         {
@@ -2054,6 +2058,13 @@ IoIs32bitProcess(
     }
 
     pProcess = CONTAINING_RECORD(pThread->Tcb.Process, EPROCESS, Pcb);
+
+    /* FIXME: A two-part hack: delay setting Process->Wow64Process, so 64-bit
+       NTDLL can use IO to init stuff. */
+    if (pProcess->Wow64Process == (PVOID)TRUE)
+    {
+        return FALSE;
+    }
 
     return pProcess->Wow64Process != NULL;
 }

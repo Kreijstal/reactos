@@ -151,20 +151,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 #ifdef _WIN64
     if (IsPeb && IsWow64)
     {
-        PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-
-        Process->Wow64Process = ExAllocatePool(NonPagedPool,
-                                               sizeof(WOW64_PROCESS));
-        if (!Process->Wow64Process)
-        {
-            ExFreePoolWithTag(Vad, 'ldaV');
-            Status = STATUS_NO_MEMORY;
-
-            PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-            goto FailPath;
-        }
-
-        Process->Wow64Process->Wow64 = (PVOID)(*BaseAddress + ROUND_TO_PAGES(sizeof(PEB)));
+        Process->Wow64Process = (PVOID)TRUE;
     }
 #endif
 
