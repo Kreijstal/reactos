@@ -35,7 +35,9 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     ULONG_PTR HighestAddress, RandomBase;
     ULONG AlignedSize;
     LARGE_INTEGER CurrentTime;
+#ifdef _WIN64
     BOOLEAN IsWow64;
+#endif
     BOOLEAN IsPeb;
 
     ASSERT(sizeof(TEB) != sizeof(PEB));
@@ -72,9 +74,10 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     Vad->FirstPrototypePte = NULL;
 
     HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
-    IsWow64 = FALSE;
 
 #ifdef _M_AMD64
+    IsWow64 = FALSE;
+
     if (Process->SectionBaseAddress != NULL)
     {
         if (RtlImageNtHeader(Process->SectionBaseAddress)->FileHeader.Machine
@@ -83,22 +86,24 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
             IsWow64 = TRUE;
         }
     }
-#endif
 
     if (IsWow64)
     {
         /* Make sure the structure resides in the 32-bit address space */
         HighestAddress &= ROUND_DOWN(0xFFFFFFFFULL, PAGE_SIZE);
     }
-    
+#endif
+
     /* Check if this is a PEB creation */
     if (IsPeb)
     {
+#ifdef _WIN64
         /* If this is a WOW64 process, allocate enough space for the 32 bit PEB */
         if (IsWow64)
         {
             Size += ROUND_TO_PAGES(sizeof(PEB32));
         }
+#endif
 
         /* Create a random value to select one page in a 64k region */
         KeQueryTickCount(&CurrentTime);
@@ -120,11 +125,13 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     }
     else
     {
+#ifdef _WIN64
         /* If this is a WOW64 process, allocate enough space for the 32 bit TEB */
         if (IsWow64)
         {
             Size += ROUND_TO_PAGES(sizeof(TEB32));
         }
+#endif
     }
 
     *BaseAddress = 0;
@@ -141,6 +148,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
         goto FailPath;
     }
 
+#ifdef _WIN64
     if (IsPeb && IsWow64)
     {
         PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
@@ -158,6 +166,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 
         Process->Wow64Process->Wow64 = (PVOID)(*BaseAddress + ROUND_TO_PAGES(sizeof(PEB)));
     }
+#endif
 
     /* Success */
     return STATUS_SUCCESS;
@@ -182,11 +191,13 @@ MmDeleteTeb(IN PEPROCESS Process,
     /* TEB is one page */
     TebEnd = (ULONG_PTR)Teb + ROUND_TO_PAGES(sizeof(TEB)) - 1;
 
+#ifdef _WIN64
     /* If this is a WOW64 process, the TEB is followed by a TEB32 */
     if (Process->Wow64Process)
     {
         TebEnd += ROUND_TO_PAGES(sizeof(TEB32));
     }
+#endif
 
     /* Attach to the process */
     KeAttachProcess(&Process->Pcb);
