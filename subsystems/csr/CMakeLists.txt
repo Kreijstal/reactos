@@ -1,4 +1,6 @@
 
 add_subdirectory(csrlib)
-add_subdirectory(csrsrv)
-add_subdirectory(csrss)
+if(NOT SARCH STREQUAL "wow64")
+    add_subdirectory(csrsrv)
+    add_subdirectory(csrss)
+endif()
