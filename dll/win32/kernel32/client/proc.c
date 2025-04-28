@@ -477,7 +477,7 @@ BaseProcessStartup(
     _SEH2_END;
 }
 
-#ifdef _WOW64
+#ifdef BUILD_WOW6432
 static
 VOID
 CopyParameterString(PWCHAR *Ptr,
@@ -655,7 +655,7 @@ BOOLEAN
 WINAPI
 BasePushProcessParameters(IN ULONG ParameterFlags,
                           IN HANDLE ProcessHandle,
-#ifndef _WOW64
+#ifndef BUILD_WOW6432
                           IN PPEB RemotePeb,
 #else
                           IN PPEB64 RemotePeb,
@@ -673,7 +673,7 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
 {
     WCHAR FullPath[MAX_PATH + 5];
     PWCHAR Remaining, DllPathString, ScanChar;
-#ifndef _WOW64
+#ifndef BUILD_WOW6432
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters, RemoteParameters;
 #else
     PRTL_USER_PROCESS_PARAMETERS64 ProcessParameters, RemoteParameters;
@@ -772,7 +772,7 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     DPRINT("Desktop  : '%wZ'\n", &Desktop);
     DPRINT("Shell    : '%wZ'\n", &Shell);
     DPRINT("Runtime  : '%wZ'\n", &Runtime);
-#ifndef _WOW64
+#ifndef BUILD_WOW6432
     Status = RtlCreateProcessParameters(&ProcessParameters,
 #else
     Status = CreateProcessParameters64(&ProcessParameters,
@@ -1013,7 +1013,7 @@ Quickie:
     /* Cleanup */
     if (HavePebLock) RtlReleasePebLock();
     RtlFreeHeap(RtlGetProcessHeap(), 0, DllPath.Buffer);
-#ifndef _WOW64
+#ifndef BUILD_WOW6432
     if (ProcessParameters) RtlDestroyProcessParameters(ProcessParameters);
 #else
     if (ProcessParameters) DestroyProcessParameters64(ProcessParameters);
@@ -2311,7 +2311,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     ULONG ResumeCount;
     PROCESS_PRIORITY_CLASS PriorityClass;
     NTSTATUS Status, AppCompatStatus, SaferStatus, IFEOStatus, ImageDbgStatus;
-#ifndef _WOW64
+#ifndef BUILD_WOW6432
     PPEB RemotePeb;
 #else
     PPEB64 RemotePeb;
@@ -3669,7 +3669,7 @@ StartScan:
         }
     }
 
-#if defined(_M_AMD64) || defined(_WOW64)
+#if defined(_M_AMD64) || defined(BUILD_WOW6432)
     /* Allow x86_32 */
     if (ImageInformation.Machine == IMAGE_FILE_MACHINE_I386) {}
     else
