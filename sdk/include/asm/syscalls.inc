@@ -53,7 +53,7 @@ $ZwFuncEndName
 SyscallId = 0
 
 #ifdef _M_IX86
-#ifdef _WOW64
+#ifdef BUILD_WOW6432
 #define KUSER_SHARED_SYSCALL HEX(7ffe0300)
 MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
 LOCAL x, x2, x3
