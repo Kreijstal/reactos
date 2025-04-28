@@ -257,7 +257,7 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         elseif(SARCH STREQUAL "pc98")
             add_definitions(-DSARCH_PC98)
         elseif(SARCH STREQUAL "wow64")
-            add_definitions(-D_WOW64)
+            add_definitions(-DBUILD_WOW6432)
         endif()
     elseif(ARCH STREQUAL "amd64")
         # clang-cl defines this one for itself
