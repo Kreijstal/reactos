@@ -1071,7 +1071,9 @@ GetProcessAffinityMask(IN HANDLE hProcess,
 
     /* Copy the affinity mask, and get the system one from our shared data */
     *lpProcessAffinityMask = (DWORD)ProcessInfo.AffinityMask;
-    *lpSystemAffinityMask = (DWORD)BaseStaticServerData->SysInfo.ActiveProcessorsAffinityMask;
+    *lpSystemAffinityMask = WOW64_READ_ULONG_FIELD(BaseStaticServerData,
+                                                   BASE_STATIC_SERVER_DATA,
+                                                   SysInfo.ActiveProcessorsAffinityMask);
     return TRUE;
 }
 
@@ -2541,7 +2543,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
         return FALSE;
     }
     else if (!(dwCreationFlags & CREATE_SHARED_WOW_VDM) &&
-             (BaseStaticServerData->DefaultSeparateVDM))
+             (WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, DefaultSeparateVDM)))
     {
         /* A shared WoW VDM was not requested but system enforces separation */
         dwCreationFlags |= CREATE_SEPARATE_WOW_VDM;
@@ -3028,7 +3030,7 @@ StartScan:
 
         /* Is a DOS VDM being forced, but we already have a WOW32 instance ready? */
         if ((dwCreationFlags & CREATE_FORCEDOS) &&
-            (BaseStaticServerData->IsWowTaskReady))
+            (WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, IsWowTaskReady)))
         {
             /* This request can't be satisfied, instead, a separate VDM is needed */
             dwCreationFlags &= ~(CREATE_FORCEDOS | CREATE_SHARED_WOW_VDM);
