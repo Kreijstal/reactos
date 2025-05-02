@@ -350,22 +350,31 @@ IopCompleteRequest(IN PKAPC Apc,
             _SEH2_TRY
             {
 #ifdef _WIN64
-                /* This is an APC - we're running in the correct thread context,
-                   and Irp->Tail is trashed. Don't bother with getting the thread
-                   from the IRP then. We should still check for the processor
-                   mode though. */
+                /*
+                 * This is an APC - we're running in the correct thread context,
+                 * and Irp->Tail is trashed. Don't bother with getting the thread
+                 * from the IRP then. The process mode still should be checked.
+                 */
                 if (Irp->RequestorMode == UserMode && IoIs32bitProcess(NULL))
                 {
-                    /* The UserIosb pointer points to a 32-bit IOSB */
+                    /* The UserIosb pointer can point to a 32-bit IOSB */
                     Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
 
-                    if (Iosb32 == NULL)
+                    /*
+                     * The only 64 bit module that should use IOSBs explicitly
+                     * is NTDLL. Its base address is outside of the 32-bit
+                     * address space.
+                     */
+                    if (Iosb32 == NULL || (PVOID)Iosb32 > (PVOID)0xFFFFFFFFULL)
                     {
-                        return;
+                        /* 64-bit IOSB fallback. */
+                        *Irp->UserIosb = Irp->IoStatus;
                     }
-
-                    Iosb32->Information = Irp->IoStatus.Information;
-                    Iosb32->Status = Irp->IoStatus.Status;
+                    else
+                    {
+                        Iosb32->Information = Irp->IoStatus.Information;
+                        Iosb32->Status = Irp->IoStatus.Status;
+                    }
                 }
                 else
 #endif
@@ -2033,8 +2042,7 @@ IoSetTopLevelIrp(IN PIRP Irp)
  */
 BOOLEAN
 NTAPI
-IoIs32bitProcess(
-    IN PIRP Irp OPTIONAL)
+IoIs32bitProcess(IN PIRP Irp OPTIONAL)
 {
     PETHREAD pThread, pCurrentThread;
     PEPROCESS pProcess;
