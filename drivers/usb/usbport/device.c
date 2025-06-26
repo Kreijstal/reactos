@@ -115,7 +115,11 @@ USBPORT_SendSetupPacket(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
             Status = USBPORT_USBDStatusToNtStatus(Urb, USBDStatus);
 
             if (TransferedLen)
+            {
                 *TransferedLen = Urb->UrbControlTransfer.TransferBufferLength;
+                DPRINT1("USBPORT_SendSetupPacket: TransferedLen set to %d (0x%x) from URB\n",
+                        *TransferedLen, *TransferedLen);
+            }
 
             if (pUSBDStatus)
                 *pUSBDStatus = USBDStatus;
@@ -1155,6 +1159,13 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
                   DeviceDescriptor,
                   sizeof(USB_DEVICE_DESCRIPTOR));
 
+    DPRINT1("USBPORT_CreateDevice: Received descriptor data (first 16 bytes):\n");
+    DPRINT1("  %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            ((PUCHAR)DeviceDescriptor)[0], ((PUCHAR)DeviceDescriptor)[1], ((PUCHAR)DeviceDescriptor)[2], ((PUCHAR)DeviceDescriptor)[3],
+            ((PUCHAR)DeviceDescriptor)[4], ((PUCHAR)DeviceDescriptor)[5], ((PUCHAR)DeviceDescriptor)[6], ((PUCHAR)DeviceDescriptor)[7],
+            ((PUCHAR)DeviceDescriptor)[8], ((PUCHAR)DeviceDescriptor)[9], ((PUCHAR)DeviceDescriptor)[10], ((PUCHAR)DeviceDescriptor)[11],
+            ((PUCHAR)DeviceDescriptor)[12], ((PUCHAR)DeviceDescriptor)[13], ((PUCHAR)DeviceDescriptor)[14], ((PUCHAR)DeviceDescriptor)[15]);
+
     ExFreePoolWithTag(DeviceDescriptor, USB_PORT_TAG);
 
     DescriptorMinSize = RTL_SIZEOF_THROUGH_FIELD(USB_DEVICE_DESCRIPTOR,
@@ -1167,16 +1178,26 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
 
     if (NT_SUCCESS(Status) && (TransferedLen >= DescriptorMinSize))
     {
+        DPRINT1("USBPORT_CreateDevice: Status=0x%lx, TransferedLen=%d, DescriptorMinSize=%d\n", 
+                Status, TransferedLen, DescriptorMinSize);
+        DPRINT1("USBPORT_CreateDevice: DeviceDescriptor.bLength=%d, sizeof(USB_DEVICE_DESCRIPTOR)=%d\n", 
+                DeviceHandle->DeviceDescriptor.bLength, sizeof(USB_DEVICE_DESCRIPTOR));
+        DPRINT1("USBPORT_CreateDevice: DeviceDescriptor.bDescriptorType=%d, USB_DEVICE_DESCRIPTOR_TYPE=%d\n", 
+                DeviceHandle->DeviceDescriptor.bDescriptorType, USB_DEVICE_DESCRIPTOR_TYPE);
+        
         if ((DeviceHandle->DeviceDescriptor.bLength >= sizeof(USB_DEVICE_DESCRIPTOR)) &&
             (DeviceHandle->DeviceDescriptor.bDescriptorType == USB_DEVICE_DESCRIPTOR_TYPE))
         {
             MaxPacketSize = DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+            
+            DPRINT1("USBPORT_CreateDevice: MaxPacketSize=%d\n", MaxPacketSize);
 
             if (MaxPacketSize == 8 ||
                 MaxPacketSize == 16 ||
                 MaxPacketSize == 32 ||
                 MaxPacketSize == 64)
             {
+                DPRINT1("USBPORT_CreateDevice: Success! Valid MaxPacketSize\n");
                 USBPORT_AddDeviceHandle(FdoDevice, DeviceHandle);
 
                 *pUsbdDeviceHandle = DeviceHandle;
@@ -1188,10 +1209,24 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
 
                 return Status;
             }
+            else
+            {
+                DPRINT1("USBPORT_CreateDevice: Invalid MaxPacketSize=%d\n", MaxPacketSize);
+            }
+        }
+        else
+        {
+            DPRINT1("USBPORT_CreateDevice: Invalid descriptor: bLength=%d, bDescriptorType=%d\n", 
+                    DeviceHandle->DeviceDescriptor.bLength, DeviceHandle->DeviceDescriptor.bDescriptorType);
         }
     }
+    else
+    {
+        DPRINT1("USBPORT_CreateDevice: Condition failed: Status=0x%lx, TransferedLen=%d, DescriptorMinSize=%d\n", 
+                Status, TransferedLen, DescriptorMinSize);
+    }
 
-    DPRINT1("USBPORT_CreateDevice: ERROR!!! TransferedLen - %x, Status - %lx\n",
+    DPRINT1("USBPORT_CreateDevice: ERROR!!! TransferedLen - %d, Status - %lx\n",
             TransferedLen,
             Status);
 
@@ -1339,25 +1374,38 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
     DeviceAddress = USBPORT_AllocateUsbAddress(FdoDevice);
     ASSERT(DeviceHandle->DeviceAddress == USB_DEFAULT_DEVICE_ADDRESS);
 
-    RtlZeroMemory(&CtrlSetup, sizeof(USB_DEFAULT_PIPE_SETUP_PACKET));
+    /* For xHCI controllers, the Address Device command already assigns the device address,
+     * so we don't need to send a Set Address control transfer. For other controllers (OHCI/UHCI/EHCI),
+     * we still need to send the Set Address control transfer.
+     */
+    if (FdoExtension->MiniPortInterface->Packet.MiniPortVersion != USB_MINIPORT_VERSION_XHCI)
+    {
+        RtlZeroMemory(&CtrlSetup, sizeof(USB_DEFAULT_PIPE_SETUP_PACKET));
 
-    CtrlSetup.bRequest = USB_REQUEST_SET_ADDRESS;
-    CtrlSetup.wValue.W = DeviceAddress;
+        CtrlSetup.bRequest = USB_REQUEST_SET_ADDRESS;
+        CtrlSetup.wValue.W = DeviceAddress;
 
-    Status = USBPORT_SendSetupPacket(DeviceHandle,
-                                     FdoDevice,
-                                     &CtrlSetup,
-                                     NULL,
-                                     0,
-                                     NULL,
-                                     NULL);
+        Status = USBPORT_SendSetupPacket(DeviceHandle,
+                                         FdoDevice,
+                                         &CtrlSetup,
+                                         NULL,
+                                         0,
+                                         NULL,
+                                         NULL);
 
-    DPRINT("USBPORT_InitializeDevice: DeviceAddress - %x. SendSetupPacket Status - %x\n",
-           DeviceAddress,
-           Status);
+        DPRINT("USBPORT_InitializeDevice: DeviceAddress - %x. SendSetupPacket Status - %x\n",
+               DeviceAddress,
+               Status);
 
-    if (!NT_SUCCESS(Status))
-        goto ExitError;
+        if (!NT_SUCCESS(Status))
+            goto ExitError;
+    }
+    else
+    {
+        DPRINT("USBPORT_InitializeDevice: xHCI controller detected, skipping Set Address control transfer. DeviceAddress - %x\n",
+               DeviceAddress);
+        Status = STATUS_SUCCESS;
+    }
 
     DeviceHandle->DeviceAddress = DeviceAddress;
     Endpoint = DeviceHandle->PipeHandle.Endpoint;
@@ -1365,10 +1413,10 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
     Endpoint->EndpointProperties.TotalMaxPacketSize = DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
     Endpoint->EndpointProperties.DeviceAddress = DeviceAddress;
 
-    Status = USBPORT_ReopenPipe(FdoDevice, Endpoint);
+  //  Status = USBPORT_ReopenPipe(FdoDevice, Endpoint); ???
 
-    if (!NT_SUCCESS(Status))
-        goto ExitError;
+ //   if (!NT_SUCCESS(Status))
+   //     goto ExitError;
 
     USBPORT_Wait(FdoDevice, 10);
 

@@ -949,7 +949,7 @@ USBPORT_IsrDpcHandler(IN PDEVICE_OBJECT FdoDevice,
 
     ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
-    DPRINT_CORE("USBPORT_IsrDpcHandler: IsDpcHandler - %x\n", IsDpcHandler);
+    DPRINT("USBPORT_IsrDpcHandler: IsDpcHandler - %x\n", IsDpcHandler);
 
     FdoExtension = FdoDevice->DeviceExtension;
     Packet = &FdoExtension->MiniPortInterface->Packet;
@@ -977,7 +977,7 @@ USBPORT_IsrDpcHandler(IN PDEVICE_OBJECT FdoDevice,
                                      USBPORT_ENDPOINT,
                                      StateChangeLink);
 
-        DPRINT_CORE("USBPORT_IsrDpcHandler: Endpoint - %p\n", Endpoint);
+        DPRINT1("USBPORT_IsrDpcHandler: Processing Endpoint - %p\n", Endpoint);
 
         /* Save the next entry before we potentially remove this one */
         NextList = List->Flink;
@@ -2045,6 +2045,9 @@ USBPORT_MiniportCompleteTransfer(IN PVOID MiniPortExtension,
 
     Transfer->Flags |= TRANSFER_FLAG_COMPLETED;
     Transfer->CompletedTransferLen = TransferLength;
+    
+    DPRINT1("USBPORT_MiniportCompleteTransfer: Setting CompletedTransferLen = %d (0x%x)\n",
+            TransferLength, TransferLength);
 
     if (((Transfer->Flags & TRANSFER_FLAG_SPLITED) == 0) ||
         TransferLength >= Transfer->TransferParameters.TransferBufferLength)
@@ -2260,6 +2263,9 @@ USBPORT_CompleteTransfer(IN PURB Urb,
     Status = USBPORT_USBDStatusToNtStatus(Urb, TransferStatus);
 
     UrbTransfer->TransferBufferLength = Transfer->CompletedTransferLen;
+    
+    DPRINT1("USBPORT_CompleteTransfer: URB TransferBufferLength set to %d (0x%x) from CompletedTransferLen\n",
+            Transfer->CompletedTransferLen, Transfer->CompletedTransferLen);
 
     if (Transfer->Flags & TRANSFER_FLAG_DMA_MAPPED)
     {
