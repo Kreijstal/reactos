@@ -2611,6 +2611,28 @@ QSI_DEF(SystemEmulationProcessorInformation)
     return STATUS_SUCCESS;
 }
 
+/* Class 63 - Emulation Processor Information */
+QSI_DEF(SystemEmulationProcessorInformation)
+{
+    NTSTATUS Status;
+
+    /* Query native information */
+    Status = QSISystemProcessorInformation(Buffer, Size, ReqSize);
+#if defined(_M_AMD64) || defined(_M_ARM64)
+    if (NT_SUCCESS(Status))
+    {
+        PSYSTEM_PROCESSOR_INFORMATION Spi = (PSYSTEM_PROCESSOR_INFORMATION)Buffer;
+#if defined(_M_AMD64)
+        Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
+#elif defined(_M_ARM64)
+        Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM;
+#endif /* _M_AMD64 | _M_ARM64 */
+    }
+#endif /* defined(_M_AMD64) || defined(_M_ARM64) */
+
+    return Status;
+}
+
 /* Class 64 - Extended handle information */
 QSI_DEF(SystemExtendedHandleInformation)
 {
