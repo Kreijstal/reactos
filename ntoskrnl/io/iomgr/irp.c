@@ -350,37 +350,31 @@ IopCompleteRequest(IN PKAPC Apc,
             _SEH2_TRY
             {
 #ifdef _WIN64
+                Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
+                
                 /*
-                 * This is an APC - we're running in the correct thread context,
-                 * and Irp->Tail is trashed. Don't bother with getting the thread
-                 * from the IRP then. The process mode still should be checked.
+                 * If this is a 32-bit process, and UserIosb->Pointer
+                 * falls within the 32-bit address space, assume it is a 
+                 * 32-bit IOSB that has to be filled. 
+                 * FIXME: This probably trashes some (user-space) memory, since
+                 * there's no guarantee that callers using IOSBs initialise
+                 * this value to something sensible. 
                  */
-                if (Irp->RequestorMode == UserMode && IoIs32bitProcess(NULL))
-                {
-                    /* The UserIosb pointer can point to a 32-bit IOSB */
-                    Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
-
+                if (Irp->RequestorMode == UserMode && 
                     /*
-                     * The only 64 bit module that should use IOSBs explicitly
-                     * is NTDLL. Its base address is outside of the 32-bit
-                     * address space.
+                     * This is an APC - we're running in the correct thread context,
+                     * and Irp->Tail is trashed. Don't bother with getting the thread
+                     * from the IRP then. The process mode still should be checked.
                      */
-                    if (Iosb32 == NULL || (PVOID)Iosb32 > (PVOID)0xFFFFFFFFULL)
-                    {
-                        /* 64-bit IOSB fallback. */
-                        *Irp->UserIosb = Irp->IoStatus;
-                    }
-                    else
-                    {
-                        Iosb32->Information = Irp->IoStatus.Information;
-                        Iosb32->Status = Irp->IoStatus.Status;
-                    }
-                }
-                else
-#endif
+                    IoIs32bitProcess(NULL) &&
+                    Iosb32 != NULL && (PVOID)Iosb32 <= (PVOID)0xFFFFFFFFULL)
                 {
-                    *Irp->UserIosb = Irp->IoStatus;
+                    Iosb32->Information = Irp->IoStatus.Information;
+                    Iosb32->Status = Irp->IoStatus.Status;
                 }
+                /* Awlays set the 64-bit IOSB anyway */
+#endif
+                *Irp->UserIosb = Irp->IoStatus;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
