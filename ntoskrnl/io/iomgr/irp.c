@@ -233,6 +233,56 @@ IopCleanupIrp(IN PIRP Irp,
     IoFreeIrp(Irp);
 }
 
+static
+VOID
+IopWriteAsyncUserIosb(PIRP Irp)
+{
+#ifdef _WIN64
+    PIO_STATUS_BLOCK32 Iosb32 = NULL;
+#endif
+    
+    /* Check for UserIos */
+    if (Irp->UserIosb != NULL)
+    {
+        /* Use SEH to make sure we don't write somewhere invalid */
+        _SEH2_TRY
+        {
+#ifdef _WIN64
+            Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
+            
+            /*
+             * If this is a 32-bit process, and UserIosb falls within the 
+             * 32-bit address space, assume it is a 32-bit IOSB that has 
+             * to be filled. 
+             */
+            if (Irp->RequestorMode == UserMode && 
+                /*
+                 * This is an APC - we're running in the correct thread context,
+                 * and Irp->Tail is trashed. Don't bother with getting the thread
+                 * from the IRP then. The process mode still should be checked.
+                 */
+                IoIs32bitProcess(NULL) &&
+                Iosb32 != NULL && (PVOID)Iosb32 <= (PVOID)0xFFFFFFFFULL)
+            {
+                InterlockedExchangePointer(&Irp->UserIosb->Pointer, NULL);
+                
+                Iosb32->Information = Irp->IoStatus.Information;
+                Iosb32->Status = Irp->IoStatus.Status;
+            }
+            else
+#endif
+            {
+                *Irp->UserIosb = Irp->IoStatus;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* Ignore any error */
+        }
+        _SEH2_END;
+    }
+}
+
 VOID
 NTAPI
 IopCompleteRequest(IN PKAPC Apc,
@@ -246,9 +296,6 @@ IopCompleteRequest(IN PKAPC Apc,
     PMDL Mdl, NextMdl;
     PVOID Port = NULL, Key = NULL;
     BOOLEAN SignaledCreateRequest = FALSE;
-#ifdef _WIN64
-    PIO_STATUS_BLOCK32 Iosb32 = NULL;
-#endif
 
     /* Get data from the APC */
     FileObject = (PFILE_OBJECT)*SystemArgument1;
@@ -343,45 +390,7 @@ IopCompleteRequest(IN PKAPC Apc,
             Key = FileObject->CompletionContext->Key;
         }
 
-        /* Check for UserIos */
-        if (Irp->UserIosb != NULL)
-        {
-            /* Use SEH to make sure we don't write somewhere invalid */
-            _SEH2_TRY
-            {
-#ifdef _WIN64
-                Iosb32 = (PIO_STATUS_BLOCK32)Irp->UserIosb->Pointer;
-                
-                /*
-                 * If this is a 32-bit process, and UserIosb->Pointer
-                 * falls within the 32-bit address space, assume it is a 
-                 * 32-bit IOSB that has to be filled. 
-                 * FIXME: This probably trashes some (user-space) memory, since
-                 * there's no guarantee that callers using IOSBs initialise
-                 * this value to something sensible. 
-                 */
-                if (Irp->RequestorMode == UserMode && 
-                    /*
-                     * This is an APC - we're running in the correct thread context,
-                     * and Irp->Tail is trashed. Don't bother with getting the thread
-                     * from the IRP then. The process mode still should be checked.
-                     */
-                    IoIs32bitProcess(NULL) &&
-                    Iosb32 != NULL && (PVOID)Iosb32 <= (PVOID)0xFFFFFFFFULL)
-                {
-                    Iosb32->Information = Irp->IoStatus.Information;
-                    Iosb32->Status = Irp->IoStatus.Status;
-                }
-                /* Awlays set the 64-bit IOSB anyway */
-#endif
-                *Irp->UserIosb = Irp->IoStatus;
-            }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-            {
-                /* Ignore any error */
-            }
-            _SEH2_END;
-        }
+        IopWriteAsyncUserIosb(Irp);
 
         /* Check if we have an event or a file object */
         if (Irp->UserEvent)
