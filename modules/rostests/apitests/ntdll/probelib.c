@@ -56,7 +56,7 @@ QuerySetProcessValidator(
                     break;
                 }
 
-                /* This one works different from the others */
+                /* This one works differently from the others */
                 case ProcessUserModeIOPL:
                 {
                     if (ExpectedStatus == STATUS_INFO_LENGTH_MISMATCH)
@@ -159,7 +159,7 @@ QuerySetProcessValidator(
                     break;
                 }
 
-                /* This one works different from the others */
+                /* This one works differently from the others */
                 case ProcessUserModeIOPL:
                 {
                     if (ExpectedStatus == STATUS_INFO_LENGTH_MISMATCH)
@@ -295,6 +295,21 @@ QuerySetThreadValidator(
                     break;
                 }
 
+                /* ThreadNameInformation is Windows 10+, but
+                 * ReactOS supports this class, so don't exclude it */
+                case ThreadNameInformation:
+                {
+#ifndef __REACTOS__
+                    if (GetNTVersion() < _WIN32_WINNT_WIN10)
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+#else
+                    /* This one works differently from the others */
+                    if (ExpectedStatus == STATUS_INFO_LENGTH_MISMATCH)
+                        ExpectedStatus = STATUS_BUFFER_TOO_SMALL;
+#endif
+                    break;
+                }
+
                 default:
                 {
                     /* All of these classes only exist on Windows 7 and above */
@@ -378,6 +393,17 @@ QuerySetThreadValidator(
                 case ThreadEnableAlignmentFaultFixup:
                 {
                     SpecialStatus = STATUS_ACCESS_VIOLATION;
+                    break;
+                }
+
+                /* ThreadNameInformation is Windows 10+, but
+                 * ReactOS supports this class, so don't exclude it */
+                case ThreadNameInformation:
+                {
+#ifndef __REACTOS__
+                    if (GetNTVersion() < _WIN32_WINNT_WIN10)
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+#endif
                     break;
                 }
 
