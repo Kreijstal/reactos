@@ -32,12 +32,14 @@
 @ stub -version=0x600+ BaseGenerateAppCompatData
 @ stdcall BaseInitAppcompatCacheSupport()
 @ stdcall BaseIsAppcompatInfrastructureDisabled() IsShimInfrastructureDisabled
-@ stdcall -version=0x501-0x502 BaseProcessInitPostImport()
-@ stdcall -version=0x600+ BaseProcessInitPostImport() # HACK: This export is dynamicaly imported by ntdll
-;@ stdcall -version=0x502 -arch=x86_64 BaseProcessStart()
+;@ stdcall -version=0x501-0x502 BaseProcessInitPostImport()
+@ stdcall BaseProcessInitPostImport() # HACK: This export is dynamicaly imported by ntdll
+@ stdcall -version=0x502 -arch=x86_64 BaseProcessStart() BaseProcessStartup
+@ stdcall -version=0x502 -arch=i386 BaseProcessStartThunk() ; FIXME: WOW64 only
 @ stdcall BaseQueryModuleData(str str ptr ptr ptr) ;check
-@ stub -version=0x600+ BaseThreadInitThunk
-;@ stdcall -version=0x502 -arch=x86_64 BaseThreadStart()
+;@ stub -version=0x600+ BaseThreadInitThunk
+@ stdcall -version=0x502 -arch=x86_64 BaseThreadStart() BaseThreadStartup
+@ stdcall -version=0x502 -arch=i386 BaseThreadStartupThunk() ; FIXME: WOW64 only
 @ stdcall BaseUpdateAppcompatCache(long long long)
 @ stdcall BasepCheckBadapp(long ptr long long long long long long long)
 @ stdcall BasepCheckWinSaferRestrictions(long long long long long long)
