@@ -2097,7 +2097,16 @@ static LRESULT LISTBOX_HandleLButtonDown( LB_DESCR *descr, DWORD keys, INT x, IN
     if (!descr->in_focus)
     {
         if( !descr->lphc ) SetFocus( descr->self );
+#ifndef BUILD_WOW6432
         else SetFocus( (descr->lphc->hWndEdit) ? descr->lphc->hWndEdit : descr->lphc->self );
+#else
+        else
+        {
+            SetFocus((descr->lphc->hWndEdit) ? 
+                        WOW64_CAST_TO_HANDLE(descr->lphc->hWndEdit) : 
+                        WOW64_CAST_TO_HANDLE(descr->lphc->self));
+        }
+#endif
     }
 
     if (index == -1) return 0;
@@ -2582,7 +2591,7 @@ static BOOL LISTBOX_Create( HWND hwnd, LPHEADCOMBO lphc )
     if( lphc )
     {
         TRACE("[%p]: resetting owner %p -> %p\n", descr->self, descr->owner, lphc->self );
-        descr->owner = lphc->self;
+        descr->owner = WOW64_CAST_TO_HANDLE(lphc->self);
     }
 
     SetWindowLongPtrW( descr->self, 0, (LONG_PTR)descr );
