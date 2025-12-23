@@ -61,13 +61,27 @@
 /* combo state struct */
 typedef struct
 {
+#ifndef BUILD_WOW6432
    HWND           self;
    HWND           owner;
+#else
+    UINT64        self;
+    UINT64        owner;
+#endif
    UINT           dwStyle;
+#ifndef BUILD_WOW6432
    HWND           hWndEdit;
    HWND           hWndLBox;
+#else
+    UINT64        hWndEdit;
+    UINT64        hWndLBox;
+#endif
    UINT           wState;
+#ifndef BUILD_WOW6432
    HFONT          hFont;
+#else
+    UINT64        hFont;
+#endif
    RECT           textRect;
    RECT           buttonRect;
    RECT           droppedRect;
