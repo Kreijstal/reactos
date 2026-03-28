@@ -309,7 +309,6 @@ QuerySetThreadValidator(
 #endif
                     break;
                 }
-
                 default:
                 {
                     /* All of these classes only exist on Windows 7 and above */
@@ -406,7 +405,6 @@ QuerySetThreadValidator(
 #endif
                     break;
                 }
-
                 default:
                 {
                     /* All of these classes only exist on Windows 7 and above */
