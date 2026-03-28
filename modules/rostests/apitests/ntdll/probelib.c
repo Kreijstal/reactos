@@ -49,7 +49,7 @@ QuerySetProcessValidator(
                  * which equates to the image filename of the process. Such status
                  * is returned in an invalid address query (STATUS_ACCESS_VIOLATION)
                  * where the function expects STATUS_INFO_LENGTH_MISMATCH instead.
-                */
+                 */
                 case ProcessImageFileName:
                 {
                     SpecialStatus = STATUS_INFO_LENGTH_MISMATCH;
@@ -60,13 +60,9 @@ QuerySetProcessValidator(
                 case ProcessUserModeIOPL:
                 {
                     if (ExpectedStatus == STATUS_INFO_LENGTH_MISMATCH)
-                    {
                         SpecialStatus = STATUS_ACCESS_VIOLATION;
-                    }
                     else
-                    {
                         SpecialStatus = STATUS_INVALID_INFO_CLASS;
-                    }
                     break;
                 }
 
@@ -87,9 +83,7 @@ QuerySetProcessValidator(
                 case ProcessForegroundInformation:
                 {
                     if (ExpectedStatus != STATUS_DATATYPE_MISALIGNMENT)
-                    {
                         SpecialStatus = STATUS_INVALID_INFO_CLASS;
-                    }
                     break;
                 }
 
@@ -98,9 +92,7 @@ QuerySetProcessValidator(
                 {
                     /* Need to fix up the length */
                     if (InfoLength == sizeof(UNICODE_STRING))
-                    {
                         InfoLength += MAX_PATH * sizeof(WCHAR);
-                    }
                     /* Fall through */
                 }
                 case ProcessIoPriority:
@@ -115,9 +107,7 @@ QuerySetProcessValidator(
                 case ProcessMemoryAllocationMode:
                 {
                     if (GetNTVersion() < _WIN32_WINNT_VISTA)
-                    {
                         SpecialStatus = STATUS_INVALID_INFO_CLASS;
-                    }
                     break;
                 }
 
@@ -173,13 +163,9 @@ QuerySetProcessValidator(
                 case ProcessUserModeIOPL:
                 {
                     if (ExpectedStatus == STATUS_INFO_LENGTH_MISMATCH)
-                    {
                         SpecialStatus = STATUS_ACCESS_VIOLATION;
-                    }
                     else
-                    {
                         SpecialStatus = STATUS_PRIVILEGE_NOT_HELD;
-                    }
                     break;
                 }
 
@@ -308,6 +294,27 @@ QuerySetThreadValidator(
                     SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     break;
                 }
+
+                default:
+                {
+                    /* ThreadNameInformation is Windows 10+, but
+                     * ReactOS supports this class, so don't exclude it */
+                    if (InfoClassIndex == ThreadNameInformation)
+                        break;
+
+                    /* All of these classes only exist on Windows 7 and above */
+                    if ( ((InfoClassIndex >= ThreadCSwitchPmu) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN7)) ||
+                         ((InfoClassIndex >= ThreadCpuAccountingInformation) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN8)) ||
+                         ((InfoClassIndex >= ThreadSuspendCount) &&
+                          (GetNTVersion() < _WIN32_WINNT_WINBLUE)) ||
+                         ((InfoClassIndex >= ThreadHeterogeneousCpuPolicy) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN10)) )
+                    {
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    }
+                }
             }
 
             /* Query the information */
@@ -377,6 +384,27 @@ QuerySetThreadValidator(
                 {
                     SpecialStatus = STATUS_ACCESS_VIOLATION;
                     break;
+                }
+
+                default:
+                {
+                    /* ThreadNameInformation is Windows 10+, but
+                     * ReactOS supports this class, so don't exclude it */
+                    if (InfoClassIndex == ThreadNameInformation)
+                        break;
+
+                    /* All of these classes only exist on Windows 7 and above */
+                    if ( ((InfoClassIndex >= ThreadCSwitchPmu) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN7)) ||
+                         ((InfoClassIndex >= ThreadCpuAccountingInformation) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN8)) ||
+                         ((InfoClassIndex >= ThreadSuspendCount) &&
+                          (GetNTVersion() < _WIN32_WINNT_WINBLUE)) ||
+                         ((InfoClassIndex >= ThreadHeterogeneousCpuPolicy) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN10)) )
+                    {
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    }
                 }
             }
 

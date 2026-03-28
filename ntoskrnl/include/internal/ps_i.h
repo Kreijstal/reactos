@@ -563,7 +563,9 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     /* ThreadCSwitchMon */
     IQS_NONE,
 
-#if 0 // Hermes will surely fix this properly
+#if 1
+// TODO: Specify the settings when implementing these classes (see commit 60aad33ed0 PR #8487)
+// and adjust modules/rostests/apitests/ntdll/probelib.c!QuerySetThreadValidator() accordingly.
     // Windows 7
     /* ThreadCSwitchPmu */
     IQS_NONE,
@@ -591,6 +593,7 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     IQS_NONE,
     /* ThreadContainerId */
     IQS_NONE,
+#endif
 
     /* ThreadNameInformation */
     IQS_SAME
@@ -600,6 +603,9 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
         ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE
     ),
 
+#if 1
+// TODO: Specify the settings when implementing these classes (see commit 60aad33ed0 PR #8487)
+// and adjust modules/rostests/apitests/ntdll/probelib.c!QuerySetThreadValidator() accordingly.
     /* ThreadSelectedCpuSets */
     IQS_NONE,
     /* ThreadSystemThreadInformation */
