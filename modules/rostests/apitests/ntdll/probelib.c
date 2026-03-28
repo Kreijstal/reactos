@@ -294,6 +294,22 @@ QuerySetThreadValidator(
                     SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     break;
                 }
+
+                default:
+                {
+                    /* All of these classes only exist on Windows 7 and above */
+                    if ( ((InfoClassIndex >= ThreadCSwitchPmu) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN7)) ||
+                         ((InfoClassIndex >= ThreadCpuAccountingInformation) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN8)) ||
+                         ((InfoClassIndex >= ThreadSuspendCount) &&
+                          (GetNTVersion() < _WIN32_WINNT_WINBLUE)) ||
+                         ((InfoClassIndex >= ThreadHeterogeneousCpuPolicy) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN10)) )
+                    {
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    }
+                }
             }
 
             /* Query the information */
@@ -363,6 +379,22 @@ QuerySetThreadValidator(
                 {
                     SpecialStatus = STATUS_ACCESS_VIOLATION;
                     break;
+                }
+
+                default:
+                {
+                    /* All of these classes only exist on Windows 7 and above */
+                    if ( ((InfoClassIndex >= ThreadCSwitchPmu) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN7)) ||
+                         ((InfoClassIndex >= ThreadCpuAccountingInformation) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN8)) ||
+                         ((InfoClassIndex >= ThreadSuspendCount) &&
+                          (GetNTVersion() < _WIN32_WINNT_WINBLUE)) ||
+                         ((InfoClassIndex >= ThreadHeterogeneousCpuPolicy) &&
+                          (GetNTVersion() < _WIN32_WINNT_WIN10)) )
+                    {
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    }
                 }
             }
 
