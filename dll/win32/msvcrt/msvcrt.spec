@@ -476,6 +476,7 @@
 @ varargs -version=0x600+ _fscanf_l(ptr str ptr)
 @ varargs -version=0x600+ _fscanf_s_l(ptr str ptr)
 @ cdecl -version=0x600+ _fseeki64(ptr int64 long)
+@ cdecl -ret64 -version=0x600+ _ftelli64(ptr)
 @ cdecl _fsopen(str str long)
 @ cdecl _fstat(long ptr)
 @ cdecl _fstat64(long ptr)
