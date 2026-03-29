@@ -255,6 +255,9 @@ extern "C" {
   __MINGW_EXTENSION __int64 __cdecl _abs64(__int64);
 #endif
   int __cdecl atexit(void (__cdecl *)(void));
+  int __cdecl at_quick_exit(void (__cdecl *)(void));
+  __declspec(noreturn) void __cdecl quick_exit(int);
+
 
 #ifndef _CRT_ATOF_DEFINED
 #define _CRT_ATOF_DEFINED
