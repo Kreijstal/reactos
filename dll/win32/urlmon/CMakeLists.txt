@@ -4,8 +4,7 @@ add_definitions(
     -DENTRY_PREFIX=URLMON_
     -DPROXY_DELEGATION
     -DWINE_REGISTER_DLL
-    -D_CRT_NON_CONFORMING_SWPRINTFS
-    -DPROXY_CLSID_IS={0x79EAC9F1,0xBAF9,0x11CE,{0x8C,0x82,0x00,0xAA,0x00,0x4B,0xA9,0x0B}})
+    -D_CRT_NON_CONFORMING_SWPRINTFS)
 
 spec2def(urlmon.dll urlmon.spec ADD_IMPORTLIB)
 add_rpcproxy_files(urlmon_urlmon.idl)
@@ -50,6 +49,9 @@ add_library(urlmon MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/urlmon.def)
 
 set_module_type(urlmon win32dll)
+# PROXY_CLSID_IS contains commas in braces which CMake/ninja can mangle.
+# Use -include to define it via a header file instead.
+target_compile_options(urlmon PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/proxy_clsid.h")
 target_link_libraries(urlmon uuid wine ${PSEH_LIB} oldnames)
 add_delay_importlibs(urlmon advpack)
 add_importlibs(urlmon rpcrt4 propsys ole32 oleaut32 shlwapi shell32 wininet user32 advapi32 kernel32_vista msvcrt kernel32 ntdll)
