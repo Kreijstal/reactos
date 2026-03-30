@@ -36,7 +36,7 @@ DWORD WINAPI PipeReader(_In_ PVOID Param)
 
     DWORD cbRead = 0;
     BOOL Success = ReadFile(hPipe, outMsg, g_dwReadBufferSize, &cbRead, NULL);
-    
+
     if (g_dwReadBufferSize == MINBUFFERSIZE)
         ok(!Success, "ReadFile() succeeded unexpectedly\n");
     else
