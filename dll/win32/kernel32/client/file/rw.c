@@ -101,7 +101,6 @@ WriteFile(IN HANDLE hFile,
          * completed).
          */
         *lpNumberOfBytesWritten = Iosb.Information;
-
         if (!NT_SUCCESS(Status))
         {
             BaseSetLastNTError(Status);
