@@ -151,7 +151,7 @@ typedef struct
     LPWSTR Content[1];
 } WhoamiTable;
 
-/* create and prepare a new table for printing */
+/* Create and prepare a new table for printing */
 WhoamiTable *WhoamiAllocTable(UINT Rows, UINT Cols)
 {
     WhoamiTable *pTable = HeapAlloc(GetProcessHeap(),
@@ -172,12 +172,12 @@ WhoamiTable *WhoamiAllocTable(UINT Rows, UINT Cols)
     return pTable;
 }
 
-/* allocate and fill a new entry in the table */
+/* Allocate and fill a new entry in the table */
 void WhoamiSetTable(WhoamiTable *pTable, WCHAR *Entry, UINT Row, UINT Col)
 {
     LPWSTR Target = HeapAlloc(GetProcessHeap(),
                               HEAP_ZERO_MEMORY,
-                              1 + wcslen(Entry) * sizeof(Entry[0]));
+                              (wcslen(Entry) + 1) * sizeof(Entry[0]));
 
     // wprintf(L"DEBUG: Setting table value '%lp' '%ls' for %lu %lu.\n", entry, entry, row, col);
 
@@ -189,19 +189,37 @@ void WhoamiSetTable(WhoamiTable *pTable, WCHAR *Entry, UINT Row, UINT Col)
     pTable->Content[Row * pTable->Cols + Col] = Target;
 }
 
-/* fill a new entry in the table */
+/* Fill a new entry in the table */
 void WhoamiSetTableDyn(WhoamiTable *pTable, WCHAR *Entry, UINT Row, UINT Col)
 {
     pTable->Content[Row * pTable->Cols + Col] = Entry;
 }
 
-/* print and deallocate the table */
+/* Deallocate the table */
+void WhoamiFreeTable(WhoamiTable *pTable)
+{
+    UINT i, j;
+
+    for (i = 0; i < pTable->Rows; i++)
+    {
+        for (j = 0; j < pTable->Cols; j++)
+        {
+            if (!pTable->Content[i * pTable->Cols + j])
+                continue;
+            WhoamiFree(pTable->Content[i * pTable->Cols + j]);
+        }
+    }
+
+    WhoamiFree(pTable);
+}
+
+/* Print the table */
 void WhoamiPrintTable(WhoamiTable *pTable)
 {
     UINT i, j;
     UINT CurRow, CurCol;
-    UINT *ColLength;
-
+    UINT SingleColLen = 0;
+    PUINT ColLength = &SingleColLen;
 
     if (!pTable)
     {
@@ -209,37 +227,36 @@ void WhoamiPrintTable(WhoamiTable *pTable)
         exit(1);
     }
 
-    /* if we are going to print a *list* or *table*; take note of the total
-       column size, as we will need it later on when printing them in a tabular
-       fashion, according to their windows counterparts */
-
-    if (PrintFormat != csv)
+    /*
+     * If we are going to print a *list* or *table*; take note of the total
+     * column size, as we will need it later on when printing them in a tabular
+     * fashion, similarly to their Windows counterparts.
+     */
+    if (PrintFormat == list)
+    {
+        for (j = 0; j < pTable->Cols; j++)
+        {
+            if (pTable->Content[j])
+            {
+                UINT ThisLength = wcslen(pTable->Content[j]);
+                ColLength[0] = max(ThisLength, ColLength[0]);
+            }
+        }
+    }
+    else if (PrintFormat != csv) // So, == table
     {
         ColLength = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(UINT) * pTable->Cols);
 
-        if (PrintFormat == list)
+        for (j = 0; j < pTable->Cols; j++)
         {
-            for (j = 0; j < pTable->Cols; j++)
-                if (pTable->Content[j])
+            for (i = 0; i < pTable->Rows; i++)
+            {
+                if (pTable->Content[i * pTable->Cols + j])
                 {
-                    UINT ThisLength = wcslen(pTable->Content[j]);
-
-                    /* now that we're here, seize the opportunity and add those pesky ":" */
-                    pTable->Content[j][ThisLength++] = L':';
-                    pTable->Content[j][ThisLength] = UNICODE_NULL;
-
-                    ColLength[0] = max(ThisLength, ColLength[0]);
+                    UINT ThisLength = wcslen(pTable->Content[i * pTable->Cols + j]);
+                    ColLength[j] = max(ThisLength, ColLength[j]);
                 }
-        }
-        else
-        {
-            for (j = 0; j < pTable->Cols; j++)
-                for (i = 0; i < pTable->Rows; i++)
-                    if (pTable->Content[i * pTable->Cols + j])
-                    {
-                        UINT ThisLength = wcslen(pTable->Content[i * pTable->Cols + j]);
-                        ColLength[j] = max(ThisLength, ColLength[j]);
-                    }
+            }
         }
     }
 
@@ -252,7 +269,7 @@ void WhoamiPrintTable(WhoamiTable *pTable)
                 if (!pTable->Content[i * pTable->Cols])
                     continue;
 
-                /* if the user especified /nh then skip the column labels */
+                /* If the user specified /nh then skip the column labels */
                 if (NoHeader && i == 0)
                     continue;
 
@@ -267,19 +284,17 @@ void WhoamiPrintTable(WhoamiTable *pTable)
                 }
                 wprintf(L"\n");
             }
-
             break;
-
         }
 
         case list:
         {
             UINT FinalRow = 0;
 
-            /* fixme: we need to do two passes to find out which entry is the last one shown, or not null this is not exactly optimal */
+            // FIXME: we need to do two passes to find out which entry is the last one shown, or not null this is not exactly optimal
             for (CurRow = 1; CurRow < pTable->Rows; CurRow++)
             {
-                /* if the first member of this row isn't available, then forget it */
+                /* If the first member of this row isn't available, skip it */
                 if (!pTable->Content[CurRow * pTable->Cols])
                     continue;
 
@@ -288,23 +303,33 @@ void WhoamiPrintTable(WhoamiTable *pTable)
 
             for (CurRow = 1; CurRow < pTable->Rows; CurRow++)
             {
-                /* if the first member of this row isn't available, then forget it */
+                /* If the first member of this row isn't available, skip it */
                 if (!pTable->Content[CurRow * pTable->Cols])
                     continue;
 
-                /* if the user especified /nh then skip the column labels */
+                /* If the user specified /nh then skip the column labels */
                 if (NoHeader && i == 0)
                     continue;
 
                 for (CurCol = 0; CurCol < pTable->Cols; CurCol++)
                 {
-                    wprintf(L"%-*s %s\n",
-                            ColLength[0],
+#if 0 // Looks better with the ':' aligned, but it's not what Windows does.
+                    /* ItemName<indent>: ItemValue */
+                    wprintf(L"%-*s: %s\n",
+                            ColLength[0] + 1,
                             pTable->Content[CurCol],
                             pTable->Content[CurRow * pTable->Cols + CurCol]);
+#else // The ':' immediately follows the ItemName.
+                    /* ItemName:<indent> ItemValue */
+                    UINT nIndent = ColLength[0] - (UINT)wcslen(pTable->Content[CurCol]);
+                    wprintf(L"%s:%*s %s\n",
+                            pTable->Content[CurCol],
+                            nIndent, L"",
+                            pTable->Content[CurRow * pTable->Cols + CurCol]);
+#endif
                 }
 
-                /* don't add two carriage returns at the very end */
+                /* Don't add two carriage returns at the very end */
                 if (CurRow != FinalRow)
                     wprintf(L"\n");
             }
@@ -312,17 +337,16 @@ void WhoamiPrintTable(WhoamiTable *pTable)
             break;
         }
 
-
         case table:
         default:
         {
             for (i = 0; i < pTable->Rows; i++)
             {
-                /* if the first member of this row isn't available, then forget it */
+                /* If the first member of this row isn't available, skip it */
                 if (!pTable->Content[i * pTable->Cols])
                     continue;
 
-                /* if the user especified /nh then skip the column labels too */
+                /* If the user specified /nh then skip the column labels too */
                 if (NoHeader && i == 0)
                     continue;
 
@@ -335,7 +359,7 @@ void WhoamiPrintTable(WhoamiTable *pTable)
                 }
                 wprintf(L"\n");
 
-                /* add the cute underline thingie for the table header */
+                /* Add the underline separators for the table headers */
                 if (i == 0)
                 {
                     for (j = 0; j < pTable->Cols; j++)
@@ -345,7 +369,7 @@ void WhoamiPrintTable(WhoamiTable *pTable)
                         while (Length--)
                             wprintf(L"=");
 
-                        /* a spacing between all the columns except for the last one */
+                        /* A spacing between all the columns except for the last one */
                         if (pTable->Cols != (i + 1))
                             wprintf(L" ");
                     }
@@ -353,7 +377,6 @@ void WhoamiPrintTable(WhoamiTable *pTable)
                     wprintf(L"\n");
                 }
             }
-
         }
     }
 
@@ -362,13 +385,7 @@ void WhoamiPrintTable(WhoamiTable *pTable)
     // if (!final_entry)
         wprintf(L"\n");
 
-    for (i = 0; i < pTable->Rows; i++)
-        for (j = 0; j < pTable->Cols; j++)
-            WhoamiFree(pTable->Content[i * pTable->Cols + j]);
-
-    WhoamiFree(pTable);
-
-    if (PrintFormat != csv)
+    if (ColLength != &SingleColLen)
         HeapFree(GetProcessHeap(), 0, ColLength);
 }
 
@@ -452,6 +469,7 @@ int WhoamiUser(void)
     WhoamiPrintTable(UserTable);
 
     /* cleanup our allocations */
+    WhoamiFreeTable(UserTable);
     LocalFree(pSidStr);
     WhoamiFree(pUserInfo);
     WhoamiFree(pUserStr);
@@ -581,7 +599,8 @@ int WhoamiGroups(void)
     WhoamiPrintTable(GroupTable);
 
     /* cleanup our allocations */
-    WhoamiFree((LPVOID)pGroupInfo);
+    WhoamiFreeTable(GroupTable);
+    WhoamiFree(pGroupInfo);
 
     return 0;
 }
@@ -657,6 +676,7 @@ int WhoamiPriv(void)
     WhoamiPrintTable(PrivTable);
 
     /* cleanup our allocations */
+    WhoamiFreeTable(PrivTable);
     WhoamiFree(pPrivInfo);
 
     return 0;
