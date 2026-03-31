@@ -35,6 +35,7 @@ KeFindConfigurationNextEntry(
     _Inout_ PCONFIGURATION_COMPONENT_DATA *NextLink);
 
 static ACPI_TABLE_RSDP *AcpiLoaderRsdp = NULL;
+static ACPI_PHYSICAL_ADDRESS AcpiLoaderRsdpAddress = 0;
 
 static
 UCHAR
@@ -107,14 +108,11 @@ ACPI_PHYSICAL_ADDRESS
 AcpiBuildLoaderRootPointer(VOID)
 {
     PACPI_BIOS_MULTI_NODE NodeData;
-    ACPI_TABLE_HEADER *RootTable;
+    ACPI_TABLE_HEADER *RootTable = NULL;
     PHYSICAL_ADDRESS PhysicalAddress;
 
-    if (AcpiLoaderRsdp != NULL)
-    {
-        PhysicalAddress = MmGetPhysicalAddress(AcpiLoaderRsdp);
-        return (ACPI_PHYSICAL_ADDRESS)PhysicalAddress.QuadPart;
-    }
+    if (AcpiLoaderRsdpAddress != 0)
+        return AcpiLoaderRsdpAddress;
 
     NodeData = AcpiGetLoaderAcpiBiosNode();
     if (!NodeData || (NodeData->RsdtAddress.QuadPart == 0))
@@ -176,15 +174,17 @@ AcpiBuildLoaderRootPointer(VOID)
                                sizeof(*AcpiLoaderRsdp));
     }
 
-    MmUnmapIoSpace(RootTable, sizeof(*RootTable));
     PhysicalAddress = MmGetPhysicalAddress(AcpiLoaderRsdp);
-    return (ACPI_PHYSICAL_ADDRESS)PhysicalAddress.QuadPart;
+    AcpiLoaderRsdpAddress = (ACPI_PHYSICAL_ADDRESS)PhysicalAddress.QuadPart;
+    MmUnmapIoSpace(RootTable, sizeof(*RootTable));
+    return AcpiLoaderRsdpAddress;
 
 Failure:
     if (AcpiLoaderRsdp)
     {
         ExFreePoolWithTag(AcpiLoaderRsdp, TAG_ACPI_LOADER_RSDP_TABLE);
         AcpiLoaderRsdp = NULL;
+        AcpiLoaderRsdpAddress = 0;
     }
     if (RootTable)
         MmUnmapIoSpace(RootTable, sizeof(*RootTable));
@@ -219,6 +219,7 @@ AcpiOsTerminate(void)
     {
         ExFreePoolWithTag(AcpiLoaderRsdp, TAG_ACPI_LOADER_RSDP_TABLE);
         AcpiLoaderRsdp = NULL;
+        AcpiLoaderRsdpAddress = 0;
     }
 
     return AE_OK;
@@ -229,15 +230,12 @@ AcpiOsGetRootPointer (
     void)
 {
     ACPI_PHYSICAL_ADDRESS pa = 0;
-    PHYSICAL_ADDRESS PhysicalAddress;
 
     DPRINT("AcpiOsGetRootPointer\n");
 
-    if (AcpiLoaderRsdp != NULL)
-    {
-        PhysicalAddress = MmGetPhysicalAddress(AcpiLoaderRsdp);
-        return (ACPI_PHYSICAL_ADDRESS)PhysicalAddress.QuadPart;
-    }
+    pa = AcpiBuildLoaderRootPointer();
+    if (pa != 0)
+        return pa;
 
     AcpiFindRootPointer(&pa);
     return pa;
