@@ -20,6 +20,8 @@ Bus_PlugInDevice (
 #endif
 
 
+
+
 NTSTATUS
 NTAPI
 Bus_PnP (
@@ -604,5 +606,3 @@ DbgDeviceIDString(
 }
 
 #endif
-
-
