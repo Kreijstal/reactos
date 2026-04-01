@@ -196,8 +196,6 @@ AcpiOsInitialize (void)
 {
     DPRINT("AcpiOsInitialize called\n");
 
-    AcpiBuildLoaderRootPointer();
-
 #ifndef NDEBUG
     /* Verboseness level of the acpica core */
     AcpiDbgLevel = 0x00FFFFFF;
