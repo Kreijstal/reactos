@@ -70,7 +70,6 @@ typedef struct
     DWORD Metric;
     DWORD Index;
     AlternateConfiguration AltConfig;
-    AlternateConfiguration OldAltConfig;
     TcpFilterSettings *pFilter;
     TcpipAdvancedDNSDlgSettings *pDNS;
 } TcpipSettings;
@@ -85,6 +84,7 @@ typedef struct
     INetCfg *pNCfg;
     INetCfgComponent *pNComp;
     TcpipSettings *pCurrentConfig;
+    TcpipSettings *pOldConfig;
     CLSID NetCfgInstanceId;
 } TcpipConfNotifyImpl, *LPTcpipConfNotifyImpl;
 
@@ -2992,81 +2992,88 @@ INetCfgComponentPropertyUi_fnSetContext(
 
 HRESULT
 LoadTcpIpSettings(
-    TcpipConfNotifyImpl * This,
-    LPOLESTR pAdapterName)
+    TcpipSettings *pSettings,
+    LPOLESTR pAdapterName,
+    IP_ADAPTER_INFO *pAdapterInfo,
+    IP_PER_ADAPTER_INFO *pPerAdapterInfo)
 {
-    HKEY hKey;
+    HKEY hInterfaceKey, hConfigKey;
     WCHAR szBuffer[200];
     DWORD dwSize;
-    BOOL bAltConfig = FALSE;
+    HRESULT hr = S_OK;
+
+
+    pSettings->DhcpEnabled = pAdapterInfo->DhcpEnabled;
+    pSettings->Index = pAdapterInfo->Index;
+
+    if (!pAdapterInfo->DhcpEnabled)
+    {
+        CopyIpAddrString(&pAdapterInfo->IpAddressList, &pSettings->Ip, SUBMASK, NULL);
+    }
+
+    CopyIpAddrString(&pAdapterInfo->GatewayList, &pSettings->Gw, METRIC, NULL);
+
+    CopyIpAddrString(&pPerAdapterInfo->DnsServerList, &pSettings->Ns, IPADDR, NULL);
+
 
     _swprintf(szBuffer, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%s", pAdapterName);
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hInterfaceKey) != ERROR_SUCCESS)
     {
         return E_FAIL;
     }
 
+     /* InterfaceMetric */
+    dwSize = sizeof(DWORD);
+    if (RegQueryValueExW(hInterfaceKey, L"InterfaceMetric", NULL, NULL, (LPBYTE)&pSettings->Metric, &dwSize) != ERROR_SUCCESS)
+        pSettings->Metric = 0;
+
+
+    /* Read the alternate configuration, if available */
     dwSize = 0;
-    RegQueryValueExW(hKey, L"ActiveConfigurations", NULL, NULL, NULL, &dwSize);
-    if (dwSize != 0)
-    {
-        bAltConfig = TRUE;
-    }
-
-    RegCloseKey(hKey);
-
-    if (bAltConfig)
+    RegQueryValueExW(hInterfaceKey, L"ActiveConfigurations", NULL, NULL, NULL, &dwSize);
+    if (dwSize)
     {
         _swprintf(szBuffer, L"SYSTEM\\CurrentControlSet\\Services\\DHCP\\Configurations\\Alternate_%s", pAdapterName);
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hConfigKey) == ERROR_SUCCESS)
         {
-            return E_FAIL;
+            dwSize = sizeof(AlternateConfiguration);
+            RegQueryValueExW(hConfigKey, L"Options", NULL, NULL, (LPBYTE)&pSettings->AltConfig, &dwSize);
+            RegCloseKey(hConfigKey);
         }
-
-        dwSize = sizeof(AlternateConfiguration);
-        if (RegQueryValueExW(hKey, L"Options", NULL, NULL, (LPBYTE)&This->pCurrentConfig->AltConfig, &dwSize) == ERROR_SUCCESS)
-        {
-            CopyMemory(&This->pCurrentConfig->OldAltConfig,
-                       &This->pCurrentConfig->AltConfig,
-                       sizeof(AlternateConfiguration));
-        }
-
-        RegCloseKey(hKey);
     }
 
-    return S_OK;
+    RegCloseKey(hInterfaceKey);
+
+    return hr;
 }
 
 HRESULT
 LoadDNSSettings(
-    TcpipConfNotifyImpl * This,
+    TcpipSettings *pSettings,
     LPOLESTR pAdapterName)
 {
+    TcpipAdvancedDNSDlgSettings *pDNS = NULL;
     WCHAR szBuffer[200];
     HKEY hKey;
     DWORD dwSize;
 
-    This->pCurrentConfig->pDNS = (TcpipAdvancedDNSDlgSettings*) CoTaskMemAlloc(sizeof(TcpipAdvancedDNSDlgSettings));
-    if (!This->pCurrentConfig->pDNS)
+    pDNS = (TcpipAdvancedDNSDlgSettings*) CoTaskMemAlloc(sizeof(TcpipAdvancedDNSDlgSettings));
+    if (!pDNS)
         return E_FAIL;
 
-    ZeroMemory(This->pCurrentConfig->pDNS, sizeof(TcpipAdvancedDNSDlgSettings));
+    ZeroMemory(pDNS, sizeof(TcpipAdvancedDNSDlgSettings));
 
     _swprintf(szBuffer, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%s", pAdapterName);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
         dwSize = sizeof(DWORD);
-        RegQueryValueExW(hKey, L"RegisterAdapterName", NULL, NULL, (LPBYTE)&This->pCurrentConfig->pDNS->RegisterAdapterName, &dwSize);
+        RegQueryValueExW(hKey, L"RegisterAdapterName", NULL, NULL, (LPBYTE)&pDNS->RegisterAdapterName, &dwSize);
 
         dwSize = sizeof(DWORD);
-        RegQueryValueExW(hKey, L"RegistrationEnabled", NULL, NULL, (LPBYTE)&This->pCurrentConfig->pDNS->RegistrationEnabled, &dwSize);
+        RegQueryValueExW(hKey, L"RegistrationEnabled", NULL, NULL, (LPBYTE)&pDNS->RegistrationEnabled, &dwSize);
 
-        dwSize = sizeof(This->pCurrentConfig->pDNS->szDomain);
-        RegQueryValueExW(hKey, L"Domain", NULL, NULL, (LPBYTE)This->pCurrentConfig->pDNS->szDomain, &dwSize);
-
-        dwSize = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"InterfaceMetric", NULL, NULL, (LPBYTE)&This->pCurrentConfig->Metric, &dwSize) != ERROR_SUCCESS)
-            This->pCurrentConfig->Metric = 0;
+        dwSize = sizeof(pDNS->szDomain);
+        RegQueryValueExW(hKey, L"Domain", NULL, NULL, (LPBYTE)pDNS->szDomain, &dwSize);
 
         RegCloseKey(hKey);
     }
@@ -3074,23 +3081,26 @@ LoadDNSSettings(
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
         dwSize = sizeof(DWORD);
-        RegQueryValueExW(hKey, L"UseDomainNameDevolution", NULL, NULL, (LPBYTE)&This->pCurrentConfig->pDNS->UseDomainNameDevolution, &dwSize);
+        RegQueryValueExW(hKey, L"UseDomainNameDevolution", NULL, NULL, (LPBYTE)&pDNS->UseDomainNameDevolution, &dwSize);
 
         dwSize = 0;
         if (RegQueryValueExW(hKey, L"SearchList", NULL, NULL, NULL, &dwSize) == ERROR_SUCCESS)
         {
-            This->pCurrentConfig->pDNS->szSearchList = (LPWSTR)CoTaskMemAlloc(dwSize);
-            if (This->pCurrentConfig->pDNS->szSearchList)
+            pDNS->szSearchList = (LPWSTR)CoTaskMemAlloc(dwSize);
+            if (pDNS->szSearchList)
             {
-                if (RegQueryValueExW(hKey, L"SearchList", NULL, NULL, (LPBYTE)This->pCurrentConfig->pDNS->szSearchList, &dwSize) != ERROR_SUCCESS)
+                if (RegQueryValueExW(hKey, L"SearchList", NULL, NULL, (LPBYTE)pDNS->szSearchList, &dwSize) != ERROR_SUCCESS)
                 {
-                    CoTaskMemFree(This->pCurrentConfig->pDNS->szSearchList);
-                    This->pCurrentConfig->pDNS->szSearchList = NULL;
+                    CoTaskMemFree(pDNS->szSearchList);
+                    pDNS->szSearchList = NULL;
                 }
             }
         }
         RegCloseKey(hKey);
     }
+
+    pSettings->pDNS = pDNS;
+
     return S_OK;
 }
 
@@ -3118,7 +3128,7 @@ LoadTcpFilterSettingsFromRegistry(HKEY hKey, LPCWSTR szName, LPDWORD Size)
 
 HRESULT
 LoadFilterSettings(
-    TcpipConfNotifyImpl * This,
+    TcpipSettings *pSettings,
     LPOLESTR pAdapterName)
 {
     HKEY hKey;
@@ -3131,8 +3141,6 @@ LoadFilterSettings(
         return E_FAIL;
 
     ZeroMemory(pFilter, sizeof(TcpFilterSettings));
-    This->pCurrentConfig->pFilter = pFilter;
-
 
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
@@ -3147,14 +3155,16 @@ LoadFilterSettings(
     }
 
     _swprintf(szBuffer, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%s", pAdapterName);
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hKey) == ERROR_SUCCESS)
     {
-        return S_OK;
+        pFilter->szTCPAllowedPorts = LoadTcpFilterSettingsFromRegistry(hKey, L"TCPAllowedPorts", &pFilter->TCPSize);
+        pFilter->szUDPAllowedPorts = LoadTcpFilterSettingsFromRegistry(hKey, L"UDPAllowedPorts", &pFilter->UDPSize);
+        pFilter->szRawIPAllowedProtocols = LoadTcpFilterSettingsFromRegistry(hKey, L"RawIPAllowedProtocols", &pFilter->IPSize);
+        RegCloseKey(hKey);
     }
-    pFilter->szTCPAllowedPorts = LoadTcpFilterSettingsFromRegistry(hKey, L"TCPAllowedPorts", &pFilter->TCPSize);
-    pFilter->szUDPAllowedPorts = LoadTcpFilterSettingsFromRegistry(hKey, L"UDPAllowedPorts", &pFilter->UDPSize);
-    pFilter->szRawIPAllowedProtocols = LoadTcpFilterSettingsFromRegistry(hKey, L"RawIPAllowedProtocols", &pFilter->IPSize);
-    RegCloseKey(hKey);
+
+    pSettings->pFilter = pFilter;
+
     return S_OK;
 }
 
@@ -3162,16 +3172,15 @@ LoadFilterSettings(
 HRESULT
 Initialize(TcpipConfNotifyImpl * This)
 {
-    DWORD dwSize, Status;
+    DWORD dwSize;
     WCHAR szBuffer[50];
     IP_ADAPTER_INFO * pCurrentAdapter;
-    IP_ADAPTER_INFO * pInfo;
-    PIP_PER_ADAPTER_INFO pPerInfo;
-    IP_PER_ADAPTER_INFO Info;
-    LPOLESTR pAdapterName;
+    IP_ADAPTER_INFO *pInfo = NULL;
+    PIP_PER_ADAPTER_INFO pPerAdapterInfo = NULL;
+    LPOLESTR pAdapterName = NULL;
     HRESULT hr;
     BOOL bFound;
-    TcpipSettings * pCurSettings;
+    TcpipSettings *pCurrentConfig = NULL, *pOldConfig = NULL;
     ULONG uLength;
 
     if (This->pCurrentConfig)
@@ -3180,7 +3189,6 @@ Initialize(TcpipConfNotifyImpl * This)
     hr = StringFromCLSID(&This->NetCfgInstanceId, &pAdapterName);
     if (FAILED(hr))
         return hr;
-
 
     dwSize = 0;
     if (GetAdaptersInfo(NULL, &dwSize) != ERROR_BUFFER_OVERFLOW)
@@ -3227,60 +3235,86 @@ Initialize(TcpipConfNotifyImpl * This)
         return E_FAIL;
     }
 
-    pCurSettings = CoTaskMemAlloc(sizeof(TcpipSettings));
-    if (!pCurSettings)
+    pPerAdapterInfo = (PIP_PER_ADAPTER_INFO)CoTaskMemAlloc(sizeof(IP_PER_ADAPTER_INFO));
+    ZeroMemory(pPerAdapterInfo, sizeof(IP_PER_ADAPTER_INFO));
+
+    if (GetPerAdapterInfo(pCurrentAdapter->Index, pPerAdapterInfo, &uLength) == ERROR_BUFFER_OVERFLOW)
     {
-        CoTaskMemFree(pAdapterName);
-        CoTaskMemFree(pInfo);
-        return E_FAIL;
-    }
-
-    ZeroMemory(pCurSettings, sizeof(TcpipSettings));
-    This->pCurrentConfig = pCurSettings;
-    pCurSettings->DhcpEnabled = pCurrentAdapter->DhcpEnabled;
-    pCurSettings->Index = pCurrentAdapter->Index;
-
-    if (!pCurrentAdapter->DhcpEnabled)
-    {
-        CopyIpAddrString(&pCurrentAdapter->IpAddressList, &pCurSettings->Ip, SUBMASK, NULL);
-    }
-
-    CopyIpAddrString(&pCurrentAdapter->GatewayList, &pCurSettings->Gw, METRIC, NULL);
-
-    uLength = sizeof(IP_PER_ADAPTER_INFO);
-    ZeroMemory(&Info, sizeof(IP_PER_ADAPTER_INFO));
-
-    if (GetPerAdapterInfo(pCurrentAdapter->Index, &Info, &uLength) == ERROR_BUFFER_OVERFLOW)
-    {
-        pPerInfo = (PIP_PER_ADAPTER_INFO)CoTaskMemAlloc(uLength);
-        if (pPerInfo)
+        CoTaskMemFree(pPerAdapterInfo);
+        pPerAdapterInfo = (PIP_PER_ADAPTER_INFO)CoTaskMemAlloc(uLength);
+        if (pPerAdapterInfo)
         {
-            Status = GetPerAdapterInfo(pCurrentAdapter->Index, pPerInfo, &uLength);
-            if (Status == NOERROR)
-            {
-                CopyIpAddrString(&pPerInfo->DnsServerList, &pCurSettings->Ns, IPADDR, NULL);
-            }
-            CoTaskMemFree(pPerInfo);
+            ZeroMemory(pPerAdapterInfo, uLength);
+            GetPerAdapterInfo(pCurrentAdapter->Index, pPerAdapterInfo, &uLength);
         }
+    }
+
+    pCurrentConfig = CoTaskMemAlloc(sizeof(TcpipSettings));
+    if (!pCurrentConfig)
+    {
+        hr = E_FAIL;
+        goto done;
+    }
+
+    ZeroMemory(pCurrentConfig, sizeof(TcpipSettings));
+
+    pOldConfig = CoTaskMemAlloc(sizeof(TcpipSettings));
+    if (!pOldConfig)
+    {
+        hr = E_FAIL;
+        goto done;
+    }
+
+    ZeroMemory(pOldConfig, sizeof(TcpipSettings));
+
+    hr = LoadTcpIpSettings(pCurrentConfig, pAdapterName, pCurrentAdapter, pPerAdapterInfo);
+    if (FAILED(hr))
+        goto done;
+
+    hr = LoadFilterSettings(pCurrentConfig, pAdapterName);
+    if (FAILED(hr))
+        goto done;
+
+    hr = LoadDNSSettings(pCurrentConfig, pAdapterName);
+    if (FAILED(hr))
+        goto done;
+
+    hr = LoadTcpIpSettings(pOldConfig, pAdapterName, pCurrentAdapter, pPerAdapterInfo);
+    if (FAILED(hr))
+        goto done;
+
+    hr = LoadFilterSettings(pOldConfig, pAdapterName);
+    if (FAILED(hr))
+        goto done;
+
+    hr = LoadDNSSettings(pOldConfig, pAdapterName);
+    if (FAILED(hr))
+        goto done;
+
+done:
+    if (pPerAdapterInfo)
+        CoTaskMemFree(pPerAdapterInfo);
+
+    CoTaskMemFree(pInfo);
+
+    if (pAdapterName)
+        CoTaskMemFree(pAdapterName);
+
+    if (FAILED(hr))
+    {
+        if (pCurrentConfig)
+            FreeSettings(pCurrentConfig);
+
+        if (pOldConfig)
+            FreeSettings(pOldConfig);
     }
     else
     {
-        CopyIpAddrString(&Info.DnsServerList, &pCurSettings->Ns, IPADDR, NULL);
+        This->pCurrentConfig = pCurrentConfig;
+        This->pOldConfig = pOldConfig;
     }
 
-    if (FAILED(LoadTcpIpSettings(This, pAdapterName)))
-        return E_FAIL;
-
-    if (FAILED(LoadFilterSettings(This, pAdapterName)))
-        return E_FAIL;
-
-    if (FAILED(LoadDNSSettings(This, pAdapterName)))
-        return E_FAIL;
-
-    CoTaskMemFree(pAdapterName);
-    CoTaskMemFree(pInfo);
-
-    return S_OK;
+    return hr;
 }
 
 HRESULT
@@ -3435,6 +3469,8 @@ INetCfgComponentControl_fnRelease(
     {
         if (This->pCurrentConfig)
             FreeSettings(This->pCurrentConfig);
+        if (This->pOldConfig)
+            FreeSettings(This->pOldConfig);
         CoTaskMemFree(This);
     }
     return refCount;
@@ -3556,25 +3592,14 @@ INetCfgComponentControl_fnApplyRegistryChanges(
     LPOLESTR pStr, pAdapterName;
     DWORD dwSize;
     WCHAR szBuffer[200];
-    TcpipSettings * pCurrentConfig, *pOldConfig;
-    ULONG NTEInstance;
-    DWORD DhcpApiVersion;
+    TcpipSettings *pCurrentConfig, *pOldConfig;
+
+    TRACE("INetCfgComponentControl_fnApplyRegistryChanges()\n");
 
     TcpipConfNotifyImpl * This = (TcpipConfNotifyImpl*)iface;
 
     pCurrentConfig = This->pCurrentConfig;
-    This->pCurrentConfig = NULL;
-
-    if (FAILED(Initialize(This)))
-    {
-        This->pCurrentConfig = pCurrentConfig;
-        return E_FAIL;
-    }
-    pOldConfig = This->pCurrentConfig;
-    This->pCurrentConfig = pCurrentConfig;
-
-    //MessageBoxW(NULL, L"INetCfgComponentControl_fnApplyRegistryChanges", NULL, MB_OK);
-
+    pOldConfig = This->pOldConfig;
 
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
     {
@@ -3594,8 +3619,6 @@ INetCfgComponentControl_fnApplyRegistryChanges(
 
     if (FAILED(StringFromCLSID(&This->NetCfgInstanceId, &pAdapterName)))
     {
-        if (pOldConfig)
-            FreeSettings(pOldConfig);
         return E_FAIL;
     }
 
@@ -3643,61 +3666,9 @@ INetCfgComponentControl_fnApplyRegistryChanges(
         {
             RegSetValueExW(hKey, L"IPAddress", 0, REG_MULTI_SZ, (LPBYTE)L"0.0.0.0\0", 9 * sizeof(WCHAR));
             RegSetValueExW(hKey, L"SubnetMask", 0, REG_MULTI_SZ, (LPBYTE)L"0.0.0.0\0", 9 * sizeof(WCHAR));
-            if (!pOldConfig->DhcpEnabled)
-            {
-                /* Delete this adapter's current IP address */
-                DeleteIPAddress(pOldConfig->Ip->NTEContext);
-
-                /* Delete all default routes for this adapter */
-                dwSize = 0;
-                if (GetIpForwardTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER)
-                {
-                    DWORD Index;
-                    PMIB_IPFORWARDTABLE pIpForwardTable = (PMIB_IPFORWARDTABLE)CoTaskMemAlloc(dwSize);
-                    if (pIpForwardTable)
-                    {
-                        if (GetIpForwardTable(pIpForwardTable, &dwSize, FALSE) == NO_ERROR)
-                        {
-                            for (Index = 0; Index < pIpForwardTable->dwNumEntries; Index++)
-                            {
-                                if (pIpForwardTable->table[Index].dwForwardIfIndex == pOldConfig->Index &&
-                                    pIpForwardTable->table[Index].dwForwardDest == 0)
-                                {
-                                    DeleteIpForwardEntry(&pIpForwardTable->table[Index]);
-                                }
-                            }
-                        }
-                        CoTaskMemFree(pIpForwardTable);
-                    }
-                }
-            }
         }
         else
         {
-            /* Open the DHCP API if DHCP is enabled */
-            if (pOldConfig->DhcpEnabled && DhcpCApiInitialize(&DhcpApiVersion) == NO_ERROR)
-            {
-                /* We have to tell DHCP about this */
-                DhcpStaticRefreshParams(pCurrentConfig->Index,
-                                        htonl(pCurrentConfig->Ip->IpAddress),
-                                        htonl(pCurrentConfig->Ip->u.Subnetmask));
-
-                /* Close the API */
-                DhcpCApiCleanup();
-            }
-            else
-            {
-                /* Delete this adapter's current static IP address */
-                DeleteIPAddress(pOldConfig->Ip->NTEContext);
-
-                /* Add the static IP address via the standard IPHLPAPI function */
-                AddIPAddress(htonl(pCurrentConfig->Ip->IpAddress),
-                             htonl(pCurrentConfig->Ip->u.Subnetmask),
-                             pCurrentConfig->Index,
-                             &pCurrentConfig->Ip->NTEContext,
-                             &NTEInstance);
-            }
-
             pStr = CreateMultiSzString(pCurrentConfig->Ip, IPADDR, &dwSize, FALSE);
             if(pStr)
             {
@@ -3711,58 +3682,22 @@ INetCfgComponentControl_fnApplyRegistryChanges(
                 RegSetValueExW(hKey, L"SubnetMask", 0, REG_MULTI_SZ, (LPBYTE)pStr, dwSize);
                 CoTaskMemFree(pStr);
             }
-
-            /* Delete all default routes for this adapter */
-            dwSize = 0;
-            if (GetIpForwardTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER)
-            {
-                DWORD Index;
-                PMIB_IPFORWARDTABLE pIpForwardTable = (PMIB_IPFORWARDTABLE)CoTaskMemAlloc(dwSize);
-                if (pIpForwardTable)
-                {
-                    if (GetIpForwardTable(pIpForwardTable, &dwSize, FALSE) == NO_ERROR)
-                    {
-                        for (Index = 0; Index < pIpForwardTable->dwNumEntries; Index++)
-                        {
-                            if (pIpForwardTable->table[Index].dwForwardIfIndex == pOldConfig->Index &&
-                                pIpForwardTable->table[Index].dwForwardDest == 0)
-                            {
-                                DeleteIpForwardEntry(&pIpForwardTable->table[Index]);
-                            }
-                        }
-                    }
-                    CoTaskMemFree(pIpForwardTable);
-                }
-            }
         }
 
         if (pCurrentConfig->Gw)
         {
-            MIB_IPFORWARDROW RouterMib;
-            ZeroMemory(&RouterMib, sizeof(MIB_IPFORWARDROW));
-
-            RouterMib.dwForwardMetric1 = 1;
-            RouterMib.dwForwardIfIndex = pOldConfig->Index;
-            RouterMib.dwForwardNextHop = htonl(pCurrentConfig->Gw->IpAddress);
-
-            //TODO
-            // add multiple gw addresses when required
-
-            if (CreateIpForwardEntry(&RouterMib) == NO_ERROR)
+            pStr = CreateMultiSzString(pCurrentConfig->Gw, IPADDR, &dwSize, FALSE);
+            if(pStr)
             {
-                pStr = CreateMultiSzString(pCurrentConfig->Gw, IPADDR, &dwSize, FALSE);
-                if(pStr)
-                {
-                    RegSetValueExW(hKey, L"DefaultGateway", 0, REG_MULTI_SZ, (LPBYTE)pStr, dwSize);
-                    CoTaskMemFree(pStr);
-                }
+                RegSetValueExW(hKey, L"DefaultGateway", 0, REG_MULTI_SZ, (LPBYTE)pStr, dwSize);
+                CoTaskMemFree(pStr);
+            }
 
-                pStr = CreateMultiSzString(pCurrentConfig->Gw, METRIC, &dwSize, FALSE);
-                if(pStr)
-                {
-                    RegSetValueExW(hKey, L"DefaultGatewayMetric", 0, REG_MULTI_SZ, (LPBYTE)pStr, dwSize);
-                    CoTaskMemFree(pStr);
-                }
+            pStr = CreateMultiSzString(pCurrentConfig->Gw, METRIC, &dwSize, FALSE);
+            if(pStr)
+            {
+                RegSetValueExW(hKey, L"DefaultGatewayMetric", 0, REG_MULTI_SZ, (LPBYTE)pStr, dwSize);
+                CoTaskMemFree(pStr);
             }
         }
         else
@@ -3786,7 +3721,7 @@ INetCfgComponentControl_fnApplyRegistryChanges(
             }
         }
 
-        if (!RtlEqualMemory(&pCurrentConfig->AltConfig, &pCurrentConfig->OldAltConfig, sizeof(AlternateConfiguration)))
+        if (!RtlEqualMemory(&pCurrentConfig->AltConfig, &pOldConfig->AltConfig, sizeof(AlternateConfiguration)))
         {
             if (pCurrentConfig->AltConfig.IpAddress == 0)
             {
@@ -3820,19 +3755,122 @@ INetCfgComponentControl_fnApplyRegistryChanges(
 
     CoTaskMemFree(pAdapterName);
 
-    if (pOldConfig)
-        FreeSettings(pOldConfig);
-
     return S_OK;
 }
 
 HRESULT
 WINAPI
 INetCfgComponentControl_fnApplyPnpChanges(
-    INetCfgComponentControl * iface,
+    INetCfgComponentControl *iface,
     INetCfgPnpReconfigCallback *pICallback)
 {
-    //MessageBoxW(NULL, L"INetCfgComponentControl_fnApplyPnpChanges", NULL, MB_OK);
+    TcpipSettings *pCurrentConfig, *pOldConfig;
+    ULONG NTEInstance;
+    DWORD DhcpApiVersion;
+    DWORD dwSize;
+
+    TRACE("INetCfgComponentControl_fnApplyPnpChanges()\n");
+
+    TcpipConfNotifyImpl *This = (TcpipConfNotifyImpl*)iface;
+
+    pCurrentConfig = This->pCurrentConfig;
+    pOldConfig = This->pOldConfig;
+
+    if (pCurrentConfig->DhcpEnabled)
+    {
+        if (!pOldConfig->DhcpEnabled)
+        {
+            /* Delete this adapter's current IP address */
+            DeleteIPAddress(pOldConfig->Ip->NTEContext);
+
+            /* Delete all default routes for this adapter */
+            dwSize = 0;
+            if (GetIpForwardTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER)
+            {
+                DWORD Index;
+                PMIB_IPFORWARDTABLE pIpForwardTable = (PMIB_IPFORWARDTABLE)CoTaskMemAlloc(dwSize);
+                if (pIpForwardTable)
+                {
+                    if (GetIpForwardTable(pIpForwardTable, &dwSize, FALSE) == NO_ERROR)
+                    {
+                        for (Index = 0; Index < pIpForwardTable->dwNumEntries; Index++)
+                        {
+                            if (pIpForwardTable->table[Index].dwForwardIfIndex == pOldConfig->Index &&
+                                pIpForwardTable->table[Index].dwForwardDest == 0)
+                            {
+                                DeleteIpForwardEntry(&pIpForwardTable->table[Index]);
+                            }
+                        }
+                    }
+                    CoTaskMemFree(pIpForwardTable);
+                }
+            }
+        }
+    }
+    else
+    {
+        /* Open the DHCP API if DHCP is enabled */
+        if (pOldConfig->DhcpEnabled && DhcpCApiInitialize(&DhcpApiVersion) == NO_ERROR)
+        {
+            /* We have to tell DHCP about this */
+            DhcpStaticRefreshParams(pCurrentConfig->Index,
+                                    htonl(pCurrentConfig->Ip->IpAddress),
+                                    htonl(pCurrentConfig->Ip->u.Subnetmask));
+
+            /* Close the API */
+            DhcpCApiCleanup();
+        }
+        else
+        {
+            /* Delete this adapter's current static IP address */
+            DeleteIPAddress(pOldConfig->Ip->NTEContext);
+
+            /* Add the static IP address via the standard IPHLPAPI function */
+            AddIPAddress(htonl(pCurrentConfig->Ip->IpAddress),
+                         htonl(pCurrentConfig->Ip->u.Subnetmask),
+                         pCurrentConfig->Index,
+                         &pCurrentConfig->Ip->NTEContext,
+                         &NTEInstance);
+        }
+
+        /* Delete all default routes for this adapter */
+        dwSize = 0;
+        if (GetIpForwardTable(NULL, &dwSize, FALSE) == ERROR_INSUFFICIENT_BUFFER)
+        {
+            DWORD Index;
+            PMIB_IPFORWARDTABLE pIpForwardTable = (PMIB_IPFORWARDTABLE)CoTaskMemAlloc(dwSize);
+            if (pIpForwardTable)
+            {
+                if (GetIpForwardTable(pIpForwardTable, &dwSize, FALSE) == NO_ERROR)
+                {
+                    for (Index = 0; Index < pIpForwardTable->dwNumEntries; Index++)
+                    {
+                        if (pIpForwardTable->table[Index].dwForwardIfIndex == pOldConfig->Index &&
+                            pIpForwardTable->table[Index].dwForwardDest == 0)
+                        {
+                            DeleteIpForwardEntry(&pIpForwardTable->table[Index]);
+                        }
+                    }
+                }
+                CoTaskMemFree(pIpForwardTable);
+            }
+        }
+    }
+
+    if (pCurrentConfig->Gw)
+    {
+        MIB_IPFORWARDROW RouterMib;
+        ZeroMemory(&RouterMib, sizeof(MIB_IPFORWARDROW));
+
+        RouterMib.dwForwardMetric1 = 1;
+        RouterMib.dwForwardIfIndex = pOldConfig->Index;
+        RouterMib.dwForwardNextHop = htonl(pCurrentConfig->Gw->IpAddress);
+
+        //TODO
+        // add multiple gw addresses when required
+        CreateIpForwardEntry(&RouterMib);
+    }
+
     return S_OK;
 }
 
@@ -3967,12 +4005,12 @@ TcpipConfigNotify_Constructor (IUnknown * pUnkOuter, REFIID riid, LPVOID * ppv)
     This->pNComp = NULL;
     This->pCurrentConfig = NULL;
 
-    if (!SUCCEEDED (INetCfgComponentControl_QueryInterface ((INetCfgComponentPropertyUi*)This, riid, ppv)))
+    if (!SUCCEEDED (INetCfgComponentControl_QueryInterface ((INetCfgComponentControl*)This, riid, ppv)))
     {
-        INetCfgComponentControl_Release((INetCfgComponentPropertyUi*)This);
+        INetCfgComponentControl_Release((INetCfgComponentControl*)This);
         return E_NOINTERFACE;
     }
 
-    INetCfgComponentControl_Release((INetCfgComponentPropertyUi*)This);
+    INetCfgComponentControl_Release((INetCfgComponentControl*)This);
     return S_OK;
 }
