@@ -50,7 +50,7 @@ DECLARE_INTERFACE_(INetCfgComponentControl, IUnknown)
 #define INetCfgComponentControl_Release(p)                        (p)->lpVtbl->Release(p)
 #define INetCfgComponentControl_Initialize(p,a,b,c)               (p)->lpVtbl->Initialize(p,a,b,c)
 #define INetCfgComponentControl_ApplyRegistryChanges(p)           (p)->lpVtbl->ApplyRegistryChanges(p)
-#define INetCfgComponentControl_ApplyPnpChanges(p,a)              (p)->lpVtbl->ApplyRegistryChanges(p,a)
+#define INetCfgComponentControl_ApplyPnpChanges(p,a)              (p)->lpVtbl->ApplyPnpChanges(p,a)
 #define INetCfgComponentControl_CancelChanges(p)                  (p)->lpVtbl->CancelChanges(p)
 #endif
 
