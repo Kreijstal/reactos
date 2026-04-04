@@ -984,6 +984,15 @@ FreeSegmentPage(PMM_SECTION_SEGMENT Segment, PLARGE_INTEGER Offset)
     if (IS_DIRTY_SSE(Entry))
         MiWritePage(Segment, Offset->QuadPart, Page);
 
+    /* Remove the section association (rmap entry) BEFORE releasing the page.
+     * MmFreePageTablesSectionSegment will free the CACHE_SECTION_PAGE_TABLE
+     * that the rmap points to.  If we don't remove the rmap first, a concurrent
+     * MmGetSectionAssociation call from the balancer thread can follow the rmap
+     * to a freed page table, read a stale Segment pointer, and dereference
+     * Segment->FileObject->SectionObjectPointer through freed memory — causing
+     * a NULL/garbage pointer dereference at DISPATCH_LEVEL (PFN lock held). */
+    MmDeleteSectionAssociation(Page);
+
     MmReleasePageMemoryConsumer(MC_USER, Page);
 }
 
@@ -1016,16 +1025,41 @@ MmDereferenceSegmentWithLock(
     /* Flush the segment */
     if (*Segment->Flags & MM_DATAFILE_SEGMENT)
     {
+        /* Cache FileObject and SectionObjectPointer BEFORE dropping the PFN lock.
+         * Segment->FileObject won't change (we own the segment), but the
+         * FileObject itself or its SectionObjectPointer could be freed by
+         * another thread after we release the lock. */
+        PFILE_OBJECT FileObject = Segment->FileObject;
+        PSECTION_OBJECT_POINTERS SectionObjectPointer = FileObject ? FileObject->SectionObjectPointer : NULL;
+
         MiReleasePfnLock(OldIrql);
         /* Free the page table. This will flush any remaining dirty data */
         MmFreePageTablesSectionSegment(Segment, FreeSegmentPage);
 
         OldIrql = MiAcquirePfnLock();
-        /* Delete the pointer on the file */
-        ASSERT(Segment->FileObject->SectionObjectPointer->DataSectionObject == Segment);
-        Segment->FileObject->SectionObjectPointer->DataSectionObject = NULL;
+        /* Delete the pointer on the file.
+         * Only clear DataSectionObject if it still points to us — another
+         * thread might have replaced it with a new segment. */
+        if (SectionObjectPointer && SectionObjectPointer->DataSectionObject == Segment)
+            SectionObjectPointer->DataSectionObject = NULL;
         MiReleasePfnLock(OldIrql);
-        ObDereferenceObject(Segment->FileObject);
+        {
+            /* Validate the FileObject before dereferencing. Under heavy memory
+             * pressure, the NTFS driver's close path may race with segment
+             * cleanup, causing FileObject to be freed before we get here.
+             * Check that the OBJECT_HEADER still has a valid Type pointer. */
+            POBJECT_HEADER ObjHdr = OBJECT_TO_OBJECT_HEADER(FileObject);
+            if (ObjHdr->Type != NULL && ObjHdr->PointerCount > 0)
+            {
+                ObDereferenceObject(FileObject);
+            }
+            else
+            {
+                DPRINT1("MmDereferenceSegmentWithLock: FileObject %p already freed "
+                        "(Type=%p PointerCount=%lld), skipping deref\n",
+                        FileObject, ObjHdr->Type, (long long)ObjHdr->PointerCount);
+            }
+        }
 
         ExFreePoolWithTag(Segment, TAG_MM_SECTION_SEGMENT);
     }
@@ -3723,21 +3757,10 @@ MiRosUnmapViewOfSection(
 
         ViewSize = PAGE_SIZE + ((Vad->EndingVpn - Vad->StartingVpn) << PAGE_SHIFT);
 
-        Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("MmUnmapViewOfSegment failed for %p (Process %p) with %lx\n",
-                    BaseAddress, Process, Status);
-            ASSERT(NT_SUCCESS(Status));
-        }
-
-        /* These might be deleted now */
-        Vad = NULL;
-        MemoryArea = NULL;
-
         if (FlagOn(*Segment->Flags, MM_PHYSICALMEMORY_SEGMENT))
         {
-            /* Don't bother */
+            Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
+            ASSERT(NT_SUCCESS(Status));
             MmDereferenceSegment(Segment);
             return STATUS_SUCCESS;
         }
@@ -3750,29 +3773,49 @@ MiRosUnmapViewOfSection(
         if (FlagOn(FileObject->Flags, FO_DELETE_ON_CLOSE) && FlagOn(FileObject->Flags, FO_CLEANUP_COMPLETE))
         {
             FsRtlReleaseFile(FileObject);
+            Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
+            ASSERT(NT_SUCCESS(Status));
             MmDereferenceSegment(Segment);
             return STATUS_SUCCESS;
         }
 
         /*
-         * Flush only when last mapping is deleted.
-         * FIXME: Why ControlArea == NULL? Or rather: is ControlArea ever not NULL here?
+         * Flush dirty pages BEFORE unmapping.  MmUnmapViewOfSegment drops
+         * PFN reference counts, which can free pages.  If we flush after
+         * unmapping, MiWritePage operates on pages whose PFN entries are
+         * already on the free list, causing PageLocation != ActiveAndValid
+         * assertions in MmProbeAndLockPages.
          */
         if (ControlArea == NULL || ControlArea->NumberOfMappedViews == 1)
         {
-            while (ViewSize > 0)
+            SIZE_T FlushViewSize = ViewSize;
+            LARGE_INTEGER FlushOffset = ViewOffset;
+            while (FlushViewSize > 0)
             {
-                ULONG FlushSize = min(ViewSize, PAGE_ROUND_DOWN(MAXULONG));
+                ULONG FlushSize = min(FlushViewSize, PAGE_ROUND_DOWN(MAXULONG));
                 MmFlushSegment(FileObject->SectionObjectPointer,
-                               &ViewOffset,
+                               &FlushOffset,
                                FlushSize,
                                NULL);
-                ViewSize -= FlushSize;
-                ViewOffset.QuadPart += FlushSize;
+                FlushViewSize -= FlushSize;
+                FlushOffset.QuadPart += FlushSize;
             }
         }
 
         FsRtlReleaseFile(FileObject);
+
+        Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("MmUnmapViewOfSegment failed for %p (Process %p) with %lx\n",
+                    BaseAddress, Process, Status);
+            ASSERT(NT_SUCCESS(Status));
+        }
+
+        /* These might be deleted now */
+        Vad = NULL;
+        MemoryArea = NULL;
+
         MmDereferenceSegment(Segment);
     }
 
@@ -5234,6 +5277,30 @@ MmCheckDirtySegment(
         Entry = WRITE_SSE(Entry);
         MmSetPageEntrySectionSegment(Segment, Offset, Entry);
 
+        /*
+         * Pin the page so it stays ActiveAndValid while we write it.
+         * After unlocking the segment, the page's PFN refcount can be
+         * dropped to 0 by concurrent unmaps, moving it to the free list.
+         * MmProbeAndLockPages in the storage driver would then find
+         * PageLocation != ActiveAndValid and assert.
+         *
+         * If the refcount is already 0 the page was freed — skip the write.
+         */
+        {
+            KIRQL PfnIrql = MiAcquirePfnLock();
+            PMMPFN Pfn1 = MiGetPfnEntry(Page);
+            if (Pfn1->u3.e2.ReferenceCount == 0)
+            {
+                MiReleasePfnLock(PfnIrql);
+                /* Page already freed, treat as clean */
+                Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) - 1);
+                MmSetPageEntrySectionSegment(Segment, Offset, Entry);
+                return FALSE;
+            }
+            MmReferencePage(Page);
+            MiReleasePfnLock(PfnIrql);
+        }
+
         MmUnlockSectionSegment(Segment);
 
         if (FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT))
@@ -5320,6 +5387,13 @@ MmCheckDirtySegment(
                 DPRINT1("Failed to allocate a swap page!\n");
                 Status = STATUS_INSUFFICIENT_RESOURCES;
             }
+        }
+
+        /* Release the PFN pin we took before the write */
+        {
+            KIRQL PfnIrql = MiAcquirePfnLock();
+            MmDereferencePage(Page);
+            MiReleasePfnLock(PfnIrql);
         }
 
         MmLockSectionSegment(Segment);

@@ -346,6 +346,11 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     Stack = IoGetCurrentIrpStackLocation(Irp);
     ASSERT(Stack);
 
+    DPRINT("NtfsCreateFile: FileName='%wZ', Disposition=%lu, Options=0x%lx\n",
+            &Stack->FileObject->FileName,
+            ((Stack->Parameters.Create.Options >> 24) & 0xff),
+            Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS);
+
     RequestedDisposition = ((Stack->Parameters.Create.Options >> 24) & 0xff);
     RequestedOptions = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
 //  PagingFileCreate = (Stack->Flags & SL_OPEN_PAGING_FILE) ? TRUE : FALSE;
@@ -423,6 +428,8 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             ExFreePoolWithTag(FullPath.Buffer, TAG_NTFS);
         }
     }
+
+    DPRINT("NtfsCreateFile: NtfsOpenFile returned Status=0x%lx, Fcb=%p\n", Status, Fcb);
 
     if (NT_SUCCESS(Status))
     {
@@ -566,11 +573,13 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             // Was the user trying to create a directory?
             if (RequestedOptions & FILE_DIRECTORY_FILE)
             {
+                DPRINT("NtfsCreateFile: Creating directory...\n");
                 // Create the directory on disk
                 Status = NtfsCreateDirectory(DeviceExt,
                                              FileObject,
                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                              BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+                DPRINT("NtfsCreateFile: NtfsCreateDirectory returned 0x%lx\n", Status);
             }
             else
             {
@@ -583,7 +592,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
             if (!NT_SUCCESS(Status))
             {
-                DPRINT1("ERROR: Couldn't create file record!\n");
+                DPRINT1("ERROR: Couldn't create file record! Status = 0x%lx\n", Status);
                 return Status;
             }
 
@@ -592,6 +601,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             Stack->Parameters.Create.Options = (ULONG)FILE_OPEN << 24 | RequestedOptions;
 
             // Now we should be able to open the file using NtfsCreateFile()
+            DPRINT("NtfsCreateFile: Recursive call to re-open created file/dir\n");
             Status = NtfsCreateFile(DeviceObject, IrpContext);
             if (NT_SUCCESS(Status))
             {
@@ -629,12 +639,14 @@ NtfsCreate(PNTFS_IRP_CONTEXT IrpContext)
     if (DeviceObject == NtfsGlobalData->DeviceObject)
     {
         /* DeviceObject represents FileSystem instead of logical volume */
-        DPRINT("Opening file system\n");
+        DPRINT1("NtfsCreate: Opening file system device object\n");
         IrpContext->Irp->IoStatus.Information = FILE_OPENED;
         return STATUS_SUCCESS;
     }
 
     DeviceExt = DeviceObject->DeviceExtension;
+    DPRINT("NtfsCreate: Processing IRP for volume, FileName='%wZ'\n",
+            &IoGetCurrentIrpStackLocation(IrpContext->Irp)->FileObject->FileName);
 
     if (!(IrpContext->Flags & IRPCONTEXT_CANWAIT))
     {
@@ -786,7 +798,7 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
         else
             FileMftIndex = FileMftIndex + ((ULONGLONG)FileRecord->SequenceNumber << 48);
 
-        DPRINT1("New File Reference: 0x%016I64x\n", FileMftIndex);
+        DPRINT("New File Reference: 0x%016I64x\n", FileMftIndex);
 
         // Add the filename attribute to the filename-index of the parent directory
         Status = NtfsAddFilenameToDirectory(DeviceExt,
@@ -945,7 +957,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
         else
             FileMftIndex = FileMftIndex + ((ULONGLONG)FileRecord->SequenceNumber << 48);
 
-        DPRINT1("New File Reference: 0x%016I64x\n", FileMftIndex);
+        DPRINT("New File Reference: 0x%016I64x\n", FileMftIndex);
 
         // Add the filename attribute to the filename-index of the parent directory
         Status = NtfsAddFilenameToDirectory(DeviceExt,

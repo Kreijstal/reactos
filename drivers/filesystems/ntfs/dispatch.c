@@ -129,6 +129,20 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsCreate(IrpContext);
             break;
 
+        case IRP_MJ_FLUSH_BUFFERS:
+            /* Flush cached data for the file */
+            if (IrpContext->FileObject)
+            {
+                CcFlushCache(IrpContext->FileObject->SectionObjectPointer, NULL, 0, &IrpContext->Irp->IoStatus);
+                Status = IrpContext->Irp->IoStatus.Status;
+            }
+            else
+            {
+                Status = STATUS_SUCCESS;
+            }
+            IrpContext->Irp->IoStatus.Information = 0;
+            break;
+
         case IRP_MJ_FILE_SYSTEM_CONTROL:
             Status = NtfsFileSystemControl(IrpContext);
             break;
@@ -187,6 +201,10 @@ NtfsFsdDispatch(PDEVICE_OBJECT DeviceObject,
 {
     PNTFS_IRP_CONTEXT IrpContext = NULL;
     NTSTATUS Status;
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    DPRINT("NtfsFsdDispatch: MajorFunction=%d MinorFunction=%d FileObject=%p\n",
+            Stack->MajorFunction, Stack->MinorFunction, Stack->FileObject);
 
     TRACE_(NTFS, "NtfsFsdDispatch()\n");
 

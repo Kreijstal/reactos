@@ -19,6 +19,52 @@
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 #define ROUND_DOWN(N, S) ((N) - ((N) % (S)))
 
+/* Pool corruption detector: validate the pool header of the block containing P.
+ * P must be a pool allocation (the pointer returned by ExAllocate*, NOT the header).
+ * On amd64, POOL_HEADER is 16 bytes immediately before the allocation.
+ * We check that the next block's PreviousSize matches our BlockSize. */
+#ifdef DBG
+static inline void NtfsCheckPoolAround(PVOID P, const char *where)
+{
+    /* Pool header is 16 bytes before the allocation */
+    PUCHAR hdr = (PUCHAR)P - 16;
+    UCHAR our_bs = hdr[2];  /* BlockSize */
+    ULONG our_size = (ULONG)our_bs * 16;
+    /* Next block header */
+    PUCHAR next_hdr = hdr + our_size;
+    /* Check that next block is on the same page */
+    if (((ULONG_PTR)next_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
+    {
+        UCHAR next_ps = next_hdr[0];  /* PreviousSize */
+        if (next_ps != our_bs)
+        {
+            DbgPrint("NTFS POOL CORRUPTION at %s: block %p (bs=%u) next at %p has PrevSize=%u\n",
+                    where, P, our_bs, next_hdr + 16, next_ps);
+            ASSERT(FALSE);
+        }
+    }
+    /* Also check our PreviousSize against the previous block */
+    UCHAR our_ps = hdr[0];  /* PreviousSize */
+    if (our_ps != 0)
+    {
+        PUCHAR prev_hdr = hdr - (ULONG)our_ps * 16;
+        if (((ULONG_PTR)prev_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
+        {
+            UCHAR prev_bs = prev_hdr[2];
+            if (prev_bs != our_ps)
+            {
+                DbgPrint("NTFS POOL CORRUPTION at %s: block %p (ps=%u) but prev block at %p has BlockSize=%u\n",
+                        where, P, our_ps, prev_hdr + 16, prev_bs);
+                ASSERT(FALSE);
+            }
+        }
+    }
+}
+#define NTFS_CHECK_POOL(P, where) NtfsCheckPoolAround(P, where)
+#else
+#define NTFS_CHECK_POOL(P, where) ((void)0)
+#endif
+
 #define DEVICE_NAME L"\\Ntfs"
 
 #include <pshpack1.h>
@@ -122,9 +168,16 @@ typedef struct
     ULONG Flags;
     ULONG OpenHandleCount;
 
+    /* Cached MFT $Bitmap for fast free-record allocation */
+    PUCHAR MftBitmapBuffer;         /* Original allocation (for freeing) */
+    PULONG MftBitmapData;           /* ULONG-aligned pointer within buffer */
+    ULONG MftBitmapSize;
+    ULONG MftNextFreeHint;          /* Next index to start searching from */
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
+#define VCB_VOLUME_CORRUPT      0x0002
 
 typedef struct
 {
@@ -453,6 +506,9 @@ typedef struct _B_TREE_FILENAME_NODE
 typedef struct
 {
     PB_TREE_FILENAME_NODE RootNode;
+    PDEVICE_EXTENSION Vcb;
+    PINDEX_ROOT_ATTRIBUTE IndexRoot;
+    struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
 } B_TREE, *PB_TREE;
 
 typedef struct
@@ -708,6 +764,12 @@ FreeClusters(PNTFS_VCB Vcb,
 /* blockdev.c */
 
 NTSTATUS
+NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
+                   IN LONGLONG StartingOffset,
+                   IN ULONG Length,
+                   IN OUT PUCHAR Buffer);
+
+NTSTATUS
 NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
              IN LONGLONG StartingOffset,
              IN ULONG Length,
@@ -721,6 +783,12 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
               IN ULONG Length,
               IN ULONG SectorSize,
               IN const PUCHAR Buffer);
+
+NTSTATUS
+NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
+                    IN LONGLONG StartingOffset,
+                    IN ULONG Length,
+                    IN const PUCHAR Buffer);
 
 NTSTATUS
 NtfsReadSectors(IN PDEVICE_OBJECT DeviceObject,

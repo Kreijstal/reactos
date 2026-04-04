@@ -284,9 +284,15 @@ msgAnyKey:
 
 SectsPerMFT:
     .word 0
-    
+
 MFTStartSector:
     .quad 0
+
+MFTDataRunsOff:
+    .word 0        // Offset of $MFT's $DATA run list within segment
+
+MFTDataRunsSeg:
+    .word 0        // Segment of $MFT's $DATA run list
 
 BiosCHSDriveSize:
     .long 0
@@ -347,6 +353,31 @@ StartSearch:
     mov   bp, sp
     sub   sp, HEX(10)
 
+    // Read MFT record 0 ($MFT) into [5000:0] (physical 0x50000) to get its
+    // data run list. This buffer must NOT be reused, since ReadInode
+    // references it later. Must not conflict with:
+    //   0x7C00-0x85FF = VBR code (sectors 0-4 loaded here),
+    //   0x1000-0x3FFF = page tables, 0x6F00 = stack/BSS,
+    //   0xF800-0x49800 = FreeLDR (FREELDR_BASE + PE image).
+    // 0x50000 is safely above all of these.
+    mov   ax, HEX(5000)
+    mov   es, ax
+    xor   bx, bx
+    xor   edx, edx
+    xor   eax, eax
+    call  ReadInodeLinear
+
+    // Find $DATA attribute (0x80) in $MFT record and save its run list
+    xor   ax, ax
+    mov   ebx, ATTRIBUTE_DATA
+    call  FindAttributeHdr
+    test  ax, ax
+    jz    PrintFileSystemError
+    mov   si, ax
+    add   si, word ptr es:[si + HEX(20)]   // SI = offset of data runs within ES segment
+    mov   word ptr [MFTDataRunsOff], si
+    mov   word ptr [MFTDataRunsSeg], es
+
     // Read Root Directory MFT into [2000:0]
     mov   ax, HEX(2000)
     mov   es, ax
@@ -367,20 +398,17 @@ StartSearch:
     pop   eax
     call  ReadInode
 
+    // Find $DATA attribute (0x80) to get file size and data runs
     xor   ax, ax
-    mov   ebx, HEX(30)
+    mov   ebx, HEX(80)
     call  FindAttributeHdr
+    test  ax, ax
+    jz    PrintFileSystemError
     mov   si, ax
-    // Move to the attribute data
-    add   si, word ptr es:[si + HEX(14)]
 
-    // We don't support compressed, sparse or encrypted Freeldr
-    test  dword ptr es:[si + HEX(38)], HEX(4a00)
-    jnz   CompressedFreeldr
-
-    // Compute size in clusters
+    // Read allocated size from $DATA non-resident attribute header (offset 0x28)
     mov   eax, dword ptr es:[si + HEX(28)]
-    mov   cl, byte ptr [SectsPerCluster]
+    movzx ecx, byte ptr [SectsPerCluster]
     xor   edx, edx
     div   ecx
     mov   cx, word ptr [BytesPerSector]
@@ -389,11 +417,12 @@ StartSearch:
     div   ecx
     mov   edx, eax
 
-    push  ax
+    push  dx
     mov   si, offset msgLoading
     call  PutChars
-    pop   ax
+    pop   dx
 
+    // Get data runs offset from the $DATA attribute
     xor   ax, ax
     mov   ebx, HEX(80)
     call  FindAttributeHdr
@@ -620,7 +649,40 @@ ReadCluster:
     pop   ecx
     ret
 
-// Reads a MFT entry
+// Reads a MFT entry using the simple linear calculation.
+// Only works for inodes in the first contiguous MFT run (e.g., record 0).
+// INPUT:
+//  - EDX:EAX      : MFT inode
+// OUTPUT:
+//  - ES:[BX] : address to read
+ReadInodeLinear:
+    push  ecx
+    push  si
+    push  di
+
+    push  edx
+    mov   cx, word ptr [SectsPerMFT]
+    movzx ecx, cx
+    mul   ecx
+    movzx eax, ax
+    add   eax, dword ptr [MFTStartSector]
+    mov   cx, word ptr [SectsPerMFT]
+    movzx ecx, cx
+    pop   edx
+    call  ReadSectors
+
+    cmp   dword ptr es:[bx], FILE_MAGIC
+    jnz   PrintFileSystemError
+
+    call  ApplyFixups
+
+    pop   di
+    pop   si
+    pop   ecx
+    ret
+
+// Reads a MFT entry by following $MFT's data runs.
+// Works for any inode number, including those in non-contiguous MFT runs.
 // INPUT:
 //  - EDX:EAX      : MFT inode
 // OUTPUT:
@@ -629,19 +691,66 @@ ReadInode:
     push  ecx
     push  si
     push  di
+    push  es
+    push  bx
 
-    push  edx
-    mov   cx, word ptr [SectsPerMFT]       // Get the correct number of sectors for the FILE entry
-    movzx ecx, cx
-    mul   ecx
-    movzx eax, ax
-    add   eax, dword ptr [MFTStartSector]  // Add it to the start of the MFT
+    // Compute VCN = (inode * record_size) / cluster_size
+    //             = inode * SectsPerMFT / SectsPerCluster
     mov   cx, word ptr [SectsPerMFT]
     movzx ecx, cx
-    pop   edx
-    call  ReadSectors
-    
-    cmp   dword ptr es:[bx], FILE_MAGIC // Ensure we get a valid FILE record
+    mul   ecx                              // EAX = inode * SectsPerMFT (sector offset in MFT)
+    movzx eax, ax                          // Truncate to 16 bits
+    xor   edx, edx
+    mov   cl, byte ptr [SectsPerCluster]
+    movzx ecx, cx
+    div   ecx                              // EAX = VCN, EDX = sector offset within cluster
+    push  dx                               // Save sector offset within cluster
+
+    // Read the MFT cluster containing our inode via data runs
+    mov   ecx, eax                         // ECX = VCN to read
+    push  es
+    mov   ax, word ptr [MFTDataRunsSeg]
+    mov   es, ax                           // ES = segment of MFT data runs
+    mov   ax, word ptr [MFTDataRunsOff]    // AX = offset of MFT data runs
+
+    // Use segment 0x3000 as temp buffer for the full cluster
+    push  HEX(3000)
+    pop   fs
+    xor   bx, bx
+    call  ReadNonResidentAttribute
+    pop   es
+    test  ax, ax
+    jz    PrintFileSystemError
+
+    // Now copy the correct MFT record from 0x3000:sector_offset to ES:BX
+    pop   dx                               // DX = sector offset within cluster
+    pop   bx                               // BX = original destination offset
+    pop   es                               // ES = original destination segment
+
+    push  ds
+    push  si
+    push  di
+
+    // Source: 0x3000:(sector_offset * BytesPerSector)
+    movzx si, dl
+    shl   si, 9                            // SI = sector_offset * 512
+    push  HEX(3000)
+    pop   ds                               // DS:SI = source
+
+    // Destination: ES:BX
+    mov   di, bx                           // ES:DI = destination
+
+    // Copy SectsPerMFT * 512 bytes = record_size
+    mov   cx, word ptr cs:[SectsPerMFT]
+    shl   cx, 8                            // CX = sectors * 256 (words to copy, since 512/2=256)
+    cld
+    rep   movsw
+
+    pop   di
+    pop   si
+    pop   ds
+
+    cmp   dword ptr es:[bx], FILE_MAGIC
     jnz   PrintFileSystemError
 
     call  ApplyFixups
