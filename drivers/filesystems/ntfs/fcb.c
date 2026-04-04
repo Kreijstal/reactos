@@ -109,8 +109,10 @@ NtfsCreateFCB(PCWSTR FileName,
     }
 
     ExInitializeResourceLite(&Fcb->MainResource);
+    ExInitializeResourceLite(&Fcb->PagingIoResource);
 
     Fcb->RFCB.Resource = &(Fcb->MainResource);
+    Fcb->RFCB.PagingIoResource = &(Fcb->PagingIoResource);
 
     return Fcb;
 }

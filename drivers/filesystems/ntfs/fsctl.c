@@ -50,7 +50,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
     PBOOT_SECTOR BootSector;
     NTSTATUS Status;
 
-    DPRINT("NtfsHasFileSystem() called\n");
+    DPRINT1("NtfsHasFileSystem() called for device %p\n", DeviceToMount);
 
     Size = sizeof(DISK_GEOMETRY);
     Status = NtfsDeviceIoControl(DeviceToMount,
@@ -90,7 +90,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
         }
     }
 
-    DPRINT1("BytesPerSector: %lu\n", DiskGeometry.BytesPerSector);
+    DPRINT("BytesPerSector: %lu\n", DiskGeometry.BytesPerSector);
     BootSector = ExAllocatePoolWithTag(NonPagedPool,
                                        DiskGeometry.BytesPerSector,
                                        TAG_NTFS);
@@ -163,6 +163,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 ByeBye:
     ExFreePool(BootSector);
 
+    DPRINT1("NtfsHasFileSystem: returning 0x%lx\n", Status);
     return Status;
 }
 
@@ -967,6 +968,7 @@ NtfsFileSystemControl(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
 
     DPRINT("NtfsFileSystemControl() called\n");
+    DPRINT1("NtfsFileSystemControl: MinorFunction=%d\n", IrpContext->MinorFunction);
 
     DeviceObject = IrpContext->DeviceObject;
     Irp = IrpContext->Irp;

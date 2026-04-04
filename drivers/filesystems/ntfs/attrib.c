@@ -1388,6 +1388,9 @@ FindFirstAttribute(PFIND_ATTR_CONTXT Context,
 {
     NTSTATUS Status;
 
+    DPRINT1("INSTRUMENT: FindFirstAttribute entering Vcb=%p FileRecord=%p OnlyResident=%d AttrOffset=%u\n",
+            Vcb, FileRecord, OnlyResident, FileRecord->AttributeOffset);
+
     DPRINT("FindFistAttribute(%p, %p, %p, %p, %u, %p)\n", Context, Vcb, FileRecord, OnlyResident, Attribute);
 
     Context->Vcb = Vcb;
@@ -1432,6 +1435,9 @@ FindNextAttribute(PFIND_ATTR_CONTXT Context,
                   PNTFS_ATTR_RECORD * Attribute)
 {
     NTSTATUS Status;
+
+    DPRINT1("INSTRUMENT: FindNextAttribute entering CurrAttr=%p Type=0x%x Offset=%u\n",
+            Context->CurrAttr, Context->CurrAttr ? Context->CurrAttr->Type : 0, Context->Offset);
 
     DPRINT("FindNextAttribute(%p, %p)\n", Context, Attribute);
 

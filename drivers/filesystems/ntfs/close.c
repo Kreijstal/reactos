@@ -98,18 +98,25 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_SUCCESS;
     }
 
-    FileObject = IrpContext->FileObject;
-    DeviceExtension = DeviceObject->DeviceExtension;
+    if (FileObject == NULL)
+    {
+        IrpContext->Irp->IoStatus.Information = 0;
+        return STATUS_SUCCESS;
+    }
 
+    DPRINT("NtfsClose(%p)\n", FileObject);
     if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        DPRINT1("INSTRUMENT: NtfsClose DirResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-
+    DPRINT1("INSTRUMENT: NtfsClose DirResource acquired\n");
     Status = NtfsCloseFile(DeviceExtension, FileObject);
+    DPRINT1("NtfsClose: NtfsCloseFile returned 0x%lx\n", Status);
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
+    DPRINT1("NtfsClose: DirResource released\n");
 
     if (Status == STATUS_PENDING)
     {

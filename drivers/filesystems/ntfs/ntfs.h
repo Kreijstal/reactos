@@ -708,6 +708,12 @@ FreeClusters(PNTFS_VCB Vcb,
 /* blockdev.c */
 
 NTSTATUS
+NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
+                   IN LONGLONG StartingOffset,
+                   IN ULONG Length,
+                   IN OUT PUCHAR Buffer);
+
+NTSTATUS
 NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
              IN LONGLONG StartingOffset,
              IN ULONG Length,

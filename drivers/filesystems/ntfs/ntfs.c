@@ -81,7 +81,7 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
 
     ExInitializeResourceLite(&NtfsGlobalData->Resource);
 
-    NtfsGlobalData->EnableWriteSupport = FALSE;
+    NtfsGlobalData->EnableWriteSupport = TRUE;
 
     // Read registry to determine if write support should be enabled
     InitializeObjectAttributes(&Attributes,

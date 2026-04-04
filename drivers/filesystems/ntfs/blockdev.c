@@ -33,6 +33,71 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/**
+ * @brief Read disk data through the volume cache manager.
+ *
+ * Uses CcMapData on the volume stream to avoid building synchronous IRPs.
+ * This prevents deadlocks when called from page fault or section flush
+ * contexts where kernel APCs are disabled.
+ *
+ * Falls back to NtfsReadDisk if the cache is not initialized.
+ */
+NTSTATUS
+NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
+                   IN LONGLONG StartingOffset,
+                   IN ULONG Length,
+                   IN OUT PUCHAR Buffer)
+{
+    PVOID BcbResult;
+    PVOID DataBuffer;
+    LARGE_INTEGER VolumeOffset;
+    BOOLEAN Mapped;
+
+    if (Vcb->StreamFileObject == NULL ||
+        Vcb->StreamFileObject->PrivateCacheMap == NULL ||
+        IoGetTopLevelIrp() != NULL)
+    {
+        return NtfsReadDisk(Vcb->StorageDevice,
+                            StartingOffset,
+                            Length,
+                            Vcb->NtfsInfo.BytesPerSector,
+                            Buffer,
+                            FALSE);
+    }
+
+    VolumeOffset.QuadPart = StartingOffset;
+
+    _SEH2_TRY
+    {
+        Mapped = CcMapData(Vcb->StreamFileObject,
+                           &VolumeOffset,
+                           Length,
+                           MAP_WAIT,
+                           &BcbResult,
+                           &DataBuffer);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Mapped = FALSE;
+    }
+    _SEH2_END;
+
+    if (!Mapped)
+    {
+        return NtfsReadDisk(Vcb->StorageDevice,
+                            StartingOffset,
+                            Length,
+                            Vcb->NtfsInfo.BytesPerSector,
+                            Buffer,
+                            FALSE);
+    }
+
+    RtlCopyMemory(Buffer, DataBuffer, Length);
+    CcUnpinData(BcbResult);
+
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
              IN LONGLONG StartingOffset,
