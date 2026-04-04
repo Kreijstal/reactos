@@ -3094,6 +3094,8 @@ typedef struct _COPYCONTEXT
 {
     ULONG TotalOperations;
     ULONG CompletedOperations;
+    ULONG OverallTotal;
+    ULONG OverallCompleted;
     PPROGRESSBAR ProgressBar;
     PPROGRESSBAR MemoryBars[4];
 } COPYCONTEXT, *PCOPYCONTEXT;
@@ -3142,6 +3144,7 @@ FileCopyCallback(PVOID Context,
         {
             CopyContext->TotalOperations = (ULONG)Param2;
             CopyContext->CompletedOperations = 0;
+            CopyContext->OverallTotal += (ULONG)Param2;
             ProgressSetStepCount(CopyContext->ProgressBar,
                                  CopyContext->TotalOperations);
             SetupUpdateMemoryInfo(CopyContext, TRUE);
@@ -3201,6 +3204,7 @@ FileCopyCallback(PVOID Context,
 
                 if (!s_pszCopying)
                     s_pszCopying = MUIGetString(STRING_COPYING);
+                DPRINT1("COPY_FILE:%S\n", DstFileName);
                 CONSOLE_SetStatusText(s_pszCopying, DstFileName);
 #ifdef __REACTOS__ /* HACK */
                 DoWatchDestFileName(DstFileName);
@@ -3225,10 +3229,22 @@ FileCopyCallback(PVOID Context,
         case SPFILENOTIFY_ENDCOPY:
         {
             CopyContext->CompletedOperations++;
+            CopyContext->OverallCompleted++;
 
             /* SYSREG checkpoint */
             if (CopyContext->TotalOperations >> 1 == CopyContext->CompletedOperations)
                 DPRINT1("CHECKPOINT:HALF_COPIED\n");
+
+            /* Emit overall progress to serial */
+            {
+                static ULONG LastProgress = (ULONG)-1;
+                ULONG Progress = (100 * CopyContext->OverallCompleted + (CopyContext->OverallTotal / 2)) / CopyContext->OverallTotal;
+                if (Progress != LastProgress)
+                {
+                    LastProgress = Progress;
+                    DPRINT1("PROGRESS:%lu%%\n", Progress);
+                }
+            }
 
             ProgressNextStep(CopyContext->ProgressBar);
             SetupUpdateMemoryInfo(CopyContext, FALSE);
@@ -3263,6 +3279,8 @@ FileCopyPage(PINPUT_RECORD Ir)
     /* Create context for the copy process */
     CopyContext.TotalOperations = 0;
     CopyContext.CompletedOperations = 0;
+    CopyContext.OverallTotal = 0;
+    CopyContext.OverallCompleted = 0;
 
     /* Create the progress bar as well */
     CopyContext.ProgressBar = CreateProgressBar(13,
@@ -3307,6 +3325,31 @@ FileCopyPage(PINPUT_RECORD Ir)
                                                   44,
                                                   FALSE,
                                                   "Free Memory");
+
+    /*
+     * Pre-copy bootloader files to the system partition BEFORE the main file
+     * copy. On NTFS, MFT records are allocated sequentially; copying freeldr.sys
+     * first ensures it gets a low MFT record number that the VBR boot code can
+     * reach even if the MFT is non-contiguous.
+     */
+    {
+        WCHAR SrcPath[MAX_PATH];
+        WCHAR DstPath[MAX_PATH];
+        WCHAR SysPath[MAX_PATH];
+
+        RtlStringCchPrintfW(SysPath, ARRAYSIZE(SysPath),
+                            L"%s\\", SystemPartition->DeviceName);
+
+        CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2,
+                     USetupData.SourceRootPath.Buffer, L"\\loader\\freeldr.sys");
+        CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SysPath, L"freeldr.sys");
+        SetupCopyFile(SrcPath, DstPath, FALSE);
+
+        CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2,
+                     USetupData.SourceRootPath.Buffer, L"\\loader\\rosload.exe");
+        CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SysPath, L"rosload.exe");
+        SetupCopyFile(SrcPath, DstPath, FALSE);
+    }
 
     /* Do the file copying */
     DoFileCopy(&USetupData, FileCopyCallback, &CopyContext);
