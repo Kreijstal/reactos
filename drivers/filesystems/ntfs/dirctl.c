@@ -404,9 +404,18 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_NOT_IMPLEMENTED;
     }
 
+    /* Acquire DirResource first to maintain consistent lock ordering
+       with NtfsCreate (DirResource -> MainResource). */
+    if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
+                                        BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
+    {
+        return STATUS_PENDING;
+    }
+
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        ExReleaseResourceLite(&DeviceExtension->DirResource);
         return STATUS_PENDING;
     }
 
@@ -461,13 +470,6 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     Buffer = NtfsGetUserBuffer(Irp, FALSE);
 
     DPRINT("Buffer=%p tofind=%S\n", Buffer, Ccb->DirectorySearchPattern);
-
-    if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
-                                        BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
-    {
-        ExReleaseResourceLite(&Fcb->MainResource);
-        return STATUS_PENDING;
-    }
 
     Written = 0;
     while (Status == STATUS_SUCCESS && BufferLength > 0)
@@ -579,8 +581,8 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         IrpContext->Irp->IoStatus.Information = Written;
     }
 
-    ExReleaseResourceLite(&DeviceExtension->DirResource);
     ExReleaseResourceLite(&Fcb->MainResource);
+    ExReleaseResourceLite(&DeviceExtension->DirResource);
 
     return Status;
 }

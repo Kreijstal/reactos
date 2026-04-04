@@ -441,11 +441,14 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
     BufferLength = Stack->Parameters.QueryFile.Length;
 
+    DPRINT("INSTRUMENT: NtfsQueryInformation acquiring MainResource shared...\n");
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        DPRINT("INSTRUMENT: NtfsQueryInformation MainResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
+    DPRINT("INSTRUMENT: NtfsQueryInformation MainResource acquired\n");
 
     switch (FileInformationClass)
     {
@@ -650,7 +653,9 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     }
 
     // set the attribute data length
+    DPRINT("NtfsSetEndOfFile: calling SetAttributeDataLength for MFT %I64u size %I64u\n", Fcb->MFTIndex, NewFileSize->QuadPart);
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, NewFileSize);
+    DPRINT("NtfsSetEndOfFile: SetAttributeDataLength returned 0x%lx\n", Status);
     if (!NT_SUCCESS(Status))
     {
         ReleaseAttributeContext(DataContext);
@@ -660,6 +665,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     // now we need to update this file's size in every directory index entry that references it
     // TODO: expand to work with every filename / hardlink stored in the file record.
+    DPRINT("NtfsSetEndOfFile: calling GetBestFileNameFromRecord\n");
     FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
     if (FileNameAttribute == NULL)
     {
@@ -677,6 +683,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     AllocationSize = AttributeAllocatedLength(DataContext->pRecord);
 
+    DPRINT("NtfsSetEndOfFile: calling UpdateFileNameRecord parent=%I64u allocSize=%I64u\n", ParentMFTId, AllocationSize);
     Status = UpdateFileNameRecord(Fcb->Vcb,
                                   ParentMFTId,
                                   &FileName,
@@ -684,10 +691,82 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                                   NewFileSize->QuadPart,
                                   AllocationSize,
                                   CaseSensitive);
+    DPRINT("NtfsSetEndOfFile: UpdateFileNameRecord returned 0x%lx\n", Status);
 
     ReleaseAttributeContext(DataContext);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
+    DPRINT("NtfsSetEndOfFile: returning 0x%lx\n", Status);
+    return Status;
+}
+
+/**
+* @name NtfsSetBasicInformation
+* @implemented
+*
+* Sets the basic file information (timestamps and attributes) for a file.
+*/
+static
+NTSTATUS
+NtfsSetBasicInformation(PNTFS_FCB Fcb,
+                        PDEVICE_EXTENSION DeviceExt,
+                        PFILE_BASIC_INFORMATION BasicInfo)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PSTANDARD_INFORMATION StdInfo;
+    NTSTATUS Status;
+
+    DPRINT1("NtfsSetBasicInformation: FCB %p MFT %I64u\n", Fcb, Fcb->MFTIndex);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
+    if (StdInfo == NULL)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    /* Only update fields that the caller provided (non-zero means set) */
+    if (BasicInfo->CreationTime.QuadPart != 0)
+    {
+        StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
+        Fcb->Entry.CreationTime = BasicInfo->CreationTime.QuadPart;
+    }
+    if (BasicInfo->LastAccessTime.QuadPart != 0)
+    {
+        StdInfo->LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+        Fcb->Entry.LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+    }
+    if (BasicInfo->LastWriteTime.QuadPart != 0)
+    {
+        StdInfo->LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+        Fcb->Entry.LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+    }
+    if (BasicInfo->ChangeTime.QuadPart != 0)
+    {
+        StdInfo->ChangeTime = BasicInfo->ChangeTime.QuadPart;
+        Fcb->Entry.ChangeTime = BasicInfo->ChangeTime.QuadPart;
+    }
+    if (BasicInfo->FileAttributes != 0)
+    {
+        StdInfo->FileAttribute = (StdInfo->FileAttribute & ~0x3FB7) |
+                                 (BasicInfo->FileAttributes & 0x3FB7);
+    }
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    DPRINT1("NtfsSetBasicInformation: UpdateFileRecord returned 0x%lx\n", Status);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
     return Status;
 }
 
@@ -739,18 +818,29 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     FileObject = IrpContext->FileObject;
     Fcb = FileObject->FsContext;
 
+    DPRINT1("NtfsSetInformation: class=%d FCB=%p\n", (int)FileInformationClass, Fcb);
+    DPRINT("INSTRUMENT: NtfsSetInformation acquiring MainResource exclusive...\n");
+
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
     BufferLength = Stack->Parameters.QueryFile.Length;
 
-    if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
+    if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        DPRINT("INSTRUMENT: NtfsSetInformation MainResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
+    DPRINT("INSTRUMENT: NtfsSetInformation MainResource acquired\n");
 
     switch (FileInformationClass)
     {
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
+
+        case FileBasicInformation:
+            Status = NtfsSetBasicInformation(Fcb,
+                                             DeviceExt,
+                                             (PFILE_BASIC_INFORMATION)SystemBuffer);
+            break;
 
         /* TODO: Allocation size is not actually the same as file end for NTFS,
            however, few applications are likely to make the distinction. */
@@ -773,7 +863,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = STATUS_NOT_IMPLEMENTED;
     }
 
+    DPRINT1("NtfsSetInformation: releasing MainResource for FCB %p\n", Fcb);
     ExReleaseResourceLite(&Fcb->MainResource);
+    DPRINT1("NtfsSetInformation: MainResource released, Status=0x%lx\n", Status);
 
     if (NT_SUCCESS(Status))
         Irp->IoStatus.Information =
@@ -781,6 +873,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     else
         Irp->IoStatus.Information = 0;
 
+    DPRINT1("NtfsSetInformation: returning 0x%lx\n", Status);
     return Status;
 }
 /* EOF */
