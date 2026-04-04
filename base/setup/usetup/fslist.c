@@ -209,6 +209,7 @@ DrawFileSystemList(
             CONSOLE_SetInvertedTextXY(List->Left,
                                       List->Top + (SHORT)Index,
                                       Buffer);
+            DPRINT1("SETUP_SELECTED:%s\n", Buffer);
         }
         else
         {
