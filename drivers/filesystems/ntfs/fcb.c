@@ -109,8 +109,10 @@ NtfsCreateFCB(PCWSTR FileName,
     }
 
     ExInitializeResourceLite(&Fcb->MainResource);
+    ExInitializeResourceLite(&Fcb->PagingIoResource);
 
     Fcb->RFCB.Resource = &(Fcb->MainResource);
+    Fcb->RFCB.PagingIoResource = &(Fcb->PagingIoResource);
 
     return Fcb;
 }
@@ -122,6 +124,28 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb);
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
+    /* Do not free the FCB while the memory manager still has section objects
+     * referencing its embedded SectionObjectPointers.  If we free the FCB,
+     * the MM segment's Segment->FileObject->SectionObjectPointer becomes a
+     * dangling pointer into freed pool memory, causing assertion failures
+     * (DataSectionObject != Segment) or BSODs when the segment is cleaned up.
+     *
+     * In a full implementation, the FCB would be ref-counted against section
+     * references and only destroyed after the last section is gone.  For now,
+     * simply leak the FCB if sections are still active — this prevents the
+     * crash at the cost of a small memory leak during install. */
+    if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
+        Fcb->SectionObjectPointers.ImageSectionObject != NULL ||
+        Fcb->SectionObjectPointers.SharedCacheMap != NULL)
+    {
+        DPRINT1("NtfsDestroyFCB(%p): SectionObjectPointers still active (Data=%p Image=%p Cache=%p), deferring destroy\n",
+                Fcb, Fcb->SectionObjectPointers.DataSectionObject,
+                Fcb->SectionObjectPointers.ImageSectionObject,
+                Fcb->SectionObjectPointers.SharedCacheMap);
+        return;
+    }
+
+    ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
 
     ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
@@ -191,17 +215,83 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->RefCount--;
-    if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
+
+    /* When the last external reference is released but the internal stream
+     * file object still holds a cache map, tear down the cache and release
+     * that file object.  This lets the memory manager fully clean up any
+     * data section segments before the FCB (and its embedded
+     * SectionObjectPointers) is freed.  Mirrors the two-step pattern used
+     * by vfatfs. */
+    if (Fcb->RefCount == 1 &&
+        !NtfsFCBIsDirectory(Fcb) &&
+        BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED) &&
+        Fcb->FileObject != NULL)
     {
+        PFILE_OBJECT tmpFileObject = Fcb->FileObject;
+        Fcb->FileObject = NULL;
+        ClearFlag(Fcb->Flags, FCB_CACHE_INITIALIZED);
+        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+
+        /* Flush and purge all dirty data BEFORE uninitializing the cache map.
+         * CcUninitializeCacheMap can drop the last reference on the data section
+         * segment, triggering MmDereferenceSegmentWithLock → FreeSegmentPage.
+         * If dirty pages remain at that point, FreeSegmentPage calls MiWritePage
+         * which does synchronous I/O that can re-enter the page-out path under
+         * memory pressure, corrupting pool.  Flushing here writes dirty pages
+         * under controlled conditions (proper IRQL, no re-entrancy risk). */
+        if (tmpFileObject->SectionObjectPointer)
+        {
+            if (tmpFileObject->SectionObjectPointer->SharedCacheMap)
+            {
+                IO_STATUS_BLOCK Iosb;
+                CcFlushCache(tmpFileObject->SectionObjectPointer, NULL, 0, &Iosb);
+            }
+            CcPurgeCacheSection(tmpFileObject->SectionObjectPointer, NULL, 0, FALSE);
+        }
+
+        CcUninitializeCacheMap(tmpFileObject, NULL, NULL);
+        /* Do NOT ObDereferenceObject(tmpFileObject) here.
+         * NtfsAttachFCBToFileObject already dropped its reference (line 395).
+         * The remaining references belong to the cache manager and the MM
+         * section segment — they will be released by CcUninitializeCacheMap
+         * and MmDereferenceSegmentWithLock respectively. An extra deref here
+         * causes a use-after-free: the FileObject is freed while the MM
+         * segment still holds a pointer to it. */
+    }
+    else if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
+    {
+        PFILE_OBJECT tmpFileObject = NULL;
+
+        /* If cache is still initialized, tear it down before freeing the FCB.
+         * This can happen if the RefCount == 1 check above was skipped because
+         * FileObject was NULL (stale stream file object), or if RefCount
+         * went from >1 to 0 in one step. */
+        if (BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED) &&
+            Fcb->FileObject != NULL)
+        {
+            tmpFileObject = Fcb->FileObject;
+            Fcb->FileObject = NULL;
+            ClearFlag(Fcb->Flags, FCB_CACHE_INITIALIZED);
+        }
+
         RemoveEntryList(&Fcb->FcbListEntry);
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-        CcUninitializeCacheMap(Fcb->FileObject, NULL, NULL);
+
+        if (tmpFileObject)
+        {
+            CcUninitializeCacheMap(tmpFileObject, NULL, NULL);
+            /* Same as above: do not ObDereferenceObject here. */
+        }
+
         NtfsDestroyFCB(Fcb);
     }
     else
     {
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
     }
+
+    /* Debug: verify IRQL is restored after FCB release */
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 }
 
 
@@ -321,6 +411,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER MftRecord;
     PFILENAME_ATTRIBUTE FileName;
+    PSTANDARD_INFORMATION StdInfo;
 
     MftRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (MftRecord == NULL)
@@ -359,6 +450,12 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     Fcb->RFCB.AllocationSize.QuadPart = FileName->AllocatedSize;
     Fcb->MFTIndex = NTFS_FILE_ROOT;
     Fcb->LinkCount = MftRecord->LinkCount;
+
+    StdInfo = GetStandardInformationFromRecord(Vcb, MftRecord);
+    if (StdInfo != NULL)
+    {
+        Fcb->Entry.FileAttributes |= StdInfo->FileAttribute;
+    }
 
     NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);
@@ -696,6 +793,11 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
             DPRINT("  elementName:%S\n", elementName);
 
             Status = NtfsDirFindFile(Vcb, parentFCB, elementName, CaseSensitive, &FCB);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("NtfsDirFindFile('%S' in MFT %I64u '%S') failed: 0x%lx\n",
+                        elementName, parentFCB->MFTIndex, parentFCB->ObjectName, Status);
+            }
             if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
             {
                 *pParentFCB = parentFCB;
