@@ -52,7 +52,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     BOOLEAN AllocatedBuffer = FALSE;
     PUCHAR ReadBuffer = Buffer;
 
-    DPRINT("NtfsReadDisk(%p, %I64x, %lu, %lu, %p, %d)\n", DeviceObject, StartingOffset, Length, SectorSize, Buffer, Override);
+    DPRINT("NtfsReadDisk: offset=%I64d len=%lu\n", StartingOffset, Length);
 
     KeInitializeEvent(&Event,
                       NotificationEvent,
@@ -77,7 +77,6 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
 
     Offset.QuadPart = RealReadOffset;
 
-    DPRINT("Building synchronous FSD Request...\n");
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_READ,
                                        DeviceObject,
                                        ReadBuffer,
@@ -87,7 +86,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
                                        &IoStatus);
     if (Irp == NULL)
     {
-        DPRINT("IoBuildSynchronousFsdRequest failed\n");
+        DPRINT1("IoBuildSynchronousFsdRequest failed\n");
 
         if (AllocatedBuffer)
         {
@@ -97,21 +96,31 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    /*
+     * NtfsReadDisk can be called from a page fault handler where kernel APCs
+     * are disabled. IoBuildSynchronousFsdRequest creates an IRP with Flags=0,
+     * so IofCompleteRequest uses APC-based completion. With APCs disabled the
+     * completion APC never fires and KeWaitForSingleObject deadlocks.
+     *
+     * Setting paging IO flags makes IofCompleteRequest signal UserEvent
+     * directly instead of queuing an APC. We must also remove the IRP from
+     * the thread's IRP list first, because the paging IO completion path
+     * calls IoFreeIrp which asserts ThreadListEntry is empty.
+     */
+    RemoveEntryList(&Irp->ThreadListEntry);
+    InitializeListHead(&Irp->ThreadListEntry);
+    Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+
     if (Override)
     {
         Stack = IoGetNextIrpStackLocation(Irp);
         Stack->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
     }
 
-    DPRINT("Calling IO Driver... with irp %p\n", Irp);
     Status = IoCallDriver(DeviceObject, Irp);
-
-    DPRINT("Waiting for IO Operation for %p\n", Irp);
     if (Status == STATUS_PENDING)
     {
-        DPRINT("Operation pending\n");
         KeWaitForSingleObject(&Event, Suspended, KernelMode, FALSE, NULL);
-        DPRINT("Getting IO Status... for %p\n", Irp);
         Status = IoStatus.Status;
     }
 
@@ -176,7 +185,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
     BOOLEAN AllocatedBuffer = FALSE;
     PUCHAR TempBuffer = NULL;
 
-    DPRINT("NtfsWriteDisk(%p, %I64x, %lu, %lu, %p)\n", DeviceObject, StartingOffset, Length, SectorSize, Buffer);
+    DPRINT("NtfsWriteDisk: offset=%I64d len=%lu\n", StartingOffset, Length);
 
     if (Length == 0)
         return STATUS_SUCCESS;
@@ -251,8 +260,6 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
                       NotificationEvent,
                       FALSE);
 
-    DPRINT("Building synchronous FSD Request...\n");
-
     // Build an IRP requesting the lower-level [disk] driver to perform the write
     // TODO: Forward the existing IRP instead
     Irp = IoBuildSynchronousFsdRequest(IRP_MJ_WRITE,
@@ -277,17 +284,15 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // Call the next-lower driver to perform the write
-    DPRINT("Calling IO Driver with irp %p\n", Irp);
-    Status = IoCallDriver(DeviceObject, Irp);
+    /* See comment in NtfsReadDisk — avoid APC-based completion deadlock */
+    RemoveEntryList(&Irp->ThreadListEntry);
+    InitializeListHead(&Irp->ThreadListEntry);
+    Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
 
-    // Wait until the next-lower driver has completed the IRP
-    DPRINT("Waiting for IO Operation for %p\n", Irp);
+    Status = IoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)
     {
-        DPRINT("Operation pending\n");
         KeWaitForSingleObject(&Event, Suspended, KernelMode, FALSE, NULL);
-        DPRINT("Getting IO Status... for %p\n", Irp);
         Status = IoStatus.Status;
     }
 
