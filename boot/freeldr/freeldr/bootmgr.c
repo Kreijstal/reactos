@@ -395,62 +395,52 @@ VOID RunLoader(VOID)
 #ifndef UEFIBOOT
     /* Load additional SCSI driver (if any) */
     if (LoadBootDeviceDriver() != ESUCCESS)
-    {
         UiMessageBoxCritical("Unable to load additional boot device drivers.");
-    }
 #endif
 #endif
 
     /* Open FREELDR.INI and load the global FreeLoader settings */
     if (!IniFileInitialize())
-    {
         UiMessageBoxCritical("Error initializing .ini file.");
-        return;
-    }
     LoadSettings(NULL);
 #if 0
     if (FALSE)
-    {
         UiMessageBoxCritical("Could not load global FreeLoader settings.");
-        return;
-    }
 #endif
 
     /* Debugger main initialization */
     DebugInit(GetBootMgrInfo()->DebugString);
 
-    /* UI main initialization */
+    /* UI main initialization. If it fails, fall back to default UI. */
     if (!UiInitialize(TRUE))
-    {
         UiMessageBoxCritical("Unable to initialize UI.");
-        return;
-    }
 
+    /* If no FREELDR.INI, skip everything else and fall back to the FreeLdr setup menu */
+    if (IsListEmpty(IniGetFileSectionListHead()))
+        goto Fallback;
+
+    /* Find all the message box settings and run them */
+    UiShowMessageBoxesInSection(GetBootMgrInfo()->FrLdrSection);
+
+    /* Retrieve the list of boot entries */
     OperatingSystemList = InitOperatingSystemList(&OperatingSystemCount,
                                                   &SelectedOperatingSystem);
     if (!OperatingSystemList)
     {
-        UiMessageBox("Unable to read operating systems section in freeldr.ini.\nPress ENTER to reboot.");
-        goto Reboot;
+        UiMessageBox("There are no operating systems listed in freeldr.ini.");
+        goto Fallback;
     }
-    if (OperatingSystemCount == 0)
-    {
-        UiMessageBox("There were no operating systems listed in freeldr.ini.\nPress ENTER to reboot.");
-        goto Reboot;
-    }
+    ASSERT(OperatingSystemCount != 0);
 
     /* Create list of display names */
     OperatingSystemDisplayNames = FrLdrTempAlloc(sizeof(PCSTR) * OperatingSystemCount, 'mNSO');
     if (!OperatingSystemDisplayNames)
-        goto Reboot;
+        goto Fallback;
 
     for (i = 0; i < OperatingSystemCount; i++)
     {
         OperatingSystemDisplayNames[i] = OperatingSystemList[i].LoadIdentifier;
     }
-
-    /* Find all the message box settings and run them */
-    UiShowMessageBoxesInSection(GetBootMgrInfo()->FrLdrSection);
 
     for (;;)
     {
@@ -488,6 +478,11 @@ VOID RunLoader(VOID)
 #endif
         UiInitialize(TRUE);
     }
+
+Fallback:
+    /* Fall back to the FreeLdr setup menu */
+    FreeLdrSetupMenu(NULL);
+    UiMessageBox("The system will now reboot.");
 
 Reboot:
     UiUnInitialize("Rebooting...");

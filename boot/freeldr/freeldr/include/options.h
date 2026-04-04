@@ -9,7 +9,7 @@
 
 VOID
 FreeLdrSetupMenu(
-    _In_ OperatingSystemItem* OperatingSystem);
+    _In_opt_ OperatingSystemItem* OperatingSystem);
 
 VOID
 DisplayBootTimeOptions(

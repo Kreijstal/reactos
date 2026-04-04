@@ -51,7 +51,7 @@ static PCSTR FrldrDbgMsg =
 
 VOID
 FreeLdrSetupMenu(
-    _In_ OperatingSystemItem* OperatingSystem)
+    _In_opt_ OperatingSystemItem* OperatingSystem)
 {
     ULONG SelectedMenuItem = 0;
 
@@ -60,7 +60,7 @@ doMenu:
     UiDrawBackdrop(UiGetScreenHeight());
 
     if (!UiDisplayMenu(VERSION " Setup and Configuration",
-                       NULL,
+                       OperatingSystem ? NULL : "Press ESC to reboot.",
                        OptionsMenuList,
                        RTL_NUMBER_OF(OptionsMenuList),
                        SelectedMenuItem, -1,
@@ -90,7 +90,8 @@ doMenu:
         //     break;
 #ifdef HAS_OPTION_MENU_EDIT_CMDLINE
         case 2: // Edit command line
-            EditOperatingSystemEntry(OperatingSystem);
+            if (OperatingSystem)
+                EditOperatingSystemEntry(OperatingSystem);
             break;
 #endif
 #ifdef HAS_OPTION_MENU_CUSTOM_BOOT
