@@ -39,10 +39,18 @@ NTAPI
 NtfsAcqLazyWrite(PVOID Context,
                  BOOLEAN Wait)
 {
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Wait);
-    UNIMPLEMENTED;
-    return FALSE;
+    PNTFS_FCB Fcb = (PNTFS_FCB)Context;
+
+    DPRINT("NtfsAcqLazyWrite(%p, %u)\n", Context, Wait);
+
+    if (!ExAcquireResourceSharedLite(&Fcb->PagingIoResource, Wait))
+    {
+        return FALSE;
+    }
+
+    IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
+
+    return TRUE;
 }
 
 
@@ -50,8 +58,13 @@ VOID
 NTAPI
 NtfsRelLazyWrite(PVOID Context)
 {
-    UNREFERENCED_PARAMETER(Context);
-    UNIMPLEMENTED;
+    PNTFS_FCB Fcb = (PNTFS_FCB)Context;
+
+    DPRINT("NtfsRelLazyWrite(%p)\n", Context);
+
+    IoSetTopLevelIrp(NULL);
+
+    ExReleaseResourceLite(&Fcb->PagingIoResource);
 }
 
 
@@ -60,10 +73,18 @@ NTAPI
 NtfsAcqReadAhead(PVOID Context,
                  BOOLEAN Wait)
 {
-    UNREFERENCED_PARAMETER(Context);
-    UNREFERENCED_PARAMETER(Wait);
-    UNIMPLEMENTED;
-    return FALSE;
+    PNTFS_FCB Fcb = (PNTFS_FCB)Context;
+
+    DPRINT("NtfsAcqReadAhead(%p, %u)\n", Context, Wait);
+
+    if (!ExAcquireResourceSharedLite(&Fcb->MainResource, Wait))
+    {
+        return FALSE;
+    }
+
+    IoSetTopLevelIrp((PIRP)FSRTL_CACHE_TOP_LEVEL_IRP);
+
+    return TRUE;
 }
 
 
@@ -71,8 +92,13 @@ VOID
 NTAPI
 NtfsRelReadAhead(PVOID Context)
 {
-    UNREFERENCED_PARAMETER(Context);
-    UNIMPLEMENTED;
+    PNTFS_FCB Fcb = (PNTFS_FCB)Context;
+
+    DPRINT("NtfsRelReadAhead(%p)\n", Context);
+
+    IoSetTopLevelIrp(NULL);
+
+    ExReleaseResourceLite(&Fcb->MainResource);
 }
 
 BOOLEAN

@@ -268,7 +268,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
         FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_ARCHIVE;
 
     // we need to extract the filename from the path
-    DPRINT1("Pathname: %wZ\n", &FileObject->FileName);
+    DPRINT("Pathname: %wZ\n", &FileObject->FileName);
 
     FsRtlDissectName(FileObject->FileName, &Current, &Remaining);
 
@@ -277,7 +277,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
 
     while (Current.Length != 0)
     {
-        DPRINT1("Current: %wZ\n", &Current);
+        DPRINT("Current: %wZ\n", &Current);
 
         if (Remaining.Length != 0)
         {
@@ -644,7 +644,7 @@ AddRun(PNTFS_VCB Vcb,
     }
 
     // Convert the map control block back to encoded data runs
-    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerCluster, &RunBufferSize);
+    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
 
     // Get the amount of free space between the start of the of the first data run and the attribute end
     DataRunMaxLength = AttrContext->pRecord->Length - AttrContext->pRecord->NonResident.MappingPairsOffset;
@@ -670,10 +670,25 @@ AddRun(PNTFS_VCB Vcb,
         if (NextAttribute->Type != AttributeEnd)
         {
             PNTFS_ATTR_RECORD FinalAttribute;
+            ULONG TrailingBytes;
 
             // Calculate where to move the trailing attributes
             ULONG_PTR MoveTo = (ULONG_PTR)DestinationAttribute + AttrContext->pRecord->NonResident.MappingPairsOffset + RunBufferSize;
             MoveTo = ALIGN_UP_BY(MoveTo, ATTR_RECORD_ALIGNMENT);
+
+            // Calculate total size of trailing attributes (including end marker)
+            TrailingBytes = FileRecord->BytesInUse - NextAttributeOffset;
+
+            // Verify the move won't overflow the file record buffer
+            if (MoveTo + TrailingBytes > (ULONG_PTR)FileRecord + Vcb->NtfsInfo.BytesPerFileRecord)
+            {
+                DPRINT1("FIXME: Not enough space in file record for data runs + trailing attributes! "
+                        "MoveTo=0x%Ix TrailingBytes=%lu RecordEnd=0x%Ix\n",
+                        MoveTo, TrailingBytes,
+                        (ULONG_PTR)FileRecord + Vcb->NtfsInfo.BytesPerFileRecord);
+                ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+                return STATUS_NOT_IMPLEMENTED;
+            }
 
             DPRINT1("Moving attribute(s) after this one starting with type 0x%lx\n", NextAttribute->Type);
 
@@ -1173,7 +1188,7 @@ FreeClusters(PNTFS_VCB Vcb,
     }
 
     // Convert the map control block back to encoded data runs
-    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerCluster, &RunBufferSize);
+    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
 
     // Update HighestVCN
     DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;
@@ -1388,6 +1403,9 @@ FindFirstAttribute(PFIND_ATTR_CONTXT Context,
 {
     NTSTATUS Status;
 
+    DPRINT("INSTRUMENT: FindFirstAttribute entering Vcb=%p FileRecord=%p OnlyResident=%d AttrOffset=%u\n",
+            Vcb, FileRecord, OnlyResident, FileRecord->AttributeOffset);
+
     DPRINT("FindFistAttribute(%p, %p, %p, %p, %u, %p)\n", Context, Vcb, FileRecord, OnlyResident, Attribute);
 
     Context->Vcb = Vcb;
@@ -1432,6 +1450,9 @@ FindNextAttribute(PFIND_ATTR_CONTXT Context,
                   PNTFS_ATTR_RECORD * Attribute)
 {
     NTSTATUS Status;
+
+    DPRINT("INSTRUMENT: FindNextAttribute entering CurrAttr=%p Type=0x%x Offset=%u\n",
+            Context->CurrAttr, Context->CurrAttr ? Context->CurrAttr->Type : 0, Context->Offset);
 
     DPRINT("FindNextAttribute(%p, %p)\n", Context, Attribute);
 

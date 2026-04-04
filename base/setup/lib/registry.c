@@ -576,13 +576,18 @@ typedef struct _HIVE_LIST_ENTRY
     // ULONG  SecurityDescriptorLength;
 } HIVE_LIST_ENTRY, *PHIVE_LIST_ENTRY;
 
-#define NUMBER_OF_STANDARD_REGISTRY_HIVES   3
+#define NUMBER_OF_STANDARD_REGISTRY_HIVES   5
 
 HIVE_LIST_ENTRY RegistryHives[/*NUMBER_OF_STANDARD_REGISTRY_HIVES*/] =
 {
     { L"SYSTEM"  , L"\\Registry\\Machine\\USetup_SYSTEM"  , HKEY_LOCAL_MACHINE, L"SYSTEM"  , Create /* , SystemSecurity  , sizeof(SystemSecurity)   */ },
     { L"SOFTWARE", L"\\Registry\\Machine\\USetup_SOFTWARE", HKEY_LOCAL_MACHINE, L"SOFTWARE", Create /* , SoftwareSecurity, sizeof(SoftwareSecurity) */ },
     { L"DEFAULT" , L"\\Registry\\User\\USetup_DEFAULT"    , HKEY_USERS        , L".DEFAULT", Create /* , SystemSecurity  , sizeof(SystemSecurity)   */ },
+    /* SAM and SECURITY are normally created by LSASS during 2nd stage setup,
+     * but the kernel requires them to exist at boot time. Create empty hives
+     * during 1st stage so that the 2nd stage boot can proceed. */
+    { L"SAM"     , L"\\Registry\\Machine\\USetup_SAM"     , HKEY_LOCAL_MACHINE, L"SAM"     , Create /* , SystemSecurity  , sizeof(SystemSecurity)   */ },
+    { L"SECURITY", L"\\Registry\\Machine\\USetup_SECURITY", HKEY_LOCAL_MACHINE, L"SECURITY", Create /* , NULL            , 0                        */ },
 
 //  { L"BCD"     , L"\\Registry\\Machine\\USetup_BCD", HKEY_LOCAL_MACHINE, L"BCD00000000", Create /* , BcdSecurity     , sizeof(BcdSecurity)      */ },
 };
@@ -1120,6 +1125,22 @@ RegCleanupRegistry(
             DPRINT1("SetupCopyFile() failed (Status %lx)\n", Status);
             // return Status;
         }
+    }
+
+    /*
+     * Create the SYSTEM.ALT hive — a copy of the SYSTEM hive used by
+     * FreeLDR as a fallback if the primary SYSTEM hive appears corrupt.
+     * Windows NT also creates this during setup.
+     */
+    CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 3,
+                 NtSystemRoot->Buffer, L"System32\\config", L"SYSTEM");
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 3,
+                 NtSystemRoot->Buffer, L"System32\\config", L"SYSTEM.ALT");
+    DPRINT1("Copy hive: %S ==> %S\n", SrcPath, DstPath);
+    Status = SetupCopyFile(SrcPath, DstPath, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SetupCopyFile() for SYSTEM.ALT failed (Status %lx)\n", Status);
     }
 
     /* Remove restore and backup privileges */

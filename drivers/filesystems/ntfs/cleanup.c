@@ -63,14 +63,31 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     }
     else
     {
+        DPRINT("INSTRUMENT: NtfsCleanupFile acquiring MainResource exclusive...\n");
         if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, CanWait))
         {
+            DPRINT("INSTRUMENT: NtfsCleanupFile MainResource CANT_WAIT\n");
             return STATUS_PENDING;
         }
+        DPRINT("INSTRUMENT: NtfsCleanupFile MainResource acquired\n");
 
         Fcb->OpenHandleCount--;
 
+        /* Flush any dirty data from the cache to disk before uninitializing.
+         * This is critical because FsRtlCopyWrite may have put data into the
+         * cache (even for FILE_NO_INTERMEDIATE_BUFFERING opens, due to the
+         * shared cache map from the internal stream file object). Without an
+         * explicit flush, the paging writeback may never complete before the
+         * cache map is torn down. */
+        if (FileObject->SectionObjectPointer->SharedCacheMap)
+        {
+            IO_STATUS_BLOCK FlushIoStatus;
+            CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &FlushIoStatus);
+        }
+
+        DPRINT("NtfsCleanupFile: calling CcUninitializeCacheMap for FCB %p FileSize=%I64d\n", Fcb, Fcb->RFCB.FileSize.QuadPart);
         CcUninitializeCacheMap(FileObject, &Fcb->RFCB.FileSize, NULL);
+        DPRINT("NtfsCleanupFile: CcUninitializeCacheMap returned\n");
 
         if (Fcb->OpenHandleCount != 0)
         {
@@ -106,15 +123,23 @@ NtfsCleanup(PNTFS_IRP_CONTEXT IrpContext)
     FileObject = IrpContext->FileObject;
     DeviceExtension = DeviceObject->DeviceExtension;
 
+    DPRINT("NtfsCleanup: entering FileObject=%p CanWait=%d\n", FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    DPRINT("NtfsCleanup: entering FileObject=%p CanWait=%d\n", FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    DPRINT("NtfsCleanup: acquiring DirResource exclusive...\n");
+    DPRINT("INSTRUMENT: NtfsCleanup acquiring DirResource exclusive...\n");
     if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        return NtfsMarkIrpContextForQueue(IrpContext);
+        DPRINT("INSTRUMENT: NtfsCleanup DirResource CANT_WAIT\n");
+        return STATUS_CANT_WAIT;
     }
+    DPRINT("INSTRUMENT: NtfsCleanup DirResource acquired\n");
 
     Status = NtfsCleanupFile(DeviceExtension, FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    DPRINT("NtfsCleanup: NtfsCleanupFile returned 0x%lx\n", Status);
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
+    DPRINT("NtfsCleanup: DirResource released\n");
 
     if (Status == STATUS_PENDING)
     {
