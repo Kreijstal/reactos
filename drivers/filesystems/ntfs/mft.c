@@ -1181,12 +1181,10 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     }
     else
     {
-        Status = NtfsReadDisk(Vcb->StorageDevice,
-                              DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster + Offset - CurrentOffset,
-                              ReadLength,
-                              Vcb->NtfsInfo.BytesPerSector,
-                              (PVOID)Buffer,
-                              FALSE);
+        Status = NtfsReadDiskCached(Vcb,
+                                    DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster + Offset - CurrentOffset,
+                                    ReadLength,
+                                    (PUCHAR)Buffer);
     }
     if (NT_SUCCESS(Status))
     {
@@ -1214,12 +1212,10 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
                 RtlZeroMemory(Buffer, ReadLength);
             else
             {
-                Status = NtfsReadDisk(Vcb->StorageDevice,
-                                      DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster,
-                                      ReadLength,
-                                      Vcb->NtfsInfo.BytesPerSector,
-                                      (PVOID)Buffer,
-                                      FALSE);
+                Status = NtfsReadDiskCached(Vcb,
+                                            DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster,
+                                            ReadLength,
+                                            (PUCHAR)Buffer);
                 if (!NT_SUCCESS(Status))
                     break;
             }

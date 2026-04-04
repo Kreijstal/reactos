@@ -172,8 +172,9 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         AllocatedBuffer = TRUE;
     }
 
-    DPRINT("Effective read: %lu at %lu for stream '%S'\n", RealLength, RealReadOffset, Fcb->Stream);
+    DPRINT1("NtfsReadFile: calling ReadAttribute offset=%lu len=%lu\n", RealReadOffset, RealLength);
     RealLengthRead = ReadAttribute(DeviceExt, DataContext, RealReadOffset, (PCHAR)ReadBuffer, RealLength);
+    DPRINT1("NtfsReadFile: ReadAttribute returned %lu\n", RealLengthRead);
     if (RealLengthRead == 0)
     {
         DPRINT1("Read failure!\n");
@@ -225,6 +226,8 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     NTSTATUS Status = STATUS_SUCCESS;
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
+    PNTFS_FCB Fcb;
+    PERESOURCE Resource;
 
     DPRINT("NtfsRead(IrpContext %p)\n", IrpContext);
 
@@ -237,6 +240,36 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     ReadLength = Stack->Parameters.Read.Length;
     ReadOffset = Stack->Parameters.Read.ByteOffset;
     Buffer = NtfsGetUserBuffer(Irp, BooleanFlagOn(Irp->Flags, IRP_PAGING_IO));
+
+    Fcb = (PNTFS_FCB)FileObject->FsContext;
+    ASSERT(Fcb);
+
+    DPRINT1("NtfsRead: FCB=%p Flags=0x%lx IrpFlags=0x%lx\n", Fcb, Fcb ? Fcb->Flags : 0, Irp->Flags);
+
+    if (Fcb->Flags & FCB_IS_VOLUME)
+    {
+        Resource = &DeviceExt->DirResource;
+        DPRINT1("NtfsRead: using DirResource\n");
+    }
+    else if (Irp->Flags & IRP_PAGING_IO)
+    {
+        Resource = &Fcb->PagingIoResource;
+        DPRINT1("NtfsRead: using PagingIoResource\n");
+    }
+    else
+    {
+        Resource = &Fcb->MainResource;
+        DPRINT1("NtfsRead: using MainResource\n");
+    }
+
+    DPRINT1("NtfsRead: acquiring resource shared...\n");
+    if (!ExAcquireResourceSharedLite(Resource,
+                                     BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
+    {
+        DPRINT1("NtfsRead: ExAcquireResourceSharedLite returned FALSE (CANT_WAIT)\n");
+        return STATUS_CANT_WAIT;
+    }
+    DPRINT1("NtfsRead: resource acquired\n");
 
     Status = NtfsReadFile(DeviceExt,
                           FileObject,
@@ -259,6 +292,8 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     {
         Irp->IoStatus.Information = 0;
     }
+
+    ExReleaseResourceLite(Resource);
 
     return Status;
 }
@@ -485,7 +520,9 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     DPRINT("Length: %lu\tWriteOffset: %lu\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
 
     // Write the data to the attribute
+    DPRINT1("NtfsWrite: calling WriteAttribute offset=%lu len=%lu\n", WriteOffset, Length);
     Status = WriteAttribute(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, FileRecord);
+    DPRINT1("NtfsWrite: WriteAttribute returned 0x%lx, written=%lu\n", Status, *LengthWritten);
 
     // Did the write fail?
     if (!NT_SUCCESS(Status))
@@ -550,6 +587,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     ULONG BytesPerSector;
 
     DPRINT("NtfsWrite(IrpContext %p)\n", IrpContext);
+    DPRINT1("NtfsWrite: entering for FCB %p\n", IrpContext->FileObject ? IrpContext->FileObject->FsContext : NULL);
     ASSERT(IrpContext);
 
     // get the I/O request packet
@@ -639,10 +677,13 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     // acquire exclusive access to the Resource
+    DPRINT1("NtfsWrite: acquiring resource %p exclusive...\n", Resource);
     if (!ExAcquireResourceExclusiveLite(Resource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        DPRINT1("NtfsWrite: can't wait, returning STATUS_CANT_WAIT\n");
         return STATUS_CANT_WAIT;
     }
+    DPRINT1("NtfsWrite: resource acquired\n");
 
     /* From VfatWrite(). Todo: Handle file locks
     if (!(IrpContext->Irp->Flags & IRP_PAGING_IO) &&
