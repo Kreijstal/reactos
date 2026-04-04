@@ -727,6 +727,9 @@ NtfsFindMftRecord(
         IndexEntryEnd = (PNTFS_INDEX_ENTRY)(IndexRecord + IndexRootCtx->Record.Resident.ValueLength);
         NtfsReleaseAttributeContext(IndexRootCtx);
 
+        printf("NtfsFindMft: '%s' in %I64u flags=0x%x\n",
+               FileName, MFTIndex, IndexRoot->IndexHeader.Flags);
+
         TRACE("IndexRecordSize: %x IndexBlockSize: %x\n", Volume->IndexRecordSize, IndexRoot->IndexBlockSize);
 
         while (IndexEntry < IndexEntryEnd &&
@@ -878,7 +881,7 @@ static BOOLEAN NtfsLookupFile(PNTFS_VOLUME_INFO Volume, PCSTR FileName, PNTFS_MF
         TRACE("- Lookup: %s\n", PathPart);
         if (!NtfsFindMftRecord(Volume, CurrentMFTIndex, PathPart, &CurrentMFTIndex, &FileAttributes))
         {
-            TRACE("- Failed\n");
+            printf("NtfsLookup FAIL: '%s' in MFT %I64u\n", PathPart, CurrentMFTIndex);
             return FALSE;
         }
         TRACE("- Lookup: %x\n", CurrentMFTIndex);
