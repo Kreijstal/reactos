@@ -153,13 +153,13 @@ DECLARE_INTERFACE_(INetCfgComponentSetup, IUnknown)
 
 #if !defined(__cplusplus) || defined(CINTERFACE)
 /*** IUnknown methods ***/
-#define INetCfgComponentControl_QueryInterface(p,a,b)             (p)->lpVtbl->QueryInterface(p,a,b)
-#define INetCfgComponentControl_AddRef(p)                         (p)->lpVtbl->AddRef(p)
-#define INetCfgComponentControl_Release(p)                        (p)->lpVtbl->Release(p)
-#define INetCfgComponentControl_Install(p,a)                      (p)->lpVtbl->Initialize(p,a)
-#define INetCfgComponentControl_Upgrade(p,a,b)                    (p)->lpVtbl->Upgrade(p,a,b)
-#define INetCfgComponentControl_ReadAnswerFile(p,a,b)             (p)->lpVtbl->ReadAnswerFile(p,a,b)
-#define INetCfgComponentControl_Removing(p)                       (p)->lpVtbl->Removing(p)
+#define INetCfgComponentSetup_QueryInterface(p,a,b)             (p)->lpVtbl->QueryInterface(p,a,b)
+#define INetCfgComponentSetup_AddRef(p)                         (p)->lpVtbl->AddRef(p)
+#define INetCfgComponentSetup_Release(p)                        (p)->lpVtbl->Release(p)
+#define INetCfgComponentSetup_Install(p,a)                      (p)->lpVtbl->Initialize(p,a)
+#define INetCfgComponentSetup_Upgrade(p,a,b)                    (p)->lpVtbl->Upgrade(p,a,b)
+#define INetCfgComponentSetup_ReadAnswerFile(p,a,b)             (p)->lpVtbl->ReadAnswerFile(p,a,b)
+#define INetCfgComponentSetup_Removing(p)                       (p)->lpVtbl->Removing(p)
 #endif
 
 EXTERN_C const IID IID_INetCfgComponentSetup;
