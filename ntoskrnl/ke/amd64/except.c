@@ -667,6 +667,9 @@ KiGeneralProtectionFaultHandler(
         return STATUS_ACCESS_VIOLATION;
     }
 
+    DPRINT1("KiGeneralProtectionFaultHandler: unhandled kernel #GP at RIP=%p "
+            "ErrorCode=0x%lx RSP=%p\n",
+            (PVOID)TrapFrame->Rip, TrapFrame->ErrorCode, (PVOID)TrapFrame->Rsp);
     ASSERT(FALSE);
     return STATUS_UNSUCCESSFUL;
 }
