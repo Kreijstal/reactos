@@ -323,6 +323,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER MftRecord;
     PFILENAME_ATTRIBUTE FileName;
+    PSTANDARD_INFORMATION StdInfo;
 
     MftRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (MftRecord == NULL)
@@ -361,6 +362,12 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     Fcb->RFCB.AllocationSize.QuadPart = FileName->AllocatedSize;
     Fcb->MFTIndex = NTFS_FILE_ROOT;
     Fcb->LinkCount = MftRecord->LinkCount;
+
+    StdInfo = GetStandardInformationFromRecord(Vcb, MftRecord);
+    if (StdInfo != NULL)
+    {
+        Fcb->Entry.FileAttributes |= StdInfo->FileAttribute;
+    }
 
     NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);

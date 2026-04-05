@@ -72,9 +72,10 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     Fcb = (PNTFS_FCB)FileObject->FsContext;
 
-    // Volume reads go directly to the storage device — don't route through
-    // MFT attributes (the volume FCB's MFTIndex 0 is $MFT).
-    if (Fcb->Flags & FCB_IS_VOLUME)
+    // Volume and volume stream reads go directly to the storage device —
+    // don't route through MFT attributes (MFTIndex 0 is $MFT, and the
+    // volume stream represents the raw volume for the cache manager).
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
     {
         NTSTATUS VStatus;
         VStatus = NtfsReadDisk(DeviceExt->StorageDevice,

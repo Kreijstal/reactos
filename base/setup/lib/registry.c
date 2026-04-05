@@ -1127,6 +1127,22 @@ RegCleanupRegistry(
         }
     }
 
+    /*
+     * Create the SYSTEM.ALT hive — a copy of the SYSTEM hive used by
+     * FreeLDR as a fallback if the primary SYSTEM hive appears corrupt.
+     * Windows NT also creates this during setup.
+     */
+    CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 3,
+                 NtSystemRoot->Buffer, L"System32\\config", L"SYSTEM");
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 3,
+                 NtSystemRoot->Buffer, L"System32\\config", L"SYSTEM.ALT");
+    DPRINT1("Copy hive: %S ==> %S\n", SrcPath, DstPath);
+    Status = SetupCopyFile(SrcPath, DstPath, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SetupCopyFile() for SYSTEM.ALT failed (Status %lx)\n", Status);
+    }
+
     /* Remove restore and backup privileges */
     RtlAdjustPrivilege(SE_BACKUP_PRIVILEGE, PrivilegeSet[1], FALSE, &PrivilegeSet[1]);
     RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, PrivilegeSet[0], FALSE, &PrivilegeSet[0]);
