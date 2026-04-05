@@ -617,14 +617,8 @@ CreateBTreeNodeFromIndexNode(PDEVICE_EXTENSION Vcb,
             // Copy the current entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
 
-            // See if the current key has a sub-node
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationAttributeCtx,
-                                                                       CurrentKey->IndexEntry);
-            }
+            // Children are loaded lazily by NtfsInsertKey when needed.
+            // The NTFS_INDEX_ENTRY_NODE flag on IndexEntry indicates a child exists on disk.
 
             CurrentKey = NextKey;
         }
@@ -633,15 +627,6 @@ CreateBTreeNodeFromIndexNode(PDEVICE_EXTENSION Vcb,
             // Copy the final entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
             CurrentKey->NextKey = NULL;
-
-            // See if the current key has a sub-node
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationAttributeCtx,
-                                                                       CurrentKey->IndexEntry);
-            }
 
             break;
         }
@@ -727,6 +712,11 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
     RootNode->FirstKey = CurrentKey;
     Tree->RootNode = RootNode;
 
+    // Store context for lazy child loading in NtfsInsertKey
+    Tree->Vcb = Vcb;
+    Tree->IndexRoot = IndexRoot;
+    Tree->IndexAllocationContext = NULL; // set below if it exists
+
     // Make sure we won't try reading past the attribute-end
     if (FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header) + IndexRoot->Header.TotalSizeOfEntries > IndexRootContext->pRecord->Resident.ValueLength)
     {
@@ -741,7 +731,10 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
                                                 + FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header)
                                                 + IndexRoot->Header.FirstEntryOffset);
 
-    // Create a key for each entry in the node
+    // Create a key for each entry in the node.
+    // Child nodes are NOT loaded here — they are loaded lazily by NtfsInsertKey
+    // when it needs to descend into a child. This makes tree creation O(root keys)
+    // instead of O(all nodes), turning the per-file insert from O(n) to O(log n).
     while (CurrentOffset < IndexRoot->Header.TotalSizeOfEntries)
     {
         // Allocate memory for the current entry
@@ -777,22 +770,7 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
             // Copy the current entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
 
-            // Does this key have a sub-node?
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                // Create the child node
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationContext,
-                                                                       CurrentKey->IndexEntry);
-                if (!CurrentKey->LesserChild)
-                {
-                    DPRINT1("ERROR: Couldn't create child node!\n");
-                    DestroyBTree(Tree);
-                    Status = STATUS_NOT_IMPLEMENTED;
-                    goto Cleanup;
-                }
-            }
+            // LesserChild stays NULL — loaded lazily when needed
 
             // Advance to the next entry
             CurrentOffset += CurrentNodeEntry->Length;
@@ -805,23 +783,6 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
             CurrentKey->NextKey = NULL;
 
-            // Does this key have a sub-node?
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                // Create the child node
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationContext,
-                                                                       CurrentKey->IndexEntry);
-                if (!CurrentKey->LesserChild)
-                {
-                    DPRINT1("ERROR: Couldn't create child node!\n");
-                    DestroyBTree(Tree);
-                    Status = STATUS_NOT_IMPLEMENTED;
-                    goto Cleanup;
-                }
-            }
-
             break;
         }
     }
@@ -830,8 +791,17 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
     Status = STATUS_SUCCESS;
 
 Cleanup:
-    if (IndexAllocationContext)
+    if (NT_SUCCESS(Status))
+    {
+        // Tree takes ownership of IndexAllocationContext for lazy child loading.
+        // It will be released when the caller calls ReleaseAttributeContext on
+        // Tree->IndexAllocationContext after destroying the tree.
+        Tree->IndexAllocationContext = IndexAllocationContext;
+    }
+    else if (IndexAllocationContext)
+    {
         ReleaseAttributeContext(IndexAllocationContext);
+    }
 
     return Status;
 }
@@ -1542,6 +1512,11 @@ DestroyBTreeNode(PB_TREE_FILENAME_NODE Node)
 VOID
 DestroyBTree(PB_TREE Tree)
 {
+    if (Tree->IndexAllocationContext)
+    {
+        ReleaseAttributeContext(Tree->IndexAllocationContext);
+        Tree->IndexAllocationContext = NULL;
+    }
     DestroyBTreeNode(Tree->RootNode);
     ExFreePoolWithTag(Tree, TAG_NTFS);
 }
@@ -1574,8 +1549,8 @@ DumpBTreeKey(PB_TREE Tree, PB_TREE_KEY Key, ULONG Number, ULONG Depth)
             DumpBTreeNode(Tree, Key->LesserChild, Number, Depth + 1);
         else
         {
-            // This will be an assert once nodes with arbitrary depth are debugged
-            DPRINT1("DRIVER ERROR: No Key->LesserChild despite Key->IndexEntry->Flags indicating this is a node!\n");
+            // Child not loaded (lazy loading) — this is expected
+            DPRINT("Child node not loaded (lazy)\n");
         }
     }
 }
@@ -1743,6 +1718,17 @@ NtfsInsertKey(PB_TREE Tree,
         // Is NewKey < CurrentKey?
         if (Comparison < 0)
         {
+            // Lazily load child node from disk if it exists but hasn't been loaded
+            if (!CurrentKey->LesserChild &&
+                (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) &&
+                Tree->IndexAllocationContext)
+            {
+                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Tree->Vcb,
+                                                                       Tree->IndexRoot,
+                                                                       Tree->IndexAllocationContext,
+                                                                       CurrentKey->IndexEntry);
+            }
+
             // Does CurrentKey have a sub-node?
             if (CurrentKey->LesserChild)
             {

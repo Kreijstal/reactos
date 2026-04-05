@@ -453,6 +453,9 @@ typedef struct _B_TREE_FILENAME_NODE
 typedef struct
 {
     PB_TREE_FILENAME_NODE RootNode;
+    PDEVICE_EXTENSION Vcb;
+    PINDEX_ROOT_ATTRIBUTE IndexRoot;
+    struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
 } B_TREE, *PB_TREE;
 
 typedef struct
