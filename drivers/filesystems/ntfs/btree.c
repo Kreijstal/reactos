@@ -133,7 +133,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     ULONG BytesNeeded;
     LARGE_INTEGER DataSize;
 
-    DPRINT1("AllocateIndexNode(%p, %p, %lu, %p, %lu, %p) called.\n", DeviceExt,
+    DPRINT("AllocateIndexNode(%p, %p, %lu, %p, %lu, %p) called.\n", DeviceExt,
             FileRecord,
             IndexBufferSize,
             IndexAllocationCtx,

@@ -441,14 +441,14 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
     BufferLength = Stack->Parameters.QueryFile.Length;
 
-    DPRINT1("INSTRUMENT: NtfsQueryInformation acquiring MainResource shared...\n");
+    DPRINT("INSTRUMENT: NtfsQueryInformation acquiring MainResource shared...\n");
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT1("INSTRUMENT: NtfsQueryInformation MainResource CANT_WAIT\n");
+        DPRINT("INSTRUMENT: NtfsQueryInformation MainResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT1("INSTRUMENT: NtfsQueryInformation MainResource acquired\n");
+    DPRINT("INSTRUMENT: NtfsQueryInformation MainResource acquired\n");
 
     switch (FileInformationClass)
     {
@@ -653,9 +653,9 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     }
 
     // set the attribute data length
-    DPRINT1("NtfsSetEndOfFile: calling SetAttributeDataLength for MFT %I64u size %I64u\n", Fcb->MFTIndex, NewFileSize->QuadPart);
+    DPRINT("NtfsSetEndOfFile: calling SetAttributeDataLength for MFT %I64u size %I64u\n", Fcb->MFTIndex, NewFileSize->QuadPart);
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, NewFileSize);
-    DPRINT1("NtfsSetEndOfFile: SetAttributeDataLength returned 0x%lx\n", Status);
+    DPRINT("NtfsSetEndOfFile: SetAttributeDataLength returned 0x%lx\n", Status);
     if (!NT_SUCCESS(Status))
     {
         ReleaseAttributeContext(DataContext);
@@ -665,7 +665,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     // now we need to update this file's size in every directory index entry that references it
     // TODO: expand to work with every filename / hardlink stored in the file record.
-    DPRINT1("NtfsSetEndOfFile: calling GetBestFileNameFromRecord\n");
+    DPRINT("NtfsSetEndOfFile: calling GetBestFileNameFromRecord\n");
     FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
     if (FileNameAttribute == NULL)
     {
@@ -683,7 +683,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     AllocationSize = AttributeAllocatedLength(DataContext->pRecord);
 
-    DPRINT1("NtfsSetEndOfFile: calling UpdateFileNameRecord parent=%I64u allocSize=%I64u\n", ParentMFTId, AllocationSize);
+    DPRINT("NtfsSetEndOfFile: calling UpdateFileNameRecord parent=%I64u allocSize=%I64u\n", ParentMFTId, AllocationSize);
     Status = UpdateFileNameRecord(Fcb->Vcb,
                                   ParentMFTId,
                                   &FileName,
@@ -691,12 +691,12 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                                   NewFileSize->QuadPart,
                                   AllocationSize,
                                   CaseSensitive);
-    DPRINT1("NtfsSetEndOfFile: UpdateFileNameRecord returned 0x%lx\n", Status);
+    DPRINT("NtfsSetEndOfFile: UpdateFileNameRecord returned 0x%lx\n", Status);
 
     ReleaseAttributeContext(DataContext);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
-    DPRINT1("NtfsSetEndOfFile: returning 0x%lx\n", Status);
+    DPRINT("NtfsSetEndOfFile: returning 0x%lx\n", Status);
     return Status;
 }
 
@@ -819,7 +819,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     Fcb = FileObject->FsContext;
 
     DPRINT1("NtfsSetInformation: class=%d FCB=%p\n", (int)FileInformationClass, Fcb);
-    DPRINT1("INSTRUMENT: NtfsSetInformation acquiring MainResource exclusive...\n");
+    DPRINT("INSTRUMENT: NtfsSetInformation acquiring MainResource exclusive...\n");
 
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
     BufferLength = Stack->Parameters.QueryFile.Length;
@@ -827,10 +827,10 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT1("INSTRUMENT: NtfsSetInformation MainResource CANT_WAIT\n");
+        DPRINT("INSTRUMENT: NtfsSetInformation MainResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT1("INSTRUMENT: NtfsSetInformation MainResource acquired\n");
+    DPRINT("INSTRUMENT: NtfsSetInformation MainResource acquired\n");
 
     switch (FileInformationClass)
     {

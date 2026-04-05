@@ -203,7 +203,7 @@ NtfsFsdDispatch(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
 
-    DPRINT1("NtfsFsdDispatch: MajorFunction=%d MinorFunction=%d FileObject=%p\n",
+    DPRINT("NtfsFsdDispatch: MajorFunction=%d MinorFunction=%d FileObject=%p\n",
             Stack->MajorFunction, Stack->MinorFunction, Stack->FileObject);
 
     TRACE_(NTFS, "NtfsFsdDispatch()\n");

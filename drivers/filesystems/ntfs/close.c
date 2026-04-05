@@ -108,10 +108,10 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext)
     if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT1("INSTRUMENT: NtfsClose DirResource CANT_WAIT\n");
+        DPRINT("INSTRUMENT: NtfsClose DirResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT1("INSTRUMENT: NtfsClose DirResource acquired\n");
+    DPRINT("INSTRUMENT: NtfsClose DirResource acquired\n");
     Status = NtfsCloseFile(DeviceExtension, FileObject);
     DPRINT1("NtfsClose: NtfsCloseFile returned 0x%lx\n", Status);
 

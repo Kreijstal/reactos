@@ -172,9 +172,9 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         AllocatedBuffer = TRUE;
     }
 
-    DPRINT1("NtfsReadFile: calling ReadAttribute offset=%lu len=%lu\n", RealReadOffset, RealLength);
+    DPRINT("NtfsReadFile: calling ReadAttribute offset=%lu len=%lu\n", RealReadOffset, RealLength);
     RealLengthRead = ReadAttribute(DeviceExt, DataContext, RealReadOffset, (PCHAR)ReadBuffer, RealLength);
-    DPRINT1("NtfsReadFile: ReadAttribute returned %lu\n", RealLengthRead);
+    DPRINT("NtfsReadFile: ReadAttribute returned %lu\n", RealLengthRead);
     if (RealLengthRead == 0)
     {
         DPRINT1("Read failure!\n");
@@ -587,9 +587,9 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     DPRINT("Length: %lu\tWriteOffset: %lu\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
 
     // Write the data to the attribute
-    DPRINT1("NtfsWrite: calling WriteAttribute offset=%lu len=%lu\n", WriteOffset, Length);
+    DPRINT("NtfsWrite: calling WriteAttribute offset=%lu len=%lu\n", WriteOffset, Length);
     Status = WriteAttribute(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, FileRecord);
-    DPRINT1("NtfsWrite: WriteAttribute returned 0x%lx, written=%lu\n", Status, *LengthWritten);
+    DPRINT("NtfsWrite: WriteAttribute returned 0x%lx, written=%lu\n", Status, *LengthWritten);
 
     // Did the write fail?
     if (!NT_SUCCESS(Status))

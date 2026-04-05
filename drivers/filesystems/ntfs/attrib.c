@@ -268,7 +268,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
         FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_ARCHIVE;
 
     // we need to extract the filename from the path
-    DPRINT1("Pathname: %wZ\n", &FileObject->FileName);
+    DPRINT("Pathname: %wZ\n", &FileObject->FileName);
 
     FsRtlDissectName(FileObject->FileName, &Current, &Remaining);
 
@@ -277,7 +277,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
 
     while (Current.Length != 0)
     {
-        DPRINT1("Current: %wZ\n", &Current);
+        DPRINT("Current: %wZ\n", &Current);
 
         if (Remaining.Length != 0)
         {
@@ -1388,7 +1388,7 @@ FindFirstAttribute(PFIND_ATTR_CONTXT Context,
 {
     NTSTATUS Status;
 
-    DPRINT1("INSTRUMENT: FindFirstAttribute entering Vcb=%p FileRecord=%p OnlyResident=%d AttrOffset=%u\n",
+    DPRINT("INSTRUMENT: FindFirstAttribute entering Vcb=%p FileRecord=%p OnlyResident=%d AttrOffset=%u\n",
             Vcb, FileRecord, OnlyResident, FileRecord->AttributeOffset);
 
     DPRINT("FindFistAttribute(%p, %p, %p, %p, %u, %p)\n", Context, Vcb, FileRecord, OnlyResident, Attribute);
@@ -1436,7 +1436,7 @@ FindNextAttribute(PFIND_ATTR_CONTXT Context,
 {
     NTSTATUS Status;
 
-    DPRINT1("INSTRUMENT: FindNextAttribute entering CurrAttr=%p Type=0x%x Offset=%u\n",
+    DPRINT("INSTRUMENT: FindNextAttribute entering CurrAttr=%p Type=0x%x Offset=%u\n",
             Context->CurrAttr, Context->CurrAttr ? Context->CurrAttr->Type : 0, Context->Offset);
 
     DPRINT("FindNextAttribute(%p, %p)\n", Context, Attribute);
