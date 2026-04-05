@@ -73,6 +73,18 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         Fcb->OpenHandleCount--;
 
+        /* Flush any dirty data from the cache to disk before uninitializing.
+         * This is critical because FsRtlCopyWrite may have put data into the
+         * cache (even for FILE_NO_INTERMEDIATE_BUFFERING opens, due to the
+         * shared cache map from the internal stream file object). Without an
+         * explicit flush, the paging writeback may never complete before the
+         * cache map is torn down. */
+        if (FileObject->SectionObjectPointer->SharedCacheMap)
+        {
+            IO_STATUS_BLOCK FlushIoStatus;
+            CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &FlushIoStatus);
+        }
+
         DPRINT("NtfsCleanupFile: calling CcUninitializeCacheMap for FCB %p FileSize=%I64d\n", Fcb, Fcb->RFCB.FileSize.QuadPart);
         CcUninitializeCacheMap(FileObject, &Fcb->RFCB.FileSize, NULL);
         DPRINT("NtfsCleanupFile: CcUninitializeCacheMap returned\n");
