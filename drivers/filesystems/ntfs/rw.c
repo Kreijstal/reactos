@@ -72,6 +72,22 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     Fcb = (PNTFS_FCB)FileObject->FsContext;
 
+    // Volume reads go directly to the storage device — don't route through
+    // MFT attributes (the volume FCB's MFTIndex 0 is $MFT).
+    if (Fcb->Flags & FCB_IS_VOLUME)
+    {
+        NTSTATUS VStatus;
+        VStatus = NtfsReadDisk(DeviceExt->StorageDevice,
+                               ReadOffset,
+                               Length,
+                               DeviceExt->NtfsInfo.BytesPerSector,
+                               Buffer,
+                               FALSE);
+        if (NT_SUCCESS(VStatus))
+            *LengthRead = Length;
+        return VStatus;
+    }
+
     if (NtfsFCBIsCompressed(Fcb))
     {
         DPRINT1("Compressed file!\n");
@@ -454,6 +470,18 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
 
     DPRINT("Fcb->PathName: %wS\n", Fcb->PathName);
     DPRINT("Fcb->ObjectName: %wS\n", Fcb->ObjectName);
+
+    // Volume writes go directly to the storage device — don't route through
+    // MFT attributes. The volume FCB has MFTIndex 0 ($MFT), so WriteAttribute
+    // would write INTO the MFT data, corrupting it.
+    if (Fcb->Flags & FCB_IS_VOLUME)
+    {
+        return NtfsWriteDisk(DeviceExt->StorageDevice,
+                             WriteOffset,
+                             Length,
+                             DeviceExt->NtfsInfo.BytesPerSector,
+                             Buffer);
+    }
 
     // we don't yet handle compression
     if (NtfsFCBIsCompressed(Fcb))

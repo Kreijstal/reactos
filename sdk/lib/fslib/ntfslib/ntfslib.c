@@ -273,6 +273,8 @@ NtfsFormat(
     Params.sector_size = DiskGeometry.BytesPerSector;
     Params.total_sectors = PartitionLength / DiskGeometry.BytesPerSector;
     Params.cluster_size = ClusterSize; /* 0 = auto */
+    if (DiskGeometry.MediaType == FixedMedia)
+        Params.hidden_sectors = (ULONG)(PartitionInfo.StartingOffset.QuadPart / DiskGeometry.BytesPerSector);
 
     /* Convert volume label */
     if (Label != NULL && Label->Length > 0)

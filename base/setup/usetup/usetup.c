@@ -3326,6 +3326,31 @@ FileCopyPage(PINPUT_RECORD Ir)
                                                   FALSE,
                                                   "Free Memory");
 
+    /*
+     * Pre-copy bootloader files to the system partition BEFORE the main file
+     * copy. On NTFS, MFT records are allocated sequentially; copying freeldr.sys
+     * first ensures it gets a low MFT record number that the VBR boot code can
+     * reach even if the MFT is non-contiguous.
+     */
+    {
+        WCHAR SrcPath[MAX_PATH];
+        WCHAR DstPath[MAX_PATH];
+        WCHAR SysPath[MAX_PATH];
+
+        RtlStringCchPrintfW(SysPath, ARRAYSIZE(SysPath),
+                            L"%s\\", SystemPartition->DeviceName);
+
+        CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2,
+                     USetupData.SourceRootPath.Buffer, L"\\loader\\freeldr.sys");
+        CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SysPath, L"freeldr.sys");
+        SetupCopyFile(SrcPath, DstPath, FALSE);
+
+        CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2,
+                     USetupData.SourceRootPath.Buffer, L"\\loader\\rosload.exe");
+        CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SysPath, L"rosload.exe");
+        SetupCopyFile(SrcPath, DstPath, FALSE);
+    }
+
     /* Do the file copying */
     DoFileCopy(&USetupData, FileCopyCallback, &CopyContext);
 

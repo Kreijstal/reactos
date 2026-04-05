@@ -1328,6 +1328,9 @@ int mkntfs_format(const MKNTFS_IO *io, const MKNTFS_PARAMS *params)
         bs.MediaDescriptor = 0xF8;
         bs.SectorsPerTrack = 63;
         bs.NumberOfHeads = 255;
+        bs.HiddenSectors = params->hidden_sectors;
+        bs.BiosDriveNumber = 0x80;
+        bs.ExtBootSignature = 0x80;
         bs.TotalSectors = s.total_sectors - 1;
         bs.MftStartLcn = s.mft_lcn;
         bs.MftMirrStartLcn = s.mft_mirr_lcn;
