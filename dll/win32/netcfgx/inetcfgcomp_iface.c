@@ -720,12 +720,23 @@ INetCfgComponent_fnRaisePropertyUi(
     CoTaskMemFree(hppages);
     if (iResult > 0)
     {
+        hr = INetCfgComponentPropertyUi_ApplyProperties(This->pProperty);
         /* indicate that settings should be stored */
-        This->pItem->bChanged = TRUE;
-        return S_OK;
+        if (hr == S_OK)
+            This->pItem->bChanged = TRUE;
     }
-    return S_FALSE;
+    else if (iResult == 0)
+    {
+        hr = INetCfgComponentPropertyUi_CancelProperties(This->pProperty);
+    }
+    else 
+    {
+        hr = S_FALSE;
+    }
+
+    return hr;
 }
+
 static const INetCfgComponentVtbl vt_NetCfgComponent =
 {
     INetCfgComponent_fnQueryInterface,
