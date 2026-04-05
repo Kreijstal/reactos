@@ -698,6 +698,11 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
             DPRINT("  elementName:%S\n", elementName);
 
             Status = NtfsDirFindFile(Vcb, parentFCB, elementName, CaseSensitive, &FCB);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("NtfsDirFindFile('%S' in MFT %I64u '%S') failed: 0x%lx\n",
+                        elementName, parentFCB->MFTIndex, parentFCB->ObjectName, Status);
+            }
             if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
             {
                 *pParentFCB = parentFCB;
