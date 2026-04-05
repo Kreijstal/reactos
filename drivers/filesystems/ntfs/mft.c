@@ -551,7 +551,7 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     ULONG OldAttributeLength = Destination->Length;
     ULONG NextAttributeOffset;
 
-    DPRINT1("InternalSetResidentAttributeLength( %p, %p, %p, %lu, %lu )\n", DeviceExt, AttrContext, FileRecord, AttrOffset, DataSize);
+    DPRINT("InternalSetResidentAttributeLength( %p, %p, %p, %lu, %lu )\n", DeviceExt, AttrContext, FileRecord, AttrOffset, DataSize);
 
     ASSERT(!AttrContext->pRecord->IsNonResident);
 
@@ -2032,7 +2032,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     LARGE_INTEGER BitmapBits;
     UCHAR SystemReservedBits;
 
-    DPRINT1("AddNewMftEntry(%p, %p, %p, %s)\n", FileRecord, DeviceExt, DestinationIndex, CanWait ? "TRUE" : "FALSE");
+    DPRINT("AddNewMftEntry(%p, %p, %p, %s)\n", FileRecord, DeviceExt, DestinationIndex, CanWait ? "TRUE" : "FALSE");
 
     // First, we have to read the mft's $Bitmap attribute
 
@@ -2111,7 +2111,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
         return AddNewMftEntry(FileRecord, DeviceExt, DestinationIndex, CanWait);
     }
 
-    DPRINT1("Creating file record at MFT index: %I64u\n", MftIndex);
+    DPRINT("Creating file record at MFT index: %I64u\n", MftIndex);
 
     // update file record with index
     FileRecord->MFTRecordNumber = MftIndex;
