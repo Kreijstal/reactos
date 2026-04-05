@@ -557,9 +557,25 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // Are we trying to write beyond the end of the stream?
     if (WriteOffset + Length > StreamSize)
     {
-        // is increasing the stream size allowed?
-        if (!(Fcb->Flags & FCB_IS_VOLUME) &&
-            !(IrpFlags & IRP_PAGING_IO))
+        if (IrpFlags & IRP_PAGING_IO)
+        {
+            // The cache manager may flush full pages that extend beyond
+            // the logical file size. Clamp the write to the stream size
+            // so we don't try to extend the file from paging I/O.
+            DPRINT1("NtfsWriteFile PAGING: %wS off=%lu len=%lu stream=%I64u\n",
+                    Fcb->ObjectName, WriteOffset, Length, StreamSize);
+            if (WriteOffset >= StreamSize)
+            {
+                // Nothing to write — the entire range is past EOF.
+                DPRINT1("NtfsWriteFile PAGING: SKIP (past EOF)\n");
+                ReleaseAttributeContext(DataContext);
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                *LengthWritten = 0;
+                return STATUS_SUCCESS;
+            }
+            Length = (ULONG)(StreamSize - WriteOffset);
+        }
+        else if (!(Fcb->Flags & FCB_IS_VOLUME))
         {
             LARGE_INTEGER DataSize;
             ULONGLONG AllocationSize;
@@ -604,7 +620,6 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         }
         else
         {
-            // TODO - just fail for now
             ReleaseAttributeContext(DataContext);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
             *LengthWritten = 0;
@@ -614,10 +629,47 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
 
     DPRINT("Length: %lu\tWriteOffset: %lu\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
 
+    // After extending, re-read the file record and re-find the attribute to ensure
+    // we have the latest on-disk state (the resident->non-resident conversion may
+    // have changed the attribute layout).
+    if (WriteOffset + Length > StreamSize && DataContext->pRecord->IsNonResident)
+    {
+        ReleaseAttributeContext(DataContext);
+
+        Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Re-read of file record failed after extend! Status: 0x%lx\n", Status);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            *LengthWritten = 0;
+            return Status;
+        }
+
+        Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream),
+                               &DataContext, &AttributeOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Re-find of $DATA after extend failed! Status: 0x%lx\n", Status);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            *LengthWritten = 0;
+            return Status;
+        }
+    }
+
     // Write the data to the attribute
-    DPRINT("NtfsWrite: calling WriteAttribute offset=%lu len=%lu\n", WriteOffset, Length);
+    if (WriteOffset == 0 && Length < 8192)
+    {
+        DPRINT1("NtfsWriteFile: write %wS: len=%lu stream=%I64u nr=%d fb=0x%02x\n",
+                Fcb->ObjectName, Length, StreamSize,
+                DataContext->pRecord->IsNonResident,
+                Buffer ? Buffer[0] : 0xFF);
+    }
     Status = WriteAttribute(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, FileRecord);
-    DPRINT("NtfsWrite: WriteAttribute returned 0x%lx, written=%lu\n", Status, *LengthWritten);
+    if (!NT_SUCCESS(Status) || *LengthWritten != Length)
+    {
+        DPRINT1("NtfsWriteFile: WriteAttribute FAILED for %wS: status=0x%lx written=%lu requested=%lu\n",
+                Fcb->ObjectName, Status, *LengthWritten, Length);
+    }
 
     // Did the write fail?
     if (!NT_SUCCESS(Status))
@@ -714,8 +766,11 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
                   BooleanFlagOn(FileObject->Flags, FILE_NO_INTERMEDIATE_BUFFERING) ||
                   BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME);
 
-    DPRINT("NtfsWrite: FCB=%p Offset=%I64u Length=%lu PagingIo=%d NonCached=%d\n",
-           Fcb, ByteOffset.QuadPart, Length, PagingIo, NonCachedIo);
+    if (Length > 0 && Length <= 4096 && ByteOffset.QuadPart == 0 && !PagingIo)
+    {
+        DPRINT1("NtfsWrite ENTRY: %wS len=%lu nc=%d paging=%d fsize=%I64d\n",
+                Fcb->ObjectName, Length, NonCachedIo, PagingIo, Fcb->RFCB.FileSize.QuadPart);
+    }
 
     if (ByteOffset.u.HighPart && !(Fcb->Flags & FCB_IS_VOLUME))
     {
@@ -809,6 +864,17 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         {
             ExReleaseResourceLite(Resource);
             return NtfsMarkIrpContextForQueue(IrpContext);
+        }
+
+        /* Flush the written data to disk immediately.
+         * The NTFS paging write path may reject cache manager writeback
+         * in edge cases, so ensure data reaches disk now. */
+        {
+            IO_STATUS_BLOCK FlushIoStatus;
+            CcFlushCache(FileObject->SectionObjectPointer,
+                         &ByteOffset,
+                         Length,
+                         &FlushIoStatus);
         }
 
         Irp->IoStatus.Status = STATUS_SUCCESS;

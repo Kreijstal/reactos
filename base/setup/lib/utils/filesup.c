@@ -316,6 +316,17 @@ SetupCopyFile(
                                NULL,
                                NULL);
 
+    {
+    /* For small files, skip FILE_NO_INTERMEDIATE_BUFFERING.
+     * The NTFS driver's cache initialization on file create causes
+     * FsRtlCopyWrite to intercept non-cached writes, putting data
+     * into the cache without flushing to disk. Using buffered I/O
+     * for small files ensures the data is flushed via CcFlushCache
+     * in the NtfsWrite cached path. */
+    ULONG CreateOptions = FILE_SEQUENTIAL_ONLY | FILE_SYNCHRONOUS_IO_NONALERT;
+    if (FileStandard.EndOfFile.u.LowPart >= PAGE_SIZE)
+        CreateOptions |= FILE_NO_INTERMEDIATE_BUFFERING;
+
     Status = NtCreateFile(&FileHandleDest,
                           GENERIC_WRITE | SYNCHRONIZE,
                           &ObjectAttributes,
@@ -324,11 +335,10 @@ SetupCopyFile(
                           FileBasic.FileAttributes, // FILE_ATTRIBUTE_NORMAL,
                           0,
                           FailIfExists ? FILE_CREATE : FILE_OVERWRITE_IF,
-                          FILE_NO_INTERMEDIATE_BUFFERING |
-                          FILE_SEQUENTIAL_ONLY |
-                          FILE_SYNCHRONOUS_IO_NONALERT,
+                          CreateOptions,
                           NULL,
                           0);
+    }
     if (!NT_SUCCESS(Status))
     {
         /*
@@ -398,7 +408,10 @@ SetupCopyFile(
         }
     }
 
-    RegionSize = (ULONG)PAGE_ROUND_UP(FileStandard.EndOfFile.u.LowPart);
+    if (FileStandard.EndOfFile.u.LowPart >= PAGE_SIZE)
+        RegionSize = (ULONG)PAGE_ROUND_UP(FileStandard.EndOfFile.u.LowPart);
+    else
+        RegionSize = FileStandard.EndOfFile.u.LowPart;
     IoStatusBlock.Status = 0;
     ByteOffset.QuadPart = 0ULL;
     Status = NtWriteFile(FileHandleDest,
@@ -429,15 +442,19 @@ SetupCopyFile(
         goto closedest;
     }
 
-    /* Shorten the file back to its real size after completing the write */
-    Status = NtSetInformationFile(FileHandleDest,
-                                  &IoStatusBlock,
-                                  &FileStandard.EndOfFile,
-                                  sizeof(FILE_END_OF_FILE_INFORMATION),
-                                  FileEndOfFileInformation);
-    if (!NT_SUCCESS(Status))
+    /* Shorten the file back to its real size after completing the write.
+     * Only needed for non-cached writes that used PAGE_ROUND_UP. */
+    if (RegionSize != FileStandard.EndOfFile.u.LowPart)
     {
-        DPRINT1("NtSetInformationFile failed: %x\n", Status);
+        Status = NtSetInformationFile(FileHandleDest,
+                                      &IoStatusBlock,
+                                      &FileStandard.EndOfFile,
+                                      sizeof(FILE_END_OF_FILE_INFORMATION),
+                                      FileEndOfFileInformation);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtSetInformationFile failed: %x\n", Status);
+        }
     }
 
 closedest:
