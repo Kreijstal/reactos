@@ -353,10 +353,14 @@ StartSearch:
     mov   bp, sp
     sub   sp, HEX(10)
 
-    // Read MFT record 0 ($MFT) into [1000:0] to get its data run list.
-    // This buffer must NOT be reused, since ReadInode references it later.
-    // Record 0 is always at MFTStartSector so the simple linear read works.
-    mov   ax, HEX(1000)
+    // Read MFT record 0 ($MFT) into [5000:0] (physical 0x50000) to get its
+    // data run list. This buffer must NOT be reused, since ReadInode
+    // references it later. Must not conflict with:
+    //   0x7C00-0x85FF = VBR code (sectors 0-4 loaded here),
+    //   0x1000-0x3FFF = page tables, 0x6F00 = stack/BSS,
+    //   0xF800-0x49800 = FreeLDR (FREELDR_BASE + PE image).
+    // 0x50000 is safely above all of these.
+    mov   ax, HEX(5000)
     mov   es, ax
     xor   bx, bx
     xor   edx, edx
@@ -394,20 +398,17 @@ StartSearch:
     pop   eax
     call  ReadInode
 
+    // Find $DATA attribute (0x80) to get file size and data runs
     xor   ax, ax
-    mov   ebx, HEX(30)
+    mov   ebx, HEX(80)
     call  FindAttributeHdr
+    test  ax, ax
+    jz    PrintFileSystemError
     mov   si, ax
-    // Move to the attribute data
-    add   si, word ptr es:[si + HEX(14)]
 
-    // We don't support compressed, sparse or encrypted Freeldr
-    test  dword ptr es:[si + HEX(38)], HEX(4a00)
-    jnz   CompressedFreeldr
-
-    // Compute size in clusters
+    // Read allocated size from $DATA non-resident attribute header (offset 0x28)
     mov   eax, dword ptr es:[si + HEX(28)]
-    mov   cl, byte ptr [SectsPerCluster]
+    movzx ecx, byte ptr [SectsPerCluster]
     xor   edx, edx
     div   ecx
     mov   cx, word ptr [BytesPerSector]
@@ -416,11 +417,12 @@ StartSearch:
     div   ecx
     mov   edx, eax
 
-    push  ax
+    push  dx
     mov   si, offset msgLoading
     call  PutChars
-    pop   ax
+    pop   dx
 
+    // Get data runs offset from the $DATA attribute
     xor   ax, ax
     mov   ebx, HEX(80)
     call  FindAttributeHdr
