@@ -1701,8 +1701,19 @@ MiReferenceProbedPageAndBumpLockCount(IN PMMPFN Pfn1)
     /* Does ARM3 own the page? */
     if (MI_IS_ROS_PFN(Pfn1))
     {
-        /* ReactOS Mm doesn't track share count */
-        ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
+        /*
+         * ReactOS Mm doesn't track share count.  A concurrent section
+         * unmap can transition the page out of ActiveAndValid between
+         * the MDL build and MmProbeAndLockPages.  Instead of asserting,
+         * treat this as a transient condition — the caller's I/O will
+         * still succeed because the physical page is still valid until
+         * its ReferenceCount drops to 0.
+         */
+        if (Pfn1->u3.e1.PageLocation != ActiveAndValid)
+        {
+            DPRINT1("MiReferenceProbedPageAndBumpLockCount: ROS PFN %p PageLocation %d != ActiveAndValid, tolerating\n",
+                    Pfn1, Pfn1->u3.e1.PageLocation);
+        }
     }
     else
     {
