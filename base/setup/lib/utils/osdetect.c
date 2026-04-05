@@ -679,6 +679,167 @@ AddNTOSInstallation(
     return NtOsInstall;
 }
 
+/**
+ * @brief Validate NTFS structures on a partition by reading the VBR and MFT
+ * record 0 directly from the raw partition device.
+ *
+ * Checks the VBR (OEM ID, BPB sanity) and reads MFT record 0 to verify
+ * its USA (Update Sequence Array) fixups. This catches corrupted NTFS
+ * volumes before the NTFS driver tries to mount them (which can cause
+ * kernel exceptions from stale/corrupted MFT records).
+ *
+ * @return TRUE if the volume looks valid (or is not NTFS), FALSE if corrupt.
+ */
+static BOOLEAN
+NtfsVolumeProbeValid(
+    _In_ PCWSTR DeviceName)
+{
+    NTSTATUS Status;
+    HANDLE PartHandle;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING PartPath;
+    LARGE_INTEGER ReadOffset;
+    UCHAR Sector[512];
+    UCHAR MftRecord[1024];
+    USHORT BytesPerSector;
+    UCHAR SectorsPerCluster;
+    ULONGLONG TotalSectors;
+    ULONGLONG MftCluster;
+    ULONGLONG MaxCluster;
+    ULONGLONG MftByteOffset;
+    LONG MftRecordSize;
+    UCHAR MftRecordSizeRaw;
+    USHORT UsaOffset, UsaCount;
+    PUSHORT UsaPtr;
+    USHORT SeqNumber;
+    USHORT i;
+
+    RtlInitUnicodeString(&PartPath, DeviceName);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &PartPath,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    /* Open the raw partition device (not the volume root — no FS mount) */
+    Status = NtOpenFile(&PartHandle,
+                        FILE_GENERIC_READ | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NtfsVolumeProbeValid: cannot open '%S', Status 0x%08lx\n",
+                DeviceName, Status);
+        return FALSE;
+    }
+
+    /* Read the first sector (VBR) */
+    Status = NtReadFile(PartHandle, NULL, NULL, NULL,
+                        &IoStatusBlock, Sector, sizeof(Sector),
+                        NULL, NULL);
+    if (!NT_SUCCESS(Status) || IoStatusBlock.Information < sizeof(Sector))
+    {
+        DPRINT1("NtfsVolumeProbeValid: read VBR failed, Status 0x%08lx\n", Status);
+        NtClose(PartHandle);
+        return FALSE;
+    }
+
+    /* Check OEM ID = "NTFS    " */
+    if (RtlCompareMemory(Sector + 3, "NTFS    ", 8) != 8)
+    {
+        NtClose(PartHandle);
+        return TRUE; /* Not NTFS �� let other FS drivers handle it */
+    }
+
+    /* Parse BPB fields */
+    BytesPerSector = *(PUSHORT)(Sector + 11);
+    SectorsPerCluster = Sector[13];
+    TotalSectors = *(PULONGLONG)(Sector + 0x28);
+    MftCluster = *(PULONGLONG)(Sector + 0x30);
+    MftRecordSizeRaw = Sector[0x40];
+
+    /* Compute MFT record size */
+    if (MftRecordSizeRaw < 128)
+        MftRecordSize = 1 << MftRecordSizeRaw;
+    else
+        MftRecordSize = 1 << (256 - MftRecordSizeRaw);
+
+    /* Basic VBR sanity checks */
+    if (BytesPerSector == 0 || (BytesPerSector & (BytesPerSector - 1)) != 0 ||
+        SectorsPerCluster == 0 || (SectorsPerCluster & (SectorsPerCluster - 1)) != 0 ||
+        TotalSectors == 0 ||
+        MftRecordSize < 512 || MftRecordSize > (LONG)sizeof(MftRecord))
+    {
+        DPRINT1("NtfsVolumeProbeValid: bad VBR parameters (bps=%u spc=%u total=%I64u recsize=%ld)\n",
+                BytesPerSector, SectorsPerCluster, TotalSectors, MftRecordSize);
+        NtClose(PartHandle);
+        return FALSE;
+    }
+
+    MaxCluster = TotalSectors / SectorsPerCluster;
+    if (MftCluster >= MaxCluster)
+    {
+        DPRINT1("NtfsVolumeProbeValid: MFT cluster %I64u out of bounds (max %I64u)\n",
+                MftCluster, MaxCluster);
+        NtClose(PartHandle);
+        return FALSE;
+    }
+
+    /* Read MFT record 0 ($MFT) and validate its USA fixup */
+    MftByteOffset = MftCluster * SectorsPerCluster * BytesPerSector;
+    ReadOffset.QuadPart = MftByteOffset;
+
+    Status = NtReadFile(PartHandle, NULL, NULL, NULL,
+                        &IoStatusBlock, MftRecord, (ULONG)MftRecordSize,
+                        &ReadOffset, NULL);
+    NtClose(PartHandle);
+
+    if (!NT_SUCCESS(Status) || IoStatusBlock.Information < (ULONG)MftRecordSize)
+    {
+        DPRINT1("NtfsVolumeProbeValid: read MFT record 0 failed, Status 0x%08lx\n", Status);
+        return FALSE;
+    }
+
+    /* Check FILE signature */
+    if (RtlCompareMemory(MftRecord, "FILE", 4) != 4)
+    {
+        DPRINT1("NtfsVolumeProbeValid: MFT record 0 has bad signature\n");
+        return FALSE;
+    }
+
+    /* Validate USA (Update Sequence Array) fixup */
+    UsaOffset = *(PUSHORT)(MftRecord + 4);
+    UsaCount = *(PUSHORT)(MftRecord + 6);
+
+    if (UsaOffset < 0x30 || UsaOffset >= (USHORT)MftRecordSize ||
+        UsaCount == 0 || UsaCount > (USHORT)(MftRecordSize / BytesPerSector + 1))
+    {
+        DPRINT1("NtfsVolumeProbeValid: bad USA (offset=%u count=%u)\n", UsaOffset, UsaCount);
+        return FALSE;
+    }
+
+    UsaPtr = (PUSHORT)(MftRecord + UsaOffset);
+    SeqNumber = UsaPtr[0];
+
+    /* Verify each sector's last two bytes match the USA sequence number */
+    for (i = 1; i < UsaCount; i++)
+    {
+        USHORT *SectorEnd = (PUSHORT)(MftRecord + i * BytesPerSector - sizeof(USHORT));
+        if (*SectorEnd != SeqNumber)
+        {
+            DPRINT1("NtfsVolumeProbeValid: USA fixup mismatch in sector %u "
+                    "(expected 0x%04x, got 0x%04x) — MFT is corrupt\n",
+                    i, SeqNumber, *SectorEnd);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
 static VOID
 FindNTOSInstallations(
     _Inout_ PGENERIC_LIST List,
@@ -701,6 +862,15 @@ FindNTOSInstallations(
                         L"%s\\", Volume->Info.DeviceName);
     RtlInitUnicodeString(&VolumeRootPath, PathBuffer);
     DPRINT("FindNTOSInstallations(%wZ)\n", &VolumeRootPath);
+
+    /* Probe the NTFS volume before mounting — a corrupted NTFS can crash
+     * the kernel during mount/directory traversal. Skip if invalid. */
+    if (!NtfsVolumeProbeValid(Volume->Info.DeviceName))
+    {
+        DPRINT1("FindNTOSInstallations: volume '%S' failed NTFS probe, skipping\n",
+                Volume->Info.DeviceName);
+        return;
+    }
 
     /* Open the volume */
     InitializeObjectAttributes(&ObjectAttributes,
