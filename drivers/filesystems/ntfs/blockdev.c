@@ -104,6 +104,47 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
     return STATUS_SUCCESS;
 }
 
+/**
+ * @brief Write disk data and keep the volume stream cache coherent.
+ *
+ * Wraps NtfsWriteDisk: after writing directly to the storage device,
+ * purges the corresponding byte range from the volume stream cache so
+ * that subsequent NtfsReadDiskCached calls return the fresh data.
+ */
+NTSTATUS
+NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
+                    IN LONGLONG StartingOffset,
+                    IN ULONG Length,
+                    IN const PUCHAR Buffer)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER PurgeOffset;
+    LARGE_INTEGER PurgeLength;
+
+    Status = NtfsWriteDisk(Vcb->StorageDevice,
+                           StartingOffset,
+                           Length,
+                           Vcb->NtfsInfo.BytesPerSector,
+                           Buffer);
+
+    if (NT_SUCCESS(Status) &&
+        Vcb->StreamFileObject != NULL &&
+        Vcb->StreamFileObject->SectionObjectPointer != NULL &&
+        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap != NULL &&
+        StartingOffset < NTFS_MAX_CACHED_OFFSET)
+    {
+        PurgeOffset.QuadPart = StartingOffset;
+        PurgeLength.QuadPart = min((LONGLONG)Length,
+                                   NTFS_MAX_CACHED_OFFSET - StartingOffset);
+        CcPurgeCacheSection(Vcb->StreamFileObject->SectionObjectPointer,
+                            &PurgeOffset,
+                            (ULONG)PurgeLength.QuadPart,
+                            FALSE);
+    }
+
+    return Status;
+}
+
 NTSTATUS
 NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
              IN LONGLONG StartingOffset,

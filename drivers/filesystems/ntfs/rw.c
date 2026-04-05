@@ -476,11 +476,10 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // would write INTO the MFT data, corrupting it.
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
-        return NtfsWriteDisk(DeviceExt->StorageDevice,
-                             WriteOffset,
-                             Length,
-                             DeviceExt->NtfsInfo.BytesPerSector,
-                             Buffer);
+        return NtfsWriteDiskCached(DeviceExt,
+                                    WriteOffset,
+                                    Length,
+                                    Buffer);
     }
 
     // we don't yet handle compression

@@ -1504,11 +1504,10 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
     StartingOffset = DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster + Offset - CurrentOffset;
 
     // Write the data to the disk
-    Status = NtfsWriteDisk(Vcb->StorageDevice,
-                           StartingOffset,
-                           WriteLength,
-                           Vcb->NtfsInfo.BytesPerSector,
-                           (PVOID)SourceBuffer);
+    Status = NtfsWriteDiskCached(Vcb,
+                                 StartingOffset,
+                                 WriteLength,
+                                 (PVOID)SourceBuffer);
 
     // Did the write fail?
     if (!NT_SUCCESS(Status))
@@ -1559,11 +1558,10 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
         else
         {
             // write the data to the disk
-            Status = NtfsWriteDisk(Vcb->StorageDevice,
-                                   DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster,
-                                   WriteLength,
-                                   Vcb->NtfsInfo.BytesPerSector,
-                                   (PVOID)SourceBuffer);
+            Status = NtfsWriteDiskCached(Vcb,
+                                         DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster,
+                                         WriteLength,
+                                         (PVOID)SourceBuffer);
             if (!NT_SUCCESS(Status))
                 break;
         }
@@ -2891,7 +2889,9 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     BytesRead = ReadAttribute(Vcb, IndexAllocationContext, Offset, (PCHAR)IndexRecord, IndexBlockSize);
     if (BytesRead != IndexBlockSize)
     {
-        DPRINT1("Unable to read index record!\n");
+        DPRINT1("Unable to read index record! VCN=%I64u Offset=%I64u Expected=%lu Got=%I64u DataSize=%I64u\n",
+                VCN, Offset, IndexBlockSize, BytesRead,
+                IndexAllocationContext->pRecord->NonResident.DataSize);
         ExFreePoolWithTag(IndexRecord, TAG_NTFS);
         return STATUS_UNSUCCESSFUL;
     }
@@ -3194,7 +3194,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     IndexRoot = (PINDEX_ROOT_ATTRIBUTE)IndexRecord;
     IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)&IndexRoot->Header + IndexRoot->Header.FirstEntryOffset);
     /* Index root is always resident. */
-    IndexEntryEnd = (PINDEX_ENTRY_ATTRIBUTE)(IndexRecord + IndexRoot->Header.TotalSizeOfEntries);
+    IndexEntryEnd = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)&IndexRoot->Header + IndexRoot->Header.TotalSizeOfEntries);
     ReleaseAttributeContext(IndexRootCtx);
 
     DPRINT("IndexRecordSize: %x IndexBlockSize: %x\n", Vcb->NtfsInfo.BytesPerIndexRecord, IndexRoot->SizeOfEntry);

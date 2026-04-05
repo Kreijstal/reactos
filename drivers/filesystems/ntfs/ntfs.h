@@ -738,6 +738,12 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
               IN const PUCHAR Buffer);
 
 NTSTATUS
+NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
+                    IN LONGLONG StartingOffset,
+                    IN ULONG Length,
+                    IN const PUCHAR Buffer);
+
+NTSTATUS
 NtfsReadSectors(IN PDEVICE_OBJECT DeviceObject,
                 IN ULONG DiskSector,
                 IN ULONG SectorCount,
