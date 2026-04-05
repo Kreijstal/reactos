@@ -40,8 +40,13 @@
  * This prevents deadlocks when called from page fault or section flush
  * contexts where kernel APCs are disabled.
  *
+ * Only caches reads within the first 128MB of the volume (MFT zone) to
+ * avoid paged pool exhaustion from accumulated BCBs during large installs.
+ *
  * Falls back to NtfsReadDisk if the cache is not initialized.
  */
+#define NTFS_MAX_CACHED_OFFSET (128 * 1024 * 1024LL)
+
 NTSTATUS
 NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
                    IN LONGLONG StartingOffset,
@@ -55,7 +60,8 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
 
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL ||
-        IoGetTopLevelIrp() != NULL)
+        IoGetTopLevelIrp() != NULL ||
+        StartingOffset + Length > NTFS_MAX_CACHED_OFFSET)
     {
         return NtfsReadDisk(Vcb->StorageDevice,
                             StartingOffset,
@@ -111,6 +117,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     LARGE_INTEGER Offset;
     KEVENT Event;
     PIRP Irp;
+    PMDL Mdl;
     NTSTATUS Status;
     ULONGLONG RealReadOffset;
     ULONG RealLength;
@@ -182,11 +189,30 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
         Stack->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
     }
 
+    /*
+     * Save the MDL pointer — the paging IO completion path frees the IRP
+     * via IoFreeIrp but does NOT unlock or free the MDL. The storage
+     * driver may have called MmProbeAndLockPages on it, so we must call
+     * MmUnlockPages + IoFreeMdl ourselves after the IRP completes.
+     */
+    Mdl = Irp->MdlAddress;
+
     Status = IoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Suspended, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
+    }
+
+    /* Irp has been freed by IofCompleteRequest (paging IO path).
+     * Unlock and free the MDL that IoBuildSynchronousFsdRequest allocated. */
+    if (Mdl)
+    {
+        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+        {
+            MmUnlockPages(Mdl);
+        }
+        IoFreeMdl(Mdl);
     }
 
     if (AllocatedBuffer)
@@ -244,6 +270,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
     LARGE_INTEGER Offset;
     KEVENT Event;
     PIRP Irp;
+    PMDL Mdl;
     NTSTATUS Status;
     ULONGLONG RealWriteOffset;
     ULONG RealLength;
@@ -354,11 +381,22 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
     InitializeListHead(&Irp->ThreadListEntry);
     Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
 
+    Mdl = Irp->MdlAddress;
+
     Status = IoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Suspended, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
+    }
+
+    if (Mdl)
+    {
+        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+        {
+            MmUnlockPages(Mdl);
+        }
+        IoFreeMdl(Mdl);
     }
 
     if (AllocatedBuffer)

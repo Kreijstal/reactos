@@ -1491,6 +1491,7 @@ CreateBTreeKeyFromFilename(ULONGLONG FileReference, PFILENAME_ATTRIBUTE FileName
     }
     NewKey->IndexEntry = NewEntry;
     NewKey->NextKey = NULL;
+    NewKey->LesserChild = NULL;
 
     return NewKey;
 }

@@ -228,6 +228,7 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
     PNTFS_FCB Fcb;
     PERESOURCE Resource;
+    BOOLEAN PagingIo, NonCachedIo;
 
     DPRINT("NtfsRead(IrpContext %p)\n", IrpContext);
 
@@ -239,37 +240,103 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     DeviceExt = DeviceObject->DeviceExtension;
     ReadLength = Stack->Parameters.Read.Length;
     ReadOffset = Stack->Parameters.Read.ByteOffset;
-    Buffer = NtfsGetUserBuffer(Irp, BooleanFlagOn(Irp->Flags, IRP_PAGING_IO));
 
     Fcb = (PNTFS_FCB)FileObject->FsContext;
     ASSERT(Fcb);
 
-    DPRINT1("NtfsRead: FCB=%p Flags=0x%lx IrpFlags=0x%lx\n", Fcb, Fcb ? Fcb->Flags : 0, Irp->Flags);
+    PagingIo = BooleanFlagOn(Irp->Flags, IRP_PAGING_IO);
+    NonCachedIo = BooleanFlagOn(Irp->Flags, IRP_NOCACHE) ||
+                  BooleanFlagOn(FileObject->Flags, FILE_NO_INTERMEDIATE_BUFFERING);
+
+    DPRINT("NtfsRead: FCB=%p Flags=0x%lx IrpFlags=0x%lx Offset=%I64d Length=%lu\n",
+           Fcb, Fcb->Flags, Irp->Flags, ReadOffset.QuadPart, ReadLength);
+
+    if (ReadLength == 0)
+    {
+        Irp->IoStatus.Information = 0;
+        return STATUS_SUCCESS;
+    }
 
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Resource = &DeviceExt->DirResource;
-        DPRINT1("NtfsRead: using DirResource\n");
     }
-    else if (Irp->Flags & IRP_PAGING_IO)
+    else if (PagingIo)
     {
         Resource = &Fcb->PagingIoResource;
-        DPRINT1("NtfsRead: using PagingIoResource\n");
     }
     else
     {
         Resource = &Fcb->MainResource;
-        DPRINT1("NtfsRead: using MainResource\n");
     }
 
-    DPRINT1("NtfsRead: acquiring resource shared...\n");
     if (!ExAcquireResourceSharedLite(Resource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT1("NtfsRead: ExAcquireResourceSharedLite returned FALSE (CANT_WAIT)\n");
-        return STATUS_CANT_WAIT;
+        return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT1("NtfsRead: resource acquired\n");
+
+    /*
+     * Cached read path: use CcCopyRead for non-paging, cached reads on
+     * regular files. The cache manager will issue IRP_PAGING_IO back to us
+     * on cache misses, which falls through to the non-cached path below.
+     */
+    if (!PagingIo && !NonCachedIo && !(Fcb->Flags & FCB_IS_VOLUME))
+    {
+        /* Ensure cache is initialized on this FileObject */
+        if (FileObject->PrivateCacheMap == NULL)
+        {
+            CcInitializeCacheMap(FileObject,
+                                 (PCC_FILE_SIZES)(&Fcb->RFCB.AllocationSize),
+                                 FALSE,
+                                 &(NtfsGlobalData->CacheMgrCallbacks),
+                                 Fcb);
+        }
+
+        /* Clamp read to file size */
+        if (ReadOffset.QuadPart >= Fcb->RFCB.FileSize.QuadPart)
+        {
+            ExReleaseResourceLite(Resource);
+            Irp->IoStatus.Information = 0;
+            return STATUS_END_OF_FILE;
+        }
+        if (ReadOffset.QuadPart + ReadLength > Fcb->RFCB.FileSize.QuadPart)
+        {
+            ReadLength = (ULONG)(Fcb->RFCB.FileSize.QuadPart - ReadOffset.QuadPart);
+        }
+
+        Buffer = NtfsGetUserBuffer(Irp, FALSE);
+
+        if (!CcCopyRead(FileObject,
+                        &ReadOffset,
+                        ReadLength,
+                        BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT),
+                        Buffer,
+                        &Irp->IoStatus))
+        {
+            ExReleaseResourceLite(Resource);
+            return NtfsMarkIrpContextForQueue(IrpContext);
+        }
+
+        Status = Irp->IoStatus.Status;
+        ReturnedReadLength = (ULONG)Irp->IoStatus.Information;
+
+        if (NT_SUCCESS(Status) && (FileObject->Flags & FO_SYNCHRONOUS_IO))
+        {
+            FileObject->CurrentByteOffset.QuadPart =
+                ReadOffset.QuadPart + ReturnedReadLength;
+        }
+
+        ExReleaseResourceLite(Resource);
+        return Status;
+    }
+
+    /*
+     * Non-cached / paging I/O path: read directly from disk via ReadAttribute.
+     * This is called by the cache manager for cache misses, and for
+     * non-cached / paging I/O requests.
+     */
+    Buffer = NtfsGetUserBuffer(Irp, PagingIo);
 
     Status = NtfsReadFile(DeviceExt,
                           FileObject,
@@ -585,38 +652,28 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     PFILE_OBJECT FileObject = NULL;
     PIRP Irp = NULL;
     ULONG BytesPerSector;
+    BOOLEAN PagingIo, NonCachedIo;
 
     DPRINT("NtfsWrite(IrpContext %p)\n", IrpContext);
-    DPRINT1("NtfsWrite: entering for FCB %p\n", IrpContext->FileObject ? IrpContext->FileObject->FsContext : NULL);
     ASSERT(IrpContext);
 
-    // get the I/O request packet
     Irp = IrpContext->Irp;
 
-    // This request is not allowed on the main device object
     if (IrpContext->DeviceObject == NtfsGlobalData->DeviceObject)
     {
-        DPRINT1("\t\t\t\tNtfsWrite is called with the main device object.\n");
-
         Irp->IoStatus.Information = 0;
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    // get the File control block
     Fcb = (PNTFS_FCB)IrpContext->FileObject->FsContext;
     ASSERT(Fcb);
 
-    DPRINT("About to write %wS\n", Fcb->ObjectName);
-    DPRINT("NTFS Version: %d.%d\n", Fcb->Vcb->NtfsInfo.MajorVersion, Fcb->Vcb->NtfsInfo.MinorVersion);
-
-    // setup some more locals
     FileObject = IrpContext->FileObject;
     DeviceObject = IrpContext->DeviceObject;
     DeviceExt = DeviceObject->DeviceExtension;
     BytesPerSector = DeviceExt->StorageDevice->SectorSize;
     Length = IrpContext->Stack->Parameters.Write.Length;
 
-    // get the file offset we'll be writing to
     ByteOffset = IrpContext->Stack->Parameters.Write.ByteOffset;
     if (ByteOffset.u.LowPart == FILE_WRITE_TO_END_OF_FILE &&
         ByteOffset.u.HighPart == -1)
@@ -624,21 +681,22 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         ByteOffset.QuadPart = Fcb->RFCB.FileSize.QuadPart;
     }
 
-    DPRINT("ByteOffset: %I64u\tLength: %lu\tBytes per sector: %lu\n", ByteOffset.QuadPart,
-        Length, BytesPerSector);
+    PagingIo = BooleanFlagOn(Irp->Flags, IRP_PAGING_IO);
+    NonCachedIo = BooleanFlagOn(Irp->Flags, IRP_NOCACHE) ||
+                  BooleanFlagOn(FileObject->Flags, FILE_NO_INTERMEDIATE_BUFFERING) ||
+                  BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME);
+
+    DPRINT("NtfsWrite: FCB=%p Offset=%I64u Length=%lu PagingIo=%d NonCached=%d\n",
+           Fcb, ByteOffset.QuadPart, Length, PagingIo, NonCachedIo);
 
     if (ByteOffset.u.HighPart && !(Fcb->Flags & FCB_IS_VOLUME))
     {
-        // TODO: Support large files
         DPRINT1("FIXME: Writing to large files is not yet supported at this time.\n");
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Is this a non-cached write? A non-buffered write?
-    if (IrpContext->Irp->Flags & (IRP_PAGING_IO | IRP_NOCACHE) || (Fcb->Flags & FCB_IS_VOLUME) ||
-        IrpContext->FileObject->Flags & FILE_NO_INTERMEDIATE_BUFFERING)
+    if (PagingIo || NonCachedIo)
     {
-        // non-cached and non-buffered writes must be sector aligned
         if (ByteOffset.u.LowPart % BytesPerSector != 0 || Length % BytesPerSector != 0)
         {
             DPRINT1("Non-cached writes and non-buffered writes must be sector aligned!\n");
@@ -648,26 +706,21 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
 
     if (Length == 0)
     {
-        DPRINT1("Null write!\n");
-
         IrpContext->Irp->IoStatus.Information = 0;
 
-        // FIXME: Doesn't accurately detect when a user passes NULL to WriteFile() for the buffer
         if (Irp->UserBuffer == NULL && Irp->MdlAddress == NULL)
         {
-            // FIXME: Update last write time
             return STATUS_SUCCESS;
         }
 
         return STATUS_INVALID_PARAMETER;
     }
 
-    // get the Resource
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Resource = &DeviceExt->DirResource;
     }
-    else if (IrpContext->Irp->Flags & IRP_PAGING_IO)
+    else if (PagingIo)
     {
         Resource = &Fcb->PagingIoResource;
     }
@@ -676,57 +729,89 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         Resource = &Fcb->MainResource;
     }
 
-    // acquire exclusive access to the Resource
-    DPRINT1("NtfsWrite: acquiring resource %p exclusive...\n", Resource);
     if (!ExAcquireResourceExclusiveLite(Resource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT1("NtfsWrite: can't wait, returning STATUS_CANT_WAIT\n");
-        return STATUS_CANT_WAIT;
+        return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT1("NtfsWrite: resource acquired\n");
 
-    /* From VfatWrite(). Todo: Handle file locks
-    if (!(IrpContext->Irp->Flags & IRP_PAGING_IO) &&
-    FsRtlAreThereCurrentFileLocks(&Fcb->FileLock))
+    /*
+     * Cached write path: use CcCopyWrite for non-paging, cached writes on
+     * regular files. For extending writes, grow the file first via
+     * NtfsWriteFile (which handles SetAttributeDataLength + CcSetFileSizes),
+     * then write the data through the cache.
+     */
+    if (!PagingIo && !NonCachedIo && !(Fcb->Flags & FCB_IS_VOLUME))
     {
-    if (!FsRtlCheckLockForWriteAccess(&Fcb->FileLock, IrpContext->Irp))
-    {
-    Status = STATUS_FILE_LOCK_CONFLICT;
-    goto ByeBye;
-    }
-    }*/
+        /* Extend the file if needed — allocate clusters and update sizes */
+        if (ByteOffset.QuadPart + Length > Fcb->RFCB.FileSize.QuadPart)
+        {
+            LARGE_INTEGER NewSize;
+            NewSize.QuadPart = ByteOffset.QuadPart + Length;
 
-    // Is this an async request to a file?
-    if (!(IrpContext->Flags & IRPCONTEXT_CANWAIT) && !(Fcb->Flags & FCB_IS_VOLUME))
-    {
-        DPRINT1("FIXME: Async writes not supported in NTFS!\n");
+            Status = NtfsSetEndOfFile(Fcb,
+                                      FileObject,
+                                      DeviceExt,
+                                      Irp->Flags,
+                                      BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
+                                      &NewSize);
+            if (!NT_SUCCESS(Status))
+            {
+                ExReleaseResourceLite(Resource);
+                Irp->IoStatus.Information = 0;
+                return Status;
+            }
+        }
 
+        if (FileObject->PrivateCacheMap == NULL)
+        {
+            CcInitializeCacheMap(FileObject,
+                                 (PCC_FILE_SIZES)(&Fcb->RFCB.AllocationSize),
+                                 FALSE,
+                                 &(NtfsGlobalData->CacheMgrCallbacks),
+                                 Fcb);
+        }
+
+        Buffer = NtfsGetUserBuffer(Irp, FALSE);
+
+        if (!CcCopyWrite(FileObject,
+                         &ByteOffset,
+                         Length,
+                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT),
+                         Buffer))
+        {
+            ExReleaseResourceLite(Resource);
+            return NtfsMarkIrpContextForQueue(IrpContext);
+        }
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = Length;
+
+        if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+        {
+            FileObject->CurrentByteOffset.QuadPart = ByteOffset.QuadPart + Length;
+        }
+
+        IrpContext->PriorityBoost = IO_DISK_INCREMENT;
         ExReleaseResourceLite(Resource);
-        return STATUS_NOT_IMPLEMENTED;
+
+        return STATUS_SUCCESS;
     }
 
-    // get the buffer of data the user is trying to write
-    Buffer = NtfsGetUserBuffer(Irp, BooleanFlagOn(Irp->Flags, IRP_PAGING_IO));
+    /*
+     * Non-cached / paging I/O path: write directly to disk via WriteAttribute.
+     * This is called by the cache manager for dirty page writeback, and for
+     * non-cached / paging I/O requests.
+     */
+    Buffer = NtfsGetUserBuffer(Irp, PagingIo);
     ASSERT(Buffer);
 
-    // lock the buffer
     Status = NtfsLockUserBuffer(Irp, Length, IoReadAccess);
-
-    // were we unable to lock the buffer?
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Unable to lock user buffer!\n");
-
         ExReleaseResourceLite(Resource);
         return Status;
     }
 
-    DPRINT("Existing File Size(Fcb->RFCB.FileSize.QuadPart): %I64u\n", Fcb->RFCB.FileSize.QuadPart);
-    DPRINT("About to write the data. Length: %lu\n", Length);
-
-    // TODO: handle HighPart of ByteOffset (large files)
-
-    // write the file
     Status = NtfsWriteFile(DeviceExt,
                            FileObject,
                            Buffer,
@@ -738,27 +823,17 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
 
     IrpContext->Irp->IoStatus.Status = Status;
 
-    // was the write successful?
     if (NT_SUCCESS(Status))
     {
-        // TODO: Update timestamps
-
         if (FileObject->Flags & FO_SYNCHRONOUS_IO)
         {
-            // advance the file pointer
             FileObject->CurrentByteOffset.QuadPart = ByteOffset.QuadPart + ReturnedWriteLength;
         }
 
         IrpContext->PriorityBoost = IO_DISK_INCREMENT;
     }
-    else
-    {
-        DPRINT1("Write not Succesful!\tReturned length: %lu\n", ReturnedWriteLength);
-    }
 
     Irp->IoStatus.Information = ReturnedWriteLength;
-
-    // Note: We leave the user buffer that we locked alone, it's up to the I/O manager to unlock and free it
 
     ExReleaseResourceLite(Resource);
 
