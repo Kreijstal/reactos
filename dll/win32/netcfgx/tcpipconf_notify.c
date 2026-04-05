@@ -67,6 +67,7 @@ typedef struct
     IP_ADDR *Gw;
 
     UINT DhcpEnabled;
+    UINT DnsDhcpEnabled;
     DWORD Metric;
     DWORD Index;
     AlternateConfiguration AltConfig;
@@ -2432,6 +2433,7 @@ StoreTcpipBasicSettings(
     if (IsDlgButtonChecked(hwndDlg, IDC_NODHCP) == BST_CHECKED)
     {
         This->pCurrentConfig->DhcpEnabled = FALSE;
+
         if (SendDlgItemMessageW(hwndDlg, IDC_IPADDR, IPM_GETADDRESS, 0, (LPARAM)&dwIpAddr) != 4)
         {
             if (bApply)
@@ -2473,26 +2475,34 @@ StoreTcpipBasicSettings(
         }
         /* store subnetmask */
         This->pCurrentConfig->Ip->u.Subnetmask = dwIpAddr;
+
+        if (SendDlgItemMessageW(hwndDlg, IDC_DEFGATEWAY, IPM_GETADDRESS, 0, (LPARAM)&dwIpAddr) == 4)
+        {
+            if (!This->pCurrentConfig->Gw)
+            {
+                This->pCurrentConfig->Gw = (IP_ADDR*)CoTaskMemAlloc(sizeof(IP_ADDR));
+                if (!This->pCurrentConfig->Gw)
+                    return E_OUTOFMEMORY;
+                ZeroMemory(This->pCurrentConfig->Gw, sizeof(IP_ADDR));
+            }
+
+            /* store default gateway */
+            This->pCurrentConfig->Gw->IpAddress = dwIpAddr;
+        }
     }
     else
     {
         This->pCurrentConfig->DhcpEnabled = TRUE;
-    }
 
-    if (SendDlgItemMessageW(hwndDlg, IDC_DEFGATEWAY, IPM_GETADDRESS, 0, (LPARAM)&dwIpAddr) == 4)
-    {
-        if (!This->pCurrentConfig->Gw)
+        /* Delete all configured ip addresses */
+        if (This->pCurrentConfig->Ip)
         {
-            This->pCurrentConfig->Gw = (IP_ADDR*)CoTaskMemAlloc(sizeof(IP_ADDR));
-            if (!This->pCurrentConfig->Gw)
-                return E_OUTOFMEMORY;
-            ZeroMemory(This->pCurrentConfig->Gw, sizeof(IP_ADDR));
+            IP_ADDR * pNextIp = This->pCurrentConfig->Ip->Next;
+            CoTaskMemFree(This->pCurrentConfig->Ip);
+            This->pCurrentConfig->Ip = pNextIp;
         }
-        /* store default gateway */
-        This->pCurrentConfig->Gw->IpAddress = dwIpAddr;
-    }
-    else
-    {
+
+        /* Delete all configured gateway addresses */
         if (This->pCurrentConfig->Gw)
         {
             IP_ADDR * pNextGw = This->pCurrentConfig->Gw->Next;
@@ -2503,6 +2513,8 @@ StoreTcpipBasicSettings(
 
     if (IsDlgButtonChecked(hwndDlg, IDC_FIXEDDNS) == BST_CHECKED)
     {
+        This->pCurrentConfig->DnsDhcpEnabled = FALSE;
+
         BOOL bSkip = FALSE;
         if (SendDlgItemMessageW(hwndDlg, IDC_DNS1, IPM_GETADDRESS, 0, (LPARAM)&dwIpAddr) == 4)
         {
@@ -2523,7 +2535,6 @@ StoreTcpipBasicSettings(
             This->pCurrentConfig->Ns = pTemp;
             bSkip = TRUE;
         }
-
 
         if (SendDlgItemMessageW(hwndDlg, IDC_DNS2, IPM_GETADDRESS, 0, (LPARAM)&dwIpAddr) == 4)
         {
@@ -2567,6 +2578,18 @@ StoreTcpipBasicSettings(
                     This->pCurrentConfig->Ns->Next = NULL;
                 }
             }
+        }
+    }
+    else
+    {
+        This->pCurrentConfig->DnsDhcpEnabled = TRUE;
+
+        /* Delete all configured name server addresses */
+        if (This->pCurrentConfig->Ns)
+        {
+            IP_ADDR * pNextNs = This->pCurrentConfig->Ns->Next;
+            CoTaskMemFree(This->pCurrentConfig->Ns);
+            This->pCurrentConfig->Ns = pNextNs;
         }
     }
 
@@ -2630,7 +2653,7 @@ InitializeTcpipBasicDlgCtrls(
         }
     }
 
-    if (pCurSettings->DhcpEnabled && (pCurSettings->Ns == NULL))
+    if (pCurSettings->DnsDhcpEnabled)
     {
         CheckRadioButton(hwndDlg, IDC_AUTODNS, IDC_FIXEDDNS, IDC_AUTODNS);
         EnableWindow(GetDlgItem(hwndDlg, IDC_DNS1), FALSE);
@@ -3015,6 +3038,7 @@ LoadTcpIpSettings(
 
     CopyIpAddrString(&pPerAdapterInfo->DnsServerList, &pSettings->Ns, IPADDR, NULL);
 
+    pSettings->DnsDhcpEnabled = (pSettings->DhcpEnabled && (pSettings->Ns == NULL));
 
     _swprintf(szBuffer, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\%s", pAdapterName);
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szBuffer, 0, KEY_READ, &hInterfaceKey) != ERROR_SUCCESS)
