@@ -2499,7 +2499,7 @@ NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    // We're done with the B-Tree now
+    // We're done with the B-Tree now (DestroyBTree releases IndexAllocationContext)
     DestroyBTree(NewTree);
 
     // Write back the new index root attribute to the parent directory file record
@@ -2560,31 +2560,23 @@ NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    // re-read the parent file record, so we can dump it
-    Status = ReadFileRecord(DeviceExt, DirectoryMftIndex, ParentFileRecord);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("ERROR: Couldn't read parent directory after messing with it!\n");
-    }
-    else
-    {
 #ifndef NDEBUG
+    // re-read the parent file record for debug dumping
+    Status = ReadFileRecord(DeviceExt, DirectoryMftIndex, ParentFileRecord);
+    if (NT_SUCCESS(Status))
+    {
         DPRINT1("Dumping new B-Tree:\n");
 
         Status = CreateBTreeFromIndex(DeviceExt, ParentFileRecord, IndexRootContext, NewIndexRoot, &NewTree);
-        if (!NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status))
         {
-            DPRINT1("ERROR: Couldn't re-create b-tree\n");
-            return Status;
+            DumpBTree(NewTree);
+            DestroyBTree(NewTree);
         }
 
-        DumpBTree(NewTree);
-
-        DestroyBTree(NewTree);
-
         NtfsDumpFileRecord(DeviceExt, ParentFileRecord);
-#endif
     }
+#endif
 
     // Cleanup
     ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
