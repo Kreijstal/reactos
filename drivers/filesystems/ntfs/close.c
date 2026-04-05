@@ -98,6 +98,9 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_SUCCESS;
     }
 
+    FileObject = IrpContext->FileObject;
+    DeviceExtension = DeviceObject->DeviceExtension;
+
     if (FileObject == NULL)
     {
         IrpContext->Irp->IoStatus.Information = 0;

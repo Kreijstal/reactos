@@ -714,6 +714,7 @@ NtfsVolumeProbeValid(
     PUSHORT UsaPtr;
     USHORT SeqNumber;
     USHORT i;
+    ULONG MftRecordIndex;
 
     RtlInitUnicodeString(&PartPath, DeviceName);
     InitializeObjectAttributes(&ObjectAttributes,
@@ -788,55 +789,71 @@ NtfsVolumeProbeValid(
         return FALSE;
     }
 
-    /* Read MFT record 0 ($MFT) and validate its USA fixup */
     MftByteOffset = MftCluster * SectorsPerCluster * BytesPerSector;
-    ReadOffset.QuadPart = MftByteOffset;
 
-    Status = NtReadFile(PartHandle, NULL, NULL, NULL,
-                        &IoStatusBlock, MftRecord, (ULONG)MftRecordSize,
-                        &ReadOffset, NULL);
-    NtClose(PartHandle);
-
-    if (!NT_SUCCESS(Status) || IoStatusBlock.Information < (ULONG)MftRecordSize)
+    /* Validate MFT records 0 ($MFT) and 5 (root directory).
+     * Record 5 is checked because the NTFS driver accesses it during
+     * volume mount and directory traversal — if its USA is corrupt,
+     * the driver can trigger a kernel #GP. */
+    for (MftRecordIndex = 0; MftRecordIndex <= 5; MftRecordIndex++)
     {
-        DPRINT1("NtfsVolumeProbeValid: read MFT record 0 failed, Status 0x%08lx\n", Status);
-        return FALSE;
-    }
+        /* Only check records 0 and 5 */
+        if (MftRecordIndex != 0 && MftRecordIndex != 5)
+            continue;
 
-    /* Check FILE signature */
-    if (RtlCompareMemory(MftRecord, "FILE", 4) != 4)
-    {
-        DPRINT1("NtfsVolumeProbeValid: MFT record 0 has bad signature\n");
-        return FALSE;
-    }
+        ReadOffset.QuadPart = MftByteOffset + MftRecordIndex * MftRecordSize;
 
-    /* Validate USA (Update Sequence Array) fixup */
-    UsaOffset = *(PUSHORT)(MftRecord + 4);
-    UsaCount = *(PUSHORT)(MftRecord + 6);
-
-    if (UsaOffset < 0x30 || UsaOffset >= (USHORT)MftRecordSize ||
-        UsaCount == 0 || UsaCount > (USHORT)(MftRecordSize / BytesPerSector + 1))
-    {
-        DPRINT1("NtfsVolumeProbeValid: bad USA (offset=%u count=%u)\n", UsaOffset, UsaCount);
-        return FALSE;
-    }
-
-    UsaPtr = (PUSHORT)(MftRecord + UsaOffset);
-    SeqNumber = UsaPtr[0];
-
-    /* Verify each sector's last two bytes match the USA sequence number */
-    for (i = 1; i < UsaCount; i++)
-    {
-        USHORT *SectorEnd = (PUSHORT)(MftRecord + i * BytesPerSector - sizeof(USHORT));
-        if (*SectorEnd != SeqNumber)
+        Status = NtReadFile(PartHandle, NULL, NULL, NULL,
+                            &IoStatusBlock, MftRecord, (ULONG)MftRecordSize,
+                            &ReadOffset, NULL);
+        if (!NT_SUCCESS(Status) || IoStatusBlock.Information < (ULONG)MftRecordSize)
         {
-            DPRINT1("NtfsVolumeProbeValid: USA fixup mismatch in sector %u "
-                    "(expected 0x%04x, got 0x%04x) — MFT is corrupt\n",
-                    i, SeqNumber, *SectorEnd);
+            DPRINT1("NtfsVolumeProbeValid: read MFT record %lu failed, Status 0x%08lx\n",
+                    MftRecordIndex, Status);
+            NtClose(PartHandle);
             return FALSE;
+        }
+
+        /* Check FILE signature */
+        if (RtlCompareMemory(MftRecord, "FILE", 4) != 4)
+        {
+            DPRINT1("NtfsVolumeProbeValid: MFT record %lu has bad signature\n",
+                    MftRecordIndex);
+            NtClose(PartHandle);
+            return FALSE;
+        }
+
+        /* Validate USA (Update Sequence Array) fixup */
+        UsaOffset = *(PUSHORT)(MftRecord + 4);
+        UsaCount = *(PUSHORT)(MftRecord + 6);
+
+        if (UsaOffset < 0x30 || UsaOffset >= (USHORT)MftRecordSize ||
+            UsaCount == 0 || UsaCount > (USHORT)(MftRecordSize / BytesPerSector + 1))
+        {
+            DPRINT1("NtfsVolumeProbeValid: MFT record %lu bad USA (offset=%u count=%u)\n",
+                    MftRecordIndex, UsaOffset, UsaCount);
+            NtClose(PartHandle);
+            return FALSE;
+        }
+
+        UsaPtr = (PUSHORT)(MftRecord + UsaOffset);
+        SeqNumber = UsaPtr[0];
+
+        for (i = 1; i < UsaCount; i++)
+        {
+            USHORT *SectorEnd = (PUSHORT)(MftRecord + i * BytesPerSector - sizeof(USHORT));
+            if (*SectorEnd != SeqNumber)
+            {
+                DPRINT1("NtfsVolumeProbeValid: MFT record %lu USA mismatch in sector %u "
+                        "(expected 0x%04x, got 0x%04x) — MFT is corrupt\n",
+                        MftRecordIndex, i, SeqNumber, *SectorEnd);
+                NtClose(PartHandle);
+                return FALSE;
+            }
         }
     }
 
+    NtClose(PartHandle);
     return TRUE;
 }
 
