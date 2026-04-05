@@ -3394,7 +3394,7 @@ INetCfgComponentPropertyUi_fnValidateProperties(
     INetCfgComponentPropertyUi * iface,
     HWND hwndDlg)
 {
-MessageBoxW(NULL, L"INetCfgComponentPropertyUi_fnValidateProperties", NULL, MB_OK);
+    TRACE("INetCfgComponentPropertyUi_fnValidateProperties()\n");
     return S_OK;
 }
 
@@ -3403,7 +3403,7 @@ WINAPI
 INetCfgComponentPropertyUi_fnApplyProperties(
     INetCfgComponentPropertyUi * iface)
 {
-MessageBoxW(NULL, L"INetCfgComponentPropertyUi_fnApplyProperties", NULL, MB_OK);
+    TRACE("INetCfgComponentPropertyUi_fnApplyProperties()\n");
     return S_OK;
 }
 
@@ -3412,7 +3412,7 @@ WINAPI
 INetCfgComponentPropertyUi_fnCancelProperties(
     INetCfgComponentPropertyUi * iface)
 {
-//MessageBoxW(NULL, L"INetCfgComponentPropertyUi_fnCancelProperties", NULL, MB_OK);
+    TRACE("INetCfgComponentPropertyUi_fnCancelProperties()\n");
     return S_OK;
 }
 
@@ -3903,7 +3903,7 @@ WINAPI
 INetCfgComponentControl_fnCancelChanges(
     INetCfgComponentControl * iface)
 {
-    //MessageBoxW(NULL, L"INetCfgComponentControl_fnCancelChanges", NULL, MB_OK);
+    TRACE("INetCfgComponentControl_fnCancelChanges()\n");
     return S_OK;
 }
 
