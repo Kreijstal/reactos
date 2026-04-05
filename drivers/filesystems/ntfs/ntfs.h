@@ -122,6 +122,12 @@ typedef struct
     ULONG Flags;
     ULONG OpenHandleCount;
 
+    /* Cached MFT $Bitmap for fast free-record allocation */
+    PUCHAR MftBitmapBuffer;         /* Original allocation (for freeing) */
+    PULONG MftBitmapData;           /* ULONG-aligned pointer within buffer */
+    ULONG MftBitmapSize;
+    ULONG MftNextFreeHint;          /* Next index to start searching from */
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001

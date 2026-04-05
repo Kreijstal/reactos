@@ -2034,9 +2034,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
 
     DPRINT("AddNewMftEntry(%p, %p, %p, %s)\n", FileRecord, DeviceExt, DestinationIndex, CanWait ? "TRUE" : "FALSE");
 
-    // First, we have to read the mft's $Bitmap attribute
-
-    // Find the attribute
+    // Find the $Bitmap attribute
     Status = FindAttribute(DeviceExt, DeviceExt->MasterFileTable, AttributeBitmap, L"", 0, &BitmapContext, NULL);
     if (!NT_SUCCESS(Status))
     {
@@ -2044,35 +2042,44 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
         return Status;
     }
 
-    // Get size of bitmap
     BitmapDataSize = AttributeDataLength(BitmapContext->pRecord);
 
-    // RtlInitializeBitmap wants a ULONG-aligned pointer, and wants the memory passed to it to be a ULONG-multiple
-    // Allocate a buffer for the $Bitmap attribute plus enough to ensure we can get a ULONG-aligned pointer
-    BitmapBuffer = ExAllocatePoolWithTag(NonPagedPool, BitmapDataSize + sizeof(ULONG), TAG_NTFS);
-    if (!BitmapBuffer)
+    // Use cached bitmap if available and size matches; otherwise read from disk
+    if (DeviceExt->MftBitmapData && DeviceExt->MftBitmapSize == BitmapDataSize)
     {
-        ReleaseAttributeContext(BitmapContext);
-        return STATUS_INSUFFICIENT_RESOURCES;
+        BitmapData = (PUCHAR)DeviceExt->MftBitmapData;
+        BitmapBuffer = NULL;
     }
-    RtlZeroMemory(BitmapBuffer, BitmapDataSize + sizeof(ULONG));
-
-    // Get a ULONG-aligned pointer for the bitmap itself
-    BitmapData = (PUCHAR)ALIGN_UP_BY((ULONG_PTR)BitmapBuffer, sizeof(ULONG));
-
-    // read $Bitmap attribute
-    AttrBytesRead = ReadAttribute(DeviceExt, BitmapContext, 0, (PCHAR)BitmapData, BitmapDataSize);
-
-    if (AttrBytesRead != BitmapDataSize)
+    else
     {
-        DPRINT1("ERROR: Unable to read $Bitmap attribute of master file table!\n");
-        ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
-        ReleaseAttributeContext(BitmapContext);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        ULONG AllocSize = ALIGN_UP_BY(BitmapDataSize, sizeof(ULONG));
+        BitmapBuffer = ExAllocatePoolWithTag(NonPagedPool, AllocSize + sizeof(ULONG), TAG_NTFS);
+        if (!BitmapBuffer)
+        {
+            ReleaseAttributeContext(BitmapContext);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        RtlZeroMemory(BitmapBuffer, AllocSize + sizeof(ULONG));
+        BitmapData = (PUCHAR)ALIGN_UP_BY((ULONG_PTR)BitmapBuffer, sizeof(ULONG));
+
+        AttrBytesRead = ReadAttribute(DeviceExt, BitmapContext, 0, (PCHAR)BitmapData, BitmapDataSize);
+        if (AttrBytesRead != BitmapDataSize)
+        {
+            DPRINT1("ERROR: Unable to read $Bitmap attribute of master file table!\n");
+            ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
+            ReleaseAttributeContext(BitmapContext);
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+
+        if (DeviceExt->MftBitmapBuffer)
+            ExFreePoolWithTag(DeviceExt->MftBitmapBuffer, TAG_NTFS);
+        DeviceExt->MftBitmapBuffer = BitmapBuffer;
+        DeviceExt->MftBitmapData = (PULONG)BitmapData;
+        DeviceExt->MftBitmapSize = BitmapDataSize;
+        BitmapBuffer = NULL;
     }
 
-    // We need to backup the bits for records 0x10 - 0x17 (3rd byte of bitmap) and mark these records
-    // as in-use so we don't assign files to those indices. They're reserved for the system (e.g. ChkDsk).
+    // Backup and mask system reserved bits
     SystemReservedBits = BitmapData[2];
     BitmapData[2] = 0xff;
 
@@ -2081,70 +2088,68 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
                           DeviceExt->NtfsInfo.BytesPerFileRecord;
     if (BitmapBits.HighPart != 0)
     {
-        DPRINT1("\tFIXME: bitmap sizes beyond 32bits are not yet supported! (Your NTFS volume is too large)\n");
+        DPRINT1("\tFIXME: bitmap sizes beyond 32bits are not yet supported!\n");
         NtfsGlobalData->EnableWriteSupport = FALSE;
-        ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
+        BitmapData[2] = SystemReservedBits;
         ReleaseAttributeContext(BitmapContext);
         return STATUS_NOT_IMPLEMENTED;
     }
 
-    // convert buffer into bitmap
     RtlInitializeBitMap(&Bitmap, (PULONG)BitmapData, BitmapBits.LowPart);
 
-    // set next available bit, preferrably after 23rd bit
-    MftIndex = RtlFindClearBitsAndSet(&Bitmap, 1, 24);
+    // Search from hint for faster allocation
+    MftIndex = RtlFindClearBitsAndSet(&Bitmap, 1,
+                                       DeviceExt->MftNextFreeHint ? DeviceExt->MftNextFreeHint : 24);
     if ((LONG)MftIndex == -1)
     {
-        DPRINT1("Couldn't find free space in MFT for file record, increasing MFT size.\n");
-
-        ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
+        DPRINT1("Couldn't find free space in MFT, increasing size.\n");
+        BitmapData[2] = SystemReservedBits;
         ReleaseAttributeContext(BitmapContext);
 
-        // Couldn't find a free record in the MFT, add some blank records and try again
+        // Invalidate cache since MFT size is changing
+        if (DeviceExt->MftBitmapBuffer)
+        {
+            ExFreePoolWithTag(DeviceExt->MftBitmapBuffer, TAG_NTFS);
+            DeviceExt->MftBitmapBuffer = NULL;
+            DeviceExt->MftBitmapData = NULL;
+            DeviceExt->MftBitmapSize = 0;
+        }
+
         Status = IncreaseMftSize(DeviceExt, CanWait);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("ERROR: Couldn't find space in MFT for file or increase MFT size!\n");
+            DPRINT1("ERROR: Couldn't increase MFT size!\n");
             return Status;
         }
 
         return AddNewMftEntry(FileRecord, DeviceExt, DestinationIndex, CanWait);
     }
 
-    DPRINT("Creating file record at MFT index: %I64u\n", MftIndex);
+    // Update hint for next allocation
+    DeviceExt->MftNextFreeHint = MftIndex + 1;
 
-    // update file record with index
     FileRecord->MFTRecordNumber = MftIndex;
-
-    // [BitmapData should have been updated via RtlFindClearBitsAndSet()]
-
-    // Restore the system reserved bits
     BitmapData[2] = SystemReservedBits;
 
-    // write the bitmap back to the MFT's $Bitmap attribute
+    // Write bitmap to disk
     Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, FileRecord);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
-        ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         return Status;
     }
 
-    // update the file record (write it to disk)
+    // Write the file record to disk
     Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
-
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Unable to write file record!\n");
-        ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         return Status;
     }
 
     *DestinationIndex = MftIndex;
-
-    ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
     ReleaseAttributeContext(BitmapContext);
 
     return Status;

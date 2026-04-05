@@ -17,6 +17,7 @@ typedef struct _MKNTFS_PARAMS {
     ULONG     index_record_size; /* Bytes per index record (default 4096) */
     const WCHAR *label;          /* Volume label (NULL = no label) */
     ULONGLONG serial_number;     /* 0 = auto-generate */
+    ULONG     hidden_sectors;    /* Sectors before partition (for BPB) */
     int       quick_format;      /* Skip zeroing */
 } MKNTFS_PARAMS;
 

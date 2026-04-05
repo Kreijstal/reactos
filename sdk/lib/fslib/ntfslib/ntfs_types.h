@@ -50,7 +50,10 @@ typedef struct _NTFS_BOOT_SECTOR {
     USHORT NumberOfHeads;          /* 0x1A */
     ULONG  HiddenSectors;         /* 0x1C */
     UCHAR  Unused2[4];            /* 0x20 */
-    UCHAR  Unused3[4];            /* 0x24: 0x800080 */
+    UCHAR  BiosDriveNumber;       /* 0x24: BIOS drive (0x80 = first HD) */
+    UCHAR  Reserved24;            /* 0x25 */
+    UCHAR  ExtBootSignature;      /* 0x26: 0x80 */
+    UCHAR  Reserved27;            /* 0x27 */
     ULONGLONG TotalSectors;        /* 0x28 */
     ULONGLONG MftStartLcn;         /* 0x30: MFT cluster */
     ULONGLONG MftMirrStartLcn;     /* 0x38: MFTMirr cluster */
