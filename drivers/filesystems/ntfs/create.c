@@ -592,7 +592,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
             if (!NT_SUCCESS(Status))
             {
-                DPRINT1("ERROR: Couldn't create file record!\n");
+                DPRINT1("ERROR: Couldn't create file record! Status = 0x%lx\n", Status);
                 return Status;
             }
 

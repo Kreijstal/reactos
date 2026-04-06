@@ -1975,8 +1975,9 @@ FixupUpdateSequenceArray(PDEVICE_EXTENSION Vcb,
     {
         if (*Block != USANumber)
         {
-            DPRINT1("Mismatch with USA: %u read, %u expected\n" , *Block, USANumber);
-            return STATUS_UNSUCCESSFUL;
+            DPRINT1("USA mismatch in record type 0x%04lx: %u read, %u expected\n",
+                    Record->Type, *Block, USANumber);
+            return STATUS_FILE_CORRUPT_ERROR;
         }
         *Block = *(USA++);
         Block = (USHORT*)((PCHAR)Block + Vcb->NtfsInfo.BytesPerSector);

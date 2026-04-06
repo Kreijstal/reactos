@@ -237,6 +237,54 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
+    // Write an empty, valid INDX record to the newly allocated space so that
+    // reads before UpdateIndexNode() don't encounter uninitialized data.
+    {
+        PINDEX_BUFFER NewIndexBuffer;
+        ULONG BytesWrittenIdx;
+        ULONG UsaCount;
+
+        NewIndexBuffer = ExAllocatePoolWithTag(NonPagedPool, IndexBufferSize, TAG_NTFS);
+        if (NewIndexBuffer)
+        {
+            RtlZeroMemory(NewIndexBuffer, IndexBufferSize);
+
+            // Initialize INDX record header
+            NewIndexBuffer->Ntfs.Type = NRH_INDX_TYPE;
+            UsaCount = IndexBufferSize / DeviceExt->NtfsInfo.BytesPerSector + 1;
+            NewIndexBuffer->Ntfs.UsaOffset = FIELD_OFFSET(INDEX_BUFFER, Header);
+            NewIndexBuffer->Ntfs.UsaCount = UsaCount;
+
+            // Initialize index header with an empty end entry
+            NewIndexBuffer->Header.FirstEntryOffset = sizeof(INDEX_HEADER_ATTRIBUTE);
+            NewIndexBuffer->Header.TotalSizeOfEntries = sizeof(INDEX_HEADER_ATTRIBUTE) + sizeof(INDEX_ENTRY_ATTRIBUTE);
+            NewIndexBuffer->Header.AllocatedSize = IndexBufferSize - FIELD_OFFSET(INDEX_BUFFER, Header);
+            NewIndexBuffer->Header.Flags = 0;
+
+            // Create an end-marker entry
+            {
+                PINDEX_ENTRY_ATTRIBUTE EndEntry;
+                EndEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&NewIndexBuffer->Header +
+                            NewIndexBuffer->Header.FirstEntryOffset);
+                EndEntry->Length = sizeof(INDEX_ENTRY_ATTRIBUTE);
+                EndEntry->KeyLength = 0;
+                EndEntry->Flags = NTFS_INDEX_ENTRY_END;
+            }
+
+            // Apply fixup array and write
+            AddFixupArray(DeviceExt, &NewIndexBuffer->Ntfs);
+            WriteAttribute(DeviceExt,
+                           IndexAllocationCtx,
+                           IndexAllocationLength,
+                           (const PUCHAR)NewIndexBuffer,
+                           IndexBufferSize,
+                           &BytesWrittenIdx,
+                           FileRecord);
+
+            ExFreePoolWithTag(NewIndexBuffer, TAG_NTFS);
+        }
+    }
+
     // Update file record on disk
     Status = UpdateFileRecord(DeviceExt, IndexAllocationCtx->FileMFTIndex, FileRecord);
     if (!NT_SUCCESS(Status))

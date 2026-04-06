@@ -57,6 +57,8 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
     PVOID DataBuffer;
     LARGE_INTEGER VolumeOffset;
     BOOLEAN Mapped;
+    ULONG ChunkLength;
+    ULONG VacbOffset;
 
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL ||
@@ -71,35 +73,47 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
                             FALSE);
     }
 
-    VolumeOffset.QuadPart = StartingOffset;
+    /* CcMapData cannot map across VACB boundaries (256KB).
+       Split the read into chunks that each stay within one VACB. */
+    while (Length > 0)
+    {
+        VolumeOffset.QuadPart = StartingOffset;
+        VacbOffset = (ULONG)(StartingOffset % VACB_MAPPING_GRANULARITY);
+        ChunkLength = min(Length, VACB_MAPPING_GRANULARITY - VacbOffset);
 
-    _SEH2_TRY
-    {
-        Mapped = CcMapData(Vcb->StreamFileObject,
-                           &VolumeOffset,
-                           Length,
-                           MAP_WAIT,
-                           &BcbResult,
-                           &DataBuffer);
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
         Mapped = FALSE;
-    }
-    _SEH2_END;
+        _SEH2_TRY
+        {
+            Mapped = CcMapData(Vcb->StreamFileObject,
+                               &VolumeOffset,
+                               ChunkLength,
+                               MAP_WAIT,
+                               &BcbResult,
+                               &DataBuffer);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Mapped = FALSE;
+        }
+        _SEH2_END;
 
-    if (!Mapped)
-    {
-        return NtfsReadDisk(Vcb->StorageDevice,
-                            StartingOffset,
-                            Length,
-                            Vcb->NtfsInfo.BytesPerSector,
-                            Buffer,
-                            FALSE);
-    }
+        if (!Mapped)
+        {
+            return NtfsReadDisk(Vcb->StorageDevice,
+                                StartingOffset,
+                                Length,
+                                Vcb->NtfsInfo.BytesPerSector,
+                                Buffer,
+                                FALSE);
+        }
 
-    RtlCopyMemory(Buffer, DataBuffer, Length);
-    CcUnpinData(BcbResult);
+        RtlCopyMemory(Buffer, DataBuffer, ChunkLength);
+        CcUnpinData(BcbResult);
+
+        Buffer += ChunkLength;
+        StartingOffset += ChunkLength;
+        Length -= ChunkLength;
+    }
 
     return STATUS_SUCCESS;
 }
