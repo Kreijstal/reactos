@@ -194,11 +194,28 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->RefCount--;
-    if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
+
+    /* When the last external reference is released but the internal stream
+     * file object still holds a cache map, tear down the cache and release
+     * that file object.  This lets the memory manager fully clean up any
+     * data section segments before the FCB (and its embedded
+     * SectionObjectPointers) is freed.  Mirrors the two-step pattern used
+     * by vfatfs. */
+    if (Fcb->RefCount == 1 &&
+        !NtfsFCBIsDirectory(Fcb) &&
+        BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED))
+    {
+        PFILE_OBJECT tmpFileObject = Fcb->FileObject;
+        Fcb->FileObject = NULL;
+        ClearFlag(Fcb->Flags, FCB_CACHE_INITIALIZED);
+        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+        CcUninitializeCacheMap(tmpFileObject, NULL, NULL);
+        ObDereferenceObject(tmpFileObject);
+    }
+    else if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
     {
         RemoveEntryList(&Fcb->FcbListEntry);
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-        CcUninitializeCacheMap(Fcb->FileObject, NULL, NULL);
         NtfsDestroyFCB(Fcb);
     }
     else
