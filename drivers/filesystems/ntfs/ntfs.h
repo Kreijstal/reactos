@@ -131,6 +131,7 @@ typedef struct
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
+#define VCB_VOLUME_CORRUPT      0x0002
 
 typedef struct
 {
