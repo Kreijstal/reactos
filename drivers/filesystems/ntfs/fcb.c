@@ -203,7 +203,8 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
      * by vfatfs. */
     if (Fcb->RefCount == 1 &&
         !NtfsFCBIsDirectory(Fcb) &&
-        BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED))
+        BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED) &&
+        Fcb->FileObject != NULL)
     {
         PFILE_OBJECT tmpFileObject = Fcb->FileObject;
         Fcb->FileObject = NULL;

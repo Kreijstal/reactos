@@ -684,6 +684,466 @@ if cpu_mode == "long":
     print("  ros-irp <addr>        Inspect an IRP structure")
     print("")
 
+    # ============================================================
+    # KTRAP_FRAME layout for ReactOS amd64
+    # Source: sdk/include/ndk/amd64/ketypes.h
+    # Built offsets: build/sdk/include/asm/ksamd64.inc
+    # Total size: 0x190 (400 bytes)
+    #
+    # CAUTION: These offsets are for the ReactOS amd64 KTRAP_FRAME.
+    # If they don't match your build, check ketypes.h or ksamd64.inc.
+    # The non-volatile registers (Rbx, Rdi, Rsi, Rbp at 0x140-0x158)
+    # are NOT saved by the CPU or EnterTrap — they come from
+    # KeTrapFrameToContext merging with KEXCEPTION_FRAME. When
+    # reading a raw trap frame on the stack, these fields may be
+    # stale or zero. Recover non-volatiles from the function's own
+    # stack frame (push rbx etc.) instead.
+    # ============================================================
+    TF_RAX           = 0x030
+    TF_RCX           = 0x038
+    TF_RDX           = 0x040
+    TF_R8            = 0x048
+    TF_R9            = 0x050
+    TF_R10           = 0x058
+    TF_R11           = 0x060
+    TF_GSBASE        = 0x068
+    TF_FAULT_ADDR    = 0x0D0  # CR2 on page fault (union with ContextRecord)
+    TF_DR0           = 0x0D8
+    TF_SEG_DS        = 0x130
+    TF_SEG_ES        = 0x132
+    TF_SEG_FS        = 0x134
+    TF_SEG_GS        = 0x136
+    TF_TRAP_LINK     = 0x138  # Pointer to previous KTRAP_FRAME (if nested)
+    TF_RBX           = 0x140  # WARNING: see note above — may not reflect fault-time value
+    TF_RDI           = 0x148
+    TF_RSI           = 0x150
+    TF_RBP           = 0x158
+    TF_ERROR_CODE    = 0x160  # Union with ExceptionFrame pointer
+    TF_RIP           = 0x168
+    TF_SEG_CS        = 0x170
+    TF_EFLAGS        = 0x178
+    TF_RSP           = 0x180
+    TF_SEG_SS        = 0x188
+    TF_SIZE          = 0x190
+    TF_PREV_IRQL     = 0x029  # PreviousIrql (UCHAR)
+    TF_PREV_MODE     = 0x028  # PreviousMode (CHAR)
+
+    # KEXCEPTION_FRAME layout (sdk/include/ndk/amd64/ketypes.h)
+    # Size: 0x140 (320 bytes). Saves non-volatile registers.
+    EF_RBP           = 0x0F8
+    EF_RBX           = 0x100
+    EF_RDI           = 0x108
+    EF_RSI           = 0x110
+    EF_R12           = 0x118
+    EF_R13           = 0x120
+    EF_R14           = 0x128
+    EF_R15           = 0x130
+    EF_RETURN        = 0x138
+    EF_TRAP_FRAME    = 0x0D0
+
+
+    class ReactosFindTrapFrames(gdb.Command):
+        """Scan a kernel stack range for KTRAP_FRAMEs.
+        Heuristic: look for SegCs == 0x10 (kernel) or 0x33 (user)
+        and a valid kernel-space Rip at the expected offset.
+
+        Usage: ros-trapframes [stack_low] [stack_high]
+        Default: scans from RSP to RSP + 0x2000.
+
+        KNOWN LIMITATIONS:
+        - False positives if random stack data matches SegCs pattern.
+        - The Rbx/Rdi/Rsi/Rbp fields in the trap frame may NOT reflect
+          the actual register values at fault time (see notes above).
+          Use ros-frame-regs to recover pushed non-volatiles from the
+          function's own prologue.
+        - If the kernel was built with a different KTRAP_FRAME layout
+          (different ReactOS branch or Windows), offsets will be wrong.
+        """
+
+        def __init__(self):
+            super().__init__("ros-trapframes", gdb.COMMAND_USER)
+
+        def invoke(self, arg, from_tty):
+            args = arg.strip().split()
+            if len(args) >= 2:
+                low = int(args[0], 0)
+                high = int(args[1], 0)
+            elif len(args) == 1:
+                low = int(args[0], 0)
+                high = low + 0x2000
+            else:
+                try:
+                    low = int(gdb.parse_and_eval("$rsp"))
+                except:
+                    print("Cannot read RSP. Provide stack range explicitly.")
+                    return
+                high = low + 0x4000
+
+            found = 0
+            for pos in range(low, high - TF_SIZE, 8):
+                cs_data = read_mem(pos + TF_SEG_CS, 2)
+                if cs_data is None:
+                    continue
+                seg_cs = struct.unpack('<H', cs_data)[0]
+                if seg_cs not in (0x10, 0x33):
+                    continue
+
+                rip = read_u64(pos + TF_RIP)
+                if rip is None:
+                    continue
+                # Kernel RIP heuristic: must be in KSEG0 range
+                if not (0xFFFFF80000000000 <= rip <= 0xFFFFFFFFFFC00000):
+                    continue
+
+                rsp = read_u64(pos + TF_RSP) or 0
+                fault_addr = read_u64(pos + TF_FAULT_ADDR) or 0
+                prev_irql = read_u8(pos + TF_PREV_IRQL)
+                prev_irql = prev_irql if prev_irql is not None else -1
+                error_code = read_u64(pos + TF_ERROR_CODE) or 0
+                rax = read_u64(pos + TF_RAX) or 0
+                rcx = read_u64(pos + TF_RCX) or 0
+                trap_link = read_u64(pos + TF_TRAP_LINK) or 0
+
+                # Try to resolve RIP to a symbol
+                sym = addr_to_sym(rip)
+                sym_str = f" ({sym})" if sym else ""
+
+                found += 1
+                print(f"KTRAP_FRAME @ 0x{pos:x}:")
+                print(f"  Rip       = 0x{rip:x}{sym_str}")
+                print(f"  Rsp       = 0x{rsp:x}")
+                print(f"  FaultAddr = 0x{fault_addr:x}")
+                print(f"  ErrorCode = 0x{error_code:x}")
+                print(f"  PrevIRQL  = {prev_irql}")
+                print(f"  Rax=0x{rax:x}  Rcx=0x{rcx:x}")
+                print(f"  TrapLink  = 0x{trap_link:x}")
+                # Warn about non-volatile registers
+                print(f"  (Rbx/Rdi/Rsi/Rbp in TF may be stale; use ros-frame-regs)")
+                print()
+
+            if found == 0:
+                print("No KTRAP_FRAMEs found in range.")
+            else:
+                print(f"{found} trap frame(s) found.")
+
+    ReactosFindTrapFrames()
+
+
+    class ReactosFrameRegs(gdb.Command):
+        """Recover pushed non-volatile registers from a function's stack frame.
+        Given the RSP at fault time (from KTRAP_FRAME.Rsp) and a typical
+        amd64 prologue pattern (push r14; push rdi; push rsi; push rbx; sub $N,rsp),
+        reads the saved register values from the stack.
+
+        Usage: ros-frame-regs <rsp_at_fault> [prologue_pattern]
+        Prologue patterns (predefined):
+          cc-release   : CcRosReleaseFileCache (push r14,rdi,rsi,rbx; sub $0x38)
+          cc-uninit    : CcUninitializeCacheMap (push r14,rbp,rdi,rsi,rbx; sub $0x20)
+          ntfs-release : NtfsReleaseFCB (push rdi,rsi,rbx; sub $0x20)
+
+        Or specify raw: "r14,rdi,rsi,rbx:0x38" meaning those regs pushed then sub $0x38.
+
+        NOTE: These patterns are based on GCC 15 output for ReactOS amd64.
+        Different compiler versions or optimization levels WILL produce different
+        prologues. Always verify with 'x/10i <function_start>'.
+        """
+
+        PATTERNS = {
+            'cc-release':   (['r14', 'rdi', 'rsi', 'rbx'], 0x38),
+            'cc-uninit':    (['r14', 'rbp', 'rdi', 'rsi', 'rbx'], 0x20),
+            'ntfs-release': (['rdi', 'rsi', 'rbx'], 0x20),
+        }
+
+        def __init__(self):
+            super().__init__("ros-frame-regs", gdb.COMMAND_USER)
+
+        def invoke(self, arg, from_tty):
+            args = arg.strip().split()
+            if len(args) < 1:
+                print("Usage: ros-frame-regs <rsp_at_fault> [pattern_name|reg,reg:sub_size]")
+                print("Patterns:", ', '.join(self.PATTERNS.keys()))
+                return
+
+            rsp = int(args[0], 0)
+            if len(args) >= 2:
+                pat_name = args[1]
+                if pat_name in self.PATTERNS:
+                    regs, sub_size = self.PATTERNS[pat_name]
+                elif ':' in pat_name:
+                    parts = pat_name.split(':')
+                    regs = parts[0].split(',')
+                    sub_size = int(parts[1], 0)
+                else:
+                    print(f"Unknown pattern '{pat_name}'")
+                    return
+            else:
+                regs, sub_size = ['rbx'], 0x20  # minimal guess
+
+            # Stack layout: sub $N lowered RSP, then pushes are above
+            # At fault time RSP is after sub. Pushes are at RSP + sub_size upward.
+            base = rsp + sub_size
+            print(f"Stack frame (sub $0x{sub_size:x}, {len(regs)} pushes):")
+            for i, reg in enumerate(reversed(regs)):
+                addr = base + i * 8
+                val = read_u64(addr)
+                val_str = f"0x{val:x}" if val is not None else "?"
+                sym = addr_to_sym(val) if val and val > 0xFFFFF80000000000 else None
+                sym_str = f" ({sym})" if sym else ""
+                print(f"  saved_{reg:4s} @ 0x{addr:x} = {val_str}{sym_str}")
+
+            # Return address is above all pushes
+            ret_addr_loc = base + len(regs) * 8
+            ret_val = read_u64(ret_addr_loc)
+            if ret_val:
+                sym = addr_to_sym(ret_val)
+                sym_str = f" ({sym})" if sym else ""
+                print(f"  return     @ 0x{ret_addr_loc:x} = 0x{ret_val:x}{sym_str}")
+
+    ReactosFrameRegs()
+
+
+    class ReactosVerifyBinary(gdb.Command):
+        """Compare a loaded module's .text section against the build on disk.
+        Detects stale installations where the qcow2 has an older driver
+        than the current build directory.
+
+        Usage: ros-verify <module_base> <build_path>
+        Example: ros-verify 0xFFFFF8807505F000 drivers/filesystems/ntfs/ntfs.sys
+
+        Reads .text section from both the QEMU memory and the build file,
+        computes SHA256, and reports match/mismatch.
+
+        KNOWN ISSUE: ReactOS relocates PE images, so .reloc-patched bytes
+        will always differ. This command hashes .text which has fewer
+        relocations, but mismatches can still be caused by relocation
+        fixups rather than different builds. For definitive comparison,
+        check a specific function's disassembly.
+        """
+
+        def __init__(self):
+            super().__init__("ros-verify", gdb.COMMAND_USER)
+
+        def invoke(self, arg, from_tty):
+            import hashlib
+
+            args = arg.strip().split(None, 1)
+            if len(args) < 2:
+                print("Usage: ros-verify <module_base> <build_path>")
+                return
+
+            base = int(args[0], 0)
+            rel_path = args[1]
+            filepath = os.path.join(BUILD_DIR, rel_path) if not os.path.isabs(rel_path) else rel_path
+            if not os.path.exists(filepath):
+                print(f"ERROR: {filepath} not found")
+                return
+
+            # Read .text section info from loaded PE
+            sections = get_pe_all_sections(base)
+            text_rva = None
+            text_size = None
+            for sname, rva in sections:
+                if sname == '.text':
+                    text_rva = rva
+                    break
+
+            if text_rva is None:
+                print("ERROR: No .text section found in loaded PE")
+                return
+
+            # Get .text size from PE section header
+            pe_off = read_u32(base + 0x3C)
+            num_sections = read_u16(base + pe_off + 6)
+            size_opt = read_u16(base + pe_off + 20)
+            sec_start = base + pe_off + 24 + size_opt
+            for i in range(num_sections):
+                sec = sec_start + i * 40
+                sec_name = read_mem(sec, 8)
+                if sec_name and sec_name.rstrip(b'\x00') == b'.text':
+                    text_size = read_u32(sec + 8)  # VirtualSize
+                    break
+
+            if text_size is None or text_size == 0:
+                print("ERROR: Cannot determine .text size")
+                return
+
+            print(f"Comparing .text (RVA=0x{text_rva:x}, size=0x{text_size:x})...")
+
+            # Hash loaded .text from memory
+            loaded_data = bytearray()
+            chunk = 4096
+            for off in range(0, text_size, chunk):
+                sz = min(chunk, text_size - off)
+                d = read_mem(base + text_rva + off, sz)
+                if d is None:
+                    print(f"  ERROR: Memory read failed at base+0x{text_rva + off:x}")
+                    return
+                loaded_data.extend(d)
+
+            loaded_hash = hashlib.sha256(bytes(loaded_data)).hexdigest()
+
+            # Hash .text from build file
+            # Need to find .text file offset in the PE on disk
+            with open(filepath, 'rb') as f:
+                pe_data = f.read(0x400)  # read headers
+                disk_pe_off = struct.unpack_from('<I', pe_data, 0x3C)[0]
+                disk_num_sec = struct.unpack_from('<H', pe_data, disk_pe_off + 6)[0]
+                disk_opt_size = struct.unpack_from('<H', pe_data, disk_pe_off + 20)[0]
+                disk_sec_start = disk_pe_off + 24 + disk_opt_size
+
+                for i in range(disk_num_sec):
+                    sec_off = disk_sec_start + i * 40
+                    if sec_off + 40 > len(pe_data):
+                        f.seek(0)
+                        pe_data = f.read(sec_off + 40)
+                    sec_name = pe_data[sec_off:sec_off + 8].rstrip(b'\x00')
+                    if sec_name == b'.text':
+                        disk_vsize = struct.unpack_from('<I', pe_data, sec_off + 8)[0]
+                        disk_raw_off = struct.unpack_from('<I', pe_data, sec_off + 20)[0]
+                        f.seek(disk_raw_off)
+                        disk_text = f.read(min(disk_vsize, text_size))
+                        break
+                else:
+                    print("  ERROR: .text not found in build file")
+                    return
+
+            build_hash = hashlib.sha256(disk_text).hexdigest()
+
+            if loaded_hash == build_hash:
+                print(f"  MATCH: {loaded_hash[:16]}...")
+                print(f"  The loaded binary matches the build.")
+            else:
+                print(f"  MISMATCH!")
+                print(f"  Loaded: {loaded_hash[:32]}...")
+                print(f"  Build:  {build_hash[:32]}...")
+                print(f"  The qcow2 has a DIFFERENT binary than the current build.")
+                print(f"  Reinstall from the latest bootcd.iso to test current code.")
+
+    ReactosVerifyBinary()
+
+
+    class ReactosCallChain(gdb.Command):
+        """Walk kernel stack looking for return addresses and resolve them.
+        Scans the stack for values that look like kernel code pointers
+        (in KSEG0 or driver space) and resolves them to symbols.
+
+        Usage: ros-callchain [rsp] [depth]
+        Default: from current RSP, scan 0x400 bytes (64 qwords).
+
+        KNOWN LIMITATIONS:
+        - This is a heuristic scan, NOT a proper frame-based unwind.
+          It will show false positives (data values that happen to look
+          like code addresses) and may miss frames with unusual layouts.
+        - For accurate unwinding, use ros-trapframes to find exception
+          frames, then ros-frame-regs to decode each function's frame.
+        - Driver addresses (0xFFFFF880...) won't resolve to symbols
+          unless you've loaded them with ros-lsmod --load or ros-load-module.
+        """
+
+        def __init__(self):
+            super().__init__("ros-callchain", gdb.COMMAND_USER)
+
+        def invoke(self, arg, from_tty):
+            args = arg.strip().split()
+            if len(args) >= 1:
+                rsp = int(args[0], 0)
+            else:
+                try:
+                    rsp = int(gdb.parse_and_eval("$rsp"))
+                except:
+                    print("Cannot read RSP.")
+                    return
+            depth = int(args[1], 0) if len(args) >= 2 else 0x400
+
+            print(f"Scanning 0x{rsp:x} - 0x{rsp + depth:x} for code pointers:")
+            for off in range(0, depth, 8):
+                addr = rsp + off
+                val = read_u64(addr)
+                if val is None:
+                    continue
+                # Check if it looks like a kernel code address
+                if 0xFFFFF80000400000 <= val <= 0xFFFFF800006FFFFF:
+                    # ntoskrnl range (approximate)
+                    sym = addr_to_sym(val)
+                    sym_str = sym if sym else "ntoskrnl+?"
+                    print(f"  [RSP+0x{off:03x}] 0x{val:x}  {sym_str}")
+                elif 0xFFFFF88070000000 <= val <= 0xFFFFF880FFFFFFFF:
+                    # Driver range
+                    sym = addr_to_sym(val)
+                    sym_str = sym if sym else "driver+?"
+                    print(f"  [RSP+0x{off:03x}] 0x{val:x}  {sym_str}")
+
+    ReactosCallChain()
+
+
+    class ReactosFindModule(gdb.Command):
+        """Find a loaded module by scanning for MZ/PE headers near an address.
+        Walks backwards from the given address (page-aligned) looking for
+        an MZ header followed by a valid PE signature.
+
+        Usage: ros-findmod <address_in_module>
+        Returns the base address of the module.
+
+        Example: ros-findmod 0xFFFFF88075069565
+        """
+
+        def __init__(self):
+            super().__init__("ros-findmod", gdb.COMMAND_USER)
+
+        def invoke(self, arg, from_tty):
+            if not arg.strip():
+                print("Usage: ros-findmod <address>")
+                return
+            target = int(arg.strip(), 0)
+            page = target & ~0xFFF
+            for i in range(4096):
+                sig = read_u16(page)
+                if sig == 0x5A4D:
+                    pe_off = read_u32(page + 0x3C)
+                    if pe_off and pe_off < 0x1000:
+                        pe_sig = read_u32(page + pe_off)
+                        if pe_sig == 0x00004550:
+                            print(f"Module base: 0x{page:x}")
+                            # Try to read export name
+                            opt_start = page + pe_off + 24
+                            export_rva = read_u32(opt_start + 0x70)
+                            if export_rva and export_rva > 0:
+                                name_rva = read_u32(page + export_rva + 12)
+                                if name_rva:
+                                    name_data = read_mem(page + name_rva, 64)
+                                    if name_data:
+                                        name = name_data.split(b'\x00')[0].decode('ascii', errors='replace')
+                                        print(f"Export name: {name}")
+                            sections = get_pe_all_sections(page)
+                            for sname, rva in sections:
+                                print(f"  {sname:8s}  @ 0x{page + rva:x} (RVA 0x{rva:x})")
+                            return
+                page -= 0x1000
+            print(f"No MZ/PE found scanning back from 0x{target:x}")
+
+    ReactosFindModule()
+
+
+    # ============================================================
+    # Print available commands (updated)
+    # ============================================================
+    print("=== ReactOS GDB helpers loaded ===")
+    print("Commands:")
+    print("  ros-load-symbols      Auto-find ntoskrnl and load DWARF symbols")
+    print("  ros-load-at <addr>    Load ntoskrnl at a known base address")
+    print("  ros-load-module <addr> <path>  Load symbols for any module")
+    print("  ros-lsmod [--load]    List loaded modules (walk PsLoadedModuleList)")
+    print("  ros-addr2mod <addr>   Find which module owns an address")
+    print("  ros-thread <addr>     Inspect thread: stack, APC state, wait info")
+    print("  ros-waiters <addr>    Find threads waiting on a dispatcher object")
+    print("  ros-irp <addr>        Inspect an IRP structure")
+    print("  ros-trapframes [lo] [hi]  Scan stack for KTRAP_FRAMEs")
+    print("  ros-frame-regs <rsp> [pat]  Recover pushed regs from function frame")
+    print("  ros-callchain [rsp] [n]  Heuristic stack scan for return addresses")
+    print("  ros-findmod <addr>    Find module base by scanning for MZ/PE")
+    print("  ros-verify <base> <path>  Compare loaded binary vs build (SHA256)")
+    print("")
+
     # Auto-load symbols
     gdb.execute("ros-load-symbols")
 

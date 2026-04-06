@@ -990,16 +990,34 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
         // Copy the index entry
         RtlCopyMemory(CurrentNodeEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
 
+        // Ensure entry flags are consistent with whether this key actually
+        // has a child node.  Entries may carry a stale NTFS_INDEX_ENTRY_NODE
+        // flag after tree restructuring (split/demotion) if the child was
+        // moved elsewhere or the entry was relocated to the root.
+        if (CurrentKey->LesserChild)
+        {
+            if (!BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length += sizeof(ULONGLONG);
+            }
+            NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
+        }
+        else
+        {
+            if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length -= sizeof(ULONGLONG);
+            }
+        }
+
         DPRINT1("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
                 CurrentNodeEntry->KeyLength,
                 CurrentNodeEntry->Length);
 
-        // Does the current key have any sub-nodes?
-        if (CurrentKey->LesserChild)
-            NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
-
         // Add Length of Current Entry to Total Size of Entries
-        NewIndexRoot->Header.TotalSizeOfEntries += CurrentKey->IndexEntry->Length;
+        NewIndexRoot->Header.TotalSizeOfEntries += CurrentNodeEntry->Length;
 
         // Go to the next node entry
         CurrentNodeEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)CurrentNodeEntry + CurrentNodeEntry->Length);
@@ -1064,6 +1082,22 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
 
         // Copy the index entry
         RtlCopyMemory(CurrentNodeEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
+
+        // Ensure entry flags are consistent with the node type.
+        // An entry may carry a stale NTFS_INDEX_ENTRY_NODE flag from a
+        // previous tree topology (e.g. after a split moved it to a leaf).
+        // Strip the flag (and its trailing VCN) for leaf nodes, and force
+        // it on for internal nodes that have children.
+        if (!HasChildren && BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        {
+            ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+            CurrentNodeEntry->Length -= sizeof(ULONGLONG);
+        }
+        else if (HasChildren && !BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        {
+            SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+            CurrentNodeEntry->Length += sizeof(ULONGLONG);
+        }
 
         DPRINT("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
                CurrentNodeEntry->KeyLength,
