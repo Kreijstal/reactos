@@ -32,6 +32,10 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/* Forward declarations for VCN helpers used in index buffer creation */
+VOID SetIndexEntryVCN(PINDEX_ENTRY_ATTRIBUTE IndexEntry, ULONGLONG VCN);
+ULONGLONG GetIndexEntryVCN(PINDEX_ENTRY_ATTRIBUTE IndexEntry);
+
 // TEMP FUNCTION for diagnostic purposes.
 // Prints VCN of every node in an index allocation
 VOID
@@ -1001,6 +1005,15 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
                 SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
                 CurrentNodeEntry->Length += sizeof(ULONGLONG);
             }
+            // Write the child VCN.  Prefer the in-memory entry's VCN if the
+            // NODE flag is set (UpdateIndexAllocation already wrote it there).
+            // Fall back to the child node's VCN otherwise.
+            if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+                SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
+            else if (CurrentKey->LesserChild)
+                SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
+            else
+                SetIndexEntryVCN(CurrentNodeEntry, 0);
             NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
         }
         else
@@ -1097,6 +1110,20 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
         {
             SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
             CurrentNodeEntry->Length += sizeof(ULONGLONG);
+        }
+
+        // Write the child VCN into the on-disk entry.  If the source in-memory
+        // entry already has the NODE flag, its VCN field is valid and was set
+        // by UpdateIndexAllocation.  Otherwise the flag was just added above
+        // and we must get the VCN from the child node directly.
+        if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        {
+            if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+                SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
+            else if (CurrentKey->LesserChild)
+                SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
+            else
+                SetIndexEntryVCN(CurrentNodeEntry, 0);
         }
 
         DPRINT("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
@@ -1425,6 +1452,7 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
                 RtlCopyMemory(NewEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
 
                 NewEntry->Length += sizeof(ULONGLONG);
+                NewEntry->Flags |= NTFS_INDEX_ENTRY_NODE;
 
                 // Free the old memory
                 ExFreePoolWithTag(CurrentKey->IndexEntry, TAG_NTFS);
@@ -1434,8 +1462,6 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
 
             // Update the VCN stored in the index entry of CurrentKey
             SetIndexEntryVCN(CurrentKey->IndexEntry, CurrentKey->LesserChild->VCN);
-
-            CurrentKey->IndexEntry->Flags |= NTFS_INDEX_ENTRY_NODE;
         }
 
         CurrentKey = CurrentKey->NextKey;

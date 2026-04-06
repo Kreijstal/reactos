@@ -2850,20 +2850,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     ULONG NodeNumber;
     NTSTATUS Status;
 
-    DPRINT("BrowseSubNodeIndexEntries(%p, %p, %lu, %wZ, %p, %p, %I64d, %lu, %lu, %s, %s, %p)\n",
-           Vcb,
-           MftRecord,
-           IndexBlockSize,
-           FileName,
-           IndexAllocationContext,
-           Bitmap,
-           VCN,
-           *StartEntry,
-           *CurrentEntry,
-           "FALSE",
-           DirSearch ? "TRUE" : "FALSE",
-           CaseSensitive ? "TRUE" : "FALSE",
-           OutMFTIndex);
+    DPRINT1("BrowseSubNodeIndexEntries: VCN=%I64d searching for '%wZ' (DirSearch=%d)\n",
+            VCN, FileName, DirSearch);
 
     // Calculate node number as VCN / Clusters per index record
     NodeNumber = VCN / (Vcb->NtfsInfo.BytesPerIndexRecord / Vcb->NtfsInfo.BytesPerCluster);
@@ -2959,6 +2947,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         {
             *StartEntry = *CurrentEntry;
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            DPRINT1("BrowseSubNode VCN=%I64d FOUND MFT=%I64u\n", VCN, *OutMFTIndex);
             ExFreePoolWithTag(IndexRecord, TAG_NTFS);
             return STATUS_SUCCESS;
         }
@@ -2969,6 +2958,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)IndexEntry + IndexEntry->Length);
     }
 
+    DPRINT1("BrowseSubNode VCN=%I64d NOT FOUND (scanned %lu entries)\n", VCN, *CurrentEntry);
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
 
     return STATUS_OBJECT_PATH_NOT_FOUND;
@@ -2996,19 +2986,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
     ULONG *BitmapPtr;
     RTL_BITMAP  Bitmap;
 
-    DPRINT("BrowseIndexEntries(%p, %p, %p, %lu, %p, %p, %wZ, %lu, %lu, %s, %s, %p)\n",
-           Vcb,
-           MftRecord,
-           IndexRecord,
-           IndexBlockSize,
-           FirstEntry,
-           LastEntry,
-           FileName,
-           *StartEntry,
-           *CurrentEntry,
-           DirSearch ? "TRUE" : "FALSE",
-           CaseSensitive ? "TRUE" : "FALSE",
-           OutMFTIndex);
+    DPRINT1("BrowseIndexEntries: searching for '%wZ' IndexBlockSize=%lu (DirSearch=%d)\n",
+            FileName, IndexBlockSize, DirSearch);
 
     // Find the $I30 index allocation, if there is one
     Status = FindAttribute(Vcb, MftRecord, AttributeIndexAllocation, L"$I30", 4, &IndexAllocationContext, NULL);
