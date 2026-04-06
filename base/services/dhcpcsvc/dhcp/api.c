@@ -167,6 +167,7 @@ Server_FallbackRefreshParams(
     _In_ LPWSTR AdapterName)
 {
     PDHCP_ADAPTER Adapter;
+    HKEY hAdapterKey;
     DWORD ret = ERROR_SUCCESS;
 
     DPRINT("Server_FallbackRefreshParams(%S)\n", AdapterName);
@@ -182,7 +183,18 @@ Server_FallbackRefreshParams(
 
     DPRINT("Adapter: %p\n", Adapter);
 
-    /* FIXME */
+    if (Adapter->AlternateConfiguration)
+    {
+        free(Adapter->AlternateConfiguration);
+        Adapter->AlternateConfiguration = NULL;
+    }
+
+    hAdapterKey = FindAdapterKey(Adapter);
+    if (hAdapterKey)
+    {
+        ret = LoadAlternateConfiguration(Adapter, hAdapterKey);
+        RegCloseKey(hAdapterKey);
+    }
 
 done:
     ApiUnlock();
