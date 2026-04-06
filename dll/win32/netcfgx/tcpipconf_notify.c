@@ -6,6 +6,8 @@
 #include <dhcpcsdk.h>
 #include <dhcpcapi.h>
 
+typedef DWORD (WINAPI *PDHCPFALLBACKREFRESHPARAMS)(PWSTR pAdapterName);
+
 typedef struct
 {
     DWORD EnableSecurityFilters;
@@ -3789,6 +3791,7 @@ INetCfgComponentControl_fnApplyPnpChanges(
     INetCfgPnpReconfigCallback *pICallback)
 {
     TcpipSettings *pCurrentConfig, *pOldConfig;
+    LPOLESTR pAdapterName;
     ULONG NTEInstance;
     DWORD DhcpApiVersion;
     DWORD dwSize;
@@ -3796,6 +3799,11 @@ INetCfgComponentControl_fnApplyPnpChanges(
     TRACE("INetCfgComponentControl_fnApplyPnpChanges()\n");
 
     TcpipConfNotifyImpl *This = (TcpipConfNotifyImpl*)iface;
+
+    if (FAILED(StringFromCLSID(&This->NetCfgInstanceId, &pAdapterName)))
+    {
+        return E_FAIL;
+    }
 
     pCurrentConfig = This->pCurrentConfig;
     pOldConfig = This->pOldConfig;
@@ -3893,6 +3901,20 @@ INetCfgComponentControl_fnApplyPnpChanges(
         //TODO
         // add multiple gw addresses when required
         CreateIpForwardEntry(&RouterMib);
+    }
+
+
+    /* Notify the DHCP client of the changed alternate configuration */
+    if (!RtlEqualMemory(&pCurrentConfig->AltConfig, &pOldConfig->AltConfig, sizeof(AlternateConfiguration)))
+    {
+        HMODULE hDhcpModule = LoadLibraryW(L"dhcpcsvc.dll");
+        if (hDhcpModule)
+        {
+            PDHCPFALLBACKREFRESHPARAMS pFunc = (PDHCPFALLBACKREFRESHPARAMS)GetProcAddress(hDhcpModule, "DhcpFallbackRefreshParams");
+            (pFunc)(pAdapterName);
+
+            FreeLibrary(hDhcpModule);
+        }
     }
 
     return S_OK;
