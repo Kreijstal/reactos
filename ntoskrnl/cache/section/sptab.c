@@ -323,6 +323,7 @@ MmFreePageTablesSectionSegment(PMM_SECTION_SEGMENT Segment,
 {
     PCACHE_SECTION_PAGE_TABLE Element;
     DPRINT("MiFreePageTablesSectionSegment(%p)\n", &Segment->PageTable);
+
     while ((Element = RtlGetElementGenericTable(&Segment->PageTable, 0))) {
         DPRINT("Delete table for <%wZ> %p -> %I64x\n",
                Segment->FileObject ? &Segment->FileObject->FileName : NULL,
@@ -351,6 +352,7 @@ MmFreePageTablesSectionSegment(PMM_SECTION_SEGMENT Segment,
         DPRINT("Remove memory\n");
         RtlDeleteElementGenericTable(&Segment->PageTable, Element);
     }
+
     DPRINT("Done\n");
 }
 

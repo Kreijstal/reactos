@@ -1010,14 +1010,20 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
             // Fall back to the child node's VCN otherwise.
             if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
                 SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
-            else if (CurrentKey->LesserChild)
-                SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
             else
-                SetIndexEntryVCN(CurrentNodeEntry, 0);
+                SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
+            NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
+        }
+        else if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        {
+            // Child exists on disk but wasn't loaded (lazy loading).
+            // Preserve the NODE flag and VCN from the original entry.
+            // The entry was already copied with the correct flag and VCN above.
             NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
         }
         else
         {
+            // Truly a leaf entry with no children on disk or in memory.
             if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
             {
                 ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
@@ -1096,34 +1102,34 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
         // Copy the index entry
         RtlCopyMemory(CurrentNodeEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
 
-        // Ensure entry flags are consistent with the node type.
-        // An entry may carry a stale NTFS_INDEX_ENTRY_NODE flag from a
-        // previous tree topology (e.g. after a split moved it to a leaf).
-        // Strip the flag (and its trailing VCN) for leaf nodes, and force
-        // it on for internal nodes that have children.
-        if (!HasChildren && BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        // Determine if this specific entry should have a child pointer.
+        // An entry has a child if: (a) it has a loaded LesserChild, OR
+        // (b) its original index entry has the NODE flag (lazy-loaded child on disk).
         {
-            ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
-            CurrentNodeEntry->Length -= sizeof(ULONGLONG);
-        }
-        else if (HasChildren && !BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
-        {
-            SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
-            CurrentNodeEntry->Length += sizeof(ULONGLONG);
-        }
+            BOOLEAN EntryHasChild = (CurrentKey->LesserChild != NULL) ||
+                                    BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE);
 
-        // Write the child VCN into the on-disk entry.  If the source in-memory
-        // entry already has the NODE flag, its VCN field is valid and was set
-        // by UpdateIndexAllocation.  Otherwise the flag was just added above
-        // and we must get the VCN from the child node directly.
-        if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
-        {
-            if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
-                SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
-            else if (CurrentKey->LesserChild)
-                SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
-            else
-                SetIndexEntryVCN(CurrentNodeEntry, 0);
+            if (EntryHasChild && !BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length += sizeof(ULONGLONG);
+            }
+            else if (!EntryHasChild && BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length -= sizeof(ULONGLONG);
+            }
+
+            // Write the child VCN into the on-disk entry.
+            if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                if (CurrentKey->LesserChild)
+                    SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
+                else if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+                    SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
+                else
+                    SetIndexEntryVCN(CurrentNodeEntry, 0);
+            }
         }
 
         DPRINT("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
@@ -1133,8 +1139,8 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
         // Add Length of Current Entry to Total Size of Entries
         IndexBuffer->Header.TotalSizeOfEntries += CurrentNodeEntry->Length;
 
-        // Check for child nodes
-        if (HasChildren)
+        // Check for child nodes (loaded or lazy)
+        if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
             IndexBuffer->Header.Flags = INDEX_NODE_LARGE;
 
         // Go to the next node entry

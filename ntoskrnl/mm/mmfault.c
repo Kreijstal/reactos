@@ -253,6 +253,19 @@ MmAccessFault(IN ULONG FaultCode,
     {
         if (Address > MM_HIGHEST_USER_ADDRESS)
         {
+            /* A kernel page fault at DISPATCH_LEVEL or above cannot be handled
+             * because the working set lock requires IRQL <= APC_LEVEL.
+             * This typically means a NULL/stale pointer dereference while a
+             * spinlock is held.  Return STATUS_ACCESS_VIOLATION to let the
+             * exception handler deal with it (bugcheck) instead of asserting
+             * inside the working set lock acquisition. */
+            if (KeGetCurrentIrql() > APC_LEVEL)
+            {
+                DPRINT1("MmAccessFault: kernel #PF at IRQL %u, Address %p — cannot handle\n",
+                        KeGetCurrentIrql(), Address);
+                return STATUS_ACCESS_VIOLATION;
+            }
+
             /* Check if this is an ARM3 memory area */
             MiLockWorkingSetShared(PsGetCurrentThread(), &MmSystemCacheWs);
             Vad = MiLocateVad(&MiRosKernelVadRoot, Address);
@@ -266,6 +279,16 @@ MmAccessFault(IN ULONG FaultCode,
         }
         else
         {
+            /* A fault at a user-mode address from kernel mode at DISPATCH_LEVEL
+             * or above is a NULL/near-NULL pointer dereference with a spinlock
+             * held.  We cannot handle it (working set lock needs APC_LEVEL). */
+            if (KeGetCurrentIrql() > APC_LEVEL)
+            {
+                DPRINT1("MmAccessFault: kernel->user #PF at IRQL %u, Address %p — NULL deref at DISPATCH\n",
+                        KeGetCurrentIrql(), Address);
+                return STATUS_ACCESS_VIOLATION;
+            }
+
             /* Could this be a VAD fault from user-mode? */
             MiLockProcessWorkingSetShared(PsGetCurrentProcess(), PsGetCurrentThread());
             Vad = MiLocateVad(&PsGetCurrentProcess()->VadRoot, Address);

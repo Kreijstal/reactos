@@ -299,7 +299,8 @@ static UCHAR *add_resident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     ULONG hdr_size = sizeof(ATTR_RECORD);  /* We'll use the resident part */
     ULONG name_off, value_off, total_len;
 
-    memset(a, 0, hdr_size);
+    /* Zero only the header, not the AT_END marker that follows */
+    memset(a, 0, sizeof(ATTR_RECORD));
     a->Type = type;
     a->NonResident = 0;
     a->NameLength = (UCHAR)name_len;

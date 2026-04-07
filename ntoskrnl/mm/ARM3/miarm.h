@@ -1247,7 +1247,7 @@ MiUnlockProcessWorkingSetUnsafe(IN PEPROCESS Process,
                                 IN PETHREAD Thread)
 {
     /* Make sure we are the owner of an unsafe acquisition */
-    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    ASSERT("miarm_1" && KeGetCurrentIrql() <= APC_LEVEL);
     ASSERT(KeAreAllApcsDisabled() == TRUE);
     ASSERT(MI_WS_OWNER(Process));
     ASSERT(MI_IS_WS_UNSAFE(Process));
@@ -1261,7 +1261,7 @@ MiUnlockProcessWorkingSetUnsafe(IN PEPROCESS Process,
 
     /* Release the lock but don't touch APC state */
     ExReleasePushLockExclusive(&Process->Vm.WorkingSetMutex);
-    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    ASSERT("miarm_2" && KeGetCurrentIrql() <= APC_LEVEL);
 }
 
 //
@@ -1539,7 +1539,7 @@ MiAcquireExpansionLock(VOID)
 {
     KIRQL OldIrql;
 
-    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    ASSERT("miarm_3" && KeGetCurrentIrql() <= APC_LEVEL);
     KeAcquireSpinLock(&MmExpansionLock, &OldIrql);
     ASSERT(MiExpansionLockOwner == NULL);
     MiExpansionLockOwner = PsGetCurrentThread();
@@ -1553,7 +1553,7 @@ MiReleaseExpansionLock(KIRQL OldIrql)
     ASSERT(MiExpansionLockOwner == PsGetCurrentThread());
     MiExpansionLockOwner = NULL;
     KeReleaseSpinLock(&MmExpansionLock, OldIrql);
-    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    ASSERT("miarm_4" && KeGetCurrentIrql() <= APC_LEVEL);
 }
 
 //

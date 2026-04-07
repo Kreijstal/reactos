@@ -644,7 +644,7 @@ AddRun(PNTFS_VCB Vcb,
     }
 
     // Convert the map control block back to encoded data runs
-    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerCluster, &RunBufferSize);
+    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
 
     // Get the amount of free space between the start of the of the first data run and the attribute end
     DataRunMaxLength = AttrContext->pRecord->Length - AttrContext->pRecord->NonResident.MappingPairsOffset;
@@ -670,10 +670,25 @@ AddRun(PNTFS_VCB Vcb,
         if (NextAttribute->Type != AttributeEnd)
         {
             PNTFS_ATTR_RECORD FinalAttribute;
+            ULONG TrailingBytes;
 
             // Calculate where to move the trailing attributes
             ULONG_PTR MoveTo = (ULONG_PTR)DestinationAttribute + AttrContext->pRecord->NonResident.MappingPairsOffset + RunBufferSize;
             MoveTo = ALIGN_UP_BY(MoveTo, ATTR_RECORD_ALIGNMENT);
+
+            // Calculate total size of trailing attributes (including end marker)
+            TrailingBytes = FileRecord->BytesInUse - NextAttributeOffset;
+
+            // Verify the move won't overflow the file record buffer
+            if (MoveTo + TrailingBytes > (ULONG_PTR)FileRecord + Vcb->NtfsInfo.BytesPerFileRecord)
+            {
+                DPRINT1("FIXME: Not enough space in file record for data runs + trailing attributes! "
+                        "MoveTo=0x%Ix TrailingBytes=%lu RecordEnd=0x%Ix\n",
+                        MoveTo, TrailingBytes,
+                        (ULONG_PTR)FileRecord + Vcb->NtfsInfo.BytesPerFileRecord);
+                ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+                return STATUS_NOT_IMPLEMENTED;
+            }
 
             DPRINT1("Moving attribute(s) after this one starting with type 0x%lx\n", NextAttribute->Type);
 
@@ -1173,7 +1188,7 @@ FreeClusters(PNTFS_VCB Vcb,
     }
 
     // Convert the map control block back to encoded data runs
-    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerCluster, &RunBufferSize);
+    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
 
     // Update HighestVCN
     DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;

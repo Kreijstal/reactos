@@ -433,10 +433,10 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
         }
     }
 
-    NtfsDumpFileAttributes(Vcb, Vcb->MasterFileTable);
+    //NtfsDumpFileAttributes(Vcb, Vcb->MasterFileTable);
 
     // Update the file record with the new attribute sizes
-    Status = UpdateFileRecord(Vcb, Vcb->VolumeFcb->MFTIndex, Vcb->MasterFileTable);
+    Status = UpdateFileRecord(Vcb, 0, Vcb->MasterFileTable);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Failed to update $MFT file record!\n");
@@ -582,9 +582,23 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
         RtlCopyMemory(AttrContext->pRecord, Destination, OldAttributeLength);
     }
 
+    NTFS_CHECK_POOL(FileRecord, "InternalSetResidentAttributeLength:pre-move");
+
     // Are there attributes after this one that need to be moved?
     if (NextAttribute->Type != AttributeEnd)
     {
+        // Bounds check: will the moved attributes fit?
+        ULONG TrailingSize = FileRecord->BytesInUse - (ULONG)((ULONG_PTR)NextAttribute - (ULONG_PTR)FileRecord);
+        ULONG_PTR MoveEnd = (ULONG_PTR)Destination + Destination->Length + TrailingSize;
+        if (MoveEnd > (ULONG_PTR)FileRecord + DeviceExt->NtfsInfo.BytesPerFileRecord)
+        {
+            DPRINT1("InternalSetResidentAttributeLength OVERFLOW: MoveEnd=0x%Ix RecordEnd=0x%Ix TrailingSize=%lu NewLen=%lu OldLen=%lu\n",
+                    MoveEnd, (ULONG_PTR)FileRecord + DeviceExt->NtfsInfo.BytesPerFileRecord,
+                    TrailingSize, Destination->Length, OldAttributeLength);
+            ASSERT(FALSE);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+
         // Move the attributes after this one
         FinalAttribute = MoveAttributes(DeviceExt, NextAttribute, NextAttributeOffset, (ULONG_PTR)Destination + Destination->Length);
     }
@@ -600,6 +614,8 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
 
     // set the file record end
     SetFileRecordEnd(FileRecord, FinalAttribute, FILE_RECORD_END);
+
+    NTFS_CHECK_POOL(FileRecord, "InternalSetResidentAttributeLength:post");
 
     //NtfsDumpFileRecord(DeviceExt, FileRecord);
 
@@ -676,7 +692,31 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
             Fcb->RFCB.AllocationSize = *DataSize;
         Fcb->RFCB.FileSize = *DataSize;
         Fcb->RFCB.ValidDataLength = *DataSize;
-        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+
+        /* Flush and purge cached data before updating sizes.  This ensures
+         * dirty pages are written to disk BEFORE CcSetFileSizes triggers
+         * section teardown, preventing re-entrant MiWritePage calls during
+         * MmFreePageTablesSectionSegment that cause pool corruption. */
+        if (FileObject->SectionObjectPointer)
+        {
+            if (FileObject->SectionObjectPointer->SharedCacheMap)
+            {
+                IO_STATUS_BLOCK Iosb;
+                CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &Iosb);
+            }
+            /* Purge the data section so the MM doesn't try to write back
+             * stale pages during segment cleanup */
+            if (FileObject->SectionObjectPointer->DataSectionObject)
+            {
+                CcPurgeCacheSection(FileObject->SectionObjectPointer,
+                                    NULL, 0, FALSE);
+            }
+        }
+        if (FileObject->SectionObjectPointer &&
+            FileObject->SectionObjectPointer->SharedCacheMap)
+        {
+            CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+        }
     }
 
     return STATUS_SUCCESS;
@@ -1630,12 +1670,16 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
 
     DPRINT("ReadFileRecord(%p, %I64x, %p)\n", Vcb, index, file);
 
+    NTFS_CHECK_POOL(file, "ReadFileRecord:pre");
+
     BytesRead = ReadAttribute(Vcb, Vcb->MFTContext, index * Vcb->NtfsInfo.BytesPerFileRecord, (PCHAR)file, Vcb->NtfsInfo.BytesPerFileRecord);
     if (BytesRead != Vcb->NtfsInfo.BytesPerFileRecord)
     {
         DPRINT1("ReadFileRecord failed: %I64u read, %lu expected\n", BytesRead, Vcb->NtfsInfo.BytesPerFileRecord);
         return STATUS_PARTIAL_COPY;
     }
+
+    NTFS_CHECK_POOL(file, "ReadFileRecord:post");
 
     /* Apply update sequence array fixups. */
     DPRINT("Sequence number: %u\n", file->SequenceNumber);
@@ -1931,8 +1975,12 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
 
+    NTFS_CHECK_POOL(FileRecord, "UpdateFileRecord:pre");
+
     // Add the fixup array to prepare the data for writing to disk
     AddFixupArray(Vcb, &FileRecord->Ntfs);
+
+    NTFS_CHECK_POOL(FileRecord, "UpdateFileRecord:post-fixup");
 
     // write the file record to the master file table
     Status = WriteAttribute(Vcb,
