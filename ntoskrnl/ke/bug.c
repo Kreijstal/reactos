@@ -1160,7 +1160,7 @@ KeBugCheckWithTf(IN ULONG BugCheckCode,
     KiBugCheckDebugBreak(DBG_STATUS_BUGCHECK_SECOND);
 
     /* Shouldn't get here */
-    ASSERT(FALSE);
+    ASSERT(0 && "bug_unreachable");
     while (TRUE);
 }
 

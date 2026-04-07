@@ -980,6 +980,15 @@ FreeSegmentPage(PMM_SECTION_SEGMENT Segment, PLARGE_INTEGER Offset)
     if (IS_DIRTY_SSE(Entry))
         MiWritePage(Segment, Offset->QuadPart, Page);
 
+    /* Remove the section association (rmap entry) BEFORE releasing the page.
+     * MmFreePageTablesSectionSegment will free the CACHE_SECTION_PAGE_TABLE
+     * that the rmap points to.  If we don't remove the rmap first, a concurrent
+     * MmGetSectionAssociation call from the balancer thread can follow the rmap
+     * to a freed page table, read a stale Segment pointer, and dereference
+     * Segment->FileObject->SectionObjectPointer through freed memory — causing
+     * a NULL/garbage pointer dereference at DISPATCH_LEVEL (PFN lock held). */
+    MmDeleteSectionAssociation(Page);
+
     MmReleasePageMemoryConsumer(MC_USER, Page);
 }
 
@@ -1012,16 +1021,41 @@ MmDereferenceSegmentWithLock(
     /* Flush the segment */
     if (*Segment->Flags & MM_DATAFILE_SEGMENT)
     {
+        /* Cache FileObject and SectionObjectPointer BEFORE dropping the PFN lock.
+         * Segment->FileObject won't change (we own the segment), but the
+         * FileObject itself or its SectionObjectPointer could be freed by
+         * another thread after we release the lock. */
+        PFILE_OBJECT FileObject = Segment->FileObject;
+        PSECTION_OBJECT_POINTERS SectionObjectPointer = FileObject ? FileObject->SectionObjectPointer : NULL;
+
         MiReleasePfnLock(OldIrql);
         /* Free the page table. This will flush any remaining dirty data */
         MmFreePageTablesSectionSegment(Segment, FreeSegmentPage);
 
         OldIrql = MiAcquirePfnLock();
-        /* Delete the pointer on the file */
-        ASSERT(Segment->FileObject->SectionObjectPointer->DataSectionObject == Segment);
-        Segment->FileObject->SectionObjectPointer->DataSectionObject = NULL;
+        /* Delete the pointer on the file.
+         * Only clear DataSectionObject if it still points to us — another
+         * thread might have replaced it with a new segment. */
+        if (SectionObjectPointer && SectionObjectPointer->DataSectionObject == Segment)
+            SectionObjectPointer->DataSectionObject = NULL;
         MiReleasePfnLock(OldIrql);
-        ObDereferenceObject(Segment->FileObject);
+        {
+            /* Validate the FileObject before dereferencing. Under heavy memory
+             * pressure, the NTFS driver's close path may race with segment
+             * cleanup, causing FileObject to be freed before we get here.
+             * Check that the OBJECT_HEADER still has a valid Type pointer. */
+            POBJECT_HEADER ObjHdr = OBJECT_TO_OBJECT_HEADER(FileObject);
+            if (ObjHdr->Type != NULL && ObjHdr->PointerCount > 0)
+            {
+                ObDereferenceObject(FileObject);
+            }
+            else
+            {
+                DPRINT1("MmDereferenceSegmentWithLock: FileObject %p already freed "
+                        "(Type=%p PointerCount=%lld), skipping deref\n",
+                        FileObject, ObjHdr->Type, (long long)ObjHdr->PointerCount);
+            }
+        }
 
         ExFreePoolWithTag(Segment, TAG_MM_SECTION_SEGMENT);
     }

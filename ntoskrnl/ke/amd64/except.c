@@ -655,7 +655,7 @@ KiGeneralProtectionFaultHandler(
     {
         /* Not implemented */
         UNIMPLEMENTED;
-        ASSERT(FALSE);
+        ASSERT(0 && "gp_iret");
     }
 
     /* Check for RDMSR/WRMSR */
@@ -670,7 +670,8 @@ KiGeneralProtectionFaultHandler(
     DPRINT1("KiGeneralProtectionFaultHandler: unhandled kernel #GP at RIP=%p "
             "ErrorCode=0x%lx RSP=%p\n",
             (PVOID)TrapFrame->Rip, TrapFrame->ErrorCode, (PVOID)TrapFrame->Rsp);
-    ASSERT(FALSE);
+    DPRINT1("  TrapFrame=%p\n", TrapFrame);
+    ASSERT(0 && "gp_fault");
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -720,8 +721,8 @@ KiXmmExceptionHandler(
     else
     {
         /* Should not happen */
-        ASSERT(FALSE);
+        ASSERT(0 && "gp_xmm");
     }
-    
+
     return ExceptionCode;
 }

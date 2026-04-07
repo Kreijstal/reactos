@@ -19,6 +19,52 @@
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 #define ROUND_DOWN(N, S) ((N) - ((N) % (S)))
 
+/* Pool corruption detector: validate the pool header of the block containing P.
+ * P must be a pool allocation (the pointer returned by ExAllocate*, NOT the header).
+ * On amd64, POOL_HEADER is 16 bytes immediately before the allocation.
+ * We check that the next block's PreviousSize matches our BlockSize. */
+#ifdef DBG
+static inline void NtfsCheckPoolAround(PVOID P, const char *where)
+{
+    /* Pool header is 16 bytes before the allocation */
+    PUCHAR hdr = (PUCHAR)P - 16;
+    UCHAR our_bs = hdr[2];  /* BlockSize */
+    ULONG our_size = (ULONG)our_bs * 16;
+    /* Next block header */
+    PUCHAR next_hdr = hdr + our_size;
+    /* Check that next block is on the same page */
+    if (((ULONG_PTR)next_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
+    {
+        UCHAR next_ps = next_hdr[0];  /* PreviousSize */
+        if (next_ps != our_bs)
+        {
+            DbgPrint("NTFS POOL CORRUPTION at %s: block %p (bs=%u) next at %p has PrevSize=%u\n",
+                    where, P, our_bs, next_hdr + 16, next_ps);
+            ASSERT(FALSE);
+        }
+    }
+    /* Also check our PreviousSize against the previous block */
+    UCHAR our_ps = hdr[0];  /* PreviousSize */
+    if (our_ps != 0)
+    {
+        PUCHAR prev_hdr = hdr - (ULONG)our_ps * 16;
+        if (((ULONG_PTR)prev_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
+        {
+            UCHAR prev_bs = prev_hdr[2];
+            if (prev_bs != our_ps)
+            {
+                DbgPrint("NTFS POOL CORRUPTION at %s: block %p (ps=%u) but prev block at %p has BlockSize=%u\n",
+                        where, P, our_ps, prev_hdr + 16, prev_bs);
+                ASSERT(FALSE);
+            }
+        }
+    }
+}
+#define NTFS_CHECK_POOL(P, where) NtfsCheckPoolAround(P, where)
+#else
+#define NTFS_CHECK_POOL(P, where) ((void)0)
+#endif
+
 #define DEVICE_NAME L"\\Ntfs"
 
 #include <pshpack1.h>

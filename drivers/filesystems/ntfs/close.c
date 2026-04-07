@@ -56,9 +56,13 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
         return STATUS_SUCCESS;
     }
 
+    /* Do NOT clear FsContext or SectionObjectPointer here.  The memory manager
+     * may still issue paging I/O (dirty page writeback) through this FileObject
+     * after IRP_MJ_CLOSE.  Clearing FsContext causes ASSERT(Fcb) failures in
+     * NtfsRead/NtfsWrite.  Clearing SectionObjectPointer breaks the MM's
+     * Segment->FileObject->SectionObjectPointer->DataSectionObject invariant.
+     * FsContext2 (CCB) is safe to clear since paging I/O doesn't use it. */
     FileObject->FsContext2 = NULL;
-    FileObject->FsContext = NULL;
-    FileObject->SectionObjectPointer = NULL;
     DeviceExt->OpenHandleCount--;
 
     if (FileObject->FileName.Buffer)
@@ -120,6 +124,9 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext)
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
     DPRINT1("NtfsClose: DirResource released\n");
+
+    /* Debug: verify IRQL is back to PASSIVE after close */
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 
     if (Status == STATUS_PENDING)
     {
