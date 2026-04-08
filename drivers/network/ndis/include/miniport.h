@@ -98,6 +98,13 @@ typedef struct _LOGICAL_ADAPTER
     PMINIPORT_BUGCHECK_CONTEXT  BugcheckContext;        /* Adapter's shutdown handler */
     BUS_INTERFACE_STANDARD     BusInterface;
     BOOLEAN                    BusInterfaceQueried;
+
+    /* dev-nt6-1 branch: NDIS 6 extension fields. The flag is FALSE for
+     * legacy NDIS 5.x adapters; the void* points at a NDIS6_ADAPTER_EXT
+     * (declared in ndis6_internal.h) when the adapter is bound to an
+     * NDIS 6 miniport driver. */
+    BOOLEAN                     IsNdis6;                /* TRUE if NDIS 6 miniport */
+    PVOID                       Ndis6Context;           /* PNDIS6_ADAPTER_EXT */
 } LOGICAL_ADAPTER, *PLOGICAL_ADAPTER;
 
 #define GET_LOGICAL_ADAPTER(Handle)((PLOGICAL_ADAPTER)Handle)
