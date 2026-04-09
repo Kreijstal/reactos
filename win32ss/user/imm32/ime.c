@@ -10,7 +10,7 @@
  */
 
 #include "precomp.h"
-#include <ime.h>
+#include <wine/ime.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(imm);
 
@@ -1164,10 +1164,10 @@ ImmSetCompositionWindow(
     pIC->cfCompForm = *lpCompForm;
     pIC->fdwInit |= INIT_COMPFORM;
 
-    if (pIC->dwUIFlags & _IME_UI_NO_COMPFORM)
-        pIC->dwUIFlags &= ~_IME_UI_NO_COMPFORM;
+    if (pIC->dwUIFlags & 0x8)
+        pIC->dwUIFlags &= ~0x8;
     else
-        pIC->dwUIFlags &= ~_IME_UI_HIDDEN;
+        pIC->dwUIFlags &= ~0x2;
 
     hWnd = pIC->hWnd;
 
@@ -1298,7 +1298,7 @@ ImmSetCompositionFontA(
     {
         LangID = LANGIDFROMLCID(GetSystemDefaultLCID());
         if (PRIMARYLANGID(LangID) == LANG_JAPANESE &&
-            !(pIC->dwUIFlags & _IME_UI_HIDDEN) &&
+            !(pIC->dwUIFlags & 2) &&
             pIC->cfCompForm.dwStyle != CFS_DEFAULT)
         {
             PostMessageA(pIC->hWnd, WM_IME_REPORT, IR_CHANGECONVERT, 0);
@@ -1357,7 +1357,7 @@ ImmSetCompositionFontW(
     {
         LangID = LANGIDFROMLCID(GetSystemDefaultLCID());
         if (PRIMARYLANGID(LangID) == LANG_JAPANESE &&
-            !(pIC->dwUIFlags & _IME_UI_HIDDEN) &&
+            !(pIC->dwUIFlags & 2) &&
             pIC->cfCompForm.dwStyle != CFS_DEFAULT)
         {
             PostMessageW(pIC->hWnd, WM_IME_REPORT, IR_CHANGECONVERT, 0);
