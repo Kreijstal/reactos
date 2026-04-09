@@ -10,7 +10,7 @@
  */
 
 #include "precomp.h"
-#include <ime.h>
+#include <wine/ime.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(imm);
 
@@ -721,15 +721,18 @@ ImmGetVirtualKey(_In_ HWND hWnd)
 DWORD WINAPI
 ImmGetAppCompatFlags(_In_ HIMC hIMC)
 {
+    PCLIENTIMC pClientIMC;
+    DWORD dwFlags;
+
     TRACE("(%p)\n", hIMC);
 
-    PCLIENTIMC pClientIMC = ImmLockClientImc(hIMC);
+    pClientIMC = ImmLockClientImc(hIMC);
     if (IS_NULL_UNEXPECTEDLY(pClientIMC))
         return 0;
 
-    DWORD dwCompatFlags = pClientIMC->dwCompatFlags;
+    dwFlags = pClientIMC->dwCompatFlags;
     ImmUnlockClientImc(pClientIMC);
-    return (dwCompatFlags | g_aimm_compat_flags);
+    return (dwFlags | g_aimm_compat_flags);
 }
 
 /***********************************************************************
@@ -814,7 +817,7 @@ ImmProcessKey(
     if (bHotKeyDone && ((vKey != VK_KANJI) || (dwHotKeyID != IME_JHOTKEY_CLOSE_OPEN)))
         ret |= IPHK_HOTKEY;
 
-    if ((ret & IPHK_PROCESSBYIME) && (ImmGetAppCompatFlags(hIMC) & _IME_APP_COMPAT_PROCESS_BY_IME))
+    if ((ret & IPHK_PROCESSBYIME) && (ImmGetAppCompatFlags(hIMC) & 0x10000))
     {
         /* The key has been processed by IME's ImeProcessKey */
         LANGID wLangID = LANGIDFROMLCID(GetSystemDefaultLCID());
@@ -876,7 +879,7 @@ ImmGenerateMessage(_In_ HIMC hIMC)
 {
     PCLIENTIMC pClientImc;
     LPINPUTCONTEXT pIC;
-    LPTRANSMSG pMsgs = NULL, pTrans = NULL, pItem;
+    LPTRANSMSG pMsgs, pTrans = NULL, pItem;
     HWND hWnd;
     DWORD dwIndex, dwCount, cbTrans;
     HIMCC hMsgBuf = NULL;
@@ -941,7 +944,7 @@ ImmGenerateMessage(_In_ HIMC hIMC)
 
 Quit:
     ImmLocalFree(pTrans);
-    if (hMsgBuf && pMsgs)
+    if (hMsgBuf)
         ImmUnlockIMCC(hMsgBuf);
     pIC->dwNumMsgBuf = 0; /* done */
     ImmUnlockIMC(hIMC);
@@ -1102,9 +1105,14 @@ ImmTranslateMessage(
             if (kret > 0)
             {
                 if ((BYTE)vk == VK_PACKET)
+                {
+                    vk &= 0xFF;
                     vk |= (wChar << 8);
+                }
                 else
+                {
                     vk = MAKEWORD(vk, wChar);
+                }
             }
         }
     }
