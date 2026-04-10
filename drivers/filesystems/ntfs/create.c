@@ -319,6 +319,73 @@ NtfsOpenFile(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+static
+NTSTATUS
+NtfsOpenTargetDirectory(PDEVICE_EXTENSION DeviceExt,
+                        PFILE_OBJECT FileObject,
+                        PWSTR FileName,
+                        BOOLEAN CaseSensitive,
+                        PNTFS_FCB *ParentFcb,
+                        PULONG IoInformation)
+{
+    NTSTATUS Status;
+    PWSTR AbsFileName = NULL;
+    PNTFS_FCB TargetFcb = NULL;
+
+    *ParentFcb = NULL;
+    *IoInformation = 0;
+
+    if (FileObject->RelatedFileObject)
+    {
+        Status = NtfsMakeAbsoluteFilename(FileObject->RelatedFileObject,
+                                          FileName,
+                                          &AbsFileName);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        if (AbsFileName != NULL)
+            FileName = AbsFileName;
+    }
+
+    if (wcscmp(FileName, L"\\") == 0)
+    {
+        if (AbsFileName != NULL)
+            ExFreePoolWithTag(AbsFileName, TAG_NTFS);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = NtfsGetFCBForFile(DeviceExt,
+                               ParentFcb,
+                               &TargetFcb,
+                               FileName,
+                               CaseSensitive);
+    if (NT_SUCCESS(Status))
+    {
+        if (*ParentFcb == NULL)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            *IoInformation = FILE_EXISTS;
+            Status = STATUS_SUCCESS;
+        }
+    }
+    else if (Status == STATUS_OBJECT_NAME_NOT_FOUND && *ParentFcb != NULL)
+    {
+        *IoInformation = FILE_DOES_NOT_EXIST;
+        Status = STATUS_SUCCESS;
+    }
+
+    if (TargetFcb != NULL)
+        NtfsReleaseFCB(DeviceExt, TargetFcb);
+
+    if (AbsFileName != NULL)
+        ExFreePoolWithTag(AbsFileName, TAG_NTFS);
+
+    return Status;
+}
+
 
 /*
  * FUNCTION: Opens a file
@@ -333,6 +400,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     PFILE_OBJECT FileObject;
     ULONG RequestedDisposition;
     ULONG RequestedOptions;
+    BOOLEAN OpenTargetDir;
     PNTFS_FCB Fcb = NULL;
 //    PWSTR FileName;
     NTSTATUS Status;
@@ -353,6 +421,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
     RequestedDisposition = ((Stack->Parameters.Create.Options >> 24) & 0xff);
     RequestedOptions = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
+    OpenTargetDir = BooleanFlagOn(Stack->Flags, SL_OPEN_TARGET_DIRECTORY);
 //  PagingFileCreate = (Stack->Flags & SL_OPEN_PAGING_FILE) ? TRUE : FALSE;
     if (RequestedOptions & FILE_DIRECTORY_FILE &&
         RequestedDisposition == FILE_SUPERSEDE)
@@ -393,6 +462,41 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         DPRINT1("Open by ID: %I64x -> %wZ\n", (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK, &FullPath);
     }
 
+    if (OpenTargetDir)
+    {
+        ULONG IoInformation;
+
+        Status = NtfsOpenTargetDirectory(DeviceExt,
+                                         FileObject,
+                                         ((RequestedOptions & FILE_OPEN_BY_FILE_ID) ? FullPath.Buffer : FileObject->FileName.Buffer),
+                                         BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                         &Fcb,
+                                         &IoInformation);
+
+        if (RequestedOptions & FILE_OPEN_BY_FILE_ID)
+        {
+            ExFreePoolWithTag(FullPath.Buffer, TAG_NTFS);
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        Status = NtfsAttachFCBToFileObject(DeviceExt,
+                                           Fcb,
+                                           FileObject);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        Fcb->OpenHandleCount++;
+        DeviceExt->OpenHandleCount++;
+        Irp->IoStatus.Information = IoInformation;
+        return STATUS_SUCCESS;
+    }
+
     /* This a open operation for the volume itself */
     if (FileObject->FileName.Length == 0 &&
         (FileObject->RelatedFileObject == NULL || FileObject->RelatedFileObject->FsContext2 != NULL))
@@ -406,6 +510,11 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         if (RequestedOptions & FILE_DIRECTORY_FILE)
         {
             return STATUS_NOT_A_DIRECTORY;
+        }
+
+        if (OpenTargetDir)
+        {
+            return STATUS_INVALID_PARAMETER;
         }
 
         NtfsAttachFCBToFileObject(DeviceExt, DeviceExt->VolumeFcb, FileObject);
@@ -734,7 +843,12 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
     // Add the $FILE_NAME attribute
-    AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, &ParentMftIndex);
+    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, &ParentMftIndex);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
 
     // save a pointer to the filename attribute
     FilenameAttribute = (PFILENAME_ATTRIBUTE)((ULONG_PTR)NextAttribute + NextAttribute->Resident.ValueOffset);
@@ -931,7 +1045,12 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
     // Add the $FILE_NAME attribute
-    AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, &ParentMftIndex);
+    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, &ParentMftIndex);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
 
     // save a pointer to the filename attribute
     FilenameAttribute = (PFILENAME_ATTRIBUTE)((ULONG_PTR)NextAttribute + NextAttribute->Resident.ValueOffset);

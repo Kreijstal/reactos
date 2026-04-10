@@ -616,8 +616,6 @@ NtfsDirectoryControl(PNTFS_IRP_CONTEXT IrpContext)
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
 
-    IrpContext->Irp->IoStatus.Information = 0;
-
     return Status;
 }
 
