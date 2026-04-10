@@ -120,10 +120,10 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext)
     }
     DPRINT("INSTRUMENT: NtfsClose DirResource acquired\n");
     Status = NtfsCloseFile(DeviceExtension, FileObject);
-    DPRINT1("NtfsClose: NtfsCloseFile returned 0x%lx\n", Status);
+    DPRINT("NtfsClose: NtfsCloseFile returned 0x%lx\n", Status);
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
-    DPRINT1("NtfsClose: DirResource released\n");
+    DPRINT("NtfsClose: DirResource released\n");
 
     /* Debug: verify IRQL is back to PASSIVE after close */
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);

@@ -606,6 +606,13 @@ typedef struct _FCB
     ULONG Flags;
     ULONG OpenHandleCount;
 
+    /* Share access tracking — used by IoCheckShareAccess /
+     * IoSetShareAccess / IoUpdateShareAccess / IoRemoveShareAccess.
+     * The MM filter callback PreAcquireForSectionSynchronization
+     * inspects ShareAccess.Writers to decide whether to report
+     * STATUS_FILE_LOCKED_WITH_WRITERS or STATUS_FILE_LOCKED_WITH_ONLY_READERS. */
+    SHARE_ACCESS ShareAccess;
+
     ULONGLONG MFTIndex;
     USHORT LinkCount;
 
