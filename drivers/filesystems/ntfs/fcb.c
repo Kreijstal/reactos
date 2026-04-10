@@ -124,25 +124,59 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb);
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
-    /* Do not free the FCB while the memory manager still has section objects
-     * referencing its embedded SectionObjectPointers.  If we free the FCB,
-     * the MM segment's Segment->FileObject->SectionObjectPointer becomes a
-     * dangling pointer into freed pool memory, causing assertion failures
-     * (DataSectionObject != Segment) or BSODs when the segment is cleaned up.
+    /* If the memory manager still has section objects referencing the FCB's
+     * embedded SectionObjectPointers, freeing the FCB would leave MM's
+     * Segment->FileObject->SectionObjectPointer dangling into freed pool —
+     * which causes the (DataSectionObject != Segment) assertion / BSOD on
+     * the next paging I/O, and is the proximate cause of the
+     * ExReleaseResourceForThreadLite "Owner != NULL" assert seen when
+     * fastfat.sys is paged in (issue #10).
      *
-     * In a full implementation, the FCB would be ref-counted against section
-     * references and only destroyed after the last section is gone.  For now,
-     * simply leak the FCB if sections are still active — this prevents the
-     * crash at the cost of a small memory leak during install. */
+     * The proper fix is to tear the lingering sections down ourselves
+     * before freeing the FCB.  MmFlushImageSection writes back any dirty
+     * image-section pages (otherwise MmForceSectionClosed would refuse) and
+     * MmForceSectionClosed forces the data and image sections closed,
+     * clearing SectionObjectPointers->DataSectionObject /
+     * ->ImageSectionObject when it succeeds.  Both calls require IRQL <=
+     * APC_LEVEL and that we do NOT hold the FCB resource — both NtfsDestroyFCB
+     * call sites (NtfsReleaseFCB after dropping FcbListLock, and the
+     * NtfsMountVolume error path which uses a fresh FCB) satisfy this. */
     if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
         Fcb->SectionObjectPointers.ImageSectionObject != NULL ||
         Fcb->SectionObjectPointers.SharedCacheMap != NULL)
     {
-        DPRINT1("NtfsDestroyFCB(%p): SectionObjectPointers still active (Data=%p Image=%p Cache=%p), deferring destroy\n",
+        DPRINT1("NtfsDestroyFCB(%p): tearing down lingering sections (Data=%p Image=%p Cache=%p)\n",
                 Fcb, Fcb->SectionObjectPointers.DataSectionObject,
                 Fcb->SectionObjectPointers.ImageSectionObject,
                 Fcb->SectionObjectPointers.SharedCacheMap);
-        return;
+
+        /* Flush dirty image-section pages so MmForceSectionClosed doesn't
+         * refuse on account of them.  Ignore the return value — it returns
+         * FALSE only when there's no image section to flush, which is fine. */
+        if (Fcb->SectionObjectPointers.ImageSectionObject != NULL)
+        {
+            MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite);
+        }
+
+        /* Force the section(s) closed.  DelayClose=TRUE lets MM defer the
+         * actual teardown if it can't drop the segment immediately, which
+         * matches the contract Windows file systems rely on. */
+        MmForceSectionClosed(&Fcb->SectionObjectPointers, TRUE);
+
+        /* If MM was unable to release everything (e.g. there's still a
+         * mapped view from user mode), the only safe thing left is to leak
+         * the FCB rather than free pool memory MM is still using.  This is
+         * the previous behaviour, kept as a backstop. */
+        if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
+            Fcb->SectionObjectPointers.ImageSectionObject != NULL ||
+            Fcb->SectionObjectPointers.SharedCacheMap != NULL)
+        {
+            DPRINT1("NtfsDestroyFCB(%p): MmForceSectionClosed could not drop all sections (Data=%p Image=%p Cache=%p), leaking FCB\n",
+                    Fcb, Fcb->SectionObjectPointers.DataSectionObject,
+                    Fcb->SectionObjectPointers.ImageSectionObject,
+                    Fcb->SectionObjectPointers.SharedCacheMap);
+            return;
+        }
     }
 
     ExDeleteResourceLite(&Fcb->PagingIoResource);
