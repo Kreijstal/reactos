@@ -38,6 +38,68 @@ PNTFS_GLOBAL_DATA NtfsGlobalData = NULL;
 /* FUNCTIONS ****************************************************************/
 
 /*
+ * Filter callback used by the memory manager when it needs to acquire a
+ * file before creating a section, or to query whether the file currently
+ * has any writers.  Mirrors FatFilterCallbackAcquireForCreateSection so
+ * NTFS-backed images can be mapped under the same locking discipline as
+ * FAT-backed images.
+ *
+ * For SyncTypeCreateSection: returns STATUS_FILE_LOCKED_WITH_WRITERS if
+ * any handle currently has write access, otherwise
+ * STATUS_FILE_LOCKED_WITH_ONLY_READERS.  For other sync types it returns
+ * STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY.
+ *
+ * The default FsRtl release routine releases Fcb->RFCB.Resource so we
+ * acquire that resource here (matches FAT).
+ */
+NTSTATUS
+NTAPI
+NtfsFilterCallbackAcquireForCreateSection(IN PFS_FILTER_CALLBACK_DATA CallbackData,
+                                          OUT PVOID *CompletionContext)
+{
+    PNTFS_FCB Fcb;
+
+    PAGED_CODE();
+
+    ASSERT(CallbackData->Operation == FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION);
+    ASSERT(CallbackData->SizeOfFsFilterCallbackData == sizeof(FS_FILTER_CALLBACK_DATA));
+
+    UNREFERENCED_PARAMETER(CompletionContext);
+
+    Fcb = CallbackData->FileObject->FsContext;
+    if (Fcb == NULL)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+
+    /* Volume opens have no per-file resource — let MM proceed. */
+    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+
+    /* Acquire the FCB's main resource exclusively, matching FAT.
+     * The default FsRtl release routine drops Fcb->RFCB.Resource. */
+    if (Fcb->RFCB.Resource != NULL)
+    {
+        ExAcquireResourceExclusiveLite(Fcb->RFCB.Resource, TRUE);
+    }
+
+    if (CallbackData->Parameters.AcquireForSectionSynchronization.SyncType != SyncTypeCreateSection)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+
+    if (Fcb->ShareAccess.Writers == 0)
+    {
+        return STATUS_FILE_LOCKED_WITH_ONLY_READERS;
+    }
+
+    return STATUS_FILE_LOCKED_WITH_WRITERS;
+}
+
+
+/*
  * FUNCTION: Called by the system to initialize the driver
  * ARGUMENTS:
  *           DriverObject = object describing this driver
@@ -134,6 +196,27 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     NtfsGlobalData->FastIoDispatch.FastIoRead = NtfsFastIoRead;
     NtfsGlobalData->FastIoDispatch.FastIoWrite = NtfsFastIoWrite;
     DriverObject->FastIoDispatch = &NtfsGlobalData->FastIoDispatch;
+
+    /* Register the FS filter callbacks the memory manager uses to acquire
+     * the file before creating a section.  Without this, MM falls back to
+     * its default acquire-for-section path which has no visibility into
+     * NTFS's per-file synchronisation, causing image-section creation to
+     * race with concurrent writes/closes on NTFS-backed executables. */
+    {
+        FS_FILTER_CALLBACKS FilterCallbacks;
+
+        RtlZeroMemory(&FilterCallbacks, sizeof(FilterCallbacks));
+        FilterCallbacks.SizeOfFsFilterCallbacks = sizeof(FilterCallbacks);
+        FilterCallbacks.PreAcquireForSectionSynchronization = NtfsFilterCallbackAcquireForCreateSection;
+
+        Status = FsRtlRegisterFileSystemFilterCallbacks(DriverObject, &FilterCallbacks);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("FsRtlRegisterFileSystemFilterCallbacks failed: 0x%lx\n", Status);
+            /* Non-fatal: NTFS still works without the callback, just with
+             * the same race window the driver had before. */
+        }
+    }
 
     /* Initialize lookaside list for IRP contexts */
     ExInitializeNPagedLookasideList(&NtfsGlobalData->IrpContextLookasideList,

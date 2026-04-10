@@ -723,6 +723,51 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
     if (NT_SUCCESS(Status))
     {
+        ACCESS_MASK DesiredAccess;
+        ULONG ShareAccess;
+
+        DesiredAccess = Stack->Parameters.Create.SecurityContext != NULL
+            ? Stack->Parameters.Create.SecurityContext->DesiredAccess
+            : 0;
+        ShareAccess = Stack->Parameters.Create.ShareAccess;
+
+        /* Maintain SHARE_ACCESS so the MM filter callback above can tell
+         * how many writers a file has, and so concurrent opens of the same
+         * file get the share-mode semantics callers depend on (e.g. the
+         * loader opens images with FILE_SHARE_READ|FILE_SHARE_DELETE and
+         * expects subsequent writers to be rejected). */
+        if (Fcb->Identifier.Type == NTFS_TYPE_FCB &&
+            !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME))
+        {
+            if (Fcb->OpenHandleCount == 0)
+            {
+                /* First open of this FCB — establish share access. */
+                IoSetShareAccess(DesiredAccess,
+                                 ShareAccess,
+                                 FileObject,
+                                 &Fcb->ShareAccess);
+            }
+            else
+            {
+                /* Subsequent open — must be compatible with existing
+                 * sharing.  IoCheckShareAccess validates and (when the
+                 * fourth argument is TRUE) updates the access counters
+                 * atomically. */
+                Status = IoCheckShareAccess(DesiredAccess,
+                                            ShareAccess,
+                                            FileObject,
+                                            &Fcb->ShareAccess,
+                                            TRUE);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("NtfsCreateFile: share access conflict for FCB %p (Desired=0x%lx Share=0x%lx): 0x%lx\n",
+                            Fcb, DesiredAccess, ShareAccess, Status);
+                    NtfsCloseFile(DeviceExt, FileObject);
+                    return Status;
+                }
+            }
+        }
+
         Fcb->OpenHandleCount++;
         DeviceExt->OpenHandleCount++;
     }
