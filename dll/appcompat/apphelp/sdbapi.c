@@ -222,10 +222,17 @@ BOOL WINAPI SdbpOpenMemMappedFile(LPCWSTR path, PMEMMAPPED mapping)
     }
 
     mapping->mapped_size = mapping->size = FileStandard.EndOfFile.LowPart;
-    Status = NtMapViewOfSection(mapping->section, NtCurrentProcess(), (PVOID*)&mapping->view, 0, 0, 0, &mapping->mapped_size, ViewUnmap, 0, PAGE_READONLY);
+    Status = NtMapViewOfSection(mapping->section, NtCurrentProcess(), (PVOID *)&mapping->view, 0, 0, 0,
+                                &mapping->mapped_size, ViewUnmap, 0, PAGE_READONLY);
     if (!NT_SUCCESS(Status))
     {
         SHIM_ERR("Failed to map view of file: 0x%lx\n", Status);
+        goto err_out;
+    }
+
+    if (mapping->size != 0 && mapping->view == NULL)
+    {
+        SHIM_ERR("Mapped '%S' with size %Iu but no view was returned\n", path, mapping->size);
         goto err_out;
     }
 

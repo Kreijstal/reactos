@@ -24,6 +24,8 @@
 
 #include <ndk/exfuncs.h>
 
+#include <pseh/pseh2.h>
+
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(userinit);
 

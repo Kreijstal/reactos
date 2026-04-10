@@ -351,6 +351,9 @@ static BOOL SdbpPropagateEnvLayers(HSDB hsdb, LPWSTR Environment, PSDBQUERYRESUL
     NTSTATUS Status;
     WCHAR Buffer[MAX_LAYER_LENGTH];
 
+    if (Environment == NULL)
+        return FALSE;
+
     RtlInitEmptyUnicodeString(&EnvValue, Buffer, sizeof(Buffer));
 
     Status = RtlQueryEnvironmentVariable_U(Environment, &EnvKey, &EnvValue);

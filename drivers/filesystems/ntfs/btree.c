@@ -1121,12 +1121,18 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
             }
 
             // Write the child VCN into the on-disk entry.
+            // Mirror CreateIndexRootFromBTree's preference: if the source
+            // IndexEntry already has the NODE flag, trust the VCN that
+            // UpdateIndexNode just wrote into it; otherwise fall back to the
+            // loaded child node's VCN.  This keeps the two serializers in
+            // agreement and avoids writing a stale LesserChild->VCN when the
+            // in-memory entry was refreshed more recently.
             if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
             {
-                if (CurrentKey->LesserChild)
-                    SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
-                else if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+                if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
                     SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
+                else if (CurrentKey->LesserChild)
+                    SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
                 else
                     SetIndexEntryVCN(CurrentNodeEntry, 0);
             }

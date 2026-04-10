@@ -217,28 +217,33 @@ ApphelpCheckRunAppEx(
 
     dwFlags &= ~APPHELP_CLEARBITS;
 
-    *SdbQueryAppCompatData = result = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SDBQUERYRESULT));
-    if (SdbQueryAppCompatDataSize)
-        *SdbQueryAppCompatDataSize = sizeof(*result);
-
-
-    hsdb = SdbInitDatabase(HID_DOS_PATHS | SDB_DATABASE_MAIN_SHIM, NULL);
-    if (hsdb)
+    if (SdbQueryAppCompatData != NULL)
     {
-        BOOL FoundMatch;
-        DWORD MatchingExeFlags = 0;
+        *SdbQueryAppCompatData = result = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SDBQUERYRESULT));
+        if (SdbQueryAppCompatDataSize)
+            *SdbQueryAppCompatDataSize = sizeof(*result);
+    }
 
-        if (dwFlags & APPHELP_IGNORE_ENVIRONMENT)
-            MatchingExeFlags |= SDBGMEF_IGNORE_ENVIRONMENT;
-
-        FoundMatch = SdbGetMatchingExe(hsdb, ApplicationName, NULL, Environment, MatchingExeFlags, result);
-        if (FileHandle != INVALID_HANDLE_VALUE)
+    if (result != NULL)
+    {
+        hsdb = SdbInitDatabase(HID_DOS_PATHS | SDB_DATABASE_MAIN_SHIM, NULL);
+        if (hsdb)
         {
-            dwFlags |= APPHELP_VALID_RESULT;
-            dwFlags |= (FoundMatch ? APPHELP_RESULT_FOUND : APPHELP_RESULT_NOTFOUND);
-        }
+            BOOL FoundMatch;
+            DWORD MatchingExeFlags = 0;
 
-        SdbReleaseDatabase(hsdb);
+            if (dwFlags & APPHELP_IGNORE_ENVIRONMENT)
+                MatchingExeFlags |= SDBGMEF_IGNORE_ENVIRONMENT;
+
+            FoundMatch = SdbGetMatchingExe(hsdb, ApplicationName, NULL, Environment, MatchingExeFlags, result);
+            if (FileHandle != INVALID_HANDLE_VALUE)
+            {
+                dwFlags |= APPHELP_VALID_RESULT;
+                dwFlags |= (FoundMatch ? APPHELP_RESULT_FOUND : APPHELP_RESULT_NOTFOUND);
+            }
+
+            SdbReleaseDatabase(hsdb);
+        }
     }
 
     if (Reason && !(dwFlags & APPHELP_DONTWRITE_REASON))

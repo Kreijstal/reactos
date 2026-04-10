@@ -68,8 +68,8 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     SECURITY_ATTRIBUTES EventAttrs;
     PSECURITY_DESCRIPTOR EventSd;
 
-    /* The following lengths are constant (see below), they cannot overflow */
-    WCHAR CommandLine[116];
+    WCHAR ApplicationPath[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH * 2];
     WCHAR InstallEventName[73];
     WCHAR PipeName[74];
     WCHAR UuidString[39];
@@ -159,8 +159,27 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     }
 
     /* Launch rundll32 to call ClientSideInstallW */
-    wcscpy(CommandLine, L"rundll32.exe newdev.dll,ClientSideInstall ");
-    wcscat(CommandLine, PipeName);
+    if (!GetSystemDirectoryW(ApplicationPath, _countof(ApplicationPath)))
+    {
+        DPRINT1("GetSystemDirectoryW failed with error %lu\n", GetLastError());
+        goto cleanup;
+    }
+
+    if (wcslen(ApplicationPath) + _countof(L"\\rundll32.exe") > _countof(ApplicationPath))
+    {
+        DPRINT1("ApplicationPath buffer too small\n");
+        goto cleanup;
+    }
+    wcscat(ApplicationPath, L"\\rundll32.exe");
+
+    if (swprintf(CommandLine,
+                 L"\"%ls\" newdev.dll,ClientSideInstall %ls",
+                 ApplicationPath,
+                 PipeName) < 0)
+    {
+        DPRINT1("Failed to build rundll32 command line\n");
+        goto cleanup;
+    }
 
     ZeroMemory(&StartupInfo, sizeof(StartupInfo));
     StartupInfo.cb = sizeof(StartupInfo);
@@ -174,7 +193,17 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
             goto cleanup;
         }
 
-        if (!CreateProcessAsUserW(hUserToken, NULL, CommandLine, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, Environment, NULL, &StartupInfo, &ProcessInfo))
+        if (!CreateProcessAsUserW(hUserToken,
+                                  ApplicationPath,
+                                  CommandLine,
+                                  NULL,
+                                  NULL,
+                                  FALSE,
+                                  CREATE_UNICODE_ENVIRONMENT,
+                                  Environment,
+                                  NULL,
+                                  &StartupInfo,
+                                  &ProcessInfo))
         {
             DPRINT1("CreateProcessAsUserW failed with error %u\n", GetLastError());
             goto cleanup;
@@ -188,7 +217,16 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
            (ShowWizard is only set to FALSE for these two modes) */
         ASSERT(!ShowWizard);
 
-        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+        if (!CreateProcessW(ApplicationPath,
+                            CommandLine,
+                            NULL,
+                            NULL,
+                            FALSE,
+                            0,
+                            NULL,
+                            NULL,
+                            &StartupInfo,
+                            &ProcessInfo))
         {
             DPRINT1("CreateProcessW failed with error %u\n", GetLastError());
             goto cleanup;

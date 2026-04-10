@@ -13,6 +13,7 @@
 #include "strsafe.h"
 #include "winver.h"
 #include "rtlfuncs.h"
+#include <pseh/pseh2.h>
 
 
 #define NUM_ATTRIBUTES  28
@@ -162,14 +163,24 @@ static DWORD WINAPI SdbpCalculateFileChecksum(PMEMMAPPED mapping)
         size = mapping->size;
     }
 
-    for (n = 0; n < size / 4; ++n)
+    _SEH2_TRY
     {
-        checks += *data;
-        carry = (checks & 1) ? 0x80000000 : 0;
-        checks >>= 1;
-        checks |= carry;
-        ++data;
+        for (n = 0; n < size / 4; ++n)
+        {
+            checks += *data;
+            carry = (checks & 1) ? 0x80000000 : 0;
+            checks >>= 1;
+            checks |= carry;
+            ++data;
+        }
     }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SHIM_ERR("Checksum calculation faulted for view %p size %Iu\n", mapping->view, mapping->size);
+        return 0;
+    }
+    _SEH2_END;
+
     return checks;
 }
 
@@ -262,14 +273,33 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
         WORD code_page;
     } *lang_page;
 
+    if (!attr_info_ret || !attr_count)
+        return FALSE;
+
+    *attr_info_ret = NULL;
+    *attr_count = 0;
+
     if (!SdbpOpenMemMappedFile(path, &mapped))
     {
         SHIM_ERR("Error retrieving FILEINFO structure\n");
         return FALSE;
     }
+
+    if (mapped.size != 0 && mapped.view == NULL)
+    {
+        SHIM_ERR("Mapped file '%S' has size %Iu but a NULL view\n", path, mapped.size);
+        SdbpCloseMemMappedFile(&mapped);
+        return FALSE;
+    }
+
     mapping_end = mapped.view + mapped.size;
 
     attr_info = (PATTRINFO)SdbAlloc(NUM_ATTRIBUTES * sizeof(ATTRINFO));
+    if (!attr_info)
+    {
+        SdbpCloseMemMappedFile(&mapped);
+        return FALSE;
+    }
 
     SdbpSetDWORDAttr(&attr_info[0], TAG_SIZE, mapped.size);
     if (mapped.size)
@@ -294,9 +324,13 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
         {
             UINT page_size = 0;
             file_info = SdbAlloc(info_size);
-            GetFileVersionInfoW(path, 0, info_size, file_info);
-            VerQueryValueW(file_info, str_tinfo, (LPVOID)&lang_page, &page_size);
-            StringCchPrintfW(translation, ARRAYSIZE(translation), str_trans, lang_page->language, lang_page->code_page);
+            if (file_info && GetFileVersionInfoW(path, 0, info_size, file_info) &&
+                VerQueryValueW(file_info, str_tinfo, (LPVOID)&lang_page, &page_size) &&
+                lang_page && page_size >= sizeof(*lang_page))
+            {
+                StringCchPrintfW(translation, ARRAYSIZE(translation), str_trans,
+                                 lang_page->language, lang_page->code_page);
+            }
         }
 
         /* Handles 2, 3, 12, 13, 14, 15, 21, 22 */
@@ -338,8 +372,10 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
             SdbpSetAttrFail(&attr_info[25]); /* TAG_EXPORT_NAME */
         }
 
-        if (info_size)
+        if (translation[0] != UNICODE_NULL)
             SdbpSetDWORDAttr(&attr_info[26], TAG_VER_LANGUAGE, lang_page->language);
+        else
+            SdbpSetAttrFail(&attr_info[26]);
 
         SdbpSetDWORDAttr(&attr_info[27], TAG_EXE_WRAPPER, 0); /* boolean */
     }

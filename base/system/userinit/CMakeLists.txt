@@ -5,7 +5,7 @@ list(APPEND SOURCE
     userinit.h)
 
 add_executable(userinit ${SOURCE} userinit.rc)
-target_link_libraries(userinit wine)
+target_link_libraries(userinit wine ${PSEH_LIB})
 set_module_type(userinit win32gui UNICODE)
 add_importlibs(userinit user32 gdi32 advapi32 shell32 msvcrt kernel32 ntdll)
 add_pch(userinit userinit.h SOURCE)

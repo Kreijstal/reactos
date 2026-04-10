@@ -21,7 +21,7 @@
  * PROJECT:     ReactOS Userinit Logon Application
  * FILE:        base/system/userinit/userinit.c
  * PROGRAMMERS: Thomas Weidenmueller (w3seek@users.sourceforge.net)
- *              Hervé Poussineau (hpoussin@reactos.org)
+ *              Hervï¿½ Poussineau (hpoussin@reactos.org)
  */
 
 #include "userinit.h"
@@ -473,7 +473,30 @@ NotifyLogon(VOID)
 
     CMP_Report_LogOn = (PCMP_REPORT_LOGON)GetProcAddress(hModule, "CMP_Report_LogOn");
     if (CMP_Report_LogOn)
-        CMP_Report_LogOn(CMP_MAGIC, GetCurrentProcessId());
+    {
+        /*
+         * Guard against unhandled RPC exceptions. On slow file systems (e.g.
+         * NTFS) PnP/SCM RPC services may not yet be listening when userinit
+         * runs on first-boot, which can cause rpcrt4 to raise
+         * RPC_S_SERVER_UNAVAILABLE (0x6BA) out of the NDR stub. setupapi's
+         * retry loop normally catches that, but if for any reason the
+         * exception escapes (e.g. an SEH edge case), we do NOT want userinit
+         * to display a fatal application-error dialog over the freshly booted
+         * desktop. NotifyLogon() is a best-effort PnP notification; failure
+         * here is non-fatal to the user session.
+         */
+        _SEH2_TRY
+        {
+            CMP_Report_LogOn(CMP_MAGIC, GetCurrentProcessId());
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ERR("userinit: CMP_Report_LogOn raised exception 0x%08lx; "
+                "continuing without PnP logon notification\n",
+                _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
     else
         WARN("GetProcAddress() failed\n");
 
