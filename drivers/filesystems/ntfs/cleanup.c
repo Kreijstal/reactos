@@ -42,6 +42,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                 BOOLEAN CanWait)
 {
     PNTFS_FCB Fcb;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     DPRINT("NtfsCleanupFile(DeviceExt %p, FileObject %p, CanWait %u)\n",
            DeviceExt,
@@ -94,12 +95,25 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
             // Remove share access when handled
         }
 
+        if (Fcb->OpenHandleCount == 0 &&
+            BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
+            Fcb->SectionObjectPointers.DataSectionObject == NULL &&
+            Fcb->SectionObjectPointers.ImageSectionObject == NULL &&
+            Fcb->SectionObjectPointers.SharedCacheMap == NULL)
+        {
+            Status = NtfsDeleteFileRecord(DeviceExt, Fcb, FALSE);
+            if (NT_SUCCESS(Status))
+                ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
+            else
+                DPRINT1("NtfsCleanupFile: NtfsDeleteFileRecord failed with 0x%lx\n", Status);
+        }
+
         FileObject->Flags |= FO_CLEANUP_COMPLETE;
 
         ExReleaseResourceLite(&Fcb->MainResource);
     }
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 NTSTATUS
