@@ -38,6 +38,135 @@ PNTFS_GLOBAL_DATA NtfsGlobalData = NULL;
 /* FUNCTIONS ****************************************************************/
 
 /*
+ * Filter callback used by the memory manager when it needs to acquire a
+ * file before creating a section, or to query whether the file currently
+ * has any writers.  Mirrors FatFilterCallbackAcquireForCreateSection so
+ * NTFS-backed images can be mapped under the same locking discipline as
+ * FAT-backed images.
+ *
+ * For SyncTypeCreateSection: returns STATUS_FILE_LOCKED_WITH_WRITERS if
+ * any handle currently has write access, otherwise
+ * STATUS_FILE_LOCKED_WITH_ONLY_READERS.  For other sync types it returns
+ * STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY.
+ *
+ * The default FsRtl release routine releases Fcb->RFCB.Resource so we
+ * acquire that resource here (matches FAT).
+ *
+ * Note for issue #11: this callback must be paired with the NTFS
+ * FastIoDispatch.AcquireFileForNtCreateSection / ReleaseFileForNtCreateSection
+ * handlers below.  Without them, FsRtlReleaseFile's default release path
+ * would call ExReleaseResourceLite(FcbHeader->Resource) **unconditionally**
+ * — even for FileObjects whose FsContext is an NTFS volume/global-data
+ * structure (not a real FCB), where we *didn't* acquire here.  On such
+ * objects the FSRTL header offset points at uninitialized or unrelated
+ * memory, so the default release reads garbage at Resource and eventually
+ * leaks / bugchecks.  Providing typed Acquire/Release handlers keeps all
+ * releases bounded to real NTFS_TYPE_FCB objects and fixes the smss boot
+ * deadlock documented in issue #11. */
+NTSTATUS
+NTAPI
+NtfsFilterCallbackAcquireForCreateSection(IN PFS_FILTER_CALLBACK_DATA CallbackData,
+                                          OUT PVOID *CompletionContext)
+{
+    PNTFS_FCB Fcb;
+
+    PAGED_CODE();
+
+    ASSERT(CallbackData->Operation == FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION);
+    ASSERT(CallbackData->SizeOfFsFilterCallbackData == sizeof(FS_FILTER_CALLBACK_DATA));
+
+    UNREFERENCED_PARAMETER(CompletionContext);
+
+    Fcb = CallbackData->FileObject->FsContext;
+    if (Fcb == NULL)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+
+    /* Volume opens have no per-file resource — let MM proceed.  The paired
+     * FastIoDispatch.ReleaseFileForNtCreateSection handler below will also
+     * skip releasing in this case, so the acquire/release stays balanced. */
+    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+
+    /* Acquire the FCB's main resource exclusively, matching FAT.
+     * The default FsRtl release routine drops Fcb->RFCB.Resource. */
+    if (Fcb->RFCB.Resource != NULL)
+    {
+        ExAcquireResourceExclusiveLite(Fcb->RFCB.Resource, TRUE);
+    }
+
+    if (CallbackData->Parameters.AcquireForSectionSynchronization.SyncType != SyncTypeCreateSection)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+
+    if (Fcb->ShareAccess.Writers == 0)
+    {
+        return STATUS_FILE_LOCKED_WITH_ONLY_READERS;
+    }
+
+    return STATUS_FILE_LOCKED_WITH_WRITERS;
+}
+
+/* FastIoDispatch.AcquireFileForNtCreateSection handler.
+ *
+ * Called by FsRtlAcquireFileExclusiveCommon when the filter callback
+ * returns an unrecognized status code (the fall-through path).  For the
+ * normal section-creation path this is not reached — the filter callback
+ * returns STATUS_FILE_LOCKED_WITH_*. We still provide a typed handler
+ * so any fallback acquire is bounded to real NTFS_TYPE_FCB objects and
+ * stays symmetric with NtfsReleaseFileForNtCreateSection.
+ *
+ * See issue #11 for why a typed handler is required — without it the
+ * default release path touches FcbHeader->Resource for non-FCB FileObjects
+ * and corrupts accounting. */
+VOID
+NTAPI
+NtfsAcquireFileForNtCreateSection(IN PFILE_OBJECT FileObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    if (Fcb == NULL || Fcb->Identifier.Type != NTFS_TYPE_FCB)
+        return;
+
+    if (Fcb->RFCB.Resource != NULL)
+    {
+        ExAcquireResourceExclusiveLite(Fcb->RFCB.Resource, TRUE);
+    }
+}
+
+/* FastIoDispatch.ReleaseFileForNtCreateSection handler.
+ *
+ * FsRtlReleaseFile always calls this handler when registered, regardless
+ * of how the matching acquire went (filter callback, default, or
+ * AcquireFileForNtCreateSection).  Pairing this with the filter callback
+ * and the acquire handler above guarantees that releases are only
+ * performed on NTFS_TYPE_FCB objects whose RFCB.Resource is initialized
+ * — which is what the filter callback check above guards on the acquire
+ * side.  Without this typed handler, FsRtlReleaseFile's default path
+ * would release on every FileObject FsContext (including NTFS volumes
+ * and the driver's global-data device extension), reading Resource from
+ * an offset in a differently-typed struct.  Issue #11 smss boot deadlock. */
+VOID
+NTAPI
+NtfsReleaseFileForNtCreateSection(IN PFILE_OBJECT FileObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    if (Fcb == NULL || Fcb->Identifier.Type != NTFS_TYPE_FCB)
+        return;
+
+    if (Fcb->RFCB.Resource != NULL)
+    {
+        ExReleaseResourceLite(Fcb->RFCB.Resource);
+    }
+}
+
+
+/*
  * FUNCTION: Called by the system to initialize the driver
  * ARGUMENTS:
  *           DriverObject = object describing this driver
@@ -133,7 +262,37 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     NtfsGlobalData->FastIoDispatch.FastIoCheckIfPossible = NtfsFastIoCheckIfPossible;
     NtfsGlobalData->FastIoDispatch.FastIoRead = NtfsFastIoRead;
     NtfsGlobalData->FastIoDispatch.FastIoWrite = NtfsFastIoWrite;
+    /* Issue #11: typed Acquire/Release handlers for NtCreateSection.
+     * Required to pair with the PreAcquireForSectionSynchronization filter
+     * callback below.  Without them, FsRtlReleaseFile falls through to a
+     * generic ExReleaseResourceLite(FcbHeader->Resource) that doesn't
+     * check FsContext type, which reads the Resource slot out of NTFS
+     * volume/global-data structures where it isn't valid.  See comments
+     * on Ntfs{Acquire,Release}FileForNtCreateSection above. */
+    NtfsGlobalData->FastIoDispatch.AcquireFileForNtCreateSection = NtfsAcquireFileForNtCreateSection;
+    NtfsGlobalData->FastIoDispatch.ReleaseFileForNtCreateSection = NtfsReleaseFileForNtCreateSection;
     DriverObject->FastIoDispatch = &NtfsGlobalData->FastIoDispatch;
+
+    /* Register the FS filter callback (PreAcquireForSectionSynchronization)
+     * so MM can coordinate section creation with open writers.  Mirrors
+     * FAT.  Must be paired with the typed FastIoDispatch handlers above:
+     * re-enabling this block without them reproduces the issue #11 smss
+     * boot deadlock. */
+    {
+        FS_FILTER_CALLBACKS FilterCallbacks;
+
+        RtlZeroMemory(&FilterCallbacks, sizeof(FilterCallbacks));
+        FilterCallbacks.SizeOfFsFilterCallbacks = sizeof(FilterCallbacks);
+        FilterCallbacks.PreAcquireForSectionSynchronization = NtfsFilterCallbackAcquireForCreateSection;
+
+        Status = FsRtlRegisterFileSystemFilterCallbacks(DriverObject, &FilterCallbacks);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NTFS: FsRtlRegisterFileSystemFilterCallbacks failed: 0x%lx\n", Status);
+            /* Non-fatal; continue without MM section sync. */
+            Status = STATUS_SUCCESS;
+        }
+    }
 
     /* Initialize lookaside list for IRP contexts */
     ExInitializeNPagedLookasideList(&NtfsGlobalData->IrpContextLookasideList,
