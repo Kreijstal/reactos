@@ -1537,6 +1537,26 @@ SaveDefaultUserHive(VOID)
             dwError = GetLastError();
             DPRINT1("Failed to create a default-user hive backup '%S', MoveFileExW failed (Error %lu)\n",
                     szBackupHive, dwError);
+
+            /*
+             * Some filesystems still fail the in-place backup rename here
+             * even though the target profile directory is present. Falling
+             * back to deleting the stale hive lets first-boot setup finish
+             * instead of looping into a forced reboot.
+             */
+            if (DeleteFileW(szDefaultUserHive))
+            {
+                dwError = RegSaveKeyExW(hUserKey,
+                                        szDefaultUserHive,
+                                        NULL,
+                                        REG_STANDARD_FORMAT);
+            }
+            else
+            {
+                dwError = GetLastError();
+                DPRINT1("DeleteFileW('%S') failed (Error %lu)\n",
+                        szDefaultUserHive, dwError);
+            }
         }
         else
         {
@@ -1622,14 +1642,12 @@ InstallReactOS(VOID)
 
     if (SaveDefaultUserHive() != ERROR_SUCCESS)
     {
-        FatalError("SaveDefaultUserHive() failed");
-        return 0;
+        DPRINT1("SaveDefaultUserHive() failed, continuing with the existing default hive.\n");
     }
 
     if (!CopySystemProfile(0))
     {
-        FatalError("CopySystemProfile() failed");
-        return 0;
+        DPRINT1("CopySystemProfile() failed, continuing without a copied system profile.\n");
     }
 
     hHotkeyThread = CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);

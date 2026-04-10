@@ -1613,6 +1613,83 @@ DestroyBTreeKey(PB_TREE_KEY Key)
     ExFreePoolWithTag(Key, TAG_NTFS);
 }
 
+static
+BOOLEAN
+NtfsRemoveKeyFromNode(PB_TREE Tree,
+                      PB_TREE_FILENAME_NODE Node,
+                      ULONGLONG FileReference,
+                      PUNICODE_STRING FileName,
+                      BOOLEAN CaseSensitive)
+{
+    PB_TREE_KEY CurrentKey, PreviousKey;
+    ULONG i;
+
+    CurrentKey = Node->FirstKey;
+    PreviousKey = NULL;
+
+    for (i = 0; i < Node->KeyCount && CurrentKey != NULL; i++)
+    {
+        if (!CurrentKey->LesserChild &&
+            (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) &&
+            Tree->IndexAllocationContext)
+        {
+            CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Tree->Vcb,
+                                                                   Tree->IndexRoot,
+                                                                   Tree->IndexAllocationContext,
+                                                                   CurrentKey->IndexEntry);
+        }
+
+        if (!(CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_END) &&
+            (CurrentKey->IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) == FileReference &&
+            CompareFileName(FileName, CurrentKey->IndexEntry, FALSE, CaseSensitive))
+        {
+            if (CurrentKey->LesserChild != NULL)
+            {
+                DPRINT1("NtfsRemoveKeyFromNode: removal of internal keys is not implemented yet.\n");
+                return FALSE;
+            }
+
+            if (PreviousKey != NULL)
+                PreviousKey->NextKey = CurrentKey->NextKey;
+            else
+                Node->FirstKey = CurrentKey->NextKey;
+
+            Node->KeyCount--;
+            Node->DiskNeedsUpdating = TRUE;
+            CurrentKey->NextKey = NULL;
+            DestroyBTreeKey(CurrentKey);
+            return TRUE;
+        }
+
+        if (CurrentKey->LesserChild != NULL &&
+            NtfsRemoveKeyFromNode(Tree, CurrentKey->LesserChild, FileReference, FileName, CaseSensitive))
+        {
+            Node->DiskNeedsUpdating = TRUE;
+            return TRUE;
+        }
+
+        PreviousKey = CurrentKey;
+        CurrentKey = CurrentKey->NextKey;
+    }
+
+    return FALSE;
+}
+
+NTSTATUS
+NtfsRemoveKey(PB_TREE Tree,
+              ULONGLONG FileReference,
+              PUNICODE_STRING FileName,
+              BOOLEAN CaseSensitive)
+{
+    if (Tree == NULL || Tree->RootNode == NULL || FileName == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!NtfsRemoveKeyFromNode(Tree, Tree->RootNode, FileReference, FileName, CaseSensitive))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    return STATUS_SUCCESS;
+}
+
 VOID
 DestroyBTreeNode(PB_TREE_FILENAME_NODE Node)
 {
