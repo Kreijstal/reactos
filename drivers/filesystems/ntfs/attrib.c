@@ -236,9 +236,11 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
 {
     ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
     PFILENAME_ATTRIBUTE FileNameAttribute;
+    PFILE_RECORD_HEADER ParentFileRecord = NULL;
     LARGE_INTEGER SystemTime;
     ULONG FileRecordEnd = AttributeAddress->Length;
     ULONGLONG CurrentMFTIndex = NTFS_FILE_ROOT;
+    USHORT ParentSequenceNumber;
     UNICODE_STRING Current, Remaining, FilenameNoPath;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG FirstEntry;
@@ -294,7 +296,19 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
                                    CaseSensitive,
                                    &CurrentMFTIndex);
         if (!NT_SUCCESS(Status))
+        {
+            /*
+             * Only the final path component may legitimately be missing when
+             * creating a new entry. Any earlier failure means the parent path
+             * does not exist, and silently falling back to the last successful
+             * directory misparents the new file.
+             */
+            if (Remaining.Length != 0 || Current.Length == 0)
+                return Status;
+
+            Status = STATUS_SUCCESS;
             break;
+        }
 
         if (Remaining.Length == 0 )
         {
@@ -315,13 +329,32 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     FileNameAttribute->DirectoryFileReferenceNumber = CurrentMFTIndex;
     *ParentMftIndex = CurrentMFTIndex;
 
-    DPRINT1("SequenceNumber: 0x%02x\n", FileRecord->SequenceNumber);
+    ParentSequenceNumber = NTFS_FILE_ROOT;
+    if (CurrentMFTIndex != NTFS_FILE_ROOT)
+    {
+        ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (!ParentFileRecord)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Status = ReadFileRecord(DeviceExt, CurrentMFTIndex, ParentFileRecord);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            return Status;
+        }
+
+        ParentSequenceNumber = ParentFileRecord->SequenceNumber;
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        ParentFileRecord = NULL;
+    }
+
+    DPRINT1("SequenceNumber: 0x%02x\n", ParentSequenceNumber);
 
     // The highest 2 bytes should be the sequence number, unless the parent happens to be root
     if (CurrentMFTIndex == NTFS_FILE_ROOT)
         FileNameAttribute->DirectoryFileReferenceNumber |= (ULONGLONG)NTFS_FILE_ROOT << 48;
     else
-        FileNameAttribute->DirectoryFileReferenceNumber |= (ULONGLONG)FileRecord->SequenceNumber << 48;
+        FileNameAttribute->DirectoryFileReferenceNumber |= (ULONGLONG)ParentSequenceNumber << 48;
 
     DPRINT1("FileNameAttribute->DirectoryFileReferenceNumber: 0x%016I64x\n", FileNameAttribute->DirectoryFileReferenceNumber);
 

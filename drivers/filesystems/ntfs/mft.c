@@ -2640,6 +2640,525 @@ NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
 }
 
 NTSTATUS
+NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
+                                ULONGLONG ParentMftIndex,
+                                ULONGLONG FileReferenceNumber,
+                                PUNICODE_STRING FileName,
+                                BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+    PFILE_RECORD_HEADER ParentFileRecord;
+    PNTFS_ATTR_CONTEXT IndexRootContext;
+    PINDEX_ROOT_ATTRIBUTE I30IndexRoot;
+    ULONG IndexRootOffset;
+    ULONGLONG I30IndexRootLength;
+    ULONG LengthWritten;
+    PINDEX_ROOT_ATTRIBUTE NewIndexRoot;
+    ULONG AttributeLength;
+    PNTFS_ATTR_RECORD NextAttribute;
+    PB_TREE NewTree;
+    ULONG BtreeIndexLength;
+    ULONG MaxIndexRootSize;
+    LARGE_INTEGER MinIndexRootSize;
+    ULONG NewMaxIndexRootSize;
+    ULONG NodeSize;
+
+    ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!ParentFileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, ParentMftIndex, ParentFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    Status = FindAttribute(DeviceExt,
+                           ParentFileRecord,
+                           AttributeIndexRoot,
+                           L"$I30",
+                           4,
+                           &IndexRootContext,
+                           &IndexRootOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    MaxIndexRootSize = DeviceExt->NtfsInfo.BytesPerFileRecord
+                       - IndexRootOffset
+                       - IndexRootContext->pRecord->Resident.ValueOffset
+                       - sizeof(INDEX_ROOT_ATTRIBUTE)
+                       - (sizeof(ULONG) * 2);
+
+    NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)ParentFileRecord + IndexRootOffset + IndexRootContext->pRecord->Length);
+    if (NextAttribute->Type != AttributeEnd)
+    {
+        ULONG LengthOfAttributes = 0;
+        PNTFS_ATTR_RECORD CurrentAttribute = NextAttribute;
+        while (CurrentAttribute->Type != AttributeEnd)
+        {
+            LengthOfAttributes += CurrentAttribute->Length;
+            CurrentAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)CurrentAttribute + CurrentAttribute->Length);
+        }
+        MaxIndexRootSize -= LengthOfAttributes;
+    }
+
+    I30IndexRootLength = AttributeDataLength(IndexRootContext->pRecord);
+    I30IndexRoot = ExAllocatePoolWithTag(NonPagedPool, I30IndexRootLength, TAG_NTFS);
+    if (!I30IndexRoot)
+    {
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)I30IndexRoot, I30IndexRootLength);
+    if (!NT_SUCCESS(Status))
+    {
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    Status = CreateBTreeFromIndex(DeviceExt,
+                                  ParentFileRecord,
+                                  IndexRootContext,
+                                  I30IndexRoot,
+                                  &NewTree);
+    if (!NT_SUCCESS(Status))
+    {
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    Status = NtfsRemoveKey(NewTree, FileReferenceNumber, FileName, CaseSensitive);
+    if (!NT_SUCCESS(Status))
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    MinIndexRootSize.QuadPart = sizeof(INDEX_ROOT_ATTRIBUTE) + 0x18;
+    AttributeLength = MinIndexRootSize.LowPart + sizeof(INDEX_ROOT_ATTRIBUTE);
+    Status = InternalSetResidentAttributeLength(DeviceExt,
+                                                IndexRootContext,
+                                                ParentFileRecord,
+                                                IndexRootOffset,
+                                                AttributeLength);
+    if (!NT_SUCCESS(Status))
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    NewMaxIndexRootSize = DeviceExt->NtfsInfo.BytesPerFileRecord
+                          - IndexRootOffset
+                          - IndexRootContext->pRecord->Resident.ValueOffset
+                          - sizeof(INDEX_ROOT_ATTRIBUTE)
+                          - (sizeof(ULONG) * 2);
+
+    NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)ParentFileRecord + IndexRootOffset + IndexRootContext->pRecord->Length);
+    if (NextAttribute->Type != AttributeEnd)
+    {
+        ULONG LengthOfAttributes = 0;
+        PNTFS_ATTR_RECORD CurrentAttribute = NextAttribute;
+        while (CurrentAttribute->Type != AttributeEnd)
+        {
+            LengthOfAttributes += CurrentAttribute->Length;
+            CurrentAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)CurrentAttribute + CurrentAttribute->Length);
+        }
+        NewMaxIndexRootSize -= LengthOfAttributes;
+    }
+
+    NodeSize = GetSizeOfIndexEntries(NewTree->RootNode);
+    if (NodeSize > NewMaxIndexRootSize)
+    {
+        Status = DemoteBTreeRoot(NewTree);
+        if (!NT_SUCCESS(Status))
+        {
+            DestroyBTree(NewTree);
+            ReleaseAttributeContext(IndexRootContext);
+            ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            return Status;
+        }
+
+        Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
+        if (!NT_SUCCESS(Status))
+        {
+            DestroyBTree(NewTree);
+            ReleaseAttributeContext(IndexRootContext);
+            ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            return Status;
+        }
+    }
+
+    Status = CreateIndexRootFromBTree(DeviceExt, NewTree, NewMaxIndexRootSize, &NewIndexRoot, &BtreeIndexLength);
+    if (!NT_SUCCESS(Status))
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    DestroyBTree(NewTree);
+
+    AttributeLength = NewIndexRoot->Header.AllocatedSize + FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header);
+    if (AttributeLength != IndexRootContext->pRecord->Resident.ValueLength)
+    {
+        Status = InternalSetResidentAttributeLength(DeviceExt,
+                                                    IndexRootContext,
+                                                    ParentFileRecord,
+                                                    IndexRootOffset,
+                                                    AttributeLength);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+            ReleaseAttributeContext(IndexRootContext);
+            ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            return Status;
+        }
+    }
+
+    Status = UpdateFileRecord(DeviceExt, ParentMftIndex, ParentFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    Status = WriteAttribute(DeviceExt,
+                            IndexRootContext,
+                            0,
+                            (PUCHAR)NewIndexRoot,
+                            AttributeLength,
+                            &LengthWritten,
+                            ParentFileRecord);
+    ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+    ReleaseAttributeContext(IndexRootContext);
+    ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+    if (!NT_SUCCESS(Status) || LengthWritten != AttributeLength)
+        return !NT_SUCCESS(Status) ? Status : STATUS_UNSUCCESSFUL;
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+    PFILENAME_ATTRIBUTE FileNameAttribute;
+    UNICODE_STRING FileName;
+    ULONGLONG ParentMftIndex;
+    PFILE_RECORD_HEADER FileRecord;
+
+    if (NtfsFCBIsDirectory(Fcb))
+        return STATUS_FILE_IS_A_DIRECTORY;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!FileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    FileNameAttribute = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    if (FileNameAttribute == NULL)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    ParentMftIndex = FileNameAttribute->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+    FileName.Length = FileNameAttribute->NameLength * sizeof(WCHAR);
+    FileName.MaximumLength = FileName.Length;
+    FileName.Buffer = FileNameAttribute->Name;
+
+    Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                             ParentMftIndex,
+                                             Fcb->MFTIndex,
+                                             &FileName,
+                                             CaseSensitive);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    ClearFlag(FileRecord->Flags, FRH_IN_USE);
+    FileRecord->LinkCount = 0;
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    if (NT_SUCCESS(Status))
+        Fcb->LinkCount = 0;
+
+    return Status;
+}
+
+NTSTATUS
+NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     ULONGLONG NewParentMftIndex,
+                     PUNICODE_STRING NewFileName,
+                     BOOLEAN ReplaceIfExists,
+                     BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PFILE_RECORD_HEADER ExistingRecord = NULL;
+    PFILE_RECORD_HEADER ParentFileRecord = NULL;
+    PNTFS_ATTR_CONTEXT FileNameContext = NULL;
+    PNTFS_ATTR_RECORD FileNameRecord;
+    PFILENAME_ATTRIBUTE ExistingName;
+    PFILENAME_ATTRIBUTE CurrentName;
+    PFILENAME_ATTRIBUTE NewDirectoryEntry = NULL;
+    UNICODE_STRING OldFileName;
+    PWCHAR OldFileNameBuffer = NULL;
+    ULONGLONG OldParentMftIndex;
+    ULONGLONG ExistingMftIndex;
+    ULONGLONG FileReferenceNumber;
+    ULONG FileNameOffset;
+    ULONG NewFileNameLength;
+    USHORT ParentSequenceNumber;
+    NTFS_FCB ExistingFcb;
+
+    if (NtfsFCBIsDirectory(Fcb))
+        return STATUS_NOT_IMPLEMENTED;
+
+    if (NewFileName->Length == 0 || FsRtlDoesNameContainWildCards(NewFileName))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!FileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    CurrentName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    if (CurrentName == NULL)
+    {
+        Status = STATUS_OBJECT_NAME_NOT_FOUND;
+        goto Cleanup;
+    }
+
+    OldParentMftIndex = CurrentName->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+    OldFileName.Length = CurrentName->NameLength * sizeof(WCHAR);
+    OldFileName.MaximumLength = OldFileName.Length;
+    OldFileNameBuffer = ExAllocatePoolWithTag(NonPagedPool, OldFileName.Length, TAG_NTFS);
+    if (!OldFileNameBuffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+    RtlCopyMemory(OldFileNameBuffer, CurrentName->Name, OldFileName.Length);
+    OldFileName.Buffer = OldFileNameBuffer;
+
+    if (OldParentMftIndex == NewParentMftIndex &&
+        RtlEqualUnicodeString(&OldFileName, NewFileName, FALSE))
+    {
+        Status = STATUS_SUCCESS;
+        goto Cleanup;
+    }
+
+    Status = NtfsLookupFileAt(DeviceExt,
+                              NewFileName,
+                              CaseSensitive,
+                              &ExistingRecord,
+                              &ExistingMftIndex,
+                              NewParentMftIndex);
+    if (NT_SUCCESS(Status))
+    {
+        ExistingName = GetBestFileNameFromRecord(DeviceExt, ExistingRecord);
+        if (ExistingMftIndex == Fcb->MFTIndex)
+        {
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
+            ExistingRecord = NULL;
+        }
+        else if (!ReplaceIfExists || ExistingName == NULL)
+        {
+            Status = STATUS_OBJECT_NAME_COLLISION;
+            goto Cleanup;
+        }
+        else
+        {
+            RtlZeroMemory(&ExistingFcb, sizeof(ExistingFcb));
+            RtlCopyMemory(&ExistingFcb.Entry,
+                          ExistingName,
+                          FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + ExistingName->NameLength * sizeof(WCHAR));
+            ExistingFcb.MFTIndex = ExistingMftIndex;
+            ExistingFcb.LinkCount = ExistingRecord->LinkCount;
+
+            Status = NtfsDeleteFileRecord(DeviceExt, &ExistingFcb, CaseSensitive);
+            if (!NT_SUCCESS(Status))
+                goto Cleanup;
+
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
+            ExistingRecord = NULL;
+        }
+    }
+    else if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
+    {
+        goto Cleanup;
+    }
+
+    ParentSequenceNumber = NTFS_FILE_ROOT;
+    if (NewParentMftIndex != NTFS_FILE_ROOT)
+    {
+        ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (!ParentFileRecord)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
+
+        Status = ReadFileRecord(DeviceExt, NewParentMftIndex, ParentFileRecord);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        ParentSequenceNumber = ParentFileRecord->SequenceNumber;
+    }
+
+    NewFileNameLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + NewFileName->Length;
+    NewDirectoryEntry = ExAllocatePoolWithTag(NonPagedPool, NewFileNameLength, TAG_NTFS);
+    if (!NewDirectoryEntry)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    RtlZeroMemory(NewDirectoryEntry, NewFileNameLength);
+    RtlCopyMemory(NewDirectoryEntry,
+                  CurrentName,
+                  min(GetFileNameAttributeLength(CurrentName),
+                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name)));
+    NewDirectoryEntry->DirectoryFileReferenceNumber = NewParentMftIndex;
+    if (NewParentMftIndex == NTFS_FILE_ROOT)
+        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)NTFS_FILE_ROOT << 48;
+    else
+        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)ParentSequenceNumber << 48;
+    NewDirectoryEntry->NameLength = NewFileName->Length / sizeof(WCHAR);
+    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3(NewFileName, NULL, NULL))
+        NewDirectoryEntry->NameType = NTFS_FILE_NAME_WIN32_AND_DOS;
+    else
+        NewDirectoryEntry->NameType = NTFS_FILE_NAME_POSIX;
+    RtlCopyMemory(NewDirectoryEntry->Name, NewFileName->Buffer, NewFileName->Length);
+
+    FileReferenceNumber = Fcb->MFTIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
+    Status = NtfsAddFilenameToDirectory(DeviceExt,
+                                        NewParentMftIndex,
+                                        FileReferenceNumber,
+                                        NewDirectoryEntry,
+                                        CaseSensitive);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = FindAttribute(DeviceExt,
+                           FileRecord,
+                           AttributeFileName,
+                           NULL,
+                           0,
+                           &FileNameContext,
+                           &FileNameOffset);
+    if (!NT_SUCCESS(Status))
+        goto RollbackNewName;
+
+    Status = InternalSetResidentAttributeLength(DeviceExt,
+                                                FileNameContext,
+                                                FileRecord,
+                                                FileNameOffset,
+                                                NewFileNameLength);
+    if (!NT_SUCCESS(Status))
+        goto RollbackNewName;
+
+    FileNameRecord = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileNameOffset);
+    CurrentName = (PFILENAME_ATTRIBUTE)((ULONG_PTR)FileNameRecord + FileNameRecord->Resident.ValueOffset);
+    RtlZeroMemory(CurrentName, NewFileNameLength);
+    RtlCopyMemory(CurrentName, NewDirectoryEntry, NewFileNameLength);
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto RollbackNewName;
+
+    Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                             OldParentMftIndex,
+                                             Fcb->MFTIndex,
+                                             &OldFileName,
+                                             CaseSensitive);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    RtlCopyMemory(&Fcb->Entry,
+                  NewDirectoryEntry,
+                  FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
+    Fcb->Entry.NameType = NewDirectoryEntry->NameType;
+    Fcb->Entry.NameLength = 0;
+    Fcb->Entry.Name[0] = UNICODE_NULL;
+    Status = STATUS_SUCCESS;
+    goto Cleanup;
+
+RollbackNewName:
+    NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                    NewParentMftIndex,
+                                    Fcb->MFTIndex,
+                                    NewFileName,
+                                    CaseSensitive);
+
+Cleanup:
+    if (OldFileNameBuffer)
+        ExFreePoolWithTag(OldFileNameBuffer, TAG_NTFS);
+    if (FileNameContext)
+        ReleaseAttributeContext(FileNameContext);
+    if (NewDirectoryEntry)
+        ExFreePoolWithTag(NewDirectoryEntry, TAG_NTFS);
+    if (ParentFileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+    if (ExistingRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+NTSTATUS
 AddFixupArray(PDEVICE_EXTENSION Vcb,
               PNTFS_RECORD_HEADER Record)
 {
@@ -3009,7 +3528,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     DPRINT1("BrowseSubNode VCN=%I64d NOT FOUND (scanned %lu entries)\n", VCN, *CurrentEntry);
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
 
-    return STATUS_OBJECT_PATH_NOT_FOUND;
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 NTSTATUS
@@ -3160,7 +3679,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         ReleaseAttributeContext(IndexAllocationContext);
     }
 
-    return STATUS_OBJECT_PATH_NOT_FOUND;
+    return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
 NTSTATUS
@@ -3281,7 +3800,7 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
         if (Remaining.Length == 0)
             break;
 
-        FsRtlDissectName(Current, &Current, &Remaining);
+        FsRtlDissectName(Remaining, &Current, &Remaining);
     }
 
     *FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
