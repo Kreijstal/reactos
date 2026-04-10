@@ -197,26 +197,34 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     NtfsGlobalData->FastIoDispatch.FastIoWrite = NtfsFastIoWrite;
     DriverObject->FastIoDispatch = &NtfsGlobalData->FastIoDispatch;
 
-    /* Register the FS filter callbacks the memory manager uses to acquire
-     * the file before creating a section.  Without this, MM falls back to
-     * its default acquire-for-section path which has no visibility into
-     * NTFS's per-file synchronisation, causing image-section creation to
-     * race with concurrent writes/closes on NTFS-backed executables. */
-    {
-        FS_FILTER_CALLBACKS FilterCallbacks;
-
-        RtlZeroMemory(&FilterCallbacks, sizeof(FilterCallbacks));
-        FilterCallbacks.SizeOfFsFilterCallbacks = sizeof(FilterCallbacks);
-        FilterCallbacks.PreAcquireForSectionSynchronization = NtfsFilterCallbackAcquireForCreateSection;
-
-        Status = FsRtlRegisterFileSystemFilterCallbacks(DriverObject, &FilterCallbacks);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("FsRtlRegisterFileSystemFilterCallbacks failed: 0x%lx\n", Status);
-            /* Non-fatal: NTFS still works without the callback, just with
-             * the same race window the driver had before. */
-        }
-    }
+    /* TODO: re-enable once the lifetime bug below is fixed.
+     *
+     * Symptom: registering NtfsFilterCallbackAcquireForCreateSection
+     * deadlocks smss boot.  Smss tries to map ntdll.dll via
+     * FsRtlAcquireFileForCcFlushEx -> ExAcquireResourceExclusiveLite
+     * on the ntdll.dll FCB MainResource, which is already owned
+     * exclusively (OwnerCount=2, recursive depth 2) by the thread
+     * that ran Phase1Initialization.  That thread tail-calls into
+     * MmZeroPageThread() (ntoskrnl/ex/init.c:2066) and parks forever
+     * on MmZeroingPageEvent without ever releasing the resource — so
+     * smss waits forever.
+     *
+     * The leak appears to be a mismatched acquire/release pair
+     * between MmCreateSection -> FsRtlAcquireToCreateMappedSection
+     * (which goes through this callback and acquires exclusive) and
+     * the corresponding FsRtlReleaseFile in MmCreateSection's exit
+     * path (mm/section.c:4876).  The recursive count of 2 strongly
+     * suggests the callback is being entered twice for the same FCB
+     * along the image-section creation path but only one release
+     * makes it back out, possibly via MmCreateImageSection's nested
+     * paging I/O.  Until that's untangled, leave NTFS without the
+     * filter callback — concurrent share-mode rejection will be
+     * weaker, but the system actually boots.
+     *
+     * Bisect: with this block enabled smss hangs immediately after
+     * the smss.exe NtfsQueryInformation; with it disabled the system
+     * boots through the second-stage wizard and into explorer.exe. */
+    DPRINT1("[NTFS] FS filter callbacks NOT registered (see ntfs.c TODO)\n");
 
     /* Initialize lookaside list for IRP contexts */
     ExInitializeNPagedLookasideList(&NtfsGlobalData->IrpContextLookasideList,
