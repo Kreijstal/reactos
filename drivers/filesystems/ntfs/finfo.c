@@ -76,7 +76,7 @@ NtfsGetPositionInformation(PFILE_OBJECT FileObject,
                            PFILE_POSITION_INFORMATION PositionInfo,
                            PULONG BufferLength)
 {
-    DPRINT1("NtfsGetPositionInformation(%p, %p, %p)\n", FileObject, PositionInfo, BufferLength);
+    DPRINT("NtfsGetPositionInformation(%p, %p, %p)\n", FileObject, PositionInfo, BufferLength);
 
     if (*BufferLength < sizeof(FILE_POSITION_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
@@ -178,7 +178,7 @@ NtfsGetInternalInformation(PNTFS_FCB Fcb,
                            PFILE_INTERNAL_INFORMATION InternalInfo,
                            PULONG BufferLength)
 {
-    DPRINT1("NtfsGetInternalInformation(%p, %p, %p)\n", Fcb, InternalInfo, BufferLength);
+    DPRINT("NtfsGetInternalInformation(%p, %p, %p)\n", Fcb, InternalInfo, BufferLength);
 
     ASSERT(InternalInfo);
     ASSERT(Fcb);
@@ -441,14 +441,11 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
     BufferLength = Stack->Parameters.QueryFile.Length;
 
-    DPRINT("INSTRUMENT: NtfsQueryInformation acquiring MainResource shared...\n");
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT("INSTRUMENT: NtfsQueryInformation MainResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT("INSTRUMENT: NtfsQueryInformation MainResource acquired\n");
 
     switch (FileInformationClass)
     {
@@ -1002,7 +999,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     FileObject = IrpContext->FileObject;
     Fcb = FileObject->FsContext;
 
-    DPRINT1("NtfsSetInformation: class=%d FCB=%p\n", (int)FileInformationClass, Fcb);
+    DPRINT("NtfsSetInformation: class=%d FCB=%p\n", (int)FileInformationClass, Fcb);
     DPRINT("INSTRUMENT: NtfsSetInformation acquiring MainResource exclusive...\n");
 
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
@@ -1014,10 +1011,8 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT("INSTRUMENT: NtfsSetInformation MainResource CANT_WAIT\n");
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT("INSTRUMENT: NtfsSetInformation MainResource acquired\n");
 
     switch (FileInformationClass)
     {
@@ -1165,9 +1160,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     if (RenamePath.Buffer != NULL)
         ExFreePoolWithTag(RenamePath.Buffer, TAG_NTFS);
 
-    DPRINT1("NtfsSetInformation: releasing MainResource for FCB %p\n", Fcb);
     ExReleaseResourceLite(&Fcb->MainResource);
-    DPRINT1("NtfsSetInformation: MainResource released, Status=0x%lx\n", Status);
 
     if (NT_SUCCESS(Status))
         Irp->IoStatus.Information =
@@ -1175,7 +1168,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     else
         Irp->IoStatus.Information = 0;
 
-    DPRINT1("NtfsSetInformation: returning 0x%lx\n", Status);
+    DPRINT("NtfsSetInformation: returning 0x%lx\n", Status);
     return Status;
 }
 /* EOF */
