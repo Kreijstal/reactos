@@ -56,21 +56,13 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Fcb->OpenHandleCount--;
-
-        if (Fcb->OpenHandleCount != 0)
-        {
-            // Remove share access when handled
-        }
     }
     else
     {
-        DPRINT("INSTRUMENT: NtfsCleanupFile acquiring MainResource exclusive...\n");
         if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, CanWait))
         {
-            DPRINT("INSTRUMENT: NtfsCleanupFile MainResource CANT_WAIT\n");
             return STATUS_PENDING;
         }
-        DPRINT("INSTRUMENT: NtfsCleanupFile MainResource acquired\n");
 
         Fcb->OpenHandleCount--;
 
@@ -90,10 +82,13 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         CcUninitializeCacheMap(FileObject, &Fcb->RFCB.FileSize, NULL);
         DPRINT("NtfsCleanupFile: CcUninitializeCacheMap returned\n");
 
-        if (Fcb->OpenHandleCount != 0)
-        {
-            // Remove share access when handled
-        }
+        /* Drop this file object's contribution to the FCB's share access.
+         * IoRemoveShareAccess decrements the relevant Readers/Writers/
+         * Deleters counts that IoSetShareAccess/IoUpdateShareAccess
+         * established at create time, allowing later opens with otherwise
+         * incompatible share modes once all current handles have been
+         * cleaned up. */
+        IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
 
         if (Fcb->OpenHandleCount == 0 &&
             BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
