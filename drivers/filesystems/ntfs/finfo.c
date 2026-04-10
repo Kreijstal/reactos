@@ -61,7 +61,7 @@ NtfsGetStandardInformation(PNTFS_FCB Fcb,
     StandardInfo->AllocationSize = Fcb->RFCB.AllocationSize;
     StandardInfo->EndOfFile = Fcb->RFCB.FileSize;
     StandardInfo->NumberOfLinks = Fcb->LinkCount;
-    StandardInfo->DeletePending = FALSE;
+    StandardInfo->DeletePending = BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING);
     StandardInfo->Directory = NtfsFCBIsDirectory(Fcb);
 
     *BufferLength -= sizeof(FILE_STANDARD_INFORMATION);
@@ -770,6 +770,185 @@ NtfsSetBasicInformation(PNTFS_FCB Fcb,
     return Status;
 }
 
+static
+BOOLEAN
+NtfsIsDotName(PUNICODE_STRING Name)
+{
+    if (Name->Length == sizeof(WCHAR) &&
+        Name->Buffer[0] == L'.')
+    {
+        return TRUE;
+    }
+
+    if (Name->Length == 2 * sizeof(WCHAR) &&
+        Name->Buffer[0] == L'.' &&
+        Name->Buffer[1] == L'.')
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static
+VOID
+NtfsUpdateFcbPathName(PNTFS_FCB Fcb,
+                      PUNICODE_STRING PathName)
+{
+    WCHAR *ObjectName;
+
+    ASSERT(PathName->Length / sizeof(WCHAR) < MAX_PATH);
+
+    RtlCopyMemory(Fcb->PathName, PathName->Buffer, PathName->Length);
+    Fcb->PathName[PathName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    ObjectName = wcsrchr(Fcb->PathName, L'\\');
+    if (ObjectName != NULL && ObjectName[1] != UNICODE_NULL)
+        Fcb->ObjectName = ObjectName + 1;
+    else
+        Fcb->ObjectName = Fcb->PathName;
+}
+
+static
+NTSTATUS
+NtfsBuildRenamePath(PNTFS_FCB Fcb,
+                    PFILE_RENAME_INFORMATION RenameInfo,
+                    PFILE_OBJECT TargetFileObject,
+                    PUNICODE_STRING FullPath,
+                    PUNICODE_STRING ParentPath,
+                    PUNICODE_STRING LeafName)
+{
+    UNICODE_STRING RenameName;
+    UNICODE_STRING Prefix;
+    UNICODE_STRING LeafComponent;
+    PWCHAR LastSeparator;
+    USHORT TotalLength;
+    BOOLEAN AddSeparator = FALSE;
+    PNTFS_FCB TargetFcb = NULL;
+
+    RenameName.Buffer = RenameInfo->FileName;
+    RenameName.Length = (USHORT)RenameInfo->FileNameLength;
+    RenameName.MaximumLength = RenameName.Length;
+
+    if (RenameName.Length == 0 || FsRtlDoesNameContainWildCards(&RenameName))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    RtlInitEmptyUnicodeString(&Prefix, NULL, 0);
+    LeafComponent = RenameName;
+
+    if (RenameInfo->RootDirectory != NULL)
+    {
+        if (TargetFileObject == NULL || TargetFileObject->FsContext == NULL)
+            return STATUS_INVALID_PARAMETER;
+
+        TargetFcb = TargetFileObject->FsContext;
+        if (TargetFcb->Vcb != Fcb->Vcb)
+            return STATUS_NOT_SAME_DEVICE;
+
+        Prefix.Buffer = TargetFcb->PathName;
+        Prefix.Length = Prefix.MaximumLength = (USHORT)(wcslen(TargetFcb->PathName) * sizeof(WCHAR));
+        AddSeparator = !NtfsFCBIsRoot(TargetFcb);
+    }
+    else if (RenameName.Buffer[0] == L'\\' &&
+             TargetFileObject != NULL &&
+             TargetFileObject->FsContext != NULL)
+    {
+        TargetFcb = TargetFileObject->FsContext;
+        if (TargetFcb->Vcb != Fcb->Vcb)
+            return STATUS_NOT_SAME_DEVICE;
+
+        Prefix.Buffer = TargetFcb->PathName;
+        Prefix.Length = Prefix.MaximumLength = (USHORT)(wcslen(TargetFcb->PathName) * sizeof(WCHAR));
+        AddSeparator = !NtfsFCBIsRoot(TargetFcb);
+
+        LastSeparator = wcsrchr(RenameName.Buffer, L'\\');
+        if (LastSeparator == NULL || LastSeparator[1] == UNICODE_NULL)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        LeafComponent.Buffer = LastSeparator + 1;
+        LeafComponent.Length = (USHORT)(RenameName.Length - ((PUCHAR)LeafComponent.Buffer - (PUCHAR)RenameName.Buffer));
+        LeafComponent.MaximumLength = LeafComponent.Length;
+    }
+    else if (RenameName.Buffer[0] != L'\\')
+    {
+        WCHAR *CurrentName = wcsrchr(Fcb->PathName, L'\\');
+        if (CurrentName == NULL)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        Prefix.Buffer = Fcb->PathName;
+        if (CurrentName == Fcb->PathName)
+            Prefix.Length = Prefix.MaximumLength = sizeof(WCHAR);
+        else
+            Prefix.Length = Prefix.MaximumLength = (USHORT)((CurrentName - Fcb->PathName) * sizeof(WCHAR));
+        AddSeparator = (Prefix.Length != sizeof(WCHAR));
+    }
+
+    if (Prefix.Length != 0)
+    {
+        TotalLength = Prefix.Length + LeafComponent.Length + sizeof(WCHAR);
+        if (AddSeparator)
+            TotalLength += sizeof(WCHAR);
+
+        if (TotalLength / sizeof(WCHAR) >= MAX_PATH)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        FullPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, TotalLength, TAG_NTFS);
+        if (FullPath->Buffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        FullPath->Length = 0;
+        FullPath->MaximumLength = TotalLength;
+
+        RtlCopyMemory(FullPath->Buffer, Prefix.Buffer, Prefix.Length);
+        FullPath->Length = Prefix.Length;
+        if (AddSeparator)
+        {
+            FullPath->Buffer[FullPath->Length / sizeof(WCHAR)] = L'\\';
+            FullPath->Length += sizeof(WCHAR);
+        }
+
+        RtlCopyMemory((PUCHAR)FullPath->Buffer + FullPath->Length,
+                      LeafComponent.Buffer,
+                      LeafComponent.Length);
+        FullPath->Length += LeafComponent.Length;
+        FullPath->Buffer[FullPath->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+    else
+    {
+        if (RenameName.Length / sizeof(WCHAR) >= MAX_PATH)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        FullPath->MaximumLength = RenameName.Length + sizeof(WCHAR);
+        FullPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, FullPath->MaximumLength, TAG_NTFS);
+        if (FullPath->Buffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlCopyMemory(FullPath->Buffer, RenameName.Buffer, RenameName.Length);
+        FullPath->Length = RenameName.Length;
+        FullPath->Buffer[FullPath->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
+    LastSeparator = wcsrchr(FullPath->Buffer, L'\\');
+    if (LastSeparator == NULL || LastSeparator[1] == UNICODE_NULL)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    ParentPath->Buffer = FullPath->Buffer;
+    ParentPath->MaximumLength = FullPath->MaximumLength;
+    if (LastSeparator == FullPath->Buffer)
+        ParentPath->Length = sizeof(WCHAR);
+    else
+        ParentPath->Length = (USHORT)((LastSeparator - FullPath->Buffer) * sizeof(WCHAR));
+
+    LeafName->Buffer = LastSeparator + 1;
+    LeafName->Length = (USHORT)(FullPath->Length - ((PUCHAR)LeafName->Buffer - (PUCHAR)FullPath->Buffer));
+    LeafName->MaximumLength = LeafName->Length;
+
+    if (NtfsIsDotName(LeafName))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    return STATUS_SUCCESS;
+}
+
 /**
 * @name NtfsSetInformation
 * @implemented
@@ -807,6 +986,11 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
+    PFILE_RECORD_HEADER ParentFileRecord = NULL;
+    ULONGLONG ParentMftIndex = NTFS_FILE_ROOT;
+    UNICODE_STRING RenamePath;
+    UNICODE_STRING RenameParentPath;
+    UNICODE_STRING RenameLeafName;
 
     DPRINT("NtfsSetInformation(%p)\n", IrpContext);
 
@@ -814,7 +998,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     Stack = IrpContext->Stack;
     DeviceObject = IrpContext->DeviceObject;
     DeviceExt = DeviceObject->DeviceExtension;
-    FileInformationClass = Stack->Parameters.QueryFile.FileInformationClass;
+    FileInformationClass = Stack->Parameters.SetFile.FileInformationClass;
     FileObject = IrpContext->FileObject;
     Fcb = FileObject->FsContext;
 
@@ -822,7 +1006,10 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     DPRINT("INSTRUMENT: NtfsSetInformation acquiring MainResource exclusive...\n");
 
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
-    BufferLength = Stack->Parameters.QueryFile.Length;
+    BufferLength = Stack->Parameters.SetFile.Length;
+    RtlInitEmptyUnicodeString(&RenamePath, NULL, 0);
+    RtlInitEmptyUnicodeString(&RenameParentPath, NULL, 0);
+    RtlInitEmptyUnicodeString(&RenameLeafName, NULL, 0);
 
     if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
@@ -835,6 +1022,8 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     switch (FileInformationClass)
     {
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
+        PFILE_DISPOSITION_INFORMATION DispositionInfo;
+        PFILE_RENAME_INFORMATION RenameInfo;
 
         case FileBasicInformation:
             Status = NtfsSetBasicInformation(Fcb,
@@ -856,6 +1045,114 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                       &EndOfFileInfo->EndOfFile);
             break;
 
+        case FileDispositionInformation:
+            if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            DispositionInfo = (PFILE_DISPOSITION_INFORMATION)SystemBuffer;
+            if (!DispositionInfo->DeleteFile)
+            {
+                ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
+            if (NtfsFCBIsDirectory(Fcb))
+            {
+                Status = STATUS_FILE_IS_A_DIRECTORY;
+                break;
+            }
+
+            if (Fcb->OpenHandleCount <= 1)
+            {
+                Status = NtfsDeleteFileRecord(DeviceExt,
+                                              Fcb,
+                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+                if (NT_SUCCESS(Status))
+                    ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
+            }
+            else
+            {
+                SetFlag(Fcb->Flags, FCB_DELETE_PENDING);
+                Status = STATUS_SUCCESS;
+            }
+            break;
+
+        case FileRenameInformation:
+        {
+            PNTFS_FCB TargetFcb = NULL;
+
+            if (BufferLength < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            RenameInfo = (PFILE_RENAME_INFORMATION)SystemBuffer;
+            if (BufferLength < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + RenameInfo->FileNameLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (Fcb->Stream[0] != UNICODE_NULL)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            Status = NtfsBuildRenamePath(Fcb,
+                                         RenameInfo,
+                                         Stack->Parameters.SetFile.FileObject,
+                                         &RenamePath,
+                                         &RenameParentPath,
+                                         &RenameLeafName);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            if (Stack->Parameters.SetFile.FileObject != NULL &&
+                Stack->Parameters.SetFile.FileObject->FsContext != NULL)
+            {
+                TargetFcb = Stack->Parameters.SetFile.FileObject->FsContext;
+                if (TargetFcb->Vcb == Fcb->Vcb)
+                {
+                    ParentMftIndex = TargetFcb->MFTIndex;
+                }
+            }
+
+            if (ParentMftIndex == NTFS_FILE_ROOT &&
+                (RenameParentPath.Length != sizeof(WCHAR) ||
+                 RenameParentPath.Buffer[0] != L'\\'))
+            {
+                Status = NtfsLookupFile(DeviceExt,
+                                        &RenameParentPath,
+                                        BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                        &ParentFileRecord,
+                                        &ParentMftIndex);
+                if (!NT_SUCCESS(Status))
+                    break;
+
+                if (!(ParentFileRecord->Flags & FRH_DIRECTORY))
+                {
+                    Status = STATUS_NOT_A_DIRECTORY;
+                    break;
+                }
+            }
+
+            Status = NtfsRenameFileRecord(DeviceExt,
+                                          Fcb,
+                                          ParentMftIndex,
+                                          &RenameLeafName,
+                                          RenameInfo->ReplaceIfExists,
+                                          BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+            if (NT_SUCCESS(Status))
+                NtfsUpdateFcbPathName(Fcb, &RenamePath);
+            break;
+        }
+
         // TODO: all other information classes
 
         default:
@@ -863,13 +1160,18 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = STATUS_NOT_IMPLEMENTED;
     }
 
+    if (ParentFileRecord != NULL)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+    if (RenamePath.Buffer != NULL)
+        ExFreePoolWithTag(RenamePath.Buffer, TAG_NTFS);
+
     DPRINT1("NtfsSetInformation: releasing MainResource for FCB %p\n", Fcb);
     ExReleaseResourceLite(&Fcb->MainResource);
     DPRINT1("NtfsSetInformation: MainResource released, Status=0x%lx\n", Status);
 
     if (NT_SUCCESS(Status))
         Irp->IoStatus.Information =
-        Stack->Parameters.QueryFile.Length - BufferLength;
+        Stack->Parameters.SetFile.Length - BufferLength;
     else
         Irp->IoStatus.Information = 0;
 

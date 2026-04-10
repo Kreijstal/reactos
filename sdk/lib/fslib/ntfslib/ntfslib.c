@@ -170,6 +170,7 @@ NtfsFormat(
     MKNTFS_PARAMS Params;
     ULONGLONG PartitionLength;
     int Result;
+    BOOLEAN VolumeLocked = FALSE;
 
     DPRINT("NtfsFormat(DriveRoot '%wZ')\n", DriveRoot);
 
@@ -256,7 +257,10 @@ NtfsFormat(
     if (!NT_SUCCESS(LockStatus))
     {
         DPRINT1("WARNING: Failed to lock volume: 0x%x\n", LockStatus);
+        NtClose(FileHandle);
+        return FALSE;
     }
+    VolumeLocked = TRUE;
 
     /* Set up I/O callbacks */
     FormatContext.FileHandle = FileHandle;
@@ -293,24 +297,28 @@ NtfsFormat(
     }
 
     /* Dismount and unlock */
-    LockStatus = NtFsControlFile(FileHandle,
-                                 NULL, NULL, NULL,
-                                 &Iosb,
-                                 FSCTL_DISMOUNT_VOLUME,
-                                 NULL, 0, NULL, 0);
-    if (!NT_SUCCESS(LockStatus))
+    if (VolumeLocked)
     {
-        DPRINT1("Failed to dismount volume: 0x%x\n", LockStatus);
-    }
+        LockStatus = NtFsControlFile(FileHandle,
+                                     NULL, NULL, NULL,
+                                     &Iosb,
+                                     FSCTL_DISMOUNT_VOLUME,
+                                     NULL, 0, NULL, 0);
+        if (!NT_SUCCESS(LockStatus))
+        {
+            DPRINT1("Failed to dismount volume: 0x%x\n", LockStatus);
+            Result = -1;
+        }
 
-    LockStatus = NtFsControlFile(FileHandle,
-                                 NULL, NULL, NULL,
-                                 &Iosb,
-                                 FSCTL_UNLOCK_VOLUME,
-                                 NULL, 0, NULL, 0);
-    if (!NT_SUCCESS(LockStatus))
-    {
-        DPRINT1("Failed to unlock volume: 0x%x\n", LockStatus);
+        LockStatus = NtFsControlFile(FileHandle,
+                                     NULL, NULL, NULL,
+                                     &Iosb,
+                                     FSCTL_UNLOCK_VOLUME,
+                                     NULL, 0, NULL, 0);
+        if (!NT_SUCCESS(LockStatus))
+        {
+            DPRINT1("Failed to unlock volume: 0x%x\n", LockStatus);
+        }
     }
 
     NtClose(FileHandle);
