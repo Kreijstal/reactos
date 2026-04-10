@@ -564,6 +564,7 @@ typedef struct _NTFS_ATTR_CONTEXT
 #define FCB_CACHE_INITIALIZED   0x0001
 #define FCB_IS_VOLUME_STREAM    0x0002
 #define FCB_IS_VOLUME           0x0004
+#define FCB_DELETE_PENDING      0x0008
 #define MAX_PATH                260
 
 typedef struct _FCB
@@ -878,6 +879,12 @@ NtfsInsertKey(PB_TREE Tree,
               ULONG IndexRecordSize,
               PB_TREE_KEY *MedianKey,
               PB_TREE_FILENAME_NODE *NewRightHandSibling);
+
+NTSTATUS
+NtfsRemoveKey(PB_TREE Tree,
+              ULONGLONG FileReference,
+              PUNICODE_STRING FileName,
+              BOOLEAN CaseSensitive);
 
 NTSTATUS
 SplitBTreeNode(PB_TREE Tree,
@@ -1265,6 +1272,26 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
                  PFILE_RECORD_HEADER *FileRecord,
                  PULONGLONG MFTIndex,
                  ULONGLONG CurrentMFTIndex);
+
+NTSTATUS
+NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
+                                ULONGLONG ParentMftIndex,
+                                ULONGLONG FileReferenceNumber,
+                                PUNICODE_STRING FileName,
+                                BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     ULONGLONG NewParentMftIndex,
+                     PUNICODE_STRING NewFileName,
+                     BOOLEAN ReplaceIfExists,
+                     BOOLEAN CaseSensitive);
 
 VOID
 NtfsDumpFileRecord(PDEVICE_EXTENSION Vcb,

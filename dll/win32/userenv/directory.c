@@ -100,7 +100,13 @@ CopyDirectory(LPCWSTR lpDestinationPath,
                            &FindFileData);
     if (hFind == INVALID_HANDLE_VALUE)
     {
-        DPRINT1("Error: %lu\n", GetLastError());
+        DWORD dwError = GetLastError();
+
+        if (dwError == ERROR_FILE_NOT_FOUND)
+            return TRUE;
+
+        DPRINT1("CopyDirectory: FindFirstFileW('%S') failed: %lu\n",
+                szFileName, dwError);
         return FALSE;
     }
 
@@ -123,9 +129,22 @@ CopyDirectory(LPCWSTR lpDestinationPath,
                 DPRINT("Create directory: %S\n", szFullDstName);
                 if (!CreateDirectoryExW(szFullSrcName, szFullDstName, NULL))
                 {
-                    if (GetLastError() != ERROR_ALREADY_EXISTS)
+                    DWORD dwError = GetLastError();
+
+                    if (dwError == ERROR_INVALID_PARAMETER ||
+                        dwError == ERROR_NOT_SUPPORTED)
                     {
-                        DPRINT1("Error: %lu\n", GetLastError());
+                        if (!CreateDirectoryW(szFullDstName, NULL))
+                            dwError = GetLastError();
+                        else
+                            dwError = ERROR_SUCCESS;
+                    }
+
+                    if (dwError != ERROR_SUCCESS &&
+                        dwError != ERROR_ALREADY_EXISTS)
+                    {
+                        DPRINT1("CopyDirectory: create '%S' from '%S' failed: %lu\n",
+                                szFullDstName, szFullSrcName, dwError);
 
                         FindClose(hFind);
                         return FALSE;
@@ -134,7 +153,8 @@ CopyDirectory(LPCWSTR lpDestinationPath,
 
                 if (!CopyDirectory(szFullDstName, szFullSrcName))
                 {
-                    DPRINT1("Error: %lu\n", GetLastError());
+                    DPRINT1("CopyDirectory: recurse '%S' -> '%S' failed: %lu\n",
+                            szFullSrcName, szFullDstName, GetLastError());
 
                     FindClose(hFind);
                     return FALSE;
@@ -145,7 +165,8 @@ CopyDirectory(LPCWSTR lpDestinationPath,
                 DPRINT("Copy file: %S -> %S\n", szFullSrcName, szFullDstName);
                 if (!CopyFileW(szFullSrcName, szFullDstName, FALSE))
                 {
-                    DPRINT1("Error: %lu\n", GetLastError());
+                    DPRINT1("CopyDirectory: file copy '%S' -> '%S' failed: %lu\n",
+                            szFullSrcName, szFullDstName, GetLastError());
 
                     FindClose(hFind);
                     return FALSE;
@@ -157,7 +178,8 @@ CopyDirectory(LPCWSTR lpDestinationPath,
         {
             if (GetLastError() != ERROR_NO_MORE_FILES)
             {
-                DPRINT1("Error: %lu\n", GetLastError());
+                DPRINT1("CopyDirectory: FindNextFileW('%S') failed: %lu\n",
+                        szFileName, GetLastError());
             }
 
             break;
