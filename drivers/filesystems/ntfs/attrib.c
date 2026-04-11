@@ -1810,6 +1810,7 @@ ConvertLargeMCBToDataRuns(PLARGE_MCB DataRunsMCB,
     ULONG RunBufferOffset = 0;
     LONGLONG  DataRunOffset;
     ULONGLONG LastLCN = 0;
+    LONGLONG ExpectedVbn = 0;
     LONGLONG Vbn, Lbn, Count;
     ULONG i;
 
@@ -1826,7 +1827,28 @@ ConvertLargeMCBToDataRuns(PLARGE_MCB DataRunsMCB,
         // [vbn, lbn, count]
         DPRINT("\t[%I64d, %I64d,%I64d]\n", Vbn, Lbn, Count);
 
-        // TODO: check for holes and convert to sparse runs
+        // If there's a Vbn gap before this entry, emit a sparse run for the
+        // hole.  The MCB doesn't store explicit sparse markers (we drop them
+        // in ConvertDataRunsToLargeMCB) — gaps in Vbn ARE the sparse holes,
+        // and round-trip stability requires re-emitting them here.
+        if (Vbn > ExpectedVbn)
+        {
+            LONGLONG SparseLength = Vbn - ExpectedVbn;
+            UCHAR SparseLenSize = GetPackedByteCount(SparseLength, TRUE);
+
+            if (RunBufferOffset + 2 + SparseLenSize > MaxBufferSize)
+            {
+                Status = STATUS_BUFFER_TOO_SMALL;
+                DPRINT1("FIXME: Ran out of room in buffer for sparse run!\n");
+                break;
+            }
+            // Sparse run: DataRunOffsetSize=0, DataRunLengthSize=SparseLenSize.
+            RunBuffer[RunBufferOffset++] = SparseLenSize & 0x0F;
+            RtlCopyMemory(RunBuffer + RunBufferOffset, &SparseLength, SparseLenSize);
+            RunBufferOffset += SparseLenSize;
+        }
+        ExpectedVbn = Vbn + Count;
+
         DataRunOffset = Lbn - LastLCN;
         LastLCN = Lbn;
 
