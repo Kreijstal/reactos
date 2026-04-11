@@ -112,10 +112,11 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
     {
         Fcb = Snapshot[i];
 
-        if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
-            Fcb->SectionObjectPointers.SharedCacheMap != NULL)
+        if (Fcb->SectionObjectPointers != NULL &&
+            (Fcb->SectionObjectPointers->DataSectionObject != NULL ||
+             Fcb->SectionObjectPointers->SharedCacheMap != NULL))
         {
-            CcFlushCache(&Fcb->SectionObjectPointers,
+            CcFlushCache(Fcb->SectionObjectPointers,
                          NULL,
                          0,
                          &IoStatus);

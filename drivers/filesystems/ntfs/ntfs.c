@@ -304,6 +304,10 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     ExInitializeNPagedLookasideList(&NtfsGlobalData->AttrCtxtLookasideList,
                                     NULL, NULL, 0, sizeof(NTFS_ATTR_CONTEXT), TAG_ATT_CTXT, 0);
 
+    /* Zombie FCB list (see fcb.c NtfsDestroyFCB / NtfsReapZombieFcbs). */
+    InitializeListHead(&NtfsGlobalData->ZombieFcbList);
+    KeInitializeSpinLock(&NtfsGlobalData->ZombieLock);
+
     /* Driver can't be unloaded */
     DriverObject->DriverUnload = NULL;
 

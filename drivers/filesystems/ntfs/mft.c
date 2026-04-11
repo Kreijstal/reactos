@@ -104,6 +104,14 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
 VOID
 ReleaseAttributeContext(PNTFS_ATTR_CONTEXT Context)
 {
+    /* Defense in depth: callers occasionally pass uninitialized stack
+     * variables on FindAttribute failure paths.  FindAttribute writes to
+     * its out-parameter only on success, so a NULL guard here turns a
+     * use-of-uninitialized into a no-op rather than a pool-tracker assert
+     * (or a kernel panic from freeing a wild pointer). */
+    if (Context == NULL)
+        return;
+
     if (Context->pRecord)
     {
         if (Context->pRecord->IsNonResident)
@@ -1534,7 +1542,6 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
         LastLCN = 0;
         CurrentOffset = 0;
 
-        // This will be rewritten in the next iteration to just use the DataRuns MCB directly
         TempBuffer = ExAllocatePoolWithTag(NonPagedPool, Vcb->NtfsInfo.BytesPerFileRecord, TAG_NTFS);
         if (TempBuffer == NULL)
         {
@@ -2811,11 +2818,38 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     // We're done with the B-Tree now (DestroyBTree releases IndexAllocationContext)
     DestroyBTree(NewTree);
 
-    // Write back the new index root attribute to the parent directory file record
+    // Write back the new index root attribute to the parent directory file record.
+    //
+    // IMPORTANT: UpdateIndexAllocation() above may have grown $INDEX_ALLOCATION
+    // and $BITMAP via AddRun, which persisted updated data runs to the on-disk
+    // MFT record.  Our local ParentFileRecord is now STALE with respect to those
+    // data runs.  We MUST re-read from disk before modifying and writing back,
+    // otherwise we clobber the data runs that AddRun wrote.
+    DPRINT("NtfsAddFilename: re-reading MFT %I64u before final write\n", DirectoryMftIndex);
+    Status = ReadFileRecord(DeviceExt, DirectoryMftIndex, ParentFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to re-read directory file record %I64u!\n", DirectoryMftIndex);
+        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
 
-    // First, we need to resize the attribute.
-    // CreateIndexRootFromBTree() should have verified that the index root fits within MaxIndexSize.
-    // We can't set the size as we normally would, because $INDEX_ROOT must always be resident.
+    // Re-find the $INDEX_ROOT attribute since offsets may have changed
+    ReleaseAttributeContext(IndexRootContext);
+    Status = FindAttribute(DeviceExt, ParentFileRecord, AttributeIndexRoot, L"$I30", 4, &IndexRootContext, &IndexRootOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to re-find $INDEX_ROOT after re-read!\n");
+        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    // Resize the attribute if needed.
     AttributeLength = NewIndexRoot->Header.AllocatedSize + FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header);
 
     if (AttributeLength != IndexRootContext->pRecord->Resident.ValueLength)
@@ -2838,20 +2872,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
 
     }
 
-    NT_ASSERT(ParentFileRecord->BytesInUse <= DeviceExt->NtfsInfo.BytesPerFileRecord);
-
-    Status = UpdateFileRecord(DeviceExt, DirectoryMftIndex, ParentFileRecord);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("ERROR: Failed to update file record of directory with index: %llx\n", DirectoryMftIndex);
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
-        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
-        ReleaseAttributeContext(IndexRootContext);
-        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
-        return Status;
-    }
-
-    // Write the new index root to disk
+    // Write the new index root to disk using the freshly re-read ParentFileRecord.
     Status = WriteAttribute(DeviceExt,
                             IndexRootContext,
                             0,
