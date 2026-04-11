@@ -149,6 +149,28 @@ typedef struct
     ERESOURCE DirResource;
 //    ERESOURCE FatResource;
 
+    /* Serializes read-modify-write of any directory's $INDEX_ALLOCATION
+     * (and the matching $INDEX_ROOT writes) across all FCBs on this volume.
+     *
+     * Held SHARED by readers (BrowseIndexEntries / NtfsFindMftRecord and
+     * the recursive BrowseSubNodeIndexEntries) and EXCLUSIVE by writers
+     * (UpdateIndexEntryFileNameSize, NtfsAddFilenameToDirectory,
+     *  NtfsRemoveFilenameFromDirectory). Without this, a writer's R/M/W
+     * cycle on a parent directory's $INDEX_ALLOCATION can race a concurrent
+     * path-walk read of the same cluster and the reader observes the
+     * cluster mid-write — most visibly the cluster's first 4 bytes are
+     * no longer 'INDX' and BrowseSubNodeIndexEntries trips
+     * ASSERT(IndexRecord->Ntfs.Type == NRH_INDX_TYPE) (mft.c:3689). See
+     * Kreijstal/reactos#14.
+     *
+     * Locking discipline:
+     *   - Sits BELOW DirResource and Fcb->MainResource in the hierarchy.
+     *   - Writers (called from NtfsSetInformation / NtfsWrite) hold the
+     *     child Fcb->MainResource but no parent lock; readers from
+     *     NtfsCreate / NtfsDirControl hold DirResource exclusive. Neither
+     *     pair shares another lock with this one, so no AB-BA is added. */
+    ERESOURCE IndexResource;
+
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
 
@@ -191,6 +213,7 @@ typedef struct
 
 #define VCB_VOLUME_LOCKED       0x0001
 #define VCB_VOLUME_CORRUPT      0x0002
+#define VCB_DISMOUNT_PENDING    0x0004
 
 typedef struct
 {
@@ -198,6 +221,7 @@ typedef struct
     LIST_ENTRY     NextCCB;
     PFILE_OBJECT   PtrFileObject;
     LARGE_INTEGER  CurrentByteOffset;
+    ULONG Flags;
     /* for DirectoryControl */
     ULONG Entry;
     /* for DirectoryControl */
@@ -205,6 +229,8 @@ typedef struct
     ULONG LastCluster;
     ULONG LastOffset;
 } NTFS_CCB, *PNTFS_CCB;
+
+#define NTFS_CCB_FLAG_COUNTED 0x00000001
 
 typedef struct
 {
