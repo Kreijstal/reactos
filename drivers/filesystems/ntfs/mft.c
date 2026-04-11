@@ -1421,6 +1421,9 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
     PUCHAR SourceBuffer = Buffer;
     LONGLONG StartingOffset;
     BOOLEAN FileRecordAllocated = FALSE;
+    LARGE_INTEGER RequiredSize;
+    PNTFS_ATTR_CONTEXT RepairContext;
+    ULONG RepairAttrOffset;
 
     //TEMPTEMP
     PUCHAR TempBuffer;
@@ -1538,10 +1541,15 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
-        ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
-                                  TempBuffer,
-                                  Vcb->NtfsInfo.BytesPerFileRecord,
-                                  &UsedBufferSize);
+        Status = ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
+                                           TempBuffer,
+                                           Vcb->NtfsInfo.BytesPerFileRecord,
+                                           &UsedBufferSize);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("WriteAttribute: failed to encode runlist 0x%lx\n", Status);
+            goto Cleanup;
+        }
 
         DataRun = TempBuffer;
 
@@ -1703,13 +1711,50 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
 
             if (*DataRun == 0)
             {
-                // We reached the last assigned cluster
-                // TODO: assign new clusters to the end of the file.
-                // (Presently, this code will rarely be reached, the write will usually have already failed by now)
-                // [We can reach here by creating a new file record when the MFT isn't large enough]
-                DPRINT1("FIXME: Master File Table needs to be enlarged.\n");
-                Status = STATUS_END_OF_FILE;
-                goto Cleanup;
+                /* The runlist ended before the requested write offset. Repair
+                 * the tail mapping and retry instead of failing the write. */
+                RequiredSize.QuadPart = max((ULONGLONG)AttributeDataLength(Context->pRecord),
+                                            Offset + Length);
+                DPRINT1("WriteAttribute: extending missing tail mapping for offset %I64u len %lu (size %I64u)\n",
+                        Offset, Length, RequiredSize.QuadPart);
+                Status = FindAttribute(Vcb, FileRecord,
+                                       Context->pRecord->Type,
+                                       (PCWSTR)((ULONG_PTR)Context->pRecord + Context->pRecord->NameOffset),
+                                       Context->pRecord->NameLength,
+                                       &RepairContext,
+                                       &RepairAttrOffset);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: couldn't re-find attribute for tail repair 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+
+                Status = SetNonResidentAttributeDataLength(Vcb,
+                                                           Context,
+                                                           RepairAttrOffset,
+                                                           FileRecord,
+                                                           &RequiredSize);
+                ReleaseAttributeContext(RepairContext);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: tail-mapping repair failed 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+
+                Status = ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
+                                                   TempBuffer,
+                                                   Vcb->NtfsInfo.BytesPerFileRecord,
+                                                   &UsedBufferSize);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: failed to re-encode repaired runlist 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+
+                DataRun = TempBuffer;
+                LastLCN = 0;
+                CurrentOffset = 0;
+                continue;
             }
 
             CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
@@ -1895,6 +1940,7 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
     PINDEX_ENTRY_ATTRIBUTE IndexEntry, IndexEntryEnd;
     NTSTATUS Status;
     ULONG CurrentEntry = 0;
+    BOOLEAN IndexLockHeld;
 
     DPRINT("UpdateFileNameRecord(%p, %I64d, %wZ, %s, %I64u, %I64u, %s)\n",
            Vcb,
@@ -1905,9 +1951,17 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
            NewAllocationSize,
            CaseSensitive ? "TRUE" : "FALSE");
 
+    /* Take IndexResource exclusive across the entire R/M/W of the parent
+     * directory's $INDEX_ROOT and $INDEX_ALLOCATION so concurrent readers
+     * (NtfsFindMftRecord -> BrowseIndexEntries) can't observe a
+     * mid-update INDX block. See Kreijstal/reactos#14. */
+    IndexLockHeld = ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+
     MftRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (MftRecord == NULL)
     {
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1915,6 +1969,8 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return Status;
     }
 
@@ -1923,6 +1979,8 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return Status;
     }
 
@@ -1931,6 +1989,8 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
     {
         ReleaseAttributeContext(IndexRootCtx);
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -1941,6 +2001,8 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
         ExFreePoolWithTag(IndexRecord, TAG_NTFS);
         ReleaseAttributeContext(IndexRootCtx);
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return Status;
     }
 
@@ -1980,6 +2042,8 @@ UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
     ReleaseAttributeContext(IndexRootCtx);
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+    if (IndexLockHeld)
+        ExReleaseResourceLite(&Vcb->IndexResource);
 
     return Status;
 }
@@ -2174,7 +2238,7 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
                             (const PUCHAR)FileRecord,
                             Vcb->NtfsInfo.BytesPerFileRecord,
                             &BytesWritten,
-                            FileRecord);
+                            Vcb->MasterFileTable);
 
     if (!NT_SUCCESS(Status))
     {
@@ -2367,7 +2431,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     BitmapData[2] = SystemReservedBits;
 
     // Write bitmap to disk
-    Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, FileRecord);
+    Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, DeviceExt->MasterFileTable);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
@@ -2424,12 +2488,17 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
 * file which contains one FILENAME_ATTRIBUTE for a long name and another for the 8.3 name, will
 * get both attributes added to its parent directory.
 */
+/* Internal worker for NtfsAddFilenameToDirectory.  The public entry point is
+ * the wrapper below, which takes Vcb->IndexResource exclusive across this
+ * call so concurrent BrowseSubNodeIndexEntries readers can't observe a
+ * mid-update INDX block (Kreijstal/reactos#14). */
+static
 NTSTATUS
-NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
-                           ULONGLONG DirectoryMftIndex,
-                           ULONGLONG FileReferenceNumber,
-                           PFILENAME_ATTRIBUTE FilenameAttribute,
-                           BOOLEAN CaseSensitive)
+NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
+                                 ULONGLONG DirectoryMftIndex,
+                                 ULONGLONG FileReferenceNumber,
+                                 PFILENAME_ATTRIBUTE FilenameAttribute,
+                                 BOOLEAN CaseSensitive)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_RECORD_HEADER ParentFileRecord;
@@ -2827,12 +2896,38 @@ NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* Public entry point for NtfsAddFilenameToDirectory.  Wraps the worker
+ * with Vcb->IndexResource exclusive (Kreijstal/reactos#14). */
 NTSTATUS
-NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
-                                ULONGLONG ParentMftIndex,
-                                ULONGLONG FileReferenceNumber,
-                                PUNICODE_STRING FileName,
-                                BOOLEAN CaseSensitive)
+NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
+                           ULONGLONG DirectoryMftIndex,
+                           ULONGLONG FileReferenceNumber,
+                           PFILENAME_ATTRIBUTE FilenameAttribute,
+                           BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+    BOOLEAN IndexLockHeld;
+
+    IndexLockHeld = ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    Status = NtfsAddFilenameToDirectoryNoLock(DeviceExt,
+                                              DirectoryMftIndex,
+                                              FileReferenceNumber,
+                                              FilenameAttribute,
+                                              CaseSensitive);
+    if (IndexLockHeld)
+        ExReleaseResourceLite(&DeviceExt->IndexResource);
+    return Status;
+}
+
+/* Internal worker for NtfsRemoveFilenameFromDirectory.  Wrapped below with
+ * IndexResource exclusive (Kreijstal/reactos#14). */
+static
+NTSTATUS
+NtfsRemoveFilenameFromDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
+                                      ULONGLONG ParentMftIndex,
+                                      ULONGLONG FileReferenceNumber,
+                                      PUNICODE_STRING FileName,
+                                      BOOLEAN CaseSensitive)
 {
     NTSTATUS Status;
     PFILE_RECORD_HEADER ParentFileRecord;
@@ -3059,6 +3154,29 @@ NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
         return !NT_SUCCESS(Status) ? Status : STATUS_UNSUCCESSFUL;
 
     return STATUS_SUCCESS;
+}
+
+/* Public entry point for NtfsRemoveFilenameFromDirectory.  Wraps the worker
+ * with Vcb->IndexResource exclusive (Kreijstal/reactos#14). */
+NTSTATUS
+NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
+                                ULONGLONG ParentMftIndex,
+                                ULONGLONG FileReferenceNumber,
+                                PUNICODE_STRING FileName,
+                                BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+    BOOLEAN IndexLockHeld;
+
+    IndexLockHeld = ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    Status = NtfsRemoveFilenameFromDirectoryNoLock(DeviceExt,
+                                                   ParentMftIndex,
+                                                   FileReferenceNumber,
+                                                   FileName,
+                                                   CaseSensitive);
+    if (IndexLockHeld)
+        ExReleaseResourceLite(&DeviceExt->IndexResource);
+    return Status;
 }
 
 NTSTATUS
@@ -3886,6 +4004,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     PINDEX_ENTRY_ATTRIBUTE IndexEntry, IndexEntryEnd;
     NTSTATUS Status;
     ULONG CurrentEntry = 0;
+    BOOLEAN IndexLockHeld = FALSE;
 
     DPRINT("NtfsFindMftRecord(%p, %I64d, %wZ, %lu, %s, %s, %p)\n",
            Vcb,
@@ -3896,9 +4015,20 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
            CaseSensitive ? "TRUE" : "FALSE",
            OutMFTIndex);
 
+    /* Take IndexResource shared so a writer (UpdateFileNameRecord /
+     * NtfsAddFilenameToDirectory / NtfsRemoveFilenameFromDirectory) can't
+     * mutate any directory's $INDEX_ALLOCATION underneath us — see
+     * Kreijstal/reactos#14. ERESOURCE allows recursive shared acquisition,
+     * so it's safe even if a caller higher up the stack already holds it.
+     * Normal kernel APCs are already disabled by FsRtlEnterFileSystem in
+     * NtfsDispatch, so we don't need a critical region wrapper. */
+    IndexLockHeld = ExAcquireResourceSharedLite(&Vcb->IndexResource, TRUE);
+
     MftRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (MftRecord == NULL)
     {
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -3906,6 +4036,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return Status;
     }
 
@@ -3914,6 +4046,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return Status;
     }
 
@@ -3922,6 +4056,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     {
         ReleaseAttributeContext(IndexRootCtx);
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+        if (IndexLockHeld)
+            ExReleaseResourceLite(&Vcb->IndexResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -3949,6 +4085,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
 
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+    if (IndexLockHeld)
+        ExReleaseResourceLite(&Vcb->IndexResource);
 
     return Status;
 }
