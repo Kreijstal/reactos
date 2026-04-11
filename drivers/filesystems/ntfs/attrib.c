@@ -786,7 +786,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
         return Status;
     }
-    DPRINT1("MigrateAttributeToList: child MFT index = %I64u\n", ChildMftIndex);
+    DPRINT("MigrateAttributeToList: type=0x%x migrated to child MFT %I64u\n", AttrInChild->Type, ChildMftIndex);
 
     /* Step 5: in the base record, REMOVE the migrated attribute slot.
      * Compact: move any trailing attributes left to fill the hole. */

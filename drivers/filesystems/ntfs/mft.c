@@ -233,6 +233,25 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
                 /* Read the new file record */
                 ReadFileRecord(Vcb, MftIndex, RemoteHdr);
                 Status = FindAttribute(Vcb, RemoteHdr, Type, Name, NameLength, AttrCtx, Offset);
+
+                /* The recursive FindAttribute on the child record set
+                 * (*AttrCtx)->FileMFTIndex = RemoteHdr->MFTRecordNumber
+                 * (the child's index, e.g. 27).  The caller however is working
+                 * with the BASE record's FileRecord buffer (where the list
+                 * lives), so callers like AllocateIndexNode that do
+                 * UpdateFileRecord(AttrCtx->FileMFTIndex, FileRecord) would
+                 * end up writing the base buffer to the child slot, corrupting
+                 * the migrated attribute.  Restore FileMFTIndex to the base
+                 * to keep the (FileMFTIndex, FileRecord) pair consistent.
+                 *
+                 * The on-disk *attribute* still physically lives in the child
+                 * record, but updates that touch only the attribute's data
+                 * runs (WriteAttribute on a non-resident attribute) go through
+                 * Context->DataRunsMCB / DataRunStartLCN, not FileMFTIndex,
+                 * so they remain correct. */
+                if (NT_SUCCESS(Status))
+                    (*AttrCtx)->FileMFTIndex = MftRecord->MFTRecordNumber;
+
                 ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, RemoteHdr);
                 FindCloseAttribute(&Context);
                 return Status;
