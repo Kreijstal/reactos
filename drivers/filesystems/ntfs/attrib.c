@@ -677,6 +677,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
     USHORT MigratedInstance;
     USHORT MigratedNameLength;
     PWCHAR MigratedNameSrc;
+    WCHAR MigratedNameBuf[256];
     BOOLEAN ListExisted;
     ULONG ListEntryNameLen;
     ULONG ListEntryFixedSize;
@@ -709,7 +710,29 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
     MigratedAttrLength = AttrInBase->Length;
     MigratedInstance = AttrInBase->Instance;
     MigratedNameLength = AttrInBase->NameLength;
-    MigratedNameSrc = (PWCHAR)((PCHAR)AttrInBase + AttrInBase->NameOffset);
+
+    /* Snapshot the attribute name into the function-scope buffer NOW.  Step 5
+     * below compacts the base record by moving trailing attributes left, which
+     * overwrites the original name bytes at AttrInBase + NameOffset.  By the
+     * time we build the new $ATTRIBUTE_LIST entry in step 6, a pointer into
+     * AttrInBase points at unrelated data from a moved attribute. */
+    if (MigratedNameLength > 0)
+    {
+        if (MigratedNameLength > 255)
+        {
+            DPRINT1("MigrateAttributeToList: name length %u exceeds snapshot buffer\n",
+                    MigratedNameLength);
+            return STATUS_INVALID_PARAMETER;
+        }
+        RtlCopyMemory(MigratedNameBuf,
+                      (PCHAR)AttrInBase + AttrInBase->NameOffset,
+                      MigratedNameLength * sizeof(WCHAR));
+        MigratedNameSrc = MigratedNameBuf;
+    }
+    else
+    {
+        MigratedNameSrc = NULL;
+    }
 
     /* Step 1: create the child file record buffer (in memory). */
     ChildRecord = NtfsCreateEmptyFileRecord(Vcb);
