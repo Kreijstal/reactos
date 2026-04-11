@@ -104,6 +104,14 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
 VOID
 ReleaseAttributeContext(PNTFS_ATTR_CONTEXT Context)
 {
+    /* Defense in depth: callers occasionally pass uninitialized stack
+     * variables on FindAttribute failure paths.  FindAttribute writes to
+     * its out-parameter only on success, so a NULL guard here turns a
+     * use-of-uninitialized into a no-op rather than a pool-tracker assert
+     * (or a kernel panic from freeing a wild pointer). */
+    if (Context == NULL)
+        return;
+
     if (Context->pRecord)
     {
         if (Context->pRecord->IsNonResident)
