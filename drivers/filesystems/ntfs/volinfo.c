@@ -117,12 +117,26 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     RTL_BITMAP Bitmap;
     ULONG AssignedRun;
     ULONG LengthWritten;
+    BOOLEAN BitmapLockHeld;
 
     DPRINT("NtfsAllocateClusters(%p, %lu, %lu, %p, %p)\n", DeviceExt, FirstDesiredCluster, DesiredClusters, FirstAssignedCluster, AssignedClusters);
+
+    /* Serialize the entire read-modify-write of the volume bitmap. Without
+     * this lock two concurrent allocators each load a private copy of the
+     * bitmap, both find the same LCN free, both mark it set, and both
+     * write the bitmap back — handing out the same cluster twice. The
+     * writeback below reads $Bitmap's MFT record and may itself recurse
+     * back into NtfsAllocateClusters if WriteAttribute needs to grow the
+     * bitmap, but ERESOURCE supports recursive exclusive acquisition so
+     * the inner call is harmless. See ntfs.h:BitmapResource and
+     * Kreijstal/reactos#14. */
+    BitmapLockHeld = ExAcquireResourceExclusiveLite(&DeviceExt->BitmapResource, TRUE);
 
     BitmapRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (BitmapRecord == NULL)
     {
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&DeviceExt->BitmapResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -130,6 +144,8 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&DeviceExt->BitmapResource);
         return Status;
     }
 
@@ -137,6 +153,8 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&DeviceExt->BitmapResource);
         return Status;
     }
 
@@ -148,6 +166,8 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     {
         ReleaseAttributeContext(DataContext);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&DeviceExt->BitmapResource);
         return  STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -166,6 +186,8 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
 
         ExFreePoolWithTag(BitmapData, TAG_NTFS);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&DeviceExt->BitmapResource);
         return STATUS_DISK_FULL;
     }
 
@@ -203,6 +225,9 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
 
     ExFreePoolWithTag(BitmapData, TAG_NTFS);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+
+    if (BitmapLockHeld)
+        ExReleaseResourceLite(&DeviceExt->BitmapResource);
 
     return Status;
 }
