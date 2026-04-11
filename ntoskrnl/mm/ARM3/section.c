@@ -2684,16 +2684,15 @@ MmDisableModifiedWriteOfSection(IN PSECTION_OBJECT_POINTERS SectionObjectPointer
 }
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * The real implementation lives in ntoskrnl/mm/section.c next to the
+ * legacy data-section helpers it depends on (MiGrabDataSection,
+ * MmDereferenceSegment).  This stub used to return UNIMPLEMENTED here,
+ * which is the chain of consequences documented in
+ * Kreijstal/reactos#14.  See the kmtest in
+ * modules/rostests/kmtests/ntos_mm/MmForceSectionClosed.c.
  */
-BOOLEAN
-NTAPI
-MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
-                     IN BOOLEAN DelayClose)
-{
-   UNIMPLEMENTED;
-   return FALSE;
-}
 
 /*
  * @implemented
