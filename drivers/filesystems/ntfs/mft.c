@@ -48,6 +48,7 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         DPRINT1("Error: Unable to allocate memory for context!\n");
         return NULL;
     }
+    Context->MigratedToMFTIndex = 0;
 
     // Allocate memory for a copy of the attribute
     Context->pRecord = ExAllocatePoolWithTag(NonPagedPool, AttrRecord->Length, TAG_NTFS);
@@ -233,6 +234,31 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
                 /* Read the new file record */
                 ReadFileRecord(Vcb, MftIndex, RemoteHdr);
                 Status = FindAttribute(Vcb, RemoteHdr, Type, Name, NameLength, AttrCtx, Offset);
+
+                /* The recursive FindAttribute on the child record set
+                 * (*AttrCtx)->FileMFTIndex = RemoteHdr->MFTRecordNumber
+                 * (the child's index, e.g. 27).  The caller however is working
+                 * with the BASE record's FileRecord buffer (where the list
+                 * lives), so callers like AllocateIndexNode that do
+                 * UpdateFileRecord(AttrCtx->FileMFTIndex, FileRecord) would
+                 * end up writing the base buffer to the child slot, corrupting
+                 * the migrated attribute.  Restore FileMFTIndex to the base
+                 * to keep the (FileMFTIndex, FileRecord) pair consistent.
+                 *
+                 * Phase 4A.5: also stash the child's MFT index in
+                 * MigratedToMFTIndex so that AddRun on this AttrContext can
+                 * re-read the child record and operate on the actual
+                 * attribute slot.  Without this, AddRun would compute
+                 * DestinationAttribute = base + AttrOffset and write mapping
+                 * pairs into a slot that no longer holds the migrated
+                 * attribute (because step 5 of MigrateAttributeToList moved
+                 * trailing attributes left into that position). */
+                if (NT_SUCCESS(Status))
+                {
+                    (*AttrCtx)->MigratedToMFTIndex = MftIndex;
+                    (*AttrCtx)->FileMFTIndex = MftRecord->MFTRecordNumber;
+                }
+
                 ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, RemoteHdr);
                 FindCloseAttribute(&Context);
                 return Status;
@@ -815,6 +841,22 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         ULONG NextAssignedCluster;
         ULONG AssignedClusters;
 
+        /* Pre-set the size fields (NOT HighestVCN — that's still maintained
+         * incrementally by AddRun, and the MCB-lookup code below relies on it
+         * matching the current MCB state) so that anything which copies
+         * AttrContext->pRecord during the AddRun loop — notably
+         * MigrateAttributeToList — captures the new sizes.  Without this,
+         * a migrated attribute lands on disk with stale AllocatedSize/DataSize. */
+        AttrContext->pRecord->NonResident.AllocatedSize = AllocationSize;
+        AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
+        AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
+        if (DestinationAttribute->Type == AttrContext->pRecord->Type)
+        {
+            DestinationAttribute->NonResident.AllocatedSize = AllocationSize;
+            DestinationAttribute->NonResident.DataSize = DataSize->QuadPart;
+            DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
+        }
+
         if (ExistingClusters == 0)
         {
             LastClusterInDataRun.QuadPart = 0;
@@ -879,16 +921,28 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
     AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
 
-    DestinationAttribute->NonResident.AllocatedSize = AllocationSize;
-    DestinationAttribute->NonResident.DataSize = DataSize->QuadPart;
-    DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
+    /* The in-buffer attribute slot at FileRecord+AttrOffset may have become
+     * stale if AddRun() above migrated the attribute to a child file record
+     * via $ATTRIBUTE_LIST.  In that case the slot at the original offset is
+     * now occupied by a *different* attribute (a moved trailing one), and
+     * writing the size fields here would corrupt it.  Detect the migration
+     * by comparing types: if they no longer match, the in-buffer copy is
+     * now in the child record (which AddRun already wrote back to disk), so
+     * skip the in-buffer mirror update. */
+    if (DestinationAttribute->Type == AttrContext->pRecord->Type)
+    {
+        DestinationAttribute->NonResident.AllocatedSize = AllocationSize;
+        DestinationAttribute->NonResident.DataSize = DataSize->QuadPart;
+        DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
+    }
 
     // HighestVCN seems to be set incorrectly somewhere. Apply a hack-fix to reset it.
     // HACKHACK FIXME: Fix for sparse files; this math won't work in that case.
     AttrContext->pRecord->NonResident.HighestVCN = ((ULONGLONG)AllocationSize / Vcb->NtfsInfo.BytesPerCluster) - 1;
-    DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;
+    if (DestinationAttribute->Type == AttrContext->pRecord->Type)
+        DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;
 
-    DPRINT("Allocated Size: %I64u\n", DestinationAttribute->NonResident.AllocatedSize);
+    DPRINT("Allocated Size: %I64u\n", AttrContext->pRecord->NonResident.AllocatedSize);
 
     return Status;
 }
