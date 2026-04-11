@@ -911,20 +911,30 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
+        /* USN journal FSCTLs: this volume has no $UsnJrnl, so report
+         * "no journal" rather than "broken driver".  Returning
+         * STATUS_INVALID_DEVICE_REQUEST lets probing apps (Explorer,
+         * indexing services, backup tools) gracefully fall back to a
+         * scan-based change-detection strategy instead of erroring out. */
         case FSCTL_CREATE_USN_JOURNAL:
         case FSCTL_DELETE_USN_JOURNAL:
         case FSCTL_ENUM_USN_DATA:
+        case FSCTL_QUERY_USN_JOURNAL:
+        case FSCTL_READ_FILE_USN_DATA:
+        case FSCTL_READ_USN_JOURNAL:
+        case FSCTL_WRITE_USN_CLOSE_RECORD:
+            DPRINT("USN journal FSCTL on volume without $UsnJrnl: %x\n",
+                   Stack->Parameters.FileSystemControl.FsControlCode);
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            break;
+
         case FSCTL_EXTEND_VOLUME:
         //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         case FSCTL_GET_RETRIEVAL_POINTERS:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
         case FSCTL_MOVE_FILE:
-        case FSCTL_QUERY_USN_JOURNAL:
-        case FSCTL_READ_FILE_USN_DATA:
-        case FSCTL_READ_USN_JOURNAL:
         //case FSCTL_SHRINK_VOLUME:
-        case FSCTL_WRITE_USN_CLOSE_RECORD:
             UNIMPLEMENTED;
             DPRINT1("Unimplemented user request: %x\n", Stack->Parameters.FileSystemControl.FsControlCode);
             Status = STATUS_NOT_IMPLEMENTED;
