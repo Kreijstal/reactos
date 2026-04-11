@@ -135,6 +135,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     RTL_BITMAP Bitmap;
     ULONG BytesWritten;
     ULONG BytesNeeded;
+    ULONG BufferSize;
     LARGE_INTEGER DataSize;
 
     DPRINT("AllocateIndexNode(%p, %p, %lu, %p, %lu, %p) called.\n", DeviceExt,
@@ -177,9 +178,17 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // Windows seems to allocate the bitmap in 8-byte chunks to keep any bytes from being wasted on padding
     BytesNeeded = ALIGN_UP(BytesNeeded, ATTR_RECORD_ALIGNMENT);
 
+    /* The on-disk bitmap (BitmapLength) and the locally-computed BytesNeeded
+     * can disagree: BytesNeeded is sized for the *new* node count, while
+     * BitmapLength reflects the current attribute size, which may already
+     * have been padded up by a previous grow.  Allocate a buffer big enough
+     * for both so the ReadAttribute below can never overflow, and so the
+     * bits we set after extending the index allocation are still in range. */
+    BufferSize = max(BytesNeeded, (ULONG)BitmapLength);
+
     // Allocate memory for the bitmap, including some padding; RtlInitializeBitmap() wants a pointer
     // that's ULONG-aligned, and it wants the size of the memory allocated for it to be a ULONG-multiple.
-    BitmapMem = ExAllocatePoolWithTag(NonPagedPool, BytesNeeded + sizeof(ULONG), TAG_NTFS);
+    BitmapMem = ExAllocatePoolWithTag(NonPagedPool, BufferSize + sizeof(ULONG), TAG_NTFS);
     if (!BitmapMem)
     {
         DPRINT1("Error: failed to allocate bitmap!");
@@ -189,7 +198,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // RtlInitializeBitmap() wants a pointer that's ULONG-aligned.
     BitmapPtr = (PULONG)ALIGN_UP_BY((ULONG_PTR)BitmapMem, sizeof(ULONG));
 
-    RtlZeroMemory(BitmapPtr, BytesNeeded);
+    RtlZeroMemory(BitmapPtr, BufferSize);
 
     // Read the existing bitmap data
     Status = ReadAttribute(DeviceExt, BitmapCtx, 0, (PCHAR)BitmapPtr, BitmapLength);
