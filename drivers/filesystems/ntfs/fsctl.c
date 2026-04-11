@@ -537,6 +537,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     ExInitializeResourceLite(&Vcb->DirResource);
     ExInitializeResourceLite(&Vcb->IndexResource);
+    ExInitializeResourceLite(&Vcb->BitmapResource);
 
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
