@@ -504,7 +504,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     Vcb->StreamFileObject->FsContext = Fcb;
     Vcb->StreamFileObject->FsContext2 = Ccb;
-    Vcb->StreamFileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    Vcb->StreamFileObject->SectionObjectPointer = Fcb->SectionObjectPointers;
     Vcb->StreamFileObject->PrivateCacheMap = NULL;
     Vcb->StreamFileObject->Vpb = Vcb->Vpb;
     Ccb->PtrFileObject = Vcb->StreamFileObject;
