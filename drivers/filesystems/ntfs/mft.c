@@ -48,6 +48,7 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         DPRINT1("Error: Unable to allocate memory for context!\n");
         return NULL;
     }
+    Context->MigratedToMFTIndex = 0;
 
     // Allocate memory for a copy of the attribute
     Context->pRecord = ExAllocatePoolWithTag(NonPagedPool, AttrRecord->Length, TAG_NTFS);
@@ -244,13 +245,19 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
                  * the migrated attribute.  Restore FileMFTIndex to the base
                  * to keep the (FileMFTIndex, FileRecord) pair consistent.
                  *
-                 * The on-disk *attribute* still physically lives in the child
-                 * record, but updates that touch only the attribute's data
-                 * runs (WriteAttribute on a non-resident attribute) go through
-                 * Context->DataRunsMCB / DataRunStartLCN, not FileMFTIndex,
-                 * so they remain correct. */
+                 * Phase 4A.5: also stash the child's MFT index in
+                 * MigratedToMFTIndex so that AddRun on this AttrContext can
+                 * re-read the child record and operate on the actual
+                 * attribute slot.  Without this, AddRun would compute
+                 * DestinationAttribute = base + AttrOffset and write mapping
+                 * pairs into a slot that no longer holds the migrated
+                 * attribute (because step 5 of MigrateAttributeToList moved
+                 * trailing attributes left into that position). */
                 if (NT_SUCCESS(Status))
+                {
+                    (*AttrCtx)->MigratedToMFTIndex = MftIndex;
                     (*AttrCtx)->FileMFTIndex = MftRecord->MFTRecordNumber;
+                }
 
                 ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, RemoteHdr);
                 FindCloseAttribute(&Context);

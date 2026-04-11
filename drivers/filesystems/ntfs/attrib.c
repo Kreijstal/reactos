@@ -788,6 +788,10 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
     }
     DPRINT("MigrateAttributeToList: type=0x%x migrated to child MFT %I64u\n", AttrInChild->Type, ChildMftIndex);
 
+    /* Record the migration so subsequent AddRun calls on this AttrContext
+     * re-target the child record instead of stomping on the base. */
+    AttrContext->MigratedToMFTIndex = ChildMftIndex;
+
     /* Step 5: in the base record, REMOVE the migrated attribute slot.
      * Compact: move any trailing attributes left to fill the hole. */
     {
@@ -1092,6 +1096,40 @@ AddRun(PNTFS_VCB Vcb,
 
     if (!AttrContext->pRecord->IsNonResident)
         return STATUS_INVALID_PARAMETER;
+
+    /* Phase 4A.5: if a previous AddRun call already migrated this attribute
+     * to a child record, the caller's FileRecord/AttrOffset point at the
+     * BASE record where the slot is gone (or replaced by a moved trailing
+     * attribute).  Re-read the child from disk and re-target our local
+     * FileRecord/AttrOffset there.  We write the child back via
+     * UpdateFileRecord at the bottom of the function and free the local
+     * buffer before returning. */
+    if (AttrContext->MigratedToMFTIndex != 0)
+    {
+        PFILE_RECORD_HEADER ChildBuf;
+        NTSTATUS ChildStatus;
+
+        ChildBuf = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+        if (!ChildBuf)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        ChildStatus = ReadFileRecord(Vcb, AttrContext->MigratedToMFTIndex, ChildBuf);
+        if (!NT_SUCCESS(ChildStatus))
+        {
+            DPRINT1("AddRun: ReadFileRecord(child MFT %I64u) failed 0x%x\n",
+                    AttrContext->MigratedToMFTIndex, (unsigned)ChildStatus);
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildBuf);
+            return ChildStatus;
+        }
+
+        /* Phase A: the migrated attribute is the first (and only) attribute
+         * in the child record, sitting at AttributeOffset. */
+        MigratedChildRecord = ChildBuf;
+        FileRecord = ChildBuf;
+        AttrOffset = ChildBuf->AttributeOffset;
+        DestinationAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+        NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
+    }
 
     if (AttrContext->pRecord->NonResident.AllocatedSize != 0)
         NextVBN = AttrContext->pRecord->NonResident.HighestVCN + 1;
