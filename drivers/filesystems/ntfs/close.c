@@ -63,7 +63,6 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
      * Segment->FileObject->SectionObjectPointer->DataSectionObject invariant.
      * FsContext2 (CCB) is safe to clear since paging I/O doesn't use it. */
     FileObject->FsContext2 = NULL;
-    DeviceExt->OpenHandleCount--;
 
     if (FileObject->FileName.Buffer)
     {

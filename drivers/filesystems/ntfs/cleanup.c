@@ -42,6 +42,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                 BOOLEAN CanWait)
 {
     PNTFS_FCB Fcb;
+    PNTFS_CCB Ccb;
     NTSTATUS Status = STATUS_SUCCESS;
 
     DPRINT("NtfsCleanupFile(DeviceExt %p, FileObject %p, CanWait %u)\n",
@@ -50,8 +51,12 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
            CanWait);
 
     Fcb = (PNTFS_FCB)(FileObject->FsContext);
-    if (!Fcb)
+    Ccb = (PNTFS_CCB)(FileObject->FsContext2);
+    if (!Fcb || Ccb == NULL || !BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_COUNTED))
         return STATUS_SUCCESS;
+
+    ASSERT(DeviceExt->OpenHandleCount > 0);
+    DeviceExt->OpenHandleCount--;
 
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
