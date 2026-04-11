@@ -1557,12 +1557,141 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
             }
             else
             {
-                // Sparse data run. We can't support writing to sparse files yet
-                // (it may require increasing the allocation size).
-                DataRunStartLCN = -1;
-                DPRINT1("FIXME: Writing to sparse files is not supported yet!\n");
-                Status = STATUS_NOT_IMPLEMENTED;
-                goto Cleanup;
+                /* Sparse data run — hole-fill: allocate real clusters and
+                 * splice them into the MCB, then restart the walk so the
+                 * write proceeds against the now-backed run.
+                 *
+                 * Note: ConvertLargeMCBToDataRuns() now emits sparse runs
+                 * for VBN gaps in the MCB, and ConvertDataRunsToLargeMCB()
+                 * drops them on read (gap = sparse). After we splice the
+                 * filled clusters into the MCB the gap closes, the next
+                 * encode produces a regular run, and the walk finds it.
+                 *
+                 * We deliberately do NOT call AddRun here: AddRun is the
+                 * "extend at the end" path and would append a duplicate run
+                 * past HighestVCN. Hole-fill keeps AllocatedSize/HighestVCN
+                 * the same — only the mapping-pair encoding changes.
+                 */
+                ULONG HoleVCN = (ULONG)(CurrentOffset / Vcb->NtfsInfo.BytesPerCluster);
+                ULONG HoleLen = (ULONG)DataRunLength;
+                ULONG FirstAssigned = 0;
+                ULONG AssignedCount = 0;
+                PNTFS_ATTR_RECORD DestAttr;
+                PNTFS_ATTR_CONTEXT FoundCtx = NULL;
+                ULONG FoundAttrOffset = 0;
+                ULONG NewRunBufSize = 0;
+                ULONG SlotMaxRuns;
+
+                DPRINT1("WriteAttribute: hole-fill at VCN %lu len %lu\n", HoleVCN, HoleLen);
+
+                Status = NtfsAllocateClusters(Vcb,
+                                              0,            /* no LCN hint */
+                                              HoleLen,
+                                              &FirstAssigned,
+                                              &AssignedCount);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: NtfsAllocateClusters failed 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+                if (AssignedCount != HoleLen)
+                {
+                    /* Phase 3.1 only handles full-hole fills. Partial allocs
+                     * (disk near full) would need a more elaborate splice that
+                     * leaves part of the hole sparse — defer. */
+                    DPRINT1("WriteAttribute: partial hole alloc (%lu of %lu) — not handled\n",
+                            AssignedCount, HoleLen);
+                    Status = STATUS_DISK_FULL;
+                    goto Cleanup;
+                }
+
+                /* Splice the new run into the MCB at HoleVCN. */
+                _SEH2_TRY {
+                    if (!FsRtlAddLargeMcbEntry(&Context->DataRunsMCB,
+                                               (LONGLONG)HoleVCN,
+                                               (LONGLONG)FirstAssigned,
+                                               (LONGLONG)HoleLen))
+                    {
+                        ExRaiseStatus(STATUS_UNSUCCESSFUL);
+                    }
+                } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+                    Status = _SEH2_GetExceptionCode();
+                    DPRINT1("WriteAttribute: FsRtlAddLargeMcbEntry raised 0x%lx\n", Status);
+                    goto Cleanup;
+                } _SEH2_END;
+
+                /* Re-encode the (now-spliced) MCB. The result goes into the
+                 * same TempBuffer we'll continue walking. */
+                Status = ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
+                                                   TempBuffer,
+                                                   Vcb->NtfsInfo.BytesPerFileRecord,
+                                                   &NewRunBufSize);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: re-encode failed 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+
+                /* Locate the on-disk slot we need to update. The caller passed
+                 * us a FileRecord which already contains the attribute (we just
+                 * walked its mapping pairs above). Find it again to get a
+                 * FoundCtx with a stable AttrOffset. */
+                Status = FindAttribute(Vcb, FileRecord,
+                                       Context->pRecord->Type,
+                                       (PCWSTR)((ULONG_PTR)Context->pRecord + Context->pRecord->NameOffset),
+                                       Context->pRecord->NameLength,
+                                       &FoundCtx,
+                                       &FoundAttrOffset);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: FindAttribute after splice failed 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+
+                DestAttr = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FoundAttrOffset);
+                SlotMaxRuns = DestAttr->Length - DestAttr->NonResident.MappingPairsOffset;
+
+                if (NewRunBufSize > SlotMaxRuns)
+                {
+                    /* Phase 3.1 punt: if the new mapping pairs no longer fit
+                     * in the existing slot, we'd need to grow the slot (and
+                     * possibly migrate to $ATTRIBUTE_LIST). Defer for now —
+                     * fill-and-fit covers the common case. */
+                    DPRINT1("WriteAttribute: hole-fill mapping pairs grew (%lu > %lu); slot grow not yet supported\n",
+                            NewRunBufSize, SlotMaxRuns);
+                    ReleaseAttributeContext(FoundCtx);
+                    Status = STATUS_NOT_SUPPORTED;
+                    goto Cleanup;
+                }
+
+                /* Splat the new mapping pairs into both the on-disk-bound
+                 * slot in FileRecord and the in-memory pRecord copy that
+                 * Context holds.  Pad with zeros to the existing slot end so
+                 * stale bytes from the prior encoding don't trip the decoder. */
+                RtlZeroMemory((PVOID)((ULONG_PTR)DestAttr + DestAttr->NonResident.MappingPairsOffset),
+                              SlotMaxRuns);
+                RtlCopyMemory((PVOID)((ULONG_PTR)DestAttr + DestAttr->NonResident.MappingPairsOffset),
+                              TempBuffer, NewRunBufSize);
+                RtlZeroMemory((PVOID)((ULONG_PTR)Context->pRecord + Context->pRecord->NonResident.MappingPairsOffset),
+                              Context->pRecord->Length - Context->pRecord->NonResident.MappingPairsOffset);
+                RtlCopyMemory((PVOID)((ULONG_PTR)Context->pRecord + Context->pRecord->NonResident.MappingPairsOffset),
+                              TempBuffer, NewRunBufSize);
+
+                ReleaseAttributeContext(FoundCtx);
+
+                Status = UpdateFileRecord(Vcb, Context->FileMFTIndex, FileRecord);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("WriteAttribute: UpdateFileRecord after hole-fill failed 0x%lx\n", Status);
+                    goto Cleanup;
+                }
+
+                /* The hole is now backed. Restart the walk over the freshly
+                 * re-encoded TempBuffer. */
+                DataRun = TempBuffer;
+                LastLCN = 0;
+                CurrentOffset = 0;
+                continue;
             }
 
             // Have we reached the data run we're trying to write to?
@@ -1645,8 +1774,10 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
         // Are we dealing with a sparse data run?
         if (DataRunStartLCN == -1)
         {
-            DPRINT1("FIXME: Don't know how to write to sparse files yet! (DataRunStartLCN == -1)\n");
-            Status = STATUS_NOT_IMPLEMENTED;
+            /* See the matching comment above — same MCB-roundtrip blocker.
+             * Crossing into a sparse hole mid-write needs hole-fill support. */
+            DPRINT1("WriteAttribute: write spans sparse hole, hole-fill not supported yet\n");
+            Status = STATUS_NOT_SUPPORTED;
             goto Cleanup;
         }
         else
