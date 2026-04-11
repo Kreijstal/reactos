@@ -171,6 +171,30 @@ typedef struct
      *     pair shares another lock with this one, so no AB-BA is added. */
     ERESOURCE IndexResource;
 
+    /* Serializes the read-modify-write of the volume $Bitmap across
+     * NtfsAllocateClusters / FreeClusters. The bitmap is read into a local
+     * buffer, modified with RtlFindClearBitsAndSet / RtlClearBits, then
+     * written back with WriteAttribute. Without serialization, two
+     * concurrent allocators each load a private copy of the bitmap, both
+     * see the same LCN as free, both mark it set, and both write the
+     * bitmap back — and now two attributes own the same cluster. The
+     * symptom is BrowseSubNodeIndexEntries reading a directory's
+     * $INDEX_ALLOCATION cluster and finding file data (e.g., a .lnk
+     * shortcut) instead of an INDX block, tripping the
+     * IndexRecord->Ntfs.Type == NRH_INDX_TYPE assertion in mft.c. See
+     * Kreijstal/reactos#14.
+     *
+     * Locking discipline:
+     *   - Always held EXCLUSIVE; the bitmap is short and contended only
+     *     during allocation/free, so a shared mode would buy nothing.
+     *   - Sits BELOW IndexResource (and therefore below DirResource and
+     *     Fcb->MainResource) in the hierarchy: WriteAttribute is the
+     *     primary path that triggers cluster allocation, and writers in
+     *     mft.c already hold IndexResource exclusive when they call into
+     *     it. Acquired recursively from WriteAttribute(bitmap) inside
+     *     NtfsAllocateClusters — ERESOURCE supports recursive exclusive. */
+    ERESOURCE BitmapResource;
+
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
 
