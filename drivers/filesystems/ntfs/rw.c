@@ -274,6 +274,20 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_SUCCESS;
     }
 
+    /* Honor byte-range locks taken by other file objects on this file.
+     * Paging I/O and volume reads aren't subject to lock checks (the
+     * kernel initiates paging itself, and the volume stream isn't a
+     * lockable file). */
+    if (!PagingIo &&
+        !(Fcb->Flags & FCB_IS_VOLUME) &&
+        Fcb->Identifier.Type == NTFS_TYPE_FCB &&
+        !NtfsFCBIsDirectory(Fcb) &&
+        !FsRtlCheckLockForReadAccess(&Fcb->FileLock, Irp))
+    {
+        Irp->IoStatus.Information = 0;
+        return STATUS_FILE_LOCK_CONFLICT;
+    }
+
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Resource = &DeviceExt->DirResource;
@@ -797,6 +811,19 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         }
 
         return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Honor byte-range locks taken by other file objects on this file.
+     * Skip the check for paging I/O, volume writes, and the volume
+     * stream itself for the same reasons as in NtfsRead. */
+    if (!PagingIo &&
+        !(Fcb->Flags & FCB_IS_VOLUME) &&
+        Fcb->Identifier.Type == NTFS_TYPE_FCB &&
+        !NtfsFCBIsDirectory(Fcb) &&
+        !FsRtlCheckLockForWriteAccess(&Fcb->FileLock, Irp))
+    {
+        Irp->IoStatus.Information = 0;
+        return STATUS_FILE_LOCK_CONFLICT;
     }
 
     if (Fcb->Flags & FCB_IS_VOLUME)

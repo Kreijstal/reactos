@@ -594,6 +594,14 @@ typedef struct _FCB
     FSRTL_COMMON_FCB_HEADER RFCB;
     SECTION_OBJECT_POINTERS SectionObjectPointers;
 
+    /* FsRtl-managed byte-range lock state for IRP_MJ_LOCK_CONTROL.
+     * Initialized in NtfsCreateFCB via FsRtlInitializeFileLock and torn
+     * down in NtfsDestroyFCB via FsRtlUninitializeFileLock. Used by
+     * lock.c!NtfsLockControl through FsRtlProcessFileLock and consulted
+     * by NtfsRead / NtfsWrite via FsRtlCheckLockForReadAccess /
+     * FsRtlCheckLockForWriteAccess so locks are actually enforced. */
+    FILE_LOCK FileLock;
+
     PFILE_OBJECT FileObject;
     PNTFS_VCB Vcb;
 
@@ -1397,6 +1405,33 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext);
 
 NTSTATUS
 NtfsWrite(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* ea.c */
+
+NTSTATUS
+NtfsQueryEa(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsSetEa(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* lock.c */
+
+NTSTATUS
+NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* pnp.c */
+
+NTSTATUS
+NtfsPnp(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* shutdown.c */
+
+NTSTATUS
+NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext);
 
 
 /* volinfo.c */
