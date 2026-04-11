@@ -1531,11 +1531,23 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
             }
             else
             {
-                // Sparse data run. We can't support writing to sparse files yet
-                // (it may require increasing the allocation size).
+                /* Sparse data run.  Real hole-fill would:
+                 *   1. NtfsAllocateClusters(DataRunLength) to back the hole
+                 *   2. Splice the new run into Context->DataRunsMCB (which
+                 *      currently drops sparse runs in ConvertDataRunsToLargeMCB)
+                 *   3. Re-encode mapping pairs and AddRun the result, falling
+                 *      back to MigrateAttributeToList if the new pairs no
+                 *      longer fit in the base record's slot.
+                 *
+                 * Step 2 is the blocker — Context->DataRunsMCB does not
+                 * faithfully represent sparse holes today, so we cannot just
+                 * call FsRtlAddLargeMcbEntry into the gap.  Until the MCB
+                 * roundtrip is fixed, return STATUS_NOT_SUPPORTED so callers
+                 * (and Win32 apps) interpret this as "this attribute layout
+                 * isn't writable" instead of "the driver is broken". */
                 DataRunStartLCN = -1;
-                DPRINT1("FIXME: Writing to sparse files is not supported yet!\n");
-                Status = STATUS_NOT_IMPLEMENTED;
+                DPRINT1("WriteAttribute: sparse hole at offset %I64u, hole-fill not supported yet\n", Offset);
+                Status = STATUS_NOT_SUPPORTED;
                 goto Cleanup;
             }
 
@@ -1619,8 +1631,10 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
         // Are we dealing with a sparse data run?
         if (DataRunStartLCN == -1)
         {
-            DPRINT1("FIXME: Don't know how to write to sparse files yet! (DataRunStartLCN == -1)\n");
-            Status = STATUS_NOT_IMPLEMENTED;
+            /* See the matching comment above — same MCB-roundtrip blocker.
+             * Crossing into a sparse hole mid-write needs hole-fill support. */
+            DPRINT1("WriteAttribute: write spans sparse hole, hole-fill not supported yet\n");
+            Status = STATUS_NOT_SUPPORTED;
             goto Cleanup;
         }
         else
