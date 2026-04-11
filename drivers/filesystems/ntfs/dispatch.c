@@ -155,30 +155,34 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case IRP_MJ_LOCK_CONTROL:
-            /* Byte-range file locks. We don't implement them yet, but
-             * returning STATUS_INVALID_DEVICE_REQUEST through the
-             * dispatch (instead of via IopInvalidDeviceRequest) keeps
-             * the code reachable for a future FsRtlProcessFileLock
-             * implementation. */
-            Status = STATUS_INVALID_DEVICE_REQUEST;
-            IrpContext->Irp->IoStatus.Information = 0;
+            /* Byte-range file locks via FsRtlProcessFileLock against
+             * the per-FCB FILE_LOCK initialized in NtfsCreateFCB. The
+             * helper takes ownership of the IRP, so NtfsLockControl
+             * clears IRPCONTEXT_COMPLETE before returning. */
+            Status = NtfsLockControl(IrpContext);
             break;
 
         case IRP_MJ_QUERY_EA:
+            /* Read the on-disk $EA attribute and copy matching
+             * FILE_FULL_EA_INFORMATION entries into the user buffer.
+             * See ea.c. */
+            Status = NtfsQueryEa(IrpContext);
+            break;
+
         case IRP_MJ_SET_EA:
-            /* NTFS supports extended attributes on disk, but the
-             * ReactOS driver does not yet expose them. Report this
-             * cleanly so applications fall back gracefully. */
-            Status = STATUS_EAS_NOT_SUPPORTED;
-            IrpContext->Irp->IoStatus.Information = 0;
+            /* Validate the input list with IoCheckEaBufferValidity and
+             * write it back into the file's $EA attribute. Creating a
+             * brand-new $EA on a file that has none yet is not yet
+             * implemented (see ea.c TODO). */
+            Status = NtfsSetEa(IrpContext);
             break;
 
         case IRP_MJ_PNP:
-            /* Plug and play notifications. We have no real handling
-             * yet, but acknowledge the IRP so the I/O Manager doesn't
-             * see STATUS_INVALID_DEVICE_REQUEST. */
-            Status = STATUS_SUCCESS;
-            IrpContext->Irp->IoStatus.Information = 0;
+            /* Forward most PNP minor codes to the underlying storage
+             * device. NtfsPnp clears IRPCONTEXT_COMPLETE on the
+             * forwarded path so the dispatch loop below doesn't try
+             * to complete an IRP that the lower driver now owns. */
+            Status = NtfsPnp(IrpContext);
             break;
     }
 

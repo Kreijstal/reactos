@@ -9,13 +9,16 @@ list(APPEND SOURCE
     devctl.c
     dirctl.c
     dispatch.c
+    ea.c
     fastio.c
     fcb.c
     finfo.c
     fsctl.c
+    lock.c
     mft.c
     misc.c
     ntfs.c
+    pnp.c
     rw.c
     shutdown.c
     volinfo.c
