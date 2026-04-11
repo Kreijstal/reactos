@@ -426,7 +426,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     BOOLEAN Lookaside = FALSE;
 
-    DPRINT("NtfsMountVolume() called\n");
+    DPRINT1("NtfsMountVolume() called\n");
 
     if (DeviceObject != NtfsGlobalData->DeviceObject)
     {
@@ -536,6 +536,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     _SEH2_END;
 
     ExInitializeResourceLite(&Vcb->DirResource);
+    ExInitializeResourceLite(&Vcb->IndexResource);
 
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
@@ -863,9 +864,14 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
     FileObject = Stack->FileObject;
     Fcb = FileObject->FsContext;
 
+    DPRINT1("LockOrUnlockVolume: Lock=%d FcbFlags=0x%x DevFlags=0x%x DevOHC=%u FcbOHC=%u FcbRefCount=%u\n",
+            Lock, Fcb->Flags, DeviceExt->Flags, DeviceExt->OpenHandleCount,
+            Fcb->OpenHandleCount, Fcb->RefCount);
+
     /* Only allow locking with the volume open */
     if (!(Fcb->Flags & FCB_IS_VOLUME))
     {
+        DPRINT1("LockOrUnlockVolume: REJECT not FCB_IS_VOLUME\n");
         return STATUS_ACCESS_DENIED;
     }
 
@@ -873,12 +879,14 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
     if (((DeviceExt->Flags & VCB_VOLUME_LOCKED) && Lock) ||
         (!(DeviceExt->Flags & VCB_VOLUME_LOCKED) && !Lock))
     {
+        DPRINT1("LockOrUnlockVolume: REJECT already in demanded state\n");
         return STATUS_ACCESS_DENIED;
     }
 
     /* Deny locking if we're not alone */
     if (Lock && DeviceExt->OpenHandleCount != 1)
     {
+        DPRINT1("LockOrUnlockVolume: REJECT OpenHandleCount=%u (need 1)\n", DeviceExt->OpenHandleCount);
         return STATUS_ACCESS_DENIED;
     }
 
@@ -891,6 +899,108 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
     {
         DeviceExt->Flags &= ~VCB_VOLUME_LOCKED;
     }
+
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
+NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
+                   PIRP Irp)
+{
+    PDEVICE_EXTENSION DeviceExt;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PIO_STACK_LOCATION Stack;
+
+    DeviceExt = DeviceObject->DeviceExtension;
+    DPRINT1("NtfsDismountVolume(%p)\n", DeviceExt);
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    Fcb = FileObject->FsContext;
+
+    /* Dismount may only be issued through a handle that holds the exclusive
+     * volume lock.  FSCTL_LOCK_VOLUME requires OpenHandleCount == 1, which
+     * guarantees no other code is currently touching the FCB list, the MFT
+     * context, or the cached MFT bitmap when we tear them down. */
+    if (!(DeviceExt->Flags & VCB_VOLUME_LOCKED))
+    {
+        DPRINT1("NtfsDismountVolume: REJECT volume not locked\n");
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+    {
+        DPRINT1("NtfsDismountVolume: REJECT FileObject is not the volume\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (DeviceExt->Flags & VCB_DISMOUNT_PENDING)
+    {
+        DPRINT1("NtfsDismountVolume: REJECT already dismounted\n");
+        return STATUS_VOLUME_DISMOUNTED;
+    }
+
+    FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
+
+    ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
+
+    /* Drop the cached $MFT $Bitmap.  After dismount the on-disk bitmap may
+     * have been rewritten under us (this is exactly what mkntfs does during
+     * a quick format), so the next AllocateMftRecord must rebuild it from
+     * the freshly read attribute. */
+    if (DeviceExt->MftBitmapBuffer)
+    {
+        ExFreePoolWithTag(DeviceExt->MftBitmapBuffer, TAG_NTFS);
+        DeviceExt->MftBitmapBuffer = NULL;
+        DeviceExt->MftBitmapData = NULL;
+        DeviceExt->MftBitmapSize = 0;
+        DeviceExt->MftNextFreeHint = 0;
+    }
+
+    /* Release the in-memory MFT attribute context and the cached
+     * $MFT file record header.  These describe the OLD layout of $MFT
+     * (location, runlist, allocated size).  Anything that asks "where on
+     * disk does MFT record N live?" reads the runlist out of MFTContext, so
+     * leaving them in place after a quick format means every subsequent
+     * ReadFileRecord/UpdateFileRecord goes to stale clusters and corrupts
+     * the freshly written volume.  The next mount rebuilds them via
+     * NtfsGetVolumeData.
+     *
+     * Note: we deliberately keep DeviceExt->FileRecLookasideList alive
+     * because the volume FCB / volume stream FCB may still be referenced by
+     * the locking handle until close, and freeing the lookaside list while
+     * pool blocks allocated from it are still in use would tear down the
+     * list while a back-pointer to it remains live. */
+    if (DeviceExt->MFTContext)
+    {
+        ReleaseAttributeContext(DeviceExt->MFTContext);
+        DeviceExt->MFTContext = NULL;
+    }
+
+    if (DeviceExt->MasterFileTable)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList,
+                                    DeviceExt->MasterFileTable);
+        DeviceExt->MasterFileTable = NULL;
+    }
+
+    /* Mark the VCB dismounted and clear VPB_MOUNTED so the I/O Manager
+     * sends IRP_MN_MOUNT_VOLUME on the next access, which routes to
+     * NtfsMountVolume → NtfsGetVolumeData and rebuilds the in-memory
+     * state from the (now freshly written) on-disk metadata.  The VPB
+     * we want to clear is the one shared with the storage device, which
+     * NtfsMountVolume hooked into the file system DeviceObject as
+     * `NewDeviceObject->Vpb = DeviceToMount->Vpb;` — read it directly
+     * from DeviceObject rather than from DeviceExt->Vpb (which the mount
+     * path never assigns and is therefore NULL). */
+    DeviceExt->Flags |= VCB_DISMOUNT_PENDING;
+    if (DeviceObject->Vpb != NULL)
+        DeviceObject->Vpb->Flags &= ~VPB_MOUNTED;
+
+    ExReleaseResourceLite(&DeviceExt->DirResource);
 
     return STATUS_SUCCESS;
 }
@@ -946,6 +1056,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_UNLOCK_VOLUME:
             Status = LockOrUnlockVolume(DeviceExt, Irp, FALSE);
+            break;
+
+        case FSCTL_DISMOUNT_VOLUME:
+            Status = NtfsDismountVolume(DeviceObject, Irp);
             break;
 
         case FSCTL_GET_NTFS_VOLUME_DATA:
