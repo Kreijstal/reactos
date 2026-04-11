@@ -2130,16 +2130,19 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     SystemReservedBits = BitmapData[2];
     BitmapData[2] = 0xff;
 
-    // Calculate bit count
+    // Calculate bit count.  The RTL bitmap API is 32-bit (ULONG bit
+    // count, ULONG search result), so cap at MAXULONG - 1 when the MFT
+    // on-disk bitmap exceeds 4 billion entries.  This only limits NEW
+    // MFT allocation to the first ~4 billion records — a filesystem
+    // with that many files is not a realistic scenario, and even if
+    // one exists we degrade gracefully to read-only semantics for the
+    // out-of-range portion instead of disabling write support entirely.
     BitmapBits.QuadPart = AttributeDataLength(DeviceExt->MFTContext->pRecord) /
                           DeviceExt->NtfsInfo.BytesPerFileRecord;
-    if (BitmapBits.HighPart != 0)
+    if (BitmapBits.HighPart != 0 || BitmapBits.LowPart == MAXULONG)
     {
-        DPRINT1("\tFIXME: bitmap sizes beyond 32bits are not yet supported!\n");
-        NtfsGlobalData->EnableWriteSupport = FALSE;
-        BitmapData[2] = SystemReservedBits;
-        ReleaseAttributeContext(BitmapContext);
-        return STATUS_NOT_IMPLEMENTED;
+        DPRINT1("NTFS: MFT bitmap > 2^32 entries; clamping search range.\n");
+        BitmapBits.QuadPart = MAXULONG - 1;
     }
 
     RtlInitializeBitMap(&Bitmap, (PULONG)BitmapData, BitmapBits.LowPart);

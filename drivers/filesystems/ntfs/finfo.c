@@ -291,6 +291,144 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
     return Status;
 }
 
+/*
+ * Retrieve the 8.3 DOS short name for the file, if any.  Returns
+ * STATUS_OBJECT_NAME_NOT_FOUND when the file has no DOS-namespace
+ * $FILE_NAME attribute (true for most files created by ReactOS since we
+ * don't auto-generate short names yet).  Returns STATUS_BUFFER_OVERFLOW
+ * if the caller's buffer is large enough for the header but not the
+ * full name.
+ */
+static
+NTSTATUS
+NtfsGetAlternateNameInformation(PNTFS_FCB Fcb,
+                                PDEVICE_EXTENSION DeviceExt,
+                                PFILE_NAME_INFORMATION NameInfo,
+                                PULONG BufferLength)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PFILENAME_ATTRIBUTE ShortName;
+    NTSTATUS Status;
+    ULONG NameBytes;
+    ULONG BytesToCopy;
+
+    ASSERT(Fcb != NULL);
+    ASSERT(NameInfo != NULL);
+
+    if (*BufferLength < (ULONG)FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    ShortName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
+    if (ShortName == NULL)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    NameBytes = (ULONG)ShortName->NameLength * sizeof(WCHAR);
+    NameInfo->FileNameLength = NameBytes;
+
+    BytesToCopy = min(NameBytes,
+                      *BufferLength - FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]));
+    RtlCopyMemory(NameInfo->FileName, ShortName->Name, BytesToCopy);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (BytesToCopy < NameBytes)
+    {
+        *BufferLength -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]) + BytesToCopy;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    *BufferLength -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]) + NameBytes;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Retrieve FILE_ALL_INFORMATION by calling the per-class handlers in
+ * order and stitching the output into the caller's buffer.  The layout
+ * of FILE_ALL_INFORMATION is a fixed prefix (Basic..Alignment) followed
+ * by a variable-length FILE_NAME_INFORMATION.  We return
+ * STATUS_BUFFER_OVERFLOW (with a truncated name) if the buffer is too
+ * small for the full name, matching Win32 behavior.
+ */
+static
+NTSTATUS
+NtfsGetAllInformation(PFILE_OBJECT FileObject,
+                      PNTFS_FCB Fcb,
+                      PDEVICE_OBJECT DeviceObject,
+                      PFILE_ALL_INFORMATION AllInfo,
+                      PULONG BufferLength)
+{
+    NTSTATUS Status;
+    ULONG NameOffset;
+    ULONG NameBufferLength;
+
+    /* The fixed prefix runs from BasicInformation through
+     * AlignmentInformation; the NameInformation is the last field. */
+    NameOffset = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation);
+
+    if (*BufferLength < NameOffset)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    /* Fill the fixed prefix.  Each helper subtracts its own struct size
+     * from *BufferLength on success, so track that via local copies. */
+    {
+        ULONG Tmp = sizeof(FILE_BASIC_INFORMATION);
+        Status = NtfsGetBasicInformation(FileObject, Fcb, DeviceObject,
+                                         &AllInfo->BasicInformation, &Tmp);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    {
+        ULONG Tmp = sizeof(FILE_STANDARD_INFORMATION);
+        Status = NtfsGetStandardInformation(Fcb, DeviceObject,
+                                            &AllInfo->StandardInformation, &Tmp);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    {
+        ULONG Tmp = sizeof(FILE_INTERNAL_INFORMATION);
+        Status = NtfsGetInternalInformation(Fcb,
+                                            &AllInfo->InternalInformation, &Tmp);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* EA, Access, Mode, Alignment — NTFS doesn't track these per-file
+     * so report the safe defaults the other ReactOS file systems use. */
+    AllInfo->EaInformation.EaSize = 0;
+    AllInfo->AccessInformation.AccessFlags = 0;
+    AllInfo->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
+    AllInfo->ModeInformation.Mode = 0;
+    AllInfo->AlignmentInformation.AlignmentRequirement = 0;
+
+    /* Fill NameInformation from the remaining buffer space. */
+    NameBufferLength = *BufferLength - NameOffset;
+    Status = NtfsGetNameInformation(FileObject, Fcb, DeviceObject,
+                                    &AllInfo->NameInformation, &NameBufferLength);
+
+    /* Update the caller's buffer length to reflect what we consumed.
+     * NtfsGetNameInformation already decremented NameBufferLength; we
+     * return the total consumed = fixed prefix + whatever it wrote. */
+    *BufferLength = (*BufferLength - NameOffset) - NameBufferLength + NameOffset;
+
+    /* NtfsGetNameInformation returns STATUS_BUFFER_OVERFLOW if the name
+     * didn't fully fit — propagate that up. */
+    return Status;
+}
+
 // Convert enum value to friendly name
 const PCSTR
 GetInfoClassName(FILE_INFORMATION_CLASS infoClass)
@@ -499,9 +637,18 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case FileAlternateNameInformation:
+            Status = NtfsGetAlternateNameInformation(Fcb,
+                                                     DeviceObject->DeviceExtension,
+                                                     SystemBuffer,
+                                                     &BufferLength);
+            break;
+
         case FileAllInformation:
-            DPRINT1("Unimplemented information class: %s\n", GetInfoClassName(FileInformationClass));
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = NtfsGetAllInformation(FileObject,
+                                           Fcb,
+                                           DeviceObject,
+                                           SystemBuffer,
+                                           &BufferLength);
             break;
 
         default:
@@ -1019,11 +1166,23 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
         PFILE_DISPOSITION_INFORMATION DispositionInfo;
         PFILE_RENAME_INFORMATION RenameInfo;
+        PFILE_POSITION_INFORMATION PositionInfo;
 
         case FileBasicInformation:
             Status = NtfsSetBasicInformation(Fcb,
                                              DeviceExt,
                                              (PFILE_BASIC_INFORMATION)SystemBuffer);
+            break;
+
+        case FilePositionInformation:
+            if (BufferLength < sizeof(FILE_POSITION_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+            PositionInfo = (PFILE_POSITION_INFORMATION)SystemBuffer;
+            FileObject->CurrentByteOffset = PositionInfo->CurrentByteOffset;
+            Status = STATUS_SUCCESS;
             break;
 
         /* TODO: Allocation size is not actually the same as file end for NTFS,

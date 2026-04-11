@@ -564,10 +564,17 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         }
 
         /*
-         * If it is a reparse point & FILE_OPEN_REPARSE_POINT, then allow opening it
-         * as a normal file.
-         * Otherwise, attempt to read reparse data and hand them to the Io manager
-         * with status reparse to force a reparse.
+         * If it is a reparse point & FILE_OPEN_REPARSE_POINT, then allow
+         * opening it as a normal file.  Otherwise, read the reparse data
+         * and hand it to the I/O manager with STATUS_REPARSE so the
+         * upper layer can resolve the reparse.
+         *
+         * Return STATUS_REPARSE for any reparse tag (mount point,
+         * symlink, third-party, etc.) — the tag goes into
+         * IoStatus.Information and the reparse data stays in
+         * Irp->Tail.Overlay.AuxiliaryBuffer for the I/O manager, which
+         * owns (and frees) that buffer once the reparse is handled.
+         * It is not our job to whitelist tags here.
          */
         if (NtfsFCBIsReparsePoint(Fcb) &&
             ((RequestedOptions & FILE_OPEN_REPARSE_POINT) != FILE_OPEN_REPARSE_POINT))
@@ -580,18 +587,13 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             if (NT_SUCCESS(Status))
             {
                 ReparseData = (PREPARSE_DATA_BUFFER)Irp->Tail.Overlay.AuxiliaryBuffer;
-                if (ReparseData->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
-                {
-                    Status = STATUS_REPARSE;
-                }
-                else
-                {
-                    Status = STATUS_NOT_IMPLEMENTED;
-                    ExFreePoolWithTag(ReparseData, TAG_NTFS);
-                }
+                Irp->IoStatus.Information = ReparseData->ReparseTag;
+                Status = STATUS_REPARSE;
             }
-
-            Irp->IoStatus.Information = ((Status == STATUS_REPARSE) ? ReparseData->ReparseTag : 0);
+            else
+            {
+                Irp->IoStatus.Information = 0;
+            }
 
             NtfsCloseFile(DeviceExt, FileObject);
             return Status;
