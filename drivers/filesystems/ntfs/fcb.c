@@ -114,6 +114,13 @@ NtfsCreateFCB(PCWSTR FileName,
     Fcb->RFCB.Resource = &(Fcb->MainResource);
     Fcb->RFCB.PagingIoResource = &(Fcb->PagingIoResource);
 
+    /* Byte-range file locks. The completion / unlock callbacks are
+     * optional and we don't need them — FsRtlProcessFileLock and the
+     * default unlock path do everything we want. Used by lock.c
+     * (NtfsLockControl) and consulted by NtfsRead / NtfsWrite via
+     * FsRtlCheckLockForReadAccess / FsRtlCheckLockForWriteAccess. */
+    FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
+
     return Fcb;
 }
 
@@ -178,6 +185,10 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
             return;
         }
     }
+
+    /* Tear down the FsRtl byte-range lock state. Must come before we
+     * free the FCB pool memory, since FILE_LOCK is embedded in it. */
+    FsRtlUninitializeFileLock(&Fcb->FileLock);
 
     ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
