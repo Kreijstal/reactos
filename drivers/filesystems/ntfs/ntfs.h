@@ -15,6 +15,13 @@
 #define TAG_IRP_CTXT 'iftN'
 #define TAG_ATT_CTXT 'aftN'
 #define TAG_FILE_REC 'rftN'
+/* Tag for the separately-allocated SECTION_OBJECT_POINTERS struct that may
+ * outlive the FCB itself when MM still references it.  See NtfsDestroyFCB
+ * in fcb.c for the rationale: previously the entire FCB (~5 KB including
+ * two ERESOURCEs and a FILE_LOCK) was leaked when MmForceSectionClosed
+ * could not drop the data section; now only the ~24-byte SOP struct is
+ * leaked, and the rest of the FCB is freed normally. */
+#define TAG_SOP 'SftN'
 
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 #define ROUND_DOWN(N, S) ((N) - ((N) % (S)))
@@ -269,6 +276,17 @@ typedef struct
     NPAGED_LOOKASIDE_LIST FcbLookasideList;
     NPAGED_LOOKASIDE_LIST AttrCtxtLookasideList;
     BOOLEAN EnableWriteSupport;
+
+    /* Zombie FCB list — FCBs we tried to destroy but whose
+     * SectionObjectPointers MM still references via a live data or image
+     * section.  We can't free the FCB while MM might still issue paging
+     * I/O against the section's stored FileObject (whose FsContext points
+     * here), so we put the FCB on this list and reap it later, when MM
+     * has finally cleared the SOP slots from MmDereferenceSegmentWithLock.
+     * Reaping is opportunistic: NtfsCreateFCB and NtfsDestroyFCB walk the
+     * list and free any whose SOP is now clean.  Protected by ZombieLock. */
+    LIST_ENTRY ZombieFcbList;
+    KSPIN_LOCK ZombieLock;
 } NTFS_GLOBAL_DATA, *PNTFS_GLOBAL_DATA;
 
 
@@ -642,7 +660,22 @@ typedef struct _FCB
     NTFSIDENTIFIER Identifier;
 
     FSRTL_COMMON_FCB_HEADER RFCB;
-    SECTION_OBJECT_POINTERS SectionObjectPointers;
+
+    /* Pointer to a separately-allocated SECTION_OBJECT_POINTERS struct
+     * (tag TAG_SOP).  This struct may outlive the FCB: when MM still
+     * holds a reference to the data/image section at FCB destruction
+     * time, NtfsDestroyFCB orphans this allocation (clearing the back-
+     * pointer here so it isn't double-freed) and frees the rest of the
+     * FCB normally.  MmDereferenceSegmentWithLock will eventually clear
+     * the leaked SOP's DataSectionObject slot when the segment refcount
+     * finally drops to zero — by which point nothing reads it.
+     *
+     * The previous design embedded the SOP struct directly inside the
+     * FCB, which forced the entire FCB (with its two ERESOURCEs, FILE_LOCK
+     * and 520-byte path strings, ~5 KB total) to be leaked instead of
+     * just the 24-byte pointer struct.  Under any sustained file open/
+     * close workload that exhausted paged pool and froze the system. */
+    PSECTION_OBJECT_POINTERS SectionObjectPointers;
 
     /* FsRtl-managed byte-range lock state for IRP_MJ_LOCK_CONTROL.
      * Initialized in NtfsCreateFCB via FsRtlInitializeFileLock and torn
@@ -663,6 +696,12 @@ typedef struct _FCB
     ERESOURCE MainResource;
 
     LIST_ENTRY FcbListEntry;
+    /* When this FCB has been "destroyed" but is still kept alive as a
+     * zombie because MM has live references via SectionObjectPointers,
+     * it lives on NtfsGlobalData->ZombieFcbList linked through this
+     * field instead of FcbListEntry.  See NtfsDestroyFCB for the
+     * orphan-vs-zombie decision and NtfsReapZombieFcbs for cleanup. */
+    LIST_ENTRY ZombieListEntry;
     struct _FCB* ParentFcb;
 
     ULONG DirIndex;
@@ -1100,6 +1139,9 @@ NtfsCreateFCB(PCWSTR FileName,
 
 VOID
 NtfsDestroyFCB(PNTFS_FCB Fcb);
+
+VOID
+NtfsReapZombieFcbs(VOID);
 
 BOOLEAN
 NtfsFCBIsDirectory(PNTFS_FCB Fcb);

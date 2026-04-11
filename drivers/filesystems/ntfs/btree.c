@@ -1548,26 +1548,6 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
                 return STATUS_END_OF_FILE;
         }
 
-        // Verify write by reading back
-        {
-            PUCHAR VerifyBuf = ExAllocatePoolWithTag(NonPagedPool, IndexBufferSize, TAG_NTFS);
-            if (VerifyBuf)
-            {
-                ULONG BytesRead = ReadAttribute(DeviceExt, IndexAllocationContext, NodeOffset, (PCHAR)VerifyBuf, IndexBufferSize);
-                if (BytesRead == IndexBufferSize)
-                {
-                    PUSHORT SectorEnd = (PUSHORT)(VerifyBuf + DeviceExt->NtfsInfo.BytesPerSector - 2);
-                    PFIXUP_ARRAY Fixup = (PFIXUP_ARRAY)(VerifyBuf + ((PNTFS_RECORD_HEADER)VerifyBuf)->UsaOffset);
-                    if (*SectorEnd != Fixup->USN)
-                    {
-                        DPRINT1("VERIFY FAIL: INDX write at VCN %I64u offset %I64u: sector-end=0x%x USN=0x%x\n",
-                                Node->VCN, NodeOffset, *SectorEnd, Fixup->USN);
-                    }
-                }
-                ExFreePoolWithTag(VerifyBuf, TAG_NTFS);
-            }
-        }
-
         Node->DiskNeedsUpdating = FALSE;
 
         // Free the index buffer

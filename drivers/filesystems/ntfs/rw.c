@@ -51,7 +51,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status = STATUS_SUCCESS;
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER FileRecord;
-    PNTFS_ATTR_CONTEXT DataContext;
+    PNTFS_ATTR_CONTEXT DataContext = NULL;
     ULONG RealLength;
     ULONG RealReadOffset;
     ULONG RealLengthRead;
@@ -453,7 +453,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER FileRecord;
-    PNTFS_ATTR_CONTEXT DataContext;
+    PNTFS_ATTR_CONTEXT DataContext = NULL;
     ULONG AttributeOffset;
     ULONGLONG StreamSize;
 
@@ -558,7 +558,10 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         }
         FindCloseAttribute(&Context);
 
-        ReleaseAttributeContext(DataContext);
+        /* Don't call ReleaseAttributeContext: FindAttribute only writes to
+         * its out-parameter on success, so DataContext is uninitialized
+         * (NULL) here.  See the matching read path above and the comment
+         * on ReleaseAttributeContext (mft.c). */
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
     }
