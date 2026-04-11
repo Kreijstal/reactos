@@ -678,6 +678,14 @@ AddRun(PNTFS_VCB Vcb,
        ULONG RunLength);
 
 NTSTATUS
+MigrateAttributeToList(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseFileRecord,
+                       PNTFS_ATTR_CONTEXT AttrContext,
+                       ULONG AttrOffset,
+                       PFILE_RECORD_HEADER *OutChildRecord,
+                       PULONG OutNewAttrOffset);
+
+NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
                    PFILE_RECORD_HEADER FileRecord,
                    PNTFS_ATTR_RECORD AttributeAddress,
