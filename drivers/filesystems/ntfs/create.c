@@ -493,6 +493,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
         Fcb->OpenHandleCount++;
         DeviceExt->OpenHandleCount++;
+        ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
         Irp->IoStatus.Information = IoInformation;
         return STATUS_SUCCESS;
     }
@@ -519,6 +520,14 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
         NtfsAttachFCBToFileObject(DeviceExt, DeviceExt->VolumeFcb, FileObject);
         DeviceExt->VolumeFcb->RefCount++;
+        /* Volume opens must be counted: NtfsCleanupFile (FCB_IS_VOLUME branch)
+         * and NtfsCloseFile both decrement these on the corresponding cleanup/
+         * close, so without matching increments here both counters underflow.
+         * That breaks FSCTL_LOCK_VOLUME, whose check requires
+         * DeviceExt->OpenHandleCount == 1 (just the locking handle). */
+        DeviceExt->VolumeFcb->OpenHandleCount++;
+        DeviceExt->OpenHandleCount++;
+        ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
 
         Irp->IoStatus.Information = FILE_OPENED;
         return STATUS_SUCCESS;
@@ -787,6 +796,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
         Fcb->OpenHandleCount++;
         DeviceExt->OpenHandleCount++;
+        ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
     }
 
     /*

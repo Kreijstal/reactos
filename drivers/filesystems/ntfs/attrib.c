@@ -1446,7 +1446,7 @@ AddRun(PNTFS_VCB Vcb,
         NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
     }
 
-    if (AttrContext->pRecord->NonResident.AllocatedSize != 0)
+    if (FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB) != 0)
         NextVBN = AttrContext->pRecord->NonResident.HighestVCN + 1;
 
     // Add newly-assigned clusters to mcb
