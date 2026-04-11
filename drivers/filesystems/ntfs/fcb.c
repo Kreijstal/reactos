@@ -81,6 +81,19 @@ NtfsCreateFCB(PCWSTR FileName,
 
     RtlZeroMemory(Fcb, sizeof(NTFS_FCB));
 
+    /* Allocate the SECTION_OBJECT_POINTERS struct out-of-band so it can
+     * outlive the FCB if MM still holds a reference at destruction time.
+     * See the comment on NTFS_FCB::SectionObjectPointers in ntfs.h. */
+    Fcb->SectionObjectPointers = ExAllocatePoolWithTag(NonPagedPool,
+                                                       sizeof(SECTION_OBJECT_POINTERS),
+                                                       TAG_SOP);
+    if (Fcb->SectionObjectPointers == NULL)
+    {
+        ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
+        return NULL;
+    }
+    RtlZeroMemory(Fcb->SectionObjectPointers, sizeof(SECTION_OBJECT_POINTERS));
+
     Fcb->Identifier.Type = NTFS_TYPE_FCB;
     Fcb->Identifier.Size = sizeof(NTFS_TYPE_FCB);
 
@@ -132,58 +145,77 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
     /* If the memory manager still has section objects referencing the FCB's
-     * embedded SectionObjectPointers, freeing the FCB would leave MM's
-     * Segment->FileObject->SectionObjectPointer dangling into freed pool —
-     * which causes the (DataSectionObject != Segment) assertion / BSOD on
-     * the next paging I/O, and is the proximate cause of the
-     * ExReleaseResourceForThreadLite "Owner != NULL" assert seen when
-     * fastfat.sys is paged in (issue #10).
+     * SectionObjectPointers, freeing that struct would leave MM's
+     * Segment->FileObject->SectionObjectPointer dangling — which corrupts
+     * pool on the next paging I/O.
      *
-     * The proper fix is to tear the lingering sections down ourselves
-     * before freeing the FCB.  MmFlushImageSection writes back any dirty
-     * image-section pages (otherwise MmForceSectionClosed would refuse) and
-     * MmForceSectionClosed forces the data and image sections closed,
-     * clearing SectionObjectPointers->DataSectionObject /
-     * ->ImageSectionObject when it succeeds.  Both calls require IRQL <=
-     * APC_LEVEL and that we do NOT hold the FCB resource — both NtfsDestroyFCB
-     * call sites (NtfsReleaseFCB after dropping FcbListLock, and the
-     * NtfsMountVolume error path which uses a fresh FCB) satisfy this. */
-    if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
-        Fcb->SectionObjectPointers.ImageSectionObject != NULL ||
-        Fcb->SectionObjectPointers.SharedCacheMap != NULL)
+     * Strategy:
+     *   1. Try to tear the sections down ourselves (MmFlushImageSection +
+     *      MmForceSectionClosed with DelayClose=TRUE).
+     *   2. If that succeeds (slots all NULL), free both the FCB and its
+     *      SOP struct.
+     *   3. If MM still holds the data/image section, ORPHAN the SOP struct:
+     *      clear our back-pointer so we don't free it, then proceed to
+     *      free the rest of the FCB (resources, FILE_LOCK, paths).  The
+     *      orphaned ~24-byte SOP allocation stays alive until MM finally
+     *      drops its references — MmDereferenceSegmentWithLock writes
+     *      DataSectionObject = NULL there in section.c, then never
+     *      touches it again.  We deliberately do NOT track or reclaim
+     *      these orphans: at 24 bytes each they are negligible compared
+     *      to the previous behaviour (which leaked the entire FCB plus
+     *      two ERESOURCEs and a FILE_LOCK, ~5 KB per orphan, and froze
+     *      the system after a few thousand opens).
+     *
+     * Both NtfsDestroyFCB call sites (NtfsReleaseFCB after dropping
+     * FcbListLock, and the NtfsMountVolume error path which uses a fresh
+     * FCB) call this at IRQL <= APC_LEVEL without holding the FCB
+     * resource, which is what MmFlushImageSection / MmForceSectionClosed
+     * require. */
+    if (Fcb->SectionObjectPointers != NULL &&
+        (Fcb->SectionObjectPointers->DataSectionObject != NULL ||
+         Fcb->SectionObjectPointers->ImageSectionObject != NULL ||
+         Fcb->SectionObjectPointers->SharedCacheMap != NULL))
     {
-        DPRINT1("NtfsDestroyFCB(%p): tearing down lingering sections (Data=%p Image=%p Cache=%p)\n",
-                Fcb, Fcb->SectionObjectPointers.DataSectionObject,
-                Fcb->SectionObjectPointers.ImageSectionObject,
-                Fcb->SectionObjectPointers.SharedCacheMap);
+        DPRINT("NtfsDestroyFCB(%p): tearing down lingering sections (Data=%p Image=%p Cache=%p)\n",
+                Fcb, Fcb->SectionObjectPointers->DataSectionObject,
+                Fcb->SectionObjectPointers->ImageSectionObject,
+                Fcb->SectionObjectPointers->SharedCacheMap);
 
         /* Flush dirty image-section pages so MmForceSectionClosed doesn't
          * refuse on account of them.  Ignore the return value — it returns
          * FALSE only when there's no image section to flush, which is fine. */
-        if (Fcb->SectionObjectPointers.ImageSectionObject != NULL)
+        if (Fcb->SectionObjectPointers->ImageSectionObject != NULL)
         {
-            MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite);
+            MmFlushImageSection(Fcb->SectionObjectPointers, MmFlushForWrite);
         }
 
         /* Force the section(s) closed.  DelayClose=TRUE lets MM defer the
          * actual teardown if it can't drop the segment immediately, which
          * matches the contract Windows file systems rely on. */
-        MmForceSectionClosed(&Fcb->SectionObjectPointers, TRUE);
+        MmForceSectionClosed(Fcb->SectionObjectPointers, TRUE);
 
-        /* If MM was unable to release everything (e.g. there's still a
-         * mapped view from user mode), the only safe thing left is to leak
-         * the FCB rather than free pool memory MM is still using.  This is
-         * the previous behaviour, kept as a backstop. */
-        if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
-            Fcb->SectionObjectPointers.ImageSectionObject != NULL ||
-            Fcb->SectionObjectPointers.SharedCacheMap != NULL)
+        /* If MM still references the SOP, orphan it (leak only the
+         * 24-byte struct) and proceed to tear the rest of the FCB down. */
+        if (Fcb->SectionObjectPointers->DataSectionObject != NULL ||
+            Fcb->SectionObjectPointers->ImageSectionObject != NULL ||
+            Fcb->SectionObjectPointers->SharedCacheMap != NULL)
         {
-            DPRINT1("NtfsDestroyFCB(%p): MmForceSectionClosed could not drop all sections (Data=%p Image=%p Cache=%p), leaking FCB\n",
-                    Fcb, Fcb->SectionObjectPointers.DataSectionObject,
-                    Fcb->SectionObjectPointers.ImageSectionObject,
-                    Fcb->SectionObjectPointers.SharedCacheMap);
-            return;
+            DPRINT("NtfsDestroyFCB(%p): orphaning SOP %p (Data=%p Image=%p Cache=%p)\n",
+                    Fcb, Fcb->SectionObjectPointers,
+                    Fcb->SectionObjectPointers->DataSectionObject,
+                    Fcb->SectionObjectPointers->ImageSectionObject,
+                    Fcb->SectionObjectPointers->SharedCacheMap);
+            /* Drop our back-pointer; MM still owns the allocation. */
+            Fcb->SectionObjectPointers = NULL;
         }
+    }
+
+    /* If we still own the SOP struct (cleanly torn down or never used),
+     * free it now. */
+    if (Fcb->SectionObjectPointers != NULL)
+    {
+        ExFreePoolWithTag(Fcb->SectionObjectPointers, TAG_SOP);
+        Fcb->SectionObjectPointers = NULL;
     }
 
     /* Tear down the FsRtl byte-range lock state. Must come before we
@@ -417,7 +449,7 @@ NtfsFCBInitializeCache(PNTFS_VCB Vcb,
     newCCB->Identifier.Type = NTFS_TYPE_CCB;
     newCCB->Identifier.Size = sizeof(NTFS_TYPE_CCB);
 
-    FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->SectionObjectPointer = Fcb->SectionObjectPointers;
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
@@ -620,7 +652,7 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     newCCB->Identifier.Type = NTFS_TYPE_CCB;
     newCCB->Identifier.Size = sizeof(NTFS_TYPE_CCB);
 
-    FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->SectionObjectPointer = Fcb->SectionObjectPointers;
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
