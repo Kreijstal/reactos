@@ -59,13 +59,10 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     }
     else
     {
-        DPRINT("INSTRUMENT: NtfsCleanupFile acquiring MainResource exclusive...\n");
         if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, CanWait))
         {
-            DPRINT("INSTRUMENT: NtfsCleanupFile MainResource CANT_WAIT\n");
             return STATUS_PENDING;
         }
-        DPRINT("INSTRUMENT: NtfsCleanupFile MainResource acquired\n");
 
         Fcb->OpenHandleCount--;
 

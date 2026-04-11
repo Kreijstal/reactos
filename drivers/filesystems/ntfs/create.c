@@ -731,14 +731,27 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             : 0;
         ShareAccess = Stack->Parameters.Create.ShareAccess;
 
-        /* Maintain SHARE_ACCESS so the MM filter callback above can tell
-         * how many writers a file has, and so concurrent opens of the same
+        /* Maintain SHARE_ACCESS so the MM filter callback can tell how
+         * many writers a file has, and so concurrent opens of the same
          * file get the share-mode semantics callers depend on (e.g. the
          * loader opens images with FILE_SHARE_READ|FILE_SHARE_DELETE and
-         * expects subsequent writers to be rejected). */
+         * expects subsequent writers to be rejected).
+         *
+         * Hold Fcb->MainResource exclusive around the ShareAccess update.
+         * This is the same resource NtfsFilterCallbackAcquireForCreateSection
+         * acquires when MM probes for writers via
+         * PreAcquireForSectionSynchronization, and the same resource
+         * NtfsCleanupFile holds around IoRemoveShareAccess.  Without it the
+         * filter callback can observe a stale Writers count and grant /
+         * reject a section creation mid-update (issue #11 P1 follow-up).
+         *
+         * Lock order: DirResource (held by NtfsCreate) -> MainResource here.
+         * Matches NtfsCleanup -> NtfsCleanupFile.  The filter callback
+         * never acquires DirResource, so no AB-BA is possible. */
         if (Fcb->Identifier.Type == NTFS_TYPE_FCB &&
             !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME))
         {
+            ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
             if (Fcb->OpenHandleCount == 0)
             {
                 /* First open of this FCB — establish share access. */
@@ -758,13 +771,15 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                                             FileObject,
                                             &Fcb->ShareAccess,
                                             TRUE);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("NtfsCreateFile: share access conflict for FCB %p (Desired=0x%lx Share=0x%lx): 0x%lx\n",
-                            Fcb, DesiredAccess, ShareAccess, Status);
-                    NtfsCloseFile(DeviceExt, FileObject);
-                    return Status;
-                }
+            }
+            ExReleaseResourceLite(&Fcb->MainResource);
+
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("NtfsCreateFile: share access conflict for FCB %p (Desired=0x%lx Share=0x%lx): 0x%lx\n",
+                        Fcb, DesiredAccess, ShareAccess, Status);
+                NtfsCloseFile(DeviceExt, FileObject);
+                return Status;
             }
         }
 
