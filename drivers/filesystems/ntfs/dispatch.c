@@ -146,6 +146,44 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         case IRP_MJ_FILE_SYSTEM_CONTROL:
             Status = NtfsFileSystemControl(IrpContext);
             break;
+
+        case IRP_MJ_SHUTDOWN:
+            /* Flush every mounted volume so that dirty cached writes
+             * (notably registry hive updates) actually reach the disk
+             * before the kernel finishes the shutdown. See shutdown.c. */
+            Status = NtfsShutdown(IrpContext);
+            break;
+
+        case IRP_MJ_LOCK_CONTROL:
+            /* Byte-range file locks via FsRtlProcessFileLock against
+             * the per-FCB FILE_LOCK initialized in NtfsCreateFCB. The
+             * helper takes ownership of the IRP, so NtfsLockControl
+             * clears IRPCONTEXT_COMPLETE before returning. */
+            Status = NtfsLockControl(IrpContext);
+            break;
+
+        case IRP_MJ_QUERY_EA:
+            /* Read the on-disk $EA attribute and copy matching
+             * FILE_FULL_EA_INFORMATION entries into the user buffer.
+             * See ea.c. */
+            Status = NtfsQueryEa(IrpContext);
+            break;
+
+        case IRP_MJ_SET_EA:
+            /* Validate the input list with IoCheckEaBufferValidity and
+             * write it back into the file's $EA attribute. Creating a
+             * brand-new $EA on a file that has none yet is not yet
+             * implemented (see ea.c TODO). */
+            Status = NtfsSetEa(IrpContext);
+            break;
+
+        case IRP_MJ_PNP:
+            /* Forward most PNP minor codes to the underlying storage
+             * device. NtfsPnp clears IRPCONTEXT_COMPLETE on the
+             * forwarded path so the dispatch loop below doesn't try
+             * to complete an IRP that the lower driver now owns. */
+            Status = NtfsPnp(IrpContext);
+            break;
     }
 
     ASSERT((!(IrpContext->Flags & IRPCONTEXT_COMPLETE) && !(IrpContext->Flags & IRPCONTEXT_QUEUE)) ||
