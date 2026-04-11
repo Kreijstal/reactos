@@ -2006,17 +2006,30 @@ FreeClusters(PNTFS_VCB Vcb,
     PUCHAR BitmapData;
     RTL_BITMAP Bitmap;
     ULONG LengthWritten;
+    BOOLEAN BitmapLockHeld;
 
     if (!AttrContext->pRecord->IsNonResident)
     {
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* Same race as NtfsAllocateClusters: an unsynchronized R/M/W of the
+     * volume bitmap lets a concurrent allocator hand out an LCN we are
+     * about to mark free, leaving two attributes pointing at the same
+     * cluster. Hold BitmapResource exclusive across the entire function;
+     * the runlist updates that follow the bitmap writeback don't need
+     * the lock, but releasing mid-function would require an extra exit
+     * label and the contention is low enough that holding it through is
+     * cheaper than the bookkeeping. See ntfs.h:BitmapResource. */
+    BitmapLockHeld = ExAcquireResourceExclusiveLite(&Vcb->BitmapResource, TRUE);
+
     // Read the $Bitmap file
     BitmapRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (BitmapRecord == NULL)
     {
         DPRINT1("Error: Unable to allocate memory for bitmap file record!\n");
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
         return STATUS_NO_MEMORY;
     }
 
@@ -2025,6 +2038,8 @@ FreeClusters(PNTFS_VCB Vcb,
     {
         DPRINT1("Error: Unable to read file record for bitmap!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
         return 0;
     }
 
@@ -2033,6 +2048,8 @@ FreeClusters(PNTFS_VCB Vcb,
     {
         DPRINT1("Error: Unable to find data attribute for bitmap file!\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
         return 0;
     }
 
@@ -2045,6 +2062,8 @@ FreeClusters(PNTFS_VCB Vcb,
         DPRINT1("Error: Unable to allocate memory for bitmap file data!\n");
         ReleaseAttributeContext(DataContext);
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
         return 0;
     }
 
@@ -2085,6 +2104,8 @@ FreeClusters(PNTFS_VCB Vcb,
         ReleaseAttributeContext(DataContext);
         ExFreePoolWithTag(BitmapData, TAG_NTFS);
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BitmapRecord);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
         return Status;
     }
 
@@ -2099,6 +2120,8 @@ FreeClusters(PNTFS_VCB Vcb,
     if (!RunBuffer)
     {
         DPRINT1("ERROR: Couldn't allocate memory for data runs!\n");
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -2135,6 +2158,9 @@ FreeClusters(PNTFS_VCB Vcb,
     ExFreePoolWithTag(RunBuffer, TAG_NTFS);
 
     NtfsDumpDataRuns((PUCHAR)((ULONG_PTR)DestinationAttribute + DestinationAttribute->NonResident.MappingPairsOffset), 0);
+
+    if (BitmapLockHeld)
+        ExReleaseResourceLite(&Vcb->BitmapResource);
 
     return Status;
 }
