@@ -571,6 +571,13 @@ typedef struct _NTFS_ATTR_CONTEXT
     LARGE_MCB           DataRunsMCB;
     ULONGLONG           FileMFTIndex;
     ULONGLONG           FileOwnerMFTIndex; /* If attribute list attribute, reference the original file */
+    /* Phase 4A.5: when MigrateAttributeToList moves this attribute into a child
+     * file record, set MigratedToMFTIndex to the child's MFT index.  Subsequent
+     * AddRun calls then re-read that child record from disk and operate on it
+     * instead of the (caller-supplied) base FileRecord, which no longer holds
+     * the attribute slot.  Zero means "not migrated, attribute lives in the
+     * base FileRecord". */
+    ULONGLONG           MigratedToMFTIndex;
     PNTFS_ATTR_RECORD    pRecord;
 } NTFS_ATTR_CONTEXT, *PNTFS_ATTR_CONTEXT;
 
@@ -676,6 +683,21 @@ AddRun(PNTFS_VCB Vcb,
        PFILE_RECORD_HEADER FileRecord,
        ULONGLONG NextAssignedCluster,
        ULONG RunLength);
+
+NTSTATUS
+MigrateAttributeToList(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseFileRecord,
+                       PNTFS_ATTR_CONTEXT AttrContext,
+                       ULONG AttrOffset,
+                       PFILE_RECORD_HEADER *OutChildRecord,
+                       PULONG OutNewAttrOffset);
+
+NTSTATUS
+CoalesceAttributeFromList(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER BaseFileRecord,
+                          ULONG AttributeType,
+                          PCWSTR Name,
+                          USHORT NameLength);
 
 NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
