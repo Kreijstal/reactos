@@ -1399,6 +1399,12 @@ NTSTATUS
 NtfsWrite(PNTFS_IRP_CONTEXT IrpContext);
 
 
+/* shutdown.c */
+
+NTSTATUS
+NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext);
+
+
 /* volinfo.c */
 
 NTSTATUS

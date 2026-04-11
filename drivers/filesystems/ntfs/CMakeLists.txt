@@ -17,6 +17,7 @@ list(APPEND SOURCE
     misc.c
     ntfs.c
     rw.c
+    shutdown.c
     volinfo.c
     ntfs.h)
 

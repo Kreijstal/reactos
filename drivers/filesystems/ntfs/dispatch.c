@@ -146,6 +146,40 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         case IRP_MJ_FILE_SYSTEM_CONTROL:
             Status = NtfsFileSystemControl(IrpContext);
             break;
+
+        case IRP_MJ_SHUTDOWN:
+            /* Flush every mounted volume so that dirty cached writes
+             * (notably registry hive updates) actually reach the disk
+             * before the kernel finishes the shutdown. See shutdown.c. */
+            Status = NtfsShutdown(IrpContext);
+            break;
+
+        case IRP_MJ_LOCK_CONTROL:
+            /* Byte-range file locks. We don't implement them yet, but
+             * returning STATUS_INVALID_DEVICE_REQUEST through the
+             * dispatch (instead of via IopInvalidDeviceRequest) keeps
+             * the code reachable for a future FsRtlProcessFileLock
+             * implementation. */
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            IrpContext->Irp->IoStatus.Information = 0;
+            break;
+
+        case IRP_MJ_QUERY_EA:
+        case IRP_MJ_SET_EA:
+            /* NTFS supports extended attributes on disk, but the
+             * ReactOS driver does not yet expose them. Report this
+             * cleanly so applications fall back gracefully. */
+            Status = STATUS_EAS_NOT_SUPPORTED;
+            IrpContext->Irp->IoStatus.Information = 0;
+            break;
+
+        case IRP_MJ_PNP:
+            /* Plug and play notifications. We have no real handling
+             * yet, but acknowledge the IRP so the I/O Manager doesn't
+             * see STATUS_INVALID_DEVICE_REQUEST. */
+            Status = STATUS_SUCCESS;
+            IrpContext->Irp->IoStatus.Information = 0;
+            break;
     }
 
     ASSERT((!(IrpContext->Flags & IRPCONTEXT_COMPLETE) && !(IrpContext->Flags & IRPCONTEXT_QUEUE)) ||
