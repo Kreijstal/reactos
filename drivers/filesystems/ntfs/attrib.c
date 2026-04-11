@@ -1037,6 +1037,321 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
 }
 
 /**
+* @name CoalesceAttributeFromList
+* @implemented
+*
+* Reverse of MigrateAttributeToList. If a previously-migrated attribute has shrunk
+* enough that its (header + mapping pairs / value) fits back inside the base file
+* record after also accounting for the bytes reclaimed from the $ATTRIBUTE_LIST
+* entry, this function moves the attribute back into the base record and removes
+* the corresponding entry from the list.
+*
+* When removing the last entry from $ATTRIBUTE_LIST, the entire $ATTRIBUTE_LIST
+* attribute slot is removed from the base record.
+*
+* @param Vcb
+* Pointer to an NTFS_VCB for the destination volume.
+*
+* @param BaseFileRecord
+* Pointer to a complete copy of the base file record. Modified in place. Caller
+* is responsible for writing it back via UpdateFileRecord (this function calls
+* UpdateFileRecord on the base before returning).
+*
+* @param AttributeType
+* The attribute type code to coalesce (e.g., AttributeData, AttributeIndexAllocation).
+*
+* @param Name
+* The attribute name (UTF-16). Pass an empty string for unnamed attributes.
+*
+* @param NameLength
+* Length of Name in WCHARs (not bytes).
+*
+* @return
+* STATUS_SUCCESS on success.
+* STATUS_OBJECT_NAME_NOT_FOUND if no matching $ATTRIBUTE_LIST entry exists.
+* STATUS_NOT_IMPLEMENTED if the existing $ATTRIBUTE_LIST is non-resident, if
+*   multiple list entries reference the same child MFT (multi-extent attribute),
+*   or if the coalesced layout would not fit in the base record.
+* Other status codes propagated from ReadFileRecord / UpdateFileRecord.
+*
+* @remarks
+* Phase A scope mirror of MigrateAttributeToList: this function does NOT free
+* the child MFT bit (the driver currently has no FreeMftEntry primitive). The
+* child record becomes orphaned, wasting one MFT slot but leaving the volume
+* consistent. Production use needs $LogFile journaling for crash safety AND a
+* working FreeMftEntry — both are out of scope for the harness-testable core.
+*/
+NTSTATUS
+CoalesceAttributeFromList(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER BaseFileRecord,
+                          ULONG AttributeType,
+                          PCWSTR Name,
+                          USHORT NameLength)
+{
+    NTSTATUS Status;
+    PNTFS_ATTR_RECORD ListAttr = NULL;
+    PNTFS_ATTR_RECORD Walker;
+    PUCHAR ListContent;
+    PUCHAR ListEnd;
+    PNTFS_ATTRIBUTE_LIST_ITEM Item;
+    PNTFS_ATTRIBUTE_LIST_ITEM MatchItem = NULL;
+    ULONGLONG ChildMftIndex = 0;
+    USHORT MatchEntryLen = 0;
+    PFILE_RECORD_HEADER ChildRecord = NULL;
+    PNTFS_ATTR_RECORD ChildAttr;
+    ULONG ChildAttrLen;
+    ULONG OtherEntriesUsingChild = 0;
+    ULONG NewListAttrLen;
+    ULONG ListAttrShrinkBy;
+    ULONG NewBytesInUse;
+    BOOLEAN RemoveListAttribute;
+    PNTFS_ATTR_RECORD InsertionPoint;
+    PNTFS_ATTR_RECORD NewEnd;
+
+    DPRINT("CoalesceAttributeFromList: base MFT=%I64u type=0x%x namelen=%u\n",
+           BaseFileRecord->MFTRecordNumber, AttributeType, NameLength);
+
+    if (AttributeType == AttributeStandardInformation ||
+        AttributeType == AttributeFileName ||
+        AttributeType == AttributeAttributeList)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Step 1: locate the $ATTRIBUTE_LIST attribute in the base record. */
+    Walker = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
+    while (Walker->Type != AttributeEnd && Walker->Length > 0 &&
+           (ULONG_PTR)Walker < (ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse)
+    {
+        if (Walker->Type == AttributeAttributeList)
+        {
+            ListAttr = Walker;
+            break;
+        }
+        Walker = (PNTFS_ATTR_RECORD)((ULONG_PTR)Walker + Walker->Length);
+    }
+    if (!ListAttr)
+    {
+        DPRINT("CoalesceAttributeFromList: no $ATTRIBUTE_LIST in base record\n");
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    if (ListAttr->IsNonResident)
+    {
+        DPRINT1("CoalesceAttributeFromList: non-resident $ATTRIBUTE_LIST not supported\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    /* Step 2: walk the list, find the matching entry. Also count how many
+     * entries (if any) reference the same child MFT — multi-extent attributes
+     * (e.g. an attribute that itself spans several child records) cannot be
+     * coalesced as a single block, so bail in that case. */
+    ListContent = (PUCHAR)ListAttr + ListAttr->Resident.ValueOffset;
+    ListEnd = ListContent + ListAttr->Resident.ValueLength;
+    Item = (PNTFS_ATTRIBUTE_LIST_ITEM)ListContent;
+    while ((PUCHAR)Item < ListEnd && Item->Length > 0)
+    {
+        if (Item->Type == AttributeType && Item->NameLength == NameLength)
+        {
+            BOOLEAN NameOk = TRUE;
+            if (NameLength > 0)
+            {
+                PCWSTR ItemName = (PCWSTR)((PUCHAR)Item + Item->NameOffset);
+                if (RtlCompareMemory(ItemName, Name, NameLength * sizeof(WCHAR)) != NameLength * sizeof(WCHAR))
+                    NameOk = FALSE;
+            }
+            if (NameOk && MatchItem == NULL)
+            {
+                MatchItem = Item;
+                MatchEntryLen = Item->Length;
+                ChildMftIndex = Item->MFTIndex & 0x0000FFFFFFFFFFFFULL;
+            }
+        }
+        Item = (PNTFS_ATTRIBUTE_LIST_ITEM)((PUCHAR)Item + Item->Length);
+    }
+    if (!MatchItem)
+    {
+        DPRINT("CoalesceAttributeFromList: no matching list entry for type 0x%x\n", AttributeType);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+    /* Second pass: count other entries pointing at ChildMftIndex. If any other
+     * entry also lives in the same child record, this attribute is multi-extent
+     * and we can't coalesce just this slice. */
+    Item = (PNTFS_ATTRIBUTE_LIST_ITEM)ListContent;
+    while ((PUCHAR)Item < ListEnd && Item->Length > 0)
+    {
+        if (Item != MatchItem &&
+            (Item->MFTIndex & 0x0000FFFFFFFFFFFFULL) == ChildMftIndex)
+        {
+            OtherEntriesUsingChild++;
+        }
+        Item = (PNTFS_ATTRIBUTE_LIST_ITEM)((PUCHAR)Item + Item->Length);
+    }
+    if (OtherEntriesUsingChild > 0)
+    {
+        DPRINT1("CoalesceAttributeFromList: child MFT %I64u referenced by %u other entries; multi-extent coalesce not supported\n",
+                ChildMftIndex, OtherEntriesUsingChild);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    /* Step 3: read the child record and find the attribute inside it. */
+    ChildRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (!ChildRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = ReadFileRecord(Vcb, ChildMftIndex, ChildRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CoalesceAttributeFromList: ReadFileRecord(child=%I64u) failed 0x%x\n",
+                ChildMftIndex, Status);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+        return Status;
+    }
+
+    ChildAttr = NULL;
+    Walker = (PNTFS_ATTR_RECORD)((ULONG_PTR)ChildRecord + ChildRecord->AttributeOffset);
+    while (Walker->Type != AttributeEnd && Walker->Length > 0 &&
+           (ULONG_PTR)Walker < (ULONG_PTR)ChildRecord + ChildRecord->BytesInUse)
+    {
+        if (Walker->Type == AttributeType && Walker->NameLength == NameLength)
+        {
+            BOOLEAN NameOk = TRUE;
+            if (NameLength > 0)
+            {
+                PCWSTR AttrName = (PCWSTR)((ULONG_PTR)Walker + Walker->NameOffset);
+                if (RtlCompareMemory(AttrName, Name, NameLength * sizeof(WCHAR)) != NameLength * sizeof(WCHAR))
+                    NameOk = FALSE;
+            }
+            if (NameOk)
+            {
+                ChildAttr = Walker;
+                break;
+            }
+        }
+        Walker = (PNTFS_ATTR_RECORD)((ULONG_PTR)Walker + Walker->Length);
+    }
+    if (!ChildAttr)
+    {
+        DPRINT1("CoalesceAttributeFromList: matching attribute missing from child MFT %I64u\n", ChildMftIndex);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+    ChildAttrLen = ChildAttr->Length;
+
+    /* Step 4: compute new layout. Two cases:
+     *   a) MatchItem is the only entry → remove the entire $ATTRIBUTE_LIST attribute
+     *   b) Other entries remain        → shrink the list attribute by MatchEntryLen
+     */
+    if (ListAttr->Resident.ValueLength == MatchEntryLen)
+    {
+        /* List would become empty; remove the whole attribute slot. */
+        RemoveListAttribute = TRUE;
+        ListAttrShrinkBy = ListAttr->Length;  /* the entire $ATTRIBUTE_LIST attr is going away */
+        NewListAttrLen = 0;
+    }
+    else
+    {
+        ULONG NewValueLen = ListAttr->Resident.ValueLength - MatchEntryLen;
+        ULONG NewAttrLen = ALIGN_UP_BY(ListAttr->Resident.ValueOffset + NewValueLen, ATTR_RECORD_ALIGNMENT);
+        RemoveListAttribute = FALSE;
+        NewListAttrLen = NewAttrLen;
+        ListAttrShrinkBy = ListAttr->Length - NewAttrLen;
+    }
+
+    NewBytesInUse = BaseFileRecord->BytesInUse - ListAttrShrinkBy + ChildAttrLen;
+    if (NewBytesInUse > Vcb->NtfsInfo.BytesPerFileRecord)
+    {
+        DPRINT1("CoalesceAttributeFromList: would not fit (need %u, max %u)\n",
+                NewBytesInUse, Vcb->NtfsInfo.BytesPerFileRecord);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    /* Step 5a: shrink or remove the list attribute. */
+    if (RemoveListAttribute)
+    {
+        ULONG ListAttrOffset = (ULONG)((ULONG_PTR)ListAttr - (ULONG_PTR)BaseFileRecord);
+        PNTFS_ATTR_RECORD AfterList = (PNTFS_ATTR_RECORD)((ULONG_PTR)ListAttr + ListAttr->Length);
+        if (AfterList->Type != AttributeEnd)
+        {
+            PNTFS_ATTR_RECORD MovedFinal;
+            MovedFinal = MoveAttributes(Vcb, AfterList,
+                                        ListAttrOffset + ListAttr->Length,
+                                        (ULONG_PTR)ListAttr);
+            SetFileRecordEnd(BaseFileRecord, MovedFinal, FILE_RECORD_END);
+        }
+        else
+        {
+            SetFileRecordEnd(BaseFileRecord, ListAttr, FILE_RECORD_END);
+        }
+    }
+    else
+    {
+        /* Slide the entries after MatchItem left by MatchEntryLen, and shrink
+         * the list attribute's Length / ValueLength accordingly. */
+        PUCHAR MatchEnd = (PUCHAR)MatchItem + MatchEntryLen;
+        SIZE_T TailLen = ListEnd - MatchEnd;
+        if (TailLen > 0)
+            RtlMoveMemory(MatchItem, MatchEnd, TailLen);
+        /* Zero the freshly-vacated tail bytes inside the value. */
+        RtlZeroMemory((PUCHAR)ListContent + (ListAttr->Resident.ValueLength - MatchEntryLen),
+                      MatchEntryLen);
+        ListAttr->Resident.ValueLength -= MatchEntryLen;
+
+        /* Slide trailing attributes (after the now-shrunk list attr) left if needed. */
+        if (NewListAttrLen != ListAttr->Length)
+        {
+            ULONG ListAttrOffset = (ULONG)((ULONG_PTR)ListAttr - (ULONG_PTR)BaseFileRecord);
+            PNTFS_ATTR_RECORD AfterList = (PNTFS_ATTR_RECORD)((ULONG_PTR)ListAttr + ListAttr->Length);
+            ULONG OldListLen = ListAttr->Length;
+            ListAttr->Length = NewListAttrLen;
+            if (AfterList->Type != AttributeEnd)
+            {
+                PNTFS_ATTR_RECORD MovedFinal;
+                MovedFinal = MoveAttributes(Vcb, AfterList,
+                                            ListAttrOffset + OldListLen,
+                                            (ULONG_PTR)ListAttr + NewListAttrLen);
+                SetFileRecordEnd(BaseFileRecord, MovedFinal, FILE_RECORD_END);
+            }
+            else
+            {
+                PNTFS_ATTR_RECORD AdjustedEnd =
+                    (PNTFS_ATTR_RECORD)((ULONG_PTR)ListAttr + NewListAttrLen);
+                SetFileRecordEnd(BaseFileRecord, AdjustedEnd, FILE_RECORD_END);
+            }
+        }
+    }
+
+    /* Step 5b: insert the coalesced attribute at the end (just before AttributeEnd). */
+    if (BaseFileRecord->BytesInUse + ChildAttrLen > Vcb->NtfsInfo.BytesPerFileRecord)
+    {
+        /* Defensive: shouldn't happen — we checked NewBytesInUse above. */
+        DPRINT1("CoalesceAttributeFromList: insert would overflow despite size check\n");
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+        return STATUS_NOT_IMPLEMENTED;
+    }
+    InsertionPoint = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse - 2 * sizeof(ULONG));
+    ASSERT(InsertionPoint->Type == AttributeEnd);
+    RtlCopyMemory(InsertionPoint, ChildAttr, ChildAttrLen);
+    NewEnd = (PNTFS_ATTR_RECORD)((ULONG_PTR)InsertionPoint + ChildAttrLen);
+    SetFileRecordEnd(BaseFileRecord, NewEnd, FILE_RECORD_END);
+
+    /* Step 6: persist the modified base. The orphaned child record stays on disk
+     * (no FreeMftEntry yet) — see remarks. */
+    Status = UpdateFileRecord(Vcb, BaseFileRecord->MFTRecordNumber, BaseFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CoalesceAttributeFromList: UpdateFileRecord(base) failed 0x%x\n", Status);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+        return Status;
+    }
+
+    DPRINT("CoalesceAttributeFromList: type 0x%x coalesced from MFT %I64u back into base MFT %I64u (child orphaned)\n",
+           AttributeType, ChildMftIndex, BaseFileRecord->MFTRecordNumber);
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+    return STATUS_SUCCESS;
+}
+
+/**
 * @name AddRun
 * @implemented
 *

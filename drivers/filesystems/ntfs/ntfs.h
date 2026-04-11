@@ -693,6 +693,13 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
                        PULONG OutNewAttrOffset);
 
 NTSTATUS
+CoalesceAttributeFromList(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER BaseFileRecord,
+                          ULONG AttributeType,
+                          PCWSTR Name,
+                          USHORT NameLength);
+
+NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
                    PFILE_RECORD_HEADER FileRecord,
                    PNTFS_ATTR_RECORD AttributeAddress,
