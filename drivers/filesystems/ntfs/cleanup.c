@@ -97,9 +97,10 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         if (Fcb->OpenHandleCount == 0 &&
             BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
-            Fcb->SectionObjectPointers.DataSectionObject == NULL &&
-            Fcb->SectionObjectPointers.ImageSectionObject == NULL &&
-            Fcb->SectionObjectPointers.SharedCacheMap == NULL)
+            Fcb->SectionObjectPointers != NULL &&
+            Fcb->SectionObjectPointers->DataSectionObject == NULL &&
+            Fcb->SectionObjectPointers->ImageSectionObject == NULL &&
+            Fcb->SectionObjectPointers->SharedCacheMap == NULL)
         {
             Status = NtfsDeleteFileRecord(DeviceExt, Fcb, FALSE);
             if (NT_SUCCESS(Status))
