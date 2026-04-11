@@ -4541,6 +4541,144 @@ MmFlushImageSection (IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
 
 /*
  * @implemented
+ *
+ * MmForceSectionClosed — file-system tear-down helper.
+ *
+ * Called by file-system drivers (NTFS, FastFAT, ...) during FCB destruction
+ * to release any cached or memory-mapped sections backed by the file before
+ * the FCB pool memory goes away.  ReactOS shipped this as an UNIMPLEMENTED
+ * stub at ARM3/section.c:2679 for years; that returned FALSE on every call,
+ * which is why every NTFS FCB with a live data section ends up being LEAKED
+ * via the "leaking FCB" path in drivers/filesystems/ntfs/fcb.c — see the
+ * kmtest in modules/rostests/kmtests/ntos_mm/MmForceSectionClosed.c and
+ * Kreijstal/reactos#14 for the chain of consequences.
+ *
+ * Contract (matching the Windows IFS docs):
+ *   - SectionObjectPointer == NULL or every slot already NULL → trivially TRUE.
+ *   - Image section present → delegate to MmFlushImageSection(... ForDelete),
+ *     which already implements the "no mappings → purge, mappings → fail"
+ *     logic for the legacy image-section path.  If it refuses and the caller
+ *     authorised deferral we still return TRUE.
+ *   - Data section present → grab the segment to bump the legacy refcount,
+ *     peek at it under the PFN lock, and either drop our temporary
+ *     reference and report failure (DelayClose=FALSE, other users still
+ *     hold the segment) or drop the reference and return TRUE so the caller
+ *     can complete FCB tear-down while MM finishes the close lazily on the
+ *     last unmap (DelayClose=TRUE, or refcount went to zero on our deref).
+ *
+ * The function intentionally never zeroes RefCount under another thread:
+ * we only undo the grab we took ourselves.  The actual segment teardown is
+ * driven by the existing MmDereferenceSegmentWithLock cleanup path that
+ * fires when the last real reference goes away — which clears
+ * SectionObjectPointer->DataSectionObject from the segment side.
+ *
+ * Lives in this file (rather than ARM3/section.c) because it needs the
+ * static MiGrabDataSection helper that's local to this translation unit.
+ */
+BOOLEAN
+NTAPI
+MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
+                     IN BOOLEAN DelayClose)
+{
+    PMM_SECTION_SEGMENT Segment;
+    BOOLEAN ImageOk = TRUE;
+    BOOLEAN DataOk = TRUE;
+    KIRQL OldIrql;
+    LONG64 SegRefs;
+
+    if (!SectionObjectPointer)
+        return TRUE;
+
+    /* Trivial case: nothing attached.  This is the EmptyPointers kmtest:
+     * before the implementation existed it returned FALSE here and that
+     * caused NtfsDestroyFCB to leak every FCB whose section pointers were
+     * already clean.  Now it correctly says "nothing to do, you're free
+     * to release the FCB pool memory". */
+    if (SectionObjectPointer->ImageSectionObject == NULL &&
+        SectionObjectPointer->DataSectionObject == NULL &&
+        SectionObjectPointer->SharedCacheMap == NULL)
+    {
+        return TRUE;
+    }
+
+    /* Image section: reuse MmFlushImageSection.  It accepts MmFlushForDelete
+     * and either purges everything (returning TRUE and clearing
+     * ImageSectionObject) or refuses with FALSE when SectionCount/MapCount
+     * say there's still a live mapping. */
+    if (SectionObjectPointer->ImageSectionObject != NULL)
+    {
+        ImageOk = MmFlushImageSection(SectionObjectPointer, MmFlushForDelete);
+        if (!ImageOk && DelayClose)
+        {
+            /* Caller permits deferral; the legacy section code will
+             * complete the teardown when the last reference is dropped. */
+            ImageOk = TRUE;
+        }
+    }
+
+    /* Data section: grab the segment to bump its refcount, peek at the
+     * count to decide whether anyone else still holds a reference, and
+     * either drop our temp grab and report failure (DelayClose=FALSE,
+     * other users still hold the segment) or drop the grab and let the
+     * caller proceed (DelayClose=TRUE).
+     *
+     * NOTE: this only handles the trivial cases.  For the realistic
+     * "data segment with cached pages still in the page table" case the
+     * RefCount is bumped per-page by MiSetPageEntrySectionSegment, so a
+     * grab/deref pair is a no-op net change and the segment's
+     * DataSectionObject slot stays set.  Properly forcing such a segment
+     * closed means walking its PageTable, dropping each page reference,
+     * then waiting for the natural cleanup at MmDereferenceSegmentWithLock
+     * to clear the slot.  That requires locking the segment against
+     * concurrent users, validating no live mappings remain, and avoiding
+     * the segment-cleanup-vs-FCB-destruction race that NtfsDestroyFCB
+     * already documents — significantly more involved than fits in this
+     * change.  For now we report failure when the segment can't be
+     * trivially dropped, which preserves the pre-existing FCB-leak
+     * fallback in NtfsDestroyFCB instead of corrupting MM state by
+     * forcibly clearing the slot. */
+    if (SectionObjectPointer->DataSectionObject != NULL)
+    {
+        Segment = MiGrabDataSection(SectionObjectPointer);
+        if (Segment != NULL)
+        {
+            OldIrql = MiAcquirePfnLock();
+            SegRefs = Segment->RefCount;
+            MiReleasePfnLock(OldIrql);
+
+            /* Drop our temp grab.  If we held the only reference the
+             * legacy cleanup runs synchronously and clears the slot.
+             * Otherwise the slot stays set and we report based on the
+             * current state. */
+            MmDereferenceSegment(Segment);
+
+            if (SectionObjectPointer->DataSectionObject == NULL)
+            {
+                /* Cleanup ran on our deref — slot is clean. */
+                DataOk = TRUE;
+            }
+            else if (DelayClose)
+            {
+                /* Slot still set but caller authorised deferral — return
+                 * TRUE so they can proceed.  The caller is expected to
+                 * tolerate the slot still being non-NULL (NTFS' fallback
+                 * path leaks the FCB rather than free pool memory MM is
+                 * still using). */
+                DataOk = TRUE;
+            }
+            else
+            {
+                /* Slot still set and caller can't defer.  Report failure. */
+                DataOk = FALSE;
+            }
+        }
+    }
+
+    return ImageOk && DataOk;
+}
+
+/*
+ * @implemented
  */
 NTSTATUS
 NTAPI
