@@ -1351,7 +1351,6 @@ Wow64LdrpInitialize(PCONTEXT pContext)
                                    1,
                                    0) == 0)
     {
-        __debugbreak();
         Wow64InitProcess(pContext);
     }
     
