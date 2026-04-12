@@ -24,7 +24,7 @@
 /* WOW64 directory: resolved dynamically via %SystemRoot%\SysWOW64 */
 
 #define WIN32_NO_STATUS
-#include <Windows.h>
+#include <windows.h>
 #include <stdio.h>
 #include <assert.h>
 #include <ntndk.h>
@@ -176,12 +176,12 @@ CallOrJump32(ULONG Address, ULONG nArgc, PULONG Args, BOOL bJump)
 #undef MAX_ARGS
 }
 
-static inline Call32(ULONG Addr, ULONG nArgc, PULONG Args)
+static inline int Call32(ULONG Addr, ULONG nArgc, PULONG Args)
 {
     return CallOrJump32(Addr, nArgc, Args, FALSE);
 }
 
-static inline Jump32(ULONG Addr, ULONG nArgc, PULONG Args)
+static inline int Jump32(ULONG Addr, ULONG nArgc, PULONG Args)
 {
     return CallOrJump32(Addr, nArgc, Args, TRUE);
 }
