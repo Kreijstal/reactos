@@ -651,6 +651,36 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
                                            &BufferLength);
             break;
 
+        case FileEaInformation:
+            if (BufferLength < sizeof(FILE_EA_INFORMATION))
+                Status = STATUS_BUFFER_TOO_SMALL;
+            else
+            {
+                PNTFS_ATTR_CONTEXT EaContext;
+                PFILE_RECORD_HEADER FileRecord;
+                ULONG EaSize = 0;
+
+                FileRecord = ExAllocateFromNPagedLookasideList(&((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->FileRecLookasideList);
+                if (FileRecord &&
+                    NT_SUCCESS(ReadFileRecord((PDEVICE_EXTENSION)DeviceObject->DeviceExtension,
+                                              Fcb->MFTIndex, FileRecord)))
+                {
+                    if (NT_SUCCESS(FindAttribute((PDEVICE_EXTENSION)DeviceObject->DeviceExtension,
+                                                  FileRecord, AttributeEA, L"", 0, &EaContext, NULL)))
+                    {
+                        EaSize = (ULONG)AttributeDataLength(EaContext->pRecord);
+                        ReleaseAttributeContext(EaContext);
+                    }
+                }
+                if (FileRecord)
+                    ExFreeToNPagedLookasideList(&((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->FileRecLookasideList, FileRecord);
+
+                ((PFILE_EA_INFORMATION)SystemBuffer)->EaSize = EaSize;
+                BufferLength -= sizeof(FILE_EA_INFORMATION);
+                Status = STATUS_SUCCESS;
+            }
+            break;
+
         default:
             DPRINT1("Unimplemented information class: %s\n", GetInfoClassName(FileInformationClass));
             Status = STATUS_INVALID_PARAMETER;
