@@ -1458,6 +1458,18 @@ typedef struct tagCURSORDATA
 /* Flags for dwCompatFlags2 */
 #define COMPAT_FLAG_2_CICERO_DISABLED 2
 
+/* WoW64 cast macros: identity on native builds, pointer-width conversion on WoW64 */
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#define WOW64_CAST_TO_PTR(x) (x)
+#define WOW64_CAST_TO_HANDLE(x) (x)
+#define WOW64_READ_ULONG_FIELD(ptr, type, field) ((ptr)->field)
+#else
+#define WOW64_CAST_TO_PTR(x) ((PVOID)(ULONG_PTR)(x))
+#define WOW64_CAST_TO_HANDLE(x) ((HANDLE)(ULONG_PTR)(x))
+#define WOW64_READ_ULONG_FIELD(ptr, type, field) \
+    (*(ULONG*)((ULONG_PTR)(ptr) + FIELD_OFFSET(type, field)))
+#endif
+
 #if !(defined(BUILD_WOW6432) && defined(_M_IX86))
 #define IS_IMM_MODE() (gpsi && (gpsi->dwSRVIFlags & SRVINFO_IMM32))
 #define IS_CICERO_MODE() (gpsi && (gpsi->dwSRVIFlags & SRVINFO_CTFIME_ENABLED))

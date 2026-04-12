@@ -109,9 +109,9 @@ ULONG __readfsdword(ULONG x)
 
 PSERVERINFO g_ServerInfo = NULL;
 
-static BOOL wow64_NtGdiInit(UINT* pArgs)
+NTSTATUS WINAPI wow64_NtGdiInit(UINT* pArgs)
 {
-    return NtGdiInit();
+    return NtGdiInit() ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
 static VOID InitServiceTable(VOID)

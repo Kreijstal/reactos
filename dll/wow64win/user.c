@@ -39,7 +39,9 @@
 #endif
 
 
+#ifndef __REACTOS__
 WINE_DEFAULT_DEBUG_CHANNEL(wow);
+#endif
 
 #ifndef __REACTOS__
 
