@@ -303,7 +303,6 @@ done:
 
     return ret;
 }
-
 /* Function 5 */
 DWORD
 __stdcall
