@@ -2988,6 +2988,11 @@ static NTSTATUS parse_manifest( struct actctx_loader* acl, struct assembly_ident
         status = parse_manifest_buffer( acl, assembly, ai, &xmlbuf );
         RtlFreeHeap( GetProcessHeap(), 0, new_buff );
     }
+    DPRINT1("actctx: parse_manifest('%S', dir='%S', shared=%d) -> 0x%08lx\n",
+            filename ? filename : L"(module)",
+            directory ? directory : L"(null)",
+            shared,
+            status);
     return status;
 }
 
@@ -3334,6 +3339,8 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
 
         for (;;)
         {
+            WCHAR *entry_name;
+
             if (data_pos >= data_len)
             {
                 if (NtQueryDirectoryFile( dir, 0, NULL, NULL, &io, buffer, sizeof(buffer),
@@ -3347,20 +3354,55 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
             if (dir_info->NextEntryOffset) data_pos += dir_info->NextEntryOffset;
             else data_pos = data_len;
 
-            tmp = (WCHAR *)dir_info->FileName + (wcschr(lookup, '*') - lookup);
+            entry_name = RtlAllocateHeap( GetProcessHeap(), 0, dir_info->FileNameLength + sizeof(WCHAR) );
+            if (!entry_name) break;
+            memcpy( entry_name, dir_info->FileName, dir_info->FileNameLength );
+            entry_name[dir_info->FileNameLength / sizeof(WCHAR)] = 0;
+
+            tmp = entry_name + (wcschr(lookup, '*') - lookup);
             build = wcstoul( tmp, NULL, 10 );
-            if (build < min_build) continue;
-            tmp = wcschr(tmp, '.') + 1;
+            if (build < min_build)
+            {
+                RtlFreeHeap( GetProcessHeap(), 0, entry_name );
+                continue;
+            }
+            tmp = wcschr(tmp, '.');
+            if (!tmp)
+            {
+                RtlFreeHeap( GetProcessHeap(), 0, entry_name );
+                continue;
+            }
+            tmp++;
             revision = wcstoul( tmp, NULL, 10 );
-            if (build == min_build && revision < min_revision) continue;
-            tmp = wcschr(tmp, '_') + 1;
-            tmp = wcschr(tmp, '_') + 1;
-            if (dir_info->FileNameLength - (tmp - dir_info->FileName) * sizeof(WCHAR) == sizeof(wine_trailerW) &&
+            if (build == min_build && revision < min_revision)
+            {
+                RtlFreeHeap( GetProcessHeap(), 0, entry_name );
+                continue;
+            }
+            tmp = wcschr(tmp, '_');
+            if (!tmp)
+            {
+                RtlFreeHeap( GetProcessHeap(), 0, entry_name );
+                continue;
+            }
+            tmp++;
+            tmp = wcschr(tmp, '_');
+            if (!tmp)
+            {
+                RtlFreeHeap( GetProcessHeap(), 0, entry_name );
+                continue;
+            }
+            tmp++;
+            if (dir_info->FileNameLength - (tmp - entry_name) * sizeof(WCHAR) == sizeof(wine_trailerW) &&
                 !wcsnicmp( tmp, wine_trailerW, ARRAY_SIZE( wine_trailerW )))
             {
                 /* prefer a non-Wine manifest if we already have one */
                 /* we'll still load the builtin dll if specified through DllOverrides */
-                if (ret) continue;
+                if (ret)
+                {
+                    RtlFreeHeap( GetProcessHeap(), 0, entry_name );
+                    continue;
+                }
             }
             else
             {
@@ -3372,12 +3414,16 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
             RtlFreeHeap( GetProcessHeap(), 0, ret );
             if ((ret = RtlAllocateHeap( GetProcessHeap(), 0, dir_info->FileNameLength + sizeof(WCHAR) )))
             {
-                memcpy( ret, dir_info->FileName, dir_info->FileNameLength );
+                memcpy( ret, entry_name, dir_info->FileNameLength );
                 ret[dir_info->FileNameLength/sizeof(WCHAR)] = 0;
             }
+            RtlFreeHeap( GetProcessHeap(), 0, entry_name );
         }
     }
-    else WARN("no matching file for %s\n", debugstr_w(lookup));
+    if (ret)
+        DPRINT1("actctx: lookup_manifest_file matched '%S' for pattern '%S'\n", ret, lookup);
+    else
+        WARN("no matching file for %s\n", debugstr_w(lookup));
     RtlFreeHeap( GetProcessHeap(), 0, lookup );
     return ret;
 }
@@ -3423,6 +3469,8 @@ static NTSTATUS lookup_winsxs(struct actctx_loader* acl, struct assembly_identit
     }
     if (!file)
     {
+        DPRINT1("actctx: lookup_winsxs found no manifest for %S %s\n",
+                ai->name, debugstr_version(&ai->version));
         RtlFreeUnicodeString( &path_us );
         return STATUS_NO_SUCH_FILE;
     }
@@ -3443,10 +3491,15 @@ static NTSTATUS lookup_winsxs(struct actctx_loader* acl, struct assembly_identit
 
     if (!open_nt_file( &handle, &path_us ))
     {
+        DPRINT1("actctx: lookup_winsxs opening '%S' with directory key '%S'\n",
+                path_us.Buffer, file);
         io.Status = get_manifest_in_manifest_file(acl, &sxs_ai, path_us.Buffer, file, TRUE, handle);
         NtClose( handle );
     }
     else io.Status = STATUS_NO_SUCH_FILE;
+
+    DPRINT1("actctx: lookup_winsxs('%S' %s) -> 0x%08lx\n",
+            ai->name, debugstr_version(&ai->version), io.Status);
 
     RtlFreeHeap( GetProcessHeap(), 0, file );
     RtlFreeUnicodeString( &path_us );
@@ -3547,7 +3600,12 @@ static NTSTATUS parse_depend_manifests(struct actctx_loader* acl)
 
     for (i = 0; i < acl->num_dependencies; i++)
     {
-        if (lookup_assembly(acl, &acl->dependencies[i]) != STATUS_SUCCESS)
+        NTSTATUS dep_status = lookup_assembly(acl, &acl->dependencies[i]);
+        DPRINT1("actctx: dependency '%S' (%s) lookup -> 0x%08lx\n",
+                acl->dependencies[i].name,
+                debugstr_version(&acl->dependencies[i].version),
+                dep_status);
+        if (dep_status != STATUS_SUCCESS)
         {
             if (!acl->dependencies[i].optional && !acl->dependencies[i].delayed)
             {
