@@ -77,14 +77,6 @@ DhcpNotifyConfigChangeEx(
 
 DWORD
 APIENTRY
-DhcpQueryHWInfo(
-    _In_ DWORD AdapterIndex,
-    _Out_ PDWORD MediaType,
-    _Out_ PDWORD Mtu,
-    _Out_ PDWORD Speed);
-
-DWORD
-APIENTRY
 DhcpReleaseParameters(
     _In_ PWSTR AdapterName);
 
