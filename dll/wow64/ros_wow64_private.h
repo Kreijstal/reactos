@@ -21,8 +21,7 @@
 
 #pragma once
 
-/* FIXME: for now, the WOW64 directory path is hardcoded. */
-#define TMP_WOW_DIR L"D:"
+/* WOW64 directory: resolved dynamically via %SystemRoot%\SysWOW64 */
 
 #define WIN32_NO_STATUS
 #include <Windows.h>
