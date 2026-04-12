@@ -85,22 +85,22 @@ PUBLIC RtlCaptureContext
     jnz RtlCaptureContextUM
 
     /* Store xmm registers */
-    movaps [rcx + CxXmm0], xmm0
-    movaps [rcx + CxXmm1], xmm1
-    movaps [rcx + CxXmm2], xmm2
-    movaps [rcx + CxXmm3], xmm3
-    movaps [rcx + CxXmm4], xmm4
-    movaps [rcx + CxXmm5], xmm5
-    movaps [rcx + CxXmm6], xmm6
-    movaps [rcx + CxXmm7], xmm7
-    movaps [rcx + CxXmm8], xmm8
-    movaps [rcx + CxXmm9], xmm9
-    movaps [rcx + CxXmm10], xmm10
-    movaps [rcx + CxXmm11], xmm11
-    movaps [rcx + CxXmm12], xmm12
-    movaps [rcx + CxXmm13], xmm13
-    movaps [rcx + CxXmm14], xmm14
-    movaps [rcx + CxXmm15], xmm15
+    movups [rcx + CxXmm0], xmm0
+    movups [rcx + CxXmm1], xmm1
+    movups [rcx + CxXmm2], xmm2
+    movups [rcx + CxXmm3], xmm3
+    movups [rcx + CxXmm4], xmm4
+    movups [rcx + CxXmm5], xmm5
+    movups [rcx + CxXmm6], xmm6
+    movups [rcx + CxXmm7], xmm7
+    movups [rcx + CxXmm8], xmm8
+    movups [rcx + CxXmm9], xmm9
+    movups [rcx + CxXmm10], xmm10
+    movups [rcx + CxXmm11], xmm11
+    movups [rcx + CxXmm12], xmm12
+    movups [rcx + CxXmm13], xmm13
+    movups [rcx + CxXmm14], xmm14
+    movups [rcx + CxXmm15], xmm15
 
     jmp RtlCaptureContextExit
 
@@ -181,22 +181,22 @@ PUBLIC RtlpRestoreContextInternal
     ldmxcsr [rcx + CxMxCsr]
 
     /* Restore xmm registers */
-    movaps xmm0, [rcx + CxXmm0]
-    movaps xmm1, [rcx + CxXmm1]
-    movaps xmm2, [rcx + CxXmm2]
-    movaps xmm3, [rcx + CxXmm3]
-    movaps xmm4, [rcx + CxXmm4]
-    movaps xmm5, [rcx + CxXmm5]
-    movaps xmm6, [rcx + CxXmm6]
-    movaps xmm7, [rcx + CxXmm7]
-    movaps xmm8, [rcx + CxXmm8]
-    movaps xmm9, [rcx + CxXmm9]
-    movaps xmm10, [rcx + CxXmm10]
-    movaps xmm11, [rcx + CxXmm11]
-    movaps xmm12, [rcx + CxXmm12]
-    movaps xmm13, [rcx + CxXmm13]
-    movaps xmm14, [rcx + CxXmm14]
-    movaps xmm15, [rcx + CxXmm15]
+    movups xmm0, [rcx + CxXmm0]
+    movups xmm1, [rcx + CxXmm1]
+    movups xmm2, [rcx + CxXmm2]
+    movups xmm3, [rcx + CxXmm3]
+    movups xmm4, [rcx + CxXmm4]
+    movups xmm5, [rcx + CxXmm5]
+    movups xmm6, [rcx + CxXmm6]
+    movups xmm7, [rcx + CxXmm7]
+    movups xmm8, [rcx + CxXmm8]
+    movups xmm9, [rcx + CxXmm9]
+    movups xmm10, [rcx + CxXmm10]
+    movups xmm11, [rcx + CxXmm11]
+    movups xmm12, [rcx + CxXmm12]
+    movups xmm13, [rcx + CxXmm13]
+    movups xmm14, [rcx + CxXmm14]
+    movups xmm15, [rcx + CxXmm15]
 
     jmp RtlRestoreContextExit
 
