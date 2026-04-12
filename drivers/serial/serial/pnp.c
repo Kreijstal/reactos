@@ -4,7 +4,7 @@
  * FILE:            drivers/dd/serial/pnp.c
  * PURPOSE:         Serial IRP_MJ_PNP operations
  *
- * PROGRAMMERS:     Hervé Poussineau (hpoussin@reactos.org)
+ * PROGRAMMERS:     Hervï¿½ Poussineau (hpoussin@reactos.org)
  */
 /* FIXME: call IoAcquireRemoveLock/IoReleaseRemoveLock around each I/O operation */
 
@@ -312,8 +312,10 @@ SerialPnpStartDevice(
 	IER |= SR_IER_DATA_RECEIVED | SR_IER_THR_EMPTY | SR_IER_LSR_CHANGE | SR_IER_MSR_CHANGE;
 	WRITE_PORT_UCHAR(SER_IER(ComPortBase), IER);
 
-	/* Activate DTR, RTS */
-	DeviceExtension->MCR |= SR_MCR_DTR | SR_MCR_RTS;
+	/* Activate DTR, RTS, and OUT2.
+	 * OUT2 gates the UART interrupt line to the interrupt controller;
+	 * without it, no UART interrupts reach the CPU. */
+	DeviceExtension->MCR |= SR_MCR_DTR | SR_MCR_RTS | SR_MCR_OUT2;
 	WRITE_PORT_UCHAR(SER_MCR(ComPortBase), DeviceExtension->MCR);
 
 	/* Activate serial interface */
