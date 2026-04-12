@@ -136,7 +136,7 @@ CsrAllocateCaptureBuffer(
     RtlZeroMemory(CaptureBuffer->PointerOffsetsArray, OffsetsArraySize);
 
     /* Point to the start of the free buffer */
-    CaptureBuffer->BufferEnd = (LPC_PVOID)((LPC_ULONG_PTR)CaptureBuffer->PointerOffsetsArray +
+    CaptureBuffer->BufferEnd = (LPC_PVOID)(ULONG_PTR)((ULONG_PTR)CaptureBuffer->PointerOffsetsArray +
                                            OffsetsArraySize);
 
     /* Return the address of the buffer */
@@ -166,7 +166,7 @@ CsrAllocateMessagePointer(
     else
     {
         /* Set the capture data at our current available buffer */
-        *CapturedData = (LPC_PVOID)CaptureBuffer->BufferEnd;
+        *CapturedData = CaptureBuffer->BufferEnd;
 
         /* Validate the size */
         if (MessageLength >= MAXLONG) return 0;
@@ -175,11 +175,11 @@ CsrAllocateMessagePointer(
         MessageLength = (MessageLength + 3) & ~3;
 
         /* Move our available buffer beyond this space */
-        CaptureBuffer->BufferEnd = (LPC_PVOID)((ULONG_PTR)CaptureBuffer->BufferEnd + MessageLength);
+        CaptureBuffer->BufferEnd = (LPC_PVOID)(ULONG_PTR)((ULONG_PTR)CaptureBuffer->BufferEnd + MessageLength);
     }
 
     /* Write down this pointer in the array and increase the count */
-    CaptureBuffer->PointerOffsetsArray[CaptureBuffer->PointerCount++] = (LPC_ULONG_PTR)CapturedData;
+    CaptureBuffer->PointerOffsetsArray[CaptureBuffer->PointerCount++] = (LPC_ULONG_PTR)(ULONG_PTR)CapturedData;
 
     /* Return the aligned length */
     return MessageLength;
@@ -203,7 +203,7 @@ CsrCaptureMessageBuffer(
     if (!MessageBuffer || !MessageLength) return;
 
     /* Copy the data into the buffer */
-    RtlMoveMemory((PVOID)*CapturedData, MessageBuffer, MessageLength);
+    RtlMoveMemory((PVOID)(ULONG_PTR)*CapturedData, MessageBuffer, MessageLength);
 }
 
 #ifdef USE_LPC6432
