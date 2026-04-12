@@ -28,13 +28,16 @@ static PNLSTABLEINFO32 UnicodeNlsTable = (PVOID)&UnicodeData;
 static PCPTABLEINFO32 AnsiCpTable;
 static PCPTABLEINFO32 OemCpTable;
 
-static UNICODE_STRING NtDll32Str = RTL_CONSTANT_STRING(L"" TMP_WOW_DIR L"\\ntdll.dll");
+static UNICODE_STRING NtDll32Str;
 static ANSI_STRING ImportLdrInitializeThunkStr = RTL_CONSTANT_STRING("LdrInitializeThunk");
 static ANSI_STRING ImportUserExceptionDispatcherStr = RTL_CONSTANT_STRING("KiUserExceptionDispatcher");
 static PVOID NtDll32 = NULL;
 
-static UNICODE_STRING Kernel32Str = RTL_CONSTANT_STRING(L"" TMP_WOW_DIR L"\\kernel32.dll");
+static UNICODE_STRING Kernel32Str;
 static ANSI_STRING ImportBaseStr = RTL_CONSTANT_STRING("Base");
+
+static WCHAR NtDll32Path[MAX_PATH];
+static WCHAR Kernel32Path[MAX_PATH];
 
 PVOID NtDll32LdrpRoutine = NULL;
 PVOID NtDll32KiUserExceptionDispatcher = NULL;
@@ -1120,7 +1123,25 @@ SetupNls(PPEB Peb,
 }
 
 static
-VOID 
+VOID
+Wow64InitSysWow64Paths(VOID)
+{
+    UNICODE_STRING UnexpandedSysRoot = RTL_CONSTANT_STRING(L"%SystemRoot%");
+    UNICODE_STRING SystemRootString;
+    WCHAR Buffer[MAX_PATH] = { 0 };
+
+    RtlInitEmptyUnicodeString(&SystemRootString, Buffer, sizeof(Buffer));
+    RtlExpandEnvironmentStrings_U(NULL, &UnexpandedSysRoot, &SystemRootString, NULL);
+
+    _snwprintf(NtDll32Path, MAX_PATH, L"%ls\\SysWOW64\\ntdll.dll", Buffer);
+    RtlInitUnicodeString(&NtDll32Str, NtDll32Path);
+
+    _snwprintf(Kernel32Path, MAX_PATH, L"%ls\\SysWOW64\\kernel32.dll", Buffer);
+    RtlInitUnicodeString(&Kernel32Str, Kernel32Path);
+}
+
+static
+VOID
 Wow64InitProcess(PCONTEXT pContext)
 {
     NTSTATUS Status;
@@ -1128,13 +1149,15 @@ Wow64InitProcess(PCONTEXT pContext)
     PRTL_USER_PROCESS_PARAMETERS32 ProcParams32 = NULL;
     PPEB Peb = NtCurrentPeb();
     IMAGE_NT_HEADERS32 *NtHeaders = NULL;
-    
+
+    Wow64InitSysWow64Paths();
+
     Status = Wow64InitEntrypointTranslation();
     ASSERT(NT_SUCCESS(Status));
-    
+
     NtHeaders = (IMAGE_NT_HEADERS32 *)RtlImageNtHeader(Peb->ImageBaseAddress);
 
-    Status = LdrLoadDll(L"" TMP_WOW_DIR L"\\ntdll.dll", 0, &NtDll32Str, &NtDll32);
+    Status = LdrLoadDll(NULL, 0, &NtDll32Str, &NtDll32);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("32 bit NTDLL.DLL could not be loaded.\n");
