@@ -4,7 +4,7 @@
  * FILE:            drivers/dd/serial/serial.h
  * PURPOSE:         Serial driver header
  *
- * PROGRAMMERS:     Hervé Poussineau (hpoussin@reactos.org)
+ * PROGRAMMERS:     Hervï¿½ Poussineau (hpoussin@reactos.org)
  */
 
 #ifndef _SERIAL_PCH_
@@ -149,6 +149,7 @@ typedef struct _WORKITEM_DATA
 #define   SER_MCR(x)   ((PUCHAR)(x)+4) /* Modem Control Register */
 #define     SR_MCR_DTR            SERIAL_DTR_STATE
 #define     SR_MCR_RTS            SERIAL_RTS_STATE
+#define     SR_MCR_OUT2           0x08
 #define   SER_LSR(x)   ((PUCHAR)(x)+5) /* Line Status Register */
 #define     SR_LSR_DATA_RECEIVED  0x01
 #define     SR_LSR_OVERRUN_ERROR  0x02
