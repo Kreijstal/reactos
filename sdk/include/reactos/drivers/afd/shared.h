@@ -546,16 +546,21 @@ typedef struct STRUCT(_FILE_REPLY_CONNECT)
 #undef PTR
 #undef _SELECT3264
 
+#ifndef _AFD_SUPER_CONNECT_DEFINED
+#define _AFD_SUPER_CONNECT_DEFINED
 typedef struct _AFD_SUPER_CONNECT_INFO
 {
     BOOLEAN SanActive;
     TRANSPORT_ADDRESS RemoteAddress;
 } AFD_SUPER_CONNECT_INFO, *PAFD_SUPER_CONNECT_INFO;
+#endif
 
 #define AFD_SUPER_CONNECT 49
 #define IOCTL_AFD_SUPER_CONNECT \
   _AFD_CONTROL_CODE(AFD_SUPER_CONNECT, METHOD_NEITHER)
 
+#ifndef _SOCKET_STATE_DEFINED
+#define _SOCKET_STATE_DEFINED
 typedef enum _SOCKET_STATE {
     SocketOpen,
     SocketBound,
@@ -563,7 +568,10 @@ typedef enum _SOCKET_STATE {
     SocketConnected,
     SocketClosed
 } SOCKET_STATE, *PSOCKET_STATE;
+#endif
 
+#ifndef _SOCK_SHARED_INFO_DEFINED
+#define _SOCK_SHARED_INFO_DEFINED
 typedef struct _SOCK_SHARED_INFO {
     SOCKET_STATE                State;
     LONG                        RefCount;
@@ -608,6 +616,7 @@ typedef struct _SOCK_SHARED_INFO {
     SOCKADDR                    WSLocalAddress;
     SOCKADDR                    WSRemoteAddress;
 } SOCK_SHARED_INFO, *PSOCK_SHARED_INFO;
+#endif
 
 #endif /*__AFD_SHARED_H */
 
