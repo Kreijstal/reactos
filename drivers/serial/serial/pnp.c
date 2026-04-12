@@ -256,12 +256,11 @@ SerialPnpStartDevice(
 		return Status;
 	}
 
-	/* Clear receive/transmit buffers */
+	/* Enable and clear receive/transmit FIFOs */
 	if (DeviceExtension->UartType >= Uart16550A)
 	{
-		/* 16550 UARTs also have FIFO queues, but they are unusable due to a bug */
 		WRITE_PORT_UCHAR(SER_FCR(ComPortBase),
-			SR_FCR_CLEAR_RCVR | SR_FCR_CLEAR_XMIT);
+			SR_FCR_ENABLE_FIFO | SR_FCR_CLEAR_RCVR | SR_FCR_CLEAR_XMIT);
 	}
 
 	/* Create link \DosDevices\COMX -> \Device\SerialX */
