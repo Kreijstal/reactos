@@ -3744,7 +3744,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     ULONG NodeNumber;
     NTSTATUS Status;
 
-    DPRINT1("BrowseSubNodeIndexEntries: VCN=%I64d searching for '%wZ' (DirSearch=%d)\n",
+    DPRINT("BrowseSubNodeIndexEntries: VCN=%I64d searching for '%wZ' (DirSearch=%d)\n",
             VCN, FileName, DirSearch);
 
     // Calculate node number as VCN / Clusters per index record
@@ -3800,7 +3800,67 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     IndexEntry = FirstEntry;
     while (IndexEntry <= LastEntry)
     {
-        // Does IndexEntry have a sub-node?
+        // For exact lookups (non-wildcard), use B-tree key ordering to
+        // navigate directly to the right sub-node instead of scanning all.
+        // NTFS B-tree invariant: the sub-node VCN attached to entry[i]
+        // contains keys that sort BEFORE entry[i].  The END entry's
+        // sub-node contains keys that sort AFTER all real entries.
+        if (!DirSearch && !(IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
+        {
+            UNICODE_STRING EntryName;
+            LONG Cmp;
+
+            EntryName.Buffer = IndexEntry->FileName.Name;
+            EntryName.Length = EntryName.MaximumLength =
+                IndexEntry->FileName.NameLength * sizeof(WCHAR);
+            Cmp = RtlCompareUnicodeString(FileName, &EntryName, !CaseSensitive);
+
+            if (Cmp < 0)
+            {
+                // search_key < entry: the target must be in this entry's sub-node
+                if ((IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) &&
+                    (IndexRecord->Header.Flags & INDEX_NODE_LARGE) &&
+                    IndexAllocationContext)
+                {
+                    Status = BrowseSubNodeIndexEntries(Vcb, MftRecord, IndexBlockSize,
+                                                       FileName, IndexAllocationContext,
+                                                       Bitmap, GetIndexEntryVCN(IndexEntry),
+                                                       StartEntry, CurrentEntry,
+                                                       DirSearch, CaseSensitive, OutMFTIndex);
+                    if (NT_SUCCESS(Status))
+                    {
+                        ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+                        return Status;
+                    }
+                }
+                // Not in sub-node: the file doesn't exist in this branch
+                ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            else if (Cmp == 0)
+            {
+                // Exact match on the key
+                if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
+                    *CurrentEntry >= *StartEntry &&
+                    IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS)
+                {
+                    *StartEntry = *CurrentEntry;
+                    *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+                    DPRINT("BrowseSubNode VCN=%I64d FOUND MFT=%I64u\n", VCN, *OutMFTIndex);
+                    ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+                    return STATUS_SUCCESS;
+                }
+                // DOS-name or system entry match — skip, continue to next
+            }
+            // Cmp > 0: search_key > entry, advance to next entry
+            (*CurrentEntry) += 1;
+            ASSERT(IndexEntry->Length >= sizeof(INDEX_ENTRY_ATTRIBUTE));
+            IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)IndexEntry + IndexEntry->Length);
+            continue;
+        }
+
+        // DirSearch path (wildcard/enumeration) or END entry:
+        // descend into every sub-node to enumerate all entries.
         if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
         {
             if (!(IndexRecord->Header.Flags & INDEX_NODE_LARGE) || !IndexAllocationContext)
@@ -3841,7 +3901,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         {
             *StartEntry = *CurrentEntry;
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
-            DPRINT1("BrowseSubNode VCN=%I64d FOUND MFT=%I64u\n", VCN, *OutMFTIndex);
+            DPRINT("BrowseSubNode VCN=%I64d FOUND MFT=%I64u\n", VCN, *OutMFTIndex);
             ExFreePoolWithTag(IndexRecord, TAG_NTFS);
             return STATUS_SUCCESS;
         }
@@ -3852,7 +3912,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)IndexEntry + IndexEntry->Length);
     }
 
-    DPRINT1("BrowseSubNode VCN=%I64d NOT FOUND (scanned %lu entries)\n", VCN, *CurrentEntry);
+    DPRINT("BrowseSubNode VCN=%I64d NOT FOUND (scanned %lu entries)\n", VCN, *CurrentEntry);
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
 
     return STATUS_OBJECT_NAME_NOT_FOUND;
@@ -3880,7 +3940,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
     ULONG *BitmapPtr;
     RTL_BITMAP  Bitmap;
 
-    DPRINT1("BrowseIndexEntries: searching for '%wZ' IndexBlockSize=%lu (DirSearch=%d)\n",
+    DPRINT("BrowseIndexEntries: searching for '%wZ' IndexBlockSize=%lu (DirSearch=%d)\n",
             FileName, IndexBlockSize, DirSearch);
 
     // Find the $I30 index allocation, if there is one
@@ -3941,7 +4001,75 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
     IndexEntry = FirstEntry;
     while (IndexEntry <= LastEntry)
     {
-        // Does IndexEntry have a sub-node?
+        // For exact lookups (non-wildcard), use B-tree key ordering to
+        // navigate directly instead of scanning all sub-nodes.
+        if (!DirSearch && !(IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
+        {
+            UNICODE_STRING EntryName;
+            LONG Cmp;
+
+            EntryName.Buffer = IndexEntry->FileName.Name;
+            EntryName.Length = EntryName.MaximumLength =
+                IndexEntry->FileName.NameLength * sizeof(WCHAR);
+            Cmp = RtlCompareUnicodeString(FileName, &EntryName, !CaseSensitive);
+
+            if (Cmp < 0)
+            {
+                // search_key < entry: target must be in this entry's sub-node
+                if ((IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) &&
+                    (IndexRecord->Header.Flags & INDEX_ROOT_LARGE) &&
+                    IndexAllocationContext)
+                {
+                    Status = BrowseSubNodeIndexEntries(Vcb, MftRecord, IndexBlockSize,
+                                                       FileName, IndexAllocationContext,
+                                                       &Bitmap, GetIndexEntryVCN(IndexEntry),
+                                                       StartEntry, CurrentEntry,
+                                                       DirSearch, CaseSensitive, OutMFTIndex);
+                    if (NT_SUCCESS(Status))
+                    {
+                        ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+                        ReleaseAttributeContext(BitmapContext);
+                        ReleaseAttributeContext(IndexAllocationContext);
+                        return Status;
+                    }
+                }
+                // Not in sub-node: file doesn't exist in this branch
+                if (IndexAllocationContext)
+                {
+                    ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+                    ReleaseAttributeContext(BitmapContext);
+                    ReleaseAttributeContext(IndexAllocationContext);
+                }
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            else if (Cmp == 0)
+            {
+                // Exact match
+                if ((IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
+                    *CurrentEntry >= *StartEntry &&
+                    IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS)
+                {
+                    *StartEntry = *CurrentEntry;
+                    *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+                    if (IndexAllocationContext)
+                    {
+                        ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+                        ReleaseAttributeContext(BitmapContext);
+                        ReleaseAttributeContext(IndexAllocationContext);
+                    }
+                    return STATUS_SUCCESS;
+                }
+                // DOS-name or system entry match — skip, continue to next
+            }
+            // Cmp > 0: search_key > entry, advance to next entry
+            (*CurrentEntry) += 1;
+            ASSERT(IndexEntry->Length >= sizeof(INDEX_ENTRY_ATTRIBUTE));
+            IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)IndexEntry + IndexEntry->Length);
+            continue;
+        }
+
+        // DirSearch path (wildcard/enumeration) or END entry:
+        // descend into every sub-node to enumerate all entries.
         if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
         {
             if (!(IndexRecord->Header.Flags & INDEX_ROOT_LARGE) || !IndexAllocationContext)
