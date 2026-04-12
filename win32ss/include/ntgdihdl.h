@@ -13,7 +13,20 @@
 
 #include <winddi.h>
 
-#include "../../dll/ntdll/wow64/ntdll32.h"
+/* WoW64 cast macros: identity on native builds, pointer-width conversion on WoW64 */
+#ifndef WOW64_CAST_TO_PTR
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#define WOW64_CAST_TO_PTR(x) (x)
+#define WOW64_CAST_FROM_PTR(x) (x)
+#define WOW64_CAST_TO_HANDLE(x) (x)
+#define WOW64_CAST_FROM_HANDLE(x) (x)
+#else
+#define WOW64_CAST_TO_PTR(x) ((PVOID)(ULONG_PTR)(x))
+#define WOW64_CAST_FROM_PTR(x) ((UINT64)(ULONG_PTR)(x))
+#define WOW64_CAST_TO_HANDLE(x) ((HANDLE)(ULONG_PTR)(x))
+#define WOW64_CAST_FROM_HANDLE(x) ((UINT64)(ULONG_PTR)(x))
+#endif
+#endif
 
 /* DEFINES *******************************************************************/
 
