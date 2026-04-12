@@ -99,6 +99,11 @@ typedef struct _WORKITEM_DATA
 
 #define SERIAL_TAG 'lreS'
 
+/* Default driver circular buffer size in bytes.
+ * Must be large enough to absorb bursts between ReadFile calls.
+ * Windows uses 4096 as the default (documented in SetupComm). */
+#define SERIAL_DEFAULT_BUFFER_SIZE 4096
+
 #define INFINITE MAXULONG
 
 /* Baud master clock */
