@@ -471,12 +471,248 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
 
     DPRINT("Buffer=%p tofind=%S\n", Buffer, Ccb->DirectorySearchPattern);
 
+    /* Synthesize '.' and '..' entries (indices 0 and 1).
+     * NTFS does not store them in the $I30 index — the Windows NTFS
+     * driver generates them on the fly.  Without them, FindFirstFile
+     * on an empty directory returns ERROR_FILE_NOT_FOUND instead of
+     * finding at least '.' and '..', which breaks CopyDirectory. */
     Written = 0;
-    while (Status == STATUS_SUCCESS && BufferLength > 0)
+    while (Ccb->Entry < 2 && Status == STATUS_SUCCESS && BufferLength > 0)
+    {
+        WCHAR DotName[3];
+        ULONG DotLen;
+        ULONGLONG DotMft;
+        UNICODE_STRING DotStr;
+
+        if (Ccb->Entry == 0)
+        {
+            DotName[0] = L'.'; DotLen = 1;
+            DotMft = Fcb->MFTIndex;
+        }
+        else
+        {
+            DotName[0] = L'.'; DotName[1] = L'.'; DotLen = 2;
+            /* Root directory's parent is itself */
+            if (Fcb->MFTIndex == NTFS_FILE_ROOT)
+                DotMft = NTFS_FILE_ROOT;
+            else
+            {
+                /* Get parent from $FILE_NAME in this directory's MFT record */
+                PFILE_RECORD_HEADER DirRec;
+                PFILENAME_ATTRIBUTE DirFn;
+                DotMft = NTFS_FILE_ROOT; /* fallback */
+                DirRec = ExAllocateFromNPagedLookasideList(&DeviceExtension->FileRecLookasideList);
+                if (DirRec && NT_SUCCESS(ReadFileRecord(DeviceExtension, Fcb->MFTIndex, DirRec)))
+                {
+                    DirFn = GetBestFileNameFromRecord(DeviceExtension, DirRec);
+                    if (DirFn)
+                        DotMft = DirFn->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+                }
+                if (DirRec)
+                    ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, DirRec);
+            }
+        }
+        DotName[DotLen] = 0;
+        RtlInitUnicodeString(&DotStr, DotName);
+
+        /* Emit '.' and '..' for queries that list all files.
+         * The I/O manager translates '*.*' into DOS wildcards (<.")
+         * before we see it, and FsRtlIsNameInExpression with those
+         * translated wildcards does not match '.' or '..'.
+         * We detect "list all" patterns: single '*', or any pattern
+         * that is purely DOS wildcards (<, >, ") and dots. */
+        if ((Pattern.Length == sizeof(WCHAR) && Pattern.Buffer[0] == L'*') ||
+            (Pattern.Length == 3 * sizeof(WCHAR) &&
+             (Pattern.Buffer[0] == L'*' || Pattern.Buffer[0] == DOS_STAR) &&
+             (Pattern.Buffer[1] == L'.' || Pattern.Buffer[1] == DOS_DOT) &&
+             (Pattern.Buffer[2] == L'*' || Pattern.Buffer[2] == DOS_STAR)) ||
+            FsRtlIsNameInExpression(&Pattern, &DotStr,
+                                    !BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                    NULL))
+        {
+            /* Read the directory's own MFT record for timestamps/attributes */
+            FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExtension->FileRecLookasideList);
+            if (FileRecord)
+            {
+                Status = ReadFileRecord(DeviceExtension, DotMft, FileRecord);
+                if (NT_SUCCESS(Status))
+                {
+                    PFILENAME_ATTRIBUTE OrigFn = GetBestFileNameFromRecord(DeviceExtension, FileRecord);
+                    PSTANDARD_INFORMATION StdInfo = GetStandardInformationFromRecord(DeviceExtension, FileRecord);
+
+                    /* Build a synthetic $FILE_NAME for '.' or '..' so we can
+                     * populate any FILE_xxx_INFORMATION structure generically. */
+                    struct {
+                        FILENAME_ATTRIBUTE Fn;
+                        WCHAR ExtraChar; /* space for ".." (2 chars, Fn.Name has 1) */
+                    } SyntheticFn;
+                    PFILENAME_ATTRIBUTE FnSrc = OrigFn;
+
+                    if (FnSrc == NULL)
+                    {
+                        /* Directory has no $FILE_NAME (shouldn't happen, but be safe) */
+                        RtlZeroMemory(&SyntheticFn, sizeof(SyntheticFn));
+                        SyntheticFn.Fn.FileAttributes = NTFS_FILE_TYPE_DIRECTORY;
+                        FnSrc = &SyntheticFn.Fn;
+                    }
+                    else
+                    {
+                        /* Copy the real attributes so we get correct timestamps */
+                        RtlCopyMemory(&SyntheticFn.Fn, FnSrc,
+                                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name));
+                    }
+
+                    /* Overwrite name with "." or ".." */
+                    SyntheticFn.Fn.NameLength = (UCHAR)DotLen;
+                    SyntheticFn.Fn.NameType = NTFS_FILE_NAME_WIN32;
+                    SyntheticFn.Fn.Name[0] = L'.';
+                    if (DotLen == 2)
+                        *(&SyntheticFn.Fn.Name[0] + 1) = L'.';
+
+                    if (StdInfo)
+                        SyntheticFn.Fn.FileAttributes |= StdInfo->FileAttribute;
+
+                    /* Build a minimal temporary file record containing only
+                     * $STANDARD_INFORMATION and our synthetic $FILE_NAME.
+                     * This is passed to the NtfsGetXxxInformation helpers
+                     * which call GetBestFileNameFromRecord/GetStandardInformation
+                     * on it. We reuse the original FileRecord since it already
+                     * has $STANDARD_INFORMATION; we just need to make
+                     * GetBestFileNameFromRecord return our synthetic name.
+                     *
+                     * Instead of building a fake record, directly fill the
+                     * output structures ourselves — it's simpler and avoids
+                     * touching shared state. */
+                    {
+                        ULONG DotNameBytes = DotLen * sizeof(WCHAR);
+                        LARGE_INTEGER CTime = {.QuadPart = SyntheticFn.Fn.CreationTime};
+                        LARGE_INTEGER ATime = {.QuadPart = SyntheticFn.Fn.LastAccessTime};
+                        LARGE_INTEGER WTime = {.QuadPart = SyntheticFn.Fn.LastWriteTime};
+                        LARGE_INTEGER MTime = {.QuadPart = SyntheticFn.Fn.ChangeTime};
+                        ULONG Attrs = FILE_ATTRIBUTE_DIRECTORY;
+                        if (StdInfo)
+                            NtfsFileFlagsToAttributes(SyntheticFn.Fn.FileAttributes, &Attrs);
+
+                        Status = STATUS_BUFFER_OVERFLOW;
+
+                        switch (FileInformationClass)
+                        {
+                        case FileNamesInformation:
+                        {
+                            ULONG Needed = FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName) + DotNameBytes;
+                            if (BufferLength >= (LONG)FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName) + (LONG)DotNameBytes)
+                            {
+                                PFILE_NAMES_INFORMATION Info = (PFILE_NAMES_INFORMATION)Buffer;
+                                Info->NextEntryOffset = ULONG_ROUND_UP(Needed);
+                                Info->FileIndex = 0;
+                                Info->FileNameLength = DotNameBytes;
+                                RtlCopyMemory(Info->FileName, DotName, DotNameBytes);
+                                Written = Needed;
+                                Status = STATUS_SUCCESS;
+                            }
+                            break;
+                        }
+                        case FileDirectoryInformation:
+                        {
+                            ULONG Needed = FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName) + DotNameBytes;
+                            if (BufferLength >= (LONG)Needed)
+                            {
+                                PFILE_DIRECTORY_INFORMATION Info = (PFILE_DIRECTORY_INFORMATION)Buffer;
+                                RtlZeroMemory(Info, FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName));
+                                Info->NextEntryOffset = ULONG_ROUND_UP(Needed);
+                                Info->FileIndex = 0;
+                                Info->CreationTime = CTime;
+                                Info->LastAccessTime = ATime;
+                                Info->LastWriteTime = WTime;
+                                Info->ChangeTime = MTime;
+                                Info->FileAttributes = Attrs;
+                                Info->FileNameLength = DotNameBytes;
+                                RtlCopyMemory(Info->FileName, DotName, DotNameBytes);
+                                Written = Needed;
+                                Status = STATUS_SUCCESS;
+                            }
+                            break;
+                        }
+                        case FileFullDirectoryInformation:
+                        {
+                            ULONG Needed = FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName) + DotNameBytes;
+                            if (BufferLength >= (LONG)Needed)
+                            {
+                                PFILE_FULL_DIR_INFORMATION Info = (PFILE_FULL_DIR_INFORMATION)Buffer;
+                                RtlZeroMemory(Info, FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName));
+                                Info->NextEntryOffset = ULONG_ROUND_UP(Needed);
+                                Info->FileIndex = 0;
+                                Info->CreationTime = CTime;
+                                Info->LastAccessTime = ATime;
+                                Info->LastWriteTime = WTime;
+                                Info->ChangeTime = MTime;
+                                Info->FileAttributes = Attrs;
+                                Info->FileNameLength = DotNameBytes;
+                                RtlCopyMemory(Info->FileName, DotName, DotNameBytes);
+                                Written = Needed;
+                                Status = STATUS_SUCCESS;
+                            }
+                            break;
+                        }
+                        case FileBothDirectoryInformation:
+                        {
+                            ULONG Needed = FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName) + DotNameBytes;
+                            if (BufferLength >= (LONG)Needed)
+                            {
+                                PFILE_BOTH_DIR_INFORMATION Info = (PFILE_BOTH_DIR_INFORMATION)Buffer;
+                                RtlZeroMemory(Info, FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName));
+                                Info->NextEntryOffset = ULONG_ROUND_UP(Needed);
+                                Info->FileIndex = 0;
+                                Info->CreationTime = CTime;
+                                Info->LastAccessTime = ATime;
+                                Info->LastWriteTime = WTime;
+                                Info->ChangeTime = MTime;
+                                Info->FileAttributes = Attrs;
+                                Info->ShortNameLength = 0;
+                                Info->FileNameLength = DotNameBytes;
+                                RtlCopyMemory(Info->FileName, DotName, DotNameBytes);
+                                Written = Needed;
+                                Status = STATUS_SUCCESS;
+                            }
+                            break;
+                        }
+                        default:
+                            Status = STATUS_INVALID_INFO_CLASS;
+                            break;
+                        }
+                    }
+
+                    if (NT_SUCCESS(Status))
+                    {
+                        Buffer0 = (PFILE_NAMES_INFORMATION)Buffer;
+                        Buffer0->FileIndex = FileIndex++;
+                        BufferLength -= Buffer0->NextEntryOffset;
+                        Buffer += Buffer0->NextEntryOffset;
+                    }
+                }
+                ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
+            }
+        }
+
+        Ccb->Entry++;
+
+        if (Stack->Flags & SL_RETURN_SINGLE_ENTRY)
+            break;
+    }
+
+    /* Ccb->Entry now includes the 2 synthetic dot entries.
+     * NtfsFindFileAt uses a 0-based index into the B-tree,
+     * so subtract 2 to get the real B-tree offset. */
+    {
+        ULONG BTreeEntry = (Ccb->Entry >= 2) ? Ccb->Entry - 2 : 0;
+    /* Only enter the B-tree loop if we haven't already satisfied
+     * a single-entry request with a dot entry. */
+    while (Status == STATUS_SUCCESS && BufferLength > 0
+           && !(Buffer0 != NULL && (Stack->Flags & SL_RETURN_SINGLE_ENTRY)))
     {
         Status = NtfsFindFileAt(DeviceExtension,
                                 &Pattern,
-                                &Ccb->Entry,
+                                &BTreeEntry,
                                 &FileRecord,
                                 &MFTRecord,
                                 Fcb->MFTIndex,
@@ -549,13 +785,14 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         }
         else
         {
-            Status = (First ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
+            BOOLEAN ReallyFirst = First && (Buffer0 == NULL);
+            Status = (ReallyFirst ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
             break;
         }
 
         Buffer0 = (PFILE_NAMES_INFORMATION)Buffer;
         Buffer0->FileIndex = FileIndex++;
-        Ccb->Entry++;
+        BTreeEntry++;
         BufferLength -= Buffer0->NextEntryOffset;
 
         ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
@@ -566,6 +803,10 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         }
 
         Buffer += Buffer0->NextEntryOffset;
+    }
+
+    /* Sync Ccb->Entry back: 2 dots + however many B-tree entries we consumed */
+    Ccb->Entry = BTreeEntry + 2;
     }
 
     if (Buffer0)
