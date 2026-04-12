@@ -389,7 +389,7 @@ AfdConnectedSocketWriteDataUdp(PAFD_FCB FCB,
     NTSTATUS Status;
 
     /* Check that the socket is bound */
-    if (FCB->State != SOCKET_STATE_BOUND || !FCB->RemoteAddress)
+    if (FCB->SharedData.State != SOCKET_STATE_BOUND || !FCB->RemoteAddress)
     {
         AFD_DbgPrint(MIN_TRACE,("Invalid parameter\n"));
         return UnlockAndMaybeComplete(FCB, 
