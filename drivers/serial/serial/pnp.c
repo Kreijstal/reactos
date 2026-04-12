@@ -68,9 +68,9 @@ SerialAddDeviceInternal(
 	DeviceExtension->Pdo = Pdo;
 	DeviceExtension->PnpState = dsStopped;
 	DeviceExtension->UartType = UartType;
-	Status = InitializeCircularBuffer(&DeviceExtension->InputBuffer, 16);
+	Status = InitializeCircularBuffer(&DeviceExtension->InputBuffer, SERIAL_DEFAULT_BUFFER_SIZE);
 	if (!NT_SUCCESS(Status)) goto ByeBye;
-	Status = InitializeCircularBuffer(&DeviceExtension->OutputBuffer, 16);
+	Status = InitializeCircularBuffer(&DeviceExtension->OutputBuffer, SERIAL_DEFAULT_BUFFER_SIZE);
 	if (!NT_SUCCESS(Status)) goto ByeBye;
 	IoInitializeRemoveLock(&DeviceExtension->RemoveLock, SERIAL_TAG, 0, 0);
 	KeInitializeSpinLock(&DeviceExtension->InputBufferLock);
