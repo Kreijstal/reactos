@@ -2311,6 +2311,13 @@ ProcessIdToSessionId(IN DWORD dwProcessId,
 
 #define AddToHandle(x,y)       ((x) = (HANDLE)((ULONG_PTR)(x) | (y)))
 #define RemoveFromHandle(x,y)  ((x) = (HANDLE)((ULONG_PTR)(x) & ~(y)))
+#ifdef USE_LPC6432
+#define AddToLpcHandle(x,y)       ((x) = (LPC_HANDLE)((x) | (y)))
+#define RemoveFromLpcHandle(x,y)  ((x) = (LPC_HANDLE)((x) & ~(y)))
+#else
+#define AddToLpcHandle    AddToHandle
+#define RemoveFromLpcHandle RemoveFromHandle
+#endif
 C_ASSERT(PROCESS_PRIORITY_CLASS_REALTIME == (PROCESS_PRIORITY_CLASS_HIGH + 1));
 
 /*
@@ -2367,7 +2374,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     UINT64 TibValue;
 #endif
     PPEB Peb;
-    PTEB Teb;
+    PTEB Teb __attribute__((unused));
     INITIAL_TEB InitialTeb;
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
@@ -4398,7 +4405,7 @@ StartScan:
          * (basesrv in particular) to know whether or not this is a GUI or a
          * TUI application.
          */
-        AddToHandle(FROM_LPC_HANDLE(CreateProcessMsg->ProcessHandle), 2);
+        AddToLpcHandle(CreateProcessMsg->ProcessHandle, 2);
 
         /* Also check if the parent is also a GUI process */
         NtHeaders = RtlImageNtHeader(GetModuleHandle(NULL));
@@ -4406,7 +4413,7 @@ StartScan:
             (NtHeaders->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI))
         {
             /* Let it know that it should display the hourglass mouse cursor */
-            AddToHandle(FROM_LPC_HANDLE(CreateProcessMsg->ProcessHandle), 1);
+            AddToLpcHandle(CreateProcessMsg->ProcessHandle, 1);
         }
     }
 
@@ -4414,11 +4421,11 @@ StartScan:
      * Likewise, the opposite holds as well, and no-feedback has precedence. */
     if (StartupInfo.dwFlags & STARTF_FORCEONFEEDBACK)
     {
-        AddToHandle(FROM_LPC_HANDLE(CreateProcessMsg->ProcessHandle), 1);
+        AddToLpcHandle(CreateProcessMsg->ProcessHandle, 1);
     }
     if (StartupInfo.dwFlags & STARTF_FORCEOFFFEEDBACK)
     {
-        RemoveFromHandle(FROM_LPC_HANDLE(CreateProcessMsg->ProcessHandle), 1);
+        RemoveFromLpcHandle(CreateProcessMsg->ProcessHandle, 1);
     }
 
     /* Also store which kind of VDM app (if any) this is */
