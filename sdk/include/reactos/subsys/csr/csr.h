@@ -51,7 +51,7 @@ CsrCaptureMessageBuffer(
     
 #ifdef USE_LPC6432 
 
-static
+__attribute__((unused)) static
 ULONG
 CsrAllocateMessagePointerNative(
     _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
@@ -61,7 +61,7 @@ CsrAllocateMessagePointerNative(
     return CsrAllocateMessagePointer(CaptureBuffer, MessageLength, CapturedData);
 }
 
-static
+__attribute__((unused)) static
 VOID
 CsrCaptureMessageBufferNative(
     _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
@@ -72,7 +72,7 @@ CsrCaptureMessageBufferNative(
     CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, CapturedData);
 }
 
-static
+__attribute__((unused)) static
 ULONG
 CsrAllocateMessagePointer32(
     _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
@@ -85,11 +85,11 @@ CsrAllocateMessagePointer32(
     Result = CsrAllocateMessagePointer(CaptureBuffer, MessageLength, &Temp);
     ASSERT((((ULONGLONG)Temp) & 0xFFFFFFFF00000000ULL) == 0);
     
-    *CapturedData = (PVOID)Temp;
+    *CapturedData = (PVOID)(ULONG_PTR)Temp;
     return Result;
 }
 
-static
+__attribute__((unused)) static
 VOID
 CsrCaptureMessageBuffer32(
     _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
@@ -100,7 +100,7 @@ CsrCaptureMessageBuffer32(
     LPC_PVOID Temp;
     CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, &Temp);
     ASSERT((((ULONGLONG)Temp) & 0xFFFFFFFF00000000ULL) == 0);
-    *CapturedData = (PVOID)Temp;
+    *CapturedData = (PVOID)(ULONG_PTR)Temp;
 }
 
 #define CsrAllocateMessagePointer CsrAllocateMessagePointer32
