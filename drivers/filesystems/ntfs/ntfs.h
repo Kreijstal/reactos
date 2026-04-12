@@ -276,6 +276,17 @@ typedef struct
     NPAGED_LOOKASIDE_LIST FcbLookasideList;
     NPAGED_LOOKASIDE_LIST AttrCtxtLookasideList;
     BOOLEAN EnableWriteSupport;
+
+    /* Zombie FCB list — FCBs we tried to destroy but whose
+     * SectionObjectPointers MM still references via a live data or image
+     * section.  We can't free the FCB while MM might still issue paging
+     * I/O against the section's stored FileObject (whose FsContext points
+     * here), so we put the FCB on this list and reap it later, when MM
+     * has finally cleared the SOP slots from MmDereferenceSegmentWithLock.
+     * Reaping is opportunistic: NtfsCreateFCB and NtfsDestroyFCB walk the
+     * list and free any whose SOP is now clean.  Protected by ZombieLock. */
+    LIST_ENTRY ZombieFcbList;
+    KSPIN_LOCK ZombieLock;
 } NTFS_GLOBAL_DATA, *PNTFS_GLOBAL_DATA;
 
 
@@ -685,6 +696,12 @@ typedef struct _FCB
     ERESOURCE MainResource;
 
     LIST_ENTRY FcbListEntry;
+    /* When this FCB has been "destroyed" but is still kept alive as a
+     * zombie because MM has live references via SectionObjectPointers,
+     * it lives on NtfsGlobalData->ZombieFcbList linked through this
+     * field instead of FcbListEntry.  See NtfsDestroyFCB for the
+     * orphan-vs-zombie decision and NtfsReapZombieFcbs for cleanup. */
+    LIST_ENTRY ZombieListEntry;
     struct _FCB* ParentFcb;
 
     ULONG DirIndex;
@@ -1122,6 +1139,9 @@ NtfsCreateFCB(PCWSTR FileName,
 
 VOID
 NtfsDestroyFCB(PNTFS_FCB Fcb);
+
+VOID
+NtfsReapZombieFcbs(VOID);
 
 BOOLEAN
 NtfsFCBIsDirectory(PNTFS_FCB Fcb);
