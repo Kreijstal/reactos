@@ -262,6 +262,8 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             add_definitions(-DSARCH_PC98)
         elseif(SARCH STREQUAL "wow64")
             add_definitions(-DBUILD_WOW6432)
+            # WoW64 build intentionally stores 32-bit pointers in 64-bit LPC fields
+            add_compile_options(-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast)
         endif()
     elseif(ARCH STREQUAL "amd64")
         # clang-cl defines this one for itself
