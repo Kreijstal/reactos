@@ -61,50 +61,51 @@ LOCAL x, x2, x3
     FPO 0, 0, 0, 0, 0, FRAME_FPO
     push ecx
     push edx
-    
+
     mov ecx, SyscallId
     mov edx, ArgCount
-    
+
     push ebp
     mov ebp, esp
-    
-    ; Align the stack, and allocate shadow space for the x64 calling convention
+
+    /* Align the stack, and allocate shadow space for the x64 calling convention */
     sub esp, 48
-    and esp, 0FFFFFFF0h
-    
+    and esp, HEX(FFFFFFF0)
+
     push 0
     push ebp
-    
-    ljmp 33h, x
-x:
-    ; pop rdx
-    db 5ah
 
-    ; add rdx, 16
-    db 48h
-    db 83h
-    db 0c2h
-    db 10h
-    
+    ljmp HEX(33), x
+x:
+    /* pop rdx (64-bit opcode) */
+    .byte HEX(5a)
+
+    /* add rdx, 16 (REX.W prefix + add r/m64, imm8) */
+    .byte HEX(48)
+    .byte HEX(83)
+    .byte HEX(c2)
+    .byte HEX(10)
+
     call x3
-    
-    push 23h
+
+    push HEX(23)
     push x2
-    db 48h
+    .byte HEX(48)
     retf
 x2:
     mov esp, ebp
     pop ebp
-    
+
     pop edx
     pop ecx
-    
+
     ret StackBytes
 x3:
-    dd 25048b64h
-    dd 000000c0h
-    db 50h
-    db 0c3h
+    /* mov rsp, gs:[0xC0] ; push rax ; ret */
+    .long HEX(25048b64)
+    .long HEX(000000c0)
+    .byte HEX(50)
+    .byte HEX(c3)
 ENDM
 MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
     int 3

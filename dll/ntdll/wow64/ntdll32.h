@@ -10,6 +10,8 @@
 
 #pragma once
 
+#include <ndk/ntndk.h>
+
 #if defined(BUILD_WOW6432)
 
 #define TEB64_TLS_OFFSET            0x1480
