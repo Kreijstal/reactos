@@ -330,11 +330,21 @@ MmDeleteVirtualMappingEx(
 
             OldIrql = MiAcquirePfnLock();
             Pfn1 = &MmPfnDatabase[OldPte.u.Hard.PageFrameNumber];
-            ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
-            ASSERT(Pfn1->u2.ShareCount > 0);
-            if (--Pfn1->u2.ShareCount == 0)
+            if (!MI_IS_ROS_PFN(Pfn1))
             {
-                Pfn1->u3.e1.PageLocation = TransitionPage;
+                /*
+                 * ARM3 pages: track share count and transition state.
+                 * ROS pages use ReferenceCount via MmDereferencePage instead;
+                 * transitioning them here causes PageLocation != ActiveAndValid
+                 * while ReferenceCount > 0 (e.g. MDL-locked by storage driver),
+                 * which triggers assertions in MmProbeAndLockPages.
+                 */
+                ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
+                ASSERT(Pfn1->u2.ShareCount > 0);
+                if (--Pfn1->u2.ShareCount == 0)
+                {
+                    Pfn1->u3.e1.PageLocation = TransitionPage;
+                }
             }
             MiReleasePfnLock(OldIrql);
         }
