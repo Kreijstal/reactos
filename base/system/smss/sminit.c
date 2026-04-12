@@ -928,14 +928,26 @@ SmpTranslateSystemPartitionInformation(VOID)
          * NOTE: This has been introduced in a post-SP1 Windows 7 update. */
         if (Status != STATUS_NO_MORE_ENTRIES)
             return;
-        DirInfo->Name.Buffer = DirInfoBuffer.Buffer;
-        DirInfo->Name.Buffer[0] = SharedUserData->NtSystemRoot[0];
-        DirInfo->Name.Buffer[1] = SharedUserData->NtSystemRoot[1]; // == L':';
+        /* NtQueryDirectoryObject never returned an entry, so
+         * DirInfo->Name.Buffer is uninitialized.  Write the
+         * boot drive letter straight into LinkBuffer instead. */
+        LinkBuffer[0] = SharedUserData->NtSystemRoot[0];
+        LinkBuffer[1] = SharedUserData->NtSystemRoot[1]; // == L':';
+        LinkBuffer[2] = L'\\';
+        LinkBuffer[3] = UNICODE_NULL;
+        goto WriteBootDir;
 #else
         return;
 #endif
     }
 
+    /* Wrap up the end of the link buffer */
+    LinkBuffer[0] = DirInfo->Name.Buffer[0];
+    LinkBuffer[1] = DirInfo->Name.Buffer[1]; // == L':';
+    LinkBuffer[2] = L'\\';
+    LinkBuffer[3] = UNICODE_NULL;
+
+WriteBootDir:
     /* Open the setup key again, for full access this time */
     RtlInitUnicodeString(&UnicodeString,
                          L"\\Registry\\Machine\\Software\\Microsoft\\Windows\\CurrentVersion\\Setup");
@@ -950,12 +962,6 @@ SmpTranslateSystemPartitionInformation(VOID)
         DPRINT1("SMSS: Cannot open software setup key for writing: 0x%x\n", Status);
         return;
     }
-
-    /* Wrap up the end of the link buffer */
-    LinkBuffer[0] = DirInfo->Name.Buffer[0];
-    LinkBuffer[1] = DirInfo->Name.Buffer[1]; // == L':';
-    LinkBuffer[2] = L'\\';
-    LinkBuffer[3] = UNICODE_NULL;
 
     /* Now set this as the "BootDir" */
     RtlInitUnicodeString(&UnicodeString, L"BootDir");
