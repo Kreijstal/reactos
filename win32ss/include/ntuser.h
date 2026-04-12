@@ -3926,7 +3926,11 @@ RtlGetExpWinVer(_In_ PVOID BaseAddress);
 WNDPROC GETPFNCLIENTA(int fnid);
 WNDPROC GETPFNCLIENTW(int fnid);
 
-#define GETPFNSERVER(fnid) (WNDPROC)WOW64_READ_ULONG_FIELD(gpsi, SERVERINFO, aStoCidPfn[fnid - FNID_FIRST])     
+#if defined(BUILD_WOW6432) && defined(_M_IX86)
+#define GETPFNSERVER(fnid) (WNDPROC)WOW64_READ_ULONG_FIELD(gpsi, SERVERINFO, aStoCidPfn[fnid - FNID_FIRST])
+#else
+#define GETPFNSERVER(fnid) gpsi->aStoCidPfn[fnid - FNID_FIRST]
+#endif
 
 #endif
 
