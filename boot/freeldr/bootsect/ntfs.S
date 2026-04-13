@@ -540,7 +540,11 @@ ExploreIndexRoot:
                                                // We take only the first word, the high word contains the
                                                // sequence number
         movzx edx, dx
+#ifdef _USE_ML
+        jmp   NEAR PTR ExitIndexTree
+#else
         jmp   ExitIndexTree
+#endif
     
         NodeCheckLastNode:
         test  word ptr es:[si + HEX(0C)], 1
