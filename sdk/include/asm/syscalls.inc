@@ -89,7 +89,14 @@ x:
     call x3
 
     push HEX(23)
-    push x2
+    /* We need to push the address of x2 in 64-bit mode.
+       "push x2" emits ff 35 [abs32], which in 64-bit mode becomes
+       push [RIP+disp32] (reads from garbage address).
+       Use call/pop trick to get RIP, then adjust. */
+    .byte HEX(e8)          /* call rel32 (next instruction) */
+    .long 0
+    /* [rsp] = addr of next byte. x2 is 7 bytes ahead (5 for add + 2 for retfq) */
+    .byte HEX(48), HEX(83), HEX(04), HEX(24), 7  /* add qword [rsp], 7 */
     .byte HEX(48)
     retf
 x2:
