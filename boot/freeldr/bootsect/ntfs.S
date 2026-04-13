@@ -372,7 +372,11 @@ StartSearch:
     mov   ebx, ATTRIBUTE_DATA
     call  FindAttributeHdr
     test  ax, ax
+#ifdef _USE_ML
+    jz    PrintFileSystemError2
+#else
     jz    PrintFileSystemError
+#endif
     mov   si, ax
     add   si, word ptr es:[si + HEX(20)]   // SI = offset of data runs within ES segment
     mov   word ptr [MFTDataRunsOff], si
@@ -403,7 +407,11 @@ StartSearch:
     mov   ebx, HEX(80)
     call  FindAttributeHdr
     test  ax, ax
+#ifdef _USE_ML
+    jz    PrintFileSystemError2
+#else
     jz    PrintFileSystemError
+#endif
     mov   si, ax
 
     // Read allocated size from $DATA non-resident attribute header (offset 0x28)
@@ -478,30 +486,50 @@ ExploreIndexRoot:
     mov   ebx, ATTRIBUTE_INDEX_ROOT
     call  FindAttributeHdr
     test  ax, ax
-    jz    PrintFileSystemError         // fail if no INDEX_ROOT
+#ifdef _USE_ML
+    jz    PrintFileSystemError2         // fail if no INDEX_ROOT
+#else
+    jz    PrintFileSystemError
+#endif
 
     mov   si, ax
     cmp   byte ptr es:[si + 8], HEX(0)
-    jnz   PrintFileSystemError         // fail if attribute is non-resident
+#ifdef _USE_ML
+    jnz   PrintFileSystemError2         // fail if attribute is non-resident
+#else
+    jnz   PrintFileSystemError
+#endif
 
     add   si, word ptr es:[si + HEX(14)]
     cmp   dword ptr es:[si], HEX(30)
-    jnz   PrintFileSystemError                  // fail if FILE_NAME attribute isn't indexed
+#ifdef _USE_ML
+    jnz   PrintFileSystemError2                  // fail if FILE_NAME attribute isn't indexed
+#else
+    jnz   PrintFileSystemError
+#endif
 
     mov   word ptr [bp - indexRootData], si
     mov   ax, word ptr [bp - fileRecord]
 
     test  byte ptr es:[si + HEX(0c)], 1
     jz    ExploreNext                          // Skip index allocation lookup if we don't have children
-    
+
     mov   ebx, ATTRIBUTE_INDEX_ALLOCATION
     call  FindAttributeHdr
     test  ax, ax
-    jz    PrintFileSystemError                  // No INDEX_ALLOCATION found
+#ifdef _USE_ML
+    jz    PrintFileSystemError2                  // No INDEX_ALLOCATION found
+#else
+    jz    PrintFileSystemError
+#endif
 
     mov   si, ax
     cmp   byte ptr es:[si + 8], 1
-    jnz   PrintFileSystemError                  // Fail if attribute is resident (shouldn't be)
+#ifdef _USE_ML
+    jnz   PrintFileSystemError2                  // Fail if attribute is resident (shouldn't be)
+#else
+    jnz   PrintFileSystemError
+#endif
 
     add   si, word ptr es:[si + HEX(20)]
     mov   word ptr [bp - allocationRunList], si // save run list
@@ -639,6 +667,13 @@ CompareWideStrInsensitive:
     pop bx
     ret
 
+// Local trampoline for MASM: conditional short jumps cannot reach
+// PrintFileSystemError from this far, so bounce through a near jmp.
+#ifdef _USE_ML
+PrintFileSystemError2:
+    jmp   NEAR PTR PrintFileSystemError
+#endif
+
 // Reads a NTFS cluster
 // INPUT:
 //  - EDX:EAX     : cluster number to read
@@ -676,7 +711,11 @@ ReadInodeLinear:
     call  ReadSectors
 
     cmp   dword ptr es:[bx], FILE_MAGIC
+#ifdef _USE_ML
+    jnz   PrintFileSystemError2
+#else
     jnz   PrintFileSystemError
+#endif
 
     call  ApplyFixups
 
@@ -724,7 +763,11 @@ ReadInode:
     call  ReadNonResidentAttribute
     pop   es
     test  ax, ax
+#ifdef _USE_ML
+    jz    PrintFileSystemError2
+#else
     jz    PrintFileSystemError
+#endif
 
     // Now copy the correct MFT record from 0x3000:sector_offset to ES:BX
     pop   dx                               // DX = sector offset within cluster
@@ -755,7 +798,11 @@ ReadInode:
     pop   ds
 
     cmp   dword ptr es:[bx], FILE_MAGIC
+#ifdef _USE_ML
+    jnz   PrintFileSystemError2
+#else
     jnz   PrintFileSystemError
+#endif
 
     call  ApplyFixups
 
@@ -788,7 +835,11 @@ ApplyFixups:
         add   di, bx
         sub   di, 2
         cmp   ax, word ptr es:[di]     // Check fixup value
+#ifdef _USE_ML
+        jnz   PrintFileSystemError2    // Fixup is corrupted, so print error
+#else
         jnz   PrintFileSystemError     // Fixup is corrupted, so print error
+#endif
         inc   cx
         add   si, cx
         mov   ax, word ptr es:[si]     // Apply fixup
@@ -944,9 +995,17 @@ ReadINDX:
     push  bx
     call  ReadNonResidentAttribute
     test  ax, ax
+#ifdef _USE_ML
+    jz    PrintFileSystemError2
+#else
     jz    PrintFileSystemError
+#endif
     cmp   dword ptr fs:[0], INDX_MAGIC
+#ifdef _USE_ML
+    jnz   PrintFileSystemError2  // jump if not valid
+#else
     jnz   PrintFileSystemError  // jump if not valid
+#endif
     pop   bx
     
     mov   ax, fs
