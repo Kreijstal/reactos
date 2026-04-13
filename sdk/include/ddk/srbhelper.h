@@ -1,6 +1,15 @@
 #ifndef _SRBHELPER_H_
 #define _SRBHELPER_H_
 
+/* GCC's __forceinline uses extern __inline__ with __gnu_inline__, which
+   doesn't emit standalone function bodies. Override to static inline for
+   this header so each function gets emitted in every TU that includes it. */
+#if defined(__GNUC__) && !defined(__cplusplus)
+#undef FORCEINLINE
+#define FORCEINLINE static __inline__ __attribute__((__always_inline__))
+#define _SRBHELPER_FORCEINLINE_REDEFINED_
+#endif
+
 #if !defined(_NTSTORPORT_) && !defined(_NTSTORPORTP_) && !defined(_NTSRB_)
 #include <scsi.h>
 #include <srb.h>
@@ -42,7 +51,7 @@
 #define SrbEqualMemory(Source1, Source2, Length) (memcmp(Source1, Source2, Length) == 0)
 #endif
 
-static FORCEINLINE
+FORCEINLINE
 PSRBEX_DATA
 SrbGetSrbExDataByIndex(
   _In_ PSTORAGE_REQUEST_BLOCK Srb,
@@ -61,7 +70,7 @@ SrbGetSrbExDataByIndex(
   return srbExData;
 }
 
-static FORCEINLINE
+FORCEINLINE
 PSRBEX_DATA
 SrbGetSrbExDataByType(
   _In_ PSTORAGE_REQUEST_BLOCK Srb,
@@ -89,7 +98,7 @@ SrbGetSrbExDataByType(
   return NULL;
 }
 
-static FORCEINLINE
+FORCEINLINE
 PSRBEX_DATA
 SrbGetPrimarySrbExData(
   _In_ PSTORAGE_REQUEST_BLOCK Srb)
@@ -136,7 +145,7 @@ SrbGetPrimarySrbExData(
   return NULL;
 }
 
-static FORCEINLINE PSTOR_ADDRESS SrbGetAddress(_In_ PSTORAGE_REQUEST_BLOCK Srb)
+FORCEINLINE PSTOR_ADDRESS SrbGetAddress(_In_ PSTORAGE_REQUEST_BLOCK Srb)
 {
   PSTOR_ADDRESS storAddr = NULL;
 
@@ -154,7 +163,7 @@ static FORCEINLINE PSTOR_ADDRESS SrbGetAddress(_In_ PSTORAGE_REQUEST_BLOCK Srb)
   return storAddr;
 }
 
-static FORCEINLINE
+FORCEINLINE
 BOOLEAN
 SrbCopySrb(
   _In_ PVOID DestinationSrb,
@@ -184,7 +193,7 @@ SrbCopySrb(
   return status;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbZeroSrb(
   _In_ PVOID Srb)
@@ -210,7 +219,7 @@ SrbZeroSrb(
   srb->Length = length;
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetSrbLength(
   _In_ PVOID Srb)
@@ -227,7 +236,7 @@ SrbGetSrbLength(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetSrbLength(
   _In_ PVOID Srb,
@@ -241,7 +250,7 @@ SrbSetSrbLength(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetDefaultSrbLengthFromFunction(
   _In_ ULONG SrbFunction)
@@ -267,7 +276,7 @@ SrbGetDefaultSrbLengthFromFunction(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 PCDB
 SrbGetScsiData(
   _In_ PSTORAGE_REQUEST_BLOCK SrbEx,
@@ -450,7 +459,7 @@ SrbGetScsiData(
   return Cdb;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetScsiData(
   _In_ PSTORAGE_REQUEST_BLOCK SrbEx,
@@ -586,7 +595,7 @@ SrbSetScsiData(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 PCDB
 SrbGetCdb(
   _In_ PVOID Srb)
@@ -605,7 +614,7 @@ SrbGetCdb(
   return pCdb;
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetSrbFunction(
   _In_ PVOID Srb)
@@ -622,7 +631,7 @@ SrbGetSrbFunction(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 PVOID
 SrbGetSenseInfoBuffer(
   _In_ PVOID Srb)
@@ -641,7 +650,7 @@ SrbGetSenseInfoBuffer(
   return pSenseInfoBuffer;
 }
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetSenseInfoBufferLength(
   _In_ PVOID Srb)
@@ -660,7 +669,7 @@ SrbGetSenseInfoBufferLength(
   return SenseInfoBufferLength;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetSenseInfoBuffer(
   _In_ PVOID Srb,
@@ -678,7 +687,7 @@ SrbSetSenseInfoBuffer(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetSenseInfoBufferLength(
   _In_ PVOID Srb,
@@ -696,7 +705,7 @@ SrbSetSenseInfoBufferLength(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 PVOID
 SrbGetOriginalRequest(
   _In_ PVOID Srb)
@@ -713,7 +722,7 @@ SrbGetOriginalRequest(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetOriginalRequest(
   _In_ PVOID Srb,
@@ -731,7 +740,7 @@ SrbSetOriginalRequest(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 PVOID
 SrbGetDataBuffer(
   _In_ PVOID Srb)
@@ -750,7 +759,7 @@ SrbGetDataBuffer(
   return DataBuffer;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetDataBuffer(
   _In_ PVOID Srb,
@@ -768,7 +777,7 @@ SrbSetDataBuffer(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetDataTransferLength(
   _In_ PVOID Srb)
@@ -787,7 +796,7 @@ SrbGetDataTransferLength(
   return DataTransferLength;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetDataTransferLength(
   _In_ PVOID Srb,
@@ -805,7 +814,7 @@ SrbSetDataTransferLength(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetTimeOutValue(
   _In_ PVOID Srb)
@@ -824,7 +833,7 @@ SrbGetTimeOutValue(
   return timeOutValue;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetTimeOutValue(
   _In_ PVOID Srb,
@@ -842,7 +851,7 @@ SrbSetTimeOutValue(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetQueueSortKey(
   _In_ PVOID Srb,
@@ -856,7 +865,7 @@ SrbSetQueueSortKey(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetQueueTag(
   _In_ PVOID Srb,
@@ -876,7 +885,7 @@ SrbSetQueueTag(
 
 #define SrbSetRequestTag SrbSetQueueTag
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetQueueTag(
   _In_ PVOID Srb)
@@ -895,7 +904,7 @@ SrbGetQueueTag(
 
 #define SrbGetRequestTag SrbGetQueueTag
 
-static FORCEINLINE
+FORCEINLINE
 PVOID
 SrbGetNextSrb(
   _In_ PVOID Srb)
@@ -912,7 +921,7 @@ SrbGetNextSrb(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetNextSrb(
   _In_ PVOID Srb,
@@ -930,7 +939,7 @@ SrbSetNextSrb(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetSrbFlags(
   _In_ PVOID Srb)
@@ -949,7 +958,7 @@ SrbGetSrbFlags(
   return srbFlags;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbAssignSrbFlags(
   _In_ PVOID Srb,
@@ -967,7 +976,7 @@ SrbAssignSrbFlags(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetSrbFlags(
   _In_ PVOID Srb,
@@ -985,7 +994,7 @@ SrbSetSrbFlags(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbClearSrbFlags(
   _In_ PVOID Srb,
@@ -1003,7 +1012,7 @@ SrbClearSrbFlags(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetSystemStatus(
   _In_ PVOID Srb)
@@ -1022,7 +1031,7 @@ SrbGetSystemStatus(
   return systemStatus;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetSystemStatus(
   _In_ PVOID Srb,
@@ -1040,7 +1049,7 @@ SrbSetSystemStatus(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetScsiStatus(
   _In_ PVOID Srb)
@@ -1059,7 +1068,7 @@ SrbGetScsiStatus(
   return scsiStatus;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetScsiStatus(
   _In_ PVOID Srb,
@@ -1077,7 +1086,7 @@ SrbSetScsiStatus(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetCdbLength(
   _In_ PVOID Srb)
@@ -1096,7 +1105,7 @@ SrbGetCdbLength(
   return CdbLength;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetCdbLength(
   _In_ PVOID Srb,
@@ -1114,7 +1123,7 @@ SrbSetCdbLength(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 ULONG
 SrbGetRequestAttribute(
   _In_ PVOID Srb)
@@ -1134,7 +1143,7 @@ SrbGetRequestAttribute(
 
 #define SrbGetQueueAction SrbGetRequestAttribute
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetRequestAttribute(
   _In_ PVOID Srb,
@@ -1154,7 +1163,7 @@ SrbSetRequestAttribute(
 
 #define SrbSetQueueAction SrbSetRequestAttribute
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetPathId(
   _In_ PVOID Srb)
@@ -1187,7 +1196,7 @@ SrbGetPathId(
   return PathId;
 }
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetTargetId(
   _In_ PVOID Srb)
@@ -1220,7 +1229,7 @@ SrbGetTargetId(
   return TargetId;
 }
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetLun(
   _In_ PVOID Srb)
@@ -1253,7 +1262,7 @@ SrbGetLun(
   return Lun;
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbGetPathTargetLun(
   _In_ PVOID Srb,
@@ -1316,7 +1325,7 @@ SrbGetPathTargetLun(
   return;
 }
 
-static FORCEINLINE
+FORCEINLINE
 PVOID
 SrbGetMiniportContext(
   _In_ PVOID Srb)
@@ -1333,7 +1342,7 @@ SrbGetMiniportContext(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 UCHAR
 SrbGetSrbStatus(
   _In_ PVOID Srb)
@@ -1350,7 +1359,7 @@ SrbGetSrbStatus(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetSrbStatus(
   _In_ PVOID Srb,
@@ -1382,7 +1391,7 @@ SrbSetSrbStatus(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 PVOID
 SrbGetPortContext(
   _In_ PVOID Srb)
@@ -1400,7 +1409,7 @@ SrbGetPortContext(
   }
 }
 
-static FORCEINLINE
+FORCEINLINE
 VOID
 SrbSetPortContext(
   _In_ PVOID Srb,
@@ -1419,4 +1428,10 @@ SrbSetPortContext(
 }
 
 #endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
+
+/* Note: FORCEINLINE remains redefined to static inline for the rest
+   of this translation unit. This is intentional — any code that
+   includes srbhelper.h is in the storage stack and its inline
+   functions must have static linkage on GCC. */
+
 #endif /* _SRBHELPER_H_ */
