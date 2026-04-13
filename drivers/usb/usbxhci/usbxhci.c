@@ -286,18 +286,19 @@ XHCI_CloseEndpoint(IN PVOID xhciExtension,
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
     ULONG DeviceAddress;
     ULONG SlotId;
-    
+
     DPRINT1("XHCI_CloseEndpoint: function initiated\n");
-    
+
     if (!XhciExtension || !XhciEndpoint)
     {
         DPRINT1("XHCI_CloseEndpoint: Invalid parameters\n");
         return;
     }
-    
+
     DeviceAddress = XhciEndpoint->EndpointProperties.DeviceAddress;
-    SlotId = DeviceAddress; // In simple implementations, slot ID == device address
-    
+    SlotId = DeviceAddress;
+    DBG_UNREFERENCED_LOCAL_VARIABLE(SlotId);
+
     DPRINT1("XHCI_CloseEndpoint: Closing endpoint for device %d, endpoint %d\n",
             DeviceAddress, XhciEndpoint->EndpointProperties.EndpointAddress);
     
@@ -1127,7 +1128,6 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     XHCI_INTERRUPTER_MANAGEMENT Iman;
     XHCI_USB_STATUS UsbStatus;
     PXHCI_EXTENSION XhciExtension;
-    static ULONG SpuriousCount = 0;
     static ULONG ValidCount = 0;
     static ULONG SharedIrqCount = 0;
 
@@ -1254,7 +1254,6 @@ XHCI_SubmitTransfer(IN PVOID xhciExtension,
     ULONG TransferDirection;
     ULONG TransferType;
     ULONG TransferLength;
-    PXHCI_TRANSFER_RING TransferRing;
     MPSTATUS Status = MP_STATUS_SUCCESS;
     
     DPRINT1("XHCI_SubmitTransfer: function initiated\n");
@@ -1277,9 +1276,6 @@ XHCI_SubmitTransfer(IN PVOID xhciExtension,
     XhciTransfer->XhciEndpoint = XhciEndpoint;
     XhciTransfer->TransferLen = TransferLength;
     XhciTransfer->USBDStatus = USBD_STATUS_PENDING;
-    
-    // Get transfer ring for this endpoint
-    TransferRing = (PXHCI_TRANSFER_RING)&XhciEndpoint->TransferRing;
     
     // Handle different transfer types
     switch (TransferType)
