@@ -59,11 +59,6 @@ typedef struct _XHCI_PENDING_TRANSFER {
 static XHCI_PENDING_TRANSFER g_PendingTransfers[MAX_PENDING_TRANSFERS];
 static BOOLEAN g_TransferTrackingInitialized = FALSE;
 
-// Legacy global variables - will be removed once new system is stable
-static PXHCI_TRANSFER g_PendingTransfer = NULL;
-static PXHCI_ENDPOINT g_PendingEndpoint = NULL;
-static PXHCI_EXTENSION g_PendingExtension = NULL;
-
 // Command completion tracking system
 #define MAX_PENDING_COMMANDS 8
 
@@ -667,7 +662,6 @@ PXHCI_InitSlot(IN PXHCI_EXTENSION xhciExtension, ULONG PortID, ULONG SlotID)
 
     PXHCI_EXTENSION XhciExtension;
     PXHCI_EVENT_TRB eventTRB;
-    PULONG OperationalRegs;
     ULONG CheckCompletion;
     ULONG_PTR TrDeqPtr;
     XHCI_TRB Trb;
@@ -676,7 +670,6 @@ PXHCI_InitSlot(IN PXHCI_EXTENSION xhciExtension, ULONG PortID, ULONG SlotID)
     HcResourcesVA = XhciExtension -> HcResourcesVA;
     eventTRB = (PXHCI_EVENT_TRB)HcResourcesVA->EventRing.dequeue_pointer;
 
-    OperationalRegs = xhciExtension->OperationalRegs;
     CheckCompletion = INVALID;
 
     HcOutputDeviceContext = ExAllocatePoolZero(NonPagedPool, sizeof(XHCI_OUTPUT_DEVICE_CONTEXT), 'TVED');
@@ -746,7 +739,7 @@ PXHCI_InitSlot(IN PXHCI_EXTENSION xhciExtension, ULONG PortID, ULONG SlotID)
 
 MPSTATUS
 NTAPI
-PXHCI_InitTransferBulk(PXHCI_EXTENSION XhciExtension)
+PXHCI_InitTransferBulk(PVOID xhciExtension)
 {
     __debugbreak();
     return MP_STATUS_FAILURE;
@@ -754,14 +747,14 @@ PXHCI_InitTransferBulk(PXHCI_EXTENSION XhciExtension)
 
 MPSTATUS
 NTAPI
-PXHCI_InitTransferInterrupt(PXHCI_EXTENSION XhciExtension)
+PXHCI_InitTransferInterrupt(PVOID xhciExtension)
 {
     return MP_STATUS_SUCCESS;
 }
 
 MPSTATUS
 NTAPI
-PXHCI_InitTransferIso(PXHCI_EXTENSION XhciExtension)
+PXHCI_InitTransferIso(PVOID xhciExtension)
 {
     DPRINT1("PXHCI_InitTransferIso: Isochronous transfers not yet implemented\n");
     return MP_STATUS_FAILURE;
@@ -769,7 +762,7 @@ PXHCI_InitTransferIso(PXHCI_EXTENSION XhciExtension)
 
 MPSTATUS
 NTAPI
-PXHCI_InitTransferControl(PXHCI_EXTENSION XhciExtension)
+PXHCI_InitTransferControl(PVOID xhciExtension)
 {
     __debugbreak();
     return MP_STATUS_FAILURE;
@@ -1988,21 +1981,15 @@ XHCI_SetupDeviceContext(IN PXHCI_EXTENSION XhciExtension,
     PXHCI_INPUT_CONTEXT InputContext;
     PXHCI_SLOT_CONTEXT SlotContext;
     PXHCI_ENDPOINT_CONTEXT EndpointContext;
-    PHYSICAL_ADDRESS InputContextPA;
-    ULONG ContextSize;
     ULONG RouteString = 0;  // For root hub device
     ULONG RootHubPortNumber = PortNumber;  // Use the actual port number
     
     DPRINT1("XHCI_SetupDeviceContext: Setting up device context for slot %d, MaxPacketSize=%d, Speed=%d, Port=%d\n",
             SlotId, MaxPacketSize, DeviceSpeed, PortNumber);
     
-    // Calculate context size (32 or 64 bytes depending on controller)
-    ContextSize = 32;  // Assume 32-byte contexts for now
-    
     // Get pointer to input context (reuse command ring memory for simplicity)
     InputContext = &HcResourcesVA->InputContext;
-    InputContextPA = MmGetPhysicalAddress(InputContext);
-    
+
     // Clear input context
     RtlZeroMemory(InputContext, sizeof(XHCI_INPUT_CONTEXT));
     
