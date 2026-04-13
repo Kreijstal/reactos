@@ -364,14 +364,12 @@ static BOOLEAN GetFileRedirect(OBJECT_ATTRIBUTES* attr)
     };
     
     size_t i;
-    PUNICODE_STRING ObjectName;
 
     if (!attr || !attr->ObjectName || !attr->ObjectName->Buffer)
     {
         return FALSE;
     }
-    ObjectName = attr->ObjectName;
-    
+
     for (i = 0; i < sizeof(Redirections) / sizeof(*Redirections); i++)
     {
         if (RedirectPath(&Redirections[i], attr))
