@@ -4583,7 +4583,7 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
     PMM_SECTION_SEGMENT Segment;
     BOOLEAN ImageOk = TRUE;
     BOOLEAN DataOk = TRUE;
-    KIRQL OldIrql;
+
     if (!SectionObjectPointer)
         return TRUE;
 
