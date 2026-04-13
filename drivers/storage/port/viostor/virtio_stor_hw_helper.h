@@ -44,7 +44,7 @@
 
 #include <srbhelper.h>
 
-FORCEINLINE ULONG
+static FORCEINLINE ULONG
 SrbGetCdbLenght(_In_ PVOID Srb) {
     ULONG CdbLen32 = 0;
     UCHAR CdbLen8 = 0;
@@ -52,7 +52,7 @@ SrbGetCdbLenght(_In_ PVOID Srb) {
     return (CdbLen8 != 0) ? CdbLen8 : CdbLen32;
 }
 
-FORCEINLINE VOID
+static FORCEINLINE VOID
 SrbGetPnpInfo(_In_ PVOID Srb, ULONG* PnPFlags, ULONG* PnPAction) {
     PSCSI_PNP_REQUEST_BLOCK pPnpSrb = NULL;
     PSRBEX_DATA_PNP pSrbExPnp = NULL;
