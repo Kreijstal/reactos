@@ -58,7 +58,11 @@
     #define APIC_PROFILE_LEVEL HIGH_LEVEL
 #endif
 
-#define APIC_MAX_IRQ 24
+/* Maximum IOAPIC pins — set dynamically from the IOAPIC Version Register
+   in ApicInitializeIOApic(). Default to 24 (standard PC IOAPIC). */
+#define APIC_DEFAULT_MAX_IRQ 24
+#define APIC_ABSOLUTE_MAX_IRQ 240
+extern UCHAR ApicMaxIrq;
 #define APIC_FREE_VECTOR 0xFF
 #define APIC_RESERVED_VECTOR 0xFE
 
