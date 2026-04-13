@@ -292,7 +292,7 @@ C_ASSERT(sizeof(CONTEXT64) == sizeof(CONTEXT));
 
 #else
 
-#ifndef WOW64_READ_PTR_FIELD
+#ifndef WOW64_READ_ULONG_FIELD
 #define WOW64_READ_PTR_FIELD(Ptr, StructType, Field) (Ptr->Field)
 #define WOW64_WRITE_PTR_FIELD(Ptr, StructType, Field, Value) (Ptr->Field = (Value))
 #define WOW64_READ_ULONG_FIELD(Ptr, StructType, Field) (Ptr->Field)
