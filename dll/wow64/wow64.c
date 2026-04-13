@@ -63,12 +63,14 @@ Wow64CopyContext32To64(PCONTEXT pContext,
     pContext->Rsi = pContext32->Esi;
     pContext->Rdi = pContext32->Edi;
     pContext->EFlags = pContext32->EFlags;
-    pContext->SegCs = pContext32->SegCs;
+    /* Force compat-mode segments: 32-bit code runs under CS=0x23
+       (KGDT64_R3_CMCODE|RPL_MASK), not whatever the 32-bit context had */
+    pContext->SegCs = 0x23;
     pContext->SegDs = pContext32->SegDs;
     pContext->SegEs = pContext32->SegEs;
-    pContext->SegFs = pContext32->SegFs;
+    pContext->SegFs = 0x53;
     pContext->SegGs = pContext32->SegGs;
-    pContext->SegSs = pContext32->SegSs;
+    pContext->SegSs = 0x2B;
     pContext->MxCsr = INITIAL_MXCSR;
 }
 
@@ -81,8 +83,8 @@ Wow64CopyContext64To32(PI386_CONTEXT pContext32,
     pContext32->Ebx = pContext->Rbx;
     pContext32->Ecx = pContext->Rcx;
     pContext32->Edx = pContext->Rdx;
-    pContext32->Esi = pContext->Rdi;
-    pContext32->Edi = pContext->Rsi;
+    pContext32->Esi = pContext->Rsi;
+    pContext32->Edi = pContext->Rdi;
     pContext32->Ebp = pContext->Rbp;
     pContext32->Esp = pContext->Rsp;
     pContext32->SegCs = pContext->SegCs;
@@ -741,15 +743,12 @@ WINAPI
 wow64_NtContinue(UINT *pArgs)
 {
     CONTEXT Context;
-    
+
     PI386_CONTEXT pContext32 = get_ptr(&pArgs);
     BOOLEAN bRasieAlert = get_ulong(&pArgs);
-    
-    /* TODO: APC handling here?
-       Wine has an implementation, port from there maybe. */
-    
+
     Wow64CopyContext32To64(&Context, pContext32);
-    
+
     return NtContinue(&Context, bRasieAlert);
 }
 
@@ -1234,7 +1233,8 @@ NTSTATUS
 Wow64Trampoline(PCONTEXT pContext)
 {
     NTSTATUS Status;
-    
+    PCONTEXT pSavedCtx;
+
 #pragma pack(push, 1)
     struct
     {
@@ -1247,35 +1247,49 @@ Wow64Trampoline(PCONTEXT pContext)
         I386_CONTEXT Context32;
     } EnterApc32Stack;
 #pragma pack(pop)
-    
+
     Wow64CopyContext64To32(&EnterApc32Stack.Context32, pContext);
-    Status = Wow64TranslateEntrypoint64To32(NtCurrentProcess(), 
-                                            &EnterApc32Stack.Context32, 
+    Status = Wow64TranslateEntrypoint64To32(NtCurrentProcess(),
+                                            &EnterApc32Stack.Context32,
                                             pContext);
     if (!NT_SUCCESS(Status))
     {
         return Status;
     }
-    
+
+    /* Heap-allocate the app entry context and stash the pointer in a TEB
+       TLS slot.  The 32-bit code's heaven's gate calls reuse parts of our
+       stack frame, so every local variable is potentially corrupted by the
+       time EnterApc32 returns. The TEB itself lives in a separate page. */
+    pSavedCtx = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(CONTEXT));
+    if (!pSavedCtx)
+    {
+        return STATUS_NO_MEMORY;
+    }
+    Wow64CopyContext32To64(pSavedCtx, &EnterApc32Stack.Context32);
+    NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO] = pSavedCtx;
+
     EnterApc32Stack.ApcRoutine = (ULONG_PTR)NtDll32LdrpRoutine;
     EnterApc32Stack.SegCs = 0x23;
     EnterApc32Stack.RetAddress32 = 0;
     EnterApc32Stack.ApcContext = PtrToUlong(&EnterApc32Stack.Context32);
     EnterApc32Stack.SystemArgument1 = PtrToUlong(NtDll32);
     EnterApc32Stack.SystemArgument2 = 0;
-    
-    _SEH2_TRY
-    {
-        EnterApc32(&EnterApc32Stack, sizeof(EnterApc32Stack));
-    }
-    _SEH2_EXCEPT(Wow64UnhandledExceptionHandler(_SEH2_GetExceptionInformation()))
-    {
-        /* Do nothing */
-    }
-    _SEH2_END;
 
-    Wow64CopyContext32To64(pContext, &EnterApc32Stack.Context32);
-    return STATUS_SUCCESS;
+    EnterApc32(&EnterApc32Stack, sizeof(EnterApc32Stack));
+
+    /* Retrieve the saved context pointer from TLS -- local variables
+       are not reliable after the 32-bit code ran. */
+    pSavedCtx = (PCONTEXT)NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO];
+    NtCurrentTeb()->TlsSlots[WOW64_TLS_WOW64INFO] = NULL;
+
+    /* LdrInitializeThunk returned after init -- transfer to the
+       application entry point via NtContinue. */
+    NtContinue(pSavedCtx, FALSE);
+
+    /* NtContinue should never return */
+    RtlFreeHeap(RtlGetProcessHeap(), 0, pSavedCtx);
+    return STATUS_UNSUCCESSFUL;
 }
 
 static
@@ -1295,6 +1309,13 @@ Wow64InitThread(PCONTEXT pContext)
     
     WowTeb->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
     WowTeb->NtTib.StackBase = PtrToUlong(Teb->NtTib.StackBase);
+    DPRINT1("WOW64: 64-bit StackBase=%p StackLimit=%p (truncated to 0x%lx / 0x%lx)\n",
+            Teb->NtTib.StackBase, Teb->NtTib.StackLimit,
+            PtrToUlong(Teb->NtTib.StackBase), PtrToUlong(Teb->NtTib.StackLimit));
+    if ((ULONG_PTR)Teb->NtTib.StackBase > 0xFFFFFFFFULL)
+    {
+        DPRINT1("WOW64 WARNING: Stack is above 4GB! 32-bit stack access will fail!\n");
+    }
     WowTeb->NtTib.ExceptionList = PtrToUlong(EXCEPTION_CHAIN_END);
     WowTeb->NtTib.Version = Teb->NtTib.Version;
 
@@ -1315,12 +1336,15 @@ Wow64InitThread(PCONTEXT pContext)
 
     WowTeb->ProcessEnvironmentBlock = PtrToUlong(WowPeb);
 
-    /* Point the FS segment register to the CMTEB entry in the GDT */
-    SetupFs(0x0053);
-
-    /* CMTEB GDT entry's fields are set on thread context switches, make sure 
-       correct values are loaded before executing. */
+    /* CMTEB GDT entry's fields are set on thread context switches, make sure
+       correct values are loaded before executing. First trigger a context switch
+       so the kernel updates the CMTEB GDT entry base to point to our TEB32,
+       THEN load FS so it picks up the correct base from the GDT. */
     while(NtYieldExecution() == STATUS_NO_YIELD_PERFORMED);
+
+    /* Now load FS — the GDT CMTEB entry has the correct TEB32 base */
+    SetupFs(0x0053);
+    DPRINT1("WOW64: FS loaded with selector 0x53, TEB32=%p\n", WowTeb);
 
     /* Initialize WOW64 TLS entries in the 64-bit TEB */
     NtCurrentTeb()->TlsSlots[WOW64_TLS_TEMPLIST] = NULL;

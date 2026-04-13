@@ -274,59 +274,73 @@ typedef struct _WOW64_PATH_REDIRECTION
     UNICODE_STRING To;
 } WOW64_PATH_REDIRECTION, *PWOW64_PATH_REDIRECTION;
 
-static 
-BOOLEAN 
-RedirectPath(const WOW64_PATH_REDIRECTION* Redirection, 
+static
+BOOLEAN
+RedirectPath(const WOW64_PATH_REDIRECTION* Redirection,
              POBJECT_ATTRIBUTES ObjectAttributes)
 {
     PUNICODE_STRING ObjectName = ObjectAttributes->ObjectName;
     const UNICODE_STRING* FromUnexpanded = &Redirection->From;
     const UNICODE_STRING* ToUnexpanded = &Redirection->To;
-    
+
     NTSTATUS Status;
-    
+
     UNICODE_STRING From, To;
     WCHAR FromBuffer[MAX_PATH] = { 0 };
     WCHAR ToBuffer[MAX_PATH] = { 0 };
-    
-    PUNICODE_STRING Buffer = NULL;
+
+    PUNICODE_STRING Buffer;
     USHORT NewLength;
 
-    RtlInitEmptyUnicodeString(&To, ToBuffer, sizeof(ToBuffer));
-    Status = RtlExpandEnvironmentStrings_U(NULL,
-                                           (PUNICODE_STRING)ToUnexpanded,
-                                           &To,
-                                           NULL);
-    ASSERT(NT_SUCCESS(Status));
-    
+    /* Expand environment variables in the redirection patterns */
     RtlInitEmptyUnicodeString(&From, FromBuffer, sizeof(FromBuffer));
     Status = RtlExpandEnvironmentStrings_U(NULL,
                                            (PUNICODE_STRING)FromUnexpanded,
                                            &From,
                                            NULL);
-    ASSERT(NT_SUCCESS(Status));
-    
-    NewLength = ObjectName->Length - From.Length + To.Length;
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("WOW64: RedirectPath: From expansion failed: 0x%lx\n", Status);
+        return FALSE;
+    }
 
+    /* Path must be at least as long as the prefix to match */
+    if (ObjectName->Length < From.Length)
+        return FALSE;
+
+    /* Check for case-insensitive prefix match */
+    if (_wcsnicmp(ObjectName->Buffer, From.Buffer, From.Length / sizeof(WCHAR)) != 0)
+        return FALSE;
+
+    /* Match found — expand the To pattern */
+    RtlInitEmptyUnicodeString(&To, ToBuffer, sizeof(ToBuffer));
+    Status = RtlExpandEnvironmentStrings_U(NULL,
+                                           (PUNICODE_STRING)ToUnexpanded,
+                                           &To,
+                                           NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("WOW64: RedirectPath: To expansion failed: 0x%lx\n", Status);
+        return FALSE;
+    }
+
+    /* Build the redirected path */
+    NewLength = ObjectName->Length - From.Length + To.Length;
     Buffer = Wow64AllocateTemp(sizeof(*Buffer) + NewLength);
-    ASSERT(Buffer != NULL);
+    if (!Buffer)
+        return FALSE;
 
     Buffer->Buffer = (PWCHAR)(((ULONG_PTR)Buffer) + sizeof(*Buffer));
-    
-    if (_wcsnicmp(ObjectName->Buffer, From.Buffer, From.Length / sizeof(WCHAR)) == 0)
-    {
-        Buffer->Length = NewLength;
-        
-        RtlCopyMemory(Buffer->Buffer, To.Buffer, To.Length);
-        
-        RtlCopyMemory(Buffer->Buffer + To.Length / sizeof(WCHAR), 
-                      ObjectName->Buffer + From.Length / sizeof(WCHAR),
-                      ObjectName->Length - From.Length);
+    Buffer->Length = NewLength;
+    Buffer->MaximumLength = NewLength;
 
-        ObjectAttributes->ObjectName = Buffer;  
-        return TRUE;
-    }
-    return FALSE;
+    RtlCopyMemory(Buffer->Buffer, To.Buffer, To.Length);
+    RtlCopyMemory(Buffer->Buffer + To.Length / sizeof(WCHAR),
+                  ObjectName->Buffer + From.Length / sizeof(WCHAR),
+                  ObjectName->Length - From.Length);
+
+    ObjectAttributes->ObjectName = Buffer;
+    return TRUE;
 }
 
 static BOOLEAN GetFileRedirect(OBJECT_ATTRIBUTES* attr)
@@ -350,12 +364,13 @@ static BOOLEAN GetFileRedirect(OBJECT_ATTRIBUTES* attr)
     };
     
     size_t i;
-    PUNICODE_STRING ObjectName = attr->ObjectName;
-    
-    if (!attr || !ObjectName || !ObjectName->Buffer)
+    PUNICODE_STRING ObjectName;
+
+    if (!attr || !attr->ObjectName || !attr->ObjectName->Buffer)
     {
         return FALSE;
     }
+    ObjectName = attr->ObjectName;
     
     for (i = 0; i < sizeof(Redirections) / sizeof(*Redirections); i++)
     {
