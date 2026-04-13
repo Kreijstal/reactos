@@ -216,3 +216,76 @@ cleanup:
 
     return result;
 }
+
+#include <shlobj.h>
+
+/*************************************************************************
+ * SHGetKnownFolderPath           [SHELL32.@]
+ *
+ * Maps known folder GUIDs to legacy CSIDL values.
+ */
+HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR *ppszPath)
+{
+    WCHAR path[MAX_PATH];
+    HRESULT hr;
+    int csidl = -1;
+
+    FIXME("(%p, 0x%lx, %p, %p): semi-stub\n", rfid, dwFlags, hToken, ppszPath);
+
+    if (!ppszPath)
+        return E_INVALIDARG;
+
+    *ppszPath = NULL;
+
+    if (IsEqualGUID(rfid, &FOLDERID_LocalAppData))
+        csidl = CSIDL_LOCAL_APPDATA;
+    else if (IsEqualGUID(rfid, &FOLDERID_Profile))
+        csidl = CSIDL_PROFILE;
+    else if (IsEqualGUID(rfid, &FOLDERID_RoamingAppData))
+        csidl = CSIDL_APPDATA;
+    else if (IsEqualGUID(rfid, &FOLDERID_Desktop))
+        csidl = CSIDL_DESKTOP;
+    else if (IsEqualGUID(rfid, &FOLDERID_Documents))
+        csidl = CSIDL_PERSONAL;
+    else if (IsEqualGUID(rfid, &FOLDERID_ProgramFiles))
+        csidl = CSIDL_PROGRAM_FILES;
+    else if (IsEqualGUID(rfid, &FOLDERID_System))
+        csidl = CSIDL_SYSTEM;
+    else if (IsEqualGUID(rfid, &FOLDERID_Windows))
+        csidl = CSIDL_WINDOWS;
+    else
+    {
+        FIXME("Unknown folder ID, returning E_INVALIDARG\n");
+        return E_INVALIDARG;
+    }
+
+    hr = SHGetFolderPathW(NULL, csidl, hToken, 0, path);
+    if (SUCCEEDED(hr))
+    {
+        *ppszPath = CoTaskMemAlloc((lstrlenW(path) + 1) * sizeof(WCHAR));
+        if (*ppszPath)
+            lstrcpyW(*ppszPath, path);
+        else
+            hr = E_OUTOFMEMORY;
+    }
+    return hr;
+}
+
+/*************************************************************************
+ * SHGetKnownFolderIDList         [SHELL32.@]
+ */
+HRESULT WINAPI SHGetKnownFolderIDList(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, LPITEMIDLIST *ppidl)
+{
+    FIXME("(%p, 0x%lx, %p, %p): stub\n", rfid, dwFlags, hToken, ppidl);
+    if (ppidl) *ppidl = NULL;
+    return E_NOTIMPL;
+}
+
+/*************************************************************************
+ * SHSetKnownFolderPath           [SHELL32.@]
+ */
+HRESULT WINAPI SHSetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, LPCWSTR pszPath)
+{
+    FIXME("(%p, 0x%lx, %p, %s): stub\n", rfid, dwFlags, hToken, debugstr_w(pszPath));
+    return E_NOTIMPL;
+}
