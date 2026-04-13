@@ -1232,7 +1232,7 @@ int mkntfs_format(const MKNTFS_IO *io, const MKNTFS_PARAMS *params)
     s.logfile_size = total_bytes / 400;
     if (s.logfile_size < 2 * 1024 * 1024) s.logfile_size = 2 * 1024 * 1024;
     if (s.logfile_size > 64 * 1024 * 1024) s.logfile_size = 64 * 1024 * 1024;
-    s.logfile_size = NTFS_ALIGN_UP(s.logfile_size, s.cluster_size);
+    s.logfile_size = NTFS_ALIGN_UP(s.logfile_size, (ULONGLONG)s.cluster_size);
     s.logfile_clusters = s.logfile_size / s.cluster_size;
     s.logfile_lcn = next_lcn;
     bitmap_set(s.lcn_bitmap, s.logfile_lcn, s.logfile_clusters);
