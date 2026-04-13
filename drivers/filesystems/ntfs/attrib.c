@@ -668,10 +668,8 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
     ULONGLONG ChildMftIndex;
     ULONG MigratedAttrLength;
     ULONG ChildAttrOffset;
-    ULONG TrailingBytes;
     ULONG NewListItemSize;
     ULONG NewListAttrSize;
-    ULONG ListContentOff;
     PUCHAR ListContent;
     PNTFS_ATTRIBUTE_LIST_ITEM NewItem;
     USHORT MigratedInstance;

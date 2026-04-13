@@ -8,7 +8,6 @@
  * LICENSE:     GPL-2.0-or-later
  */
 
-#define NTOS_MODE_USER
 #include <ndk/umtypes.h>
 #include <ndk/iofuncs.h>
 #include <ndk/obfuncs.h>
