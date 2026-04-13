@@ -3,5 +3,5 @@ add_library(ntfslib
     mkntfs.c
     attrdef.c
     upcase.c)
-target_compile_definitions(ntfslib PRIVATE NTOS_MODE_USER)
+target_compile_definitions(ntfslib PRIVATE NTOS_MODE_USER=)
 add_dependencies(ntfslib psdk)
