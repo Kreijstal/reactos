@@ -26,8 +26,8 @@ EnterApc32:
     pop rsi
     pop rdi
 
-    lea rcx, [return32]
-    mov [rsp + 16], rcx
+    lea ecx, [return32]
+    mov [rsp + 16], ecx
 
     .byte HEX(48)
     retf
