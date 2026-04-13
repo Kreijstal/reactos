@@ -307,9 +307,13 @@ C_ASSERT(sizeof(CONTEXT64) == sizeof(CONTEXT));
 #define WOW64_CONTAINING_RECORD(Ptr, StructType, Field) CONTAINING_RECORD(Ptr, StructType, Field)
 #define WOW64_FIELD_PTR(Ptr, Type, Field) (&(Ptr)->Field)
 
+#ifndef WOW64_CAST_TO_PTR
 #define WOW64_CAST_TO_PTR(Ptr) (Ptr)
 #define WOW64_CAST_TO_HANDLE(H) (H)
+#endif
+#ifndef WOW64_CAST_FROM_PTR
 #define WOW64_CAST_FROM_PTR(Ptr) (Ptr)
 #define WOW64_CAST_FROM_HANDLE(H) (H)
+#endif
 
 #endif
