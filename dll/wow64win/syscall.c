@@ -101,11 +101,13 @@ static unsigned char ReadFsDwordImpl[] =
     0xC3              /* ret */
 };
 
+#ifndef __clang__
 ULONG __readfsdword(ULONG x)
 {
     typedef ULONG(*__readfsdwordImplType)(ULONG);
     return ((__readfsdwordImplType)ReadFsDwordImpl)(x);
 }
+#endif
 
 PSERVERINFO g_ServerInfo = NULL;
 
