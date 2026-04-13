@@ -998,10 +998,12 @@ static size_t packed_message_32to64(UINT message,
         winpos_32to64( params64, params32 );
         return sizeof(WINDOWPOS);
 #else
-        WINDOWPOS wpos64, *outWpos64 = params64;
-        winpos_32to64(&wpos64, params32);
-        *outWpos64 = wpos64;
-        return sizeof(WINDOWPOS);
+        {
+            WINDOWPOS wpos64, *outWpos64 = params64;
+            winpos_32to64(&wpos64, params32);
+            *outWpos64 = wpos64;
+            return sizeof(WINDOWPOS);
+        }
 #endif
 
     case WM_NEXTMENU:
