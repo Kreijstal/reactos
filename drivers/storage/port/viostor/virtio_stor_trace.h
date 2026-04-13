@@ -69,7 +69,7 @@ extern int nViostorDebugLevel;
 #if DBG
 #define RhelDbgPrint(Level, MSG, ...) \
     if ((!bDebugPrint) || Level > nViostorDebugLevel) {} \
-    else VirtioDebugPrintProc (MSG, __VA_ARGS__)
+    else VirtioDebugPrintProc (MSG, ##__VA_ARGS__)
 #define VioStorDbgBreak()\
     if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT) DbgBreakPoint();
 #else
