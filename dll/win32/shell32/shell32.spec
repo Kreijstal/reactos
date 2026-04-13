@@ -532,8 +532,8 @@
 @ stdcall SHGetIconOverlayIndexA(str long) # 2k3:308, Vista:371
 @ stdcall SHGetIconOverlayIndexW(wstr long) # 2k3:309, Vista:372
 @ stdcall SHGetInstanceExplorer(long) shcore.GetProcessReference # 2k3:310, Vista:373
-@ stub -version=0x600+ SHGetKnownFolderIDList # Vista:374
-@ stub -version=0x600+ SHGetKnownFolderPath # Vista:375
+@ stdcall -version=0x600+ SHGetKnownFolderIDList(ptr long ptr ptr) # Vista:374
+@ stdcall -version=0x600+ SHGetKnownFolderPath(ptr long ptr ptr) # Vista:375
 @ stub -version=0x600+ SHGetLocalizedName # Vista:376
 @ stdcall SHGetMalloc(ptr) # 2k3:311, Vista:377
 @ stdcall -version=0x600+ SHGetNameFromIDList(ptr long ptr) # Vista:378
@@ -569,7 +569,7 @@
 @ stub -version=0x600+ SHQueryUserNotificationState # Vista:405
 @ stub -version=0x600+ SHRemoveLocalizedName # Vista:406
 @ stub -version=0x600+ SHSetDefaultProperties # Vista:407
-@ stub -version=0x600+ SHSetKnownFolderPath # Vista:408
+@ stdcall -version=0x600+ SHSetKnownFolderPath(ptr long ptr wstr) # Vista:408
 @ stdcall SHSetLocalizedName(wstr wstr long) # 2k3:335, Vista:409
 @ stub -version=0x600+ SHSetTemporaryPropertyForItem # Vista:410
 @ stdcall SHSetUnreadMailCountW (wstr long wstr) # 2k3:336, Vista:411
