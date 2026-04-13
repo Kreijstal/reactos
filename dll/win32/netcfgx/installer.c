@@ -464,12 +464,17 @@ InstallNetDevice(
         goto cleanup;
     }
 
-    /* Start the device */
-    if (!SetupDiRestartDevices(DeviceInfoSet, DeviceInfoData))
+    /* Restart the device so NDIS re-reads Tcpip\Linkage\Bind and binds
+     * the protocol to this adapter. We need a full disable/enable cycle
+     * to trigger the miniport start path which calls
+     * ndisBindMiniportsToProtocol with the updated linkage.
+     * Use CM_Disable_DevNode/CM_Enable_DevNode directly for a real
+     * PnP stop/start cycle. */
     {
-        rc = GetLastError();
-        ERR("SetupDiRestartDevices() failed with error 0x%lx\n", rc);
-        goto cleanup;
+        DEVINST dnDevInst = DeviceInfoData->DevInst;
+
+        CM_Disable_DevNode(dnDevInst, 0);
+        CM_Enable_DevNode(dnDevInst, 0);
     }
 
     rc = ERROR_SUCCESS;
