@@ -108,7 +108,7 @@ x2:
 
     ret StackBytes
 x3:
-    /* mov rsp, gs:[0xC0] ; push rax ; ret */
+    /* mov eax, fs:[0xC0] ; push rax ; ret */
     .long HEX(25048b64)
     .long HEX(000000c0)
     .byte HEX(50)
