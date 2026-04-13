@@ -87,6 +87,9 @@ HalVectorToIRQL[16] =
 };
 #endif
 
+/* Dynamic IOAPIC pin count, read from hardware in ApicInitializeIOApic */
+UCHAR ApicMaxIrq = APIC_DEFAULT_MAX_IRQ;
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 FORCEINLINE
@@ -94,7 +97,7 @@ ULONG
 IOApicRead(UCHAR Register)
 {
     /* Select the register, then do the read */
-    ASSERT(Register <= 0x3F);
+    ASSERT(Register <= 0x10 + 2 * ApicMaxIrq);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     return READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
 }
@@ -104,7 +107,7 @@ VOID
 IOApicWrite(UCHAR Register, ULONG Value)
 {
     /* Select the register, then do the write */
-    ASSERT(Register <= 0x3F);
+    ASSERT(Register <= 0x10 + 2 * ApicMaxIrq);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN), Value);
 }
@@ -115,7 +118,7 @@ ApicWriteIORedirectionEntry(
     UCHAR Index,
     IOAPIC_REDIRECTION_REGISTER ReDirReg)
 {
-    ASSERT(Index < APIC_MAX_IRQ);
+    ASSERT(Index < ApicMaxIrq);
     IOApicWrite(IOAPIC_REDTBL + 2 * Index, ReDirReg.Long0);
     IOApicWrite(IOAPIC_REDTBL + 2 * Index + 1, ReDirReg.Long1);
 }
@@ -127,7 +130,7 @@ ApicReadIORedirectionEntry(
 {
     IOAPIC_REDIRECTION_REGISTER ReDirReg;
 
-    ASSERT(Index < APIC_MAX_IRQ);
+    ASSERT(Index < ApicMaxIrq);
     ReDirReg.Long0 = IOApicRead(IOAPIC_REDTBL + 2 * Index);
     ReDirReg.Long1 = IOApicRead(IOAPIC_REDTBL + 2 * Index + 1);
 
@@ -372,7 +375,7 @@ HalpAllocateSystemInterrupt(
 {
     IOAPIC_REDIRECTION_REGISTER ReDirReg;
 
-    ASSERT(Irq < APIC_MAX_IRQ);
+    ASSERT(Irq < ApicMaxIrq);
     ASSERT(HalpVectorToIndex[Vector] == APIC_FREE_VECTOR);
 
     /* Setup a redirection entry */
@@ -474,6 +477,16 @@ ApicInitializeIOApic(VOID)
     Pte->Global = 1;
     _ReadWriteBarrier();
 
+    /* Read the actual IOAPIC pin count from the Version Register */
+    {
+        ULONG IoApicVersion = IOApicRead(IOAPIC_VER);
+        UCHAR MaxRedir = (UCHAR)((IoApicVersion >> 16) & 0xFF);
+        ApicMaxIrq = MaxRedir + 1; /* MaxRedirEntry is 0-based */
+        if (ApicMaxIrq > APIC_ABSOLUTE_MAX_IRQ)
+            ApicMaxIrq = APIC_ABSOLUTE_MAX_IRQ;
+        DPRINT1("IOAPIC: %u redirection entries detected\n", ApicMaxIrq);
+    }
+
     /* Setup a redirection entry */
     ReDirReg.Vector = APIC_FREE_VECTOR;
     ReDirReg.MessageType = APIC_MT_Fixed;
@@ -487,7 +500,7 @@ ApicInitializeIOApic(VOID)
     ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
 
     /* Loop all table entries */
-    for (Index = 0; Index < APIC_MAX_IRQ; Index++)
+    for (Index = 0; Index < ApicMaxIrq; Index++)
     {
         /* Initialize entry */
         ApicWriteIORedirectionEntry(Index, ReDirReg);
@@ -770,7 +783,7 @@ HalBeginSystemInterrupt(
         Index = HalpVectorToIndex[Vector];
 
         /* Check if it's valid */
-        if (Index < APIC_MAX_IRQ)
+        if (Index < ApicMaxIrq)
         {
             /* Read the I/O redirection entry */
             RedirReg = ApicReadIORedirectionEntry(Index);
