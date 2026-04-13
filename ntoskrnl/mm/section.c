@@ -4584,8 +4584,6 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
     BOOLEAN ImageOk = TRUE;
     BOOLEAN DataOk = TRUE;
     KIRQL OldIrql;
-    LONG64 SegRefs;
-
     if (!SectionObjectPointer)
         return TRUE;
 
@@ -4642,10 +4640,6 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
         Segment = MiGrabDataSection(SectionObjectPointer);
         if (Segment != NULL)
         {
-            OldIrql = MiAcquirePfnLock();
-            SegRefs = Segment->RefCount;
-            MiReleasePfnLock(OldIrql);
-
             /* Drop our temp grab.  If we held the only reference the
              * legacy cleanup runs synchronously and clears the slot.
              * Otherwise the slot stays set and we report based on the
