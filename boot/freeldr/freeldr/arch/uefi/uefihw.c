@@ -24,6 +24,182 @@ extern ULONG VramSize;
 extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
 
 BOOLEAN AcpiPresent = FALSE;
+
+/**
+ * @brief Register an ISA bus in the hardware configuration tree.
+ *
+ * ScsiPort and other drivers use IoQueryDeviceDescription with
+ * InterfaceType=Isa to verify the bus exists before scanning.
+ */
+static
+VOID
+DetectIsaBus(
+    _In_ PCONFIGURATION_COMPONENT_DATA SystemKey,
+    _Inout_ PULONG BusNumber)
+{
+    PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
+    PCONFIGURATION_COMPONENT_DATA BusKey;
+    ULONG Size;
+
+    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
+    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+    if (!PartialResourceList)
+        return;
+
+    RtlZeroMemory(PartialResourceList, Size);
+    PartialResourceList->Version = 1;
+    PartialResourceList->Revision = 1;
+    PartialResourceList->Count = 0;
+
+    FldrCreateComponentKey(SystemKey,
+                           AdapterClass,
+                           MultiFunctionAdapter,
+                           0, 0, 0xFFFFFFFF,
+                           "ISA",
+                           PartialResourceList,
+                           Size,
+                           &BusKey);
+    (*BusNumber)++;
+}
+
+#define PCI_CONFIG_ADDRESS  0xCF8
+#define PCI_CONFIG_DATA     0xCFC
+
+/**
+ * @brief Detect PCI bus presence by probing config space mechanism 1
+ * and register the PCI bus in the hardware configuration tree.
+ *
+ * This replaces the BIOS INT 1Ah PCI detection for UEFI boots.
+ * PCI config mechanism 1 (I/O ports 0xCF8/0xCFC) is architecture-defined
+ * and works identically on BIOS and UEFI.
+ */
+static
+VOID
+DetectPci(
+    _In_ PCONFIGURATION_COMPONENT_DATA SystemKey,
+    _Inout_ PULONG BusNumber)
+{
+    PCI_REGISTRY_INFO BusData;
+    PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
+    PCONFIGURATION_COMPONENT_DATA BiosKey;
+    PCONFIGURATION_COMPONENT_DATA BusKey;
+    ULONG Size;
+    ULONG OldValue;
+    ULONG TestValue;
+    ULONG i;
+
+    /*
+     * Probe PCI configuration mechanism 1:
+     * Save old value at 0xCF8, write a known pattern, read back.
+     */
+    OldValue = __indword(PCI_CONFIG_ADDRESS);
+    __outdword(PCI_CONFIG_ADDRESS, 0x80000000);
+    TestValue = __indword(PCI_CONFIG_ADDRESS);
+    __outdword(PCI_CONFIG_ADDRESS, OldValue);
+
+    if (TestValue != 0x80000000)
+    {
+        TRACE("PCI mechanism 1 not detected (got 0x%lx)\n", TestValue);
+        return;
+    }
+
+    /* Read vendor ID at bus 0, device 0, function 0 to confirm PCI works */
+    __outdword(PCI_CONFIG_ADDRESS, 0x80000000);
+    TestValue = __indword(PCI_CONFIG_DATA);
+    if ((TestValue & 0xFFFF) == 0xFFFF)
+    {
+        TRACE("No PCI device at 0:0.0\n");
+        return;
+    }
+
+    TRACE("PCI mechanism 1 detected, host bridge vendor:device = %04lx:%04lx\n",
+          TestValue & 0xFFFF, (TestValue >> 16) & 0xFFFF);
+
+    /* Count PCI buses by scanning bus numbers for valid devices */
+    BusData.NoBuses = 1;
+    for (i = 1; i < 256; i++)
+    {
+        __outdword(PCI_CONFIG_ADDRESS, 0x80000000 | (i << 16));
+        TestValue = __indword(PCI_CONFIG_DATA);
+        if ((TestValue & 0xFFFF) != 0xFFFF)
+            BusData.NoBuses = (UCHAR)(i + 1);
+    }
+
+    BusData.MajorRevision = 2;
+    BusData.MinorRevision = 0;
+    BusData.HardwareMechanism = 1;
+
+    TRACE("Found %u PCI bus(es)\n", (ULONG)BusData.NoBuses);
+
+    /* Create the "PCI BIOS" MultiFunctionAdapter key (same as BIOS path) */
+    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
+    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+    if (!PartialResourceList)
+        return;
+
+    RtlZeroMemory(PartialResourceList, Size);
+
+    FldrCreateComponentKey(SystemKey,
+                           AdapterClass,
+                           MultiFunctionAdapter,
+                           0,
+                           0,
+                           0xFFFFFFFF,
+                           "PCI BIOS",
+                           PartialResourceList,
+                           Size,
+                           &BiosKey);
+    (*BusNumber)++;
+
+    /* Report PCI buses */
+    for (i = 0; i < (ULONG)BusData.NoBuses; i++)
+    {
+        if (i == 0)
+        {
+            /* First bus gets the PCI_REGISTRY_INFO data */
+            Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) +
+                   sizeof(BusData);
+            PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+            if (!PartialResourceList)
+                return;
+
+            RtlZeroMemory(PartialResourceList, Size);
+            PartialResourceList->Version = 1;
+            PartialResourceList->Revision = 1;
+            PartialResourceList->Count = 1;
+
+            PartialDescriptor = &PartialResourceList->PartialDescriptors[0];
+            PartialDescriptor->Type = CmResourceTypeDeviceSpecific;
+            PartialDescriptor->ShareDisposition = CmResourceShareUndetermined;
+            PartialDescriptor->u.DeviceSpecificData.DataSize = sizeof(BusData);
+
+            RtlCopyMemory(&PartialResourceList->PartialDescriptors[1],
+                          &BusData, sizeof(BusData));
+        }
+        else
+        {
+            Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
+            PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+            if (!PartialResourceList)
+                return;
+
+            RtlZeroMemory(PartialResourceList, Size);
+        }
+
+        FldrCreateComponentKey(SystemKey,
+                               AdapterClass,
+                               MultiFunctionAdapter,
+                               0,
+                               0,
+                               0xFFFFFFFF,
+                               "PCI",
+                               PartialResourceList,
+                               Size,
+                               &BusKey);
+        (*BusNumber)++;
+    }
+}
 static EFI_EVENT IdleTimerEvent = NULL;
 
 /* FUNCTIONS *****************************************************************/
@@ -344,8 +520,11 @@ UefiHwDetect(
 
     /* Detect buses */
     DetectInternal(SystemKey, &BusNumber);
-    // TODO: DetectPciBios
+    DetectPci(SystemKey, &BusNumber);
+    DetectIsaBus(SystemKey, &BusNumber);
     DetectAcpiBios(SystemKey, &BusNumber);
+
+    /* TODO: Detect ISA sub-devices (serial ports, keyboard, etc.) */
 
     TRACE("DetectHardware() Done\n");
     return SystemKey;
