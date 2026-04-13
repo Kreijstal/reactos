@@ -24,6 +24,44 @@ extern ULONG VramSize;
 extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
 
 BOOLEAN AcpiPresent = FALSE;
+
+/**
+ * @brief Register an ISA bus in the hardware configuration tree.
+ *
+ * ScsiPort and other drivers use IoQueryDeviceDescription with
+ * InterfaceType=Isa to verify the bus exists before scanning.
+ */
+static
+VOID
+DetectIsaBus(
+    _In_ PCONFIGURATION_COMPONENT_DATA SystemKey,
+    _Inout_ PULONG BusNumber)
+{
+    PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
+    PCONFIGURATION_COMPONENT_DATA BusKey;
+    ULONG Size;
+
+    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
+    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+    if (!PartialResourceList)
+        return;
+
+    RtlZeroMemory(PartialResourceList, Size);
+    PartialResourceList->Version = 1;
+    PartialResourceList->Revision = 1;
+    PartialResourceList->Count = 0;
+
+    FldrCreateComponentKey(SystemKey,
+                           AdapterClass,
+                           MultiFunctionAdapter,
+                           0, 0, 0xFFFFFFFF,
+                           "ISA",
+                           PartialResourceList,
+                           Size,
+                           &BusKey);
+    (*BusNumber)++;
+}
+
 static EFI_EVENT IdleTimerEvent = NULL;
 
 #if defined(_M_IX86) || defined(_M_AMD64)
@@ -515,7 +553,10 @@ UefiHwDetect(
 #if defined(_M_IX86) || defined(_M_AMD64)
     DetectPciBus(SystemKey, &BusNumber, UefiDetectPciBus);
 #endif
+    DetectIsaBus(SystemKey, &BusNumber);
     DetectAcpiBios(SystemKey, &BusNumber);
+
+    /* TODO: Detect ISA sub-devices (serial ports, keyboard, etc.) */
 
     TRACE("DetectHardware() Done\n");
     return SystemKey;
