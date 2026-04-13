@@ -15,6 +15,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * When DLL_EXPORT_VERSION >= 0x600, msvcrt exports these natively,
+ * so the compat shims are not needed and would cause duplicate symbols.
+ */
+#if DLL_EXPORT_VERSION < 0x600
+
 #undef wctob
 #undef btowc
 #undef wcrtomb
@@ -76,6 +82,8 @@ size_t __cdecl mbrtowc(wchar_t *pwc, const char *s, size_t n, void *ps)
     return (size_t)ret;
 }
 
+#endif /* DLL_EXPORT_VERSION < 0x600 */
+
 /*
  * lseek64 / fstat64 — POSIX names that GCC 15 libstdc++ basic_file.o expects.
  * Map to the MSVC CRT underscore-prefixed versions.
@@ -104,16 +112,22 @@ void __cdecl __msvcrt_assert(const char *expr, const char *file, unsigned int li
     _assert(expr, file, line);
 }
 
+#if DLL_EXPORT_VERSION < 0x600
 #ifdef _M_IX86
 void *_imp__wctob = wctob;
 void *_imp__btowc = btowc;
 void *_imp__wcrtomb = wcrtomb;
 void *_imp__mbrtowc = mbrtowc;
-void *_imp____msvcrt_assert = __msvcrt_assert;
 #else
 void *__imp_wctob = wctob;
 void *__imp_btowc = btowc;
 void *__imp_wcrtomb = wcrtomb;
 void *__imp_mbrtowc = mbrtowc;
+#endif
+#endif /* DLL_EXPORT_VERSION < 0x600 */
+
+#ifdef _M_IX86
+void *_imp____msvcrt_assert = __msvcrt_assert;
+#else
 void *__imp___msvcrt_assert = __msvcrt_assert;
 #endif
