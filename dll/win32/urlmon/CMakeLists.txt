@@ -50,8 +50,12 @@ add_library(urlmon MODULE
 
 set_module_type(urlmon win32dll)
 # PROXY_CLSID_IS contains commas in braces which CMake/ninja can mangle.
-# Use -include to define it via a header file instead.
-target_compile_options(urlmon PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/proxy_clsid.h")
+# Use a forced-include to define it via a header file instead.
+if(MSVC)
+    target_compile_options(urlmon PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/proxy_clsid.h)
+else()
+    target_compile_options(urlmon PRIVATE "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/proxy_clsid.h")
+endif()
 target_link_libraries(urlmon uuid wine ${PSEH_LIB} oldnames)
 add_delay_importlibs(urlmon advpack)
 add_importlibs(urlmon rpcrt4 propsys ole32 oleaut32 shlwapi shell32 wininet user32 advapi32 kernel32_vista msvcrt kernel32 ntdll)
