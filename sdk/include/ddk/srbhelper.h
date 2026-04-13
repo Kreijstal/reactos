@@ -42,7 +42,7 @@
 #define SrbEqualMemory(Source1, Source2, Length) (memcmp(Source1, Source2, Length) == 0)
 #endif
 
-FORCEINLINE
+static FORCEINLINE
 PSRBEX_DATA
 SrbGetSrbExDataByIndex(
   _In_ PSTORAGE_REQUEST_BLOCK Srb,
@@ -61,7 +61,7 @@ SrbGetSrbExDataByIndex(
   return srbExData;
 }
 
-FORCEINLINE
+static FORCEINLINE
 PSRBEX_DATA
 SrbGetSrbExDataByType(
   _In_ PSTORAGE_REQUEST_BLOCK Srb,
@@ -89,7 +89,7 @@ SrbGetSrbExDataByType(
   return NULL;
 }
 
-FORCEINLINE
+static FORCEINLINE
 PSRBEX_DATA
 SrbGetPrimarySrbExData(
   _In_ PSTORAGE_REQUEST_BLOCK Srb)
@@ -136,7 +136,7 @@ SrbGetPrimarySrbExData(
   return NULL;
 }
 
-FORCEINLINE PSTOR_ADDRESS SrbGetAddress(_In_ PSTORAGE_REQUEST_BLOCK Srb)
+static FORCEINLINE PSTOR_ADDRESS SrbGetAddress(_In_ PSTORAGE_REQUEST_BLOCK Srb)
 {
   PSTOR_ADDRESS storAddr = NULL;
 
@@ -154,7 +154,7 @@ FORCEINLINE PSTOR_ADDRESS SrbGetAddress(_In_ PSTORAGE_REQUEST_BLOCK Srb)
   return storAddr;
 }
 
-FORCEINLINE
+static FORCEINLINE
 BOOLEAN
 SrbCopySrb(
   _In_ PVOID DestinationSrb,
@@ -184,7 +184,7 @@ SrbCopySrb(
   return status;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbZeroSrb(
   _In_ PVOID Srb)
@@ -210,7 +210,7 @@ SrbZeroSrb(
   srb->Length = length;
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetSrbLength(
   _In_ PVOID Srb)
@@ -227,7 +227,7 @@ SrbGetSrbLength(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetSrbLength(
   _In_ PVOID Srb,
@@ -241,7 +241,7 @@ SrbSetSrbLength(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetDefaultSrbLengthFromFunction(
   _In_ ULONG SrbFunction)
@@ -267,7 +267,7 @@ SrbGetDefaultSrbLengthFromFunction(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 PCDB
 SrbGetScsiData(
   _In_ PSTORAGE_REQUEST_BLOCK SrbEx,
@@ -450,7 +450,7 @@ SrbGetScsiData(
   return Cdb;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetScsiData(
   _In_ PSTORAGE_REQUEST_BLOCK SrbEx,
@@ -586,7 +586,7 @@ SrbSetScsiData(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 PCDB
 SrbGetCdb(
   _In_ PVOID Srb)
@@ -605,7 +605,7 @@ SrbGetCdb(
   return pCdb;
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetSrbFunction(
   _In_ PVOID Srb)
@@ -622,7 +622,7 @@ SrbGetSrbFunction(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 PVOID
 SrbGetSenseInfoBuffer(
   _In_ PVOID Srb)
@@ -641,7 +641,7 @@ SrbGetSenseInfoBuffer(
   return pSenseInfoBuffer;
 }
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetSenseInfoBufferLength(
   _In_ PVOID Srb)
@@ -660,7 +660,7 @@ SrbGetSenseInfoBufferLength(
   return SenseInfoBufferLength;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetSenseInfoBuffer(
   _In_ PVOID Srb,
@@ -678,7 +678,7 @@ SrbSetSenseInfoBuffer(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetSenseInfoBufferLength(
   _In_ PVOID Srb,
@@ -696,7 +696,7 @@ SrbSetSenseInfoBufferLength(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 PVOID
 SrbGetOriginalRequest(
   _In_ PVOID Srb)
@@ -713,7 +713,7 @@ SrbGetOriginalRequest(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetOriginalRequest(
   _In_ PVOID Srb,
@@ -731,7 +731,7 @@ SrbSetOriginalRequest(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 PVOID
 SrbGetDataBuffer(
   _In_ PVOID Srb)
@@ -750,7 +750,7 @@ SrbGetDataBuffer(
   return DataBuffer;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetDataBuffer(
   _In_ PVOID Srb,
@@ -768,7 +768,7 @@ SrbSetDataBuffer(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetDataTransferLength(
   _In_ PVOID Srb)
@@ -787,7 +787,7 @@ SrbGetDataTransferLength(
   return DataTransferLength;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetDataTransferLength(
   _In_ PVOID Srb,
@@ -805,7 +805,7 @@ SrbSetDataTransferLength(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetTimeOutValue(
   _In_ PVOID Srb)
@@ -824,7 +824,7 @@ SrbGetTimeOutValue(
   return timeOutValue;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetTimeOutValue(
   _In_ PVOID Srb,
@@ -842,7 +842,7 @@ SrbSetTimeOutValue(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetQueueSortKey(
   _In_ PVOID Srb,
@@ -856,7 +856,7 @@ SrbSetQueueSortKey(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetQueueTag(
   _In_ PVOID Srb,
@@ -876,7 +876,7 @@ SrbSetQueueTag(
 
 #define SrbSetRequestTag SrbSetQueueTag
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetQueueTag(
   _In_ PVOID Srb)
@@ -895,7 +895,7 @@ SrbGetQueueTag(
 
 #define SrbGetRequestTag SrbGetQueueTag
 
-FORCEINLINE
+static FORCEINLINE
 PVOID
 SrbGetNextSrb(
   _In_ PVOID Srb)
@@ -912,7 +912,7 @@ SrbGetNextSrb(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetNextSrb(
   _In_ PVOID Srb,
@@ -930,7 +930,7 @@ SrbSetNextSrb(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetSrbFlags(
   _In_ PVOID Srb)
@@ -949,7 +949,7 @@ SrbGetSrbFlags(
   return srbFlags;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbAssignSrbFlags(
   _In_ PVOID Srb,
@@ -967,7 +967,7 @@ SrbAssignSrbFlags(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetSrbFlags(
   _In_ PVOID Srb,
@@ -985,7 +985,7 @@ SrbSetSrbFlags(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbClearSrbFlags(
   _In_ PVOID Srb,
@@ -1003,7 +1003,7 @@ SrbClearSrbFlags(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetSystemStatus(
   _In_ PVOID Srb)
@@ -1022,7 +1022,7 @@ SrbGetSystemStatus(
   return systemStatus;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetSystemStatus(
   _In_ PVOID Srb,
@@ -1040,7 +1040,7 @@ SrbSetSystemStatus(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetScsiStatus(
   _In_ PVOID Srb)
@@ -1059,7 +1059,7 @@ SrbGetScsiStatus(
   return scsiStatus;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetScsiStatus(
   _In_ PVOID Srb,
@@ -1077,7 +1077,7 @@ SrbSetScsiStatus(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetCdbLength(
   _In_ PVOID Srb)
@@ -1096,7 +1096,7 @@ SrbGetCdbLength(
   return CdbLength;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetCdbLength(
   _In_ PVOID Srb,
@@ -1114,7 +1114,7 @@ SrbSetCdbLength(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 ULONG
 SrbGetRequestAttribute(
   _In_ PVOID Srb)
@@ -1134,7 +1134,7 @@ SrbGetRequestAttribute(
 
 #define SrbGetQueueAction SrbGetRequestAttribute
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetRequestAttribute(
   _In_ PVOID Srb,
@@ -1154,7 +1154,7 @@ SrbSetRequestAttribute(
 
 #define SrbSetQueueAction SrbSetRequestAttribute
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetPathId(
   _In_ PVOID Srb)
@@ -1187,7 +1187,7 @@ SrbGetPathId(
   return PathId;
 }
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetTargetId(
   _In_ PVOID Srb)
@@ -1220,7 +1220,7 @@ SrbGetTargetId(
   return TargetId;
 }
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetLun(
   _In_ PVOID Srb)
@@ -1253,7 +1253,7 @@ SrbGetLun(
   return Lun;
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbGetPathTargetLun(
   _In_ PVOID Srb,
@@ -1316,7 +1316,7 @@ SrbGetPathTargetLun(
   return;
 }
 
-FORCEINLINE
+static FORCEINLINE
 PVOID
 SrbGetMiniportContext(
   _In_ PVOID Srb)
@@ -1333,7 +1333,7 @@ SrbGetMiniportContext(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 UCHAR
 SrbGetSrbStatus(
   _In_ PVOID Srb)
@@ -1350,7 +1350,7 @@ SrbGetSrbStatus(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetSrbStatus(
   _In_ PVOID Srb,
@@ -1382,7 +1382,7 @@ SrbSetSrbStatus(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 PVOID
 SrbGetPortContext(
   _In_ PVOID Srb)
@@ -1400,7 +1400,7 @@ SrbGetPortContext(
   }
 }
 
-FORCEINLINE
+static FORCEINLINE
 VOID
 SrbSetPortContext(
   _In_ PVOID Srb,
