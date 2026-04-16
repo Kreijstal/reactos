@@ -189,6 +189,83 @@ GetQueuedCompletionStatus(IN HANDLE CompletionHandle,
  */
 BOOL
 WINAPI
+GetQueuedCompletionStatusEx(IN HANDLE CompletionPort,
+                            OUT LPOVERLAPPED_ENTRY lpEntries,
+                            IN ULONG ulCount,
+                            OUT PULONG ulNumEntriesRemoved,
+                            IN DWORD dwMilliseconds,
+                            IN BOOL fAlertable)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatus;
+    PVOID CompletionKey;
+    PVOID ApcContext;
+    LARGE_INTEGER Time;
+    PLARGE_INTEGER TimePtr;
+    LARGE_INTEGER ZeroTimeout;
+    ULONG i;
+
+    /* Validate parameters */
+    if (!ulCount || !lpEntries || !ulNumEntriesRemoved)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* First entry: use the caller's timeout */
+    TimePtr = BaseFormatTimeOut(&Time, dwMilliseconds);
+    Status = NtRemoveIoCompletion(CompletionPort,
+                                  &CompletionKey,
+                                  &ApcContext,
+                                  &IoStatus,
+                                  TimePtr);
+    if (!NT_SUCCESS(Status) || Status == STATUS_TIMEOUT)
+    {
+        *ulNumEntriesRemoved = 0;
+        if (Status == STATUS_TIMEOUT)
+            SetLastError(WAIT_TIMEOUT);
+        else if (Status == STATUS_USER_APC)
+            SetLastError(WAIT_IO_COMPLETION);
+        else
+            BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    /* Fill in the first entry */
+    lpEntries[0].lpCompletionKey = (ULONG_PTR)CompletionKey;
+    lpEntries[0].lpOverlapped = (LPOVERLAPPED)ApcContext;
+    lpEntries[0].Internal = (ULONG_PTR)IoStatus.Status;
+    lpEntries[0].dwNumberOfBytesTransferred = (DWORD)IoStatus.Information;
+    i = 1;
+
+    /* Try to drain more completions without waiting */
+    ZeroTimeout.QuadPart = 0;
+    while (i < ulCount)
+    {
+        Status = NtRemoveIoCompletion(CompletionPort,
+                                      &CompletionKey,
+                                      &ApcContext,
+                                      &IoStatus,
+                                      &ZeroTimeout);
+        if (!NT_SUCCESS(Status) || Status == STATUS_TIMEOUT)
+            break;
+
+        lpEntries[i].lpCompletionKey = (ULONG_PTR)CompletionKey;
+        lpEntries[i].lpOverlapped = (LPOVERLAPPED)ApcContext;
+        lpEntries[i].Internal = (ULONG_PTR)IoStatus.Status;
+        lpEntries[i].dwNumberOfBytesTransferred = (DWORD)IoStatus.Information;
+        i++;
+    }
+
+    *ulNumEntriesRemoved = i;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 PostQueuedCompletionStatus(IN HANDLE CompletionHandle,
                            IN DWORD dwNumberOfBytesTransferred,
                            IN ULONG_PTR dwCompletionKey,
