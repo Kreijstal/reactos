@@ -98,7 +98,8 @@ typedef struct IPADDR_ENTRY {
 #define FUNCTION_DISCONNECT             5
 #define FUNCTION_CLOSE                  6
 #define FUNCTION_CONNECTEX              7
-#define MAX_FUNCTIONS                   8
+#define FUNCTION_SUPERACCEPT            8
+#define MAX_FUNCTIONS                   9
 
 #define IN_FLIGHT_REQUESTS              5
 
@@ -285,6 +286,9 @@ NTSTATUS AfdListenSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
 NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 		    PIO_STACK_LOCATION IrpSp );
+
+NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+			 PIO_STACK_LOCATION IrpSp );
 
 /* lock.c */
 
