@@ -1006,6 +1006,9 @@ AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         case IOCTL_AFD_ACCEPT:
             return AfdAccept( DeviceObject, Irp, IrpSp );
 
+        case IOCTL_AFD_SUPER_ACCEPT:
+            return AfdSuperAccept( DeviceObject, Irp, IrpSp );
+
         case IOCTL_AFD_DISCONNECT:
             return AfdDisconnect( DeviceObject, Irp, IrpSp );
 

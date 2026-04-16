@@ -65,8 +65,80 @@ WSPAcceptEx(
     OUT LPDWORD lpdwBytesReceived,
     IN OUT LPOVERLAPPED lpOverlapped)
 {
-    UNIMPLEMENTED;
+    AFD_SUPER_ACCEPT_DATA AcceptData;
+    PSOCKET_INFORMATION ListenSocket;
+    PSOCKET_INFORMATION AcceptSocket;
+    NTSTATUS Status;
+    PIO_STATUS_BLOCK IOSB;
+    HANDLE Event;
+    PVOID APCContext;
+    ULONG OutputLength;
 
+    /* Validate parameters */
+    if (!lpOverlapped || !lpOutputBuffer)
+    {
+        WSASetLastError(WSAEINVAL);
+        return FALSE;
+    }
+
+    ListenSocket = GetSocketStructure(sListenSocket);
+    AcceptSocket = GetSocketStructure(sAcceptSocket);
+    if (!ListenSocket || !AcceptSocket)
+    {
+        WSASetLastError(WSAENOTSOCK);
+        return FALSE;
+    }
+
+    /* Build the AFD super accept request */
+    AcceptData.AcceptHandle = (HANDLE)AcceptSocket->Handle;
+    AcceptData.ReceiveDataLength = dwReceiveDataLength;
+    AcceptData.LocalAddressLength = dwLocalAddressLength;
+    AcceptData.RemoteAddressLength = dwRemoteAddressLength;
+
+    OutputLength = dwReceiveDataLength + dwLocalAddressLength + dwRemoteAddressLength;
+
+    /* Set up for IOCP/overlapped — match pattern from WSPRecv */
+    IOSB = (PIO_STATUS_BLOCK)&lpOverlapped->Internal;
+    IOSB->Status = STATUS_PENDING;
+    IOSB->Information = 0;
+
+    Event = lpOverlapped->hEvent;
+    if (Event)
+    {
+        APCContext = NULL;
+    }
+    else
+    {
+        /* No event: APC context = overlapped pointer for IOCP delivery */
+        APCContext = lpOverlapped;
+    }
+
+    Status = NtDeviceIoControlFile(
+        (HANDLE)ListenSocket->Handle,
+        Event,
+        NULL,           /* No APC routine */
+        APCContext,
+        IOSB,
+        IOCTL_AFD_SUPER_ACCEPT,
+        &AcceptData,
+        sizeof(AcceptData),
+        lpOutputBuffer,
+        OutputLength);
+
+    if (Status == STATUS_PENDING)
+    {
+        WSASetLastError(WSA_IO_PENDING);
+        return FALSE;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        if (lpdwBytesReceived)
+            *lpdwBytesReceived = (DWORD)IOSB->Information;
+        return TRUE;
+    }
+
+    WSASetLastError(TranslateNtStatusError(Status));
     return FALSE;
 }
 
@@ -95,7 +167,22 @@ WSPGetAcceptExSockaddrs(
     OUT struct sockaddr **RemoteSockaddr,
     OUT LPINT RemoteSockaddrLength)
 {
-    UNIMPLEMENTED;
+    PCHAR Buffer = (PCHAR)lpOutputBuffer;
+    PCHAR LocalSlot = Buffer + dwReceiveDataLength;
+    PCHAR RemoteSlot = LocalSlot + dwLocalAddressLength;
+
+    /* Each address slot format: [4-byte length][SOCKADDR data] */
+    if (LocalSockaddr && LocalSockaddrLength)
+    {
+        *LocalSockaddrLength = *(INT *)LocalSlot;
+        *LocalSockaddr = (struct sockaddr *)(LocalSlot + sizeof(INT));
+    }
+
+    if (RemoteSockaddr && RemoteSockaddrLength)
+    {
+        *RemoteSockaddrLength = *(INT *)RemoteSlot;
+        *RemoteSockaddr = (struct sockaddr *)(RemoteSlot + sizeof(INT));
+    }
 }
 
 /* EOF */
