@@ -21,6 +21,13 @@ HKCU,"Keyboard Layout\Toggle","Layout Hotkey",0x00000000,"2"
 ; Cdrom class driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Cdrom","Start",0x00010001,0x00000000
 
+; AFD (Ancillary Function Driver) - required for Winsock bind/listen/accept
+HKLM,"SYSTEM\CurrentControlSet\Services\Afd","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Afd","Group",0x00000000,"TDI"
+HKLM,"SYSTEM\CurrentControlSet\Services\Afd","ImagePath",0x00020000,"system32\drivers\afd.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\Afd","Start",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Afd","Type",0x00010001,0x00000001
+
 ; TCP/IP stack (normally installed by nettcpip.inf during setup)
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Tcpip","Group",0x00000000,"PNP_TDI"
