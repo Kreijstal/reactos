@@ -86,6 +86,11 @@ static NTSTATUS SatisfyPreAccept( PIRP Irp, PAFD_TDI_OBJECT_QELT Qelt ) {
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS SatisfySuperAccept( PAFD_DEVICE_EXTENSION DeviceExt,
+                                    PAFD_FCB ListenFCB,
+                                    PIRP Irp,
+                                    PIO_STACK_LOCATION IrpSp );
+
 static IO_COMPLETION_ROUTINE ListenComplete;
 static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
                                       PIRP Irp,
@@ -172,8 +177,18 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         }
     }
 
+    /* Satisfy a super-accept (AcceptEx) request if one is available */
+    if( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SUPERACCEPT] ) &&
+        !IsListEmpty( &FCB->PendingConnections ) ) {
+        PLIST_ENTRY PendingIrpEntry =
+            RemoveHeadList( &FCB->PendingIrpList[FUNCTION_SUPERACCEPT] );
+        PIRP SuperAcceptIrp =
+            CONTAINING_RECORD( PendingIrpEntry, IRP, Tail.Overlay.ListEntry );
+        SatisfySuperAccept( FCB->DeviceExt, FCB, SuperAcceptIrp,
+                            IoGetCurrentIrpStackLocation(SuperAcceptIrp) );
+    }
     /* Satisfy a pre-accept request if one is available */
-    if( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
+    else if( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_PREACCEPT] ) &&
         !IsListEmpty( &FCB->PendingConnections ) ) {
         PLIST_ENTRY PendingIrp  =
             RemoveHeadList( &FCB->PendingIrpList[FUNCTION_PREACCEPT] );
@@ -403,4 +418,213 @@ NTSTATUS AfdAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     AFD_DbgPrint(MIN_TRACE,("No connection waiting\n"));
 
     return UnlockAndMaybeComplete( FCB, STATUS_UNSUCCESSFUL, Irp, 0 );
+}
+
+static NTSTATUS SatisfySuperAccept( PAFD_DEVICE_EXTENSION DeviceExt,
+                                    PAFD_FCB ListenFCB,
+                                    PIRP Irp,
+                                    PIO_STACK_LOCATION IrpSp ) {
+    PAFD_SUPER_ACCEPT_DATA AcceptInfo;
+    PAFD_TDI_OBJECT_QELT PendingConnObj;
+    PLIST_ENTRY PendingConn;
+    PFILE_OBJECT AcceptFileObject = NULL;
+    PAFD_FCB AcceptFCB;
+    NTSTATUS Status;
+    PCHAR OutputBuffer;
+    ULONG OutputLength;
+    PTRANSPORT_ADDRESS RemoteAddr;
+    PTRANSPORT_ADDRESS LocalAddr;
+    ULONG AddrLen;
+    HANDLE AcceptHandle;
+    ULONG ReceiveDataLength;
+    ULONG LocalAddressLength;
+    ULONG RemoteAddressLength;
+
+    UNREFERENCED_PARAMETER(DeviceExt);
+
+    AcceptInfo = (PAFD_SUPER_ACCEPT_DATA)Irp->AssociatedIrp.SystemBuffer;
+    OutputBuffer = (PCHAR)Irp->AssociatedIrp.SystemBuffer;
+    OutputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+
+    /* METHOD_BUFFERED: input and output share SystemBuffer, so capture
+     * the input fields into locals BEFORE writing output */
+    AcceptHandle = AcceptInfo->AcceptHandle;
+    ReceiveDataLength = AcceptInfo->ReceiveDataLength;
+    LocalAddressLength = AcceptInfo->LocalAddressLength;
+    RemoteAddressLength = AcceptInfo->RemoteAddressLength;
+
+    /* Get the first pending connection */
+    if (IsListEmpty(&ListenFCB->PendingConnections))
+    {
+        AFD_DbgPrint(MIN_TRACE,("SuperAccept: no pending connection\n"));
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    PendingConn = RemoveHeadList(&ListenFCB->PendingConnections);
+    PendingConnObj = CONTAINING_RECORD(PendingConn, AFD_TDI_OBJECT_QELT, ListEntry);
+
+    /* Reference the accept socket */
+    Status = ObReferenceObjectByHandle(AcceptHandle,
+                                       FILE_ALL_ACCESS,
+                                       *IoFileObjectType,
+                                       Irp->RequestorMode,
+                                       (PVOID *)&AcceptFileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        AFD_DbgPrint(MIN_TRACE,("SuperAccept: bad accept handle %p\n",
+                                AcceptHandle));
+        InsertHeadList(&ListenFCB->PendingConnections, &PendingConnObj->ListEntry);
+        return Status;
+    }
+
+    AcceptFCB = AcceptFileObject->FsContext;
+
+    /* Transfer TDI connection to accept socket */
+    if (!SocketAcquireStateLock(AcceptFCB))
+    {
+        ObDereferenceObject(AcceptFileObject);
+        InsertHeadList(&ListenFCB->PendingConnections, &PendingConnObj->ListEntry);
+        return STATUS_FILE_CLOSED;
+    }
+
+    AcceptFCB->Connection = PendingConnObj->Object;
+
+    if (AcceptFCB->RemoteAddress)
+    {
+        ExFreePoolWithTag(AcceptFCB->RemoteAddress, TAG_AFD_TRANSPORT_ADDRESS);
+    }
+
+    AcceptFCB->RemoteAddress =
+        TaCopyTransportAddress(PendingConnObj->ConnInfo->RemoteAddress);
+
+    if (!AcceptFCB->RemoteAddress)
+        Status = STATUS_NO_MEMORY;
+    else
+        Status = MakeSocketIntoConnection(AcceptFCB);
+
+    if (NT_SUCCESS(Status))
+        Status = TdiBuildConnectionInfo(&AcceptFCB->ConnectCallInfo,
+                                        AcceptFCB->RemoteAddress);
+
+    if (NT_SUCCESS(Status))
+        Status = TdiBuildConnectionInfo(&AcceptFCB->ConnectReturnInfo,
+                                        AcceptFCB->RemoteAddress);
+
+    SocketStateUnlock(AcceptFCB);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ObDereferenceObject(AcceptFileObject);
+        ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
+        return Status;
+    }
+
+    /* Fill output buffer with addresses in AcceptEx format:
+     * [ReceiveDataLength bytes of data (usually 0)]
+     * [LocalAddressLength bytes: 4-byte len + SOCKADDR]
+     * [RemoteAddressLength bytes: 4-byte len + SOCKADDR]
+     */
+    if (OutputBuffer && OutputLength >= ReceiveDataLength +
+                                        LocalAddressLength +
+                                        RemoteAddressLength)
+    {
+        PCHAR LocalSlot = OutputBuffer + ReceiveDataLength;
+        PCHAR RemoteSlot = LocalSlot + LocalAddressLength;
+
+        RtlZeroMemory(LocalSlot, LocalAddressLength);
+        RtlZeroMemory(RemoteSlot, RemoteAddressLength);
+
+        /* Local address from the listen socket */
+        LocalAddr = ListenFCB->LocalAddress;
+        if (LocalAddr && LocalAddr->TAAddressCount > 0)
+        {
+            AddrLen = sizeof(USHORT) + LocalAddr->Address[0].AddressLength;
+            if (AddrLen + sizeof(INT) <= LocalAddressLength)
+            {
+                *(INT *)LocalSlot = AddrLen;
+                *(USHORT *)(LocalSlot + sizeof(INT)) =
+                    LocalAddr->Address[0].AddressType;
+                RtlCopyMemory(LocalSlot + sizeof(INT) + sizeof(USHORT),
+                              LocalAddr->Address[0].Address,
+                              LocalAddr->Address[0].AddressLength);
+            }
+        }
+
+        /* Remote address from the accepted connection */
+        RemoteAddr = PendingConnObj->ConnInfo->RemoteAddress;
+        if (RemoteAddr && RemoteAddr->TAAddressCount > 0)
+        {
+            AddrLen = sizeof(USHORT) + RemoteAddr->Address[0].AddressLength;
+            if (AddrLen + sizeof(INT) <= RemoteAddressLength)
+            {
+                *(INT *)RemoteSlot = AddrLen;
+                *(USHORT *)(RemoteSlot + sizeof(INT)) =
+                    RemoteAddr->Address[0].AddressType;
+                RtlCopyMemory(RemoteSlot + sizeof(INT) + sizeof(USHORT),
+                              RemoteAddr->Address[0].Address,
+                              RemoteAddr->Address[0].AddressLength);
+            }
+        }
+    }
+
+    ObDereferenceObject(AcceptFileObject);
+    ExFreePoolWithTag(PendingConnObj, TAG_AFD_ACCEPT_QUEUE);
+
+    /* Update listen socket poll state */
+    if (!IsListEmpty(&ListenFCB->PendingConnections))
+    {
+        ListenFCB->PollState |= AFD_EVENT_ACCEPT;
+        ListenFCB->PollStatus[FD_ACCEPT_BIT] = STATUS_SUCCESS;
+        PollReeval(ListenFCB->DeviceExt, ListenFCB->FileObject);
+    }
+    else
+    {
+        ListenFCB->PollState &= ~AFD_EVENT_ACCEPT;
+    }
+
+    Irp->IoStatus.Information = ReceiveDataLength +
+                                 LocalAddressLength +
+                                 RemoteAddressLength;
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    (void)IoSetCancelRoutine(Irp, NULL);
+    IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
+                         PIO_STACK_LOCATION IrpSp ) {
+    PFILE_OBJECT FileObject = IrpSp->FileObject;
+    PAFD_DEVICE_EXTENSION DeviceExt =
+        (PAFD_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    PAFD_FCB FCB = FileObject->FsContext;
+    ULONG InputLength;
+
+    AFD_DbgPrint(MID_TRACE,("AfdSuperAccept called\n"));
+
+    if (!SocketAcquireStateLock(FCB)) return LostSocket(Irp);
+
+    if (FCB->SharedData.State != SOCKET_STATE_LISTENING)
+    {
+        AFD_DbgPrint(MIN_TRACE,("SuperAccept on non-listening socket\n"));
+        return UnlockAndMaybeComplete(FCB, STATUS_INVALID_PARAMETER, Irp, 0);
+    }
+
+    InputLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    if (InputLength < sizeof(AFD_SUPER_ACCEPT_DATA))
+    {
+        return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
+    }
+
+    /* Check if there's already a pending connection */
+    if (!IsListEmpty(&FCB->PendingConnections))
+    {
+        NTSTATUS Status = SatisfySuperAccept(DeviceExt, FCB, Irp, IrpSp);
+        SocketStateUnlock(FCB);
+        return Status;
+    }
+
+    /* No pending connection — pend the IRP for later completion */
+    AFD_DbgPrint(MID_TRACE,("SuperAccept: pending IRP\n"));
+    return LeaveIrpUntilLater(FCB, Irp, FUNCTION_SUPERACCEPT);
 }
