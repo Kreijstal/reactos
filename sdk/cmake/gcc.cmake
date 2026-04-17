@@ -650,8 +650,9 @@ if(LIBWINPTHREAD_LOCATION MATCHES "mingw32")
     string(STRIP ${LIBWINPTHREAD_LOCATION} LIBWINPTHREAD_LOCATION)
     message(STATUS "Using libwinpthread from ${LIBWINPTHREAD_LOCATION}")
     set_target_properties(libwinpthread PROPERTIES IMPORTED_LOCATION ${LIBWINPTHREAD_LOCATION})
-    # libwinpthread needs kernel32 imports, a CRT and msvcrtex
-    target_link_libraries(libwinpthread INTERFACE libkernel32 libmsvcrt msvcrtex)
+    # Some MinGW runtimes call Vista-era kernel32 exports such as GetTickCount64.
+    # An appropriate CRT must be linked manually by the final target.
+    target_link_libraries(libwinpthread INTERFACE libkernel32_vista libkernel32)
 else()
     add_library(libwinpthread INTERFACE)
 endif()
