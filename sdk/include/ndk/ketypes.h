@@ -1614,7 +1614,7 @@ typedef struct _KTHREAD
             UCHAR WaitBlockFill6[2 * sizeof(KWAIT_BLOCK) + FIELD_OFFSET(KWAIT_BLOCK, SpareLong)];
             ULONG WaitTime;
         };
-#if (NTDDI_VERSION >= NTDDI_VISTA) // [
+#if (NTDDI_VERSION >= NTDDI_WIN7) // [
         struct
         {
             UCHAR WaitBlockFill7[168];
@@ -1624,7 +1624,7 @@ typedef struct _KTHREAD
 #endif // ]
         struct
         {
-#if (NTDDI_VERSION >= NTDDI_VISTA) // [
+#if (NTDDI_VERSION >= NTDDI_WIN7) // [
             UCHAR WaitBlockFill8[188];
 #else // ][
             UCHAR WaitBlockFill7[3 * sizeof(KWAIT_BLOCK) + FIELD_OFFSET(KWAIT_BLOCK, SpareLong)];
