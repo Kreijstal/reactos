@@ -170,7 +170,12 @@ CsrpConnectToServer(
     /* Save CSR Section data */
 #ifndef BUILD_WOW6432
     NtCurrentPeb()->ReadOnlySharedMemoryBase = ConnectionInfo.SharedSectionBase;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* ReadOnlySharedMemoryHeap was replaced by HotpatchInformation at Vista */
+    NtCurrentPeb()->HotpatchInformation = ConnectionInfo.SharedSectionHeap;
+#else
     NtCurrentPeb()->ReadOnlySharedMemoryHeap = ConnectionInfo.SharedSectionHeap;
+#endif
     NtCurrentPeb()->ReadOnlyStaticServerData = ConnectionInfo.SharedStaticServerData;
 #else
     NtCurrentPeb64()->ReadOnlySharedMemoryBase = ConnectionInfo.SharedSectionBase;

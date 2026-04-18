@@ -1,8 +1,5 @@
 
-
-# kmdfdriver links wdfdriverentry which re-exports _WIN32_WINNT=0x603 PUBLIC,
-# so we just strip the propagated REACTOS_TARGET_NT and let WDF set it.
-remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
+remove_definitions(-D_WIN32_WINNT=0x600)
 
 list(APPEND SOURCE
     adsp.cpp
