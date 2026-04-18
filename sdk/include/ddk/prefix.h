@@ -1,6 +1,10 @@
 #ifndef _RXPREFIX_
 #define _RXPREFIX_
 
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 typedef struct _RX_CONNECTION_ID
 {
     union
@@ -78,7 +82,7 @@ typedef struct _RX_PREFIX_TABLE {
     LIST_ENTRY HashBuckets[RX_PREFIX_TABLE_DEFAULT_LENGTH];
 } RX_PREFIX_TABLE, *PRX_PREFIX_TABLE;
 
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
 #define RxAcquirePrefixTableLockShared(T, W) RxpAcquirePrefixTableLockShared((T),(W),TRUE)
 #define RxAcquirePrefixTableLockExclusive(T, W) RxpAcquirePrefixTableLockExclusive((T), (W), TRUE)
 #define RxReleasePrefixTableLock(T) RxpReleasePrefixTableLock((T), TRUE)

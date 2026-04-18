@@ -1,6 +1,10 @@
 #ifndef _RX_CONTEXT_STRUCT_DEFINED_
 #define _RX_CONTEXT_STRUCT_DEFINED_
 
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 #define RX_TOPLEVELIRP_CONTEXT_SIGNATURE 'LTxR'
 
 typedef struct _RX_TOPLEVELIRP_CONTEXT
@@ -67,7 +71,7 @@ typedef struct _RX_FCBTRACKER_CALLINFO
 
 #define MRX_CONTEXT_FIELD_COUNT 4
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 typedef
 NTSTATUS
 (NTAPI *PRX_DISPATCH) (
@@ -529,7 +533,7 @@ VOID
 RxResumeBlockedOperations_ALL(
     _Inout_ PRX_CONTEXT RxContext);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 VOID
 RxCancelBlockingOperation(
     _Inout_ PRX_CONTEXT RxContext,
