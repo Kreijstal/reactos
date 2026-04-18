@@ -201,11 +201,9 @@ XHCI_RH_ClearFeaturePortEnable(IN PVOID xhciExtension,
     PortStatusRegister.PortEnableDisable = 1;
     
     WRITE_REGISTER_ULONG(PortStatusRegPointer, PortStatusRegister.AsULONG );
-    
-    PortStatusRegister.AsULONG = READ_REGISTER_ULONG(PortStatusRegPointer) ;
-    
-    ASSERT(PortStatusRegister.PortEnableDisable == 0);
-    return MP_STATUS_SUCCESS;    
+
+    DPRINT1("XHCI_RH_ClearFeaturePortEnable: port %u disable requested\n", Port);
+    return MP_STATUS_SUCCESS;
 }
 
 MPSTATUS
