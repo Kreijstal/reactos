@@ -463,19 +463,19 @@ static NTSTATUS SatisfySuperAccept( PAFD_DEVICE_EXTENSION DeviceExt,
     PendingConn = RemoveHeadList(&ListenFCB->PendingConnections);
     PendingConnObj = CONTAINING_RECORD(PendingConn, AFD_TDI_OBJECT_QELT, ListEntry);
 
-    /* Reference the accept socket */
-    Status = ObReferenceObjectByHandle(AcceptHandle,
-                                       FILE_ALL_ACCESS,
-                                       *IoFileObjectType,
-                                       Irp->RequestorMode,
-                                       (PVOID *)&AcceptFileObject,
-                                       NULL);
-    if (!NT_SUCCESS(Status))
+    /* The accept socket file object was resolved in AfdSuperAccept's caller
+     * context and stashed here.  We cannot resolve the user-mode handle
+     * now: when the IRP was pre-posted (libuv/AcceptEx pattern), this
+     * routine runs from ListenComplete in arbitrary thread context, not
+     * the requesting process. */
+    AcceptFileObject = (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[0];
+    Irp->Tail.Overlay.DriverContext[0] = NULL;
+    if (!AcceptFileObject)
     {
-        AFD_DbgPrint(MIN_TRACE,("SuperAccept: bad accept handle %p\n",
+        AFD_DbgPrint(MIN_TRACE,("SuperAccept: missing prereferenced accept object (handle=%p)\n",
                                 AcceptHandle));
         InsertHeadList(&ListenFCB->PendingConnections, &PendingConnObj->ListEntry);
-        return Status;
+        return STATUS_INVALID_HANDLE;
     }
 
     AcceptFCB = AcceptFileObject->FsContext;
@@ -598,7 +598,10 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_DEVICE_EXTENSION DeviceExt =
         (PAFD_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     PAFD_FCB FCB = FileObject->FsContext;
+    PAFD_SUPER_ACCEPT_DATA AcceptInfo;
+    PFILE_OBJECT AcceptFileObject = NULL;
     ULONG InputLength;
+    NTSTATUS Status;
 
     AFD_DbgPrint(MID_TRACE,("AfdSuperAccept called\n"));
 
@@ -616,10 +619,30 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete(FCB, STATUS_BUFFER_TOO_SMALL, Irp, 0);
     }
 
+    /* Resolve the accept socket handle NOW, in the caller's process
+     * context.  If the IRP pends, SatisfySuperAccept will run from
+     * ListenComplete in an arbitrary thread context where the user
+     * handle would not resolve. */
+    AcceptInfo = (PAFD_SUPER_ACCEPT_DATA)Irp->AssociatedIrp.SystemBuffer;
+    Status = ObReferenceObjectByHandle(AcceptInfo->AcceptHandle,
+                                       0, /* no access required; AFD doesn't
+                                           * act on the handle rights */
+                                       *IoFileObjectType,
+                                       Irp->RequestorMode,
+                                       (PVOID *)&AcceptFileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        AFD_DbgPrint(MIN_TRACE,("SuperAccept: bad accept handle %p err=0x%08x\n",
+                                AcceptInfo->AcceptHandle, Status));
+        return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
+    }
+    Irp->Tail.Overlay.DriverContext[0] = AcceptFileObject;
+
     /* Check if there's already a pending connection */
     if (!IsListEmpty(&FCB->PendingConnections))
     {
-        NTSTATUS Status = SatisfySuperAccept(DeviceExt, FCB, Irp, IrpSp);
+        Status = SatisfySuperAccept(DeviceExt, FCB, Irp, IrpSp);
         SocketStateUnlock(FCB);
         return Status;
     }
