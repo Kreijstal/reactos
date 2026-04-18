@@ -2719,6 +2719,7 @@ static void test_GdiGetCodePage(void)
         hfont = SelectObject(hdc, hfont);
         DeleteObject(hfont);
 
+#if _WIN32_WINNT >= 0x0600
         /* CLIP_DFA_DISABLE turns off the font association */
         lf.lfClipPrecision = CLIP_DFA_DISABLE;
         hfont = CreateFontIndirectA(&lf);
@@ -2733,6 +2734,7 @@ static void test_GdiGetCodePage(void)
 
         hfont = SelectObject(hdc, hfont);
         DeleteObject(hfont);
+#endif
 
         ReleaseDC(NULL, hdc);
     }
