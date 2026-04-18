@@ -1,4 +1,5 @@
 
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x600)
 
 add_executable(reg add.c copy.c delete.c export.c import.c query.c reg.c reg.rc)
