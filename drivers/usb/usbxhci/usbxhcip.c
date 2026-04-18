@@ -2127,12 +2127,15 @@ XHCI_SetupDeviceContext(IN PXHCI_EXTENSION XhciExtension,
     SlotContext->RouteString = RouteString;
     
     // Convert USB speed to xHCI speed encoding
-    // USB enum: 0=Low, 1=Full, 2=High; xHCI: 1=Full, 2=Low, 3=High, 4=Super
+    // USB enum: 0=Low, 1=Full, 2=High, 3=Super; xHCI: 1=Full, 2=Low, 3=High, 4=Super
     ULONG XhciSpeed;
     switch (DeviceSpeed) {
         case 0: XhciSpeed = 2; break;  // Low Speed -> 2
-        case 1: XhciSpeed = 1; break;  // Full Speed ->  1  
+        case 1: XhciSpeed = 1; break;  // Full Speed ->  1
         case 2: XhciSpeed = 3; break;  // High Speed -> 3
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        case 3: XhciSpeed = 4; break;  // SuperSpeed (UsbSuperSpeed) -> 4
+#endif
         default: XhciSpeed = 1; break; // Default to Full Speed
     }
     SlotContext->Speed = XhciSpeed;
