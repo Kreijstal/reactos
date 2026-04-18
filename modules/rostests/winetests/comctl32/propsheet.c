@@ -735,6 +735,11 @@ static const struct message property_sheet_seq[] = {
 static void save_message(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, INT receiver)
 {
     struct message msg = { 0 };
+    UINT last_mouse_message = WM_MOUSELAST;
+
+#ifdef WM_MOUSEHWHEEL
+    last_mouse_message = WM_MOUSEHWHEEL;
+#endif
 
     if (message < WM_USER &&
         message != WM_GETICON &&
@@ -745,7 +750,7 @@ static void save_message(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, 
         message != WM_ERASEBKGND &&
         message != WM_SETCURSOR &&
         (message < WM_NCCREATE || message > WM_NCMBUTTONDBLCLK) &&
-        (message < WM_MOUSEFIRST || message > WM_MOUSEHWHEEL) &&
+        (message < WM_MOUSEFIRST || message > last_mouse_message) &&
         message != 0x90)
     {
         msg.message = message;

@@ -1754,6 +1754,7 @@ static void test_killfocus(void)
     DestroyWindow(hwnd);
 }
 
+#if NTDDI_VERSION >= 0x06000000
 static void test_hittest_v6(void)
 {
     MCHITTESTINFO mchit;
@@ -1848,6 +1849,7 @@ static void test_hittest_v6(void)
 
     DestroyWindow(hwnd);
 }
+#endif
 
 static void test_get_set_border(void)
 {
@@ -2089,7 +2091,9 @@ START_TEST(monthcal)
         return;
     }
 
+#if NTDDI_VERSION >= 0x06000000
     test_hittest_v6();
+#endif
     test_get_set_border();
     test_MCM_SIZERECTTOMIN();
     test_MCM_GETCALENDARCOUNT();
