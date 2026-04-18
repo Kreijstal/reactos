@@ -48,5 +48,5 @@ LogError(
     IN ULONG UniqueId
     );
 
-#endif ___VIOSTOR_UTILS_H___
+#endif /* ___VIOSTOR_UTILS_H___ */
 
