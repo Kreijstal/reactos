@@ -52,7 +52,7 @@ PspDumpThreads(BOOLEAN IncludeSystem)
                          Thread->Tcb.Priority,
                          Thread->Cid.UniqueProcess,
                          Thread->Cid.UniqueThread,
-                         Thread->ThreadsProcess->ImageFileName);
+                         ((PEPROCESS)Thread->ThreadsProcess)->ImageFileName);
 
                 /* Make sure it's not running */
                 if(Thread->Tcb.State == Ready ||
