@@ -558,7 +558,11 @@ WinLdrLoadNLSData(
     //
     // THIS IS a HACK and should be replaced by actually loading the OEMHAL file!
     //
+#if (NTDDI_VERSION < NTDDI_WIN8)
+    /* _LOADER_PARAMETER_BLOCK.OemFontFile was removed at NTDDI_WIN8
+     * (see sdk/include/reactos/arc/arc.h:852). */
     LoaderBlock->OemFontFile = VaToPa(LoaderBlock->NlsData->UnicodeCodePageData);
+#endif
 
     /* Convert NlsTables address to VA */
     LoaderBlock->NlsData = PaToVa(LoaderBlock->NlsData);
