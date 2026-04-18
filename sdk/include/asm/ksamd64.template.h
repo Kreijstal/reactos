@@ -1043,9 +1043,8 @@ OFFSET(KTHREAD_TrapFrame, KTHREAD, TrapFrame),
 OFFSET(KTHREAD_PreviousMode, KTHREAD, PreviousMode),
 OFFSET(KTHREAD_KernelStack, KTHREAD, KernelStack),
 OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
-/* KTHREAD.LargeStack lives in the pre-Win8 KTHREAD layout only, inside
- * the NTDDI_WIN7+ branch (see ndk/ketypes.h). */
-#if (NTDDI_VERSION >= NTDDI_WIN7) && (NTDDI_VERSION < NTDDI_WIN8)
+/* KTHREAD.LargeStack lives in the pre-Win8 KTHREAD layout. */
+#if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
 #endif
 
