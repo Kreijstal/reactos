@@ -339,6 +339,7 @@ typedef struct _XHCI_INPUT_CONTEXT
 } XHCI_INPUT_CONTEXT, *PXHCI_INPUT_CONTEXT;
 
 #define XHCI_MAX_SLOTS 32  // Maximum number of device slots supported
+#define XHCI_MAX_PORTS 255 // HCSPARAMS1.MaxPorts is an 8-bit field
 
 typedef struct _XHCI_HC_RESOURCES 
 {
@@ -379,6 +380,8 @@ typedef struct _XHCI_EXTENSION
      * Callers in usbport expect a monotonically increasing 32-bit frame number,
      * so XHCI_Get32BitFrameNumber detects MFINDEX wrap and bumps this field. */
     ULONG FrameHighPart;
+    UCHAR PortConnectStatus[XHCI_MAX_PORTS + 1];
+    UCHAR PortConnectChange[XHCI_MAX_PORTS + 1];
 } XHCI_EXTENSION, *PXHCI_EXTENSION;
 
 typedef union _XHCI_LINK_ADDR
@@ -438,4 +441,3 @@ C_ASSERT (FIELD_OFFSET(XHCI_HC_RESOURCES,SlotTransferRings)% 64 == 0);
 C_ASSERT (FIELD_OFFSET(XHCI_HC_RESOURCES,EventRingSegTable)% 64 == 0);
 C_ASSERT (FIELD_OFFSET(XHCI_HC_RESOURCES,InputContext)% 64 == 0);
 C_ASSERT (FIELD_OFFSET(XHCI_HC_RESOURCES,OutputContexts)% 64 == 0);
-
