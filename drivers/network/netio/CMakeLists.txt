@@ -2,6 +2,7 @@
 spec2def(netio.sys netio.spec ADD_IMPORTLIB)
 
 # NETIO.SYS is a NT 6 driver
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x600)
 # Including AFD is needed by the TDI helpers.
 # They have been part of AFD before.
