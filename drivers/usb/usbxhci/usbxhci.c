@@ -1795,6 +1795,17 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
                               USB_MINIPORT_FLAGS_USB2 |
                               USB_MINIPORT_FLAGS_POLLING |
                               USB_MINIPORT_FLAGS_WAKE_SUPPORT;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /*
+     * Advertise SuperSpeed capability so usbport will honour the
+     * Usb30PortStatus.NegotiatedDeviceSpeed field populated by
+     * XHCI_RH_GetPortStatus. Without this, USBPORT_CreateDevice falls back
+     * to the legacy USB 2.0 port-status bits and misclassifies SuperSpeed
+     * connects as UsbHighSpeed, producing xHCI slot-context Speed=3 and a
+     * Parameter Error on CONFIGURE_ENDPOINT for EP MaxPacketSize=1024.
+     */
+    RegPacket.MiniPortFlags |= USB_MINIPORT_FLAGS_USB3;
+#endif
 
     RegPacket.MiniPortBusBandwidth = TOTAL_USB30_BUS_BANDWIDTH;
 

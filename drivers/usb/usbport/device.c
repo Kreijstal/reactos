@@ -1068,6 +1068,49 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
     DeviceHandle->PortNumber = Port;
     DeviceHandle->HubDeviceHandle = HubDeviceHandle;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB3)
+    {
+        USB_PORT_STATUS PortStatusView;
+        UCHAR NegotiatedSpeed;
+
+        /*
+         * USB 3.0 root-hub miniports report NegotiatedDeviceSpeed in bits
+         * 10-12 of the port status word (Windows 10 port-status layout).
+         * The 3-bit code uses the xHCI PORTSC.PortSpeed encoding:
+         *   1 = Full, 2 = Low, 3 = High, 4 = SuperSpeed.
+         */
+        PortStatusView.AsUshort16 = PortStatus;
+        NegotiatedSpeed = (UCHAR)PortStatusView.Usb30PortStatus.NegotiatedDeviceSpeed;
+
+        switch (NegotiatedSpeed)
+        {
+            case 1:
+                DeviceHandle->DeviceSpeed = UsbFullSpeed;
+                break;
+            case 2:
+                DeviceHandle->DeviceSpeed = UsbLowSpeed;
+                break;
+            case 3:
+                DeviceHandle->DeviceSpeed = UsbHighSpeed;
+                break;
+            case 4:
+            default:
+                DeviceHandle->DeviceSpeed = UsbSuperSpeed;
+                break;
+            case 0:
+                /* Field unpopulated: fall back to legacy port-status bits. */
+                if (PortStatus & USB_PORT_STATUS_LOW_SPEED)
+                    DeviceHandle->DeviceSpeed = UsbLowSpeed;
+                else if (PortStatus & USB_PORT_STATUS_HIGH_SPEED)
+                    DeviceHandle->DeviceSpeed = UsbHighSpeed;
+                else
+                    DeviceHandle->DeviceSpeed = UsbFullSpeed;
+                break;
+        }
+    }
+    else
+#endif
     if (PortStatus & USB_PORT_STATUS_LOW_SPEED)
     {
         DeviceHandle->DeviceSpeed = UsbLowSpeed;
