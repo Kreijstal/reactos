@@ -277,6 +277,7 @@ typedef struct _SRB_EXTENSION {
 }SRB_EXTENSION, *PSRB_EXTENSION;
 
 BOOLEAN
+NTAPI
 VirtIoInterrupt(
     IN PVOID DeviceExtension
     );
