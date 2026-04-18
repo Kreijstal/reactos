@@ -735,6 +735,7 @@ static HWND create_listview_controlW(DWORD style, HWND parent)
 
 static BOOL is_win_xp(void)
 {
+#if _WIN32_WINNT >= 0x0600
     HWND hwnd, header;
     BOOL ret;
 
@@ -746,6 +747,9 @@ static BOOL is_win_xp(void)
     DestroyWindow(hwnd);
 
     return ret;
+#else
+    return FALSE;
+#endif
 }
 
 static LRESULT WINAPI header_subclass_proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -5045,6 +5049,7 @@ static void test_scrollnotify(void)
     DestroyWindow(hwnd);
 }
 
+#if _WIN32_WINNT >= 0x0600
 static void test_LVS_EX_TRANSPARENTBKGND(void)
 {
     HWND hwnd;
@@ -5088,6 +5093,7 @@ static void test_LVS_EX_TRANSPARENTBKGND(void)
 
     DestroyWindow(hwnd);
 }
+#endif
 
 static void test_approximate_viewrect(void)
 {
@@ -5369,6 +5375,7 @@ static void test_finditem(void)
     DestroyWindow(hwnd);
 }
 
+#if _WIN32_WINNT >= 0x0600
 static void test_LVS_EX_HEADERINALLVIEWS(void)
 {
     HWND hwnd, header;
@@ -5428,6 +5435,7 @@ static void test_LVS_EX_HEADERINALLVIEWS(void)
     ok(IsWindow(header), "Expected header to be created\n");
     DestroyWindow(hwnd);
 }
+#endif
 
 static void test_hover(void)
 {
@@ -6729,8 +6737,10 @@ START_TEST(listview)
     test_canceleditlabel();
     test_mapidindex();
     test_scrollnotify();
+#if _WIN32_WINNT >= 0x0600
     test_LVS_EX_TRANSPARENTBKGND();
     test_LVS_EX_HEADERINALLVIEWS();
+#endif
     test_deleteitem();
     test_multiselect();
     test_insertitem();
