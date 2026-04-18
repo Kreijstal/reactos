@@ -42,6 +42,10 @@ typedef enum _USB_DEVICE_SPEED {
   UsbLowSpeed = 0,
   UsbFullSpeed,
   UsbHighSpeed
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+  ,
+  UsbSuperSpeed
+#endif
 } USB_DEVICE_SPEED;
 
 #define USB_PORT_STATUS_CONNECT                       0x0001
