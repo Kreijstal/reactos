@@ -522,7 +522,11 @@ OFFSET(IoPointer, IO_STATUS_BLOCK, Pointer),
 OFFSET(IoInformation, IO_STATUS_BLOCK, Information),
 #endif /* _M_AMD64 */
 
-#if (NTDDI_VERSION >= NTDDI_WIN8)
+/* KSTACK_CONTROL is a Win8+ kernel stack-control structure.  ReactOS does
+ * not yet define the type in any NDK/XDK header, so the block is disabled
+ * until the typedef is introduced.  The pre-Win8 equivalent
+ * KERNEL_STACK_CONTROL is obsolete. */
+#if 0 // (NTDDI_VERSION >= NTDDI_WIN8) -- KSTACK_CONTROL not yet defined in NDK
 HEADER("KSTACK_CONTROL"),
 OFFSET(KcCurrentBase, KSTACK_CONTROL, StackBase),
 OFFSET(KcActualLimit, KSTACK_CONTROL, ActualLimit),
@@ -536,8 +540,6 @@ OFFSET(KcExceptionList, KSTACK_CONTROL, PreviousExceptionList),
 #endif // _IX86
 SIZE(KSTACK_CONTROL_LENGTH, KSTACK_CONTROL),
 CONSTANT(KSTACK_ACTUAL_LIMIT_EXPANDED), // move somewhere else?
-#else
-//HEADER("KERNEL_STACK_CONTROL"), // obsolete
 #endif
 
 #if 0 // no longer in win 10, different struct
@@ -886,15 +888,24 @@ OFFSET(UsLastSystemRITEventTickCount, KUSER_SHARED_DATA, LastSystemRITEventTickC
 OFFSET(UsNumberOfPhysicalPages, KUSER_SHARED_DATA, NumberOfPhysicalPages),
 OFFSET(UsSafeBootMode, KUSER_SHARED_DATA, SafeBootMode),
 OFFSET(UsTestRetInstruction, KUSER_SHARED_DATA, TestRetInstruction),
-OFFSET(UsSystemCall, KUSER_SHARED_DATA, SystemCall), // not in win10
-OFFSET(UsSystemCallReturn, KUSER_SHARED_DATA, SystemCallReturn), // not in win10
+/* KUSER_SHARED_DATA.SystemCall exists at offset 0x300 for < NTDDI_WIN8, and
+ * reappears at offset 0x308 for >= NTDDI_WIN10_TH2; SystemCallReturn only
+ * exists for < NTDDI_WIN8.  See ndk/ketypes.h SystemCall/QpcFrequency block. */
+#if (NTDDI_VERSION < NTDDI_WIN8) || (NTDDI_VERSION >= NTDDI_WIN10_TH2)
+OFFSET(UsSystemCall, KUSER_SHARED_DATA, SystemCall),
+#endif
+#if (NTDDI_VERSION < NTDDI_WIN8)
+OFFSET(UsSystemCallReturn, KUSER_SHARED_DATA, SystemCallReturn),
+#endif
 OFFSET(UsSystemCallPad, KUSER_SHARED_DATA, SystemCallPad),
 OFFSET(UsTickCount, KUSER_SHARED_DATA, TickCount),
 OFFSET(UsTickCountQuad, KUSER_SHARED_DATA, TickCountQuad),
-#if (NTDDI_VERSION >= NTDDI_VISTASP2)
+#if (NTDDI_VERSION >= NTDDI_VISTASP2) && (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(UsWow64SharedInformation, KUSER_SHARED_DATA, DEPRECATED_Wow64SharedInformation),
 #elif (NTDDI_VERSION >= NTDDI_VISTA)
 /* Field does not exist -- Vista pre-SP2 has it under a different layout */
+#elif (NTDDI_VERSION >= NTDDI_WIN8)
+/* Replaced by TimeUpdateLock / TimeUpdateSequence at offset 0x340 */
 #else
 OFFSET(UsWow64SharedInformation, KUSER_SHARED_DATA, Wow64SharedInformation),
 #endif
@@ -904,7 +915,11 @@ HEADER("KWAIT_BLOCK offsets"),
 OFFSET(WbWaitListEntry, KWAIT_BLOCK, WaitListEntry),
 OFFSET(WbThread, KWAIT_BLOCK, Thread),
 OFFSET(WbObject, KWAIT_BLOCK, Object),
-OFFSET(WbNextWaitBlock, KWAIT_BLOCK, NextWaitBlock), // not in win10
+/* KWAIT_BLOCK was re-laid-out at NTDDI_WIN8; NextWaitBlock only exists in
+ * the pre-Win8 layout.  See xdk/ketypes.h _KWAIT_BLOCK. */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+OFFSET(WbNextWaitBlock, KWAIT_BLOCK, NextWaitBlock),
+#endif
 OFFSET(WbWaitKey, KWAIT_BLOCK, WaitKey),
 OFFSET(WbWaitType, KWAIT_BLOCK, WaitType),
 
