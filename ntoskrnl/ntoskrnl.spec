@@ -508,7 +508,6 @@
 @ stdcall IoSetFileOrigin(ptr long)
 @ stdcall IoSetHardErrorOrVerifyDevice(ptr ptr)
 @ stdcall IoSetInformation(ptr ptr long ptr)
-@ stdcall IoSetMasterIrpStatus(ptr long)
 @ stdcall IoSetIoCompletion(ptr ptr ptr long ptr long)
 @ fastcall IoSetPartitionInformation(ptr long long long)
 @ stdcall IoSetPartitionInformationEx(ptr long ptr)
