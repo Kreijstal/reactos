@@ -4,7 +4,7 @@
 ###############################################################################
 
 # This requires NT6
-remove_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x600)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x601 -DWINVER=0x601)
 
 # Replace the global CRT include directory with the msvcrt include directory
