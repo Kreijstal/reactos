@@ -1316,8 +1316,115 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
                        IN PXHCI_TRANSFER XhciTransfer,
                        IN PUSBPORT_SCATTER_GATHER_LIST SgList)
 {
-    DPRINT1("XHCI_SubmitBulkTransfer: Bulk transfers not yet implemented\n");
-    return MP_STATUS_FAILURE;
+    PUSBPORT_TRANSFER_PARAMETERS TransferParameters;
+    XHCI_TRB NormalTrb;
+    PHYSICAL_ADDRESS BufferPA;
+    ULONG TransferLength;
+    ULONG SlotId;
+    ULONG ContextIndex;
+    MPSTATUS Status;
+    PHYSICAL_ADDRESS NormalTrbPA;
+    PXHCI_RING EndpointTransferRing;
+
+    DPRINT1("XHCI_SubmitBulkTransfer: function initiated\n");
+
+    TransferParameters = XhciTransfer->TransferParameters;
+    TransferLength = TransferParameters->TransferBufferLength;
+
+    // Get the slot ID for this endpoint
+    SlotId = *(PULONG)&XhciEndpoint->FirstTD;  // Stored in FirstTD field during endpoint creation
+    DPRINT1("XHCI_SubmitBulkTransfer: Retrieved slot ID %d from endpoint\n", SlotId);
+
+    // Calculate the context index (DCI) for this endpoint
+    ContextIndex = XhciEndpoint->ContextIndex;
+    DPRINT1("XHCI_SubmitBulkTransfer: Using context index %d for endpoint (length=%d)\n",
+            ContextIndex, TransferLength);
+
+    // Use the endpoint's transfer ring
+    EndpointTransferRing = &XhciEndpoint->TransferRing;
+    if (EndpointTransferRing->enqueue_pointer == NULL) {
+        DPRINT1("XHCI_SubmitBulkTransfer: Endpoint transfer ring not initialized\n");
+        return MP_STATUS_FAILURE;
+    }
+
+    DPRINT1("XHCI_SubmitBulkTransfer: Using endpoint transfer ring at %p\n", EndpointTransferRing);
+
+    // Resolve buffer physical address.
+    // Bulk endpoints legitimately carry zero-length transfers (BOT status
+    // phase, ZLPs) -- in that case we still build a Normal TRB with
+    // Word0/Word1/Word2 all zero and IOC=1. Only reject when TransferLength
+    // is non-zero but the SgList is missing/empty.
+    BufferPA.QuadPart = 0;
+    if (TransferLength > 0)
+    {
+        if (SgList == NULL || SgList->SgElementCount == 0)
+        {
+            DPRINT1("XHCI_SubmitBulkTransfer: missing SgList for length=%d\n",
+                    TransferLength);
+            return MP_STATUS_FAILURE;
+        }
+        BufferPA = SgList->SgElement[0].SgPhysicalAddress;
+        DPRINT1("XHCI_SubmitBulkTransfer: Using buffer PA from SG list: 0x%I64x (length=%d)\n",
+                BufferPA.QuadPart, TransferLength);
+    }
+    else
+    {
+        DPRINT1("XHCI_SubmitBulkTransfer: Zero-length bulk transfer (ZLP / status phase)\n");
+    }
+
+    // Build a single Normal TRB for this bulk transfer.
+    // NOTE: USB Mass Storage BOT CBW/CSW are 31/13 bytes and typical SCSI
+    // data phases fit in a single TRB, so one Normal TRB per submission is
+    // sufficient for current usbstor needs. Multi-TRB chaining for transfers
+    // exceeding a single TRB's max length is not implemented here.
+    RtlZeroMemory(&NormalTrb, sizeof(XHCI_TRB));
+    NormalTrb.GenericTRB.Word0 = (ULONG)(BufferPA.QuadPart & 0xFFFFFFFF);
+    NormalTrb.GenericTRB.Word1 = (ULONG)(BufferPA.QuadPart >> 32);
+    NormalTrb.GenericTRB.Word2 = TransferLength;
+    NormalTrb.GenericTRB.Word3 = (NORMAL_TRB << 10) | // TRB Type = Normal
+                                (1 << 5) | // IOC (Interrupt on Completion)
+                                1; // Cycle bit (will be overridden by enqueue function)
+
+    DPRINT1("XHCI_SubmitBulkTransfer: Created Normal TRB with length %d, IOC=1\n", TransferLength);
+
+    // Enqueue Normal TRB onto the endpoint's transfer ring
+    Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing, &NormalTrb, &NormalTrbPA);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue Normal TRB\n");
+        return MP_STATUS_FAILURE;
+    }
+
+    // Register the transfer for completion tracking
+    PHYSICAL_ADDRESS TrbPointers[1];
+    TrbPointers[0] = NormalTrbPA;
+
+    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, 1, TransferLength);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_SubmitBulkTransfer: Failed to register transfer for tracking\n");
+        // Don't fail the transfer submission just because tracking failed
+    }
+    else
+    {
+        DPRINT1("XHCI_SubmitBulkTransfer: Transfer registered in tracking system\n");
+    }
+
+    // Ring doorbell to notify the controller (using the endpoint's context index)
+    DPRINT1("XHCI_SubmitBulkTransfer: About to ring doorbell for slot %d, endpoint %d\n", SlotId, ContextIndex);
+    Status = XHCI_RingDoorbell(XhciExtension, SlotId, ContextIndex);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_SubmitBulkTransfer: Failed to ring doorbell\n");
+        return MP_STATUS_FAILURE;
+    }
+
+    DPRINT1("XHCI_SubmitBulkTransfer: Bulk transfer submitted successfully\n");
+
+    // Process events after submission to catch any completions
+    XHCI_ProcessEvent(XhciExtension);
+
+    return MP_STATUS_SUCCESS;
 }
 
 MPSTATUS
