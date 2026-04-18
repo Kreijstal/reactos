@@ -402,7 +402,7 @@ NTAPI
 PspDeleteThread(IN PVOID ObjectBody)
 {
     PETHREAD Thread = (PETHREAD)ObjectBody;
-    PEPROCESS Process = Thread->ThreadsProcess;
+    PEPROCESS Process = (PEPROCESS)Thread->ThreadsProcess;
     PAGED_CODE();
     PSTRACE(PS_KILL_DEBUG, "ObjectBody: %p\n", ObjectBody);
     PSREFTRACE(Thread);
@@ -485,7 +485,7 @@ PspExitThread(IN NTSTATUS ExitStatus)
 
     /* Get the Current Thread and Process */
     Thread = PsGetCurrentThread();
-    CurrentProcess = Thread->ThreadsProcess;
+    CurrentProcess = (PEPROCESS)Thread->ThreadsProcess;
     ASSERT((Thread) == PsGetCurrentThread());
 
     /* Can't terminate a thread if it attached another process */
@@ -528,7 +528,11 @@ PspExitThread(IN NTSTATUS ExitStatus)
     ExWaitForRundownProtectionRelease(&Thread->RundownProtect);
 
     /* Cleanup the power state */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.LargeStack);
+#else
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.PowerState);
+#endif
 
     /* Call the WMI Callback for Threads */
     //WmiTraceThread(Thread, NULL, FALSE);
@@ -797,7 +801,13 @@ PspExitThread(IN NTSTATUS ExitStatus)
         if (!Thread->DeadThread)
         {
             /* Check if we need to free its stack */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+            if (Teb->ReservedPad1)
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+            if (Teb->SpareBool1)
+#else
             if (Teb->FreeStackOnTermination)
+#endif
             {
                 /* Set the TEB's Deallocation Stack as the Base Address */
                 Dummy = 0;
@@ -1021,7 +1031,7 @@ PspTerminateThreadByPointer(IN PETHREAD Thread,
         /* Break to debugger */
         PspCatchCriticalBreak("Terminating critical thread 0x%p (in %s)\n",
                               Thread,
-                              Thread->ThreadsProcess->ImageFileName);
+                              ((PEPROCESS)Thread->ThreadsProcess)->ImageFileName);
     }
 
     /* Check if we are already inside the thread */
