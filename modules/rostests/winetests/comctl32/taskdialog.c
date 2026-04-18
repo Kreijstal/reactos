@@ -715,6 +715,7 @@ static void test_timer(void)
     pTaskDialogIndirect(&info, NULL, NULL, NULL);
 }
 
+#if _WIN32_WINNT >= 0x0600
 static HRESULT CALLBACK taskdialog_callback_proc_progress_bar(HWND hwnd, UINT notification, WPARAM wParam,
                                                               LPARAM lParam, LONG_PTR ref_data)
 {
@@ -780,6 +781,7 @@ static void test_progress_bar(void)
     info.lpCallbackData = (LONG_PTR)info.dwFlags;
     pTaskDialogIndirect(&info, NULL, NULL, NULL);
 }
+#endif
 
 static void test_verification_box(void)
 {
@@ -907,7 +909,9 @@ START_TEST(taskdialog)
     test_buttons();
     test_help();
     test_timer();
+#if _WIN32_WINNT >= 0x0600
     test_progress_bar();
+#endif
     test_verification_box();
     test_navigate_page();
     test_wm_close();
