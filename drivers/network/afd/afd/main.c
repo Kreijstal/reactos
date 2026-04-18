@@ -1183,6 +1183,17 @@ CleanupPendingIrp(PAFD_FCB FCB, PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_ACTIVE_
             ZeroEvents(PollReq, IoIs32bitProcess(Irp));
             SignalSocket(Poll, NULL, Poll->AfdHandles, PollReq, STATUS_CANCELLED);
         }
+        else if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_AFD_SUPER_ACCEPT)
+        {
+            /* AfdSuperAccept pre-referenced the accept socket's file object
+             * and stashed it in DriverContext[0].  Release it here when the
+             * IRP is cancelled so we don't leak the object reference. */
+            PFILE_OBJECT AcceptFileObject =
+                (PFILE_OBJECT)Irp->Tail.Overlay.DriverContext[0];
+            Irp->Tail.Overlay.DriverContext[0] = NULL;
+            if (AcceptFileObject)
+                ObDereferenceObject(AcceptFileObject);
+        }
     }
 }
 
@@ -1248,6 +1259,10 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         case IOCTL_AFD_WAIT_FOR_LISTEN:
             Function = FUNCTION_PREACCEPT;
+            break;
+
+        case IOCTL_AFD_SUPER_ACCEPT:
+            Function = FUNCTION_SUPERACCEPT;
             break;
 
         case IOCTL_AFD_SELECT:
