@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x502 -D_WIN32_WINNT=0x502)
 add_executable(bcrypt_winetest bcrypt.c)
 set_module_type(bcrypt_winetest win32cui)
 target_link_libraries(bcrypt_winetest winetestlib)
