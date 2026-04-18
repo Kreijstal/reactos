@@ -5,6 +5,7 @@ add_definitions(
     -D_WINE
     -D_WINHTTP_INTERNAL_)
 
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x600)
 
 spec2def(winhttp.dll winhttp.spec ADD_IMPORTLIB)
