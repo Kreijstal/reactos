@@ -76,18 +76,30 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     portstatus.PortStatus.Usb20PortStatus.PortPower = PortStatusRegister.PortPower;
     portstatus.PortStatus.Usb20PortStatus.LowSpeedDeviceAttached = 0;//PortStatusRegister.PortEnableDisabl
     portstatus.PortStatus.Usb20PortStatus.HighSpeedDeviceAttached =  PortStatusRegister.CurrentConnectStatus;
-   
+
     portstatus.PortStatus.Usb20PortStatus.PortTestMode = 0;//PortStatusRegister.PortPower;
     portstatus.PortStatus.Usb20PortStatus.PortIndicatorControl = 0;//PortStatusRegister.PortIndicatorControl;
-    
+
     portstatus.PortChange.Usb20PortChange.ConnectStatusChange = PortStatusRegister.ConnectStatusChange;
     portstatus.PortChange.Usb20PortChange.PortEnableDisableChange = PortStatusRegister.PortEnableDisableChange;
     portstatus.PortChange.Usb20PortChange.SuspendChange = 0;//PortStatusRegister.ConnectStatusChange;
     portstatus.PortChange.Usb20PortChange.OverCurrentIndicatorChange = PortStatusRegister.OverCurrentChange;
     portstatus.PortChange.Usb20PortChange.ResetChange = PortStatusRegister.PortResetChange;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /*
+     * xHCI reports a 3-bit PortSpeed in PORTSC bits 10-13 using the same
+     * encoding as the Windows 10 USB 3.0 port-status NegotiatedDeviceSpeed
+     * field (1=Full, 2=Low, 3=High, 4=SuperSpeed, ...). Surface it via the
+     * Usb30PortStatus view so usbport can distinguish SuperSpeed from
+     * HighSpeed devices attached to a USB3 root hub. The Usb20 fields above
+     * are still populated for consumers that only read legacy bits.
+     */
+    portstatus.PortStatus.Usb30PortStatus.NegotiatedDeviceSpeed = (USHORT)PortStatusRegister.PortSpeed;
+#endif
+
     *PortStatus = portstatus;
-    
+
     return MP_STATUS_SUCCESS;
 }
 
