@@ -519,77 +519,51 @@ VOID
 NTAPI
 PXHCI_PortStatusChange(IN PXHCI_EXTENSION XhciExtension, IN ULONG PortID)
 {
-    BOOLEAN DeviceInsertedEvent = FALSE;
     XHCI_PORT_STATUS_CONTROL PortStatus;
     PULONG PortReg;
-    static ULONG LastProcessedPort = 0;
-    static LARGE_INTEGER LastProcessedTime = {{0, 0}};
-    LARGE_INTEGER CurrentTime;
-    
-    // Prevent processing the same port multiple times in quick succession
-    KeQuerySystemTime(&CurrentTime);
-    if (LastProcessedPort == PortID && 
-        (CurrentTime.QuadPart - LastProcessedTime.QuadPart) < 10000000) // 1 second
-    {
-        DPRINT1("PXHCI_PortStatusChange: Ignoring repeated port %d change within 1 second\n", PortID);
+    BOOLEAN CurrentConnect;
+    BOOLEAN PreviousConnect;
+    extern USBPORT_REGISTRATION_PACKET RegPacket;
+
+    if (PortID == 0 || PortID > XhciExtension->NumberOfPorts || PortID > XHCI_MAX_PORTS)
         return;
-    }
-    
-    LastProcessedPort = PortID;
-    LastProcessedTime = CurrentTime;
     
     PortReg = XhciExtension->OperationalRegs + (0x400 / sizeof(ULONG)) + ((PortID - 1) * 4);
     PortStatus.AsULONG = READ_REGISTER_ULONG(PortReg);
+    CurrentConnect = PortStatus.CurrentConnectStatus ? TRUE : FALSE;
+    PreviousConnect = XhciExtension->PortConnectStatus[PortID] ? TRUE : FALSE;
     
     DPRINT1("PXHCI_PortStatusChange: Port %d status = 0x%x\n", PortID, PortStatus.AsULONG);
     DPRINT1("PXHCI_PortStatusChange: CCS=%d, CSC=%d, PED=%d, PEC=%d\n", 
             PortStatus.CurrentConnectStatus, PortStatus.ConnectStatusChange, 
             PortStatus.PortEnableDisable, PortStatus.PortEnableDisableChange);
-    
-    // Check if this is a connect status change
-    if (PortStatus.ConnectStatusChange)
+
+    if (PortStatus.ConnectStatusChange || CurrentConnect != PreviousConnect)
     {
-        // Determine if device was inserted or removed
-        DeviceInsertedEvent = PortStatus.CurrentConnectStatus ? TRUE : FALSE;
-        
-        DPRINT1("PXHCI_PortStatusChange: Connect status change on port %d, device %s\n", 
-                PortID, DeviceInsertedEvent ? "connected" : "disconnected");
+        XhciExtension->PortConnectChange[PortID] = 1;
+
+        DPRINT1("PXHCI_PortStatusChange: connect change on port %d, device %s\n",
+                PortID, CurrentConnect ? "connected" : "disconnected");
     }
     else
     {
-        DPRINT1("PXHCI_PortStatusChange: No connect status change, ignoring\n");
-        return;
+        DPRINT1("PXHCI_PortStatusChange: CSC already clear; invalidating root hub from TRB\n");
     }
-    
-    if(DeviceInsertedEvent == TRUE)
-    {
-        extern USBPORT_REGISTRATION_PACKET RegPacket;
 
-        /* Attached: */
+    if (CurrentConnect)
+    {
         DPRINT1("PXHCI_PortStatusChange: USB device has been inserted from port: %X\n", PortID);
-
-        /* Let usbport drive enumeration: it will poll XHCI_RH_GetPortStatus,
-         * reset the port, W1C-clear CSC via XHCI_RH_ClearFeaturePortConnectChange,
-         * then call XHCI_OpenEndpoint/XHCI_SubmitTransfer for Enable Slot,
-         * Address Device and the standard descriptor requests. Do NOT clear
-         * PORTSC here or enumerate locally; that pre-empts usbport and leaves
-         * the device invisible to PnP. */
-        RegPacket.UsbPortInvalidateRootHub(XhciExtension);
-        DPRINT1("PXHCI_PortStatusChange: invalidated root hub for port %u, usbport will enumerate\n", PortID);
     }
     else
     {
-        /* Detached: 
-         *    - CCS -> 0 
-         *    - CSC -> 1 
-         */
         DPRINT1("PXHCI_PortStatusChange: USB device has been removed from port: %X\n", PortID);
-        /* Run de-escalation code */
-        /*
-         * -> Submit a disable slot command
-         * -> clear transfer rings of all TDs associated with device post deattach
-         */
     }
+
+    /* A Port Status Change TRB is already a notification from hardware. Let
+     * usbport re-read the root-hub status even if CSC was consumed by the
+     * root-hub poller before this DPC ran. */
+    RegPacket.UsbPortInvalidateRootHub(XhciExtension);
+    DPRINT1("PXHCI_PortStatusChange: invalidated root hub for port %u\n", PortID);
 }
 
 VOID

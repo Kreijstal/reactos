@@ -60,6 +60,8 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     PULONG PortStatusRegPointer;
     XHCI_PORT_STATUS_CONTROL PortStatusRegister;
     USB_PORT_STATUS_AND_CHANGE  portstatus;
+    BOOLEAN CurrentConnect;
+    BOOLEAN PreviousConnect;
     
     XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     ASSERT(Port != 0 && Port <= XhciExtension->NumberOfPorts);
@@ -68,6 +70,8 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     
    
     portstatus.AsUlong32 = 0;
+    CurrentConnect = PortStatusRegister.CurrentConnectStatus ? TRUE : FALSE;
+    PreviousConnect = XhciExtension->PortConnectStatus[Port] ? TRUE : FALSE;
     portstatus.PortStatus.Usb20PortStatus.CurrentConnectStatus = PortStatusRegister.CurrentConnectStatus;
     portstatus.PortStatus.Usb20PortStatus.PortEnabledDisabled = PortStatusRegister.PortEnableDisable;
     portstatus.PortStatus.Usb20PortStatus.Suspend = 0;//PortStatusRegister.PortEnableDisable;
@@ -80,7 +84,10 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     portstatus.PortStatus.Usb20PortStatus.PortTestMode = 0;//PortStatusRegister.PortPower;
     portstatus.PortStatus.Usb20PortStatus.PortIndicatorControl = 0;//PortStatusRegister.PortIndicatorControl;
 
-    portstatus.PortChange.Usb20PortChange.ConnectStatusChange = PortStatusRegister.ConnectStatusChange;
+    portstatus.PortChange.Usb20PortChange.ConnectStatusChange =
+        PortStatusRegister.ConnectStatusChange ||
+        XhciExtension->PortConnectChange[Port] ||
+        (CurrentConnect != PreviousConnect);
     portstatus.PortChange.Usb20PortChange.PortEnableDisableChange = PortStatusRegister.PortEnableDisableChange;
     portstatus.PortChange.Usb20PortChange.SuspendChange = 0;//PortStatusRegister.ConnectStatusChange;
     portstatus.PortChange.Usb20PortChange.OverCurrentIndicatorChange = PortStatusRegister.OverCurrentChange;
@@ -98,6 +105,7 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     portstatus.PortStatus.Usb30PortStatus.NegotiatedDeviceSpeed = (USHORT)PortStatusRegister.PortSpeed;
 #endif
 
+    XhciExtension->PortConnectStatus[Port] = CurrentConnect ? 1 : 0;
     *PortStatus = portstatus;
 
     return MP_STATUS_SUCCESS;
@@ -270,6 +278,7 @@ XHCI_RH_ClearFeaturePortConnectChange(IN PVOID xhciExtension,
     
     PortStatusRegister.AsULONG = PortStatusRegister.AsULONG & PORT_STATUS_MASK;
     PortStatusRegister.ConnectStatusChange = 1;
+    XhciExtension->PortConnectChange[Port] = 0;
     
     WRITE_REGISTER_ULONG(PortStatusRegPointer, PortStatusRegister.AsULONG );
     
