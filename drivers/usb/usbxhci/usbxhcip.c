@@ -549,65 +549,21 @@ PXHCI_PortStatusChange(IN PXHCI_EXTENSION XhciExtension, IN ULONG PortID)
         return;
     }
     
-    // Clear the port status change bits by writing 1 to them
-    // This is critical to prevent infinite port status change events
-    XHCI_PORT_STATUS_CONTROL ClearBits;
-    PortReg = XhciExtension->OperationalRegs + (0x400 / sizeof(ULONG)) + ((PortID - 1) * 4);
-    
-    ClearBits.AsULONG = 0;
-    ClearBits.ConnectStatusChange = 1;  // Clear Connect Status Change
-    ClearBits.PortEnableDisableChange = 1;  // Clear Port Enable/Disable Change  
-    ClearBits.WarmResetChange = 1;  // Clear Warm Port Reset Change
-    ClearBits.OverCurrentChange = 1;  // Clear Over-current Change
-    ClearBits.PortResetChange = 1;  // Clear Port Reset Change
-    ClearBits.PortLinkStateChange = 1;  // Clear Port Link State Change
-    ClearBits.ConfigErrorChange = 1;  // Clear Port Config Error Change
-    
-    DPRINT1("PXHCI_PortStatusChange: Clearing port %d status change bits (0x%x)\n", PortID, ClearBits.AsULONG);
-    WRITE_REGISTER_ULONG(PortReg, ClearBits.AsULONG);
-
     if(DeviceInsertedEvent == TRUE)
     {
+        extern USBPORT_REGISTRATION_PACKET RegPacket;
+
         /* Attached: */
         DPRINT1("PXHCI_PortStatusChange: USB device has been inserted from port: %X\n", PortID);
-        
-        // Check if we're in DPC context and need to defer enumeration
-        if (KeGetCurrentIrql() >= DISPATCH_LEVEL)
-        {
-            DPRINT1("PXHCI_PortStatusChange: In DPC context (IRQL=%d), deferring enumeration to work item for port %d\n", 
-                    KeGetCurrentIrql(), PortID);
-            
-            // Allocate work item for deferred enumeration
-            PXHCI_ENUMERATION_WORK_ITEM EnumWorkItem = ExAllocatePoolZero(NonPagedPool, 
-                                                                         sizeof(XHCI_ENUMERATION_WORK_ITEM), 
-                                                                         'XHWI');
-            if (EnumWorkItem)
-            {
-                // Initialize work item
-                ExInitializeWorkItem(&EnumWorkItem->WorkItem, XHCI_EnumerationWorkItem, EnumWorkItem);
-                EnumWorkItem->XhciExtension = XhciExtension;
-                EnumWorkItem->PortNumber = PortID;
-                
-                // Queue the work item to run at PASSIVE_LEVEL using DelayedWorkQueue instead of CriticalWorkQueue
-                // This reduces the chance of deadlocks by using a less critical work queue
-                ExQueueWorkItem(&EnumWorkItem->WorkItem, DelayedWorkQueue);
-                
-                DPRINT1("PXHCI_PortStatusChange: Queued work item for port %d enumeration (DelayedWorkQueue)\n", PortID);
-            }
-            else
-            {
-                DPRINT1("PXHCI_PortStatusChange: Failed to allocate work item for port %d\n", PortID);
-                // Fallback to immediate enumeration (may cause DPC timeout but better than losing the device)
-                PXHCI_AssignSlot(XhciExtension, PortID);
-            }
-        }
-        else
-        {
-            DPRINT1("PXHCI_PortStatusChange: Not in DPC context (IRQL=%d), proceeding with immediate enumeration for port %d\n", 
-                    KeGetCurrentIrql(), PortID);
-            // Safe to enumerate immediately
-            PXHCI_AssignSlot(XhciExtension, PortID);
-        }
+
+        /* Let usbport drive enumeration: it will poll XHCI_RH_GetPortStatus,
+         * reset the port, W1C-clear CSC via XHCI_RH_ClearFeaturePortConnectChange,
+         * then call XHCI_OpenEndpoint/XHCI_SubmitTransfer for Enable Slot,
+         * Address Device and the standard descriptor requests. Do NOT clear
+         * PORTSC here or enumerate locally; that pre-empts usbport and leaves
+         * the device invisible to PnP. */
+        RegPacket.UsbPortInvalidateRootHub(XhciExtension);
+        DPRINT1("PXHCI_PortStatusChange: invalidated root hub for port %u, usbport will enumerate\n", PortID);
     }
     else
     {
