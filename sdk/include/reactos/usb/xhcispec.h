@@ -374,6 +374,11 @@ typedef struct _XHCI_EXTENSION
     PXHCI_HC_RESOURCES HcResourcesVA;
     PHYSICAL_ADDRESS HcResourcesPA;
     PHYSICAL_ADDRESS LastCommandTrbPA; // Track the actual physical address of the last sent command TRB
+    /* Software-maintained high part for XHCI_Get32BitFrameNumber.
+     * The hardware MFINDEX register is only 14 bits wide and wraps every ~2s.
+     * Callers in usbport expect a monotonically increasing 32-bit frame number,
+     * so XHCI_Get32BitFrameNumber detects MFINDEX wrap and bumps this field. */
+    ULONG FrameHighPart;
 } XHCI_EXTENSION, *PXHCI_EXTENSION;
 
 typedef union _XHCI_LINK_ADDR
