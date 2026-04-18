@@ -1818,7 +1818,7 @@ IoGetRequestorProcess(IN PIRP Irp)
     {
         if (Irp->ApcEnvironment == OriginalApcEnvironment)
         {
-            return Irp->Tail.Overlay.Thread->ThreadsProcess;
+            return (PEPROCESS)Irp->Tail.Overlay.Thread->ThreadsProcess;
         }
         else if (Irp->ApcEnvironment == AttachedApcEnvironment)
         {
@@ -1858,7 +1858,7 @@ IoGetRequestorSessionId(IN PIRP Irp,
     /* Return the session */
     if (Irp->Tail.Overlay.Thread)
     {
-        Process = Irp->Tail.Overlay.Thread->ThreadsProcess;
+        Process = (PEPROCESS)Irp->Tail.Overlay.Thread->ThreadsProcess;
         *pSessionId = MmGetSessionId(Process);
         return STATUS_SUCCESS;
     }

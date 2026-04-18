@@ -42,7 +42,10 @@ PsConvertToGuiThread(VOID)
     PAGED_CODE();
 
     /* Validate the previous mode */
-    if (KeGetPreviousMode() == KernelMode) return STATUS_INVALID_PARAMETER;
+    if (KeGetPreviousMode() == KernelMode)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* If no win32k, crashes later */
     ASSERT(PspW32ProcessCallout != NULL);
@@ -51,7 +54,11 @@ PsConvertToGuiThread(VOID)
     if (!PspW32ProcessCallout) return STATUS_ACCESS_DENIED;
 
     /* Make sure it's not already win32 */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) && (defined(_WIN64) || (NTDDI_VERSION >= NTDDI_WIN7))
+    if (Thread->Tcb.GuiThread)
+#else
     if (Thread->Tcb.ServiceTable != KeServiceDescriptorTable)
+#endif
     {
         /* We're already a win32 thread */
         return STATUS_ALREADY_WIN32;
@@ -88,7 +95,12 @@ PsConvertToGuiThread(VOID)
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Set the new service table */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) && (defined(_WIN64) || (NTDDI_VERSION >= NTDDI_WIN7))
+    /* At Win7+ amd64, ServiceTable removed; use GuiThread flag */
+    Thread->Tcb.GuiThread = TRUE;
+#else
     Thread->Tcb.ServiceTable = KeServiceDescriptorTableShadow;
+#endif
     ASSERT(Thread->Tcb.Win32Thread == 0);
 
     /* Tell Win32k about our thread */
@@ -96,7 +108,11 @@ PsConvertToGuiThread(VOID)
     if (!NT_SUCCESS(Status))
     {
         /* Revert our table */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) && (defined(_WIN64) || (NTDDI_VERSION >= NTDDI_WIN7))
+        Thread->Tcb.GuiThread = FALSE;
+#else
         Thread->Tcb.ServiceTable = KeServiceDescriptorTable;
+#endif
     }
 
     /* Return status */
