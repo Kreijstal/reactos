@@ -307,4 +307,4 @@ typedef struct {
 } PCI_MSIX_CAPABILITY, *PPCI_MSIX_CAPABILITY;
 #endif
 
-#endif ___VIOSTOR__H__
+#endif /* ___VIOSTOR__H__ */
