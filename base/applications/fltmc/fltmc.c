@@ -12,12 +12,12 @@
 #include <stdarg.h>
 #include <windef.h>
 #include <winbase.h>
+#include <winuser.h>
 #include <wchar.h>
 #else
 #include <Windows.h>
 #endif
 #include <fltuser.h>
-#include <atlstr.h>
 #include <strsafe.h>
 #include "resource.h"
 
@@ -27,12 +27,15 @@ void
 LoadAndPrintString(ULONG MessageId, ...)
 {
     va_list args;
+    WCHAR Message[256];
 
-    CAtlStringW Message;
-    if (Message.LoadStringW(MessageId))
+    if (LoadStringW(GetModuleHandleW(NULL),
+                    MessageId,
+                    Message,
+                    sizeof(Message) / sizeof(Message[0])))
     {
         va_start(args, MessageId);
-        vwprintf(Message.GetBuffer(), args);
+        vwprintf(Message, args);
         va_end(args);
     }
 }
@@ -52,6 +55,12 @@ PrintErrorText(_In_ ULONG ErrorCode)
         wprintf(L"%s\n", Buffer);
     }
 }
+
+#if (_WIN32_WINNT >= 0x0600)
+#define FLTMC_HAS_FILTER_AGGREGATE_INFORMATION 1
+#else
+#define FLTMC_HAS_FILTER_AGGREGATE_INFORMATION 0
+#endif
 
 DWORD
 SetDriverLoadPrivilege()
@@ -132,6 +141,7 @@ PrintFilterInfo(_In_ PVOID Buffer,
                 _In_ BOOL IsNewStyle)
 {
     WCHAR FilterName[128] = { 0 };
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
     WCHAR NumOfInstances[16] = { 0 };
     WCHAR Altitude[64] = { 0 };
     WCHAR Frame[16] = { 0 };
@@ -183,6 +193,7 @@ PrintFilterInfo(_In_ PVOID Buffer,
                 Frame);
     }
     else
+#endif
     {
         PFILTER_FULL_INFORMATION FilterInfo;
         FilterInfo = (PFILTER_FULL_INFORMATION)Buffer;
@@ -205,9 +216,11 @@ PrintFilterInfo(_In_ PVOID Buffer,
 void
 PrintVolumeInfo(_In_ PVOID Buffer)
 {
+    WCHAR VolName[128] = { 0 };
+
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
     PFILTER_VOLUME_STANDARD_INFORMATION FilterVolInfo;
     WCHAR DosName[16] = { 0 };
-    WCHAR VolName[128] = { 0 };
     WCHAR FileSystem[32] = { 0 };
 
     FilterVolInfo = (PFILTER_VOLUME_STANDARD_INFORMATION)Buffer;
@@ -220,7 +233,9 @@ PrintVolumeInfo(_In_ PVOID Buffer)
         VolName[FilterVolInfo->FilterVolumeNameLength] = UNICODE_NULL;
     }
 
-    if (!SUCCEEDED(FilterGetDosName(VolName, DosName, _countof(DosName))))
+    if (!SUCCEEDED(FilterGetDosName(VolName,
+                                    DosName,
+                                    sizeof(DosName) / sizeof(DosName[0]))))
         DosName[0] = L'\0';
 
     switch (FilterVolInfo->FileSystemType)
@@ -259,6 +274,21 @@ PrintVolumeInfo(_In_ PVOID Buffer)
             DosName,
             VolName,
             FileSystem);
+#else
+    PFILTER_VOLUME_BASIC_INFORMATION FilterVolInfo;
+
+    FilterVolInfo = (PFILTER_VOLUME_BASIC_INFORMATION)Buffer;
+
+    if (FilterVolInfo->FilterVolumeNameLength < sizeof(VolName))
+    {
+        CopyMemory(VolName,
+                   FilterVolInfo->FilterVolumeName,
+                   FilterVolInfo->FilterVolumeNameLength);
+        VolName[FilterVolInfo->FilterVolumeNameLength / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
+    wprintf(L"%s\n", VolName);
+#endif
 }
 
 void
@@ -267,9 +297,14 @@ ListFilters()
     HANDLE FindHandle;
     BYTE Buffer[1024];
     ULONG BytesReturned;
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
     BOOL IsNewStyle = TRUE;
+#else
+    BOOL IsNewStyle = FALSE;
+#endif
     HRESULT hr;
 
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
     hr = FilterFindFirst(FilterAggregateStandardInformation,
                          Buffer,
                          sizeof(Buffer),
@@ -284,6 +319,13 @@ ListFilters()
                              &BytesReturned,
                              &FindHandle);
     }
+#else
+    hr = FilterFindFirst(FilterFullInformation,
+                         Buffer,
+                         sizeof(Buffer),
+                         &BytesReturned,
+                         &FindHandle);
+#endif
 
     if (!SUCCEEDED(hr))
     {
@@ -339,25 +381,46 @@ ListVolumes()
     ULONG BytesReturned;
     HRESULT hr;
 
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
     hr = FilterVolumeFindFirst(FilterVolumeStandardInformation,
                                Buffer,
                                1024,
                                &BytesReturned,
                                &FindHandle);
+#else
+    hr = FilterVolumeFindFirst(FilterVolumeBasicInformation,
+                               Buffer,
+                               1024,
+                               &BytesReturned,
+                               &FindHandle);
+#endif
     if (SUCCEEDED(hr))
     {
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
         LoadAndPrintString(IDS_DISPLAY_VOLUMES);
         wprintf(L"------------------------------  ---------------------------------------  ----------  --------\n");
+#else
+        wprintf(L"Volume Name\n");
+        wprintf(L"-----------\n");
+#endif
 
         PrintVolumeInfo(Buffer);
 
         do
         {
+#if FLTMC_HAS_FILTER_AGGREGATE_INFORMATION
             hr = FilterVolumeFindNext(FindHandle,
                                       FilterVolumeStandardInformation,
                                       Buffer,
                                       1024,
                                       &BytesReturned);
+#else
+            hr = FilterVolumeFindNext(FindHandle,
+                                      FilterVolumeBasicInformation,
+                                      Buffer,
+                                      1024,
+                                      &BytesReturned);
+#endif
             if (SUCCEEDED(hr))
             {
                 PrintVolumeInfo(Buffer);
