@@ -630,7 +630,12 @@ HvWriteHive(
  * @return
  * Returns TRUE if hive writing has succeeded,
  * FALSE otherwise.
+ *
+ * @note
+ * Vista+ replaced alternate hives with a dual-log mechanism.
+ * This function is only available pre-Vista.
  */
+#if (NTDDI_VERSION < NTDDI_VISTA)
 BOOLEAN
 CMAPI
 HvWriteAlternateHive(
@@ -656,6 +661,7 @@ HvWriteAlternateHive(
 
     return TRUE;
 }
+#endif /* NTDDI_VERSION < NTDDI_VISTA */
 
 /**
  * @brief

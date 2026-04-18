@@ -120,7 +120,11 @@ KiSelectNextProcessor(
     ULONG Processor;
 
     /* Start with the affinity */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    PreferredSet = Thread->Affinity.Mask;
+#else
     PreferredSet = Thread->Affinity;
+#endif
 
     /* If we have matching idle processors, use them */
     IdleSet = PreferredSet & KiIdleSummary;
@@ -773,7 +777,11 @@ KiUpdateEffectiveAffinityThread(
     Thread->IdealProcessor = Thread->UserIdealProcessor;
 
     /* Check if the affinity doesn't match with the current processor */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    if ((Prcb->SetMember & Thread->Affinity.Mask) == 0)
+#else
     if ((Prcb->SetMember & Thread->Affinity) == 0)
+#endif
     {
         if (Thread->State == Running)
         {
@@ -828,7 +836,11 @@ KiSetAffinityThread(IN PKTHREAD Thread,
     KAFFINITY OldAffinity;
 
     /* Get the current affinity */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    OldAffinity = Thread->UserAffinity.Mask;
+#else
     OldAffinity = Thread->UserAffinity;
+#endif
 
     /* Make sure that the affinity is valid */
     if (((Affinity & Thread->ApcState.Process->Affinity) != (Affinity)) ||
@@ -839,7 +851,11 @@ KiSetAffinityThread(IN PKTHREAD Thread,
     }
 
     /* Update the new affinity */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    Thread->UserAffinity.Mask = Affinity;
+#else
     Thread->UserAffinity = Affinity;
+#endif
 
 #ifdef CONFIG_SMP
     /* Check if system affinity is not active */

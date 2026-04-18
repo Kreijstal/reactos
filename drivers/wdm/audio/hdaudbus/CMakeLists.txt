@@ -1,5 +1,4 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
 
 # kmdfdriver links wdfdriverentry which re-exports _WIN32_WINNT=0x603 PUBLIC,
 # so we just strip the propagated REACTOS_TARGET_NT and let WDF set it.

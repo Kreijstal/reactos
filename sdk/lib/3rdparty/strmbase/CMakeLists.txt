@@ -10,7 +10,6 @@
 # the moment but are deliberately not built, and they will not compile against
 # the new header.
 
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
 add_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x600 -D__WINESRC__)
 
 list(APPEND SOURCE

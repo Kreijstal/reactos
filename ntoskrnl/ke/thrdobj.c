@@ -512,8 +512,14 @@ KeStartThread(IN OUT PKTHREAD Thread)
     /* Setup volatile data */
     Thread->Priority = Process->BasePriority;
     Thread->BasePriority = Process->BasePriority;
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    /* At Win7+, Affinity/UserAffinity are GROUP_AFFINITY structs */
+    Thread->Affinity.Mask = Process->Affinity;
+    Thread->UserAffinity.Mask = Process->Affinity;
+#else
     Thread->Affinity = Process->Affinity;
     Thread->UserAffinity = Process->Affinity;
+#endif
 
 #ifdef CONFIG_SMP
     /* Get the KNODE and its PRCB */
@@ -536,7 +542,11 @@ KeStartThread(IN OUT PKTHREAD Thread)
     Process->ThreadSeed = IdealProcessor;
 
     /* Sanity check */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    ASSERT((Thread->UserAffinity.Mask & AFFINITY_MASK(IdealProcessor)));
+#else
     ASSERT((Thread->UserAffinity & AFFINITY_MASK(IdealProcessor)));
+#endif
 #endif
 
     /* Set the Ideal Processor */
@@ -788,15 +798,22 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Set swap settings */
     Thread->EnableStackSwap = TRUE;
     Thread->IdealProcessor = 1;
+#if (NTDDI_VERSION < NTDDI_WIN7)
     Thread->SwapBusy = FALSE;
+#endif
     Thread->KernelStackResident = TRUE;
     Thread->AdjustReason = AdjustNone;
 
     /* Initialize the lock */
     KeInitializeSpinLock(&Thread->ThreadLock);
 
-    /* Setup the Service Descriptor Table for Native Calls */
+    /* Setup the Service Descriptor Table for Native Calls.
+     * NDK ketypes.h gates ServiceTable as:
+     *   #if (NTDDI_VERSION < NTDDI_LONGHORN) || ((NTDDI_VERSION < NTDDI_WIN7) && !defined(_WIN64))
+     * so on amd64 it disappears already at NT 6.0 (Vista). Mirror that here. */
+#if (NTDDI_VERSION < NTDDI_LONGHORN) || ((NTDDI_VERSION < NTDDI_WIN7) && !defined(_WIN64))
     Thread->ServiceTable = KeServiceDescriptorTable;
+#endif
 
     /* Setup APC Fields */
     InitializeListHead(&Thread->ApcState.ApcListHead[KernelMode]);
@@ -1036,7 +1053,11 @@ KeRevertToUserAffinityThread(VOID)
 
     /* Get the current PRCB and check if it doesn't match this affinity */
     Prcb = KeGetCurrentPrcb();
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    if (!(Prcb->SetMember & CurrentThread->Affinity.Mask))
+#else
     if (!(Prcb->SetMember & CurrentThread->Affinity))
+#endif
     {
         /* Lock the PRCB */
         KiAcquirePrcbLock(Prcb);
@@ -1080,7 +1101,11 @@ KeSetIdealProcessorThread(IN PKTHREAD Thread,
     if (Processor < KeNumberProcessors)
     {
         /* Check if the user ideal CPU is in the affinity */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        if (Thread->Affinity.Mask & AFFINITY_MASK(Processor))
+#else
         if (Thread->Affinity & AFFINITY_MASK(Processor))
+#endif
         {
             /* Set the ideal processor */
             Thread->IdealProcessor = Processor;
@@ -1116,7 +1141,11 @@ KeSetSystemAffinityThread(IN KAFFINITY Affinity)
     OldIrql = KiAcquireDispatcherLock();
 
     /* Restore the affinity and enable system affinity */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    CurrentThread->Affinity.Mask = Affinity;
+#else
     CurrentThread->Affinity = Affinity;
+#endif
     CurrentThread->SystemAffinityActive = TRUE;
 
 #ifdef CONFIG_SMP
@@ -1127,7 +1156,11 @@ KeSetSystemAffinityThread(IN KAFFINITY Affinity)
 
     /* Get the current PRCB and check if it doesn't match this affinity */
     Prcb = KeGetCurrentPrcb();
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    if (!(Prcb->SetMember & CurrentThread->Affinity.Mask))
+#else
     if (!(Prcb->SetMember & CurrentThread->Affinity))
+#endif
     {
         /* Lock the PRCB */
         KiAcquirePrcbLock(Prcb);
