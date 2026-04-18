@@ -117,6 +117,7 @@ XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
                        IN ULONG EndpointIndex,
                        IN ULONG EndpointType,
                        IN ULONG MaxPacketSize,
+                       IN ULONG Interval,
                        IN PHYSICAL_ADDRESS TransferRingPA);
 
 // Transfer tracking helper functions
@@ -972,6 +973,7 @@ XHCI_OpenBulkEndpoint(IN PXHCI_EXTENSION XhciExtension,
                                            DCI,
                                            EpType,
                                            MaxPacketSize,
+                                           0, /* bulk: Interval ignored */
                                            RingPA);
         if (CfgStatus != MP_STATUS_SUCCESS)
         {
@@ -1031,6 +1033,60 @@ XHCI_OpenInterruptEndpoint(IN PXHCI_EXTENSION XhciExtension,
     *(PULONG)&XhciEndpoint->FirstTD = DeviceAddress;
     
     DPRINT1("XHCI_OpenInterruptEndpoint: Stored slot ID %d for interrupt endpoint\n", DeviceAddress);
+
+    /*
+     * Tell the controller about this endpoint: issue CONFIGURE_ENDPOINT so
+     * the EP Context at DCI transitions from Disabled to Running.  Without
+     * this the doorbell rings are silently dropped and no TRANSFER_EVENT is
+     * ever posted for the interrupt IN (HID keyboard keystrokes, etc.).
+     * Mirrors the pattern XHCI_OpenBulkEndpoint uses.
+     *
+     * xHCI EP Type encoding (spec 6.2.3 Table 6-9):
+     *   Interrupt OUT = 3, Interrupt IN = 7.
+     */
+    {
+        ULONG SlotId = DeviceAddress;
+        ULONG EndpointNumber = EndpointAddress & 0x0F;
+        BOOLEAN IsIn = (EndpointAddress & 0x80) != 0;
+        ULONG DCI = (EndpointNumber * 2) + (IsIn ? 1 : 0);
+        ULONG EpType = IsIn ? 7 : 3;
+        PHYSICAL_ADDRESS RingPA;
+        MPSTATUS CfgStatus;
+        ULONG Log2Interval;
+        ULONG Tmp;
+
+        ASSERT(DCI == ContextIndex);
+
+        /* usbport provides Period as the polling interval expressed in
+         * microframes (HS) or frames (LS/FS).  xHCI wants it as log2 of
+         * that count.  Clamp to spec-valid range (HS/SS Interrupt: 0..15).
+         * Empirically usbport hands us power-of-2 values (e.g. 32 for a
+         * HID keyboard).  We round down if not. */
+        Tmp = Interval ? Interval : 1;
+        Log2Interval = 0;
+        while (Tmp > 1) { Tmp >>= 1; Log2Interval++; }
+        if (Log2Interval > 15) Log2Interval = 15;
+
+        RingPA = MmGetPhysicalAddress(&XhciEndpoint->TransferRing.firstSeg.XhciTrb[0]);
+
+        DPRINT1("XHCI_OpenInterruptEndpoint: Configuring EP on slot %d, DCI=%d, EpType=%d, Period=%d -> xhciInterval=%d, RingPA=0x%I64x\n",
+                SlotId, DCI, EpType, Interval, Log2Interval, RingPA.QuadPart);
+
+        CfgStatus = XHCI_ConfigureEndpoint(XhciExtension,
+                                           SlotId,
+                                           DCI,
+                                           EpType,
+                                           MaxPacketSize,
+                                           Log2Interval,
+                                           RingPA);
+        if (CfgStatus != MP_STATUS_SUCCESS)
+        {
+            DPRINT1("XHCI_OpenInterruptEndpoint: XHCI_ConfigureEndpoint failed (0x%x) for slot %d DCI %d\n",
+                    CfgStatus, SlotId, DCI);
+            return CfgStatus;
+        }
+    }
+
     DPRINT1("XHCI_OpenInterruptEndpoint: Interrupt endpoint initialized successfully\n");
     return MP_STATUS_SUCCESS;
 }
@@ -2272,6 +2328,7 @@ XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
                        IN ULONG EndpointIndex,
                        IN ULONG EndpointType,
                        IN ULONG MaxPacketSize,
+                       IN ULONG Interval,
                        IN PHYSICAL_ADDRESS TransferRingPA)
 {
     PXHCI_HC_RESOURCES HcResourcesVA;
@@ -2306,6 +2363,54 @@ XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
 
     HcResourcesVA = (PXHCI_HC_RESOURCES)XhciExtension->HcResourcesVA;
     HcResourcesPA = XhciExtension->HcResourcesPA;
+
+    /* Pre-step: if the slot is still in Default state (xHCI 6.2.2.2
+     * SlotState==1), Configure Endpoint will fail with Context State Error
+     * (completion code 19 in this driver's hardware.h table).  Our
+     * XHCI_AddressDevice is only ever called with BlockSetRequest=FALSE,
+     * which encodes BSR=1 in the TRB — so after first-stage enumeration
+     * the slot is stuck in Default.  Transition Default -> Addressed here
+     * by re-issuing AddressDevice with BSR=0 (BlockSetRequest=TRUE).  The
+     * DCBAA fix in XHCI_SetupDCBAAEntry now makes OutputContext->SlotContext
+     * reflect the controller's live state, so copying it forward is safe. */
+    {
+        PXHCI_INPUT_CONTEXT OC = &HcResourcesVA->OutputContexts[SlotId - 1];
+        PXHCI_SLOT_CONTEXT OCSlot = &OC->SlotContext;
+        if (OCSlot->SlotState == 1)  /* Default */
+        {
+            PXHCI_INPUT_CONTEXT IC = &HcResourcesVA->InputContext;
+            PHYSICAL_ADDRESS ICPA;
+            MPSTATUS AddrStatus;
+
+            DPRINT1("XHCI_ConfigureEndpoint: slot %d in Default state, issuing AddressDevice BSR=0 first\n",
+                    SlotId);
+
+            RtlZeroMemory(IC, sizeof(XHCI_INPUT_CONTEXT));
+            IC->InputContext.AddContextFlags = 0x3;   /* A0 (slot) + A1 (EP0) */
+            IC->InputContext.DropContextFlags = 0;
+            RtlCopyMemory(&IC->SlotContext,
+                          OCSlot,
+                          sizeof(XHCI_SLOT_CONTEXT));
+            RtlCopyMemory(&IC->EndpointContextList[0],
+                          &OC->EndpointContextList[0],
+                          sizeof(XHCI_ENDPOINT_CONTEXT));
+            /* Input Slot Context reserved/RO fields must be zero per spec */
+            IC->SlotContext.SlotState = 0;
+            IC->SlotContext.USBDeviceAddress = 0;
+
+            ICPA = MmGetPhysicalAddress(IC);
+            AddrStatus = XHCI_AddressDevice(XhciExtension, SlotId, ICPA,
+                                            TRUE /* BlockSetRequest=TRUE -> BSR=0 -> assign address */);
+            if (AddrStatus != MP_STATUS_SUCCESS)
+            {
+                DPRINT1("XHCI_ConfigureEndpoint: AddressDevice BSR=0 for slot %d FAILED 0x%x\n",
+                        SlotId, AddrStatus);
+                return AddrStatus;
+            }
+            DPRINT1("XHCI_ConfigureEndpoint: slot %d now in Addressed state (SlotState=%d, Addr=%d)\n",
+                    SlotId, OCSlot->SlotState, OCSlot->USBDeviceAddress);
+        }
+    }
 
     /* 1. Zero and populate the shared Input Context. */
     InputContext = &HcResourcesVA->InputContext;
@@ -2345,8 +2450,16 @@ XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
     EpCtx->Mult             = 0;
     EpCtx->LSA              = 0;
     EpCtx->MaxPStreams      = 0;
-    EpCtx->Interval         = 0;
-    EpCtx->MaxESITPayload   = 0;
+    /* Interval (spec 6.2.3.6): only Interrupt (3/7) and Isoch (1/5) care.
+     * Bulk / Control pass 0.  For periodic EPs, the caller has already
+     * encoded the value as log2(microframes). */
+    EpCtx->Interval         = (EndpointType == 3 || EndpointType == 7 ||
+                               EndpointType == 1 || EndpointType == 5) ? Interval : 0;
+    /* MaxESITPayload: total bytes per service interval.  For single-packet
+     * non-burst periodic EPs this equals MaxPacketSize.  Required non-zero
+     * for interrupt/isoch or CONFIGURE_ENDPOINT returns Parameter Error. */
+    EpCtx->MaxESITPayload   = (EndpointType == 3 || EndpointType == 7 ||
+                               EndpointType == 1 || EndpointType == 5) ? MaxPacketSize : 0;
     EpCtx->MaxESITHigh      = 0;
     EpCtx->HID              = 0;
     EpCtx->AverageTRBLength = (EndpointType == 2 || EndpointType == 6) ? 1024 : 8;
@@ -2576,13 +2689,23 @@ XHCI_SetupDCBAAEntry(IN PXHCI_EXTENSION XhciExtension,
     
     // Get the device-specific output context
     OutputContext = &HcResourcesVA->OutputContexts[SlotId - 1];
-    
+
     // Clear the output context
     RtlZeroMemory(OutputContext, sizeof(XHCI_INPUT_CONTEXT));
-    
-    // Get physical address of this device's output context
-    OutputContextPA = MmGetPhysicalAddress(OutputContext);
-    
+
+    /* DCBAA must point to the Slot Context, NOT to the Input Control
+     * Context that XHCI_INPUT_CONTEXT puts at offset 0.  Per xHCI 6.2.1
+     * the Device Context is laid out as:
+     *     Slot Context (32B) + EP0 Context (32B) + EPn contexts...
+     * which matches XHCI_INPUT_CONTEXT.{SlotContext, EndpointContextList[]}
+     * once the 32-byte Input Control Context prefix is skipped.
+     *
+     * Without this, the controller writes the Slot Context on top of our
+     * InputControlContext bytes, and subsequent reads of
+     * OutputContext->SlotContext return stale zeros — causing Configure
+     * Endpoint to see an invalid Slot Context (Parameter Error). */
+    OutputContextPA = MmGetPhysicalAddress(&OutputContext->SlotContext);
+
     // Set the DCBAA entry to point to the device's output context
     HcResourcesVA->DCBAA.ContextBaseAddr[SlotId].QuadPart = OutputContextPA.QuadPart;
     
