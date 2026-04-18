@@ -6,6 +6,24 @@
 #include "rxtimer.h"
 #include "rxstruc.h"
 
+/*
+ * ReactOS RDBSS API-level selection.
+ *
+ * The Vista-era RDBSS API takes a PIRP parameter on several prefix /
+ * construction / Lowio entry points (RxFindOrCreateConnections,
+ * RxFindOrConstructVirtualNetRoot, RxCompleteMdl, RxLockUserBuffer,
+ * RxMapSystemBuffer, etc.).  ReactOS only ships a Windows Server 2003
+ * implementation of those functions in sdk/lib/drivers/rxce and
+ * sdk/lib/drivers/rdbsslib, so keep the pre-Vista prototypes visible
+ * regardless of the global _WIN32_WINNT target.  A consumer that ports
+ * the rxce / rdbss body to the Vista ABI can flip this knob at that
+ * point; papering over it with -D_WIN32_WINNT=0x0502 on rdbsslib broke
+ * MSBuild, which reorders /U and /D in AdditionalOptions.
+ */
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 extern PVOID RxNull;
 
 #define RxLogFailure(DO, Originator, Event, Status) \
@@ -51,7 +69,7 @@ ULONG
 RxGetSessionId(
     _In_ PIO_STACK_LOCATION IrpSp);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 RxFindOrCreateConnections(
     _In_ PRX_CONTEXT RxContext,
@@ -91,7 +109,7 @@ RxConjureOriginalName(
     _Inout_ PLONG LengthRemaining,
     _In_ RX_NAME_CONJURING_METHODS NameConjuringMethod);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 RxCompleteMdl(
     _In_ PRX_CONTEXT RxContext,
@@ -103,7 +121,7 @@ RxCompleteMdl(
     _In_ PRX_CONTEXT RxContext);
 #endif
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 VOID
 RxLockUserBuffer(
     _In_ PRX_CONTEXT RxContext,
@@ -393,7 +411,7 @@ RxConstructNetRoot(
     _In_ PV_NET_ROOT VirtualNetRoot,
     _Out_ PLOCK_HOLDING_STATE LockHoldingState);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 RxConstructVirtualNetRoot(
     _In_ PRX_CONTEXT RxContext,
@@ -430,7 +448,7 @@ RxFindOrConstructVirtualNetRoot(
     _In_ PUNICODE_STRING RemainingName);
 #endif
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 RxLowIoLockControlShell(
     _In_ PRX_CONTEXT RxContext,
@@ -488,7 +506,7 @@ RxUpdateCondition(
     _Out_ PRX_BLOCK_CONDITION Condition,
     _In_ OUT PLIST_ENTRY TransitionWaitList);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 RxCloseAssociatedSrvOpen(
     _In_opt_ PRX_CONTEXT RxContext,
@@ -785,7 +803,7 @@ RxUnlockOperation(
     _In_ PVOID Context,
     _In_ PFILE_LOCK_INFO LockInfo);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 RxPostStackOverflowRead(
     _In_ PRX_CONTEXT RxContext,
