@@ -55,7 +55,9 @@ set(NDIS6_SOURCE
     ndis/60filter.c
     ndis/60util.c
     include/ndis6_internal.h)
-set_source_files_properties(${NDIS6_SOURCE} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+set_source_files_properties(${NDIS6_SOURCE} PROPERTIES
+    SKIP_PRECOMPILE_HEADERS ON
+    COMPILE_DEFINITIONS "NDIS620;NDIS620_MINIPORT;WINVER=0x0601;_WIN32_WINNT=0x0601;NTDDI_VERSION=0x06010000")
 
 add_library(ndis MODULE
     ${SOURCE}
