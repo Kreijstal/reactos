@@ -299,3 +299,8 @@
     SVC_(Wow64ReadVirtualMemory64, 7)
     SVC_(Wow64WriteVirtualMemory64, 7)
 #endif
+/* NTDDI_VISTA = 0x06000000. Use the literal so the assembler preprocessor
+ * (which doesn't include sdkddkver.h) gates this correctly too. */
+#if (NTDDI_VERSION >= 0x06000000)
+    SVC_(CreateUserProcess, 11)
+#endif
