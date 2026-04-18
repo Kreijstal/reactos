@@ -1,3 +1,4 @@
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0xA01 -DWINVER=0xA01)
 
 add_definitions(
@@ -58,4 +59,3 @@ else()
     target_compile_options(kernelbase_static PRIVATE -Wno-unused-variable)
     target_compile_options(kernelbase_static PRIVATE -Wno-unused-function)
 endif()
-
