@@ -3,6 +3,19 @@
 
 #include "buffring.h"
 
+/*
+ * ReactOS RDBSS API-level selection (see also rxprocs.h). All ReactOS
+ * RDBSS consumers (rxce, rdbsslib, fastfat) were written against the
+ * Windows Server 2003 FCB layout (Specific union wrapping FileLock /
+ * LowIoPerFcbInfo) and the pre-Vista RxCreateNetFcb / RxFinalizeSrvCall
+ * signatures. Keep that layout and those signatures active regardless
+ * of the global _WIN32_WINNT target so that rdbsslib builds at every
+ * REACTOS_TARGET_NT value without per-module -D hacks.
+ */
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 struct _FCB_INIT_PACKET;
 typedef struct _FCB_INIT_PACKET *PFCB_INIT_PACKET;
 
@@ -158,18 +171,18 @@ typedef struct _FCB
     LARGE_INTEGER LastAccessTime;
     LARGE_INTEGER LastWriteTime;
     LARGE_INTEGER LastChangeTime;
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
     PETHREAD CreateSectionThread;
 #endif
     ULONG ulFileSizeVersion;
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
     union
     {
         struct
         {
 #endif
         FILE_LOCK FileLock;
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
         PVOID LazyWriteThread;
 #endif
         union
@@ -180,7 +193,7 @@ typedef struct _FCB
 #ifdef USE_FILESIZE_LOCK
         PFAST_MUTEX FileSizeLock;
 #endif
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
         } Fcb;
     } Specific;
 #endif
@@ -266,7 +279,7 @@ typedef struct _SRV_OPEN
         {
             MRX_NORMAL_NODE_HEADER spacer;
             PFCB Fcb;
-#if (_WIN32_WINNT >= 0x600)
+#if RDBSS_VISTA_API
             PV_NET_ROOT VNetRoot;
 #endif
         };
@@ -450,7 +463,7 @@ RxCreateSrvCall(
 #define RxWaitForStableSrvCall(S, R) RxWaitForStableCondition(&(S)->Condition, &(S)->TransitionWaitList, (R), NULL)
 #define RxTransitionSrvCall(S, C) RxUpdateCondition((C), &(S)->Condition, &(S)->TransitionWaitList)
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 BOOLEAN
 RxFinalizeSrvCall(
     _Out_ PSRV_CALL ThisSrvCall,
@@ -524,7 +537,7 @@ RxGetFileSizeWithLock(
     _In_ PFCB Fcb,
     _Out_ PLONGLONG FileSize);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 PFCB
 RxCreateNetFcb(
     _In_ PRX_CONTEXT RxContext,
