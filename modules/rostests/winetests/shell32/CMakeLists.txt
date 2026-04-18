@@ -5,7 +5,12 @@ add_definitions(
     -Dstrcasecmp=_stricmp
 )
 
-remove_definitions(-DWINVER=0x600 -D_WIN32_IE=0x600 -D_WIN32_WINNT=0x600)
+if(REACTOS_TARGET_NT STREQUAL "0x600")
+    remove_definitions(-DWINVER=0x502 -DWINVER=0x600 -D_WIN32_WINNT=0x502 -D_WIN32_WINNT=0x600)
+    add_definitions(-DWINVER=0x600 -D_WIN32_WINNT=0x600 -DNTDDI_VERSION=0x06000100)
+else()
+    remove_definitions(-DWINVER=0x600 -D_WIN32_IE=0x600 -D_WIN32_WINNT=0x600)
+endif()
 
 list(APPEND SOURCE
     appbar.c
