@@ -1222,6 +1222,7 @@ static void test_hdm_index_messages(HWND hParent)
     DestroyWindow(hChild);
 }
 
+#if _WIN32_WINNT >= 0x0600
 static void test_hdf_fixedwidth(HWND hParent)
 {
     HWND hChild;
@@ -1289,7 +1290,9 @@ static void test_hdf_fixedwidth(HWND hParent)
 
     DestroyWindow(hChild);
 }
+#endif
 
+#if _WIN32_WINNT >= 0x0600
 static void test_hds_nosizing(HWND hParent)
 {
     HWND hChild;
@@ -1364,6 +1367,7 @@ static void test_hds_nosizing(HWND hParent)
 
     DestroyWindow(hChild);
 }
+#endif
 
 #define TEST_NMCUSTOMDRAW(draw_stage, item_spec, lparam, _left, _top, _right, _bottom) \
     ok(nm->dwDrawStage == draw_stage, "Invalid dwDrawStage %d vs %d\n", draw_stage, nm->dwDrawStage); \
@@ -1877,8 +1881,10 @@ START_TEST(header)
     init_functions();
 
     /* comctl32 version 6 tests start here */
+#if _WIN32_WINNT >= 0x0600
     test_hdf_fixedwidth(parent_hwnd);
     test_hds_nosizing(parent_hwnd);
+#endif
     test_item_auto_format(parent_hwnd);
 
     unload_v6_module(ctx_cookie, hCtx);

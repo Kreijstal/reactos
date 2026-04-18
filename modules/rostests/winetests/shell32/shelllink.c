@@ -47,7 +47,9 @@ static BOOL (WINAPI *pILIsEqual)(LPCITEMIDLIST, LPCITEMIDLIST);
 static HRESULT (WINAPI *pSHILCreateFromPath)(LPCWSTR, LPITEMIDLIST *,DWORD*);
 static HRESULT (WINAPI *pSHGetFolderLocation)(HWND,INT,HANDLE,DWORD,PIDLIST_ABSOLUTE*);
 static HRESULT (WINAPI *pSHDefExtractIconA)(LPCSTR, int, UINT, HICON*, HICON*, UINT);
+#if NTDDI_VERSION >= 0x06000000
 static HRESULT (WINAPI *pSHGetStockIconInfo)(SHSTOCKICONID, UINT, SHSTOCKICONINFO *);
+#endif
 static DWORD (WINAPI *pGetLongPathNameA)(LPCSTR, LPSTR, DWORD);
 static DWORD (WINAPI *pGetShortPathNameA)(LPCSTR, LPSTR, DWORD);
 static UINT (WINAPI *pSHExtractIconsW)(LPCWSTR, int, int, int, HICON *, UINT *, UINT, UINT);
@@ -1062,6 +1064,7 @@ static void test_GetIconLocation(void)
     IShellLinkA_Release(sl);
 }
 
+#if NTDDI_VERSION >= 0x06000000
 static void test_SHGetStockIconInfo(void)
 {
     BYTE buffer[sizeof(SHSTOCKICONINFO) + 16];
@@ -1159,6 +1162,7 @@ static void test_SHGetStockIconInfo(void)
             sii->iIcon, wine_dbgstr_w(sii->szPath));
     }
 }
+#endif
 
 static void test_SHExtractIcons(void)
 {
@@ -1460,11 +1464,19 @@ static void test_SHGetImageList(void)
     IImageList_Release( list );
 
     /* Test the icon sizes */
-    for (i = 0; i <= SHIL_LAST; i++)
+#if NTDDI_VERSION >= 0x06000000
+    for (i = 0; i <= SHIL_JUMBO; i++)
+#else
+    for (i = 0; i <= SHIL_SYSSMALL; i++)
+#endif
     {
         hr = SHGetImageList( i, &IID_IImageList, (void **)&list );
+#if NTDDI_VERSION >= 0x06000000
         ok( hr == S_OK || broken( i == SHIL_JUMBO && hr == E_INVALIDARG ), /* XP and 2003 */
                 "%d: got %08x\n", i, hr );
+#else
+        ok( hr == S_OK, "%d: got %08x\n", i, hr );
+#endif
         if (FAILED(hr)) continue;
         IImageList_GetIconSize( list, &width, &height );
         switch (i)
@@ -1483,9 +1495,11 @@ static void test_SHGetImageList(void)
         case SHIL_SYSSMALL:
             expect = GetSystemMetrics( SM_CXSMICON );
             break;
+#if NTDDI_VERSION >= 0x06000000
         case SHIL_JUMBO:
             expect = 256;
             break;
+#endif
         }
         todo_wine_if(i == SHIL_SYSSMALL && dpi_aware && expect != GetSystemMetrics( SM_CXICON ) / 2)
         {
@@ -1508,7 +1522,9 @@ START_TEST(shelllink)
     pSHILCreateFromPath = (void *)GetProcAddress(hmod, (LPSTR)28);
     pSHGetFolderLocation = (void *)GetProcAddress(hmod, "SHGetFolderLocation");
     pSHDefExtractIconA = (void *)GetProcAddress(hmod, "SHDefExtractIconA");
+#if NTDDI_VERSION >= 0x06000000
     pSHGetStockIconInfo = (void *)GetProcAddress(hmod, "SHGetStockIconInfo");
+#endif
     pGetLongPathNameA = (void *)GetProcAddress(hkernel32, "GetLongPathNameA");
     pGetShortPathNameA = (void *)GetProcAddress(hkernel32, "GetShortPathNameA");
     pSHExtractIconsW = (void *)GetProcAddress(hmod, "SHExtractIconsW");
@@ -1524,7 +1540,9 @@ START_TEST(shelllink)
     test_datalink();
     test_shdefextracticon();
     test_GetIconLocation();
+#if NTDDI_VERSION >= 0x06000000
     test_SHGetStockIconInfo();
+#endif
     test_SHExtractIcons();
     test_propertystore();
     test_ExtractIcon();
