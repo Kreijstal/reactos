@@ -1,4 +1,6 @@
 
+remove_definitions(-D_CRT_NON_CONFORMING_SWPRINTFS)
+
 add_definitions(
     -D_WINE
     -D_WINHTTP_INTERNAL_)
