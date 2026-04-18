@@ -1,6 +1,10 @@
 #ifndef _RDBSSSTRUC_
 #define _RDBSSSTRUC_
 
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 #include "prefix.h"
 #include "lowio.h"
 #include "scavengr.h"
@@ -33,7 +37,7 @@ typedef struct _RDBSS_DATA
     LONG NumberOfMinirdrsRegistered;
     PEPROCESS OurProcess;
     CACHE_MANAGER_CALLBACKS CacheManagerCallbacks;
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
     CACHE_MANAGER_CALLBACKS CacheManagerNoOpCallbacks;
 #endif
     ERESOURCE Resource;
