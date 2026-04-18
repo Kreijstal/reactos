@@ -1,9 +1,9 @@
 
 if(REACTOS_TARGET_NT STREQUAL "0x600")
-    remove_definitions(-DWINVER=0x502 -DWINVER=0x600 -D_WIN32_WINNT=0x502 -D_WIN32_WINNT=0x600)
+    remove_definitions(-DWINVER=${REACTOS_TARGET_NT} -D_WIN32_WINNT=${REACTOS_TARGET_NT})
     add_definitions(-DWINVER=0x600 -D_WIN32_WINNT=0x600 -DNTDDI_VERSION=0x06000100)
 else()
-    remove_definitions(-D_WIN32_WINNT=0x600 -D_WIN32_IE=0x600)
+    remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -D_WIN32_IE=0x600)
 endif()
 
 add_definitions(-D__ROS_LONG64__)
