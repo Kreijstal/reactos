@@ -1304,20 +1304,23 @@ VOID DispTdiQueryInformationExComplete(
         if (QueryContext->UserInputBuffer)
         {
             _SEH2_TRY {
+#ifdef _WIN64
                 RtlCopyMemory(
                     (PUCHAR)QueryContext->UserInputBuffer +
-#ifdef _WIN64
                         (IoIs32bitProcess(QueryContext->Irp)
                             ? FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX32, Context)
                             : FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context)),
                     (PCHAR)(IoIs32bitProcess(QueryContext->Irp)
                         ? &((TCP_REQUEST_QUERY_INFORMATION_EX32 *)&QueryContext->QueryInfo)->Context
                         : &QueryContext->QueryInfo.Context),
+                    CONTEXT_SIZE);
 #else
+                RtlCopyMemory(
+                    (PUCHAR)QueryContext->UserInputBuffer +
                         FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context),
                     &QueryContext->QueryInfo.Context,
-#endif
                     CONTEXT_SIZE);
+#endif
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
                 /* User buffer went away — keep going. */
             } _SEH2_END;
