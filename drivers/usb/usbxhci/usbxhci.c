@@ -890,6 +890,20 @@ XHCI_InitializeHardware(IN PXHCI_EXTENSION XhciExtension)
     StructuralParams_1.AsULONG = READ_REGISTER_ULONG(BaseIoAdress + XHCI_HCSP1); // HCSPARAMS1 register
 
     XhciExtension->NumberOfPorts = StructuralParams_1.NumberOfPorts;
+    RtlZeroMemory(XhciExtension->PortConnectStatus, sizeof(XhciExtension->PortConnectStatus));
+    RtlZeroMemory(XhciExtension->PortConnectChange, sizeof(XhciExtension->PortConnectChange));
+    {
+        ULONG Port;
+
+        for (Port = 1; Port <= XhciExtension->NumberOfPorts && Port <= XHCI_MAX_PORTS; Port++)
+        {
+            PULONG PortReg = OperationalRegs + XHCI_PORTSC + ((Port - 1) * 4);
+            XHCI_PORT_STATUS_CONTROL PortStatus;
+
+            PortStatus.AsULONG = READ_REGISTER_ULONG(PortReg);
+            XhciExtension->PortConnectStatus[Port] = PortStatus.CurrentConnectStatus ? 1 : 0;
+        }
+    }
     
     DPRINT1("XHCI_InitializeHardware: xHCI controller supports %d device slots\n", 
             StructuralParams_1.NumberOfDeviceSlots);
