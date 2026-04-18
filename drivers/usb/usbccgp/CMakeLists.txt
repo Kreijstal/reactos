@@ -1,5 +1,6 @@
 
 add_definitions(-DDEBUG_MODE)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x600)
 include_directories(${REACTOS_SOURCE_DIR}/ntoskrnl/include)
 

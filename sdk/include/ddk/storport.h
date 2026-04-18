@@ -10623,8 +10623,8 @@ StorPortLogSystemEvent(
                                     MaximumSize);
 }
 
-ULONG
 FORCEINLINE
+ULONG
 StorPortSetUnitAttributes(
     _In_ PVOID HwDeviceExtension,
     _In_ PSTOR_ADDRESS Address,
@@ -10637,8 +10637,8 @@ StorPortSetUnitAttributes(
                                     Attributes);
 }
 
-ULONG
 FORCEINLINE
+ULONG
 StorPortStateChangeDetected(
     _In_ PVOID HwDeviceExtension,
     _In_ ULONG ChangedEntity,

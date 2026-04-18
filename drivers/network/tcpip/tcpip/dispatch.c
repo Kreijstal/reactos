@@ -1401,8 +1401,6 @@ NTSTATUS DispTdiQueryInformationEx(
     UINT Size;
     UINT InputBufferLength;
     UINT OutputBufferLength;
-    BOOLEAN InputMdlLocked  = FALSE;
-    BOOLEAN OutputMdlLocked = FALSE;
     PMDL InputMdl           = NULL;
     PMDL OutputMdl          = NULL;
     NTSTATUS Status         = STATUS_SUCCESS;
@@ -1518,8 +1516,6 @@ NTSTATUS DispTdiQueryInformationEx(
 
             MmBuildMdlForNonPagedPool(InputMdl);
             MmBuildMdlForNonPagedPool(OutputMdl);
-            InputMdlLocked = TRUE;    /* not locked, but treated as such for cleanup */
-            OutputMdlLocked = TRUE;
 
             /* Save the original user pointers so completion can copy back. */
             QueryContext->UserInputBuffer  = InputBuffer;
@@ -1623,7 +1619,6 @@ NTSTATUS DispTdiQueryInformationEx(
 	    else
 	    {
 	        MmBuildMdlForNonPagedPool(InputMdl);
-	        InputMdlLocked = TRUE;
 	        QueryContext->UserInputBuffer = InputBuffer;
 	        DbgPrint("TCPIP-TDI: size-query InputMdl=%p ready\n", InputMdl);
 	    }
