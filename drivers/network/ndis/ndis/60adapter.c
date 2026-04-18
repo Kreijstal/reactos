@@ -267,7 +267,7 @@ Ndis6CreateLogicalAdapter(
      * on \Driver\PCI; USB miniports (usbrndis) sit on \Driver\USBHUB.
      * Anything else falls through to PCIBus which is the safest default
      * for the legacy NdisMMapIoSpace fallback path. */
-    Adapter->NdisMiniportBlock.BusType    = PCIBus;
+    Adapter->NdisMiniportBlock.BusType    = (NDIS_INTERFACE_TYPE)PCIBus;
     Adapter->NdisMiniportBlock.BusNumber  = 0;
     if (Pdo != NULL && Pdo->DriverObject != NULL)
     {
