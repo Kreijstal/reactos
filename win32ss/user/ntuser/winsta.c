@@ -738,8 +738,7 @@ IntCreateWindowStation(
 
     if (InputWindowStation == NULL)
     {
-        ERR("Initializing input window station\n");
-
+        TRACE("Initializing input window station\n");
         /* Only Winlogon can create the interactive window station */
         ASSERT(gpidLogon == PsGetCurrentProcessId());
 

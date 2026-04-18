@@ -2570,6 +2570,15 @@ IoReplaceFileObjectName(
   _In_reads_bytes_(FileNameLength) PWSTR NewFileName,
   _In_ USHORT FileNameLength);
 $endif (_NTIFS_)
+$if (_NTDDK_)
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoReportRootDevice(
+  _In_ PDRIVER_OBJECT DriverObject);
+
+$endif (_NTDDK_)
 #endif /* (NTDDI_VERSION >= NTDDI_WIN7) */
 
 $if (_NTDDK_)

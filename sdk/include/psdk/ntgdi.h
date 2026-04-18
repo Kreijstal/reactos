@@ -3064,14 +3064,11 @@ NtGdiGetFontUnicodeRanges(
     _Out_ _Post_bytecount_(return) LPGLYPHSET pgs);
 
 #ifdef LANGPACK
-#if (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
-__kernel_entry
-W32KAPI
-BOOL
-NtGdiGetRealizationInfo(
-    _In_ HDC hdc,
-    _Out_ PFONT_REALIZATION_INFO pri);
-#else
+/*
+ * ReactOS implements the pre-Win7 NtGdiGetRealizationInfo (3 args).
+ * The Win7+ variant uses PFONT_REALIZATION_INFO which is not defined.
+ * Always use the pre-Win7 declaration.
+ */
 __kernel_entry
 W32KAPI
 BOOL
@@ -3080,7 +3077,6 @@ NtGdiGetRealizationInfo(
     _In_ HDC hdc,
     _Out_ PREALIZATION_INFO pri,
     _In_ HFONT hf);
-#endif
 #endif
 
 __kernel_entry
