@@ -1122,7 +1122,11 @@ PspSetJobLimitsBasicOrExtended(
      */
 
     /* Acquire the memory limits lock */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ExAcquirePushLockExclusive(&Job->MemoryLimitsLock);
+#else
     KeAcquireGuardedMutexUnsafe(&Job->MemoryLimitsLock);
+#endif
 
     if (ExtendedLimit->BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_PROCESS_MEMORY)
     {
@@ -1141,7 +1145,11 @@ PspSetJobLimitsBasicOrExtended(
 
     /* Release locks */
 
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ExReleasePushLockExclusive(&Job->MemoryLimitsLock);
+#else
     KeReleaseGuardedMutexUnsafe(&Job->MemoryLimitsLock);
+#endif
 
 ExitFromBasicLimits:
 
@@ -1402,14 +1410,22 @@ PspQueryJobLimitInformation(
     /* If extended limits are requested, include memory limits */
     if (Extended)
     {
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        ExAcquirePushLockExclusive(&Job->MemoryLimitsLock);
+#else
         KeAcquireGuardedMutexUnsafe(&Job->MemoryLimitsLock);
+#endif
 
         ExtendedLimit->ProcessMemoryLimit = Job->ProcessMemoryLimit << PAGE_SHIFT;
         ExtendedLimit->JobMemoryLimit = Job->JobMemoryLimit << PAGE_SHIFT;
         ExtendedLimit->PeakProcessMemoryUsed = Job->PeakProcessMemoryUsed << PAGE_SHIFT;
         ExtendedLimit->PeakJobMemoryUsed = Job->PeakJobMemoryUsed << PAGE_SHIFT;
 
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        ExReleasePushLockExclusive(&Job->MemoryLimitsLock);
+#else
         KeReleaseGuardedMutexUnsafe(&Job->MemoryLimitsLock);
+#endif
 
         /* Zero out IoInfo to avoid kernel memory leaks */
         RtlZeroMemory(&ExtendedLimit->IoInfo, sizeof(ExtendedLimit->IoInfo));
@@ -1788,7 +1804,11 @@ NtCreateJobObject(
     Job->SessionId = PsGetProcessSessionId(CurrentProcess);
 
     /* Initialize the job limits lock */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ExInitializePushLock(&Job->MemoryLimitsLock);
+#else
     KeInitializeGuardedMutex(&Job->MemoryLimitsLock);
+#endif
 
     /* Initialize the job lock */
     (VOID)ExInitializeResource(&Job->JobLock);

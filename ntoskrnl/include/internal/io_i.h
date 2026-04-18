@@ -109,6 +109,19 @@ UCHAR IopSetOperationLength[] =
     0,
     sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
     sizeof(UNICODE_STRING),
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    /* Vista+ file info classes (Set-side). NT 5.2 retains the historical
+     * sentinel-at-index-41 layout so its behaviour is byte-identical. */
+    sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION), /* 41 */
+    sizeof(FILE_IOSTATUSBLOCK_RANGE_INFORMATION),        /* 42 */
+    sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),           /* 43 */
+    sizeof(FILE_SFIO_RESERVE_INFORMATION),               /* 44 */
+    sizeof(FILE_SFIO_VOLUME_INFORMATION),                /* 45 */
+    0,                                                   /* 46 FileHardLinkInformation */
+    0,                                                   /* 47 FileProcessIdsUsingFileInformation */
+    0,                                                   /* 48 FileNormalizedNameInformation */
+    0,                                                   /* 49 FileNetworkPhysicalNameInformation */
+#endif
     0xFF
 };
 
@@ -201,6 +214,19 @@ ACCESS_MASK IopSetOperationAccess[] =
     0,
     FILE_WRITE_DATA,
     DELETE,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    /* Vista+ file info classes (Set-side access). All hint/optimisation
+     * classes — no specific access mask required. */
+    0, /* 41 FileIoCompletionNotificationInformation */
+    0, /* 42 FileIoStatusBlockRangeInformation */
+    0, /* 43 FileIoPriorityHintInformation */
+    0, /* 44 FileSfioReserveInformation */
+    0, /* 45 FileSfioVolumeInformation */
+    0, /* 46 FileHardLinkInformation */
+    0, /* 47 FileProcessIdsUsingFileInformation */
+    0, /* 48 FileNormalizedNameInformation */
+    0, /* 49 FileNetworkPhysicalNameInformation */
+#endif
     0xFFFFFFFF
 };
 
