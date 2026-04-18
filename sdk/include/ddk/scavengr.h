@@ -1,6 +1,10 @@
 #ifndef _SCAVENGR_H_
 #define _SCAVENGR_H_
 
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 extern KMUTEX RxScavengerMutex;
 
 #define RX_SCAVENGER_FINALIZATION_TIME_INTERVAL (10 * 1000 * 1000 * 10)
@@ -144,7 +148,7 @@ BOOLEAN
 RxScavengeVNetRoots(
     _In_ PRDBSS_DEVICE_OBJECT RxDeviceObject);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 VOID
 RxSynchronizeWithScavenger(
     _In_ PRX_CONTEXT RxContext,

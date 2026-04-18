@@ -1,6 +1,10 @@
 #ifndef __MRXFCB_H__
 #define __MRXFCB_H__
 
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 typedef struct _MRX_NORMAL_NODE_HEADER
 {
     NODE_TYPE_CODE NodeTypeCode;
@@ -162,7 +166,7 @@ typedef struct _MRX_SRV_OPEN_
     PMRX_V_NET_ROOT pVNetRoot;
     PVOID Context;
     PVOID Context2;
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
     PMRXSHADOW_SRV_OPEN ShadowContext;
 #endif
     ULONG Flags;

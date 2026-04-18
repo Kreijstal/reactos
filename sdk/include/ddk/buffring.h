@@ -1,13 +1,17 @@
 #ifndef __BUFFRING_H__
 #define __BUFFRING_H__
 
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 #define RX_REQUEST_PREPARED_FOR_HANDLING 0x10000000
 
 typedef struct _CHANGE_BUFFERING_STATE_REQUEST_
 {
     LIST_ENTRY ListEntry;
     ULONG Flags;
-#if (_WIN32_WINNT < 0x0600)
+#if !RDBSS_VISTA_API
     PSRV_CALL pSrvCall;
 #endif
     PSRV_OPEN SrvOpen;
@@ -36,7 +40,7 @@ typedef struct _RX_BUFFERING_MANAGER_
     LIST_ENTRY SrvOpenLists[1];
 } RX_BUFFERING_MANAGER, *PRX_BUFFERING_MANAGER;
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 #define RxAcquireBufferingManagerMutex(BufMan) ExAcquireFastMutex(&(BufMan)->Mutex)
 #else
 #define RxAcquireBufferingManagerMutex(BufMan)          \
