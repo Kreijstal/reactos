@@ -3176,14 +3176,25 @@ NtSetInformationFile(IN HANDLE FileHandle,
         }
     }
 
-    /* Reference the Handle */
-    Status = ObReferenceObjectByHandle(FileHandle,
-                                       IopSetOperationAccess
-                                       [FileInformationClass],
-                                       IoFileObjectType,
-                                       PreviousMode,
-                                       (PVOID *)&FileObject,
-                                       NULL);
+    /* Reference the Handle. Vista+ pure-hint info classes (notification mode,
+     * priority hint, IOSB range) require no specific access mask. */
+    {
+        ACCESS_MASK DesiredAccess = IopSetOperationAccess[FileInformationClass];
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+        if (FileInformationClass == FileIoCompletionNotificationInformation ||
+            FileInformationClass == FileIoStatusBlockRangeInformation ||
+            FileInformationClass == FileIoPriorityHintInformation)
+        {
+            DesiredAccess = 0;
+        }
+#endif
+        Status = ObReferenceObjectByHandle(FileHandle,
+                                           DesiredAccess,
+                                           IoFileObjectType,
+                                           PreviousMode,
+                                           (PVOID *)&FileObject,
+                                           NULL);
+    }
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Check if this is a direct open or not */
@@ -3375,6 +3386,41 @@ NtSetInformationFile(IN HANDLE FileHandle,
         Irp->IoStatus.Status = Status;
         Irp->IoStatus.Information = 0;
     }
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    else if (FileInformationClass == FileIoCompletionNotificationInformation)
+    {
+        /* Vista+ optimisation hint set via kernel32!SetFileCompletionNotificationModes.
+         * Validate the flags, store them on the FileObject, complete locally — the
+         * driver doesn't need to see this IRP. */
+        PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION ioNotif =
+            (PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION)Irp->AssociatedIrp.SystemBuffer;
+        ULONG flags = ioNotif->Flags;
+
+        if (flags & ~(FILE_SKIP_COMPLETION_PORT_ON_SUCCESS |
+                      FILE_SKIP_SET_EVENT_ON_HANDLE |
+                      FILE_SKIP_SET_USER_EVENT_ON_FAST_IO))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            if (flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)
+                FileObject->Flags |= FO_SKIP_COMPLETION_PORT;
+            if (flags & FILE_SKIP_SET_EVENT_ON_HANDLE)
+                FileObject->Flags |= FO_SKIP_SET_EVENT;
+            if (flags & FILE_SKIP_SET_USER_EVENT_ON_FAST_IO)
+                FileObject->Flags |= FO_SKIP_SET_FAST_IO;
+            Status = STATUS_SUCCESS;
+        }
+
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+    }
+#endif
     else if (FileInformationClass == FileRenameInformation ||
              FileInformationClass == FileLinkInformation ||
              FileInformationClass == FileMoveClusterInformation)
