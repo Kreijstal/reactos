@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
 
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/virtio)
 
