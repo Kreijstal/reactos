@@ -65,6 +65,7 @@ extern int vring_add_buf_stor(
     IN PVOID data);
 
 BOOLEAN
+NTAPI
 VirtIoHwInitialize(
     IN PVOID DeviceExtension
     );
@@ -75,6 +76,7 @@ VirtIoHwReinitialize(
     );
 
 BOOLEAN
+NTAPI
 VirtIoBuildIo(
     IN PVOID DeviceExtension,
     IN PSCSI_REQUEST_BLOCK Srb
@@ -88,18 +90,21 @@ CompleteDpcRoutine(
     IN PVOID SystemArgument2
     ) ;
 BOOLEAN
+NTAPI
 VirtIoMSInterruptRoutine (
     IN PVOID  DeviceExtension,
     IN ULONG  MessageID
     );
 
 BOOLEAN
+NTAPI
 VirtIoStartIo(
     IN PVOID DeviceExtension,
     IN PSCSI_REQUEST_BLOCK Srb
     );
 
 ULONG
+NTAPI
 VirtIoFindAdapter(
     IN PVOID DeviceExtension,
     IN PVOID HwContext,
@@ -110,12 +115,14 @@ VirtIoFindAdapter(
     );
 
 BOOLEAN
+NTAPI
 VirtIoResetBus(
     IN PVOID DeviceExtension,
     IN ULONG PathId
     );
 
 SCSI_ADAPTER_CONTROL_STATUS
+NTAPI
 VirtIoAdapterControl(
     IN PVOID DeviceExtension,
     IN SCSI_ADAPTER_CONTROL_TYPE ControlType,
@@ -314,6 +321,7 @@ static ULONG InitVirtIODevice(PVOID DeviceExtension)
 }
 
 ULONG
+NTAPI
 VirtIoFindAdapter(
     IN PVOID DeviceExtension,
     IN PVOID HwContext,
@@ -712,6 +720,7 @@ RhelSetGuestFeatures(
 }
 
 BOOLEAN
+NTAPI
 VirtIoHwInitialize(
     IN PVOID DeviceExtension
     )
@@ -910,6 +919,7 @@ CompletePendingRequests(
 }
 
 BOOLEAN
+NTAPI
 VirtIoStartIo(
     IN PVOID DeviceExtension,
     IN PSCSI_REQUEST_BLOCK Srb
@@ -1121,6 +1131,7 @@ VirtIoStartIo(
 }
 
 BOOLEAN
+NTAPI
 VirtIoInterrupt(
     IN PVOID DeviceExtension
     )
@@ -1158,6 +1169,7 @@ VirtIoInterrupt(
 }
 
 BOOLEAN
+NTAPI
 VirtIoResetBus(
     IN PVOID DeviceExtension,
     IN ULONG PathId
@@ -1172,6 +1184,7 @@ VirtIoResetBus(
 }
 
 SCSI_ADAPTER_CONTROL_STATUS
+NTAPI
 VirtIoAdapterControl(
     IN PVOID DeviceExtension,
     IN SCSI_ADAPTER_CONTROL_TYPE ControlType,
@@ -1266,6 +1279,7 @@ VirtIoHwReinitialize(
 }
 
 BOOLEAN
+NTAPI
 VirtIoBuildIo(
     IN PVOID DeviceExtension,
     IN PSCSI_REQUEST_BLOCK Srb
@@ -1384,6 +1398,7 @@ VirtIoBuildIo(
 }
 
 BOOLEAN
+NTAPI
 VirtIoMSInterruptRoutine (
     IN PVOID  DeviceExtension,
     IN ULONG  MessageID
