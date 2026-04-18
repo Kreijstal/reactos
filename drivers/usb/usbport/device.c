@@ -1192,10 +1192,16 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
             
             DPRINT1("USBPORT_CreateDevice: MaxPacketSize=%d\n", MaxPacketSize);
 
+            /* USB 2.x devices encode bMaxPacketSize0 as the actual EP0 packet
+             * size in bytes (must be 8, 16, 32, or 64).
+             * USB 3.x devices encode bMaxPacketSize0 as a log2 exponent; the
+             * only legal value is 9, meaning 2^9 = 512 bytes. */
             if (MaxPacketSize == 8 ||
                 MaxPacketSize == 16 ||
                 MaxPacketSize == 32 ||
-                MaxPacketSize == 64)
+                MaxPacketSize == 64 ||
+                (MaxPacketSize == 9 &&
+                 DeviceHandle->DeviceDescriptor.bcdUSB >= 0x0300))
             {
                 DPRINT1("USBPORT_CreateDevice: Success! Valid MaxPacketSize\n");
                 USBPORT_AddDeviceHandle(FdoDevice, DeviceHandle);
@@ -1410,7 +1416,18 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
     DeviceHandle->DeviceAddress = DeviceAddress;
     Endpoint = DeviceHandle->PipeHandle.Endpoint;
 
-    Endpoint->EndpointProperties.TotalMaxPacketSize = DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+    /* Translate bMaxPacketSize0: USB 2.x stores literal bytes, USB 3.x stores
+     * a log2 exponent (only 9 is legal -> 512). */
+    if (DeviceHandle->DeviceDescriptor.bcdUSB >= 0x0300)
+    {
+        Endpoint->EndpointProperties.TotalMaxPacketSize =
+            1u << DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+    }
+    else
+    {
+        Endpoint->EndpointProperties.TotalMaxPacketSize =
+            DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+    }
     Endpoint->EndpointProperties.DeviceAddress = DeviceAddress;
 
   //  Status = USBPORT_ReopenPipe(FdoDevice, Endpoint); ???
@@ -1446,11 +1463,15 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
                     TransferedLen);
         }
 
-        /* Use the known bMaxPacketSize0 (was obtained prior to SetAddress) */
+        /* Use the known bMaxPacketSize0 (was obtained prior to SetAddress).
+         * USB 2.x: literal byte count (8/16/32/64).
+         * USB 3.x: log2 exponent; only 9 is legal (2^9 = 512). */
         MaxPacketSize = DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
 
         if (!(MaxPacketSize == 8 || MaxPacketSize == 16 ||
-              MaxPacketSize == 32 || MaxPacketSize == 64))
+              MaxPacketSize == 32 || MaxPacketSize == 64 ||
+              (MaxPacketSize == 9 &&
+               DeviceHandle->DeviceDescriptor.bcdUSB >= 0x0300)))
         {
             DPRINT1("USBPORT_InitializeDevice: Invalid MPS0 %u\n", MaxPacketSize);
             Status = STATUS_DEVICE_DATA_ERROR;
