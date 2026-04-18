@@ -3,6 +3,13 @@
 
 #include "mrx.h"
 
+/* See sdk/include/ddk/rxprocs.h for the rationale. ReactOS ships only
+ * the pre-Vista Lowio signatures; keep them visible independent of
+ * the global _WIN32_WINNT target. */
+#ifndef RDBSS_VISTA_API
+#define RDBSS_VISTA_API 0
+#endif
+
 extern FAST_MUTEX RxLowIoPagingIoSyncMutex;
 
 #define RxLowIoIsMdlLocked(MDL) (RxMdlIsLocked((MDL)) || RxMdlSourceIsNonPaged((MDL)))
@@ -20,7 +27,7 @@ typedef struct _LOWIO_PER_FCB_INFO
     LIST_ENTRY PagingIoWritesOutstanding;
 } LOWIO_PER_FCB_INFO, *PLOWIO_PER_FCB_INFO;
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 NTAPI
 RxLowIoPopulateFsctlInfo(
@@ -33,7 +40,7 @@ RxLowIoPopulateFsctlInfo(
     _In_ PRX_CONTEXT RxContext);
 #endif
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 NTSTATUS
 NTAPI
 RxLowIoSubmit(
@@ -54,7 +61,7 @@ NTAPI
 RxLowIoCompletion(
     _In_ PRX_CONTEXT RxContext);
 
-#if (_WIN32_WINNT >= 0x0600)
+#if RDBSS_VISTA_API
 VOID
 NTAPI
 RxInitializeLowIoContext(
