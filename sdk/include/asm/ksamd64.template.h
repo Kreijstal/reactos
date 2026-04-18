@@ -858,11 +858,13 @@ SIZE(XsaHeaderLength, XSAVE_AREA_HEADER),
 
 //CONSTANT(CFlushSize),
 
-#if (NTDDI_VERSION >= NTDDI_VISTA)
+#if (NTDDI_VERSION >= NTDDI_WIN7)
 HEADER("KTHREAD offsets"),
 OFFSET(ThTebMappedLowVa, KTHREAD, TebMappedLowVa),
 OFFSET(ThUcb, KTHREAD, Ucb),
+#endif
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
 HEADER("KPROCESS offsets"),
 OFFSET(PrLdtSystemDescriptor, KPROCESS, LdtSystemDescriptor),
 OFFSET(PrLdtBaseAddress, KPROCESS, LdtBaseAddress),
