@@ -178,4 +178,4 @@ CompleteRequestWithStatus(
 
 extern VirtIOSystemOps VioStorSystemOps;
 
-#endif ___VIOSTOR_HW_HELPER_H___
+#endif /* ___VIOSTOR_HW_HELPER_H___ */

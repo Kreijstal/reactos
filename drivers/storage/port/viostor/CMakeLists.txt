@@ -13,6 +13,14 @@ add_library(viostor MODULE ${SOURCE} virtio_stor.rc)
 
 if(MSVC)
     target_compile_options(viostor PRIVATE /wd4189 /wd4267)
+else()
+    # 3rd-party viostor source has latent -Wswitch, -Wunused-function,
+    # -Wunused-variable, -Wattributes and -Woverflow warnings that GCC
+    # -Werror refuses. Suppress those classes on non-MSVC until upstream
+    # is resynced.
+    target_compile_options(viostor PRIVATE
+        -Wno-switch -Wno-unused-function -Wno-unused-variable
+        -Wno-attributes -Wno-overflow)
 endif()
 
 target_compile_definitions(viostor PUBLIC
