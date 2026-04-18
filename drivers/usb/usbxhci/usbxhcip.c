@@ -108,6 +108,17 @@ VOID NTAPI CleanupSlotResources(IN PXHCI_EXTENSION XhciExtension, IN ULONG SlotI
 VOID RemovePendingCommand(PXHCI_PENDING_COMMAND PendingCommand);
 PXHCI_PENDING_COMMAND FindPendingCommandInternal(PHYSICAL_ADDRESS TrbPointer);
 
+/* Forward declaration for XHCI_OpenBulkEndpoint call site
+ * (definition lives after XHCI_AddressDevice). */
+MPSTATUS
+NTAPI
+XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                       IN ULONG SlotId,
+                       IN ULONG EndpointIndex,
+                       IN ULONG EndpointType,
+                       IN ULONG MaxPacketSize,
+                       IN PHYSICAL_ADDRESS TransferRingPA);
+
 // Transfer tracking helper functions
 VOID
 NTAPI
@@ -923,8 +934,53 @@ XHCI_OpenBulkEndpoint(IN PXHCI_EXTENSION XhciExtension,
     // Store the slot ID in the endpoint for future reference
     // For non-control endpoints, the slot ID is typically the device address
     *(PULONG)&XhciEndpoint->FirstTD = DeviceAddress;
-    
+
     DPRINT1("XHCI_OpenBulkEndpoint: Stored slot ID %d for bulk endpoint\n", DeviceAddress);
+
+    /*
+     * Tell the controller about this endpoint: issue CONFIGURE_ENDPOINT so the
+     * EP Context at DCI (ContextIndex) transitions from Disabled to Running.
+     * Without this, doorbell rings on this DCI are silently dropped and no
+     * TRANSFER_EVENT is ever posted for our Bulk CBW/CSW traffic.
+     *
+     * Slot ID convention matches XHCI_SubmitBulkTransfer: stored via
+     * *(PULONG)&XhciEndpoint->FirstTD = DeviceAddress.
+     *
+     * EpType encoding per xHCI spec section 6.2.3 Table 6-9:
+     *   Bulk OUT = 2, Bulk IN = 6.  IN direction == (EndpointAddress & 0x80).
+     */
+    {
+        ULONG SlotId = DeviceAddress;
+        ULONG EndpointNumber = EndpointAddress & 0x0F;
+        BOOLEAN IsIn = (EndpointAddress & 0x80) != 0;
+        ULONG DCI = (EndpointNumber * 2) + (IsIn ? 1 : 0);
+        ULONG EpType = IsIn ? 6 : 2;
+        PHYSICAL_ADDRESS RingPA;
+        MPSTATUS CfgStatus;
+
+        /* Sanity: the DCI we derive here must match what the submission
+         * path already cached (computed above identically). */
+        ASSERT(DCI == ContextIndex);
+
+        RingPA = MmGetPhysicalAddress(&XhciEndpoint->TransferRing.firstSeg.XhciTrb[0]);
+
+        DPRINT1("XHCI_OpenBulkEndpoint: Configuring EP on slot %d, DCI=%d, EpType=%d, RingPA=0x%I64x\n",
+                SlotId, DCI, EpType, RingPA.QuadPart);
+
+        CfgStatus = XHCI_ConfigureEndpoint(XhciExtension,
+                                           SlotId,
+                                           DCI,
+                                           EpType,
+                                           MaxPacketSize,
+                                           RingPA);
+        if (CfgStatus != MP_STATUS_SUCCESS)
+        {
+            DPRINT1("XHCI_OpenBulkEndpoint: XHCI_ConfigureEndpoint failed (0x%x) for slot %d DCI %d\n",
+                    CfgStatus, SlotId, DCI);
+            return CfgStatus;
+        }
+    }
+
     DPRINT1("XHCI_OpenBulkEndpoint: Bulk endpoint initialized successfully\n");
     return MP_STATUS_SUCCESS;
 }
@@ -2183,7 +2239,170 @@ XHCI_AddressDevice(IN PXHCI_EXTENSION XhciExtension,
     
     // Remove from pending commands
     RemovePendingCommand(PendingCommand);
-    
+
+    return Status;
+}
+
+/*
+ * XHCI_ConfigureEndpoint
+ *
+ * Issue a CONFIGURE_ENDPOINT_COMMAND for a single non-EP0 endpoint on an
+ * already-addressed slot.  Tells the controller about one new DCI so it
+ * transitions the EP Context from Disabled to Running; without this the
+ * controller silently drops doorbells rung on that DCI.
+ *
+ * EndpointIndex is the xHCI Device Context Index (DCI): 2..31.
+ * EndpointType is the xHCI EP Type encoding:
+ *   1 = Isoch OUT, 2 = Bulk OUT, 3 = Interrupt OUT,
+ *   4 = Control, 5 = Isoch IN, 6 = Bulk IN, 7 = Interrupt IN.
+ * TransferRingPA must be the PA of the first TRB on the endpoint's
+ * transfer ring; the DCS (bit 0) is forced to 1 by this helper.
+ *
+ * This first pass supports single-DCI add only (no sibling ExpandAddFlags
+ * re-add).  usbport opens bulk IN and bulk OUT via separate OpenEndpoint
+ * calls, so one DCI per Configure Endpoint command is sufficient.
+ */
+MPSTATUS
+NTAPI
+XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                       IN ULONG SlotId,
+                       IN ULONG EndpointIndex,
+                       IN ULONG EndpointType,
+                       IN ULONG MaxPacketSize,
+                       IN PHYSICAL_ADDRESS TransferRingPA)
+{
+    PXHCI_HC_RESOURCES HcResourcesVA;
+    PHYSICAL_ADDRESS HcResourcesPA;
+    PXHCI_INPUT_CONTEXT InputContext;
+    PXHCI_INPUT_CONTEXT OutputContext;
+    PXHCI_SLOT_CONTEXT InputSlotContext;
+    PXHCI_SLOT_CONTEXT OutputSlotContext;
+    PXHCI_ENDPOINT_CONTEXT EpCtx;
+    PHYSICAL_ADDRESS InputContextPA;
+    PHYSICAL_ADDRESS TrbPA;
+    PXHCI_TRB enqueue_pointer;
+    ULONG TrbIndex;
+    ULONG ContextEntries;
+    XHCI_TRB CommandTrb;
+    PXHCI_PENDING_COMMAND PendingCommand;
+    MPSTATUS Status;
+
+    DPRINT1("XHCI_ConfigureEndpoint: slot=%d DCI=%d EPType=%d MaxPacket=%d RingPA=0x%I64x\n",
+            SlotId, EndpointIndex, EndpointType, MaxPacketSize, TransferRingPA.QuadPart);
+
+    if (SlotId == 0 || SlotId > XHCI_MAX_SLOTS)
+    {
+        DPRINT1("XHCI_ConfigureEndpoint: Invalid slot ID %d\n", SlotId);
+        return MP_STATUS_FAILURE;
+    }
+    if (EndpointIndex < 2 || EndpointIndex > 31)
+    {
+        DPRINT1("XHCI_ConfigureEndpoint: Invalid DCI %d (must be 2..31)\n", EndpointIndex);
+        return MP_STATUS_FAILURE;
+    }
+
+    HcResourcesVA = (PXHCI_HC_RESOURCES)XhciExtension->HcResourcesVA;
+    HcResourcesPA = XhciExtension->HcResourcesPA;
+
+    /* 1. Zero and populate the shared Input Context. */
+    InputContext = &HcResourcesVA->InputContext;
+    RtlZeroMemory(InputContext, sizeof(XHCI_INPUT_CONTEXT));
+
+    /* 2. Input Control Context: add the slot context (A0) and the new DCI. */
+    InputContext->InputContext.AddContextFlags = (1u << 0) | (1u << EndpointIndex);
+    InputContext->InputContext.DropContextFlags = 0;
+
+    /*
+     * 3. Copy the controller's current output slot context into the input
+     *    slot context.  CONFIGURE_ENDPOINT is a read-modify-write: the
+     *    controller re-reads the slot context, so it must reflect the
+     *    addressed device's current state (speed, route string, root hub
+     *    port, device address, slot state).
+     */
+    OutputContext = &HcResourcesVA->OutputContexts[SlotId - 1];
+    OutputSlotContext = &OutputContext->SlotContext;
+    InputSlotContext = &InputContext->SlotContext;
+    RtlCopyMemory(InputSlotContext, OutputSlotContext, sizeof(XHCI_SLOT_CONTEXT));
+
+    /* 4. Bump ContextEntries to at least the new DCI so the controller
+     *    treats it as valid. */
+    ContextEntries = InputSlotContext->ContextEntries;
+    if (ContextEntries < EndpointIndex)
+        ContextEntries = EndpointIndex;
+    InputSlotContext->ContextEntries = ContextEntries;
+
+    /* 5. Fill the endpoint context at (DCI - 1).  EndpointContextList[0]
+     *    is EP0/DCI 1. */
+    EpCtx = &InputContext->EndpointContextList[EndpointIndex - 1];
+    EpCtx->EPState          = 0;   /* Disabled -> controller will move to Running */
+    EpCtx->EPType           = EndpointType;
+    EpCtx->MaxPacketSize    = MaxPacketSize;
+    EpCtx->MaxBurstSize     = 0;   /* SS burst not supported in first pass */
+    EpCtx->CErr             = 3;   /* Spec-recommended retry count for bulk/int */
+    EpCtx->Mult             = 0;
+    EpCtx->LSA              = 0;
+    EpCtx->MaxPStreams      = 0;
+    EpCtx->Interval         = 0;
+    EpCtx->MaxESITPayload   = 0;
+    EpCtx->MaxESITHigh      = 0;
+    EpCtx->HID              = 0;
+    EpCtx->AverageTRBLength = (EndpointType == 2 || EndpointType == 6) ? 1024 : 8;
+    EpCtx->TRDeqPtr         = (TransferRingPA.QuadPart & ~((ULONGLONG)0xFULL)) | 1ULL; /* DCS = 1 */
+
+    InputContextPA = MmGetPhysicalAddress(InputContext);
+    DPRINT1("XHCI_ConfigureEndpoint: InputContext PA=0x%I64x, AddFlags=0x%x, ContextEntries=%d\n",
+            InputContextPA.QuadPart,
+            InputContext->InputContext.AddContextFlags,
+            InputSlotContext->ContextEntries);
+
+    /* 6. Build and issue the Configure Endpoint command.  Same command-ring
+     *    + pending-command pattern as XHCI_AddressDevice. */
+    RtlZeroMemory(&CommandTrb, sizeof(XHCI_TRB));
+    CommandTrb.GenericTRB.Word0 = (ULONG)(InputContextPA.QuadPart & 0xFFFFFFFF);
+    CommandTrb.GenericTRB.Word1 = (ULONG)(InputContextPA.QuadPart >> 32);
+    CommandTrb.GenericTRB.Word2 = 0;
+    CommandTrb.GenericTRB.Word3 = ((CONFIGURE_ENDPOINT_COMMAND << 10) |
+                                   (SlotId << 24) |
+                                   1);  /* Cycle bit fixed up inside XHCI_SendCommand */
+
+    /* Pre-compute the PA where the TRB will land (matches AddressDevice). */
+    enqueue_pointer = HcResourcesVA->CommandRing.enqueue_pointer;
+    TrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer -
+                       (ULONG_PTR)&HcResourcesVA->CommandRing.firstSeg.XhciTrb[0]) /
+               sizeof(XHCI_TRB);
+    TrbPA.QuadPart = HcResourcesPA.QuadPart +
+                     FIELD_OFFSET(XHCI_HC_RESOURCES, CommandRing.firstSeg.XhciTrb[0]) +
+                     (TrbIndex * sizeof(XHCI_TRB));
+
+    PendingCommand = AddPendingCommand(COMMAND_CONFIGURE_ENDPOINT, TrbPA, SlotId);
+    if (!PendingCommand)
+    {
+        DPRINT1("XHCI_ConfigureEndpoint: Failed to add pending command\n");
+        return MP_STATUS_FAILURE;
+    }
+
+    Status = XHCI_SendCommand(CommandTrb, XhciExtension);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_ConfigureEndpoint: Failed to submit command\n");
+        RemovePendingCommand(PendingCommand);
+        return Status;
+    }
+
+    /* 7. Wait for the matching COMMAND_COMPLETION_EVENT. */
+    Status = WaitForCommandCompletion(XhciExtension, PendingCommand, 2000);
+    if (Status == MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_ConfigureEndpoint: slot %d DCI %d configured OK\n",
+                SlotId, EndpointIndex);
+    }
+    else
+    {
+        DPRINT1("XHCI_ConfigureEndpoint: slot %d DCI %d FAILED (completion=%d)\n",
+                SlotId, EndpointIndex, PendingCommand->CompletionCode);
+    }
+
+    RemovePendingCommand(PendingCommand);
     return Status;
 }
 
