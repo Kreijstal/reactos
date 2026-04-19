@@ -2967,4 +2967,120 @@ GetBestFileNameFromRecord(PDEVICE_EXTENSION Vcb,
     return FileName;
 }
 
+/*
+ * Resident-attribute add/remove helpers.  Pulled forward from the reparse/
+ * objid WIP slice so security.c (per-file $SECURITY_DESCRIPTOR) can use them
+ * without that slice's other half (objid.c / reparse.c) landing.
+ */
+NTSTATUS
+AddResidentAttribute(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     ULONG Type,
+                     PCWSTR Name,
+                     USHORT NameLength,
+                     const VOID *Data,
+                     ULONG DataLength)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    ULONG NameOffset;
+    ULONG ValueOffset;
+    ULONG AttributeLength;
+    ULONG FileRecordEnd;
+    ULONG BytesAvailable;
+    PNTFS_ATTR_RECORD AttributeAddress;
+    PNTFS_ATTR_RECORD NextSlot;
+
+    AttributeAddress = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+    while (AttributeAddress->Type != AttributeEnd &&
+           (ULONG_PTR)AttributeAddress < (ULONG_PTR)FileRecord + FileRecord->BytesInUse)
+    {
+        AttributeAddress = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttributeAddress + AttributeAddress->Length);
+    }
+
+    if (AttributeAddress->Type != AttributeEnd)
+    {
+        DPRINT1("AddResidentAttribute: file record has no AttributeEnd marker\n");
+        return STATUS_NOT_IMPLEMENTED;
+    }
+
+    FileRecordEnd = AttributeAddress->Length;
+
+    NameOffset = ResidentHeaderLength;
+    ValueOffset = ALIGN_UP_BY(NameOffset + (sizeof(WCHAR) * NameLength), VALUE_OFFSET_ALIGNMENT);
+    AttributeLength = ALIGN_UP_BY(ValueOffset + DataLength, ATTR_RECORD_ALIGNMENT);
+
+    BytesAvailable = Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse;
+    if (BytesAvailable < AttributeLength)
+    {
+        DPRINT1("AddResidentAttribute: not enough room (need %u, have %u)\n",
+                AttributeLength, BytesAvailable);
+        return STATUS_DISK_FULL;
+    }
+
+    RtlZeroMemory(AttributeAddress, AttributeLength);
+    AttributeAddress->Type = Type;
+    AttributeAddress->Length = AttributeLength;
+    AttributeAddress->IsNonResident = 0;
+    AttributeAddress->NameLength = (UCHAR)NameLength;
+    AttributeAddress->NameOffset = (USHORT)NameOffset;
+    AttributeAddress->Flags = 0;
+    AttributeAddress->Instance = FileRecord->NextAttributeNumber++;
+
+    AttributeAddress->Resident.ValueLength = DataLength;
+    AttributeAddress->Resident.ValueOffset = (USHORT)ValueOffset;
+    AttributeAddress->Resident.Flags = 0;
+
+    if (NameLength != 0 && Name != NULL)
+    {
+        RtlCopyMemory((PCHAR)((ULONG_PTR)AttributeAddress + NameOffset),
+                      Name,
+                      NameLength * sizeof(WCHAR));
+    }
+
+    if (DataLength != 0 && Data != NULL)
+    {
+        RtlCopyMemory((PCHAR)((ULONG_PTR)AttributeAddress + ValueOffset),
+                      Data,
+                      DataLength);
+    }
+
+    NextSlot = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttributeAddress + AttributeLength);
+    SetFileRecordEnd(FileRecord, NextSlot, FileRecordEnd);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+RemoveResidentAttribute(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        PNTFS_ATTR_RECORD AttrAddress)
+{
+    PNTFS_ATTR_RECORD NextAttr;
+    PNTFS_ATTR_RECORD FinalAttribute;
+    ULONG AttrOffset;
+
+    UNREFERENCED_PARAMETER(Vcb);
+
+    if (AttrAddress->Type == AttributeEnd)
+        return STATUS_INVALID_PARAMETER;
+
+    NextAttr = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttrAddress + AttrAddress->Length);
+    AttrOffset = (ULONG)((ULONG_PTR)AttrAddress - (ULONG_PTR)FileRecord);
+
+    if (NextAttr->Type == AttributeEnd)
+    {
+        SetFileRecordEnd(FileRecord, AttrAddress, FILE_RECORD_END);
+    }
+    else
+    {
+        FinalAttribute = MoveAttributes(Vcb,
+                                        NextAttr,
+                                        AttrOffset + AttrAddress->Length,
+                                        (ULONG_PTR)AttrAddress);
+        SetFileRecordEnd(FileRecord, FinalAttribute, FILE_RECORD_END);
+    }
+
+    return STATUS_SUCCESS;
+}
+
 /* EOF */
