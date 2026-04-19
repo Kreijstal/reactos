@@ -250,6 +250,30 @@ typedef struct
      */
     volatile ULONG CachedVacbBitmap[512 / 32];
 
+    /* $UsnJrnl first-slice state (Kreijstal/reactos#33).
+     *
+     * When this volume has a journal, UsnJournalFcb points at an FCB-like
+     * shim that owns the MFT index of \$Extend\$UsnJrnl so usn.c can
+     * Read/WriteAttribute against its $J (:$DATA, non-resident, sparse)
+     * and $Max (:$DATA, resident, 32-byte USN_JOURNAL_DATA_V0) streams
+     * without re-walking the directory every time.  NULL means "no
+     * journal" — NtfsUsnEmitRecord and the FSCTL dispatcher both gate
+     * on that so un-journalled volumes pay nothing.
+     *
+     * UsnJournalId is the per-lifetime ID callers stamp into every
+     * READ_USN_JOURNAL request; it must match the one returned by
+     * CREATE_USN_JOURNAL or the read is rejected by Windows.
+     * UsnMaxSize / UsnAllocationDelta mirror the on-disk $Max fields.
+     * UsnNextUsn is the byte offset inside $J where the *next* record
+     * will land.  It's 8-byte aligned and persists across remounts by
+     * being (re)written into $Max whenever we emit a record. */
+    struct _FCB *UsnJournalFcb;
+    ULONGLONG UsnJournalId;
+    ULONGLONG UsnMaxSize;
+    ULONGLONG UsnAllocationDelta;
+    ULONGLONG UsnNextUsn;
+    ERESOURCE UsnResource;
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
@@ -1309,6 +1333,63 @@ NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
 NTSTATUS
 NtfsDeleteSecurityFromRecord(PNTFS_VCB Vcb,
                              PFILE_RECORD_HEADER FileRecord);
+
+/*
+ * $UsnJrnl workers (first slice, Kreijstal/reactos#33).  These operate
+ * directly on the in-memory journal state and the on-disk $J / $Max
+ * attributes; IRP dispatch (fsctl.c) and the emission hooks
+ * (create.c / cleanup.c) call into them.
+ *
+ * NtfsUsnInitJournal      — either creates \$Extend\$UsnJrnl or loads
+ *                           an existing one, and populates the Vcb->Usn*
+ *                           fields.  Idempotent.
+ * NtfsUsnEmitRecord       — serialise one USN_RECORD_V2 into $J.  Callers
+ *                           must gate on Vcb->UsnJournalFcb != NULL.
+ * NtfsUsnReadRange        — linear scan of $J filtered by reason mask;
+ *                           matches FSCTL_READ_USN_JOURNAL semantics.
+ * NtfsUsnEnumerate        — MFT walk with per-record synthesis;
+ *                           matches FSCTL_ENUM_USN_DATA semantics.
+ *                           Reason=0, Usn=0 on synthesised records.
+ *
+ * These are all worker-style helpers: pure functions of the Vcb and
+ * caller buffers, no IRP plumbing.
+ */
+NTSTATUS
+NtfsUsnInitJournal(PDEVICE_EXTENSION Vcb,
+                   ULONGLONG MaximumSize,
+                   ULONGLONG AllocationDelta);
+
+NTSTATUS
+NtfsUsnLoadJournal(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsUsnEmitRecord(PDEVICE_EXTENSION Vcb,
+                  ULONGLONG FileRef,
+                  ULONGLONG ParentRef,
+                  ULONG Reason,
+                  ULONG SourceInfo,
+                  PCWSTR Name,
+                  USHORT NameLength);
+
+NTSTATUS
+NtfsUsnReadRange(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG StartUsn,
+                 ULONG ReasonMask,
+                 PVOID Buffer,
+                 ULONG BufferLength,
+                 PULONG BytesReturned);
+
+NTSTATUS
+NtfsUsnEnumerate(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG StartRef,
+                 LONGLONG LowUsn,
+                 LONGLONG HighUsn,
+                 PVOID Buffer,
+                 ULONG BufferLength,
+                 PULONG BytesReturned);
+
+VOID
+NtfsUsnFreeJournalFcb(struct _FCB *Fcb);
 
 NTSTATUS
 InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
