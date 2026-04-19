@@ -552,6 +552,12 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     FsRtlNotifyVolumeEvent(Vcb->StreamFileObject, FSRTL_VOLUME_MOUNT);
 
+    /* $UsnJrnl bootstrap (Kreijstal/reactos#33): if the volume already has
+     * a journal on disk, bring its state into the Vcb so subsequent
+     * FSCTLs and emission hooks see a live UsnJournalFcb.  A failure is
+     * benign — the volume mounts, the journal simply stays inactive. */
+    (void)NtfsUsnLoadJournal(Vcb);
+
     Status = STATUS_SUCCESS;
 
 ByeBye:
@@ -1007,6 +1013,92 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
 }
 
 
+/*
+ * $UsnJrnl first-slice FSCTL wrappers (Kreijstal/reactos#33).  Each
+ * unpacks the IRP, sanity-checks buffers, and delegates to the matching
+ * usn.c worker.  Handlers bail with STATUS_INVALID_DEVICE_REQUEST when
+ * Vcb->UsnJournalFcb is NULL (legacy "no journal" fallback) — except
+ * FSCTL_CREATE_USN_JOURNAL, which lazily brings the journal up.
+ */
+static
+NTSTATUS
+FsctlCreateUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PCREATE_USN_JOURNAL_DATA Create;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(CREATE_USN_JOURNAL_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Create = (PCREATE_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+    return NtfsUsnInitJournal(DeviceExt, Create->MaximumSize, Create->AllocationDelta);
+}
+
+static
+NTSTATUS
+FsctlEnumUsnData(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PMFT_ENUM_DATA Enum;
+    ULONG BytesReturned = 0;
+    NTSTATUS Status;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(MFT_ENUM_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONGLONG))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Enum = (PMFT_ENUM_DATA)Irp->AssociatedIrp.SystemBuffer;
+
+    Status = NtfsUsnEnumerate(DeviceExt,
+                              Enum->StartFileReferenceNumber,
+                              Enum->LowUsn,
+                              Enum->HighUsn,
+                              Irp->AssociatedIrp.SystemBuffer,
+                              Stack->Parameters.FileSystemControl.OutputBufferLength,
+                              &BytesReturned);
+    Irp->IoStatus.Information = BytesReturned;
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlReadUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PREAD_USN_JOURNAL_DATA Read;
+    ULONG BytesReturned = 0;
+    NTSTATUS Status;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(READ_USN_JOURNAL_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONGLONG))
+        return STATUS_BUFFER_TOO_SMALL;
+    if (DeviceExt->UsnJournalFcb == NULL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    Read = (PREAD_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+
+    Status = NtfsUsnReadRange(DeviceExt,
+                              (ULONGLONG)Read->StartUsn,
+                              Read->ReasonMask,
+                              Irp->AssociatedIrp.SystemBuffer,
+                              Stack->Parameters.FileSystemControl.OutputBufferLength,
+                              &BytesReturned);
+    Irp->IoStatus.Information = BytesReturned;
+    return Status;
+}
+
+
 static
 NTSTATUS
 NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
@@ -1022,19 +1114,28 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
-        /* USN journal FSCTLs: this volume has no $UsnJrnl, so report
-         * "no journal" rather than "broken driver".  Returning
-         * STATUS_INVALID_DEVICE_REQUEST lets probing apps (Explorer,
-         * indexing services, backup tools) gracefully fall back to a
-         * scan-based change-detection strategy instead of erroring out. */
+        /* USN journal FSCTLs — first slice (Kreijstal/reactos#33).
+         * CREATE / ENUM / READ are wired; the remaining four keep the
+         * legacy "no journal" fallback for now, since their semantics
+         * depend on bookkeeping (LowestValidUsn, CCB-cached reasons,
+         * circular-wrap) that this slice doesn't implement. */
         case FSCTL_CREATE_USN_JOURNAL:
-        case FSCTL_DELETE_USN_JOURNAL:
+            Status = FsctlCreateUsnJournal(DeviceExt, Irp);
+            break;
+
         case FSCTL_ENUM_USN_DATA:
+            Status = FsctlEnumUsnData(DeviceExt, Irp);
+            break;
+
+        case FSCTL_READ_USN_JOURNAL:
+            Status = FsctlReadUsnJournal(DeviceExt, Irp);
+            break;
+
+        case FSCTL_DELETE_USN_JOURNAL:
         case FSCTL_QUERY_USN_JOURNAL:
         case FSCTL_READ_FILE_USN_DATA:
-        case FSCTL_READ_USN_JOURNAL:
         case FSCTL_WRITE_USN_CLOSE_RECORD:
-            DPRINT("USN journal FSCTL on volume without $UsnJrnl: %x\n",
+            DPRINT("USN journal FSCTL deferred to follow-up slice: %x\n",
                    Stack->Parameters.FileSystemControl.FsControlCode);
             Status = STATUS_INVALID_DEVICE_REQUEST;
             break;

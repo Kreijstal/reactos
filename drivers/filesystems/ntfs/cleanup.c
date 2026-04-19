@@ -58,6 +58,32 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     ASSERT(DeviceExt->OpenHandleCount > 0);
     DeviceExt->OpenHandleCount--;
 
+    /* Emit USN_REASON_CLOSE if this volume has an active journal and we
+     * aren't looking at the volume-stream FCB.  Gated so un-journalled
+     * volumes stay on the fast path.  Per-handle CCB-cached reasons
+     * (OR'd into the close record) are a follow-up slice -- for now we
+     * just announce the close itself so the basic read-back contract
+     * holds.  Kreijstal/reactos#33. */
+    if (DeviceExt->UsnJournalFcb != NULL &&
+        !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME) &&
+        !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME_STREAM))
+    {
+        ULONGLONG FileRef =
+            ((ULONGLONG)Fcb->Entry.DirectoryFileReferenceNumber != 0)
+                ? ((ULONGLONG)Fcb->Entry.DirectoryFileReferenceNumber & NTFS_MFT_MASK)
+                : 0;
+        /* Build the child FileRef: Fcb->MFTIndex is just the index,
+         * combine with the FCB's own sequence number if available via
+         * its parent's $FILE_NAME.DirectoryFileReferenceNumber. */
+        (void)NtfsUsnEmitRecord(DeviceExt,
+                                Fcb->MFTIndex,
+                                FileRef,
+                                USN_REASON_CLOSE,
+                                0,
+                                Fcb->Entry.Name,
+                                Fcb->Entry.NameLength);
+    }
+
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Fcb->OpenHandleCount--;
