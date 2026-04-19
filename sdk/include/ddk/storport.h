@@ -23,6 +23,20 @@
 #ifndef _NTSTORPORT_
 #define _NTSTORPORT_
 
+/* GCC's __forceinline expands to `extern __inline__ __attribute__((gnu_inline))`,
+   which doesn't emit standalone bodies so callers get undefined references.
+   Override to static inline for GCC C mode (same workaround as srbhelper.h).
+
+   storport.h uses the `<type>\nFORCEINLINE\n<name>(...)` split-line form for
+   every inline stub. Regardless of what FORCEINLINE expands to, any
+   storage-class-spec after the return type trips -Wold-style-declaration.
+   Silence that warning for the rest of this translation unit. */
+#if defined(__GNUC__) && !defined(__cplusplus)
+#undef FORCEINLINE
+#define FORCEINLINE static __inline__ __attribute__((__always_inline__))
+#pragma GCC diagnostic ignored "-Wold-style-declaration"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
