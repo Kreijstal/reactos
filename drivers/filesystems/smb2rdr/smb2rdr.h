@@ -22,7 +22,13 @@
 #define IOCTL_SMB2RDR_GETSTATE  _RDR_CTL_CODE(3, METHOD_NEITHER)
 #define IOCTL_SMB2RDR_ADDCONN   _RDR_CTL_CODE(4, METHOD_BUFFERED)
 #define IOCTL_SMB2RDR_DELCONN   _RDR_CTL_CODE(5, METHOD_BUFFERED)
-#define IOCTL_SMB2RDR_UPCALL    _RDR_CTL_CODE(6, METHOD_BUFFERED)
-#define IOCTL_SMB2RDR_DOWNCALL  _RDR_CTL_CODE(7, METHOD_BUFFERED)
+/* Daemon poll: kernel -> usermode (serialized upcall entry). */
+#define IOCTL_SMB2RDR_READ      _RDR_CTL_CODE(6, METHOD_BUFFERED)
+/* Daemon reply: usermode -> kernel (downcall for a pending xid). */
+#define IOCTL_SMB2RDR_WRITE     _RDR_CTL_CODE(7, METHOD_BUFFERED)
+
+/* Legacy names kept for the early scaffolding; prefer READ/WRITE. */
+#define IOCTL_SMB2RDR_UPCALL    IOCTL_SMB2RDR_READ
+#define IOCTL_SMB2RDR_DOWNCALL  IOCTL_SMB2RDR_WRITE
 
 #endif /* _SMB2RDR_H_ */

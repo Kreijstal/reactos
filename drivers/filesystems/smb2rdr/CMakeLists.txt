@@ -1,7 +1,9 @@
 
 list(APPEND SOURCE
     smb2rdr.c
-    smb2rdr.h)
+    upcall.c
+    smb2rdr.h
+    upcall.h)
 
 add_definitions(-DRDBSS_TRACKER)
 

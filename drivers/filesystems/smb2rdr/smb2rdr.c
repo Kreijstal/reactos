@@ -30,6 +30,7 @@
 #include <debug.h>
 
 #include "smb2rdr.h"
+#include "upcall.h"
 
 typedef enum _SMB2RDR_STORAGE_TYPE_CODES {
     NTC_SMB2RDR_DEVICE_EXTENSION = (NODE_TYPE_CODE)0xFC10,
@@ -76,6 +77,48 @@ smb2rdr_AreFilesAliased(PFCB a, PFCB b)
  * point.  Every callback returns STATUS_NOT_IMPLEMENTED (or STATUS_SUCCESS
  * where rdbss treats failure as fatal to the driver) after logging. */
 
+/* ---------- devfcb (IOCTL) dispatch ----------
+ *
+ * The usermode smb2d daemon opens \\.\smb2rdr and drives the upcall bridge
+ * through two IOCTLs: IOCTL_SMB2RDR_READ pops the next pending upcall off
+ * the queue and writes its header+payload into the daemon's output buffer;
+ * IOCTL_SMB2RDR_WRITE delivers the matching downcall reply and wakes the
+ * blocked kernel producer.  Everything else flows through the minirdr
+ * stubs (or returns STATUS_INVALID_DEVICE_REQUEST so rdbss's default
+ * handling wins). */
+NTSTATUS NTAPI
+smb2rdr_DevFcbXXXControlFile(IN OUT PRX_CONTEXT RxContext)
+{
+    NTSTATUS status;
+    UCHAR op = RxContext->MajorFunction;
+    PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
+    ULONG ioctl;
+    ULONG info = 0;
+
+    if (op != IRP_MJ_DEVICE_CONTROL && op != IRP_MJ_INTERNAL_DEVICE_CONTROL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    ioctl = LowIo->ParamsFor.IoCtl.IoControlCode;
+
+    switch (ioctl) {
+    case IOCTL_SMB2RDR_READ:
+        status = SmbRdrUpcallIoctl(RxContext, &info);
+        RxContext->InformationToReturn = info;
+        break;
+    case IOCTL_SMB2RDR_WRITE:
+        status = SmbRdrDowncallIoctl(RxContext);
+        RxContext->InformationToReturn = 0;
+        break;
+    default:
+        DbgPrint("SMB2RDR: DevFcbXXXControlFile unhandled ioctl=0x%08lx\n",
+                 ioctl);
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+    return status;
+}
+
 NTSTATUS NTAPI
 smb2rdr_Start(IN OUT PRX_CONTEXT RxContext,
               IN OUT PRDBSS_DEVICE_OBJECT dev)
@@ -96,25 +139,90 @@ smb2rdr_Stop(IN OUT PRX_CONTEXT RxContext,
     return STATUS_SUCCESS;
 }
 
+/* CreateSrvCall is the first MRx hook after MUP picks us as the UNC
+ * provider.  The actual connect has to happen in the usermode daemon, so
+ * we package the server name and hand it off via the upcall bridge.  Two
+ * layers:
+ *
+ *   smb2rdr_CreateSrvCallInner — does the blocking upcall and invokes
+ *       CallbackContext->SrvCalldownStructure->CallBack with whatever the
+ *       daemon returned.  Runs at PASSIVE_LEVEL in a context safe to
+ *       block.
+ *
+ *   smb2rdr_CreateSrvCall — the thin MRx entry.  If we're already in the
+ *       rdbss process context it's safe to call Inner directly; otherwise
+ *       we hop onto a worker thread (nfs41 pattern) so we don't block the
+ *       requestor's thread while rdbss holds pRxNetNameTable EXCLUSIVE.
+ */
+static VOID NTAPI
+smb2rdr_CreateSrvCallInner(PVOID pContext)
+{
+    PMRX_SRVCALL_CALLBACK_CONTEXT CallbackContext = pContext;
+    PMRX_SRVCALLDOWN_STRUCTURE Calldown;
+    PMRX_SRV_CALL SrvCall;
+    NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+    NTSTATUS bridgeStatus;
+    ULONG outActual = 0;
+
+    Calldown = (PMRX_SRVCALLDOWN_STRUCTURE)CallbackContext->SrvCalldownStructure;
+    SrvCall = Calldown->SrvCall;
+
+    DPRINT1("SMB2RDR: MRxCreateSrvCall (worker) name=%wZ\n",
+            SrvCall->pSrvCallName);
+
+    /* The input payload for SMB2D_OP_CONNECT_SHARE is simply the server
+     * name in Unicode bytes (no trailing NUL).  The daemon logs this back
+     * verbatim to prove the bridge round-trip. */
+    bridgeStatus = SmbRdrIssueUpcall(
+        SMB2D_OP_CONNECT_SHARE,
+        SrvCall->pSrvCallName->Buffer,
+        (ULONG)SrvCall->pSrvCallName->Length,
+        NULL, 0, &outActual,
+        &daemonStatus,
+        30 /* seconds */);
+
+    if (bridgeStatus != STATUS_SUCCESS) {
+        /* Timeout, OOM, or uninitialised bridge: surface STATUS_BAD_NETWORK_PATH
+         * so rdbss unwinds cleanly.  The daemon-reported status only matters
+         * if the round-trip completed. */
+        DPRINT1("SMB2RDR: CreateSrvCall bridge failed 0x%08lx\n", bridgeStatus);
+        CallbackContext->Status = STATUS_BAD_NETWORK_PATH;
+    } else {
+        CallbackContext->Status = daemonStatus;
+    }
+    CallbackContext->RecommunicateContext = NULL;
+    Calldown->CallBack(CallbackContext);
+}
+
 NTSTATUS NTAPI
 smb2rdr_CreateSrvCall(IN OUT PMRX_SRV_CALL SrvCall,
                       IN OUT PMRX_SRVCALL_CALLBACK_CONTEXT CallbackContext)
 {
-    /* This is the entry point the usermode SMB2 daemon will upcall into
-     * once libsmb2 is wired up.  For now we log the server name, fail the
-     * calldown with STATUS_NOT_IMPLEMENTED, and let rdbss unwind. */
-    PMRX_SRVCALLDOWN_STRUCTURE Calldown;
+    NTSTATUS status;
+
+    ASSERT(SrvCall != NULL);
+    ASSERT(NodeType(SrvCall) == RDBSS_NTC_SRVCALL);
 
     DPRINT1("SMB2RDR: MRxCreateSrvCall name=%wZ\n", SrvCall->pSrvCallName);
 
-    Calldown = (PMRX_SRVCALLDOWN_STRUCTURE)CallbackContext->SrvCalldownStructure;
-    CallbackContext->Status = STATUS_NOT_IMPLEMENTED;
-    CallbackContext->RecommunicateContext = NULL;
-    Calldown->CallBack(CallbackContext);
+    if (IoGetCurrentProcess() == RxGetRDBSSProcess()) {
+        smb2rdr_CreateSrvCallInner(CallbackContext);
+        status = STATUS_PENDING;
+    } else {
+        status = RxDispatchToWorkerThread(smb2rdr_dev, DelayedWorkQueue,
+                                          smb2rdr_CreateSrvCallInner,
+                                          CallbackContext);
+        if (status != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: RxDispatchToWorkerThread -> 0x%08lx\n", status);
+            CallbackContext->Status = status;
+            CallbackContext->RecommunicateContext = NULL;
+            ((PMRX_SRVCALLDOWN_STRUCTURE)CallbackContext->SrvCalldownStructure)
+                ->CallBack(CallbackContext);
+        }
+        status = STATUS_PENDING;
+    }
 
-    /* rdbss requires MRxCreateSrvCall to return STATUS_PENDING on success
-     * or failure; the real status travels via CallbackContext->Status. */
-    return STATUS_PENDING;
+    return status;
 }
 
 NTSTATUS NTAPI
@@ -220,7 +328,7 @@ smb2rdr_init_ops(void)
 
     smb2rdr_ops.MRxStart                = smb2rdr_Start;
     smb2rdr_ops.MRxStop                 = smb2rdr_Stop;
-    smb2rdr_ops.MRxDevFcbXXXControlFile = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxDevFcbXXXControlFile = smb2rdr_DevFcbXXXControlFile;
 
     smb2rdr_ops.MRxCreateSrvCall       = smb2rdr_CreateSrvCall;
     smb2rdr_ops.MRxSrvCallWinnerNotify = NULL;
@@ -276,6 +384,8 @@ smb2rdr_driver_unload(PDRIVER_OBJECT drv)
     PRX_CONTEXT RxContext;
     UNICODE_STRING shadow_name;
 
+    SmbRdrShutdownUpcall();
+
     RxContext = RxCreateRxContext(NULL, smb2rdr_dev, RX_CONTEXT_FLAG_IN_FSP);
     if (RxContext) {
         RxStopMinirdr(RxContext, &RxContext->PostRequest);
@@ -300,6 +410,8 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
     status = RxDriverEntry(drv, path);
     if (status != STATUS_SUCCESS)
         return status;
+
+    SmbRdrInitUpcall();
 
     status = smb2rdr_init_ops();
     if (status != STATUS_SUCCESS)
