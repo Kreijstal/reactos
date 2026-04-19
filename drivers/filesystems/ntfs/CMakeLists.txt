@@ -22,6 +22,7 @@ list(APPEND SOURCE
     ntfs.c
     objid.c
     pnp.c
+    quota.c
     reparse.c
     rw.c
     security.c
