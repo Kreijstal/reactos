@@ -73,10 +73,40 @@ typedef struct _NTFS_BOOT_SECTOR {
 
 #define NRH_FILE_TYPE   0x454C4946  /* 'FILE' */
 #define NRH_INDX_TYPE   0x58444E49  /* 'INDX' */
+#define NRH_RSTR_TYPE   0x52545352  /* 'RSTR' — $LogFile restart page */
+#define NRH_RCRD_TYPE   0x44524352  /* 'RCRD' — $LogFile record page  */
 
 /* FILE_RECORD_HEADER flags */
 #define FRH_IN_USE      0x0001
 #define FRH_DIRECTORY   0x0002
+
+/* ============================================================
+ * $LogFile RSTR restart-page layout (for mkntfs)
+ *
+ * Layout authority: libfsntfs (Apache/LGPL), cross-checked against the
+ * ReactOS driver's NtfsLfsParseRestartPage in lfsparse.c.  Field order
+ * mirrors drivers/filesystems/ntfs/ntfs.h:NTFS_LFS_RESTART_AREA one-for-
+ * one; we duplicate here because ntfslib compiles without driver headers.
+ * ============================================================ */
+
+typedef struct _NTFS_LFS_RESTART_AREA {
+    ULONGLONG CurrentLsn;               /* 0x00 — last LSN ever written     */
+    USHORT    LogClients;               /* 0x08 — count of client records   */
+    USHORT    ClientFreeList;           /* 0x0A — head of free client chain */
+    USHORT    ClientInUseList;          /* 0x0C — head of in-use chain      */
+    USHORT    Flags;                    /* 0x0E — restart flags             */
+    ULONG     SeqNumberBits;            /* 0x10 — bits for the seq number   */
+    USHORT    RestartAreaLength;        /* 0x14 — byte length of this area  */
+    USHORT    ClientArrayOffset;        /* 0x16 — offset to first LogClient */
+    ULONGLONG FileSize;                 /* 0x18 — size of $LogFile:$DATA    */
+    ULONG     LastLsnDataLength;        /* 0x20 — LastLSN payload length    */
+    USHORT    RecordHeaderLength;       /* 0x24 — len of LFS_RECORD header  */
+    USHORT    LogPageDataOffset;        /* 0x26 — first byte of client data */
+    ULONG     RestartOpenLogCount;      /* 0x28 — open counter              */
+    ULONG     Reserved;                 /* 0x2C — must be zero              */
+} NTFS_LFS_RESTART_AREA;
+
+#define NTFS_LFS_RESTART_FLAG_CLEAN 0x0002  /* Dismounted cleanly           */
 
 typedef struct _FILE_RECORD_HEADER {
     ULONG     Magic;                 /* 'FILE' */
