@@ -563,6 +563,30 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
      * IRP_MJ_{QUERY,SET}_QUOTA returns STATUS_NOT_SUPPORTED when absent. */
     (void)NtfsQuotaProbe(Vcb);
 
+    /* $LogFile Phase-1 clean-shutdown gate (Kreijstal/reactos#34).
+     *
+     * Parse both restart pages; on any irregularity (I/O failure, torn
+     * backup, dirty landmark, byte-disagreement), force the volume into
+     * read-only mode by setting VCB_VOLUME_READ_ONLY.  NtfsDispatch
+     * short-circuits every mutating IRP major with
+     * STATUS_MEDIA_WRITE_PROTECTED when that flag is set, so the rest
+     * of the mount path proceeds exactly as it does for a clean volume
+     * except that writes are refused.  Phase 2+ (replay, emission,
+     * $Volume::DIRTY handshake) will clear this bit after replay.
+     *
+     * Mount itself is NOT failed on a dirty log: callers that want to
+     * fsck / inspect such a volume still need to open files on it.
+     * Rejecting writes is enough to prevent further corruption. */
+    {
+        NTSTATUS LogStatus = NtfsLfsCheckCleanShutdown(Vcb);
+        if (!NT_SUCCESS(LogStatus))
+        {
+            DPRINT1("NtfsMountVolume: $LogFile dirty (0x%08lx); forcing read-only mount\n",
+                    LogStatus);
+            Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+        }
+    }
+
     Status = STATUS_SUCCESS;
 
 ByeBye:
@@ -1828,6 +1852,28 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
         case FSCTL_GET_VOLUME_BITMAP:
             Status = GetVolumeBitmap(DeviceExt, Irp);
             break;
+
+        /* $LogFile Phase-0 forensic dump (Kreijstal/reactos#34).
+         *
+         * Returns a short human-readable report of the current state of
+         * $LogFile: both restart pages plus the first RCRD record.  No
+         * replay, no emission, no mutation -- this is a read-only
+         * diagnostic hook so the userspace test harness (and chkdsk-lite
+         * workflows) can inspect the log without re-implementing RSTR
+         * parsing in a separate tool.  See lfsparse.c banner. */
+        case FSCTL_NTFS_DUMP_LOGFILE:
+        {
+            PCHAR OutBuf = (PCHAR)Irp->AssociatedIrp.SystemBuffer;
+            ULONG OutLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
+            ULONG BytesOut = 0;
+
+            Status = NtfsLfsDumpLogfile(DeviceExt, OutBuf, OutLen, &BytesOut);
+            if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+                Irp->IoStatus.Information = BytesOut;
+            else
+                Irp->IoStatus.Information = 0;
+            break;
+        }
 
         default:
             DPRINT("Invalid user request: %x\n", Stack->Parameters.FileSystemControl.FsControlCode);
