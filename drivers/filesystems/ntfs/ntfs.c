@@ -350,6 +350,8 @@ NtfsInitializeFunctionPointers(PDRIVER_OBJECT DriverObject)
     DriverObject->MajorFunction[IRP_MJ_LOCK_CONTROL]             = NtfsFsdDispatch;
     DriverObject->MajorFunction[IRP_MJ_SHUTDOWN]                 = NtfsFsdDispatch;
     DriverObject->MajorFunction[IRP_MJ_PNP]                      = NtfsFsdDispatch;
+    DriverObject->MajorFunction[IRP_MJ_QUERY_SECURITY]           = NtfsFsdDispatch;
+    DriverObject->MajorFunction[IRP_MJ_SET_SECURITY]             = NtfsFsdDispatch;
 
     return;
 }
