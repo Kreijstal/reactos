@@ -15,6 +15,7 @@ list(APPEND SOURCE
     fcb.c
     finfo.c
     fsctl.c
+    lfsparse.c
     lock.c
     lznt1.c
     mft.c
