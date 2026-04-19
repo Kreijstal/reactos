@@ -28,40 +28,50 @@
 
 /* Pool corruption detector: validate the pool header of the block containing P.
  * P must be a pool allocation (the pointer returned by ExAllocate*, NOT the header).
- * On amd64, POOL_HEADER is 16 bytes immediately before the allocation.
- * We check that the next block's PreviousSize matches our BlockSize. */
+ * POOL_HEADER lives at (P - sizeof(POOL_HEADER)).  BlockSize/PreviousSize are in
+ * POOL_BLOCK_SIZE units (16 on amd64, 8 on x86).  Bitfield widths differ:
+ *   amd64: PreviousSize:8, PoolIndex:8, BlockSize:8, PoolType:8
+ *   x86:   PreviousSize:9, PoolIndex:7, BlockSize:9, PoolType:7
+ * Read the first ULONG of the header and mask the appropriate width so the check
+ * works correctly for allocations up to one page on both architectures. */
 #ifdef DBG
+#ifdef _WIN64
+#define NTFS_POOL_BLOCK 16
+#define NTFS_POOL_SZ_MASK 0xFF
+#else
+#define NTFS_POOL_BLOCK 8
+#define NTFS_POOL_SZ_MASK 0x1FF
+#endif
 static inline void NtfsCheckPoolAround(PVOID P, const char *where)
 {
-    /* Pool header is 16 bytes before the allocation */
-    PUCHAR hdr = (PUCHAR)P - 16;
-    UCHAR our_bs = hdr[2];  /* BlockSize */
-    ULONG our_size = (ULONG)our_bs * 16;
-    /* Next block header */
+    PUCHAR hdr = (PUCHAR)P - NTFS_POOL_BLOCK;
+    ULONG ul1 = *(volatile ULONG *)hdr;
+    ULONG our_ps = ul1 & NTFS_POOL_SZ_MASK;
+    ULONG our_bs = (ul1 >> 16) & NTFS_POOL_SZ_MASK;
+    ULONG our_size = our_bs * NTFS_POOL_BLOCK;
     PUCHAR next_hdr = hdr + our_size;
-    /* Check that next block is on the same page */
     if (((ULONG_PTR)next_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
     {
-        UCHAR next_ps = next_hdr[0];  /* PreviousSize */
+        ULONG next_ul1 = *(volatile ULONG *)next_hdr;
+        ULONG next_ps = next_ul1 & NTFS_POOL_SZ_MASK;
         if (next_ps != our_bs)
         {
             DbgPrint("NTFS POOL CORRUPTION at %s: block %p (bs=%u) next at %p has PrevSize=%u\n",
-                    where, P, our_bs, next_hdr + 16, next_ps);
+                    where, P, our_bs, next_hdr + NTFS_POOL_BLOCK, next_ps);
             ASSERT(FALSE);
         }
     }
-    /* Also check our PreviousSize against the previous block */
-    UCHAR our_ps = hdr[0];  /* PreviousSize */
     if (our_ps != 0)
     {
-        PUCHAR prev_hdr = hdr - (ULONG)our_ps * 16;
+        PUCHAR prev_hdr = hdr - our_ps * NTFS_POOL_BLOCK;
         if (((ULONG_PTR)prev_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
         {
-            UCHAR prev_bs = prev_hdr[2];
+            ULONG prev_ul1 = *(volatile ULONG *)prev_hdr;
+            ULONG prev_bs = (prev_ul1 >> 16) & NTFS_POOL_SZ_MASK;
             if (prev_bs != our_ps)
             {
                 DbgPrint("NTFS POOL CORRUPTION at %s: block %p (ps=%u) but prev block at %p has BlockSize=%u\n",
-                        where, P, our_ps, prev_hdr + 16, prev_bs);
+                        where, P, our_ps, prev_hdr + NTFS_POOL_BLOCK, prev_bs);
                 ASSERT(FALSE);
             }
         }
