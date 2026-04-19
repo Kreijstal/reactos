@@ -855,6 +855,277 @@ GetVolumeBitmap(PDEVICE_EXTENSION DeviceExt,
 }
 
 
+/*
+ * IRP-bound wrapper for FSCTL_GET_RETRIEVAL_POINTERS.  Opens the unnamed
+ * $DATA of the caller's file, then delegates to the MCB walker in
+ * attrib.c so both the real driver and userspace tests can share the
+ * extent-emission logic.
+ */
+static
+NTSTATUS
+GetRetrievalPointers(PDEVICE_EXTENSION DeviceExt,
+                     PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PNTFS_ATTR_CONTEXT DataContext = NULL;
+    PRETRIEVAL_POINTERS_BUFFER OutBuffer;
+    LONGLONG StartingVcn;
+    ULONG BytesReturned = 0;
+    ULONG OutLen;
+
+    DPRINT("GetRetrievalPointers(%p, %p)\n", DeviceExt, Irp);
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Fcb = FileObject->FsContext;
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(STARTING_VCN_INPUT_BUFFER) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    OutLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    if (OutLen < sizeof(RETRIEVAL_POINTERS_BUFFER))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    StartingVcn = ((PSTARTING_VCN_INPUT_BUFFER)Irp->AssociatedIrp.SystemBuffer)->StartingVcn.QuadPart;
+    OutBuffer = (PRETRIEVAL_POINTERS_BUFFER)Irp->AssociatedIrp.SystemBuffer;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0, &DataContext, NULL);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    if (DataContext->pRecord->IsNonResident == 0)
+    {
+        /* Resident $DATA has no runlist -- report an empty map. */
+        OutBuffer->ExtentCount = 0;
+        OutBuffer->StartingVcn.QuadPart = StartingVcn;
+        Irp->IoStatus.Information = FIELD_OFFSET(RETRIEVAL_POINTERS_BUFFER, Extents);
+        Status = STATUS_SUCCESS;
+        goto Cleanup;
+    }
+
+    Status = NtfsFillRetrievalPointersFromMcb(&DataContext->DataRunsMCB,
+                                              StartingVcn,
+                                              (LONGLONG)DataContext->pRecord->NonResident.HighestVCN,
+                                              OutBuffer,
+                                              OutLen,
+                                              &BytesReturned);
+    Irp->IoStatus.Information = BytesReturned;
+
+Cleanup:
+    if (DataContext != NULL)
+        ReleaseAttributeContext(DataContext);
+    if (FileRecord != NULL)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+
+/*
+ * IRP-bound wrapper for FSCTL_EXTEND_VOLUME.  Parses the MSDN-documented
+ * ULONGLONG NumberOfSectors input and delegates to NtfsExtendVolumeBitmap.
+ * First-slice scope: grow $Bitmap + bump in-core ClusterCount only; boot
+ * sector / $Volume rewrite deferred (see Kreijstal/reactos#32).
+ */
+static
+NTSTATUS
+ExtendVolume(PDEVICE_EXTENSION DeviceExt,
+             PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    ULONGLONG NumberOfSectors = 0;
+    ULONGLONG NewClusterCount;
+    ULONGLONG OldClusterCount;
+
+    DPRINT1("ExtendVolume(%p, %p)\n", DeviceExt, Irp);
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Fcb = FileObject->FsContext;
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(ULONGLONG) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    _SEH2_TRY
+    {
+        NumberOfSectors = *(PULONGLONG)Irp->AssociatedIrp.SystemBuffer;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (DeviceExt->NtfsInfo.SectorsPerCluster == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    NewClusterCount = NumberOfSectors / DeviceExt->NtfsInfo.SectorsPerCluster;
+    OldClusterCount = DeviceExt->NtfsInfo.ClusterCount;
+
+    if (NewClusterCount <= OldClusterCount)
+    {
+        /* MSDN: "If the file system does not support sector-aligned grow,
+         * it may round down".  We treat "same or smaller" as a no-op
+         * success so that callers probing the capability with a shrink-
+         * equivalent call don't see a spurious error.  A true shrink
+         * request should go through FSCTL_SHRINK_VOLUME. */
+        return STATUS_SUCCESS;
+    }
+
+    Status = NtfsExtendVolumeBitmap(DeviceExt, OldClusterCount, NewClusterCount);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Last step: bump the in-core cluster count so follow-up allocations
+     * can land in the freshly-grown region.  TODO: persist via boot-sector
+     * / $Volume rewrite (see Kreijstal/reactos#32). */
+    DeviceExt->NtfsInfo.ClusterCount = NewClusterCount;
+    DeviceExt->NtfsInfo.SectorCount = NumberOfSectors;
+
+    return STATUS_SUCCESS;
+}
+
+
+/*
+ * IRP-bound wrapper for FSCTL_MOVE_FILE.  Resolves the caller's file
+ * handle, opens its unnamed $DATA attribute, and hands the heavy lifting
+ * (bitmap R/M/W, raw disk copy, MCB surgery, mapping-pairs rewrite) to
+ * NtfsRelocateAttributeRange.  Compressed / encrypted sources are
+ * refused up-front.  See Kreijstal/reactos#32 for deferred scope (cache
+ * flush, paging-I/O draining).
+ */
+static
+NTSTATUS
+MoveFile(PDEVICE_EXTENSION DeviceExt,
+         PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    MOVE_FILE_DATA MoveData;
+    PFILE_OBJECT TargetFileObject = NULL;
+    PNTFS_FCB TargetFcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PNTFS_ATTR_CONTEXT DataContext = NULL;
+    ULONG AttrOffset = 0;
+
+    DPRINT1("MoveFile(%p, %p)\n", DeviceExt, Irp);
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(MOVE_FILE_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    _SEH2_TRY
+    {
+        MoveData = *(PMOVE_FILE_DATA)Irp->AssociatedIrp.SystemBuffer;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (MoveData.ClusterCount == 0 ||
+        MoveData.StartingVcn.QuadPart < 0 ||
+        MoveData.StartingLcn.QuadPart < 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = ObReferenceObjectByHandle(MoveData.FileHandle,
+                                       0,
+                                       *IoFileObjectType,
+                                       Irp->RequestorMode,
+                                       (PVOID *)&TargetFileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (TargetFileObject->FsContext == NULL)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+
+    TargetFcb = TargetFileObject->FsContext;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    Status = ReadFileRecord(DeviceExt, TargetFcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0,
+                           &DataContext, &AttrOffset);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    if (!DataContext->pRecord->IsNonResident)
+    {
+        /* A resident $DATA has no LCNs to relocate.  Callers that hit
+         * this with valid Vcn/Count are likely looking at a small file
+         * -- return a stable error rather than silently succeeding. */
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+
+    Status = NtfsRelocateAttributeRange(DeviceExt,
+                                        DataContext,
+                                        AttrOffset,
+                                        FileRecord,
+                                        MoveData.StartingVcn.QuadPart,
+                                        MoveData.StartingLcn.QuadPart,
+                                        MoveData.ClusterCount);
+
+Cleanup:
+    if (DataContext != NULL)
+        ReleaseAttributeContext(DataContext);
+    if (FileRecord != NULL)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    if (TargetFileObject != NULL)
+        ObDereferenceObject(TargetFileObject);
+    return Status;
+}
+
+
 static
 NTSTATUS
 LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
@@ -1014,87 +1285,322 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
 
 
 /*
- * $UsnJrnl first-slice FSCTL wrappers (Kreijstal/reactos#33).  Each
- * unpacks the IRP, sanity-checks buffers, and delegates to the matching
- * usn.c worker.  Handlers bail with STATUS_INVALID_DEVICE_REQUEST when
- * Vcb->UsnJournalFcb is NULL (legacy "no journal" fallback) — except
- * FSCTL_CREATE_USN_JOURNAL, which lazily brings the journal up.
+ * IRP-bound wrappers for the plan-3 metadata round-trip FSCTLs.
+ * Each wraps a worker (reparse.c / objid.c) that mutates an in-memory
+ * FILE_RECORD_HEADER; this wrapper owns the ReadFileRecord / UpdateFileRecord
+ * bookends plus the IRP buffer plumbing.
  */
-static
-NTSTATUS
-FsctlCreateUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
-{
-    PIO_STACK_LOCATION Stack;
-    PCREATE_USN_JOURNAL_DATA Create;
-
-    Stack = IoGetCurrentIrpStackLocation(Irp);
-
-    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(CREATE_USN_JOURNAL_DATA) ||
-        Irp->AssociatedIrp.SystemBuffer == NULL)
-        return STATUS_INVALID_PARAMETER;
-
-    Create = (PCREATE_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
-    return NtfsUsnInitJournal(DeviceExt, Create->MaximumSize, Create->AllocationDelta);
-}
 
 static
 NTSTATUS
-FsctlEnumUsnData(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+FsctlSetReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
 {
-    PIO_STACK_LOCATION Stack;
-    PMFT_ENUM_DATA Enum;
-    ULONG BytesReturned = 0;
     NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PREPARSE_DATA_BUFFER Input;
+    ULONG InputLength;
 
     Stack = IoGetCurrentIrpStackLocation(Irp);
-
-    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(MFT_ENUM_DATA) ||
-        Irp->AssociatedIrp.SystemBuffer == NULL)
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
         return STATUS_INVALID_PARAMETER;
-    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONGLONG))
-        return STATUS_BUFFER_TOO_SMALL;
+    Fcb = FileObject->FsContext;
 
-    Enum = (PMFT_ENUM_DATA)Irp->AssociatedIrp.SystemBuffer;
+    Input = (PREPARSE_DATA_BUFFER)Irp->AssociatedIrp.SystemBuffer;
+    InputLength = Stack->Parameters.FileSystemControl.InputBufferLength;
+    if (Input == NULL || InputLength < REPARSE_DATA_BUFFER_HEADER_SIZE)
+        return STATUS_INVALID_PARAMETER;
+    if ((ULONG)Input->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE > InputLength)
+        return STATUS_IO_REPARSE_DATA_INVALID;
 
-    Status = NtfsUsnEnumerate(DeviceExt,
-                              Enum->StartFileReferenceNumber,
-                              Enum->LowUsn,
-                              Enum->HighUsn,
-                              Irp->AssociatedIrp.SystemBuffer,
-                              Stack->Parameters.FileSystemControl.OutputBufferLength,
-                              &BytesReturned);
-    Irp->IoStatus.Information = BytesReturned;
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = NtfsSetReparsePointOnRecord(DeviceExt, FileRecord,
+                                         Input->ReparseTag,
+                                         (PUCHAR)Input + REPARSE_DATA_BUFFER_HEADER_SIZE,
+                                         Input->ReparseDataLength);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
     return Status;
 }
 
 static
 NTSTATUS
-FsctlReadUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+FsctlGetReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
 {
-    PIO_STACK_LOCATION Stack;
-    PREAD_USN_JOURNAL_DATA Read;
-    ULONG BytesReturned = 0;
     NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PREPARSE_DATA_BUFFER Output;
+    ULONG OutputLength;
+    ULONG Tag = 0;
+    ULONG BodyLen = 0;
 
     Stack = IoGetCurrentIrpStackLocation(Irp);
-
-    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(READ_USN_JOURNAL_DATA) ||
-        Irp->AssociatedIrp.SystemBuffer == NULL)
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
         return STATUS_INVALID_PARAMETER;
-    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONGLONG))
+    Fcb = FileObject->FsContext;
+
+    Output = (PREPARSE_DATA_BUFFER)Irp->AssociatedIrp.SystemBuffer;
+    OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    if (Output == NULL || OutputLength < REPARSE_DATA_BUFFER_HEADER_SIZE)
         return STATUS_BUFFER_TOO_SMALL;
-    if (DeviceExt->UsnJournalFcb == NULL)
-        return STATUS_INVALID_DEVICE_REQUEST;
 
-    Read = (PREAD_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
-    Status = NtfsUsnReadRange(DeviceExt,
-                              (ULONGLONG)Read->StartUsn,
-                              Read->ReasonMask,
-                              Irp->AssociatedIrp.SystemBuffer,
-                              Stack->Parameters.FileSystemControl.OutputBufferLength,
-                              &BytesReturned);
-    Irp->IoStatus.Information = BytesReturned;
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = NtfsGetReparsePointFromRecord(DeviceExt, FileRecord, &Tag,
+                                           (PUCHAR)Output + REPARSE_DATA_BUFFER_HEADER_SIZE,
+                                           OutputLength - REPARSE_DATA_BUFFER_HEADER_SIZE,
+                                           &BodyLen);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Output->ReparseTag = Tag;
+    Output->ReparseDataLength = (USHORT)BodyLen;
+    Output->Reserved = 0;
+    Irp->IoStatus.Information = REPARSE_DATA_BUFFER_HEADER_SIZE + BodyLen;
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlDeleteReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Fcb = FileObject->FsContext;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = NtfsDeleteReparsePointFromRecord(DeviceExt, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlGetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PFILE_OBJECTID_BUFFER Output;
+    ULONG OutputLength;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Fcb = FileObject->FsContext;
+
+    Output = (PFILE_OBJECTID_BUFFER)Irp->AssociatedIrp.SystemBuffer;
+    OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    if (Output == NULL || OutputLength < sizeof(FILE_OBJECTID_BUFFER))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    RtlZeroMemory(Output, sizeof(*Output));
+    Status = NtfsGetObjectIdFromRecord(DeviceExt, FileRecord, Output->ObjectId);
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = sizeof(FILE_OBJECTID_BUFFER);
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlSetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PFILE_OBJECTID_BUFFER Input;
+    ULONG InputLength;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Fcb = FileObject->FsContext;
+
+    Input = (PFILE_OBJECTID_BUFFER)Irp->AssociatedIrp.SystemBuffer;
+    InputLength = Stack->Parameters.FileSystemControl.InputBufferLength;
+    if (Input == NULL || InputLength < sizeof(FILE_OBJECTID_BUFFER))
+        return STATUS_INVALID_PARAMETER;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = NtfsSetObjectIdOnRecord(DeviceExt, FileRecord, Input->ObjectId);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlCreateOrGetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PFILE_OBJECTID_BUFFER Output;
+    ULONG OutputLength;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Fcb = FileObject->FsContext;
+
+    Output = (PFILE_OBJECTID_BUFFER)Irp->AssociatedIrp.SystemBuffer;
+    OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    if (Output == NULL || OutputLength < sizeof(FILE_OBJECTID_BUFFER))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    RtlZeroMemory(Output, sizeof(*Output));
+    Status = NtfsGetObjectIdFromRecord(DeviceExt, FileRecord, Output->ObjectId);
+    if (Status == STATUS_OBJECTID_NOT_FOUND)
+    {
+        UUID NewId;
+        Status = ExUuidCreate(&NewId);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+        RtlCopyMemory(Output->ObjectId, &NewId, sizeof(NewId));
+        Status = NtfsSetObjectIdOnRecord(DeviceExt, FileRecord, Output->ObjectId);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+        Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+    }
+
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = sizeof(FILE_OBJECTID_BUFFER);
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlDeleteObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    NTSTATUS Status;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Fcb = FileObject->FsContext;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = NtfsDeleteObjectIdFromRecord(DeviceExt, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+
+Cleanup:
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
     return Status;
 }
 
@@ -1140,12 +1646,49 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
             Status = STATUS_INVALID_DEVICE_REQUEST;
             break;
 
-        case FSCTL_EXTEND_VOLUME:
-        //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         case FSCTL_GET_RETRIEVAL_POINTERS:
+            Status = GetRetrievalPointers(DeviceExt, Irp);
+            break;
+
+        case FSCTL_SET_REPARSE_POINT:
+            Status = FsctlSetReparsePoint(DeviceExt, Irp);
+            break;
+
+        case FSCTL_GET_REPARSE_POINT:
+            Status = FsctlGetReparsePoint(DeviceExt, Irp);
+            break;
+
+        case FSCTL_DELETE_REPARSE_POINT:
+            Status = FsctlDeleteReparsePoint(DeviceExt, Irp);
+            break;
+
+        case FSCTL_GET_OBJECT_ID:
+            Status = FsctlGetObjectId(DeviceExt, Irp);
+            break;
+
+        case FSCTL_SET_OBJECT_ID:
+            Status = FsctlSetObjectId(DeviceExt, Irp);
+            break;
+
+        case FSCTL_CREATE_OR_GET_OBJECT_ID:
+            Status = FsctlCreateOrGetObjectId(DeviceExt, Irp);
+            break;
+
+        case FSCTL_DELETE_OBJECT_ID:
+            Status = FsctlDeleteObjectId(DeviceExt, Irp);
+            break;
+
+        case FSCTL_EXTEND_VOLUME:
+            Status = ExtendVolume(DeviceExt, Irp);
+            break;
+
+        case FSCTL_MOVE_FILE:
+            Status = MoveFile(DeviceExt, Irp);
+            break;
+
+        //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
-        case FSCTL_MOVE_FILE:
         //case FSCTL_SHRINK_VOLUME:
             UNIMPLEMENTED;
             DPRINT1("Unimplemented user request: %x\n", Stack->Parameters.FileSystemControl.FsControlCode);
