@@ -1288,6 +1288,28 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
 ULONGLONG
 AttributeDataLength(PNTFS_ATTR_RECORD AttrRecord);
 
+/*
+ * Per-file $SECURITY_DESCRIPTOR worker primitives — see security.c and
+ * Kreijstal/reactos#36.  This is the NT4-era per-record SD, NOT the
+ * \$Secure:$SDS shared-SD pool (that's a later slice).
+ */
+NTSTATUS
+NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        const VOID *SD,
+                        ULONG SdLength);
+
+NTSTATUS
+NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER FileRecord,
+                          PVOID Buf,
+                          ULONG BufLen,
+                          PULONG LenOut);
+
+NTSTATUS
+NtfsDeleteSecurityFromRecord(PNTFS_VCB Vcb,
+                             PFILE_RECORD_HEADER FileRecord);
+
 NTSTATUS
 InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
                                    PNTFS_ATTR_CONTEXT AttrContext,
