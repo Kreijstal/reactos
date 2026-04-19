@@ -5,6 +5,7 @@ list(APPEND SOURCE
     btree.c
     cleanup.c
     close.c
+    compress.c
     create.c
     devctl.c
     dirctl.c
@@ -15,6 +16,7 @@ list(APPEND SOURCE
     finfo.c
     fsctl.c
     lock.c
+    lznt1.c
     mft.c
     misc.c
     ntfs.c
