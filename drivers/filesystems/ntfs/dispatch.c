@@ -351,6 +351,20 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
                 Status = NtfsSetSecurity(IrpContext);
             }
             break;
+
+        case IRP_MJ_QUERY_QUOTA:
+        case IRP_MJ_SET_QUOTA:
+            /* Disk quota (Kreijstal/reactos#37).  This slice plumbs the
+             * IRP_MJ slots so callers see a stable STATUS_NOT_SUPPORTED
+             * return code on un-quota'd volumes (and on quota'd volumes
+             * too -- the on-disk $Q/$O indexes are blocked on btree.c
+             * growing non-$I30 collation support; see quota.c banner).
+             * Windows drivers return STATUS_NOT_SUPPORTED on this major
+             * when they don't maintain quota, so this matches the
+             * expected shape. */
+            IrpContext->Irp->IoStatus.Information = 0;
+            Status = STATUS_NOT_SUPPORTED;
+            break;
     }
 
     ASSERT((!(IrpContext->Flags & IRPCONTEXT_COMPLETE) && !(IrpContext->Flags & IRPCONTEXT_QUEUE)) ||
