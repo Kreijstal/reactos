@@ -1313,6 +1313,41 @@ ULONGLONG
 AttributeDataLength(PNTFS_ATTR_RECORD AttrRecord);
 
 NTSTATUS
+NtfsFillRetrievalPointersFromMcb(PLARGE_MCB Mcb,
+                                 LONGLONG StartingVcn,
+                                 LONGLONG AttributeLastVcn,
+                                 PRETRIEVAL_POINTERS_BUFFER OutBuffer,
+                                 ULONG OutBufferLength,
+                                 PULONG BytesReturned);
+
+/*
+ * FSCTL_MOVE_FILE / FSCTL_EXTEND_VOLUME worker primitives.  Extracted per
+ * the exemplar that shipped with FSCTL_GET_RETRIEVAL_POINTERS so userspace
+ * tests can exercise the MCB surgery and bitmap-grow paths without needing
+ * a live IRP.  See Kreijstal/reactos#32.
+ */
+NTSTATUS
+NtfsMoveRunInMcb(PLARGE_MCB Mcb,
+                 LONGLONG StartingVcn,
+                 LONGLONG SourceLcn,
+                 LONGLONG TargetLcn,
+                 ULONG ClusterCount);
+
+NTSTATUS
+NtfsExtendVolumeBitmap(PDEVICE_EXTENSION Vcb,
+                       ULONGLONG OldClusterCount,
+                       ULONGLONG NewClusterCount);
+
+NTSTATUS
+NtfsRelocateAttributeRange(PDEVICE_EXTENSION Vcb,
+                           PNTFS_ATTR_CONTEXT AttrContext,
+                           ULONG AttrOffset,
+                           PFILE_RECORD_HEADER FileRecord,
+                           LONGLONG StartingVcn,
+                           LONGLONG TargetLcn,
+                           ULONG ClusterCount);
+
+NTSTATUS
 AddResidentAttribute(PNTFS_VCB Vcb,
                      PFILE_RECORD_HEADER FileRecord,
                      ULONG Type,
@@ -1326,129 +1361,38 @@ RemoveResidentAttribute(PNTFS_VCB Vcb,
                         PFILE_RECORD_HEADER FileRecord,
                         PNTFS_ATTR_RECORD AttrAddress);
 
-/*
- * Per-file $SECURITY_DESCRIPTOR worker primitives — see security.c and
- * Kreijstal/reactos#36.  This is the NT4-era per-record SD, NOT the
- * \$Secure:$SDS shared-SD pool (that's a later slice).
- */
 NTSTATUS
-NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
+NtfsSetReparsePointOnRecord(PNTFS_VCB Vcb,
+                            PFILE_RECORD_HEADER FileRecord,
+                            ULONG Tag,
+                            const VOID *Data,
+                            ULONG DataLength);
+
+NTSTATUS
+NtfsGetReparsePointFromRecord(PNTFS_VCB Vcb,
+                              PFILE_RECORD_HEADER FileRecord,
+                              PULONG TagOut,
+                              PVOID Buffer,
+                              ULONG BufferLength,
+                              PULONG LengthOut);
+
+NTSTATUS
+NtfsDeleteReparsePointFromRecord(PNTFS_VCB Vcb,
+                                 PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsSetObjectIdOnRecord(PNTFS_VCB Vcb,
                         PFILE_RECORD_HEADER FileRecord,
-                        const VOID *SD,
-                        ULONG SdLength);
+                        const UCHAR ObjectId[16]);
 
 NTSTATUS
-NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
+NtfsGetObjectIdFromRecord(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER FileRecord,
-                          PVOID Buf,
-                          ULONG BufLen,
-                          PULONG LenOut);
+                          UCHAR ObjectIdOut[16]);
 
 NTSTATUS
-NtfsDeleteSecurityFromRecord(PNTFS_VCB Vcb,
+NtfsDeleteObjectIdFromRecord(PNTFS_VCB Vcb,
                              PFILE_RECORD_HEADER FileRecord);
-
-/*
- * $UsnJrnl workers (first slice, Kreijstal/reactos#33).  These operate
- * directly on the in-memory journal state and the on-disk $J / $Max
- * attributes; IRP dispatch (fsctl.c) and the emission hooks
- * (create.c / cleanup.c) call into them.
- *
- * NtfsUsnInitJournal      — either creates \$Extend\$UsnJrnl or loads
- *                           an existing one, and populates the Vcb->Usn*
- *                           fields.  Idempotent.
- * NtfsUsnEmitRecord       — serialise one USN_RECORD_V2 into $J.  Callers
- *                           must gate on Vcb->UsnJournalFcb != NULL.
- * NtfsUsnReadRange        — linear scan of $J filtered by reason mask;
- *                           matches FSCTL_READ_USN_JOURNAL semantics.
- * NtfsUsnEnumerate        — MFT walk with per-record synthesis;
- *                           matches FSCTL_ENUM_USN_DATA semantics.
- *                           Reason=0, Usn=0 on synthesised records.
- *
- * These are all worker-style helpers: pure functions of the Vcb and
- * caller buffers, no IRP plumbing.
- */
-NTSTATUS
-NtfsUsnInitJournal(PDEVICE_EXTENSION Vcb,
-                   ULONGLONG MaximumSize,
-                   ULONGLONG AllocationDelta);
-
-NTSTATUS
-NtfsUsnLoadJournal(PDEVICE_EXTENSION Vcb);
-
-NTSTATUS
-NtfsUsnEmitRecord(PDEVICE_EXTENSION Vcb,
-                  ULONGLONG FileRef,
-                  ULONGLONG ParentRef,
-                  ULONG Reason,
-                  ULONG SourceInfo,
-                  PCWSTR Name,
-                  USHORT NameLength);
-
-NTSTATUS
-NtfsUsnReadRange(PDEVICE_EXTENSION Vcb,
-                 ULONGLONG StartUsn,
-                 ULONG ReasonMask,
-                 PVOID Buffer,
-                 ULONG BufferLength,
-                 PULONG BytesReturned);
-
-NTSTATUS
-NtfsUsnEnumerate(PDEVICE_EXTENSION Vcb,
-                 ULONGLONG StartRef,
-                 LONGLONG LowUsn,
-                 LONGLONG HighUsn,
-                 PVOID Buffer,
-                 ULONG BufferLength,
-                 PULONG BytesReturned);
-
-VOID
-NtfsUsnFreeJournalFcb(struct _FCB *Fcb);
-
-/*
- * LZNT1 codec + compressed-$DATA read dispatch (issue #35, slice 1a).
- * lznt1.c owns the pure buffer-in/buffer-out decompressor; compress.c
- * owns the MCB walk + per-compression-unit classification.
- *
- * Slice 1a is decompression-only — the matching write path
- * (NtfsLznt1Compress / NtfsCompressedWriteLogical) is slice 1b and
- * WriteAttribute against a compressed attribute still returns
- * STATUS_NOT_IMPLEMENTED via the existing non-resident write code.
- */
-NTSTATUS
-NtfsLznt1Decompress(const UCHAR *In,
-                    ULONG InLen,
-                    UCHAR *Out,
-                    ULONG OutLen,
-                    PULONG OutUsed);
-
-/* Callback used by NtfsCompressedReadLogicalEx so the worker itself is
- * transport-agnostic.  The kernel wrapper plugs NtfsReadDiskCached in;
- * the userspace test harness plugs a file-backed reader against a
- * synthetic LCN space. */
-typedef NTSTATUS (*NtfsCompressedRawReadFn)(PNTFS_ATTR_CONTEXT Context,
-                                            LONGLONG Lcn,
-                                            ULONG Length,
-                                            PUCHAR Buffer,
-                                            PVOID Ctx);
-
-NTSTATUS
-NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
-                            ULONGLONG Offset,
-                            ULONG Len,
-                            PUCHAR Out,
-                            ULONG BytesPerCluster,
-                            NtfsCompressedRawReadFn RawRead,
-                            PVOID RawCtx,
-                            PULONG BytesReadOut);
-
-NTSTATUS
-NtfsCompressedReadLogical(PDEVICE_EXTENSION Vcb,
-                          PNTFS_ATTR_CONTEXT Context,
-                          ULONGLONG Offset,
-                          ULONG Len,
-                          PUCHAR Out,
-                          PULONG BytesReadOut);
 
 NTSTATUS
 InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
