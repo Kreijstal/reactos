@@ -181,6 +181,36 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
     return Status;
 }
 
+/*
+ * Return TRUE when @p FsCtl is one of the FSCTL codes we currently honour
+ * that MUTATE on-disk state.  Gate for IRP_MJ_FILE_SYSTEM_CONTROL on a
+ * read-only-mounted volume (VCB_VOLUME_READ_ONLY): we still let queries
+ * through (LOCK / UNLOCK / GET_REPARSE / GET_OBJECT_ID / GET_VOLUME_BITMAP
+ * / GET_RETRIEVAL_POINTERS / DUMP_LOGFILE / the GET_NTFS_* diagnostics)
+ * because they're how the caller inspects the volume that just got
+ * forced into RO mode.  $LogFile Phase-1 gate, see Kreijstal/reactos#34.
+ */
+static BOOLEAN
+NtfsFsctlMutatesVolume(ULONG FsCtl)
+{
+    switch (FsCtl)
+    {
+        case FSCTL_SET_REPARSE_POINT:
+        case FSCTL_DELETE_REPARSE_POINT:
+        case FSCTL_SET_OBJECT_ID:
+        case FSCTL_CREATE_OR_GET_OBJECT_ID:
+        case FSCTL_DELETE_OBJECT_ID:
+        case FSCTL_EXTEND_VOLUME:
+        case FSCTL_MOVE_FILE:
+        case FSCTL_CREATE_USN_JOURNAL:
+        case FSCTL_DELETE_USN_JOURNAL:
+        case FSCTL_MARK_HANDLE:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
 static
 NTSTATUS
 NtfsQueueRequest(PNTFS_IRP_CONTEXT IrpContext)
@@ -210,6 +240,69 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     FsRtlEnterFileSystem();
 
     NtfsIsIrpTopLevel(Irp);
+
+    /* $LogFile Phase-1 read-only enforcement (Kreijstal/reactos#34).
+     *
+     * When the mount path set VCB_VOLUME_READ_ONLY because the log was
+     * dirty, short-circuit every mutating major function here before it
+     * reaches the on-disk plumbing.  Query/read-shaped majors fall
+     * through to the normal switch so userspace can still inspect the
+     * volume; write-shaped majors return STATUS_MEDIA_WRITE_PROTECTED.
+     * For IRP_MJ_FILE_SYSTEM_CONTROL we defer per-FSCTL classification
+     * to NtfsFsctlMutatesVolume so read-only FSCTLs (GET_REPARSE_POINT,
+     * FSCTL_NTFS_DUMP_LOGFILE, ...) still work. */
+    if (IrpContext->DeviceObject != NULL &&
+        IrpContext->DeviceObject != NtfsGlobalData->DeviceObject)
+    {
+        PNTFS_VCB Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
+        if (Vcb != NULL &&
+            Vcb->Identifier.Type == NTFS_TYPE_VCB &&
+            (Vcb->Flags & VCB_VOLUME_READ_ONLY) != 0)
+        {
+            BOOLEAN Reject = FALSE;
+
+            switch (IrpContext->MajorFunction)
+            {
+                case IRP_MJ_WRITE:
+                case IRP_MJ_SET_INFORMATION:
+                case IRP_MJ_SET_EA:
+                case IRP_MJ_SET_SECURITY:
+                case IRP_MJ_SET_VOLUME_INFORMATION:
+                case IRP_MJ_SET_QUOTA:
+                    Reject = TRUE;
+                    break;
+
+                case IRP_MJ_FILE_SYSTEM_CONTROL:
+                    if (IrpContext->Stack != NULL &&
+                        IrpContext->MinorFunction == IRP_MN_USER_FS_REQUEST &&
+                        NtfsFsctlMutatesVolume(
+                            IrpContext->Stack->Parameters.FileSystemControl.FsControlCode))
+                    {
+                        Reject = TRUE;
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (Reject)
+            {
+                DPRINT1("NTFS: refusing mutating IRP on read-only-mounted volume "
+                        "(major=0x%x minor=0x%x)\n",
+                        IrpContext->MajorFunction, IrpContext->MinorFunction);
+                Status = STATUS_MEDIA_WRITE_PROTECTED;
+                Irp->IoStatus.Status = Status;
+                Irp->IoStatus.Information = 0;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                ExFreeToNPagedLookasideList(
+                    &NtfsGlobalData->IrpContextLookasideList, IrpContext);
+                IoSetTopLevelIrp(NULL);
+                FsRtlExitFileSystem();
+                return Status;
+            }
+        }
+    }
 
     switch (IrpContext->MajorFunction)
     {
