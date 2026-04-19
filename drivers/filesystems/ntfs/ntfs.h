@@ -284,9 +284,9 @@ typedef struct
      * workers don't re-walk the \$Extend directory on every call.
      *
      * Real $Q (owner-ID -> QUOTA_CONTROL) / $O (SID -> owner-ID) maintenance
-     * is blocked on btree.c growing non-$I30 collation support; the workers
-     * currently return STATUS_NOT_SUPPORTED.  See quota.c for the blocker
-     * note. */
+     * now goes through the generalised btree.c collation API
+     * (NtfsBTree{Insert,Find,Remove}Blob on COLLATION_NTOFS_ULONG /
+     * COLLATION_NTOFS_SID).  See quota.c for the worker implementations. */
     BOOLEAN QuotaPresent;
     ULONGLONG QuotaFileMft;
 
@@ -640,6 +640,17 @@ typedef struct
     PDEVICE_EXTENSION Vcb;
     PINDEX_ROOT_ATTRIBUTE IndexRoot;
     struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
+    /* Collation rule for this B-tree's keys (COLLATION_FILE_NAME by default
+     * for $I30 indexes).  Generalised per [MS-FSCC] / NTFS-3G:
+     *   COLLATION_BINARY              — memcmp on key bytes
+     *   COLLATION_FILE_NAME           — filename (case-insensitive)
+     *   COLLATION_UNICODE_STRING      — filename (case-sensitive)
+     *   COLLATION_NTOFS_ULONG         — 4-byte LE unsigned compare ($Q)
+     *   COLLATION_NTOFS_SID           — $O keys
+     *   COLLATION_NTOFS_SECURITY_HASH — $SDH
+     *   COLLATION_NTOFS_ULONGS        — $ObjId / n-ULONG compare
+     */
+    ULONG CollationRule;
 } B_TREE, *PB_TREE;
 
 typedef struct
@@ -1003,15 +1014,68 @@ NtfsDeviceIoControl(IN PDEVICE_OBJECT DeviceObject,
 LONG
 CompareTreeKeys(PB_TREE_KEY Key1,
                 PB_TREE_KEY Key2,
+                ULONG CollationRule,
                 BOOLEAN CaseSensitive);
+
+/* Pure collation comparator on raw key bytes.  Used directly by view-index
+ * code (quota, security, objid) and by CompareTreeKeys under the covers.
+ * Returns -1/0/+1 per the collation rule.  Does not know about the END
+ * sentinel — callers must filter that out first. */
+LONG
+NtfsCompareKeyBytes(const VOID *Key1,
+                    ULONG Key1Len,
+                    const VOID *Key2,
+                    ULONG Key2Len,
+                    ULONG CollationRule,
+                    BOOLEAN CaseSensitive);
+
+/* Generalised B-tree insert for view indexes (non-$I30 keys + values).
+ * Builds an INDEX_ENTRY_ATTRIBUTE that carries arbitrary key bytes followed
+ * by arbitrary value bytes, and inserts it using the tree's CollationRule.
+ * If the key already exists, the value is overwritten in place and
+ * STATUS_OBJECT_NAME_COLLISION is NOT returned — caller uses this for
+ * insert-or-update semantics (matching Windows $Q/$O behaviour). */
+NTSTATUS
+NtfsBTreeInsertBlob(PB_TREE Tree,
+                    const VOID *KeyBytes,
+                    ULONG KeyLen,
+                    const VOID *ValueBytes,
+                    ULONG ValueLen,
+                    ULONG MaxIndexRootSize,
+                    ULONG IndexRecordSize);
+
+/* Look up a key in the tree and return a pointer to its index entry.  Used
+ * by quota/security for read paths.  Returns STATUS_OBJECT_NAME_NOT_FOUND if
+ * not found.  The returned pointer is owned by the tree. */
+NTSTATUS
+NtfsBTreeFindBlob(PB_TREE Tree,
+                  const VOID *KeyBytes,
+                  ULONG KeyLen,
+                  PINDEX_ENTRY_ATTRIBUTE *FoundEntry);
+
+/* Remove a key from the tree by raw key bytes (view-index removal). */
+NTSTATUS
+NtfsBTreeRemoveBlob(PB_TREE Tree,
+                    const VOID *KeyBytes,
+                    ULONG KeyLen);
 
 NTSTATUS
 CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
                      PFILE_RECORD_HEADER FileRecordWithIndex,
-                     /*PCWSTR IndexName,*/
                      PNTFS_ATTR_CONTEXT IndexRootContext,
                      PINDEX_ROOT_ATTRIBUTE IndexRoot,
                      PB_TREE *NewTree);
+
+/* Same, but for arbitrary view indexes (e.g. $Q, $O, $SDH).  The $I30
+ * wrapper above forwards here. */
+NTSTATUS
+CreateBTreeFromIndexEx(PDEVICE_EXTENSION Vcb,
+                       PFILE_RECORD_HEADER FileRecordWithIndex,
+                       PCWSTR IndexName,
+                       ULONG IndexNameLen,
+                       PNTFS_ATTR_CONTEXT IndexRootContext,
+                       PINDEX_ROOT_ATTRIBUTE IndexRoot,
+                       PB_TREE *NewTree);
 
 NTSTATUS
 CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
@@ -1046,6 +1110,11 @@ DumpBTreeNode(PB_TREE Tree,
 
 NTSTATUS
 CreateEmptyBTree(PB_TREE *NewTree);
+
+/* Same as CreateEmptyBTree but with a caller-specified collation rule.  For
+ * $I30 legacy callers, CreateEmptyBTree stays the plain-filename shape. */
+NTSTATUS
+CreateEmptyBTreeEx(ULONG CollationRule, PB_TREE *NewTree);
 
 ULONGLONG
 GetAllocationOffsetFromVCN(PDEVICE_EXTENSION DeviceExt,
