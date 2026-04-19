@@ -274,6 +274,22 @@ typedef struct
     ULONGLONG UsnNextUsn;
     ERESOURCE UsnResource;
 
+    /* Disk-quota first-slice state (Kreijstal/reactos#37).
+     *
+     * QuotaPresent is TRUE when \$Extend\$Quota exists on this volume;
+     * IRP_MJ_{QUERY,SET}_QUOTA returns STATUS_NOT_SUPPORTED when FALSE so
+     * un-quota'd volumes behave the same as they do on Windows.
+     *
+     * QuotaFileMft caches the MFT index of the \$Extend\$Quota file so
+     * workers don't re-walk the \$Extend directory on every call.
+     *
+     * Real $Q (owner-ID -> QUOTA_CONTROL) / $O (SID -> owner-ID) maintenance
+     * is blocked on btree.c growing non-$I30 collation support; the workers
+     * currently return STATUS_NOT_SUPPORTED.  See quota.c for the blocker
+     * note. */
+    BOOLEAN QuotaPresent;
+    ULONGLONG QuotaFileMft;
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
@@ -1660,6 +1676,133 @@ NtfsQueryVolumeInformation(PNTFS_IRP_CONTEXT IrpContext);
 NTSTATUS
 NtfsSetVolumeInformation(PNTFS_IRP_CONTEXT IrpContext);
 
+
+/* security.c */
+
+NTSTATUS
+NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        const VOID *SD,
+                        ULONG SdLength);
+
+NTSTATUS
+NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER FileRecord,
+                          PVOID Buf,
+                          ULONG BufLen,
+                          PULONG LenOut);
+
+NTSTATUS
+NtfsDeleteSecurityFromRecord(PNTFS_VCB Vcb,
+                             PFILE_RECORD_HEADER FileRecord);
+
+/* usn.c */
+
+NTSTATUS
+NtfsUsnLoadJournal(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsUsnInitJournal(PDEVICE_EXTENSION Vcb,
+                   ULONGLONG MaximumSize,
+                   ULONGLONG AllocationDelta);
+
+NTSTATUS
+NtfsUsnEmitRecord(PDEVICE_EXTENSION Vcb,
+                  ULONGLONG FileRef,
+                  ULONGLONG ParentRef,
+                  ULONG Reason,
+                  ULONG SourceInfo,
+                  PCWSTR Name,
+                  USHORT NameLength);
+
+NTSTATUS
+NtfsUsnReadRange(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG StartUsn,
+                 ULONG ReasonMask,
+                 PVOID Buffer,
+                 ULONG BufferLength,
+                 PULONG BytesReturned);
+
+NTSTATUS
+NtfsUsnEnumerate(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG StartRef,
+                 LONGLONG LowUsn,
+                 LONGLONG HighUsn,
+                 PVOID Buffer,
+                 ULONG BufferLength,
+                 PULONG BytesReturned);
+
+VOID
+NtfsUsnFreeJournalFcb(struct _FCB *Fcb);
+
+/* lznt1.c */
+
+NTSTATUS
+NtfsLznt1Decompress(const UCHAR *In,
+                    ULONG InLen,
+                    UCHAR *Out,
+                    ULONG OutLen,
+                    PULONG OutUsed);
+
+/* compress.c */
+
+/* Raw-cluster read callback used by NtfsCompressedReadLogicalEx so the
+ * userspace test harness can inject a file-backed reader (no VCB). */
+typedef NTSTATUS (*NtfsCompressedRawReadFn)(PNTFS_ATTR_CONTEXT Context,
+                                            LONGLONG Lcn,
+                                            ULONG LenBytes,
+                                            PUCHAR Buffer,
+                                            PVOID Ctx);
+
+NTSTATUS
+NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
+                            ULONGLONG Offset,
+                            ULONG Len,
+                            PUCHAR Out,
+                            ULONG BytesPerCluster,
+                            NtfsCompressedRawReadFn RawRead,
+                            PVOID RawCtx,
+                            PULONG BytesReadOut);
+
+NTSTATUS
+NtfsCompressedReadLogical(PDEVICE_EXTENSION Vcb,
+                          PNTFS_ATTR_CONTEXT Context,
+                          ULONGLONG Offset,
+                          ULONG Len,
+                          PUCHAR Out,
+                          PULONG BytesReadOut);
+
+/* quota.c */
+
+NTSTATUS
+NtfsQuotaProbe(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsQuotaSetEntry(PDEVICE_EXTENSION Vcb,
+                  const UCHAR *Sid,
+                  ULONG SidLen,
+                  const VOID *Limits,
+                  ULONG LimitsLen);
+
+NTSTATUS
+NtfsQuotaGetEntry(PDEVICE_EXTENSION Vcb,
+                  const UCHAR *Sid,
+                  ULONG SidLen,
+                  PVOID Limits,
+                  ULONG LimitsCap,
+                  PULONG LimitsOut);
+
+NTSTATUS
+NtfsQuotaEnumerate(PDEVICE_EXTENSION Vcb,
+                   ULONG StartEntry,
+                   PVOID Buf,
+                   ULONG BufLen,
+                   PULONG BytesRet);
+
+NTSTATUS
+NtfsQuotaDeleteEntry(PDEVICE_EXTENSION Vcb,
+                     const UCHAR *Sid,
+                     ULONG SidLen);
 
 /* ntfs.c */
 
