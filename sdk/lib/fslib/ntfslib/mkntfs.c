@@ -1108,35 +1108,183 @@ static void build_remaining_system_files(MKNTFS_STATE *s)
  * $LogFile initialization
  * ============================================================ */
 
-/* Write the $LogFile with restart page markers */
+/* Pick the log-page size for this volume.  Matches the driver's
+ * LfsPageSize in drivers/filesystems/ntfs/lfsparse.c: NTFS uses a 4 KiB
+ * log page as long as the cluster size is at most 4 KiB; above that the
+ * page size equals the cluster size.  Both RSTR copies plus subsequent
+ * RCRD pages are laid out at this stride. */
+static ULONG lfs_page_size(const MKNTFS_STATE *s)
+{
+    return (s->cluster_size > 4096) ? s->cluster_size : 4096;
+}
+
+/* Apply the LFS restart-page USA.  Shape identical to apply_fixup above
+ * (which is used for FILE / INDX records): for every sector in the page,
+ * save the original last-2-bytes into USA[1..N] and stamp the USN into
+ * the last 2 bytes.  FixupUpdateSequenceArray in the driver reverses
+ * this on read, and the parser's magic check happens after the fixup. */
+static void apply_lfs_fixup(UCHAR *page, ULONG page_size, ULONG sector_size,
+                             USHORT usa_offset, USHORT usa_count)
+{
+    USHORT *usa;
+    ULONG i, num_sectors;
+    USHORT usn;
+
+    usa = (USHORT *)(page + usa_offset);
+    usn = usa[0];
+    num_sectors = usa_count - 1;
+    if (num_sectors > page_size / sector_size)
+        num_sectors = page_size / sector_size;
+
+    for (i = 0; i < num_sectors; i++) {
+        USHORT *sector_end = (USHORT *)(page + (i + 1) * sector_size - 2);
+        usa[1 + i] = *sector_end;       /* Save original (usually 0). */
+        *sector_end = usn;              /* Stamp USN sentinel.        */
+    }
+}
+
+/* Build one spec-compliant CLEAN RSTR restart page.
+ *
+ * Layout (sized by page_size, typically 4096):
+ *
+ *   0x00..0x0F   NTFS_RECORD_HEADER
+ *                  Type      = 'RSTR'
+ *                  UsaOffset = 0x28    (past the restart-page header fields)
+ *                  UsaCount  = sectors-per-page + 1
+ *                  Lsn       = 0       (fresh volume)
+ *   0x10         RestartOffset USHORT (where the NTFS_LFS_RESTART_AREA
+ *                sits).  The ReactOS driver parser reads this field.
+ *                We put the restart area at 0x40 so it sits past the USA.
+ *   0x12         SystemPageSize USHORT  (log page size in bytes)
+ *   0x14         LogPageSize USHORT     (log page size in bytes)
+ *   0x16         RestartOffset USHORT   (libfsntfs view, matches 0x10 copy)
+ *   0x18         MajorVersion USHORT    (1)
+ *   0x1A         MinorVersion USHORT    (0)
+ *   0x1C..0x27   reserved / alignment
+ *   0x28..       USA array (USHORT USN + num_sectors saved words)
+ *   0x40..0x6F   NTFS_LFS_RESTART_AREA (CLEAN landmark)
+ *   0x70..0xBF   a single LOG_CLIENT_RECORD (zero-filled payload; the
+ *                ReactOS driver's Phase-1 gate does not inspect it, but
+ *                we leave the ClientFreeList/ClientInUseList chain sane
+ *                for a future replayer).
+ *   ...          zero-fill out to the last sector
+ *   sector ends  USN sentinel stamped by apply_lfs_fixup
+ *
+ * After the USA is stamped, every sector's last USHORT equals the USN so
+ * FixupUpdateSequenceArray succeeds when the driver reads the page back.
+ */
+static void build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
+                             ULONGLONG file_size)
+{
+    /* NTFS_RECORD_HEADER field offsets — match driver layout exactly. */
+    NTFS_LFS_RESTART_AREA area;
+    USHORT usa_offset = 0x28;
+    USHORT usa_count  = (USHORT)(page_size / sector_size + 1);
+    USHORT restart_offset = 0x40;
+    USHORT usn = 1;   /* Any non-zero 16-bit value; driver doesn't care
+                       * about the specific USN value on a fresh page. */
+
+    memset(page, 0, page_size);
+
+    /* NTFS_RECORD_HEADER: Type | UsaOffset | UsaCount | Lsn (8 bytes) */
+    *(ULONG  *)(page + 0x00) = NRH_RSTR_TYPE;
+    *(USHORT *)(page + 0x04) = usa_offset;
+    *(USHORT *)(page + 0x06) = usa_count;
+    *(ULONGLONG *)(page + 0x08) = 0;              /* Lsn = 0 */
+
+    /* RestartOffset at 0x10 — the field the ReactOS driver parser reads.
+     * Keep a mirror at 0x16 so libfsntfs dumpers see the same value. */
+    *(USHORT *)(page + 0x10) = restart_offset;
+    *(USHORT *)(page + 0x12) = (USHORT)page_size; /* SystemPageSize */
+    *(USHORT *)(page + 0x14) = (USHORT)page_size; /* LogPageSize    */
+    *(USHORT *)(page + 0x16) = restart_offset;    /* RestartOffset  */
+    *(USHORT *)(page + 0x18) = 1;                 /* MajorVersion   */
+    *(USHORT *)(page + 0x1A) = 0;                 /* MinorVersion   */
+
+    /* USA: USN at usa[0]; saved-originals at usa[1..num_sectors] are
+     * filled in by apply_lfs_fixup below (they're the original last-2-
+     * bytes of each sector, which on a zero-page are 0). */
+    *(USHORT *)(page + usa_offset) = usn;
+
+    /* Restart area: CLEAN landmark.  CurrentLsn=0, LastLsnDataLength=0,
+     * CLEAN flag set.  RestartAreaLength / ClientArrayOffset let a
+     * future replayer locate the LOG_CLIENT_RECORD array that starts
+     * immediately after.  LogClients=1, ClientFreeList=0 (client 0 is
+     * on the free list — no active clients on a fresh volume),
+     * ClientInUseList = 0xFFFF (no in-use chain). */
+    memset(&area, 0, sizeof(area));
+    area.CurrentLsn          = 0;
+    area.LogClients          = 1;
+    area.ClientFreeList      = 0;
+    area.ClientInUseList     = 0xFFFF;
+    area.Flags               = NTFS_LFS_RESTART_FLAG_CLEAN;
+    area.SeqNumberBits       = 0x2D;
+    area.RestartAreaLength   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
+    area.ClientArrayOffset   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
+    area.FileSize            = file_size;
+    area.LastLsnDataLength   = 0;
+    area.RecordHeaderLength  = 0x30;
+    area.LogPageDataOffset   = 0x40;
+    area.RestartOpenLogCount = 1;
+    area.Reserved            = 0;
+    memcpy(page + restart_offset, &area, sizeof(area));
+
+    /* Apply the USA sentinel pass: stamps every sector's trailing
+     * USHORT with the USN so the driver's FixupUpdateSequenceArray
+     * matches on read. */
+    apply_lfs_fixup(page, page_size, sector_size, usa_offset, usa_count);
+}
+
+/* Write the $LogFile with two byte-identical CLEAN RSTR pages followed
+ * by 0xFF-filled tail (empty RCRD region).  The ReactOS driver's Phase-1
+ * clean-shutdown gate reads the first two pages and requires:
+ *   - both parse (USA ok, RSTR magic, restart-area offset in range)
+ *   - both byte-exact equal
+ *   - Flags & NTFS_LFS_RESTART_FLAG_CLEAN set
+ *   - LastLsnDataLength == 0
+ * See drivers/filesystems/ntfs/lfsparse.c:NtfsLfsCheckCleanShutdown. */
 static int write_logfile(MKNTFS_STATE *s)
 {
-    /* $LogFile must be initialized with 0xFF (empty journal) */
-    UCHAR *buf;
-    ULONGLONG offset;
-    ULONG chunk_size = 65536;
+    UCHAR *page = NULL;
+    UCHAR *tail = NULL;
+    ULONG page_size = lfs_page_size(s);
+    ULONGLONG offset = s->logfile_lcn * s->cluster_size;
     ULONGLONG remaining;
-    int ret;
+    ULONG chunk_size = 65536;
+    int ret = -1;
 
-    buf = (UCHAR *)malloc(chunk_size);
-    if (!buf) return -1;
-    memset(buf, 0xFF, chunk_size);
+    /* Build one CLEAN RSTR page; write it verbatim twice. */
+    page = (UCHAR *)malloc(page_size);
+    if (!page) goto done;
+    build_rstr_page(page, page_size, s->sector_size, s->logfile_size);
 
-    /* Write restart area markers at offset 0 and 0x1000 */
-    /* Simplified: just fill with 0xFF which is "empty log" */
-    offset = s->logfile_lcn * s->cluster_size;
-    remaining = s->logfile_size;
+    if (io_write(s, offset, page, page_size) < 0) goto done;
+    if (io_write(s, offset + page_size, page, page_size) < 0) goto done;
+
+    /* Fill the rest with 0xFF (empty journal marker). */
+    tail = (UCHAR *)malloc(chunk_size);
+    if (!tail) goto done;
+    memset(tail, 0xFF, chunk_size);
+
+    offset += (ULONGLONG)page_size * 2;
+    if (s->logfile_size < (ULONGLONG)page_size * 2)
+        remaining = 0;
+    else
+        remaining = s->logfile_size - (ULONGLONG)page_size * 2;
 
     while (remaining > 0) {
         ULONG to_write = remaining > chunk_size ? chunk_size : (ULONG)remaining;
-        ret = io_write(s, offset, buf, to_write);
-        if (ret < 0) { free(buf); return -1; }
+        if (io_write(s, offset, tail, to_write) < 0) goto done;
         offset += to_write;
         remaining -= to_write;
     }
 
-    free(buf);
-    return 0;
+    ret = 0;
+
+done:
+    free(page);
+    free(tail);
+    return ret;
 }
 
 /* ============================================================
