@@ -97,23 +97,13 @@ interface dhcpcsvc
     /* Function 5 */
     DWORD
     __stdcall
-    QueryHWInfo(
-        [in, string, unique] PDHCP_SERVER_NAME ServerName,
-        [in] DWORD AdapterIndex,
-        [out] PDWORD MediaType,
-        [out] PDWORD Mtu,
-        [out] PDWORD Speed);
-
-    /* Function 6 */
-    DWORD
-    __stdcall
     StaticRefreshParams(
         [in, string, unique] PDHCP_SERVER_NAME ServerName,
         [in] DWORD AdapterIndex,
         [in] DWORD Address,
         [in] DWORD Netmask);
 
-    /* Function 7 */
+    /* Function 6 */
     DWORD
     __stdcall
     RemoveDNSRegistrations(
