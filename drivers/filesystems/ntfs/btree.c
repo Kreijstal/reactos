@@ -459,6 +459,21 @@ CreateEmptyBTree(PB_TREE *NewTree)
     return CreateEmptyBTreeEx(COLLATION_FILE_NAME, NewTree);
 }
 
+/* Byte-wise compare returning signum; ntoskrnl does not export libc memcmp
+ * and RtlCompareMemory returns match-length, not sign. */
+static int
+NtfsCompareBytes(const VOID *A, const VOID *B, ULONG Len)
+{
+    const UCHAR *a = (const UCHAR *)A;
+    const UCHAR *b = (const UCHAR *)B;
+    ULONG i;
+    for (i = 0; i < Len; i++)
+    {
+        if (a[i] != b[i]) return (a[i] < b[i]) ? -1 : 1;
+    }
+    return 0;
+}
+
 /* FILENAME-collation compare of two raw filename-attribute key blobs.  The
  * blobs are parsed as FILENAME_ATTRIBUTE: NameLength is at
  * FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength), WCHAR name starts at
@@ -479,7 +494,7 @@ NtfsCompareFilenameKey(const VOID *Key1, ULONG Key1Len,
     {
         /* Degenerate case: fall back to binary */
         ULONG MinLen = min(Key1Len, Key2Len);
-        int r = MinLen ? memcmp(Key1, Key2, MinLen) : 0;
+        int r = MinLen ? NtfsCompareBytes(Key1, Key2, MinLen) : 0;
         if (r != 0)
             return (r < 0) ? -1 : 1;
         if (Key1Len < Key2Len) return -1;
@@ -519,7 +534,7 @@ NtfsCompareBinaryKey(const VOID *Key1, ULONG Key1Len,
                      const VOID *Key2, ULONG Key2Len)
 {
     ULONG MinLen = min(Key1Len, Key2Len);
-    int r = MinLen ? memcmp(Key1, Key2, MinLen) : 0;
+    int r = MinLen ? NtfsCompareBytes(Key1, Key2, MinLen) : 0;
     if (r != 0)
         return (r < 0) ? -1 : 1;
     if (Key1Len < Key2Len) return -1;
@@ -574,7 +589,7 @@ NtfsCompareKeyBytes(const VOID *Key1, ULONG Key1Len,
         if (s1[0] != s2[0]) return (s1[0] < s2[0]) ? -1 : 1;
         /* IdAuthority (bytes 2..7 — 6-byte big-endian per SID spec) */
         {
-            int r = memcmp(s1 + 2, s2 + 2, 6);
+            int r = NtfsCompareBytes(s1 + 2, s2 + 2, 6);
             if (r != 0) return (r < 0) ? -1 : 1;
         }
         Sub1 = s1[1];
