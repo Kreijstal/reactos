@@ -1391,6 +1391,51 @@ NtfsUsnEnumerate(PDEVICE_EXTENSION Vcb,
 VOID
 NtfsUsnFreeJournalFcb(struct _FCB *Fcb);
 
+/*
+ * LZNT1 codec + compressed-$DATA read dispatch (issue #35, slice 1a).
+ * lznt1.c owns the pure buffer-in/buffer-out decompressor; compress.c
+ * owns the MCB walk + per-compression-unit classification.
+ *
+ * Slice 1a is decompression-only — the matching write path
+ * (NtfsLznt1Compress / NtfsCompressedWriteLogical) is slice 1b and
+ * WriteAttribute against a compressed attribute still returns
+ * STATUS_NOT_IMPLEMENTED via the existing non-resident write code.
+ */
+NTSTATUS
+NtfsLznt1Decompress(const UCHAR *In,
+                    ULONG InLen,
+                    UCHAR *Out,
+                    ULONG OutLen,
+                    PULONG OutUsed);
+
+/* Callback used by NtfsCompressedReadLogicalEx so the worker itself is
+ * transport-agnostic.  The kernel wrapper plugs NtfsReadDiskCached in;
+ * the userspace test harness plugs a file-backed reader against a
+ * synthetic LCN space. */
+typedef NTSTATUS (*NtfsCompressedRawReadFn)(PNTFS_ATTR_CONTEXT Context,
+                                            LONGLONG Lcn,
+                                            ULONG Length,
+                                            PUCHAR Buffer,
+                                            PVOID Ctx);
+
+NTSTATUS
+NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
+                            ULONGLONG Offset,
+                            ULONG Len,
+                            PUCHAR Out,
+                            ULONG BytesPerCluster,
+                            NtfsCompressedRawReadFn RawRead,
+                            PVOID RawCtx,
+                            PULONG BytesReadOut);
+
+NTSTATUS
+NtfsCompressedReadLogical(PDEVICE_EXTENSION Vcb,
+                          PNTFS_ATTR_CONTEXT Context,
+                          ULONGLONG Offset,
+                          ULONG Len,
+                          PUCHAR Out,
+                          PULONG BytesReadOut);
+
 NTSTATUS
 InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
                                    PNTFS_ATTR_CONTEXT AttrContext,

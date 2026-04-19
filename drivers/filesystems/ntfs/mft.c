@@ -923,7 +923,16 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         Status = FreeClusters(Vcb, AttrContext, AttrOffset, FileRecord, ClustersToFree);
     }
 
-    // TODO: is the file compressed, encrypted, or sparse?
+    /* Compressed / encrypted / sparse attribute sizing: slice 1a only
+     * implements the compressed-$DATA READ path (NtfsCompressedReadLogical
+     * in compress.c).  Resizing a compressed attribute would require
+     * re-encoding the tail compression unit and re-packing the mapping
+     * pairs around the compressed-tail sparse marker, which is the write
+     * side (slice 1b, separate issue).  For now, non-zero Flags on the
+     * attribute fall through here: the byte sizes below are still
+     * persisted, but the caller (SetAttributeDataLength) already rejects
+     * writes to compressed attributes upstream.  Encrypted / pure sparse
+     * pre-existing behaviour is unchanged. */
 
     AttrContext->pRecord->NonResident.AllocatedSize = AllocationSize;
     AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
@@ -1202,6 +1211,31 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     /*
      * Non-resident attribute
      */
+
+    /*
+     * Compressed $DATA fast path (issue #35, slice 1a).  A non-zero
+     * CompressionUnit means the attribute stores its clusters in
+     * LZNT1-compressed "compression units" of 1 << CompressionUnit
+     * clusters.  The verbatim MCB walk below would hand callers the
+     * raw compressed bytes; route through NtfsCompressedReadLogical
+     * instead, which decompresses per-CU and zero-fills sparse CUs.
+     * Encrypted / other attribute flags still fall through to the
+     * legacy walker (they currently return raw bytes — not regressed
+     * by this change). */
+    if (Context->pRecord->NonResident.CompressionUnit != 0)
+    {
+        ULONG CompBytesRead = 0;
+        NTSTATUS CompStatus;
+
+        CompStatus = NtfsCompressedReadLogical(Vcb, Context, Offset, Length,
+                                               (PUCHAR)Buffer, &CompBytesRead);
+        if (!NT_SUCCESS(CompStatus))
+        {
+            DPRINT1("NtfsCompressedReadLogical failed 0x%x\n", (unsigned)CompStatus);
+            return 0;
+        }
+        return CompBytesRead;
+    }
 
     /*
      * I. Find the corresponding start data run.
