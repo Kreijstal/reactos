@@ -37,6 +37,150 @@ static LONG QueueCount = 0;
 
 static WORKER_THREAD_ROUTINE NtfsDoRequest;
 
+/*
+ * IRP_MJ_QUERY_SECURITY handler.  Looks up the FCB from
+ * IrpSp->FileObject->FsContext, reads the owning file record, calls the
+ * NtfsGetSecurityFromRecord worker (security.c), and surfaces the result
+ * back through the IRP.  Kreijstal/reactos#36 — per-file $SECURITY_DESCRIPTOR
+ * (NOT \$Secure:$SDS, that's a follow-up slice).
+ *
+ * IoStatus contract:
+ *   - success:  Information = bytes copied out.
+ *   - overflow: Information = required length, Status = STATUS_BUFFER_OVERFLOW.
+ *   - other:    Information = 0.
+ */
+static
+NTSTATUS
+NtfsQuerySecurity(PNTFS_IRP_CONTEXT IrpContext)
+{
+    PIRP Irp = IrpContext->Irp;
+    PIO_STACK_LOCATION Stack = IrpContext->Stack;
+    PFILE_OBJECT FileObject = IrpContext->FileObject;
+    PNTFS_FCB Fcb;
+    PNTFS_VCB Vcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PVOID OutBuffer;
+    ULONG OutLength;
+    ULONG LengthOut = 0;
+    NTSTATUS Status;
+
+    DPRINT("NtfsQuerySecurity(%p)\n", IrpContext);
+
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Fcb = (PNTFS_FCB)FileObject->FsContext;
+    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
+
+    /* For direct I/O IRPs the user buffer is owned by the caller — dereference
+     * via the Mdl when one was supplied, else the direct UserBuffer pointer.
+     * Mirrors btrfs's map_user_buffer helper. */
+    if (Irp->MdlAddress != NULL)
+    {
+        OutBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+        if (OutBuffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    else
+    {
+        OutBuffer = Irp->UserBuffer;
+    }
+    OutLength = Stack->Parameters.QuerySecurity.Length;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    Status = NtfsGetSecurityFromRecord(Vcb, FileRecord, OutBuffer, OutLength, &LengthOut);
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+        Irp->IoStatus.Information = LengthOut;
+    else
+        Irp->IoStatus.Information = 0;
+
+    return Status;
+}
+
+/*
+ * IRP_MJ_SET_SECURITY handler.  The IO manager has already captured and
+ * validated the caller-supplied SD; it arrives as a self-relative blob at
+ * IrpSp->Parameters.SetSecurity.SecurityDescriptor.  We persist it into the
+ * file's $SECURITY_DESCRIPTOR attribute via NtfsSetSecurityOnRecord.
+ *
+ * TODO (follow-up slice): honour SECURITY_INFORMATION flags (OWNER / GROUP /
+ * DACL / SACL) by merging the incoming SD against the existing one instead
+ * of wholesale replacement.
+ */
+static
+NTSTATUS
+NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
+{
+    PIRP Irp = IrpContext->Irp;
+    PIO_STACK_LOCATION Stack = IrpContext->Stack;
+    PFILE_OBJECT FileObject = IrpContext->FileObject;
+    PNTFS_FCB Fcb;
+    PNTFS_VCB Vcb;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PSECURITY_DESCRIPTOR InSd;
+    ULONG InLength;
+    NTSTATUS Status;
+
+    DPRINT("NtfsSetSecurity(%p)\n", IrpContext);
+
+    if (FileObject == NULL || FileObject->FsContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Fcb = (PNTFS_FCB)FileObject->FsContext;
+    if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
+
+    InSd = Stack->Parameters.SetSecurity.SecurityDescriptor;
+    if (InSd == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /* RtlLengthSecurityDescriptor returns the serialized byte count of a
+     * self-relative SD — the form the IO manager always gives us. */
+    InLength = RtlLengthSecurityDescriptor(InSd);
+    if (InLength == 0)
+        return STATUS_INVALID_SECURITY_DESCR;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    Status = NtfsSetSecurityOnRecord(Vcb, FileRecord, InSd, InLength);
+    if (NT_SUCCESS(Status))
+    {
+        Status = UpdateFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
+    }
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+
+    Irp->IoStatus.Information = 0;
+    return Status;
+}
+
 static
 NTSTATUS
 NtfsQueueRequest(PNTFS_IRP_CONTEXT IrpContext)
@@ -183,6 +327,29 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
              * forwarded path so the dispatch loop below doesn't try
              * to complete an IRP that the lower driver now owns. */
             Status = NtfsPnp(IrpContext);
+            break;
+
+        case IRP_MJ_QUERY_SECURITY:
+            /* Read the on-disk $SECURITY_DESCRIPTOR (or synthesise the
+             * default world-readable SD if absent) into the caller's
+             * buffer.  Kreijstal/reactos#36 — see security.c. */
+            Status = NtfsQuerySecurity(IrpContext);
+            break;
+
+        case IRP_MJ_SET_SECURITY:
+            /* Write the supplied self-relative SD into the file's
+             * $SECURITY_DESCRIPTOR attribute.  Creation of a brand-new
+             * attribute is supported; in-place overwrite of same size
+             * is supported; resize is not yet (delete + re-set). */
+            if (!NtfsGlobalData->EnableWriteSupport)
+            {
+                DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
+                Status = STATUS_ACCESS_DENIED;
+            }
+            else
+            {
+                Status = NtfsSetSecurity(IrpContext);
+            }
             break;
     }
 
