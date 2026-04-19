@@ -20,6 +20,7 @@ list(APPEND SOURCE
     ntfs.c
     pnp.c
     rw.c
+    security.c
     shutdown.c
     volinfo.c
     ntfs.h)
