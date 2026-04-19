@@ -290,11 +290,36 @@ typedef struct
     BOOLEAN QuotaPresent;
     ULONGLONG QuotaFileMft;
 
+    /* $LogFile Phase 0 + Phase 1 state (Kreijstal/reactos#34).
+     *
+     * LogFileDirty is set TRUE after NtfsMountVolume runs NtfsLfsParseRestart
+     * and the restart pages disagree / fail verification / carry a non-clean
+     * CurrentLsn landmark.  When set, NtfsDispatch short-circuits IRP_MJ_WRITE,
+     * IRP_MJ_SET_INFORMATION, IRP_MJ_SET_SECURITY, IRP_MJ_SET_EA and every
+     * mutating FSCTL with STATUS_MEDIA_WRITE_PROTECTED — the volume mounts
+     * read-only until the caller reboots into a log-replaying driver or runs
+     * chkdsk externally.  This matches the spec intent of the VPB_READ_ONLY
+     * plumbing in the issue body; we use a VCB-private flag because the
+     * standard VPB flag list in sdk/include/xdk/iotypes.h has no
+     * VPB_READ_ONLY bit and Windows-compatibility forbids inventing one.
+     *
+     * LogFileLsn / LogFileRestartLen carry the Phase-0 dump state so the
+     * FSCTL_NTFS_DUMP_LOGFILE worker has something to return without re-
+     * reading $LogFile on every call.  These are populated by the mount
+     * gate and never re-touched outside a dismount-rebuild. */
+    BOOLEAN LogFileDirty;
+    ULONGLONG LogFileLsn;
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
 #define VCB_VOLUME_CORRUPT      0x0002
 #define VCB_DISMOUNT_PENDING    0x0004
+/* Volume is mounted read-only.  Set at mount time when $LogFile Phase-1
+ * clean-shutdown gate detects a dirty log; checked by NtfsDispatch to
+ * return STATUS_MEDIA_WRITE_PROTECTED on every mutating major function.
+ * See lfsparse.c banner for the full read-only-mount rationale. */
+#define VCB_VOLUME_READ_ONLY    0x0008
 
 typedef struct
 {
@@ -429,6 +454,9 @@ typedef struct
 /* NTFS_RECORD_HEADER.Type */
 #define NRH_FILE_TYPE  0x454C4946  /* 'FILE' */
 #define NRH_INDX_TYPE  0x58444E49  /* 'INDX' */
+#define NRH_RSTR_TYPE  0x52545352  /* 'RSTR' — $LogFile restart page */
+#define NRH_RCRD_TYPE  0x44524352  /* 'RCRD' — $LogFile record page */
+#define NRH_CHKD_TYPE  0x444B4843  /* 'CHKD' — chkdsk-cleaned page */
 
 
 typedef struct _FILE_RECORD_HEADER
@@ -1882,5 +1910,168 @@ CODE_SEG("INIT")
 VOID
 NTAPI
 NtfsInitializeFunctionPointers(PDRIVER_OBJECT DriverObject);
+
+/* lfsparse.c — $LogFile Phase 0 (read-only parser) + Phase 1 (clean-shutdown
+ * gate) structures and worker prototypes.  Layout authority is libfsntfs
+ * (Apache/LGPL reference) + Microsoft public LFS docs; ntfs3 (GPL-2.0-only)
+ * is algorithm-only reference — NO code copy.  See Kreijstal/reactos#34.
+ *
+ * The names mirror the libfsntfs wording (RESTART_AREA, LFS_RECORD_HEADER)
+ * and, where possible, match the public MSDN/LFS terminology so forensic
+ * tools can cross-reference.
+ */
+#include <pshpack1.h>
+
+/* The fixed-size header prefixing an RSTR / RCRD page.  Reuses the standard
+ * NTFS_RECORD_HEADER (the 4-byte magic + UsaOffset + UsaCount + Lsn shared
+ * with FILE / INDX records).  Both RSTR and RCRD land at the start of a
+ * log page and carry per-sector USA fixups applied at the same stride as
+ * MFT records (Vcb->NtfsInfo.BytesPerSector). */
+
+/* Body of an $LogFile RESTART AREA (immediately follows NTFS_RECORD_HEADER
+ * at RSTR page offset RestartOffset).  Field-for-field layout per libfsntfs
+ * documentation (documentation/NTFS%20File%20System.asciidoc §14). */
+typedef struct _NTFS_LFS_RESTART_AREA
+{
+    ULONGLONG CurrentLsn;               /* 0x00 — last LSN ever written      */
+    USHORT    LogClients;               /* 0x08 — count of client records    */
+    USHORT    ClientFreeList;           /* 0x0A — head of free client chain  */
+    USHORT    ClientInUseList;          /* 0x0C — head of in-use chain       */
+    USHORT    Flags;                    /* 0x0E — restart flags              */
+    ULONG     SeqNumberBits;            /* 0x10 — bits for the seq number    */
+    USHORT    RestartAreaLength;        /* 0x14 — byte length of this area   */
+    USHORT    ClientArrayOffset;        /* 0x16 — offset to first LogClient  */
+    ULONGLONG FileSize;                 /* 0x18 — size of $LogFile:$DATA     */
+    ULONG     LastLsnDataLength;        /* 0x20 — serialised data len of the
+                                         *        record at CurrentLsn — the
+                                         *        Phase-1 clean-shutdown
+                                         *        landmark (must equal zero
+                                         *        on a clean-mount restart) */
+    USHORT    RecordHeaderLength;       /* 0x24 — fixed len of LFS_RECORD    */
+    USHORT    LogPageDataOffset;        /* 0x26 — first byte of client data  */
+    ULONG     RestartOpenLogCount;      /* 0x28 — incremented on each open   */
+    ULONG     Reserved;                 /* 0x2C — reserved, must be zero     */
+} NTFS_LFS_RESTART_AREA, *PNTFS_LFS_RESTART_AREA;
+
+/* Restart flags bits (NTFS_LFS_RESTART_AREA.Flags). */
+#define NTFS_LFS_RESTART_FLAG_CLEAN 0x0002   /* Volume dismounted cleanly    */
+
+/* Body of an $LogFile RCRD page record.  Immediately follows the
+ * NTFS_RECORD_HEADER.  Every log record starts on a 512-byte-aligned
+ * boundary and carries this header, then a variable-size payload
+ * ("LogRecordData") described by RedoLength / UndoLength.  See libfsntfs
+ * documentation §14.3. */
+typedef struct _NTFS_LFS_RECORD_HEADER
+{
+    ULONGLONG ThisLsn;                  /* 0x00 — this record's LSN          */
+    ULONGLONG ClientPreviousLsn;        /* 0x08 — client's previous LSN      */
+    ULONGLONG ClientUndoNextLsn;        /* 0x10 — undo-chain predecessor     */
+    ULONG     ClientDataLength;         /* 0x18 — total payload bytes        */
+    USHORT    ClientId;                 /* 0x1C — originating client index   */
+    USHORT    Alignment;                /* 0x1E — should be 0                */
+    ULONG     RecordType;               /* 0x20 — 1=UPDATE 2=CHECKPOINT ...  */
+    ULONG     TransactionId;            /* 0x24 — opaque per-TX id           */
+    USHORT    Flags;                    /* 0x28 — record flags               */
+    USHORT    Reserved1[3];             /* 0x2A                              */
+    USHORT    RedoOperation;            /* 0x30 — redo opcode                */
+    USHORT    UndoOperation;            /* 0x32 — undo opcode                */
+    USHORT    RedoOffset;               /* 0x34 — offset of redo payload     */
+    USHORT    RedoLength;               /* 0x36 — size of redo payload       */
+    USHORT    UndoOffset;               /* 0x38 — offset of undo payload     */
+    USHORT    UndoLength;               /* 0x3A — size of undo payload       */
+    USHORT    TargetAttribute;          /* 0x3C — attr index this touches    */
+    USHORT    LcnsToFollow;             /* 0x3E — LCN list length            */
+    USHORT    RecordOffset;             /* 0x40                              */
+    USHORT    AttributeOffset;          /* 0x42                              */
+    USHORT    MftClusterIndex;          /* 0x44                              */
+    USHORT    Alignment2;               /* 0x46                              */
+    ULONGLONG TargetVcn;                /* 0x48                              */
+    /* Followed by: LCN[] (LcnsToFollow * 8 bytes), then RedoData / UndoData */
+} NTFS_LFS_RECORD_HEADER, *PNTFS_LFS_RECORD_HEADER;
+
+#include <poppack.h>
+
+/* LFS record RecordType values (Microsoft-documented).  Carried here so
+ * the Phase-0 dump can render human-readable names; Phase 2+ will use
+ * them as opcode dispatch keys. */
+#define NTFS_LFS_RECTYPE_NORMAL        0x00000001  /* normal log record      */
+#define NTFS_LFS_RECTYPE_CHECKPOINT    0x00000002  /* restart checkpoint     */
+
+/* lfsparse.c worker prototypes. */
+
+/* Parse a single RSTR page from @p Page (size @p PageSize).  Applies USA
+ * fixups in place, validates the restart-area pointer and length, and
+ * returns STATUS_SUCCESS with @p RestartOut populated when the page is
+ * coherent.  @p RestartOffsetOut is optional; callers who want to walk
+ * client array use it to locate the base.
+ *
+ * @return  STATUS_SUCCESS          — page looks good, fields populated
+ *          STATUS_FILE_CORRUPT_ERROR — magic wrong / USA mismatch
+ *          STATUS_INVALID_PARAMETER — buffer shape wrong              */
+NTSTATUS
+NtfsLfsParseRestartPage(PDEVICE_EXTENSION Vcb,
+                        PUCHAR Page,
+                        ULONG PageSize,
+                        PNTFS_LFS_RESTART_AREA RestartOut,
+                        PULONG RestartOffsetOut);
+
+/* Parse a single RCRD page from @p Page (size @p PageSize).  Applies USA
+ * fixups in place and returns a pointer to the first LFS_RECORD_HEADER
+ * in the page.  Phase-0 only inspects the first record; walking the rest
+ * is left to Phase 2+.
+ *
+ * @return  STATUS_SUCCESS          — page looks good, pointer populated
+ *          STATUS_FILE_CORRUPT_ERROR — magic wrong / USA mismatch     */
+NTSTATUS
+NtfsLfsParseRecordPage(PDEVICE_EXTENSION Vcb,
+                       PUCHAR Page,
+                       ULONG PageSize,
+                       PNTFS_LFS_RECORD_HEADER *FirstRecordOut);
+
+/* Phase-1 clean-shutdown gate.  Called from NtfsMountVolume after the
+ * MFT is up and before the mount succeeds.  Reads the first two restart
+ * pages from $LogFile:$DATA (both copies — primary at offset 0, backup
+ * at offset PageSize), parses each, and returns:
+ *
+ *   STATUS_SUCCESS          — both copies agree, CurrentLsn landmarks
+ *                             match, and restart flags carry the
+ *                             "clean" bit.  Caller mounts RW.
+ *   STATUS_LOG_FILE_FULL    — pages disagree / landmark mismatch / one
+ *                             copy torn.  Caller sets VCB_VOLUME_READ_ONLY
+ *                             and mounts RO.
+ *
+ * Any other NTSTATUS is a hard failure (bad $LogFile MFT record, I/O
+ * error reading the attribute); the caller maps it to mount failure.
+ *
+ * On any return path, the Vcb fields LogFileDirty / LogFileLsn are
+ * populated so FSCTL_NTFS_DUMP_LOGFILE can report state. */
+NTSTATUS
+NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb);
+
+/* Phase-0 dump FSCTL worker.  Reads the first N pages of $LogFile:$DATA
+ * (starting at byte 0), parses each, and appends a human-readable line
+ * per page into @p Buffer.  @p BufferLength caps the output; @p BytesOut
+ * receives the actual byte count written.  Returns STATUS_BUFFER_OVERFLOW
+ * (with BytesOut = required size, truncated output) when the buffer is
+ * too small, else STATUS_SUCCESS.  No replay, no emission. */
+NTSTATUS
+NtfsLfsDumpLogfile(PDEVICE_EXTENSION Vcb,
+                   PCHAR Buffer,
+                   ULONG BufferLength,
+                   PULONG BytesOut);
+
+/* Private FSCTL code for the Phase-0 dump.  Sits in the driver-private
+ * range (code 0x300) and uses METHOD_BUFFERED so the I/O Manager copies
+ * the result through SystemBuffer.  Not shipped to userspace via
+ * winioctl.h — lives here so the kernel dispatch and the userspace test
+ * can share the macro through this header.  The userspace test harness's
+ * ntfs_mock.h doesn't provide CTL_CODE; gate on its presence so the mock
+ * just skips this define instead of failing to compile.  Userspace tests
+ * don't need the macro — they call NtfsLfsDumpLogfile directly. */
+#if defined(CTL_CODE) && !defined(FSCTL_NTFS_DUMP_LOGFILE)
+#define FSCTL_NTFS_DUMP_LOGFILE                                 \
+    CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x300,                    \
+             METHOD_BUFFERED, FILE_ANY_ACCESS)
+#endif
 
 #endif /* NTFS_H */
