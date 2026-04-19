@@ -1156,6 +1156,21 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                                             FileMftIndex,
                                             FilenameAttribute,
                                             CaseSensitive);
+
+        /* Emit a USN_REASON_FILE_CREATE record into the change journal
+         * if one is active on this volume.  Gated so un-journalled
+         * volumes stay on the fast path.  Kreijstal/reactos#33. */
+        if (NT_SUCCESS(Status) && DeviceExt->UsnJournalFcb != NULL)
+        {
+            ULONGLONG ParentRef = FilenameAttribute->DirectoryFileReferenceNumber;
+            (void)NtfsUsnEmitRecord(DeviceExt,
+                                    FileMftIndex,
+                                    ParentRef,
+                                    USN_REASON_FILE_CREATE,
+                                    0,
+                                    FilenameAttribute->Name,
+                                    FilenameAttribute->NameLength);
+        }
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
