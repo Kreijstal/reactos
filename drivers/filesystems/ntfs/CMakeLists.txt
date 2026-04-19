@@ -20,7 +20,9 @@ list(APPEND SOURCE
     mft.c
     misc.c
     ntfs.c
+    objid.c
     pnp.c
+    reparse.c
     rw.c
     security.c
     shutdown.c
