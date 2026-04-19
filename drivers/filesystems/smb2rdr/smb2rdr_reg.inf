@@ -3,7 +3,7 @@
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr","ErrorControl",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr","Group",0x00000000,"Network"
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr","ImagePath",0x00020000,"system32\drivers\smb2rdr.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr","Start",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr","Type",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr\NetworkProvider","DeviceName",0x00000000,\Device\smb2rdr
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2rdr\NetworkProvider","Name",0x00000000,"SMB2 Network"
