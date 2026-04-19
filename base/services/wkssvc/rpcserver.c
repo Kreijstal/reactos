@@ -29,8 +29,52 @@
 #include "precomp.h"
 
 #include "lmerr.h"
+#include <lmuseflg.h>
+#include <winnetwk.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(wkssvc);
+
+static NET_API_STATUS
+WkssvcUseInfoToNetResource(
+    ULONG Level,
+    LPUSE_INFO InfoStruct,
+    LPNETRESOURCEW NetResource,
+    LPWSTR *Password,
+    LPWSTR *UserName)
+{
+    PUSE_INFO_1 ui1;
+    PUSE_INFO_2 ui2;
+
+    ZeroMemory(NetResource, sizeof(*NetResource));
+    NetResource->dwType = RESOURCETYPE_DISK;
+    *Password = NULL;
+    *UserName = NULL;
+
+    switch (Level) {
+        case 0:
+            if (!InfoStruct || !InfoStruct->UseInfo0) return ERROR_INVALID_PARAMETER;
+            NetResource->lpLocalName  = InfoStruct->UseInfo0->ui0_local;
+            NetResource->lpRemoteName = InfoStruct->UseInfo0->ui0_remote;
+            return NERR_Success;
+        case 1:
+            if (!InfoStruct || !InfoStruct->UseInfo1) return ERROR_INVALID_PARAMETER;
+            ui1 = InfoStruct->UseInfo1;
+            NetResource->lpLocalName  = ui1->ui1_local;
+            NetResource->lpRemoteName = ui1->ui1_remote;
+            *Password = ui1->ui1_password;
+            return NERR_Success;
+        case 2:
+            if (!InfoStruct || !InfoStruct->UseInfo2) return ERROR_INVALID_PARAMETER;
+            ui2 = InfoStruct->UseInfo2;
+            NetResource->lpLocalName  = ui2->ui2_useinfo.ui1_local;
+            NetResource->lpRemoteName = ui2->ui2_useinfo.ui1_remote;
+            *Password = ui2->ui2_useinfo.ui1_password;
+            *UserName = ui2->ui2_username;
+            return NERR_Success;
+        default:
+            return ERROR_INVALID_LEVEL;
+    }
+}
 
 /* FUNCTIONS *****************************************************************/
 
@@ -945,8 +989,18 @@ NetrUseAdd(
     LPUSE_INFO InfoStruct,
     unsigned long *ErrorParameter)
 {
-    UNIMPLEMENTED;
-    return 0;
+    NETRESOURCEW nr;
+    LPWSTR password, username;
+    NET_API_STATUS status;
+
+    UNREFERENCED_PARAMETER(ServerName);
+    if (ErrorParameter) *ErrorParameter = 0;
+
+    status = WkssvcUseInfoToNetResource(Level, InfoStruct, &nr, &password, &username);
+    if (status != NERR_Success) return status;
+    if (!nr.lpRemoteName) return ERROR_INVALID_PARAMETER;
+
+    return WNetAddConnection2W(&nr, password, username, 0);
 }
 
 
@@ -972,8 +1026,9 @@ NetrUseDel(
     wchar_t *UseName,
     unsigned long ForceLevel)
 {
-    UNIMPLEMENTED;
-    return 0;
+    UNREFERENCED_PARAMETER(ServerName);
+    if (!UseName) return ERROR_INVALID_PARAMETER;
+    return WNetCancelConnection2W(UseName, 0, ForceLevel == USE_FORCE);
 }
 
 
