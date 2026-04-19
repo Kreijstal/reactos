@@ -22,6 +22,7 @@ list(APPEND SOURCE
     rw.c
     security.c
     shutdown.c
+    usn.c
     volinfo.c
     ntfs.h)
 
