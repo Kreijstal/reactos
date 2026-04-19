@@ -52,6 +52,40 @@ typedef struct _SMB2RDR_DOWNCALL_HEADER {
     ULONG    OutLength;     /* bytes of payload following this header */
 } SMB2RDR_DOWNCALL_HEADER, *PSMB2RDR_DOWNCALL_HEADER;
 
+/*
+ * Per-opcode payload layouts for CREATE and CLOSE.  Paths are carried as
+ * length-prefixed UTF-16LE with no NUL terminator; the daemon converts to
+ * UTF-8 and rewrites backslashes into forward slashes for libsmb2.
+ */
+typedef struct _OP_CREATE_IN {
+    ULONGLONG    VNetHandle;      /* ULONG64 from V_NET_ROOT_EXTENSION->DaemonHandle */
+    ULONG        CreateOptions;   /* NT CreateOptions (FILE_DIRECTORY_FILE, ...) */
+    ULONG        Disposition;     /* NT CreateDisposition (FILE_OPEN, ...) */
+    ULONG        DesiredAccess;   /* NT ACCESS_MASK */
+    ULONG        FileAttributes;
+    ULONG        ShareAccess;
+    USHORT       PathLen;         /* bytes, UTF-16LE, no NUL */
+    USHORT       _Pad;
+    /* PathLen bytes of UTF-16LE path immediately follow */
+} OP_CREATE_IN, *POP_CREATE_IN;
+
+typedef struct _OP_CREATE_OUT {
+    ULONGLONG     FileHandle;     /* opaque daemon-assigned, non-zero on success */
+    ULONG         Information;    /* NT FILE_OPENED / FILE_CREATED / ... */
+    ULONG         IsDirectory;    /* 0 = file, 1 = directory */
+    LARGE_INTEGER EndOfFile;      /* file size; zero for directories */
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes; /* server-reported attribute bits */
+    ULONG         _Pad;
+} OP_CREATE_OUT, *POP_CREATE_OUT;
+
+typedef struct _OP_CLOSE_IN {
+    ULONGLONG FileHandle;
+    ULONG     IsDirectory;
+    ULONG     _Pad;
+} OP_CLOSE_IN, *POP_CLOSE_IN;
+/* OP_CLOSE has no output payload (status-only downcall). */
+
 #pragma pack(pop)
 
 #if defined(_NTDDK_) || defined(_NTIFS_) || defined(_KERNEL_MODE)
