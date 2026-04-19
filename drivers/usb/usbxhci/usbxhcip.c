@@ -110,6 +110,7 @@ PXHCI_PENDING_COMMAND FindPendingCommandInternal(PHYSICAL_ADDRESS TrbPointer);
 
 // Transfer tracking helper functions
 VOID
+NTAPI
 InitializeTransferTracking(VOID)
 {
     ULONG i;
@@ -255,6 +256,7 @@ UnregisterPendingTransfer(IN PXHCI_PENDING_TRANSFER PendingTransfer)
 
 // Command tracking helper functions
 VOID
+NTAPI
 InitializeCommandTracking(VOID)
 {
     ULONG i;
