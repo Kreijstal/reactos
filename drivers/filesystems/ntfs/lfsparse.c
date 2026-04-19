@@ -472,6 +472,32 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
     Status = NtfsLfsParseRestartPage(Vcb, Pages, PageSize, &Primary, &PrimaryOff);
     if (!NT_SUCCESS(Status))
     {
+        /* Belt-and-braces: a freshly-formatted $LogFile that has never
+         * been touched by any NTFS driver may carry absolutely no RSTR
+         * magic in either page (both all-zeros / all-0xFF / otherwise
+         * blank).  Real dirty-shutdown volumes always have valid magic
+         * on at least one copy -- only the CLEAN flag is missing --
+         * so a bilaterally magic-less pair is the fingerprint of an
+         * uninitialised log, not a torn one.  Treat that as clean so
+         * third-party formatters (ntfsprogs-plus, older ReactOS installs,
+         * images restored from DD dumps of never-mounted volumes) don't
+         * drop the install into RO mode.  Any partial magic (primary
+         * present, backup absent or vice-versa) is STILL dirty. */
+        PNTFS_RECORD_HEADER PrimaryHdr = (PNTFS_RECORD_HEADER)Pages;
+        PNTFS_RECORD_HEADER BackupHdr  = (PNTFS_RECORD_HEADER)(Pages + PageSize);
+
+        if (PrimaryHdr->Type != NRH_RSTR_TYPE &&
+            BackupHdr->Type  != NRH_RSTR_TYPE)
+        {
+            DPRINT1("LFS CheckCleanShutdown: both restart pages lack RSTR "
+                    "magic (primary=0x%08lx backup=0x%08lx); treating as "
+                    "freshly-formatted / clean\n",
+                    (ULONG)PrimaryHdr->Type, (ULONG)BackupHdr->Type);
+            Vcb->LogFileDirty = FALSE;
+            Status = STATUS_SUCCESS;
+            goto Out;
+        }
+
         DPRINT1("LFS CheckCleanShutdown: primary restart page invalid (0x%08lx)\n", Status);
         Status = STATUS_LOG_FILE_FULL;
         goto Out;
