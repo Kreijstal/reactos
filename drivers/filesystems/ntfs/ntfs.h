@@ -1312,6 +1312,20 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
 ULONGLONG
 AttributeDataLength(PNTFS_ATTR_RECORD AttrRecord);
 
+NTSTATUS
+AddResidentAttribute(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     ULONG Type,
+                     PCWSTR Name,
+                     USHORT NameLength,
+                     const VOID *Data,
+                     ULONG DataLength);
+
+NTSTATUS
+RemoveResidentAttribute(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        PNTFS_ATTR_RECORD AttrAddress);
+
 /*
  * Per-file $SECURITY_DESCRIPTOR worker primitives — see security.c and
  * Kreijstal/reactos#36.  This is the NT4-era per-record SD, NOT the
