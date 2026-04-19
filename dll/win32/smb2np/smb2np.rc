@@ -1,0 +1,5 @@
+#define REACTOS_VERSION_DLL
+#define REACTOS_STR_FILE_DESCRIPTION  "ReactOS SMB2/3 Network Provider"
+#define REACTOS_STR_INTERNAL_NAME     "smb2np"
+#define REACTOS_STR_ORIGINAL_FILENAME "smb2np.dll"
+#include <reactos/version.rc>
