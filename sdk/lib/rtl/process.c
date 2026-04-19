@@ -228,10 +228,23 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         PPS_ATTRIBUTE_LIST AttrList = (PPS_ATTRIBUTE_LIST)AttrBuffer;
 
         /*
-         * The ImageFileName passed to RtlCreateUserProcess is already an
-         * NT path (e.g. \??\C:\Windows\system32\smss.exe or
-         * \SystemRoot\system32\smss.exe), so use it directly.
+         * PS_ATTRIBUTE_IMAGE_NAME must be an NT-form path (\??\…, \SystemRoot\…,
+         * or \Device\…) because the kernel's NtCreateUserProcess uses it with
+         * ZwOpenFile, which doesn't understand DOS paths.  Some callers
+         * (notably ntoskrnl!Phase3InitializationDiscard spawning SMSS) reuse
+         * the same UNICODE_STRING Buffer for ImageFileName and
+         * ProcessParameters->ImagePathName, so the post-normalize DOS-form
+         * rewrites we do below would corrupt the kernel's view of the image
+         * name.  Snapshot ImageFileName into a local buffer up-front so the
+         * PS_ATTRIBUTE_IMAGE_NAME binding is immune to the later in-place
+         * rewrites of the shared ProcessParameters buffer.
          */
+        WCHAR LocalImageName[MAX_PATH + 1];
+        USHORT LocalImageNameLen = ImageFileName->Length;
+        if (LocalImageNameLen > sizeof(LocalImageName) - sizeof(WCHAR))
+            LocalImageNameLen = sizeof(LocalImageName) - sizeof(WCHAR);
+        RtlCopyMemory(LocalImageName, ImageFileName->Buffer, LocalImageNameLen);
+        LocalImageName[LocalImageNameLen / sizeof(WCHAR)] = UNICODE_NULL;
 
         /* Clean out the current directory handle if we won't use it */
         if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = NULL;
@@ -246,10 +259,11 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         /* Build attribute list */
         AttrCount = 0;
 
-        /* Image name attribute (required) */
+        /* Image name attribute (required) — pristine NT form, not affected by
+         * the in-place rewrites of ProcessParameters below. */
         AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_IMAGE_NAME;
-        AttrList->Attributes[AttrCount].Size = ImageFileName->Length;
-        AttrList->Attributes[AttrCount].ValuePtr = ImageFileName->Buffer;
+        AttrList->Attributes[AttrCount].Size = LocalImageNameLen;
+        AttrList->Attributes[AttrCount].ValuePtr = LocalImageName;
         AttrList->Attributes[AttrCount].ReturnLength = NULL;
         AttrCount++;
 
@@ -293,8 +307,130 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         CreateInfo.Size = sizeof(CreateInfo);
         CreateInfo.State = PsCreateInitialState;
 
-        /* Normalize process parameters */
+        /* Normalize process parameters (converts relative Buffer offsets
+         * back to absolute pointers so the fields below can be read). */
         RtlNormalizeProcessParams(ProcessParameters);
+
+        /*
+         * Windows invariant: the DOS-form fields of RTL_USER_PROCESS_PARAMETERS
+         * (ImagePathName, CurrentDirectory.DosPath) really are DOS paths.
+         * Downstream consumers — LDR_DATA_TABLE_ENTRY.FullDllName,
+         * BaseComputeProcessDllPath (feeding SearchPathW), activation-context
+         * resource probing, GetCurrentDirectoryW, inherited CWD for spawned
+         * children, etc. — are DOS-path APIs and don't understand the native
+         * "\??\" or "\SystemRoot\" prefix.  Callers (the NT6 kernel spawning
+         * SMSS, SMSS spawning subsystems, kernel32 CreateProcessW inheriting
+         * an NT-form CWD) legitimately reuse the same NT-form string for both
+         * PS_ATTRIBUTE_IMAGE_NAME (kernel needs NT form to ZwOpenFile the
+         * image) and ProcessParameters, which lets the NT form leak into the
+         * child's user-mode DOS APIs.
+         *
+         * We restore the invariant here, after RtlNormalizeProcessParams so
+         * that Buffer is an absolute pointer.  Two prefixes are handled:
+         *
+         *   "\??\"          -> stripped in place (4 WCHARs removed).
+         *   "\SystemRoot\"  -> replaced by the runtime DOS expansion kept in
+         *                     SharedUserData->NtSystemRoot (e.g. "X:\ReactOS"
+         *                     on a livecd boot).  SharedUserData resolves to
+         *                     a valid read-only mapping in both user mode
+         *                     (0x7FFE0000) and kernel mode
+         *                     (KI_USER_SHARED_DATA), and this function links
+         *                     into ntoskrnl as well as ntdll.
+         *
+         * All rewrites are bounded by MaximumLength to avoid corruption; if
+         * the DOS expansion would not fit, we leave the field alone rather
+         * than truncate.
+         */
+#define STRIP_NT_PREFIX(us)                                                          \
+        do {                                                                         \
+            if ((us).Length >= 4 * sizeof(WCHAR) &&                                  \
+                (us).Buffer[0] == L'\\' &&                                           \
+                (us).Buffer[1] == L'?' &&                                            \
+                (us).Buffer[2] == L'?' &&                                            \
+                (us).Buffer[3] == L'\\')                                             \
+            {                                                                        \
+                USHORT _strip = 4 * sizeof(WCHAR);                                   \
+                USHORT _newLen = (us).Length - _strip;                               \
+                RtlMoveMemory((us).Buffer,                                           \
+                              (PBYTE)(us).Buffer + _strip,                           \
+                              _newLen + sizeof(WCHAR));                              \
+                (us).Length = _newLen;                                               \
+            }                                                                        \
+        } while (0)
+
+        /*
+         * Replace leading "\SystemRoot\" (case-insensitive) with the DOS-form
+         * system root from SharedUserData->NtSystemRoot.  The replacement
+         * keeps the trailing backslash of the prefix, so we only substitute
+         * the "\SystemRoot" portion (the 11-char substring before the final
+         * backslash) with the expansion.
+         */
+#define SYSROOT_PREFIX_CHARS  11 /* length of L"\\SystemRoot" (no trailing '\\') */
+#define EXPAND_SYSTEMROOT_PREFIX(us)                                                 \
+        do {                                                                         \
+            static const WCHAR _sysroot[SYSROOT_PREFIX_CHARS] =                      \
+                { L'\\', L'S', L'y', L's', L't', L'e',                               \
+                  L'm', L'R', L'o', L'o', L't' };                                    \
+            BOOLEAN _match = FALSE;                                                  \
+            if ((us).Length >= (SYSROOT_PREFIX_CHARS + 1) * sizeof(WCHAR) &&         \
+                (us).Buffer[SYSROOT_PREFIX_CHARS] == L'\\')                          \
+            {                                                                        \
+                ULONG _i;                                                            \
+                _match = TRUE;                                                       \
+                for (_i = 0; _i < SYSROOT_PREFIX_CHARS; _i++)                        \
+                {                                                                    \
+                    WCHAR _a = (us).Buffer[_i];                                      \
+                    WCHAR _b = _sysroot[_i];                                         \
+                    if (_a >= L'A' && _a <= L'Z') _a = (WCHAR)(_a + (L'a' - L'A'));  \
+                    if (_b >= L'A' && _b <= L'Z') _b = (WCHAR)(_b + (L'a' - L'A'));  \
+                    if (_a != _b) { _match = FALSE; break; }                         \
+                }                                                                    \
+            }                                                                        \
+            if (_match)                                                              \
+            {                                                                        \
+                PCWSTR _dos = SharedUserData->NtSystemRoot;                          \
+                SIZE_T _dosChars = 0;                                                \
+                while (_dos[_dosChars] != UNICODE_NULL &&                            \
+                       _dosChars < RTL_NUMBER_OF(SharedUserData->NtSystemRoot))      \
+                    _dosChars++;                                                     \
+                if (_dosChars != 0)                                                  \
+                {                                                                    \
+                    SIZE_T _tail = (us).Length -                                     \
+                                   SYSROOT_PREFIX_CHARS * sizeof(WCHAR);             \
+                    SIZE_T _newBytes = _dosChars * sizeof(WCHAR) + _tail;            \
+                    if (_newBytes + sizeof(WCHAR) <= (us).MaximumLength)             \
+                    {                                                                \
+                        RtlMoveMemory((PBYTE)(us).Buffer +                           \
+                                          _dosChars * sizeof(WCHAR),                 \
+                                      (PBYTE)(us).Buffer +                           \
+                                          SYSROOT_PREFIX_CHARS * sizeof(WCHAR),      \
+                                      _tail + sizeof(WCHAR));                        \
+                        RtlCopyMemory((us).Buffer,                                   \
+                                      _dos,                                          \
+                                      _dosChars * sizeof(WCHAR));                    \
+                        (us).Length = (USHORT)_newBytes;                             \
+                    }                                                                \
+                    else                                                             \
+                    {                                                                \
+                        DPRINT1("RtlCreateUserProcess: cannot expand \\SystemRoot"   \
+                                " in %wZ (need %Iu, have %u)\n",                     \
+                                &(us), _newBytes + sizeof(WCHAR),                    \
+                                (us).MaximumLength);                                 \
+                    }                                                                \
+                }                                                                    \
+            }                                                                        \
+        } while (0)
+
+        if (ProcessParameters->Flags & RTL_USER_PROCESS_PARAMETERS_NORMALIZED)
+        {
+            STRIP_NT_PREFIX(ProcessParameters->ImagePathName);
+            STRIP_NT_PREFIX(ProcessParameters->CurrentDirectory.DosPath);
+            EXPAND_SYSTEMROOT_PREFIX(ProcessParameters->ImagePathName);
+            EXPAND_SYSTEMROOT_PREFIX(ProcessParameters->CurrentDirectory.DosPath);
+        }
+#undef STRIP_NT_PREFIX
+#undef EXPAND_SYSTEMROOT_PREFIX
+#undef SYSROOT_PREFIX_CHARS
 
         /* Call NtCreateUserProcess */
         Status = NtCreateUserProcess(&ProcessInfo->ProcessHandle,
