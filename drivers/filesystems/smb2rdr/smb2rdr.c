@@ -64,6 +64,21 @@ typedef struct _SMB2RDR_V_NET_ROOT_EXTENSION {
 #define Smb2RdrGetVNetRootExtension(V) \
     (((V) == NULL) ? NULL : (PSMB2RDR_V_NET_ROOT_EXTENSION)((V)->Context))
 
+/* FCB extension: tracks the opaque daemon file handle associated with the
+ * underlying libsmb2 smb2fh/smb2dir.  One entry per FCB is sufficient for
+ * the current non-collapsing open model: every CreateFile() produces a
+ * fresh FCB (MRxShouldTryToCollapseThisOpen returns NOT_IMPLEMENTED), so
+ * the FCB extension cleanly maps 1:1 to a daemon handle for the lifetime
+ * of the open chain.  FOBX extension is unused today; when sharing opens
+ * across collapsed FCBs is introduced, the per-handle state moves there. */
+typedef struct _SMB2RDR_FCB_EXTENSION {
+    ULONG64 DaemonFileHandle;   /* 0 if no daemon-side open */
+    BOOLEAN IsDirectory;
+} SMB2RDR_FCB_EXTENSION, *PSMB2RDR_FCB_EXTENSION;
+
+#define Smb2RdrGetFcbExtension(F) \
+    (((F) == NULL) ? NULL : (PSMB2RDR_FCB_EXTENSION)((F)->Context))
+
 static struct _MINIRDR_DISPATCH smb2rdr_ops;
 static PRDBSS_DEVICE_OBJECT     smb2rdr_dev;
 
@@ -82,6 +97,26 @@ smb2rdr_AreFilesAliased(PFCB a, PFCB b)
     UNREFERENCED_PARAMETER(a);
     UNREFERENCED_PARAMETER(b);
     return STATUS_NOT_IMPLEMENTED;
+}
+
+/* rdbss calls MRxDeallocateForFcb right before it frees the FCB storage.
+ * Our FCB extension is allocated inline by rdbss (MRxFcbSize > 0 plus the
+ * RDBSS_MANAGE_FCB_EXTENSION flag), so rdbss reclaims it along with the
+ * FCB — there's nothing dynamic here for us to release.  MRxCloseSrvOpen
+ * has already told the daemon to drop its libsmb2 handle, so the slot
+ * sits at DaemonFileHandle == 0 by the time we get here. */
+NTSTATUS NTAPI
+smb2rdr_DeallocateForFcb(IN OUT PMRX_FCB pFcb)
+{
+    UNREFERENCED_PARAMETER(pFcb);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI
+smb2rdr_DeallocateForFobx(IN OUT PMRX_FOBX pFobx)
+{
+    UNREFERENCED_PARAMETER(pFobx);
+    return STATUS_SUCCESS;
 }
 
 /* ---------- connection-bringup stubs ----------
@@ -468,6 +503,236 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
     return STATUS_SUCCESS;
 }
 
+/* ---------- MRxCreate / MRxCloseSrvOpen ----------
+ *
+ * MRxCreate is invoked by rdbss once it has already allocated an SRV_OPEN
+ * and (possibly) an FCB for the path.  Our job is to translate the create
+ * parameters into an OP_CREATE upcall, block on the daemon's reply, and
+ * populate the FCB extension with the opaque daemon-side handle that
+ * subsequent read/close/query-info calls will quote.
+ *
+ * For the share-root case (path length 0 after stripping the NetRoot
+ * prefix), the daemon drives smb2_opendir(""); for non-root paths it
+ * either honours FILE_DIRECTORY_FILE / FILE_NON_DIRECTORY_FILE hints or
+ * falls back to smb2_stat() to disambiguate. */
+
+static NTSTATUS
+smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PSMB2RDR_V_NET_ROOT_EXTENSION vNetExt;
+    PSMB2RDR_FCB_EXTENSION fcbExt;
+    PNT_CREATE_PARAMETERS params;
+    PUNICODE_STRING relName;
+    PUCHAR inBuf = NULL;
+    ULONG inLen;
+    PWCHAR pathChars;
+    USHORT pathBytes;
+    OP_CREATE_OUT out;
+    ULONG outActual = 0;
+    NTSTATUS bridgeStatus;
+    NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+    NTSTATUS status;
+
+    if (SrvOpen == NULL || Fcb == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    vNetExt = Smb2RdrGetVNetRootExtension(SrvOpen->pVNetRoot);
+    fcbExt  = Smb2RdrGetFcbExtension(Fcb);
+    if (vNetExt == NULL || fcbExt == NULL ||
+        vNetExt->DaemonHandle == 0)
+    {
+        DPRINT1("SMB2RDR: MRxCreate: no daemon share handle on vnet\n");
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
+    params = &RxContext->Create.NtCreateParameters;
+
+    /* The relative path is whatever remains after the VNetRoot prefix
+     * was stripped during canonicalisation.  rdbss stashes this in
+     * Fcb->FcbTableEntry.Path (empty for the share root). */
+    relName = &((PFCB)Fcb)->FcbTableEntry.Path;
+    pathChars = relName->Buffer;
+    pathBytes = relName->Length;
+
+    /* Drop a single leading backslash: the daemon converts backslashes
+     * to forward slashes but libsmb2's smb2_open wants "dir/file" rather
+     * than "/dir/file". */
+    if (pathBytes >= sizeof(WCHAR) && pathChars[0] == L'\\') {
+        pathChars++;
+        pathBytes -= sizeof(WCHAR);
+    }
+
+    DPRINT1("SMB2RDR: MRxCreate path=\"%wZ\" opts=0x%lx disp=%lu "
+            "access=0x%lx vnet=0x%llx\n",
+            relName, params->CreateOptions, params->Disposition,
+            params->DesiredAccess, vNetExt->DaemonHandle);
+
+    inLen = (ULONG)sizeof(OP_CREATE_IN) + pathBytes;
+    inBuf = ExAllocatePoolWithTag(NonPagedPool, inLen, 'rCcS');
+    if (inBuf == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    {
+        OP_CREATE_IN hdr;
+        RtlZeroMemory(&hdr, sizeof(hdr));
+        hdr.VNetHandle     = vNetExt->DaemonHandle;
+        hdr.CreateOptions  = params->CreateOptions;
+        hdr.Disposition    = params->Disposition;
+        hdr.DesiredAccess  = params->DesiredAccess;
+        hdr.FileAttributes = params->FileAttributes;
+        hdr.ShareAccess    = params->ShareAccess;
+        hdr.PathLen        = pathBytes;
+        RtlCopyMemory(inBuf, &hdr, sizeof(hdr));
+        if (pathBytes)
+            RtlCopyMemory(inBuf + sizeof(hdr), pathChars, pathBytes);
+    }
+
+    RtlZeroMemory(&out, sizeof(out));
+    bridgeStatus = SmbRdrIssueUpcall(
+        SMB2D_OP_CREATE,
+        inBuf, inLen,
+        &out, (ULONG)sizeof(out), &outActual,
+        &daemonStatus,
+        30 /* seconds */);
+
+    ExFreePoolWithTag(inBuf, 'rCcS');
+
+    if (bridgeStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxCreate bridge failed 0x%08lx\n", bridgeStatus);
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    if (daemonStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxCreate daemon failed 0x%08lx\n", daemonStatus);
+        return daemonStatus;
+    }
+    if (outActual < sizeof(out) || out.FileHandle == 0) {
+        DPRINT1("SMB2RDR: MRxCreate short reply outlen=%lu handle=0x%llx\n",
+                outActual, out.FileHandle);
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+
+    /* Allocate a FOBX for the file object.  rdbss frees it on Cleanup. */
+    if (!RxIsFcbAcquiredExclusive(Fcb)) {
+        ASSERT(!RxIsFcbAcquiredShared(Fcb));
+        RxAcquireExclusiveFcbResourceInMRx(Fcb);
+    }
+    RxContext->pFobx = RxCreateNetFobx(RxContext, SrvOpen);
+    if (RxContext->pFobx == NULL) {
+        /* Best-effort: ask the daemon to release the libsmb2 handle we
+         * just opened; worst case the handle sits in the table until
+         * the service is restarted. */
+        OP_CLOSE_IN cin;
+        ULONG closeActual = 0;
+        NTSTATUS closeStatus = STATUS_UNSUCCESSFUL;
+        RtlZeroMemory(&cin, sizeof(cin));
+        cin.FileHandle  = out.FileHandle;
+        cin.IsDirectory = out.IsDirectory;
+        (void)SmbRdrIssueUpcall(SMB2D_OP_CLOSE, &cin, (ULONG)sizeof(cin),
+                                 NULL, 0, &closeActual, &closeStatus, 5);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* Teach rdbss about the file-vs-directory distinction and the
+     * basic metadata we got back.  For the P0 slice we only need the
+     * FCB to know it's a directory (so subsequent SetInfo/Query paths
+     * pick the right branch).  QueryFileInfo, when implemented, will
+     * overwrite the InitPacket values with authoritative numbers. */
+    {
+        FCB_INIT_PACKET initPkt;
+        RX_FILE_TYPE storageType;
+        LARGE_INTEGER zero;
+        ULONG attrs = out.FileAttributes ? out.FileAttributes
+                                         : FILE_ATTRIBUTE_NORMAL;
+        ULONG numLinks = 1;
+
+        zero.QuadPart = 0;
+        RxFormInitPacket(initPkt,
+                          &attrs,
+                          &numLinks,
+                          &zero, &zero, &zero, &zero,
+                          &out.AllocationSize,
+                          &out.EndOfFile,
+                          &out.EndOfFile);
+
+        storageType = out.IsDirectory ? FileTypeDirectory : FileTypeFile;
+        RxFinishFcbInitialization(Fcb, RDBSS_STORAGE_NTC(storageType),
+                                   &initPkt);
+    }
+
+    fcbExt->DaemonFileHandle = out.FileHandle;
+    fcbExt->IsDirectory      = out.IsDirectory ? TRUE : FALSE;
+
+    RxContext->Create.ReturnedCreateInformation = out.Information;
+#ifndef __REACTOS__
+    RxContext->CurrentIrp->IoStatus.Information = out.Information;
+#endif
+
+    status = STATUS_SUCCESS;
+    RxContext->CurrentIrp->IoStatus.Status = status;
+
+    DPRINT1("SMB2RDR: MRxCreate success fcb_handle=0x%llx info=%lu "
+            "is_dir=%lu\n",
+            out.FileHandle, out.Information, out.IsDirectory);
+    return status;
+}
+
+static NTSTATUS
+smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    ULONG64 handle;
+    BOOLEAN isDir;
+    OP_CLOSE_IN cin;
+    ULONG outActual = 0;
+    NTSTATUS bridgeStatus;
+    NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+        /* Nothing to close daemon-side — either MRxCreate never ran to
+         * completion, or a prior CloseSrvOpen already cleared the slot
+         * (rdbss can call us twice on the scavenger path). */
+        DPRINT1("SMB2RDR: MRxCloseSrvOpen (no handle)\n");
+        return STATUS_SUCCESS;
+    }
+
+    handle = fcbExt->DaemonFileHandle;
+    isDir  = fcbExt->IsDirectory;
+    /* Clear the slot up-front so a racing finalize doesn't double-close
+     * even if the upcall path bounces (timeout, bridge not ready, etc.). */
+    fcbExt->DaemonFileHandle = 0;
+
+    DPRINT1("SMB2RDR: MRxCloseSrvOpen handle=0x%llx is_dir=%u\n",
+            handle, isDir);
+
+    RtlZeroMemory(&cin, sizeof(cin));
+    cin.FileHandle  = handle;
+    cin.IsDirectory = isDir ? 1u : 0u;
+
+    bridgeStatus = SmbRdrIssueUpcall(
+        SMB2D_OP_CLOSE,
+        &cin, (ULONG)sizeof(cin),
+        NULL, 0, &outActual,
+        &daemonStatus,
+        15 /* seconds */);
+
+    if (bridgeStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxCloseSrvOpen bridge failed 0x%08lx\n",
+                bridgeStatus);
+        /* Still report SUCCESS to rdbss: the kernel side has already
+         * dropped its reference, and leaking a daemon-side handle is
+         * recoverable across a service restart. */
+        return STATUS_SUCCESS;
+    }
+    if (daemonStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxCloseSrvOpen daemon reply 0x%08lx\n",
+                daemonStatus);
+    }
+    return STATUS_SUCCESS;
+}
+
 /* ---------- ops table ---------- */
 
 static NTSTATUS
@@ -484,7 +749,7 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxSrvCallSize  = 0;
     smb2rdr_ops.MRxNetRootSize  = 0;
     smb2rdr_ops.MRxVNetRootSize = sizeof(SMB2RDR_V_NET_ROOT_EXTENSION);
-    smb2rdr_ops.MRxFcbSize      = 0;
+    smb2rdr_ops.MRxFcbSize      = sizeof(SMB2RDR_FCB_EXTENSION);
     smb2rdr_ops.MRxFobxSize     = 0;
 
     smb2rdr_ops.MRxCancel = NULL;
@@ -501,15 +766,15 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxFinalizeNetRoot     = smb2rdr_FinalizeNetRoot;
     smb2rdr_ops.MRxFinalizeVNetRoot    = smb2rdr_FinalizeVNetRoot;
 
-    smb2rdr_ops.MRxCreate                     = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxCreate                     = smb2rdr_Create;
     smb2rdr_ops.MRxCollapseOpen               = smb2rdr_Unimplemented;
     /* Returning failure here tells rdbss "don't collapse, open fresh".
      * rdbss requires this slot non-NULL or asserts in RxSearchForCollapsibleOpen. */
     smb2rdr_ops.MRxShouldTryToCollapseThisOpen = smb2rdr_Unimplemented;
-    smb2rdr_ops.MRxCloseSrvOpen      = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxCloseSrvOpen      = smb2rdr_CloseSrvOpen;
     smb2rdr_ops.MRxFlush             = smb2rdr_Unimplemented;
-    smb2rdr_ops.MRxDeallocateForFcb  = smb2rdr_Unimplemented;
-    smb2rdr_ops.MRxDeallocateForFobx = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxDeallocateForFcb  = smb2rdr_DeallocateForFcb;
+    smb2rdr_ops.MRxDeallocateForFobx = smb2rdr_DeallocateForFobx;
 
     smb2rdr_ops.MRxQueryDirectory    = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxQueryVolumeInfo   = smb2rdr_Unimplemented;
