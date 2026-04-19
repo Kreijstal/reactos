@@ -19,6 +19,7 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <winioctl.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdarg.h>
@@ -28,6 +29,31 @@
 #include <smb2/libsmb2.h>
 
 #include "smb2d.h"
+
+/* libsmb2 uses POSIX open() flag values; if the CRT headers don't provide
+ * them (e.g. ancient cross-compile toolchains) fall back to the Linux
+ * numeric values libsmb2 itself was compiled against. */
+#ifndef O_RDONLY
+# define O_RDONLY 0x0000
+#endif
+#ifndef O_WRONLY
+# define O_WRONLY 0x0001
+#endif
+#ifndef O_RDWR
+# define O_RDWR   0x0002
+#endif
+#ifndef O_CREAT
+# define O_CREAT  0x0040
+#endif
+#ifndef O_EXCL
+# define O_EXCL   0x0080
+#endif
+#ifndef O_TRUNC
+# define O_TRUNC  0x0200
+#endif
+#ifndef O_APPEND
+# define O_APPEND 0x0400
+#endif
 
 /*
  * smb2d runs as a service where stdout/stderr have nowhere to go, so we
@@ -68,6 +94,36 @@ typedef struct {
     LONG     Status;        /* NTSTATUS */
     ULONG    OutLength;
 } SMB2D_DOWNCALL_HEADER;
+
+/* Must stay byte-identical to the kernel definitions in
+ * drivers/filesystems/smb2rdr/upcall.h.  Kept inline rather than shared
+ * because this daemon is deliberately DDK-free. */
+typedef struct {
+    ULONGLONG VNetHandle;
+    ULONG     CreateOptions;
+    ULONG     Disposition;
+    ULONG     DesiredAccess;
+    ULONG     FileAttributes;
+    ULONG     ShareAccess;
+    USHORT    PathLen;
+    USHORT    _Pad;
+} SMB2D_OP_CREATE_IN;
+
+typedef struct {
+    ULONGLONG     FileHandle;
+    ULONG         Information;
+    ULONG         IsDirectory;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         _Pad;
+} SMB2D_OP_CREATE_OUT;
+
+typedef struct {
+    ULONGLONG FileHandle;
+    ULONG     IsDirectory;
+    ULONG     _Pad;
+} SMB2D_OP_CLOSE_IN;
 #pragma pack(pop)
 
 /* Matches SMB2D_OP_* in drivers/filesystems/smb2rdr/upcall.h. */
@@ -95,7 +151,97 @@ enum {
 #ifndef STATUS_OBJECT_NAME_NOT_FOUND
 # define STATUS_OBJECT_NAME_NOT_FOUND  ((LONG)0xC0000034L)
 #endif
+#ifndef STATUS_OBJECT_NAME_COLLISION
+# define STATUS_OBJECT_NAME_COLLISION  ((LONG)0xC0000035L)
+#endif
+#ifndef STATUS_OBJECT_PATH_NOT_FOUND
+# define STATUS_OBJECT_PATH_NOT_FOUND  ((LONG)0xC000003AL)
+#endif
+#ifndef STATUS_INVALID_HANDLE
+# define STATUS_INVALID_HANDLE         ((LONG)0xC0000008L)
+#endif
+#ifndef STATUS_NOT_A_DIRECTORY
+# define STATUS_NOT_A_DIRECTORY        ((LONG)0xC0000103L)
+#endif
+#ifndef STATUS_FILE_IS_A_DIRECTORY
+# define STATUS_FILE_IS_A_DIRECTORY    ((LONG)0xC00000BAL)
+#endif
+#ifndef STATUS_ACCESS_DENIED
+# define STATUS_ACCESS_DENIED          ((LONG)0xC0000022L)
+#endif
+#ifndef STATUS_UNSUCCESSFUL
+# define STATUS_UNSUCCESSFUL           ((LONG)0xC0000001L)
+#endif
 #define SMB2D_STATUS_SUCCESS           ((LONG)0x00000000L)
+
+/* NT create-disposition / createoptions / file-attribute constants we need
+ * on the daemon side.  winnt.h supplies all of these when built against the
+ * SDK; we defensively redefine them in case the service build environment
+ * omits anything. */
+#ifndef FILE_SUPERSEDE
+# define FILE_SUPERSEDE                0x00000000
+#endif
+#ifndef FILE_OPEN
+# define FILE_OPEN                     0x00000001
+#endif
+#ifndef FILE_CREATE
+# define FILE_CREATE                   0x00000002
+#endif
+#ifndef FILE_OPEN_IF
+# define FILE_OPEN_IF                  0x00000003
+#endif
+#ifndef FILE_OVERWRITE
+# define FILE_OVERWRITE                0x00000004
+#endif
+#ifndef FILE_OVERWRITE_IF
+# define FILE_OVERWRITE_IF             0x00000005
+#endif
+
+#ifndef FILE_SUPERSEDED
+# define FILE_SUPERSEDED               0x00000000
+#endif
+#ifndef FILE_OPENED
+# define FILE_OPENED                   0x00000001
+#endif
+#ifndef FILE_CREATED
+# define FILE_CREATED                  0x00000002
+#endif
+#ifndef FILE_OVERWRITTEN
+# define FILE_OVERWRITTEN              0x00000003
+#endif
+#ifndef FILE_EXISTS
+# define FILE_EXISTS                   0x00000004
+#endif
+#ifndef FILE_DOES_NOT_EXIST
+# define FILE_DOES_NOT_EXIST           0x00000005
+#endif
+
+#ifndef FILE_DIRECTORY_FILE
+# define FILE_DIRECTORY_FILE           0x00000001
+#endif
+#ifndef FILE_NON_DIRECTORY_FILE
+# define FILE_NON_DIRECTORY_FILE       0x00000040
+#endif
+
+#ifndef FILE_ATTRIBUTE_DIRECTORY
+# define FILE_ATTRIBUTE_DIRECTORY      0x00000010
+#endif
+#ifndef FILE_ATTRIBUTE_NORMAL
+# define FILE_ATTRIBUTE_NORMAL         0x00000080
+#endif
+#ifndef FILE_ATTRIBUTE_ARCHIVE
+# define FILE_ATTRIBUTE_ARCHIVE        0x00000020
+#endif
+
+#ifndef FILE_WRITE_DATA
+# define FILE_WRITE_DATA               0x00000002
+#endif
+#ifndef FILE_APPEND_DATA
+# define FILE_APPEND_DATA              0x00000004
+#endif
+#ifndef GENERIC_WRITE_A
+# define GENERIC_WRITE_A               0x40000000
+#endif
 
 /* ---------- handle table: ULONG64 handle -> smb2_context * ---------- */
 
@@ -173,6 +319,107 @@ RemoveConn(ULONG64 h)
     }
     LeaveCriticalSection(&g_conn_lock);
     return ctx;
+}
+
+/* Non-owning lookup: returns the smb2_context * associated with the vnet
+ * handle without removing it from the table.  Used by per-file ops that
+ * leave the share connection intact across the upcall. */
+static struct smb2_context *
+LookupConn(ULONG64 h)
+{
+    int i;
+    struct smb2_context *ctx = NULL;
+
+    if (h == 0) return NULL;
+    EnterCriticalSection(&g_conn_lock);
+    for (i = 0; i < SMB2D_MAX_HANDLES; i++) {
+        if (g_conns[i].handle == h) {
+            ctx = g_conns[i].ctx;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_conn_lock);
+    return ctx;
+}
+
+/* ---------- file/dir handle table: ULONG64 file handle -> (ctx, fh|dir, is_dir) ----- */
+
+#define SMB2D_MAX_FILE_HANDLES 256
+
+typedef struct {
+    ULONG64              handle;       /* 0 = free slot */
+    struct smb2_context *ctx;          /* borrowed reference from the conn table */
+    void                *opaque;       /* smb2fh* if !is_dir, smb2dir* otherwise */
+    int                  is_dir;
+} SMB2D_FILE;
+
+static SMB2D_FILE       g_files[SMB2D_MAX_FILE_HANDLES];
+static CRITICAL_SECTION g_file_lock;
+static BOOL             g_file_lock_init;
+/* Start file handles at 0x100 to keep them visually distinct from the
+ * per-share handles (which start at 1).  Both namespaces live in the same
+ * ULONG64 but never collide because they go through separate tables. */
+static ULONG64          g_next_file_handle = 0x100;
+
+static void
+EnsureFileLock(void)
+{
+    if (!g_file_lock_init) {
+        InitializeCriticalSection(&g_file_lock);
+        g_file_lock_init = TRUE;
+    }
+}
+
+static ULONG64
+InsertFile(struct smb2_context *ctx, void *opaque, int is_dir)
+{
+    int i;
+    ULONG64 h = 0;
+
+    EnsureFileLock();
+    EnterCriticalSection(&g_file_lock);
+    for (i = 0; i < SMB2D_MAX_FILE_HANDLES; i++) {
+        if (g_files[i].handle == 0) {
+            h = g_next_file_handle++;
+            if (g_next_file_handle == 0) g_next_file_handle = 0x100;
+            g_files[i].handle = h;
+            g_files[i].ctx    = ctx;
+            g_files[i].opaque = opaque;
+            g_files[i].is_dir = is_dir;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_file_lock);
+    return h;
+}
+
+/* Remove-and-return a file-handle table entry.  Returns FALSE if the handle
+ * wasn't known.  The caller is responsible for invoking smb2_close() /
+ * smb2_closedir() on the returned opaque. */
+static BOOL
+RemoveFile(ULONG64 h, struct smb2_context **ctx_out,
+           void **opaque_out, int *is_dir_out)
+{
+    int i;
+    BOOL found = FALSE;
+
+    EnsureFileLock();
+    EnterCriticalSection(&g_file_lock);
+    for (i = 0; i < SMB2D_MAX_FILE_HANDLES; i++) {
+        if (g_files[i].handle == h) {
+            *ctx_out    = g_files[i].ctx;
+            *opaque_out = g_files[i].opaque;
+            *is_dir_out = g_files[i].is_dir;
+            g_files[i].handle = 0;
+            g_files[i].ctx    = NULL;
+            g_files[i].opaque = NULL;
+            g_files[i].is_dir = 0;
+            found = TRUE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_file_lock);
+    return found;
 }
 
 /* ---------- small UTF-16 helpers ---------- */
@@ -352,6 +599,273 @@ out:
     return status;
 }
 
+/*
+ * Converts an UTF-16LE WCHAR path (as shipped by smb2rdr) into a libsmb2-
+ * friendly UTF-8 string.  Handles three path-munging quirks in one place:
+ *   - an empty input or "\" becomes "" (libsmb2 treats the share root as
+ *     the empty path),
+ *   - every '\\' is rewritten to '/' for libsmb2's POSIX path syntax,
+ *   - a leading slash (from a leading '\\' on the kernel side) is stripped
+ *     because smb2_open() expects "dir/file", not "/dir/file".
+ * The returned string is HeapFreed by the caller.  Returns NULL on OOM.
+ */
+static char *
+MakeSmb2Path(const WCHAR *w, int wbytes)
+{
+    char *s;
+    size_t i;
+    size_t len;
+
+    if (wbytes <= 0) {
+        s = (char *)HeapAlloc(GetProcessHeap(), 0, 1);
+        if (s) s[0] = '\0';
+        return s;
+    }
+
+    s = Utf16ToUtf8(w, wbytes / (int)sizeof(WCHAR));
+    if (!s) return NULL;
+
+    for (i = 0; s[i]; i++) {
+        if (s[i] == '\\') s[i] = '/';
+    }
+    len = strlen(s);
+    if (len > 0 && s[0] == '/') {
+        memmove(s, s + 1, len); /* len includes the NUL */
+    }
+    /* Drop any trailing slash; libsmb2 rejects "dir/" on opendir. */
+    len = strlen(s);
+    while (len > 0 && s[len - 1] == '/') {
+        s[--len] = '\0';
+    }
+    return s;
+}
+
+/*
+ * Map NT {CreateOptions, Disposition, DesiredAccess} to POSIX open() flags
+ * for libsmb2's smb2_open().  Directories go through smb2_opendir() and
+ * don't need POSIX flags; this helper is only used for file opens.
+ */
+static int
+NtOpenToPosixFlags(ULONG createOptions, ULONG disposition, ULONG desiredAccess)
+{
+    int flags;
+    BOOL needsWrite;
+
+    UNREFERENCED_PARAMETER(createOptions);
+
+    needsWrite = (desiredAccess &
+                  (FILE_WRITE_DATA | FILE_APPEND_DATA |
+                   GENERIC_WRITE)) != 0;
+
+    switch (disposition) {
+    case FILE_OPEN:
+        flags = needsWrite ? O_RDWR : O_RDONLY;
+        break;
+    case FILE_CREATE:
+        flags = O_CREAT | O_EXCL | O_RDWR;
+        break;
+    case FILE_OPEN_IF:
+        flags = O_CREAT | O_RDWR;
+        break;
+    case FILE_OVERWRITE:
+        flags = O_TRUNC | O_RDWR;
+        break;
+    case FILE_OVERWRITE_IF:
+    case FILE_SUPERSEDE:
+        flags = O_CREAT | O_TRUNC | O_RDWR;
+        break;
+    default:
+        flags = needsWrite ? O_RDWR : O_RDONLY;
+        break;
+    }
+    return flags;
+}
+
+static LONG
+HandleOpCreate(const BYTE *in, ULONG inLen,
+               SMB2D_OP_CREATE_OUT *out)
+{
+    SMB2D_OP_CREATE_IN hdr;
+    const WCHAR *pathW;
+    char *path = NULL;
+    struct smb2_context *ctx;
+    struct smb2_stat_64 st;
+    BOOLEAN wantDir, wantFile;
+    int is_dir;
+    int rc;
+    struct smb2fh *fh = NULL;
+    struct smb2dir *dir = NULL;
+    ULONG64 handle;
+    LONG status = STATUS_UNSUCCESSFUL;
+
+    memset(out, 0, sizeof(*out));
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    if ((ULONG)sizeof(hdr) + hdr.PathLen > inLen)
+        return STATUS_INVALID_PARAMETER;
+    pathW = (const WCHAR *)(in + sizeof(hdr));
+
+    ctx = LookupConn(hdr.VNetHandle);
+    if (ctx == NULL) {
+        smb2d_log("smb2d: OP_CREATE unknown vnet handle=0x%llx\n",
+                  (unsigned long long)hdr.VNetHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+
+    path = MakeSmb2Path(pathW, (int)hdr.PathLen);
+    if (!path) return (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+
+    smb2d_log("smb2d: OP_CREATE vnet=0x%llx path=\"%s\" options=0x%lx "
+              "disp=%lu access=0x%lx\n",
+              (unsigned long long)hdr.VNetHandle, path,
+              hdr.CreateOptions, hdr.Disposition, hdr.DesiredAccess);
+
+    wantDir  = (hdr.CreateOptions & FILE_DIRECTORY_FILE)     != 0;
+    wantFile = (hdr.CreateOptions & FILE_NON_DIRECTORY_FILE) != 0;
+
+    /* Decide whether the target is a file or directory.  The empty path
+     * is always the share root (directory).  Otherwise we honour the
+     * NT hints, falling back to smb2_stat() to disambiguate when neither
+     * FILE_DIRECTORY_FILE nor FILE_NON_DIRECTORY_FILE is set. */
+    if (path[0] == '\0') {
+        is_dir = 1;
+    } else if (wantDir && !wantFile) {
+        is_dir = 1;
+    } else if (wantFile && !wantDir) {
+        is_dir = 0;
+    } else {
+        memset(&st, 0, sizeof(st));
+        rc = smb2_stat(ctx, path, &st);
+        if (rc == 0) {
+            is_dir = (st.smb2_type == SMB2_TYPE_DIRECTORY) ? 1 : 0;
+        } else {
+            /* stat failed; fall through to treat as file if caller wanted
+             * to create/supersede, otherwise report not-found. */
+            smb2d_log("smb2d: smb2_stat(\"%s\") failed: %s\n",
+                      path, smb2_get_error(ctx));
+            if (hdr.Disposition == FILE_CREATE ||
+                hdr.Disposition == FILE_OPEN_IF ||
+                hdr.Disposition == FILE_OVERWRITE_IF ||
+                hdr.Disposition == FILE_SUPERSEDE) {
+                is_dir = 0;
+            } else {
+                status = STATUS_OBJECT_NAME_NOT_FOUND;
+                goto out;
+            }
+        }
+    }
+
+    if (is_dir) {
+        dir = smb2_opendir(ctx, path);
+        if (dir == NULL) {
+            smb2d_log("smb2d: smb2_opendir(\"%s\") failed: %s\n",
+                      path, smb2_get_error(ctx));
+            /* Path-not-found is the most useful kernel-side hint. */
+            status = (path[0] == '\0') ? STATUS_BAD_NETWORK_NAME
+                                       : STATUS_OBJECT_NAME_NOT_FOUND;
+            goto out;
+        }
+        handle = InsertFile(ctx, dir, 1);
+        if (handle == 0) {
+            smb2_closedir(ctx, dir);
+            status = (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+            goto out;
+        }
+        smb2d_log("smb2d: smb2_opendir(\"%s\") -> dir=%p\n",
+                  path, (void *)dir);
+        out->FileHandle  = handle;
+        out->Information = FILE_OPENED;
+        out->IsDirectory = 1;
+        out->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
+        smb2d_log("smb2d: create_file ok handle=0x%llx\n",
+                  (unsigned long long)handle);
+    } else {
+        int posixFlags;
+
+        posixFlags = NtOpenToPosixFlags(hdr.CreateOptions,
+                                         hdr.Disposition,
+                                         hdr.DesiredAccess);
+        fh = smb2_open(ctx, path, posixFlags);
+        if (fh == NULL) {
+            smb2d_log("smb2d: smb2_open(\"%s\", 0x%x) failed: %s\n",
+                      path, posixFlags, smb2_get_error(ctx));
+            status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto out;
+        }
+        handle = InsertFile(ctx, fh, 0);
+        if (handle == 0) {
+            smb2_close(ctx, fh);
+            status = (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+            goto out;
+        }
+        smb2d_log("smb2d: smb2_open(\"%s\", 0x%x) -> fh=%p\n",
+                  path, posixFlags, (void *)fh);
+
+        /* Fill in whatever file metadata we can cheaply get from fstat.
+         * QueryFileInfo (next slice) can refine; for CreateFile() to
+         * return a usable handle we only need Information to be
+         * non-zero. */
+        memset(&st, 0, sizeof(st));
+        if (smb2_fstat(ctx, fh, &st) == 0) {
+            out->EndOfFile.QuadPart      = (LONGLONG)st.smb2_size;
+            out->AllocationSize.QuadPart = (LONGLONG)st.smb2_size;
+        }
+        out->FileHandle   = handle;
+        out->IsDirectory  = 0;
+        out->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+
+        switch (hdr.Disposition) {
+        case FILE_CREATE:           out->Information = FILE_CREATED;      break;
+        case FILE_SUPERSEDE:        out->Information = FILE_SUPERSEDED;   break;
+        case FILE_OVERWRITE:
+        case FILE_OVERWRITE_IF:     out->Information = FILE_OVERWRITTEN;  break;
+        case FILE_OPEN:
+        case FILE_OPEN_IF:
+        default:                    out->Information = FILE_OPENED;       break;
+        }
+        smb2d_log("smb2d: create_file ok handle=0x%llx\n",
+                  (unsigned long long)handle);
+    }
+
+    status = SMB2D_STATUS_SUCCESS;
+
+out:
+    Utf8Free(path);
+    return status;
+}
+
+static LONG
+HandleOpClose(const BYTE *in, ULONG inLen)
+{
+    SMB2D_OP_CLOSE_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    smb2d_log("smb2d: OP_CLOSE handle=0x%llx\n",
+              (unsigned long long)hdr.FileHandle);
+
+    if (!RemoveFile(hdr.FileHandle, &ctx, &opaque, &is_dir)) {
+        smb2d_log("smb2d: OP_CLOSE unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+
+    if (is_dir) {
+        smb2_closedir(ctx, (struct smb2dir *)opaque);
+        smb2d_log("smb2d: smb2_closedir ok\n");
+    } else {
+        smb2_close(ctx, (struct smb2fh *)opaque);
+        smb2d_log("smb2d: smb2_close ok\n");
+    }
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -462,11 +976,25 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             SendDowncall(hDev, hdr.Xid, status, NULL, 0);
             break;
 
-        case SMB2D_OP_CREATE:
+        case SMB2D_OP_CREATE: {
+            SMB2D_OP_CREATE_OUT cout;
+            status = HandleOpCreate(payload, payloadLen, &cout);
+            if (status == SMB2D_STATUS_SUCCESS) {
+                SendDowncall(hDev, hdr.Xid, status, &cout, (ULONG)sizeof(cout));
+            } else {
+                SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            }
+            break;
+        }
+
+        case SMB2D_OP_CLOSE:
+            status = HandleOpClose(payload, payloadLen);
+            SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            break;
+
         case SMB2D_OP_READDIR:
         case SMB2D_OP_QUERY_INFO:
         case SMB2D_OP_READ:
-        case SMB2D_OP_CLOSE:
         default:
             smb2d_log("smb2d: opcode %lu (%s) not implemented\n",
                       hdr.Opcode, OpcodeName(hdr.Opcode));
