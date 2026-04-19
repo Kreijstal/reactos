@@ -128,6 +128,104 @@ WPUFDIsSet(IN SOCKET s,
 
 /*
  * @implemented
+ *
+ * WSAPoll() built on top of select(). The underlying WSP provider exposes
+ * lpWSPSelect but not a native poll entry, so the pollfd array is translated
+ * into read/write/except fd_sets, select() is called, and the result mapped
+ * back. This matches the semantics clients such as libsmb2 rely on for
+ * async connect() completion (POLLOUT once the TCP handshake finishes).
+ */
+INT
+WSAAPI
+WSAPoll(LPWSAPOLLFD fdArray,
+        ULONG fds,
+        INT timeout)
+{
+    fd_set rfds, wfds, efds;
+    struct timeval tv, *ptv;
+    ULONG i;
+    INT nready;
+    INT nfds_max = 0;
+
+    if (fds == 0 || fdArray == NULL)
+    {
+        SetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    /* fd_set only holds FD_SETSIZE sockets; bail if the caller exceeds it. */
+    if (fds > FD_SETSIZE)
+    {
+        SetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+
+    for (i = 0; i < fds; i++)
+    {
+        fdArray[i].revents = 0;
+        if (fdArray[i].fd == INVALID_SOCKET)
+            continue;
+
+        if (fdArray[i].events & (POLLRDNORM | POLLRDBAND))
+            FD_SET(fdArray[i].fd, &rfds);
+        if (fdArray[i].events & POLLWRNORM)
+            FD_SET(fdArray[i].fd, &wfds);
+        /* Error/HUP signalling surfaces via the except fd_set. */
+        FD_SET(fdArray[i].fd, &efds);
+
+        if ((INT)fdArray[i].fd > nfds_max)
+            nfds_max = (INT)fdArray[i].fd;
+    }
+
+    if (timeout < 0)
+    {
+        ptv = NULL;
+    }
+    else
+    {
+        tv.tv_sec  = timeout / 1000;
+        tv.tv_usec = (timeout % 1000) * 1000;
+        ptv = &tv;
+    }
+
+    nready = select(nfds_max + 1, &rfds, &wfds, &efds, ptv);
+    if (nready == SOCKET_ERROR)
+        return SOCKET_ERROR;
+    if (nready == 0)
+        return 0;
+
+    nready = 0;
+    for (i = 0; i < fds; i++)
+    {
+        if (fdArray[i].fd == INVALID_SOCKET)
+            continue;
+
+        if (__WSAFDIsSet(fdArray[i].fd, &rfds))
+            fdArray[i].revents |= (fdArray[i].events & (POLLRDNORM | POLLRDBAND));
+        if (__WSAFDIsSet(fdArray[i].fd, &wfds))
+            fdArray[i].revents |= (fdArray[i].events & POLLWRNORM);
+        if (__WSAFDIsSet(fdArray[i].fd, &efds))
+        {
+            /* select() signals both "urgent data" and "connect failure /
+             * OOB" via the except set. Report POLLERR so callers that
+             * poll connecting sockets can distinguish failure from
+             * readiness by inspecting SO_ERROR. */
+            fdArray[i].revents |= POLLERR;
+        }
+
+        if (fdArray[i].revents)
+            nready++;
+    }
+
+    return nready;
+}
+
+/*
+ * @implemented
  */
 INT
 WSAAPI
