@@ -991,6 +991,14 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Smb2Np\NetworkProvider","DeviceName",0x0
 HKLM,"SYSTEM\CurrentControlSet\Services\Smb2Np\NetworkProvider","Name",0x00000000,"SMB2"
 HKLM,"SYSTEM\CurrentControlSet\Services\Smb2Np\NetworkProvider","ProviderPath",0x00020000,"%SystemRoot%\system32\smb2np.dll"
 
+; SMB2 usermode daemon (upcall endpoint for smb2rdr.sys)
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Type",0x00010001,0x00000010
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","DisplayName",0x00000000,"SMB2 Client Daemon"
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ImagePath",0x00020000,"%SystemRoot%\system32\smb2d.exe"
+
 ; NLS Files
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\CodePage","37",0x00000000,"c_037.nls"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\CodePage","424",0x00000000,"c_424.nls"
