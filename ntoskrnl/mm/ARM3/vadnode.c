@@ -58,13 +58,12 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
     }
     else if (Table == &MiRosKernelVadRoot)
     {
-        /* Need to hold either the system working-set lock or
-           the idle process' AddressCreationLock. At Vista+,
-           AddressCreationLock is an EX_PUSH_LOCK and has no
-           Owner field — we can only check the WS-lock half. */
+        /* Need to hold either the system working-set lock or the idle
+           process' AddressCreationLock. On Vista+ the latter is an
+           EX_PUSH_LOCK with no owner tracking, so we can't verify it
+           and accept that case silently. */
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
-               PsGetCurrentThread()->OwnsSystemWorkingSetShared);
+        /* unverifiable push-lock path; presume caller is correct */
 #else
         ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
                PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
@@ -77,7 +76,10 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
            the current process' AddressCreationLock */
         PEPROCESS Process = CONTAINING_RECORD(Table, EPROCESS, VadRoot);
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        ASSERT(MI_WS_OWNER(Process));
+        /* EX_PUSH_LOCK on Vista+ has no owner tracking, so we can only
+         * positively verify the WS-lock case. Callers that hold the
+         * AddressCreationLock without the WS lock pass silently. */
+        (void)Process;
 #else
         ASSERT(MI_WS_OWNER(Process) ||
                (Process->AddressCreationLock.Owner == KeGetCurrentThread()));
