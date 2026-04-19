@@ -558,6 +558,11 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
      * benign — the volume mounts, the journal simply stays inactive. */
     (void)NtfsUsnLoadJournal(Vcb);
 
+    /* Disk-quota bootstrap (Kreijstal/reactos#37): probe \$Extend\$Quota
+     * and cache presence + MFT index.  Absent quota is the common case;
+     * IRP_MJ_{QUERY,SET}_QUOTA returns STATUS_NOT_SUPPORTED when absent. */
+    (void)NtfsQuotaProbe(Vcb);
+
     Status = STATUS_SUCCESS;
 
 ByeBye:
@@ -1601,6 +1606,111 @@ FsctlDeleteObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
 Cleanup:
     if (FileRecord)
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+
+/* FSCTL_CREATE_USN_JOURNAL IRP wrapper.  Accepts a CREATE_USN_JOURNAL_DATA
+ * (MaximumSize + AllocationDelta) and delegates to the state-machine worker.
+ * See usn.c banner for the first-slice scope; volumes without a pre-seeded
+ * \$Extend\$UsnJrnl observe STATUS_NOT_IMPLEMENTED until the create path
+ * lands (follow-up slice). */
+static
+NTSTATUS
+FsctlCreateUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PCREATE_USN_JOURNAL_DATA Input;
+    ULONG InputLen;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    InputLen = Stack->Parameters.FileSystemControl.InputBufferLength;
+    if (InputLen < sizeof(CREATE_USN_JOURNAL_DATA))
+        return STATUS_INVALID_PARAMETER;
+    Input = (PCREATE_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+    if (Input == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    return NtfsUsnInitJournal(DeviceExt, Input->MaximumSize,
+                              Input->AllocationDelta);
+}
+
+/* FSCTL_READ_USN_JOURNAL IRP wrapper.  Matches the Windows contract: output
+ * buffer is prefixed with an 8-byte next-USN followed by serialised
+ * USN_RECORD_V2 entries. */
+static
+NTSTATUS
+FsctlReadUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PREAD_USN_JOURNAL_DATA Input;
+    PVOID Output;
+    ULONG OutputLen;
+    ULONG BytesRet = 0;
+    NTSTATUS Status;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    if (Stack->Parameters.FileSystemControl.InputBufferLength <
+        sizeof(READ_USN_JOURNAL_DATA))
+        return STATUS_INVALID_PARAMETER;
+
+    Input = (PREAD_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+    Output = Irp->AssociatedIrp.SystemBuffer;
+    OutputLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    if (Input == NULL || Output == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (DeviceExt->UsnJournalFcb == NULL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    if (Input->UsnJournalID != 0 &&
+        Input->UsnJournalID != DeviceExt->UsnJournalId)
+        return STATUS_JOURNAL_NOT_ACTIVE;
+
+    Status = NtfsUsnReadRange(DeviceExt,
+                              (ULONGLONG)Input->StartUsn,
+                              Input->ReasonMask,
+                              Output,
+                              OutputLen,
+                              &BytesRet);
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = BytesRet;
+    return Status;
+}
+
+/* FSCTL_ENUM_USN_DATA IRP wrapper.  Input is MFT_ENUM_DATA, output is the
+ * same [NextRef | records...] blob the worker produces. */
+static
+NTSTATUS
+FsctlEnumUsnData(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PMFT_ENUM_DATA Input;
+    PVOID Output;
+    ULONG OutputLen;
+    ULONG BytesRet = 0;
+    NTSTATUS Status;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    if (Stack->Parameters.FileSystemControl.InputBufferLength <
+        sizeof(MFT_ENUM_DATA))
+        return STATUS_INVALID_PARAMETER;
+
+    Input = (PMFT_ENUM_DATA)Irp->AssociatedIrp.SystemBuffer;
+    Output = Irp->AssociatedIrp.SystemBuffer;
+    OutputLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    if (Input == NULL || Output == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = NtfsUsnEnumerate(DeviceExt,
+                              Input->StartFileReferenceNumber,
+                              Input->LowUsn,
+                              Input->HighUsn,
+                              Output,
+                              OutputLen,
+                              &BytesRet);
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = BytesRet;
     return Status;
 }
 
