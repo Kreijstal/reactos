@@ -529,7 +529,7 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
  * either honours FILE_DIRECTORY_FILE / FILE_NON_DIRECTORY_FILE hints or
  * falls back to smb2_stat() to disambiguate. */
 
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
@@ -720,7 +720,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
     return status;
 }
 
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
@@ -839,7 +839,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
  * into the user buffer in a single memcpy.  This deliberately trades one
  * extra copy for a tiny kernel-side footprint.
  */
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
@@ -1035,7 +1035,7 @@ out:
 #define SMB2RDR_READ_CHUNK_BYTES (1u << 20)
 #endif
 
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
@@ -1245,7 +1245,7 @@ smb2rdr_ExtendForCache(IN OUT PRX_CONTEXT RxContext,
 #define SMB2RDR_WRITE_CHUNK_BYTES (1u << 20)
 #endif
 
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
@@ -1479,7 +1479,7 @@ Smb2FillNetworkOpenInfo(PFILE_NETWORK_OPEN_INFORMATION noi,
                                          : FILE_ATTRIBUTE_NORMAL;
 }
 
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
@@ -1717,7 +1717,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
  * success — directories don't have SMB2 flush semantics, and a missing
  * daemon handle means there's no dirty server-side state to begin with.
  */
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
@@ -1785,7 +1785,7 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
  * is left unimplemented today because Explorer will accept failure there
  * without blocking the copy/rename/delete dataflow; wiring it is a P2 item.
  */
-static NTSTATUS
+static NTSTATUS NTAPI
 smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
