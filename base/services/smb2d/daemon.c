@@ -211,6 +211,31 @@ typedef struct {
     SMB2D_STAT Stat;
 } SMB2D_OP_QUERY_FILE_INFO_OUT;
 
+/* Kernel->daemon RENAME wire layout, mirror of OP_RENAME_IN in
+ * drivers/filesystems/smb2rdr/upcall.h.  Both paths are relative to the
+ * share root, UTF-16LE, no NUL terminator; the daemon converts and rewrites
+ * them before shipping through libsmb2. */
+typedef struct {
+    ULONGLONG VNetHandle;
+    ULONG     ReplaceIfExists;
+    USHORT    OldPathLen;
+    USHORT    NewPathLen;
+} SMB2D_OP_RENAME_IN;
+
+/* Kernel->daemon UNLINK wire layout, mirror of OP_UNLINK_IN. */
+typedef struct {
+    ULONGLONG VNetHandle;
+    ULONG     IsDirectory;
+    USHORT    PathLen;
+    USHORT    _Pad;
+} SMB2D_OP_UNLINK_IN;
+
+/* Kernel->daemon FTRUNCATE wire layout, mirror of OP_FTRUNCATE_IN. */
+typedef struct {
+    ULONGLONG FileHandle;
+    ULONGLONG NewSize;
+} SMB2D_OP_FTRUNCATE_IN;
+
 /* NT dir-info record types (flat layout, matches FILE_*_DIR_INFORMATION in
  * ntifs.h / ndk/iotypes.h; we keep a local copy here so the daemon stays
  * free of DDK/NTIFS headers).  See sdk/include/ndk/iotypes.h. */
@@ -280,6 +305,9 @@ enum {
     SMB2D_OP_DISCONNECT    = 7,
     SMB2D_OP_WRITE         = 8,
     SMB2D_OP_FSYNC         = 9,
+    SMB2D_OP_RENAME        = 10,
+    SMB2D_OP_UNLINK        = 11,
+    SMB2D_OP_FTRUNCATE     = 12,
 };
 
 /* A small grab-bag of NTSTATUS values we need.  Most come in via winnt.h
@@ -653,6 +681,9 @@ OpcodeName(ULONG op)
     case SMB2D_OP_DISCONNECT:    return "DISCONNECT";
     case SMB2D_OP_WRITE:         return "WRITE";
     case SMB2D_OP_FSYNC:         return "FSYNC";
+    case SMB2D_OP_RENAME:        return "RENAME";
+    case SMB2D_OP_UNLINK:        return "UNLINK";
+    case SMB2D_OP_FTRUNCATE:     return "FTRUNCATE";
     default:                     return "INVALID";
     }
 }
@@ -1684,6 +1715,211 @@ HandleOpQueryFileInfo(const BYTE *in, ULONG inLen,
     return SMB2D_STATUS_SUCCESS;
 }
 
+/*
+ * Translate a libsmb2 rc + smb2_get_error() string into an NTSTATUS that
+ * reflects the most common failure modes applications actually observe.
+ * We can't route every server-side error distinctly, but the cases that
+ * show up often on cmd.exe copy / rename / delete are worth distinguishing
+ * so callers can surface useful messages.
+ */
+static LONG
+MapSmb2ErrnoToNtStatus(struct smb2_context *ctx, int rc)
+{
+    const char *msg;
+    if (rc >= 0)
+        return SMB2D_STATUS_SUCCESS;
+
+    msg = smb2_get_error(ctx);
+    if (msg == NULL)
+        msg = "";
+
+    /* smb2_get_error returns a human-readable sentence that libsmb2
+     * assembles from the server-provided STATUS_* token, so a substring
+     * match catches the common cases without pulling in a full error
+     * table.  Case-sensitive is fine — libsmb2's wording is stable. */
+    if (strstr(msg, "NOT_FOUND")        != NULL ||
+        strstr(msg, "No such")          != NULL ||
+        strstr(msg, "does not exist")   != NULL)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    if (strstr(msg, "PATH_NOT_FOUND")   != NULL)
+        return STATUS_OBJECT_PATH_NOT_FOUND;
+    if (strstr(msg, "ACCESS_DENIED")    != NULL ||
+        strstr(msg, "Permission")       != NULL)
+        return STATUS_ACCESS_DENIED;
+    if (strstr(msg, "COLLISION")        != NULL ||
+        strstr(msg, "exists")           != NULL)
+        return STATUS_OBJECT_NAME_COLLISION;
+    if (strstr(msg, "NOT_A_DIRECTORY")  != NULL)
+        return STATUS_NOT_A_DIRECTORY;
+    if (strstr(msg, "FILE_IS_A_DIRECTORY") != NULL)
+        return STATUS_FILE_IS_A_DIRECTORY;
+
+    return (LONG)0xC000020CL; /* STATUS_UNEXPECTED_NETWORK_ERROR */
+}
+
+/*
+ * OP_RENAME: translate a kernel-side rename upcall into smb2_rename() on
+ * the share context.  The kernel ships us two length-prefixed UTF-16LE
+ * paths (old, new) after the header; MakeSmb2Path rewrites both to the
+ * POSIX form libsmb2 expects.  libsmb2 requires destination to be within
+ * the same share, which is the only case rdbss ever routes here (cross-
+ * share moves surface as STATUS_NOT_SAME_DEVICE before they reach us).
+ */
+static LONG
+HandleOpRename(const BYTE *in, ULONG inLen)
+{
+    SMB2D_OP_RENAME_IN hdr;
+    struct smb2_context *ctx;
+    const WCHAR *oldW;
+    const WCHAR *newW;
+    char *oldPath = NULL;
+    char *newPath = NULL;
+    int rc;
+    LONG status = SMB2D_STATUS_SUCCESS;
+    ULONG need;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    need = (ULONG)sizeof(hdr) + (ULONG)hdr.OldPathLen + (ULONG)hdr.NewPathLen;
+    if (need > inLen) return STATUS_INVALID_PARAMETER;
+
+    oldW = (const WCHAR *)(in + sizeof(hdr));
+    newW = (const WCHAR *)((const BYTE *)oldW + hdr.OldPathLen);
+
+    ctx = LookupConn(hdr.VNetHandle);
+    if (ctx == NULL) {
+        smb2d_log("smb2d: OP_RENAME unknown vnet handle=0x%llx\n",
+                  (unsigned long long)hdr.VNetHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+
+    oldPath = MakeSmb2Path(oldW, (int)hdr.OldPathLen);
+    newPath = MakeSmb2Path(newW, (int)hdr.NewPathLen);
+    if (oldPath == NULL || newPath == NULL) {
+        status = (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+        goto out;
+    }
+
+    smb2d_log("smb2d: OP_RENAME old=\"%s\" new=\"%s\" replace=%lu\n",
+              oldPath, newPath, hdr.ReplaceIfExists);
+
+    rc = smb2_rename(ctx, oldPath, newPath);
+    smb2d_log("smb2d: smb2_rename -> %d\n", rc);
+    if (rc < 0) {
+        smb2d_log("smb2d: smb2_rename error: %s\n", smb2_get_error(ctx));
+        status = MapSmb2ErrnoToNtStatus(ctx, rc);
+        goto out;
+    }
+
+    status = SMB2D_STATUS_SUCCESS;
+
+out:
+    Utf8Free(oldPath);
+    Utf8Free(newPath);
+    return status;
+}
+
+/*
+ * OP_UNLINK: dispatch to smb2_rmdir or smb2_unlink based on the
+ * IsDirectory hint the kernel stashed at create time.  Fires from
+ * MRxCloseSrvOpen's delete-on-close path after the open handle has been
+ * released; the kernel already cleared its DaemonFileHandle slot so a
+ * failure here is just logged for diagnostics.
+ */
+static LONG
+HandleOpUnlink(const BYTE *in, ULONG inLen)
+{
+    SMB2D_OP_UNLINK_IN hdr;
+    struct smb2_context *ctx;
+    const WCHAR *pathW;
+    char *path = NULL;
+    int rc;
+    LONG status = SMB2D_STATUS_SUCCESS;
+    ULONG need;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    need = (ULONG)sizeof(hdr) + (ULONG)hdr.PathLen;
+    if (need > inLen) return STATUS_INVALID_PARAMETER;
+
+    pathW = (const WCHAR *)(in + sizeof(hdr));
+
+    ctx = LookupConn(hdr.VNetHandle);
+    if (ctx == NULL) {
+        smb2d_log("smb2d: OP_UNLINK unknown vnet handle=0x%llx\n",
+                  (unsigned long long)hdr.VNetHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+
+    path = MakeSmb2Path(pathW, (int)hdr.PathLen);
+    if (path == NULL)
+        return (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+
+    smb2d_log("smb2d: OP_UNLINK path=\"%s\" is_dir=%lu\n",
+              path, hdr.IsDirectory);
+
+    rc = hdr.IsDirectory ? smb2_rmdir(ctx, path)
+                         : smb2_unlink(ctx, path);
+    smb2d_log("smb2d: smb2_%s -> %d\n",
+              hdr.IsDirectory ? "rmdir" : "unlink", rc);
+    if (rc < 0) {
+        smb2d_log("smb2d: smb2_%s error: %s\n",
+                  hdr.IsDirectory ? "rmdir" : "unlink",
+                  smb2_get_error(ctx));
+        status = MapSmb2ErrnoToNtStatus(ctx, rc);
+    }
+
+    Utf8Free(path);
+    return status;
+}
+
+/*
+ * OP_FTRUNCATE: translate to smb2_ftruncate() on the open libsmb2 handle.
+ * The kernel only routes this for file handles; directory handles are
+ * caught before the upcall with STATUS_FILE_IS_A_DIRECTORY.
+ */
+static LONG
+HandleOpFtruncate(const BYTE *in, ULONG inLen)
+{
+    SMB2D_OP_FTRUNCATE_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+    struct smb2fh *fh;
+    int rc;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    smb2d_log("smb2d: OP_FTRUNCATE fh=0x%llx new_size=%llu\n",
+              (unsigned long long)hdr.FileHandle,
+              (unsigned long long)hdr.NewSize);
+
+    if (!LookupFile(hdr.FileHandle, &ctx, &opaque, &is_dir) ||
+        ctx == NULL || opaque == NULL)
+    {
+        smb2d_log("smb2d: OP_FTRUNCATE unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (is_dir) {
+        smb2d_log("smb2d: OP_FTRUNCATE on directory handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+    fh = (struct smb2fh *)opaque;
+
+    rc = smb2_ftruncate(ctx, fh, hdr.NewSize);
+    smb2d_log("smb2d: smb2_ftruncate -> %d\n", rc);
+    if (rc < 0) {
+        smb2d_log("smb2d: smb2_ftruncate error: %s\n", smb2_get_error(ctx));
+        return MapSmb2ErrnoToNtStatus(ctx, rc);
+    }
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -1947,6 +2183,21 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             }
             break;
         }
+
+        case SMB2D_OP_RENAME:
+            status = HandleOpRename(payload, payloadLen);
+            SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            break;
+
+        case SMB2D_OP_UNLINK:
+            status = HandleOpUnlink(payload, payloadLen);
+            SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            break;
+
+        case SMB2D_OP_FTRUNCATE:
+            status = HandleOpFtruncate(payload, payloadLen);
+            SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            break;
 
         default:
             smb2d_log("smb2d: opcode %lu (%s) not implemented\n",
