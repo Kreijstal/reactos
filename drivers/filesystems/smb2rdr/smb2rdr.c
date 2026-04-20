@@ -72,8 +72,14 @@ typedef struct _SMB2RDR_V_NET_ROOT_EXTENSION {
  * of the open chain.  FOBX extension is unused today; when sharing opens
  * across collapsed FCBs is introduced, the per-handle state moves there. */
 typedef struct _SMB2RDR_FCB_EXTENSION {
-    ULONG64 DaemonFileHandle;   /* 0 if no daemon-side open */
-    BOOLEAN IsDirectory;
+    ULONG64        DaemonFileHandle;   /* 0 if no daemon-side open */
+    BOOLEAN        IsDirectory;
+    BOOLEAN        DeleteOnClose;      /* FileDispositionInformation flag,
+                                         * consumed in MRxCloseSrvOpen */
+    /* Share-relative path captured at MRxCreate time, needed so that the
+     * rename/unlink upcalls can rebuild an SMB2 path without the name-table
+     * entry (which rdbss drops before MRxSetFileInfo fires on dispose). */
+    UNICODE_STRING Path;
 } SMB2RDR_FCB_EXTENSION, *PSMB2RDR_FCB_EXTENSION;
 
 #define Smb2RdrGetFcbExtension(F) \
@@ -102,13 +108,20 @@ smb2rdr_AreFilesAliased(PFCB a, PFCB b)
 /* rdbss calls MRxDeallocateForFcb right before it frees the FCB storage.
  * Our FCB extension is allocated inline by rdbss (MRxFcbSize > 0 plus the
  * RDBSS_MANAGE_FCB_EXTENSION flag), so rdbss reclaims it along with the
- * FCB — there's nothing dynamic here for us to release.  MRxCloseSrvOpen
- * has already told the daemon to drop its libsmb2 handle, so the slot
- * sits at DaemonFileHandle == 0 by the time we get here. */
+ * FCB itself.  The one dynamic thing we own is the Path buffer stashed at
+ * MRxCreate time; release it here before rdbss zeroes the extension.
+ * MRxCloseSrvOpen has already told the daemon to drop its libsmb2 handle,
+ * so the handle slot sits at DaemonFileHandle == 0 by the time we get here. */
 NTSTATUS NTAPI
 smb2rdr_DeallocateForFcb(IN OUT PMRX_FCB pFcb)
 {
-    UNREFERENCED_PARAMETER(pFcb);
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(pFcb);
+    if (fcbExt != NULL && fcbExt->Path.Buffer != NULL) {
+        ExFreePoolWithTag(fcbExt->Path.Buffer, 'pFcS');
+        fcbExt->Path.Buffer = NULL;
+        fcbExt->Path.Length = 0;
+        fcbExt->Path.MaximumLength = 0;
+    }
     return STATUS_SUCCESS;
 }
 
@@ -663,6 +676,35 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
 
     fcbExt->DaemonFileHandle = out.FileHandle;
     fcbExt->IsDirectory      = out.IsDirectory ? TRUE : FALSE;
+    fcbExt->DeleteOnClose    = FALSE;
+
+    /* Cache the share-relative path so MRxSetFileInfo (rename) and the
+     * DeleteOnClose path in MRxCloseSrvOpen can reconstruct an OP_RENAME
+     * / OP_UNLINK payload without depending on rdbss's FcbTableEntry,
+     * which gets cleared out by RxRemoveNameNetFcb before the disposition
+     * upcall fires.  Uses the relName copy already normalised above (leading
+     * backslash stripped), matching the OP_CREATE path format so the daemon
+     * sees consistent shape across all file ops. */
+    if (fcbExt->Path.Buffer != NULL) {
+        /* Should not happen — MRxCreate runs once per FCB — but defend. */
+        ExFreePoolWithTag(fcbExt->Path.Buffer, 'pFcS');
+        fcbExt->Path.Buffer = NULL;
+        fcbExt->Path.Length = 0;
+        fcbExt->Path.MaximumLength = 0;
+    }
+    if (pathBytes > 0) {
+        PWCHAR pathCopy = ExAllocatePoolWithTag(PagedPool, pathBytes, 'pFcS');
+        if (pathCopy != NULL) {
+            RtlCopyMemory(pathCopy, pathChars, pathBytes);
+            fcbExt->Path.Buffer        = pathCopy;
+            fcbExt->Path.Length        = pathBytes;
+            fcbExt->Path.MaximumLength = pathBytes;
+        } else {
+            /* Non-fatal — rename/unlink will refuse when Path is empty. */
+            DPRINT1("SMB2RDR: MRxCreate path-stash alloc failed, "
+                    "rename/unlink disabled on this fcb\n");
+        }
+    }
 
     RxContext->Create.ReturnedCreateInformation = out.Information;
 #ifndef __REACTOS__
@@ -682,9 +724,14 @@ static NTSTATUS
 smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
 {
     PMRX_FCB Fcb = RxContext->pFcb;
+    PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
     PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PSMB2RDR_V_NET_ROOT_EXTENSION vNetExt =
+        (SrvOpen != NULL) ? Smb2RdrGetVNetRootExtension(SrvOpen->pVNetRoot)
+                          : NULL;
     ULONG64 handle;
     BOOLEAN isDir;
+    BOOLEAN wantUnlink;
     OP_CLOSE_IN cin;
     ULONG outActual = 0;
     NTSTATUS bridgeStatus;
@@ -700,12 +747,14 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
 
     handle = fcbExt->DaemonFileHandle;
     isDir  = fcbExt->IsDirectory;
+    wantUnlink = fcbExt->DeleteOnClose;
     /* Clear the slot up-front so a racing finalize doesn't double-close
      * even if the upcall path bounces (timeout, bridge not ready, etc.). */
     fcbExt->DaemonFileHandle = 0;
+    fcbExt->DeleteOnClose    = FALSE;
 
-    DPRINT1("SMB2RDR: MRxCloseSrvOpen handle=0x%llx is_dir=%u\n",
-            handle, isDir);
+    DPRINT1("SMB2RDR: MRxCloseSrvOpen handle=0x%llx is_dir=%u delete=%u\n",
+            handle, isDir, wantUnlink);
 
     RtlZeroMemory(&cin, sizeof(cin));
     cin.FileHandle  = handle;
@@ -730,6 +779,51 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
         DPRINT1("SMB2RDR: MRxCloseSrvOpen daemon reply 0x%08lx\n",
                 daemonStatus);
     }
+
+    /* If MRxSetFileInfo armed DeleteOnClose, fire an OP_UNLINK now that the
+     * daemon has released its libsmb2 handle.  We deliberately swallow
+     * errors from the unlink — NT semantics treat the disposition flag as
+     * best-effort at close time, and failing the close would strand the
+     * kernel-side FCB in an inconsistent state. */
+    if (wantUnlink &&
+        vNetExt != NULL && vNetExt->DaemonHandle != 0 &&
+        fcbExt->Path.Buffer != NULL && fcbExt->Path.Length > 0)
+    {
+        ULONG unlinkLen = (ULONG)sizeof(OP_UNLINK_IN) + fcbExt->Path.Length;
+        POP_UNLINK_IN unlinkIn =
+            ExAllocatePoolWithTag(NonPagedPool, unlinkLen, 'UDcS');
+        if (unlinkIn != NULL) {
+            NTSTATUS unlinkDaemon = STATUS_UNSUCCESSFUL;
+            NTSTATUS unlinkBridge;
+            ULONG unlinkActual = 0;
+
+            RtlZeroMemory(unlinkIn, sizeof(OP_UNLINK_IN));
+            unlinkIn->VNetHandle  = vNetExt->DaemonHandle;
+            unlinkIn->IsDirectory = isDir ? 1u : 0u;
+            unlinkIn->PathLen     = fcbExt->Path.Length;
+            RtlCopyMemory((PUCHAR)unlinkIn + sizeof(OP_UNLINK_IN),
+                          fcbExt->Path.Buffer, fcbExt->Path.Length);
+
+            unlinkBridge = SmbRdrIssueUpcall(
+                SMB2D_OP_UNLINK,
+                unlinkIn, unlinkLen,
+                NULL, 0, &unlinkActual,
+                &unlinkDaemon,
+                15 /* seconds */);
+
+            DPRINT1("SMB2RDR: CloseSrvOpen delete-on-close unlink "
+                    "bridge=0x%08lx daemon=0x%08lx\n",
+                    unlinkBridge, unlinkDaemon);
+
+            ExFreePoolWithTag(unlinkIn, 'UDcS');
+        } else {
+            DPRINT1("SMB2RDR: CloseSrvOpen delete-on-close alloc failed\n");
+        }
+    } else if (wantUnlink) {
+        DPRINT1("SMB2RDR: CloseSrvOpen delete-on-close skipped "
+                "(no path or no vnet handle)\n");
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -1671,6 +1765,262 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
     return STATUS_SUCCESS;
 }
 
+/* ---------- MRxSetFileInfo ----------
+ *
+ * NtSetInformationFile lands here after rdbss has routed the caller's
+ * class through RxCommonSetInformation -> {RxSetDispositionInfo,
+ * RxSetRenameInfo, ...} -> RxpSetInfoMiniRdr.  We implement the subset
+ * cmd.exe + Explorer exercise on a mounted SMB2 share:
+ *
+ *   FileRenameInformation       (10) - smb2_rename on the share context
+ *   FileDispositionInformation  (13) - stash DeleteOnClose on the FCB,
+ *                                      trigger smb2_unlink/smb2_rmdir from
+ *                                      MRxCloseSrvOpen after smb2_close
+ *   FileEndOfFileInformation    (20) - smb2_ftruncate on the file handle
+ *   FileAllocationInformation   (19) - acknowledged no-op (SMB2 has no
+ *                                      preallocation wire op)
+ *
+ * Other classes return STATUS_NOT_IMPLEMENTED so higher layers can fall
+ * back or report a meaningful failure to user code.  FileBasicInformation
+ * is left unimplemented today because Explorer will accept failure there
+ * without blocking the copy/rename/delete dataflow; wiring it is a P2 item.
+ */
+static NTSTATUS
+smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PSMB2RDR_V_NET_ROOT_EXTENSION vNetExt =
+        (SrvOpen != NULL) ? Smb2RdrGetVNetRootExtension(SrvOpen->pVNetRoot)
+                          : NULL;
+    FILE_INFORMATION_CLASS infoClass;
+    PVOID userBuf;
+    LONG userBufLen;
+    NTSTATUS status;
+
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+        DPRINT1("SMB2RDR: MRxSetFileInfo no daemon handle\n");
+        return STATUS_INVALID_HANDLE;
+    }
+
+    infoClass  = RxContext->Info.FileInformationClass;
+    userBuf    = RxContext->Info.Buffer;
+    userBufLen = (LONG)RxContext->Info.Length;
+
+    DbgPrint("SMB2RDR: MRxSetFileInfo class=%d fh=0x%llx buflen=%d\n",
+             (int)infoClass, fcbExt->DaemonFileHandle, userBufLen);
+
+    switch (infoClass) {
+    case FileDispositionInformation: {
+        PFILE_DISPOSITION_INFORMATION dinfo;
+
+        if (userBuf == NULL || userBufLen < (LONG)sizeof(*dinfo))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        dinfo = (PFILE_DISPOSITION_INFORMATION)userBuf;
+        fcbExt->DeleteOnClose = dinfo->DeleteFile ? TRUE : FALSE;
+        DbgPrint("SMB2RDR: SetFileInfo Disposition DeleteFile=%u\n",
+                 dinfo->DeleteFile);
+        /* Actual unlink fires in MRxCloseSrvOpen after the daemon close
+         * has released the server-side handle.  NT semantics: disposition
+         * is an FCB-level flag, deletion is deferred to last-close. */
+        return STATUS_SUCCESS;
+    }
+
+    case FileAllocationInformation: {
+        /* SMB2 has no preallocation op, and Windows is happy to treat the
+         * hint as advisory when the underlying FS doesn't support it.
+         * Accepting with no round-trip matches how most non-NTFS file
+         * systems handle this class. */
+        DbgPrint("SMB2RDR: SetFileInfo Allocation accepted (no-op)\n");
+        return STATUS_SUCCESS;
+    }
+
+    case FileEndOfFileInformation: {
+        PFILE_END_OF_FILE_INFORMATION einfo;
+        OP_FTRUNCATE_IN in;
+        ULONG outActual = 0;
+        NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+        NTSTATUS bridgeStatus;
+
+        if (userBuf == NULL || userBufLen < (LONG)sizeof(*einfo))
+            return STATUS_INFO_LENGTH_MISMATCH;
+        einfo = (PFILE_END_OF_FILE_INFORMATION)userBuf;
+
+        if (fcbExt->IsDirectory) {
+            DPRINT1("SMB2RDR: SetFileInfo EOF on directory handle=0x%llx\n",
+                    fcbExt->DaemonFileHandle);
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+        if (einfo->EndOfFile.QuadPart < 0)
+            return STATUS_INVALID_PARAMETER;
+
+        RtlZeroMemory(&in, sizeof(in));
+        in.FileHandle = fcbExt->DaemonFileHandle;
+        in.NewSize    = (ULONGLONG)einfo->EndOfFile.QuadPart;
+
+        DbgPrint("SMB2RDR: SetFileInfo EOF fh=0x%llx new_size=%llu\n",
+                 fcbExt->DaemonFileHandle,
+                 (unsigned long long)in.NewSize);
+
+        bridgeStatus = SmbRdrIssueUpcall(
+            SMB2D_OP_FTRUNCATE,
+            &in, (ULONG)sizeof(in),
+            NULL, 0, &outActual,
+            &daemonStatus,
+            30 /* seconds */);
+
+        if (bridgeStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: SetFileInfo EOF bridge failed 0x%08lx\n",
+                    bridgeStatus);
+            return STATUS_UNEXPECTED_NETWORK_ERROR;
+        }
+        if (daemonStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: SetFileInfo EOF daemon failed 0x%08lx\n",
+                    daemonStatus);
+            return daemonStatus;
+        }
+        DbgPrint("SMB2RDR: SetFileInfo EOF ok\n");
+        return STATUS_SUCCESS;
+    }
+
+    case FileRenameInformation: {
+        PFILE_RENAME_INFORMATION rinfo;
+        PWCHAR newPathChars;
+        USHORT newPathBytes;
+        ULONG totalLen;
+        POP_RENAME_IN renameIn = NULL;
+        ULONG outActual = 0;
+        NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+        NTSTATUS bridgeStatus;
+
+        if (vNetExt == NULL || vNetExt->DaemonHandle == 0)
+            return STATUS_DEVICE_NOT_CONNECTED;
+        if (userBuf == NULL ||
+            userBufLen < (LONG)FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName))
+        {
+            return STATUS_INFO_LENGTH_MISMATCH;
+        }
+        rinfo = (PFILE_RENAME_INFORMATION)userBuf;
+        if (rinfo->RootDirectory != NULL) {
+            /* rdbss only supplies paths through the OpenTargetDir route,
+             * which never carries a RootDirectory handle.  If we get one,
+             * it's a pass-through from user space we can't honour. */
+            DPRINT1("SMB2RDR: SetFileInfo Rename rejected: RootDirectory!=NULL\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        newPathChars = rinfo->FileName;
+        if (rinfo->FileNameLength > 0xFFFF)
+            return STATUS_INVALID_PARAMETER;
+        newPathBytes = (USHORT)rinfo->FileNameLength;
+
+        /* RxSetRenameInfo rewrites Info.Buffer so FileName holds the
+         * OpenTargetDir FCB's FcbTableEntry.Path, which always starts with
+         * a single leading backslash relative to the share root.  Strip
+         * that single slash to match the OP_CREATE path format the daemon
+         * already understands. */
+        if (newPathBytes >= sizeof(WCHAR) && newPathChars[0] == L'\\') {
+            newPathChars++;
+            newPathBytes -= sizeof(WCHAR);
+        }
+        if (newPathBytes == 0) {
+            DPRINT1("SMB2RDR: SetFileInfo Rename empty dest\n");
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+        if (fcbExt->Path.Buffer == NULL || fcbExt->Path.Length == 0) {
+            DPRINT1("SMB2RDR: SetFileInfo Rename source-path missing\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        totalLen = (ULONG)sizeof(OP_RENAME_IN)
+                 + (ULONG)fcbExt->Path.Length
+                 + (ULONG)newPathBytes;
+        renameIn = ExAllocatePoolWithTag(NonPagedPool, totalLen, 'RNcS');
+        if (renameIn == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlZeroMemory(renameIn, sizeof(OP_RENAME_IN));
+        renameIn->VNetHandle      = vNetExt->DaemonHandle;
+        renameIn->ReplaceIfExists = rinfo->ReplaceIfExists ? 1u : 0u;
+        renameIn->OldPathLen      = fcbExt->Path.Length;
+        renameIn->NewPathLen      = newPathBytes;
+        RtlCopyMemory((PUCHAR)renameIn + sizeof(OP_RENAME_IN),
+                      fcbExt->Path.Buffer, fcbExt->Path.Length);
+        RtlCopyMemory((PUCHAR)renameIn + sizeof(OP_RENAME_IN)
+                              + fcbExt->Path.Length,
+                      newPathChars, newPathBytes);
+
+        DbgPrint("SMB2RDR: SetFileInfo Rename old=%wZ new_bytes=%u\n",
+                 &fcbExt->Path, (unsigned)newPathBytes);
+
+        bridgeStatus = SmbRdrIssueUpcall(
+            SMB2D_OP_RENAME,
+            renameIn, totalLen,
+            NULL, 0, &outActual,
+            &daemonStatus,
+            30 /* seconds */);
+
+        ExFreePoolWithTag(renameIn, 'RNcS');
+
+        if (bridgeStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: SetFileInfo Rename bridge failed 0x%08lx\n",
+                    bridgeStatus);
+            return STATUS_UNEXPECTED_NETWORK_ERROR;
+        }
+        if (daemonStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: SetFileInfo Rename daemon failed 0x%08lx\n",
+                    daemonStatus);
+            return daemonStatus;
+        }
+
+        /* Update the cached FCB path so a follow-up rename or delete sees
+         * the new name rather than the pre-rename one.  Best-effort: if
+         * the realloc fails we leave the stale name in place and the next
+         * upcall will surface STATUS_OBJECT_NAME_NOT_FOUND, which is
+         * recoverable by the caller. */
+        {
+            PWCHAR pathCopy =
+                ExAllocatePoolWithTag(PagedPool, newPathBytes, 'pFcS');
+            if (pathCopy != NULL) {
+                RtlCopyMemory(pathCopy, newPathChars, newPathBytes);
+                if (fcbExt->Path.Buffer != NULL)
+                    ExFreePoolWithTag(fcbExt->Path.Buffer, 'pFcS');
+                fcbExt->Path.Buffer        = pathCopy;
+                fcbExt->Path.Length        = newPathBytes;
+                fcbExt->Path.MaximumLength = newPathBytes;
+            }
+        }
+
+        DbgPrint("SMB2RDR: SetFileInfo Rename ok\n");
+        return STATUS_SUCCESS;
+    }
+
+    case FileBasicInformation:
+    case FileValidDataLengthInformation:
+    case FileShortNameInformation:
+    case FileLinkInformation:
+    case FilePositionInformation:
+    case FilePipeInformation:
+    case FilePipeLocalInformation:
+    case FilePipeRemoteInformation:
+        /* Known NT classes we don't translate today.  STATUS_NOT_IMPLEMENTED
+         * lets rdbss surface a clean failure upstream. */
+        DPRINT1("SMB2RDR: MRxSetFileInfo class=%d NOT_IMPLEMENTED\n",
+                (int)infoClass);
+        status = STATUS_NOT_IMPLEMENTED;
+        break;
+
+    default:
+        DPRINT1("SMB2RDR: MRxSetFileInfo unknown class=%d\n",
+                (int)infoClass);
+        status = STATUS_INVALID_INFO_CLASS;
+        break;
+    }
+
+    return status;
+}
+
 /* ---------- ops table ---------- */
 
 static NTSTATUS
@@ -1717,7 +2067,7 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxQueryDirectory    = smb2rdr_QueryDirectory;
     smb2rdr_ops.MRxQueryVolumeInfo   = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxQueryFileInfo     = smb2rdr_QueryFileInfo;
-    smb2rdr_ops.MRxSetFileInfo       = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxSetFileInfo       = smb2rdr_SetFileInfo;
 
     smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_READ]   = smb2rdr_Read;
     smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_WRITE]  = smb2rdr_Write;
