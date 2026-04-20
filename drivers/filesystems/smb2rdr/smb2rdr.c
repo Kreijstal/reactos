@@ -1111,6 +1111,203 @@ done_out:
     return status;
 }
 
+/* ---------- MRxExtendForCache / MRxExtendForNonCache ----------
+ *
+ * rdbss invokes these during RxCommonWrite when the pending write would
+ * extend the file past its current AllocationSize, and refuses to issue
+ * the IRP if the slot returns STATUS_NOT_IMPLEMENTED.  The contract is
+ * just "acknowledge the new end-of-file and hand back an allocation size
+ * that's at least that large" — the actual on-disk extension happens
+ * when smb2_pwrite() lands on the server.  We mirror the nfs41 miniport
+ * here: set the FCB's StandardInfo if we tracked it (we don't yet), and
+ * round the allocation size up by a small slack so we don't have to
+ * re-visit this path on every byte.
+ */
+static ULONG NTAPI
+smb2rdr_ExtendForCache(IN OUT PRX_CONTEXT RxContext,
+                       IN OUT PLARGE_INTEGER NewFileSize,
+                       OUT PLARGE_INTEGER NewAllocationSize)
+{
+    UNREFERENCED_PARAMETER(RxContext);
+
+    NewAllocationSize->QuadPart = NewFileSize->QuadPart + 8192;
+    return STATUS_SUCCESS;
+}
+
+/* ---------- MRxLowIOSubmit[LOWIO_OP_WRITE] ----------
+ *
+ * Mirror of the read path.  DO_DIRECT_IO on the device object means the
+ * user buffer has already been probed+locked into an MDL by the time we
+ * land here; LowIoContext->ParamsFor.ReadWrite.Buffer is that MDL.  We
+ * copy out of the mapped system VA into a per-chunk OP_WRITE_IN payload
+ * that gets shipped to the daemon inline.  Chunks are capped at 1 MiB so
+ * the daemon's receive buffer (and its libsmb2 pwrite() scratch space)
+ * stays bounded.  Short writes (server accepted < chunk) break the loop
+ * and surface however many bytes actually made it; bridge/daemon errors
+ * with a non-zero partial fill are also reported as success so rdbss
+ * lets the caller retry at offset+done.
+ */
+#ifndef SMB2RDR_WRITE_CHUNK_BYTES
+#define SMB2RDR_WRITE_CHUNK_BYTES (1u << 20)
+#endif
+
+static NTSTATUS
+smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
+    PMDL mdl;
+    PUCHAR src;
+    ULONG64 offset;
+    ULONG   total;
+    ULONG   done = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] no daemon handle\n");
+        return STATUS_INVALID_HANDLE;
+    }
+    if (fcbExt->IsDirectory) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] on directory handle=0x%llx\n",
+                fcbExt->DaemonFileHandle);
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+
+    mdl    = LowIo->ParamsFor.ReadWrite.Buffer;
+    offset = (ULONG64)LowIo->ParamsFor.ReadWrite.ByteOffset;
+    total  = LowIo->ParamsFor.ReadWrite.ByteCount;
+
+    if (total == 0) {
+        RxContext->InformationToReturn = 0;
+        RxContext->CurrentIrp->IoStatus.Information = 0;
+        return STATUS_SUCCESS;
+    }
+    if (mdl == NULL) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] NULL MDL\n");
+        return STATUS_INVALID_USER_BUFFER;
+    }
+
+    src = (PUCHAR)MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+    if (src == NULL) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] MmGetSystemAddressForMdlSafe "
+                "failed\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DbgPrint("SMB2RDR: MRxLowIOSubmit[WRITE] fh=0x%llx offset=%llu len=%lu\n",
+             fcbExt->DaemonFileHandle,
+             (unsigned long long)offset, total);
+
+    while (done < total) {
+        POP_WRITE_IN in;
+        OP_WRITE_OUT out;
+        ULONG chunk, inLen, outActual = 0;
+        NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+        NTSTATUS bridgeStatus;
+
+        chunk = total - done;
+        if (chunk > SMB2RDR_WRITE_CHUNK_BYTES)
+            chunk = SMB2RDR_WRITE_CHUNK_BYTES;
+
+        inLen = (ULONG)sizeof(OP_WRITE_IN) + chunk;
+        /* PagedPool mirrors the READ path: upcall serialisation runs at
+         * PASSIVE_LEVEL inside SmbRdrUpcallIoctl's caller (the daemon's
+         * IOCTL thread), and the buffer is never touched below
+         * DISPATCH_LEVEL. */
+        in = ExAllocatePoolWithTag(PagedPool, inLen, 'WDrS');
+        if (in == NULL) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        RtlZeroMemory(in, sizeof(*in));
+        in->FileHandle = fcbExt->DaemonFileHandle;
+        in->Offset     = offset + done;
+        in->Length     = chunk;
+
+        _SEH2_TRY {
+            RtlCopyMemory((PUCHAR)(in + 1), src + done, chunk);
+        } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+            ExFreePoolWithTag(in, 'WDrS');
+            status = STATUS_INVALID_USER_BUFFER;
+            goto done_out;
+        } _SEH2_END;
+
+        RtlZeroMemory(&out, sizeof(out));
+        bridgeStatus = SmbRdrIssueUpcall(
+            SMB2D_OP_WRITE,
+            in, inLen,
+            &out, (ULONG)sizeof(out), &outActual,
+            &daemonStatus,
+            60 /* seconds */);
+
+        ExFreePoolWithTag(in, 'WDrS');
+
+        if (bridgeStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] bridge failed 0x%08lx\n",
+                    bridgeStatus);
+            if (done > 0) {
+                status = STATUS_SUCCESS;
+            } else {
+                status = STATUS_UNEXPECTED_NETWORK_ERROR;
+            }
+            break;
+        }
+        if (daemonStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] daemon failed 0x%08lx\n",
+                    daemonStatus);
+            if (done > 0) {
+                status = STATUS_SUCCESS;
+            } else {
+                status = daemonStatus;
+            }
+            break;
+        }
+        if (outActual < sizeof(out)) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] short reply outlen=%lu\n",
+                    outActual);
+            if (done == 0)
+                status = STATUS_UNEXPECTED_NETWORK_ERROR;
+            break;
+        }
+
+        if (out.BytesWritten == 0) {
+            /* Server accepted nothing; stop to avoid an infinite loop. */
+            break;
+        }
+        if (out.BytesWritten > chunk) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] bad reply bw=%lu chunk=%lu\n",
+                    out.BytesWritten, chunk);
+            if (done == 0)
+                status = STATUS_UNEXPECTED_NETWORK_ERROR;
+            break;
+        }
+
+        DbgPrint("SMB2RDR: Write chunk ok bytes=%lu total=%lu\n",
+                 out.BytesWritten, done + out.BytesWritten);
+
+        done += out.BytesWritten;
+
+        if (out.BytesWritten < chunk) {
+            /* Short write — surface a partial success to the caller so
+             * it can decide whether to retry at offset+done. */
+            break;
+        }
+    }
+
+done_out:
+    /* Hand the final count back to rdbss.  A zero-byte completion with a
+     * non-success code propagates; otherwise success, and rdbss fills
+     * IoStatusBlock.Information from RxContext->IoStatusBlock. */
+    if (done > 0)
+        status = STATUS_SUCCESS;
+
+    RxContext->IoStatusBlock.Information = done;
+    RxContext->IoStatusBlock.Status = status;
+    return status;
+}
+
 /* ---------- ops table ---------- */
 
 static NTSTATUS
@@ -1160,7 +1357,10 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxSetFileInfo       = smb2rdr_Unimplemented;
 
     smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_READ]   = smb2rdr_Read;
-    smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_WRITE]  = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_WRITE]  = smb2rdr_Write;
+
+    smb2rdr_ops.MRxExtendForCache    = smb2rdr_ExtendForCache;
+    smb2rdr_ops.MRxExtendForNonCache = smb2rdr_ExtendForCache;
 
     smb2rdr_ops.MRxTruncate       = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxZeroExtend     = smb2rdr_Unimplemented;
