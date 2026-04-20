@@ -1308,6 +1308,312 @@ done_out:
     return status;
 }
 
+/* ---------- MRxQueryFileInfo ----------
+ *
+ * NtQueryInformationFile lands here after rdbss has decoded the caller's
+ * information class into RxContext->Info and mapped the user buffer into
+ * Info.Buffer.  We issue a single OP_QUERY_FILE_INFO upcall so the daemon
+ * can hand back a flat SMB2RDR_STAT (mirror of libsmb2's smb2_stat_64);
+ * the kernel then synthesises each NT FILE_*_INFORMATION layout that
+ * cmd.exe copy / shell consumers exercise.
+ *
+ * Info classes honoured:
+ *   FileBasicInformation       - timestamps + attribute bits
+ *   FileStandardInformation    - AllocationSize/EndOfFile/NumberOfLinks
+ *   FileNetworkOpenInformation - flat composite cmd.exe issues first
+ *   FileInternalInformation    - server file-id (smb2_ino)
+ *   FileEaInformation          - EaSize = 0 (no EAs over SMB2 today)
+ *   FileAllInformation         - aggregate of the above (partial)
+ *
+ * Other classes return STATUS_NOT_IMPLEMENTED or
+ * STATUS_INVALID_INFO_CLASS so the caller can fall back to a more
+ * minimal query.  Buffers smaller than the requested structure get
+ * STATUS_BUFFER_OVERFLOW with InformationToReturn set to the full size.
+ */
+
+/* POSIX seconds -> NT FILETIME (100ns since 1601-01-01).  11644473600 is
+ * the offset in seconds between the two epochs. */
+static ULONGLONG
+Smb2StatToFileTime(ULONGLONG sec, ULONGLONG nsec)
+{
+    return (sec + 11644473600ULL) * 10000000ULL + (nsec / 100ULL);
+}
+
+static VOID
+Smb2FillBasicInfo(PFILE_BASIC_INFORMATION bi, const SMB2RDR_STAT *st)
+{
+    bi->CreationTime.QuadPart   =
+        (LONGLONG)Smb2StatToFileTime(st->Btime, st->Btime_nsec);
+    bi->LastAccessTime.QuadPart =
+        (LONGLONG)Smb2StatToFileTime(st->Atime, st->Atime_nsec);
+    bi->LastWriteTime.QuadPart  =
+        (LONGLONG)Smb2StatToFileTime(st->Mtime, st->Mtime_nsec);
+    bi->ChangeTime.QuadPart     =
+        (LONGLONG)Smb2StatToFileTime(st->Ctime, st->Ctime_nsec);
+    bi->FileAttributes = st->Attributes ? st->Attributes
+                                        : FILE_ATTRIBUTE_NORMAL;
+}
+
+static VOID
+Smb2FillStandardInfo(PFILE_STANDARD_INFORMATION si, const SMB2RDR_STAT *st)
+{
+    si->AllocationSize.QuadPart =
+        (LONGLONG)((st->Size + 4095ULL) & ~4095ULL);
+    si->EndOfFile.QuadPart      = (LONGLONG)st->Size;
+    si->NumberOfLinks           = st->NLink ? st->NLink : 1;
+    si->DeletePending           = FALSE;
+    si->Directory               = (st->Attributes & FILE_ATTRIBUTE_DIRECTORY)
+                                  ? TRUE : FALSE;
+}
+
+static VOID
+Smb2FillNetworkOpenInfo(PFILE_NETWORK_OPEN_INFORMATION noi,
+                        const SMB2RDR_STAT *st)
+{
+    noi->CreationTime.QuadPart   =
+        (LONGLONG)Smb2StatToFileTime(st->Btime, st->Btime_nsec);
+    noi->LastAccessTime.QuadPart =
+        (LONGLONG)Smb2StatToFileTime(st->Atime, st->Atime_nsec);
+    noi->LastWriteTime.QuadPart  =
+        (LONGLONG)Smb2StatToFileTime(st->Mtime, st->Mtime_nsec);
+    noi->ChangeTime.QuadPart     =
+        (LONGLONG)Smb2StatToFileTime(st->Ctime, st->Ctime_nsec);
+    noi->AllocationSize.QuadPart =
+        (LONGLONG)((st->Size + 4095ULL) & ~4095ULL);
+    noi->EndOfFile.QuadPart      = (LONGLONG)st->Size;
+    noi->FileAttributes = st->Attributes ? st->Attributes
+                                         : FILE_ATTRIBUTE_NORMAL;
+}
+
+static NTSTATUS
+smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    FILE_INFORMATION_CLASS infoClass;
+    PVOID userBuf;
+    LONG userBufLen;
+    OP_QUERY_FILE_INFO_IN in;
+    OP_QUERY_FILE_INFO_OUT out;
+    ULONG outActual = 0;
+    NTSTATUS bridgeStatus;
+    NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+    NTSTATUS status;
+    ULONG needed = 0;
+
+    if (RxContext->Info.Buffer == NULL)
+        return STATUS_INVALID_USER_BUFFER;
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+        DPRINT1("SMB2RDR: MRxQueryFileInfo: no daemon handle\n");
+        return STATUS_INVALID_HANDLE;
+    }
+
+    infoClass  = RxContext->Info.FileInformationClass;
+    userBuf    = RxContext->Info.Buffer;
+    userBufLen = RxContext->Info.LengthRemaining;
+
+    if (userBufLen <= 0)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    /* Classes we know are irrelevant for cmd.exe copy — fail them quickly
+     * so rdbss/NtQueryInformationFile can fall back without round-tripping
+     * through the daemon. */
+    switch (infoClass) {
+    case FileAlternateNameInformation:
+    case FileStreamInformation:
+    case FileCompressionInformation:
+        DPRINT1("SMB2RDR: MRxQueryFileInfo class=%d returning NOT_IMPLEMENTED\n",
+                (int)infoClass);
+        return STATUS_NOT_IMPLEMENTED;
+    case FileBasicInformation:
+    case FileStandardInformation:
+    case FileInternalInformation:
+    case FileEaInformation:
+    case FileNetworkOpenInformation:
+    case FileAllInformation:
+    case FileAttributeTagInformation:
+        break;
+    default:
+        DPRINT1("SMB2RDR: MRxQueryFileInfo unhandled class=%d\n",
+                (int)infoClass);
+        return STATUS_INVALID_INFO_CLASS;
+    }
+
+    /* FileEaInformation doesn't need a round-trip — we never expose
+     * extended attributes over SMB2, so the answer is always zero. */
+    if (infoClass == FileEaInformation) {
+        PFILE_EA_INFORMATION ei = (PFILE_EA_INFORMATION)userBuf;
+        if ((ULONG)userBufLen < sizeof(FILE_EA_INFORMATION)) {
+            RxContext->InformationToReturn = sizeof(FILE_EA_INFORMATION);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+        ei->EaSize = 0;
+        RxContext->Info.LengthRemaining -= (LONG)sizeof(FILE_EA_INFORMATION);
+        return STATUS_SUCCESS;
+    }
+
+    RtlZeroMemory(&in, sizeof(in));
+    RtlZeroMemory(&out, sizeof(out));
+    in.FileHandle = fcbExt->DaemonFileHandle;
+
+    DbgPrint("SMB2RDR: MRxQueryFileInfo class=%d fh=0x%llx buflen=%d\n",
+             (int)infoClass, fcbExt->DaemonFileHandle, userBufLen);
+
+    bridgeStatus = SmbRdrIssueUpcall(
+        SMB2D_OP_QUERY_INFO,
+        &in, (ULONG)sizeof(in),
+        &out, (ULONG)sizeof(out), &outActual,
+        &daemonStatus,
+        30 /* seconds */);
+
+    if (bridgeStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxQueryFileInfo bridge failed 0x%08lx\n",
+                bridgeStatus);
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+    if (daemonStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxQueryFileInfo daemon failed 0x%08lx\n",
+                daemonStatus);
+        return daemonStatus;
+    }
+    if (outActual < sizeof(out)) {
+        DPRINT1("SMB2RDR: MRxQueryFileInfo short reply outlen=%lu\n",
+                outActual);
+        return STATUS_UNEXPECTED_NETWORK_ERROR;
+    }
+
+    /* Stamp DIRECTORY if the daemon told us and the FCB agrees — old
+     * smb2d builds may only set Type=1 without translating it to the NT
+     * attribute bitmap. */
+    if ((out.Stat.Attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+        fcbExt->IsDirectory)
+    {
+        out.Stat.Attributes |= FILE_ATTRIBUTE_DIRECTORY;
+    }
+
+    switch (infoClass) {
+    case FileBasicInformation:
+        needed = sizeof(FILE_BASIC_INFORMATION);
+        if ((ULONG)userBufLen < needed) {
+            RxContext->InformationToReturn = needed;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        Smb2FillBasicInfo((PFILE_BASIC_INFORMATION)userBuf, &out.Stat);
+        RxContext->Info.LengthRemaining -= (LONG)needed;
+        status = STATUS_SUCCESS;
+        break;
+
+    case FileStandardInformation:
+        needed = sizeof(FILE_STANDARD_INFORMATION);
+        if ((ULONG)userBufLen < needed) {
+            RxContext->InformationToReturn = needed;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        Smb2FillStandardInfo((PFILE_STANDARD_INFORMATION)userBuf, &out.Stat);
+        RxContext->Info.LengthRemaining -= (LONG)needed;
+        status = STATUS_SUCCESS;
+        break;
+
+    case FileInternalInformation:
+        needed = sizeof(FILE_INTERNAL_INFORMATION);
+        if ((ULONG)userBufLen < needed) {
+            RxContext->InformationToReturn = needed;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        ((PFILE_INTERNAL_INFORMATION)userBuf)->IndexNumber.QuadPart =
+            (LONGLONG)out.Stat.Ino;
+        RxContext->Info.LengthRemaining -= (LONG)needed;
+        status = STATUS_SUCCESS;
+        break;
+
+    case FileNetworkOpenInformation:
+        needed = sizeof(FILE_NETWORK_OPEN_INFORMATION);
+        if ((ULONG)userBufLen < needed) {
+            RxContext->InformationToReturn = needed;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        Smb2FillNetworkOpenInfo((PFILE_NETWORK_OPEN_INFORMATION)userBuf,
+                                &out.Stat);
+        RxContext->Info.LengthRemaining -= (LONG)needed;
+        status = STATUS_SUCCESS;
+        break;
+
+    case FileAttributeTagInformation:
+        needed = sizeof(FILE_ATTRIBUTE_TAG_INFORMATION);
+        if ((ULONG)userBufLen < needed) {
+            RxContext->InformationToReturn = needed;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        {
+            PFILE_ATTRIBUTE_TAG_INFORMATION ati =
+                (PFILE_ATTRIBUTE_TAG_INFORMATION)userBuf;
+            ati->FileAttributes = out.Stat.Attributes
+                ? out.Stat.Attributes : FILE_ATTRIBUTE_NORMAL;
+            ati->ReparseTag     = 0;
+        }
+        RxContext->Info.LengthRemaining -= (LONG)needed;
+        status = STATUS_SUCCESS;
+        break;
+
+    case FileAllInformation: {
+        /* FILE_ALL_INFORMATION is a flat struct.  We fill the leading four
+         * fields (Basic/Standard/Internal/Ea); Access/Position/Mode/Alignment
+         * are left zero, which is valid for a freshly-opened handle, and
+         * NameInformation is not populated (callers that need the filename
+         * round-trip through FileNameInformation separately). */
+        needed = sizeof(FILE_ALL_INFORMATION);
+        if ((ULONG)userBufLen < sizeof(FILE_BASIC_INFORMATION)) {
+            /* Not enough room for even the first field — bail out. */
+            RxContext->InformationToReturn = needed;
+            status = STATUS_BUFFER_OVERFLOW;
+            break;
+        }
+        {
+            PFILE_ALL_INFORMATION ai = (PFILE_ALL_INFORMATION)userBuf;
+            ULONG fill = ((ULONG)userBufLen >= needed) ? needed
+                                                       : (ULONG)userBufLen;
+            RtlZeroMemory(userBuf, fill);
+            Smb2FillBasicInfo(&ai->BasicInformation, &out.Stat);
+            if (fill >= (ULONG)(sizeof(FILE_BASIC_INFORMATION)
+                              + sizeof(FILE_STANDARD_INFORMATION)))
+                Smb2FillStandardInfo(&ai->StandardInformation, &out.Stat);
+            if (fill >= (ULONG)(sizeof(FILE_BASIC_INFORMATION)
+                              + sizeof(FILE_STANDARD_INFORMATION)
+                              + sizeof(FILE_INTERNAL_INFORMATION)))
+                ai->InternalInformation.IndexNumber.QuadPart =
+                    (LONGLONG)out.Stat.Ino;
+            /* EaInformation.EaSize already zeroed above.  Access/Position/
+             * Mode/Alignment left zero. */
+            if ((ULONG)userBufLen < needed) {
+                RxContext->InformationToReturn = needed;
+                RxContext->Info.LengthRemaining -= (LONG)fill;
+                status = STATUS_BUFFER_OVERFLOW;
+            } else {
+                RxContext->Info.LengthRemaining -= (LONG)needed;
+                status = STATUS_SUCCESS;
+            }
+        }
+        break;
+    }
+
+    default:
+        /* Shouldn't reach here — earlier switch filters unknown classes. */
+        status = STATUS_INVALID_INFO_CLASS;
+        break;
+    }
+
+    DbgPrint("SMB2RDR: QueryFileInfo class=%d size=%llu attr=0x%lx -> 0x%08lx\n",
+             (int)infoClass,
+             (unsigned long long)out.Stat.Size,
+             out.Stat.Attributes, status);
+    return status;
+}
+
 /* ---------- MRxFlush ----------
  *
  * FlushFileBuffers / NtFlushBuffersFile / cache-manager flushes land here.
@@ -1410,7 +1716,7 @@ smb2rdr_init_ops(void)
 
     smb2rdr_ops.MRxQueryDirectory    = smb2rdr_QueryDirectory;
     smb2rdr_ops.MRxQueryVolumeInfo   = smb2rdr_Unimplemented;
-    smb2rdr_ops.MRxQueryFileInfo     = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxQueryFileInfo     = smb2rdr_QueryFileInfo;
     smb2rdr_ops.MRxSetFileInfo       = smb2rdr_Unimplemented;
 
     smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_READ]   = smb2rdr_Read;
