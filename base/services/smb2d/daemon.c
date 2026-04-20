@@ -175,6 +175,13 @@ typedef struct {
     ULONG _Pad;
 } SMB2D_OP_WRITE_OUT;
 
+/* Kernel->daemon FSYNC wire layout, mirror of OP_FSYNC_IN in
+ * drivers/filesystems/smb2rdr/upcall.h.  No reply payload — the downcall
+ * Status is the whole answer. */
+typedef struct {
+    ULONGLONG FileHandle;
+} SMB2D_OP_FSYNC_IN;
+
 /* NT dir-info record types (flat layout, matches FILE_*_DIR_INFORMATION in
  * ntifs.h / ndk/iotypes.h; we keep a local copy here so the daemon stays
  * free of DDK/NTIFS headers).  See sdk/include/ndk/iotypes.h. */
@@ -243,6 +250,7 @@ enum {
     SMB2D_OP_CLOSE         = 6,
     SMB2D_OP_DISCONNECT    = 7,
     SMB2D_OP_WRITE         = 8,
+    SMB2D_OP_FSYNC         = 9,
 };
 
 /* A small grab-bag of NTSTATUS values we need.  Most come in via winnt.h
@@ -615,6 +623,7 @@ OpcodeName(ULONG op)
     case SMB2D_OP_CLOSE:         return "CLOSE";
     case SMB2D_OP_DISCONNECT:    return "DISCONNECT";
     case SMB2D_OP_WRITE:         return "WRITE";
+    case SMB2D_OP_FSYNC:         return "FSYNC";
     default:                     return "INVALID";
     }
 }
@@ -1513,6 +1522,53 @@ HandleOpWrite(const BYTE *in, ULONG inLen,
     return SMB2D_STATUS_SUCCESS;
 }
 
+/*
+ * OP_FSYNC: fire libsmb2's smb2_fsync() on the target file handle so the
+ * server forces a disk flush of the open stream.  Directory handles are
+ * a no-op — SMB2 has no directory-flush op, and pretending one failed
+ * would break FlushFileBuffers() on directory handles that applications
+ * happen to open.  A negative rc from libsmb2 is surfaced as a network
+ * error so FlushFileBuffers propagates failure to user code.
+ */
+static LONG
+HandleOpFsync(const BYTE *in, ULONG inLen)
+{
+    SMB2D_OP_FSYNC_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+    struct smb2fh *fh;
+    int rc;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    smb2d_log("smb2d: OP_FSYNC fh=0x%llx\n",
+              (unsigned long long)hdr.FileHandle);
+
+    if (!LookupFile(hdr.FileHandle, &ctx, &opaque, &is_dir) ||
+        ctx == NULL || opaque == NULL)
+    {
+        smb2d_log("smb2d: OP_FSYNC unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (is_dir) {
+        /* SMB2 has no directory-flush; report success so the caller's
+         * FlushFileBuffers on a directory handle still returns ok. */
+        return SMB2D_STATUS_SUCCESS;
+    }
+    fh = (struct smb2fh *)opaque;
+
+    rc = smb2_fsync(ctx, fh);
+    smb2d_log("smb2d: smb2_fsync -> %d\n", rc);
+    if (rc < 0) {
+        smb2d_log("smb2d: smb2_fsync error: %s\n", smb2_get_error(ctx));
+        return (LONG)0xC000020CL; /* STATUS_UNEXPECTED_NETWORK_ERROR */
+    }
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -1759,6 +1815,11 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             }
             break;
         }
+
+        case SMB2D_OP_FSYNC:
+            status = HandleOpFsync(payload, payloadLen);
+            SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            break;
 
         case SMB2D_OP_QUERY_INFO:
         default:
