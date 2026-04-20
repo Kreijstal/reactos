@@ -8,6 +8,13 @@
 
 /* INCLUDES ******************************************************************/
 
+/* WSAPoll and WSAPOLLFD are gated behind _WIN32_WINNT >= 0x600 in the PSDK
+ * winsock2.h. Raise the target here so the types are visible to ws2_32's
+ * own implementation; callers using <=WinServer2003 simply can't call
+ * WSAPoll, but ws2_32 must still compile it. */
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+
 #include <ws2_32.h>
 
 #define NDEBUG
