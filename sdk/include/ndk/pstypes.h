@@ -1549,6 +1549,17 @@ typedef struct _ETHREAD
     PUNICODE_STRING ThreadName;
     // TODO: Missing Win10+ members
 #endif
+#if DBG
+    //
+    // ReactOS-only debug owner tracking for EX_PUSH_LOCK.
+    // Stores push-locks currently held by this thread so that debug
+    // assertions can verify push-lock ownership the same way
+    // KGUARDED_MUTEX.Owner used to. Kept at the tail to avoid shifting
+    // any existing field offsets. Non-DBG builds do not emit these.
+    //
+    PVOID HeldPushLocks[8];
+    UCHAR HeldPushLockCount;
+#endif
 } ETHREAD;
 
 //
