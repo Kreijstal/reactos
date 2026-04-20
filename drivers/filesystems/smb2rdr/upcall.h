@@ -35,6 +35,9 @@ typedef enum _SMB2D_OPCODE {
     SMB2D_OP_DISCONNECT      = 7,
     SMB2D_OP_WRITE           = 8,
     SMB2D_OP_FSYNC           = 9,
+    SMB2D_OP_RENAME          = 10,
+    SMB2D_OP_UNLINK          = 11,
+    SMB2D_OP_FTRUNCATE       = 12,
     SMB2D_OP_MAX
 } SMB2D_OPCODE;
 
@@ -213,6 +216,48 @@ typedef struct _OP_QUERY_FILE_INFO_IN {
 typedef struct _OP_QUERY_FILE_INFO_OUT {
     SMB2RDR_STAT Stat;
 } OP_QUERY_FILE_INFO_OUT, *POP_QUERY_FILE_INFO_OUT;
+
+/*
+ * RENAME wire format.  Both paths are relative to the share root and
+ * encoded as length-prefixed UTF-16LE with no NUL terminator; the daemon
+ * converts to UTF-8 and rewrites backslashes into forward slashes for
+ * libsmb2.  VNetHandle selects the share context since smb2_rename() takes
+ * a context + two paths rather than an open file handle.  There is no
+ * output payload — the downcall Status is the whole answer.
+ */
+typedef struct _OP_RENAME_IN {
+    ULONGLONG VNetHandle;     /* share context handle */
+    ULONG     ReplaceIfExists; /* carried for future use; libsmb2 rename
+                                 * always replaces so we ignore it today */
+    USHORT    OldPathLen;     /* bytes, UTF-16LE, no NUL */
+    USHORT    NewPathLen;     /* bytes, UTF-16LE, no NUL */
+    /* OldPathLen bytes of UTF-16LE, then NewPathLen bytes of UTF-16LE */
+} OP_RENAME_IN, *POP_RENAME_IN;
+
+/*
+ * UNLINK wire format.  Path is relative to the share root (same encoding
+ * as CREATE).  IsDirectory selects smb2_rmdir() vs smb2_unlink() so the
+ * daemon doesn't need a second stat() round-trip to disambiguate.  Fires
+ * from MRxCloseSrvOpen when the FCB extension's DeleteOnClose flag is set.
+ */
+typedef struct _OP_UNLINK_IN {
+    ULONGLONG VNetHandle;
+    ULONG     IsDirectory;    /* 1 = rmdir, 0 = unlink */
+    USHORT    PathLen;
+    USHORT    _Pad;
+    /* PathLen bytes of UTF-16LE path immediately follow */
+} OP_UNLINK_IN, *POP_UNLINK_IN;
+
+/*
+ * FTRUNCATE wire format.  Fires from MRxSetFileInfo for
+ * FileEndOfFileInformation.  No output payload — the downcall Status is
+ * the whole answer.  Sign-extended to 64 bits even on 32-bit NT; the
+ * caller already validated non-negative before shipping.
+ */
+typedef struct _OP_FTRUNCATE_IN {
+    ULONGLONG FileHandle;
+    ULONGLONG NewSize;
+} OP_FTRUNCATE_IN, *POP_FTRUNCATE_IN;
 
 #pragma pack(pop)
 
