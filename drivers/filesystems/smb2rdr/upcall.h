@@ -33,6 +33,7 @@ typedef enum _SMB2D_OPCODE {
     SMB2D_OP_READ            = 5,
     SMB2D_OP_CLOSE           = 6,
     SMB2D_OP_DISCONNECT      = 7,
+    SMB2D_OP_WRITE           = 8,
     SMB2D_OP_MAX
 } SMB2D_OPCODE;
 
@@ -143,6 +144,29 @@ typedef struct _OP_READ_OUT {
     ULONG _Pad;
     /* BytesRead bytes of file data follow */
 } OP_READ_OUT, *POP_READ_OUT;
+
+/*
+ * WRITE wire format.  Input carries the opaque daemon file handle, the
+ * 64-bit byte offset to start writing at, and the byte count for this
+ * chunk; Length bytes of caller-supplied payload follow the header inline.
+ * Output is a compact header carrying the number of bytes the server
+ * actually accepted, which may be < Length on a short write (in which
+ * case the kernel side stops the chunk loop and surfaces a partial
+ * success to the caller).  Kernel splits large writes into 1 MiB chunks
+ * so the upcall staging buffers on both sides stay bounded.
+ */
+typedef struct _OP_WRITE_IN {
+    ULONGLONG FileHandle;
+    ULONGLONG Offset;
+    ULONG     Length;
+    ULONG     _Pad;
+    /* Length bytes of payload follow immediately */
+} OP_WRITE_IN, *POP_WRITE_IN;
+
+typedef struct _OP_WRITE_OUT {
+    ULONG BytesWritten;
+    ULONG _Pad;
+} OP_WRITE_OUT, *POP_WRITE_OUT;
 
 #pragma pack(pop)
 
