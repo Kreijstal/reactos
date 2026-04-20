@@ -733,6 +733,198 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
     return STATUS_SUCCESS;
 }
 
+/* ---------- MRxQueryDirectory ----------
+ *
+ * rdbss already canonicalised everything we need: Fobx->UnicodeQueryTemplate
+ * is the filename filter (empty/"*" on the first call), Info.Buffer is the
+ * (locked + mapped) user buffer to fill, and QueryDirectory.{InitialQuery,
+ * RestartScan, ReturnSingleEntry} tell us how to pilot the iterator in the
+ * daemon.  We drive SMB2D_OP_READDIR with a temporary non-paged staging
+ * buffer big enough to hold the header + the user's buffer; the daemon
+ * formats NT dir-info records straight into it, and we bounce the payload
+ * into the user buffer in a single memcpy.  This deliberately trades one
+ * extra copy for a tiny kernel-side footprint.
+ */
+static NTSTATUS
+smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PMRX_FOBX Fobx = RxContext->pFobx;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    FILE_INFORMATION_CLASS infoClass;
+    PVOID userBuf;
+    LONG userBufLen;
+    PUNICODE_STRING filter;
+    POP_READDIR_IN opIn = NULL;
+    PUCHAR opOutBuf = NULL;
+    POP_READDIR_OUT opOut;
+    ULONG inLen;
+    ULONG outCap;
+    ULONG outActual = 0;
+    NTSTATUS bridgeStatus;
+    NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+    NTSTATUS status;
+
+    if (RxContext->Info.Buffer == NULL)
+        return STATUS_INVALID_USER_BUFFER;
+
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0 || !fcbExt->IsDirectory) {
+        DPRINT1("SMB2RDR: MRxQueryDirectory: no daemon dir handle\n");
+        return STATUS_INVALID_HANDLE;
+    }
+
+    infoClass   = RxContext->Info.FileInformationClass;
+    userBuf     = RxContext->Info.Buffer;
+    userBufLen  = RxContext->Info.LengthRemaining;
+    filter      = (Fobx != NULL) ? &Fobx->UnicodeQueryTemplate : NULL;
+
+    if (userBufLen <= 0)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    switch (infoClass) {
+    case FileDirectoryInformation:
+    case FileFullDirectoryInformation:
+    case FileBothDirectoryInformation:
+    case FileNamesInformation:
+        break;
+    default:
+        DPRINT1("SMB2RDR: MRxQueryDirectory: unhandled info class %d\n",
+                (int)infoClass);
+        return STATUS_INVALID_INFO_CLASS;
+    }
+
+    /* Build upcall input.  The filter is length-prefixed inside the header
+     * so the daemon can reconstruct it without extra parsing gymnastics. */
+    {
+        USHORT filterBytes = 0;
+        if (filter != NULL && filter->Length > 0 && filter->Buffer != NULL)
+            filterBytes = filter->Length;
+
+        inLen = (ULONG)sizeof(OP_READDIR_IN) + filterBytes;
+        opIn = ExAllocatePoolWithTag(NonPagedPool, inLen, 'RDcS');
+        if (opIn == NULL) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto out;
+        }
+        RtlZeroMemory(opIn, inLen);
+        opIn->FileHandle        = fcbExt->DaemonFileHandle;
+        opIn->InfoClass         = (ULONG)infoClass;
+        opIn->MaxOutputLen      = (ULONG)userBufLen;
+        opIn->RestartScan       = (RxContext->QueryDirectory.RestartScan ||
+                                    RxContext->QueryDirectory.InitialQuery) ? 1 : 0;
+        opIn->ReturnSingleEntry = RxContext->QueryDirectory.ReturnSingleEntry ? 1 : 0;
+        opIn->FileIndex         = RxContext->QueryDirectory.IndexSpecified
+                                  ? RxContext->QueryDirectory.FileIndex : 0;
+        opIn->FileSpecLen       = filterBytes;
+        if (filterBytes > 0) {
+            RtlCopyMemory((PUCHAR)opIn + sizeof(OP_READDIR_IN),
+                          filter->Buffer, filterBytes);
+        }
+    }
+
+    /* Size the output staging buffer to fit the user's full request.  The
+     * daemon side will cap what it emits at MaxOutputLen, so we never
+     * overflow on the copy-out below. */
+    outCap = (ULONG)sizeof(OP_READDIR_OUT) + (ULONG)userBufLen;
+    opOutBuf = ExAllocatePoolWithTag(NonPagedPool, outCap, 'RDoS');
+    if (opOutBuf == NULL) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto out;
+    }
+    RtlZeroMemory(opOutBuf, sizeof(OP_READDIR_OUT));
+    opOut = (POP_READDIR_OUT)opOutBuf;
+
+    DPRINT1("SMB2RDR: MRxQueryDirectory handle=0x%llx class=%d buf=%d "
+            "restart=%u initial=%u single=%u filter=%wZ\n",
+            fcbExt->DaemonFileHandle, (int)infoClass, userBufLen,
+            (unsigned)RxContext->QueryDirectory.RestartScan,
+            (unsigned)RxContext->QueryDirectory.InitialQuery,
+            (unsigned)RxContext->QueryDirectory.ReturnSingleEntry,
+            filter);
+
+    bridgeStatus = SmbRdrIssueUpcall(
+        SMB2D_OP_READDIR,
+        opIn, inLen,
+        opOutBuf, outCap, &outActual,
+        &daemonStatus,
+        30 /* seconds */);
+
+    if (bridgeStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxQueryDirectory bridge failed 0x%08lx\n",
+                bridgeStatus);
+        status = STATUS_UNEXPECTED_NETWORK_ERROR;
+        goto out;
+    }
+
+    if (outActual < sizeof(OP_READDIR_OUT)) {
+        /* Daemon-side failures (unknown handle, stat error, ...) come back
+         * as a status-only downcall with no payload.  Surface the NTSTATUS
+         * unchanged — for STATUS_NO_MORE_FILES the caller already expects
+         * a zero-entry completion. */
+        status = (daemonStatus != STATUS_SUCCESS) ? daemonStatus
+                                                 : STATUS_UNEXPECTED_NETWORK_ERROR;
+        DPRINT1("SMB2RDR: MRxQueryDirectory short reply outlen=%lu ds=0x%08lx\n",
+                outActual, daemonStatus);
+        goto out;
+    }
+
+    if (daemonStatus == STATUS_NO_MORE_FILES) {
+        /* Iterator has been drained by a previous call; rdbss wants the
+         * buffer to remain untouched and the terminating status. */
+        RxContext->Info.LengthRemaining = userBufLen;
+        status = STATUS_NO_MORE_FILES;
+        goto out;
+    }
+
+    if (daemonStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxQueryDirectory daemon failed 0x%08lx\n",
+                daemonStatus);
+        status = daemonStatus;
+        goto out;
+    }
+
+    if (opOut->BytesWritten > (ULONG)userBufLen ||
+        sizeof(OP_READDIR_OUT) + opOut->BytesWritten > outActual)
+    {
+        DPRINT1("SMB2RDR: MRxQueryDirectory bad reply bw=%lu bufcap=%d "
+                "actual=%lu\n",
+                opOut->BytesWritten, userBufLen, outActual);
+        status = STATUS_UNEXPECTED_NETWORK_ERROR;
+        goto out;
+    }
+
+    if (opOut->EntryCount == 0) {
+        /* End-of-directory with no entries produced this round. */
+        RxContext->Info.LengthRemaining = userBufLen;
+        status = STATUS_NO_MORE_FILES;
+        goto out;
+    }
+
+    /* Ferry the packed records into the locked user buffer.  rdbss
+     * has already mapped Info.Buffer at elevated IRQL; this copy is
+     * kernel-mode to kernel-mode. */
+    _SEH2_TRY {
+        RtlCopyMemory(userBuf,
+                      opOutBuf + sizeof(OP_READDIR_OUT),
+                      opOut->BytesWritten);
+    } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+        status = STATUS_INVALID_USER_BUFFER;
+        goto out;
+    } _SEH2_END;
+
+    RxContext->Info.LengthRemaining = userBufLen - (LONG)opOut->BytesWritten;
+
+    DPRINT1("SMB2RDR: MRxQueryDirectory ok bytes=%lu entries=%lu flags=0x%lx\n",
+            opOut->BytesWritten, opOut->EntryCount, opOut->Flags);
+
+    status = STATUS_SUCCESS;
+
+out:
+    if (opIn) ExFreePoolWithTag(opIn, 'RDcS');
+    if (opOutBuf) ExFreePoolWithTag(opOutBuf, 'RDoS');
+    return status;
+}
+
 /* ---------- ops table ---------- */
 
 static NTSTATUS
@@ -776,7 +968,7 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxDeallocateForFcb  = smb2rdr_DeallocateForFcb;
     smb2rdr_ops.MRxDeallocateForFobx = smb2rdr_DeallocateForFobx;
 
-    smb2rdr_ops.MRxQueryDirectory    = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxQueryDirectory    = smb2rdr_QueryDirectory;
     smb2rdr_ops.MRxQueryVolumeInfo   = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxQueryFileInfo     = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxSetFileInfo       = smb2rdr_Unimplemented;
