@@ -2879,13 +2879,56 @@ RxCommonFileSystemControl(
     return STATUS_NOT_IMPLEMENTED;
 }
 
+/*
+ * RxCommonFlushBuffers — IRP_MJ_FLUSH_BUFFERS entry point.  The minimal
+ * correct behaviour is to forward the request to the active mini-rdr's
+ * MRxFlush callback so it can translate the flush into whatever the
+ * wire protocol needs (an SMB2 FLUSH, a pipe sync, etc.).  Volume /
+ * pipe / mailslot FCBs have no on-wire flush semantics, so they
+ * short-circuit to success.  Mini-rdrs that don't implement MRxFlush
+ * still get MINIRDR_CALL's STATUS_NOT_IMPLEMENTED back unchanged, so
+ * the historical behaviour for those callers is preserved.
+ */
 NTSTATUS
 NTAPI
 RxCommonFlushBuffers(
     PRX_CONTEXT Context)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFCB Fcb;
+    NTSTATUS Status;
+    NODE_TYPE_CODE NodeTypeCode;
+
+    PAGED_CODE();
+
+    Fcb = (PFCB)Context->pFcb;
+    if (Fcb == NULL)
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    NodeTypeCode = NodeType(Fcb);
+    DPRINT("RxCommonFlushBuffers(%p) FCB: %p NTC: %x\n",
+           Context, Fcb, NodeTypeCode);
+
+    /* Only file-type FCBs carry wire-flushable state.  Pipes, mailslots,
+     * volume FCBs and spool files have no on-server dirty data for the
+     * mini-rdr to sync, so we complete the IRP with success rather than
+     * bothering the minirdr with a request it couldn't action anyway. */
+    if (NodeTypeCode != RDBSS_NTC_STORAGE_TYPE_FILE)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    /* Dispatch to the mini-rdr.  Fcb->MRxDispatch is valid for any FCB
+     * that reached IRP_MJ_FLUSH_BUFFERS (it was filled in by
+     * RxCreateNetFcb during the open that produced this file object).
+     * MINIRDR_CALL maps a NULL slot to STATUS_NOT_IMPLEMENTED on its
+     * own, so legacy minirdrs without an MRxFlush hook keep their old
+     * behaviour. */
+    MINIRDR_CALL(Status, Context, Fcb->MRxDispatch, MRxFlush, (Context));
+
+    DPRINT("RxCommonFlushBuffers status %x\n", Status);
+    return Status;
 }
 
 NTSTATUS
