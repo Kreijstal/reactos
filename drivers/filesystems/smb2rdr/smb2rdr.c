@@ -925,6 +925,192 @@ out:
     return status;
 }
 
+/* ---------- MRxLowIOSubmit[LOWIO_OP_READ] ----------
+ *
+ * rdbss has already locked the caller's buffer (RxLockUserBuffer) and
+ * mapped it into system address space (RxNewMapUserBuffer called
+ * MmGetSystemAddressForMdlSafe before the read was dispatched).  By the
+ * time we land here, LowIoContext->ParamsFor.ReadWrite.Buffer is the
+ * PMDL covering the destination pages and ByteCount is the request size
+ * in bytes.  We cap per-upcall transfer at 1 MiB so the daemon's staging
+ * pool allocation (OP_READ_OUT header + payload) stays bounded; larger
+ * user reads loop over multiple OP_READ round-trips until the whole
+ * range is filled or the daemon reports a short read (EOF).
+ */
+#ifndef SMB2RDR_READ_CHUNK_BYTES
+#define SMB2RDR_READ_CHUNK_BYTES (1u << 20)
+#endif
+
+static NTSTATUS
+smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
+    PMDL mdl;
+    PUCHAR dst;
+    ULONG64 offset;
+    ULONG   total;
+    ULONG   done = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] no daemon handle\n");
+        return STATUS_INVALID_HANDLE;
+    }
+    if (fcbExt->IsDirectory) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] on directory handle=0x%llx\n",
+                fcbExt->DaemonFileHandle);
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+
+    mdl    = LowIo->ParamsFor.ReadWrite.Buffer;
+    offset = (ULONG64)LowIo->ParamsFor.ReadWrite.ByteOffset;
+    total  = LowIo->ParamsFor.ReadWrite.ByteCount;
+
+    if (total == 0) {
+        RxContext->InformationToReturn = 0;
+        RxContext->CurrentIrp->IoStatus.Information = 0;
+        return STATUS_SUCCESS;
+    }
+    if (mdl == NULL) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] NULL MDL\n");
+        return STATUS_INVALID_USER_BUFFER;
+    }
+
+    dst = (PUCHAR)MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
+    if (dst == NULL) {
+        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] MmGetSystemAddressForMdlSafe "
+                "failed\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DbgPrint("SMB2RDR: MRxLowIOSubmit[READ] fh=0x%llx offset=%llu len=%lu\n",
+             fcbExt->DaemonFileHandle,
+             (unsigned long long)offset, total);
+
+    while (done < total) {
+        OP_READ_IN  in;
+        POP_READ_OUT ro;
+        PUCHAR out;
+        ULONG chunk, outCap, outActual = 0;
+        NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+        NTSTATUS bridgeStatus;
+
+        chunk = total - done;
+        if (chunk > SMB2RDR_READ_CHUNK_BYTES)
+            chunk = SMB2RDR_READ_CHUNK_BYTES;
+
+        outCap = (ULONG)sizeof(OP_READ_OUT) + chunk;
+        /* PagedPool is acceptable: the downcall copy runs at PASSIVE_LEVEL
+         * inside SmbRdrDowncallIoctl, and the buffer is never touched
+         * below DISPATCH_LEVEL.  Keeping it out of NonPaged avoids
+         * pressuring the 1 MiB-per-read tag. */
+        out = ExAllocatePoolWithTag(PagedPool, outCap, 'RDrS');
+        if (out == NULL) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        RtlZeroMemory(&in, sizeof(in));
+        in.FileHandle = fcbExt->DaemonFileHandle;
+        in.Offset     = offset + done;
+        in.Length     = chunk;
+
+        bridgeStatus = SmbRdrIssueUpcall(
+            SMB2D_OP_READ,
+            &in, (ULONG)sizeof(in),
+            out, outCap, &outActual,
+            &daemonStatus,
+            60 /* seconds */);
+
+        if (bridgeStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] bridge failed 0x%08lx\n",
+                    bridgeStatus);
+            ExFreePoolWithTag(out, 'RDrS');
+            if (done > 0) {
+                status = STATUS_SUCCESS;
+            } else {
+                status = STATUS_UNEXPECTED_NETWORK_ERROR;
+            }
+            break;
+        }
+        if (daemonStatus != STATUS_SUCCESS) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] daemon failed 0x%08lx\n",
+                    daemonStatus);
+            ExFreePoolWithTag(out, 'RDrS');
+            if (done > 0) {
+                status = STATUS_SUCCESS;
+            } else {
+                status = daemonStatus;
+            }
+            break;
+        }
+        if (outActual < sizeof(OP_READ_OUT)) {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] short reply outlen=%lu\n",
+                    outActual);
+            ExFreePoolWithTag(out, 'RDrS');
+            if (done == 0)
+                status = STATUS_UNEXPECTED_NETWORK_ERROR;
+            break;
+        }
+
+        ro = (POP_READ_OUT)out;
+        if (ro->BytesRead == 0) {
+            /* End-of-file at current offset. */
+            ExFreePoolWithTag(out, 'RDrS');
+            break;
+        }
+        if (ro->BytesRead > chunk ||
+            sizeof(OP_READ_OUT) + ro->BytesRead > outActual)
+        {
+            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] bad reply br=%lu chunk=%lu "
+                    "actual=%lu\n",
+                    ro->BytesRead, chunk, outActual);
+            ExFreePoolWithTag(out, 'RDrS');
+            if (done == 0)
+                status = STATUS_UNEXPECTED_NETWORK_ERROR;
+            break;
+        }
+
+        _SEH2_TRY {
+            RtlCopyMemory(dst + done,
+                          (PUCHAR)(ro + 1),
+                          ro->BytesRead);
+        } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
+            ExFreePoolWithTag(out, 'RDrS');
+            status = STATUS_INVALID_USER_BUFFER;
+            goto done_out;
+        } _SEH2_END;
+
+        DbgPrint("SMB2RDR: Read chunk ok bytes=%lu total=%lu\n",
+                 ro->BytesRead, done + ro->BytesRead);
+
+        done += ro->BytesRead;
+        ExFreePoolWithTag(out, 'RDrS');
+
+        if (ro->BytesRead < chunk) {
+            /* Short read — either EOF mid-chunk or server bounded us. */
+            break;
+        }
+    }
+
+done_out:
+    /* Hand the final count back to rdbss.  A zero-byte completion is
+     * STATUS_END_OF_FILE; a non-zero partial fill is STATUS_SUCCESS with
+     * Information == done.  rdbss's RxLowIoReadShellCompletion remaps
+     * the paging-IO case internally.  InformationToReturn and IoStatusBlock
+     * share a union in RX_CONTEXT — setting the status block fills both. */
+    if (done > 0)
+        status = STATUS_SUCCESS;
+    else if (status == STATUS_SUCCESS)
+        status = STATUS_END_OF_FILE;
+
+    RxContext->IoStatusBlock.Information = done;
+    RxContext->IoStatusBlock.Status = status;
+    return status;
+}
+
 /* ---------- ops table ---------- */
 
 static NTSTATUS
@@ -973,7 +1159,7 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxQueryFileInfo     = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxSetFileInfo       = smb2rdr_Unimplemented;
 
-    smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_READ]   = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_READ]   = smb2rdr_Read;
     smb2rdr_ops.MRxLowIOSubmit[LOWIO_OP_WRITE]  = smb2rdr_Unimplemented;
 
     smb2rdr_ops.MRxTruncate       = smb2rdr_Unimplemented;
