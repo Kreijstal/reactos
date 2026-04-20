@@ -86,6 +86,43 @@ typedef struct _OP_CLOSE_IN {
 } OP_CLOSE_IN, *POP_CLOSE_IN;
 /* OP_CLOSE has no output payload (status-only downcall). */
 
+/*
+ * READDIR wire format.  Input carries the opaque directory handle (assigned
+ * by OP_CREATE for a directory open), the NT file-information class the
+ * caller wants entries encoded as, the maximum bytes the kernel can ingest,
+ * scan-control flags, and an optional UTF-16LE filename filter.  Output is
+ * a compact header followed by a flat packed run of NT dir-info records —
+ * the daemon has already formatted them in the NT layout so the kernel side
+ * can memcpy straight into the caller's buffer.
+ */
+typedef struct _OP_READDIR_IN {
+    ULONGLONG FileHandle;
+    ULONG     InfoClass;          /* FILE_INFORMATION_CLASS value */
+    ULONG     MaxOutputLen;       /* bytes available after the OUT header */
+    ULONG     RestartScan;        /* 1 = smb2_rewinddir() first */
+    ULONG     ReturnSingleEntry;  /* 1 = stop after first entry */
+    ULONG     FileIndex;          /* resume index, 0 typical */
+    USHORT    FileSpecLen;        /* bytes of UTF-16LE filter; 0 = no filter */
+    USHORT    _Pad;
+    /* FileSpecLen bytes of UTF-16LE filter immediately follow */
+} OP_READDIR_IN, *POP_READDIR_IN;
+
+/* OUT header.  BytesWritten bytes of flat NT-format records follow.  Flags:
+ *   0x1 = more entries remain (kernel side should report STATUS_SUCCESS on
+ *         a partially-filled buffer, and the next call will continue); zero
+ *         when the daemon walked the whole directory.  EntryCount == 0 with
+ *         Flags == 0 means the iterator is exhausted.
+ */
+#define OP_READDIR_FLAG_MORE_ENTRIES 0x00000001u
+
+typedef struct _OP_READDIR_OUT {
+    ULONG BytesWritten;
+    ULONG EntryCount;
+    ULONG Flags;
+    ULONG _Pad;
+    /* BytesWritten bytes of packed NT dir-info records follow */
+} OP_READDIR_OUT, *POP_READDIR_OUT;
+
 #pragma pack(pop)
 
 #if defined(_NTDDK_) || defined(_NTIFS_) || defined(_KERNEL_MODE)
