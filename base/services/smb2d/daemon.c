@@ -182,6 +182,35 @@ typedef struct {
     ULONGLONG FileHandle;
 } SMB2D_OP_FSYNC_IN;
 
+/* Kernel->daemon QUERY_FILE_INFO wire layout.  Mirror of SMB2RDR_STAT /
+ * OP_QUERY_FILE_INFO_{IN,OUT} in drivers/filesystems/smb2rdr/upcall.h.
+ * Field-for-field copy of smb2_stat_64 plus an NT-style attributes bitmap
+ * the daemon stamps based on smb2_type. */
+typedef struct {
+    ULONGLONG FileHandle;
+} SMB2D_OP_QUERY_FILE_INFO_IN;
+
+typedef struct {
+    ULONG     Type;
+    ULONG     NLink;
+    ULONGLONG Ino;
+    ULONGLONG Size;
+    ULONGLONG Atime;
+    ULONGLONG Atime_nsec;
+    ULONGLONG Mtime;
+    ULONGLONG Mtime_nsec;
+    ULONGLONG Ctime;
+    ULONGLONG Ctime_nsec;
+    ULONGLONG Btime;
+    ULONGLONG Btime_nsec;
+    ULONG     Attributes;
+    ULONG     _Pad;
+} SMB2D_STAT;
+
+typedef struct {
+    SMB2D_STAT Stat;
+} SMB2D_OP_QUERY_FILE_INFO_OUT;
+
 /* NT dir-info record types (flat layout, matches FILE_*_DIR_INFORMATION in
  * ntifs.h / ndk/iotypes.h; we keep a local copy here so the daemon stays
  * free of DDK/NTIFS headers).  See sdk/include/ndk/iotypes.h. */
@@ -1569,6 +1598,92 @@ HandleOpFsync(const BYTE *in, ULONG inLen)
     return SMB2D_STATUS_SUCCESS;
 }
 
+/*
+ * OP_QUERY_FILE_INFO: hand the kernel a flat SMB2_stat_64 snapshot for
+ * the opaque file/dir handle.  The kernel synthesises whichever NT
+ * FILE_*_INFORMATION layout the caller asked for from the same blob, so
+ * we only round-trip to the wire once per NtQueryInformationFile.
+ *
+ * For file handles, smb2_fstat() on the open smb2fh gives us a fresh
+ * server snapshot.  For directory handles libsmb2 doesn't support
+ * smb2_fstat on an smb2dir (different opaque type), so we synthesise a
+ * minimally-populated stat with Type=DIRECTORY / Size=0 / NLink=1 and
+ * the NT attribute bits the Create path already stamps down.  That's
+ * enough for cmd.exe/shell consumers to see a directory; a later slice
+ * can stash a cached smb2_stat from OP_CREATE's file-vs-dir probe if
+ * more accurate timestamps are needed.
+ */
+static LONG
+HandleOpQueryFileInfo(const BYTE *in, ULONG inLen,
+                      SMB2D_OP_QUERY_FILE_INFO_OUT *out)
+{
+    SMB2D_OP_QUERY_FILE_INFO_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+    struct smb2_stat_64 st;
+    int rc;
+
+    memset(out, 0, sizeof(*out));
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    smb2d_log("smb2d: OP_QUERY_FILE_INFO fh=0x%llx\n",
+              (unsigned long long)hdr.FileHandle);
+
+    if (!LookupFile(hdr.FileHandle, &ctx, &opaque, &is_dir) ||
+        ctx == NULL || opaque == NULL)
+    {
+        smb2d_log("smb2d: OP_QUERY_FILE_INFO unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+
+    memset(&st, 0, sizeof(st));
+
+    if (!is_dir) {
+        struct smb2fh *fh = (struct smb2fh *)opaque;
+        rc = smb2_fstat(ctx, fh, &st);
+        smb2d_log("smb2d: smb2_fstat -> %d size=%llu type=%u nlink=%u\n",
+                  rc, (unsigned long long)st.smb2_size,
+                  (unsigned)st.smb2_type, (unsigned)st.smb2_nlink);
+        if (rc < 0) {
+            smb2d_log("smb2d: smb2_fstat error: %s\n",
+                      smb2_get_error(ctx));
+            return (LONG)0xC000020CL; /* STATUS_UNEXPECTED_NETWORK_ERROR */
+        }
+    } else {
+        /* Directory handle: libsmb2 has no smb2_fstat on smb2dir.
+         * Synthesise a directory-shaped stat so the kernel can still
+         * satisfy FileBasicInformation / FileNetworkOpenInformation
+         * queries without a wire round-trip. */
+        smb2d_log("smb2d: smb2_fstat (dir synth) fh=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        st.smb2_type  = SMB2_TYPE_DIRECTORY;
+        st.smb2_nlink = 1;
+        st.smb2_size  = 0;
+    }
+
+    out->Stat.Type       = (ULONG)st.smb2_type;
+    out->Stat.NLink      = (ULONG)st.smb2_nlink;
+    out->Stat.Ino        = (ULONGLONG)st.smb2_ino;
+    out->Stat.Size       = (ULONGLONG)st.smb2_size;
+    out->Stat.Atime      = (ULONGLONG)st.smb2_atime;
+    out->Stat.Atime_nsec = (ULONGLONG)st.smb2_atime_nsec;
+    out->Stat.Mtime      = (ULONGLONG)st.smb2_mtime;
+    out->Stat.Mtime_nsec = (ULONGLONG)st.smb2_mtime_nsec;
+    out->Stat.Ctime      = (ULONGLONG)st.smb2_ctime;
+    out->Stat.Ctime_nsec = (ULONGLONG)st.smb2_ctime_nsec;
+    out->Stat.Btime      = (ULONGLONG)st.smb2_btime;
+    out->Stat.Btime_nsec = (ULONGLONG)st.smb2_btime_nsec;
+    out->Stat.Attributes = (st.smb2_type == SMB2_TYPE_DIRECTORY)
+                           ? FILE_ATTRIBUTE_DIRECTORY
+                           : FILE_ATTRIBUTE_NORMAL;
+
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -1821,7 +1936,18 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             SendDowncall(hDev, hdr.Xid, status, NULL, 0);
             break;
 
-        case SMB2D_OP_QUERY_INFO:
+        case SMB2D_OP_QUERY_INFO: {
+            SMB2D_OP_QUERY_FILE_INFO_OUT qout;
+            status = HandleOpQueryFileInfo(payload, payloadLen, &qout);
+            if (status == SMB2D_STATUS_SUCCESS) {
+                SendDowncall(hDev, hdr.Xid, status,
+                             &qout, (ULONG)sizeof(qout));
+            } else {
+                SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            }
+            break;
+        }
+
         default:
             smb2d_log("smb2d: opcode %lu (%s) not implemented\n",
                       hdr.Opcode, OpcodeName(hdr.Opcode));
