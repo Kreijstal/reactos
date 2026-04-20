@@ -160,6 +160,21 @@ typedef struct {
     ULONG _Pad;
 } SMB2D_OP_READ_OUT;
 
+/* Kernel->daemon WRITE wire layout, mirror of OP_WRITE_IN / OP_WRITE_OUT
+ * in drivers/filesystems/smb2rdr/upcall.h.  Length bytes of payload follow
+ * the header inline in the upcall buffer. */
+typedef struct {
+    ULONGLONG FileHandle;
+    ULONGLONG Offset;
+    ULONG     Length;
+    ULONG     _Pad;
+} SMB2D_OP_WRITE_IN;
+
+typedef struct {
+    ULONG BytesWritten;
+    ULONG _Pad;
+} SMB2D_OP_WRITE_OUT;
+
 /* NT dir-info record types (flat layout, matches FILE_*_DIR_INFORMATION in
  * ntifs.h / ndk/iotypes.h; we keep a local copy here so the daemon stays
  * free of DDK/NTIFS headers).  See sdk/include/ndk/iotypes.h. */
@@ -227,6 +242,7 @@ enum {
     SMB2D_OP_READ          = 5,
     SMB2D_OP_CLOSE         = 6,
     SMB2D_OP_DISCONNECT    = 7,
+    SMB2D_OP_WRITE         = 8,
 };
 
 /* A small grab-bag of NTSTATUS values we need.  Most come in via winnt.h
@@ -598,6 +614,7 @@ OpcodeName(ULONG op)
     case SMB2D_OP_READ:          return "READ";
     case SMB2D_OP_CLOSE:         return "CLOSE";
     case SMB2D_OP_DISCONNECT:    return "DISCONNECT";
+    case SMB2D_OP_WRITE:         return "WRITE";
     default:                     return "INVALID";
     }
 }
@@ -1431,6 +1448,71 @@ HandleOpRead(const BYTE *in, ULONG inLen,
     return SMB2D_STATUS_SUCCESS;
 }
 
+/*
+ * OP_WRITE: translate a kernel-side OP_WRITE upcall into smb2_pwrite() on
+ * the target libsmb2 file handle.  The kernel chunks at 1 MiB so each
+ * call fits inside a bounded receive buffer; we still clamp Length
+ * defensively against the trailing payload length.  smb2_pwrite returns
+ * the number of bytes written on success (may be < Length on a short
+ * write) or a negative errno on error.
+ */
+static LONG
+HandleOpWrite(const BYTE *in, ULONG inLen,
+              SMB2D_OP_WRITE_OUT *out)
+{
+    SMB2D_OP_WRITE_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+    struct smb2fh *fh;
+    ULONG want;
+    int rc;
+
+    memset(out, 0, sizeof(*out));
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+    if ((ULONG)sizeof(hdr) + hdr.Length > inLen)
+        return STATUS_INVALID_PARAMETER;
+
+    smb2d_log("smb2d: OP_WRITE fh=0x%llx offset=%llu len=%lu\n",
+              (unsigned long long)hdr.FileHandle,
+              (unsigned long long)hdr.Offset, hdr.Length);
+
+    if (!LookupFile(hdr.FileHandle, &ctx, &opaque, &is_dir) ||
+        ctx == NULL || opaque == NULL)
+    {
+        smb2d_log("smb2d: OP_WRITE unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (is_dir) {
+        smb2d_log("smb2d: OP_WRITE on directory handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+    fh = (struct smb2fh *)opaque;
+
+    want = hdr.Length;
+    if (want == 0) {
+        out->BytesWritten = 0;
+        return SMB2D_STATUS_SUCCESS;
+    }
+
+    /* smb2_pwrite's buf is const in the public prototype, so we can pass
+     * the in-buffer pointer straight through. */
+    rc = smb2_pwrite(ctx, fh, (const uint8_t *)(in + sizeof(hdr)),
+                     want, hdr.Offset);
+    smb2d_log("smb2d: smb2_pwrite -> %d\n", rc);
+    if (rc < 0) {
+        smb2d_log("smb2d: smb2_pwrite error: %s\n", smb2_get_error(ctx));
+        return (LONG)0xC000020CL; /* STATUS_UNEXPECTED_NETWORK_ERROR */
+    }
+
+    out->BytesWritten = (ULONG)rc;
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -1457,17 +1539,34 @@ HandleDisconnect(const BYTE *in, ULONG inLen)
 
 /* ---------- main loop ---------- */
 
+/* Initial upcall receive capacity: needs to hold at least the SMB2D_UPCALL
+ * header + 1 MiB (the kernel's per-chunk WRITE/READ bound) + a little
+ * slack.  Keeping this in a heap allocation rather than on the stack
+ * avoids the 1 MB default thread-stack growing a full 1 MiB on every
+ * loop iteration. */
+#define SMB2D_UPCALL_INBUF_INITIAL (1u << 20)  /* 1 MiB */
+#define SMB2D_UPCALL_INBUF_MAX     (4u << 20)  /* 4 MiB absolute cap */
+
 DWORD
 Smb2dDaemonLoop(HANDLE hStopEvent)
 {
     HANDLE hDev = INVALID_HANDLE_VALUE;
+    BYTE  *inBuf = NULL;
+    ULONG  inBufCap = 0;
 
     EnsureConnLock();
 
     smb2d_log("smb2d: daemon loop starting\n");
 
+    inBufCap = SMB2D_UPCALL_INBUF_INITIAL +
+               (ULONG)sizeof(SMB2D_UPCALL_HEADER) + 4096u;
+    inBuf = (BYTE *)HeapAlloc(GetProcessHeap(), 0, inBufCap);
+    if (inBuf == NULL) {
+        smb2d_log("smb2d: failed to allocate upcall inbuf\n");
+        return 1;
+    }
+
     for (;;) {
-        BYTE inBuf[8192];
         DWORD br = 0;
         SMB2D_UPCALL_HEADER hdr;
         const BYTE *payload;
@@ -1496,12 +1595,40 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
          * inBuf into the IRP; on return br is the bytes produced. */
         ok = DeviceIoControl(hDev, IOCTL_SMB2RDR_READ,
                              NULL, 0,
-                             inBuf, sizeof(inBuf),
+                             inBuf, inBufCap,
                              &br, NULL);
         if (!ok) {
             DWORD err = GetLastError();
             if (err == ERROR_OPERATION_ABORTED) {
                 /* APC broke us out of the wait, typical on stop. */
+                continue;
+            }
+            if (err == ERROR_INSUFFICIENT_BUFFER ||
+                err == ERROR_MORE_DATA)
+            {
+                /* Kernel re-queued the upcall because our buffer is too
+                 * small.  Double the receive buffer (capped) and retry. */
+                ULONG newCap = inBufCap * 2u;
+                BYTE *nbuf;
+                if (newCap > SMB2D_UPCALL_INBUF_MAX)
+                    newCap = SMB2D_UPCALL_INBUF_MAX;
+                if (newCap <= inBufCap) {
+                    smb2d_log("smb2d: upcall inbuf already at cap %lu, "
+                              "giving up\n", inBufCap);
+                    Sleep(200);
+                    continue;
+                }
+                nbuf = (BYTE *)HeapReAlloc(GetProcessHeap(), 0, inBuf, newCap);
+                if (nbuf == NULL) {
+                    smb2d_log("smb2d: upcall inbuf HeapReAlloc(%lu) failed\n",
+                              newCap);
+                    Sleep(200);
+                    continue;
+                }
+                inBuf    = nbuf;
+                inBufCap = newCap;
+                smb2d_log("smb2d: upcall inbuf grown to %lu bytes\n",
+                          inBufCap);
                 continue;
             }
             smb2d_log("smb2d: upcall DeviceIoControl failed err=%lu\n", err);
@@ -1621,6 +1748,18 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             break;
         }
 
+        case SMB2D_OP_WRITE: {
+            SMB2D_OP_WRITE_OUT wout;
+            status = HandleOpWrite(payload, payloadLen, &wout);
+            if (status == SMB2D_STATUS_SUCCESS) {
+                SendDowncall(hDev, hdr.Xid, status,
+                             &wout, (ULONG)sizeof(wout));
+            } else {
+                SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            }
+            break;
+        }
+
         case SMB2D_OP_QUERY_INFO:
         default:
             smb2d_log("smb2d: opcode %lu (%s) not implemented\n",
@@ -1632,6 +1771,8 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
 
     if (hDev != INVALID_HANDLE_VALUE)
         CloseHandle(hDev);
+    if (inBuf)
+        HeapFree(GetProcessHeap(), 0, inBuf);
 
     smb2d_log("smb2d: daemon loop exiting\n");
     return 0;
