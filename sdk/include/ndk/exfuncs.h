@@ -124,8 +124,6 @@ NTAPI
 ExPushLockIsOwnedByCurrentThread(
     _In_ PEX_PUSH_LOCK PushLock
 );
-#else
-#define ExPushLockIsOwnedByCurrentThread(PushLock) (TRUE)
 #endif
 
 //
