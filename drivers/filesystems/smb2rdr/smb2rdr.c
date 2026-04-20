@@ -1308,6 +1308,63 @@ done_out:
     return status;
 }
 
+/* ---------- MRxFlush ----------
+ *
+ * FlushFileBuffers / NtFlushBuffersFile / cache-manager flushes land here.
+ * We ship an OP_FSYNC upcall so the daemon can call libsmb2's smb2_fsync()
+ * and have the server force an on-disk flush of the open handle.  Nothing
+ * to flush (handle already closed, or opened as a directory) is a trivial
+ * success — directories don't have SMB2 flush semantics, and a missing
+ * daemon handle means there's no dirty server-side state to begin with.
+ */
+static NTSTATUS
+smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    OP_FSYNC_IN in;
+    ULONG outActual = 0;
+    NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+    NTSTATUS bridgeStatus;
+
+    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+        /* Nothing open on the daemon side — nothing to flush. */
+        return STATUS_SUCCESS;
+    }
+    if (fcbExt->IsDirectory) {
+        /* SMB2 has no directory-flush op; the server has nothing to sync. */
+        return STATUS_SUCCESS;
+    }
+
+    DbgPrint("SMB2RDR: MRxFlush fh=0x%llx\n",
+             fcbExt->DaemonFileHandle);
+
+    RtlZeroMemory(&in, sizeof(in));
+    in.FileHandle = fcbExt->DaemonFileHandle;
+
+    bridgeStatus = SmbRdrIssueUpcall(
+        SMB2D_OP_FSYNC,
+        &in, (ULONG)sizeof(in),
+        NULL, 0, &outActual,
+        &daemonStatus,
+        30 /* seconds */);
+
+    if (bridgeStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxFlush bridge failed 0x%08lx\n",
+                bridgeStatus);
+        return bridgeStatus;
+    }
+    if (daemonStatus != STATUS_SUCCESS) {
+        DPRINT1("SMB2RDR: MRxFlush daemon failed 0x%08lx\n",
+                daemonStatus);
+        return daemonStatus;
+    }
+
+    DbgPrint("SMB2RDR: Flush ok fh=0x%llx\n",
+             fcbExt->DaemonFileHandle);
+    return STATUS_SUCCESS;
+}
+
 /* ---------- ops table ---------- */
 
 static NTSTATUS
@@ -1347,7 +1404,7 @@ smb2rdr_init_ops(void)
      * rdbss requires this slot non-NULL or asserts in RxSearchForCollapsibleOpen. */
     smb2rdr_ops.MRxShouldTryToCollapseThisOpen = smb2rdr_Unimplemented;
     smb2rdr_ops.MRxCloseSrvOpen      = smb2rdr_CloseSrvOpen;
-    smb2rdr_ops.MRxFlush             = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxFlush             = smb2rdr_Flush;
     smb2rdr_ops.MRxDeallocateForFcb  = smb2rdr_DeallocateForFcb;
     smb2rdr_ops.MRxDeallocateForFobx = smb2rdr_DeallocateForFobx;
 
