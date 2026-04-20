@@ -60,10 +60,13 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
     {
         /* Need to hold either the system working-set lock or the idle
            process' AddressCreationLock. On Vista+ the latter is an
-           EX_PUSH_LOCK with no owner tracking, so we can't verify it
-           and accept that case silently. */
+           EX_PUSH_LOCK; DBG-only owner tracking
+           (ExPushLockIsOwnedByCurrentThread) stands in for the
+           KGUARDED_MUTEX.Owner check used on NT5. */
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        /* unverifiable push-lock path; presume caller is correct */
+        ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
+               PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
+               ExPushLockIsOwnedByCurrentThread(&PsIdleProcess->AddressCreationLock));
 #else
         ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
                PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
@@ -76,10 +79,8 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
            the current process' AddressCreationLock */
         PEPROCESS Process = CONTAINING_RECORD(Table, EPROCESS, VadRoot);
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        /* EX_PUSH_LOCK on Vista+ has no owner tracking, so we can only
-         * positively verify the WS-lock case. Callers that hold the
-         * AddressCreationLock without the WS lock pass silently. */
-        (void)Process;
+        ASSERT(MI_WS_OWNER(Process) ||
+               ExPushLockIsOwnedByCurrentThread(&Process->AddressCreationLock));
 #else
         ASSERT(MI_WS_OWNER(Process) ||
                (Process->AddressCreationLock.Owner == KeGetCurrentThread()));
@@ -101,7 +102,9 @@ MiDbgAssertIsLockedForWrite(_In_ PMM_AVL_TABLE Table)
         /* Need to hold both the system working-set lock exclusive and
            the idle process' AddressCreationLock */
         ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive);
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        ASSERT(ExPushLockIsOwnedByCurrentThread(&PsIdleProcess->AddressCreationLock));
+#else
         ASSERT(PsIdleProcess->AddressCreationLock.Owner == KeGetCurrentThread());
 #endif
     }
@@ -112,7 +115,9 @@ MiDbgAssertIsLockedForWrite(_In_ PMM_AVL_TABLE Table)
         PEPROCESS Process = CONTAINING_RECORD(Table, EPROCESS, VadRoot);
         ASSERT(Process == PsGetCurrentProcess());
         ASSERT(PsGetCurrentThread()->OwnsProcessWorkingSetExclusive);
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        ASSERT(ExPushLockIsOwnedByCurrentThread(&Process->AddressCreationLock));
+#else
         ASSERT(Process->AddressCreationLock.Owner == KeGetCurrentThread());
 #endif
     }
