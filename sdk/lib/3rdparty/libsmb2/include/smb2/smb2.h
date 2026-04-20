@@ -879,8 +879,12 @@ struct smb2_file_fs_attribute_info {
 };
 
 /* Device type */
+#ifndef FILE_DEVICE_CD_ROM
 #define FILE_DEVICE_CD_ROM 0x00000002
+#endif
+#ifndef FILE_DEVICE_DISK
 #define FILE_DEVICE_DISK   0x00000007
+#endif
 
 /* Characteristics */
 #define FILE_REMOVABLE_MEDIA                     0x00000001
