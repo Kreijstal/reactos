@@ -101,6 +101,34 @@ ExfUnblockPushLock(
 );
 
 //
+// Debug-only push-lock owner tracking helpers.
+// Declared on DBG builds; release builds get a TRUE-evaluating macro
+// for the public query so assertion sites compile to no-ops without
+// churn. Not exported; these live in ntoskrnl only.
+//
+#if DBG
+VOID
+NTAPI
+ExpTrackAcquirePushLock(
+    _In_ PEX_PUSH_LOCK PushLock
+);
+
+VOID
+NTAPI
+ExpTrackReleasePushLock(
+    _In_ PEX_PUSH_LOCK PushLock
+);
+
+BOOLEAN
+NTAPI
+ExPushLockIsOwnedByCurrentThread(
+    _In_ PEX_PUSH_LOCK PushLock
+);
+#else
+#define ExPushLockIsOwnedByCurrentThread(PushLock) (TRUE)
+#endif
+
+//
 // Handle Table Functions
 //
 NTKERNELAPI
