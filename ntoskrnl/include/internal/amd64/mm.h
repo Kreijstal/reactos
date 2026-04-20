@@ -102,9 +102,16 @@
 #define MI_PAGE_WRITE_THROUGH(x)   ((x)->u.Hard.WriteThrough = 1)
 #define MI_PAGE_WRITE_COMBINED(x)  ((x)->u.Hard.WriteThrough = 0)
 #define MI_IS_PAGE_LARGE(x)        ((x)->u.Hard.LargePage == 1)
+/* Hardware R/W lives at bit 1 on amd64 regardless of NTDDI.  ReactOS's
+ * MmProtectToPteMask[] sets PTE_READWRITE=0x2 (hardware bit 1) for
+ * MM_READWRITE, so MI_IS_PAGE_WRITEABLE / MI_MAKE_WRITE_PAGE must read and
+ * write the bit-1 field too or probes will think every R/W user page is
+ * read-only.  The NDK MMPTE_HARDWARE struct renames bit 1 to `Dirty1` at
+ * NTDDI_LONGHORN+ for software dirty-tracking purposes — we ignore that
+ * layering here because the MM on our side is the one that owns the bit
+ * and treats it strictly as the hardware R/W permission. */
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-/* At Vista+, Writable field removed; Write is at bit 11 unconditionally */
-#define MI_IS_PAGE_WRITEABLE(x)    ((x)->u.Hard.Write == 1)
+#define MI_IS_PAGE_WRITEABLE(x)    ((x)->u.Hard.Dirty1 == 1)
 #elif !defined(CONFIG_SMP)
 #define MI_IS_PAGE_WRITEABLE(x)    ((x)->u.Hard.Write == 1)
 #else
@@ -115,7 +122,7 @@
 #define MI_IS_PAGE_DIRTY(x)        ((x)->u.Hard.Dirty == 1)
 #define MI_MAKE_OWNER_PAGE(x)      ((x)->u.Hard.Owner = 1)
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-#define MI_MAKE_WRITE_PAGE(x)      ((x)->u.Hard.Write = 1)
+#define MI_MAKE_WRITE_PAGE(x)      ((x)->u.Hard.Dirty1 = 1)
 #elif !defined(CONFIG_SMP)
 #define MI_MAKE_WRITE_PAGE(x)      ((x)->u.Hard.Write = 1)
 #else
