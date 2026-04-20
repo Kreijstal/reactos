@@ -1406,33 +1406,33 @@ NTSTATUS DispTdiQueryInformationEx(
     NTSTATUS Status         = STATUS_SUCCESS;
     SIZE_T ValidInputLength = sizeof(TCP_REQUEST_QUERY_INFORMATION_EX);
 
-    DbgPrint("TCPIP-TDI: DispTdiQueryInformationEx ENTER FileObj=%p FsContext=%p FsContext2=%p RequestorMode=%d\n",
+    TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: DispTdiQueryInformationEx ENTER FileObj=%p FsContext=%p FsContext2=%p RequestorMode=%d\n",
              IrpSp->FileObject,
              IrpSp->FileObject ? IrpSp->FileObject->FsContext : NULL,
              IrpSp->FileObject ? IrpSp->FileObject->FsContext2 : NULL,
-             Irp->RequestorMode);
+             Irp->RequestorMode));
 
     TranContext = (PTRANSPORT_CONTEXT)IrpSp->FileObject->FsContext;
 
     switch ((ULONG_PTR)IrpSp->FileObject->FsContext2) {
     case TDI_TRANSPORT_ADDRESS_FILE:
-        DbgPrint("TCPIP-TDI: TRANSPORT_ADDRESS_FILE TranContext=%p\n", TranContext);
+        TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: TRANSPORT_ADDRESS_FILE TranContext=%p\n", TranContext));
         Request.Handle.AddressHandle = TranContext->Handle.AddressHandle;
         break;
 
     case TDI_CONNECTION_FILE:
-        DbgPrint("TCPIP-TDI: CONNECTION_FILE TranContext=%p\n", TranContext);
+        TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: CONNECTION_FILE TranContext=%p\n", TranContext));
         Request.Handle.ConnectionContext = TranContext->Handle.ConnectionContext;
         break;
 
     case TDI_CONTROL_CHANNEL_FILE:
-        DbgPrint("TCPIP-TDI: CONTROL_CHANNEL_FILE TranContext=%p\n", TranContext);
+        TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: CONTROL_CHANNEL_FILE TranContext=%p\n", TranContext));
         Request.Handle.ControlChannel = TranContext->Handle.ControlChannel;
         break;
 
     default:
-        DbgPrint("TCPIP-TDI: invalid FsContext2=%p — returning STATUS_INVALID_PARAMETER\n",
-                 IrpSp->FileObject ? IrpSp->FileObject->FsContext2 : NULL);
+        TI_DbgPrint(MIN_TRACE, ("TCPIP-TDI: invalid FsContext2=%p — returning STATUS_INVALID_PARAMETER\n",
+                 IrpSp->FileObject ? IrpSp->FileObject->FsContext2 : NULL));
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -1445,14 +1445,14 @@ NTSTATUS DispTdiQueryInformationEx(
         ValidInputLength = sizeof(TCP_REQUEST_QUERY_INFORMATION_EX32);
     }
 #endif
-    DbgPrint("TCPIP-TDI: InputBufferLength=%u (expected %u) OutputBufferLength=%u\n",
+    TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: InputBufferLength=%u (expected %u) OutputBufferLength=%u\n",
              InputBufferLength,
              (UINT)ValidInputLength,
-             OutputBufferLength);
-    DbgPrint("TCPIP-TDI: Type3InputBuffer=%p UserBuffer=%p SystemBuffer=%p\n",
+             OutputBufferLength));
+    TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: Type3InputBuffer=%p UserBuffer=%p SystemBuffer=%p\n",
              IrpSp->Parameters.DeviceIoControl.Type3InputBuffer,
              Irp->UserBuffer,
-             Irp->AssociatedIrp.SystemBuffer);
+             Irp->AssociatedIrp.SystemBuffer));
 
     /* Validate parameters */
     if ((InputBufferLength == ValidInputLength) &&
@@ -1461,7 +1461,7 @@ NTSTATUS DispTdiQueryInformationEx(
         InputBuffer = (PTCP_REQUEST_QUERY_INFORMATION_EX)
             IrpSp->Parameters.DeviceIoControl.Type3InputBuffer;
         OutputBuffer = Irp->UserBuffer;
-        DbgPrint("TCPIP-TDI: TAKING DATA-FETCH PATH (output != 0)\n");
+        TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: TAKING DATA-FETCH PATH (output != 0)\n"));
 
         QueryContext = ExAllocatePoolWithTag(NonPagedPool, sizeof(TI_QUERY_CONTEXT), QUERY_CONTEXT_TAG);
         if (QueryContext) {
@@ -1492,10 +1492,10 @@ NTSTATUS DispTdiQueryInformationEx(
                               QueryContext->KernelInputBuffer,
                               ValidInputLength);
                 Status = STATUS_SUCCESS;
-                DbgPrint("TCPIP-TDI: data-fetch user→kernel copy OK\n");
+                TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: data-fetch user→kernel copy OK\n"));
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
                 Status = _SEH2_GetExceptionCode();
-                DbgPrint("TCPIP-TDI: data-fetch SEH caught 0x%08lx\n", (ULONG)Status);
+                TI_DbgPrint(MIN_TRACE, ("TCPIP-TDI: data-fetch SEH caught 0x%08lx\n", (ULONG)Status));
                 goto fetch_cleanup;
             } _SEH2_END;
 
@@ -1522,8 +1522,8 @@ NTSTATUS DispTdiQueryInformationEx(
             QueryContext->UserOutputBuffer = OutputBuffer;
             QueryContext->UserOutputLength = OutputBufferLength;
 
-            DbgPrint("TCPIP-TDI: data-fetch MDLs ready InputMdl=%p OutputMdl=%p\n",
-                     InputMdl, OutputMdl);
+            TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: data-fetch MDLs ready InputMdl=%p OutputMdl=%p\n",
+                     InputMdl, OutputMdl));
 
         fetch_cleanup:
             ;
@@ -1568,8 +1568,8 @@ NTSTATUS DispTdiQueryInformationEx(
     else if(InputBufferLength == ValidInputLength)
     {
         /* Handle the case where the user is probing the buffer for length */
-        DbgPrint("TCPIP-TDI: TAKING SIZE-QUERY PATH InputBufferLength=%u OutputBufferLength=%u\n",
-                 InputBufferLength, OutputBufferLength);
+        TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: TAKING SIZE-QUERY PATH InputBufferLength=%u OutputBufferLength=%u\n",
+                 InputBufferLength, OutputBufferLength));
         InputBuffer = (PTCP_REQUEST_QUERY_INFORMATION_EX)
             IrpSp->Parameters.DeviceIoControl.Type3InputBuffer;
 
@@ -1601,10 +1601,10 @@ NTSTATUS DispTdiQueryInformationEx(
 	                  QueryContext->KernelInputBuffer,
 	                  ValidInputLength);
 	    Status = STATUS_SUCCESS;
-	    DbgPrint("TCPIP-TDI: size-query user→kernel copy OK\n");
+	    TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: size-query user→kernel copy OK\n"));
 	} _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
 	    Status = _SEH2_GetExceptionCode();
-	    DbgPrint("TCPIP-TDI: size-query SEH caught 0x%08lx\n", (ULONG)Status);
+	    TI_DbgPrint(MIN_TRACE, ("TCPIP-TDI: size-query SEH caught 0x%08lx\n", (ULONG)Status));
 	} _SEH2_END;
 
 	if (NT_SUCCESS(Status))
@@ -1620,7 +1620,7 @@ NTSTATUS DispTdiQueryInformationEx(
 	    {
 	        MmBuildMdlForNonPagedPool(InputMdl);
 	        QueryContext->UserInputBuffer = InputBuffer;
-	        DbgPrint("TCPIP-TDI: size-query InputMdl=%p ready\n", InputMdl);
+	        TI_DbgPrint(DEBUG_IRP, ("TCPIP-TDI: size-query InputMdl=%p ready\n", InputMdl));
 	    }
 	}
 
