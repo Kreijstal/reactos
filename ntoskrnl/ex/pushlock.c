@@ -27,6 +27,124 @@ ULONG ExPushLockSpinCount = 0;
 #define InterlockedAndPointer(ptr,val) InterlockedAnd((PLONG)ptr,(LONG)val)
 #endif
 
+#if DBG
+/*
+ * Per-thread owner tracking for EX_PUSH_LOCK. Debug builds only.
+ *
+ * The tracking array lives in ETHREAD.HeldPushLocks[] and exists purely
+ * so that ASSERTs in code paths that used to compare against
+ * KGUARDED_MUTEX.Owner can be written in terms of
+ * ExPushLockIsOwnedByCurrentThread() on NT6+ where AddressCreationLock
+ * became an EX_PUSH_LOCK (which has no owner field).
+ *
+ * A thread can legitimately hold a shared push-lock more than once
+ * (ExfAcquirePushLockShared is effectively recursion-tolerant on the
+ * shared count), so we allow duplicate entries and remove only the
+ * first match on release. Exclusive acquisition of a lock the thread
+ * already holds would be a real bug, but we don't assert here since
+ * the array cannot tell exclusive from shared slots.
+ *
+ * Overflow policy: if the eight-slot array is full we stop tracking
+ * silently. Overflow loses fidelity for the helper (it may return
+ * FALSE for a lock that is in fact held), but it does not affect the
+ * lock's correctness and never trips a false ASSERT because the
+ * affected assertions are always OR'd with another verifiable
+ * condition.
+ *
+ * These helpers are exposed via exfuncs.h (DBG-gated) because the
+ * push-lock acquire/release fast paths live in internal/ex.h as
+ * FORCEINLINE wrappers and need to call them too.
+ */
+VOID
+NTAPI
+ExpTrackAcquirePushLock(PEX_PUSH_LOCK PushLock)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    UCHAR Count;
+
+    if (Thread == NULL) return;
+
+    Count = Thread->HeldPushLockCount;
+    if (Count >= RTL_NUMBER_OF(Thread->HeldPushLocks))
+    {
+        /* Tracking array overflowed; silently stop recording.
+         * Fidelity suffers but correctness is unaffected. */
+        return;
+    }
+
+    Thread->HeldPushLocks[Count] = PushLock;
+    Thread->HeldPushLockCount = Count + 1;
+}
+
+VOID
+NTAPI
+ExpTrackReleasePushLock(PEX_PUSH_LOCK PushLock)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    UCHAR Count, i;
+
+    if (Thread == NULL) return;
+
+    Count = Thread->HeldPushLockCount;
+    /* Walk for the first matching entry and remove it. Shared
+     * acquires can legally repeat, so only drop one entry. */
+    for (i = 0; i < Count; i++)
+    {
+        if (Thread->HeldPushLocks[i] == PushLock)
+        {
+            /* Shift the tail down one slot */
+            for (; i + 1 < Count; i++)
+            {
+                Thread->HeldPushLocks[i] = Thread->HeldPushLocks[i + 1];
+            }
+            Thread->HeldPushLocks[i] = NULL;
+            Thread->HeldPushLockCount = Count - 1;
+            return;
+        }
+    }
+
+    /* No matching entry. Either we overflowed on acquire or the
+     * caller is releasing a lock they never acquired (real bug).
+     * Keep silent here; the surrounding lock machinery will catch
+     * the latter via its own invariants. */
+}
+
+/*++
+ * @name ExPushLockIsOwnedByCurrentThread
+ *
+ *     Returns TRUE if the calling thread currently holds the given
+ *     push-lock, based on the DBG-only per-thread tracking array.
+ *
+ * @param PushLock
+ *        Pointer to the push-lock to query.
+ *
+ * @return TRUE if this thread has recorded the push-lock as held,
+ *         FALSE otherwise (including cases where tracking overflowed).
+ *
+ * @remarks Debug-build only. Release builds resolve this identifier
+ *          via a macro that evaluates to TRUE so assertion sites
+ *          compile cleanly. ReactOS-internal; never exported.
+ *
+ *--*/
+BOOLEAN
+NTAPI
+ExPushLockIsOwnedByCurrentThread(PEX_PUSH_LOCK PushLock)
+{
+    PETHREAD Thread = PsGetCurrentThread();
+    UCHAR Count, i;
+
+    if (Thread == NULL) return FALSE;
+
+    Count = Thread->HeldPushLockCount;
+    for (i = 0; i < Count; i++)
+    {
+        if (Thread->HeldPushLocks[i] == PushLock) return TRUE;
+    }
+
+    return FALSE;
+}
+#endif /* DBG */
+
 /*++
  * @name ExpInitializePushLocks
  *
@@ -495,6 +613,10 @@ ExfAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
                 continue;
             }
 
+#if DBG
+            /* Record ownership for debug assertions */
+            ExpTrackAcquirePushLock(PushLock);
+#endif
             /* Break out of the loop */
             break;
         }
@@ -682,6 +804,10 @@ ExfAcquirePushLockShared(PEX_PUSH_LOCK PushLock)
                 continue;
             }
 
+#if DBG
+            /* Record ownership for debug assertions */
+            ExpTrackAcquirePushLock(PushLock);
+#endif
             /* Break out of the loop */
             break;
         }
@@ -814,6 +940,11 @@ ExfReleasePushLock(PEX_PUSH_LOCK PushLock)
 
     /* The caller must hold the push lock */
     ASSERT(OldValue.Locked);
+
+#if DBG
+    /* Drop our ownership record before the lock word flips */
+    ExpTrackReleasePushLock(PushLock);
+#endif
 
     while (TRUE)
     {
@@ -977,6 +1108,11 @@ ExfReleasePushLockShared(PEX_PUSH_LOCK PushLock)
     /* The caller must hold the push lock */
     ASSERT(OldValue.Locked);
 
+#if DBG
+    /* Drop our ownership record before the lock word flips */
+    ExpTrackReleasePushLock(PushLock);
+#endif
+
     /*
      * Without waiters, the upper bits contain the shared acquisition count.
      * Drop one shared acquisition, or clear the lock word when releasing the
@@ -1124,6 +1260,11 @@ ExfReleasePushLockExclusive(PEX_PUSH_LOCK PushLock)
 {
     EX_PUSH_LOCK NewValue, WakeValue;
     EX_PUSH_LOCK OldValue = *PushLock;
+
+#if DBG
+    /* Drop our ownership record before the lock word flips */
+    ExpTrackReleasePushLock(PushLock);
+#endif
 
     /* Loop until we can change */
     for (;;)
