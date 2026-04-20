@@ -77,7 +77,11 @@ target_include_directories(libsmb2
             ${CMAKE_CURRENT_SOURCE_DIR}/lib
             ${CMAKE_CURRENT_SOURCE_DIR}/reactos)
 
-target_compile_options(libsmb2 PRIVATE -include rx-wsapoll.h)
+if(MSVC)
+    target_compile_options(libsmb2 PRIVATE /FIrx-wsapoll.h)
+else()
+    target_compile_options(libsmb2 PRIVATE -include rx-wsapoll.h)
+endif()
 
 if(MSVC)
     target_compile_options(libsmb2 PRIVATE /wd4018 /wd4101 /wd4146 /wd4244 /wd4267 /wd4334)
