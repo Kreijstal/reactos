@@ -48,6 +48,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+/* MSVC's CRT exposes _getpid, not the POSIX-named getpid libsmb2 expects;
+ * mingw-w64 decorates the POSIX name but MSVC does not. Use the Win32 API
+ * inline at the call site (see smb2_init_context below) to keep a single
+ * portable spelling across MSVC, clang-cl, and MinGW without perturbing
+ * the getpid prototype pulled in by <unistd.h>. */
+#ifdef _WIN32
+# include <windows.h>
+#endif
+
 #ifdef HAVE_TIME_H
 #include <time.h>
 #endif
@@ -273,7 +282,11 @@ struct smb2_context *smb2_init_context(void)
         int i, ret;
         static int ctr;
 
+#ifdef _WIN32
+        srandom((unsigned)time(NULL) ^ (unsigned)GetCurrentProcessId() ^ ctr++);
+#else
         srandom((unsigned)time(NULL) ^ getpid() ^ ctr++);
+#endif
 
         smb2 = calloc(1, sizeof(struct smb2_context));
         if (smb2 == NULL) {
