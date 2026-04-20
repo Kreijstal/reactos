@@ -282,9 +282,16 @@ int random(void);
 
 int getlogin_r(char *buf, size_t size);
 
+/* MSVC's <process.h> (with _CRT_DECLARE_NONSTDC_NAMES=1, set in the libsmb2
+ * CMakeLists.txt) already exposes getpid as an alias for _getpid with
+ * __declspec(dllimport) linkage. Redeclaring it without the attribute trips
+ * C4273 (inconsistent dll linkage). The init.c call site already uses
+ * GetCurrentProcessId() on _WIN32, so MSVC doesn't need this prototype. */
+#ifndef _MSC_VER
 int getpid();
+#endif
 
-#pragma warning( disable : 4090 ) 
+#pragma warning( disable : 4090 )
 
 #define strdup _strdup
 
