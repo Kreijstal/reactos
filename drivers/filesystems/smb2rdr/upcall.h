@@ -34,6 +34,7 @@ typedef enum _SMB2D_OPCODE {
     SMB2D_OP_CLOSE           = 6,
     SMB2D_OP_DISCONNECT      = 7,
     SMB2D_OP_WRITE           = 8,
+    SMB2D_OP_FSYNC           = 9,
     SMB2D_OP_MAX
 } SMB2D_OPCODE;
 
@@ -167,6 +168,16 @@ typedef struct _OP_WRITE_OUT {
     ULONG BytesWritten;
     ULONG _Pad;
 } OP_WRITE_OUT, *POP_WRITE_OUT;
+
+/*
+ * FSYNC wire format.  Input carries the opaque daemon file handle.  There
+ * is no output payload — the downcall Status is the whole answer.  Fires
+ * on MRxFlush (FlushFileBuffers / cache-manager flush paths).
+ */
+typedef struct _OP_FSYNC_IN {
+    ULONGLONG FileHandle;
+} OP_FSYNC_IN, *POP_FSYNC_IN;
+/* OP_FSYNC has no output payload (status-only downcall). */
 
 #pragma pack(pop)
 
