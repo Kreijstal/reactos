@@ -123,6 +123,27 @@ typedef struct _OP_READDIR_OUT {
     /* BytesWritten bytes of packed NT dir-info records follow */
 } OP_READDIR_OUT, *POP_READDIR_OUT;
 
+/*
+ * READ wire format.  Input carries the opaque daemon file handle (assigned
+ * by OP_CREATE), the 64-bit byte offset to start reading at, and the byte
+ * count requested in this chunk.  Output is a compact header whose
+ * BytesRead says how many bytes of file data immediately follow; a short
+ * read (BytesRead < Length) signals end-of-file.  The kernel side splits
+ * large reads into 1 MiB chunks so the upcall staging buffer stays bounded.
+ */
+typedef struct _OP_READ_IN {
+    ULONGLONG FileHandle;
+    ULONGLONG Offset;
+    ULONG     Length;
+    ULONG     _Pad;
+} OP_READ_IN, *POP_READ_IN;
+
+typedef struct _OP_READ_OUT {
+    ULONG BytesRead;        /* may be < Length on EOF */
+    ULONG _Pad;
+    /* BytesRead bytes of file data follow */
+} OP_READ_OUT, *POP_READ_OUT;
+
 #pragma pack(pop)
 
 #if defined(_NTDDK_) || defined(_NTIFS_) || defined(_KERNEL_MODE)
