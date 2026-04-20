@@ -8,13 +8,6 @@
 
 /* INCLUDES ******************************************************************/
 
-/* WSAPoll and WSAPOLLFD are gated behind _WIN32_WINNT >= 0x600 in the PSDK
- * winsock2.h. Raise the target here so the types are visible to ws2_32's
- * own implementation; callers using <=WinServer2003 simply can't call
- * WSAPoll, but ws2_32 must still compile it. */
-#undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-
 #include <ws2_32.h>
 
 #define NDEBUG
@@ -133,6 +126,7 @@ WPUFDIsSet(IN SOCKET s,
     return (SOCKET)0;
 }
 
+#if (_WIN32_WINNT >= 0x0600)
 /*
  * @implemented
  *
@@ -141,6 +135,9 @@ WPUFDIsSet(IN SOCKET s,
  * into read/write/except fd_sets, select() is called, and the result mapped
  * back. This matches the semantics clients such as libsmb2 rely on for
  * async connect() completion (POLLOUT once the TCP handshake finishes).
+ *
+ * Only compiled when the target supports WSAPoll — the export is gated the
+ * same way in ws2_32.spec (-version=0x600+).
  */
 INT
 WSAAPI
@@ -230,6 +227,7 @@ WSAPoll(LPWSAPOLLFD fdArray,
 
     return nready;
 }
+#endif /* (_WIN32_WINNT >= 0x0600) */
 
 /*
  * @implemented
