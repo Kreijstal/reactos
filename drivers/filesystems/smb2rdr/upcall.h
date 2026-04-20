@@ -179,6 +179,41 @@ typedef struct _OP_FSYNC_IN {
 } OP_FSYNC_IN, *POP_FSYNC_IN;
 /* OP_FSYNC has no output payload (status-only downcall). */
 
+/*
+ * QUERY_FILE_INFO wire format.  A single opcode delivers everything the
+ * kernel needs to synthesize all NT file-info classes that cmd.exe copy
+ * exercises; the kernel translates the daemon-reported stat into each
+ * concrete FILE_* layout.  SMB2RDR_STAT mirrors libsmb2's smb2_stat_64
+ * field-by-field so the daemon can do a flat copy, without forcing
+ * <smb2/libsmb2.h> into the kernel include set.  Attributes are the
+ * NT-style bitmap derived server-side from smb2_type (directory flag)
+ * plus whatever FILE_ATTRIBUTE_* bits smb2d cares to stamp down today.
+ */
+typedef struct _SMB2RDR_STAT {
+    ULONG     Type;            /* SMB2_TYPE_* (0=file, 1=dir, 2=link) */
+    ULONG     NLink;
+    ULONGLONG Ino;
+    ULONGLONG Size;
+    ULONGLONG Atime;           /* seconds since the POSIX epoch */
+    ULONGLONG Atime_nsec;
+    ULONGLONG Mtime;
+    ULONGLONG Mtime_nsec;
+    ULONGLONG Ctime;
+    ULONGLONG Ctime_nsec;
+    ULONGLONG Btime;
+    ULONGLONG Btime_nsec;
+    ULONG     Attributes;      /* NT FILE_ATTRIBUTE_* bits */
+    ULONG     _Pad;
+} SMB2RDR_STAT, *PSMB2RDR_STAT;
+
+typedef struct _OP_QUERY_FILE_INFO_IN {
+    ULONGLONG FileHandle;
+} OP_QUERY_FILE_INFO_IN, *POP_QUERY_FILE_INFO_IN;
+
+typedef struct _OP_QUERY_FILE_INFO_OUT {
+    SMB2RDR_STAT Stat;
+} OP_QUERY_FILE_INFO_OUT, *POP_QUERY_FILE_INFO_OUT;
+
 #pragma pack(pop)
 
 #if defined(_NTDDK_) || defined(_NTIFS_) || defined(_KERNEL_MODE)
