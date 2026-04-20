@@ -124,6 +124,82 @@ typedef struct {
     ULONG     IsDirectory;
     ULONG     _Pad;
 } SMB2D_OP_CLOSE_IN;
+
+typedef struct {
+    ULONGLONG FileHandle;
+    ULONG     InfoClass;
+    ULONG     MaxOutputLen;
+    ULONG     RestartScan;
+    ULONG     ReturnSingleEntry;
+    ULONG     FileIndex;
+    USHORT    FileSpecLen;
+    USHORT    _Pad;
+} SMB2D_OP_READDIR_IN;
+
+typedef struct {
+    ULONG BytesWritten;
+    ULONG EntryCount;
+    ULONG Flags;
+    ULONG _Pad;
+} SMB2D_OP_READDIR_OUT;
+
+#define SMB2D_READDIR_FLAG_MORE 0x00000001u
+
+/* NT dir-info record types (flat layout, matches FILE_*_DIR_INFORMATION in
+ * ntifs.h / ndk/iotypes.h; we keep a local copy here so the daemon stays
+ * free of DDK/NTIFS headers).  See sdk/include/ndk/iotypes.h. */
+typedef struct {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    CCHAR         ShortNameLength;
+    WCHAR         ShortName[12];
+    WCHAR         FileName[1];
+} SMB2D_FILE_BOTH_DIR_INFORMATION;
+
+typedef struct {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    WCHAR         FileName[1];
+} SMB2D_FILE_FULL_DIR_INFORMATION;
+
+typedef struct {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    WCHAR         FileName[1];
+} SMB2D_FILE_DIRECTORY_INFORMATION;
+
+typedef struct {
+    ULONG NextEntryOffset;
+    ULONG FileIndex;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+} SMB2D_FILE_NAMES_INFORMATION;
 #pragma pack(pop)
 
 /* Matches SMB2D_OP_* in drivers/filesystems/smb2rdr/upcall.h. */
@@ -172,7 +248,22 @@ enum {
 #ifndef STATUS_UNSUCCESSFUL
 # define STATUS_UNSUCCESSFUL           ((LONG)0xC0000001L)
 #endif
+#ifndef STATUS_NO_MORE_FILES
+# define STATUS_NO_MORE_FILES          ((LONG)0x80000006L)
+#endif
+#ifndef STATUS_BUFFER_OVERFLOW
+# define STATUS_BUFFER_OVERFLOW        ((LONG)0x80000005L)
+#endif
+#ifndef STATUS_INVALID_INFO_CLASS
+# define STATUS_INVALID_INFO_CLASS     ((LONG)0xC0000003L)
+#endif
 #define SMB2D_STATUS_SUCCESS           ((LONG)0x00000000L)
+
+/* FILE_INFORMATION_CLASS values we recognise. */
+#define SMB2D_FileDirectoryInformation      1
+#define SMB2D_FileFullDirectoryInformation  2
+#define SMB2D_FileBothDirectoryInformation  3
+#define SMB2D_FileNamesInformation          12
 
 /* NT create-disposition / createoptions / file-attribute constants we need
  * on the daemon side.  winnt.h supplies all of these when built against the
@@ -393,6 +484,32 @@ InsertFile(struct smb2_context *ctx, void *opaque, int is_dir)
     return h;
 }
 
+/* Non-owning lookup: returns TRUE and fills in *ctx/opaque/is_dir when the
+ * handle is known.  The kernel side holds a reference on the handle for the
+ * lifetime of the FCB, so the returned pointers are safe to use for the
+ * duration of the upcall. */
+static BOOL
+LookupFile(ULONG64 h, struct smb2_context **ctx_out,
+           void **opaque_out, int *is_dir_out)
+{
+    int i;
+    BOOL found = FALSE;
+
+    EnsureFileLock();
+    EnterCriticalSection(&g_file_lock);
+    for (i = 0; i < SMB2D_MAX_FILE_HANDLES; i++) {
+        if (g_files[i].handle == h) {
+            if (ctx_out)    *ctx_out    = g_files[i].ctx;
+            if (opaque_out) *opaque_out = g_files[i].opaque;
+            if (is_dir_out) *is_dir_out = g_files[i].is_dir;
+            found = TRUE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&g_file_lock);
+    return found;
+}
+
 /* Remove-and-return a file-handle table entry.  Returns FALSE if the handle
  * wasn't known.  The caller is responsible for invoking smb2_close() /
  * smb2_closedir() on the returned opaque. */
@@ -481,13 +598,30 @@ OpenSmbRdr(void)
 static BOOL
 SendDowncall(HANDLE h, LONGLONG xid, LONG status, const void *out, ULONG outLen)
 {
-    BYTE buf[4096];
+    BYTE stack[4096];
+    BYTE *buf = stack;
     DWORD br = 0;
     SMB2D_DOWNCALL_HEADER hdr;
     BOOL ok;
+    ULONG total;
+    BOOL heap = FALSE;
 
-    if (outLen > sizeof(buf) - sizeof(hdr))
-        outLen = sizeof(buf) - sizeof(hdr);
+    total = (ULONG)sizeof(hdr) + outLen;
+    if (total > sizeof(stack)) {
+        buf = (BYTE *)HeapAlloc(GetProcessHeap(), 0, total);
+        if (buf == NULL) {
+            smb2d_log("smb2d: downcall alloc failed xid=%lld size=%lu\n",
+                      xid, total);
+            /* Degrade to a status-only reply so the kernel waiter unblocks. */
+            hdr.Xid = xid;
+            hdr.Status = (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+            hdr.OutLength = 0;
+            ok = DeviceIoControl(h, IOCTL_SMB2RDR_WRITE,
+                                 &hdr, sizeof(hdr), NULL, 0, &br, NULL);
+            return ok;
+        }
+        heap = TRUE;
+    }
 
     hdr.Xid = xid;
     hdr.Status = status;
@@ -498,11 +632,13 @@ SendDowncall(HANDLE h, LONGLONG xid, LONG status, const void *out, ULONG outLen)
         memcpy(buf + sizeof(hdr), out, outLen);
 
     ok = DeviceIoControl(h, IOCTL_SMB2RDR_WRITE,
-                         buf, sizeof(hdr) + outLen,
+                         buf, total,
                          NULL, 0, &br, NULL);
     if (!ok)
         smb2d_log("smb2d: downcall DeviceIoControl failed xid=%lld err=%lu\n",
                   xid, GetLastError());
+    if (heap)
+        HeapFree(GetProcessHeap(), 0, buf);
     return ok;
 }
 
@@ -866,6 +1002,346 @@ HandleOpClose(const BYTE *in, ULONG inLen)
     return SMB2D_STATUS_SUCCESS;
 }
 
+/*
+ * Windows FILETIME is 100-ns ticks since 1601-01-01; libsmb2 delivers
+ * seconds + nanoseconds since the POSIX epoch.  Bump by the 369-year gap
+ * and scale to 100-ns units.  A zero POSIX timestamp maps to the 1601
+ * epoch origin here, which is exactly what NT reports for "never set".
+ */
+static ULONG64
+Smb2TimeToFileTime(uint64_t sec, uint64_t nsec)
+{
+    return (sec + 11644473600ULL) * 10000000ULL + nsec / 100ULL;
+}
+
+/*
+ * Encode one libsmb2 dir entry into an NT FILE_*_DIR_INFORMATION record at
+ * *cursor (pointing inside a flat buffer of total capacity capacity bytes).
+ * Returns the on-the-wire size written on success, 0 when the record
+ * wouldn't fit.  nameUtf16/nameWchars must already hold the encoded name.
+ *
+ * The caller is responsible for computing the 8-byte-aligned next offset;
+ * this helper writes NextEntryOffset = 0 and lets the loop patch it up
+ * before emitting the following entry.
+ */
+static ULONG
+EncodeDirEntry(ULONG infoClass,
+               BYTE *base, ULONG offset, ULONG capacity,
+               const struct smb2dirent *e,
+               const WCHAR *nameUtf16, int nameWchars)
+{
+    ULONG nameBytes = (ULONG)nameWchars * (ULONG)sizeof(WCHAR);
+    ULONG recBase;
+    ULONG recTotal;
+    ULONG attrs;
+    ULONG64 cre, acc, wri, chg;
+    LONGLONG size;
+    BYTE *rec;
+
+    attrs = (e->st.smb2_type == SMB2_TYPE_DIRECTORY) ? FILE_ATTRIBUTE_DIRECTORY
+                                                     : FILE_ATTRIBUTE_NORMAL;
+    size = (LONGLONG)e->st.smb2_size;
+    cre  = Smb2TimeToFileTime(e->st.smb2_btime, e->st.smb2_btime_nsec);
+    acc  = Smb2TimeToFileTime(e->st.smb2_atime, e->st.smb2_atime_nsec);
+    wri  = Smb2TimeToFileTime(e->st.smb2_mtime, e->st.smb2_mtime_nsec);
+    chg  = Smb2TimeToFileTime(e->st.smb2_ctime, e->st.smb2_ctime_nsec);
+
+    switch (infoClass) {
+    case SMB2D_FileBothDirectoryInformation:
+        recBase = (ULONG)(FIELD_OFFSET(SMB2D_FILE_BOTH_DIR_INFORMATION, FileName));
+        break;
+    case SMB2D_FileFullDirectoryInformation:
+        recBase = (ULONG)(FIELD_OFFSET(SMB2D_FILE_FULL_DIR_INFORMATION, FileName));
+        break;
+    case SMB2D_FileDirectoryInformation:
+        recBase = (ULONG)(FIELD_OFFSET(SMB2D_FILE_DIRECTORY_INFORMATION, FileName));
+        break;
+    case SMB2D_FileNamesInformation:
+        recBase = (ULONG)(FIELD_OFFSET(SMB2D_FILE_NAMES_INFORMATION, FileName));
+        break;
+    default:
+        return 0;
+    }
+
+    recTotal = recBase + nameBytes;
+    /* 8-byte alignment for NextEntryOffset chaining. */
+    recTotal = (recTotal + 7u) & ~7u;
+
+    if ((ULONG64)offset + recTotal > capacity)
+        return 0;
+
+    rec = base + offset;
+    memset(rec, 0, recTotal);
+
+    switch (infoClass) {
+    case SMB2D_FileBothDirectoryInformation: {
+        SMB2D_FILE_BOTH_DIR_INFORMATION *r = (SMB2D_FILE_BOTH_DIR_INFORMATION *)rec;
+        r->NextEntryOffset      = 0;
+        r->FileIndex            = 0;
+        r->CreationTime.QuadPart   = (LONGLONG)cre;
+        r->LastAccessTime.QuadPart = (LONGLONG)acc;
+        r->LastWriteTime.QuadPart  = (LONGLONG)wri;
+        r->ChangeTime.QuadPart     = (LONGLONG)chg;
+        r->EndOfFile.QuadPart      = size;
+        r->AllocationSize.QuadPart = size;
+        r->FileAttributes       = attrs;
+        r->FileNameLength       = nameBytes;
+        r->EaSize               = 0;
+        r->ShortNameLength      = 0;
+        /* ShortName left zeroed. */
+        if (nameBytes)
+            memcpy(r->FileName, nameUtf16, nameBytes);
+        break;
+    }
+    case SMB2D_FileFullDirectoryInformation: {
+        SMB2D_FILE_FULL_DIR_INFORMATION *r = (SMB2D_FILE_FULL_DIR_INFORMATION *)rec;
+        r->NextEntryOffset      = 0;
+        r->FileIndex            = 0;
+        r->CreationTime.QuadPart   = (LONGLONG)cre;
+        r->LastAccessTime.QuadPart = (LONGLONG)acc;
+        r->LastWriteTime.QuadPart  = (LONGLONG)wri;
+        r->ChangeTime.QuadPart     = (LONGLONG)chg;
+        r->EndOfFile.QuadPart      = size;
+        r->AllocationSize.QuadPart = size;
+        r->FileAttributes       = attrs;
+        r->FileNameLength       = nameBytes;
+        r->EaSize               = 0;
+        if (nameBytes)
+            memcpy(r->FileName, nameUtf16, nameBytes);
+        break;
+    }
+    case SMB2D_FileDirectoryInformation: {
+        SMB2D_FILE_DIRECTORY_INFORMATION *r = (SMB2D_FILE_DIRECTORY_INFORMATION *)rec;
+        r->NextEntryOffset      = 0;
+        r->FileIndex            = 0;
+        r->CreationTime.QuadPart   = (LONGLONG)cre;
+        r->LastAccessTime.QuadPart = (LONGLONG)acc;
+        r->LastWriteTime.QuadPart  = (LONGLONG)wri;
+        r->ChangeTime.QuadPart     = (LONGLONG)chg;
+        r->EndOfFile.QuadPart      = size;
+        r->AllocationSize.QuadPart = size;
+        r->FileAttributes       = attrs;
+        r->FileNameLength       = nameBytes;
+        if (nameBytes)
+            memcpy(r->FileName, nameUtf16, nameBytes);
+        break;
+    }
+    case SMB2D_FileNamesInformation: {
+        SMB2D_FILE_NAMES_INFORMATION *r = (SMB2D_FILE_NAMES_INFORMATION *)rec;
+        r->NextEntryOffset      = 0;
+        r->FileIndex            = 0;
+        r->FileNameLength       = nameBytes;
+        if (nameBytes)
+            memcpy(r->FileName, nameUtf16, nameBytes);
+        break;
+    }
+    }
+
+    return recTotal;
+}
+
+/*
+ * Patch the NextEntryOffset of the record that ends at offset+0 to reach
+ * the record at nextOffset.  All four info classes keep NextEntryOffset
+ * as the first ULONG in the record, so we can do this header-less.
+ */
+static void
+PatchNextOffset(BYTE *base, ULONG recOffset, ULONG delta)
+{
+    ULONG *p = (ULONG *)(base + recOffset);
+    *p = delta;
+}
+
+/*
+ * OP_READDIR: walk smb2_readdir() and lay down NT dir-info records into a
+ * staging buffer.  The kernel side hands us MaxOutputLen bytes of capacity
+ * and we keep emitting until we either run out of room, the iterator is
+ * drained, or ReturnSingleEntry says "stop after one".
+ *
+ * Paging semantics: the smb2dir iterator position persists inside libsmb2
+ * across calls on the same FCB, so a follow-up OP_READDIR with RestartScan=0
+ * continues from where we left off.  If a record doesn't fit into the
+ * buffer, we re-queue nothing — libsmb2 has already advanced past that
+ * entry, so it'll come back on the next call.  Rather than trying to
+ * peek/rewind one entry, we simply defer: the NT semantics of dir queries
+ * is that each call returns as many whole records as fit.
+ *
+ * Caller owns outBuf (capacity outCap, which must include the
+ * SMB2D_OP_READDIR_OUT header) and on success *outWritten is the total
+ * number of bytes to ship to the kernel (header + payload).
+ */
+static LONG
+HandleOpReaddir(const BYTE *in, ULONG inLen,
+                BYTE *outBuf, ULONG outCap, ULONG *outWritten)
+{
+    SMB2D_OP_READDIR_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+    struct smb2dir *dir;
+    SMB2D_OP_READDIR_OUT *oh;
+    BYTE *payload;
+    ULONG payloadCap;
+    ULONG bytesWritten = 0;
+    ULONG entryCount = 0;
+    ULONG lastRecOffset = 0;
+    ULONG lastRecTotal = 0;
+    BOOL haveLast = FALSE;
+    BOOL more = FALSE;
+    ULONG totalReply;
+
+    *outWritten = 0;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    if (outCap < sizeof(SMB2D_OP_READDIR_OUT)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    smb2d_log("smb2d: OP_READDIR fh=0x%llx class=%lu maxout=%lu restart=%lu "
+              "single=%lu\n",
+              (unsigned long long)hdr.FileHandle, hdr.InfoClass,
+              hdr.MaxOutputLen, hdr.RestartScan, hdr.ReturnSingleEntry);
+
+    if (hdr.InfoClass != SMB2D_FileBothDirectoryInformation &&
+        hdr.InfoClass != SMB2D_FileFullDirectoryInformation &&
+        hdr.InfoClass != SMB2D_FileDirectoryInformation &&
+        hdr.InfoClass != SMB2D_FileNamesInformation)
+    {
+        smb2d_log("smb2d: OP_READDIR unsupported info class %lu\n",
+                  hdr.InfoClass);
+        return STATUS_INVALID_INFO_CLASS;
+    }
+
+    if (!LookupFile(hdr.FileHandle, &ctx, &opaque, &is_dir) ||
+        ctx == NULL || opaque == NULL)
+    {
+        smb2d_log("smb2d: OP_READDIR unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (!is_dir) {
+        smb2d_log("smb2d: OP_READDIR not a directory handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_NOT_A_DIRECTORY;
+    }
+    dir = (struct smb2dir *)opaque;
+
+    if (hdr.RestartScan) {
+        smb2_rewinddir(ctx, dir);
+    }
+
+    /* Clamp the caller's declared max against the actual staging capacity —
+     * the kernel side has MaxOutputLen == userbuffer_size and sized outBuf
+     * to accommodate it, but defend against a bogus header. */
+    payloadCap = outCap - (ULONG)sizeof(SMB2D_OP_READDIR_OUT);
+    if (hdr.MaxOutputLen < payloadCap)
+        payloadCap = hdr.MaxOutputLen;
+
+    oh      = (SMB2D_OP_READDIR_OUT *)outBuf;
+    payload = outBuf + sizeof(SMB2D_OP_READDIR_OUT);
+    memset(oh, 0, sizeof(*oh));
+
+    for (;;) {
+        struct smb2dirent *e;
+        int wlen;
+        WCHAR *wname;
+        ULONG wnameBytes;
+        ULONG recTotal;
+
+        e = smb2_readdir(ctx, dir);
+        if (e == NULL) {
+            /* End of directory. */
+            more = FALSE;
+            break;
+        }
+
+        if (e->name == NULL || e->name[0] == '\0')
+            continue;
+
+        /* Convert the UTF-8 name to UTF-16LE in a stack-sized scratch
+         * buffer; SMB paths are capped at 255 WCHARs on the wire so 512
+         * WCHARs is a generous upper bound that never overflows. */
+        {
+            static WCHAR scratch[520];
+            wlen = MultiByteToWideChar(CP_UTF8, 0, e->name, -1,
+                                        scratch, (int)(sizeof(scratch)/sizeof(WCHAR)));
+            if (wlen <= 1) {
+                /* Conversion failed or returned only the NUL — skip the
+                 * entry rather than emit a zero-length name. */
+                smb2d_log("smb2d: readdir name conversion failed for \"%s\"\n",
+                          e->name ? e->name : "(null)");
+                continue;
+            }
+            /* MultiByteToWideChar with -1 includes the NUL in the return;
+             * the NT record carries an explicit length so strip it. */
+            wlen -= 1;
+            wname = scratch;
+            wnameBytes = (ULONG)wlen * (ULONG)sizeof(WCHAR);
+            (void)wnameBytes;
+        }
+
+        recTotal = EncodeDirEntry(hdr.InfoClass, payload, bytesWritten,
+                                  payloadCap, e, wname, wlen);
+        if (recTotal == 0) {
+            /* Out of buffer space.  libsmb2 has already advanced past this
+             * entry, so we lose it for this iteration; the NT contract only
+             * promises partial fills via STATUS_BUFFER_OVERFLOW/SUCCESS on
+             * the partial page.  Mark more=TRUE and stop. */
+            more = TRUE;
+            break;
+        }
+
+        /* Patch the previously-emitted record so NT callers can walk the
+         * chain forwards.  Each NextEntryOffset is the distance from that
+         * record's start to the next one. */
+        if (haveLast) {
+            PatchNextOffset(payload, lastRecOffset, lastRecTotal);
+        }
+
+        lastRecOffset = bytesWritten;
+        lastRecTotal  = recTotal;
+        haveLast      = TRUE;
+        bytesWritten += recTotal;
+        entryCount++;
+
+        smb2d_log("smb2d: readdir entry \"%s\" attr=0x%lx size=%llu\n",
+                  e->name,
+                  (e->st.smb2_type == SMB2_TYPE_DIRECTORY)
+                      ? (ULONG)FILE_ATTRIBUTE_DIRECTORY
+                      : (ULONG)FILE_ATTRIBUTE_NORMAL,
+                  (unsigned long long)e->st.smb2_size);
+
+        if (hdr.ReturnSingleEntry) {
+            /* Single-entry contract: emit exactly one record and stop, but
+             * leave `more` unset — the iterator position decides whether
+             * the next call returns anything. */
+            more = FALSE;
+            break;
+        }
+    }
+
+    /* Final record terminates the chain with NextEntryOffset == 0 (already
+     * zeroed when we wrote the record, so nothing to patch). */
+
+    oh->BytesWritten = bytesWritten;
+    oh->EntryCount   = entryCount;
+    oh->Flags        = more ? SMB2D_READDIR_FLAG_MORE : 0u;
+    oh->_Pad         = 0;
+
+    totalReply = (ULONG)sizeof(SMB2D_OP_READDIR_OUT) + bytesWritten;
+    *outWritten = totalReply;
+
+    smb2d_log("smb2d: OP_READDIR wrote %lu entries, bytes=%lu, more=%u\n",
+              entryCount, bytesWritten, (unsigned)more);
+
+    if (entryCount == 0) {
+        /* No entries produced and end-of-dir reached — surface the NT
+         * terminating status so rdbss completes the IRP cleanly. */
+        return STATUS_NO_MORE_FILES;
+    }
+
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -992,7 +1468,38 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             SendDowncall(hDev, hdr.Xid, status, NULL, 0);
             break;
 
-        case SMB2D_OP_READDIR:
+        case SMB2D_OP_READDIR: {
+            /* Pre-read the caller's declared MaxOutputLen to size a
+             * correctly-bounded reply staging buffer; clamp defensively. */
+            SMB2D_OP_READDIR_IN rdhdr;
+            BYTE *rdbuf;
+            ULONG rdcap;
+            ULONG rdWritten = 0;
+            if (payloadLen < sizeof(rdhdr)) {
+                SendDowncall(hDev, hdr.Xid, STATUS_INVALID_PARAMETER, NULL, 0);
+                break;
+            }
+            memcpy(&rdhdr, payload, sizeof(rdhdr));
+            /* Cap at 1 MB — dir listings on NT are usually 4K–64K, but
+             * don't let a bogus header wedge the daemon. */
+            if (rdhdr.MaxOutputLen > (1u << 20))
+                rdhdr.MaxOutputLen = (1u << 20);
+            rdcap = (ULONG)sizeof(SMB2D_OP_READDIR_OUT) + rdhdr.MaxOutputLen;
+            rdbuf = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, rdcap);
+            if (rdbuf == NULL) {
+                SendDowncall(hDev, hdr.Xid, (LONG)0xC0000017L, NULL, 0);
+                break;
+            }
+            status = HandleOpReaddir(payload, payloadLen, rdbuf, rdcap, &rdWritten);
+            if (status == SMB2D_STATUS_SUCCESS && rdWritten >= sizeof(SMB2D_OP_READDIR_OUT)) {
+                SendDowncall(hDev, hdr.Xid, status, rdbuf, rdWritten);
+            } else {
+                SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            }
+            HeapFree(GetProcessHeap(), 0, rdbuf);
+            break;
+        }
+
         case SMB2D_OP_QUERY_INFO:
         case SMB2D_OP_READ:
         default:
