@@ -1076,6 +1076,16 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
      * routine" rejection in iomgr/file.c. */
     ClearFlag(smb2rdr_dev->DeviceObject.Flags, DO_DEVICE_INITIALIZING);
 
+    /* Direct-I/O transfer mode: NtReadFile / NtWriteFile / NtQueryDirectoryFile
+     * construct and probe+lock the user buffer's MDL in the originating
+     * caller's thread context before the IRP reaches us.  Without this flag
+     * Irp->MdlAddress arrives NULL for those major codes and rdbss's
+     * RxLockUserBuffer ends up calling MmProbeAndLockPages on its own,
+     * from whatever context the FSD happens to be running in.  That is how
+     * every production Windows mini-redirector is wired and mirrors the
+     * setup MUP uses for its own redirected-file device objects. */
+    SetFlag(smb2rdr_dev->DeviceObject.Flags, DO_DIRECT_IO);
+
     /* Self-trigger the rdbss start handshake so FsRtlRegisterUncProvider
      * runs and smb2rdr shows up as a UNC provider to MUP without waiting
      * for a usermode daemon to IOCTL us.  RX_CONTEXT_FLAG_IN_FSP bypasses
