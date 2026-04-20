@@ -145,6 +145,21 @@ typedef struct {
 
 #define SMB2D_READDIR_FLAG_MORE 0x00000001u
 
+/* Kernel→daemon READ wire layout, mirror of OP_READ_IN / OP_READ_OUT in
+ * drivers/filesystems/smb2rdr/upcall.h.  Kept byte-identical; any layout
+ * change on either side must be mirrored here. */
+typedef struct {
+    ULONGLONG FileHandle;
+    ULONGLONG Offset;
+    ULONG     Length;
+    ULONG     _Pad;
+} SMB2D_OP_READ_IN;
+
+typedef struct {
+    ULONG BytesRead;
+    ULONG _Pad;
+} SMB2D_OP_READ_OUT;
+
 /* NT dir-info record types (flat layout, matches FILE_*_DIR_INFORMATION in
  * ntifs.h / ndk/iotypes.h; we keep a local copy here so the daemon stays
  * free of DDK/NTIFS headers).  See sdk/include/ndk/iotypes.h. */
@@ -1342,6 +1357,80 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
     return SMB2D_STATUS_SUCCESS;
 }
 
+/*
+ * OP_READ: translate a kernel-side OP_READ upcall into smb2_pread() on the
+ * target libsmb2 file handle.  The kernel chunks at 1 MiB so each call
+ * fits comfortably inside the reply staging buffer; we simply clamp
+ * defensively against outCap (sizeof(header) + whatever the kernel
+ * allocated).  smb2_pread returns the number of bytes read on success
+ * (may be < Length on EOF) or a negative errno on error.
+ */
+static LONG
+HandleOpRead(const BYTE *in, ULONG inLen,
+             BYTE *outBuf, ULONG outCap, ULONG *outWritten)
+{
+    SMB2D_OP_READ_IN hdr;
+    struct smb2_context *ctx = NULL;
+    void *opaque = NULL;
+    int is_dir = 0;
+    struct smb2fh *fh;
+    SMB2D_OP_READ_OUT *oh;
+    BYTE *payload;
+    ULONG capacity;
+    ULONG want;
+    int rc;
+
+    *outWritten = 0;
+
+    if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
+    if (outCap < sizeof(SMB2D_OP_READ_OUT)) return STATUS_INVALID_PARAMETER;
+    memcpy(&hdr, in, sizeof(hdr));
+
+    smb2d_log("smb2d: OP_READ fh=0x%llx offset=%llu len=%lu\n",
+              (unsigned long long)hdr.FileHandle,
+              (unsigned long long)hdr.Offset, hdr.Length);
+
+    if (!LookupFile(hdr.FileHandle, &ctx, &opaque, &is_dir) ||
+        ctx == NULL || opaque == NULL)
+    {
+        smb2d_log("smb2d: OP_READ unknown handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_INVALID_HANDLE;
+    }
+    if (is_dir) {
+        smb2d_log("smb2d: OP_READ on directory handle=0x%llx\n",
+                  (unsigned long long)hdr.FileHandle);
+        return STATUS_FILE_IS_A_DIRECTORY;
+    }
+    fh = (struct smb2fh *)opaque;
+
+    oh      = (SMB2D_OP_READ_OUT *)outBuf;
+    payload = outBuf + sizeof(SMB2D_OP_READ_OUT);
+    memset(oh, 0, sizeof(*oh));
+
+    capacity = outCap - (ULONG)sizeof(SMB2D_OP_READ_OUT);
+    want = hdr.Length;
+    if (want > capacity)
+        want = capacity;
+
+    if (want == 0) {
+        oh->BytesRead = 0;
+        *outWritten = (ULONG)sizeof(SMB2D_OP_READ_OUT);
+        return SMB2D_STATUS_SUCCESS;
+    }
+
+    rc = smb2_pread(ctx, fh, payload, want, hdr.Offset);
+    smb2d_log("smb2d: smb2_pread -> %d\n", rc);
+    if (rc < 0) {
+        smb2d_log("smb2d: smb2_pread error: %s\n", smb2_get_error(ctx));
+        return (LONG)0xC000020CL; /* STATUS_UNEXPECTED_NETWORK_ERROR */
+    }
+
+    oh->BytesRead = (ULONG)rc;
+    *outWritten = (ULONG)sizeof(SMB2D_OP_READ_OUT) + (ULONG)rc;
+    return SMB2D_STATUS_SUCCESS;
+}
+
 static LONG
 HandleDisconnect(const BYTE *in, ULONG inLen)
 {
@@ -1500,8 +1589,39 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             break;
         }
 
+        case SMB2D_OP_READ: {
+            SMB2D_OP_READ_IN rhdr;
+            BYTE *rbuf;
+            ULONG rcap;
+            ULONG rWritten = 0;
+            if (payloadLen < sizeof(rhdr)) {
+                SendDowncall(hDev, hdr.Xid, STATUS_INVALID_PARAMETER, NULL, 0);
+                break;
+            }
+            memcpy(&rhdr, payload, sizeof(rhdr));
+            /* Cap at 1 MiB — matches the kernel-side chunk bound and keeps
+             * the daemon's heap footprint predictable. */
+            if (rhdr.Length > (1u << 20))
+                rhdr.Length = (1u << 20);
+            rcap = (ULONG)sizeof(SMB2D_OP_READ_OUT) + rhdr.Length;
+            rbuf = (BYTE *)HeapAlloc(GetProcessHeap(), 0, rcap);
+            if (rbuf == NULL) {
+                SendDowncall(hDev, hdr.Xid, (LONG)0xC0000017L, NULL, 0);
+                break;
+            }
+            status = HandleOpRead(payload, payloadLen, rbuf, rcap, &rWritten);
+            if (status == SMB2D_STATUS_SUCCESS &&
+                rWritten >= sizeof(SMB2D_OP_READ_OUT))
+            {
+                SendDowncall(hDev, hdr.Xid, status, rbuf, rWritten);
+            } else {
+                SendDowncall(hDev, hdr.Xid, status, NULL, 0);
+            }
+            HeapFree(GetProcessHeap(), 0, rbuf);
+            break;
+        }
+
         case SMB2D_OP_QUERY_INFO:
-        case SMB2D_OP_READ:
         default:
             smb2d_log("smb2d: opcode %lu (%s) not implemented\n",
                       hdr.Opcode, OpcodeName(hdr.Opcode));
