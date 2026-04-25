@@ -784,6 +784,56 @@ TestRdpBcgrParseClientInfoPayload(VOID)
 }
 
 static VOID
+TestRdpBcgrParseMcsSendDataPayload(VOID)
+{
+    static const UCHAR SendData[] =
+    {
+        0x03, 0x00, 0x00, 0x12,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xef, 0x70, 0x00, 0x03,
+        0xaa, 0xbb, 0xcc
+    };
+    static const UCHAR BadPayloadLength[] =
+    {
+        0x03, 0x00, 0x00, 0x12,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xef, 0x70, 0x00, 0x04,
+        0xaa, 0xbb, 0xcc
+    };
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD Parsed;
+
+    ok(TermSrvRdpBcgrParseMcsSendDataPayload(SendData,
+                                             sizeof(SendData),
+                                             &Parsed) == TermSrvRdpBcgrSuccess,
+       "MCS Send Data payload parse failed\n");
+    ok(Parsed.Initiator == 1001,
+       "Unexpected MCS Send Data initiator %u\n", Parsed.Initiator);
+    ok(Parsed.ChannelId == 1007,
+       "Unexpected MCS Send Data channel %u\n", Parsed.ChannelId);
+    ok(Parsed.Priority == 0x70,
+       "Unexpected MCS Send Data priority 0x%x\n", Parsed.Priority);
+    ok(Parsed.Payload == &SendData[15],
+       "Unexpected MCS Send Data payload pointer\n");
+    ok(Parsed.PayloadLength == 3,
+       "Unexpected MCS Send Data payload length %Iu\n", Parsed.PayloadLength);
+    ok(memcmp(Parsed.Payload, "\xaa\xbb\xcc", Parsed.PayloadLength) == 0,
+       "Unexpected MCS Send Data payload bytes\n");
+
+    ok(TermSrvRdpBcgrParseMcsSendDataPayload(NULL,
+                                             sizeof(SendData),
+                                             &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "NULL MCS Send Data buffer should fail\n");
+    ok(TermSrvRdpBcgrParseMcsSendDataPayload(SendData,
+                                             sizeof(SendData),
+                                             NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL MCS Send Data output should fail\n");
+    ok(TermSrvRdpBcgrParseMcsSendDataPayload(BadPayloadLength,
+                                             sizeof(BadPayloadLength),
+                                             &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Bad MCS Send Data payload length should fail\n");
+}
+
+static VOID
 TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 {
     static const UCHAR ExpectedConfirm[] =
@@ -1390,6 +1440,160 @@ TestCliprdrHandlePdu(VOID)
        "NULL cliprdr handler backend should fail\n");
 }
 
+static VOID
+TestCliprdrRouteMcsSendData(VOID)
+{
+    static const UCHAR FormatListPacket[] =
+    {
+        0x03, 0x00, 0x00, 0x19,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xef, 0x70, 0x00, 0x0a,
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0xaa, 0xbb
+    };
+    static const UCHAR ExpectedFormatListResponse[] =
+    {
+        0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR FormatDataRequestPacket[] =
+    {
+        0x03, 0x00, 0x00, 0x1b,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xef, 0x70, 0x00, 0x0c,
+        0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00
+    };
+    static const UCHAR NonCliprdrChannelPacket[] =
+    {
+        0x03, 0x00, 0x00, 0x19,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xf0, 0x70, 0x00, 0x0a,
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0xaa, 0xbb
+    };
+    static const UCHAR MalformedPacket[] =
+    {
+        0x03, 0x00, 0x00, 0x19,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xef, 0x70, 0x00, 0x0b,
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0xaa, 0xbb
+    };
+    static const UCHAR ClipboardData[] =
+    {
+        'r', 'd', 'p'
+    };
+    static const UCHAR ExpectedFormatDataResponse[] =
+    {
+        0x05, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00,
+        'r', 'd', 'p'
+    };
+    static const UCHAR ExpectedMissingFormatResponse[] =
+    {
+        0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    TERMSRV_CLIPRDR_CHANNEL Channel;
+    TERMSRV_CLIPRDR_CHANNEL UnassignedChannel;
+    TERMSRV_CLIPRDR_DUMMY_BACKEND Dummy;
+    TERMSRV_CLIPRDR_BACKEND Backend;
+    UCHAR Buffer[32];
+    SIZE_T BytesWritten = 0;
+
+    ok(TermSrvCliprdrChannelInit(&Channel) == TermSrvCliprdrSuccess,
+       "cliprdr channel init failed\n");
+    ok(TermSrvCliprdrAssignChannelId(&Channel, 1007) == TermSrvCliprdrSuccess,
+       "cliprdr channel assignment failed\n");
+    ok(TermSrvCliprdrChannelInit(&UnassignedChannel) == TermSrvCliprdrSuccess,
+       "unassigned cliprdr channel init failed\n");
+    ok(TermSrvCliprdrDummyBackendInit(&Dummy, &Backend) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend init failed\n");
+
+    ok(TermSrvCliprdrRouteMcsSendData(FormatListPacket,
+                                      sizeof(FormatListPacket),
+                                      &Channel,
+                                      &Backend,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr MCS Format List route failed\n");
+    ok(BytesWritten == sizeof(ExpectedFormatListResponse),
+       "Unexpected routed cliprdr Format List response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer,
+              ExpectedFormatListResponse,
+              sizeof(ExpectedFormatListResponse)) == 0,
+       "Routed cliprdr Format List response mismatch\n");
+
+    ok(TermSrvCliprdrBackendSetData(&Backend,
+                                    13,
+                                    ClipboardData,
+                                    sizeof(ClipboardData)) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend data set failed\n");
+    ok(TermSrvCliprdrRouteMcsSendData(FormatDataRequestPacket,
+                                      sizeof(FormatDataRequestPacket),
+                                      &Channel,
+                                      &Backend,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr MCS Format Data Request route failed\n");
+    ok(BytesWritten == sizeof(ExpectedFormatDataResponse),
+       "Unexpected routed cliprdr Format Data Response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer,
+              ExpectedFormatDataResponse,
+              sizeof(ExpectedFormatDataResponse)) == 0,
+       "Routed cliprdr Format Data Response mismatch\n");
+
+    ok(TermSrvCliprdrBackendClear(&Backend) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend clear failed\n");
+    ok(TermSrvCliprdrRouteMcsSendData(FormatDataRequestPacket,
+                                      sizeof(FormatDataRequestPacket),
+                                      &Channel,
+                                      &Backend,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &BytesWritten) == TermSrvCliprdrFormatNotAvailable,
+       "Missing routed cliprdr format should be reported\n");
+    ok(BytesWritten == sizeof(ExpectedMissingFormatResponse),
+       "Unexpected missing routed cliprdr format response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer,
+              ExpectedMissingFormatResponse,
+              sizeof(ExpectedMissingFormatResponse)) == 0,
+       "Missing routed cliprdr format response mismatch\n");
+
+    ok(TermSrvCliprdrRouteMcsSendData(NonCliprdrChannelPacket,
+                                      sizeof(NonCliprdrChannelPacket),
+                                      &Channel,
+                                      &Backend,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &BytesWritten) == TermSrvCliprdrUnsupportedPdu,
+       "Non-cliprdr MCS channel should be unsupported\n");
+    ok(BytesWritten == 0,
+       "Non-cliprdr MCS channel wrote %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvCliprdrRouteMcsSendData(FormatListPacket,
+                                      sizeof(FormatListPacket),
+                                      &UnassignedChannel,
+                                      &Backend,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &BytesWritten) == TermSrvCliprdrUnsupportedPdu,
+       "Unassigned cliprdr MCS channel should be unsupported\n");
+    ok(BytesWritten == 0,
+       "Unassigned cliprdr MCS channel wrote %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvCliprdrRouteMcsSendData(MalformedPacket,
+                                      sizeof(MalformedPacket),
+                                      &Channel,
+                                      &Backend,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &BytesWritten) == TermSrvCliprdrInvalidLength,
+       "Malformed routed cliprdr MCS packet should fail\n");
+    ok(BytesWritten == 0,
+       "Malformed routed cliprdr MCS packet wrote %Iu bytes\n", BytesWritten);
+}
+
 START_TEST(RdpPeer)
 {
     TestFullHandshake();
@@ -1413,6 +1617,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseMcsChannelJoinRequest();
     TestRdpBcgrParseSecurityExchangePayload();
     TestRdpBcgrParseClientInfoPayload();
+    TestRdpBcgrParseMcsSendDataPayload();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
     TestCliprdrStaticChannelName();
     TestCliprdrChannelDescriptor();
@@ -1423,4 +1628,5 @@ START_TEST(RdpPeer)
     TestCliprdrWriteFormatDataResponse();
     TestCliprdrDummyBackend();
     TestCliprdrHandlePdu();
+    TestCliprdrRouteMcsSendData();
 }
