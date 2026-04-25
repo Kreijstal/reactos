@@ -625,6 +625,164 @@ TestRdpBcgrParseMcsChannelJoinRequest(VOID)
 }
 
 static VOID
+TestRdpBcgrParseSecurityExchangePayload(VOID)
+{
+    static const UCHAR SecurityExchange[] =
+    {
+        0x03, 0x00, 0x00, 0x17,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x08,
+        0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd
+    };
+    static const UCHAR BadTpkt[] =
+    {
+        0x02, 0x00, 0x00, 0x17,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x08,
+        0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd
+    };
+    static const UCHAR BadX224Type[] =
+    {
+        0x03, 0x00, 0x00, 0x17,
+        0x02, 0xe0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x08,
+        0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd
+    };
+    static const UCHAR BadMcsMarker[] =
+    {
+        0x03, 0x00, 0x00, 0x17,
+        0x02, 0xf0, 0x80,
+        0x65, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x08,
+        0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd
+    };
+    static const UCHAR BadPayloadLength[] =
+    {
+        0x03, 0x00, 0x00, 0x17,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x09,
+        0x01, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd
+    };
+    static const UCHAR ShortMcsBody[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb
+    };
+    TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD Parsed;
+
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(SecurityExchange,
+                                                  sizeof(SecurityExchange),
+                                                  &Parsed) == TermSrvRdpBcgrSuccess,
+       "Security Exchange payload parse failed\n");
+    ok(Parsed.Initiator == 1001,
+       "Unexpected Security Exchange initiator %u\n", Parsed.Initiator);
+    ok(Parsed.ChannelId == 1003,
+       "Unexpected Security Exchange channel %u\n", Parsed.ChannelId);
+    ok(Parsed.Priority == 0x70,
+       "Unexpected Security Exchange priority 0x%x\n", Parsed.Priority);
+    ok(Parsed.Flags == 0x00000001,
+       "Unexpected Security Exchange flags 0x%lx\n", Parsed.Flags);
+    ok(Parsed.Payload == &SecurityExchange[19],
+       "Unexpected Security Exchange payload pointer\n");
+    ok(Parsed.PayloadLength == 4,
+       "Unexpected Security Exchange payload length %Iu\n", Parsed.PayloadLength);
+    ok(memcmp(Parsed.Payload, "\xaa\xbb\xcc\xdd", Parsed.PayloadLength) == 0,
+       "Unexpected Security Exchange opaque bytes\n");
+
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(NULL,
+                                                  sizeof(SecurityExchange),
+                                                  &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "NULL Security Exchange buffer should fail\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(SecurityExchange,
+                                                  sizeof(SecurityExchange),
+                                                  NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL Security Exchange output should fail\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(SecurityExchange,
+                                                  6,
+                                                  &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short Security Exchange packet should request more data\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(BadTpkt,
+                                                  sizeof(BadTpkt),
+                                                  &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "Bad Security Exchange TPKT should fail\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(BadX224Type,
+                                                  sizeof(BadX224Type),
+                                                  &Parsed) == TermSrvRdpBcgrUnsupportedPdu,
+       "Bad Security Exchange X.224 type should fail\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(BadMcsMarker,
+                                                  sizeof(BadMcsMarker),
+                                                  &Parsed) == TermSrvRdpBcgrUnsupportedPdu,
+       "Bad Security Exchange MCS marker should fail\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(BadPayloadLength,
+                                                  sizeof(BadPayloadLength),
+                                                  &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Bad Security Exchange payload length should fail\n");
+    ok(TermSrvRdpBcgrParseSecurityExchangePayload(ShortMcsBody,
+                                                  sizeof(ShortMcsBody),
+                                                  &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Short Security Exchange MCS body should fail\n");
+}
+
+static VOID
+TestRdpBcgrParseClientInfoPayload(VOID)
+{
+    static const UCHAR ClientInfo[] =
+    {
+        0x03, 0x00, 0x00, 0x16,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x07,
+        0x40, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33
+    };
+    static const UCHAR BadFlags[] =
+    {
+        0x03, 0x00, 0x00, 0x16,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x07,
+        0x01, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33
+    };
+    static const UCHAR ShortFlags[] =
+    {
+        0x03, 0x00, 0x00, 0x12,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x03,
+        0x40, 0x00, 0x00
+    };
+    TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD Parsed;
+
+    ok(TermSrvRdpBcgrParseClientInfoPayload(ClientInfo,
+                                            sizeof(ClientInfo),
+                                            &Parsed) == TermSrvRdpBcgrSuccess,
+       "Client Info payload parse failed\n");
+    ok(Parsed.Initiator == 1001,
+       "Unexpected Client Info initiator %u\n", Parsed.Initiator);
+    ok(Parsed.ChannelId == 1003,
+       "Unexpected Client Info channel %u\n", Parsed.ChannelId);
+    ok(Parsed.Priority == 0x70,
+       "Unexpected Client Info priority 0x%x\n", Parsed.Priority);
+    ok(Parsed.Flags == 0x00000040,
+       "Unexpected Client Info flags 0x%lx\n", Parsed.Flags);
+    ok(Parsed.Payload == &ClientInfo[19],
+       "Unexpected Client Info payload pointer\n");
+    ok(Parsed.PayloadLength == 3,
+       "Unexpected Client Info payload length %Iu\n", Parsed.PayloadLength);
+    ok(memcmp(Parsed.Payload, "\x11\x22\x33", Parsed.PayloadLength) == 0,
+       "Unexpected Client Info opaque bytes\n");
+
+    ok(TermSrvRdpBcgrParseClientInfoPayload(ClientInfo,
+                                            6,
+                                            &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short Client Info packet should request more data\n");
+    ok(TermSrvRdpBcgrParseClientInfoPayload(BadFlags,
+                                            sizeof(BadFlags),
+                                            &Parsed) == TermSrvRdpBcgrUnsupportedPdu,
+       "Bad Client Info flags should fail\n");
+    ok(TermSrvRdpBcgrParseClientInfoPayload(ShortFlags,
+                                            sizeof(ShortFlags),
+                                            &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Short Client Info flags should fail\n");
+}
+
+static VOID
 TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 {
     static const UCHAR ExpectedConfirm[] =
@@ -681,5 +839,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseMcsAttachUserRequest();
     TestRdpBcgrWriteMcsAttachUserConfirm();
     TestRdpBcgrParseMcsChannelJoinRequest();
+    TestRdpBcgrParseSecurityExchangePayload();
+    TestRdpBcgrParseClientInfoPayload();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
 }

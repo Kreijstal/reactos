@@ -19,6 +19,10 @@
 #define X224_DATA_EOT 0x80
 
 #define RDP_NEGOTIATION_LENGTH 8
+#define MCS_SEND_DATA_REQUEST 0x64
+#define SECURITY_FLAGS_LENGTH 4
+#define SEC_EXCHANGE_PKT 0x00000001
+#define SEC_INFO_PKT 0x00000040
 
 static USHORT
 ReadBe16(
@@ -390,6 +394,80 @@ TermSrvRdpBcgrParseMcsChannelJoinRequest(
     Request->Initiator = ReadBe16(&Body[1]);
     Request->ChannelId = ReadBe16(&Body[3]);
     return TermSrvRdpBcgrSuccess;
+}
+
+static TERMSRV_RDPBCGR_RESULT
+ParseOpaqueSecurityPayload(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ ULONG ExpectedFlags,
+    _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *Packet)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    SIZE_T BodyLength;
+    SIZE_T PayloadLength;
+    const UCHAR *Body;
+    const UCHAR *Payload;
+    ULONG Flags;
+
+    if (Packet == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(Packet, 0, sizeof(*Packet));
+
+    Result = ParseMcsDataBody(Buffer, BufferLength, &Body, &BodyLength);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (BodyLength < 8)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (Body[0] != MCS_SEND_DATA_REQUEST)
+        return TermSrvRdpBcgrUnsupportedPdu;
+
+    PayloadLength = ReadBe16(&Body[6]);
+    if (PayloadLength < SECURITY_FLAGS_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (PayloadLength != BodyLength - 8)
+        return TermSrvRdpBcgrInvalidLength;
+
+    Payload = &Body[8];
+    Flags = ReadLe32(Payload);
+    if (Flags != ExpectedFlags)
+        return TermSrvRdpBcgrUnsupportedPdu;
+
+    Packet->Initiator = ReadBe16(&Body[1]);
+    Packet->ChannelId = ReadBe16(&Body[3]);
+    Packet->Priority = Body[5];
+    Packet->Flags = Flags;
+    Packet->Payload = &Payload[SECURITY_FLAGS_LENGTH];
+    Packet->PayloadLength = PayloadLength - SECURITY_FLAGS_LENGTH;
+    return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseSecurityExchangePayload(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *SecurityExchange)
+{
+    return ParseOpaqueSecurityPayload(Buffer,
+                                      BufferLength,
+                                      SEC_EXCHANGE_PKT,
+                                      SecurityExchange);
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseClientInfoPayload(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *ClientInfo)
+{
+    return ParseOpaqueSecurityPayload(Buffer,
+                                      BufferLength,
+                                      SEC_INFO_PKT,
+                                      ClientInfo);
 }
 
 TERMSRV_RDPBCGR_RESULT
