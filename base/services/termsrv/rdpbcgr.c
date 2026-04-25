@@ -311,6 +311,49 @@ TermSrvRdpBcgrWriteConnectionConfirm(
     return TermSrvRdpBcgrSuccess;
 }
 
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsConnectResponse(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    SIZE_T PacketLength;
+    SIZE_T HeaderLength;
+
+    if (BytesWritten == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    *BytesWritten = 0;
+
+    if (Buffer == NULL || Payload == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    HeaderLength = TPKT_HEADER_LENGTH + 1 + X224_DATA_LENGTH;
+    if (PayloadLength > 0xFFFF - HeaderLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    PacketLength = HeaderLength + PayloadLength;
+    if (PacketLength > 0xFFFF)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (BufferLength < PacketLength)
+        return TermSrvRdpBcgrBufferTooSmall;
+
+    Buffer[0] = TPKT_VERSION;
+    Buffer[1] = 0;
+    WriteBe16(&Buffer[2], (USHORT)PacketLength);
+
+    Buffer[4] = X224_DATA_LENGTH;
+    Buffer[5] = X224_DT_TPDU;
+    Buffer[6] = X224_DATA_EOT;
+    memcpy(&Buffer[HeaderLength], Payload, PayloadLength);
+
+    *BytesWritten = PacketLength;
+    return TermSrvRdpBcgrSuccess;
+}
+
 PCSTR
 TermSrvRdpBcgrResultName(
     _In_ TERMSRV_RDPBCGR_RESULT Result)
