@@ -69,6 +69,24 @@ typedef struct _TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL
     SIZE_T PayloadLength;
 } TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL;
 
+typedef struct _TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM
+{
+    USHORT UserChannelId;
+} TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM;
+
+typedef struct _TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST
+{
+    USHORT Initiator;
+    USHORT ChannelId;
+} TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST;
+
+typedef struct _TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM
+{
+    USHORT Initiator;
+    USHORT RequestedChannelId;
+    USHORT ConfirmedChannelId;
+} TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM;
+
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrParseConnectionRequest(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
@@ -80,6 +98,22 @@ TermSrvRdpBcgrParseMcsConnectInitial(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL *ConnectInitial);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsErectDomainRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsAttachUserRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsChannelJoinRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST *Request);
 
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrWriteConnectionConfirm(
@@ -94,6 +128,20 @@ TermSrvRdpBcgrWriteMcsConnectResponse(
     _In_ SIZE_T BufferLength,
     _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
     _In_ SIZE_T PayloadLength,
+    _Out_ SIZE_T *BytesWritten);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsAttachUserConfirm(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM *Confirm,
+    _Out_ SIZE_T *BytesWritten);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsChannelJoinConfirm(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM *Confirm,
     _Out_ SIZE_T *BytesWritten);
 
 PCSTR
