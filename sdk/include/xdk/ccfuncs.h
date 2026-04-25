@@ -422,6 +422,42 @@ CcCopyWriteWontFlush(
 #define CcCopyWriteWontFlush(FO, FOFF, LEN) ((LEN) <= 0x10000)
 #endif
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+
+#define CC_ENABLE_DISK_IO_ACCOUNTING 0x00000001
+
+NTKERNELAPI
+VOID
+NTAPI
+CcSetAdditionalCacheAttributesEx(
+  _In_ PFILE_OBJECT FileObject,
+  _In_ ULONG Flags);
+
+NTKERNELAPI
+BOOLEAN
+NTAPI
+CcCopyReadEx(
+  _In_ PFILE_OBJECT FileObject,
+  _In_ PLARGE_INTEGER FileOffset,
+  _In_ ULONG Length,
+  _In_ BOOLEAN Wait,
+  _Out_writes_bytes_(Length) PVOID Buffer,
+  _Out_ PIO_STATUS_BLOCK IoStatus,
+  _In_ PETHREAD IoIssuerThread);
+
+NTKERNELAPI
+BOOLEAN
+NTAPI
+CcCopyWriteEx(
+  _In_ PFILE_OBJECT FileObject,
+  _In_ PLARGE_INTEGER FileOffset,
+  _In_ ULONG Length,
+  _In_ BOOLEAN Wait,
+  _In_reads_bytes_(Length) PVOID Buffer,
+  _In_ PETHREAD IoIssuerThread);
+
+#endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
+
 #define CcReadAhead(FO, FOFF, LEN) (                \
     if ((LEN) >= 256) {                             \
         CcScheduleReadAhead((FO), (FOFF), (LEN));   \
