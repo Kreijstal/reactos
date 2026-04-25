@@ -1349,3 +1349,38 @@ FsRtlFreeFileLock(IN PFILE_LOCK FileLock)
     FsRtlUninitializeFileLock(FileLock);
     ExFreeToPagedLookasideList(&FsRtlFileLockLookasideList, FileLock);
 }
+
+/*
+ * @implemented
+ *
+ * Returns TRUE iff there are byte-range lock requests still being processed
+ * on the FILE_LOCK (granted but not yet completed, or queued waiters). This
+ * mirrors the LockRequestsInProgress counter that FsRtlPrivateLock /
+ * FsRtlIncrement|DecrementLockRequestsInProgress maintain.
+ */
+BOOLEAN
+NTAPI
+FsRtlAreThereWaitingFileLocks(IN PFILE_LOCK FileLock)
+{
+    return (FileLock->LockRequestsInProgress > 0);
+}
+
+/*
+ * @implemented
+ *
+ * Pre-oplock-grant safety check: returns TRUE if it is safe for the file
+ * system to grant a new oplock based on current byte-range lock state.
+ * Conservative-correct rule: if any lock is currently held anywhere on the
+ * file (FastIoIsQuestionable), refuse. AllocationSize would let us narrow
+ * the scan to in-range locks only; that requires walking the FsRtl-private
+ * lock tree which the public API doesn't expose, so we keep the conservative
+ * behaviour until that walk lands.
+ */
+BOOLEAN
+NTAPI
+FsRtlCheckLockForOplockRequest(IN PFILE_LOCK FileLock,
+                               IN PLARGE_INTEGER AllocationSize)
+{
+    UNREFERENCED_PARAMETER(AllocationSize);
+    return !FsRtlAreThereCurrentFileLocks(FileLock);
+}
