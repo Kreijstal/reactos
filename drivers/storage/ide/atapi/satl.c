@@ -1055,7 +1055,7 @@ AtaReqCompleteModeSense(
     /* Return SCSI mode pages */
     if (PageCode == MODE_PAGE_CONTROL || PageCode == MODE_SENSE_RETURN_ALL)
     {
-        UCHAR SubPageCode = Cdb->MODE_SENSE.SubPageCode;
+        UCHAR SubPageCode = Request->Srb->Cdb[3];
 
         if (SubPageCode == 0x00 || SubPageCode == 0xFF)
             Buffer += AtaReqControlModePage(DevExt, Buffer);
@@ -1122,7 +1122,7 @@ AtaReqScsiModeSense(
 
         case MODE_PAGE_CONTROL:
         {
-            UCHAR SubPageCode = Cdb->MODE_SENSE.SubPageCode;
+            UCHAR SubPageCode = Srb->Cdb[3];
 
             if (SubPageCode != 0x00 && SubPageCode != 0x01 && SubPageCode != 0xFF)
                 return AtaReqTerminateInvalidField(Srb);
