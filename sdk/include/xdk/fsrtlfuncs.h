@@ -1712,4 +1712,42 @@ FsRtlSetupAdvancedHeader(
     (IRP)->IoStatus.Status = (STATUS);                                         \
     IoCompleteRequest( (IRP), IO_DISK_INCREMENT );                             \
 }
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+
+NTKERNELAPI
+VOID
+NTAPI
+FsRtlDismountComplete(
+  _In_ PDEVICE_OBJECT DeviceObject,
+  _In_ NTSTATUS DismountStatus);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+FsRtlGetSectorSizeInformation(
+  _In_ PDEVICE_OBJECT DeviceObject,
+  _Out_ PFILE_FS_SECTOR_SIZE_INFORMATION SectorSizeInfo);
+
+NTKERNELAPI
+VOID
+NTAPI
+FsRtlUpdateDiskCounters(
+  _In_ ULONGLONG BytesRead,
+  _In_ ULONGLONG BytesWritten);
+
+NTKERNELAPI
+BOOLEAN
+NTAPI
+FsRtlAreThereWaitingFileLocks(
+  _In_ PFILE_LOCK FileLock);
+
+NTKERNELAPI
+BOOLEAN
+NTAPI
+FsRtlCheckLockForOplockRequest(
+  _In_ PFILE_LOCK FileLock,
+  _In_ PLARGE_INTEGER AllocationSize);
+
+#endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
 $endif (_NTIFS_)
