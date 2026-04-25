@@ -22,6 +22,13 @@ typedef enum _TERMSRV_PACKET_PLACEHOLDER
     TermSrvPacketFastPath
 } TERMSRV_PACKET_PLACEHOLDER;
 
+typedef enum _TERMSRV_CLIENT_PACKET_CLASS
+{
+    TermSrvClientPacketAbsent,
+    TermSrvClientPacketInvalid,
+    TermSrvClientPacketMcsConnectInitial
+} TERMSRV_CLIENT_PACKET_CLASS;
+
 static BOOL
 TermSrvListenerEnabled(VOID)
 {
@@ -61,31 +68,68 @@ TermSrvSetNonBlocking(
     return ioctlsocket(Socket, FIONBIO, &NonBlocking);
 }
 
+static INT
+TermSrvReceiveWithTimeout(
+    _In_ SOCKET Client,
+    _In_ HANDLE StopEvent,
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ INT BufferLength)
+{
+    fd_set ReadSet;
+    TIMEVAL Timeout;
+    INT Received;
+    INT SelectResult;
+
+    Received = recv(Client, (char *)Buffer, BufferLength, 0);
+    if (Received != SOCKET_ERROR || WSAGetLastError() != WSAEWOULDBLOCK)
+        return Received;
+
+    FD_ZERO(&ReadSet);
+    FD_SET(Client, &ReadSet);
+    Timeout.tv_sec = 0;
+    Timeout.tv_usec = TERMSRV_SELECT_TIMEOUT_MS * 1000;
+
+    SelectResult = select(0, &ReadSet, NULL, NULL, &Timeout);
+    if (SelectResult <= 0 || !FD_ISSET(Client, &ReadSet) || TermSrvStopRequested(StopEvent))
+        return 0;
+
+    return recv(Client, (char *)Buffer, BufferLength, 0);
+}
+
+static TERMSRV_CLIENT_PACKET_CLASS
+TermSrvClassifyClientPacket(
+    _In_reads_bytes_(Length) const UCHAR *Buffer,
+    _In_ INT Length)
+{
+    TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
+
+    if (Length <= 0)
+        return TermSrvClientPacketAbsent;
+
+    if (TermSrvIdentifyPacketPlaceholder(Buffer, Length) != TermSrvPacketTpkt)
+        return TermSrvClientPacketInvalid;
+
+    if (TermSrvRdpBcgrParseMcsConnectInitial(Buffer,
+                                            (SIZE_T)Length,
+                                            &ConnectInitial) == TermSrvRdpBcgrSuccess)
+    {
+        return TermSrvClientPacketMcsConnectInitial;
+    }
+
+    return TermSrvClientPacketInvalid;
+}
+
 static VOID
 TermSrvHandleClient(
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent)
 {
     UCHAR Buffer[512];
-    fd_set ReadSet;
-    TIMEVAL Timeout;
     INT Received;
-    INT SelectResult;
 
     TermSrvSetNonBlocking(Client);
 
-    Received = recv(Client, (char *)Buffer, sizeof(Buffer), 0);
-    if (Received == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK)
-    {
-        FD_ZERO(&ReadSet);
-        FD_SET(Client, &ReadSet);
-        Timeout.tv_sec = 0;
-        Timeout.tv_usec = TERMSRV_SELECT_TIMEOUT_MS * 1000;
-
-        SelectResult = select(0, &ReadSet, NULL, NULL, &Timeout);
-        if (SelectResult > 0 && FD_ISSET(Client, &ReadSet) && !TermSrvStopRequested(StopEvent))
-            Received = recv(Client, (char *)Buffer, sizeof(Buffer), 0);
-    }
+    Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, sizeof(Buffer));
 
     if (Received > 0)
     {
@@ -116,6 +160,13 @@ TermSrvHandleClient(
                                                      &ReplyLength) == TermSrvRdpBcgrSuccess)
             {
                 send(Client, (const char *)Reply, (INT)ReplyLength, 0);
+            }
+
+            Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, sizeof(Buffer));
+            if (TermSrvClassifyClientPacket(Buffer, Received) ==
+                TermSrvClientPacketMcsConnectInitial)
+            {
+                /* The scaffold recognizes this envelope but stops before MCS processing. */
             }
         }
     }
