@@ -13,13 +13,18 @@
 #include "rdpbcgr.h"
 
 #define TERMSRV_LISTEN_ENV_NAME L"REACTOS_TERMSRV_LISTEN"
+#define TERMSRV_LISTEN_PORT_ENV_NAME L"REACTOS_TERMSRV_PORT"
 #define TERMSRV_LISTEN_PORT 3389
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 250
 #define TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID 1001
+#define TERMSRV_MCS_SCAFFOLD_FIRST_STATIC_CHANNEL_ID 1004
 #define TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID 1007
 #define TERMSRV_CLIPRDR_SCAFFOLD_FORMAT_ID 13
 #define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 4
+#define TERMSRV_SCAFFOLD_STATIC_CHANNEL_LIST_HEADER_LENGTH 1
+#define TERMSRV_SCAFFOLD_STATIC_CHANNEL_DEF_LENGTH \
+    (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
 
 static const UCHAR TermSrvMcsConnectResponsePayload[] =
 {
@@ -41,6 +46,22 @@ TermSrvListenerEnabled(VOID)
 
     return (GetEnvironmentVariableW(TERMSRV_LISTEN_ENV_NAME, Value, ARRAYSIZE(Value)) == 1 &&
             Value[0] == L'1');
+}
+
+static USHORT
+TermSrvListenerPort(VOID)
+{
+    WCHAR Value[8];
+    INT Port;
+
+    if (GetEnvironmentVariableW(TERMSRV_LISTEN_PORT_ENV_NAME, Value, ARRAYSIZE(Value)) == 0)
+        return TERMSRV_LISTEN_PORT;
+
+    Port = _wtoi(Value);
+    if (Port <= 0 || Port > 0xffff)
+        return TERMSRV_LISTEN_PORT;
+
+    return (USHORT)Port;
 }
 
 static TERMSRV_PACKET_PLACEHOLDER
@@ -263,6 +284,73 @@ TermSrvInitializeCliprdrScaffold(
 }
 
 static BOOL
+TermSrvLooksLikeScaffoldStaticChannelList(
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength)
+{
+    SIZE_T Count;
+    SIZE_T ExpectedLength;
+
+    if (Payload == NULL ||
+        PayloadLength < TERMSRV_SCAFFOLD_STATIC_CHANNEL_LIST_HEADER_LENGTH)
+    {
+        return FALSE;
+    }
+
+    Count = Payload[0];
+    if (Count > TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS)
+        return FALSE;
+
+    ExpectedLength = TERMSRV_SCAFFOLD_STATIC_CHANNEL_LIST_HEADER_LENGTH +
+                     Count * TERMSRV_SCAFFOLD_STATIC_CHANNEL_DEF_LENGTH;
+    return PayloadLength == ExpectedLength;
+}
+
+static BOOL
+TermSrvTryParseScaffoldStaticChannelList(
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength,
+    _Out_ TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+
+    if (!TermSrvLooksLikeScaffoldStaticChannelList(Payload, PayloadLength))
+        return FALSE;
+
+    Result = TermSrvRdpBcgrParseStaticChannelList(Payload,
+                                                  PayloadLength,
+                                                  ChannelList);
+    if (Result != TermSrvRdpBcgrSuccess)
+    {
+        TermSrvLogRdpBcgrFailure("scaffold static channel list parse", Result);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvTryAssignCliprdrFromStaticChannelList(
+    _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList)
+{
+    TERMSRV_CLIPRDR_RESULT ClipResult;
+
+    if (ChannelList == NULL)
+        return FALSE;
+
+    ClipResult = TermSrvCliprdrAssignFromStaticChannelList(
+        Channel,
+        ChannelList,
+        TERMSRV_MCS_SCAFFOLD_FIRST_STATIC_CHANNEL_ID);
+    if (ClipResult == TermSrvCliprdrSuccess)
+        return TRUE;
+
+    TermSrvLogCliprdrFailure("cliprdr static channel list assign", ClipResult);
+    return FALSE;
+}
+
+static BOOL
 TermSrvRouteOptionalCliprdrPacket(
     _In_ SOCKET Client,
     _In_reads_bytes_(Received) const UCHAR *Buffer,
@@ -373,7 +461,8 @@ TermSrvRunEarlyMcsPhase(
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
     _In_ INT BufferLength,
     _Out_writes_bytes_(ReplyLength) UCHAR *Reply,
-    _In_ SIZE_T ReplyLength)
+    _In_ SIZE_T ReplyLength,
+    _In_opt_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *StaticChannelList)
 {
     INT Received;
     SIZE_T BytesWritten;
@@ -392,6 +481,9 @@ TermSrvRunEarlyMcsPhase(
     {
         return FALSE;
     }
+
+    TermSrvTryAssignCliprdrFromStaticChannelList(&CliprdrChannel,
+                                                 StaticChannelList);
 
     if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
         return FALSE;
@@ -469,7 +561,8 @@ TermSrvRunEarlyMcsPhase(
         ChannelJoinConfirm.RequestedChannelId = ChannelJoinRequest.ChannelId;
         ChannelJoinConfirm.ConfirmedChannelId = ChannelJoinRequest.ChannelId;
 
-        if (ChannelJoinRequest.ChannelId == TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID)
+        if (ChannelJoinRequest.ChannelId == TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID &&
+            CliprdrChannel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID)
         {
             TERMSRV_CLIPRDR_RESULT ClipResult;
 
@@ -477,7 +570,8 @@ TermSrvRunEarlyMcsPhase(
                                                        ChannelJoinRequest.ChannelId);
             if (ClipResult != TermSrvCliprdrSuccess)
             {
-                TermSrvLogCliprdrFailure("cliprdr scaffold channel assign", ClipResult);
+                TermSrvLogCliprdrFailure("cliprdr fixed scaffold channel assign",
+                                         ClipResult);
                 return FALSE;
             }
         }
@@ -551,7 +645,10 @@ TermSrvHandleClient(
         SIZE_T ReplyLength;
         TERMSRV_RDPBCGR_RESULT Result;
         TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
+        TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST StaticChannelList;
+        BOOL HaveStaticChannelList;
 
+        HaveStaticChannelList = FALSE;
         if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) == TermSrvPacketTpkt &&
             TermSrvRdpBcgrParseConnectionRequest(Buffer,
                                                 (SIZE_T)Received,
@@ -588,6 +685,11 @@ TermSrvHandleClient(
                                                     (SIZE_T)Received,
                                                     &ConnectInitial) == TermSrvRdpBcgrSuccess)
             {
+                HaveStaticChannelList = TermSrvTryParseScaffoldStaticChannelList(
+                    ConnectInitial.Payload,
+                    ConnectInitial.PayloadLength,
+                    &StaticChannelList);
+
                 Result = TermSrvRdpBcgrWriteMcsConnectResponse(Reply,
                                                                sizeof(Reply),
                                                                TermSrvMcsConnectResponsePayload,
@@ -607,7 +709,8 @@ TermSrvHandleClient(
                                              Buffer,
                                              sizeof(Buffer),
                                              Reply,
-                                             sizeof(Reply)))
+                                             sizeof(Reply),
+                                             HaveStaticChannelList ? &StaticChannelList : NULL))
                 {
                     goto Cleanup;
                 }
@@ -702,7 +805,7 @@ TermSrvListenerRun(
     ZeroMemory(&Address, sizeof(Address));
     Address.sin_family = AF_INET;
     Address.sin_addr.s_addr = htonl(INADDR_ANY);
-    Address.sin_port = htons(TERMSRV_LISTEN_PORT);
+    Address.sin_port = htons(TermSrvListenerPort());
 
     if (bind(ListenSocket, (SOCKADDR *)&Address, sizeof(Address)) == SOCKET_ERROR)
     {
