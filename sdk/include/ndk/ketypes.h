@@ -2163,7 +2163,16 @@ typedef struct _KTHREAD
         struct
         {
             UCHAR SchedulerApcFill4[FIELD_OFFSET(KAPC, SystemArgument2)]; // 32 bit:, 64 bit: 72/0x48
-            PVOID LegoData;
+            union
+            {
+                PVOID LegoData;
+                /* Win8 removed the dedicated KTHREAD::CallbackStack slot.
+                 * Reuse LegoData (unused by modern code, real KTHREAD field
+                 * per the public symbols) so the user-mode callout path can
+                 * continue to spell its private save area as CallbackStack
+                 * without an extra struct field. */
+                PVOID CallbackStack;
+            };
         };
         struct
         {

@@ -1038,7 +1038,14 @@ typedef struct _KEXCEPTION_FRAME
     ULONG64 P4Home;
     ULONG64 P5;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    ULONG64 Spare1;
+    /* Win8 renamed this slot to Spare1; ReactOS' user-mode callout path
+     * still uses it as the saved kernel InitialStack. Same offset, two
+     * names. */
+    union
+    {
+        ULONG64 Spare1;
+        ULONG64 InitialStack;
+    };
 #else
     ULONG64 InitialStack;
 #endif
@@ -1053,9 +1060,12 @@ typedef struct _KEXCEPTION_FRAME
     M128A Xmm14;
     M128A Xmm15;
     ULONG64 TrapFrame;
-#if (NTDDI_VERSION < NTDDI_WIN8)
+    /* Win8 dropped the dedicated CallbackStack slot from KEXCEPTION_FRAME,
+     * but the user-mode callout path still needs to save the previous
+     * KTHREAD::CallbackStack across the call. Keep the slot at every
+     * NTDDI level - this is private to KiUserModeCallout / NtCallbackReturn
+     * (KCALLOUT_FRAME is not part of any public driver ABI). */
     ULONG64 CallbackStack;
-#endif
     ULONG64 OutputBuffer;
     ULONG64 OutputLength;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
