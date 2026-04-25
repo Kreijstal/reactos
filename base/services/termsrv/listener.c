@@ -6,6 +6,7 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include <stdio.h>
 
 #include "listener.h"
 #include "rdpbcgr.h"
@@ -15,19 +16,18 @@
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 250
 
+static const UCHAR TermSrvMcsConnectResponsePayload[] =
+{
+    /* Placeholder Connect-Response body; rdpbcgr.c wraps it in TPKT/X.224. */
+    0x7f, 0x66, 0x03, 0x01, 0x02
+};
+
 typedef enum _TERMSRV_PACKET_PLACEHOLDER
 {
     TermSrvPacketUnknown,
     TermSrvPacketTpkt,
     TermSrvPacketFastPath
 } TERMSRV_PACKET_PLACEHOLDER;
-
-typedef enum _TERMSRV_CLIENT_PACKET_CLASS
-{
-    TermSrvClientPacketAbsent,
-    TermSrvClientPacketInvalid,
-    TermSrvClientPacketMcsConnectInitial
-} TERMSRV_CLIENT_PACKET_CLASS;
 
 static BOOL
 TermSrvListenerEnabled(VOID)
@@ -57,6 +57,46 @@ TermSrvStopRequested(
     _In_ HANDLE StopEvent)
 {
     return WaitForSingleObject(StopEvent, 0) == WAIT_OBJECT_0;
+}
+
+static VOID
+TermSrvLogFailure(
+    _In_z_ const CHAR *Message)
+{
+    OutputDebugStringA("termsrv: ");
+    OutputDebugStringA(Message);
+    OutputDebugStringA("\n");
+}
+
+static VOID
+TermSrvLogSocketFailure(
+    _In_z_ const CHAR *Operation)
+{
+    CHAR Message[128];
+
+    _snprintf(Message,
+              sizeof(Message),
+              "%s failed: WSA error %u",
+              Operation,
+              (unsigned int)WSAGetLastError());
+    Message[sizeof(Message) - 1] = '\0';
+    TermSrvLogFailure(Message);
+}
+
+static VOID
+TermSrvLogRdpBcgrFailure(
+    _In_z_ const CHAR *Operation,
+    _In_ TERMSRV_RDPBCGR_RESULT Result)
+{
+    CHAR Message[128];
+
+    _snprintf(Message,
+              sizeof(Message),
+              "%s failed: %s",
+              Operation,
+              TermSrvRdpBcgrResultName(Result));
+    Message[sizeof(Message) - 1] = '\0';
+    TermSrvLogFailure(Message);
 }
 
 static INT
@@ -96,27 +136,28 @@ TermSrvReceiveWithTimeout(
     return recv(Client, (char *)Buffer, BufferLength, 0);
 }
 
-static TERMSRV_CLIENT_PACKET_CLASS
-TermSrvClassifyClientPacket(
+static BOOL
+TermSrvSendPacket(
+    _In_ SOCKET Client,
     _In_reads_bytes_(Length) const UCHAR *Buffer,
-    _In_ INT Length)
+    _In_ SIZE_T Length)
 {
-    TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
+    INT Sent;
 
-    if (Length <= 0)
-        return TermSrvClientPacketAbsent;
-
-    if (TermSrvIdentifyPacketPlaceholder(Buffer, Length) != TermSrvPacketTpkt)
-        return TermSrvClientPacketInvalid;
-
-    if (TermSrvRdpBcgrParseMcsConnectInitial(Buffer,
-                                            (SIZE_T)Length,
-                                            &ConnectInitial) == TermSrvRdpBcgrSuccess)
+    Sent = send(Client, (const char *)Buffer, (INT)Length, 0);
+    if (Sent == SOCKET_ERROR)
     {
-        return TermSrvClientPacketMcsConnectInitial;
+        TermSrvLogSocketFailure("send");
+        return FALSE;
     }
 
-    return TermSrvClientPacketInvalid;
+    if ((SIZE_T)Sent != Length)
+    {
+        TermSrvLogFailure("send returned a short write");
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static VOID
@@ -137,6 +178,8 @@ TermSrvHandleClient(
         TERMSRV_RDPBCGR_CONNECTION_CONFIRM Confirm;
         UCHAR Reply[32];
         SIZE_T ReplyLength;
+        TERMSRV_RDPBCGR_RESULT Result;
+        TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
 
         if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) == TermSrvPacketTpkt &&
             TermSrvRdpBcgrParseConnectionRequest(Buffer,
@@ -154,23 +197,44 @@ TermSrvHandleClient(
                 Confirm.Negotiation.Protocols = TermSrvRdpBcgrProtocolStandard;
             }
 
-            if (TermSrvRdpBcgrWriteConnectionConfirm(Reply,
-                                                     sizeof(Reply),
-                                                     &Confirm,
-                                                     &ReplyLength) == TermSrvRdpBcgrSuccess)
+            Result = TermSrvRdpBcgrWriteConnectionConfirm(Reply,
+                                                          sizeof(Reply),
+                                                          &Confirm,
+                                                          &ReplyLength);
+            if (Result != TermSrvRdpBcgrSuccess)
             {
-                send(Client, (const char *)Reply, (INT)ReplyLength, 0);
+                TermSrvLogRdpBcgrFailure("connection confirm write", Result);
+                goto Cleanup;
             }
 
+            if (!TermSrvSendPacket(Client, Reply, ReplyLength))
+                goto Cleanup;
+
             Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, sizeof(Buffer));
-            if (TermSrvClassifyClientPacket(Buffer, Received) ==
-                TermSrvClientPacketMcsConnectInitial)
+            if (Received > 0 &&
+                TermSrvIdentifyPacketPlaceholder(Buffer, Received) == TermSrvPacketTpkt &&
+                TermSrvRdpBcgrParseMcsConnectInitial(Buffer,
+                                                    (SIZE_T)Received,
+                                                    &ConnectInitial) == TermSrvRdpBcgrSuccess)
             {
-                /* The scaffold recognizes this envelope but stops before MCS processing. */
+                Result = TermSrvRdpBcgrWriteMcsConnectResponse(Reply,
+                                                               sizeof(Reply),
+                                                               TermSrvMcsConnectResponsePayload,
+                                                               sizeof(TermSrvMcsConnectResponsePayload),
+                                                               &ReplyLength);
+                if (Result != TermSrvRdpBcgrSuccess)
+                {
+                    TermSrvLogRdpBcgrFailure("MCS connect response write", Result);
+                    goto Cleanup;
+                }
+
+                if (!TermSrvSendPacket(Client, Reply, ReplyLength))
+                    goto Cleanup;
             }
         }
     }
 
+Cleanup:
     closesocket(Client);
 }
 
