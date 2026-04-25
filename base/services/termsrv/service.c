@@ -5,6 +5,7 @@
  */
 
 #include <windows.h>
+#include "listener.h"
 #include "termsrv.h"
 
 #include <stdio.h>
@@ -65,19 +66,9 @@ static DWORD WINAPI
 WorkerThread(
     _In_opt_ LPVOID Parameter)
 {
-    TERMSRV_SESSION_MANAGER SessionManager;
-    TERMSRV_RDP_PEER Peer;
-
     UNREFERENCED_PARAMETER(Parameter);
 
-    TermSrvSessionManagerInit(&SessionManager);
-    TermSrvRdpPeerInit(&Peer, &SessionManager);
-
-    /* Network accept/listen is intentionally not enabled yet. This worker
-     * keeps the service alive while the RDP server-side state engine grows
-     * behind unit tests. */
-    WaitForSingleObject(StopEvent, INFINITE);
-    return ERROR_SUCCESS;
+    return TermSrvListenerRun(StopEvent);
 }
 
 static VOID WINAPI
