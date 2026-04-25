@@ -13,7 +13,10 @@
 
 #define X224_CR_TPDU 0xE0
 #define X224_CC_TPDU 0xD0
+#define X224_DT_TPDU 0xF0
 #define X224_FIXED_LENGTH 6
+#define X224_DATA_LENGTH 2
+#define X224_DATA_EOT 0x80
 
 #define RDP_NEGOTIATION_LENGTH 8
 
@@ -195,6 +198,53 @@ ParseNegotiationRequest:
 
     Request->Negotiation.Protocols = ReadLe32(&Buffer[Offset + 4]);
     Request->HasNegotiation = TRUE;
+    return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsConnectInitial(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL *ConnectInitial)
+{
+    SIZE_T PacketLength;
+    SIZE_T HeaderLength;
+    SIZE_T Offset;
+
+    if (ConnectInitial == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(ConnectInitial, 0, sizeof(*ConnectInitial));
+
+    HeaderLength = TPKT_HEADER_LENGTH + 1 + X224_DATA_LENGTH;
+    if (BufferLength < HeaderLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (Buffer[0] != TPKT_VERSION || Buffer[1] != 0)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    PacketLength = ReadBe16(&Buffer[2]);
+    if (PacketLength < HeaderLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (PacketLength > BufferLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (PacketLength != BufferLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (Buffer[TPKT_HEADER_LENGTH] != X224_DATA_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    Offset = TPKT_HEADER_LENGTH + 1;
+    if (Buffer[Offset] != X224_DT_TPDU ||
+        Buffer[Offset + 1] != X224_DATA_EOT)
+    {
+        return TermSrvRdpBcgrUnsupportedPdu;
+    }
+
+    ConnectInitial->Payload = &Buffer[Offset + X224_DATA_LENGTH];
+    ConnectInitial->PayloadLength = PacketLength - HeaderLength;
     return TermSrvRdpBcgrSuccess;
 }
 
