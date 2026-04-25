@@ -215,6 +215,7 @@ VOID WppCleanupRoutine(PVOID arg1) {
 
 
 ULONG
+NTAPI
 DriverEntry(
     IN PVOID  DriverObject,
     IN PVOID  RegistryPath
