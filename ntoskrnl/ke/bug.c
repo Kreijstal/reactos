@@ -118,8 +118,11 @@ KiRosPcToUserFileHeader(IN PVOID Pc,
      * succesfull address from RtlWalkFrameChain for UserMode, which
      * validates everything for us.
      */
-    ListHead = &KeGetCurrentThread()->
-               Teb->ProcessEnvironmentBlock->Ldr->InLoadOrderModuleList;
+    /* KTHREAD::Teb is PVOID at NTDDI_WIN8+ (Microsoft made it opaque to
+     * drivers); cast through PTEB so this compiles at every NTDDI level
+     * we build the kernel at. */
+    ListHead = &((PTEB)KeGetCurrentThread()->
+                 Teb)->ProcessEnvironmentBlock->Ldr->InLoadOrderModuleList;
 
     /* Set list pointers and make sure it's valid */
     NextEntry = ListHead->Flink;
