@@ -187,6 +187,39 @@ TermSrvReceiveTpkt(
 }
 
 static BOOL
+TermSrvConsumeOptionalClientInfoPacket(
+    _In_ SOCKET Client,
+    _In_ HANDLE StopEvent,
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ INT BufferLength)
+{
+    INT Received;
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD ClientInfo;
+
+    Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+    if (Received <= 0)
+        return TRUE;
+
+    if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
+    {
+        TermSrvLogFailure("expected TPKT packet");
+        return FALSE;
+    }
+
+    Result = TermSrvRdpBcgrParseClientInfoPayload(Buffer,
+                                                 (SIZE_T)Received,
+                                                 &ClientInfo);
+    if (Result != TermSrvRdpBcgrSuccess)
+    {
+        TermSrvLogRdpBcgrFailure("client info parse", Result);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
 TermSrvRunEarlyMcsPhase(
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
@@ -200,6 +233,8 @@ TermSrvRunEarlyMcsPhase(
     ULONG JoinCount;
     TERMSRV_RDPBCGR_RESULT Result;
     TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM AttachUserConfirm;
+    TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD SecurityExchange;
+    BOOL HaveSecurityExchange;
 
     if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
         return FALSE;
@@ -237,6 +272,8 @@ TermSrvRunEarlyMcsPhase(
     if (!TermSrvSendPacket(Client, Reply, BytesWritten))
         return FALSE;
 
+    HaveSecurityExchange = FALSE;
+
     for (JoinCount = 0; JoinCount < TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS; JoinCount++)
     {
         TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST ChannelJoinRequest;
@@ -257,7 +294,16 @@ TermSrvRunEarlyMcsPhase(
                                                          &ChannelJoinRequest);
         if (Result != TermSrvRdpBcgrSuccess)
         {
-            TermSrvLogRdpBcgrFailure("MCS channel join request parse", Result);
+            Result = TermSrvRdpBcgrParseSecurityExchangePayload(Buffer,
+                                                                (SIZE_T)Received,
+                                                                &SecurityExchange);
+            if (Result == TermSrvRdpBcgrSuccess)
+            {
+                HaveSecurityExchange = TRUE;
+                break;
+            }
+
+            TermSrvLogRdpBcgrFailure("security exchange parse", Result);
             return FALSE;
         }
 
@@ -279,6 +325,31 @@ TermSrvRunEarlyMcsPhase(
         if (!TermSrvSendPacket(Client, Reply, BytesWritten))
             return FALSE;
     }
+
+    if (!HaveSecurityExchange)
+    {
+        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+        if (Received <= 0)
+            return TRUE;
+
+        if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
+        {
+            TermSrvLogFailure("expected TPKT packet");
+            return FALSE;
+        }
+
+        Result = TermSrvRdpBcgrParseSecurityExchangePayload(Buffer,
+                                                            (SIZE_T)Received,
+                                                            &SecurityExchange);
+        if (Result != TermSrvRdpBcgrSuccess)
+        {
+            TermSrvLogRdpBcgrFailure("security exchange parse", Result);
+            return FALSE;
+        }
+    }
+
+    if (!TermSrvConsumeOptionalClientInfoPacket(Client, StopEvent, Buffer, BufferLength))
+        return FALSE;
 
     return TRUE;
 }
