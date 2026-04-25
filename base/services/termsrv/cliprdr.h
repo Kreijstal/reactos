@@ -116,6 +116,12 @@ TermSrvCliprdrAssignChannelId(
     _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
     _In_ USHORT ChannelId);
 
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrAssignFromStaticChannelList(
+    _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _In_ USHORT FirstStaticChannelId);
+
 BOOL
 TermSrvCliprdrIsChannelId(
     _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
