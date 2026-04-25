@@ -147,6 +147,22 @@ RunSelfTest(VOID)
     return (Peer.State == TermSrvRdpStateActive) ? 0 : 1;
 }
 
+static INT
+RunListenerConsole(VOID)
+{
+    DWORD Result;
+
+    StopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (StopEvent == NULL)
+        return (INT)GetLastError();
+
+    Result = TermSrvListenerRun(StopEvent);
+
+    CloseHandle(StopEvent);
+    StopEvent = NULL;
+    return (INT)Result;
+}
+
 int __cdecl
 wmain(
     _In_ INT Argc,
@@ -163,6 +179,13 @@ wmain(
          _wcsicmp(Argv[1], L"/selftest") == 0))
     {
         return RunSelfTest();
+    }
+
+    if (Argc >= 2 &&
+        (_wcsicmp(Argv[1], L"-listen") == 0 ||
+         _wcsicmp(Argv[1], L"/listen") == 0))
+    {
+        return RunListenerConsole();
     }
 
     return StartServiceCtrlDispatcherW(Table) ? 0 : (INT)GetLastError();
