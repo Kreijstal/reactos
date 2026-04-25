@@ -73,6 +73,98 @@ WriteLe32(
     Buffer[3] = (UCHAR)(Value >> 24);
 }
 
+static TERMSRV_RDPBCGR_RESULT
+ParseMcsDataBody(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ const UCHAR **Body,
+    _Out_ SIZE_T *BodyLength)
+{
+    SIZE_T PacketLength;
+    SIZE_T HeaderLength;
+    SIZE_T Offset;
+
+    if (Body == NULL || BodyLength == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    *Body = NULL;
+    *BodyLength = 0;
+
+    HeaderLength = TPKT_HEADER_LENGTH + 1 + X224_DATA_LENGTH;
+    if (BufferLength < HeaderLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (Buffer[0] != TPKT_VERSION || Buffer[1] != 0)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    PacketLength = ReadBe16(&Buffer[2]);
+    if (PacketLength < HeaderLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (PacketLength > BufferLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (PacketLength != BufferLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (Buffer[TPKT_HEADER_LENGTH] != X224_DATA_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    Offset = TPKT_HEADER_LENGTH + 1;
+    if (Buffer[Offset] != X224_DT_TPDU ||
+        Buffer[Offset + 1] != X224_DATA_EOT)
+    {
+        return TermSrvRdpBcgrUnsupportedPdu;
+    }
+
+    *Body = &Buffer[HeaderLength];
+    *BodyLength = PacketLength - HeaderLength;
+    return TermSrvRdpBcgrSuccess;
+}
+
+static TERMSRV_RDPBCGR_RESULT
+WriteMcsDataPdu(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_reads_bytes_(BodyLength) const UCHAR *Body,
+    _In_ SIZE_T BodyLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    SIZE_T PacketLength;
+    SIZE_T HeaderLength;
+
+    if (BytesWritten == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    *BytesWritten = 0;
+
+    if (Buffer == NULL || Body == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    HeaderLength = TPKT_HEADER_LENGTH + 1 + X224_DATA_LENGTH;
+    if (BodyLength > 0xFFFF - HeaderLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    PacketLength = HeaderLength + BodyLength;
+    if (PacketLength > 0xFFFF)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (BufferLength < PacketLength)
+        return TermSrvRdpBcgrBufferTooSmall;
+
+    Buffer[0] = TPKT_VERSION;
+    Buffer[1] = 0;
+    WriteBe16(&Buffer[2], (USHORT)PacketLength);
+
+    Buffer[4] = X224_DATA_LENGTH;
+    Buffer[5] = X224_DT_TPDU;
+    Buffer[6] = X224_DATA_EOT;
+    memcpy(&Buffer[HeaderLength], Body, BodyLength);
+
+    *BytesWritten = PacketLength;
+    return TermSrvRdpBcgrSuccess;
+}
+
 static BOOL
 FindCookieTerminator(
     _In_reads_bytes_(Length) const UCHAR *Buffer,
@@ -207,44 +299,96 @@ TermSrvRdpBcgrParseMcsConnectInitial(
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL *ConnectInitial)
 {
-    SIZE_T PacketLength;
-    SIZE_T HeaderLength;
-    SIZE_T Offset;
+    TERMSRV_RDPBCGR_RESULT Result;
+    SIZE_T BodyLength;
+    const UCHAR *Body;
 
     if (ConnectInitial == NULL || Buffer == NULL)
         return TermSrvRdpBcgrInvalidHeader;
 
     memset(ConnectInitial, 0, sizeof(*ConnectInitial));
 
-    HeaderLength = TPKT_HEADER_LENGTH + 1 + X224_DATA_LENGTH;
-    if (BufferLength < HeaderLength)
-        return TermSrvRdpBcgrNeedMoreData;
+    Result = ParseMcsDataBody(Buffer, BufferLength, &Body, &BodyLength);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
 
-    if (Buffer[0] != TPKT_VERSION || Buffer[1] != 0)
+    ConnectInitial->Payload = Body;
+    ConnectInitial->PayloadLength = BodyLength;
+    return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsErectDomainRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength)
+{
+    static const UCHAR ExpectedBody[] = { 0x04, 0x01, 0x00, 0x01, 0x00 };
+    TERMSRV_RDPBCGR_RESULT Result;
+    SIZE_T BodyLength;
+    const UCHAR *Body;
+
+    Result = ParseMcsDataBody(Buffer, BufferLength, &Body, &BodyLength);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (BodyLength != sizeof(ExpectedBody))
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (memcmp(Body, ExpectedBody, sizeof(ExpectedBody)) != 0)
+        return TermSrvRdpBcgrUnsupportedPdu;
+
+    return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsAttachUserRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    SIZE_T BodyLength;
+    const UCHAR *Body;
+
+    Result = ParseMcsDataBody(Buffer, BufferLength, &Body, &BodyLength);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (BodyLength != 1)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (Body[0] != 0x28)
+        return TermSrvRdpBcgrUnsupportedPdu;
+
+    return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsChannelJoinRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST *Request)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    SIZE_T BodyLength;
+    const UCHAR *Body;
+
+    if (Request == NULL || Buffer == NULL)
         return TermSrvRdpBcgrInvalidHeader;
 
-    PacketLength = ReadBe16(&Buffer[2]);
-    if (PacketLength < HeaderLength)
+    memset(Request, 0, sizeof(*Request));
+
+    Result = ParseMcsDataBody(Buffer, BufferLength, &Body, &BodyLength);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (BodyLength != 5)
         return TermSrvRdpBcgrInvalidLength;
 
-    if (PacketLength > BufferLength)
-        return TermSrvRdpBcgrNeedMoreData;
-
-    if (PacketLength != BufferLength)
-        return TermSrvRdpBcgrInvalidLength;
-
-    if (Buffer[TPKT_HEADER_LENGTH] != X224_DATA_LENGTH)
-        return TermSrvRdpBcgrInvalidLength;
-
-    Offset = TPKT_HEADER_LENGTH + 1;
-    if (Buffer[Offset] != X224_DT_TPDU ||
-        Buffer[Offset + 1] != X224_DATA_EOT)
-    {
+    if (Body[0] != 0x38)
         return TermSrvRdpBcgrUnsupportedPdu;
-    }
 
-    ConnectInitial->Payload = &Buffer[Offset + X224_DATA_LENGTH];
-    ConnectInitial->PayloadLength = PacketLength - HeaderLength;
+    Request->Initiator = ReadBe16(&Body[1]);
+    Request->ChannelId = ReadBe16(&Body[3]);
     return TermSrvRdpBcgrSuccess;
 }
 
@@ -319,39 +463,67 @@ TermSrvRdpBcgrWriteMcsConnectResponse(
     _In_ SIZE_T PayloadLength,
     _Out_ SIZE_T *BytesWritten)
 {
-    SIZE_T PacketLength;
-    SIZE_T HeaderLength;
+    return WriteMcsDataPdu(Buffer,
+                           BufferLength,
+                           Payload,
+                           PayloadLength,
+                           BytesWritten);
+}
 
-    if (BytesWritten == NULL)
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsAttachUserConfirm(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM *Confirm,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Body[4];
+
+    if (Confirm == NULL)
+    {
+        if (BytesWritten != NULL)
+            *BytesWritten = 0;
         return TermSrvRdpBcgrInvalidHeader;
+    }
 
-    *BytesWritten = 0;
+    Body[0] = 0x2e;
+    Body[1] = 0x00;
+    WriteBe16(&Body[2], Confirm->UserChannelId);
 
-    if (Buffer == NULL || Payload == NULL)
+    return WriteMcsDataPdu(Buffer,
+                           BufferLength,
+                           Body,
+                           sizeof(Body),
+                           BytesWritten);
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsChannelJoinConfirm(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM *Confirm,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Body[8];
+
+    if (Confirm == NULL)
+    {
+        if (BytesWritten != NULL)
+            *BytesWritten = 0;
         return TermSrvRdpBcgrInvalidHeader;
+    }
 
-    HeaderLength = TPKT_HEADER_LENGTH + 1 + X224_DATA_LENGTH;
-    if (PayloadLength > 0xFFFF - HeaderLength)
-        return TermSrvRdpBcgrInvalidLength;
+    Body[0] = 0x3e;
+    Body[1] = 0x00;
+    WriteBe16(&Body[2], Confirm->Initiator);
+    WriteBe16(&Body[4], Confirm->RequestedChannelId);
+    WriteBe16(&Body[6], Confirm->ConfirmedChannelId);
 
-    PacketLength = HeaderLength + PayloadLength;
-    if (PacketLength > 0xFFFF)
-        return TermSrvRdpBcgrInvalidLength;
-
-    if (BufferLength < PacketLength)
-        return TermSrvRdpBcgrBufferTooSmall;
-
-    Buffer[0] = TPKT_VERSION;
-    Buffer[1] = 0;
-    WriteBe16(&Buffer[2], (USHORT)PacketLength);
-
-    Buffer[4] = X224_DATA_LENGTH;
-    Buffer[5] = X224_DT_TPDU;
-    Buffer[6] = X224_DATA_EOT;
-    memcpy(&Buffer[HeaderLength], Payload, PayloadLength);
-
-    *BytesWritten = PacketLength;
-    return TermSrvRdpBcgrSuccess;
+    return WriteMcsDataPdu(Buffer,
+                           BufferLength,
+                           Body,
+                           sizeof(Body),
+                           BytesWritten);
 }
 
 PCSTR
