@@ -87,6 +87,15 @@ typedef struct _TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM
     USHORT ConfirmedChannelId;
 } TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM;
 
+typedef struct _TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD
+{
+    USHORT Initiator;
+    USHORT ChannelId;
+    UCHAR Priority;
+    const UCHAR *Payload;
+    SIZE_T PayloadLength;
+} TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD;
+
 typedef struct _TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD
 {
     USHORT Initiator;
@@ -124,6 +133,12 @@ TermSrvRdpBcgrParseMcsChannelJoinRequest(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST *Request);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsSendDataPayload(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD *SendData);
 
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrParseSecurityExchangePayload(
