@@ -106,6 +106,22 @@ typedef struct _TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD
     SIZE_T PayloadLength;
 } TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD;
 
+#define TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH 8
+#define TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS 31
+
+typedef struct _TERMSRV_RDPBCGR_STATIC_CHANNEL
+{
+    UCHAR Name[TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH];
+    ULONG Options;
+    SIZE_T Index;
+} TERMSRV_RDPBCGR_STATIC_CHANNEL;
+
+typedef struct _TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST
+{
+    SIZE_T Count;
+    TERMSRV_RDPBCGR_STATIC_CHANNEL Channels[TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS];
+} TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST;
+
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrParseConnectionRequest(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
@@ -151,6 +167,27 @@ TermSrvRdpBcgrParseClientInfoPayload(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *ClientInfo);
+
+/*
+ * Parses a small scaffold static virtual channel list:
+ *   UINT8 count;
+ *   CHANNEL_DEF[count] where each entry is 8 name bytes + UINT32LE options.
+ *
+ * This matches the CS_NET channelDef element shape without claiming to parse
+ * the surrounding GCC user data yet.
+ */
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseStaticChannelList(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList);
+
+BOOL
+TermSrvRdpBcgrFindStaticChannelByName(
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _In_reads_bytes_(NameLength) const CHAR *Name,
+    _In_ SIZE_T NameLength,
+    _Out_ SIZE_T *ChannelIndex);
 
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrWriteConnectionConfirm(
