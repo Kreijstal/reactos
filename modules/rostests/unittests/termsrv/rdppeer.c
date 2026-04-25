@@ -1151,6 +1151,125 @@ TestCliprdrWriteFormatDataResponse(VOID)
        "NULL non-empty cliprdr Format Data Response payload should fail\n");
 }
 
+static VOID
+TestCliprdrDummyBackend(VOID)
+{
+    static const UCHAR TextData[] =
+    {
+        'h', 0x00, 'i', 0x00, 0x00, 0x00
+    };
+    static const UCHAR BinaryData[] =
+    {
+        0xde, 0xad, 0xbe, 0xef
+    };
+    TERMSRV_CLIPRDR_DUMMY_BACKEND Dummy;
+    TERMSRV_CLIPRDR_BACKEND Backend;
+    UCHAR Buffer[sizeof(TextData)];
+    SIZE_T RequiredLength = 0;
+
+    ok(TermSrvCliprdrDummyBackendInit(NULL, &Backend) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr dummy backend state should fail init\n");
+    ok(TermSrvCliprdrDummyBackendInit(&Dummy, NULL) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr backend output should fail init\n");
+
+    ok(TermSrvCliprdrDummyBackendInit(&Dummy, &Backend) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend init failed\n");
+    ok(!Dummy.HasData,
+       "cliprdr dummy backend should start empty\n");
+
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    13,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    &RequiredLength) == TermSrvCliprdrFormatNotAvailable,
+       "Empty cliprdr dummy backend should report missing format\n");
+    ok(RequiredLength == 0,
+       "Missing cliprdr dummy data should require %Iu bytes\n", RequiredLength);
+
+    ok(TermSrvCliprdrBackendSetData(&Backend,
+                                    13,
+                                    TextData,
+                                    sizeof(TextData)) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend text set failed\n");
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    13,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    &RequiredLength) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend exact text query failed\n");
+    ok(RequiredLength == sizeof(TextData),
+       "Unexpected cliprdr dummy text size %Iu\n", RequiredLength);
+    ok(memcmp(Buffer, TextData, sizeof(TextData)) == 0,
+       "Unexpected cliprdr dummy text bytes\n");
+
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    13,
+                                    Buffer,
+                                    sizeof(TextData) - 1,
+                                    &RequiredLength) == TermSrvCliprdrBufferTooSmall,
+       "Short cliprdr dummy backend query should fail\n");
+    ok(RequiredLength == sizeof(TextData),
+       "Short cliprdr dummy query should require %Iu bytes\n", RequiredLength);
+
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    1,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    &RequiredLength) == TermSrvCliprdrFormatNotAvailable,
+       "Different cliprdr dummy format should be missing\n");
+    ok(RequiredLength == 0,
+       "Different cliprdr dummy format should require %Iu bytes\n", RequiredLength);
+
+    ok(TermSrvCliprdrBackendClear(&Backend) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend clear failed\n");
+    ok(!Dummy.HasData,
+       "cliprdr dummy backend should be empty after clear\n");
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    13,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    &RequiredLength) == TermSrvCliprdrFormatNotAvailable,
+       "Cleared cliprdr dummy backend should report missing format\n");
+
+    ok(TermSrvCliprdrBackendSetData(&Backend,
+                                    0xcafe,
+                                    BinaryData,
+                                    sizeof(BinaryData)) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend binary set failed\n");
+    ok(Dummy.FormatId == 0xcafe,
+       "Unexpected cliprdr dummy binary format 0x%lx\n", Dummy.FormatId);
+    ok(Dummy.DataLength == sizeof(BinaryData),
+       "Unexpected cliprdr dummy binary size %Iu\n", Dummy.DataLength);
+
+    ok(TermSrvCliprdrDummyBackendReset(&Dummy) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend reset failed\n");
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    0xcafe,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    &RequiredLength) == TermSrvCliprdrFormatNotAvailable,
+       "Reset cliprdr dummy backend should report missing format\n");
+
+    ok(TermSrvCliprdrBackendSetData(NULL,
+                                    13,
+                                    TextData,
+                                    sizeof(TextData)) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr backend set should fail\n");
+    ok(TermSrvCliprdrBackendSetData(&Backend,
+                                    13,
+                                    NULL,
+                                    sizeof(TextData)) == TermSrvCliprdrInvalidHeader,
+       "NULL non-empty cliprdr backend payload should fail\n");
+    ok(TermSrvCliprdrBackendGetData(&Backend,
+                                    13,
+                                    Buffer,
+                                    sizeof(Buffer),
+                                    NULL) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr backend required length should fail\n");
+    ok(TermSrvCliprdrBackendClear(NULL) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr backend clear should fail\n");
+}
+
 START_TEST(RdpPeer)
 {
     TestFullHandshake();
@@ -1182,4 +1301,5 @@ START_TEST(RdpPeer)
     TestCliprdrWriteFormatListResponse();
     TestCliprdrParseFormatDataRequest();
     TestCliprdrWriteFormatDataResponse();
+    TestCliprdrDummyBackend();
 }
