@@ -834,6 +834,104 @@ TestRdpBcgrParseMcsSendDataPayload(VOID)
 }
 
 static VOID
+TestRdpBcgrWriteMcsSendDataPayload(VOID)
+{
+    static const UCHAR Payload[] = { 0xaa, 0xbb, 0xcc };
+    static const UCHAR ExpectedSendData[] =
+    {
+        0x03, 0x00, 0x00, 0x12,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xef, 0x70, 0x00, 0x03,
+        0xaa, 0xbb, 0xcc
+    };
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD Parsed;
+    UCHAR Buffer[sizeof(ExpectedSendData)];
+    SIZE_T BytesWritten = 0;
+
+    SendData.Initiator = 1001;
+    SendData.ChannelId = 1007;
+    SendData.Priority = 0x70;
+    SendData.Payload = Payload;
+    SendData.PayloadLength = sizeof(Payload);
+
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(Buffer,
+                                             sizeof(Buffer),
+                                             &SendData,
+                                             &BytesWritten) == TermSrvRdpBcgrSuccess,
+       "MCS Send Data payload serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedSendData),
+       "Unexpected serialized MCS Send Data payload size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedSendData, sizeof(ExpectedSendData)) == 0,
+       "Serialized MCS Send Data payload did not match expected bytes\n");
+
+    ok(TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
+                                             BytesWritten,
+                                             &Parsed) == TermSrvRdpBcgrSuccess,
+       "Serialized MCS Send Data payload did not parse\n");
+    ok(Parsed.Initiator == SendData.Initiator,
+       "Round-tripped MCS Send Data initiator mismatch %u\n", Parsed.Initiator);
+    ok(Parsed.ChannelId == SendData.ChannelId,
+       "Round-tripped MCS Send Data channel mismatch %u\n", Parsed.ChannelId);
+    ok(Parsed.Priority == SendData.Priority,
+       "Round-tripped MCS Send Data priority mismatch 0x%x\n", Parsed.Priority);
+    ok(Parsed.PayloadLength == SendData.PayloadLength,
+       "Round-tripped MCS Send Data payload length mismatch %Iu\n", Parsed.PayloadLength);
+    ok(memcmp(Parsed.Payload, Payload, sizeof(Payload)) == 0,
+       "Round-tripped MCS Send Data payload mismatch\n");
+
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(Buffer,
+                                             sizeof(ExpectedSendData) - 1,
+                                             &SendData,
+                                             &BytesWritten) == TermSrvRdpBcgrBufferTooSmall,
+       "Short MCS Send Data output buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short MCS Send Data write returned %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(NULL,
+                                             sizeof(Buffer),
+                                             &SendData,
+                                             &BytesWritten) == TermSrvRdpBcgrInvalidHeader,
+       "NULL MCS Send Data output buffer should fail\n");
+    ok(BytesWritten == 0,
+       "NULL MCS Send Data output buffer wrote %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(Buffer,
+                                             sizeof(Buffer),
+                                             NULL,
+                                             &BytesWritten) == TermSrvRdpBcgrInvalidHeader,
+       "NULL MCS Send Data descriptor should fail\n");
+    ok(BytesWritten == 0,
+       "NULL MCS Send Data descriptor wrote %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(Buffer,
+                                             sizeof(Buffer),
+                                             &SendData,
+                                             NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL MCS Send Data byte count should fail\n");
+
+    SendData.Payload = NULL;
+    SendData.PayloadLength = sizeof(Payload);
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(Buffer,
+                                             sizeof(Buffer),
+                                             &SendData,
+                                             &BytesWritten) == TermSrvRdpBcgrInvalidHeader,
+       "NULL non-empty MCS Send Data payload should fail\n");
+    ok(BytesWritten == 0,
+       "NULL non-empty MCS Send Data payload wrote %Iu bytes\n", BytesWritten);
+
+    SendData.Payload = Payload;
+    SendData.PayloadLength = 0xFFFF;
+    ok(TermSrvRdpBcgrWriteMcsSendDataPayload(Buffer,
+                                             sizeof(Buffer),
+                                             &SendData,
+                                             &BytesWritten) == TermSrvRdpBcgrInvalidLength,
+       "Oversized MCS Send Data payload should fail\n");
+    ok(BytesWritten == 0,
+       "Oversized MCS Send Data payload wrote %Iu bytes\n", BytesWritten);
+}
+
+static VOID
 TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 {
     static const UCHAR ExpectedConfirm[] =
@@ -1618,6 +1716,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseSecurityExchangePayload();
     TestRdpBcgrParseClientInfoPayload();
     TestRdpBcgrParseMcsSendDataPayload();
+    TestRdpBcgrWriteMcsSendDataPayload();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
     TestCliprdrStaticChannelName();
     TestCliprdrChannelDescriptor();
