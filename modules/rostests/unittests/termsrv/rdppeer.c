@@ -361,6 +361,67 @@ TestRdpBcgrParseConnectionRequest(VOID)
 }
 
 static VOID
+TestRdpBcgrParseMcsConnectInitial(VOID)
+{
+    static const UCHAR ConnectInitial[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x7f, 0x65, 0x03, 0x01, 0x02
+    };
+    static const UCHAR BadTpkt[] =
+    {
+        0x02, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x7f, 0x65, 0x03, 0x01, 0x02
+    };
+    static const UCHAR BadX224Type[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xe0, 0x80,
+        0x7f, 0x65, 0x03, 0x01, 0x02
+    };
+    static const UCHAR LengthMismatch[] =
+    {
+        0x03, 0x00, 0x00, 0x0b,
+        0x02, 0xf0, 0x80,
+        0x7f, 0x65, 0x03, 0x01, 0x02
+    };
+    TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL Parsed;
+
+    ok(TermSrvRdpBcgrParseMcsConnectInitial(ConnectInitial,
+                                            sizeof(ConnectInitial),
+                                            &Parsed) == TermSrvRdpBcgrSuccess,
+       "MCS Connect Initial parse failed\n");
+    ok(Parsed.Payload == &ConnectInitial[7],
+       "Unexpected MCS payload pointer\n");
+    ok(Parsed.PayloadLength == 5,
+       "Unexpected MCS payload length %Iu\n", Parsed.PayloadLength);
+    ok(memcmp(Parsed.Payload, "\x7f\x65\x03\x01\x02", Parsed.PayloadLength) == 0,
+       "Unexpected opaque MCS payload bytes\n");
+
+    ok(TermSrvRdpBcgrParseMcsConnectInitial(ConnectInitial,
+                                            6,
+                                            &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short MCS Connect Initial should request more data\n");
+
+    ok(TermSrvRdpBcgrParseMcsConnectInitial(BadTpkt,
+                                            sizeof(BadTpkt),
+                                            &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "Bad TPKT header should fail\n");
+
+    ok(TermSrvRdpBcgrParseMcsConnectInitial(BadX224Type,
+                                            sizeof(BadX224Type),
+                                            &Parsed) == TermSrvRdpBcgrUnsupportedPdu,
+       "Bad X.224 type should fail\n");
+
+    ok(TermSrvRdpBcgrParseMcsConnectInitial(LengthMismatch,
+                                            sizeof(LengthMismatch),
+                                            &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Mismatched TPKT length should fail\n");
+}
+
+static VOID
 TestRdpBcgrWriteConnectionConfirm(VOID)
 {
     static const UCHAR ExpectedConfirm[] =
@@ -411,5 +472,6 @@ START_TEST(RdpPeer)
     TestGraphicsOutput();
     TestUnknownPacket();
     TestRdpBcgrParseConnectionRequest();
+    TestRdpBcgrParseMcsConnectInitial();
     TestRdpBcgrWriteConnectionConfirm();
 }
