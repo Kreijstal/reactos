@@ -29,8 +29,53 @@ typedef enum _TERMSRV_CLIPRDR_RESULT
     TermSrvCliprdrBufferTooSmall,
     TermSrvCliprdrInvalidHeader,
     TermSrvCliprdrInvalidLength,
-    TermSrvCliprdrUnsupportedPdu
+    TermSrvCliprdrUnsupportedPdu,
+    TermSrvCliprdrFormatNotAvailable
 } TERMSRV_CLIPRDR_RESULT;
+
+struct _TERMSRV_CLIPRDR_BACKEND;
+
+typedef TERMSRV_CLIPRDR_RESULT
+(*TERMSRV_CLIPRDR_BACKEND_SET_DATA)(
+    _Inout_ struct _TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength);
+
+typedef TERMSRV_CLIPRDR_RESULT
+(*TERMSRV_CLIPRDR_BACKEND_GET_DATA)(
+    _Inout_ struct _TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _Out_writes_bytes_to_opt_(BufferLength, *RequiredLength) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *RequiredLength);
+
+typedef TERMSRV_CLIPRDR_RESULT
+(*TERMSRV_CLIPRDR_BACKEND_CLEAR)(
+    _Inout_ struct _TERMSRV_CLIPRDR_BACKEND *Backend);
+
+typedef struct _TERMSRV_CLIPRDR_BACKEND_OPS
+{
+    TERMSRV_CLIPRDR_BACKEND_SET_DATA SetData;
+    TERMSRV_CLIPRDR_BACKEND_GET_DATA GetData;
+    TERMSRV_CLIPRDR_BACKEND_CLEAR Clear;
+} TERMSRV_CLIPRDR_BACKEND_OPS;
+
+typedef struct _TERMSRV_CLIPRDR_BACKEND
+{
+    const TERMSRV_CLIPRDR_BACKEND_OPS *Ops;
+    VOID *Context;
+} TERMSRV_CLIPRDR_BACKEND;
+
+#define TERMSRV_CLIPRDR_DUMMY_MAX_DATA_LENGTH    4096
+
+typedef struct _TERMSRV_CLIPRDR_DUMMY_BACKEND
+{
+    BOOL HasData;
+    ULONG FormatId;
+    SIZE_T DataLength;
+    UCHAR Data[TERMSRV_CLIPRDR_DUMMY_MAX_DATA_LENGTH];
+} TERMSRV_CLIPRDR_DUMMY_BACKEND;
 
 typedef struct _TERMSRV_CLIPRDR_PDU
 {
@@ -68,6 +113,34 @@ BOOL
 TermSrvCliprdrIsChannelId(
     _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
     _In_ USHORT ChannelId);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrBackendSetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrBackendGetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _Out_writes_bytes_to_opt_(BufferLength, *RequiredLength) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *RequiredLength);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrBackendClear(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrDummyBackendInit(
+    _Out_ TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy,
+    _Out_ TERMSRV_CLIPRDR_BACKEND *Backend);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrDummyBackendReset(
+    _Out_ TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy);
 
 TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrParsePdu(
