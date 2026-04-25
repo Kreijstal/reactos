@@ -968,6 +968,148 @@ TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 }
 
 static VOID
+TestRdpBcgrParseStaticChannelList(VOID)
+{
+    static const UCHAR ChannelList[] =
+    {
+        0x03,
+        'r', 'd', 'p', 'd', 'r', 0x00, 0x00, 0x00,
+        0x04, 0x03, 0x02, 0x01,
+        'c', 'l', 'i', 'p', 'r', 'd', 'r', 0x00,
+        0xd4, 0xc3, 0xb2, 0xa1,
+        'd', 'r', 'd', 'y', 'n', 'v', 'c', 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR NoCliprdrList[] =
+    {
+        0x01,
+        'r', 'd', 'p', 'd', 'r', 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR ShortList[] =
+    {
+        0x02,
+        'r', 'd', 'p', 'd', 'r', 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR TooManyChannels[] =
+    {
+        TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS + 1
+    };
+    static const UCHAR TrailingBytes[] =
+    {
+        0x01,
+        'r', 'd', 'p', 'd', 'r', 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0xff
+    };
+    TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST Parsed;
+    SIZE_T ChannelIndex = 99;
+
+    ok(TermSrvRdpBcgrParseStaticChannelList(ChannelList,
+                                            sizeof(ChannelList),
+                                            &Parsed) == TermSrvRdpBcgrSuccess,
+       "Static channel list parse failed\n");
+    ok(Parsed.Count == 3,
+       "Unexpected static channel count %Iu\n", Parsed.Count);
+    ok(Parsed.Channels[0].Index == 0,
+       "Unexpected first static channel index %Iu\n", Parsed.Channels[0].Index);
+    ok(memcmp(Parsed.Channels[0].Name, "rdpdr", 5) == 0,
+       "Unexpected first static channel name\n");
+    ok(Parsed.Channels[0].Name[5] == 0 &&
+       Parsed.Channels[0].Name[6] == 0 &&
+       Parsed.Channels[0].Name[7] == 0,
+       "First static channel name was not NUL padded\n");
+    ok(Parsed.Channels[0].Options == 0x01020304,
+       "Unexpected first static channel options 0x%lx\n", Parsed.Channels[0].Options);
+    ok(Parsed.Channels[1].Index == 1,
+       "Unexpected cliprdr static channel index %Iu\n", Parsed.Channels[1].Index);
+    ok(memcmp(Parsed.Channels[1].Name, "cliprdr", 7) == 0,
+       "Unexpected cliprdr static channel name\n");
+    ok(Parsed.Channels[1].Name[7] == 0,
+       "cliprdr static channel name was not NUL padded\n");
+    ok(Parsed.Channels[1].Options == 0xa1b2c3d4,
+       "Unexpected cliprdr static channel options 0x%lx\n", Parsed.Channels[1].Options);
+
+    ok(TermSrvRdpBcgrFindStaticChannelByName(&Parsed,
+                                             "rdpdr",
+                                             5,
+                                             &ChannelIndex),
+       "Generic static channel lookup did not find rdpdr\n");
+    ok(ChannelIndex == 0,
+       "Generic static channel lookup returned index %Iu\n", ChannelIndex);
+
+    ChannelIndex = 99;
+    ok(TermSrvCliprdrFindStaticChannel(&Parsed, &ChannelIndex),
+       "cliprdr static channel lookup failed\n");
+    ok(ChannelIndex == 1,
+       "cliprdr static channel lookup returned index %Iu\n", ChannelIndex);
+
+    ok(!TermSrvRdpBcgrFindStaticChannelByName(&Parsed,
+                                              "rdpsnd",
+                                              6,
+                                              &ChannelIndex),
+       "Generic static channel lookup unexpectedly found rdpsnd\n");
+
+    ok(TermSrvRdpBcgrParseStaticChannelList(NoCliprdrList,
+                                            sizeof(NoCliprdrList),
+                                            &Parsed) == TermSrvRdpBcgrSuccess,
+       "Static channel list without cliprdr did not parse\n");
+    ok(!TermSrvCliprdrFindStaticChannel(&Parsed, &ChannelIndex),
+       "cliprdr lookup unexpectedly matched a list without cliprdr\n");
+
+    ok(TermSrvRdpBcgrParseStaticChannelList(NULL,
+                                            sizeof(ChannelList),
+                                            &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "NULL static channel list buffer should fail\n");
+    ok(TermSrvRdpBcgrParseStaticChannelList(ChannelList,
+                                            sizeof(ChannelList),
+                                            NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL static channel list output should fail\n");
+    ok(TermSrvRdpBcgrParseStaticChannelList(ChannelList,
+                                            0,
+                                            &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Empty static channel list buffer should request more data\n");
+    ok(TermSrvRdpBcgrParseStaticChannelList(ShortList,
+                                            sizeof(ShortList),
+                                            &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short static channel list should request more data\n");
+    ok(TermSrvRdpBcgrParseStaticChannelList(TooManyChannels,
+                                            sizeof(TooManyChannels),
+                                            &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Too many static channels should fail\n");
+    ok(TermSrvRdpBcgrParseStaticChannelList(TrailingBytes,
+                                            sizeof(TrailingBytes),
+                                            &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Static channel list with trailing bytes should fail\n");
+
+    ok(!TermSrvRdpBcgrFindStaticChannelByName(NULL,
+                                              "rdpdr",
+                                              5,
+                                              &ChannelIndex),
+       "NULL static channel list lookup should fail\n");
+    ok(!TermSrvRdpBcgrFindStaticChannelByName(&Parsed,
+                                              NULL,
+                                              5,
+                                              &ChannelIndex),
+       "NULL static channel name lookup should fail\n");
+    ok(!TermSrvRdpBcgrFindStaticChannelByName(&Parsed,
+                                              "toolongname",
+                                              11,
+                                              &ChannelIndex),
+       "Overlong static channel name lookup should fail\n");
+    ok(!TermSrvRdpBcgrFindStaticChannelByName(&Parsed,
+                                              "rdpdr",
+                                              5,
+                                              NULL),
+       "NULL static channel lookup output should fail\n");
+    ok(!TermSrvCliprdrFindStaticChannel(NULL, &ChannelIndex),
+       "NULL cliprdr static channel list lookup should fail\n");
+    ok(!TermSrvCliprdrFindStaticChannel(&Parsed, NULL),
+       "NULL cliprdr static channel lookup output should fail\n");
+}
+
+static VOID
 TestCliprdrStaticChannelName(VOID)
 {
     static const CHAR FixedName[TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH] =
@@ -1718,6 +1860,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseMcsSendDataPayload();
     TestRdpBcgrWriteMcsSendDataPayload();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
+    TestRdpBcgrParseStaticChannelList();
     TestCliprdrStaticChannelName();
     TestCliprdrChannelDescriptor();
     TestCliprdrParsePdu();

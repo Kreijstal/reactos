@@ -108,6 +108,35 @@ TermSrvCliprdrIsStaticChannelName(
     return TRUE;
 }
 
+BOOL
+TermSrvCliprdrFindStaticChannel(
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _Out_ SIZE_T *ChannelIndex)
+{
+    SIZE_T Index;
+
+    if (ChannelIndex == NULL)
+        return FALSE;
+
+    *ChannelIndex = 0;
+
+    if (ChannelList == NULL)
+        return FALSE;
+
+    for (Index = 0; Index < ChannelList->Count; Index++)
+    {
+        if (TermSrvCliprdrIsStaticChannelName(
+                (const CHAR *)ChannelList->Channels[Index].Name,
+                TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH))
+        {
+            *ChannelIndex = ChannelList->Channels[Index].Index;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrAssignChannelId(
     _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
