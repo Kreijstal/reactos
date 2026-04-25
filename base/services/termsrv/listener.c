@@ -15,6 +15,8 @@
 #define TERMSRV_LISTEN_PORT 3389
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 250
+#define TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID 1001
+#define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 4
 
 static const UCHAR TermSrvMcsConnectResponsePayload[] =
 {
@@ -160,6 +162,127 @@ TermSrvSendPacket(
     return TRUE;
 }
 
+static BOOL
+TermSrvReceiveTpkt(
+    _In_ SOCKET Client,
+    _In_ HANDLE StopEvent,
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ INT BufferLength,
+    _Out_ INT *Received)
+{
+    *Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+    if (*Received <= 0)
+    {
+        TermSrvLogFailure("expected packet was not received");
+        return FALSE;
+    }
+
+    if (TermSrvIdentifyPacketPlaceholder(Buffer, *Received) != TermSrvPacketTpkt)
+    {
+        TermSrvLogFailure("expected TPKT packet");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvRunEarlyMcsPhase(
+    _In_ SOCKET Client,
+    _In_ HANDLE StopEvent,
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ INT BufferLength,
+    _Out_writes_bytes_(ReplyLength) UCHAR *Reply,
+    _In_ SIZE_T ReplyLength)
+{
+    INT Received;
+    SIZE_T BytesWritten;
+    ULONG JoinCount;
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM AttachUserConfirm;
+
+    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+        return FALSE;
+
+    Result = TermSrvRdpBcgrParseMcsErectDomainRequest(Buffer, (SIZE_T)Received);
+    if (Result != TermSrvRdpBcgrSuccess)
+    {
+        TermSrvLogRdpBcgrFailure("MCS erect domain request parse", Result);
+        return FALSE;
+    }
+
+    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+        return FALSE;
+
+    Result = TermSrvRdpBcgrParseMcsAttachUserRequest(Buffer, (SIZE_T)Received);
+    if (Result != TermSrvRdpBcgrSuccess)
+    {
+        TermSrvLogRdpBcgrFailure("MCS attach user request parse", Result);
+        return FALSE;
+    }
+
+    ZeroMemory(&AttachUserConfirm, sizeof(AttachUserConfirm));
+    AttachUserConfirm.UserChannelId = TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID;
+
+    Result = TermSrvRdpBcgrWriteMcsAttachUserConfirm(Reply,
+                                                     ReplyLength,
+                                                     &AttachUserConfirm,
+                                                     &BytesWritten);
+    if (Result != TermSrvRdpBcgrSuccess)
+    {
+        TermSrvLogRdpBcgrFailure("MCS attach user confirm write", Result);
+        return FALSE;
+    }
+
+    if (!TermSrvSendPacket(Client, Reply, BytesWritten))
+        return FALSE;
+
+    for (JoinCount = 0; JoinCount < TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS; JoinCount++)
+    {
+        TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST ChannelJoinRequest;
+        TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM ChannelJoinConfirm;
+
+        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+        if (Received <= 0)
+            break;
+
+        if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
+        {
+            TermSrvLogFailure("expected TPKT packet");
+            return FALSE;
+        }
+
+        Result = TermSrvRdpBcgrParseMcsChannelJoinRequest(Buffer,
+                                                         (SIZE_T)Received,
+                                                         &ChannelJoinRequest);
+        if (Result != TermSrvRdpBcgrSuccess)
+        {
+            TermSrvLogRdpBcgrFailure("MCS channel join request parse", Result);
+            return FALSE;
+        }
+
+        ZeroMemory(&ChannelJoinConfirm, sizeof(ChannelJoinConfirm));
+        ChannelJoinConfirm.Initiator = ChannelJoinRequest.Initiator;
+        ChannelJoinConfirm.RequestedChannelId = ChannelJoinRequest.ChannelId;
+        ChannelJoinConfirm.ConfirmedChannelId = ChannelJoinRequest.ChannelId;
+
+        Result = TermSrvRdpBcgrWriteMcsChannelJoinConfirm(Reply,
+                                                          ReplyLength,
+                                                          &ChannelJoinConfirm,
+                                                          &BytesWritten);
+        if (Result != TermSrvRdpBcgrSuccess)
+        {
+            TermSrvLogRdpBcgrFailure("MCS channel join confirm write", Result);
+            return FALSE;
+        }
+
+        if (!TermSrvSendPacket(Client, Reply, BytesWritten))
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
 static VOID
 TermSrvHandleClient(
     _In_ SOCKET Client,
@@ -230,6 +353,16 @@ TermSrvHandleClient(
 
                 if (!TermSrvSendPacket(Client, Reply, ReplyLength))
                     goto Cleanup;
+
+                if (!TermSrvRunEarlyMcsPhase(Client,
+                                             StopEvent,
+                                             Buffer,
+                                             sizeof(Buffer),
+                                             Reply,
+                                             sizeof(Reply)))
+                {
+                    goto Cleanup;
+                }
             }
         }
     }
