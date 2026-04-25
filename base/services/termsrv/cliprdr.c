@@ -133,6 +133,178 @@ TermSrvCliprdrIsChannelId(
 }
 
 static TERMSRV_CLIPRDR_RESULT
+DummyBackendSetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength)
+{
+    TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy;
+
+    if (Backend == NULL || Backend->Context == NULL ||
+        (DataLength != 0 && Data == NULL))
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (DataLength > TERMSRV_CLIPRDR_DUMMY_MAX_DATA_LENGTH)
+        return TermSrvCliprdrBufferTooSmall;
+
+    Dummy = (TERMSRV_CLIPRDR_DUMMY_BACKEND *)Backend->Context;
+    Dummy->HasData = TRUE;
+    Dummy->FormatId = FormatId;
+    Dummy->DataLength = DataLength;
+
+    if (DataLength != 0)
+        memcpy(Dummy->Data, Data, DataLength);
+
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
+DummyBackendGetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _Out_writes_bytes_to_opt_(BufferLength, *RequiredLength) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *RequiredLength)
+{
+    TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy;
+
+    if (RequiredLength == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    *RequiredLength = 0;
+
+    if (Backend == NULL || Backend->Context == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    Dummy = (TERMSRV_CLIPRDR_DUMMY_BACKEND *)Backend->Context;
+    if (!Dummy->HasData || Dummy->FormatId != FormatId)
+        return TermSrvCliprdrFormatNotAvailable;
+
+    *RequiredLength = Dummy->DataLength;
+
+    if (Dummy->DataLength != 0 && Buffer == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (BufferLength < Dummy->DataLength)
+        return TermSrvCliprdrBufferTooSmall;
+
+    if (Dummy->DataLength != 0)
+        memcpy(Buffer, Dummy->Data, Dummy->DataLength);
+
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
+DummyBackendClear(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    if (Backend == NULL || Backend->Context == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    return TermSrvCliprdrDummyBackendReset(
+        (TERMSRV_CLIPRDR_DUMMY_BACKEND *)Backend->Context);
+}
+
+static const TERMSRV_CLIPRDR_BACKEND_OPS DummyBackendOps =
+{
+    DummyBackendSetData,
+    DummyBackendGetData,
+    DummyBackendClear
+};
+
+static BOOL
+IsValidBackend(
+    _In_ const TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    return Backend != NULL &&
+           Backend->Ops != NULL &&
+           Backend->Context != NULL;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrBackendSetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength)
+{
+    if (!IsValidBackend(Backend) || Backend->Ops->SetData == NULL ||
+        (DataLength != 0 && Data == NULL))
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    return Backend->Ops->SetData(Backend, FormatId, Data, DataLength);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrBackendGetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _Out_writes_bytes_to_opt_(BufferLength, *RequiredLength) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *RequiredLength)
+{
+    if (RequiredLength == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    *RequiredLength = 0;
+
+    if (!IsValidBackend(Backend) || Backend->Ops->GetData == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    return Backend->Ops->GetData(Backend,
+                                 FormatId,
+                                 Buffer,
+                                 BufferLength,
+                                 RequiredLength);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrBackendClear(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    if (!IsValidBackend(Backend) || Backend->Ops->Clear == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    return Backend->Ops->Clear(Backend);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrDummyBackendInit(
+    _Out_ TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy,
+    _Out_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    TERMSRV_CLIPRDR_RESULT Result;
+
+    if (Dummy == NULL || Backend == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    Result = TermSrvCliprdrDummyBackendReset(Dummy);
+    if (Result != TermSrvCliprdrSuccess)
+        return Result;
+
+    Backend->Ops = &DummyBackendOps;
+    Backend->Context = Dummy;
+
+    return TermSrvCliprdrSuccess;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrDummyBackendReset(
+    _Out_ TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy)
+{
+    if (Dummy == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    memset(Dummy, 0, sizeof(*Dummy));
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
 WritePdu(
     _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
