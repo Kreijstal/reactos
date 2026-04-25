@@ -396,24 +396,21 @@ TermSrvRdpBcgrParseMcsChannelJoinRequest(
     return TermSrvRdpBcgrSuccess;
 }
 
-static TERMSRV_RDPBCGR_RESULT
-ParseOpaqueSecurityPayload(
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsSendDataPayload(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
-    _In_ ULONG ExpectedFlags,
-    _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *Packet)
+    _Out_ TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD *SendData)
 {
     TERMSRV_RDPBCGR_RESULT Result;
     SIZE_T BodyLength;
     SIZE_T PayloadLength;
     const UCHAR *Body;
-    const UCHAR *Payload;
-    ULONG Flags;
 
-    if (Packet == NULL || Buffer == NULL)
+    if (SendData == NULL || Buffer == NULL)
         return TermSrvRdpBcgrInvalidHeader;
 
-    memset(Packet, 0, sizeof(*Packet));
+    memset(SendData, 0, sizeof(*SendData));
 
     Result = ParseMcsDataBody(Buffer, BufferLength, &Body, &BodyLength);
     if (Result != TermSrvRdpBcgrSuccess)
@@ -426,23 +423,52 @@ ParseOpaqueSecurityPayload(
         return TermSrvRdpBcgrUnsupportedPdu;
 
     PayloadLength = ReadBe16(&Body[6]);
-    if (PayloadLength < SECURITY_FLAGS_LENGTH)
-        return TermSrvRdpBcgrInvalidLength;
-
     if (PayloadLength != BodyLength - 8)
         return TermSrvRdpBcgrInvalidLength;
 
-    Payload = &Body[8];
-    Flags = ReadLe32(Payload);
+    SendData->Initiator = ReadBe16(&Body[1]);
+    SendData->ChannelId = ReadBe16(&Body[3]);
+    SendData->Priority = Body[5];
+    SendData->Payload = &Body[8];
+    SendData->PayloadLength = PayloadLength;
+    return TermSrvRdpBcgrSuccess;
+}
+
+static TERMSRV_RDPBCGR_RESULT
+ParseOpaqueSecurityPayload(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ ULONG ExpectedFlags,
+    _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *Packet)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    ULONG Flags;
+
+    if (Packet == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(Packet, 0, sizeof(*Packet));
+
+    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
+                                                   BufferLength,
+                                                   &SendData);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (SendData.PayloadLength < SECURITY_FLAGS_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    Flags = ReadLe32(SendData.Payload);
     if (Flags != ExpectedFlags)
         return TermSrvRdpBcgrUnsupportedPdu;
 
-    Packet->Initiator = ReadBe16(&Body[1]);
-    Packet->ChannelId = ReadBe16(&Body[3]);
-    Packet->Priority = Body[5];
+    Packet->Initiator = SendData.Initiator;
+    Packet->ChannelId = SendData.ChannelId;
+    Packet->Priority = SendData.Priority;
     Packet->Flags = Flags;
-    Packet->Payload = &Payload[SECURITY_FLAGS_LENGTH];
-    Packet->PayloadLength = PayloadLength - SECURITY_FLAGS_LENGTH;
+    Packet->Payload = &SendData.Payload[SECURITY_FLAGS_LENGTH];
+    Packet->PayloadLength = SendData.PayloadLength - SECURITY_FLAGS_LENGTH;
     return TermSrvRdpBcgrSuccess;
 }
 
