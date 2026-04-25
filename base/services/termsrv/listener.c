@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <stdio.h>
 
+#include "cliprdr.h"
 #include "listener.h"
 #include "rdpbcgr.h"
 
@@ -16,6 +17,8 @@
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 250
 #define TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID 1001
+#define TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID 1007
+#define TERMSRV_CLIPRDR_SCAFFOLD_FORMAT_ID 13
 #define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 4
 
 static const UCHAR TermSrvMcsConnectResponsePayload[] =
@@ -97,6 +100,39 @@ TermSrvLogRdpBcgrFailure(
               "%s failed: %s",
               Operation,
               TermSrvRdpBcgrResultName(Result));
+    Message[sizeof(Message) - 1] = '\0';
+    TermSrvLogFailure(Message);
+}
+
+static PCSTR
+TermSrvCliprdrResultName(
+    _In_ TERMSRV_CLIPRDR_RESULT Result)
+{
+    switch (Result)
+    {
+        case TermSrvCliprdrSuccess: return "Success";
+        case TermSrvCliprdrNeedMoreData: return "NeedMoreData";
+        case TermSrvCliprdrBufferTooSmall: return "BufferTooSmall";
+        case TermSrvCliprdrInvalidHeader: return "InvalidHeader";
+        case TermSrvCliprdrInvalidLength: return "InvalidLength";
+        case TermSrvCliprdrUnsupportedPdu: return "UnsupportedPdu";
+        case TermSrvCliprdrFormatNotAvailable: return "FormatNotAvailable";
+        default: return "Unknown";
+    }
+}
+
+static VOID
+TermSrvLogCliprdrFailure(
+    _In_z_ const CHAR *Operation,
+    _In_ TERMSRV_CLIPRDR_RESULT Result)
+{
+    CHAR Message[128];
+
+    _snprintf(Message,
+              sizeof(Message),
+              "%s failed: %s",
+              Operation,
+              TermSrvCliprdrResultName(Result));
     Message[sizeof(Message) - 1] = '\0';
     TermSrvLogFailure(Message);
 }
@@ -187,11 +223,98 @@ TermSrvReceiveTpkt(
 }
 
 static BOOL
-TermSrvConsumeOptionalClientInfoPacket(
+TermSrvInitializeCliprdrScaffold(
+    _Out_ TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _Out_ TERMSRV_CLIPRDR_DUMMY_BACKEND *Dummy,
+    _Out_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    static const UCHAR ClipboardText[] =
+    {
+        'R', 0, 'e', 0, 'a', 0, 'c', 0, 't', 0, 'O', 0, 'S', 0, ' ', 0,
+        't', 0, 'e', 0, 'r', 0, 'm', 0, 's', 0, 'r', 0, 'v', 0, 0, 0
+    };
+    TERMSRV_CLIPRDR_RESULT ClipResult;
+
+    ClipResult = TermSrvCliprdrChannelInit(Channel);
+    if (ClipResult != TermSrvCliprdrSuccess)
+    {
+        TermSrvLogCliprdrFailure("cliprdr channel init", ClipResult);
+        return FALSE;
+    }
+
+    ClipResult = TermSrvCliprdrDummyBackendInit(Dummy, Backend);
+    if (ClipResult != TermSrvCliprdrSuccess)
+    {
+        TermSrvLogCliprdrFailure("cliprdr dummy backend init", ClipResult);
+        return FALSE;
+    }
+
+    ClipResult = TermSrvCliprdrBackendSetData(Backend,
+                                              TERMSRV_CLIPRDR_SCAFFOLD_FORMAT_ID,
+                                              ClipboardText,
+                                              sizeof(ClipboardText));
+    if (ClipResult != TermSrvCliprdrSuccess)
+    {
+        TermSrvLogCliprdrFailure("cliprdr dummy backend data set", ClipResult);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvRouteOptionalCliprdrPacket(
+    _In_ SOCKET Client,
+    _In_reads_bytes_(Received) const UCHAR *Buffer,
+    _In_ INT Received,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    UCHAR CliprdrReply[512];
+    SIZE_T BytesWritten;
+    TERMSRV_CLIPRDR_RESULT ClipResult;
+
+    if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
+    {
+        TermSrvLogFailure("expected TPKT packet");
+        return FALSE;
+    }
+
+    ClipResult = TermSrvCliprdrRouteMcsSendData(Buffer,
+                                                (SIZE_T)Received,
+                                                Channel,
+                                                Backend,
+                                                CliprdrReply,
+                                                sizeof(CliprdrReply),
+                                                &BytesWritten);
+    if (BytesWritten != 0)
+    {
+        /*
+         * This listener scaffold does not have an MCS Send Data writer yet, so
+         * return the cliprdr virtual-channel payload directly for now.
+         */
+        if (!TermSrvSendPacket(Client, CliprdrReply, BytesWritten))
+            return FALSE;
+    }
+
+    if (ClipResult == TermSrvCliprdrSuccess ||
+        ClipResult == TermSrvCliprdrFormatNotAvailable)
+    {
+        return TRUE;
+    }
+
+    TermSrvLogCliprdrFailure("cliprdr MCS Send Data route", ClipResult);
+    return FALSE;
+}
+
+static BOOL
+TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
-    _In_ INT BufferLength)
+    _In_ INT BufferLength,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
 {
     INT Received;
     TERMSRV_RDPBCGR_RESULT Result;
@@ -210,13 +333,18 @@ TermSrvConsumeOptionalClientInfoPacket(
     Result = TermSrvRdpBcgrParseClientInfoPayload(Buffer,
                                                  (SIZE_T)Received,
                                                  &ClientInfo);
-    if (Result != TermSrvRdpBcgrSuccess)
+    if (Result == TermSrvRdpBcgrSuccess)
     {
-        TermSrvLogRdpBcgrFailure("client info parse", Result);
-        return FALSE;
+        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+        if (Received <= 0)
+            return TRUE;
     }
 
-    return TRUE;
+    return TermSrvRouteOptionalCliprdrPacket(Client,
+                                            Buffer,
+                                            Received,
+                                            Channel,
+                                            Backend);
 }
 
 static BOOL
@@ -234,7 +362,17 @@ TermSrvRunEarlyMcsPhase(
     TERMSRV_RDPBCGR_RESULT Result;
     TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM AttachUserConfirm;
     TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD SecurityExchange;
+    TERMSRV_CLIPRDR_BACKEND CliprdrBackend;
+    TERMSRV_CLIPRDR_CHANNEL CliprdrChannel;
+    TERMSRV_CLIPRDR_DUMMY_BACKEND CliprdrDummy;
     BOOL HaveSecurityExchange;
+
+    if (!TermSrvInitializeCliprdrScaffold(&CliprdrChannel,
+                                          &CliprdrDummy,
+                                          &CliprdrBackend))
+    {
+        return FALSE;
+    }
 
     if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
         return FALSE;
@@ -312,6 +450,19 @@ TermSrvRunEarlyMcsPhase(
         ChannelJoinConfirm.RequestedChannelId = ChannelJoinRequest.ChannelId;
         ChannelJoinConfirm.ConfirmedChannelId = ChannelJoinRequest.ChannelId;
 
+        if (ChannelJoinRequest.ChannelId == TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID)
+        {
+            TERMSRV_CLIPRDR_RESULT ClipResult;
+
+            ClipResult = TermSrvCliprdrAssignChannelId(&CliprdrChannel,
+                                                       ChannelJoinRequest.ChannelId);
+            if (ClipResult != TermSrvCliprdrSuccess)
+            {
+                TermSrvLogCliprdrFailure("cliprdr scaffold channel assign", ClipResult);
+                return FALSE;
+            }
+        }
+
         Result = TermSrvRdpBcgrWriteMcsChannelJoinConfirm(Reply,
                                                           ReplyLength,
                                                           &ChannelJoinConfirm,
@@ -348,8 +499,15 @@ TermSrvRunEarlyMcsPhase(
         }
     }
 
-    if (!TermSrvConsumeOptionalClientInfoPacket(Client, StopEvent, Buffer, BufferLength))
+    if (!TermSrvConsumeOptionalClientInfoAndCliprdrPacket(Client,
+                                                         StopEvent,
+                                                         Buffer,
+                                                         BufferLength,
+                                                         &CliprdrChannel,
+                                                         &CliprdrBackend))
+    {
         return FALSE;
+    }
 
     return TRUE;
 }
