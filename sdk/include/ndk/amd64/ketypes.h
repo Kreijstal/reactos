@@ -1060,16 +1060,25 @@ typedef struct _KEXCEPTION_FRAME
     M128A Xmm14;
     M128A Xmm15;
     ULONG64 TrapFrame;
-    /* Win8 dropped the dedicated CallbackStack slot from KEXCEPTION_FRAME,
-     * but the user-mode callout path still needs to save the previous
-     * KTHREAD::CallbackStack across the call. Keep the slot at every
-     * NTDDI level - this is private to KiUserModeCallout / NtCallbackReturn
-     * (KCALLOUT_FRAME is not part of any public driver ABI). */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+    /* Pre-Win8 KEXCEPTION_FRAME has its own CallbackStack slot here. */
     ULONG64 CallbackStack;
+#endif
     ULONG64 OutputBuffer;
     ULONG64 OutputLength;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    ULONG64 Spare2;
+    /* Win8 dropped the dedicated CallbackStack slot and added Spare2 in
+     * its place (relative to the field count). The user-mode callout
+     * path still needs to save the previous KTHREAD::CallbackStack
+     * across the call, so alias CallbackStack onto Spare2 - same offset,
+     * two names. This keeps the field count even (40 ULONG64s) so the
+     * struct ends with Return at offset KEXCEPTION_FRAME_LENGTH - 8,
+     * which the RESTORE_EXCEPTION_STATE asm macro relies on. */
+    union
+    {
+        ULONG64 Spare2;
+        ULONG64 CallbackStack;
+    };
 #endif
     ULONG64 MxCsr;
     ULONG64 Rbp;
