@@ -53,7 +53,7 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
     OldStackBase = CurrentThread->StackBase;
 
     /* Get the size of the current stack */
-    StackSize = (ULONG_PTR)CurrentThread->StackBase - CurrentThread->StackLimit;
+    StackSize = (ULONG_PTR)CurrentThread->StackBase - (ULONG_PTR)CurrentThread->StackLimit;
     ASSERT(StackSize <= (ULONG_PTR)StackBase - (ULONG_PTR)StackLimit);
 
     /* Copy the current stack contents to the new stack */
@@ -83,7 +83,13 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
     /* Set the new stack limits */
     CurrentThread->StackBase = StackBase;
     CurrentThread->StackLimit = (ULONG_PTR)StackLimit;
+#if (NTDDI_VERSION < NTDDI_WIN8)
     CurrentThread->LargeStack = TRUE;
+#else
+    /* TODO: KTHREAD::LargeStack was removed at Win8; the matching
+     * tracking needs a Win8 home before MmDeleteKernelStack can free
+     * the right amount on teardown. */
+#endif
 
     /* Adjust RspBase in the PCR */
     Pcr = (PKIPCR)KeGetPcr();

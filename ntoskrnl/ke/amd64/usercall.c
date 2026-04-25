@@ -141,6 +141,14 @@ FASTCALL
 KiUserModeCallout(
     _Out_ PKCALLOUT_FRAME CalloutFrame)
 {
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* TODO: Win8 removed KTHREAD::CallbackStack and the matching
+     * KEXCEPTION_FRAME save slots; the user-mode callout path needs
+     * to be rewired to the Win8 callback dispatcher before this can
+     * run again. */
+    UNREFERENCED_PARAMETER(CalloutFrame);
+    return STATUS_NOT_IMPLEMENTED;
+#else
     PKTHREAD CurrentThread;
     PKTRAP_FRAME TrapFrame;
     KTRAP_FRAME CallbackTrapFrame;
@@ -204,6 +212,7 @@ KiUserModeCallout(
 
     /* Exit to user-mode */
     KiUserCallbackExit(&CallbackTrapFrame);
+#endif /* NTDDI_VERSION < NTDDI_WIN8 */
 }
 
 VOID
@@ -334,6 +343,14 @@ NtCallbackReturn(
     _In_ ULONG ResultLength,
     _In_ NTSTATUS CallbackStatus)
 {
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* TODO: paired with KiUserModeCallout, this needs the Win8 callback
+     * dispatcher rewire before it can run. */
+    UNREFERENCED_PARAMETER(Result);
+    UNREFERENCED_PARAMETER(ResultLength);
+    UNREFERENCED_PARAMETER(CallbackStatus);
+    return STATUS_NO_CALLBACK_ACTIVE;
+#else
     PKTHREAD CurrentThread;
     PKCALLOUT_FRAME CalloutFrame;
     PKTRAP_FRAME CallbackTrapFrame, TrapFrame;
@@ -400,5 +417,6 @@ NtCallbackReturn(
 
     /* Now switch back to the old stack */
     KiCallbackReturn(CalloutFrame, CallbackStatus);
+#endif /* NTDDI_VERSION < NTDDI_WIN8 */
 }
 
