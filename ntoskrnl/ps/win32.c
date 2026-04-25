@@ -64,7 +64,13 @@ PsConvertToGuiThread(VOID)
     }
 
     /* Check if we don't already have a kernel-mode stack */
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* TODO: Win8 KTHREAD has no LargeStack flag; assume the thread is
+     * not on a large stack yet so a new one is created. */
+    if (TRUE)
+#else
     if (!Thread->Tcb.LargeStack)
+#endif
     {
         /* We don't create one */
         NewStack = (ULONG_PTR)MmCreateKernelStack(TRUE, 0);

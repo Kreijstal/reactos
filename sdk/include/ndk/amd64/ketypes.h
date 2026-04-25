@@ -98,7 +98,8 @@ typedef enum
     CPU_UNKNOWN,
     CPU_AMD,
     CPU_INTEL,
-    CPU_VIA
+    CPU_VIA,
+    CPU_CENTAUR = CPU_VIA
 } CPU_VENDORS;
 
 //

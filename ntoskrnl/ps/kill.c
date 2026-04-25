@@ -186,7 +186,14 @@ PspReapRoutine(IN PVOID Context)
 
             /* Delete this entry's kernel stack */
             MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+                                /* TODO: Win8 KTHREAD has no LargeStack flag;
+                                 * threads using a large kernel stack will leak
+                                 * the extra pages until that storage is found. */
+                                FALSE);
+#else
                                 Thread->Tcb.LargeStack);
+#endif
             Thread->Tcb.InitialStack = NULL;
 
             /* Move to the next entry */
@@ -413,7 +420,12 @@ PspDeleteThread(IN PVOID ObjectBody)
     {
         /* Release it */
         MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+                            /* TODO: see PspReaper for the LargeStack note. */
+                            FALSE);
+#else
                             Thread->Tcb.LargeStack);
+#endif
     }
 
     /* Check if we have a CID Handle */
@@ -528,7 +540,11 @@ PspExitThread(IN NTSTATUS ExitStatus)
     ExWaitForRundownProtectionRelease(&Thread->RundownProtect);
 
     /* Cleanup the power state */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* TODO: per-thread power state was removed from KTHREAD at Win8;
+     * once NtSetThreadExecutionState is reworked onto Power Requests,
+     * route the matching cleanup here. */
+#elif (NTDDI_VERSION >= NTDDI_WIN7)
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.LargeStack);
 #else
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.PowerState);
