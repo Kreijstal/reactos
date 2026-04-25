@@ -181,6 +181,13 @@ TermSrvRdpBcgrWriteMcsChannelJoinConfirm(
     _In_ const TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM *Confirm,
     _Out_ SIZE_T *BytesWritten);
 
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsSendDataPayload(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD *SendData,
+    _Out_ SIZE_T *BytesWritten);
+
 PCSTR
 TermSrvRdpBcgrResultName(
     _In_ TERMSRV_RDPBCGR_RESULT Result);
