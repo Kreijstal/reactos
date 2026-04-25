@@ -63,11 +63,23 @@ typedef struct _TERMSRV_RDPBCGR_CONNECTION_CONFIRM
     TERMSRV_RDPBCGR_NEGOTIATION Negotiation;
 } TERMSRV_RDPBCGR_CONNECTION_CONFIRM;
 
+typedef struct _TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL
+{
+    const UCHAR *Payload;
+    SIZE_T PayloadLength;
+} TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL;
+
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrParseConnectionRequest(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_CONNECTION_REQUEST *Request);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseMcsConnectInitial(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL *ConnectInitial);
 
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrWriteConnectionConfirm(
