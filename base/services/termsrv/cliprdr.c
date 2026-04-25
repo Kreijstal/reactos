@@ -151,6 +151,36 @@ TermSrvCliprdrAssignChannelId(
     return TermSrvCliprdrSuccess;
 }
 
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrAssignFromStaticChannelList(
+    _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _In_ USHORT FirstStaticChannelId)
+{
+    SIZE_T ChannelIndex;
+    SIZE_T ChannelId;
+
+    if (Channel == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    TermSrvCliprdrChannelReset(Channel);
+
+    if (ChannelList == NULL ||
+        FirstStaticChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID)
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (!TermSrvCliprdrFindStaticChannel(ChannelList, &ChannelIndex))
+        return TermSrvCliprdrUnsupportedPdu;
+
+    if (ChannelIndex > (SIZE_T)0xffff - FirstStaticChannelId)
+        return TermSrvCliprdrInvalidLength;
+
+    ChannelId = FirstStaticChannelId + ChannelIndex;
+    return TermSrvCliprdrAssignChannelId(Channel, (USHORT)ChannelId);
+}
+
 BOOL
 TermSrvCliprdrIsChannelId(
     _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
