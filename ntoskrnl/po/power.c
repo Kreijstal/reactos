@@ -1100,7 +1100,15 @@ NtSetThreadExecutionState(IN EXECUTION_STATE esFlags,
     }
 
     /* Save the previous state, always masking in the continous flag */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* TODO: Win8 removed the per-thread LargeStack/PowerState byte from
+     * KTHREAD; Microsoft routes NtSetThreadExecutionState through the
+     * Power Request infrastructure (PoCreateRequestObject etc.). Until
+     * that path is implemented, echo the requested flags as the previous
+     * state without persistence. */
+    PreviousState = esFlags | ES_CONTINUOUS;
+    UNREFERENCED_PARAMETER(Thread);
+#elif (NTDDI_VERSION >= NTDDI_WIN7)
     /* PowerState was renamed to LargeStack at Win7 (same byte overlay) */
     PreviousState = Thread->LargeStack | ES_CONTINUOUS;
     if (esFlags & ES_CONTINUOUS) Thread->LargeStack = (UCHAR)esFlags;
