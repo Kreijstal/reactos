@@ -1210,6 +1210,98 @@ TestCliprdrChannelDescriptor(VOID)
 }
 
 static VOID
+TestCliprdrAssignFromStaticChannelList(VOID)
+{
+    static const UCHAR ChannelList[] =
+    {
+        0x03,
+        'r', 'd', 'p', 'd', 'r', 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        'c', 'l', 'i', 'p', 'r', 'd', 'r', 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        'r', 'd', 'p', 's', 'n', 'd', 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR NoCliprdrList[] =
+    {
+        0x01,
+        'r', 'd', 'p', 'd', 'r', 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST Parsed;
+    TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST NoCliprdr;
+    TERMSRV_CLIPRDR_CHANNEL Channel;
+
+    ok(TermSrvRdpBcgrParseStaticChannelList(ChannelList,
+                                            sizeof(ChannelList),
+                                            &Parsed) == TermSrvRdpBcgrSuccess,
+       "Static channel list parse failed\n");
+    ok(TermSrvRdpBcgrParseStaticChannelList(NoCliprdrList,
+                                            sizeof(NoCliprdrList),
+                                            &NoCliprdr) == TermSrvRdpBcgrSuccess,
+       "Static channel list without cliprdr parse failed\n");
+
+    ok(TermSrvCliprdrChannelInit(&Channel) == TermSrvCliprdrSuccess,
+       "cliprdr channel init failed\n");
+    ok(TermSrvCliprdrAssignFromStaticChannelList(&Channel,
+                                                 &Parsed,
+                                                 1004) == TermSrvCliprdrSuccess,
+       "cliprdr static channel derived assignment failed\n");
+    ok(Channel.Enabled,
+       "cliprdr channel should be enabled after derived assignment\n");
+    ok(Channel.ChannelId == 1005,
+       "Expected derived cliprdr channel id 1005, got %u\n", Channel.ChannelId);
+    ok(TermSrvCliprdrIsChannelId(&Channel, 1005),
+       "Derived cliprdr channel id should match\n");
+
+    ok(TermSrvCliprdrAssignFromStaticChannelList(NULL,
+                                                 &Parsed,
+                                                 1004) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr channel derived assignment should fail\n");
+
+    ok(TermSrvCliprdrAssignChannelId(&Channel, 1007) == TermSrvCliprdrSuccess,
+       "cliprdr channel assignment before NULL list failed\n");
+    ok(TermSrvCliprdrAssignFromStaticChannelList(&Channel,
+                                                 NULL,
+                                                 1004) == TermSrvCliprdrInvalidHeader,
+       "NULL static channel list derived assignment should fail\n");
+    ok(!Channel.Enabled &&
+       Channel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID,
+       "NULL static channel list failure should disable cliprdr channel\n");
+
+    ok(TermSrvCliprdrAssignChannelId(&Channel, 1007) == TermSrvCliprdrSuccess,
+       "cliprdr channel assignment before base validation failed\n");
+    ok(TermSrvCliprdrAssignFromStaticChannelList(&Channel,
+                                                 &Parsed,
+                                                 TERMSRV_CLIPRDR_INVALID_CHANNEL_ID) ==
+       TermSrvCliprdrInvalidHeader,
+       "Invalid first static channel id should fail\n");
+    ok(!Channel.Enabled &&
+       Channel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID,
+       "Invalid first static channel id failure should disable cliprdr channel\n");
+
+    ok(TermSrvCliprdrAssignChannelId(&Channel, 1007) == TermSrvCliprdrSuccess,
+       "cliprdr channel assignment before missing channel failed\n");
+    ok(TermSrvCliprdrAssignFromStaticChannelList(&Channel,
+                                                 &NoCliprdr,
+                                                 1004) == TermSrvCliprdrUnsupportedPdu,
+       "Missing cliprdr static channel should be unsupported\n");
+    ok(!Channel.Enabled &&
+       Channel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID,
+       "Missing cliprdr static channel should disable cliprdr channel\n");
+
+    ok(TermSrvCliprdrAssignChannelId(&Channel, 1007) == TermSrvCliprdrSuccess,
+       "cliprdr channel assignment before overflow failed\n");
+    ok(TermSrvCliprdrAssignFromStaticChannelList(&Channel,
+                                                 &Parsed,
+                                                 0xffff) == TermSrvCliprdrInvalidLength,
+       "Overflowing derived cliprdr channel id should fail\n");
+    ok(!Channel.Enabled &&
+       Channel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID,
+       "Overflowing derived assignment should disable cliprdr channel\n");
+}
+
+static VOID
 TestCliprdrParsePdu(VOID)
 {
     static const UCHAR FormatList[] =
@@ -1863,6 +1955,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseStaticChannelList();
     TestCliprdrStaticChannelName();
     TestCliprdrChannelDescriptor();
+    TestCliprdrAssignFromStaticChannelList();
     TestCliprdrParsePdu();
     TestCliprdrWriteMonitorReady();
     TestCliprdrWriteFormatListResponse();
