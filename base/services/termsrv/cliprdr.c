@@ -55,6 +55,83 @@ IsValidResponseFlags(
            ResponseFlags == TERMSRV_CLIPRDR_CB_RESPONSE_FAIL;
 }
 
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrChannelInit(
+    _Out_ TERMSRV_CLIPRDR_CHANNEL *Channel)
+{
+    return TermSrvCliprdrChannelReset(Channel);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrChannelReset(
+    _Out_ TERMSRV_CLIPRDR_CHANNEL *Channel)
+{
+    if (Channel == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    Channel->Enabled = FALSE;
+    Channel->ChannelId = TERMSRV_CLIPRDR_INVALID_CHANNEL_ID;
+
+    return TermSrvCliprdrSuccess;
+}
+
+BOOL
+TermSrvCliprdrIsStaticChannelName(
+    _In_reads_bytes_(NameLength) const CHAR *Name,
+    _In_ SIZE_T NameLength)
+{
+    SIZE_T Index;
+    static const CHAR CliprdrName[] = TERMSRV_CLIPRDR_CHANNEL_NAME;
+
+    if (Name == NULL)
+        return FALSE;
+
+    if (NameLength < sizeof(CliprdrName) - 1)
+        return FALSE;
+
+    if (memcmp(Name, CliprdrName, sizeof(CliprdrName) - 1) != 0)
+        return FALSE;
+
+    if (NameLength == sizeof(CliprdrName) - 1)
+        return TRUE;
+
+    if (NameLength > TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH)
+        return FALSE;
+
+    for (Index = sizeof(CliprdrName) - 1; Index < NameLength; Index++)
+    {
+        if (Name[Index] != '\0')
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrAssignChannelId(
+    _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ USHORT ChannelId)
+{
+    if (Channel == NULL || ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID)
+        return TermSrvCliprdrInvalidHeader;
+
+    Channel->Enabled = TRUE;
+    Channel->ChannelId = ChannelId;
+
+    return TermSrvCliprdrSuccess;
+}
+
+BOOL
+TermSrvCliprdrIsChannelId(
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ USHORT ChannelId)
+{
+    if (Channel == NULL || ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID)
+        return FALSE;
+
+    return Channel->Enabled && Channel->ChannelId == ChannelId;
+}
+
 static TERMSRV_CLIPRDR_RESULT
 WritePdu(
     _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
