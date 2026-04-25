@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include "rdpbcgr.h"
+
 #include <windef.h>
 
 #define TERMSRV_CLIPRDR_CB_MONITOR_READY          0x0001
@@ -103,6 +105,11 @@ BOOL
 TermSrvCliprdrIsStaticChannelName(
     _In_reads_bytes_(NameLength) const CHAR *Name,
     _In_ SIZE_T NameLength);
+
+BOOL
+TermSrvCliprdrFindStaticChannel(
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _Out_ SIZE_T *ChannelIndex);
 
 TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrAssignChannelId(

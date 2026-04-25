@@ -23,6 +23,8 @@
 #define SECURITY_FLAGS_LENGTH 4
 #define SEC_EXCHANGE_PKT 0x00000001
 #define SEC_INFO_PKT 0x00000040
+#define STATIC_CHANNEL_HEADER_LENGTH 1
+#define STATIC_CHANNEL_DEF_LENGTH (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
 
 static USHORT
 ReadBe16(
@@ -494,6 +496,113 @@ TermSrvRdpBcgrParseClientInfoPayload(
                                       BufferLength,
                                       SEC_INFO_PKT,
                                       ClientInfo);
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseStaticChannelList(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList)
+{
+    SIZE_T Count;
+    SIZE_T ExpectedLength;
+    SIZE_T Offset;
+    SIZE_T Index;
+
+    if (ChannelList == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(ChannelList, 0, sizeof(*ChannelList));
+
+    if (BufferLength < STATIC_CHANNEL_HEADER_LENGTH)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    Count = Buffer[0];
+    if (Count > TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS)
+        return TermSrvRdpBcgrInvalidLength;
+
+    ExpectedLength = STATIC_CHANNEL_HEADER_LENGTH + Count * STATIC_CHANNEL_DEF_LENGTH;
+    if (BufferLength < ExpectedLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (BufferLength != ExpectedLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    ChannelList->Count = Count;
+    Offset = STATIC_CHANNEL_HEADER_LENGTH;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        memcpy(ChannelList->Channels[Index].Name,
+               &Buffer[Offset],
+               TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH);
+        Offset += TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH;
+
+        ChannelList->Channels[Index].Options = ReadLe32(&Buffer[Offset]);
+        ChannelList->Channels[Index].Index = Index;
+        Offset += 4;
+    }
+
+    return TermSrvRdpBcgrSuccess;
+}
+
+static BOOL
+StaticChannelNameEquals(
+    _In_reads_bytes_(TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH) const UCHAR *ChannelName,
+    _In_reads_bytes_(NameLength) const CHAR *Name,
+    _In_ SIZE_T NameLength)
+{
+    SIZE_T Index;
+
+    if (ChannelName == NULL || Name == NULL ||
+        NameLength > TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH)
+    {
+        return FALSE;
+    }
+
+    if (memcmp(ChannelName, Name, NameLength) != 0)
+        return FALSE;
+
+    for (Index = NameLength;
+         Index < TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH;
+         Index++)
+    {
+        if (ChannelName[Index] != '\0')
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+BOOL
+TermSrvRdpBcgrFindStaticChannelByName(
+    _In_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _In_reads_bytes_(NameLength) const CHAR *Name,
+    _In_ SIZE_T NameLength,
+    _Out_ SIZE_T *ChannelIndex)
+{
+    SIZE_T Index;
+
+    if (ChannelIndex == NULL)
+        return FALSE;
+
+    *ChannelIndex = 0;
+
+    if (ChannelList == NULL || Name == NULL)
+        return FALSE;
+
+    for (Index = 0; Index < ChannelList->Count; Index++)
+    {
+        if (StaticChannelNameEquals(ChannelList->Channels[Index].Name,
+                                    Name,
+                                    NameLength))
+        {
+            *ChannelIndex = ChannelList->Channels[Index].Index;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
 
 TERMSRV_RDPBCGR_RESULT
