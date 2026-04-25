@@ -59,10 +59,6 @@ CdQueryFsAttributeInfo (
     _Inout_ PULONG Length
     );
 
-#ifdef __REACTOS__
-#define PFILE_FS_SECTOR_SIZE_INFORMATION PVOID
-#endif
-
 NTSTATUS
 CdQueryFsSectorSizeInfo (
     _In_ PIRP_CONTEXT IrpContext,

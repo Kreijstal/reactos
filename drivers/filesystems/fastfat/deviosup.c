@@ -185,7 +185,7 @@ FatSingleNonAlignedSync (
     FsRtlUpdateDiskCounters( ((IsAWrite) ? 0       : (Count) ),         \
                              ((IsAWrite) ? (Count) : 0) )
 #else
-#define FatUpdateIOCountersPCW(IsAWrite,Count)
+#define FatUpdateIOCountersPCW(IsAWrite,Count) ((void)(IsAWrite), (void)(Count))
 #endif
 
 #ifdef ALLOC_PRAGMA
@@ -267,9 +267,7 @@ Return Value:
     ULONG BufferOffset;
     PDEVICE_OBJECT DeviceObject;
 
-#ifndef __REACTOS__
     BOOLEAN IsAWrite = FALSE;
-#endif
 
     DebugTrace(+1, Dbg, "FatPagingFileIo\n", 0);
     DebugTrace( 0, Dbg, "Irp = %p\n", Irp );
@@ -287,9 +285,7 @@ Return Value:
 
     Vbo = IrpSp->Parameters.Read.ByteOffset.LowPart;
     ByteCount = IrpSp->Parameters.Read.Length;
-#ifndef __REACTOS__
     IsAWrite = (IrpSp->MajorFunction == IRP_MJ_WRITE);
-#endif
 
     MustSucceed = FatLookupMcbEntry( Fcb->Vcb, &Fcb->Mcb,
                                      Vbo,
@@ -1683,10 +1679,8 @@ Return Value:
     PMDL Mdl;
     BOOLEAN Wait;
     PFAT_IO_CONTEXT Context;
-#ifndef __REACTOS__
     BOOLEAN IsAWrite = FALSE;
     ULONG Length = 0;
-#endif
 
     ULONG UnwindRunCount = 0;
 
@@ -1726,10 +1720,8 @@ Return Value:
     Context->MasterIrp = MasterIrp;
 
     IrpSp = IoGetCurrentIrpStackLocation( MasterIrp );
-#ifndef __REACTOS__
     IsAWrite = (IrpSp->MajorFunction == IRP_MJ_WRITE);
     Length = IrpSp->Parameters.Read.Length;
-#endif
 
     _SEH2_TRY {
 
@@ -2027,9 +2019,7 @@ Return Value:
 {
     PIO_STACK_LOCATION IrpSp;
     PFAT_IO_CONTEXT Context;
-#ifndef __REACTOS__
     BOOLEAN IsAWrite = FALSE;
-#endif
 
     PAGED_CODE();
 
@@ -2078,9 +2068,7 @@ Return Value:
     IrpSp->Parameters.Read.Length = ByteCount;
     IrpSp->Parameters.Read.ByteOffset.QuadPart = Lbo;
 
-#ifndef __REACTOS__
     IsAWrite = (IrpSp->MajorFunction == IRP_MJ_WRITE);
-#endif
 
     //
     //  If this Irp is the result of a WriteThough operation,
@@ -2214,9 +2202,7 @@ Return Value:
 
     PMDL Mdl;
     PMDL SavedMdl;
-#ifndef __REACTOS__
     BOOLEAN IsAWrite = FALSE;
-#endif
 
     PAGED_CODE();
 
@@ -2293,9 +2279,7 @@ Return Value:
     IrpSp->Parameters.Read.Length = ByteCount;
     IrpSp->Parameters.Read.ByteOffset.QuadPart = Lbo;
 
-#ifndef __REACTOS__
     IsAWrite = (IrpSp->MajorFunction == IRP_MJ_WRITE);
-#endif
 
     //
     //  If this I/O originating during FatVerifyVolume, bypass the

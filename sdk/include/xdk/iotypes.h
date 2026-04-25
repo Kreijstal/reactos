@@ -1411,6 +1411,14 @@ typedef enum _FSINFOCLASS {
   FileFsObjectIdInformation,
   FileFsDriverPathInformation,
   FileFsVolumeFlagsInformation,
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+  FileFsSectorSizeInformation,
+  FileFsDataCopyInformation,
+#endif
+#if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
+  FileFsMetadataSizeInformation,
+  FileFsFullSizeInformationEx,
+#endif
   FileFsMaximumInformation
 } FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
 
@@ -3412,6 +3420,7 @@ $if (_WDMDDK_)
 #define FILE_ATTRIBUTE_ENCRYPTED          0x00004000
 #define FILE_ATTRIBUTE_INTEGRITY_STREAM   0x00008000
 #define FILE_ATTRIBUTE_VIRTUAL            0x00010000
+#define FILE_ATTRIBUTE_NO_SCRUB_DATA      0x00020000
 
 #define FILE_ATTRIBUTE_VALID_FLAGS        0x00007fb7
 #define FILE_ATTRIBUTE_VALID_SET_FLAGS    0x000031a7
@@ -4439,6 +4448,11 @@ typedef enum _CONFIGURATION_TYPE {
 #define IRP_MN_UNLOCK_ALL_BY_KEY          0x04
 
 #define IRP_MN_FLUSH_AND_PURGE          0x01
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+#define IRP_MN_FLUSH_DATA_ONLY          0x02
+#define IRP_MN_FLUSH_NO_SYNC            0x03
+#define IRP_MN_FLUSH_AND_PURGE_NO_SYNC  0x04
+#endif
 
 #define IRP_MN_NORMAL                     0x00
 #define IRP_MN_DPC                        0x01
@@ -6044,6 +6058,26 @@ typedef struct _FILE_FS_VOLUME_FLAGS_INFORMATION {
   ULONG Flags;
 } FILE_FS_VOLUME_FLAGS_INFORMATION, *PFILE_FS_VOLUME_FLAGS_INFORMATION;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+typedef struct _FILE_FS_SECTOR_SIZE_INFORMATION {
+  ULONG LogicalBytesPerSector;
+  ULONG PhysicalBytesPerSectorForAtomicity;
+  ULONG PhysicalBytesPerSectorForPerformance;
+  ULONG FileSystemEffectivePhysicalBytesPerSectorForAtomicity;
+  ULONG Flags;
+  ULONG ByteOffsetForSectorAlignment;
+  ULONG ByteOffsetForPartitionAlignment;
+} FILE_FS_SECTOR_SIZE_INFORMATION, *PFILE_FS_SECTOR_SIZE_INFORMATION;
+
+#define SSINFO_FLAGS_ALIGNED_DEVICE              0x00000001
+#define SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE 0x00000002
+#define SSINFO_FLAGS_NO_SEEK_PENALTY             0x00000004
+#define SSINFO_FLAGS_TRIM_ENABLED                0x00000008
+#define SSINFO_FLAGS_BYTE_ADDRESSABLE            0x00000010
+
+#define SSINFO_OFFSET_UNKNOWN                    0xFFFFFFFF
+#endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
+
 #define FILE_VC_QUOTA_NONE              0x00000000
 #define FILE_VC_QUOTA_TRACK             0x00000001
 #define FILE_VC_QUOTA_ENFORCE           0x00000002
@@ -6240,6 +6274,13 @@ typedef struct _CSV_NAMESPACE_INFO {
 #define FSCTL_WRITE_USN_REASON              CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 180, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_CSV_CONTROL                   CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 181, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define FSCTL_GET_REFS_VOLUME_DATA          CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 182, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _SET_PURGE_FAILURE_MODE_INPUT {
+  ULONG Flags;
+} SET_PURGE_FAILURE_MODE_INPUT, *PSET_PURGE_FAILURE_MODE_INPUT;
+
+#define SET_PURGE_FAILURE_MODE_ENABLED  0x00000001
+#define SET_PURGE_FAILURE_MODE_DISABLED 0x00000002
 
 #endif
 
