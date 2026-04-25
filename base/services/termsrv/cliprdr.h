@@ -191,3 +191,18 @@ TermSrvCliprdrHandlePdu(
     _Out_writes_bytes_to_(OutputLength, *BytesWritten) UCHAR *Output,
     _In_ SIZE_T OutputLength,
     _Out_ SIZE_T *BytesWritten);
+
+/*
+ * Consumes one complete scaffold MCS Send Data packet for the assigned
+ * cliprdr static virtual channel and writes at most one cliprdr response PDU.
+ * Non-cliprdr channel packets write zero bytes and return UnsupportedPdu.
+ */
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrRouteMcsSendData(
+    _In_reads_bytes_(InputLength) const UCHAR *Input,
+    _In_ SIZE_T InputLength,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _Out_writes_bytes_to_(OutputLength, *BytesWritten) UCHAR *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten);
