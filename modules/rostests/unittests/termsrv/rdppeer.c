@@ -5,6 +5,7 @@
  */
 
 #include <apitest.h>
+#include "cliprdr.h"
 #include "rdpbcgr.h"
 #include "termsrv.h"
 
@@ -818,6 +819,238 @@ TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
        "Short MCS Channel Join Confirm write returned %Iu bytes\n", BytesWritten);
 }
 
+static VOID
+TestCliprdrParsePdu(VOID)
+{
+    static const UCHAR FormatList[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x11, 0x22, 0x33
+    };
+    static const UCHAR ShortHeader[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x03
+    };
+    static const UCHAR NeedMoreData[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x11, 0x22, 0x33
+    };
+    static const UCHAR LengthMismatch[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0x11, 0x22, 0x33
+    };
+    TERMSRV_CLIPRDR_PDU Pdu;
+
+    ok(TermSrvCliprdrParsePdu(FormatList,
+                              sizeof(FormatList),
+                              &Pdu) == TermSrvCliprdrSuccess,
+       "cliprdr Format List PDU parse failed\n");
+    ok(Pdu.MsgType == TERMSRV_CLIPRDR_CB_FORMAT_LIST,
+       "Unexpected cliprdr msgType 0x%x\n", Pdu.MsgType);
+    ok(Pdu.MsgFlags == 0,
+       "Unexpected cliprdr msgFlags 0x%x\n", Pdu.MsgFlags);
+    ok(Pdu.DataLength == 3,
+       "Unexpected cliprdr dataLen %lu\n", Pdu.DataLength);
+    ok(Pdu.Payload == &FormatList[8],
+       "Unexpected cliprdr payload pointer\n");
+    ok(memcmp(Pdu.Payload, "\x11\x22\x33", Pdu.DataLength) == 0,
+       "Unexpected cliprdr payload bytes\n");
+
+    ok(TermSrvCliprdrParsePdu(NULL,
+                              sizeof(FormatList),
+                              &Pdu) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr buffer should fail\n");
+    ok(TermSrvCliprdrParsePdu(FormatList,
+                              sizeof(FormatList),
+                              NULL) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr output should fail\n");
+    ok(TermSrvCliprdrParsePdu(ShortHeader,
+                              sizeof(ShortHeader),
+                              &Pdu) == TermSrvCliprdrNeedMoreData,
+       "Short cliprdr header should request more data\n");
+    ok(TermSrvCliprdrParsePdu(NeedMoreData,
+                              sizeof(NeedMoreData),
+                              &Pdu) == TermSrvCliprdrNeedMoreData,
+       "Short cliprdr payload should request more data\n");
+    ok(TermSrvCliprdrParsePdu(LengthMismatch,
+                              sizeof(LengthMismatch),
+                              &Pdu) == TermSrvCliprdrInvalidLength,
+       "Trailing cliprdr bytes should fail\n");
+}
+
+static VOID
+TestCliprdrWriteMonitorReady(VOID)
+{
+    static const UCHAR Expected[] =
+    {
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    UCHAR Buffer[16];
+    SIZE_T BytesWritten = 0;
+
+    ok(TermSrvCliprdrWriteMonitorReady(Buffer,
+                                       sizeof(Buffer),
+                                       &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Monitor Ready serialization failed\n");
+    ok(BytesWritten == sizeof(Expected),
+       "Unexpected cliprdr Monitor Ready size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, Expected, sizeof(Expected)) == 0,
+       "Serialized cliprdr Monitor Ready did not match expected bytes\n");
+
+    ok(TermSrvCliprdrWriteMonitorReady(Buffer,
+                                       sizeof(Expected) - 1,
+                                       &BytesWritten) == TermSrvCliprdrBufferTooSmall,
+       "Short cliprdr Monitor Ready buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short cliprdr Monitor Ready write returned %Iu bytes\n", BytesWritten);
+}
+
+static VOID
+TestCliprdrWriteFormatListResponse(VOID)
+{
+    static const UCHAR ExpectedOk[] =
+    {
+        0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR ExpectedFail[] =
+    {
+        0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    UCHAR Buffer[16];
+    SIZE_T BytesWritten = 0;
+
+    ok(TermSrvCliprdrWriteFormatListResponse(Buffer,
+                                             sizeof(Buffer),
+                                             TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                             &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format List Response OK serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedOk),
+       "Unexpected cliprdr Format List Response OK size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedOk, sizeof(ExpectedOk)) == 0,
+       "Serialized cliprdr Format List Response OK did not match expected bytes\n");
+
+    ok(TermSrvCliprdrWriteFormatListResponse(Buffer,
+                                             sizeof(Buffer),
+                                             TERMSRV_CLIPRDR_CB_RESPONSE_FAIL,
+                                             &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format List Response FAIL serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedFail),
+       "Unexpected cliprdr Format List Response FAIL size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedFail, sizeof(ExpectedFail)) == 0,
+       "Serialized cliprdr Format List Response FAIL did not match expected bytes\n");
+
+    ok(TermSrvCliprdrWriteFormatListResponse(Buffer,
+                                             sizeof(Buffer),
+                                             0,
+                                             &BytesWritten) == TermSrvCliprdrInvalidHeader,
+       "Invalid cliprdr Format List Response flags should fail\n");
+}
+
+static VOID
+TestCliprdrParseFormatDataRequest(VOID)
+{
+    static const UCHAR Request[] =
+    {
+        0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00
+    };
+    static const UCHAR BadType[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00
+    };
+    static const UCHAR BadLength[] =
+    {
+        0x04, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00
+    };
+    ULONG FormatId = 0;
+
+    ok(TermSrvCliprdrParseFormatDataRequest(Request,
+                                            sizeof(Request),
+                                            &FormatId) == TermSrvCliprdrSuccess,
+       "cliprdr Format Data Request parse failed\n");
+    ok(FormatId == 13,
+       "Unexpected cliprdr requested format id %lu\n", FormatId);
+
+    ok(TermSrvCliprdrParseFormatDataRequest(Request,
+                                            sizeof(Request),
+                                            NULL) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr Format Data Request output should fail\n");
+    ok(TermSrvCliprdrParseFormatDataRequest(BadType,
+                                            sizeof(BadType),
+                                            &FormatId) == TermSrvCliprdrUnsupportedPdu,
+       "Wrong cliprdr Format Data Request type should fail\n");
+    ok(TermSrvCliprdrParseFormatDataRequest(BadLength,
+                                            sizeof(BadLength),
+                                            &FormatId) == TermSrvCliprdrInvalidLength,
+       "Bad cliprdr Format Data Request length should fail\n");
+}
+
+static VOID
+TestCliprdrWriteFormatDataResponse(VOID)
+{
+    static const UCHAR Data[] =
+    {
+        't', 'e', 'x', 't'
+    };
+    static const UCHAR ExpectedOk[] =
+    {
+        0x05, 0x00, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00,
+        't', 'e', 'x', 't'
+    };
+    static const UCHAR ExpectedFail[] =
+    {
+        0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    UCHAR Buffer[16];
+    SIZE_T BytesWritten = 0;
+
+    ok(TermSrvCliprdrWriteFormatDataResponse(Buffer,
+                                             sizeof(Buffer),
+                                             TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                             Data,
+                                             sizeof(Data),
+                                             &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format Data Response OK serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedOk),
+       "Unexpected cliprdr Format Data Response OK size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedOk, sizeof(ExpectedOk)) == 0,
+       "Serialized cliprdr Format Data Response OK did not match expected bytes\n");
+
+    ok(TermSrvCliprdrWriteFormatDataResponse(Buffer,
+                                             sizeof(Buffer),
+                                             TERMSRV_CLIPRDR_CB_RESPONSE_FAIL,
+                                             NULL,
+                                             0,
+                                             &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format Data Response FAIL serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedFail),
+       "Unexpected cliprdr Format Data Response FAIL size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedFail, sizeof(ExpectedFail)) == 0,
+       "Serialized cliprdr Format Data Response FAIL did not match expected bytes\n");
+
+    ok(TermSrvCliprdrWriteFormatDataResponse(Buffer,
+                                             sizeof(ExpectedOk) - 1,
+                                             TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                             Data,
+                                             sizeof(Data),
+                                             &BytesWritten) == TermSrvCliprdrBufferTooSmall,
+       "Short cliprdr Format Data Response buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short cliprdr Format Data Response write returned %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvCliprdrWriteFormatDataResponse(Buffer,
+                                             sizeof(Buffer),
+                                             TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                             NULL,
+                                             sizeof(Data),
+                                             &BytesWritten) == TermSrvCliprdrInvalidHeader,
+       "NULL non-empty cliprdr Format Data Response payload should fail\n");
+}
+
 START_TEST(RdpPeer)
 {
     TestFullHandshake();
@@ -842,4 +1075,9 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseSecurityExchangePayload();
     TestRdpBcgrParseClientInfoPayload();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
+    TestCliprdrParsePdu();
+    TestCliprdrWriteMonitorReady();
+    TestCliprdrWriteFormatListResponse();
+    TestCliprdrParseFormatDataRequest();
+    TestCliprdrWriteFormatDataResponse();
 }
