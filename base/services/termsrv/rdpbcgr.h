@@ -88,6 +88,14 @@ TermSrvRdpBcgrWriteConnectionConfirm(
     _In_ const TERMSRV_RDPBCGR_CONNECTION_CONFIRM *Confirm,
     _Out_ SIZE_T *BytesWritten);
 
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrWriteMcsConnectResponse(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength,
+    _Out_ SIZE_T *BytesWritten);
+
 PCSTR
 TermSrvRdpBcgrResultName(
     _In_ TERMSRV_RDPBCGR_RESULT Result);
