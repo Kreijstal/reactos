@@ -820,6 +820,106 @@ TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 }
 
 static VOID
+TestCliprdrStaticChannelName(VOID)
+{
+    static const CHAR FixedName[TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH] =
+    {
+        'c', 'l', 'i', 'p', 'r', 'd', 'r', '\0'
+    };
+    static const CHAR WrongName[TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH] =
+    {
+        'r', 'd', 'p', 'd', 'r', '\0', '\0', '\0'
+    };
+    static const CHAR PrefixName[TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH] =
+    {
+        'c', 'l', 'i', 'p', 'r', 'd', 'x', '\0'
+    };
+    static const CHAR UnpaddedName[TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH] =
+    {
+        'c', 'l', 'i', 'p', 'r', 'd', 'r', 'x'
+    };
+
+    ok(TermSrvCliprdrIsStaticChannelName(TERMSRV_CLIPRDR_CHANNEL_NAME,
+                                         sizeof(TERMSRV_CLIPRDR_CHANNEL_NAME) - 1),
+       "NUL-terminated cliprdr name without NUL length should match\n");
+    ok(TermSrvCliprdrIsStaticChannelName(TERMSRV_CLIPRDR_CHANNEL_NAME,
+                                         sizeof(TERMSRV_CLIPRDR_CHANNEL_NAME)),
+       "NUL-terminated cliprdr name should match\n");
+    ok(TermSrvCliprdrIsStaticChannelName(FixedName,
+                                         sizeof(FixedName)),
+       "Fixed-width NUL-padded cliprdr name should match\n");
+    ok(!TermSrvCliprdrIsStaticChannelName(WrongName,
+                                          sizeof(WrongName)),
+       "Wrong static channel name should not match\n");
+    ok(!TermSrvCliprdrIsStaticChannelName(PrefixName,
+                                          sizeof(PrefixName)),
+       "Different static channel prefix should not match\n");
+    ok(!TermSrvCliprdrIsStaticChannelName(UnpaddedName,
+                                          sizeof(UnpaddedName)),
+       "Unpadded fixed-width cliprdr prefix should not match\n");
+    ok(!TermSrvCliprdrIsStaticChannelName(NULL,
+                                          sizeof(FixedName)),
+       "NULL static channel name should not match\n");
+    ok(!TermSrvCliprdrIsStaticChannelName(TERMSRV_CLIPRDR_CHANNEL_NAME,
+                                          3),
+       "Short static channel name should not match\n");
+}
+
+static VOID
+TestCliprdrChannelDescriptor(VOID)
+{
+    TERMSRV_CLIPRDR_CHANNEL Channel;
+
+    Channel.Enabled = TRUE;
+    Channel.ChannelId = 1004;
+
+    ok(TermSrvCliprdrChannelReset(NULL) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr channel reset should fail\n");
+    ok(TermSrvCliprdrAssignChannelId(NULL, 1004) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr channel assignment should fail\n");
+
+    ok(TermSrvCliprdrChannelInit(&Channel) == TermSrvCliprdrSuccess,
+       "cliprdr channel init failed\n");
+    ok(!Channel.Enabled,
+       "cliprdr channel should be disabled after init\n");
+    ok(Channel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID,
+       "Unexpected cliprdr channel id after init %u\n", Channel.ChannelId);
+    ok(!TermSrvCliprdrIsChannelId(&Channel, 1004),
+       "Unassigned cliprdr channel id should not match\n");
+    ok(!TermSrvCliprdrIsChannelId(NULL, 1004),
+       "NULL cliprdr channel descriptor should not match\n");
+
+    ok(TermSrvCliprdrAssignChannelId(&Channel,
+                                     TERMSRV_CLIPRDR_INVALID_CHANNEL_ID) == TermSrvCliprdrInvalidHeader,
+       "Invalid cliprdr channel id assignment should fail\n");
+    ok(!Channel.Enabled,
+       "Failed cliprdr channel assignment should not enable channel\n");
+
+    ok(TermSrvCliprdrAssignChannelId(&Channel, 1007) == TermSrvCliprdrSuccess,
+       "cliprdr channel assignment failed\n");
+    ok(Channel.Enabled,
+       "cliprdr channel should be enabled after assignment\n");
+    ok(Channel.ChannelId == 1007,
+       "Unexpected assigned cliprdr channel id %u\n", Channel.ChannelId);
+    ok(TermSrvCliprdrIsChannelId(&Channel, 1007),
+       "Assigned cliprdr channel id should match\n");
+    ok(!TermSrvCliprdrIsChannelId(&Channel, 1008),
+       "Different cliprdr channel id should not match\n");
+    ok(!TermSrvCliprdrIsChannelId(&Channel,
+                                  TERMSRV_CLIPRDR_INVALID_CHANNEL_ID),
+       "Invalid cliprdr channel id should not match\n");
+
+    ok(TermSrvCliprdrChannelReset(&Channel) == TermSrvCliprdrSuccess,
+       "cliprdr channel reset failed\n");
+    ok(!Channel.Enabled,
+       "cliprdr channel should be disabled after reset\n");
+    ok(Channel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID,
+       "Unexpected cliprdr channel id after reset %u\n", Channel.ChannelId);
+    ok(!TermSrvCliprdrIsChannelId(&Channel, 1007),
+       "Reset cliprdr channel id should not match\n");
+}
+
+static VOID
 TestCliprdrParsePdu(VOID)
 {
     static const UCHAR FormatList[] =
@@ -1075,6 +1175,8 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseSecurityExchangePayload();
     TestRdpBcgrParseClientInfoPayload();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
+    TestCliprdrStaticChannelName();
+    TestCliprdrChannelDescriptor();
     TestCliprdrParsePdu();
     TestCliprdrWriteMonitorReady();
     TestCliprdrWriteFormatListResponse();

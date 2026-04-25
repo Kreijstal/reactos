@@ -18,6 +18,10 @@
 #define TERMSRV_CLIPRDR_CB_RESPONSE_OK           0x0001
 #define TERMSRV_CLIPRDR_CB_RESPONSE_FAIL         0x0002
 
+#define TERMSRV_CLIPRDR_CHANNEL_NAME             "cliprdr"
+#define TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH  8
+#define TERMSRV_CLIPRDR_INVALID_CHANNEL_ID       0
+
 typedef enum _TERMSRV_CLIPRDR_RESULT
 {
     TermSrvCliprdrSuccess = 0,
@@ -35,6 +39,35 @@ typedef struct _TERMSRV_CLIPRDR_PDU
     ULONG DataLength;
     const UCHAR *Payload;
 } TERMSRV_CLIPRDR_PDU;
+
+typedef struct _TERMSRV_CLIPRDR_CHANNEL
+{
+    BOOL Enabled;
+    USHORT ChannelId;
+} TERMSRV_CLIPRDR_CHANNEL;
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrChannelInit(
+    _Out_ TERMSRV_CLIPRDR_CHANNEL *Channel);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrChannelReset(
+    _Out_ TERMSRV_CLIPRDR_CHANNEL *Channel);
+
+BOOL
+TermSrvCliprdrIsStaticChannelName(
+    _In_reads_bytes_(NameLength) const CHAR *Name,
+    _In_ SIZE_T NameLength);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrAssignChannelId(
+    _Inout_ TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ USHORT ChannelId);
+
+BOOL
+TermSrvCliprdrIsChannelId(
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ USHORT ChannelId);
 
 TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrParsePdu(
