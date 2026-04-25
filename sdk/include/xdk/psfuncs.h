@@ -359,4 +359,22 @@ PsSetCreateProcessNotifyRoutineEx(
   IN PCREATE_PROCESS_NOTIFY_ROUTINE_EX NotifyRoutine,
   IN BOOLEAN Remove);
 #endif /* (NTDDI_VERSION >= NTDDI_VISTASP1) */
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+BOOLEAN
+NTAPI
+PsIsDiskCountersEnabled(VOID);
+
+NTKERNELAPI
+VOID
+NTAPI
+PsUpdateDiskCounters(
+  _Inout_ PEPROCESS Process,
+  _In_ ULONGLONG BytesRead,
+  _In_ ULONGLONG BytesWritten,
+  _In_ ULONG ReadOperationCount,
+  _In_ ULONG WriteOperationCount,
+  _In_ ULONG FlushOperationCount);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
 $endif (_NTDDK_)

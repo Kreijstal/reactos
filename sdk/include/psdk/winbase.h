@@ -3007,12 +3007,14 @@ SetFirmwareEnvironmentVariableExA(
 #define SetFirmwareEnvironmentVariableEx SetFirmwareEnvironmentVariableExA
 #endif
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
 _Success_(return)
 WINBASEAPI
 BOOL
 WINAPI
 GetFirmwareType(
     _Out_ PFIRMWARE_TYPE FirmwareType);
+#endif /* (NTDDI_VERSION >= NTDDI_VISTA) — PFIRMWARE_TYPE is only declared at this NTDDI level */
 
 #endif /* _WIN32_WINNT >= 0x0602 */
 
