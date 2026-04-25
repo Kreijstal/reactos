@@ -8655,7 +8655,7 @@ typedef STOR_KSPIN_LOCK *PSTOR_KSPIN_LOCK;
 
 typedef
 ULONG
-sp_DRIVER_INITIALIZE (
+(NTAPI sp_DRIVER_INITIALIZE)(
     _In_ PVOID DriverObject,
     _In_ PVOID RegistryPath
     );
@@ -8663,14 +8663,14 @@ typedef sp_DRIVER_INITIALIZE *sp_PDRIVER_INITIALIZE;
 
 typedef
 BOOLEAN
-HW_INITIALIZE (
+(NTAPI HW_INITIALIZE)(
     _In_ PVOID DeviceExtension
     );
 typedef HW_INITIALIZE *PHW_INITIALIZE;
 
 typedef
 BOOLEAN
-HW_BUILDIO (
+(NTAPI HW_BUILDIO)(
     _In_ PVOID DeviceExtension,
     _In_ PSCSI_REQUEST_BLOCK Srb
     );
@@ -8678,7 +8678,7 @@ typedef HW_BUILDIO *PHW_BUILDIO;
 
 typedef
 BOOLEAN
-HW_STARTIO (
+(NTAPI HW_STARTIO)(
     _In_ PVOID DeviceExtension,
     _In_ PSCSI_REQUEST_BLOCK Srb
     );
@@ -8686,21 +8686,21 @@ typedef HW_STARTIO *PHW_STARTIO;
 
 typedef
 BOOLEAN
-HW_INTERRUPT (
+(NTAPI HW_INTERRUPT)(
     _In_ PVOID DeviceExtension
     );
 typedef HW_INTERRUPT *PHW_INTERRUPT;
 
 typedef
 VOID
-HW_TIMER (
+(NTAPI HW_TIMER)(
     _In_ PVOID DeviceExtension
     );
 typedef HW_TIMER *PHW_TIMER;
 
 typedef
 VOID
-HW_TIMER_EX (
+(NTAPI HW_TIMER_EX)(
     _In_ PVOID DeviceExtension,
     _In_opt_ PVOID Context
     );
@@ -8708,14 +8708,14 @@ typedef HW_TIMER_EX *PHW_TIMER_EX;
 
 typedef
 VOID
-HW_DMA_STARTED (
+(NTAPI HW_DMA_STARTED)(
     _In_ PVOID DeviceExtension
     );
 typedef HW_DMA_STARTED *PHW_DMA_STARTED;
 
 typedef
 ULONG
-HW_FIND_ADAPTER (
+(NTAPI HW_FIND_ADAPTER)(
     _In_ PVOID DeviceExtension,
     _In_ PVOID HwContext,
     _In_ PVOID BusInformation,
@@ -8727,7 +8727,7 @@ typedef HW_FIND_ADAPTER *PHW_FIND_ADAPTER;
 
 typedef
 BOOLEAN
-HW_RESET_BUS (
+(NTAPI HW_RESET_BUS)(
     _In_ PVOID DeviceExtension,
     _In_ ULONG PathId
     );
@@ -8735,7 +8735,7 @@ typedef HW_RESET_BUS *PHW_RESET_BUS;
 
 typedef
 BOOLEAN
-HW_ADAPTER_STATE (
+(NTAPI HW_ADAPTER_STATE)(
     _In_ PVOID DeviceExtension,
     _In_ PVOID Context,
     _In_ BOOLEAN SaveState
@@ -8744,7 +8744,7 @@ typedef HW_ADAPTER_STATE *PHW_ADAPTER_STATE;
 
 typedef
 SCSI_ADAPTER_CONTROL_STATUS
-HW_ADAPTER_CONTROL (
+(NTAPI HW_ADAPTER_CONTROL)(
     _In_ PVOID DeviceExtension,
     _In_ SCSI_ADAPTER_CONTROL_TYPE ControlType,
     _In_ PVOID Parameters
@@ -8753,14 +8753,14 @@ typedef HW_ADAPTER_CONTROL *PHW_ADAPTER_CONTROL;
 
 typedef
 BOOLEAN
-HW_PASSIVE_INITIALIZE_ROUTINE (
+(NTAPI HW_PASSIVE_INITIALIZE_ROUTINE)(
     _In_ PVOID DeviceExtension
     );
 typedef HW_PASSIVE_INITIALIZE_ROUTINE *PHW_PASSIVE_INITIALIZE_ROUTINE;
 
 typedef
 VOID
-HW_DPC_ROUTINE(
+(NTAPI HW_DPC_ROUTINE)(
     _In_ PSTOR_DPC Dpc,
     _In_ PVOID HwDeviceExtension,
     _In_opt_ PVOID SystemArgument1,
@@ -8773,7 +8773,7 @@ typedef HW_DPC_ROUTINE *PHW_DPC_ROUTINE;
 // Callback for system thread work item
 typedef
 VOID
-HW_WORKITEM (
+(NTAPI HW_WORKITEM)(
     _In_ PVOID HwDeviceExtension,
     _In_opt_ PVOID Context,
     _In_ PVOID Worker
@@ -8783,7 +8783,7 @@ typedef HW_WORKITEM *PHW_WORKITEM;
 // Callback for StateChangeDetected notification
 typedef
 VOID
-HW_STATE_CHANGE (
+(NTAPI HW_STATE_CHANGE)(
     _In_ PVOID HwDeviceExtension,
     _In_opt_ PVOID Context,
     _In_ SHORT AddressType,
@@ -8795,7 +8795,7 @@ typedef HW_STATE_CHANGE *PHW_STATE_CHANGE;
 // Callback for indicating if ETW tracing is enabled or disabled
 typedef
 VOID
-HW_TRACING_ENABLED (
+(NTAPI HW_TRACING_ENABLED)(
     _In_ PVOID HwDeviceExtension,
     _In_ BOOLEAN Enabled
     );
@@ -8804,7 +8804,7 @@ typedef HW_TRACING_ENABLED *PHW_TRACING_ENABLED;
 // Callback for unit control
 typedef
 SCSI_UNIT_CONTROL_STATUS
-HW_UNIT_CONTROL (
+(NTAPI HW_UNIT_CONTROL)(
     _In_ PVOID DeviceExtension,
     _In_ SCSI_UNIT_CONTROL_TYPE ControlType,
     _In_ PVOID Parameters
@@ -9293,7 +9293,7 @@ typedef HW_CLEANUP_TRACING *PHW_CLEANUP_TRACING;
 
 typedef
 ULONG
-VIRTUAL_HW_FIND_ADAPTER (
+(NTAPI VIRTUAL_HW_FIND_ADAPTER)(
     _In_ PVOID DeviceExtension,
     _In_ PVOID HwContext,
     _In_ PVOID BusInformation,
