@@ -949,7 +949,13 @@ KeInitThread(IN OUT PKTHREAD Thread,
     TimerWaitBlock->Object = Timer;
     TimerWaitBlock->WaitKey = STATUS_TIMEOUT;
     TimerWaitBlock->WaitType = WaitAny;
+#if (NTDDI_VERSION < NTDDI_WIN8)
+    /* WIN8 dropped KWAIT_BLOCK::NextWaitBlock; the timer block is
+     * traversed via Timer->Header.Inserted plus the well-known slot
+     * Thread->WaitBlock[TIMER_WAIT_BLOCK] rather than a NextWaitBlock
+     * cycle, so this idle-link is no longer required at WIN8+. */
     TimerWaitBlock->NextWaitBlock = NULL;
+#endif
 
     /* Link the two wait lists together */
     TimerWaitBlock->WaitListEntry.Flink = &Timer->Header.WaitListHead;

@@ -63,6 +63,7 @@ KiUnlinkThread(IN PKTHREAD Thread,
 
     /* Remove the Wait Blocks from the list */
     WaitBlock = Thread->WaitBlockList;
+#if (NTDDI_VERSION < NTDDI_WIN8)
     do
     {
         /* Remove it */
@@ -71,13 +72,35 @@ KiUnlinkThread(IN PKTHREAD Thread,
         /* Go to the next one */
         WaitBlock = WaitBlock->NextWaitBlock;
     } while (WaitBlock != Thread->WaitBlockList);
+#else
+    {
+        /* WIN8+: Walk the array by count rather than chasing
+         * NextWaitBlock. The timer block, if armed, is the well-known
+         * Thread->WaitBlock[TIMER_WAIT_BLOCK] slot and is removed
+         * separately below as part of the timer dequeue path. */
+        UCHAR Index;
+        for (Index = 0; Index < Thread->WaitBlockCount; Index++)
+        {
+            RemoveEntryList(&WaitBlock[Index].WaitListEntry);
+        }
+    }
+#endif
 
     /* Remove the thread from the wait list! */
     if (Thread->WaitListEntry.Flink) RemoveEntryList(&Thread->WaitListEntry);
 
     /* Check if there's a Thread Timer */
     Timer = &Thread->Timer;
-    if (Timer->Header.Inserted) KxRemoveTreeTimer(Timer);
+    if (Timer->Header.Inserted)
+    {
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        /* The timer block was inserted into the timer's WaitListHead at
+         * wait setup time and was not part of the array iteration above;
+         * unlink it now before dequeuing the timer. */
+        RemoveEntryList(&Thread->WaitBlock[TIMER_WAIT_BLOCK].WaitListEntry);
+#endif
+        KxRemoveTreeTimer(Timer);
+    }
 
     /* Increment the Queue's active threads */
     if (Thread->Queue) Thread->Queue->CurrentCount++;
@@ -754,6 +777,7 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 if (Index == Count)
                 {
                     /* Loop wait blocks */
+#if (NTDDI_VERSION < NTDDI_WIN8)
                     WaitBlock = WaitBlockArray;
                     do
                     {
@@ -764,6 +788,15 @@ KeWaitForMultipleObjects(IN ULONG Count,
                         /* Go to the next block */
                         WaitBlock = WaitBlock->NextWaitBlock;
                     } while(WaitBlock != WaitBlockArray);
+#else
+                    /* WIN8+: walk by index, no NextWaitBlock chain. */
+                    for (Index = 0; Index < Count; Index++)
+                    {
+                        WaitBlock = &WaitBlockArray[Index];
+                        CurrentObject = (PKMUTANT)WaitBlock->Object;
+                        KiSatisfyObjectWait(CurrentObject, Thread);
+                    }
+#endif
 
                     /* Set the wait status and get out */
                     WaitStatus = (NTSTATUS)Thread->WaitStatus;
@@ -791,11 +824,15 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 /* It didn't, so activate it */
                 Timer->Header.Inserted = TRUE;
 
-                /* Link the wait blocks */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+                /* Splice the timer block into the cyclic NextWaitBlock
+                 * list so it is walked alongside the regular waiters. */
                 WaitBlock->NextWaitBlock = TimerBlock;
+#endif
             }
 
             /* Insert into Object's Wait List*/
+#if (NTDDI_VERSION < NTDDI_WIN8)
             WaitBlock = WaitBlockArray;
             do
             {
@@ -809,6 +846,23 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 /* Move to the next Wait Block */
                 WaitBlock = WaitBlock->NextWaitBlock;
             } while (WaitBlock != WaitBlockArray);
+#else
+            /* WIN8+: walk the array by Count. The timer block is not
+             * part of WaitBlockArray; insert it into Timer->Header's
+             * WaitListHead separately when Timeout is in play. */
+            for (Index = 0; Index < Count; Index++)
+            {
+                WaitBlock = &WaitBlockArray[Index];
+                CurrentObject = WaitBlock->Object;
+                InsertTailList(&CurrentObject->Header.WaitListHead,
+                               &WaitBlock->WaitListEntry);
+            }
+            if (Timeout && Timer->Header.Inserted)
+            {
+                InsertTailList(&Timer->Header.WaitListHead,
+                               &TimerBlock->WaitListEntry);
+            }
+#endif
 
             /* Handle Kernel Queues */
             if (Thread->Queue) KiActivateWaiterQueue(Thread->Queue);
