@@ -823,7 +823,11 @@ KeInitThread(IN OUT PKTHREAD Thread,
     Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
     Thread->ApcStateIndex = OriginalApcEnvironment;
     Thread->ApcQueueable = TRUE;
+#if (NTDDI_VERSION < NTDDI_WIN8)
+    /* Pre-Win8: separate per-thread APC queue lock; Win8+ folded onto
+     * KTHREAD::ThreadLock which the dispatcher already initialises. */
     KeInitializeSpinLock(&Thread->ApcQueueLock);
+#endif
 
     /* Initialize the Suspend APC */
     KeInitializeApc(&Thread->SuspendApc,

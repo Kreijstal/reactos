@@ -530,7 +530,16 @@ KDDEBUGGER_DATA64 KdDebuggerDataBlock =
     0,
     PtrToUL64(RtlpBreakWithStatusInstruction),
     0,
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* Microsoft removed KTHREAD::CallbackStack from amd64 starting at
+     * Win8 (the kernel-to-user-mode callback path was reorganised so
+     * the stack pointer no longer lives directly on KTHREAD). The
+     * symbol layout simply has nothing to expose here; emit 0 so windbg
+     * sees "field not present" rather than a stale offset. */
+    0,
+#else
     FIELD_OFFSET(KTHREAD, CallbackStack),
+#endif
 #if defined(_M_ARM) || defined(_M_AMD64)
     0,
     0,
