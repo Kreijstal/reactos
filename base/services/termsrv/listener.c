@@ -270,9 +270,13 @@ TermSrvRouteOptionalCliprdrPacket(
     _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
     _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
 {
-    UCHAR CliprdrReply[512];
+    UCHAR CliprdrPayload[512];
+    UCHAR WrappedReply[544];
     SIZE_T BytesWritten;
+    SIZE_T WrappedBytesWritten;
     TERMSRV_CLIPRDR_RESULT ClipResult;
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    TERMSRV_RDPBCGR_RESULT Result;
 
     if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
     {
@@ -284,16 +288,31 @@ TermSrvRouteOptionalCliprdrPacket(
                                                 (SIZE_T)Received,
                                                 Channel,
                                                 Backend,
-                                                CliprdrReply,
-                                                sizeof(CliprdrReply),
+                                                CliprdrPayload,
+                                                sizeof(CliprdrPayload),
                                                 &BytesWritten);
     if (BytesWritten != 0)
     {
-        /*
-         * This listener scaffold does not have an MCS Send Data writer yet, so
-         * return the cliprdr virtual-channel payload directly for now.
-         */
-        if (!TermSrvSendPacket(Client, CliprdrReply, BytesWritten))
+        ZeroMemory(&SendData, sizeof(SendData));
+        SendData.Initiator = TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID;
+        SendData.ChannelId = (Channel->ChannelId != TERMSRV_CLIPRDR_INVALID_CHANNEL_ID) ?
+                             Channel->ChannelId :
+                             TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID;
+        SendData.Priority = 0x70;
+        SendData.Payload = CliprdrPayload;
+        SendData.PayloadLength = BytesWritten;
+
+        Result = TermSrvRdpBcgrWriteMcsSendDataPayload(WrappedReply,
+                                                       sizeof(WrappedReply),
+                                                       &SendData,
+                                                       &WrappedBytesWritten);
+        if (Result != TermSrvRdpBcgrSuccess)
+        {
+            TermSrvLogRdpBcgrFailure("cliprdr MCS Send Data write", Result);
+            return FALSE;
+        }
+
+        if (!TermSrvSendPacket(Client, WrappedReply, WrappedBytesWritten))
             return FALSE;
     }
 
