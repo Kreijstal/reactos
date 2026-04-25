@@ -74,10 +74,21 @@ KiUnlinkThread(IN PKTHREAD Thread,
     } while (WaitBlock != Thread->WaitBlockList);
 #else
     {
-        /* WIN8+: Walk the array by count rather than chasing
-         * NextWaitBlock. The timer block, if armed, is the well-known
-         * Thread->WaitBlock[TIMER_WAIT_BLOCK] slot and is removed
-         * separately below as part of the timer dequeue path. */
+        /* WIN8+: walk the array by count rather than chasing
+         * NextWaitBlock. The timer block lives at
+         * Thread->WaitBlock[TIMER_WAIT_BLOCK] outside this array; it is
+         * unlinked unconditionally below.  Pre-Win8 the cyclic
+         * NextWaitBlock walk above already covered it (TimerBlock was
+         * spliced into the cycle whenever Timeout was in play, and was
+         * the cycle root for the delay-only case where
+         * WaitBlockList == TimerBlock).  The timer-tree dequeue
+         * (KxRemoveTreeTimer) is a separate step gated on
+         * Timer->Header.Inserted; the *wait-list* unlink must happen
+         * regardless so a later KiTimerExpiration / KxUnwaitThread on
+         * the same KTIMER does not find a stale TimerBlock and try to
+         * unwait an already-Standby thread (NextThread==Thread + State
+         * transition Standby->DeferredReady would trip the
+         * KiDeferredReadyThread sanity check). */
         UCHAR Index;
         for (Index = 0; Index < Thread->WaitBlockCount; Index++)
         {
@@ -91,14 +102,30 @@ KiUnlinkThread(IN PKTHREAD Thread,
 
     /* Check if there's a Thread Timer */
     Timer = &Thread->Timer;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* WIN8+: unlink the timer block from Timer->Header.WaitListHead
+     * unconditionally, mirroring the pre-Win8 cyclic walk above. The
+     * Kx*ThreadWait macros set Timer->Header.WaitListHead.Flink/Blink
+     * to point at &TimerBlock->WaitListEntry whenever Timeout was
+     * passed (or for the delay-only case), regardless of whether the
+     * timer ended up in the timer table.  KeInitThread initialises
+     * TimerBlock->WaitListEntry.Flink/Blink to &Timer->Header.
+     * WaitListHead so the resulting two-element list is consistent;
+     * RemoveEntryList collapses it back to an empty
+     * &WaitListHead<->&WaitListHead self-loop without touching
+     * TimerBlock's own Flink/Blink, leaving them in their setup-
+     * compatible state for the next wait.  This must not be gated on
+     * Timer->Header.Inserted because KiTimerExpiration sets Inserted
+     * FALSE *before* calling KxUnwaitThread, so the unwait path
+     * would otherwise leave the entry dangling for the next reuse. */
+    if (Timer->Header.WaitListHead.Flink ==
+        &Thread->WaitBlock[TIMER_WAIT_BLOCK].WaitListEntry)
+    {
+        RemoveEntryList(&Thread->WaitBlock[TIMER_WAIT_BLOCK].WaitListEntry);
+    }
+#endif
     if (Timer->Header.Inserted)
     {
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-        /* The timer block was inserted into the timer's WaitListHead at
-         * wait setup time and was not part of the array iteration above;
-         * unlink it now before dequeuing the timer. */
-        RemoveEntryList(&Thread->WaitBlock[TIMER_WAIT_BLOCK].WaitListEntry);
-#endif
         KxRemoveTreeTimer(Timer);
     }
 
