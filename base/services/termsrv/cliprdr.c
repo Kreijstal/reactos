@@ -469,3 +469,80 @@ TermSrvCliprdrWriteFormatDataResponse(
                     DataLength,
                     BytesWritten);
 }
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrHandlePdu(
+    _In_reads_bytes_(InputLength) const UCHAR *Input,
+    _In_ SIZE_T InputLength,
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _Out_writes_bytes_to_(OutputLength, *BytesWritten) UCHAR *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    TERMSRV_CLIPRDR_PDU Pdu;
+    TERMSRV_CLIPRDR_RESULT Result;
+    ULONG FormatId;
+    SIZE_T RequiredLength;
+
+    if (BytesWritten == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    *BytesWritten = 0;
+
+    if (Input == NULL || Output == NULL || !IsValidBackend(Backend))
+        return TermSrvCliprdrInvalidHeader;
+
+    Result = TermSrvCliprdrParsePdu(Input, InputLength, &Pdu);
+    if (Result != TermSrvCliprdrSuccess)
+        return Result;
+
+    switch (Pdu.MsgType)
+    {
+        case TERMSRV_CLIPRDR_CB_FORMAT_LIST:
+            return TermSrvCliprdrWriteFormatListResponse(
+                Output,
+                OutputLength,
+                TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                BytesWritten);
+
+        case TERMSRV_CLIPRDR_CB_FORMAT_DATA_REQUEST:
+            if (Pdu.DataLength != sizeof(ULONG))
+                return TermSrvCliprdrInvalidLength;
+
+            if (OutputLength < CLIPRDR_HEADER_LENGTH)
+                return TermSrvCliprdrBufferTooSmall;
+
+            FormatId = ReadLe32(Pdu.Payload);
+            Result = TermSrvCliprdrBackendGetData(Backend,
+                                                  FormatId,
+                                                  &Output[CLIPRDR_HEADER_LENGTH],
+                                                  OutputLength - CLIPRDR_HEADER_LENGTH,
+                                                  &RequiredLength);
+            if (Result == TermSrvCliprdrFormatNotAvailable)
+            {
+                Result = TermSrvCliprdrWriteFormatDataResponse(
+                    Output,
+                    OutputLength,
+                    TERMSRV_CLIPRDR_CB_RESPONSE_FAIL,
+                    NULL,
+                    0,
+                    BytesWritten);
+                if (Result == TermSrvCliprdrSuccess)
+                    return TermSrvCliprdrFormatNotAvailable;
+
+                return Result;
+            }
+
+            if (Result != TermSrvCliprdrSuccess)
+                return Result;
+
+            WriteLe16(&Output[0], TERMSRV_CLIPRDR_CB_FORMAT_DATA_RESPONSE);
+            WriteLe16(&Output[2], TERMSRV_CLIPRDR_CB_RESPONSE_OK);
+            WriteLe32(&Output[4], (ULONG)RequiredLength);
+            *BytesWritten = CLIPRDR_HEADER_LENGTH + RequiredLength;
+            return TermSrvCliprdrSuccess;
+
+        default:
+            return TermSrvCliprdrUnsupportedPdu;
+    }
+}

@@ -175,3 +175,19 @@ TermSrvCliprdrWriteFormatDataResponse(
     _In_reads_bytes_(DataLength) const UCHAR *Data,
     _In_ SIZE_T DataLength,
     _Out_ SIZE_T *BytesWritten);
+
+/*
+ * Consumes one complete cliprdr PDU payload and writes at most one response PDU.
+ * Unsupported PDUs write zero bytes and return TermSrvCliprdrUnsupportedPdu.
+ * Missing requested clipboard data writes a CB_FORMAT_DATA_RESPONSE FAIL PDU
+ * and returns TermSrvCliprdrFormatNotAvailable.
+ * Output buffer failures write zero bytes and return TermSrvCliprdrBufferTooSmall.
+ */
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrHandlePdu(
+    _In_reads_bytes_(InputLength) const UCHAR *Input,
+    _In_ SIZE_T InputLength,
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _Out_writes_bytes_to_(OutputLength, *BytesWritten) UCHAR *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten);
