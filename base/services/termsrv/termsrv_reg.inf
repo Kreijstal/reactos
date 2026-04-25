@@ -1,0 +1,10 @@
+; Minimal Terminal Services service registration. Start=3 keeps the scaffold
+; demand-start until a real listener and security path are implemented.
+[AddReg]
+HKLM,"SYSTEM\CurrentControlSet\Services\TermService","DisplayName",0x00000000,"Terminal Services"
+HKLM,"SYSTEM\CurrentControlSet\Services\TermService","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\TermService","ImagePath",0x00020000,"%SystemRoot%\system32\termsrv.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\TermService","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\TermService","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\TermService","Type",0x00010001,0x00000010
+
