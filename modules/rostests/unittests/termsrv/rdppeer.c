@@ -495,6 +495,171 @@ TestRdpBcgrWriteMcsConnectResponse(VOID)
        "Short MCS Connect Response write returned %Iu bytes\n", BytesWritten);
 }
 
+static VOID
+TestRdpBcgrParseMcsErectDomainRequest(VOID)
+{
+    static const UCHAR ErectDomainRequest[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x04, 0x01, 0x00, 0x01, 0x00
+    };
+    static const UCHAR BadBody[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x05, 0x01, 0x00, 0x01, 0x00
+    };
+
+    ok(TermSrvRdpBcgrParseMcsErectDomainRequest(ErectDomainRequest,
+                                                sizeof(ErectDomainRequest)) == TermSrvRdpBcgrSuccess,
+       "MCS Erect Domain Request parse failed\n");
+
+    ok(TermSrvRdpBcgrParseMcsErectDomainRequest(ErectDomainRequest,
+                                                6) == TermSrvRdpBcgrNeedMoreData,
+       "Short MCS Erect Domain Request should request more data\n");
+
+    ok(TermSrvRdpBcgrParseMcsErectDomainRequest(BadBody,
+                                                sizeof(BadBody)) == TermSrvRdpBcgrUnsupportedPdu,
+       "Malformed MCS Erect Domain Request body should fail\n");
+}
+
+static VOID
+TestRdpBcgrParseMcsAttachUserRequest(VOID)
+{
+    static const UCHAR AttachUserRequest[] =
+    {
+        0x03, 0x00, 0x00, 0x08,
+        0x02, 0xf0, 0x80,
+        0x28
+    };
+    static const UCHAR BadLength[] =
+    {
+        0x03, 0x00, 0x00, 0x09,
+        0x02, 0xf0, 0x80,
+        0x28, 0x00
+    };
+
+    ok(TermSrvRdpBcgrParseMcsAttachUserRequest(AttachUserRequest,
+                                               sizeof(AttachUserRequest)) == TermSrvRdpBcgrSuccess,
+       "MCS Attach User Request parse failed\n");
+
+    ok(TermSrvRdpBcgrParseMcsAttachUserRequest(AttachUserRequest,
+                                               7) == TermSrvRdpBcgrNeedMoreData,
+       "Short MCS Attach User Request should request more data\n");
+
+    ok(TermSrvRdpBcgrParseMcsAttachUserRequest(BadLength,
+                                               sizeof(BadLength)) == TermSrvRdpBcgrInvalidLength,
+       "Malformed MCS Attach User Request length should fail\n");
+}
+
+static VOID
+TestRdpBcgrWriteMcsAttachUserConfirm(VOID)
+{
+    static const UCHAR ExpectedConfirm[] =
+    {
+        0x03, 0x00, 0x00, 0x0b,
+        0x02, 0xf0, 0x80,
+        0x2e, 0x00, 0x03, 0xe9
+    };
+    TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM Confirm;
+    UCHAR Buffer[16];
+    SIZE_T BytesWritten = 0;
+
+    Confirm.UserChannelId = 1001;
+
+    ok(TermSrvRdpBcgrWriteMcsAttachUserConfirm(Buffer,
+                                               sizeof(Buffer),
+                                               &Confirm,
+                                               &BytesWritten) == TermSrvRdpBcgrSuccess,
+       "MCS Attach User Confirm serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedConfirm),
+       "Unexpected serialized MCS Attach User Confirm size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedConfirm, sizeof(ExpectedConfirm)) == 0,
+       "Serialized MCS Attach User Confirm did not match expected bytes\n");
+
+    ok(TermSrvRdpBcgrWriteMcsAttachUserConfirm(Buffer,
+                                               sizeof(ExpectedConfirm) - 1,
+                                               &Confirm,
+                                               &BytesWritten) == TermSrvRdpBcgrBufferTooSmall,
+       "Short MCS Attach User Confirm output buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short MCS Attach User Confirm write returned %Iu bytes\n", BytesWritten);
+}
+
+static VOID
+TestRdpBcgrParseMcsChannelJoinRequest(VOID)
+{
+    static const UCHAR ChannelJoinRequest[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x38, 0x03, 0xe9, 0x03, 0xeb
+    };
+    static const UCHAR BadTpktLength[] =
+    {
+        0x03, 0x00, 0x00, 0x0b,
+        0x02, 0xf0, 0x80,
+        0x38, 0x03, 0xe9, 0x03, 0xeb
+    };
+    TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST Request;
+
+    ok(TermSrvRdpBcgrParseMcsChannelJoinRequest(ChannelJoinRequest,
+                                                sizeof(ChannelJoinRequest),
+                                                &Request) == TermSrvRdpBcgrSuccess,
+       "MCS Channel Join Request parse failed\n");
+    ok(Request.Initiator == 1001,
+       "Unexpected MCS Channel Join Request initiator %u\n", Request.Initiator);
+    ok(Request.ChannelId == 1003,
+       "Unexpected MCS Channel Join Request channel %u\n", Request.ChannelId);
+
+    ok(TermSrvRdpBcgrParseMcsChannelJoinRequest(ChannelJoinRequest,
+                                                6,
+                                                &Request) == TermSrvRdpBcgrNeedMoreData,
+       "Short MCS Channel Join Request should request more data\n");
+
+    ok(TermSrvRdpBcgrParseMcsChannelJoinRequest(BadTpktLength,
+                                                sizeof(BadTpktLength),
+                                                &Request) == TermSrvRdpBcgrInvalidLength,
+       "Mismatched MCS Channel Join Request TPKT length should fail\n");
+}
+
+static VOID
+TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
+{
+    static const UCHAR ExpectedConfirm[] =
+    {
+        0x03, 0x00, 0x00, 0x0f,
+        0x02, 0xf0, 0x80,
+        0x3e, 0x00, 0x03, 0xe9, 0x03, 0xeb, 0x03, 0xeb
+    };
+    TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM Confirm;
+    UCHAR Buffer[16];
+    SIZE_T BytesWritten = 0;
+
+    Confirm.Initiator = 1001;
+    Confirm.RequestedChannelId = 1003;
+    Confirm.ConfirmedChannelId = 1003;
+
+    ok(TermSrvRdpBcgrWriteMcsChannelJoinConfirm(Buffer,
+                                                sizeof(Buffer),
+                                                &Confirm,
+                                                &BytesWritten) == TermSrvRdpBcgrSuccess,
+       "MCS Channel Join Confirm serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedConfirm),
+       "Unexpected serialized MCS Channel Join Confirm size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedConfirm, sizeof(ExpectedConfirm)) == 0,
+       "Serialized MCS Channel Join Confirm did not match expected bytes\n");
+
+    ok(TermSrvRdpBcgrWriteMcsChannelJoinConfirm(Buffer,
+                                                sizeof(ExpectedConfirm) - 1,
+                                                &Confirm,
+                                                &BytesWritten) == TermSrvRdpBcgrBufferTooSmall,
+       "Short MCS Channel Join Confirm output buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short MCS Channel Join Confirm write returned %Iu bytes\n", BytesWritten);
+}
+
 START_TEST(RdpPeer)
 {
     TestFullHandshake();
@@ -512,4 +677,9 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseMcsConnectInitial();
     TestRdpBcgrWriteConnectionConfirm();
     TestRdpBcgrWriteMcsConnectResponse();
+    TestRdpBcgrParseMcsErectDomainRequest();
+    TestRdpBcgrParseMcsAttachUserRequest();
+    TestRdpBcgrWriteMcsAttachUserConfirm();
+    TestRdpBcgrParseMcsChannelJoinRequest();
+    TestRdpBcgrWriteMcsChannelJoinConfirm();
 }
