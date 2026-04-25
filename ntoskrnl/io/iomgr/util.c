@@ -352,6 +352,15 @@ IoCheckQuerySetVolumeInformation(IN FS_INFORMATION_CLASS FsInformationClass,
     return STATUS_NOT_IMPLEMENTED;
 }
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+typedef struct _IO_PRIORITY_INFO {
+    ULONG Size;
+    ULONG ThreadPriority;
+    ULONG PagePriority;
+    IO_PRIORITY_HINT IoPriority;
+} IO_PRIORITY_INFO, *PIO_PRIORITY_INFO;
+#endif
+
 /*
  * @implemented
  *
@@ -381,6 +390,9 @@ IoRetrievePriorityInfo(IN PIRP Irp OPTIONAL,
         return STATUS_INVALID_PARAMETER;
     }
 
-    IoInitializePriorityInfo(PriorityInfo);
+    PriorityInfo->Size = sizeof(IO_PRIORITY_INFO);
+    PriorityInfo->ThreadPriority = 0xffff;
+    PriorityInfo->IoPriority = IoPriorityNormal;
+    PriorityInfo->PagePriority = 0;
     return STATUS_SUCCESS;
 }
