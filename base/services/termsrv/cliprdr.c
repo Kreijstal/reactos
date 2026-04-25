@@ -5,6 +5,7 @@
  */
 
 #include "cliprdr.h"
+#include "rdpbcgr.h"
 
 #include <string.h>
 
@@ -545,4 +546,69 @@ TermSrvCliprdrHandlePdu(
         default:
             return TermSrvCliprdrUnsupportedPdu;
     }
+}
+
+static TERMSRV_CLIPRDR_RESULT
+MapRdpBcgrResult(
+    _In_ TERMSRV_RDPBCGR_RESULT Result)
+{
+    switch (Result)
+    {
+        case TermSrvRdpBcgrSuccess:
+            return TermSrvCliprdrSuccess;
+
+        case TermSrvRdpBcgrNeedMoreData:
+            return TermSrvCliprdrNeedMoreData;
+
+        case TermSrvRdpBcgrBufferTooSmall:
+            return TermSrvCliprdrBufferTooSmall;
+
+        case TermSrvRdpBcgrInvalidHeader:
+            return TermSrvCliprdrInvalidHeader;
+
+        case TermSrvRdpBcgrInvalidLength:
+            return TermSrvCliprdrInvalidLength;
+
+        case TermSrvRdpBcgrUnsupportedPdu:
+        default:
+            return TermSrvCliprdrUnsupportedPdu;
+    }
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrRouteMcsSendData(
+    _In_reads_bytes_(InputLength) const UCHAR *Input,
+    _In_ SIZE_T InputLength,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _Out_writes_bytes_to_(OutputLength, *BytesWritten) UCHAR *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    TERMSRV_RDPBCGR_RESULT ParseResult;
+
+    if (BytesWritten == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    *BytesWritten = 0;
+
+    if (Input == NULL || Output == NULL || Channel == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    ParseResult = TermSrvRdpBcgrParseMcsSendDataPayload(Input,
+                                                        InputLength,
+                                                        &SendData);
+    if (ParseResult != TermSrvRdpBcgrSuccess)
+        return MapRdpBcgrResult(ParseResult);
+
+    if (!TermSrvCliprdrIsChannelId(Channel, SendData.ChannelId))
+        return TermSrvCliprdrUnsupportedPdu;
+
+    return TermSrvCliprdrHandlePdu(SendData.Payload,
+                                   SendData.PayloadLength,
+                                   Backend,
+                                   Output,
+                                   OutputLength,
+                                   BytesWritten);
 }
