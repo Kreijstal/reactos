@@ -21,15 +21,45 @@
 #define TERMSRV_MCS_SCAFFOLD_FIRST_STATIC_CHANNEL_ID 1004
 #define TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID 1007
 #define TERMSRV_CLIPRDR_SCAFFOLD_FORMAT_ID 13
-#define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 4
+#define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 6
 #define TERMSRV_SCAFFOLD_STATIC_CHANNEL_LIST_HEADER_LENGTH 1
 #define TERMSRV_SCAFFOLD_STATIC_CHANNEL_DEF_LENGTH \
     (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
 
 static const UCHAR TermSrvMcsConnectResponsePayload[] =
 {
-    /* Placeholder Connect-Response body; rdpbcgr.c wraps it in TPKT/X.224. */
-    0x7f, 0x66, 0x03, 0x01, 0x02
+    /*
+     * BER MCS Connect-Response with a minimal T.124 ConferenceCreateResponse.
+     * The GCC user data advertises RDP 5.x core data, four static virtual
+     * channels, and no standard RDP encryption.
+     */
+    0x7f, 0x66, 0x6c,
+    0x0a, 0x01, 0x00,
+    0x02, 0x01, 0x00,
+    0x30, 0x20,
+    0x02, 0x02, 0x00, 0x22,
+    0x02, 0x02, 0x00, 0x03,
+    0x02, 0x02, 0x00, 0x00,
+    0x02, 0x02, 0x00, 0x01,
+    0x02, 0x02, 0x00, 0x00,
+    0x02, 0x02, 0x00, 0x01,
+    0x02, 0x02, 0xff, 0xff,
+    0x02, 0x02, 0x00, 0x02,
+    0x04, 0x3a,
+    0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01,
+    0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00,
+    0x01, 0xc0, 0x00, 'M', 'c', 'D', 'n', 0x2c,
+    0x01, 0x0c, 0x10, 0x00,
+    0x04, 0x00, 0x08, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x03, 0x0c, 0x10, 0x00,
+    0xeb, 0x03, 0x04, 0x00,
+    0xec, 0x03, 0xed, 0x03,
+    0xee, 0x03, 0xef, 0x03,
+    0x02, 0x0c, 0x0c, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00
 };
 
 typedef enum _TERMSRV_PACKET_PLACEHOLDER
@@ -195,6 +225,33 @@ TermSrvReceiveWithTimeout(
     return recv(Client, (char *)Buffer, BufferLength, 0);
 }
 
+static INT
+TermSrvReceiveExactWithTimeout(
+    _In_ SOCKET Client,
+    _In_ HANDLE StopEvent,
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ INT BufferLength)
+{
+    INT Total;
+
+    Total = 0;
+    while (Total < BufferLength)
+    {
+        INT Received;
+
+        Received = TermSrvReceiveWithTimeout(Client,
+                                             StopEvent,
+                                             &Buffer[Total],
+                                             BufferLength - Total);
+        if (Received <= 0)
+            return Received;
+
+        Total += Received;
+    }
+
+    return Total;
+}
+
 static BOOL
 TermSrvSendPacket(
     _In_ SOCKET Client,
@@ -227,12 +284,42 @@ TermSrvReceiveTpkt(
     _In_ INT BufferLength,
     _Out_ INT *Received)
 {
-    *Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+    USHORT PacketLength;
+
+    *Received = TermSrvReceiveExactWithTimeout(Client,
+                                               StopEvent,
+                                               Buffer,
+                                               4);
     if (*Received <= 0)
     {
         TermSrvLogFailure("expected packet was not received");
         return FALSE;
     }
+
+    if (Buffer[0] != 3 || Buffer[1] != 0)
+    {
+        TermSrvLogFailure("expected TPKT header");
+        return FALSE;
+    }
+
+    PacketLength = (USHORT)(((USHORT)Buffer[2] << 8) | Buffer[3]);
+    if (PacketLength < 7 || PacketLength > (USHORT)BufferLength)
+    {
+        TermSrvLogFailure("invalid TPKT length");
+        return FALSE;
+    }
+
+    *Received = TermSrvReceiveExactWithTimeout(Client,
+                                               StopEvent,
+                                               &Buffer[4],
+                                               PacketLength - 4);
+    if (*Received <= 0)
+    {
+        TermSrvLogFailure("expected TPKT body was not received");
+        return FALSE;
+    }
+
+    *Received = PacketLength;
 
     if (TermSrvIdentifyPacketPlaceholder(Buffer, *Received) != TermSrvPacketTpkt)
     {
@@ -528,15 +615,8 @@ TermSrvRunEarlyMcsPhase(
         TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST ChannelJoinRequest;
         TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM ChannelJoinConfirm;
 
-        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
-        if (Received <= 0)
+        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
             break;
-
-        if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
-        {
-            TermSrvLogFailure("expected TPKT packet");
-            return FALSE;
-        }
 
         Result = TermSrvRdpBcgrParseMcsChannelJoinRequest(Buffer,
                                                          (SIZE_T)Received,
@@ -592,15 +672,8 @@ TermSrvRunEarlyMcsPhase(
 
     if (!HaveSecurityExchange)
     {
-        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
-        if (Received <= 0)
+        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
             return TRUE;
-
-        if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
-        {
-            TermSrvLogFailure("expected TPKT packet");
-            return FALSE;
-        }
 
         Result = TermSrvRdpBcgrParseSecurityExchangePayload(Buffer,
                                                             (SIZE_T)Received,
@@ -641,7 +714,7 @@ TermSrvHandleClient(
     {
         TERMSRV_RDPBCGR_CONNECTION_REQUEST Request;
         TERMSRV_RDPBCGR_CONNECTION_CONFIRM Confirm;
-        UCHAR Reply[32];
+        UCHAR Reply[128];
         SIZE_T ReplyLength;
         TERMSRV_RDPBCGR_RESULT Result;
         TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
