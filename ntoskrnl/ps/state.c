@@ -606,4 +606,38 @@ NtQueueApcThread(IN HANDLE ThreadHandle,
     return NtQueueApcThreadEx(ThreadHandle, NULL, ApcRoutine, NormalContext, SystemArgument1, SystemArgument2);
 }
 
+/*
+ * @unimplemented
+ *
+ * Per-process disk-byte accounting introduced in Windows 8. Returning FALSE
+ * tells callers the counter infrastructure is disabled, so they will skip
+ * the matching PsUpdateDiskCounters calls.
+ */
+BOOLEAN
+NTAPI
+PsIsDiskCountersEnabled(VOID)
+{
+    return FALSE;
+}
+
+/*
+ * @unimplemented
+ */
+VOID
+NTAPI
+PsUpdateDiskCounters(IN PEPROCESS Process,
+                     IN ULONGLONG BytesRead,
+                     IN ULONGLONG BytesWritten,
+                     IN ULONG ReadOperationCount,
+                     IN ULONG WriteOperationCount,
+                     IN ULONG FlushOperationCount)
+{
+    UNREFERENCED_PARAMETER(Process);
+    UNREFERENCED_PARAMETER(BytesRead);
+    UNREFERENCED_PARAMETER(BytesWritten);
+    UNREFERENCED_PARAMETER(ReadOperationCount);
+    UNREFERENCED_PARAMETER(WriteOperationCount);
+    UNREFERENCED_PARAMETER(FlushOperationCount);
+}
+
 /* EOF */
