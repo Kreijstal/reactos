@@ -2118,7 +2118,46 @@ MmArmInitSystem(IN ULONG Phase,
         // whatever follows are separate from the PDEs that boot loader might've
         // already created (and later, we can blow all that away if we want to).
         //
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        {
+            //
+            // LoaderPagesSpanned was removed from LOADER_PARAMETER_EXTENSION at
+            // Win8. Compute the equivalent bounding range by walking the loader
+            // block's load-order list and taking min(DllBase) .. max(DllBase +
+            // SizeOfImage). This gives the same "pages spanned by all loader-
+            // mapped images" result that LoaderPagesSpanned used to provide
+            // without overcounting holes between modules.
+            //
+            PLIST_ENTRY NextEntry;
+            PLDR_DATA_TABLE_ENTRY LdrEntry;
+            ULONG_PTR LowestBase = (ULONG_PTR)-1;
+            ULONG_PTR HighestEnd = 0;
+            ULONG_PTR ModuleEnd;
+
+            ASSERT(!IsListEmpty(&KeLoaderBlock->LoadOrderListHead));
+
+            for (NextEntry = KeLoaderBlock->LoadOrderListHead.Flink;
+                 NextEntry != &KeLoaderBlock->LoadOrderListHead;
+                 NextEntry = NextEntry->Flink)
+            {
+                LdrEntry = CONTAINING_RECORD(NextEntry,
+                                             LDR_DATA_TABLE_ENTRY,
+                                             InLoadOrderLinks);
+
+                if ((ULONG_PTR)LdrEntry->DllBase < LowestBase)
+                    LowestBase = (ULONG_PTR)LdrEntry->DllBase;
+
+                ModuleEnd = (ULONG_PTR)LdrEntry->DllBase + LdrEntry->SizeOfImage;
+                if (ModuleEnd > HighestEnd)
+                    HighestEnd = ModuleEnd;
+            }
+
+            ASSERT(HighestEnd > LowestBase);
+            MmBootImageSize = (HighestEnd - LowestBase + PAGE_SIZE - 1) >> PAGE_SHIFT;
+        }
+#else
         MmBootImageSize = KeLoaderBlock->Extension->LoaderPagesSpanned;
+#endif
         MmBootImageSize *= PAGE_SIZE;
         MmBootImageSize = (MmBootImageSize + PDE_MAPPED_VA - 1) & ~(PDE_MAPPED_VA - 1);
         ASSERT((MmBootImageSize % PDE_MAPPED_VA) == 0);
