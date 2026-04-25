@@ -1270,6 +1270,126 @@ TestCliprdrDummyBackend(VOID)
        "NULL cliprdr backend clear should fail\n");
 }
 
+static VOID
+TestCliprdrHandlePdu(VOID)
+{
+    static const UCHAR FormatList[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0xaa, 0xbb
+    };
+    static const UCHAR ExpectedFormatListResponse[] =
+    {
+        0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR FormatDataRequest[] =
+    {
+        0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00
+    };
+    static const UCHAR ClipboardData[] =
+    {
+        'a', 'b', 'c'
+    };
+    static const UCHAR ExpectedFormatDataResponse[] =
+    {
+        0x05, 0x00, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00,
+        'a', 'b', 'c'
+    };
+    static const UCHAR ExpectedMissingFormatResponse[] =
+    {
+        0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR UnsupportedPdu[] =
+    {
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    TERMSRV_CLIPRDR_DUMMY_BACKEND Dummy;
+    TERMSRV_CLIPRDR_BACKEND Backend;
+    UCHAR Buffer[32];
+    SIZE_T BytesWritten = 0;
+
+    ok(TermSrvCliprdrDummyBackendInit(&Dummy, &Backend) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend init failed\n");
+
+    ok(TermSrvCliprdrHandlePdu(FormatList,
+                               sizeof(FormatList),
+                               &Backend,
+                               Buffer,
+                               sizeof(Buffer),
+                               &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format List handler failed\n");
+    ok(BytesWritten == sizeof(ExpectedFormatListResponse),
+       "Unexpected cliprdr Format List handler response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer,
+              ExpectedFormatListResponse,
+              sizeof(ExpectedFormatListResponse)) == 0,
+       "cliprdr Format List handler response mismatch\n");
+
+    ok(TermSrvCliprdrBackendSetData(&Backend,
+                                    13,
+                                    ClipboardData,
+                                    sizeof(ClipboardData)) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend data set failed\n");
+    ok(TermSrvCliprdrHandlePdu(FormatDataRequest,
+                               sizeof(FormatDataRequest),
+                               &Backend,
+                               Buffer,
+                               sizeof(Buffer),
+                               &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format Data Request handler failed\n");
+    ok(BytesWritten == sizeof(ExpectedFormatDataResponse),
+       "Unexpected cliprdr Format Data Response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer,
+              ExpectedFormatDataResponse,
+              sizeof(ExpectedFormatDataResponse)) == 0,
+       "cliprdr Format Data Response mismatch\n");
+
+    ok(TermSrvCliprdrHandlePdu(FormatDataRequest,
+                               sizeof(FormatDataRequest),
+                               &Backend,
+                               Buffer,
+                               sizeof(ExpectedFormatDataResponse) - 1,
+                               &BytesWritten) == TermSrvCliprdrBufferTooSmall,
+       "Short cliprdr handler output buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short cliprdr handler output buffer wrote %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvCliprdrBackendClear(&Backend) == TermSrvCliprdrSuccess,
+       "cliprdr dummy backend clear failed\n");
+    ok(TermSrvCliprdrHandlePdu(FormatDataRequest,
+                               sizeof(FormatDataRequest),
+                               &Backend,
+                               Buffer,
+                               sizeof(Buffer),
+                               &BytesWritten) == TermSrvCliprdrFormatNotAvailable,
+       "Missing cliprdr format should be reported\n");
+    ok(BytesWritten == sizeof(ExpectedMissingFormatResponse),
+       "Unexpected missing cliprdr format response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer,
+              ExpectedMissingFormatResponse,
+              sizeof(ExpectedMissingFormatResponse)) == 0,
+       "Missing cliprdr format response mismatch\n");
+
+    ok(TermSrvCliprdrHandlePdu(UnsupportedPdu,
+                               sizeof(UnsupportedPdu),
+                               &Backend,
+                               Buffer,
+                               sizeof(Buffer),
+                               &BytesWritten) == TermSrvCliprdrUnsupportedPdu,
+       "Unsupported cliprdr PDU should fail\n");
+    ok(BytesWritten == 0,
+       "Unsupported cliprdr PDU wrote %Iu bytes\n", BytesWritten);
+
+    ok(TermSrvCliprdrHandlePdu(FormatList,
+                               sizeof(FormatList),
+                               NULL,
+                               Buffer,
+                               sizeof(Buffer),
+                               &BytesWritten) == TermSrvCliprdrInvalidHeader,
+       "NULL cliprdr handler backend should fail\n");
+}
+
 START_TEST(RdpPeer)
 {
     TestFullHandshake();
@@ -1302,4 +1422,5 @@ START_TEST(RdpPeer)
     TestCliprdrParseFormatDataRequest();
     TestCliprdrWriteFormatDataResponse();
     TestCliprdrDummyBackend();
+    TestCliprdrHandlePdu();
 }
