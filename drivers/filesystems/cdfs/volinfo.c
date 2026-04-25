@@ -59,6 +59,7 @@ CdQueryFsAttributeInfo (
     _Inout_ PULONG Length
     );
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
 NTSTATUS
 CdQueryFsSectorSizeInfo (
     _In_ PIRP_CONTEXT IrpContext,
@@ -66,6 +67,7 @@ CdQueryFsSectorSizeInfo (
     _Out_writes_bytes_(*Length) PFILE_FS_SECTOR_SIZE_INFORMATION Buffer,
     _Inout_ PULONG Length
     );
+#endif
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, CdCommonQueryVolInfo)
@@ -73,7 +75,9 @@ CdQueryFsSectorSizeInfo (
 #pragma alloc_text(PAGE, CdQueryFsDeviceInfo)
 #pragma alloc_text(PAGE, CdQueryFsSizeInfo)
 #pragma alloc_text(PAGE, CdQueryFsVolumeInfo)
+#if (NTDDI_VERSION >= NTDDI_WIN8)
 #pragma alloc_text(PAGE, CdQueryFsSectorSizeInfo)
+#endif
 #endif
 
 
@@ -606,4 +610,3 @@ Return Value:
 }
 
 #endif
-
