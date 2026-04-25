@@ -458,6 +458,43 @@ TestRdpBcgrWriteConnectionConfirm(VOID)
        "Short output buffer should fail\n");
 }
 
+static VOID
+TestRdpBcgrWriteMcsConnectResponse(VOID)
+{
+    static const UCHAR Payload[] =
+    {
+        0x7f, 0x66, 0x03, 0x01, 0x02
+    };
+    static const UCHAR ExpectedResponse[] =
+    {
+        0x03, 0x00, 0x00, 0x0c,
+        0x02, 0xf0, 0x80,
+        0x7f, 0x66, 0x03, 0x01, 0x02
+    };
+    UCHAR Buffer[32];
+    SIZE_T BytesWritten = 0;
+
+    ok(TermSrvRdpBcgrWriteMcsConnectResponse(Buffer,
+                                             sizeof(Buffer),
+                                             Payload,
+                                             sizeof(Payload),
+                                             &BytesWritten) == TermSrvRdpBcgrSuccess,
+       "MCS Connect Response serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedResponse),
+       "Unexpected serialized MCS Connect Response size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedResponse, sizeof(ExpectedResponse)) == 0,
+       "Serialized MCS Connect Response did not match expected bytes\n");
+
+    ok(TermSrvRdpBcgrWriteMcsConnectResponse(Buffer,
+                                             sizeof(ExpectedResponse) - 1,
+                                             Payload,
+                                             sizeof(Payload),
+                                             &BytesWritten) == TermSrvRdpBcgrBufferTooSmall,
+       "Short MCS Connect Response output buffer should fail\n");
+    ok(BytesWritten == 0,
+       "Short MCS Connect Response write returned %Iu bytes\n", BytesWritten);
+}
+
 START_TEST(RdpPeer)
 {
     TestFullHandshake();
@@ -474,4 +511,5 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseConnectionRequest();
     TestRdpBcgrParseMcsConnectInitial();
     TestRdpBcgrWriteConnectionConfirm();
+    TestRdpBcgrWriteMcsConnectResponse();
 }
