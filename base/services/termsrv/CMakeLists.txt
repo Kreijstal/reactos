@@ -1,4 +1,6 @@
 list(APPEND TERMSRV_CORE_SOURCE
+    cliprdr.c
+    cliprdr.h
     rdpbcgr.c
     rdpbcgr.h
     rdppeer.c
