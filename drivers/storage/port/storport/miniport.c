@@ -291,13 +291,17 @@ MiniportFindAdapter(
 
     DPRINT1("MiniportFindAdapter(%p)\n", Miniport);
 
-    /* Call the miniport HwFindAdapter routine */
-    Result = Miniport->InitData->HwFindAdapter(&Miniport->MiniportExtension->HwDeviceExtension,
-                                               NULL,
-                                               NULL,
-                                               NULL,
-                                               &Miniport->PortConfig,
-                                               &Reserved);
+    /* Call the miniport HwFindAdapter routine.
+     * At NTDDI_WIN8+, HW_INITIALIZATION_DATA::HwFindAdapter is PVOID since
+     * the storport ABI now permits either a physical (PHW_FIND_ADAPTER) or
+     * a virtual (PVIRTUAL_HW_FIND_ADAPTER) callback. We currently treat all
+     * miniports as physical, so cast accordingly. */
+    Result = ((PHW_FIND_ADAPTER)Miniport->InitData->HwFindAdapter)(&Miniport->MiniportExtension->HwDeviceExtension,
+                                                                    NULL,
+                                                                    NULL,
+                                                                    NULL,
+                                                                    &Miniport->PortConfig,
+                                                                    &Reserved);
     DPRINT1("HwFindAdapter() returned %lu\n", Result);
 
     /* Convert the result to a status code */

@@ -935,3 +935,43 @@ CcZeroData (
 
     return TRUE;
 }
+
+/*
+ * @implemented
+ *
+ * Win8+ extension of CcCopyRead taking an explicit issuer thread for
+ * priority/accounting. We don't yet wire the IoIssuerThread into PsUpdate-
+ * DiskCounters / IO_PRIORITY_INFO routing, but the data-copy semantics are
+ * identical, so we delegate. When the disk-counter / priority pipeline is
+ * implemented, this is the choke point that needs to attribute the bytes
+ * to IoIssuerThread instead of PsGetCurrentThread().
+ */
+BOOLEAN
+NTAPI
+CcCopyReadEx(IN PFILE_OBJECT FileObject,
+             IN PLARGE_INTEGER FileOffset,
+             IN ULONG Length,
+             IN BOOLEAN Wait,
+             OUT PVOID Buffer,
+             OUT PIO_STATUS_BLOCK IoStatus,
+             IN PETHREAD IoIssuerThread)
+{
+    UNREFERENCED_PARAMETER(IoIssuerThread);
+    return CcCopyRead(FileObject, FileOffset, Length, Wait, Buffer, IoStatus);
+}
+
+/*
+ * @implemented
+ */
+BOOLEAN
+NTAPI
+CcCopyWriteEx(IN PFILE_OBJECT FileObject,
+              IN PLARGE_INTEGER FileOffset,
+              IN ULONG Length,
+              IN BOOLEAN Wait,
+              IN PVOID Buffer,
+              IN PETHREAD IoIssuerThread)
+{
+    UNREFERENCED_PARAMETER(IoIssuerThread);
+    return CcCopyWrite(FileObject, FileOffset, Length, Wait, Buffer);
+}
