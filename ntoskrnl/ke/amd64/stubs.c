@@ -84,11 +84,12 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
     CurrentThread->StackBase = StackBase;
     CurrentThread->StackLimit = (ULONG_PTR)StackLimit;
 #if (NTDDI_VERSION < NTDDI_WIN8)
+    /* Pre-Win8 KTHREAD has a LargeStack flag that the legacy
+     * MmDeleteKernelStack call sites still consult; keep it set so
+     * that path continues to behave the same. Win8+ teardown reads
+     * the actual reservation via the kernel-stack guard PTE marker
+     * and does not need this field. */
     CurrentThread->LargeStack = TRUE;
-#else
-    /* TODO: KTHREAD::LargeStack was removed at Win8; the matching
-     * tracking needs a Win8 home before MmDeleteKernelStack can free
-     * the right amount on teardown. */
 #endif
 
     /* Adjust RspBase in the PCR */

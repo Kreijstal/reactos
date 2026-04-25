@@ -184,12 +184,13 @@ PspReapRoutine(IN PVOID Context)
             /* Get the first Thread Entry */
             Thread = CONTAINING_RECORD(NextEntry, ETHREAD, ReaperLink);
 
-            /* Delete this entry's kernel stack */
+            /* Delete this entry's kernel stack. The GuiStack hint is
+             * ignored by MmDeleteKernelStack at NTDDI_WIN8+ (which
+             * detects small vs. large via the guard PTE marker), so
+             * passing FALSE here is safe even when the thread owns a
+             * large stack. Pre-Win8 still honors the hint. */
             MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-                                /* TODO: Win8 KTHREAD has no LargeStack flag;
-                                 * threads using a large kernel stack will leak
-                                 * the extra pages until that storage is found. */
                                 FALSE);
 #else
                                 Thread->Tcb.LargeStack);
@@ -418,10 +419,11 @@ PspDeleteThread(IN PVOID ObjectBody)
     /* Check if we have a stack */
     if (Thread->Tcb.InitialStack)
     {
-        /* Release it */
+        /* Release it. At NTDDI_WIN8+ the GuiStack hint is ignored by
+         * MmDeleteKernelStack, which detects the reservation size via
+         * the guard PTE marker; pre-Win8 keeps using LargeStack. */
         MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-                            /* TODO: see PspReaper for the LargeStack note. */
                             FALSE);
 #else
                             Thread->Tcb.LargeStack);

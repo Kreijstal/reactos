@@ -65,8 +65,12 @@ PsConvertToGuiThread(VOID)
 
     /* Check if we don't already have a kernel-mode stack */
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    /* TODO: Win8 KTHREAD has no LargeStack flag; assume the thread is
-     * not on a large stack yet so a new one is created. */
+    /* Win8 KTHREAD has no LargeStack flag. Always allocate a fresh
+     * large stack; if a prior conversion attempt already swapped the
+     * thread to a large stack and was rolled back, the resulting
+     * OldStack handed to MmDeleteKernelStack below will be auto-
+     * recognized as large via the guard PTE marker and freed
+     * correctly, so there is no leak. */
     if (TRUE)
 #else
     if (!Thread->Tcb.LargeStack)

@@ -27,6 +27,39 @@
 
 /* GLOBALS ********************************************************************/
 
+/*
+ * Magic value written into the bottom-most PTE of every kernel stack
+ * reservation by MmCreateKernelStack so that MmDeleteKernelStack can
+ * recognize the guard at teardown time without being told the original
+ * stack size. The value is parked in the PageFileHigh field of an
+ * invalid (Valid=0, Protection=MM_NOACCESS) software PTE - PageFileHigh
+ * is unused for stack guards (no real backing store) and 32 bits is
+ * wide enough to make a stray collision astronomically unlikely.
+ *
+ * This frees the deletion path from depending on KTHREAD::LargeStack,
+ * which Win8 removed. With self-describing guards both small and large
+ * (and any future) kernel-stack sizes are released correctly.
+ */
+#define MI_KERNEL_STACK_GUARD_MAGIC 0xCEED5A9DUL
+
+FORCEINLINE
+VOID
+MiMakeKernelStackGuardPte(_Out_ PMMPTE Pte)
+{
+    Pte->u.Long = 0;
+    Pte->u.Soft.Protection = MM_NOACCESS;
+    Pte->u.Soft.PageFileHigh = MI_KERNEL_STACK_GUARD_MAGIC;
+}
+
+FORCEINLINE
+BOOLEAN
+MiIsKernelStackGuardPte(_In_ PMMPTE Pte)
+{
+    return (Pte->u.Hard.Valid == 0) &&
+           (Pte->u.Soft.Protection == MM_NOACCESS) &&
+           (Pte->u.Soft.PageFileHigh == MI_KERNEL_STACK_GUARD_MAGIC);
+}
+
 ULONG MmProcessColorSeed = 0x12345678;
 ULONG MmMaximumDeadKernelStacks = 5;
 SLIST_HEADER MmDeadStackSListHead;
@@ -269,24 +302,35 @@ NTAPI
 MmDeleteKernelStack(IN PVOID StackBase,
                     IN BOOLEAN GuiStack)
 {
-    PMMPTE PointerPte;
+    PMMPTE PointerPte, TopPte;
     PFN_NUMBER PageFrameNumber, PageTableFrameNumber;
-    PFN_COUNT StackPages;
+    PFN_COUNT StackPages, MaxScan;
     PMMPFN Pfn1, Pfn2;
-    ULONG i;
     KIRQL OldIrql;
     PSLIST_ENTRY SListEntry;
+    BOOLEAN IsSmallStack;
 
-    //
-    // This should be the guard page, so decrement by one
-    //
-    PointerPte = MiAddressToPte(StackBase);
-    PointerPte--;
+    UNREFERENCED_PARAMETER(GuiStack);
 
-    //
-    // If this is a small stack, just push the stack onto the dead stack S-LIST
-    //
-    if (!GuiStack)
+    /*
+     * Topmost committed PTE = the PTE just below StackBase.
+     * The reservation extends downward to the guard PTE, which
+     * MmCreateKernelStack marked with MI_KERNEL_STACK_GUARD_MAGIC.
+     * We auto-detect small vs. large by probing the small-stack
+     * guard offset first. This makes the function correct without
+     * requiring the caller to know the original GuiStack flag,
+     * which Win8 KTHREAD layout no longer exposes.
+     */
+    TopPte = MiAddressToPte(StackBase) - 1;
+    IsSmallStack = MiIsKernelStackGuardPte(TopPte - BYTES_TO_PAGES(KERNEL_STACK_SIZE));
+
+    /*
+     * Small stacks get pushed onto the dead-stack S-LIST for fast
+     * recycling, just like before. Large stacks always go through
+     * the full release path - large stacks have a much wider PTE
+     * reservation that the small-stack S-LIST can't represent.
+     */
+    if (IsSmallStack)
     {
         if (ExQueryDepthSList(&MmDeadStackSListHead) < MmMaximumDeadKernelStacks)
         {
@@ -294,25 +338,28 @@ MmDeleteKernelStack(IN PVOID StackBase,
             InterlockedPushEntrySList(&MmDeadStackSListHead, SListEntry);
             return;
         }
+        StackPages = BYTES_TO_PAGES(KERNEL_STACK_SIZE);
+    }
+    else
+    {
+        StackPages = BYTES_TO_PAGES(MmLargeStackSize);
     }
 
-    //
-    // Calculate pages used
-    //
-    StackPages = BYTES_TO_PAGES(GuiStack ?
-                                MmLargeStackSize : KERNEL_STACK_SIZE);
+    /*
+     * Walk down from the top, freeing every committed page along the
+     * way. For a partially-grown large stack, the un-committed grow
+     * zone PTEs are zero (created via MiReserveSystemPtes), and we
+     * simply skip past them. The walk is bounded by StackPages so we
+     * can never run past the reservation into a neighboring one.
+     */
+    PointerPte = TopPte;
+    MaxScan = StackPages;
 
     /* Acquire the PFN lock */
     OldIrql = MiAcquirePfnLock();
 
-    //
-    // Loop them
-    //
-    for (i = 0; i < StackPages; i++)
+    while (MaxScan--)
     {
-        //
-        // Check if this is a valid PTE
-        //
         if (PointerPte->u.Hard.Valid == 1)
         {
             /* Get the PTE's page */
@@ -333,23 +380,16 @@ MmDeleteKernelStack(IN PVOID StackBase,
             MiDecrementShareCount(Pfn1, PageFrameNumber);
         }
 
-        //
-        // Next one
-        //
         PointerPte--;
     }
 
-    //
-    // We should be at the guard page now
-    //
-    ASSERT(PointerPte->u.Hard.Valid == 0);
+    /* PointerPte should now be exactly the guard - confirm it. */
+    ASSERT(MiIsKernelStackGuardPte(PointerPte));
 
     /* Release the PFN lock */
     MiReleasePfnLock(OldIrql);
 
-    //
-    // Release the PTEs
-    //
+    /* Release the entire reservation (all stack PTEs + guard) */
     MiReleaseSystemPtes(PointerPte, StackPages + 1, SystemPteSpace);
 }
 
@@ -411,6 +451,17 @@ MmCreateKernelStack(IN BOOLEAN GuiStack,
     // Get the stack address
     //
     BaseAddress = MiPteToAddress(StackPte + StackPtes + 1);
+
+    //
+    // Mark the bottom-most reserved PTE as a kernel-stack guard so
+    // MmDeleteKernelStack can later find this reservation's lower
+    // bound by scanning, without needing to know the GuiStack flag.
+    //
+    {
+        MMPTE GuardPte;
+        MiMakeKernelStackGuardPte(&GuardPte);
+        StackPte->u.Long = GuardPte.u.Long;
+    }
 
     //
     // Select the right PTE address where we actually start committing pages
