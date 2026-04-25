@@ -1106,10 +1106,17 @@ FUNC KiConvertToGuiThread
     .allocstack 40
     .endprolog
 
+#if (NTDDI_VERSION < 0x06020000) /* NTDDI_WIN8 is undefined in asm cpp */
     /* Check if we already have a large stack */
     mov rax, gs:[PcCurrentThread]
     cmp byte ptr [rax + KTHREAD_LargeStack], 0
     jnz AlreadyLargeStack
+#else
+    /* TODO: Win8 KTHREAD has no LargeStack flag. Skip the per-thread
+     * stack-grow conversion until a Win8 home for this state lands;
+     * PsConvertToGuiThread still runs below. */
+    jmp AlreadyLargeStack
+#endif
 
     // NewStack = (ULONG_PTR)MmCreateKernelStack(TRUE, 0);
     mov cl, 1
