@@ -64,6 +64,158 @@ ActivatePeer(
     ActivatePeerWithFastPath(Peer, TRUE);
 }
 
+typedef struct _TEST_SESSION_BACKEND_CONTEXT
+{
+    INT CreateOrAttachCount;
+    INT DisconnectCount;
+    INT LogoffCount;
+    INT CaptureFrameCount;
+    INT InjectMouseCount;
+    INT InjectKeyboardCount;
+    INT ClipboardCount;
+    INT LastSessionId;
+    BOOL FailCreateOrAttach;
+} TEST_SESSION_BACKEND_CONTEXT;
+
+static BOOL
+TestBackendCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    Context->CreateOrAttachCount++;
+    Context->LastSessionId = SessionId;
+    if (Context->FailCreateOrAttach)
+        return FALSE;
+
+    if (!TermSrvSessionManagerAttachWin32Session(Manager,
+                                                 SessionId,
+                                                 UserIdentity,
+                                                 ClientName))
+    {
+        return FALSE;
+    }
+
+    *AttachedSessionId = SessionId;
+    return TRUE;
+}
+
+static BOOL
+TestBackendDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    Context->DisconnectCount++;
+    Context->LastSessionId = SessionId;
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  SessionId,
+                                                  TermSrvSessionDisconnected);
+}
+
+static BOOL
+TestBackendLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    Context->LogoffCount++;
+    Context->LastSessionId = SessionId;
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  SessionId,
+                                                  TermSrvSessionLoggedOff);
+}
+
+static BOOL
+TestBackendCaptureFrame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    Context->CaptureFrameCount++;
+    Context->LastSessionId = SessionId;
+    return TermSrvSessionManagerCaptureWin32Frame(Manager, SessionId, Frame);
+}
+
+static BOOL
+TestBackendInjectMouse(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    Context->InjectMouseCount++;
+    Context->LastSessionId = SessionId;
+    return TermSrvSessionManagerRecordWin32Input(Manager,
+                                                SessionId,
+                                                HasPointer,
+                                                PointerX,
+                                                PointerY);
+}
+
+static BOOL
+TestBackendInjectKeyboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ UINT VirtualKey,
+    _In_ BOOL KeyDown)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    UNREFERENCED_PARAMETER(VirtualKey);
+    UNREFERENCED_PARAMETER(KeyDown);
+
+    Context->InjectKeyboardCount++;
+    Context->LastSessionId = SessionId;
+    return TermSrvSessionManagerRecordWin32Input(Manager, SessionId, FALSE, 0, 0);
+}
+
+static BOOL
+TestBackendClipboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_reads_bytes_opt_(InputLength) const VOID *Input,
+    _In_ SIZE_T InputLength,
+    _Out_writes_bytes_to_opt_(OutputLength, *BytesWritten) VOID *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
+
+    UNREFERENCED_PARAMETER(SessionId);
+    UNREFERENCED_PARAMETER(Input);
+    UNREFERENCED_PARAMETER(InputLength);
+    UNREFERENCED_PARAMETER(Output);
+    UNREFERENCED_PARAMETER(OutputLength);
+
+    Context->ClipboardCount++;
+    *BytesWritten = 0;
+    return TRUE;
+}
+
+static const TERMSRV_SESSION_BACKEND TestSessionBackend =
+{
+    "test",
+    TestBackendCreateOrAttach,
+    TestBackendDisconnect,
+    TestBackendLogoff,
+    TestBackendCaptureFrame,
+    TestBackendInjectMouse,
+    TestBackendInjectKeyboard,
+    TestBackendClipboard
+};
+
 static VOID
 TestFullHandshake(VOID)
 {
@@ -178,6 +330,62 @@ TestAttachFailure(VOID)
        "State changed after rejected attach\n");
     ok(Manager.Sessions[0].State == TermSrvSessionIdle,
        "Attach failure connected the session\n");
+}
+
+static VOID
+TestBackendSelectionAndBehavior(VOID)
+{
+    TERMSRV_SESSION_MANAGER Manager;
+    TERMSRV_RDP_PEER Peer;
+    TEST_SESSION_BACKEND_CONTEXT Context;
+
+    memset(&Context, 0, sizeof(Context));
+    TermSrvSessionManagerInit(&Manager);
+
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
+       "Default backend was not selected\n");
+
+    TermSrvSessionManagerSetBackend(&Manager, &TestSessionBackend, &Context);
+    ok(TermSrvSessionManagerGetBackend(&Manager) == &TestSessionBackend,
+       "Custom backend was not selected\n");
+
+    TermSrvRdpPeerInit(&Peer, &Manager);
+    ActivatePeer(&Peer);
+    ok(Context.CreateOrAttachCount == 1,
+       "CreateOrAttach was called %d times\n", Context.CreateOrAttachCount);
+    ok(Context.LastSessionId == 1,
+       "Backend attached unexpected session %d\n", Context.LastSessionId);
+
+    ok(TermSrvRdpPeerReceive(&Peer, "SLOW_INPUT mouse=1 x=4 y=5") == TermSrvRdpSuccess,
+       "Mouse input failed\n");
+    ok(Context.InjectMouseCount == 1,
+       "InjectMouse was called %d times\n", Context.InjectMouseCount);
+
+    ok(TermSrvRdpPeerReceive(&Peer, "SLOW_INPUT scancode=30") == TermSrvRdpSuccess,
+       "Keyboard input failed\n");
+    ok(Context.InjectKeyboardCount == 1,
+       "InjectKeyboard was called %d times\n", Context.InjectKeyboardCount);
+
+    ok(TermSrvRdpPeerSendBitmapUpdate(&Peer, 10, 10) == TermSrvRdpSuccess,
+       "Bitmap update through backend failed\n");
+    ok(Context.CaptureFrameCount == 1,
+       "CaptureFrame was called %d times\n", Context.CaptureFrameCount);
+
+    ok(TermSrvRdpPeerReceive(&Peer, "DISCONNECT") == TermSrvRdpSuccess,
+       "Disconnect failed\n");
+    ok(Context.DisconnectCount == 1,
+       "Disconnect was called %d times\n", Context.DisconnectCount);
+
+    TermSrvRdpPeerInit(&Peer, &Manager);
+    ActivatePeer(&Peer);
+    ok(TermSrvRdpPeerReceive(&Peer, "LOGOFF") == TermSrvRdpSuccess,
+       "Logoff failed\n");
+    ok(Context.LogoffCount == 1,
+       "Logoff was called %d times\n", Context.LogoffCount);
+
+    TermSrvSessionManagerSetBackend(&Manager, NULL, NULL);
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
+       "NULL backend did not restore default backend\n");
 }
 
 static VOID
@@ -2498,6 +2706,7 @@ START_TEST(RdpPeer)
     TestTooManyChannels();
     TestAuthenticationFailure();
     TestAttachFailure();
+    TestBackendSelectionAndBehavior();
     TestClientInfoBeforeSecurity();
     TestInputAndVirtualChannels();
     TestFastPathNotNegotiated();
