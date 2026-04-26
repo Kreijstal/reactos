@@ -68,6 +68,7 @@ list(APPEND SOURCE
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
     ntuser/NtUserProcessConnect.c
+    ntuser/NtUserRdpCapture.c
     ntuser/NtUserRedrawWindow.c
     ntuser/NtUserSBGetParms.c
     ntuser/NtUserScrollDC.c
