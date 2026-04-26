@@ -51,6 +51,7 @@ typedef enum _TERMSRV_SESSION_STATE
 typedef struct _TERMSRV_SESSION
 {
     INT SessionId;
+    ULONG Win32SessionId;
     WCHAR UserIdentity[64];
     WCHAR WinStationName[32];
     WCHAR DesktopName[32];
@@ -64,6 +65,9 @@ typedef struct _TERMSRV_SESSION
     BOOL HasPointer;
     INT LastPointerX;
     INT LastPointerY;
+    BOOL SessmanStarted;
+    PVOID WindowsSubSysProcessId;
+    PVOID InitialCommandProcessId;
 } TERMSRV_SESSION;
 
 typedef struct _TERMSRV_SESSION_FRAME
@@ -135,6 +139,11 @@ typedef struct _TERMSRV_SESSION_MANAGER
     INT SessionCount;
     const TERMSRV_SESSION_BACKEND *Backend;
     PVOID BackendContext;
+    PVOID SmApiPort;
+    LONG LastSessmanStatus;
+    BOOL SessmanConnected;
+    BOOL SessmanUnavailable;
+    BOOL SessmanFallback;
     BOOL RejectAuthentication;
     BOOL RejectAttach;
     CHAR Calls[TERMSRV_RDP_MAX_CALLS][64];
@@ -172,6 +181,9 @@ TermSrvSessionManagerGetDefaultBackend(VOID);
 
 const TERMSRV_SESSION_BACKEND *
 TermSrvSessionManagerGetConsoleBackend(VOID);
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetSessmanBackend(VOID);
 
 BOOL
 TermSrvSessionManagerSelectBackendByName(
