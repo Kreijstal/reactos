@@ -17,6 +17,6 @@ add_executable(termsrv
 
 set_module_type(termsrv win32cui UNICODE)
 target_link_libraries(termsrv termsrv_rdp)
-add_importlibs(termsrv advapi32 ws2_32 msvcrt kernel32 ntdll)
+add_importlibs(termsrv advapi32 user32 ws2_32 msvcrt kernel32 ntdll)
 add_cd_file(TARGET termsrv DESTINATION reactos/system32 FOR all)
 add_registry_inf(termsrv_reg.inf)
