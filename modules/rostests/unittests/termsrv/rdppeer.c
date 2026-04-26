@@ -630,6 +630,39 @@ TestGraphicsOutput(VOID)
 }
 
 static VOID
+TestBgra32ToRdpBitmapData(VOID)
+{
+    static const UCHAR Source[] =
+    {
+        0x10, 0x11, 0x12, 0xff, 0x20, 0x21, 0x22, 0xff,
+        0x30, 0x31, 0x32, 0xff, 0x40, 0x41, 0x42, 0xff
+    };
+    static const UCHAR Expected[] =
+    {
+        0x30, 0x31, 0x32, 0xff, 0x40, 0x41, 0x42, 0xff,
+        0x10, 0x11, 0x12, 0xff, 0x20, 0x21, 0x22, 0xff
+    };
+    UCHAR Destination[sizeof(Source)];
+
+    memset(Destination, 0, sizeof(Destination));
+    ok(TermSrvConvertBgra32ToRdpBitmapData(Source,
+                                           2,
+                                           2,
+                                           2 * 4,
+                                           Destination),
+       "BGRA32 conversion failed\n");
+    ok(memcmp(Destination, Expected, sizeof(Expected)) == 0,
+       "BGRA32 conversion did not produce bottom-up RDP bitmap data\n");
+
+    ok(!TermSrvConvertBgra32ToRdpBitmapData(Source,
+                                            2,
+                                            2,
+                                            2 * 4 - 1,
+                                            Destination),
+       "Invalid source pitch should fail\n");
+}
+
+static VOID
 TestUnknownPacket(VOID)
 {
     TERMSRV_SESSION_MANAGER Manager;
@@ -2810,6 +2843,7 @@ START_TEST(RdpPeer)
     TestFastPathNotNegotiated();
     TestDisconnectLogoffAndReconnect();
     TestGraphicsOutput();
+    TestBgra32ToRdpBitmapData();
     TestUnknownPacket();
     TestRdpBcgrParseConnectionRequest();
     TestRdpBcgrParseMcsConnectInitial();
