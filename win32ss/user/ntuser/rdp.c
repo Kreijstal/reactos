@@ -10,6 +10,7 @@
 #define RDP_CAPTURE_DEFAULT_WIDTH 1024
 #define RDP_CAPTURE_DEFAULT_HEIGHT 768
 #define RDP_CAPTURE_BYTES_PER_PIXEL 4
+#define RDP_INPUT_NORMALIZED_MAX 65535
 
 typedef struct _RDP_CAPTURE_CONTEXT
 {
@@ -147,6 +148,56 @@ RdpFillDeterministicFrame(
             Pixel[3] = 0xff;
         }
     }
+}
+
+static
+ULONG
+RdpGetScreenMetric(
+    _In_ INT Index,
+    _In_ ULONG Fallback)
+{
+    if (gpsi != NULL && gpsi->aiSysMet[Index] > 0)
+        return gpsi->aiSysMet[Index];
+
+    return Fallback;
+}
+
+static
+LONG
+RdpNormalizeCoordinate(
+    _In_ USHORT Coordinate,
+    _In_ ULONG Extent)
+{
+    ULONG Clamped;
+
+    if (Extent <= 1)
+        return 0;
+
+    Clamped = Coordinate;
+    if (Clamped >= Extent)
+        Clamped = Extent - 1;
+
+    return (LONG)((Clamped * RDP_INPUT_NORMALIZED_MAX) / (Extent - 1));
+}
+
+static
+DWORD
+RdpMouseButtonFlagsToMouseInputFlags(
+    _In_ ULONG PointerFlags)
+{
+    DWORD Flags = 0;
+    BOOL Down = (PointerFlags & NTUSER_RDP_MOUSE_FLAG_DOWN) != 0;
+
+    if (PointerFlags & NTUSER_RDP_MOUSE_FLAG_BUTTON1)
+        Flags |= Down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+
+    if (PointerFlags & NTUSER_RDP_MOUSE_FLAG_BUTTON2)
+        Flags |= Down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+
+    if (PointerFlags & NTUSER_RDP_MOUSE_FLAG_BUTTON3)
+        Flags |= Down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+
+    return Flags;
 }
 
 HANDLE
@@ -325,4 +376,135 @@ NtUserRdpCloseSession(
 
     ExFreePoolWithTag(Context, USERTAG_RDP);
     return TRUE;
+}
+
+BOOL
+APIENTRY
+NtUserRdpInjectMouse(
+    _In_ ULONG SessionId,
+    _In_ PNTUSER_RDP_MOUSE_INPUT Input)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    NTUSER_RDP_MOUSE_INPUT LocalInput;
+    MOUSEINPUT MouseInput;
+    BOOL Ret;
+
+    if (Input == NULL)
+    {
+        SetLastNtError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        ProbeForRead(Input, sizeof(*Input), 1);
+        LocalInput = *Input;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+
+    if (LocalInput.Size != sizeof(LocalInput) ||
+        SessionId != 0 ||
+        LocalInput.SessionId != SessionId)
+    {
+        SetLastNtError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlZeroMemory(&MouseInput, sizeof(MouseInput));
+    if (LocalInput.PointerFlags & NTUSER_RDP_MOUSE_FLAG_MOVE)
+    {
+        MouseInput.dx = RdpNormalizeCoordinate(LocalInput.PointerX,
+                                               RdpGetScreenMetric(SM_CXSCREEN,
+                                                                  RDP_CAPTURE_DEFAULT_WIDTH));
+        MouseInput.dy = RdpNormalizeCoordinate(LocalInput.PointerY,
+                                               RdpGetScreenMetric(SM_CYSCREEN,
+                                                                  RDP_CAPTURE_DEFAULT_HEIGHT));
+        MouseInput.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+    }
+
+    MouseInput.dwFlags |= RdpMouseButtonFlagsToMouseInputFlags(LocalInput.PointerFlags);
+    if (MouseInput.dwFlags == 0)
+    {
+        SetLastNtError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    UserEnterExclusive();
+    Ret = UserSendMouseInput(&MouseInput, TRUE);
+    UserLeave();
+
+    if (!Ret)
+        SetLastNtError(STATUS_UNSUCCESSFUL);
+
+    return Ret;
+}
+
+BOOL
+APIENTRY
+NtUserRdpInjectKeyboard(
+    _In_ ULONG SessionId,
+    _In_ PNTUSER_RDP_KEYBOARD_INPUT Input)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    NTUSER_RDP_KEYBOARD_INPUT LocalInput;
+    KEYBDINPUT KeyboardInput;
+    BOOL Ret;
+
+    if (Input == NULL)
+    {
+        SetLastNtError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    _SEH2_TRY
+    {
+        ProbeForRead(Input, sizeof(*Input), 1);
+        LocalInput = *Input;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastNtError(Status);
+        return FALSE;
+    }
+
+    if (LocalInput.Size != sizeof(LocalInput) ||
+        SessionId != 0 ||
+        LocalInput.SessionId != SessionId)
+    {
+        SetLastNtError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlZeroMemory(&KeyboardInput, sizeof(KeyboardInput));
+    KeyboardInput.wScan = LocalInput.KeyCode;
+    KeyboardInput.dwFlags = KEYEVENTF_SCANCODE;
+    if (LocalInput.KeyboardFlags & NTUSER_RDP_KEYBOARD_FLAG_EXTENDED)
+        KeyboardInput.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+    if (LocalInput.KeyboardFlags & NTUSER_RDP_KEYBOARD_FLAG_RELEASE)
+        KeyboardInput.dwFlags |= KEYEVENTF_KEYUP;
+
+    UserEnterExclusive();
+    Ret = UserSendKeyboardInput(&KeyboardInput, TRUE);
+    UserLeave();
+
+    if (!Ret)
+        SetLastNtError(STATUS_UNSUCCESSFUL);
+
+    return Ret;
 }

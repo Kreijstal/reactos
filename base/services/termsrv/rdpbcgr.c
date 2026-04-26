@@ -552,6 +552,10 @@ TermSrvRdpBcgrParseInputEvents(
             InputEvents->FirstPointerX = ReadLe16(&Buffer[12]);
             InputEvents->FirstPointerY = ReadLe16(&Buffer[14]);
         }
+        else
+        {
+            InputEvents->FirstKeyboardCode = ReadLe16(&Buffer[12]);
+        }
     }
 
     return TermSrvRdpBcgrSuccess;
@@ -737,12 +741,17 @@ TermSrvRdpBcgrParseFastPathInputEvents(
         if (Index == 0)
         {
             InputEvents->FirstEventCode = EventCode;
+            InputEvents->FirstEventFlags = EventHeader & 0x1f;
             if (EventCode == FASTPATH_INPUT_EVENT_MOUSE ||
                 EventCode == FASTPATH_INPUT_EVENT_MOUSEX)
             {
                 InputEvents->FirstEventFlags = ReadLe16(&Buffer[Offset]);
                 InputEvents->FirstPointerX = ReadLe16(&Buffer[Offset + 2]);
                 InputEvents->FirstPointerY = ReadLe16(&Buffer[Offset + 4]);
+            }
+            else if (EventCode == FASTPATH_INPUT_EVENT_SCANCODE)
+            {
+                InputEvents->FirstKeyboardCode = Buffer[Offset];
             }
         }
 

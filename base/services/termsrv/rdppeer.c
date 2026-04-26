@@ -10,9 +10,35 @@
 
 #include "termsrv.h"
 
+#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define TERMSRV_RDP_MOUSE_FLAG_MOVE 0x00000800
+#define TERMSRV_RDP_KEYBOARD_FLAG_EXTENDED 0x00000100
+#define TERMSRV_RDP_KEYBOARD_FLAG_RELEASE 0x00008000
+#define TERMSRV_FASTPATH_KEYBOARD_FLAG_RELEASE 0x01
+#define TERMSRV_FASTPATH_KEYBOARD_FLAG_EXTENDED 0x02
+
+typedef struct _TERMSRV_RDP_MOUSE_INPUT
+{
+    ULONG Size;
+    ULONG SessionId;
+    ULONG PointerFlags;
+    USHORT PointerX;
+    USHORT PointerY;
+    ULONG Flags;
+} TERMSRV_RDP_MOUSE_INPUT;
+
+typedef struct _TERMSRV_RDP_KEYBOARD_INPUT
+{
+    ULONG Size;
+    ULONG SessionId;
+    USHORT KeyboardFlags;
+    USHORT KeyCode;
+    ULONG Flags;
+} TERMSRV_RDP_KEYBOARD_INPUT;
 
 static VOID
 RecordCall(
@@ -237,6 +263,7 @@ static BOOL
 DummyInjectMouse(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
+    _In_ ULONG PointerFlags,
     _In_ BOOL HasPointer,
     _In_ INT PointerX,
     _In_ INT PointerY);
@@ -246,6 +273,7 @@ DummyInjectKeyboard(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
     _In_ UINT VirtualKey,
+    _In_ UINT KeyboardFlags,
     _In_ BOOL KeyDown);
 
 static BOOL
@@ -286,6 +314,7 @@ static BOOL
 ConsoleInjectMouse(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
+    _In_ ULONG PointerFlags,
     _In_ BOOL HasPointer,
     _In_ INT PointerX,
     _In_ INT PointerY);
@@ -295,6 +324,7 @@ ConsoleInjectKeyboard(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
     _In_ UINT VirtualKey,
+    _In_ UINT KeyboardFlags,
     _In_ BOOL KeyDown);
 
 static BOOL
@@ -695,10 +725,13 @@ static BOOL
 DummyInjectMouse(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
+    _In_ ULONG PointerFlags,
     _In_ BOOL HasPointer,
     _In_ INT PointerX,
     _In_ INT PointerY)
 {
+    UNREFERENCED_PARAMETER(PointerFlags);
+
     return TermSrvSessionManagerRecordWin32Input(Manager,
                                                 SessionId,
                                                 HasPointer,
@@ -711,9 +744,11 @@ DummyInjectKeyboard(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
     _In_ UINT VirtualKey,
+    _In_ UINT KeyboardFlags,
     _In_ BOOL KeyDown)
 {
     UNREFERENCED_PARAMETER(VirtualKey);
+    UNREFERENCED_PARAMETER(KeyboardFlags);
     UNREFERENCED_PARAMETER(KeyDown);
     return TermSrvSessionManagerRecordWin32Input(Manager, SessionId, FALSE, 0, 0);
 }
@@ -807,14 +842,54 @@ ConsoleCaptureFrame(
 }
 
 static BOOL
+ConsoleTryInjectMouseThroughWin32u(
+    _In_ ULONG SessionId,
+    _In_ ULONG PointerFlags,
+    _In_ INT PointerX,
+    _In_ INT PointerY)
+{
+    HMODULE Win32u;
+    FARPROC Proc;
+    TERMSRV_RDP_MOUSE_INPUT Input;
+    BOOL (WINAPI *NtUserRdpInjectMouse)(_In_ ULONG, _In_ TERMSRV_RDP_MOUSE_INPUT *);
+    BOOL Ret;
+
+    Win32u = LoadLibraryW(L"win32u.dll");
+    if (Win32u == NULL)
+        return FALSE;
+
+    Proc = GetProcAddress(Win32u, "NtUserRdpInjectMouse");
+    if (Proc == NULL)
+    {
+        FreeLibrary(Win32u);
+        return FALSE;
+    }
+
+    ZeroMemory(&Input, sizeof(Input));
+    Input.Size = sizeof(Input);
+    Input.SessionId = SessionId;
+    Input.PointerFlags = PointerFlags | TERMSRV_RDP_MOUSE_FLAG_MOVE;
+    Input.PointerX = (USHORT)PointerX;
+    Input.PointerY = (USHORT)PointerY;
+
+    NtUserRdpInjectMouse = (BOOL (WINAPI *)(ULONG, TERMSRV_RDP_MOUSE_INPUT *))Proc;
+    Ret = NtUserRdpInjectMouse(SessionId, &Input);
+    FreeLibrary(Win32u);
+    return Ret;
+}
+
+static BOOL
 ConsoleInjectMouse(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
+    _In_ ULONG PointerFlags,
     _In_ BOOL HasPointer,
     _In_ INT PointerX,
     _In_ INT PointerY)
 {
     UNREFERENCED_PARAMETER(SessionId);
+
+    ConsoleTryInjectMouseThroughWin32u(0, PointerFlags, PointerX, PointerY);
 
     return TermSrvSessionManagerRecordWin32Input(Manager,
                                                 0,
@@ -824,15 +899,54 @@ ConsoleInjectMouse(
 }
 
 static BOOL
+ConsoleTryInjectKeyboardThroughWin32u(
+    _In_ ULONG SessionId,
+    _In_ UINT ScanCode,
+    _In_ UINT KeyboardFlags)
+{
+    HMODULE Win32u;
+    FARPROC Proc;
+    TERMSRV_RDP_KEYBOARD_INPUT Input;
+    BOOL (WINAPI *NtUserRdpInjectKeyboard)(_In_ ULONG, _In_ TERMSRV_RDP_KEYBOARD_INPUT *);
+    BOOL Ret;
+
+    Win32u = LoadLibraryW(L"win32u.dll");
+    if (Win32u == NULL)
+        return FALSE;
+
+    Proc = GetProcAddress(Win32u, "NtUserRdpInjectKeyboard");
+    if (Proc == NULL)
+    {
+        FreeLibrary(Win32u);
+        return FALSE;
+    }
+
+    ZeroMemory(&Input, sizeof(Input));
+    Input.Size = sizeof(Input);
+    Input.SessionId = SessionId;
+    Input.KeyboardFlags = (USHORT)KeyboardFlags;
+    Input.KeyCode = (USHORT)ScanCode;
+
+    NtUserRdpInjectKeyboard = (BOOL (WINAPI *)(ULONG, TERMSRV_RDP_KEYBOARD_INPUT *))Proc;
+    Ret = NtUserRdpInjectKeyboard(SessionId, &Input);
+    FreeLibrary(Win32u);
+    return Ret;
+}
+
+static BOOL
 ConsoleInjectKeyboard(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
     _In_ UINT VirtualKey,
+    _In_ UINT KeyboardFlags,
     _In_ BOOL KeyDown)
 {
     UNREFERENCED_PARAMETER(SessionId);
-    UNREFERENCED_PARAMETER(VirtualKey);
     UNREFERENCED_PARAMETER(KeyDown);
+
+    ConsoleTryInjectKeyboardThroughWin32u(0,
+                                          VirtualKey,
+                                          KeyboardFlags);
 
     return TermSrvSessionManagerRecordWin32Input(Manager, 0, FALSE, 0, 0);
 }
@@ -1072,10 +1186,16 @@ TermSrvRdpPeerReceive(
         HasMouse = (strstr(Packet, "mouse=1") != NULL);
         if (HasMouse)
         {
+            ULONG PointerFlags;
+
+            PointerFlags = (ULONG)ParseIntAfter(Packet,
+                                                "flags=",
+                                                TERMSRV_RDP_MOUSE_FLAG_MOVE);
             if (Backend->InjectMouse != NULL)
             {
                 Backend->InjectMouse(Manager,
                                      Peer->SessionId,
+                                     PointerFlags,
                                      TRUE,
                                      ParseIntAfter(Packet, "x=", 0),
                                      ParseIntAfter(Packet, "y=", 0));
@@ -1083,10 +1203,14 @@ TermSrvRdpPeerReceive(
         }
         else if (Backend->InjectKeyboard != NULL)
         {
+            UINT KeyboardFlags;
+
+            KeyboardFlags = (UINT)ParseIntAfter(Packet, "flags=", 0);
             Backend->InjectKeyboard(Manager,
                                     Peer->SessionId,
                                     (UINT)ParseIntAfter(Packet, "scancode=", 0),
-                                    TRUE);
+                                    KeyboardFlags,
+                                    (KeyboardFlags & TERMSRV_RDP_KEYBOARD_FLAG_RELEASE) == 0);
         }
         return TermSrvRdpSuccess;
     }
@@ -1106,10 +1230,16 @@ TermSrvRdpPeerReceive(
         HasMouse = (strstr(Packet, "mouse=1") != NULL);
         if (HasMouse)
         {
+            ULONG PointerFlags;
+
+            PointerFlags = (ULONG)ParseIntAfter(Packet,
+                                                "flags=",
+                                                TERMSRV_RDP_MOUSE_FLAG_MOVE);
             if (Backend->InjectMouse != NULL)
             {
                 Backend->InjectMouse(Manager,
                                      Peer->SessionId,
+                                     PointerFlags,
                                      TRUE,
                                      ParseIntAfter(Packet, "x=", 0),
                                      ParseIntAfter(Packet, "y=", 0));
@@ -1117,10 +1247,20 @@ TermSrvRdpPeerReceive(
         }
         else if (Backend->InjectKeyboard != NULL)
         {
+            UINT KeyboardFlags;
+            UINT FastPathKeyboardFlags;
+
+            FastPathKeyboardFlags = (UINT)ParseIntAfter(Packet, "flags=", 0);
+            KeyboardFlags = 0;
+            if (FastPathKeyboardFlags & TERMSRV_FASTPATH_KEYBOARD_FLAG_RELEASE)
+                KeyboardFlags |= TERMSRV_RDP_KEYBOARD_FLAG_RELEASE;
+            if (FastPathKeyboardFlags & TERMSRV_FASTPATH_KEYBOARD_FLAG_EXTENDED)
+                KeyboardFlags |= TERMSRV_RDP_KEYBOARD_FLAG_EXTENDED;
             Backend->InjectKeyboard(Manager,
                                     Peer->SessionId,
                                     (UINT)ParseIntAfter(Packet, "scancode=", 0),
-                                    TRUE);
+                                    KeyboardFlags,
+                                    (KeyboardFlags & TERMSRV_RDP_KEYBOARD_FLAG_RELEASE) == 0);
         }
         return TermSrvRdpSuccess;
     }
