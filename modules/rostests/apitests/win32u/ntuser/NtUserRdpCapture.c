@@ -14,6 +14,7 @@ START_TEST(NtUserRdpCapture)
     PBYTE Pixels;
     ULONG BytesReturned;
     ULONG RequiredSize;
+    ULONG FirstFrameId;
     BOOL Ret;
 
     RtlInitUnicodeString(&WinSta, L"WinSta0");
@@ -53,6 +54,18 @@ START_TEST(NtUserRdpCapture)
         ok(Ret, "NtUserRdpCaptureFrame failed with full pixel buffer\n");
         ok(BytesReturned == RequiredSize, "Unexpected bytes returned %lu\n", BytesReturned);
         ok(Pixels[3] == 0xff, "Unexpected first pixel alpha %#x\n", Pixels[3]);
+
+        FirstFrameId = Frame.FrameId;
+        BytesReturned = 0;
+        RtlZeroMemory(Pixels, RequiredSize);
+        Ret = NtUserRdpCaptureFrame(Session, &Frame, Pixels, RequiredSize, &BytesReturned);
+        ok(Ret, "Second NtUserRdpCaptureFrame failed with full pixel buffer\n");
+        ok(BytesReturned == RequiredSize, "Unexpected second bytes returned %lu\n", BytesReturned);
+        ok(Frame.FrameId > FirstFrameId,
+           "Expected increasing frame id, got %lu after %lu\n",
+           Frame.FrameId,
+           FirstFrameId);
+        ok(Pixels[3] == 0xff, "Unexpected second first pixel alpha %#x\n", Pixels[3]);
         HeapFree(GetProcessHeap(), 0, Pixels);
     }
 
