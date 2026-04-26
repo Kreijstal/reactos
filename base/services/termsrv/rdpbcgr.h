@@ -106,6 +106,14 @@ typedef struct _TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD
     SIZE_T PayloadLength;
 } TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD;
 
+typedef struct _TERMSRV_RDPBCGR_INPUT_EVENTS
+{
+    USHORT NumberEvents;
+    ULONG FirstEventTime;
+    USHORT FirstMessageType;
+    USHORT FirstDeviceFlags;
+} TERMSRV_RDPBCGR_INPUT_EVENTS;
+
 #define TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH 8
 #define TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS 31
 
@@ -167,6 +175,12 @@ TermSrvRdpBcgrParseClientInfoPayload(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD *ClientInfo);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseInputEvents(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_INPUT_EVENTS *InputEvents);
 
 /*
  * Parses a small scaffold static virtual channel list:
