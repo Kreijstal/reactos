@@ -64,6 +64,16 @@ ActivatePeer(
     ActivatePeerWithFastPath(Peer, TRUE);
 }
 
+static VOID
+InitTestSessionManager(
+    _Out_ TERMSRV_SESSION_MANAGER *Manager)
+{
+    TermSrvSessionManagerInit(Manager);
+    Manager->SessmanUnavailable = TRUE;
+}
+
+#define TermSrvSessionManagerInit InitTestSessionManager
+
 typedef struct _TEST_SESSION_BACKEND_CONTEXT
 {
     INT CreateOrAttachCount;
@@ -349,8 +359,10 @@ TestBackendSelectionAndBehavior(VOID)
     memset(&Context, 0, sizeof(Context));
     TermSrvSessionManagerInit(&Manager);
 
-    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
-       "Default backend was not selected\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetSessmanBackend(),
+       "Sessman backend was not selected by default\n");
+    ok(TermSrvSessionManagerGetDefaultBackend() == TermSrvSessionManagerGetSessmanBackend(),
+       "Default backend is not sessman\n");
 
     TermSrvSessionManagerSetBackend(&Manager, &TestSessionBackend, &Context);
     ok(TermSrvSessionManagerGetBackend(&Manager) == &TestSessionBackend,
@@ -418,6 +430,36 @@ TestBackendSelectionAndBehavior(VOID)
     TermSrvSessionManagerSetBackend(&Manager, NULL, NULL);
     ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
        "NULL backend did not restore default backend\n");
+}
+
+static VOID
+TestSessmanBackendFallback(VOID)
+{
+    TERMSRV_SESSION_MANAGER Manager;
+    TERMSRV_RDP_PEER Peer;
+    TERMSRV_SESSION *Session;
+
+    TermSrvSessionManagerInit(&Manager);
+    ok(TermSrvSessionManagerSelectBackendByName(&Manager, L"sessman"),
+       "Sessman backend selection failed\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetSessmanBackend(),
+       "Sessman backend was not selected by name\n");
+
+    Manager.SessmanUnavailable = TRUE;
+    TermSrvRdpPeerInit(&Peer, &Manager);
+    ActivatePeer(&Peer);
+
+    ok(Manager.SessmanFallback,
+       "Sessman backend did not report deterministic fallback\n");
+    ok(Peer.SessionId == 1,
+       "Sessman fallback attached peer to session %d\n", Peer.SessionId);
+    Session = TermSrvSessionManagerFindSession(&Manager, Peer.SessionId);
+    ok(Session != NULL && Session->State == TermSrvSessionConnected,
+       "Sessman fallback did not connect the session\n");
+    ok(Session != NULL && Session->Win32Attached,
+       "Sessman fallback did not attach Win32 state\n");
+    ok(Session != NULL && !Session->SessmanStarted,
+       "Sessman fallback should not mark a real SMSS session started\n");
 }
 
 static VOID
@@ -510,6 +552,11 @@ TestBackendSelectionFallback(VOID)
     ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
        "Unknown backend did not fall back to default\n");
 
+    ok(TermSrvSessionManagerSelectBackendByName(&Manager, L"dummy"),
+       "Dummy backend selection failed\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) != TermSrvSessionManagerGetDefaultBackend(),
+       "Dummy backend unexpectedly matched default\n");
+
     ok(TermSrvSessionManagerSelectBackendByName(&Manager, NULL),
        "NULL backend selection should select default\n");
     ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
@@ -543,6 +590,8 @@ TestInputAndVirtualChannels(VOID)
     TERMSRV_SESSION_FRAME Frame;
 
     TermSrvSessionManagerInit(&Manager);
+    ok(TermSrvSessionManagerSelectBackendByName(&Manager, L"dummy"),
+       "Dummy backend selection failed\n");
     TermSrvRdpPeerInit(&Peer, &Manager);
     ActivatePeer(&Peer);
     Session = TermSrvSessionManagerFindSession(&Manager, Peer.SessionId);
@@ -641,6 +690,8 @@ TestGraphicsOutput(VOID)
     TERMSRV_RDP_PEER Peer;
 
     TermSrvSessionManagerInit(&Manager);
+    ok(TermSrvSessionManagerSelectBackendByName(&Manager, L"dummy"),
+       "Dummy backend selection failed\n");
     TermSrvRdpPeerInit(&Peer, &Manager);
 
     ok(TermSrvRdpPeerSendBitmapUpdate(&Peer, 10, 10) == TermSrvRdpGraphicsBeforeActive,
@@ -2887,6 +2938,7 @@ START_TEST(RdpPeer)
     TestAuthenticationFailure();
     TestAttachFailure();
     TestBackendSelectionAndBehavior();
+    TestSessmanBackendFallback();
     TestConsoleBackendBinding();
     TestBackendSelectionFallback();
     TestClientInfoBeforeSecurity();
