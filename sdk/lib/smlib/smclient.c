@@ -353,8 +353,8 @@ SmLoadDeferedSubsystem(
  * @param[in]   SmApiPort
  * Port handle returned by SmConnectToSm().
  *
- * @param[out]  pMuSessionId
- * Pointer to a variable that receives the session ID of the new
+ * @param[in,out]  pMuSessionId
+ * Pointer to the requested session ID. Receives the session ID of the new
  * Terminal Services session that has been created.
  *
  * @param[in]   CommandLine
@@ -375,7 +375,7 @@ NTSTATUS
 NTAPI
 SmStartCsr(
     _In_ HANDLE SmApiPort,
-    _Out_ PULONG pMuSessionId,
+    _Inout_ PULONG pMuSessionId,
     _In_opt_ PUNICODE_STRING CommandLine,
     _Out_ PHANDLE pWindowsSubSysProcessId,
     _Out_ PHANDLE pInitialCommandProcessId)
@@ -396,7 +396,11 @@ SmStartCsr(
     }
 #endif
 
+    if (!pMuSessionId || !pWindowsSubSysProcessId || !pInitialCommandProcessId)
+        return STATUS_INVALID_PARAMETER;
+
     /* Set the message data */
+    StartCsr->MuSessionId = *pMuSessionId;
     if (CommandLine)
     {
         /* Validate CommandLine's length */

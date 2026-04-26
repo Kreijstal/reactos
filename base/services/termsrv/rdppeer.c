@@ -8,18 +8,31 @@
  * it does not parse MS-RDPBCGR byte streams yet.
  */
 
+#define WIN32_NO_STATUS
 #include "termsrv.h"
 
 #include <windows.h>
+#undef WIN32_NO_STATUS
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define NTOS_MODE_USER
+#include <ndk/lpctypes.h>
+#include <ndk/lpcfuncs.h>
+#include <ndk/obfuncs.h>
+#include <ndk/rtlfuncs.h>
+#include <sm/smmsg.h>
 
 #define TERMSRV_RDP_MOUSE_FLAG_MOVE 0x00000800
 #define TERMSRV_RDP_KEYBOARD_FLAG_EXTENDED 0x00000100
 #define TERMSRV_RDP_KEYBOARD_FLAG_RELEASE 0x00008000
 #define TERMSRV_FASTPATH_KEYBOARD_FLAG_RELEASE 0x01
 #define TERMSRV_FASTPATH_KEYBOARD_FLAG_EXTENDED 0x02
+
+#ifndef STATUS_OBJECT_NAME_NOT_FOUND
+#define STATUS_OBJECT_NAME_NOT_FOUND ((NTSTATUS)0xC0000034)
+#endif
 
 typedef struct _TERMSRV_RDP_MOUSE_INPUT
 {
@@ -175,6 +188,7 @@ InitializeSessionRecord(
 {
     memset(Session, 0, sizeof(*Session));
     Session->SessionId = SessionId;
+    Session->Win32SessionId = (ULONG)SessionId;
     Session->State = State;
     Session->DesktopWidth = 1024;
     Session->DesktopHeight = 768;
@@ -207,6 +221,7 @@ SetConsoleSessionBinding(
     _In_z_ PCWSTR ClientName)
 {
     Session->SessionId = 0;
+    Session->Win32SessionId = 0;
     wcsncpy(Session->UserIdentity, UserIdentity, ARRAYSIZE(Session->UserIdentity) - 1);
     Session->UserIdentity[ARRAYSIZE(Session->UserIdentity) - 1] = UNICODE_NULL;
     wcsncpy(Session->ClientName, ClientName, ARRAYSIZE(Session->ClientName) - 1);
@@ -337,6 +352,24 @@ ConsoleClipboard(
     _In_ SIZE_T OutputLength,
     _Out_ SIZE_T *BytesWritten);
 
+static BOOL
+SessmanCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId);
+
+static BOOL
+SessmanDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
+static BOOL
+SessmanLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
 static const TERMSRV_SESSION_BACKEND DummySessionBackend =
 {
     "dummy",
@@ -359,6 +392,18 @@ static const TERMSRV_SESSION_BACKEND ConsoleSessionBackend =
     ConsoleInjectMouse,
     ConsoleInjectKeyboard,
     ConsoleClipboard
+};
+
+static const TERMSRV_SESSION_BACKEND SessmanSessionBackend =
+{
+    "sessman",
+    SessmanCreateOrAttach,
+    SessmanDisconnect,
+    SessmanLogoff,
+    ConsoleCaptureFrame,
+    ConsoleInjectMouse,
+    ConsoleInjectKeyboard,
+    DummyClipboard
 };
 
 TERMSRV_SESSION *
@@ -472,6 +517,7 @@ TermSrvSessionManagerInit(
 {
     memset(Manager, 0, sizeof(*Manager));
     Manager->Backend = TermSrvSessionManagerGetDefaultBackend();
+    Manager->LastSessmanStatus = STATUS_SUCCESS;
     Manager->SessionCount = 1;
     InitializeSessionRecord(&Manager->Sessions[0], 1, TermSrvSessionIdle);
     Manager->LastInputSessionId = -1;
@@ -481,13 +527,19 @@ TermSrvSessionManagerInit(
 const TERMSRV_SESSION_BACKEND *
 TermSrvSessionManagerGetDefaultBackend(VOID)
 {
-    return &DummySessionBackend;
+    return &SessmanSessionBackend;
 }
 
 const TERMSRV_SESSION_BACKEND *
 TermSrvSessionManagerGetConsoleBackend(VOID)
 {
     return &ConsoleSessionBackend;
+}
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetSessmanBackend(VOID)
+{
+    return &SessmanSessionBackend;
 }
 
 BOOL
@@ -507,11 +559,20 @@ TermSrvSessionManagerSelectBackendByName(
             return TRUE;
         }
 
-        if (_wcsicmp(BackendName, L"dummy") != 0)
+        if (_wcsicmp(BackendName, L"sessman") == 0)
         {
-            TermSrvSessionManagerSetBackend(Manager, NULL, NULL);
-            return FALSE;
+            TermSrvSessionManagerSetBackend(Manager, &SessmanSessionBackend, NULL);
+            return TRUE;
         }
+
+        if (_wcsicmp(BackendName, L"dummy") == 0)
+        {
+            TermSrvSessionManagerSetBackend(Manager, &DummySessionBackend, NULL);
+            return TRUE;
+        }
+
+        TermSrvSessionManagerSetBackend(Manager, NULL, NULL);
+        return FALSE;
     }
 
     TermSrvSessionManagerSetBackend(Manager, NULL, NULL);
@@ -775,6 +836,174 @@ DummyClipboard(
 
     *BytesWritten = 0;
     return TRUE;
+}
+
+static BOOL
+SessmanConnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager)
+{
+    HANDLE SmApiPort = NULL;
+    NTSTATUS Status;
+
+    if (Manager == NULL)
+        return FALSE;
+
+    if (Manager->SessmanConnected)
+        return TRUE;
+
+    if (Manager->SessmanUnavailable)
+        return FALSE;
+
+    Status = SmConnectToSm(NULL, NULL, IMAGE_SUBSYSTEM_UNKNOWN, &SmApiPort);
+    Manager->LastSessmanStatus = Status;
+    if (!NT_SUCCESS(Status))
+    {
+        Manager->SessmanUnavailable = TRUE;
+        return FALSE;
+    }
+
+    Manager->SmApiPort = SmApiPort;
+    Manager->SessmanConnected = TRUE;
+    return TRUE;
+}
+
+static BOOL
+SessmanFallbackAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId)
+{
+    Manager->SessmanFallback = TRUE;
+    if (Manager->LastSessmanStatus == STATUS_SUCCESS)
+        Manager->LastSessmanStatus = STATUS_OBJECT_NAME_NOT_FOUND;
+
+    return DummyCreateOrAttach(Manager,
+                               SessionId,
+                               UserIdentity,
+                               ClientName,
+                               AttachedSessionId);
+}
+
+static BOOL
+SessmanAttachExisting(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _Inout_ TERMSRV_SESSION *Session,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId)
+{
+    if (!TermSrvSessionManagerAttachWin32Session(Manager,
+                                                 Session->SessionId,
+                                                 UserIdentity,
+                                                 ClientName))
+    {
+        return FALSE;
+    }
+
+    *AttachedSessionId = Session->SessionId;
+    return TRUE;
+}
+
+static BOOL
+SessmanCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId)
+{
+    TERMSRV_SESSION *Session;
+    ULONG MuSessionId;
+    HANDLE WindowsSubSysProcessId = NULL;
+    HANDLE InitialCommandProcessId = NULL;
+    NTSTATUS Status;
+
+    if (Manager == NULL || UserIdentity == NULL || ClientName == NULL || AttachedSessionId == NULL)
+        return FALSE;
+
+    Session = FindSessionInternal(Manager, SessionId);
+    if (Session == NULL)
+        return FALSE;
+
+    if (Session->SessmanStarted)
+        return SessmanAttachExisting(Manager, Session, UserIdentity, ClientName, AttachedSessionId);
+
+    if (!SessmanConnect(Manager))
+        return SessmanFallbackAttach(Manager, SessionId, UserIdentity, ClientName, AttachedSessionId);
+
+    MuSessionId = (ULONG)SessionId;
+    Status = SmStartCsr((HANDLE)Manager->SmApiPort,
+                        &MuSessionId,
+                        NULL,
+                        &WindowsSubSysProcessId,
+                        &InitialCommandProcessId);
+    Manager->LastSessmanStatus = Status;
+    if (!NT_SUCCESS(Status))
+        return SessmanFallbackAttach(Manager, SessionId, UserIdentity, ClientName, AttachedSessionId);
+
+    if ((INT)MuSessionId != SessionId)
+    {
+        TERMSRV_SESSION *ExistingSession = FindSessionInternal(Manager, (INT)MuSessionId);
+        if (ExistingSession != NULL)
+        {
+            Session = ExistingSession;
+        }
+        else
+        {
+            Session->SessionId = (INT)MuSessionId;
+        }
+    }
+
+    Session->Win32SessionId = MuSessionId;
+    Session->SessmanStarted = TRUE;
+    Session->WindowsSubSysProcessId = WindowsSubSysProcessId;
+    Session->InitialCommandProcessId = InitialCommandProcessId;
+
+    if (!SessmanAttachExisting(Manager, Session, UserIdentity, ClientName, AttachedSessionId))
+        return FALSE;
+
+    Manager->SessmanFallback = FALSE;
+    return TRUE;
+}
+
+static BOOL
+SessmanDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  SessionId,
+                                                  TermSrvSessionDisconnected);
+}
+
+static BOOL
+SessmanLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    TERMSRV_SESSION *Session;
+    NTSTATUS Status;
+
+    if (Manager == NULL)
+        return FALSE;
+
+    Session = FindSessionInternal(Manager, SessionId);
+    if (Session != NULL &&
+        Session->SessmanStarted &&
+        Manager->SessmanConnected &&
+        Manager->SmApiPort != NULL)
+    {
+        Status = SmStopCsr((HANDLE)Manager->SmApiPort, Session->Win32SessionId);
+        Manager->LastSessmanStatus = Status;
+        if (NT_SUCCESS(Status))
+            Session->SessmanStarted = FALSE;
+    }
+
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  SessionId,
+                                                  TermSrvSessionLoggedOff);
 }
 
 static BOOL
