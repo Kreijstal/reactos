@@ -74,6 +74,10 @@ typedef struct _TEST_SESSION_BACKEND_CONTEXT
     INT InjectKeyboardCount;
     INT ClipboardCount;
     INT LastSessionId;
+    ULONG LastPointerFlags;
+    UINT LastKeyboardCode;
+    UINT LastKeyboardFlags;
+    BOOL LastKeyDown;
     BOOL FailCreateOrAttach;
 } TEST_SESSION_BACKEND_CONTEXT;
 
@@ -149,6 +153,7 @@ static BOOL
 TestBackendInjectMouse(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
+    _In_ ULONG PointerFlags,
     _In_ BOOL HasPointer,
     _In_ INT PointerX,
     _In_ INT PointerY)
@@ -157,6 +162,7 @@ TestBackendInjectMouse(
 
     Context->InjectMouseCount++;
     Context->LastSessionId = SessionId;
+    Context->LastPointerFlags = PointerFlags;
     return TermSrvSessionManagerRecordWin32Input(Manager,
                                                 SessionId,
                                                 HasPointer,
@@ -169,15 +175,16 @@ TestBackendInjectKeyboard(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
     _In_ UINT VirtualKey,
+    _In_ UINT KeyboardFlags,
     _In_ BOOL KeyDown)
 {
     TEST_SESSION_BACKEND_CONTEXT *Context = (TEST_SESSION_BACKEND_CONTEXT *)Manager->BackendContext;
 
-    UNREFERENCED_PARAMETER(VirtualKey);
-    UNREFERENCED_PARAMETER(KeyDown);
-
     Context->InjectKeyboardCount++;
     Context->LastSessionId = SessionId;
+    Context->LastKeyboardCode = VirtualKey;
+    Context->LastKeyboardFlags = KeyboardFlags;
+    Context->LastKeyDown = KeyDown;
     return TermSrvSessionManagerRecordWin32Input(Manager, SessionId, FALSE, 0, 0);
 }
 
@@ -360,11 +367,36 @@ TestBackendSelectionAndBehavior(VOID)
        "Mouse input failed\n");
     ok(Context.InjectMouseCount == 1,
        "InjectMouse was called %d times\n", Context.InjectMouseCount);
+    ok(Context.LastPointerFlags == 0x0800,
+       "Unexpected mouse flags 0x%lx\n", Context.LastPointerFlags);
 
     ok(TermSrvRdpPeerReceive(&Peer, "SLOW_INPUT scancode=30") == TermSrvRdpSuccess,
        "Keyboard input failed\n");
     ok(Context.InjectKeyboardCount == 1,
        "InjectKeyboard was called %d times\n", Context.InjectKeyboardCount);
+    ok(Context.LastKeyboardCode == 30 && Context.LastKeyboardFlags == 0 && Context.LastKeyDown,
+       "Unexpected keyboard input code=%u flags=0x%x down=%d\n",
+       Context.LastKeyboardCode,
+       Context.LastKeyboardFlags,
+       Context.LastKeyDown);
+    ok(TermSrvRdpPeerReceive(&Peer, "SLOW_INPUT scancode=30 flags=32768") == TermSrvRdpSuccess,
+       "Keyboard release input failed\n");
+    ok(Context.InjectKeyboardCount == 2,
+       "InjectKeyboard was called %d times after release\n", Context.InjectKeyboardCount);
+    ok(Context.LastKeyboardCode == 30 && Context.LastKeyboardFlags == 32768 && !Context.LastKeyDown,
+       "Unexpected keyboard release code=%u flags=0x%x down=%d\n",
+       Context.LastKeyboardCode,
+       Context.LastKeyboardFlags,
+       Context.LastKeyDown);
+    ok(TermSrvRdpPeerReceive(&Peer, "FAST_INPUT scancode=30 flags=3") == TermSrvRdpSuccess,
+       "Fast keyboard release input failed\n");
+    ok(Context.LastKeyboardCode == 30 &&
+       Context.LastKeyboardFlags == 0x8100 &&
+       !Context.LastKeyDown,
+       "Unexpected fast keyboard release code=%u flags=0x%x down=%d\n",
+       Context.LastKeyboardCode,
+       Context.LastKeyboardFlags,
+       Context.LastKeyDown);
 
     ok(TermSrvRdpPeerSendBitmapUpdate(&Peer, 10, 10) == TermSrvRdpSuccess,
        "Bitmap update through backend failed\n");
@@ -1446,6 +1478,8 @@ TestRdpBcgrParseInputEvents(VOID)
        "Unexpected first input message type 0x%x\n", Parsed.FirstMessageType);
     ok(Parsed.FirstDeviceFlags == 0x001e,
        "Unexpected first input device flags 0x%x\n", Parsed.FirstDeviceFlags);
+    ok(Parsed.FirstKeyboardCode == 0x001e,
+       "Unexpected first input keyboard code 0x%x\n", Parsed.FirstKeyboardCode);
 
     ok(TermSrvRdpBcgrParseInputEvents(TwoInputEvents,
                                       sizeof(TwoInputEvents),
@@ -1573,6 +1607,8 @@ TestRdpBcgrParseShareDataInputPdu(VOID)
        "Unexpected slow-path input event count %u\n", InputEvents.NumberEvents);
     ok(InputEvents.FirstMessageType == 0x0004,
        "Unexpected slow-path input message type 0x%x\n", InputEvents.FirstMessageType);
+    ok(InputEvents.FirstKeyboardCode == 0x001e,
+       "Unexpected slow-path input keyboard code 0x%x\n", InputEvents.FirstKeyboardCode);
 
     ok(TermSrvRdpBcgrParseShareDataPdu(ControlPdu,
                                        sizeof(ControlPdu),
@@ -1626,6 +1662,12 @@ TestRdpBcgrParseFastPathInputEvents(VOID)
         0x00, 0x08,
         0x34, 0x12
     };
+    static const UCHAR KeyboardInput[] =
+    {
+        0x04, 0x04,
+        0x01,
+        0x1e
+    };
     TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS Parsed;
 
     ok(TermSrvRdpBcgrParseFastPathInputEvents(MouseInput,
@@ -1647,6 +1689,15 @@ TestRdpBcgrParseFastPathInputEvents(VOID)
                                               sizeof(LongLengthMouseInput),
                                               &Parsed) == TermSrvRdpBcgrSuccess,
        "Long-length fast-path mouse input should parse\n");
+    ok(TermSrvRdpBcgrParseFastPathInputEvents(KeyboardInput,
+                                              sizeof(KeyboardInput),
+                                              &Parsed) == TermSrvRdpBcgrSuccess,
+       "Fast-path keyboard input should parse\n");
+    ok(Parsed.FirstEventCode == 0 && Parsed.FirstEventFlags == 1 && Parsed.FirstKeyboardCode == 0x1e,
+       "Unexpected fast-path keyboard event code=%u flags=0x%x key=0x%x\n",
+       Parsed.FirstEventCode,
+       Parsed.FirstEventFlags,
+       Parsed.FirstKeyboardCode);
     ok(TermSrvRdpBcgrParseFastPathInputEvents(ShortMouseInput,
                                               sizeof(ShortMouseInput),
                                               &Parsed) == TermSrvRdpBcgrNeedMoreData,

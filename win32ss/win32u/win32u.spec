@@ -597,6 +597,8 @@
 @ stdcall NtUserRdpOpenSession(long ptr ptr)
 @ stdcall NtUserRdpCaptureFrame(ptr ptr ptr long ptr)
 @ stdcall NtUserRdpCloseSession(ptr)
+@ stdcall NtUserRdpInjectMouse(long ptr)
+@ stdcall NtUserRdpInjectKeyboard(long ptr)
 @ stdcall NtUserWaitForMsgAndEvent(long)
 @ stdcall NtUserWaitMessage()
 @ stdcall NtUserWin32PoolAllocationStats(long long long long long long)

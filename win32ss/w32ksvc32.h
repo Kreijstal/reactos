@@ -753,3 +753,5 @@
     SVC_(GdiDdDDISharedPrimaryUnLockNotification, 1)
     SVC_(GdiDdDDISignalSynchronizationObject, 1)
     SVC_(GdiDdDDIWaitForSynchronizationObject, 1)
+    SVC_(UserRdpInjectMouse, 2)
+    SVC_(UserRdpInjectKeyboard, 2)
