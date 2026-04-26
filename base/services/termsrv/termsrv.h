@@ -107,6 +107,7 @@ typedef struct _TERMSRV_SESSION_BACKEND
     (*InjectMouse)(
         _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
         _In_ INT SessionId,
+        _In_ ULONG PointerFlags,
         _In_ BOOL HasPointer,
         _In_ INT PointerX,
         _In_ INT PointerY);
@@ -115,6 +116,7 @@ typedef struct _TERMSRV_SESSION_BACKEND
         _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
         _In_ INT SessionId,
         _In_ UINT VirtualKey,
+        _In_ UINT KeyboardFlags,
         _In_ BOOL KeyDown);
     BOOL
     (*Clipboard)(
