@@ -168,6 +168,14 @@ TermSrvSessionManagerInit(
 const TERMSRV_SESSION_BACKEND *
 TermSrvSessionManagerGetDefaultBackend(VOID);
 
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetConsoleBackend(VOID);
+
+BOOL
+TermSrvSessionManagerSelectBackendByName(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_opt_z_ PCWSTR BackendName);
+
 VOID
 TermSrvSessionManagerSetBackend(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
