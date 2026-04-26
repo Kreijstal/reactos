@@ -174,6 +174,67 @@ SetRdpWinStationName(
     Name[NameLength - 1] = UNICODE_NULL;
 }
 
+static BOOL
+DummyCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId);
+
+static BOOL
+DummyDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
+static BOOL
+DummyLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
+static BOOL
+DummyCaptureFrame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame);
+
+static BOOL
+DummyInjectMouse(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY);
+
+static BOOL
+DummyInjectKeyboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ UINT VirtualKey,
+    _In_ BOOL KeyDown);
+
+static BOOL
+DummyClipboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_reads_bytes_opt_(InputLength) const VOID *Input,
+    _In_ SIZE_T InputLength,
+    _Out_writes_bytes_to_opt_(OutputLength, *BytesWritten) VOID *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten);
+
+static const TERMSRV_SESSION_BACKEND DummySessionBackend =
+{
+    "dummy",
+    DummyCreateOrAttach,
+    DummyDisconnect,
+    DummyLogoff,
+    DummyCaptureFrame,
+    DummyInjectMouse,
+    DummyInjectKeyboard,
+    DummyClipboard
+};
+
 TERMSRV_SESSION *
 TermSrvSessionManagerFindSession(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
@@ -242,23 +303,28 @@ static TERMSRV_RDP_STATUS
 AttachConnection(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
-    _In_z_ PCWSTR UserIdentity)
+    _In_z_ PCWSTR UserIdentity,
+    _Out_ INT *AttachedSessionId)
 {
     TERMSRV_SESSION *Session;
+    const TERMSRV_SESSION_BACKEND *Backend;
 
     RecordCall(Manager, "attach_connection");
 
-    if (Manager->RejectAttach)
+    if (AttachedSessionId == NULL || Manager->RejectAttach)
         return TermSrvRdpAttachFailed;
 
     Session = FindSessionInternal(Manager, SessionId);
     if (Session == NULL)
         return TermSrvRdpAttachFailed;
 
-    if (!TermSrvSessionManagerAttachWin32Session(Manager,
-                                                 SessionId,
-                                                 UserIdentity,
-                                                 L"RDP client"))
+    Backend = TermSrvSessionManagerGetBackend(Manager);
+    if (Backend->CreateOrAttach == NULL ||
+        !Backend->CreateOrAttach(Manager,
+                                 SessionId,
+                                 UserIdentity,
+                                 L"RDP client",
+                                 AttachedSessionId))
     {
         return TermSrvRdpAttachFailed;
     }
@@ -271,10 +337,40 @@ TermSrvSessionManagerInit(
     _Out_ TERMSRV_SESSION_MANAGER *Manager)
 {
     memset(Manager, 0, sizeof(*Manager));
+    Manager->Backend = TermSrvSessionManagerGetDefaultBackend();
     Manager->SessionCount = 1;
     InitializeSessionRecord(&Manager->Sessions[0], 1, TermSrvSessionIdle);
     Manager->LastInputSessionId = -1;
     Manager->LastChannelSessionId = -1;
+}
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetDefaultBackend(VOID)
+{
+    return &DummySessionBackend;
+}
+
+VOID
+TermSrvSessionManagerSetBackend(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_opt_ const TERMSRV_SESSION_BACKEND *Backend,
+    _In_opt_ PVOID Context)
+{
+    if (Manager == NULL)
+        return;
+
+    Manager->Backend = (Backend != NULL) ? Backend : TermSrvSessionManagerGetDefaultBackend();
+    Manager->BackendContext = Context;
+}
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetBackend(
+    _In_ const TERMSRV_SESSION_MANAGER *Manager)
+{
+    if (Manager == NULL || Manager->Backend == NULL)
+        return TermSrvSessionManagerGetDefaultBackend();
+
+    return Manager->Backend;
 }
 
 VOID
@@ -402,6 +498,109 @@ TermSrvSessionManagerCaptureWin32Frame(
     Frame->PointerY = Session->LastPointerY;
     Frame->FramePending = Session->FramePending;
     Session->FramePending = FALSE;
+    return TRUE;
+}
+
+static BOOL
+DummyCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId)
+{
+    if (AttachedSessionId == NULL)
+        return FALSE;
+
+    if (!TermSrvSessionManagerAttachWin32Session(Manager,
+                                                 SessionId,
+                                                 UserIdentity,
+                                                 ClientName))
+    {
+        return FALSE;
+    }
+
+    *AttachedSessionId = SessionId;
+    return TRUE;
+}
+
+static BOOL
+DummyDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  SessionId,
+                                                  TermSrvSessionDisconnected);
+}
+
+static BOOL
+DummyLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  SessionId,
+                                                  TermSrvSessionLoggedOff);
+}
+
+static BOOL
+DummyCaptureFrame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame)
+{
+    return TermSrvSessionManagerCaptureWin32Frame(Manager, SessionId, Frame);
+}
+
+static BOOL
+DummyInjectMouse(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY)
+{
+    return TermSrvSessionManagerRecordWin32Input(Manager,
+                                                SessionId,
+                                                HasPointer,
+                                                PointerX,
+                                                PointerY);
+}
+
+static BOOL
+DummyInjectKeyboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ UINT VirtualKey,
+    _In_ BOOL KeyDown)
+{
+    UNREFERENCED_PARAMETER(VirtualKey);
+    UNREFERENCED_PARAMETER(KeyDown);
+    return TermSrvSessionManagerRecordWin32Input(Manager, SessionId, FALSE, 0, 0);
+}
+
+static BOOL
+DummyClipboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_reads_bytes_opt_(InputLength) const VOID *Input,
+    _In_ SIZE_T InputLength,
+    _Out_writes_bytes_to_opt_(OutputLength, *BytesWritten) VOID *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UNREFERENCED_PARAMETER(Manager);
+    UNREFERENCED_PARAMETER(SessionId);
+    UNREFERENCED_PARAMETER(Input);
+    UNREFERENCED_PARAMETER(InputLength);
+    UNREFERENCED_PARAMETER(Output);
+    UNREFERENCED_PARAMETER(OutputLength);
+
+    if (BytesWritten == NULL)
+        return FALSE;
+
+    *BytesWritten = 0;
     return TRUE;
 }
 
@@ -571,6 +770,7 @@ TermSrvRdpPeerReceive(
     {
         WCHAR UserIdentity[64];
         INT SessionId;
+        INT AttachedSessionId;
         TERMSRV_RDP_STATUS Status = RequireState(Peer, TermSrvRdpStateSecurityComplete);
 
         if (Status != TermSrvRdpSuccess)
@@ -582,10 +782,11 @@ TermSrvRdpPeerReceive(
             return TermSrvRdpAuthenticationFailed;
 
         Peer->SessionId = SessionId;
-        Status = AttachConnection(Manager, SessionId, UserIdentity);
+        Status = AttachConnection(Manager, SessionId, UserIdentity, &AttachedSessionId);
         if (Status != TermSrvRdpSuccess)
             return Status;
 
+        Peer->SessionId = AttachedSessionId;
         Peer->State = TermSrvRdpStateCapabilitiesDemanded;
         SetOutput(Peer, "DEMAND_ACTIVE");
         return TermSrvRdpSuccess;
@@ -605,31 +806,65 @@ TermSrvRdpPeerReceive(
     if (PacketStartsWith(Packet, "SLOW_INPUT"))
     {
         TERMSRV_RDP_STATUS Status = RequireState(Peer, TermSrvRdpStateActive);
+        const TERMSRV_SESSION_BACKEND *Backend;
+        BOOL HasMouse;
         if (Status != TermSrvRdpSuccess)
             return Status;
 
-        TermSrvSessionManagerRecordWin32Input(Manager,
-                                              Peer->SessionId,
-                                              strstr(Packet, "mouse=1") != NULL,
-                                              ParseIntAfter(Packet, "x=", 0),
-                                              ParseIntAfter(Packet, "y=", 0));
+        Backend = TermSrvSessionManagerGetBackend(Manager);
+        HasMouse = (strstr(Packet, "mouse=1") != NULL);
+        if (HasMouse)
+        {
+            if (Backend->InjectMouse != NULL)
+            {
+                Backend->InjectMouse(Manager,
+                                     Peer->SessionId,
+                                     TRUE,
+                                     ParseIntAfter(Packet, "x=", 0),
+                                     ParseIntAfter(Packet, "y=", 0));
+            }
+        }
+        else if (Backend->InjectKeyboard != NULL)
+        {
+            Backend->InjectKeyboard(Manager,
+                                    Peer->SessionId,
+                                    (UINT)ParseIntAfter(Packet, "scancode=", 0),
+                                    TRUE);
+        }
         return TermSrvRdpSuccess;
     }
 
     if (PacketStartsWith(Packet, "FAST_INPUT"))
     {
         TERMSRV_RDP_STATUS Status = RequireState(Peer, TermSrvRdpStateActive);
+        const TERMSRV_SESSION_BACKEND *Backend;
+        BOOL HasMouse;
         if (Status != TermSrvRdpSuccess)
             return Status;
 
         if (!Peer->FastPathInput)
             return TermSrvRdpFastPathNotNegotiated;
 
-        TermSrvSessionManagerRecordWin32Input(Manager,
-                                              Peer->SessionId,
-                                              strstr(Packet, "mouse=1") != NULL,
-                                              ParseIntAfter(Packet, "x=", 0),
-                                              ParseIntAfter(Packet, "y=", 0));
+        Backend = TermSrvSessionManagerGetBackend(Manager);
+        HasMouse = (strstr(Packet, "mouse=1") != NULL);
+        if (HasMouse)
+        {
+            if (Backend->InjectMouse != NULL)
+            {
+                Backend->InjectMouse(Manager,
+                                     Peer->SessionId,
+                                     TRUE,
+                                     ParseIntAfter(Packet, "x=", 0),
+                                     ParseIntAfter(Packet, "y=", 0));
+            }
+        }
+        else if (Backend->InjectKeyboard != NULL)
+        {
+            Backend->InjectKeyboard(Manager,
+                                    Peer->SessionId,
+                                    (UINT)ParseIntAfter(Packet, "scancode=", 0),
+                                    TRUE);
+        }
         return TermSrvRdpSuccess;
     }
 
@@ -655,10 +890,11 @@ TermSrvRdpPeerReceive(
 
     if (PacketStartsWith(Packet, "DISCONNECT"))
     {
+        const TERMSRV_SESSION_BACKEND *Backend = TermSrvSessionManagerGetBackend(Manager);
+
         RecordCall(Manager, "disconnect");
-        TermSrvSessionManagerDetachWin32Session(Manager,
-                                                Peer->SessionId,
-                                                TermSrvSessionDisconnected);
+        if (Backend->Disconnect != NULL)
+            Backend->Disconnect(Manager, Peer->SessionId);
 
         Peer->State = TermSrvRdpStateClosed;
         return TermSrvRdpSuccess;
@@ -666,10 +902,11 @@ TermSrvRdpPeerReceive(
 
     if (PacketStartsWith(Packet, "LOGOFF"))
     {
+        const TERMSRV_SESSION_BACKEND *Backend = TermSrvSessionManagerGetBackend(Manager);
+
         RecordCall(Manager, "logoff");
-        TermSrvSessionManagerDetachWin32Session(Manager,
-                                                Peer->SessionId,
-                                                TermSrvSessionLoggedOff);
+        if (Backend->Logoff != NULL)
+            Backend->Logoff(Manager, Peer->SessionId);
 
         Peer->State = TermSrvRdpStateClosed;
         return TermSrvRdpSuccess;
@@ -693,10 +930,12 @@ TermSrvRdpPeerSendBitmapUpdate(
     if (Peer->SessionManager != NULL)
     {
         TERMSRV_SESSION_FRAME Frame;
+        const TERMSRV_SESSION_BACKEND *Backend = TermSrvSessionManagerGetBackend(Peer->SessionManager);
 
-        if (!TermSrvSessionManagerCaptureWin32Frame(Peer->SessionManager,
-                                                    Peer->SessionId,
-                                                    &Frame))
+        if (Backend->CaptureFrame == NULL ||
+            !Backend->CaptureFrame(Peer->SessionManager,
+                                   Peer->SessionId,
+                                   &Frame))
         {
             return TermSrvRdpGraphicsBeforeActive;
         }

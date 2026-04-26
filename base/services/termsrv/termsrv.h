@@ -78,10 +78,61 @@ typedef struct _TERMSRV_SESSION_FRAME
     BOOL FramePending;
 } TERMSRV_SESSION_FRAME;
 
+struct _TERMSRV_SESSION_MANAGER;
+
+typedef struct _TERMSRV_SESSION_BACKEND
+{
+    PCSTR Name;
+    BOOL
+    (*CreateOrAttach)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId,
+        _In_z_ PCWSTR UserIdentity,
+        _In_z_ PCWSTR ClientName,
+        _Out_ INT *AttachedSessionId);
+    BOOL
+    (*Disconnect)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId);
+    BOOL
+    (*Logoff)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId);
+    BOOL
+    (*CaptureFrame)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId,
+        _Out_ TERMSRV_SESSION_FRAME *Frame);
+    BOOL
+    (*InjectMouse)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId,
+        _In_ BOOL HasPointer,
+        _In_ INT PointerX,
+        _In_ INT PointerY);
+    BOOL
+    (*InjectKeyboard)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId,
+        _In_ UINT VirtualKey,
+        _In_ BOOL KeyDown);
+    BOOL
+    (*Clipboard)(
+        _Inout_ struct _TERMSRV_SESSION_MANAGER *Manager,
+        _In_ INT SessionId,
+        _In_reads_bytes_opt_(InputLength) const VOID *Input,
+        _In_ SIZE_T InputLength,
+        _Out_writes_bytes_to_opt_(OutputLength, *BytesWritten) VOID *Output,
+        _In_ SIZE_T OutputLength,
+        _Out_ SIZE_T *BytesWritten);
+} TERMSRV_SESSION_BACKEND;
+
 typedef struct _TERMSRV_SESSION_MANAGER
 {
     TERMSRV_SESSION Sessions[8];
     INT SessionCount;
+    const TERMSRV_SESSION_BACKEND *Backend;
+    PVOID BackendContext;
     BOOL RejectAuthentication;
     BOOL RejectAttach;
     CHAR Calls[TERMSRV_RDP_MAX_CALLS][64];
@@ -113,6 +164,19 @@ typedef struct _TERMSRV_RDP_PEER
 VOID
 TermSrvSessionManagerInit(
     _Out_ TERMSRV_SESSION_MANAGER *Manager);
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetDefaultBackend(VOID);
+
+VOID
+TermSrvSessionManagerSetBackend(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_opt_ const TERMSRV_SESSION_BACKEND *Backend,
+    _In_opt_ PVOID Context);
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetBackend(
+    _In_ const TERMSRV_SESSION_MANAGER *Manager);
 
 VOID
 TermSrvSessionManagerAddDisconnected(
