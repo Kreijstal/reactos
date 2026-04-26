@@ -126,7 +126,7 @@ RequireState(
 }
 
 static TERMSRV_SESSION *
-FindSession(
+FindSessionInternal(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId)
 {
@@ -139,6 +139,50 @@ FindSession(
     }
 
     return NULL;
+}
+
+static VOID
+InitializeSessionRecord(
+    _Out_ TERMSRV_SESSION *Session,
+    _In_ INT SessionId,
+    _In_ TERMSRV_SESSION_STATE State)
+{
+    memset(Session, 0, sizeof(*Session));
+    Session->SessionId = SessionId;
+    Session->State = State;
+    Session->DesktopWidth = 1024;
+    Session->DesktopHeight = 768;
+    Session->ColorDepth = 16;
+    wcsncpy(Session->WinStationName,
+            L"RDP-Tcp",
+            ARRAYSIZE(Session->WinStationName) - 1);
+    wcsncpy(Session->DesktopName,
+            L"Default",
+            ARRAYSIZE(Session->DesktopName) - 1);
+}
+
+static VOID
+SetRdpWinStationName(
+    _Out_writes_(NameLength) PWSTR Name,
+    _In_ SIZE_T NameLength,
+    _In_ INT SessionId)
+{
+    if (NameLength == 0)
+        return;
+
+    _snwprintf(Name, NameLength, L"RDP-Tcp#%d", SessionId);
+    Name[NameLength - 1] = UNICODE_NULL;
+}
+
+TERMSRV_SESSION *
+TermSrvSessionManagerFindSession(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    if (Manager == NULL)
+        return NULL;
+
+    return FindSessionInternal(Manager, SessionId);
 }
 
 static INT
@@ -160,12 +204,7 @@ SelectSession(
         TERMSRV_SESSION *Session = &Manager->Sessions[Manager->SessionCount];
         INT SessionId = Manager->SessionCount + 1;
 
-        memset(Session, 0, sizeof(*Session));
-        Session->SessionId = SessionId;
-        Session->State = TermSrvSessionIdle;
-        Session->DesktopWidth = 1024;
-        Session->DesktopHeight = 768;
-        Session->ColorDepth = 16;
+        InitializeSessionRecord(Session, SessionId, TermSrvSessionIdle);
         Manager->SessionCount++;
         return SessionId;
     }
@@ -212,13 +251,18 @@ AttachConnection(
     if (Manager->RejectAttach)
         return TermSrvRdpAttachFailed;
 
-    Session = FindSession(Manager, SessionId);
+    Session = FindSessionInternal(Manager, SessionId);
     if (Session == NULL)
         return TermSrvRdpAttachFailed;
 
-    wcsncpy(Session->UserIdentity, UserIdentity, ARRAYSIZE(Session->UserIdentity) - 1);
-    Session->UserIdentity[ARRAYSIZE(Session->UserIdentity) - 1] = UNICODE_NULL;
-    Session->State = TermSrvSessionConnected;
+    if (!TermSrvSessionManagerAttachWin32Session(Manager,
+                                                 SessionId,
+                                                 UserIdentity,
+                                                 L"RDP client"))
+    {
+        return TermSrvRdpAttachFailed;
+    }
+
     return TermSrvRdpSuccess;
 }
 
@@ -228,11 +272,7 @@ TermSrvSessionManagerInit(
 {
     memset(Manager, 0, sizeof(*Manager));
     Manager->SessionCount = 1;
-    Manager->Sessions[0].SessionId = 1;
-    Manager->Sessions[0].State = TermSrvSessionIdle;
-    Manager->Sessions[0].DesktopWidth = 1024;
-    Manager->Sessions[0].DesktopHeight = 768;
-    Manager->Sessions[0].ColorDepth = 16;
+    InitializeSessionRecord(&Manager->Sessions[0], 1, TermSrvSessionIdle);
     Manager->LastInputSessionId = -1;
     Manager->LastChannelSessionId = -1;
 }
@@ -249,14 +289,120 @@ TermSrvSessionManagerAddDisconnected(
         return;
 
     Session = &Manager->Sessions[Manager->SessionCount++];
-    memset(Session, 0, sizeof(*Session));
-    Session->SessionId = SessionId;
-    Session->State = TermSrvSessionDisconnected;
-    Session->DesktopWidth = 1024;
-    Session->DesktopHeight = 768;
-    Session->ColorDepth = 16;
+    InitializeSessionRecord(Session, SessionId, TermSrvSessionDisconnected);
     wcsncpy(Session->UserIdentity, UserIdentity, ARRAYSIZE(Session->UserIdentity) - 1);
     Session->UserIdentity[ARRAYSIZE(Session->UserIdentity) - 1] = UNICODE_NULL;
+}
+
+BOOL
+TermSrvSessionManagerAttachWin32Session(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName)
+{
+    TERMSRV_SESSION *Session;
+
+    if (Manager == NULL || UserIdentity == NULL || ClientName == NULL)
+        return FALSE;
+
+    Session = FindSessionInternal(Manager, SessionId);
+    if (Session == NULL)
+        return FALSE;
+
+    wcsncpy(Session->UserIdentity, UserIdentity, ARRAYSIZE(Session->UserIdentity) - 1);
+    Session->UserIdentity[ARRAYSIZE(Session->UserIdentity) - 1] = UNICODE_NULL;
+    wcsncpy(Session->ClientName, ClientName, ARRAYSIZE(Session->ClientName) - 1);
+    Session->ClientName[ARRAYSIZE(Session->ClientName) - 1] = UNICODE_NULL;
+    SetRdpWinStationName(Session->WinStationName,
+                         ARRAYSIZE(Session->WinStationName),
+                         SessionId);
+    wcsncpy(Session->DesktopName, L"Default", ARRAYSIZE(Session->DesktopName) - 1);
+    Session->DesktopName[ARRAYSIZE(Session->DesktopName) - 1] = UNICODE_NULL;
+    Session->State = TermSrvSessionConnected;
+    Session->Win32Attached = TRUE;
+    Session->FramePending = TRUE;
+    return TRUE;
+}
+
+BOOL
+TermSrvSessionManagerDetachWin32Session(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ TERMSRV_SESSION_STATE NewState)
+{
+    TERMSRV_SESSION *Session;
+
+    if (Manager == NULL)
+        return FALSE;
+
+    Session = FindSessionInternal(Manager, SessionId);
+    if (Session == NULL)
+        return FALSE;
+
+    Session->State = NewState;
+    Session->Win32Attached = FALSE;
+    Session->FramePending = FALSE;
+    return TRUE;
+}
+
+BOOL
+TermSrvSessionManagerRecordWin32Input(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY)
+{
+    TERMSRV_SESSION *Session;
+
+    if (Manager == NULL)
+        return FALSE;
+
+    RecordCall(Manager, "deliver_input");
+    Manager->LastInputSessionId = SessionId;
+
+    Session = FindSessionInternal(Manager, SessionId);
+    if (Session == NULL || Session->State != TermSrvSessionConnected)
+        return FALSE;
+
+    if (HasPointer)
+    {
+        Session->HasPointer = TRUE;
+        Session->LastPointerX = PointerX;
+        Session->LastPointerY = PointerY;
+    }
+
+    Session->FramePending = TRUE;
+    return TRUE;
+}
+
+BOOL
+TermSrvSessionManagerCaptureWin32Frame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame)
+{
+    TERMSRV_SESSION *Session;
+
+    if (Manager == NULL || Frame == NULL)
+        return FALSE;
+
+    Session = FindSessionInternal(Manager, SessionId);
+    if (Session == NULL || Session->State != TermSrvSessionConnected)
+        return FALSE;
+
+    memset(Frame, 0, sizeof(*Frame));
+    Frame->SessionId = Session->SessionId;
+    Frame->DesktopWidth = Session->DesktopWidth;
+    Frame->DesktopHeight = Session->DesktopHeight;
+    Frame->ColorDepth = Session->ColorDepth;
+    Frame->HasPointer = Session->HasPointer;
+    Frame->PointerX = Session->LastPointerX;
+    Frame->PointerY = Session->LastPointerY;
+    Frame->FramePending = Session->FramePending;
+    Session->FramePending = FALSE;
+    return TRUE;
 }
 
 VOID
@@ -462,8 +608,11 @@ TermSrvRdpPeerReceive(
         if (Status != TermSrvRdpSuccess)
             return Status;
 
-        RecordCall(Manager, "deliver_input");
-        Manager->LastInputSessionId = Peer->SessionId;
+        TermSrvSessionManagerRecordWin32Input(Manager,
+                                              Peer->SessionId,
+                                              strstr(Packet, "mouse=1") != NULL,
+                                              ParseIntAfter(Packet, "x=", 0),
+                                              ParseIntAfter(Packet, "y=", 0));
         return TermSrvRdpSuccess;
     }
 
@@ -476,8 +625,11 @@ TermSrvRdpPeerReceive(
         if (!Peer->FastPathInput)
             return TermSrvRdpFastPathNotNegotiated;
 
-        RecordCall(Manager, "deliver_input");
-        Manager->LastInputSessionId = Peer->SessionId;
+        TermSrvSessionManagerRecordWin32Input(Manager,
+                                              Peer->SessionId,
+                                              strstr(Packet, "mouse=1") != NULL,
+                                              ParseIntAfter(Packet, "x=", 0),
+                                              ParseIntAfter(Packet, "y=", 0));
         return TermSrvRdpSuccess;
     }
 
@@ -503,11 +655,10 @@ TermSrvRdpPeerReceive(
 
     if (PacketStartsWith(Packet, "DISCONNECT"))
     {
-        TERMSRV_SESSION *Session = FindSession(Manager, Peer->SessionId);
-
         RecordCall(Manager, "disconnect");
-        if (Session != NULL)
-            Session->State = TermSrvSessionDisconnected;
+        TermSrvSessionManagerDetachWin32Session(Manager,
+                                                Peer->SessionId,
+                                                TermSrvSessionDisconnected);
 
         Peer->State = TermSrvRdpStateClosed;
         return TermSrvRdpSuccess;
@@ -515,11 +666,10 @@ TermSrvRdpPeerReceive(
 
     if (PacketStartsWith(Packet, "LOGOFF"))
     {
-        TERMSRV_SESSION *Session = FindSession(Manager, Peer->SessionId);
-
         RecordCall(Manager, "logoff");
-        if (Session != NULL)
-            Session->State = TermSrvSessionLoggedOff;
+        TermSrvSessionManagerDetachWin32Session(Manager,
+                                                Peer->SessionId,
+                                                TermSrvSessionLoggedOff);
 
         Peer->State = TermSrvRdpStateClosed;
         return TermSrvRdpSuccess;
@@ -539,6 +689,18 @@ TermSrvRdpPeerSendBitmapUpdate(
 
     if (Width > Peer->DesktopWidth || Height > Peer->DesktopHeight)
         return TermSrvRdpBitmapOutOfBounds;
+
+    if (Peer->SessionManager != NULL)
+    {
+        TERMSRV_SESSION_FRAME Frame;
+
+        if (!TermSrvSessionManagerCaptureWin32Frame(Peer->SessionManager,
+                                                    Peer->SessionId,
+                                                    &Frame))
+        {
+            return TermSrvRdpGraphicsBeforeActive;
+        }
+    }
 
     SetOutput(Peer, "GRAPHICS_UPDATE");
     return TermSrvRdpSuccess;
