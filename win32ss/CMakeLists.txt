@@ -149,6 +149,7 @@ list(APPEND SOURCE
     user/ntuser/painting.c
     user/ntuser/power.c
     user/ntuser/prop.c
+    user/ntuser/rdp.c
     user/ntuser/scrollbar.c
     user/ntuser/scrollex.c
     user/ntuser/security.c
