@@ -25,6 +25,11 @@
 #define SEC_INFO_PKT 0x00000040
 #define INPUT_EVENTS_HEADER_LENGTH 4
 #define INPUT_EVENT_LENGTH 12
+#define SHARE_CONTROL_HEADER_LENGTH 6
+#define SHARE_DATA_HEADER_LENGTH 18
+#define SHARE_PDU_TYPE_DATA 0x07
+#define SHARE_DATA_TYPE_CONTROL 0x14
+#define SHARE_DATA_TYPE_INPUT 0x1c
 #define STATIC_CHANNEL_HEADER_LENGTH 1
 #define STATIC_CHANNEL_DEF_LENGTH (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
 
@@ -538,6 +543,98 @@ TermSrvRdpBcgrParseInputEvents(
     }
 
     return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseShareDataPdu(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_SHARE_DATA_PDU *ShareData)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    const UCHAR *Payload;
+    USHORT ShareLength;
+    USHORT RawPduType;
+    USHORT BodyLength;
+
+    if (ShareData == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(ShareData, 0, sizeof(*ShareData));
+
+    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
+                                                   BufferLength,
+                                                   &SendData);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (SendData.PayloadLength < SHARE_CONTROL_HEADER_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    Payload = SendData.Payload;
+    ShareLength = ReadLe16(Payload);
+    RawPduType = ReadLe16(&Payload[2]);
+    if (ShareLength < SHARE_CONTROL_HEADER_LENGTH ||
+        ShareLength > SendData.PayloadLength)
+    {
+        return TermSrvRdpBcgrInvalidLength;
+    }
+
+    ShareData->Initiator = SendData.Initiator;
+    ShareData->ChannelId = SendData.ChannelId;
+    ShareData->Priority = SendData.Priority;
+    ShareData->PduType = (UCHAR)(RawPduType & 0x0f);
+
+    if (ShareData->PduType != SHARE_PDU_TYPE_DATA)
+        return TermSrvRdpBcgrSuccess;
+
+    if (ShareLength < SHARE_DATA_HEADER_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    BodyLength = ReadLe16(&Payload[12]);
+    if ((SIZE_T)BodyLength > ShareLength - SHARE_DATA_HEADER_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    ShareData->ShareId = ReadLe32(&Payload[6]);
+    ShareData->DataType = Payload[14];
+    ShareData->BodyLength = BodyLength;
+    ShareData->Body = &Payload[SHARE_DATA_HEADER_LENGTH];
+    if (ShareData->DataType == SHARE_DATA_TYPE_CONTROL && BodyLength >= 2)
+        ShareData->ControlAction = ReadLe16(ShareData->Body);
+
+    return TermSrvRdpBcgrSuccess;
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseSlowPathInputPdu(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_INPUT_EVENTS *InputEvents)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_SHARE_DATA_PDU ShareData;
+
+    if (InputEvents == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(InputEvents, 0, sizeof(*InputEvents));
+
+    Result = TermSrvRdpBcgrParseShareDataPdu(Buffer,
+                                            BufferLength,
+                                            &ShareData);
+    if (Result != TermSrvRdpBcgrSuccess)
+        return Result;
+
+    if (ShareData.PduType != SHARE_PDU_TYPE_DATA ||
+        ShareData.DataType != SHARE_DATA_TYPE_INPUT)
+    {
+        return TermSrvRdpBcgrUnsupportedPdu;
+    }
+
+    return TermSrvRdpBcgrParseInputEvents(ShareData.Body,
+                                          ShareData.BodyLength,
+                                          InputEvents);
 }
 
 TERMSRV_RDPBCGR_RESULT
