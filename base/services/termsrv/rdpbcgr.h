@@ -112,6 +112,7 @@ typedef struct _TERMSRV_RDPBCGR_INPUT_EVENTS
     ULONG FirstEventTime;
     USHORT FirstMessageType;
     USHORT FirstDeviceFlags;
+    USHORT FirstKeyboardCode;
     USHORT FirstPointerX;
     USHORT FirstPointerY;
 } TERMSRV_RDPBCGR_INPUT_EVENTS;
@@ -121,6 +122,7 @@ typedef struct _TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS
     USHORT NumberEvents;
     UCHAR FirstEventCode;
     USHORT FirstEventFlags;
+    USHORT FirstKeyboardCode;
     USHORT FirstPointerX;
     USHORT FirstPointerY;
 } TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS;

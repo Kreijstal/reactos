@@ -757,3 +757,5 @@
     SVC_(GdiGetFontFileData, 5)
     SVC_(GdiGetFontFileInfo, 5)
     SVC_(GdiGetFontRealizationInfo, 2)
+    SVC_(UserRdpInjectMouse, 2)
+    SVC_(UserRdpInjectKeyboard, 2)
