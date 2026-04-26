@@ -389,6 +389,102 @@ TestBackendSelectionAndBehavior(VOID)
 }
 
 static VOID
+TestConsoleBackendBinding(VOID)
+{
+    TERMSRV_SESSION_MANAGER Manager;
+    TERMSRV_RDP_PEER Peer;
+    TERMSRV_SESSION *Session;
+    TERMSRV_SESSION_FRAME Frame;
+    const TERMSRV_SESSION_BACKEND *Backend;
+
+    TermSrvSessionManagerInit(&Manager);
+    TermSrvSessionManagerSetBackend(&Manager,
+                                    TermSrvSessionManagerGetConsoleBackend(),
+                                    NULL);
+    Backend = TermSrvSessionManagerGetBackend(&Manager);
+    ok(Backend == TermSrvSessionManagerGetConsoleBackend(),
+       "Console backend was not selected directly\n");
+
+    TermSrvRdpPeerInit(&Peer, &Manager);
+    ActivatePeer(&Peer);
+
+    ok(Peer.SessionId == 0,
+       "Console backend attached peer to session %d\n", Peer.SessionId);
+    Session = TermSrvSessionManagerFindSession(&Manager, 0);
+    ok(Session != NULL,
+       "Console session was not found\n");
+    ok(Session != NULL && Session->State == TermSrvSessionConnected,
+       "Console session was not connected\n");
+    ok(Session != NULL && Session->Win32Attached,
+       "Console Win32 session was not attached\n");
+    ok(Session != NULL && wcscmp(Session->WinStationName, L"WinSta0") == 0,
+       "Unexpected console WinStation binding\n");
+    ok(Session != NULL && wcscmp(Session->DesktopName, L"Default") == 0,
+       "Unexpected console desktop binding\n");
+    ok(Manager.SessionCount == 1,
+       "Console backend created %d session records\n", Manager.SessionCount);
+
+    ok(TermSrvRdpPeerReceive(&Peer, "FAST_INPUT mouse=1 x=22 y=33") == TermSrvRdpSuccess,
+       "Console input failed\n");
+    ok(Backend->CaptureFrame(&Manager, Peer.SessionId, &Frame),
+       "Console frame capture failed\n");
+    ok(Frame.SessionId == 0,
+       "Console frame came from session %d\n", Frame.SessionId);
+    ok(Frame.DesktopWidth == 1024 && Frame.DesktopHeight == 768 && Frame.ColorDepth == 16,
+       "Unexpected console frame metadata %dx%dx%d\n",
+       Frame.DesktopWidth,
+       Frame.DesktopHeight,
+       Frame.ColorDepth);
+    ok(Frame.HasPointer && Frame.PointerX == 22 && Frame.PointerY == 33,
+       "Unexpected console pointer metadata %d,%d\n", Frame.PointerX, Frame.PointerY);
+
+    ok(TermSrvRdpPeerReceive(&Peer, "DISCONNECT") == TermSrvRdpSuccess,
+       "Console disconnect failed\n");
+    ok(Session != NULL && Session->State == TermSrvSessionDisconnected,
+       "Console disconnect did not mark session disconnected\n");
+    ok(Session != NULL && !Session->Win32Attached,
+       "Console disconnect kept Win32 attached\n");
+
+    TermSrvRdpPeerInit(&Peer, &Manager);
+    ActivatePeer(&Peer);
+    ok(Peer.SessionId == 0,
+       "Console reconnect attached peer to session %d\n", Peer.SessionId);
+    ok(Manager.SessionCount == 1,
+       "Console reconnect created %d session records\n", Manager.SessionCount);
+
+    ok(TermSrvRdpPeerReceive(&Peer, "LOGOFF") == TermSrvRdpSuccess,
+       "Console logoff failed\n");
+    ok(Session != NULL && Session->State == TermSrvSessionLoggedOff,
+       "Console logoff did not mark session logged off\n");
+    ok(Session != NULL && !Session->Win32Attached,
+       "Console logoff kept Win32 attached\n");
+}
+
+static VOID
+TestBackendSelectionFallback(VOID)
+{
+    TERMSRV_SESSION_MANAGER Manager;
+
+    TermSrvSessionManagerInit(&Manager);
+    ok(TermSrvSessionManagerSelectBackendByName(&Manager, L"console"),
+       "Console backend selection failed\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetConsoleBackend(),
+       "Console backend was not selected by name\n");
+    ok(Manager.SessionCount == 1 && Manager.Sessions[0].SessionId == 0,
+       "Console selection did not prepare session 0\n");
+
+    ok(!TermSrvSessionManagerSelectBackendByName(&Manager, L"unknown"),
+       "Unknown backend selection should report fallback\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
+       "Unknown backend did not fall back to default\n");
+
+    ok(TermSrvSessionManagerSelectBackendByName(&Manager, NULL),
+       "NULL backend selection should select default\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetDefaultBackend(),
+       "NULL backend did not select default\n");
+}
+
+static VOID
 TestClientInfoBeforeSecurity(VOID)
 {
     TERMSRV_SESSION_MANAGER Manager;
@@ -2707,6 +2803,8 @@ START_TEST(RdpPeer)
     TestAuthenticationFailure();
     TestAttachFailure();
     TestBackendSelectionAndBehavior();
+    TestConsoleBackendBinding();
+    TestBackendSelectionFallback();
     TestClientInfoBeforeSecurity();
     TestInputAndVirtualChannels();
     TestFastPathNotNegotiated();
