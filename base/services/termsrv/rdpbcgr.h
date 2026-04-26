@@ -112,7 +112,18 @@ typedef struct _TERMSRV_RDPBCGR_INPUT_EVENTS
     ULONG FirstEventTime;
     USHORT FirstMessageType;
     USHORT FirstDeviceFlags;
+    USHORT FirstPointerX;
+    USHORT FirstPointerY;
 } TERMSRV_RDPBCGR_INPUT_EVENTS;
+
+typedef struct _TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS
+{
+    USHORT NumberEvents;
+    UCHAR FirstEventCode;
+    USHORT FirstEventFlags;
+    USHORT FirstPointerX;
+    USHORT FirstPointerY;
+} TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS;
 
 typedef struct _TERMSRV_RDPBCGR_SHARE_DATA_PDU
 {
@@ -206,6 +217,12 @@ TermSrvRdpBcgrParseSlowPathInputPdu(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_INPUT_EVENTS *InputEvents);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseFastPathInputEvents(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS *InputEvents);
 
 /*
  * Parses a small scaffold static virtual channel list:

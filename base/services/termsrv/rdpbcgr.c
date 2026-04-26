@@ -25,11 +25,18 @@
 #define SEC_INFO_PKT 0x00000040
 #define INPUT_EVENTS_HEADER_LENGTH 4
 #define INPUT_EVENT_LENGTH 12
+#define FASTPATH_INPUT_ACTION_FASTPATH 0x00
+#define FASTPATH_INPUT_EVENT_SCANCODE 0x00
+#define FASTPATH_INPUT_EVENT_MOUSE 0x01
+#define FASTPATH_INPUT_EVENT_SYNC 0x03
+#define FASTPATH_INPUT_EVENT_UNICODE 0x04
+#define FASTPATH_INPUT_EVENT_MOUSEX 0x05
 #define SHARE_CONTROL_HEADER_LENGTH 6
 #define SHARE_DATA_HEADER_LENGTH 18
 #define SHARE_PDU_TYPE_DATA 0x07
 #define SHARE_DATA_TYPE_CONTROL 0x14
 #define SHARE_DATA_TYPE_INPUT 0x1c
+#define INPUT_EVENT_MOUSE 0x8001
 #define STATIC_CHANNEL_HEADER_LENGTH 1
 #define STATIC_CHANNEL_DEF_LENGTH (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
 
@@ -540,6 +547,11 @@ TermSrvRdpBcgrParseInputEvents(
         InputEvents->FirstEventTime = ReadLe32(&Buffer[4]);
         InputEvents->FirstMessageType = ReadLe16(&Buffer[8]);
         InputEvents->FirstDeviceFlags = ReadLe16(&Buffer[10]);
+        if (InputEvents->FirstMessageType == INPUT_EVENT_MOUSE)
+        {
+            InputEvents->FirstPointerX = ReadLe16(&Buffer[12]);
+            InputEvents->FirstPointerY = ReadLe16(&Buffer[14]);
+        }
     }
 
     return TermSrvRdpBcgrSuccess;
@@ -635,6 +647,109 @@ TermSrvRdpBcgrParseSlowPathInputPdu(
     return TermSrvRdpBcgrParseInputEvents(ShareData.Body,
                                           ShareData.BodyLength,
                                           InputEvents);
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseFastPathInputEvents(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS *InputEvents)
+{
+    SIZE_T Offset;
+    SIZE_T PacketLength;
+    UCHAR EventCount;
+    UCHAR Index;
+
+    if (InputEvents == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(InputEvents, 0, sizeof(*InputEvents));
+
+    if (BufferLength < 2)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if ((Buffer[0] & 0x03) != FASTPATH_INPUT_ACTION_FASTPATH)
+        return TermSrvRdpBcgrUnsupportedPdu;
+
+    EventCount = (Buffer[0] >> 2) & 0x0f;
+    if (EventCount == 0)
+        return TermSrvRdpBcgrInvalidLength;
+
+    Offset = 2;
+    PacketLength = Buffer[1];
+    if (Buffer[1] & 0x80)
+    {
+        if (BufferLength < 3)
+            return TermSrvRdpBcgrNeedMoreData;
+
+        PacketLength = (((SIZE_T)Buffer[1] & 0x7f) << 8) | Buffer[2];
+        Offset = 3;
+    }
+
+    if (PacketLength < Offset)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (PacketLength > BufferLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (PacketLength != BufferLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    InputEvents->NumberEvents = EventCount;
+
+    for (Index = 0; Index < EventCount; Index++)
+    {
+        UCHAR EventHeader;
+        UCHAR EventCode;
+        SIZE_T EventPayloadLength;
+
+        if (Offset >= PacketLength)
+            return TermSrvRdpBcgrInvalidLength;
+
+        EventHeader = Buffer[Offset++];
+        EventCode = EventHeader >> 5;
+        switch (EventCode)
+        {
+            case FASTPATH_INPUT_EVENT_SCANCODE:
+                EventPayloadLength = 1;
+                break;
+
+            case FASTPATH_INPUT_EVENT_SYNC:
+                EventPayloadLength = 0;
+                break;
+
+            case FASTPATH_INPUT_EVENT_UNICODE:
+                EventPayloadLength = 2;
+                break;
+
+            case FASTPATH_INPUT_EVENT_MOUSE:
+            case FASTPATH_INPUT_EVENT_MOUSEX:
+                EventPayloadLength = 6;
+                break;
+
+            default:
+                return TermSrvRdpBcgrUnsupportedPdu;
+        }
+
+        if (Offset + EventPayloadLength > PacketLength)
+            return TermSrvRdpBcgrNeedMoreData;
+
+        if (Index == 0)
+        {
+            InputEvents->FirstEventCode = EventCode;
+            if (EventCode == FASTPATH_INPUT_EVENT_MOUSE ||
+                EventCode == FASTPATH_INPUT_EVENT_MOUSEX)
+            {
+                InputEvents->FirstEventFlags = ReadLe16(&Buffer[Offset]);
+                InputEvents->FirstPointerX = ReadLe16(&Buffer[Offset + 2]);
+                InputEvents->FirstPointerY = ReadLe16(&Buffer[Offset + 4]);
+            }
+        }
+
+        Offset += EventPayloadLength;
+    }
+
+    return (Offset == PacketLength) ? TermSrvRdpBcgrSuccess : TermSrvRdpBcgrInvalidLength;
 }
 
 TERMSRV_RDPBCGR_RESULT
