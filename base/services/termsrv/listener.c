@@ -16,12 +16,25 @@
 #define TERMSRV_LISTEN_PORT_ENV_NAME L"REACTOS_TERMSRV_PORT"
 #define TERMSRV_LISTEN_PORT 3389
 #define TERMSRV_LISTEN_BACKLOG 4
-#define TERMSRV_SELECT_TIMEOUT_MS 250
+#define TERMSRV_SELECT_TIMEOUT_MS 2000
 #define TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID 1001
+#define TERMSRV_RDP_SCAFFOLD_SHARE_ID 0x000103e9
 #define TERMSRV_MCS_SCAFFOLD_FIRST_STATIC_CHANNEL_ID 1004
 #define TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID 1007
+#define TERMSRV_MESSAGE_SCAFFOLD_CHANNEL_ID 1008
 #define TERMSRV_CLIPRDR_SCAFFOLD_FORMAT_ID 13
-#define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 6
+#define TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS 7
+#define TERMSRV_SEC_AUTODETECT_REQ 0x00001000
+#define TERMSRV_SEC_AUTODETECT_RSP 0x00002000
+#define TERMSRV_RDP_PDU_TYPE_CONFIRM_ACTIVE 0x03
+#define TERMSRV_RDP_PDU_TYPE_DATA 0x07
+#define TERMSRV_RDP_DATA_TYPE_CONTROL 0x14
+#define TERMSRV_RDP_DATA_TYPE_SYNCHRONIZE 0x1f
+#define TERMSRV_RDP_DATA_TYPE_FONT_LIST 0x27
+#define TERMSRV_RDP_DATA_TYPE_FONT_MAP 0x28
+#define TERMSRV_RDP_CONTROL_ACTION_REQUEST_CONTROL 1
+#define TERMSRV_RDP_CONTROL_ACTION_GRANTED_CONTROL 2
+#define TERMSRV_RDP_CONTROL_ACTION_COOPERATE 4
 #define TERMSRV_SCAFFOLD_STATIC_CHANNEL_LIST_HEADER_LENGTH 1
 #define TERMSRV_SCAFFOLD_STATIC_CHANNEL_DEF_LENGTH \
     (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
@@ -33,7 +46,7 @@ static const UCHAR TermSrvMcsConnectResponsePayload[] =
      * The GCC user data advertises RDP 5.x core data, four static virtual
      * channels, and no standard RDP encryption.
      */
-    0x7f, 0x66, 0x6c,
+    0x7f, 0x66, 0x72,
     0x0a, 0x01, 0x00,
     0x02, 0x01, 0x00,
     0x30, 0x20,
@@ -45,10 +58,10 @@ static const UCHAR TermSrvMcsConnectResponsePayload[] =
     0x02, 0x02, 0x00, 0x01,
     0x02, 0x02, 0xff, 0xff,
     0x02, 0x02, 0x00, 0x02,
-    0x04, 0x3a,
+    0x04, 0x40,
     0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01,
     0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00,
-    0x01, 0xc0, 0x00, 'M', 'c', 'D', 'n', 0x2c,
+    0x01, 0xc0, 0x00, 'M', 'c', 'D', 'n', 0x32,
     0x01, 0x0c, 0x10, 0x00,
     0x04, 0x00, 0x08, 0x00,
     0x00, 0x00, 0x00, 0x00,
@@ -57,6 +70,8 @@ static const UCHAR TermSrvMcsConnectResponsePayload[] =
     0xeb, 0x03, 0x04, 0x00,
     0xec, 0x03, 0xed, 0x03,
     0xee, 0x03, 0xef, 0x03,
+    0x04, 0x0c, 0x06, 0x00,
+    0xf0, 0x03,
     0x02, 0x0c, 0x0c, 0x00,
     0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00
@@ -502,19 +517,528 @@ TermSrvRouteOptionalCliprdrPacket(
 }
 
 static BOOL
+TermSrvWriteServerGlobalPayload(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    SIZE_T PacketLength;
+    SIZE_T BodyLength;
+    SIZE_T PayloadOffset;
+
+    if (BytesWritten == NULL)
+        return FALSE;
+
+    *BytesWritten = 0;
+    if (Buffer == NULL || Payload == NULL || PayloadLength > 0x7fff)
+        return FALSE;
+
+    BodyLength = ((PayloadLength > 0x7f) ? 8 : 7) + PayloadLength;
+    PacketLength = 7 + BodyLength;
+    if (BufferLength < PacketLength || PacketLength > 0xffff)
+        return FALSE;
+
+    Buffer[0] = 0x03;
+    Buffer[1] = 0x00;
+    Buffer[2] = (UCHAR)(PacketLength >> 8);
+    Buffer[3] = (UCHAR)PacketLength;
+    Buffer[4] = 0x02;
+    Buffer[5] = 0xf0;
+    Buffer[6] = 0x80;
+
+    Buffer[7] = 0x68;
+    Buffer[8] = 0x00;
+    Buffer[9] = 0x00;
+    Buffer[10] = 0x03;
+    Buffer[11] = 0xeb;
+    Buffer[12] = 0x70;
+    if (PayloadLength > 0x7f)
+    {
+        Buffer[13] = 0x80;
+        Buffer[14] = (UCHAR)PayloadLength;
+        PayloadOffset = 15;
+    }
+    else
+    {
+        Buffer[13] = (UCHAR)PayloadLength;
+        PayloadOffset = 14;
+    }
+    CopyMemory(&Buffer[PayloadOffset], Payload, PayloadLength);
+
+    *BytesWritten = PacketLength;
+    return TRUE;
+}
+
+static BOOL
+TermSrvWriteLicenseValidClientPacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    static const UCHAR Payload[] =
+    {
+        /* TS_SECURITY_HEADER: SEC_LICENSE_PKT */
+        0x80, 0x00, 0x00, 0x00,
+        /* ERROR_ALERT, PREAMBLE_VERSION_3_0, wMsgSize = 16 */
+        0xff, 0x03, 0x10, 0x00,
+        /* STATUS_VALID_CLIENT, ST_NO_TRANSITION */
+        0x07, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x00, 0x00,
+        /* BB_ERROR_BLOB, empty */
+        0x04, 0x00, 0x00, 0x00
+    };
+
+    return TermSrvWriteServerGlobalPayload(Buffer,
+                                           BufferLength,
+                                           Payload,
+                                           sizeof(Payload),
+                                           BytesWritten);
+}
+
+static BOOL
+TermSrvWriteDemandActivePacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    static const UCHAR Payload[] =
+    {
+        /* Share Control Header: totalLength, Demand Active, user channel. */
+        0x4e, 0x00, 0x11, 0x00, 0xe9, 0x03,
+        /* Demand Active PDU Data. */
+        0xe9, 0x03, 0x01, 0x00,
+        0x04, 0x00,
+        0x38, 0x00,
+        'R', 'D', 'P', 0x00,
+        0x02, 0x00, 0x00, 0x00,
+        /* General Capability Set. */
+        0x01, 0x00, 0x18, 0x00,
+        0x01, 0x00, 0x03, 0x00,
+        0x00, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x01, 0x04, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x01,
+        /* Bitmap Capability Set. */
+        0x02, 0x00, 0x1c, 0x00,
+        0x20, 0x00, 0x01, 0x01,
+        0x01, 0x00, 0x00, 0x04,
+        0x00, 0x03, 0x00, 0x00,
+        0x01, 0x00, 0x01, 0x00,
+        0x00, 0x00, 0x01, 0x00,
+        0x00, 0x00,
+        0x00, 0x00,
+        /* sessionId */
+        0x00, 0x00, 0x00, 0x00
+    };
+
+    return TermSrvWriteServerGlobalPayload(Buffer,
+                                           BufferLength,
+                                           Payload,
+                                           sizeof(Payload),
+                                           BytesWritten);
+}
+
+static VOID
+TermSrvWriteLe16(
+    _Out_writes_bytes_(2) UCHAR *Buffer,
+    _In_ USHORT Value)
+{
+    Buffer[0] = (UCHAR)Value;
+    Buffer[1] = (UCHAR)(Value >> 8);
+}
+
+static VOID
+TermSrvWriteLe32(
+    _Out_writes_bytes_(4) UCHAR *Buffer,
+    _In_ ULONG Value)
+{
+    Buffer[0] = (UCHAR)Value;
+    Buffer[1] = (UCHAR)(Value >> 8);
+    Buffer[2] = (UCHAR)(Value >> 16);
+    Buffer[3] = (UCHAR)(Value >> 24);
+}
+
+static BOOL
+TermSrvWriteShareDataPacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ UCHAR DataType,
+    _In_reads_bytes_(BodyLength) const UCHAR *Body,
+    _In_ SIZE_T BodyLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Payload[32];
+    SIZE_T PayloadLength;
+
+    if (BytesWritten == NULL)
+        return FALSE;
+
+    *BytesWritten = 0;
+    if (BodyLength > sizeof(Payload) - 18 || (Body == NULL && BodyLength != 0))
+        return FALSE;
+
+    PayloadLength = 18 + BodyLength;
+    TermSrvWriteLe16(&Payload[0], (USHORT)PayloadLength);
+    TermSrvWriteLe16(&Payload[2], 0x10 | TERMSRV_RDP_PDU_TYPE_DATA);
+    TermSrvWriteLe16(&Payload[4], TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID);
+    TermSrvWriteLe32(&Payload[6], TERMSRV_RDP_SCAFFOLD_SHARE_ID);
+    Payload[10] = 0;
+    Payload[11] = 1;
+    TermSrvWriteLe16(&Payload[12], (USHORT)BodyLength);
+    Payload[14] = DataType;
+    Payload[15] = 0;
+    TermSrvWriteLe16(&Payload[16], 0);
+    if (BodyLength != 0)
+        CopyMemory(&Payload[18], Body, BodyLength);
+
+    return TermSrvWriteServerGlobalPayload(Buffer,
+                                           BufferLength,
+                                           Payload,
+                                           PayloadLength,
+                                           BytesWritten);
+}
+
+static BOOL
+TermSrvWriteServerSynchronizePacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Body[4];
+
+    TermSrvWriteLe16(&Body[0], 1);
+    TermSrvWriteLe16(&Body[2], TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID);
+    return TermSrvWriteShareDataPacket(Buffer,
+                                       BufferLength,
+                                       TERMSRV_RDP_DATA_TYPE_SYNCHRONIZE,
+                                       Body,
+                                       sizeof(Body),
+                                       BytesWritten);
+}
+
+static BOOL
+TermSrvWriteServerControlPacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ USHORT Action,
+    _In_ USHORT GrantId,
+    _In_ ULONG ControlId,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Body[8];
+
+    TermSrvWriteLe16(&Body[0], Action);
+    TermSrvWriteLe16(&Body[2], GrantId);
+    TermSrvWriteLe32(&Body[4], ControlId);
+    return TermSrvWriteShareDataPacket(Buffer,
+                                       BufferLength,
+                                       TERMSRV_RDP_DATA_TYPE_CONTROL,
+                                       Body,
+                                       sizeof(Body),
+                                       BytesWritten);
+}
+
+static BOOL
+TermSrvWriteServerFontMapPacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Body[8];
+
+    TermSrvWriteLe16(&Body[0], 0);
+    TermSrvWriteLe16(&Body[2], 0);
+    TermSrvWriteLe16(&Body[4], 0x0003);
+    TermSrvWriteLe16(&Body[6], 4);
+    return TermSrvWriteShareDataPacket(Buffer,
+                                       BufferLength,
+                                       TERMSRV_RDP_DATA_TYPE_FONT_MAP,
+                                       Body,
+                                       sizeof(Body),
+                                       BytesWritten);
+}
+
+static BOOL
+TermSrvWriteAutoDetectRttRequest(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    static const UCHAR Payload[] =
+    {
+        /* TS_SECURITY_HEADER: SEC_AUTODETECT_REQ */
+        0x00, 0x10, 0x00, 0x00,
+        /* RDP_RTT_REQUEST, sequence 0x23, connect-time request type. */
+        0x06, 0x00, 0x23, 0x00, 0x01, 0x10
+    };
+    SIZE_T PacketLength;
+    SIZE_T BodyLength;
+
+    if (BytesWritten == NULL)
+        return FALSE;
+
+    *BytesWritten = 0;
+    if (Buffer == NULL)
+        return FALSE;
+
+    BodyLength = 8 + sizeof(Payload);
+    PacketLength = 7 + BodyLength;
+    if (BufferLength < PacketLength || PacketLength > 0xffff)
+        return FALSE;
+
+    Buffer[0] = 0x03;
+    Buffer[1] = 0x00;
+    Buffer[2] = (UCHAR)(PacketLength >> 8);
+    Buffer[3] = (UCHAR)PacketLength;
+    Buffer[4] = 0x02;
+    Buffer[5] = 0xf0;
+    Buffer[6] = 0x80;
+
+    Buffer[7] = 0x68;
+    Buffer[8] = 0x00;
+    Buffer[9] = 0x00;
+    Buffer[10] = (UCHAR)(TERMSRV_MESSAGE_SCAFFOLD_CHANNEL_ID >> 8);
+    Buffer[11] = (UCHAR)TERMSRV_MESSAGE_SCAFFOLD_CHANNEL_ID;
+    Buffer[12] = 0x70;
+    Buffer[13] = 0x80;
+    Buffer[14] = sizeof(Payload);
+    CopyMemory(&Buffer[15], Payload, sizeof(Payload));
+
+    *BytesWritten = PacketLength;
+    return TRUE;
+}
+
+static BOOL
+TermSrvLooksLikeAutoDetectRttResponse(
+    _In_reads_bytes_(Received) const UCHAR *Buffer,
+    _In_ INT Received)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    const UCHAR *Payload;
+    ULONG Flags;
+
+    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
+                                                   (SIZE_T)Received,
+                                                   &SendData);
+    if (Result != TermSrvRdpBcgrSuccess || SendData.PayloadLength < 10)
+        return FALSE;
+
+    Payload = SendData.Payload;
+    Flags = ((ULONG)Payload[3] << 24) |
+            ((ULONG)Payload[2] << 16) |
+            ((ULONG)Payload[1] << 8) |
+            Payload[0];
+
+    return Flags == TERMSRV_SEC_AUTODETECT_RSP &&
+           Payload[4] == 0x06 &&
+           Payload[5] == 0x01 &&
+           Payload[6] == 0x23 &&
+           Payload[7] == 0x00 &&
+           Payload[8] == 0x00 &&
+           Payload[9] == 0x00;
+}
+
+static BOOL
+TermSrvTryGetSharePduType(
+    _In_reads_bytes_(Received) const UCHAR *Buffer,
+    _In_ INT Received,
+    _Out_ UCHAR *PduType,
+    _Out_ UCHAR *DataType,
+    _Out_ USHORT *ControlAction)
+{
+    TERMSRV_RDPBCGR_RESULT Result;
+    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
+    const UCHAR *Payload;
+    USHORT ShareLength;
+    USHORT RawPduType;
+
+    if (PduType == NULL || DataType == NULL || ControlAction == NULL)
+        return FALSE;
+
+    *PduType = 0;
+    *DataType = 0;
+    *ControlAction = 0;
+    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
+                                                   (SIZE_T)Received,
+                                                   &SendData);
+    if (Result != TermSrvRdpBcgrSuccess || SendData.PayloadLength < 6)
+        return FALSE;
+
+    Payload = SendData.Payload;
+    ShareLength = (USHORT)(Payload[0] | (Payload[1] << 8));
+    RawPduType = (USHORT)(Payload[2] | (Payload[3] << 8));
+    if (ShareLength > SendData.PayloadLength || ShareLength < 6)
+        return FALSE;
+
+    *PduType = (UCHAR)(RawPduType & 0x0f);
+    if (*PduType == TERMSRV_RDP_PDU_TYPE_DATA && ShareLength >= 18)
+    {
+        *DataType = Payload[14];
+        if (*DataType == TERMSRV_RDP_DATA_TYPE_CONTROL && ShareLength >= 26)
+            *ControlAction = (USHORT)(Payload[18] | (Payload[19] << 8));
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvSendServerControlPacket(
+    _In_ SOCKET Client,
+    _Out_writes_bytes_(ReplyLength) UCHAR *Reply,
+    _In_ SIZE_T ReplyLength,
+    _In_ USHORT Action,
+    _In_ USHORT GrantId,
+    _In_ ULONG ControlId)
+{
+    SIZE_T BytesWritten;
+
+    if (!TermSrvWriteServerControlPacket(Reply,
+                                         ReplyLength,
+                                         Action,
+                                         GrantId,
+                                         ControlId,
+                                         &BytesWritten) ||
+        !TermSrvSendPacket(Client, Reply, BytesWritten))
+    {
+        TermSrvLogFailure("server control packet write failed");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvHandleClientFinalization(
+    _In_ SOCKET Client,
+    _In_ HANDLE StopEvent,
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ INT BufferLength,
+    _In_ INT InitialReceived,
+    _Out_writes_bytes_(ReplyLength) UCHAR *Reply,
+    _In_ SIZE_T ReplyLength)
+{
+    INT Received;
+    INT PacketCount;
+    BOOL SawConfirmActive;
+    BOOL SentSyncAndCooperate;
+    BOOL SentGranted;
+    BOOL SentFontMap;
+
+    Received = InitialReceived;
+    SawConfirmActive = FALSE;
+    SentSyncAndCooperate = FALSE;
+    SentGranted = FALSE;
+    SentFontMap = FALSE;
+
+    for (PacketCount = 0; PacketCount < 8; PacketCount++)
+    {
+        UCHAR PduType;
+        UCHAR DataType;
+        USHORT ControlAction;
+
+        if (Received <= 0 &&
+            !TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+        {
+            return TRUE;
+        }
+
+        if (!TermSrvTryGetSharePduType(Buffer,
+                                       Received,
+                                       &PduType,
+                                       &DataType,
+                                       &ControlAction))
+        {
+            Received = 0;
+            continue;
+        }
+
+        if (PduType == TERMSRV_RDP_PDU_TYPE_CONFIRM_ACTIVE && !SentSyncAndCooperate)
+        {
+            SIZE_T BytesWritten;
+
+            SawConfirmActive = TRUE;
+            if (!TermSrvWriteServerSynchronizePacket(Reply, ReplyLength, &BytesWritten) ||
+                !TermSrvSendPacket(Client, Reply, BytesWritten) ||
+                !TermSrvSendServerControlPacket(Client,
+                                                Reply,
+                                                ReplyLength,
+                                                TERMSRV_RDP_CONTROL_ACTION_COOPERATE,
+                                                0,
+                                                0))
+            {
+                TermSrvLogFailure("server synchronize/cooperate write failed");
+                return FALSE;
+            }
+
+            SentSyncAndCooperate = TRUE;
+        }
+        else if (PduType == TERMSRV_RDP_PDU_TYPE_DATA &&
+                 DataType == TERMSRV_RDP_DATA_TYPE_CONTROL &&
+                 ControlAction == TERMSRV_RDP_CONTROL_ACTION_REQUEST_CONTROL &&
+                 SawConfirmActive &&
+                 SentSyncAndCooperate &&
+                 !SentGranted)
+        {
+            if (!TermSrvSendServerControlPacket(Client,
+                                                Reply,
+                                                ReplyLength,
+                                                TERMSRV_RDP_CONTROL_ACTION_GRANTED_CONTROL,
+                                                TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID,
+                                                0x03ea))
+            {
+                TermSrvLogFailure("server granted-control write failed");
+                return FALSE;
+            }
+
+            SentGranted = TRUE;
+        }
+        else if (PduType == TERMSRV_RDP_PDU_TYPE_DATA &&
+                 DataType == TERMSRV_RDP_DATA_TYPE_FONT_LIST &&
+                 SentGranted)
+        {
+            SIZE_T BytesWritten;
+
+            if (!TermSrvWriteServerFontMapPacket(Reply, ReplyLength, &BytesWritten) ||
+                !TermSrvSendPacket(Client, Reply, BytesWritten))
+            {
+                TermSrvLogFailure("server font-map packet write failed");
+                return FALSE;
+            }
+
+            SentFontMap = TRUE;
+            break;
+        }
+
+        Received = 0;
+    }
+
+    return SentFontMap || !SawConfirmActive;
+}
+
+static BOOL
 TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
     _In_ INT BufferLength,
+    _In_ INT InitialReceived,
+    _Out_writes_bytes_(ReplyLength) UCHAR *Reply,
+    _In_ SIZE_T ReplyLength,
     _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
     _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
 {
     INT Received;
+    SIZE_T BytesWritten;
     TERMSRV_RDPBCGR_RESULT Result;
     TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD ClientInfo;
 
-    Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+    Received = InitialReceived;
+    if (Received <= 0)
+        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+
     if (Received <= 0)
         return TRUE;
 
@@ -527,11 +1051,45 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
     Result = TermSrvRdpBcgrParseClientInfoPayload(Buffer,
                                                  (SIZE_T)Received,
                                                  &ClientInfo);
-    if (Result == TermSrvRdpBcgrSuccess)
+    if (Result != TermSrvRdpBcgrSuccess)
+        TermSrvLogRdpBcgrFailure("client info parse", Result);
+
+    if (!TermSrvWriteAutoDetectRttRequest(Reply, ReplyLength, &BytesWritten) ||
+        !TermSrvSendPacket(Client, Reply, BytesWritten))
     {
-        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
-        if (Received <= 0)
+        TermSrvLogFailure("autodetect RTT request write failed");
+        return FALSE;
+    }
+
+    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+        return TRUE;
+
+    if (TermSrvLooksLikeAutoDetectRttResponse(Buffer, Received))
+    {
+        if (!TermSrvWriteLicenseValidClientPacket(Reply, ReplyLength, &BytesWritten) ||
+            !TermSrvSendPacket(Client, Reply, BytesWritten))
+        {
+            TermSrvLogFailure("license valid-client packet write failed");
+            return FALSE;
+        }
+
+        if (!TermSrvWriteDemandActivePacket(Reply, ReplyLength, &BytesWritten) ||
+            !TermSrvSendPacket(Client, Reply, BytesWritten))
+        {
+            TermSrvLogFailure("demand active packet write failed");
+            return FALSE;
+        }
+
+        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
             return TRUE;
+
+        return TermSrvHandleClientFinalization(Client,
+                                               StopEvent,
+                                               Buffer,
+                                               BufferLength,
+                                               Received,
+                                               Reply,
+                                               ReplyLength);
     }
 
     return TermSrvRouteOptionalCliprdrPacket(Client,
@@ -561,6 +1119,7 @@ TermSrvRunEarlyMcsPhase(
     TERMSRV_CLIPRDR_CHANNEL CliprdrChannel;
     TERMSRV_CLIPRDR_DUMMY_BACKEND CliprdrDummy;
     BOOL HaveSecurityExchange;
+    INT InitialClientInfoReceived;
 
     if (!TermSrvInitializeCliprdrScaffold(&CliprdrChannel,
                                           &CliprdrDummy,
@@ -609,6 +1168,7 @@ TermSrvRunEarlyMcsPhase(
         return FALSE;
 
     HaveSecurityExchange = FALSE;
+    InitialClientInfoReceived = 0;
 
     for (JoinCount = 0; JoinCount < TERMSRV_MCS_MAX_CHANNEL_JOIN_REQUESTS; JoinCount++)
     {
@@ -680,8 +1240,8 @@ TermSrvRunEarlyMcsPhase(
                                                             &SecurityExchange);
         if (Result != TermSrvRdpBcgrSuccess)
         {
-            TermSrvLogRdpBcgrFailure("security exchange parse", Result);
-            return FALSE;
+            TermSrvLogRdpBcgrFailure("security exchange parse, treating packet as client info", Result);
+            InitialClientInfoReceived = Received;
         }
     }
 
@@ -689,6 +1249,9 @@ TermSrvRunEarlyMcsPhase(
                                                          StopEvent,
                                                          Buffer,
                                                          BufferLength,
+                                                         InitialClientInfoReceived,
+                                                         Reply,
+                                                         ReplyLength,
                                                          &CliprdrChannel,
                                                          &CliprdrBackend))
     {

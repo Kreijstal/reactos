@@ -425,6 +425,8 @@ TermSrvRdpBcgrParseMcsSendDataPayload(
         return TermSrvRdpBcgrUnsupportedPdu;
 
     PayloadLength = ReadBe16(&Body[6]);
+    if (PayloadLength & 0x8000)
+        PayloadLength &= 0x7fff;
     if (PayloadLength != BodyLength - 8)
         return TermSrvRdpBcgrInvalidLength;
 
