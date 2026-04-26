@@ -451,7 +451,9 @@ TermSrvIsConsoleBackend(
         return FALSE;
 
     Backend = TermSrvSessionManagerGetBackend(Context->Peer.SessionManager);
-    return Backend != NULL && Backend == TermSrvSessionManagerGetConsoleBackend();
+    return Backend != NULL &&
+           (Backend == TermSrvSessionManagerGetConsoleBackend() ||
+            Backend == TermSrvSessionManagerGetSessmanBackend());
 }
 
 static BOOL
