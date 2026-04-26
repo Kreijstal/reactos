@@ -2980,9 +2980,22 @@ TermSrvHandleSlowPathInputPacket(
 
         _snprintf(PeerPacket,
                   sizeof(PeerPacket),
-                  "SLOW_INPUT mouse=1 x=%u y=%u",
+                  "SLOW_INPUT mouse=1 x=%u y=%u flags=%u",
                   InputEvents.FirstPointerX,
-                  InputEvents.FirstPointerY);
+                  InputEvents.FirstPointerY,
+                  InputEvents.FirstDeviceFlags);
+        PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+        TermSrvAdvancePeer(Context, PeerPacket, "slow-path input delivery");
+    }
+    else if (InputEvents.FirstMessageType == 0x0004)
+    {
+        CHAR PeerPacket[80];
+
+        _snprintf(PeerPacket,
+                  sizeof(PeerPacket),
+                  "SLOW_INPUT scancode=%u flags=%u",
+                  InputEvents.FirstKeyboardCode,
+                  InputEvents.FirstDeviceFlags);
         PeerPacket[sizeof(PeerPacket) - 1] = '\0';
         TermSrvAdvancePeer(Context, PeerPacket, "slow-path input delivery");
     }
@@ -3332,7 +3345,61 @@ TermSrvRunActiveLoop(
                                                  PendingLength,
                                                  &PacketLength))
             {
-                return FALSE;
+                UCHAR Reply[1024];
+                SIZE_T BytesWritten;
+                TERMSRV_RDPBCGR_RESULT Result;
+                TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS InputEvents;
+
+                Result = TermSrvRdpBcgrParseFastPathInputEvents(Buffer,
+                                                                (SIZE_T)Received,
+                                                                &InputEvents);
+                if (Result == TermSrvRdpBcgrSuccess &&
+                    (InputEvents.FirstEventCode == 0x01 ||
+                     InputEvents.FirstEventCode == 0x05))
+                {
+                    CHAR PeerPacket[64];
+
+                    _snprintf(PeerPacket,
+                              sizeof(PeerPacket),
+                              "FAST_INPUT mouse=1 x=%u y=%u flags=%u",
+                              InputEvents.FirstPointerX,
+                              InputEvents.FirstPointerY,
+                              InputEvents.FirstEventFlags);
+                    PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+                    TermSrvAdvancePeer(Context,
+                                       PeerPacket,
+                                       "fast-path input delivery");
+                    if (TermSrvWritePointerMarkerPacket(Reply,
+                                                        sizeof(Reply),
+                                                        InputEvents.FirstPointerX,
+                                                        InputEvents.FirstPointerY,
+                                                        &BytesWritten))
+                    {
+                        TermSrvSendPacket(Client, Reply, BytesWritten);
+                    }
+                }
+                else if (Result == TermSrvRdpBcgrSuccess &&
+                         InputEvents.FirstEventCode == 0x00)
+                {
+                    CHAR PeerPacket[80];
+
+                    _snprintf(PeerPacket,
+                              sizeof(PeerPacket),
+                              "FAST_INPUT scancode=%u flags=%u",
+                              InputEvents.FirstKeyboardCode,
+                              InputEvents.FirstEventFlags);
+                    PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+                    TermSrvAdvancePeer(Context,
+                                       PeerPacket,
+                                       "fast-path input delivery");
+                }
+                else
+                {
+                    TermSrvAdvancePeer(Context,
+                                       "FAST_INPUT wire=fastpath",
+                                       "fast-path input delivery");
+                }
+                break;
             }
 
             if (PacketLength == 0)
