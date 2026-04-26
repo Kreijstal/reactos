@@ -63,6 +63,7 @@ extern void func_NtUserGetKeyboardLayoutName(void);
 extern void func_NtUserGetThreadState(void);
 extern void func_NtUserGetTitleBarInfo(void);
 extern void func_NtUserProcessConnect(void);
+extern void func_NtUserRdpCapture(void);
 extern void func_NtUserRedrawWindow(void);
 extern void func_NtUserSBGetParms(void);
 extern void func_NtUserScrollDC(void);
@@ -138,6 +139,7 @@ const struct test winetest_testlist[] =
     { "NtUserGetThreadState", func_NtUserGetThreadState },
     { "NtUserGetTitleBarInfo", func_NtUserGetTitleBarInfo },
     { "NtUserProcessConnect", func_NtUserProcessConnect },
+    { "NtUserRdpCapture", func_NtUserRdpCapture },
     { "NtUserRedrawWindow", func_NtUserRedrawWindow },
     { "NtUserSBGetParms", func_NtUserSBGetParms },
     { "NtUserScrollDC", func_NtUserScrollDC },

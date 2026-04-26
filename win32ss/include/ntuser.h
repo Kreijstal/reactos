@@ -2074,6 +2074,43 @@ NTAPI
 NtUserCloseWindowStation(
     HWINSTA hWinSta);
 
+#define NTUSER_RDP_FRAME_FORMAT_BGRA32 1
+
+typedef struct _NTUSER_RDP_FRAME
+{
+    ULONG Size;
+    ULONG SessionId;
+    ULONG Width;
+    ULONG Height;
+    ULONG BitsPerPixel;
+    ULONG Pitch;
+    ULONG Format;
+    ULONG FrameId;
+    ULONG RequiredBufferSize;
+    ULONG Flags;
+} NTUSER_RDP_FRAME, *PNTUSER_RDP_FRAME;
+
+HANDLE
+NTAPI
+NtUserRdpOpenSession(
+    _In_ ULONG SessionId,
+    _In_opt_ PUNICODE_STRING WinStationName,
+    _In_opt_ PUNICODE_STRING DesktopName);
+
+BOOL
+NTAPI
+NtUserRdpCaptureFrame(
+    _In_ HANDLE hRdpSession,
+    _Out_ PNTUSER_RDP_FRAME Frame,
+    _Out_writes_bytes_to_opt_(PixelBufferSize, *BytesReturned) PVOID PixelBuffer,
+    _In_ ULONG PixelBufferSize,
+    _Out_opt_ PULONG BytesReturned);
+
+BOOL
+NTAPI
+NtUserRdpCloseSession(
+    _In_ HANDLE hRdpSession);
+
 /* Console commands for NtUserConsoleControl */
 typedef enum _CONSOLECONTROL
 {

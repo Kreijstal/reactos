@@ -594,6 +594,9 @@
 #@ stdcall NtUserValidateTimerCallback(ptr ptr ptr)
 @ stdcall NtUserVkKeyScanEx(long ptr long)
 @ stdcall NtUserWaitForInputIdle(ptr long long)
+@ stdcall NtUserRdpOpenSession(long ptr ptr)
+@ stdcall NtUserRdpCaptureFrame(ptr ptr ptr long ptr)
+@ stdcall NtUserRdpCloseSession(ptr)
 @ stdcall NtUserWaitForMsgAndEvent(long)
 @ stdcall NtUserWaitMessage()
 @ stdcall NtUserWin32PoolAllocationStats(long long long long long long)
@@ -672,4 +675,3 @@
 @ stdcall NtGdiBRUSHOBJ_DeleteRbrush(ptr ptr)
 @ stdcall NtGdiUMPDEngFreeUserMem(ptr)
 @ stdcall NtGdiDrawStream(ptr long ptr)
-
