@@ -193,6 +193,7 @@
 #define USERTAG_SERVICE_TABLE            'lacU'
 #define USERTAG_MONITOR_MARGIN           'mamU'
 #define USERTAG_REDIRECT                 'rdrU'
+#define USERTAG_RDP                      'pdrU'
 #define USERTAG_ACCEL                    'casU'
 #define USERTAG_ATTACHINFO               'iasU'
 #define USERTAG_ALTTAB                   'lasU'
