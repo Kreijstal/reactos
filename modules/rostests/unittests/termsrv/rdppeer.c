@@ -1050,6 +1050,15 @@ TestRdpBcgrParseInputEvents(VOID)
     {
         0x00, 0x00, 0x00, 0x00, 0xff
     };
+    static const UCHAR MouseInputEvent[] =
+    {
+        0x01, 0x00, 0x00, 0x00,
+        0x79, 0x56, 0x34, 0x12,
+        0x01, 0x80,
+        0x00, 0x08,
+        0x34, 0x12,
+        0x78, 0x56
+    };
     TERMSRV_RDPBCGR_INPUT_EVENTS Parsed;
 
     ok(TermSrvRdpBcgrParseInputEvents(InputEvents,
@@ -1073,6 +1082,18 @@ TestRdpBcgrParseInputEvents(VOID)
        "Unexpected two-event input count %u\n", Parsed.NumberEvents);
     ok(Parsed.FirstDeviceFlags == 0x001e,
        "Unexpected first two-event input flags 0x%x\n", Parsed.FirstDeviceFlags);
+    ok(TermSrvRdpBcgrParseInputEvents(MouseInputEvent,
+                                      sizeof(MouseInputEvent),
+                                      &Parsed) == TermSrvRdpBcgrSuccess,
+       "Mouse input event should parse\n");
+    ok(Parsed.FirstMessageType == 0x8001,
+       "Unexpected mouse input message type 0x%x\n", Parsed.FirstMessageType);
+    ok(Parsed.FirstDeviceFlags == 0x0800,
+       "Unexpected mouse input flags 0x%x\n", Parsed.FirstDeviceFlags);
+    ok(Parsed.FirstPointerX == 0x1234,
+       "Unexpected mouse input X %u\n", Parsed.FirstPointerX);
+    ok(Parsed.FirstPointerY == 0x5678,
+       "Unexpected mouse input Y %u\n", Parsed.FirstPointerY);
 
     ok(TermSrvRdpBcgrParseInputEvents(InputEvents,
                                       3,
@@ -1204,6 +1225,67 @@ TestRdpBcgrParseShareDataInputPdu(VOID)
                                        sizeof(SlowPathInput),
                                        NULL) == TermSrvRdpBcgrInvalidHeader,
        "NULL Share Data output should fail\n");
+}
+
+static VOID
+TestRdpBcgrParseFastPathInputEvents(VOID)
+{
+    static const UCHAR MouseInput[] =
+    {
+        0x04, 0x09,
+        0x20,
+        0x00, 0x08,
+        0x34, 0x12,
+        0x78, 0x56
+    };
+    static const UCHAR LongLengthMouseInput[] =
+    {
+        0x04, 0x80, 0x0a,
+        0x20,
+        0x00, 0x08,
+        0x34, 0x12,
+        0x78, 0x56
+    };
+    static const UCHAR ShortMouseInput[] =
+    {
+        0x04, 0x09,
+        0x20,
+        0x00, 0x08,
+        0x34, 0x12
+    };
+    TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS Parsed;
+
+    ok(TermSrvRdpBcgrParseFastPathInputEvents(MouseInput,
+                                              sizeof(MouseInput),
+                                              &Parsed) == TermSrvRdpBcgrSuccess,
+       "Fast-path mouse input should parse\n");
+    ok(Parsed.NumberEvents == 1,
+       "Unexpected fast-path event count %u\n", Parsed.NumberEvents);
+    ok(Parsed.FirstEventCode == 1,
+       "Unexpected fast-path event code %u\n", Parsed.FirstEventCode);
+    ok(Parsed.FirstEventFlags == 0x0800,
+       "Unexpected fast-path pointer flags 0x%x\n", Parsed.FirstEventFlags);
+    ok(Parsed.FirstPointerX == 0x1234,
+       "Unexpected fast-path pointer X %u\n", Parsed.FirstPointerX);
+    ok(Parsed.FirstPointerY == 0x5678,
+       "Unexpected fast-path pointer Y %u\n", Parsed.FirstPointerY);
+
+    ok(TermSrvRdpBcgrParseFastPathInputEvents(LongLengthMouseInput,
+                                              sizeof(LongLengthMouseInput),
+                                              &Parsed) == TermSrvRdpBcgrSuccess,
+       "Long-length fast-path mouse input should parse\n");
+    ok(TermSrvRdpBcgrParseFastPathInputEvents(ShortMouseInput,
+                                              sizeof(ShortMouseInput),
+                                              &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short fast-path mouse input should request more data\n");
+    ok(TermSrvRdpBcgrParseFastPathInputEvents(NULL,
+                                              sizeof(MouseInput),
+                                              &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "NULL fast-path input buffer should fail\n");
+    ok(TermSrvRdpBcgrParseFastPathInputEvents(MouseInput,
+                                              sizeof(MouseInput),
+                                              NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL fast-path input output should fail\n");
 }
 
 static VOID
@@ -2228,6 +2310,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrWriteMcsSendDataPayload();
     TestRdpBcgrParseInputEvents();
     TestRdpBcgrParseShareDataInputPdu();
+    TestRdpBcgrParseFastPathInputEvents();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
     TestRdpBcgrParseStaticChannelList();
     TestCliprdrStaticChannelName();
