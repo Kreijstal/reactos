@@ -39,6 +39,14 @@
 #define TERMSRV_RDP_CONTROL_ACTION_REQUEST_CONTROL 1
 #define TERMSRV_RDP_CONTROL_ACTION_GRANTED_CONTROL 2
 #define TERMSRV_RDP_CONTROL_ACTION_COOPERATE 4
+#define TERMSRV_TEST_BITMAP_WIDTH 64
+#define TERMSRV_TEST_BITMAP_HEIGHT 64
+#define TERMSRV_TEST_BITMAP_BPP 16
+#define TERMSRV_TEST_BITMAP_BYTES \
+    (TERMSRV_TEST_BITMAP_WIDTH * TERMSRV_TEST_BITMAP_HEIGHT * 2)
+#define TERMSRV_POINTER_MARKER_SIZE 16
+#define TERMSRV_POINTER_MARKER_BYTES \
+    (TERMSRV_POINTER_MARKER_SIZE * TERMSRV_POINTER_MARKER_SIZE * 2)
 #define TERMSRV_SCAFFOLD_STATIC_CHANNEL_LIST_HEADER_LENGTH 1
 #define TERMSRV_SCAFFOLD_STATIC_CHANNEL_DEF_LENGTH \
     (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
@@ -696,12 +704,15 @@ TermSrvWriteDemandActivePacket(
         0x00, 0x00, 0x01, 0x01,
         /* Bitmap Capability Set. */
         0x02, 0x00, 0x1c, 0x00,
-        0x20, 0x00, 0x01, 0x01,
-        0x01, 0x00, 0x00, 0x04,
-        0x00, 0x03, 0x00, 0x00,
+        0x20, 0x00,
+        0x01, 0x00,
+        0x01, 0x00,
+        0x01, 0x00,
+        0x00, 0x04,
+        0x00, 0x03,
+        0x00, 0x00,
         0x01, 0x00, 0x01, 0x00,
         0x00, 0x00, 0x01, 0x00,
-        0x00, 0x00,
         0x00, 0x00,
         /* sessionId */
         0x00, 0x00, 0x00, 0x00
@@ -743,7 +754,7 @@ TermSrvWriteShareDataPacket(
     _In_ SIZE_T BodyLength,
     _Out_ SIZE_T *BytesWritten)
 {
-    UCHAR Payload[128];
+    UCHAR Payload[18 + 4 + 18 + TERMSRV_TEST_BITMAP_BYTES];
     SIZE_T PayloadLength;
 
     if (BytesWritten == NULL)
@@ -775,58 +786,136 @@ TermSrvWriteShareDataPacket(
 }
 
 static BOOL
-TermSrvWriteTestBitmapUpdatePacket(
+TermSrvWriteBitmapUpdatePacket(
     _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
+    _In_ USHORT DestLeft,
+    _In_ USHORT DestTop,
+    _In_ USHORT Width,
+    _In_ USHORT Height,
+    _In_reads_bytes_(BitmapLength) const UCHAR *Bitmap,
+    _In_ USHORT BitmapLength,
     _Out_ SIZE_T *BytesWritten)
 {
-    UCHAR Body[4 + 18 + 32];
+    UCHAR Body[4 + 18 + TERMSRV_TEST_BITMAP_BYTES];
     UCHAR *Rectangle;
-    UCHAR *Pixels;
-    USHORT Colors[16];
-    SIZE_T Index;
 
-    Colors[0] = 0xf800;
-    Colors[1] = 0x07e0;
-    Colors[2] = 0x001f;
-    Colors[3] = 0xffff;
-    Colors[4] = 0xffff;
-    Colors[5] = 0x001f;
-    Colors[6] = 0x07e0;
-    Colors[7] = 0xf800;
-    Colors[8] = 0x07ff;
-    Colors[9] = 0xf81f;
-    Colors[10] = 0xffe0;
-    Colors[11] = 0x0000;
-    Colors[12] = 0x0000;
-    Colors[13] = 0xffe0;
-    Colors[14] = 0xf81f;
-    Colors[15] = 0x07ff;
+    if (Bitmap == NULL ||
+        BitmapLength > TERMSRV_TEST_BITMAP_BYTES ||
+        BitmapLength != Width * Height * 2)
+    {
+        if (BytesWritten != NULL)
+            *BytesWritten = 0;
+        return FALSE;
+    }
 
     TermSrvWriteLe16(&Body[0], 0x0001);
     TermSrvWriteLe16(&Body[2], 1);
 
     Rectangle = &Body[4];
-    TermSrvWriteLe16(&Rectangle[0], 0);
-    TermSrvWriteLe16(&Rectangle[2], 0);
-    TermSrvWriteLe16(&Rectangle[4], 3);
-    TermSrvWriteLe16(&Rectangle[6], 3);
-    TermSrvWriteLe16(&Rectangle[8], 4);
-    TermSrvWriteLe16(&Rectangle[10], 4);
-    TermSrvWriteLe16(&Rectangle[12], 16);
+    TermSrvWriteLe16(&Rectangle[0], DestLeft);
+    TermSrvWriteLe16(&Rectangle[2], DestTop);
+    TermSrvWriteLe16(&Rectangle[4], DestLeft + Width - 1);
+    TermSrvWriteLe16(&Rectangle[6], DestTop + Height - 1);
+    TermSrvWriteLe16(&Rectangle[8], Width);
+    TermSrvWriteLe16(&Rectangle[10], Height);
+    TermSrvWriteLe16(&Rectangle[12], TERMSRV_TEST_BITMAP_BPP);
     TermSrvWriteLe16(&Rectangle[14], 0);
-    TermSrvWriteLe16(&Rectangle[16], 32);
-
-    Pixels = &Rectangle[18];
-    for (Index = 0; Index < ARRAYSIZE(Colors); Index++)
-        TermSrvWriteLe16(&Pixels[Index * 2], Colors[Index]);
+    TermSrvWriteLe16(&Rectangle[16], BitmapLength);
+    CopyMemory(&Rectangle[18], Bitmap, BitmapLength);
 
     return TermSrvWriteShareDataPacket(Buffer,
                                        BufferLength,
                                        TERMSRV_RDP_DATA_TYPE_UPDATE,
                                        Body,
-                                       sizeof(Body),
+                                       4 + 18 + BitmapLength,
                                        BytesWritten);
+}
+
+static BOOL
+TermSrvWriteTestBitmapUpdatePacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Pixels[TERMSRV_TEST_BITMAP_BYTES];
+    ULONG X;
+    ULONG Y;
+
+    for (Y = 0; Y < TERMSRV_TEST_BITMAP_HEIGHT; Y++)
+    {
+        for (X = 0; X < TERMSRV_TEST_BITMAP_WIDTH; X++)
+        {
+            ULONG Red;
+            ULONG Green;
+            ULONG Blue;
+            USHORT Pixel;
+
+            Red = (X * 31) / (TERMSRV_TEST_BITMAP_WIDTH - 1);
+            Green = (Y * 63) / (TERMSRV_TEST_BITMAP_HEIGHT - 1);
+            Blue = (((X / 8) ^ (Y / 8)) & 1) ? 31 : 4;
+            Pixel = (USHORT)((Red << 11) | (Green << 5) | Blue);
+            TermSrvWriteLe16(&Pixels[((Y * TERMSRV_TEST_BITMAP_WIDTH) + X) * 2],
+                             Pixel);
+        }
+    }
+
+    return TermSrvWriteBitmapUpdatePacket(Buffer,
+                                          BufferLength,
+                                          0,
+                                          0,
+                                          TERMSRV_TEST_BITMAP_WIDTH,
+                                          TERMSRV_TEST_BITMAP_HEIGHT,
+                                          Pixels,
+                                          sizeof(Pixels),
+                                          BytesWritten);
+}
+
+static BOOL
+TermSrvWritePointerMarkerPacket(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ USHORT PointerX,
+    _In_ USHORT PointerY,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Pixels[TERMSRV_POINTER_MARKER_BYTES];
+    ULONG X;
+    ULONG Y;
+    USHORT DestLeft;
+    USHORT DestTop;
+
+    DestLeft = (PointerX > TERMSRV_POINTER_MARKER_SIZE / 2) ?
+               PointerX - TERMSRV_POINTER_MARKER_SIZE / 2 :
+               0;
+    DestTop = (PointerY > TERMSRV_POINTER_MARKER_SIZE / 2) ?
+              PointerY - TERMSRV_POINTER_MARKER_SIZE / 2 :
+              0;
+
+    for (Y = 0; Y < TERMSRV_POINTER_MARKER_SIZE; Y++)
+    {
+        for (X = 0; X < TERMSRV_POINTER_MARKER_SIZE; X++)
+        {
+            USHORT Pixel;
+
+            Pixel = (X == Y ||
+                     X + Y == TERMSRV_POINTER_MARKER_SIZE - 1 ||
+                     X == TERMSRV_POINTER_MARKER_SIZE / 2 ||
+                     Y == TERMSRV_POINTER_MARKER_SIZE / 2) ? 0xffff : 0x001f;
+            TermSrvWriteLe16(&Pixels[((Y * TERMSRV_POINTER_MARKER_SIZE) + X) * 2],
+                             Pixel);
+        }
+    }
+
+    return TermSrvWriteBitmapUpdatePacket(Buffer,
+                                          BufferLength,
+                                          DestLeft,
+                                          DestTop,
+                                          TERMSRV_POINTER_MARKER_SIZE,
+                                          TERMSRV_POINTER_MARKER_SIZE,
+                                          Pixels,
+                                          sizeof(Pixels),
+                                          BytesWritten);
 }
 
 static BOOL
@@ -1003,9 +1092,12 @@ TermSrvTryGetSharePduType(
 static VOID
 TermSrvHandleSlowPathInputPacket(
     _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
     _In_reads_bytes_(Received) const UCHAR *Buffer,
     _In_ INT Received)
 {
+    UCHAR Reply[1024];
+    SIZE_T BytesWritten;
     TERMSRV_RDPBCGR_RESULT Result;
     TERMSRV_RDPBCGR_INPUT_EVENTS InputEvents;
 
@@ -1020,6 +1112,15 @@ TermSrvHandleSlowPathInputPacket(
     }
 
     TermSrvAdvancePeer(Context, "SLOW_INPUT wire=rdpbcgr", "slow-path input delivery");
+    if (InputEvents.FirstMessageType == 0x8001 &&
+        TermSrvWritePointerMarkerPacket(Reply,
+                                        sizeof(Reply),
+                                        InputEvents.FirstPointerX,
+                                        InputEvents.FirstPointerY,
+                                        &BytesWritten))
+    {
+        TermSrvSendPacket(Client, Reply, BytesWritten);
+    }
 }
 
 static BOOL
@@ -1172,11 +1273,32 @@ TermSrvRunActiveLoop(
     _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
     _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
 {
+    fd_set ReadSet;
+    TIMEVAL Timeout;
     INT Received;
+    INT SelectResult;
 
     while (!TermSrvStopRequested(StopEvent))
     {
-        Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, BufferLength);
+        FD_ZERO(&ReadSet);
+        FD_SET(Client, &ReadSet);
+        Timeout.tv_sec = 0;
+        Timeout.tv_usec = TERMSRV_SELECT_TIMEOUT_MS * 1000;
+
+        SelectResult = select(0, &ReadSet, NULL, NULL, &Timeout);
+        if (SelectResult == 0)
+            continue;
+
+        if (SelectResult == SOCKET_ERROR)
+        {
+            TermSrvLogSocketFailure("select");
+            return FALSE;
+        }
+
+        if (!FD_ISSET(Client, &ReadSet))
+            continue;
+
+        Received = recv(Client, (char *)Buffer, BufferLength, 0);
         if (Received == 0)
             return TRUE;
 
@@ -1192,10 +1314,29 @@ TermSrvRunActiveLoop(
         switch (TermSrvIdentifyPacketPlaceholder(Buffer, Received))
         {
             case TermSrvPacketFastPath:
+            {
+                UCHAR Reply[1024];
+                SIZE_T BytesWritten;
+                TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS InputEvents;
+
                 TermSrvAdvancePeer(Context,
                                    "FAST_INPUT wire=fastpath",
                                    "fast-path input delivery");
+                if (TermSrvRdpBcgrParseFastPathInputEvents(Buffer,
+                                                           (SIZE_T)Received,
+                                                           &InputEvents) == TermSrvRdpBcgrSuccess &&
+                    (InputEvents.FirstEventCode == 0x01 ||
+                     InputEvents.FirstEventCode == 0x05) &&
+                    TermSrvWritePointerMarkerPacket(Reply,
+                                                    sizeof(Reply),
+                                                    InputEvents.FirstPointerX,
+                                                    InputEvents.FirstPointerY,
+                                                    &BytesWritten))
+                {
+                    TermSrvSendPacket(Client, Reply, BytesWritten);
+                }
                 break;
+            }
 
             case TermSrvPacketTpkt:
                 if (TermSrvIsCliprdrMcsPacket(Buffer, Received, Channel))
@@ -1211,7 +1352,7 @@ TermSrvRunActiveLoop(
                 }
                 else
                 {
-                    TermSrvHandleSlowPathInputPacket(Context, Buffer, Received);
+                    TermSrvHandleSlowPathInputPacket(Context, Client, Buffer, Received);
                 }
                 break;
 
@@ -1538,7 +1679,7 @@ TermSrvHandleClient(
     {
         TERMSRV_RDPBCGR_CONNECTION_REQUEST Request;
         TERMSRV_RDPBCGR_CONNECTION_CONFIRM Confirm;
-        UCHAR Reply[2048];
+        UCHAR Reply[12288];
         SIZE_T ReplyLength;
         TERMSRV_RDPBCGR_RESULT Result;
         TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
