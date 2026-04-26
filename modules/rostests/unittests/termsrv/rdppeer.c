@@ -1024,6 +1024,79 @@ TestRdpBcgrWriteMcsSendDataPayload(VOID)
 }
 
 static VOID
+TestRdpBcgrParseInputEvents(VOID)
+{
+    static const UCHAR InputEvents[] =
+    {
+        0x01, 0x00, 0x00, 0x00,
+        0x78, 0x56, 0x34, 0x12,
+        0x04, 0x00,
+        0x1e, 0x00,
+        0x1e, 0x00, 0x00, 0x00
+    };
+    static const UCHAR TwoInputEvents[] =
+    {
+        0x02, 0x00, 0x00, 0x00,
+        0x78, 0x56, 0x34, 0x12,
+        0x04, 0x00,
+        0x1e, 0x00,
+        0x1e, 0x00, 0x00, 0x00,
+        0x79, 0x56, 0x34, 0x12,
+        0x04, 0x00,
+        0x9e, 0x00,
+        0x1e, 0x00, 0x00, 0x00
+    };
+    static const UCHAR ExtraByte[] =
+    {
+        0x00, 0x00, 0x00, 0x00, 0xff
+    };
+    TERMSRV_RDPBCGR_INPUT_EVENTS Parsed;
+
+    ok(TermSrvRdpBcgrParseInputEvents(InputEvents,
+                                      sizeof(InputEvents),
+                                      &Parsed) == TermSrvRdpBcgrSuccess,
+       "Input event parse failed\n");
+    ok(Parsed.NumberEvents == 1,
+       "Unexpected input event count %u\n", Parsed.NumberEvents);
+    ok(Parsed.FirstEventTime == 0x12345678,
+       "Unexpected first input event time 0x%lx\n", Parsed.FirstEventTime);
+    ok(Parsed.FirstMessageType == 0x0004,
+       "Unexpected first input message type 0x%x\n", Parsed.FirstMessageType);
+    ok(Parsed.FirstDeviceFlags == 0x001e,
+       "Unexpected first input device flags 0x%x\n", Parsed.FirstDeviceFlags);
+
+    ok(TermSrvRdpBcgrParseInputEvents(TwoInputEvents,
+                                      sizeof(TwoInputEvents),
+                                      &Parsed) == TermSrvRdpBcgrSuccess,
+       "Two input events should parse\n");
+    ok(Parsed.NumberEvents == 2,
+       "Unexpected two-event input count %u\n", Parsed.NumberEvents);
+    ok(Parsed.FirstDeviceFlags == 0x001e,
+       "Unexpected first two-event input flags 0x%x\n", Parsed.FirstDeviceFlags);
+
+    ok(TermSrvRdpBcgrParseInputEvents(InputEvents,
+                                      3,
+                                      &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short input event header should request more data\n");
+    ok(TermSrvRdpBcgrParseInputEvents(InputEvents,
+                                      sizeof(InputEvents) - 1,
+                                      &Parsed) == TermSrvRdpBcgrNeedMoreData,
+       "Short input event body should request more data\n");
+    ok(TermSrvRdpBcgrParseInputEvents(ExtraByte,
+                                      sizeof(ExtraByte),
+                                      &Parsed) == TermSrvRdpBcgrInvalidLength,
+       "Trailing input event bytes should fail\n");
+    ok(TermSrvRdpBcgrParseInputEvents(NULL,
+                                      sizeof(InputEvents),
+                                      &Parsed) == TermSrvRdpBcgrInvalidHeader,
+       "NULL input event buffer should fail\n");
+    ok(TermSrvRdpBcgrParseInputEvents(InputEvents,
+                                      sizeof(InputEvents),
+                                      NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL input event output should fail\n");
+}
+
+static VOID
 TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 {
     static const UCHAR ExpectedConfirm[] =
@@ -2043,6 +2116,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseClientInfoPayload();
     TestRdpBcgrParseMcsSendDataPayload();
     TestRdpBcgrWriteMcsSendDataPayload();
+    TestRdpBcgrParseInputEvents();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
     TestRdpBcgrParseStaticChannelList();
     TestCliprdrStaticChannelName();
