@@ -98,15 +98,49 @@ RdpFindCaptureContext(
 }
 
 static
+BOOL
+RdpGetPrimarySurfaceSize(
+    _Out_ PULONG Width,
+    _Out_ PULONG Height)
+{
+    PPDEVOBJ ppdev;
+    PSURFACE Surface;
+    BOOL Ret = FALSE;
+
+    ppdev = EngpGetPDEV(NULL);
+    if (ppdev == NULL)
+        return FALSE;
+
+    EngAcquireSemaphore(ppdev->hsemDevLock);
+
+    Surface = ppdev->pSurface;
+    if (Surface != NULL &&
+        Surface->SurfObj.sizlBitmap.cx > 0 &&
+        Surface->SurfObj.sizlBitmap.cy > 0)
+    {
+        *Width = Surface->SurfObj.sizlBitmap.cx;
+        *Height = Surface->SurfObj.sizlBitmap.cy;
+        Ret = TRUE;
+    }
+
+    EngReleaseSemaphore(ppdev->hsemDevLock);
+    PDEVOBJ_vRelease(ppdev);
+
+    return Ret;
+}
+
+static
 VOID
 RdpBuildFrameInfo(
-    _In_ PRDP_CAPTURE_CONTEXT Context,
+    _In_ ULONG SessionId,
+    _In_ ULONG FrameId,
     _Out_ PNTUSER_RDP_FRAME Frame)
 {
     ULONG Width = RDP_CAPTURE_DEFAULT_WIDTH;
     ULONG Height = RDP_CAPTURE_DEFAULT_HEIGHT;
+    ULONG Pitch, RequiredBufferSize;
 
-    if (gpsi != NULL)
+    if (!RdpGetPrimarySurfaceSize(&Width, &Height) && gpsi != NULL)
     {
         if (gpsi->aiSysMet[SM_CXSCREEN] > 0)
             Width = gpsi->aiSysMet[SM_CXSCREEN];
@@ -114,16 +148,25 @@ RdpBuildFrameInfo(
             Height = gpsi->aiSysMet[SM_CYSCREEN];
     }
 
+    if (!NT_SUCCESS(RtlULongMult(Width, RDP_CAPTURE_BYTES_PER_PIXEL, &Pitch)) ||
+        !NT_SUCCESS(RtlULongMult(Pitch, Height, &RequiredBufferSize)))
+    {
+        Width = RDP_CAPTURE_DEFAULT_WIDTH;
+        Height = RDP_CAPTURE_DEFAULT_HEIGHT;
+        Pitch = Width * RDP_CAPTURE_BYTES_PER_PIXEL;
+        RequiredBufferSize = Pitch * Height;
+    }
+
     RtlZeroMemory(Frame, sizeof(*Frame));
     Frame->Size = sizeof(*Frame);
-    Frame->SessionId = Context->SessionId;
+    Frame->SessionId = SessionId;
     Frame->Width = Width;
     Frame->Height = Height;
     Frame->BitsPerPixel = 32;
-    Frame->Pitch = Width * RDP_CAPTURE_BYTES_PER_PIXEL;
+    Frame->Pitch = Pitch;
     Frame->Format = NTUSER_RDP_FRAME_FORMAT_BGRA32;
-    Frame->FrameId = Context->FrameId;
-    Frame->RequiredBufferSize = Frame->Pitch * Height;
+    Frame->FrameId = FrameId;
+    Frame->RequiredBufferSize = RequiredBufferSize;
 }
 
 static
@@ -148,6 +191,110 @@ RdpFillDeterministicFrame(
             Pixel[3] = 0xff;
         }
     }
+}
+
+static
+VOID
+RdpMakeFrameOpaque(
+    _In_ const NTUSER_RDP_FRAME *Frame,
+    _Inout_updates_bytes_(Frame->RequiredBufferSize) PBYTE Pixels)
+{
+    ULONG X, Y;
+
+    for (Y = 0; Y < Frame->Height; Y++)
+    {
+        PBYTE Row = Pixels + (Y * Frame->Pitch);
+
+        for (X = 0; X < Frame->Width; X++)
+            Row[(X * RDP_CAPTURE_BYTES_PER_PIXEL) + 3] = 0xff;
+    }
+}
+
+static
+BOOL
+RdpCapturePrimarySurfaceFrame(
+    _In_ const NTUSER_RDP_FRAME *Frame,
+    _Out_writes_bytes_(Frame->RequiredBufferSize) PBYTE Pixels)
+{
+    PPDEVOBJ ppdev;
+    PSURFACE SourceSurface, TargetSurface;
+    RECTL DestRect;
+    POINTL SourcePoint = { 0, 0 };
+    EXLATEOBJ XlateObj;
+    BOOL Ret = FALSE;
+    BOOL XlateInitialized = FALSE;
+    BOOL MouseSafetyActive = FALSE;
+
+    ppdev = EngpGetPDEV(NULL);
+    if (ppdev == NULL)
+        return FALSE;
+
+    TargetSurface = SURFACE_AllocSurface(STYPE_BITMAP,
+                                         Frame->Width,
+                                         Frame->Height,
+                                         BMF_32BPP,
+                                         BMF_TOPDOWN,
+                                         Frame->Pitch,
+                                         Frame->RequiredBufferSize,
+                                         Pixels);
+    if (TargetSurface == NULL)
+    {
+        PDEVOBJ_vRelease(ppdev);
+        return FALSE;
+    }
+
+    EngAcquireSemaphore(ppdev->hsemDevLock);
+
+    SourceSurface = ppdev->pSurface;
+    if (SourceSurface == NULL ||
+        SourceSurface->SurfObj.sizlBitmap.cx < (LONG)Frame->Width ||
+        SourceSurface->SurfObj.sizlBitmap.cy < (LONG)Frame->Height)
+    {
+        goto Cleanup;
+    }
+
+    DestRect.left = 0;
+    DestRect.top = 0;
+    DestRect.right = Frame->Width;
+    DestRect.bottom = Frame->Height;
+
+    EXLATEOBJ_vInitialize(&XlateObj,
+                          SourceSurface->ppal,
+                          TargetSurface->ppal,
+                          CLR_INVALID,
+                          CLR_INVALID,
+                          CLR_INVALID);
+    XlateInitialized = TRUE;
+
+    MouseSafetyOnDrawStart(ppdev,
+                           DestRect.left,
+                           DestRect.top,
+                           DestRect.right,
+                           DestRect.bottom);
+    MouseSafetyActive = TRUE;
+
+    Ret = EngCopyBits(&TargetSurface->SurfObj,
+                      &SourceSurface->SurfObj,
+                      NULL,
+                      &XlateObj.xlo,
+                      &DestRect,
+                      &SourcePoint);
+
+Cleanup:
+    if (MouseSafetyActive)
+        MouseSafetyOnDrawEnd(ppdev);
+    if (XlateInitialized)
+        EXLATEOBJ_vCleanup(&XlateObj);
+
+    EngReleaseSemaphore(ppdev->hsemDevLock);
+    PDEVOBJ_vRelease(ppdev);
+
+    if (Ret)
+        RdpMakeFrameOpaque(Frame, Pixels);
+
+    GDIOBJ_vDeleteObject(&TargetSurface->BaseObject);
+
+    return Ret;
 }
 
 static
@@ -278,6 +425,9 @@ NtUserRdpCaptureFrame(
     PRDP_CAPTURE_CONTEXT Context;
     NTUSER_RDP_FRAME LocalFrame;
     ULONG LocalBytesReturned = 0;
+    ULONG SessionId, FrameId;
+    PBYTE CapturePixels = NULL;
+    BOOL CapturedRealFrame = FALSE;
 
     if (Frame == NULL)
     {
@@ -295,8 +445,11 @@ NtUserRdpCaptureFrame(
     }
 
     Context->FrameId++;
-    RdpBuildFrameInfo(Context, &LocalFrame);
+    SessionId = Context->SessionId;
+    FrameId = Context->FrameId;
     UserLeave();
+
+    RdpBuildFrameInfo(SessionId, FrameId, &LocalFrame);
 
     _SEH2_TRY
     {
@@ -332,7 +485,23 @@ NtUserRdpCaptureFrame(
 
     _SEH2_TRY
     {
-        RdpFillDeterministicFrame(&LocalFrame, PixelBuffer);
+        CapturePixels = ExAllocatePoolWithTag(PagedPool,
+                                              LocalFrame.RequiredBufferSize,
+                                              USERTAG_RDP);
+        if (CapturePixels != NULL)
+        {
+            CapturedRealFrame = RdpCapturePrimarySurfaceFrame(&LocalFrame, CapturePixels);
+            if (CapturedRealFrame)
+            {
+                RtlCopyMemory(PixelBuffer,
+                              CapturePixels,
+                              LocalFrame.RequiredBufferSize);
+            }
+        }
+
+        if (!CapturedRealFrame)
+            RdpFillDeterministicFrame(&LocalFrame, PixelBuffer);
+
         LocalBytesReturned = LocalFrame.RequiredBufferSize;
 
         if (BytesReturned != NULL)
@@ -345,6 +514,9 @@ NtUserRdpCaptureFrame(
         Status = _SEH2_GetExceptionCode();
     }
     _SEH2_END;
+
+    if (CapturePixels != NULL)
+        ExFreePoolWithTag(CapturePixels, USERTAG_RDP);
 
     if (!NT_SUCCESS(Status))
     {
