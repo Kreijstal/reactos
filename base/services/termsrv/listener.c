@@ -98,7 +98,6 @@ typedef enum _TERMSRV_PACKET_PLACEHOLDER
 
 typedef struct _TERMSRV_CLIENT_CONTEXT
 {
-    TERMSRV_SESSION_MANAGER SessionManager;
     TERMSRV_RDP_PEER Peer;
     TERMSRV_CLIPRDR_CHANNEL CliprdrChannel;
     TERMSRV_CLIPRDR_DUMMY_BACKEND CliprdrDummy;
@@ -1111,7 +1110,23 @@ TermSrvHandleSlowPathInputPacket(
         return;
     }
 
-    TermSrvAdvancePeer(Context, "SLOW_INPUT wire=rdpbcgr", "slow-path input delivery");
+    if (InputEvents.FirstMessageType == 0x8001)
+    {
+        CHAR PeerPacket[64];
+
+        _snprintf(PeerPacket,
+                  sizeof(PeerPacket),
+                  "SLOW_INPUT mouse=1 x=%u y=%u",
+                  InputEvents.FirstPointerX,
+                  InputEvents.FirstPointerY);
+        PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+        TermSrvAdvancePeer(Context, PeerPacket, "slow-path input delivery");
+    }
+    else
+    {
+        TermSrvAdvancePeer(Context, "SLOW_INPUT wire=rdpbcgr", "slow-path input delivery");
+    }
+
     if (InputEvents.FirstMessageType == 0x8001 &&
         TermSrvWritePointerMarkerPacket(Reply,
                                         sizeof(Reply),
@@ -1243,13 +1258,28 @@ TermSrvHandleClientFinalization(
                  SentGranted)
         {
             SIZE_T BytesWritten;
+            TERMSRV_RDP_STATUS Status;
+
+            Status = TermSrvRdpPeerSendBitmapUpdate(&Context->Peer,
+                                                    TERMSRV_TEST_BITMAP_WIDTH,
+                                                    TERMSRV_TEST_BITMAP_HEIGHT);
+            if (Status != TermSrvRdpSuccess)
+                TermSrvLogRdpPeerFailure("initial win32 frame capture", Status);
 
             if (!TermSrvWriteServerFontMapPacket(Reply, ReplyLength, &BytesWritten) ||
-                !TermSrvSendPacket(Client, Reply, BytesWritten) ||
-                !TermSrvWriteTestBitmapUpdatePacket(Reply, ReplyLength, &BytesWritten) ||
                 !TermSrvSendPacket(Client, Reply, BytesWritten))
             {
-                TermSrvLogFailure("server font-map/bitmap packet write failed");
+                TermSrvLogFailure("server font-map packet write failed");
+                return FALSE;
+            }
+
+            if (Status != TermSrvRdpSuccess)
+                TermSrvLogFailure("sending scaffold bitmap without a captured win32 frame");
+
+            if (!TermSrvWriteTestBitmapUpdatePacket(Reply, ReplyLength, &BytesWritten) ||
+                !TermSrvSendPacket(Client, Reply, BytesWritten))
+            {
+                TermSrvLogFailure("server bitmap packet write failed");
                 return FALSE;
             }
 
@@ -1319,21 +1349,37 @@ TermSrvRunActiveLoop(
                 SIZE_T BytesWritten;
                 TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS InputEvents;
 
-                TermSrvAdvancePeer(Context,
-                                   "FAST_INPUT wire=fastpath",
-                                   "fast-path input delivery");
                 if (TermSrvRdpBcgrParseFastPathInputEvents(Buffer,
                                                            (SIZE_T)Received,
                                                            &InputEvents) == TermSrvRdpBcgrSuccess &&
                     (InputEvents.FirstEventCode == 0x01 ||
-                     InputEvents.FirstEventCode == 0x05) &&
-                    TermSrvWritePointerMarkerPacket(Reply,
-                                                    sizeof(Reply),
-                                                    InputEvents.FirstPointerX,
-                                                    InputEvents.FirstPointerY,
-                                                    &BytesWritten))
+                     InputEvents.FirstEventCode == 0x05))
                 {
-                    TermSrvSendPacket(Client, Reply, BytesWritten);
+                    CHAR PeerPacket[64];
+
+                    _snprintf(PeerPacket,
+                              sizeof(PeerPacket),
+                              "FAST_INPUT mouse=1 x=%u y=%u",
+                              InputEvents.FirstPointerX,
+                              InputEvents.FirstPointerY);
+                    PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+                    TermSrvAdvancePeer(Context,
+                                       PeerPacket,
+                                       "fast-path input delivery");
+                    if (TermSrvWritePointerMarkerPacket(Reply,
+                                                        sizeof(Reply),
+                                                        InputEvents.FirstPointerX,
+                                                        InputEvents.FirstPointerY,
+                                                        &BytesWritten))
+                    {
+                        TermSrvSendPacket(Client, Reply, BytesWritten);
+                    }
+                }
+                else
+                {
+                    TermSrvAdvancePeer(Context,
+                                       "FAST_INPUT wire=fastpath",
+                                       "fast-path input delivery");
                 }
                 break;
             }
@@ -1661,15 +1707,15 @@ TermSrvRunEarlyMcsPhase(
 static VOID
 TermSrvHandleClient(
     _In_ SOCKET Client,
-    _In_ HANDLE StopEvent)
+    _In_ HANDLE StopEvent,
+    _Inout_ TERMSRV_SESSION_MANAGER *SessionManager)
 {
     UCHAR Buffer[512];
     TERMSRV_CLIENT_CONTEXT Context;
     INT Received;
 
     ZeroMemory(&Context, sizeof(Context));
-    TermSrvSessionManagerInit(&Context.SessionManager);
-    TermSrvRdpPeerInit(&Context.Peer, &Context.SessionManager);
+    TermSrvRdpPeerInit(&Context.Peer, SessionManager);
 
     TermSrvSetNonBlocking(Client);
 
@@ -1771,7 +1817,8 @@ Cleanup:
 static DWORD
 TermSrvListenerLoop(
     _In_ SOCKET ListenSocket,
-    _In_ HANDLE StopEvent)
+    _In_ HANDLE StopEvent,
+    _Inout_ TERMSRV_SESSION_MANAGER *SessionManager)
 {
     fd_set ReadSet;
     TIMEVAL Timeout;
@@ -1803,7 +1850,7 @@ TermSrvListenerLoop(
                 return ERROR_NETWORK_UNREACHABLE;
             }
 
-            TermSrvHandleClient(Client, StopEvent);
+            TermSrvHandleClient(Client, StopEvent, SessionManager);
 
             if (TermSrvStopRequested(StopEvent))
                 break;
@@ -1821,6 +1868,7 @@ TermSrvListenerRun(
     SOCKET ListenSocket;
     SOCKADDR_IN Address;
     DWORD Result;
+    TERMSRV_SESSION_MANAGER SessionManager;
 
     if (!TermSrvListenerEnabled())
     {
@@ -1869,7 +1917,8 @@ TermSrvListenerRun(
         return Result;
     }
 
-    Result = TermSrvListenerLoop(ListenSocket, StopEvent);
+    TermSrvSessionManagerInit(&SessionManager);
+    Result = TermSrvListenerLoop(ListenSocket, StopEvent, &SessionManager);
 
     closesocket(ListenSocket);
     WSACleanup();
