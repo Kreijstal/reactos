@@ -979,10 +979,7 @@ TermSrvTryGetSharePduType(
     _Out_ USHORT *ControlAction)
 {
     TERMSRV_RDPBCGR_RESULT Result;
-    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
-    const UCHAR *Payload;
-    USHORT ShareLength;
-    USHORT RawPduType;
+    TERMSRV_RDPBCGR_SHARE_DATA_PDU ShareData;
 
     if (PduType == NULL || DataType == NULL || ControlAction == NULL)
         return FALSE;
@@ -990,25 +987,15 @@ TermSrvTryGetSharePduType(
     *PduType = 0;
     *DataType = 0;
     *ControlAction = 0;
-    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
-                                                   (SIZE_T)Received,
-                                                   &SendData);
-    if (Result != TermSrvRdpBcgrSuccess || SendData.PayloadLength < 6)
+    Result = TermSrvRdpBcgrParseShareDataPdu(Buffer,
+                                            (SIZE_T)Received,
+                                            &ShareData);
+    if (Result != TermSrvRdpBcgrSuccess)
         return FALSE;
 
-    Payload = SendData.Payload;
-    ShareLength = (USHORT)(Payload[0] | (Payload[1] << 8));
-    RawPduType = (USHORT)(Payload[2] | (Payload[3] << 8));
-    if (ShareLength > SendData.PayloadLength || ShareLength < 6)
-        return FALSE;
-
-    *PduType = (UCHAR)(RawPduType & 0x0f);
-    if (*PduType == TERMSRV_RDP_PDU_TYPE_DATA && ShareLength >= 18)
-    {
-        *DataType = Payload[14];
-        if (*DataType == TERMSRV_RDP_DATA_TYPE_CONTROL && ShareLength >= 26)
-            *ControlAction = (USHORT)(Payload[18] | (Payload[19] << 8));
-    }
+    *PduType = ShareData.PduType;
+    *DataType = ShareData.DataType;
+    *ControlAction = ShareData.ControlAction;
 
     return TRUE;
 }
@@ -1020,40 +1007,15 @@ TermSrvHandleSlowPathInputPacket(
     _In_ INT Received)
 {
     TERMSRV_RDPBCGR_RESULT Result;
-    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
     TERMSRV_RDPBCGR_INPUT_EVENTS InputEvents;
-    const UCHAR *Payload;
-    USHORT ShareLength;
-    USHORT RawPduType;
-    USHORT BodyLength;
 
-    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
-                                                   (SIZE_T)Received,
-                                                   &SendData);
-    if (Result != TermSrvRdpBcgrSuccess || SendData.PayloadLength < 18)
-        return;
-
-    Payload = SendData.Payload;
-    ShareLength = (USHORT)(Payload[0] | (Payload[1] << 8));
-    RawPduType = (USHORT)(Payload[2] | (Payload[3] << 8));
-    if (ShareLength > SendData.PayloadLength ||
-        ShareLength < 18 ||
-        (RawPduType & 0x0f) != TERMSRV_RDP_PDU_TYPE_DATA ||
-        Payload[14] != TERMSRV_RDP_DATA_TYPE_INPUT)
-    {
-        return;
-    }
-
-    BodyLength = (USHORT)(Payload[12] | (Payload[13] << 8));
-    if (BodyLength != ShareLength - 18)
-        return;
-
-    Result = TermSrvRdpBcgrParseInputEvents(&Payload[18],
-                                            BodyLength,
-                                            &InputEvents);
+    Result = TermSrvRdpBcgrParseSlowPathInputPdu(Buffer,
+                                                 (SIZE_T)Received,
+                                                 &InputEvents);
     if (Result != TermSrvRdpBcgrSuccess)
     {
-        TermSrvLogRdpBcgrFailure("slow-path input parse", Result);
+        if (Result != TermSrvRdpBcgrUnsupportedPdu)
+            TermSrvLogRdpBcgrFailure("slow-path input parse", Result);
         return;
     }
 
