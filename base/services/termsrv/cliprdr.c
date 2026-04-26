@@ -7,9 +7,14 @@
 #include "cliprdr.h"
 #include "rdpbcgr.h"
 
+#include <windows.h>
 #include <string.h>
 
 #define CLIPRDR_HEADER_LENGTH 8
+#define CHANNEL_PDU_HEADER_LENGTH 8
+#define CHANNEL_FLAG_FIRST 0x00000001
+#define CHANNEL_FLAG_LAST 0x00000002
+#define CHANNEL_FLAG_SHOW_PROTOCOL 0x00000010
 
 static USHORT
 ReadLe16(
@@ -192,6 +197,41 @@ TermSrvCliprdrIsChannelId(
     return Channel->Enabled && Channel->ChannelId == ChannelId;
 }
 
+static BOOL
+TryUnwrapVirtualChannelPayload(
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength,
+    _Outptr_result_bytebuffer_(*CliprdrLength) const UCHAR **CliprdrPayload,
+    _Out_ SIZE_T *CliprdrLength)
+{
+    ULONG DeclaredLength;
+    ULONG Flags;
+
+    if (CliprdrPayload == NULL || CliprdrLength == NULL)
+        return FALSE;
+
+    *CliprdrPayload = Payload;
+    *CliprdrLength = PayloadLength;
+
+    if (Payload == NULL || PayloadLength < CHANNEL_PDU_HEADER_LENGTH)
+        return FALSE;
+
+    DeclaredLength = ReadLe32(&Payload[0]);
+    Flags = ReadLe32(&Payload[4]);
+    if ((Flags & (CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST)) !=
+        (CHANNEL_FLAG_FIRST | CHANNEL_FLAG_LAST))
+    {
+        return FALSE;
+    }
+
+    if (DeclaredLength > PayloadLength - CHANNEL_PDU_HEADER_LENGTH)
+        return FALSE;
+
+    *CliprdrPayload = Payload + CHANNEL_PDU_HEADER_LENGTH;
+    *CliprdrLength = DeclaredLength;
+    return TRUE;
+}
+
 static TERMSRV_CLIPRDR_RESULT
 DummyBackendSetData(
     _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
@@ -284,6 +324,236 @@ IsValidBackend(
            Backend->Context != NULL;
 }
 
+static BOOL
+IsSupportedWin32ClipboardFormat(
+    _In_ ULONG FormatId)
+{
+    return FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT ||
+           FormatId == TERMSRV_CLIPRDR_CF_DIB ||
+           FormatId == TERMSRV_CLIPRDR_CF_DIBV5 ||
+           FormatId >= 0xc000;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWin32BackendAttach(
+    _Inout_ TERMSRV_CLIPRDR_WIN32_BACKEND *Win32)
+{
+    if (Win32 == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (Win32->Attached)
+        return TermSrvCliprdrSuccess;
+
+    Win32->WindowStation = OpenWindowStationW(L"WinSta0",
+                                              FALSE,
+                                              WINSTA_ACCESSCLIPBOARD |
+                                              WINSTA_READATTRIBUTES |
+                                              WINSTA_ENUMDESKTOPS);
+    if (Win32->WindowStation == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (!SetProcessWindowStation((HWINSTA)Win32->WindowStation))
+        return TermSrvCliprdrInvalidHeader;
+
+    Win32->Desktop = OpenDesktopW(L"Default",
+                                  0,
+                                  FALSE,
+                                  DESKTOP_READOBJECTS |
+                                  DESKTOP_WRITEOBJECTS |
+                                  DESKTOP_CREATEWINDOW);
+    if (Win32->Desktop == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (!SetThreadDesktop((HDESK)Win32->Desktop))
+        return TermSrvCliprdrInvalidHeader;
+
+    Win32->Attached = TRUE;
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
+Win32BackendSetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength)
+{
+    TERMSRV_CLIPRDR_WIN32_BACKEND *Win32;
+    HGLOBAL Global;
+    UCHAR *Target;
+    SIZE_T AllocLength;
+
+    if (Backend == NULL || Backend->Context == NULL ||
+        (DataLength != 0 && Data == NULL))
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (!IsSupportedWin32ClipboardFormat(FormatId))
+        return TermSrvCliprdrFormatNotAvailable;
+
+    Win32 = (TERMSRV_CLIPRDR_WIN32_BACKEND *)Backend->Context;
+    if (TermSrvCliprdrWin32BackendAttach(Win32) != TermSrvCliprdrSuccess)
+        return TermSrvCliprdrInvalidHeader;
+
+    AllocLength = DataLength;
+    if (FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT)
+    {
+        if (AllocLength > (SIZE_T)-1 - sizeof(WCHAR))
+            return TermSrvCliprdrInvalidLength;
+        AllocLength += sizeof(WCHAR);
+    }
+    if (AllocLength == 0)
+        AllocLength = 1;
+
+    Global = GlobalAlloc(GMEM_MOVEABLE, AllocLength);
+    if (Global == NULL)
+        return TermSrvCliprdrBufferTooSmall;
+
+    Target = (UCHAR *)GlobalLock(Global);
+    if (Target == NULL)
+    {
+        GlobalFree(Global);
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (DataLength != 0)
+        memcpy(Target, Data, DataLength);
+    if (FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT)
+        memset(Target + DataLength, 0, sizeof(WCHAR));
+    GlobalUnlock(Global);
+
+    if (!OpenClipboard(NULL))
+    {
+        GlobalFree(Global);
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (Backend->ReplaceOnNextSet)
+    {
+        EmptyClipboard();
+        Backend->ReplaceOnNextSet = FALSE;
+    }
+    if (SetClipboardData((UINT)FormatId, Global) == NULL)
+    {
+        CloseClipboard();
+        GlobalFree(Global);
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    CloseClipboard();
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
+Win32BackendGetData(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
+    _In_ ULONG FormatId,
+    _Out_writes_bytes_to_opt_(BufferLength, *RequiredLength) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *RequiredLength)
+{
+    TERMSRV_CLIPRDR_WIN32_BACKEND *Win32;
+    HANDLE Data;
+    const UCHAR *Source;
+    SIZE_T Length;
+
+    if (RequiredLength == NULL)
+        return TermSrvCliprdrInvalidHeader;
+    *RequiredLength = 0;
+
+    if (Backend == NULL || Backend->Context == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (!IsSupportedWin32ClipboardFormat(FormatId))
+        return TermSrvCliprdrFormatNotAvailable;
+
+    Win32 = (TERMSRV_CLIPRDR_WIN32_BACKEND *)Backend->Context;
+    if (TermSrvCliprdrWin32BackendAttach(Win32) != TermSrvCliprdrSuccess)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (!IsClipboardFormatAvailable((UINT)FormatId))
+        return TermSrvCliprdrFormatNotAvailable;
+
+    if (!OpenClipboard(NULL))
+        return TermSrvCliprdrInvalidHeader;
+
+    Data = GetClipboardData((UINT)FormatId);
+    if (Data == NULL)
+    {
+        CloseClipboard();
+        return TermSrvCliprdrFormatNotAvailable;
+    }
+
+    Source = (const UCHAR *)GlobalLock(Data);
+    if (Source == NULL)
+    {
+        CloseClipboard();
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    Length = GlobalSize(Data);
+    if (FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT)
+    {
+        const WCHAR *Text = (const WCHAR *)Source;
+        SIZE_T Chars = 0;
+
+        while ((Chars + 1) * sizeof(WCHAR) <= Length && Text[Chars] != 0)
+            Chars++;
+        Length = (Chars + 1) * sizeof(WCHAR);
+    }
+
+    *RequiredLength = Length;
+    if (BufferLength < Length)
+    {
+        GlobalUnlock(Data);
+        CloseClipboard();
+        return TermSrvCliprdrBufferTooSmall;
+    }
+
+    if (Length != 0 && Buffer == NULL)
+    {
+        GlobalUnlock(Data);
+        CloseClipboard();
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (Length != 0)
+        memcpy(Buffer, Source, Length);
+
+    GlobalUnlock(Data);
+    CloseClipboard();
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
+Win32BackendClear(
+    _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    TERMSRV_CLIPRDR_WIN32_BACKEND *Win32;
+
+    if (Backend == NULL || Backend->Context == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    Win32 = (TERMSRV_CLIPRDR_WIN32_BACKEND *)Backend->Context;
+    if (TermSrvCliprdrWin32BackendAttach(Win32) != TermSrvCliprdrSuccess)
+        return TermSrvCliprdrInvalidHeader;
+
+    if (!OpenClipboard(NULL))
+        return TermSrvCliprdrInvalidHeader;
+
+    EmptyClipboard();
+    CloseClipboard();
+    return TermSrvCliprdrSuccess;
+}
+
+static const TERMSRV_CLIPRDR_BACKEND_OPS Win32BackendOps =
+{
+    Win32BackendSetData,
+    Win32BackendGetData,
+    Win32BackendClear
+};
+
 TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrBackendSetData(
     _Inout_ TERMSRV_CLIPRDR_BACKEND *Backend,
@@ -349,6 +619,8 @@ TermSrvCliprdrDummyBackendInit(
 
     Backend->Ops = &DummyBackendOps;
     Backend->Context = Dummy;
+    Backend->PendingFormatId = 0;
+    Backend->ReplaceOnNextSet = TRUE;
 
     return TermSrvCliprdrSuccess;
 }
@@ -361,6 +633,22 @@ TermSrvCliprdrDummyBackendReset(
         return TermSrvCliprdrInvalidHeader;
 
     memset(Dummy, 0, sizeof(*Dummy));
+    return TermSrvCliprdrSuccess;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWin32BackendInit(
+    _Out_ TERMSRV_CLIPRDR_WIN32_BACKEND *Win32,
+    _Out_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    if (Win32 == NULL || Backend == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    memset(Win32, 0, sizeof(*Win32));
+    Backend->Ops = &Win32BackendOps;
+    Backend->Context = Win32;
+    Backend->PendingFormatId = 0;
+    Backend->ReplaceOnNextSet = TRUE;
     return TermSrvCliprdrSuccess;
 }
 
@@ -457,6 +745,37 @@ TermSrvCliprdrWriteMonitorReady(
 }
 
 TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteCapabilities(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Payload[16];
+    ULONG GeneralFlags;
+
+    GeneralFlags = TERMSRV_CLIPRDR_CB_USE_LONG_FORMAT_NAMES |
+                   TERMSRV_CLIPRDR_CB_STREAM_FILECLIP_ENABLED |
+                   TERMSRV_CLIPRDR_CB_FILECLIP_NO_FILE_PATHS |
+                   TERMSRV_CLIPRDR_CB_CAN_LOCK_CLIPDATA |
+                   TERMSRV_CLIPRDR_CB_HUGE_FILE_SUPPORT_ENABLED;
+
+    WriteLe16(&Payload[0], 1);
+    WriteLe16(&Payload[2], 0);
+    WriteLe16(&Payload[4], TERMSRV_CLIPRDR_CB_CAPSTYPE_GENERAL);
+    WriteLe16(&Payload[6], 12);
+    WriteLe32(&Payload[8], TERMSRV_CLIPRDR_CB_CAPS_VERSION_2);
+    WriteLe32(&Payload[12], GeneralFlags);
+
+    return WritePdu(Buffer,
+                    BufferLength,
+                    TERMSRV_CLIPRDR_CB_CLIP_CAPS,
+                    0,
+                    Payload,
+                    sizeof(Payload),
+                    BytesWritten);
+}
+
+TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrWriteFormatListResponse(
     _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
@@ -475,6 +794,188 @@ TermSrvCliprdrWriteFormatListResponse(
                     ResponseFlags,
                     NULL,
                     0,
+                    BytesWritten);
+}
+
+static BOOL
+IsSupportedPhaseOneFormat(
+    _In_ ULONG FormatId)
+{
+    return FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT ||
+           FormatId == TERMSRV_CLIPRDR_CF_DIB ||
+           FormatId == TERMSRV_CLIPRDR_CF_DIBV5;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFormatList(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_CLIPRDR_FORMAT_LIST *FormatList)
+{
+    TERMSRV_CLIPRDR_PDU Pdu;
+    TERMSRV_CLIPRDR_RESULT Result;
+    SIZE_T Offset;
+
+    if (FormatList == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    memset(FormatList, 0, sizeof(*FormatList));
+
+    Result = TermSrvCliprdrParsePdu(Buffer, BufferLength, &Pdu);
+    if (Result != TermSrvCliprdrSuccess)
+        return Result;
+
+    if (Pdu.MsgType != TERMSRV_CLIPRDR_CB_FORMAT_LIST)
+        return TermSrvCliprdrUnsupportedPdu;
+
+    Offset = 0;
+    if (Pdu.MsgFlags & TERMSRV_CLIPRDR_CB_ASCII_NAMES)
+    {
+        while (Offset + 36 <= Pdu.DataLength &&
+               FormatList->Count < TERMSRV_CLIPRDR_MAX_FORMATS)
+        {
+            ULONG Count = FormatList->Count++;
+            ULONG Index;
+
+            FormatList->Formats[Count].FormatId = ReadLe32(&Pdu.Payload[Offset]);
+            for (Index = 0; Index + 1 < TERMSRV_CLIPRDR_MAX_FORMAT_NAME &&
+                 Index < 32 && Pdu.Payload[Offset + 4 + Index] != 0; Index++)
+            {
+                FormatList->Formats[Count].Name[Index] =
+                    (WCHAR)Pdu.Payload[Offset + 4 + Index];
+            }
+            Offset += 36;
+        }
+        return TermSrvCliprdrSuccess;
+    }
+
+    while (Offset + 4 <= Pdu.DataLength &&
+           FormatList->Count < TERMSRV_CLIPRDR_MAX_FORMATS)
+    {
+        ULONG Count = FormatList->Count++;
+        ULONG NameIndex = 0;
+
+        FormatList->Formats[Count].FormatId = ReadLe32(&Pdu.Payload[Offset]);
+        Offset += 4;
+
+        while (Offset + 1 < Pdu.DataLength)
+        {
+            WCHAR Ch = (WCHAR)ReadLe16(&Pdu.Payload[Offset]);
+            Offset += 2;
+            if (Ch == 0)
+                break;
+            if (NameIndex + 1 < TERMSRV_CLIPRDR_MAX_FORMAT_NAME)
+                FormatList->Formats[Count].Name[NameIndex++] = Ch;
+        }
+    }
+
+    return TermSrvCliprdrSuccess;
+}
+
+BOOL
+TermSrvCliprdrFormatListContains(
+    _In_ const TERMSRV_CLIPRDR_FORMAT_LIST *FormatList,
+    _In_ ULONG FormatId)
+{
+    ULONG Index;
+
+    if (FormatList == NULL)
+        return FALSE;
+
+    for (Index = 0; Index < FormatList->Count; Index++)
+    {
+        if (FormatList->Formats[Index].FormatId == FormatId)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+ULONG
+TermSrvCliprdrFindNamedFormat(
+    _In_ const TERMSRV_CLIPRDR_FORMAT_LIST *FormatList,
+    _In_z_ const WCHAR *Name)
+{
+    ULONG Index;
+
+    if (FormatList == NULL || Name == NULL)
+        return 0;
+
+    for (Index = 0; Index < FormatList->Count; Index++)
+    {
+        if (lstrcmpiW(FormatList->Formats[Index].Name, Name) == 0)
+            return FormatList->Formats[Index].FormatId;
+    }
+
+    return 0;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFormatList(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_reads_(FormatCount) const TERMSRV_CLIPRDR_FORMAT *Formats,
+    _In_ ULONG FormatCount,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Payload[1024];
+    SIZE_T Offset;
+    ULONG Index;
+
+    if (Formats == NULL && FormatCount != 0)
+        return TermSrvCliprdrInvalidHeader;
+
+    Offset = 0;
+    for (Index = 0; Index < FormatCount; Index++)
+    {
+        SIZE_T NameIndex;
+
+        if (Offset + 6 > sizeof(Payload))
+            return TermSrvCliprdrBufferTooSmall;
+
+        WriteLe32(&Payload[Offset], Formats[Index].FormatId);
+        Offset += 4;
+
+        for (NameIndex = 0;
+             Formats[Index].Name[NameIndex] != 0 &&
+             NameIndex < TERMSRV_CLIPRDR_MAX_FORMAT_NAME - 1;
+             NameIndex++)
+        {
+            if (Offset + 2 > sizeof(Payload))
+                return TermSrvCliprdrBufferTooSmall;
+            WriteLe16(&Payload[Offset], Formats[Index].Name[NameIndex]);
+            Offset += 2;
+        }
+
+        WriteLe16(&Payload[Offset], 0);
+        Offset += 2;
+    }
+
+    return WritePdu(Buffer,
+                    BufferLength,
+                    TERMSRV_CLIPRDR_CB_FORMAT_LIST,
+                    0,
+                    Payload,
+                    Offset,
+                    BytesWritten);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFormatDataRequest(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ ULONG FormatId,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Payload[4];
+
+    WriteLe32(Payload, FormatId);
+    return WritePdu(Buffer,
+                    BufferLength,
+                    TERMSRV_CLIPRDR_CB_FORMAT_DATA_REQUEST,
+                    0,
+                    Payload,
+                    sizeof(Payload),
                     BytesWritten);
 }
 
@@ -565,6 +1066,27 @@ TermSrvCliprdrHandlePdu(
                 TERMSRV_CLIPRDR_CB_RESPONSE_OK,
                 BytesWritten);
 
+        case TERMSRV_CLIPRDR_CB_FORMAT_DATA_RESPONSE:
+            if ((Pdu.MsgFlags & TERMSRV_CLIPRDR_CB_RESPONSE_OK) == 0)
+                return TermSrvCliprdrFormatNotAvailable;
+
+            /*
+             * The listener serializes pull requests, so the backend's
+             * LastSetFormatId tells us which advertised client format this
+             * payload completes.
+             */
+            FormatId = Backend->PendingFormatId;
+            if (!IsSupportedPhaseOneFormat(FormatId) && FormatId < 0xc000)
+                FormatId = TERMSRV_CLIPRDR_CF_UNICODETEXT;
+
+            Result = TermSrvCliprdrBackendSetData(Backend,
+                                                  FormatId,
+                                                  Pdu.Payload,
+                                                  Pdu.DataLength);
+            if (Result == TermSrvCliprdrSuccess)
+                return TermSrvCliprdrSuccess;
+            return Result;
+
         case TERMSRV_CLIPRDR_CB_FORMAT_DATA_REQUEST:
             if (Pdu.DataLength != sizeof(ULONG))
                 return TermSrvCliprdrInvalidLength;
@@ -600,6 +1122,25 @@ TermSrvCliprdrHandlePdu(
             WriteLe16(&Output[2], TERMSRV_CLIPRDR_CB_RESPONSE_OK);
             WriteLe32(&Output[4], (ULONG)RequiredLength);
             *BytesWritten = CLIPRDR_HEADER_LENGTH + RequiredLength;
+            return TermSrvCliprdrSuccess;
+
+        case TERMSRV_CLIPRDR_CB_FILECONTENTS_REQUEST:
+            if (Pdu.DataLength < sizeof(ULONG))
+                return TermSrvCliprdrInvalidLength;
+            if (OutputLength < CLIPRDR_HEADER_LENGTH + sizeof(ULONG))
+                return TermSrvCliprdrBufferTooSmall;
+
+            WriteLe16(&Output[0], TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE);
+            WriteLe16(&Output[2], TERMSRV_CLIPRDR_CB_RESPONSE_FAIL);
+            WriteLe32(&Output[4], sizeof(ULONG));
+            WriteLe32(&Output[CLIPRDR_HEADER_LENGTH], ReadLe32(Pdu.Payload));
+            *BytesWritten = CLIPRDR_HEADER_LENGTH + sizeof(ULONG);
+            return TermSrvCliprdrFormatNotAvailable;
+
+        case TERMSRV_CLIPRDR_CB_CLIP_CAPS:
+        case TERMSRV_CLIPRDR_CB_LOCK_CLIPDATA:
+        case TERMSRV_CLIPRDR_CB_UNLOCK_CLIPDATA:
+        case TERMSRV_CLIPRDR_CB_FORMAT_LIST_RESPONSE:
             return TermSrvCliprdrSuccess;
 
         default:
@@ -663,6 +1204,11 @@ TermSrvCliprdrRouteMcsSendData(
 
     if (!TermSrvCliprdrIsChannelId(Channel, SendData.ChannelId))
         return TermSrvCliprdrUnsupportedPdu;
+
+    TryUnwrapVirtualChannelPayload(SendData.Payload,
+                                   SendData.PayloadLength,
+                                   &SendData.Payload,
+                                   &SendData.PayloadLength);
 
     return TermSrvCliprdrHandlePdu(SendData.Payload,
                                    SendData.PayloadLength,
