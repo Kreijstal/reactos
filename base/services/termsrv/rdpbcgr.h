@@ -114,6 +114,19 @@ typedef struct _TERMSRV_RDPBCGR_INPUT_EVENTS
     USHORT FirstDeviceFlags;
 } TERMSRV_RDPBCGR_INPUT_EVENTS;
 
+typedef struct _TERMSRV_RDPBCGR_SHARE_DATA_PDU
+{
+    USHORT Initiator;
+    USHORT ChannelId;
+    UCHAR Priority;
+    ULONG ShareId;
+    UCHAR PduType;
+    UCHAR DataType;
+    USHORT BodyLength;
+    const UCHAR *Body;
+    USHORT ControlAction;
+} TERMSRV_RDPBCGR_SHARE_DATA_PDU;
+
 #define TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH 8
 #define TERMSRV_RDPBCGR_MAX_STATIC_CHANNELS 31
 
@@ -178,6 +191,18 @@ TermSrvRdpBcgrParseClientInfoPayload(
 
 TERMSRV_RDPBCGR_RESULT
 TermSrvRdpBcgrParseInputEvents(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_INPUT_EVENTS *InputEvents);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseShareDataPdu(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_SHARE_DATA_PDU *ShareData);
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseSlowPathInputPdu(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _Out_ TERMSRV_RDPBCGR_INPUT_EVENTS *InputEvents);
