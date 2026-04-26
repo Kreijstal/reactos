@@ -20,6 +20,7 @@
 #define TERMSRV_NOAUTH_ENV_NAME L"REACTOS_TERMSRV_NOAUTH"
 #define TERMSRV_LISTEN_PORT_ENV_NAME L"REACTOS_TERMSRV_PORT"
 #define TERMSRV_BACKEND_ENV_NAME L"REACTOS_TERMSRV_BACKEND"
+#define TERMSRV_SYNTHETIC_FRAME_ENV_NAME L"REACTOS_TERMSRV_SYNTHETIC_FRAME"
 #define TERMSRV_LISTEN_PORT 3389
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 2000
@@ -49,6 +50,9 @@
 #define TERMSRV_TEST_BITMAP_BPP 16
 #define TERMSRV_TEST_BITMAP_BYTES \
     (TERMSRV_TEST_BITMAP_WIDTH * TERMSRV_TEST_BITMAP_HEIGHT * 2)
+#define TERMSRV_CAPTURE_BITMAP_BPP 32
+#define TERMSRV_CAPTURE_BITMAP_BYTES_PER_PIXEL 4
+#define TERMSRV_NTUSER_RDP_FRAME_FORMAT_BGRA32 1
 #define TERMSRV_POINTER_MARKER_SIZE 16
 #define TERMSRV_POINTER_MARKER_BYTES \
     (TERMSRV_POINTER_MARKER_SIZE * TERMSRV_POINTER_MARKER_SIZE * 2)
@@ -141,7 +145,42 @@ typedef struct _TERMSRV_CLIENT_CONTEXT
     TERMSRV_CLIPRDR_FILE_LIST CliprdrOutgoingFiles;
     WCHAR CliprdrOutgoingPaths[TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS][MAX_PATH];
     ULONG CliprdrOutgoingCount;
+    HMODULE RdpCaptureModule;
+    HANDLE RdpCaptureSession;
+    BOOL RdpCaptureLoadAttempted;
+    BOOL RdpCaptureAvailable;
+    BOOL RdpSyntheticFallbackLogged;
+    HANDLE (WINAPI *NtUserRdpOpenSession)(_In_ ULONG SessionId,
+                                          _In_opt_ PVOID WinStationName,
+                                          _In_opt_ PVOID DesktopName);
+    BOOL (WINAPI *NtUserRdpCaptureFrame)(_In_ HANDLE Session,
+                                         _Out_ PVOID Frame,
+                                         _Out_writes_bytes_to_opt_(PixelBufferSize, *BytesReturned) PVOID PixelBuffer,
+                                         _In_ ULONG PixelBufferSize,
+                                         _Out_opt_ PULONG BytesReturned);
+    BOOL (WINAPI *NtUserRdpCloseSession)(_In_ HANDLE Session);
 } TERMSRV_CLIENT_CONTEXT;
+
+typedef struct _TERMSRV_UNICODE_STRING
+{
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR Buffer;
+} TERMSRV_UNICODE_STRING;
+
+typedef struct _TERMSRV_NTUSER_RDP_FRAME
+{
+    ULONG Size;
+    ULONG SessionId;
+    ULONG Width;
+    ULONG Height;
+    ULONG BitsPerPixel;
+    ULONG Pitch;
+    ULONG Format;
+    ULONG FrameId;
+    ULONG RequiredBufferSize;
+    ULONG Flags;
+} TERMSRV_NTUSER_RDP_FRAME;
 
 static BOOL
 TermSrvListenerEnabled(VOID)
@@ -167,6 +206,15 @@ TermSrvNoAuthEnabled(VOID)
         return Value[0] != L'0';
 
     return TRUE;
+}
+
+static BOOL
+TermSrvSyntheticFrameEnabled(VOID)
+{
+    WCHAR Value[2];
+
+    return (GetEnvironmentVariableW(TERMSRV_SYNTHETIC_FRAME_ENV_NAME, Value, ARRAYSIZE(Value)) == 1 &&
+            Value[0] == L'1');
 }
 
 static USHORT
@@ -378,6 +426,133 @@ TermSrvLogRdpPeerFailure(
               TermSrvRdpStatusName(Status));
     Message[sizeof(Message) - 1] = '\0';
     TermSrvLogFailure(Message);
+}
+
+static VOID
+TermSrvInitUnicodeString(
+    _Out_ TERMSRV_UNICODE_STRING *String,
+    _In_z_ PCWSTR Buffer)
+{
+    SIZE_T Length;
+
+    Length = lstrlenW(Buffer) * sizeof(WCHAR);
+    String->Length = (USHORT)Length;
+    String->MaximumLength = (USHORT)(Length + sizeof(WCHAR));
+    String->Buffer = (PWSTR)Buffer;
+}
+
+static BOOL
+TermSrvIsConsoleBackend(
+    _In_ const TERMSRV_CLIENT_CONTEXT *Context)
+{
+    const TERMSRV_SESSION_BACKEND *Backend;
+
+    if (Context == NULL || Context->Peer.SessionManager == NULL)
+        return FALSE;
+
+    Backend = TermSrvSessionManagerGetBackend(Context->Peer.SessionManager);
+    return Backend != NULL && Backend == TermSrvSessionManagerGetConsoleBackend();
+}
+
+static BOOL
+TermSrvLoadRdpCaptureApi(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context)
+{
+    FARPROC OpenSession;
+    FARPROC CaptureFrame;
+    FARPROC CloseSession;
+
+    if (Context->RdpCaptureLoadAttempted)
+        return Context->RdpCaptureAvailable;
+
+    Context->RdpCaptureLoadAttempted = TRUE;
+    Context->RdpCaptureModule = LoadLibraryW(L"win32u.dll");
+    if (Context->RdpCaptureModule == NULL)
+    {
+        TermSrvLogFailure("RDP capture fallback: win32u.dll could not be loaded");
+        return FALSE;
+    }
+
+    OpenSession = GetProcAddress(Context->RdpCaptureModule, "NtUserRdpOpenSession");
+    CaptureFrame = GetProcAddress(Context->RdpCaptureModule, "NtUserRdpCaptureFrame");
+    CloseSession = GetProcAddress(Context->RdpCaptureModule, "NtUserRdpCloseSession");
+    if (OpenSession == NULL || CaptureFrame == NULL || CloseSession == NULL)
+    {
+        TermSrvLogFailure("RDP capture fallback: NtUserRdp* exports are not available");
+        FreeLibrary(Context->RdpCaptureModule);
+        Context->RdpCaptureModule = NULL;
+        return FALSE;
+    }
+
+    Context->NtUserRdpOpenSession = (HANDLE (WINAPI *)(ULONG, PVOID, PVOID))OpenSession;
+    Context->NtUserRdpCaptureFrame = (BOOL (WINAPI *)(HANDLE, PVOID, PVOID, ULONG, PULONG))CaptureFrame;
+    Context->NtUserRdpCloseSession = (BOOL (WINAPI *)(HANDLE))CloseSession;
+    Context->RdpCaptureAvailable = TRUE;
+    return TRUE;
+}
+
+static VOID
+TermSrvCloseRdpCaptureApi(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context)
+{
+    if (Context == NULL)
+        return;
+
+    if (Context->RdpCaptureSession != NULL && Context->NtUserRdpCloseSession != NULL)
+        Context->NtUserRdpCloseSession(Context->RdpCaptureSession);
+
+    if (Context->RdpCaptureModule != NULL)
+        FreeLibrary(Context->RdpCaptureModule);
+
+    Context->RdpCaptureSession = NULL;
+    Context->RdpCaptureModule = NULL;
+    Context->RdpCaptureAvailable = FALSE;
+}
+
+static BOOL
+TermSrvOpenRdpCaptureSession(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context)
+{
+    TERMSRV_UNICODE_STRING WinStationName;
+    TERMSRV_UNICODE_STRING DesktopName;
+
+    if (Context->RdpCaptureSession != NULL)
+        return TRUE;
+
+    if (!TermSrvLoadRdpCaptureApi(Context))
+        return FALSE;
+
+    TermSrvInitUnicodeString(&WinStationName, L"WinSta0");
+    TermSrvInitUnicodeString(&DesktopName, L"Default");
+    Context->RdpCaptureSession = Context->NtUserRdpOpenSession(0,
+                                                               &WinStationName,
+                                                               &DesktopName);
+    if (Context->RdpCaptureSession == NULL)
+    {
+        TermSrvLogFailure("RDP capture fallback: NtUserRdpOpenSession failed");
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static VOID
+TermSrvLogSyntheticFallbackOnce(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_z_ const CHAR *Reason)
+{
+    CHAR Message[160];
+
+    if (Context->RdpSyntheticFallbackLogged)
+        return;
+
+    _snprintf(Message,
+              sizeof(Message),
+              "using synthetic RDP bitmap frame fallback: %s",
+              Reason);
+    Message[sizeof(Message) - 1] = '\0';
+    TermSrvLogFailure(Message);
+    Context->RdpSyntheticFallbackLogged = TRUE;
 }
 
 static VOID
@@ -2352,17 +2527,25 @@ TermSrvWriteShareDataPacket(
     _In_ SIZE_T BodyLength,
     _Out_ SIZE_T *BytesWritten)
 {
-    UCHAR Payload[18 + 4 + 18 + TERMSRV_TEST_BITMAP_BYTES];
+    UCHAR *Payload;
     SIZE_T PayloadLength;
+    BOOL Ret;
 
     if (BytesWritten == NULL)
         return FALSE;
 
     *BytesWritten = 0;
-    if (BodyLength > sizeof(Payload) - 18 || (Body == NULL && BodyLength != 0))
+    if (Body == NULL && BodyLength != 0)
         return FALSE;
 
     PayloadLength = 18 + BodyLength;
+    if (PayloadLength > 0x7fff)
+        return FALSE;
+
+    Payload = HeapAlloc(GetProcessHeap(), 0, PayloadLength);
+    if (Payload == NULL)
+        return FALSE;
+
     TermSrvWriteLe16(&Payload[0], (USHORT)PayloadLength);
     TermSrvWriteLe16(&Payload[2], 0x10 | TERMSRV_RDP_PDU_TYPE_DATA);
     TermSrvWriteLe16(&Payload[4], TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID);
@@ -2376,11 +2559,13 @@ TermSrvWriteShareDataPacket(
     if (BodyLength != 0)
         CopyMemory(&Payload[18], Body, BodyLength);
 
-    return TermSrvWriteServerGlobalPayload(Buffer,
-                                           BufferLength,
-                                           Payload,
-                                           PayloadLength,
-                                           BytesWritten);
+    Ret = TermSrvWriteServerGlobalPayload(Buffer,
+                                          BufferLength,
+                                          Payload,
+                                          PayloadLength,
+                                          BytesWritten);
+    HeapFree(GetProcessHeap(), 0, Payload);
+    return Ret;
 }
 
 static BOOL
@@ -2391,16 +2576,26 @@ TermSrvWriteBitmapUpdatePacket(
     _In_ USHORT DestTop,
     _In_ USHORT Width,
     _In_ USHORT Height,
+    _In_ USHORT BitsPerPixel,
     _In_reads_bytes_(BitmapLength) const UCHAR *Bitmap,
-    _In_ USHORT BitmapLength,
+    _In_ SIZE_T BitmapLength,
     _Out_ SIZE_T *BytesWritten)
 {
-    UCHAR Body[4 + 18 + TERMSRV_TEST_BITMAP_BYTES];
+    UCHAR *Body;
     UCHAR *Rectangle;
+    BOOL Ret;
 
     if (Bitmap == NULL ||
-        BitmapLength > TERMSRV_TEST_BITMAP_BYTES ||
-        BitmapLength != Width * Height * 2)
+        BitmapLength > 0xffff ||
+        BitmapLength != ((SIZE_T)Width * Height * ((BitsPerPixel + 7) / 8)))
+    {
+        if (BytesWritten != NULL)
+            *BytesWritten = 0;
+        return FALSE;
+    }
+
+    Body = HeapAlloc(GetProcessHeap(), 0, 4 + 18 + BitmapLength);
+    if (Body == NULL)
     {
         if (BytesWritten != NULL)
             *BytesWritten = 0;
@@ -2417,17 +2612,19 @@ TermSrvWriteBitmapUpdatePacket(
     TermSrvWriteLe16(&Rectangle[6], DestTop + Height - 1);
     TermSrvWriteLe16(&Rectangle[8], Width);
     TermSrvWriteLe16(&Rectangle[10], Height);
-    TermSrvWriteLe16(&Rectangle[12], TERMSRV_TEST_BITMAP_BPP);
+    TermSrvWriteLe16(&Rectangle[12], BitsPerPixel);
     TermSrvWriteLe16(&Rectangle[14], 0);
-    TermSrvWriteLe16(&Rectangle[16], BitmapLength);
+    TermSrvWriteLe16(&Rectangle[16], (USHORT)BitmapLength);
     CopyMemory(&Rectangle[18], Bitmap, BitmapLength);
 
-    return TermSrvWriteShareDataPacket(Buffer,
-                                       BufferLength,
-                                       TERMSRV_RDP_DATA_TYPE_UPDATE,
-                                       Body,
-                                       4 + 18 + BitmapLength,
-                                       BytesWritten);
+    Ret = TermSrvWriteShareDataPacket(Buffer,
+                                      BufferLength,
+                                      TERMSRV_RDP_DATA_TYPE_UPDATE,
+                                      Body,
+                                      4 + 18 + BitmapLength,
+                                      BytesWritten);
+    HeapFree(GetProcessHeap(), 0, Body);
+    return Ret;
 }
 
 static BOOL
@@ -2464,9 +2661,157 @@ TermSrvWriteTestBitmapUpdatePacket(
                                           0,
                                           TERMSRV_TEST_BITMAP_WIDTH,
                                           TERMSRV_TEST_BITMAP_HEIGHT,
+                                          TERMSRV_TEST_BITMAP_BPP,
                                           Pixels,
                                           sizeof(Pixels),
                                           BytesWritten);
+}
+
+static BOOL
+TermSrvCaptureRdpFrame(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _Out_ TERMSRV_NTUSER_RDP_FRAME *Frame,
+    _Outptr_ UCHAR **Pixels)
+{
+    ULONG BytesReturned;
+    UCHAR *CapturedPixels;
+
+    *Pixels = NULL;
+    ZeroMemory(Frame, sizeof(*Frame));
+
+    if (!TermSrvOpenRdpCaptureSession(Context))
+        return FALSE;
+
+    Context->NtUserRdpCaptureFrame(Context->RdpCaptureSession,
+                                   Frame,
+                                   NULL,
+                                   0,
+                                   &BytesReturned);
+    if (Frame->Size != sizeof(*Frame) ||
+        Frame->Width == 0 ||
+        Frame->Height == 0 ||
+        Frame->BitsPerPixel != TERMSRV_CAPTURE_BITMAP_BPP ||
+        Frame->Pitch < Frame->Width * TERMSRV_CAPTURE_BITMAP_BYTES_PER_PIXEL ||
+        Frame->Format != TERMSRV_NTUSER_RDP_FRAME_FORMAT_BGRA32 ||
+        Frame->RequiredBufferSize < Frame->Pitch * Frame->Height)
+    {
+        TermSrvLogFailure("RDP capture fallback: NtUserRdpCaptureFrame returned unsupported metadata");
+        return FALSE;
+    }
+
+    CapturedPixels = HeapAlloc(GetProcessHeap(), 0, Frame->RequiredBufferSize);
+    if (CapturedPixels == NULL)
+    {
+        TermSrvLogFailure("RDP capture failed: unable to allocate pixel buffer");
+        return FALSE;
+    }
+
+    BytesReturned = 0;
+    if (!Context->NtUserRdpCaptureFrame(Context->RdpCaptureSession,
+                                        Frame,
+                                        CapturedPixels,
+                                        Frame->RequiredBufferSize,
+                                        &BytesReturned) ||
+        BytesReturned != Frame->RequiredBufferSize)
+    {
+        HeapFree(GetProcessHeap(), 0, CapturedPixels);
+        TermSrvLogFailure("RDP capture fallback: NtUserRdpCaptureFrame failed");
+        return FALSE;
+    }
+
+    *Pixels = CapturedPixels;
+    return TRUE;
+}
+
+static BOOL
+TermSrvSendCapturedBitmapUpdate(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client)
+{
+    enum { MaxBitmapBytesPerPacket = 0x7fff - 40 };
+    TERMSRV_NTUSER_RDP_FRAME Frame;
+    UCHAR *CapturedPixels;
+    UCHAR *BitmapData;
+    UCHAR *Packet;
+    ULONG RowBytes;
+    ULONG MaxRowsPerPacket;
+    ULONG Top;
+    BOOL Ret;
+
+    if (!TermSrvIsConsoleBackend(Context))
+        return FALSE;
+
+    if (!TermSrvCaptureRdpFrame(Context, &Frame, &CapturedPixels))
+        return FALSE;
+
+    if (Frame.Width > 0xffff || Frame.Height > 0xffff)
+    {
+        HeapFree(GetProcessHeap(), 0, CapturedPixels);
+        TermSrvLogFailure("RDP capture failed: frame dimensions exceed bitmap update limits");
+        return FALSE;
+    }
+
+    RowBytes = Frame.Width * TERMSRV_CAPTURE_BITMAP_BYTES_PER_PIXEL;
+    MaxRowsPerPacket = MaxBitmapBytesPerPacket / RowBytes;
+    if (MaxRowsPerPacket == 0)
+    {
+        HeapFree(GetProcessHeap(), 0, CapturedPixels);
+        TermSrvLogFailure("RDP capture failed: frame width exceeds uncompressed bitmap update limit");
+        return FALSE;
+    }
+
+    BitmapData = HeapAlloc(GetProcessHeap(), 0, MaxRowsPerPacket * RowBytes);
+    Packet = HeapAlloc(GetProcessHeap(), 0, MaxBitmapBytesPerPacket + 128);
+    if (BitmapData == NULL || Packet == NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, Packet);
+        HeapFree(GetProcessHeap(), 0, BitmapData);
+        HeapFree(GetProcessHeap(), 0, CapturedPixels);
+        TermSrvLogFailure("RDP capture failed: unable to allocate bitmap packet buffers");
+        return FALSE;
+    }
+
+    Ret = TRUE;
+    for (Top = 0; Top < Frame.Height; Top += MaxRowsPerPacket)
+    {
+        ULONG TileHeight;
+        SIZE_T BitmapLength;
+        SIZE_T BytesWritten;
+        const UCHAR *TileSource;
+
+        TileHeight = Frame.Height - Top;
+        if (TileHeight > MaxRowsPerPacket)
+            TileHeight = MaxRowsPerPacket;
+
+        TileSource = CapturedPixels + (Top * Frame.Pitch);
+        BitmapLength = (SIZE_T)TileHeight * RowBytes;
+        if (!TermSrvConvertBgra32ToRdpBitmapData(TileSource,
+                                                 Frame.Width,
+                                                 TileHeight,
+                                                 Frame.Pitch,
+                                                 BitmapData) ||
+            !TermSrvWriteBitmapUpdatePacket(Packet,
+                                            MaxBitmapBytesPerPacket + 128,
+                                            0,
+                                            (USHORT)Top,
+                                            (USHORT)Frame.Width,
+                                            (USHORT)TileHeight,
+                                            TERMSRV_CAPTURE_BITMAP_BPP,
+                                            BitmapData,
+                                            BitmapLength,
+                                            &BytesWritten) ||
+            !TermSrvSendPacket(Client, Packet, BytesWritten))
+        {
+            TermSrvLogFailure("RDP capture failed: bitmap update packet write failed");
+            Ret = FALSE;
+            break;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Packet);
+    HeapFree(GetProcessHeap(), 0, BitmapData);
+    HeapFree(GetProcessHeap(), 0, CapturedPixels);
+    return Ret;
 }
 
 static BOOL
@@ -2511,6 +2856,7 @@ TermSrvWritePointerMarkerPacket(
                                           DestTop,
                                           TERMSRV_POINTER_MARKER_SIZE,
                                           TERMSRV_POINTER_MARKER_SIZE,
+                                          TERMSRV_TEST_BITMAP_BPP,
                                           Pixels,
                                           sizeof(Pixels),
                                           BytesWritten);
@@ -2777,6 +3123,8 @@ TermSrvHandleClientFinalization(
         {
             SIZE_T BytesWritten;
             TERMSRV_RDP_STATUS Status;
+            BOOL SyntheticFrameEnabled;
+            BOOL SentBitmap;
 
             Status = TermSrvRdpPeerSendBitmapUpdate(&Context->Peer,
                                                     TERMSRV_TEST_BITMAP_WIDTH,
@@ -2791,14 +3139,30 @@ TermSrvHandleClientFinalization(
                 return FALSE;
             }
 
-            if (Status != TermSrvRdpSuccess)
-                TermSrvLogFailure("sending scaffold bitmap without a captured win32 frame");
+            SyntheticFrameEnabled = TermSrvSyntheticFrameEnabled();
+            SentBitmap = FALSE;
+            if (Status == TermSrvRdpSuccess && !SyntheticFrameEnabled)
+                SentBitmap = TermSrvSendCapturedBitmapUpdate(Context, Client);
 
-            if (!TermSrvWriteTestBitmapUpdatePacket(Reply, ReplyLength, &BytesWritten) ||
-                !TermSrvSendPacket(Client, Reply, BytesWritten))
+            if (!SentBitmap)
             {
-                TermSrvLogFailure("server bitmap packet write failed");
-                return FALSE;
+                if (!SyntheticFrameEnabled && Context->RdpCaptureAvailable)
+                {
+                    TermSrvLogFailure("server bitmap packet write failed: captured frame was unavailable");
+                    return FALSE;
+                }
+
+                TermSrvLogSyntheticFallbackOnce(Context,
+                                                SyntheticFrameEnabled ?
+                                                "REACTOS_TERMSRV_SYNTHETIC_FRAME=1" :
+                                                "private RDP capture API could not be loaded");
+
+                if (!TermSrvWriteTestBitmapUpdatePacket(Reply, ReplyLength, &BytesWritten) ||
+                    !TermSrvSendPacket(Client, Reply, BytesWritten))
+                {
+                    TermSrvLogFailure("server bitmap packet write failed");
+                    return FALSE;
+                }
             }
 
             SentFontMap = TRUE;
@@ -3410,6 +3774,7 @@ TermSrvHandleClient(
     }
 
 Cleanup:
+    TermSrvCloseRdpCaptureApi(&Context);
     closesocket(Client);
 }
 
