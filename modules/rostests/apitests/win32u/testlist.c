@@ -64,6 +64,7 @@ extern void func_NtUserGetThreadState(void);
 extern void func_NtUserGetTitleBarInfo(void);
 extern void func_NtUserProcessConnect(void);
 extern void func_NtUserRdpCapture(void);
+extern void func_NtUserRdpInput(void);
 extern void func_NtUserRedrawWindow(void);
 extern void func_NtUserScrollDC(void);
 extern void func_NtUserSelectPalette(void);
@@ -139,6 +140,7 @@ const struct test winetest_testlist[] =
     { "NtUserGetTitleBarInfo", func_NtUserGetTitleBarInfo },
     { "NtUserProcessConnect", func_NtUserProcessConnect },
     { "NtUserRdpCapture", func_NtUserRdpCapture },
+    { "NtUserRdpInput", func_NtUserRdpInput },
     { "NtUserRedrawWindow", func_NtUserRedrawWindow },
     { "NtUserScrollDC", func_NtUserScrollDC },
     { "NtUserSelectPalette", func_NtUserSelectPalette },
