@@ -1097,6 +1097,116 @@ TestRdpBcgrParseInputEvents(VOID)
 }
 
 static VOID
+TestRdpBcgrParseShareDataInputPdu(VOID)
+{
+    static const UCHAR SlowPathInput[] =
+    {
+        0x03, 0x00, 0x00, 0x31,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x22,
+        0x22, 0x00,
+        0x17, 0x00,
+        0xe9, 0x03,
+        0xe9, 0x03, 0x01, 0x00,
+        0x00, 0x00,
+        0x10, 0x00,
+        0x1c, 0x00,
+        0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x78, 0x56, 0x34, 0x12,
+        0x04, 0x00,
+        0x1e, 0x00,
+        0x1e, 0x00, 0x00, 0x00
+    };
+    static const UCHAR ControlPdu[] =
+    {
+        0x03, 0x00, 0x00, 0x29,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x1a,
+        0x1a, 0x00,
+        0x17, 0x00,
+        0xe9, 0x03,
+        0xe9, 0x03, 0x01, 0x00,
+        0x00, 0x00,
+        0x08, 0x00,
+        0x14, 0x00,
+        0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR BadBodyLength[] =
+    {
+        0x03, 0x00, 0x00, 0x31,
+        0x02, 0xf0, 0x80,
+        0x64, 0x03, 0xe9, 0x03, 0xeb, 0x70, 0x00, 0x22,
+        0x22, 0x00,
+        0x17, 0x00,
+        0xe9, 0x03,
+        0xe9, 0x03, 0x01, 0x00,
+        0x00, 0x00,
+        0x11, 0x00,
+        0x1c, 0x00,
+        0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+        0x78, 0x56, 0x34, 0x12,
+        0x04, 0x00,
+        0x1e, 0x00,
+        0x1e, 0x00, 0x00, 0x00
+    };
+    TERMSRV_RDPBCGR_SHARE_DATA_PDU ShareData;
+    TERMSRV_RDPBCGR_INPUT_EVENTS InputEvents;
+
+    ok(TermSrvRdpBcgrParseShareDataPdu(SlowPathInput,
+                                       sizeof(SlowPathInput),
+                                       &ShareData) == TermSrvRdpBcgrSuccess,
+       "Share Data input PDU parse failed\n");
+    ok(ShareData.Initiator == 1001,
+       "Unexpected Share Data initiator %u\n", ShareData.Initiator);
+    ok(ShareData.ChannelId == 1003,
+       "Unexpected Share Data channel %u\n", ShareData.ChannelId);
+    ok(ShareData.PduType == 0x07,
+       "Unexpected Share Data PDU type 0x%x\n", ShareData.PduType);
+    ok(ShareData.DataType == 0x1c,
+       "Unexpected Share Data data type 0x%x\n", ShareData.DataType);
+    ok(ShareData.BodyLength == 16,
+       "Unexpected Share Data body length %u\n", ShareData.BodyLength);
+
+    ok(TermSrvRdpBcgrParseSlowPathInputPdu(SlowPathInput,
+                                           sizeof(SlowPathInput),
+                                           &InputEvents) == TermSrvRdpBcgrSuccess,
+       "Slow-path input PDU parse failed\n");
+    ok(InputEvents.NumberEvents == 1,
+       "Unexpected slow-path input event count %u\n", InputEvents.NumberEvents);
+    ok(InputEvents.FirstMessageType == 0x0004,
+       "Unexpected slow-path input message type 0x%x\n", InputEvents.FirstMessageType);
+
+    ok(TermSrvRdpBcgrParseShareDataPdu(ControlPdu,
+                                       sizeof(ControlPdu),
+                                       &ShareData) == TermSrvRdpBcgrSuccess,
+       "Share Data control PDU parse failed\n");
+    ok(ShareData.DataType == 0x14,
+       "Unexpected control data type 0x%x\n", ShareData.DataType);
+    ok(ShareData.ControlAction == 1,
+       "Unexpected control action %u\n", ShareData.ControlAction);
+    ok(TermSrvRdpBcgrParseSlowPathInputPdu(ControlPdu,
+                                           sizeof(ControlPdu),
+                                           &InputEvents) == TermSrvRdpBcgrUnsupportedPdu,
+       "Control PDU should not parse as slow-path input\n");
+    ok(TermSrvRdpBcgrParseShareDataPdu(BadBodyLength,
+                                       sizeof(BadBodyLength),
+                                       &ShareData) == TermSrvRdpBcgrInvalidLength,
+       "Bad Share Data body length should fail\n");
+    ok(TermSrvRdpBcgrParseShareDataPdu(NULL,
+                                       sizeof(SlowPathInput),
+                                       &ShareData) == TermSrvRdpBcgrInvalidHeader,
+       "NULL Share Data buffer should fail\n");
+    ok(TermSrvRdpBcgrParseShareDataPdu(SlowPathInput,
+                                       sizeof(SlowPathInput),
+                                       NULL) == TermSrvRdpBcgrInvalidHeader,
+       "NULL Share Data output should fail\n");
+}
+
+static VOID
 TestRdpBcgrWriteMcsChannelJoinConfirm(VOID)
 {
     static const UCHAR ExpectedConfirm[] =
@@ -2117,6 +2227,7 @@ START_TEST(RdpPeer)
     TestRdpBcgrParseMcsSendDataPayload();
     TestRdpBcgrWriteMcsSendDataPayload();
     TestRdpBcgrParseInputEvents();
+    TestRdpBcgrParseShareDataInputPdu();
     TestRdpBcgrWriteMcsChannelJoinConfirm();
     TestRdpBcgrParseStaticChannelList();
     TestCliprdrStaticChannelName();
