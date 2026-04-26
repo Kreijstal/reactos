@@ -224,6 +224,14 @@ TermSrvSessionManagerCaptureWin32Frame(
     _In_ INT SessionId,
     _Out_ TERMSRV_SESSION_FRAME *Frame);
 
+BOOL
+TermSrvConvertBgra32ToRdpBitmapData(
+    _In_reads_bytes_(SourcePitch * Height) const UCHAR *Source,
+    _In_ ULONG Width,
+    _In_ ULONG Height,
+    _In_ ULONG SourcePitch,
+    _Out_writes_bytes_(Width * Height * 4) UCHAR *Destination);
+
 VOID
 TermSrvRdpPeerInit(
     _Out_ TERMSRV_RDP_PEER *Peer,
