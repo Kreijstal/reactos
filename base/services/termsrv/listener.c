@@ -11,6 +11,7 @@
 #include "cliprdr.h"
 #include "listener.h"
 #include "rdpbcgr.h"
+#include "termsrv.h"
 
 #define TERMSRV_LISTEN_ENV_NAME L"REACTOS_TERMSRV_LISTEN"
 #define TERMSRV_NOAUTH_ENV_NAME L"REACTOS_TERMSRV_NOAUTH"
@@ -86,6 +87,15 @@ typedef enum _TERMSRV_PACKET_PLACEHOLDER
     TermSrvPacketTpkt,
     TermSrvPacketFastPath
 } TERMSRV_PACKET_PLACEHOLDER;
+
+typedef struct _TERMSRV_CLIENT_CONTEXT
+{
+    TERMSRV_SESSION_MANAGER SessionManager;
+    TERMSRV_RDP_PEER Peer;
+    TERMSRV_CLIPRDR_CHANNEL CliprdrChannel;
+    TERMSRV_CLIPRDR_DUMMY_BACKEND CliprdrDummy;
+    TERMSRV_CLIPRDR_BACKEND CliprdrBackend;
+} TERMSRV_CLIENT_CONTEXT;
 
 static BOOL
 TermSrvListenerEnabled(VOID)
@@ -213,6 +223,38 @@ TermSrvLogCliprdrFailure(
               TermSrvCliprdrResultName(Result));
     Message[sizeof(Message) - 1] = '\0';
     TermSrvLogFailure(Message);
+}
+
+static VOID
+TermSrvLogRdpPeerFailure(
+    _In_z_ const CHAR *Operation,
+    _In_ TERMSRV_RDP_STATUS Status)
+{
+    CHAR Message[128];
+
+    _snprintf(Message,
+              sizeof(Message),
+              "%s failed: %s",
+              Operation,
+              TermSrvRdpStatusName(Status));
+    Message[sizeof(Message) - 1] = '\0';
+    TermSrvLogFailure(Message);
+}
+
+static VOID
+TermSrvAdvancePeer(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_z_ PCSTR Packet,
+    _In_z_ PCSTR Operation)
+{
+    TERMSRV_RDP_STATUS Status;
+
+    if (Context == NULL)
+        return;
+
+    Status = TermSrvRdpPeerReceive(&Context->Peer, Packet);
+    if (Status != TermSrvRdpSuccess)
+        TermSrvLogRdpPeerFailure(Operation, Status);
 }
 
 static INT
@@ -973,6 +1015,7 @@ TermSrvTryGetSharePduType(
 
 static VOID
 TermSrvHandleSlowPathInputPacket(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
     _In_reads_bytes_(Received) const UCHAR *Buffer,
     _In_ INT Received)
 {
@@ -1009,7 +1052,12 @@ TermSrvHandleSlowPathInputPacket(
                                             BodyLength,
                                             &InputEvents);
     if (Result != TermSrvRdpBcgrSuccess)
+    {
         TermSrvLogRdpBcgrFailure("slow-path input parse", Result);
+        return;
+    }
+
+    TermSrvAdvancePeer(Context, "SLOW_INPUT wire=rdpbcgr", "slow-path input delivery");
 }
 
 static BOOL
@@ -1040,6 +1088,7 @@ TermSrvSendServerControlPacket(
 
 static BOOL
 TermSrvHandleClientFinalization(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
@@ -1088,6 +1137,9 @@ TermSrvHandleClientFinalization(
             SIZE_T BytesWritten;
 
             SawConfirmActive = TRUE;
+            TermSrvAdvancePeer(Context,
+                               "CONFIRM_ACTIVE",
+                               "confirm active session transition");
             if (!TermSrvWriteServerSynchronizePacket(Reply, ReplyLength, &BytesWritten) ||
                 !TermSrvSendPacket(Client, Reply, BytesWritten) ||
                 !TermSrvSendServerControlPacket(Client,
@@ -1150,6 +1202,7 @@ TermSrvHandleClientFinalization(
 
 static BOOL
 TermSrvRunActiveLoop(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
@@ -1177,6 +1230,9 @@ TermSrvRunActiveLoop(
         switch (TermSrvIdentifyPacketPlaceholder(Buffer, Received))
         {
             case TermSrvPacketFastPath:
+                TermSrvAdvancePeer(Context,
+                                   "FAST_INPUT wire=fastpath",
+                                   "fast-path input delivery");
                 break;
 
             case TermSrvPacketTpkt:
@@ -1193,7 +1249,7 @@ TermSrvRunActiveLoop(
                 }
                 else
                 {
-                    TermSrvHandleSlowPathInputPacket(Buffer, Received);
+                    TermSrvHandleSlowPathInputPacket(Context, Buffer, Received);
                 }
                 break;
 
@@ -1208,6 +1264,7 @@ TermSrvRunActiveLoop(
 
 static BOOL
 TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
@@ -1249,6 +1306,15 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
         return FALSE;
     }
 
+    if (Context->Peer.State == TermSrvRdpStateChannelsJoined)
+        TermSrvAdvancePeer(Context,
+                           "SECURITY client_random=wire",
+                           "security session transition");
+
+    TermSrvAdvancePeer(Context,
+                       "CLIENT_INFO user=DOMAIN\\rdp-scaffold",
+                       "client info session attach");
+
     if (!TermSrvWriteAutoDetectRttRequest(Reply, ReplyLength, &BytesWritten) ||
         !TermSrvSendPacket(Client, Reply, BytesWritten))
     {
@@ -1278,14 +1344,16 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
         if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
             return TRUE;
 
-        return TermSrvHandleClientFinalization(Client,
+        return TermSrvHandleClientFinalization(Context,
+                                               Client,
                                                StopEvent,
                                                Buffer,
                                                BufferLength,
                                                Received,
                                                Reply,
                                                ReplyLength) &&
-               TermSrvRunActiveLoop(Client,
+               TermSrvRunActiveLoop(Context,
+                                    Client,
                                     StopEvent,
                                     Buffer,
                                     BufferLength,
@@ -1302,6 +1370,7 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
 
 static BOOL
 TermSrvRunEarlyMcsPhase(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
     _In_ SOCKET Client,
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
@@ -1317,20 +1386,17 @@ TermSrvRunEarlyMcsPhase(
     TERMSRV_RDPBCGR_RESULT Result;
     TERMSRV_RDPBCGR_MCS_ATTACH_USER_CONFIRM AttachUserConfirm;
     TERMSRV_RDPBCGR_OPAQUE_SECURITY_PAYLOAD SecurityExchange;
-    TERMSRV_CLIPRDR_BACKEND CliprdrBackend;
-    TERMSRV_CLIPRDR_CHANNEL CliprdrChannel;
-    TERMSRV_CLIPRDR_DUMMY_BACKEND CliprdrDummy;
     BOOL HaveSecurityExchange;
     INT InitialClientInfoReceived;
 
-    if (!TermSrvInitializeCliprdrScaffold(&CliprdrChannel,
-                                          &CliprdrDummy,
-                                          &CliprdrBackend))
+    if (!TermSrvInitializeCliprdrScaffold(&Context->CliprdrChannel,
+                                          &Context->CliprdrDummy,
+                                          &Context->CliprdrBackend))
     {
         return FALSE;
     }
 
-    TermSrvTryAssignCliprdrFromStaticChannelList(&CliprdrChannel,
+    TermSrvTryAssignCliprdrFromStaticChannelList(&Context->CliprdrChannel,
                                                  StaticChannelList);
 
     if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
@@ -1342,6 +1408,7 @@ TermSrvRunEarlyMcsPhase(
         TermSrvLogRdpBcgrFailure("MCS erect domain request parse", Result);
         return FALSE;
     }
+    TermSrvAdvancePeer(Context, "ERECT", "MCS erect domain session transition");
 
     if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
         return FALSE;
@@ -1352,6 +1419,7 @@ TermSrvRunEarlyMcsPhase(
         TermSrvLogRdpBcgrFailure("MCS attach user request parse", Result);
         return FALSE;
     }
+    TermSrvAdvancePeer(Context, "ATTACH", "MCS attach user session transition");
 
     ZeroMemory(&AttachUserConfirm, sizeof(AttachUserConfirm));
     AttachUserConfirm.UserChannelId = TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID;
@@ -1391,6 +1459,9 @@ TermSrvRunEarlyMcsPhase(
             if (Result == TermSrvRdpBcgrSuccess)
             {
                 HaveSecurityExchange = TRUE;
+                TermSrvAdvancePeer(Context,
+                                   "SECURITY client_random=wire",
+                                   "security exchange session transition");
                 break;
             }
 
@@ -1404,11 +1475,11 @@ TermSrvRunEarlyMcsPhase(
         ChannelJoinConfirm.ConfirmedChannelId = ChannelJoinRequest.ChannelId;
 
         if (ChannelJoinRequest.ChannelId == TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID &&
-            CliprdrChannel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID)
+            Context->CliprdrChannel.ChannelId == TERMSRV_CLIPRDR_INVALID_CHANNEL_ID)
         {
             TERMSRV_CLIPRDR_RESULT ClipResult;
 
-            ClipResult = TermSrvCliprdrAssignChannelId(&CliprdrChannel,
+            ClipResult = TermSrvCliprdrAssignChannelId(&Context->CliprdrChannel,
                                                        ChannelJoinRequest.ChannelId);
             if (ClipResult != TermSrvCliprdrSuccess)
             {
@@ -1430,6 +1501,19 @@ TermSrvRunEarlyMcsPhase(
 
         if (!TermSrvSendPacket(Client, Reply, BytesWritten))
             return FALSE;
+
+        if (ChannelJoinRequest.ChannelId == TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID ||
+            ChannelJoinRequest.ChannelId == 1003)
+        {
+            CHAR PeerPacket[32];
+
+            _snprintf(PeerPacket,
+                      sizeof(PeerPacket),
+                      "JOIN id=%u",
+                      ChannelJoinRequest.ChannelId);
+            PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+            TermSrvAdvancePeer(Context, PeerPacket, "MCS channel join session transition");
+        }
     }
 
     if (!HaveSecurityExchange)
@@ -1445,17 +1529,24 @@ TermSrvRunEarlyMcsPhase(
             TermSrvLogRdpBcgrFailure("security exchange parse, treating packet as client info", Result);
             InitialClientInfoReceived = Received;
         }
+        else
+        {
+            TermSrvAdvancePeer(Context,
+                               "SECURITY client_random=wire",
+                               "security exchange session transition");
+        }
     }
 
-    if (!TermSrvConsumeOptionalClientInfoAndCliprdrPacket(Client,
+    if (!TermSrvConsumeOptionalClientInfoAndCliprdrPacket(Context,
+                                                         Client,
                                                          StopEvent,
                                                          Buffer,
                                                          BufferLength,
                                                          InitialClientInfoReceived,
                                                          Reply,
                                                          ReplyLength,
-                                                         &CliprdrChannel,
-                                                         &CliprdrBackend,
+                                                         &Context->CliprdrChannel,
+                                                         &Context->CliprdrBackend,
                                                          NoAuthEnabled))
     {
         return FALSE;
@@ -1470,7 +1561,12 @@ TermSrvHandleClient(
     _In_ HANDLE StopEvent)
 {
     UCHAR Buffer[512];
+    TERMSRV_CLIENT_CONTEXT Context;
     INT Received;
+
+    ZeroMemory(&Context, sizeof(Context));
+    TermSrvSessionManagerInit(&Context.SessionManager);
+    TermSrvRdpPeerInit(&Context.Peer, &Context.SessionManager);
 
     TermSrvSetNonBlocking(Client);
 
@@ -1516,6 +1612,9 @@ TermSrvHandleClient(
 
             if (!TermSrvSendPacket(Client, Reply, ReplyLength))
                 goto Cleanup;
+            TermSrvAdvancePeer(&Context,
+                               "X224 cookie=mstshash=wire",
+                               "X224 session transition");
 
             Received = TermSrvReceiveWithTimeout(Client, StopEvent, Buffer, sizeof(Buffer));
             if (Received > 0 &&
@@ -1542,8 +1641,12 @@ TermSrvHandleClient(
 
                 if (!TermSrvSendPacket(Client, Reply, ReplyLength))
                     goto Cleanup;
+                TermSrvAdvancePeer(&Context,
+                                   "MCS channels=;fast=1",
+                                   "MCS session transition");
 
-                if (!TermSrvRunEarlyMcsPhase(Client,
+                if (!TermSrvRunEarlyMcsPhase(&Context,
+                                             Client,
                                              StopEvent,
                                              Buffer,
                                              sizeof(Buffer),
