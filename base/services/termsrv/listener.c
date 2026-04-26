@@ -19,6 +19,7 @@
 #define TERMSRV_LISTEN_ENV_NAME L"REACTOS_TERMSRV_LISTEN"
 #define TERMSRV_NOAUTH_ENV_NAME L"REACTOS_TERMSRV_NOAUTH"
 #define TERMSRV_LISTEN_PORT_ENV_NAME L"REACTOS_TERMSRV_PORT"
+#define TERMSRV_BACKEND_ENV_NAME L"REACTOS_TERMSRV_BACKEND"
 #define TERMSRV_LISTEN_PORT 3389
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 2000
@@ -182,6 +183,23 @@ TermSrvListenerPort(VOID)
         return TERMSRV_LISTEN_PORT;
 
     return (USHORT)Port;
+}
+
+static VOID
+TermSrvSelectListenerBackend(
+    _Inout_ TERMSRV_SESSION_MANAGER *SessionManager)
+{
+    WCHAR Value[32];
+    DWORD Length;
+
+    Length = GetEnvironmentVariableW(TERMSRV_BACKEND_ENV_NAME, Value, ARRAYSIZE(Value));
+    if (Length == 0 || Length >= ARRAYSIZE(Value))
+    {
+        TermSrvSessionManagerSelectBackendByName(SessionManager, NULL);
+        return;
+    }
+
+    TermSrvSessionManagerSelectBackendByName(SessionManager, Value);
 }
 
 static TERMSRV_PACKET_PLACEHOLDER
@@ -3499,6 +3517,7 @@ TermSrvListenerRun(
     }
 
     TermSrvSessionManagerInit(&SessionManager);
+    TermSrvSelectListenerBackend(&SessionManager);
     Result = TermSrvListenerLoop(ListenSocket, StopEvent, &SessionManager);
 
     closesocket(ListenSocket);
