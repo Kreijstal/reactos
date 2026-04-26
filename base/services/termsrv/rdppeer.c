@@ -174,6 +174,41 @@ SetRdpWinStationName(
     Name[NameLength - 1] = UNICODE_NULL;
 }
 
+static VOID
+SetConsoleSessionBinding(
+    _Out_ TERMSRV_SESSION *Session,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName)
+{
+    Session->SessionId = 0;
+    wcsncpy(Session->UserIdentity, UserIdentity, ARRAYSIZE(Session->UserIdentity) - 1);
+    Session->UserIdentity[ARRAYSIZE(Session->UserIdentity) - 1] = UNICODE_NULL;
+    wcsncpy(Session->ClientName, ClientName, ARRAYSIZE(Session->ClientName) - 1);
+    Session->ClientName[ARRAYSIZE(Session->ClientName) - 1] = UNICODE_NULL;
+    wcsncpy(Session->WinStationName, L"WinSta0", ARRAYSIZE(Session->WinStationName) - 1);
+    Session->WinStationName[ARRAYSIZE(Session->WinStationName) - 1] = UNICODE_NULL;
+    wcsncpy(Session->DesktopName, L"Default", ARRAYSIZE(Session->DesktopName) - 1);
+    Session->DesktopName[ARRAYSIZE(Session->DesktopName) - 1] = UNICODE_NULL;
+    Session->State = TermSrvSessionConnected;
+    Session->Win32Attached = TRUE;
+    Session->FramePending = TRUE;
+}
+
+static VOID
+PrepareConsoleSessionRecord(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager)
+{
+    memset(Manager->Sessions, 0, sizeof(Manager->Sessions));
+    Manager->SessionCount = 1;
+    InitializeSessionRecord(&Manager->Sessions[0], 0, TermSrvSessionIdle);
+    wcsncpy(Manager->Sessions[0].WinStationName,
+            L"WinSta0",
+            ARRAYSIZE(Manager->Sessions[0].WinStationName) - 1);
+    wcsncpy(Manager->Sessions[0].DesktopName,
+            L"Default",
+            ARRAYSIZE(Manager->Sessions[0].DesktopName) - 1);
+}
+
 static BOOL
 DummyCreateOrAttach(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
@@ -223,6 +258,55 @@ DummyClipboard(
     _In_ SIZE_T OutputLength,
     _Out_ SIZE_T *BytesWritten);
 
+static BOOL
+ConsoleCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId);
+
+static BOOL
+ConsoleDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
+static BOOL
+ConsoleLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
+static BOOL
+ConsoleCaptureFrame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame);
+
+static BOOL
+ConsoleInjectMouse(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY);
+
+static BOOL
+ConsoleInjectKeyboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ UINT VirtualKey,
+    _In_ BOOL KeyDown);
+
+static BOOL
+ConsoleClipboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_reads_bytes_opt_(InputLength) const VOID *Input,
+    _In_ SIZE_T InputLength,
+    _Out_writes_bytes_to_opt_(OutputLength, *BytesWritten) VOID *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten);
+
 static const TERMSRV_SESSION_BACKEND DummySessionBackend =
 {
     "dummy",
@@ -233,6 +317,18 @@ static const TERMSRV_SESSION_BACKEND DummySessionBackend =
     DummyInjectMouse,
     DummyInjectKeyboard,
     DummyClipboard
+};
+
+static const TERMSRV_SESSION_BACKEND ConsoleSessionBackend =
+{
+    "console",
+    ConsoleCreateOrAttach,
+    ConsoleDisconnect,
+    ConsoleLogoff,
+    ConsoleCaptureFrame,
+    ConsoleInjectMouse,
+    ConsoleInjectKeyboard,
+    ConsoleClipboard
 };
 
 TERMSRV_SESSION *
@@ -253,6 +349,14 @@ SelectSession(
     INT i;
 
     RecordCall(Manager, "select_session");
+
+    if (TermSrvSessionManagerGetBackend(Manager) == &ConsoleSessionBackend)
+    {
+        if (FindSessionInternal(Manager, 0) == NULL)
+            PrepareConsoleSessionRecord(Manager);
+
+        return 0;
+    }
 
     for (i = 0; i < Manager->SessionCount; i++)
     {
@@ -348,6 +452,40 @@ const TERMSRV_SESSION_BACKEND *
 TermSrvSessionManagerGetDefaultBackend(VOID)
 {
     return &DummySessionBackend;
+}
+
+const TERMSRV_SESSION_BACKEND *
+TermSrvSessionManagerGetConsoleBackend(VOID)
+{
+    return &ConsoleSessionBackend;
+}
+
+BOOL
+TermSrvSessionManagerSelectBackendByName(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_opt_z_ PCWSTR BackendName)
+{
+    if (Manager == NULL)
+        return FALSE;
+
+    if (BackendName != NULL && BackendName[0] != UNICODE_NULL)
+    {
+        if (_wcsicmp(BackendName, L"console") == 0)
+        {
+            TermSrvSessionManagerSetBackend(Manager, &ConsoleSessionBackend, NULL);
+            PrepareConsoleSessionRecord(Manager);
+            return TRUE;
+        }
+
+        if (_wcsicmp(BackendName, L"dummy") != 0)
+        {
+            TermSrvSessionManagerSetBackend(Manager, NULL, NULL);
+            return FALSE;
+        }
+    }
+
+    TermSrvSessionManagerSetBackend(Manager, NULL, NULL);
+    return TRUE;
 }
 
 VOID
@@ -582,6 +720,125 @@ DummyInjectKeyboard(
 
 static BOOL
 DummyClipboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_reads_bytes_opt_(InputLength) const VOID *Input,
+    _In_ SIZE_T InputLength,
+    _Out_writes_bytes_to_opt_(OutputLength, *BytesWritten) VOID *Output,
+    _In_ SIZE_T OutputLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UNREFERENCED_PARAMETER(Manager);
+    UNREFERENCED_PARAMETER(SessionId);
+    UNREFERENCED_PARAMETER(Input);
+    UNREFERENCED_PARAMETER(InputLength);
+    UNREFERENCED_PARAMETER(Output);
+    UNREFERENCED_PARAMETER(OutputLength);
+
+    if (BytesWritten == NULL)
+        return FALSE;
+
+    *BytesWritten = 0;
+    return TRUE;
+}
+
+static BOOL
+ConsoleCreateOrAttach(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName,
+    _Out_ INT *AttachedSessionId)
+{
+    TERMSRV_SESSION *Session;
+
+    UNREFERENCED_PARAMETER(SessionId);
+
+    if (Manager == NULL || UserIdentity == NULL || ClientName == NULL || AttachedSessionId == NULL)
+        return FALSE;
+
+    Session = FindSessionInternal(Manager, 0);
+    if (Session == NULL)
+    {
+        PrepareConsoleSessionRecord(Manager);
+        Session = FindSessionInternal(Manager, 0);
+        if (Session == NULL)
+            return FALSE;
+    }
+
+    SetConsoleSessionBinding(Session, UserIdentity, ClientName);
+    *AttachedSessionId = 0;
+    return TRUE;
+}
+
+static BOOL
+ConsoleDisconnect(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    UNREFERENCED_PARAMETER(SessionId);
+
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  0,
+                                                  TermSrvSessionDisconnected);
+}
+
+static BOOL
+ConsoleLogoff(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId)
+{
+    UNREFERENCED_PARAMETER(SessionId);
+
+    return TermSrvSessionManagerDetachWin32Session(Manager,
+                                                  0,
+                                                  TermSrvSessionLoggedOff);
+}
+
+static BOOL
+ConsoleCaptureFrame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame)
+{
+    UNREFERENCED_PARAMETER(SessionId);
+
+    return TermSrvSessionManagerCaptureWin32Frame(Manager, 0, Frame);
+}
+
+static BOOL
+ConsoleInjectMouse(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY)
+{
+    UNREFERENCED_PARAMETER(SessionId);
+
+    return TermSrvSessionManagerRecordWin32Input(Manager,
+                                                0,
+                                                HasPointer,
+                                                PointerX,
+                                                PointerY);
+}
+
+static BOOL
+ConsoleInjectKeyboard(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ UINT VirtualKey,
+    _In_ BOOL KeyDown)
+{
+    UNREFERENCED_PARAMETER(SessionId);
+    UNREFERENCED_PARAMETER(VirtualKey);
+    UNREFERENCED_PARAMETER(KeyDown);
+
+    return TermSrvSessionManagerRecordWin32Input(Manager, 0, FALSE, 0, 0);
+}
+
+static BOOL
+ConsoleClipboard(
     _Inout_ TERMSRV_SESSION_MANAGER *Manager,
     _In_ INT SessionId,
     _In_reads_bytes_opt_(InputLength) const VOID *Input,
