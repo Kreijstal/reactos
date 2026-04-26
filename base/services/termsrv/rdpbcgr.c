@@ -23,6 +23,8 @@
 #define SECURITY_FLAGS_LENGTH 4
 #define SEC_EXCHANGE_PKT 0x00000001
 #define SEC_INFO_PKT 0x00000040
+#define INPUT_EVENTS_HEADER_LENGTH 4
+#define INPUT_EVENT_LENGTH 12
 #define STATIC_CHANNEL_HEADER_LENGTH 1
 #define STATIC_CHANNEL_DEF_LENGTH (TERMSRV_RDPBCGR_STATIC_CHANNEL_NAME_LENGTH + 4)
 
@@ -498,6 +500,44 @@ TermSrvRdpBcgrParseClientInfoPayload(
                                       BufferLength,
                                       SEC_INFO_PKT,
                                       ClientInfo);
+}
+
+TERMSRV_RDPBCGR_RESULT
+TermSrvRdpBcgrParseInputEvents(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_RDPBCGR_INPUT_EVENTS *InputEvents)
+{
+    SIZE_T ExpectedLength;
+
+    if (InputEvents == NULL || Buffer == NULL)
+        return TermSrvRdpBcgrInvalidHeader;
+
+    memset(InputEvents, 0, sizeof(*InputEvents));
+
+    if (BufferLength < INPUT_EVENTS_HEADER_LENGTH)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    InputEvents->NumberEvents = ReadLe16(Buffer);
+    ExpectedLength = INPUT_EVENTS_HEADER_LENGTH +
+                     (SIZE_T)InputEvents->NumberEvents * INPUT_EVENT_LENGTH;
+    if (ExpectedLength < INPUT_EVENTS_HEADER_LENGTH)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (BufferLength < ExpectedLength)
+        return TermSrvRdpBcgrNeedMoreData;
+
+    if (BufferLength != ExpectedLength)
+        return TermSrvRdpBcgrInvalidLength;
+
+    if (InputEvents->NumberEvents != 0)
+    {
+        InputEvents->FirstEventTime = ReadLe32(&Buffer[4]);
+        InputEvents->FirstMessageType = ReadLe16(&Buffer[8]);
+        InputEvents->FirstDeviceFlags = ReadLe16(&Buffer[10]);
+    }
+
+    return TermSrvRdpBcgrSuccess;
 }
 
 TERMSRV_RDPBCGR_RESULT
