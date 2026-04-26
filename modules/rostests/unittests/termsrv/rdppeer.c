@@ -69,13 +69,23 @@ TestFullHandshake(VOID)
 {
     TERMSRV_SESSION_MANAGER Manager;
     TERMSRV_RDP_PEER Peer;
+    TERMSRV_SESSION *Session;
 
     TermSrvSessionManagerInit(&Manager);
     TermSrvRdpPeerInit(&Peer, &Manager);
     ActivatePeer(&Peer);
 
-    ok(Manager.Sessions[0].State == TermSrvSessionConnected,
+    Session = TermSrvSessionManagerFindSession(&Manager, 1);
+    ok(Session != NULL,
+       "Session 1 was not found\n");
+    ok(Session != NULL && Session->State == TermSrvSessionConnected,
        "Session was not connected\n");
+    ok(Session != NULL && Session->Win32Attached,
+       "Win32 session was not attached\n");
+    ok(Session != NULL && wcscmp(Session->WinStationName, L"RDP-Tcp#1") == 0,
+       "Unexpected WinStation binding\n");
+    ok(Session != NULL && wcscmp(Session->DesktopName, L"Default") == 0,
+       "Unexpected desktop binding\n");
     ok(strcmp(Peer.LastOutput, "FONT_MAP") == 0,
        "Expected FONT_MAP, got %s\n", Peer.LastOutput);
 }
@@ -193,18 +203,40 @@ TestInputAndVirtualChannels(VOID)
 {
     TERMSRV_SESSION_MANAGER Manager;
     TERMSRV_RDP_PEER Peer;
+    TERMSRV_SESSION *Session;
+    TERMSRV_SESSION_FRAME Frame;
 
     TermSrvSessionManagerInit(&Manager);
     TermSrvRdpPeerInit(&Peer, &Manager);
     ActivatePeer(&Peer);
+    Session = TermSrvSessionManagerFindSession(&Manager, Peer.SessionId);
 
-    ok(TermSrvRdpPeerReceive(&Peer, "SLOW_INPUT scancode=30") == TermSrvRdpSuccess,
+    ok(TermSrvRdpPeerReceive(&Peer, "SLOW_INPUT mouse=1 x=12 y=34") == TermSrvRdpSuccess,
        "Slow-path input failed\n");
     ok(Manager.LastInputSessionId == 1,
        "Input delivered to session %d\n", Manager.LastInputSessionId);
+    ok(Session != NULL && Session->HasPointer,
+       "Pointer state was not recorded\n");
+    ok(Session != NULL && Session->LastPointerX == 12 && Session->LastPointerY == 34,
+       "Unexpected pointer state %d,%d\n",
+       Session != NULL ? Session->LastPointerX : -1,
+       Session != NULL ? Session->LastPointerY : -1);
 
-    ok(TermSrvRdpPeerReceive(&Peer, "FAST_INPUT mouse=1") == TermSrvRdpSuccess,
+    ok(TermSrvRdpPeerReceive(&Peer, "FAST_INPUT mouse=1 x=56 y=78") == TermSrvRdpSuccess,
        "Fast-path input failed\n");
+    ok(Session != NULL && Session->LastPointerX == 56 && Session->LastPointerY == 78,
+       "Unexpected fast-path pointer state %d,%d\n",
+       Session != NULL ? Session->LastPointerX : -1,
+       Session != NULL ? Session->LastPointerY : -1);
+    ok(TermSrvSessionManagerCaptureWin32Frame(&Manager, Peer.SessionId, &Frame),
+       "Win32 frame capture failed\n");
+    ok(Frame.SessionId == 1 && Frame.DesktopWidth == 1024 && Frame.DesktopHeight == 768,
+       "Unexpected frame metadata session=%d size=%dx%d\n",
+       Frame.SessionId,
+       Frame.DesktopWidth,
+       Frame.DesktopHeight);
+    ok(Frame.HasPointer && Frame.PointerX == 56 && Frame.PointerY == 78,
+       "Unexpected frame pointer %d,%d\n", Frame.PointerX, Frame.PointerY);
 
     ok(TermSrvRdpPeerReceive(&Peer, "VC id=1004 payload=device") == TermSrvRdpSuccess,
        "Virtual channel payload failed\n");
@@ -250,6 +282,8 @@ TestDisconnectLogoffAndReconnect(VOID)
        "Peer did not close on disconnect\n");
     ok(Manager.Sessions[0].State == TermSrvSessionDisconnected,
        "Disconnect did not preserve session\n");
+    ok(!Manager.Sessions[0].Win32Attached,
+       "Disconnect kept the Win32 session attached\n");
 
     TermSrvRdpPeerInit(&Peer, &Manager);
     ActivatePeer(&Peer);
@@ -260,6 +294,8 @@ TestDisconnectLogoffAndReconnect(VOID)
        "Logoff failed\n");
     ok(Manager.Sessions[0].State == TermSrvSessionLoggedOff,
        "Logoff did not destroy session\n");
+    ok(!Manager.Sessions[0].Win32Attached,
+       "Logoff kept the Win32 session attached\n");
 }
 
 static VOID

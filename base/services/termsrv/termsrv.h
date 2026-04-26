@@ -52,11 +52,31 @@ typedef struct _TERMSRV_SESSION
 {
     INT SessionId;
     WCHAR UserIdentity[64];
+    WCHAR WinStationName[32];
+    WCHAR DesktopName[32];
+    WCHAR ClientName[64];
     TERMSRV_SESSION_STATE State;
     INT DesktopWidth;
     INT DesktopHeight;
     INT ColorDepth;
+    BOOL Win32Attached;
+    BOOL FramePending;
+    BOOL HasPointer;
+    INT LastPointerX;
+    INT LastPointerY;
 } TERMSRV_SESSION;
+
+typedef struct _TERMSRV_SESSION_FRAME
+{
+    INT SessionId;
+    INT DesktopWidth;
+    INT DesktopHeight;
+    INT ColorDepth;
+    BOOL HasPointer;
+    INT PointerX;
+    INT PointerY;
+    BOOL FramePending;
+} TERMSRV_SESSION_FRAME;
 
 typedef struct _TERMSRV_SESSION_MANAGER
 {
@@ -100,6 +120,38 @@ TermSrvSessionManagerAddDisconnected(
     _In_ INT SessionId,
     _In_z_ PCWSTR UserIdentity);
 
+TERMSRV_SESSION *
+TermSrvSessionManagerFindSession(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId);
+
+BOOL
+TermSrvSessionManagerAttachWin32Session(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_z_ PCWSTR UserIdentity,
+    _In_z_ PCWSTR ClientName);
+
+BOOL
+TermSrvSessionManagerDetachWin32Session(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ TERMSRV_SESSION_STATE NewState);
+
+BOOL
+TermSrvSessionManagerRecordWin32Input(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _In_ BOOL HasPointer,
+    _In_ INT PointerX,
+    _In_ INT PointerY);
+
+BOOL
+TermSrvSessionManagerCaptureWin32Frame(
+    _Inout_ TERMSRV_SESSION_MANAGER *Manager,
+    _In_ INT SessionId,
+    _Out_ TERMSRV_SESSION_FRAME *Frame);
+
 VOID
 TermSrvRdpPeerInit(
     _Out_ TERMSRV_RDP_PEER *Peer,
@@ -123,4 +175,3 @@ TermSrvRdpStateName(
 PCSTR
 TermSrvRdpStatusName(
     _In_ TERMSRV_RDP_STATUS Status);
-
