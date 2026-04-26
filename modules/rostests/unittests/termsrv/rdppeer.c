@@ -1824,6 +1824,62 @@ TestCliprdrWriteFormatListResponse(VOID)
 }
 
 static VOID
+TestCliprdrFormatListHelpers(VOID)
+{
+    static const UCHAR LongList[] =
+    {
+        0x02, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00,
+        0x0d, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x34, 0x12, 0x00, 0x00, 'F', 0x00, 'o', 0x00, 'o', 0x00, 0x00, 0x00
+    };
+    static const UCHAR ExpectedRequest[] =
+    {
+        0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x34, 0x12, 0x00, 0x00
+    };
+    TERMSRV_CLIPRDR_FORMAT_LIST List;
+    TERMSRV_CLIPRDR_FORMAT Formats[2];
+    UCHAR Buffer[64];
+    SIZE_T BytesWritten;
+
+    ok(TermSrvCliprdrParseFormatList(LongList,
+                                     sizeof(LongList),
+                                     &List) == TermSrvCliprdrSuccess,
+       "cliprdr long Format List parse failed\n");
+    ok(List.Count == 2,
+       "Unexpected cliprdr long Format List count %lu\n", List.Count);
+    ok(TermSrvCliprdrFormatListContains(&List, TERMSRV_CLIPRDR_CF_UNICODETEXT),
+       "cliprdr long Format List did not include CF_UNICODETEXT\n");
+    ok(TermSrvCliprdrFindNamedFormat(&List, L"Foo") == 0x1234,
+       "cliprdr named format lookup failed\n");
+
+    ZeroMemory(Formats, sizeof(Formats));
+    Formats[0].FormatId = TERMSRV_CLIPRDR_CF_UNICODETEXT;
+    Formats[1].FormatId = 0x1234;
+    lstrcpyW(Formats[1].Name, L"Foo");
+    ok(TermSrvCliprdrWriteFormatList(Buffer,
+                                     sizeof(Buffer),
+                                     Formats,
+                                     2,
+                                     &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format List serialization failed\n");
+    ok(BytesWritten == sizeof(LongList),
+       "Unexpected cliprdr Format List size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, LongList, sizeof(LongList)) == 0,
+       "Serialized cliprdr Format List did not match expected bytes\n");
+
+    ok(TermSrvCliprdrWriteFormatDataRequest(Buffer,
+                                            sizeof(Buffer),
+                                            0x1234,
+                                            &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr Format Data Request serialization failed\n");
+    ok(BytesWritten == sizeof(ExpectedRequest),
+       "Unexpected cliprdr Format Data Request size %Iu\n", BytesWritten);
+    ok(memcmp(Buffer, ExpectedRequest, sizeof(ExpectedRequest)) == 0,
+       "Serialized cliprdr Format Data Request did not match expected bytes\n");
+}
+
+static VOID
 TestCliprdrParseFormatDataRequest(VOID)
 {
     static const UCHAR Request[] =
@@ -2077,7 +2133,7 @@ TestCliprdrHandlePdu(VOID)
     };
     static const UCHAR UnsupportedPdu[] =
     {
-        0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        0xff, 0x7f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     TERMSRV_CLIPRDR_DUMMY_BACKEND Dummy;
     TERMSRV_CLIPRDR_BACKEND Backend;
@@ -2355,6 +2411,7 @@ START_TEST(RdpPeer)
     TestCliprdrParsePdu();
     TestCliprdrWriteMonitorReady();
     TestCliprdrWriteFormatListResponse();
+    TestCliprdrFormatListHelpers();
     TestCliprdrParseFormatDataRequest();
     TestCliprdrWriteFormatDataResponse();
     TestCliprdrDummyBackend();
