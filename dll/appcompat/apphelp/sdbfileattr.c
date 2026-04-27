@@ -256,6 +256,7 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
     DWORD module_type;
     WCHAR translation[128] = {0};
     PATTRINFO attr_info;
+    LPCWSTR dos_path = path;
 
     struct LANGANDCODEPAGE {
         WORD language;
@@ -268,6 +269,22 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
         return FALSE;
     }
     mapping_end = mapped.view + mapped.size;
+
+    /*
+     * GetFileVersionInfoSizeW / GetFileVersionInfoW below funnel through
+     * LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE), which only understands DOS
+     * paths.  Callers (e.g. kernel32!BasepCheckBadapp) often hand us an
+     * NT-form "\??\X:\..." path which is the absolute path of the image
+     * being launched.  Strip the leading "\??\" so the version-resource
+     * probe can succeed; if the rest of the string isn't a valid DOS path
+     * we'll still degrade gracefully (info_size will be 0 below).
+     */
+    if (path &&
+        path[0] == L'\\' && path[1] == L'?' &&
+        path[2] == L'?' && path[3] == L'\\')
+    {
+        dos_path = path + 4;
+    }
 
     attr_info = (PATTRINFO)SdbAlloc(NUM_ATTRIBUTES * sizeof(ATTRINFO));
 
@@ -289,12 +306,12 @@ BOOL WINAPI SdbGetFileAttributes(LPCWSTR path, PATTRINFO *attr_info_ret, LPDWORD
         ULONG export_dir_size;
         PIMAGE_EXPORT_DIRECTORY export_dir;
 
-        info_size = GetFileVersionInfoSizeW(path, NULL);
+        info_size = GetFileVersionInfoSizeW(dos_path, NULL);
         if (info_size != 0)
         {
             UINT page_size = 0;
             file_info = SdbAlloc(info_size);
-            GetFileVersionInfoW(path, 0, info_size, file_info);
+            GetFileVersionInfoW(dos_path, 0, info_size, file_info);
             VerQueryValueW(file_info, str_tinfo, (LPVOID)&lang_page, &page_size);
             StringCchPrintfW(translation, ARRAYSIZE(translation), str_trans, lang_page->language, lang_page->code_page);
         }
