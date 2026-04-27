@@ -480,8 +480,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    /* Now, assume we will assign a letter */
-    DeviceInformation->LetterAssigned =
+    /* Now, assume we will assign a letter. */
     DriveLetterInfo->DriveLetterWasAssigned = TRUE;
 
     /* Browse all the symlinks to check if there is already a drive letter */
@@ -493,6 +492,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
         /* If this is a drive letter and it is online, forget about new drive letter */
         if (IsDriveLetter(&(SymlinkInformation->Name)) && SymlinkInformation->Online)
         {
+            DeviceInformation->LetterAssigned = TRUE;
             DriveLetterInfo->DriveLetterWasAssigned = FALSE;
             DriveLetterInfo->CurrentDriveLetter = (CHAR)SymlinkInformation->Name.Buffer[LETTER_POSITION];
             break;
@@ -574,6 +574,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
         Status = MountMgrCreatePointWorker(DeviceExtension, &SymbolicName, &TargetDeviceName);
         if (NT_SUCCESS(Status))
         {
+            DeviceInformation->LetterAssigned = TRUE;
             goto Release;
         }
     }
@@ -588,6 +589,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
         Status = MountMgrCreatePointWorker(DeviceExtension, &SymbolicName, &TargetDeviceName);
         if (NT_SUCCESS(Status))
         {
+            DeviceInformation->LetterAssigned = TRUE;
             break;
         }
     }
@@ -597,6 +599,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
     {
         DriveLetterInfo->DriveLetterWasAssigned = FALSE;
         DriveLetterInfo->CurrentDriveLetter = 0;
+        DeviceInformation->LetterAssigned = FALSE;
 
         /* Try at least to add a no drive letter entry */
         Status = QueryDeviceInformation(&TargetDeviceName, NULL, &UniqueId, NULL, NULL, NULL, NULL, NULL);
