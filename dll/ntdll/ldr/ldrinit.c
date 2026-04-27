@@ -2551,9 +2551,7 @@ LdrpInitializeProcess(IN PCONTEXT Context,
     /* Check whether all static imports were properly loaded and return here */
     if (!NT_SUCCESS(ImportStatus)) return ImportStatus;
 
-    /* Following two calls are for Vista+ support, required for winesync */
-    /* Initialize the keyed event for condition variables */
-    RtlpInitializeKeyedEvent();
+    /* Initialize Vista+ thread pooling */
     RtlpInitializeThreadPooling();
 
     /* Initialize TLS */
