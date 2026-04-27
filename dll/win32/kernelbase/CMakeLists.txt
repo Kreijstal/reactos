@@ -1,13 +1,13 @@
 
 remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
-add_definitions(-D_WIN32_WINNT=0x601 -DWINVER=0x601)
+add_definitions(-D_WIN32_WINNT=0x602 -DWINVER=0x602)
 
-add_definitions(
-    -D__WINESRC__
-    -D_WINE
-    -D_KERNELBASE_)
+spec2def(kernelbase.dll kernelbase.spec ADD_IMPORTLIB)
 
-include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
+list(APPEND SOURCE
+    kernelbase.c
+    kernelbase.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/kernelbase.def)
 
 add_subdirectory(wine)
 
@@ -24,6 +24,8 @@ add_importlibs(kernelbase_ros msvcrt advapi32 advapi32_vista kernel32 kernel32_v
 add_dependencies(kernelbase_ros psdk errcodes)
 add_cd_file(TARGET kernelbase_ros DESTINATION reactos/system32 FOR all)
 
-# Fake import library, so consumers can link against it without needing to know about the actual implementation in kernelbase_ros.dll
-add_library(libkernelbase INTERFACE)
-target_link_libraries(libkernelbase INTERFACE libkernelbase_ros)
+add_library(kernelbase MODULE ${SOURCE})
+set_module_type(kernelbase win32dll ENTRYPOINT DllMain 12)
+add_importlibs(kernelbase kernel32 ntdll)
+add_dependencies(kernelbase psdk)
+add_cd_file(TARGET kernelbase DESTINATION reactos/system32 FOR all)
