@@ -16,6 +16,10 @@
 #define CHANNEL_FLAG_LAST 0x00000002
 #define CHANNEL_FLAG_SHOW_PROTOCOL 0x00000010
 
+#define CLIPRDR_CLIPBOARD_WINDOW_CLASS L"ReactOSTermSrvCliprdrWindow"
+#define CLIPRDR_FILEDESCRIPTORW_LENGTH 592
+#define CLIPRDR_FILEDESCRIPTORW_NAME_OFFSET 72
+
 static USHORT
 ReadLe16(
     _In_reads_bytes_(2) const UCHAR *Buffer)
@@ -329,20 +333,79 @@ IsSupportedWin32ClipboardFormat(
     _In_ ULONG FormatId)
 {
     return FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT ||
+           FormatId == TERMSRV_CLIPRDR_CF_TEXT ||
+           FormatId == TERMSRV_CLIPRDR_CF_HDROP ||
            FormatId == TERMSRV_CLIPRDR_CF_DIB ||
            FormatId == TERMSRV_CLIPRDR_CF_DIBV5 ||
            FormatId >= 0xc000;
+}
+
+static LRESULT CALLBACK
+CliprdrClipboardWndProc(
+    _In_ HWND Wnd,
+    _In_ UINT Msg,
+    _In_ WPARAM WParam,
+    _In_ LPARAM LParam)
+{
+    return DefWindowProcW(Wnd, Msg, WParam, LParam);
+}
+
+static TERMSRV_CLIPRDR_RESULT
+EnsureClipboardOwnerWindow(
+    _Inout_ TERMSRV_CLIPRDR_WIN32_BACKEND *Win32)
+{
+    WNDCLASSW Class;
+    HINSTANCE Instance;
+
+    if (Win32->ClipboardWindow != NULL &&
+        IsWindow(Win32->ClipboardWindow))
+    {
+        return TermSrvCliprdrSuccess;
+    }
+
+    Instance = GetModuleHandleW(NULL);
+
+    memset(&Class, 0, sizeof(Class));
+    Class.lpfnWndProc = CliprdrClipboardWndProc;
+    Class.hInstance = Instance;
+    Class.lpszClassName = CLIPRDR_CLIPBOARD_WINDOW_CLASS;
+
+    if (!RegisterClassW(&Class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    Win32->ClipboardWindow = CreateWindowExW(0,
+                                            CLIPRDR_CLIPBOARD_WINDOW_CLASS,
+                                            L"",
+                                            WS_POPUP,
+                                            0,
+                                            0,
+                                            0,
+                                            0,
+                                            NULL,
+                                            NULL,
+                                            Instance,
+                                            NULL);
+    if (Win32->ClipboardWindow == NULL)
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    return TermSrvCliprdrSuccess;
 }
 
 TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrWin32BackendAttach(
     _Inout_ TERMSRV_CLIPRDR_WIN32_BACKEND *Win32)
 {
+    DWORD DesktopAccess;
+
     if (Win32 == NULL)
         return TermSrvCliprdrInvalidHeader;
 
     if (Win32->Attached)
-        return TermSrvCliprdrSuccess;
+        return EnsureClipboardOwnerWindow(Win32);
 
     Win32->WindowStation = OpenWindowStationW(L"WinSta0",
                                               FALSE,
@@ -350,21 +413,35 @@ TermSrvCliprdrWin32BackendAttach(
                                               WINSTA_READATTRIBUTES |
                                               WINSTA_ENUMDESKTOPS);
     if (Win32->WindowStation == NULL)
+    {
         return TermSrvCliprdrInvalidHeader;
+    }
 
     if (!SetProcessWindowStation((HWINSTA)Win32->WindowStation))
+    {
         return TermSrvCliprdrInvalidHeader;
+    }
 
-    Win32->Desktop = OpenDesktopW(L"Default",
-                                  0,
-                                  FALSE,
-                                  DESKTOP_READOBJECTS |
-                                  DESKTOP_WRITEOBJECTS |
-                                  DESKTOP_CREATEWINDOW);
+    DesktopAccess = DESKTOP_READOBJECTS |
+                    DESKTOP_WRITEOBJECTS |
+                    DESKTOP_CREATEWINDOW;
+
+    Win32->Desktop = OpenInputDesktop(0, FALSE, DesktopAccess);
     if (Win32->Desktop == NULL)
-        return TermSrvCliprdrInvalidHeader;
+    {
+        Win32->Desktop = OpenDesktopW(L"Default", 0, FALSE, DesktopAccess);
+        if (Win32->Desktop == NULL)
+        {
+            return TermSrvCliprdrInvalidHeader;
+        }
+    }
 
     if (!SetThreadDesktop((HDESK)Win32->Desktop))
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (EnsureClipboardOwnerWindow(Win32) != TermSrvCliprdrSuccess)
         return TermSrvCliprdrInvalidHeader;
 
     Win32->Attached = TRUE;
@@ -403,12 +480,20 @@ Win32BackendSetData(
             return TermSrvCliprdrInvalidLength;
         AllocLength += sizeof(WCHAR);
     }
+    else if (FormatId == TERMSRV_CLIPRDR_CF_TEXT)
+    {
+        if (AllocLength > (SIZE_T)-1 - sizeof(CHAR))
+            return TermSrvCliprdrInvalidLength;
+        AllocLength += sizeof(CHAR);
+    }
     if (AllocLength == 0)
         AllocLength = 1;
 
     Global = GlobalAlloc(GMEM_MOVEABLE, AllocLength);
     if (Global == NULL)
+    {
         return TermSrvCliprdrBufferTooSmall;
+    }
 
     Target = (UCHAR *)GlobalLock(Global);
     if (Target == NULL)
@@ -421,9 +506,11 @@ Win32BackendSetData(
         memcpy(Target, Data, DataLength);
     if (FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT)
         memset(Target + DataLength, 0, sizeof(WCHAR));
+    else if (FormatId == TERMSRV_CLIPRDR_CF_TEXT)
+        memset(Target + DataLength, 0, sizeof(CHAR));
     GlobalUnlock(Global);
 
-    if (!OpenClipboard(NULL))
+    if (!OpenClipboard(Win32->ClipboardWindow))
     {
         GlobalFree(Global);
         return TermSrvCliprdrInvalidHeader;
@@ -475,8 +562,10 @@ Win32BackendGetData(
     if (!IsClipboardFormatAvailable((UINT)FormatId))
         return TermSrvCliprdrFormatNotAvailable;
 
-    if (!OpenClipboard(NULL))
+    if (!OpenClipboard(Win32->ClipboardWindow))
+    {
         return TermSrvCliprdrInvalidHeader;
+    }
 
     Data = GetClipboardData((UINT)FormatId);
     if (Data == NULL)
@@ -501,6 +590,17 @@ Win32BackendGetData(
         while ((Chars + 1) * sizeof(WCHAR) <= Length && Text[Chars] != 0)
             Chars++;
         Length = (Chars + 1) * sizeof(WCHAR);
+    }
+    else if (FormatId == TERMSRV_CLIPRDR_CF_TEXT)
+    {
+        const CHAR *Text = (const CHAR *)Source;
+        SIZE_T Chars = 0;
+
+        while (Chars < Length && Text[Chars] != 0)
+            Chars++;
+        if (Chars < Length)
+            Chars++;
+        Length = Chars;
     }
 
     *RequiredLength = Length;
@@ -539,8 +639,10 @@ Win32BackendClear(
     if (TermSrvCliprdrWin32BackendAttach(Win32) != TermSrvCliprdrSuccess)
         return TermSrvCliprdrInvalidHeader;
 
-    if (!OpenClipboard(NULL))
+    if (!OpenClipboard(Win32->ClipboardWindow))
+    {
         return TermSrvCliprdrInvalidHeader;
+    }
 
     EmptyClipboard();
     CloseClipboard();
@@ -756,7 +858,6 @@ TermSrvCliprdrWriteCapabilities(
     GeneralFlags = TERMSRV_CLIPRDR_CB_USE_LONG_FORMAT_NAMES |
                    TERMSRV_CLIPRDR_CB_STREAM_FILECLIP_ENABLED |
                    TERMSRV_CLIPRDR_CB_FILECLIP_NO_FILE_PATHS |
-                   TERMSRV_CLIPRDR_CB_CAN_LOCK_CLIPDATA |
                    TERMSRV_CLIPRDR_CB_HUGE_FILE_SUPPORT_ENABLED;
 
     WriteLe16(&Payload[0], 1);
@@ -802,6 +903,7 @@ IsSupportedPhaseOneFormat(
     _In_ ULONG FormatId)
 {
     return FormatId == TERMSRV_CLIPRDR_CF_UNICODETEXT ||
+           FormatId == TERMSRV_CLIPRDR_CF_TEXT ||
            FormatId == TERMSRV_CLIPRDR_CF_DIB ||
            FormatId == TERMSRV_CLIPRDR_CF_DIBV5;
 }
@@ -1032,6 +1134,309 @@ TermSrvCliprdrWriteFormatDataResponse(
 }
 
 TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFileList(
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength,
+    _Out_ TERMSRV_CLIPRDR_FILE_LIST *FileList)
+{
+    ULONG Count;
+    ULONG Index;
+
+    if (FileList == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    memset(FileList, 0, sizeof(*FileList));
+
+    if (Data == NULL || DataLength < sizeof(ULONG))
+        return TermSrvCliprdrInvalidHeader;
+
+    Count = ReadLe32(Data);
+    if (Count > TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS)
+        return TermSrvCliprdrBufferTooSmall;
+
+    if ((DataLength - sizeof(ULONG)) / CLIPRDR_FILEDESCRIPTORW_LENGTH < Count)
+        return TermSrvCliprdrInvalidLength;
+
+    FileList->Count = Count;
+    for (Index = 0; Index < Count; Index++)
+    {
+        const UCHAR *Descriptor;
+        TERMSRV_CLIPRDR_FILE_DESCRIPTOR *Output;
+        ULONG NameIndex;
+
+        Descriptor = Data + sizeof(ULONG) +
+                     (SIZE_T)Index * CLIPRDR_FILEDESCRIPTORW_LENGTH;
+        Output = &FileList->Descriptors[Index];
+
+        Output->Flags = ReadLe32(&Descriptor[0]);
+        Output->Attributes = ReadLe32(&Descriptor[36]);
+        Output->CreationTime.dwLowDateTime = ReadLe32(&Descriptor[40]);
+        Output->CreationTime.dwHighDateTime = ReadLe32(&Descriptor[44]);
+        Output->LastAccessTime.dwLowDateTime = ReadLe32(&Descriptor[48]);
+        Output->LastAccessTime.dwHighDateTime = ReadLe32(&Descriptor[52]);
+        Output->LastWriteTime.dwLowDateTime = ReadLe32(&Descriptor[56]);
+        Output->LastWriteTime.dwHighDateTime = ReadLe32(&Descriptor[60]);
+        Output->FileSizeHigh = ReadLe32(&Descriptor[64]);
+        Output->FileSizeLow = ReadLe32(&Descriptor[68]);
+
+        for (NameIndex = 0;
+             NameIndex < TERMSRV_CLIPRDR_MAX_FILE_NAME - 1;
+             NameIndex++)
+        {
+            WCHAR Ch;
+
+            Ch = (WCHAR)ReadLe16(&Descriptor[CLIPRDR_FILEDESCRIPTORW_NAME_OFFSET +
+                                             NameIndex * sizeof(WCHAR)]);
+            if (Ch == 0)
+                break;
+            Output->FileName[NameIndex] = Ch;
+        }
+    }
+
+    return TermSrvCliprdrSuccess;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFileList(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_CLIPRDR_FILE_LIST *FileList,
+    _Out_ SIZE_T *BytesWritten)
+{
+    SIZE_T Required;
+    ULONG Index;
+
+    if (BytesWritten == NULL)
+        return TermSrvCliprdrInvalidHeader;
+    *BytesWritten = 0;
+
+    if (Buffer == NULL || FileList == NULL ||
+        FileList->Count > TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS)
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    Required = sizeof(ULONG) +
+               (SIZE_T)FileList->Count * CLIPRDR_FILEDESCRIPTORW_LENGTH;
+    if (BufferLength < Required)
+        return TermSrvCliprdrBufferTooSmall;
+
+    memset(Buffer, 0, Required);
+    WriteLe32(Buffer, FileList->Count);
+
+    for (Index = 0; Index < FileList->Count; Index++)
+    {
+        UCHAR *Descriptor;
+        const TERMSRV_CLIPRDR_FILE_DESCRIPTOR *Input;
+        ULONG NameIndex;
+
+        Descriptor = Buffer + sizeof(ULONG) +
+                     (SIZE_T)Index * CLIPRDR_FILEDESCRIPTORW_LENGTH;
+        Input = &FileList->Descriptors[Index];
+
+        WriteLe32(&Descriptor[0], Input->Flags);
+        WriteLe32(&Descriptor[36], Input->Attributes);
+        WriteLe32(&Descriptor[40], Input->CreationTime.dwLowDateTime);
+        WriteLe32(&Descriptor[44], Input->CreationTime.dwHighDateTime);
+        WriteLe32(&Descriptor[48], Input->LastAccessTime.dwLowDateTime);
+        WriteLe32(&Descriptor[52], Input->LastAccessTime.dwHighDateTime);
+        WriteLe32(&Descriptor[56], Input->LastWriteTime.dwLowDateTime);
+        WriteLe32(&Descriptor[60], Input->LastWriteTime.dwHighDateTime);
+        WriteLe32(&Descriptor[64], Input->FileSizeHigh);
+        WriteLe32(&Descriptor[68], Input->FileSizeLow);
+
+        for (NameIndex = 0;
+             NameIndex < TERMSRV_CLIPRDR_MAX_FILE_NAME - 1 &&
+             Input->FileName[NameIndex] != 0;
+             NameIndex++)
+        {
+            WriteLe16(&Descriptor[CLIPRDR_FILEDESCRIPTORW_NAME_OFFSET +
+                                  NameIndex * sizeof(WCHAR)],
+                      Input->FileName[NameIndex]);
+        }
+    }
+
+    *BytesWritten = Required;
+    return TermSrvCliprdrSuccess;
+}
+
+static TERMSRV_CLIPRDR_RESULT
+ValidateFileContentsRequest(
+    _In_ const TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST *Request)
+{
+    if (Request == NULL)
+        return TermSrvCliprdrInvalidHeader;
+
+    if ((Request->Flags & (TERMSRV_CLIPRDR_FILECONTENTS_SIZE |
+                           TERMSRV_CLIPRDR_FILECONTENTS_RANGE)) ==
+        (TERMSRV_CLIPRDR_FILECONTENTS_SIZE |
+         TERMSRV_CLIPRDR_FILECONTENTS_RANGE))
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    if (Request->Flags & TERMSRV_CLIPRDR_FILECONTENTS_SIZE)
+    {
+        if (Request->Requested != sizeof(ULONGLONG) ||
+            Request->PositionLow != 0 ||
+            Request->PositionHigh != 0)
+        {
+            return TermSrvCliprdrInvalidLength;
+        }
+    }
+
+    if ((Request->Flags & (TERMSRV_CLIPRDR_FILECONTENTS_SIZE |
+                           TERMSRV_CLIPRDR_FILECONTENTS_RANGE)) == 0)
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    return TermSrvCliprdrSuccess;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFileContentsRequest(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST *Request,
+    _Out_ SIZE_T *BytesWritten)
+{
+    UCHAR Payload[28];
+    SIZE_T PayloadLength;
+    TERMSRV_CLIPRDR_RESULT Result;
+
+    if (BytesWritten == NULL)
+        return TermSrvCliprdrInvalidHeader;
+    *BytesWritten = 0;
+
+    Result = ValidateFileContentsRequest(Request);
+    if (Result != TermSrvCliprdrSuccess)
+        return Result;
+
+    PayloadLength = Request->HasClipDataId ? 28 : 24;
+    WriteLe32(&Payload[0], Request->StreamId);
+    WriteLe32(&Payload[4], Request->ListIndex);
+    WriteLe32(&Payload[8], Request->Flags);
+    WriteLe32(&Payload[12], Request->PositionLow);
+    WriteLe32(&Payload[16], Request->PositionHigh);
+    WriteLe32(&Payload[20], Request->Requested);
+    if (Request->HasClipDataId)
+        WriteLe32(&Payload[24], Request->ClipDataId);
+
+    return WritePdu(Buffer,
+                    BufferLength,
+                    TERMSRV_CLIPRDR_CB_FILECONTENTS_REQUEST,
+                    0,
+                    Payload,
+                    PayloadLength,
+                    BytesWritten);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFileContentsRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST *Request)
+{
+    TERMSRV_CLIPRDR_PDU Pdu;
+    TERMSRV_CLIPRDR_RESULT Result;
+
+    if (Request == NULL)
+        return TermSrvCliprdrInvalidHeader;
+    memset(Request, 0, sizeof(*Request));
+
+    Result = TermSrvCliprdrParsePdu(Buffer, BufferLength, &Pdu);
+    if (Result != TermSrvCliprdrSuccess)
+        return Result;
+
+    if (Pdu.MsgType != TERMSRV_CLIPRDR_CB_FILECONTENTS_REQUEST)
+        return TermSrvCliprdrUnsupportedPdu;
+
+    if (Pdu.DataLength != 24 && Pdu.DataLength != 28)
+        return TermSrvCliprdrInvalidLength;
+
+    Request->StreamId = ReadLe32(&Pdu.Payload[0]);
+    Request->ListIndex = ReadLe32(&Pdu.Payload[4]);
+    Request->Flags = ReadLe32(&Pdu.Payload[8]);
+    Request->PositionLow = ReadLe32(&Pdu.Payload[12]);
+    Request->PositionHigh = ReadLe32(&Pdu.Payload[16]);
+    Request->Requested = ReadLe32(&Pdu.Payload[20]);
+    if (Pdu.DataLength == 28)
+    {
+        Request->HasClipDataId = TRUE;
+        Request->ClipDataId = ReadLe32(&Pdu.Payload[24]);
+    }
+
+    return ValidateFileContentsRequest(Request);
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFileContentsResponse(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ USHORT ResponseFlags,
+    _In_ ULONG StreamId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    SIZE_T TotalLength;
+
+    if (BytesWritten == NULL)
+        return TermSrvCliprdrInvalidHeader;
+    *BytesWritten = 0;
+
+    if (!IsValidResponseFlags(ResponseFlags) ||
+        (DataLength != 0 && Data == NULL))
+    {
+        return TermSrvCliprdrInvalidHeader;
+    }
+
+    TotalLength = CLIPRDR_HEADER_LENGTH + sizeof(ULONG) + DataLength;
+    if (Buffer == NULL || BufferLength < TotalLength)
+        return TermSrvCliprdrBufferTooSmall;
+
+    WriteLe16(&Buffer[0], TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE);
+    WriteLe16(&Buffer[2], ResponseFlags);
+    WriteLe32(&Buffer[4], (ULONG)(sizeof(ULONG) + DataLength));
+    WriteLe32(&Buffer[CLIPRDR_HEADER_LENGTH], StreamId);
+    if (DataLength != 0)
+        memcpy(&Buffer[CLIPRDR_HEADER_LENGTH + sizeof(ULONG)], Data, DataLength);
+
+    *BytesWritten = TotalLength;
+    return TermSrvCliprdrSuccess;
+}
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFileContentsResponse(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_CLIPRDR_FILE_CONTENTS_RESPONSE *Response)
+{
+    TERMSRV_CLIPRDR_PDU Pdu;
+    TERMSRV_CLIPRDR_RESULT Result;
+
+    if (Response == NULL)
+        return TermSrvCliprdrInvalidHeader;
+    memset(Response, 0, sizeof(*Response));
+
+    Result = TermSrvCliprdrParsePdu(Buffer, BufferLength, &Pdu);
+    if (Result != TermSrvCliprdrSuccess)
+        return Result;
+
+    if (Pdu.MsgType != TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE)
+        return TermSrvCliprdrUnsupportedPdu;
+
+    if (Pdu.DataLength < sizeof(ULONG))
+        return TermSrvCliprdrInvalidLength;
+
+    Response->StreamId = ReadLe32(Pdu.Payload);
+    Response->Data = &Pdu.Payload[sizeof(ULONG)];
+    Response->DataLength = Pdu.DataLength - sizeof(ULONG);
+    return TermSrvCliprdrSuccess;
+}
+
+TERMSRV_CLIPRDR_RESULT
 TermSrvCliprdrHandlePdu(
     _In_reads_bytes_(InputLength) const UCHAR *Input,
     _In_ SIZE_T InputLength,
@@ -1125,18 +1530,7 @@ TermSrvCliprdrHandlePdu(
             return TermSrvCliprdrSuccess;
 
         case TERMSRV_CLIPRDR_CB_FILECONTENTS_REQUEST:
-            if (Pdu.DataLength < sizeof(ULONG))
-                return TermSrvCliprdrInvalidLength;
-            if (OutputLength < CLIPRDR_HEADER_LENGTH + sizeof(ULONG))
-                return TermSrvCliprdrBufferTooSmall;
-
-            WriteLe16(&Output[0], TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE);
-            WriteLe16(&Output[2], TERMSRV_CLIPRDR_CB_RESPONSE_FAIL);
-            WriteLe32(&Output[4], sizeof(ULONG));
-            WriteLe32(&Output[CLIPRDR_HEADER_LENGTH], ReadLe32(Pdu.Payload));
-            *BytesWritten = CLIPRDR_HEADER_LENGTH + sizeof(ULONG);
-            return TermSrvCliprdrFormatNotAvailable;
-
+        case TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE:
         case TERMSRV_CLIPRDR_CB_CLIP_CAPS:
         case TERMSRV_CLIPRDR_CB_LOCK_CLIPDATA:
         case TERMSRV_CLIPRDR_CB_UNLOCK_CLIPDATA:

@@ -456,10 +456,11 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
         if (dequeue_pointer == &(HcResourcesVA->EventRing.firstSeg.XhciTrb[256]))
         {
             DPRINT("XHCI_ProcessEvent: Wrapping event ring, flipping cycle state from %d to %d\n",
-                    HcResourcesVA->EventRing.ConsumerCycleState, ~(HcResourcesVA->EventRing.ConsumerCycleState));
+                    HcResourcesVA->EventRing.ConsumerCycleState,
+                    HcResourcesVA->EventRing.ConsumerCycleState ? 0 : 1);
                     
-            HcResourcesVA->EventRing.ConsumerCycleState = ~(HcResourcesVA->EventRing.ConsumerCycleState);
-            HcResourcesVA->EventRing.ProducerCycleState = ~(HcResourcesVA->EventRing.ProducerCycleState); 
+            HcResourcesVA->EventRing.ConsumerCycleState = HcResourcesVA->EventRing.ConsumerCycleState ? 0 : 1;
+            HcResourcesVA->EventRing.ProducerCycleState = HcResourcesVA->EventRing.ProducerCycleState ? 0 : 1;
             dequeue_pointer = &(HcResourcesVA->EventRing.firstSeg.XhciTrb[0]);
         }
         
@@ -469,22 +470,19 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     
     HcResourcesVA->EventRing.dequeue_pointer = dequeue_pointer;
     
-    // Update the Event Ring Dequeue Pointer register to tell hardware where we are
-    // Only update if we actually processed any events to avoid redundant writes
-    if (EventsProcessedInThisCall > 0)
-    {
-        erstdp.AsULONGLONG = HcResourcesPA.QuadPart + ((ULONG_PTR)dequeue_pointer - (ULONG_PTR)HcResourcesVA);
-        ASSERT(erstdp.AsULONGLONG >= HcResourcesPA.QuadPart && erstdp.AsULONGLONG < HcResourcesPA.QuadPart + sizeof(XHCI_HC_RESOURCES)) ;
-        erstdp.DequeueERSTIndex = 0;
-        
-        DPRINT("XHCI_ProcessEvent: Updating event ring dequeue register to 0x%I64x (dequeue_ptr=%p) after processing %d events\n", 
-                erstdp.AsULONGLONG, dequeue_pointer, EventsProcessedInThisCall);
-        XHCI_Write64bitReg(RunTimeRegisterBase + XHCI_ERSTDP, erstdp.AsULONGLONG);
-    }
-    else
-    {
-        DPRINT("XHCI_ProcessEvent: No events processed, skipping dequeue pointer register update\n");
-    }
+    /*
+     * Always update ERDP, even when no TRB was consumed.  The EHB bit is
+     * write-1-to-clear; if an interrupt arrives while the next event TRB is
+     * not yet visible, skipping this write leaves the interrupter busy and
+     * QEMU can spin with IMAN.IP asserted without delivering the pending
+     * transfer completion.
+     */
+    erstdp.AsULONGLONG = HcResourcesPA.QuadPart + ((ULONG_PTR)dequeue_pointer - (ULONG_PTR)HcResourcesVA);
+    ASSERT(erstdp.AsULONGLONG >= HcResourcesPA.QuadPart && erstdp.AsULONGLONG < HcResourcesPA.QuadPart + sizeof(XHCI_HC_RESOURCES)) ;
+    erstdp.DequeueERSTIndex = 0;
+    erstdp.EventHandlerBusy = 1;
+
+    XHCI_Write64bitReg(RunTimeRegisterBase + XHCI_ERSTDP, erstdp.AsULONGLONG);
     
     return MP_STATUS_SUCCESS;
 }
@@ -1157,12 +1155,15 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     if (Iman.InterruptPending == 1)
     {
         ValidCount++;
-        if ((ValidCount % 10) == 1)
-        {
-            DPRINT1("XHCI_InterruptService: Valid IMAN interrupt #%d detected (will be cleared by DPC)\n", ValidCount);
-        }
-        // Don't clear the interrupt here - let the DPC clear it after processing events
-        // This ensures events aren't lost between ISR and DPC execution
+
+        /*
+         * Acknowledge the interrupter in the ISR.  The event ring entries are
+         * persistent until the DPC advances ERDP, but leaving IMAN.IP asserted
+         * here causes an interrupt storm that can starve the DPC before the
+         * transfer completion is drained.
+         */
+        Iman.InterruptPending = 1;
+        WRITE_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN, Iman.AsULONG);
         return TRUE;
     }
     
@@ -1222,10 +1223,13 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
 {
     PXHCI_EXTENSION XhciExtension;
     PULONG RunTimeRegisterBase;
+    PULONG OperationalRegs;
     XHCI_INTERRUPTER_MANAGEMENT Iman;
+    XHCI_USB_STATUS UsbStatus;
     
     XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     RunTimeRegisterBase = XhciExtension->RunTimeRegisterBase;
+    OperationalRegs = XhciExtension->OperationalRegs;
     
     DPRINT1("XHCI_InterruptDpc: Called with IsDoEnableInterrupts=%d\n", IsDoEnableInterrupts);
     
@@ -1248,6 +1252,16 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
         Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
         DPRINT1("XHCI_InterruptDpc: After clearing, IMAN=0x%08x, InterruptPending=%d\n", 
                 Iman.AsULONG, Iman.InterruptPending);
+    }
+
+    UsbStatus.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
+    if (UsbStatus.EventInterrupt)
+    {
+        XHCI_USB_STATUS UsbStatusClear;
+
+        UsbStatusClear.AsULONG = 0;
+        UsbStatusClear.EventInterrupt = 1;
+        WRITE_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS, UsbStatusClear.AsULONG);
     }
     
     DPRINT1("XHCI_InterruptDpc: Completed\n");
@@ -1385,9 +1399,8 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
                       IN PVOID xhciEndpoint,
                       IN ULONG EndpointState)
 {
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
-    
-    UNREFERENCED_PARAMETER(xhciExtension);
     
     DPRINT1("XHCI_SetEndpointState: function initiated, setting state to %d\n", EndpointState);
     
@@ -1416,7 +1429,22 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
             
         case 4: // USBPORT_ENDPOINT_REMOVE
             DPRINT1("XHCI_SetEndpointState: Removing endpoint\n");
-            // TODO: Issue Stop Endpoint command if needed
+            if ((XhciEndpoint->EndpointProperties.EndpointAddress & 0x0F) == 0)
+            {
+        }
+        else
+        {
+            ULONG SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
+            ULONG EndpointIndex = XhciEndpoint->ContextIndex;
+            MPSTATUS DropStatus;
+
+            DropStatus = XHCI_DropEndpoint(XhciExtension, SlotId, EndpointIndex);
+            if (DropStatus != MP_STATUS_SUCCESS)
+            {
+                    DPRINT1("XHCI_SetEndpointState: XHCI_DropEndpoint failed for slot %d DCI %d with status 0x%x\n",
+                            SlotId, EndpointIndex, DropStatus);
+                }
+            }
             break;
             
         case 5: // USBPORT_ENDPOINT_CLOSED
