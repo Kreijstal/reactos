@@ -239,11 +239,20 @@ ClientThreadSetupHelper(BOOL IsCallback)
     if (IsFirstThread)
         GdiProcessSetup();
 
-    /* Check for already initialized thread, and bail out if so */
+    /*
+     * Bail out if the thread is already initialized.  ClientThreadSetupHelper
+     * has multiple potential callers per thread (Init() from DllMain,
+     * User32CallClientThreadSetupFromKernel, and the exported
+     * ClientThreadSetup), so a redundant invocation must not be reported as a
+     * failure -- the thread is already in the desired state and the heavy
+     * lifting was performed by the first caller.  Returning FALSE here would
+     * propagate as STATUS_DLL_INIT_FAILED through DllMain and abort the
+     * process load.
+     */
     if (ClientInfo->CI_flags & CI_INITTHREAD)
     {
-        ERR("ClientThreadSetup: Thread already initialized.\n");
-        return FALSE;
+        TRACE("ClientThreadSetup: Thread already initialized.\n");
+        return TRUE;
     }
 
     /*
