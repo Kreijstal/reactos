@@ -6,6 +6,8 @@
 
 #include <winsock2.h>
 #include <windows.h>
+#include <shlobj.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <debug.h>
 
@@ -21,6 +23,7 @@
 #define TERMSRV_LISTEN_BACKLOG 4
 #define TERMSRV_SELECT_TIMEOUT_MS 2000
 #define TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID 1001
+#define TERMSRV_MCS_WIRE_USER_CHANNEL_ID 2002
 #define TERMSRV_RDP_SCAFFOLD_SHARE_ID 0x000103e9
 #define TERMSRV_MCS_SCAFFOLD_FIRST_STATIC_CHANNEL_ID 1004
 #define TERMSRV_CLIPRDR_SCAFFOLD_CHANNEL_ID 1007
@@ -55,6 +58,11 @@
 #define TERMSRV_CHANNEL_FLAG_FIRST 0x00000001
 #define TERMSRV_CHANNEL_FLAG_LAST 0x00000002
 #define TERMSRV_CHANNEL_FLAG_SHOW_PROTOCOL 0x00000010
+#define TERMSRV_CLIPRDR_HEADER_LENGTH 8
+#define TERMSRV_ACTIVE_BUFFER_LENGTH 16384
+#define TERMSRV_CLIPRDR_FILE_CHUNK 4096
+#define TERMSRV_CLIPRDR_TEMP_ROOT L"TermSrvClip"
+#define TERMSRV_CLIPRDR_MAX_WIRE_FILE_DESCRIPTORS 20
 
 static const UCHAR TermSrvMcsConnectResponsePayload[] =
 {
@@ -94,6 +102,10 @@ static const UCHAR TermSrvMcsConnectResponsePayload[] =
     0x00, 0x00, 0x00, 0x00
 };
 
+static VOID
+TermSrvLogFailure(
+    _In_z_ const CHAR *Message);
+
 typedef enum _TERMSRV_PACKET_PLACEHOLDER
 {
     TermSrvPacketUnknown,
@@ -118,24 +130,42 @@ typedef struct _TERMSRV_CLIENT_CONTEXT
     ULONG CliprdrPendingLocalFormats[TERMSRV_CLIPRDR_MAX_FORMATS];
     ULONG CliprdrPendingFormatCount;
     ULONG CliprdrPendingFormatIndex;
+    TERMSRV_CLIPRDR_FILE_LIST CliprdrIncomingFiles;
+    WCHAR CliprdrIncomingPaths[TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS][MAX_PATH];
+    HANDLE CliprdrIncomingHandle;
+    ULONG CliprdrIncomingIndex;
+    ULONGLONG CliprdrIncomingOffset;
+    ULONG CliprdrIncomingStreamId;
+    BOOL CliprdrIncomingActive;
+    TERMSRV_CLIPRDR_FILE_LIST CliprdrOutgoingFiles;
+    WCHAR CliprdrOutgoingPaths[TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS][MAX_PATH];
+    ULONG CliprdrOutgoingCount;
 } TERMSRV_CLIENT_CONTEXT;
 
 static BOOL
 TermSrvListenerEnabled(VOID)
 {
     WCHAR Value[2];
+    DWORD Length;
 
-    return (GetEnvironmentVariableW(TERMSRV_LISTEN_ENV_NAME, Value, ARRAYSIZE(Value)) == 1 &&
-            Value[0] == L'1');
+    Length = GetEnvironmentVariableW(TERMSRV_LISTEN_ENV_NAME, Value, ARRAYSIZE(Value));
+    if (Length == 1)
+        return Value[0] != L'0';
+
+    return TRUE;
 }
 
 static BOOL
 TermSrvNoAuthEnabled(VOID)
 {
     WCHAR Value[2];
+    DWORD Length;
 
-    return (GetEnvironmentVariableW(TERMSRV_NOAUTH_ENV_NAME, Value, ARRAYSIZE(Value)) == 1 &&
-            Value[0] == L'1');
+    Length = GetEnvironmentVariableW(TERMSRV_NOAUTH_ENV_NAME, Value, ARRAYSIZE(Value));
+    if (Length == 1)
+        return Value[0] != L'0';
+
+    return TRUE;
 }
 
 static USHORT
@@ -169,6 +199,58 @@ TermSrvIdentifyPacketPlaceholder(
 }
 
 static BOOL
+TermSrvTryGetActivePacketLength(
+    _In_reads_bytes_(Available) const UCHAR *Buffer,
+    _In_ INT Available,
+    _Out_ INT *PacketLength)
+{
+    INT Length;
+
+    *PacketLength = 0;
+    if (Available <= 0)
+        return FALSE;
+
+    if (Available >= 4 && Buffer[0] == 3)
+    {
+        Length = ((INT)Buffer[2] << 8) | Buffer[3];
+        if (Length < 7)
+        {
+            TermSrvLogFailure("active TPKT packet has invalid length");
+            return FALSE;
+        }
+
+        *PacketLength = Length;
+        return TRUE;
+    }
+
+    if (Available >= 2 && (Buffer[0] & 0x03) == 0)
+    {
+        if (Buffer[1] & 0x80)
+        {
+            if (Available < 3)
+                return TRUE;
+
+            Length = ((INT)(Buffer[1] & 0x7f) << 8) | Buffer[2];
+        }
+        else
+        {
+            Length = Buffer[1];
+        }
+
+        if (Length < 2)
+        {
+            TermSrvLogFailure("active fast-path packet has invalid length");
+            return FALSE;
+        }
+
+        *PacketLength = Length;
+        return TRUE;
+    }
+
+    return TRUE;
+}
+
+static BOOL
 TermSrvStopRequested(
     _In_ HANDLE StopEvent)
 {
@@ -195,6 +277,22 @@ TermSrvLogSocketFailure(
               "%s failed: WSA error %u",
               Operation,
               (unsigned int)WSAGetLastError());
+    Message[sizeof(Message) - 1] = '\0';
+    TermSrvLogFailure(Message);
+}
+
+static VOID
+TermSrvLogWin32Failure(
+    _In_z_ const CHAR *Operation,
+    _In_ DWORD Error)
+{
+    CHAR Message[160];
+
+    _snprintf(Message,
+              sizeof(Message),
+              "%s failed: Win32 error %lu",
+              Operation,
+              Error);
     Message[sizeof(Message) - 1] = '\0';
     TermSrvLogFailure(Message);
 }
@@ -350,19 +448,34 @@ TermSrvSendPacket(
     _In_reads_bytes_(Length) const UCHAR *Buffer,
     _In_ SIZE_T Length)
 {
-    INT Sent;
+    SIZE_T TotalSent = 0;
 
-    Sent = send(Client, (const char *)Buffer, (INT)Length, 0);
-    if (Sent == SOCKET_ERROR)
+    while (TotalSent < Length)
     {
-        TermSrvLogSocketFailure("send");
-        return FALSE;
-    }
+        INT Sent;
+        INT Remaining;
 
-    if ((SIZE_T)Sent != Length)
-    {
-        TermSrvLogFailure("send returned a short write");
-        return FALSE;
+        Remaining = (INT)min(Length - TotalSent, (SIZE_T)INT_MAX);
+        Sent = send(Client, (const char *)&Buffer[TotalSent], Remaining, 0);
+        if (Sent == SOCKET_ERROR)
+        {
+            if (WSAGetLastError() == WSAEWOULDBLOCK)
+            {
+                Sleep(1);
+                continue;
+            }
+
+            TermSrvLogSocketFailure("send");
+            return FALSE;
+        }
+
+        if (Sent == 0)
+        {
+            TermSrvLogFailure("send returned zero bytes");
+            return FALSE;
+        }
+
+        TotalSent += (SIZE_T)Sent;
     }
 
     return TRUE;
@@ -577,6 +690,34 @@ TermSrvTryAssignCliprdrFromStaticChannelList(
     return FALSE;
 }
 
+static SIZE_T
+TermSrvBuildMcsConnectResponsePayload(
+    _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_opt_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList)
+{
+    SIZE_T PayloadLength;
+    USHORT ChannelCount;
+
+    PayloadLength = sizeof(TermSrvMcsConnectResponsePayload);
+    if (Buffer == NULL || BufferLength < PayloadLength)
+        return 0;
+
+    CopyMemory(Buffer, TermSrvMcsConnectResponsePayload, PayloadLength);
+
+    ChannelCount = 4;
+    if (ChannelList != NULL && ChannelList->Count < ChannelCount)
+        ChannelCount = (USHORT)ChannelList->Count;
+
+    /*
+     * Patch SC_NET.channelCount in the fixed GCC response. FreeRDP rejects
+     * servers that advertise more static channels than the client requested.
+     */
+    Buffer[89] = (UCHAR)ChannelCount;
+    Buffer[90] = (UCHAR)(ChannelCount >> 8);
+    return PayloadLength;
+}
+
 static ULONG
 TermSrvReadLe32(
     _In_reads_bytes_(4) const UCHAR *Buffer)
@@ -740,6 +881,764 @@ TermSrvSendCliprdrPdu(
     return TermSrvSendPacket(Client, WrappedReply, WrappedBytesWritten);
 }
 
+static ULONGLONG
+TermSrvFileSizeFromDescriptor(
+    _In_ const TERMSRV_CLIPRDR_FILE_DESCRIPTOR *Descriptor)
+{
+    return ((ULONGLONG)Descriptor->FileSizeHigh << 32) |
+           Descriptor->FileSizeLow;
+}
+
+static VOID
+TermSrvWriteLe64(
+    _Out_writes_bytes_(8) UCHAR *Buffer,
+    _In_ ULONGLONG Value)
+{
+    Buffer[0] = (UCHAR)Value;
+    Buffer[1] = (UCHAR)(Value >> 8);
+    Buffer[2] = (UCHAR)(Value >> 16);
+    Buffer[3] = (UCHAR)(Value >> 24);
+    Buffer[4] = (UCHAR)(Value >> 32);
+    Buffer[5] = (UCHAR)(Value >> 40);
+    Buffer[6] = (UCHAR)(Value >> 48);
+    Buffer[7] = (UCHAR)(Value >> 56);
+}
+
+static BOOL
+TermSrvIsSafeRelativeFileName(
+    _In_z_ const WCHAR *Name)
+{
+    const WCHAR *Cursor;
+
+    if (Name == NULL || Name[0] == 0)
+        return FALSE;
+
+    if (Name[0] == L'\\' || Name[0] == L'/' ||
+        (Name[0] != 0 && Name[1] == L':'))
+    {
+        return FALSE;
+    }
+
+    Cursor = Name;
+    while (*Cursor != 0)
+    {
+        if ((Cursor[0] == L'.' && Cursor[1] == L'.' &&
+             (Cursor[2] == 0 || Cursor[2] == L'\\' || Cursor[2] == L'/')) ||
+            ((Cursor == Name || Cursor[-1] == L'\\' || Cursor[-1] == L'/') &&
+             Cursor[0] == L'.' && Cursor[1] == L'.' &&
+             (Cursor[2] == 0 || Cursor[2] == L'\\' || Cursor[2] == L'/')))
+        {
+            return FALSE;
+        }
+
+        if (*Cursor == L'/')
+            return FALSE;
+        Cursor++;
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvDirectoryExists(
+    _In_z_ const WCHAR *Path)
+{
+    DWORD Attributes;
+
+    Attributes = GetFileAttributesW(Path);
+    return Attributes != INVALID_FILE_ATTRIBUTES &&
+           (Attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static BOOL
+TermSrvEnsureDirectoryTree(
+    _In_z_ const WCHAR *Path)
+{
+    WCHAR Temp[MAX_PATH];
+    SIZE_T Index;
+
+    if (Path == NULL || lstrlenW(Path) >= MAX_PATH)
+        return FALSE;
+
+    lstrcpyW(Temp, Path);
+    for (Index = 0; Temp[Index] != 0; Index++)
+    {
+        if (Temp[Index] == L'\\' && Index > 2)
+        {
+            DWORD Error;
+
+            Temp[Index] = 0;
+            if (!CreateDirectoryW(Temp, NULL))
+            {
+                Error = GetLastError();
+                if (Error != ERROR_ALREADY_EXISTS &&
+                    !TermSrvDirectoryExists(Temp))
+                {
+                    TermSrvLogWin32Failure("cliprdr incoming directory create",
+                                           Error);
+                    Temp[Index] = L'\\';
+                    return FALSE;
+                }
+            }
+            Temp[Index] = L'\\';
+        }
+    }
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvCreateIncomingRoot(
+    _In_z_ const CHAR *Description,
+    _In_z_ const WCHAR *Root)
+{
+    DWORD Error;
+
+    if (!TermSrvEnsureDirectoryTree(Root))
+        return FALSE;
+
+    if (CreateDirectoryW(Root, NULL))
+        return TRUE;
+
+    Error = GetLastError();
+    if (Error == ERROR_ALREADY_EXISTS || TermSrvDirectoryExists(Root))
+        return TRUE;
+
+    TermSrvLogWin32Failure(Description, Error);
+    return FALSE;
+}
+
+static BOOL
+TermSrvBuildIncomingTempRoot(
+    _Out_writes_(MAX_PATH) WCHAR *Root)
+{
+    WCHAR TempPath[MAX_PATH];
+    DWORD Length;
+
+    Length = GetTempPathW(ARRAYSIZE(TempPath), TempPath);
+    if (Length == 0 || Length >= ARRAYSIZE(TempPath))
+    {
+        TermSrvLogWin32Failure("cliprdr GetTempPath", GetLastError());
+        return FALSE;
+    }
+
+    _snwprintf(Root,
+               MAX_PATH,
+               L"%s%s\%lu",
+               TempPath,
+               TERMSRV_CLIPRDR_TEMP_ROOT,
+               GetTickCount());
+    Root[MAX_PATH - 1] = 0;
+
+    if (!TermSrvCreateIncomingRoot("cliprdr temp root create", Root))
+        return FALSE;
+
+    return TRUE;
+}
+
+static BOOL
+TermSrvBuildIncomingPath(
+    _In_z_ const WCHAR *Root,
+    _In_z_ const WCHAR *RelativeName,
+    _Out_writes_(MAX_PATH) WCHAR *Path)
+{
+    if (!TermSrvIsSafeRelativeFileName(RelativeName))
+        return FALSE;
+
+    if (_snwprintf(Path, MAX_PATH, L"%s\\%s", Root, RelativeName) < 0)
+        return FALSE;
+    Path[MAX_PATH - 1] = 0;
+
+    return lstrlenW(Path) < MAX_PATH;
+}
+
+static BOOL
+TermSrvPublishHdrop(
+    _In_reads_(Count) WCHAR Paths[][MAX_PATH],
+    _In_ ULONG Count,
+    _In_ TERMSRV_CLIPRDR_BACKEND *Backend)
+{
+    SIZE_T Chars;
+    ULONG Index;
+    SIZE_T Bytes;
+    HGLOBAL Global;
+    DROPFILES *Drop;
+    WCHAR *Target;
+
+    if (Count == 0)
+        return FALSE;
+
+    Chars = 1;
+    for (Index = 0; Index < Count; Index++)
+        Chars += (SIZE_T)lstrlenW(Paths[Index]) + 1;
+
+    Bytes = sizeof(DROPFILES) + Chars * sizeof(WCHAR);
+    Global = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, Bytes);
+    if (Global == NULL)
+        return FALSE;
+
+    Drop = (DROPFILES *)GlobalLock(Global);
+    if (Drop == NULL)
+    {
+        GlobalFree(Global);
+        return FALSE;
+    }
+
+    Drop->pFiles = sizeof(DROPFILES);
+    Drop->fWide = TRUE;
+    Target = (WCHAR *)((UCHAR *)Drop + sizeof(DROPFILES));
+    for (Index = 0; Index < Count; Index++)
+    {
+        SIZE_T Length = (SIZE_T)lstrlenW(Paths[Index]);
+
+        CopyMemory(Target, Paths[Index], Length * sizeof(WCHAR));
+        Target += Length + 1;
+    }
+    *Target = 0;
+    if (TermSrvCliprdrBackendSetData(Backend,
+                                     TERMSRV_CLIPRDR_CF_HDROP,
+                                     (const UCHAR *)Drop,
+                                     Bytes) != TermSrvCliprdrSuccess)
+    {
+        GlobalUnlock(Global);
+        GlobalFree(Global);
+        return FALSE;
+    }
+
+    GlobalUnlock(Global);
+    GlobalFree(Global);
+    return TRUE;
+}
+
+static BOOL
+TermSrvRequestClientFileRange(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel)
+{
+    TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST Request;
+    UCHAR Pdu[64];
+    SIZE_T BytesWritten;
+    ULONGLONG Size;
+    ULONG Chunk;
+
+    while (Context->CliprdrIncomingIndex < Context->CliprdrIncomingFiles.Count)
+    {
+        TERMSRV_CLIPRDR_FILE_DESCRIPTOR *Descriptor;
+        WCHAR *Path;
+
+        Descriptor = &Context->CliprdrIncomingFiles.Descriptors[Context->CliprdrIncomingIndex];
+        Path = Context->CliprdrIncomingPaths[Context->CliprdrIncomingIndex];
+
+        if (Descriptor->Attributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            TermSrvEnsureDirectoryTree(Path);
+            CreateDirectoryW(Path, NULL);
+            Context->CliprdrIncomingIndex++;
+            Context->CliprdrIncomingOffset = 0;
+            continue;
+        }
+
+        Size = TermSrvFileSizeFromDescriptor(Descriptor);
+        if (Size == 0)
+        {
+            HANDLE EmptyFile;
+
+            if (!TermSrvEnsureDirectoryTree(Path))
+                return FALSE;
+
+            EmptyFile = CreateFileW(Path,
+                                    GENERIC_WRITE,
+                                    0,
+                                    NULL,
+                                    CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL,
+                                    NULL);
+            if (EmptyFile == INVALID_HANDLE_VALUE)
+                return FALSE;
+            CloseHandle(EmptyFile);
+            Context->CliprdrIncomingIndex++;
+            Context->CliprdrIncomingOffset = 0;
+            continue;
+        }
+
+        if (Context->CliprdrIncomingOffset >= Size)
+        {
+            if (Context->CliprdrIncomingHandle != NULL &&
+                Context->CliprdrIncomingHandle != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(Context->CliprdrIncomingHandle);
+                Context->CliprdrIncomingHandle = INVALID_HANDLE_VALUE;
+            }
+            Context->CliprdrIncomingIndex++;
+            Context->CliprdrIncomingOffset = 0;
+            continue;
+        }
+
+        if (Context->CliprdrIncomingHandle == NULL ||
+            Context->CliprdrIncomingHandle == INVALID_HANDLE_VALUE)
+        {
+            if (!TermSrvEnsureDirectoryTree(Path))
+                return FALSE;
+
+            Context->CliprdrIncomingHandle = CreateFileW(Path,
+                                                         GENERIC_WRITE,
+                                                         0,
+                                                         NULL,
+                                                         CREATE_ALWAYS,
+                                                         FILE_ATTRIBUTE_NORMAL,
+                                                         NULL);
+            if (Context->CliprdrIncomingHandle == INVALID_HANDLE_VALUE)
+            {
+                TermSrvLogFailure("cliprdr incoming file create failed");
+                return FALSE;
+            }
+        }
+
+        Chunk = (ULONG)min(Size - Context->CliprdrIncomingOffset,
+                           (ULONGLONG)TERMSRV_CLIPRDR_FILE_CHUNK);
+        ZeroMemory(&Request, sizeof(Request));
+        Request.StreamId = ++Context->CliprdrIncomingStreamId;
+        Request.ListIndex = Context->CliprdrIncomingIndex;
+        Request.Flags = TERMSRV_CLIPRDR_FILECONTENTS_RANGE;
+        Request.PositionLow = (ULONG)Context->CliprdrIncomingOffset;
+        Request.PositionHigh = (ULONG)(Context->CliprdrIncomingOffset >> 32);
+        Request.Requested = Chunk;
+
+        if (TermSrvCliprdrWriteFileContentsRequest(Pdu,
+                                                   sizeof(Pdu),
+                                                   &Request,
+                                                   &BytesWritten) != TermSrvCliprdrSuccess)
+        {
+            return FALSE;
+        }
+
+        return TermSrvSendCliprdrPdu(Client, Channel, Pdu, BytesWritten);
+    }
+
+    Context->CliprdrIncomingActive = FALSE;
+    return TermSrvPublishHdrop(Context->CliprdrIncomingPaths,
+                               Context->CliprdrIncomingFiles.Count,
+                               &Context->CliprdrBackend);
+}
+
+static BOOL
+TermSrvStartIncomingFiles(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength)
+{
+    WCHAR Root[MAX_PATH];
+    ULONG Index;
+
+    if (TermSrvCliprdrParseFileList(Data,
+                                    DataLength,
+                                    &Context->CliprdrIncomingFiles) != TermSrvCliprdrSuccess)
+    {
+        TermSrvLogFailure("cliprdr FileGroupDescriptorW parse failed");
+        return FALSE;
+    }
+
+    if (Context->CliprdrIncomingFiles.Count == 0 ||
+        !TermSrvBuildIncomingTempRoot(Root))
+    {
+        if (Context->CliprdrIncomingFiles.Count == 0)
+            TermSrvLogFailure("cliprdr FileGroupDescriptorW contains no files");
+        else
+            TermSrvLogFailure("cliprdr incoming temp root creation failed");
+        return FALSE;
+    }
+
+    for (Index = 0; Index < Context->CliprdrIncomingFiles.Count; Index++)
+    {
+        if (!TermSrvBuildIncomingPath(Root,
+                                      Context->CliprdrIncomingFiles.Descriptors[Index].FileName,
+                                      Context->CliprdrIncomingPaths[Index]))
+        {
+            TermSrvLogFailure("cliprdr rejected unsafe incoming file path");
+            return FALSE;
+        }
+    }
+
+    if (Context->CliprdrIncomingHandle != NULL &&
+        Context->CliprdrIncomingHandle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(Context->CliprdrIncomingHandle);
+    }
+
+    Context->CliprdrIncomingHandle = INVALID_HANDLE_VALUE;
+    Context->CliprdrIncomingIndex = 0;
+    Context->CliprdrIncomingOffset = 0;
+    Context->CliprdrIncomingStreamId = 0;
+    Context->CliprdrIncomingActive = TRUE;
+
+    return TermSrvRequestClientFileRange(Context, Client, Channel);
+}
+
+static BOOL
+TermSrvHandleIncomingFileContentsResponse(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength)
+{
+    UCHAR PduBuffer[12288];
+    TERMSRV_CLIPRDR_FILE_CONTENTS_RESPONSE Response;
+    DWORD Written;
+
+    if (!Context->CliprdrIncomingActive)
+        return TRUE;
+
+    if (DataLength > sizeof(PduBuffer) - TERMSRV_CLIPRDR_HEADER_LENGTH)
+        return FALSE;
+
+    PduBuffer[0] = TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE;
+    PduBuffer[1] = 0;
+    PduBuffer[2] = TERMSRV_CLIPRDR_CB_RESPONSE_OK;
+    PduBuffer[3] = 0;
+    PduBuffer[4] = (UCHAR)DataLength;
+    PduBuffer[5] = (UCHAR)(DataLength >> 8);
+    PduBuffer[6] = (UCHAR)(DataLength >> 16);
+    PduBuffer[7] = (UCHAR)(DataLength >> 24);
+    CopyMemory(&PduBuffer[TERMSRV_CLIPRDR_HEADER_LENGTH], Data, DataLength);
+
+    if (TermSrvCliprdrParseFileContentsResponse(PduBuffer,
+                                                TERMSRV_CLIPRDR_HEADER_LENGTH + DataLength,
+                                                &Response) != TermSrvCliprdrSuccess)
+    {
+        return FALSE;
+    }
+
+    if (Response.StreamId != Context->CliprdrIncomingStreamId ||
+        Context->CliprdrIncomingHandle == INVALID_HANDLE_VALUE)
+    {
+        TermSrvLogFailure("cliprdr unexpected file contents stream id");
+        return FALSE;
+    }
+
+    if (Response.DataLength != 0 &&
+        !WriteFile(Context->CliprdrIncomingHandle,
+                   Response.Data,
+                   (DWORD)Response.DataLength,
+                   &Written,
+                   NULL))
+    {
+        TermSrvLogFailure("cliprdr incoming file write failed");
+        return FALSE;
+    }
+
+    Context->CliprdrIncomingOffset += Response.DataLength;
+    return TermSrvRequestClientFileRange(Context, Client, Channel);
+}
+
+static BOOL
+TermSrvReadHdropClipboard(
+    _Out_writes_(TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS) WCHAR Paths[][MAX_PATH],
+    _Out_ ULONG *Count)
+{
+    HDROP Drop;
+    UINT FileCount;
+    UINT Index;
+
+    if (Count == NULL)
+        return FALSE;
+    *Count = 0;
+
+    if (!IsClipboardFormatAvailable(CF_HDROP) || !OpenClipboard(NULL))
+        return FALSE;
+
+    Drop = (HDROP)GetClipboardData(CF_HDROP);
+    if (Drop == NULL)
+    {
+        CloseClipboard();
+        return FALSE;
+    }
+
+    FileCount = DragQueryFileW(Drop, 0xffffffff, NULL, 0);
+    if (FileCount > TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS)
+        FileCount = TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS;
+
+    for (Index = 0; Index < FileCount; Index++)
+    {
+        if (DragQueryFileW(Drop, Index, Paths[Index], MAX_PATH) != 0)
+            (*Count)++;
+    }
+
+    CloseClipboard();
+    return *Count != 0;
+}
+
+static BOOL
+TermSrvAddOutgoingPath(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_z_ const WCHAR *FullPath,
+    _In_z_ const WCHAR *RelativeName)
+{
+    WIN32_FILE_ATTRIBUTE_DATA Attr;
+    TERMSRV_CLIPRDR_FILE_DESCRIPTOR *Descriptor;
+
+    if (Context->CliprdrOutgoingCount >= TERMSRV_CLIPRDR_MAX_WIRE_FILE_DESCRIPTORS)
+        return FALSE;
+
+    if (!GetFileAttributesExW(FullPath, GetFileExInfoStandard, &Attr))
+        return FALSE;
+
+    lstrcpynW(Context->CliprdrOutgoingPaths[Context->CliprdrOutgoingCount],
+              FullPath,
+              MAX_PATH);
+
+    Descriptor = &Context->CliprdrOutgoingFiles.Descriptors[Context->CliprdrOutgoingCount];
+    ZeroMemory(Descriptor, sizeof(*Descriptor));
+    Descriptor->Flags = TERMSRV_CLIPRDR_FD_ATTRIBUTES |
+                        TERMSRV_CLIPRDR_FD_WRITESTIME |
+                        TERMSRV_CLIPRDR_FD_FILESIZE |
+                        TERMSRV_CLIPRDR_FD_PROGRESSUI |
+                        TERMSRV_CLIPRDR_FD_UNICODE;
+    Descriptor->Attributes = Attr.dwFileAttributes;
+    Descriptor->LastWriteTime = Attr.ftLastWriteTime;
+    Descriptor->FileSizeHigh = Attr.nFileSizeHigh;
+    Descriptor->FileSizeLow = Attr.nFileSizeLow;
+    lstrcpynW(Descriptor->FileName,
+              RelativeName,
+              ARRAYSIZE(Descriptor->FileName));
+
+    Context->CliprdrOutgoingCount++;
+    Context->CliprdrOutgoingFiles.Count = Context->CliprdrOutgoingCount;
+    return TRUE;
+}
+
+static BOOL
+TermSrvAddOutgoingPathRecursive(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_z_ const WCHAR *FullPath,
+    _In_z_ const WCHAR *RelativeName)
+{
+    WIN32_FILE_ATTRIBUTE_DATA Attr;
+    WCHAR Pattern[MAX_PATH];
+    WIN32_FIND_DATAW FindData;
+    HANDLE Find;
+
+    if (!TermSrvAddOutgoingPath(Context, FullPath, RelativeName))
+        return FALSE;
+
+    if (!GetFileAttributesExW(FullPath, GetFileExInfoStandard, &Attr) ||
+        !(Attr.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        return TRUE;
+    }
+
+    if (_snwprintf(Pattern, MAX_PATH, L"%s\\*", FullPath) < 0)
+        return FALSE;
+    Pattern[MAX_PATH - 1] = 0;
+
+    Find = FindFirstFileW(Pattern, &FindData);
+    if (Find == INVALID_HANDLE_VALUE)
+        return TRUE;
+
+    do
+    {
+        WCHAR ChildFull[MAX_PATH];
+        WCHAR ChildRelative[TERMSRV_CLIPRDR_MAX_FILE_NAME];
+
+        if (lstrcmpW(FindData.cFileName, L".") == 0 ||
+            lstrcmpW(FindData.cFileName, L"..") == 0)
+        {
+            continue;
+        }
+
+        if (_snwprintf(ChildFull,
+                       MAX_PATH,
+                       L"%s\\%s",
+                       FullPath,
+                       FindData.cFileName) < 0 ||
+            _snwprintf(ChildRelative,
+                       ARRAYSIZE(ChildRelative),
+                       L"%s\\%s",
+                       RelativeName,
+                       FindData.cFileName) < 0)
+        {
+            FindClose(Find);
+            return FALSE;
+        }
+        ChildFull[MAX_PATH - 1] = 0;
+        ChildRelative[ARRAYSIZE(ChildRelative) - 1] = 0;
+
+        if (!TermSrvAddOutgoingPathRecursive(Context, ChildFull, ChildRelative))
+        {
+            FindClose(Find);
+            return FALSE;
+        }
+    }
+    while (FindNextFileW(Find, &FindData));
+
+    FindClose(Find);
+    return TRUE;
+}
+
+static BOOL
+TermSrvBuildOutgoingFileList(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context)
+{
+    WCHAR Selected[TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS][MAX_PATH];
+    ULONG SelectedCount;
+    ULONG Index;
+
+    if (!TermSrvReadHdropClipboard(Selected, &SelectedCount))
+        return FALSE;
+
+    ZeroMemory(&Context->CliprdrOutgoingFiles, sizeof(Context->CliprdrOutgoingFiles));
+    ZeroMemory(Context->CliprdrOutgoingPaths, sizeof(Context->CliprdrOutgoingPaths));
+    Context->CliprdrOutgoingCount = 0;
+
+    for (Index = 0; Index < SelectedCount; Index++)
+    {
+        WCHAR *Leaf;
+
+        Leaf = wcsrchr(Selected[Index], L'\\');
+        Leaf = (Leaf != NULL) ? Leaf + 1 : Selected[Index];
+        if (!TermSrvAddOutgoingPathRecursive(Context, Selected[Index], Leaf))
+            return Context->CliprdrOutgoingCount != 0;
+    }
+
+    return Context->CliprdrOutgoingCount != 0;
+}
+
+static BOOL
+TermSrvSendOutgoingFileList(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel)
+{
+    UCHAR Payload[sizeof(ULONG) +
+                  TERMSRV_CLIPRDR_MAX_WIRE_FILE_DESCRIPTORS * 592];
+    UCHAR Pdu[sizeof(Payload) + TERMSRV_CLIPRDR_HEADER_LENGTH];
+    SIZE_T PayloadLength;
+    SIZE_T BytesWritten;
+
+    if (!TermSrvBuildOutgoingFileList(Context))
+        return FALSE;
+    if (Context->CliprdrOutgoingFiles.Count > TERMSRV_CLIPRDR_MAX_WIRE_FILE_DESCRIPTORS)
+        Context->CliprdrOutgoingFiles.Count = TERMSRV_CLIPRDR_MAX_WIRE_FILE_DESCRIPTORS;
+
+    if (TermSrvCliprdrWriteFileList(Payload,
+                                    sizeof(Payload),
+                                    &Context->CliprdrOutgoingFiles,
+                                    &PayloadLength) != TermSrvCliprdrSuccess)
+    {
+        return FALSE;
+    }
+
+    if (TermSrvCliprdrWriteFormatDataResponse(Pdu,
+                                              sizeof(Pdu),
+                                              TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                              Payload,
+                                              PayloadLength,
+                                              &BytesWritten) != TermSrvCliprdrSuccess)
+    {
+        return FALSE;
+    }
+
+    return TermSrvSendCliprdrPdu(Client, Channel, Pdu, BytesWritten);
+}
+
+static BOOL
+TermSrvSendOutgoingFileContents(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel,
+    _In_ const TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST *Request)
+{
+    UCHAR Data[TERMSRV_CLIPRDR_FILE_CHUNK];
+    UCHAR Pdu[TERMSRV_CLIPRDR_FILE_CHUNK + 16];
+    SIZE_T BytesWritten;
+    HANDLE File;
+    LARGE_INTEGER Position;
+    DWORD Read = 0;
+    BOOL Ok;
+    ULONGLONG Size;
+
+    if (Request->ListIndex >= Context->CliprdrOutgoingCount)
+    {
+        if (TermSrvCliprdrWriteFileContentsResponse(Pdu,
+                                                    sizeof(Pdu),
+                                                    TERMSRV_CLIPRDR_CB_RESPONSE_FAIL,
+                                                    Request->StreamId,
+                                                    NULL,
+                                                    0,
+                                                    &BytesWritten) != TermSrvCliprdrSuccess)
+            return FALSE;
+        return TermSrvSendCliprdrPdu(Client, Channel, Pdu, BytesWritten);
+    }
+
+    Size = TermSrvFileSizeFromDescriptor(
+        &Context->CliprdrOutgoingFiles.Descriptors[Request->ListIndex]);
+
+    if (Request->Flags & TERMSRV_CLIPRDR_FILECONTENTS_SIZE)
+    {
+        TermSrvWriteLe64(Data, Size);
+        if (TermSrvCliprdrWriteFileContentsResponse(Pdu,
+                                                    sizeof(Pdu),
+                                                    TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                                    Request->StreamId,
+                                                    Data,
+                                                    sizeof(ULONGLONG),
+                                                    &BytesWritten) != TermSrvCliprdrSuccess)
+        {
+            return FALSE;
+        }
+        return TermSrvSendCliprdrPdu(Client, Channel, Pdu, BytesWritten);
+    }
+
+    if (Request->Requested > TERMSRV_CLIPRDR_FILE_CHUNK ||
+        (Context->CliprdrOutgoingFiles.Descriptors[Request->ListIndex].Attributes &
+         FILE_ATTRIBUTE_DIRECTORY))
+    {
+        if (TermSrvCliprdrWriteFileContentsResponse(Pdu,
+                                                    sizeof(Pdu),
+                                                    TERMSRV_CLIPRDR_CB_RESPONSE_FAIL,
+                                                    Request->StreamId,
+                                                    NULL,
+                                                    0,
+                                                    &BytesWritten) != TermSrvCliprdrSuccess)
+            return FALSE;
+        return TermSrvSendCliprdrPdu(Client, Channel, Pdu, BytesWritten);
+    }
+
+    File = CreateFileW(Context->CliprdrOutgoingPaths[Request->ListIndex],
+                       GENERIC_READ,
+                       FILE_SHARE_READ,
+                       NULL,
+                       OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL,
+                       NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    Position.QuadPart = ((LONGLONG)Request->PositionHigh << 32) |
+                        Request->PositionLow;
+    Ok = SetFilePointerEx(File, Position, NULL, FILE_BEGIN) &&
+         ReadFile(File, Data, Request->Requested, &Read, NULL);
+    CloseHandle(File);
+    if (!Ok)
+        return FALSE;
+
+    if (TermSrvCliprdrWriteFileContentsResponse(Pdu,
+                                                sizeof(Pdu),
+                                                TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                                Request->StreamId,
+                                                Data,
+                                                Read,
+                                                &BytesWritten) != TermSrvCliprdrSuccess)
+    {
+        return FALSE;
+    }
+
+    return TermSrvSendCliprdrPdu(Client, Channel, Pdu, BytesWritten);
+}
+
 static ULONG
 TermSrvHashBytes(
     _In_reads_bytes_(Length) const UCHAR *Data,
@@ -775,6 +1674,7 @@ TermSrvWriteAvailableClipboardFormats(
     ULONG Ids[] =
     {
         TERMSRV_CLIPRDR_CF_UNICODETEXT,
+        TERMSRV_CLIPRDR_CF_TEXT,
         TERMSRV_CLIPRDR_CF_DIB,
         TERMSRV_CLIPRDR_CF_DIBV5
     };
@@ -805,6 +1705,48 @@ TermSrvWriteAvailableClipboardFormats(
 
         LocalHash ^= TermSrvHashBytes(Scratch, min(Required, sizeof(Scratch)));
         LocalLength += Required;
+    }
+
+    if (Count == 0)
+    {
+        if (TermSrvReadHdropClipboard(Context->CliprdrOutgoingPaths,
+                                      &Context->CliprdrOutgoingCount))
+        {
+            if (Context->CliprdrFormatFileGroupDescriptorW == 0)
+            {
+                Context->CliprdrFormatFileGroupDescriptorW =
+                    RegisterClipboardFormatW(L"FileGroupDescriptorW");
+            }
+            if (Count < RTL_NUMBER_OF(Formats))
+            {
+                ZeroMemory(&Formats[Count], sizeof(Formats[Count]));
+                Formats[Count].FormatId = Context->CliprdrFormatFileGroupDescriptorW;
+                lstrcpyW(Formats[Count].Name, L"FileGroupDescriptorW");
+                Count++;
+            }
+            LocalHash ^= TermSrvHashBytes((const UCHAR *)Context->CliprdrOutgoingPaths,
+                                          Context->CliprdrOutgoingCount * MAX_PATH * sizeof(WCHAR));
+            LocalLength += Context->CliprdrOutgoingCount;
+        }
+    }
+    else if (TermSrvReadHdropClipboard(Context->CliprdrOutgoingPaths,
+                                       &Context->CliprdrOutgoingCount))
+    {
+        if (Context->CliprdrFormatFileGroupDescriptorW == 0)
+        {
+            Context->CliprdrFormatFileGroupDescriptorW =
+                RegisterClipboardFormatW(L"FileGroupDescriptorW");
+        }
+        if (Count < RTL_NUMBER_OF(Formats))
+        {
+            ZeroMemory(&Formats[Count], sizeof(Formats[Count]));
+            Formats[Count].FormatId = Context->CliprdrFormatFileGroupDescriptorW;
+            lstrcpyW(Formats[Count].Name, L"FileGroupDescriptorW");
+            Count++;
+        }
+        LocalHash ^= TermSrvHashBytes((const UCHAR *)Context->CliprdrOutgoingPaths,
+                                      Context->CliprdrOutgoingCount * MAX_PATH * sizeof(WCHAR));
+        LocalLength += Context->CliprdrOutgoingCount;
     }
 
     if (Count == 0)
@@ -999,6 +1941,12 @@ TermSrvQueueSupportedClientFormats(
                                  TERMSRV_CLIPRDR_CF_UNICODETEXT,
                                  TERMSRV_CLIPRDR_CF_UNICODETEXT);
     }
+    if (TermSrvCliprdrFormatListContains(FormatList, TERMSRV_CLIPRDR_CF_TEXT))
+    {
+        TermSrvQueueClientFormat(Context,
+                                 TERMSRV_CLIPRDR_CF_TEXT,
+                                 TERMSRV_CLIPRDR_CF_TEXT);
+    }
 
     if (TermSrvCliprdrFormatListContains(FormatList, TERMSRV_CLIPRDR_CF_DIBV5))
     {
@@ -1063,6 +2011,7 @@ TermSrvRouteOptionalCliprdrPacket(
     SIZE_T ClipPayloadLength;
     BOOL IsFormatList;
     BOOL IsDataResponse;
+    BOOL IsFileContentsResponse;
 
     if (TermSrvIdentifyPacketPlaceholder(Buffer, Received) != TermSrvPacketTpkt)
     {
@@ -1070,21 +2019,11 @@ TermSrvRouteOptionalCliprdrPacket(
         return FALSE;
     }
 
-    ClipResult = TermSrvCliprdrRouteMcsSendData(Buffer,
-                                                (SIZE_T)Received,
-                                                Channel,
-                                                &Context->CliprdrBackend,
-                                                CliprdrPayload,
-                                                sizeof(CliprdrPayload),
-                                                &BytesWritten);
-    if (BytesWritten != 0)
-    {
-        if (!TermSrvSendCliprdrPdu(Client, Channel, CliprdrPayload, BytesWritten))
-            return FALSE;
-    }
-
     IsFormatList = FALSE;
     IsDataResponse = FALSE;
+    IsFileContentsResponse = FALSE;
+    ClipPayload = NULL;
+    ClipPayloadLength = 0;
     Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
                                                   (SIZE_T)Received,
                                                   &SendData);
@@ -1104,11 +2043,67 @@ TermSrvRouteOptionalCliprdrPacket(
         }
         if (TermSrvCliprdrParsePdu(ClipPayload,
                                    ClipPayloadLength,
-                                   &ClipPdu) == TermSrvCliprdrSuccess &&
-            ClipPdu.MsgType == TERMSRV_CLIPRDR_CB_FORMAT_DATA_RESPONSE)
+                                   &ClipPdu) == TermSrvCliprdrSuccess)
         {
-            IsDataResponse = TRUE;
+            ULONG RequestedFormat;
+
+            if (ClipPdu.MsgType == TERMSRV_CLIPRDR_CB_FORMAT_DATA_RESPONSE)
+                IsDataResponse = TRUE;
+            else if (ClipPdu.MsgType == TERMSRV_CLIPRDR_CB_FILECONTENTS_RESPONSE)
+                IsFileContentsResponse = TRUE;
+            else if (ClipPdu.MsgType == TERMSRV_CLIPRDR_CB_FORMAT_DATA_REQUEST &&
+                     TermSrvCliprdrParseFormatDataRequest(ClipPayload,
+                                                          ClipPayloadLength,
+                                                          &RequestedFormat) == TermSrvCliprdrSuccess &&
+                     RequestedFormat == Context->CliprdrFormatFileGroupDescriptorW &&
+                     RequestedFormat != 0)
+            {
+                return TermSrvSendOutgoingFileList(Context, Client, Channel);
+            }
+            else if (ClipPdu.MsgType == TERMSRV_CLIPRDR_CB_FILECONTENTS_REQUEST)
+            {
+                TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST Request;
+
+                if (TermSrvCliprdrParseFileContentsRequest(ClipPayload,
+                                                           ClipPayloadLength,
+                                                           &Request) != TermSrvCliprdrSuccess)
+                {
+                    return FALSE;
+                }
+                return TermSrvSendOutgoingFileContents(Context, Client, Channel, &Request);
+            }
+
+            if (ClipPdu.MsgType == TERMSRV_CLIPRDR_CB_FORMAT_DATA_RESPONSE &&
+                Context->CliprdrBackend.PendingFormatId ==
+                    Context->CliprdrFormatFileGroupDescriptorW &&
+                Context->CliprdrFormatFileGroupDescriptorW != 0 &&
+                (ClipPdu.MsgFlags & TERMSRV_CLIPRDR_CB_RESPONSE_OK))
+            {
+                Context->CliprdrSuppressNextServerAdvertise = TRUE;
+                if (!TermSrvStartIncomingFiles(Context,
+                                               Client,
+                                               Channel,
+                                               ClipPdu.Payload,
+                                               ClipPdu.DataLength))
+                {
+                    TermSrvLogFailure("cliprdr incoming file clipboard import skipped");
+                }
+                return TRUE;
+            }
         }
+    }
+
+    ClipResult = TermSrvCliprdrRouteMcsSendData(Buffer,
+                                                (SIZE_T)Received,
+                                                Channel,
+                                                &Context->CliprdrBackend,
+                                                CliprdrPayload,
+                                                sizeof(CliprdrPayload),
+                                                &BytesWritten);
+    if (BytesWritten != 0)
+    {
+        if (!TermSrvSendCliprdrPdu(Client, Channel, CliprdrPayload, BytesWritten))
+            return FALSE;
     }
 
     if (ClipResult == TermSrvCliprdrSuccess ||
@@ -1121,6 +2116,33 @@ TermSrvRouteOptionalCliprdrPacket(
                                                 &FormatList))
         {
             return FALSE;
+        }
+
+        if (IsFileContentsResponse)
+        {
+            return TermSrvHandleIncomingFileContentsResponse(Context,
+                                                            Client,
+                                                            Channel,
+                                                            ClipPdu.Payload,
+                                                            ClipPdu.DataLength);
+        }
+
+        if (IsDataResponse &&
+            Context->CliprdrBackend.PendingFormatId ==
+                Context->CliprdrFormatFileGroupDescriptorW &&
+            Context->CliprdrFormatFileGroupDescriptorW != 0 &&
+            (ClipPdu.MsgFlags & TERMSRV_CLIPRDR_CB_RESPONSE_OK))
+        {
+            Context->CliprdrSuppressNextServerAdvertise = TRUE;
+            if (!TermSrvStartIncomingFiles(Context,
+                                           Client,
+                                           Channel,
+                                           ClipPdu.Payload,
+                                           ClipPdu.DataLength))
+            {
+                TermSrvLogFailure("cliprdr incoming file clipboard import skipped");
+            }
+            return TRUE;
         }
 
         if (IsDataResponse &&
@@ -1537,87 +2559,6 @@ TermSrvWriteServerFontMapPacket(
 }
 
 static BOOL
-TermSrvWriteAutoDetectRttRequest(
-    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
-    _In_ SIZE_T BufferLength,
-    _Out_ SIZE_T *BytesWritten)
-{
-    static const UCHAR Payload[] =
-    {
-        /* TS_SECURITY_HEADER: SEC_AUTODETECT_REQ */
-        0x00, 0x10, 0x00, 0x00,
-        /* RDP_RTT_REQUEST, sequence 0x23, connect-time request type. */
-        0x06, 0x00, 0x23, 0x00, 0x01, 0x10
-    };
-    SIZE_T PacketLength;
-    SIZE_T BodyLength;
-
-    if (BytesWritten == NULL)
-        return FALSE;
-
-    *BytesWritten = 0;
-    if (Buffer == NULL)
-        return FALSE;
-
-    BodyLength = 8 + sizeof(Payload);
-    PacketLength = 7 + BodyLength;
-    if (BufferLength < PacketLength || PacketLength > 0xffff)
-        return FALSE;
-
-    Buffer[0] = 0x03;
-    Buffer[1] = 0x00;
-    Buffer[2] = (UCHAR)(PacketLength >> 8);
-    Buffer[3] = (UCHAR)PacketLength;
-    Buffer[4] = 0x02;
-    Buffer[5] = 0xf0;
-    Buffer[6] = 0x80;
-
-    Buffer[7] = 0x68;
-    Buffer[8] = 0x00;
-    Buffer[9] = 0x00;
-    Buffer[10] = (UCHAR)(TERMSRV_MESSAGE_SCAFFOLD_CHANNEL_ID >> 8);
-    Buffer[11] = (UCHAR)TERMSRV_MESSAGE_SCAFFOLD_CHANNEL_ID;
-    Buffer[12] = 0x70;
-    Buffer[13] = 0x80;
-    Buffer[14] = sizeof(Payload);
-    CopyMemory(&Buffer[15], Payload, sizeof(Payload));
-
-    *BytesWritten = PacketLength;
-    return TRUE;
-}
-
-static BOOL
-TermSrvLooksLikeAutoDetectRttResponse(
-    _In_reads_bytes_(Received) const UCHAR *Buffer,
-    _In_ INT Received)
-{
-    TERMSRV_RDPBCGR_RESULT Result;
-    TERMSRV_RDPBCGR_MCS_SEND_DATA_PAYLOAD SendData;
-    const UCHAR *Payload;
-    ULONG Flags;
-
-    Result = TermSrvRdpBcgrParseMcsSendDataPayload(Buffer,
-                                                   (SIZE_T)Received,
-                                                   &SendData);
-    if (Result != TermSrvRdpBcgrSuccess || SendData.PayloadLength < 10)
-        return FALSE;
-
-    Payload = SendData.Payload;
-    Flags = ((ULONG)Payload[3] << 24) |
-            ((ULONG)Payload[2] << 16) |
-            ((ULONG)Payload[1] << 8) |
-            Payload[0];
-
-    return Flags == TERMSRV_SEC_AUTODETECT_RSP &&
-           Payload[4] == 0x06 &&
-           Payload[5] == 0x01 &&
-           Payload[6] == 0x23 &&
-           Payload[7] == 0x00 &&
-           Payload[8] == 0x00 &&
-           Payload[9] == 0x00;
-}
-
-static BOOL
 TermSrvTryGetSharePduType(
     _In_reads_bytes_(Received) const UCHAR *Buffer,
     _In_ INT Received,
@@ -1853,6 +2794,83 @@ TermSrvHandleClientFinalization(
 }
 
 static BOOL
+TermSrvHandleActivePacket(
+    _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
+    _In_ SOCKET Client,
+    _In_reads_bytes_(Received) const UCHAR *Buffer,
+    _In_ INT Received,
+    _In_ const TERMSRV_CLIPRDR_CHANNEL *Channel)
+{
+    switch (TermSrvIdentifyPacketPlaceholder(Buffer, Received))
+    {
+        case TermSrvPacketFastPath:
+        {
+            UCHAR Reply[1024];
+            SIZE_T BytesWritten;
+            TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS InputEvents;
+
+            if (TermSrvRdpBcgrParseFastPathInputEvents(Buffer,
+                                                       (SIZE_T)Received,
+                                                       &InputEvents) == TermSrvRdpBcgrSuccess &&
+                (InputEvents.FirstEventCode == 0x01 ||
+                 InputEvents.FirstEventCode == 0x05))
+            {
+                CHAR PeerPacket[64];
+
+                _snprintf(PeerPacket,
+                          sizeof(PeerPacket),
+                          "FAST_INPUT mouse=1 x=%u y=%u",
+                          InputEvents.FirstPointerX,
+                          InputEvents.FirstPointerY);
+                PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+                TermSrvAdvancePeer(Context,
+                                   PeerPacket,
+                                   "fast-path input delivery");
+                if (TermSrvWritePointerMarkerPacket(Reply,
+                                                    sizeof(Reply),
+                                                    InputEvents.FirstPointerX,
+                                                    InputEvents.FirstPointerY,
+                                                    &BytesWritten))
+                {
+                    TermSrvSendPacket(Client, Reply, BytesWritten);
+                }
+            }
+            else
+            {
+                TermSrvAdvancePeer(Context,
+                                   "FAST_INPUT wire=fastpath",
+                                   "fast-path input delivery");
+            }
+            break;
+        }
+
+        case TermSrvPacketTpkt:
+            if (TermSrvIsCliprdrMcsPacket(Buffer, Received, Channel))
+            {
+                if (!TermSrvRouteOptionalCliprdrPacket(Client,
+                                                      Buffer,
+                                                      Received,
+                                                      Channel,
+                                                      Context))
+                {
+                    return FALSE;
+                }
+            }
+            else
+            {
+                TermSrvHandleSlowPathInputPacket(Context, Client, Buffer, Received);
+            }
+            break;
+
+        default:
+            TermSrvLogFailure("ignoring unknown active RDP packet");
+            break;
+    }
+
+    return TRUE;
+}
+
+static BOOL
 TermSrvRunActiveLoop(
     _Inout_ TERMSRV_CLIENT_CONTEXT *Context,
     _In_ SOCKET Client,
@@ -1865,6 +2883,7 @@ TermSrvRunActiveLoop(
     TIMEVAL Timeout;
     INT Received;
     INT SelectResult;
+    INT PendingLength;
 
     if (!TermSrvSendInitialCliprdrMonitorReady(Context, Client, Channel))
     {
@@ -1872,6 +2891,7 @@ TermSrvRunActiveLoop(
         return FALSE;
     }
 
+    PendingLength = 0;
     while (!TermSrvStopRequested(StopEvent))
     {
         FD_ZERO(&ReadSet);
@@ -1899,7 +2919,16 @@ TermSrvRunActiveLoop(
         if (!FD_ISSET(Client, &ReadSet))
             continue;
 
-        Received = recv(Client, (char *)Buffer, BufferLength, 0);
+        if (PendingLength >= BufferLength)
+        {
+            TermSrvLogFailure("active packet buffer is full before packet completion");
+            return FALSE;
+        }
+
+        Received = recv(Client,
+                        (char *)&Buffer[PendingLength],
+                        BufferLength - PendingLength,
+                        0);
         if (Received == 0)
             return TRUE;
 
@@ -1912,70 +2941,42 @@ TermSrvRunActiveLoop(
             return FALSE;
         }
 
-        switch (TermSrvIdentifyPacketPlaceholder(Buffer, Received))
+        PendingLength += Received;
+        while (PendingLength > 0)
         {
-            case TermSrvPacketFastPath:
+            INT PacketLength;
+
+            if (!TermSrvTryGetActivePacketLength(Buffer,
+                                                 PendingLength,
+                                                 &PacketLength))
             {
-                UCHAR Reply[1024];
-                SIZE_T BytesWritten;
-                TERMSRV_RDPBCGR_FASTPATH_INPUT_EVENTS InputEvents;
-
-                if (TermSrvRdpBcgrParseFastPathInputEvents(Buffer,
-                                                           (SIZE_T)Received,
-                                                           &InputEvents) == TermSrvRdpBcgrSuccess &&
-                    (InputEvents.FirstEventCode == 0x01 ||
-                     InputEvents.FirstEventCode == 0x05))
-                {
-                    CHAR PeerPacket[64];
-
-                    _snprintf(PeerPacket,
-                              sizeof(PeerPacket),
-                              "FAST_INPUT mouse=1 x=%u y=%u",
-                              InputEvents.FirstPointerX,
-                              InputEvents.FirstPointerY);
-                    PeerPacket[sizeof(PeerPacket) - 1] = '\0';
-                    TermSrvAdvancePeer(Context,
-                                       PeerPacket,
-                                       "fast-path input delivery");
-                    if (TermSrvWritePointerMarkerPacket(Reply,
-                                                        sizeof(Reply),
-                                                        InputEvents.FirstPointerX,
-                                                        InputEvents.FirstPointerY,
-                                                        &BytesWritten))
-                    {
-                        TermSrvSendPacket(Client, Reply, BytesWritten);
-                    }
-                }
-                else
-                {
-                    TermSrvAdvancePeer(Context,
-                                       "FAST_INPUT wire=fastpath",
-                                       "fast-path input delivery");
-                }
-                break;
+                return FALSE;
             }
 
-            case TermSrvPacketTpkt:
-                if (TermSrvIsCliprdrMcsPacket(Buffer, Received, Channel))
-                {
-                    if (!TermSrvRouteOptionalCliprdrPacket(Client,
-                                                          Buffer,
-                                                          Received,
-                                                          Channel,
-                                                          Context))
-                    {
-                        return FALSE;
-                    }
-                }
-                else
-                {
-                    TermSrvHandleSlowPathInputPacket(Context, Client, Buffer, Received);
-                }
+            if (PacketLength == 0)
                 break;
 
-            default:
-                TermSrvLogFailure("ignoring unknown active RDP packet");
+            if (PacketLength > BufferLength)
+            {
+                TermSrvLogFailure("active packet exceeds receive buffer");
+                return FALSE;
+            }
+
+            if (PendingLength < PacketLength)
                 break;
+
+            if (!TermSrvHandleActivePacket(Context,
+                                           Client,
+                                           Buffer,
+                                           PacketLength,
+                                           Channel))
+            {
+                return FALSE;
+            }
+
+            PendingLength -= PacketLength;
+            if (PendingLength != 0)
+                MoveMemory(Buffer, &Buffer[PacketLength], PendingLength);
         }
     }
 
@@ -2034,56 +3035,37 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
                        "CLIENT_INFO user=DOMAIN\\rdp-scaffold",
                        "client info session attach");
 
-    if (!TermSrvWriteAutoDetectRttRequest(Reply, ReplyLength, &BytesWritten) ||
+    if (!TermSrvWriteLicenseValidClientPacket(Reply, ReplyLength, &BytesWritten) ||
         !TermSrvSendPacket(Client, Reply, BytesWritten))
     {
-        TermSrvLogFailure("autodetect RTT request write failed");
+        TermSrvLogFailure("license valid-client packet write failed");
+        return FALSE;
+    }
+
+    if (!TermSrvWriteDemandActivePacket(Reply, ReplyLength, &BytesWritten) ||
+        !TermSrvSendPacket(Client, Reply, BytesWritten))
+    {
+        TermSrvLogFailure("demand active packet write failed");
         return FALSE;
     }
 
     if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
         return TRUE;
 
-    if (TermSrvLooksLikeAutoDetectRttResponse(Buffer, Received))
-    {
-        if (!TermSrvWriteLicenseValidClientPacket(Reply, ReplyLength, &BytesWritten) ||
-            !TermSrvSendPacket(Client, Reply, BytesWritten))
-        {
-            TermSrvLogFailure("license valid-client packet write failed");
-            return FALSE;
-        }
-
-        if (!TermSrvWriteDemandActivePacket(Reply, ReplyLength, &BytesWritten) ||
-            !TermSrvSendPacket(Client, Reply, BytesWritten))
-        {
-            TermSrvLogFailure("demand active packet write failed");
-            return FALSE;
-        }
-
-        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
-            return TRUE;
-
-        return TermSrvHandleClientFinalization(Context,
-                                               Client,
-                                               StopEvent,
-                                               Buffer,
-                                               BufferLength,
-                                               Received,
-                                               Reply,
-                                               ReplyLength) &&
-               TermSrvRunActiveLoop(Context,
-                                    Client,
-                                    StopEvent,
-                                    Buffer,
-                                    BufferLength,
-                                    Channel);
-    }
-
-    return TermSrvRouteOptionalCliprdrPacket(Client,
-                                            Buffer,
-                                            Received,
-                                            Channel,
-                                            Context);
+    return TermSrvHandleClientFinalization(Context,
+                                           Client,
+                                           StopEvent,
+                                           Buffer,
+                                           BufferLength,
+                                           Received,
+                                           Reply,
+                                           ReplyLength) &&
+           TermSrvRunActiveLoop(Context,
+                                Client,
+                                StopEvent,
+                                Buffer,
+                                BufferLength,
+                                Channel);
 }
 
 static BOOL
@@ -2183,6 +3165,15 @@ TermSrvRunEarlyMcsPhase(
                 break;
             }
 
+            Result = TermSrvRdpBcgrParseClientInfoPayload(Buffer,
+                                                          (SIZE_T)Received,
+                                                          &SecurityExchange);
+            if (Result == TermSrvRdpBcgrSuccess)
+            {
+                InitialClientInfoReceived = Received;
+                break;
+            }
+
             TermSrvLogRdpBcgrFailure("security exchange parse", Result);
             return FALSE;
         }
@@ -2220,21 +3211,27 @@ TermSrvRunEarlyMcsPhase(
         if (!TermSrvSendPacket(Client, Reply, BytesWritten))
             return FALSE;
 
-        if (ChannelJoinRequest.ChannelId == TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID ||
+        if (ChannelJoinRequest.ChannelId == TERMSRV_MCS_WIRE_USER_CHANNEL_ID ||
+            ChannelJoinRequest.ChannelId == TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID ||
             ChannelJoinRequest.ChannelId == 1003)
         {
             CHAR PeerPacket[32];
+            USHORT PeerChannelId;
+
+            PeerChannelId = ChannelJoinRequest.ChannelId;
+            if (PeerChannelId == TERMSRV_MCS_WIRE_USER_CHANNEL_ID)
+                PeerChannelId = TERMSRV_MCS_SCAFFOLD_USER_CHANNEL_ID;
 
             _snprintf(PeerPacket,
                       sizeof(PeerPacket),
                       "JOIN id=%u",
-                      ChannelJoinRequest.ChannelId);
+                      PeerChannelId);
             PeerPacket[sizeof(PeerPacket) - 1] = '\0';
             TermSrvAdvancePeer(Context, PeerPacket, "MCS channel join session transition");
         }
     }
 
-    if (!HaveSecurityExchange)
+    if (!HaveSecurityExchange && InitialClientInfoReceived <= 0)
     {
         if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
             return TRUE;
@@ -2278,7 +3275,7 @@ TermSrvHandleClient(
     _In_ HANDLE StopEvent,
     _Inout_ TERMSRV_SESSION_MANAGER *SessionManager)
 {
-    UCHAR Buffer[512];
+    UCHAR Buffer[TERMSRV_ACTIVE_BUFFER_LENGTH];
     TERMSRV_CLIENT_CONTEXT Context;
     INT Received;
 
@@ -2294,6 +3291,8 @@ TermSrvHandleClient(
         TERMSRV_RDPBCGR_CONNECTION_REQUEST Request;
         TERMSRV_RDPBCGR_CONNECTION_CONFIRM Confirm;
         UCHAR Reply[12288];
+        UCHAR ConnectResponsePayload[sizeof(TermSrvMcsConnectResponsePayload)];
+        SIZE_T ConnectResponsePayloadLength;
         SIZE_T ReplyLength;
         TERMSRV_RDPBCGR_RESULT Result;
         TERMSRV_RDPBCGR_MCS_CONNECT_INITIAL ConnectInitial;
@@ -2352,10 +3351,17 @@ TermSrvHandleClient(
                         &StaticChannelList);
                 }
 
+                ConnectResponsePayloadLength = TermSrvBuildMcsConnectResponsePayload(
+                    ConnectResponsePayload,
+                    sizeof(ConnectResponsePayload),
+                    HaveStaticChannelList ? &StaticChannelList : NULL);
+                if (ConnectResponsePayloadLength == 0)
+                    goto Cleanup;
+
                 Result = TermSrvRdpBcgrWriteMcsConnectResponse(Reply,
                                                                sizeof(Reply),
-                                                               TermSrvMcsConnectResponsePayload,
-                                                               sizeof(TermSrvMcsConnectResponsePayload),
+                                                               ConnectResponsePayload,
+                                                               ConnectResponsePayloadLength,
                                                                &ReplyLength);
                 if (Result != TermSrvRdpBcgrSuccess)
                 {
@@ -2473,7 +3479,7 @@ TermSrvListenerRun(
 
     ZeroMemory(&Address, sizeof(Address));
     Address.sin_family = AF_INET;
-    Address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    Address.sin_addr.s_addr = htonl(INADDR_ANY);
     Address.sin_port = htons(TermSrvListenerPort());
 
     if (bind(ListenSocket, (SOCKADDR *)&Address, sizeof(Address)) == SOCKET_ERROR)

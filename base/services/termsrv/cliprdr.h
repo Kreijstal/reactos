@@ -37,11 +37,24 @@
 #define TERMSRV_CLIPRDR_MAX_CHANNEL_NAME_LENGTH  8
 #define TERMSRV_CLIPRDR_INVALID_CHANNEL_ID       0
 
+#define TERMSRV_CLIPRDR_CF_TEXT                  1
 #define TERMSRV_CLIPRDR_CF_UNICODETEXT           13
 #define TERMSRV_CLIPRDR_CF_DIB                   8
 #define TERMSRV_CLIPRDR_CF_DIBV5                 17
+#define TERMSRV_CLIPRDR_CF_HDROP                 15
 #define TERMSRV_CLIPRDR_MAX_FORMATS              32
 #define TERMSRV_CLIPRDR_MAX_FORMAT_NAME          64
+#define TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS     64
+#define TERMSRV_CLIPRDR_MAX_FILE_NAME            260
+
+#define TERMSRV_CLIPRDR_FILECONTENTS_SIZE        0x00000001
+#define TERMSRV_CLIPRDR_FILECONTENTS_RANGE       0x00000002
+
+#define TERMSRV_CLIPRDR_FD_ATTRIBUTES            0x00000004
+#define TERMSRV_CLIPRDR_FD_WRITESTIME            0x00000020
+#define TERMSRV_CLIPRDR_FD_FILESIZE              0x00000040
+#define TERMSRV_CLIPRDR_FD_PROGRESSUI            0x00004000
+#define TERMSRV_CLIPRDR_FD_UNICODE               0x80000000
 
 typedef enum _TERMSRV_CLIPRDR_RESULT
 {
@@ -104,6 +117,7 @@ typedef struct _TERMSRV_CLIPRDR_WIN32_BACKEND
 {
     HANDLE WindowStation;
     HANDLE Desktop;
+    HWND ClipboardWindow;
     BOOL Attached;
 } TERMSRV_CLIPRDR_WIN32_BACKEND;
 
@@ -118,6 +132,43 @@ typedef struct _TERMSRV_CLIPRDR_FORMAT_LIST
     ULONG Count;
     TERMSRV_CLIPRDR_FORMAT Formats[TERMSRV_CLIPRDR_MAX_FORMATS];
 } TERMSRV_CLIPRDR_FORMAT_LIST;
+
+typedef struct _TERMSRV_CLIPRDR_FILE_DESCRIPTOR
+{
+    ULONG Flags;
+    ULONG Attributes;
+    FILETIME CreationTime;
+    FILETIME LastAccessTime;
+    FILETIME LastWriteTime;
+    ULONG FileSizeHigh;
+    ULONG FileSizeLow;
+    WCHAR FileName[TERMSRV_CLIPRDR_MAX_FILE_NAME];
+} TERMSRV_CLIPRDR_FILE_DESCRIPTOR;
+
+typedef struct _TERMSRV_CLIPRDR_FILE_LIST
+{
+    ULONG Count;
+    TERMSRV_CLIPRDR_FILE_DESCRIPTOR Descriptors[TERMSRV_CLIPRDR_MAX_FILE_DESCRIPTORS];
+} TERMSRV_CLIPRDR_FILE_LIST;
+
+typedef struct _TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST
+{
+    ULONG StreamId;
+    ULONG ListIndex;
+    ULONG Flags;
+    ULONG PositionLow;
+    ULONG PositionHigh;
+    ULONG Requested;
+    BOOL HasClipDataId;
+    ULONG ClipDataId;
+} TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST;
+
+typedef struct _TERMSRV_CLIPRDR_FILE_CONTENTS_RESPONSE
+{
+    ULONG StreamId;
+    const UCHAR *Data;
+    SIZE_T DataLength;
+} TERMSRV_CLIPRDR_FILE_CONTENTS_RESPONSE;
 
 typedef struct _TERMSRV_CLIPRDR_PDU
 {
@@ -274,6 +325,48 @@ TermSrvCliprdrWriteFormatDataResponse(
     _In_reads_bytes_(DataLength) const UCHAR *Data,
     _In_ SIZE_T DataLength,
     _Out_ SIZE_T *BytesWritten);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFileList(
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength,
+    _Out_ TERMSRV_CLIPRDR_FILE_LIST *FileList);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFileList(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_CLIPRDR_FILE_LIST *FileList,
+    _Out_ SIZE_T *BytesWritten);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFileContentsRequest(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ const TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST *Request,
+    _Out_ SIZE_T *BytesWritten);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFileContentsRequest(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST *Request);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrWriteFileContentsResponse(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_ USHORT ResponseFlags,
+    _In_ ULONG StreamId,
+    _In_reads_bytes_(DataLength) const UCHAR *Data,
+    _In_ SIZE_T DataLength,
+    _Out_ SIZE_T *BytesWritten);
+
+TERMSRV_CLIPRDR_RESULT
+TermSrvCliprdrParseFileContentsResponse(
+    _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _Out_ TERMSRV_CLIPRDR_FILE_CONTENTS_RESPONSE *Response);
 
 /*
  * Consumes one complete cliprdr PDU payload and writes at most one response PDU.
