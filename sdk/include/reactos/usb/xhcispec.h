@@ -182,7 +182,23 @@ typedef struct _XHCI_ENDPOINT_CONTEXT
         ULONG AverageTRBLength               : 16;
         ULONG MaxESITPayload                 : 16;
     };
+    /* Offset 14h */
+    struct
+    {
+        ULONG RsvdZ4                         : 32;
+    };
+    /* Offset 18h */
+    struct
+    {
+        ULONG RsvdZ5                         : 32;
+    };
+    /* Offset 1Ch */
+    struct
+    {
+        ULONG RsvdZ6                         : 32;
+    };
 } XHCI_ENDPOINT_CONTEXT, *PXHCI_ENDPOINT_CONTEXT;
+C_ASSERT(sizeof(XHCI_ENDPOINT_CONTEXT) == 32);
 
 typedef struct _XHCI_ISO_ENDPOINT
 {
