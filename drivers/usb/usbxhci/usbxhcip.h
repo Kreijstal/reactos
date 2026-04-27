@@ -20,6 +20,7 @@ typedef enum {
     COMMAND_ADDRESS_DEVICE,
     COMMAND_DISABLE_SLOT,
     COMMAND_CONFIGURE_ENDPOINT,
+    COMMAND_DROP_ENDPOINT,
     COMMAND_SET_TR_DEQUEUE_POINTER,
     COMMAND_UNKNOWN
 } XHCI_COMMAND_TYPE;
@@ -246,6 +247,12 @@ XHCI_SetTransferRingDequeuePointer(IN PXHCI_EXTENSION XhciExtension,
                                    IN ULONG EndpointIndex,
                                    IN PHYSICAL_ADDRESS DequeuePointer,
                                    IN ULONG CycleState);
+
+MPSTATUS
+NTAPI
+XHCI_DropEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                  IN ULONG SlotId,
+                  IN ULONG EndpointIndex);
 
 ULONG
 NTAPI
