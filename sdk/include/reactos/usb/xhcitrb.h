@@ -246,9 +246,9 @@ typedef struct _XHCI_EVENT_TRANSFER_TRB
         ULONG EventData                 : 1;
         ULONG RsvdZ2                    : 7;
         ULONG TrbType                   : 6;
-        ULONG EndpointID                : 6;
+        ULONG EndpointID                : 5;
         ULONG RsvdZ3                    : 3;
-        ULONG SlotID                    : 7;
+        ULONG SlotID                    : 8;
     };
 } XHCI_EVENT_TRANSFER_TRB;
 C_ASSERT(sizeof(XHCI_EVENT_TRANSFER_TRB) == 16);

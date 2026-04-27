@@ -39,6 +39,43 @@ LONG Unloading;
 static const WCHAR Cunc[] = L"\\??\\C:";
 #define Cunc_LETTER_POSITION 4
 
+static
+VOID
+NTAPI
+MountMgrDriverReinitialization(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_opt_ PVOID Context,
+    _In_ ULONG Count)
+{
+    PDEVICE_EXTENSION DeviceExtension;
+
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(Count);
+
+    DeviceExtension = Context;
+    if (!DeviceExtension)
+    {
+        return;
+    }
+
+    KeWaitForSingleObject(&(DeviceExtension->DeviceLock),
+                          Executive,
+                          KernelMode,
+                          FALSE,
+                          NULL);
+
+    if (!DeviceExtension->AutomaticDriveLetter)
+    {
+        DeviceExtension->AutomaticDriveLetter = TRUE;
+    }
+
+    MountMgrAssignDriveLetters(DeviceExtension);
+    ReconcileAllDatabasesWithMaster(DeviceExtension);
+
+    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    WaitForOnlinesToComplete(DeviceExtension);
+}
+
 /**
  * @brief
  * Sends a synchronous IOCTL to the specified device object.
@@ -1798,6 +1835,12 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     if (!NT_SUCCESS(Status))
     {
         IoDeleteDevice(DeviceObject);
+    }
+    else
+    {
+        IoRegisterDriverReinitialization(DriverObject,
+                                         MountMgrDriverReinitialization,
+                                         DeviceExtension);
     }
 
     return Status;
