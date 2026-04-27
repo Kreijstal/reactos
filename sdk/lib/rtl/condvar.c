@@ -37,10 +37,6 @@ typedef struct _COND_VAR_WAIT_ENTRY
 #define CONTAINING_COND_VAR_WAIT_ENTRY(address, field) \
     CONTAINING_RECORD(address, COND_VAR_WAIT_ENTRY, field)
 
-/* GLOBALS *******************************************************************/
-
-static HANDLE CondVarKeyedEventHandle = NULL;
-
 /* INTERNAL FUNCTIONS ********************************************************/
 
 FORCEINLINE
@@ -268,8 +264,6 @@ InternalWake(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
     LARGE_INTEGER Timeout;
     PCOND_VAR_WAIT_ENTRY RemoveOnUnlockEntry;
 
-    ASSERT(CondVarKeyedEventHandle != NULL);
-
     if (HeadEntry == NULL)
     {
         /* There is noone there to wake up. In this case do nothing
@@ -304,7 +298,7 @@ InternalWake(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
 
         /* Wake the thread associated with this event. We will
            immediately return if we failed (zero timeout). */
-        Status = NtReleaseKeyedEvent(CondVarKeyedEventHandle,
+        Status = NtReleaseKeyedEvent(NULL,
                                      &Entry->WaitKey,
                                      FALSE,
                                      &Timeout);
@@ -377,7 +371,6 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
     COND_VAR_WAIT_ENTRY OwnEntry;
     NTSTATUS Status;
 
-    ASSERT(CondVarKeyedEventHandle != NULL);
     ASSERT((CriticalSection == NULL) != (SRWLock == NULL));
 
     RtlZeroMemory(&OwnEntry, sizeof(OwnEntry));
@@ -405,7 +398,7 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
     }
 
     /* Now sleep using the caller provided timeout. */
-    Status = NtWaitForKeyedEvent(CondVarKeyedEventHandle,
+    Status = NtWaitForKeyedEvent(NULL,
                                  &OwnEntry.WaitKey,
                                  FALSE,
                                  (PLARGE_INTEGER)TimeOut);
@@ -453,23 +446,6 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
 
     /* Return whatever NtWaitForKeyedEvent returned. */
     return Status;
-}
-
-VOID
-NTAPI
-RtlpInitializeKeyedEvent(VOID)
-{
-    ASSERT(CondVarKeyedEventHandle == NULL);
-    NtCreateKeyedEvent(&CondVarKeyedEventHandle, EVENT_ALL_ACCESS, NULL, 0);
-}
-
-VOID
-NTAPI
-RtlpCloseKeyedEvent(VOID)
-{
-    ASSERT(CondVarKeyedEventHandle != NULL);
-    NtClose(CondVarKeyedEventHandle);
-    CondVarKeyedEventHandle = NULL;
 }
 
 /* EXPORTED FUNCTIONS ********************************************************/

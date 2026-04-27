@@ -248,16 +248,6 @@ RtlDoesFileExists_UStr(
 
 VOID
 NTAPI
-RtlpInitializeKeyedEvent(
-    VOID);
-
-VOID
-NTAPI
-RtlpCloseKeyedEvent(
-    VOID);
-
-VOID
-NTAPI
 RtlpInitializeThreadPooling(
     VOID);
 
