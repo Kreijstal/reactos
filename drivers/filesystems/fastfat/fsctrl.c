@@ -4003,6 +4003,16 @@ Return Value:
     IrpSp = IoGetCurrentIrpStackLocation( Irp );
 
     //
+    //  Make sure the output buffer is large enough and then initialize
+    //  the answer to be that the volume isn't dirty.
+    //
+
+    if (IrpSp->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONG)) {
+        FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_PARAMETER );
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    //
     //  Get a pointer to the output buffer.  Look at the system buffer field in the
     //  irp first.  Then the Irp Mdl.
     //
@@ -4016,26 +4026,13 @@ Return Value:
         VolumeState = MmGetSystemAddressForMdlSafe( Irp->MdlAddress, LowPagePriority | MdlMappingNoExecute );
 
         if (VolumeState == NULL) {
-
             FatCompleteRequest( IrpContext, Irp, STATUS_INSUFFICIENT_RESOURCES );
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
     } else {
-
         FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_USER_BUFFER );
         return STATUS_INVALID_USER_BUFFER;
-    }
-
-    //
-    //  Make sure the output buffer is large enough and then initialize
-    //  the answer to be that the volume isn't dirty.
-    //
-
-    if (IrpSp->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONG)) {
-
-        FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_PARAMETER );
-        return STATUS_INVALID_PARAMETER;
     }
 
     *VolumeState = 0;
@@ -8187,4 +8184,3 @@ FatSetZeroOnDeallocate (
     return Status;
 }
 #endif
-

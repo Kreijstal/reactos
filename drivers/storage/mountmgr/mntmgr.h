@@ -343,6 +343,11 @@ ReconcileThisDatabaseWithMasterWorker(
 
 DRIVER_DISPATCH MountMgrDeviceControl;
 
+VOID
+MountMgrAssignDriveLetters(
+    IN PDEVICE_EXTENSION DeviceExtension
+);
+
 /* notify.c */
 VOID
 IssueUniqueIdChangeNotifyWorker(

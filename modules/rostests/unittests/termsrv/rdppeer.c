@@ -1983,6 +1983,122 @@ TestCliprdrWriteFormatDataResponse(VOID)
 }
 
 static VOID
+TestCliprdrFileListHelpers(VOID)
+{
+    TERMSRV_CLIPRDR_FILE_LIST List;
+    TERMSRV_CLIPRDR_FILE_LIST Parsed;
+    UCHAR Buffer[sizeof(ULONG) + 592];
+    SIZE_T BytesWritten = 0;
+
+    ZeroMemory(&List, sizeof(List));
+    List.Count = 1;
+    List.Descriptors[0].Flags = TERMSRV_CLIPRDR_FD_ATTRIBUTES |
+                                TERMSRV_CLIPRDR_FD_FILESIZE |
+                                TERMSRV_CLIPRDR_FD_UNICODE;
+    List.Descriptors[0].Attributes = FILE_ATTRIBUTE_NORMAL;
+    List.Descriptors[0].FileSizeHigh = 0x11223344;
+    List.Descriptors[0].FileSizeLow = 0x55667788;
+    lstrcpyW(List.Descriptors[0].FileName, L"foo.txt");
+
+    ok(TermSrvCliprdrWriteFileList(Buffer,
+                                   sizeof(Buffer),
+                                   &List,
+                                   &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr FileGroupDescriptorW write failed\n");
+    ok(BytesWritten == sizeof(Buffer),
+       "Unexpected FileGroupDescriptorW size %Iu\n", BytesWritten);
+    ok(TermSrvCliprdrParseFileList(Buffer,
+                                   BytesWritten,
+                                   &Parsed) == TermSrvCliprdrSuccess,
+       "cliprdr FileGroupDescriptorW parse failed\n");
+    ok(Parsed.Count == 1,
+       "Unexpected parsed file descriptor count %lu\n", Parsed.Count);
+    ok(Parsed.Descriptors[0].Attributes == FILE_ATTRIBUTE_NORMAL,
+       "Unexpected parsed file attributes 0x%lx\n", Parsed.Descriptors[0].Attributes);
+    ok(Parsed.Descriptors[0].FileSizeHigh == 0x11223344 &&
+       Parsed.Descriptors[0].FileSizeLow == 0x55667788,
+       "Unexpected parsed file size\n");
+    ok(lstrcmpW(Parsed.Descriptors[0].FileName, L"foo.txt") == 0,
+       "Unexpected parsed file name\n");
+
+    ok(TermSrvCliprdrParseFileList(Buffer,
+                                   sizeof(ULONG) + 591,
+                                   &Parsed) == TermSrvCliprdrInvalidLength,
+       "Short FileGroupDescriptorW payload should fail\n");
+}
+
+static VOID
+TestCliprdrFileContentsHelpers(VOID)
+{
+    TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST Request;
+    TERMSRV_CLIPRDR_FILE_CONTENTS_REQUEST ParsedRequest;
+    TERMSRV_CLIPRDR_FILE_CONTENTS_RESPONSE ParsedResponse;
+    UCHAR Buffer[64];
+    UCHAR Data[] = { 'a', 'b', 'c' };
+    SIZE_T BytesWritten = 0;
+
+    ZeroMemory(&Request, sizeof(Request));
+    Request.StreamId = 0x1234;
+    Request.ListIndex = 2;
+    Request.Flags = TERMSRV_CLIPRDR_FILECONTENTS_SIZE;
+    Request.Requested = sizeof(ULONGLONG);
+
+    ok(TermSrvCliprdrWriteFileContentsRequest(Buffer,
+                                              sizeof(Buffer),
+                                              &Request,
+                                              &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr FileContents SIZE request write failed\n");
+    ok(TermSrvCliprdrParseFileContentsRequest(Buffer,
+                                              BytesWritten,
+                                              &ParsedRequest) == TermSrvCliprdrSuccess,
+       "cliprdr FileContents SIZE request parse failed\n");
+    ok(ParsedRequest.StreamId == 0x1234 &&
+       ParsedRequest.ListIndex == 2 &&
+       ParsedRequest.Flags == TERMSRV_CLIPRDR_FILECONTENTS_SIZE,
+       "Unexpected parsed FileContents SIZE request\n");
+
+    Request.Flags = TERMSRV_CLIPRDR_FILECONTENTS_RANGE;
+    Request.PositionLow = 4;
+    Request.Requested = 3;
+    ok(TermSrvCliprdrWriteFileContentsRequest(Buffer,
+                                              sizeof(Buffer),
+                                              &Request,
+                                              &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr FileContents RANGE request write failed\n");
+    ok(TermSrvCliprdrParseFileContentsRequest(Buffer,
+                                              BytesWritten,
+                                              &ParsedRequest) == TermSrvCliprdrSuccess,
+       "cliprdr FileContents RANGE request parse failed\n");
+    ok(ParsedRequest.PositionLow == 4 && ParsedRequest.Requested == 3,
+       "Unexpected parsed FileContents RANGE request\n");
+
+    Request.Flags = TERMSRV_CLIPRDR_FILECONTENTS_SIZE |
+                    TERMSRV_CLIPRDR_FILECONTENTS_RANGE;
+    ok(TermSrvCliprdrWriteFileContentsRequest(Buffer,
+                                              sizeof(Buffer),
+                                              &Request,
+                                              &BytesWritten) == TermSrvCliprdrInvalidHeader,
+       "Invalid FileContents flags should fail\n");
+
+    ok(TermSrvCliprdrWriteFileContentsResponse(Buffer,
+                                               sizeof(Buffer),
+                                               TERMSRV_CLIPRDR_CB_RESPONSE_OK,
+                                               0x9876,
+                                               Data,
+                                               sizeof(Data),
+                                               &BytesWritten) == TermSrvCliprdrSuccess,
+       "cliprdr FileContents response write failed\n");
+    ok(TermSrvCliprdrParseFileContentsResponse(Buffer,
+                                               BytesWritten,
+                                               &ParsedResponse) == TermSrvCliprdrSuccess,
+       "cliprdr FileContents response parse failed\n");
+    ok(ParsedResponse.StreamId == 0x9876 &&
+       ParsedResponse.DataLength == sizeof(Data) &&
+       memcmp(ParsedResponse.Data, Data, sizeof(Data)) == 0,
+       "Unexpected parsed FileContents response\n");
+}
+
+static VOID
 TestCliprdrDummyBackend(VOID)
 {
     static const UCHAR TextData[] =
@@ -2414,6 +2530,8 @@ START_TEST(RdpPeer)
     TestCliprdrFormatListHelpers();
     TestCliprdrParseFormatDataRequest();
     TestCliprdrWriteFormatDataResponse();
+    TestCliprdrFileListHelpers();
+    TestCliprdrFileContentsHelpers();
     TestCliprdrDummyBackend();
     TestCliprdrHandlePdu();
     TestCliprdrRouteMcsSendData();
