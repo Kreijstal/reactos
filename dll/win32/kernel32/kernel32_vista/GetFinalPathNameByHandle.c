@@ -29,6 +29,8 @@ QueryDosVolumeNameForNtDeviceName(
     WCHAR Buffer[MAX_PATH];
     PMOUNTMGR_TARGET_NAME TargetName = (PMOUNTMGR_TARGET_NAME)Buffer;
     PMOUNTMGR_VOLUME_PATHS VolumePaths = (PMOUNTMGR_VOLUME_PATHS)Buffer;
+    PCWSTR VolumePath;
+    SIZE_T VolumePathLength;
     NTSTATUS Status;
 
     /* Validate parameters */
@@ -97,9 +99,20 @@ QueryDosVolumeNameForNtDeviceName(
     }
 
     /* Construct the full volume path name from the first returned DOS volume */
+    VolumePath = VolumePaths->MultiSz;
+    if ((VolumePath[0] == L'\\') &&
+        (VolumePath[1] == L'?') &&
+        (VolumePath[2] == L'?') &&
+        (VolumePath[3] == L'\\'))
+    {
+        VolumePath += 4;
+    }
+
+    VolumePathLength = wcslen(VolumePath);
     if (!NT_SUCCESS(RtlAppendUnicodeToString(DosVolumeName, L"\\\\?\\")) ||
-        !NT_SUCCESS(RtlAppendUnicodeToString(DosVolumeName, VolumePaths->MultiSz) ||
-        !NT_SUCCESS(RtlAppendUnicodeToString(DosVolumeName, L"\\"))))
+        !NT_SUCCESS(RtlAppendUnicodeToString(DosVolumeName, VolumePath)) ||
+        ((VolumePathLength == 0 || VolumePath[VolumePathLength - 1] != L'\\') &&
+         !NT_SUCCESS(RtlAppendUnicodeToString(DosVolumeName, L"\\"))))
     {
         DPRINT1("RtlAppendUnicodeToString failed: %lx\n", Status);
         goto Exit;
