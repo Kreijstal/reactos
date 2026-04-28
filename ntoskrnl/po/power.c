@@ -1070,7 +1070,7 @@ NTAPI
 NtSetThreadExecutionState(IN EXECUTION_STATE esFlags,
                           OUT EXECUTION_STATE *PreviousFlags)
 {
-    PKTHREAD Thread = KeGetCurrentThread();
+    PETHREAD Thread = PsGetCurrentThread();
     KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
     EXECUTION_STATE PreviousState;
     PAGED_CODE();
@@ -1101,14 +1101,19 @@ NtSetThreadExecutionState(IN EXECUTION_STATE esFlags,
 
     /* Save the previous state, always masking in the continous flag */
 #if (NTDDI_VERSION >= NTDDI_WIN7)
-    /* PowerState was renamed to LargeStack at Win7 (same byte overlay) */
-    PreviousState = Thread->LargeStack | ES_CONTINUOUS;
-    if (esFlags & ES_CONTINUOUS) Thread->LargeStack = (UCHAR)esFlags;
-#else
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     PreviousState = Thread->PowerState | ES_CONTINUOUS;
+    if (esFlags & ES_CONTINUOUS) Thread->PowerState = (UCHAR)esFlags;
+#else
+    /* PowerState was renamed to LargeStack at Win7 (same byte overlay) */
+    PreviousState = Thread->Tcb.LargeStack | ES_CONTINUOUS;
+    if (esFlags & ES_CONTINUOUS) Thread->Tcb.LargeStack = (UCHAR)esFlags;
+#endif
+#else
+    PreviousState = Thread->Tcb.PowerState | ES_CONTINUOUS;
 
     /* Check if we need to update the power state */
-    if (esFlags & ES_CONTINUOUS) Thread->PowerState = (UCHAR)esFlags;
+    if (esFlags & ES_CONTINUOUS) Thread->Tcb.PowerState = (UCHAR)esFlags;
 #endif
 
     /* Protect the write back to user mode */
