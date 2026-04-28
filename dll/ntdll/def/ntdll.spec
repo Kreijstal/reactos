@@ -876,7 +876,8 @@
 @ stdcall RtlGetCompressionWorkSpaceSize(long ptr ptr)
 @ stdcall RtlGetControlSecurityDescriptor(ptr ptr ptr)
 @ stdcall RtlGetCriticalSectionRecursionCount(ptr)
-@ stdcall RtlGetCurrentDirectory_U(long ptr)
+@ stdcall -arch=i386,arm RtlGetCurrentDirectory_U(long ptr)
+@ stdcall -arch=x86_64 RtlGetCurrentDirectory_U(long ptr) RtlGetCurrentDirectory_U_RtlpMsysDecoy
 @ stdcall RtlGetCurrentPeb()
 @ stdcall RtlGetCurrentProcessorNumber() ; 5.2 SP1 and higher
 @ stdcall -version=0x601+ RtlGetCurrentProcessorNumberEx(ptr)
