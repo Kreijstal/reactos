@@ -2120,11 +2120,22 @@ Return Value:
     //  Finally deallocate the Fcb and non-paged fcb records
     //
 
-    FatFreeResource( Fcb->Header.Resource );
+    {
+        PERESOURCE Resource;
+        PERESOURCE PagingIoResource;
 
-    if (Fcb->Header.PagingIoResource != Fcb->Header.Resource) {
+        Resource = Fcb->Header.Resource;
+        PagingIoResource = Fcb->Header.PagingIoResource;
 
-        FatFreeResource( Fcb->Header.PagingIoResource );
+        Fcb->Header.Resource = NULL;
+        Fcb->Header.PagingIoResource = NULL;
+
+        FatFreeResource( Resource );
+
+        if (PagingIoResource != Resource) {
+
+            FatFreeResource( PagingIoResource );
+        }
     }
 
     //
@@ -3941,5 +3952,4 @@ Return Value:
 
     return Result;
 }
-
 
