@@ -285,6 +285,10 @@ LsarQueryPdAccount(PLSA_DB_OBJECT PolicyObject,
 }
 
 
+static NTSTATUS
+LsapInitEmptyLsaString(PRPC_UNICODE_STRING String);
+
+
 NTSTATUS
 LsarQueryAccountDomain(PLSA_DB_OBJECT PolicyObject,
                        PLSAPR_POLICY_INFORMATION *PolicyInformation)
@@ -299,6 +303,12 @@ LsarQueryAccountDomain(PLSA_DB_OBJECT PolicyObject,
     p = MIDL_user_allocate(sizeof(LSAPR_POLICY_ACCOUNT_DOM_INFO));
     if (p == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
+
+    ZeroMemory(p, sizeof(LSAPR_POLICY_ACCOUNT_DOM_INFO));
+
+    Status = LsapInitEmptyLsaString(&p->DomainName);
+    if (!NT_SUCCESS(Status))
+        goto Done;
 
     /* Domain Name */
     Status = LsapGetObjectAttribute(PolicyObject,
@@ -538,6 +548,21 @@ LsarQueryAuditFull(PLSA_DB_OBJECT PolicyObject,
 }
 
 
+static NTSTATUS
+LsapInitEmptyLsaString(PRPC_UNICODE_STRING String)
+{
+    String->Buffer = MIDL_user_allocate(sizeof(WCHAR));
+    if (String->Buffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    String->Buffer[0] = UNICODE_NULL;
+    String->Length = 0;
+    String->MaximumLength = sizeof(WCHAR);
+
+    return STATUS_SUCCESS;
+}
+
+
 NTSTATUS
 LsarQueryDnsDomain(PLSA_DB_OBJECT PolicyObject,
                    PLSAPR_POLICY_INFORMATION *PolicyInformation)
@@ -552,6 +577,20 @@ LsarQueryDnsDomain(PLSA_DB_OBJECT PolicyObject,
     p = MIDL_user_allocate(sizeof(LSAPR_POLICY_DNS_DOMAIN_INFO));
     if (p == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
+
+    ZeroMemory(p, sizeof(LSAPR_POLICY_DNS_DOMAIN_INFO));
+
+    Status = LsapInitEmptyLsaString(&p->Name);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = LsapInitEmptyLsaString(&p->DnsDomainName);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = LsapInitEmptyLsaString(&p->DnsForestName);
+    if (!NT_SUCCESS(Status))
+        goto done;
 
     /* Primary Domain Name */
     AttributeSize = 0;
@@ -582,6 +621,8 @@ LsarQueryDnsDomain(PLSA_DB_OBJECT PolicyObject,
             DomainName->Buffer = (LPWSTR)((ULONG_PTR)DomainName + (ULONG_PTR)DomainName->Buffer);
 
             TRACE("PrimaryDomainName: %wZ\n", DomainName);
+
+            MIDL_user_free(p->Name.Buffer);
 
             p->Name.Buffer = MIDL_user_allocate(DomainName->MaximumLength);
             if (p->Name.Buffer == NULL)
