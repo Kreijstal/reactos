@@ -1048,6 +1048,8 @@ OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
 /* KTHREAD.LargeStack lives in the pre-Win8 KTHREAD layout. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
+#else
+OFFSET(ETHREAD_LargeStack, ETHREAD, LargeStack),
 #endif
 
 HEADER("KINTERRUPT"),

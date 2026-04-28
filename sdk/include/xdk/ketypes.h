@@ -1723,4 +1723,3 @@ typedef struct _KQUEUE {
 } KQUEUE, *PKQUEUE, *RESTRICTED_POINTER PRKQUEUE;
 
 $endif (_NTIFS_)
-
