@@ -1473,10 +1473,10 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
     }
     Endpoint->EndpointProperties.DeviceAddress = DeviceAddress;
 
-  //  Status = USBPORT_ReopenPipe(FdoDevice, Endpoint); ???
+    Status = USBPORT_ReopenPipe(FdoDevice, Endpoint);
 
- //   if (!NT_SUCCESS(Status))
-   //     goto ExitError;
+    if (!NT_SUCCESS(Status))
+        goto ExitError;
 
     USBPORT_Wait(FdoDevice, 10);
 

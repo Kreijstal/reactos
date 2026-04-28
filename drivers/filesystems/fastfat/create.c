@@ -1188,10 +1188,16 @@ Return Value:
                                                  FinalName.Length);
 
                     Status = RtlDowncaseUnicodeString(&UpcasedFinalName, &FinalName, FALSE );
-                    NT_ASSERT( NT_SUCCESS( Status ));
+                    if (!NT_SUCCESS(Status)) {
+
+                        try_return( Iosb.Status = Status );
+                    }
 
                     Status = RtlUpcaseUnicodeString( &UpcasedFinalName, &UpcasedFinalName, FALSE );
-                    NT_ASSERT( NT_SUCCESS( Status ));
+                    if (!NT_SUCCESS(Status)) {
+
+                        try_return( Iosb.Status = Status );
+                    }
 
 
                     NextFcb = FatFindFcb( IrpContext,
