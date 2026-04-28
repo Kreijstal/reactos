@@ -11,6 +11,20 @@
 #define NDEBUG
 #include <debug.h>
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+#define KxCalloutFrameInitialStack(_Frame) ((_Frame)->Spare1)
+#define KxCalloutFrameCallbackStack(_Frame) ((_Frame)->Spare2)
+#define KxGetThreadCallbackStack(_Thread) \
+    (CONTAINING_RECORD((_Thread), ETHREAD, Tcb)->CallbackStack)
+#define KxSetThreadCallbackStack(_Thread, _Stack) \
+    (CONTAINING_RECORD((_Thread), ETHREAD, Tcb)->CallbackStack = (_Stack))
+#else
+#define KxCalloutFrameInitialStack(_Frame) ((_Frame)->InitialStack)
+#define KxCalloutFrameCallbackStack(_Frame) ((_Frame)->CallbackStack)
+#define KxGetThreadCallbackStack(_Thread) ((_Thread)->CallbackStack)
+#define KxSetThreadCallbackStack(_Thread, _Stack) ((_Thread)->CallbackStack = (_Stack))
+#endif
+
 /*!
  *  \name KiInitializeUserApc
  *
@@ -171,15 +185,15 @@ KiUserModeCallout(
     }
 
     /* Save the current callback stack and initial stack */
-    CalloutFrame->CallbackStack = (ULONG_PTR)CurrentThread->CallbackStack;
-    CalloutFrame->InitialStack = (ULONG_PTR)CurrentThread->InitialStack;
+    KxCalloutFrameCallbackStack(CalloutFrame) = (ULONG_PTR)KxGetThreadCallbackStack(CurrentThread);
+    KxCalloutFrameInitialStack(CalloutFrame) = (ULONG_PTR)CurrentThread->InitialStack;
 
     /* Get and save the trap frame */
     TrapFrame = CurrentThread->TrapFrame;
     CalloutFrame->TrapFrame = (ULONG_PTR)TrapFrame;
 
     /* Set the new callback stack */
-    CurrentThread->CallbackStack = CalloutFrame;
+    KxSetThreadCallbackStack(CurrentThread, CalloutFrame);
 
     /* Disable interrupts so we can fill the NPX State */
     _disable();
@@ -340,7 +354,7 @@ NtCallbackReturn(
 
     /* Get the current thread and make sure we have a callback stack */
     CurrentThread = KeGetCurrentThread();
-    CalloutFrame = CurrentThread->CallbackStack;
+    CalloutFrame = KxGetThreadCallbackStack(CurrentThread);
     if (CalloutFrame == NULL)
     {
         return STATUS_NO_CALLBACK_ACTIVE;
@@ -384,15 +398,15 @@ NtCallbackReturn(
     }
 
     /* Switch the stack back to the previous value */
-    Pcr->TssBase->Rsp0 = CalloutFrame->InitialStack;
-    Pcr->Prcb.RspBase = CalloutFrame->InitialStack;
+    Pcr->TssBase->Rsp0 = KxCalloutFrameInitialStack(CalloutFrame);
+    Pcr->Prcb.RspBase = KxCalloutFrameInitialStack(CalloutFrame);
 
     /* Get the initial stack and restore it */
-    CurrentThread->InitialStack = (PVOID)CalloutFrame->InitialStack;
+    CurrentThread->InitialStack = (PVOID)KxCalloutFrameInitialStack(CalloutFrame);
 
     /* Restore the trap frame and the previous callback stack */
     CurrentThread->TrapFrame = TrapFrame;
-    CurrentThread->CallbackStack = (PVOID)CalloutFrame->CallbackStack;
+    KxSetThreadCallbackStack(CurrentThread, (PVOID)KxCalloutFrameCallbackStack(CalloutFrame));
 
     /* Bring interrupts back */
     _enable();
@@ -400,4 +414,3 @@ NtCallbackReturn(
     /* Now switch back to the old stack */
     KiCallbackReturn(CalloutFrame, CallbackStatus);
 }
-
