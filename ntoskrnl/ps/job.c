@@ -119,8 +119,30 @@ NTAPI
 PspAssignProcessToJob(PEPROCESS Process,
     PEJOB Job)
 {
-    DPRINT("PspAssignProcessToJob() is unimplemented!\n");
-    return STATUS_NOT_IMPLEMENTED;
+    PKTHREAD CurrentThread;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    CurrentThread = KeGetCurrentThread();
+
+    KeEnterGuardedRegionThread(CurrentThread);
+    ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
+
+    if ((Job->ActiveProcessLimit != 0) &&
+        (Job->ActiveProcesses >= Job->ActiveProcessLimit))
+    {
+        Status = STATUS_QUOTA_EXCEEDED;
+    }
+    else
+    {
+        InsertTailList(&Job->ProcessListHead, &Process->JobLinks);
+        Job->TotalProcesses++;
+        Job->ActiveProcesses++;
+    }
+
+    ExReleaseResourceLite(&Job->JobLock);
+    KeLeaveGuardedRegionThread(CurrentThread);
+
+    return Status;
 }
 
 NTSTATUS
@@ -138,7 +160,30 @@ NTAPI
 PspRemoveProcessFromJob(IN PEPROCESS Process,
                         IN PEJOB Job)
 {
-    /* FIXME */
+    PKTHREAD CurrentThread;
+    BOOLEAN Exited;
+
+    CurrentThread = KeGetCurrentThread();
+
+    KeEnterGuardedRegionThread(CurrentThread);
+    ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
+
+    if (Process->JobLinks.Flink != NULL)
+    {
+        Exited = BooleanFlagOn(Process->JobStatus, 2);
+
+        RemoveEntryList(&Process->JobLinks);
+        Process->JobLinks.Flink = NULL;
+        Process->JobLinks.Blink = NULL;
+
+        if (!Exited && Job->ActiveProcesses != 0)
+        {
+            Job->ActiveProcesses--;
+        }
+    }
+
+    ExReleaseResourceLite(&Job->JobLock);
+    KeLeaveGuardedRegionThread(CurrentThread);
 }
 
 VOID
@@ -146,7 +191,27 @@ NTAPI
 PspExitProcessFromJob(IN PEJOB Job,
                       IN PEPROCESS Process)
 {
-    /* FIXME */
+    PKTHREAD CurrentThread;
+
+    CurrentThread = KeGetCurrentThread();
+
+    KeEnterGuardedRegionThread(CurrentThread);
+    ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
+
+    if (!BooleanFlagOn(Process->JobStatus, 2))
+    {
+        SetFlag(Process->JobStatus, 2);
+
+        if (Job->ActiveProcesses != 0)
+        {
+            Job->ActiveProcesses--;
+        }
+
+        Job->TotalTerminatedProcesses++;
+    }
+
+    ExReleaseResourceLite(&Job->JobLock);
+    KeLeaveGuardedRegionThread(CurrentThread);
 }
 
 /*
@@ -172,13 +237,22 @@ NtAssignProcessToJobObject (
     I open the process handle before the job handle is that a simple test showed
     that it first complains about a invalid process handle! The other way around
     would be simpler though... */
-    Status = ObReferenceObjectByHandle(
-        ProcessHandle,
-        PROCESS_TERMINATE,
-        PsProcessType,
-        PreviousMode,
-        (PVOID*)&Process,
-        NULL);
+    if (ProcessHandle == NtCurrentProcess())
+    {
+        Process = PsGetCurrentProcess();
+        ObReferenceObject(Process);
+        Status = STATUS_SUCCESS;
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(
+            ProcessHandle,
+            PROCESS_TERMINATE,
+            PsProcessType,
+            PreviousMode,
+            (PVOID*)&Process,
+            NULL);
+    }
     if(NT_SUCCESS(Status))
     {
         if(Process->Job == NULL)
@@ -220,6 +294,19 @@ NtAssignProcessToJobObject (
                         /* let's actually assign the process to the job as we're not holding
                         the process lock anymore! */
                         Status = PspAssignProcessToJob(Process, Job);
+                        if(!NT_SUCCESS(Status))
+                        {
+                            if(ExAcquireRundownProtection(&Process->RundownProtect))
+                            {
+                                if(Process->Job == Job)
+                                {
+                                    Process->Job = NULL;
+                                    ObDereferenceObject(Job);
+                                }
+
+                                ExReleaseRundownProtection(&Process->RundownProtect);
+                            }
+                        }
                     }
                 }
 
