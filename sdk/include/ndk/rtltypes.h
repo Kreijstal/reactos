@@ -1367,6 +1367,10 @@ typedef struct _RTLP_CURDIR_REF
 {
     LONG RefCount;
     HANDLE Handle;
+    ULONG OldDismountCount;
+    UNICODE_STRING Path;
+    LONG FSCharacteristics;
+    DECLSPEC_ALIGN(8) WCHAR Buffer[2];
 } RTLP_CURDIR_REF, *PRTLP_CURDIR_REF;
 
 typedef struct _RTL_RELATIVE_NAME_U
