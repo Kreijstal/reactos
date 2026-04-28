@@ -3353,6 +3353,9 @@ Return Value:
     PBCB *Bcbs = NULL;
     ULONG Page;
     ULONG PagesPinned = 0;
+    PERESOURCE *AcquiredResources = NULL;
+    ULONG AcquiredResourceCount = 0;
+    ULONG AcquiredResourceCapacity = 0;
 
     ULONG DcbSize;
     ULONG TotalBytesAllocated = 0;
@@ -3395,9 +3398,29 @@ Return Value:
          Links != &Dcb->Specific.Dcb.ParentDcbQueue;
          Links = Links->Flink) {
 
+        AcquiredResourceCapacity += 1;
+    }
+
+    if (AcquiredResourceCapacity != 0) {
+
+        AcquiredResources = FsRtlAllocatePoolWithTag( PagedPool,
+                                                      AcquiredResourceCapacity * sizeof(PERESOURCE),
+                                                      TAG_ERESOURCE );
+    }
+
+    for (Links = Dcb->Specific.Dcb.ParentDcbQueue.Flink;
+         Links != &Dcb->Specific.Dcb.ParentDcbQueue;
+         Links = Links->Flink) {
+
         Fcb = CONTAINING_RECORD( Links, FCB, ParentDcbLinks );
 
-        (VOID)ExAcquireResourceExclusiveLite( Fcb->Header.Resource, TRUE );
+        if (!ExAcquireResourceExclusiveLite( Fcb->Header.Resource, TRUE )) {
+
+            FatRaiseStatus( IrpContext, STATUS_CANT_WAIT );
+        }
+
+        AcquiredResources[AcquiredResourceCount] = Fcb->Header.Resource;
+        AcquiredResourceCount += 1;
     }
 
     _SEH2_TRY {
@@ -3720,6 +3743,8 @@ Return Value:
                 } _SEH2_EXCEPT(FsRtlIsNtstatusExpected(_SEH2_GetExceptionCode()) ?
                          EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
 
+                      TmpBcb = NULL;
+                      TmpDirent = NULL;
                       InvalidateFcbs = TRUE;
                 } _SEH2_END;
             }
@@ -3773,13 +3798,15 @@ Return Value:
 
         FatUnpinBcb( IrpContext, Bcb );
 
-        for (Links = Dcb->Specific.Dcb.ParentDcbQueue.Flink;
-             Links != &Dcb->Specific.Dcb.ParentDcbQueue;
-             Links = Links->Flink) {
+        while (AcquiredResourceCount != 0) {
 
-            Fcb = CONTAINING_RECORD( Links, FCB, ParentDcbLinks );
+            AcquiredResourceCount -= 1;
+            ExReleaseResourceLite( AcquiredResources[AcquiredResourceCount] );
+        }
 
-            ExReleaseResourceLite( Fcb->Header.Resource );
+        if (AcquiredResources != NULL) {
+
+            ExFreePool( AcquiredResources );
         }
 
         IrpContext->Flags = SavedIrpContextFlag;
@@ -3791,6 +3818,3 @@ Return Value:
 
     return ReturnValue;
 }
-
-
-
