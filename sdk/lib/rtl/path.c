@@ -1748,7 +1748,9 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
     FILE_FS_DEVICE_INFORMATION FileFsDeviceInfo;
     ULONG SavedLength, CharLength, FullPathLength;
     HANDLE OldHandle = NULL, CurDirHandle = NULL, OldCurDirHandle = NULL;
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
     SIZE_T CurDirRefSize;
+#endif
 
     DPRINT("RtlSetCurrentDirectory_U %wZ\n", Path);
 
@@ -1874,12 +1876,18 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
         FullPath.Length += sizeof(WCHAR);
     }
 
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
     CurDirRefSize = FIELD_OFFSET(RTLP_CURDIR_REF, Buffer) + FullPath.Length + sizeof(WCHAR);
+#endif
 
     /* If we have previous current directory with only us as reference, save it */
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
     if (RtlpCurDirRef != NULL &&
         RtlpCurDirRef->RefCount == 1 &&
         RtlpCurDirRef->Path.MaximumLength >= FullPath.Length + sizeof(WCHAR))
+#else
+    if (RtlpCurDirRef != NULL && RtlpCurDirRef->RefCount == 1)
+#endif
     {
         OldCurDirHandle = RtlpCurDirRef->Handle;
     }
@@ -1887,7 +1895,11 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
     {
         /* Allocate new current directory struct saving previous one */
         OldCurDir = RtlpCurDirRef;
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
         RtlpCurDirRef = RtlAllocateHeap(RtlGetProcessHeap(), 0, CurDirRefSize);
+#else
+        RtlpCurDirRef = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(RTLP_CURDIR_REF));
+#endif
         if (!RtlpCurDirRef)
         {
             RtlpCurDirRef = OldCurDir;
@@ -1898,22 +1910,28 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
 
         /* Set reference to 1 (us) */
         RtlpCurDirRef->RefCount = 1;
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
         RtlpCurDirRef->Path.MaximumLength = FullPath.Length + sizeof(WCHAR);
+#endif
     }
 
     /* Save new data */
     CurDir->Handle = CurDirHandle;
     RtlpCurDirRef->Handle = CurDirHandle;
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
     RtlpCurDirRef->OldDismountCount = 0;
     RtlpCurDirRef->Path.Buffer = RtlpCurDirRef->Buffer;
     RtlpCurDirRef->Path.Length = FullPath.Length;
     RtlpCurDirRef->FSCharacteristics = FileFsDeviceInfo.Characteristics;
+#endif
     CurDirHandle = NULL;
 
     /* Copy full path */
     RtlCopyMemory(CurDir->DosPath.Buffer, FullPath.Buffer, FullPath.Length + sizeof(WCHAR));
     CurDir->DosPath.Length = FullPath.Length;
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
     RtlCopyMemory(RtlpCurDirRef->Path.Buffer, FullPath.Buffer, FullPath.Length + sizeof(WCHAR));
+#endif
 
     Status = STATUS_SUCCESS;
 
