@@ -1126,4 +1126,50 @@ private:
 
 #endif
 
+FORCEINLINE
+PKWAIT_BLOCK
+KiGetNextWaitBlock(_In_ PKWAIT_BLOCK WaitBlock)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    PKTHREAD Thread;
+    PETHREAD EThread;
+
+    Thread = WaitBlock->Thread;
+    if ((WaitBlock >= &Thread->WaitBlock[0]) &&
+        (WaitBlock <= &Thread->WaitBlock[THREAD_WAIT_OBJECTS]))
+    {
+        EThread = CONTAINING_RECORD(Thread, ETHREAD, Tcb);
+        return EThread->WaitBlockNext[WaitBlock - &Thread->WaitBlock[0]];
+    }
+
+    return (PKWAIT_BLOCK)WaitBlock->SparePtr;
+#else
+    return WaitBlock->NextWaitBlock;
+#endif
+}
+
+FORCEINLINE
+VOID
+KiSetNextWaitBlock(_In_ PKWAIT_BLOCK WaitBlock,
+                   _In_opt_ PKWAIT_BLOCK NextWaitBlock)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    PKTHREAD Thread;
+    PETHREAD EThread;
+
+    Thread = WaitBlock->Thread;
+    if ((WaitBlock >= &Thread->WaitBlock[0]) &&
+        (WaitBlock <= &Thread->WaitBlock[THREAD_WAIT_OBJECTS]))
+    {
+        EThread = CONTAINING_RECORD(Thread, ETHREAD, Tcb);
+        EThread->WaitBlockNext[WaitBlock - &Thread->WaitBlock[0]] = NextWaitBlock;
+        return;
+    }
+
+    WaitBlock->SparePtr = NextWaitBlock;
+#else
+    WaitBlock->NextWaitBlock = NextWaitBlock;
+#endif
+}
+
 #include "ke_x.h"
