@@ -2604,6 +2604,17 @@ PipDeviceActionWorker(
                 {
                     PiDevNodeStateMachine(deviceNode);
                 }
+                else if (deviceNode->State == DeviceNodeStarted &&
+                         !(deviceNode->Flags & DNF_HAS_PROBLEM))
+                {
+                    /*
+                     * The device may already have been started by kernel-mode
+                     * enumeration before user-mode setup installs or finalizes
+                     * the matching driver package. Treat that as success: the
+                     * requested post-install state has already been reached.
+                     */
+                    status = STATUS_SUCCESS;
+                }
                 else
                 {
                     DPRINT1("NOTE: attempt to start an already started/uninitialized device %wZ\n",
