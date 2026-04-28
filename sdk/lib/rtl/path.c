@@ -1748,6 +1748,7 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
     FILE_FS_DEVICE_INFORMATION FileFsDeviceInfo;
     ULONG SavedLength, CharLength, FullPathLength;
     HANDLE OldHandle = NULL, CurDirHandle = NULL, OldCurDirHandle = NULL;
+    SIZE_T CurDirRefSize;
 
     DPRINT("RtlSetCurrentDirectory_U %wZ\n", Path);
 
@@ -1873,8 +1874,12 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
         FullPath.Length += sizeof(WCHAR);
     }
 
+    CurDirRefSize = FIELD_OFFSET(RTLP_CURDIR_REF, Buffer) + FullPath.Length + sizeof(WCHAR);
+
     /* If we have previous current directory with only us as reference, save it */
-    if (RtlpCurDirRef != NULL && RtlpCurDirRef->RefCount == 1)
+    if (RtlpCurDirRef != NULL &&
+        RtlpCurDirRef->RefCount == 1 &&
+        RtlpCurDirRef->Path.MaximumLength >= FullPath.Length + sizeof(WCHAR))
     {
         OldCurDirHandle = RtlpCurDirRef->Handle;
     }
@@ -1882,7 +1887,7 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
     {
         /* Allocate new current directory struct saving previous one */
         OldCurDir = RtlpCurDirRef;
-        RtlpCurDirRef = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(RTLP_CURDIR_REF));
+        RtlpCurDirRef = RtlAllocateHeap(RtlGetProcessHeap(), 0, CurDirRefSize);
         if (!RtlpCurDirRef)
         {
             RtlpCurDirRef = OldCurDir;
@@ -1893,16 +1898,22 @@ RtlSetCurrentDirectory_U(IN PUNICODE_STRING Path)
 
         /* Set reference to 1 (us) */
         RtlpCurDirRef->RefCount = 1;
+        RtlpCurDirRef->Path.MaximumLength = FullPath.Length + sizeof(WCHAR);
     }
 
     /* Save new data */
     CurDir->Handle = CurDirHandle;
     RtlpCurDirRef->Handle = CurDirHandle;
+    RtlpCurDirRef->OldDismountCount = 0;
+    RtlpCurDirRef->Path.Buffer = RtlpCurDirRef->Buffer;
+    RtlpCurDirRef->Path.Length = FullPath.Length;
+    RtlpCurDirRef->FSCharacteristics = FileFsDeviceInfo.Characteristics;
     CurDirHandle = NULL;
 
     /* Copy full path */
     RtlCopyMemory(CurDir->DosPath.Buffer, FullPath.Buffer, FullPath.Length + sizeof(WCHAR));
     CurDir->DosPath.Length = FullPath.Length;
+    RtlCopyMemory(RtlpCurDirRef->Path.Buffer, FullPath.Buffer, FullPath.Length + sizeof(WCHAR));
 
     Status = STATUS_SUCCESS;
 
