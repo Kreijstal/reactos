@@ -916,7 +916,7 @@ OFFSET(WbWaitListEntry, KWAIT_BLOCK, WaitListEntry),
 OFFSET(WbThread, KWAIT_BLOCK, Thread),
 OFFSET(WbObject, KWAIT_BLOCK, Object),
 /* KWAIT_BLOCK was re-laid-out at NTDDI_WIN8; NextWaitBlock only exists in
- * the pre-Win8 layout.  See xdk/ketypes.h _KWAIT_BLOCK. */
+ * the pre-Win8 public layout.  See xdk/ketypes.h _KWAIT_BLOCK. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(WbNextWaitBlock, KWAIT_BLOCK, NextWaitBlock),
 #endif

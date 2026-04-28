@@ -186,7 +186,11 @@ PspReapRoutine(IN PVOID Context)
 
             /* Delete this entry's kernel stack */
             MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+                                Thread->LargeStack);
+#else
                                 Thread->Tcb.LargeStack);
+#endif
             Thread->Tcb.InitialStack = NULL;
 
             /* Move to the next entry */
@@ -413,7 +417,11 @@ PspDeleteThread(IN PVOID ObjectBody)
     {
         /* Release it */
         MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+                            Thread->LargeStack);
+#else
                             Thread->Tcb.LargeStack);
+#endif
     }
 
     /* Check if we have a CID Handle */
@@ -528,7 +536,9 @@ PspExitThread(IN NTSTATUS ExitStatus)
     ExWaitForRundownProtectionRelease(&Thread->RundownProtect);
 
     /* Cleanup the power state */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    PopCleanupPowerState((PPOWER_STATE)&Thread->PowerState);
+#elif (NTDDI_VERSION >= NTDDI_WIN7)
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.LargeStack);
 #else
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.PowerState);
