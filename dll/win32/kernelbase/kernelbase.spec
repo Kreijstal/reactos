@@ -1,6 +1,6 @@
 @ stdcall QueryInterruptTime(ptr)
 @ stdcall QueryInterruptTimePrecise(ptr)
-@ stdcall QueryUnbiasedInterruptTime(ptr) kernel32.QueryUnbiasedInterruptTime
+@ stdcall QueryUnbiasedInterruptTime(ptr)
 @ stdcall QueryUnbiasedInterruptTimePrecise(ptr)
 @ stdcall SetThreadDescription(ptr wstr)
 @ stdcall VirtualAlloc2(ptr ptr long long long ptr long)
