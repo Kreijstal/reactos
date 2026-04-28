@@ -632,14 +632,30 @@ GetModuleFileNameW(HINSTANCE hModule,
             /* Check if this is the requested module */
             if (Module->DllBase == (PVOID)hModule)
             {
+                PWSTR ModuleName = Module->FullDllName.Buffer;
+                ULONG ModuleNameLength = Module->FullDllName.Length;
+                ULONG ModuleNameMaximumLength = Module->FullDllName.MaximumLength;
+
+                if ((ModuleNameLength >= 6 * sizeof(WCHAR)) &&
+                    (ModuleName[0] == L'\\') &&
+                    (ModuleName[1] == L'?') &&
+                    (ModuleName[2] == L'?') &&
+                    (ModuleName[3] == L'\\') &&
+                    (ModuleName[5] == L':'))
+                {
+                    ModuleName += 4;
+                    ModuleNameLength -= 4 * sizeof(WCHAR);
+                    ModuleNameMaximumLength -= 4 * sizeof(WCHAR);
+                }
+
                 /* Calculate size to copy */
-                Length = min(nSize, Module->FullDllName.MaximumLength);
+                Length = min(nSize, ModuleNameMaximumLength);
 
                 /* Copy contents */
-                RtlMoveMemory(lpFilename, Module->FullDllName.Buffer, Length);
+                RtlMoveMemory(lpFilename, ModuleName, Length);
 
                 /* Subtract a terminating zero */
-                if (Length == Module->FullDllName.MaximumLength)
+                if (Length == ModuleNameMaximumLength)
                     Length -= sizeof(WCHAR);
 
                 /* Break out of the loop */
