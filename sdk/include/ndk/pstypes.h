@@ -1549,6 +1549,12 @@ typedef struct _ETHREAD
     PUNICODE_STRING ThreadName;
     // TODO: Missing Win10+ members
 #endif
+#if (NTDDI_VERSION >= NTDDI_WIN8) && defined(__REACTOS__)
+    UCHAR LargeStack;
+    UCHAR PowerState;
+    PVOID CallbackStack;
+    PKWAIT_BLOCK WaitBlockNext[THREAD_WAIT_OBJECTS + 1];
+#endif
 #if DBG
     //
     // ReactOS-only debug owner tracking for EX_PUSH_LOCK.
