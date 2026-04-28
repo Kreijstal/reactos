@@ -1568,6 +1568,12 @@ typedef struct _ETHREAD
     volatile ULONG CycleTimeHigh;
 #endif
 #endif
+#if (NTDDI_VERSION >= NTDDI_WIN8) && defined(__REACTOS__)
+    UCHAR LargeStack;
+    UCHAR PowerState;
+    PVOID CallbackStack;
+    PKWAIT_BLOCK WaitBlockNext[THREAD_WAIT_OBJECTS + 1];
+#endif
 #if DBG
     //
     // ReactOS-only debug owner tracking for EX_PUSH_LOCK.

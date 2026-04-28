@@ -949,7 +949,7 @@ KeInitThread(IN OUT PKTHREAD Thread,
     TimerWaitBlock->Object = Timer;
     TimerWaitBlock->WaitKey = STATUS_TIMEOUT;
     TimerWaitBlock->WaitType = WaitAny;
-    TimerWaitBlock->NextWaitBlock = NULL;
+    KiSetNextWaitBlock(TimerWaitBlock, NULL);
 
     /* Link the two wait lists together */
     TimerWaitBlock->WaitListEntry.Flink = &Timer->Header.WaitListHead;

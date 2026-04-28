@@ -69,7 +69,7 @@ KiUnlinkThread(IN PKTHREAD Thread,
         RemoveEntryList(&WaitBlock->WaitListEntry);
 
         /* Go to the next one */
-        WaitBlock = WaitBlock->NextWaitBlock;
+        WaitBlock = KiGetNextWaitBlock(WaitBlock);
     } while (WaitBlock != Thread->WaitBlockList);
 
     /* Remove the thread from the wait list! */
@@ -762,7 +762,7 @@ KeWaitForMultipleObjects(IN ULONG Count,
                         KiSatisfyObjectWait(CurrentObject, Thread);
 
                         /* Go to the next block */
-                        WaitBlock = WaitBlock->NextWaitBlock;
+                        WaitBlock = KiGetNextWaitBlock(WaitBlock);
                     } while(WaitBlock != WaitBlockArray);
 
                     /* Set the wait status and get out */
@@ -792,7 +792,7 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 Timer->Header.Inserted = TRUE;
 
                 /* Link the wait blocks */
-                WaitBlock->NextWaitBlock = TimerBlock;
+                KiSetNextWaitBlock(WaitBlock, TimerBlock);
             }
 
             /* Insert into Object's Wait List*/
@@ -807,7 +807,7 @@ KeWaitForMultipleObjects(IN ULONG Count,
                                &WaitBlock->WaitListEntry);
 
                 /* Move to the next Wait Block */
-                WaitBlock = WaitBlock->NextWaitBlock;
+                WaitBlock = KiGetNextWaitBlock(WaitBlock);
             } while (WaitBlock != WaitBlockArray);
 
             /* Handle Kernel Queues */
