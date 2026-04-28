@@ -8,6 +8,7 @@
  */
 
 #define WIN32_NO_STATUS
+#define _KERNEL32_
 #include <windef.h>
 #include <winbase.h>
 #include <winerror.h>
@@ -49,6 +50,11 @@ BOOL WINAPI QueryInterruptTime(PULONGLONG InterruptTime)
 BOOL WINAPI QueryInterruptTimePrecise(PULONGLONG InterruptTime)
 {
     return QueryInterruptTime(InterruptTime);
+}
+
+BOOL WINAPI QueryUnbiasedInterruptTime(PULONGLONG UnbiasedTime)
+{
+    return QueryInterruptTime(UnbiasedTime);
 }
 
 BOOL WINAPI QueryUnbiasedInterruptTimePrecise(PULONGLONG UnbiasedTime)
