@@ -1474,15 +1474,14 @@ EHCI_InterruptService(IN PVOID ehciExtension)
         }
     }
 
-    FrameIndex = READ_REGISTER_ULONG(&OperationalRegs->FrameIndex) / EHCI_MICROFRAMES;
-    FrameIndex &= EHCI_FRINDEX_FRAME_MASK;
+    FrameIndex = READ_REGISTER_ULONG(&OperationalRegs->FrameIndex) &
+                 ((EHCI_FRINDEX_FRAME_MASK << 3) | (EHCI_MICROFRAMES - 1));
 
-    if ((FrameIndex ^ EhciExtension->FrameIndex) & EHCI_FRAME_LIST_MAX_ENTRIES)
+    if (FrameIndex < (EhciExtension->FrameIndex &
+                      ((EHCI_FRINDEX_FRAME_MASK << 3) | (EHCI_MICROFRAMES - 1))))
     {
-        EhciExtension->FrameHighPart += 2 * EHCI_FRAME_LIST_MAX_ENTRIES;
-
-        EhciExtension->FrameHighPart -= (FrameIndex ^ EhciExtension->FrameHighPart) &
-                                        EHCI_FRAME_LIST_MAX_ENTRIES;
+        EhciExtension->FrameHighPart +=
+            ((EHCI_FRINDEX_FRAME_MASK << 3) | EHCI_MICROFRAMES);
     }
 
     EhciExtension->FrameIndex = FrameIndex;
@@ -3363,20 +3362,30 @@ NTAPI
 EHCI_Get32BitFrameNumber(IN PVOID ehciExtension)
 {
     PEHCI_EXTENSION EhciExtension = ehciExtension;
-    ULONG FrameIdx;
     ULONG FrameIndex;
     ULONG FrameNumber;
+    ULONG FrameMask;
+    ULONG FrameRange;
 
     //DPRINT_EHCI("EHCI_Get32BitFrameNumber: EhciExtension - %p\n", EhciExtension);
 
-    FrameIdx = EhciExtension->FrameIndex;
-    FrameIndex = READ_REGISTER_ULONG(&EhciExtension->OperationalRegs->FrameIndex);
+    FrameMask = (EHCI_FRINDEX_FRAME_MASK << 3) | (EHCI_MICROFRAMES - 1);
+    FrameRange = FrameMask + 1;
 
-    FrameNumber = (USHORT)FrameIdx ^ ((FrameIndex / EHCI_MICROFRAMES) & EHCI_FRINDEX_FRAME_MASK);
-    FrameNumber &= EHCI_FRAME_LIST_MAX_ENTRIES;
-    FrameNumber += FrameIndex | ((FrameIndex / EHCI_MICROFRAMES) & EHCI_FRINDEX_INDEX_MASK);
+    FrameIndex = READ_REGISTER_ULONG(&EhciExtension->OperationalRegs->FrameIndex) &
+                 FrameMask;
 
-    return FrameNumber;
+    FrameNumber = EhciExtension->FrameHighPart;
+
+    if (FrameIndex < (EhciExtension->FrameIndex & FrameMask))
+    {
+        FrameNumber += FrameRange;
+    }
+
+    EhciExtension->FrameHighPart = FrameNumber & ~FrameMask;
+    EhciExtension->FrameIndex = FrameIndex;
+
+    return (FrameNumber & ~FrameMask) | FrameIndex;
 }
 
 VOID

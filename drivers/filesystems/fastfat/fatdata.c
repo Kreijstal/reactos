@@ -309,7 +309,6 @@ Return Value:
         //  We raised this code explicitly ourselves, so it had better be
         //  expected.
         //
-
         NT_ASSERT( IrpContext->ExceptionStatus == ExceptionCode );
         NT_ASSERT( FsRtlIsNtstatusExpected( ExceptionCode ) );
     }
@@ -1006,7 +1005,8 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
+    _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
+    PERESOURCE _SEH2_VOLATILE FcbResource = NULL;
 
     PAGED_CODE();
     UNREFERENCED_PARAMETER( DeviceObject );
@@ -1048,7 +1048,19 @@ Return Value:
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
 
-        if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
+        if (((NodeType(Fcb) != FAT_NTC_FCB) &&
+             (NodeType(Fcb) != FAT_NTC_DCB) &&
+             (NodeType(Fcb) != FAT_NTC_ROOT_DCB)) ||
+            (Fcb->FcbCondition != FcbGood) ||
+            (Fcb->Header.Resource == NULL)) {
+
+            FsRtlExitFileSystem();
+            return Results;
+        }
+
+        FcbResource = Fcb->Header.Resource;
+
+        if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
 
             FsRtlExitFileSystem();
             return Results;
@@ -1130,7 +1142,7 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( Fcb->Header.Resource ); }
+        if (FcbAcquired) { ExReleaseResourceLite( FcbResource ); }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1186,7 +1198,8 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
+    _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
+    PERESOURCE _SEH2_VOLATILE FcbResource = NULL;
 
     PAGED_CODE();
 
@@ -1229,7 +1242,19 @@ Return Value:
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
 
-        if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
+        if (((NodeType(Fcb) != FAT_NTC_FCB) &&
+             (NodeType(Fcb) != FAT_NTC_DCB) &&
+             (NodeType(Fcb) != FAT_NTC_ROOT_DCB)) ||
+            (Fcb->FcbCondition != FcbGood) ||
+            (Fcb->Header.Resource == NULL)) {
+
+            FsRtlExitFileSystem();
+            return Results;
+        }
+
+        FcbResource = Fcb->Header.Resource;
+
+        if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
 
             FsRtlExitFileSystem();
             return Results;
@@ -1291,7 +1316,7 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( Fcb->Header.Resource ); }
+        if (FcbAcquired) { ExReleaseResourceLite( FcbResource ); }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1347,7 +1372,8 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
+    _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
+    PERESOURCE _SEH2_VOLATILE FcbResource = NULL;
 
     PAGED_CODE();
 
@@ -1390,7 +1416,19 @@ Return Value:
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
 
-        if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
+        if (((NodeType(Fcb) != FAT_NTC_FCB) &&
+             (NodeType(Fcb) != FAT_NTC_DCB) &&
+             (NodeType(Fcb) != FAT_NTC_ROOT_DCB)) ||
+            (Fcb->FcbCondition != FcbGood) ||
+            (Fcb->Header.Resource == NULL)) {
+
+            FsRtlExitFileSystem();
+            return Results;
+        }
+
+        FcbResource = Fcb->Header.Resource;
+
+        if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
 
             FsRtlExitFileSystem();
             return Results;
@@ -1491,7 +1529,7 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( Fcb->Header.Resource ); }
+        if (FcbAcquired) { ExReleaseResourceLite( FcbResource ); }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1573,4 +1611,3 @@ Return Value:
                                    &Fcb->FullFileName,
                                    Thread);
 }
-

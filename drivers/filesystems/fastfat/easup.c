@@ -392,6 +392,7 @@ Return Value:
 
 {
     PBCB EaBcb;
+    PBCB LocalEaBcb;
     BOOLEAN LockedEaFcb;
 
     PEA_SET_HEADER EaSetHeader = NULL;
@@ -644,7 +645,9 @@ Return Value:
         //  Unpin the dirents for the EaFcb and EaSetFcb if necessary.
         //
 
-        FatUnpinBcb( IrpContext, EaBcb );
+        LocalEaBcb = EaBcb;
+        EaBcb = NULL;
+        FatUnpinBcb( IrpContext, LocalEaBcb );
         FatUnpinEaRange( IrpContext, &EaSetRange );
 
         DebugTrace(-1, Dbg, "FatCreateEa -> Exit\n", 0);
@@ -3663,6 +3666,8 @@ Return Value:
             ByteCount = Length;
         }
 
+        *NextBcb = NULL;
+
         if (!CcPinRead( VirtualEaFile,
                         &LargeVbo,
                         ByteCount,
@@ -3815,6 +3820,9 @@ Return Value:
 
 {
     PBCB *NextBcb;
+    PBCB *BcbChain;
+    USHORT BcbChainLength;
+    BOOLEAN FreeBcbChain;
     ULONG BcbCount;
 
     PAGED_CODE();
@@ -3837,8 +3845,18 @@ Return Value:
 
     if (EaRange->BcbChain != NULL) {
 
-        BcbCount = EaRange->BcbChainLength;
-        NextBcb = EaRange->BcbChain;
+        BcbChain = EaRange->BcbChain;
+        BcbChainLength = EaRange->BcbChainLength;
+        FreeBcbChain = (BcbChain != &EaRange->BcbArray[0]);
+
+        EaRange->BcbChain = NULL;
+        EaRange->BcbChainLength = 0;
+        EaRange->Data = NULL;
+        EaRange->StartingVbo = 0;
+        EaRange->Length = 0;
+
+        BcbCount = BcbChainLength;
+        NextBcb = BcbChain;
 
         while (BcbCount--) {
 
@@ -3855,12 +3873,10 @@ Return Value:
         //  If we allocated a Bcb chain, deallocate it here.
         //
 
-        if (EaRange->BcbChain != &EaRange->BcbArray[0]) {
+        if (FreeBcbChain) {
 
-            ExFreePool( EaRange->BcbChain );
+            ExFreePool( BcbChain );
         }
-
-        EaRange->BcbChain = NULL;
     }
 
     return;
