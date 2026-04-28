@@ -897,8 +897,10 @@ Return Value:
 
     PBCB BootBcb;
     PPACKED_BOOT_SECTOR BootSector = NULL;
+    BOOLEAN BootBcbAcquired = FALSE;
 
     PBCB DirentBcb;
+    BOOLEAN DirentBcbAcquired = FALSE;
     PDIRENT Dirent;
     ULONG ByteOffset;
 
@@ -1197,6 +1199,10 @@ Return Value:
                                &BootBcb,
                                (PVOID *)&BootSector );
 
+            if (BootBcb != NULL) {
+                BootBcbAcquired = TRUE;
+            }
+
         } _SEH2_EXCEPT( Vpb->RealDevice->DeviceType == FILE_DEVICE_CD_ROM ?
                   EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
 
@@ -1348,7 +1354,10 @@ Return Value:
         //  works.
         //
 
-        FatUnpinBcb( IrpContext, BootBcb );
+        if (BootBcbAcquired) {
+            FatUnpinBcb( IrpContext, BootBcb );
+            BootBcbAcquired = FALSE;
+        }
 
         //
         //  Compute a number of fields for Vcb.AllocationSupport
@@ -1420,6 +1429,10 @@ Return Value:
                               &DirentBcb,
                               (PVBO)&ByteOffset );
 
+        if (DirentBcb != NULL) {
+            DirentBcbAcquired = TRUE;
+        }
+
         if (Dirent != NULL) {
 
             UCHAR OemBuffer[11];
@@ -1469,6 +1482,11 @@ Return Value:
         } else {
 
             Vpb->VolumeLabelLength = 0;
+        }
+
+        if (DirentBcbAcquired) {
+            FatUnpinBcb( IrpContext, DirentBcb );
+            DirentBcbAcquired = FALSE;
         }
 
         //
@@ -1751,8 +1769,14 @@ Return Value:
 
         DebugUnwind( FatMountVolume );
 
-        FatUnpinBcb( IrpContext, BootBcb );
-        FatUnpinBcb( IrpContext, DirentBcb );
+        if (BootBcbAcquired) {
+            FatUnpinBcb( IrpContext, BootBcb );
+        }
+
+        if (DirentBcbAcquired) {
+            FatUnpinBcb( IrpContext, DirentBcb );
+            DirentBcbAcquired = FALSE;
+        }
 
         //
         //  Check if a volume was mounted.  If not then we need to
@@ -5994,8 +6018,11 @@ Return Value:
             //  apart the allocator).
             //
 
-            (VOID)FatAcquireExclusiveFcb( IrpContext, FcbOrDcb );
-            FcbAcquired = TRUE;
+            FcbAcquired = FatAcquireExclusiveFcb( IrpContext, FcbOrDcb );
+
+            if (!FcbAcquired) {
+                try_return( Status = STATUS_CANT_WAIT );
+            }
 
             FatVerifyFcb( IrpContext, FcbOrDcb );
 
@@ -6055,8 +6082,11 @@ Return Value:
 
             if (FcbAcquired == FALSE) {
 
-                (VOID)FatAcquireExclusiveFcb( IrpContext, FcbOrDcb );
-                FcbAcquired = TRUE;
+                FcbAcquired = FatAcquireExclusiveFcb( IrpContext, FcbOrDcb );
+
+                if (!FcbAcquired) {
+                    try_return( Status = STATUS_CANT_WAIT );
+                }
 
                 FatVerifyFcb( IrpContext, FcbOrDcb );
             }

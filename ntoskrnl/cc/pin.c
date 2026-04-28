@@ -197,7 +197,14 @@ CcpGetAppropriateBcb(
                 Result = ExAcquireSharedStarveExclusive(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
 
-            ASSERT(Result);
+            if (!Result)
+            {
+                iBcb->PinCount--;
+                KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
+                ExDeleteResourceLite(&iBcb->Lock);
+                ExFreeToNPagedLookasideList(&iBcbLookasideList, iBcb);
+                return NULL;
+            }
         }
 
         InsertTailList(&SharedCacheMap->BcbList, &iBcb->BcbEntry);
@@ -464,9 +471,9 @@ CcPinMappedData (
     ++CcPinMappedDataCount;
 
     Result = CcpPinData(SharedCacheMap, FileOffset, Length, Flags, Bcb, &Buffer);
-    if (Result)
+    if (Result && iBcb != NULL)
     {
-        CcUnpinData(&iBcb->PFCB);
+        CcpDereferenceBcb(SharedCacheMap, iBcb);
     }
 
     return Result;
@@ -589,6 +596,7 @@ CcUnpinDataForThread (
     IN	ERESOURCE_THREAD ResourceThreadId)
 {
     PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p ResourceThreadId=%lu\n", Bcb, ResourceThreadId);
 
@@ -598,7 +606,7 @@ CcUnpinDataForThread (
         iBcb->PinCount--;
     }
 
-    CcpDereferenceBcb(iBcb->Vacb->SharedCacheMap, iBcb);
+    CcpDereferenceBcb(SharedCacheMap, iBcb);
 }
 
 /*
@@ -656,8 +664,16 @@ CcUnpinRepinnedBcb (
 
         if (iBcb->PinCount != 0)
         {
-            ExReleaseResourceLite(&iBcb->Lock);
-            iBcb->PinCount--;
+            if (iBcb->Lock.ActiveEntries != 0)
+            {
+                ExReleaseResourceLite(&iBcb->Lock);
+            }
+            else
+            {
+                ExReinitializeResourceLite(&iBcb->Lock);
+            }
+
+            iBcb->PinCount = 0;
             ASSERT(iBcb->PinCount == 0);
         }
 
