@@ -1108,7 +1108,11 @@ FUNC KiConvertToGuiThread
 
     /* Check if we already have a large stack */
     mov rax, gs:[PcCurrentThread]
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    cmp byte ptr [rax + ETHREAD_LargeStack], 0
+#else
     cmp byte ptr [rax + KTHREAD_LargeStack], 0
+#endif
     jnz AlreadyLargeStack
 
     // NewStack = (ULONG_PTR)MmCreateKernelStack(TRUE, 0);
