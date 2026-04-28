@@ -124,7 +124,7 @@ KiSetProcessorType(VOID)
     {
         ExtendModel |= (Vendor == CPU_INTEL);
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-        ExtendModel |= (Vendor == CPU_CENTAUR);
+        ExtendModel |= (Vendor == CPU_VIA);
 #endif
     }
 #endif
