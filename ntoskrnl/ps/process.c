@@ -890,7 +890,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
         /* Hacky way of returning the PEB to the user-mode creator */
         if ((Process->Peb) && (CurrentThread->Tcb.Teb))
         {
-            CurrentThread->Tcb.Teb->NtTib.ArbitraryUserPointer = Process->Peb;
+            ((PTEB)CurrentThread->Tcb.Teb)->NtTib.ArbitraryUserPointer = Process->Peb;
         }
 
         /* Save the process handle */

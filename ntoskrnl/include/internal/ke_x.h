@@ -1112,7 +1112,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     DueTime.QuadPart = Timer->DueTime.QuadPart;                             \
                                                                             \
     /* Link the timer to this Wait Block */                                 \
-    TimerBlock->NextWaitBlock = TimerBlock;                                 \
+    KiSetNextWaitBlock(TimerBlock, TimerBlock);                             \
     Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;          \
     Timer->Header.WaitListHead.Blink = &TimerBlock->WaitListEntry;          \
                                                                             \
@@ -1149,12 +1149,12 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
         WaitBlock->Thread = Thread;                                         \
                                                                             \
         /* Link to next block */                                            \
-        WaitBlock->NextWaitBlock = &WaitBlockArray[Index + 1];              \
+        KiSetNextWaitBlock(WaitBlock, &WaitBlockArray[Index + 1]);          \
         Index++;                                                            \
     } while (Index < Count);                                                \
                                                                             \
     /* Link the last block */                                               \
-    WaitBlock->NextWaitBlock = WaitBlockArray;                              \
+    KiSetNextWaitBlock(WaitBlock, WaitBlockArray);                          \
                                                                             \
     /* Set default wait status */                                           \
     Thread->WaitStatus = STATUS_WAIT_0;                                     \
@@ -1163,7 +1163,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     if (Timeout)                                                            \
     {                                                                       \
         /* Link to the block */                                             \
-        TimerBlock->NextWaitBlock = WaitBlockArray;                         \
+        KiSetNextWaitBlock(TimerBlock, WaitBlockArray);                     \
                                                                             \
         /* Setup the timer */                                               \
         KxSetTimerForThreadWait(Timer, *Timeout, &Hand);                    \
@@ -1207,8 +1207,8 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
         DueTime.QuadPart = Timer->DueTime.QuadPart;                         \
                                                                             \
         /* Pointer to timer block */                                        \
-        WaitBlock->NextWaitBlock = TimerBlock;                              \
-        TimerBlock->NextWaitBlock = WaitBlock;                              \
+        KiSetNextWaitBlock(WaitBlock, TimerBlock);                          \
+        KiSetNextWaitBlock(TimerBlock, WaitBlock);                          \
                                                                             \
         /* Link the timer to this Wait Block */                             \
         Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;      \
@@ -1217,7 +1217,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     else                                                                    \
     {                                                                       \
         /* No timer block, just ourselves */                                \
-        WaitBlock->NextWaitBlock = WaitBlock;                               \
+        KiSetNextWaitBlock(WaitBlock, WaitBlock);                           \
     }                                                                       \
                                                                             \
     /* Set wait settings */                                                 \
@@ -1253,8 +1253,8 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
         DueTime.QuadPart = Timer->DueTime.QuadPart;                         \
                                                                             \
         /* Pointer to timer block */                                        \
-        WaitBlock->NextWaitBlock = TimerBlock;                              \
-        TimerBlock->NextWaitBlock = WaitBlock;                              \
+        KiSetNextWaitBlock(WaitBlock, TimerBlock);                          \
+        KiSetNextWaitBlock(TimerBlock, WaitBlock);                          \
                                                                             \
         /* Link the timer to this Wait Block */                             \
         Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;      \
@@ -1263,7 +1263,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     else                                                                    \
     {                                                                       \
         /* No timer block, just ourselves */                                \
-        WaitBlock->NextWaitBlock = WaitBlock;                               \
+        KiSetNextWaitBlock(WaitBlock, WaitBlock);                           \
     }                                                                       \
                                                                             \
     /* Set wait settings */                                                 \

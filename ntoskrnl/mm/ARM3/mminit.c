@@ -222,6 +222,70 @@ PFN_COUNT MmNumberOfPhysicalPages;
 //
 SIZE_T MmBootImageSize;
 
+static
+BOOLEAN
+MiIsBootLoaderMappedMemoryType(IN TYPE_OF_MEMORY MemoryType)
+{
+    switch (MemoryType)
+    {
+        case LoaderLoadedProgram:
+        case LoaderOsloaderStack:
+        case LoaderFirmwareTemporary:
+        case LoaderExceptionBlock:
+        case LoaderSystemBlock:
+        case LoaderFirmwarePermanent:
+        case LoaderSystemCode:
+        case LoaderHalCode:
+        case LoaderBootDriver:
+        case LoaderConsoleInDriver:
+        case LoaderConsoleOutDriver:
+        case LoaderStartupDpcStack:
+        case LoaderStartupKernelStack:
+        case LoaderStartupPanicStack:
+        case LoaderStartupPcrPage:
+        case LoaderStartupPdrPage:
+        case LoaderRegistryData:
+        case LoaderMemoryData:
+        case LoaderNlsData:
+        case LoaderXIPRom:
+        case LoaderOsloaderHeap:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+static
+SIZE_T
+MiGetBootImageSize(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
+{
+#if (NTDDI_VERSION < NTDDI_WIN8)
+    return LoaderBlock->Extension->LoaderPagesSpanned * PAGE_SIZE;
+#else
+    PLIST_ENTRY NextEntry;
+    PMEMORY_ALLOCATION_DESCRIPTOR MdBlock;
+    PFN_NUMBER LastLoaderPage = 0;
+
+    for (NextEntry = LoaderBlock->MemoryDescriptorListHead.Flink;
+         NextEntry != &LoaderBlock->MemoryDescriptorListHead;
+         NextEntry = NextEntry->Flink)
+    {
+        MdBlock = CONTAINING_RECORD(NextEntry,
+                                    MEMORY_ALLOCATION_DESCRIPTOR,
+                                    ListEntry);
+
+        if (MiIsBootLoaderMappedMemoryType(MdBlock->MemoryType) &&
+            (MdBlock->BasePage + MdBlock->PageCount > LastLoaderPage))
+        {
+            LastLoaderPage = MdBlock->BasePage + MdBlock->PageCount;
+        }
+    }
+
+    return LastLoaderPage * PAGE_SIZE;
+#endif
+}
+
 //
 // These three variables keep track of the core separation of address space that
 // exists between kernel mode and user mode.
@@ -2118,8 +2182,7 @@ MmArmInitSystem(IN ULONG Phase,
         // whatever follows are separate from the PDEs that boot loader might've
         // already created (and later, we can blow all that away if we want to).
         //
-        MmBootImageSize = KeLoaderBlock->Extension->LoaderPagesSpanned;
-        MmBootImageSize *= PAGE_SIZE;
+        MmBootImageSize = MiGetBootImageSize(KeLoaderBlock);
         MmBootImageSize = (MmBootImageSize + PDE_MAPPED_VA - 1) & ~(PDE_MAPPED_VA - 1);
         ASSERT((MmBootImageSize % PDE_MAPPED_VA) == 0);
 
