@@ -235,6 +235,7 @@ typedef struct _INTERNAL_BCB
     PUBLIC_BCB PFCB;
     PROS_VACB Vacb;
     ULONG PinCount;
+    ERESOURCE_THREAD ResourceThreadId;
     CSHORT RefCount; /* (At offset 0x34 on WinNT4) */
     LIST_ENTRY BcbEntry;
 } INTERNAL_BCB, *PINTERNAL_BCB;

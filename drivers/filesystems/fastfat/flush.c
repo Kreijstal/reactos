@@ -230,6 +230,7 @@ Return Value:
             //
 
             if ((Irp->Tail.Overlay.Thread != NULL) &&
+                ((ULONG_PTR)Irp->Tail.Overlay.Thread >= (ULONG_PTR)MmSystemRangeStart) &&
                 !IoIsSystemThread( Irp->Tail.Overlay.Thread )) {
 
                 OriginatingThread = Irp->Tail.Overlay.Thread;
@@ -308,6 +309,14 @@ Return Value:
                 NextFcb = Fcb->ParentDcb;
 
                 while (NextFcb != NULL) {
+                    BOOLEAN NextFcbVerified = TRUE;
+
+                    if (((ULONG_PTR)NextFcb < (ULONG_PTR)MmSystemRangeStart) ||
+                        ((NodeType(NextFcb) != FAT_NTC_DCB) &&
+                         (NodeType(NextFcb) != FAT_NTC_ROOT_DCB))) {
+
+                        break;
+                    }
 
                     //
                     //  Make sure the Fcb is OK.
@@ -321,7 +330,13 @@ Return Value:
                               EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
 
                         FatResetExceptionState( IrpContext );
+                        NextFcbVerified = FALSE;
                     } _SEH2_END;
+
+                    if (!NextFcbVerified) {
+
+                        break;
+                    }
 
                     if (NextFcb->FcbCondition == FcbGood) {
 
@@ -1368,4 +1383,3 @@ FatHijackCompletionRoutine (
 
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
-
