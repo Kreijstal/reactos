@@ -41,6 +41,20 @@ RtlpCopyParameterString(PWCHAR *Ptr,
    *Ptr = ALIGN_UP_POINTER_BY(*Ptr, sizeof(PVOID));
 }
 
+static __inline VOID
+RtlpCopyParameterData(PWCHAR *Ptr,
+		      PUNICODE_STRING Destination,
+		      PUNICODE_STRING Source)
+{
+   Destination->Length = Source->Length;
+   Destination->MaximumLength = Source->MaximumLength;
+   Destination->Buffer = (PWCHAR)(*Ptr);
+   if (Source->Length)
+     memmove(Destination->Buffer, Source->Buffer, Source->Length);
+   *Ptr = (PWCHAR)(((ULONG_PTR)*Ptr + Destination->MaximumLength + sizeof(ULONG) - 1) &
+                   ~(sizeof(ULONG) - 1));
+}
+
 
 /*
  * @implemented
@@ -210,10 +224,9 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
 			   0);
 
    /* copy runtime info */
-   RtlpCopyParameterString(&Dest,
-			   &Param->RuntimeData,
-			   RuntimeData,
-			   0);
+   RtlpCopyParameterData(&Dest,
+			 &Param->RuntimeData,
+			 RuntimeData);
 
    /* Make sure we didn't go past the end of the buffer */
    ASSERT(((PUCHAR)Dest - (PUCHAR)Param) <= Param->MaximumLength);

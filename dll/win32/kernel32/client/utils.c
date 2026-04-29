@@ -428,6 +428,18 @@ BaseCreateStack(
     StackCommit = ROUND_UP(StackCommit, PageSize);
     StackReserve = ROUND_UP(StackReserve, AllocationGranularity);
 
+#ifdef _M_AMD64
+    /*
+     * The AMD64 Cygwin/MSYS runtime obtains per-thread reentrancy data from
+     * the initial stack allocation by addressing below StackBase before any
+     * normal stack probing takes place.  Windows provides enough committed
+     * initial stack for this top-of-stack runtime area even when the PE stack
+     * commit field is only one page.
+     */
+    if (StackCommit < 0x10000)
+        StackCommit = 0x10000;
+#endif
+
     MinimumStackCommit = NtCurrentPeb()->MinimumStackCommit;
     if ((MinimumStackCommit != 0) && (StackCommit < MinimumStackCommit))
     {
