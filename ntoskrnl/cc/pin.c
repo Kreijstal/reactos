@@ -159,6 +159,7 @@ CcpGetAppropriateBcb(
 
             if (Result)
             {
+                DupBcb->ResourceThreadId = ExGetCurrentResourceThread();
                 DupBcb->PinCount++;
             }
             else
@@ -205,6 +206,8 @@ CcpGetAppropriateBcb(
                 ExFreeToNPagedLookasideList(&iBcbLookasideList, iBcb);
                 return NULL;
             }
+
+            iBcb->ResourceThreadId = ExGetCurrentResourceThread();
         }
 
         InsertTailList(&SharedCacheMap->BcbList, &iBcb->BcbEntry);
@@ -261,6 +264,7 @@ CcpPinData(
         }
 
         NewBcb->PinCount++;
+        NewBcb->ResourceThreadId = ExGetCurrentResourceThread();
     }
     else
     {
@@ -602,8 +606,19 @@ CcUnpinDataForThread (
 
     if (iBcb->PinCount != 0)
     {
+        if ((ExIsResourceAcquiredLite(&iBcb->Lock) == 0) &&
+            (iBcb->ResourceThreadId != 0))
+        {
+            ResourceThreadId = iBcb->ResourceThreadId;
+        }
+
         ExReleaseResourceForThreadLite(&iBcb->Lock, ResourceThreadId);
         iBcb->PinCount--;
+
+        if (iBcb->PinCount == 0)
+        {
+            iBcb->ResourceThreadId = 0;
+        }
     }
 
     CcpDereferenceBcb(SharedCacheMap, iBcb);
@@ -666,7 +681,10 @@ CcUnpinRepinnedBcb (
         {
             if (iBcb->Lock.ActiveEntries != 0)
             {
-                ExReleaseResourceLite(&iBcb->Lock);
+                ExReleaseResourceForThreadLite(&iBcb->Lock,
+                                               iBcb->ResourceThreadId != 0 ?
+                                               iBcb->ResourceThreadId :
+                                               ExGetCurrentResourceThread());
             }
             else
             {
@@ -674,6 +692,7 @@ CcUnpinRepinnedBcb (
             }
 
             iBcb->PinCount = 0;
+            iBcb->ResourceThreadId = 0;
             ASSERT(iBcb->PinCount == 0);
         }
 

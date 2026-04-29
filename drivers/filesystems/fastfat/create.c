@@ -910,7 +910,11 @@ Return Value:
                                      &Fcb,
                                      &Ccb ) == UserVolumeOpen) {
 
-                NT_ASSERT( RelatedFileObject == NULL || Vcb == DecodeVcb );
+                if ((RelatedFileObject != NULL) &&
+                    (Vcb != DecodeVcb)) {
+
+                    try_return( Iosb.Status = STATUS_OBJECT_PATH_NOT_FOUND );
+                }
 
                 //
                 //  Check if we were to open a directory
