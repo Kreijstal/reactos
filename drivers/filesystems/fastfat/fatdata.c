@@ -1057,7 +1057,6 @@ Return Value:
             FsRtlExitFileSystem();
             return Results;
         }
-
         FcbResource = Fcb->Header.Resource;
 
         if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
@@ -1142,7 +1141,11 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( FcbResource ); }
+        if (FcbAcquired) {
+
+            FcbAcquired = FALSE;
+            ExReleaseResourceLite( FcbResource );
+        }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1251,7 +1254,6 @@ Return Value:
             FsRtlExitFileSystem();
             return Results;
         }
-
         FcbResource = Fcb->Header.Resource;
 
         if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
@@ -1316,7 +1318,11 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( FcbResource ); }
+        if (FcbAcquired) {
+
+            FcbAcquired = FALSE;
+            ExReleaseResourceLite( FcbResource );
+        }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1425,7 +1431,6 @@ Return Value:
             FsRtlExitFileSystem();
             return Results;
         }
-
         FcbResource = Fcb->Header.Resource;
 
         if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
@@ -1529,7 +1534,11 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( FcbResource ); }
+        if (FcbAcquired) {
+
+            FcbAcquired = FALSE;
+            ExReleaseResourceLite( FcbResource );
+        }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
