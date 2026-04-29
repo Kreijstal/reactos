@@ -80,6 +80,17 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
     StackCommit = ROUND_UP(StackCommit, SystemBasicInfo.PageSize);
     StackReserve = ROUND_UP(StackReserve, SystemBasicInfo.AllocationGranularity);
 
+#ifdef _M_AMD64
+    /*
+     * Keep the top-of-stack runtime area committed on AMD64.  Some Windows
+     * runtimes, including Cygwin/MSYS newlib, place per-thread data below
+     * StackBase before they have probed enough stack pages to trip the guard
+     * page growth path.
+     */
+    if (StackCommit < 0x10000)
+        StackCommit = 0x10000;
+#endif
+
     /* Reserve memory for the stack */
     Stack = 0;
     Status = ZwAllocateVirtualMemory(ProcessHandle,
