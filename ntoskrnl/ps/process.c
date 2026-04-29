@@ -2075,6 +2075,18 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
         if (StackReserve == 0) StackReserve = 0x100000;  /* 1MB default */
         if (StackCommit == 0) StackCommit = PAGE_SIZE;
 
+#ifdef _M_AMD64
+        /*
+         * Keep the initial top-of-stack runtime area committed on AMD64.
+         * This matches the user-mode stack creation helpers and avoids
+         * runtimes faulting before the guard page growth path can run.
+         */
+        if (StackCommit < 0x10000)
+        {
+            StackCommit = 0x10000;
+        }
+#endif
+
         /* Ensure commit does not exceed reserve */
         if (StackCommit >= StackReserve)
         {
