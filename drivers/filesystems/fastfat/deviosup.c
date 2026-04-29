@@ -800,6 +800,7 @@ Return Value:
         BytesToRead = ByteCount;
 
         if ((Irp->Tail.Overlay.Thread != NULL) &&
+            ((ULONG_PTR)Irp->Tail.Overlay.Thread >= (ULONG_PTR)MmSystemRangeStart) &&
             !IoIsSystemThread( Irp->Tail.Overlay.Thread )) {
 
             OriginatingThread = Irp->Tail.Overlay.Thread;
@@ -839,6 +840,7 @@ Return Value:
         if (IoGetTopLevelIrp() == Irp) {
 
             if ((Irp->Tail.Overlay.Thread != NULL) &&
+                ((ULONG_PTR)Irp->Tail.Overlay.Thread >= (ULONG_PTR)MmSystemRangeStart) &&
                 !IoIsSystemThread( Irp->Tail.Overlay.Thread )) {
 
                 OriginatingThread = Irp->Tail.Overlay.Thread;
@@ -3818,5 +3820,4 @@ Return Value:
 
     return ZeroMdl;
 }
-
 
