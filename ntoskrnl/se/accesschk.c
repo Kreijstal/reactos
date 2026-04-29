@@ -2071,17 +2071,8 @@ SeAccessCheck(
     if (DesiredAccess == 0)
     {
         *GrantedAccess = PreviouslyGrantedAccess;
-        if (PreviouslyGrantedAccess == 0)
-        {
-            DPRINT1("Request for zero access to an object. Denying.\n");
-            *AccessStatus = STATUS_ACCESS_DENIED;
-            ret = FALSE;
-        }
-        else
-        {
-            *AccessStatus = STATUS_SUCCESS;
-            ret = TRUE;
-        }
+        *AccessStatus = STATUS_SUCCESS;
+        ret = TRUE;
     }
     else
     {
