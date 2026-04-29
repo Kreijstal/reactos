@@ -510,6 +510,20 @@ CopyParameterString(PWCHAR *Ptr,
     *Ptr += Destination->MaximumLength / sizeof(WCHAR);
 }
 
+static
+VOID
+CopyParameterData(PWCHAR *Ptr,
+                  PUNICODE_STRING64 Destination,
+                  PUNICODE_STRING Source)
+{
+    Destination->Length = Source->Length;
+    Destination->MaximumLength = Source->MaximumLength;
+    Destination->Buffer = WOW64_CAST_FROM_PTR(*Ptr);
+    if (Source->Length)
+        memmove(WOW64_CAST_TO_PTR(Destination->Buffer), Source->Buffer, Source->Length);
+    *Ptr = (PWCHAR)ALIGN_UP_BY((ULONG_PTR)*Ptr + Destination->MaximumLength, sizeof(ULONG));
+}
+
 /* TODO: This is duplicated code, find a better way to handle this. */
 static
 NTSTATUS
@@ -632,7 +646,7 @@ CreateProcessParameters64(
     CopyParameterString(&Dest, &Param->ShellInfo, ShellInfo, 0);
 
     /* copy runtime info */
-    CopyParameterString(&Dest, &Param->RuntimeData, RuntimeData, 0);
+    CopyParameterData(&Dest, &Param->RuntimeData, RuntimeData);
 
 #define DENORMALIZE(x,addr) {if(x) x=(UINT64)((ULONG_PTR)(x)-(ULONG_PTR)(addr));}
     if (Param && (Param->Flags & RTL_USER_PROCESS_PARAMETERS_NORMALIZED))
