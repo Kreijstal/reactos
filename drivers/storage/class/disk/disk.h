@@ -384,6 +384,13 @@ typedef struct _DISK_DATA {
 
     DISK_USER_WRITE_CACHE_SETTING WriteCacheOverride;
 
+    //
+    // Set after SCSIOP_SYNCHRONIZE_CACHE fails so later flushes rely on
+    // SRB_FUNCTION_FLUSH instead of repeatedly failing the whole flush.
+    //
+
+    BOOLEAN SyncCacheUnsupported;
+
 
 } DISK_DATA, *PDISK_DATA;
 

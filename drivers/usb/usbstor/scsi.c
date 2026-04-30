@@ -132,18 +132,16 @@ USBSTOR_CSWCompletionRoutine(
     PVOID Ctx)
 {
     PIRP_CONTEXT Context;
-    PIO_STACK_LOCATION IoStack;
     PPDO_DEVICE_EXTENSION PDODeviceExtension;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PSCSI_REQUEST_BLOCK Request;
 
     DPRINT("USBSTOR_CSWCompletionRoutine Irp %p Ctx %p Status %x\n", Irp, Ctx, Irp->IoStatus.Status);
 
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)IoStack->DeviceObject->DeviceExtension;
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Ctx;
     Context = &FDODeviceExtension->CurrentIrpContext;
-    Request = IoStack->Parameters.Scsi.Srb;
+    Request = Context->Srb;
+    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)Context->PDODeviceObject->DeviceExtension;
     ASSERT(Request);
 
     // first check for Irp errors
@@ -181,10 +179,9 @@ USBSTOR_CSWCompletionRoutine(
         // should happen only when a sense request was sent
         if (Request != FDODeviceExtension->ActiveSrb)
         {
-            ASSERT(IoStack->Parameters.Scsi.Srb == &Context->SenseSrb);
             FDODeviceExtension->ActiveSrb->SenseInfoBufferLength = Request->DataTransferLength;
             Request = FDODeviceExtension->ActiveSrb;
-            IoStack->Parameters.Scsi.Srb = Request;
+            Context->Srb = Request;
             Request->SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
         }
 
@@ -227,7 +224,7 @@ USBSTOR_CSWCompletionRoutine(
 ResetRecovery:
 
     Request = FDODeviceExtension->ActiveSrb;
-    IoStack->Parameters.Scsi.Srb = Request;
+    Context->Srb = Request;
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
     Request->SrbStatus = SRB_STATUS_BUS_RESET;
@@ -263,7 +260,6 @@ USBSTOR_DataCompletionRoutine(
     PVOID Ctx)
 {
     PIRP_CONTEXT Context;
-    PIO_STACK_LOCATION IoStack;
     PSCSI_REQUEST_BLOCK Request;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PPDO_DEVICE_EXTENSION PDODeviceExtension;
@@ -272,9 +268,8 @@ USBSTOR_DataCompletionRoutine(
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Ctx;
     Context = &FDODeviceExtension->CurrentIrpContext;
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    Request = IoStack->Parameters.Scsi.Srb;
-    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)IoStack->DeviceObject->DeviceExtension;
+    Request = Context->Srb;
+    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)Context->PDODeviceObject->DeviceExtension;
 
     // for Sense Request a partial MDL was already freed (if existed)
     if (Request == FDODeviceExtension->ActiveSrb &&
@@ -331,7 +326,7 @@ USBSTOR_CBWCompletionRoutine(
     PIRP Irp,
     PVOID Ctx)
 {
-    PIO_STACK_LOCATION IoStack;
+    PIRP_CONTEXT Context;
     PSCSI_REQUEST_BLOCK Request;
     PPDO_DEVICE_EXTENSION PDODeviceExtension;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
@@ -343,9 +338,9 @@ USBSTOR_CBWCompletionRoutine(
     DPRINT("USBSTOR_CBWCompletionRoutine Irp %p Ctx %p Status %x\n", Irp, Ctx, Irp->IoStatus.Status);
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Ctx;
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    Request = IoStack->Parameters.Scsi.Srb;
-    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)IoStack->DeviceObject->DeviceExtension;
+    Context = &FDODeviceExtension->CurrentIrpContext;
+    Request = Context->Srb;
+    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)Context->PDODeviceObject->DeviceExtension;
 
     if (!NT_SUCCESS(Irp->IoStatus.Status))
     {
@@ -429,7 +424,7 @@ USBSTOR_CBWCompletionRoutine(
 
 ResetRecovery:
     Request = FDODeviceExtension->ActiveSrb;
-    IoStack->Parameters.Scsi.Srb = Request;
+    Context->Srb = Request;
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
     Request->SrbStatus = SRB_STATUS_BUS_RESET;
@@ -486,6 +481,8 @@ USBSTOR_SendCBWRequest(
 
     // initialize rest of context
     Context->Irp = Irp;
+    Context->PDODeviceObject = IoStack->DeviceObject;
+    Context->Srb = Request;
     Context->StallRetryCount = 0;
 
     return USBSTOR_IssueBulkOrInterruptRequest(
