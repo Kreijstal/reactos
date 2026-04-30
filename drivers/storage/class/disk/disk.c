@@ -1557,6 +1557,7 @@ Return Value:
 
 {
     PFUNCTIONAL_DEVICE_EXTENSION fdoExt = Fdo->DeviceExtension;
+    PDISK_DATA diskData = (PDISK_DATA)fdoExt->CommonExtension.DriverData;
     PSCSI_REQUEST_BLOCK srb = &FlushContext->Srb.Srb;
     PSTORAGE_REQUEST_BLOCK srbEx = &FlushContext->Srb.SrbEx;
     PIO_STACK_LOCATION  irpSp = NULL;
@@ -1603,7 +1604,8 @@ Return Value:
     //
     // If write caching is enabled then send down a synchronize cache request
     //
-    if (TEST_FLAG(fdoExt->DeviceFlags, DEV_WRITE_CACHE))
+    if (TEST_FLAG(fdoExt->DeviceFlags, DEV_WRITE_CACHE) &&
+        !diskData->SyncCacheUnsupported)
     {
 
         if (fdoExt->AdapterDescriptor->SrbType == SRB_TYPE_STORAGE_REQUEST_BLOCK) {
@@ -1637,6 +1639,11 @@ Return Value:
         TracePrint((TRACE_LEVEL_VERBOSE, TRACE_FLAG_SCSI, "DiskFlushDispatch: sending sync cache\n"));
 
         SyncCacheStatus = ClassSendSrbSynchronous(Fdo, srb, NULL, 0, TRUE);
+        if (!NT_SUCCESS(SyncCacheStatus))
+        {
+            diskData->SyncCacheUnsupported = TRUE;
+            SyncCacheStatus = STATUS_SUCCESS;
+        }
     }
 
     //
