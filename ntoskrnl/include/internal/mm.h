@@ -1542,7 +1542,8 @@ MmCheckDirtySegment(
     PMM_SECTION_SEGMENT Segment,
     PLARGE_INTEGER Offset,
     BOOLEAN ForceDirty,
-    BOOLEAN PageOut);
+    BOOLEAN PageOut,
+    PIO_STATUS_BLOCK Iosb OPTIONAL);
 
 BOOLEAN
 NTAPI
