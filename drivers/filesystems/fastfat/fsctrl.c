@@ -828,7 +828,7 @@ Return Value:
             CalloutParameters.ExceptionStatus = STATUS_SUCCESS;
             CalloutParameters.IrpStatus = STATUS_UNRECOGNIZED_VOLUME;
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_VISTA)
             Status = KeExpandKernelStackAndCalloutEx( FatMountVolumeCallout,
                                                       &CalloutParameters,
                                                       MAXIMUM_EXPANSION_SIZE,
