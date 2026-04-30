@@ -762,6 +762,8 @@ PartitionHandleDeviceControl(
         case IOCTL_DISK_VERIFY:
         {
             PVERIFY_INFORMATION verifyInfo = Irp->AssociatedIrp.SystemBuffer;
+            PIO_STACK_LOCATION nextStack;
+
             if (!VerifyIrpInBufferSize(Irp, sizeof(*verifyInfo)))
             {
                 status = STATUS_INFO_LENGTH_MISMATCH;
@@ -769,8 +771,11 @@ PartitionHandleDeviceControl(
             }
 
             // Partition device should just adjust the starting offset
+            IoCopyCurrentIrpStackLocationToNext(Irp);
+            nextStack = IoGetNextIrpStackLocation(Irp);
             verifyInfo->StartingOffset.QuadPart += partExt->StartingOffset;
-            return ForwardIrpAndForget(DeviceObject, Irp);
+            nextStack->Parameters.DeviceIoControl.Type3InputBuffer = verifyInfo;
+            return IoCallDriver(partExt->LowerDevice, Irp);
         }
         case IOCTL_DISK_UPDATE_PROPERTIES:
         {

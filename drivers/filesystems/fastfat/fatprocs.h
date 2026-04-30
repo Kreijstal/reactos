@@ -2994,8 +2994,9 @@ __pragma(warning(pop))                                                          
 //
 
 #define FatNormalizeAndRaiseStatus(IRPCONTEXT,STATUS) {                         \
-    (IRPCONTEXT)->ExceptionStatus = (STATUS);                                   \
-    ExRaiseStatus(FsRtlNormalizeNtstatus((STATUS),STATUS_UNEXPECTED_IO_ERROR)); \
+    NTSTATUS _NormalizedStatus = FsRtlNormalizeNtstatus((STATUS), STATUS_UNEXPECTED_IO_ERROR); \
+    (IRPCONTEXT)->ExceptionStatus = _NormalizedStatus;                          \
+    ExRaiseStatus(_NormalizedStatus);                                           \
 }
 
 

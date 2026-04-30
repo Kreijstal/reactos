@@ -2061,6 +2061,7 @@ USBPORT_MiniportCompleteTransfer(IN PVOID MiniPortExtension,
 
     if (IsListEmpty(&ParentTransfer->SplitTransfersList))
     {
+        KeReleaseSpinLock(&ParentTransfer->TransferSpinLock, OldIrql);
         goto Exit;
     }
 
