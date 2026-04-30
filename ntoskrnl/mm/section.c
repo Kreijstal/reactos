@@ -1432,6 +1432,10 @@ MmMakeSegmentResident(
                 KeWaitForSingleObject(&Event, WrPageIn, KernelMode, FALSE, NULL);
                 Status = Iosb.Status;
             }
+            else
+            {
+                Iosb.Status = Status;
+            }
 
             if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
             {
@@ -5349,7 +5353,14 @@ MmFlushSegment(
 
         if (IS_DIRTY_SSE(Entry))
         {
-            MmCheckDirtySegment(Segment, &FlushStart, FALSE, FALSE);
+            IO_STATUS_BLOCK DirtyIosb;
+
+            MmCheckDirtySegment(Segment, &FlushStart, FALSE, FALSE, &DirtyIosb);
+            if (!NT_SUCCESS(DirtyIosb.Status))
+            {
+                Status = DirtyIosb.Status;
+                break;
+            }
 
             if (Iosb)
                 Iosb->Information += PAGE_SIZE;
@@ -5362,11 +5373,10 @@ MmFlushSegment(
     MmDereferenceSegment(Segment);
 
 Quit:
-    /* FIXME: Handle failures */
     if (Iosb)
-        Iosb->Status = STATUS_SUCCESS;
+        Iosb->Status = Status;
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 _Requires_exclusive_lock_held_(Segment->Lock)
@@ -5376,11 +5386,18 @@ MmCheckDirtySegment(
     PMM_SECTION_SEGMENT Segment,
     PLARGE_INTEGER Offset,
     BOOLEAN ForceDirty,
-    BOOLEAN PageOut)
+    BOOLEAN PageOut,
+    PIO_STATUS_BLOCK Iosb OPTIONAL)
 {
     ULONG_PTR Entry;
     NTSTATUS Status;
     PFN_NUMBER Page;
+
+    if (Iosb)
+    {
+        Iosb->Status = STATUS_SUCCESS;
+        Iosb->Information = 0;
+    }
 
     ASSERT(Segment->Locked);
 
@@ -5538,6 +5555,10 @@ MmCheckDirtySegment(
         {
             /* Damn, this failed. Consider this page as still dirty */
             DPRINT1("MiWritePage FAILED: Status 0x%08x!\n", Status);
+            if (Iosb)
+            {
+                Iosb->Status = Status;
+            }
             DirtyAgain = TRUE;
         }
         else

@@ -836,7 +836,10 @@ Return Value:
 
             if (!NT_SUCCESS( CalloutParameters.ExceptionStatus )) {
 
-                FatRaiseStatus( IrpContext, CalloutParameters.ExceptionStatus );
+                Status = FatProcessException( IrpContext,
+                                              Irp,
+                                              CalloutParameters.ExceptionStatus );
+                break;
             }
 
             if (NT_SUCCESS( Status )) {

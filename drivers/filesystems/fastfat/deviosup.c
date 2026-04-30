@@ -2125,6 +2125,9 @@ Return Value:
     //  Issue the read request
     //
 
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = ByteCount;
+
     DebugDoit( FatIoCallDriverCount += 1);
 
     //
@@ -2305,6 +2308,9 @@ Return Value:
     //
     //  Issue the read request
     //
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = ByteCount;
 
     DebugDoit( FatIoCallDriverCount += 1);
 
