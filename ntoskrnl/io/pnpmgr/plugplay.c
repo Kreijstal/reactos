@@ -29,6 +29,7 @@ typedef struct _IOP_FIND_DEVICE_INSTANCE_TRAVERSE_CONTEXT
 
 static LIST_ENTRY IopPnpEventQueueHead;
 static KEVENT IopPnpNotifyEvent;
+static KGUARDED_MUTEX IopPnpEventQueueLock;
 
 /* FUNCTIONS *****************************************************************/
 
@@ -40,6 +41,7 @@ NTSTATUS
 IopInitPlugPlayEvents(VOID)
 {
     InitializeListHead(&IopPnpEventQueueHead);
+    KeInitializeGuardedMutex(&IopPnpEventQueueLock);
 
     KeInitializeEvent(&IopPnpNotifyEvent,
                       SynchronizationEvent,
@@ -84,8 +86,11 @@ IopQueueDeviceChangeEvent(
                   SymbolicLinkName->Buffer, SymbolicLinkName->Length);
     EventEntry->Event.DeviceClass.SymbolicLinkName[SymbolicLinkName->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
+    KeAcquireGuardedMutex(&IopPnpEventQueueLock);
     InsertHeadList(&IopPnpEventQueueHead,
                    &EventEntry->ListEntry);
+    KeReleaseGuardedMutex(&IopPnpEventQueueLock);
+
     KeSetEvent(&IopPnpNotifyEvent,
                0,
                FALSE);
@@ -125,7 +130,9 @@ IopQueueDeviceInstallEvent(
                   DeviceId->Buffer, DeviceId->Length);
     EventEntry->Event.InstallDevice.DeviceId[DeviceId->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
+    KeAcquireGuardedMutex(&IopPnpEventQueueLock);
     InsertHeadList(&IopPnpEventQueueHead, &EventEntry->ListEntry);
+    KeReleaseGuardedMutex(&IopPnpEventQueueLock);
 
     KeSetEvent(&IopPnpNotifyEvent, 0, FALSE);
 
@@ -173,8 +180,11 @@ IopQueueTargetDeviceEvent(const GUID *Guid,
         return Status;
     }
 
+    KeAcquireGuardedMutex(&IopPnpEventQueueLock);
     InsertHeadList(&IopPnpEventQueueHead,
                    &EventEntry->ListEntry);
+    KeReleaseGuardedMutex(&IopPnpEventQueueLock);
+
     KeSetEvent(&IopPnpNotifyEvent,
                0,
                FALSE);
@@ -391,10 +401,16 @@ NTSTATUS
 IopRemovePlugPlayEvent(
     _In_ PPLUGPLAY_CONTROL_USER_RESPONSE_DATA ResponseData)
 {
+    PPNP_EVENT_ENTRY Entry;
+
     /* Remove a pnp event entry from the tail of the queue */
+    KeAcquireGuardedMutex(&IopPnpEventQueueLock);
     if (!IsListEmpty(&IopPnpEventQueueHead))
     {
-        ExFreePool(CONTAINING_RECORD(RemoveTailList(&IopPnpEventQueueHead), PNP_EVENT_ENTRY, ListEntry));
+        Entry = CONTAINING_RECORD(RemoveTailList(&IopPnpEventQueueHead), PNP_EVENT_ENTRY, ListEntry);
+        KeReleaseGuardedMutex(&IopPnpEventQueueLock);
+        ExFreePool(Entry);
+        KeAcquireGuardedMutex(&IopPnpEventQueueLock);
     }
 
     /* Signal the next pnp event in the queue */
@@ -404,6 +420,7 @@ IopRemovePlugPlayEvent(
                    0,
                    FALSE);
     }
+    KeReleaseGuardedMutex(&IopPnpEventQueueLock);
 
     return STATUS_SUCCESS;
 }
@@ -1446,6 +1463,8 @@ NtGetPlugPlayEvent(IN ULONG Reserved1,
                    IN ULONG BufferSize)
 {
     PPNP_EVENT_ENTRY Entry;
+    PPLUGPLAY_EVENT_BLOCK EventCopy;
+    ULONG TotalSize;
     NTSTATUS Status;
 
     DPRINT("NtGetPlugPlayEvent() called\n");
@@ -1479,33 +1498,56 @@ NtGetPlugPlayEvent(IN ULONG Reserved1,
         return Status;
     }
 
+    KeAcquireGuardedMutex(&IopPnpEventQueueLock);
+
+    if (IsListEmpty(&IopPnpEventQueueHead))
+    {
+        KeReleaseGuardedMutex(&IopPnpEventQueueLock);
+        return STATUS_NO_MORE_ENTRIES;
+    }
+
     /* Get entry from the tail of the queue */
     Entry = CONTAINING_RECORD(IopPnpEventQueueHead.Blink,
                               PNP_EVENT_ENTRY,
                               ListEntry);
+    TotalSize = Entry->Event.TotalSize;
 
     /* Check the buffer size */
-    if (BufferSize < Entry->Event.TotalSize)
+    if (BufferSize < TotalSize)
     {
+        KeReleaseGuardedMutex(&IopPnpEventQueueLock);
         DPRINT1("Buffer is too small for the pnp-event\n");
         return STATUS_BUFFER_TOO_SMALL;
     }
+
+    EventCopy = ExAllocatePool(NonPagedPool, TotalSize);
+    if (EventCopy == NULL)
+    {
+        KeReleaseGuardedMutex(&IopPnpEventQueueLock);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlCopyMemory(EventCopy, &Entry->Event, TotalSize);
+    KeReleaseGuardedMutex(&IopPnpEventQueueLock);
 
     /* Copy event data to the user buffer */
     _SEH2_TRY
     {
         ProbeForWrite(Buffer,
-                      Entry->Event.TotalSize,
+                      TotalSize,
                       sizeof(UCHAR));
         RtlCopyMemory(Buffer,
-                      &Entry->Event,
-                      Entry->Event.TotalSize);
+                      EventCopy,
+                      TotalSize);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
+        ExFreePool(EventCopy);
         _SEH2_YIELD(return _SEH2_GetExceptionCode());
     }
     _SEH2_END;
+
+    ExFreePool(EventCopy);
 
     DPRINT("NtGetPlugPlayEvent() done\n");
 
