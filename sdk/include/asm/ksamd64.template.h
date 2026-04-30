@@ -1046,9 +1046,13 @@ OFFSET(KTHREAD_PreviousMode, KTHREAD, PreviousMode),
 OFFSET(KTHREAD_KernelStack, KTHREAD, KernelStack),
 OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
 /* LargeStack moved from KTHREAD to ETHREAD in Win8.
- * Define both unconditionally — trap.S selects at build time. */
+ * Both offsets are defined per the NTDDI gate; trap.S selects
+ * the correct one with its own matching #if guard. */
+#if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
+#else
 OFFSET(ETHREAD_LargeStack, ETHREAD, LargeStack),
+#endif
 
 HEADER("KINTERRUPT"),
 OFFSET(KINTERRUPT_Type, KINTERRUPT, Type),
