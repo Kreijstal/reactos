@@ -1842,16 +1842,49 @@ MmUnmapReservedMapping(
                        MDL_FREE_EXTRA_PTES);
 }
 
-/*
- * @unimplemented
- */
 NTSTATUS
 NTAPI
 MmPrefetchPages(IN ULONG NumberOfLists,
                 IN PREAD_LIST *ReadLists)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    ULONG ListIndex;
+
+    if (KeGetCurrentIrql() > PASSIVE_LEVEL)
+    {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    if (NumberOfLists != 0 && ReadLists == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    for (ListIndex = 0; ListIndex < NumberOfLists; ListIndex++)
+    {
+        PREAD_LIST ReadList = ReadLists[ListIndex];
+
+        if (ReadList == NULL)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (ReadList->NumberOfEntries != 0 && ReadList->FileObject == NULL)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    /*
+     * MmPrefetchPages is advisory.  A caller must still tolerate pages being
+     * faulted in by ordinary demand paging, so it is valid to accept the
+     * request without issuing speculative I/O.
+     *
+     * Do not emulate this by synchronously calling the cache manager here:
+     * filesystem callers can invoke MmPrefetchPages while holding filesystem
+     * resources, and re-entering Cc/FSD paths violates those recursion and
+     * locking assumptions.
+     */
+    return STATUS_SUCCESS;
 }
 
 /*
