@@ -1108,12 +1108,17 @@ AddControllers(PDRIVER_OBJECT DriverObject)
             /* 3j: Clear the DO_DEVICE_INITIALIZING flag */
             gControllerInfo[i].DriveInfo[j].DeviceObject->Flags &= ~DO_DEVICE_INITIALIZING;
 
-            /* 3k: Report to the MountMgr */
-            ReportToMountMgr(i, j);
-
-            /* 3l: Attempt to get drive info - if a floppy is already present */
+            /* 3k: Attempt to get drive info - if a floppy is already present */
             StartMotor(&gControllerInfo[i].DriveInfo[j]);
-            RWDetermineMediaType(&gControllerInfo[i].DriveInfo[j], TRUE);
+            if (NT_SUCCESS(RWDetermineMediaType(&gControllerInfo[i].DriveInfo[j], TRUE)))
+            {
+                /*
+                 * Notify the MountMgr only when media is actually present.
+                 * A floppy drive with no disk is a device, but not a mounted
+                 * volume and must not be assigned a drive letter yet.
+                 */
+                ReportToMountMgr(i, j);
+            }
             StopMotor(gControllerInfo[i].DriveInfo[j].ControllerInfo);
         }
     }
@@ -1142,6 +1147,8 @@ SignalMediaChanged(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     TRACE_(FLOPPY, "SignalMediaChanged called\n");
 
     DriveInfo->DiskChangeCount++;
+    DriveInfo->DiskGeometry.MediaType = Unknown;
+    DriveInfo->BytesPerSectorCode = 0;
 
     /* If volume is not mounted, do NOT set verify and return STATUS_IO_DEVICE_ERROR */
     if(!(DeviceObject->Vpb->Flags & VPB_MOUNTED))
