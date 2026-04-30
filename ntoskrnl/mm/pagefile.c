@@ -110,7 +110,11 @@ VOID
 NTAPI
 MmBuildMdlFromPages(PMDL Mdl, PPFN_NUMBER Pages)
 {
-    memcpy(Mdl + 1, Pages, sizeof(PFN_NUMBER) * (PAGE_ROUND_UP(Mdl->ByteOffset+Mdl->ByteCount)/PAGE_SIZE));
+    RtlCopyMemory(MmGetMdlPfnArray(Mdl),
+                  Pages,
+                  sizeof(PFN_NUMBER) *
+                  ADDRESS_AND_SIZE_TO_SPAN_PAGES(MmGetMdlVirtualAddress(Mdl),
+                                                 MmGetMdlByteCount(Mdl)));
 }
 
 
