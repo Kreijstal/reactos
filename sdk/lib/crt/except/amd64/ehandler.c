@@ -8,6 +8,11 @@
 #include <precomp.h>
 #include <winnt.h>
 
+/* The Win32 amd64 EH ABI requires saving/restoring all nonvolatile
+ * registers before calling out to a filter/handler compiled code.
+ * GCC/Clang inline asm provides the wrappers; MSVC calls directly. */
+#ifdef __GNUC__
+
 static LONG
 __cdecl
 CallExceptionFilter(
@@ -97,6 +102,8 @@ __asm__(
     "\tpop %rbp\n"
     "\tret\n");
 
+#endif /* __GNUC__ */
+
 
 _CRTIMP
 EXCEPTION_DISPOSITION
@@ -165,10 +172,14 @@ __C_specific_handler(
                 /* Call the handler */
                 Handler = ScopeTable->ScopeRecord[i].HandlerAddress;
                 TerminationHandler = (PTERMINATION_HANDLER)(ImageBase + Handler);
+#ifdef __GNUC__
                 CallTerminationHandler(TerminationHandler,
                                        TRUE,
                                        EstablisherFrame,
                                        DispatcherContext->ContextRecord);
+#else
+                TerminationHandler(TRUE, EstablisherFrame);
+#endif
             }
             else if (ScopeTable->ScopeRecord[i].JumpTarget == TargetIpOffset)
             {
@@ -196,10 +207,14 @@ __C_specific_handler(
             {
                 /* Otherwise we need to call the handler */
                 ExceptionFilter = (PEXCEPTION_FILTER)(ImageBase + Handler);
+#ifdef __GNUC__
                 FilterResult = CallExceptionFilter(ExceptionFilter,
                                                    &ExceptionPointers,
                                                    EstablisherFrame,
                                                    DispatcherContext->ContextRecord);
+#else
+                FilterResult = ExceptionFilter(&ExceptionPointers, EstablisherFrame);
+#endif
             }
 
             if (FilterResult < 0 /* EXCEPTION_CONTINUE_EXECUTION */)
