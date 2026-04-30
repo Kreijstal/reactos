@@ -792,6 +792,14 @@ Return Value:
 
             Vcb->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common.MetaDataDiskWrites += Vcb->Bpb.Fats;
 
+            //
+            //  FatMultipleAsync only updates the master IRP status from a
+            //  child IRP on failure.  Seed the master IRP with the expected
+            //  success result before issuing the FAT copy writes.
+            //
+
+            Irp->IoStatus = RaiseIosb;
+
             _SEH2_TRY {
 
                 FatMultipleAsync( IrpContext,

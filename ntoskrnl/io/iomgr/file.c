@@ -3133,9 +3133,16 @@ IoCreateStreamFileObjectEx(IN PFILE_OBJECT FileObject OPTIONAL,
     /* Set File Object Data */
     RtlZeroMemory(CreatedFileObject, sizeof(FILE_OBJECT));
     CreatedFileObject->DeviceObject = DeviceObject;
+    CreatedFileObject->Vpb = FileObject ? FileObject->Vpb : DeviceObject->Vpb;
     CreatedFileObject->Type = IO_TYPE_FILE;
     CreatedFileObject->Size = sizeof(FILE_OBJECT);
     CreatedFileObject->Flags = FO_STREAM_FILE;
+    if ((FileObject == NULL) &&
+        ((CreatedFileObject->Vpb == NULL) ||
+         (CreatedFileObject->Vpb->DeviceObject == NULL)))
+    {
+        CreatedFileObject->Flags |= FO_DIRECT_DEVICE_OPEN;
+    }
 
     /* Initialize the wait event */
     KeInitializeEvent(&CreatedFileObject->Event, SynchronizationEvent, FALSE);
