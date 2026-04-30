@@ -178,7 +178,7 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
 
     /* Set the new stack limits */
     CurrentThread->StackBase = StackBase;
-    CurrentThread->StackLimit = StackLimit;
+    CurrentThread->StackLimit = (ULONG_PTR)StackLimit;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb)->LargeStack = TRUE;
 #else
