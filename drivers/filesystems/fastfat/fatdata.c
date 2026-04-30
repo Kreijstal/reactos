@@ -199,7 +199,6 @@ Return Value:
 }
 #endif
 
-
 ULONG
 FatExceptionFilter (
     IN PIRP_CONTEXT IrpContext,
@@ -306,11 +305,12 @@ Return Value:
     } else {
 
         //
-        //  We raised this code explicitly ourselves, so it had better be
-        //  expected.
+        //  An earlier FastFAT helper already recorded the status that should
+        //  complete this request.  During unwinding or cleanup a later fault
+        //  may be less specific than the original I/O failure; do not replace
+        //  or validate the saved status against that secondary exception.
         //
-        NT_ASSERT( IrpContext->ExceptionStatus == ExceptionCode );
-        NT_ASSERT( FsRtlIsNtstatusExpected( ExceptionCode ) );
+        NT_ASSERT( FsRtlIsNtstatusExpected( IrpContext->ExceptionStatus ) );
     }
 
     return EXCEPTION_EXECUTE_HANDLER;
@@ -770,9 +770,9 @@ Return Value:
 
     if (IrpContext != NULL) {
 
-        NT_ASSERT( IrpContext->Repinned.Bcb[0] == NULL );
-
         FatUnpinRepinnedBcbs( IrpContext );
+
+        NT_ASSERT( IrpContext->Repinned.Bcb[0] == NULL );
     }
 
     //
@@ -1006,7 +1006,6 @@ Return Value:
     PCCB Ccb;
 
     _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
-    PERESOURCE _SEH2_VOLATILE FcbResource = NULL;
 
     PAGED_CODE();
     UNREFERENCED_PARAMETER( DeviceObject );
@@ -1047,19 +1046,7 @@ Return Value:
     //
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
-
-        if (((NodeType(Fcb) != FAT_NTC_FCB) &&
-             (NodeType(Fcb) != FAT_NTC_DCB) &&
-             (NodeType(Fcb) != FAT_NTC_ROOT_DCB)) ||
-            (Fcb->FcbCondition != FcbGood) ||
-            (Fcb->Header.Resource == NULL)) {
-
-            FsRtlExitFileSystem();
-            return Results;
-        }
-        FcbResource = Fcb->Header.Resource;
-
-        if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
+        if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
 
             FsRtlExitFileSystem();
             return Results;
@@ -1144,7 +1131,7 @@ Return Value:
         if (FcbAcquired) {
 
             FcbAcquired = FALSE;
-            ExReleaseResourceLite( FcbResource );
+            ExReleaseResourceLite( Fcb->Header.Resource );
         }
 
         FsRtlExitFileSystem();
@@ -1202,7 +1189,6 @@ Return Value:
     PCCB Ccb;
 
     _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
-    PERESOURCE _SEH2_VOLATILE FcbResource = NULL;
 
     PAGED_CODE();
 
@@ -1244,19 +1230,7 @@ Return Value:
     FsRtlEnterFileSystem();
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
-
-        if (((NodeType(Fcb) != FAT_NTC_FCB) &&
-             (NodeType(Fcb) != FAT_NTC_DCB) &&
-             (NodeType(Fcb) != FAT_NTC_ROOT_DCB)) ||
-            (Fcb->FcbCondition != FcbGood) ||
-            (Fcb->Header.Resource == NULL)) {
-
-            FsRtlExitFileSystem();
-            return Results;
-        }
-        FcbResource = Fcb->Header.Resource;
-
-        if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
+        if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
 
             FsRtlExitFileSystem();
             return Results;
@@ -1321,7 +1295,7 @@ Return Value:
         if (FcbAcquired) {
 
             FcbAcquired = FALSE;
-            ExReleaseResourceLite( FcbResource );
+            ExReleaseResourceLite( Fcb->Header.Resource );
         }
 
         FsRtlExitFileSystem();
@@ -1379,7 +1353,6 @@ Return Value:
     PCCB Ccb;
 
     _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
-    PERESOURCE _SEH2_VOLATILE FcbResource = NULL;
 
     PAGED_CODE();
 
@@ -1421,19 +1394,7 @@ Return Value:
     //
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
-
-        if (((NodeType(Fcb) != FAT_NTC_FCB) &&
-             (NodeType(Fcb) != FAT_NTC_DCB) &&
-             (NodeType(Fcb) != FAT_NTC_ROOT_DCB)) ||
-            (Fcb->FcbCondition != FcbGood) ||
-            (Fcb->Header.Resource == NULL)) {
-
-            FsRtlExitFileSystem();
-            return Results;
-        }
-        FcbResource = Fcb->Header.Resource;
-
-        if (!ExAcquireResourceSharedLite( FcbResource, Wait )) {
+        if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
 
             FsRtlExitFileSystem();
             return Results;
@@ -1537,7 +1498,7 @@ Return Value:
         if (FcbAcquired) {
 
             FcbAcquired = FALSE;
-            ExReleaseResourceLite( FcbResource );
+            ExReleaseResourceLite( Fcb->Header.Resource );
         }
 
         FsRtlExitFileSystem();
