@@ -138,6 +138,21 @@ relocated:
     cmp ax, HEX(AA55)
     jne .boot_freeldr
 
+    // A valid MBR signature alone does not mean the disk is bootable.
+    // Partitioned data media, such as writable USB sticks, commonly have a
+    // valid signature but no active partition.  In that case, keep booting
+    // the ReactOS medium instead of handing control to non-bootable MBR code.
+    mov bx, HEX(7C00)+446
+    mov cx, 4
+.check_active_partition:
+    cmp byte ptr ds:[bx], HEX(80)
+    je .mbr_bootable
+    add bx, 16
+    loop .check_active_partition
+    jmp .boot_freeldr
+
+.mbr_bootable:
+
 #ifdef WAIT_FOR_KEY
     // We could either boot from the ReactOS medium or from hard disk. Let the user decide!
     // Display the 'Press key' message.
