@@ -1489,6 +1489,9 @@ Return Value:
 
                 IO_STATUS_BLOCK Iosb;
 
+                Iosb.Status = STATUS_SUCCESS;
+                Iosb.Information = 0;
+
                 if (WriteThroughToDisk &&
                     FlagOn(IrpContext->Vcb->VcbState, VCB_STATE_FLAG_DEFERRED_FLUSH)) {
 
@@ -1566,6 +1569,9 @@ Return Value:
                                 if (RepinnedToPurge->Bcb[j] != NULL) {
 
                                     if (CcGetFileObjectFromBcb( RepinnedToPurge->Bcb[j] ) == FileObject) {
+
+                                        Iosb.Status = STATUS_SUCCESS;
+                                        Iosb.Information = 0;
 
                                         CcUnpinRepinnedBcb( RepinnedToPurge->Bcb[j],
                                                             FALSE,
