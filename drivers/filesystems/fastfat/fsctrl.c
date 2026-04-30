@@ -29,6 +29,17 @@ Abstract:
 
 #define Dbg                              (DEBUG_TRACE_FSCTRL)
 
+typedef struct _FAT_MOUNT_CALLOUT_PARAMETERS {
+
+    PIRP_CONTEXT IrpContext;
+    PDEVICE_OBJECT TargetDeviceObject;
+    PVPB Vpb;
+    PDEVICE_OBJECT FsDeviceObject;
+    NTSTATUS IrpStatus;
+    NTSTATUS ExceptionStatus;
+
+} FAT_MOUNT_CALLOUT_PARAMETERS, *PFAT_MOUNT_CALLOUT_PARAMETERS;
+
 //
 //  Local procedure prototypes
 //
@@ -40,6 +51,12 @@ FatMountVolume (
     IN PDEVICE_OBJECT TargetDeviceObject,
     IN PVPB Vpb,
     IN PDEVICE_OBJECT FsDeviceObject
+    );
+
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatMountVolumeCallout (
+    _In_ PVOID Parameter
     );
 
 _Requires_lock_held_(_Global_critical_region_)
@@ -801,10 +818,32 @@ Return Value:
 
     case IRP_MN_MOUNT_VOLUME:
 
-        Status = FatMountVolume( IrpContext,
-                                 IrpSp->Parameters.MountVolume.DeviceObject,
-                                 IrpSp->Parameters.MountVolume.Vpb,
-                                 IrpSp->DeviceObject );
+        {
+            FAT_MOUNT_CALLOUT_PARAMETERS CalloutParameters;
+
+            CalloutParameters.IrpContext = IrpContext;
+            CalloutParameters.TargetDeviceObject = IrpSp->Parameters.MountVolume.DeviceObject;
+            CalloutParameters.Vpb = IrpSp->Parameters.MountVolume.Vpb;
+            CalloutParameters.FsDeviceObject = IrpSp->DeviceObject;
+            CalloutParameters.ExceptionStatus = STATUS_SUCCESS;
+            CalloutParameters.IrpStatus = STATUS_UNRECOGNIZED_VOLUME;
+
+            Status = KeExpandKernelStackAndCalloutEx( FatMountVolumeCallout,
+                                                      &CalloutParameters,
+                                                      MAXIMUM_EXPANSION_SIZE,
+                                                      TRUE,
+                                                      NULL );
+
+            if (!NT_SUCCESS( CalloutParameters.ExceptionStatus )) {
+
+                FatRaiseStatus( IrpContext, CalloutParameters.ExceptionStatus );
+            }
+
+            if (NT_SUCCESS( Status )) {
+
+                Status = CalloutParameters.IrpStatus;
+            }
+        }
 
         //
         //  Complete the request.
@@ -842,6 +881,80 @@ Return Value:
 //
 //  Local Support Routine
 //
+
+static
+NTSTATUS
+FatReadBootSectorForMount (
+    IN PDEVICE_OBJECT TargetDeviceObject,
+    IN ULONG Length,
+    OUT PVOID Buffer
+    )
+{
+    KEVENT Event;
+    PIRP Irp;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER ByteOffset;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION IrpSp;
+
+    PAGED_CODE();
+
+    KeInitializeEvent( &Event, NotificationEvent, FALSE );
+    ByteOffset.QuadPart = 0;
+
+    Irp = IoBuildSynchronousFsdRequest( IRP_MJ_READ,
+                                        TargetDeviceObject,
+                                        Buffer,
+                                        Length,
+                                        &ByteOffset,
+                                        &Event,
+                                        &Iosb );
+
+    if (Irp == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    IrpSp = IoGetNextIrpStackLocation( Irp );
+    SetFlag( IrpSp->Flags, SL_OVERRIDE_VERIFY_VOLUME );
+
+    Status = IoCallDriver( TargetDeviceObject, Irp );
+
+    if (Status == STATUS_PENDING) {
+
+        KeWaitForSingleObject( &Event,
+                               Executive,
+                               KernelMode,
+                               FALSE,
+                               NULL );
+
+        Status = Iosb.Status;
+    }
+
+    return Status;
+}
+
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+FatMountVolumeCallout (
+    _In_ PVOID Parameter
+    )
+{
+    PFAT_MOUNT_CALLOUT_PARAMETERS CalloutParameters = Parameter;
+
+    _SEH2_TRY {
+
+        CalloutParameters->IrpStatus =
+            FatMountVolume( CalloutParameters->IrpContext,
+                            CalloutParameters->TargetDeviceObject,
+                            CalloutParameters->Vpb,
+                            CalloutParameters->FsDeviceObject );
+
+    } _SEH2_EXCEPT (FatExceptionFilter( CalloutParameters->IrpContext,
+                                        _SEH2_GetExceptionInformation() )) {
+
+        CalloutParameters->ExceptionStatus = _SEH2_GetExceptionCode();
+    } _SEH2_END;
+}
 
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
@@ -895,25 +1008,27 @@ Return Value:
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation( IrpContext->OriginatingIrp );
     NTSTATUS Status = STATUS_INVALID_PARAMETER;
 
-    PBCB BootBcb;
-    PPACKED_BOOT_SECTOR BootSector = NULL;
-    BOOLEAN BootBcbAcquired = FALSE;
+    PPACKED_BOOT_SECTOR _SEH2_VOLATILE BootSector = NULL;
+    ULONG BootSectorLength = 0;
 
     PBCB DirentBcb;
-    BOOLEAN DirentBcbAcquired = FALSE;
+    PBCB _SEH2_VOLATILE DirentBcbToUnpin = NULL;
+    _SEH2_VOLATILE BOOLEAN DirentBcbAcquired = FALSE;
     PDIRENT Dirent;
     ULONG ByteOffset;
 
-    BOOLEAN MountNewVolume = FALSE;
-    BOOLEAN WeClearedVerifyRequiredBit = FALSE;
-    BOOLEAN DoARemount = FALSE;
+    _SEH2_VOLATILE BOOLEAN MountNewVolume = FALSE;
+    _SEH2_VOLATILE BOOLEAN AcquiredGlobal = FALSE;
+    _SEH2_VOLATILE BOOLEAN WeClearedVerifyRequiredBit = FALSE;
+    _SEH2_VOLATILE BOOLEAN WeClearedTargetVerifyRequiredBit = FALSE;
+    _SEH2_VOLATILE BOOLEAN DoARemount = FALSE;
 
-    PVCB OldVcb = NULL;
+    PVCB _SEH2_VOLATILE OldVcb = NULL;
     PVPB OldVpb = NULL;
 
     PDEVICE_OBJECT RealDevice = NULL;
-    PVOLUME_DEVICE_OBJECT VolDo = NULL;
-    PVCB Vcb = NULL;
+    PVOLUME_DEVICE_OBJECT _SEH2_VOLATILE VolDo = NULL;
+    PVCB _SEH2_VOLATILE Vcb = NULL;
     PFILE_OBJECT RootDirectoryFile = NULL;
 
     PLIST_ENTRY Links;
@@ -1038,7 +1153,6 @@ Return Value:
     //  handlers will know what to free or unpin
     //
 
-    BootBcb = NULL;
     DirentBcb = NULL;
 
     Vcb = NULL;
@@ -1058,6 +1172,7 @@ Return Value:
 #endif
 
         (VOID)FatAcquireExclusiveGlobal( IrpContext );
+        AcquiredGlobal = TRUE;
 
 #ifdef _MSC_VER
 #pragma prefast( pop )
@@ -1152,8 +1267,11 @@ Return Value:
         Vpb->DeviceObject = (PDEVICE_OBJECT)VolDo;
 
         //
-        //  If the real device needs verification, temporarily clear the
-        //  field.
+        //  If either device object used by this mount needs verification,
+        //  temporarily clear the field.  The mount path is performing the
+        //  verification and must be able to read the boot sector through the
+        //  target device object without the cached read failing with
+        //  STATUS_VERIFY_REQUIRED.
         //
 
         RealDevice = Vpb->RealDevice;
@@ -1163,6 +1281,14 @@ Return Value:
             ClearFlag(RealDevice->Flags, DO_VERIFY_VOLUME);
 
             WeClearedVerifyRequiredBit = TRUE;
+        }
+
+        if ((TargetDeviceObject != RealDevice) &&
+            FlagOn(TargetDeviceObject->Flags, DO_VERIFY_VOLUME)) {
+
+            ClearFlag(TargetDeviceObject->Flags, DO_VERIFY_VOLUME);
+
+            WeClearedTargetVerifyRequiredBit = TRUE;
         }
 
         //
@@ -1181,39 +1307,49 @@ Return Value:
         Vcb = &VolDo->Vcb;
 
         //
-        //  Read in the boot sector, and have the read be the minumum size
-        //  needed.  We know we can wait.
+        //  Read sector zero directly from the target device.  The volume file
+        //  cache is not fully established yet during mount, and using CcMapData
+        //  here can turn a simple media probe into pageable work on an unwind
+        //  path.  A synchronous device read is the mount-time primitive Windows
+        //  filesystems use for this probe.
         //
 
-        //
-        //  We need to commute errors on CD so that CDFS will get its crack.  Audio
-        //  and even data media may not be universally readable on sector zero.
-        //
+        BootSectorLength = Geometry.BytesPerSector;
 
-        _SEH2_TRY {
+        if (BootSectorLength < sizeof(PACKED_BOOT_SECTOR)) {
+            BootSectorLength = sizeof(PACKED_BOOT_SECTOR);
+        }
 
-            FatReadVolumeFile( IrpContext,
-                               Vcb,
-                               0,                          // Starting Byte
-                               sizeof(PACKED_BOOT_SECTOR),
-                               &BootBcb,
-                               (PVOID *)&BootSector );
+        BootSector = FsRtlAllocatePoolWithTag( NonPagedPool,
+                                               BootSectorLength,
+                                               TAG_VERIFY_BOOTSECTOR );
 
-            if (BootBcb != NULL) {
-                BootBcbAcquired = TRUE;
+        RtlZeroMemory( BootSector, BootSectorLength );
+
+        Status = FatReadBootSectorForMount( TargetDeviceObject,
+                                            BootSectorLength,
+                                            BootSector );
+
+        if (!NT_SUCCESS( Status )) {
+
+            //
+            //  We need to commute errors on CD so that CDFS will get its crack.
+            //  Audio and even data media may not be universally readable on
+            //  sector zero.
+            //
+
+            if (Vpb->RealDevice->DeviceType == FILE_DEVICE_CD_ROM) {
+                Status = STATUS_UNRECOGNIZED_VOLUME;
             }
 
-        } _SEH2_EXCEPT( Vpb->RealDevice->DeviceType == FILE_DEVICE_CD_ROM ?
-                  EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH ) {
-
-              NOTHING;
-        } _SEH2_END;
+            try_return( Status );
+        }
 
         //
         //  Call a routine to check the boot sector to see if it is fat
         //
 
-        if (BootBcb == NULL || !FatIsBootSectorFat( BootSector)) {
+        if (!FatIsBootSectorFat( BootSector )) {
 
             DebugTrace(0, Dbg, "Not a Fat Volume\n", 0);
 
@@ -1350,16 +1486,6 @@ Return Value:
         }
 
         //
-        //  Now unpin the boot sector, so when we set up allocation eveything
-        //  works.
-        //
-
-        if (BootBcbAcquired) {
-            FatUnpinBcb( IrpContext, BootBcb );
-            BootBcbAcquired = FALSE;
-        }
-
-        //
         //  Compute a number of fields for Vcb.AllocationSupport
         //
 
@@ -1429,7 +1555,8 @@ Return Value:
                               &DirentBcb,
                               (PVBO)&ByteOffset );
 
-        if (DirentBcb != NULL) {
+        DirentBcbToUnpin = DirentBcb;
+        if (DirentBcbToUnpin != NULL) {
             DirentBcbAcquired = TRUE;
         }
 
@@ -1485,7 +1612,8 @@ Return Value:
         }
 
         if (DirentBcbAcquired) {
-            FatUnpinBcb( IrpContext, DirentBcb );
+            FatUnpinBcb( IrpContext, DirentBcbToUnpin );
+            DirentBcb = NULL;
             DirentBcbAcquired = FALSE;
         }
 
@@ -1573,6 +1701,9 @@ Return Value:
             NT_ASSERT( !FlagOn( OldVcb->VcbState, VCB_STATE_FLAG_VPB_MUST_BE_FREED ) );
 
             FatSetVcbCondition( OldVcb, VcbGood);
+            OldVpb->DeviceObject = (PDEVICE_OBJECT)CONTAINING_RECORD( OldVcb,
+                                                                       VOLUME_DEVICE_OBJECT,
+                                                                       Vcb );
             OldVpb->RealDevice = Vpb->RealDevice;
             ClearFlag( OldVcb->VcbState, VCB_STATE_VPB_NOT_ON_DEVICE);
 
@@ -1769,12 +1900,14 @@ Return Value:
 
         DebugUnwind( FatMountVolume );
 
-        if (BootBcbAcquired) {
-            FatUnpinBcb( IrpContext, BootBcb );
+        if (BootSector != NULL) {
+            ExFreePoolWithTag( BootSector, TAG_VERIFY_BOOTSECTOR );
+            BootSector = NULL;
         }
 
         if (DirentBcbAcquired) {
-            FatUnpinBcb( IrpContext, DirentBcb );
+            FatUnpinBcb( IrpContext, DirentBcbToUnpin );
+            DirentBcb = NULL;
             DirentBcbAcquired = FALSE;
         }
 
@@ -1821,6 +1954,20 @@ Return Value:
                                      OldVcb,
                                      TRUE );
             }
+
+            if (DoARemount && !_SEH2_AbnormalTermination() && OldVcb != NULL && OldVpb != NULL) {
+
+                KIRQL SavedIrql;
+
+                IoAcquireVpbSpinLock( &SavedIrql );
+
+                OldVpb->DeviceObject = (PDEVICE_OBJECT)CONTAINING_RECORD( OldVcb,
+                                                                           VOLUME_DEVICE_OBJECT,
+                                                                           Vcb );
+                OldVpb->RealDevice->Vpb = OldVpb;
+
+                IoReleaseVpbSpinLock( SavedIrql );
+            }
         }
 
         if ( WeClearedVerifyRequiredBit == TRUE ) {
@@ -1828,7 +1975,16 @@ Return Value:
             SetFlag(RealDevice->Flags, DO_VERIFY_VOLUME);
         }
 
-        FatReleaseGlobal( IrpContext );
+        if ( WeClearedTargetVerifyRequiredBit == TRUE ) {
+
+            SetFlag(TargetDeviceObject->Flags, DO_VERIFY_VOLUME);
+        }
+
+        if (AcquiredGlobal) {
+
+            FatReleaseGlobal( IrpContext );
+            AcquiredGlobal = FALSE;
+        }
 
         DebugTrace(-1, Dbg, "FatMountVolume -> %08lx\n", Status);
     } _SEH2_END;

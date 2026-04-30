@@ -217,6 +217,26 @@ SetReg(
 
 static
 __inline
+BOOLEAN
+RtlpIsUnwindStackAccessValid(
+    _In_ ULONG64 Address,
+    _In_ SIZE_T Size)
+{
+    ULONG64 StackLow, StackHigh;
+
+    if (Address + Size < Address)
+    {
+        return FALSE;
+    }
+
+    RtlpGetStackLimits(&StackLow, &StackHigh);
+    return (Address >= StackLow) &&
+           (Address + Size <= StackHigh) &&
+           ((Address & 7) == 0);
+}
+
+static
+__inline
 void
 SetRegFromStackValue(
     _Inout_ PCONTEXT Context,
@@ -224,6 +244,13 @@ SetRegFromStackValue(
     _In_ BYTE Reg,
     _In_ PDWORD64 ValuePointer)
 {
+    if (!RtlpIsUnwindStackAccessValid((ULONG64)ValuePointer, sizeof(*ValuePointer)))
+    {
+        Context->Rip = 0;
+        Context->Rsp = 0;
+        return;
+    }
+
     SetReg(Context, Reg, *ValuePointer);
     if (ContextPointers != NULL)
     {
@@ -273,6 +300,13 @@ SetXmmRegFromStackValue(
     _In_ BYTE Reg,
     _In_ M128A *ValuePointer)
 {
+    if (!RtlpIsUnwindStackAccessValid((ULONG64)ValuePointer, sizeof(*ValuePointer)))
+    {
+        Context->Rip = 0;
+        Context->Rsp = 0;
+        return;
+    }
+
     SetXmmReg(Context, Reg, *ValuePointer);
     if (ContextPointers != NULL)
     {
@@ -417,6 +451,13 @@ RtlpTryToUnwindEpilog(
     }
 
     /* Unwind is finished, pop new Rip from Stack */
+    if (!RtlpIsUnwindStackAccessValid(LocalContext.Rsp, sizeof(DWORD64)))
+    {
+        Context->Rip = 0;
+        Context->Rsp = 0;
+        return TRUE;
+    }
+
     LocalContext.Rip = *(DWORD64*)LocalContext.Rsp;
     LocalContext.Rsp += sizeof(DWORD64);
 
@@ -617,6 +658,13 @@ RepeatChainedInfo:
                 Context->Rsp += UnwindCode.OpInfo * sizeof(DWORD64);
 
                 /* Now pop the MACHINE_FRAME (RIP/RSP only. And yes, "magic numbers", deal with it) */
+                if (!RtlpIsUnwindStackAccessValid(Context->Rsp, 0x20))
+                {
+                    Context->Rip = 0;
+                    Context->Rsp = 0;
+                    goto Exit;
+                }
+
                 Context->Rip = *(PDWORD64)(Context->Rsp + 0x00);
                 Context->Rsp = *(PDWORD64)(Context->Rsp + 0x18);
                 ASSERT((i + 1) == UnwindInfo->CountOfCodes);
@@ -637,6 +685,13 @@ RepeatChainedInfo:
     /* Unwind is finished, pop new Rip from Stack */
     if (Context->Rsp != 0)
     {
+        if (!RtlpIsUnwindStackAccessValid(Context->Rsp, sizeof(DWORD64)))
+        {
+            Context->Rip = 0;
+            Context->Rsp = 0;
+            goto Exit;
+        }
+
         Context->Rip = *(DWORD64*)Context->Rsp;
         Context->Rsp += sizeof(DWORD64);
     }
@@ -733,7 +788,7 @@ RtlpUnwindInternal(
     PRUNTIME_FUNCTION FunctionEntry;
     ULONG_PTR StackLow, StackHigh;
     ULONG64 ImageBase, EstablisherFrame;
-    CONTEXT UnwindContext;
+    CONTEXT UnwindContext, HandlerContext;
 
     /* Get the current stack limits */
     RtlpGetStackLimits(&StackLow, &StackHigh);
@@ -748,8 +803,7 @@ RtlpUnwindInternal(
     UnwindContext = *ContextRecord;
 
     /* Set up the constant fields of the dispatcher context */
-    DispatcherContext.ContextRecord =
-        (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &UnwindContext;
+    DispatcherContext.ContextRecord = &UnwindContext;
     DispatcherContext.HistoryTable = HistoryTable;
     DispatcherContext.TargetIp = (ULONG64)TargetIp;
 
@@ -780,16 +834,31 @@ RtlpUnwindInternal(
 
         /* Save Rip before the virtual unwind */
         DispatcherContext.ControlPc = UnwindContext.Rip;
+        HandlerContext = UnwindContext;
 
         /* Do a virtual unwind to get the next frame */
-        ExceptionRoutine = RtlVirtualUnwind(HandlerType,
-                                            ImageBase,
-                                            UnwindContext.Rip,
-                                            FunctionEntry,
-                                            &UnwindContext,
-                                            &DispatcherContext.HandlerData,
-                                            &EstablisherFrame,
-                                            NULL);
+        _SEH2_TRY
+        {
+            ExceptionRoutine = RtlVirtualUnwind(HandlerType,
+                                                ImageBase,
+                                                UnwindContext.Rip,
+                                                FunctionEntry,
+                                                &UnwindContext,
+                                                &DispatcherContext.HandlerData,
+                                                &EstablisherFrame,
+                                                NULL);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            if (HandlerType == UNW_FLAG_EHANDLER)
+            {
+                ExceptionRecord->ExceptionFlags |= EXCEPTION_STACK_INVALID;
+                return FALSE;
+            }
+
+            RtlRaiseStatus(STATUS_BAD_STACK);
+        }
+        _SEH2_END;
 
         /* Check, if we are still within the stack boundaries */
         if ((EstablisherFrame < StackLow) ||
@@ -830,6 +899,7 @@ RtlpUnwindInternal(
             DispatcherContext.FunctionEntry = FunctionEntry;
             DispatcherContext.LanguageHandler = ExceptionRoutine;
             DispatcherContext.EstablisherFrame = EstablisherFrame;
+            DispatcherContext.ContextRecord = &HandlerContext;
             DispatcherContext.ScopeIndex = 0;
 
             /* Store the return value in the unwind context */
@@ -882,14 +952,28 @@ RtlpUnwindInternal(
                     /* The original context was from "before" the unwind, so we
                        need to do an additional virtual unwind to restore the
                        unwind contxt. */
-                    RtlVirtualUnwind(HandlerType,
-                                     DispatcherContext.ImageBase,
-                                     UnwindContext.Rip,
-                                     DispatcherContext.FunctionEntry,
-                                     &UnwindContext,
-                                     &DispatcherContext.HandlerData,
-                                     &EstablisherFrame,
-                                     NULL);
+                    _SEH2_TRY
+                    {
+                        RtlVirtualUnwind(HandlerType,
+                                         DispatcherContext.ImageBase,
+                                         UnwindContext.Rip,
+                                         DispatcherContext.FunctionEntry,
+                                         &UnwindContext,
+                                         &DispatcherContext.HandlerData,
+                                         &EstablisherFrame,
+                                         NULL);
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        if (HandlerType == UNW_FLAG_EHANDLER)
+                        {
+                            ExceptionRecord->ExceptionFlags |= EXCEPTION_STACK_INVALID;
+                            return FALSE;
+                        }
+
+                        RtlRaiseStatus(STATUS_BAD_STACK);
+                    }
+                    _SEH2_END;
 
                     /* Restore the context pointer and establisher frame. */
                     DispatcherContext.ContextRecord = &UnwindContext;

@@ -8,6 +8,95 @@
 #include <precomp.h>
 #include <winnt.h>
 
+static LONG
+__cdecl
+CallExceptionFilter(
+    PEXCEPTION_FILTER ExceptionFilter,
+    PEXCEPTION_POINTERS ExceptionPointers,
+    PVOID EstablisherFrame,
+    PCONTEXT ContextRecord);
+
+static VOID
+__cdecl
+CallTerminationHandler(
+    PTERMINATION_HANDLER TerminationHandler,
+    BOOLEAN AbnormalTermination,
+    PVOID EstablisherFrame,
+    PCONTEXT ContextRecord);
+
+__asm__(
+    ".text\n"
+    ".p2align 4, 0x90\n"
+    "CallExceptionFilter:\n"
+    "\tpush %rbp\n"
+    "\tpush %rbx\n"
+    "\tpush %rsi\n"
+    "\tpush %rdi\n"
+    "\tpush %r12\n"
+    "\tpush %r13\n"
+    "\tpush %r14\n"
+    "\tpush %r15\n"
+    "\tmov %rcx, %r11\n"
+    "\tmov %rdx, %r10\n"
+    "\tmov %r8, %rax\n"
+    "\tmov %r8, %rbp\n"
+    "\tmov 0x98(%r9), %rbx\n"
+    "\tmov 0xb0(%r9), %rsi\n"
+    "\tmov 0xb8(%r9), %rdi\n"
+    "\tmov 0xe0(%r9), %r12\n"
+    "\tmov 0xe8(%r9), %r13\n"
+    "\tmov 0xf0(%r9), %r14\n"
+    "\tmov 0xf8(%r9), %r15\n"
+    "\tmov %r10, %rcx\n"
+    "\tmov %rax, %rdx\n"
+    "\tsub $40, %rsp\n"
+    "\tcall *%r11\n"
+    "\tadd $40, %rsp\n"
+    "\tpop %r15\n"
+    "\tpop %r14\n"
+    "\tpop %r13\n"
+    "\tpop %r12\n"
+    "\tpop %rdi\n"
+    "\tpop %rsi\n"
+    "\tpop %rbx\n"
+    "\tpop %rbp\n"
+    "\tret\n"
+    ".p2align 4, 0x90\n"
+    "CallTerminationHandler:\n"
+    "\tpush %rbp\n"
+    "\tpush %rbx\n"
+    "\tpush %rsi\n"
+    "\tpush %rdi\n"
+    "\tpush %r12\n"
+    "\tpush %r13\n"
+    "\tpush %r14\n"
+    "\tpush %r15\n"
+    "\tmov %rcx, %r11\n"
+    "\tmov %edx, %r10d\n"
+    "\tmov %r8, %rax\n"
+    "\tmov %r8, %rbp\n"
+    "\tmov 0x98(%r9), %rbx\n"
+    "\tmov 0xb0(%r9), %rsi\n"
+    "\tmov 0xb8(%r9), %rdi\n"
+    "\tmov 0xe0(%r9), %r12\n"
+    "\tmov 0xe8(%r9), %r13\n"
+    "\tmov 0xf0(%r9), %r14\n"
+    "\tmov 0xf8(%r9), %r15\n"
+    "\tmov %r10d, %ecx\n"
+    "\tmov %rax, %rdx\n"
+    "\tsub $40, %rsp\n"
+    "\tcall *%r11\n"
+    "\tadd $40, %rsp\n"
+    "\tpop %r15\n"
+    "\tpop %r14\n"
+    "\tpop %r13\n"
+    "\tpop %r12\n"
+    "\tpop %rdi\n"
+    "\tpop %rsi\n"
+    "\tpop %rbx\n"
+    "\tpop %rbp\n"
+    "\tret\n");
+
 
 _CRTIMP
 EXCEPTION_DISPOSITION
@@ -76,7 +165,10 @@ __C_specific_handler(
                 /* Call the handler */
                 Handler = ScopeTable->ScopeRecord[i].HandlerAddress;
                 TerminationHandler = (PTERMINATION_HANDLER)(ImageBase + Handler);
-                TerminationHandler(TRUE, EstablisherFrame);
+                CallTerminationHandler(TerminationHandler,
+                                       TRUE,
+                                       EstablisherFrame,
+                                       DispatcherContext->ContextRecord);
             }
             else if (ScopeTable->ScopeRecord[i].JumpTarget == TargetIpOffset)
             {
@@ -104,7 +196,10 @@ __C_specific_handler(
             {
                 /* Otherwise we need to call the handler */
                 ExceptionFilter = (PEXCEPTION_FILTER)(ImageBase + Handler);
-                FilterResult = ExceptionFilter(&ExceptionPointers, EstablisherFrame);
+                FilterResult = CallExceptionFilter(ExceptionFilter,
+                                                   &ExceptionPointers,
+                                                   EstablisherFrame,
+                                                   DispatcherContext->ContextRecord);
             }
 
             if (FilterResult < 0 /* EXCEPTION_CONTINUE_EXECUTION */)
