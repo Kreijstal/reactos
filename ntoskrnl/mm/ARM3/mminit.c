@@ -222,6 +222,7 @@ PFN_COUNT MmNumberOfPhysicalPages;
 //
 SIZE_T MmBootImageSize;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
 static
 BOOLEAN
 MiIsBootLoaderMappedMemoryType(IN TYPE_OF_MEMORY MemoryType)
@@ -255,6 +256,7 @@ MiIsBootLoaderMappedMemoryType(IN TYPE_OF_MEMORY MemoryType)
             return FALSE;
     }
 }
+#endif
 
 static
 SIZE_T
