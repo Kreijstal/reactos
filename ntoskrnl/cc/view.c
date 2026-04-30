@@ -1203,8 +1203,20 @@ CcFlushCache (
 
     if (!SectionObjectPointers->SharedCacheMap)
     {
+        if (IoStatus)
+        {
+            IoStatus->Status = STATUS_SUCCESS;
+            IoStatus->Information = 0;
+        }
+
         /* Forward this to Mm */
-        MmFlushSegment(SectionObjectPointers, FileOffset, Length, IoStatus);
+        Status = MmFlushSegment(SectionObjectPointers, FileOffset, Length, IoStatus);
+
+        if (IoStatus)
+        {
+            IoStatus->Status = Status;
+        }
+
         return;
     }
 
