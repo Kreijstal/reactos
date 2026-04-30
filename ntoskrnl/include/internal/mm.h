@@ -860,6 +860,11 @@ PVOID
 NTAPI
 MmCreateKernelStack(BOOLEAN GuiStack, UCHAR Node);
 
+NTSTATUS
+NTAPI
+MmGrowKernelStackEx(IN PVOID StackPointer,
+                    IN ULONG GrowSize);
+
 VOID
 NTAPI
 MmDeleteKernelStack(PVOID Stack,

@@ -614,7 +614,8 @@
 @ stdcall KeEnterCriticalRegion() _KeEnterCriticalRegion
 @ stdcall KeEnterGuardedRegion() _KeEnterGuardedRegion
 @ stdcall KeEnterKernelDebugger()
-;@ stdcall -arch=x86_64 KeExpandKernelStackAndCallout(ptr ptr double)
+@ stdcall -arch=x86_64 KeExpandKernelStackAndCallout(ptr ptr double)
+@ stdcall -arch=x86_64 KeExpandKernelStackAndCalloutEx(ptr ptr double long ptr)
 @ stdcall KeFindConfigurationEntry(ptr long long ptr)
 @ stdcall KeFindConfigurationNextEntry(ptr long long ptr ptr)
 @ stdcall KeFlushEntireTb(long long)
