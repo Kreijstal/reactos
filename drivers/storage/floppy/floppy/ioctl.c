@@ -32,6 +32,7 @@
  */
 
 #include "precomp.h"
+#include "readwrite.h"
 
 #include <debug.h>
 
@@ -111,6 +112,117 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
         INFO_(FLOPPY, "Ioctl: completing with STATUS_SUCCESS\n");
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
+        return;
+    }
+
+    /*
+     * Mount device identity is a property of the floppy drive device, not of
+     * the currently inserted disk.  MountMgr asks these during volume-arrival
+     * processing before a filesystem has mounted the media, so do not route
+     * them through media-change handling.
+     */
+    if (Code == IOCTL_MOUNTDEV_QUERY_UNIQUE_ID)
+    {
+        if(OutputLength < sizeof(MOUNTDEV_UNIQUE_ID))
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        UniqueId = Irp->AssociatedIrp.SystemBuffer;
+        UniqueId->UniqueIdLength = (USHORT)wcslen(&DriveInfo->DeviceNameBuffer[0]) * sizeof(WCHAR);
+
+        if(OutputLength < FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + UniqueId->UniqueIdLength)
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+            Irp->IoStatus.Information = sizeof(MOUNTDEV_UNIQUE_ID);
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        RtlCopyMemory(UniqueId->UniqueId, &DriveInfo->DeviceNameBuffer[0],
+                      UniqueId->UniqueIdLength);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + UniqueId->UniqueIdLength;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return;
+    }
+
+    if (Code == IOCTL_MOUNTDEV_QUERY_DEVICE_NAME)
+    {
+        if(OutputLength < sizeof(MOUNTDEV_NAME))
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        Name = Irp->AssociatedIrp.SystemBuffer;
+        Name->NameLength = (USHORT)wcslen(&DriveInfo->DeviceNameBuffer[0]) * sizeof(WCHAR);
+
+        if(OutputLength < FIELD_OFFSET(MOUNTDEV_NAME, Name) + Name->NameLength)
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+            Irp->IoStatus.Information = sizeof(MOUNTDEV_NAME);
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        RtlCopyMemory(Name->Name, &DriveInfo->DeviceNameBuffer[0],
+                      Name->NameLength);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_NAME, Name) + Name->NameLength;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return;
+    }
+
+    if (Code == IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME)
+    {
+        PMOUNTDEV_SUGGESTED_LINK_NAME SuggestedName;
+        WCHAR DriveLetter;
+        USHORT NameLength;
+
+        if (OutputLength < sizeof(MOUNTDEV_SUGGESTED_LINK_NAME))
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            Irp->IoStatus.Information = sizeof(MOUNTDEV_SUGGESTED_LINK_NAME);
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        if (DriveInfo->UnitNumber > 1)
+        {
+            Irp->IoStatus.Status = STATUS_NOT_FOUND;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        DriveLetter = (WCHAR)(L'A' + DriveInfo->UnitNumber);
+        NameLength = sizeof(L"\\DosDevices\\A:") - sizeof(UNICODE_NULL);
+
+        SuggestedName = Irp->AssociatedIrp.SystemBuffer;
+        RtlZeroMemory(SuggestedName, sizeof(MOUNTDEV_SUGGESTED_LINK_NAME));
+        SuggestedName->UseOnlyIfThereAreNoOtherLinks = TRUE;
+        SuggestedName->NameLength = NameLength;
+
+        Irp->IoStatus.Information = FIELD_OFFSET(MOUNTDEV_SUGGESTED_LINK_NAME, Name) + NameLength;
+        if (OutputLength < Irp->IoStatus.Information)
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_OVERFLOW;
+            Irp->IoStatus.Information = sizeof(MOUNTDEV_SUGGESTED_LINK_NAME);
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return;
+        }
+
+        RtlCopyMemory(SuggestedName->Name, L"\\DosDevices\\", sizeof(L"\\DosDevices\\") - sizeof(UNICODE_NULL));
+        SuggestedName->Name[12] = DriveLetter;
+        SuggestedName->Name[13] = L':';
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return;
     }
 
@@ -201,7 +313,23 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
     break;
 
     case IOCTL_DISK_CHECK_VERIFY:
+    {
+        NTSTATUS Status;
+
         INFO_(FLOPPY, "IOCTL_DISK_CHECK_VERIFY called\n");
+
+        if (DriveInfo->DiskGeometry.MediaType == Unknown)
+        {
+            Status = RWDetermineMediaType(DriveInfo, TRUE);
+            if (!NT_SUCCESS(Status))
+            {
+                Irp->IoStatus.Status =
+                    (Status == STATUS_UNRECOGNIZED_MEDIA) ? STATUS_NO_MEDIA_IN_DEVICE : Status;
+                Irp->IoStatus.Information = 0;
+                break;
+            }
+        }
+
         if (OutputLength != 0)
         {
             if (OutputLength < sizeof(ULONG))
@@ -222,6 +350,7 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
             Irp->IoStatus.Information = 0;
         }
         break;
+    }
 
     case IOCTL_DISK_GET_DRIVE_GEOMETRY:
     {
