@@ -828,11 +828,16 @@ Return Value:
             CalloutParameters.ExceptionStatus = STATUS_SUCCESS;
             CalloutParameters.IrpStatus = STATUS_UNRECOGNIZED_VOLUME;
 
+#ifdef _M_AMD64
             Status = KeExpandKernelStackAndCalloutEx( FatMountVolumeCallout,
                                                       &CalloutParameters,
                                                       MAXIMUM_EXPANSION_SIZE,
                                                       TRUE,
                                                       NULL );
+#else
+            FatMountVolumeCallout(&CalloutParameters);
+            Status = STATUS_SUCCESS;
+#endif
 
             if (!NT_SUCCESS( CalloutParameters.ExceptionStatus )) {
 
