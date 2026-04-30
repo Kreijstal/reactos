@@ -248,6 +248,15 @@ Return Value:
         SET_FLAG(Fdo->Characteristics, FILE_REMOVABLE_MEDIA);
     }
 
+    /*
+     * disk.sys owns direct-access disk devices, including removable USB
+     * disks. Floppy devices are handled by the floppy/sfloppy class drivers.
+     * Do not allow a stale lower-stack characteristic to make partition and
+     * filesystem volume devices look like FILE_FLOPPY_DISKETTE: FastFAT uses
+     * that bit to select floppy-only write-protect probing.
+     */
+    CLEAR_FLAG(Fdo->Characteristics, FILE_FLOPPY_DISKETTE);
+
     //
     // Initialize the srb flags.
     //

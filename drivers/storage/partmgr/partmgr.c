@@ -13,6 +13,38 @@
 
 #include "partmgr.h"
 
+DRIVER_DISPATCH PartMgrCreateClose;
+NTSTATUS
+NTAPI
+PartMgrCreateClose(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp)
+{
+    PPARTITION_EXTENSION partExt = DeviceObject->DeviceExtension;
+
+    if (!partExt->IsFDO)
+    {
+        NTSTATUS status;
+
+        if (!partExt->IsEnumerated)
+        {
+            status = STATUS_DEVICE_DOES_NOT_EXIST;
+        }
+        else
+        {
+            status = STATUS_SUCCESS;
+        }
+
+        Irp->IoStatus.Status = status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return status;
+    }
+
+    IoSkipCurrentIrpStackLocation(Irp);
+    return IoCallDriver(partExt->LowerDevice, Irp);
+}
+
 
 static
 CODE_SEG("PAGE")
@@ -1108,6 +1140,8 @@ FdoHandleDeviceRelations(
 
         Irp->IoStatus.Information = (ULONG_PTR)deviceRelations;
         Irp->IoStatus.Status = STATUS_SUCCESS;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
     }
 
     IoSkipCurrentIrpStackLocation(Irp);
@@ -1381,7 +1415,6 @@ PartMgrReadWrite(
     _In_ PIRP Irp)
 {
     PPARTITION_EXTENSION partExt = DeviceObject->DeviceExtension;
-    PIO_STACK_LOCATION ioStack = IoGetCurrentIrpStackLocation(Irp);
 
     if (!partExt->IsFDO)
     {
@@ -1393,7 +1426,12 @@ PartMgrReadWrite(
         }
         else
         {
-            ioStack->Parameters.Read.ByteOffset.QuadPart += partExt->StartingOffset;
+            PIO_STACK_LOCATION nextStack;
+
+            IoCopyCurrentIrpStackLocationToNext(Irp);
+            nextStack = IoGetNextIrpStackLocation(Irp);
+            nextStack->Parameters.Read.ByteOffset.QuadPart += partExt->StartingOffset;
+            return IoCallDriver(partExt->LowerDevice, Irp);
         }
     }
 
@@ -1494,8 +1532,8 @@ DriverEntry(
 {
     DriverObject->DriverUnload = PartMgrUnload;
     DriverObject->DriverExtension->AddDevice = PartMgrAddDevice;
-    DriverObject->MajorFunction[IRP_MJ_CREATE]         = ForwardIrpAndForget;
-    DriverObject->MajorFunction[IRP_MJ_CLOSE]          = ForwardIrpAndForget;
+    DriverObject->MajorFunction[IRP_MJ_CREATE]         = PartMgrCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE]          = PartMgrCreateClose;
     DriverObject->MajorFunction[IRP_MJ_READ]           = PartMgrReadWrite;
     DriverObject->MajorFunction[IRP_MJ_WRITE]          = PartMgrReadWrite;
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = PartMgrDeviceControl;

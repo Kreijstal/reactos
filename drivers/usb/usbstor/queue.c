@@ -91,7 +91,7 @@ USBSTOR_QueueAddIrp(
 
     KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
 
-    SrbProcessing = FDODeviceExtension->IrpPendingCount != 0;
+    SrbProcessing = FDODeviceExtension->ActiveSrb != NULL;
 
     if (SrbProcessing)
     {
@@ -191,16 +191,19 @@ USBSTOR_QueueTerminateRequest(
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
     PSCSI_REQUEST_BLOCK Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
+    PIRP_CONTEXT Context;
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)FDODeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
+    Context = &FDODeviceExtension->CurrentIrpContext;
 
     KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
 
     FDODeviceExtension->IrpPendingCount--;
 
     // check if this was our current active SRB
-    if (FDODeviceExtension->ActiveSrb == Request)
+    if (FDODeviceExtension->ActiveSrb == Request ||
+        (Context->Irp == Irp && FDODeviceExtension->ActiveSrb == Context->Srb))
     {
         // indicate processing is completed
         FDODeviceExtension->ActiveSrb = NULL;

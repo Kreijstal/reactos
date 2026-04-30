@@ -61,7 +61,10 @@ USBSTOR_FdoHandleDeviceRelations(
             }
         }
 
-        DeviceRelations = ExAllocatePoolWithTag(PagedPool, sizeof(DEVICE_RELATIONS) + (DeviceCount - 1) * sizeof(PDEVICE_OBJECT), USB_STOR_TAG);
+        DeviceRelations = ExAllocatePoolWithTag(PagedPool,
+                                                sizeof(DEVICE_RELATIONS) +
+                                                (DeviceCount > 1 ? (DeviceCount - 1) * sizeof(PDEVICE_OBJECT) : 0),
+                                                USB_STOR_TAG);
         if (!DeviceRelations)
         {
             Irp->IoStatus.Information = 0;
@@ -89,9 +92,12 @@ USBSTOR_FdoHandleDeviceRelations(
 
         Irp->IoStatus.Information = (ULONG_PTR)DeviceRelations;
         Irp->IoStatus.Status = STATUS_SUCCESS;
+
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
     }
 
-    IoCopyCurrentIrpStackLocationToNext(Irp);
+    IoSkipCurrentIrpStackLocation(Irp);
 
     return IoCallDriver(DeviceExtension->LowerDeviceObject, Irp);
 }
@@ -250,6 +256,15 @@ USBSTOR_FdoHandleStartDevice(
         DeviceExtension->InstanceCount++;
 
     } while(Index < DeviceExtension->MaxLUN);
+
+    /*
+     * Child PDOs are created only after the USB mass-storage interface is
+     * started and its LUNs have answered INQUIRY.  Notify PnP that the FDO's
+     * BusRelations changed so disk.sys can attach to the LUN PDOs and the
+     * mount manager can assign DOS drive letters.
+     */
+    IoInvalidateDeviceRelations(DeviceExtension->PhysicalDeviceObject,
+                                BusRelations);
 
 #if 0
     //
