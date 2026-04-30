@@ -1046,11 +1046,14 @@ OFFSET(KTHREAD_PreviousMode, KTHREAD, PreviousMode),
 OFFSET(KTHREAD_KernelStack, KTHREAD, KernelStack),
 OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
 /* LargeStack moved from KTHREAD to ETHREAD in Win8.
- * Both offsets are defined per the NTDDI gate; trap.S selects
- * the correct one with its own matching #if guard. */
+ * Define both offsets unconditionally so the generated .inc is
+ * safe regardless of which NTDDI the asm preprocessor resolves.
+ * trap.S selects the correct one with its own #if guard. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
+CONSTANTX(ETHREAD_LargeStack, 0),
 #else
+CONSTANTX(KTHREAD_LargeStack, 0),
 OFFSET(ETHREAD_LargeStack, ETHREAD, LargeStack),
 #endif
 
