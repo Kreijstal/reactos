@@ -443,7 +443,7 @@ typedef DIRENT *PDIRENT;
 //
 
 #define FatRootDirectoryLbo(B) (FatReservedBytes(B) + ((B)->Fats * FatBytesPerFat(B)))
-#define FatRootDirectoryLbo32(B) (FatFileAreaLbo(B)+((B)->RootDirFirstCluster-2)*FatBytesPerCluster(B))
+#define FatRootDirectoryLbo32(B) (FatFileAreaLbo(B) + (((LBO)(B)->RootDirFirstCluster - 2) * FatBytesPerCluster(B)))
 
 //
 //  This macro returns the first Lbo (zero based) of the file area on the
@@ -752,4 +752,3 @@ typedef PACKED_EA *PPACKED_EA;
 
 
 #endif // _FAT_
-
