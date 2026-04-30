@@ -22,6 +22,102 @@ KiSwitchKernelStackHelper(
     LONG_PTR StackOffset,
     PVOID OldStackBase);
 
+NTSTATUS
+NTAPI
+KeExpandKernelStackAndCalloutEx(
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ SIZE_T Size,
+    _In_ BOOLEAN Wait,
+    _In_opt_ PVOID Context)
+{
+    PKTHREAD CurrentThread;
+    PVOID NewStackBase;
+    PVOID OldStackBase;
+    ULONG_PTR OldStackLimit;
+    LONG_PTR StackOffset;
+    SIZE_T CommitSize;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    if (Callout == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    CurrentThread = KeGetCurrentThread();
+
+    CommitSize = max(Size, KERNEL_LARGE_STACK_COMMIT);
+    if (CommitSize > MAXIMUM_EXPANSION_SIZE)
+    {
+        CommitSize = MAXIMUM_EXPANSION_SIZE;
+    }
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    if (CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb)->LargeStack)
+#else
+    if (CurrentThread->LargeStack)
+#endif
+    {
+        Status = MmGrowKernelStackEx(CurrentThread->StackBase, CommitSize);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        Callout(Parameter);
+        return STATUS_SUCCESS;
+    }
+
+    NewStackBase = MmCreateKernelStack(TRUE, 0);
+    if (NewStackBase == NULL)
+    {
+        if (!Wait)
+        {
+            return STATUS_NO_MEMORY;
+        }
+
+        return STATUS_NO_MEMORY;
+    }
+
+    OldStackLimit = (ULONG_PTR)CurrentThread->StackLimit;
+    OldStackBase = KeSwitchKernelStack(NewStackBase,
+                                       Add2Ptr(NewStackBase, -KERNEL_LARGE_STACK_COMMIT));
+    StackOffset = (PUCHAR)NewStackBase - (PUCHAR)OldStackBase;
+
+    MmDeleteKernelStack(OldStackBase, FALSE);
+
+    Status = MmGrowKernelStackEx(NewStackBase, CommitSize);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    if (((ULONG_PTR)Parameter >= OldStackLimit) &&
+        ((ULONG_PTR)Parameter < (ULONG_PTR)OldStackBase))
+    {
+        Parameter = Add2Ptr(Parameter, StackOffset);
+    }
+
+    Callout(Parameter);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+KeExpandKernelStackAndCallout(
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ SIZE_T Size)
+{
+    return KeExpandKernelStackAndCalloutEx(Callout,
+                                           Parameter,
+                                           Size,
+                                           TRUE,
+                                           NULL);
+}
+
 /*
  * Kernel stack layout (example pointers):
  * 0xFFFFFC0F'2D008000 KTHREAD::StackBase
@@ -82,7 +178,7 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
 
     /* Set the new stack limits */
     CurrentThread->StackBase = StackBase;
-    CurrentThread->StackLimit = (ULONG_PTR)StackLimit;
+    CurrentThread->StackLimit = StackLimit;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb)->LargeStack = TRUE;
 #else
