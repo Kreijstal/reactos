@@ -298,6 +298,15 @@ USBSTOR_FdoHandleStartDevice(
 
     }while(Index < DeviceExtension->MaxLUN);
 
+    /*
+     * Child PDOs are created only after the USB mass-storage interface is
+     * started and its LUNs have answered INQUIRY.  Notify PnP that the FDO's
+     * BusRelations changed so disk.sys can attach to the LUN PDOs and the
+     * mount manager can assign DOS drive letters.
+     */
+    IoInvalidateDeviceRelations(DeviceExtension->PhysicalDeviceObject,
+                                BusRelations);
+
 #if 0
     //
     // finally get usb device interface
