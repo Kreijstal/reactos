@@ -826,11 +826,9 @@ XHCI_OpenControlEndpoint(IN PXHCI_EXTENSION XhciExtension,
     ULONG EndpointAddress;
     ULONG MaxPacketSize;
     ULONG DeviceSpeed;
-   /// PXHCI_HC_RESOURCES HcResourcesVA;
+    PXHCI_HC_RESOURCES HcResourcesVA = (PXHCI_HC_RESOURCES)XhciExtension->HcResourcesVA;
     ULONG SlotId;
     MPSTATUS Status;
-    UNREFERENCED_PARAMETER(SlotId);
-    UNREFERENCED_PARAMETER(Status);
     DPRINT1("XHCI_OpenControlEndpoint: function initiated\n");
     
     DeviceAddress = EndpointProperties->DeviceAddress;
@@ -915,9 +913,59 @@ XHCI_OpenControlEndpoint(IN PXHCI_EXTENSION XhciExtension,
         DPRINT1("XHCI_OpenControlEndpoint: Device context setup completed for address 0 device\n");
     } else {
         DPRINT1("XHCI_OpenControlEndpoint: Opening endpoint for existing device (addr=%d)\n", DeviceAddress);
-        // For an existing device, we would need to look up the slot ID
-        // For now, assume slot 1
-        *(PULONG)&XhciEndpoint->FirstTD = 1;
+        // Find occupied slot: scan output contexts for a slot with non-zero SlotState.
+        SlotId = 0;
+        for (ULONG i = 0; i < XHCI_MAX_SLOTS; i++) {
+            if (HcResourcesVA->OutputContexts[i].SlotContext.SlotState != 0) {
+                SlotId = i + 1;
+                break;
+            }
+        }
+        if (SlotId == 0) {
+            DPRINT1("XHCI_OpenControlEndpoint: No occupied slot found for device address %d\n", DeviceAddress);
+            return MP_STATUS_FAILURE;
+        }
+        *(PULONG)&XhciEndpoint->FirstTD = SlotId;
+
+        // Transition Default->Addressed (BSR=0) and simultaneously update the
+        // EP0 TR Dequeue Pointer to the new endpoint ring.  The controller
+        // rewrites the entire Output Context on Address Device, so this is the
+        // only command that can change EP0's transfer ring on the fly.
+        {
+            PXHCI_INPUT_CONTEXT OutputCtx = &HcResourcesVA->OutputContexts[SlotId - 1];
+            PXHCI_INPUT_CONTEXT InputCtx = &HcResourcesVA->InputContext;
+            PHYSICAL_ADDRESS AddrInputPA;
+            PHYSICAL_ADDRESS NewRingPA;
+
+            BOOLEAN NeedsBSR0 = (OutputCtx->SlotContext.SlotState == 1 /* Default */);
+            DPRINT1("XHCI_OpenControlEndpoint: slot %d SlotState=%d, NeedsBSR0=%d\n",
+                    SlotId, OutputCtx->SlotContext.SlotState, NeedsBSR0);
+
+            // Always rebuild the input context with the NEW ring PA
+            RtlZeroMemory(InputCtx, sizeof(XHCI_INPUT_CONTEXT));
+            InputCtx->InputContext.AddContextFlags = 0x3;  // A0 + A1
+            InputCtx->InputContext.DropContextFlags = 0;
+            RtlCopyMemory(&InputCtx->SlotContext, &OutputCtx->SlotContext, sizeof(XHCI_SLOT_CONTEXT));
+            RtlCopyMemory(&InputCtx->EndpointContextList[0], &OutputCtx->EndpointContextList[0],
+                          sizeof(XHCI_ENDPOINT_CONTEXT));
+            InputCtx->SlotContext.SlotState = 0;
+            InputCtx->SlotContext.USBDeviceAddress = 0;
+
+            // Override TRDeqPtr with the new endpoint ring's physical address
+            NewRingPA = MmGetPhysicalAddress(&XhciEndpoint->TransferRing.firstSeg.XhciTrb[0]);
+            InputCtx->EndpointContextList[0].TRDeqPtr = (NewRingPA.QuadPart & ~((ULONGLONG)0xFULL)) | 1ULL;
+
+            DPRINT1("XHCI_OpenControlEndpoint: new EP0 ring PA=0x%I64x\n", NewRingPA.QuadPart);
+
+            AddrInputPA = MmGetPhysicalAddress(InputCtx);
+            Status = XHCI_AddressDevice(XhciExtension, SlotId, AddrInputPA, TRUE  /* always BSR=0 to update EP0 ring even when already Addressed */);
+            if (Status != MP_STATUS_SUCCESS) {
+                DPRINT1("XHCI_OpenControlEndpoint: Address Device failed (0x%x)\n", Status);
+                return MP_STATUS_FAILURE;
+            }
+            DPRINT1("XHCI_OpenControlEndpoint: Address Device OK, slot %d now addr=%d\n",
+                    SlotId, OutputCtx->SlotContext.USBDeviceAddress & 0xFF);
+        }
     }
     
     DPRINT1("XHCI_OpenControlEndpoint: Control endpoint initialized successfully\n");
@@ -2864,4 +2912,5 @@ XHCI_GetCurrentFrameNumber(IN PXHCI_EXTENSION XhciExtension)
     
     // Convert microframe index to frame number (divide by 8 since there are 8 microframes per frame)
     return MFIndex / 8;
+
 }
