@@ -20,6 +20,10 @@ static BOOLEAN AcpiInterruptHandlerRegistered = FALSE;
 static ACPI_OSD_HANDLER AcpiIrqHandler = NULL;
 static PVOID AcpiIrqContext = NULL;
 static ULONG AcpiIrqNumber = 0;
+/* SCI delivery: ISR (DIRQL) just queues the DPC; the DPC (DISPATCH_LEVEL)
+ * runs the ACPICA service routine, where AcpiOsExecute() may safely
+ * allocate non-paged pool and queue a worker. */
+static KDPC AcpiSciDpc;
 /* TODO: Replace these local declarations with <ndk/kefuncs.h> once the
  * acpi.sys build context can consume the required NDK dependencies cleanly.
  */
@@ -412,35 +416,50 @@ AcpiOsGetThreadId (void)
     return (ULONG_PTR)PsGetCurrentThreadId() + 1;
 }
 
+typedef struct _ACPI_OSL_WORK_ITEM
+{
+    WORK_QUEUE_ITEM         Item;
+    ACPI_OSD_EXEC_CALLBACK  Function;
+    void                   *Context;
+} ACPI_OSL_WORK_ITEM, *PACPI_OSL_WORK_ITEM;
+
+static
+VOID
+NTAPI
+AcpiOsExecuteWorker(IN PVOID Parameter)
+{
+    PACPI_OSL_WORK_ITEM WorkItem = (PACPI_OSL_WORK_ITEM)Parameter;
+    ACPI_OSD_EXEC_CALLBACK Function = WorkItem->Function;
+    void *Context = WorkItem->Context;
+
+    ExFreePoolWithTag(WorkItem, 'IpcA');
+    Function(Context);
+}
+
 ACPI_STATUS
 AcpiOsExecute (
     ACPI_EXECUTE_TYPE       Type,
     ACPI_OSD_EXEC_CALLBACK  Function,
     void                    *Context)
 {
-    HANDLE ThreadHandle;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    NTSTATUS Status;
+    PACPI_OSL_WORK_ITEM WorkItem;
 
     DPRINT("AcpiOsExecute\n");
 
-    InitializeObjectAttributes(&ObjectAttributes,
-                               NULL,
-                               OBJ_KERNEL_HANDLE,
-                               NULL,
-                               NULL);
+    /*
+     * ACPICA may call this from the SCI ISR (DIRQL) — e.g. when dispatching
+     * GPE Notify() handlers for hot-plug events. Creating a thread directly
+     * would assert at PASSIVE_LEVEL; instead queue a system worker that
+     * runs the callback at PASSIVE_LEVEL.
+     */
+    WorkItem = ExAllocatePoolWithTag(NonPagedPool, sizeof(*WorkItem), 'IpcA');
+    if (!WorkItem)
+        return AE_NO_MEMORY;
 
-    Status = PsCreateSystemThread(&ThreadHandle,
-                                  THREAD_ALL_ACCESS,
-                                  &ObjectAttributes,
-                                  NULL,
-                                  NULL,
-                                  (PKSTART_ROUTINE)Function,
-                                  Context);
-    if (!NT_SUCCESS(Status))
-        return AE_ERROR;
-
-    ZwClose(ThreadHandle);
+    WorkItem->Function = Function;
+    WorkItem->Context = Context;
+    ExInitializeWorkItem(&WorkItem->Item, AcpiOsExecuteWorker, WorkItem);
+    ExQueueWorkItem(&WorkItem->Item, DelayedWorkQueue);
 
     return AE_OK;
 }
@@ -721,19 +740,36 @@ AcpiOsReleaseLock(
     }
 }
 
+static
+VOID
+NTAPI
+OslSciDpcRoutine(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(DeferredContext);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    if (AcpiIrqHandler)
+        (*AcpiIrqHandler)(AcpiIrqContext);
+}
+
 BOOLEAN NTAPI
 OslIsrStub(
   PKINTERRUPT Interrupt,
   PVOID ServiceContext)
 {
-  INT32 Status;
-
-  Status = (*AcpiIrqHandler)(AcpiIrqContext);
-
-  if (Status == ACPI_INTERRUPT_HANDLED)
-    return TRUE;
-  else
-    return FALSE;
+  /* SCI is level-triggered shared with the ACPI dispatcher. The ACPICA
+   * handler may dispatch GPE Notify() callbacks via AcpiOsExecute, which
+   * needs to allocate from non-paged pool and is therefore not legal at
+   * DIRQL. Defer the actual handler to a DPC; the SCI line will be
+   * unmasked by ACPICA once the DPC clears the GPE status bits. */
+  KeInsertQueueDpc(&AcpiSciDpc, NULL, NULL);
+  return TRUE;
 }
 
 UINT32
@@ -772,6 +808,8 @@ AcpiOsInstallInterruptHandler (
     AcpiIrqHandler = ServiceRoutine;
     AcpiIrqContext = Context;
     AcpiInterruptHandlerRegistered = TRUE;
+
+    KeInitializeDpc(&AcpiSciDpc, OslSciDpcRoutine, NULL);
 
     Status = IoConnectInterrupt(
         &AcpiInterrupt,
