@@ -1422,8 +1422,45 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
             if ((XhciEndpoint->EndpointProperties.EndpointAddress & 0x0F) == 0) {
                 DPRINT1("XHCI_SetEndpointState: Control endpoint already configured, marking as active\n");
             } else {
-                // For other endpoint types, we would need to configure them here
-                DPRINT1("XHCI_SetEndpointState: Non-control endpoint activation not yet implemented\n");
+                /*
+                 * Restart a stopped non-control endpoint by issuing Set TR
+                 * Dequeue Pointer, which transitions the EP Context from
+                 * Stopped back to Running without destroying in-flight TRBs.
+                 * The SlotId and DCI were saved during
+                 * XHCI_Open{Bulk,Interrupt}Endpoint.
+                 */
+                ULONG SlotId;
+                ULONG DCI = XhciEndpoint->ContextIndex;
+                PHYSICAL_ADDRESS DequeuePA;
+                MPSTATUS Status;
+
+                /* SlotId is stored via FirstTD (same as XHCI_SubmitBulkTransfer) */
+                SlotId = *(PULONG)&XhciEndpoint->FirstTD;
+                if (SlotId == 0)
+                    SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
+
+                DequeuePA = MmGetPhysicalAddress(
+                    XhciEndpoint->TransferRing.dequeue_pointer);
+
+                DPRINT1("XHCI_SetEndpointState: Restarting EP slot=%d DCI=%d dequeue=0x%I64x cycle=%d\n",
+                        SlotId, DCI, DequeuePA.QuadPart,
+                        XhciEndpoint->TransferRing.ConsumerCycleState);
+
+                Status = XHCI_SetTransferRingDequeuePointer(
+                    XhciExtension, SlotId, DCI,
+                    DequeuePA,
+                    XhciEndpoint->TransferRing.ConsumerCycleState);
+
+                if (Status == MP_STATUS_SUCCESS)
+                {
+                    /* Doorbell re-arms the endpoint after Set TR Dequeue */
+                    XHCI_RingDoorbell(XhciExtension, SlotId, DCI);
+                }
+                else
+                {
+                    DPRINT1("XHCI_SetEndpointState: SetTRDequeue failed (0x%x) slot=%d DCI=%d\n",
+                            Status, SlotId, DCI);
+                }
             }
             break;
             
