@@ -350,11 +350,18 @@ PartitionHandleRemove(
 
     if (FinalRemove)
     {
-        ASSERT(PartExt->DeviceName.Buffer);
         if (PartExt->DeviceName.Buffer)
         {
             INFO("Removed device %wZ\n", &PartExt->DeviceName);
             RtlFreeUnicodeString(&PartExt->DeviceName);
+        }
+        else
+        {
+            /*
+             * DeviceName was never allocated (e.g. surprise removal
+             * arrived before the partition was fully started).
+             */
+            DPRINT1("PartitionHandleRemove: DeviceName already NULL, skipping free\n");
         }
 
         IoDeleteDevice(PartExt->DeviceObject);
