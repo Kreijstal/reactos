@@ -126,7 +126,7 @@ XHCI_ReopenEndpoint(IN PVOID xhciExtension,
     PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
     MPSTATUS Status;
-    __debugbreak();
+
     DPRINT1("XHCI_ReopenEndpoint: function initiated\n");
     
     if (!XhciExtension || !XhciEndpoint || !endpointParameters)
