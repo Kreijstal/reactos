@@ -48,6 +48,8 @@ extern void acpi_pic_sci_set_trigger(unsigned int irq, UINT16 trigger);
 
 typedef int (*acpi_bus_walk_callback)(struct acpi_device*, int, void*);
 
+int acpi_bus_scan(struct acpi_device *start);
+
 struct acpi_device		*acpi_root;
 KSPIN_LOCK	acpi_bus_event_lock;
 LIST_HEAD(acpi_bus_event_list);
@@ -670,19 +672,63 @@ acpi_bus_check_device (ACPI_HANDLE handle)
 	if (ACPI_FAILURE(status))
 		return;
 
-	if (STRUCT_TO_INT(old_status) == STRUCT_TO_INT(device->status))
+	if (STRUCT_TO_INT(old_status) == STRUCT_TO_INT(device->status)) {
+		/*
+		 * QEMU PCI hot-plug fires Notify(slot, 1) without changing the
+		 * slot device's _STA: the slot is reported "present, enabled"
+		 * before and after, but the function attached underneath is
+		 * new. Walk our PDO list and invalidate BusRelations on every
+		 * PCI host bridge PDO (PNP0A03/PNP0A08); PnP re-issues
+		 * IRP_MN_QUERY_DEVICE_RELATIONS to pci.sys, which rescans
+		 * config space and surfaces the newly-arrived function.
+		 */
+		if (device->status.present && AcpiFdo) {
+			PLIST_ENTRY entry;
+			for (entry = AcpiFdo->ListOfPDOs.Flink;
+			     entry != &AcpiFdo->ListOfPDOs;
+			     entry = entry->Flink)
+			{
+				PPDO_DEVICE_DATA pdoData =
+					CONTAINING_RECORD(entry, PDO_DEVICE_DATA, Link);
+				struct acpi_device *cur;
+
+				if (!pdoData->AcpiHandle) continue;
+				if (acpi_bus_get_device(pdoData->AcpiHandle, &cur)) continue;
+				if (!cur || !cur->flags.hardware_id) continue;
+
+				if (!strcmp(cur->pnp.hardware_id, "PNP0A03") ||
+				    !strcmp(cur->pnp.hardware_id, "PNP0A08"))
+				{
+					DPRINT1("ACPI hot-plug: rescan PCI PDO %p (%s)\n",
+					        pdoData->Common.Self, cur->pnp.hardware_id);
+					IoInvalidateDeviceRelations(pdoData->Common.Self,
+					                            BusRelations);
+				}
+			}
+		}
 		return;
+	}
 
 
 	/*
 	 * Device Insertion/Removal
 	 */
 	if ((device->status.present) && !(old_status.present)) {
-		DPRINT("Device insertion detected\n");
-		/* TBD: Handle device insertion */
+		DPRINT1("Device insertion detected for [%s]\n", device->pnp.bus_id);
+		/*
+		 * Walk the namespace below this handle so any newly-arrived
+		 * children become acpi_device structs; ACPIEnumerateDevices
+		 * then promotes them to PDOs (it dedupes by ACPI handle).
+		 */
+		acpi_bus_scan(device);
+		if (AcpiFdo) {
+			ACPIEnumerateDevices(AcpiFdo);
+			IoInvalidateDeviceRelations(AcpiFdo->UnderlyingPDO,
+			                            BusRelations);
+		}
 	}
 	else if (!(device->status.present) && (old_status.present)) {
-		DPRINT("Device removal detected\n");
+		DPRINT1("Device removal detected for [%s]\n", device->pnp.bus_id);
 		/* TBD: Handle device removal */
 	}
 
@@ -692,13 +738,26 @@ acpi_bus_check_device (ACPI_HANDLE handle)
 static void
 acpi_bus_check_scope (ACPI_HANDLE handle)
 {
+	struct acpi_device *device = NULL;
+
 	/* Status Change? */
 	acpi_bus_check_device(handle);
 
 	/*
-	 * TBD: Enumerate child devices within this device's scope and
-	 *       run acpi_bus_check_device()'s on them.
+	 * BUS_CHECK is the QEMU/firmware notification for PCI/ACPI hot-plug:
+	 * the children of this handle have changed but the handle itself may
+	 * still report the same status. Re-scan its subtree, refresh the FDO
+	 * PDO list, and ask PnP to re-query BusRelations so the PCI bus driver
+	 * picks up new functions.
 	 */
+	if (acpi_bus_get_device(handle, &device) == 0 && device) {
+		acpi_bus_scan(device);
+		if (AcpiFdo) {
+			ACPIEnumerateDevices(AcpiFdo);
+			IoInvalidateDeviceRelations(AcpiFdo->UnderlyingPDO,
+			                            BusRelations);
+		}
+	}
 }
 
 
@@ -1666,6 +1725,20 @@ acpi_bus_init (void)
 		DPRINT1("Unable to initialize ACPI objects\n");
 		goto error1;
 	}
+
+	/*
+	 * Walk the namespace once now that objects exist so every _Lxx/_Exx
+	 * GPE handler is registered, then unmask all runtime GPEs. Without
+	 * this the SCI fires but the dispatcher has nothing to invoke, so
+	 * hot-plug Notify(...) requests from QEMU/firmware are dropped.
+	 */
+	status = AcpiUpdateAllGpes();
+	if (ACPI_FAILURE(status))
+		DPRINT1("AcpiUpdateAllGpes failed: %s\n", AcpiFormatException(status));
+
+	status = AcpiEnableAllRuntimeGpes();
+	if (ACPI_FAILURE(status))
+		DPRINT1("AcpiEnableAllRuntimeGpes failed: %s\n", AcpiFormatException(status));
 
 	/*
 	 * Maybe EC region is required at bus_scan/acpi_get_devices. So it
