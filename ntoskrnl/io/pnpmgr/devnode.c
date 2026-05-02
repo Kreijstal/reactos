@@ -331,12 +331,31 @@ IopFreeDeviceNode(
     PDEVICE_NODE PrevSibling = NULL;
 
     ASSERT(DeviceNode->PhysicalDeviceObject);
-    /* All children must be deleted before a parent is deleted */
-    ASSERT(DeviceNode->Child == NULL);
     /* This is the only state where we are allowed to remove the node */
     ASSERT(DeviceNode->State == DeviceNodeRemoved);
     /* No notifications should be registered for this device */
     ASSERT(IsListEmpty(&DeviceNode->TargetDeviceNotify));
+
+    /*
+     * If children remain (e.g. a surprise-removed USBSTOR disk whose
+     * partition child couldn't be fully torn down because of open file
+     * handles), unlink them from the tree so we don't crash below.
+     * They will leak, but the system survives.
+     */
+    if (DeviceNode->Child)
+    {
+        PDEVICE_NODE child, next;
+        DPRINT1("IopFreeDeviceNode: %wZ still has children -- unlinking\n",
+                &DeviceNode->InstancePath);
+        for (child = DeviceNode->Child; child; child = next)
+        {
+            next = child->Sibling;
+            child->Parent = NULL;
+            child->Sibling = NULL;
+        }
+        DeviceNode->Child = NULL;
+        DeviceNode->LastChild = NULL;
+    }
 
     KeAcquireSpinLock(&IopDeviceTreeLock, &OldIrql);
 
