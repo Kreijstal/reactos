@@ -2210,6 +2210,76 @@ XHCI_EnableSlot(IN PXHCI_EXTENSION XhciExtension,
 
 MPSTATUS
 NTAPI
+XHCI_DisableSlot(IN PXHCI_EXTENSION XhciExtension,
+                 IN ULONG SlotId)
+{
+    XHCI_TRB DisableSlotTrb;
+    PXHCI_PENDING_COMMAND PendingCommand;
+    PHYSICAL_ADDRESS TrbPA;
+    MPSTATUS Status;
+
+    DPRINT1("XHCI_DisableSlot: Disabling slot %d\n", SlotId);
+
+    if (SlotId == 0 || SlotId > XHCI_MAX_SLOTS)
+    {
+        DPRINT1("XHCI_DisableSlot: Invalid slot ID %d\n", SlotId);
+        return MP_STATUS_FAILURE;
+    }
+
+    // Create Disable Slot command TRB
+    RtlZeroMemory(&DisableSlotTrb, sizeof(XHCI_TRB));
+    DisableSlotTrb.GenericTRB.Word0 = 0;
+    DisableSlotTrb.GenericTRB.Word1 = 0;
+    DisableSlotTrb.GenericTRB.Word2 = 0;
+    DisableSlotTrb.GenericTRB.Word3 = ((DISABLE_SLOT_COMMAND << 10) |  // TRB Type
+                                       (SlotId << 24) |                  // Slot ID
+                                       1);                               // Cycle bit set by XHCI_SendCommand
+
+    // Pre-calculate the TRB physical address
+    PXHCI_HC_RESOURCES HcResourcesVA = XhciExtension->HcResourcesVA;
+    PHYSICAL_ADDRESS HcResourcesPA = XhciExtension->HcResourcesPA;
+    PXHCI_TRB enqueue_pointer = HcResourcesVA->CommandRing.enqueue_pointer;
+
+    ULONG TrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer -
+                            (ULONG_PTR)&HcResourcesVA->CommandRing.firstSeg.XhciTrb[0]) / sizeof(XHCI_TRB);
+    TrbPA.QuadPart = HcResourcesPA.QuadPart +
+                     FIELD_OFFSET(XHCI_HC_RESOURCES, CommandRing.firstSeg.XhciTrb[0]) +
+                     (TrbIndex * sizeof(XHCI_TRB));
+
+    // Add to pending commands before sending
+    PendingCommand = AddPendingCommand(COMMAND_DISABLE_SLOT, TrbPA, SlotId);
+    if (!PendingCommand)
+    {
+        DPRINT1("XHCI_DisableSlot: Failed to add pending command\n");
+        return MP_STATUS_FAILURE;
+    }
+
+    // Send command
+    Status = XHCI_SendCommand(DisableSlotTrb, XhciExtension);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_DisableSlot: Failed to send Disable Slot command\n");
+        RemovePendingCommand(PendingCommand);
+        return Status;
+    }
+
+    // Wait for completion
+    Status = WaitForCommandCompletion(XhciExtension, PendingCommand, 1000);
+    if (Status == MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_DisableSlot: Slot %d disabled successfully\n", SlotId);
+    }
+    else
+    {
+        DPRINT1("XHCI_DisableSlot: Disable Slot failed or timed out for slot %d\n", SlotId);
+    }
+
+    RemovePendingCommand(PendingCommand);
+    return Status;
+}
+
+MPSTATUS
+NTAPI
 XHCI_SetupDeviceContext(IN PXHCI_EXTENSION XhciExtension,
                        IN ULONG SlotId,
                        IN ULONG MaxPacketSize,

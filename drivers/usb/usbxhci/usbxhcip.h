@@ -219,6 +219,11 @@ NTAPI
 XHCI_DisableSlot(IN PXHCI_EXTENSION XhciExtension,
                 IN ULONG SlotId);
 
+VOID
+NTAPI
+CleanupSlotResources(IN PXHCI_EXTENSION XhciExtension,
+                    IN ULONG SlotId);
+
 MPSTATUS
 NTAPI
 XHCI_AddressDevice(IN PXHCI_EXTENSION XhciExtension,
