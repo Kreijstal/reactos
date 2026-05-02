@@ -250,6 +250,16 @@ XHCI_SetTransferRingDequeuePointer(IN PXHCI_EXTENSION XhciExtension,
 
 MPSTATUS
 NTAPI
+XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                       IN ULONG SlotId,
+                       IN ULONG EndpointIndex,
+                       IN ULONG EndpointType,
+                       IN ULONG MaxPacketSize,
+                       IN ULONG Interval,
+                       IN PHYSICAL_ADDRESS TransferRingPA);
+
+MPSTATUS
+NTAPI
 XHCI_DropEndpoint(IN PXHCI_EXTENSION XhciExtension,
                   IN ULONG SlotId,
                   IN ULONG EndpointIndex);
