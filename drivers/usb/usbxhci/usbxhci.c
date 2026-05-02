@@ -158,7 +158,8 @@ XHCI_ReopenEndpoint(IN PVOID xhciExtension,
     
     // CRITICAL FIX: Update the xHCI controller's endpoint context with the new transfer ring state
     // This tells the controller where to find the new transfer ring after reinitialization
-    ULONG SlotId = endpointParameters->DeviceAddress;  // Device address is the slot ID
+    // Retrieve the slot ID from FirstTD (stored during endpoint creation), NOT from DeviceAddress
+    ULONG SlotId = *(PULONG)&XhciEndpoint->FirstTD;
     ULONG EndpointIndex = ((endpointParameters->EndpointAddress & 0x0F) * 2) + 
                           ((endpointParameters->EndpointAddress & 0x80) ? 1 : 0);  // Convert to endpoint index
     
@@ -296,11 +297,11 @@ XHCI_CloseEndpoint(IN PVOID xhciExtension,
     }
 
     DeviceAddress = XhciEndpoint->EndpointProperties.DeviceAddress;
-    SlotId = DeviceAddress;
-    DBG_UNREFERENCED_LOCAL_VARIABLE(SlotId);
+    // Retrieve the slot ID from FirstTD, where it was stored during endpoint creation
+    SlotId = *(PULONG)&XhciEndpoint->FirstTD;
 
-    DPRINT1("XHCI_CloseEndpoint: Closing endpoint for device %d, endpoint %d\n",
-            DeviceAddress, XhciEndpoint->EndpointProperties.EndpointAddress);
+    DPRINT1("XHCI_CloseEndpoint: Closing endpoint for device %d, endpoint %d, slot %d\n",
+            DeviceAddress, XhciEndpoint->EndpointProperties.EndpointAddress, SlotId);
     
     // Mark endpoint as inactive first
     XhciEndpoint->EndpointState = USBPORT_ENDPOINT_REMOVE;
@@ -308,7 +309,19 @@ XHCI_CloseEndpoint(IN PVOID xhciExtension,
     // Clear any pending transfers from the transfer ring
     DPRINT1("XHCI_CloseEndpoint: Clearing transfer ring for device %d\n", DeviceAddress);
     // Reset transfer ring to clean state - this will clear any pending TRBs
-    // TODO: Update device context to disable this endpoint
+    
+    // When closing EP0 of an addressed device (not during default-address
+    // enumeration), disable the hardware slot so it can be reused.
+    // DeviceAddress == 0 means the initial EP0 before SET_ADDRESS;
+    // we must NOT disable the slot in that case.
+    if (XhciEndpoint->EndpointProperties.EndpointAddress == 0 &&
+        SlotId != 0 && DeviceAddress != 0)
+    {
+        DPRINT1("XHCI_CloseEndpoint: Disabling slot %d for device %d\n", SlotId, DeviceAddress);
+        XHCI_DisableSlot(XhciExtension, SlotId);
+        // Also clean up software slot tracking
+        CleanupSlotResources(XhciExtension, SlotId);
+    }
     
     // Clean up the endpoint structure
     if (!IsListEmpty(&XhciEndpoint->ListTDs))
