@@ -18,6 +18,8 @@ UNICODE_STRING ProcessorHardwareIds = {0, 0, NULL};
 LPWSTR ProcessorIdString = NULL;
 LPWSTR ProcessorNameString = NULL;
 
+PFDO_DEVICE_DATA AcpiFdo = NULL;
+
 
 CODE_SEG("PAGE")
 NTSTATUS
@@ -56,6 +58,10 @@ Bus_AddDevice(
 
     deviceData = (PFDO_DEVICE_DATA) deviceObject->DeviceExtension;
     RtlZeroMemory (deviceData, sizeof (FDO_DEVICE_DATA));
+
+    /* The bus driver instantiates a single FDO; remember it so the ACPI
+     * Notify path can issue BusRelations invalidations on hot-plug. */
+    AcpiFdo = deviceData;
 
     //
     // Set the initial state of the FDO
