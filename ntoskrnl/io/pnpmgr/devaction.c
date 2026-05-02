@@ -2079,6 +2079,26 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
 
     BOOLEAN surpriseRemoval = (_Bool)(DeviceNode->Flags & DNF_DEVICE_GONE);
 
+    /*
+     * Remove children bottom-up before removing the parent.  Otherwise
+     * IopFreeDeviceNode asserts on DeviceNode->Child == NULL when a
+     * surprise-removed parent (e.g. USBSTOR) still has mounted children
+     * (e.g. STORAGE\Partition holding a FAT volume).
+     */
+    {
+        PDEVICE_NODE child = DeviceNode->Child;
+        while (child)
+        {
+            PDEVICE_NODE next = child->Sibling;
+            /* Mark as surprise-removed if the parent was surprise-removed */
+            if (surpriseRemoval)
+                child->Flags |= DNF_DEVICE_GONE;
+            PiSetDevNodeState(child, DeviceNodeAwaitingQueuedRemoval);
+            IopRemoveDevice(child);
+            child = next;
+        }
+    }
+
     Status = IopPrepareDeviceForRemoval(DeviceNode->PhysicalDeviceObject, surpriseRemoval);
 
     if (surpriseRemoval)
