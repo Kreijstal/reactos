@@ -1235,15 +1235,6 @@ HalpDispatchInterrupt2(VOID)
 
 ULONG
 NTAPI
-HalpGetSystemInterruptMaxVector(VOID)
-{
-    /* Cascaded 8259 PIC: IRQs 0..15. HalpGetRootInterruptVector additionally
-     * accepts up to 23 for ELCR-mapped extra lines on some legacy chipsets. */
-    return 15;
-}
-
-ULONG
-NTAPI
 HalpGetRootInterruptVector(IN ULONG BusInterruptLevel,
                            IN ULONG BusInterruptVector,
                            OUT PKIRQL Irql,

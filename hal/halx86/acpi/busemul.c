@@ -111,71 +111,12 @@ HalpFindBusAddressTranslation(IN PHYSICAL_ADDRESS BusAddress,
 
 /*
  * @implemented
- *
- * Walks the IO_RESOURCE_REQUIREMENTS_LIST and constrains every interrupt
- * descriptor's vector range to one the underlying interrupt controller can
- * actually program. Without this, a generic PCI bus driver requirement of
- * "any vector in [0, 0xFF]" can be satisfied by the PnP arbiter with a vector
- * above the IO-APIC's redirection-entry count, which then asserts in
- * IOApicWrite when the kernel tries to route the interrupt (e.g. on hot-plug,
- * where no BIOS has programmed PCI Configuration Space InterruptLine and no
- * boot-resources interrupt entry is supplied).
- *
- * The maximum reachable system vector comes from the linked HAL component:
- * for the APIC HAL it is the IO-APIC's redirection-entry count read at boot
- * from the IO-APIC Version Register; for the PIC HAL it is the 8259 cascade
- * ceiling of 15. Clamping at the requirements stage matches the Windows
- * behavior where the platform HAL is the authority on which vectors are
- * valid system resources.
  */
 NTSTATUS
 NTAPI
 HalAdjustResourceList(IN OUT PIO_RESOURCE_REQUIREMENTS_LIST* pRequirementsList)
 {
-    PIO_RESOURCE_REQUIREMENTS_LIST List;
-    PIO_RESOURCE_LIST AltList;
-    PIO_RESOURCE_DESCRIPTOR Descriptor;
-    ULONG Alt, Idx;
-    ULONG MaxVector;
-
-    if (!pRequirementsList || !*pRequirementsList)
-        return STATUS_SUCCESS;
-
-    List = *pRequirementsList;
-    MaxVector = HalpGetSystemInterruptMaxVector();
-    if (MaxVector == 0)
-        return STATUS_SUCCESS;
-
-    AltList = &List->List[0];
-    for (Alt = 0; Alt < List->AlternativeLists; Alt++)
-    {
-        for (Idx = 0; Idx < AltList->Count; Idx++)
-        {
-            Descriptor = &AltList->Descriptors[Idx];
-            if (Descriptor->Type != CmResourceTypeInterrupt)
-                continue;
-
-            if (Descriptor->u.Interrupt.MaximumVector > MaxVector)
-            {
-                DPRINT1("HAL: clamping IRQ requirement [%lu..%lu] to MaxVector=%lu\n",
-                        Descriptor->u.Interrupt.MinimumVector,
-                        Descriptor->u.Interrupt.MaximumVector,
-                        MaxVector);
-                Descriptor->u.Interrupt.MaximumVector = MaxVector;
-            }
-            if (Descriptor->u.Interrupt.MinimumVector > MaxVector)
-            {
-                /* Whole range is unreachable - flatten to MaxVector so the
-                 * arbiter at least knows what the platform can offer; if the
-                 * device truly demands a vector this HAL cannot supply, the
-                 * arbitrate-and-conflict path will surface the failure to the
-                 * user-mode PnP manager rather than asserting in HAL. */
-                Descriptor->u.Interrupt.MinimumVector = MaxVector;
-            }
-        }
-        AltList = (PIO_RESOURCE_LIST)(AltList->Descriptors + AltList->Count);
-    }
-
+    /* Deprecated, return success */
     return STATUS_SUCCESS;
 }
 
