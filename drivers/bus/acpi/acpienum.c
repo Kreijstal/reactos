@@ -135,7 +135,7 @@ Bus_PlugInDevice (
     // queries and cause the function driver to be loaded.
     //
 
-    //IoInvalidateDeviceRelations (FdoData->UnderlyingPDO, BusRelations);
+    IoInvalidateDeviceRelations (FdoData->UnderlyingPDO, BusRelations);
 
     return status;
 }

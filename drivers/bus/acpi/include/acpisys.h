@@ -8,6 +8,10 @@ extern UNICODE_STRING ProcessorHardwareIds;
 extern LPWSTR ProcessorIdString;
 extern LPWSTR ProcessorNameString;
 
+/* Set in Bus_AddDevice; consumed by the ACPI Notify dispatcher to issue a
+ * BusRelations invalidation when a device hot-plug arrives. */
+extern struct _FDO_DEVICE_DATA *AcpiFdo;
+
 typedef enum _DEVICE_PNP_STATE {
 
     NotStarted = 0,         // Not started yet
