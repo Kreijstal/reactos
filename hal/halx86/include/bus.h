@@ -421,6 +421,17 @@ HalpGetRootInterruptVector(
     _Out_ PKIRQL Irql,
     _Out_ PKAFFINITY Affinity);
 
+/*
+ * Returns the highest BusInterruptLevel the underlying interrupt controller
+ * (PIC or IO-APIC) can route. Used by HalAdjustResourceList to constrain
+ * generic IO_RESOURCE_REQUIREMENTS_LIST interrupt entries from bus drivers
+ * that propose a wide vector range. Each HAL component (pic, apic) provides
+ * its own definition.
+ */
+ULONG
+NTAPI
+HalpGetSystemInterruptMaxVector(VOID);
+
 ULONG
 NTAPI
 HalpGetCmosData(
