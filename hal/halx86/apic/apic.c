@@ -401,6 +401,14 @@ HalpAllocateSystemInterrupt(
 
 ULONG
 NTAPI
+HalpGetSystemInterruptMaxVector(VOID)
+{
+    /* IO-APIC redirection-entry count - 1 (last valid pin index). */
+    return (ApicMaxIrq != 0) ? ((ULONG)ApicMaxIrq - 1) : 0;
+}
+
+ULONG
+NTAPI
 HalpGetRootInterruptVector(
     _In_ ULONG BusInterruptLevel,
     _In_ ULONG BusInterruptVector,
