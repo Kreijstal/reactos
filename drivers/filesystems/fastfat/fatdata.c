@@ -1039,6 +1039,16 @@ Return Value:
         return Results;
     }
 
+    //
+    //  Ensure Fcb is valid. Defensive check against races or
+    //  corrupted file object state on NT6+ where FastIo paths
+    //  can be entered before the FCB is fully initialized.
+    //
+    if (!Fcb) {
+
+        return Results;
+    }
+
     FsRtlEnterFileSystem();
 
     //
@@ -1224,6 +1234,16 @@ Return Value:
     }
 
     //
+    //  Ensure Fcb is valid. Defensive check against races or
+    //  corrupted file object state on NT6+ where FastIo paths
+    //  can be entered before the FCB is fully initialized.
+    //
+    if (!Fcb) {
+
+        return Results;
+    }
+
+    //
     //  Get access to the Fcb but only if it is not the paging file
     //
 
@@ -1383,6 +1403,16 @@ Return Value:
     TypeOfOpen = FatDecodeFileObject( FileObject, &Vcb, &Fcb, &Ccb );
 
     if ((TypeOfOpen != UserFileOpen) && (TypeOfOpen != UserDirectoryOpen)) {
+
+        return Results;
+    }
+
+    //
+    //  Ensure Fcb is valid. Defensive check against races or
+    //  corrupted file object state on NT6+ where FastIo paths
+    //  can be entered before the FCB is fully initialized.
+    //
+    if (!Fcb) {
 
         return Results;
     }
