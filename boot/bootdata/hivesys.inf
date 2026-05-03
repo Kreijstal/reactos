@@ -993,7 +993,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Smb2Np\NetworkProvider","ProviderPath",0
 
 ; SMB2 usermode daemon (upcall endpoint for smb2rdr.sys)
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Type",0x00010001,0x00000010
-HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","DisplayName",0x00000000,"SMB2 Client Daemon"
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ObjectName",0x00000000,"LocalSystem"

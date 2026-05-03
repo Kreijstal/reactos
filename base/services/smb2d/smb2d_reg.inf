@@ -1,10 +1,11 @@
 ; SMB2 usermode daemon — kernel-mode smb2rdr minirdr uses this service as
-; its upcall endpoint.  Start=3 (on demand); launched via `net start smb2d`
-; or on first UNC create, once autostart plumbing lands.
+; its upcall endpoint.  Start=2 (automatic) because direct MUP/RDBSS UNC
+; opens bypass the user-mode network provider and cannot demand-start a
+; Win32 service before the redirector needs its daemon.
 [AddReg]
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","DisplayName",0x00000000,"SMB2 Client Daemon"
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ImagePath",0x00020000,"%SystemRoot%\system32\smb2d.exe"
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","ObjectName",0x00000000,"LocalSystem"
-HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\smb2d","Type",0x00010001,0x00000010
