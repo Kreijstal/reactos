@@ -1496,6 +1496,116 @@ PdoQueryDeviceRelations(
 }
 
 
+/*
+ * Walk an IO_RESOURCE_REQUIREMENTS_LIST and narrow every CmResourceTypeInterrupt
+ * descriptor to the single system IRQ that ACPI says routes this device's INTx
+ * pin.  Without this, the PCI bus driver hands the PnP arbiter
+ * MinimumVector=0 / MaximumVector=0xFF for every PCI device, which it satisfies
+ * by linearly walking the integer space and picking whatever vector happens
+ * to be free -- on a hot-plugged device with all legacy IRQs already claimed
+ * that lands well outside the IO-APIC's redirection-entry count and bug-checks
+ * the HAL.
+ */
+static NTSTATUS
+PdoFilterResourceRequirements(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    PIO_RESOURCE_REQUIREMENTS_LIST OldList, NewList;
+    PIO_RESOURCE_LIST AltList;
+    PIO_RESOURCE_DESCRIPTOR Descriptor;
+    NTSTATUS Status;
+    ULONG SystemIrq;
+    BOOLEAN IsLevelTriggered, IsActiveLow;
+    ULONG i, j;
+
+    DeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    FdoExtension = (PFDO_DEVICE_EXTENSION)DeviceExtension->Fdo->DeviceExtension;
+
+    /* Reject bridges (no INTx routing of their own to apply). */
+    if (PCI_CONFIGURATION_TYPE(&DeviceExtension->PciDevice->PciConfig) != PCI_DEVICE_TYPE)
+        return Irp->IoStatus.Status;
+
+    if (DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin == 0)
+        return Irp->IoStatus.Status;
+
+    /* The PnP manager seeds Irp->IoStatus.Information with the existing
+     * IO_RESOURCE_REQUIREMENTS_LIST (see IopInitiatePnpIrp).  An upstream
+     * filter may have already replaced it. */
+    OldList = (PIO_RESOURCE_REQUIREMENTS_LIST)Irp->IoStatus.Information;
+    if (OldList == NULL)
+        OldList = IrpSp->Parameters.FilterResourceRequirements.IoResourceRequirementList;
+    if (OldList == NULL || OldList->ListSize == 0)
+        return Irp->IoStatus.Status;
+
+    /* Lazy-fetch the ACPI _PRT routing service from the parent host bridge. */
+    Status = PciFdoAcquireRoutingInterface(FdoExtension);
+    if (!NT_SUCCESS(Status) || !FdoExtension->RoutingValid)
+        return Irp->IoStatus.Status;
+
+    Status = FdoExtension->Routing.RouteInterrupt(FdoExtension->Routing.Context,
+                                                  DeviceExtension->PciDevice->BusNumber,
+                                                  DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
+                                                  DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
+                                                  DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin,
+                                                  &SystemIrq,
+                                                  &IsLevelTriggered,
+                                                  &IsActiveLow);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("PCI: _PRT lookup for %02lx:%02lx.%lx pin %u failed (0x%lx)\n",
+                DeviceExtension->PciDevice->BusNumber,
+                DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
+                DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
+                DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin,
+                Status);
+        return Irp->IoStatus.Status;
+    }
+
+    NewList = ExAllocatePoolWithTag(PagedPool, OldList->ListSize, TAG_PCI);
+    if (NewList == NULL)
+        return Irp->IoStatus.Status;
+
+    RtlCopyMemory(NewList, OldList, OldList->ListSize);
+
+    AltList = &NewList->List[0];
+    for (i = 0; i < NewList->AlternativeLists; i++)
+    {
+        for (j = 0; j < AltList->Count; j++)
+        {
+            Descriptor = &AltList->Descriptors[j];
+            if (Descriptor->Type != CmResourceTypeInterrupt)
+                continue;
+
+            Descriptor->ShareDisposition = CmResourceShareShared;
+            Descriptor->Flags = IsLevelTriggered ? CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE
+                                                 : CM_RESOURCE_INTERRUPT_LATCHED;
+            Descriptor->u.Interrupt.MinimumVector = SystemIrq;
+            Descriptor->u.Interrupt.MaximumVector = SystemIrq;
+        }
+
+        AltList = (PIO_RESOURCE_LIST)((PUCHAR)AltList +
+                                      FIELD_OFFSET(IO_RESOURCE_LIST, Descriptors) +
+                                      AltList->Count * sizeof(IO_RESOURCE_DESCRIPTOR));
+    }
+
+    DPRINT1("PCI: %02lx:%02lx.%lx pin %u routed to system IRQ %lu (level=%u low=%u)\n",
+            DeviceExtension->PciDevice->BusNumber,
+            DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
+            DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
+            DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin,
+            SystemIrq, IsLevelTriggered, IsActiveLow);
+
+    /* The PnP manager owns OldList and frees the list it gets back via
+     * Irp->IoStatus.Information; do not free OldList here. */
+    Irp->IoStatus.Information = (ULONG_PTR)NewList;
+    return STATUS_SUCCESS;
+}
+
+
 /*** PUBLIC ******************************************************************/
 
 NTSTATUS
@@ -1601,8 +1711,7 @@ PdoPnpControl(
 
         case IRP_MN_FILTER_RESOURCE_REQUIREMENTS:
             DPRINT("IRP_MN_FILTER_RESOURCE_REQUIREMENTS received\n");
-            /* Nothing to do */
-            Irp->IoStatus.Status = Status;
+            Status = PdoFilterResourceRequirements(DeviceObject, Irp, IrpSp);
             break;
 
         default:
