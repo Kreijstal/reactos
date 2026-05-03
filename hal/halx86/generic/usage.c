@@ -398,6 +398,21 @@ HalpReportResourceUsage(IN PUNICODE_STRING HalName,
             /* Check for valid vector number */
             if (i <= MAXIMUM_IDTVECTOR)
             {
+                /* Skip CPU exception slots (0..PRIMARY_VECTOR_BASE-1) on the
+                 * Internal pass.  Those entries are flagged IDT_INTERNAL by the
+                 * pre-loop above only to keep the dynamic vector allocator from
+                 * handing them out -- they are CPU traps and faults, not IRQs,
+                 * and reporting them as CmResourceTypeInterrupt resources would
+                 * make the PnP arbiter believe IRQs 0..PRIMARY_VECTOR_BASE-1
+                 * are already owned and refuse to assign overlapping IRQs to
+                 * real devices (e.g. a PCI device that _PRT routes to IRQ 10
+                 * collides with IDT slot 10 = #TS). */
+                if (ReportType == 1 && i < PRIMARY_VECTOR_BASE)
+                {
+                    i++;
+                    continue;
+                }
+
                 /* Check if this entry should be parsed */
                 if ((HalpIDTUsageFlags[i].Flags & FlagMatch))
                 {
