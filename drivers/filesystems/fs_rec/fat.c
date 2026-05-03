@@ -147,17 +147,6 @@ FsRecVfatFsControl(IN PDEVICE_OBJECT DeviceObject,
                 DeviceError = TRUE;
             }
 
-            /* Check if we have an error on the stack */
-            if (DeviceError)
-            {
-                /* Was this because of a floppy? */
-                if (MountDevice->Characteristics & FILE_FLOPPY_DISKETTE)
-                {
-                    /* Let the FS try anyway */
-                    Status = STATUS_FS_DRIVER_REQUIRED;
-                }
-            }
-
             break;
 
         case IRP_MN_LOAD_FILE_SYSTEM:
