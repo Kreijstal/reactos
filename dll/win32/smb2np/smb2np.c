@@ -39,6 +39,7 @@ typedef struct _SMB2NP_CONN {
 static SMB2NP_CONN      g_conns[SMB2NP_MAX_CONNECTIONS];
 static CRITICAL_SECTION g_lock;
 static BOOL             g_wsa_started;
+static LONG             g_smb2d_start_attempted;
 
 /* ---------- small helpers ---------- */
 
@@ -155,6 +156,38 @@ ensure_wsa(void)
     }
 }
 
+static void
+ensure_smb2d_started(void)
+{
+    SC_HANDLE scm, svc;
+    SERVICE_STATUS_PROCESS ssp;
+    DWORD bytes;
+
+    if (InterlockedCompareExchange(&g_smb2d_start_attempted, 1, 0) != 0)
+        return;
+
+    scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm)
+        return;
+
+    svc = OpenServiceW(scm, L"smb2d", SERVICE_QUERY_STATUS | SERVICE_START);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return;
+    }
+
+    if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssp,
+                             sizeof(ssp), &bytes) &&
+        ssp.dwCurrentState != SERVICE_RUNNING &&
+        ssp.dwCurrentState != SERVICE_START_PENDING)
+    {
+        StartServiceW(svc, 0, NULL);
+    }
+
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
 /* ---------- NP exports ---------- */
 
 DWORD WINAPI
@@ -170,6 +203,8 @@ NPGetCaps(DWORD nIndex)
                  | WNNC_CON_ADDCONNECTION3
                  | WNNC_CON_CANCELCONNECTION
                  | WNNC_CON_GETCONNECTIONS;
+        case WNNC_DIALOG:
+            return WNNC_DLG_GETRESOURCEINFORMATION;
         case WNNC_ENUMERATION:     return WNNC_ENUM_GLOBAL;
         case WNNC_START:           return 1;
         default:                   return 0;
@@ -205,6 +240,7 @@ NPAddConnection3(HWND hwndOwner,
     if (!parse_unc(lpNetResource->lpRemoteName, &host, &share, &path))
         return WN_BAD_NETNAME;
 
+    ensure_smb2d_started();
     ensure_wsa();
 
     smb2 = smb2_init_context();
@@ -461,7 +497,44 @@ NPGetResourceInformation(LPNETRESOURCEW lpNetResource,
                          LPDWORD lpBufferSize,
                          LPWSTR *lplpSystem)
 {
-    return WN_NOT_SUPPORTED;
+    NETRESOURCEW *nr;
+    DWORD remoteLen, needed;
+    char *host = NULL, *share = NULL, *path = NULL;
+    WCHAR *tail;
+
+    if (!lpNetResource || !lpNetResource->lpRemoteName || !lpBufferSize)
+        return WN_BAD_POINTER;
+
+    if (!parse_unc(lpNetResource->lpRemoteName, &host, &share, &path))
+        return WN_BAD_NETNAME;
+
+    ensure_smb2d_started();
+
+    remoteLen = (lstrlenW(lpNetResource->lpRemoteName) + 1) * sizeof(WCHAR);
+    needed = sizeof(NETRESOURCEW) + remoteLen;
+    if (!lpBuffer || *lpBufferSize < needed) {
+        *lpBufferSize = needed;
+        utf8_free(host); utf8_free(share); utf8_free(path);
+        return WN_MORE_DATA;
+    }
+
+    ZeroMemory(lpBuffer, needed);
+    nr = (NETRESOURCEW *)lpBuffer;
+    tail = (WCHAR *)((BYTE *)lpBuffer + sizeof(NETRESOURCEW));
+    CopyMemory(tail, lpNetResource->lpRemoteName, remoteLen);
+
+    nr->dwScope = RESOURCE_GLOBALNET;
+    nr->dwType = RESOURCETYPE_DISK;
+    nr->dwDisplayType = RESOURCEDISPLAYTYPE_SHARE;
+    nr->dwUsage = RESOURCEUSAGE_CONNECTABLE;
+    nr->lpRemoteName = tail;
+
+    if (lplpSystem)
+        *lplpSystem = NULL;
+
+    *lpBufferSize = needed;
+    utf8_free(host); utf8_free(share); utf8_free(path);
+    return WN_SUCCESS;
 }
 
 DWORD WINAPI

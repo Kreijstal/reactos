@@ -41,6 +41,7 @@ static LIST_ENTRY   gInFlightList;  /* WAIT_REPLY entries */
 static KEVENT       gUpcallEvent;   /* signalled when gUpcallQueue non-empty */
 static volatile LONG64 gXidNext = 0;
 static BOOLEAN      gUpcallInit = FALSE;
+static volatile LONG gDaemonObserved = 0;
 
 VOID
 SmbRdrInitUpcall(VOID)
@@ -53,6 +54,7 @@ SmbRdrInitUpcall(VOID)
     InitializeListHead(&gInFlightList);
     KeInitializeEvent(&gUpcallEvent, NotificationEvent, FALSE);
     gXidNext = 0;
+    gDaemonObserved = 0;
     gUpcallInit = TRUE;
 
     DbgPrint("SMB2RDR: upcall bridge initialised\n");
@@ -112,6 +114,8 @@ SmbRdrIssueUpcall(
         *OutStatus = STATUS_UNSUCCESSFUL;
 
     if (!gUpcallInit)
+        return STATUS_DEVICE_NOT_READY;
+    if (InterlockedCompareExchange(&gDaemonObserved, 0, 0) == 0)
         return STATUS_DEVICE_NOT_READY;
 
     RtlZeroMemory(&entry, sizeof(entry));
@@ -188,6 +192,8 @@ SmbRdrUpcallIoctl(
 
     if (!gUpcallInit)
         return STATUS_DEVICE_NOT_READY;
+
+    InterlockedExchange(&gDaemonObserved, 1);
 
     for (;;) {
         /* Look for a pending upcall; if none, wait for the event. */
