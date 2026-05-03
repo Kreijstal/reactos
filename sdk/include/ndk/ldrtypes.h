@@ -37,11 +37,14 @@ Author:
 //
 #define LDRP_STATIC_LINK                        0x00000002
 #define LDRP_IMAGE_DLL                          0x00000004
-#if (NTDDI_VERSION < NTDDI_WIN8)
-#define LDRP_SHIMENG_SUPPRESSED_ENTRY           0x00000008
-#else
+/* LDRP_SHIMENG_SUPPRESSED_ENTRY is the apphelp/shim engine private flag and
+ * LDRP_LOAD_NOTIFICATIONS_SENT is set unconditionally by ntdll on every
+ * loaded module on Win8+. They MUST live on different bits, otherwise the
+ * shim engine's SeiResetEntryProcessed() (which clears LDRP_ENTRY_PROCESSED
+ * for any entry it sees with LDRP_SHIMENG_SUPPRESSED_ENTRY) ends up clearing
+ * it for every loaded DLL — re-running their DllMain a second time. */
+#define LDRP_SHIMENG_SUPPRESSED_ENTRY           0x00000010
 #define LDRP_LOAD_NOTIFICATIONS_SENT            0x00000008
-#endif
 #define LDRP_IMAGE_INTEGRITY_FORCED             0x00000020
 #define LDRP_LOAD_IN_PROGRESS                   0x00001000
 #define LDRP_UNLOAD_IN_PROGRESS                 0x00002000
