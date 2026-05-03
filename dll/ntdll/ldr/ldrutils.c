@@ -2769,9 +2769,14 @@ LdrpLoadShimEngine(IN PWSTR ImageName, IN PUNICODE_STRING ProcessImage, IN PVOID
     PVOID ShimLibrary;
     NTSTATUS Status;
     RtlInitUnicodeString(&ShimLibraryName, ImageName);
-    /* We should NOT pass CallInit = TRUE!
-       If we do this, other init routines will be called before we get a chance to shim stuff.. */
-    Status = LdrpLoadDll(FALSE, NULL, NULL, &ShimLibraryName, &ShimLibrary, FALSE);
+    /* Pass CallInit=TRUE so that the shim engine's transitive dependencies
+       (apphelp, shlwapi, msvcrt, etc.) get their DllMains called as part of
+       LdrpLoadDll. Without this, SE_InstallBeforeInit below can call into
+       those uninitialized DLLs (e.g. msvcrt!getenv → _lock(_ENV_LOCK)
+       infinitely recurses because lock_table isn't initialized).
+       The shim engine DLL's own DllMain still runs via LdrpRunShimEngineInitRoutine
+       below to handle the shim-engine-specific reason code. */
+    Status = LdrpLoadDll(FALSE, NULL, NULL, &ShimLibraryName, &ShimLibrary, TRUE);
     if (NT_SUCCESS(Status))
     {
         g_pShimEngineModule = ShimLibrary;
