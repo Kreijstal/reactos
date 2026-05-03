@@ -4,6 +4,7 @@
 #include <ntifs.h>
 #include <cmreslist.h>
 #include <ntstrsafe.h>
+#include <reactos/drivers/acpi/pci_routing.h>
 
 #define TAG_PCI '0ICP'
 
@@ -96,6 +97,11 @@ typedef struct _FDO_DEVICE_EXTENSION
     KSPIN_LOCK DeviceListLock;
     // Lower device object
     PDEVICE_OBJECT Ldo;
+    // ACPI _PRT routing service exported by the parent ACPI host bridge PDO,
+    // queried lazily and cached.  Valid only when RoutingValid is TRUE.
+    REACTOS_PCI_ROUTING_INTERFACE Routing;
+    BOOLEAN RoutingValid;
+    BOOLEAN RoutingQueried;
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 
@@ -191,6 +197,10 @@ NTSTATUS
 PdoPowerControl(
     PDEVICE_OBJECT DeviceObject,
     PIRP Irp);
+
+NTSTATUS
+PciFdoAcquireRoutingInterface(
+    PFDO_DEVICE_EXTENSION FdoExtension);
 
 
 CODE_SEG("INIT")
