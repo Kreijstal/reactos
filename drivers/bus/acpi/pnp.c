@@ -415,6 +415,12 @@ Bus_DestroyPdo (
         PdoData->HardwareIDs = NULL;
     }
 
+    if (PdoData->PciRoutingTable) {
+        ExFreePoolWithTag(PdoData->PciRoutingTable, 'PpcA');
+        PdoData->PciRoutingTable = NULL;
+        PdoData->PciRoutingTableSize = 0;
+    }
+
     DPRINT("\tDeleting PDO: 0x%p\n", Device);
     IoDeleteDevice (Device);
     return STATUS_SUCCESS;
