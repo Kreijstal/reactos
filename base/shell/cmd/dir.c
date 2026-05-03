@@ -635,6 +635,17 @@ PrintDirectoryHeader(LPCTSTR szPath, LPDIRSWITCHFLAGS lpFlags)
     return TRUE;
 }
 
+static BOOL
+DirValidateVolumeRoot(LPCTSTR szPath)
+{
+    TCHAR szRootName[MAX_PATH];
+
+    if (!GetVolumePathName(szPath, szRootName, ARRAYSIZE(szRootName)))
+        return FALSE;
+
+    return (GetDriveType(szRootName) != DRIVE_NO_ROOT_DIR);
+}
+
 
 static VOID
 DirPrintFileDateTime(TCHAR *lpDate,
@@ -1956,6 +1967,13 @@ CommandDir(LPTSTR rest)
 
         /* Resolve the pattern */
         ResolvePattern(params[loop], ARRAYSIZE(szFullPath), szFullPath, &pszFilePart);
+
+        if (!DirValidateVolumeRoot(szFullPath))
+        {
+            error_invalid_drive();
+            nErrorLevel = 1;
+            goto cleanup;
+        }
 
         /* Print the header */
         cPathSep = pszFilePart[-1];

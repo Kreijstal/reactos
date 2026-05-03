@@ -182,6 +182,7 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
     if (Code == IOCTL_MOUNTDEV_QUERY_SUGGESTED_LINK_NAME)
     {
         PMOUNTDEV_SUGGESTED_LINK_NAME SuggestedName;
+        NTSTATUS Status;
         WCHAR DriveLetter;
         USHORT NameLength;
 
@@ -198,6 +199,21 @@ DeviceIoctlPassive(PDRIVE_INFO DriveInfo, PIRP Irp)
             Irp->IoStatus.Status = STATUS_NOT_FOUND;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return;
+        }
+
+        if (DriveInfo->DiskGeometry.MediaType == Unknown)
+        {
+            StartMotor(DriveInfo);
+            Status = RWDetermineMediaType(DriveInfo, TRUE);
+            StopMotor(DriveInfo->ControllerInfo);
+
+            if (!NT_SUCCESS(Status))
+            {
+                Irp->IoStatus.Status =
+                    (Status == STATUS_UNRECOGNIZED_MEDIA) ? STATUS_NO_MEDIA_IN_DEVICE : Status;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return;
+            }
         }
 
         DriveLetter = (WCHAR)(L'A' + DriveInfo->UnitNumber);
