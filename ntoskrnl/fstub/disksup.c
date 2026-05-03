@@ -600,6 +600,51 @@ HalpSetMountLetter(
     return Status;
 }
 
+static BOOLEAN
+HalpFloppyHasMedia(
+    _In_ PUNICODE_STRING DeviceName)
+{
+    NTSTATUS Status;
+    HANDLE FileHandle;
+    IO_STATUS_BLOCK IoStatusBlock;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    LARGE_INTEGER ByteOffset;
+    UCHAR Sector[512];
+
+    PAGED_CODE();
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               DeviceName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    Status = ZwOpenFile(&FileHandle,
+                        SYNCHRONIZE | FILE_READ_DATA,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        return FALSE;
+    }
+
+    ByteOffset.QuadPart = 0;
+    Status = ZwReadFile(FileHandle,
+                        NULL,
+                        NULL,
+                        NULL,
+                        &IoStatusBlock,
+                        Sector,
+                        sizeof(Sector),
+                        &ByteOffset,
+                        NULL);
+
+    ZwClose(FileHandle);
+    return NT_SUCCESS(Status) && IoStatusBlock.Information == sizeof(Sector);
+}
+
 static UCHAR
 HalpNextDriveLetter(
     _In_ PUNICODE_STRING DeviceName,
@@ -611,6 +656,12 @@ HalpNextDriveLetter(
     WCHAR Buffer[40];
     UCHAR DriveLetter;
     UNICODE_STRING NtDeviceNameU, DosDevice;
+
+    if (RtlPrefixUnicodeString(&FloppyPrefix, DeviceName, TRUE) &&
+        !HalpFloppyHasMedia(DeviceName))
+    {
+        return 0;
+    }
 
     /* Quick path, ask directly the MountMgr
      * to assign the next free drive letter */
