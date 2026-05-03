@@ -52,6 +52,11 @@ typedef struct _PDO_DEVICE_DATA
     ULONG       InterfaceRefCount;
     UNICODE_STRING InterfaceName;
 
+    /* For PCI host bridges (PNP0A03/PNP0A08): cached _PRT result. The
+     * buffer is owned by the PDO and freed in Bus_DestroyPdo. */
+    PVOID       PciRoutingTable;
+    ULONG       PciRoutingTableSize;
+
 } PDO_DEVICE_DATA, *PPDO_DEVICE_DATA;
 
 //
