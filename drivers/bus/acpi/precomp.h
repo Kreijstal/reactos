@@ -15,6 +15,7 @@
 #include <glue.h>
 #include <wdmguid.h>
 #include <acpiioct.h>
+#include <reactos/drivers/acpi/pci_routing.h>
 #include <ntintsafe.h>
 
 #endif /* _ACPI_PCH_ */
