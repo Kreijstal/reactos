@@ -14,6 +14,73 @@
 
 /*** PRIVATE *****************************************************************/
 
+/*
+ * Send a synchronous IRP_MN_QUERY_INTERFACE down the device stack to ask
+ * the parent ACPI host-bridge PDO for its _PRT routing service.  Cached on
+ * first use; never retried after a NOT_SUPPORTED reply.
+ */
+NTSTATUS
+PciFdoAcquireRoutingInterface(PFDO_DEVICE_EXTENSION FdoExtension)
+{
+    KEVENT Event;
+    IO_STATUS_BLOCK IoStatus;
+    PIRP Irp;
+    PIO_STACK_LOCATION IrpSp;
+    NTSTATUS Status;
+
+    if (FdoExtension->RoutingQueried)
+        return FdoExtension->RoutingValid ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+
+    FdoExtension->RoutingQueried = TRUE;
+
+    if (FdoExtension->Ldo == NULL)
+        return STATUS_NOT_SUPPORTED;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    RtlZeroMemory(&FdoExtension->Routing, sizeof(FdoExtension->Routing));
+    FdoExtension->Routing.Size = sizeof(REACTOS_PCI_ROUTING_INTERFACE);
+    FdoExtension->Routing.Version = REACTOS_PCI_ROUTING_INTERFACE_VERSION;
+
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
+                                       FdoExtension->Ldo,
+                                       NULL,
+                                       0,
+                                       NULL,
+                                       &Event,
+                                       &IoStatus);
+    if (Irp == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    Irp->IoStatus.Information = 0;
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->MajorFunction = IRP_MJ_PNP;
+    IrpSp->MinorFunction = IRP_MN_QUERY_INTERFACE;
+    IrpSp->Parameters.QueryInterface.InterfaceType = &GUID_REACTOS_PCI_ROUTING_INTERFACE;
+    IrpSp->Parameters.QueryInterface.Size = sizeof(REACTOS_PCI_ROUTING_INTERFACE);
+    IrpSp->Parameters.QueryInterface.Version = REACTOS_PCI_ROUTING_INTERFACE_VERSION;
+    IrpSp->Parameters.QueryInterface.Interface = (PINTERFACE)&FdoExtension->Routing;
+    IrpSp->Parameters.QueryInterface.InterfaceSpecificData = NULL;
+
+    Status = IoCallDriver(FdoExtension->Ldo, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+
+    if (NT_SUCCESS(Status) && FdoExtension->Routing.RouteInterrupt != NULL)
+    {
+        FdoExtension->RoutingValid = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    DPRINT("PCI: ACPI _PRT routing interface unavailable (0x%lx)\n", Status);
+    RtlZeroMemory(&FdoExtension->Routing, sizeof(FdoExtension->Routing));
+    return STATUS_NOT_SUPPORTED;
+}
+
 static NTSTATUS
 FdoLocateChildDevice(
     PPCI_DEVICE *Device,
