@@ -58,6 +58,8 @@ MountMgrDriverReinitialization(
         return;
     }
 
+    DPRINT1("MountMgr DriverReinitialization: assigning drive letters\n");
+
     KeWaitForSingleObject(&(DeviceExtension->DeviceLock),
                           Executive,
                           KernelMode,
@@ -74,6 +76,7 @@ MountMgrDriverReinitialization(
 
     KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
     WaitForOnlinesToComplete(DeviceExtension);
+    DPRINT1("MountMgr DriverReinitialization: done\n");
 }
 
 /**
@@ -1274,10 +1277,13 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     {
         DeviceInformation->SuggestedDriveLetter = 0;
     }
-    /* Else, it's time to set up one */
+    /* Else, it's time to set up one. Volumes that already supplied a
+     * suggested letter or a GPT drive-letter attribute keep using those.
+     * For any other volume that is automountable and not blacklisted,
+     * fall through to CreateNewDriveLetterName, which will scan from
+     * C: upwards (or A:/D: for floppies/CD-ROMs) for a free letter. */
     else if ((!DeviceExtension->NoAutoMount || DeviceInformation->Removable) &&
              DeviceExtension->AutomaticDriveLetter &&
-             (HasGptDriveLetter || DeviceInformation->SuggestedDriveLetter) &&
              !HasNoDriveLetterEntry(UniqueId))
     {
         /* Create a new drive letter */
@@ -1286,10 +1292,15 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                           NULL);
         if (!NT_SUCCESS(Status))
         {
+            DPRINT1("MountMgr: CreateNewDriveLetterName(%wZ) failed 0x%08lx\n",
+                    &TargetDeviceName, Status);
             CreateNoDriveLetterEntry(UniqueId);
         }
         else
         {
+            DPRINT1("MountMgr: assigned %wZ -> %wZ\n",
+                    &DriveLetter, &TargetDeviceName);
+
             /* Save it to global database */
             RtlWriteRegistryValue(RTL_REGISTRY_ABSOLUTE,
                                   DatabasePath,
@@ -1312,6 +1323,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                &(SymlinkInformation->SymbolicLinksListEntry));
 
                 SendLinkCreated(&DriveLetter);
+                DeviceInformation->LetterAssigned = TRUE;
             }
         }
     }
@@ -1749,6 +1761,8 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     NTSTATUS Status;
     PDEVICE_OBJECT DeviceObject;
     PDEVICE_EXTENSION DeviceExtension;
+
+    DPRINT1("MountMgr DriverEntry: registry path %wZ\n", RegistryPath);
 
     RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, DatabasePath);
 
