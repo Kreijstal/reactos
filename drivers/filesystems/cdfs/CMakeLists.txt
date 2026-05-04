@@ -35,6 +35,15 @@ list(APPEND SOURCE
 add_library(cdfs MODULE ${SOURCE} cdfs.rc)
 set_module_type(cdfs kernelmodedriver)
 target_link_libraries(cdfs ${PSEH_LIB} memcmp)
+if((NOT MSVC) AND (ARCH STREQUAL "amd64"))
+    # Block reordering can move code in a _SEH2_TRY scope outside the
+    # [begin_try, filter) RVA range that the GCC SEH plugin records,
+    # which causes __C_specific_handler to miss the handler and the
+    # exception to escape uncaught (e.g. STATUS_VERIFY_REQUIRED on a
+    # CD-ROM media-change traps in kdb instead of being handled by
+    # CdFsdDispatch).
+    target_compile_options(cdfs PRIVATE -fno-reorder-blocks)
+endif()
 add_importlibs(cdfs ntoskrnl hal)
 
 add_cd_file(TARGET cdfs DESTINATION reactos/system32/drivers NO_CAB FOR all)
