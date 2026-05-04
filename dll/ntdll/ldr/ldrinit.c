@@ -2496,6 +2496,40 @@ LdrpInitializeProcess(IN PCONTEXT Context,
         Kernel32BaseQueryModuleData = FunctionAddress;
     }
 
+    /*
+     * Load the shim engine BEFORE walking the EXE's import descriptor.
+     *
+     * The shim-engine DLL (apphelp) has to be loaded with CallInit=TRUE so
+     * its own transitive deps (msvcrt etc.) get their DllMains run before
+     * SE_InstallBeforeInit calls into them. That CallInit pass calls
+     * LdrpRunInitializeRoutines(NULL), which iterates EVERY pending entry
+     * on InInitializationOrderModuleList -- not just apphelp's deps.
+     *
+     * If LdrpWalkImportDescriptor ran first, the EXE's static imports
+     * (e.g. msys-2.0.dll for an msys2 binary) would already be parked on
+     * that list, and the shim engine load would call their DllMains with
+     * lpReserved == NULL. Per the documented PE convention, lpReserved is
+     * non-NULL for static loads and NULL only for runtime LoadLibrary
+     * calls; passing NULL here makes Cygwin/msys2 think it was loaded
+     * dynamically and take the early-return path out of dll_crt0_1, which
+     * crashes the process at the noreturn boundary in cygwin_crt0().
+     *
+     * Loading the shim engine first means only apphelp's own dependency
+     * chain is on the pending list when CallInit=TRUE fires; the EXE's
+     * static imports come in afterwards via LdrpWalkImportDescriptor and
+     * are dispatched by the LdrpRunInitializeRoutines(Context) call below
+     * with lpReserved == Context (non-NULL), matching Windows.
+     */
+    if (OldShimData)
+    {
+        Peb->AppCompatInfo = NULL;
+        LdrpLoadShimEngine(OldShimData, &ImagePathName, OldShimData);
+    }
+    else
+    {
+        DPRINT("Querying app compat hacks is missing!\n");
+    }
+
     /* Walk the IAT and load all the DLLs */
     ImportStatus = LdrpWalkImportDescriptor(LdrpDefaultPath.Buffer, LdrpImageEntry);
 
@@ -2631,20 +2665,6 @@ LdrpInitializeProcess(IN PCONTEXT Context,
                           Peb->CSDVersion.MaximumLength);
             Peb->CSDVersion.Buffer[Peb->CSDVersion.Length / sizeof(WCHAR)] = UNICODE_NULL;
         }
-    }
-
-    /* Check if we had Shim Data */
-    if (OldShimData)
-    {
-        /* Load the Shim Engine */
-        Peb->AppCompatInfo = NULL;
-        LdrpLoadShimEngine(OldShimData, &ImagePathName, OldShimData);
-    }
-    else
-    {
-        /* Check for Application Compatibility Goo */
-        //LdrQueryApplicationCompatibilityGoo(hKey);
-        DPRINT("Querying app compat hacks is missing!\n");
     }
 
     /*
