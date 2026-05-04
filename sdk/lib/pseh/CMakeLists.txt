@@ -20,6 +20,13 @@ elseif((CMAKE_C_COMPILER_ID STREQUAL "GNU") AND (ARCH STREQUAL "amd64"))
     else()
         target_compile_options(pseh INTERFACE $<$<COMPILE_LANGUAGE:C,CXX>:-fplugin=$<TARGET_FILE:native-gcc_plugin_seh>>)
     endif()
+    # gcc_plugin_seh records the SEH scope as [__seh2$$begin_try__, __seh2$$filter__).
+    # GCC's basic-block reordering can hoist code from the try body before the
+    # __seh2$$begin_try__ label, leaving the faulting RIP outside the recorded
+    # range so __C_specific_handler skips the handler and the exception escapes.
+    # Disable block reordering for every translation unit that uses PSEH so the
+    # source-order layout the plugin assumes actually holds.
+    target_compile_options(pseh INTERFACE $<$<COMPILE_LANGUAGE:C,CXX>:-fno-reorder-blocks>)
 else()
 
     if(USE_PSEH3)

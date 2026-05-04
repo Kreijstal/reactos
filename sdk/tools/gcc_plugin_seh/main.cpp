@@ -214,7 +214,11 @@ finish_seh_function(void* event_data, void* UNUSED user_data)
          * The filter label is always emitted by GCC after all try-block code
          * (it lives inside an unreachable "if (0)" branch), so using it as
          * the scope End guarantees the entire try body is covered regardless
-         * of basic-block reordering.
+         * of basic-block reordering past end_try.  The opposite direction --
+         * blocks hoisted before begin_try -- cannot be papered over here, so
+         * sdk/lib/pseh/CMakeLists.txt forces -fno-reorder-blocks on every
+         * translation unit that links pseh, keeping the source-order layout
+         * this plugin assumes.
          */
         asm_str << "\n\t.rva " << "__seh2$$begin_try__" << handler.line; /* Begin of tried code */
         asm_str << "\n\t.rva " << "__seh2$$filter__" << handler.line; /* End of tried code (filter is after all reordered try-block code) */
