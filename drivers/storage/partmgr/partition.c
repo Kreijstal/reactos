@@ -172,11 +172,15 @@ PartitionHandleStartDevice(
     status = IoSetDeviceInterfaceState(&interfaceName, TRUE);
     if (!NT_SUCCESS(status))
     {
+        ERR("IoSetDeviceInterfaceState VOLUME for %wZ failed 0x%08lx\n",
+            &PartExt->DeviceName, status);
         RtlFreeUnicodeString(&interfaceName);
         RtlInitUnicodeString(&PartExt->VolumeInterfaceName, NULL);
         return status;
     }
 
+    DPRINT1("partmgr: %wZ ready, MountMgr will be notified via %wZ\n",
+            &PartExt->DeviceName, &PartExt->VolumeInterfaceName);
     return STATUS_SUCCESS;
 }
 
