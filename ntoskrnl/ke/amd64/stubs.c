@@ -22,6 +22,13 @@ KiSwitchKernelStackHelper(
     LONG_PTR StackOffset,
     PVOID OldStackBase);
 
+VOID
+NTAPI
+KiCalloutOnNewStack(
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ PVOID NewStackTop);
+
 NTSTATUS
 NTAPI
 KeExpandKernelStackAndCalloutEx(
@@ -32,10 +39,13 @@ KeExpandKernelStackAndCalloutEx(
     _In_opt_ PVOID Context)
 {
     PKTHREAD CurrentThread;
+    PETHREAD CurrentEthread;
     PVOID NewStackBase;
-    PVOID OldStackBase;
-    ULONG_PTR OldStackLimit;
-    LONG_PTR StackOffset;
+    PVOID NewStackLimit;
+    PVOID SavedStackBase;
+    ULONG_PTR SavedStackLimit;
+    PVOID SavedInitialStack;
+    BOOLEAN SavedLargeStack;
     SIZE_T CommitSize;
     NTSTATUS Status;
 
@@ -47,6 +57,7 @@ KeExpandKernelStackAndCalloutEx(
     }
 
     CurrentThread = KeGetCurrentThread();
+    CurrentEthread = CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb);
 
     CommitSize = max(Size, KERNEL_LARGE_STACK_COMMIT);
     if (CommitSize > MAXIMUM_EXPANSION_SIZE)
@@ -55,7 +66,7 @@ KeExpandKernelStackAndCalloutEx(
     }
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    if (CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb)->LargeStack)
+    if (CurrentEthread->LargeStack)
 #else
     if (CurrentThread->LargeStack)
 #endif
@@ -70,37 +81,67 @@ KeExpandKernelStackAndCalloutEx(
         return STATUS_SUCCESS;
     }
 
+    /*
+     * Allocate a temporary large kernel stack on which to run the callout.
+     * The thread's original stack is left intact so that any pointers from
+     * heap structures (such as Irp->UserEvent populated by IopMountVolume)
+     * into our caller's frames remain valid for the duration of the
+     * callout and after it returns.
+     */
     NewStackBase = MmCreateKernelStack(TRUE, 0);
     if (NewStackBase == NULL)
     {
-        if (!Wait)
-        {
-            return STATUS_NO_MEMORY;
-        }
-
         return STATUS_NO_MEMORY;
     }
-
-    OldStackLimit = (ULONG_PTR)CurrentThread->StackLimit;
-    OldStackBase = KeSwitchKernelStack(NewStackBase,
-                                       Add2Ptr(NewStackBase, -KERNEL_LARGE_STACK_COMMIT));
-    StackOffset = (PUCHAR)NewStackBase - (PUCHAR)OldStackBase;
-
-    MmDeleteKernelStack(OldStackBase, FALSE);
 
     Status = MmGrowKernelStackEx(NewStackBase, CommitSize);
     if (!NT_SUCCESS(Status))
     {
+        MmDeleteKernelStack(NewStackBase, FALSE);
         return Status;
     }
 
-    if (((ULONG_PTR)Parameter >= OldStackLimit) &&
-        ((ULONG_PTR)Parameter < (ULONG_PTR)OldStackBase))
-    {
-        Parameter = Add2Ptr(Parameter, StackOffset);
-    }
+    NewStackLimit = Add2Ptr(NewStackBase, -KERNEL_LARGE_STACK_SIZE);
 
-    Callout(Parameter);
+    /* Save the thread's stack bookkeeping so we can restore it afterwards. */
+    SavedStackBase = CurrentThread->StackBase;
+    SavedStackLimit = (ULONG_PTR)CurrentThread->StackLimit;
+    SavedInitialStack = CurrentThread->InitialStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    SavedLargeStack = CurrentEthread->LargeStack;
+#else
+    SavedLargeStack = CurrentThread->LargeStack;
+#endif
+
+    /*
+     * Point the thread at the new stack while the callout runs so that
+     * stack-overflow checks and unwinding queries inside the callout see a
+     * consistent stack range. The callout's RSP itself is switched by the
+     * KiCalloutOnNewStack assembly helper.
+     */
+    CurrentThread->StackBase = NewStackBase;
+    CurrentThread->StackLimit = (volatile PVOID)NewStackLimit;
+    CurrentThread->InitialStack = NewStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    CurrentEthread->LargeStack = TRUE;
+#else
+    CurrentThread->LargeStack = TRUE;
+#endif
+
+    KiCalloutOnNewStack(Callout, Parameter, NewStackBase);
+
+    /* Restore the thread's original stack bookkeeping. */
+    CurrentThread->StackBase = SavedStackBase;
+    CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
+    CurrentThread->InitialStack = SavedInitialStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    CurrentEthread->LargeStack = SavedLargeStack;
+#else
+    CurrentThread->LargeStack = SavedLargeStack;
+#endif
+
+    MmDeleteKernelStack(NewStackBase, FALSE);
+
     return STATUS_SUCCESS;
 }
 
