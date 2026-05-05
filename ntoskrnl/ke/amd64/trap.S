@@ -1333,6 +1333,48 @@ FUNC KeSwitchKernelStack
 
 ENDFUNC
 
+/*!
+ * VOID
+ * NTAPI
+ * KiCalloutOnNewStack(
+ *     IN PEXPAND_STACK_CALLOUT Callout,    // RCX
+ *     IN PVOID Parameter,                   // RDX
+ *     IN PVOID NewStackTop                  // R8
+ * );
+ *
+ * Runs Callout(Parameter) on the stack region whose top is NewStackTop,
+ * then returns to the caller on the original stack. The original stack
+ * remains valid for the duration of the callout, so any pointers into
+ * the original stack frames stay live.
+ */
+PUBLIC KiCalloutOnNewStack
+FUNC KiCalloutOnNewStack
+
+    /* Save the original frame pointer and capture the original RSP */
+    push rbp
+    .pushreg rbp
+    mov rbp, rsp
+    .setframe rbp, 0
+    .endprolog
+
+    /* Move callout into a scratch register and load Parameter into RCX */
+    mov rax, rcx
+    mov rcx, rdx
+
+    /* Switch to the new stack and reserve a 32-byte home/shadow area */
+    mov rsp, r8
+    sub rsp, 32
+
+    /* Run the callout on the new stack */
+    call rax
+
+    /* Restore the original RSP and frame pointer */
+    mov rsp, rbp
+    pop rbp
+    ret
+
+ENDFUNC
+
 
 
 
