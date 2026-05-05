@@ -1491,15 +1491,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
         MI_SET_PFN_DELETED(Pfn1);
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MiDecrementShareCount(Pfn1, Process->WorkingSetPage);
-        if (!((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress)))
-        {
-            DPRINT1("MmDeleteProcessAddressSpace: WorkingSetPage PFN refcount=%u, WriteInProgress=%u\n",
-                    Pfn1->u3.e2.ReferenceCount, Pfn1->u3.e1.WriteInProgress);
-            /* Only a single transient reference is tolerable -- anything
-             * higher is a real leak that would corrupt PFN accounting. */
-            if (Pfn1->u3.e2.ReferenceCount > 1)
-                KeBugCheck(MEMORY_MANAGEMENT);
-        }
+        ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
 
         /* Now map hyperspace and its page table */
         PageFrameIndex = Process->Pcb.DTB1 >> PAGE_SHIFT;
@@ -1510,13 +1502,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
         MI_SET_PFN_DELETED(Pfn1);
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MiDecrementShareCount(Pfn1, PageFrameIndex);
-        if (!((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress)))
-        {
-            DPRINT1("MmDeleteProcessAddressSpace: DTB1 PFN refcount=%u, WriteInProgress=%u\n",
-                    Pfn1->u3.e2.ReferenceCount, Pfn1->u3.e1.WriteInProgress);
-            if (Pfn1->u3.e2.ReferenceCount > 1)
-                KeBugCheck(MEMORY_MANAGEMENT);
-        }
+        ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
 
         /* Finally, nuke the PDE itself */
         PageFrameIndex = Process->Pcb.DTB0 >> PAGE_SHIFT;
@@ -1526,13 +1512,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
         MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         /* Page table is now dead. Bye bye... */
-        if (!((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress)))
-        {
-            DPRINT1("MmDeleteProcessAddressSpace: DTB0 PFN refcount=%u, WriteInProgress=%u\n",
-                    Pfn1->u3.e2.ReferenceCount, Pfn1->u3.e1.WriteInProgress);
-            if (Pfn1->u3.e2.ReferenceCount > 1)
-                KeBugCheck(MEMORY_MANAGEMENT);
-        }
+        ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
     }
     else
     {
