@@ -13,6 +13,7 @@
 #include <cache/section/newmm.h>
 #define NDEBUG
 #include <debug.h>
+#include "ARM3/miarm.h"
 
 /* TYPES ********************************************************************/
 
@@ -382,6 +383,10 @@ MmInsertRmap(PFN_NUMBER Page, PEPROCESS Process,
     if (current_entry && (current_entry->Address == Address) && (current_entry->Process == Process))
     {
 #if DBG
+        PMMPFN Pfn1;
+        PMM_RMAP_ENTRY scan;
+        ULONG RmapCount;
+
         DbgPrint("MmInsertRmap tries to add a second rmap entry for address %p\n", current_entry->Address);
         DbgPrint("    current caller  %p\n", new_entry->Caller);
         DbgPrint("    previous caller %p\n", current_entry->Caller);
@@ -394,14 +399,59 @@ MmInsertRmap(PFN_NUMBER Page, PEPROCESS Process,
                  KeGetCurrentIrql());
 
         /*
-         * Heal-and-continue: the rmap already records exactly the same
-         * (Page, Process, Address) triple that we are trying to insert.
-         * Drop the duplicate insertion request so the system stays alive
-         * and we can collect data on the upstream race that left the
-         * rmap entry in place after the PTE was zeroed. The PFN share
-         * count was just bumped by MmCreateVirtualMapping for our new
-         * mapping, but the WorkingSetSize accounting is left untouched
-         * because we do not own a fresh rmap entry.
+         * Heal-and-continue is only safe when one rmap entry exists per
+         * mapping that holds a PFN share-count reference: i.e.
+         *
+         *     Pfn1->u2.ShareCount == (number of rmap entries for Page)
+         *
+         * If that invariant holds, the existing rmap entry simply records
+         * the very mapping that MmCreateVirtualMapping just installed for
+         * us (the previous owner unmapped without removing its rmap, and
+         * the PFN share count was decremented at that time -- a stale-
+         * rmap leak that the caller's diagnostic above pinpoints).
+         *
+         * If the invariant does NOT hold -- e.g. the previous owner is
+         * still mapped and our insertion is a true double-map race -- then
+         * dropping the new entry without compensating ShareCount would
+         * permanently strand the page on tear-down. Bugcheck so the bad
+         * state is preserved.
+         */
+        Pfn1 = MiGetPfnEntry(Page);
+        RmapCount = 0;
+        for (scan = MmGetRmapListHeadPage(Page); scan != NULL; scan = scan->Next)
+            ++RmapCount;
+
+        /*
+         * The invariant only holds for ARM3-managed pages whose mappings
+         * were installed via MmCreateVirtualMappingUnsafeEx (which bumps
+         * Pfn1->u2.ShareCount). ROS-managed pages use a different
+         * accounting model (ReferenceCount via MmReferencePage) and we
+         * cannot decide from here whether dropping the entry would leak.
+         */
+        if (MI_IS_ROS_PFN(Pfn1))
+        {
+            DbgPrint("    Page is ROS-managed, refusing to heal\n");
+            MiReleasePfnLock(OldIrql);
+            KeBugCheck(MEMORY_MANAGEMENT);
+        }
+
+        DbgPrint("    Pfn ShareCount=%lu RmapCount=%lu\n",
+                 (ULONG)Pfn1->u2.ShareCount, RmapCount);
+
+        if (Pfn1->u2.ShareCount != RmapCount)
+        {
+            DbgPrint("    invariant violated: ShareCount != RmapCount, refusing to heal\n");
+            MiReleasePfnLock(OldIrql);
+            KeBugCheck(MEMORY_MANAGEMENT);
+        }
+
+        /*
+         * Drop the duplicate insertion request. The existing rmap entry
+         * will serve as the rmap record for the mapping just installed by
+         * MmCreateVirtualMapping; when the new mapping is later torn down,
+         * MmDeleteRmap will remove it and decrement ShareCount once,
+         * balancing the +1 we just added. WorkingSetSize is intentionally
+         * left untouched because we do not own a fresh entry.
          */
         MiReleasePfnLock(OldIrql);
         ExFreeToNPagedLookasideList(&RmapLookasideList, new_entry);
