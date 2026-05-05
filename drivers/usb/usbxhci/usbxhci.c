@@ -1436,44 +1436,57 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
                 DPRINT1("XHCI_SetEndpointState: Control endpoint already configured, marking as active\n");
             } else {
                 /*
-                 * Restart a stopped non-control endpoint by issuing Set TR
-                 * Dequeue Pointer, which transitions the EP Context from
-                 * Stopped back to Running without destroying in-flight TRBs.
-                 * The SlotId and DCI were saved during
-                 * XHCI_Open{Bulk,Interrupt}Endpoint.
+                 * USBPORT toggles SetEndpointState(ACTIVE) on every transfer
+                 * completion's idle->active transition. On xHCI, an endpoint
+                 * that's already in the Running state only needs a doorbell
+                 * write to pick up newly-queued TRBs - issuing Set TR Dequeue
+                 * Pointer floods the 256-entry command ring on sustained I/O
+                 * (mass-storage walks file system metadata at ~one transfer
+                 * per filesystem block) and stalls the controller.
+                 *
+                 * Only restart the EP via Set TR Dequeue after a real Halted
+                 * or Stopped event (recorded in EndpointStatus). Otherwise,
+                 * a doorbell ring is sufficient and idempotent.
                  */
                 ULONG SlotId;
                 ULONG DCI = XhciEndpoint->ContextIndex;
-                PHYSICAL_ADDRESS DequeuePA;
-                MPSTATUS Status;
 
-                /* SlotId is stored via FirstTD (same as XHCI_SubmitBulkTransfer) */
                 SlotId = *(PULONG)&XhciEndpoint->FirstTD;
                 if (SlotId == 0)
                     SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
 
-                DequeuePA = MmGetPhysicalAddress(
-                    XhciEndpoint->TransferRing.dequeue_pointer);
+                if (XhciEndpoint->EndpointStatus != 0)
+                {
+                    PHYSICAL_ADDRESS DequeuePA;
+                    MPSTATUS Status;
 
-                DPRINT1("XHCI_SetEndpointState: Restarting EP slot=%d DCI=%d dequeue=0x%I64x cycle=%d\n",
-                        SlotId, DCI, DequeuePA.QuadPart,
+                    DequeuePA = MmGetPhysicalAddress(
+                        XhciEndpoint->TransferRing.dequeue_pointer);
+
+                    DPRINT1("XHCI_SetEndpointState: Restarting halted EP slot=%d DCI=%d dequeue=0x%I64x cycle=%d status=0x%x\n",
+                            SlotId, DCI, DequeuePA.QuadPart,
+                            XhciEndpoint->TransferRing.ConsumerCycleState,
+                            XhciEndpoint->EndpointStatus);
+
+                    Status = XHCI_SetTransferRingDequeuePointer(
+                        XhciExtension, SlotId, DCI,
+                        DequeuePA,
                         XhciEndpoint->TransferRing.ConsumerCycleState);
 
-                Status = XHCI_SetTransferRingDequeuePointer(
-                    XhciExtension, SlotId, DCI,
-                    DequeuePA,
-                    XhciEndpoint->TransferRing.ConsumerCycleState);
+                    if (Status == MP_STATUS_SUCCESS)
+                    {
+                        XhciEndpoint->EndpointStatus = 0;
+                    }
+                    else
+                    {
+                        DPRINT1("XHCI_SetEndpointState: SetTRDequeue failed (0x%x) slot=%d DCI=%d\n",
+                                Status, SlotId, DCI);
+                    }
+                }
 
-                if (Status == MP_STATUS_SUCCESS)
-                {
-                    /* Doorbell re-arms the endpoint after Set TR Dequeue */
-                    XHCI_RingDoorbell(XhciExtension, SlotId, DCI);
-                }
-                else
-                {
-                    DPRINT1("XHCI_SetEndpointState: SetTRDequeue failed (0x%x) slot=%d DCI=%d\n",
-                            Status, SlotId, DCI);
-                }
+                /* Doorbell is idempotent: it tells HC to pick up new TRBs.
+                 * Safe to ring whether or not we just issued SetTRDequeue. */
+                XHCI_RingDoorbell(XhciExtension, SlotId, DCI);
             }
             break;
             
@@ -1698,7 +1711,16 @@ XHCI_SetEndpointStatus(IN PVOID xhciExtension,
                        IN PVOID xhciEndpoint,
                        IN ULONG EndpointStatus)
 {
-    DPRINT1("XHCI_SetEndpointStatus: function initiated\n");
+    PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+
+    DPRINT1("XHCI_SetEndpointStatus: setting status=0x%x\n", EndpointStatus);
+    if (XhciEndpoint != NULL)
+    {
+        /* Tracked so SetEndpointState(ACTIVE) can decide whether the EP
+         * Context needs Set TR Dequeue Pointer (on real Halted/Stopped
+         * state) or just a doorbell ring (normal idle->active). */
+        XhciEndpoint->EndpointStatus = EndpointStatus;
+    }
 }
 
 MPSTATUS
