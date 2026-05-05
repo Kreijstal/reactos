@@ -1191,12 +1191,30 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
     LONG TrbIndex = enqueue_pointer - &(TransferRing->firstSeg.XhciTrb[0]);
     if (TrbIndex == 255)
     {
-        // We're at the Link TRB - toggle cycle state and wrap to beginning
+        /*
+         * We're sitting on the Link TRB.  Per xHCI 4.9.2.2, software must
+         * stamp the Link TRB's Cycle bit with the *current* Producer Cycle
+         * State (the one used for the TRBs that precede it) before flipping
+         * its own state.  Otherwise the controller, after toggling its
+         * Consumer Cycle State on the previous traversal, will encounter a
+         * stale cycle bit in the Link TRB on the next pass and stall the
+         * ring -- the exact symptom seen on the bulk-IN ring after the
+         * second wrap (transfer completes never arrive, DPC goes idle).
+         *
+         * The Link TRB itself was programmed once in XHCI_InitializeTransferRing
+         * with TC=1 and pointer back to index 0; we only need to refresh its
+         * cycle bit here, preserving TRB type / Toggle Cycle.
+         */
+        PXHCI_TRB LinkTrb = &(TransferRing->firstSeg.XhciTrb[255]);
+        LinkTrb->GenericTRB.Word3 =
+            (LinkTrb->GenericTRB.Word3 & ~1u) | (TransferRing->ProducerCycleState & 1u);
+
         TransferRing->ProducerCycleState = TransferRing->ProducerCycleState ? 0 : 1;
         enqueue_pointer = &(TransferRing->firstSeg.XhciTrb[0]);
         TransferRing->enqueue_pointer = enqueue_pointer;
         TrbIndex = 0; // Update index after wrapping
-        DPRINT1("XHCI_EnqueueTRBOnTransferRing: Wrapped to beginning, new cycle state %d\n", TransferRing->ProducerCycleState);
+        DPRINT1("XHCI_EnqueueTRBOnTransferRing: Wrapped to beginning, Link TRB cycle stamped, new producer cycle state %d (Link Word3=0x%08x)\n",
+                TransferRing->ProducerCycleState, LinkTrb->GenericTRB.Word3);
     }
     
     // Calculate next position for ring full check
@@ -1837,20 +1855,78 @@ XHCI_ProcessCommandCompletion(IN PXHCI_EXTENSION XhciExtension,
 {
     PHYSICAL_ADDRESS TrbPointer;
     ULONG CompletionCode, SlotId;
-    
+    PXHCI_HC_RESOURCES HcResourcesVA;
+    PHYSICAL_ADDRESS HcResourcesPA;
+    PXHCI_TRB CompletedTrbVA;
+    PXHCI_TRB NewDequeue;
+    ULONG_PTR TrbOffset;
+
     DPRINT1("XHCI_ProcessCommandCompletion: Processing command completion event\n");
-    
+
     // Extract event data
     TrbPointer.LowPart = EventTrb->CommandCompletionTRB.CommandTRBPointerLo << 4; // Shift back to get full address
     TrbPointer.HighPart = EventTrb->CommandCompletionTRB.CommandTRBPointerHi;
     CompletionCode = EventTrb->CommandCompletionTRB.CompletionCode;
     SlotId = EventTrb->CommandCompletionTRB.SlotID;
-    
+
     DPRINT1("XHCI_ProcessCommandCompletion: TRB=0x%I64x, Slot=%d, Code=%d\n",
             TrbPointer.QuadPart, SlotId, CompletionCode);
-    
+
     // Complete the pending command
     CompletePendingCommand(TrbPointer, CompletionCode, SlotId);
+
+    /*
+     * xHCI 4.6.1 / 4.9.4: a Command Completion Event acknowledges that the
+     * controller has consumed the referenced Command TRB.  Advance the
+     * Command Ring's dequeue pointer past it so software's view tracks the
+     * controller's, otherwise XHCI_SendCommand's "ring full" check (which
+     * compares enqueue+1 against dequeue) wedges after roughly 255 commands
+     * and every subsequent Set TR Dequeue Pointer fails.
+     *
+     * Completion events are reported in the same order commands were placed,
+     * so the new dequeue is simply (event-reported TRB + 1), with the Link
+     * TRB at index 255 followed back to the start of the ring.
+     */
+    HcResourcesVA = XhciExtension->HcResourcesVA;
+    HcResourcesPA = XhciExtension->HcResourcesPA;
+
+    if (TrbPointer.QuadPart < HcResourcesPA.QuadPart ||
+        TrbPointer.QuadPart >= HcResourcesPA.QuadPart + sizeof(XHCI_HC_RESOURCES))
+    {
+        DPRINT1("XHCI_ProcessCommandCompletion: TRB PA 0x%I64x outside HC resources, skipping dequeue advance\n",
+                TrbPointer.QuadPart);
+        return;
+    }
+
+    TrbOffset = (ULONG_PTR)(TrbPointer.QuadPart - HcResourcesPA.QuadPart);
+    CompletedTrbVA = (PXHCI_TRB)((ULONG_PTR)HcResourcesVA + TrbOffset);
+
+    /* Only advance for TRBs that actually live on the Command Ring segment. */
+    if (CompletedTrbVA < &HcResourcesVA->CommandRing.firstSeg.XhciTrb[0] ||
+        CompletedTrbVA >= &HcResourcesVA->CommandRing.firstSeg.XhciTrb[256])
+    {
+        DPRINT1("XHCI_ProcessCommandCompletion: TRB VA %p not in command ring segment, skipping dequeue advance\n",
+                CompletedTrbVA);
+        return;
+    }
+
+    NewDequeue = CompletedTrbVA + 1;
+
+    /* Step over the Link TRB at index 255 to wrap to the start of the segment. */
+    if (NewDequeue >= &HcResourcesVA->CommandRing.firstSeg.XhciTrb[255])
+    {
+        NewDequeue = &HcResourcesVA->CommandRing.firstSeg.XhciTrb[0];
+        HcResourcesVA->CommandRing.ConsumerCycleState =
+            HcResourcesVA->CommandRing.ConsumerCycleState ? 0 : 1;
+        DPRINT1("XHCI_ProcessCommandCompletion: Command ring dequeue wrapped, consumer cycle now %d\n",
+                HcResourcesVA->CommandRing.ConsumerCycleState);
+    }
+
+    DPRINT1("XHCI_ProcessCommandCompletion: Advancing command ring dequeue %p -> %p (enqueue=%p)\n",
+            HcResourcesVA->CommandRing.dequeue_pointer, NewDequeue,
+            HcResourcesVA->CommandRing.enqueue_pointer);
+
+    HcResourcesVA->CommandRing.dequeue_pointer = NewDequeue;
 }
 
 VOID
