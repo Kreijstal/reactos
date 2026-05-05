@@ -330,21 +330,26 @@ MmDeleteVirtualMappingEx(
 
             OldIrql = MiAcquirePfnLock();
             Pfn1 = &MmPfnDatabase[OldPte.u.Hard.PageFrameNumber];
-            if (!MI_IS_ROS_PFN(Pfn1))
+
+            /*
+             * Always mirror the ShareCount bump that
+             * MmCreateVirtualMappingUnsafeEx performed for this PTE,
+             * regardless of PFN flavour, otherwise every map/unmap cycle
+             * on ROS-managed pages leaks +1 ShareCount and silently grows
+             * the count past the number of live mappings.
+             *
+             * For ROS-managed PFNs, however, do NOT flip PageLocation to
+             * TransitionPage on the last drop: ROS pages use ReferenceCount
+             * via MmDereferencePage for liveness, and a storage MDL can
+             * legitimately hold the page while ShareCount falls to zero --
+             * setting PageLocation here would trip MmProbeAndLockPages's
+             * ActiveAndValid assertion.
+             */
+            ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
+            ASSERT(Pfn1->u2.ShareCount > 0);
+            if (--Pfn1->u2.ShareCount == 0 && !MI_IS_ROS_PFN(Pfn1))
             {
-                /*
-                 * ARM3 pages: track share count and transition state.
-                 * ROS pages use ReferenceCount via MmDereferencePage instead;
-                 * transitioning them here causes PageLocation != ActiveAndValid
-                 * while ReferenceCount > 0 (e.g. MDL-locked by storage driver),
-                 * which triggers assertions in MmProbeAndLockPages.
-                 */
-                ASSERT(Pfn1->u3.e1.PageLocation == ActiveAndValid);
-                ASSERT(Pfn1->u2.ShareCount > 0);
-                if (--Pfn1->u2.ShareCount == 0)
-                {
-                    Pfn1->u3.e1.PageLocation = TransitionPage;
-                }
+                Pfn1->u3.e1.PageLocation = TransitionPage;
             }
             MiReleasePfnLock(OldIrql);
         }
