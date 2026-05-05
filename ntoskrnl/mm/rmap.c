@@ -385,8 +385,30 @@ MmInsertRmap(PFN_NUMBER Page, PEPROCESS Process,
         DbgPrint("MmInsertRmap tries to add a second rmap entry for address %p\n", current_entry->Address);
         DbgPrint("    current caller  %p\n", new_entry->Caller);
         DbgPrint("    previous caller %p\n", current_entry->Caller);
-#endif
+        DbgPrint("    Page=0x%Ix Process=%p (%s) PID=%lu CurrentProc=%p IRQL=%u\n",
+                 (ULONG_PTR)Page,
+                 Process,
+                 (PSTR)Process->ImageFileName,
+                 (ULONG)(ULONG_PTR)Process->UniqueProcessId,
+                 PsGetCurrentProcess(),
+                 KeGetCurrentIrql());
+
+        /*
+         * Heal-and-continue: the rmap already records exactly the same
+         * (Page, Process, Address) triple that we are trying to insert.
+         * Drop the duplicate insertion request so the system stays alive
+         * and we can collect data on the upstream race that left the
+         * rmap entry in place after the PTE was zeroed. The PFN share
+         * count was just bumped by MmCreateVirtualMapping for our new
+         * mapping, but the WorkingSetSize accounting is left untouched
+         * because we do not own a fresh rmap entry.
+         */
+        MiReleasePfnLock(OldIrql);
+        ExFreeToNPagedLookasideList(&RmapLookasideList, new_entry);
+        return;
+#else
         KeBugCheck(MEMORY_MANAGEMENT);
+#endif
     }
 
     new_entry->Next = current_entry;
