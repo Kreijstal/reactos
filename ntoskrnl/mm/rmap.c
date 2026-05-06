@@ -450,6 +450,41 @@ MmDeleteRmap(PFN_NUMBER Page, PEPROCESS Process,
 }
 
 /*
+ * Returns TRUE iff an rmap entry already exists for (Page, Process, Address).
+ * Used as a DBG-only invariant check at MmInsertRmap call sites that lack a
+ * structural guard (e.g. the SSE-resident else-branch in
+ * MmNotPresentFaultSectionView), so a producer that clears a PTE without
+ * removing the matching rmap fires an ASSERT at the consumer choke point
+ * instead of a generic dup-rmap KeBugCheck inside MmInsertRmap.
+ */
+BOOLEAN
+NTAPI
+MmRmapEntryExists(PFN_NUMBER Page, PEPROCESS Process, PVOID Address)
+{
+    PMM_RMAP_ENTRY current_entry;
+    KIRQL OldIrql;
+    BOOLEAN Found = FALSE;
+
+    if (!RMAP_IS_SEGMENT(Address))
+        Address = (PVOID)PAGE_ROUND_DOWN(Address);
+
+    OldIrql = MiAcquirePfnLock();
+    for (current_entry = MmGetRmapListHeadPage(Page);
+         current_entry != NULL;
+         current_entry = current_entry->Next)
+    {
+        if (current_entry->Process == Process &&
+            current_entry->Address == Address)
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    MiReleasePfnLock(OldIrql);
+    return Found;
+}
+
+/*
 
 Return the process pointer given when a previous call to MmInsertRmap was
 called with a process and address pointer that conform to the segment rmap
