@@ -978,6 +978,14 @@ MmDeleteRmap(
     PVOID Address
 );
 
+BOOLEAN
+NTAPI
+MmRmapEntryExists(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address
+);
+
 CODE_SEG("INIT")
 VOID
 NTAPI

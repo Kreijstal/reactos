@@ -1960,7 +1960,17 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         }
 
         if (Process)
+        {
+            /*
+             * Invariant: PTE was 0 (MmCreateVirtualMapping just made it
+             * valid), so on the SSE-resident path this rmap MUST be absent.
+             * If present, a prior pageout/COW path leaked an rmap; surface
+             * it here at the choke point rather than via dup-rmap KeBugCheck
+             * inside MmInsertRmap.
+             */
+            ASSERT(!MmRmapEntryExists(Page, Process, Address));
             MmInsertRmap(Page, Process, Address);
+        }
 
         /* Take a reference on it */
         MmSharePageEntrySectionSegment(Segment, &Offset);
