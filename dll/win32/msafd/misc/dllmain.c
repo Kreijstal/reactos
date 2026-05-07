@@ -1380,6 +1380,15 @@ WSPSelect(IN int nfds,
                     TRACE("Event %x on handle %x\n",
                         Events,
                         Handle);
+                    /* Non-alertable waits (cygwin/msys2 select via WSAEventSelect)
+                     * never run the connect-completion APC, so SharedData->State
+                     * stays SocketBound. Pull the kernel state now so the next
+                     * WSPGetPeerName / WSPSendTo / SO_UPDATE_CONNECT_CONTEXT
+                     * sees SocketConnected. */
+                    {
+                        INT updErr = 0;
+                        MsafdUpdateConnectionContext(Handle, &updErr);
+                    }
                     if( writefds && Socket->SharedData->NonBlocking != 0 )
                         FD_SET(Handle, writefds);
                     break;
@@ -2985,7 +2994,6 @@ SendToHelper:
     return (Errno == NO_ERROR) ? NO_ERROR : SOCKET_ERROR;
 }
 
-static
 INT
 NTAPI
 MsafdUpdateConnectionContext(
