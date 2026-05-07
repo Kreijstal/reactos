@@ -220,6 +220,16 @@ WSPEnumNetworkEvents(
             (AFD_EVENT_CONNECT | AFD_EVENT_CONNECT_FAIL)) {
         lpNetworkEvents->lNetworkEvents |= FD_CONNECT;
         lpNetworkEvents->iErrorCode[FD_CONNECT_BIT] = TranslateNtStatusError(EnumReq.EventStatus[FD_CONNECT_BIT]);
+        /* Non-alertable waits (cygwin/msys2 WaitForMultipleObjects on the WSA
+         * event) never run the connect-completion APC, so the user-mode
+         * SharedData->State stays SocketBound. Refresh from the kernel here so
+         * the next WSPGetPeerName / WSPSendTo sees SocketConnected. */
+        if ((EnumReq.PollEvents & AFD_EVENT_CONNECT) &&
+            NT_SUCCESS(EnumReq.EventStatus[FD_CONNECT_BIT]))
+        {
+            INT updErr = 0;
+            MsafdUpdateConnectionContext(Handle, &updErr);
+        }
     }
 
     if (EnumReq.PollEvents &
