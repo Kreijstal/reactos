@@ -50,8 +50,8 @@ typedef struct _XHCI_PENDING_TRANSFER {
     PXHCI_TRANSFER XhciTransfer;
     PXHCI_ENDPOINT XhciEndpoint;
     PXHCI_EXTENSION XhciExtension;
-    PHYSICAL_ADDRESS TrbPointers[3];  // Setup, Data (optional), Status TRBs
-    ULONG TrbCount;                   // Number of valid TRB pointers
+    PHYSICAL_ADDRESS CompletionTrb;    // TRB expected to generate the completion event
+    ULONG TrbCount;                   // Number of TRBs that belong to the transfer TD
     ULONG RequestedLength;            // Original request length for proper transfer length calculation
     BOOLEAN InUse;
 } XHCI_PENDING_TRANSFER, *PXHCI_PENDING_TRANSFER;
@@ -204,7 +204,7 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
                        IN ULONG TrbCount,
                        IN ULONG RequestedLength)
 {
-    ULONG i, j;
+    ULONG i;
     
     InitializeTransferTracking();
     
@@ -234,19 +234,12 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
             g_PendingTransfers[i].XhciEndpoint = XhciEndpoint;
             g_PendingTransfers[i].XhciExtension = XhciExtension;
             g_PendingTransfers[i].TrbCount = TrbCount;
-            for (j = 0; j < TrbCount && j < 3; j++)
-            {
-                g_PendingTransfers[i].TrbPointers[j] = TrbPointers[j];
-            }
+            g_PendingTransfers[i].CompletionTrb = TrbPointers[TrbCount - 1];
             g_PendingTransfers[i].RequestedLength = RequestedLength;
             g_PendingTransfers[i].InUse = TRUE;
             
             DPRINT1("RegisterPendingTransfer: Registered transfer at index %d with %d TRBs, requested length %d\n", 
                     i, TrbCount, RequestedLength);
-            for (j = 0; j < TrbCount; j++)
-            {
-                DPRINT1("RegisterPendingTransfer: TRB[%d] = 0x%I64x\n", j, g_PendingTransfers[i].TrbPointers[j].QuadPart);
-            }
             return MP_STATUS_SUCCESS;
         }
     }
@@ -269,10 +262,7 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
         g_PendingTransfers[0].XhciEndpoint = XhciEndpoint;
         g_PendingTransfers[0].XhciExtension = XhciExtension;
         g_PendingTransfers[0].TrbCount = TrbCount;
-        for (j = 0; j < TrbCount && j < 3; j++)
-        {
-            g_PendingTransfers[0].TrbPointers[j] = TrbPointers[j];
-        }
+        g_PendingTransfers[0].CompletionTrb = TrbPointers[TrbCount - 1];
         g_PendingTransfers[0].RequestedLength = RequestedLength;
         g_PendingTransfers[0].InUse = TRUE;
         
@@ -287,21 +277,17 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
 PXHCI_PENDING_TRANSFER
 FindPendingTransfer(IN PHYSICAL_ADDRESS TrbPointer)
 {
-    ULONG i, j;
+    ULONG i;
     
     for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
         if (g_PendingTransfers[i].InUse)
         {
-            // Check all TRB pointers in this transfer
-            for (j = 0; j < g_PendingTransfers[i].TrbCount; j++)
+            if (g_PendingTransfers[i].CompletionTrb.QuadPart == TrbPointer.QuadPart)
             {
-                if (g_PendingTransfers[i].TrbPointers[j].QuadPart == TrbPointer.QuadPart)
-                {
-                    DPRINT1("FindPendingTransfer: Found transfer at index %d for TRB pointer 0x%I64x (TRB %d of %d)\n",
-                            i, TrbPointer.QuadPart, j, g_PendingTransfers[i].TrbCount);
-                    return &g_PendingTransfers[i];
-                }
+                DPRINT1("FindPendingTransfer: Found transfer at index %d for completion TRB 0x%I64x (%d TRBs)\n",
+                        i, TrbPointer.QuadPart, g_PendingTransfers[i].TrbCount);
+                return &g_PendingTransfers[i];
             }
         }
     }
@@ -1511,10 +1497,15 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     XHCI_TRB NormalTrb;
     PHYSICAL_ADDRESS BufferPA;
     ULONG TransferLength;
+    ULONG SubmittedLength;
+    ULONG TrbCount;
+    ULONG SgNonZeroCount;
+    ULONG SgIdx;
     ULONG SlotId;
     ULONG ContextIndex;
     MPSTATUS Status;
     PHYSICAL_ADDRESS NormalTrbPA;
+    PHYSICAL_ADDRESS TrbPointers[255];
     PXHCI_RING EndpointTransferRing;
 
     DPRINT1("XHCI_SubmitBulkTransfer: function initiated\n");
@@ -1546,6 +1537,9 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     // Word0/Word1/Word2 all zero and IOC=1. Only reject when TransferLength
     // is non-zero but the SgList is missing/empty.
     BufferPA.QuadPart = 0;
+    SubmittedLength = 0;
+    TrbCount = 0;
+    SgNonZeroCount = 0;
     if (TransferLength > 0)
     {
         if (SgList == NULL || SgList->SgElementCount == 0)
@@ -1554,43 +1548,89 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
                     TransferLength);
             return MP_STATUS_FAILURE;
         }
-        BufferPA = SgList->SgElement[0].SgPhysicalAddress;
-        DPRINT1("XHCI_SubmitBulkTransfer: Using buffer PA from SG list: 0x%I64x (length=%d)\n",
-                BufferPA.QuadPart, TransferLength);
+
+        for (SgIdx = 0; SgIdx < SgList->SgElementCount; SgIdx++)
+        {
+            ULONG ElementLength = SgList->SgElement[SgIdx].SgTransferLength;
+
+            if (ElementLength == 0)
+                continue;
+
+            SgNonZeroCount++;
+            SubmittedLength += ElementLength;
+        }
+
+        if (SgNonZeroCount == 0 ||
+            SgNonZeroCount > 255 ||
+            SubmittedLength != TransferLength)
+        {
+            DPRINT1("XHCI_SubmitBulkTransfer: invalid SG list, sg=%d nonzero=%d submitted=%d expected=%d\n",
+                    SgList->SgElementCount, SgNonZeroCount, SubmittedLength, TransferLength);
+            return MP_STATUS_FAILURE;
+        }
+
     }
     else
     {
         DPRINT1("XHCI_SubmitBulkTransfer: Zero-length bulk transfer (ZLP / status phase)\n");
     }
 
-    // Build a single Normal TRB for this bulk transfer.
-    // NOTE: USB Mass Storage BOT CBW/CSW are 31/13 bytes and typical SCSI
-    // data phases fit in a single TRB, so one Normal TRB per submission is
-    // sufficient for current usbstor needs. Multi-TRB chaining for transfers
-    // exceeding a single TRB's max length is not implemented here.
-    RtlZeroMemory(&NormalTrb, sizeof(XHCI_TRB));
-    NormalTrb.GenericTRB.Word0 = (ULONG)(BufferPA.QuadPart & 0xFFFFFFFF);
-    NormalTrb.GenericTRB.Word1 = (ULONG)(BufferPA.QuadPart >> 32);
-    NormalTrb.GenericTRB.Word2 = TransferLength;
-    NormalTrb.GenericTRB.Word3 = (NORMAL_TRB << 10) | // TRB Type = Normal
-                                (1 << 5) | // IOC (Interrupt on Completion)
-                                1; // Cycle bit (will be overridden by enqueue function)
-
-    DPRINT1("XHCI_SubmitBulkTransfer: Created Normal TRB with length %d, IOC=1\n", TransferLength);
-
-    // Enqueue Normal TRB onto the endpoint's transfer ring
-    Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing, &NormalTrb, &NormalTrbPA);
-    if (Status != MP_STATUS_SUCCESS)
+    if (TransferLength == 0)
     {
-        DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue Normal TRB\n");
-        return MP_STATUS_FAILURE;
+        RtlZeroMemory(&NormalTrb, sizeof(XHCI_TRB));
+        NormalTrb.GenericTRB.Word2 = 0;
+        NormalTrb.GenericTRB.Word3 = (NORMAL_TRB << 10) |
+                                    (1 << 5) | // IOC
+                                    1;         // cycle bit is fixed by enqueue
+
+        Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing, &NormalTrb, &NormalTrbPA);
+        if (Status != MP_STATUS_SUCCESS)
+        {
+            DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue zero-length TRB\n");
+            return MP_STATUS_FAILURE;
+        }
+
+        TrbPointers[TrbCount++] = NormalTrbPA;
+    }
+    else
+    {
+        for (SgIdx = 0; SgIdx < SgList->SgElementCount; SgIdx++)
+        {
+            ULONG ElementLength = SgList->SgElement[SgIdx].SgTransferLength;
+
+            if (ElementLength == 0)
+                continue;
+
+            BufferPA = SgList->SgElement[SgIdx].SgPhysicalAddress;
+
+            RtlZeroMemory(&NormalTrb, sizeof(XHCI_TRB));
+            NormalTrb.GenericTRB.Word0 = (ULONG)(BufferPA.QuadPart & 0xFFFFFFFF);
+            NormalTrb.GenericTRB.Word1 = (ULONG)(BufferPA.QuadPart >> 32);
+            NormalTrb.GenericTRB.Word2 = ElementLength;
+            NormalTrb.GenericTRB.Word3 = (NORMAL_TRB << 10) |
+                                        ((TrbCount + 1 < SgNonZeroCount) ? (1 << 4) : 0) | // CH
+                                        ((TrbCount + 1 == SgNonZeroCount) ? (1 << 5) : 0) | // IOC
+                                        1; // cycle bit is fixed by enqueue
+
+            Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing, &NormalTrb, &NormalTrbPA);
+            if (Status != MP_STATUS_SUCCESS)
+            {
+                DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue SG TRB %d\n", SgIdx);
+                return MP_STATUS_FAILURE;
+            }
+
+            TrbPointers[TrbCount++] = NormalTrbPA;
+        }
+
+        if (TrbCount != SgNonZeroCount)
+        {
+            DPRINT1("XHCI_SubmitBulkTransfer: SG TRB count mismatch, built=%d expected=%d\n",
+                    TrbCount, SgNonZeroCount);
+            return MP_STATUS_FAILURE;
+        }
     }
 
-    // Register the transfer for completion tracking
-    PHYSICAL_ADDRESS TrbPointers[1];
-    TrbPointers[0] = NormalTrbPA;
-
-    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, 1, TransferLength);
+    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, TrbCount, TransferLength);
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitBulkTransfer: Failed to register transfer for tracking\n");
