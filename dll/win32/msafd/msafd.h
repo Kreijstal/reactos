@@ -508,6 +508,12 @@ SockReenableAsyncSelectEvent (
     IN ULONG Event
     );
 
+INT
+NTAPI
+MsafdUpdateConnectionContext(
+    _In_ SOCKET Handle,
+    _Out_ LPINT lpErrno);
+
 typedef VOID (*PASYNC_COMPLETION_ROUTINE)(PVOID Context, PIO_STATUS_BLOCK IoStatusBlock);
 
 FORCEINLINE
