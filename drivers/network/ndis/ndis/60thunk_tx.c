@@ -34,6 +34,12 @@
 
 #include "ndis6_internal.h"
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 /* MiniSendComplete is declared in miniport.h (pulled in via ndis6_internal.h)
  * and is the canonical way to wake up a legacy NDIS 5 protocol's
  * SendCompleteHandler. */
@@ -153,7 +159,7 @@ Ndis6TxSendPacket(
         KeReleaseSpinLock(&Ext->TxLookupLock, OldIrql);
     }
 
-    DbgPrint("NDIS6-TX: Ndis6TxSendPacket Adapter=%p Packet=%p Nbl=%p Len=%u\n",
+    DPRINT("NDIS6-TX: Ndis6TxSendPacket Adapter=%p Packet=%p Nbl=%p Len=%u\n",
              Adapter, Packet, Nbl, TotalLength);
 
     /* Phase 8: route through the filter chain. If no filters are
@@ -190,13 +196,13 @@ Ndis6FilterTerminalSend(
     if (Ext == NULL || Ext->DriverBlock == NULL ||
         Ext->DriverBlock->Characteristics.SendNetBufferListsHandler == NULL)
     {
-        DbgPrint("NDIS6-TX: TerminalSend Ext=%p DriverBlock=%p Handler=%p — DROPPING\n",
+        DPRINT("NDIS6-TX: TerminalSend Ext=%p DriverBlock=%p Handler=%p — DROPPING\n",
                  Ext, Ext ? Ext->DriverBlock : NULL,
                  (Ext && Ext->DriverBlock) ? Ext->DriverBlock->Characteristics.SendNetBufferListsHandler : NULL);
         return;
     }
 
-    DbgPrint("NDIS6-TX: TerminalSend → driver Nbl=%p\n", NetBufferList);
+    DPRINT("NDIS6-TX: TerminalSend → driver Nbl=%p\n", NetBufferList);
     Ext->DriverBlock->Characteristics.SendNetBufferListsHandler(
         Ext->MiniportAdapterContext,
         NetBufferList,
@@ -423,7 +429,7 @@ Ndis6TxSendPackets(
 
     if (HeadNbl != NULL)
     {
-        DbgPrint("NDIS6-TX: Ndis6TxSendPackets batch=%lu adapter=%p\n",
+        DPRINT("NDIS6-TX: Ndis6TxSendPackets batch=%lu adapter=%p\n",
                  Wrapped, Adapter);
         /* Route through the filter chain. With no filters attached, this
          * goes straight to Ndis6FilterTerminalSend which hands the chain

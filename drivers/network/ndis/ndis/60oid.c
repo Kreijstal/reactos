@@ -30,6 +30,12 @@
 
 #include "ndis6_internal.h"
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 /* ETH_HEADER_SIZE — fixed Ethernet II header length. Used to derive
  * OID_GEN_MAXIMUM_TOTAL_SIZE from the MTU the driver reported. */
 #define NDIS6_ETH_HEADER_SIZE   14
@@ -111,7 +117,7 @@ Ndis6OidForward(
     InsertTailList(&Ext->OidWaiters, &Waiter.ListEntry);
     KeReleaseSpinLock(&Ext->OidWaiterLock, OldIrql);
 
-    DbgPrint("NDIS6-OID: forward Type=%d Oid=0x%08lx → driver\n",
+    DPRINT("NDIS6-OID: forward Type=%d Oid=0x%08lx → driver\n",
              Request->RequestType,
              (Request->RequestType == NdisRequestQueryInformation)
                  ? Request->DATA.QUERY_INFORMATION.Oid
@@ -123,7 +129,7 @@ Ndis6OidForward(
      * no filters are attached. */
     Status = Ndis6FilterDispatchOidRequest(Ext->Adapter, &OidReq);
 
-    DbgPrint("NDIS6-OID: forward Oid=0x%08lx → driver returned 0x%08lx\n",
+    DPRINT("NDIS6-OID: forward Oid=0x%08lx → driver returned 0x%08lx\n",
              (Request->RequestType == NdisRequestQueryInformation)
                  ? Request->DATA.QUERY_INFORMATION.Oid
                  : Request->DATA.SET_INFORMATION.Oid,

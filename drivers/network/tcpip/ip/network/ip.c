@@ -10,6 +10,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 #define __LWIP_INET_H__
 #include "lwip/netifapi.h"
 
@@ -175,7 +181,7 @@ VOID IPDispatchProtocol(
         static volatile LONG DispCount = 0;
         LONG dc = InterlockedIncrement(&DispCount);
         if (dc <= 5)
-            DbgPrint("TCPIP-IP: IPDispatchProtocol #%ld proto=%d handler=%p\n",
+            DPRINT("TCPIP-IP: IPDispatchProtocol #%ld proto=%d handler=%p\n",
                      dc, Protocol,
                      Protocol < IP_PROTOCOL_TABLE_SIZE ? ProtocolTable[Protocol] : NULL);
     }

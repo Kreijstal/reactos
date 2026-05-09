@@ -23,6 +23,12 @@
 #include "ndis6_internal.h"
 #include <ntstrsafe.h>
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 #define NDIS6_ADAPTER_TAG  'aDNn'  /* "nNDa" */
 
 /* ============================================================================
@@ -233,14 +239,14 @@ Ndis6CreateLogicalAdapter(
     {
         NDIS_STATUS PoolStatus;
         NdisAllocateBufferPool(&PoolStatus, &Ext->RxLegacyBufferPool, 64);
-        DbgPrint("NDIS6-INIT: NdisAllocateBufferPool -> 0x%08lx, handle=%p\n",
+        DPRINT("NDIS6-INIT: NdisAllocateBufferPool -> 0x%08lx, handle=%p\n",
                  (ULONG)PoolStatus, Ext->RxLegacyBufferPool);
         if (PoolStatus != NDIS_STATUS_SUCCESS)
             Ext->RxLegacyBufferPool = NULL;
 
         NdisAllocatePacketPool(&PoolStatus, &Ext->RxLegacyPacketPool, 64,
                                sizeof(PVOID) * 4);
-        DbgPrint("NDIS6-INIT: NdisAllocatePacketPool -> 0x%08lx, handle=%p\n",
+        DPRINT("NDIS6-INIT: NdisAllocatePacketPool -> 0x%08lx, handle=%p\n",
                  (ULONG)PoolStatus, Ext->RxLegacyPacketPool);
         if (PoolStatus != NDIS_STATUS_SUCCESS)
             Ext->RxLegacyPacketPool = NULL;
@@ -418,7 +424,7 @@ Ndis6CallMiniportHaltEx(
     StartingCount = Ext->TxInFlightCount;
     if (StartingCount > 0)
     {
-        DbgPrint("NDIS6: HaltEx draining %ld in-flight TX NBLs\n", StartingCount);
+        DPRINT("NDIS6: HaltEx draining %ld in-flight TX NBLs\n", StartingCount);
 
         /* Clear the event so we wait for the NEXT decrement. We own
          * the event setter side (TerminalSendComplete), so clearing
@@ -443,7 +449,7 @@ Ndis6CallMiniportHaltEx(
             RemainingCount = Ext->TxInFlightCount;
             if (WaitStatus == STATUS_TIMEOUT && RemainingCount > 0)
             {
-                DbgPrint("NDIS6: HaltEx drain TIMEOUT, %ld NBLs still in flight — leaking\n",
+                DPRINT("NDIS6: HaltEx drain TIMEOUT, %ld NBLs still in flight — leaking\n",
                          RemainingCount);
                 /* Fall through. The send-completion path will still
                  * try to call MiniSendComplete on an adapter whose
@@ -514,10 +520,10 @@ Ndis6CallMiniportPauseEx(
     Ext->PauseStatus = NDIS_STATUS_PENDING;
     KeClearEvent(&Ext->PauseEvent);
 
-    DbgPrint("NDIS6: Pause → driver\n");
+    DPRINT("NDIS6: Pause → driver\n");
     Status = Ext->DriverBlock->Characteristics.PauseHandler(
         Ext->MiniportAdapterContext, &PauseParams);
-    DbgPrint("NDIS6: PauseHandler returned 0x%08lx\n", (ULONG)Status);
+    DPRINT("NDIS6: PauseHandler returned 0x%08lx\n", (ULONG)Status);
 
     if (Status == NDIS_STATUS_PENDING)
     {
@@ -573,10 +579,10 @@ Ndis6CallMiniportRestartEx(
     Ext->RestartStatus = NDIS_STATUS_PENDING;
     KeClearEvent(&Ext->RestartEvent);
 
-    DbgPrint("NDIS6: Restart → driver\n");
+    DPRINT("NDIS6: Restart → driver\n");
     Status = Ext->DriverBlock->Characteristics.RestartHandler(
         Ext->MiniportAdapterContext, &RestartParams);
-    DbgPrint("NDIS6: RestartHandler returned 0x%08lx\n", (ULONG)Status);
+    DPRINT("NDIS6: RestartHandler returned 0x%08lx\n", (ULONG)Status);
 
     if (Status == NDIS_STATUS_PENDING)
     {
