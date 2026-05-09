@@ -117,6 +117,15 @@ typedef struct _AFD_MAPBUF {
      * TryToSatisfyRecvRequestFromBuffer, and the send path in write.c all
      * overwrite BufferAddress with a transient MmMapLockedPages result. */
     PVOID OriginalUserBuffer;
+    /* The originating process, captured at LockBuffers time. UnlockBuffers
+     * may run from a TDI completion in arbitrary kernel context (e.g. the
+     * TCP/IP receive worker thread), so the user-mode VA in
+     * OriginalUserBuffer is meaningless until we KeStackAttachProcess back
+     * to the requestor's address space. Without this attach the writeback
+     * lands in whichever process happened to be on the CPU, which is why
+     * blocking recv() returned positive byte counts but the user buffer
+     * contained zeros. */
+    PEPROCESS OriginalProcess;
 } AFD_MAPBUF, *PAFD_MAPBUF;
 
 typedef struct _AFD_DEVICE_EXTENSION {
