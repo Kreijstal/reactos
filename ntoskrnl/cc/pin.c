@@ -198,14 +198,7 @@ CcpGetAppropriateBcb(
                 Result = ExAcquireSharedStarveExclusive(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
 
-            if (!Result)
-            {
-                iBcb->PinCount--;
-                KeReleaseSpinLock(&SharedCacheMap->BcbSpinLock, OldIrql);
-                ExDeleteResourceLite(&iBcb->Lock);
-                ExFreeToNPagedLookasideList(&iBcbLookasideList, iBcb);
-                return NULL;
-            }
+            ASSERT(Result);
 
             iBcb->ResourceThreadId = ExGetCurrentResourceThread();
         }
