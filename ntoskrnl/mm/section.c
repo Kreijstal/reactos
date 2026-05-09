@@ -5340,8 +5340,19 @@ MiFlushDirtySegmentRun(
     ULONG i;
     KIRQL PfnIrql;
     NTSTATUS Status = STATUS_SUCCESS;
-    UCHAR MdlBuf[sizeof(MDL) + MM_FLUSH_BATCH_PAGES * sizeof(PFN_NUMBER)];
-    PMDL Mdl = (PMDL)MdlBuf;
+    /* MDL header followed by inline PFN array. The struct ensures both
+     * members get their natural alignment (PVOID-aligned MDL header,
+     * PFN_NUMBER-aligned PFN slots), which is required on architectures
+     * with strict alignment such as aarch64. MmGetMdlPfnArray locates
+     * the PFN slots as (Mdl + 1), so the layout must be contiguous —
+     * sizeof(MDL) is a multiple of sizeof(PFN_NUMBER) on every supported
+     * target, so the compiler inserts no padding between the two. */
+    struct
+    {
+        MDL Mdl;
+        PFN_NUMBER Pfns[MM_FLUSH_BATCH_PAGES];
+    } MdlStorage;
+    PMDL Mdl = &MdlStorage.Mdl;
     KEVENT Event;
     IO_STATUS_BLOCK IoStatus;
     LARGE_INTEGER FileOffset;
@@ -5396,7 +5407,7 @@ MiFlushDirtySegmentRun(
     MmUnlockSectionSegment(Segment);
 
     /* Build a single multi-page MDL covering the entire run. */
-    RtlZeroMemory(MdlBuf, sizeof(MdlBuf));
+    RtlZeroMemory(&MdlStorage, sizeof(MdlStorage));
     MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
     MmBuildMdlFromPages(Mdl, Pages);
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
