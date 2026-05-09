@@ -384,9 +384,22 @@ DbgGdiHTIntegrityCheck(VOID)
 			}
 			else if (((POBJ)(pEntry->KernelData))->hHmgr != Handle)
 			{
+				PULONG dumpwords;
 				r = 0;
 				DPRINT1("Used entry %lu, has invalid hHmg %p (expected: %p)\n",
 				        i, ((POBJ)(pEntry->KernelData))->hHmgr, Handle);
+				DPRINT1("  KernelData=%p ProcessId=%lx Type=%lx FullUnique=%x\n",
+				        pEntry->KernelData,
+				        (ULONG)pEntry->ProcessId,
+				        (ULONG)pEntry->Type,
+				        (UINT)pEntry->FullUnique);
+				dumpwords = (PULONG)pEntry->KernelData;
+				DPRINT1("  obj+0x00: %08lx %08lx %08lx %08lx\n",
+				        dumpwords[0], dumpwords[1], dumpwords[2], dumpwords[3]);
+				DPRINT1("  obj+0x10: %08lx %08lx %08lx %08lx\n",
+				        dumpwords[4], dumpwords[5], dumpwords[6], dumpwords[7]);
+				DPRINT1("  obj+0x20: %08lx %08lx %08lx %08lx\n",
+				        dumpwords[8], dumpwords[9], dumpwords[10], dumpwords[11]);
 			}
 			nUsed++;
 		}
