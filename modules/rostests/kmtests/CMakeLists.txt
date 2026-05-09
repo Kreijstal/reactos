@@ -1,5 +1,6 @@
 
 include_directories(include)
+include_directories(${REACTOS_SOURCE_DIR}/drivers/usb/usbxhci)
 
 #
 # subdirectories containing special-purpose drivers
@@ -119,6 +120,8 @@ list(APPEND KMTEST_DRV_SOURCE
     rtl/RtlIsValidOemCharacter.c
     rtl/RtlRangeList.c
     ${COMMON_SOURCE}
+    usb_xhci/XhciBulkTrb.c
+    ${REACTOS_SOURCE_DIR}/drivers/usb/usbxhci/trb.c
 
     kmtest_drv/kmtest_drv.rc)
 
