@@ -22,6 +22,12 @@
 #include <guiddef.h>
 #include <wdmguid.h>
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 /* ============================================================================
  *  Helper: get the NDIS6_ADAPTER_EXT from any miniport handle the driver
  *  passed in. The handle is whatever NdisMSetMiniportAttributes returned —
@@ -643,7 +649,7 @@ Ndis6IsrWrapper(
     /* Log the first few ISRs (limit to avoid log flood). */
     MyCount = InterlockedIncrement(&IsrCount);
     if (MyCount <= 30)
-        DbgPrint("NDIS6-IRQ: ISR fired #%ld Recognized=%d QueueDpc=%d\n",
+        DPRINT("NDIS6-IRQ: ISR fired #%ld Recognized=%d QueueDpc=%d\n",
                  MyCount, Recognized, QueueDpc);
 
     if (Recognized && QueueDpc)
@@ -791,7 +797,7 @@ NdisMRegisterInterruptEx(
         p.MessageBased.FallBackServiceRoutine  = Ndis6IsrWrapper;
 
         Status = IoConnectInterruptEx(&p);
-        DbgPrint("NDIS6: IoConnectInterruptEx(MSG) -> 0x%08lx MsiTable=%p\n",
+        DPRINT("NDIS6: IoConnectInterruptEx(MSG) -> 0x%08lx MsiTable=%p\n",
                  (ULONG)Status, Ext->MsiTable);
 
         if (NT_SUCCESS(Status))
@@ -814,7 +820,7 @@ NdisMRegisterInterruptEx(
                 MiniportInterruptCharacteristics->InterruptType    = NDIS_CONNECT_MESSAGE_BASED;
                 MiniportInterruptCharacteristics->MessageInfoTable = Ext->MsiTable;
 
-                DbgPrint("NDIS6: connected %lu MSI vectors (wrote back InterruptType=MSG MessageInfoTable=%p)\n",
+                DPRINT("NDIS6: connected %lu MSI vectors (wrote back InterruptType=MSG MessageInfoTable=%p)\n",
                          Ext->MsiTable->MessageCount, Ext->MsiTable);
             }
             else
@@ -833,7 +839,7 @@ NdisMRegisterInterruptEx(
                 MiniportInterruptCharacteristics->InterruptType    = NDIS_CONNECT_LINE_BASED;
                 MiniportInterruptCharacteristics->MessageInfoTable = NULL;
 
-                DbgPrint("NDIS6: message-based fell back to line KINTERRUPT=%p\n",
+                DPRINT("NDIS6: message-based fell back to line KINTERRUPT=%p\n",
                          Ext->InterruptObject);
             }
 
@@ -861,7 +867,7 @@ NdisMRegisterInterruptEx(
     /* Share the vector — we default to shared line-based. */
     ShareVector = TRUE;
 
-    DbgPrint("NDIS6: NdisMRegisterInterruptEx vec=%u irql=%u affinity=0x%lx mode=%s share=%d\n",
+    DPRINT("NDIS6: NdisMRegisterInterruptEx vec=%u irql=%u affinity=0x%lx mode=%s share=%d\n",
              Ext->InterruptVector, Ext->InterruptIrql,
              (ULONG)Ext->InterruptAffinity,
              (InterruptMode == Latched) ? "Latched" : "Level",
@@ -880,7 +886,7 @@ NdisMRegisterInterruptEx(
         Ext->InterruptAffinity,
         FALSE);                     /* FloatingSave */
 
-    DbgPrint("NDIS6: IoConnectInterrupt -> 0x%08lx, KINTERRUPT=%p\n",
+    DPRINT("NDIS6: IoConnectInterrupt -> 0x%08lx, KINTERRUPT=%p\n",
              (ULONG)Status, Ext->InterruptObject);
 
     if (!NT_SUCCESS(Status))

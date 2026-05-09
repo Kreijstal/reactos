@@ -10,6 +10,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 BOOLEAN DGRemoveIRP(
     PADDRESS_FILE AddrFile,
     PIRP Irp)
@@ -86,7 +92,7 @@ DGDeliverData(
         static volatile LONG DgCount = 0;
         LONG dc = InterlockedIncrement(&DgCount);
         if (dc <= 10)
-            DbgPrint("TCPIP-DG: DGDeliverData #%ld AddrFile=%p RecvQueueEmpty=%d Handler=%p Registered=%d\n",
+            DPRINT("TCPIP-DG: DGDeliverData #%ld AddrFile=%p RecvQueueEmpty=%d Handler=%p Registered=%d\n",
                      dc, AddrFile,
                      IsListEmpty(&AddrFile->ReceiveQueue),
                      AddrFile->ReceiveDatagramHandler,
@@ -116,7 +122,7 @@ DGDeliverData(
         LONG mc = InterlockedIncrement(&MatchCount);
 
         if (mc <= 10)
-            DbgPrint("TCPIP-DG: queue scan AfPort=%u DstPort=%u AfAddr=0x%08x DstAddr=0x%08x\n",
+            DPRINT("TCPIP-DG: queue scan AfPort=%u DstPort=%u AfAddr=0x%08x DstAddr=0x%08x\n",
                      WN2H(AddrFile->Port), WN2H(DstPort),
                      AddrFile->Address.Address.IPv4Address,
                      DstAddress->Address.IPv4Address);
@@ -133,7 +139,7 @@ DGDeliverData(
                 AddrIsUnspecified(DstAddress)))
             {
                 if (mc <= 10)
-                    DbgPrint("TCPIP-DG: MATCH — delivering to recv request %p buf=%p sz=%lu\n",
+                    DPRINT("TCPIP-DG: MATCH — delivering to recv request %p buf=%p sz=%lu\n",
                              Current, Current->Buffer, Current->BufferSize);
 
                 /* Remove the request from the queue */

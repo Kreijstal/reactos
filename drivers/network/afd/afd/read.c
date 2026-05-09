@@ -10,6 +10,12 @@
 
 #include "afd.h"
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 static VOID RefillSocketBuffer( PAFD_FCB FCB )
 {
     /* Make sure nothing's in flight first */
@@ -593,7 +599,7 @@ PacketSocketRecvComplete(
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if (psr <= 10)
-        DbgPrint("AFD-RX: PacketSocketRecvComplete #%ld FCB=%p Status=0x%08lx Info=%lu\n",
+        DPRINT("AFD-RX: PacketSocketRecvComplete #%ld FCB=%p Status=0x%08lx Info=%lu\n",
                  psr, FCB, (ULONG)Irp->IoStatus.Status,
                  (ULONG)Irp->IoStatus.Information);
 
