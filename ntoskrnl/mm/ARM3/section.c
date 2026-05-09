@@ -2021,6 +2021,33 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
     ControlArea->NumberOfUserReferences--;
     ControlArea->NumberOfMappedViews--;
 
+    /*
+     * MiResolveDemandZeroFault writes a hardware-valid PTE directly into
+     * the prototype PTE for pagefile-backed sections, but MiSegmentDelete
+     * later requires the proto to be 0 / Soft.Transition / Soft.PageFileHigh.
+     * On the last view of such a section, walk the prototype array and
+     * release the proto's residual ShareCount before MiCheckControlArea
+     * can hand the segment off to MiSegmentDelete.
+     */
+    if ((ControlArea->NumberOfMappedViews == 0) &&
+        (ControlArea->NumberOfSectionReferences == 0) &&
+        !ControlArea->u.Flags.Image &&
+        (ControlArea->FilePointer == NULL))
+    {
+        PSUBSECTION Sub = (PSUBSECTION)(ControlArea + 1);
+        PMMPTE Proto = Sub->SubsectionBase;
+        PMMPTE LastProto = Proto + Sub->PtesInSubsection;
+        for (; Proto < LastProto; Proto++)
+        {
+            if (Proto->u.Hard.Valid)
+            {
+                PMMPFN ProtoPfn = MiGetPfnEntry(PFN_FROM_PTE(Proto));
+                MiDecrementShareCount(ProtoPfn, PFN_FROM_PTE(Proto));
+                Proto->u.Long = 0;
+            }
+        }
+    }
+
     /* Check if we should destroy the CA and release the lock */
     MiCheckControlArea(ControlArea, OldIrql);
 }
