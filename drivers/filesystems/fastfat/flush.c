@@ -875,66 +875,44 @@ Return Value:
     }
 
     //
-    //  The only way we have to correctly synchronize things is to
-    //  repin stuff, and then unpin repin it.
-    //
-    //  With NT 5.0, we can use some new cache manager support to make
-    //  this a lot more efficient (important for FAT32).  Since we're
-    //  only worried about ranges that are dirty - and since we're a
-    //  modified-no-write stream - we can assume that if there is no
-    //  BCB, there is no work to do in the range. I.e., the lazy writer
-    //  beat us to it.
-    //
-    //  This is much better than reading the entire FAT in and trying
-    //  to punch it out (see the test in the write path to blow
-    //  off writes that don't correspond to dirty ranges of the FAT).
-    //  For FAT32, this would be a *lot* of reading.
+    //  For FAT16/FAT32: use CcFlushCache on the full FAT range.
+    //  For FAT12: repin the single FAT buffer and unpin it write-through.
     //
 
     if (Vcb->AllocationSupport.FatIndexBitSize != 12) {
 
         //
-        //  Walk through the Fat, one page at a time.
+        //  Flush the entire FAT range via CcFlushCache so that dirty pages
+        //  without an active BCB (left by the lazy writer flushing an earlier
+        //  intermediate state) are not silently skipped.  On Windows the
+        //  VirtualVolumeFile has write-behind disabled (PinAccess=TRUE), so
+        //  the lazy writer never touches it and the old PIN_IF_BCB approach
+        //  was safe.  In ReactOS write-behind is not suppressed for PinAccess
+        //  streams, so the lazy writer can flush a partial cluster chain to
+        //  disk and then release the BCB; a subsequent PIN_IF_BCB call finds
+        //  no BCB and skips the now-re-dirtied VACB, leaving the chain
+        //  truncated on disk.  CcFlushCache finds and flushes every dirty
+        //  VACB in the range regardless of BCB state.
         //
 
-        ULONG NumberOfPages;
-        ULONG Page;
+        Offset.QuadPart = 0;
 
-        NumberOfPages = ( FatReservedBytes(&Vcb->Bpb) +
-                          FatBytesPerFat(&Vcb->Bpb) +
-                          (PAGE_SIZE - 1) ) / PAGE_SIZE;
+        _SEH2_TRY {
 
+            CcFlushCache( Vcb->VirtualVolumeFile->SectionObjectPointer,
+                          &Offset,
+                          FatReservedBytes( &Vcb->Bpb ) + FatBytesPerFat( &Vcb->Bpb ),
+                          &Iosb );
 
-        for ( Page = 0, Offset.QuadPart = 0;
-              Page < NumberOfPages;
-              Page++, Offset.LowPart += PAGE_SIZE ) {
+            if (!NT_SUCCESS(Iosb.Status)) {
 
-            _SEH2_TRY {
+                ReturnStatus = Iosb.Status;
+            }
 
-                if (CcPinRead( Vcb->VirtualVolumeFile,
-                               &Offset,
-                               PAGE_SIZE,
-                               PIN_WAIT | PIN_IF_BCB,
-                               &Bcb,
-                               &DontCare )) {
+        } _SEH2_EXCEPT(FatExceptionFilter(IrpContext, _SEH2_GetExceptionInformation())) {
 
-                    CcSetDirtyPinnedData( Bcb, NULL );
-                    CcRepinBcb( Bcb );
-                    CcUnpinData( Bcb );
-                    CcUnpinRepinnedBcb( Bcb, TRUE, &Iosb );
-
-                    if (!NT_SUCCESS(Iosb.Status)) {
-
-                        ReturnStatus = Iosb.Status;
-                    }
-                }
-
-            } _SEH2_EXCEPT(FatExceptionFilter(IrpContext, _SEH2_GetExceptionInformation())) {
-
-                ReturnStatus = IrpContext->ExceptionStatus;
-                continue;
-            } _SEH2_END;
-        }
+            ReturnStatus = IrpContext->ExceptionStatus;
+        } _SEH2_END;
 
     } else {
 
