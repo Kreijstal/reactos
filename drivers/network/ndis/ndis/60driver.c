@@ -26,6 +26,12 @@
 
 #include "ndis6_internal.h"
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 LIST_ENTRY  g_Ndis6DriverList;
 KSPIN_LOCK  g_Ndis6DriverListLock;
 static BOOLEAN g_Ndis6DriverListReady = FALSE;
@@ -267,7 +273,7 @@ NdisMSetMiniportAttributes(
             Ext->OffloadDefaultPtr = AttrBase[0];
             Ext->OffloadHwPtr      = AttrBase[1];
             Ext->OffloadValid      = TRUE;
-            DbgPrint("NDIS6: offload attrs recorded Default=%p Hw=%p\n",
+            DPRINT("NDIS6: offload attrs recorded Default=%p Hw=%p\n",
                      Ext->OffloadDefaultPtr, Ext->OffloadHwPtr);
             return NDIS_STATUS_SUCCESS;
         }
