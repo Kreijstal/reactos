@@ -654,6 +654,18 @@ UserDereferenceObject(PVOID Object)
 
         entry = handle_to_entry(gHandleTable, ObjHead->h);
 
+        if (entry == NULL)
+        {
+            PULONG dumpwords = (PULONG)Object;
+            ERR("UserDereferenceObject: ObjHead=%p h=0x%lx (entry NULL)\n",
+                    Object, (ULONG)ObjHead->h);
+            ERR("  bytes+0x00: %08lx %08lx %08lx %08lx\n",
+                    dumpwords[0], dumpwords[1], dumpwords[2], dumpwords[3]);
+            ERR("  bytes+0x10: %08lx %08lx %08lx %08lx\n",
+                    dumpwords[4], dumpwords[5], dumpwords[6], dumpwords[7]);
+            ERR("  gHandleTable=%p nb_handles=%u\n",
+                    gHandleTable, gHandleTable ? gHandleTable->nb_handles : 0);
+        }
         ASSERT(entry != NULL);
         /* The entry should be marked as in deletion */
         ASSERT(entry->flags & HANDLEENTRY_INDESTROY);
