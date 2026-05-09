@@ -418,10 +418,14 @@ MiDeletePte(IN PMMPTE PointerPte,
             /* Delete the PFN */
             MI_SET_PFN_DELETED(Pfn1);
 
-            /* It must be either free (refcount == 0) or being written (refcount == 1) */
-            ASSERT(Pfn1->u3.e2.ReferenceCount == Pfn1->u3.e1.WriteInProgress);
+            /* If it has any reference (writeback OR an MmProbeAndLockPages-style
+             * I/O hold), the eventual MiDecrementReferenceCount will see
+             * MI_IS_PFN_DELETED and route the page to the free list. We only
+             * need to do the freeing ourselves when no references remain. */
+            ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
 
-            /* See if we must free it ourselves, or if it will be freed once I/O is over */
+            /* See if we must free it ourselves, or if it will be freed once
+             * the outstanding reference (writeback or I/O lock) is released. */
             if (Pfn1->u3.e2.ReferenceCount == 0)
             {
                 /* And it should be in standby or modified list */
