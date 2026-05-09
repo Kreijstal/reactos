@@ -10,6 +10,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 #include <ntifs.h>
 #include <ndk/rtlfuncs.h>
 #include <ndk/obfuncs.h>
@@ -544,10 +550,10 @@ TiDispatch(
 
             case IOCTL_ICMP_ECHO_REQUEST:
                 TI_DbgPrint(MIN_TRACE, ("ICMP_ECHO_REQUEST\n"));
-                DbgPrint("TCPIP-IOCTL: IOCTL_ICMP_ECHO_REQUEST received FileObj=%p\n",
+                DPRINT("TCPIP-IOCTL: IOCTL_ICMP_ECHO_REQUEST received FileObj=%p\n",
                          IrpSp->FileObject);
                 Status = DispEchoRequest(DeviceObject, Irp, IrpSp);
-                DbgPrint("TCPIP-IOCTL: DispEchoRequest returned 0x%08x\n", Status);
+                DPRINT("TCPIP-IOCTL: DispEchoRequest returned 0x%08x\n", Status);
                 break;
 
             default:

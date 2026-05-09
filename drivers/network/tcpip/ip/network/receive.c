@@ -12,6 +12,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 LIST_ENTRY ReassemblyListHead;
 KSPIN_LOCK ReassemblyListLock;
 NPAGED_LOOKASIDE_LIST IPDRList;
@@ -456,7 +462,7 @@ VOID ProcessFragment(
     {
         static volatile LONG ReasmCount = 0;
         LONG rc = InterlockedIncrement(&ReasmCount);
-        if (rc <= 5) DbgPrint("TCPIP-IP: ProcessFragment #%ld complete\n", rc);
+        if (rc <= 5) DPRINT("TCPIP-IP: ProcessFragment #%ld complete\n", rc);
     }
 
     RemoveIPDR(IPDR);
@@ -478,7 +484,7 @@ VOID ProcessFragment(
     {
         static volatile LONG DispCount = 0;
         LONG dc = InterlockedIncrement(&DispCount);
-        if (dc <= 5) DbgPrint("TCPIP-IP: → IPDispatchProtocol #%ld\n", dc);
+        if (dc <= 5) DPRINT("TCPIP-IP: → IPDispatchProtocol #%ld\n", dc);
     }
 
     /* Give the packet to the protocol dispatcher */
@@ -576,7 +582,7 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     LONG ic = InterlockedIncrement(&IPv4Count);
 
     if (ic <= 5)
-        DbgPrint("TCPIP-IP: IPv4Receive #%ld TotalSize=%lu\n", ic, IPPacket->TotalSize);
+        DPRINT("TCPIP-IP: IPv4Receive #%ld TotalSize=%lu\n", ic, IPPacket->TotalSize);
 
     /* Read in the first IP header byte for size information */
     BytesCopied = CopyPacketToBuffer((PCHAR)&FirstByte,
@@ -627,7 +633,7 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     /* Checksum IPv4 header */
     if (!IPv4CorrectChecksum(IPPacket->Header, IPPacket->HeaderSize)) {
         if (ic <= 5)
-            DbgPrint("TCPIP-IP: IPv4Receive #%ld BAD CHECKSUM 0x%04x\n", ic,
+            DPRINT("TCPIP-IP: IPv4Receive #%ld BAD CHECKSUM 0x%04x\n", ic,
                      WN2H(((PIPv4_HEADER)IPPacket->Header)->Checksum));
         /* Discard packet */
         return;
@@ -639,7 +645,7 @@ VOID IPv4Receive(PIP_INTERFACE IF, PIP_PACKET IPPacket)
     AddrInitIPv4(&IPPacket->DstAddr, ((PIPv4_HEADER)IPPacket->Header)->DstAddr);
 
     if (ic <= 5)
-        DbgPrint("TCPIP-IP: IPv4Receive #%ld src=0x%08x dst=0x%08x proto=%d\n", ic,
+        DPRINT("TCPIP-IP: IPv4Receive #%ld src=0x%08x dst=0x%08x proto=%d\n", ic,
                  ((PIPv4_HEADER)IPPacket->Header)->SrcAddr,
                  ((PIPv4_HEADER)IPPacket->Header)->DstAddr,
                  ((PIPv4_HEADER)IPPacket->Header)->Protocol);

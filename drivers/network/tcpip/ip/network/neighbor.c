@@ -10,6 +10,14 @@
 
 #include "precomp.h"
 
+/* Use the standard NDEBUG / DPRINT pattern for the neighbour-cache trace
+ * prints below.  They fire on every IP packet and dominate the kernel
+ * debug log; they're useful when bringing up the NDIS stack but pure
+ * noise otherwise.  Comment out the "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 NEIGHBOR_CACHE_TABLE NeighborCache[NB_HASHMASK + 1];
 
 VOID NBCompleteSend( PVOID Context,
@@ -32,7 +40,7 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
     UINT Count = 0;
 
     ASSERT(!(NCE->State & NUD_INCOMPLETE));
-    DbgPrint("TCPIP-NB: NBSendPackets NCE=%p addr=0x%08x state=0x%x\n",
+    DPRINT("TCPIP-NB: NBSendPackets NCE=%p addr=0x%08x state=0x%x\n",
              NCE, NCE->Address.Address.IPv4Address, NCE->State);
 
     HashValue  = *(PULONG)(&NCE->Address.Address);
@@ -56,7 +64,7 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
 	PC(Packet->Packet)->Context  = Packet;
 
 	Count++;
-	DbgPrint("TCPIP-NB:   flushing queued packet #%u NdisPacket=%p\n",
+	DPRINT("TCPIP-NB:   flushing queued packet #%u NdisPacket=%p\n",
 	         Count, Packet->Packet);
 	NCE->Interface->Transmit
 	    ( NCE->Interface->Context,
@@ -65,7 +73,7 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
 	      NCE->LinkAddress,
 	      LAN_PROTO_IPv4 );
     }
-    DbgPrint("TCPIP-NB: NBSendPackets drained %u packets for NCE=%p\n",
+    DPRINT("TCPIP-NB: NBSendPackets drained %u packets for NCE=%p\n",
              Count, NCE);
 }
 
@@ -376,7 +384,7 @@ VOID NBUpdateNeighbor(
     UINT HashValue;
 
     TI_DbgPrint(DEBUG_NCACHE, ("Called. NCE (0x%X)  LinkAddress (0x%X)  State (0x%X).\n", NCE, LinkAddress, State));
-    DbgPrint("TCPIP-NB: NBUpdateNeighbor NCE=%p addr=0x%08x oldState=0x%x newState=0x%x\n",
+    DPRINT("TCPIP-NB: NBUpdateNeighbor NCE=%p addr=0x%08x oldState=0x%x newState=0x%x\n",
              NCE, NCE->Address.Address.IPv4Address, NCE->State, State);
 
     HashValue  = *(PULONG)(&NCE->Address.Address);
@@ -396,7 +404,7 @@ VOID NBUpdateNeighbor(
     if( !(NCE->State & NUD_INCOMPLETE) )
     {
         if (NCE->EventTimer) NCE->EventTimer = ARP_COMPLETE_TIMEOUT;
-        DbgPrint("TCPIP-NB:   NCE resolved, flushing queue\n");
+        DPRINT("TCPIP-NB:   NCE resolved, flushing queue\n");
         NBSendPackets( NCE );
     }
 }
@@ -584,7 +592,7 @@ BOOLEAN NBQueuePacket(
   TI_DbgPrint
       (DEBUG_NCACHE,
        ("Called. NCE (0x%X)  NdisPacket (0x%X).\n", NCE, NdisPacket));
-  DbgPrint("TCPIP-NB: NBQueuePacket NCE=%p addr=0x%08x state=0x%x NdisPacket=%p\n",
+  DPRINT("TCPIP-NB: NBQueuePacket NCE=%p addr=0x%08x state=0x%x NdisPacket=%p\n",
            NCE, NCE->Address.Address.IPv4Address, NCE->State, NdisPacket);
 
   Packet = ExAllocatePoolWithTag( NonPagedPool, sizeof(NEIGHBOR_PACKET),
@@ -609,10 +617,10 @@ BOOLEAN NBQueuePacket(
   TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
 
   if( !(NCE->State & NUD_INCOMPLETE) ) {
-      DbgPrint("TCPIP-NB:   NCE complete, calling NBSendPackets now\n");
+      DPRINT("TCPIP-NB:   NCE complete, calling NBSendPackets now\n");
       NBSendPackets( NCE );
   } else {
-      DbgPrint("TCPIP-NB:   NCE INCOMPLETE - packet queued, awaiting ARP\n");
+      DPRINT("TCPIP-NB:   NCE INCOMPLETE - packet queued, awaiting ARP\n");
   }
 
   return TRUE;

@@ -14,6 +14,14 @@
 #include <receive.h>
 #include <wait.h>
 
+/* Use the standard NDEBUG / DPRINT pattern for the LANTransmit/NdisSend
+ * trace prints below.  They fire on every IP packet and dominate the
+ * kernel debug log; useful for NDIS bring-up but pure noise otherwise.
+ * Comment out the "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 UINT TransferDataCalled = 0;
 UINT TransferDataCompleteCalled = 0;
 
@@ -317,7 +325,7 @@ VOID LanReceiveWorker( PVOID Context ) {
     LONG wc = InterlockedIncrement(&WorkerCount);
 
     if (wc <= 5)
-        DbgPrint("TCPIP-RX: LanReceiveWorker #%ld\n", wc);
+        DPRINT("TCPIP-RX: LanReceiveWorker #%ld\n", wc);
 
     Packet = WorkItem->Packet;
     Adapter = WorkItem->Adapter;
@@ -364,7 +372,7 @@ VOID LanReceiveWorker( PVOID Context ) {
     }
 
     if (wc <= 5)
-        DbgPrint("TCPIP-RX: LanReceiveWorker #%ld PacketType=0x%04x TotalSize=%lu\n",
+        DPRINT("TCPIP-RX: LanReceiveWorker #%ld PacketType=0x%04x TotalSize=%lu\n",
                  wc, PacketType, IPPacket.TotalSize);
 
     /* Update interface stats */
@@ -374,15 +382,15 @@ VOID LanReceiveWorker( PVOID Context ) {
     switch (PacketType) {
         case ETYPE_IPv4:
         case ETYPE_IPv6:
-            if (wc <= 5) DbgPrint("TCPIP-RX: → IPReceive\n");
+            if (wc <= 5) DPRINT("TCPIP-RX: → IPReceive\n");
             IPReceive(Adapter->Context, &IPPacket);
             break;
         case ETYPE_ARP:
-            if (wc <= 5) DbgPrint("TCPIP-RX: → ARPReceive\n");
+            if (wc <= 5) DPRINT("TCPIP-RX: → ARPReceive\n");
             ARPReceive(Adapter->Context, &IPPacket);
             break;
         default:
-            if (wc <= 5) DbgPrint("TCPIP-RX: dropped, unknown ether type\n");
+            if (wc <= 5) DPRINT("TCPIP-RX: dropped, unknown ether type\n");
             IPPacket.Free(&IPPacket);
             break;
     }
@@ -991,11 +999,11 @@ VOID LANTransmit(
     TI_DbgPrint(DEBUG_DATALINK,
 		("Called( NdisPacket %x, Offset %d, Adapter %x )\n",
 		 NdisPacket, Offset, Adapter));
-    DbgPrint("TCPIP-LAN: LANTransmit Adapter=%p State=%d Type=%d LinkAddr=%p\n",
+    DPRINT("TCPIP-LAN: LANTransmit Adapter=%p State=%d Type=%d LinkAddr=%p\n",
              Adapter, Adapter->State, Type, LinkAddress);
 
     if (Adapter->State != LAN_STATE_STARTED) {
-        DbgPrint("TCPIP-LAN: ABORT - Adapter not started (state=%d)\n", Adapter->State);
+        DPRINT("TCPIP-LAN: ABORT - Adapter not started (state=%d)\n", Adapter->State);
         (*PC(NdisPacket)->DLComplete)(PC(NdisPacket)->Context, NdisPacket, NDIS_STATUS_NOT_ACCEPTED);
         return;
     }
@@ -1082,13 +1090,13 @@ VOID LANTransmit(
 
 	TcpipAcquireSpinLock( &Adapter->Lock, &OldIrql );
 	TI_DbgPrint(MID_TRACE, ("NdisSend\n"));
-	DbgPrint("TCPIP-LAN: NdisSend XmitPacket=%p Size=%u Handle=%p\n",
+	DPRINT("TCPIP-LAN: NdisSend XmitPacket=%p Size=%u Handle=%p\n",
 	         XmitPacket, Size, Adapter->NdisHandle);
 	NdisSend(&NdisStatus, Adapter->NdisHandle, XmitPacket);
 	TI_DbgPrint(MID_TRACE, ("NdisSend %s\n",
 				NdisStatus == NDIS_STATUS_PENDING ?
 				"Pending" : "Complete"));
-	DbgPrint("TCPIP-LAN: NdisSend returned 0x%08x\n", NdisStatus);
+	DPRINT("TCPIP-LAN: NdisSend returned 0x%08x\n", NdisStatus);
 	TcpipReleaseSpinLock( &Adapter->Lock, OldIrql );
 
 	/* I had a talk with vizzini: these really ought to be here.
