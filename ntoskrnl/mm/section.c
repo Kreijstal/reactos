@@ -1968,7 +1968,15 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
              * it here at the choke point rather than via dup-rmap KeBugCheck
              * inside MmInsertRmap.
              */
-            ASSERT(!MmRmapEntryExists(Page, Process, Address));
+#if DBG
+            if (MmRmapEntryExists(Page, Process, Address))
+            {
+                MmValidateRmapChain(Page, Process, Address);
+                MmDumpRmapTrace(Page, Process, Address);
+                MmDumpPteTrace(Address);
+                ASSERT(FALSE);
+            }
+#endif
             MmInsertRmap(Page, Process, Address);
         }
 
@@ -5303,6 +5311,141 @@ MmMakeSegmentDirty(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Flush a run of up to MM_FLUSH_BATCH_PAGES consecutive dirty pages from a
+ * data section in a single multi-page write IRP. Returns the number of pages
+ * actually included in the run via *PagesFlushed and the IRP status via
+ * *RunStatus. Walks forward from *Offset, advancing it past the run.
+ *
+ * The segment lock must be held on entry; this routine drops it across the
+ * IRP and reacquires it before returning, like MmCheckDirtySegment does for
+ * a single page.
+ */
+#define MM_FLUSH_BATCH_PAGES 16
+
+_Requires_exclusive_lock_held_(Segment->Lock)
+static
+VOID
+MiFlushDirtySegmentRun(
+    PMM_SECTION_SEGMENT Segment,
+    PLARGE_INTEGER Offset,
+    PLARGE_INTEGER FlushEnd,
+    PULONG PagesFlushed,
+    PNTSTATUS RunStatus)
+{
+    LARGE_INTEGER RunStart = *Offset;
+    LARGE_INTEGER Cursor = *Offset;
+    PFN_NUMBER Pages[MM_FLUSH_BATCH_PAGES];
+    ULONG Count = 0;
+    ULONG i;
+    KIRQL PfnIrql;
+    NTSTATUS Status = STATUS_SUCCESS;
+    UCHAR MdlBuf[sizeof(MDL) + MM_FLUSH_BATCH_PAGES * sizeof(PFN_NUMBER)];
+    PMDL Mdl = (PMDL)MdlBuf;
+    KEVENT Event;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER FileOffset;
+
+    *PagesFlushed = 0;
+    *RunStatus = STATUS_SUCCESS;
+
+    ASSERT(Segment->Locked);
+
+    /* Build the run: pin PFNs, mark each page write-in-progress, clear dirty. */
+    while (Cursor.QuadPart < FlushEnd->QuadPart && Count < MM_FLUSH_BATCH_PAGES)
+    {
+        ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &Cursor);
+        PFN_NUMBER Page;
+        PMMPFN Pfn1;
+
+        if (Entry == 0 || !IS_DIRTY_SSE(Entry))
+            break;
+
+        Page = PFN_FROM_SSE(Entry);
+
+        /* Pin the page so it stays ActiveAndValid across the lock-drop. */
+        PfnIrql = MiAcquirePfnLock();
+        Pfn1 = MiGetPfnEntry(Page);
+        if (Pfn1->u3.e2.ReferenceCount == 0)
+        {
+            /* Already freed; treat as clean and stop the run here. */
+            MiReleasePfnLock(PfnIrql);
+            Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry));
+            MmSetPageEntrySectionSegment(Segment, &Cursor, Entry);
+            break;
+        }
+        MmReferencePage(Page);
+        MiReleasePfnLock(PfnIrql);
+
+        /* Mark write-in-progress, bump share count, clear dirty. */
+        Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) + 1);
+        Entry = WRITE_SSE(Entry);
+        MmSetPageEntrySectionSegment(Segment, &Cursor, Entry);
+
+        Pages[Count++] = Page;
+        Cursor.QuadPart += PAGE_SIZE;
+    }
+
+    if (Count == 0)
+    {
+        *Offset = Cursor;
+        return;
+    }
+
+    /* Drop the segment lock for the I/O. */
+    MmUnlockSectionSegment(Segment);
+
+    /* Build a single multi-page MDL covering the entire run. */
+    RtlZeroMemory(MdlBuf, sizeof(MdlBuf));
+    MmInitializeMdl(Mdl, NULL, Count * PAGE_SIZE);
+    MmBuildMdlFromPages(Mdl, Pages);
+    Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+
+    FileOffset.QuadPart = Segment->Image.FileOffset + RunStart.QuadPart;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Status = IoSynchronousPageWrite(Segment->FileObject, Mdl, &FileOffset, &Event, &IoStatus);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+        MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+
+    MmLockSectionSegment(Segment);
+
+    /* Resolve per-page state: drop share count, propagate dirty-again or success. */
+    for (i = 0; i < Count; i++)
+    {
+        LARGE_INTEGER PageOff;
+        ULONG_PTR Entry;
+        BOOLEAN DirtyAgain;
+
+        PageOff.QuadPart = RunStart.QuadPart + (LONGLONG)i * PAGE_SIZE;
+        Entry = MmGetPageEntrySectionSegment(Segment, &PageOff);
+        ASSERT(PFN_FROM_SSE(Entry) == Pages[i]);
+
+        if (!NT_SUCCESS(Status))
+            DirtyAgain = TRUE;
+        else
+            DirtyAgain = IS_DIRTY_SSE(Entry);
+
+        Entry = MAKE_SSE(Pages[i] << PAGE_SHIFT, SHARE_COUNT_FROM_SSE(Entry) - 1);
+        if (DirtyAgain)
+            Entry = DIRTY_SSE(Entry);
+        MmSetPageEntrySectionSegment(Segment, &PageOff, Entry);
+
+        PfnIrql = MiAcquirePfnLock();
+        MmDereferencePage(Pages[i]);
+        MiReleasePfnLock(PfnIrql);
+    }
+
+    *PagesFlushed = NT_SUCCESS(Status) ? Count : 0;
+    *RunStatus = Status;
+    *Offset = Cursor;
+}
+
 NTSTATUS
 NTAPI
 MmFlushSegment(
@@ -5361,22 +5504,36 @@ MmFlushSegment(
     {
         ULONG_PTR Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
 
-        if (IS_DIRTY_SSE(Entry))
+        /* Skip clean / non-existent pages without I/O. */
+        if (Entry == 0 || !IS_DIRTY_SSE(Entry))
         {
-            IO_STATUS_BLOCK DirtyIosb;
+            FlushStart.QuadPart += PAGE_SIZE;
+            continue;
+        }
 
-            MmCheckDirtySegment(Segment, &FlushStart, FALSE, FALSE, &DirtyIosb);
-            if (!NT_SUCCESS(DirtyIosb.Status))
+        /* Found the start of a dirty run. Flush it as one multi-page IRP. */
+        {
+            ULONG PagesFlushed = 0;
+            NTSTATUS RunStatus = STATUS_SUCCESS;
+
+            MiFlushDirtySegmentRun(Segment, &FlushStart, &FlushEnd,
+                                   &PagesFlushed, &RunStatus);
+
+            if (!NT_SUCCESS(RunStatus))
             {
-                Status = DirtyIosb.Status;
+                Status = RunStatus;
                 break;
             }
 
             if (Iosb)
-                Iosb->Information += PAGE_SIZE;
-        }
+                Iosb->Information += (ULONG_PTR)PagesFlushed * PAGE_SIZE;
 
-        FlushStart.QuadPart += PAGE_SIZE;
+            /* If the run helper made no progress (e.g. first page had refcount 0
+             * and was treated as clean without advancing past it), force a step
+             * to avoid an infinite loop. */
+            if (PagesFlushed == 0)
+                FlushStart.QuadPart += PAGE_SIZE;
+        }
     }
 
     MmUnlockSectionSegment(Segment);
