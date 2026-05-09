@@ -5424,6 +5424,12 @@ MiFlushDirtySegmentRun(
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
         MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
 
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("MiFlushDirtySegmentRun: IoPageWrite status %lx at off %I64d count %u for %wZ\n",
+                Status, FileOffset.QuadPart, Count, &Segment->FileObject->FileName);
+    }
+
     MmLockSectionSegment(Segment);
 
     /* Resolve per-page state: drop share count, propagate dirty-again or success. */
