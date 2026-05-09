@@ -31,6 +31,12 @@
 
 #include "ndis6_internal.h"
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 /* MiniIndicateReceivePacket lives in the legacy library (miniport.c) but
  * has no public header. Forward-declare so we can call it from the RX
  * indication path. */
@@ -80,7 +86,7 @@ Ndis6RxBuildLegacyPacket(
      * to be non-NULL. */
     if (Ext->RxLegacyPacketPool == NULL)
     {
-        DbgPrint("NDIS6-RX: BuildLegacyPacket NULL packet pool\n");
+        DPRINT("NDIS6-RX: BuildLegacyPacket NULL packet pool\n");
         return NULL;
     }
 
@@ -90,13 +96,13 @@ Ndis6RxBuildLegacyPacket(
 
     bc = InterlockedIncrement(&BuildCount);
     if (bc <= 5)
-        DbgPrint("NDIS6-RX: BuildLegacyPacket #%ld FirstMdl=%p Offset=%lu Length=%lu\n",
+        DPRINT("NDIS6-RX: BuildLegacyPacket #%ld FirstMdl=%p Offset=%lu Length=%lu\n",
                  bc, CurrentMdl, DataOffset, DataLength);
 
     if (CurrentMdl == NULL || DataLength == 0)
     {
         if (bc <= 5)
-            DbgPrint("NDIS6-RX: BuildLegacyPacket NULL Mdl or zero len — drop\n");
+            DPRINT("NDIS6-RX: BuildLegacyPacket NULL Mdl or zero len — drop\n");
         return NULL;
     }
 
@@ -104,7 +110,7 @@ Ndis6RxBuildLegacyPacket(
     if (Status != NDIS_STATUS_SUCCESS || Packet == NULL)
     {
         if (bc <= 5)
-            DbgPrint("NDIS6-RX: NdisAllocatePacket failed 0x%08lx\n", (ULONG)Status);
+            DPRINT("NDIS6-RX: NdisAllocatePacket failed 0x%08lx\n", (ULONG)Status);
         return NULL;
     }
 
@@ -143,7 +149,7 @@ Ndis6RxBuildLegacyPacket(
         if (Status != NDIS_STATUS_SUCCESS || NdisBuffer == NULL)
         {
             if (bc <= 5)
-                DbgPrint("NDIS6-RX: NdisAllocateBuffer failed 0x%08lx\n", (ULONG)Status);
+                DPRINT("NDIS6-RX: NdisAllocateBuffer failed 0x%08lx\n", (ULONG)Status);
             /* Tear down the partial chain we built before this failure,
              * then free the packet itself. */
             {
@@ -180,7 +186,7 @@ Ndis6RxBuildLegacyPacket(
     if (FirstBuffer == NULL || Remaining > 0)
     {
         if (bc <= 5)
-            DbgPrint("NDIS6-RX: BuildLegacyPacket short chain (Remaining=%lu) — drop\n",
+            DPRINT("NDIS6-RX: BuildLegacyPacket short chain (Remaining=%lu) — drop\n",
                      Remaining);
         {
             PNDIS_BUFFER toFree = FirstBuffer;
@@ -196,7 +202,7 @@ Ndis6RxBuildLegacyPacket(
     }
 
     if (bc <= 5 && ChainedMdls > 1)
-        DbgPrint("NDIS6-RX: BuildLegacyPacket #%ld chained %lu MDLs total=%lu\n",
+        DPRINT("NDIS6-RX: BuildLegacyPacket #%ld chained %lu MDLs total=%lu\n",
                  bc, ChainedMdls, DataLength);
 
     NdisChainBufferAtFront(Packet, FirstBuffer);
@@ -334,7 +340,7 @@ NdisMIndicateReceiveNetBufferLists(
 
     MyCount = InterlockedIncrement(&RxCount);
     if (MyCount <= 30)
-        DbgPrint("NDIS6-RX: NdisMIndicateReceiveNetBufferLists #%ld NumNbls=%lu Flags=0x%lx\n",
+        DPRINT("NDIS6-RX: NdisMIndicateReceiveNetBufferLists #%ld NumNbls=%lu Flags=0x%lx\n",
                  MyCount, NumberOfNetBufferLists, ReceiveFlags);
 
     /* Phase 8: walk the chain bottom→top — bottommost filter sees the
@@ -392,7 +398,7 @@ Ndis6FilterTerminalReceive(
     if (TermCount <= 30)
     {
         BOOLEAN HasProto = !IsListEmpty(&Adapter->ProtocolListHead);
-        DbgPrint("NDIS6-RX: TerminalReceive #%ld HasProtocol=%d Flags=0x%lx\n",
+        DPRINT("NDIS6-RX: TerminalReceive #%ld HasProtocol=%d Flags=0x%lx\n",
                  TermCount, HasProto, ReceiveFlags);
     }
 
@@ -418,7 +424,7 @@ Ndis6FilterTerminalReceive(
         }
 
         if (TermCount <= 30)
-            DbgPrint("NDIS6-RX: TerminalReceive built PacketCount=%u\n", PacketCount);
+            DPRINT("NDIS6-RX: TerminalReceive built PacketCount=%u\n", PacketCount);
 
         if (PacketCount == 0)
         {
@@ -445,7 +451,7 @@ Ndis6FilterTerminalReceive(
             if (ic <= 5)
             {
                 BOOLEAN HasProto = !IsListEmpty(&Adapter->ProtocolListHead);
-                DbgPrint("NDIS6-RX: MiniIndicateReceivePacket #%ld PacketCount=%u HasProtocol=%d\n",
+                DPRINT("NDIS6-RX: MiniIndicateReceivePacket #%ld PacketCount=%u HasProtocol=%d\n",
                          ic, PacketCount, HasProto);
             }
         }
@@ -651,7 +657,7 @@ NdisMIndicateStatusEx(
 
     default:
         /* Unknown indication — drop with debug log. */
-        DbgPrint("NDIS6: unhandled status indication 0x%08lx\n",
+        DPRINT("NDIS6: unhandled status indication 0x%08lx\n",
                  StatusIndication->StatusCode);
         return;
     }
