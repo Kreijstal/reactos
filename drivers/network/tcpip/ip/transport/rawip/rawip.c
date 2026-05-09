@@ -10,6 +10,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 NTSTATUS AddGenericHeaderIPv4(
     PADDRESS_FILE AddrFile,
     PIP_ADDRESS RemoteAddress,
@@ -197,7 +203,7 @@ NTSTATUS RawIPSendDatagram(
     TI_DbgPrint(MID_TRACE,("Sending Datagram(%x %x %x %d)\n",
 			   AddrFile, ConnInfo, BufferData, DataSize));
     TI_DbgPrint(MID_TRACE,("RemoteAddressTa: %x\n", RemoteAddressTa));
-    DbgPrint("TCPIP-RAWIP: SendDatagram AddrFile=%p DataSize=%u Protocol=%d\n",
+    DPRINT("TCPIP-RAWIP: SendDatagram AddrFile=%p DataSize=%u Protocol=%d\n",
              AddrFile, DataSize, AddrFile->Protocol);
 
     switch( RemoteAddressTa->Address[0].AddressType ) {
@@ -210,12 +216,12 @@ NTSTATUS RawIPSendDatagram(
 
         default:
             UnlockObject(AddrFile);
-            DbgPrint("TCPIP-RAWIP: bad AddressType %d — STATUS_UNSUCCESSFUL\n",
+            DPRINT("TCPIP-RAWIP: bad AddressType %d — STATUS_UNSUCCESSFUL\n",
                      RemoteAddressTa->Address[0].AddressType);
             return STATUS_UNSUCCESSFUL;
     }
 
-    DbgPrint("TCPIP-RAWIP: RemoteAddr=0x%08x LocalAddr=0x%08x\n",
+    DPRINT("TCPIP-RAWIP: RemoteAddr=0x%08x LocalAddr=0x%08x\n",
              RemoteAddress.Address.IPv4Address,
              AddrFile->Address.Address.IPv4Address);
     TI_DbgPrint(MID_TRACE,("About to get route to destination\n"));
@@ -228,22 +234,22 @@ NTSTATUS RawIPSendDatagram(
          * interface we're sending over
          */
         NCE = RouteGetRouteToDestination( &RemoteAddress );
-        DbgPrint("TCPIP-RAWIP: RouteGetRouteToDestination(0x%08x) -> NCE=%p\n",
+        DPRINT("TCPIP-RAWIP: RouteGetRouteToDestination(0x%08x) -> NCE=%p\n",
                  RemoteAddress.Address.IPv4Address, NCE);
         if(!NCE) {
             UnlockObject(AddrFile);
-            DbgPrint("TCPIP-RAWIP: NETWORK_UNREACHABLE - no route\n");
+            DPRINT("TCPIP-RAWIP: NETWORK_UNREACHABLE - no route\n");
             return STATUS_NETWORK_UNREACHABLE;
         }
 
         LocalAddress = NCE->Interface->Unicast;
-        DbgPrint("TCPIP-RAWIP: Using Interface unicast as LocalAddr=0x%08x state=0x%x\n",
+        DPRINT("TCPIP-RAWIP: Using Interface unicast as LocalAddr=0x%08x state=0x%x\n",
                  LocalAddress.Address.IPv4Address, NCE->State);
     }
     else
     {
         NCE = NBLocateNeighbor( &LocalAddress, NULL );
-        DbgPrint("TCPIP-RAWIP: NBLocateNeighbor(local=0x%08x) -> NCE=%p\n",
+        DPRINT("TCPIP-RAWIP: NBLocateNeighbor(local=0x%08x) -> NCE=%p\n",
                  LocalAddress.Address.IPv4Address, NCE);
         if(!NCE) {
             UnlockObject(AddrFile);
@@ -259,7 +265,7 @@ NTSTATUS RawIPSendDatagram(
                                AddrFile->Port,
                                BufferData,
                                DataSize );
-    DbgPrint("TCPIP-RAWIP: BuildRawIpPacket -> 0x%08x\n", Status);
+    DPRINT("TCPIP-RAWIP: BuildRawIpPacket -> 0x%08x\n", Status);
 
     UnlockObject(AddrFile);
 
@@ -269,7 +275,7 @@ NTSTATUS RawIPSendDatagram(
     TI_DbgPrint(MID_TRACE,("About to send datagram\n"));
 
     Status = IPSendDatagram(&Packet, NCE);
-    DbgPrint("TCPIP-RAWIP: IPSendDatagram -> 0x%08x\n", Status);
+    DPRINT("TCPIP-RAWIP: IPSendDatagram -> 0x%08x\n", Status);
     if (!NT_SUCCESS(Status))
         return Status;
 
