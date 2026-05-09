@@ -62,6 +62,32 @@ FatLogOf(
     IN ULONG Value
     );
 
+#ifdef __REACTOS__
+VOID
+FatReconcileMirrorFatBitmap(
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb,
+    IN ULONG StartIndex,
+    IN ULONG EndIndex,
+    IN PRTL_BITMAP_DBG BitMap,
+    IN ULONG BitMapStartIndex,
+    IN OUT PULONG FreeClusterCount,
+    IN OUT PULONG WindowFreeClusters
+    );
+
+VOID
+FatReconcileDirentBitmap(
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb,
+    IN ULONG StartIndex,
+    IN ULONG EndIndex,
+    IN PRTL_BITMAP_DBG BitMap,
+    IN ULONG BitMapStartIndex,
+    IN OUT PULONG FreeClusterCount,
+    IN OUT PULONG WindowFreeClusters
+    );
+#endif
+
 //
 //  Note that the KdPrint below will ONLY fire when the assert does. Leave it
 //  alone.
@@ -257,6 +283,10 @@ FatLogOf(
 #pragma alloc_text(PAGE, FatAllocateDiskSpace)
 #pragma alloc_text(PAGE, FatDeallocateDiskSpace)
 #pragma alloc_text(PAGE, FatExamineFatEntries)
+#ifdef __REACTOS__
+#pragma alloc_text(PAGE, FatReconcileMirrorFatBitmap)
+#pragma alloc_text(PAGE, FatReconcileDirentBitmap)
+#endif
 #pragma alloc_text(PAGE, FatInterpretClusterType)
 #pragma alloc_text(PAGE, FatLogOf)
 #pragma alloc_text(PAGE, FatLookupFatEntry)
@@ -429,6 +459,13 @@ Arguments:
     {
         CC_FILE_SIZES FileSizes;
 
+        //
+        //  Keep the VirtualVolumeFile cache map sized to FAT0 only.  The
+        //  FAT-mirror loop in FatWriteVolumeFile fans paging IRPs from FAT0
+        //  StartingVbos out to all FAT copies; widening this size pulls FAT1
+        //  pages into the cache and breaks that fanout.  FAT1 is read via
+        //  non-cached direct IO in FatReconcileMirrorFatBitmap instead.
+        //
         FileSizes.AllocationSize.QuadPart =
         FileSizes.FileSize.QuadPart = (FatReservedBytes( &Vcb->Bpb ) +
                                        FatBytesPerFat( &Vcb->Bpb ));
@@ -1581,6 +1618,17 @@ Return Value:
 
                 Dirent->FirstClusterOfFileHi = 0;
             }
+
+            //
+            //  Zero FileSize alongside FirstClusterOfFile so the on-disk
+            //  invariant chain_length==0 <=> dirent.FileSize==0 holds across
+            //  any flush window before the caller commits its own FileSize
+            //  update.  Otherwise a lazy-write between the deallocate below
+            //  and the caller's later dirent fix-up persists a dirent with
+            //  FirstClusterOfFile=0 and a stale large FileSize.
+            //
+
+            Dirent->FileSize = 0;
 
             FcbOrDcb->FirstClusterOfFile = 0;
 
@@ -5241,6 +5289,69 @@ Return Value:
         //  window.  This is the case of FAT12/16 initialization.
         //
 
+#ifdef __REACTOS__
+        //
+        //  Reconcile the just-built FAT0 bitmap against FAT1.  If a prior
+        //  crash left FAT0 marking a cluster free while FAT1 still chains
+        //  it, the conservative union prevents the allocator from handing
+        //  that cluster to a new file and aliasing it onto an existing
+        //  chain.  Skip when the volume has only one FAT, when there is no
+        //  bitmap to reconcile, or when we are merely populating a caller
+        //  bitmap for GetVolumeBitmap (BitMapBuffer != NULL means BitMap
+        //  points at a transient buffer the caller will not consult for
+        //  allocation; reconciling there is wasted work).
+        //
+        //  Run BEFORE the SwitchToWindow reinit of Vcb->FreeClusterBitMap so
+        //  that reinit picks up the reconciled buffer state and the dbg
+        //  cache it computes is consistent.
+        //
+
+        if (Vcb->Bpb.Fats >= 2 &&
+            BitMap != NULL &&
+            BitMapBuffer == NULL) {
+
+            //
+            //  Release the FAT0 BCB we still hold so the cache manager
+            //  can give us a fresh pin on FAT1 pages without contention.
+            //
+
+            FatUnpinBcb( IrpContext, Bcb );
+            Bcb = NULL;
+
+            FatReconcileMirrorFatBitmap(
+                IrpContext,
+                Vcb,
+                StartIndex,
+                EndIndex,
+                BitMap,
+                StartIndex,
+                FreeClusterCount,
+                CurrentWindow ? &CurrentWindow->ClustersFree : NULL );
+        }
+
+        //
+        //  Third defensive layer: union every cluster reachable from any
+        //  on-disk dirent's first_cluster chain into the bitmap.  Defends
+        //  against pre-existing dirent-aliased clusters where BOTH FAT0 and
+        //  FAT1 mark the cluster free yet a still-live dirent points at it
+        //  (e.g. when an external tool clears FAT entries without clearing
+        //  the dirent).  Skip when there is no real bitmap to update or when
+        //  populating a transient caller buffer for GetVolumeBitmap.
+        //
+        if (BitMap != NULL && BitMapBuffer == NULL) {
+
+            FatReconcileDirentBitmap(
+                IrpContext,
+                Vcb,
+                StartIndex,
+                EndIndex,
+                BitMap,
+                StartIndex,
+                FreeClusterCount,
+                CurrentWindow ? &CurrentWindow->ClustersFree : NULL );
+        }
+#endif
+
         if (SwitchToWindow) {
 
             if (Vcb->FreeClusterBitMap.Buffer) {
@@ -5290,4 +5401,872 @@ Return Value:
         }
     } _SEH2_END;
 }
+
+
+#ifdef __REACTOS__
+//
+//  Inside the reconciliation routine we operate on the underlying NT
+//  RTL_BITMAP directly.  The <dbgbitmap.h> wrappers revalidate cached
+//  counts/hashes on every call, which is unsafe when we mutate many bits
+//  in a loop with CC reads interleaving — the cached BitmapHash only
+//  covers the first 512 ULONGs of the buffer, and the incremental
+//  RtlSetBitsDbg can trip the consistency check across hundreds of
+//  iterations.  Bypass the wrappers here and resync once at the end.
+//
+#undef RtlSetBits
+#undef RtlCheckBit
+#undef RtlNumberOfSetBits
+#undef PRTL_BITMAP
+#undef RTL_BITMAP
+#undef _RTL_BITMAP
+
+//
+//  Read ByteCount bytes starting at Lbo (partition-relative, sector-aligned)
+//  from the underlying storage into Buffer, bypassing CC.  Returns the IRP
+//  status; raises nothing.  Used to consult FAT1 without dragging it into the
+//  volume-file cache (which would derail the FAT-mirror IRP fanout in
+//  FatWriteVolumeFile).
+//
+static
+NTSTATUS
+FatReadVolumeNonCached(
+    IN PVCB Vcb,
+    IN LONGLONG Lbo,
+    IN ULONG ByteCount,
+    OUT PVOID Buffer
+    )
+{
+    KEVENT Event;
+    PIRP Irp;
+    IO_STATUS_BLOCK Iosb;
+    LARGE_INTEGER ByteOffset;
+    NTSTATUS Status;
+    PIO_STACK_LOCATION IrpSp;
+
+    PAGED_CODE();
+
+    KeInitializeEvent( &Event, NotificationEvent, FALSE );
+    ByteOffset.QuadPart = Lbo;
+
+    Irp = IoBuildSynchronousFsdRequest( IRP_MJ_READ,
+                                        Vcb->TargetDeviceObject,
+                                        Buffer,
+                                        ByteCount,
+                                        &ByteOffset,
+                                        &Event,
+                                        &Iosb );
+    if (Irp == NULL) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    IrpSp = IoGetNextIrpStackLocation( Irp );
+    SetFlag( IrpSp->Flags, SL_OVERRIDE_VERIFY_VOLUME );
+
+    Status = IoCallDriver( Vcb->TargetDeviceObject, Irp );
+
+    if (Status == STATUS_PENDING) {
+        KeWaitForSingleObject( &Event, Executive, KernelMode, FALSE, NULL );
+        Status = Iosb.Status;
+    }
+
+    return Status;
+}
+
+
+VOID
+FatReconcileMirrorFatBitmap(
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb,
+    IN ULONG StartIndex,
+    IN ULONG EndIndex,
+    IN PRTL_BITMAP_DBG BitMap,
+    IN ULONG BitMapStartIndex,
+    IN OUT PULONG FreeClusterCount,
+    IN OUT PULONG WindowFreeClusters
+    )
+/*++
+
+Routine Description:
+
+    Walk FAT1 over the cluster range [StartIndex..EndIndex] and mark every
+    allocated entry as in-use in BitMap.  The caller has already populated
+    BitMap from FAT0; this pass enforces the conservative union:
+
+        free in bitmap  iff  free in FAT0  AND  free in FAT1
+
+    so the allocator can never hand out a cluster that either FAT chain
+    still references.  This is the producer-side fix for the cluster-aliasing
+    family of bugs caused by FatMultipleAsync's non-atomic FAT0/FAT1 commit
+    leaving the two copies diverged after a crash.
+
+    FAT1 is read via direct IRP_MJ_READ to Vcb->TargetDeviceObject (no CC),
+    so the volume-file cache map (sized to cover only FAT0) is never asked
+    to materialize FAT1 pages — that would break the FAT-mirror fanout in
+    FatWriteVolumeFile, which assumes the cached region is FAT0 only.
+
+Arguments:
+
+    Vcb               - the volume.
+    StartIndex,
+    EndIndex          - inclusive cluster range to walk against FAT1.
+    BitMap            - bitmap whose bit (FatIndex - BitMapStartIndex) is
+                        SET when the cluster is allocated.
+    BitMapStartIndex  - cluster number that maps to bit 0 of BitMap.
+    FreeClusterCount  - if non-NULL, decremented for each cluster newly
+                        marked allocated by this pass.
+    WindowFreeClusters- if non-NULL, decremented likewise.
+
+--*/
+{
+    ULONG Fat1ByteOffset;
+    ULONG FatIndexBitSize;
+    ULONG BytesPerEntry;
+    ULONG FatIndex;
+    ULONG SectorSize;
+    ULONG Fat1Bytes;
+    ULONG ChunkBytes;
+    ULONG ChunkStart;
+    ULONG ChunkLen;
+    ULONG WindowOffset;
+    PUCHAR Buffer = NULL;
+    PUCHAR EntryPtr;
+    FAT_ENTRY FatEntry;
+    PRTL_BITMAP RawBitMap;
+    ULONG NewlySet = 0;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(IrpContext);
+
+    PAGED_CODE();
+
+    if (Vcb->Bpb.Fats < 2) {
+        return;
+    }
+
+    //
+    //  Operate on the embedded NT RTL_BITMAP directly so per-call dbg
+    //  validation does not run during our incremental updates.  We resync
+    //  the dbg cache once after the loop.
+    //
+    RawBitMap = &BitMap->BitMap;
+
+    FatIndexBitSize = Vcb->AllocationSupport.FatIndexBitSize;
+    Fat1ByteOffset  = FatReservedBytes( &Vcb->Bpb ) + FatBytesPerFat( &Vcb->Bpb );
+    Fat1Bytes       = FatBytesPerFat( &Vcb->Bpb );
+    SectorSize      = Vcb->Bpb.BytesPerSector;
+
+    //
+    //  Pick a chunk size: whole FAT for FAT12 (it's tiny), 16 KiB sector-
+    //  aligned otherwise.  Reads must be sector-aligned for raw block IO.
+    //
+    if (FatIndexBitSize == 12) {
+        ChunkBytes = Fat1Bytes;
+    } else {
+        ChunkBytes = 0x4000;
+        if (ChunkBytes < SectorSize) ChunkBytes = SectorSize;
+    }
+
+    //  Round up to sector boundary in case Fat1Bytes < ChunkBytes.
+    if (ChunkBytes > Fat1Bytes) {
+        ChunkBytes = (Fat1Bytes + SectorSize - 1) & ~(SectorSize - 1);
+    }
+
+    Buffer = FsRtlAllocatePoolWithTag( NonPagedPoolNx, ChunkBytes, TAG_FAT_BITMAP );
+
+    _SEH2_TRY {
+
+        if (FatIndexBitSize == 12) {
+
+            //  FAT12 is small; read the whole table once.
+            Status = FatReadVolumeNonCached( Vcb, Fat1ByteOffset, ChunkBytes, Buffer );
+            if (!NT_SUCCESS( Status )) {
+                try_return( NOTHING );
+            }
+
+            for (FatIndex = StartIndex; FatIndex <= EndIndex; FatIndex++) {
+
+                FatLookup12BitEntry( (PUSHORT)Buffer, FatIndex, &FatEntry );
+
+                if (FatEntry == FAT_CLUSTER_AVAILABLE) {
+                    continue;
+                }
+
+                if (RtlCheckBit( RawBitMap, FatIndex - BitMapStartIndex ) == 0) {
+                    RtlSetBits( RawBitMap, FatIndex - BitMapStartIndex, 1 );
+                    NewlySet++;
+                }
+            }
+
+        } else {
+
+            BytesPerEntry = FatIndexBitSize >> 3;
+
+            //
+            //  Walk the requested cluster range one chunk at a time.  Each
+            //  chunk is the FAT1 byte window [ChunkStart .. ChunkStart+ChunkLen).
+            //
+            FatIndex = StartIndex;
+            while (FatIndex <= EndIndex) {
+
+                //  Sector-aligned start within FAT1.
+                ChunkStart = (FatIndex * BytesPerEntry) & ~(SectorSize - 1);
+                ChunkLen   = ChunkBytes;
+                if (ChunkStart + ChunkLen > Fat1Bytes) {
+                    ChunkLen = (Fat1Bytes - ChunkStart + SectorSize - 1) & ~(SectorSize - 1);
+                    if (ChunkLen == 0) {
+                        break;
+                    }
+                }
+
+                Status = FatReadVolumeNonCached( Vcb,
+                                                 (LONGLONG)Fat1ByteOffset + ChunkStart,
+                                                 ChunkLen,
+                                                 Buffer );
+                if (!NT_SUCCESS( Status )) {
+                    try_return( NOTHING );
+                }
+
+                //  Process every cluster whose FAT1 entry falls inside this chunk.
+                while (FatIndex <= EndIndex) {
+
+                    WindowOffset = FatIndex * BytesPerEntry;
+                    if (WindowOffset + BytesPerEntry > ChunkStart + ChunkLen) {
+                        break;
+                    }
+
+                    EntryPtr = Buffer + (WindowOffset - ChunkStart);
+
+                    if (FatIndexBitSize == 32) {
+                        FatEntry = (*(PULONG)EntryPtr) & FAT32_ENTRY_MASK;
+                    } else {
+                        FatEntry = *(PUSHORT)EntryPtr;
+                    }
+
+                    if (FatEntry != FAT_CLUSTER_AVAILABLE) {
+                        if (RtlCheckBit( RawBitMap, FatIndex - BitMapStartIndex ) == 0) {
+                            RtlSetBits( RawBitMap, FatIndex - BitMapStartIndex, 1 );
+                            NewlySet++;
+                        }
+                    }
+
+                    FatIndex++;
+                }
+            }
+        }
+
+        if (NewlySet != 0) {
+
+            //
+            //  Decrement the free-cluster counters by exactly how many bits
+            //  we just newly set, then resync the dbg bitmap's cached
+            //  NumberOfSetBits / BitmapHash from the now-consistent buffer.
+            //
+            if (FreeClusterCount) {
+                if (*FreeClusterCount >= NewlySet) {
+                    *FreeClusterCount -= NewlySet;
+                } else {
+                    *FreeClusterCount = 0;
+                }
+            }
+            if (WindowFreeClusters) {
+                if (*WindowFreeClusters >= NewlySet) {
+                    *WindowFreeClusters -= NewlySet;
+                } else {
+                    *WindowFreeClusters = 0;
+                }
+            }
+
+            BitMap->NumberOfSetBits = RtlNumberOfSetBits(RawBitMap);
+            BitMap->BitmapHash = RtlComputeBitmapHashDbg(BitMap);
+        }
+
+        try_exit: NOTHING;
+
+    } _SEH2_FINALLY {
+
+        if (Buffer != NULL) {
+            ExFreePoolWithTag( Buffer, TAG_FAT_BITMAP );
+        }
+
+    } _SEH2_END;
+}
+
+//
+//  Maximum directory-walk recursion depth.  16 nested directories is well
+//  beyond anything realistic; if a volume exceeds this we fall back to
+//  partial reconciliation rather than risk a kernel-stack blowout.
+//
+#define FAT_DIRENT_RECON_MAX_DEPTH 16
+
+//
+//  Per-frame state for the directory-walk explicit stack.
+//
+typedef struct _FAT_DIRENT_RECON_FRAME {
+
+    //
+    //  For FAT12/16 root: FixedRoot==TRUE, RootLbo + RootBytes describe a
+    //  contiguous on-disk extent.  Otherwise we follow a normal cluster
+    //  chain starting at FirstCluster.
+    //
+    BOOLEAN FixedRoot;
+    LONGLONG RootLbo;
+    ULONG RootBytes;
+
+    ULONG FirstCluster;
+    ULONG ParentFirstCluster;
+
+} FAT_DIRENT_RECON_FRAME, *PFAT_DIRENT_RECON_FRAME;
+
+//
+//  Look up FatIndex in FAT0 via a small lazy-loaded sector window cache, so
+//  we don't issue a direct IO per cluster.  The cache covers a single
+//  contiguous sector-aligned chunk; we slide it whenever the requested
+//  entry falls outside.  Returns the masked entry value (FAT12/16/32);
+//  FAT_CLUSTER_LAST on read failure so the caller stops walking.
+//
+static
+FAT_ENTRY
+FatReconLookupFat0Entry(
+    IN PVCB Vcb,
+    IN ULONG FatIndex,
+    IN ULONG FatIndexBitSize,
+    IN ULONG Fat0ByteOffset,
+    IN ULONG Fat0Bytes,
+    IN PUCHAR Fat0Buffer,
+    IN ULONG Fat0BufferSize,
+    IN OUT PULONG Fat0CachedStart,
+    IN OUT PULONG Fat0CachedLen
+    )
+{
+    NTSTATUS Status;
+    ULONG SectorSize;
+    ULONG ByteOffsetInFat;
+    ULONG NeededBytes;
+    ULONG ChunkStart;
+    ULONG ChunkLen;
+    FAT_ENTRY Entry;
+
+    SectorSize = Vcb->Bpb.BytesPerSector;
+
+    if (FatIndexBitSize == 12) {
+
+        //
+        //  FAT12 has 1.5 bytes per entry; the helper macro consumes a USHORT
+        //  at byte (Index * 3 / 2).  Make sure the cached window covers that
+        //  pair plus a safety byte.
+        //
+        ByteOffsetInFat = (FatIndex * 3) / 2;
+        NeededBytes = 2;
+
+    } else if (FatIndexBitSize == 16) {
+
+        ByteOffsetInFat = FatIndex * sizeof(USHORT);
+        NeededBytes = sizeof(USHORT);
+
+    } else {
+
+        ByteOffsetInFat = FatIndex * sizeof(ULONG);
+        NeededBytes = sizeof(ULONG);
+    }
+
+    if (ByteOffsetInFat + NeededBytes > Fat0Bytes) {
+        return FAT_CLUSTER_LAST;
+    }
+
+    if (*Fat0CachedLen == 0 ||
+        ByteOffsetInFat < *Fat0CachedStart ||
+        ByteOffsetInFat + NeededBytes > *Fat0CachedStart + *Fat0CachedLen) {
+
+        ChunkStart = ByteOffsetInFat & ~(SectorSize - 1);
+        ChunkLen = Fat0BufferSize;
+        if (ChunkStart + ChunkLen > Fat0Bytes) {
+            ChunkLen = (Fat0Bytes - ChunkStart + SectorSize - 1) & ~(SectorSize - 1);
+            if (ChunkLen > Fat0BufferSize) ChunkLen = Fat0BufferSize;
+        }
+
+        Status = FatReadVolumeNonCached( Vcb,
+                                         (LONGLONG)Fat0ByteOffset + ChunkStart,
+                                         ChunkLen,
+                                         Fat0Buffer );
+        if (!NT_SUCCESS( Status )) {
+            *Fat0CachedLen = 0;
+            return FAT_CLUSTER_LAST;
+        }
+
+        *Fat0CachedStart = ChunkStart;
+        *Fat0CachedLen = ChunkLen;
+    }
+
+    if (FatIndexBitSize == 12) {
+
+        //
+        //  Decode FAT12 entry directly from the cached window.  Two entries
+        //  share three bytes; even-index entries take the low 12 bits of
+        //  the 16-bit word, odd-index entries take the high 12 bits.
+        //
+        PUCHAR p = Fat0Buffer + (ByteOffsetInFat - *Fat0CachedStart);
+        USHORT raw = (USHORT)p[0] | ((USHORT)p[1] << 8);
+        if (FatIndex & 1) {
+            Entry = raw >> 4;
+        } else {
+            Entry = raw & 0x0FFF;
+        }
+
+    } else if (FatIndexBitSize == 16) {
+
+        Entry = *(PUSHORT)(Fat0Buffer + (ByteOffsetInFat - *Fat0CachedStart));
+
+    } else {
+
+        Entry = (*(PULONG)(Fat0Buffer + (ByteOffsetInFat - *Fat0CachedStart))) & FAT32_ENTRY_MASK;
+    }
+
+    return Entry;
+}
+
+//
+//  Mark every cluster in the chain rooted at FirstCluster as in-use in
+//  BitMap, walking FAT0.  Returns the count of bits newly set, and
+//  optionally the count of clusters in the chain via TotalClusters (used
+//  to extend the per-directory walk extent for FAT32 root etc).
+//
+static
+ULONG
+FatReconMarkChain(
+    IN PVCB Vcb,
+    IN ULONG FirstCluster,
+    IN ULONG StartIndex,
+    IN ULONG EndIndex,
+    IN PRTL_BITMAP RawBitMap,
+    IN ULONG BitMapStartIndex,
+    IN ULONG FatIndexBitSize,
+    IN ULONG Fat0ByteOffset,
+    IN ULONG Fat0Bytes,
+    IN PUCHAR Fat0Buffer,
+    IN ULONG Fat0BufferSize,
+    IN OUT PULONG Fat0CachedStart,
+    IN OUT PULONG Fat0CachedLen,
+    IN ULONG MaxClusters,
+    OUT PULONG TotalClusters OPTIONAL
+    )
+{
+    ULONG NewlySet = 0;
+    ULONG Cluster;
+    ULONG Walked = 0;
+    FAT_ENTRY Entry;
+    FAT_ENTRY EofMin;
+    FAT_ENTRY ResvMin;
+
+    if (TotalClusters) *TotalClusters = 0;
+
+    if (FirstCluster < 2) {
+        return 0;
+    }
+
+    if (FatIndexBitSize == 12) {
+        EofMin = 0xFF8;
+        ResvMin = 0xFF0;
+    } else if (FatIndexBitSize == 16) {
+        EofMin = 0xFFF8;
+        ResvMin = 0xFFF0;
+    } else {
+        EofMin = 0x0FFFFFF8;
+        ResvMin = 0x0FFFFFF0;
+    }
+
+    Cluster = FirstCluster;
+
+    while (Walked < MaxClusters) {
+
+        if (Cluster < 2) break;
+
+        if (Cluster >= StartIndex && Cluster <= EndIndex) {
+            ULONG Bit = Cluster - BitMapStartIndex;
+            if (Bit < RawBitMap->SizeOfBitMap) {
+                if (RtlCheckBit( RawBitMap, Bit ) == 0) {
+                    RtlSetBits( RawBitMap, Bit, 1 );
+                    NewlySet++;
+                }
+            }
+        }
+
+        Walked++;
+
+        Entry = FatReconLookupFat0Entry( Vcb, Cluster, FatIndexBitSize,
+                                         Fat0ByteOffset, Fat0Bytes,
+                                         Fat0Buffer, Fat0BufferSize,
+                                         Fat0CachedStart, Fat0CachedLen );
+
+        //
+        //  Stop on EOF, bad/reserved, or available (chain corrupt — refuse
+        //  to walk into other files' clusters).
+        //
+        if (Entry == FAT_CLUSTER_AVAILABLE ||
+            Entry >= ResvMin) {
+            break;
+        }
+        (void)EofMin;
+
+        Cluster = Entry;
+    }
+
+    if (TotalClusters) *TotalClusters = Walked;
+    return NewlySet;
+}
+
+//
+//  Walk the directory whose data extent is described by Frame (either a
+//  fixed root or a cluster chain), parsing 32-byte dirents.  For each live
+//  non-LFN dirent that names a file or subdirectory, mark its FAT chain
+//  into the bitmap and (for subdirectories that are not "." / "..") push
+//  a new frame onto the explicit stack.
+//
+static
+ULONG
+FatReconWalkDirectory(
+    IN PVCB Vcb,
+    IN PFAT_DIRENT_RECON_FRAME Frame,
+    IN ULONG StartIndex,
+    IN ULONG EndIndex,
+    IN PRTL_BITMAP RawBitMap,
+    IN ULONG BitMapStartIndex,
+    IN ULONG FatIndexBitSize,
+    IN ULONG Fat0ByteOffset,
+    IN ULONG Fat0Bytes,
+    IN PUCHAR Fat0Buffer,
+    IN ULONG Fat0BufferSize,
+    IN OUT PULONG Fat0CachedStart,
+    IN OUT PULONG Fat0CachedLen,
+    IN PUCHAR DirBuffer,
+    IN ULONG DirBufferSize,
+    IN OUT PFAT_DIRENT_RECON_FRAME StackBase,
+    IN ULONG StackCapacity,
+    IN OUT PULONG StackDepth
+    )
+{
+    NTSTATUS Status;
+    ULONG NewlySet = 0;
+    ULONG ClusterSize;
+    ULONG SectorSize;
+    BOOLEAN EndSeen = FALSE;
+    ULONG Cluster;
+    ULONG ClustersWalked = 0;
+    LONGLONG Lbo;
+    ULONG BytesThisRead;
+    ULONG i;
+
+    SectorSize = Vcb->Bpb.BytesPerSector;
+    ClusterSize = FatBytesPerCluster( &Vcb->Bpb );
+
+    if (Frame->FixedRoot) {
+
+        //
+        //  FAT12/16 root directory: contiguous on-disk extent.  Read in
+        //  DirBufferSize chunks; only ever reads sectors so it is safe via
+        //  raw block IO.
+        //
+        ULONG Remaining = Frame->RootBytes;
+        Lbo = Frame->RootLbo;
+
+        while (Remaining > 0 && !EndSeen) {
+
+            BytesThisRead = (Remaining < DirBufferSize) ? Remaining : DirBufferSize;
+            BytesThisRead &= ~(SectorSize - 1);
+            if (BytesThisRead == 0) break;
+
+            Status = FatReadVolumeNonCached( Vcb, Lbo, BytesThisRead, DirBuffer );
+            if (!NT_SUCCESS( Status )) return NewlySet;
+
+            for (i = 0; i + sizeof(DIRENT) <= BytesThisRead; i += sizeof(DIRENT)) {
+                PUCHAR D = DirBuffer + i;
+                UCHAR Attr;
+                USHORT Hi, Lo;
+                ULONG First;
+
+                if (D[0] == FAT_DIRENT_NEVER_USED) { EndSeen = TRUE; break; }
+                if (D[0] == FAT_DIRENT_DELETED) continue;
+
+                Attr = D[11];
+                if ((Attr & 0x0F) == 0x0F) continue;            // LFN slot
+                if (Attr & FAT_DIRENT_ATTR_VOLUME_ID) continue; // volume label
+                (void)Attr;
+
+                Hi = (FatIndexBitSize == 32) ? *(PUSHORT)(D + 20) : 0;
+                Lo = *(PUSHORT)(D + 26);
+                First = ((ULONG)Hi << 16) | Lo;
+
+                if (First < 2) continue;
+
+                NewlySet += FatReconMarkChain( Vcb, First, StartIndex, EndIndex,
+                                               RawBitMap, BitMapStartIndex,
+                                               FatIndexBitSize,
+                                               Fat0ByteOffset, Fat0Bytes,
+                                               Fat0Buffer, Fat0BufferSize,
+                                               Fat0CachedStart, Fat0CachedLen,
+                                               /* MaxClusters */ 0x100000,
+                                               NULL );
+
+                if ((D[11] & 0x10) /* directory */ &&
+                    D[0] != '.' &&
+                    First != Frame->FirstCluster &&
+                    First != Frame->ParentFirstCluster &&
+                    *StackDepth < StackCapacity) {
+
+                    PFAT_DIRENT_RECON_FRAME New = &StackBase[(*StackDepth)++];
+                    New->FixedRoot = FALSE;
+                    New->RootLbo = 0;
+                    New->RootBytes = 0;
+                    New->FirstCluster = First;
+                    New->ParentFirstCluster = Frame->FirstCluster;
+                }
+            }
+
+            Lbo += BytesThisRead;
+            Remaining -= BytesThisRead;
+        }
+
+        return NewlySet;
+    }
+
+    //
+    //  Cluster-chain directory.  Walk FAT0 to enumerate clusters and read
+    //  each cluster's data via raw IO.  Bound the walk to a sane number of
+    //  clusters in case a chain loops or is corrupted.
+    //
+    Cluster = Frame->FirstCluster;
+    while (!EndSeen && Cluster >= 2 && ClustersWalked < 0x100000) {
+
+        FAT_ENTRY Next;
+        FAT_ENTRY ResvMin = (FatIndexBitSize == 32) ? 0x0FFFFFF0 :
+                            ((FatIndexBitSize == 16) ? 0xFFF0 : 0xFF0);
+
+        Lbo = (LONGLONG)FatRootDirectoryLbo( &Vcb->Bpb ) +
+              FatRootDirectorySize( &Vcb->Bpb ) +
+              ((LONGLONG)(Cluster - 2) * ClusterSize);
+
+        BytesThisRead = ClusterSize;
+        if (BytesThisRead > DirBufferSize) {
+            BytesThisRead = DirBufferSize & ~(SectorSize - 1);
+        }
+
+        Status = FatReadVolumeNonCached( Vcb, Lbo, BytesThisRead, DirBuffer );
+        if (!NT_SUCCESS( Status )) break;
+
+        for (i = 0; i + sizeof(DIRENT) <= BytesThisRead; i += sizeof(DIRENT)) {
+            PUCHAR D = DirBuffer + i;
+            UCHAR Attr;
+            USHORT Hi, Lo;
+            ULONG First;
+
+            if (D[0] == FAT_DIRENT_NEVER_USED) { EndSeen = TRUE; break; }
+            if (D[0] == FAT_DIRENT_DELETED) continue;
+
+            Attr = D[11];
+            if ((Attr & 0x0F) == 0x0F) continue;
+            if (Attr & FAT_DIRENT_ATTR_VOLUME_ID) continue;
+
+            Hi = (FatIndexBitSize == 32) ? *(PUSHORT)(D + 20) : 0;
+            Lo = *(PUSHORT)(D + 26);
+            First = ((ULONG)Hi << 16) | Lo;
+
+            if (First < 2) continue;
+
+            NewlySet += FatReconMarkChain( Vcb, First, StartIndex, EndIndex,
+                                           RawBitMap, BitMapStartIndex,
+                                           FatIndexBitSize,
+                                           Fat0ByteOffset, Fat0Bytes,
+                                           Fat0Buffer, Fat0BufferSize,
+                                           Fat0CachedStart, Fat0CachedLen,
+                                           0x100000,
+                                           NULL );
+
+            if ((Attr & 0x10) &&
+                D[0] != '.' &&
+                First != Frame->FirstCluster &&
+                First != Frame->ParentFirstCluster &&
+                *StackDepth < StackCapacity) {
+
+                PFAT_DIRENT_RECON_FRAME New = &StackBase[(*StackDepth)++];
+                New->FixedRoot = FALSE;
+                New->RootLbo = 0;
+                New->RootBytes = 0;
+                New->FirstCluster = First;
+                New->ParentFirstCluster = Frame->FirstCluster;
+            }
+        }
+
+        ClustersWalked++;
+
+        Next = FatReconLookupFat0Entry( Vcb, Cluster, FatIndexBitSize,
+                                        Fat0ByteOffset, Fat0Bytes,
+                                        Fat0Buffer, Fat0BufferSize,
+                                        Fat0CachedStart, Fat0CachedLen );
+        if (Next == FAT_CLUSTER_AVAILABLE || Next >= ResvMin) break;
+        Cluster = Next;
+    }
+
+    return NewlySet;
+}
+
+VOID
+FatReconcileDirentBitmap(
+    IN PIRP_CONTEXT IrpContext,
+    IN PVCB Vcb,
+    IN ULONG StartIndex,
+    IN ULONG EndIndex,
+    IN PRTL_BITMAP_DBG BitMap,
+    IN ULONG BitMapStartIndex,
+    IN OUT PULONG FreeClusterCount,
+    IN OUT PULONG WindowFreeClusters
+    )
+/*++
+
+Routine Description:
+
+    Walk every reachable on-disk dirent and union each dirent's first-cluster
+    chain into BitMap.  Defends against pre-existing dirent-aliased clusters
+    where BOTH FAT0 and FAT1 mark the cluster free yet a still-live dirent
+    points at it.  Reads dirent and FAT data via direct IRP_MJ_READ — the
+    volume-file cache is sized for FAT0 only, so pinning anything else
+    breaks the FAT-mirror IRP fanout.
+
+Arguments:
+
+    Vcb               - the volume.
+    StartIndex,
+    EndIndex          - inclusive cluster range to update.
+    BitMap            - dbg bitmap to OR into.
+    BitMapStartIndex  - cluster number that maps to bit 0 of BitMap.
+    FreeClusterCount  - decremented for each cluster newly marked.
+    WindowFreeClusters- decremented likewise.
+
+--*/
+{
+    PRTL_BITMAP RawBitMap;
+    PFAT_DIRENT_RECON_FRAME Stack = NULL;
+    PUCHAR DirBuffer = NULL;
+    PUCHAR Fat0Buffer = NULL;
+    ULONG StackDepth;
+    ULONG Fat0ByteOffset;
+    ULONG Fat0Bytes;
+    ULONG Fat0CachedStart;
+    ULONG Fat0CachedLen;
+    ULONG FatIndexBitSize;
+    ULONG SectorSize;
+    ULONG NewlySet = 0;
+    ULONG DirBufferSize;
+    ULONG Fat0BufferSize;
+
+    UNREFERENCED_PARAMETER(IrpContext);
+
+    PAGED_CODE();
+
+    if (BitMap == NULL) return;
+
+    RawBitMap = &BitMap->BitMap;
+
+    FatIndexBitSize = Vcb->AllocationSupport.FatIndexBitSize;
+    Fat0ByteOffset  = FatReservedBytes( &Vcb->Bpb );
+    Fat0Bytes       = FatBytesPerFat( &Vcb->Bpb );
+    SectorSize      = Vcb->Bpb.BytesPerSector;
+
+    DirBufferSize = 0x4000;     // 16 KiB scratch for dirent reads
+    if (DirBufferSize < FatBytesPerCluster( &Vcb->Bpb )) {
+        DirBufferSize = FatBytesPerCluster( &Vcb->Bpb );
+    }
+    Fat0BufferSize = 0x4000;    // 16 KiB FAT-window cache
+    if (Fat0BufferSize < SectorSize) Fat0BufferSize = SectorSize;
+
+    Stack = FsRtlAllocatePoolWithTag( NonPagedPoolNx,
+                                      sizeof(FAT_DIRENT_RECON_FRAME) *
+                                          FAT_DIRENT_RECON_MAX_DEPTH,
+                                      TAG_FAT_BITMAP );
+    DirBuffer = FsRtlAllocatePoolWithTag( NonPagedPoolNx, DirBufferSize, TAG_FAT_BITMAP );
+    Fat0Buffer = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Fat0BufferSize, TAG_FAT_BITMAP );
+
+    _SEH2_TRY {
+
+        if (Stack == NULL || DirBuffer == NULL || Fat0Buffer == NULL) {
+            try_return( NOTHING );
+        }
+
+        StackDepth = 0;
+        Fat0CachedStart = 0;
+        Fat0CachedLen = 0;
+
+        //
+        //  Seed the walk with the volume root.
+        //
+        Stack[0].FixedRoot = (FatIndexBitSize != 32) ? TRUE : FALSE;
+        Stack[0].RootLbo = (FatIndexBitSize != 32) ?
+                              FatRootDirectoryLbo( &Vcb->Bpb ) : 0;
+        Stack[0].RootBytes = (FatIndexBitSize != 32) ?
+                              FatRootDirectorySize( &Vcb->Bpb ) : 0;
+        Stack[0].FirstCluster = (FatIndexBitSize == 32) ?
+                                    Vcb->Bpb.RootDirFirstCluster : 0;
+        Stack[0].ParentFirstCluster = 0;
+        StackDepth = 1;
+
+        while (StackDepth > 0) {
+
+            FAT_DIRENT_RECON_FRAME Frame;
+
+            //  Pop one frame.  We copy out so child pushes that grow the
+            //  stack array don't alias an in-use slot.
+            StackDepth--;
+            Frame = Stack[StackDepth];
+
+            if (StackDepth >= FAT_DIRENT_RECON_MAX_DEPTH - 1) {
+                DbgPrint("FAT: FatReconcileDirentBitmap: depth limit hit\n");
+                continue;
+            }
+
+            NewlySet += FatReconWalkDirectory( Vcb, &Frame,
+                                               StartIndex, EndIndex,
+                                               RawBitMap, BitMapStartIndex,
+                                               FatIndexBitSize,
+                                               Fat0ByteOffset, Fat0Bytes,
+                                               Fat0Buffer, Fat0BufferSize,
+                                               &Fat0CachedStart, &Fat0CachedLen,
+                                               DirBuffer, DirBufferSize,
+                                               Stack, FAT_DIRENT_RECON_MAX_DEPTH,
+                                               &StackDepth );
+        }
+
+        DbgPrint("FAT: FatReconcileDirentBitmap: marked %u clusters from "
+                 "dirents (window=[%u..%u], FatBits=%u)\n",
+                 NewlySet, StartIndex, EndIndex, FatIndexBitSize);
+
+        if (NewlySet != 0) {
+
+            if (FreeClusterCount) {
+                if (*FreeClusterCount >= NewlySet) {
+                    *FreeClusterCount -= NewlySet;
+                } else {
+                    *FreeClusterCount = 0;
+                }
+            }
+            if (WindowFreeClusters) {
+                if (*WindowFreeClusters >= NewlySet) {
+                    *WindowFreeClusters -= NewlySet;
+                } else {
+                    *WindowFreeClusters = 0;
+                }
+            }
+
+            BitMap->NumberOfSetBits = RtlNumberOfSetBits(RawBitMap);
+            BitMap->BitmapHash = RtlComputeBitmapHashDbg(BitMap);
+        }
+
+        try_exit: NOTHING;
+
+    } _SEH2_FINALLY {
+
+        if (Stack != NULL)      ExFreePoolWithTag( Stack, TAG_FAT_BITMAP );
+        if (DirBuffer != NULL)  ExFreePoolWithTag( DirBuffer, TAG_FAT_BITMAP );
+        if (Fat0Buffer != NULL) ExFreePoolWithTag( Fat0Buffer, TAG_FAT_BITMAP );
+
+    } _SEH2_END;
+}
+#endif
 
