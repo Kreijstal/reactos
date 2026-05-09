@@ -1818,6 +1818,18 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
 
     DeviceExtension->NoAutoMount = MountmgrReadNoAutoMount(&(DeviceExtension->RegistryPath));
 
+    /* Enable automatic drive-letter assignment from the very first arrival.
+     * The flag has no external policy in this driver (no registry binding,
+     * never set FALSE) and is otherwise toggled to TRUE only inside
+     * MountMgrDriverReinitialization, which runs *after* IoRegisterPlugPlayNotification
+     * has already fired arrivals (synchronously, via PNPNOTIFY_DEVICE_INTERFACE_INCLUDE_EXISTING_INTERFACES,
+     * and asynchronously for any volume that surfaces during early enumeration).
+     * Leaving it FALSE forces those early arrivals into MountMgrAssignDriveLetters
+     * → MountMgrNextDriveLetterWorker, which does not exercise the same arrival
+     * code path and has been observed to silently drop boot-attached MBR volumes.
+     * Setting it TRUE here makes early and late arrivals follow the same proven path. */
+    DeviceExtension->AutomaticDriveLetter = TRUE;
+
     GlobalCreateSymbolicLink(&DosDevicesMount, &DeviceMount);
 
     /* Register for device arrival & removal. Ask to be notified for already
