@@ -173,7 +173,7 @@ smb2rdr_DevFcbXXXControlFile(IN OUT PRX_CONTEXT RxContext)
         RxContext->InformationToReturn = 0;
         break;
     default:
-        DbgPrint("SMB2RDR: DevFcbXXXControlFile unhandled ioctl=0x%08lx\n",
+        DPRINT("SMB2RDR: DevFcbXXXControlFile unhandled ioctl=0x%08lx\n",
                  ioctl);
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -1079,7 +1079,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    DbgPrint("SMB2RDR: MRxLowIOSubmit[READ] fh=0x%llx offset=%llu len=%lu\n",
+    DPRINT("SMB2RDR: MRxLowIOSubmit[READ] fh=0x%llx offset=%llu len=%lu\n",
              fcbExt->DaemonFileHandle,
              (unsigned long long)offset, total);
 
@@ -1177,7 +1177,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
             goto done_out;
         } _SEH2_END;
 
-        DbgPrint("SMB2RDR: Read chunk ok bytes=%lu total=%lu\n",
+        DPRINT("SMB2RDR: Read chunk ok bytes=%lu total=%lu\n",
                  ro->BytesRead, done + ro->BytesRead);
 
         done += ro->BytesRead;
@@ -1289,7 +1289,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    DbgPrint("SMB2RDR: MRxLowIOSubmit[WRITE] fh=0x%llx offset=%llu len=%lu\n",
+    DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] fh=0x%llx offset=%llu len=%lu\n",
              fcbExt->DaemonFileHandle,
              (unsigned long long)offset, total);
 
@@ -1378,7 +1378,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
             break;
         }
 
-        DbgPrint("SMB2RDR: Write chunk ok bytes=%lu total=%lu\n",
+        DPRINT("SMB2RDR: Write chunk ok bytes=%lu total=%lu\n",
                  out.BytesWritten, done + out.BytesWritten);
 
         done += out.BytesWritten;
@@ -1550,7 +1550,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     RtlZeroMemory(&out, sizeof(out));
     in.FileHandle = fcbExt->DaemonFileHandle;
 
-    DbgPrint("SMB2RDR: MRxQueryFileInfo class=%d fh=0x%llx buflen=%d\n",
+    DPRINT("SMB2RDR: MRxQueryFileInfo class=%d fh=0x%llx buflen=%d\n",
              (int)infoClass, fcbExt->DaemonFileHandle, userBufLen);
 
     bridgeStatus = SmbRdrIssueUpcall(
@@ -1701,7 +1701,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
         break;
     }
 
-    DbgPrint("SMB2RDR: QueryFileInfo class=%d size=%llu attr=0x%lx -> 0x%08lx\n",
+    DPRINT("SMB2RDR: QueryFileInfo class=%d size=%llu attr=0x%lx -> 0x%08lx\n",
              (int)infoClass,
              (unsigned long long)out.Stat.Size,
              out.Stat.Attributes, status);
@@ -1736,7 +1736,7 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
         return STATUS_SUCCESS;
     }
 
-    DbgPrint("SMB2RDR: MRxFlush fh=0x%llx\n",
+    DPRINT("SMB2RDR: MRxFlush fh=0x%llx\n",
              fcbExt->DaemonFileHandle);
 
     RtlZeroMemory(&in, sizeof(in));
@@ -1760,7 +1760,7 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
         return daemonStatus;
     }
 
-    DbgPrint("SMB2RDR: Flush ok fh=0x%llx\n",
+    DPRINT("SMB2RDR: Flush ok fh=0x%llx\n",
              fcbExt->DaemonFileHandle);
     return STATUS_SUCCESS;
 }
@@ -1808,7 +1808,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
     userBuf    = RxContext->Info.Buffer;
     userBufLen = (LONG)RxContext->Info.Length;
 
-    DbgPrint("SMB2RDR: MRxSetFileInfo class=%d fh=0x%llx buflen=%d\n",
+    DPRINT("SMB2RDR: MRxSetFileInfo class=%d fh=0x%llx buflen=%d\n",
              (int)infoClass, fcbExt->DaemonFileHandle, userBufLen);
 
     switch (infoClass) {
@@ -1819,7 +1819,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
             return STATUS_INFO_LENGTH_MISMATCH;
         dinfo = (PFILE_DISPOSITION_INFORMATION)userBuf;
         fcbExt->DeleteOnClose = dinfo->DeleteFile ? TRUE : FALSE;
-        DbgPrint("SMB2RDR: SetFileInfo Disposition DeleteFile=%u\n",
+        DPRINT("SMB2RDR: SetFileInfo Disposition DeleteFile=%u\n",
                  dinfo->DeleteFile);
         /* Actual unlink fires in MRxCloseSrvOpen after the daemon close
          * has released the server-side handle.  NT semantics: disposition
@@ -1832,7 +1832,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
          * hint as advisory when the underlying FS doesn't support it.
          * Accepting with no round-trip matches how most non-NTFS file
          * systems handle this class. */
-        DbgPrint("SMB2RDR: SetFileInfo Allocation accepted (no-op)\n");
+        DPRINT("SMB2RDR: SetFileInfo Allocation accepted (no-op)\n");
         return STATUS_SUCCESS;
     }
 
@@ -1859,7 +1859,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
         in.FileHandle = fcbExt->DaemonFileHandle;
         in.NewSize    = (ULONGLONG)einfo->EndOfFile.QuadPart;
 
-        DbgPrint("SMB2RDR: SetFileInfo EOF fh=0x%llx new_size=%llu\n",
+        DPRINT("SMB2RDR: SetFileInfo EOF fh=0x%llx new_size=%llu\n",
                  fcbExt->DaemonFileHandle,
                  (unsigned long long)in.NewSize);
 
@@ -1880,7 +1880,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
                     daemonStatus);
             return daemonStatus;
         }
-        DbgPrint("SMB2RDR: SetFileInfo EOF ok\n");
+        DPRINT("SMB2RDR: SetFileInfo EOF ok\n");
         return STATUS_SUCCESS;
     }
 
@@ -1951,7 +1951,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
                               + fcbExt->Path.Length,
                       newPathChars, newPathBytes);
 
-        DbgPrint("SMB2RDR: SetFileInfo Rename old=%wZ new_bytes=%u\n",
+        DPRINT("SMB2RDR: SetFileInfo Rename old=%wZ new_bytes=%u\n",
                  &fcbExt->Path, (unsigned)newPathBytes);
 
         bridgeStatus = SmbRdrIssueUpcall(
@@ -1992,7 +1992,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
             }
         }
 
-        DbgPrint("SMB2RDR: SetFileInfo Rename ok\n");
+        DPRINT("SMB2RDR: SetFileInfo Rename ok\n");
         return STATUS_SUCCESS;
     }
 
