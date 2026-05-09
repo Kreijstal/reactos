@@ -65,8 +65,8 @@ XHCI_OpenEndpoint(IN PVOID xhciExtension,
     ULONG TransferType;
     MPSTATUS MPStatus;
 
-    DPRINT1("XHCI_OpenEndpoint: function initiated\n");
-    DPRINT1("XHCI_OpenEndpoint: EndpointProperties=%p, DeviceAddress=%d, EndpointAddress=%d, TransferType=%d, MaxPacketSize=%d\n",
+    DPRINT("XHCI_OpenEndpoint: function initiated\n");
+    DPRINT("XHCI_OpenEndpoint: EndpointProperties=%p, DeviceAddress=%d, EndpointAddress=%d, TransferType=%d, MaxPacketSize=%d\n",
             EndpointProperties, 
             EndpointProperties ? EndpointProperties->DeviceAddress : -1,
             EndpointProperties ? EndpointProperties->EndpointAddress : -1,
@@ -74,7 +74,7 @@ XHCI_OpenEndpoint(IN PVOID xhciExtension,
             EndpointProperties ? EndpointProperties->MaxPacketSize : -1);
             
     if (!EndpointProperties || !XhciExtension || !XhciEndpoint) {
-        DPRINT1("XHCI_OpenEndpoint: Invalid parameters - EndpointProperties=%p, XhciExtension=%p, XhciEndpoint=%p\n",
+        DPRINT("XHCI_OpenEndpoint: Invalid parameters - EndpointProperties=%p, XhciExtension=%p, XhciEndpoint=%p\n",
                 EndpointProperties, XhciExtension, XhciEndpoint);
         return MP_STATUS_FAILURE;
     }
@@ -107,12 +107,12 @@ XHCI_OpenEndpoint(IN PVOID xhciExtension,
                                                   XhciEndpoint);
             break;
         default:
-            DPRINT1("XHCI_OpenEndpoint: Unsupported transfer type %d\n", TransferType);
+            DPRINT("XHCI_OpenEndpoint: Unsupported transfer type %d\n", TransferType);
             return MP_STATUS_NOT_SUPPORTED;
             break;
     }
 
-    DPRINT1("XHCI_OpenEndpoint: Endpoint open completed with status 0x%x (MP_STATUS_SUCCESS=0x%x)\n", 
+    DPRINT("XHCI_OpenEndpoint: Endpoint open completed with status 0x%x (MP_STATUS_SUCCESS=0x%x)\n", 
             MPStatus, MP_STATUS_SUCCESS);
     return MPStatus;
 }
@@ -413,7 +413,7 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
         // Only log event processing for the first few or periodically
         if (EventsProcessedInThisCall < 5 || (DebugCounter % 100) == 1)
         {
-            DPRINT1("XHCI_ProcessEvent: Processing TRB Type %d (0x%x), event #%d in this call\n", 
+            DPRINT("XHCI_ProcessEvent: Processing TRB Type %d (0x%x), event #%d in this call\n", 
                     TRBType, TRBType, EventsProcessedInThisCall + 1);
         }
         
@@ -1244,11 +1244,11 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
     RunTimeRegisterBase = XhciExtension->RunTimeRegisterBase;
     OperationalRegs = XhciExtension->OperationalRegs;
     
-    DPRINT1("XHCI_InterruptDpc: Called with IsDoEnableInterrupts=%d\n", IsDoEnableInterrupts);
+    DPRINT("XHCI_InterruptDpc: Called with IsDoEnableInterrupts=%d\n", IsDoEnableInterrupts);
     
     // Read current interrupt status
     Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
-    DPRINT1("XHCI_InterruptDpc: Current IMAN=0x%08x, InterruptPending=%d\n", 
+    DPRINT("XHCI_InterruptDpc: Current IMAN=0x%08x, InterruptPending=%d\n", 
             Iman.AsULONG, Iman.InterruptPending);
     
     // Process any pending events
@@ -1257,13 +1257,13 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
     // Clear the interrupt pending bit now that we've processed events
     if (Iman.InterruptPending == 1)
     {
-        DPRINT1("XHCI_InterruptDpc: Clearing interrupt pending bit\n");
+        DPRINT("XHCI_InterruptDpc: Clearing interrupt pending bit\n");
         Iman.InterruptPending = 1; // Write 1 to clear
         WRITE_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN, Iman.AsULONG);
         
         // Verify it was cleared
         Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
-        DPRINT1("XHCI_InterruptDpc: After clearing, IMAN=0x%08x, InterruptPending=%d\n", 
+        DPRINT("XHCI_InterruptDpc: After clearing, IMAN=0x%08x, InterruptPending=%d\n", 
                 Iman.AsULONG, Iman.InterruptPending);
     }
 
@@ -1277,7 +1277,7 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
         WRITE_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS, UsbStatusClear.AsULONG);
     }
     
-    DPRINT1("XHCI_InterruptDpc: Completed\n");
+    DPRINT("XHCI_InterruptDpc: Completed\n");
 }
 
 MPSTATUS
@@ -1297,19 +1297,19 @@ XHCI_SubmitTransfer(IN PVOID xhciExtension,
     ULONG TransferLength;
     MPSTATUS Status = MP_STATUS_SUCCESS;
     
-    DPRINT1("XHCI_SubmitTransfer: function initiated\n");
-    
+    DPRINT("XHCI_SubmitTransfer: function initiated\n");
+
     if (!XhciExtension || !XhciEndpoint || !TransferParameters || !XhciTransfer)
     {
         DPRINT1("XHCI_SubmitTransfer: Invalid parameters\n");
         return MP_STATUS_FAILURE;
     }
-    
+
     TransferDirection = TransferParameters->TransferFlags; //& USBPORT_TRANSFER_DIRECTION_FLAG;
     TransferType = XhciEndpoint->EndpointProperties.TransferType;
     TransferLength = TransferParameters->TransferBufferLength;
-    
-    DPRINT1("XHCI_SubmitTransfer: TransferType=%d, TransferDirection=%d, TransferLength=%d\n",
+
+    DPRINT("XHCI_SubmitTransfer: TransferType=%d, TransferDirection=%d, TransferLength=%d\n",
             TransferType, TransferDirection, TransferLength);
     
     // Initialize transfer structure
@@ -1345,7 +1345,7 @@ XHCI_SubmitTransfer(IN PVOID xhciExtension,
     
     if (Status == MP_STATUS_SUCCESS)
     {
-        DPRINT1("XHCI_SubmitTransfer: Transfer submitted successfully\n");
+        DPRINT("XHCI_SubmitTransfer: Transfer submitted successfully\n");
     }
     else
     {
@@ -1415,8 +1415,8 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
     PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
     
-    DPRINT1("XHCI_SetEndpointState: function initiated, setting state to %d\n", EndpointState);
-    
+    DPRINT("XHCI_SetEndpointState: function initiated, setting state to %d\n", EndpointState);
+
     if (!XhciEndpoint) {
         DPRINT1("XHCI_SetEndpointState: Invalid endpoint pointer\n");
         return;
@@ -1428,12 +1428,12 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
     // Handle specific state transitions
     switch (EndpointState) {
         case 3: // USBPORT_ENDPOINT_ACTIVE
-            DPRINT1("XHCI_SetEndpointState: Activating endpoint (EP addr 0x%02x)\n", 
+            DPRINT("XHCI_SetEndpointState: Activating endpoint (EP addr 0x%02x)\n",
                     XhciEndpoint->EndpointProperties.EndpointAddress);
             // For control endpoints (EP0), we've already configured them during OpenEndpoint
             // Just mark them as active
             if ((XhciEndpoint->EndpointProperties.EndpointAddress & 0x0F) == 0) {
-                DPRINT1("XHCI_SetEndpointState: Control endpoint already configured, marking as active\n");
+                DPRINT("XHCI_SetEndpointState: Control endpoint already configured, marking as active\n");
             } else {
                 /*
                  * USBPORT toggles SetEndpointState(ACTIVE) on every transfer
@@ -1491,7 +1491,7 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
             break;
             
         case 4: // USBPORT_ENDPOINT_REMOVE
-            DPRINT1("XHCI_SetEndpointState: Removing endpoint\n");
+            DPRINT("XHCI_SetEndpointState: Removing endpoint\n");
             if ((XhciEndpoint->EndpointProperties.EndpointAddress & 0x0F) == 0)
             {
         }
@@ -1511,16 +1511,16 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
             break;
             
         case 5: // USBPORT_ENDPOINT_CLOSED
-            DPRINT1("XHCI_SetEndpointState: Closing endpoint\n");
+            DPRINT("XHCI_SetEndpointState: Closing endpoint\n");
             // TODO: Clean up endpoint resources
             break;
-            
+
         default:
-            DPRINT1("XHCI_SetEndpointState: Setting endpoint to state %d\n", EndpointState);
+            DPRINT("XHCI_SetEndpointState: Setting endpoint to state %d\n", EndpointState);
             break;
     }
-    
-    DPRINT1("XHCI_SetEndpointState: endpoint state set successfully to %d\n", EndpointState);
+
+    DPRINT("XHCI_SetEndpointState: endpoint state set successfully to %d\n", EndpointState);
 }
 
 VOID
@@ -1534,9 +1534,9 @@ XHCI_PollEndpoint(IN PVOID xhciExtension,
     PollCount++;
     if ((PollCount % 100) == 1)
     {
-        DPRINT1("XHCI_PollEndpoint: poll #%d initiated\n", PollCount);
+        DPRINT("XHCI_PollEndpoint: poll #%d initiated\n", PollCount);
         if (XhciEndpoint) {
-            DPRINT1("XHCI_PollEndpoint: DeviceAddress=%d, EndpointAddress=%d, EndpointState=%d\n",
+            DPRINT("XHCI_PollEndpoint: DeviceAddress=%d, EndpointAddress=%d, EndpointState=%d\n",
                     XhciEndpoint->EndpointProperties.DeviceAddress,
                     XhciEndpoint->EndpointProperties.EndpointAddress,
                     XhciEndpoint->EndpointState);
@@ -1622,7 +1622,7 @@ XHCI_InterruptNextSOF(IN PVOID xhciExtension)
         return;
     }
     
-    DPRINT1("XHCI_InterruptNextSOF: Triggering soft interrupt via UsbPortInvalidateController\n");
+    DPRINT("XHCI_InterruptNextSOF: Triggering soft interrupt via UsbPortInvalidateController\n");
     
     // Use the same approach as EHCI driver - trigger a soft interrupt through the USB port layer
     // This is much more reliable than manipulating hardware registers directly
