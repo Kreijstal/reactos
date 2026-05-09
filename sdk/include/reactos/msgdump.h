@@ -594,14 +594,18 @@ MD_GetNotifyCode(HWND hwndFrom, UINT code)
             case LVN_GETINFOTIPW: return "LVN_GETINFOTIPW";
             case LVN_INCREMENTALSEARCHA: return "LVN_INCREMENTALSEARCHA";
             case LVN_INCREMENTALSEARCHW: return "LVN_INCREMENTALSEARCHW";
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVN_COLUMNDROPDOWN
             case LVN_COLUMNDROPDOWN: return "LVN_COLUMNDROPDOWN";
+#endif
+#ifdef LVN_COLUMNOVERFLOWCLICK
             case LVN_COLUMNOVERFLOWCLICK: return "LVN_COLUMNOVERFLOWCLICK";
 #endif
             case LVN_BEGINSCROLL: return "LVN_BEGINSCROLL";
             case LVN_ENDSCROLL: return "LVN_ENDSCROLL";
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVN_LINKCLICK
             case LVN_LINKCLICK: return "LVN_LINKCLICK";
+#endif
+#ifdef LVN_GETEMPTYMARKUP
             case LVN_GETEMPTYMARKUP: return "LVN_GETEMPTYMARKUP";
 #endif
         }
@@ -3445,7 +3449,7 @@ MD_ListView_OnGetStringWidthW(HWND hwnd, LPCWSTR psz)
     return 0;
 }
 
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETGROUPSTATE
     static __inline UINT MSGDUMP_API
     MD_ListView_OnGetGroupState(HWND hwnd, DWORD dwGroupId, DWORD dwMask)
     {
@@ -3453,7 +3457,9 @@ MD_ListView_OnGetStringWidthW(HWND hwnd, LPCWSTR psz)
                        MSGDUMP_PREFIX, (void *)hwnd, dwGroupId, dwMask);
         return 0;
     }
+#endif
 
+#ifdef LVM_GETFOCUSEDGROUP
     static __inline INT MSGDUMP_API
     MD_ListView_OnGetFocusedGroup(HWND hwnd)
     {
@@ -3487,7 +3493,7 @@ MD_ListView_OnInsertColumnW(HWND hwnd, INT iCol, const LV_COLUMNW *pcol)
     return 0;
 }
 
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETGROUPRECT
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetGroupRect(HWND hwnd, INT iGroupId, RECT *prc)
     {
@@ -3847,14 +3853,16 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
     return FALSE;
 }
 
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETEMPTYTEXT
     static __inline void MSGDUMP_API
     MD_ListView_OnGetEmptyText(HWND hwnd, PWSTR pszText, UINT cchText)
     {
         MSGDUMP_PRINTF("%sLVM_GETEMPTYTEXT(hwnd:%p, pszText:%p, cchText:%u)\n",
                        MSGDUMP_PREFIX, (void *)hwnd, (void *)pszText, cchText);
     }
+#endif
 
+#ifdef LVM_GETFOOTERRECT
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetFooterRect(HWND hwnd, RECT *prc)
     {
@@ -3862,7 +3870,9 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
                        MSGDUMP_PREFIX, (void *)hwnd, (void *)prc);
         return FALSE;
     }
+#endif
 
+#ifdef LVM_GETFOOTERINFO
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetFooterInfo(HWND hwnd, LVFOOTERINFO *plvfi)
     {
@@ -3870,7 +3880,9 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
                        MSGDUMP_PREFIX, (void *)hwnd, (void *)plvfi);
         return FALSE;
     }
+#endif
 
+#ifdef LVM_GETFOOTERITEMRECT
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetFooterItemRect(HWND hwnd, INT iItem, RECT *prc)
     {
@@ -3878,7 +3890,9 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
                        MSGDUMP_PREFIX, (void *)hwnd, iItem, (void *)prc);
         return FALSE;
     }
+#endif
 
+#ifdef LVM_GETFOOTERITEM
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetFooterItem(HWND hwnd, INT iItem, LVFOOTERITEM *pfi)
     {
@@ -3886,7 +3900,9 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
                        MSGDUMP_PREFIX, (void *)hwnd, iItem, (void *)pfi);
         return FALSE;
     }
+#endif
 
+#ifdef LVM_GETITEMINDEXRECT
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetItemIndexRect(HWND hwnd, const LVITEMINDEX *plvii, RECT *prc)
     {
@@ -3894,7 +3910,9 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
                        MSGDUMP_PREFIX, (void *)hwnd, (void *)plvii, (void *)prc);
         return FALSE;
     }
+#endif
 
+#ifdef LVM_SETITEMINDEXSTATE
     static __inline HRESULT MSGDUMP_API
     MD_ListView_OnSetItemIndexState(HWND hwnd, const LVITEMINDEX *plvii, const LV_ITEM *lvi)
     {
@@ -3902,7 +3920,9 @@ MD_ListView_OnIsItemVisible(HWND hwnd, UINT index)
                        MSGDUMP_PREFIX, (void *)hwnd, (const void *)plvii, (const void *)lvi);
         return 0;
     }
+#endif
 
+#ifdef LVM_GETNEXTITEMINDEX
     static __inline BOOL MSGDUMP_API
     MD_ListView_OnGetNextItemIndex(HWND hwnd, LVITEMINDEX *plvii, UINT flags)
     {
@@ -4184,7 +4204,7 @@ MD_TreeView_OnGetScrollTime(HWND hwnd)
     return 0;
 }
 
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETBORDER
     static __inline INT MSGDUMP_API
     MD_TreeView_OnSetBorder(HWND hwnd, DWORD dwFlags, INT xBorder, INT yBorder)
     {
@@ -4964,14 +4984,16 @@ MD_msgdump_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, WNDPROC fnDefP
             HANDLE_MSG(hwnd, LVM_SORTITEMSEX, MD_ListView_OnSortItemsEx);
             HANDLE_MSG(hwnd, LVM_FINDITEMW, MD_ListView_OnFindItemW);
             HANDLE_MSG(hwnd, LVM_GETSTRINGWIDTHW, MD_ListView_OnGetStringWidthW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETGROUPSTATE
             HANDLE_MSG(hwnd, LVM_GETGROUPSTATE, MD_ListView_OnGetGroupState);
+#endif
+#ifdef LVM_GETFOCUSEDGROUP
             HANDLE_MSG(hwnd, LVM_GETFOCUSEDGROUP, MD_ListView_OnGetFocusedGroup);
 #endif
             HANDLE_MSG(hwnd, LVM_GETCOLUMNW, MD_ListView_OnGetColumnW);
             HANDLE_MSG(hwnd, LVM_SETCOLUMNW, MD_ListView_OnSetColumnW);
             HANDLE_MSG(hwnd, LVM_INSERTCOLUMNW, MD_ListView_OnInsertColumnW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETGROUPRECT
             HANDLE_MSG(hwnd, LVM_GETGROUPRECT, MD_ListView_OnGetGroupRect);
 #endif
             HANDLE_MSG(hwnd, LVM_GETITEMTEXTW, MD_ListView_OnGetItemTextW);
@@ -4990,8 +5012,12 @@ MD_msgdump_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, WNDPROC fnDefP
             HANDLE_MSG(hwnd, LVM_GETGROUPINFO, MD_ListView_OnGetGroupInfo);
             HANDLE_MSG(hwnd, LVM_REMOVEGROUP, MD_ListView_OnRemoveGroup);
             HANDLE_MSG(hwnd, LVM_MOVEGROUP, MD_ListView_OnMoveGroup);
+#ifdef LVM_GETGROUPCOUNT
             HANDLE_MSG(hwnd, LVM_GETGROUPCOUNT, MD_ListView_OnGetGroupCount);
+#endif
+#ifdef LVM_GETGROUPINFOBYINDEX
             HANDLE_MSG(hwnd, LVM_GETGROUPINFOBYINDEX, MD_ListView_OnGetGroupInfoByIndex);
+#endif
             HANDLE_MSG(hwnd, LVM_MOVEITEMTOGROUP, MD_ListView_OnMoveItemToGroup);
             HANDLE_MSG(hwnd, LVM_SETGROUPMETRICS, MD_ListView_OnSetGroupMetrics);
             HANDLE_MSG(hwnd, LVM_GETGROUPMETRICS, MD_ListView_OnGetGroupMetrics);
@@ -5020,14 +5046,28 @@ MD_msgdump_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, WNDPROC fnDefP
             HANDLE_MSG(hwnd, LVM_MAPINDEXTOID, MD_ListView_OnMapIndexToID);
             HANDLE_MSG(hwnd, LVM_MAPIDTOINDEX, MD_ListView_OnMapIDToIndex);
             HANDLE_MSG(hwnd, LVM_ISITEMVISIBLE, MD_ListView_OnIsItemVisible);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETEMPTYTEXT
             HANDLE_MSG(hwnd, LVM_GETEMPTYTEXT, MD_ListView_OnGetEmptyText);
+#endif
+#ifdef LVM_GETFOOTERRECT
             HANDLE_MSG(hwnd, LVM_GETFOOTERRECT, MD_ListView_OnGetFooterRect);
+#endif
+#ifdef LVM_GETFOOTERINFO
             HANDLE_MSG(hwnd, LVM_GETFOOTERINFO, MD_ListView_OnGetFooterInfo);
+#endif
+#ifdef LVM_GETFOOTERITEMRECT
             HANDLE_MSG(hwnd, LVM_GETFOOTERITEMRECT, MD_ListView_OnGetFooterItemRect);
+#endif
+#ifdef LVM_GETFOOTERITEM
             HANDLE_MSG(hwnd, LVM_GETFOOTERITEM, MD_ListView_OnGetFooterItem);
+#endif
+#ifdef LVM_GETITEMINDEXRECT
             HANDLE_MSG(hwnd, LVM_GETITEMINDEXRECT, MD_ListView_OnGetItemIndexRect);
+#endif
+#ifdef LVM_SETITEMINDEXSTATE
             HANDLE_MSG(hwnd, LVM_SETITEMINDEXSTATE, MD_ListView_OnSetItemIndexState);
+#endif
+#ifdef LVM_GETNEXTITEMINDEX
             HANDLE_MSG(hwnd, LVM_GETNEXTITEMINDEX, MD_ListView_OnGetNextItemIndex);
 #endif
         }
@@ -5070,7 +5110,7 @@ MD_msgdump_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, WNDPROC fnDefP
             HANDLE_MSG(hwnd, TVM_GETTEXTCOLOR, MD_TreeView_OnGetTextColor);
             HANDLE_MSG(hwnd, TVM_SETSCROLLTIME, MD_TreeView_OnSetScrollTime);
             HANDLE_MSG(hwnd, TVM_GETSCROLLTIME, MD_TreeView_OnGetScrollTime);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETBORDER
             HANDLE_MSG(hwnd, TVM_SETBORDER, MD_TreeView_OnSetBorder);
 #endif
             HANDLE_MSG(hwnd, TVM_SETINSERTMARKCOLOR, MD_TreeView_OnSetInsertMarkColor);
@@ -5080,22 +5120,30 @@ MD_msgdump_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, WNDPROC fnDefP
             HANDLE_MSG(hwnd, TVM_GETLINECOLOR, MD_TreeView_OnGetLineColor);
             HANDLE_MSG(hwnd, TVM_MAPACCIDTOHTREEITEM, MD_TreeView_OnMapAccIDToHTREEITEM);
             HANDLE_MSG(hwnd, TVM_MAPHTREEITEMTOACCID, MD_TreeView_OnMapHTREEITEMToAccID);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETEXTENDEDSTYLE
             HANDLE_MSG(hwnd, TVM_SETEXTENDEDSTYLE, MD_TreeView_OnSetExtendedStyle);
+#endif
+#ifdef TVM_GETEXTENDEDSTYLE
             HANDLE_MSG(hwnd, TVM_GETEXTENDEDSTYLE, MD_TreeView_OnGetExtendedStyle);
 #endif
             HANDLE_MSG(hwnd, TVM_INSERTITEMW, MD_TreeView_OnInsertItemW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETHOT
             HANDLE_MSG(hwnd, TVM_SETHOT, MD_TreeView_OnSetHot);
+#endif
+#ifdef TVM_SETAUTOSCROLLINFO
             HANDLE_MSG(hwnd, TVM_SETAUTOSCROLLINFO, MD_TreeView_OnSetAutoScrollInfo);
 #endif
             HANDLE_MSG(hwnd, TVM_GETITEMW, MD_TreeView_OnGetItemW);
             HANDLE_MSG(hwnd, TVM_SETITEMW, MD_TreeView_OnSetItemW);
             HANDLE_MSG(hwnd, TVM_GETISEARCHSTRINGW, MD_TreeView_OnGetISearchStringW);
             HANDLE_MSG(hwnd, TVM_EDITLABELW, MD_TreeView_OnEditLabelW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_GETSELECTEDCOUNT
             HANDLE_MSG(hwnd, TVM_GETSELECTEDCOUNT, MD_TreeView_OnGetSelectedCount);
+#endif
+#ifdef TVM_SHOWINFOTIP
             HANDLE_MSG(hwnd, TVM_SHOWINFOTIP, MD_TreeView_OnShowInfoTip);
+#endif
+#ifdef TVM_GETITEMPARTRECT
             HANDLE_MSG(hwnd, TVM_GETITEMPARTRECT, MD_TreeView_OnGetItemPartRect);
 #endif
         }
@@ -5678,14 +5726,16 @@ MD_msgresult_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT lRes
             DEFINE_RESULT(LVM_SORTITEMSEX);
             DEFINE_RESULT(LVM_FINDITEMW);
             DEFINE_RESULT(LVM_GETSTRINGWIDTHW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETGROUPSTATE
             DEFINE_RESULT(LVM_GETGROUPSTATE);
+#endif
+#ifdef LVM_GETFOCUSEDGROUP
             DEFINE_RESULT(LVM_GETFOCUSEDGROUP);
 #endif
             DEFINE_RESULT(LVM_GETCOLUMNW);
             DEFINE_RESULT(LVM_SETCOLUMNW);
             DEFINE_RESULT(LVM_INSERTCOLUMNW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETGROUPRECT
             DEFINE_RESULT(LVM_GETGROUPRECT);
 #endif
             DEFINE_RESULT(LVM_GETITEMTEXTW);
@@ -5704,8 +5754,12 @@ MD_msgresult_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT lRes
             DEFINE_RESULT(LVM_GETGROUPINFO);
             DEFINE_RESULT(LVM_REMOVEGROUP);
             DEFINE_RESULT(LVM_MOVEGROUP);
+#ifdef LVM_GETGROUPCOUNT
             DEFINE_RESULT(LVM_GETGROUPCOUNT);
+#endif
+#ifdef LVM_GETGROUPINFOBYINDEX
             DEFINE_RESULT(LVM_GETGROUPINFOBYINDEX);
+#endif
             DEFINE_RESULT(LVM_MOVEITEMTOGROUP);
             DEFINE_RESULT(LVM_SETGROUPMETRICS);
             DEFINE_RESULT(LVM_GETGROUPMETRICS);
@@ -5734,14 +5788,28 @@ MD_msgresult_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT lRes
             DEFINE_RESULT(LVM_MAPINDEXTOID);
             DEFINE_RESULT(LVM_MAPIDTOINDEX);
             DEFINE_RESULT(LVM_ISITEMVISIBLE);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef LVM_GETEMPTYTEXT
             DEFINE_RESULT(LVM_GETEMPTYTEXT);
+#endif
+#ifdef LVM_GETFOOTERRECT
             DEFINE_RESULT(LVM_GETFOOTERRECT);
+#endif
+#ifdef LVM_GETFOOTERINFO
             DEFINE_RESULT(LVM_GETFOOTERINFO);
+#endif
+#ifdef LVM_GETFOOTERITEMRECT
             DEFINE_RESULT(LVM_GETFOOTERITEMRECT);
+#endif
+#ifdef LVM_GETFOOTERITEM
             DEFINE_RESULT(LVM_GETFOOTERITEM);
+#endif
+#ifdef LVM_GETITEMINDEXRECT
             DEFINE_RESULT(LVM_GETITEMINDEXRECT);
+#endif
+#ifdef LVM_SETITEMINDEXSTATE
             DEFINE_RESULT(LVM_SETITEMINDEXSTATE);
+#endif
+#ifdef LVM_GETNEXTITEMINDEX
             DEFINE_RESULT(LVM_GETNEXTITEMINDEX);
 #endif
         }
@@ -5784,7 +5852,7 @@ MD_msgresult_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT lRes
             DEFINE_RESULT(TVM_GETTEXTCOLOR);
             DEFINE_RESULT(TVM_SETSCROLLTIME);
             DEFINE_RESULT(TVM_GETSCROLLTIME);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETBORDER
             DEFINE_RESULT(TVM_SETBORDER);
 #endif
             DEFINE_RESULT(TVM_SETINSERTMARKCOLOR);
@@ -5794,22 +5862,30 @@ MD_msgresult_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT lRes
             DEFINE_RESULT(TVM_GETLINECOLOR);
             DEFINE_RESULT(TVM_MAPACCIDTOHTREEITEM);
             DEFINE_RESULT(TVM_MAPHTREEITEMTOACCID);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETEXTENDEDSTYLE
             DEFINE_RESULT(TVM_SETEXTENDEDSTYLE);
+#endif
+#ifdef TVM_GETEXTENDEDSTYLE
             DEFINE_RESULT(TVM_GETEXTENDEDSTYLE);
 #endif
             DEFINE_RESULT(TVM_INSERTITEMW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_SETHOT
             DEFINE_RESULT(TVM_SETHOT);
+#endif
+#ifdef TVM_SETAUTOSCROLLINFO
             DEFINE_RESULT(TVM_SETAUTOSCROLLINFO);
 #endif
             DEFINE_RESULT(TVM_GETITEMW);
             DEFINE_RESULT(TVM_SETITEMW);
             DEFINE_RESULT(TVM_GETISEARCHSTRINGW);
             DEFINE_RESULT(TVM_EDITLABELW);
-#if NTDDI_VERSION >= 0x06000000
+#ifdef TVM_GETSELECTEDCOUNT
             DEFINE_RESULT(TVM_GETSELECTEDCOUNT);
+#endif
+#ifdef TVM_SHOWINFOTIP
             DEFINE_RESULT(TVM_SHOWINFOTIP);
+#endif
+#ifdef TVM_GETITEMPARTRECT
             DEFINE_RESULT(TVM_GETITEMPARTRECT);
 #endif
         }
@@ -6005,27 +6081,55 @@ MD_msgresult_ex(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT lRes
     DEFINE_RESULT(WM_EXITSIZEMOVE);
     DEFINE_RESULT(WM_DROPFILES);
     DEFINE_RESULT(WM_MDIREFRESHMENU);
-#if WINVER >= 0x0602
+#ifdef WM_POINTERDEVICECHANGE
     DEFINE_RESULT(WM_POINTERDEVICECHANGE);
+#endif
+#ifdef WM_POINTERDEVICEINRANGE
     DEFINE_RESULT(WM_POINTERDEVICEINRANGE);
+#endif
+#ifdef WM_POINTERDEVICEOUTOFRANGE
     DEFINE_RESULT(WM_POINTERDEVICEOUTOFRANGE);
 #endif
 #ifdef WM_TOUCH
     DEFINE_RESULT(WM_TOUCH);
 #endif
-#if WINVER >= 0x0602
+#ifdef WM_NCPOINTERUPDATE
     DEFINE_RESULT(WM_NCPOINTERUPDATE);
+#endif
+#ifdef WM_NCPOINTERDOWN
     DEFINE_RESULT(WM_NCPOINTERDOWN);
+#endif
+#ifdef WM_NCPOINTERUP
     DEFINE_RESULT(WM_NCPOINTERUP);
+#endif
+#ifdef WM_POINTERUPDATE
     DEFINE_RESULT(WM_POINTERUPDATE);
+#endif
+#ifdef WM_POINTERDOWN
     DEFINE_RESULT(WM_POINTERDOWN);
+#endif
+#ifdef WM_POINTERUP
     DEFINE_RESULT(WM_POINTERUP);
+#endif
+#ifdef WM_POINTERENTER
     DEFINE_RESULT(WM_POINTERENTER);
+#endif
+#ifdef WM_POINTERLEAVE
     DEFINE_RESULT(WM_POINTERLEAVE);
+#endif
+#ifdef WM_POINTERACTIVATE
     DEFINE_RESULT(WM_POINTERACTIVATE);
+#endif
+#ifdef WM_POINTERCAPTURECHANGED
     DEFINE_RESULT(WM_POINTERCAPTURECHANGED);
+#endif
+#ifdef WM_TOUCHHITTESTING
     DEFINE_RESULT(WM_TOUCHHITTESTING);
+#endif
+#ifdef WM_POINTERWHEEL
     DEFINE_RESULT(WM_POINTERWHEEL);
+#endif
+#ifdef WM_POINTERHWHEEL
     DEFINE_RESULT(WM_POINTERHWHEEL);
 #endif
     DEFINE_RESULT(WM_IME_SETCONTEXT);
