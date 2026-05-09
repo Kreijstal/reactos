@@ -198,6 +198,18 @@ CcLazyWriteScan(VOID)
          */
         CcScheduleLazyWriteScan(FALSE);
     }
+    else if (CcTotalDirtyPages != 0)
+    {
+        /* Pages still need to drain. Each CcWriteBehind cycle only flushes
+         * Target=CcTotalDirtyPages/8, so a workload that finishes producing
+         * dirty pages while the queue is large still needs ~log8(N) more
+         * cycles to drain. Without this branch, ScanActive flips off as
+         * soon as the deferred-write list empties and the remaining dirty
+         * pages stagnate until the next write activity restarts the
+         * scheduler — leaving stale data in cache and unflushed clusters
+         * on disk if a crash hits. */
+        CcScheduleLazyWriteScan(FALSE);
+    }
     else
     {
         /* We're no longer active */
