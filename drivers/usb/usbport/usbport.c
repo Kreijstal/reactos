@@ -22,6 +22,43 @@ LIST_ENTRY USBPORT_USB2FdoList = {NULL, NULL};
 KSPIN_LOCK USBPORT_SpinLock;
 BOOLEAN USBPORT_Initialized = FALSE;
 
+#if DBG
+static
+VOID
+USBPORT_ValidateScatterGatherList(IN PUSBPORT_TRANSFER Transfer)
+{
+    PUSBPORT_SCATTER_GATHER_LIST SgList;
+    ULONG TransferLength;
+    ULONG SgIdx;
+    SIZE_T SubmittedLength;
+    SIZE_T ExpectedOffset;
+
+    ASSERT(Transfer != NULL);
+    ASSERT(Transfer->TransferParameters.TransferBufferLength != 0);
+
+    SgList = &Transfer->SgList;
+    TransferLength = Transfer->TransferParameters.TransferBufferLength;
+    SubmittedLength = 0;
+    ExpectedOffset = 0;
+
+    ASSERT(SgList->SgElementCount != 0);
+
+    for (SgIdx = 0; SgIdx < SgList->SgElementCount; SgIdx++)
+    {
+        PUSBPORT_SCATTER_GATHER_ELEMENT SgElement = &SgList->SgElement[SgIdx];
+
+        ASSERT(SgElement->SgTransferLength != 0);
+        ASSERT(SgElement->SgOffset == ExpectedOffset);
+
+        SubmittedLength += SgElement->SgTransferLength;
+        ExpectedOffset += SgElement->SgTransferLength;
+    }
+
+    ASSERT(SubmittedLength == TransferLength);
+    ASSERT(ExpectedOffset == TransferLength);
+}
+#endif
+
 PDEVICE_OBJECT
 NTAPI
 USBPORT_FindUSB2Controller(IN PDEVICE_OBJECT FdoDevice)
@@ -977,7 +1014,7 @@ USBPORT_IsrDpcHandler(IN PDEVICE_OBJECT FdoDevice,
                                      USBPORT_ENDPOINT,
                                      StateChangeLink);
 
-        DPRINT1("USBPORT_IsrDpcHandler: Processing Endpoint - %p\n", Endpoint);
+        DPRINT("USBPORT_IsrDpcHandler: Processing Endpoint - %p\n", Endpoint);
 
         /* Save the next entry before we potentially remove this one */
         NextList = List->Flink;
@@ -1796,6 +1833,10 @@ USBPORT_AllocateCommonBuffer(IN PDEVICE_OBJECT FdoDevice,
 
     RtlZeroMemory((PVOID)StartBufferVA, BufferLength + LengthPadded);
 
+    DPRINT("USBPORT_DMATRACE: alloc PA=%08lx..%08lx VA=%p len=%lx caller=%p\n",
+           StartBufferPA, StartBufferPA + Length, (PVOID)StartBufferVA,
+           (ULONG)Length, _ReturnAddress());
+
 Exit:
     return HeaderBuffer;
 }
@@ -1815,6 +1856,12 @@ USBPORT_FreeCommonBuffer(IN PDEVICE_OBJECT FdoDevice,
 
     DmaAdapter = FdoExtension->DmaAdapter;
     DmaOperations = DmaAdapter->DmaOperations;
+
+    DPRINT("USBPORT_DMATRACE: free  PA=%08lx VA=%p len=%lx caller=%p\n",
+            HeaderBuffer->PhysicalAddress,
+            (PVOID)HeaderBuffer->VirtualAddress,
+            HeaderBuffer->Length,
+            _ReturnAddress());
 
     DmaOperations->FreeCommonBuffer(FdoExtension->DmaAdapter,
                                     HeaderBuffer->Length,
@@ -2046,7 +2093,7 @@ USBPORT_MiniportCompleteTransfer(IN PVOID MiniPortExtension,
     Transfer->Flags |= TRANSFER_FLAG_COMPLETED;
     Transfer->CompletedTransferLen = TransferLength;
     
-    DPRINT1("USBPORT_MiniportCompleteTransfer: Setting CompletedTransferLen = %d (0x%x)\n",
+    DPRINT("USBPORT_MiniportCompleteTransfer: Setting CompletedTransferLen = %d (0x%x)\n",
             TransferLength, TransferLength);
 
     if (((Transfer->Flags & TRANSFER_FLAG_SPLITED) == 0) ||
@@ -2265,7 +2312,7 @@ USBPORT_CompleteTransfer(IN PURB Urb,
 
     UrbTransfer->TransferBufferLength = Transfer->CompletedTransferLen;
     
-    DPRINT1("USBPORT_CompleteTransfer: URB TransferBufferLength set to %d (0x%x) from CompletedTransferLen\n",
+    DPRINT("USBPORT_CompleteTransfer: URB TransferBufferLength set to %d (0x%x) from CompletedTransferLen\n",
             Transfer->CompletedTransferLen, Transfer->CompletedTransferLen);
 
     if (Transfer->Flags & TRANSFER_FLAG_DMA_MAPPED)
@@ -2461,6 +2508,10 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
     while (CurrentLength != Transfer->TransferParameters.TransferBufferLength);
 
     sgList->SgElementCount = ix;
+
+#if DBG
+    USBPORT_ValidateScatterGatherList(Transfer);
+#endif
 
     if (Endpoint->EndpointProperties.DeviceSpeed == UsbHighSpeed)
     {
