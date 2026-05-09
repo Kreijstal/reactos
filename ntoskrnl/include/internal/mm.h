@@ -986,6 +986,53 @@ MmRmapEntryExists(
     PVOID Address
 );
 
+#if DBG
+VOID
+NTAPI
+MmDumpRmapTrace(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address
+);
+
+VOID
+NTAPI
+MmTracePte(
+    UCHAR Op,
+    PVOID Va,
+    ULONG_PTR OldPte,
+    ULONG_PTR NewPte,
+    PVOID Caller
+);
+
+VOID
+NTAPI
+MmDumpPteTrace(PVOID Va);
+
+VOID
+NTAPI
+MmValidateRmapChain(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address
+);
+
+#define MI_TRACE_PTE_CLEAR(va, pte_ptr) do { \
+    ULONG_PTR _oldpte = (pte_ptr)->u.Long; \
+    (pte_ptr)->u.Long = 0; \
+    MmTracePte('C', (va), _oldpte, 0, _ReturnAddress()); \
+} while (0)
+
+#define MI_TRACE_PTE_VALID(va, pte_ptr, newval) do { \
+    ULONG_PTR _oldpte = (pte_ptr)->u.Long; \
+    (pte_ptr)->u.Long = (newval); \
+    MmTracePte('V', (va), _oldpte, (newval), _ReturnAddress()); \
+} while (0)
+#else
+#define MI_TRACE_PTE_CLEAR(va, pte_ptr)        ((pte_ptr)->u.Long = 0)
+#define MI_TRACE_PTE_VALID(va, pte_ptr, newval) ((pte_ptr)->u.Long = (newval))
+#endif
+
 CODE_SEG("INIT")
 VOID
 NTAPI
