@@ -292,6 +292,10 @@ MmDeleteVirtualMappingEx(
     {
         PointerPte = MiAddressToPte(Address);
         OldPte.u.Long = InterlockedExchangePte(PointerPte, 0);
+#if DBG
+        if (OldPte.u.Long != 0)
+            MmTracePte('D', Address, OldPte.u.Long, 0, _ReturnAddress());
+#endif
 
         KeInvalidateTlbEntry(Address);
 
@@ -412,6 +416,10 @@ MmDeletePageFileMapping(
 
     PointerPte = MiAddressToPte(Address);
     OldPte.u.Long = InterlockedExchangePte(PointerPte, 0);
+#if DBG
+    if (OldPte.u.Long != 0)
+        MmTracePte('F', Address, OldPte.u.Long, 0, _ReturnAddress());
+#endif
     /* This must be a swap entry ! */
     if (!FlagOn(OldPte.u.Long, 0x800) || OldPte.u.Hard.Valid)
     {

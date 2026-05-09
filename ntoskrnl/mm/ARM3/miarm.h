@@ -1017,9 +1017,15 @@ FORCEINLINE
 VOID
 MI_ERASE_PTE(IN PMMPTE PointerPte)
 {
+#if DBG
+    ULONG_PTR _oldpte = PointerPte->u.Long;
+#endif
     /* Zero out the PTE */
     ASSERT(PointerPte->u.Long != 0);
     PointerPte->u.Long = 0;
+#if DBG
+    MmTracePte('E', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
+#endif
 }
 
 //

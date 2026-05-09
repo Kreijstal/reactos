@@ -699,7 +699,16 @@ MiSegmentDelete(IN PSEGMENT Segment)
         }
 
         /* Zero the PTE and keep going */
+#if DBG
+        {
+            ULONG_PTR _oldpte = PointerPte->u.Long;
+            PointerPte->u.Long = 0;
+            if (_oldpte)
+                MmTracePte('S', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
+        }
+#else
         PointerPte->u.Long = 0;
+#endif
         PointerPte++;
     }
 
@@ -2003,8 +2012,38 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
             }
         }
 
+        /* MiRemoveMappedPtes is the section-view-unmap path; ARM3 has no
+         * rmap awareness so it cannot clean up legacy MM rmap entries here.
+         * If a rmap entry exists at this point, the upstream view-unmap path
+         * forgot to call MmDeleteRmap, and the next fault on this address
+         * would trip section.c:1971 dup-rmap ASSERT. Trap the producer here
+         * with full PFN context so we catch the leak at its origin. */
+#if DBG
+        if (PteContents.u.Hard.Valid == 1)
+        {
+            PFN_NUMBER UnmapPfn = PFN_FROM_PTE(&PteContents);
+            if (MmGetRmapListHeadPage(UnmapPfn) != NULL)
+            {
+                PVOID UnmapVa = MiPteToAddress(PointerPte);
+                DbgPrint("MiRemoveMappedPtes: stale rmap on PFN %p VA %p Proc %p\n",
+                         (PVOID)UnmapPfn, UnmapVa, PsGetCurrentProcess());
+                MmDumpRmapTrace(UnmapPfn, PsGetCurrentProcess(), UnmapVa);
+                ASSERT(MmGetRmapListHeadPage(UnmapPfn) == NULL);
+            }
+        }
+#endif
+
         /* Make the PTE into a zero PTE */
+#if DBG
+        {
+            ULONG_PTR _oldpte = PointerPte->u.Long;
+            PointerPte->u.Long = 0;
+            if (_oldpte)
+                MmTracePte('R', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
+        }
+#else
         PointerPte->u.Long = 0;
+#endif
 
         /* Move to the next PTE */
         PointerPte++;

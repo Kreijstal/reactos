@@ -566,3 +566,41 @@ MmDeleteSectionAssociation(PFN_NUMBER Page)
     }
     MiReleasePfnLock(OldIrql);
 }
+
+#if DBG
+VOID
+NTAPI
+MmTracePte(UCHAR Op, PVOID Va, ULONG_PTR OldPte, ULONG_PTR NewPte, PVOID Caller)
+{
+    UNREFERENCED_PARAMETER(Op);
+    UNREFERENCED_PARAMETER(Va);
+    UNREFERENCED_PARAMETER(OldPte);
+    UNREFERENCED_PARAMETER(NewPte);
+    UNREFERENCED_PARAMETER(Caller);
+}
+
+VOID
+NTAPI
+MmDumpPteTrace(PVOID Va)
+{
+    UNREFERENCED_PARAMETER(Va);
+}
+
+VOID
+NTAPI
+MmDumpRmapTrace(PFN_NUMBER Page, struct _EPROCESS *Process, PVOID Address)
+{
+    UNREFERENCED_PARAMETER(Page);
+    UNREFERENCED_PARAMETER(Process);
+    UNREFERENCED_PARAMETER(Address);
+}
+
+VOID
+NTAPI
+MmValidateRmapChain(PFN_NUMBER Page, struct _EPROCESS *Process, PVOID Address)
+{
+    UNREFERENCED_PARAMETER(Page);
+    UNREFERENCED_PARAMETER(Process);
+    UNREFERENCED_PARAMETER(Address);
+}
+#endif
