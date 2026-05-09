@@ -10,6 +10,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 BOOLEAN UDPInitialized = FALSE;
 PORT_SET UDPPorts;
 
@@ -311,7 +317,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
       LONG uc = InterlockedIncrement(&UdpRxCount);
       if (uc <= 10)
       {
-          DbgPrint("TCPIP-UDP: UDPReceive #%ld dst=0x%08x:%u src=0x%08x:%u len=%u\n",
+          DPRINT("TCPIP-UDP: UDPReceive #%ld dst=0x%08x:%u src=0x%08x:%u len=%u\n",
                    uc, DstAddress->Address.IPv4Address, WH2N(UDPHeader->DestPort),
                    SrcAddress->Address.IPv4Address, WH2N(UDPHeader->SourcePort),
                    DataSize);
@@ -326,7 +332,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     static volatile LONG UdpDelivered = 0;
     LONG ud = InterlockedIncrement(&UdpDelivered);
     if (ud <= 10)
-        DbgPrint("TCPIP-UDP: matched AddrFile=%p — delivering\n", AddrFile);
+        DPRINT("TCPIP-UDP: matched AddrFile=%p — delivering\n", AddrFile);
     do {
       DGDeliverData(AddrFile,
 		    SrcAddress,
@@ -348,7 +354,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
         extern KSPIN_LOCK AddressFileListLock;
         PLIST_ENTRY entry;
         KIRQL OldIrql;
-        DbgPrint("TCPIP-UDP: NO MATCH for dst=0x%08x:%u proto=UDP — listing all bound:\n",
+        DPRINT("TCPIP-UDP: NO MATCH for dst=0x%08x:%u proto=UDP — listing all bound:\n",
                  DstAddress->Address.IPv4Address, WH2N(UDPHeader->DestPort));
         TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
         for (entry = AddressFileListHead.Flink;
@@ -356,7 +362,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
              entry = entry->Flink)
         {
             PADDRESS_FILE Af = CONTAINING_RECORD(entry, ADDRESS_FILE, ListEntry);
-            DbgPrint("TCPIP-UDP:   bound: addr=0x%08x port=%u proto=%d\n",
+            DPRINT("TCPIP-UDP:   bound: addr=0x%08x port=%u proto=%d\n",
                      Af->Address.Address.IPv4Address,
                      WN2H(Af->Port), Af->Protocol);
         }
