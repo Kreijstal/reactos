@@ -1341,7 +1341,12 @@ CcRosInitializeFileCache (
         InitializeListHead(&SharedCacheMap->BcbList);
         KeInitializeGuardedMutex(&SharedCacheMap->FlushCacheLock);
 
-        SharedCacheMap->Flags = SHARED_CACHE_MAP_IN_CREATION;
+        /* PinAccess streams (e.g. FAT VirtualVolumeFile) are modified-no-write:
+         * the file system flushes them explicitly via CcUnpinRepinnedBcb /
+         * FatFlushFat.  Suppress lazy-writer flushing to avoid writing partial
+         * cluster chains to disk between consecutive file-extend IRPs. */
+        SharedCacheMap->Flags = SHARED_CACHE_MAP_IN_CREATION |
+                                (PinAccess ? WRITEBEHIND_DISABLED : 0);
 
         ObReferenceObjectByPointer(FileObject,
                                    FILE_ALL_ACCESS,
