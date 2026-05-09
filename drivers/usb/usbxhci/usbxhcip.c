@@ -238,7 +238,7 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
             g_PendingTransfers[i].RequestedLength = RequestedLength;
             g_PendingTransfers[i].InUse = TRUE;
             
-            DPRINT1("RegisterPendingTransfer: Registered transfer at index %d with %d TRBs, requested length %d\n", 
+            DPRINT("RegisterPendingTransfer: Registered transfer at index %d with %d TRBs, requested length %d\n", 
                     i, TrbCount, RequestedLength);
             return MP_STATUS_SUCCESS;
         }
@@ -266,7 +266,7 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
         g_PendingTransfers[0].RequestedLength = RequestedLength;
         g_PendingTransfers[0].InUse = TRUE;
         
-        DPRINT1("RegisterPendingTransfer: Registered transfer at cleaned slot 0\n");
+        DPRINT("RegisterPendingTransfer: Registered transfer at cleaned slot 0\n");
         return MP_STATUS_SUCCESS;
     }
     
@@ -285,7 +285,7 @@ FindPendingTransfer(IN PHYSICAL_ADDRESS TrbPointer)
         {
             if (g_PendingTransfers[i].CompletionTrb.QuadPart == TrbPointer.QuadPart)
             {
-                DPRINT1("FindPendingTransfer: Found transfer at index %d for completion TRB 0x%I64x (%d TRBs)\n",
+                DPRINT("FindPendingTransfer: Found transfer at index %d for completion TRB 0x%I64x (%d TRBs)\n",
                         i, TrbPointer.QuadPart, g_PendingTransfers[i].TrbCount);
                 return &g_PendingTransfers[i];
             }
@@ -301,7 +301,7 @@ UnregisterPendingTransfer(IN PXHCI_PENDING_TRANSFER PendingTransfer)
 {
     if (PendingTransfer && PendingTransfer->InUse)
     {
-        DPRINT1("UnregisterPendingTransfer: Unregistering transfer with %d TRBs\n",
+        DPRINT("UnregisterPendingTransfer: Unregistering transfer with %d TRBs\n",
                 PendingTransfer->TrbCount);
         RtlZeroMemory(PendingTransfer, sizeof(XHCI_PENDING_TRANSFER));
         PendingTransfer->InUse = FALSE;
@@ -1199,7 +1199,7 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
         enqueue_pointer = &(TransferRing->firstSeg.XhciTrb[0]);
         TransferRing->enqueue_pointer = enqueue_pointer;
         TrbIndex = 0; // Update index after wrapping
-        DPRINT1("XHCI_EnqueueTRBOnTransferRing: Wrapped to beginning, Link TRB cycle stamped, new producer cycle state %d (Link Word3=0x%08x)\n",
+        DPRINT("XHCI_EnqueueTRBOnTransferRing: Wrapped to beginning, Link TRB cycle stamped, new producer cycle state %d (Link Word3=0x%08x)\n",
                 TransferRing->ProducerCycleState, LinkTrb->GenericTRB.Word3);
     }
     
@@ -1213,28 +1213,28 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
     // Check if ring is full
     if (NextEnqueuePtr == dequeue_pointer) 
     {
-        DPRINT1("XHCI_EnqueueTRBOnTransferRing: Transfer ring is full\n");
+        DPRINT("XHCI_EnqueueTRBOnTransferRing: Transfer ring is full\n");
         return MP_STATUS_FAILURE;
     }
     
     // Debug: Log ring state for troubleshooting
-    DPRINT1("XHCI_EnqueueTRBOnTransferRing: Ring state - enqueue=%p, dequeue=%p, producer_cycle=%d, consumer_cycle=%d\n",
+    DPRINT("XHCI_EnqueueTRBOnTransferRing: Ring state - enqueue=%p, dequeue=%p, producer_cycle=%d, consumer_cycle=%d\n",
             TransferRing->enqueue_pointer, TransferRing->dequeue_pointer, 
             TransferRing->ProducerCycleState, TransferRing->ConsumerCycleState);
     
     // Set the cycle bit to match the producer cycle state
     Trb->GenericTRB.Word3 = (Trb->GenericTRB.Word3 & ~1) | TransferRing->ProducerCycleState;
     
-    DPRINT1("XHCI_EnqueueTRBOnTransferRing: Placing TRB at %p (index %d), cycle bit %d, TRB type %d\n", 
+    DPRINT("XHCI_EnqueueTRBOnTransferRing: Placing TRB at %p (index %d), cycle bit %d, TRB type %d\n", 
             enqueue_pointer, TrbIndex, TransferRing->ProducerCycleState, 
             (Trb->GenericTRB.Word3 >> 10) & 0x3F);
     
-    DPRINT1("XHCI_EnqueueTRBOnTransferRing: TRB content - Word0=0x%08x, Word1=0x%08x, Word2=0x%08x, Word3=0x%08x\n",
+    DPRINT("XHCI_EnqueueTRBOnTransferRing: TRB content - Word0=0x%08x, Word1=0x%08x, Word2=0x%08x, Word3=0x%08x\n",
             Trb->GenericTRB.Word0, Trb->GenericTRB.Word1, Trb->GenericTRB.Word2, Trb->GenericTRB.Word3);
     
     // Calculate physical address of where we're placing this TRB
     PHYSICAL_ADDRESS TrbPA = MmGetPhysicalAddress(enqueue_pointer);
-    DPRINT1("XHCI_EnqueueTRBOnTransferRing: Placing TRB at PA 0x%I64x\n", TrbPA.QuadPart);
+    DPRINT("XHCI_EnqueueTRBOnTransferRing: Placing TRB at PA 0x%I64x\n", TrbPA.QuadPart);
     
     // Return the physical address if requested
     if (TrbPhysicalAddress)
@@ -1249,7 +1249,7 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
     enqueue_pointer = enqueue_pointer + 1;
     TransferRing->enqueue_pointer = enqueue_pointer;
     
-    DPRINT1("XHCI_EnqueueTRBOnTransferRing: TRB enqueued successfully, new enqueue pointer at %p\n", enqueue_pointer);
+    DPRINT("XHCI_EnqueueTRBOnTransferRing: TRB enqueued successfully, new enqueue pointer at %p\n", enqueue_pointer);
     
     return MP_STATUS_SUCCESS;
 }
@@ -1310,59 +1310,59 @@ XHCI_SubmitControlTransfer(IN PXHCI_EXTENSION XhciExtension,
     PXHCI_HC_RESOURCES HcResourcesVA;
     PXHCI_RING SlotTransferRing;
     
-    DPRINT1("XHCI_SubmitControlTransfer: function initiated\n");
-    
+    DPRINT("XHCI_SubmitControlTransfer: function initiated\n");
+
     TransferParameters = XhciTransfer->TransferParameters;
     SetupPacket = &TransferParameters->SetupPacket;
     TransferLength = TransferParameters->TransferBufferLength;
-    
-    DPRINT1("XHCI_SubmitControlTransfer: SetupPacket->bmRequestType=0x%02x, bRequest=0x%02x, wValue=0x%04x\n",
+
+    DPRINT("XHCI_SubmitControlTransfer: SetupPacket->bmRequestType=0x%02x, bRequest=0x%02x, wValue=0x%04x\n",
             SetupPacket->bmRequestType.B, SetupPacket->bRequest, SetupPacket->wValue.W);
-    
+
     // Get the slot ID for this endpoint
     SlotId = *(PULONG)&XhciEndpoint->FirstTD;  // Stored in FirstTD field during endpoint creation
-    DPRINT1("XHCI_SubmitControlTransfer: Retrieved slot ID %d from endpoint\n", SlotId);
-    
+    DPRINT("XHCI_SubmitControlTransfer: Retrieved slot ID %d from endpoint\n", SlotId);
+
     // Get the correct transfer ring - use endpoint's ring if available, otherwise fall back to slot ring
     HcResourcesVA = XhciExtension->HcResourcesVA;
     if (XhciEndpoint->TransferRing.enqueue_pointer != NULL) {
         // Use the endpoint's transfer ring (matches what's configured in device context)
         SlotTransferRing = &XhciEndpoint->TransferRing;
-        DPRINT1("XHCI_SubmitControlTransfer: Using endpoint transfer ring at %p\n", SlotTransferRing);
+        DPRINT("XHCI_SubmitControlTransfer: Using endpoint transfer ring at %p\n", SlotTransferRing);
     } else {
         // Fall back to slot-specific ring for enumeration
         SlotTransferRing = &HcResourcesVA->SlotTransferRings[SlotId - 1];
-        DPRINT1("XHCI_SubmitControlTransfer: Using slot transfer ring at %p (SlotTransferRings[%d])\n", 
+        DPRINT("XHCI_SubmitControlTransfer: Using slot transfer ring at %p (SlotTransferRings[%d])\n",
                 SlotTransferRing, SlotId - 1);
     }
-    
+
     // Verify the transfer ring PA matches what's in the device context
     PHYSICAL_ADDRESS ExpectedRingPA = MmGetPhysicalAddress(&SlotTransferRing->firstSeg.XhciTrb[0]);
-    DPRINT1("XHCI_SubmitControlTransfer: Transfer ring PA = 0x%I64x\n", ExpectedRingPA.QuadPart);
-    
+    DPRINT("XHCI_SubmitControlTransfer: Transfer ring PA = 0x%I64x\n", ExpectedRingPA.QuadPart);
+
     // Also log the DCBAA entry for this slot
     if (SlotId > 0 && SlotId <= MAX_DEVICE_SLOTS) {
         PHYSICAL_ADDRESS DeviceContextPA = HcResourcesVA->DCBAA.ContextBaseAddr[SlotId];
-        DPRINT1("XHCI_SubmitControlTransfer: DCBAA[%d] points to device context at PA 0x%I64x\n", 
+        DPRINT("XHCI_SubmitControlTransfer: DCBAA[%d] points to device context at PA 0x%I64x\n",
                 SlotId, DeviceContextPA.QuadPart);
     }
-    
+
     // Get buffer physical address if data transfer is needed
     if (TransferLength > 0 && SgList && SgList->SgElementCount > 0)
     {
         // Get physical address from scatter-gather list
         BufferPA = SgList->SgElement[0].SgPhysicalAddress;
-        DPRINT1("XHCI_SubmitControlTransfer: Using buffer PA from SG list: 0x%I64x (SgElementCount=%d)\n", 
+        DPRINT("XHCI_SubmitControlTransfer: Using buffer PA from SG list: 0x%I64x (SgElementCount=%d)\n",
                 BufferPA.QuadPart, SgList->SgElementCount);
     }
     else
     {
         BufferPA.QuadPart = 0; // No data transfer needed
-        DPRINT1("XHCI_SubmitControlTransfer: No data transfer or SG list - TransferLength=%d, SgList=%p\n", 
+        DPRINT("XHCI_SubmitControlTransfer: No data transfer or SG list - TransferLength=%d, SgList=%p\n",
                 TransferLength, SgList);
         if (SgList)
         {
-            DPRINT1("XHCI_SubmitControlTransfer: SgList->SgElementCount=%d\n", SgList->SgElementCount);
+            DPRINT("XHCI_SubmitControlTransfer: SgList->SgElementCount=%d\n", SgList->SgElementCount);
         }
     }
     
@@ -1426,21 +1426,21 @@ XHCI_SubmitControlTransfer(IN PXHCI_EXTENSION XhciExtension,
     }
     else
     {
-        DPRINT1("XHCI_SubmitControlTransfer: Transfer registered in tracking system with %d TRBs\n", TrbCount);
+        DPRINT("XHCI_SubmitControlTransfer: Transfer registered in tracking system with %d TRBs\n", TrbCount);
     }
 
     KeMemoryBarrier();
-    
+
     // Ring doorbell to notify the controller (after registration to avoid race condition)
-    DPRINT1("XHCI_SubmitControlTransfer: About to ring doorbell for slot %d, endpoint 1\n", SlotId);
+    DPRINT("XHCI_SubmitControlTransfer: About to ring doorbell for slot %d, endpoint 1\n", SlotId);
     Status = XHCI_RingDoorbell(XhciExtension, SlotId, 1); // EP0 is always DCI 1
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitControlTransfer: Failed to ring doorbell\n");
         return MP_STATUS_FAILURE;
     }
-    
-    DPRINT1("XHCI_SubmitControlTransfer: Control transfer submitted successfully\n");
+
+    DPRINT("XHCI_SubmitControlTransfer: Control transfer submitted successfully\n");
     
     // Process events after submission to catch any completions
     XHCI_ProcessEvent(XhciExtension);
@@ -1457,17 +1457,17 @@ XHCI_RingDoorbell(IN PXHCI_EXTENSION XhciExtension,
     PULONG DoorBellRegisterBase;
     XHCI_DOORBELL DoorbellValue;
     
-    DPRINT1("XHCI_RingDoorbell: SlotId=%d, EndpointIndex=%d\n", SlotId, EndpointIndex);
+    DPRINT("XHCI_RingDoorbell: SlotId=%d, EndpointIndex=%d\n", SlotId, EndpointIndex);
     
     if (!XhciExtension || !XhciExtension->DoorBellRegisterBase)
     {
-        DPRINT1("XHCI_RingDoorbell: Invalid XhciExtension or doorbell register base\n");
+        DPRINT("XHCI_RingDoorbell: Invalid XhciExtension or doorbell register base\n");
         return MP_STATUS_FAILURE;
     }
     
     if (SlotId == 0 || SlotId > 255) // Basic validation
     {
-        DPRINT1("XHCI_RingDoorbell: Invalid SlotId %d\n", SlotId);
+        DPRINT("XHCI_RingDoorbell: Invalid SlotId %d\n", SlotId);
         return MP_STATUS_FAILURE;
     }
     
@@ -1482,7 +1482,7 @@ XHCI_RingDoorbell(IN PXHCI_EXTENSION XhciExtension,
     // Ring the doorbell
     WRITE_REGISTER_ULONG(DoorBellRegisterBase, DoorbellValue.AsULONG);
     
-    DPRINT1("XHCI_RingDoorbell: Doorbell rung successfully\n");
+    DPRINT("XHCI_RingDoorbell: Doorbell rung successfully\n");
     return MP_STATUS_SUCCESS;
 }
 
@@ -1494,32 +1494,29 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
                        IN PUSBPORT_SCATTER_GATHER_LIST SgList)
 {
     PUSBPORT_TRANSFER_PARAMETERS TransferParameters;
-    XHCI_TRB NormalTrb;
-    PHYSICAL_ADDRESS BufferPA;
+    XHCI_TRB NormalTrbs[XHCI_MAX_BULK_NORMAL_TRBS];
     ULONG TransferLength;
-    ULONG SubmittedLength;
     ULONG TrbCount;
-    ULONG SgNonZeroCount;
-    ULONG SgIdx;
+    ULONG TrbIdx;
     ULONG SlotId;
     ULONG ContextIndex;
     MPSTATUS Status;
     PHYSICAL_ADDRESS NormalTrbPA;
-    PHYSICAL_ADDRESS TrbPointers[255];
+    PHYSICAL_ADDRESS TrbPointers[XHCI_MAX_BULK_NORMAL_TRBS];
     PXHCI_RING EndpointTransferRing;
 
-    DPRINT1("XHCI_SubmitBulkTransfer: function initiated\n");
+    DPRINT("XHCI_SubmitBulkTransfer: function initiated\n");
 
     TransferParameters = XhciTransfer->TransferParameters;
     TransferLength = TransferParameters->TransferBufferLength;
 
     // Get the slot ID for this endpoint
     SlotId = *(PULONG)&XhciEndpoint->FirstTD;  // Stored in FirstTD field during endpoint creation
-    DPRINT1("XHCI_SubmitBulkTransfer: Retrieved slot ID %d from endpoint\n", SlotId);
+    DPRINT("XHCI_SubmitBulkTransfer: Retrieved slot ID %d from endpoint\n", SlotId);
 
     // Calculate the context index (DCI) for this endpoint
     ContextIndex = XhciEndpoint->ContextIndex;
-    DPRINT1("XHCI_SubmitBulkTransfer: Using context index %d for endpoint (length=%d)\n",
+    DPRINT("XHCI_SubmitBulkTransfer: Using context index %d for endpoint (length=%d)\n",
             ContextIndex, TransferLength);
 
     // Use the endpoint's transfer ring
@@ -1529,105 +1526,39 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
         return MP_STATUS_FAILURE;
     }
 
-    DPRINT1("XHCI_SubmitBulkTransfer: Using endpoint transfer ring at %p\n", EndpointTransferRing);
-
-    // Resolve buffer physical address.
-    // Bulk endpoints legitimately carry zero-length transfers (BOT status
-    // phase, ZLPs) -- in that case we still build a Normal TRB with
-    // Word0/Word1/Word2 all zero and IOC=1. Only reject when TransferLength
-    // is non-zero but the SgList is missing/empty.
-    BufferPA.QuadPart = 0;
-    SubmittedLength = 0;
-    TrbCount = 0;
-    SgNonZeroCount = 0;
-    if (TransferLength > 0)
-    {
-        if (SgList == NULL || SgList->SgElementCount == 0)
-        {
-            DPRINT1("XHCI_SubmitBulkTransfer: missing SgList for length=%d\n",
-                    TransferLength);
-            return MP_STATUS_FAILURE;
-        }
-
-        for (SgIdx = 0; SgIdx < SgList->SgElementCount; SgIdx++)
-        {
-            ULONG ElementLength = SgList->SgElement[SgIdx].SgTransferLength;
-
-            if (ElementLength == 0)
-                continue;
-
-            SgNonZeroCount++;
-            SubmittedLength += ElementLength;
-        }
-
-        if (SgNonZeroCount == 0 ||
-            SgNonZeroCount > 255 ||
-            SubmittedLength != TransferLength)
-        {
-            DPRINT1("XHCI_SubmitBulkTransfer: invalid SG list, sg=%d nonzero=%d submitted=%d expected=%d\n",
-                    SgList->SgElementCount, SgNonZeroCount, SubmittedLength, TransferLength);
-            return MP_STATUS_FAILURE;
-        }
-
-    }
-    else
-    {
-        DPRINT1("XHCI_SubmitBulkTransfer: Zero-length bulk transfer (ZLP / status phase)\n");
-    }
+    DPRINT("XHCI_SubmitBulkTransfer: Using endpoint transfer ring at %p\n", EndpointTransferRing);
 
     if (TransferLength == 0)
-    {
-        RtlZeroMemory(&NormalTrb, sizeof(XHCI_TRB));
-        NormalTrb.GenericTRB.Word2 = 0;
-        NormalTrb.GenericTRB.Word3 = (NORMAL_TRB << 10) |
-                                    (1 << 5) | // IOC
-                                    1;         // cycle bit is fixed by enqueue
+        DPRINT("XHCI_SubmitBulkTransfer: Zero-length bulk transfer (ZLP / status phase)\n");
 
-        Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing, &NormalTrb, &NormalTrbPA);
+    Status = XHCI_BuildBulkNormalTrbs(SgList,
+                                      TransferLength,
+                                      NormalTrbs,
+                                      RTL_NUMBER_OF(NormalTrbs),
+                                      &TrbCount);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_SubmitBulkTransfer: invalid bulk SG list, sg=%d expected=%d\n",
+                SgList ? SgList->SgElementCount : 0,
+                TransferLength);
+        return MP_STATUS_FAILURE;
+    }
+
+    ASSERT(TrbCount > 0);
+    ASSERT(TrbCount <= RTL_NUMBER_OF(TrbPointers));
+
+    for (TrbIdx = 0; TrbIdx < TrbCount; TrbIdx++)
+    {
+        Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing,
+                                               &NormalTrbs[TrbIdx],
+                                               &NormalTrbPA);
         if (Status != MP_STATUS_SUCCESS)
         {
-            DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue zero-length TRB\n");
+            DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue bulk TRB %d\n", TrbIdx);
             return MP_STATUS_FAILURE;
         }
 
-        TrbPointers[TrbCount++] = NormalTrbPA;
-    }
-    else
-    {
-        for (SgIdx = 0; SgIdx < SgList->SgElementCount; SgIdx++)
-        {
-            ULONG ElementLength = SgList->SgElement[SgIdx].SgTransferLength;
-
-            if (ElementLength == 0)
-                continue;
-
-            BufferPA = SgList->SgElement[SgIdx].SgPhysicalAddress;
-
-            RtlZeroMemory(&NormalTrb, sizeof(XHCI_TRB));
-            NormalTrb.GenericTRB.Word0 = (ULONG)(BufferPA.QuadPart & 0xFFFFFFFF);
-            NormalTrb.GenericTRB.Word1 = (ULONG)(BufferPA.QuadPart >> 32);
-            NormalTrb.GenericTRB.Word2 = ElementLength;
-            NormalTrb.GenericTRB.Word3 = (NORMAL_TRB << 10) |
-                                        ((TrbCount + 1 < SgNonZeroCount) ? (1 << 4) : 0) | // CH
-                                        ((TrbCount + 1 == SgNonZeroCount) ? (1 << 5) : 0) | // IOC
-                                        1; // cycle bit is fixed by enqueue
-
-            Status = XHCI_EnqueueTRBOnTransferRing(EndpointTransferRing, &NormalTrb, &NormalTrbPA);
-            if (Status != MP_STATUS_SUCCESS)
-            {
-                DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue SG TRB %d\n", SgIdx);
-                return MP_STATUS_FAILURE;
-            }
-
-            TrbPointers[TrbCount++] = NormalTrbPA;
-        }
-
-        if (TrbCount != SgNonZeroCount)
-        {
-            DPRINT1("XHCI_SubmitBulkTransfer: SG TRB count mismatch, built=%d expected=%d\n",
-                    TrbCount, SgNonZeroCount);
-            return MP_STATUS_FAILURE;
-        }
+        TrbPointers[TrbIdx] = NormalTrbPA;
     }
 
     Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, TrbCount, TransferLength);
@@ -1638,13 +1569,13 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     }
     else
     {
-        DPRINT1("XHCI_SubmitBulkTransfer: Transfer registered in tracking system\n");
+        DPRINT("XHCI_SubmitBulkTransfer: Transfer registered in tracking system\n");
     }
 
     KeMemoryBarrier();
 
     // Ring doorbell to notify the controller (using the endpoint's context index)
-    DPRINT1("XHCI_SubmitBulkTransfer: About to ring doorbell for slot %d, endpoint %d\n", SlotId, ContextIndex);
+    DPRINT("XHCI_SubmitBulkTransfer: About to ring doorbell for slot %d, endpoint %d\n", SlotId, ContextIndex);
     Status = XHCI_RingDoorbell(XhciExtension, SlotId, ContextIndex);
     if (Status != MP_STATUS_SUCCESS)
     {
@@ -1652,7 +1583,7 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
         return MP_STATUS_FAILURE;
     }
 
-    DPRINT1("XHCI_SubmitBulkTransfer: Bulk transfer submitted successfully\n");
+    DPRINT("XHCI_SubmitBulkTransfer: Bulk transfer submitted successfully\n");
 
     // Process events after submission to catch any completions
     XHCI_ProcessEvent(XhciExtension);
@@ -1786,7 +1717,7 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     PXHCI_PENDING_TRANSFER PendingTransfer;
     ULONG CompletionCode, TransferLength, SlotId, EndpointId;
     
-    DPRINT1("XHCI_ProcessTransferEvent: Processing transfer completion event\n");
+    DPRINT("XHCI_ProcessTransferEvent: Processing transfer completion event\n");
     
     // Extract event data
     TrbPointer.LowPart = EventTrb->TransferEventTRB.TRBPtrLo;
@@ -1796,12 +1727,12 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     SlotId = EventTrb->TransferEventTRB.SlotID;
     EndpointId = EventTrb->TransferEventTRB.EndpointID;
     
-    DPRINT1("XHCI_ProcessTransferEvent: TRB=0x%I64x, Slot=%d, EP=%d, Code=%d, Length=%d\n",
+    DPRINT("XHCI_ProcessTransferEvent: TRB=0x%I64x, Slot=%d, EP=%d, Code=%d, Length=%d\n",
             TrbPointer.QuadPart, SlotId, EndpointId, CompletionCode, TransferLength);
     
     // Check for slot ID mismatches - this may indicate a problem with device context setup
     if (SlotId == 0) {
-        DPRINT1("XHCI_ProcessTransferEvent: WARNING - Transfer event reports slot ID 0, this may indicate a controller issue\n");
+        DPRINT("XHCI_ProcessTransferEvent: WARNING - Transfer event reports slot ID 0, this may indicate a controller issue\n");
     }
     
     // Find the pending transfer
@@ -1809,7 +1740,7 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     if (PendingTransfer)
     {
         // Complete the transfer
-        DPRINT1("XHCI_ProcessTransferEvent: Found pending transfer, completing\n");
+        DPRINT("XHCI_ProcessTransferEvent: Found pending transfer, completing\n");
         
         // Update transfer status based on completion code
         switch (CompletionCode)
@@ -1825,14 +1756,14 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
                 break;
             case TRB_ERROR:
                 PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_XACT_ERROR;
-                DPRINT1("XHCI_ProcessTransferEvent: TRB_ERROR detected (code=5)\n");
+                DPRINT("XHCI_ProcessTransferEvent: TRB_ERROR detected (code=5)\n");
                 break;
             case DATA_BUFFER_ERROR:
                 PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_DATA_BUFFER_ERROR;
                 break;
             default:
                 PendingTransfer->XhciTransfer->USBDStatus = USBD_STATUS_XACT_ERROR;
-                DPRINT1("XHCI_ProcessTransferEvent: Unknown completion code %d\n", CompletionCode);
+                DPRINT("XHCI_ProcessTransferEvent: Unknown completion code %d\n", CompletionCode);
                 break;
         }
         
@@ -1843,37 +1774,37 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
         {
             // For successful transfers, actual transferred = requested
             ActualTransferred = PendingTransfer->RequestedLength;
-            DPRINT1("XHCI_ProcessTransferEvent: SUCCESS - using requested length %d\n", ActualTransferred);
+            DPRINT("XHCI_ProcessTransferEvent: SUCCESS - using requested length %d\n", ActualTransferred);
         }
         else if (CompletionCode == SHORT_PACKET)
         {
             // For short packet transfers, calculate from event data
             ActualTransferred = PendingTransfer->RequestedLength - TransferLength;
-            DPRINT1("XHCI_ProcessTransferEvent: SHORT_PACKET - calculated %d (req=%d, not_xfer=%d)\n", 
+            DPRINT("XHCI_ProcessTransferEvent: SHORT_PACKET - calculated %d (req=%d, not_xfer=%d)\n", 
                     ActualTransferred, PendingTransfer->RequestedLength, TransferLength);
         }
         else
         {
             // For error conditions, no data was transferred
             ActualTransferred = 0;
-            DPRINT1("XHCI_ProcessTransferEvent: ERROR (code=%d) - setting transferred to 0\n", CompletionCode);
+            DPRINT("XHCI_ProcessTransferEvent: ERROR (code=%d) - setting transferred to 0\n", CompletionCode);
         }
         
         // Ensure we don't report negative transfer lengths
         if ((LONG)ActualTransferred < 0)
         {
-            DPRINT1("XHCI_ProcessTransferEvent: WARNING - ActualTransferred was negative (%d), setting to 0\n", 
+            DPRINT("XHCI_ProcessTransferEvent: WARNING - ActualTransferred was negative (%d), setting to 0\n", 
                     (LONG)ActualTransferred);
             ActualTransferred = 0;
         }
         
         PendingTransfer->XhciTransfer->TransferLen = ActualTransferred;
         
-        DPRINT1("XHCI_ProcessTransferEvent: Final - Requested=%d, NotTransferred=%d, ActualTransferred=%d, Status=0x%x\n",
+        DPRINT("XHCI_ProcessTransferEvent: Final - Requested=%d, NotTransferred=%d, ActualTransferred=%d, Status=0x%x\n",
                 PendingTransfer->RequestedLength, TransferLength, ActualTransferred, 
                 PendingTransfer->XhciTransfer->USBDStatus);
         
-        DPRINT1("XHCI_ProcessTransferEvent: About to notify USBPORT with length %d\n", ActualTransferred);
+        DPRINT("XHCI_ProcessTransferEvent: About to notify USBPORT with length %d\n", ActualTransferred);
         
         // Mark transfer as completed and notify USB port driver
         XHCI_CompleteTransfer(XhciExtension, SlotId, EndpointId, TrbPointer, ActualTransferred, 
@@ -1884,7 +1815,7 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     }
     else
     {
-        DPRINT1("XHCI_ProcessTransferEvent: No pending transfer found for TRB 0x%I64x\n", TrbPointer.QuadPart);
+        DPRINT("XHCI_ProcessTransferEvent: No pending transfer found for TRB 0x%I64x\n", TrbPointer.QuadPart);
     }
 }
 
@@ -1980,14 +1911,14 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
 {
     extern USBPORT_REGISTRATION_PACKET RegPacket;
     
-    DPRINT1("XHCI_CompleteTransfer: Slot=%d, EP=%d, TRB=0x%I64x, Length=%d, Status=0x%x\n",
+    DPRINT("XHCI_CompleteTransfer: Slot=%d, EP=%d, TRB=0x%I64x, Length=%d, Status=0x%x\n",
             SlotId, EndpointId, TrbPointer.QuadPart, TransferLength, USBDStatus);
     
     // Find the pending transfer to get the required parameters
     PXHCI_PENDING_TRANSFER PendingTransfer = FindPendingTransfer(TrbPointer);
     if (PendingTransfer && PendingTransfer->XhciTransfer && PendingTransfer->XhciEndpoint)
     {
-        DPRINT1("XHCI_CompleteTransfer: Notifying USB port driver about transfer completion\n");
+        DPRINT("XHCI_CompleteTransfer: Notifying USB port driver about transfer completion\n");
         
         // CRITICAL FIX: Update transfer ring dequeue pointer
         // This is essential to prevent the ring from appearing "full" to the controller
@@ -2000,7 +1931,7 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
             // dequeue pointer based on the number of TRBs that were part of this transfer
             ULONG TrbsToAdvance = PendingTransfer->TrbCount;
             
-            DPRINT1("XHCI_CompleteTransfer: Advancing dequeue pointer by %d TRBs (current dequeue=%p)\n",
+            DPRINT("XHCI_CompleteTransfer: Advancing dequeue pointer by %d TRBs (current dequeue=%p)\n",
                     TrbsToAdvance, TransferRing->dequeue_pointer);
             
             // Advance dequeue pointer by the number of TRBs in this transfer
@@ -2016,18 +1947,18 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
                     NewDequeue = &(TransferRing->firstSeg.XhciTrb[0]);
                     // Update consumer cycle state when wrapping
                     TransferRing->ConsumerCycleState = TransferRing->ConsumerCycleState ? 0 : 1;
-                    DPRINT1("XHCI_CompleteTransfer: Transfer ring wrapped at TRB %d, new consumer cycle state %d\n", 
+                    DPRINT("XHCI_CompleteTransfer: Transfer ring wrapped at TRB %d, new consumer cycle state %d\n", 
                             i, TransferRing->ConsumerCycleState);
                 }
                 
                 TransferRing->dequeue_pointer = NewDequeue;
                 
-                DPRINT1("XHCI_CompleteTransfer: Advanced dequeue pointer %d/%d from %p to %p\n",
+                DPRINT("XHCI_CompleteTransfer: Advanced dequeue pointer %d/%d from %p to %p\n",
                         i + 1, TrbsToAdvance, CurrentDequeue, NewDequeue);
             }
             
             // Log final ring state after update for debugging
-            DPRINT1("XHCI_CompleteTransfer: Final ring state - enqueue=%p, dequeue=%p, producer_cycle=%d, consumer_cycle=%d\n",
+            DPRINT("XHCI_CompleteTransfer: Final ring state - enqueue=%p, dequeue=%p, producer_cycle=%d, consumer_cycle=%d\n",
                     TransferRing->enqueue_pointer, TransferRing->dequeue_pointer, 
                     TransferRing->ProducerCycleState, TransferRing->ConsumerCycleState);
         }
@@ -2041,7 +1972,7 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
             // The XhciEndpoint should be a USBPORT_ENDPOINT structure
             PUSBPORT_ENDPOINT UsbPortEndpoint = (PUSBPORT_ENDPOINT)PendingTransfer->XhciEndpoint;
             
-            DPRINT1("XHCI_CompleteTransfer: Updating endpoint frame number from %d to %d\n", 
+            DPRINT("XHCI_CompleteTransfer: Updating endpoint frame number from %d to %d\n", 
                     UsbPortEndpoint->FrameNumber, CurrentFrameNumber);
                     
             // Update the endpoint's frame number to signal that it has advanced
@@ -2057,7 +1988,7 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
     }
     else
     {
-        DPRINT1("XHCI_CompleteTransfer: ERROR - Could not find transfer context for completion\n");
+        DPRINT("XHCI_CompleteTransfer: ERROR - Could not find transfer context for completion\n");
     }
 }
 
@@ -3078,12 +3009,12 @@ XHCI_GetCurrentFrameNumber(IN PXHCI_EXTENSION XhciExtension)
     PULONG RunTimeRegisterBase;
     ULONG MFIndex;
     
-    DPRINT1("XHCI_GetCurrentFrameNumber: Reading current frame number\n");
+    DPRINT("XHCI_GetCurrentFrameNumber: Reading current frame number\n");
     
     RunTimeRegisterBase = XhciExtension->RunTimeRegisterBase;
     if (!RunTimeRegisterBase)
     {
-        DPRINT1("XHCI_GetCurrentFrameNumber: RunTimeRegisterBase is NULL\n");
+        DPRINT("XHCI_GetCurrentFrameNumber: RunTimeRegisterBase is NULL\n");
         return 0;
     }
     
@@ -3094,7 +3025,7 @@ XHCI_GetCurrentFrameNumber(IN PXHCI_EXTENSION XhciExtension)
     // Extract the 14-bit microframe index (bits 0-13)
     MFIndex &= 0x3FFF;
     
-    DPRINT1("XHCI_GetCurrentFrameNumber: Current MFINDEX = %d\n", MFIndex);
+    DPRINT("XHCI_GetCurrentFrameNumber: Current MFINDEX = %d\n", MFIndex);
     
     // Convert microframe index to frame number (divide by 8 since there are 8 microframes per frame)
     return MFIndex / 8;
