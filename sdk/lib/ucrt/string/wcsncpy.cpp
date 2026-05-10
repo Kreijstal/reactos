@@ -12,7 +12,7 @@
 #pragma warning(disable:__WARNING_POSTCONDITION_NULLTERMINATION_VIOLATION) // 26036
 
 
-#ifdef _M_ARM
+#ifdef _MSC_VER
     #pragma function(wcsncpy)
 #endif
 

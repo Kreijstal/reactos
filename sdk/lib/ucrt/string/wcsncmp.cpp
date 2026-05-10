@@ -19,7 +19,7 @@
 
 
 
-#ifdef _M_ARM
+#ifdef _MSC_VER
     #pragma function(wcsncmp)
 #endif
 

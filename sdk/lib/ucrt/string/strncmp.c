@@ -11,7 +11,7 @@
 
 #include <string.h>
 
-#ifdef _M_ARM
+#ifdef _MSC_VER
     #pragma function(strncmp)
 #endif
 
