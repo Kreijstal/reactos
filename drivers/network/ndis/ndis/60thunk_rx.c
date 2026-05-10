@@ -398,6 +398,7 @@ Ndis6FilterTerminalReceive(
     if (TermCount <= 30)
     {
         BOOLEAN HasProto = !IsListEmpty(&Adapter->ProtocolListHead);
+        UNREFERENCED_PARAMETER(HasProto);
         DPRINT("NDIS6-RX: TerminalReceive #%ld HasProtocol=%d Flags=0x%lx\n",
                  TermCount, HasProto, ReceiveFlags);
     }
@@ -451,6 +452,7 @@ Ndis6FilterTerminalReceive(
             if (ic <= 5)
             {
                 BOOLEAN HasProto = !IsListEmpty(&Adapter->ProtocolListHead);
+                UNREFERENCED_PARAMETER(HasProto);
                 DPRINT("NDIS6-RX: MiniIndicateReceivePacket #%ld PacketCount=%u HasProtocol=%d\n",
                          ic, PacketCount, HasProto);
             }
