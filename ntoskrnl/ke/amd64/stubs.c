@@ -120,7 +120,11 @@ KeExpandKernelStackAndCalloutEx(
      * KiCalloutOnNewStack assembly helper.
      */
     CurrentThread->StackBase = NewStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     CurrentThread->StackLimit = (volatile PVOID)NewStackLimit;
+#else
+    CurrentThread->StackLimit = (ULONG_PTR)NewStackLimit;
+#endif
     CurrentThread->InitialStack = NewStackBase;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     CurrentEthread->LargeStack = TRUE;
@@ -132,7 +136,11 @@ KeExpandKernelStackAndCalloutEx(
 
     /* Restore the thread's original stack bookkeeping. */
     CurrentThread->StackBase = SavedStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
+#else
+    CurrentThread->StackLimit = SavedStackLimit;
+#endif
     CurrentThread->InitialStack = SavedInitialStack;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     CurrentEthread->LargeStack = SavedLargeStack;
