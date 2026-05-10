@@ -1778,12 +1778,25 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
     PMEMORY_SECTION_NAME SectionName = NULL;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 
+    /* Vista+ Windows accepts either PROCESS_QUERY_INFORMATION or
+     * PROCESS_QUERY_LIMITED_INFORMATION for NtQueryVirtualMemory; fall
+     * back to the latter to match handles opened by Cygwin/MSYS2 fork
+     * emulation. */
     Status = ObReferenceObjectByHandle(ProcessHandle,
                                        PROCESS_QUERY_INFORMATION,
                                        NULL,
                                        PreviousMode,
                                        (PVOID*)(&Process),
                                        NULL);
+    if (Status == STATUS_ACCESS_DENIED)
+    {
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_LIMITED_INFORMATION,
+                                           NULL,
+                                           PreviousMode,
+                                           (PVOID*)(&Process),
+                                           NULL);
+    }
 
     if (!NT_SUCCESS(Status))
     {
