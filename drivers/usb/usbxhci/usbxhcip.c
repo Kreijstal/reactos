@@ -1338,11 +1338,13 @@ XHCI_SubmitControlTransfer(IN PXHCI_EXTENSION XhciExtension,
 
     // Verify the transfer ring PA matches what's in the device context
     PHYSICAL_ADDRESS ExpectedRingPA = MmGetPhysicalAddress(&SlotTransferRing->firstSeg.XhciTrb[0]);
+    UNREFERENCED_PARAMETER(ExpectedRingPA);
     DPRINT("XHCI_SubmitControlTransfer: Transfer ring PA = 0x%I64x\n", ExpectedRingPA.QuadPart);
 
     // Also log the DCBAA entry for this slot
     if (SlotId > 0 && SlotId <= MAX_DEVICE_SLOTS) {
         PHYSICAL_ADDRESS DeviceContextPA = HcResourcesVA->DCBAA.ContextBaseAddr[SlotId];
+        UNREFERENCED_PARAMETER(DeviceContextPA);
         DPRINT("XHCI_SubmitControlTransfer: DCBAA[%d] points to device context at PA 0x%I64x\n",
                 SlotId, DeviceContextPA.QuadPart);
     }
