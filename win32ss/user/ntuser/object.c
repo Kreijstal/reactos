@@ -661,8 +661,8 @@ UserDereferenceObject(PVOID Object)
         if (entry == NULL)
         {
             PULONG dumpwords = (PULONG)Object;
-            ERR("UserDereferenceObject: ObjHead=%p h=0x%lx (entry NULL)\n",
-                    Object, (ULONG)ObjHead->h);
+            ERR("UserDereferenceObject: ObjHead=%p h=%p (entry NULL)\n",
+                    Object, ObjHead->h);
             ERR("  bytes+0x00: %08lx %08lx %08lx %08lx\n",
                     dumpwords[0], dumpwords[1], dumpwords[2], dumpwords[3]);
             ERR("  bytes+0x10: %08lx %08lx %08lx %08lx\n",
