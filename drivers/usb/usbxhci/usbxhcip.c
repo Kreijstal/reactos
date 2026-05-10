@@ -1494,7 +1494,7 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
                        IN PUSBPORT_SCATTER_GATHER_LIST SgList)
 {
     PUSBPORT_TRANSFER_PARAMETERS TransferParameters;
-    XHCI_TRB NormalTrbs[XHCI_MAX_BULK_NORMAL_TRBS];
+    PXHCI_TRB NormalTrbs;
     ULONG TransferLength;
     ULONG TrbCount;
     ULONG TrbIdx;
@@ -1502,10 +1502,25 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     ULONG ContextIndex;
     MPSTATUS Status;
     PHYSICAL_ADDRESS NormalTrbPA;
-    PHYSICAL_ADDRESS TrbPointers[XHCI_MAX_BULK_NORMAL_TRBS];
+    PPHYSICAL_ADDRESS TrbPointers;
     PXHCI_RING EndpointTransferRing;
 
     DPRINT("XHCI_SubmitBulkTransfer: function initiated\n");
+
+    NormalTrbs = ExAllocatePoolZero(NonPagedPool,
+                                    sizeof(*NormalTrbs) * XHCI_MAX_BULK_NORMAL_TRBS,
+                                    'BxhX');
+    TrbPointers = ExAllocatePoolZero(NonPagedPool,
+                                     sizeof(*TrbPointers) * XHCI_MAX_BULK_NORMAL_TRBS,
+                                     'BxhX');
+    if (NormalTrbs == NULL || TrbPointers == NULL)
+    {
+        if (NormalTrbs != NULL)
+            ExFreePoolWithTag(NormalTrbs, 'BxhX');
+        if (TrbPointers != NULL)
+            ExFreePoolWithTag(TrbPointers, 'BxhX');
+        return MP_STATUS_FAILURE;
+    }
 
     TransferParameters = XhciTransfer->TransferParameters;
     TransferLength = TransferParameters->TransferBufferLength;
@@ -1523,7 +1538,8 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     EndpointTransferRing = &XhciEndpoint->TransferRing;
     if (EndpointTransferRing->enqueue_pointer == NULL) {
         DPRINT1("XHCI_SubmitBulkTransfer: Endpoint transfer ring not initialized\n");
-        return MP_STATUS_FAILURE;
+        Status = MP_STATUS_FAILURE;
+        goto Cleanup;
     }
 
     DPRINT("XHCI_SubmitBulkTransfer: Using endpoint transfer ring at %p\n", EndpointTransferRing);
@@ -1534,18 +1550,19 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     Status = XHCI_BuildBulkNormalTrbs(SgList,
                                       TransferLength,
                                       NormalTrbs,
-                                      RTL_NUMBER_OF(NormalTrbs),
+                                      XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitBulkTransfer: invalid bulk SG list, sg=%d expected=%d\n",
                 SgList ? SgList->SgElementCount : 0,
                 TransferLength);
-        return MP_STATUS_FAILURE;
+        Status = MP_STATUS_FAILURE;
+        goto Cleanup;
     }
 
     ASSERT(TrbCount > 0);
-    ASSERT(TrbCount <= RTL_NUMBER_OF(TrbPointers));
+    ASSERT(TrbCount <= XHCI_MAX_BULK_NORMAL_TRBS);
 
     for (TrbIdx = 0; TrbIdx < TrbCount; TrbIdx++)
     {
@@ -1555,7 +1572,8 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
         if (Status != MP_STATUS_SUCCESS)
         {
             DPRINT1("XHCI_SubmitBulkTransfer: Failed to enqueue bulk TRB %d\n", TrbIdx);
-            return MP_STATUS_FAILURE;
+            Status = MP_STATUS_FAILURE;
+            goto Cleanup;
         }
 
         TrbPointers[TrbIdx] = NormalTrbPA;
@@ -1580,7 +1598,8 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitBulkTransfer: Failed to ring doorbell\n");
-        return MP_STATUS_FAILURE;
+        Status = MP_STATUS_FAILURE;
+        goto Cleanup;
     }
 
     DPRINT("XHCI_SubmitBulkTransfer: Bulk transfer submitted successfully\n");
@@ -1588,7 +1607,12 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     // Process events after submission to catch any completions
     XHCI_ProcessEvent(XhciExtension);
 
-    return MP_STATUS_SUCCESS;
+    Status = MP_STATUS_SUCCESS;
+
+Cleanup:
+    ExFreePoolWithTag(TrbPointers, 'BxhX');
+    ExFreePoolWithTag(NormalTrbs, 'BxhX');
+    return Status;
 }
 
 MPSTATUS
