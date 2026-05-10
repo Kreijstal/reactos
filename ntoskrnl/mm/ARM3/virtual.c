@@ -1743,13 +1743,25 @@ MiQueryMemoryBasicInformation(IN HANDLE ProcessHandle,
     }
     else
     {
-        /* Reference the target process */
+        /* Reference the target process. Vista+ Windows accepts either
+         * PROCESS_QUERY_INFORMATION or PROCESS_QUERY_LIMITED_INFORMATION
+         * for NtQueryVirtualMemory, so fall back to the latter to remain
+         * compatible with handles opened by Cygwin/MSYS2 fork emulation. */
         Status = ObReferenceObjectByHandle(ProcessHandle,
                                            PROCESS_QUERY_INFORMATION,
                                            PsProcessType,
                                            ExGetPreviousMode(),
                                            (PVOID*)&TargetProcess,
                                            NULL);
+        if (Status == STATUS_ACCESS_DENIED)
+        {
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+                                               PsProcessType,
+                                               ExGetPreviousMode(),
+                                               (PVOID*)&TargetProcess,
+                                               NULL);
+        }
         if (!NT_SUCCESS(Status)) return Status;
 
         /* Attach to it now */
