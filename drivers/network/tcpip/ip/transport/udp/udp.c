@@ -362,6 +362,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
              entry = entry->Flink)
         {
             PADDRESS_FILE Af = CONTAINING_RECORD(entry, ADDRESS_FILE, ListEntry);
+            UNREFERENCED_PARAMETER(Af);
             DPRINT("TCPIP-UDP:   bound: addr=0x%08x port=%u proto=%d\n",
                      Af->Address.Address.IPv4Address,
                      WN2H(Af->Port), Af->Protocol);
