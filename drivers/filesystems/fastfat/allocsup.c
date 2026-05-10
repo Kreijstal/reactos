@@ -5420,6 +5420,15 @@ Return Value:
 #undef RTL_BITMAP
 #undef _RTL_BITMAP
 
+static
+BOOLEAN
+FatRawCheckBit(
+    IN PRTL_BITMAP BitMap,
+    IN ULONG Bit)
+{
+    return (BitMap->Buffer[Bit / 32] >> (Bit % 32)) & 1;
+}
+
 //
 //  Read ByteCount bytes starting at Lbo (partition-relative, sector-aligned)
 //  from the underlying storage into Buffer, bypassing CC.  Returns the IRP
@@ -5591,7 +5600,7 @@ Arguments:
                     continue;
                 }
 
-                if (RtlCheckBit( RawBitMap, FatIndex - BitMapStartIndex ) == 0) {
+                if (FatRawCheckBit( RawBitMap, FatIndex - BitMapStartIndex ) == 0) {
                     RtlSetBits( RawBitMap, FatIndex - BitMapStartIndex, 1 );
                     NewlySet++;
                 }
@@ -5643,7 +5652,7 @@ Arguments:
                     }
 
                     if (FatEntry != FAT_CLUSTER_AVAILABLE) {
-                        if (RtlCheckBit( RawBitMap, FatIndex - BitMapStartIndex ) == 0) {
+                        if (FatRawCheckBit( RawBitMap, FatIndex - BitMapStartIndex ) == 0) {
                             RtlSetBits( RawBitMap, FatIndex - BitMapStartIndex, 1 );
                             NewlySet++;
                         }
@@ -5883,7 +5892,7 @@ FatReconMarkChain(
         if (Cluster >= StartIndex && Cluster <= EndIndex) {
             ULONG Bit = Cluster - BitMapStartIndex;
             if (Bit < RawBitMap->SizeOfBitMap) {
-                if (RtlCheckBit( RawBitMap, Bit ) == 0) {
+                if (FatRawCheckBit( RawBitMap, Bit ) == 0) {
                     RtlSetBits( RawBitMap, Bit, 1 );
                     NewlySet++;
                 }
@@ -6269,4 +6278,3 @@ Arguments:
     } _SEH2_END;
 }
 #endif
-
