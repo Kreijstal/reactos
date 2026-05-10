@@ -10,7 +10,7 @@
 
 #include <string.h>
 
-#if defined _M_ARM
+#if defined _MSC_VER
     #pragma function(strncpy)
 #endif
 
