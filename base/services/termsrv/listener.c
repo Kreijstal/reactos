@@ -1219,7 +1219,7 @@ TermSrvBuildIncomingTempRoot(
 
     _snwprintf(Root,
                MAX_PATH,
-               L"%s%s\%lu",
+               L"%s%s\\%lu",
                TempPath,
                TERMSRV_CLIPRDR_TEMP_ROOT,
                GetTickCount());
