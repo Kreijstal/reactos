@@ -333,10 +333,17 @@ WSPSocket(int AddressFamily,
         }
     }
 
-    /* Set up Object Attributes */
+    /* Set up Object Attributes. Match Windows winsock: sockets default to
+     * non-inheritable; callers that want CreateProcess(bInheritHandles=TRUE)
+     * inheritance must SetHandleInformation explicitly, and POSIX layers
+     * (Cygwin/MSYS2) rely on the absence of HANDLE_FLAG_INHERIT to take the
+     * WSADuplicateSocket+WSASocket(FROM_PROTOCOL_INFO) fixup path on
+     * fork/exec. Inheriting raw socket handles via OBJ_INHERIT bypasses
+     * msafd's per-process SOCKET_INFORMATION bookkeeping and surfaces as
+     * WSAENOTSOCK in the child. */
     InitializeObjectAttributes (&Object,
                                 &DevName,
-                                OBJ_CASE_INSENSITIVE | OBJ_INHERIT,
+                                OBJ_CASE_INSENSITIVE,
                                 0,
                                 0);
 
