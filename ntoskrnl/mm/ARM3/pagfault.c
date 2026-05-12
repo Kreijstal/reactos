@@ -83,7 +83,7 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - GuaranteedSize);
 
     /* Do we have at least one page between here and the end of the stack? */
-    if (((ULONG_PTR)NextStackAddress - PAGE_SIZE) <= (ULONG_PTR)DeallocationStack)
+    if (((ULONG_PTR)NextStackAddress - PAGE_SIZE) < (ULONG_PTR)DeallocationStack)
     {
         /* We don't -- Trying to make this guard page valid now */
         DPRINT1("Close to our death...\n");
