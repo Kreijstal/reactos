@@ -1177,9 +1177,9 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
         return MP_STATUS_FAILURE;
     }
 
-    // Check if we're at the Link TRB (index 255) and need to wrap around
+    // Check if we're at the Link TRB and need to wrap around
     LONG TrbIndex = enqueue_pointer - &(TransferRing->firstSeg.XhciTrb[0]);
-    if (TrbIndex == 255)
+    if (TrbIndex == XHCI_TRANSFER_RING_LINK_INDEX)
     {
         /*
          * We're sitting on the Link TRB.  Per xHCI 4.9.2.2, software must
@@ -1195,7 +1195,7 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
          * with TC=1 and pointer back to index 0; we only need to refresh its
          * cycle bit here, preserving TRB type / Toggle Cycle.
          */
-        PXHCI_TRB LinkTrb = &(TransferRing->firstSeg.XhciTrb[255]);
+        PXHCI_TRB LinkTrb = &(TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX]);
         LinkTrb->GenericTRB.Word3 =
             (LinkTrb->GenericTRB.Word3 & ~1u) | (TransferRing->ProducerCycleState & 1u);
 
@@ -1238,9 +1238,9 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
     
     // Advance enqueue pointer
     enqueue_pointer = enqueue_pointer + 1;
-    if (enqueue_pointer >= &(TransferRing->firstSeg.XhciTrb[255]))
+    if (enqueue_pointer >= &(TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX]))
     {
-        PXHCI_TRB LinkTrb = &(TransferRing->firstSeg.XhciTrb[255]);
+        PXHCI_TRB LinkTrb = &(TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX]);
         LinkTrb->GenericTRB.Word3 =
             (LinkTrb->GenericTRB.Word3 & ~1u) | (TransferRing->ProducerCycleState & 1u);
 
@@ -1277,12 +1277,10 @@ XHCI_InitializeTransferRing(IN PXHCI_RING TransferRing)
     TransferRing->ProducerCycleState = 1;
     TransferRing->ConsumerCycleState = 1;
     
-    // Zero out all TRBs (indices 0-255)
-    RtlZeroMemory(&TransferRing->firstSeg.XhciTrb[0], sizeof(XHCI_TRB) * 256);
+    RtlZeroMemory(&TransferRing->firstSeg.XhciTrb[0],
+                  sizeof(XHCI_TRB) * XHCI_RING_TRB_COUNT);
     
-    // Set up Link TRB at the last position (index 255)
-    // This makes indices 0-254 usable for actual transfer TRBs
-    LinkTrb = &TransferRing->firstSeg.XhciTrb[255];
+    LinkTrb = &TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX];
     RingStartPA = MmGetPhysicalAddress(&TransferRing->firstSeg.XhciTrb[0]);
     
     // Configure Link TRB to point back to start of ring
@@ -1293,7 +1291,8 @@ XHCI_InitializeTransferRing(IN PXHCI_RING TransferRing)
                                 (1 << 1) |          // Toggle Cycle bit
                                 1;                  // Cycle bit (matches initial producer cycle state)
     
-    DPRINT1("XHCI_InitializeTransferRing: Transfer ring initialized with Link TRB at index 255 pointing to PA 0x%I64x\n", RingStartPA.QuadPart);
+    DPRINT1("XHCI_InitializeTransferRing: Transfer ring initialized with Link TRB at index %d pointing to PA 0x%I64x\n",
+            XHCI_TRANSFER_RING_LINK_INDEX, RingStartPA.QuadPart);
     return MP_STATUS_SUCCESS;
 }
 
@@ -1972,7 +1971,7 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
                 PXHCI_TRB NewDequeue = CurrentDequeue + 1;
                 
                 // Handle ring wrap-around if we reach the Link TRB
-                if (NewDequeue >= &(TransferRing->firstSeg.XhciTrb[255]))
+                if (NewDequeue >= &(TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX]))
                 {
                     // Skip over Link TRB and wrap to beginning
                     NewDequeue = &(TransferRing->firstSeg.XhciTrb[0]);
