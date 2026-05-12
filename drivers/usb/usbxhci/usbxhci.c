@@ -344,7 +344,7 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     PXHCI_TRB dequeue_pointer;
     ULONG TRBType;
     XHCI_EVENT_TRB eventTRB;
-    static ULONG DebugCounter = 0;
+    ULONG EventsProcessed = 0;
 
     HcResourcesVA = XhciExtension -> HcResourcesVA;
     HcResourcesPA = XhciExtension -> HcResourcesPA;
@@ -352,72 +352,25 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     RunTimeRegisterBase = XhciExtension-> RunTimeRegisterBase;
     dequeue_pointer = HcResourcesVA-> EventRing.dequeue_pointer;
 
-    // Enhanced debugging every 100 calls to avoid log spam but catch real events
-    DebugCounter++;
-    if ((DebugCounter % 100) == 1 || DebugCounter <= 10)
-    {
-        DPRINT1("XHCI_ProcessEvent: DEBUG #%d - dequeue_pointer=%p, ConsumerCycleState=%d\n", 
-                DebugCounter, dequeue_pointer, HcResourcesVA->EventRing.ConsumerCycleState);
-        DPRINT1("XHCI_ProcessEvent: First TRB content: Word0=0x%08x, Word1=0x%08x, Word2=0x%08x, Word3=0x%08x\n",
-                dequeue_pointer->GenericTRB.Word0, dequeue_pointer->GenericTRB.Word1,
-                dequeue_pointer->GenericTRB.Word2, dequeue_pointer->GenericTRB.Word3);
-        DPRINT1("XHCI_ProcessEvent: TRB Cycle bit = %d, Expected = %d\n",
-                dequeue_pointer->EventTRB.EventGenericTRB.CycleBit, HcResourcesVA->EventRing.ConsumerCycleState);
-    }
-
-    ULONG EventsProcessedInThisCall = 0;
-    const ULONG MaxEventsPerCall = 16; // Limit events processed per interrupt
-    PXHCI_TRB PreviousDequeuePointer = NULL;
-    ULONG SamePointerCount = 0;
-    
     while (TRUE)
     {
-        // Throttle event processing to prevent overwhelming the system
-        if (EventsProcessedInThisCall >= MaxEventsPerCall)
+        if (EventsProcessed >= 256)
         {
-            DPRINT1("XHCI_ProcessEvent: Event processing throttled at %d events, will continue in next interrupt\n", 
-                    MaxEventsPerCall);
+            DPRINT1("XHCI_ProcessEvent: event ring did not terminate after %lu TRBs\n",
+                    EventsProcessed);
             break;
-        }
-        
-        // Detect infinite loops with the same dequeue pointer
-        if (PreviousDequeuePointer == dequeue_pointer)
-        {
-            SamePointerCount++;
-            if (SamePointerCount >= 3)
-            {
-                DPRINT1("XHCI_ProcessEvent: ERROR - Infinite loop detected! Dequeue pointer %p stuck for %d iterations\n",
-                        dequeue_pointer, SamePointerCount);
-                DPRINT1("XHCI_ProcessEvent: Breaking loop to prevent system hang\n");
-                break;
-            }
-        }
-        else
-        {
-            SamePointerCount = 0;
-            PreviousDequeuePointer = dequeue_pointer;
         }
         
         eventTRB = (*dequeue_pointer).EventTRB;
         if (eventTRB.EventGenericTRB.CycleBit != HcResourcesVA->EventRing.ConsumerCycleState)
         {
-            if ((DebugCounter % 100) == 1 || DebugCounter <= 5)
-            {
-                DPRINT1("XHCI_ProcessEvent: cycle bit mismatch - TRB.CycleBit=%d, Expected=%d (no more events to process)\n",
-                        eventTRB.EventGenericTRB.CycleBit, HcResourcesVA->EventRing.ConsumerCycleState);
-            }
             break;
         }
         TRBType = eventTRB.EventGenericTRB.TRBType;
         
-        // Only log event processing for the first few or periodically
-        if (EventsProcessedInThisCall < 5 || (DebugCounter % 100) == 1)
-        {
-            DPRINT("XHCI_ProcessEvent: Processing TRB Type %d (0x%x), event #%d in this call\n", 
-                    TRBType, TRBType, EventsProcessedInThisCall + 1);
-        }
-        
-        EventsProcessedInThisCall++;
+        DPRINT("XHCI_ProcessEvent: Processing TRB Type %d (0x%x)\n",
+               TRBType, TRBType);
+        EventsProcessed++;
         
         switch (TRBType)
         {
@@ -429,12 +382,12 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
                 DPRINT("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT\n");
                 // Always process completion events regardless of success/failure
                 // The ProcessCommandCompletion function will handle the status appropriately
-                DPRINT1("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT, completion code %i\n",
-                         eventTRB.CommandCompletionTRB.CompletionCode);
+                DPRINT("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT, completion code %i\n",
+                       eventTRB.CommandCompletionTRB.CompletionCode);
                 XHCI_ProcessCommandCompletion(XhciExtension, &eventTRB);
                 break;
             case PORT_STATUS_CHANGE_EVENT: 
-                DPRINT1("XHCI_ProcessEvent: Port Status change event\n");
+                DPRINT("XHCI_ProcessEvent: Port Status change event\n");
                 /* Call a private function to handle port status events */
                 PXHCI_PortStatusChange(XhciExtension, eventTRB.PortStatusChangeTRB.PortID);
                 break;
@@ -723,7 +676,6 @@ XHCI_InitializeResources(IN PXHCI_EXTENSION XhciExtension,
     //Primary Interrupter init
     RunTimeRegisterBase =  XhciExtension -> RunTimeRegisterBase;
 
-    // dont change imod now
     erstz.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_ERSTSZ) ;
     erstz.EventRingSegTableSize = 1;
     DPRINT1("XHCI_InitializeResources  : erstz.AsULONG   %p\n", erstz.AsULONG );
@@ -1529,6 +1481,7 @@ XHCI_PollEndpoint(IN PVOID xhciExtension,
                   IN PVOID xhciEndpoint)
 {
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     static ULONG PollCount = 0;
     
     PollCount++;
@@ -1542,14 +1495,21 @@ XHCI_PollEndpoint(IN PVOID xhciExtension,
                     XhciEndpoint->EndpointState);
         }
     }
+
+    if (XhciExtension)
+        XHCI_ProcessEvent(XhciExtension);
 }
 
 VOID
 NTAPI
 XHCI_CheckController(IN PVOID xhciExtension)
 {
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
+
     DPRINT("XHCI_CheckController: function initiated\n");
-  //  XHCI_ProcessEvent(xhciExtension);
+
+    if (XhciExtension)
+        XHCI_ProcessEvent(XhciExtension);
 }
 
 ULONG
