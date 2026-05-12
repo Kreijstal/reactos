@@ -721,6 +721,7 @@ XHCI_InitializeResources(IN PXHCI_EXTENSION XhciExtension,
 
     HcResourcesVA->TransferRing.enqueue_pointer = &(HcResourcesVA->TransferRing.firstSeg.XhciTrb[0]);
     HcResourcesVA->TransferRing.dequeue_pointer = &(HcResourcesVA->TransferRing.firstSeg.XhciTrb[0]);
+    HcResourcesVA->TransferRing.UsedTrbs = 0;
     for (i=0; i<256; i++)
     {
         HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word0 = 0;
