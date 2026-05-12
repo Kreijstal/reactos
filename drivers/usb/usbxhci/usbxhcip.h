@@ -125,6 +125,7 @@ XHCI_SubmitIsochronousTransfer(IN PXHCI_EXTENSION XhciExtension,
 /* Device context and TRB management functions *********************************************************/
 
 #define XHCI_MAX_BULK_NORMAL_TRBS 255
+#define XHCI_MAX_NORMAL_TRB_TRANSFER_LENGTH 0x10000
 
 MPSTATUS
 NTAPI
