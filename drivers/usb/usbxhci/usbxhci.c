@@ -719,18 +719,7 @@ XHCI_InitializeResources(IN PXHCI_EXTENSION XhciExtension,
 
     /* Initalize Transfer Ring */
 
-    HcResourcesVA->TransferRing.enqueue_pointer = &(HcResourcesVA->TransferRing.firstSeg.XhciTrb[0]);
-    HcResourcesVA->TransferRing.dequeue_pointer = &(HcResourcesVA->TransferRing.firstSeg.XhciTrb[0]);
-    HcResourcesVA->TransferRing.UsedTrbs = 0;
-    for (i=0; i<256; i++)
-    {
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word0 = 0;
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word1 = 0;
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word2 = 0;
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word3 = 0;
-    }
-    HcResourcesVA->TransferRing.ProducerCycleState = 1;
-    HcResourcesVA->TransferRing.ConsumerCycleState = 1;
+    XHCI_InitializeTransferRing(&HcResourcesVA->TransferRing);
 
     /* Initialize Per-Slot Transfer Rings for EP0 */
     DPRINT1("XHCI_InitializeResources: Initializing per-slot transfer rings\n");
