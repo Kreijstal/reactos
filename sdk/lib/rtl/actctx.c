@@ -696,6 +696,7 @@ static const struct olemisc_entry olemisc_values[] =
 static ACTIVATION_CONTEXT system_actctx = { ACTCTX_MAGIC, 1 };
 static ACTIVATION_CONTEXT *process_actctx = &system_actctx;
 static ACTIVATION_CONTEXT *implicit_actctx = &system_actctx;
+static RTL_RUN_ONCE implicit_actctx_run_once = RTL_RUN_ONCE_INIT;
 
 static WCHAR *strdupW(const WCHAR* str)
 {
@@ -2988,11 +2989,11 @@ static NTSTATUS parse_manifest( struct actctx_loader* acl, struct assembly_ident
         status = parse_manifest_buffer( acl, assembly, ai, &xmlbuf );
         RtlFreeHeap( GetProcessHeap(), 0, new_buff );
     }
-    DPRINT1("actctx: parse_manifest('%S', dir='%S', shared=%d) -> 0x%08lx\n",
-            filename ? filename : L"(module)",
-            directory ? directory : L"(null)",
-            shared,
-            status);
+    DPRINT("actctx: parse_manifest('%S', dir='%S', shared=%d) -> 0x%08lx\n",
+           filename ? filename : L"(module)",
+           directory ? directory : L"(null)",
+           shared,
+           status);
     return status;
 }
 
@@ -3421,7 +3422,7 @@ static WCHAR *lookup_manifest_file( HANDLE dir, struct assembly_identity *ai )
         }
     }
     if (ret)
-        DPRINT1("actctx: lookup_manifest_file matched '%S' for pattern '%S'\n", ret, lookup);
+        DPRINT("actctx: lookup_manifest_file matched '%S' for pattern '%S'\n", ret, lookup);
     else
         WARN("no matching file for %s\n", debugstr_w(lookup));
     RtlFreeHeap( GetProcessHeap(), 0, lookup );
@@ -3469,8 +3470,8 @@ static NTSTATUS lookup_winsxs(struct actctx_loader* acl, struct assembly_identit
     }
     if (!file)
     {
-        DPRINT1("actctx: lookup_winsxs found no manifest for %S %s\n",
-                ai->name, debugstr_version(&ai->version));
+        DPRINT("actctx: lookup_winsxs found no manifest for %S %s\n",
+               ai->name, debugstr_version(&ai->version));
         RtlFreeUnicodeString( &path_us );
         return STATUS_NO_SUCH_FILE;
     }
@@ -3491,15 +3492,15 @@ static NTSTATUS lookup_winsxs(struct actctx_loader* acl, struct assembly_identit
 
     if (!open_nt_file( &handle, &path_us ))
     {
-        DPRINT1("actctx: lookup_winsxs opening '%S' with directory key '%S'\n",
-                path_us.Buffer, file);
+        DPRINT("actctx: lookup_winsxs opening '%S' with directory key '%S'\n",
+               path_us.Buffer, file);
         io.Status = get_manifest_in_manifest_file(acl, &sxs_ai, path_us.Buffer, file, TRUE, handle);
         NtClose( handle );
     }
     else io.Status = STATUS_NO_SUCH_FILE;
 
-    DPRINT1("actctx: lookup_winsxs('%S' %s) -> 0x%08lx\n",
-            ai->name, debugstr_version(&ai->version), io.Status);
+    DPRINT("actctx: lookup_winsxs('%S' %s) -> 0x%08lx\n",
+           ai->name, debugstr_version(&ai->version), io.Status);
 
     RtlFreeHeap( GetProcessHeap(), 0, file );
     RtlFreeUnicodeString( &path_us );
@@ -3601,10 +3602,10 @@ static NTSTATUS parse_depend_manifests(struct actctx_loader* acl)
     for (i = 0; i < acl->num_dependencies; i++)
     {
         NTSTATUS dep_status = lookup_assembly(acl, &acl->dependencies[i]);
-        DPRINT1("actctx: dependency '%S' (%s) lookup -> 0x%08lx\n",
-                acl->dependencies[i].name,
-                debugstr_version(&acl->dependencies[i].version),
-                dep_status);
+        DPRINT("actctx: dependency '%S' (%s) lookup -> 0x%08lx\n",
+               acl->dependencies[i].name,
+               debugstr_version(&acl->dependencies[i].version),
+               dep_status);
         if (dep_status != STATUS_SUCCESS)
         {
             if (!acl->dependencies[i].optional && !acl->dependencies[i].delayed)
@@ -5542,6 +5543,40 @@ void actctx_init(void)
 #endif // __REACTOS__
 }
 
+static ULONG NTAPI init_implicit_actctx_once( PRTL_RUN_ONCE once, PVOID parameter, PVOID *context )
+{
+    ACTCTXW ctx;
+    HANDLE handle;
+    WCHAR buffer[1024];
+    NTSTATUS status;
+
+    ctx.cbSize   = sizeof(ctx);
+    ctx.dwFlags  = 0;
+    ctx.hModule  = NULL;
+    ctx.lpResourceName = NULL;
+    ctx.lpSource = buffer;
+    RtlStringCchCopyW(buffer, RTL_NUMBER_OF(buffer), SharedUserData->NtSystemRoot);
+    RtlStringCchCatW(buffer, RTL_NUMBER_OF(buffer), L"\\winsxs\\manifests\\systemcompatible.manifest");
+
+    status = RtlCreateActivationContext(0, (PVOID)&ctx, 0, NULL, NULL, &handle);
+    if (NT_SUCCESS(status))
+    {
+        implicit_actctx = check_actctx(handle);
+        return TRUE;
+    }
+
+    DPRINT1("Failed to create the implicit act ctx. Status: 0x%x!!!\n", status);
+    return FALSE;
+}
+
+static void init_implicit_actctx(void)
+{
+    RtlRunOnceExecuteOnce(&implicit_actctx_run_once,
+                          init_implicit_actctx_once,
+                          NULL,
+                          NULL);
+}
+
 
 /***********************************************************************
  * RtlCreateActivationContext (NTDLL.@)
@@ -6246,7 +6281,10 @@ NTSTATUS WINAPI RtlFindActivationContextSectionString( ULONG flags, const GUID *
         status = find_string( process_actctx, section_kind, section_name, flags, data );
 
     if (status != STATUS_SUCCESS)
+    {
+        init_implicit_actctx();
         status = find_string( implicit_actctx, section_kind, section_name, flags, data );
+    }
 
     DPRINT("RtlFindActivationContextSectionString() returns status %x\n", status);
     return status;
@@ -6289,7 +6327,10 @@ NTSTATUS WINAPI RtlFindActivationContextSectionGuid( ULONG flags, const GUID *ex
         status = find_guid( process_actctx, section_kind, guid, flags, data );
 
     if (status != STATUS_SUCCESS)
+    {
+        init_implicit_actctx();
         status = find_guid( implicit_actctx, section_kind, guid, flags, data );
+    }
 
     return status;
 }
@@ -6501,11 +6542,6 @@ NTSTATUS
 NTAPI
 RtlpInitializeActCtx(PVOID* pOldShimData)
 {
-    ACTCTXW ctx;
-    HANDLE handle;
-    WCHAR buffer[1024];
-    NTSTATUS Status;
-
     /* Initialize trace flags to WARN and ERR */
     __wine_dbch_actctx.flags = 0x03;
 
@@ -6515,25 +6551,7 @@ RtlpInitializeActCtx(PVOID* pOldShimData)
        Now that we have found the process_actctx we can initialize the process compat subsystem */
     LdrpInitializeProcessCompat(process_actctx, pOldShimData);
 
-    ctx.cbSize   = sizeof(ctx);
-    ctx.dwFlags  = 0;
-    ctx.hModule  = NULL;
-    ctx.lpResourceName = NULL;
-    ctx.lpSource = buffer;
-    RtlStringCchCopyW(buffer, RTL_NUMBER_OF(buffer), SharedUserData->NtSystemRoot);
-    RtlStringCchCatW(buffer, RTL_NUMBER_OF(buffer), L"\\winsxs\\manifests\\systemcompatible.manifest");
-
-    Status = RtlCreateActivationContext(0, (PVOID)&ctx, 0, NULL, NULL, &handle);
-    if (NT_SUCCESS(Status))
-    {
-        implicit_actctx = check_actctx(handle);
-    }
-    else
-    {
-        DPRINT1("Failed to create the implicit act ctx. Status: 0x%x!!!\n", Status);
-    }
-
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 #endif // __REACTOS__

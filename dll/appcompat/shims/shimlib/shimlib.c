@@ -22,7 +22,7 @@ typedef struct UsedShim
 } UsedShim, *pUsedShim;
 
 
-ULONG g_ShimEngDebugLevel = 0xffffffff;
+ULONG g_ShimEngDebugLevel = 0;
 static HINSTANCE g_ShimLib_hInstance;
 static HANDLE g_ShimLib_Heap;
 static PSLIST_HEADER g_UsedShims;
@@ -167,7 +167,7 @@ VOID SeiInitDebugSupport(VOID)
     static const UNICODE_STRING DebugKey = RTL_CONSTANT_STRING(L"SHIM_DEBUG_LEVEL");
     UNICODE_STRING DebugValue;
     NTSTATUS Status;
-    ULONG NewLevel = SEI_MSG;
+    ULONG NewLevel = 0;
     WCHAR Buffer[40];
 
     RtlInitEmptyUnicodeString(&DebugValue, Buffer, sizeof(Buffer));
@@ -245,4 +245,3 @@ BOOL WINAPIV SeiDbgPrint(SEI_LOG_LEVEL Level, PCSTR Function, PCSTR Format, ...)
     DbgPrint("%s", Buffer);
     return TRUE;
 }
-
