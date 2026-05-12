@@ -422,6 +422,23 @@ GetServiceNameForPort(IN LPWSTR pServiceBuffer,
                       IN WORD Port,
                       IN DWORD Flags)
 {
+    INT Length;
+
+    UNREFERENCED_PARAMETER(Flags);
+
+    if (!pServiceBuffer || !ServiceBufferSize)
+        return WSAEFAULT;
+
+    Length = _snwprintf(pServiceBuffer,
+                        ServiceBufferSize,
+                        L"%u",
+                        ntohs(Port));
+    if ((Length < 0) || ((DWORD)Length >= ServiceBufferSize))
+    {
+        pServiceBuffer[0] = UNICODE_NULL;
+        return WSAEFAULT;
+    }
+
     return ERROR_SUCCESS;
 }
 
