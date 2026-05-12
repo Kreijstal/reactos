@@ -124,8 +124,8 @@ XHCI_SubmitIsochronousTransfer(IN PXHCI_EXTENSION XhciExtension,
 
 /* Device context and TRB management functions *********************************************************/
 
-/* Transfer rings have 255 data TRB slots plus the Link TRB at index 255. */
-#define XHCI_MAX_BULK_NORMAL_TRBS 255
+#define XHCI_TRANSFER_RING_LINK_INDEX (XHCI_RING_TRB_COUNT - 1)
+#define XHCI_MAX_BULK_NORMAL_TRBS XHCI_TRANSFER_RING_LINK_INDEX
 #define XHCI_MAX_NORMAL_TRB_TRANSFER_LENGTH 0x10000
 
 MPSTATUS
