@@ -112,6 +112,7 @@ typedef struct _XHCI_RING
     PXHCI_TRB enqueue_pointer;
     PXHCI_SEGMENT enqueue_segment;
     PXHCI_SEGMENT dequeue_segment;
+    ULONG UsedTrbs;
     struct 
     {
         UCHAR ProducerCycleState : 1;

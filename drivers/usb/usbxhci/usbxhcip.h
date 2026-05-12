@@ -124,12 +124,8 @@ XHCI_SubmitIsochronousTransfer(IN PXHCI_EXTENSION XhciExtension,
 
 /* Device context and TRB management functions *********************************************************/
 
-/*
- * Transfer rings have 255 data TRB slots plus the Link TRB at index 255.
- * The enqueue path intentionally keeps one data slot empty so enqueue and
- * dequeue pointers can distinguish full from empty, leaving 254 safe slots.
- */
-#define XHCI_MAX_BULK_NORMAL_TRBS 254
+/* Transfer rings have 255 data TRB slots plus the Link TRB at index 255. */
+#define XHCI_MAX_BULK_NORMAL_TRBS 255
 #define XHCI_MAX_NORMAL_TRB_TRANSFER_LENGTH 0x10000
 
 MPSTATUS
