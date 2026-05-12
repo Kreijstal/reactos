@@ -185,6 +185,23 @@ Cleanup:
     return IsMatch;
 }
 
+static BOOL WINAPI SdbpNeedsMainFileAttributes(PDB pdb, TAGID exe)
+{
+    TAGID matching_file;
+
+    for (matching_file = SdbFindFirstTag(pdb, exe, TAG_MATCHING_FILE);
+            matching_file != TAGID_NULL; matching_file = SdbFindNextTag(pdb, exe, matching_file))
+    {
+        TAGID tagName = SdbFindFirstTag(pdb, matching_file, TAG_NAME);
+        LPCWSTR name = SdbGetStringTagPtr(pdb, tagName);
+
+        if (name && !wcscmp(name, L"*"))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 /* Add a database guid to the query result */
 static void SdbpAddDatabaseGuid(PDB pdb, PSDBQUERYRESULT result)
 {
@@ -538,7 +555,7 @@ BOOL WINAPI SdbGetMatchingExe(HSDB hsdb, LPCWSTR path, LPCWSTR module_name,
         if (isWildcard || !_wcsicmp(foundName, file_name))
         {
             /* Get information about executable required to match it with database entry */
-            if (!attribs)
+            if (!attribs && SdbpNeedsMainFileAttributes(pdb, iter))
             {
                 if (!SdbGetFileAttributes(path, &attribs, &attr_count))
                     goto Cleanup;

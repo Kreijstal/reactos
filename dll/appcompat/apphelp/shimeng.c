@@ -29,7 +29,7 @@ static UNICODE_STRING g_WindowsDirectory;
 static UNICODE_STRING g_System32Directory;
 static UNICODE_STRING g_SxsDirectory;
 static UNICODE_STRING g_LoadingShimDll;
-ULONG g_ShimEngDebugLevel = 0xffffffff;
+ULONG g_ShimEngDebugLevel = 0;
 BOOL g_bComPlusImage = FALSE;
 BOOL g_bShimDuringInit = FALSE;
 BOOL g_bShimEngInitialized = FALSE;
@@ -130,7 +130,7 @@ VOID SeiInitDebugSupport(VOID)
     static const UNICODE_STRING DebugKey = RTL_CONSTANT_STRING(L"SHIMENG_DEBUG_LEVEL");
     UNICODE_STRING DebugValue;
     NTSTATUS Status;
-    ULONG NewLevel = SEI_MSG;   /* Show some basic info in the logs, unless configured different */
+    ULONG NewLevel = 0;
     WCHAR Buffer[40];
 
     RtlInitEmptyUnicodeString(&DebugValue, Buffer, sizeof(Buffer));
@@ -1533,4 +1533,3 @@ BOOL WINAPI SE_DynamicShim(LPCWSTR ProcessImage, HSDB hsdb, PVOID pQueryResult, 
 
     return TRUE;
 }
-

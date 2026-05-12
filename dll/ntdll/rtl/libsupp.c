@@ -1041,19 +1041,19 @@ LdrpApisetVersion(VOID)
                 break;
             case _WIN32_WINNT_WIN7:
                 CachedApisetVersion = APISET_WIN7;
-                DPRINT1("Activating apisets for Win7\n");
+                DPRINT("Activating apisets for Win7\n");
                 break;
             case _WIN32_WINNT_WIN8:
                 CachedApisetVersion = APISET_WIN8;
-                DPRINT1("Activating apisets for Win8\n");
+                DPRINT("Activating apisets for Win8\n");
                 break;
             case _WIN32_WINNT_WINBLUE:
                 CachedApisetVersion = APISET_WIN81;
-                DPRINT1("Activating apisets for Win8.1\n");
+                DPRINT("Activating apisets for Win8.1\n");
                 break;
             case _WIN32_WINNT_WIN10:
                 CachedApisetVersion = APISET_WIN10;
-                DPRINT1("Activating apisets for Win10\n");
+                DPRINT("Activating apisets for Win10\n");
                 break;
             default:
                 DPRINT1("Unknown version 0x%x\n", CompatVersion);
@@ -1148,7 +1148,7 @@ LdrpApplyFileNameRedirection(
         RtlAppendUnicodeStringToString(ResultPath, &NtSystemRoot);
         RtlAppendUnicodeStringToString(ResultPath, &System32);
         RtlAppendUnicodeStringToString(ResultPath, &ApisetName);
-        DPRINT1("ApiSetResolveToHost redirected %wZ to %wZ\n", OriginalName, ResultPath);
+        DPRINT("ApiSetResolveToHost redirected %wZ to %wZ\n", OriginalName, ResultPath);
         *NewName = ResultPath;
     }
     else
