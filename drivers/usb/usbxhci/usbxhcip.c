@@ -1168,11 +1168,15 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
                               OUT PPHYSICAL_ADDRESS TrbPhysicalAddress OPTIONAL)
 {
     PXHCI_TRB enqueue_pointer;
-    PXHCI_TRB dequeue_pointer;
     
     enqueue_pointer = TransferRing->enqueue_pointer;
-    dequeue_pointer = TransferRing->dequeue_pointer;
     
+    if (TransferRing->UsedTrbs >= XHCI_MAX_BULK_NORMAL_TRBS)
+    {
+        DPRINT("XHCI_EnqueueTRBOnTransferRing: Transfer ring is full\n");
+        return MP_STATUS_FAILURE;
+    }
+
     // Check if we're at the Link TRB (index 255) and need to wrap around
     LONG TrbIndex = enqueue_pointer - &(TransferRing->firstSeg.XhciTrb[0]);
     if (TrbIndex == 255)
@@ -1203,23 +1207,10 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
                 TransferRing->ProducerCycleState, LinkTrb->GenericTRB.Word3);
     }
     
-    // Calculate next position for ring full check
-    PXHCI_TRB NextEnqueuePtr = enqueue_pointer + 1;
-    if (NextEnqueuePtr >= &(TransferRing->firstSeg.XhciTrb[255]))
-    {
-        NextEnqueuePtr = &(TransferRing->firstSeg.XhciTrb[0]); // Would wrap to start
-    }
-    
-    // Check if ring is full
-    if (NextEnqueuePtr == dequeue_pointer) 
-    {
-        DPRINT("XHCI_EnqueueTRBOnTransferRing: Transfer ring is full\n");
-        return MP_STATUS_FAILURE;
-    }
-    
     // Debug: Log ring state for troubleshooting
-    DPRINT("XHCI_EnqueueTRBOnTransferRing: Ring state - enqueue=%p, dequeue=%p, producer_cycle=%d, consumer_cycle=%d\n",
+    DPRINT("XHCI_EnqueueTRBOnTransferRing: Ring state - enqueue=%p, dequeue=%p, used=%d, producer_cycle=%d, consumer_cycle=%d\n",
             TransferRing->enqueue_pointer, TransferRing->dequeue_pointer, 
+            TransferRing->UsedTrbs,
             TransferRing->ProducerCycleState, TransferRing->ConsumerCycleState);
     
     // Set the cycle bit to match the producer cycle state
@@ -1247,7 +1238,20 @@ XHCI_EnqueueTRBOnTransferRing(IN PXHCI_RING TransferRing,
     
     // Advance enqueue pointer
     enqueue_pointer = enqueue_pointer + 1;
+    if (enqueue_pointer >= &(TransferRing->firstSeg.XhciTrb[255]))
+    {
+        PXHCI_TRB LinkTrb = &(TransferRing->firstSeg.XhciTrb[255]);
+        LinkTrb->GenericTRB.Word3 =
+            (LinkTrb->GenericTRB.Word3 & ~1u) | (TransferRing->ProducerCycleState & 1u);
+
+        TransferRing->ProducerCycleState = TransferRing->ProducerCycleState ? 0 : 1;
+        enqueue_pointer = &(TransferRing->firstSeg.XhciTrb[0]);
+        DPRINT("XHCI_EnqueueTRBOnTransferRing: Advanced through Link TRB, new producer cycle state %d (Link Word3=0x%08x)\n",
+                TransferRing->ProducerCycleState, LinkTrb->GenericTRB.Word3);
+    }
+
     TransferRing->enqueue_pointer = enqueue_pointer;
+    TransferRing->UsedTrbs++;
     
     DPRINT("XHCI_EnqueueTRBOnTransferRing: TRB enqueued successfully, new enqueue pointer at %p\n", enqueue_pointer);
     
@@ -1269,6 +1273,7 @@ XHCI_InitializeTransferRing(IN PXHCI_RING TransferRing)
     // Initialize ring pointers
     TransferRing->enqueue_pointer = &TransferRing->firstSeg.XhciTrb[0];
     TransferRing->dequeue_pointer = &TransferRing->firstSeg.XhciTrb[0];
+    TransferRing->UsedTrbs = 0;
     TransferRing->ProducerCycleState = 1;
     TransferRing->ConsumerCycleState = 1;
     
@@ -1978,14 +1983,17 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
                 }
                 
                 TransferRing->dequeue_pointer = NewDequeue;
+                if (TransferRing->UsedTrbs != 0)
+                    TransferRing->UsedTrbs--;
                 
                 DPRINT("XHCI_CompleteTransfer: Advanced dequeue pointer %d/%d from %p to %p\n",
                         i + 1, TrbsToAdvance, CurrentDequeue, NewDequeue);
             }
             
             // Log final ring state after update for debugging
-            DPRINT("XHCI_CompleteTransfer: Final ring state - enqueue=%p, dequeue=%p, producer_cycle=%d, consumer_cycle=%d\n",
+            DPRINT("XHCI_CompleteTransfer: Final ring state - enqueue=%p, dequeue=%p, used=%d, producer_cycle=%d, consumer_cycle=%d\n",
                     TransferRing->enqueue_pointer, TransferRing->dequeue_pointer, 
+                    TransferRing->UsedTrbs,
                     TransferRing->ProducerCycleState, TransferRing->ConsumerCycleState);
         }
         
