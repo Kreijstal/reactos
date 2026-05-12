@@ -3135,7 +3135,9 @@ MsafdUpdateConnectionContext(
         return SOCKET_ERROR;
     }
 
-    if (Socket->SharedData->State == SocketConnected)
+    if (Socket->SharedData->State == SocketConnected &&
+        Socket->TdiConnectionHandle &&
+        Socket->TdiAddressHandle)
     {
         return NO_ERROR;
     }
@@ -3364,6 +3366,7 @@ WSPSetSockOpt(
 
               return NO_ERROR;
 
+           case SO_UPDATE_ACCEPT_CONTEXT:
            case SO_UPDATE_CONNECT_CONTEXT:
            case SO_UPDATE_ACCEPT_CONTEXT:
               return MsafdUpdateConnectionContext(s, lpErrno);
