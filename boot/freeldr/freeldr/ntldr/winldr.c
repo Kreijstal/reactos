@@ -857,6 +857,19 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
     RtlStringCbCopyA(HalFileName   , sizeof(HalFileName)   , "hal.dll");
     RtlStringCbCopyA(KernelFileName, sizeof(KernelFileName), "ntoskrnl.exe");
 
+#ifdef _M_AMD64
+    /* On amd64 the MP HAL/kernel pair handles UP transparently
+     * (HalStartNextProcessor caps itself at HalpApicInfoTable.ProcessorCount,
+     * so on a 1-CPU system no AP startup is attempted). Default to the MP
+     * binaries so that -smp >=2 actually brings the secondary CPUs online.
+     * The pair must match: pairing halmp.dll with ntoskrnl.exe (or hal.dll
+     * with ntkrnlmp.exe) hits the Prcb->BuildType vs HalpBuildType check at
+     * hal/halx86/generic/halinit.c:122 and bugchecks 0x79 (2, ...). The
+     * explicit /HAL= and /KERNEL= options below still override this. */
+    RtlStringCbCopyA(HalFileName, sizeof(HalFileName), "halmp.dll");
+    RtlStringCbCopyA(KernelFileName, sizeof(KernelFileName), "ntkrnlmp.exe");
+#endif
+
     Option = NtLdrGetOptionEx(BootOptions, "HAL=", &OptionLength);
     if (Option && (OptionLength > 4))
     {
