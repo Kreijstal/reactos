@@ -860,6 +860,7 @@ NtSetInformationJobObject (
     ACCESS_MASK DesiredAccess;
     KPROCESSOR_MODE PreviousMode;
     ULONG RequiredLength, RequiredAlign;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION ExtendedLimit;
 
     PAGED_CODE();
 
@@ -919,12 +920,66 @@ NtSetInformationJobObject (
         return Status;
     }
 
+    _SEH2_TRY
+    {
+        if (JobInformationClass == JobObjectBasicLimitInformation)
+        {
+            RtlZeroMemory(&ExtendedLimit, sizeof(ExtendedLimit));
+            RtlCopyMemory(&ExtendedLimit.BasicLimitInformation,
+                          JobInformation,
+                          sizeof(JOBOBJECT_BASIC_LIMIT_INFORMATION));
+        }
+        else if (JobInformationClass == JobObjectExtendedLimitInformation)
+        {
+            RtlCopyMemory(&ExtendedLimit,
+                          JobInformation,
+                          sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ObDereferenceObject(Job);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
     /* And set the information */
     KeEnterGuardedRegionThread(CurrentThread);
     switch (JobInformationClass)
     {
+        case JobObjectBasicLimitInformation:
         case JobObjectExtendedLimitInformation:
-            DPRINT1("Class JobObjectExtendedLimitInformation not implemented\n");
+            ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
+
+            Job->LimitFlags = ExtendedLimit.BasicLimitInformation.LimitFlags;
+            Job->MinimumWorkingSetSize = ExtendedLimit.BasicLimitInformation.MinimumWorkingSetSize;
+            Job->MaximumWorkingSetSize = ExtendedLimit.BasicLimitInformation.MaximumWorkingSetSize;
+            Job->ActiveProcessLimit = ExtendedLimit.BasicLimitInformation.ActiveProcessLimit;
+            Job->PriorityClass = ExtendedLimit.BasicLimitInformation.PriorityClass;
+            Job->SchedulingClass = ExtendedLimit.BasicLimitInformation.SchedulingClass;
+            Job->Affinity = ExtendedLimit.BasicLimitInformation.Affinity;
+            Job->PerProcessUserTimeLimit.QuadPart =
+                ExtendedLimit.BasicLimitInformation.PerProcessUserTimeLimit.QuadPart;
+            Job->PerJobUserTimeLimit.QuadPart =
+                ExtendedLimit.BasicLimitInformation.PerJobUserTimeLimit.QuadPart;
+
+            if (JobInformationClass == JobObjectExtendedLimitInformation)
+            {
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+                ExAcquirePushLockExclusive(&Job->MemoryLimitsLock);
+#else
+                KeAcquireGuardedMutexUnsafe(&Job->MemoryLimitsLock);
+#endif
+                Job->ProcessMemoryLimit = BYTES_TO_PAGES(ExtendedLimit.ProcessMemoryLimit);
+                Job->JobMemoryLimit = BYTES_TO_PAGES(ExtendedLimit.JobMemoryLimit);
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+                ExReleasePushLockExclusive(&Job->MemoryLimitsLock);
+#else
+                KeReleaseGuardedMutexUnsafe(&Job->MemoryLimitsLock);
+#endif
+            }
+
+            ExReleaseResourceLite(&Job->JobLock);
             Status = STATUS_SUCCESS;
             break;
 
