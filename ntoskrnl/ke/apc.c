@@ -212,8 +212,16 @@ KiInsertQueueApc(IN PKAPC Apc,
                 }
                 else if (Thread->State == GateWait)
                 {
-                    /* Lock the thread */
+                    /* Lock the thread.
+                     * On NTDDI_WIN8+, KTHREAD::ApcQueueLock has been
+                     * consolidated into KTHREAD::ThreadLock — the caller of
+                     * KiInsertQueueApc (KeInsertQueueApc et al.) already holds
+                     * this thread's ApcLock, which IS the ThreadLock at Win8+,
+                     * so a second acquire would self-deadlock. See
+                     * KiApcLockOf() in ke_x.h. */
+#if (NTDDI_VERSION < NTDDI_WIN8)
                     KiAcquireThreadLock(Thread);
+#endif
 
                     /* Essentially do the same check as above */
                     if ((Thread->State == GateWait) &&
@@ -251,8 +259,10 @@ KiInsertQueueApc(IN PKAPC Apc,
                         KiInsertDeferredReadyList(Thread);
                     }
 
-                    /* Release the thread lock */
+                    /* Release the thread lock (only acquired pre-Win8). */
+#if (NTDDI_VERSION < NTDDI_WIN8)
                     KiReleaseThreadLock(Thread);
+#endif
                 }
             }
             else if ((Thread->State == Waiting) &&
