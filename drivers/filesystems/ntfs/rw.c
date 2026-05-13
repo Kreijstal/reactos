@@ -248,7 +248,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
              PFILE_OBJECT FileObject,
              PUCHAR Buffer,
              ULONG Length,
-             ULONG ReadOffset,
+             ULONGLONG ReadOffset,
              ULONG IrpFlags,
              PULONG LengthRead)
 {
@@ -258,14 +258,14 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     PFILE_RECORD_HEADER PreviousCachedRecord;
     PNTFS_ATTR_CONTEXT DataContext = NULL;
     ULONG RealLength;
-    ULONG RealReadOffset;
+    ULONGLONG RealReadOffset;
     ULONG RealLengthRead;
     ULONG ToRead;
     BOOLEAN AllocatedBuffer = FALSE;
     PCHAR ReadBuffer = (PCHAR)Buffer;
     ULONGLONG StreamSize;
 
-    DPRINT("NtfsReadFile(%p, %p, %p, %lu, %lu, %lx, %p)\n", DeviceExt, FileObject, Buffer, Length, ReadOffset, IrpFlags, LengthRead);
+    DPRINT("NtfsReadFile(%p, %p, %p, %lu, %I64u, %lx, %p)\n", DeviceExt, FileObject, Buffer, Length, ReadOffset, IrpFlags, LengthRead);
 
     *LengthRead = 0;
 
@@ -415,7 +415,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         AllocatedBuffer = TRUE;
     }
 
-    DPRINT("NtfsReadFile: calling ReadAttribute offset=%lu len=%lu\n", RealReadOffset, RealLength);
+    DPRINT("NtfsReadFile: calling ReadAttribute offset=%I64u len=%lu\n", RealReadOffset, RealLength);
     RealLengthRead = ReadAttribute(DeviceExt, DataContext, RealReadOffset, (PCHAR)ReadBuffer, RealLength);
     DPRINT("NtfsReadFile: ReadAttribute returned %lu\n", RealLengthRead);
     if (RealLengthRead == 0)
@@ -599,7 +599,7 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
                           FileObject,
                           Buffer,
                           ReadLength,
-                          ReadOffset.u.LowPart,
+                          ReadOffset.QuadPart,
                           Irp->Flags,
                           &ReturnedReadLength);
     if (NT_SUCCESS(Status))
@@ -688,7 +688,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                        PFILE_OBJECT FileObject,
                        const PUCHAR Buffer,
                        ULONG Length,
-                       ULONG WriteOffset,
+                       ULONGLONG WriteOffset,
                        ULONG IrpFlags,
                        BOOLEAN CaseSensitive,
                        PULONG LengthWritten)
@@ -700,7 +700,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     ULONG AttributeOffset;
     ULONGLONG StreamSize;
 
-    DPRINT("NtfsWriteFile(%p, %p, %p, %lu, %lu, %x, %s, %p)\n",
+    DPRINT("NtfsWriteFile(%p, %p, %p, %lu, %I64u, %x, %s, %p)\n",
            DeviceExt,
            FileObject,
            Buffer,
@@ -819,7 +819,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
 
-    DPRINT("WriteOffset: %lu\tStreamSize: %I64u\n", WriteOffset, StreamSize);
+    DPRINT("WriteOffset: %I64u\tStreamSize: %I64u\n", WriteOffset, StreamSize);
 
     // Are we trying to write beyond the end of the stream?
     if (WriteOffset + Length > StreamSize)
@@ -829,7 +829,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
             // The cache manager may flush full pages that extend beyond
             // the logical file size. Clamp the write to the stream size
             // so we don't try to extend the file from paging I/O.
-            DPRINT1("NtfsWriteFile PAGING: %wS off=%lu len=%lu stream=%I64u\n",
+            DPRINT1("NtfsWriteFile PAGING: %wS off=%I64u len=%lu stream=%I64u\n",
                     Fcb->ObjectName, WriteOffset, Length, StreamSize);
             if (WriteOffset >= StreamSize)
             {
@@ -894,7 +894,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         }
     }
 
-    DPRINT("Length: %lu\tWriteOffset: %lu\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
+    DPRINT("Length: %lu\tWriteOffset: %I64u\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
 
     // After extending, re-read the file record and re-find the attribute to ensure
     // we have the latest on-disk state (the resident->non-resident conversion may
@@ -1190,7 +1190,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
                            FileObject,
                            Buffer,
                            Length,
-                           ByteOffset.LowPart,
+                           ByteOffset.QuadPart,
                            Irp->Flags,
                            BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
                            &ReturnedWriteLength);
