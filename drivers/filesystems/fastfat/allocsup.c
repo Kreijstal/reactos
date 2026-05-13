@@ -88,10 +88,6 @@ FatReconcileDirentBitmap(
     );
 #endif
 
-#ifdef __REACTOS__
-#define FAT_DIRENT_RECON_MAX_VOLUME_CLUSTERS 65536
-#endif
-
 //
 //  Note that the KdPrint below will ONLY fire when the assert does. Leave it
 //  alone.
@@ -5342,9 +5338,7 @@ Return Value:
         //  the dirent).  Skip when there is no real bitmap to update or when
         //  populating a transient caller buffer for GetVolumeBitmap.
         //
-        if (BitMap != NULL &&
-            BitMapBuffer == NULL &&
-            Vcb->AllocationSupport.NumberOfClusters <= FAT_DIRENT_RECON_MAX_VOLUME_CLUSTERS) {
+        if (BitMap != NULL && BitMapBuffer == NULL) {
 
             FatReconcileDirentBitmap(
                 IrpContext,
