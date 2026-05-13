@@ -679,6 +679,12 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
             FileRecord,
             DataSize->QuadPart);
 
+    /* Invalidate FCB-level MFT record cache: the caller-supplied
+     * FileRecord buffer (which gets written back via UpdateFileRecord at
+     * the bottom of this function) is independent of our cached copy,
+     * so the cache is about to be stale. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     // are we truncating the file?
     if (DataSize->QuadPart < AttributeDataLength(AttrContext->pRecord))
     {
@@ -3225,6 +3231,10 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     if (NtfsFCBIsDirectory(Fcb))
         return STATUS_FILE_IS_A_DIRECTORY;
 
+    /* Invalidate FCB-level MFT record cache: deletion clears FRH_IN_USE
+     * and LinkCount in the on-disk record. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (!FileRecord)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -3301,6 +3311,10 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
 
     if (NewFileName->Length == 0 || FsRtlDoesNameContainWildCards(NewFileName))
         return STATUS_OBJECT_NAME_INVALID;
+
+    /* Invalidate FCB-level MFT record cache: rename rewrites $FILENAME on
+     * the source record. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (!FileRecord)
