@@ -530,8 +530,12 @@ WinLdrDetectVersion(VOID)
     }
     RegCloseKey(hKey);
 
-    /* We may here want to read the value of ProductVersion */
-    return _WIN32_WINNT_WS03;
+    /* TODO: read CurrentControlSet\Control\Windows\CSDVersion or the
+     * ProductVersion under the installed Software hive. Until that lands,
+     * fall back to the version this freeldr was built to load — the same
+     * build emits both freeldr and ntoskrnl, so the build-time target is
+     * a sound default. */
+    return FRLDR_TARGET_NT_VERSION;
 }
 
 static
