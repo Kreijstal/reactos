@@ -823,6 +823,18 @@ typedef struct _FCB
      * UpdateFileRecord, so the next reader re-reads the fresh state. */
     PFILE_RECORD_HEADER CachedFileRecord;
 
+    /* Sequential-read prefetch state.  NextPrefetchOffset is the file
+     * offset (bytes) where the last paging read ended -- used to detect
+     * a contiguous-read pattern in NtfsReadFile so we can speculatively
+     * fault the next window of pages into the data section via
+     * MmPrefetchPages.  PrefetchInFlight is a 0/1 atomic guard: only one
+     * caller at a time runs the prefetch path on a given FCB, and a
+     * re-entrant paging read from inside the prefetch (via the section
+     * page-in IRP that lands back on NtfsRead) sees the flag set and
+     * bypasses it, so we don't recurse or stack pool allocations. */
+    LONGLONG NextPrefetchOffset;
+    volatile LONG PrefetchInFlight;
+
 } NTFS_FCB, *PNTFS_FCB;
 
 typedef struct _FIND_ATTR_CONTXT
