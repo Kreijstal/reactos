@@ -164,17 +164,11 @@ NtfsCleanup(PNTFS_IRP_CONTEXT IrpContext)
     FileObject = IrpContext->FileObject;
     DeviceExtension = DeviceObject->DeviceExtension;
 
-    DPRINT("NtfsCleanup: entering FileObject=%p CanWait=%d\n", FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
-    DPRINT("NtfsCleanup: entering FileObject=%p CanWait=%d\n", FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
-    DPRINT("NtfsCleanup: acquiring DirResource exclusive...\n");
-    DPRINT("INSTRUMENT: NtfsCleanup acquiring DirResource exclusive...\n");
     if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
-        DPRINT("INSTRUMENT: NtfsCleanup DirResource CANT_WAIT\n");
-        return STATUS_CANT_WAIT;
+        return NtfsMarkIrpContextForQueue(IrpContext);
     }
-    DPRINT("INSTRUMENT: NtfsCleanup DirResource acquired\n");
 
     Status = NtfsCleanupFile(DeviceExtension, FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
     DPRINT("NtfsCleanup: NtfsCleanupFile returned 0x%lx\n", Status);
