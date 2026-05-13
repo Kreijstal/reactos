@@ -51,6 +51,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status = STATUS_SUCCESS;
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER FileRecord;
+    PFILE_RECORD_HEADER PreviousCachedRecord;
     PNTFS_ATTR_CONTEXT DataContext = NULL;
     ULONG RealLength;
     ULONG RealReadOffset;
@@ -103,21 +104,42 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         return STATUS_NOT_IMPLEMENTED;
     }
 
-    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    /* Cache hit: reuse the FCB-owned MFT record buffer.  NtfsRead has
+     * already taken the FCB resource shared, so the cached pointer is
+     * stable for the duration of this call — writers take it exclusive
+     * and call NtfsInvalidateCachedFileRecord before mutating disk. */
+    FileRecord = Fcb->CachedFileRecord;
+
     if (FileRecord == NULL)
     {
-        DPRINT1("Not enough memory!\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
+        FileRecord = ExAllocatePoolWithTag(NonPagedPool,
+                                           DeviceExt->NtfsInfo.BytesPerFileRecord,
+                                           TAG_NTFS);
+        if (FileRecord == NULL)
+        {
+            DPRINT1("Not enough memory!\n");
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
 
-    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Can't find record!\n");
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
-    }
+        Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Can't find record!\n");
+            ExFreePoolWithTag(FileRecord, TAG_NTFS);
+            return Status;
+        }
 
+        /* Install the freshly-read record as the cached copy.  Lock-free
+         * via CAS so a concurrent reader that also missed can race us:
+         * loser frees its buffer and uses the installed one. */
+        PreviousCachedRecord = InterlockedCompareExchangePointer(
+            (PVOID *)&Fcb->CachedFileRecord, FileRecord, NULL);
+        if (PreviousCachedRecord != NULL)
+        {
+            ExFreePoolWithTag(FileRecord, TAG_NTFS);
+            FileRecord = PreviousCachedRecord;
+        }
+    }
 
     Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &DataContext, NULL);
     if (!NT_SUCCESS(Status))
@@ -146,7 +168,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         FindCloseAttribute(&Context);
 
         ReleaseAttributeContext(DataContext);
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
         return Status;
     }
 
@@ -155,7 +177,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     {
         DPRINT1("Reading beyond stream end!\n");
         ReleaseAttributeContext(DataContext);
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
         return STATUS_END_OF_FILE;
     }
 
@@ -183,7 +205,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         {
             DPRINT1("Not enough memory!\n");
             ReleaseAttributeContext(DataContext);
-            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         AllocatedBuffer = TRUE;
@@ -196,7 +218,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     {
         DPRINT1("Read failure!\n");
         ReleaseAttributeContext(DataContext);
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
         if (AllocatedBuffer)
         {
             ExFreePoolWithTag(ReadBuffer, TAG_NTFS);
@@ -205,7 +227,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     }
 
     ReleaseAttributeContext(DataContext);
-    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
 
     *LengthRead = ToRead;
 
@@ -504,6 +526,13 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         UNIMPLEMENTED;
         return STATUS_NOT_IMPLEMENTED;
     }
+
+    /* Invalidate any cached MFT record on the FCB: this write may update
+     * attribute sizes / runs in the on-disk record (resident → non-resident
+     * promotion, SetAttributeDataLength, hole-fill, …) and even paging
+     * write-backs of non-resident data can mutate the record indirectly.
+     * The next reader will re-read from disk under the post-write state. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     // allocate non-paged memory for the FILE_RECORD_HEADER
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);

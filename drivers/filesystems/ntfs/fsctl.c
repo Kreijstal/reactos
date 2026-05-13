@@ -1345,6 +1345,9 @@ FsctlSetReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     if ((ULONG)Input->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE > InputLength)
         return STATUS_IO_REPARSE_DATA_INVALID;
 
+    /* Invalidate FCB-level MFT record cache: reparse data about to change. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1435,6 +1438,9 @@ FsctlDeleteReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
         return STATUS_INVALID_PARAMETER;
     Fcb = FileObject->FsContext;
 
+    /* Invalidate FCB-level MFT record cache: reparse data about to be removed. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1520,6 +1526,9 @@ FsctlSetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     if (Input == NULL || InputLength < sizeof(FILE_OBJECTID_BUFFER))
         return STATUS_INVALID_PARAMETER;
 
+    /* Invalidate FCB-level MFT record cache: $OBJECT_ID about to change. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1562,6 +1571,9 @@ FsctlCreateOrGetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
     if (Output == NULL || OutputLength < sizeof(FILE_OBJECTID_BUFFER))
         return STATUS_BUFFER_TOO_SMALL;
+
+    /* Invalidate FCB-level MFT record cache: may create a new $OBJECT_ID. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -1612,6 +1624,9 @@ FsctlDeleteObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     if (FileObject == NULL || FileObject->FsContext == NULL)
         return STATUS_INVALID_PARAMETER;
     Fcb = FileObject->FsContext;
+
+    /* Invalidate FCB-level MFT record cache: $OBJECT_ID about to be removed. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)

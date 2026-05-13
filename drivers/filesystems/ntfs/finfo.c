@@ -755,6 +755,10 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     UNICODE_STRING FileName;
 
 
+    /* Invalidate FCB-level MFT record cache: SetAttributeDataLength /
+     * UpdateFileNameRecord are about to mutate the on-disk record. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     // Allocate non-paged memory for the file record
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -891,6 +895,10 @@ NtfsSetBasicInformation(PNTFS_FCB Fcb,
     NTSTATUS Status;
 
     DPRINT1("NtfsSetBasicInformation: FCB %p MFT %I64u\n", Fcb, Fcb->MFTIndex);
+
+    /* Invalidate FCB-level MFT record cache: timestamps / attributes about
+     * to change on disk. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
