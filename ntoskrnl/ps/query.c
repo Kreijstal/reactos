@@ -1994,10 +1994,26 @@ NtSetInformationProcess(
             /* Check if it's within job affinity limits */
             if (Process->Job)
             {
-                /* Not yet implemented */
-                UNIMPLEMENTED;
-                Status = STATUS_NOT_IMPLEMENTED;
-                break;
+                PEJOB Job = Process->Job;
+                ULONG_PTR JobAffinity = 0;
+
+                KeEnterGuardedRegion();
+                ExAcquireResourceSharedLite(&Job->JobLock, TRUE);
+
+                if (Job->LimitFlags & JOB_OBJECT_LIMIT_AFFINITY)
+                {
+                    JobAffinity = Job->Affinity;
+                }
+
+                ExReleaseResourceLite(&Job->JobLock);
+                KeLeaveGuardedRegion();
+
+                if ((JobAffinity != 0) &&
+                    ((Affinity & JobAffinity) != Affinity))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
             }
 
             /* Make sure the process isn't dying */
