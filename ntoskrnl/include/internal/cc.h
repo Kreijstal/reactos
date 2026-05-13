@@ -212,6 +212,8 @@ typedef struct _ROS_VACB
     BOOLEAN Dirty;
     /* Page out in progress */
     BOOLEAN PageOut;
+    /* Consecutive lazy-writer attempts that could not acquire the file. */
+    ULONG LazyWriteMisses;
     ULONG MappedCount;
     /* Entry in the list of VACBs for this shared cache map. */
     LIST_ENTRY CacheMapVacbListEntry;
