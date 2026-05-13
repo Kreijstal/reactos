@@ -587,6 +587,19 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         }
     }
 
+    /* Precompute and cache the free-cluster count so the first
+     * IRP_MJ_QUERY_VOLUME_INFORMATION returns immediately.  On slow media
+     * (USB-MSC) reading $Bitmap sector-by-sector takes tens of seconds;
+     * doing it once here, behind the mount IRP rather than on the hot
+     * loader path, hides that cost.  Failures fall back to lazy compute
+     * (cache stays invalid). */
+    {
+        ULONGLONG FreeClusters = NtfsGetFreeClusters(Vcb);
+        /* NtfsGetFreeClusters already stores the value and sets
+         * CachedFreeClustersValid=1 on success; nothing else to do. */
+        (void)FreeClusters;
+    }
+
     Status = STATUS_SUCCESS;
 
 ByeBye:
