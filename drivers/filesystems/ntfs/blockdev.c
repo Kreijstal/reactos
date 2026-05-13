@@ -131,7 +131,6 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
     /* Bypass conditions:
      *   - cache not yet initialized on the volume stream
      *   - we are already inside our own CcMapData (sentinel set below)
-     *   - read crosses the cached region (avoid unbounded BCB growth)
      *
      * The TopLevelIrp == NULL test that used to live here was an over-broad
      * recursion guard: it fired on every IRP-driven read (NTFS dispatch sets
@@ -139,11 +138,13 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
      * lookups.  The real concern — re-entering ourselves through a Cc page
      * fault on the volume stream — is now handled by the explicit sentinel
      * below.  Page-fault paths into NtfsRead for FCB_IS_VOLUME_STREAM short-
-     * circuit to NtfsReadDisk in rw.c, so the recursion chain has depth ≤ 2. */
+     * circuit to NtfsReadDisk in rw.c, so the recursion chain has depth ≤ 2.
+     *
+     * No high-offset bypass: the volume stream FCB has FileSize=full volume,
+     * Cc handles arbitrary offsets via SEC_RESERVE-extending data sections. */
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL ||
-        IoGetTopLevelIrp() == NTFS_CACHED_READ_SENTINEL ||
-        StartingOffset + Length > NTFS_MAX_CACHED_OFFSET)
+        IoGetTopLevelIrp() == NTFS_CACHED_READ_SENTINEL)
     {
         return NtfsReadDisk(Vcb->StorageDevice,
                             StartingOffset,
@@ -256,27 +257,27 @@ NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
 
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->SectionObjectPointer == NULL ||
-        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap == NULL ||
-        StartingOffset >= NTFS_MAX_CACHED_OFFSET)
+        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap == NULL)
     {
         return Status;
     }
 
-    /* Compute the VACB range for the written bytes, clamped to the
-     * cached region. */
+    /* For writes inside the 128-MB region covered by CachedVacbBitmap,
+     * skip the purge if no VACB in that range has ever been mapped.
+     * Writes that cross above NTFS_MAX_CACHED_OFFSET fall through to the
+     * unconditional purge (the bitmap doesn't cover them, so we must
+     * conservatively assume coherence is needed). */
     EndOffset = StartingOffset + (LONGLONG)Length;
-    if (EndOffset > NTFS_MAX_CACHED_OFFSET)
-        EndOffset = NTFS_MAX_CACHED_OFFSET;
+    if (EndOffset <= NTFS_MAX_CACHED_OFFSET)
+    {
+        FirstVacb = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
+        LastVacb = (ULONG)((EndOffset - 1) / VACB_MAPPING_GRANULARITY);
+        if (LastVacb >= NTFS_CACHED_VACB_COUNT)
+            LastVacb = NTFS_CACHED_VACB_COUNT - 1;
 
-    FirstVacb = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
-    LastVacb = (ULONG)((EndOffset - 1) / VACB_MAPPING_GRANULARITY);
-    if (LastVacb >= NTFS_CACHED_VACB_COUNT)
-        LastVacb = NTFS_CACHED_VACB_COUNT - 1;
-
-    /* Fast path: if no VACB in the written range has ever been mapped
-     * via CcMapData on this volume, there's nothing to purge. */
-    if (!NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb))
-        return Status;
+        if (!NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb))
+            return Status;
+    }
 
     PurgeOffset.QuadPart = StartingOffset;
     PurgeLength.QuadPart = EndOffset - StartingOffset;
