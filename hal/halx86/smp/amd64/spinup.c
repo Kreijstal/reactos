@@ -24,8 +24,11 @@ extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
 /* The trampoline image; defined in hal/halx86/smp/amd64/apentry.S. */
 extern UCHAR HalpAPEntry16[];
 extern UCHAR HalpAPEntryData[];
+extern UCHAR HalpAPEntry32[];
 extern UCHAR HalpAPEntry64[];
 extern UCHAR HalpAPEntry16End[];
+extern UCHAR HalpAPEntryEnd[];
+extern UCHAR APE_IndirectJumpOperandSite[];
 
 /* Boot CPU is the first started processor (counted as 1). */
 ULONG HalpStartedProcessorCount = 1;
@@ -36,71 +39,71 @@ ULONG HalpStartedProcessorCount = 1;
 
 /*
  * Layout of the in-page data block embedded in the trampoline at
- * HalpAPEntryData. The asm side accesses these fields by their fixed
- * offsets (CS-relative in 16-bit, RIP-relative in 64-bit) so the struct
- * here must stay in lockstep with apentry.S. Natural amd64 alignment
- * already matches the asm layout -- no packing pragma needed.
+ * HalpAPEntryData. The asm side reads these fields by their fixed
+ * offsets, so the struct here must stay in lockstep with apentry.S.
+ * Layout is dense (tight, no auto-padding) to match the asm's raw
+ * .word/.long/.quad sequence.
  */
 typedef struct _AP_ENTRY_DATA
 {
-    /* +0  Absolute (physical = virtual, since the trampoline page is
-     *     identity-mapped in the temp PML4) address of HalpAPEntry64
-     *     inside the stub copy. Used as the 32-bit operand of the
-     *     16-bit-encoded far-jump that switches CPU into long mode. */
-    ULONG Jump32Offset;
+    /* +0  Absolute linear address of HalpAPEntry32 inside the stub
+     *     copy. Stage-0's 32-bit far-jump (66 EA off:32 seg:16)
+     *     reads this as its offset operand. */
+    ULONG Jump32To32Offset;
 
-    /* +4  Far-jump target selector. Always KGDT64_R0_CODE -- the temp
-     *     GDT slot at the same selector value. The asm reserves a full
-     *     dword here for layout; only the low 16 bits are consumed by
-     *     the far-jump encoding. */
-    ULONG Jump32Segment;
+    /* +4  Stage-0 far-jump target selector. 0x20 = temp GDT's 32-bit
+     *     code descriptor (base 0, 4 GB flat). Pre-init in asm. */
+    ULONG Jump32To32Segment;
 
-    /* +8  Physical address of this data block. Diagnostic only. */
+    /* +8  Absolute linear address of HalpAPEntry64 inside the stub.
+     *     Stage-1's indirect far-jump (FF /5 ds:[disp32]) reads this
+     *     and the segment below as a 6-byte m16:32. */
+    ULONG Jump64Offset;
+
+    /* +12 Stage-1 far-jump target selector. 0x10 = temp GDT's 64-bit
+     *     code descriptor (L=1, base=0). Pre-init in asm. */
+    ULONG Jump64Segment;
+
+    /* +16 Diagnostic: physical address of this data block. */
     ULONG64 SelfPtr;
 
-    /* +16 Physical address of the temp PML4 the AP loads into CR3 in
-     *     stage 1. Built by HalpSetupTemporaryMappings. */
+    /* +24 Physical address of the temp PML4. */
     ULONG64 PageTableRoot;
 
-    /* +24 Virtual address of KeLoaderBlock. The 64-bit handoff stuffs
-     *     this into RCX (Win64 ABI arg0) before lret'ing into
-     *     KiSystemStartup(LoaderBlock). */
+    /* +32 Virtual address of KeLoaderBlock (Win64 arg0). */
     ULONG64 KxLoaderBlock;
 
-    /* +32 Virtual address of the AP's KPROCESSOR_STATE. Stage 2 reads
-     *     CR0/CR4/CR8/DR0..7, Gdtr, Idtr, Tr, MsrGsBase, MsrGsSwap,
-     *     Rsp, Rip and SegCs from it. */
+    /* +40 Virtual address of the AP's KPROCESSOR_STATE. */
     ULONG64 ProcessorState;
 
-    /* +40 Two-byte pad so the Gdtr32 base field below sits at a
-     *     4-byte-aligned offset, matching the asm. */
+    /* +48 2-byte pad (matches asm; keeps Gdtr32 base 4-aligned). */
     USHORT Gdtr32_Pad;
 
-    /* +42 Limit of the 4-entry temp GDT (= sizeof(TempGdt) - 1 = 31).
-     *     The 16-bit "data32 lgdt cs:[Gdtr32]" reads this and the base
-     *     below as a 6-byte fword. */
+    /* +50 Temp GDT limit (= sizeof(TempGdt) - 1). */
     USHORT Gdtr32_Limit;
 
-    /* +44 Physical address of the temp GDT inside the stub copy. */
+    /* +52 Physical address of the temp GDT inside the stub. */
     ULONG Gdtr32_Base;
 
-    /* +48 Temp GDT itself: null, unused, KGDT64_R0_CODE (L=1),
-     *     KGDT64_R0_DATA (4 GB flat). Pre-initialized in apentry.S; the
-     *     copy into HalpLowStub carries the right bytes, so we don't
-     *     touch this field at runtime. Reserved here so the struct
-     *     size matches the asm-side data block. */
-    ULONG64 TempGdt[4];
+    /* +56 Temp GDT: null / unused / KGDT64_R0_CODE (L=1) /
+     *     KGDT64_R0_DATA / 32-bit code (base 0). All entries
+     *     pre-initialized in asm; spinup does not patch them. */
+    ULONG64 TempGdt[5];
 } AP_ENTRY_DATA, *PAP_ENTRY_DATA;
 
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Jump32Offset)   == 0);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Jump32Segment)  == 4);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, SelfPtr)        == 8);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, PageTableRoot)  == 16);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, KxLoaderBlock)  == 24);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, ProcessorState) == 32);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Gdtr32_Limit)   == 42);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Gdtr32_Base)    == 44);
-C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, TempGdt)        == 48);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Jump32To32Offset)  == 0);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Jump32To32Segment) == 4);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Jump64Offset)      == 8);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Jump64Segment)     == 12);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, SelfPtr)           == 16);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, PageTableRoot)     == 24);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, KxLoaderBlock)     == 32);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, ProcessorState)    == 40);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Gdtr32_Pad)        == 48);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Gdtr32_Limit)      == 50);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, Gdtr32_Base)       == 52);
+C_ASSERT(FIELD_OFFSET(AP_ENTRY_DATA, TempGdt)           == 56);
+C_ASSERT(sizeof(AP_ENTRY_DATA)                          == 96);
 
 /* FUNCTIONS *****************************************************************/
 
@@ -199,6 +202,7 @@ HalStartNextProcessor(
     PHYSICAL_ADDRESS TempPml4Pa;
     SIZE_T TrampolineLength;
     SIZE_T DataBlockOffset;
+    SIZE_T Entry32Offset;
     SIZE_T Entry64Offset;
     SIZE_T TempGdtOffset;
     PAP_ENTRY_DATA ApData;
@@ -218,31 +222,53 @@ HalStartNextProcessor(
     if (!TempPml4Pa.QuadPart)
         return FALSE;
 
-    /* Copy the trampoline (code + embedded data block) into the
-     * low-memory stub page. The SIPI vector tells the AP to start at
-     * HalpLowStubPhysicalAddress, which is identity-mapped in the
-     * temp PML4 we just built. */
-    TrampolineLength = (SIZE_T)(HalpAPEntry16End - HalpAPEntry16);
+    /* Copy the trampoline (all three stages + embedded data block) into
+     * the low-memory stub page. The SIPI vector tells the AP to start at
+     * HalpLowStubPhysicalAddress, which is identity-mapped in the temp
+     * PML4 we just built. HalpAPEntry16End only marks the end of stage 0
+     * (it has to live inside .code16 in apentry.S); the stage-0 far jump
+     * lands at HalpAPEntry32 inside the SAME stub page, so we must copy
+     * the full HalpAPEntry16..HalpAPEntryEnd range, not just stage 0. */
+    TrampolineLength = (SIZE_T)(HalpAPEntryEnd - HalpAPEntry16);
     ASSERT(TrampolineLength <= PAGE_SIZE);
     RtlCopyMemory(HalpLowStub, HalpAPEntry16, TrampolineLength);
 
-    /* Compute link-time offsets of the labels inside the trampoline
-     * image so we can patch the data block in the *copy* (HalpLowStub),
-     * not the read-only original. */
+    /* Compute link-time offsets so we can patch the *copy* of the
+     * trampoline in HalpLowStub. */
     DataBlockOffset = (SIZE_T)(HalpAPEntryData - HalpAPEntry16);
+    Entry32Offset   = (SIZE_T)(HalpAPEntry32  - HalpAPEntry16);
     Entry64Offset   = (SIZE_T)(HalpAPEntry64  - HalpAPEntry16);
     TempGdtOffset   = DataBlockOffset + FIELD_OFFSET(AP_ENTRY_DATA, TempGdt);
 
     ApData = (PAP_ENTRY_DATA)Add2Ptr(HalpLowStub, DataBlockOffset);
 
-    /* Absolute virtual/physical address of HalpAPEntry64 in the stub
-     * copy. The temp PML4 identity-maps the stub, so VA == PA here. */
-    ApData->Jump32Offset = (ULONG)(HalpLowStubPhysicalAddress.QuadPart + Entry64Offset);
-    ApData->Jump32Segment = KGDT64_R0_CODE;
+    /* The temp PML4 identity-maps the stub, so virtual = physical
+     * for these addresses. */
 
-    /* Diagnostic only -- gives the AP a way to find its own data block
-     * by reading SelfPtr. Spinup doesn't need it but the field exists
-     * in the asm layout. */
+    /* Stage-0 -> Stage-1 jump: absolute linear address of
+     * HalpAPEntry32 with selector 0x20 (32-bit code, base 0). */
+    ApData->Jump32To32Offset = (ULONG)(HalpLowStubPhysicalAddress.QuadPart + Entry32Offset);
+    /* Jump32To32Segment is pre-set to 0x20 in the asm. */
+
+    /* Stage-1 -> Stage-2 jump: absolute linear address of
+     * HalpAPEntry64 with selector 0x10 (64-bit code, base 0). */
+    ApData->Jump64Offset = (ULONG)(HalpLowStubPhysicalAddress.QuadPart + Entry64Offset);
+    /* Jump64Segment is pre-set to 0x10 in the asm. */
+
+    /* The stage-1 indirect far-jump reads its m16:32 from
+     * ds:[disp32]. DS.base = 0 (sel 0x18), so disp32 must be the
+     * ABSOLUTE linear address of the Jump64Offset field. The asm
+     * leaves the disp32 placeholder at APE_IndirectJumpOperandSite;
+     * patch it now. */
+    {
+        SIZE_T OperandSiteOffset =
+            (SIZE_T)(APE_IndirectJumpOperandSite - HalpAPEntry16);
+        ULONG *p = (ULONG *)Add2Ptr(HalpLowStub, OperandSiteOffset);
+        *p = (ULONG)(HalpLowStubPhysicalAddress.QuadPart + DataBlockOffset +
+                     FIELD_OFFSET(AP_ENTRY_DATA, Jump64Offset));
+    }
+
+    /* Diagnostic SelfPtr. */
     ApData->SelfPtr = (ULONG64)HalpLowStubPhysicalAddress.QuadPart +
                        (ULONG64)DataBlockOffset;
 
@@ -250,11 +276,12 @@ HalStartNextProcessor(
     ApData->KxLoaderBlock  = (ULONG64)LoaderBlock;
     ApData->ProcessorState = (ULONG64)ProcessorState;
 
-    /* Temp GDT: 4 descriptors of 8 bytes each = 32 bytes; lgdt wants
-     * limit = byte-count - 1. The descriptor bytes themselves come
-     * along with the RtlCopyMemory above. */
+    /* GDT pointer: lgdt limit = sizeof(GDT) - 1 = 5*8 - 1 = 39. */
     ApData->Gdtr32_Limit = (USHORT)(sizeof(ApData->TempGdt) - 1);
     ApData->Gdtr32_Base  = (ULONG)(HalpLowStubPhysicalAddress.QuadPart + TempGdtOffset);
+
+    /* No GDT entries need runtime patching -- all five descriptors
+     * (including sel 0x20 with base 0) are pre-initialized in asm. */
 
     /* Kick the AP. INIT-SIPI is shared between amd64 and i386. */
     ApicStartApplicationProcessor(HalpStartedProcessorCount, HalpLowStubPhysicalAddress);
