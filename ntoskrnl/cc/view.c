@@ -46,8 +46,6 @@ NPAGED_LOOKASIDE_LIST iBcbLookasideList;
 static NPAGED_LOOKASIDE_LIST SharedCacheMapLookasideList;
 static NPAGED_LOOKASIDE_LIST VacbLookasideList;
 
-#define CC_LAZY_WRITE_WAIT_MISS_THRESHOLD 3
-
 /* Internal vars (MS):
  * - Threshold above which lazy writer will start action
  * - Amount of dirty pages
@@ -337,7 +335,6 @@ CcRosFlushDirtyPages (
         PROS_SHARED_CACHE_MAP SharedCacheMap;
         PROS_VACB current;
         BOOLEAN Locked;
-        BOOLEAN WaitForVacb;
 
         if (current_entry == &DirtyVacbListHead)
         {
@@ -386,23 +383,13 @@ CcRosFlushDirtyPages (
 
         KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
-        WaitForVacb = Wait;
-        if (CalledFromLazy &&
-            !Wait &&
-            current->LazyWriteMisses >= CC_LAZY_WRITE_WAIT_MISS_THRESHOLD)
-        {
-            WaitForVacb = TRUE;
-        }
-
-        Locked = SharedCacheMap->Callbacks->AcquireForLazyWrite(SharedCacheMap->LazyWriteContext, WaitForVacb);
+        Locked = SharedCacheMap->Callbacks->AcquireForLazyWrite(SharedCacheMap->LazyWriteContext, Wait);
         if (!Locked)
         {
             DPRINT("Not locked\n");
-            ASSERT(!WaitForVacb);
-            OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
-            if (current->Dirty)
-                current->LazyWriteMisses++;
+            ASSERT(!Wait);
             CcRosVacbDecRefCount(current);
+            OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
             SharedCacheMap->Flags &= ~SHARED_CACHE_MAP_IN_LAZYWRITE;
 
             if (--SharedCacheMap->OpenCount == 0)
@@ -436,8 +423,6 @@ CcRosFlushDirtyPages (
         else
         {
             ULONG PagesFreed;
-
-            current->LazyWriteMisses = 0;
 
             /* How many pages did we free? */
             PagesFreed = Iosb.Information / PAGE_SIZE;
@@ -696,7 +681,6 @@ CcRosMarkDirtyVacb (
     /* FIXME: There is no reason to account for the whole VACB. */
     CcTotalDirtyPages += VACB_MAPPING_GRANULARITY / PAGE_SIZE;
     Vacb->SharedCacheMap->DirtyPages += VACB_MAPPING_GRANULARITY / PAGE_SIZE;
-    Vacb->LazyWriteMisses = 0;
     CcRosVacbIncRefCount(Vacb);
 
     /* Move to the tail of the LRU list */
@@ -734,7 +718,6 @@ CcRosUnmarkDirtyVacb (
     ASSERT(Vacb->Dirty);
 
     Vacb->Dirty = FALSE;
-    Vacb->LazyWriteMisses = 0;
 
     RemoveEntryList(&Vacb->DirtyVacbListEntry);
     InitializeListHead(&Vacb->DirtyVacbListEntry);
