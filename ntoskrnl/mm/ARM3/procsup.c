@@ -149,7 +149,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
                            BaseAddress,
                            Size,
                            HighestAddress,
-                           PAGE_SIZE,
+                           MM_VIRTMEM_GRANULARITY,
                            MEM_TOP_DOWN);
     if (!NT_SUCCESS(Status))
     {
