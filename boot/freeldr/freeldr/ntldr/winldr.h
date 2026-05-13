@@ -12,6 +12,14 @@
 /* Entry-point to kernel */
 typedef VOID (NTAPI *KERNEL_ENTRY_POINT) (PLOADER_PARAMETER_BLOCK LoaderBlock);
 
+/* NT version freeldr was built to load. The loaded ntoskrnl is built from
+ * the same source tree at the same NTDDI_VERSION and its ExpIsLoaderValid
+ * rejects loader-block versions older than its own VER_PRODUCTMAJOR/MINOR,
+ * so the loader must announce the build's target version (not a fixed
+ * historical value). NTDDI_VERSION's high 16 bits are the _WIN32_WINNT-form
+ * USHORT (e.g. NTDDI_WIN8 0x06020000 -> 0x0602). */
+#define FRLDR_TARGET_NT_VERSION ((USHORT)(NTDDI_VERSION >> 16))
+
 /* Descriptors */
 #define NUM_GDT 128     // Must be 128
 #define NUM_IDT 0x100   // Only 16 are used though. Must be 0x100
