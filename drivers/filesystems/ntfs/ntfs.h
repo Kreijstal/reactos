@@ -225,6 +225,18 @@ typedef struct
 
     NTFS_INFO NtfsInfo;
 
+    /* Cached free cluster count.  NtfsGetFreeClusters reads the entire
+     * $Bitmap attribute sector-by-sector to compute this on each call, which
+     * stalls IRP_MJ_QUERY_VOLUME_INFORMATION (held under DirResource shared)
+     * for tens of seconds on slow media (USB-MSC) and deadlocks any
+     * concurrent IRP_MJ_CREATE waiting for DirResource exclusive.  Match the
+     * fastfat policy: compute lazily on first query, cache, never recompute.
+     * NtfsAllocateClusters / FreeClusters update CachedFreeClustersValid=FALSE
+     * so the next query refreshes.  Counter precision is approximate; this
+     * mirrors what Windows reports between flushes. */
+    volatile LONG CachedFreeClustersValid;   /* 0 = invalid, 1 = valid */
+    ULONGLONG CachedFreeClusters;
+
     NPAGED_LOOKASIDE_LIST FileRecLookasideList;
 
     ULONG MftDataOffset;
