@@ -1859,6 +1859,7 @@ MmPrefetchPages(IN ULONG NumberOfLists,
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* First pass: validate. */
     for (ListIndex = 0; ListIndex < NumberOfLists; ListIndex++)
     {
         PREAD_LIST ReadList = ReadLists[ListIndex];
@@ -1875,15 +1876,99 @@ MmPrefetchPages(IN ULONG NumberOfLists,
     }
 
     /*
-     * MmPrefetchPages is advisory.  A caller must still tolerate pages being
-     * faulted in by ordinary demand paging, so it is valid to accept the
-     * request without issuing speculative I/O.
+     * MmPrefetchPages is advisory.  Page-in failures are not surfaced to the
+     * caller, and the caller must still tolerate normal demand paging of any
+     * requested page that wasn't successfully prefetched.
      *
-     * Do not emulate this by synchronously calling the cache manager here:
-     * filesystem callers can invoke MmPrefetchPages while holding filesystem
-     * resources, and re-entering Cc/FSD paths violates those recursion and
-     * locking assumptions.
+     * For each ReadList, group consecutive pages from the FILE_SEGMENT_ELEMENT
+     * array into contiguous file ranges and prefetch each range through the
+     * existing data-section / image-section page-in path.  This reuses
+     * MmMakeSegmentResident's clustering and the FS's paging-IO handler
+     * (IRP_PAGING_IO), which is recursion-safe with respect to ordinary FS
+     * locks the caller may hold.
      */
+    for (ListIndex = 0; ListIndex < NumberOfLists; ListIndex++)
+    {
+        PREAD_LIST ReadList = ReadLists[ListIndex];
+        PSECTION_OBJECT_POINTERS Pointers;
+        BOOLEAN UseImageSection;
+        ULONG EntryIndex;
+        LONGLONG RangeStart = 0;
+        LONGLONG RangeEnd = 0;
+        BOOLEAN HaveRange = FALSE;
+
+        if (ReadList->NumberOfEntries == 0)
+        {
+            continue;
+        }
+
+        Pointers = ReadList->FileObject->SectionObjectPointer;
+        if (Pointers == NULL)
+        {
+            /* Nothing to prefetch into; skip. */
+            continue;
+        }
+
+        UseImageSection = (ReadList->IsImage != 0) && (Pointers->ImageSectionObject != NULL);
+
+        if (!UseImageSection && Pointers->DataSectionObject == NULL)
+        {
+            continue;
+        }
+
+        for (EntryIndex = 0; EntryIndex <= ReadList->NumberOfEntries; EntryIndex++)
+        {
+            LONGLONG ThisStart;
+            LONGLONG ThisEnd;
+            BOOLEAN Flush;
+
+            if (EntryIndex < ReadList->NumberOfEntries)
+            {
+                /* Strip flag bits stored in the low PAGE_SIZE-1 bits. */
+                ThisStart = (LONGLONG)(ReadList->List[EntryIndex].Alignment &
+                                       ~((ULONG_PTR)PAGE_SIZE - 1));
+                ThisEnd = ThisStart + PAGE_SIZE;
+                Flush = HaveRange && (ThisStart != RangeEnd);
+            }
+            else
+            {
+                /* Sentinel pass: flush whatever range remains. */
+                ThisStart = 0;
+                ThisEnd = 0;
+                Flush = HaveRange;
+            }
+
+            if (Flush)
+            {
+                LARGE_INTEGER VDL;
+                ULONG Length = (ULONG)(RangeEnd - RangeStart);
+
+                VDL.QuadPart = MAXLONGLONG;
+                (VOID)MmMakeDataSectionResident(Pointers,
+                                                RangeStart,
+                                                Length,
+                                                &VDL);
+                HaveRange = FALSE;
+            }
+
+            if (EntryIndex == ReadList->NumberOfEntries)
+            {
+                break;
+            }
+
+            if (!HaveRange)
+            {
+                RangeStart = ThisStart;
+                RangeEnd = ThisEnd;
+                HaveRange = TRUE;
+            }
+            else
+            {
+                RangeEnd = ThisEnd;
+            }
+        }
+    }
+
     return STATUS_SUCCESS;
 }
 
