@@ -50,6 +50,19 @@
 C_ASSERT(NTFS_CACHED_VACB_COUNT == 512);
 C_ASSERT(sizeof(((PDEVICE_EXTENSION)0)->CachedVacbBitmap) * 8 >= NTFS_CACHED_VACB_COUNT);
 
+/* Per-thread sentinel: while a NtfsReadDiskCached invocation is mid-flight
+ * with CcMapData on the volume stream, we set TopLevelIrp to the address of
+ * this static variable.  A nested NtfsReadDiskCached on the same thread
+ * recognizes the sentinel and falls back to NtfsReadDisk, guaranteeing a
+ * recursion depth of at most 2 even if Cc faults trigger volume-stream
+ * paging IRPs that re-enter the filesystem.
+ *
+ * The variable's address is distinct from any real PIRP and from every
+ * FSRTL_*_TOP_LEVEL_IRP sentinel (which all sit at low integer ULONG_PTRs
+ * <= 0x04), so the test is unambiguous. */
+static UCHAR NtfsCachedReadSentinel;
+#define NTFS_CACHED_READ_SENTINEL ((PIRP)&NtfsCachedReadSentinel)
+
 /* Mark a VACB index (0..NTFS_CACHED_VACB_COUNT-1) as populated.
  * Safe to call concurrently — uses an atomic OR. */
 FORCEINLINE
@@ -113,10 +126,23 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
     BOOLEAN Mapped;
     ULONG ChunkLength;
     ULONG VacbOffset;
+    PIRP SavedTopLevelIrp;
 
+    /* Bypass conditions:
+     *   - cache not yet initialized on the volume stream
+     *   - we are already inside our own CcMapData (sentinel set below)
+     *   - read crosses the cached region (avoid unbounded BCB growth)
+     *
+     * The TopLevelIrp == NULL test that used to live here was an over-broad
+     * recursion guard: it fired on every IRP-driven read (NTFS dispatch sets
+     * TopLevelIrp at entry), effectively disabling Cc for all MFT / run-list
+     * lookups.  The real concern — re-entering ourselves through a Cc page
+     * fault on the volume stream — is now handled by the explicit sentinel
+     * below.  Page-fault paths into NtfsRead for FCB_IS_VOLUME_STREAM short-
+     * circuit to NtfsReadDisk in rw.c, so the recursion chain has depth ≤ 2. */
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL ||
-        IoGetTopLevelIrp() != NULL ||
+        IoGetTopLevelIrp() == NTFS_CACHED_READ_SENTINEL ||
         StartingOffset + Length > NTFS_MAX_CACHED_OFFSET)
     {
         return NtfsReadDisk(Vcb->StorageDevice,
@@ -126,6 +152,12 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
                             Buffer,
                             FALSE);
     }
+
+    /* Mark this thread as inside a cached read so any reentrant call to
+     * NtfsReadDiskCached (e.g. from a page fault Cc triggers while
+     * resolving the volume-stream mapping) falls back to direct I/O. */
+    SavedTopLevelIrp = IoGetTopLevelIrp();
+    IoSetTopLevelIrp(NTFS_CACHED_READ_SENTINEL);
 
     /* CcMapData cannot map across VACB boundaries (256KB).
        Split the read into chunks that each stay within one VACB. */
@@ -163,6 +195,7 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
 
         if (!Mapped)
         {
+            IoSetTopLevelIrp(SavedTopLevelIrp);
             return NtfsReadDisk(Vcb->StorageDevice,
                                 StartingOffset,
                                 Length,
@@ -179,6 +212,7 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
         Length -= ChunkLength;
     }
 
+    IoSetTopLevelIrp(SavedTopLevelIrp);
     return STATUS_SUCCESS;
 }
 
