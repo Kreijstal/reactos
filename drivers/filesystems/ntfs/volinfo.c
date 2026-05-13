@@ -47,6 +47,16 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
 
     DPRINT("NtfsGetFreeClusters(%p)\n", DeviceExt);
 
+    /* Fast path: return the cached count if the cache is still valid.
+     * NtfsAllocateClusters / FreeClusters invalidate it on every cluster
+     * state change, so the value is always at least as fresh as the last
+     * commit.  Reading the entire bitmap is O(volume_size) and fatally
+     * slow on USB-MSC, so this cache is load-bearing. */
+    if (InterlockedCompareExchange(&DeviceExt->CachedFreeClustersValid, 1, 1) == 1)
+    {
+        return DeviceExt->CachedFreeClusters;
+    }
+
     BitmapRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (BitmapRecord == NULL)
     {
@@ -93,6 +103,12 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
 
     ExFreePoolWithTag(BitmapData, TAG_NTFS);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+
+    /* Cache result.  A concurrent racer may overwrite it with a slightly
+     * different value, but the cache only needs to be "approximately right
+     * between commits", which both readers compute. */
+    DeviceExt->CachedFreeClusters = FreeClusters;
+    InterlockedExchange(&DeviceExt->CachedFreeClustersValid, 1);
 
     return FreeClusters;
 }
@@ -225,6 +241,10 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
 
     ExFreePoolWithTag(BitmapData, TAG_NTFS);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+
+    /* Cluster state changed; invalidate the cached free-clusters count.
+     * Next IRP_MJ_QUERY_VOLUME_INFORMATION will recompute on demand. */
+    InterlockedExchange(&DeviceExt->CachedFreeClustersValid, 0);
 
     if (BitmapLockHeld)
         ExReleaseResourceLite(&DeviceExt->BitmapResource);
