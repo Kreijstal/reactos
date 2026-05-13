@@ -88,12 +88,27 @@ NtfsAllocateIrpContext(PDEVICE_OBJECT DeviceObject,
     IrpContext->PriorityBoost = IO_NO_INCREMENT;
     IrpContext->Flags = IRPCONTEXT_COMPLETE;
 
+    /* CanWait policy mirrors MS-style FASTFAT:
+     *   FSCONTROL / DEVCONTROL / SHUTDOWN  : always wait.
+     *   CLEANUP                            : always wait (matches FatFsdCleanup,
+     *                                        which hard-codes Wait=TRUE).  CLEANUP
+     *                                        runs once per FILE_OBJECT at user-mode
+     *                                        CloseHandle time and must block on
+     *                                        DirResource/MainResource rather than
+     *                                        return STATUS_CANT_WAIT, which is not
+     *                                        a status NtClose retries.
+     *   CLOSE                              : wait when top-level (TopLevelIrp==Irp).
+     *                                        Nested CLOSEs (e.g. MM teardown calling
+     *                                        IoCancelFileOpen on a cached stream)
+     *                                        must not block to avoid deadlocking
+     *                                        the MM context that holds them.
+     *   other synchronous IRPs             : wait. */
     if (IrpContext->MajorFunction == IRP_MJ_FILE_SYSTEM_CONTROL ||
         IrpContext->MajorFunction == IRP_MJ_DEVICE_CONTROL ||
         IrpContext->MajorFunction == IRP_MJ_SHUTDOWN ||
-        (IrpContext->MajorFunction != IRP_MJ_CLEANUP &&
-         IrpContext->MajorFunction != IRP_MJ_CLOSE &&
-         IoIsOperationSynchronous(Irp)))
+        IrpContext->MajorFunction == IRP_MJ_CLEANUP ||
+        (IrpContext->MajorFunction == IRP_MJ_CLOSE && IrpContext->IsTopLevel) ||
+        IoIsOperationSynchronous(Irp))
     {
         IrpContext->Flags |= IRPCONTEXT_CANWAIT;
     }
