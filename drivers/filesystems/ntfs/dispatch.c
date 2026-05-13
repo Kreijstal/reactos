@@ -238,12 +238,18 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
 {
     PIRP Irp = IrpContext->Irp;
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    BOOLEAN PromotedTopLevel;
 
     TRACE_(NTFS, "NtfsDispatch()\n");
 
     FsRtlEnterFileSystem();
 
-    NtfsIsIrpTopLevel(Irp);
+    /* Only this dispatch may clear TopLevelIrp at exit if it was the one
+     * that promoted the IRP to top-level.  When a nested NTFS dispatch
+     * runs (e.g. a paging IRP issued by Cc inside NtfsReadDiskCached),
+     * the inner dispatch must leave the outer caller's TopLevelIrp
+     * sentinel intact. */
+    PromotedTopLevel = NtfsIsIrpTopLevel(Irp);
 
     /* $LogFile Phase-1 read-only enforcement (Kreijstal/reactos#34).
      *
@@ -301,7 +307,8 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
                 ExFreeToNPagedLookasideList(
                     &NtfsGlobalData->IrpContextLookasideList, IrpContext);
-                IoSetTopLevelIrp(NULL);
+                if (PromotedTopLevel)
+                    IoSetTopLevelIrp(NULL);
                 FsRtlExitFileSystem();
                 return Status;
             }
@@ -486,7 +493,8 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         ExFreeToNPagedLookasideList(&NtfsGlobalData->IrpContextLookasideList, IrpContext);
     }
 
-    IoSetTopLevelIrp(NULL);
+    if (PromotedTopLevel)
+        IoSetTopLevelIrp(NULL);
     FsRtlExitFileSystem();
 
     return Status;
