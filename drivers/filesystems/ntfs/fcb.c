@@ -142,6 +142,27 @@ NtfsCreateFCB(PCWSTR FileName,
 }
 
 
+/* Drop the cached MFT record (if any) and clear the slot.  Called from
+ * the FCB teardown path and from FCB-aware write paths that mutate the
+ * on-disk file record so the next reader picks up fresh data.  Uses an
+ * atomic exchange so a concurrent NtfsReadFile install loses cleanly:
+ * either the installer's CAS sees NULL and stores its buffer (which
+ * this exchange then claims and frees), or it sees the old pointer
+ * we just nulled out and frees its own buffer.  Invocation happens
+ * under the FCB MainResource taken exclusive by writers, so racing
+ * readers never observe a half-replaced cache. */
+VOID
+NtfsInvalidateCachedFileRecord(PNTFS_FCB Fcb)
+{
+    PFILE_RECORD_HEADER Old;
+
+    Old = InterlockedExchangePointer((PVOID *)&Fcb->CachedFileRecord, NULL);
+    if (Old != NULL)
+    {
+        ExFreePoolWithTag(Old, TAG_NTFS);
+    }
+}
+
 /* Free an FCB whose SectionObjectPointers slot is fully clean: tear down
  * the resources, FILE_LOCK, the SOP struct itself, and return the FCB
  * pool block to the lookaside list.  Caller must guarantee no other
@@ -154,6 +175,8 @@ NtfsFreeFcbStorage(PNTFS_FCB Fcb)
         ExFreePoolWithTag(Fcb->SectionObjectPointers, TAG_SOP);
         Fcb->SectionObjectPointers = NULL;
     }
+
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FsRtlUninitializeFileLock(&Fcb->FileLock);
     ExDeleteResourceLite(&Fcb->PagingIoResource);
