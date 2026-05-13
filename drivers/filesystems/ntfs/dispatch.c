@@ -158,6 +158,10 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
     if (InLength == 0)
         return STATUS_INVALID_SECURITY_DESCR;
 
+    /* Invalidate FCB-level MFT record cache: the on-disk record's
+     * $SECURITY_DESCRIPTOR slot is about to change. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (FileRecord == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
