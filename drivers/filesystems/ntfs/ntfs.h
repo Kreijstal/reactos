@@ -811,6 +811,18 @@ typedef struct _FCB
 
     FILENAME_ATTRIBUTE Entry;
 
+    /* Cached on-disk MFT record for this FCB.  Populated lazily on the
+     * first NtfsReadFile cache miss and reused by subsequent reads to
+     * avoid re-decoding the $MFT MCB and re-issuing a sector read on
+     * every paging IRP.  Allocated from non-paged pool with TAG_NTFS at
+     * BytesPerFileRecord bytes; freed in NtfsDestroyFCB.  Installed
+     * lock-free via InterlockedCompareExchangePointer so concurrent
+     * shared-resource readers can race the install — the loser frees
+     * its buffer.  Invalidated by FCB-aware write paths via
+     * NtfsInvalidateCachedFileRecord before they commit changes through
+     * UpdateFileRecord, so the next reader re-reads the fresh state. */
+    PFILE_RECORD_HEADER CachedFileRecord;
+
 } NTFS_FCB, *PNTFS_FCB;
 
 typedef struct _FIND_ATTR_CONTXT
@@ -1289,6 +1301,9 @@ NtfsDestroyFCB(PNTFS_FCB Fcb);
 
 VOID
 NtfsReapZombieFcbs(VOID);
+
+VOID
+NtfsInvalidateCachedFileRecord(PNTFS_FCB Fcb);
 
 BOOLEAN
 NtfsFCBIsDirectory(PNTFS_FCB Fcb);
