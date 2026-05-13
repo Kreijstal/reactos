@@ -114,9 +114,18 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
     ULONG ChunkLength;
     ULONG VacbOffset;
 
+    /* The cache manager faults pages in by issuing IRP_PAGING_IO back to
+     * NtfsFsdRead on the volume StreamFileObject.  NtfsReadFile shortcuts
+     * any FCB_IS_VOLUME or FCB_IS_VOLUME_STREAM read to NtfsReadDisk
+     * (rw.c), which talks directly to the storage stack and does not
+     * re-enter NtfsReadDiskCached.  The recursion chain therefore has a
+     * fixed depth of two and terminates without a guard.
+     *
+     * This matches Windows ntfs.sys: cached reads on the volume stream
+     * are not gated by TopLevelIrp; the paging-IO path on the volume
+     * stream FCB is the recursion terminator. */
     if (Vcb->StreamFileObject == NULL ||
-        Vcb->StreamFileObject->PrivateCacheMap == NULL ||
-        IoGetTopLevelIrp() != NULL)
+        Vcb->StreamFileObject->PrivateCacheMap == NULL)
     {
         return NtfsReadDisk(Vcb->StorageDevice,
                             StartingOffset,
