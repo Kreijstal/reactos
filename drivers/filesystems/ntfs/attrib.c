@@ -3028,6 +3028,9 @@ FreeClusters(PNTFS_VCB Vcb,
     if (BitmapLockHeld)
         ExReleaseResourceLite(&Vcb->BitmapResource);
 
+    /* Cluster state changed; invalidate the cached free-clusters count. */
+    InterlockedExchange(&Vcb->CachedFreeClustersValid, 0);
+
     return Status;
 }
 
