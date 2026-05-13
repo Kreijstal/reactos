@@ -518,6 +518,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
     RTL_USER_PROCESS_INFORMATION rtl_info;
     HANDLE parent = 0, debug = 0;
+    DWORD *handle_flags = NULL;
+    SIZE_T handle_count = 0;
     ULONG nt_flags = 0;
     USHORT machine = 0;
     NTSTATUS status;
@@ -627,13 +629,59 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         }
     }
 
-    if (inherit) nt_flags |= PROCESS_CREATE_FLAGS_INHERIT_HANDLES;
+    if (inherit || handle_list) nt_flags |= PROCESS_CREATE_FLAGS_INHERIT_HANDLES;
     if (flags & DEBUG_ONLY_THIS_PROCESS) nt_flags |= PROCESS_CREATE_FLAGS_NO_DEBUG_INHERIT;
     if (flags & CREATE_BREAKAWAY_FROM_JOB) nt_flags |= PROCESS_CREATE_FLAGS_BREAKAWAY;
     if (flags & CREATE_SUSPENDED) nt_flags |= PROCESS_CREATE_FLAGS_SUSPENDED;
 
+    if ((nt_flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) && handle_list)
+    {
+        HANDLE *handles = handle_list->value;
+        SIZE_T i;
+
+        handle_count = handle_list->size / sizeof(*handles);
+        if (handle_count)
+        {
+            handle_flags = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                      handle_count * sizeof(*handle_flags) );
+            if (!handle_flags)
+            {
+                status = STATUS_NO_MEMORY;
+                goto done;
+            }
+        }
+
+        for (i = 0; i < handle_count; ++i)
+        {
+            DWORD current_flags;
+
+            if (GetHandleInformation( handles[i], &current_flags ))
+            {
+                handle_flags[i] = current_flags | 0x80000000;
+                SetHandleInformation( handles[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT );
+            }
+        }
+    }
+
     status = create_nt_process( token, debug, process_attr, thread_attr,
                                 nt_flags, params, &rtl_info, parent, machine, handle_list, job_list );
+
+    if (handle_flags)
+    {
+        HANDLE *handles = handle_list->value;
+        SIZE_T i;
+
+        for (i = 0; i < handle_count; ++i)
+        {
+            if (handle_flags[i] & 0x80000000)
+            {
+                SetHandleInformation( handles[i], HANDLE_FLAG_INHERIT,
+                                      handle_flags[i] & HANDLE_FLAG_INHERIT );
+            }
+        }
+        HeapFree( GetProcessHeap(), 0, handle_flags );
+    }
+
     switch (status)
     {
     case STATUS_SUCCESS:
