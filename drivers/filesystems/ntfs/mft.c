@@ -1191,7 +1191,6 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     ULONGLONG DataRunLength;
     LONGLONG DataRunStartLCN;
     ULONGLONG CurrentOffset;
-    ULONG ReadLength;
     ULONG AlreadyRead;
     NTSTATUS Status;
 
@@ -1300,86 +1299,187 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     }
 
     /*
-     * II. Go through the run list and read the data
+     * II. Go through the run list and read the data.
+     *
+     * Coalesce physically-adjacent data runs into a single NtfsReadDiskCached
+     * call.  NTFS write allocators (notably libntfs-3g's MFT growth path and
+     * post-resize $DATA layouts) frequently split a single contiguous extent
+     * into multiple mapping-pair entries whose LCNs are still consecutive on
+     * disk.  Issuing one IRP per run on those layouts pays per-IRP BOT
+     * command/data/status overhead on USB-MSC for no reason.
+     *
+     * Invariants enforced below:
+     *   - Sparse segments (DiskOffset == -1) are flushed as RtlZeroMemory
+     *     and NEVER merged with a real-disk segment.
+     *   - Real-disk segments merge iff the next run starts at exactly the
+     *     end of the pending real-disk segment AND the merged length stays
+     *     within NTFS_MAX_COALESCED_READ.
+     *   - The total pending length always corresponds to a contiguous slice
+     *     of the destination Buffer; we ASSERT that flushing leaves the
+     *     accumulated AlreadyRead consistent.
      */
+#define NTFS_MAX_COALESCED_READ (4UL * 1024 * 1024)
 
-    ReadLength = (ULONG)min(DataRunLength * Vcb->NtfsInfo.BytesPerCluster - (Offset - CurrentOffset), Length);
-    if (DataRunStartLCN == -1)
     {
-        RtlZeroMemory(Buffer, ReadLength);
+        LONGLONG PendingDiskOffset = -1;   /* -1 => no pending segment.    */
+        ULONG    PendingLength     = 0;
+        PUCHAR   PendingBuffer     = NULL;
+        BOOLEAN  PendingIsSparse   = FALSE;
+        ULONG    RunBytesAvailable;
+        ULONG    RunBytesToConsume;
+        ULONGLONG IntraRunOffset;
+
         Status = STATUS_SUCCESS;
-    }
-    else
-    {
-        Status = NtfsReadDiskCached(Vcb,
-                                    DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster + Offset - CurrentOffset,
-                                    ReadLength,
-                                    (PUCHAR)Buffer);
-    }
-    if (NT_SUCCESS(Status))
-    {
-        Length -= ReadLength;
-        Buffer += ReadLength;
-        AlreadyRead += ReadLength;
 
-        if (ReadLength == DataRunLength * Vcb->NtfsInfo.BytesPerCluster - (Offset - CurrentOffset))
-        {
-            CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
-            DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-            if (DataRunOffset != (ULONGLONG)-1)
-            {
-                DataRunStartLCN = LastLCN + DataRunOffset;
-                LastLCN = DataRunStartLCN;
-            }
-            else
-                DataRunStartLCN = -1;
-        }
+        /* First iteration honours the intra-run offset; subsequent runs
+         * start at their first byte. */
+        IntraRunOffset = Offset - CurrentOffset;
 
         while (Length > 0)
         {
-            ReadLength = (ULONG)min(DataRunLength * Vcb->NtfsInfo.BytesPerCluster, Length);
+            RunBytesAvailable = (ULONG)min(DataRunLength * Vcb->NtfsInfo.BytesPerCluster - IntraRunOffset,
+                                           (ULONGLONG)Length);
+            RunBytesToConsume = RunBytesAvailable;
+
             if (DataRunStartLCN == -1)
-                RtlZeroMemory(Buffer, ReadLength);
+            {
+                /* Sparse: flush any pending real-disk segment first, then
+                 * either extend a pending sparse segment or start one. */
+                if (!PendingIsSparse && PendingLength != 0)
+                {
+                    Status = NtfsReadDiskCached(Vcb,
+                                                PendingDiskOffset,
+                                                PendingLength,
+                                                PendingBuffer);
+                    if (!NT_SUCCESS(Status))
+                        break;
+                    AlreadyRead += PendingLength;
+                    PendingLength = 0;
+                }
+
+                if (PendingLength == 0)
+                {
+                    PendingIsSparse = TRUE;
+                    PendingBuffer = (PUCHAR)Buffer;
+                    PendingDiskOffset = -1;
+                }
+
+                /* Cap the sparse segment too so a giant sparse hole doesn't
+                 * cause us to issue a single multi-megabyte RtlZeroMemory
+                 * while real-disk segments are queued behind it. */
+                if (PendingLength + RunBytesToConsume > NTFS_MAX_COALESCED_READ)
+                {
+                    RtlZeroMemory(PendingBuffer, PendingLength);
+                    AlreadyRead += PendingLength;
+                    PendingLength = 0;
+                    PendingBuffer = (PUCHAR)Buffer;
+                }
+
+                PendingLength += RunBytesToConsume;
+            }
             else
             {
-                Status = NtfsReadDiskCached(Vcb,
-                                            DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster,
-                                            ReadLength,
-                                            (PUCHAR)Buffer);
-                if (!NT_SUCCESS(Status))
-                    break;
+                LONGLONG RunDiskOffset = DataRunStartLCN * Vcb->NtfsInfo.BytesPerCluster + IntraRunOffset;
+
+                /* If we have a pending sparse segment, flush it before
+                 * starting a real read. */
+                if (PendingIsSparse && PendingLength != 0)
+                {
+                    RtlZeroMemory(PendingBuffer, PendingLength);
+                    AlreadyRead += PendingLength;
+                    PendingLength = 0;
+                }
+
+                /* Merge with a pending real-disk segment when physically
+                 * adjacent and within the size cap. */
+                if (!PendingIsSparse &&
+                    PendingLength != 0 &&
+                    PendingDiskOffset + (LONGLONG)PendingLength == RunDiskOffset &&
+                    PendingLength + RunBytesToConsume <= NTFS_MAX_COALESCED_READ)
+                {
+                    ASSERT(PendingBuffer + PendingLength == (PUCHAR)Buffer);
+                    PendingLength += RunBytesToConsume;
+                }
+                else
+                {
+                    /* Flush any pending real-disk segment that can't be
+                     * merged (different LCN or would overflow the cap). */
+                    if (PendingLength != 0)
+                    {
+                        ASSERT(!PendingIsSparse);
+                        Status = NtfsReadDiskCached(Vcb,
+                                                    PendingDiskOffset,
+                                                    PendingLength,
+                                                    PendingBuffer);
+                        if (!NT_SUCCESS(Status))
+                            break;
+                        AlreadyRead += PendingLength;
+                    }
+
+                    PendingIsSparse = FALSE;
+                    PendingBuffer = (PUCHAR)Buffer;
+                    PendingDiskOffset = RunDiskOffset;
+                    PendingLength = RunBytesToConsume;
+                }
             }
 
-            Length -= ReadLength;
-            Buffer += ReadLength;
-            AlreadyRead += ReadLength;
+            Length -= RunBytesToConsume;
+            Buffer += RunBytesToConsume;
 
-            /* We finished this request, but there still data in this data run. */
-            if (Length == 0 && ReadLength != DataRunLength * Vcb->NtfsInfo.BytesPerCluster)
+            /* Advance through the current run; if we consumed all of it
+             * (which is always the case here, since RunBytesAvailable is
+             * the whole remainder of this run unless Length capped it),
+             * walk to the next run. */
+            if (RunBytesToConsume != DataRunLength * Vcb->NtfsInfo.BytesPerCluster - IntraRunOffset)
+            {
+                /* Caller's Length ran out mid-run.  Done. */
+                ASSERT(Length == 0);
                 break;
+            }
 
-            /*
-             * Go to next run in the list.
-             */
+            /* Subsequent runs are entered from their first byte. */
+            IntraRunOffset = 0;
+            CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
+
+            if (Length == 0)
+                break;
 
             if (*DataRun == 0)
                 break;
-            CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
+
             DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
             if (DataRunOffset != -1)
             {
-                /* Normal data run. */
                 DataRunStartLCN = LastLCN + DataRunOffset;
                 LastLCN = DataRunStartLCN;
             }
             else
             {
-                /* Sparse data run. */
                 DataRunStartLCN = -1;
             }
-        } /* while */
+        } /* while Length > 0 */
 
-    } /* if Disk */
+        /* Flush any trailing pending segment. */
+        if (NT_SUCCESS(Status) && PendingLength != 0)
+        {
+            if (PendingIsSparse)
+            {
+                RtlZeroMemory(PendingBuffer, PendingLength);
+                AlreadyRead += PendingLength;
+            }
+            else
+            {
+                Status = NtfsReadDiskCached(Vcb,
+                                            PendingDiskOffset,
+                                            PendingLength,
+                                            PendingBuffer);
+                if (NT_SUCCESS(Status))
+                    AlreadyRead += PendingLength;
+            }
+        }
+    }
+
+#undef NTFS_MAX_COALESCED_READ
 
     return AlreadyRead;
 }
