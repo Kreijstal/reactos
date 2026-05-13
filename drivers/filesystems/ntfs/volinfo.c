@@ -42,7 +42,6 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
     ULONGLONG BitmapDataSize;
     PCHAR BitmapData;
     ULONGLONG FreeClusters = 0;
-    ULONG Read = 0;
     RTL_BITMAP Bitmap;
 
     DPRINT("NtfsGetFreeClusters(%p)\n", DeviceExt);
@@ -87,11 +86,12 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
         return 0;
     }
 
-    /* FIXME: Totally underoptimized! */
-    for (; Read < BitmapDataSize; Read += DeviceExt->NtfsInfo.BytesPerSector)
-    {
-        ReadAttribute(DeviceExt, DataContext, Read, (PCHAR)((ULONG_PTR)BitmapData + Read), DeviceExt->NtfsInfo.BytesPerSector);
-    }
+    /* Read the entire bitmap in one ReadAttribute call.  Doing this
+     * sector-by-sector (the previous code) issued ~600 separate I/Os on
+     * a 10 GiB volume — fine on a fast disk, ~tens-of-seconds on USB-MSC.
+     * ReadAttribute handles the run list internally and coalesces
+     * contiguous extents, so the underlying I/O count drops to ~run-count. */
+    ReadAttribute(DeviceExt, DataContext, 0, (PCHAR)BitmapData, (ULONG)BitmapDataSize);
     ReleaseAttributeContext(DataContext);
 
     DPRINT1("Total clusters: %I64x\n", DeviceExt->NtfsInfo.ClusterCount);
