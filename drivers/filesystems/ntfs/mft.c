@@ -1189,9 +1189,6 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     ULONG AlreadyRead;
     NTSTATUS Status;
 
-    //TEMPTEMP
-    PUCHAR TempBuffer;
-
     if (!Context->pRecord->IsNonResident)
     {
         // We need to truncate Offset to a ULONG for pointer arithmetic
@@ -1243,66 +1240,57 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
 
     AlreadyRead = 0;
 
-    // FIXME: Cache seems to be non-working. Disable it for now
-    //if(Context->CacheRunOffset <= Offset && Offset < Context->CacheRunOffset + Context->CacheRunLength * Volume->ClusterSize)
-    if (0)
+    /*
+     * Walk the encoded mapping pairs stored inside the attribute record
+     * itself.  PrepareAttributeContext() copies the on-disk attribute
+     * (including its data runs) into Context->pRecord, and AddRun() keeps
+     * that region in sync whenever the runlist grows, so the bytes at
+     * NonResident.MappingPairsOffset are an always-current encoded runlist.
+     *
+     * Walking them directly avoids the per-call non-paged pool allocation
+     * and full MCB <-> data-run round-trip that the previous implementation
+     * performed for every ReadAttribute call.  That round-trip dominated
+     * cold-load latency for paging I/O against the MFT and large
+     * non-resident $DATA attributes (every 64 KB paging chunk re-decoded
+     * the entire mapping pairs list from VBN 0).
+     *
+     * The historic CacheRun fast path on PNTFS_ATTR_CONTEXT is deliberately
+     * not consulted here: PrepareAttributeContext / FindAttribute are cheap
+     * relative to the old round-trip, NtfsReadFile allocates a fresh context
+     * per IRP, and the shared Vcb->MFTContext is touched concurrently by
+     * unsynchronized paths -- a stale or torn cache snapshot was the root
+     * cause of the original "cache gives wrong results" disable from 2010.
+     */
+    DataRun = (PUCHAR)((ULONG_PTR)Context->pRecord +
+                       Context->pRecord->NonResident.MappingPairsOffset);
+    LastLCN = 0;
+    CurrentOffset = 0;
+
+    while (1)
     {
-        DataRun = Context->CacheRun;
-        LastLCN = Context->CacheRunLastLCN;
-        DataRunStartLCN = Context->CacheRunStartLCN;
-        DataRunLength = Context->CacheRunLength;
-        CurrentOffset = Context->CacheRunCurrentOffset;
-    }
-    else
-    {
-        //TEMPTEMP
-        ULONG UsedBufferSize;
-        TempBuffer = ExAllocatePoolWithTag(NonPagedPool, Vcb->NtfsInfo.BytesPerFileRecord, TAG_NTFS);
-        if (TempBuffer == NULL)
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
+        if (DataRunOffset != -1)
         {
-            return STATUS_INSUFFICIENT_RESOURCES;
+            /* Normal data run. */
+            DataRunStartLCN = LastLCN + DataRunOffset;
+            LastLCN = DataRunStartLCN;
+        }
+        else
+        {
+            /* Sparse data run. */
+            DataRunStartLCN = -1;
         }
 
-        LastLCN = 0;
-        CurrentOffset = 0;
-
-        // This will be rewritten in the next iteration to just use the DataRuns MCB directly
-        ConvertLargeMCBToDataRuns(&Context->DataRunsMCB,
-                                  TempBuffer,
-                                  Vcb->NtfsInfo.BytesPerFileRecord,
-                                  &UsedBufferSize);
-
-        DataRun = TempBuffer;
-
-        while (1)
+        if (Offset >= CurrentOffset &&
+            Offset < CurrentOffset + (DataRunLength * Vcb->NtfsInfo.BytesPerCluster))
         {
-            DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-            if (DataRunOffset != -1)
-            {
-                /* Normal data run. */
-                DataRunStartLCN = LastLCN + DataRunOffset;
-                LastLCN = DataRunStartLCN;
-            }
-            else
-            {
-                /* Sparse data run. */
-                DataRunStartLCN = -1;
-            }
-
-            if (Offset >= CurrentOffset &&
-                Offset < CurrentOffset + (DataRunLength * Vcb->NtfsInfo.BytesPerCluster))
-            {
-                break;
-            }
-
-            if (*DataRun == 0)
-            {
-                ExFreePoolWithTag(TempBuffer, TAG_NTFS);
-                return AlreadyRead;
-            }
-
-            CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
+            break;
         }
+
+        if (*DataRun == 0)
+            return AlreadyRead;
+
+        CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
     }
 
     /*
@@ -1386,17 +1374,6 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
         } /* while */
 
     } /* if Disk */
-
-    // TEMPTEMP
-    if (Context->pRecord->IsNonResident)
-        ExFreePoolWithTag(TempBuffer, TAG_NTFS);
-
-    Context->CacheRun = DataRun;
-    Context->CacheRunOffset = Offset + AlreadyRead;
-    Context->CacheRunStartLCN = DataRunStartLCN;
-    Context->CacheRunLength = DataRunLength;
-    Context->CacheRunLastLCN = LastLCN;
-    Context->CacheRunCurrentOffset = CurrentOffset;
 
     return AlreadyRead;
 }
