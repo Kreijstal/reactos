@@ -94,15 +94,6 @@ KeExpandKernelStackAndCalloutEx(
         return STATUS_NO_MEMORY;
     }
 
-    Status = MmGrowKernelStackEx(NewStackBase, CommitSize);
-    if (!NT_SUCCESS(Status))
-    {
-        MmDeleteKernelStack(NewStackBase, FALSE);
-        return Status;
-    }
-
-    NewStackLimit = Add2Ptr(NewStackBase, -KERNEL_LARGE_STACK_SIZE);
-
     /* Save the thread's stack bookkeeping so we can restore it afterwards. */
     SavedStackBase = CurrentThread->StackBase;
     SavedStackLimit = (ULONG_PTR)CurrentThread->StackLimit;
@@ -120,6 +111,7 @@ KeExpandKernelStackAndCalloutEx(
      * KiCalloutOnNewStack assembly helper.
      */
     CurrentThread->StackBase = NewStackBase;
+    NewStackLimit = Add2Ptr(NewStackBase, -KERNEL_LARGE_STACK_COMMIT);
 #if (NTDDI_VERSION >= NTDDI_WIN8)
     CurrentThread->StackLimit = (volatile PVOID)NewStackLimit;
 #else
@@ -131,6 +123,25 @@ KeExpandKernelStackAndCalloutEx(
 #else
     CurrentThread->LargeStack = TRUE;
 #endif
+
+    Status = MmGrowKernelStackEx(NewStackBase, CommitSize);
+    if (!NT_SUCCESS(Status))
+    {
+        CurrentThread->StackBase = SavedStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
+#else
+        CurrentThread->StackLimit = SavedStackLimit;
+#endif
+        CurrentThread->InitialStack = SavedInitialStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        CurrentEthread->LargeStack = SavedLargeStack;
+#else
+        CurrentThread->LargeStack = SavedLargeStack;
+#endif
+        MmDeleteKernelStack(NewStackBase, FALSE);
+        return Status;
+    }
 
     KiCalloutOnNewStack(Callout, Parameter, NewStackBase);
 

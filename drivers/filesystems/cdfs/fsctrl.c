@@ -29,6 +29,15 @@ Abstract:
 BOOLEAN CdDisable = FALSE;
 BOOLEAN CdNoJoliet = FALSE;
 
+typedef struct _CD_MOUNT_CALLOUT_PARAMETERS {
+
+    PIRP_CONTEXT IrpContext;
+    PIRP Irp;
+    NTSTATUS IrpStatus;
+    NTSTATUS ExceptionStatus;
+
+} CD_MOUNT_CALLOUT_PARAMETERS, *PCD_MOUNT_CALLOUT_PARAMETERS;
+
 //
 //  Local support routines
 //
@@ -46,6 +55,12 @@ CdReMountOldVcb (
     _Inout_ PVCB OldVcb,
     _Inout_ PVCB NewVcb,
     _In_ PDEVICE_OBJECT DeviceObjectWeTalkTo
+    );
+
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+CdMountVolumeCallout (
+    _In_ PVOID Parameter
     );
 
 _Requires_lock_held_(_Global_critical_region_)
@@ -389,7 +404,40 @@ Return Value:
 
     case IRP_MN_MOUNT_VOLUME:
 
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_VISTA)
+        {
+            CD_MOUNT_CALLOUT_PARAMETERS CalloutParameters;
+
+            CalloutParameters.IrpContext = IrpContext;
+            CalloutParameters.Irp = Irp;
+            CalloutParameters.IrpStatus = STATUS_UNRECOGNIZED_VOLUME;
+            CalloutParameters.ExceptionStatus = STATUS_SUCCESS;
+
+            Status = KeExpandKernelStackAndCalloutEx( CdMountVolumeCallout,
+                                                      &CalloutParameters,
+                                                      MAXIMUM_EXPANSION_SIZE,
+                                                      TRUE,
+                                                      NULL );
+
+            if (!NT_SUCCESS( CalloutParameters.ExceptionStatus )) {
+
+                Status = CdProcessException( IrpContext,
+                                             Irp,
+                                             CalloutParameters.ExceptionStatus );
+                break;
+            }
+
+            if (!NT_SUCCESS( Status )) {
+
+                CdCompleteRequest( IrpContext, Irp, Status );
+                break;
+            }
+
+            Status = CalloutParameters.IrpStatus;
+        }
+#else
         Status = CdMountVolume( IrpContext, Irp );
+#endif
         break;
 
     case IRP_MN_VERIFY_VOLUME:
@@ -405,6 +453,27 @@ Return Value:
     }
 
     return Status;
+}
+
+_Requires_lock_held_(_Global_critical_region_)
+VOID
+CdMountVolumeCallout (
+    _In_ PVOID Parameter
+    )
+{
+    PCD_MOUNT_CALLOUT_PARAMETERS CalloutParameters = Parameter;
+
+    _SEH2_TRY {
+
+        CalloutParameters->IrpStatus =
+            CdMountVolume( CalloutParameters->IrpContext,
+                           CalloutParameters->Irp );
+
+    } _SEH2_EXCEPT (CdExceptionFilter( CalloutParameters->IrpContext,
+                                       _SEH2_GetExceptionInformation() )) {
+
+        CalloutParameters->ExceptionStatus = _SEH2_GetExceptionCode();
+    } _SEH2_END;
 }
 
 
@@ -3504,6 +3573,3 @@ Return Value:
 
     Vcb->Vpb->VolumeLabelLength = (USHORT) (Index * sizeof( WCHAR ));
 }
-
-
-
