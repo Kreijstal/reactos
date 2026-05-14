@@ -1150,8 +1150,20 @@ KeRevertToUserAffinityThread(VOID)
     /* Lock the Dispatcher Database */
     OldIrql = KiAcquireDispatcherLock();
 
-    /* Set the user affinity and processor and disable system affinity */
+    /* Set the user affinity and processor and disable system affinity.
+     * On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes) whose
+     * trailing Reserved[] bytes overlap separate KTHREAD fields per union
+     * (Affinity hides ApcStateIndex/WaitBlockCount/IdealProcessor;
+     * UserAffinity hides PreviousMode/BasePriority/...). A whole-struct
+     * assignment would clobber ApcStateIndex with PreviousMode and later
+     * crash KiInsertQueueApc when an APC with a matching state index gets
+     * queued. Copy only the affinity bits. */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    CurrentThread->Affinity.Mask = CurrentThread->UserAffinity.Mask;
+    CurrentThread->Affinity.Group = CurrentThread->UserAffinity.Group;
+#else
     CurrentThread->Affinity = CurrentThread->UserAffinity;
+#endif
     CurrentThread->IdealProcessor = CurrentThread->UserIdealProcessor;
     CurrentThread->SystemAffinityActive = FALSE;
 
