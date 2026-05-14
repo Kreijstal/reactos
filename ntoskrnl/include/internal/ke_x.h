@@ -452,7 +452,12 @@ KiAcquirePrcbLock(IN PKPRCB Prcb)
     for (;;)
     {
         /* Acquire the lock and break out if we acquired it first */
-        if (!InterlockedExchange((PLONG)&Prcb->PrcbLock, 1)) break;
+        if (InterlockedCompareExchangePointer((PVOID volatile *)&Prcb->PrcbLock,
+                                             (PVOID)1,
+                                             NULL) == NULL)
+        {
+            break;
+        }
 
         /* Loop until the other CPU releases it */
         do
@@ -479,7 +484,7 @@ KiReleasePrcbLock(IN PKPRCB Prcb)
     ASSERT(Prcb->PrcbLock != 0);
 
     /* Release it */
-    InterlockedAnd((PLONG)&Prcb->PrcbLock, 0);
+    InterlockedExchangePointer((PVOID volatile *)&Prcb->PrcbLock, NULL);
 }
 
 //
@@ -500,7 +505,12 @@ KiAcquireThreadLock(IN PKTHREAD Thread)
     for (;;)
     {
         /* Acquire the lock and break out if we acquired it first */
-        if (!InterlockedExchange((PLONG)&Thread->ThreadLock, 1)) break;
+        if (InterlockedCompareExchangePointer((PVOID volatile *)&Thread->ThreadLock,
+                                             (PVOID)1,
+                                             NULL) == NULL)
+        {
+            break;
+        }
 
         /* Loop until the other CPU releases it */
         do
@@ -526,24 +536,17 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
     /* Release it */
-    InterlockedAnd((PLONG)&Thread->ThreadLock, 0);
+    InterlockedExchangePointer((PVOID volatile *)&Thread->ThreadLock, NULL);
 }
 
 FORCEINLINE
 BOOLEAN
 KiTryThreadLock(IN PKTHREAD Thread)
 {
-    LONG Value;
-
-    /* If the lock isn't acquired, return false */
-    if (!Thread->ThreadLock) return FALSE;
-
-    /* Otherwise, try to acquire it and check the result */
-    Value = 1;
-    Value = InterlockedExchange((PLONG)&Thread->ThreadLock, Value);
-
-    /* Return the lock state */
-    return (Value == 1);
+    /* Try acquiring the lock. Return TRUE if it was already held. */
+    return (InterlockedCompareExchangePointer((PVOID volatile *)&Thread->ThreadLock,
+                                             (PVOID)1,
+                                             NULL) != NULL);
 }
 
 FORCEINLINE
