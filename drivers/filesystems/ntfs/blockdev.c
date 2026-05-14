@@ -215,9 +215,11 @@ NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
     NTSTATUS Status;
     LARGE_INTEGER PurgeOffset;
     LARGE_INTEGER PurgeLength;
+    LARGE_INTEGER CacheOffset;
     LONGLONG EndOffset;
     ULONG FirstVacb;
     ULONG LastVacb;
+    BOOLEAN CacheMayContainRange = TRUE;
 
     Status = NtfsWriteDisk(Vcb->StorageDevice,
                            StartingOffset,
@@ -248,8 +250,30 @@ NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
         if (LastVacb >= NTFS_CACHED_VACB_COUNT)
             LastVacb = NTFS_CACHED_VACB_COUNT - 1;
 
-        if (!NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb))
+        CacheMayContainRange = NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb);
+        if (!CacheMayContainRange)
             return Status;
+    }
+
+    /*
+     * Keep the volume stream cache coherent with metadata writes.  A purge is
+     * not sufficient on every ReactOS cache-manager path: a following
+     * CcMapData can still observe the old VACB contents.  Updating the cache
+     * with the bytes that just reached disk makes immediate metadata re-reads
+     * deterministic.  During format, however, the volume stream cache can
+     * still describe the pre-format section size.  Do not call CcCopyWrite
+     * beyond that size; the cache manager asserts on such writes.
+     */
+    CacheOffset.QuadPart = StartingOffset;
+    if (CacheMayContainRange &&
+        EndOffset <= CcGetFileSizePointer(Vcb->StreamFileObject)->QuadPart &&
+        CcCopyWrite(Vcb->StreamFileObject,
+                    &CacheOffset,
+                    Length,
+                    FALSE,
+                    (PVOID)Buffer))
+    {
+        return Status;
     }
 
     PurgeOffset.QuadPart = StartingOffset;
