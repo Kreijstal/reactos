@@ -328,13 +328,20 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
 
     /* Get the next scheduled thread */
     NextThread = Prcb->NextThread;
+    if (NextThread == Prcb->CurrentThread)
+    {
+        Prcb->NextThread = NULL;
+        NextThread = NULL;
+    }
+
     if (NextThread)
     {
         /* Sanity check */
         ASSERT(NextThread->State == Standby);
 
         /* Check if priority changed */
-        if (OldPriority > NextThread->Priority)
+        if ((OldPriority > NextThread->Priority) &&
+            (KeGetCurrentProcessorNumber() == Processor))
         {
             /* Preempt the thread */
             NextThread->Preempted = TRUE;
@@ -343,11 +350,14 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             Thread->State = Standby;
             Prcb->NextThread = Thread;
 
-            /* Set it in deferred ready mode */
-            NextThread->State = DeferredReady;
-            NextThread->DeferredProcessor = Prcb->Number;
+            /* Put the displaced standby thread back on this PRCB's ready list. */
+            NextThread->State = Ready;
+            NextThread->WaitTime = KeTickCount.LowPart;
+            InsertHeadList(&Prcb->DispatcherReadyListHead[NextThread->Priority],
+                           &NextThread->WaitListEntry);
+            Prcb->ReadySummary |= PRIORITY_MASK(NextThread->Priority);
+
             KiReleasePrcbLock(Prcb);
-            KiDeferredReadyThread(NextThread);
             return;
         }
     }
@@ -940,7 +950,15 @@ NtYieldExecution(VOID)
         KiAcquirePrcbLock(Prcb);
 
         /* Find a new thread to run if none was selected */
-        if (!Prcb->NextThread) Prcb->NextThread = KiSelectReadyThread(1, Prcb);
+        if (!Prcb->NextThread)
+        {
+            NextThread = KiSelectReadyThread(1, Prcb);
+            if (NextThread)
+            {
+                NextThread->State = Standby;
+                Prcb->NextThread = NextThread;
+            }
+        }
 
         /* Make sure we still have a next thread to schedule */
         NextThread = Prcb->NextThread;
