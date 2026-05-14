@@ -740,6 +740,18 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                                     Buffer);
     }
 
+    if (Fcb->Flags & FCB_IS_VOLUME_STREAM)
+    {
+        Status = NtfsWriteDisk(DeviceExt->StorageDevice,
+                               WriteOffset,
+                               Length,
+                               DeviceExt->NtfsInfo.BytesPerSector,
+                               Buffer);
+        if (NT_SUCCESS(Status))
+            *LengthWritten = Length;
+        return Status;
+    }
+
     // we don't yet handle compression
     if (NtfsFCBIsCompressed(Fcb))
     {
@@ -1031,7 +1043,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     PagingIo = BooleanFlagOn(Irp->Flags, IRP_PAGING_IO);
     NonCachedIo = BooleanFlagOn(Irp->Flags, IRP_NOCACHE) ||
                   BooleanFlagOn(FileObject->Flags, FILE_NO_INTERMEDIATE_BUFFERING) ||
-                  BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME);
+                  BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM);
 
     if (Length > 0 && Length <= 4096 && ByteOffset.QuadPart == 0 && !PagingIo)
     {
@@ -1039,7 +1051,8 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
                 Fcb->ObjectName, Length, NonCachedIo, PagingIo, Fcb->RFCB.FileSize.QuadPart);
     }
 
-    if (ByteOffset.u.HighPart && !(Fcb->Flags & FCB_IS_VOLUME))
+    if (ByteOffset.u.HighPart &&
+        !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
     {
         DPRINT1("FIXME: Writing to large files is not yet supported at this time.\n");
         return STATUS_INVALID_PARAMETER;
@@ -1070,7 +1083,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
      * Skip the check for paging I/O, volume writes, and the volume
      * stream itself for the same reasons as in NtfsRead. */
     if (!PagingIo &&
-        !(Fcb->Flags & FCB_IS_VOLUME) &&
+        !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
         Fcb->Identifier.Type == NTFS_TYPE_FCB &&
         !NtfsFCBIsDirectory(Fcb) &&
         !FsRtlCheckLockForWriteAccess(&Fcb->FileLock, Irp))
@@ -1103,7 +1116,9 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
      * NtfsWriteFile (which handles SetAttributeDataLength + CcSetFileSizes),
      * then write the data through the cache.
      */
-    if (!PagingIo && !NonCachedIo && !(Fcb->Flags & FCB_IS_VOLUME))
+    if (!PagingIo &&
+        !NonCachedIo &&
+        !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
     {
         /* Extend the file if needed — allocate clusters and update sizes */
         if (ByteOffset.QuadPart + Length > Fcb->RFCB.FileSize.QuadPart)
