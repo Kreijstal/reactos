@@ -452,7 +452,12 @@ KiAcquirePrcbLock(IN PKPRCB Prcb)
     for (;;)
     {
         /* Acquire the lock and break out if we acquired it first */
-        if (!InterlockedExchange((PLONG)&Prcb->PrcbLock, 1)) break;
+        if (InterlockedCompareExchangePointer((PVOID volatile *)&Prcb->PrcbLock,
+                                             (PVOID)1,
+                                             NULL) == NULL)
+        {
+            break;
+        }
 
         /* Loop until the other CPU releases it */
         do
@@ -479,7 +484,7 @@ KiReleasePrcbLock(IN PKPRCB Prcb)
     ASSERT(Prcb->PrcbLock != 0);
 
     /* Release it */
-    InterlockedAnd((PLONG)&Prcb->PrcbLock, 0);
+    InterlockedExchangePointer((PVOID volatile *)&Prcb->PrcbLock, NULL);
 }
 
 //
