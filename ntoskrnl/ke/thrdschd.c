@@ -772,8 +772,20 @@ KiUpdateEffectiveAffinityThread(
     Prcb = KiProcessorBlock[Thread->NextProcessor];
     KiAcquirePrcbLock(Prcb);
 
-    /* Set the thread's affinity and ideal processor */
+    /* Set the thread's affinity and ideal processor.
+     * NB: On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes).
+     * The trailing Reserved[] bytes overlap distinct KTHREAD fields in
+     * each union (Affinity hides ApcStateIndex/WaitBlockCount/IdealProcessor;
+     * UserAffinity hides PreviousMode/BasePriority/PriorityDecrement/...).
+     * A whole-struct copy would clobber ApcStateIndex with PreviousMode and
+     * crash KiInsertQueueApc the next time the thread receives an APC with
+     * a matching ApcStateIndex. Copy only the affinity bits. */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    Thread->Affinity.Mask = Thread->UserAffinity.Mask;
+    Thread->Affinity.Group = Thread->UserAffinity.Group;
+#else
     Thread->Affinity = Thread->UserAffinity;
+#endif
     Thread->IdealProcessor = Thread->UserIdealProcessor;
 
     /* Check if the affinity doesn't match with the current processor */
