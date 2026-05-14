@@ -25,6 +25,30 @@
 KAFFINITY KiIdleSummary;
 KAFFINITY KiIdleSMTSummary;
 
+static
+BOOLEAN
+KiIsThreadCurrentOnAnyProcessor(
+    _In_ PKTHREAD Thread)
+{
+#ifdef CONFIG_SMP
+    CCHAR Cpu;
+    PKPRCB Prcb;
+
+    for (Cpu = 0; Cpu < KeNumberProcessors; Cpu++)
+    {
+        Prcb = KiProcessorBlock[Cpu];
+        if ((Prcb != NULL) && (Prcb->CurrentThread == Thread))
+        {
+            return TRUE;
+        }
+    }
+#else
+    UNREFERENCED_PARAMETER(Thread);
+#endif
+
+    return FALSE;
+}
+
 /* FUNCTIONS *****************************************************************/
 
 PKTHREAD
@@ -328,7 +352,10 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
 
     /* Get the next scheduled thread */
     NextThread = Prcb->NextThread;
-    if (NextThread == Prcb->CurrentThread)
+    if ((NextThread != NULL) &&
+        ((NextThread == Prcb->CurrentThread) ||
+         ((NextThread->State != Standby) &&
+          KiIsThreadCurrentOnAnyProcessor(NextThread))))
     {
         Prcb->NextThread = NULL;
         NextThread = NULL;
