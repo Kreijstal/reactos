@@ -43,7 +43,7 @@ NtfsAcqLazyWrite(PVOID Context,
 
     DPRINT("NtfsAcqLazyWrite(%p, %u)\n", Context, Wait);
 
-    if (!ExAcquireResourceSharedLite(&Fcb->PagingIoResource, Wait))
+    if (!ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, Wait))
     {
         return FALSE;
     }
