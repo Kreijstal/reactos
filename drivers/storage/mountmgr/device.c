@@ -766,8 +766,15 @@ MountMgrAssignDriveLetters(IN PDEVICE_EXTENSION DeviceExtension)
     {
         DeviceInformation = CONTAINING_RECORD(NextEntry, DEVICE_INFORMATION, DeviceListEntry);
 
-        /* If the device doesn't have a letter assigned, do it! */
-        if (!DeviceInformation->LetterAssigned)
+        /* If the device doesn't have a letter assigned, do it!
+         * Skip CD-ROMs until fstub has issued IOCTL_MOUNTMGR_AUTO_DL_ASSIGNMENTS:
+         * the boot CD must stay letter-less so xHalIoAssignDriveLetters'
+         * MININT branch can claim X: for it. fstub itself loops over CD-ROMs
+         * via HalpNextDriveLetter, and a second AssignDriveLetters pass
+         * fires from the IOCTL handler, so non-boot CDs still get a letter. */
+        if (!DeviceInformation->LetterAssigned &&
+            (DeviceExtension->AutoDLAssignmentsRequested ||
+             !RtlPrefixUnicodeString(&DeviceCdRom, &(DeviceInformation->DeviceName), TRUE)))
         {
             MountMgrNextDriveLetterWorker(DeviceExtension,
                                           &(DeviceInformation->DeviceName),
@@ -2709,6 +2716,7 @@ MountMgrDeviceControl(IN PDEVICE_OBJECT DeviceObject,
         case IOCTL_MOUNTMGR_AUTO_DL_ASSIGNMENTS:
         // NOTE: On Win7+, this is handled during driver re-initialization.
             DeviceExtension->AutomaticDriveLetter = TRUE;
+            DeviceExtension->AutoDLAssignmentsRequested = TRUE;
             MountMgrAssignDriveLetters(DeviceExtension);
             ReconcileAllDatabasesWithMaster(DeviceExtension);
             WaitForOnlinesToComplete(DeviceExtension);
