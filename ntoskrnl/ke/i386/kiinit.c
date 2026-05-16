@@ -424,7 +424,6 @@ KiVerifyCpuFeatures(PKPRCB Prcb)
 
     // 5. Save feature bits.
     Prcb->FeatureBits = (ULONG)FeatureBits;
-    Prcb->FeatureBitsHigh = FeatureBits >> 32;
 }
 
 CODE_SEG("INIT")
@@ -446,7 +445,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
     /* Set boot-level flags */
     if (Number == 0)
-        KeFeatureBits = Prcb->FeatureBits | (ULONG64)Prcb->FeatureBitsHigh << 32;
+        KeFeatureBits = Prcb->FeatureBits;
 
     /* Set the default NX policy (opt-in) */
     SharedUserData->NXSupportPolicy = NX_SUPPORT_POLICY_OPTIN;
@@ -551,12 +550,17 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitThread->NextProcessor = Number;
     InitThread->Priority = HIGH_PRIORITY;
     InitThread->State = Running;
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    InitThread->Affinity.Mask = 1 << Number;
+    InitThread->Affinity.Group = 0;
+#else
     InitThread->Affinity = 1 << Number;
+#endif
     InitThread->WaitIrql = DISPATCH_LEVEL;
     InitProcess->ActiveProcessors |= 1 << Number;
 
     /* HACK for MmUpdatePageDir */
-    ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
+    ((PETHREAD)InitThread)->ThreadsProcess = InitProcess;
 
     /* Set basic CPU Features that user mode can read */
     SharedUserData->ProcessorFeatures[PF_FLOATING_POINT_PRECISION_ERRATA] = FALSE;
@@ -795,6 +799,9 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     /* Set us as the current process */
     InitialThread->ApcState.Process = &KiInitialProcess.Pcb;
+#if !defined(_WIN64) || (NTDDI_VERSION < NTDDI_WIN7)
+    InitialThread->ServiceTable = KeServiceDescriptorTable;
+#endif
 
     /* Clear DR6/7 to cleanup bootloader debugging */
     __writefsdword(KPCR_TEB, 0);

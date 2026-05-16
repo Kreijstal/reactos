@@ -1268,7 +1268,7 @@ KdpSwitchProcessor(
     }
 
     /* If the new processor is the current one, there is nothing to do */
-    if (ProcessorIndex == KeGetCurrentProcessorNumber())
+    if (ProcessorIndex == KiGetCurrentProcessorNumber())
     {
         return ContinueProcessorReselected;
     }

@@ -3460,6 +3460,9 @@ NtfsDumpAttribute(PDEVICE_EXTENSION Vcb,
     ULONGLONG lcn = 0;
     ULONGLONG runcount = 0;
 
+    if (!NTFS_TRACE_ENABLED)
+        return;
+
     switch (Attribute->Type)
     {
         case AttributeFileName:
@@ -3564,6 +3567,9 @@ VOID NtfsDumpDataRunData(PUCHAR DataRun)
     UCHAR DataRunLengthSize;
     CHAR i;
 
+    if (!NTFS_TRACE_ENABLED)
+        return;
+
     DbgPrint("%02x ", *DataRun);
 
     if (*DataRun == 0)
@@ -3597,9 +3603,12 @@ NtfsDumpDataRuns(PVOID StartOfRun,
     LONGLONG DataRunOffset;
     ULONGLONG DataRunLength;
 
+    if (!NTFS_TRACE_ENABLED)
+        return;
+
     if (CurrentLCN == 0)
     {
-        DPRINT1("Dumping data runs.\n\tData:\n\t\t");
+        NTFS_TRACE("Dumping data runs.\n\tData:\n\t\t");
         NtfsDumpDataRunData(StartOfRun);
         DbgPrint("\n\tRuns:\n\t\tOff\t\tLCN\t\tLength\n");
     }
@@ -3631,6 +3640,9 @@ NtfsDumpFileAttributes(PDEVICE_EXTENSION Vcb,
     NTSTATUS Status;
     FIND_ATTR_CONTXT Context;
     PNTFS_ATTR_RECORD Attribute;
+
+    if (!NTFS_TRACE_ENABLED)
+        return;
 
     Status = FindFirstAttribute(&Context, Vcb, FileRecord, FALSE, &Attribute);
     while (NT_SUCCESS(Status))

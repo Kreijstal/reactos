@@ -602,7 +602,9 @@ Ke386SetIOPL(VOID)
 
     /* IOPL was enabled for this process/thread */
     Process->Iopl = TRUE;
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
     Thread->Iopl = TRUE;
+#endif
 
     /* Get the trap frame on exit */
     TrapFrame = KeGetTrapFrame(Thread);

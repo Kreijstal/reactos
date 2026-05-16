@@ -520,6 +520,231 @@ IsUISuppressionAllowed(VOID)
 }
 
 
+#define LIVE_BOOT_INSTALL_WORKERS 2
+
+typedef struct _BOOT_INSTALL_DEVICE
+{
+    PCWSTR DeviceInstance;
+    DWORD Depth;
+} BOOT_INSTALL_DEVICE, *PBOOT_INSTALL_DEVICE;
+
+typedef struct _BOOT_INSTALL_QUEUE
+{
+    PBOOT_INSTALL_DEVICE Devices;
+    DWORD Count;
+    DWORD Next;
+    HANDLE Lock;
+} BOOT_INSTALL_QUEUE, *PBOOT_INSTALL_QUEUE;
+
+static VOID
+InstallBootDevicesSerial(
+    _In_ PWSTR DeviceList)
+{
+    PWSTR CurrentDevice;
+
+    for (CurrentDevice = DeviceList;
+         CurrentDevice[0] != UNICODE_NULL;
+         CurrentDevice += lstrlenW(CurrentDevice) + 1)
+    {
+        InstallDevice(CurrentDevice, FALSE);
+    }
+}
+
+static VOID
+SortBootInstallDevices(
+    _Inout_updates_(Count) PBOOT_INSTALL_DEVICE Devices,
+    _In_ DWORD Count)
+{
+    DWORD i;
+
+    for (i = 1; i < Count; i++)
+    {
+        DWORD j = i;
+        BOOT_INSTALL_DEVICE Device = Devices[i];
+
+        while ((j > 0) &&
+               ((Devices[j - 1].Depth > Device.Depth) ||
+                ((Devices[j - 1].Depth == Device.Depth) &&
+                 (lstrcmpiW(Devices[j - 1].DeviceInstance, Device.DeviceInstance) > 0))))
+        {
+            Devices[j] = Devices[j - 1];
+            j--;
+        }
+
+        Devices[j] = Device;
+    }
+}
+
+static BOOL
+BuildBootInstallDeviceList(
+    _In_ PWSTR DeviceList,
+    _Outptr_result_buffer_(*DeviceCount) PBOOT_INSTALL_DEVICE *Devices,
+    _Out_ PDWORD DeviceCount)
+{
+    DWORD Count = 0;
+    DWORD Index;
+    PWSTR CurrentDevice;
+    PBOOT_INSTALL_DEVICE DeviceArray;
+
+    *Devices = NULL;
+    *DeviceCount = 0;
+
+    for (CurrentDevice = DeviceList;
+         CurrentDevice[0] != UNICODE_NULL;
+         CurrentDevice += lstrlenW(CurrentDevice) + 1)
+    {
+        Count++;
+    }
+
+    if (Count == 0)
+        return TRUE;
+
+    DeviceArray = HeapAlloc(GetProcessHeap(), 0, Count * sizeof(*DeviceArray));
+    if (DeviceArray == NULL)
+        return FALSE;
+
+    Index = 0;
+    for (CurrentDevice = DeviceList;
+         CurrentDevice[0] != UNICODE_NULL;
+         CurrentDevice += lstrlenW(CurrentDevice) + 1)
+    {
+        DWORD Depth;
+
+        if (PNP_GetDepth(NULL, CurrentDevice, &Depth, 0) != CR_SUCCESS)
+        {
+            HeapFree(GetProcessHeap(), 0, DeviceArray);
+            return FALSE;
+        }
+
+        DeviceArray[Index].DeviceInstance = CurrentDevice;
+        DeviceArray[Index].Depth = Depth;
+        Index++;
+    }
+
+    SortBootInstallDevices(DeviceArray, Count);
+
+    *Devices = DeviceArray;
+    *DeviceCount = Count;
+    return TRUE;
+}
+
+static DWORD
+WINAPI
+BootInstallWorker(
+    _In_ LPVOID Parameter)
+{
+    PBOOT_INSTALL_QUEUE Queue = Parameter;
+
+    while (TRUE)
+    {
+        DWORD Index;
+
+        WaitForSingleObject(Queue->Lock, INFINITE);
+        Index = Queue->Next++;
+        ReleaseMutex(Queue->Lock);
+
+        if (Index >= Queue->Count)
+            break;
+
+        InstallDevice(Queue->Devices[Index].DeviceInstance, FALSE);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static VOID
+InstallBootDeviceGroupParallel(
+    _In_reads_(Count) PBOOT_INSTALL_DEVICE Devices,
+    _In_ DWORD Count)
+{
+    BOOT_INSTALL_QUEUE Queue;
+    HANDLE Threads[LIVE_BOOT_INSTALL_WORKERS];
+    DWORD ThreadCount;
+    DWORD i;
+
+    if (Count <= 1)
+    {
+        if (Count == 1)
+            InstallDevice(Devices[0].DeviceInstance, FALSE);
+        return;
+    }
+
+    Queue.Devices = Devices;
+    Queue.Count = Count;
+    Queue.Next = 0;
+    Queue.Lock = CreateMutexW(NULL, FALSE, NULL);
+    if (Queue.Lock == NULL)
+    {
+        for (i = 0; i < Count; i++)
+            InstallDevice(Devices[i].DeviceInstance, FALSE);
+        return;
+    }
+
+    ThreadCount = min(Count, LIVE_BOOT_INSTALL_WORKERS);
+    for (i = 0; i < ThreadCount; i++)
+    {
+        Threads[i] = CreateThread(NULL, 0, BootInstallWorker, &Queue, 0, NULL);
+        if (Threads[i] == NULL)
+            break;
+    }
+
+    if (i == 0)
+    {
+        CloseHandle(Queue.Lock);
+        for (i = 0; i < Count; i++)
+            InstallDevice(Devices[i].DeviceInstance, FALSE);
+        return;
+    }
+
+    ThreadCount = i;
+    WaitForMultipleObjects(ThreadCount, Threads, TRUE, INFINITE);
+
+    for (i = 0; i < ThreadCount; i++)
+        CloseHandle(Threads[i]);
+
+    CloseHandle(Queue.Lock);
+}
+
+static VOID
+InstallBootDevicesParallel(
+    _In_ PWSTR DeviceList)
+{
+    PBOOT_INSTALL_DEVICE Devices;
+    DWORD Count;
+    DWORD Start;
+
+    if (!BuildBootInstallDeviceList(DeviceList, &Devices, &Count))
+    {
+        InstallBootDevicesSerial(DeviceList);
+        return;
+    }
+
+    Start = 0;
+    while (Start < Count)
+    {
+        DWORD End = Start + 1;
+
+        while ((End < Count) && (Devices[End].Depth == Devices[Start].Depth))
+            End++;
+
+        InstallBootDeviceGroupParallel(&Devices[Start], End - Start);
+        Start = End;
+    }
+
+    HeapFree(GetProcessHeap(), 0, Devices);
+}
+
+static VOID
+InstallBootDevices(
+    _In_ PWSTR DeviceList)
+{
+    if (g_IsLiveMedium)
+        InstallBootDevicesParallel(DeviceList);
+    else
+        InstallBootDevicesSerial(DeviceList);
+}
+
+
 /* Loop to install all queued devices installations */
 DWORD
 WINAPI
@@ -567,12 +792,7 @@ DeviceInstallThread(LPVOID lpParameter)
         }
     }
 
-    for (PWSTR currentDev = deviceList;
-         currentDev[0] != UNICODE_NULL;
-         currentDev += lstrlenW(currentDev) + 1)
-    {
-        InstallDevice(currentDev, FALSE);
-    }
+    InstallBootDevices(deviceList);
 
 Cleanup:
     HeapFree(GetProcessHeap(), 0, deviceList);
