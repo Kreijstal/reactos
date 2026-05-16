@@ -1358,11 +1358,13 @@ KeSaveFloatingPointState(
     /* Perform the save */
     Ke386SaveFpuState(FsContext->PfxSaveArea);
 
+#if (NTDDI_VERSION < NTDDI_WIN7)
     /* Store the NPX IRQL */
     FsContext->OldNpxIrql = FsContext->CurrentThread->Header.NpxIrql;
 
     /* Set the current IRQL to NPX */
     FsContext->CurrentThread->Header.NpxIrql = KeGetCurrentIrql();
+#endif
 
     /* Initialize the FPU */
     Ke386FnInit();
@@ -1430,6 +1432,7 @@ KeRestoreFloatingPointState(
                      0);
     }
 
+#if (NTDDI_VERSION < NTDDI_WIN7)
     /* Are we under the same NPX interrupt level? */
     if (FsContext->CurrentThread->Header.NpxIrql != KeGetCurrentIrql())
     {
@@ -1440,6 +1443,7 @@ KeRestoreFloatingPointState(
                      (ULONG_PTR)KeGetCurrentIrql(),
                      0);
     }
+#endif
 
     /* Disable interrupts */
     _disable();
@@ -1454,8 +1458,10 @@ KeRestoreFloatingPointState(
     /* Restore the state */
     Ke386RestoreFpuState(FsContext->PfxSaveArea);
 
+#if (NTDDI_VERSION < NTDDI_WIN7)
     /* Give the saved NPX IRQL back to the NPX thread */
     FsContext->CurrentThread->Header.NpxIrql = FsContext->OldNpxIrql;
+#endif
 
     /* Enable interrupts back */
     _enable();

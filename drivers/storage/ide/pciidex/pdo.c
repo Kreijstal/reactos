@@ -331,7 +331,7 @@ PciIdeXMakePortResource(
     PAGED_CODE();
 
     Descriptor->Type = CmResourceTypePort;
-    Descriptor->ShareDisposition = CmResourceShareDeviceExclusive;
+    Descriptor->ShareDisposition = CmResourceShareShared;
     Descriptor->Flags = CM_RESOURCE_PORT_IO | CM_RESOURCE_PORT_16_BIT_DECODE;
     Descriptor->u.Port.Length = Length;
     Descriptor->u.Port.Start.LowPart = IoBase;
@@ -429,7 +429,7 @@ PciIdeXPdoQueryResources(
 
     /* Interrupt */
     Descriptor->Type = CmResourceTypeInterrupt;
-    Descriptor->ShareDisposition = CmResourceShareDeviceExclusive;
+    Descriptor->ShareDisposition = CmResourceShareShared;
     Descriptor->Flags = CM_RESOURCE_INTERRUPT_LATCHED;
     Descriptor->u.Interrupt.Level = InterruptVector;
     Descriptor->u.Interrupt.Vector = InterruptVector;

@@ -79,6 +79,7 @@ list(APPEND SOURCE
     registry.c
     res.c
     resource.c
+    runonce.c
     rxact.c
     sd.c
     security.c
