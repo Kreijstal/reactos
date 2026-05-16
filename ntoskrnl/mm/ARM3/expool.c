@@ -94,6 +94,144 @@ ExpEncodePoolLink(IN PLIST_ENTRY Link)
     return (PLIST_ENTRY)((ULONG_PTR)Link | 1);
 }
 
+#if DBG
+//
+// Pool free-history ring buffer.
+//
+// When ExpCheckPoolHeader / ExpCheckPoolLinks detects pool corruption,
+// the producer (the freer or allocator that overran the header of an
+// adjacent block) is usually long gone -- only the consistency walk's
+// stack is live. Record every free in a small ring so the kdb log
+// shows which recent freer is closest in address to the corrupt block;
+// in practice that is the corruptor or its immediate neighbour.
+//
+// Always emitted in DBG so the helper is callable from header / link
+// validators. The ring is small (POOL_BLOCK_SIZE-aligned, ~2 KB) and
+// not consulted on the success path.
+//
+
+#define EXP_FREE_HISTORY_SIZE 128
+
+typedef struct _EXP_FREE_HISTORY_ENTRY
+{
+    ULONG  Sequence;
+    PVOID  Block;
+    ULONG  Tag;
+    USHORT BlockSize;
+    PVOID  Caller;
+} EXP_FREE_HISTORY_ENTRY, *PEXP_FREE_HISTORY_ENTRY;
+
+static volatile LONG ExpFreeHistoryIndex = -1;
+static EXP_FREE_HISTORY_ENTRY ExpFreeHistory[EXP_FREE_HISTORY_SIZE];
+
+static
+VOID
+ExpRecordPoolFree(
+    _In_ PVOID Block,
+    _In_ ULONG Tag,
+    _In_ USHORT BlockSize,
+    _In_ PVOID Caller)
+{
+    LONG Sequence;
+    PEXP_FREE_HISTORY_ENTRY Entry;
+
+    Sequence = InterlockedIncrement(&ExpFreeHistoryIndex);
+    Entry = &ExpFreeHistory[Sequence & (EXP_FREE_HISTORY_SIZE - 1)];
+
+    Entry->Sequence  = (ULONG)Sequence;
+    Entry->Block     = Block;
+    Entry->Tag       = Tag;
+    Entry->BlockSize = BlockSize;
+    Entry->Caller    = Caller;
+}
+
+VOID
+NTAPI
+ExpDumpRecentPoolFrees(
+    _In_opt_ PVOID NearBlock)
+{
+    LONG i, Head;
+    PEXP_FREE_HISTORY_ENTRY Entry;
+    BOOLEAN NearHit;
+
+    Head = ExpFreeHistoryIndex;
+    if (Head < 0) return;
+
+    DPRINT1("Recent ExFreePoolWithTag calls (newest first, ** = within "
+            "64KiB of %p):\n", NearBlock);
+    for (i = 0; i < EXP_FREE_HISTORY_SIZE; i++)
+    {
+        LONG Idx = (Head - i) & (EXP_FREE_HISTORY_SIZE - 1);
+        Entry = &ExpFreeHistory[Idx];
+        if (Entry->Block == NULL) continue;
+
+        NearHit = NearBlock != NULL &&
+            ((ULONG_PTR)Entry->Block + 0x10000 >= (ULONG_PTR)NearBlock) &&
+            ((ULONG_PTR)Entry->Block <= (ULONG_PTR)NearBlock + 0x10000);
+
+        DPRINT1("  %s seq=%lu blk=%p tag=%.4s blocksize=%u caller=%p\n",
+                NearHit ? "**" : "  ",
+                Entry->Sequence, Entry->Block,
+                (char *)&Entry->Tag, Entry->BlockSize, Entry->Caller);
+    }
+}
+
+//
+// Validate the safe-unlink invariant on a pool freelist entry. Called
+// from the unlink fast paths so that a corrupt freelist neighbour is
+// caught the first time it is observed, instead of waiting for a full
+// ExpCheckPoolBlocks walk (which loses the live stack).
+//
+static
+VOID
+ExpAssertPoolUnlinkable(
+    _In_ PLIST_ENTRY Entry,
+    _In_ PCSTR Operation)
+{
+    PLIST_ENTRY Flink, Blink;
+
+    Flink = ExpDecodePoolLink(Entry->Flink);
+    Blink = ExpDecodePoolLink(Entry->Blink);
+
+    if (((ULONG_PTR)Flink & (POOL_BLOCK_SIZE - 1)) ||
+        ((ULONG_PTR)Blink & (POOL_BLOCK_SIZE - 1)))
+    {
+        DPRINT1("Pool freelist %s: misaligned neighbour pointers on "
+                "entry %p Flink=%p Blink=%p\n",
+                Operation, Entry, Flink, Blink);
+        ExpDumpRecentPoolFrees(Entry);
+        DbgBreakPoint();
+    }
+
+    if ((ExpDecodePoolLink(Flink->Blink) != Entry) ||
+        (ExpDecodePoolLink(Blink->Flink) != Entry))
+    {
+        DPRINT1("Pool freelist %s: safe-unlink violation on entry %p "
+                "Flink=%p Flink->Blink=%p Blink=%p Blink->Flink=%p\n",
+                Operation, Entry,
+                Flink, ExpDecodePoolLink(Flink->Blink),
+                Blink, ExpDecodePoolLink(Blink->Flink));
+        ExpDumpRecentPoolFrees(Entry);
+        DbgBreakPoint();
+    }
+}
+
+//
+// Break into kdb with the live consistency-walker stack intact so the
+// caller is visible, then dump recent frees so the producer is in
+// the log. Caller follows up with KeBugCheckEx.
+//
+static
+VOID
+ExpPoolBugCheckBreak(_In_opt_ PVOID Subject)
+{
+    DPRINT1("Pool corruption detected near %p. Breaking to debugger.\n",
+            Subject);
+    ExpDumpRecentPoolFrees(Subject);
+    DbgBreakPoint();
+}
+#endif /* DBG */
+
 VOID
 NTAPI
 ExpCheckPoolLinks(IN PLIST_ENTRY ListHead)
@@ -101,6 +239,22 @@ ExpCheckPoolLinks(IN PLIST_ENTRY ListHead)
     if ((ExpDecodePoolLink(ExpDecodePoolLink(ListHead->Flink)->Blink) != ListHead) ||
         (ExpDecodePoolLink(ExpDecodePoolLink(ListHead->Blink)->Flink) != ListHead))
     {
+#if DBG
+        //
+        // Break into kdb with the live stack first so the caller doing
+        // the list manipulation is visible; KeBugCheckEx tears down the
+        // CONTEXT and leaves the kdb walker with a single frame.
+        //
+        DPRINT1("Pool freelist consistency violation on head %p: "
+                "Flink=%p Flink->Blink=%p Blink=%p Blink->Flink=%p\n",
+                ListHead,
+                ExpDecodePoolLink(ListHead->Flink),
+                ExpDecodePoolLink(ExpDecodePoolLink(ListHead->Flink)->Blink),
+                ExpDecodePoolLink(ListHead->Blink),
+                ExpDecodePoolLink(ExpDecodePoolLink(ListHead->Blink)->Flink));
+        ExpDumpRecentPoolFrees(ListHead);
+        DbgBreakPoint();
+#endif
         KeBugCheckEx(BAD_POOL_HEADER,
                      3,
                      (ULONG_PTR)ListHead,
@@ -128,6 +282,9 @@ NTAPI
 ExpRemovePoolEntryList(IN PLIST_ENTRY Entry)
 {
     PLIST_ENTRY Blink, Flink;
+#if DBG
+    ExpAssertPoolUnlinkable(Entry, "RemoveEntry");
+#endif
     Flink = ExpDecodePoolLink(Entry->Flink);
     Blink = ExpDecodePoolLink(Entry->Blink);
     Flink->Blink = ExpEncodePoolLink(Blink);
@@ -140,6 +297,9 @@ ExpRemovePoolHeadList(IN PLIST_ENTRY ListHead)
 {
     PLIST_ENTRY Entry, Flink;
     Entry = ExpDecodePoolLink(ListHead->Flink);
+#if DBG
+    ExpAssertPoolUnlinkable(Entry, "RemoveHead");
+#endif
     Flink = ExpDecodePoolLink(Entry->Flink);
     ListHead->Flink = ExpEncodePoolLink(Flink);
     Flink->Blink = ExpEncodePoolLink(ListHead);
@@ -152,6 +312,9 @@ ExpRemovePoolTailList(IN PLIST_ENTRY ListHead)
 {
     PLIST_ENTRY Entry, Blink;
     Entry = ExpDecodePoolLink(ListHead->Blink);
+#if DBG
+    ExpAssertPoolUnlinkable(Entry, "RemoveTail");
+#endif
     Blink = ExpDecodePoolLink(Entry->Blink);
     ListHead->Blink = ExpEncodePoolLink(Blink);
     Blink->Flink = ExpEncodePoolLink(ListHead);
@@ -204,6 +367,9 @@ ExpCheckPoolHeader(IN PPOOL_HEADER Entry)
         if (PAGE_ALIGN(Entry) != PAGE_ALIGN(PreviousEntry))
         {
             /* Something is awry */
+#if DBG
+            ExpPoolBugCheckBreak(Entry);
+#endif
             KeBugCheckEx(BAD_POOL_HEADER,
                          6,
                          (ULONG_PTR)PreviousEntry,
@@ -218,6 +384,9 @@ ExpCheckPoolHeader(IN PPOOL_HEADER Entry)
             DPRINT1("PreviousEntry BlockSize %lu, tag %.4s. Entry PreviousSize %lu, tag %.4s\n",
                     PreviousEntry->BlockSize, (char *)&PreviousEntry->PoolTag,
                     Entry->PreviousSize, (char *)&Entry->PoolTag);
+#if DBG
+            ExpPoolBugCheckBreak(Entry);
+#endif
             KeBugCheckEx(BAD_POOL_HEADER,
                          5,
                          (ULONG_PTR)PreviousEntry,
@@ -228,6 +397,9 @@ ExpCheckPoolHeader(IN PPOOL_HEADER Entry)
     else if (PAGE_ALIGN(Entry) != Entry)
     {
         /* If there's no block before us, we are the first block, so we should be on a page boundary */
+#if DBG
+        ExpPoolBugCheckBreak(Entry);
+#endif
         KeBugCheckEx(BAD_POOL_HEADER,
                      7,
                      0,
@@ -251,6 +423,9 @@ ExpCheckPoolHeader(IN PPOOL_HEADER Entry)
             DPRINT1("Entry tag %.4s\n",
                     (char *)&Entry->PoolTag);
         }
+#if DBG
+        ExpPoolBugCheckBreak(Entry);
+#endif
         KeBugCheckEx(BAD_POOL_HEADER,
                      8,
                      0,
@@ -268,6 +443,9 @@ ExpCheckPoolHeader(IN PPOOL_HEADER Entry)
         if (PAGE_ALIGN(Entry) != PAGE_ALIGN(NextEntry))
         {
             /* Something is messed up */
+#if DBG
+            ExpPoolBugCheckBreak(Entry);
+#endif
             KeBugCheckEx(BAD_POOL_HEADER,
                          9,
                          (ULONG_PTR)NextEntry,
@@ -282,6 +460,9 @@ ExpCheckPoolHeader(IN PPOOL_HEADER Entry)
             DPRINT1("Entry BlockSize %lu, tag %.4s. NextEntry PreviousSize %lu, tag %.4s\n",
                     Entry->BlockSize, (char *)&Entry->PoolTag,
                     NextEntry->PreviousSize, (char *)&NextEntry->PoolTag);
+#if DBG
+            ExpPoolBugCheckBreak(Entry);
+#endif
             KeBugCheckEx(BAD_POOL_HEADER,
                          5,
                          (ULONG_PTR)NextEntry,
@@ -2714,6 +2895,15 @@ ExFreePoolWithTag(IN PVOID P,
     ExpRemovePoolTracker(Tag,
                          BlockSize * POOL_BLOCK_SIZE,
                          Entry->PoolType - 1);
+
+#if DBG
+    //
+    // Record this free in the diagnostic ring so that, when the pool
+    // consistency check later trips on a corrupt neighbour, the
+    // closest-by-address recent freer is visible in the kdb log.
+    //
+    ExpRecordPoolFree(P, Tag, (USHORT)BlockSize, _ReturnAddress());
+#endif
 
     //
     // Release pool quota, if any
