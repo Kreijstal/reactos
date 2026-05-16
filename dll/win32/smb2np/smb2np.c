@@ -500,20 +500,30 @@ NPGetResourceInformation(LPNETRESOURCEW lpNetResource,
     NETRESOURCEW *nr;
     DWORD remoteLen, needed;
     char *host = NULL, *share = NULL, *path = NULL;
+    LPWSTR remoteName;
     WCHAR *tail;
 
     if (!lpNetResource || !lpNetResource->lpRemoteName || !lpBufferSize)
         return WN_BAD_POINTER;
 
-    if (!parse_unc(lpNetResource->lpRemoteName, &host, &share, &path))
+    remoteLen = (lstrlenW(lpNetResource->lpRemoteName) + 1) * sizeof(WCHAR);
+    remoteName = HeapAlloc(GetProcessHeap(), 0, remoteLen);
+    if (!remoteName)
+        return WN_OUT_OF_MEMORY;
+
+    CopyMemory(remoteName, lpNetResource->lpRemoteName, remoteLen);
+
+    if (!parse_unc(remoteName, &host, &share, &path)) {
+        HeapFree(GetProcessHeap(), 0, remoteName);
         return WN_BAD_NETNAME;
+    }
 
     ensure_smb2d_started();
 
-    remoteLen = (lstrlenW(lpNetResource->lpRemoteName) + 1) * sizeof(WCHAR);
     needed = sizeof(NETRESOURCEW) + remoteLen;
     if (!lpBuffer || *lpBufferSize < needed) {
         *lpBufferSize = needed;
+        HeapFree(GetProcessHeap(), 0, remoteName);
         utf8_free(host); utf8_free(share); utf8_free(path);
         return WN_MORE_DATA;
     }
@@ -521,7 +531,7 @@ NPGetResourceInformation(LPNETRESOURCEW lpNetResource,
     ZeroMemory(lpBuffer, needed);
     nr = (NETRESOURCEW *)lpBuffer;
     tail = (WCHAR *)((BYTE *)lpBuffer + sizeof(NETRESOURCEW));
-    CopyMemory(tail, lpNetResource->lpRemoteName, remoteLen);
+    CopyMemory(tail, remoteName, remoteLen);
 
     nr->dwScope = RESOURCE_GLOBALNET;
     nr->dwType = RESOURCETYPE_DISK;
@@ -533,6 +543,7 @@ NPGetResourceInformation(LPNETRESOURCEW lpNetResource,
         *lplpSystem = NULL;
 
     *lpBufferSize = needed;
+    HeapFree(GetProcessHeap(), 0, remoteName);
     utf8_free(host); utf8_free(share); utf8_free(path);
     return WN_SUCCESS;
 }
