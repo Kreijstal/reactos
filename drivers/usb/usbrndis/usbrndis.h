@@ -20,6 +20,12 @@
 /* Include NDIS 6.x compatibility layer */
 #include "ndis6_compat.h"
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+#define RndisGetCurrentProcessorIndex() KeGetCurrentProcessorIndex()
+#else
+#define RndisGetCurrentProcessorIndex() KeGetCurrentProcessorNumber()
+#endif
+
 #define USBRNDIS_TAG 'DNRU'
 
 /*
@@ -1181,7 +1187,7 @@ RndisGetCurrentCpuStats(
     {
         return NULL;
     }
-    CpuIndex = KeGetCurrentProcessorNumber();
+    CpuIndex = RndisGetCurrentProcessorIndex();
     if (CpuIndex >= Adapter->NumCpus)
     {
         CpuIndex = 0;

@@ -328,7 +328,7 @@ RtlpCaptureStackLimits(IN ULONG_PTR Ebp,
     if (KeGetCurrentIrql() > DISPATCH_LEVEL) return FALSE;
 
     /* Start with defaults */
-    *StackBegin = Thread->StackLimit;
+    *StackBegin = (ULONG_PTR)Thread->StackLimit;
     *StackEnd = (ULONG_PTR)Thread->StackBase;
 
     /* Check if EBP is inside the stack */

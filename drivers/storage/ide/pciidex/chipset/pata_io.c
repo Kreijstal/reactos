@@ -336,6 +336,9 @@ PataPioDataIn(
     TRACE("Read block %lu %lu %p\n",
           ByteCount, ChanData->BytesToTransfer, ChanData->DataBuffer);
 
+    if (ByteCount == 0)
+        return;
+
     /* Transfer the data block */
     if (!(ByteCount & (sizeof(ULONG) - 1)) &&
         (ChanData->ChanInfo & CHANNEL_FLAG_IO32))
@@ -386,6 +389,9 @@ PataPioDataOut(
 
     TRACE("Write block %lu %lu %p\n",
           ByteCount, ChanData->BytesToTransfer, ChanData->DataBuffer);
+
+    if (ByteCount == 0)
+        return;
 
     /* Transfer the data block */
     if (!(ByteCount & (sizeof(ULONG) - 1)) &&
@@ -458,6 +464,12 @@ PataProcessAtapiRequest(
         InterruptReason = ATA_READ(ChanData->Regs.InterruptReason, ChanData, MRES_TF);
         InterruptReason &= ATAPI_INT_REASON_MASK;
         InterruptReason |= IdeStatus & IDE_STATUS_DRQ;
+    }
+
+    if ((ChanData->CommandFlags & CMD_FLAG_AWAIT_CDB) &&
+        (IdeStatus & IDE_STATUS_DRQ))
+    {
+        InterruptReason = ATAPI_INT_REASON_AWAIT_CDB;
     }
 
     switch (InterruptReason)
@@ -910,7 +922,7 @@ PataStartIo(
     IdeStatus = ATA_WAIT(ChanData, ATA_TIME_BUSY_SELECT, IDE_STATUS_BUSY, 0);
     if (IdeStatus & IDE_STATUS_BUSY)
     {
-        WARN("Device is busy 0x%02x\n", IdeStatus);
+        TRACE("Device is busy 0x%02x\n", IdeStatus);
         PataCompleteCommand(ChanData, IdeStatus, SRB_STATUS_SELECTION_TIMEOUT);
         return TRUE;
     }
@@ -1095,11 +1107,11 @@ PciIdeChannelIsr(
         !(ChanData->CommandFlags & CMD_FLAG_AWAIT_INTERRUPT) ||
         (IdeStatus & IDE_STATUS_BUSY))
     {
-        /* Do not log PCI shared interrupts */
+        /* Shared PCI IDE interrupts can legitimately reach inactive channels. */
         if (WasCleared)
         {
-            WARN("Spurious bus-master interrupt %02x, %02x, flags %08lx\n",
-                 IdeStatus, DmaStatus, ChanData->CommandFlags);
+            TRACE("Spurious bus-master interrupt %02x, %02x, flags %08lx\n",
+                  IdeStatus, DmaStatus, ChanData->CommandFlags);
         }
 
         return WasCleared;
@@ -1131,7 +1143,7 @@ PataChannelIsr(
         !(ChanData->CommandFlags & CMD_FLAG_AWAIT_INTERRUPT) ||
         (IdeStatus & IDE_STATUS_BUSY))
     {
-        WARN("Spurious IDE interrupt %02x, flags %08lx\n", IdeStatus, ChanData->CommandFlags);
+        TRACE("Spurious IDE interrupt %02x, flags %08lx\n", IdeStatus, ChanData->CommandFlags);
         return FALSE;
     }
 

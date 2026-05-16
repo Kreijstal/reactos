@@ -239,6 +239,9 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     PIRP Irp = IrpContext->Irp;
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
     BOOLEAN PromotedTopLevel;
+#if NTFS_ENABLE_INVESTIGATION_TRACE
+    BOOLEAN TraceSetInfo;
+#endif
 
     TRACE_(NTFS, "NtfsDispatch()\n");
 
@@ -250,6 +253,9 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
      * the inner dispatch must leave the outer caller's TopLevelIrp
      * sentinel intact. */
     PromotedTopLevel = NtfsIsIrpTopLevel(Irp);
+#if NTFS_ENABLE_INVESTIGATION_TRACE
+    TraceSetInfo = (IrpContext->MajorFunction == IRP_MJ_SET_INFORMATION);
+#endif
 
     /* $LogFile Phase-1 read-only enforcement (Kreijstal/reactos#34).
      *
@@ -477,8 +483,12 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
 
     if (IrpContext->Flags & IRPCONTEXT_COMPLETE)
     {
+        NTFS_TRACE_IF(TraceSetInfo, "REGSTALL: dispatch complete begin status=0x%lx info=%Iu\n",
+                    Status,
+                    Irp->IoStatus.Information);
         Irp->IoStatus.Status = Status;
         IoCompleteRequest(Irp, IrpContext->PriorityBoost);
+        NTFS_TRACE_IF(TraceSetInfo, "REGSTALL: dispatch complete done\n");
     }
 
     if (IrpContext->Flags & IRPCONTEXT_QUEUE)
@@ -496,6 +506,7 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     if (PromotedTopLevel)
         IoSetTopLevelIrp(NULL);
     FsRtlExitFileSystem();
+    NTFS_TRACE_IF(TraceSetInfo, "REGSTALL: dispatch returning 0x%lx\n", Status);
 
     return Status;
 }

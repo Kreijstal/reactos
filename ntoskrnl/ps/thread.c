@@ -386,7 +386,7 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     /* Check if the thread was ours, terminated and it was user mode */
     if ((Thread->Terminated) &&
         (ThreadContext) &&
-        (Thread->ThreadsProcess == Process))
+        ((ULONG_PTR)Thread->ThreadsProcess == (ULONG_PTR)Process))
     {
         /* Cleanup, we don't want to start it up and context switch */
         goto Quickie;

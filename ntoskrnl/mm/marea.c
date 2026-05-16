@@ -504,7 +504,7 @@ MiRosCleanupMemoryArea(
        Make sure things are as expected... */
     ASSERT(Process == PsGetCurrentProcess());
     ASSERT(Process->VmDeleted == TRUE);
-    ASSERT(((PsGetCurrentThread()->ThreadsProcess == Process) &&
+    ASSERT((((ULONG_PTR)PsGetCurrentThread()->ThreadsProcess == (ULONG_PTR)Process) &&
             (Process->ActiveThreads == 1)) ||
            (Process->ActiveThreads == 0));
 

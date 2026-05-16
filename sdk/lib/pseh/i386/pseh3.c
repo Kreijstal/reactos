@@ -96,9 +96,15 @@ _SEH3$_Unregister(
         }
 
         /* Loop to find the frame that links the target frame */
-        while (CurrentFrame->Next != Frame)
+        while ((CurrentFrame != (PVOID)-1) &&
+               (CurrentFrame->Next != Frame))
         {
             CurrentFrame = CurrentFrame->Next;
+        }
+
+        if (CurrentFrame == (PVOID)-1)
+        {
+            return;
         }
 
         /* Remove the frame from the linked list */

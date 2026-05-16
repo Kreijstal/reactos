@@ -708,6 +708,9 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                                               FileObject,
                                               BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                               BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+                NTFS_TRACE("DRVIDX: top create record returned 0x%lx for %wZ\n",
+                        Status,
+                        &FileObject->FileName);
             }
 
             if (!NT_SUCCESS(Status))
@@ -722,7 +725,11 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
             // Now we should be able to open the file using NtfsCreateFile()
             DPRINT("NtfsCreateFile: Recursive call to re-open created file/dir\n");
+            NTFS_TRACE("DRVIDX: recursive open begin for %wZ\n", &FileObject->FileName);
             Status = NtfsCreateFile(DeviceObject, IrpContext);
+            NTFS_TRACE("DRVIDX: recursive open returned 0x%lx for %wZ\n",
+                    Status,
+                    &FileObject->FileName);
             if (NT_SUCCESS(Status))
             {
                 // We need to change Irp->IoStatus.Information to reflect creation
@@ -1156,6 +1163,10 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                                             FileMftIndex,
                                             FilenameAttribute,
                                             CaseSensitive);
+        NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file add-name returned 0x%lx for %.*S\n",
+                    Status,
+                    FilenameAttribute->NameLength,
+                    FilenameAttribute->Name);
 
         /* Emit a USN_REASON_FILE_CREATE record into the change journal
          * if one is active on this volume.  Gated so un-journalled
@@ -1174,6 +1185,10 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file record return 0x%lx for %.*S\n",
+                Status,
+                FilenameAttribute->NameLength,
+                FilenameAttribute->Name);
 
     return Status;
 }

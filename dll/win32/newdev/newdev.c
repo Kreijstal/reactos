@@ -22,6 +22,7 @@
 
 #include "newdev_private.h"
 
+#include <cfgmgr32.h>
 #include <stdio.h>
 #include <winnls.h>
 
@@ -33,6 +34,65 @@ SearchDriver(
     IN PDEVINSTDATA DevInstData,
     IN LPCWSTR Directory OPTIONAL,
     IN LPCWSTR InfFile OPTIONAL);
+
+BOOL
+SetFailedInstall(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DevInfoData OPTIONAL,
+    IN BOOLEAN Set)
+{
+    DWORD dwType, dwSize, dwFlags = 0;
+
+    dwSize = sizeof(dwFlags);
+    if (!SetupDiGetDeviceRegistryProperty(DeviceInfoSet,
+                                          DevInfoData,
+                                          SPDRP_CONFIGFLAGS,
+                                          &dwType,
+                                          (PBYTE)&dwFlags,
+                                          dwSize,
+                                          &dwSize))
+    {
+        return FALSE;
+    }
+
+    if (Set)
+        dwFlags |= CONFIGFLAG_FAILEDINSTALL;
+    else
+        dwFlags &= ~CONFIGFLAG_FAILEDINSTALL;
+
+    if (!SetupDiSetDeviceRegistryProperty(DeviceInfoSet,
+                                          DevInfoData,
+                                          SPDRP_CONFIGFLAGS,
+                                          (PBYTE)&dwFlags,
+                                          dwSize))
+    {
+        return FALSE;
+    }
+
+    if (Set)
+    {
+        PWSTR pszUnknown = L"Unknown";
+        PWSTR pszUnknownGuid = L"{4D36E97E-E325-11CE-BFC1-08002BE10318}";
+
+        SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
+                                          DevInfoData,
+                                          SPDRP_CLASS,
+                                          (PBYTE)pszUnknown,
+                                          (wcslen(pszUnknown) + 1) * sizeof(WCHAR));
+
+        SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
+                                          DevInfoData,
+                                          SPDRP_CLASSGUID,
+                                          (PBYTE)pszUnknownGuid,
+                                          (wcslen(pszUnknownGuid) + 1) * sizeof(WCHAR));
+
+        CM_Set_DevNode_Problem(DevInfoData->DevInst,
+                               CM_PROB_FAILED_INSTALL,
+                               CM_SET_DEVNODE_PROBLEM_OVERRIDE);
+    }
+
+    return TRUE;
+}
 
 /*
 * @implemented
@@ -538,12 +598,12 @@ PrepareFoldersToScan(
 }
 
 BOOL
-InstallCurrentDriver(
+PrepareCurrentDriver(
     IN PDEVINSTDATA DevInstData)
 {
     BOOL ret;
 
-    TRACE("Installing driver %s: %s\n",
+    TRACE("Preparing driver %s: %s\n",
         debugstr_w(DevInstData->drvInfoData.MfgName),
         debugstr_w(DevInstData->drvInfoData.Description));
 
@@ -556,6 +616,19 @@ InstallCurrentDriver(
         TRACE("SetupDiCallClassInstaller(DIF_SELECTBESTCOMPATDRV) failed with error 0x%x\n", GetLastError());
         return FALSE;
     }
+
+    return TRUE;
+}
+
+BOOL
+InstallPreparedDriver(
+    IN PDEVINSTDATA DevInstData)
+{
+    BOOL ret;
+
+    TRACE("Installing prepared driver %s: %s\n",
+        debugstr_w(DevInstData->drvInfoData.MfgName),
+        debugstr_w(DevInstData->drvInfoData.Description));
 
     ret = SetupDiCallClassInstaller(
         DIF_ALLOW_INSTALL,
@@ -648,6 +721,16 @@ InstallCurrentDriver(
     }
 
     return TRUE;
+}
+
+BOOL
+InstallCurrentDriver(
+    IN PDEVINSTDATA DevInstData)
+{
+    if (!PrepareCurrentDriver(DevInstData))
+        return FALSE;
+
+    return InstallPreparedDriver(DevInstData);
 }
 
 /*
@@ -771,9 +854,16 @@ DevInstallW(
     }
     if (ScanFoldersForDriver(DevInstData))
     {
-        /* Driver found ; install it */
-        retval = InstallCurrentDriver(DevInstData);
-        TRACE("InstallCurrentDriver() returned %d\n", retval);
+        /* Driver found; select it before entering the install commit phase. */
+        retval = PrepareCurrentDriver(DevInstData);
+        TRACE("PrepareCurrentDriver() returned %d\n", retval);
+
+        if (retval)
+        {
+            retval = InstallPreparedDriver(DevInstData);
+            TRACE("InstallPreparedDriver() returned %d\n", retval);
+        }
+
         if (retval && Show != SW_HIDE)
         {
             /* Should we display the 'Need to reboot' page? */
@@ -795,6 +885,13 @@ DevInstallW(
     }
     else if (Show == SW_HIDE)
     {
+        if (!DevInstData->bUpdate)
+        {
+            SetFailedInstall(DevInstData->hDevInfo,
+                             &DevInstData->devInfoData,
+                             TRUE);
+        }
+
         /* We can't show the wizard. Fail the install */
         TRACE("No wizard\n");
         goto cleanup;

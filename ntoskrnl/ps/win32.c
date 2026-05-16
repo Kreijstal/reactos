@@ -54,7 +54,7 @@ PsConvertToGuiThread(VOID)
     if (!PspW32ProcessCallout) return STATUS_ACCESS_DENIED;
 
     /* Make sure it's not already win32 */
-#if (NTDDI_VERSION >= NTDDI_LONGHORN) && (defined(_WIN64) || (NTDDI_VERSION >= NTDDI_WIN7))
+#if defined(_WIN64) && (NTDDI_VERSION >= NTDDI_WIN7)
     if (Thread->Tcb.GuiThread)
 #else
     if (Thread->Tcb.ServiceTable != KeServiceDescriptorTable)
@@ -99,7 +99,7 @@ PsConvertToGuiThread(VOID)
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Set the new service table */
-#if (NTDDI_VERSION >= NTDDI_LONGHORN) && (defined(_WIN64) || (NTDDI_VERSION >= NTDDI_WIN7))
+#if defined(_WIN64) && (NTDDI_VERSION >= NTDDI_WIN7)
     /* At Win7+ amd64, ServiceTable removed; use GuiThread flag */
     Thread->Tcb.GuiThread = TRUE;
 #else
@@ -112,7 +112,7 @@ PsConvertToGuiThread(VOID)
     if (!NT_SUCCESS(Status))
     {
         /* Revert our table */
-#if (NTDDI_VERSION >= NTDDI_LONGHORN) && (defined(_WIN64) || (NTDDI_VERSION >= NTDDI_WIN7))
+#if defined(_WIN64) && (NTDDI_VERSION >= NTDDI_WIN7)
         Thread->Tcb.GuiThread = FALSE;
 #else
         Thread->Tcb.ServiceTable = KeServiceDescriptorTable;
