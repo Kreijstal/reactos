@@ -778,9 +778,14 @@ KiSetPriorityThread(IN PKTHREAD Thread,
             }
             else if (Thread->State == DeferredReady)
             {
-                /* FIXME: TODO */
-                DPRINT1("Deferred state not yet supported\n");
-                ASSERT(FALSE);
+                /* The thread is on a per-CPU deferred-ready list waiting
+                 * for KiProcessDeferredReadyList to dispatch it. Update
+                 * its priority in place; the deferred-ready processor
+                 * will queue it on the appropriate ready list at the
+                 * new priority when it runs. No list shuffle is needed
+                 * because DeferredReady threads aren't on a ready list
+                 * yet. */
+                Thread->Priority = (SCHAR)Priority;
             }
             else
             {
