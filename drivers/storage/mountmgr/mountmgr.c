@@ -1281,10 +1281,19 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
      * suggested letter or a GPT drive-letter attribute keep using those.
      * For any other volume that is automountable and not blacklisted,
      * fall through to CreateNewDriveLetterName, which will scan from
-     * C: upwards (or A:/D: for floppies/CD-ROMs) for a free letter. */
+     * C: upwards (or A:/D: for floppies/CD-ROMs) for a free letter.
+     *
+     * CD-ROMs arriving before fstub has issued IOCTL_MOUNTMGR_AUTO_DL_ASSIGNMENTS
+     * are skipped here: the boot CD must be reachable from
+     * xHalIoAssignDriveLetters' MININT branch as 'no letter yet' so it
+     * can take X:, and fstub's CD-ROM loop covers all other cold-boot CDs
+     * via HalpNextDriveLetter. Hot-plugged CDs (post-IOCTL) auto-assign
+     * normally. */
     else if ((!DeviceExtension->NoAutoMount || DeviceInformation->Removable) &&
              DeviceExtension->AutomaticDriveLetter &&
-             !HasNoDriveLetterEntry(UniqueId))
+             !HasNoDriveLetterEntry(UniqueId) &&
+             (DeviceExtension->AutoDLAssignmentsRequested ||
+              !RtlPrefixUnicodeString(&DeviceCdRom, &TargetDeviceName, TRUE)))
     {
         /* Create a new drive letter */
         Status = CreateNewDriveLetterName(&DriveLetter, &TargetDeviceName,

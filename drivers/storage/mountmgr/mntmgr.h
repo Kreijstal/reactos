@@ -20,6 +20,7 @@ typedef struct _DEVICE_EXTENSION
     KSEMAPHORE DeviceLock;
     KSEMAPHORE RemoteDatabaseLock;
     BOOLEAN AutomaticDriveLetter;
+    BOOLEAN AutoDLAssignmentsRequested;
     LIST_ENTRY IrpListHead;
     ULONG EpicNumber;
     LIST_ENTRY SavedLinksListHead;
