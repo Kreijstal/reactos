@@ -47,6 +47,12 @@ typedef struct _DEVINSTDATA
 /* newdev.c */
 
 BOOL
+SetFailedInstall(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DevInfoData OPTIONAL,
+    IN BOOLEAN Set);
+
+BOOL
 ScanFoldersForDriver(
 	IN PDEVINSTDATA DevInstData);
 
@@ -56,6 +62,14 @@ PrepareFoldersToScan(
 	IN BOOL IncludeRemovableDevices,
 	IN BOOL IncludeCustomPath,
 	IN HWND hwndCombo OPTIONAL);
+
+BOOL
+PrepareCurrentDriver(
+	IN PDEVINSTDATA DevInstData);
+
+BOOL
+InstallPreparedDriver(
+	IN PDEVINSTDATA DevInstData);
 
 BOOL
 InstallCurrentDriver(

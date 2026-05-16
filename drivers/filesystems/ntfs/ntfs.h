@@ -23,6 +23,19 @@
  * leaked, and the rest of the FCB is freed normally. */
 #define TAG_SOP 'SftN'
 
+#define NTFS_ENABLE_INVESTIGATION_TRACE 0
+#define NTFS_ENABLE_POOL_CHECK 0
+
+#if NTFS_ENABLE_INVESTIGATION_TRACE
+#define NTFS_TRACE(...) DPRINT1(__VA_ARGS__)
+#define NTFS_TRACE_IF(Condition, ...) do { if (Condition) DPRINT1(__VA_ARGS__); } while (0)
+#define NTFS_TRACE_ENABLED 1
+#else
+#define NTFS_TRACE(...) do { } while (0)
+#define NTFS_TRACE_IF(Condition, ...) do { } while (0)
+#define NTFS_TRACE_ENABLED 0
+#endif
+
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 #define ROUND_DOWN(N, S) ((N) - ((N) % (S)))
 
@@ -34,7 +47,7 @@
  *   x86:   PreviousSize:9, PoolIndex:7, BlockSize:9, PoolType:7
  * Read the first ULONG of the header and mask the appropriate width so the check
  * works correctly for allocations up to one page on both architectures. */
-#ifdef DBG
+#if defined(DBG) && NTFS_ENABLE_POOL_CHECK
 #ifdef _WIN64
 #define NTFS_POOL_BLOCK 16
 #define NTFS_POOL_SZ_MASK 0xFF

@@ -565,7 +565,16 @@ KeContextToTrapFrame(IN PCONTEXT Context,
     }
 
     /* Check if thread has IOPL and force it enabled if so */
-    if (KeGetCurrentThread()->Iopl) TrapFrame->EFlags |= EFLAGS_IOPL;
+    if (
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        KeGetCurrentThread()->ApcState.Process->Iopl
+#else
+        KeGetCurrentThread()->Iopl
+#endif
+       )
+    {
+        TrapFrame->EFlags |= EFLAGS_IOPL;
+    }
 
     /* Restore IRQL */
     if (OldIrql < APC_LEVEL) KeLowerIrql(OldIrql);
@@ -1030,7 +1039,6 @@ DispatchToUser:
                 PsGetCurrentProcess()->SectionBaseAddress,
                 ExceptionRecord->ExceptionInformation[0],
                 ExceptionRecord->ExceptionInformation[1]);
-
         ZwTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
         KeBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED,
                      ExceptionRecord->ExceptionCode,

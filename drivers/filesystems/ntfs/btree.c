@@ -204,8 +204,12 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // Read the existing bitmap data
     Status = ReadAttribute(DeviceExt, BitmapCtx, 0, (PCHAR)BitmapPtr, BitmapLength);
 
-    // Initialize bitmap
-    RtlInitializeBitMap(&Bitmap, BitmapPtr, NextNodeNumber);
+    /*
+     * Include the node being allocated in the in-memory bitmap range.  The
+     * old size is NextNodeNumber entries, and the new node is stored at
+     * exactly that bit index.
+     */
+    RtlInitializeBitMap(&Bitmap, BitmapPtr, NextNodeNumber + 1);
 
     // Do we need to enlarge the bitmap?
     if (BytesNeeded > BitmapLength)
@@ -413,7 +417,7 @@ CreateEmptyBTreeEx(ULONG CollationRule, PB_TREE *NewTree)
     PB_TREE_FILENAME_NODE RootNode = ExAllocatePoolWithTag(NonPagedPool, sizeof(B_TREE_FILENAME_NODE), TAG_NTFS);
     PB_TREE_KEY DummyKey;
 
-    DPRINT1("CreateEmptyBTreeEx(0x%lx, %p) called\n", CollationRule, NewTree);
+    NTFS_TRACE("CreateEmptyBTreeEx(0x%lx, %p) called\n", CollationRule, NewTree);
 
     if (!Tree || !RootNode)
     {
@@ -1240,7 +1244,7 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
             }
         }
 
-        DPRINT1("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
+        NTFS_TRACE("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
                 CurrentNodeEntry->KeyLength,
                 CurrentNodeEntry->Length);
 
@@ -2243,6 +2247,10 @@ VOID
 DumpBTreeKey(PB_TREE Tree, PB_TREE_KEY Key, ULONG Number, ULONG Depth)
 {
     ULONG i;
+
+    if (!NTFS_TRACE_ENABLED)
+        return;
+
     for (i = 0; i < Depth; i++)
         DbgPrint(" ");
     DbgPrint(" Key #%d", Number);
@@ -2290,6 +2298,10 @@ DumpBTreeNode(PB_TREE Tree,
 {
     PB_TREE_KEY CurrentKey;
     ULONG i;
+
+    if (!NTFS_TRACE_ENABLED)
+        return;
+
     for (i = 0; i < Depth; i++)
         DbgPrint(" ");
     DbgPrint("Node #%d, Depth %d, has %d key%s", Number, Depth, Node->KeyCount, Node->KeyCount == 1 ? "" : "s");
@@ -2324,6 +2336,9 @@ DumpBTreeNode(PB_TREE Tree,
 VOID
 DumpBTree(PB_TREE Tree)
 {
+    if (!NTFS_TRACE_ENABLED)
+        return;
+
     DbgPrint("B_TREE @ %p\n", Tree);
     DumpBTreeNode(Tree, Tree->RootNode, 0, 0);
 }

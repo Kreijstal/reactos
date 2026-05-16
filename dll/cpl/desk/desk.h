@@ -197,7 +197,8 @@ SaveDesktopSettings(PDESKTOP_DATA pData);
 VOID
 SetDesktopSettings(PDESKTOP_DATA pData);
 
-LONG
+LSTATUS
+WINAPI
 RegLoadMUIStringW(IN HKEY hKey,
                   IN LPCWSTR pszValue  OPTIONAL,
                   OUT LPWSTR pszOutBuf,
