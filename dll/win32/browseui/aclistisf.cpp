@@ -135,6 +135,9 @@ HRESULT CACListISF::SetLocation(LPITEMIDLIST pidl)
         m_pShellFolder.Attach(pFolder.Detach());
     }
 
+    if (!m_pShellFolder)
+        return E_FAIL;
+
     SHCONTF Flags = SHCONTF_FOLDERS | SHCONTF_INIT_ON_FIRST_NEXT;
     if (m_fShowHidden)
         Flags |= SHCONTF_INCLUDEHIDDEN;
@@ -145,6 +148,13 @@ HRESULT CACListISF::SetLocation(LPITEMIDLIST pidl)
     if (hr != S_OK)
     {
         ERR("EnumObjects failed: 0x%lX\n", hr);
+        m_pEnumIDList.Release();
+        m_pShellFolder.Release();
+        hr = E_FAIL;
+    }
+    else if (!m_pEnumIDList)
+    {
+        m_pShellFolder.Release();
         hr = E_FAIL;
     }
     return hr;
@@ -220,10 +230,10 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
     if (pceltFetched)
         *pceltFetched = 0;
 
-    if (!m_pEnumIDList)
+    if (!m_pEnumIDList || !m_pShellFolder)
     {
         NextLocation();
-        if (!m_pEnumIDList)
+        if (!m_pEnumIDList || !m_pShellFolder)
             return S_FALSE;
     }
 
@@ -235,6 +245,12 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
     {
         for (;;)
         {
+            if (!m_pEnumIDList || !m_pShellFolder)
+            {
+                hr = S_FALSE;
+                break;
+            }
+
             pidlChild.Free();
             hr = m_pEnumIDList->Next(1, &pidlChild, NULL);
             if (hr != S_OK)
@@ -242,7 +258,8 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
 
             pszRawPath.Free();
             pszExpanded.Free();
-            GetPaths(pidlChild, pszRawPath, pszExpanded);
+            if (FAILED_UNEXPECTEDLY(GetPaths(pidlChild, pszRawPath, pszExpanded)))
+                continue;
             if (!pszRawPath || !pszExpanded)
                 continue;
 
@@ -260,7 +277,7 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
             hr = S_OK;
             break;
         }
-    } while (hr == S_FALSE && NextLocation() == S_OK);
+    } while (hr == S_FALSE && NextLocation() == S_OK && m_pEnumIDList && m_pShellFolder);
 
     if (hr == S_OK)
     {

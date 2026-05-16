@@ -88,6 +88,12 @@ typedef enum _TYPE_OF_OPEN {
 #define MAX_USHORT ((USHORT)-1)
 #endif
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+#define FatGetCurrentProcessorIndex() KeGetCurrentProcessorIndex()
+#else
+#define FatGetCurrentProcessorIndex() KeGetCurrentProcessorNumber()
+#endif
+
 //
 //  We must explicitly tag our allocations.
 //
@@ -3108,5 +3114,4 @@ FatInterpretClusterType (
 #define IsDirectory(FcbOrDcb) ((NodeType((FcbOrDcb)) == FAT_NTC_DCB) || (NodeType((FcbOrDcb)) == FAT_NTC_ROOT_DCB))
 
 #endif // _FATPROCS_
-
 

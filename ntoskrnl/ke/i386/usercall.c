@@ -15,6 +15,16 @@
 
 extern PGDI_BATCHFLUSH_ROUTINE KeGdiFlushUserBatch;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+#define KxGetThreadCallbackStack(Thread) \
+    (CONTAINING_RECORD((Thread), ETHREAD, Tcb)->CallbackStack)
+#define KxSetThreadCallbackStack(Thread, Stack) \
+    (CONTAINING_RECORD((Thread), ETHREAD, Tcb)->CallbackStack = (Stack))
+#else
+#define KxGetThreadCallbackStack(Thread) ((Thread)->CallbackStack)
+#define KxSetThreadCallbackStack(Thread, Stack) ((Thread)->CallbackStack = (Stack))
+#endif
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 /*++
@@ -100,7 +110,16 @@ KiInitializeUserApc(IN PKEXCEPTION_FRAME ExceptionFrame,
         TrapFrame->EFlags = Ke386SanitizeFlags(Context.EFlags, UserMode);
 
         /* Check if thread has IOPL and force it enabled if so */
-        if (KeGetCurrentThread()->Iopl) TrapFrame->EFlags |= EFLAGS_IOPL;
+        if (
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+            KeGetCurrentThread()->ApcState.Process->Iopl
+#else
+            KeGetCurrentThread()->Iopl
+#endif
+           )
+        {
+            TrapFrame->EFlags |= EFLAGS_IOPL;
+        }
 
         /* Setup the stack */
         *(PULONG_PTR)(Stack + 0 * sizeof(ULONG_PTR)) = (ULONG_PTR)NormalRoutine;
@@ -276,7 +295,7 @@ KiUserModeCallout(PKCALLOUT_FRAME CalloutFrame)
     InitialStack = ALIGN_DOWN_BY(CalloutFrame, 16);
 
     /* Check if we have enough space on the stack */
-    if ((InitialStack - KERNEL_STACK_SIZE) < CurrentThread->StackLimit)
+    if ((InitialStack - KERNEL_STACK_SIZE) < (ULONG_PTR)CurrentThread->StackLimit)
     {
         /* We don't, we'll have to grow our stack */
         Status = MmGrowKernelStack((PVOID)InitialStack);
@@ -294,7 +313,7 @@ KiUserModeCallout(PKCALLOUT_FRAME CalloutFrame)
     }
 
     /* Save the current callback stack and initial stack */
-    CalloutFrame->CallbackStack = (ULONG_PTR)CurrentThread->CallbackStack;
+    CalloutFrame->CallbackStack = (ULONG_PTR)KxGetThreadCallbackStack(CurrentThread);
     CalloutFrame->InitialStack = (ULONG_PTR)CurrentThread->InitialStack;
 
     /* Get and save the trap frame */
@@ -302,7 +321,7 @@ KiUserModeCallout(PKCALLOUT_FRAME CalloutFrame)
     CalloutFrame->TrapFrame = (ULONG_PTR)TrapFrame;
 
     /* Set the new callback stack */
-    CurrentThread->CallbackStack = CalloutFrame;
+    KxSetThreadCallbackStack(CurrentThread, CalloutFrame);
 
     /* Set destination and origin NPX Areas */
     OldFxSaveArea = (PVOID)(CalloutFrame->InitialStack - sizeof(FX_SAVE_AREA));
@@ -398,7 +417,7 @@ NtCallbackReturn(
 
     /* Get the current thread and make sure we have a callback stack */
     CurrentThread = KeGetCurrentThread();
-    CalloutFrame = CurrentThread->CallbackStack;
+    CalloutFrame = KxGetThreadCallbackStack(CurrentThread);
     if (CalloutFrame == NULL)
     {
         return STATUS_NO_CALLBACK_ACTIVE;
@@ -484,7 +503,7 @@ NtCallbackReturn(
 
     /* Restore the trap frame and the previous callback stack */
     CurrentThread->TrapFrame = TrapFrame;
-    CurrentThread->CallbackStack = (PVOID)CalloutFrame->CallbackStack;
+    KxSetThreadCallbackStack(CurrentThread, (PVOID)CalloutFrame->CallbackStack);
 
     /* Bring interrupts back */
     _enable();

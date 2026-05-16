@@ -542,7 +542,7 @@ KeStartThread(IN OUT PKTHREAD Thread)
 
     /* Setup static fields from parent */
     Thread->DisableBoost = Process->DisableBoost;
-#if defined(_M_IX86)
+#if defined(_M_IX86) && (NTDDI_VERSION < NTDDI_LONGHORN)
     Thread->Iopl = Process->Iopl;
 #endif
     Thread->Quantum = Process->QuantumReset;
@@ -885,11 +885,8 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Initialize the lock */
     KeInitializeSpinLock(&Thread->ThreadLock);
 
-    /* Setup the Service Descriptor Table for Native Calls.
-     * NDK ketypes.h gates ServiceTable as:
-     *   #if (NTDDI_VERSION < NTDDI_LONGHORN) || ((NTDDI_VERSION < NTDDI_WIN7) && !defined(_WIN64))
-     * so on amd64 it disappears already at NT 6.0 (Vista). Mirror that here. */
-#if (NTDDI_VERSION < NTDDI_LONGHORN) || ((NTDDI_VERSION < NTDDI_WIN7) && !defined(_WIN64))
+    /* Setup the Service Descriptor Table for Native Calls. */
+#if !defined(_WIN64) || (NTDDI_VERSION < NTDDI_WIN7)
     Thread->ServiceTable = KeServiceDescriptorTable;
 #endif
 
@@ -973,7 +970,7 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Set the Thread Stacks */
     Thread->InitialStack = KernelStack;
     Thread->StackBase = KernelStack;
-    Thread->StackLimit = (ULONG_PTR)KernelStack - KERNEL_STACK_SIZE;
+    Thread->StackLimit = (volatile PVOID)((ULONG_PTR)KernelStack - KERNEL_STACK_SIZE);
     Thread->KernelStackResident = TRUE;
 
     /* Enter SEH to avoid crashes due to user mode */

@@ -1758,14 +1758,13 @@ UINT WINAPI SetupDefaultQueueCallbackW( PVOID context, UINT notification,
             SetupDeleteErrorW(ctx->owner, NULL, paths->Target, paths->Win32Error, 0);
         return FILEOP_SKIP;
     case SPFILENOTIFY_STARTRENAME:
-        SetupRenameErrorW(ctx->owner, NULL, paths->Source, paths->Target, paths->Win32Error, 0);
+        TRACE( "start rename %s -> %s\n", debugstr_w(paths->Source), debugstr_w(paths->Target) );
         return FILEOP_DOIT;
     case SPFILENOTIFY_ENDRENAME:
         TRACE( "end rename %s -> %s\n", debugstr_w(paths->Source), debugstr_w(paths->Target) );
         return 0;
     case SPFILENOTIFY_RENAMEERROR:
-        ERR( "rename error %d %s -> %s\n", paths->Win32Error,
-             debugstr_w(paths->Source), debugstr_w(paths->Target) );
+        SetupRenameErrorW(ctx->owner, NULL, paths->Source, paths->Target, paths->Win32Error, 0);
         return FILEOP_SKIP;
     case SPFILENOTIFY_STARTCOPY:
         TRACE( "start copy %s -> %s\n", debugstr_w(paths->Source), debugstr_w(paths->Target) );

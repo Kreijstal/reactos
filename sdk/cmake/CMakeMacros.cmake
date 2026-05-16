@@ -385,6 +385,31 @@ function(add_cd_file)
 endfunction()
 
 function(create_iso_lists)
+    get_property(_livecd_filelist GLOBAL PROPERTY LIVECD_FILE_LIST)
+    set(_infcache_inputs)
+    foreach(_entry ${_livecd_filelist})
+        if(_entry MATCHES "^reactos[\\\\/]inf[\\\\/][^=]+=(.+)$")
+            list(APPEND _infcache_inputs "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+    unset(_livecd_filelist)
+    if(_infcache_inputs)
+        list(REMOVE_DUPLICATES _infcache_inputs)
+        math(EXPR _infcache_major "(${REACTOS_TARGET_NT} >> 8) & 0xff" OUTPUT_FORMAT DECIMAL)
+        math(EXPR _infcache_minor "${REACTOS_TARGET_NT} & 0xff" OUTPUT_FORMAT DECIMAL)
+        set(_infcache_file ${REACTOS_BINARY_DIR}/boot/bootdata/INFCACHE.1)
+        add_custom_command(
+            OUTPUT ${_infcache_file}
+            COMMAND native-infcache ${_infcache_file} ${ARCH} ${_infcache_major} ${_infcache_minor} ${_infcache_inputs}
+            DEPENDS native-infcache ${_infcache_inputs})
+        add_custom_target(reactos_infcache DEPENDS ${_infcache_file})
+        add_cd_file(
+            TARGET reactos_infcache
+            FILE ${_infcache_file}
+            DESTINATION reactos/inf
+            FOR all)
+    endif()
+
     # Generate reactos.cab before anything else
     get_property(_filelist GLOBAL PROPERTY REACTOS_CAB_DEPENDS)
 

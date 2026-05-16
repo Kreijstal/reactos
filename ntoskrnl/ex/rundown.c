@@ -385,7 +385,7 @@ ExfAcquireRundownProtectionCacheAware(IN PEX_RUNDOWN_REF_CACHE_AWARE RunRefCache
 {
     PEX_RUNDOWN_REF RunRef;
 
-    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KeGetCurrentProcessorNumber());
+    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KiGetCurrentProcessorNumber());
     return _ExAcquireRundownProtection(RunRef);
 }
 
@@ -399,7 +399,7 @@ ExfAcquireRundownProtectionCacheAwareEx(IN PEX_RUNDOWN_REF_CACHE_AWARE RunRefCac
 {
     PEX_RUNDOWN_REF RunRef;
 
-    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KeGetCurrentProcessorNumber());
+    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KiGetCurrentProcessorNumber());
     return ExfAcquireRundownProtectionEx(RunRef, Count);
 }
 
@@ -412,7 +412,7 @@ ExfReleaseRundownProtectionCacheAware(IN PEX_RUNDOWN_REF_CACHE_AWARE RunRefCache
 {
     PEX_RUNDOWN_REF RunRef;
 
-    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KeGetCurrentProcessorNumber());
+    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KiGetCurrentProcessorNumber());
     _ExReleaseRundownProtection(RunRef);
 }
 
@@ -426,7 +426,7 @@ ExfReleaseRundownProtectionCacheAwareEx(IN PEX_RUNDOWN_REF_CACHE_AWARE RunRefCac
 {
     PEX_RUNDOWN_REF RunRef;
 
-    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KeGetCurrentProcessorNumber());
+    RunRef = ExGetRunRefForGivenProcessor(RunRefCacheAware, KiGetCurrentProcessorNumber());
     ExfReleaseRundownProtectionEx(RunRef, Count);
 }
 
@@ -742,4 +742,3 @@ ExSizeOfRundownProtectionCacheAware(VOID)
     /* Return total size (master structure and runrefs) */
     return Size + sizeof(EX_RUNDOWN_REF_CACHE_AWARE);
 }
-

@@ -1,10 +1,12 @@
 
-remove_definitions(
-    -DWINVER=0x502
-    -D_WIN32_WINNT=0x502)
-add_definitions(
-    -DWINVER=0x600
-    -D_WIN32_WINNT=0x600)
+if(DLL_EXPORT_VERSION LESS 0x600)
+    remove_definitions(
+        -DWINVER=0x502
+        -D_WIN32_WINNT=0x502)
+    add_definitions(
+        -DWINVER=0x600
+        -D_WIN32_WINNT=0x600)
+endif()
 
 add_definitions(
     -D_WINE)

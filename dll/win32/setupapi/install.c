@@ -43,6 +43,7 @@ static const WCHAR ServiceBinaryKey[] = {'S','e','r','v','i','c','e','B','i','n'
 static const WCHAR ServiceTypeKey[] = {'S','e','r','v','i','c','e','T','y','p','e',0};
 static const WCHAR StartTypeKey[] = {'S','t','a','r','t','T','y','p','e',0};
 static const WCHAR StartNameKey[] = {'S','t','a','r','t','N','a','m','e',0};
+static const WCHAR DotExe[] = {'.','e','x','e',0};
 
 static const WCHAR Name[] = {'N','a','m','e',0};
 static const WCHAR CmdLine[] = {'C','m','d','L','i','n','e',0};
@@ -534,6 +535,7 @@ static BOOL do_register_dll( const struct register_dll_info *info, const WCHAR *
     HRESULT res;
     SP_REGISTER_CONTROL_STATUSW status;
     IMAGE_NT_HEADERS *nt;
+    const WCHAR *extension;
 
     status.cbSize = sizeof(status);
     status.FileName = path;
@@ -553,6 +555,49 @@ static BOOL do_register_dll( const struct register_dll_info *info, const WCHAR *
         case FILEOP_DOIT:
             break;
         }
+    }
+
+    extension = strrchrW( path, '.' );
+    if (extension && !strcmpiW( extension, DotExe ))
+    {
+        STARTUPINFOW startup;
+        PROCESS_INFORMATION process_info;
+        WCHAR *cmd_line;
+        BOOL process_created;
+        static const WCHAR format[] = {'"','%','s','"',' ','%','s',0};
+        static const WCHAR default_args[] = {'/','R','e','g','S','e','r','v','e','r',0};
+
+        if (!args) args = default_args;
+        cmd_line = HeapAlloc( GetProcessHeap(), 0, (strlenW(path) + strlenW(args) + 4) * sizeof(WCHAR) );
+        if (!cmd_line)
+        {
+            status.FailureCode = SPREG_LOADLIBRARY;
+            status.Win32Error = ERROR_NOT_ENOUGH_MEMORY;
+            goto done;
+        }
+
+        sprintfW( cmd_line, format, path, args );
+        memset( &startup, 0, sizeof(startup) );
+        startup.cb = sizeof(startup);
+        TRACE( "executing %s\n", debugstr_w(cmd_line) );
+        process_created = CreateProcessW( NULL, cmd_line, NULL, NULL, FALSE, 0, NULL, NULL, &startup, &process_info );
+        HeapFree( GetProcessHeap(), 0, cmd_line );
+        if (!process_created)
+        {
+            status.FailureCode = SPREG_LOADLIBRARY;
+            status.Win32Error = GetLastError();
+            goto done;
+        }
+        CloseHandle( process_info.hThread );
+
+        if (WaitForSingleObject( process_info.hProcess, timeout * 1000 ) == WAIT_TIMEOUT)
+        {
+            TerminateProcess( process_info.hProcess, 1 );
+            status.FailureCode = SPREG_TIMEOUT;
+            status.Win32Error = ERROR_TIMEOUT;
+        }
+        CloseHandle( process_info.hProcess );
+        goto done;
     }
 
     if (!(module = LoadLibraryExW( path, 0, LOAD_WITH_ALTERED_SEARCH_PATH )))
@@ -1468,7 +1513,8 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
 void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, INT show )
 {
     BOOL ret = FALSE;
-    WCHAR *s, *path, section[MAX_PATH];
+    WCHAR *s, *path, section[MAX_PATH], source_root[MAX_PATH];
+    PCWSTR source_root_ptr = NULL;
     void *callback_context = NULL;
     DWORD SectionNameLength;
     UINT mode;
@@ -1491,7 +1537,13 @@ void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, I
 
     if (mode & 0x80)
     {
-        FIXME("default path of the installation not changed\n");
+        lstrcpynW( source_root, path, MAX_PATH );
+        if ((s = strrchrW( source_root, '\\' )))
+        {
+            if (s == source_root || s[-1] == ':') s[1] = 0;
+            else *s = 0;
+            source_root_ptr = source_root;
+        }
         mode &= ~0x80;
     }
 
@@ -1517,7 +1569,7 @@ void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, I
 
     /* Copy files and add registry entries */
     callback_context = SetupInitDefaultQueueCallback( hwnd );
-    ret = SetupInstallFromInfSectionW( hwnd, hinf, section, SPINST_ALL, NULL, NULL,
+    ret = SetupInstallFromInfSectionW( hwnd, hinf, section, SPINST_ALL, NULL, source_root_ptr,
                                        SP_COPY_NEWER | SP_COPY_IN_USE_NEEDS_REBOOT,
                                        SetupDefaultQueueCallbackW, callback_context,
                                        NULL, NULL );

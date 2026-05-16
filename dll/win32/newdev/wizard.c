@@ -60,67 +60,6 @@ CenterWindow(
 }
 
 static BOOL
-SetFailedInstall(
-    IN HDEVINFO DeviceInfoSet,
-    IN PSP_DEVINFO_DATA DevInfoData OPTIONAL,
-    IN BOOLEAN Set)
-{
-    DWORD dwType, dwSize, dwFlags = 0;
-
-    dwSize = sizeof(dwFlags);
-    if (!SetupDiGetDeviceRegistryProperty(DeviceInfoSet,
-                                          DevInfoData,
-                                          SPDRP_CONFIGFLAGS,
-                                          &dwType,
-                                          (PBYTE)&dwFlags,
-                                          dwSize,
-                                          &dwSize))
-    {
-        return FALSE;
-    }
-
-    if (Set)
-        dwFlags |= CONFIGFLAG_FAILEDINSTALL;
-    else
-        dwFlags &= ~CONFIGFLAG_FAILEDINSTALL;
-
-    if (!SetupDiSetDeviceRegistryProperty(DeviceInfoSet,
-                                          DevInfoData,
-                                          SPDRP_CONFIGFLAGS,
-                                          (PBYTE)&dwFlags,
-                                          dwSize))
-    {
-
-        return FALSE;
-    }
-
-    if (Set)
-    {
-        /* Set the 'Unknown' device class */
-        PWSTR pszUnknown = L"Unknown";
-        SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
-                                          DevInfoData,
-                                          SPDRP_CLASS,
-                                          (PBYTE)pszUnknown,
-                                          (wcslen(pszUnknown) + 1) * sizeof(WCHAR));
-
-        PWSTR pszUnknownGuid = L"{4D36E97E-E325-11CE-BFC1-08002BE10318}";
-        SetupDiSetDeviceRegistryPropertyW(DeviceInfoSet,
-                                          DevInfoData,
-                                          SPDRP_CLASSGUID,
-                                          (PBYTE)pszUnknownGuid,
-                                          (wcslen(pszUnknownGuid) + 1) * sizeof(WCHAR));
-
-        /* Set device problem code CM_PROB_FAILED_INSTALL */
-        CM_Set_DevNode_Problem(DevInfoData->DevInst,
-                               CM_PROB_FAILED_INSTALL,
-                               CM_SET_DEVNODE_PROBLEM_OVERRIDE);
-    }
-
-    return TRUE;
-}
-
-static BOOL
 CanDisableDevice(
     IN DEVINST DevInst,
     IN HMACHINE hMachine,
