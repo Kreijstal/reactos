@@ -101,12 +101,12 @@ ExfUnblockPushLock(
 );
 
 //
-// Debug-only push-lock owner tracking helpers.
-// Declared on DBG builds; release builds get a TRUE-evaluating macro
-// for the public query so assertion sites compile to no-ops without
-// churn. Not exported; these live in ntoskrnl only.
+// Push-lock owner tracking helpers.
+// Mirrors the per-thread held-pushlocks list that Windows uses so that
+// ExPushLockIsOwnedByCurrentThread can answer for ASSERTs in code paths
+// that previously compared against KGUARDED_MUTEX.Owner. Not exported;
+// these live in ntoskrnl only.
 //
-#if DBG
 VOID
 NTAPI
 ExpTrackAcquirePushLock(
@@ -124,7 +124,6 @@ NTAPI
 ExPushLockIsOwnedByCurrentThread(
     _In_ PEX_PUSH_LOCK PushLock
 );
-#endif
 
 //
 // Handle Table Functions
