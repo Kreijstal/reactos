@@ -670,8 +670,10 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
                        PLARGE_INTEGER DataSize)
 {
     NTSTATUS Status = STATUS_SUCCESS;
+    ULONGLONG OldDataSize;
+    BOOLEAN Shrinking;
 
-    DPRINT1("SetAttributeDataLength(%p, %p, %p, %lu, %p, %I64u)\n",
+    NTFS_TRACE("SetAttributeDataLength(%p, %p, %p, %lu, %p, %I64u)\n",
             FileObject,
             Fcb,
             AttrContext,
@@ -685,8 +687,11 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
      * so the cache is about to be stale. */
     NtfsInvalidateCachedFileRecord(Fcb);
 
+    OldDataSize = AttributeDataLength(AttrContext->pRecord);
+    Shrinking = (DataSize->QuadPart < OldDataSize);
+
     // are we truncating the file?
-    if (DataSize->QuadPart < AttributeDataLength(AttrContext->pRecord))
+    if (Shrinking)
     {
         if (!MmCanFileBeTruncated(FileObject->SectionObjectPointer, DataSize))
         {
@@ -697,20 +702,30 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
 
     if (AttrContext->pRecord->IsNonResident)
     {
+        NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: set nonresident begin old=%I64u new=%I64u\n",
+                    OldDataSize,
+                    DataSize->QuadPart);
         Status = SetNonResidentAttributeDataLength(Fcb->Vcb,
                                                    AttrContext,
                                                    AttrOffset,
                                                    FileRecord,
                                                    DataSize);
+        NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: set nonresident returned 0x%lx\n", Status);
     }
     else
     {
         // resident attribute
+        NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: set resident begin old=%I64u new=%I64u\n",
+                    OldDataSize,
+                    DataSize->QuadPart);
         Status = SetResidentAttributeDataLength(Fcb->Vcb,
                                                 AttrContext,
                                                 AttrOffset,
                                                 FileRecord,
                                                 DataSize);
+        NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: set resident returned 0x%lx nr=%u\n",
+                    Status,
+                    AttrContext->pRecord->IsNonResident);
     }
 
     if (!NT_SUCCESS(Status))
@@ -722,7 +737,9 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
     //NtfsDumpFileAttributes(Fcb->Vcb, FileRecord);
 
     // write the updated file record back to disk
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update file record begin\n");
     Status = UpdateFileRecord(Fcb->Vcb, Fcb->MFTIndex, FileRecord);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update file record returned 0x%lx\n", Status);
 
     if (NT_SUCCESS(Status))
     {
@@ -733,19 +750,18 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
         Fcb->RFCB.FileSize = *DataSize;
         Fcb->RFCB.ValidDataLength = *DataSize;
 
-        /* Flush and purge cached data before updating sizes.  This ensures
-         * dirty pages are written to disk BEFORE CcSetFileSizes triggers
-         * section teardown, preventing re-entrant MiWritePage calls during
-         * MmFreePageTablesSectionSegment that cause pool corruption. */
-        if (FileObject->SectionObjectPointer)
+        if (Shrinking && FileObject->SectionObjectPointer)
         {
+            /*
+             * Flush and purge cached data before shrinking.  Extension only
+             * needs CcSetFileSizes; flushing the freshly-created stream here
+             * can re-enter the filesystem before the caller writes data.
+             */
             if (FileObject->SectionObjectPointer->SharedCacheMap)
             {
                 IO_STATUS_BLOCK Iosb;
                 CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &Iosb);
             }
-            /* Purge the data section so the MM doesn't try to write back
-             * stale pages during segment cleanup */
             if (FileObject->SectionObjectPointer->DataSectionObject)
             {
                 CcPurgeCacheSection(FileObject->SectionObjectPointer,
@@ -755,10 +771,13 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
         if (FileObject->SectionObjectPointer &&
             FileObject->SectionObjectPointer->SharedCacheMap)
         {
+            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: cc set file sizes begin\n");
             CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: cc set file sizes done\n");
         }
     }
 
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: set attribute data length return\n");
     return STATUS_SUCCESS;
 }
 
@@ -1193,6 +1212,7 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     ULONGLONG CurrentOffset;
     ULONG AlreadyRead;
     NTSTATUS Status;
+    BOOLEAN DirectDiskRead;
 
     if (!Context->pRecord->IsNonResident)
     {
@@ -1213,6 +1233,8 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     /*
      * Non-resident attribute
      */
+    DirectDiskRead = (Context == Vcb->MFTContext ||
+                      Context->pRecord->Type != AttributeData);
 
     /*
      * Compressed $DATA fast path (issue #35, slice 1a).  A non-zero
@@ -1347,10 +1369,22 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
                  * either extend a pending sparse segment or start one. */
                 if (!PendingIsSparse && PendingLength != 0)
                 {
-                    Status = NtfsReadDiskCached(Vcb,
-                                                PendingDiskOffset,
-                                                PendingLength,
-                                                PendingBuffer);
+                    if (DirectDiskRead)
+                    {
+                        Status = NtfsReadDisk(Vcb->StorageDevice,
+                                              PendingDiskOffset,
+                                              PendingLength,
+                                              Vcb->NtfsInfo.BytesPerSector,
+                                              PendingBuffer,
+                                              FALSE);
+                    }
+                    else
+                    {
+                        Status = NtfsReadDiskCached(Vcb,
+                                                    PendingDiskOffset,
+                                                    PendingLength,
+                                                    PendingBuffer);
+                    }
                     if (!NT_SUCCESS(Status))
                         break;
                     AlreadyRead += PendingLength;
@@ -1407,10 +1441,22 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
                     if (PendingLength != 0)
                     {
                         ASSERT(!PendingIsSparse);
-                        Status = NtfsReadDiskCached(Vcb,
-                                                    PendingDiskOffset,
-                                                    PendingLength,
-                                                    PendingBuffer);
+                        if (DirectDiskRead)
+                        {
+                            Status = NtfsReadDisk(Vcb->StorageDevice,
+                                                  PendingDiskOffset,
+                                                  PendingLength,
+                                                  Vcb->NtfsInfo.BytesPerSector,
+                                                  PendingBuffer,
+                                                  FALSE);
+                        }
+                        else
+                        {
+                            Status = NtfsReadDiskCached(Vcb,
+                                                        PendingDiskOffset,
+                                                        PendingLength,
+                                                        PendingBuffer);
+                        }
                         if (!NT_SUCCESS(Status))
                             break;
                         AlreadyRead += PendingLength;
@@ -1469,10 +1515,22 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
             }
             else
             {
-                Status = NtfsReadDiskCached(Vcb,
-                                            PendingDiskOffset,
-                                            PendingLength,
-                                            PendingBuffer);
+                if (DirectDiskRead)
+                {
+                    Status = NtfsReadDisk(Vcb->StorageDevice,
+                                          PendingDiskOffset,
+                                          PendingLength,
+                                          Vcb->NtfsInfo.BytesPerSector,
+                                          PendingBuffer,
+                                          FALSE);
+                }
+                else
+                {
+                    Status = NtfsReadDiskCached(Vcb,
+                                                PendingDiskOffset,
+                                                PendingLength,
+                                                PendingBuffer);
+                }
                 if (NT_SUCCESS(Status))
                     AlreadyRead += PendingLength;
             }
@@ -2026,7 +2084,13 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
 
     NTFS_CHECK_POOL(file, "ReadFileRecord:pre");
 
+    NTFS_TRACE_IF(index == 144, "DRVIDX: ReadFileRecord begin index=%I64u offset=%I64u\n",
+                index,
+                index * Vcb->NtfsInfo.BytesPerFileRecord);
     BytesRead = ReadAttribute(Vcb, Vcb->MFTContext, index * Vcb->NtfsInfo.BytesPerFileRecord, (PCHAR)file, Vcb->NtfsInfo.BytesPerFileRecord);
+    NTFS_TRACE_IF(index == 144, "DRVIDX: ReadFileRecord readattr bytes=%I64u expected=%lu\n",
+                BytesRead,
+                Vcb->NtfsInfo.BytesPerFileRecord);
     if (BytesRead != Vcb->NtfsInfo.BytesPerFileRecord)
     {
         DPRINT1("ReadFileRecord failed: %I64u read, %lu expected\n", BytesRead, Vcb->NtfsInfo.BytesPerFileRecord);
@@ -2037,7 +2101,12 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
 
     /* Apply update sequence array fixups. */
     DPRINT("Sequence number: %u\n", file->SequenceNumber);
-    return FixupUpdateSequenceArray(Vcb, &file->Ntfs);
+    NTFS_TRACE_IF(index == 144, "DRVIDX: ReadFileRecord fixup begin type=0x%lx\n", file->Ntfs.Type);
+    {
+        NTSTATUS Status = FixupUpdateSequenceArray(Vcb, &file->Ntfs);
+        NTFS_TRACE_IF(index == 144, "DRVIDX: ReadFileRecord fixup returned 0x%lx\n", Status);
+        return Status;
+    }
 }
 
 
@@ -2642,6 +2711,16 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     LARGE_INTEGER MinIndexRootSize;
     ULONG NewMaxIndexRootSize;
     ULONG NodeSize;
+#if NTFS_ENABLE_INVESTIGATION_TRACE
+    BOOLEAN TraceIndex;
+
+    TraceIndex = (DirectoryMftIndex == 27);
+#endif
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: begin dir=%I64u ref=%I64u name=%.*S\n",
+                DirectoryMftIndex,
+                FileReferenceNumber,
+                FilenameAttribute->NameLength,
+                FilenameAttribute->Name);
 
     // Allocate memory for the parent directory
     ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
@@ -2767,6 +2846,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: inserted key\n");
 
 #ifndef NDEBUG
     DumpBTree(NewTree);
@@ -2816,8 +2896,10 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: shrunk index root\n");
 
     // Update the index allocation
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: update index allocation 1\n");
     Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
     if (!NT_SUCCESS(Status))
     {
@@ -2828,6 +2910,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: update index allocation 1 done\n");
 
 #ifndef NDEBUG
     DPRINT1("Index Allocation updated\n");
@@ -2879,6 +2962,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         }
 
         // We need to update the index allocation once more
+        NTFS_TRACE_IF(TraceIndex, "DRVIDX: update index allocation 2\n");
         Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
         if (!NT_SUCCESS(Status))
         {
@@ -2889,6 +2973,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
             return Status;
         }
+        NTFS_TRACE_IF(TraceIndex, "DRVIDX: update index allocation 2 done\n");
 
         // re-recalculate max size of index root
         NewMaxIndexRootSize =
@@ -2931,9 +3016,12 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: create index root done len=%lu\n", BtreeIndexLength);
 
     // We're done with the B-Tree now (DestroyBTree releases IndexAllocationContext)
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: destroy btree\n");
     DestroyBTree(NewTree);
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: destroy btree done\n");
 
     // Write back the new index root attribute to the parent directory file record.
     //
@@ -2943,6 +3031,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     // data runs.  We MUST re-read from disk before modifying and writing back,
     // otherwise we clobber the data runs that AddRun wrote.
     DPRINT("NtfsAddFilename: re-reading MFT %I64u before final write\n", DirectoryMftIndex);
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: reread parent\n");
     Status = ReadFileRecord(DeviceExt, DirectoryMftIndex, ParentFileRecord);
     if (!NT_SUCCESS(Status))
     {
@@ -2953,6 +3042,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: reread parent done\n");
 
     // Re-find the $INDEX_ROOT attribute since offsets may have changed
     ReleaseAttributeContext(IndexRootContext);
@@ -2965,12 +3055,16 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: refind index root done\n");
 
     // Resize the attribute if needed.
     AttributeLength = NewIndexRoot->Header.AllocatedSize + FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header);
 
     if (AttributeLength != IndexRootContext->pRecord->Resident.ValueLength)
     {
+        NTFS_TRACE_IF(TraceIndex, "DRVIDX: resize final root old=%lu new=%lu\n",
+                    IndexRootContext->pRecord->Resident.ValueLength,
+                    AttributeLength);
         // Update the length of the attribute in the file record of the parent directory
         Status = InternalSetResidentAttributeLength(DeviceExt,
                                                     IndexRootContext,
@@ -2990,6 +3084,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     }
 
     // Write the new index root to disk using the freshly re-read ParentFileRecord.
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: write index root len=%lu\n", AttributeLength);
     Status = WriteAttribute(DeviceExt,
                             IndexRootContext,
                             0,
@@ -2997,6 +3092,9 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
                             AttributeLength,
                             &LengthWritten,
                             ParentFileRecord);
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: write index root done status=0x%lx written=%lu\n",
+                Status,
+                LengthWritten);
     if (!NT_SUCCESS(Status) || LengthWritten != AttributeLength)
     {
         DPRINT1("ERROR: Unable to write new index root attribute to parent directory!\n");
@@ -3030,6 +3128,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     ReleaseAttributeContext(IndexRootContext);
     ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+    NTFS_TRACE_IF(TraceIndex, "DRVIDX: return status=0x%lx\n", Status);
 
     return Status;
 }
@@ -4288,6 +4387,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
            DirSearch ? "TRUE" : "FALSE",
            CaseSensitive ? "TRUE" : "FALSE",
            OutMFTIndex);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: find mft record begin name=%wZ\n", FileName);
 
     /* Take IndexResource shared so a writer (UpdateFileNameRecord /
      * NtfsAddFilenameToDirectory / NtfsRemoveFilenameFromDirectory) can't
@@ -4296,7 +4396,9 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
      * so it's safe even if a caller higher up the stack already holds it.
      * Normal kernel APCs are already disabled by FsRtlEnterFileSystem in
      * NtfsDispatch, so we don't need a critical region wrapper. */
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: acquire index shared\n");
     IndexLockHeld = ExAcquireResourceSharedLite(&Vcb->IndexResource, TRUE);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: acquire index shared done held=%u\n", IndexLockHeld);
 
     MftRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (MftRecord == NULL)
@@ -4307,6 +4409,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     }
 
     Status = ReadFileRecord(Vcb, MFTIndex, MftRecord);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: read dir record status=0x%lx\n", Status);
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
@@ -4317,6 +4420,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
 
     ASSERT(MftRecord->Ntfs.Type == NRH_FILE_TYPE);
     Status = FindAttribute(Vcb, MftRecord, AttributeIndexRoot, L"$I30", 4, &IndexRootCtx, NULL);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: find index root status=0x%lx\n", Status);
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
@@ -4336,6 +4440,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     }
 
     ReadAttribute(Vcb, IndexRootCtx, 0, IndexRecord, Vcb->NtfsInfo.BytesPerIndexRecord);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: read index root done\n");
     IndexRoot = (PINDEX_ROOT_ATTRIBUTE)IndexRecord;
     IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)&IndexRoot->Header + IndexRoot->Header.FirstEntryOffset);
     /* Index root is always resident. */
@@ -4356,11 +4461,20 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                                 DirSearch,
                                 CaseSensitive,
                                 OutMFTIndex);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: browse index status=0x%lx out=%I64u\n",
+                Status,
+                OutMFTIndex ? *OutMFTIndex : 0);
 
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: freed index record\n");
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
+    NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: freed mft record\n");
     if (IndexLockHeld)
+    {
+        NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: release index shared\n");
         ExReleaseResourceLite(&Vcb->IndexResource);
+        NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: release index shared done\n");
+    }
 
     return Status;
 }
@@ -4392,6 +4506,11 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
         DPRINT("Current: %wZ\n", &Current);
 
         Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex);
+        NTFS_TRACE_IF(CurrentMFTIndex == 144, "DRVIDX: lookup find returned 0x%lx current=%wZ mft=%I64u remaining=%wZ\n",
+                    Status,
+                    &Current,
+                    CurrentMFTIndex,
+                    &Remaining);
         if (!NT_SUCCESS(Status))
         {
             return Status;
@@ -4404,13 +4523,22 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
     }
 
     *FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    NTFS_TRACE_IF(CurrentMFTIndex == 144, "DRVIDX: lookup allocated file record %p for mft=%I64u\n",
+                *FileRecord,
+                CurrentMFTIndex);
     if (*FileRecord == NULL)
     {
         DPRINT("NtfsLookupFileAt: Can't allocate MFT record\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
+    NTFS_TRACE_IF(CurrentMFTIndex == 144, "DRVIDX: lookup read file record begin mft=%I64u\n", CurrentMFTIndex);
     Status = ReadFileRecord(Vcb, CurrentMFTIndex, *FileRecord);
+    NTFS_TRACE_IF(CurrentMFTIndex == 144, "DRVIDX: lookup read file record returned 0x%lx mft=%I64u type=0x%lx flags=0x%x\n",
+                Status,
+                CurrentMFTIndex,
+                (*FileRecord)->Ntfs.Type,
+                (*FileRecord)->Flags);
     if (!NT_SUCCESS(Status))
     {
         DPRINT("NtfsLookupFileAt: Can't read MFT record\n");
@@ -4437,6 +4565,9 @@ void
 NtfsDumpData(ULONG_PTR Buffer, ULONG Length)
 {
     ULONG i, j;
+
+    if (!NTFS_TRACE_ENABLED)
+        return;
 
     // dump binary data, 8 bytes at a time
     for (i = 0; i < Length; i += 8)
@@ -4475,6 +4606,9 @@ NtfsDumpFileRecord(PDEVICE_EXTENSION Vcb,
                    PFILE_RECORD_HEADER FileRecord)
 {
     ULONG i, j;
+
+    if (!NTFS_TRACE_ENABLED)
+        return;
 
     // dump binary data, 8 bytes at a time
     for (i = 0; i < FileRecord->BytesInUse; i += 8)

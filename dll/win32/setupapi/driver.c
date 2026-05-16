@@ -32,6 +32,345 @@ static const WCHAR INF_PROVIDER[]  = {'P','r','o','v','i','d','e','r',0};
 static const WCHAR INF_DRIVER_VER[]  = {'D','r','i','v','e','r','V','e','r',0};
 
 
+struct InfCacheEntry
+{
+    LIST_ENTRY ListEntry;
+    LPWSTR InfFile;
+    LPWSTR SectionName;
+    LPWSTR DriverDescription;
+    LPWSTR ProviderName;
+    LPWSTR ManufacturerName;
+    LPWSTR MatchingId;
+    GUID ClassGuid;
+    FILETIME DriverDate;
+    DWORDLONG DriverVersion;
+    DWORD FieldIndex;
+};
+
+static VOID
+InfCacheInit(PLIST_ENTRY ListHead)
+{
+    InitializeListHead(ListHead);
+}
+
+static VOID
+InfCacheFree(PLIST_ENTRY ListHead)
+{
+    while (!IsListEmpty(ListHead))
+    {
+        PLIST_ENTRY Entry = RemoveHeadList(ListHead);
+        struct InfCacheEntry *CacheEntry = CONTAINING_RECORD(Entry, struct InfCacheEntry, ListEntry);
+        MyFree(CacheEntry->InfFile);
+        MyFree(CacheEntry->SectionName);
+        MyFree(CacheEntry->DriverDescription);
+        MyFree(CacheEntry->ProviderName);
+        MyFree(CacheEntry->ManufacturerName);
+        MyFree(CacheEntry->MatchingId);
+        MyFree(CacheEntry);
+    }
+}
+
+static LPWSTR
+InfCacheDupSanitized(IN LPCWSTR String)
+{
+    LPWSTR Copy;
+    DWORD i;
+
+    if (String == NULL)
+        String = L"";
+
+    Copy = pSetupDuplicateString(String);
+    if (Copy == NULL)
+        return NULL;
+
+    for (i = 0; Copy[i] != UNICODE_NULL; ++i)
+    {
+        if (Copy[i] == L'\t' || Copy[i] == L'\r' || Copy[i] == L'\n')
+            Copy[i] = L' ';
+    }
+
+    return Copy;
+}
+
+static BOOL
+InfCacheAddEntry(
+    IN PLIST_ENTRY ListHead,
+    IN LPCWSTR InfFile,
+    IN LPCWSTR SectionName,
+    IN LPCWSTR DriverDescription,
+    IN LPCWSTR ProviderName,
+    IN LPCWSTR ManufacturerName,
+    IN LPCWSTR MatchingId,
+    IN LPGUID ClassGuid,
+    IN FILETIME DriverDate,
+    IN DWORDLONG DriverVersion,
+    IN DWORD FieldIndex)
+{
+    struct InfCacheEntry *Entry;
+
+    Entry = MyMalloc(sizeof(*Entry));
+    if (Entry == NULL)
+        return FALSE;
+
+    ZeroMemory(Entry, sizeof(*Entry));
+    Entry->InfFile = InfCacheDupSanitized(InfFile);
+    Entry->SectionName = InfCacheDupSanitized(SectionName);
+    Entry->DriverDescription = InfCacheDupSanitized(DriverDescription);
+    Entry->ProviderName = InfCacheDupSanitized(ProviderName);
+    Entry->ManufacturerName = InfCacheDupSanitized(ManufacturerName);
+    Entry->MatchingId = InfCacheDupSanitized(MatchingId);
+    if (Entry->InfFile == NULL || Entry->SectionName == NULL ||
+        Entry->DriverDescription == NULL || Entry->ProviderName == NULL ||
+        Entry->ManufacturerName == NULL || Entry->MatchingId == NULL)
+    {
+        MyFree(Entry->InfFile);
+        MyFree(Entry->SectionName);
+        MyFree(Entry->DriverDescription);
+        MyFree(Entry->ProviderName);
+        MyFree(Entry->ManufacturerName);
+        MyFree(Entry->MatchingId);
+        MyFree(Entry);
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    Entry->ClassGuid = *ClassGuid;
+    Entry->DriverDate = DriverDate;
+    Entry->DriverVersion = DriverVersion;
+    Entry->FieldIndex = FieldIndex;
+    InsertTailList(ListHead, &Entry->ListEntry);
+    return TRUE;
+}
+
+static BOOL
+InfCacheGetPaths(
+    OUT LPWSTR InfDir,
+    IN DWORD InfDirCch,
+    OUT LPWSTR CacheFile,
+    IN DWORD CacheFileCch)
+{
+    DWORD Len;
+
+    Len = GetSystemWindowsDirectoryW(InfDir, InfDirCch);
+    if (Len == 0 || Len >= InfDirCch)
+        return FALSE;
+    if (InfDir[lstrlenW(InfDir) - 1] != L'\\')
+        strcatW(InfDir, BackSlash);
+    if (lstrlenW(InfDir) + lstrlenW(InfDirectory) + 1 > InfDirCch)
+        return FALSE;
+    strcatW(InfDir, InfDirectory);
+
+    if (lstrlenW(InfDir) + 11 > CacheFileCch)
+        return FALSE;
+    strcpyW(CacheFile, InfDir);
+    strcatW(CacheFile, L"INFCACHE.1");
+    return TRUE;
+}
+
+static BOOL
+InfCacheIsCurrent(IN LPCWSTR InfDir, IN LPCWSTR CacheFile)
+{
+    WIN32_FILE_ATTRIBUTE_DATA CacheAttrs;
+    WIN32_FIND_DATAW FindData;
+    WCHAR Pattern[MAX_PATH];
+    HANDLE FindHandle;
+    BOOL Current = TRUE;
+
+    if (!GetFileAttributesExW(CacheFile, GetFileExInfoStandard, &CacheAttrs))
+        return FALSE;
+
+    if (lstrlenW(InfDir) + 6 > MAX_PATH)
+        return FALSE;
+    strcpyW(Pattern, InfDir);
+    strcatW(Pattern, L"*.inf");
+
+    FindHandle = FindFirstFileW(Pattern, &FindData);
+    if (FindHandle == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    do
+    {
+        if (CompareFileTime(&FindData.ftLastWriteTime, &CacheAttrs.ftLastWriteTime) > 0)
+        {
+            Current = FALSE;
+            break;
+        }
+    } while (FindNextFileW(FindHandle, &FindData));
+
+    FindClose(FindHandle);
+    return Current;
+}
+
+static LPWSTR
+InfCacheNextField(IN OUT LPWSTR *Cursor)
+{
+    LPWSTR Field = *Cursor;
+    LPWSTR Tab;
+
+    if (Field == NULL)
+        return NULL;
+
+    Tab = strchrW(Field, L'\t');
+    if (Tab != NULL)
+    {
+        *Tab = UNICODE_NULL;
+        *Cursor = Tab + 1;
+    }
+    else
+    {
+        *Cursor = NULL;
+    }
+
+    return Field;
+}
+
+static BOOL
+InfCacheLoad(IN LPCWSTR CacheFile, OUT PLIST_ENTRY ListHead)
+{
+    HANDLE File;
+    DWORD Size, Read;
+    LPWSTR Buffer, Line, NextLine;
+    static const WCHAR Header[] = L"ReactOS INF Cache 1";
+    BOOL Ret = FALSE;
+
+    File = CreateFileW(CacheFile, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    Size = GetFileSize(File, NULL);
+    if (Size == INVALID_FILE_SIZE || Size < sizeof(WCHAR) || Size > 16 * 1024 * 1024)
+        goto done;
+
+    Buffer = MyMalloc(Size + sizeof(WCHAR));
+    if (Buffer == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        goto done;
+    }
+
+    if (!ReadFile(File, Buffer, Size, &Read, NULL) || Read != Size)
+    {
+        MyFree(Buffer);
+        goto done;
+    }
+    Buffer[Size / sizeof(WCHAR)] = UNICODE_NULL;
+
+    if (Buffer[0] == 0xFEFF)
+        Line = Buffer + 1;
+    else
+        Line = Buffer;
+
+    NextLine = wcschr(Line, L'\n');
+    if (NextLine == NULL)
+    {
+        MyFree(Buffer);
+        goto done;
+    }
+    *NextLine++ = UNICODE_NULL;
+    if (Line[lstrlenW(Line) - 1] == L'\r')
+        Line[lstrlenW(Line) - 1] = UNICODE_NULL;
+    if (strcmpW(Line, Header) != 0)
+    {
+        MyFree(Buffer);
+        goto done;
+    }
+
+    Ret = TRUE;
+    for (Line = NextLine; Line && *Line; Line = NextLine)
+    {
+        LPWSTR Cursor, Fields[11];
+        GUID ClassGuid;
+        FILETIME DriverDate;
+        DWORD i;
+        ULARGE_INTEGER Version;
+
+        NextLine = wcschr(Line, L'\n');
+        if (NextLine != NULL)
+            *NextLine++ = UNICODE_NULL;
+        if (*Line == UNICODE_NULL)
+            continue;
+        if (Line[lstrlenW(Line) - 1] == L'\r')
+            Line[lstrlenW(Line) - 1] = UNICODE_NULL;
+
+        Cursor = Line;
+        for (i = 0; i < 11; ++i)
+            Fields[i] = InfCacheNextField(&Cursor);
+        if (Fields[10] == NULL)
+            continue;
+
+        if (pSetupGuidFromString(Fields[5], &ClassGuid) != ERROR_SUCCESS)
+            continue;
+        DriverDate.dwLowDateTime = wcstoul(Fields[6], NULL, 16);
+        DriverDate.dwHighDateTime = wcstoul(Fields[7], NULL, 16);
+        Version.QuadPart = _wcstoui64(Fields[8], NULL, 16);
+
+        if (!InfCacheAddEntry(ListHead, Fields[0], Fields[1], Fields[2],
+                              Fields[3], Fields[4], Fields[10], &ClassGuid,
+                              DriverDate, Version.QuadPart, wcstoul(Fields[9], NULL, 16)))
+        {
+            Ret = FALSE;
+            break;
+        }
+    }
+
+    MyFree(Buffer);
+
+done:
+    CloseHandle(File);
+    if (!Ret)
+        InfCacheFree(ListHead);
+    return Ret;
+}
+
+static BOOL
+InfCacheSave(IN LPCWSTR CacheFile, IN PLIST_ENTRY ListHead)
+{
+    HANDLE File;
+    DWORD Written;
+    WCHAR Line[4 * MAX_PATH];
+    static const WCHAR Bom = 0xFEFF;
+    static const WCHAR Header[] = L"ReactOS INF Cache 1\r\n";
+    PLIST_ENTRY Entry;
+
+    File = CreateFileW(CacheFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (File == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    WriteFile(File, &Bom, sizeof(Bom), &Written, NULL);
+    WriteFile(File, Header, lstrlenW(Header) * sizeof(WCHAR), &Written, NULL);
+
+    for (Entry = ListHead->Flink; Entry != ListHead; Entry = Entry->Flink)
+    {
+        struct InfCacheEntry *CacheEntry = CONTAINING_RECORD(Entry, struct InfCacheEntry, ListEntry);
+        WCHAR GuidString[MAX_GUID_STRING_LEN + 1];
+        ULARGE_INTEGER Version;
+
+        pSetupStringFromGuid(&CacheEntry->ClassGuid, GuidString, ARRAYSIZE(GuidString));
+        Version.QuadPart = CacheEntry->DriverVersion;
+        _snwprintf(Line, ARRAYSIZE(Line),
+                   L"%s\t%s\t%s\t%s\t%s\t%s\t%08lx\t%08lx\t%016I64x\t%lx\t%s\r\n",
+                   CacheEntry->InfFile,
+                   CacheEntry->SectionName,
+                   CacheEntry->DriverDescription,
+                   CacheEntry->ProviderName,
+                   CacheEntry->ManufacturerName,
+                   GuidString,
+                   CacheEntry->DriverDate.dwLowDateTime,
+                   CacheEntry->DriverDate.dwHighDateTime,
+                   Version.QuadPart,
+                   CacheEntry->FieldIndex,
+                   CacheEntry->MatchingId);
+        Line[ARRAYSIZE(Line) - 1] = UNICODE_NULL;
+        WriteFile(File, Line, lstrlenW(Line) * sizeof(WCHAR), &Written, NULL);
+    }
+
+    CloseHandle(File);
+    return TRUE;
+}
+
+
 /***********************************************************************
  *		struct InfFileDetails management
  */
@@ -565,6 +904,383 @@ done:
     return Result;
 }
 
+
+static BOOL
+InfCacheGetStringField(
+    IN PINFCONTEXT Context,
+    IN DWORD FieldIndex,
+    OUT LPWSTR *Value)
+{
+    DWORD RequiredSize;
+    BOOL Result;
+
+    *Value = NULL;
+    Result = SetupGetStringFieldW(Context, FieldIndex, NULL, 0, &RequiredSize);
+    if (!Result)
+        return FALSE;
+
+    *Value = HeapAlloc(GetProcessHeap(), 0, RequiredSize * sizeof(WCHAR));
+    if (*Value == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    Result = SetupGetStringFieldW(Context, FieldIndex, *Value, RequiredSize, &RequiredSize);
+    if (!Result)
+    {
+        HeapFree(GetProcessHeap(), 0, *Value);
+        *Value = NULL;
+    }
+
+    return Result;
+}
+
+static BOOL
+InfCacheBuild(
+    IN LPCWSTR InfDir,
+    OUT PLIST_ENTRY CacheList)
+{
+    PVOID Buffer = NULL;
+    LPWSTR FullInfFileName = NULL;
+    DWORD RequiredSize;
+    BOOL Result;
+    BOOL Ret = FALSE;
+    LPCWSTR FileName;
+    LPWSTR pFullFilename;
+
+    RequiredSize = 32768;
+    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    do
+    {
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        Buffer = HeapAlloc(GetProcessHeap(), 0, RequiredSize * sizeof(WCHAR));
+        if (Buffer == NULL)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            goto done;
+        }
+
+        Result = SetupGetInfFileListW(NULL,
+                                      INF_STYLE_WIN4,
+                                      Buffer,
+                                      RequiredSize,
+                                      &RequiredSize);
+    } while (!Result && GetLastError() == ERROR_INSUFFICIENT_BUFFER);
+
+    if (!Result)
+    {
+        if (GetLastError() == ERROR_FILE_NOT_FOUND)
+            Ret = TRUE;
+        goto done;
+    }
+
+    FullInfFileName = HeapAlloc(GetProcessHeap(), 0, (lstrlenW(InfDir) + MAX_PATH + 1) * sizeof(WCHAR));
+    if (FullInfFileName == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        goto done;
+    }
+
+    strcpyW(FullInfFileName, InfDir);
+    pFullFilename = &FullInfFileName[lstrlenW(FullInfFileName)];
+
+    for (FileName = (LPCWSTR)Buffer; *FileName; FileName += strlenW(FileName) + 1)
+    {
+        struct InfFileDetails *InfFileDetails;
+        INFCONTEXT ContextManufacturer, ContextDevice;
+        GUID ClassGuid;
+        LPWSTR ProviderName = NULL;
+        FILETIME DriverDate;
+        DWORDLONG DriverVersion = 0;
+
+        strcpyW(pFullFilename, FileName);
+        InfFileDetails = CreateInfFileDetails(FullInfFileName);
+        if (InfFileDetails == NULL)
+            continue;
+
+        if (!GetVersionInformationFromInfFile(InfFileDetails->hInf,
+                                              &ClassGuid,
+                                              &ProviderName,
+                                              &DriverDate,
+                                              &DriverVersion))
+        {
+            DereferenceInfFile(InfFileDetails);
+            continue;
+        }
+
+        Result = SetupFindFirstLineW(InfFileDetails->hInf, INF_MANUFACTURER, NULL, &ContextManufacturer);
+        while (Result)
+        {
+            LPWSTR ManufacturerName = NULL;
+            WCHAR ManufacturerSection[LINE_LEN + 1];
+
+            if (!InfCacheGetStringField(&ContextManufacturer, 0, &ManufacturerName))
+                goto next_manufacturer;
+
+            if (!SetupGetStringFieldW(&ContextManufacturer,
+                                      1,
+                                      ManufacturerSection,
+                                      LINE_LEN,
+                                      &RequiredSize))
+            {
+                goto next_manufacturer;
+            }
+            ManufacturerSection[RequiredSize] = UNICODE_NULL;
+
+            if (!SetupDiGetActualSectionToInstallW(InfFileDetails->hInf,
+                                                   ManufacturerSection,
+                                                   ManufacturerSection,
+                                                   LINE_LEN,
+                                                   NULL,
+                                                   NULL))
+            {
+                goto next_manufacturer;
+            }
+
+            Result = SetupFindFirstLineW(InfFileDetails->hInf,
+                                         ManufacturerSection,
+                                         NULL,
+                                         &ContextDevice);
+            while (Result)
+            {
+                DWORD FieldCount = SetupGetFieldCount(&ContextDevice);
+                DWORD FieldIndex;
+                LPWSTR SectionName = NULL;
+                LPWSTR DriverDescription = NULL;
+
+                if (!InfCacheGetStringField(&ContextDevice, 1, &SectionName) ||
+                    !InfCacheGetStringField(&ContextDevice, 0, &DriverDescription))
+                {
+                    HeapFree(GetProcessHeap(), 0, SectionName);
+                    HeapFree(GetProcessHeap(), 0, DriverDescription);
+                    goto next_device;
+                }
+
+                for (FieldIndex = 2; FieldIndex <= FieldCount; ++FieldIndex)
+                {
+                    LPWSTR MatchingId = NULL;
+
+                    if (InfCacheGetStringField(&ContextDevice, FieldIndex, &MatchingId))
+                    {
+                        if (!InfCacheAddEntry(CacheList,
+                                              FileName,
+                                              SectionName,
+                                              DriverDescription,
+                                              ProviderName,
+                                              ManufacturerName,
+                                              MatchingId,
+                                              &ClassGuid,
+                                              DriverDate,
+                                              DriverVersion,
+                                              FieldIndex))
+                        {
+                            HeapFree(GetProcessHeap(), 0, MatchingId);
+                            HeapFree(GetProcessHeap(), 0, SectionName);
+                            HeapFree(GetProcessHeap(), 0, DriverDescription);
+                            HeapFree(GetProcessHeap(), 0, ManufacturerName);
+                            HeapFree(GetProcessHeap(), 0, ProviderName);
+                            DereferenceInfFile(InfFileDetails);
+                            goto done;
+                        }
+                        HeapFree(GetProcessHeap(), 0, MatchingId);
+                    }
+                }
+
+next_device:
+                HeapFree(GetProcessHeap(), 0, SectionName);
+                HeapFree(GetProcessHeap(), 0, DriverDescription);
+                Result = SetupFindNextLine(&ContextDevice, &ContextDevice);
+            }
+
+next_manufacturer:
+            HeapFree(GetProcessHeap(), 0, ManufacturerName);
+            Result = SetupFindNextLine(&ContextManufacturer, &ContextManufacturer);
+        }
+
+        HeapFree(GetProcessHeap(), 0, ProviderName);
+        DereferenceInfFile(InfFileDetails);
+    }
+
+    Ret = TRUE;
+
+done:
+    if (!Ret)
+        InfCacheFree(CacheList);
+    HeapFree(GetProcessHeap(), 0, FullInfFileName);
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return Ret;
+}
+
+static BOOL
+InfCacheLoadOrBuild(
+    OUT PLIST_ENTRY CacheList,
+    OUT LPWSTR InfDir,
+    IN DWORD InfDirCch)
+{
+    WCHAR CacheFile[MAX_PATH];
+
+    InfCacheInit(CacheList);
+    if (!InfCacheGetPaths(InfDir, InfDirCch, CacheFile, ARRAYSIZE(CacheFile)))
+        return FALSE;
+
+    if (InfCacheIsCurrent(InfDir, CacheFile) && InfCacheLoad(CacheFile, CacheList))
+        return TRUE;
+
+    InfCacheFree(CacheList);
+    InfCacheInit(CacheList);
+
+    if (!InfCacheBuild(InfDir, CacheList))
+        return FALSE;
+
+    InfCacheSave(CacheFile, CacheList);
+    return TRUE;
+}
+
+static BOOL
+InfCacheAppendPath(
+    IN LPCWSTR InfDir,
+    IN LPCWSTR InfFile,
+    OUT LPWSTR *FullInfFileName)
+{
+    DWORD Length = lstrlenW(InfDir) + lstrlenW(InfFile) + 1;
+
+    *FullInfFileName = HeapAlloc(GetProcessHeap(), 0, Length * sizeof(WCHAR));
+    if (*FullInfFileName == NULL)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    strcpyW(*FullInfFileName, InfDir);
+    strcatW(*FullInfFileName, InfFile);
+    return TRUE;
+}
+
+static BOOL
+InfCacheAddMatchingDrivers(
+    IN PLIST_ENTRY DriverListHead,
+    IN DWORD DriverType,
+    IN LPCWSTR InfDir,
+    IN PLIST_ENTRY CacheList,
+    IN LPWSTR HardwareIDs,
+    IN LPWSTR CompatibleIDs)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = CacheList->Flink; Entry != CacheList; Entry = Entry->Flink)
+    {
+        struct InfCacheEntry *CacheEntry = CONTAINING_RECORD(Entry, struct InfCacheEntry, ListEntry);
+        LPCWSTR CurrentId;
+        DWORD DriverRank;
+        BOOL DriverAlreadyAdded = FALSE;
+
+        if (HardwareIDs)
+        {
+            for (DriverRank = 0, CurrentId = HardwareIDs;
+                 !DriverAlreadyAdded && *CurrentId;
+                 CurrentId += strlenW(CurrentId) + 1, DriverRank++)
+            {
+                if (strcmpiW(CacheEntry->MatchingId, CurrentId) == 0)
+                {
+                    LPWSTR FullInfFileName;
+                    struct InfFileDetails *InfFileDetails;
+                    DWORD Rank = DriverRank + (CacheEntry->FieldIndex == 2 ? 0 : 0x1000 + CacheEntry->FieldIndex - 3);
+
+                    if (!InfCacheAppendPath(InfDir, CacheEntry->InfFile, &FullInfFileName))
+                        return FALSE;
+
+                    InfFileDetails = CreateInfFileDetails(FullInfFileName);
+                    if (InfFileDetails != NULL)
+                    {
+                        AddKnownDriverToList(DriverListHead,
+                                             DriverType,
+                                             &CacheEntry->ClassGuid,
+                                             InfFileDetails,
+                                             FullInfFileName,
+                                             CacheEntry->SectionName,
+                                             CacheEntry->DriverDescription,
+                                             CacheEntry->ProviderName,
+                                             CacheEntry->ManufacturerName,
+                                             CurrentId,
+                                             CacheEntry->DriverDate,
+                                             CacheEntry->DriverVersion,
+                                             Rank);
+                        DereferenceInfFile(InfFileDetails);
+                    }
+                    HeapFree(GetProcessHeap(), 0, FullInfFileName);
+                    DriverAlreadyAdded = TRUE;
+                }
+            }
+        }
+
+        if (CompatibleIDs)
+        {
+            for (DriverRank = 0, CurrentId = CompatibleIDs;
+                 !DriverAlreadyAdded && *CurrentId;
+                 CurrentId += strlenW(CurrentId) + 1, DriverRank++)
+            {
+                if (strcmpiW(CacheEntry->MatchingId, CurrentId) == 0)
+                {
+                    LPWSTR FullInfFileName;
+                    struct InfFileDetails *InfFileDetails;
+                    DWORD Rank = DriverRank + (CacheEntry->FieldIndex == 2 ? 0x2000 : 0x3000 + CacheEntry->FieldIndex - 3);
+
+                    if (!InfCacheAppendPath(InfDir, CacheEntry->InfFile, &FullInfFileName))
+                        return FALSE;
+
+                    InfFileDetails = CreateInfFileDetails(FullInfFileName);
+                    if (InfFileDetails != NULL)
+                    {
+                        AddKnownDriverToList(DriverListHead,
+                                             DriverType,
+                                             &CacheEntry->ClassGuid,
+                                             InfFileDetails,
+                                             FullInfFileName,
+                                             CacheEntry->SectionName,
+                                             CacheEntry->DriverDescription,
+                                             CacheEntry->ProviderName,
+                                             CacheEntry->ManufacturerName,
+                                             CurrentId,
+                                             CacheEntry->DriverDate,
+                                             CacheEntry->DriverVersion,
+                                             Rank);
+                        DereferenceInfFile(InfFileDetails);
+                    }
+                    HeapFree(GetProcessHeap(), 0, FullInfFileName);
+                    DriverAlreadyAdded = TRUE;
+                }
+            }
+        }
+    }
+
+    return TRUE;
+}
+
+static BOOL
+InfCacheBuildDriverInfoList(
+    IN PLIST_ENTRY DriverListHead,
+    IN DWORD DriverType,
+    IN LPWSTR HardwareIDs,
+    IN LPWSTR CompatibleIDs)
+{
+    LIST_ENTRY CacheList;
+    WCHAR InfDir[MAX_PATH];
+    BOOL Ret;
+
+    if (!InfCacheLoadOrBuild(&CacheList, InfDir, ARRAYSIZE(InfDir)))
+        return FALSE;
+
+    Ret = InfCacheAddMatchingDrivers(DriverListHead,
+                                     DriverType,
+                                     InfDir,
+                                     &CacheList,
+                                     HardwareIDs,
+                                     CompatibleIDs);
+    InfCacheFree(&CacheList);
+    return Ret;
+}
+
 /***********************************************************************
  *		SetupDiBuildDriverInfoList (SETUPAPI.@)
  */
@@ -637,6 +1353,18 @@ SetupDiBuildDriverInfoList(
             {
                 SetLastError(ERROR_FILE_NOT_FOUND);
                 goto done;
+            }
+
+            if (!(InstallParams.FlagsEx & DI_FLAGSEX_INSTALLEDDRIVER) &&
+                !(InstallParams.Flags & DI_ENUMSINGLEINF) &&
+                !*InstallParams.DriverPath)
+            {
+                ret = InfCacheBuildDriverInfoList(pDriverListHead,
+                                                  DriverType,
+                                                  HardwareIDs,
+                                                  CompatibleIDs);
+                if (ret)
+                    goto done;
             }
         }
 

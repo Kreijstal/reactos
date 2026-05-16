@@ -41,8 +41,22 @@ LUID LoadDriverPrivilege = {SE_LOAD_DRIVER_PRIVILEGE, 0};
 
 LIST_ENTRY NotificationListHead;
 RTL_RESOURCE NotificationListLock;
+static HANDLE hPnpMutationMutex;
 
 /* FUNCTIONS *****************************************************************/
+
+static VOID
+LockPnpMutation(VOID)
+{
+    WaitForSingleObject(hPnpMutationMutex, INFINITE);
+}
+
+
+static VOID
+UnlockPnpMutation(VOID)
+{
+    ReleaseMutex(hPnpMutationMutex);
+}
 
 DWORD WINAPI
 RpcServerThread(LPVOID lpParameter)
@@ -56,6 +70,9 @@ RpcServerThread(LPVOID lpParameter)
 
     InitializeListHead(&NotificationListHead);
     RtlInitializeResource(&NotificationListLock);
+    hPnpMutationMutex = CreateMutexW(NULL, FALSE, NULL);
+    if (hPnpMutationMutex == NULL)
+        return 0;
 
 #if 0
     /* 2k/XP/2k3-compatible protocol sequence/endpoint */
@@ -217,9 +234,11 @@ ClearDeviceStatus(
     PlugPlayData.DeviceStatus = ulStatus;
     PlugPlayData.DeviceProblem = ulProblem;
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlDeviceStatus,
                                (PVOID)&PlugPlayData,
                                sizeof(PLUGPLAY_CONTROL_STATUS_DATA));
+    UnlockPnpMutation();
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
 
@@ -282,9 +301,11 @@ SetDeviceStatus(
     PlugPlayData.DeviceStatus = ulStatus;
     PlugPlayData.DeviceProblem = ulProblem;
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlDeviceStatus,
                                (PVOID)&PlugPlayData,
                                sizeof(PLUGPLAY_CONTROL_STATUS_DATA));
+    UnlockPnpMutation();
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
 
@@ -315,9 +336,11 @@ DisableDeviceInstance(
     QueryRemoveData.VetoName = pszVetoName;
     QueryRemoveData.NameLength = ulNameLength;
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlQueryAndRemoveDevice,
                                &QueryRemoveData,
                                sizeof(PLUGPLAY_CONTROL_QUERY_REMOVE_DATA));
+    UnlockPnpMutation();
     if (Status == STATUS_NO_SUCH_DEVICE)
     {
         ret = CR_INVALID_DEVNODE;
@@ -2284,12 +2307,17 @@ PNP_SetDeviceRegProp(
 
     DPRINT("Value name: %S\n", lpValueName);
 
+    LockPnpMutation();
+
     if (RegOpenKeyExW(hEnumKey,
                       pDeviceId,
                       0,
                       KEY_SET_VALUE,
                       &hKey))
+    {
+        UnlockPnpMutation();
         return CR_INVALID_DEVNODE;
+    }
 
     if (ulLength == 0)
     {
@@ -2309,6 +2337,7 @@ PNP_SetDeviceRegProp(
     }
 
     RegCloseKey(hKey);
+    UnlockPnpMutation();
 
     DPRINT("PNP_SetDeviceRegProp() done (returns %lx)\n", ret);
 
@@ -2351,6 +2380,8 @@ PNP_GetClassInstance(
                                0);
     if (ret == CR_SUCCESS)
         return ret;
+
+    LockPnpMutation();
 
     ulTransferLength = sizeof(szClassGuid);
     ulDataLength = sizeof(szClassGuid);
@@ -2428,6 +2459,8 @@ done:
     if (hDeviceClassKey != NULL)
         RegCloseKey(hDeviceClassKey);
 
+    UnlockPnpMutation();
+
     return ret;
 }
 
@@ -2456,6 +2489,8 @@ PNP_CreateKey(
 
     if (!IsValidDeviceInstanceID(pszSubKey))
         return CR_INVALID_DEVINST;
+
+    LockPnpMutation();
 
     dwError = RegOpenKeyExW(hEnumKey,
                             pszSubKey,
@@ -2491,6 +2526,8 @@ done:
 
     if (hDeviceKey != NULL)
         RegCloseKey(hDeviceKey);
+
+    UnlockPnpMutation();
 
     return ret;
 }
@@ -2837,9 +2874,11 @@ PNP_RegisterDeviceClassAssociation(
     PlugPlayData.SymbolicLinkName = pszSymLink;
     PlugPlayData.SymbolicLinkNameLength = *pulLength;
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlDeviceClassAssociation,
                                &PlugPlayData,
                                sizeof(PLUGPLAY_CONTROL_CLASS_ASSOCIATION_DATA));
+    UnlockPnpMutation();
     if (NT_SUCCESS(Status))
     {
         *pulLength = PlugPlayData.SymbolicLinkNameLength;
@@ -2883,9 +2922,11 @@ PNP_UnregisterDeviceClassAssociation(
     PlugPlayData.SymbolicLinkName = pszInterfaceDevice;
     PlugPlayData.SymbolicLinkNameLength = wcslen(pszInterfaceDevice) + 1;
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlDeviceClassAssociation,
                                &PlugPlayData,
                                sizeof(PLUGPLAY_CONTROL_CLASS_ASSOCIATION_DATA));
+    UnlockPnpMutation();
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
 
@@ -3068,6 +3109,8 @@ PNP_SetClassRegProp(
             return CR_INVALID_PROPERTY;
     }
 
+    LockPnpMutation();
+
     lError = RegOpenKeyExW(hClassKey,
                            pszClassGuid,
                            0,
@@ -3118,6 +3161,8 @@ done:
 
     if (hInstKey != NULL)
         RegCloseKey(hInstKey);
+
+    UnlockPnpMutation();
 
     return ret;
 }
@@ -3323,10 +3368,18 @@ PNP_CreateDevInst(
 
     if (ulFlags & CM_CREATE_DEVNODE_GENERATE_ID)
     {
+        LockPnpMutation();
         ret = GenerateDeviceID(pszDeviceID,
                                ulLength);
         if (ret != CR_SUCCESS)
+        {
+            UnlockPnpMutation();
             return ret;
+        }
+    }
+    else
+    {
+        LockPnpMutation();
     }
 
     /* Try to open the device instance key */
@@ -3389,6 +3442,8 @@ PNP_CreateDevInst(
 done:
     if (hKey)
         RegCloseKey(hKey);
+
+    UnlockPnpMutation();
 
     DPRINT("PNP_CreateDevInst() done (returns %lx)\n", ret);
 
@@ -3550,6 +3605,8 @@ PNP_DeviceInstanceAction(
            hBinding, ulMajorAction, ulMinorAction,
            pszDeviceInstance1, pszDeviceInstance2);
 
+    LockPnpMutation();
+
     switch (ulMajorAction)
     {
         case PNP_DEVINST_SETUP:
@@ -3570,6 +3627,8 @@ PNP_DeviceInstanceAction(
             DPRINT1("Unknown device action %lu: not implemented\n", ulMajorAction);
             ret = CR_CALL_NOT_IMPLEMENTED;
     }
+
+    UnlockPnpMutation();
 
     DPRINT("PNP_DeviceInstanceAction() done (returns %lx)\n", ret);
 
@@ -3678,17 +3737,20 @@ PNP_SetDeviceProblem(
     if (!IsValidDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVINST;
 
+    LockPnpMutation();
+
     ret = GetDeviceStatus(pDeviceID,
                           &ulOldStatus,
                           &ulOldProblem);
     if (ret != CR_SUCCESS)
-        return ret;
+        goto done;
 
     if (((ulFlags & CM_SET_DEVNODE_PROBLEM_OVERRIDE) == 0) &&
         (ulOldProblem != 0) &&
         (ulOldProblem != ulProblem))
     {
-        return CR_FAILURE;
+        ret = CR_FAILURE;
+        goto done;
     }
 
     if (ulProblem == 0)
@@ -3703,6 +3765,9 @@ PNP_SetDeviceProblem(
                               DN_HAS_PROBLEM,
                               ulProblem);
     }
+
+done:
+    UnlockPnpMutation();
 
     return ret;
 }
@@ -3814,6 +3879,8 @@ PNP_AddID(
     DPRINT("PNP_AddID(%p %S %S 0x%08lx)\n",
            hBinding, pszDeviceID, pszID, ulFlags);
 
+    LockPnpMutation();
+
     if (RegOpenKeyExW(hEnumKey,
                       pszDeviceID,
                       0,
@@ -3821,6 +3888,7 @@ PNP_AddID(
                       &hDeviceKey) != ERROR_SUCCESS)
     {
         DPRINT("Failed to open the device key!\n");
+        UnlockPnpMutation();
         return CR_INVALID_DEVNODE;
     }
 
@@ -3894,6 +3962,8 @@ Done:
     if (pszDeviceIdList)
         HeapFree(GetProcessHeap(), 0, pszDeviceIdList);
 
+    UnlockPnpMutation();
+
     DPRINT("PNP_AddID() done (returns %lx)\n", ret);
 
     return ret;
@@ -3962,9 +4032,11 @@ PNP_QueryRemove(
     PlugPlayData.NameLength = ulNameLength;
 //    PlugPlayData.Flags =
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlQueryAndRemoveDevice,
                                &PlugPlayData,
                                sizeof(PlugPlayData));
+    UnlockPnpMutation();
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
 
@@ -4010,9 +4082,11 @@ PNP_RequestDeviceEject(
     PlugPlayData.NameLength = ulNameLength;
 //    PlugPlayData.Flags =
 
+    LockPnpMutation();
     Status = NtPlugPlayControl(PlugPlayControlQueryAndRemoveDevice,
                                &PlugPlayData,
                                sizeof(PlugPlayData));
+    UnlockPnpMutation();
     if (!NT_SUCCESS(Status))
         ret = NtStatusToCrError(Status);
 
@@ -4358,6 +4432,8 @@ PNP_AddEmptyLogConf(
     if (!IsValidDeviceInstanceID(pDeviceID) || IsRootDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVNODE;
 
+    LockPnpMutation();
+
     ret = OpenConfigurationKey(pDeviceID,
                                ulFlags & LOG_CONF_BITS,
                                &hConfigKey);
@@ -4540,6 +4616,8 @@ done:
 
     DPRINT("PNP_AddEmptyLogConf() returns %lu\n", ret);
 
+    UnlockPnpMutation();
+
     return ret;
 }
 
@@ -4569,6 +4647,8 @@ PNP_FreeLogConf(
 
     if (!IsValidDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVNODE;
+
+    LockPnpMutation();
 
     ret = OpenConfigurationKey(pDeviceID,
                                ulLogConfType,
@@ -4680,6 +4760,8 @@ done:
         RegCloseKey(hConfigKey);
 
     DPRINT("PNP_FreeLogConf() returns %lu\n", ret);
+
+    UnlockPnpMutation();
 
     return ret;
 }

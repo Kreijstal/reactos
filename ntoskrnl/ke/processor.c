@@ -40,6 +40,21 @@ ULONG KeBootprocSpecified = 0;
 
 /* FUNCTIONS *****************************************************************/
 
+static ULONG
+KiCountAffinityBits(
+    _In_ KAFFINITY Affinity)
+{
+    ULONG Count = 0;
+
+    while (Affinity != 0)
+    {
+        Count += Affinity & 1;
+        Affinity >>= 1;
+    }
+
+    return Count;
+}
+
 KAFFINITY
 NTAPI
 KeQueryActiveProcessors(VOID)
@@ -47,11 +62,75 @@ KeQueryActiveProcessors(VOID)
     return KeActiveProcessors;
 }
 
+ULONG
+NTAPI
+KeQueryMaximumProcessorCount(VOID)
+{
+#ifdef CONFIG_SMP
+    return KeMaximumProcessors;
+#else
+    return 1;
+#endif
+}
+
+ULONG
+NTAPI
+KeQueryActiveProcessorCountEx(
+    _In_ USHORT GroupNumber)
+{
+    if ((GroupNumber != 0) && (GroupNumber != ALL_PROCESSOR_GROUPS))
+    {
+        return 0;
+    }
+
+    return KiCountAffinityBits(KeActiveProcessors);
+}
+
+ULONG
+NTAPI
+KeQueryMaximumProcessorCountEx(
+    _In_ USHORT GroupNumber)
+{
+    if ((GroupNumber != 0) && (GroupNumber != ALL_PROCESSOR_GROUPS))
+    {
+        return 0;
+    }
+
+    return KeQueryMaximumProcessorCount();
+}
+
+USHORT
+NTAPI
+KeQueryActiveGroupCount(VOID)
+{
+    return 1;
+}
+
+USHORT
+NTAPI
+KeQueryMaximumGroupCount(VOID)
+{
+    return 1;
+}
+
+KAFFINITY
+NTAPI
+KeQueryGroupAffinity(
+    _In_ USHORT GroupNumber)
+{
+    if (GroupNumber != 0)
+    {
+        return 0;
+    }
+
+    return KeActiveProcessors;
+}
+
 /**
  * Retrieves the number of the current processor.
  *
  * \param ProcessorNumber Pointer to a PROCESSOR_NUMBER structure that receives the processor number.
- * 
+ *
  * \return NTSTATUS The status of the operation.
  */
 NTSTATUS
