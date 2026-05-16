@@ -550,7 +550,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     //
     // Set the new limit
     //
-    Thread->StackLimit = (ULONG_PTR)MiPteToAddress(NewLimitPte);
+    Thread->StackLimit = (volatile PVOID)MiPteToAddress(NewLimitPte);
     return STATUS_SUCCESS;
 }
 

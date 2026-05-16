@@ -49,7 +49,8 @@ static int load_string(HINSTANCE hModule, UINT resId, LPWSTR pwszBuffer, INT cMa
  *
  * @implemented
  */
-LONG
+LSTATUS
+WINAPI
 RegLoadMUIStringW(IN HKEY hKey,
                   IN LPCWSTR pszValue  OPTIONAL,
                   OUT LPWSTR pszOutBuf,

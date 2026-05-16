@@ -342,6 +342,9 @@ SmpConfigureMemoryMgmt(IN PWSTR ValueName,
                        IN PVOID Context,
                        IN PVOID EntryContext)
 {
+    if ((ValueType == REG_SZ) && (ValueData != NULL) && (*(PWSTR)ValueData == UNICODE_NULL))
+        return STATUS_SUCCESS;
+
     /* Save this is into a list */
     return SmpSaveRegistryValue(EntryContext, ValueData, NULL, TRUE);
 }

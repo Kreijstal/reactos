@@ -33,7 +33,7 @@ Abstract:
 //
 
 #define CollectWriteStats(VCB,OPEN_TYPE,BYTE_COUNT) {                                        \
-    PFILESYSTEM_STATISTICS Stats = &(VCB)->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common; \
+    PFILESYSTEM_STATISTICS Stats = &(VCB)->Statistics[FatGetCurrentProcessorIndex() % FatData.NumberProcessors].Common; \
     if (((OPEN_TYPE) == UserFileOpen)) {                                                     \
         Stats->UserFileWrites += 1;                                                          \
         Stats->UserFileWriteBytes += (ULONG)(BYTE_COUNT);                                    \
@@ -790,7 +790,7 @@ Return Value:
             //  Keep track of meta-data disk ios.
             //
 
-            Vcb->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common.MetaDataDiskWrites += Vcb->Bpb.Fats;
+            Vcb->Statistics[FatGetCurrentProcessorIndex() % FatData.NumberProcessors].Common.MetaDataDiskWrites += Vcb->Bpb.Fats;
 
             //
             //  FatMultipleAsync only updates the master IRP status from a
@@ -3077,5 +3077,4 @@ Return Value:
     ExFreePool( Parameter );
 
 }
-
 

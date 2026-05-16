@@ -129,6 +129,13 @@ static PUCHAR FsInformationClassStrings[] = {
  */
 
 #define DBG_BUF_LEN 0x100
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+#define Ext2GetCurrentProcessorNumber() KeGetCurrentProcessorIndex()
+#else
+#define Ext2GetCurrentProcessorNumber() KeGetCurrentProcessorNumber()
+#endif
+
 VOID
 Ext2Printf(
     PCHAR DebugMessage,
@@ -149,7 +156,7 @@ Ext2Printf(
     _vsnprintf(&Buffer[0], DBG_BUF_LEN, DebugMessage, ap);
 
     DbgPrint(DRIVER_NAME":~%d: %2.2d:%2.2d:%2.2d:%3.3d %8.8x:   %s",
-             KeGetCurrentProcessorNumber(),
+             Ext2GetCurrentProcessorNumber(),
              TimeFields.Hour, TimeFields.Minute,
              TimeFields.Second, TimeFields.Milliseconds,
              PsGetCurrentThread(), Buffer);
@@ -176,7 +183,7 @@ Ext2NiPrintf(
     _vsnprintf(&Buffer[0], 0x100, DebugMessage, ap);
 
     DbgPrint(DRIVER_NAME":~%d: %2.2d:%2.2d:%2.2d:%3.3d %8.8x: %s",
-             KeGetCurrentProcessorNumber(),
+             Ext2GetCurrentProcessorNumber(),
              TimeFields.Hour, TimeFields.Minute,
              TimeFields.Second, TimeFields.Milliseconds,
              PsGetCurrentThread(), Buffer);

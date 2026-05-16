@@ -3164,7 +3164,7 @@ NTAPI
 NtGetCurrentProcessorNumber(VOID)
 {
     /* Just use Ke */
-    return KeGetCurrentProcessorNumber();
+    return KiGetCurrentProcessorNumber();
 }
 
 #undef ExGetPreviousMode
