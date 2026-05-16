@@ -822,6 +822,11 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     }
 
     Status = NtfsLookupFileAt(Vcb, &File, CaseSensitive, &FileRecord, &MFTIndex, CurrentDir);
+    NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: dirfind lookup returned 0x%lx file=%wZ dir=%I64u mft=%I64u\n",
+                Status,
+                &File,
+                CurrentDir,
+                MFTIndex);
     if (!NT_SUCCESS(Status))
     {
         return Status;
@@ -847,7 +852,16 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
         ReleaseAttributeContext(DataContext);
     }
 
+    NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: make fcb begin file=%wZ mft=%I64u record=%p\n",
+                &File,
+                MFTIndex,
+                FileRecord);
     Status = NtfsMakeFCBFromDirEntry(Vcb, DirectoryFcb, &File, Colon, FileRecord, MFTIndex, FoundFCB);
+    NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: make fcb returned 0x%lx file=%wZ mft=%I64u fcb=%p\n",
+                Status,
+                &File,
+                MFTIndex,
+                FoundFCB ? *FoundFCB : NULL);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
 
     return Status;

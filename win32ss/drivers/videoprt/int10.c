@@ -794,6 +794,12 @@ IntInitializeInt10(VOID)
     /* We should only do that for CSRSS */
     ASSERT(PsGetCurrentProcess() == (PEPROCESS)CsrProcess);
 #ifdef _M_IX86
+    if (!VideoPortDisableX86Emulator)
+    {
+        VDMAddressSpaceInitialized = TRUE;
+        return STATUS_SUCCESS;
+    }
+
     return IntInitializeVideoAddressSpace();
 #else
     return STATUS_SUCCESS;

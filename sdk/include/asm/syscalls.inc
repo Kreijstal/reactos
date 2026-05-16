@@ -118,7 +118,12 @@ MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
     int 3
 ENDM
 #else
+#if (defined(NTDDI_VERSION) && (NTDDI_VERSION >= NTDDI_WIN8)) || \
+    (defined(_WIN32_WINNT) && (_WIN32_WINNT >= 0x0602))
+#define KUSER_SHARED_SYSCALL HEX(7ffe0308)
+#else
 #define KUSER_SHARED_SYSCALL HEX(7ffe0300)
+#endif
 #define KGDT_R0_CODE 8
 MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
     StackBytes = 4 * ArgCount
