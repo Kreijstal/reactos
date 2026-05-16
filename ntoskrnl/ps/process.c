@@ -1522,6 +1522,10 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
     PSTRACE(PS_PROCESS_DEBUG,
             "ProcessFlags: %lx ThreadFlags: %lx\n", ProcessFlags, ThreadFlags);
 
+    (void)TokenHandle;
+    (void)TebAddressPtr;
+    (void)Thread;
+
     RtlInitUnicodeString(&ImageName, NULL);
     RtlInitUnicodeString(&CapturedImageName, NULL);
 

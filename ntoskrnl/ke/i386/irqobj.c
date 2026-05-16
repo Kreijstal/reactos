@@ -461,9 +461,6 @@ KeConnectInterrupt(IN PKINTERRUPT Interrupt)
             /* Check if this is the first chain */
             if (Dispatch.Type != ChainConnect)
             {
-                /* This is not supported */
-                ASSERT(Dispatch.Interrupt->Mode != Latched);
-
                 /* Setup the chainned handler */
                 KiConnectVectorToInterrupt(Dispatch.Interrupt, ChainConnect);
             }
