@@ -27,15 +27,16 @@ ULONG ExPushLockSpinCount = 0;
 #define InterlockedAndPointer(ptr,val) InterlockedAnd((PLONG)ptr,(LONG)val)
 #endif
 
-#if DBG
 /*
- * Per-thread owner tracking for EX_PUSH_LOCK. Debug builds only.
+ * Per-thread owner tracking for EX_PUSH_LOCK.
  *
- * The tracking array lives in ETHREAD.HeldPushLocks[] and exists purely
- * so that ASSERTs in code paths that used to compare against
+ * The tracking array lives in ETHREAD.HeldPushLocks[] and exists so
+ * that ASSERTs in code paths that used to compare against
  * KGUARDED_MUTEX.Owner can be written in terms of
  * ExPushLockIsOwnedByCurrentThread() on NT6+ where AddressCreationLock
- * became an EX_PUSH_LOCK (which has no owner field).
+ * became an EX_PUSH_LOCK (which has no owner field). Always-on:
+ * win32k user-mode callouts (KeUserModeCallback) nest deeply enough
+ * that ownership has to be queryable in any build, not just DBG.
  *
  * A thread can legitimately hold a shared push-lock more than once
  * (ExfAcquirePushLockShared is effectively recursion-tolerant on the
@@ -44,16 +45,11 @@ ULONG ExPushLockSpinCount = 0;
  * already holds would be a real bug, but we don't assert here since
  * the array cannot tell exclusive from shared slots.
  *
- * Overflow policy: if the eight-slot array is full we stop tracking
- * silently. Overflow loses fidelity for the helper (it may return
- * FALSE for a lock that is in fact held), but it does not affect the
- * lock's correctness and never trips a false ASSERT because the
- * affected assertions are always OR'd with another verifiable
- * condition.
- *
- * These helpers are exposed via exfuncs.h (DBG-gated) because the
- * push-lock acquire/release fast paths live in internal/ex.h as
- * FORCEINLINE wrappers and need to call them too.
+ * Overflow policy: if the array is full we stop tracking silently.
+ * Overflow loses fidelity for the helper (it may return FALSE for a
+ * lock that is in fact held), but it does not affect the lock's
+ * correctness and never trips a false ASSERT because the affected
+ * assertions are always OR'd with another verifiable condition.
  */
 VOID
 NTAPI
@@ -121,9 +117,7 @@ ExpTrackReleasePushLock(PEX_PUSH_LOCK PushLock)
  * @return TRUE if this thread has recorded the push-lock as held,
  *         FALSE otherwise (including cases where tracking overflowed).
  *
- * @remarks Debug-build only. Release builds resolve this identifier
- *          via a macro that evaluates to TRUE so assertion sites
- *          compile cleanly. ReactOS-internal; never exported.
+ * @remarks ReactOS-internal; never exported.
  *
  *--*/
 BOOLEAN
@@ -143,7 +137,6 @@ ExPushLockIsOwnedByCurrentThread(PEX_PUSH_LOCK PushLock)
 
     return FALSE;
 }
-#endif /* DBG */
 
 /*++
  * @name ExpInitializePushLocks
@@ -613,10 +606,8 @@ ExfAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
                 continue;
             }
 
-#if DBG
-            /* Record ownership for debug assertions */
+            /* Record ownership for assertions */
             ExpTrackAcquirePushLock(PushLock);
-#endif
             /* Break out of the loop */
             break;
         }
@@ -804,10 +795,8 @@ ExfAcquirePushLockShared(PEX_PUSH_LOCK PushLock)
                 continue;
             }
 
-#if DBG
-            /* Record ownership for debug assertions */
+            /* Record ownership for assertions */
             ExpTrackAcquirePushLock(PushLock);
-#endif
             /* Break out of the loop */
             break;
         }
@@ -941,10 +930,8 @@ ExfReleasePushLock(PEX_PUSH_LOCK PushLock)
     /* Sanity check */
     ASSERT(OldValue.Locked);
 
-#if DBG
     /* Drop our ownership record before the lock word flips */
     ExpTrackReleasePushLock(PushLock);
-#endif
 
     /* Start main loop */
     while (TRUE)
@@ -1089,10 +1076,8 @@ ExfReleasePushLockShared(PEX_PUSH_LOCK PushLock)
     EX_PUSH_LOCK OldValue = *PushLock, NewValue, WakeValue;
     PEX_PUSH_LOCK_WAIT_BLOCK WaitBlock, LastWaitBlock;
 
-#if DBG
     /* Drop our ownership record before the lock word flips */
     ExpTrackReleasePushLock(PushLock);
-#endif
 
     /* Check if someone is waiting on the lock */
     while (!OldValue.Waiting)
@@ -1229,10 +1214,8 @@ ExfReleasePushLockExclusive(PEX_PUSH_LOCK PushLock)
     EX_PUSH_LOCK NewValue, WakeValue;
     EX_PUSH_LOCK OldValue = *PushLock;
 
-#if DBG
     /* Drop our ownership record before the lock word flips */
     ExpTrackReleasePushLock(PushLock);
-#endif
 
     /* Loop until we can change */
     for (;;)
