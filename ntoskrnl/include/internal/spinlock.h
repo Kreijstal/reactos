@@ -81,6 +81,12 @@ KxReleaseSpinLock(
     /* Make sure that the threads match */
     if (((KSPIN_LOCK)KeGetCurrentThread() | 1) != *SpinLock)
     {
+        DbgPrint("SPIN_LOCK_NOT_OWNED: lock=%p value=%p current=%p caller=%p\n",
+                 SpinLock,
+                 (PVOID)*SpinLock,
+                 KeGetCurrentThread(),
+                 _ReturnAddress());
+
         /* They don't, bugcheck */
         KeBugCheckEx(SPIN_LOCK_NOT_OWNED, (ULONG_PTR)SpinLock, 0, 0, 0);
     }

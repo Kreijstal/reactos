@@ -567,7 +567,7 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    DPRINT1("NtfsQueryInformation(%p)\n", IrpContext);
+    NTFS_TRACE("NtfsQueryInformation(%p)\n", IrpContext);
 
     Irp = IrpContext->Irp;
     Stack = IrpContext->Stack;
@@ -833,6 +833,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     // set the attribute data length
     DPRINT("NtfsSetEndOfFile: calling SetAttributeDataLength for MFT %I64u size %I64u\n", Fcb->MFTIndex, NewFileSize->QuadPart);
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, NewFileSize);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof after set attribute 0x%lx\n", Status);
     DPRINT("NtfsSetEndOfFile: SetAttributeDataLength returned 0x%lx\n", Status);
     if (!NT_SUCCESS(Status))
     {
@@ -844,7 +845,9 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     // now we need to update this file's size in every directory index entry that references it
     // TODO: expand to work with every filename / hardlink stored in the file record.
     DPRINT("NtfsSetEndOfFile: calling GetBestFileNameFromRecord\n");
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof get filename begin\n");
     FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof get filename returned %p\n", FileNameAttribute);
     if (FileNameAttribute == NULL)
     {
         DPRINT1("Unable to find FileName attribute associated with file!\n");
@@ -860,6 +863,10 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     FileName.MaximumLength = FileName.Length;
 
     AllocationSize = AttributeAllocatedLength(DataContext->pRecord);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof update filename begin parent=%I64u name=%wZ alloc=%I64u\n",
+                ParentMFTId,
+                &FileName,
+                AllocationSize);
 
     DPRINT("NtfsSetEndOfFile: calling UpdateFileNameRecord parent=%I64u allocSize=%I64u\n", ParentMFTId, AllocationSize);
     Status = UpdateFileNameRecord(Fcb->Vcb,
@@ -869,12 +876,17 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                                   NewFileSize->QuadPart,
                                   AllocationSize,
                                   CaseSensitive);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof update filename returned 0x%lx\n", Status);
     DPRINT("NtfsSetEndOfFile: UpdateFileNameRecord returned 0x%lx\n", Status);
 
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof release attr begin ctx=%p\n", DataContext);
     ReleaseAttributeContext(DataContext);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof release attr done\n");
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof free file record done\n");
 
     DPRINT("NtfsSetEndOfFile: returning 0x%lx\n", Status);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof returning 0x%lx\n", Status);
     return Status;
 }
 
@@ -1235,6 +1247,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                       Irp->Flags,
                                       BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                       &EndOfFileInfo->EndOfFile);
+            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: setinfo eof returned 0x%lx\n", Status);
             break;
 
         case FileDispositionInformation:
@@ -1357,7 +1370,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     if (RenamePath.Buffer != NULL)
         ExFreePoolWithTag(RenamePath.Buffer, TAG_NTFS);
 
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: setinfo release main begin\n");
     ExReleaseResourceLite(&Fcb->MainResource);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: setinfo release main done\n");
 
     if (NT_SUCCESS(Status))
         Irp->IoStatus.Information =
@@ -1366,6 +1381,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
         Irp->IoStatus.Information = 0;
 
     DPRINT("NtfsSetInformation: returning 0x%lx\n", Status);
+    NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: setinfo returning 0x%lx info=%Iu\n",
+                Status,
+                Irp->IoStatus.Information);
     return Status;
 }
 /* EOF */

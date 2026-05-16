@@ -34,6 +34,8 @@
 #include "smb2rdr.h"
 #include "upcall.h"
 
+#define SMB2RDR_STAT_TYPE_DIRECTORY 1
+
 typedef enum _SMB2RDR_STORAGE_TYPE_CODES {
     NTC_SMB2RDR_DEVICE_EXTENSION = (NODE_TYPE_CODE)0xFC10,
 } SMB2RDR_STORAGE_TYPE_CODES;
@@ -65,12 +67,9 @@ typedef struct _SMB2RDR_V_NET_ROOT_EXTENSION {
     (((V) == NULL) ? NULL : (PSMB2RDR_V_NET_ROOT_EXTENSION)((V)->Context))
 
 /* FCB extension: tracks the opaque daemon file handle associated with the
- * underlying libsmb2 smb2fh/smb2dir.  One entry per FCB is sufficient for
- * the current non-collapsing open model: every CreateFile() produces a
- * fresh FCB (MRxShouldTryToCollapseThisOpen returns NOT_IMPLEMENTED), so
- * the FCB extension cleanly maps 1:1 to a daemon handle for the lifetime
- * of the open chain.  FOBX extension is unused today; when sharing opens
- * across collapsed FCBs is introduced, the per-handle state moves there. */
+ * underlying libsmb2 smb2fh/smb2dir.  RDBSS may collapse compatible opens
+ * onto the same SRV_OPEN, so this remains per-FCB/SRV_OPEN state while each
+ * caller still gets its own FOBX from RxCreateNetFobx. */
 typedef struct _SMB2RDR_FCB_EXTENSION {
     ULONG64        DaemonFileHandle;   /* 0 if no daemon-side open */
     BOOLEAN        IsDirectory;
@@ -577,10 +576,10 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
         pathBytes -= sizeof(WCHAR);
     }
 
-    DPRINT1("SMB2RDR: MRxCreate path=\"%wZ\" opts=0x%lx disp=%lu "
-            "access=0x%lx vnet=0x%llx\n",
-            relName, params->CreateOptions, params->Disposition,
-            params->DesiredAccess, vNetExt->DaemonHandle);
+    DPRINT("SMB2RDR: MRxCreate path=\"%wZ\" opts=0x%lx disp=%lu "
+           "access=0x%lx vnet=0x%llx\n",
+           relName, params->CreateOptions, params->Disposition,
+           params->DesiredAccess, vNetExt->DaemonHandle);
 
     inLen = (ULONG)sizeof(OP_CREATE_IN) + pathBytes;
     inBuf = ExAllocatePoolWithTag(NonPagedPool, inLen, 'rCcS');
@@ -714,10 +713,58 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
     status = STATUS_SUCCESS;
     RxContext->CurrentIrp->IoStatus.Status = status;
 
-    DPRINT1("SMB2RDR: MRxCreate success fcb_handle=0x%llx info=%lu "
-            "is_dir=%lu\n",
-            out.FileHandle, out.Information, out.IsDirectory);
+    DPRINT("SMB2RDR: MRxCreate success fcb_handle=0x%llx info=%lu "
+           "is_dir=%lu\n",
+           out.FileHandle, out.Information, out.IsDirectory);
     return status;
+}
+
+static NTSTATUS NTAPI
+smb2rdr_ShouldTryToCollapseThisOpen(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_SRV_OPEN SrvOpen;
+
+    PAGED_CODE();
+
+    if (RxContext->pRelevantSrvOpen == NULL)
+        return STATUS_SUCCESS;
+
+    SrvOpen = RxContext->pRelevantSrvOpen;
+
+    if (SrvOpen->pVNetRoot != RxContext->Create.pVNetRoot)
+        return STATUS_MORE_PROCESSING_REQUIRED;
+
+    if (BooleanFlagOn(SrvOpen->CreateOptions ^
+                      RxContext->Create.NtCreateParameters.CreateOptions,
+                      FILE_OPEN_REPARSE_POINT))
+    {
+        return STATUS_MORE_PROCESSING_REQUIRED;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NTAPI
+smb2rdr_CollapseOpen(IN OUT PRX_CONTEXT RxContext)
+{
+    PMRX_FCB Fcb = RxContext->pFcb;
+    PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
+
+    PAGED_CODE();
+
+    if (SrvOpen == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!RxIsFcbAcquiredExclusive(Fcb)) {
+        ASSERT(!RxIsFcbAcquiredShared(Fcb));
+        RxAcquireExclusiveFcbResourceInMRx(Fcb);
+    }
+
+    RxContext->pFobx = RxCreateNetFobx(RxContext, SrvOpen);
+    if (RxContext->pFobx == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    return STATUS_SUCCESS;
 }
 
 static NTSTATUS NTAPI
@@ -753,8 +800,8 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
     fcbExt->DaemonFileHandle = 0;
     fcbExt->DeleteOnClose    = FALSE;
 
-    DPRINT1("SMB2RDR: MRxCloseSrvOpen handle=0x%llx is_dir=%u delete=%u\n",
-            handle, isDir, wantUnlink);
+    DPRINT("SMB2RDR: MRxCloseSrvOpen handle=0x%llx is_dir=%u delete=%u\n",
+           handle, isDir, wantUnlink);
 
     RtlZeroMemory(&cin, sizeof(cin));
     cin.FileHandle  = handle;
@@ -928,13 +975,13 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
     RtlZeroMemory(opOutBuf, sizeof(OP_READDIR_OUT));
     opOut = (POP_READDIR_OUT)opOutBuf;
 
-    DPRINT1("SMB2RDR: MRxQueryDirectory handle=0x%llx class=%d buf=%d "
-            "restart=%u initial=%u single=%u filter=%wZ\n",
-            fcbExt->DaemonFileHandle, (int)infoClass, userBufLen,
-            (unsigned)RxContext->QueryDirectory.RestartScan,
-            (unsigned)RxContext->QueryDirectory.InitialQuery,
-            (unsigned)RxContext->QueryDirectory.ReturnSingleEntry,
-            filter);
+    DPRINT("SMB2RDR: MRxQueryDirectory handle=0x%llx class=%d buf=%d "
+           "restart=%u initial=%u single=%u filter=%wZ\n",
+           fcbExt->DaemonFileHandle, (int)infoClass, userBufLen,
+           (unsigned)RxContext->QueryDirectory.RestartScan,
+           (unsigned)RxContext->QueryDirectory.InitialQuery,
+           (unsigned)RxContext->QueryDirectory.ReturnSingleEntry,
+           filter);
 
     bridgeStatus = SmbRdrIssueUpcall(
         SMB2D_OP_READDIR,
@@ -1008,8 +1055,8 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
 
     RxContext->Info.LengthRemaining = userBufLen - (LONG)opOut->BytesWritten;
 
-    DPRINT1("SMB2RDR: MRxQueryDirectory ok bytes=%lu entries=%lu flags=0x%lx\n",
-            opOut->BytesWritten, opOut->EntryCount, opOut->Flags);
+    DPRINT("SMB2RDR: MRxQueryDirectory ok bytes=%lu entries=%lu flags=0x%lx\n",
+           opOut->BytesWritten, opOut->EntryCount, opOut->Flags);
 
     status = STATUS_SUCCESS;
 
@@ -1546,8 +1593,17 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
         return STATUS_SUCCESS;
     }
 
-    RtlZeroMemory(&in, sizeof(in));
     RtlZeroMemory(&out, sizeof(out));
+
+    if (fcbExt->IsDirectory) {
+        out.Stat.Type       = SMB2RDR_STAT_TYPE_DIRECTORY;
+        out.Stat.NLink      = 1;
+        out.Stat.Size       = 0;
+        out.Stat.Attributes = FILE_ATTRIBUTE_DIRECTORY;
+        goto HaveStat;
+    }
+
+    RtlZeroMemory(&in, sizeof(in));
     in.FileHandle = fcbExt->DaemonFileHandle;
 
     DPRINT("SMB2RDR: MRxQueryFileInfo class=%d fh=0x%llx buflen=%d\n",
@@ -1576,6 +1632,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
         return STATUS_UNEXPECTED_NETWORK_ERROR;
     }
 
+HaveStat:
     /* Stamp DIRECTORY if the daemon told us and the FCB agrees — old
      * smb2d builds may only set Type=1 without translating it to the NT
      * attribute bitmap. */
@@ -2055,10 +2112,8 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxFinalizeVNetRoot    = smb2rdr_FinalizeVNetRoot;
 
     smb2rdr_ops.MRxCreate                     = smb2rdr_Create;
-    smb2rdr_ops.MRxCollapseOpen               = smb2rdr_Unimplemented;
-    /* Returning failure here tells rdbss "don't collapse, open fresh".
-     * rdbss requires this slot non-NULL or asserts in RxSearchForCollapsibleOpen. */
-    smb2rdr_ops.MRxShouldTryToCollapseThisOpen = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxCollapseOpen               = smb2rdr_CollapseOpen;
+    smb2rdr_ops.MRxShouldTryToCollapseThisOpen = smb2rdr_ShouldTryToCollapseThisOpen;
     smb2rdr_ops.MRxCloseSrvOpen      = smb2rdr_CloseSrvOpen;
     smb2rdr_ops.MRxFlush             = smb2rdr_Flush;
     smb2rdr_ops.MRxDeallocateForFcb  = smb2rdr_DeallocateForFcb;

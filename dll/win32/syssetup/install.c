@@ -1077,7 +1077,7 @@ PreprocessUnattend(
 }
 
 static BOOL
-CommonInstall(VOID)
+CommonInstall(IN BOOL WaitForPnp)
 {
     HANDLE hThread = NULL;
     DWORD dwThreadId = 0;
@@ -1121,7 +1121,7 @@ CommonInstall(VOID)
         goto Exit;
     }
 
-    if (CMP_WaitNoPendingInstallEvents(INFINITE) != WAIT_OBJECT_0)
+    if (WaitForPnp && CMP_WaitNoPendingInstallEvents(INFINITE) != WAIT_OBJECT_0)
     {
         FatalError("CMP_WaitNoPendingInstallEvents() failed!\n");
         goto Exit;
@@ -1145,16 +1145,44 @@ Exit:
     return bResult;
 }
 
-static
-DWORD
-InstallLiveCD(VOID)
+static BOOL
+StartUserinit(VOID)
 {
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInformation;
     BOOL bRes;
 
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    bRes = CreateProcessW(L"userinit.exe",
+                          NULL,
+                          NULL,
+                          NULL,
+                          FALSE,
+                          0,
+                          NULL,
+                          NULL,
+                          &StartupInfo,
+                          &ProcessInformation);
+    if (!bRes)
+        return FALSE;
+
+    CloseHandle(ProcessInformation.hThread);
+    CloseHandle(ProcessInformation.hProcess);
+    return TRUE;
+}
+
+static
+DWORD
+InstallLiveCD(VOID)
+{
+    BOOL bRes;
+
     PreprocessUnattend(FALSE);
-    if (!CommonInstall())
+    if (!CommonInstall(FALSE))
+        goto error;
+
+    if (!StartUserinit())
         goto error;
 
     /* Install the TCP/IP protocol driver */
@@ -1191,25 +1219,6 @@ InstallLiveCD(VOID)
     _SEH2_END;
 
     SetupCloseInfFile(hSysSetupInf);
-
-    /* Run the shell */
-    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
-    StartupInfo.cb = sizeof(StartupInfo);
-    bRes = CreateProcessW(L"userinit.exe",
-                          NULL,
-                          NULL,
-                          NULL,
-                          FALSE,
-                          0,
-                          NULL,
-                          NULL,
-                          &StartupInfo,
-                          &ProcessInformation);
-    if (!bRes)
-        goto error;
-
-    CloseHandle(ProcessInformation.hThread);
-    CloseHandle(ProcessInformation.hProcess);
 
     return 0;
 
@@ -1677,7 +1686,7 @@ InstallReactOS(VOID)
     CloseHandle(CreateThread(NULL, 0, HotkeyThread, NULL, 0, &dwHotkeyThreadId));
 
     PreprocessUnattend(TRUE);
-    if (!CommonInstall())
+    if (!CommonInstall(TRUE))
         goto Quit;
 
     /* Install the TCP/IP protocol driver */

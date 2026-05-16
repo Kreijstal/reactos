@@ -115,28 +115,33 @@ PspLookupKernelUserEntryPoints(VOID)
 
     /* On x86, there are multiple ways to do a system call, find the right stubs */
 #if defined(_X86_)
+    PULONG SystemCall;
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    SystemCall = (PULONG)&SharedUserData->SystemCallPad[0];
+#else
+    SystemCall = &SharedUserData->SystemCall;
+#endif
+
     /* Check if this is a machine that supports SYSENTER */
     if (KeFeatureBits & KF_FAST_SYSCALL)
     {
         /* Get user-mode sysenter stub */
-        SharedUserData->SystemCall = (PsNtosImageBase >> (PAGE_SHIFT + 1));
+        SystemCall[0] = (PsNtosImageBase >> (PAGE_SHIFT + 1));
         Status = PspLookupSystemDllEntryPoint("KiFastSystemCall",
-                                              (PVOID)&SharedUserData->
-                                              SystemCall);
+                                              (PVOID)&SystemCall[0]);
         if (!NT_SUCCESS(Status)) return Status;
 
         /* Get user-mode sysenter return stub */
         Status = PspLookupSystemDllEntryPoint("KiFastSystemCallRet",
-                                              (PVOID)&SharedUserData->
-                                              SystemCallReturn);
+                                              (PVOID)&SystemCall[1]);
         if (!NT_SUCCESS(Status)) return Status;
     }
     else
     {
         /* Get the user-mode interrupt stub */
         Status = PspLookupSystemDllEntryPoint("KiIntSystemCall",
-                                              (PVOID)&SharedUserData->
-                                              SystemCall);
+                                              (PVOID)&SystemCall[0]);
         if (!NT_SUCCESS(Status)) return Status;
     }
 

@@ -1565,7 +1565,7 @@ _KeAcquireGuardedMutexUnsafe(IN OUT PKGUARDED_MUTEX GuardedMutex)
     ASSERT((KeGetCurrentIrql() == APC_LEVEL) ||
            (Thread->SpecialApcDisable < 0) ||
            (Thread->Teb == NULL) ||
-           (Thread->Teb >= (PTEB)MM_SYSTEM_RANGE_START));
+           ((ULONG_PTR)Thread->Teb >= (ULONG_PTR)MM_SYSTEM_RANGE_START));
     ASSERT(GuardedMutex->Owner != Thread);
 
     /* Remove the lock */
@@ -1589,7 +1589,7 @@ _KeReleaseGuardedMutexUnsafe(IN OUT PKGUARDED_MUTEX GuardedMutex)
     ASSERT((KeGetCurrentIrql() == APC_LEVEL) ||
            (KeGetCurrentThread()->SpecialApcDisable < 0) ||
            (KeGetCurrentThread()->Teb == NULL) ||
-           (KeGetCurrentThread()->Teb >= (PTEB)MM_SYSTEM_RANGE_START));
+           ((ULONG_PTR)KeGetCurrentThread()->Teb >= (ULONG_PTR)MM_SYSTEM_RANGE_START));
     ASSERT(GuardedMutex->Owner == KeGetCurrentThread());
 
     /* Destroy the Owner */

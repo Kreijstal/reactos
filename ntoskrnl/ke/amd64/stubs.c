@@ -139,7 +139,7 @@ KeExpandKernelStackAndCalloutEx(
 #else
         CurrentThread->LargeStack = SavedLargeStack;
 #endif
-        MmDeleteKernelStack(NewStackBase, FALSE);
+        MmDeleteKernelStack(NewStackBase, TRUE);
         return Status;
     }
 
@@ -159,7 +159,7 @@ KeExpandKernelStackAndCalloutEx(
     CurrentThread->LargeStack = SavedLargeStack;
 #endif
 
-    MmDeleteKernelStack(NewStackBase, FALSE);
+    MmDeleteKernelStack(NewStackBase, TRUE);
 
     return STATUS_SUCCESS;
 }

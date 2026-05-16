@@ -804,12 +804,15 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 /* It didn't, so activate it */
                 Timer->Header.Inserted = TRUE;
 
-                /* Link the wait blocks */
+                /* Link the timeout block into the wait chain and timer */
                 KiSetNextWaitBlock(WaitBlock, TimerBlock);
+                Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;
+                Timer->Header.WaitListHead.Blink = &TimerBlock->WaitListEntry;
             }
 
             /* Insert into Object's Wait List*/
             WaitBlock = WaitBlockArray;
+            Index = 0;
             do
             {
                 /* Get the Current Object */
@@ -821,7 +824,8 @@ KeWaitForMultipleObjects(IN ULONG Count,
 
                 /* Move to the next Wait Block */
                 WaitBlock = KiGetNextWaitBlock(WaitBlock);
-            } while (WaitBlock != WaitBlockArray);
+                Index++;
+            } while (Index < Count);
 
             /* Handle Kernel Queues */
             if (Thread->Queue) KiActivateWaiterQueue(Thread->Queue);

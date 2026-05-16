@@ -20,6 +20,40 @@ static PGRAPHICS_DEVICE gpGraphicsDeviceLast = NULL;
 static HSEMAPHORE ghsemGraphicsDeviceList;
 static ULONG giDevNum = 1;
 
+static
+VOID
+EngpFreeGraphicsDevice(
+    _In_ PGRAPHICS_DEVICE pGraphicsDevice)
+{
+    PDEVMODEINFO pdminfo;
+    ULONG i;
+
+    if (pGraphicsDevice->FileObject)
+        ObDereferenceObject(pGraphicsDevice->FileObject);
+
+    if (pGraphicsDevice->pvMonDev)
+    {
+        for (i = 0; i < pGraphicsDevice->dwMonCnt; i++)
+            ObDereferenceObject(pGraphicsDevice->pvMonDev[i].pdo);
+        ExFreePoolWithTag(pGraphicsDevice->pvMonDev, GDITAG_GDEVICE);
+    }
+
+    while (pGraphicsDevice->pdevmodeInfo)
+    {
+        pdminfo = pGraphicsDevice->pdevmodeInfo;
+        pGraphicsDevice->pdevmodeInfo = pdminfo->pdmiNext;
+        ExFreePoolWithTag(pdminfo, GDITAG_DEVMODE);
+    }
+
+    if (pGraphicsDevice->pDevModeList)
+        ExFreePoolWithTag(pGraphicsDevice->pDevModeList, GDITAG_GDEVICE);
+
+    if (pGraphicsDevice->pDiplayDrivers)
+        ExFreePoolWithTag(pGraphicsDevice->pDiplayDrivers, GDITAG_DRVSUP);
+
+    ExFreePoolWithTag(pGraphicsDevice, GDITAG_GDEVICE);
+}
+
 CODE_SEG("INIT")
 NTSTATUS
 NTAPI
@@ -166,6 +200,10 @@ EngpUnlinkGraphicsDevice(
                 pPrevGraphicsDevice->pNextGraphicsDevice = pToDelete->pNextGraphicsDevice;
             if (gpGraphicsDeviceLast == pToDelete)
                 gpGraphicsDeviceLast = pPrevGraphicsDevice;
+            if (gpPrimaryGraphicsDevice == pToDelete)
+                gpPrimaryGraphicsDevice = NULL;
+            if (gpVgaGraphicsDevice == pToDelete)
+                gpVgaGraphicsDevice = NULL;
         }
     }
 }
@@ -278,8 +316,7 @@ EngpUpdateGraphicsDeviceList(VOID)
                 pGraphicsDevice = pGraphicsDevice->pNextGraphicsDevice;
 
                 /* Free memory */
-                ExFreePoolWithTag(pToDelete->pDiplayDrivers, GDITAG_DRVSUP);
-                ExFreePoolWithTag(pToDelete, GDITAG_GDEVICE);
+                EngpFreeGraphicsDevice(pToDelete);
             }
             else
             {
@@ -744,7 +781,7 @@ EngpRegisterGraphicsDevice(
     {
         ERR("Could not allocate string buffer\n");
         ASSERT(FALSE); // FIXME
-        ExFreePoolWithTag(pGraphicsDevice, GDITAG_GDEVICE);
+        EngpFreeGraphicsDevice(pGraphicsDevice);
         return NULL;
     }
 

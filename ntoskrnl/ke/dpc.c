@@ -99,7 +99,9 @@ KiTimerExpiration(IN PKDPC Dpc,
     ULONG Period;
     DPC_QUEUE_ENTRY DpcEntry[MAX_TIMER_DPCS];
     PKSPIN_LOCK_QUEUE LockQueue;
+#if defined(CONFIG_SMP) || (DBG && (NTDDI_VERSION < NTDDI_LONGHORN))
     PKPRCB Prcb = KeGetCurrentPrcb();
+#endif
 
     /* Disable interrupts */
     _disable();
@@ -353,7 +355,9 @@ KiTimerListExpire(IN PLIST_ENTRY ExpiredListHead,
     PKDPC TimerDpc;
     ULONG Period;
     DPC_QUEUE_ENTRY DpcEntry[MAX_TIMER_DPCS];
+#if defined(CONFIG_SMP) || (DBG && (NTDDI_VERSION < NTDDI_LONGHORN))
     PKPRCB Prcb = KeGetCurrentPrcb();
+#endif
 
     /* Query system */
     KeQuerySystemTime((PLARGE_INTEGER)&SystemTime);
@@ -513,8 +517,8 @@ KiQuantumEnd(VOID)
                 if (NextThread)
                 {
                     /* Found one, set it on standby */
-                    NextThread->State = Standby;
-                    Prcb->NextThread = NextThread;
+                    KiSetThreadStateTrace(NextThread, Standby, 400, _ReturnAddress());
+                    KiSetPrcbNextThreadTrace(Prcb, NextThread, 401, _ReturnAddress());
                 }
             }
             else
@@ -544,11 +548,11 @@ KiQuantumEnd(VOID)
     KiSetThreadSwapBusy(Thread);
 
     /* Switch threads in PRCB */
-    Prcb->NextThread = NULL;
-    Prcb->CurrentThread = NextThread;
+    KiSetPrcbNextThreadTrace(Prcb, NULL, 402, _ReturnAddress());
+    KiSetPrcbCurrentThreadTrace(Prcb, NextThread, 403, _ReturnAddress());
 
     /* Set thread to running and the switch reason to Quantum End */
-    NextThread->State = Running;
+    KiSetThreadStateTrace(NextThread, Running, 404, _ReturnAddress());
     Thread->WaitReason = WrQuantumEnd;
 
     /* Queue it on the ready lists */
@@ -569,7 +573,10 @@ FASTCALL
 KiRetireDpcList(IN PKPRCB Prcb)
 {
     PKDPC_DATA DpcData;
-    PLIST_ENTRY ListHead, DpcEntry;
+    PLIST_ENTRY DpcEntry;
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
+    PLIST_ENTRY ListHead;
+#endif
     PKDPC Dpc;
     PKDEFERRED_ROUTINE DeferredRoutine;
     PVOID DeferredContext, SystemArgument1, SystemArgument2;

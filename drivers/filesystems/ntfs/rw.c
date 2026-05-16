@@ -379,7 +379,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     StreamSize = AttributeDataLength(DataContext->pRecord);
     if (ReadOffset >= StreamSize)
     {
-        DPRINT1("Reading beyond stream end!\n");
+        NTFS_TRACE("Reading beyond stream end!\n");
         ReleaseAttributeContext(DataContext);
         /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
         return STATUS_END_OF_FILE;
@@ -538,7 +538,7 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
      * regular files. The cache manager will issue IRP_PAGING_IO back to us
      * on cache misses, which falls through to the non-cached path below.
      */
-    if (!PagingIo && !NonCachedIo && !(Fcb->Flags & FCB_IS_VOLUME))
+    if (FALSE && !PagingIo && !NonCachedIo && !(Fcb->Flags & FCB_IS_VOLUME))
     {
         /* Ensure cache is initialized on this FileObject */
         if (FileObject->PrivateCacheMap == NULL)
@@ -841,12 +841,12 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
             // The cache manager may flush full pages that extend beyond
             // the logical file size. Clamp the write to the stream size
             // so we don't try to extend the file from paging I/O.
-            DPRINT1("NtfsWriteFile PAGING: %wS off=%I64u len=%lu stream=%I64u\n",
+            NTFS_TRACE("NtfsWriteFile PAGING: %wS off=%I64u len=%lu stream=%I64u\n",
                     Fcb->ObjectName, WriteOffset, Length, StreamSize);
             if (WriteOffset >= StreamSize)
             {
                 // Nothing to write — the entire range is past EOF.
-                DPRINT1("NtfsWriteFile PAGING: SKIP (past EOF)\n");
+                NTFS_TRACE("NtfsWriteFile PAGING: SKIP (past EOF)\n");
                 ReleaseAttributeContext(DataContext);
                 ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
                 *LengthWritten = 0;
@@ -866,6 +866,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
 
             // set the attribute data length
             Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, &DataSize);
+            NTFS_TRACE("REGSTALL: rw after set attribute 0x%lx fcb=%p\n", Status, Fcb);
             if (!NT_SUCCESS(Status))
             {
                 ReleaseAttributeContext(DataContext);
@@ -888,6 +889,11 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
             filename.Length = fileNameAttribute->NameLength * sizeof(WCHAR);
             filename.MaximumLength = filename.Length;
 
+            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update filename begin parent=%I64u name=%wZ size=%I64u alloc=%I64u\n",
+                        ParentMFTId,
+                        &filename,
+                        DataSize.QuadPart,
+                        AllocationSize);
             Status = UpdateFileNameRecord(Fcb->Vcb,
                                           ParentMFTId,
                                           &filename,
@@ -895,6 +901,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                                           DataSize.QuadPart,
                                           AllocationSize,
                                           CaseSensitive);
+            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update filename returned 0x%lx\n", Status);
 
         }
         else
@@ -938,7 +945,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // Write the data to the attribute
     if (WriteOffset == 0 && Length < 8192)
     {
-        DPRINT1("NtfsWriteFile: write %wS: len=%lu stream=%I64u nr=%d fb=0x%02x\n",
+        NTFS_TRACE("NtfsWriteFile: write %wS: len=%lu stream=%I64u nr=%d fb=0x%02x\n",
                 Fcb->ObjectName, Length, StreamSize,
                 DataContext->pRecord->IsNonResident,
                 Buffer ? Buffer[0] : 0xFF);
@@ -946,7 +953,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     Status = WriteAttribute(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, FileRecord);
     if (!NT_SUCCESS(Status) || *LengthWritten != Length)
     {
-        DPRINT1("NtfsWriteFile: WriteAttribute FAILED for %wS: status=0x%lx written=%lu requested=%lu\n",
+        NTFS_TRACE("NtfsWriteFile: WriteAttribute FAILED for %wS: status=0x%lx written=%lu requested=%lu\n",
                 Fcb->ObjectName, Status, *LengthWritten, Length);
     }
 
@@ -1047,7 +1054,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
 
     if (Length > 0 && Length <= 4096 && ByteOffset.QuadPart == 0 && !PagingIo)
     {
-        DPRINT1("NtfsWrite ENTRY: %wS len=%lu nc=%d paging=%d fsize=%I64d\n",
+        NTFS_TRACE("NtfsWrite ENTRY: %wS len=%lu nc=%d paging=%d fsize=%I64d\n",
                 Fcb->ObjectName, Length, NonCachedIo, PagingIo, Fcb->RFCB.FileSize.QuadPart);
     }
 
