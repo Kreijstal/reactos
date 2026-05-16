@@ -1604,17 +1604,18 @@ typedef struct _ETHREAD
     PVOID CallbackStack;
     PKWAIT_BLOCK WaitBlockNext[THREAD_WAIT_OBJECTS + 1];
 #endif
-#if DBG
     //
-    // ReactOS-only debug owner tracking for EX_PUSH_LOCK.
-    // Stores push-locks currently held by this thread so that debug
-    // assertions can verify push-lock ownership the same way
-    // KGUARDED_MUTEX.Owner used to. Kept at the tail to avoid shifting
-    // any existing field offsets. Non-DBG builds do not emit these.
+    // ReactOS-only owner tracking for EX_PUSH_LOCK.
+    // Stores push-locks currently held by this thread so that
+    // assertions (and ExPushLockIsOwnedByCurrentThread) can verify
+    // push-lock ownership the same way KGUARDED_MUTEX.Owner used to.
+    // Always emitted — win32k user-mode callouts nest deeply enough
+    // (KeUserModeCallback → user → re-entrant syscall) that the
+    // 8-slot original overflowed silently and the helper missed real
+    // owners. Kept at the tail to avoid shifting any existing offsets.
     //
     PVOID HeldPushLocks[8];
     UCHAR HeldPushLockCount;
-#endif
 } ETHREAD;
 
 //
