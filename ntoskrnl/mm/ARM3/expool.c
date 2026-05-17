@@ -193,8 +193,15 @@ ExpAssertPoolUnlinkable(
     Flink = ExpDecodePoolLink(Entry->Flink);
     Blink = ExpDecodePoolLink(Entry->Blink);
 
-    if (((ULONG_PTR)Flink & (POOL_BLOCK_SIZE - 1)) ||
-        ((ULONG_PTR)Blink & (POOL_BLOCK_SIZE - 1)))
+    //
+    // Pointer-sized alignment only: neighbours can be either another
+    // POOL_FREE_BLOCK (16-byte aligned) or a POOL_DESCRIPTOR.ListHeads[]
+    // LIST_ENTRY sentinel embedded in a struct, which is not guaranteed
+    // 16-byte aligned. The bug we want to catch had odd-byte misalignment
+    // (+9, +0x29), so pointer-size alignment still flags it.
+    //
+    if (((ULONG_PTR)Flink & (sizeof(PVOID) - 1)) ||
+        ((ULONG_PTR)Blink & (sizeof(PVOID) - 1)))
     {
         DPRINT1("Pool freelist %s: misaligned neighbour pointers on "
                 "entry %p Flink=%p Blink=%p\n",
