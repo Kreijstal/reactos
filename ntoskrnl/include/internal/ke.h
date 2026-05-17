@@ -260,68 +260,6 @@ VOID
 FASTCALL
 KiDeferredReadyThread(IN PKTHREAD Thread);
 
-VOID
-NTAPI
-KiTraceSchedulerEvent(
-    _In_ ULONG Tag,
-    _In_opt_ PKPRCB Prcb,
-    _In_opt_ PKTHREAD Thread,
-    _In_ UCHAR OldState,
-    _In_ UCHAR NewState,
-    _In_opt_ PVOID Value,
-    _In_opt_ PVOID Caller);
-
-VOID
-NTAPI
-KiDumpSchedulerTrace(
-    _In_ PCSTR Reason,
-    _In_opt_ PKPRCB Prcb,
-    _In_opt_ PKTHREAD Thread);
-
-VOID
-NTAPI
-KiTracePrcbLockAcquire(
-    _Inout_ PKPRCB Prcb,
-    _In_opt_ PVOID Caller);
-
-VOID
-NTAPI
-KiTracePrcbLockRelease(
-    _Inout_ PKPRCB Prcb,
-    _In_opt_ PVOID Caller);
-
-VOID
-NTAPI
-KiSetThreadStateTrace(
-    _Inout_ PKTHREAD Thread,
-    _In_ KTHREAD_STATE NewState,
-    _In_ ULONG Tag,
-    _In_opt_ PVOID Caller);
-
-VOID
-NTAPI
-KiSetPrcbNextThreadTrace(
-    _Inout_ PKPRCB Prcb,
-    _In_opt_ PKTHREAD Thread,
-    _In_ ULONG Tag,
-    _In_opt_ PVOID Caller);
-
-VOID
-NTAPI
-KiSetPrcbCurrentThreadTrace(
-    _Inout_ PKPRCB Prcb,
-    _In_opt_ PKTHREAD Thread,
-    _In_ ULONG Tag,
-    _In_opt_ PVOID Caller);
-
-VOID
-NTAPI
-KiCheckSelectedReadyThreadTrace(
-    _In_ PKTHREAD Thread,
-    _In_ PKPRCB Prcb,
-    _In_ ULONG Tag,
-    _In_opt_ PVOID Caller);
-
 PKTHREAD
 FASTCALL
 KiIdleSchedule(

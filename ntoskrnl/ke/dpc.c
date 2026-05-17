@@ -517,8 +517,8 @@ KiQuantumEnd(VOID)
                 if (NextThread)
                 {
                     /* Found one, set it on standby */
-                    KiSetThreadStateTrace(NextThread, Standby, 400, _ReturnAddress());
-                    KiSetPrcbNextThreadTrace(Prcb, NextThread, 401, _ReturnAddress());
+                    NextThread->State = Standby;
+                    Prcb->NextThread = NextThread;
                 }
             }
             else
@@ -548,11 +548,11 @@ KiQuantumEnd(VOID)
     KiSetThreadSwapBusy(Thread);
 
     /* Switch threads in PRCB */
-    KiSetPrcbNextThreadTrace(Prcb, NULL, 402, _ReturnAddress());
-    KiSetPrcbCurrentThreadTrace(Prcb, NextThread, 403, _ReturnAddress());
+    Prcb->NextThread = NULL;
+    Prcb->CurrentThread = NextThread;
 
     /* Set thread to running and the switch reason to Quantum End */
-    KiSetThreadStateTrace(NextThread, Running, 404, _ReturnAddress());
+    NextThread->State = Running;
     Thread->WaitReason = WrQuantumEnd;
 
     /* Queue it on the ready lists */
