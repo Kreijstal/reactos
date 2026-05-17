@@ -1135,6 +1135,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         POP_READ_OUT ro;
         PUCHAR out;
         ULONG chunk, outCap, outActual = 0;
+        ULONG bytesRead;
         NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
         NTSTATUS bridgeStatus;
 
@@ -1214,10 +1215,12 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
             break;
         }
 
+        bytesRead = ro->BytesRead;
+
         _SEH2_TRY {
             RtlCopyMemory(dst + done,
                           (PUCHAR)(ro + 1),
-                          ro->BytesRead);
+                          bytesRead);
         } _SEH2_EXCEPT (EXCEPTION_EXECUTE_HANDLER) {
             ExFreePoolWithTag(out, 'RDrS');
             status = STATUS_INVALID_USER_BUFFER;
@@ -1225,12 +1228,12 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         } _SEH2_END;
 
         DPRINT("SMB2RDR: Read chunk ok bytes=%lu total=%lu\n",
-                 ro->BytesRead, done + ro->BytesRead);
+                 bytesRead, done + bytesRead);
 
-        done += ro->BytesRead;
+        done += bytesRead;
         ExFreePoolWithTag(out, 'RDrS');
 
-        if (ro->BytesRead < chunk) {
+        if (bytesRead < chunk) {
             /* Short read — either EOF mid-chunk or server bounded us. */
             break;
         }
