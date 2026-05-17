@@ -251,8 +251,19 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
                 break;
             }
 
+            //
+            // Take strong local references for the duration of this
+            // iteration. The m_pEnumIDList->Next() call below can
+            // reenter our object via IShellFolderViewCB / browser-service
+            // callbacks and end up in SetLocation(), which releases
+            // both m_pEnumIDList and m_pShellFolder. Without the locals
+            // a subsequent m_pShellFolder use would dereference NULL.
+            //
+            CComPtr<IEnumIDList>  pEnumIDList  = m_pEnumIDList;
+            CComPtr<IShellFolder> pShellFolder = m_pShellFolder;
+
             pidlChild.Free();
-            hr = m_pEnumIDList->Next(1, &pidlChild, NULL);
+            hr = pEnumIDList->Next(1, &pidlChild, NULL);
             if (hr != S_OK)
                 break;
 
@@ -265,7 +276,7 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
 
             DWORD attrs = SFGAO_FOLDER | SFGAO_FILESYSTEM;
             LPCITEMIDLIST pidlRef = pidlChild;
-            hr = m_pShellFolder->GetAttributesOf(1, &pidlRef, &attrs);
+            hr = pShellFolder->GetAttributesOf(1, &pidlRef, &attrs);
             if (FAILED_UNEXPECTEDLY(hr))
                 continue;
 
