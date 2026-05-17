@@ -5057,8 +5057,11 @@ RxConjureOriginalName(
     /* If we still have room to write data */
     if (*LengthRemaining != -1)
     {
-        /* If we can copy everything, it's fine! */
-        if (*LengthRemaining > ToCopy)
+        /* If we can copy everything, it's fine!  Match the prefix-copy
+         * step above and accept an exact-fit buffer (>= ToCopy), otherwise
+         * a caller that sized to the previous *ActualNameLength would
+         * forever see STATUS_BUFFER_OVERFLOW. */
+        if (*LengthRemaining >= ToCopy)
         {
             *LengthRemaining = *LengthRemaining - ToCopy;
         }
