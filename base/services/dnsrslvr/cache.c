@@ -36,11 +36,15 @@ DnsIntNegativeCacheRemoveEntryItem(
     DnsNegCache.EntryCount--;
 }
 
-/* Caller must hold DnsNegCacheLock. */
+/* Caller must hold DnsNegCacheLock.
+ * NowMs is a GetTickCount() snapshot; entries are deemed expired when
+ * (NowMs - ExpireTickMs) is small (i.e. NowMs has passed the expiry).
+ * The unsigned subtraction is wraparound-safe over a 24-day window,
+ * well beyond the 15-minute negative-cache TTL. */
 static
 VOID
 DnsIntNegativeCachePurgeExpired(
-    _In_ ULONGLONG NowMs)
+    _In_ DWORD NowMs)
 {
     PLIST_ENTRY Entry, Next;
     PRESOLVER_NEG_CACHE_ENTRY NegEntry;
@@ -50,7 +54,7 @@ DnsIntNegativeCachePurgeExpired(
     {
         Next = Entry->Flink;
         NegEntry = CONTAINING_RECORD(Entry, RESOLVER_NEG_CACHE_ENTRY, CacheLink);
-        if (NowMs >= NegEntry->ExpireTickMs)
+        if ((LONG)(NowMs - NegEntry->ExpireTickMs) >= 0)
             DnsIntNegativeCacheRemoveEntryItem(NegEntry);
         Entry = Next;
     }
@@ -148,12 +152,12 @@ DnsIntNegativeCacheLookup(
     PLIST_ENTRY Entry;
     PRESOLVER_NEG_CACHE_ENTRY NegEntry;
     DNS_STATUS Status = ERROR_SUCCESS;
-    ULONGLONG NowMs;
+    DWORD NowMs;
 
     if (!DnsNegCacheInitialized || Name == NULL)
         return ERROR_SUCCESS;
 
-    NowMs = GetTickCount64();
+    NowMs = GetTickCount();
 
     DnsNegCacheLock();
     DnsIntNegativeCachePurgeExpired(NowMs);
@@ -188,7 +192,7 @@ DnsIntNegativeCacheInsert(
     PLIST_ENTRY Entry;
     PRESOLVER_NEG_CACHE_ENTRY NegEntry;
     SIZE_T NameLen;
-    ULONGLONG NowMs;
+    DWORD NowMs;
 
     /* Only failures belong in the negative cache. */
     ASSERT(Status != ERROR_SUCCESS);
@@ -198,7 +202,7 @@ DnsIntNegativeCacheInsert(
     if (!DnsNegCacheInitialized || Name == NULL)
         return;
 
-    NowMs = GetTickCount64();
+    NowMs = GetTickCount();
 
     DnsNegCacheLock();
     DnsIntNegativeCachePurgeExpired(NowMs);
@@ -212,7 +216,6 @@ DnsIntNegativeCacheInsert(
             _wcsicmp(NegEntry->Name, Name) == 0)
         {
             NegEntry->Status = Status;
-            ASSERT(NowMs + NEGATIVE_CACHE_TTL_MS >= NegEntry->ExpireTickMs);
             NegEntry->ExpireTickMs = NowMs + NEGATIVE_CACHE_TTL_MS;
             DnsNegCacheUnlock();
             return;
