@@ -800,7 +800,9 @@ OFFSET(ThAdjustIncrement, KTHREAD, AdjustIncrement),
 OFFSET(ThAffinity, KTHREAD, Affinity), // obsolete
 OFFSET(ThApcStateIndex, KTHREAD, ApcStateIndex),
 OFFSET(ThIdealProcessor, KTHREAD, IdealProcessor), // obsolete
+#if (NTDDI_VERSION < NTDDI_WIN10)
 OFFSET(ThApcStatePointer, KTHREAD, ApcStatePointer), // obsolete
+#endif
 OFFSET(ThSavedApcState, KTHREAD, SavedApcState), // obsolete
 OFFSET(ThWaitReason, KTHREAD, WaitReason),
 OFFSET(ThSaturation, KTHREAD, Saturation), // obsolete
@@ -864,11 +866,11 @@ OFFSET(UsMaxStackTraceDepth, KUSER_SHARED_DATA, MaxStackTraceDepth),
 OFFSET(UsCryptoExponent, KUSER_SHARED_DATA, CryptoExponent),
 OFFSET(UsTimeZoneId, KUSER_SHARED_DATA, TimeZoneId),
 OFFSET(UsLargePageMinimum, KUSER_SHARED_DATA, LargePageMinimum),
-//#if (NTDDI_VERSION >= NTDDI_WIN10)
-//OFFSET(UsNtBuildNumber, KUSER_SHARED_DATA, NtBuildNumber),
-//#else
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+OFFSET(UsNtBuildNumber, KUSER_SHARED_DATA, NtBuildNumber),
+#else
 OFFSET(UsReserved2, KUSER_SHARED_DATA, Reserved2),
-//#endif
+#endif
 OFFSET(UsNtProductType, KUSER_SHARED_DATA, NtProductType),
 OFFSET(UsProductTypeIsValid, KUSER_SHARED_DATA, ProductTypeIsValid),
 OFFSET(UsNtMajorVersion, KUSER_SHARED_DATA, NtMajorVersion),

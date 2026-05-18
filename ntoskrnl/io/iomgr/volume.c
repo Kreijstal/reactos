@@ -4,7 +4,7 @@
  * FILE:            ntoskrnl/io/iomgr/volume.c
  * PURPOSE:         Volume and File System I/O Support
  * PROGRAMMERS:     Alex Ionescu (alex.ionescu@reactos.org)
- *                  Hervé Poussineau (hpoussin@reactos.org)
+ *                  Hervï¿½ Poussineau (hpoussin@reactos.org)
  *                  Eric Kohl
  *                  Pierre Schweitzer (pierre.schweitzer@reactos.org)
  */
@@ -1448,5 +1448,60 @@ Quit:
     ObDereferenceObject(FileObject);
     return Status;
 }
+
+#if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
+
+/*
+ * @unimplemented
+ *
+ * Windows 10 exposes IoVolumeDeviceToGuid for translating a volume device
+ * object into its associated volume GUID. ReactOS does not yet maintain
+ * persistent volume GUIDs, so this returns STATUS_NOT_IMPLEMENTED. Callers
+ * such as fastfat mount-time bookkeeping handle the failure gracefully.
+ */
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuid(
+    _In_ PVOID VolumeDeviceObject,
+    _Out_ GUID *Guid)
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(VolumeDeviceObject);
+
+    if (Guid)
+    {
+        RtlZeroMemory(Guid, sizeof(GUID));
+    }
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*
+ * @unimplemented
+ *
+ * Companion to IoVolumeDeviceToGuid: returns the "\??\Volume{GUID}\" path
+ * for a volume device object. ReactOS does not yet emit such names, so
+ * we report STATUS_NOT_IMPLEMENTED and leave the output string empty.
+ */
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuidPath(
+    _In_ PVOID VolumeDeviceObject,
+    _Out_ PUNICODE_STRING GuidPath)
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(VolumeDeviceObject);
+
+    if (GuidPath)
+    {
+        GuidPath->Length = 0;
+        GuidPath->MaximumLength = 0;
+        GuidPath->Buffer = NULL;
+    }
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+#endif /* NTDDI_VERSION >= NTDDI_WINTHRESHOLD */
 
 /* EOF */
