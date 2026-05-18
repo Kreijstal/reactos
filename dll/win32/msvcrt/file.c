@@ -5375,12 +5375,14 @@ int CDECL vfwprintf_s(FILE* file, const wchar_t *format, va_list valist)
     return _vfwprintf_s_l(file, format, NULL, valist);
 }
 
-#if _MSVCR_VER >= 140
+/* ReactOS: msvcrt is the UCRT apiset host (see sdk/lib/apisets/update.py),
+ * so these __stdio_common_v* entry points must be available unconditionally
+ * rather than only on _MSVCR_VER>=140 builds. */
 
 /*********************************************************************
  *              __stdio_common_vfprintf (UCRTBASE.@)
  */
-int CDECL _stdio_common_vfprintf(unsigned __int64 options, FILE *file, const char *format,
+int CDECL __stdio_common_vfprintf(unsigned __int64 options, FILE *file, const char *format,
                                         _locale_t locale, va_list valist)
 {
     if (options & ~UCRTBASE_PRINTF_MASK)
@@ -5455,7 +5457,7 @@ int CDECL __stdio_common_vfwprintf_s(unsigned __int64 options, FILE *file, const
             file, format, locale, valist);
 }
 
-#endif /* _MSVCR_VER >= 140 */
+/* end of __stdio_common_v* UCRT block */
 
 /*********************************************************************
  *    _vfprintf_l (MSVCRT.@)
