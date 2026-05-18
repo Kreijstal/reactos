@@ -189,7 +189,7 @@ void msvcrt_set_errno(int err)
   }
 }
 
-#if _MSVCR_VER >= 80
+#if 1 /* _MSVCR_VER >= 80, enabled as UCRT host */
 
 /*********************************************************************
  * __sys_nerr (MSVCR80.@)
