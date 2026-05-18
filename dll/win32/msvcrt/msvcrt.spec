@@ -240,6 +240,16 @@
 @ cdecl round(double)
 @ cdecl roundf(float)
 @ cdecl trunc(double)
+@ cdecl _execute_onexit_table(ptr)
+@ cdecl _initialize_onexit_table(ptr)
+@ cdecl _register_onexit_function(ptr ptr)
+@ cdecl _stat64i32(str ptr)
+@ cdecl _strftime_l(ptr long str ptr ptr)
+@ cdecl __sys_nerr()
+@ extern __timezone MSVCRT___timezone
+@ extern __tzname MSVCRT__tzname
+@ cdecl wcstoll(wstr ptr long) _wcstoi64
+@ cdecl wcstoull(wstr ptr long) _wcstoui64
 @ cdecl __stdio_common_vfprintf(int64 ptr str ptr ptr)
 @ cdecl __stdio_common_vfprintf_p(int64 ptr str ptr ptr)
 @ cdecl __stdio_common_vfprintf_s(int64 ptr str ptr ptr)
@@ -1499,9 +1509,10 @@
 @ cdecl strtok(str str)
 @ cdecl -version=0x600+ strtok_s(ptr str ptr)
 @ cdecl strtol(str ptr long)
-@ cdecl -impsym strtoll(str ptr long) _strtoi64
+@ cdecl strtoll(str ptr long) _strtoi64
 @ cdecl strtoul(str ptr long)
-@ cdecl -impsym strtoull(str ptr long) _strtoui64
+@ cdecl strtoull(str ptr long) _strtoui64
+@ cdecl strtof(str ptr)
 @ cdecl strxfrm(ptr str long)
 @ varargs swprintf(ptr wstr) _swprintf # Non-conforming swprintf
 @ varargs -version=0x600+ swprintf_s(ptr long wstr)
