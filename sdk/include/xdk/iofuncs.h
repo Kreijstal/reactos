@@ -2126,6 +2126,24 @@ IoVolumeDeviceToDosName(
     _At_(DosName->Buffer, __drv_allocatesMem(Mem)))
     PUNICODE_STRING DosName);
 
+#if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuid(
+  _In_ PVOID VolumeDeviceObject,
+  _Out_ GUID *Guid);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuidPath(
+  _In_ PVOID VolumeDeviceObject,
+  _Out_ PUNICODE_STRING GuidPath);
+
+#endif /* NTDDI_VERSION >= NTDDI_WINTHRESHOLD */
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTKERNELAPI
 NTSTATUS
