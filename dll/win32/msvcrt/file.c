@@ -3224,7 +3224,7 @@ int CDECL _stat(const char* path, struct _stat * buf)
   return ret;
 }
 
-#if _MSVCR_VER >= 80
+#if 1 /* _MSVCR_VER >= 80, enabled as UCRT host */
 
 /*********************************************************************
  *  _stat32 (MSVCR80.@)
