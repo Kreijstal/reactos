@@ -293,3 +293,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
     add_subdirectory(dcomp)
     add_subdirectory(rtworkq)
 endif()
+
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_subdirectory(dwrite)
+endif()
