@@ -228,6 +228,18 @@
 @ cdecl _set_app_type(long) __set_app_type
 @ cdecl _set_invalid_parameter_handler(ptr)
 @ cdecl _set_new_mode(long)
+@ cdecl acosh(double)
+@ cdecl asinh(double)
+@ cdecl atanh(double)
+@ cdecl cbrt(double)
+@ cdecl exp2(double)
+@ cdecl expm1(double)
+@ cdecl hypot(double double) _msvcrt_ucrt_hypot
+@ cdecl log1p(double)
+@ cdecl log2(double)
+@ cdecl round(double)
+@ cdecl roundf(float)
+@ cdecl trunc(double)
 @ cdecl __stdio_common_vfprintf(int64 ptr str ptr ptr)
 @ cdecl __stdio_common_vfprintf_p(int64 ptr str ptr ptr)
 @ cdecl __stdio_common_vfprintf_s(int64 ptr str ptr ptr)
