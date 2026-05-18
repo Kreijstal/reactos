@@ -1045,4 +1045,29 @@ GetLastError(VOID)
     return NtCurrentTeb()->LastErrorValue;
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+/*
+ * @implemented
+ *
+ * Win7+ fail-fast exception API: terminate the process unconditionally
+ * with the fail-fast status, bypassing all unhandled-exception filters.
+ * Used by CRT __fastfail and friends to abort on integrity violations
+ * (stack-cookie failure, heap corruption, etc.).  Real Windows can
+ * optionally route through a Watson-style reporter; we just terminate,
+ * which is the documented worst-case behaviour and matches the runtime
+ * contract callers rely on.
+ */
+VOID
+WINAPI
+RaiseFailFastException(IN PEXCEPTION_RECORD ExceptionRecord OPTIONAL,
+                       IN PCONTEXT ContextRecord OPTIONAL,
+                       IN DWORD Flags)
+{
+    (void)ExceptionRecord;
+    (void)ContextRecord;
+    (void)Flags;
+    TerminateProcess(GetCurrentProcess(), STATUS_FAIL_FAST_EXCEPTION);
+}
+#endif
+
 /* EOF */
