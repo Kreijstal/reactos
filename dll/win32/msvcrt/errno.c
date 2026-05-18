@@ -481,7 +481,9 @@ void __cdecl _invalid_parameter(const wchar_t *expr, const wchar_t *func,
     }
 }
 
-#if _MSVCR_VER >= 80
+/* ReactOS: msvcrt hosts the UCRT apisets, so the MSVCR80-era
+ * invalid-parameter helpers must be compiled even with _MSVCR_VER=0. */
+#if 1 /* _MSVCR_VER >= 80, enabled as UCRT host */
 
 /*********************************************************************
  * _invalid_parameter_noinfo (MSVCR80.@)
