@@ -128,6 +128,8 @@ R_ResolverQuery(
     }
     else
     {
+        DNS_STATUS NegStatus;
+
         DPRINT("DNS cache query!\n");
         Status = DnsIntCacheGetEntryByName(pszName,
                                            wType,
@@ -135,15 +137,31 @@ R_ResolverQuery(
                                            ppResultRecords);
         if (Status == DNS_INFO_NO_RECORDS)
         {
-            DPRINT("DNS query!\n");
-            Status = Query_Main(pszName,
-                                wType,
-                                dwFlags,
-                                ppResultRecords);
-            if (Status == ERROR_SUCCESS)
+            /* Short-circuit a fresh wire round-trip if the same (name, type)
+             * recently failed; matches the Windows DNS Client Service negative
+             * cache. */
+            NegStatus = DnsIntNegativeCacheLookup(pszName, wType);
+            if (NegStatus != ERROR_SUCCESS)
             {
-                DPRINT("DNS query successful!\n");
-                DnsIntCacheAddEntry(*ppResultRecords, FALSE);
+                DPRINT("Negative cache hit (status %lu)\n", NegStatus);
+                Status = NegStatus;
+            }
+            else
+            {
+                DPRINT("DNS query!\n");
+                Status = Query_Main(pszName,
+                                    wType,
+                                    dwFlags,
+                                    ppResultRecords);
+                if (Status == ERROR_SUCCESS)
+                {
+                    DPRINT("DNS query successful!\n");
+                    DnsIntCacheAddEntry(*ppResultRecords, FALSE);
+                }
+                else
+                {
+                    DnsIntNegativeCacheInsert(pszName, wType, Status);
+                }
             }
         }
     }
