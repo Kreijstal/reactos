@@ -21,198 +21,450 @@
 
 #include "precomp.h"
 
+//
+// Per-worker context. Each enumeration run owns its own copy of the
+// inputs and its own shell pointers, so detaching a stuck worker
+// (e.g. one blocked inside a multi-second SMB roundtrip) is safe:
+// the next worker shares no mutable state with it.
+//
+// The worker holds a reference to its owner (AddRef in StartWorker)
+// so the owner cannot be destroyed while a worker is still running.
+//
+struct CACListISFWorkerCtx
+{
+    CACListISF *m_pOwner;
+    LONG m_lGeneration;
+    LONG m_lCancel;
+    HANDLE m_hThread;
+
+    // Snapshot of the relevant CACListISF members at the time the
+    // worker was started. The worker reads only these, never the
+    // owner's members.
+    DWORD m_dwOptions;
+    BOOL m_fShowHidden;
+    BOOL m_bUseExpand;
+    CStringW m_szRawPath;
+    CStringW m_szExpanded;
+    CComHeapPtr<ITEMIDLIST> m_pidlCurDir;
+
+    // Per-worker shell state (never aliased into the owner).
+    CACListISF::LOCATION_TYPE m_iNextLocation;
+    CACListISF::LOCATION_TYPE m_iLastLocation;
+    CComPtr<IShellFolder> m_pShellFolder;
+    CComPtr<IEnumIDList> m_pEnumIDList;
+
+    CACListISFWorkerCtx()
+        : m_pOwner(NULL)
+        , m_lGeneration(0)
+        , m_lCancel(0)
+        , m_hThread(NULL)
+        , m_dwOptions(0)
+        , m_fShowHidden(FALSE)
+        , m_bUseExpand(FALSE)
+        , m_iNextLocation(CACListISF::LT_DIRECTORY)
+        , m_iLastLocation(CACListISF::LT_MAX)
+    {
+    }
+
+    ~CACListISFWorkerCtx()
+    {
+        if (m_hThread)
+            CloseHandle(m_hThread);
+    }
+
+    BOOL IsCancelled() const
+    {
+        return InterlockedCompareExchange(const_cast<LONG *>(&m_lCancel), 0, 0) != 0;
+    }
+};
+
 CACListISF::CACListISF()
     : m_dwOptions(ACLO_CURRENTDIR | ACLO_MYCOMPUTER)
     , m_iNextLocation(LT_DIRECTORY)
     , m_fShowHidden(FALSE)
+    , m_bCsInit(FALSE)
+    , m_pCurrentWorker(NULL)
+    , m_lActiveGeneration(0)
 {
+    InitializeCriticalSection(&m_csState);
+    m_bCsInit = TRUE;
 }
 
 CACListISF::~CACListISF()
 {
+    // The worker holds a ref on us via AddRef() in StartWorker(). If
+    // one were still alive, our refcount could not have reached zero
+    // and this destructor would not run. The invariant therefore is:
+    // no live worker.
+    ATLASSERT(m_pCurrentWorker == NULL);
+    if (m_bCsInit)
+        DeleteCriticalSection(&m_csState);
+}
+
+// Signal the current worker (if any) to stop, then forget it. The
+// worker thread frees its own context once it observes the cancel
+// flag and releases its owner ref at that point.
+void CACListISF::DetachCurrentWorker()
+{
+    // Bump generation and cancel under the CS. The worker's exit
+    // path also takes the CS before deleting its context, so as long
+    // as we touch m_lCancel here we are guaranteed the context is
+    // still alive: the worker cannot have run its "delete pCtx" yet.
+    //
+    // Do NOT WaitForSingleObject here. The worker may be stuck
+    // inside a synchronous SMB / shell call that the cancel flag
+    // cannot interrupt; blocking the UI thread on that wait is
+    // exactly the bug this change is fixing.
+    EnterCriticalSection(&m_csState);
+    InterlockedIncrement(&m_lActiveGeneration);
+    if (m_pCurrentWorker)
+        InterlockedExchange(&m_pCurrentWorker->m_lCancel, 1);
+    m_pCurrentWorker = NULL;
+    m_Results.RemoveAll();
+    LeaveCriticalSection(&m_csState);
 }
 
 HRESULT CACListISF::NextLocation()
 {
-    TRACE("(%p)\n", this);
-    HRESULT hr;
-    switch (m_iNextLocation)
-    {
-        case LT_DIRECTORY:
-            m_iNextLocation = LT_DESKTOP;
-            if (!ILIsEmpty(m_pidlCurDir) && (m_dwOptions & ACLO_CURRENTDIR))
-            {
-                CComHeapPtr<ITEMIDLIST> pidl(ILClone(m_pidlCurDir));
-                hr = SetLocation(pidl.Detach());
-                if (SUCCEEDED(hr))
-                {
-                    TRACE("LT_DIRECTORY\n");
-                    return hr;
-                }
-            }
-            // FALL THROUGH
-        case LT_DESKTOP:
-            m_iNextLocation = LT_MYCOMPUTER;
-            if (m_dwOptions & ACLO_DESKTOP)
-            {
-                CComHeapPtr<ITEMIDLIST> pidl;
-                hr = SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &pidl);
-                if (FAILED_UNEXPECTEDLY(hr))
-                    return S_FALSE;
-                hr = SetLocation(pidl.Detach());
-                if (SUCCEEDED(hr))
-                {
-                    TRACE("LT_DESKTOP\n");
-                    return hr;
-                }
-            }
-            // FALL THROUGH
-        case LT_MYCOMPUTER:
-            m_iNextLocation = LT_FAVORITES;
-            if (m_dwOptions & ACLO_MYCOMPUTER)
-            {
-                CComHeapPtr<ITEMIDLIST> pidl;
-                hr = SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidl);
-                if (FAILED_UNEXPECTEDLY(hr))
-                    return S_FALSE;
-                hr = SetLocation(pidl.Detach());
-                if (SUCCEEDED(hr))
-                {
-                    TRACE("LT_MYCOMPUTER\n");
-                    return hr;
-                }
-            }
-            // FALL THROUGH
-        case LT_FAVORITES:
-            m_iNextLocation = LT_MAX;
-            if (m_dwOptions & ACLO_FAVORITES)
-            {
-                CComHeapPtr<ITEMIDLIST> pidl;
-                hr = SHGetSpecialFolderLocation(NULL, CSIDL_FAVORITES, &pidl);
-                if (FAILED_UNEXPECTEDLY(hr))
-                    return S_FALSE;
-                hr = SetLocation(pidl.Detach());
-                if (SUCCEEDED(hr))
-                {
-                    TRACE("LT_FAVORITES\n");
-                    return hr;
-                }
-            }
-            // FALL THROUGH
-        case LT_MAX:
-        default:
-            TRACE("LT_MAX\n");
-            return S_FALSE;
-    }
+    // Retained for source compatibility with the published class
+    // signature. The production path uses an inline worker-local
+    // switch (see WorkerNextLocation in this file). This entry
+    // point is no longer driven by Next().
+    return S_FALSE;
 }
 
 HRESULT CACListISF::SetLocation(LPITEMIDLIST pidl)
 {
-    TRACE("(%p, %p)\n", this, pidl);
+    // See NextLocation() comment - unused on the production path.
+    if (pidl)
+        ILFree(pidl);
+    return E_NOTIMPL;
+}
 
-    m_pEnumIDList.Release();
-    m_pShellFolder.Release();
-    m_pidlLocation.Free();
+HRESULT CACListISF::GetDisplayName(LPCITEMIDLIST, CComHeapPtr<WCHAR>&)
+{
+    return E_NOTIMPL;
+}
+
+HRESULT
+CACListISF::GetPaths(LPCITEMIDLIST, CComHeapPtr<WCHAR>&, CComHeapPtr<WCHAR>&)
+{
+    return E_NOTIMPL;
+}
+
+//
+// Worker-side helpers. These mirror the previous synchronous
+// NextLocation / SetLocation / GetPaths / GetDisplayName logic but
+// operate exclusively on the worker context.
+//
+static HRESULT WorkerSetLocation(CACListISFWorkerCtx *pCtx, LPITEMIDLIST pidl)
+{
+    pCtx->m_pEnumIDList.Release();
+    pCtx->m_pShellFolder.Release();
 
     if (!pidl)
         return E_FAIL;
 
-    m_pidlLocation.Attach(pidl);
+    CComHeapPtr<ITEMIDLIST> pidlOwned;
+    pidlOwned.Attach(pidl);
 
     CComPtr<IShellFolder> pFolder;
     HRESULT hr = SHGetDesktopFolder(&pFolder);
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
-    if (!ILIsEmpty(pidl))
+    if (!ILIsEmpty(pidlOwned))
     {
-        hr = pFolder->BindToObject(pidl, NULL, IID_PPV_ARG(IShellFolder, &m_pShellFolder));
+        hr = pFolder->BindToObject(pidlOwned, NULL,
+                                   IID_PPV_ARG(IShellFolder, &pCtx->m_pShellFolder));
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
     }
     else
     {
-        m_pShellFolder.Attach(pFolder.Detach());
+        pCtx->m_pShellFolder.Attach(pFolder.Detach());
     }
 
-    if (!m_pShellFolder)
+    if (!pCtx->m_pShellFolder)
         return E_FAIL;
 
     SHCONTF Flags = SHCONTF_FOLDERS | SHCONTF_INIT_ON_FIRST_NEXT;
-    if (m_fShowHidden)
+    if (pCtx->m_fShowHidden)
         Flags |= SHCONTF_INCLUDEHIDDEN;
-    if (!(m_dwOptions & ACLO_FILESYSDIRS))
+    if (!(pCtx->m_dwOptions & ACLO_FILESYSDIRS))
         Flags |= SHCONTF_NONFOLDERS;
 
-    hr = m_pShellFolder->EnumObjects(NULL, Flags, &m_pEnumIDList);
+    hr = pCtx->m_pShellFolder->EnumObjects(NULL, Flags, &pCtx->m_pEnumIDList);
     if (hr != S_OK)
     {
         ERR("EnumObjects failed: 0x%lX\n", hr);
-        m_pEnumIDList.Release();
-        m_pShellFolder.Release();
-        hr = E_FAIL;
+        pCtx->m_pEnumIDList.Release();
+        pCtx->m_pShellFolder.Release();
+        return E_FAIL;
     }
-    else if (!m_pEnumIDList)
+    if (!pCtx->m_pEnumIDList)
     {
-        m_pShellFolder.Release();
-        hr = E_FAIL;
+        pCtx->m_pShellFolder.Release();
+        return E_FAIL;
     }
-    return hr;
+    return S_OK;
 }
 
-HRESULT CACListISF::GetDisplayName(LPCITEMIDLIST pidlChild, CComHeapPtr<WCHAR>& pszChild)
+static HRESULT WorkerNextLocation(CACListISFWorkerCtx *pCtx)
 {
-    TRACE("(%p, %p)\n", this, pidlChild);
+    HRESULT hr;
+    for (;;)
+    {
+        CACListISF::LOCATION_TYPE current = pCtx->m_iNextLocation;
+        switch (current)
+        {
+            case CACListISF::LT_DIRECTORY:
+                pCtx->m_iNextLocation = CACListISF::LT_DESKTOP;
+                if (pCtx->m_pidlCurDir && !ILIsEmpty(pCtx->m_pidlCurDir) &&
+                    (pCtx->m_dwOptions & ACLO_CURRENTDIR))
+                {
+                    CComHeapPtr<ITEMIDLIST> pidl(ILClone(pCtx->m_pidlCurDir));
+                    hr = WorkerSetLocation(pCtx, pidl.Detach());
+                    if (SUCCEEDED(hr))
+                    {
+                        pCtx->m_iLastLocation = CACListISF::LT_DIRECTORY;
+                        return hr;
+                    }
+                }
+                break;
+            case CACListISF::LT_DESKTOP:
+                pCtx->m_iNextLocation = CACListISF::LT_MYCOMPUTER;
+                if (pCtx->m_dwOptions & ACLO_DESKTOP)
+                {
+                    CComHeapPtr<ITEMIDLIST> pidl;
+                    hr = SHGetSpecialFolderLocation(NULL, CSIDL_DESKTOP, &pidl);
+                    if (FAILED_UNEXPECTEDLY(hr))
+                        return S_FALSE;
+                    hr = WorkerSetLocation(pCtx, pidl.Detach());
+                    if (SUCCEEDED(hr))
+                    {
+                        pCtx->m_iLastLocation = CACListISF::LT_DESKTOP;
+                        return hr;
+                    }
+                }
+                break;
+            case CACListISF::LT_MYCOMPUTER:
+                pCtx->m_iNextLocation = CACListISF::LT_FAVORITES;
+                if (pCtx->m_dwOptions & ACLO_MYCOMPUTER)
+                {
+                    CComHeapPtr<ITEMIDLIST> pidl;
+                    hr = SHGetSpecialFolderLocation(NULL, CSIDL_DRIVES, &pidl);
+                    if (FAILED_UNEXPECTEDLY(hr))
+                        return S_FALSE;
+                    hr = WorkerSetLocation(pCtx, pidl.Detach());
+                    if (SUCCEEDED(hr))
+                    {
+                        pCtx->m_iLastLocation = CACListISF::LT_MYCOMPUTER;
+                        return hr;
+                    }
+                }
+                break;
+            case CACListISF::LT_FAVORITES:
+                pCtx->m_iNextLocation = CACListISF::LT_MAX;
+                if (pCtx->m_dwOptions & ACLO_FAVORITES)
+                {
+                    CComHeapPtr<ITEMIDLIST> pidl;
+                    hr = SHGetSpecialFolderLocation(NULL, CSIDL_FAVORITES, &pidl);
+                    if (FAILED_UNEXPECTEDLY(hr))
+                        return S_FALSE;
+                    hr = WorkerSetLocation(pCtx, pidl.Detach());
+                    if (SUCCEEDED(hr))
+                    {
+                        pCtx->m_iLastLocation = CACListISF::LT_FAVORITES;
+                        return hr;
+                    }
+                }
+                break;
+            case CACListISF::LT_MAX:
+            default:
+                return S_FALSE;
+        }
+        if (pCtx->IsCancelled())
+            return S_FALSE;
+    }
+}
+
+static HRESULT WorkerGetDisplayName(CACListISFWorkerCtx *pCtx, LPCITEMIDLIST pidlChild,
+                                    CComHeapPtr<WCHAR>& pszChild)
+{
     pszChild.Free();
 
     STRRET StrRet;
     DWORD dwFlags = SHGDN_INFOLDER | SHGDN_FORPARSING | SHGDN_FORADDRESSBAR;
-    HRESULT hr = m_pShellFolder->GetDisplayNameOf(pidlChild, dwFlags, &StrRet);
+    HRESULT hr = pCtx->m_pShellFolder->GetDisplayNameOf(pidlChild, dwFlags, &StrRet);
     if (FAILED(hr))
     {
         dwFlags = SHGDN_INFOLDER | SHGDN_FORPARSING;
-        hr = m_pShellFolder->GetDisplayNameOf(pidlChild, dwFlags, &StrRet);
+        hr = pCtx->m_pShellFolder->GetDisplayNameOf(pidlChild, dwFlags, &StrRet);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
     }
 
-    hr = StrRetToStrW(&StrRet, NULL, &pszChild);
-    if (FAILED_UNEXPECTEDLY(hr))
-        return hr;
-
-    TRACE("pszChild: '%S'\n", static_cast<LPCWSTR>(pszChild));
-    return hr;
+    return StrRetToStrW(&StrRet, NULL, &pszChild);
 }
 
-HRESULT
-CACListISF::GetPaths(LPCITEMIDLIST pidlChild, CComHeapPtr<WCHAR>& pszRaw,
-                     CComHeapPtr<WCHAR>& pszExpanded)
+static HRESULT WorkerGetPath(CACListISFWorkerCtx *pCtx, LPCITEMIDLIST pidlChild,
+                             CStringW& strRaw)
 {
-    TRACE("(%p, %p)\n", this, pidlChild);
-
     CComHeapPtr<WCHAR> pszChild;
-    HRESULT hr = GetDisplayName(pidlChild, pszChild);
-    if (FAILED_UNEXPECTEDLY(hr))
-        return hr;
+    HRESULT hr = WorkerGetDisplayName(pCtx, pidlChild, pszChild);
+    if (FAILED(hr) || !pszChild)
+        return FAILED(hr) ? hr : E_FAIL;
 
-    CStringW szRawPath, szExpanded;
-    if (m_szRawPath.GetLength() && m_iNextLocation == LT_DIRECTORY)
+    strRaw.Empty();
+    if (pCtx->m_szRawPath.GetLength() &&
+        pCtx->m_iLastLocation == CACListISF::LT_DIRECTORY)
     {
-        INT cchExpand = m_szRawPath.GetLength();
-        if (StrCmpNIW(pszChild, m_szRawPath, cchExpand) != 0 ||
+        INT cchExpand = pCtx->m_szRawPath.GetLength();
+        if (StrCmpNIW(pszChild, pCtx->m_szRawPath, cchExpand) != 0 ||
             pszChild[0] != L'\\' || pszChild[1] != L'\\')
         {
-            szRawPath = m_szRawPath;
-            szExpanded = m_szExpanded;
+            strRaw = pCtx->m_szRawPath;
         }
     }
-    szRawPath += pszChild;
-    szExpanded += pszChild;
+    strRaw += static_cast<LPCWSTR>(pszChild);
+    return S_OK;
+}
 
-    SHStrDupW(szRawPath, &pszRaw);
-    SHStrDupW(szExpanded, &pszExpanded);
-    TRACE("pszRaw: '%S'\n", static_cast<LPCWSTR>(pszRaw));
-    TRACE("pszExpanded: '%S'\n", static_cast<LPCWSTR>(pszExpanded));
+void CACListISF::WorkerRun(CACListISFWorkerCtx *pCtx)
+{
+    HRESULT hr;
+
+    if (pCtx->m_bUseExpand)
+    {
+        // Resolve the user-typed path here. SHParseDisplayName and
+        // BindToObject can each block on SMB; both stay off-thread.
+        CComHeapPtr<ITEMIDLIST> pidl;
+        hr = SHParseDisplayName(pCtx->m_szExpanded, NULL, &pidl, NULL, NULL);
+        if (FAILED(hr) || pCtx->IsCancelled())
+            return;
+        hr = WorkerSetLocation(pCtx, pidl.Detach());
+        if (FAILED(hr))
+            return;
+        pCtx->m_iLastLocation = CACListISF::LT_DIRECTORY;
+    }
+    else
+    {
+        if (WorkerNextLocation(pCtx) != S_OK)
+            return;
+    }
+
+    CComHeapPtr<ITEMIDLIST> pidlChild;
+    for (;;)
+    {
+        if (pCtx->IsCancelled())
+            return;
+
+        if (!pCtx->m_pEnumIDList || !pCtx->m_pShellFolder)
+        {
+            if (WorkerNextLocation(pCtx) != S_OK)
+                return;
+            continue;
+        }
+
+        pidlChild.Free();
+        hr = pCtx->m_pEnumIDList->Next(1, &pidlChild, NULL);
+        if (hr != S_OK)
+        {
+            // Drained this location; advance.
+            if (WorkerNextLocation(pCtx) != S_OK)
+                return;
+            continue;
+        }
+
+        CStringW strRaw;
+        if (FAILED(WorkerGetPath(pCtx, pidlChild, strRaw)))
+            continue;
+        if (strRaw.IsEmpty())
+            continue;
+
+        DWORD attrs = SFGAO_FOLDER | SFGAO_FILESYSTEM;
+        LPCITEMIDLIST pidlRef = pidlChild;
+        if (FAILED(pCtx->m_pShellFolder->GetAttributesOf(1, &pidlRef, &attrs)))
+            continue;
+
+        if ((pCtx->m_dwOptions & ACLO_FILESYSDIRS) && !(attrs & SFGAO_FOLDER))
+            continue;
+        if ((pCtx->m_dwOptions & (ACLO_FILESYSONLY | ACLO_FILESYSDIRS)) &&
+            !(attrs & SFGAO_FILESYSTEM))
+        {
+            continue;
+        }
+
+        // Publish iff we are still the active generation. Inside the
+        // CS so a concurrent DetachCurrentWorker() either sees us
+        // before we publish (and bumps generation, so we drop the
+        // result) or after we publish (and clears m_Results
+        // unconditionally).
+        EnterCriticalSection(&m_csState);
+        if (pCtx->m_lGeneration ==
+            InterlockedCompareExchange(&m_lActiveGeneration, 0, 0))
+        {
+            m_Results.AddTail(strRaw);
+        }
+        LeaveCriticalSection(&m_csState);
+    }
+}
+
+DWORD WINAPI CACListISF::s_WorkerThreadProc(LPVOID pv)
+{
+    CACListISFWorkerCtx *pCtx = static_cast<CACListISFWorkerCtx *>(pv);
+    CACListISF *pOwner = pCtx->m_pOwner;
+
+    HRESULT hrCo = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    pOwner->WorkerRun(pCtx);
+    if (SUCCEEDED(hrCo))
+        CoUninitialize();
+
+    // Clear the registered current-worker pointer if it still
+    // refers to us; otherwise we were already detached.
+    EnterCriticalSection(&pOwner->m_csState);
+    if (pOwner->m_pCurrentWorker == pCtx)
+        pOwner->m_pCurrentWorker = NULL;
+    LeaveCriticalSection(&pOwner->m_csState);
+
+    delete pCtx;
+    pOwner->Release(); // matches AddRef() in StartWorker
+    return 0;
+}
+
+HRESULT CACListISF::StartWorker(BOOL bUseExpand)
+{
+    // Caller must have already detached any prior worker.
+    ATLASSERT(m_pCurrentWorker == NULL);
+
+    CACListISFWorkerCtx *pCtx = new CACListISFWorkerCtx();
+    if (!pCtx)
+        return E_OUTOFMEMORY;
+
+    pCtx->m_pOwner = this;
+    pCtx->m_lGeneration = InterlockedIncrement(&m_lActiveGeneration);
+    pCtx->m_dwOptions = m_dwOptions;
+    pCtx->m_fShowHidden = m_fShowHidden;
+    pCtx->m_bUseExpand = bUseExpand;
+    pCtx->m_szRawPath = m_szRawPath;
+    pCtx->m_szExpanded = m_szExpanded;
+    pCtx->m_iNextLocation = m_iNextLocation;
+    if (m_pidlCurDir)
+        pCtx->m_pidlCurDir.Attach(ILClone(m_pidlCurDir));
+
+    AddRef();
+    pCtx->m_hThread = CreateThread(NULL, 0, s_WorkerThreadProc, pCtx, 0, NULL);
+    if (!pCtx->m_hThread)
+    {
+        Release();
+        delete pCtx;
+        return E_FAIL;
+    }
+
+    EnterCriticalSection(&m_csState);
+    m_pCurrentWorker = pCtx;
+    LeaveCriticalSection(&m_csState);
     return S_OK;
 }
 
@@ -230,87 +482,45 @@ STDMETHODIMP CACListISF::Next(ULONG celt, LPOLESTR *rgelt, ULONG *pceltFetched)
     if (pceltFetched)
         *pceltFetched = 0;
 
-    if (!m_pEnumIDList || !m_pShellFolder)
+    CStringW str;
+    BOOL bHaveResult = FALSE;
+    EnterCriticalSection(&m_csState);
+    if (!m_Results.IsEmpty())
     {
-        NextLocation();
-        if (!m_pEnumIDList || !m_pShellFolder)
-            return S_FALSE;
+        str = m_Results.RemoveHead();
+        bHaveResult = TRUE;
+    }
+    LeaveCriticalSection(&m_csState);
+
+    if (!bHaveResult)
+    {
+        // Worker has not produced anything yet (or has finished).
+        // IEnumString::Next is allowed to return S_FALSE without
+        // having exhausted the source; the autocomplete client will
+        // re-poll on the next keystroke.
+        return S_FALSE;
     }
 
-    HRESULT hr;
-    CComHeapPtr<ITEMIDLIST> pidlChild;
-    CComHeapPtr<WCHAR> pszRawPath, pszExpanded;
+    HRESULT hr = SHStrDupW(static_cast<LPCWSTR>(str), rgelt);
+    if (FAILED(hr) || !*rgelt)
+        return S_FALSE;
 
-    do
-    {
-        for (;;)
-        {
-            if (!m_pEnumIDList || !m_pShellFolder)
-            {
-                hr = S_FALSE;
-                break;
-            }
-
-            //
-            // Take strong local references for the duration of this
-            // iteration. The m_pEnumIDList->Next() call below can
-            // reenter our object via IShellFolderViewCB / browser-service
-            // callbacks and end up in SetLocation(), which releases
-            // both m_pEnumIDList and m_pShellFolder. Without the locals
-            // a subsequent m_pShellFolder use would dereference NULL.
-            //
-            CComPtr<IEnumIDList>  pEnumIDList  = m_pEnumIDList;
-            CComPtr<IShellFolder> pShellFolder = m_pShellFolder;
-
-            pidlChild.Free();
-            hr = pEnumIDList->Next(1, &pidlChild, NULL);
-            if (hr != S_OK)
-                break;
-
-            pszRawPath.Free();
-            pszExpanded.Free();
-            if (FAILED_UNEXPECTEDLY(GetPaths(pidlChild, pszRawPath, pszExpanded)))
-                continue;
-            if (!pszRawPath || !pszExpanded)
-                continue;
-
-            DWORD attrs = SFGAO_FOLDER | SFGAO_FILESYSTEM;
-            LPCITEMIDLIST pidlRef = pidlChild;
-            hr = pShellFolder->GetAttributesOf(1, &pidlRef, &attrs);
-            if (FAILED_UNEXPECTEDLY(hr))
-                continue;
-
-            if ((m_dwOptions & ACLO_FILESYSDIRS) && !(attrs & SFGAO_FOLDER))
-                continue;
-            if ((m_dwOptions & (ACLO_FILESYSONLY | ACLO_FILESYSDIRS)) && !(attrs & SFGAO_FILESYSTEM))
-                continue;
-
-            hr = S_OK;
-            break;
-        }
-    } while (hr == S_FALSE && NextLocation() == S_OK && m_pEnumIDList && m_pShellFolder);
-
-    if (hr == S_OK)
-    {
-        *rgelt = pszRawPath.Detach();
-        if (pceltFetched)
-            *pceltFetched = 1;
-    }
-    else
-    {
-        hr = S_FALSE;
-    }
+    if (pceltFetched)
+        *pceltFetched = 1;
 
     TRACE("*rgelt: %S\n", *rgelt);
-    return hr;
+    return S_OK;
 }
 
 STDMETHODIMP CACListISF::Reset()
 {
     TRACE("(%p)\n", this);
 
+    DetachCurrentWorker();
+
     m_iNextLocation = LT_DIRECTORY;
     m_szRawPath = L"";
+    m_szExpanded = L"";
 
     SHELLSTATE ss = { 0 };
     SHGetSetSettings(&ss, SSF_SHOWALLOBJECTS, FALSE);
@@ -318,17 +528,16 @@ STDMETHODIMP CACListISF::Reset()
 
     if (m_dwOptions & ACLO_CURRENTDIR)
     {
-        CComHeapPtr<ITEMIDLIST> pidl;
         if (m_pBrowserService)
         {
+            CComHeapPtr<ITEMIDLIST> pidl;
             m_pBrowserService->GetPidl(&pidl);
             if (pidl)
                 Initialize(pidl);
         }
-        HRESULT hr = SetLocation(pidl.Detach());
-        if (FAILED_UNEXPECTEDLY(hr))
-            return S_FALSE;
     }
+
+    StartWorker(FALSE);
     return S_OK;
 }
 
@@ -350,6 +559,11 @@ STDMETHODIMP CACListISF::Expand(LPCOLESTR pszExpand)
 {
     TRACE("(%p, %ls)\n", this, pszExpand);
 
+    // Detach (do not join) the prior keystroke's worker. It may be
+    // stuck inside a synchronous SMB call we cannot interrupt;
+    // joining would reintroduce the UI hang.
+    DetachCurrentWorker();
+
     m_szRawPath = pszExpand;
     m_iNextLocation = LT_DIRECTORY;
 
@@ -362,7 +576,11 @@ STDMETHODIMP CACListISF::Expand(LPCOLESTR pszExpand)
     ExpandEnvironmentStringsW(pszExpand, szExpanded, _countof(szExpanded));
     pszExpand = szExpanded;
 
-    // get full path
+    // Resolve to a full path. PathFileExistsW on a UNC root can
+    // still hit the network, but that was already part of the
+    // address bar's typed-path validation prior to this change;
+    // the worker takes the brunt of latency in SHParseDisplayName
+    // + EnumObjects.
     if (szExpanded[0] && szExpanded[1] == L':' && szExpanded[2] == 0)
     {
         // 'C:' --> 'C:\'
@@ -385,19 +603,9 @@ STDMETHODIMP CACListISF::Expand(LPCOLESTR pszExpand)
         }
     }
 
-    CComHeapPtr<ITEMIDLIST> pidl;
     m_szExpanded = pszExpand;
-    HRESULT hr = SHParseDisplayName(m_szExpanded, NULL, &pidl, NULL, NULL);
-    if (SUCCEEDED(hr))
-    {
-        hr = SetLocation(pidl.Detach());
-        if (FAILED_UNEXPECTEDLY(hr))
-        {
-            m_szRawPath = L"";
-            m_szExpanded = L"";
-        }
-    }
-    return hr;
+    StartWorker(TRUE);
+    return S_OK;
 }
 
 // *** IACList2 methods ***
