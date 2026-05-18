@@ -949,6 +949,7 @@
 @ cdecl -arch=i386 -norelay _setjmp3(ptr long)
 @ cdecl -arch=!i386 -norelay _setjmpex(ptr ptr)
 @ cdecl -arch=!i386 -norelay __intrinsic_setjmpex(ptr ptr) _setjmpex
+@ cdecl -arch=!i386 -norelay __intrinsic_setjmp(ptr) _setjmp
 @ cdecl _setmaxstdio(long)
 @ cdecl _setmbcp(long)
 @ cdecl _setmode(long long)
