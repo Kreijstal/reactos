@@ -2082,6 +2082,7 @@ typedef struct _KTHREAD
     union
     {
         ULONG NextProcessor;
+        ULONG DeferredProcessor; /* Win8+ folded the deferred CPU into NextProcessor's slot */
         struct
         {
             ULONG NextProcessorNumber : 31;
