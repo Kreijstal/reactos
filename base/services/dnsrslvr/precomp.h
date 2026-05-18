@@ -52,7 +52,11 @@ typedef struct _RESOLVER_NEG_CACHE_ENTRY
     LPWSTR Name;
     WORD wType;
     DNS_STATUS Status;
-    ULONGLONG ExpireTickMs;
+    /* GetTickCount() value at which the entry expires.  Stored as DWORD
+     * to avoid pulling in GetTickCount64 (Vista+ only and not present in
+     * older Windows SDKs); time-since checks use the wraparound-safe
+     * unsigned subtraction pattern. */
+    DWORD ExpireTickMs;
 } RESOLVER_NEG_CACHE_ENTRY, *PRESOLVER_NEG_CACHE_ENTRY;
 
 typedef struct _RESOLVER_NEG_CACHE
