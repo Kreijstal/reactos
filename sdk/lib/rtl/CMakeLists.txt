@@ -77,7 +77,6 @@ list(APPEND SOURCE
     registry.c
     res.c
     resource.c
-    runonce.c
     rxact.c
     sd.c
     security.c
@@ -140,6 +139,7 @@ list(APPEND SOURCE_VISTA
     ${RTL_WINE_SOURCE_VISTA}
     condvar.c
     locale.c
+    runonce.c
     srw.c
     threadpool.c
     unicode_vista.c
