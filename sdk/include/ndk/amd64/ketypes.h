@@ -957,10 +957,10 @@ typedef struct _KPRCB
     UINT64 StartCycles;
     UINT64 CycleTime;
 #endif
-#if  (NTDDI_VERSION < NTDDI_WINBLUE)
-    // On Win 8.1+ the FeatureBits field is extended to 64 bits
+    /* On Win 8.1+ the FeatureBits field was widened to 64 bits; carry the
+     * upper half as a sibling ULONG so the existing init code can populate
+     * the combined feature set. The slot is unused on <8.1 and harmless. */
     ULONG FeatureBitsHigh;
-#endif
 #endif
 } KPRCB, *PKPRCB;
 

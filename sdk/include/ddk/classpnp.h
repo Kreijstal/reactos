@@ -857,7 +857,10 @@ typedef struct _CLASS_FUNCTION_SUPPORT_INFO
 
 #if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
   CLASS_FUNCTION_SUPPORT HwFirmwareGetInfoSupport;
-  PSTORAGE_HW_FIRMWARE_INFO HwFirmwareInfo;
+  /* Forward declared here so this header doesn't pull in ntddstor's
+   * STORAGE_HW_FIRMWARE_INFO; consumers that need to dereference must
+   * include the full definition themselves. */
+  struct _STORAGE_HW_FIRMWARE_INFO *HwFirmwareInfo;
 #endif
 } CLASS_FUNCTION_SUPPORT_INFO, *PCLASS_FUNCTION_SUPPORT_INFO;
 #ifdef _MSC_VER
@@ -953,7 +956,8 @@ typedef struct _FUNCTIONAL_DEVICE_EXTENSION {
 #endif
 
 #if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
-  PADDITIONAL_FDO_DATA AdditionalFdoData;
+  /* classpnp-private bookkeeping; opaque to driver consumers. */
+  struct _ADDITIONAL_FDO_DATA *AdditionalFdoData;
 #else
   ULONG_PTR Reserved4;
 #endif

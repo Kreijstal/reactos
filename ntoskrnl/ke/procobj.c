@@ -61,9 +61,11 @@ KiAttachProcess(IN PKTHREAD Thread,
     /* Update Environment Pointers if needed*/
     if (SavedApcState == &Thread->SavedApcState)
     {
+#if (NTDDI_VERSION < NTDDI_WIN10)
         Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->
                                                           SavedApcState;
         Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->ApcState;
+#endif
         Thread->ApcStateIndex = AttachedApcEnvironment;
     }
 
@@ -668,8 +670,10 @@ KeDetachProcess(VOID)
     /* Restore the APC State */
     KiMoveApcState(&Thread->SavedApcState, &Thread->ApcState);
     Thread->SavedApcState.Process = NULL;
+#if (NTDDI_VERSION < NTDDI_WIN10)
     Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
     Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
+#endif
     Thread->ApcStateIndex = OriginalApcEnvironment;
 
     /* Release lock */
@@ -835,8 +839,10 @@ KeUnstackDetachProcess(IN PRKAPC_STATE ApcState)
         KiMoveApcState(&Thread->SavedApcState, &Thread->ApcState);
         Thread->SavedApcState.Process = NULL;
         Thread->ApcStateIndex = OriginalApcEnvironment;
+#if (NTDDI_VERSION < NTDDI_WIN10)
         Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
         Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
+#endif
     }
 
     /* Release lock */
