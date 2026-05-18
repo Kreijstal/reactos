@@ -282,3 +282,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(bcryptprimitives)
     add_subdirectory(dwmapi)
 endif()
+
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_subdirectory(dwrite)
+endif()
