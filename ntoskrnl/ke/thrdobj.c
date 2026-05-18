@@ -63,8 +63,15 @@ KeQueryBasePriorityThread(IN PKTHREAD Thread)
     /* Lock the thread */
     KiAcquireThreadLock(Thread);
 
-    /* Get the Process */
-    Process = Thread->ApcStatePointer[0]->Process;
+    /* Get the Process via the OriginalApcEnvironment pointer. */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    /* Win10 KTHREAD: when attached, SavedApcState carries the parent process;
+     * otherwise ApcState is the only environment. */
+    Process = (Thread->ApcStateIndex == AttachedApcEnvironment) ?
+              Thread->SavedApcState.Process : Thread->ApcState.Process;
+#else
+    Process = Thread->ApcStatePointer[OriginalApcEnvironment]->Process;
+#endif
 
     /* Calculate the base increment */
     BaseIncrement = Thread->BasePriority - Process->BasePriority;
@@ -894,8 +901,10 @@ KeInitThread(IN OUT PKTHREAD Thread,
     InitializeListHead(&Thread->ApcState.ApcListHead[KernelMode]);
     InitializeListHead(&Thread->ApcState.ApcListHead[UserMode]);
     Thread->ApcState.Process = Process;
+#if (NTDDI_VERSION < NTDDI_WIN10)
     Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
     Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
+#endif
     Thread->ApcStateIndex = OriginalApcEnvironment;
     Thread->ApcQueueable = TRUE;
 #if (NTDDI_VERSION < NTDDI_WIN8)
