@@ -69,8 +69,14 @@ ApiSetResolveToHost(
         LONG result = RtlCompareUnicodeString(&Tmp, &g_Apisets[Index].Name, TRUE);
         if (result == 0)
         {
-            // Check if this version is included
-            if (g_Apisets[Index].dwOsVersions & ApisetVersion)
+            /* Win10/11 inherit every downlevel apiset name as a forwarder
+             * alias, so match this entry if the requested version or any
+             * older bit is set on it. The auto-generated table only marks
+             * the highest Windows release that exposes a given name in its
+             * apisetschema, but the real schema contains all earlier names
+             * as downlevel aliases pointing at the same host DLL. */
+            DWORD VersionMask = ApisetVersion | (ApisetVersion - 1);
+            if (g_Apisets[Index].dwOsVersions & VersionMask)
             {
                 // Return a static string (does not have to be freed)
                 *Resolved = TRUE;
