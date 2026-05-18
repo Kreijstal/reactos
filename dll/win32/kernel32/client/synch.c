@@ -934,4 +934,40 @@ UnregisterWaitEx(IN HANDLE WaitHandle,
     return TRUE;
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+/*
+ * @implemented
+ *
+ * Address-based wait primitive (Win8+).  Windows API takes a millisecond
+ * timeout; RtlWaitOnAddress takes a relative LARGE_INTEGER in 100-ns units
+ * (negative).  WakeByAddressSingle/All are spec-side forwarders to
+ * ntdll.RtlWakeAddress{Single,All}.
+ */
+BOOL
+WINAPI
+WaitOnAddress(volatile VOID *Address,
+              PVOID CompareAddress,
+              SIZE_T AddressSize,
+              DWORD dwMilliseconds)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER Time;
+    PLARGE_INTEGER TimeoutPtr = NULL;
+
+    if (dwMilliseconds != INFINITE)
+    {
+        Time.QuadPart = -(LONGLONG)dwMilliseconds * 10000LL;
+        TimeoutPtr = &Time;
+    }
+
+    Status = RtlWaitOnAddress((PVOID)Address, CompareAddress, AddressSize, TimeoutPtr);
+    if (!NT_SUCCESS(Status) || Status == STATUS_TIMEOUT)
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+    return TRUE;
+}
+#endif
+
 /* EOF */
