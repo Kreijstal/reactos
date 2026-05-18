@@ -3415,13 +3415,17 @@ RxFinalizeVNetRoot(
         return FALSE;
     }
 
-    /* If there's an associated device, notify mini-rdr */
+    /* If there's an associated device, notify mini-rdr.  Propagate the
+     * ForceFinalize flag so a mini-RDR that keeps a per-VNetRoot keep-alive
+     * cache can bypass it on an FSCTL_DELETE_CONNECTION / forced-unmount
+     * teardown (RxFinalizeConnection calls us with ForceFinalize=TRUE). */
     if (NetRoot->pSrvCall->RxDeviceObject != NULL)
     {
         NTSTATUS Status;
+        BOOLEAN MrxForce = ForceFinalize;
 
         MINIRDR_CALL_THROUGH(Status, NetRoot->pSrvCall->RxDeviceObject->Dispatch,
-                             MRxFinalizeVNetRoot, ((PMRX_V_NET_ROOT)ThisVNetRoot, FALSE));
+                             MRxFinalizeVNetRoot, ((PMRX_V_NET_ROOT)ThisVNetRoot, &MrxForce));
         (void)Status;
     }
 
