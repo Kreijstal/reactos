@@ -105,7 +105,17 @@ KiInsertQueueApc(IN PKAPC Apc,
     }
 
     /* Get the APC State for this Index, and the mode too */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    /* Win10 removed KTHREAD::ApcStatePointer[]; the index pair maps onto the
+     * inline KAPC_STATEs via the thread's current environment: when the
+     * caller's targeted environment matches the thread's, the active
+     * ApcState is the live one; otherwise the SavedApcState carries the
+     * other side. */
+    ApcState = (Apc->ApcStateIndex == Thread->ApcStateIndex) ?
+               &Thread->ApcState : &Thread->SavedApcState;
+#else
     ApcState = Thread->ApcStatePointer[(UCHAR)Apc->ApcStateIndex];
+#endif
     ApcMode = Apc->ApcMode;
 
     /* The APC must be "inserted" already */
@@ -916,7 +926,12 @@ KeRemoveQueueApc(IN PKAPC Apc)
     {
         /* Set it as non-inserted and get the APC state */
         Apc->Inserted = FALSE;
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+        ApcState = (Apc->ApcStateIndex == Thread->ApcStateIndex) ?
+                   &Thread->ApcState : &Thread->SavedApcState;
+#else
         ApcState = Thread->ApcStatePointer[(UCHAR)Apc->ApcStateIndex];
+#endif
 
         /* Acquire the dispatcher lock and remove it from the list */
         KiAcquireDispatcherLockAtSynchLevel();
