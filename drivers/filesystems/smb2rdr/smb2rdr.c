@@ -66,13 +66,16 @@ typedef struct _SMB2RDR_V_NET_ROOT_EXTENSION {
 #define Smb2RdrGetVNetRootExtension(V) \
     (((V) == NULL) ? NULL : (PSMB2RDR_V_NET_ROOT_EXTENSION)((V)->Context))
 
-/* FCB extension: tracks the opaque daemon file handle associated with the
- * underlying libsmb2 smb2fh/smb2dir.  RDBSS may collapse compatible opens
- * onto the same SRV_OPEN, so this remains per-FCB/SRV_OPEN state while each
- * caller still gets its own FOBX from RxCreateNetFobx. */
+/* FCB extension: holds per-path state that all SRV_OPENs on this FCB
+ * share.  The daemon-side file handle is intentionally NOT stored here:
+ * RDBSS opens a fresh SRV_OPEN (and hence a fresh OP_CREATE) every time
+ * a caller's access/share mask doesn't collapse, and each daemon handle
+ * has its own lifetime governed by that SRV_OPEN.  An image section,
+ * which can outlive the user-mode handle that created it, keeps the
+ * SRV_OPEN alive until IRP_MJ_CLOSE; storing the daemon handle on the
+ * FCB would let a second opener's CloseSrvOpen wipe the slot a still-
+ * paging SRV_OPEN depends on. */
 typedef struct _SMB2RDR_FCB_EXTENSION {
-    ULONG64        DaemonFileHandle;   /* 0 if no daemon-side open */
-    BOOLEAN        IsDirectory;
     BOOLEAN        DeleteOnClose;      /* FileDispositionInformation flag,
                                          * consumed in MRxCloseSrvOpen */
     /* Share-relative path captured at MRxCreate time, needed so that the
@@ -84,8 +87,409 @@ typedef struct _SMB2RDR_FCB_EXTENSION {
 #define Smb2RdrGetFcbExtension(F) \
     (((F) == NULL) ? NULL : (PSMB2RDR_FCB_EXTENSION)((F)->Context))
 
+/* SRV_OPEN extension: tracks the per-SRV_OPEN daemon file handle returned
+ * by OP_CREATE.  Lives until rdbss calls MRxCloseSrvOpen, which is driven
+ * off IRP_MJ_CLOSE (last reference gone, image sections included) — not
+ * IRP_MJ_CLEANUP — so a section keeps its backing daemon handle as long
+ * as MM may issue paging reads against it. */
+typedef struct _SMB2RDR_SRV_OPEN_EXTENSION {
+    ULONG64 DaemonFileHandle;   /* 0 if no daemon-side open */
+    BOOLEAN IsDirectory;
+} SMB2RDR_SRV_OPEN_EXTENSION, *PSMB2RDR_SRV_OPEN_EXTENSION;
+
+#define Smb2RdrGetSrvOpenExtension(S) \
+    (((S) == NULL) ? NULL : (PSMB2RDR_SRV_OPEN_EXTENSION)((S)->Context))
+
+/* Resolve the SRV_OPEN that owns the daemon-side handle for the I/O an
+ * RX_CONTEXT is carrying.  For LowIo (paging) reads the caller's FOBX is
+ * the authoritative link; pRelevantSrvOpen is set by rdbss on the Create/
+ * Cleanup/Close/SetInfo paths.  Both routes ultimately point at the same
+ * SRV_OPEN — fall back from one to the other so we don't depend on which
+ * path armed the RX_CONTEXT. */
+static PMRX_SRV_OPEN
+Smb2RdrSrvOpenFromContext(PRX_CONTEXT RxContext)
+{
+    if (RxContext == NULL)
+        return NULL;
+    if (RxContext->pRelevantSrvOpen != NULL)
+        return RxContext->pRelevantSrvOpen;
+    if (RxContext->pFobx != NULL)
+        return RxContext->pFobx->pSrvOpen;
+    return NULL;
+}
+
 static struct _MINIRDR_DISPATCH smb2rdr_ops;
 static PRDBSS_DEVICE_OBJECT     smb2rdr_dev;
+
+/* ---------- SrvCall / NetRoot keep-alive cache ----------
+ *
+ * Windows RDR2 keeps SRV_CALL and NET_ROOT objects alive past the last user
+ * reference so that an Explorer autocomplete keystroke loop on a UNC path
+ * does not re-handshake on every key.  The cache is a per-(server, share)
+ * TTL list of daemon handles: when MRxFinalizeVNetRoot fires with the last
+ * user reference gone we insert the handle here rather than disconnecting
+ * immediately; the next MRxCreateVNetRoot for the same share hits the
+ * cache and reuses the existing libsmb2 context without an OP_CONNECT_SHARE
+ * round-trip.  Entries past their deadline are reaped by a periodic worker.
+ *
+ * TTL choice: 30 seconds.  Windows's documented RDR2 default for the
+ * SrvCall keep-alive (the longer of the two; NET_ROOT is ~10 s) is 30 s
+ * via HKLM\System\CCS\Services\LanmanWorkstation\Parameters\KeepConn.
+ * Since smb2rdr collapses the SrvCall/NetRoot/VNetRoot lifecycle on a
+ * single daemon-handle granularity, a single 30 s window matches the
+ * outermost (SrvCall) Windows behavior.  The sweep tick is 10 s so the
+ * worst-case extra liveness is +10 s.
+ *
+ * Force-finalization (rdbss passes *Force=TRUE on FSCTL_INVALIDATE_VOLUMES
+ * / RxFinalizeConnection paths) bypasses the cache: the handle is
+ * disconnected immediately as if there were no keep-alive at all.
+ *
+ * Reuse safety: the cached handle owns a libsmb2 smb2_context on the
+ * daemon side.  Nothing else holds a reference to it once we cache it —
+ * any prior SRV_OPEN / FCB on top of the VNetRoot has been torn down by
+ * rdbss before MRxFinalizeVNetRoot fires (the V_NET_ROOT cannot be
+ * finalized otherwise).  A subsequent OP_CREATE under a reused handle
+ * issues a fresh smb2_open on the existing tcon. */
+#define SMB2RDR_KA_TTL_SEC         30
+#define SMB2RDR_KA_SWEEP_TICK_SEC  10
+
+typedef struct _SMB2RDR_KA_ENTRY {
+    LIST_ENTRY        ListEntry;
+    UNICODE_STRING    Server;       /* "server" — no leading backslash */
+    UNICODE_STRING    Share;        /* "share"  — no leading backslash */
+    ULONG64           DaemonHandle;
+    LARGE_INTEGER     DeadlineTick; /* KeQueryTickCount() value at which to reap */
+} SMB2RDR_KA_ENTRY, *PSMB2RDR_KA_ENTRY;
+
+static LIST_ENTRY      g_KaList;
+static KSPIN_LOCK      g_KaLock;
+static KTIMER          g_KaTimer;
+static KDPC            g_KaDpc;
+static WORK_QUEUE_ITEM g_KaWorkItem;
+static volatile LONG   g_KaSweepArmed = 0;   /* 1 while DPC/worker pair is queued */
+static volatile LONG   g_KaTimerArmed = 0;
+static BOOLEAN         g_KaInitialized = FALSE;
+static BOOLEAN         g_KaShuttingDown = FALSE;
+
+#define SMB2RDR_KA_POOL_TAG 'aKsS'   /* "SsKa" */
+
+static VOID
+Smb2RdrKaArmTimerLocked(VOID)
+{
+    LARGE_INTEGER due;
+
+    if (g_KaShuttingDown)
+        return;
+    if (InterlockedCompareExchange(&g_KaTimerArmed, 1, 0) != 0)
+        return;
+    due.QuadPart = -(LONGLONG)SMB2RDR_KA_SWEEP_TICK_SEC * 10000000LL;
+    KeSetTimer(&g_KaTimer, due, &g_KaDpc);
+}
+
+static VOID NTAPI
+Smb2RdrKaWorker(PVOID Context)
+{
+    LIST_ENTRY local;
+    KIRQL irql;
+    LARGE_INTEGER now;
+    PLIST_ENTRY cur;
+    PLIST_ENTRY next;
+    BOOLEAN needRequeue;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    InitializeListHead(&local);
+
+    KeQueryTickCount(&now);
+
+    KeAcquireSpinLock(&g_KaLock, &irql);
+
+    cur = g_KaList.Flink;
+    while (cur != &g_KaList) {
+        PSMB2RDR_KA_ENTRY e = CONTAINING_RECORD(cur, SMB2RDR_KA_ENTRY, ListEntry);
+        next = cur->Flink;
+        if (g_KaShuttingDown || e->DeadlineTick.QuadPart <= now.QuadPart) {
+            RemoveEntryList(&e->ListEntry);
+            InsertTailList(&local, &e->ListEntry);
+        }
+        cur = next;
+    }
+
+    needRequeue = !IsListEmpty(&g_KaList) && !g_KaShuttingDown;
+
+    KeReleaseSpinLock(&g_KaLock, irql);
+
+    while (!IsListEmpty(&local)) {
+        PLIST_ENTRY ent = RemoveHeadList(&local);
+        PSMB2RDR_KA_ENTRY e = CONTAINING_RECORD(ent, SMB2RDR_KA_ENTRY, ListEntry);
+        ULONG64 handle = e->DaemonHandle;
+        NTSTATUS dStatus = STATUS_UNSUCCESSFUL;
+        ULONG outActual = 0;
+
+        DPRINT1("SMB2RDR: KA reap server=%wZ share=%wZ handle=0x%llx\n",
+                &e->Server, &e->Share, handle);
+
+        if (handle != 0) {
+            (void)SmbRdrIssueUpcall(SMB2D_OP_DISCONNECT,
+                                    &handle, (ULONG)sizeof(handle),
+                                    NULL, 0, &outActual,
+                                    &dStatus,
+                                    5);
+        }
+
+        if (e->Server.Buffer)
+            ExFreePoolWithTag(e->Server.Buffer, SMB2RDR_KA_POOL_TAG);
+        if (e->Share.Buffer)
+            ExFreePoolWithTag(e->Share.Buffer, SMB2RDR_KA_POOL_TAG);
+        ExFreePoolWithTag(e, SMB2RDR_KA_POOL_TAG);
+    }
+
+    InterlockedExchange(&g_KaSweepArmed, 0);
+
+    if (needRequeue) {
+        KeAcquireSpinLock(&g_KaLock, &irql);
+        Smb2RdrKaArmTimerLocked();
+        KeReleaseSpinLock(&g_KaLock, irql);
+    }
+}
+
+static VOID NTAPI
+Smb2RdrKaDpc(PKDPC Dpc, PVOID DeferredContext, PVOID Sys1, PVOID Sys2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(DeferredContext);
+    UNREFERENCED_PARAMETER(Sys1);
+    UNREFERENCED_PARAMETER(Sys2);
+
+    InterlockedExchange(&g_KaTimerArmed, 0);
+
+    /* Coalesce overlapping ticks: only queue the worker if it isn't already
+     * pending.  The worker re-arms the timer at exit if the list is still
+     * non-empty. */
+    if (InterlockedCompareExchange(&g_KaSweepArmed, 1, 0) == 0) {
+        ExQueueWorkItem(&g_KaWorkItem, DelayedWorkQueue);
+    }
+}
+
+static VOID
+Smb2RdrKaInit(VOID)
+{
+    if (g_KaInitialized)
+        return;
+    InitializeListHead(&g_KaList);
+    KeInitializeSpinLock(&g_KaLock);
+    KeInitializeTimer(&g_KaTimer);
+    KeInitializeDpc(&g_KaDpc, Smb2RdrKaDpc, NULL);
+    ExInitializeWorkItem(&g_KaWorkItem, Smb2RdrKaWorker, NULL);
+    g_KaInitialized = TRUE;
+}
+
+static VOID
+Smb2RdrKaShutdown(VOID)
+{
+    LIST_ENTRY drain;
+    KIRQL irql;
+
+    if (!g_KaInitialized)
+        return;
+
+    InitializeListHead(&drain);
+
+    KeAcquireSpinLock(&g_KaLock, &irql);
+    g_KaShuttingDown = TRUE;
+    while (!IsListEmpty(&g_KaList)) {
+        PLIST_ENTRY ent = RemoveHeadList(&g_KaList);
+        InsertTailList(&drain, ent);
+    }
+    KeReleaseSpinLock(&g_KaLock, irql);
+
+    (VOID)KeCancelTimer(&g_KaTimer);
+    /* Worker may already be running; if so the drain we just snatched is
+     * disjoint and safe to free. */
+    while (!IsListEmpty(&drain)) {
+        PLIST_ENTRY ent = RemoveHeadList(&drain);
+        PSMB2RDR_KA_ENTRY e = CONTAINING_RECORD(ent, SMB2RDR_KA_ENTRY, ListEntry);
+        ULONG64 handle = e->DaemonHandle;
+        NTSTATUS dStatus = STATUS_UNSUCCESSFUL;
+        ULONG outActual = 0;
+
+        if (handle != 0) {
+            (void)SmbRdrIssueUpcall(SMB2D_OP_DISCONNECT,
+                                    &handle, (ULONG)sizeof(handle),
+                                    NULL, 0, &outActual,
+                                    &dStatus,
+                                    5);
+        }
+        if (e->Server.Buffer)
+            ExFreePoolWithTag(e->Server.Buffer, SMB2RDR_KA_POOL_TAG);
+        if (e->Share.Buffer)
+            ExFreePoolWithTag(e->Share.Buffer, SMB2RDR_KA_POOL_TAG);
+        ExFreePoolWithTag(e, SMB2RDR_KA_POOL_TAG);
+    }
+}
+
+/* Split "\server" / "\server\share" into bare components (no leading
+ * backslashes).  Returns FALSE on a malformed input. */
+static BOOLEAN
+Smb2RdrKaSplit(PUNICODE_STRING SrvCallName,
+               PUNICODE_STRING NetRootName,
+               PUNICODE_STRING OutServer,
+               PUNICODE_STRING OutShare)
+{
+    PWCHAR srv, sh;
+    USHORT srvBytes, shBytes;
+    USHORT srvPrefix;
+
+    if (SrvCallName == NULL || SrvCallName->Buffer == NULL ||
+        SrvCallName->Length < sizeof(WCHAR))
+        return FALSE;
+    if (NetRootName == NULL || NetRootName->Buffer == NULL)
+        return FALSE;
+
+    srv = SrvCallName->Buffer + 1;
+    srvBytes = (USHORT)(SrvCallName->Length - sizeof(WCHAR));
+
+    srvPrefix = SrvCallName->Length;
+    if (NetRootName->Length <= srvPrefix + sizeof(WCHAR))
+        return FALSE;
+    sh = (PWCHAR)((PUCHAR)NetRootName->Buffer + srvPrefix);
+    if (*sh == L'\\') {
+        sh++;
+        shBytes = (USHORT)(NetRootName->Length - srvPrefix - sizeof(WCHAR));
+    } else {
+        shBytes = (USHORT)(NetRootName->Length - srvPrefix);
+    }
+    /* Strip a path tail "\rest" if rdbss handed us a longer name. */
+    {
+        USHORT i;
+        for (i = 0; i < shBytes / sizeof(WCHAR); ++i) {
+            if (sh[i] == L'\\') {
+                shBytes = (USHORT)(i * sizeof(WCHAR));
+                break;
+            }
+        }
+    }
+    if (shBytes == 0)
+        return FALSE;
+
+    OutServer->Buffer = srv;
+    OutServer->Length = OutServer->MaximumLength = srvBytes;
+    OutShare->Buffer = sh;
+    OutShare->Length = OutShare->MaximumLength = shBytes;
+    return TRUE;
+}
+
+/* Pop a matching entry if its deadline hasn't elapsed.  Returns the
+ * daemon handle (non-zero) on hit, 0 on miss/expired. */
+static ULONG64
+Smb2RdrKaTake(PUNICODE_STRING Server, PUNICODE_STRING Share)
+{
+    KIRQL irql;
+    LARGE_INTEGER now;
+    PLIST_ENTRY cur;
+    PSMB2RDR_KA_ENTRY hit = NULL;
+
+    if (!g_KaInitialized)
+        return 0;
+
+    KeQueryTickCount(&now);
+
+    KeAcquireSpinLock(&g_KaLock, &irql);
+    for (cur = g_KaList.Flink; cur != &g_KaList; cur = cur->Flink) {
+        PSMB2RDR_KA_ENTRY e = CONTAINING_RECORD(cur, SMB2RDR_KA_ENTRY, ListEntry);
+        if (e->DeadlineTick.QuadPart <= now.QuadPart)
+            continue;  /* expired; worker will reap shortly */
+        if (RtlEqualUnicodeString(&e->Server, Server, TRUE) &&
+            RtlEqualUnicodeString(&e->Share,  Share,  TRUE)) {
+            RemoveEntryList(&e->ListEntry);
+            hit = e;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&g_KaLock, irql);
+
+    if (hit == NULL)
+        return 0;
+
+    {
+        ULONG64 handle = hit->DaemonHandle;
+        /* Object's refcount-while-cached invariant: every entry on the list
+         * owns exactly one daemon-side smb2_context.  We are about to
+         * transfer that ownership to the caller. */
+        ASSERT(handle != 0);
+        if (hit->Server.Buffer)
+            ExFreePoolWithTag(hit->Server.Buffer, SMB2RDR_KA_POOL_TAG);
+        if (hit->Share.Buffer)
+            ExFreePoolWithTag(hit->Share.Buffer, SMB2RDR_KA_POOL_TAG);
+        ExFreePoolWithTag(hit, SMB2RDR_KA_POOL_TAG);
+        return handle;
+    }
+}
+
+/* Park a daemon handle in the cache for SMB2RDR_KA_TTL_SEC.  On allocation
+ * failure the caller MUST disconnect the handle itself — we never silently
+ * leak a libsmb2 context. */
+static BOOLEAN
+Smb2RdrKaPut(PUNICODE_STRING Server, PUNICODE_STRING Share, ULONG64 Handle)
+{
+    PSMB2RDR_KA_ENTRY e;
+    LARGE_INTEGER now;
+    ULONG tickIncrement;
+    LONGLONG ttlTicks;
+    KIRQL irql;
+
+    if (!g_KaInitialized || g_KaShuttingDown || Handle == 0)
+        return FALSE;
+    if (Server == NULL || Server->Length == 0 ||
+        Share  == NULL || Share->Length == 0)
+        return FALSE;
+
+    e = ExAllocatePoolWithTag(NonPagedPool, sizeof(*e), SMB2RDR_KA_POOL_TAG);
+    if (e == NULL)
+        return FALSE;
+    RtlZeroMemory(e, sizeof(*e));
+
+    e->Server.Buffer = ExAllocatePoolWithTag(NonPagedPool, Server->Length,
+                                             SMB2RDR_KA_POOL_TAG);
+    if (e->Server.Buffer == NULL) {
+        ExFreePoolWithTag(e, SMB2RDR_KA_POOL_TAG);
+        return FALSE;
+    }
+    RtlCopyMemory(e->Server.Buffer, Server->Buffer, Server->Length);
+    e->Server.Length = e->Server.MaximumLength = Server->Length;
+
+    e->Share.Buffer = ExAllocatePoolWithTag(NonPagedPool, Share->Length,
+                                            SMB2RDR_KA_POOL_TAG);
+    if (e->Share.Buffer == NULL) {
+        ExFreePoolWithTag(e->Server.Buffer, SMB2RDR_KA_POOL_TAG);
+        ExFreePoolWithTag(e, SMB2RDR_KA_POOL_TAG);
+        return FALSE;
+    }
+    RtlCopyMemory(e->Share.Buffer, Share->Buffer, Share->Length);
+    e->Share.Length = e->Share.MaximumLength = Share->Length;
+
+    e->DaemonHandle = Handle;
+
+    KeQueryTickCount(&now);
+    tickIncrement = KeQueryTimeIncrement();   /* 100-ns units per tick */
+    /* TTL in ticks = TTL_seconds * 10_000_000 / tickIncrement */
+    ttlTicks = ((LONGLONG)SMB2RDR_KA_TTL_SEC * 10000000LL) / (LONGLONG)tickIncrement;
+    e->DeadlineTick.QuadPart = now.QuadPart + ttlTicks;
+
+    KeAcquireSpinLock(&g_KaLock, &irql);
+    if (g_KaShuttingDown) {
+        KeReleaseSpinLock(&g_KaLock, irql);
+        ExFreePoolWithTag(e->Server.Buffer, SMB2RDR_KA_POOL_TAG);
+        ExFreePoolWithTag(e->Share.Buffer, SMB2RDR_KA_POOL_TAG);
+        ExFreePoolWithTag(e, SMB2RDR_KA_POOL_TAG);
+        return FALSE;
+    }
+    InsertTailList(&g_KaList, &e->ListEntry);
+    Smb2RdrKaArmTimerLocked();
+    KeReleaseSpinLock(&g_KaLock, irql);
+
+    return TRUE;
+}
 
 /* ---------- unimplemented leaves ---------- */
 
@@ -109,8 +513,9 @@ smb2rdr_AreFilesAliased(PFCB a, PFCB b)
  * RDBSS_MANAGE_FCB_EXTENSION flag), so rdbss reclaims it along with the
  * FCB itself.  The one dynamic thing we own is the Path buffer stashed at
  * MRxCreate time; release it here before rdbss zeroes the extension.
- * MRxCloseSrvOpen has already told the daemon to drop its libsmb2 handle,
- * so the handle slot sits at DaemonFileHandle == 0 by the time we get here. */
+ * Daemon-side handles are owned per-SRV_OPEN; rdbss has already finalised
+ * every SRV_OPEN backing this FCB through MRxCloseSrvOpen by the time we
+ * get here, so there is nothing FCB-scoped left to release. */
 NTSTATUS NTAPI
 smb2rdr_DeallocateForFcb(IN OUT PMRX_FCB pFcb)
 {
@@ -340,6 +745,26 @@ smb2rdr_CreateVNetRootInner(PVOID pContext)
         goto out;
     }
 
+    /* Keep-alive cache: if the same \server\share was finalized within the
+     * TTL window and the daemon handle is still parked, reuse it and skip
+     * the OP_CONNECT_SHARE round-trip entirely. */
+    {
+        UNICODE_STRING kaServer, kaShare;
+        if (Smb2RdrKaSplit(pSrvCall->pSrvCallName, pNetRoot->pNetRootName,
+                           &kaServer, &kaShare)) {
+            ULONG64 cached = Smb2RdrKaTake(&kaServer, &kaShare);
+            if (cached != 0) {
+                ext->DaemonHandle = cached;
+                pNetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
+                pNetRoot->DeviceType = FILE_DEVICE_DISK;
+                DPRINT1("SMB2RDR: MRxCreateVNetRoot cache hit srv=%wZ share=%wZ "
+                        "handle=0x%llx\n", &kaServer, &kaShare, cached);
+                status = STATUS_SUCCESS;
+                goto out;
+            }
+        }
+    }
+
     status = smb2rdr_PackConnectShare(pSrvCall, pNetRoot->pNetRootName,
                                       &inBuf, &inLen);
     if (status != STATUS_SUCCESS)
@@ -482,15 +907,47 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
                          IN PBOOLEAN Force)
 {
     PSMB2RDR_V_NET_ROOT_EXTENSION ext = Smb2RdrGetVNetRootExtension(VNetRoot);
+    PMRX_NET_ROOT pNetRoot;
+    PMRX_SRV_CALL pSrvCall;
+    BOOLEAN forced;
     ULONG64 handle;
+    BOOLEAN parked = FALSE;
 
-    UNREFERENCED_PARAMETER(Force);
+    forced = (Force != NULL && *Force);
 
-    if (ext != NULL && ext->DaemonHandle != 0) {
-        handle = ext->DaemonHandle;
-        ext->DaemonHandle = 0;
-        DPRINT1("SMB2RDR: FinalizeVNetRoot handle=0x%llx\n", handle);
+    if (ext == NULL || ext->DaemonHandle == 0) {
+        DPRINT1("SMB2RDR: FinalizeVNetRoot (no handle)\n");
+        return STATUS_SUCCESS;
+    }
 
+    handle = ext->DaemonHandle;
+    ext->DaemonHandle = 0;
+
+    pNetRoot = VNetRoot->pNetRoot;
+    pSrvCall = (pNetRoot != NULL) ? pNetRoot->pSrvCall : NULL;
+
+    /* Soft finalize: park the daemon handle in the keep-alive cache so a
+     * follow-up MRxCreateVNetRoot for the same \server\share within
+     * SMB2RDR_KA_TTL_SEC can reuse it without re-handshaking.  Forced
+     * finalization (rdbss passes Force=TRUE on FSCTL_INVALIDATE_VOLUMES /
+     * forced-unmount paths) bypasses the cache. */
+    if (!forced && pSrvCall != NULL && pNetRoot != NULL) {
+        UNICODE_STRING kaServer, kaShare;
+        if (Smb2RdrKaSplit(pSrvCall->pSrvCallName, pNetRoot->pNetRootName,
+                           &kaServer, &kaShare)) {
+            parked = Smb2RdrKaPut(&kaServer, &kaShare, handle);
+            if (parked) {
+                DPRINT1("SMB2RDR: FinalizeVNetRoot park srv=%wZ share=%wZ "
+                        "handle=0x%llx\n", &kaServer, &kaShare, handle);
+            }
+        }
+    }
+
+    if (!parked) {
+        NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
+        ULONG outActual = 0;
+        DPRINT1("SMB2RDR: FinalizeVNetRoot disconnect handle=0x%llx forced=%u\n",
+                handle, forced);
         /* Best-effort: ask the daemon to tear down its libsmb2 context.
          * If the bridge is down or the daemon is gone the kernel side
          * still unwinds cleanly — the handle reference is dropped either
@@ -498,18 +955,12 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
          * smb2d restart.  SmbRdrIssueUpcall is self-gating via gUpcallInit
          * and simply returns STATUS_DEVICE_NOT_READY if the bridge is
          * already torn down. */
-        {
-            NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
-            ULONG outActual = 0;
-            (void)SmbRdrIssueUpcall(
-                SMB2D_OP_DISCONNECT,
-                &handle, (ULONG)sizeof(handle),
-                NULL, 0, &outActual,
-                &daemonStatus,
-                5 /* seconds */);
-        }
-    } else {
-        DPRINT1("SMB2RDR: FinalizeVNetRoot (no handle)\n");
+        (void)SmbRdrIssueUpcall(
+            SMB2D_OP_DISCONNECT,
+            &handle, (ULONG)sizeof(handle),
+            NULL, 0, &outActual,
+            &daemonStatus,
+            5 /* seconds */);
     }
 
     return STATUS_SUCCESS;
@@ -535,6 +986,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
     PMRX_FCB Fcb = RxContext->pFcb;
     PSMB2RDR_V_NET_ROOT_EXTENSION vNetExt;
     PSMB2RDR_FCB_EXTENSION fcbExt;
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt;
     PNT_CREATE_PARAMETERS params;
     PUNICODE_STRING relName;
     PUCHAR inBuf = NULL;
@@ -552,7 +1004,8 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
 
     vNetExt = Smb2RdrGetVNetRootExtension(SrvOpen->pVNetRoot);
     fcbExt  = Smb2RdrGetFcbExtension(Fcb);
-    if (vNetExt == NULL || fcbExt == NULL ||
+    soExt   = Smb2RdrGetSrvOpenExtension(SrvOpen);
+    if (vNetExt == NULL || fcbExt == NULL || soExt == NULL ||
         vNetExt->DaemonHandle == 0)
     {
         DPRINT1("SMB2RDR: MRxCreate: no daemon share handle on vnet\n");
@@ -673,8 +1126,14 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
                                    &initPkt);
     }
 
-    fcbExt->DaemonFileHandle = out.FileHandle;
-    fcbExt->IsDirectory      = out.IsDirectory ? TRUE : FALSE;
+    /* SRV_OPEN owns the daemon handle for its lifetime — see
+     * SMB2RDR_SRV_OPEN_EXTENSION.  Setting it here also guards against the
+     * second (collapsed-FCB but distinct SRV_OPEN) opener clobbering the
+     * first opener's image-section-backing handle, which used to land in
+     * FcbExtension->DaemonFileHandle. */
+    ASSERT(soExt->DaemonFileHandle == 0);
+    soExt->DaemonFileHandle = out.FileHandle;
+    soExt->IsDirectory      = out.IsDirectory ? TRUE : FALSE;
     fcbExt->DeleteOnClose    = FALSE;
 
     /* Cache the share-relative path so MRxSetFileInfo (rename) and the
@@ -773,6 +1232,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
     PMRX_FCB Fcb = RxContext->pFcb;
     PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
     PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     PSMB2RDR_V_NET_ROOT_EXTENSION vNetExt =
         (SrvOpen != NULL) ? Smb2RdrGetVNetRootExtension(SrvOpen->pVNetRoot)
                           : NULL;
@@ -784,7 +1244,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
     NTSTATUS bridgeStatus;
     NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
 
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+    if (soExt == NULL || soExt->DaemonFileHandle == 0) {
         /* Nothing to close daemon-side — either MRxCreate never ran to
          * completion, or a prior CloseSrvOpen already cleared the slot
          * (rdbss can call us twice on the scavenger path). */
@@ -792,13 +1252,14 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
         return STATUS_SUCCESS;
     }
 
-    handle = fcbExt->DaemonFileHandle;
-    isDir  = fcbExt->IsDirectory;
-    wantUnlink = fcbExt->DeleteOnClose;
+    handle = soExt->DaemonFileHandle;
+    isDir  = soExt->IsDirectory;
+    wantUnlink = (fcbExt != NULL) ? fcbExt->DeleteOnClose : FALSE;
     /* Clear the slot up-front so a racing finalize doesn't double-close
      * even if the upcall path bounces (timeout, bridge not ready, etc.). */
-    fcbExt->DaemonFileHandle = 0;
-    fcbExt->DeleteOnClose    = FALSE;
+    soExt->DaemonFileHandle = 0;
+    if (fcbExt != NULL)
+        fcbExt->DeleteOnClose    = FALSE;
 
     DPRINT("SMB2RDR: MRxCloseSrvOpen handle=0x%llx is_dir=%u delete=%u\n",
            handle, isDir, wantUnlink);
@@ -889,9 +1350,9 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
 static NTSTATUS NTAPI
 smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
 {
-    PMRX_FCB Fcb = RxContext->pFcb;
     PMRX_FOBX Fobx = RxContext->pFobx;
-    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PMRX_SRV_OPEN SrvOpen = Smb2RdrSrvOpenFromContext(RxContext);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     FILE_INFORMATION_CLASS infoClass;
     PVOID userBuf;
     LONG userBufLen;
@@ -909,7 +1370,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
     if (RxContext->Info.Buffer == NULL)
         return STATUS_INVALID_USER_BUFFER;
 
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0 || !fcbExt->IsDirectory) {
+    if (soExt == NULL || soExt->DaemonFileHandle == 0 || !soExt->IsDirectory) {
         DPRINT1("SMB2RDR: MRxQueryDirectory: no daemon dir handle\n");
         return STATUS_INVALID_HANDLE;
     }
@@ -948,7 +1409,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
             goto out;
         }
         RtlZeroMemory(opIn, inLen);
-        opIn->FileHandle        = fcbExt->DaemonFileHandle;
+        opIn->FileHandle        = soExt->DaemonFileHandle;
         opIn->InfoClass         = (ULONG)infoClass;
         opIn->MaxOutputLen      = (ULONG)userBufLen;
         opIn->RestartScan       = (RxContext->QueryDirectory.RestartScan ||
@@ -977,7 +1438,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
 
     DPRINT("SMB2RDR: MRxQueryDirectory handle=0x%llx class=%d buf=%d "
            "restart=%u initial=%u single=%u filter=%wZ\n",
-           fcbExt->DaemonFileHandle, (int)infoClass, userBufLen,
+           soExt->DaemonFileHandle, (int)infoClass, userBufLen,
            (unsigned)RxContext->QueryDirectory.RestartScan,
            (unsigned)RxContext->QueryDirectory.InitialQuery,
            (unsigned)RxContext->QueryDirectory.ReturnSingleEntry,
@@ -1085,8 +1546,8 @@ out:
 static NTSTATUS NTAPI
 smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
 {
-    PMRX_FCB Fcb = RxContext->pFcb;
-    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PMRX_SRV_OPEN SrvOpen = Smb2RdrSrvOpenFromContext(RxContext);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
     PMDL mdl;
     PUCHAR dst;
@@ -1095,13 +1556,16 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
     ULONG   done = 0;
     NTSTATUS status = STATUS_SUCCESS;
 
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] no daemon handle\n");
-        return STATUS_INVALID_HANDLE;
-    }
-    if (fcbExt->IsDirectory) {
+    /* Invariant: while MM/Cc can issue paging reads against an FCB the
+     * backing SRV_OPEN is alive (rdbss drives MRxCloseSrvOpen off
+     * IRP_MJ_CLOSE, which only fires once every kernel reference,
+     * sections included, has been dropped).  A NULL/0 slot here means
+     * a previous CloseSrvOpen wiped the wrong SRV_OPEN's daemon handle. */
+    ASSERT(soExt != NULL);
+    ASSERT(soExt->DaemonFileHandle != 0);
+    if (soExt->IsDirectory) {
         DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] on directory handle=0x%llx\n",
-                fcbExt->DaemonFileHandle);
+                soExt->DaemonFileHandle);
         return STATUS_FILE_IS_A_DIRECTORY;
     }
 
@@ -1127,7 +1591,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
     }
 
     DPRINT("SMB2RDR: MRxLowIOSubmit[READ] fh=0x%llx offset=%llu len=%lu\n",
-             fcbExt->DaemonFileHandle,
+             soExt->DaemonFileHandle,
              (unsigned long long)offset, total);
 
     while (done < total) {
@@ -1155,7 +1619,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         }
 
         RtlZeroMemory(&in, sizeof(in));
-        in.FileHandle = fcbExt->DaemonFileHandle;
+        in.FileHandle = soExt->DaemonFileHandle;
         in.Offset     = offset + done;
         in.Length     = chunk;
 
@@ -1298,8 +1762,8 @@ smb2rdr_ExtendForCache(IN OUT PRX_CONTEXT RxContext,
 static NTSTATUS NTAPI
 smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
 {
-    PMRX_FCB Fcb = RxContext->pFcb;
-    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PMRX_SRV_OPEN SrvOpen = Smb2RdrSrvOpenFromContext(RxContext);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     PLOWIO_CONTEXT LowIo = &RxContext->LowIoContext;
     PMDL mdl;
     PUCHAR src;
@@ -1308,13 +1772,13 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
     ULONG   done = 0;
     NTSTATUS status = STATUS_SUCCESS;
 
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] no daemon handle\n");
-        return STATUS_INVALID_HANDLE;
-    }
-    if (fcbExt->IsDirectory) {
+    /* See smb2rdr_Read: while paging IO is in flight against this FCB the
+     * SRV_OPEN that armed the daemon handle is still alive. */
+    ASSERT(soExt != NULL);
+    ASSERT(soExt->DaemonFileHandle != 0);
+    if (soExt->IsDirectory) {
         DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] on directory handle=0x%llx\n",
-                fcbExt->DaemonFileHandle);
+                soExt->DaemonFileHandle);
         return STATUS_FILE_IS_A_DIRECTORY;
     }
 
@@ -1340,7 +1804,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
     }
 
     DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] fh=0x%llx offset=%llu len=%lu\n",
-             fcbExt->DaemonFileHandle,
+             soExt->DaemonFileHandle,
              (unsigned long long)offset, total);
 
     while (done < total) {
@@ -1366,7 +1830,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
         }
 
         RtlZeroMemory(in, sizeof(*in));
-        in->FileHandle = fcbExt->DaemonFileHandle;
+        in->FileHandle = soExt->DaemonFileHandle;
         in->Offset     = offset + done;
         in->Length     = chunk;
 
@@ -1532,8 +1996,8 @@ Smb2FillNetworkOpenInfo(PFILE_NETWORK_OPEN_INFORMATION noi,
 static NTSTATUS NTAPI
 smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
 {
-    PMRX_FCB Fcb = RxContext->pFcb;
-    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PMRX_SRV_OPEN SrvOpen = Smb2RdrSrvOpenFromContext(RxContext);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     FILE_INFORMATION_CLASS infoClass;
     PVOID userBuf;
     LONG userBufLen;
@@ -1547,7 +2011,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
 
     if (RxContext->Info.Buffer == NULL)
         return STATUS_INVALID_USER_BUFFER;
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+    if (soExt == NULL || soExt->DaemonFileHandle == 0) {
         DPRINT1("SMB2RDR: MRxQueryFileInfo: no daemon handle\n");
         return STATUS_INVALID_HANDLE;
     }
@@ -1598,7 +2062,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
 
     RtlZeroMemory(&out, sizeof(out));
 
-    if (fcbExt->IsDirectory) {
+    if (soExt->IsDirectory) {
         out.Stat.Type       = SMB2RDR_STAT_TYPE_DIRECTORY;
         out.Stat.NLink      = 1;
         out.Stat.Size       = 0;
@@ -1607,10 +2071,10 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     }
 
     RtlZeroMemory(&in, sizeof(in));
-    in.FileHandle = fcbExt->DaemonFileHandle;
+    in.FileHandle = soExt->DaemonFileHandle;
 
     DPRINT("SMB2RDR: MRxQueryFileInfo class=%d fh=0x%llx buflen=%d\n",
-             (int)infoClass, fcbExt->DaemonFileHandle, userBufLen);
+             (int)infoClass, soExt->DaemonFileHandle, userBufLen);
 
     bridgeStatus = SmbRdrIssueUpcall(
         SMB2D_OP_QUERY_INFO,
@@ -1640,7 +2104,7 @@ HaveStat:
      * smb2d builds may only set Type=1 without translating it to the NT
      * attribute bitmap. */
     if ((out.Stat.Attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
-        fcbExt->IsDirectory)
+        soExt->IsDirectory)
     {
         out.Stat.Attributes |= FILE_ATTRIBUTE_DIRECTORY;
     }
@@ -1780,27 +2244,27 @@ HaveStat:
 static NTSTATUS NTAPI
 smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
 {
-    PMRX_FCB Fcb = RxContext->pFcb;
-    PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PMRX_SRV_OPEN SrvOpen = Smb2RdrSrvOpenFromContext(RxContext);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     OP_FSYNC_IN in;
     ULONG outActual = 0;
     NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
     NTSTATUS bridgeStatus;
 
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+    if (soExt == NULL || soExt->DaemonFileHandle == 0) {
         /* Nothing open on the daemon side — nothing to flush. */
         return STATUS_SUCCESS;
     }
-    if (fcbExt->IsDirectory) {
+    if (soExt->IsDirectory) {
         /* SMB2 has no directory-flush op; the server has nothing to sync. */
         return STATUS_SUCCESS;
     }
 
     DPRINT("SMB2RDR: MRxFlush fh=0x%llx\n",
-             fcbExt->DaemonFileHandle);
+             soExt->DaemonFileHandle);
 
     RtlZeroMemory(&in, sizeof(in));
-    in.FileHandle = fcbExt->DaemonFileHandle;
+    in.FileHandle = soExt->DaemonFileHandle;
 
     bridgeStatus = SmbRdrIssueUpcall(
         SMB2D_OP_FSYNC,
@@ -1821,7 +2285,7 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
     }
 
     DPRINT("SMB2RDR: Flush ok fh=0x%llx\n",
-             fcbExt->DaemonFileHandle);
+             soExt->DaemonFileHandle);
     return STATUS_SUCCESS;
 }
 
@@ -1851,6 +2315,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
     PMRX_FCB Fcb = RxContext->pFcb;
     PMRX_SRV_OPEN SrvOpen = RxContext->pRelevantSrvOpen;
     PSMB2RDR_FCB_EXTENSION fcbExt = Smb2RdrGetFcbExtension(Fcb);
+    PSMB2RDR_SRV_OPEN_EXTENSION soExt = Smb2RdrGetSrvOpenExtension(SrvOpen);
     PSMB2RDR_V_NET_ROOT_EXTENSION vNetExt =
         (SrvOpen != NULL) ? Smb2RdrGetVNetRootExtension(SrvOpen->pVNetRoot)
                           : NULL;
@@ -1859,7 +2324,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
     LONG userBufLen;
     NTSTATUS status;
 
-    if (fcbExt == NULL || fcbExt->DaemonFileHandle == 0) {
+    if (fcbExt == NULL || soExt == NULL || soExt->DaemonFileHandle == 0) {
         DPRINT1("SMB2RDR: MRxSetFileInfo no daemon handle\n");
         return STATUS_INVALID_HANDLE;
     }
@@ -1869,7 +2334,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
     userBufLen = (LONG)RxContext->Info.Length;
 
     DPRINT("SMB2RDR: MRxSetFileInfo class=%d fh=0x%llx buflen=%d\n",
-             (int)infoClass, fcbExt->DaemonFileHandle, userBufLen);
+             (int)infoClass, soExt->DaemonFileHandle, userBufLen);
 
     switch (infoClass) {
     case FileDispositionInformation: {
@@ -1907,20 +2372,20 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
             return STATUS_INFO_LENGTH_MISMATCH;
         einfo = (PFILE_END_OF_FILE_INFORMATION)userBuf;
 
-        if (fcbExt->IsDirectory) {
+        if (soExt->IsDirectory) {
             DPRINT1("SMB2RDR: SetFileInfo EOF on directory handle=0x%llx\n",
-                    fcbExt->DaemonFileHandle);
+                    soExt->DaemonFileHandle);
             return STATUS_FILE_IS_A_DIRECTORY;
         }
         if (einfo->EndOfFile.QuadPart < 0)
             return STATUS_INVALID_PARAMETER;
 
         RtlZeroMemory(&in, sizeof(in));
-        in.FileHandle = fcbExt->DaemonFileHandle;
+        in.FileHandle = soExt->DaemonFileHandle;
         in.NewSize    = (ULONGLONG)einfo->EndOfFile.QuadPart;
 
         DPRINT("SMB2RDR: SetFileInfo EOF fh=0x%llx new_size=%llu\n",
-                 fcbExt->DaemonFileHandle,
+                 soExt->DaemonFileHandle,
                  (unsigned long long)in.NewSize);
 
         bridgeStatus = SmbRdrIssueUpcall(
@@ -2092,12 +2557,14 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxFlags = (RDBSS_MANAGE_NET_ROOT_EXTENSION
                           | RDBSS_MANAGE_V_NET_ROOT_EXTENSION
                           | RDBSS_MANAGE_FCB_EXTENSION
+                          | RDBSS_MANAGE_SRV_OPEN_EXTENSION
                           | RDBSS_MANAGE_FOBX_EXTENSION);
 
     smb2rdr_ops.MRxSrvCallSize  = 0;
     smb2rdr_ops.MRxNetRootSize  = 0;
     smb2rdr_ops.MRxVNetRootSize = sizeof(SMB2RDR_V_NET_ROOT_EXTENSION);
     smb2rdr_ops.MRxFcbSize      = sizeof(SMB2RDR_FCB_EXTENSION);
+    smb2rdr_ops.MRxSrvOpenSize  = sizeof(SMB2RDR_SRV_OPEN_EXTENSION);
     smb2rdr_ops.MRxFobxSize     = 0;
 
     smb2rdr_ops.MRxCancel = NULL;
@@ -2165,6 +2632,7 @@ smb2rdr_driver_unload(PDRIVER_OBJECT drv)
     PRX_CONTEXT RxContext;
     UNICODE_STRING shadow_name;
 
+    Smb2RdrKaShutdown();
     SmbRdrShutdownUpcall();
 
     RxContext = RxCreateRxContext(NULL, smb2rdr_dev, RX_CONTEXT_FLAG_IN_FSP);
@@ -2193,6 +2661,7 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         return status;
 
     SmbRdrInitUpcall();
+    Smb2RdrKaInit();
 
     status = smb2rdr_init_ops();
     if (status != STATUS_SUCCESS)
