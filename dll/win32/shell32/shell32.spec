@@ -368,6 +368,7 @@
 366 stdcall Shell_NotifyIcon(long ptr) Shell_NotifyIconA
 367 stdcall Shell_NotifyIconA(long ptr)
 368 stdcall Shell_NotifyIconW(long ptr)
+@ stdcall -version=0x600+ Shell_NotifyIconGetRect(ptr ptr)
 369 stdcall StrChrA(str long) shlwapi.StrChrA
 370 stdcall StrChrIA(str long) shlwapi.StrChrIA
 371 stdcall StrChrIW(wstr long) shlwapi.StrChrIW
@@ -474,3 +475,4 @@
 @ stdcall -version=0x600+ SHGetKnownFolderPath(ptr long ptr ptr)
 @ stdcall -version=0x600+ SHGetKnownFolderIDList(ptr long ptr ptr)
 @ stdcall -version=0x600+ SHSetKnownFolderPath(ptr long ptr wstr)
+@ stdcall -version=0x600+ SHGetStockIconInfo(long long ptr)
