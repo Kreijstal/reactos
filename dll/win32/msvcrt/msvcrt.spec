@@ -246,8 +246,8 @@
 @ cdecl _stat64i32(str ptr)
 @ cdecl _strftime_l(ptr long str ptr ptr)
 @ cdecl __sys_nerr()
-@ extern __timezone MSVCRT___timezone
-@ extern __tzname MSVCRT__tzname
+@ cdecl __timezone() __ucrt_timezone
+@ cdecl __tzname() __ucrt_tzname
 @ cdecl wcstoll(wstr ptr long) _wcstoi64
 @ cdecl wcstoull(wstr ptr long) _wcstoui64
 @ cdecl __stdio_common_vfprintf(int64 ptr str ptr ptr)

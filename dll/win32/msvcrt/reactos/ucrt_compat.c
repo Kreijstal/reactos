@@ -10,6 +10,19 @@
 
 extern FILE * __cdecl __iob_func(void);
 
+/* MSVCRT-internal globals exposed by data.c / time.c.  See msvcrt.spec
+ * for the @ extern aliases that already publish them under their
+ * legacy names (_environ, _timezone, _tzname, _daylight). */
+extern long  MSVCRT___timezone;
+extern char *MSVCRT__tzname[2];
+
+/* UCRT shape: these names are getters, not bare variables, so a caller
+ * that thinks `__tzname()` is a function does `call qword ptr [iat]`
+ * and lands in data when we export them as @ extern.  Provide the
+ * getter functions so the IAT slot resolves to a callable here. */
+char ** __cdecl __ucrt_tzname(void)  { return MSVCRT__tzname; }
+long *  __cdecl __ucrt_timezone(void){ return &MSVCRT___timezone; }
+
 /* ---------------- C99 math ---------------- *
  *
  * Provided unconditionally so the api-ms-win-crt-math-l1-1-0.dll
