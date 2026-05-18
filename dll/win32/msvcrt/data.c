@@ -679,7 +679,9 @@ void CDECL __set_app_type(int app_type)
   MSVCRT_app_type = app_type;
 }
 
-#if _MSVCR_VER>=140
+/* ReactOS: msvcrt is the UCRT apiset host, so the UCRT-only narrow/wide
+ * argv/environ helpers below must be available unconditionally. */
+#if 1 /* MSVCR_VER>=140, enabled as UCRT host */
 
 /*********************************************************************
  *		_configure_narrow_argv (UCRTBASE.@)
@@ -791,7 +793,7 @@ wchar_t* CDECL _get_wide_winmain_command_line(void)
   return wide_command_line = s;
 }
 
-#endif /* _MSVCR_VER>=140 */
+#endif /* MSVCR_VER>=140, enabled as UCRT host */
 
 /*********************************************************************
  *    _get_winmajor (MSVCRT.@)
