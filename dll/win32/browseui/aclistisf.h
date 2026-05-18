@@ -21,6 +21,10 @@
 
 #pragma once
 
+#include <atlcoll.h>
+
+struct CACListISFWorkerCtx;
+
 class CACListISF :
     public CComCoClass<CACListISF, &CLSID_ACListISF>,
     public CComObjectRootEx<CComMultiThreadModelNoCS>,
@@ -30,7 +34,7 @@ class CACListISF :
     public IShellService,
     public IPersistFolder
 {
-private:
+public:
     enum LOCATION_TYPE
     {
         LT_DIRECTORY,
@@ -40,6 +44,7 @@ private:
         LT_MAX
     };
 
+private:
     DWORD m_dwOptions;
     LOCATION_TYPE m_iNextLocation;
     BOOL m_fShowHidden;
@@ -50,6 +55,28 @@ private:
     CComPtr<IEnumIDList> m_pEnumIDList;
     CComPtr<IShellFolder> m_pShellFolder;
     CComPtr<IBrowserService> m_pBrowserService;
+
+    // Background enumeration. SHParseDisplayName, BindToObject and
+    // EnumObjects on remote shares (SMB, UNC) can block for many
+    // seconds. We move the whole pipeline off the UI thread; the
+    // worker pushes plain WCHAR strings into m_Results and Next()
+    // pops from there. Only string copies cross apartments; shell
+    // pointers stay inside the worker.
+    //
+    // Per-keystroke calls to Expand() detach the previous worker
+    // rather than joining it (the prior worker may still be stuck
+    // inside a synchronous SMB call). Each worker carries a
+    // generation; only the matching generation may publish results.
+    CRITICAL_SECTION m_csState;
+    BOOL m_bCsInit;
+    CAtlList<CStringW> m_Results;
+    CACListISFWorkerCtx *m_pCurrentWorker;  // owned by the worker; weak here
+    LONG m_lActiveGeneration;
+
+    void DetachCurrentWorker();
+    HRESULT StartWorker(BOOL bUseExpand);
+    static DWORD WINAPI s_WorkerThreadProc(LPVOID pv);
+    void WorkerRun(CACListISFWorkerCtx *pCtx);
 
 public:
     CACListISF();
