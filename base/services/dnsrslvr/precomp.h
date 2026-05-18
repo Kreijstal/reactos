@@ -37,12 +37,62 @@ typedef struct _RESOLVER_CACHE
     CRITICAL_SECTION Lock;
 } RESOLVER_CACHE, *PRESOLVER_CACHE;
 
+/*
+ * Negative DNS cache entry.
+ *
+ * Holds the failure status for a (name, type) pair that recently failed to
+ * resolve, so that repeated lookups of the same unresolvable name short-circuit
+ * the wire path. Matches the Windows DNS Client Service "negative cache"
+ * (registry-tunable MaxNegativeCacheTtl, default 900 seconds per Microsoft's
+ * "DNS Client Resolver Cache" documentation; see KB286834).
+ */
+typedef struct _RESOLVER_NEG_CACHE_ENTRY
+{
+    LIST_ENTRY CacheLink;
+    LPWSTR Name;
+    WORD wType;
+    DNS_STATUS Status;
+    ULONGLONG ExpireTickMs;
+} RESOLVER_NEG_CACHE_ENTRY, *PRESOLVER_NEG_CACHE_ENTRY;
+
+typedef struct _RESOLVER_NEG_CACHE
+{
+    LIST_ENTRY RecordList;
+    ULONG EntryCount;
+    CRITICAL_SECTION Lock;
+} RESOLVER_NEG_CACHE, *PRESOLVER_NEG_CACHE;
+
+/*
+ * TTL for negative entries, in milliseconds. 900 s matches the documented
+ * Microsoft default for MaxNegativeCacheTtl.
+ */
+#define NEGATIVE_CACHE_TTL_MS  (900 * 1000)
+
+/* Hard cap on the number of negative entries to bound memory; FIFO eviction. */
+#define NEGATIVE_CACHE_CAP     64
+
 
 /* cache.c */
 
 VOID DnsIntCacheInitialize(VOID);
 VOID DnsIntCacheRemoveEntryItem(PRESOLVER_CACHE_ENTRY CacheEntry);
 VOID DnsIntCacheFree(VOID);
+
+VOID DnsIntNegativeCacheInitialize(VOID);
+VOID DnsIntNegativeCacheFree(VOID);
+VOID DnsIntNegativeCacheFlush(VOID);
+BOOL DnsIntNegativeCacheRemoveEntry(_In_ LPCWSTR Name, _In_ WORD wType);
+
+DNS_STATUS
+DnsIntNegativeCacheLookup(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType);
+
+VOID
+DnsIntNegativeCacheInsert(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType,
+    _In_ DNS_STATUS Status);
 
 #define CACHE_FLUSH_HOSTS_FILE_ENTRIES     0x00000001
 #define CACHE_FLUSH_NON_HOSTS_FILE_ENTRIES 0x00000002

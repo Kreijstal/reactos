@@ -17,6 +17,45 @@ static BOOL DnsCacheInitialized = FALSE;
 #define DnsCacheLock()          do { EnterCriticalSection(&DnsCache.Lock); } while (0)
 #define DnsCacheUnlock()        do { LeaveCriticalSection(&DnsCache.Lock); } while (0)
 
+static RESOLVER_NEG_CACHE DnsNegCache;
+static BOOL DnsNegCacheInitialized = FALSE;
+
+#define DnsNegCacheLock()       do { EnterCriticalSection(&DnsNegCache.Lock); } while (0)
+#define DnsNegCacheUnlock()     do { LeaveCriticalSection(&DnsNegCache.Lock); } while (0)
+
+static
+VOID
+DnsIntNegativeCacheRemoveEntryItem(
+    _In_ PRESOLVER_NEG_CACHE_ENTRY Entry)
+{
+    RemoveEntryList(&Entry->CacheLink);
+    if (Entry->Name)
+        HeapFree(GetProcessHeap(), 0, Entry->Name);
+    HeapFree(GetProcessHeap(), 0, Entry);
+    ASSERT(DnsNegCache.EntryCount > 0);
+    DnsNegCache.EntryCount--;
+}
+
+/* Caller must hold DnsNegCacheLock. */
+static
+VOID
+DnsIntNegativeCachePurgeExpired(
+    _In_ ULONGLONG NowMs)
+{
+    PLIST_ENTRY Entry, Next;
+    PRESOLVER_NEG_CACHE_ENTRY NegEntry;
+
+    Entry = DnsNegCache.RecordList.Flink;
+    while (Entry != &DnsNegCache.RecordList)
+    {
+        Next = Entry->Flink;
+        NegEntry = CONTAINING_RECORD(Entry, RESOLVER_NEG_CACHE_ENTRY, CacheLink);
+        if (NowMs >= NegEntry->ExpireTickMs)
+            DnsIntNegativeCacheRemoveEntryItem(NegEntry);
+        Entry = Next;
+    }
+}
+
 VOID
 DnsIntCacheInitialize(VOID)
 {
@@ -30,6 +69,8 @@ DnsIntCacheInitialize(VOID)
     InitializeCriticalSection((LPCRITICAL_SECTION)&DnsCache.Lock);
     InitializeListHead(&DnsCache.RecordList);
     DnsCacheInitialized = TRUE;
+
+    DnsIntNegativeCacheInitialize();
 }
 
 VOID
@@ -48,6 +89,201 @@ DnsIntCacheFree(VOID)
 
     DeleteCriticalSection(&DnsCache.Lock);
     DnsCacheInitialized = FALSE;
+
+    DnsIntNegativeCacheFree();
+}
+
+VOID
+DnsIntNegativeCacheInitialize(VOID)
+{
+    if (DnsNegCacheInitialized)
+        return;
+
+    InitializeCriticalSection(&DnsNegCache.Lock);
+    InitializeListHead(&DnsNegCache.RecordList);
+    DnsNegCache.EntryCount = 0;
+    DnsNegCacheInitialized = TRUE;
+}
+
+VOID
+DnsIntNegativeCacheFlush(VOID)
+{
+    PLIST_ENTRY Entry, Next;
+    PRESOLVER_NEG_CACHE_ENTRY NegEntry;
+
+    if (!DnsNegCacheInitialized)
+        return;
+
+    DnsNegCacheLock();
+
+    Entry = DnsNegCache.RecordList.Flink;
+    while (Entry != &DnsNegCache.RecordList)
+    {
+        Next = Entry->Flink;
+        NegEntry = CONTAINING_RECORD(Entry, RESOLVER_NEG_CACHE_ENTRY, CacheLink);
+        DnsIntNegativeCacheRemoveEntryItem(NegEntry);
+        Entry = Next;
+    }
+    ASSERT(DnsNegCache.EntryCount == 0);
+
+    DnsNegCacheUnlock();
+}
+
+VOID
+DnsIntNegativeCacheFree(VOID)
+{
+    if (!DnsNegCacheInitialized)
+        return;
+
+    DnsIntNegativeCacheFlush();
+    DeleteCriticalSection(&DnsNegCache.Lock);
+    DnsNegCacheInitialized = FALSE;
+}
+
+DNS_STATUS
+DnsIntNegativeCacheLookup(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType)
+{
+    PLIST_ENTRY Entry;
+    PRESOLVER_NEG_CACHE_ENTRY NegEntry;
+    DNS_STATUS Status = ERROR_SUCCESS;
+    ULONGLONG NowMs;
+
+    if (!DnsNegCacheInitialized || Name == NULL)
+        return ERROR_SUCCESS;
+
+    NowMs = GetTickCount64();
+
+    DnsNegCacheLock();
+    DnsIntNegativeCachePurgeExpired(NowMs);
+
+    Entry = DnsNegCache.RecordList.Flink;
+    while (Entry != &DnsNegCache.RecordList)
+    {
+        NegEntry = CONTAINING_RECORD(Entry, RESOLVER_NEG_CACHE_ENTRY, CacheLink);
+        /* Cache key is (name, type) case-folded, matching Windows DNS lookup
+         * semantics; _wcsicmp handles the case fold. */
+        if (NegEntry->wType == wType &&
+            _wcsicmp(NegEntry->Name, Name) == 0)
+        {
+            /* Successful queries must never be cached as negatives. */
+            ASSERT(NegEntry->Status != ERROR_SUCCESS);
+            Status = NegEntry->Status;
+            break;
+        }
+        Entry = Entry->Flink;
+    }
+
+    DnsNegCacheUnlock();
+    return Status;
+}
+
+VOID
+DnsIntNegativeCacheInsert(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType,
+    _In_ DNS_STATUS Status)
+{
+    PLIST_ENTRY Entry;
+    PRESOLVER_NEG_CACHE_ENTRY NegEntry;
+    SIZE_T NameLen;
+    ULONGLONG NowMs;
+
+    /* Only failures belong in the negative cache. */
+    ASSERT(Status != ERROR_SUCCESS);
+    if (Status == ERROR_SUCCESS)
+        return;
+
+    if (!DnsNegCacheInitialized || Name == NULL)
+        return;
+
+    NowMs = GetTickCount64();
+
+    DnsNegCacheLock();
+    DnsIntNegativeCachePurgeExpired(NowMs);
+
+    /* Refresh an existing entry rather than duplicate. */
+    Entry = DnsNegCache.RecordList.Flink;
+    while (Entry != &DnsNegCache.RecordList)
+    {
+        NegEntry = CONTAINING_RECORD(Entry, RESOLVER_NEG_CACHE_ENTRY, CacheLink);
+        if (NegEntry->wType == wType &&
+            _wcsicmp(NegEntry->Name, Name) == 0)
+        {
+            NegEntry->Status = Status;
+            ASSERT(NowMs + NEGATIVE_CACHE_TTL_MS >= NegEntry->ExpireTickMs);
+            NegEntry->ExpireTickMs = NowMs + NEGATIVE_CACHE_TTL_MS;
+            DnsNegCacheUnlock();
+            return;
+        }
+        Entry = Entry->Flink;
+    }
+
+    /* Evict oldest entries until we are below the cap. */
+    while (DnsNegCache.EntryCount >= NEGATIVE_CACHE_CAP &&
+           !IsListEmpty(&DnsNegCache.RecordList))
+    {
+        NegEntry = CONTAINING_RECORD(DnsNegCache.RecordList.Flink,
+                                     RESOLVER_NEG_CACHE_ENTRY,
+                                     CacheLink);
+        DnsIntNegativeCacheRemoveEntryItem(NegEntry);
+    }
+
+    NameLen = wcslen(Name);
+    NegEntry = HeapAlloc(GetProcessHeap(), 0, sizeof(*NegEntry));
+    if (NegEntry == NULL)
+    {
+        DnsNegCacheUnlock();
+        return;
+    }
+    NegEntry->Name = HeapAlloc(GetProcessHeap(), 0, (NameLen + 1) * sizeof(WCHAR));
+    if (NegEntry->Name == NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, NegEntry);
+        DnsNegCacheUnlock();
+        return;
+    }
+    StringCchCopyW(NegEntry->Name, NameLen + 1, Name);
+    NegEntry->wType = wType;
+    NegEntry->Status = Status;
+    NegEntry->ExpireTickMs = NowMs + NEGATIVE_CACHE_TTL_MS;
+
+    InsertTailList(&DnsNegCache.RecordList, &NegEntry->CacheLink);
+    DnsNegCache.EntryCount++;
+
+    DnsNegCacheUnlock();
+}
+
+BOOL
+DnsIntNegativeCacheRemoveEntry(
+    _In_ LPCWSTR Name,
+    _In_ WORD wType)
+{
+    PLIST_ENTRY Entry;
+    PRESOLVER_NEG_CACHE_ENTRY NegEntry;
+    BOOL Removed = FALSE;
+
+    if (!DnsNegCacheInitialized || Name == NULL)
+        return FALSE;
+
+    DnsNegCacheLock();
+
+    Entry = DnsNegCache.RecordList.Flink;
+    while (Entry != &DnsNegCache.RecordList)
+    {
+        NegEntry = CONTAINING_RECORD(Entry, RESOLVER_NEG_CACHE_ENTRY, CacheLink);
+        Entry = Entry->Flink;
+        if (_wcsicmp(NegEntry->Name, Name) == 0 &&
+            (wType == DNS_TYPE_ANY || NegEntry->wType == wType))
+        {
+            DnsIntNegativeCacheRemoveEntryItem(NegEntry);
+            Removed = TRUE;
+        }
+    }
+
+    DnsNegCacheUnlock();
+    return Removed;
 }
 
 VOID
@@ -98,6 +334,11 @@ DnsIntCacheFlush(
     /* Unlock the cache */
     DnsCacheUnlock();
 
+    /* DnsFlushCache callers expect *all* resolver state for non-hosts entries
+     * to be wiped; the negative cache is inherently non-hosts. */
+    if (ulFlags & CACHE_FLUSH_NON_HOSTS_FILE_ENTRIES)
+        DnsIntNegativeCacheFlush();
+
     return ERROR_SUCCESS;
 }
 
@@ -141,6 +382,9 @@ DnsIntFlushCacheEntry(
 
     /* Unlock the cache */
     DnsCacheUnlock();
+
+    /* Also evict any negative entry for the same name. */
+    DnsIntNegativeCacheRemoveEntry(pszName, wType);
 
     return ERROR_SUCCESS;
 }
