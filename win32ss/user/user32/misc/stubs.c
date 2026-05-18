@@ -601,3 +601,109 @@ Win32PoolAllocationStats(DWORD dw1, DWORD dw2, DWORD dw3, DWORD dw4, DWORD dw5)
     return FALSE;
 }
 
+
+/* DPI-aware variants of pre-existing window APIs and the timer extension.
+ * Real per-thread/window DPI is in win32k; these forward to the
+ * non-DPI primitives so callers operate as if at the default 96-DPI. */
+
+BOOL WINAPI AdjustWindowRectExForDpi(LPRECT lpRect, DWORD dwStyle, BOOL bMenu, DWORD dwExStyle, UINT dpi)
+{
+    UNREFERENCED_PARAMETER(dpi);
+    return AdjustWindowRectEx(lpRect, dwStyle, bMenu, dwExStyle);
+}
+
+BOOL WINAPI AreDpiAwarenessContextsEqual(HANDLE dpiContextA, HANDLE dpiContextB)
+{
+    return dpiContextA == dpiContextB;
+}
+
+BOOL WINAPI EnableNonClientDpiScaling(HWND hwnd)
+{
+    UNREFERENCED_PARAMETER(hwnd);
+    return TRUE;
+}
+
+int WINAPI GetSystemMetricsForDpi(int nIndex, UINT dpi)
+{
+    UNREFERENCED_PARAMETER(dpi);
+    return GetSystemMetrics(nIndex);
+}
+
+HANDLE WINAPI GetThreadDpiAwarenessContext(VOID)
+{
+    /* DPI_AWARENESS_CONTEXT_UNAWARE is documented as the literal -1. */
+    return (HANDLE)(LONG_PTR)-1;
+}
+
+HANDLE WINAPI GetWindowDpiAwarenessContext(HWND hwnd)
+{
+    UNREFERENCED_PARAMETER(hwnd);
+    return (HANDLE)(LONG_PTR)-1;
+}
+
+UINT_PTR WINAPI SetCoalescableTimer(HWND hwnd, UINT_PTR id, UINT msec, TIMERPROC proc, ULONG tolerance)
+{
+    UNREFERENCED_PARAMETER(tolerance);
+    return SetTimer(hwnd, id, msec, proc);
+}
+
+BOOL WINAPI SystemParametersInfoForDpi(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni, UINT dpi)
+{
+    UNREFERENCED_PARAMETER(dpi);
+    return SystemParametersInfoW(uiAction, uiParam, pvParam, fWinIni);
+}
+
+/* Win8/10 pointer-input API stubs. The installer probes for these to
+ * detect touch/pen capability; reporting failure makes it fall back to
+ * mouse-only input. */
+
+BOOL WINAPI GetPointerDeviceRects(HANDLE device, RECT *pointerDeviceRect, RECT *displayRect)
+{
+    UNREFERENCED_PARAMETER(device);
+    if (pointerDeviceRect) SetRectEmpty(pointerDeviceRect);
+    if (displayRect) SetRectEmpty(displayRect);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerFrameTouchInfo(UINT32 pointerId, UINT32 *pointerCount, PVOID touchInfo)
+{
+    UNREFERENCED_PARAMETER(pointerId);
+    UNREFERENCED_PARAMETER(touchInfo);
+    if (pointerCount) *pointerCount = 0;
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerFrameTouchInfoHistory(UINT32 pointerId, UINT32 *entriesCount, UINT32 *pointerCount, PVOID touchInfo)
+{
+    UNREFERENCED_PARAMETER(pointerId);
+    UNREFERENCED_PARAMETER(touchInfo);
+    if (entriesCount) *entriesCount = 0;
+    if (pointerCount) *pointerCount = 0;
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerPenInfo(UINT32 pointerId, PVOID penInfo)
+{
+    UNREFERENCED_PARAMETER(pointerId);
+    UNREFERENCED_PARAMETER(penInfo);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerPenInfoHistory(UINT32 pointerId, UINT32 *entriesCount, PVOID penInfo)
+{
+    UNREFERENCED_PARAMETER(pointerId);
+    UNREFERENCED_PARAMETER(penInfo);
+    if (entriesCount) *entriesCount = 0;
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
+}
+
+BOOL WINAPI SkipPointerFrameMessages(UINT32 pointerId)
+{
+    UNREFERENCED_PARAMETER(pointerId);
+    return TRUE;
+}
