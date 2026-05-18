@@ -281,6 +281,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(avrt)
     add_subdirectory(bcryptprimitives)
     add_subdirectory(dwmapi)
+    add_subdirectory(dxgi)
     add_subdirectory(ncrypt)
 endif()
 
