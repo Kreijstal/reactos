@@ -8,6 +8,7 @@
 @ stub BCryptDecrypt
 @ stub BCryptDeleteContext
 @ stub BCryptDeriveKey
+@ stub BCryptDeriveKeyPBKDF2
 @ stdcall BCryptDestroyHash(ptr)
 @ stdcall -stub BCryptDestroyKey(ptr)
 @ stub BCryptDestroySecret
