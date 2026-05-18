@@ -289,3 +289,78 @@ HRESULT WINAPI SHSetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE
     FIXME("(%p, 0x%lx, %p, %s): stub\n", rfid, dwFlags, hToken, debugstr_w(pszPath));
     return E_NOTIMPL;
 }
+
+/*************************************************************************
+ * SHGetStockIconInfo           [SHELL32.@]
+ *
+ * Returns the path and icon index for a stock system icon.
+ */
+/* SHSTOCKICONINFO is gated by NTDDI_VISTA in shellapi.h. This file does
+ * not pull that gate so declare the bits we need locally. */
+typedef struct _SH_STOCKICONINFO
+{
+    DWORD cbSize;
+    HICON hIcon;
+    int   iSysImageIndex;
+    int   iIcon;
+    WCHAR szPath[MAX_PATH];
+} SH_STOCKICONINFO;
+
+#ifndef SHGSI_ICON
+#define SHGSI_ICON       0x000000100  /* same value as SHGFI_ICON */
+#endif
+#ifndef SHGSI_SMALLICON
+#define SHGSI_SMALLICON  0x000000001  /* same value as SHGFI_SMALLICON */
+#endif
+
+HRESULT WINAPI SHGetStockIconInfo(int siid, UINT uFlags, void *psii_v)
+{
+    SH_STOCKICONINFO *psii = psii_v;
+
+    TRACE("(%d, 0x%x, %p)\n", siid, uFlags, psii);
+
+    if (!psii || psii->cbSize != sizeof(*psii))
+        return E_INVALIDARG;
+    if (siid < 0)
+        return E_INVALIDARG;
+
+    /* The stock-icon index in shell32.dll matches the SIID value for the
+     * range of icons that ReactOS shell32 actually ships. Apps such as
+     * NSIS-based installers only need the resource path/index pair to be
+     * filled in so they can hand it to ExtractIconEx; they do not require
+     * the loaded HICON unless SHGSI_ICON is requested. */
+    GetSystemDirectoryW(psii->szPath, MAX_PATH);
+    lstrcatW(psii->szPath, L"\\shell32.dll");
+    psii->iIcon = -(siid + 1);
+    psii->iSysImageIndex = -1;
+    psii->hIcon = NULL;
+
+    if (uFlags & SHGSI_ICON)
+    {
+        UINT cx = (uFlags & SHGSI_SMALLICON) ? GetSystemMetrics(SM_CXSMICON)
+                                             : GetSystemMetrics(SM_CXICON);
+        UINT cy = (uFlags & SHGSI_SMALLICON) ? GetSystemMetrics(SM_CYSMICON)
+                                             : GetSystemMetrics(SM_CYICON);
+        psii->hIcon = (HICON)LoadImageW(GetModuleHandleW(L"shell32.dll"),
+                                        MAKEINTRESOURCEW(siid + 1),
+                                        IMAGE_ICON, cx, cy, LR_DEFAULTCOLOR);
+        if (!psii->hIcon)
+            return S_FALSE;
+    }
+    return S_OK;
+}
+
+/*************************************************************************
+ * Shell_NotifyIconGetRect          [SHELL32.@]
+ *
+ * Returns the bounding rect on screen of a notify-area icon.
+ * ReactOS does not yet plumb identifier-keyed notify-icon lookup, so
+ * answer "not found" and let callers fall back to default placement.
+ */
+HRESULT WINAPI Shell_NotifyIconGetRect(const void *identifier, RECT *iconLocation)
+{
+    FIXME("(%p, %p): stub\n", identifier, iconLocation);
+    if (iconLocation)
+        SetRectEmpty(iconLocation);
+    return E_NOTIMPL;
+}
