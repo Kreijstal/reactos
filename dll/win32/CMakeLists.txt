@@ -296,5 +296,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
 endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_subdirectory(d3d11)
+    add_subdirectory(d3d12)
     add_subdirectory(dwrite)
 endif()
