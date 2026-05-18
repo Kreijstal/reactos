@@ -597,11 +597,43 @@ SetSystemFileCacheSize(IN SIZE_T MinimumFileCacheSize,
 
 /*
  * @unimplemented
+ *
+ * Win8+ packaged-app identity probes.  ReactOS never runs packaged apps,
+ * so every entry returns APPMODEL_ERROR_NO_PACKAGE.  That's the value
+ * Windows uses to tell the caller "this process is not packaged" — the
+ * documented signal for legacy-app fallback paths in Win8+ runtimes.
  */
 LONG
 WINAPI
 GetCurrentPackageId(UINT32 *BufferLength,
                     BYTE *Buffer)
+{
+    STUB;
+    return APPMODEL_ERROR_NO_PACKAGE;
+}
+
+LONG
+WINAPI
+GetCurrentPackageFullName(UINT32 *PackageFullNameLength,
+                          PWSTR PackageFullName)
+{
+    STUB;
+    return APPMODEL_ERROR_NO_PACKAGE;
+}
+
+LONG
+WINAPI
+GetCurrentPackageFamilyName(UINT32 *PackageFamilyNameLength,
+                            PWSTR PackageFamilyName)
+{
+    STUB;
+    return APPMODEL_ERROR_NO_PACKAGE;
+}
+
+LONG
+WINAPI
+GetCurrentPackagePath(UINT32 *PathLength,
+                      PWSTR Path)
 {
     STUB;
     return APPMODEL_ERROR_NO_PACKAGE;
