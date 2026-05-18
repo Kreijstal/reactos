@@ -391,7 +391,10 @@ int CDECL MSVCRT_atexit(void (__cdecl *func)(void))
   return _onexit((_onexit_t)func) == (_onexit_t)func ? 0 : -1;
 }
 
-#if _MSVCR_VER >= 140
+/* ReactOS: msvcrt hosts the UCRT apisets, so _crt_atexit and
+ * _register_thread_local_exe_atexit_callback must be available even
+ * when _MSVCR_VER is 0. */
+#if 1 /* MSVCR_VER>=140, enabled as UCRT host */
 static _onexit_table_t MSVCRT_quick_exit_table;
 
 /*********************************************************************

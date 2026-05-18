@@ -878,7 +878,10 @@ printf_arg arg_clbk_positional(void *ctx, int pos, int type, va_list *valist)
     return args[pos];
 }
 
-#if _MSVCR_VER < 140
+/* ReactOS: msvcrt also hosts the UCRT apisets, so compile both the
+ * legacy MSVCRT-style _vsnprintf branch and the UCRT-style
+ * __stdio_common_v* branch below. */
+#if 1 /* legacy MSVCRT names */
 
 /*********************************************************************
  *              _vsnprintf (MSVCRT.@)
@@ -895,7 +898,9 @@ int CDECL _vsnprintf( char *str, size_t len, const char *format, va_list valist 
     return ret;
 }
 
-#else
+#endif /* legacy MSVCRT names */
+
+#if 1 /* UCRT __stdio_common_v* names */
 
 static int puts_clbk_str_c99_a(void *ctx, int len, const char *str)
 {
@@ -946,7 +951,7 @@ int CDECL __stdio_common_vsprintf( unsigned __int64 options, char *str, size_t l
     return ret;
 }
 
-#endif /* _MSVCR_VER>=140 */
+#endif /* UCRT __stdio_common_v* names */
 
 /*********************************************************************
  *		_vsnprintf_l (MSVCRT.@)
@@ -1109,7 +1114,7 @@ int CDECL _vsnprintf_c(char *str, size_t len,
     return _vsnprintf_c_l(str, len, format, NULL, valist);
 }
 
-#if _MSVCR_VER>=140
+#if 1 /* MSVCR_VER>=140, enabled as UCRT host */
 
 /*********************************************************************
  *              __stdio_common_vsnprintf_s (UCRTBASE.@)
@@ -1157,7 +1162,7 @@ int CDECL __stdio_common_vsprintf_s( unsigned __int64 options,
     return vsnprintf_s_l_opt(str, INT_MAX, count, format, options & UCRTBASE_PRINTF_MASK, locale, valist);
 }
 
-#endif /* _MSVCR_VER>=140 */
+#endif /* MSVCR_VER>=140, enabled as UCRT host */
 
 /*********************************************************************
  *		vsprintf (MSVCRT.@)
@@ -1458,7 +1463,7 @@ int CDECL _vswprintf_p(wchar_t *buffer, size_t length,
 }
 #endif
 
-#if _MSVCR_VER>=140
+#if 1 /* MSVCR_VER>=140, enabled as UCRT host */
 /*********************************************************************
  *              __stdio_common_vswprintf_p (UCRTBASE.@)
  */
@@ -1547,7 +1552,7 @@ int WINAPIV _snwprintf_s_l( wchar_t *str, size_t len, size_t count,
     return retval;
 }
 
-#if _MSVCR_VER>=140
+#if 1 /* MSVCR_VER>=140, enabled as UCRT host */
 
 static int puts_clbk_str_c99_w(void *ctx, int len, const wchar_t *str)
 {
@@ -1598,7 +1603,7 @@ int CDECL __stdio_common_vswprintf( unsigned __int64 options,
     return ret;
 }
 
-#endif /* _MSVCR_VER>=140 */
+#endif /* MSVCR_VER>=140, enabled as UCRT host */
 
 /*********************************************************************
  *		sprintf (MSVCRT.@)
@@ -1879,7 +1884,7 @@ int CDECL _vsprintf_p(char *buffer, size_t length,
     return _vsprintf_p_l(buffer, length, format, NULL, args);
 }
 
-#if _MSVCR_VER>=140
+#if 1 /* MSVCR_VER>=140, enabled as UCRT host */
 /*********************************************************************
  *              __stdio_common_vsprintf_p (UCRTBASE.@)
  */
