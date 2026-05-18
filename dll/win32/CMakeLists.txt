@@ -282,6 +282,10 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(dwmapi)
 endif()
 
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
+    add_subdirectory(dwrite)
+endif()
+
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x602)
     add_subdirectory(shcore)
 endif()
