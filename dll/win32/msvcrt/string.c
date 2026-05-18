@@ -1079,7 +1079,7 @@ double CDECL strtod( const char *str, char **end )
     return _strtod_l( str, end, NULL );
 }
 
-#if _MSVCR_VER>=120
+#if 1 /* _MSVCR_VER>=120, enabled as UCRT host */
 
 /*********************************************************************
  *		strtof_l  (MSVCR120.@)
