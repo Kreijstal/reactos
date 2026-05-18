@@ -112,7 +112,12 @@ LPVOID WINAPI VirtualAlloc2(HANDLE Process,
  * Win8+ address-based wait primitive.  The Windows API takes a millisecond
  * timeout; RtlWaitOnAddress takes a relative LARGE_INTEGER in 100-ns units
  * (negative).  WakeByAddressSingle/All are pure forwarders (see .spec).
+ *
+ * Only emit this when the build's DLL_EXPORT_VERSION is Win8+: lower
+ * targets don't export RtlWaitOnAddress from ntdll, so the link would
+ * fail even though the function isn't exported by kernelbase here either.
  */
+#if DLL_EXPORT_VERSION >= 0x602
 BOOL WINAPI WaitOnAddress(volatile VOID *Address,
                           PVOID CompareAddress,
                           SIZE_T AddressSize,
@@ -136,3 +141,4 @@ BOOL WINAPI WaitOnAddress(volatile VOID *Address,
     }
     return TRUE;
 }
+#endif /* DLL_EXPORT_VERSION >= 0x602 */
