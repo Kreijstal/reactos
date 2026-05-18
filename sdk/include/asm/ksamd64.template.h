@@ -842,8 +842,8 @@ OFFSET(UcbUmsTeb, UMS_CONTROL_BLOCK, UmsTeb),
 HEADER("XSTATE_CONFIGURATION offsets"),
 OFFSET(XcfgEnabledFeatures, XSTATE_CONFIGURATION, EnabledFeatures),
 #if (NTDDI_VERSION >= NTDDI_WIN10)
-OFFSET(XcfgEnabledVolatileFeatures, XSTATE_CONFIGURATION, EnabledFeatures),
-OFFSET(XcfgEnabledSupervisorFeatures, XSTATE_CONFIGURATION, EnabledSupervisorFeaturestures),
+OFFSET(XcfgEnabledVolatileFeatures, XSTATE_CONFIGURATION, EnabledVolatileFeatures),
+OFFSET(XcfgEnabledSupervisorFeatures, XSTATE_CONFIGURATION, EnabledSupervisorFeatures),
 #endif
 
 HEADER("XSTATE_CONTEXT offsets"),
