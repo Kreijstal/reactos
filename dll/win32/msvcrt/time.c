@@ -1511,7 +1511,7 @@ static size_t strftime_helper(char *str, size_t max, const char *format,
 #endif
 }
 
-#if _MSVCR_VER >= 80
+#if 1 /* _MSVCR_VER >= 80, enabled as UCRT host */
 /********************************************************************
  *     _strftime_l (MSVCR80.@)
  */
