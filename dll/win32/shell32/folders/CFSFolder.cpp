@@ -14,6 +14,288 @@ WINE_DEFAULT_DEBUG_CHANNEL (shell);
 
 static HRESULT SHELL32_GetCLSIDForDirectory(LPCWSTR pwszDir, LPCWSTR KeyName, CLSID* pclsidFolder);
 
+/* ---------------------------------------------------------------------------
+ * CFSEnumCache - process-wide enumeration cache for CFSFolder.
+ *
+ * Background: typing a UNC path into the Explorer address bar drives
+ * CACListISF (browseui) to BindToObject/EnumObjects on a fresh CFSFolder
+ * per keystroke. Each EnumObjects walks FindFirstFile on the target,
+ * which round-trips through smb2rdr for UNC paths and storms the wire.
+ *
+ * This is Windows' "INSCache" shape (per-folder enumeration cache keyed on
+ * normalized path + filter flags, TTL-bounded). We cache the produced
+ * child PIDL list and re-materialize a fresh CFileSysEnum for cheap
+ * lookups (hwndOwner == NULL: address-bar autocomplete, preview, etc.).
+ * Real view fills (CDefView::FillList passes its HWND) always re-enumerate
+ * and refresh the cache - that is how F5 / explicit Refresh bypasses
+ * cached data without an out-of-band invalidation channel.
+ *
+ * TTL: 5 seconds. Long enough to absorb a typing storm (10+ keystrokes/s);
+ * short enough that transient mounts/unmounts don't leave the user staring
+ * at stale entries for long. Windows' INSCache default for stable shares
+ * is several minutes, but we don't subscribe to all the relevant
+ * invalidation channels (SHCNE_NETSHARE, mount/unmount) yet, so 5 s is the
+ * safe near-term default.
+ *
+ * Cap: 64 entries, LRU eviction. Bounded so a pathological caller can't
+ * grow heap; 64 covers Explorer + a few autocomplete sources.
+ * --------------------------------------------------------------------------- */
+
+#define CFS_ENUM_CACHE_TTL_MS   5000
+#define CFS_ENUM_CACHE_MAX      64
+
+/* Flag bits that affect the result set. Other SHCONTF bits (e.g.
+ * SHCONTF_INIT_ON_FIRST_NEXT, SHCONTF_SHAREABLE, SHCONTF_STORAGE) do not
+ * change which child PIDLs we produce, so we mask them out of the key. */
+#define CFS_ENUM_CACHE_FLAGMASK \
+    (SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | \
+     SHCONTF_INCLUDEHIDDEN | SHCONTF_INCLUDESUPERHIDDEN)
+
+struct CFSEnumCacheEntry
+{
+    CFSEnumCacheEntry  *pNext;
+    CFSEnumCacheEntry  *pPrev;
+    LPWSTR              pszPath;        /* lowercase, no trailing backslash */
+    DWORD               dwFlags;        /* masked SHCONTF flags */
+    DWORD               dwExpireTick;   /* GetTickCount() value when entry expires */
+    UINT                cItems;
+    LPITEMIDLIST       *apidl;          /* cloned child PIDLs */
+};
+
+class CFSEnumCache
+{
+public:
+    static CFSEnumCache &Instance()
+    {
+        /* Function-local static; CRT guards init under MT model. */
+        static CFSEnumCache s_cache;
+        return s_cache;
+    }
+
+    /* Look up a hit. On success, fills *ppEnum with a fresh, populated
+     * CFileSysEnum-equivalent IEnumIDList. Returns S_OK on hit, S_FALSE
+     * on miss or expired. */
+    HRESULT Lookup(LPCWSTR pszPath, DWORD dwFlags, IEnumIDList **ppEnum);
+
+    /* Insert / refresh an entry. apidlIn ownership transfers on success
+     * (entries are SHFree'd on eviction); on failure the caller still
+     * owns apidlIn. */
+    void Store(LPCWSTR pszPath, DWORD dwFlags, LPITEMIDLIST *apidlIn, UINT cItems);
+
+private:
+    CFSEnumCache() : m_pHead(NULL), m_pTail(NULL), m_cEntries(0)
+    {
+        InitializeCriticalSection(&m_cs);
+    }
+    ~CFSEnumCache() { /* singleton: leaked at process exit, OK */ }
+
+    static BOOL NormalizePath(LPCWSTR pszIn, LPWSTR pszOut, UINT cchOut);
+    void Unlink(CFSEnumCacheEntry *p);
+    void PushFront(CFSEnumCacheEntry *p);
+    void FreeEntry(CFSEnumCacheEntry *p);
+    CFSEnumCacheEntry *FindLocked(LPCWSTR pszNorm, DWORD dwFlags);
+
+    CRITICAL_SECTION    m_cs;
+    CFSEnumCacheEntry  *m_pHead;
+    CFSEnumCacheEntry  *m_pTail;
+    UINT                m_cEntries;
+};
+
+BOOL CFSEnumCache::NormalizePath(LPCWSTR pszIn, LPWSTR pszOut, UINT cchOut)
+{
+    if (!pszIn || !pszOut || cchOut == 0)
+        return FALSE;
+    SIZE_T cch = wcslen(pszIn);
+    /* Strip one trailing backslash if present and not the only character. */
+    if (cch > 1 && pszIn[cch - 1] == L'\\')
+        --cch;
+    if (cch + 1 > cchOut)
+        return FALSE;
+    for (SIZE_T i = 0; i < cch; ++i)
+    {
+        WCHAR c = pszIn[i];
+        if (c >= L'A' && c <= L'Z')
+            c = (WCHAR)(c + (L'a' - L'A'));
+        pszOut[i] = c;
+    }
+    pszOut[cch] = L'\0';
+    return TRUE;
+}
+
+void CFSEnumCache::Unlink(CFSEnumCacheEntry *p)
+{
+    if (p->pPrev) p->pPrev->pNext = p->pNext;
+    else          m_pHead         = p->pNext;
+    if (p->pNext) p->pNext->pPrev = p->pPrev;
+    else          m_pTail         = p->pPrev;
+    p->pPrev = p->pNext = NULL;
+}
+
+void CFSEnumCache::PushFront(CFSEnumCacheEntry *p)
+{
+    p->pPrev = NULL;
+    p->pNext = m_pHead;
+    if (m_pHead) m_pHead->pPrev = p;
+    m_pHead = p;
+    if (!m_pTail) m_pTail = p;
+}
+
+void CFSEnumCache::FreeEntry(CFSEnumCacheEntry *p)
+{
+    if (!p) return;
+    if (p->apidl)
+    {
+        for (UINT i = 0; i < p->cItems; ++i)
+        {
+            if (p->apidl[i])
+                SHFree(p->apidl[i]);
+        }
+        SHFree(p->apidl);
+    }
+    if (p->pszPath)
+        SHFree(p->pszPath);
+    SHFree(p);
+}
+
+CFSEnumCacheEntry *CFSEnumCache::FindLocked(LPCWSTR pszNorm, DWORD dwFlags)
+{
+    for (CFSEnumCacheEntry *p = m_pHead; p; p = p->pNext)
+    {
+        if (p->dwFlags == dwFlags && !wcscmp(p->pszPath, pszNorm))
+            return p;
+    }
+    return NULL;
+}
+
+HRESULT CFSEnumCache::Lookup(LPCWSTR pszPath, DWORD dwFlags, IEnumIDList **ppEnum)
+{
+    *ppEnum = NULL;
+    WCHAR szNorm[MAX_PATH];
+    if (!NormalizePath(pszPath, szNorm, _countof(szNorm)))
+        return S_FALSE;
+
+    dwFlags &= CFS_ENUM_CACHE_FLAGMASK;
+
+    CComPtr<IEnumIDList> pEnumStub;
+    /* We need a fresh CEnumIDListBase to hand out. Build it under lock so
+     * we can ILClone directly from the cached entries while holding the
+     * cache's reference. */
+    HRESULT hr = ShellObjectCreator<CEnumIDListBase>(IID_PPV_ARG(IEnumIDList, &pEnumStub));
+    if (FAILED(hr))
+        return S_FALSE;
+
+    CEnumIDListBase *pBase = static_cast<CEnumIDListBase *>(pEnumStub.p);
+
+    EnterCriticalSection(&m_cs);
+    CFSEnumCacheEntry *p = FindLocked(szNorm, dwFlags);
+    if (!p)
+    {
+        LeaveCriticalSection(&m_cs);
+        return S_FALSE;
+    }
+
+    DWORD now = GetTickCount();
+    /* Invariant: stored entries always have a future expire tick at
+     * insertion time. A "past" tick here means TTL elapsed. */
+    if ((INT)(p->dwExpireTick - now) <= 0)
+    {
+        Unlink(p);
+        --m_cEntries;
+        LeaveCriticalSection(&m_cs);
+        FreeEntry(p);
+        return S_FALSE;
+    }
+
+    /* Promote to MRU. */
+    Unlink(p);
+    PushFront(p);
+
+    BOOL bOk = TRUE;
+    for (UINT i = 0; i < p->cItems; ++i)
+    {
+        LPITEMIDLIST pidlClone = ILClone(p->apidl[i]);
+        if (!pidlClone)
+        {
+            bOk = FALSE;
+            break;
+        }
+        if (!pBase->AddToEnumList(pidlClone))
+        {
+            SHFree(pidlClone);
+            bOk = FALSE;
+            break;
+        }
+    }
+    LeaveCriticalSection(&m_cs);
+
+    if (!bOk)
+        return S_FALSE;
+
+    *ppEnum = pEnumStub.Detach();
+    return S_OK;
+}
+
+void CFSEnumCache::Store(LPCWSTR pszPath, DWORD dwFlags, LPITEMIDLIST *apidlIn, UINT cItems)
+{
+    WCHAR szNorm[MAX_PATH];
+    if (!NormalizePath(pszPath, szNorm, _countof(szNorm)))
+        return;
+
+    dwFlags &= CFS_ENUM_CACHE_FLAGMASK;
+
+    SIZE_T cchPath = wcslen(szNorm) + 1;
+    LPWSTR pszStored = static_cast<LPWSTR>(SHAlloc(cchPath * sizeof(WCHAR)));
+    if (!pszStored)
+        return;
+    memcpy(pszStored, szNorm, cchPath * sizeof(WCHAR));
+
+    CFSEnumCacheEntry *pNew =
+        static_cast<CFSEnumCacheEntry *>(SHAlloc(sizeof(CFSEnumCacheEntry)));
+    if (!pNew)
+    {
+        SHFree(pszStored);
+        return;
+    }
+    ZeroMemory(pNew, sizeof(*pNew));
+    pNew->pszPath = pszStored;
+    pNew->dwFlags = dwFlags;
+    pNew->dwExpireTick = GetTickCount() + CFS_ENUM_CACHE_TTL_MS;
+    pNew->cItems = cItems;
+    pNew->apidl = apidlIn;
+
+    EnterCriticalSection(&m_cs);
+
+    /* Replace an existing entry with the same key (refresh). */
+    CFSEnumCacheEntry *pOld = FindLocked(szNorm, dwFlags);
+    if (pOld)
+    {
+        Unlink(pOld);
+        --m_cEntries;
+    }
+
+    PushFront(pNew);
+    ++m_cEntries;
+
+    /* Enforce cap with LRU eviction. */
+    CFSEnumCacheEntry *pEvict = NULL;
+    if (m_cEntries > CFS_ENUM_CACHE_MAX)
+    {
+        pEvict = m_pTail;
+        if (pEvict)
+        {
+            Unlink(pEvict);
+            --m_cEntries;
+        }
+    }
+
+    LeaveCriticalSection(&m_cs);
+
+    if (pOld)
+        FreeEntry(pOld);
+    if (pEvict)
+        FreeEntry(pEvict);
+}
+
 static BOOL ItemIsFolder(PCUITEMID_CHILD pidl)
 {
     const BYTE mask = PT_FS | PT_FS_FOLDER_FLAG | PT_FS_FILE_FLAG;
@@ -565,6 +847,53 @@ public:
         return hr;
     }
 
+    /* Snapshot the populated list into a freshly allocated PIDL array.
+     * Ownership of the cloned PIDLs transfers to the caller; on failure
+     * the partial array is freed and *pcItems is set to 0. Used to
+     * publish the enumeration result into CFSEnumCache. */
+    HRESULT SnapshotForCache(LPITEMIDLIST **papidlOut, UINT *pcItems)
+    {
+        *papidlOut = NULL;
+        *pcItems = 0;
+
+        UINT cItems = 0;
+        for (ENUMLIST *p = mpFirst; p; p = p->pNext)
+            ++cItems;
+
+        if (cItems == 0)
+        {
+            /* Allow caching of empty results; callers that pass cItems==0
+             * still consume a heap allocation, so use a sentinel-free
+             * 0-length array. */
+            *papidlOut = NULL;
+            *pcItems = 0;
+            return S_OK;
+        }
+
+        LPITEMIDLIST *apidl =
+            static_cast<LPITEMIDLIST *>(SHAlloc(cItems * sizeof(LPITEMIDLIST)));
+        if (!apidl)
+            return E_OUTOFMEMORY;
+        ZeroMemory(apidl, cItems * sizeof(LPITEMIDLIST));
+
+        UINT i = 0;
+        for (ENUMLIST *p = mpFirst; p && i < cItems; p = p->pNext, ++i)
+        {
+            apidl[i] = ILClone(p->pidl);
+            if (!apidl[i])
+            {
+                /* Best-effort: drop on the floor. Caller decides. */
+                for (UINT j = 0; j < i; ++j)
+                    SHFree(apidl[j]);
+                SHFree(apidl);
+                return E_OUTOFMEMORY;
+            }
+        }
+        *papidlOut = apidl;
+        *pcItems = cItems;
+        return S_OK;
+    }
+
     BEGIN_COM_MAP(CFileSysEnum)
         COM_INTERFACE_ENTRY_IID(IID_IEnumIDList, IEnumIDList)
     END_COM_MAP()
@@ -1001,7 +1330,49 @@ HRESULT WINAPI CFSFolder::EnumObjects(
     DWORD dwFlags,
     LPENUMIDLIST *ppEnumIDList)
 {
-    return ShellObjectCreatorInit<CFileSysEnum>(m_sPathTarget, dwFlags, IID_PPV_ARG(IEnumIDList, ppEnumIDList));
+    /* hwndOwner discrimination:
+     *   NULL  -> address-bar autocomplete, preview, or other "cheap, may be
+     *            stale" caller. Serve from CFSEnumCache when fresh.
+     *   non-0 -> CDefView::FillList / Refresh path. Always re-enumerate and
+     *            refresh the cache so F5 sees ground truth without an
+     *            explicit invalidate channel. */
+    if (!hwndOwner && m_sPathTarget && m_sPathTarget[0])
+    {
+        IEnumIDList *pCached = NULL;
+        if (CFSEnumCache::Instance().Lookup(m_sPathTarget, dwFlags, &pCached) == S_OK)
+        {
+            *ppEnumIDList = pCached;
+            return S_OK;
+        }
+    }
+
+    /* Create the typed enumerator ourselves so we can snapshot via the
+     * concrete CFileSysEnum interface without bouncing through QI. */
+    CComObject<CFileSysEnum> *pEnum;
+    HRESULT hr = CComObject<CFileSysEnum>::CreateInstance(&pEnum);
+    if (FAILED(hr))
+        return hr;
+    pEnum->AddRef();
+
+    hr = pEnum->Initialize(m_sPathTarget, dwFlags);
+    if (SUCCEEDED(hr) && m_sPathTarget && m_sPathTarget[0])
+    {
+        LPITEMIDLIST *apidl = NULL;
+        UINT cItems = 0;
+        if (SUCCEEDED(pEnum->SnapshotForCache(&apidl, &cItems)))
+        {
+            /* On success Store() takes ownership of apidl. */
+            CFSEnumCache::Instance().Store(m_sPathTarget, dwFlags, apidl, cItems);
+        }
+        pEnum->Reset();
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        hr = pEnum->QueryInterface(IID_PPV_ARG(IEnumIDList, ppEnumIDList));
+    }
+    pEnum->Release();
+    return hr;
 }
 
 /**************************************************************************
