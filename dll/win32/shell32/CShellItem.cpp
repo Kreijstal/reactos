@@ -430,3 +430,33 @@ SHCreateShellItemArrayFromDataObject(_In_ IDataObject *pdo, _In_ REFIID riid, _O
 {
     return ShellObjectCreatorInit<CShellItemArray>(pdo, riid, ppv);
 }
+
+/*
+ * @implemented
+ *
+ * Vista+ wrapper around SHCreateShellItem.  Builds an IShellItem from an
+ * absolute PIDL and QIs it to the requested riid (typically
+ * IID_IShellItem or IID_IShellItem2).  Functionally identical to
+ * "SHCreateShellItem(NULL, NULL, pidl, &psi); psi->QI(riid, ppv); psi->Release();"
+ * which is exactly the wrapper Windows itself exposes — the only reason
+ * it's a separate entry-point is that callers want a one-shot
+ * "PIDL + riid -> shell item" without juggling intermediates.
+ */
+EXTERN_C HRESULT WINAPI
+SHCreateItemFromIDList(PCIDLIST_ABSOLUTE pidl, REFIID riid, void **ppv)
+{
+    IShellItem *psi;
+    HRESULT hr;
+
+    if (!ppv)
+        return E_INVALIDARG;
+    *ppv = NULL;
+
+    hr = SHCreateShellItem(NULL, NULL, pidl, &psi);
+    if (FAILED(hr))
+        return hr;
+
+    hr = psi->QueryInterface(riid, ppv);
+    psi->Release();
+    return hr;
+}
