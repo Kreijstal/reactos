@@ -1219,9 +1219,9 @@
 @ stdcall WaitForMultipleObjectsEx(long ptr long long long)
 @ stdcall WaitForSingleObject(long long)
 @ stdcall WaitForSingleObjectEx(long long long)
-@ stub -version=0x600+ WaitForThreadpoolIoCallbacks
-@ stub -version=0x600+ WaitForThreadpoolTimerCallbacks
-@ stub -version=0x600+ WaitForThreadpoolWaitCallbacks
+@ stdcall -stub -version=0x600+ WaitForThreadpoolIoCallbacks(ptr long)
+@ stdcall -stub -version=0x600+ WaitForThreadpoolTimerCallbacks(ptr long)
+@ stdcall -stub -version=0x600+ WaitForThreadpoolWaitCallbacks(ptr long)
 @ stdcall -stub -version=0x600+ WaitForThreadpoolWorkCallbacks(ptr long)
 @ stdcall WaitNamedPipeA(str long)
 @ stdcall WaitNamedPipeW(wstr long)
