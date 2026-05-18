@@ -105,3 +105,34 @@ LPVOID WINAPI VirtualAlloc2(HANDLE Process,
 
     return VirtualAllocEx(Process, BaseAddress, Size, AllocationType, PageProtection);
 }
+
+/*
+ * @implemented
+ *
+ * Win8+ address-based wait primitive.  The Windows API takes a millisecond
+ * timeout; RtlWaitOnAddress takes a relative LARGE_INTEGER in 100-ns units
+ * (negative).  WakeByAddressSingle/All are pure forwarders (see .spec).
+ */
+BOOL WINAPI WaitOnAddress(volatile VOID *Address,
+                          PVOID CompareAddress,
+                          SIZE_T AddressSize,
+                          DWORD dwMilliseconds)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER Timeout;
+    PLARGE_INTEGER TimeoutPtr = NULL;
+
+    if (dwMilliseconds != INFINITE)
+    {
+        Timeout.QuadPart = -(LONGLONG)dwMilliseconds * 10000LL;
+        TimeoutPtr = &Timeout;
+    }
+
+    Status = RtlWaitOnAddress((PVOID)Address, CompareAddress, AddressSize, TimeoutPtr);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+    return TRUE;
+}
