@@ -37,11 +37,12 @@ double __cdecl cbrt(double x)
     return (x < 0) ? -pow(-x, 1.0/3.0) : pow(x, 1.0/3.0);
 }
 
-/* MSVC's CRT headers can declare some of these as intrinsics; disable
- * the intrinsic translation so we can provide real bodies that the
- * msvcrt apiset host needs to export. */
+/* MSVC's CRT header declares log2 as an intrinsic; the other C99 math
+ * names listed here are NOT MSVC intrinsics, so #pragma function only
+ * needs to cover log2 (listing the others triggers C4163 "not
+ * available as an intrinsic function"). */
 #ifdef _MSC_VER
-#pragma function(acosh, asinh, atanh, exp2, expm1, log1p, log2, round, roundf, trunc)
+#pragma function(log2)
 #endif
 
 double __cdecl acosh(double x) { return log(x + sqrt(x*x - 1.0)); }
