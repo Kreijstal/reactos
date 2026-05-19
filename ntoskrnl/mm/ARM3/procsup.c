@@ -550,7 +550,11 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     //
     // Set the new limit
     //
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     Thread->StackLimit = (volatile PVOID)MiPteToAddress(NewLimitPte);
+#else
+    Thread->StackLimit = (ULONG_PTR)MiPteToAddress(NewLimitPte);
+#endif
     return STATUS_SUCCESS;
 }
 
