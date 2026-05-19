@@ -21,6 +21,7 @@ extern PHYSICAL_ADDRESS HalpLowStubPhysicalAddress;
 extern PVOID HalpLowStub;
 extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
 
+#ifndef _NO_AP_TRAMPOLINE_
 /* The trampoline image; defined in hal/halx86/smp/amd64/apentry.S. */
 extern UCHAR HalpAPEntry16[];
 extern UCHAR HalpAPEntryData[];
@@ -29,6 +30,7 @@ extern UCHAR HalpAPEntry64[];
 extern UCHAR HalpAPEntry16End[];
 extern UCHAR HalpAPEntryEnd[];
 extern UCHAR APE_IndirectJumpOperandSite[];
+#endif
 
 /* Boot CPU is the first started processor (counted as 1). */
 ULONG HalpStartedProcessorCount = 1;
@@ -131,6 +133,7 @@ C_ASSERT(sizeof(AP_ENTRY_DATA)                          == 96);
  * and the 5-page stub stays leaked (acceptable for at most a handful
  * of APs).
  */
+#ifndef _NO_AP_TRAMPOLINE_
 static PHYSICAL_ADDRESS
 HalpSetupTemporaryMappings(VOID)
 {
@@ -192,6 +195,7 @@ HalpSetupTemporaryMappings(VOID)
     Pml4Pa = MmGetPhysicalAddress(Pml4);
     return Pml4Pa;
 }
+#endif /* _NO_AP_TRAMPOLINE_ */
 
 BOOLEAN
 NTAPI
@@ -199,6 +203,14 @@ HalStartNextProcessor(
     _In_ PLOADER_PARAMETER_BLOCK LoaderBlock,
     _In_ PKPROCESSOR_STATE ProcessorState)
 {
+#ifdef _NO_AP_TRAMPOLINE_
+    /* ml64 / MSVC builds cannot assemble the .code16 trampoline, so
+     * SMP AP bringup is unavailable.  Return FALSE so KeStartAllProcessors
+     * stops after the boot CPU, matching the UP HAL behaviour. */
+    UNREFERENCED_PARAMETER(LoaderBlock);
+    UNREFERENCED_PARAMETER(ProcessorState);
+    return FALSE;
+#else
     PHYSICAL_ADDRESS TempPml4Pa;
     SIZE_T TrampolineLength;
     SIZE_T DataBlockOffset;
@@ -288,4 +300,5 @@ HalStartNextProcessor(
 
     HalpStartedProcessorCount++;
     return TRUE;
+#endif /* _NO_AP_TRAMPOLINE_ */
 }
