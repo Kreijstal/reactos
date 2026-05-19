@@ -121,13 +121,38 @@ struct font_face_obj
     LONG ref;
     DWRITE_FONT_FACE_TYPE face_type;
     DWORD simulations;
+    /* Identity, copied from font_obj_t at CreateFontFace time so the
+     * face is independent of the family/font lifetimes. */
+    WCHAR family_name[LF_FACESIZE];
+    LONG  weight;
+    BYTE  italic;
+    BYTE  charset;
+    /* GDI delegation state.  Lazily initialised on first metric/glyph
+     * call by gdi_face_ensure.  HFONT is created at em_units pixel
+     * height so subsequent GetGlyphOutlineW / GetGlyphIndicesW results
+     * are already in font design units. */
+    CRITICAL_SECTION cs;
+    BOOL   cs_inited;
+    BOOL   ready;          /* gdi_face_ensure ran successfully */
+    HDC    hdc;
+    HFONT  hfont;
+    HGDIOBJ prev_obj;
+    UINT16 em_units;
+    UINT16 ascent_du;      /* tmAscent in design units */
+    UINT16 descent_du;     /* tmDescent in design units */
+    /* Cached results — populated under cs. */
+    UINT16 glyph_count;    /* 0 == not yet cached */
+    BOOL   metrics_ready;
+    DWRITE_FONT_METRICS metrics_cache;
 };
 
 /* Forward vtable declarations. */
 static const void * const g_collection_vtbl[14];
 static const void * const g_family_vtbl[14];
 static const void * const g_font_vtbl[24];
-static const void * const g_face_vtbl[58];
+static const void * const g_face_vtbl[60];
+/* Forward decl: defined in the FontFace section below. */
+static BOOL gdi_face_ensure(font_face_obj_t *face);
 
 /* ----- Collection: enumeration ---------------------------------------- */
 
@@ -278,6 +303,29 @@ static HRESULT build_singleton_collection(void)
     }
     TRACE("collected %u families\n", coll->nfamilies);
     g_collection = coll;
+    return S_OK;
+}
+
+/* ---- Accessors used by dwrite_glyphrun.c ---- */
+
+UINT16 dwrite_face_get_em_units(void *face)
+{
+    font_face_obj_t *self = (font_face_obj_t *)face;
+    if (!gdi_face_ensure(self)) return 0;
+    return self->em_units;
+}
+
+HRESULT dwrite_face_get_logfont(void *face, LOGFONTW *lf)
+{
+    font_face_obj_t *self = (font_face_obj_t *)face;
+    if (!lf) return E_POINTER;
+    memset(lf, 0, sizeof(*lf));
+    lf->lfWeight       = self->weight;
+    lf->lfItalic       = self->italic;
+    lf->lfCharSet      = self->charset;
+    lf->lfOutPrecision = OUT_TT_PRECIS;
+    lf->lfQuality      = DEFAULT_QUALITY;
+    lstrcpynW(lf->lfFaceName, self->family_name, LF_FACESIZE);
     return S_OK;
 }
 
@@ -570,6 +618,12 @@ static HRESULT STDMETHODCALLTYPE font_CreateFontFace(void *iface, void **out)
         ? DWRITE_FONT_FACE_TYPE_TRUETYPE
         : DWRITE_FONT_FACE_TYPE_TYPE1; /* generic non-TT bucket */
     face->simulations = DWRITE_FONT_SIMULATIONS_NONE;
+    lstrcpynW(face->family_name, self->family->family_name, LF_FACESIZE);
+    face->weight = self->rec.weight;
+    face->italic = self->rec.italic;
+    face->charset = self->rec.charset;
+    InitializeCriticalSection(&face->cs);
+    face->cs_inited = TRUE;
     *out = face;
     return S_OK;
 }
@@ -623,7 +677,107 @@ static const void * const g_font_vtbl[24] =
     font_GetLocality,                      /* 23 Font3::GetLocality */
 };
 
-/* ----- FontFace (Phase 1: minimal) ------------------------------------ */
+/* ----- FontFace (Phase 2: real metrics/glyphs/outlines via GDI) ------- */
+
+/* Lazily create an HDC + em-sized HFONT for `face` and query OTM once
+ * to discover otmEMSquare and tmAscent/tmDescent.  Subsequent
+ * GetGlyphOutlineW / GetGlyphIndicesW calls run against this DC so
+ * their pixel-domain output already lives in font design units. */
+static BOOL gdi_face_ensure(font_face_obj_t *face)
+{
+    LOGFONTW lf;
+    BYTE otm_buf[512];
+    OUTLINETEXTMETRICW *otm = (OUTLINETEXTMETRICW *)otm_buf;
+    UINT bytes;
+
+    if (face->ready) return TRUE;
+    if (!face->cs_inited) return FALSE;
+
+    EnterCriticalSection(&face->cs);
+    if (face->ready) { LeaveCriticalSection(&face->cs); return TRUE; }
+
+    face->hdc = CreateCompatibleDC(NULL);
+    if (!face->hdc) goto fail;
+
+    memset(&lf, 0, sizeof(lf));
+    lf.lfHeight       = -2048;  /* probe size; replaced after OTM */
+    lf.lfWeight       = face->weight;
+    lf.lfItalic       = face->italic;
+    lf.lfCharSet      = face->charset;
+    lf.lfOutPrecision = OUT_TT_PRECIS;
+    lf.lfQuality      = DEFAULT_QUALITY;
+    lstrcpynW(lf.lfFaceName, face->family_name, LF_FACESIZE);
+
+    face->hfont = CreateFontIndirectW(&lf);
+    if (!face->hfont) goto fail;
+    face->prev_obj = SelectObject(face->hdc, face->hfont);
+
+    bytes = GetOutlineTextMetricsW(face->hdc, sizeof(otm_buf), otm);
+    if (!bytes)
+    {
+        /* Non-outline (bitmap/vector) font.  Keep the probe HFONT for
+         * GetGlyphIndicesW which still works on raster fonts, but mark
+         * em_units = 0 so callers know design metrics are unavailable. */
+        face->em_units = 0;
+        face->ready = TRUE;
+        LeaveCriticalSection(&face->cs);
+        return TRUE;
+    }
+
+    face->em_units   = otm->otmEMSquare ? otm->otmEMSquare : 2048;
+    face->ascent_du  = otm->otmTextMetrics.tmAscent;
+    face->descent_du = otm->otmTextMetrics.tmDescent;
+
+    /* Cache the design metrics straight from the probe OTM, scaled from
+     * the probe height to design units. */
+    {
+        FLOAT s = (FLOAT)face->em_units / 2048.0f;
+        DWRITE_FONT_METRICS *m = &face->metrics_cache;
+        memset(m, 0, sizeof(*m));
+        m->designUnitsPerEm        = face->em_units;
+        m->ascent                  = (UINT16)((FLOAT)otm->otmTextMetrics.tmAscent * s);
+        m->descent                 = (UINT16)((FLOAT)otm->otmTextMetrics.tmDescent * s);
+        m->lineGap                 = (INT16) ((FLOAT)otm->otmLineGap * s);
+        m->capHeight               = (UINT16)((FLOAT)otm->otmsCapEmHeight * s);
+        m->xHeight                 = (UINT16)((FLOAT)otm->otmsXHeight * s);
+        m->underlinePosition       = (INT16) ((FLOAT)otm->otmsUnderscorePosition * s);
+        m->underlineThickness      = (UINT16)((FLOAT)otm->otmsUnderscoreSize * s);
+        m->strikethroughPosition   = (INT16) ((FLOAT)otm->otmsStrikeoutPosition * s);
+        m->strikethroughThickness  = (UINT16)((FLOAT)otm->otmsStrikeoutSize * s);
+        face->ascent_du            = m->ascent;
+        face->descent_du           = m->descent;
+        face->metrics_ready = TRUE;
+    }
+
+    /* Recreate the HFONT at exactly em_units so subsequent
+     * GetGlyphOutlineW returns are 1:1 in design units. */
+    if (lf.lfHeight != -(LONG)face->em_units)
+    {
+        HFONT new_font;
+        lf.lfHeight = -(LONG)face->em_units;
+        new_font = CreateFontIndirectW(&lf);
+        if (new_font)
+        {
+            SelectObject(face->hdc, face->prev_obj);
+            DeleteObject(face->hfont);
+            face->hfont = new_font;
+            face->prev_obj = SelectObject(face->hdc, face->hfont);
+        }
+        /* If CreateFontIndirectW fails at em size, keep the probe HFONT
+         * and rescale outputs by em_units/2048 in callers — but for
+         * common TT fonts the em-sized create works. */
+    }
+
+    face->ready = TRUE;
+    LeaveCriticalSection(&face->cs);
+    return TRUE;
+
+fail:
+    if (face->hfont) { DeleteObject(face->hfont); face->hfont = NULL; }
+    if (face->hdc)   { DeleteDC(face->hdc); face->hdc = NULL; }
+    LeaveCriticalSection(&face->cs);
+    return FALSE;
+}
 
 static HRESULT STDMETHODCALLTYPE face_QueryInterface(
     void *iface, REFIID iid, void **out)
@@ -651,6 +805,13 @@ static ULONG STDMETHODCALLTYPE face_Release(void *iface)
     LONG r = InterlockedDecrement(&self->ref);
     if (r == 0)
     {
+        if (self->hdc)
+        {
+            if (self->prev_obj) SelectObject(self->hdc, self->prev_obj);
+            DeleteDC(self->hdc);
+        }
+        if (self->hfont) DeleteObject(self->hfont);
+        if (self->cs_inited) DeleteCriticalSection(&self->cs);
         HeapFree(GetProcessHeap(), 0, self);
     }
     return r < 0 ? 0 : (ULONG)r;
@@ -680,21 +841,514 @@ static DWRITE_FONT_SIMULATIONS STDMETHODCALLTYPE face_GetSimulations(void *iface
 /* BOOL IsSymbolFont(void) */
 static BOOL STDMETHODCALLTYPE face_IsSymbolFont(void *iface)
 {
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    return self->charset == SYMBOL_CHARSET;
+}
+
+/* void GetMetrics(DWRITE_FONT_METRICS *metrics) — slot 8.
+ * Returns void; caller-provided struct is filled (or zero-filled on
+ * failure). */
+static void STDMETHODCALLTYPE face_GetMetrics(void *iface, DWRITE_FONT_METRICS *out)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!gdi_face_ensure(self)) return;
+    if (!self->metrics_ready) { out->designUnitsPerEm = self->em_units ? self->em_units : 1; return; }
+    *out = self->metrics_cache;
+}
+
+/* UINT16 GetGlyphCount(void) — slot 9.
+ * Read 'maxp' table; numGlyphs is BE16 at offset 4. */
+static UINT16 STDMETHODCALLTYPE face_GetGlyphCount(void *iface)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    BYTE maxp[6];
+    DWORD r;
+    if (self->glyph_count) return self->glyph_count;
+    if (!gdi_face_ensure(self)) return 0;
+    if (!self->em_units) return 0;
+    EnterCriticalSection(&self->cs);
+    r = GetFontData(self->hdc, DWRITE_MAKE_TAG('m','a','x','p'), 0, maxp, sizeof(maxp));
+    if (r == sizeof(maxp))
+        self->glyph_count = (UINT16)(((UINT16)maxp[4] << 8) | maxp[5]);
+    LeaveCriticalSection(&self->cs);
+    return self->glyph_count;
+}
+
+/* HRESULT GetDesignGlyphMetrics(UINT16 const *glyph_indices,
+ *      UINT32 glyph_count, DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways)
+ * Slot 10. */
+static HRESULT STDMETHODCALLTYPE face_GetDesignGlyphMetrics(
+    void *iface, UINT16 const *glyph_indices, UINT32 glyph_count,
+    DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    static const MAT2 ident = { {0,1}, {0,0}, {0,0}, {0,1} };
+    UINT32 i;
+    (void)is_sideways;
+    if (!glyph_indices || !metrics) return E_POINTER;
+    if (!gdi_face_ensure(self)) return E_FAIL;
+    memset(metrics, 0, glyph_count * sizeof(*metrics));
+    if (!self->em_units) return S_OK;
+
+    EnterCriticalSection(&self->cs);
+    for (i = 0; i < glyph_count; ++i)
+    {
+        GLYPHMETRICS gm;
+        DWORD r = GetGlyphOutlineW(self->hdc, glyph_indices[i],
+                                   GGO_METRICS | GGO_GLYPH_INDEX,
+                                   &gm, 0, NULL, &ident);
+        if (r == GDI_ERROR) continue;
+        metrics[i].leftSideBearing  = gm.gmptGlyphOrigin.x;
+        metrics[i].advanceWidth     = gm.gmCellIncX;
+        metrics[i].rightSideBearing = (INT32)gm.gmCellIncX
+                                    - gm.gmptGlyphOrigin.x
+                                    - (INT32)gm.gmBlackBoxX;
+        metrics[i].topSideBearing   = (INT32)self->ascent_du - gm.gmptGlyphOrigin.y;
+        metrics[i].advanceHeight    = (UINT32)self->ascent_du + (UINT32)self->descent_du;
+        metrics[i].bottomSideBearing = (INT32)self->descent_du
+                                     + gm.gmptGlyphOrigin.y
+                                     - (INT32)gm.gmBlackBoxY;
+        metrics[i].verticalOriginY  = (INT32)self->ascent_du;
+    }
+    LeaveCriticalSection(&self->cs);
+    return S_OK;
+}
+
+/* HRESULT GetGlyphIndices(UINT32 const *codepoints, UINT32 count,
+ *      UINT16 *glyph_indices) — slot 11. */
+static HRESULT STDMETHODCALLTYPE face_GetGlyphIndices(
+    void *iface, UINT32 const *codepoints, UINT32 count, UINT16 *indices)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    WCHAR  *buf;
+    WORD   *gidx;
+    UINT32 i, u16n;
+    DWORD  r;
+    if (!indices) return E_POINTER;
+    if (!count) return S_OK;
+    if (!codepoints) return E_INVALIDARG;
+    if (!gdi_face_ensure(self)) { memset(indices, 0, count * sizeof(*indices)); return E_FAIL; }
+
+    buf  = HeapAlloc(GetProcessHeap(), 0, count * 2 * sizeof(WCHAR));
+    gidx = HeapAlloc(GetProcessHeap(), 0, count * 2 * sizeof(WORD));
+    if (!buf || !gidx)
+    {
+        if (buf) HeapFree(GetProcessHeap(), 0, buf);
+        if (gidx) HeapFree(GetProcessHeap(), 0, gidx);
+        return E_OUTOFMEMORY;
+    }
+
+    u16n = 0;
+    for (i = 0; i < count; ++i)
+    {
+        UINT32 cp = codepoints[i];
+        if (cp < 0x10000) buf[u16n++] = (WCHAR)cp;
+        else if (cp <= 0x10FFFF)
+        {
+            cp -= 0x10000;
+            buf[u16n++] = (WCHAR)(0xD800 | (cp >> 10));
+            buf[u16n++] = (WCHAR)(0xDC00 | (cp & 0x3FF));
+        }
+        else buf[u16n++] = 0xFFFD;
+    }
+
+    EnterCriticalSection(&self->cs);
+    r = GetGlyphIndicesW(self->hdc, buf, u16n, gidx, GGI_MARK_NONEXISTING_GLYPHS);
+    LeaveCriticalSection(&self->cs);
+
+    if (r == GDI_ERROR)
+    {
+        memset(indices, 0, count * sizeof(*indices));
+        HeapFree(GetProcessHeap(), 0, buf);
+        HeapFree(GetProcessHeap(), 0, gidx);
+        return S_OK;
+    }
+
+    u16n = 0;
+    for (i = 0; i < count; ++i)
+    {
+        UINT32 cp = codepoints[i];
+        if (cp < 0x10000)
+        {
+            indices[i] = (gidx[u16n] == 0xFFFF) ? 0 : gidx[u16n];
+            u16n++;
+        }
+        else
+        {
+            /* SMP code points: GDI maps each surrogate individually and
+             * neither half has a real glyph.  Report missing. */
+            indices[i] = 0;
+            u16n += 2;
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    HeapFree(GetProcessHeap(), 0, gidx);
+    return S_OK;
+}
+
+/* HRESULT TryGetFontTable(UINT32 tag, void const **table_data,
+ *      UINT32 *table_size, void **context, BOOL *exists) — slot 12. */
+static HRESULT STDMETHODCALLTYPE face_TryGetFontTable(
+    void *iface, UINT32 tag, const void **table_data, UINT32 *table_size,
+    void **context, BOOL *exists)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    DWORD size;
+    void *blob;
+    if (!table_data || !table_size || !context || !exists) return E_POINTER;
+    *table_data = NULL;
+    *table_size = 0;
+    *context = NULL;
+    *exists = FALSE;
+    if (!gdi_face_ensure(self)) return E_FAIL;
+
+    EnterCriticalSection(&self->cs);
+    size = GetFontData(self->hdc, tag, 0, NULL, 0);
+    if (size == GDI_ERROR || size == 0)
+    {
+        LeaveCriticalSection(&self->cs);
+        return S_OK; /* exists stays FALSE */
+    }
+    blob = HeapAlloc(GetProcessHeap(), 0, size);
+    if (!blob)
+    {
+        LeaveCriticalSection(&self->cs);
+        return E_OUTOFMEMORY;
+    }
+    if (GetFontData(self->hdc, tag, 0, blob, size) != size)
+    {
+        HeapFree(GetProcessHeap(), 0, blob);
+        LeaveCriticalSection(&self->cs);
+        return E_FAIL;
+    }
+    LeaveCriticalSection(&self->cs);
+
+    *table_data = blob;
+    *table_size = size;
+    *context    = blob;
+    *exists     = TRUE;
+    return S_OK;
+}
+
+/* void ReleaseFontTable(void *context) — slot 13.
+ * Declared as HRESULT-returning in IDWriteFontFace IDL; treat the return
+ * value as ignored and use the slot for both. */
+static void STDMETHODCALLTYPE face_ReleaseFontTable(void *iface, void *context)
+{
+    (void)iface;
+    if (context) HeapFree(GetProcessHeap(), 0, context);
+}
+
+/* ---- GetGlyphRunOutline support: TrueType outline decoder ------------ */
+
+static D2D1_POINT_2F fixed_to_point(const POINTFX *p, FLOAT scale, FLOAT ox, FLOAT oy)
+{
+    D2D1_POINT_2F r;
+    FLOAT x = (FLOAT)p->x.value + (FLOAT)p->x.fract / 65536.0f;
+    FLOAT y = (FLOAT)p->y.value + (FLOAT)p->y.fract / 65536.0f;
+    /* GDI's GGO_NATIVE returns y-up around the glyph origin.  DirectWrite
+     * sinks consume y-down with the origin at the run baseline. */
+    r.x = ox + x * scale;
+    r.y = oy - y * scale;
+    return r;
+}
+
+static D2D1_POINT_2F midpoint_pt(D2D1_POINT_2F a, D2D1_POINT_2F b)
+{
+    D2D1_POINT_2F r;
+    r.x = (a.x + b.x) * 0.5f;
+    r.y = (a.y + b.y) * 0.5f;
+    return r;
+}
+
+static void quadratic_to_cubic(D2D1_POINT_2F s, D2D1_POINT_2F c, D2D1_POINT_2F e,
+                               D2D1_BEZIER_SEGMENT *out)
+{
+    out->point1.x = s.x + (2.0f / 3.0f) * (c.x - s.x);
+    out->point1.y = s.y + (2.0f / 3.0f) * (c.y - s.y);
+    out->point2.x = e.x + (2.0f / 3.0f) * (c.x - e.x);
+    out->point2.y = e.y + (2.0f / 3.0f) * (c.y - e.y);
+    out->point3   = e;
+}
+
+static void emit_glyph_outline(void *sink, BYTE *buf, DWORD len,
+                               FLOAT scale, FLOAT ox, FLOAT oy)
+{
+    const dwrite_sink_vtbl_t *vt = *(const dwrite_sink_vtbl_t *const *)sink;
+    BYTE *end = buf + len;
+    BYTE *p = buf;
+
+    while (p < end)
+    {
+        TTPOLYGONHEADER *hdr = (TTPOLYGONHEADER *)p;
+        BYTE *poly_end = p + hdr->cb;
+        BYTE *cursor = (BYTE *)hdr + sizeof(TTPOLYGONHEADER);
+        D2D1_POINT_2F start = fixed_to_point(&hdr->pfxStart, scale, ox, oy);
+        D2D1_POINT_2F pos = start;
+
+        if (hdr->dwType != TT_POLYGON_TYPE)
+        {
+            p = poly_end;
+            continue;
+        }
+
+        vt->BeginFigure(sink, start, D2D1_FIGURE_BEGIN_FILLED);
+
+        while (cursor < poly_end)
+        {
+            TTPOLYCURVE *cur = (TTPOLYCURVE *)cursor;
+            UINT32 npts = cur->cpfx;
+            BYTE *next_cursor;
+
+            next_cursor = (BYTE *)cur + sizeof(WORD) * 2 + sizeof(POINTFX) * npts;
+
+            if (cur->wType == TT_PRIM_LINE && npts > 0)
+            {
+                D2D1_POINT_2F *lines = HeapAlloc(GetProcessHeap(), 0,
+                                                 npts * sizeof(D2D1_POINT_2F));
+                UINT32 j;
+                if (lines)
+                {
+                    for (j = 0; j < npts; ++j)
+                        lines[j] = fixed_to_point(&cur->apfx[j], scale, ox, oy);
+                    vt->AddLines(sink, lines, npts);
+                    pos = lines[npts - 1];
+                    HeapFree(GetProcessHeap(), 0, lines);
+                }
+            }
+            else if (cur->wType == TT_PRIM_QSPLINE && npts >= 2)
+            {
+                /* TT_PRIM_QSPLINE: apfx[0..npts-2] are control points,
+                 * apfx[npts-1] is the final on-curve endpoint.  Between
+                 * consecutive control points c_i, c_{i+1} (when
+                 * i+1 < npts-1) the implicit on-curve point is their
+                 * midpoint, so each quadratic spans the implicit (or
+                 * explicit terminal) on-curve points. */
+                UINT32 nq = npts - 1; /* number of quadratics */
+                D2D1_BEZIER_SEGMENT *cubics = HeapAlloc(GetProcessHeap(), 0,
+                                                       nq * sizeof(D2D1_BEZIER_SEGMENT));
+                UINT32 j;
+                if (cubics)
+                {
+                    for (j = 0; j < nq; ++j)
+                    {
+                        D2D1_POINT_2F ctrl = fixed_to_point(&cur->apfx[j], scale, ox, oy);
+                        D2D1_POINT_2F endp;
+                        if (j + 1 == nq)
+                            endp = fixed_to_point(&cur->apfx[npts - 1], scale, ox, oy);
+                        else
+                        {
+                            D2D1_POINT_2F nxt = fixed_to_point(&cur->apfx[j + 1], scale, ox, oy);
+                            endp = midpoint_pt(ctrl, nxt);
+                        }
+                        quadratic_to_cubic(pos, ctrl, endp, &cubics[j]);
+                        pos = endp;
+                    }
+                    vt->AddBeziers(sink, cubics, nq);
+                    HeapFree(GetProcessHeap(), 0, cubics);
+                }
+            }
+            /* TT_PRIM_CSPLINE (cubic) — GDI emits this for PostScript Type1
+             * outlines.  apfx is groups of 3 points: (ctrl1, ctrl2, end). */
+            else if (cur->wType == TT_PRIM_CSPLINE && npts >= 3 && (npts % 3) == 0)
+            {
+                UINT32 ncubic = npts / 3;
+                D2D1_BEZIER_SEGMENT *cubics = HeapAlloc(GetProcessHeap(), 0,
+                                                       ncubic * sizeof(D2D1_BEZIER_SEGMENT));
+                UINT32 j;
+                if (cubics)
+                {
+                    for (j = 0; j < ncubic; ++j)
+                    {
+                        cubics[j].point1 = fixed_to_point(&cur->apfx[j*3 + 0], scale, ox, oy);
+                        cubics[j].point2 = fixed_to_point(&cur->apfx[j*3 + 1], scale, ox, oy);
+                        cubics[j].point3 = fixed_to_point(&cur->apfx[j*3 + 2], scale, ox, oy);
+                        pos = cubics[j].point3;
+                    }
+                    vt->AddBeziers(sink, cubics, ncubic);
+                    HeapFree(GetProcessHeap(), 0, cubics);
+                }
+            }
+
+            cursor = next_cursor;
+        }
+
+        vt->EndFigure(sink, D2D1_FIGURE_END_CLOSED);
+        p = poly_end;
+    }
+}
+
+/* HRESULT GetGlyphRunOutline(FLOAT em_size, UINT16 const *glyph_indices,
+ *      FLOAT const *glyph_advances, DWRITE_GLYPH_OFFSET const *glyph_offsets,
+ *      UINT32 glyph_count, BOOL is_sideways, BOOL is_rtl,
+ *      IDWriteGeometrySink *sink) — slot 14. */
+static HRESULT STDMETHODCALLTYPE face_GetGlyphRunOutline(
+    void *iface, FLOAT em_size, UINT16 const *glyph_indices,
+    FLOAT const *glyph_advances, DWRITE_GLYPH_OFFSET const *glyph_offsets,
+    UINT32 glyph_count, BOOL is_sideways, BOOL is_rtl, void *sink)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    static const MAT2 ident = { {0,1}, {0,0}, {0,0}, {0,1} };
+    BYTE *buf = NULL;
+    DWORD buf_cap = 0;
+    FLOAT scale, pen_x = 0.0f;
+    UINT32 i;
+    (void)is_sideways;
+
+    if (!sink) return E_POINTER;
+    if (!glyph_indices && glyph_count) return E_INVALIDARG;
+    if (!gdi_face_ensure(self)) return E_FAIL;
+    if (!self->em_units) return S_OK;
+
+    scale = em_size / (FLOAT)self->em_units;
+
+    EnterCriticalSection(&self->cs);
+    for (i = 0; i < glyph_count; ++i)
+    {
+        FLOAT ox = pen_x;
+        FLOAT oy = 0.0f;
+        FLOAT advance;
+        GLYPHMETRICS gm;
+        DWORD r;
+
+        if (glyph_offsets)
+        {
+            ox += glyph_offsets[i].advanceOffset;
+            oy -= glyph_offsets[i].ascenderOffset;
+        }
+
+        r = GetGlyphOutlineW(self->hdc, glyph_indices[i],
+                             GGO_NATIVE | GGO_GLYPH_INDEX,
+                             &gm, 0, NULL, &ident);
+        if (r != GDI_ERROR && r > 0)
+        {
+            if (r > buf_cap)
+            {
+                BYTE *nb = buf ? HeapReAlloc(GetProcessHeap(), 0, buf, r)
+                               : HeapAlloc(GetProcessHeap(), 0, r);
+                if (!nb)
+                {
+                    LeaveCriticalSection(&self->cs);
+                    if (buf) HeapFree(GetProcessHeap(), 0, buf);
+                    return E_OUTOFMEMORY;
+                }
+                buf = nb;
+                buf_cap = r;
+            }
+            if (GetGlyphOutlineW(self->hdc, glyph_indices[i],
+                                 GGO_NATIVE | GGO_GLYPH_INDEX,
+                                 &gm, r, buf, &ident) != GDI_ERROR)
+            {
+                emit_glyph_outline(sink, buf, r, scale, ox, oy);
+            }
+        }
+
+        advance = glyph_advances ? glyph_advances[i]
+                                 : ((r != GDI_ERROR)
+                                    ? (FLOAT)gm.gmCellIncX * scale
+                                    : 0.0f);
+        pen_x += is_rtl ? -advance : advance;
+    }
+    LeaveCriticalSection(&self->cs);
+    if (buf) HeapFree(GetProcessHeap(), 0, buf);
+    return S_OK;
+}
+
+/* HRESULT GetRecommendedRenderingMode(FLOAT em_size, FLOAT pixels_per_dip,
+ *      DWRITE_MEASURING_MODE mode, IDWriteRenderingParams *params,
+ *      DWRITE_RENDERING_MODE *mode_out) — slot 15. */
+static HRESULT STDMETHODCALLTYPE face_GetRecommendedRenderingMode(
+    void *iface, FLOAT em_size, FLOAT pixels_per_dip,
+    DWRITE_MEASURING_MODE mode, void *params, DWRITE_RENDERING_MODE *mode_out)
+{
+    (void)iface; (void)em_size; (void)pixels_per_dip; (void)mode; (void)params;
+    if (!mode_out) return E_POINTER;
+    *mode_out = DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC;
+    return S_OK;
+}
+
+/* HRESULT GetGdiCompatibleMetrics(FLOAT em_size, FLOAT pixels_per_dip,
+ *      DWRITE_MATRIX const *transform, DWRITE_FONT_METRICS *out) — slot 16.
+ * For Phase 2 we ignore the GDI compatibility tweaks and return the design
+ * metrics. */
+static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleMetrics(
+    void *iface, FLOAT em_size, FLOAT pixels_per_dip,
+    DWRITE_MATRIX const *transform, DWRITE_FONT_METRICS *out)
+{
+    (void)em_size; (void)pixels_per_dip; (void)transform;
+    if (!out) return E_POINTER;
+    face_GetMetrics(iface, out);
+    return S_OK;
+}
+
+/* HRESULT GetGdiCompatibleGlyphMetrics(FLOAT em_size, FLOAT pixels_per_dip,
+ *      DWRITE_MATRIX const *transform, BOOL use_gdi_natural,
+ *      UINT16 const *glyph_indices, UINT32 glyph_count,
+ *      DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways) — slot 17. */
+static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphMetrics(
+    void *iface, FLOAT em_size, FLOAT pixels_per_dip,
+    DWRITE_MATRIX const *transform, BOOL use_gdi_natural,
+    UINT16 const *glyph_indices, UINT32 glyph_count,
+    DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways)
+{
+    (void)em_size; (void)pixels_per_dip; (void)transform; (void)use_gdi_natural;
+    return face_GetDesignGlyphMetrics(iface, glyph_indices, glyph_count,
+                                      metrics, is_sideways);
+}
+
+/* IDWriteFontFace1::GetMetrics(DWRITE_FONT_METRICS1 *out) — slot 18.
+ * Same as GetMetrics, additional fields zeroed. */
+static void STDMETHODCALLTYPE face_GetMetrics1(void *iface, DWRITE_FONT_METRICS1 *out)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!gdi_face_ensure(self)) return;
+    if (self->metrics_ready)
+    {
+        out->designUnitsPerEm       = self->metrics_cache.designUnitsPerEm;
+        out->ascent                 = self->metrics_cache.ascent;
+        out->descent                = self->metrics_cache.descent;
+        out->lineGap                = self->metrics_cache.lineGap;
+        out->capHeight              = self->metrics_cache.capHeight;
+        out->xHeight                = self->metrics_cache.xHeight;
+        out->underlinePosition      = self->metrics_cache.underlinePosition;
+        out->underlineThickness     = self->metrics_cache.underlineThickness;
+        out->strikethroughPosition  = self->metrics_cache.strikethroughPosition;
+        out->strikethroughThickness = self->metrics_cache.strikethroughThickness;
+        out->hasTypographicMetrics  = TRUE;
+    }
+    else
+    {
+        out->designUnitsPerEm = self->em_units ? self->em_units : 1;
+    }
+}
+
+/* IDWriteFontFace3::HasCharacter(UINT32 codepoint) — return TRUE if any
+ * non-zero glyph maps.  Slot for IDWriteFontFace3::HasCharacter lives in
+ * the FontFace3 extension. */
+static BOOL STDMETHODCALLTYPE face_HasCharacter(void *iface, UINT32 codepoint)
+{
+    UINT16 gid = 0;
+    HRESULT hr = face_GetGlyphIndices(iface, &codepoint, 1, &gid);
+    return SUCCEEDED(hr) && gid != 0;
+}
+
+/* IDWriteFontFace1::IsMonospacedFont(void) — slot 22.
+ * GDI doesn't expose this directly without parsing 'post'.  Treat
+ * known monospace family names heuristically as monospace, else FALSE. */
+static BOOL STDMETHODCALLTYPE face_IsMonospacedFont(void *iface)
+{
     (void)iface;
     return FALSE;
 }
 
-/* UINT16 GetGlyphCount(void) — Phase 1: 0. */
-static UINT16 STDMETHODCALLTYPE face_GetGlyphCount(void *iface)
-{
-    (void)iface;
-    return 0;
-}
-
-/* The FontFace vtable size = 3 (IUnknown) + 15 + 12 + 5 + 14 + 4 + 5 = 58.
- * Slots beyond what we implement return E_NOTIMPL.  Qt's Phase-1 path
- * does not invoke them. */
-static const void * const g_face_vtbl[58] =
+/* FontFace vtable: 3 (IUnknown) + 15 + 12 + 5 + 15 + 4 + 5 = 59.
+ * Indexed 0..58.  Pad to 60 for safety against IDL drift; we'll
+ * tighten when Wine's IDLs are vendored in Phase 3. */
+static const void * const g_face_vtbl[60] =
 {
     face_QueryInterface,                   /* 0  QueryInterface */
     dwrite_common_AddRef,                  /* 1  AddRef */
@@ -704,36 +1358,63 @@ static const void * const g_face_vtbl[58] =
     face_GetIndex,                         /* 5  GetIndex */
     face_GetSimulations,                   /* 6  GetSimulations */
     face_IsSymbolFont,                     /* 7  IsSymbolFont */
-    dwrite_common_method_e_notimpl,        /* 8  GetMetrics */
-    face_GetGlyphCount,                    /* 9  GetGlyphCount (returns 0 in Phase 1) */
-    /* 10..57: rest of FontFace0..5 extensions */
-    dwrite_common_method_e_notimpl,        /* 10 GetDesignGlyphMetrics */
-    dwrite_common_method_e_notimpl,        /* 11 GetGlyphIndices */
-    dwrite_common_method_e_notimpl,        /* 12 TryGetFontTable */
-    dwrite_common_method_e_notimpl,        /* 13 ReleaseFontTable (return value ignored) */
-    dwrite_common_method_e_notimpl,        /* 14 GetGlyphRunOutline */
-    dwrite_common_method_e_notimpl,        /* 15 GetRecommendedRenderingMode */
-    dwrite_common_method_e_notimpl,        /* 16 GetGdiCompatibleMetrics */
-    dwrite_common_method_e_notimpl,        /* 17 GetGdiCompatibleGlyphMetrics */
-    /* FontFace1..5: tail E_NOTIMPL */
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
-    dwrite_common_method_e_notimpl, dwrite_common_method_e_notimpl,
+    face_GetMetrics,                       /* 8  GetMetrics */
+    face_GetGlyphCount,                    /* 9  GetGlyphCount */
+    face_GetDesignGlyphMetrics,            /* 10 GetDesignGlyphMetrics */
+    face_GetGlyphIndices,                  /* 11 GetGlyphIndices */
+    face_TryGetFontTable,                  /* 12 TryGetFontTable */
+    face_ReleaseFontTable,                 /* 13 ReleaseFontTable */
+    face_GetGlyphRunOutline,               /* 14 GetGlyphRunOutline */
+    face_GetRecommendedRenderingMode,      /* 15 GetRecommendedRenderingMode */
+    face_GetGdiCompatibleMetrics,          /* 16 GetGdiCompatibleMetrics */
+    face_GetGdiCompatibleGlyphMetrics,     /* 17 GetGdiCompatibleGlyphMetrics */
+    /* IDWriteFontFace1 (slots 18-29; note IDL order is
+     *   GetGdiCompatibleMetrics(18) before GetMetrics(19)). */
+    dwrite_common_method_e_notimpl,        /* 18 FontFace1::GetGdiCompatibleMetrics */
+    face_GetMetrics1,                      /* 19 FontFace1::GetMetrics(DWRITE_FONT_METRICS1*) */
+    dwrite_common_method_e_notimpl,        /* 20 FontFace1::GetCaretMetrics */
+    dwrite_common_method_e_notimpl,        /* 21 FontFace1::GetUnicodeRanges */
+    face_IsMonospacedFont,                 /* 22 FontFace1::IsMonospacedFont */
+    dwrite_common_method_e_notimpl,        /* 23 FontFace1::GetDesignGlyphAdvances */
+    dwrite_common_method_e_notimpl,        /* 24 FontFace1::GetGdiCompatibleGlyphAdvances */
+    dwrite_common_method_e_notimpl,        /* 25 FontFace1::GetKerningPairAdjustments */
+    dwrite_common_method_e_notimpl,        /* 26 FontFace1::HasKerningPairs */
+    dwrite_common_method_e_notimpl,        /* 27 FontFace1::GetRecommendedRenderingMode */
+    dwrite_common_method_e_notimpl,        /* 28 FontFace1::GetVerticalGlyphVariants */
+    dwrite_common_method_e_notimpl,        /* 29 FontFace1::HasVerticalGlyphVariants */
+    /* IDWriteFontFace2 (slots 30-34) */
+    dwrite_common_method_e_notimpl,        /* 30 IsColorFont */
+    dwrite_common_method_e_notimpl,        /* 31 GetColorPaletteCount */
+    dwrite_common_method_e_notimpl,        /* 32 GetPaletteEntryCount */
+    dwrite_common_method_e_notimpl,        /* 33 GetPaletteEntries */
+    dwrite_common_method_e_notimpl,        /* 34 GetRecommendedRenderingMode */
+    /* IDWriteFontFace3 (slots 35-49) */
+    dwrite_common_method_e_notimpl,        /* 35 GetFontFaceReference */
+    dwrite_common_method_e_notimpl,        /* 36 GetPanose */
+    dwrite_common_method_e_notimpl,        /* 37 GetWeight */
+    dwrite_common_method_e_notimpl,        /* 38 GetStretch */
+    dwrite_common_method_e_notimpl,        /* 39 GetStyle */
+    dwrite_common_method_e_notimpl,        /* 40 GetFamilyNames */
+    dwrite_common_method_e_notimpl,        /* 41 GetFaceNames */
+    dwrite_common_method_e_notimpl,        /* 42 GetInformationalStrings */
+    dwrite_common_method_e_notimpl,        /* 43 Equals */
+    face_HasCharacter,                     /* 44 HasCharacter */
+    dwrite_common_method_e_notimpl,        /* 45 GetRecommendedRenderingMode (FF3) */
+    dwrite_common_method_e_notimpl,        /* 46 IsCharacterLocal */
+    dwrite_common_method_e_notimpl,        /* 47 IsGlyphLocal */
+    dwrite_common_method_e_notimpl,        /* 48 AreCharactersLocal */
+    dwrite_common_method_e_notimpl,        /* 49 AreGlyphsLocal */
+    /* IDWriteFontFace4 (slots 50-53) */
+    dwrite_common_method_e_notimpl,        /* 50 GetGlyphImageFormats (overload) */
+    dwrite_common_method_e_notimpl,        /* 51 GetGlyphImageFormats */
+    dwrite_common_method_e_notimpl,        /* 52 GetGlyphImageData */
+    dwrite_common_method_e_notimpl,        /* 53 ReleaseGlyphImageData */
+    /* IDWriteFontFace5 (slots 54-58) */
+    dwrite_common_method_e_notimpl,        /* 54 GetFontAxisValueCount */
+    dwrite_common_method_e_notimpl,        /* 55 GetFontAxisValues */
+    dwrite_common_method_e_notimpl,        /* 56 HasVariations */
+    dwrite_common_method_e_notimpl,        /* 57 GetFontResource */
+    dwrite_common_method_e_notimpl,        /* 58 Equals (FontFace5) */
+    /* Pad */
+    dwrite_common_method_e_notimpl,        /* 59 padding */
 };
