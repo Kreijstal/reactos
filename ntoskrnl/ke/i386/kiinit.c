@@ -560,7 +560,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitProcess->ActiveProcessors |= 1 << Number;
 
     /* HACK for MmUpdatePageDir */
-    ((PETHREAD)InitThread)->ThreadsProcess = InitProcess;
+    ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
 
     /* Set basic CPU Features that user mode can read */
     SharedUserData->ProcessorFeatures[PF_FLOATING_POINT_PRECISION_ERRATA] = FALSE;
