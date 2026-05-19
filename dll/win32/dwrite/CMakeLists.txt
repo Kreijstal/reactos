@@ -4,6 +4,7 @@ spec2def(dwrite.dll dwrite.spec)
 list(APPEND SOURCE
     dwrite_main.c
     dwrite_collection.c
+    dwrite_glyphrun.c
     dwrite_strings.c
     dwrite_private.h
     ${CMAKE_CURRENT_BINARY_DIR}/dwrite_stubs.c

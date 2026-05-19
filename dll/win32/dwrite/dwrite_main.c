@@ -200,6 +200,48 @@ static HRESULT STDMETHODCALLTYPE factory6_GetSystemFontCollection(
     return dwrite_get_system_font_collection(family_model, out);
 }
 
+/* IDWriteFactory::CreateGlyphRunAnalysis(DWRITE_GLYPH_RUN const *,
+ *     FLOAT pixels_per_dip, DWRITE_MATRIX const *,
+ *     DWRITE_RENDERING_MODE, DWRITE_MEASURING_MODE,
+ *     FLOAT baseline_x, FLOAT baseline_y,
+ *     IDWriteGlyphRunAnalysis **out) — slot 23.
+ *
+ * Qt 6's QFontEngineDirectWrite::imageForGlyph calls this to rasterize
+ * each glyph into an alpha texture for blitting.  Without it Qt logs
+ * "CreateGlyphRunAnalysis failed (0x80004001)" and returns an empty
+ * QImage, leaving the dialog body blank even after the font collection
+ * populates correctly. */
+static HRESULT STDMETHODCALLTYPE factory_CreateGlyphRunAnalysis(
+    void *iface, void const *run, FLOAT ppd, DWRITE_MATRIX const *transform,
+    DWORD rendering_mode, DWORD measuring_mode,
+    FLOAT baseline_x, FLOAT baseline_y, void **out)
+{
+    (void)iface;
+    return dwrite_create_glyph_run_analysis(
+        (DWRITE_GLYPH_RUN const *)run, ppd, transform,
+        (DWRITE_RENDERING_MODE)rendering_mode,
+        (DWRITE_MEASURING_MODE)measuring_mode,
+        baseline_x, baseline_y, out);
+}
+
+/* IDWriteFactory2::CreateGlyphRunAnalysis — slot 30.
+ * Signature drops the pixels-per-dip argument and adds grid_fit_mode +
+ * antialias_mode (both ignored in Phase 2.5).  Qt 6 prefers this
+ * overload when QI(IDWriteFactory2) succeeded, which it does for us. */
+static HRESULT STDMETHODCALLTYPE factory2_CreateGlyphRunAnalysis(
+    void *iface, void const *run, DWRITE_MATRIX const *transform,
+    DWORD rendering_mode, DWORD measuring_mode,
+    DWORD grid_fit_mode, DWORD antialias_mode,
+    FLOAT baseline_x, FLOAT baseline_y, void **out)
+{
+    (void)iface; (void)grid_fit_mode; (void)antialias_mode;
+    return dwrite_create_glyph_run_analysis(
+        (DWRITE_GLYPH_RUN const *)run, 1.0f, transform,
+        (DWRITE_RENDERING_MODE)rendering_mode,
+        (DWRITE_MEASURING_MODE)measuring_mode,
+        baseline_x, baseline_y, out);
+}
+
 static const void * const dwrite_factory_vtbl[80] = {
     factory_QueryInterface,               /* 0  QueryInterface */
     common_AddRef,                        /* 1  AddRef */
@@ -224,7 +266,7 @@ static const void * const dwrite_factory_vtbl[80] = {
     common_method_e_notimpl,              /* 20 CreateEllipsisTrimmingSign */
     common_method_e_notimpl,              /* 21 CreateTextAnalyzer */
     common_method_e_notimpl,              /* 22 CreateNumberSubstitution */
-    common_method_e_notimpl,              /* 23 CreateGlyphRunAnalysis */
+    factory_CreateGlyphRunAnalysis,       /* 23 CreateGlyphRunAnalysis */
     /* IDWriteFactory1 (slots 24-25) */
     common_method_e_notimpl,              /* 24 GetEudcFontCollection */
     common_method_e_notimpl,              /* 25 CreateCustomRenderingParams */
@@ -233,7 +275,7 @@ static const void * const dwrite_factory_vtbl[80] = {
     common_method_e_notimpl,              /* 27 CreateFontFallbackBuilder */
     common_method_e_notimpl,              /* 28 TranslateColorGlyphRun */
     common_method_e_notimpl,              /* 29 CreateCustomRenderingParams */
-    common_method_e_notimpl,              /* 30 CreateGlyphRunAnalysis */
+    factory2_CreateGlyphRunAnalysis,      /* 30 CreateGlyphRunAnalysis (FF2) */
     /* IDWriteFactory3 (slots 31-39) */
     common_method_e_notimpl,              /* 31 CreateGlyphRunAnalysis */
     common_method_e_notimpl,              /* 32 CreateCustomRenderingParams */
