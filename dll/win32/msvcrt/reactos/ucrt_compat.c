@@ -37,6 +37,13 @@ double __cdecl cbrt(double x)
     return (x < 0) ? -pow(-x, 1.0/3.0) : pow(x, 1.0/3.0);
 }
 
+/* MSVC's CRT headers can declare some of these as intrinsics; disable
+ * the intrinsic translation so we can provide real bodies that the
+ * msvcrt apiset host needs to export. */
+#ifdef _MSC_VER
+#pragma function(acosh, asinh, atanh, exp2, expm1, log1p, log2, round, roundf, trunc)
+#endif
+
 double __cdecl acosh(double x) { return log(x + sqrt(x*x - 1.0)); }
 double __cdecl asinh(double x) { return log(x + sqrt(x*x + 1.0)); }
 double __cdecl atanh(double x) { return 0.5 * log((1.0 + x) / (1.0 - x)); }
