@@ -979,7 +979,11 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Set the Thread Stacks */
     Thread->InitialStack = KernelStack;
     Thread->StackBase = KernelStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     Thread->StackLimit = (volatile PVOID)((ULONG_PTR)KernelStack - KERNEL_STACK_SIZE);
+#else
+    Thread->StackLimit = (ULONG_PTR)KernelStack - KERNEL_STACK_SIZE;
+#endif
     Thread->KernelStackResident = TRUE;
 
     /* Enter SEH to avoid crashes due to user mode */
