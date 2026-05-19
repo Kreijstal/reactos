@@ -228,18 +228,18 @@
 @ cdecl _set_app_type(long) __set_app_type
 @ cdecl _set_invalid_parameter_handler(ptr)
 @ cdecl _set_new_mode(long)
-@ cdecl acosh(double)
-@ cdecl asinh(double)
-@ cdecl atanh(double)
+@ cdecl acosh(double) _msvcrt_ucrt_acosh
+@ cdecl asinh(double) _msvcrt_ucrt_asinh
+@ cdecl atanh(double) _msvcrt_ucrt_atanh
 @ cdecl cbrt(double)
-@ cdecl exp2(double)
-@ cdecl expm1(double)
+@ cdecl exp2(double) _msvcrt_ucrt_exp2
+@ cdecl expm1(double) _msvcrt_ucrt_expm1
 @ cdecl hypot(double double) _msvcrt_ucrt_hypot
-@ cdecl log1p(double)
-@ cdecl log2(double)
-@ cdecl round(double)
-@ cdecl roundf(float)
-@ cdecl trunc(double)
+@ cdecl log1p(double) _msvcrt_ucrt_log1p
+@ cdecl log2(double) _msvcrt_ucrt_log2
+@ cdecl round(double) _msvcrt_ucrt_round
+@ cdecl roundf(float) _msvcrt_ucrt_roundf
+@ cdecl trunc(double) _msvcrt_ucrt_trunc
 @ cdecl _execute_onexit_table(ptr)
 @ cdecl _initialize_onexit_table(ptr)
 @ cdecl _register_onexit_function(ptr ptr)
