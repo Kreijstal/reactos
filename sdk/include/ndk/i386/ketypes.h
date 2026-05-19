@@ -762,8 +762,11 @@ typedef struct _KPRCB
     LARGE_INTEGER UpdateSignature;
     volatile LARGE_INTEGER IsrTime;
     LARGE_INTEGER SpareField1;
-    PROCESSOR_POWER_STATE PowerState;
+    /* NpxSaveArea precedes PowerState in the original Windows XP/2003
+     * i386 KPRCB layout; KPCR_PRCB_POWER_STATE_IDLE_FUNCTION in the
+     * asm constants is keyed off that ordering. */
     FX_SAVE_AREA NpxSaveArea;
+    PROCESSOR_POWER_STATE PowerState;
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     KDPC DpcWatchdogDoc;
     KTIMER DpcWatchdogTimer;
