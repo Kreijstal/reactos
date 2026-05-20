@@ -943,9 +943,33 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     }
     else if (AttrContext->pRecord->NonResident.AllocatedSize > AllocationSize)
     {
-        // shrink allocation size
-        ULONG ClustersToFree = ExistingClusters - (AllocationSize / BytesPerCluster);
-        Status = FreeClusters(Vcb, AttrContext, AttrOffset, FileRecord, ClustersToFree);
+        /* Shrink allocation. Compute the number of clusters to free from
+         * the actual MCB extent (HighestVCN+1), not from AllocatedSize/BPC.
+         * They should match by NTFS invariant; if they don't, an upstream
+         * caller pre-set AllocatedSize without finishing the corresponding
+         * AddRun work, and trusting that stale value here would have us
+         * walk off the end of the MCB inside FreeClusters. ASSERT the
+         * invariant loudly so the producer gets caught in debug builds. */
+        ULONG NewClusters = AllocationSize / BytesPerCluster;
+        ULONG ActualClusters;
+        if (FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB) == 0)
+            ActualClusters = 0;
+        else
+            ActualClusters = (ULONG)(AttrContext->pRecord->NonResident.HighestVCN + 1);
+
+        ASSERT(ActualClusters == ExistingClusters);
+
+        if (ActualClusters > NewClusters)
+        {
+            ULONG ClustersToFree = ActualClusters - NewClusters;
+            Status = FreeClusters(Vcb, AttrContext, AttrOffset, FileRecord, ClustersToFree);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("ERROR: FreeClusters failed 0x%lx (MFT %p, asked=%lu)\n",
+                        Status, FileRecord, ClustersToFree);
+                return Status;
+            }
+        }
     }
 
     /* Compressed / encrypted / sparse attribute sizing: slice 1a only
