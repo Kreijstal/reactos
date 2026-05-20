@@ -1149,12 +1149,13 @@ VirtIoInterrupt(
         return FALSE;
     }
     intReason = virtio_read_isr_status(&adaptExt->vdev);
-    if ( intReason == 1 || adaptExt->dump_mode ) {
+    if ((intReason & 1) || adaptExt->dump_mode) {
         if (!CompleteDPC(DeviceExtension, 1)) {
             VioStorCompleteRequest(DeviceExtension, 1, TRUE);
         }
         isInterruptServiced = TRUE;
-    } else if (intReason == 3) {
+    }
+    if (intReason & 2) {
         RhelGetDiskGeometry(DeviceExtension);
         isInterruptServiced = TRUE;
         adaptExt->sense_info.senseKey = SCSI_SENSE_UNIT_ATTENTION;
