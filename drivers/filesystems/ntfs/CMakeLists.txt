@@ -15,12 +15,16 @@ list(APPEND SOURCE
     fcb.c
     finfo.c
     fsctl.c
+    lfsparse.c
     lock.c
     lznt1.c
     mft.c
     misc.c
     ntfs.c
+    objid.c
     pnp.c
+    quota.c
+    reparse.c
     rw.c
     security.c
     shutdown.c

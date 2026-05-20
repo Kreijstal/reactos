@@ -10,6 +10,7 @@
 
 #include <ntoskrnl.h>
 #include <ioevent.h>
+#include <ntddstor.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -114,4 +115,132 @@ FsRtlNotifyVolumeEvent(IN PFILE_OBJECT FileObject,
     ObDereferenceObject(DeviceObject);
 
     return Status;
+}
+
+/*
+ * @unimplemented
+ *
+ * Filter-manager hint that a volume dismount has finished. Filter manager
+ * uses this to release per-volume filter state; without it the worst-case
+ * effect is a small one-shot leak across the dismount path.
+ */
+VOID
+NTAPI
+FsRtlDismountComplete(IN PDEVICE_OBJECT DeviceObject,
+                      IN NTSTATUS DismountStatus)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(DismountStatus);
+}
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+/*
+ * @implemented
+ *
+ * Returns sector-size geometry for a volume's underlying device by issuing
+ * IOCTL_STORAGE_QUERY_PROPERTY/StorageAccessAlignmentProperty against the
+ * DeviceObject. If the device honours the IOCTL, the descriptor is mapped
+ * directly into FILE_FS_SECTOR_SIZE_INFORMATION; if it doesn't (older
+ * device, virtual disk that only knows DeviceObject->SectorSize), we fall
+ * back to the device's logical sector size for both logical and physical,
+ * which is the same answer Microsoft returns for legacy devices.
+ */
+NTSTATUS
+NTAPI
+FsRtlGetSectorSizeInformation(IN PDEVICE_OBJECT DeviceObject,
+                              OUT PFILE_FS_SECTOR_SIZE_INFORMATION SectorSizeInfo)
+{
+    STORAGE_PROPERTY_QUERY Query;
+    STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR Descriptor;
+    KEVENT Event;
+    IO_STATUS_BLOCK Iosb;
+    PIRP Irp;
+    NTSTATUS Status;
+    ULONG SectorSize;
+
+    if (SectorSizeInfo == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Sensible legacy defaults — overwritten if the IOCTL succeeds. */
+    SectorSize = (DeviceObject->SectorSize != 0) ? DeviceObject->SectorSize : 512;
+    SectorSizeInfo->LogicalBytesPerSector = SectorSize;
+    SectorSizeInfo->PhysicalBytesPerSectorForAtomicity = SectorSize;
+    SectorSizeInfo->PhysicalBytesPerSectorForPerformance = SectorSize;
+    SectorSizeInfo->FileSystemEffectivePhysicalBytesPerSectorForAtomicity = SectorSize;
+    SectorSizeInfo->Flags = 0;
+    SectorSizeInfo->ByteOffsetForSectorAlignment = SSINFO_OFFSET_UNKNOWN;
+    SectorSizeInfo->ByteOffsetForPartitionAlignment = SSINFO_OFFSET_UNKNOWN;
+
+    RtlZeroMemory(&Query, sizeof(Query));
+    Query.PropertyId = StorageAccessAlignmentProperty;
+    Query.QueryType = PropertyStandardQuery;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_STORAGE_QUERY_PROPERTY,
+                                        DeviceObject,
+                                        &Query,
+                                        sizeof(Query),
+                                        &Descriptor,
+                                        sizeof(Descriptor),
+                                        FALSE,
+                                        &Event,
+                                        &Iosb);
+    if (Irp == NULL)
+    {
+        /* Out of memory building the IRP — defaults are already filled in. */
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = IoCallDriver(DeviceObject, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = Iosb.Status;
+    }
+
+    if (NT_SUCCESS(Status) && Iosb.Information >= sizeof(Descriptor))
+    {
+        SectorSizeInfo->LogicalBytesPerSector = Descriptor.BytesPerLogicalSector;
+        SectorSizeInfo->PhysicalBytesPerSectorForAtomicity = Descriptor.BytesPerPhysicalSector;
+        SectorSizeInfo->PhysicalBytesPerSectorForPerformance = Descriptor.BytesPerPhysicalSector;
+        SectorSizeInfo->FileSystemEffectivePhysicalBytesPerSectorForAtomicity = Descriptor.BytesPerPhysicalSector;
+        SectorSizeInfo->ByteOffsetForSectorAlignment = Descriptor.BytesOffsetForSectorAlignment;
+        if (Descriptor.BytesOffsetForSectorAlignment == 0)
+        {
+            SectorSizeInfo->Flags |= SSINFO_FLAGS_ALIGNED_DEVICE;
+            SectorSizeInfo->Flags |= SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+#else
+NTSTATUS
+NTAPI
+FsRtlGetSectorSizeInformation(IN PDEVICE_OBJECT DeviceObject,
+                              OUT PVOID SectorSizeInfo)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(SectorSizeInfo);
+    return STATUS_NOT_IMPLEMENTED;
+}
+#endif
+
+/*
+ * @unimplemented
+ *
+ * Per-process disk-byte accounting hook used by FAT/CDFS at NTDDI_WIN8+.
+ * The full implementation tags the current process's accounting block;
+ * the stub is a no-op until the EPROCESS counters are wired up.
+ */
+VOID
+NTAPI
+FsRtlUpdateDiskCounters(IN ULONGLONG BytesRead,
+                        IN ULONGLONG BytesWritten)
+{
+    UNREFERENCED_PARAMETER(BytesRead);
+    UNREFERENCED_PARAMETER(BytesWritten);
 }

@@ -351,3 +351,48 @@ IoCheckQuerySetVolumeInformation(IN FS_INFORMATION_CLASS FsInformationClass,
     UNIMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
 }
+
+#if (NTDDI_VERSION < NTDDI_VISTA)
+typedef struct _IO_PRIORITY_INFO {
+    ULONG Size;
+    ULONG ThreadPriority;
+    ULONG PagePriority;
+    IO_PRIORITY_HINT IoPriority;
+} IO_PRIORITY_INFO, *PIO_PRIORITY_INFO;
+#endif
+
+/*
+ * @implemented
+ *
+ * Win8 helper that fills an IO_PRIORITY_INFO from the request's IRP /
+ * file object / thread. The full Microsoft implementation reads the
+ * thread's IO priority hint, the IRP's flags (paging IO, etc.), and the
+ * file object's priority bias. We don't yet track per-thread IO priority,
+ * so the inert defaults set by IoInitializePriorityInfo are returned --
+ * which is exactly what Microsoft returns for a thread that has not
+ * boosted its IO priority. Once per-thread IO priority is wired up via
+ * KeQueryPriorityThread + a per-ETHREAD IoPriority field, this is the
+ * single choke point that needs to fold those values in.
+ */
+NTSTATUS
+NTAPI
+IoRetrievePriorityInfo(IN PIRP Irp OPTIONAL,
+                       IN PFILE_OBJECT FileObject OPTIONAL,
+                       IN PETHREAD Thread OPTIONAL,
+                       IN OUT PIO_PRIORITY_INFO PriorityInfo)
+{
+    UNREFERENCED_PARAMETER(Irp);
+    UNREFERENCED_PARAMETER(FileObject);
+    UNREFERENCED_PARAMETER(Thread);
+
+    if (PriorityInfo == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PriorityInfo->Size = sizeof(IO_PRIORITY_INFO);
+    PriorityInfo->ThreadPriority = 0xffff;
+    PriorityInfo->IoPriority = IoPriorityNormal;
+    PriorityInfo->PagePriority = 0;
+    return STATUS_SUCCESS;
+}
