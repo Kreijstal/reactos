@@ -217,6 +217,106 @@ static void WlanGetInterfaceCapability_test(void)
     ok(ret == ERROR_INVALID_PARAMETER, "expected failure\n");
 }
 
+/*
+ * Round-trip the profile store: open a real WlanSvc handle, write a
+ * profile, list profiles, fetch the just-written XML back, then delete
+ * it.  Skips entirely when WlanSvc is not running, so the test is
+ * harmless on stock ReactOS / Windows installs where the service is
+ * stopped by default.
+ */
+static void Wlan_Profile_RoundTrip(void)
+{
+    static const WCHAR kProfileXml[] =
+        L"<?xml version=\"1.0\"?>"
+        L"<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">"
+        L"<name>WlanapiApitestProfile</name>"
+        L"<SSIDConfig><SSID><name>apitest-ssid</name></SSID></SSIDConfig>"
+        L"</WLANProfile>";
+    static const WCHAR kProfileName[] = L"WlanapiApitestProfile";
+
+    HANDLE hClient = NULL;
+    DWORD ret, dwNegotiated = 0, dwReasonCode = 0, dwFlags = 0, dwGranted = 0;
+    LPWSTR pXmlOut = NULL;
+    PWLAN_PROFILE_INFO_LIST pList = NULL;
+    PWLAN_INTERFACE_INFO_LIST pIfList = NULL;
+    DWORD i;
+    BOOL Found;
+
+    ret = WlanOpenHandle(2, NULL, &dwNegotiated, &hClient);
+    if (ret != ERROR_SUCCESS)
+    {
+        skip("WlanSvc not running (WlanOpenHandle=%lu); profile round-trip skipped\n", ret);
+        return;
+    }
+
+    /* Interface enumeration: must succeed even with no Wi-Fi adapter
+     * present (empty list, dwNumberOfItems == 0).  Verifies the
+     * "successful empty" path landed in _RpcEnumInterfaces. */
+    ret = WlanEnumInterfaces(hClient, NULL, &pIfList);
+    ok(ret == ERROR_SUCCESS, "WlanEnumInterfaces=%lu (expected ERROR_SUCCESS)\n", ret);
+    if (pIfList)
+    {
+        WlanFreeMemory(pIfList);
+        pIfList = NULL;
+    }
+
+    /* Delete any leftover from a previous failed run. */
+    WlanDeleteProfile(hClient, &InterfaceGuid, kProfileName, NULL);
+
+    /* Save a profile. */
+    ret = WlanSetProfile(hClient, &InterfaceGuid, 0, kProfileXml, NULL, TRUE,
+                         NULL, &dwReasonCode);
+    ok(ret == ERROR_SUCCESS,
+       "WlanSetProfile=%lu (expected ERROR_SUCCESS; reason=%lu)\n",
+       ret, dwReasonCode);
+
+    /* Enumerate and confirm it shows up. */
+    ret = WlanGetProfileList(hClient, &InterfaceGuid, NULL, &pList);
+    ok(ret == ERROR_SUCCESS, "WlanGetProfileList=%lu\n", ret);
+    Found = FALSE;
+    if (ret == ERROR_SUCCESS && pList != NULL)
+    {
+        for (i = 0; i < pList->dwNumberOfItems; i++)
+        {
+            if (wcscmp(pList->ProfileInfo[i].strProfileName, kProfileName) == 0)
+            {
+                Found = TRUE;
+                break;
+            }
+        }
+        WlanFreeMemory(pList);
+    }
+    ok(Found, "Profile not found in WlanGetProfileList\n");
+
+    /* Read it back. */
+    ret = WlanGetProfile(hClient, &InterfaceGuid, kProfileName, NULL,
+                         &pXmlOut, &dwFlags, &dwGranted);
+    ok(ret == ERROR_SUCCESS, "WlanGetProfile=%lu\n", ret);
+    if (ret == ERROR_SUCCESS && pXmlOut != NULL)
+    {
+        ok(wcscmp(pXmlOut, kProfileXml) == 0, "Round-tripped XML differs\n");
+        WlanFreeMemory(pXmlOut);
+    }
+
+    /* Delete it; second delete should report NOT_FOUND. */
+    ret = WlanDeleteProfile(hClient, &InterfaceGuid, kProfileName, NULL);
+    ok(ret == ERROR_SUCCESS, "WlanDeleteProfile=%lu\n", ret);
+
+    ret = WlanDeleteProfile(hClient, &InterfaceGuid, kProfileName, NULL);
+    ok(ret == ERROR_NOT_FOUND,
+       "WlanDeleteProfile of stale name=%lu (expected ERROR_NOT_FOUND)\n", ret);
+
+    /* Driver-dependent calls return NOT_FOUND, not CALL_NOT_IMPLEMENTED. */
+    {
+        DOT11_SSID Ssid = {0};
+        ret = WlanScan(hClient, &InterfaceGuid, &Ssid, NULL, NULL);
+        ok(ret == ERROR_NOT_FOUND,
+           "WlanScan with no driver=%lu (expected ERROR_NOT_FOUND)\n", ret);
+    }
+
+    WlanCloseHandle(hClient, NULL);
+}
+
 
 START_TEST(wlanapi)
 {
@@ -230,4 +330,5 @@ START_TEST(wlanapi)
     WlanGetProfile_test();
     WlanEnumInterfaces_test();
     WlanGetInterfaceCapability_test();
+    Wlan_Profile_RoundTrip();
 }
