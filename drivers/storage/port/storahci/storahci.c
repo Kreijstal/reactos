@@ -75,26 +75,43 @@ AhciPortInitialize (
     // 500 milliseconds for PxCMD.FR to return ‘0’ when read. If PxCMD.CR or PxCMD.FR do
     // not clear to ‘0’ correctly, then software may attempt a port reset or a full HBA reset to recove
 
-    // TODO: Check if port is in idle state or not, if not then restart port
+    // Per AHCI 1.3 sec.10.3.2: bring port to idle before reprogramming. Clear
+    // ST and wait up to 500 ms for CR=0, then clear FRE and wait up to 500 ms
+    // for FR=0. We poll every 50 ms (10 ticks * 50 ms = 500 ms).
     cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
     if ((cmd.FR != 0) || (cmd.CR != 0) || (cmd.FRE != 0) || (cmd.ST != 0))
     {
         cmd.ST = 0;
-        cmd.FRE = 0;
+        StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->CMD, cmd.Status);
 
-        ticks = 3;
-        do
+        for (ticks = 0; ticks < 10; ticks++)
         {
-            StorPortStallExecution(50000);
             cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
-            if (ticks == 0)
-            {
-                AhciDebugPrint("\tAttempt to reset port failed: %x\n", cmd);
-                return FALSE;
-            }
-            ticks--;
+            if (cmd.CR == 0)
+                break;
+            StorPortStallExecution(50000);
         }
-        while(cmd.CR != 0 || cmd.FR != 0);
+        if (cmd.CR != 0)
+        {
+            AhciDebugPrint("\tIdling port (clear ST) timed out: %x\n", cmd);
+            return FALSE;
+        }
+
+        cmd.FRE = 0;
+        StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->CMD, cmd.Status);
+
+        for (ticks = 0; ticks < 10; ticks++)
+        {
+            cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
+            if (cmd.FR == 0)
+                break;
+            StorPortStallExecution(50000);
+        }
+        if (cmd.FR != 0)
+        {
+            AhciDebugPrint("\tIdling port (clear FRE) timed out: %x\n", cmd);
+            return FALSE;
+        }
     }
 
     // 10.1.2 For each implemented port, system software shall allocate memory for and program:
@@ -933,24 +950,95 @@ AhciHwResetBus (
     )
 {
     STOR_LOCK_HANDLE lockhandle = {0};
-//    PAHCI_ADAPTER_EXTENSION adapterExtension;
+    PAHCI_ADAPTER_EXTENSION adapterExtension;
+    PAHCI_PORT_EXTENSION PortExtension;
+    AHCI_PORT_CMD cmd;
+    AHCI_SERIAL_ATA_CONTROL sctl;
+    AHCI_SERIAL_ATA_STATUS ssts;
+    ULONG ticks;
+    BOOLEAN Result = FALSE;
 
     AhciDebugPrint("AhciHwResetBus()\n");
 
-//    adapterExtension = AdapterExtension;
+    adapterExtension = AdapterExtension;
 
-    if (IsPortValid(AdapterExtension, PathId))
+    if (!IsPortValid(adapterExtension, PathId))
+        return FALSE;
+
+    PortExtension = &adapterExtension->PortExtension[PathId];
+
+    // Per AHCI 1.3 sec.10.4.2 (Port Reset / COMRESET):
+    //   1. Clear PxCMD.ST, wait for PxCMD.CR=0 (500 ms).
+    //   2. Drive PxSCTL.DET = 1 for >=1 ms to request a COMRESET.
+    //   3. Clear PxSCTL.DET back to 0, wait for PxSSTS.DET == 3 (device present
+    //      and Phy ready) up to ~1 s.
+    //   4. Clear all sticky PxSERR bits.
+    //   5. Re-enable PxCMD.ST and wait for PxCMD.CR=1.
+    StorPortAcquireSpinLock(adapterExtension, InterruptLock, NULL, &lockhandle);
+
+    cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
+    cmd.ST = 0;
+    StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->CMD, cmd.Status);
+
+    for (ticks = 0; ticks < 10; ticks++)
     {
-        // Acquire Lock
-        StorPortAcquireSpinLock(AdapterExtension, InterruptLock, NULL, &lockhandle);
-
-        // TODO: Perform port reset
-
-        // Release lock
-        StorPortReleaseSpinLock(AdapterExtension, &lockhandle);
+        cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
+        if (cmd.CR == 0)
+            break;
+        StorPortStallExecution(50000);
+    }
+    if (cmd.CR != 0)
+    {
+        AhciDebugPrint("\tCannot clear PxCMD.CR (cmd=0x%08x)\n", cmd.Status);
+        goto out;
     }
 
-    return FALSE;
+    sctl.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->SCTL);
+    sctl.DET = 1;
+    StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->SCTL, sctl.Status);
+    StorPortStallExecution(2000);   // 2 ms >= 1 ms minimum
+    sctl.DET = 0;
+    StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->SCTL, sctl.Status);
+
+    for (ticks = 0; ticks < 100; ticks++)
+    {
+        ssts.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->SSTS);
+        if (ssts.DET == 3)
+            break;
+        StorPortStallExecution(10000);  // 10 ms * 100 = 1 s
+    }
+    if (ssts.DET != 3)
+    {
+        AhciDebugPrint("\tNo device on port after COMRESET (ssts=0x%08x)\n", ssts.Status);
+        goto out;
+    }
+
+    // Clear any sticky SError bits the reset just produced.
+    StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->SERR, (ULONG)~0);
+
+    // Re-enable command engine.
+    cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
+    cmd.ST = 1;
+    StorPortWriteRegisterUlong(adapterExtension, &PortExtension->Port->CMD, cmd.Status);
+
+    for (ticks = 0; ticks < 10; ticks++)
+    {
+        cmd.Status = StorPortReadRegisterUlong(adapterExtension, &PortExtension->Port->CMD);
+        if (cmd.CR == 1)
+            break;
+        StorPortStallExecution(50000);
+    }
+    if (cmd.CR != 1)
+    {
+        AhciDebugPrint("\tPort failed to re-arm (cmd=0x%08x)\n", cmd.Status);
+        goto out;
+    }
+
+    Result = TRUE;
+
+out:
+    StorPortReleaseSpinLock(adapterExtension, &lockhandle);
+    return Result;
 }// -- AhciHwResetBus();
 
 /**
@@ -1748,20 +1836,23 @@ InquiryCompletion (
             PortExtension->DeviceParams.MaxLba.LowPart = IdentifyDeviceData->UserAddressableSectors;
         }
 
-        /* Bytes Per Logical Sector */
+        /* Bytes Per Logical Sector: anything other than 512-byte logical
+         * sectors is unusual but valid. Until the data path knows how to issue
+         * transfers in those sizes we keep using DEVICE_ATA_BLOCK_SIZE; log
+         * the mismatch but do NOT crash. */
         if (IdentifyDeviceData->PhysicalLogicalSectorSize.LogicalSectorLongerThan256Words)
         {
-            AhciDebugPrint("\tBytesPerLogicalSector != DEVICE_ATA_BLOCK_SIZE\n");
-            NT_ASSERT(FALSE);
+            AhciDebugPrint("\tBytesPerLogicalSector > 512: not yet honoured\n");
         }
 
         PortExtension->DeviceParams.BytesPerLogicalSector = DEVICE_ATA_BLOCK_SIZE;
 
-        /* Bytes Per Physical Sector */
+        /* Bytes Per Physical Sector: Advanced Format (4Kn) disks report
+         * multiple logical sectors per physical sector. The transfer size is
+         * still the logical sector size, so this is informational. */
         if (IdentifyDeviceData->PhysicalLogicalSectorSize.MultipleLogicalSectorsPerPhysicalSector)
         {
-            AhciDebugPrint("\tBytesPerPhysicalSector != DEVICE_ATA_BLOCK_SIZE\n");
-            NT_ASSERT(FALSE);
+            AhciDebugPrint("\tAdvanced Format (multi-logical/physical) disk\n");
         }
 
         PortExtension->DeviceParams.BytesPerPhysicalSector = DEVICE_ATA_BLOCK_SIZE;
@@ -1775,8 +1866,27 @@ InquiryCompletion (
         PortExtension->DeviceParams.RevisionID[sizeof(PortExtension->DeviceParams.RevisionID) - 1] = '\0';
         PortExtension->DeviceParams.SerialNumber[sizeof(PortExtension->DeviceParams.SerialNumber) - 1] = '\0';
 
-        // TODO: Add other device params
-        AhciDebugPrint("\tATA Device\n");
+        // LBA48 support and addressable sector count.
+        PortExtension->DeviceParams.Lba48BitMode =
+            (UCHAR)IdentifyDeviceData->CommandSetSupport.BigLba;
+
+        PortExtension->DeviceParams.MaxLba.QuadPart = 0;
+        if (PortExtension->DeviceParams.Lba48BitMode &&
+            IdentifyDeviceData->Max48BitLBA[0] != 0)
+        {
+            /* Max48BitLBA[] is two little-endian DWORDs (sectors 0..2^48-1). */
+            PortExtension->DeviceParams.MaxLba.LowPart  = IdentifyDeviceData->Max48BitLBA[0];
+            PortExtension->DeviceParams.MaxLba.HighPart = (LONG)IdentifyDeviceData->Max48BitLBA[1];
+        }
+        else
+        {
+            PortExtension->DeviceParams.MaxLba.QuadPart =
+                IdentifyDeviceData->UserAddressableSectors;
+        }
+
+        AhciDebugPrint("\tATA Device LBA48=%u MaxLba=0x%I64x\n",
+                       PortExtension->DeviceParams.Lba48BitMode,
+                       PortExtension->DeviceParams.MaxLba.QuadPart);
     }
     else
     {
@@ -2288,18 +2398,13 @@ DeviceInquiryRequest (
         SrbExtension->CompletionRoutine = InquiryCompletion;
         SrbExtension->CommandReg = IDE_COMMAND_NOT_VALID;
 
-        // TODO: Should use AhciZeroMemory
-        SrbExtension->FeaturesLow = 0;
-        SrbExtension->LBA0 = 0;
-        SrbExtension->LBA1 = 0;
-        SrbExtension->LBA2 = 0;
+        // Zero the FIS feature/LBA/sector-count fields in one shot, then set
+        // the one field (Device) that differs from the default.
+        AhciZeroMemory((PCHAR)&SrbExtension->FeaturesLow,
+                       FIELD_OFFSET(AHCI_SRB_EXTENSION, SectorCountHigh) -
+                       FIELD_OFFSET(AHCI_SRB_EXTENSION, FeaturesLow) +
+                       sizeof(SrbExtension->SectorCountHigh));
         SrbExtension->Device = 0xA0;
-        SrbExtension->LBA3 = 0;
-        SrbExtension->LBA4 = 0;
-        SrbExtension->LBA5 = 0;
-        SrbExtension->FeaturesHigh = 0;
-        SrbExtension->SectorCountLow = 0;
-        SrbExtension->SectorCountHigh = 0;
 
         SrbExtension->Sgl.NumberOfElements = 1;
         SrbExtension->Sgl.List[0].PhysicalAddress.LowPart = PortExtension->IdentifyDeviceDataPhysicalAddress.LowPart;
