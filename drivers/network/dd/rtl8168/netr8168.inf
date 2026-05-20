@@ -1,0 +1,88 @@
+; NETR8168.INF -- ReactOS Realtek RTL8168/8111 GbE installer
+;
+; PCI ID list ported from Linux drivers/net/ethernet/realtek/r8169_main.c.
+
+[Version]
+Signature  = "$Windows NT$"
+LayoutFile = layout.inf
+Class      = Net
+ClassGUID  = {4D36E972-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 05/20/2026,1.00
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%RealtekMfg% = RealtekMfg
+%DLinkMfg%   = DLinkMfg
+%LinksysMfg% = LinksysMfg
+%USRMfg%     = USRMfg
+
+[RealtekMfg]
+%Realtek8168.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8168
+%Realtek8136.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8136
+%Realtek8161.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8161
+%Realtek8162.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8162
+%Realtek8167.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8167
+%Realtek8169.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8169
+%Realtek2502.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_2502
+%Realtek2600.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_2600
+
+[DLinkMfg]
+%DLink4300.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_1186&DEV_4300
+%DLink4302.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_1186&DEV_4302
+
+[LinksysMfg]
+%LinksysEG1032.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_1737&DEV_1032
+
+[USRMfg]
+%USR0116.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_16EC&DEV_0116
+
+;---------------------------- RTL8168 DRIVER ----------------------------
+
+[RTL8168_Inst.ndi.NT]
+Characteristics = 0x4 ; NCF_PHYSICAL
+BusType         = 5   ; PCIBus
+AddReg          = RTL8168_AddReg.NT
+CopyFiles       = RTL8168_CopyFiles.NT
+
+[RTL8168_CopyFiles.NT]
+rtl8168.sys
+
+[RTL8168_AddReg.NT]
+HKR, Ndi,            Service,    0, "rtl8168"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "ethernet"
+
+[RTL8168_Inst.ndi.NT.Services]
+AddService = rtl8168, 0x00000002, RTL8168_Service_Inst
+
+[RTL8168_Service_Inst]
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 0
+ServiceBinary = %12%\rtl8168.sys
+LoadOrderGroup = NDIS
+
+;-------------------------------- STRINGS -------------------------------
+
+[Strings]
+ReactOS    = "ReactOS Project"
+RealtekMfg = "Realtek"
+DLinkMfg   = "D-Link"
+LinksysMfg = "Linksys"
+USRMfg     = "U.S. Robotics"
+
+Realtek8168.DeviceDesc = "Realtek RTL8168/8111 Family PCI-E Gigabit Ethernet"
+Realtek8136.DeviceDesc = "Realtek RTL8101/8102 Family PCI-E Fast Ethernet"
+Realtek8161.DeviceDesc = "Realtek RTL8161 Family PCI-E Gigabit Ethernet"
+Realtek8162.DeviceDesc = "Realtek RTL8162 Family PCI-E Gigabit Ethernet"
+Realtek8167.DeviceDesc = "Realtek RTL8167 Family PCI-E Gigabit Ethernet"
+Realtek8169.DeviceDesc = "Realtek RTL8169/8110 Gigabit Ethernet"
+Realtek2502.DeviceDesc = "Realtek RTL2502 Family Gigabit Ethernet"
+Realtek2600.DeviceDesc = "Realtek RTL2600 Family Gigabit Ethernet"
+DLink4300.DeviceDesc   = "D-Link DGE-528T Gigabit Ethernet (RTL8169)"
+DLink4302.DeviceDesc   = "D-Link DGE-560T Gigabit Ethernet"
+LinksysEG1032.DeviceDesc = "Linksys EG1032 Gigabit Ethernet"
+USR0116.DeviceDesc     = "U.S. Robotics USR997900 Gigabit Ethernet"
