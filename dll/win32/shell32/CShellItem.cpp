@@ -637,4 +637,36 @@ SHGetPropertyStoreFromParsingName(
     return hr;
 }
 
+/***********************************************************************
+ *   SHCreateItemWithParent [SHELL32.@]
+ *
+ * Build an IShellItem from a (parent-folder, child-pidl) pair, where the
+ * parent is supplied either as a PIDL (pidlParent) or as a live
+ * IShellFolder (psfParent) - one of the two must be non-NULL.  Wraps
+ * SHCreateShellItem, which already accepts that exact shape.
+ */
+EXTERN_C HRESULT WINAPI
+SHCreateItemWithParent(
+    _In_opt_ PCIDLIST_ABSOLUTE pidlParent,
+    _In_opt_ IShellFolder *psfParent,
+    _In_ PCUITEMID_CHILD pidl,
+    _In_ REFIID riid,
+    _Out_ void **ppv)
+{
+    CComPtr<IShellItem> item;
+    HRESULT hr;
+
+    TRACE("(%p,%p,%p,%s,%p)\n", pidlParent, psfParent, pidl, debugstr_guid(&riid), ppv);
+
+    if (!ppv)
+        return E_POINTER;
+    *ppv = NULL;
+
+    hr = SHCreateShellItem(pidlParent, psfParent, pidl, &item);
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+
+    return item->QueryInterface(riid, ppv);
+}
+
 #endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA */

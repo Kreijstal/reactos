@@ -507,7 +507,7 @@
 @ stdcall -version=0x600+ SHCreateItemFromParsingName(wstr ptr ptr ptr) # Vista:331
 @ stdcall -version=0x600+ SHCreateItemFromRelativeName(ptr wstr ptr ptr ptr) # Vista:332
 @ stdcall -version=0x600+ SHCreateItemInKnownFolder(ptr long wstr ptr ptr) # Vista:333
-@ stdcall -stub -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr) # Vista:334
+@ stdcall -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr) # Vista:334
 @ stub SHCreateLocalServerRunDll # 2k3:280, Vista:335
 @ stdcall SHCreateProcessAsUserW(ptr) # 2k3:281, Vista:336
 @ stdcall SHCreateQueryCancelAutoPlayMoniker(ptr) # 2k3:282, Vista:337
