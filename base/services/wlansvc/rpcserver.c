@@ -1,16 +1,41 @@
 /*
  * PROJECT:     ReactOS WLAN Service
- * LICENSE:     GPL - See COPYING in the top level directory
+ * LICENSE:     GPL-2.0-or-later
  * FILE:        base/services/wlansvc/rpcserver.c
  * PURPOSE:     RPC server interface
  * COPYRIGHT:   Copyright 2009 Christoph von Wittich
  */
 
 #include "precomp.h"
+#include <winreg.h>
 
 #define NDEBUG
 #include <debug.h>
-//#define GET_IF_ENTRY2_IMPLEMENTED 1
+
+/*
+ * No native NDIS 802.11 miniport has been ported to ReactOS yet, so the
+ * driver-dependent surface (enumerate interfaces, scan, connect, query
+ * radio state, ...) cannot deliver real data.  The implementations in
+ * this file fall into three buckets:
+ *
+ *   - Enumeration surface (interfaces, available networks, BSS list):
+ *     return an empty list with ERROR_SUCCESS, so apps that just want
+ *     to "list Wi-Fi adapters" get a successful empty result instead
+ *     of failing with ERROR_CALL_NOT_IMPLEMENTED.
+ *
+ *   - Per-interface operations on an unknown InterfaceGuid (scan,
+ *     connect, query interface, ...): return ERROR_NOT_FOUND, which
+ *     is the documented error WlanScan etc. emit for a stale GUID.
+ *
+ *   - Profile / parameter / filter-list / security storage: fully
+ *     implemented against the registry, since none of that requires
+ *     a driver.  WlanSetProfile, WlanGetProfileList, etc. round-trip
+ *     correctly even with no Wi-Fi hardware present.
+ *
+ * Once a miniport (and the OID_DOT11_* SDK headers it requires) lands,
+ * the empty-list / ERROR_NOT_FOUND branches will become NDIS handle
+ * lookups and OID requests.
+ */
 
 LIST_ENTRY WlanSvcHandleListHead;
 
@@ -107,6 +132,7 @@ DWORD _RpcCloseHandle(
 
     RemoveEntryList(&lpWlanSvcHandle->WlanSvcHandleListEntry);
     HeapFree(GetProcessHeap(), 0, lpWlanSvcHandle);
+    *phClientHandle = NULL;
 
     return ERROR_SUCCESS;
 }
@@ -115,65 +141,21 @@ DWORD _RpcEnumInterfaces(
     WLANSVC_RPC_HANDLE hClientHandle,
     PWLAN_INTERFACE_INFO_LIST *ppInterfaceList)
 {
-#if GET_IF_ENTRY2_IMPLEMENTED
-    DWORD dwNumInterfaces;
-    DWORD dwResult, dwSize;
-    DWORD dwIndex;
-    MIB_IF_ROW2 IfRow;
-    PWLAN_INTERFACE_INFO_LIST InterfaceList;
+    PWLAN_INTERFACE_INFO_LIST List;
 
-    dwResult = GetNumberOfInterfaces(&dwNumInterfaces);
-    dwSize = sizeof(WLAN_INTERFACE_INFO_LIST);
-    if (dwResult != NO_ERROR)
-    {
-        /* set num interfaces to zero when an error occurs */
-        dwNumInterfaces = 0;
-    }
-    else
-    {
-        if (dwNumInterfaces > 1)
-        {
-            /* add extra size for interface */
-            dwSize += (dwNumInterfaces-1) * sizeof(WLAN_INTERFACE_INFO);
-        }
-    }
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
 
-    /* allocate interface list */
-    InterfaceList = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
-    if (!InterfaceList)
-    {
+    /* No native 802.11 miniport exists in tree, so the interface list is
+     * always empty.  Returning success with dwNumberOfItems=0 matches what
+     * Windows does on a machine with no Wi-Fi radio. */
+    List = midl_user_allocate(sizeof(WLAN_INTERFACE_INFO_LIST));
+    if (List == NULL)
         return ERROR_NOT_ENOUGH_MEMORY;
-    }
 
-    *ppInterfaceList = InterfaceList;
-    if (!dwNumInterfaces)
-    {
-        return ERROR_SUCCESS;
-    }
-
-    for(dwIndex = 0; dwIndex < dwNumInterfaces; dwIndex++)
-    {
-        ZeroMemory(&IfRow, sizeof(MIB_IF_ROW2));
-        IfRow.InterfaceIndex = dwIndex;
-
-        dwResult = GetIfEntry2(&IfRow);
-        if (dwResult == NO_ERROR)
-        {
-            if (IfRow.Type == IF_TYPE_IEEE80211 && IfRow.InterfaceAndOperStatusFlags.HardwareInterface)
-            {
-                RtlMoveMemory(&InterfaceList->InterfaceInfo[InterfaceList->dwNumberOfItems].InterfaceGuid, &IfRow.InterfaceGuid, sizeof(GUID));
-                wcscpy(InterfaceList->InterfaceInfo[InterfaceList->dwNumberOfItems].strInterfaceDescription, IfRow.Description);
-                //FIXME set state
-                InterfaceList->dwNumberOfItems++;
-            }
-        }
-    }
-
+    RtlZeroMemory(List, sizeof(WLAN_INTERFACE_INFO_LIST));
+    *ppInterfaceList = List;
     return ERROR_SUCCESS;
-#else
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
-#endif
 }
 
 DWORD _RpcSetAutoConfigParameter(
@@ -182,8 +164,23 @@ DWORD _RpcSetAutoConfigParameter(
     DWORD dwDataSize,
     LPBYTE pData)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hParams;
+    WCHAR Value[32];
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pData == NULL && dwDataSize != 0)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenParametersKey(KEY_SET_VALUE, &hParams);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"AutoConfig_%lu", (DWORD)OpCode);
+    Status = RegSetValueExW(hParams, Value, 0, REG_BINARY, pData, dwDataSize);
+    RegCloseKey(hParams);
+    return Status;
 }
 
 DWORD _RpcQueryAutoConfigParameter(
@@ -193,8 +190,26 @@ DWORD _RpcQueryAutoConfigParameter(
     char **ppData,
     DWORD *pWlanOpcodeValueType)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hParams;
+    WCHAR Value[32];
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pdwDataSize == NULL || ppData == NULL || pWlanOpcodeValueType == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenParametersKey(KEY_QUERY_VALUE, &hParams);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"AutoConfig_%lu", OpCode);
+    Status = WlanSvcReadAllocBinary(hParams, Value, pdwDataSize, (LPBYTE *)ppData);
+    RegCloseKey(hParams);
+
+    if (Status == ERROR_SUCCESS)
+        *pWlanOpcodeValueType = 2 /* wlan_opcode_value_type_set_by_user */;
+    return Status;
 }
 
 DWORD _RpcGetInterfaceCapability(
@@ -202,16 +217,13 @@ DWORD _RpcGetInterfaceCapability(
     const GUID *pInterfaceGuid,
     PWLAN_INTERFACE_CAPABILITY *ppCapability)
 {
-    PWLANSVCHANDLE lpWlanSvcHandle;
-
-    lpWlanSvcHandle = WlanSvcGetHandleEntry(hClientHandle);
-    if (!lpWlanSvcHandle)
-    {
+    if (!WlanSvcGetHandleEntry(hClientHandle))
         return ERROR_INVALID_HANDLE;
-    }
 
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    /* GUID can't match any present interface (we have none). */
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(ppCapability);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcSetInterface(
@@ -221,8 +233,13 @@ DWORD _RpcSetInterface(
     DWORD dwDataSize,
     LPBYTE pData)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(OpCode);
+    UNREFERENCED_PARAMETER(dwDataSize);
+    UNREFERENCED_PARAMETER(pData);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcQueryInterface(
@@ -233,8 +250,14 @@ DWORD _RpcQueryInterface(
     LPBYTE *ppData,
     LPDWORD pWlanOpcodeValueType)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(OpCode);
+    UNREFERENCED_PARAMETER(pdwDataSize);
+    UNREFERENCED_PARAMETER(ppData);
+    UNREFERENCED_PARAMETER(pWlanOpcodeValueType);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcIhvControl(
@@ -247,8 +270,17 @@ DWORD _RpcIhvControl(
     LPBYTE pOutBuffer,
     LPDWORD pdwBytesReturned)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(Type);
+    UNREFERENCED_PARAMETER(dwInBufferSize);
+    UNREFERENCED_PARAMETER(pInBuffer);
+    UNREFERENCED_PARAMETER(dwOutBufferSize);
+    UNREFERENCED_PARAMETER(pOutBuffer);
+    if (pdwBytesReturned != NULL)
+        *pdwBytesReturned = 0;
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcScan(
@@ -257,31 +289,12 @@ DWORD _RpcScan(
     PDOT11_SSID pDot11Ssid,
     PWLAN_RAW_DATA pIeData)
 {
-    PWLANSVCHANDLE lpWlanSvcHandle;
-
-    lpWlanSvcHandle = WlanSvcGetHandleEntry(hClientHandle);
-    if (!lpWlanSvcHandle)
-    {
+    if (!WlanSvcGetHandleEntry(hClientHandle))
         return ERROR_INVALID_HANDLE;
-    }
-
-    /*
-    DWORD dwBytesReturned;
-    HANDLE hDevice;
-    ULONG OidCode = OID_802_11_BSSID_LIST_SCAN;
-    PNDIS_802_11_BSSID_LIST pBssIDList;
-
-    DeviceIoControl(hDevice,
-                    IOCTL_NDIS_QUERY_GLOBAL_STATS,
-                    &OidCode,
-                    sizeof(ULONG),
-                    NULL,
-                    0,
-                    &dwBytesReturned,
-                    NULL);
-*/
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(pDot11Ssid);
+    UNREFERENCED_PARAMETER(pIeData);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcGetAvailableNetworkList(
@@ -290,8 +303,20 @@ DWORD _RpcGetAvailableNetworkList(
     DWORD dwFlags,
     WLAN_AVAILABLE_NETWORK_LIST **ppAvailableNetworkList)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    WLAN_AVAILABLE_NETWORK_LIST *List;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(dwFlags);
+
+    /* Empty list: GUID can't match a real interface yet. */
+    List = midl_user_allocate(sizeof(WLAN_AVAILABLE_NETWORK_LIST));
+    if (List == NULL)
+        return ERROR_NOT_ENOUGH_MEMORY;
+    RtlZeroMemory(List, sizeof(WLAN_AVAILABLE_NETWORK_LIST));
+    *ppAvailableNetworkList = List;
+    return ERROR_SUCCESS;
 }
 
 DWORD _RpcGetNetworkBssList(
@@ -303,8 +328,26 @@ DWORD _RpcGetNetworkBssList(
     LPDWORD dwBssListSize,
     LPBYTE *ppWlanBssList)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(pDot11Ssid);
+    UNREFERENCED_PARAMETER(dot11BssType);
+    UNREFERENCED_PARAMETER(bSecurityEnabled);
+
+    /* The on-wire shape is a DWORD count followed by an array of
+     * WLAN_BSS_ENTRY (currently absent from ROS' windot11.h).  Until
+     * the BSS_ENTRY struct ships we return an empty (zero-count)
+     * blob, which client wrappers walk safely. */
+    *dwBssListSize = sizeof(DWORD);
+    *ppWlanBssList = midl_user_allocate(sizeof(DWORD));
+    if (*ppWlanBssList == NULL)
+    {
+        *dwBssListSize = 0;
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    RtlZeroMemory(*ppWlanBssList, sizeof(DWORD));
+    return ERROR_SUCCESS;
 }
 
 DWORD _RpcConnect(
@@ -312,33 +355,52 @@ DWORD _RpcConnect(
     const GUID *pInterfaceGuid,
     const PWLAN_CONNECTION_PARAMETERS *pConnectionParameters)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(pConnectionParameters);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcDisconnect(
     WLANSVC_RPC_HANDLE hClientHandle,
     const GUID *pInterfaceGUID)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGUID);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcRegisterNotification(
     WLANSVC_RPC_HANDLE hClientHandle,
-    DWORD arg_2,
+    DWORD dwNotifSource,
     LPDWORD pdwPrevNotifSource)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    PWLANSVCHANDLE Handle = WlanSvcGetHandleEntry(hClientHandle);
+
+    if (Handle == NULL)
+        return ERROR_INVALID_HANDLE;
+    if (pdwPrevNotifSource != NULL)
+        *pdwPrevNotifSource = Handle->dwNotifSource;
+
+    /* No driver means there's nothing producing events, so we just
+     * record the subscription mask for future query. */
+    Handle->dwNotifSource = dwNotifSource;
+    return ERROR_SUCCESS;
 }
 
 DWORD _RpcAsyncGetNotification(
     WLANSVC_RPC_HANDLE hClientHandle,
     PWLAN_NOTIFICATION_DATA *NotificationData)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    *NotificationData = NULL;
+    /* The contract is "blocks until an event arrives or the handle is
+     * closed".  Without a driver no event will ever arrive, so we
+     * return INVALID_STATE rather than blocking the RPC thread. */
+    return ERROR_INVALID_STATE;
 }
 
 DWORD _RpcSetProfileEapUserData(
@@ -350,8 +412,27 @@ DWORD _RpcSetProfileEapUserData(
     DWORD dwEapUserDataSize,
     LPBYTE pbEapUserData)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfile;
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileName == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenProfileKey(pInterfaceGuid, strProfileName, FALSE,
+                                   KEY_SET_VALUE, &hProfile);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    RegSetValueExW(hProfile, L"EapMethodType", 0, REG_BINARY,
+                   (LPBYTE)&MethodType, sizeof(MethodType));
+    RegSetValueExW(hProfile, L"EapFlags", 0, REG_DWORD,
+                   (LPBYTE)&dwFlags, sizeof(dwFlags));
+    Status = RegSetValueExW(hProfile, L"EapUserData", 0, REG_BINARY,
+                            pbEapUserData, dwEapUserDataSize);
+    RegCloseKey(hProfile);
+    return Status;
 }
 
 DWORD _RpcSetProfile(
@@ -363,8 +444,93 @@ DWORD _RpcSetProfile(
     BOOL bOverwrite,
     LPDWORD pdwReasonCode)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfile = NULL, hProfiles = NULL;
+    LPWSTR ProfileName = NULL;
+    LPWSTR Cursor;
+    DWORD Status;
+    DWORD GrantedAccess = WLAN_READ_ACCESS | WLAN_EXECUTE_ACCESS | WLAN_WRITE_ACCESS;
+    DWORD ExistsDisp;
+
+    if (pdwReasonCode != NULL)
+        *pdwReasonCode = 0;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileXml == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    /* Extract <name>X</name> from the XML so callers don't have to
+     * pre-parse just to pick a registry subkey.  This is the same
+     * convention Windows uses. */
+    Cursor = wcsstr(strProfileXml, L"<name>");
+    if (Cursor != NULL)
+    {
+        LPWSTR End = wcsstr(Cursor + 6, L"</name>");
+        if (End != NULL)
+        {
+            SIZE_T Len = End - (Cursor + 6);
+            if (Len > 0 && Len < 256)
+            {
+                ProfileName = HeapAlloc(GetProcessHeap(), 0, (Len + 1) * sizeof(WCHAR));
+                if (ProfileName == NULL)
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                RtlCopyMemory(ProfileName, Cursor + 6, Len * sizeof(WCHAR));
+                ProfileName[Len] = L'\0';
+            }
+        }
+    }
+    if (ProfileName == NULL)
+    {
+        if (pdwReasonCode != NULL)
+            *pdwReasonCode = ERROR_BAD_PROFILE;
+        return ERROR_BAD_PROFILE;
+    }
+
+    Status = WlanSvcOpenProfilesKey(pInterfaceGuid,
+                                    KEY_READ | KEY_CREATE_SUB_KEY,
+                                    &hProfiles);
+    if (Status != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, ProfileName);
+        return Status;
+    }
+
+    /* Honour bOverwrite. */
+    if (!bOverwrite)
+    {
+        Status = RegOpenKeyExW(hProfiles, ProfileName, 0, KEY_READ, &hProfile);
+        if (Status == ERROR_SUCCESS)
+        {
+            RegCloseKey(hProfile);
+            RegCloseKey(hProfiles);
+            HeapFree(GetProcessHeap(), 0, ProfileName);
+            return ERROR_ALREADY_EXISTS;
+        }
+    }
+
+    Status = RegCreateKeyExW(hProfiles, ProfileName, 0, NULL, 0,
+                             KEY_SET_VALUE, NULL, &hProfile, &ExistsDisp);
+    RegCloseKey(hProfiles);
+    if (Status != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, ProfileName);
+        return Status;
+    }
+
+    RegSetValueExW(hProfile, L"Xml", 0, REG_SZ, (LPBYTE)strProfileXml,
+                   (DWORD)((wcslen(strProfileXml) + 1) * sizeof(WCHAR)));
+    RegSetValueExW(hProfile, L"Flags", 0, REG_DWORD,
+                   (LPBYTE)&dwFlags, sizeof(dwFlags));
+    RegSetValueExW(hProfile, L"GrantedAccess", 0, REG_DWORD,
+                   (LPBYTE)&GrantedAccess, sizeof(GrantedAccess));
+    if (strAllUserProfileSecurity != NULL)
+    {
+        RegSetValueExW(hProfile, L"Sddl", 0, REG_SZ,
+                       (LPBYTE)strAllUserProfileSecurity,
+                       (DWORD)((wcslen(strAllUserProfileSecurity) + 1) * sizeof(WCHAR)));
+    }
+    RegCloseKey(hProfile);
+    HeapFree(GetProcessHeap(), 0, ProfileName);
+    return ERROR_SUCCESS;
 }
 
 DWORD _RpcGetProfile(
@@ -375,8 +541,37 @@ DWORD _RpcGetProfile(
     LPDWORD pdwFlags,
     LPDWORD pdwGrantedAccess)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfile;
+    DWORD Status;
+
+    if (pstrProfileXml != NULL)
+        *pstrProfileXml = NULL;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileName == NULL || pstrProfileXml == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenProfileKey(pInterfaceGuid, strProfileName, FALSE,
+                                   KEY_QUERY_VALUE, &hProfile);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    Status = WlanSvcReadAllocString(hProfile, L"Xml", pstrProfileXml);
+    if (Status == ERROR_SUCCESS)
+    {
+        if (pdwFlags != NULL)
+        {
+            *pdwFlags = 0;
+            WlanSvcReadDword(hProfile, L"Flags", pdwFlags);
+        }
+        if (pdwGrantedAccess != NULL)
+        {
+            *pdwGrantedAccess = WLAN_READ_ACCESS;
+            WlanSvcReadDword(hProfile, L"GrantedAccess", pdwGrantedAccess);
+        }
+    }
+    RegCloseKey(hProfile);
+    return Status;
 }
 
 DWORD _RpcDeleteProfile(
@@ -384,8 +579,24 @@ DWORD _RpcDeleteProfile(
     const GUID *pInterfaceGuid,
     const wchar_t *strProfileName)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfiles;
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileName == NULL ||
+        wcschr(strProfileName, L'\\') != NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    Status = WlanSvcOpenProfilesKey(pInterfaceGuid, KEY_WRITE, &hProfiles);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    Status = RegDeleteTreeW(hProfiles, strProfileName);
+    RegCloseKey(hProfiles);
+    return Status == ERROR_FILE_NOT_FOUND ? ERROR_NOT_FOUND : Status;
 }
 
 DWORD _RpcRenameProfile(
@@ -394,8 +605,78 @@ DWORD _RpcRenameProfile(
     const wchar_t *strOldProfileName,
     const wchar_t *strNewProfileName)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfiles, hSrc;
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strOldProfileName == NULL || strNewProfileName == NULL)
+        return ERROR_INVALID_PARAMETER;
+    if (wcschr(strOldProfileName, L'\\') != NULL ||
+        wcschr(strNewProfileName, L'\\') != NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    Status = WlanSvcOpenProfilesKey(pInterfaceGuid,
+                                    KEY_READ | KEY_WRITE | KEY_CREATE_SUB_KEY,
+                                    &hProfiles);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    /* Reject if destination already present. */
+    if (RegOpenKeyExW(hProfiles, strNewProfileName, 0, KEY_READ, &hSrc) == ERROR_SUCCESS)
+    {
+        RegCloseKey(hSrc);
+        RegCloseKey(hProfiles);
+        return ERROR_ALREADY_EXISTS;
+    }
+
+    Status = RegRenameKey(hProfiles, strOldProfileName, strNewProfileName);
+    if (Status == ERROR_PROC_NOT_FOUND || Status == ERROR_CALL_NOT_IMPLEMENTED)
+    {
+        /* RegRenameKey isn't available on older runtimes - fall back to
+         * read-then-recreate-then-delete. */
+        WCHAR ValueName[256];
+        DWORD Index, NameLen, Type, DataSize;
+        HKEY hDst = NULL;
+
+        Status = RegOpenKeyExW(hProfiles, strOldProfileName, 0, KEY_READ, &hSrc);
+        if (Status == ERROR_SUCCESS)
+        {
+            Status = RegCreateKeyExW(hProfiles, strNewProfileName, 0, NULL, 0,
+                                     KEY_SET_VALUE, NULL, &hDst, NULL);
+        }
+        if (Status == ERROR_SUCCESS)
+        {
+            for (Index = 0; ; Index++)
+            {
+                LPBYTE Buf;
+                NameLen = ARRAYSIZE(ValueName);
+                DataSize = 0;
+                if (RegEnumValueW(hSrc, Index, ValueName, &NameLen,
+                                  NULL, &Type, NULL, &DataSize) != ERROR_SUCCESS)
+                    break;
+                Buf = HeapAlloc(GetProcessHeap(), 0, DataSize);
+                if (Buf == NULL)
+                    break;
+                NameLen = ARRAYSIZE(ValueName);
+                if (RegEnumValueW(hSrc, Index, ValueName, &NameLen,
+                                  NULL, &Type, Buf, &DataSize) == ERROR_SUCCESS)
+                {
+                    RegSetValueExW(hDst, ValueName, 0, Type, Buf, DataSize);
+                }
+                HeapFree(GetProcessHeap(), 0, Buf);
+            }
+        }
+        if (hSrc) RegCloseKey(hSrc);
+        if (hDst) RegCloseKey(hDst);
+        if (Status == ERROR_SUCCESS)
+            RegDeleteTreeW(hProfiles, strOldProfileName);
+    }
+
+    RegCloseKey(hProfiles);
+    return Status == ERROR_FILE_NOT_FOUND ? ERROR_NOT_FOUND : Status;
 }
 
 DWORD _RpcSetProfileList(
@@ -404,8 +685,43 @@ DWORD _RpcSetProfileList(
     DWORD dwItems,
     BYTE **strProfileNames)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfiles;
+    DWORD Status, i, TotalLen = 1;
+    LPWSTR MultiSz, Cursor;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || (dwItems != 0 && strProfileNames == NULL))
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenProfilesKey(pInterfaceGuid, KEY_SET_VALUE, &hProfiles);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    /* Serialise dwItems names to a REG_MULTI_SZ so subsequent
+     * GetProfileList enumerations can recover the order. */
+    for (i = 0; i < dwItems; i++)
+        TotalLen += (DWORD)wcslen((LPCWSTR)strProfileNames[i]) + 1;
+    MultiSz = HeapAlloc(GetProcessHeap(), 0, TotalLen * sizeof(WCHAR));
+    if (MultiSz == NULL)
+    {
+        RegCloseKey(hProfiles);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    Cursor = MultiSz;
+    for (i = 0; i < dwItems; i++)
+    {
+        SIZE_T Len = wcslen((LPCWSTR)strProfileNames[i]) + 1;
+        RtlCopyMemory(Cursor, strProfileNames[i], Len * sizeof(WCHAR));
+        Cursor += Len;
+    }
+    *Cursor = L'\0';
+
+    Status = RegSetValueExW(hProfiles, L"Order", 0, REG_MULTI_SZ,
+                            (LPBYTE)MultiSz, TotalLen * sizeof(WCHAR));
+    HeapFree(GetProcessHeap(), 0, MultiSz);
+    RegCloseKey(hProfiles);
+    return Status;
 }
 
 DWORD _RpcGetProfileList(
@@ -413,8 +729,12 @@ DWORD _RpcGetProfileList(
     const GUID *pInterfaceGuid,
     PWLAN_PROFILE_INFO_LIST *ppProfileList)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || ppProfileList == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    return WlanSvcEnumProfileNames(pInterfaceGuid, ppProfileList);
 }
 
 DWORD _RpcSetProfilePosition(
@@ -423,8 +743,23 @@ DWORD _RpcSetProfilePosition(
     wchar_t *strProfileName,
     DWORD dwPosition)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfile;
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileName == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenProfileKey(pInterfaceGuid, strProfileName, FALSE,
+                                   KEY_SET_VALUE, &hProfile);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    Status = RegSetValueExW(hProfile, L"Position", 0, REG_DWORD,
+                            (LPBYTE)&dwPosition, sizeof(dwPosition));
+    RegCloseKey(hProfile);
+    return Status;
 }
 
 DWORD _RpcSetProfileCustomUserData(
@@ -434,8 +769,25 @@ DWORD _RpcSetProfileCustomUserData(
     DWORD dwDataSize,
     LPBYTE pData)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfile;
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileName == NULL)
+        return ERROR_INVALID_PARAMETER;
+    if (dwDataSize != 0 && pData == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenProfileKey(pInterfaceGuid, strProfileName, FALSE,
+                                   KEY_SET_VALUE, &hProfile);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    Status = RegSetValueExW(hProfile, L"CustomUserData", 0, REG_BINARY,
+                            pData, dwDataSize);
+    RegCloseKey(hProfile);
+    return Status;
 }
 
 DWORD _RpcGetProfileCustomUserData(
@@ -445,8 +797,26 @@ DWORD _RpcGetProfileCustomUserData(
     LPDWORD dwDataSize,
     LPBYTE *pData)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hProfile;
+    DWORD Status;
+
+    if (pData != NULL)
+        *pData = NULL;
+    if (dwDataSize != NULL)
+        *dwDataSize = 0;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pInterfaceGuid == NULL || strProfileName == NULL || dwDataSize == NULL || pData == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenProfileKey(pInterfaceGuid, strProfileName, FALSE,
+                                   KEY_QUERY_VALUE, &hProfile);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    Status = WlanSvcReadAllocBinary(hProfile, L"CustomUserData", dwDataSize, pData);
+    RegCloseKey(hProfile);
+    return Status;
 }
 
 DWORD _RpcSetFilterList(
@@ -454,8 +824,34 @@ DWORD _RpcSetFilterList(
     short wlanFilterListType,
     PDOT11_NETWORK_LIST pNetworkList)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hFilters;
+    WCHAR Value[32];
+    DWORD Status, Count, Size;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+
+    Status = WlanSvcOpenFiltersKey(KEY_SET_VALUE, &hFilters);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"Filter_%hd", wlanFilterListType);
+
+    if (pNetworkList == NULL)
+    {
+        Status = RegDeleteValueW(hFilters, Value);
+    }
+    else
+    {
+        Count = pNetworkList->dwNumberOfItems;
+        if (Count > 1024)
+            Count = 1024;
+        Size = FIELD_OFFSET(DOT11_NETWORK_LIST, Network[Count]);
+        Status = RegSetValueExW(hFilters, Value, 0, REG_BINARY,
+                                (LPBYTE)pNetworkList, Size);
+    }
+    RegCloseKey(hFilters);
+    return Status == ERROR_FILE_NOT_FOUND ? ERROR_SUCCESS : Status;
 }
 
 DWORD _RpcGetFilterList(
@@ -463,8 +859,40 @@ DWORD _RpcGetFilterList(
     short wlanFilterListType,
     PDOT11_NETWORK_LIST *pNetworkList)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hFilters;
+    WCHAR Value[32];
+    DWORD Status, Size = 0;
+    LPBYTE Buf = NULL;
+
+    if (pNetworkList != NULL)
+        *pNetworkList = NULL;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (pNetworkList == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenFiltersKey(KEY_QUERY_VALUE, &hFilters);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"Filter_%hd", wlanFilterListType);
+    Status = WlanSvcReadAllocBinary(hFilters, Value, &Size, &Buf);
+    RegCloseKey(hFilters);
+
+    if (Status == ERROR_NOT_FOUND)
+    {
+        /* No filter set: synthesise an empty list. */
+        PDOT11_NETWORK_LIST Empty = midl_user_allocate(sizeof(DOT11_NETWORK_LIST));
+        if (Empty == NULL)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        RtlZeroMemory(Empty, sizeof(DOT11_NETWORK_LIST));
+        *pNetworkList = Empty;
+        return ERROR_SUCCESS;
+    }
+
+    if (Status == ERROR_SUCCESS)
+        *pNetworkList = (PDOT11_NETWORK_LIST)Buf;
+    return Status;
 }
 
 DWORD _RpcSetPsdIEDataList(
@@ -473,8 +901,26 @@ DWORD _RpcSetPsdIEDataList(
     DWORD dwDataListSize,
     LPBYTE pPsdIEDataList)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hParams;
+    WCHAR Value[128];
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (strFormat == NULL || wcschr(strFormat, L'\\') != NULL)
+        return ERROR_INVALID_PARAMETER;
+    if (dwDataListSize != 0 && pPsdIEDataList == NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenParametersKey(KEY_SET_VALUE, &hParams);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"PsdIE_%.100ls", strFormat);
+    Status = RegSetValueExW(hParams, Value, 0, REG_BINARY,
+                            pPsdIEDataList, dwDataListSize);
+    RegCloseKey(hParams);
+    return Status;
 }
 
 DWORD _RpcSaveTemporaryProfile(
@@ -485,8 +931,17 @@ DWORD _RpcSaveTemporaryProfile(
     DWORD dwFlags,
     BOOL bOverWrite)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    /* Temporary profile semantics: persist the named in-memory profile
+     * to the regular profile store.  Without a driver we never have a
+     * cached temporary profile, so report NOT_FOUND. */
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(strProfileName);
+    UNREFERENCED_PARAMETER(strAllUserProfileSecurity);
+    UNREFERENCED_PARAMETER(dwFlags);
+    UNREFERENCED_PARAMETER(bOverWrite);
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcIsUIRequestPending(
@@ -495,8 +950,12 @@ DWORD _RpcIsUIRequestPending(
     struct_C *arg_3,
     LPDWORD arg_4)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(arg_3);
+    if (arg_4 != NULL)
+        *arg_4 = 0;
+    return ERROR_SUCCESS;
 }
 
 DWORD _RpcSetUIForwardingNetworkList(
@@ -505,8 +964,11 @@ DWORD _RpcSetUIForwardingNetworkList(
     DWORD dwSize,
     GUID *arg_4)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(arg_2);
+    UNREFERENCED_PARAMETER(dwSize);
+    UNREFERENCED_PARAMETER(arg_4);
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcIsNetworkSuppressed(
@@ -515,16 +977,21 @@ DWORD _RpcIsNetworkSuppressed(
     const GUID *pInterfaceGuid,
     LPDWORD arg_4)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(arg_2);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    if (arg_4 != NULL)
+        *arg_4 = 0;
+    return ERROR_SUCCESS;
 }
 
 DWORD _RpcRemoveUIForwardingNetworkList(
     wchar_t *arg_1,
     const GUID *pInterfaceGuid)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcQueryExtUIRequest(
@@ -535,8 +1002,14 @@ DWORD _RpcQueryExtUIRequest(
     GUID *pInterfaceGuid,
     struct_C **arg_6)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(arg_2);
+    UNREFERENCED_PARAMETER(arg_3);
+    UNREFERENCED_PARAMETER(arg_4);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    if (arg_6 != NULL)
+        *arg_6 = NULL;
+    return ERROR_NOT_FOUND;
 }
 
 DWORD _RpcUIResponse(
@@ -544,8 +1017,10 @@ DWORD _RpcUIResponse(
     struct_C *arg_2,
     struct_D *arg_3)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(arg_2);
+    UNREFERENCED_PARAMETER(arg_3);
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcGetProfileKeyInfo(
@@ -558,8 +1033,17 @@ DWORD _RpcGetProfileKeyInfo(
     char *arg_7,
     LPDWORD arg_8)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(arg_2);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(arg_4);
+    UNREFERENCED_PARAMETER(arg_5);
+    UNREFERENCED_PARAMETER(arg_7);
+    if (arg_6 != NULL)
+        *arg_6 = 0;
+    if (arg_8 != NULL)
+        *arg_8 = 0;
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcAsyncDoPlap(
@@ -569,8 +1053,12 @@ DWORD _RpcAsyncDoPlap(
     DWORD dwSize,
     struct_E arg_5[])
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    UNREFERENCED_PARAMETER(arg_3);
+    UNREFERENCED_PARAMETER(dwSize);
+    UNREFERENCED_PARAMETER(arg_5);
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcQueryPlapCredentials(
@@ -584,16 +1072,25 @@ DWORD _RpcQueryPlapCredentials(
     LPDWORD arg_8,
     LPDWORD arg_9)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    if (dwSize) *dwSize = 0;
+    if (arg_3) *arg_3 = NULL;
+    if (arg_4) *arg_4 = NULL;
+    if (arg_6) *arg_6 = 0;
+    if (arg_7) *arg_7 = 0;
+    if (arg_8) *arg_8 = 0;
+    if (arg_9) *arg_9 = 0;
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcCancelPlap(
     wchar_t *arg_1,
     const GUID *pInterfaceGuid)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(arg_1);
+    UNREFERENCED_PARAMETER(pInterfaceGuid);
+    return ERROR_NOT_SUPPORTED;
 }
 
 DWORD _RpcSetSecuritySettings(
@@ -601,8 +1098,24 @@ DWORD _RpcSetSecuritySettings(
     WLAN_SECURABLE_OBJECT SecurableObject,
     const wchar_t *strModifiedSDDL)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hSec;
+    WCHAR Value[32];
+    DWORD Status;
+
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if (strModifiedSDDL == NULL || (DWORD)SecurableObject >= WLAN_SECURABLE_OBJECT_COUNT)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WlanSvcOpenSecurityKey(KEY_SET_VALUE, &hSec);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"Object_%lu", (DWORD)SecurableObject);
+    Status = RegSetValueExW(hSec, Value, 0, REG_SZ, (LPBYTE)strModifiedSDDL,
+                            (DWORD)((wcslen(strModifiedSDDL) + 1) * sizeof(WCHAR)));
+    RegCloseKey(hSec);
+    return Status;
 }
 
 DWORD _RpcGetSecuritySettings(
@@ -612,8 +1125,36 @@ DWORD _RpcGetSecuritySettings(
     wchar_t **pstrCurrentSDDL,
     LPDWORD pdwGrantedAccess)
 {
-    UNIMPLEMENTED;
-    return ERROR_CALL_NOT_IMPLEMENTED;
+    HKEY hSec;
+    WCHAR Value[32];
+    DWORD Status;
+
+    if (pstrCurrentSDDL != NULL)
+        *pstrCurrentSDDL = NULL;
+    if (!WlanSvcGetHandleEntry(hClientHandle))
+        return ERROR_INVALID_HANDLE;
+    if ((DWORD)SecurableObject >= WLAN_SECURABLE_OBJECT_COUNT ||
+        pstrCurrentSDDL == NULL)
+    {
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    Status = WlanSvcOpenSecurityKey(KEY_QUERY_VALUE, &hSec);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    swprintf(Value, ARRAYSIZE(Value), L"Object_%lu", (DWORD)SecurableObject);
+    Status = WlanSvcReadAllocString(hSec, Value, pstrCurrentSDDL);
+    RegCloseKey(hSec);
+
+    if (Status == ERROR_SUCCESS)
+    {
+        if (pValueType != NULL)
+            *pValueType = wlan_opcode_value_type_set_by_user;
+        if (pdwGrantedAccess != NULL)
+            *pdwGrantedAccess = WLAN_READ_ACCESS | WLAN_WRITE_ACCESS;
+    }
+    return Status;
 }
 
 void __RPC_FAR * __RPC_USER midl_user_allocate(SIZE_T len)
@@ -630,5 +1171,12 @@ void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
 
 void __RPC_USER WLANSVC_RPC_HANDLE_rundown(WLANSVC_RPC_HANDLE hClientHandle)
 {
+    /* Client connection torn down without a matching WlanCloseHandle:
+     * drop the handle ourselves so the list does not grow unbounded. */
+    PWLANSVCHANDLE Handle = WlanSvcGetHandleEntry(hClientHandle);
+    if (Handle != NULL)
+    {
+        RemoveEntryList(&Handle->WlanSvcHandleListEntry);
+        HeapFree(GetProcessHeap(), 0, Handle);
+    }
 }
-
