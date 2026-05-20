@@ -281,6 +281,8 @@
 282 stdcall SHCreateQueryCancelAutoPlayMoniker(ptr)
 283 stdcall SHCreateShellItem(ptr ptr ptr ptr)
 @ stdcall -version=0x600+ SHCreateItemFromIDList(ptr ptr ptr)
+@ stdcall -version=0x600+ SHCreateItemFromParsingName(wstr ptr ptr ptr)
+@ stdcall -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr)
 @ stdcall -version=0x600+ SHCreateShellItemArrayFromDataObject(ptr ptr ptr)
 284 stdcall SHEmptyRecycleBinA(long str long)
 285 stdcall SHEmptyRecycleBinW(long wstr long)
