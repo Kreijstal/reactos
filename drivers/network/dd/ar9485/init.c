@@ -1,0 +1,386 @@
+/*
+ * PROJECT:     ReactOS Atheros AR9485 Wi-Fi Driver
+ * LICENSE:     GPL-2.0-or-later
+ * PURPOSE:     MiniportInitializeEx / HaltEx.  Maps BAR0, reads AR_SREV
+ *              for chip-revision identification, and reports general
+ *              attributes to NDIS.
+ */
+
+#include "ar9485.h"
+
+#define NDEBUG
+#include <debug.h>
+
+static NDIS_STATUS
+AR9485SetRegistrationAttributes(_In_ PAR9485_ADAPTER Adapter);
+static NDIS_STATUS
+AR9485SetGeneralAttributes(_In_ PAR9485_ADAPTER Adapter);
+static NDIS_STATUS
+AR9485MapHardwareResources(
+    _In_ PAR9485_ADAPTER Adapter,
+    _In_ PNDIS_RESOURCE_LIST ResourceList);
+static VOID
+AR9485DetectChip(_In_ PAR9485_ADAPTER Adapter);
+
+NDIS_STATUS NTAPI
+AR9485MiniportInitializeEx(
+    _In_ NDIS_HANDLE NdisMiniportHandle,
+    _In_ NDIS_HANDLE MiniportDriverContext,
+    _In_ PNDIS_MINIPORT_INIT_PARAMETERS MiniportInitParameters)
+{
+    PAR9485_ADAPTER Adapter;
+    NDIS_STATUS Status;
+
+    UNREFERENCED_PARAMETER(MiniportDriverContext);
+
+    DPRINT1("AR9485: MiniportInitializeEx, handle=%p\n", NdisMiniportHandle);
+
+    Adapter = NdisAllocateMemoryWithTagPriority(NdisMiniportHandle,
+                                                sizeof(AR9485_ADAPTER),
+                                                AR9485_TAG,
+                                                NormalPoolPriority);
+    if (Adapter == NULL)
+    {
+        DPRINT1("AR9485: out of memory allocating adapter context\n");
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    NdisZeroMemory(Adapter, sizeof(*Adapter));
+    Adapter->MiniportAdapterHandle    = NdisMiniportHandle;
+    Adapter->NdisMiniportDriverHandle = g_NdisMiniportDriverHandle;
+
+    NdisMGetDeviceProperty(NdisMiniportHandle,
+                           &Adapter->PhysicalDeviceObject,
+                           NULL,
+                           NULL,
+                           NULL,
+                           NULL);
+
+    Status = AR9485SetRegistrationAttributes(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: SetRegistrationAttributes failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    if (MiniportInitParameters->AllocatedResources == NULL)
+    {
+        DPRINT1("AR9485: no PnP resources allocated\n");
+        Status = NDIS_STATUS_RESOURCES;
+        goto Fail;
+    }
+
+    Status = AR9485MapHardwareResources(Adapter,
+                                        MiniportInitParameters->AllocatedResources);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: MapHardwareResources failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    AR9485DetectChip(Adapter);
+
+    if (Adapter->MacVersion != AR_SREV_VERSION_9485)
+    {
+        DPRINT1("AR9485: unexpected chip-version 0x%03x (want 0x%03x); "
+                "binding anyway for diagnostics\n",
+                Adapter->MacVersion, AR_SREV_VERSION_9485);
+        /* Stay attached for Phase 1a so we can log the value on bare-metal
+         * variants where the version readback may differ.  Phase 2a tightens
+         * this to NDIS_STATUS_ADAPTER_NOT_FOUND on a mismatch. */
+    }
+    else
+    {
+        Adapter->Flags |= AR9485_FLAG_HW_RECOGNIZED;
+    }
+
+    Status = AR9485RegisterInterrupt(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: RegisterInterrupt failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    Status = AR9485SetGeneralAttributes(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: SetGeneralAttributes failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    DPRINT1("AR9485: initialized: SREV=0x%08x version=0x%03x rev=%u\n",
+            Adapter->SregRaw, Adapter->MacVersion, Adapter->MacRevision);
+    return NDIS_STATUS_SUCCESS;
+
+Fail:
+    if (Adapter->InterruptHandle != NULL)
+        AR9485UnregisterInterrupt(Adapter);
+    if (Adapter->IoBase != NULL)
+        MmUnmapIoSpace(Adapter->IoBase, Adapter->IoLength);
+    NdisFreeMemory(Adapter, sizeof(*Adapter), 0);
+    return Status;
+}
+
+VOID NTAPI
+AR9485MiniportHaltEx(
+    _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ NDIS_HALT_ACTION HaltAction)
+{
+    PAR9485_ADAPTER Adapter = (PAR9485_ADAPTER)MiniportAdapterContext;
+
+    UNREFERENCED_PARAMETER(HaltAction);
+
+    if (Adapter == NULL)
+        return;
+
+    DPRINT1("AR9485: MiniportHaltEx\n");
+    InterlockedOr(&Adapter->Flags, AR9485_FLAG_HALTING);
+
+    if (Adapter->InterruptHandle != NULL)
+        AR9485UnregisterInterrupt(Adapter);
+    if (Adapter->IoBase != NULL)
+    {
+        MmUnmapIoSpace(Adapter->IoBase, Adapter->IoLength);
+        Adapter->IoBase = NULL;
+    }
+    NdisFreeMemory(Adapter, sizeof(*Adapter), 0);
+}
+
+NDIS_STATUS NTAPI
+AR9485MiniportPause(
+    _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ PNDIS_MINIPORT_PAUSE_PARAMETERS PauseParameters)
+{
+    UNREFERENCED_PARAMETER(MiniportAdapterContext);
+    UNREFERENCED_PARAMETER(PauseParameters);
+    return NDIS_STATUS_SUCCESS;
+}
+
+NDIS_STATUS NTAPI
+AR9485MiniportRestart(
+    _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ PNDIS_MINIPORT_RESTART_PARAMETERS RestartParameters)
+{
+    UNREFERENCED_PARAMETER(MiniportAdapterContext);
+    UNREFERENCED_PARAMETER(RestartParameters);
+    return NDIS_STATUS_SUCCESS;
+}
+
+VOID NTAPI
+AR9485MiniportDevicePnPEventNotify(
+    _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ PNET_DEVICE_PNP_EVENT NetDevicePnPEvent)
+{
+    PAR9485_ADAPTER Adapter = (PAR9485_ADAPTER)MiniportAdapterContext;
+
+    if (NetDevicePnPEvent->DevicePnPEvent == NdisDevicePnPEventSurpriseRemoved && Adapter != NULL)
+        InterlockedOr(&Adapter->Flags, AR9485_FLAG_HALTING);
+
+    DPRINT1("AR9485: PnP event %d\n", NetDevicePnPEvent->DevicePnPEvent);
+}
+
+VOID NTAPI
+AR9485MiniportShutdownEx(
+    _In_ NDIS_HANDLE MiniportAdapterContext,
+    _In_ NDIS_SHUTDOWN_ACTION ShutdownAction)
+{
+    UNREFERENCED_PARAMETER(MiniportAdapterContext);
+    UNREFERENCED_PARAMETER(ShutdownAction);
+    DPRINT1("AR9485: MiniportShutdownEx\n");
+}
+
+static NDIS_STATUS
+AR9485SetRegistrationAttributes(_In_ PAR9485_ADAPTER Adapter)
+{
+    NDIS_MINIPORT_ADAPTER_REGISTRATION_ATTRIBUTES RegAttrs;
+
+    NdisZeroMemory(&RegAttrs, sizeof(RegAttrs));
+    RegAttrs.Header.Type     = NDIS_OBJECT_TYPE_MINIPORT_ADAPTER_REGISTRATION_ATTRIBUTES;
+    RegAttrs.Header.Revision = NDIS_MINIPORT_ADAPTER_REGISTRATION_ATTRIBUTES_REVISION_1;
+    RegAttrs.Header.Size     = sizeof(RegAttrs);
+    RegAttrs.MiniportAdapterContext = Adapter;
+    RegAttrs.AttributeFlags = NDIS_MINIPORT_ATTRIBUTES_HARDWARE_DEVICE |
+                              NDIS_MINIPORT_ATTRIBUTES_BUS_MASTER |
+                              NDIS_MINIPORT_ATTRIBUTES_SURPRISE_REMOVE_OK;
+    RegAttrs.CheckForHangTimeInSeconds = 4;
+    RegAttrs.InterfaceType = NdisInterfacePci;
+
+    return NdisMSetMiniportAttributes(Adapter->MiniportAdapterHandle,
+        (PNDIS_MINIPORT_ADAPTER_ATTRIBUTES)&RegAttrs);
+}
+
+static NDIS_STATUS
+AR9485SetGeneralAttributes(_In_ PAR9485_ADAPTER Adapter)
+{
+    /* Phase 1a: report enough for NDIS to accept the miniport.  Full
+     * 802.11 capability advertisement (PHY types, auth/cipher pairs,
+     * BSS list, regulatory domain) lands with Phase 2-3. */
+    NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES GenAttrs;
+    NDIS_OID SupportedOids[] = {
+        OID_GEN_HARDWARE_STATUS,
+        OID_GEN_MEDIA_SUPPORTED,
+        OID_GEN_MEDIA_IN_USE,
+        OID_GEN_MAXIMUM_FRAME_SIZE,
+        OID_GEN_LINK_SPEED,
+        OID_GEN_TRANSMIT_BUFFER_SPACE,
+        OID_GEN_RECEIVE_BUFFER_SPACE,
+        OID_GEN_TRANSMIT_BLOCK_SIZE,
+        OID_GEN_RECEIVE_BLOCK_SIZE,
+        OID_GEN_VENDOR_ID,
+        OID_GEN_VENDOR_DESCRIPTION,
+        OID_GEN_VENDOR_DRIVER_VERSION,
+        OID_GEN_CURRENT_PACKET_FILTER,
+        OID_GEN_CURRENT_LOOKAHEAD,
+        OID_GEN_DRIVER_VERSION,
+        OID_GEN_MAXIMUM_TOTAL_SIZE,
+        OID_GEN_MAC_OPTIONS,
+        OID_GEN_MEDIA_CONNECT_STATUS,
+        OID_GEN_INTERRUPT_MODERATION,
+        OID_GEN_PHYSICAL_MEDIUM,
+        OID_GEN_STATISTICS,
+    };
+
+    NdisZeroMemory(&GenAttrs, sizeof(GenAttrs));
+    GenAttrs.Header.Type     = NDIS_OBJECT_TYPE_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES;
+    GenAttrs.Header.Revision = NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES_REVISION_2;
+    GenAttrs.Header.Size     = sizeof(NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES);
+
+    /* Native 802.11 medium.  Until the full DOT11 OID surface is wired up,
+     * NDIS will see this as a powered-down wireless interface. */
+    GenAttrs.MediaType                = NdisMediumNative802_11;
+    GenAttrs.PhysicalMediumType       = NdisPhysicalMediumNative802_11;
+    GenAttrs.MtuSize                  = 1500;
+    GenAttrs.MaxXmitLinkSpeed         = 150000000ULL;   /* 150 Mbps */
+    GenAttrs.MaxRcvLinkSpeed          = 150000000ULL;
+    GenAttrs.XmitLinkSpeed            = NDIS_LINK_SPEED_UNKNOWN;
+    GenAttrs.RcvLinkSpeed             = NDIS_LINK_SPEED_UNKNOWN;
+    GenAttrs.MediaConnectState        = MediaConnectStateDisconnected;
+    GenAttrs.MediaDuplexState         = MediaDuplexStateUnknown;
+    GenAttrs.LookaheadSize            = 2304;
+    GenAttrs.PowerManagementCapabilities = NULL;
+    GenAttrs.MacOptions               = NDIS_MAC_OPTION_NO_LOOPBACK |
+                                        NDIS_MAC_OPTION_TRANSFERS_NOT_PEND |
+                                        NDIS_MAC_OPTION_RECEIVE_SERIALIZED;
+    GenAttrs.SupportedPacketFilters   = NDIS_PACKET_TYPE_DIRECTED |
+                                        NDIS_PACKET_TYPE_BROADCAST |
+                                        NDIS_PACKET_TYPE_MULTICAST;
+    GenAttrs.MaxMulticastListSize     = 32;
+    GenAttrs.MacAddressLength         = 6;
+    /* No MAC available until EEPROM parse (Phase 2a).  Report all-zero. */
+    NdisZeroMemory(GenAttrs.PermanentMacAddress, 6);
+    NdisZeroMemory(GenAttrs.CurrentMacAddress, 6);
+
+    GenAttrs.RecvScaleCapabilities    = NULL;
+    GenAttrs.AccessType               = NET_IF_ACCESS_BROADCAST;
+    GenAttrs.DirectionType            = NET_IF_DIRECTION_SENDRECEIVE;
+    GenAttrs.ConnectionType           = NET_IF_CONNECTION_DEDICATED;
+    GenAttrs.IfType                   = IF_TYPE_IEEE80211;
+    GenAttrs.IfConnectorPresent       = TRUE;
+    GenAttrs.SupportedStatistics      = 0;
+    GenAttrs.SupportedPauseFunctions  = NdisPauseFunctionsUnsupported;
+    GenAttrs.DataBackFillSize         = 0;
+    GenAttrs.ContextBackFillSize      = 0;
+
+    GenAttrs.SupportedOidList         = SupportedOids;
+    GenAttrs.SupportedOidListLength   = sizeof(SupportedOids);
+
+    return NdisMSetMiniportAttributes(Adapter->MiniportAdapterHandle,
+        (PNDIS_MINIPORT_ADAPTER_ATTRIBUTES)&GenAttrs);
+}
+
+static NDIS_STATUS
+AR9485MapHardwareResources(
+    _In_ PAR9485_ADAPTER Adapter,
+    _In_ PNDIS_RESOURCE_LIST ResourceList)
+{
+    ULONG i;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Resource;
+    BOOLEAN FoundMemory = FALSE;
+    BOOLEAN FoundInterrupt = FALSE;
+
+    DPRINT1("AR9485: parsing %u PnP resources\n", ResourceList->Count);
+
+    for (i = 0; i < ResourceList->Count; i++)
+    {
+        Resource = &ResourceList->PartialDescriptors[i];
+        switch (Resource->Type)
+        {
+            case CmResourceTypeMemory:
+                /* AR9485's only BAR is a 64 KiB memory window. */
+                if (FoundMemory)
+                    break;
+                Adapter->IoAddress = Resource->u.Memory.Start;
+                Adapter->IoLength  = Resource->u.Memory.Length;
+                Adapter->IoBase    = MmMapIoSpace(Adapter->IoAddress,
+                                                  Adapter->IoLength,
+                                                  MmNonCached);
+                if (Adapter->IoBase == NULL)
+                {
+                    DPRINT1("AR9485: MmMapIoSpace failed for 0x%I64x len %u\n",
+                            Adapter->IoAddress.QuadPart, Adapter->IoLength);
+                    return NDIS_STATUS_RESOURCES;
+                }
+                FoundMemory = TRUE;
+                DPRINT1("AR9485: mapped BAR at PA 0x%I64x len %u -> VA %p\n",
+                        Adapter->IoAddress.QuadPart, Adapter->IoLength, Adapter->IoBase);
+                break;
+
+            case CmResourceTypeInterrupt:
+                if (Resource->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)
+                {
+                    Adapter->InterruptVector   = Resource->u.MessageInterrupt.Translated.Vector;
+                    Adapter->InterruptLevel    = (KIRQL)Resource->u.MessageInterrupt.Translated.Level;
+                    Adapter->InterruptAffinity = Resource->u.MessageInterrupt.Translated.Affinity;
+                    Adapter->InterruptModeType = Latched;
+                    Adapter->InterruptShared   = FALSE;
+                    Adapter->HasMessageInterrupt = TRUE;
+                    DPRINT1("AR9485: MSI vector %u level %u\n",
+                            Adapter->InterruptVector, Adapter->InterruptLevel);
+                }
+                else
+                {
+                    Adapter->InterruptVector   = Resource->u.Interrupt.Vector;
+                    Adapter->InterruptLevel    = (KIRQL)Resource->u.Interrupt.Level;
+                    Adapter->InterruptAffinity = Resource->u.Interrupt.Affinity;
+                    Adapter->InterruptModeType = (Resource->Flags & CM_RESOURCE_INTERRUPT_LATCHED) ?
+                                                 Latched : LevelSensitive;
+                    Adapter->InterruptShared   = (Resource->ShareDisposition == CmResourceShareShared);
+                    Adapter->HasMessageInterrupt = FALSE;
+                    DPRINT1("AR9485: line-based IRQ vector %u level %u shared=%u\n",
+                            Adapter->InterruptVector, Adapter->InterruptLevel,
+                            Adapter->InterruptShared);
+                }
+                FoundInterrupt = TRUE;
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    if (!FoundMemory)
+    {
+        DPRINT1("AR9485: no memory BAR found in resource list\n");
+        return NDIS_STATUS_RESOURCES;
+    }
+    if (!FoundInterrupt)
+    {
+        DPRINT1("AR9485: no interrupt resource found\n");
+        return NDIS_STATUS_RESOURCES;
+    }
+    return NDIS_STATUS_SUCCESS;
+}
+
+static VOID
+AR9485DetectChip(_In_ PAR9485_ADAPTER Adapter)
+{
+    ULONG Sreg;
+
+    Sreg = AR9485_READ_REG(Adapter, AR_SREV);
+    Adapter->SregRaw     = Sreg;
+    Adapter->MacVersion  = (Sreg & AR_SREV_VERSION_MASK)  >> AR_SREV_VERSION_SHIFT;
+    Adapter->MacRevision = (Sreg & AR_SREV_REVISION_MASK) >> AR_SREV_REVISION_SHIFT;
+
+    DPRINT1("AR9485: AR_SREV raw=0x%08x version=0x%03x revision=%u\n",
+            Sreg, Adapter->MacVersion, Adapter->MacRevision);
+}
