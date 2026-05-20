@@ -460,3 +460,63 @@ SHCreateItemFromIDList(PCIDLIST_ABSOLUTE pidl, REFIID riid, void **ppv)
     psi->Release();
     return hr;
 }
+
+/*
+ * @implemented
+ *
+ * Vista+ entry-point: parse a display name into an absolute PIDL via
+ * SHParseDisplayName, then hand it to SHCreateItemFromIDList for the
+ * actual IShellItem construction + QI.  Matches the documented
+ * Windows behaviour (display name in, IShellItem out).  pbc is an
+ * optional bind context for name parsing.
+ */
+EXTERN_C HRESULT WINAPI
+SHCreateItemFromParsingName(PCWSTR pszPath, IBindCtx *pbc, REFIID riid, void **ppv)
+{
+    PIDLIST_ABSOLUTE pidl;
+    HRESULT hr;
+
+    if (!ppv)
+        return E_INVALIDARG;
+    *ppv = NULL;
+
+    hr = SHParseDisplayName(pszPath, pbc, &pidl, 0, NULL);
+    if (FAILED(hr))
+        return hr;
+
+    hr = SHCreateItemFromIDList(pidl, riid, ppv);
+    ILFree(pidl);
+    return hr;
+}
+
+/*
+ * @implemented
+ *
+ * Vista+ entry-point: build an IShellItem from a (parent-folder,
+ * child-pidl) pair, where the parent is either supplied as a PIDL
+ * (pidlParent) or as a live IShellFolder (psfParent) — one of the
+ * two must be non-NULL.  Wraps SHCreateShellItem, which already
+ * accepts that exact shape.
+ */
+EXTERN_C HRESULT WINAPI
+SHCreateItemWithParent(PCIDLIST_ABSOLUTE pidlParent,
+                       IShellFolder *psfParent,
+                       PCUITEMID_CHILD pidl,
+                       REFIID riid,
+                       void **ppv)
+{
+    IShellItem *psi;
+    HRESULT hr;
+
+    if (!ppv)
+        return E_INVALIDARG;
+    *ppv = NULL;
+
+    hr = SHCreateShellItem(pidlParent, psfParent, pidl, &psi);
+    if (FAILED(hr))
+        return hr;
+
+    hr = psi->QueryInterface(riid, ppv);
+    psi->Release();
+    return hr;
+}

@@ -489,10 +489,10 @@
 @ stdcall SHCreateDirectoryExA(long str ptr) # 2k3:278, Vista:328
 @ stdcall SHCreateDirectoryExW(long wstr ptr) # 2k3:279, Vista:329
 @ stdcall -version=0x600+ SHCreateItemFromIDList(ptr ptr ptr) # Vista:330
-@ stub -version=0x600+ SHCreateItemFromParsingName # Vista:331
+@ stdcall -version=0x600+ SHCreateItemFromParsingName(wstr ptr ptr ptr) # Vista:331
 @ stub -version=0x600+ SHCreateItemFromRelativeName # Vista:332
 @ stub -version=0x600+ SHCreateItemInKnownFolder # Vista:333
-@ stub -version=0x600+ SHCreateItemWithParent # Vista:334
+@ stdcall -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr) # Vista:334
 @ stub SHCreateLocalServerRunDll # 2k3:280, Vista:335
 @ stdcall SHCreateProcessAsUserW(ptr) # 2k3:281, Vista:336
 @ stdcall SHCreateQueryCancelAutoPlayMoniker(ptr) # 2k3:282, Vista:337
