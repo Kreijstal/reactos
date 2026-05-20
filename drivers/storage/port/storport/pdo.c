@@ -8,10 +8,8 @@
 /* INCLUDES *******************************************************************/
 
 #include "precomp.h"
-#include "inline.h"
 
 #define NDEBUG
-#include <debug/driverdbg.h>
 #include <debug.h>
 
 
@@ -27,6 +25,7 @@ PortCreatePdo(
 {
     PPDO_DEVICE_EXTENSION DeviceExtension = NULL;
     PDEVICE_OBJECT Pdo = NULL;
+    KLOCK_QUEUE_HANDLE LockHandle;
     NTSTATUS Status;
 
     DPRINT("PortCreatePdo(%p %p)\n",
@@ -60,40 +59,20 @@ PortCreatePdo(
     DeviceExtension->PnpState = dsStopped;
 
     /* Add the PDO to the PDO list*/
-    StorpInterlockedInsertHeadListCounted(&FdoDeviceExtension->PdoListLock,
-                                          &FdoDeviceExtension->PdoListHead,
-                                          &DeviceExtension->PdoListEntry,
-                                          &FdoDeviceExtension->PdoCount);
+    KeAcquireInStackQueuedSpinLock(&FdoDeviceExtension->PdoListLock,
+                                   &LockHandle);
+    InsertHeadList(&FdoDeviceExtension->PdoListHead,
+                   &DeviceExtension->PdoListEntry);
+    FdoDeviceExtension->PdoCount++;
+    KeReleaseInStackQueuedSpinLock(&LockHandle);
 
     DeviceExtension->Bus = Bus;
     DeviceExtension->Target = Target;
     DeviceExtension->Lun = Lun;
 
-    /* Initialize IO flow control structure */
-    // KeInitializeSpinLock(&DeviceExtension->FlowControl.Lock);
-    DeviceExtension->FlowControl.IsBusy = FALSE;
-    DeviceExtension->FlowControl.IsPaused = FALSE;
-    DeviceExtension->FlowControl.IsWaitingQueueClear = FALSE;
-    DeviceExtension->FlowControl.StrongOrderedCount = 0;
-    DeviceExtension->FlowControl.RemainingBusyRequests = 0;
-    DeviceExtension->FlowControl.RemainingPauseTime = 0;
-
-    /* Beginning from Windows 8, when you specified SRB_TYPE_STORAGE_REQUEST_BLOCK, you can increase
-       maximum number of outstanding requests to (254, MaxNumberOfIO) range. We do not support
-       STORAGE_REQUEST_BLOCKs so we're not implementing it.
-    */
-    InitializeListHead(&DeviceExtension->FlowControl.AwaitingRequestsListHead);
-    // InitializeListHead(&DeviceExtension->FlowControl.ApprovedRequestsListHead);
-    InitializeListHead(&DeviceExtension->FlowControl.ActiveRequestsListHead);
-    DeviceExtension->FlowControl.OutstandingRequestCount = 0;
-    DeviceExtension->OutstandingRequestMax = 254;
-    DeviceExtension->TagCounter = -1;
-
-    DeviceExtension->IsClaimed = 0;
 
     // FIXME: More initialization
 
-    DeviceExtension->SpecialRequestCounter = 0; /* FIXME: DELETE AFTER DEBUG */
 
     /* The device has been initialized */
     Pdo->Flags &= ~DO_DEVICE_INITIALIZING;
@@ -108,12 +87,16 @@ NTSTATUS
 PortDeletePdo(
     _In_ PPDO_DEVICE_EXTENSION PdoExtension)
 {
+    KLOCK_QUEUE_HANDLE LockHandle;
+
     DPRINT("PortDeletePdo(%p)\n", PdoExtension);
 
     /* Remove the PDO from the PDO list*/
-    StorpInterlockedRemoveEntryListCounted(&PdoExtension->FdoExtension->PdoListLock,
-                                           &PdoExtension->PdoListEntry,
-                                           &PdoExtension->FdoExtension->PdoCount);
+    KeAcquireInStackQueuedSpinLock(&PdoExtension->FdoExtension->PdoListLock,
+                                   &LockHandle);
+    RemoveEntryList(&PdoExtension->PdoListEntry);
+    PdoExtension->FdoExtension->PdoCount--;
+    KeReleaseInStackQueuedSpinLock(&LockHandle);
 
     if (PdoExtension->InquiryBuffer)
     {
@@ -132,36 +115,163 @@ PortDeletePdo(
 }
 
 
-/* FROM SCSIPORT */
+NTSTATUS
+NTAPI
+PortPdoScsi(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp)
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension;
+    PIO_STACK_LOCATION Stack;
+    PSCSI_REQUEST_BLOCK Srb;
+    NTSTATUS Status;
+
+    DPRINT("PortPdoScsi(%p %p)\n", DeviceObject, Irp);
+
+    DeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    ASSERT(DeviceExtension->ExtensionType == PdoExtension);
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    Srb = Stack->Parameters.Scsi.Srb;
+
+    if (Srb == NULL)
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    switch (Srb->Function)
+    {
+        case SRB_FUNCTION_EXECUTE_SCSI:
+        case SRB_FUNCTION_IO_CONTROL:
+        case SRB_FUNCTION_FLUSH:
+        case SRB_FUNCTION_SHUTDOWN:
+            Status = PortDispatchSrb(DeviceExtension, Irp, Srb);
+            if (Status != STATUS_PENDING)
+            {
+                Srb->SrbStatus = SRB_STATUS_ERROR;
+                Irp->IoStatus.Status = Status;
+                Irp->IoStatus.Information = 0;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            }
+            return Status;
+
+        case SRB_FUNCTION_CLAIM_DEVICE:
+            /* The PDO is the device object. Hand it back; the class driver
+             * uses it as its target for subsequent SRBs. */
+            Srb->DataBuffer = DeviceObject;
+            Srb->SrbStatus = SRB_STATUS_SUCCESS;
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_SUCCESS;
+
+        case SRB_FUNCTION_RELEASE_DEVICE:
+            Srb->SrbStatus = SRB_STATUS_SUCCESS;
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_SUCCESS;
+
+        default:
+            DPRINT1("PortPdoScsi: unhandled SRB function 0x%02x\n", Srb->Function);
+            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+            Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_NOT_SUPPORTED;
+    }
+}
+
+
+/* PnP identifier helpers
+ *
+ * The patterns here mirror Windows' install/scsi identifiers documented at
+ *   https://learn.microsoft.com/windows-hardware/drivers/install/identifiers-for-scsi-devices
+ *   https://learn.microsoft.com/windows-hardware/drivers/install/identifiers-for-ide-devices
+ * scsiport/pdo.c already implements them; we copy that translation here so
+ * disk.sys / cdrom.sys see the same hardware IDs from storport PDOs as
+ * scsiport PDOs.
+ */
 
 static
+PCSTR
+PortGetDeviceType(
+    _In_ PINQUIRYDATA InquiryData)
+{
+    switch (InquiryData->DeviceType)
+    {
+        case DIRECT_ACCESS_DEVICE: return "Disk";
+        case SEQUENTIAL_ACCESS_DEVICE: return "Sequential";
+        case PRINTER_DEVICE: return "Printer";
+        case PROCESSOR_DEVICE: return "Processor";
+        case WRITE_ONCE_READ_MULTIPLE_DEVICE: return "Worm";
+        case READ_ONLY_DIRECT_ACCESS_DEVICE: return "CdRom";
+        case SCANNER_DEVICE: return "Scanner";
+        case OPTICAL_DEVICE: return "Optical";
+        case MEDIUM_CHANGER: return "Changer";
+        case COMMUNICATION_DEVICE: return "Net";
+        case ARRAY_CONTROLLER_DEVICE: return "Array";
+        case SCSI_ENCLOSURE_DEVICE: return "Enclosure";
+        case REDUCED_BLOCK_DEVICE: return "RBC";
+        case OPTICAL_CARD_READER_WRITER_DEVICE: return "CardReader";
+        case BRIDGE_CONTROLLER_DEVICE: return "Bridge";
+        default: return "Other";
+    }
+}
+
+static
+PCSTR
+PortGetGenericType(
+    _In_ PINQUIRYDATA InquiryData)
+{
+    switch (InquiryData->DeviceType)
+    {
+        case DIRECT_ACCESS_DEVICE: return "GenDisk";
+        case PRINTER_DEVICE: return "GenPrinter";
+        case WRITE_ONCE_READ_MULTIPLE_DEVICE: return "GenWorm";
+        case READ_ONLY_DIRECT_ACCESS_DEVICE: return "GenCdRom";
+        case SCANNER_DEVICE: return "GenScanner";
+        case OPTICAL_DEVICE: return "GenOptical";
+        case MEDIUM_CHANGER: return "ScsiChanger";
+        case COMMUNICATION_DEVICE: return "ScsiNet";
+        case ARRAY_CONTROLLER_DEVICE: return "ScsiArray";
+        case SCSI_ENCLOSURE_DEVICE: return "ScsiEnclosure";
+        case REDUCED_BLOCK_DEVICE: return "ScsiRBC";
+        case OPTICAL_CARD_READER_WRITER_DEVICE: return "ScsiCardReader";
+        case BRIDGE_CONTROLLER_DEVICE: return "ScsiBridge";
+        default: return "ScsiOther";
+    }
+}
+
+/* Copy a fixed-length INQUIRY field into a buffer, replacing unprintables
+ * (and ',') with DefaultCharacter. Optionally trim trailing default chars.
+ * Returns the number of characters written. */
+static
 ULONG
-CopyField(
-    IN PUCHAR Name,
-    IN PCHAR Buffer,
-    IN ULONG MaxLength,
-    IN CHAR DefaultCharacter,
-    IN BOOLEAN Trim)
+PortCopyField(
+    _In_reads_(MaxLength) PUCHAR Source,
+    _Out_writes_(MaxLength) PCHAR Buffer,
+    _In_ ULONG MaxLength,
+    _In_ CHAR DefaultCharacter,
+    _In_ BOOLEAN Trim)
 {
     ULONG Index;
 
     for (Index = 0; Index < MaxLength; Index++)
     {
-        if (Name[Index] <= ' ' || Name[Index] >= 0x7F /* last printable ascii character */ ||  Name[Index] == ',')
-        {
-            // convert to underscore
+        UCHAR Ch = Source[Index];
+        if (Ch <= ' ' || Ch >= 0x7F || Ch == ',')
             Buffer[Index] = DefaultCharacter;
-        }
         else
-        {
-            // just copy character
-            Buffer[Index] = Name[Index];
-        }
+            Buffer[Index] = (CHAR)Ch;
     }
 
-    /* Trim trailing default characters */
     if (Trim)
     {
+        Index = MaxLength;
         while (Index > 0 && Buffer[Index - 1] == DefaultCharacter)
             Index--;
     }
@@ -169,509 +279,335 @@ CopyField(
     return Index;
 }
 
-
+/* Append an ANSI string to a UTF-16 multi-sz buffer starting at *OffsetChars.
+ * Buffer is sized to hold the final string; advances *OffsetChars past the
+ * trailing NUL of the just-written entry. */
 static
-NTSTATUS
-PdoHandleQueryDeviceId(
-    _In_ PPDO_DEVICE_EXTENSION DeviceExtension,
-    _Inout_ PIRP Irp)
+VOID
+PortAppendUnicodeMultiSz(
+    _Inout_ PWCHAR Buffer,
+    _Inout_ PULONG OffsetChars,
+    _In_ ULONG TotalChars,
+    _In_z_ PCSTR Source)
 {
+    ANSI_STRING AnsiString;
+    UNICODE_STRING UnicodeString;
     NTSTATUS Status;
-    PWCHAR Buffer;
-    PCSTR DeviceType;
-    PINQUIRYDATA InquiryData;
-    ULONG Offset;
-    size_t CharCount;
-    CHAR VidBuffer[RTL_FIELD_SIZE(INQUIRYDATA, VendorId) + sizeof(ANSI_NULL)];
-    CHAR PidBuffer[RTL_FIELD_SIZE(INQUIRYDATA, ProductId) + sizeof(ANSI_NULL)];
-    CHAR RevLevelBuffer[RTL_FIELD_SIZE(INQUIRYDATA, ProductRevisionLevel) + sizeof(ANSI_NULL)];
 
-    InquiryData = DeviceExtension->InquiryBuffer;
-    DeviceType = GetDeviceType(InquiryData);
+    RtlInitAnsiString(&AnsiString, Source);
 
-    CharCount = (sizeof("SCSI\\") - 1) + strlen(DeviceType) +
-                (sizeof("&Ven_") - 1) + RTL_FIELD_SIZE(INQUIRYDATA, VendorId) +
-                (sizeof("&Prod_") - 1) + RTL_FIELD_SIZE(INQUIRYDATA, ProductId) +
-                (sizeof("&Rev_") - 1) + RTL_FIELD_SIZE(INQUIRYDATA, ProductRevisionLevel) +
-                sizeof(ANSI_NULL);
+    UnicodeString.Buffer = &Buffer[*OffsetChars];
+    UnicodeString.Length = 0;
+    UnicodeString.MaximumLength = (USHORT)((TotalChars - *OffsetChars) * sizeof(WCHAR));
 
-    Buffer = ExAllocatePoolUninitialized(PagedPool,
-                                         CharCount * sizeof(WCHAR),
-                                         TAG_DEVICE_ID);
-    if (!Buffer)
-    {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    Offset = CopyField(InquiryData->VendorId,
-                       VidBuffer,
-                       RTL_FIELD_SIZE(INQUIRYDATA, VendorId),
-                       '_',
-                       TRUE);
-    VidBuffer[Offset] = ANSI_NULL;
-
-    Offset = CopyField(InquiryData->ProductId,
-                       PidBuffer,
-                       RTL_FIELD_SIZE(INQUIRYDATA, ProductId),
-                       '_',
-                       TRUE);
-    PidBuffer[Offset] = ANSI_NULL;
-
-    Offset = CopyField(InquiryData->ProductRevisionLevel,
-                       RevLevelBuffer,
-                       RTL_FIELD_SIZE(INQUIRYDATA, ProductRevisionLevel),
-                       '_',
-                       TRUE);
-    RevLevelBuffer[Offset] = ANSI_NULL;
-
-    Status = RtlStringCchPrintfExW(Buffer,
-                                   CharCount,
-                                   NULL,
-                                   NULL,
-                                   0,
-                                   L"SCSI\\%hs&Ven_%hs&Prod_%hs&Rev_%hs",
-                                   DeviceType,
-                                   VidBuffer,
-                                   PidBuffer,
-                                   RevLevelBuffer);
+    Status = RtlAnsiStringToUnicodeString(&UnicodeString, &AnsiString, FALSE);
     ASSERT(NT_SUCCESS(Status));
+    (VOID)Status;
 
-    DPRINT("DeviceID: '%S'\n", Buffer);
-
-    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
-    return STATUS_SUCCESS;
+    *OffsetChars += (UnicodeString.Length / sizeof(WCHAR)) + 1;
 }
 
 
 static
 NTSTATUS
-PdoHandleQueryHardwareId(
+PortPdoQueryDeviceId(
     _In_ PPDO_DEVICE_EXTENSION PdoExtension,
     _Inout_ PIRP Irp)
 {
+    CHAR Ascii[100] = {0};
+    ULONG Offset = 0;
+    PINQUIRYDATA Inquiry;
+    ANSI_STRING AnsiString;
+    UNICODE_STRING DeviceId;
     NTSTATUS Status;
-    PWCHAR Buffer, End, IdStart;
-    PINQUIRYDATA InquiryData;
-    PCSTR GenericType, DeviceType;
-    size_t CharCount, Remaining;
-    CHAR VidBuffer[RTL_FIELD_SIZE(INQUIRYDATA, VendorId)];
-    CHAR PidBuffer[RTL_FIELD_SIZE(INQUIRYDATA, ProductId)];
-    CHAR RevLevelBuffer[RTL_FIELD_SIZE(INQUIRYDATA, ProductRevisionLevel)];
 
-    DBG_UNREFERENCED_LOCAL_VARIABLE(IdStart);
-
-    InquiryData = PdoExtension->InquiryBuffer;
-    DeviceType = GetDeviceType(InquiryData);
-    GenericType = GetGenericType(InquiryData);
-
-    /*
-     * 1) SCSI\DeviceTypeVendorId(8)ProductId(16)Revision(4)
-     * 2) SCSI\DeviceTypeVendorId(8)ProductId(16)
-     * 3) SCSI\DeviceTypeVendorId(8)
-     * 4) SCSI\VendorId(8)ProductId(16)Revision(1)
-     * 5) VendorId(8)ProductId(16)Revision(1)
-     * 6) GenericType
-     */
-    CharCount = strlen(DeviceType) * 3 +
-                strlen(GenericType) +
-                (sizeof("SCSI\\") - 1) * 4 +
-                RTL_FIELD_SIZE(INQUIRYDATA, VendorId) * 5 +
-                RTL_FIELD_SIZE(INQUIRYDATA, ProductId) * 4 +
-                RTL_FIELD_SIZE(INQUIRYDATA, ProductRevisionLevel) + 1 * 2 +
-                6 * sizeof(ANSI_NULL) +
-                sizeof(ANSI_NULL); /* multi-string */
-
-    Buffer = ExAllocatePoolUninitialized(PagedPool,
-                                         CharCount * sizeof(WCHAR),
-                                         TAG_DEVICE_ID);
-    if (!Buffer)
+    if (PdoExtension->InquiryBuffer == NULL)
     {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INSUFFICIENT_RESOURCES;
+        DPRINT1("PortPdoQueryDeviceId: no inquiry data cached\n");
+        return STATUS_DEVICE_DOES_NOT_EXIST;
     }
 
-    CopyField(InquiryData->VendorId,
-              VidBuffer,
-              RTL_FIELD_SIZE(INQUIRYDATA, VendorId),
-              '_',
-              FALSE);
+    Inquiry = PdoExtension->InquiryBuffer;
 
-    CopyField(InquiryData->ProductId,
-              PidBuffer,
-              RTL_FIELD_SIZE(INQUIRYDATA, ProductId),
-              '_',
-              FALSE);
+    /* Format: SCSI\<DeviceType>&Ven_<Vendor>&Prod_<Product>&Rev_<Rev> */
+    Offset += sprintf(&Ascii[Offset], "SCSI\\%s&Ven_", PortGetDeviceType(Inquiry));
+    Offset += PortCopyField(Inquiry->VendorId, &Ascii[Offset], 8, '_', TRUE);
+    Offset += sprintf(&Ascii[Offset], "&Prod_");
+    Offset += PortCopyField(Inquiry->ProductId, &Ascii[Offset], 16, '_', TRUE);
+    Offset += sprintf(&Ascii[Offset], "&Rev_");
+    Offset += PortCopyField(Inquiry->ProductRevisionLevel, &Ascii[Offset], 4, '_', TRUE);
+    Ascii[Offset] = '\0';
 
-    CopyField(InquiryData->ProductRevisionLevel,
-              RevLevelBuffer,
-              RTL_FIELD_SIZE(INQUIRYDATA, ProductRevisionLevel),
-              '_',
-              FALSE);
-
-    DPRINT("HardwareIDs:\n");
-
-    /* ID 1 */
-    IdStart = Buffer;
-    Status = RtlStringCchPrintfExW(Buffer,
-                                   CharCount,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"SCSI\\%hs%.8hs%.16hs%.4hs",
-                                   DeviceType,
-                                   VidBuffer,
-                                   PidBuffer,
-                                   RevLevelBuffer);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("1) '%S'\n", IdStart);
-
-    ++End;
-    --Remaining;
-
-    /* ID 2 */
-    IdStart = End;
-    Status = RtlStringCchPrintfExW(End,
-                                   Remaining,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"SCSI\\%hs%.8hs%.16hs",
-                                   DeviceType,
-                                   VidBuffer,
-                                   PidBuffer);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("2) '%S'\n", IdStart);
-
-    ++End;
-    --Remaining;
-
-    /* ID 3 */
-    IdStart = End;
-    Status = RtlStringCchPrintfExW(End,
-                                   Remaining,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"SCSI\\%hs%.8hs",
-                                   DeviceType,
-                                   VidBuffer);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("3) '%S'\n", IdStart);
-
-    ++End;
-    --Remaining;
-
-    /* ID 4 */
-    IdStart = End;
-    Status = RtlStringCchPrintfExW(End,
-                                   Remaining,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"SCSI\\%.8hs%.16hs%.1hs",
-                                   VidBuffer,
-                                   PidBuffer,
-                                   RevLevelBuffer);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("4) '%S'\n", IdStart);
-
-    ++End;
-    --Remaining;
-
-    /* ID 5 */
-    IdStart = End;
-    Status = RtlStringCchPrintfExW(End,
-                                   Remaining,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"%.8hs%.16hs%.1hs",
-                                   VidBuffer,
-                                   PidBuffer,
-                                   RevLevelBuffer);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("5) '%S'\n", IdStart);
-
-    ++End;
-    --Remaining;
-
-    /* ID 6 */
-    IdStart = End;
-    Status = RtlStringCchPrintfExW(End,
-                                   Remaining,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"%hs",
-                                   GenericType);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("6) '%S'\n", IdStart);
-
-    *++End = UNICODE_NULL; /* multi-string */
-
-    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
-    return STATUS_SUCCESS;
-}
-
-
-static
-NTSTATUS
-PdoHandleQueryCompatibleId(
-    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
-    _Inout_ PIRP Irp)
-{
-    NTSTATUS Status;
-    PWCHAR Buffer, End, IdStart;
-    PCSTR DeviceType;
-    size_t CharCount, Remaining;
-
-    DBG_UNREFERENCED_LOCAL_VARIABLE(IdStart);
-
-    DeviceType = GetDeviceType(PdoExtension->InquiryBuffer);
-
-    /*
-     * 1) SCSI\DeviceType
-     * 2) SCSI\RAW
-     */
-    CharCount = (sizeof("SCSI\\") - 1) + strlen(DeviceType) + sizeof(ANSI_NULL) +
-                (sizeof("SCSI\\RAW") - 1) + sizeof(ANSI_NULL) +
-                sizeof(ANSI_NULL); /* multi-string */
-
-    Buffer = ExAllocatePoolUninitialized(PagedPool,
-                                         CharCount * sizeof(WCHAR),
-                                         TAG_DEVICE_ID);
-    if (!Buffer)
+    RtlInitAnsiString(&AnsiString, Ascii);
+    Status = RtlAnsiStringToUnicodeString(&DeviceId, &AnsiString, TRUE);
+    if (NT_SUCCESS(Status))
     {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INSUFFICIENT_RESOURCES;
+        DPRINT("PortPdoQueryDeviceId: %wZ\n", &DeviceId);
+        Irp->IoStatus.Information = (ULONG_PTR)DeviceId.Buffer;
     }
-
-    DPRINT("CompatibleIDs:\n");
-
-    /* ID 1 */
-    IdStart = Buffer;
-    Status = RtlStringCchPrintfExW(Buffer,
-                                   CharCount,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"SCSI\\%hs",
-                                   DeviceType);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("1) '%S'\n", IdStart);
-
-    ++End;
-    --Remaining;
-
-    /* ID 2 */
-    IdStart = End;
-    Status = RtlStringCchPrintfExW(End,
-                                   Remaining,
-                                   &End,
-                                   &Remaining,
-                                   0,
-                                   L"SCSI\\RAW");
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("2) '%S'\n", IdStart);
-
-    *++End = UNICODE_NULL; /* multi-string */
-
-    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
-    return STATUS_SUCCESS;
-}
-
-
-static
-NTSTATUS
-PdoHandleQueryInstanceId(
-    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
-    _Inout_ PIRP Irp)
-{
-    NTSTATUS Status;
-    PWCHAR Buffer;
-    size_t CharCount;
-
-    /* PathTargetLun */
-    CharCount = sizeof("FFFFFF");
-
-    Buffer = ExAllocatePoolUninitialized(PagedPool,
-                                         CharCount * sizeof(WCHAR),
-                                         TAG_DEVICE_ID);
-    if (!Buffer)
-    {
-        Irp->IoStatus.Information = 0;
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    Status = RtlStringCchPrintfExW(Buffer,
-                                   CharCount,
-                                   NULL,
-                                   NULL,
-                                   0,
-                                   L"%x%x%x",
-                                   PdoExtension->Bus,
-                                   PdoExtension->Target,
-                                   PdoExtension->Lun);
-    ASSERT(NT_SUCCESS(Status));
-
-    DPRINT("InstanceID: '%S'\n", Buffer);
-
-    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
-    return STATUS_SUCCESS;
-}
-
-
-static
-NTSTATUS
-PdoHandleQueryDeviceText(
-    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
-    _Inout_ PIRP Irp)
-{
-    PIO_STACK_LOCATION IoStack;
-    NTSTATUS Status;
-    PWCHAR Buffer;
-    size_t CharCount;
-
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    switch (IoStack->Parameters.QueryDeviceText.DeviceTextType)
-    {
-        case DeviceTextDescription:
-        {
-            PINQUIRYDATA InquiryData;
-            PCSTR DeviceType;
-            ULONG Offset;
-            CHAR LocalBuffer[RTL_FIELD_SIZE(INQUIRYDATA, VendorId) +
-                             (sizeof(" ") - 1) +
-                             RTL_FIELD_SIZE(INQUIRYDATA, ProductId) +
-                             sizeof(ANSI_NULL)];
-
-            InquiryData = PdoExtension->InquiryBuffer;
-            DeviceType = GetDeviceType(InquiryData);
-
-            CharCount = RTL_FIELD_SIZE(INQUIRYDATA, VendorId) +
-                        (sizeof(" ") - 1) +
-                        RTL_FIELD_SIZE(INQUIRYDATA, ProductId) +
-                        (sizeof(" SCSI ") - 1) +
-                        strlen(DeviceType) +
-                        (sizeof(" Device ") - 1) +
-                        sizeof(ANSI_NULL);
-
-            Buffer = ExAllocatePoolUninitialized(PagedPool,
-                                                 CharCount * sizeof(WCHAR),
-                                                 TAG_DEVICE_TEXT);
-            if (!Buffer)
-            {
-                Status = STATUS_INSUFFICIENT_RESOURCES;
-                break;
-            }
-
-            /* Combine VendorId and ProductId, separated by a space */
-            Offset = 0;
-            Offset += CopyField(InquiryData->VendorId,
-                                &LocalBuffer[Offset],
-                                RTL_FIELD_SIZE(INQUIRYDATA, VendorId),
-                                ' ',
-                                TRUE);
-            LocalBuffer[Offset++] = ' ';
-            Offset += CopyField(InquiryData->ProductId,
-                                &LocalBuffer[Offset],
-                                RTL_FIELD_SIZE(INQUIRYDATA, ProductId),
-                                ' ',
-                                TRUE);
-            LocalBuffer[Offset++] = ANSI_NULL;
-
-            Status = RtlStringCchPrintfExW(Buffer,
-                                           CharCount,
-                                           NULL,
-                                           NULL,
-                                           0,
-                                           L"%hs SCSI %hs Device",
-                                           LocalBuffer,
-                                           DeviceType);
-            ASSERT(NT_SUCCESS(Status));
-
-            DPRINT("TextDescription: '%S'\n", Buffer);
-            break;
-        }
-
-        case DeviceTextLocationInformation:
-        {
-            CharCount = sizeof("Bus Number 255, Target ID 255, LUN 255");
-
-            Buffer = ExAllocatePoolUninitialized(PagedPool,
-                                                 CharCount * sizeof(WCHAR),
-                                                 TAG_DEVICE_TEXT);
-            if (!Buffer)
-            {
-                Status = STATUS_INSUFFICIENT_RESOURCES;
-                break;
-            }
-
-            Status = RtlStringCchPrintfExW(Buffer,
-                                           CharCount,
-                                           NULL,
-                                           NULL,
-                                           0,
-                                           L"Bus Number %lu, Target ID %lu, LUN %lu",
-                                           PdoExtension->Bus,
-                                           PdoExtension->Target,
-                                           PdoExtension->Lun);
-            ASSERT(NT_SUCCESS(Status));
-
-            DPRINT("TextLocationInformation: '%S'\n", Buffer);
-            break;
-        }
-
-        default:
-        {
-            Buffer = NULL;
-            Status = Irp->IoStatus.Status;
-            break;
-        }
-    }
-
-    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
     return Status;
 }
 
 
+/* IRP_MN_QUERY_ID / BusQueryHardwareIDs: multi-sz of fall-back compatibility
+ * strings, most-specific first. Class drivers walk this list to pick the best
+ * .inf match. */
 static
 NTSTATUS
-PdoHandleDeviceRelations(
+PortPdoQueryHardwareIds(
     _In_ PPDO_DEVICE_EXTENSION PdoExtension,
     _Inout_ PIRP Irp)
 {
-    PDEVICE_RELATIONS deviceRelations;
-    PIO_STACK_LOCATION ioStack = IoGetCurrentIrpStackLocation(Irp);
+    PINQUIRYDATA Inquiry;
+    PCSTR DeviceType, GenericType;
+    CHAR Ids[6][64];
+    ULONG IdLengths[6];
+    ULONG TotalChars, OffsetChars, i, n;
+    PWCHAR Buffer;
 
-    // check if relation type is BusRelations
-    if (ioStack->Parameters.QueryDeviceRelations.Type != TargetDeviceRelation)
+    if (PdoExtension->InquiryBuffer == NULL)
+        return STATUS_DEVICE_DOES_NOT_EXIST;
+
+    Inquiry = PdoExtension->InquiryBuffer;
+    DeviceType = PortGetDeviceType(Inquiry);
+    GenericType = PortGetGenericType(Inquiry);
+
+    RtlZeroMemory(Ids, sizeof(Ids));
+
+    /* 0: SCSI\<Type><Vendor8><Product16><Rev4> */
+    n = sprintf(Ids[0], "SCSI\\%s", DeviceType);
+    n += PortCopyField(Inquiry->VendorId, &Ids[0][n], 8, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductId, &Ids[0][n], 16, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductRevisionLevel, &Ids[0][n], 4, '_', FALSE);
+    Ids[0][n] = 0;
+
+    /* 1: SCSI\<Type><Vendor8><Product16> */
+    n = sprintf(Ids[1], "SCSI\\%s", DeviceType);
+    n += PortCopyField(Inquiry->VendorId, &Ids[1][n], 8, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductId, &Ids[1][n], 16, '_', FALSE);
+    Ids[1][n] = 0;
+
+    /* 2: SCSI\<Type><Vendor8> */
+    n = sprintf(Ids[2], "SCSI\\%s", DeviceType);
+    n += PortCopyField(Inquiry->VendorId, &Ids[2][n], 8, '_', FALSE);
+    Ids[2][n] = 0;
+
+    /* 3: SCSI\<Vendor8><Product16><Rev1> */
+    n = sprintf(Ids[3], "SCSI\\");
+    n += PortCopyField(Inquiry->VendorId, &Ids[3][n], 8, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductId, &Ids[3][n], 16, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductRevisionLevel, &Ids[3][n], 1, '_', FALSE);
+    Ids[3][n] = 0;
+
+    /* 4: <Vendor8><Product16><Rev1> */
+    n = PortCopyField(Inquiry->VendorId, &Ids[4][0], 8, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductId, &Ids[4][n], 16, '_', FALSE);
+    n += PortCopyField(Inquiry->ProductRevisionLevel, &Ids[4][n], 1, '_', FALSE);
+    Ids[4][n] = 0;
+
+    /* 5: GenericType (e.g. GenDisk) */
+    sprintf(Ids[5], "%s", GenericType);
+
+    TotalChars = 1; /* terminating empty string */
+    for (i = 0; i < 6; i++)
     {
-        // PDO handles only target device relation
-        return Irp->IoStatus.Status;
+        IdLengths[i] = (ULONG)strlen(Ids[i]) + 1;
+        TotalChars += IdLengths[i];
     }
 
-    deviceRelations = ExAllocatePoolWithTag(PagedPool, sizeof(*deviceRelations), TAG_DEVICE_RELATION);
-    if (!deviceRelations)
+    Buffer = ExAllocatePoolWithTag(PagedPool, TotalChars * sizeof(WCHAR), TAG_INQUIRY_DATA);
+    if (Buffer == NULL)
     {
+        Irp->IoStatus.Information = 0;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(Buffer, TotalChars * sizeof(WCHAR));
+
+    OffsetChars = 0;
+    for (i = 0; i < 6; i++)
+    {
+        DPRINT("PortPdoQueryHardwareIds[%lu]: %s\n", i, Ids[i]);
+        PortAppendUnicodeMultiSz(Buffer, &OffsetChars, TotalChars, Ids[i]);
+    }
+    Buffer[OffsetChars] = UNICODE_NULL;
+
+    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
+PortPdoQueryCompatibleIds(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _Inout_ PIRP Irp)
+{
+    PINQUIRYDATA Inquiry;
+    PCSTR DeviceType;
+    CHAR Ids[2][32];
+    ULONG TotalChars, OffsetChars, i;
+    PWCHAR Buffer;
+
+    if (PdoExtension->InquiryBuffer == NULL)
+        return STATUS_DEVICE_DOES_NOT_EXIST;
+
+    Inquiry = PdoExtension->InquiryBuffer;
+    DeviceType = PortGetDeviceType(Inquiry);
+
+    sprintf(Ids[0], "SCSI\\%s", DeviceType);
+    sprintf(Ids[1], "SCSI\\RAW");
+
+    TotalChars = 1;
+    for (i = 0; i < 2; i++)
+        TotalChars += (ULONG)strlen(Ids[i]) + 1;
+
+    Buffer = ExAllocatePoolWithTag(PagedPool, TotalChars * sizeof(WCHAR), TAG_INQUIRY_DATA);
+    if (Buffer == NULL)
+    {
+        Irp->IoStatus.Information = 0;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(Buffer, TotalChars * sizeof(WCHAR));
+
+    OffsetChars = 0;
+    for (i = 0; i < 2; i++)
+        PortAppendUnicodeMultiSz(Buffer, &OffsetChars, TotalChars, Ids[i]);
+    Buffer[OffsetChars] = UNICODE_NULL;
+
+    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
+PortPdoQueryInstanceId(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _Inout_ PIRP Irp)
+{
+    WCHAR Tmp[26];
+    ULONG Length;
+    PWCHAR Buffer;
+
+    _snwprintf(Tmp, ARRAYSIZE(Tmp), L"%x%x%x",
+               PdoExtension->Bus, PdoExtension->Target, PdoExtension->Lun);
+    Tmp[ARRAYSIZE(Tmp) - 1] = UNICODE_NULL;
+
+    Length = (ULONG)wcslen(Tmp) + 1;
+    Buffer = ExAllocatePoolWithTag(PagedPool, Length * sizeof(WCHAR), TAG_INQUIRY_DATA);
+    if (Buffer == NULL)
+    {
+        Irp->IoStatus.Information = 0;
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    // initialize device relations
-    deviceRelations->Count = 1;
-    deviceRelations->Objects[0] = PdoExtension->Device;
+    RtlCopyMemory(Buffer, Tmp, Length * sizeof(WCHAR));
+    DPRINT("PortPdoQueryInstanceId: %S\n", Buffer);
+
+    Irp->IoStatus.Information = (ULONG_PTR)Buffer;
+    return STATUS_SUCCESS;
+}
+
+
+/* IRP_MN_QUERY_DEVICE_TEXT / DeviceTextDescription: shown in Device Manager. */
+static
+NTSTATUS
+PortPdoQueryDeviceText(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PINQUIRYDATA Inquiry;
+    CHAR Ascii[80];
+    ULONG Offset = 0;
+    ANSI_STRING AnsiString;
+    UNICODE_STRING Description;
+
+    if (PdoExtension->InquiryBuffer == NULL)
+        return Irp->IoStatus.Status;
+
+    Inquiry = PdoExtension->InquiryBuffer;
+
+    switch (Stack->Parameters.QueryDeviceText.DeviceTextType)
+    {
+        case DeviceTextDescription:
+            Offset += PortCopyField(Inquiry->VendorId, &Ascii[Offset], 8, ' ', TRUE);
+            Ascii[Offset++] = ' ';
+            Offset += PortCopyField(Inquiry->ProductId, &Ascii[Offset], 16, ' ', TRUE);
+            Offset += sprintf(&Ascii[Offset], " SCSI %s Device", PortGetDeviceType(Inquiry));
+            Ascii[Offset++] = '\0';
+
+            RtlInitAnsiString(&AnsiString, Ascii);
+            if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&Description, &AnsiString, TRUE)))
+            {
+                Irp->IoStatus.Information = 0;
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            Irp->IoStatus.Information = (ULONG_PTR)Description.Buffer;
+            return STATUS_SUCCESS;
+
+        case DeviceTextLocationInformation:
+            sprintf(Ascii, "Bus Number %lu, Target Id %lu, LUN %lu",
+                    PdoExtension->Bus, PdoExtension->Target, PdoExtension->Lun);
+            RtlInitAnsiString(&AnsiString, Ascii);
+            if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&Description, &AnsiString, TRUE)))
+            {
+                Irp->IoStatus.Information = 0;
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            Irp->IoStatus.Information = (ULONG_PTR)Description.Buffer;
+            return STATUS_SUCCESS;
+
+        default:
+            return Irp->IoStatus.Status;
+    }
+}
+
+
+/* For PDOs, only TargetDeviceRelation is meaningful: return self. */
+static
+NTSTATUS
+PortPdoQueryDeviceRelations(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PDEVICE_RELATIONS Relations;
+
+    if (Stack->Parameters.QueryDeviceRelations.Type != TargetDeviceRelation)
+        return Irp->IoStatus.Status;
+
+    Relations = ExAllocatePoolWithTag(PagedPool, sizeof(DEVICE_RELATIONS), TAG_INQUIRY_DATA);
+    if (Relations == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Relations->Count = 1;
+    Relations->Objects[0] = PdoExtension->Device;
     ObReferenceObject(PdoExtension->Device);
 
-    Irp->IoStatus.Information = (ULONG_PTR)deviceRelations;
+    Irp->IoStatus.Information = (ULONG_PTR)Relations;
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
+PortPdoQueryCapabilities(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PDEVICE_CAPABILITIES Caps = Stack->Parameters.DeviceCapabilities.Capabilities;
+
+    if (Caps == NULL || Caps->Version != 1 || Caps->Size < sizeof(DEVICE_CAPABILITIES))
+        return STATUS_UNSUCCESSFUL;
+
+    Caps->SilentInstall = TRUE;
+    Caps->RawDeviceOK = TRUE;
+    Caps->SurpriseRemovalOK = TRUE;
+    Caps->Address = (PdoExtension->Target << 8) | PdoExtension->Lun;
+    Caps->UniqueID = FALSE;
+
     return STATUS_SUCCESS;
 }
 
@@ -682,95 +618,87 @@ PortPdoPnp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp)
 {
-    NTSTATUS Status;
+    PPDO_DEVICE_EXTENSION Pdo;
     PIO_STACK_LOCATION Stack;
-    PPDO_DEVICE_EXTENSION DeviceExtension;
+    NTSTATUS Status;
+    NTSTATUS DefaultStatus;
 
-    DPRINT1("PortPdoPnp(%p %p)\n", DeviceObject, Irp);
-
-    DeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-    ASSERT(DeviceExtension->ExtensionType == PdoExtension);
+    Pdo = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    ASSERT(Pdo->ExtensionType == PdoExtension);
 
     Stack = IoGetCurrentIrpStackLocation(Irp);
+    DefaultStatus = Irp->IoStatus.Status;
+
+    DPRINT("PortPdoPnp: minor 0x%02x (%lu/%lu/%lu)\n",
+           Stack->MinorFunction, Pdo->Bus, Pdo->Target, Pdo->Lun);
 
     switch (Stack->MinorFunction)
     {
         case IRP_MN_START_DEVICE:
-        {
-            // RegistryInitLunKey(lunExt);
-            DeviceExtension->PnpState = dsStarted;
+            Pdo->PnpState = dsStarted;
             Status = STATUS_SUCCESS;
             break;
-        }
-        case IRP_MN_REMOVE_DEVICE:
-        case IRP_MN_SURPRISE_REMOVAL:
-        {
-            DeviceExtension->PnpState = (Stack->MinorFunction == IRP_MN_REMOVE_DEVICE)
-                                        ? dsRemoved : dsSurpriseRemoved;
-            Status = STATUS_SUCCESS;
-            break;
-        }
-        case IRP_MN_QUERY_CAPABILITIES:
-        case IRP_MN_QUERY_REMOVE_DEVICE:
+
         case IRP_MN_QUERY_STOP_DEVICE:
-        {
+        case IRP_MN_CANCEL_STOP_DEVICE:
+        case IRP_MN_QUERY_REMOVE_DEVICE:
+        case IRP_MN_CANCEL_REMOVE_DEVICE:
+        case IRP_MN_SURPRISE_REMOVAL:
+        case IRP_MN_REMOVE_DEVICE:
             Status = STATUS_SUCCESS;
             break;
-        }
+
+        case IRP_MN_STOP_DEVICE:
+            Pdo->PnpState = dsStopped;
+            Status = STATUS_SUCCESS;
+            break;
+
+        case IRP_MN_QUERY_CAPABILITIES:
+            Status = PortPdoQueryCapabilities(Pdo, Irp);
+            break;
+
         case IRP_MN_QUERY_DEVICE_RELATIONS:
-        {
-            Status = PdoHandleDeviceRelations(DeviceExtension, Irp);
+            Status = PortPdoQueryDeviceRelations(Pdo, Irp);
             break;
-        }
-        case IRP_MN_QUERY_DEVICE_TEXT:
-        {
-            Status = PdoHandleQueryDeviceText(DeviceExtension, Irp);
-            break;
-        }
+
         case IRP_MN_QUERY_ID:
-        {
-            DPRINT("IRP_MN_QUERY_ID IdType %s\n",
-                DbgGetDeviceIDString(Stack->Parameters.QueryId.IdType));
-
-           if (Stack->Parameters.QueryId.IdType == BusQueryDeviceID)
-           {
-               Status = PdoHandleQueryDeviceId(DeviceExtension, Irp);
-               break;
-           }
-           else if (Stack->Parameters.QueryId.IdType == BusQueryHardwareIDs)
-           {
-               Status = PdoHandleQueryHardwareId(DeviceExtension, Irp);
-               break;
-           }
-           else if (Stack->Parameters.QueryId.IdType == BusQueryInstanceID)
-           {
-               Status = PdoHandleQueryInstanceId(DeviceExtension, Irp);
-               break;
-           }
-           else if (Stack->Parameters.QueryId.IdType == BusQueryCompatibleIDs)
-           {
-               Status = PdoHandleQueryCompatibleId(DeviceExtension, Irp);
-               break;
-           }
-
-           __fallthrough;
-        }
-        default:
-        {
-            // do nothing
-            Status = Irp->IoStatus.Status;
+            DPRINT("PortPdoPnp QUERY_ID type %lu\n", Stack->Parameters.QueryId.IdType);
+            switch (Stack->Parameters.QueryId.IdType)
+            {
+                case BusQueryDeviceID:
+                    Status = PortPdoQueryDeviceId(Pdo, Irp);
+                    break;
+                case BusQueryHardwareIDs:
+                    Status = PortPdoQueryHardwareIds(Pdo, Irp);
+                    break;
+                case BusQueryCompatibleIDs:
+                    Status = PortPdoQueryCompatibleIds(Pdo, Irp);
+                    break;
+                case BusQueryInstanceID:
+                    Status = PortPdoQueryInstanceId(Pdo, Irp);
+                    break;
+                default:
+                    Status = DefaultStatus;
+                    break;
+            }
             break;
-        }
+
+        case IRP_MN_QUERY_DEVICE_TEXT:
+            Status = PortPdoQueryDeviceText(Pdo, Irp);
+            break;
+
+        default:
+            /* Unhandled minor: preserve incoming IoStatus.Status unchanged.
+             * Bus PDOs (versus filter FDOs) must not complete unknown PnP
+             * IRPs with STATUS_NOT_SUPPORTED — that would break things like
+             * resource queries — so we just pass-through. */
+            Status = DefaultStatus;
+            break;
     }
 
-    if (Status != STATUS_PENDING)
-    {
-        Irp->IoStatus.Status = Status;
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    }
-
+    Irp->IoStatus.Status = Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return Status;
 }
-
 
 /* EOF */

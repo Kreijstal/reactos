@@ -3,11 +3,9 @@ spec2def(storport.sys storport.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     fdo.c
-    ioctl.c
     miniport.c
     misc.c
     pdo.c
-    srb.c
     storport.c
     stubs.c)
 

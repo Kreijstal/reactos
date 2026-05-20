@@ -87,9 +87,6 @@ InitializeConfiguration(
         PortConfig->InitiatorBusId[i] = (CCHAR)SP_UNINITIALIZED_VALUE;
     }
 
-    /* Default per-adapter outstanding IO limit, as per storport documentation. */
-    PortConfig->MaxNumberOfIO = 1000;
-
     return STATUS_SUCCESS;
 }
 
@@ -252,14 +249,8 @@ MiniportInitialize(
     Miniport->InitData = InitData;
 
     /* Calculate the miniport device extension size */
-    Status = RtlULongAdd(sizeof(*MiniportExtension),
-                         Miniport->InitData->DeviceExtensionSize,
-                         &Size);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Invalid miniport extension size %lx\n", Miniport->InitData->DeviceExtensionSize);
-        return Status;
-    }
+    Size = sizeof(MINIPORT_DEVICE_EXTENSION) +
+           Miniport->InitData->DeviceExtensionSize;
 
     /* Allocate and initialize the miniport device extension */
     MiniportExtension = ExAllocatePoolWithTag(NonPagedPool,
@@ -352,11 +343,11 @@ MiniportHwInitialize(
 {
     BOOLEAN Result;
 
-    DPRINT("MiniportHwInitialize(%p)\n", Miniport);
+    DPRINT1("MiniportHwInitialize(%p)\n", Miniport);
 
     /* Call the miniport HwInitialize routine */
     Result = Miniport->InitData->HwInitialize(&Miniport->MiniportExtension->HwDeviceExtension);
-    DPRINT("HwInitialize() returned %u\n", Result);
+    DPRINT1("HwInitialize() returned %u\n", Result);
 
     return Result ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
@@ -368,11 +359,11 @@ MiniportHwInterrupt(
 {
     BOOLEAN Result;
 
-    DPRINT("MiniportHwInterrupt(%p)\n",
+    DPRINT1("MiniportHwInterrupt(%p)\n",
             Miniport);
 
     Result = Miniport->InitData->HwInterrupt(&Miniport->MiniportExtension->HwDeviceExtension);
-    DPRINT("HwInterrupt() returned %u\n", Result);
+    DPRINT1("HwInterrupt() returned %u\n", Result);
 
     return Result;
 }
@@ -385,11 +376,26 @@ MiniportStartIo(
 {
     BOOLEAN Result;
 
-    DPRINT("MiniportHwStartIo(%p %p)\n",
+    DPRINT1("MiniportHwStartIo(%p %p)\n",
             Miniport, Srb);
 
+    /* Storport calls HwBuildIo (if registered) before HwStartIo so the
+     * miniport can do per-SRB setup at lower IRQL — assemble SG lists,
+     * populate descriptor counts, validate addressing, etc. — outside the
+     * interrupt-locked HwStartIo path. Skipping this leaves miniport
+     * descriptor state (e.g., viostor's srbExt->out/in) zero, so the
+     * subsequent virtqueue_add_buf pushes an empty SG and the device
+     * completes nothing. */
+    if (Miniport->InitData->HwBuildIo != NULL)
+    {
+        BOOLEAN BuildOk = Miniport->InitData->HwBuildIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
+        DPRINT1("HwBuildIo() returned %u\n", BuildOk);
+        if (!BuildOk)
+            return FALSE;
+    }
+
     Result = Miniport->InitData->HwStartIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
-    DPRINT("HwStartIo() returned %u\n", Result);
+    DPRINT1("HwStartIo() returned %u\n", Result);
 
     return Result;
 }
