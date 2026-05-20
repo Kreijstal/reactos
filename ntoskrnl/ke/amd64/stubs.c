@@ -145,19 +145,42 @@ KeExpandKernelStackAndCalloutEx(
 
     KiCalloutOnNewStack(Callout, Parameter, NewStackBase);
 
-    /* Restore the thread's original stack bookkeeping. */
-    CurrentThread->StackBase = SavedStackBase;
+    /*
+     * Restore the thread's original stack bookkeeping.  KiSwapContextResume
+     * mirrors KTHREAD::InitialStack into the per-CPU Pcr->Prcb.RspBase and
+     * the TSS Rsp0 on every context switch.  If the callout caused us to be
+     * preempted (likely for FS mount paths), those per-CPU fields now point
+     * at the temporary stack we are about to free, which would corrupt any
+     * subsequent syscall entry on this processor (KiSystemCallEntry64 reads
+     * gs:[PcRspBase]).  Sync them back to the old stack under interrupt
+     * disable so the freed stack is never reachable from a new syscall.
+     */
+    {
+        PKIPCR Pcr;
+        ULONG Eflags;
+
+        Eflags = __readeflags();
+        _disable();
+
+        CurrentThread->StackBase = SavedStackBase;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
+        CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
 #else
-    CurrentThread->StackLimit = SavedStackLimit;
+        CurrentThread->StackLimit = SavedStackLimit;
 #endif
-    CurrentThread->InitialStack = SavedInitialStack;
+        CurrentThread->InitialStack = SavedInitialStack;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    CurrentEthread->LargeStack = SavedLargeStack;
+        CurrentEthread->LargeStack = SavedLargeStack;
 #else
-    CurrentThread->LargeStack = SavedLargeStack;
+        CurrentThread->LargeStack = SavedLargeStack;
 #endif
+
+        Pcr = (PKIPCR)KeGetPcr();
+        Pcr->Prcb.RspBase = SavedInitialStack;
+        Pcr->TssBase->Rsp0 = (ULONG64)SavedInitialStack;
+
+        __writeeflags(Eflags);
+    }
 
     MmDeleteKernelStack(NewStackBase, TRUE);
 
