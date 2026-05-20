@@ -10,8 +10,6 @@
 
 #include <wdm.h>
 #include <ntddk.h>
-#include <ntintsafe.h>
-#include <ntstrsafe.h>
 #include <stdio.h>
 #include <memory.h>
 
@@ -27,23 +25,22 @@
 /* Memory Tags */
 #define TAG_GLOBAL_DATA     'DGtS'
 #define TAG_INIT_DATA       'DItS'
-#define TAG_DEVICE_RELATION 'RDtS'
-#define TAG_DEVICE_ID       'DItS'
-#define TAG_DEVICE_TEXT     'XTtS'
 #define TAG_MINIPORT_DATA   'DMtS'
 #define TAG_ACCRESS_RANGE   'RAtS'
 #define TAG_RESOURCE_LIST   'LRtS'
 #define TAG_ADDRESS_MAPPING 'MAtS'
 #define TAG_INQUIRY_DATA    'QItS'
-#define TAG_LUN_EXTENSION   'ELtS'
-#define TAG_REPORT_LUN_DATA 'LRtS'
 #define TAG_SENSE_DATA      'NStS'
-#define TAG_QUEUED_REQUEST  'RQtS'
-#define TAG_SRB_EXTENSION   'XStS'
+#define TAG_SRB_CONTEXT     'CStS'
 
-#define SET_FLAG(Flags, Bit)    ((Flags) |= (Bit))
-#define CLEAR_FLAG(Flags, Bit)  ((Flags) &= ~(Bit))
-#define TEST_FLAG(Flags, Bit)   (((Flags) & (Bit)) != 0)
+#define SRB_CONTEXT_MAGIC   'xCBS'
+#define STORPORT_MAX_SGL_ENTRIES 257
+
+/* Windows storport guarantees SrbExtension is 128-byte aligned so DMA-target
+ * miniport structures placed at SrbExtension (e.g. AHCI command tables) meet
+ * the hardware alignment requirement. ExAllocatePoolWithTag only guarantees
+ * 16-byte alignment, so we have to over-allocate and align manually. */
+#define SRB_EXTENSION_ALIGNMENT 128
 
 typedef enum
 {
@@ -67,12 +64,6 @@ typedef struct _DRIVER_INIT_DATA
     LIST_ENTRY Entry;
     HW_INITIALIZATION_DATA HwInitData;
 } DRIVER_INIT_DATA, *PDRIVER_INIT_DATA;
-
-/* Size of HW_INITIALIZATION_DATA before the virtual miniport members were added */
-#define HW_INIT_DATA_SIZE_PHYSICAL  FIELD_OFFSET(HW_INITIALIZATION_DATA, HwFreeAdapterResources)
-
-/* Size of the Win7 virtual miniport initialization data */
-#define HW_INIT_DATA_SIZE_VIRTUAL_LEGACY  FIELD_OFFSET(HW_INITIALIZATION_DATA, HwTracingEnabled)
 
 typedef struct _DRIVER_OBJECT_EXTENSION
 {
@@ -98,13 +89,6 @@ typedef struct _MINIPORT
     PHW_INITIALIZATION_DATA InitData;
     PORT_CONFIGURATION_INFORMATION PortConfig;
     PMINIPORT_DEVICE_EXTENSION MiniportExtension;
-
-    /* Answers to the supported control type queries, unclaimed types are never sent */
-    ULONG AdapterControlSupportedBitmap;
-    ULONG UnitControlSupportedBitmap;
-
-    /* No resources, interrupt or DMA adapter, it gets its own stack's device objects instead */
-    BOOLEAN IsVirtual;
 } MINIPORT, *PMINIPORT;
 
 typedef struct _UNIT_DATA
@@ -112,132 +96,6 @@ typedef struct _UNIT_DATA
     LIST_ENTRY ListEntry;
     INQUIRYDATA InquiryData;
 } UNIT_DATA, *PUNIT_DATA;
-
-typedef struct _TIMER_ENTRY
-{
-    LIST_ENTRY ListEntry;
-    KTIMER Timer;
-    KDPC TimerCallbackDpc;
-    LONG TimerAlreadySet;
-    PVOID HwDeviceExtension;
-    PHW_TIMER_EX TimerCallback;
-    PVOID Context;
-} TIMER_ENTRY, *PTIMER_ENTRY;
-
-/*
- * Storport implements some scheduling on how outstanding requests on the PDO are handled.
- *
- * Important facts:
- * A PDO by default can handle (Storport will actually issue that many) 254 outstanding requests;
- * If miniport actually ate that many requests, incoming requests will wait;
- * If miniport thinks a device is overloaded, PDO can be marked Busy/Ready by miniport;
- * A busy PDO device will exit Busy state when completing specified amount (or all) of IOs;
- * The miniport can pause a PDO for a while, for stuff like load balancing;
- * By default Storport uses tagged queuing. If an IO is untagged, it has to wait until all tagged
- *     IOs finish, then Storport will schedule these requests synchronously;
- * If an IO error occured (SCSISTAT_CHECK_CONDITION, SCSISTAT_COMMAND_TERMINATED), a LUN is reset
- *     because of timeout, or a bus reset occured (affects all LUNs on the HBA), the PDO queue is
- *     put into a third halt state known as Frozen;
- * Class driver can use special SRBs to Unfreeze the device queue and clear all requests it held;
- * When class driver asks a device for power functionalities, it puts the device to a fourth holdup
- *     state known as Locked (with special SRB function, unlock as well but with a bypass flag).
- *
- * Access to IO Flow control is synchronized by a lock in FDO flow control, and contains all
- * information about pausing, busy state, freezing, untagged requests and possibly other stuff
- * that affects how Storport schedules IOs sent to the LUN.
- */
-typedef struct _PDO_IO_FLOW_CONTROL
-{
-    // KSPIN_LOCK Lock; // FIXME: Remove
-
-    /*
-     * Basic attributes to determine if a request must go waiting. Actually, awaiting request queue
-     * should be checked too (if we already got waiting requests, new requests must be served later)
-     */
-    BOOLEAN IsBusy;
-    BOOLEAN IsPaused;
-    BOOLEAN IsLocked;
-    BOOLEAN IsFrozen;
-
-    /*
-     * There are cases when, even the LUN can accept more requests, a new request should still not
-     * be issued until all issued requests have completed:
-     *
-     * 1. A request can have Srb->QueueAction == SRB_ORDERED_QUEUE_TAG_REQUEST which can only be
-     * issued after all previously issued and queued requests have completed;
-     * 2. An untagged request must wait until all tagged requests complete before it can be issued;
-     *
-     * Such ordered requests are always issued only after the last active request completes. To
-     * accomplish this, we check if the request needs strong ordering before taking it out of
-     * approved queue, if it does AND the active list is not empty then this flag is set to TRUE,
-     * the command will stay at the tail of the approved list and only be issued when next time the
-     * active list is empty.
-     */
-    BOOLEAN IsWaitingQueueClear;
-
-    /*
-     * Ordered tagged & Untagged requests are strong ordered. When we have them in our wait queue,
-     * new requests must go waiting. This value is counted by SCSI IRP and completion handler.
-     */
-    ULONG StrongOrderedCount;
-
-    /* How many active requests are still in the hands of miniport */
-    ULONG OutstandingRequestCount;
-
-    /* How many requests needs to be completed before PDO is no longer busy */
-    ULONG RemainingBusyRequests;
-
-    /* How many seconds remaining before PDO is no longer paused */
-    ULONG RemainingPauseTime;
-
-    /* Requests that PDO and FDO both agreed to send, and already went to the device */
-    LIST_ENTRY ActiveRequestsListHead;
-
-    /* Requests that PDO approved to send, awaiting FDO judgement */
-    // LIST_ENTRY ApprovedRequestsListHead;
-
-    /* Requests that PDO is too busy to handle, awaiting PDO scheduling */
-    LIST_ENTRY AwaitingRequestsListHead;
-} PDO_IO_FLOW_CONTROL, *PPDO_IO_FLOW_CONTROL;
-
-/*
- * Storport implements some flow control on FDO.
- *
- * By default FDO has 1000 total outstanding requests limit;
- * Storport will actually issue that many requests (from all LUNs);
- * If miniport thinks the HBA is overloaded, FDO can be marked Busy/Ready by miniport;
- * A busy FDO will exit Busy state when completing specified amount (or all) of IOs;
- * The miniport can pause FDO for a while, for stuff like load balancing;
- *
- * FDO flow control structure has a lock that synchronizes all flow controlling on an HBA.
- */
-typedef struct _FDO_IO_FLOW_CONTROL
-{
-    KSPIN_LOCK Lock;
-
-    BOOLEAN IsBusy;
-    BOOLEAN IsPaused;
-
-    /* Active outstanding request count */
-    ULONG OutstandingRequestCount;
-
-    ULONG RemainingBusyRequests;
-    ULONG RemainingPauseTime;
-
-    /*
-     * If FDO blocks a request from being issued, it'll be queued on both the PDO queue and
-     * this queue. This is used to implement first-come-first-serve when FDO becomes ready again
-     */
-    LIST_ENTRY FdoBlockedRequestsListHead;
-} FDO_IO_FLOW_CONTROL, *PFDO_IO_FLOW_CONTROL;
-
-/* Requests that could not allocate their private contexts. Cancel safe, as we hold them. */
-typedef struct _STARVED_REQUEST_QUEUE
-{
-    IO_CSQ Csq;
-    KSPIN_LOCK Lock;
-    LIST_ENTRY ListHead;
-} STARVED_REQUEST_QUEUE, *PSTARVED_REQUEST_QUEUE;
 
 typedef struct _FDO_DEVICE_EXTENSION
 {
@@ -252,7 +110,6 @@ typedef struct _FDO_DEVICE_EXTENSION
     MINIPORT Miniport;
     ULONG BusNumber;
     ULONG SlotNumber;
-    LONG ScsiPortNumber;
     PCM_RESOURCE_LIST AllocatedResources;
     PCM_RESOURCE_LIST TranslatedResources;
     BUS_INTERFACE_STANDARD BusInterface;
@@ -261,59 +118,13 @@ typedef struct _FDO_DEVICE_EXTENSION
     PVOID UncachedExtensionVirtualBase;
     PHYSICAL_ADDRESS UncachedExtensionPhysicalBase;
     ULONG UncachedExtensionSize;
-    PDMA_ADAPTER DmaAdapter;
     PHW_PASSIVE_INITIALIZE_ROUTINE HwPassiveInitRoutine;
     PKINTERRUPT Interrupt;
     ULONG InterruptIrql;
 
-    /* Message signaled interrupts, Interrupt then holds the first message's object */
-    BOOLEAN MessageInterrupts;
-    PIO_INTERRUPT_MESSAGE_INFO MessageInfo;
-
     KSPIN_LOCK PdoListLock;
     LIST_ENTRY PdoListHead;
     ULONG PdoCount;
-
-    /* BusChangeDetected can arrive at device IRQL, PnP is told from here instead */
-    KDPC BusChangeDpc;
-
-    /*
-     * HBA timers. The first timer, DPC & callback are for StorPortNotification's RequestTimerCall,
-     * and the timer list is for StorPortInitializeTimer (implemented in ExtendedFunction), list
-     * entry type is TIMER_ENTRY.
-     */
-    KTIMER Timer;
-    KDPC TimerDpc;
-    PHW_TIMER TimerCallback;
-    KSPIN_LOCK TimerListLock;
-    LIST_ENTRY TimerListHead;
-    ULONG TimerCount;
-
-    /* Request "flow control" */
-    FDO_IO_FLOW_CONTROL FlowControl;
-
-    /* This maximum number is set in port configuration */
-    ULONG OutstandingRequestMax;
-
-    /* The requests awaiting completion DPC processing */
-    SLIST_HEADER CompletionList;
-
-    /* Backing store for the per request QUEUED_REQUEST_REFERENCE packets */
-    NPAGED_LOOKASIDE_LIST RequestReferenceLookaside;
-    BOOLEAN RequestReferenceLookasideInitialized;
-
-    /* Memory for one request, reserved at adapter start, for when pool runs out */
-    struct _QUEUED_REQUEST_REFERENCE *ReservedRequestReference;
-    PVOID ReservedSrbExtension;
-    LONG ReserveInUse;
-    STARVED_REQUEST_QUEUE StarvedRequests;
-
-    /*
-     * FIXME: It REALLY should be cached here. The function pointers inside are extremely frequently
-     * used but Eric didn't put them here. Need review.
-     */
-    PHW_INITIALIZATION_DATA HwInitData;
-    
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 
@@ -329,158 +140,57 @@ typedef struct _PDO_DEVICE_EXTENSION
     ULONG Bus;
     ULONG Target;
     ULONG Lun;
+    ULONG QueueDepth;
     PINQUIRYDATA InquiryBuffer;
 
-    LONG IsClaimed;
-
-    /* Same as FDO flow control */
-    PDO_IO_FLOW_CONTROL FlowControl;
-    ULONG OutstandingRequestMax;
-    LONG TagCounter;
-
-    LONG SpecialRequestCounter; /* FIXME: DELETE AFTER DEBUG */
-
-    /* What the miniport keeps about this one unit, if it asked for any */
-    PVOID LunExtension;
 
 } PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
 
-/* The miniport reaches the address and CDB by offset, so they must follow the SRB */
-typedef struct _EXTENDED_REQUEST
-{
-    STORAGE_REQUEST_BLOCK Srb;
-    STOR_ADDR_BTL8 Address;
-    SRBEX_DATA_SCSI_CDB16 Cdb;
-} EXTENDED_REQUEST, *PEXTENDED_REQUEST;
 
-/* 
- * Storport sends SRBs to HBA, and needs to notify IRPs about IO status.
- * Conventionally SRB has an OriginalRequest field to point to IRP, and IRP tail overlay
- * has got a device queue entry, and that should be enough.
- *
- * But in Storport we also might wanna store more stuff like per request timeout value,
- * and possibly request origin processor to redirect completion DPC to other processors,
- * we use an additional structure here, to store some Storport private per-request data.
- *
- * This structure is put into FDO/PDO request queue. It is referenced by SRB OriginalRequest
- * field, also contains SRB back reference, and source IRP is referenced by this structure.
- *
- * FIXME: Before completing a request, restore OriginalRequest as Classpnp will CHECK it.
+/*
+ * Per-SRB context that the port layer hangs off the SRB's SrbExtension pointer.
+ * Layout: [SRB_PORT_CONTEXT header][miniport extension bytes]
+ * SrbExtension passed to the miniport points at the end of the header so the
+ * miniport sees an opaque buffer of the size it asked for in HW_INITIALIZATION_DATA.
+ * From a miniport-facing SrbExtension we can recover the context via
+ * CONTAINING_RECORD(ext, SRB_PORT_CONTEXT, MiniportExtension).
  */
-typedef struct _QUEUED_REQUEST_REFERENCE
+typedef struct _SRB_PORT_CONTEXT
 {
-    SLIST_ENTRY CompletionEntry;
-    LIST_ENTRY FdoEntry;
-    LIST_ENTRY PdoEntry;
-    PPDO_DEVICE_EXTENSION PdoExtension;
-    PSCSI_REQUEST_BLOCK Srb;
-    /* Points at Ex, set only when the miniport takes extended SRBs */
-    PEXTENDED_REQUEST ExtendedRequest;
+    /* The raw pool allocation that backs this context. Free this — not
+     * `this` — in PortCompleteSrb. The context pointer itself is offset
+     * forward into RawAlloc so MiniportExtension lands on a 128-byte boundary
+     * suitable for AHCI command-table DMA. */
+    PVOID RawAlloc;
+    ULONG Magic;
     PIRP Irp;
-    PSTOR_SCATTER_GATHER_LIST ScatterGatherList;
-    PVOID MappedSystemVa;
-    /* TODO: Nothing counts this down yet, a timer should call HwResetBus when it expires */
-    ULONG TimeoutCounter;
-    /*
-     * Indicates if the current request is outstanding. Some requests are for HBA, and shouldn't be
-     * affected by outstanding requests flow controlling.
-     * If this field is set to FALSE, this request will not trigger flow control code, flow control
-     * lock will not be acquired, and no new request will be scheduled upon its completion.
-     */
-    BOOLEAN IsOutstanding;
-    BOOLEAN StrongOrdered;
-    BOOLEAN WriteToDevice;
+    PSCSI_REQUEST_BLOCK Srb;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    PPDO_DEVICE_EXTENSION PdoExtension;
 
-    /* This packet and its SRB extension came from the reserve, not from pool */
-    BOOLEAN FromReserve;
+    /* Deferred completion DPC. RequestComplete fires from the miniport's ISR
+     * or DPC, which may run inside an interrupt spinlock at DIRQL — too high
+     * for ExFreePoolWithTag and IoCompleteRequest. When that's the case the
+     * completion is queued here and replayed at DISPATCH_LEVEL. */
+    KDPC CompleteDpc;
 
-    /* FIXME: This is solely for debugging and should be removed */
-    BOOLEAN DumpSpecialRequest;
-    LONG SpecialRequestId;
+    /* Single scatter/gather list, built before HwStartIo. NumberOfElements is 0
+     * for non-data SRBs. STOR_SCATTER_GATHER_LIST is variable-length, so we
+     * over-allocate the trailing element array to STORPORT_MAX_SGL_ENTRIES. */
+    STOR_SCATTER_GATHER_LIST Sgl;
+    STOR_SCATTER_GATHER_ELEMENT SglOverflow[STORPORT_MAX_SGL_ENTRIES - 1];
 
-    /* Must be the last member, packets for SCSI SRB miniports end before it */
-    EXTENDED_REQUEST Ex;
-} QUEUED_REQUEST_REFERENCE, *PQUEUED_REQUEST_REFERENCE;
+    /* MiniportExtension MUST start on a 128-byte boundary for AHCI miniports
+     * (and generally for any miniport that hands SrbExtension to hardware as
+     * a DMA address). The DECLSPEC_ALIGN ensures the field's offset within
+     * the struct is a multiple of 128. PortDispatchSrb must additionally
+     * compute the context pointer such that the struct base is 128-aligned
+     * (via over-allocate + align). */
+    DECLSPEC_ALIGN(SRB_EXTENSION_ALIGNMENT) UCHAR MiniportExtension[ANYSIZE_ARRAY];
+} SRB_PORT_CONTEXT, *PSRB_PORT_CONTEXT;
 
-/* This and next one are for REPORT_LUNS command return structure, seems to be found nowhere else */
-typedef struct _LUN_DESCRIPTOR
-{
-    UCHAR BusId : 6;
-    UCHAR AddressMethod : 2;
-    UCHAR Level1Address;
-    UCHAR Level2Address[2];
-    UCHAR Level3Address[2];
-    UCHAR Level4Address[2];
-} LUN_DESCRIPTOR, *PLUN_DESCRIPTOR;
-
-typedef struct _REPORT_LUNS_DATA
-{
-    UCHAR LunListLength[4];
-    UCHAR Reserved[4];
-    LUN_DESCRIPTOR LunDescriptor[1];
-} REPORT_LUNS_DATA, *PREPORT_LUNS_DATA;
 
 /* fdo.c */
-
-NTSTATUS
-PortInitializeStarvedRequestQueue(
-    _In_ PSTARVED_REQUEST_QUEUE Queue);
-
-VOID
-PortQueueStarvedRequest(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _In_ PIRP Irp);
-
-VOID
-PortRetryStarvedRequest(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
-
-VOID
-PortFlushStarvedRequests(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
-
-VOID
-PortAllocateRequestReserve(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
-
-VOID
-PortFreeRequestReserve(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
-
-PPDO_DEVICE_EXTENSION
-FdoFindLun(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _In_ ULONG Bus,
-    _In_ ULONG Target,
-    _In_ ULONG Lun);
-
-PPDO_DEVICE_EXTENSION
-NTAPI
-FdoFindLunAboveDispatch(
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _In_ ULONG Bus,
-    _In_ ULONG Target,
-    _In_ ULONG Lun);
-
-VOID
-NTAPI
-PortFdoLinkPdo(
-    _Inout_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _Inout_ PPDO_DEVICE_EXTENSION PdoExtension);
-
-VOID
-NTAPI
-PortFdoUnlinkPdo(
-    _Inout_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _Inout_ PPDO_DEVICE_EXTENSION PdoExtension);
-
-VOID
-NTAPI
-PortFdoBusChangeDpc(
-    _In_ PKDPC Dpc,
-    _In_opt_ PVOID DeferredContext,
-    _In_opt_ PVOID SystemArgument1,
-    _In_opt_ PVOID SystemArgument2);
 
 NTSTATUS
 NTAPI
@@ -494,20 +204,15 @@ PortFdoPnp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp);
 
-
-/* ioctl.c */
-
 NTSTATUS
-NTAPI
-PortFdoDeviceControl(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP Irp);
+PortDispatchSrb(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _In_ PIRP Irp,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
 
-NTSTATUS
-NTAPI
-PortPdoDeviceControl(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP Irp);
+VOID
+PortCompleteSrb(
+    _In_ PSRB_PORT_CONTEXT Context);
 
 
 /* miniport.c */
@@ -529,41 +234,6 @@ MiniportHwInitialize(
 BOOLEAN
 MiniportHwInterrupt(
     _In_ PMINIPORT Miniport);
-
-VOID
-NTAPI
-MiniportFreeAdapterResources(
-    _In_ PMINIPORT Miniport);
-
-BOOLEAN
-NTAPI
-MiniportHwMSInterrupt(
-    _In_ PMINIPORT Miniport,
-    _In_ ULONG MessageId);
-
-VOID
-NTAPI
-MiniportQueryAdapterControl(
-    _In_ PMINIPORT Miniport);
-
-SCSI_ADAPTER_CONTROL_STATUS
-NTAPI
-MiniportAdapterControl(
-    _In_ PMINIPORT Miniport,
-    _In_ SCSI_ADAPTER_CONTROL_TYPE ControlType,
-    _In_opt_ PVOID Parameters);
-
-VOID
-NTAPI
-MiniportQueryUnitControl(
-    _In_ PMINIPORT Miniport);
-
-SCSI_UNIT_CONTROL_STATUS
-NTAPI
-MiniportUnitControl(
-    _In_ PMINIPORT Miniport,
-    _In_ SCSI_UNIT_CONTROL_TYPE ControlType,
-    _In_opt_ PVOID Parameters);
 
 BOOLEAN
 MiniportStartIo(
@@ -623,31 +293,6 @@ AllocateAddressMapping(
     ULONG NumberOfBytes,
     ULONG BusNumber);
 
-VOID
-NTAPI
-SimpleTimerCallbackDpcRoutine(
-    PKDPC Dpc,
-    PVOID DeferredContext,
-    PVOID SystemArgument1,
-    PVOID SystemArgument2);
-
-VOID
-NTAPI
-TimerCallbackDpcRoutine(
-    PKDPC Dpc,
-    PVOID DeferredContext,
-    PVOID SystemArgument1,
-    PVOID SystemArgument2
-);
-
-PCSTR
-GetDeviceType(
-    _In_ PINQUIRYDATA InquiryData);
-
-PCSTR
-GetGenericType(
-    _In_ PINQUIRYDATA InquiryData);
-
 /* pdo.c */
 
 NTSTATUS
@@ -664,77 +309,15 @@ PortDeletePdo(
 
 NTSTATUS
 NTAPI
-PortPdoPnp(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP Irp);
-
-
-/* srb.c */
-
-VOID
-StorpSrbFreeRequestReference(
-    _In_ PSCSI_REQUEST_BLOCK Srb);
-
-NTSTATUS
-PortPdoIssueRequest(
-    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
-    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
-
-BOOLEAN
-PortPdoScheduleRequestFlowControlled(
-    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
-    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
-    _In_ PQUEUED_REQUEST_REFERENCE RequestReference);
-
-NTSTATUS
-NTAPI
 PortPdoScsi(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp);
 
-VOID
+NTSTATUS
 NTAPI
-PortCompletionDpc(
-    _In_ PKDPC Dpc,
-    _In_ PVOID Context,
-    _In_ PVOID SystemArgument1,
-    _In_ PVOID SystemArgument2);
-
-
-/* srbex.c */
-
-VOID
-NTAPI
-StorpBuildUnitAddress(
-    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
-    _Out_ PSTOR_ADDR_BTL8 Address);
-
-BOOLEAN
-NTAPI
-StorpIsExtendedSrb(
-    _In_ PVOID Srb);
-
-PQUEUED_REQUEST_REFERENCE
-NTAPI
-StorpRequestReference(
-    _In_ PSCSI_REQUEST_BLOCK Srb);
-
-PVOID
-NTAPI
-StorpSrbDataBuffer(
-    _In_ PSCSI_REQUEST_BLOCK Srb);
-
-VOID
-NTAPI
-StorpBuildExtendedSrb(
-    _In_ PSCSI_REQUEST_BLOCK Srb,
-    _Out_ PEXTENDED_REQUEST Request);
-
-VOID
-NTAPI
-StorpCompleteExtendedSrb(
-    _In_ PSCSI_REQUEST_BLOCK Srb,
-    _In_ PEXTENDED_REQUEST Request);
+PortPdoPnp(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp);
 
 
 /* storport.c */
