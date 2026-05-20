@@ -50,7 +50,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
     PBOOT_SECTOR BootSector;
     NTSTATUS Status;
 
-    DPRINT("NtfsHasFileSystem() called\n");
+    DPRINT1("NtfsHasFileSystem() called for device %p\n", DeviceToMount);
 
     Size = sizeof(DISK_GEOMETRY);
     Status = NtfsDeviceIoControl(DeviceToMount,
@@ -90,7 +90,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
         }
     }
 
-    DPRINT1("BytesPerSector: %lu\n", DiskGeometry.BytesPerSector);
+    DPRINT("BytesPerSector: %lu\n", DiskGeometry.BytesPerSector);
     BootSector = ExAllocatePoolWithTag(NonPagedPool,
                                        DiskGeometry.BytesPerSector,
                                        TAG_NTFS);
@@ -163,6 +163,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 ByeBye:
     ExFreePool(BootSector);
 
+    DPRINT1("NtfsHasFileSystem: returning 0x%lx\n", Status);
     return Status;
 }
 
@@ -425,7 +426,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     BOOLEAN Lookaside = FALSE;
 
-    DPRINT("NtfsMountVolume() called\n");
+    DPRINT1("NtfsMountVolume() called\n");
 
     if (DeviceObject != NtfsGlobalData->DeviceObject)
     {
@@ -503,7 +504,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     Vcb->StreamFileObject->FsContext = Fcb;
     Vcb->StreamFileObject->FsContext2 = Ccb;
-    Vcb->StreamFileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    Vcb->StreamFileObject->SectionObjectPointer = Fcb->SectionObjectPointers;
     Vcb->StreamFileObject->PrivateCacheMap = NULL;
     Vcb->StreamFileObject->Vpb = Vcb->Vpb;
     Ccb->PtrFileObject = Vcb->StreamFileObject;
@@ -535,6 +536,8 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     _SEH2_END;
 
     ExInitializeResourceLite(&Vcb->DirResource);
+    ExInitializeResourceLite(&Vcb->IndexResource);
+    ExInitializeResourceLite(&Vcb->BitmapResource);
 
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
@@ -548,6 +551,12 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
                   Vcb->NtfsInfo.VolumeLabelLength);
 
     FsRtlNotifyVolumeEvent(Vcb->StreamFileObject, FSRTL_VOLUME_MOUNT);
+
+    /* $UsnJrnl bootstrap (Kreijstal/reactos#33): if the volume already has
+     * a journal on disk, bring its state into the Vcb so subsequent
+     * FSCTLs and emission hooks see a live UsnJournalFcb.  A failure is
+     * benign — the volume mounts, the journal simply stays inactive. */
+    (void)NtfsUsnLoadJournal(Vcb);
 
     Status = STATUS_SUCCESS;
 
@@ -862,9 +871,14 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
     FileObject = Stack->FileObject;
     Fcb = FileObject->FsContext;
 
+    DPRINT1("LockOrUnlockVolume: Lock=%d FcbFlags=0x%x DevFlags=0x%x DevOHC=%u FcbOHC=%u FcbRefCount=%u\n",
+            Lock, Fcb->Flags, DeviceExt->Flags, DeviceExt->OpenHandleCount,
+            Fcb->OpenHandleCount, Fcb->RefCount);
+
     /* Only allow locking with the volume open */
     if (!(Fcb->Flags & FCB_IS_VOLUME))
     {
+        DPRINT1("LockOrUnlockVolume: REJECT not FCB_IS_VOLUME\n");
         return STATUS_ACCESS_DENIED;
     }
 
@@ -872,12 +886,14 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
     if (((DeviceExt->Flags & VCB_VOLUME_LOCKED) && Lock) ||
         (!(DeviceExt->Flags & VCB_VOLUME_LOCKED) && !Lock))
     {
+        DPRINT1("LockOrUnlockVolume: REJECT already in demanded state\n");
         return STATUS_ACCESS_DENIED;
     }
 
     /* Deny locking if we're not alone */
     if (Lock && DeviceExt->OpenHandleCount != 1)
     {
+        DPRINT1("LockOrUnlockVolume: REJECT OpenHandleCount=%u (need 1)\n", DeviceExt->OpenHandleCount);
         return STATUS_ACCESS_DENIED;
     }
 
@@ -897,6 +913,194 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
 
 static
 NTSTATUS
+NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
+                   PIRP Irp)
+{
+    PDEVICE_EXTENSION DeviceExt;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    PIO_STACK_LOCATION Stack;
+
+    DeviceExt = DeviceObject->DeviceExtension;
+    DPRINT1("NtfsDismountVolume(%p)\n", DeviceExt);
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = Stack->FileObject;
+    Fcb = FileObject->FsContext;
+
+    /* Dismount may only be issued through a handle that holds the exclusive
+     * volume lock.  FSCTL_LOCK_VOLUME requires OpenHandleCount == 1, which
+     * guarantees no other code is currently touching the FCB list, the MFT
+     * context, or the cached MFT bitmap when we tear them down. */
+    if (!(DeviceExt->Flags & VCB_VOLUME_LOCKED))
+    {
+        DPRINT1("NtfsDismountVolume: REJECT volume not locked\n");
+        return STATUS_ACCESS_DENIED;
+    }
+
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+    {
+        DPRINT1("NtfsDismountVolume: REJECT FileObject is not the volume\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (DeviceExt->Flags & VCB_DISMOUNT_PENDING)
+    {
+        DPRINT1("NtfsDismountVolume: REJECT already dismounted\n");
+        return STATUS_VOLUME_DISMOUNTED;
+    }
+
+    FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
+
+    ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
+
+    /* Drop the cached $MFT $Bitmap.  After dismount the on-disk bitmap may
+     * have been rewritten under us (this is exactly what mkntfs does during
+     * a quick format), so the next AllocateMftRecord must rebuild it from
+     * the freshly read attribute. */
+    if (DeviceExt->MftBitmapBuffer)
+    {
+        ExFreePoolWithTag(DeviceExt->MftBitmapBuffer, TAG_NTFS);
+        DeviceExt->MftBitmapBuffer = NULL;
+        DeviceExt->MftBitmapData = NULL;
+        DeviceExt->MftBitmapSize = 0;
+        DeviceExt->MftNextFreeHint = 0;
+    }
+
+    /* Release the in-memory MFT attribute context and the cached
+     * $MFT file record header.  These describe the OLD layout of $MFT
+     * (location, runlist, allocated size).  Anything that asks "where on
+     * disk does MFT record N live?" reads the runlist out of MFTContext, so
+     * leaving them in place after a quick format means every subsequent
+     * ReadFileRecord/UpdateFileRecord goes to stale clusters and corrupts
+     * the freshly written volume.  The next mount rebuilds them via
+     * NtfsGetVolumeData.
+     *
+     * Note: we deliberately keep DeviceExt->FileRecLookasideList alive
+     * because the volume FCB / volume stream FCB may still be referenced by
+     * the locking handle until close, and freeing the lookaside list while
+     * pool blocks allocated from it are still in use would tear down the
+     * list while a back-pointer to it remains live. */
+    if (DeviceExt->MFTContext)
+    {
+        ReleaseAttributeContext(DeviceExt->MFTContext);
+        DeviceExt->MFTContext = NULL;
+    }
+
+    if (DeviceExt->MasterFileTable)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList,
+                                    DeviceExt->MasterFileTable);
+        DeviceExt->MasterFileTable = NULL;
+    }
+
+    /* Mark the VCB dismounted and clear VPB_MOUNTED so the I/O Manager
+     * sends IRP_MN_MOUNT_VOLUME on the next access, which routes to
+     * NtfsMountVolume → NtfsGetVolumeData and rebuilds the in-memory
+     * state from the (now freshly written) on-disk metadata.  The VPB
+     * we want to clear is the one shared with the storage device, which
+     * NtfsMountVolume hooked into the file system DeviceObject as
+     * `NewDeviceObject->Vpb = DeviceToMount->Vpb;` — read it directly
+     * from DeviceObject rather than from DeviceExt->Vpb (which the mount
+     * path never assigns and is therefore NULL). */
+    DeviceExt->Flags |= VCB_DISMOUNT_PENDING;
+    if (DeviceObject->Vpb != NULL)
+        DeviceObject->Vpb->Flags &= ~VPB_MOUNTED;
+
+    ExReleaseResourceLite(&DeviceExt->DirResource);
+
+    return STATUS_SUCCESS;
+}
+
+
+/*
+ * $UsnJrnl first-slice FSCTL wrappers (Kreijstal/reactos#33).  Each
+ * unpacks the IRP, sanity-checks buffers, and delegates to the matching
+ * usn.c worker.  Handlers bail with STATUS_INVALID_DEVICE_REQUEST when
+ * Vcb->UsnJournalFcb is NULL (legacy "no journal" fallback) — except
+ * FSCTL_CREATE_USN_JOURNAL, which lazily brings the journal up.
+ */
+static
+NTSTATUS
+FsctlCreateUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PCREATE_USN_JOURNAL_DATA Create;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(CREATE_USN_JOURNAL_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Create = (PCREATE_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+    return NtfsUsnInitJournal(DeviceExt, Create->MaximumSize, Create->AllocationDelta);
+}
+
+static
+NTSTATUS
+FsctlEnumUsnData(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PMFT_ENUM_DATA Enum;
+    ULONG BytesReturned = 0;
+    NTSTATUS Status;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(MFT_ENUM_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONGLONG))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Enum = (PMFT_ENUM_DATA)Irp->AssociatedIrp.SystemBuffer;
+
+    Status = NtfsUsnEnumerate(DeviceExt,
+                              Enum->StartFileReferenceNumber,
+                              Enum->LowUsn,
+                              Enum->HighUsn,
+                              Irp->AssociatedIrp.SystemBuffer,
+                              Stack->Parameters.FileSystemControl.OutputBufferLength,
+                              &BytesReturned);
+    Irp->IoStatus.Information = BytesReturned;
+    return Status;
+}
+
+static
+NTSTATUS
+FsctlReadUsnJournal(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack;
+    PREAD_USN_JOURNAL_DATA Read;
+    ULONG BytesReturned = 0;
+    NTSTATUS Status;
+
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(READ_USN_JOURNAL_DATA) ||
+        Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONGLONG))
+        return STATUS_BUFFER_TOO_SMALL;
+    if (DeviceExt->UsnJournalFcb == NULL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    Read = (PREAD_USN_JOURNAL_DATA)Irp->AssociatedIrp.SystemBuffer;
+
+    Status = NtfsUsnReadRange(DeviceExt,
+                              (ULONGLONG)Read->StartUsn,
+                              Read->ReasonMask,
+                              Irp->AssociatedIrp.SystemBuffer,
+                              Stack->Parameters.FileSystemControl.OutputBufferLength,
+                              &BytesReturned);
+    Irp->IoStatus.Information = BytesReturned;
+    return Status;
+}
+
+
+static
+NTSTATUS
 NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
                   PIRP Irp)
 {
@@ -910,20 +1114,39 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
+        /* USN journal FSCTLs — first slice (Kreijstal/reactos#33).
+         * CREATE / ENUM / READ are wired; the remaining four keep the
+         * legacy "no journal" fallback for now, since their semantics
+         * depend on bookkeeping (LowestValidUsn, CCB-cached reasons,
+         * circular-wrap) that this slice doesn't implement. */
         case FSCTL_CREATE_USN_JOURNAL:
-        case FSCTL_DELETE_USN_JOURNAL:
+            Status = FsctlCreateUsnJournal(DeviceExt, Irp);
+            break;
+
         case FSCTL_ENUM_USN_DATA:
+            Status = FsctlEnumUsnData(DeviceExt, Irp);
+            break;
+
+        case FSCTL_READ_USN_JOURNAL:
+            Status = FsctlReadUsnJournal(DeviceExt, Irp);
+            break;
+
+        case FSCTL_DELETE_USN_JOURNAL:
+        case FSCTL_QUERY_USN_JOURNAL:
+        case FSCTL_READ_FILE_USN_DATA:
+        case FSCTL_WRITE_USN_CLOSE_RECORD:
+            DPRINT("USN journal FSCTL deferred to follow-up slice: %x\n",
+                   Stack->Parameters.FileSystemControl.FsControlCode);
+            Status = STATUS_INVALID_DEVICE_REQUEST;
+            break;
+
         case FSCTL_EXTEND_VOLUME:
         //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         case FSCTL_GET_RETRIEVAL_POINTERS:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
         case FSCTL_MOVE_FILE:
-        case FSCTL_QUERY_USN_JOURNAL:
-        case FSCTL_READ_FILE_USN_DATA:
-        case FSCTL_READ_USN_JOURNAL:
         //case FSCTL_SHRINK_VOLUME:
-        case FSCTL_WRITE_USN_CLOSE_RECORD:
             UNIMPLEMENTED;
             DPRINT1("Unimplemented user request: %x\n", Stack->Parameters.FileSystemControl.FsControlCode);
             Status = STATUS_NOT_IMPLEMENTED;
@@ -935,6 +1158,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_UNLOCK_VOLUME:
             Status = LockOrUnlockVolume(DeviceExt, Irp, FALSE);
+            break;
+
+        case FSCTL_DISMOUNT_VOLUME:
+            Status = NtfsDismountVolume(DeviceObject, Irp);
             break;
 
         case FSCTL_GET_NTFS_VOLUME_DATA:
@@ -967,6 +1194,7 @@ NtfsFileSystemControl(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
 
     DPRINT("NtfsFileSystemControl() called\n");
+    DPRINT1("NtfsFileSystemControl: MinorFunction=%d\n", IrpContext->MinorFunction);
 
     DeviceObject = IrpContext->DeviceObject;
     Irp = IrpContext->Irp;

@@ -68,9 +68,9 @@ SerialAddDeviceInternal(
 	DeviceExtension->Pdo = Pdo;
 	DeviceExtension->PnpState = dsStopped;
 	DeviceExtension->UartType = UartType;
-	Status = InitializeCircularBuffer(&DeviceExtension->InputBuffer, 16);
+	Status = InitializeCircularBuffer(&DeviceExtension->InputBuffer, SERIAL_DEFAULT_BUFFER_SIZE);
 	if (!NT_SUCCESS(Status)) goto ByeBye;
-	Status = InitializeCircularBuffer(&DeviceExtension->OutputBuffer, 16);
+	Status = InitializeCircularBuffer(&DeviceExtension->OutputBuffer, SERIAL_DEFAULT_BUFFER_SIZE);
 	if (!NT_SUCCESS(Status)) goto ByeBye;
 	IoInitializeRemoveLock(&DeviceExtension->RemoveLock, SERIAL_TAG, 0, 0);
 	KeInitializeSpinLock(&DeviceExtension->InputBufferLock);
@@ -256,12 +256,11 @@ SerialPnpStartDevice(
 		return Status;
 	}
 
-	/* Clear receive/transmit buffers */
+	/* Enable and clear receive/transmit FIFOs */
 	if (DeviceExtension->UartType >= Uart16550A)
 	{
-		/* 16550 UARTs also have FIFO queues, but they are unusable due to a bug */
 		WRITE_PORT_UCHAR(SER_FCR(ComPortBase),
-			SR_FCR_CLEAR_RCVR | SR_FCR_CLEAR_XMIT);
+			SR_FCR_ENABLE_FIFO | SR_FCR_CLEAR_RCVR | SR_FCR_CLEAR_XMIT);
 	}
 
 	/* Create link \DosDevices\COMX -> \Device\SerialX */
@@ -312,8 +311,10 @@ SerialPnpStartDevice(
 	IER |= SR_IER_DATA_RECEIVED | SR_IER_THR_EMPTY | SR_IER_LSR_CHANGE | SR_IER_MSR_CHANGE;
 	WRITE_PORT_UCHAR(SER_IER(ComPortBase), IER);
 
-	/* Activate DTR, RTS */
-	DeviceExtension->MCR |= SR_MCR_DTR | SR_MCR_RTS;
+	/* Activate DTR, RTS, and OUT2.
+	 * OUT2 gates the UART interrupt line to the interrupt controller;
+	 * without it, no UART interrupts reach the CPU. */
+	DeviceExtension->MCR |= SR_MCR_DTR | SR_MCR_RTS | SR_MCR_OUT2;
 	WRITE_PORT_UCHAR(SER_MCR(ComPortBase), DeviceExtension->MCR);
 
 	/* Activate serial interface */

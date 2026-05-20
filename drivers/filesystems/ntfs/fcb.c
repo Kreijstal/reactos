@@ -73,6 +73,10 @@ NtfsCreateFCB(PCWSTR FileName,
     ASSERT(Vcb);
     ASSERT(Vcb->Identifier.Type == NTFS_TYPE_VCB);
 
+    /* Try to free any zombie FCBs whose MM references have finally
+     * dropped, so we don't grow the zombie list unboundedly. */
+    NtfsReapZombieFcbs();
+
     Fcb = ExAllocateFromNPagedLookasideList(&NtfsGlobalData->FcbLookasideList);
     if (Fcb == NULL)
     {
@@ -80,6 +84,19 @@ NtfsCreateFCB(PCWSTR FileName,
     }
 
     RtlZeroMemory(Fcb, sizeof(NTFS_FCB));
+
+    /* Allocate the SECTION_OBJECT_POINTERS struct out-of-band so it can
+     * outlive the FCB if MM still holds a reference at destruction time.
+     * See the comment on NTFS_FCB::SectionObjectPointers in ntfs.h. */
+    Fcb->SectionObjectPointers = ExAllocatePoolWithTag(NonPagedPool,
+                                                       sizeof(SECTION_OBJECT_POINTERS),
+                                                       TAG_SOP);
+    if (Fcb->SectionObjectPointers == NULL)
+    {
+        ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
+        return NULL;
+    }
+    RtlZeroMemory(Fcb->SectionObjectPointers, sizeof(SECTION_OBJECT_POINTERS));
 
     Fcb->Identifier.Type = NTFS_TYPE_FCB;
     Fcb->Identifier.Size = sizeof(NTFS_TYPE_FCB);
@@ -109,12 +126,89 @@ NtfsCreateFCB(PCWSTR FileName,
     }
 
     ExInitializeResourceLite(&Fcb->MainResource);
+    ExInitializeResourceLite(&Fcb->PagingIoResource);
 
     Fcb->RFCB.Resource = &(Fcb->MainResource);
+    Fcb->RFCB.PagingIoResource = &(Fcb->PagingIoResource);
+
+    /* Byte-range file locks. The completion / unlock callbacks are
+     * optional and we don't need them — FsRtlProcessFileLock and the
+     * default unlock path do everything we want. Used by lock.c
+     * (NtfsLockControl) and consulted by NtfsRead / NtfsWrite via
+     * FsRtlCheckLockForReadAccess / FsRtlCheckLockForWriteAccess. */
+    FsRtlInitializeFileLock(&Fcb->FileLock, NULL, NULL);
 
     return Fcb;
 }
 
+
+/* Free an FCB whose SectionObjectPointers slot is fully clean: tear down
+ * the resources, FILE_LOCK, the SOP struct itself, and return the FCB
+ * pool block to the lookaside list.  Caller must guarantee no other
+ * thread can still hold a pointer to this FCB. */
+static VOID
+NtfsFreeFcbStorage(PNTFS_FCB Fcb)
+{
+    if (Fcb->SectionObjectPointers != NULL)
+    {
+        ExFreePoolWithTag(Fcb->SectionObjectPointers, TAG_SOP);
+        Fcb->SectionObjectPointers = NULL;
+    }
+
+    FsRtlUninitializeFileLock(&Fcb->FileLock);
+    ExDeleteResourceLite(&Fcb->PagingIoResource);
+    ExDeleteResourceLite(&Fcb->MainResource);
+
+    ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
+}
+
+/* Walk the global zombie list and free any FCB whose SOP slots have all
+ * been cleared by MM (MmDereferenceSegmentWithLock writes
+ * SectionObjectPointer->DataSectionObject = NULL when the segment finally
+ * dies — see ntoskrnl/mm/section.c).  Called opportunistically from
+ * NtfsCreateFCB and NtfsDestroyFCB so we don't need a dedicated worker
+ * thread; the cost is one short critical-section walk per FCB churn,
+ * which is negligible compared to the I/O the same code path is doing.
+ *
+ * Runs at PASSIVE/APC level — same constraints as the call sites. */
+VOID
+NtfsReapZombieFcbs(VOID)
+{
+    KIRQL OldIrql;
+    LIST_ENTRY ToFree;
+    PLIST_ENTRY entry, next;
+
+    InitializeListHead(&ToFree);
+
+    KeAcquireSpinLock(&NtfsGlobalData->ZombieLock, &OldIrql);
+    for (entry = NtfsGlobalData->ZombieFcbList.Flink;
+         entry != &NtfsGlobalData->ZombieFcbList;
+         entry = next)
+    {
+        PNTFS_FCB zombie = CONTAINING_RECORD(entry, NTFS_FCB, ZombieListEntry);
+        next = entry->Flink;
+
+        if (zombie->SectionObjectPointers == NULL ||
+            (zombie->SectionObjectPointers->DataSectionObject == NULL &&
+             zombie->SectionObjectPointers->ImageSectionObject == NULL &&
+             zombie->SectionObjectPointers->SharedCacheMap == NULL))
+        {
+            RemoveEntryList(entry);
+            InsertTailList(&ToFree, entry);
+        }
+    }
+    KeReleaseSpinLock(&NtfsGlobalData->ZombieLock, OldIrql);
+
+    /* Free outside the lock — ExDeleteResourceLite / ExFreePool can be
+     * slow and may acquire other locks. */
+    while (!IsListEmpty(&ToFree))
+    {
+        PLIST_ENTRY e = RemoveHeadList(&ToFree);
+        PNTFS_FCB zombie = CONTAINING_RECORD(e, NTFS_FCB, ZombieListEntry);
+        DPRINT("NtfsReapZombieFcbs: reaping FCB %p\n", zombie);
+        NtfsFreeFcbStorage(zombie);
+    }
+}
 
 VOID
 NtfsDestroyFCB(PNTFS_FCB Fcb)
@@ -122,9 +216,74 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb);
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
-    ExDeleteResourceLite(&Fcb->MainResource);
+    /* Opportunistic zombie reap on the way through. */
+    NtfsReapZombieFcbs();
 
-    ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
+    /* If the memory manager still has section objects referencing the FCB's
+     * SectionObjectPointers, freeing the FCB pool block would leave a
+     * dangling FileObject->FsContext: MM's Segment->FileObject is still
+     * usable for paging I/O, and NtfsRead would dereference the freed FCB
+     * (and the freed PagingIoResource that lives inside it).  That race
+     * surfaces as ASSERT(Owner != NULL) at ntoskrnl/ex/resource.c:1939
+     * because the freed FCB pool gets reused for a new FCB whose
+     * resources have a different owner thread.
+     *
+     * Strategy:
+     *   1. Try to tear the sections down ourselves (MmFlushImageSection +
+     *      MmForceSectionClosed with DelayClose=TRUE).
+     *   2. If that succeeds (slots all NULL), free the FCB now.
+     *   3. Otherwise put the FCB on the global zombie list and let
+     *      NtfsReapZombieFcbs free it later, when MM has cleared the
+     *      SOP slots from MmDereferenceSegmentWithLock.
+     *
+     * Both NtfsDestroyFCB call sites (NtfsReleaseFCB after dropping
+     * FcbListLock, and the NtfsMountVolume error path which uses a fresh
+     * FCB) call this at IRQL <= APC_LEVEL without holding the FCB
+     * resource, which is what MmFlushImageSection / MmForceSectionClosed
+     * require. */
+    if (Fcb->SectionObjectPointers != NULL &&
+        (Fcb->SectionObjectPointers->DataSectionObject != NULL ||
+         Fcb->SectionObjectPointers->ImageSectionObject != NULL ||
+         Fcb->SectionObjectPointers->SharedCacheMap != NULL))
+    {
+        DPRINT("NtfsDestroyFCB(%p): tearing down lingering sections (Data=%p Image=%p Cache=%p)\n",
+                Fcb, Fcb->SectionObjectPointers->DataSectionObject,
+                Fcb->SectionObjectPointers->ImageSectionObject,
+                Fcb->SectionObjectPointers->SharedCacheMap);
+
+        /* Flush dirty image-section pages so MmForceSectionClosed doesn't
+         * refuse on account of them.  Ignore the return value — it returns
+         * FALSE only when there's no image section to flush, which is fine. */
+        if (Fcb->SectionObjectPointers->ImageSectionObject != NULL)
+        {
+            MmFlushImageSection(Fcb->SectionObjectPointers, MmFlushForWrite);
+        }
+
+        /* Force the section(s) closed.  DelayClose=TRUE lets MM defer the
+         * actual teardown if it can't drop the segment immediately, which
+         * matches the contract Windows file systems rely on. */
+        MmForceSectionClosed(Fcb->SectionObjectPointers, TRUE);
+
+        /* If MM still references the SOP, the FCB becomes a zombie:
+         * stays alive until NtfsReapZombieFcbs notices the SOP is clean. */
+        if (Fcb->SectionObjectPointers->DataSectionObject != NULL ||
+            Fcb->SectionObjectPointers->ImageSectionObject != NULL ||
+            Fcb->SectionObjectPointers->SharedCacheMap != NULL)
+        {
+            KIRQL OldIrql;
+            DPRINT("NtfsDestroyFCB(%p): zombifying (SOP=%p Data=%p Image=%p Cache=%p)\n",
+                    Fcb, Fcb->SectionObjectPointers,
+                    Fcb->SectionObjectPointers->DataSectionObject,
+                    Fcb->SectionObjectPointers->ImageSectionObject,
+                    Fcb->SectionObjectPointers->SharedCacheMap);
+            KeAcquireSpinLock(&NtfsGlobalData->ZombieLock, &OldIrql);
+            InsertTailList(&NtfsGlobalData->ZombieFcbList, &Fcb->ZombieListEntry);
+            KeReleaseSpinLock(&NtfsGlobalData->ZombieLock, OldIrql);
+            return;
+        }
+    }
+
+    NtfsFreeFcbStorage(Fcb);
 }
 
 
@@ -191,17 +350,83 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->RefCount--;
-    if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
+
+    /* When the last external reference is released but the internal stream
+     * file object still holds a cache map, tear down the cache and release
+     * that file object.  This lets the memory manager fully clean up any
+     * data section segments before the FCB (and its embedded
+     * SectionObjectPointers) is freed.  Mirrors the two-step pattern used
+     * by vfatfs. */
+    if (Fcb->RefCount == 1 &&
+        !NtfsFCBIsDirectory(Fcb) &&
+        BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED) &&
+        Fcb->FileObject != NULL)
     {
+        PFILE_OBJECT tmpFileObject = Fcb->FileObject;
+        Fcb->FileObject = NULL;
+        ClearFlag(Fcb->Flags, FCB_CACHE_INITIALIZED);
+        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+
+        /* Flush and purge all dirty data BEFORE uninitializing the cache map.
+         * CcUninitializeCacheMap can drop the last reference on the data section
+         * segment, triggering MmDereferenceSegmentWithLock → FreeSegmentPage.
+         * If dirty pages remain at that point, FreeSegmentPage calls MiWritePage
+         * which does synchronous I/O that can re-enter the page-out path under
+         * memory pressure, corrupting pool.  Flushing here writes dirty pages
+         * under controlled conditions (proper IRQL, no re-entrancy risk). */
+        if (tmpFileObject->SectionObjectPointer)
+        {
+            if (tmpFileObject->SectionObjectPointer->SharedCacheMap)
+            {
+                IO_STATUS_BLOCK Iosb;
+                CcFlushCache(tmpFileObject->SectionObjectPointer, NULL, 0, &Iosb);
+            }
+            CcPurgeCacheSection(tmpFileObject->SectionObjectPointer, NULL, 0, FALSE);
+        }
+
+        CcUninitializeCacheMap(tmpFileObject, NULL, NULL);
+        /* Do NOT ObDereferenceObject(tmpFileObject) here.
+         * NtfsAttachFCBToFileObject already dropped its reference (line 395).
+         * The remaining references belong to the cache manager and the MM
+         * section segment — they will be released by CcUninitializeCacheMap
+         * and MmDereferenceSegmentWithLock respectively. An extra deref here
+         * causes a use-after-free: the FileObject is freed while the MM
+         * segment still holds a pointer to it. */
+    }
+    else if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
+    {
+        PFILE_OBJECT tmpFileObject = NULL;
+
+        /* If cache is still initialized, tear it down before freeing the FCB.
+         * This can happen if the RefCount == 1 check above was skipped because
+         * FileObject was NULL (stale stream file object), or if RefCount
+         * went from >1 to 0 in one step. */
+        if (BooleanFlagOn(Fcb->Flags, FCB_CACHE_INITIALIZED) &&
+            Fcb->FileObject != NULL)
+        {
+            tmpFileObject = Fcb->FileObject;
+            Fcb->FileObject = NULL;
+            ClearFlag(Fcb->Flags, FCB_CACHE_INITIALIZED);
+        }
+
         RemoveEntryList(&Fcb->FcbListEntry);
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-        CcUninitializeCacheMap(Fcb->FileObject, NULL, NULL);
+
+        if (tmpFileObject)
+        {
+            CcUninitializeCacheMap(tmpFileObject, NULL, NULL);
+            /* Same as above: do not ObDereferenceObject here. */
+        }
+
         NtfsDestroyFCB(Fcb);
     }
     else
     {
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
     }
+
+    /* Debug: verify IRQL is restored after FCB release */
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 }
 
 
@@ -282,7 +507,7 @@ NtfsFCBInitializeCache(PNTFS_VCB Vcb,
     newCCB->Identifier.Type = NTFS_TYPE_CCB;
     newCCB->Identifier.Size = sizeof(NTFS_TYPE_CCB);
 
-    FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->SectionObjectPointer = Fcb->SectionObjectPointers;
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
@@ -321,6 +546,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER MftRecord;
     PFILENAME_ATTRIBUTE FileName;
+    PSTANDARD_INFORMATION StdInfo;
 
     MftRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
     if (MftRecord == NULL)
@@ -359,6 +585,12 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     Fcb->RFCB.AllocationSize.QuadPart = FileName->AllocatedSize;
     Fcb->MFTIndex = NTFS_FILE_ROOT;
     Fcb->LinkCount = MftRecord->LinkCount;
+
+    StdInfo = GetStandardInformationFromRecord(Vcb, MftRecord);
+    if (StdInfo != NULL)
+    {
+        Fcb->Entry.FileAttributes |= StdInfo->FileAttribute;
+    }
 
     NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);
@@ -478,7 +710,7 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     newCCB->Identifier.Type = NTFS_TYPE_CCB;
     newCCB->Identifier.Size = sizeof(NTFS_TYPE_CCB);
 
-    FileObject->SectionObjectPointer = &Fcb->SectionObjectPointers;
+    FileObject->SectionObjectPointer = Fcb->SectionObjectPointers;
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
@@ -696,6 +928,11 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
             DPRINT("  elementName:%S\n", elementName);
 
             Status = NtfsDirFindFile(Vcb, parentFCB, elementName, CaseSensitive, &FCB);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("NtfsDirFindFile('%S' in MFT %I64u '%S') failed: 0x%lx\n",
+                        elementName, parentFCB->MFTIndex, parentFCB->ObjectName, Status);
+            }
             if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
             {
                 *pParentFCB = parentFCB;

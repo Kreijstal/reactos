@@ -32,6 +32,10 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/* Forward declarations for VCN helpers used in index buffer creation */
+VOID SetIndexEntryVCN(PINDEX_ENTRY_ATTRIBUTE IndexEntry, ULONGLONG VCN);
+ULONGLONG GetIndexEntryVCN(PINDEX_ENTRY_ATTRIBUTE IndexEntry);
+
 // TEMP FUNCTION for diagnostic purposes.
 // Prints VCN of every node in an index allocation
 VOID
@@ -131,9 +135,10 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     RTL_BITMAP Bitmap;
     ULONG BytesWritten;
     ULONG BytesNeeded;
+    ULONG BufferSize;
     LARGE_INTEGER DataSize;
 
-    DPRINT1("AllocateIndexNode(%p, %p, %lu, %p, %lu, %p) called.\n", DeviceExt,
+    DPRINT("AllocateIndexNode(%p, %p, %lu, %p, %lu, %p) called.\n", DeviceExt,
             FileRecord,
             IndexBufferSize,
             IndexAllocationCtx,
@@ -173,9 +178,17 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // Windows seems to allocate the bitmap in 8-byte chunks to keep any bytes from being wasted on padding
     BytesNeeded = ALIGN_UP(BytesNeeded, ATTR_RECORD_ALIGNMENT);
 
+    /* The on-disk bitmap (BitmapLength) and the locally-computed BytesNeeded
+     * can disagree: BytesNeeded is sized for the *new* node count, while
+     * BitmapLength reflects the current attribute size, which may already
+     * have been padded up by a previous grow.  Allocate a buffer big enough
+     * for both so the ReadAttribute below can never overflow, and so the
+     * bits we set after extending the index allocation are still in range. */
+    BufferSize = max(BytesNeeded, (ULONG)BitmapLength);
+
     // Allocate memory for the bitmap, including some padding; RtlInitializeBitmap() wants a pointer
     // that's ULONG-aligned, and it wants the size of the memory allocated for it to be a ULONG-multiple.
-    BitmapMem = ExAllocatePoolWithTag(NonPagedPool, BytesNeeded + sizeof(ULONG), TAG_NTFS);
+    BitmapMem = ExAllocatePoolWithTag(NonPagedPool, BufferSize + sizeof(ULONG), TAG_NTFS);
     if (!BitmapMem)
     {
         DPRINT1("Error: failed to allocate bitmap!");
@@ -185,7 +198,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     // RtlInitializeBitmap() wants a pointer that's ULONG-aligned.
     BitmapPtr = (PULONG)ALIGN_UP_BY((ULONG_PTR)BitmapMem, sizeof(ULONG));
 
-    RtlZeroMemory(BitmapPtr, BytesNeeded);
+    RtlZeroMemory(BitmapPtr, BufferSize);
 
     // Read the existing bitmap data
     Status = ReadAttribute(DeviceExt, BitmapCtx, 0, (PCHAR)BitmapPtr, BitmapLength);
@@ -235,6 +248,54 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
         DPRINT1("ERROR: Failed to set length of index allocation!\n");
         ReleaseAttributeContext(BitmapCtx);
         return Status;
+    }
+
+    // Write an empty, valid INDX record to the newly allocated space so that
+    // reads before UpdateIndexNode() don't encounter uninitialized data.
+    {
+        PINDEX_BUFFER NewIndexBuffer;
+        ULONG BytesWrittenIdx;
+        ULONG UsaCount;
+
+        NewIndexBuffer = ExAllocatePoolWithTag(NonPagedPool, IndexBufferSize, TAG_NTFS);
+        if (NewIndexBuffer)
+        {
+            RtlZeroMemory(NewIndexBuffer, IndexBufferSize);
+
+            // Initialize INDX record header
+            NewIndexBuffer->Ntfs.Type = NRH_INDX_TYPE;
+            UsaCount = IndexBufferSize / DeviceExt->NtfsInfo.BytesPerSector + 1;
+            NewIndexBuffer->Ntfs.UsaOffset = FIELD_OFFSET(INDEX_BUFFER, Header);
+            NewIndexBuffer->Ntfs.UsaCount = UsaCount;
+
+            // Initialize index header with an empty end entry
+            NewIndexBuffer->Header.FirstEntryOffset = sizeof(INDEX_HEADER_ATTRIBUTE);
+            NewIndexBuffer->Header.TotalSizeOfEntries = sizeof(INDEX_HEADER_ATTRIBUTE) + sizeof(INDEX_ENTRY_ATTRIBUTE);
+            NewIndexBuffer->Header.AllocatedSize = IndexBufferSize - FIELD_OFFSET(INDEX_BUFFER, Header);
+            NewIndexBuffer->Header.Flags = 0;
+
+            // Create an end-marker entry
+            {
+                PINDEX_ENTRY_ATTRIBUTE EndEntry;
+                EndEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&NewIndexBuffer->Header +
+                            NewIndexBuffer->Header.FirstEntryOffset);
+                EndEntry->Length = sizeof(INDEX_ENTRY_ATTRIBUTE);
+                EndEntry->KeyLength = 0;
+                EndEntry->Flags = NTFS_INDEX_ENTRY_END;
+            }
+
+            // Apply fixup array and write
+            AddFixupArray(DeviceExt, &NewIndexBuffer->Ntfs);
+            WriteAttribute(DeviceExt,
+                           IndexAllocationCtx,
+                           IndexAllocationLength,
+                           (const PUCHAR)NewIndexBuffer,
+                           IndexBufferSize,
+                           &BytesWrittenIdx,
+                           FileRecord);
+
+            ExFreePoolWithTag(NewIndexBuffer, TAG_NTFS);
+        }
     }
 
     // Update file record on disk
@@ -617,14 +678,8 @@ CreateBTreeNodeFromIndexNode(PDEVICE_EXTENSION Vcb,
             // Copy the current entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
 
-            // See if the current key has a sub-node
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationAttributeCtx,
-                                                                       CurrentKey->IndexEntry);
-            }
+            // Children are loaded lazily by NtfsInsertKey when needed.
+            // The NTFS_INDEX_ENTRY_NODE flag on IndexEntry indicates a child exists on disk.
 
             CurrentKey = NextKey;
         }
@@ -633,15 +688,6 @@ CreateBTreeNodeFromIndexNode(PDEVICE_EXTENSION Vcb,
             // Copy the final entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
             CurrentKey->NextKey = NULL;
-
-            // See if the current key has a sub-node
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationAttributeCtx,
-                                                                       CurrentKey->IndexEntry);
-            }
 
             break;
         }
@@ -727,6 +773,11 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
     RootNode->FirstKey = CurrentKey;
     Tree->RootNode = RootNode;
 
+    // Store context for lazy child loading in NtfsInsertKey
+    Tree->Vcb = Vcb;
+    Tree->IndexRoot = IndexRoot;
+    Tree->IndexAllocationContext = NULL; // set below if it exists
+
     // Make sure we won't try reading past the attribute-end
     if (FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header) + IndexRoot->Header.TotalSizeOfEntries > IndexRootContext->pRecord->Resident.ValueLength)
     {
@@ -741,7 +792,10 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
                                                 + FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header)
                                                 + IndexRoot->Header.FirstEntryOffset);
 
-    // Create a key for each entry in the node
+    // Create a key for each entry in the node.
+    // Child nodes are NOT loaded here — they are loaded lazily by NtfsInsertKey
+    // when it needs to descend into a child. This makes tree creation O(root keys)
+    // instead of O(all nodes), turning the per-file insert from O(n) to O(log n).
     while (CurrentOffset < IndexRoot->Header.TotalSizeOfEntries)
     {
         // Allocate memory for the current entry
@@ -777,22 +831,7 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
             // Copy the current entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
 
-            // Does this key have a sub-node?
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                // Create the child node
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationContext,
-                                                                       CurrentKey->IndexEntry);
-                if (!CurrentKey->LesserChild)
-                {
-                    DPRINT1("ERROR: Couldn't create child node!\n");
-                    DestroyBTree(Tree);
-                    Status = STATUS_NOT_IMPLEMENTED;
-                    goto Cleanup;
-                }
-            }
+            // LesserChild stays NULL — loaded lazily when needed
 
             // Advance to the next entry
             CurrentOffset += CurrentNodeEntry->Length;
@@ -805,23 +844,6 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
             CurrentKey->NextKey = NULL;
 
-            // Does this key have a sub-node?
-            if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
-            {
-                // Create the child node
-                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Vcb,
-                                                                       IndexRoot,
-                                                                       IndexAllocationContext,
-                                                                       CurrentKey->IndexEntry);
-                if (!CurrentKey->LesserChild)
-                {
-                    DPRINT1("ERROR: Couldn't create child node!\n");
-                    DestroyBTree(Tree);
-                    Status = STATUS_NOT_IMPLEMENTED;
-                    goto Cleanup;
-                }
-            }
-
             break;
         }
     }
@@ -830,8 +852,17 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
     Status = STATUS_SUCCESS;
 
 Cleanup:
-    if (IndexAllocationContext)
+    if (NT_SUCCESS(Status))
+    {
+        // Tree takes ownership of IndexAllocationContext for lazy child loading.
+        // It will be released when the caller calls ReleaseAttributeContext on
+        // Tree->IndexAllocationContext after destroying the tree.
+        Tree->IndexAllocationContext = IndexAllocationContext;
+    }
+    else if (IndexAllocationContext)
+    {
         ReleaseAttributeContext(IndexAllocationContext);
+    }
 
     return Status;
 }
@@ -972,16 +1003,49 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
         // Copy the index entry
         RtlCopyMemory(CurrentNodeEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
 
+        // Ensure entry flags are consistent with whether this key actually
+        // has a child node.  Entries may carry a stale NTFS_INDEX_ENTRY_NODE
+        // flag after tree restructuring (split/demotion) if the child was
+        // moved elsewhere or the entry was relocated to the root.
+        if (CurrentKey->LesserChild)
+        {
+            if (!BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length += sizeof(ULONGLONG);
+            }
+            // Write the child VCN.  Prefer the in-memory entry's VCN if the
+            // NODE flag is set (UpdateIndexAllocation already wrote it there).
+            // Fall back to the child node's VCN otherwise.
+            if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+                SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
+            else
+                SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
+            NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
+        }
+        else if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        {
+            // Child exists on disk but wasn't loaded (lazy loading).
+            // Preserve the NODE flag and VCN from the original entry.
+            // The entry was already copied with the correct flag and VCN above.
+            NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
+        }
+        else
+        {
+            // Truly a leaf entry with no children on disk or in memory.
+            if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length -= sizeof(ULONGLONG);
+            }
+        }
+
         DPRINT1("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
                 CurrentNodeEntry->KeyLength,
                 CurrentNodeEntry->Length);
 
-        // Does the current key have any sub-nodes?
-        if (CurrentKey->LesserChild)
-            NewIndexRoot->Header.Flags = INDEX_ROOT_LARGE;
-
         // Add Length of Current Entry to Total Size of Entries
-        NewIndexRoot->Header.TotalSizeOfEntries += CurrentKey->IndexEntry->Length;
+        NewIndexRoot->Header.TotalSizeOfEntries += CurrentNodeEntry->Length;
 
         // Go to the next node entry
         CurrentNodeEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)CurrentNodeEntry + CurrentNodeEntry->Length);
@@ -1047,6 +1111,42 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
         // Copy the index entry
         RtlCopyMemory(CurrentNodeEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
 
+        // Determine if this specific entry should have a child pointer.
+        // An entry has a child if: (a) it has a loaded LesserChild, OR
+        // (b) its original index entry has the NODE flag (lazy-loaded child on disk).
+        {
+            BOOLEAN EntryHasChild = (CurrentKey->LesserChild != NULL) ||
+                                    BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+
+            if (EntryHasChild && !BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                SetFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length += sizeof(ULONGLONG);
+            }
+            else if (!EntryHasChild && BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                ClearFlag(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE);
+                CurrentNodeEntry->Length -= sizeof(ULONGLONG);
+            }
+
+            // Write the child VCN into the on-disk entry.
+            // Mirror CreateIndexRootFromBTree's preference: if the source
+            // IndexEntry already has the NODE flag, trust the VCN that
+            // UpdateIndexNode just wrote into it; otherwise fall back to the
+            // loaded child node's VCN.  This keeps the two serializers in
+            // agreement and avoids writing a stale LesserChild->VCN when the
+            // in-memory entry was refreshed more recently.
+            if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+            {
+                if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+                    SetIndexEntryVCN(CurrentNodeEntry, GetIndexEntryVCN(CurrentKey->IndexEntry));
+                else if (CurrentKey->LesserChild)
+                    SetIndexEntryVCN(CurrentNodeEntry, CurrentKey->LesserChild->VCN);
+                else
+                    SetIndexEntryVCN(CurrentNodeEntry, 0);
+            }
+        }
+
         DPRINT("Index Node Entry Stream Length: %u\nIndex Node Entry Length: %u\n",
                CurrentNodeEntry->KeyLength,
                CurrentNodeEntry->Length);
@@ -1054,8 +1154,8 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
         // Add Length of Current Entry to Total Size of Entries
         IndexBuffer->Header.TotalSizeOfEntries += CurrentNodeEntry->Length;
 
-        // Check for child nodes
-        if (HasChildren)
+        // Check for child nodes (loaded or lazy)
+        if (BooleanFlagOn(CurrentNodeEntry->Flags, NTFS_INDEX_ENTRY_NODE))
             IndexBuffer->Header.Flags = INDEX_NODE_LARGE;
 
         // Go to the next node entry
@@ -1373,6 +1473,7 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
                 RtlCopyMemory(NewEntry, CurrentKey->IndexEntry, CurrentKey->IndexEntry->Length);
 
                 NewEntry->Length += sizeof(ULONGLONG);
+                NewEntry->Flags |= NTFS_INDEX_ENTRY_NODE;
 
                 // Free the old memory
                 ExFreePoolWithTag(CurrentKey->IndexEntry, TAG_NTFS);
@@ -1382,8 +1483,6 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
 
             // Update the VCN stored in the index entry of CurrentKey
             SetIndexEntryVCN(CurrentKey->IndexEntry, CurrentKey->LesserChild->VCN);
-
-            CurrentKey->IndexEntry->Flags |= NTFS_INDEX_ENTRY_NODE;
         }
 
         CurrentKey = CurrentKey->NextKey;
@@ -1440,7 +1539,8 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
         Status = WriteAttribute(DeviceExt, IndexAllocationContext, NodeOffset, (const PUCHAR)IndexBuffer, IndexBufferSize, &LengthWritten, FileRecord);
         if (!NT_SUCCESS(Status) || LengthWritten != IndexBufferSize)
         {
-            DPRINT1("ERROR: Failed to update index allocation!\n");
+            DPRINT1("ERROR: Failed to update index allocation! Status=0x%lx Written=%lu Expected=%lu\n",
+                    Status, LengthWritten, IndexBufferSize);
             ExFreePoolWithTag(IndexBuffer, TAG_NTFS);
             if (!NT_SUCCESS(Status))
                 return Status;
@@ -1491,6 +1591,7 @@ CreateBTreeKeyFromFilename(ULONGLONG FileReference, PFILENAME_ATTRIBUTE FileName
     }
     NewKey->IndexEntry = NewEntry;
     NewKey->NextKey = NULL;
+    NewKey->LesserChild = NULL;
 
     return NewKey;
 }
@@ -1505,6 +1606,83 @@ DestroyBTreeKey(PB_TREE_KEY Key)
         DestroyBTreeNode(Key->LesserChild);
 
     ExFreePoolWithTag(Key, TAG_NTFS);
+}
+
+static
+BOOLEAN
+NtfsRemoveKeyFromNode(PB_TREE Tree,
+                      PB_TREE_FILENAME_NODE Node,
+                      ULONGLONG FileReference,
+                      PUNICODE_STRING FileName,
+                      BOOLEAN CaseSensitive)
+{
+    PB_TREE_KEY CurrentKey, PreviousKey;
+    ULONG i;
+
+    CurrentKey = Node->FirstKey;
+    PreviousKey = NULL;
+
+    for (i = 0; i < Node->KeyCount && CurrentKey != NULL; i++)
+    {
+        if (!CurrentKey->LesserChild &&
+            (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) &&
+            Tree->IndexAllocationContext)
+        {
+            CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Tree->Vcb,
+                                                                   Tree->IndexRoot,
+                                                                   Tree->IndexAllocationContext,
+                                                                   CurrentKey->IndexEntry);
+        }
+
+        if (!(CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_END) &&
+            (CurrentKey->IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) == FileReference &&
+            CompareFileName(FileName, CurrentKey->IndexEntry, FALSE, CaseSensitive))
+        {
+            if (CurrentKey->LesserChild != NULL)
+            {
+                DPRINT1("NtfsRemoveKeyFromNode: removal of internal keys is not implemented yet.\n");
+                return FALSE;
+            }
+
+            if (PreviousKey != NULL)
+                PreviousKey->NextKey = CurrentKey->NextKey;
+            else
+                Node->FirstKey = CurrentKey->NextKey;
+
+            Node->KeyCount--;
+            Node->DiskNeedsUpdating = TRUE;
+            CurrentKey->NextKey = NULL;
+            DestroyBTreeKey(CurrentKey);
+            return TRUE;
+        }
+
+        if (CurrentKey->LesserChild != NULL &&
+            NtfsRemoveKeyFromNode(Tree, CurrentKey->LesserChild, FileReference, FileName, CaseSensitive))
+        {
+            Node->DiskNeedsUpdating = TRUE;
+            return TRUE;
+        }
+
+        PreviousKey = CurrentKey;
+        CurrentKey = CurrentKey->NextKey;
+    }
+
+    return FALSE;
+}
+
+NTSTATUS
+NtfsRemoveKey(PB_TREE Tree,
+              ULONGLONG FileReference,
+              PUNICODE_STRING FileName,
+              BOOLEAN CaseSensitive)
+{
+    if (Tree == NULL || Tree->RootNode == NULL || FileName == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!NtfsRemoveKeyFromNode(Tree, Tree->RootNode, FileReference, FileName, CaseSensitive))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    return STATUS_SUCCESS;
 }
 
 VOID
@@ -1541,6 +1719,11 @@ DestroyBTreeNode(PB_TREE_FILENAME_NODE Node)
 VOID
 DestroyBTree(PB_TREE Tree)
 {
+    if (Tree->IndexAllocationContext)
+    {
+        ReleaseAttributeContext(Tree->IndexAllocationContext);
+        Tree->IndexAllocationContext = NULL;
+    }
     DestroyBTreeNode(Tree->RootNode);
     ExFreePoolWithTag(Tree, TAG_NTFS);
 }
@@ -1573,8 +1756,8 @@ DumpBTreeKey(PB_TREE Tree, PB_TREE_KEY Key, ULONG Number, ULONG Depth)
             DumpBTreeNode(Tree, Key->LesserChild, Number, Depth + 1);
         else
         {
-            // This will be an assert once nodes with arbitrary depth are debugged
-            DPRINT1("DRIVER ERROR: No Key->LesserChild despite Key->IndexEntry->Flags indicating this is a node!\n");
+            // Child not loaded (lazy loading) — this is expected
+            DPRINT("Child node not loaded (lazy)\n");
         }
     }
 }
@@ -1742,6 +1925,17 @@ NtfsInsertKey(PB_TREE Tree,
         // Is NewKey < CurrentKey?
         if (Comparison < 0)
         {
+            // Lazily load child node from disk if it exists but hasn't been loaded
+            if (!CurrentKey->LesserChild &&
+                (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) &&
+                Tree->IndexAllocationContext)
+            {
+                CurrentKey->LesserChild = CreateBTreeNodeFromIndexNode(Tree->Vcb,
+                                                                       Tree->IndexRoot,
+                                                                       Tree->IndexAllocationContext,
+                                                                       CurrentKey->IndexEntry);
+            }
+
             // Does CurrentKey have a sub-node?
             if (CurrentKey->LesserChild)
             {

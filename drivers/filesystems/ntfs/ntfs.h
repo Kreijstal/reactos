@@ -15,9 +15,72 @@
 #define TAG_IRP_CTXT 'iftN'
 #define TAG_ATT_CTXT 'aftN'
 #define TAG_FILE_REC 'rftN'
+/* Tag for the separately-allocated SECTION_OBJECT_POINTERS struct that may
+ * outlive the FCB itself when MM still references it.  See NtfsDestroyFCB
+ * in fcb.c for the rationale: previously the entire FCB (~5 KB including
+ * two ERESOURCEs and a FILE_LOCK) was leaked when MmForceSectionClosed
+ * could not drop the data section; now only the ~24-byte SOP struct is
+ * leaked, and the rest of the FCB is freed normally. */
+#define TAG_SOP 'SftN'
 
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 #define ROUND_DOWN(N, S) ((N) - ((N) % (S)))
+
+/* Pool corruption detector: validate the pool header of the block containing P.
+ * P must be a pool allocation (the pointer returned by ExAllocate*, NOT the header).
+ * POOL_HEADER lives at (P - sizeof(POOL_HEADER)).  BlockSize/PreviousSize are in
+ * POOL_BLOCK_SIZE units (16 on amd64, 8 on x86).  Bitfield widths differ:
+ *   amd64: PreviousSize:8, PoolIndex:8, BlockSize:8, PoolType:8
+ *   x86:   PreviousSize:9, PoolIndex:7, BlockSize:9, PoolType:7
+ * Read the first ULONG of the header and mask the appropriate width so the check
+ * works correctly for allocations up to one page on both architectures. */
+#ifdef DBG
+#ifdef _WIN64
+#define NTFS_POOL_BLOCK 16
+#define NTFS_POOL_SZ_MASK 0xFF
+#else
+#define NTFS_POOL_BLOCK 8
+#define NTFS_POOL_SZ_MASK 0x1FF
+#endif
+static inline void NtfsCheckPoolAround(PVOID P, const char *where)
+{
+    PUCHAR hdr = (PUCHAR)P - NTFS_POOL_BLOCK;
+    ULONG ul1 = *(volatile ULONG *)hdr;
+    ULONG our_ps = ul1 & NTFS_POOL_SZ_MASK;
+    ULONG our_bs = (ul1 >> 16) & NTFS_POOL_SZ_MASK;
+    ULONG our_size = our_bs * NTFS_POOL_BLOCK;
+    PUCHAR next_hdr = hdr + our_size;
+    if (((ULONG_PTR)next_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
+    {
+        ULONG next_ul1 = *(volatile ULONG *)next_hdr;
+        ULONG next_ps = next_ul1 & NTFS_POOL_SZ_MASK;
+        if (next_ps != our_bs)
+        {
+            DbgPrint("NTFS POOL CORRUPTION at %s: block %p (bs=%u) next at %p has PrevSize=%u\n",
+                    where, P, our_bs, next_hdr + NTFS_POOL_BLOCK, next_ps);
+            ASSERT(FALSE);
+        }
+    }
+    if (our_ps != 0)
+    {
+        PUCHAR prev_hdr = hdr - our_ps * NTFS_POOL_BLOCK;
+        if (((ULONG_PTR)prev_hdr & ~0xFFF) == ((ULONG_PTR)hdr & ~0xFFF))
+        {
+            ULONG prev_ul1 = *(volatile ULONG *)prev_hdr;
+            ULONG prev_bs = (prev_ul1 >> 16) & NTFS_POOL_SZ_MASK;
+            if (prev_bs != our_ps)
+            {
+                DbgPrint("NTFS POOL CORRUPTION at %s: block %p (ps=%u) but prev block at %p has BlockSize=%u\n",
+                        where, P, our_ps, prev_hdr + NTFS_POOL_BLOCK, prev_bs);
+                ASSERT(FALSE);
+            }
+        }
+    }
+}
+#define NTFS_CHECK_POOL(P, where) NtfsCheckPoolAround(P, where)
+#else
+#define NTFS_CHECK_POOL(P, where) ((void)0)
+#endif
 
 #define DEVICE_NAME L"\\Ntfs"
 
@@ -103,6 +166,52 @@ typedef struct
     ERESOURCE DirResource;
 //    ERESOURCE FatResource;
 
+    /* Serializes read-modify-write of any directory's $INDEX_ALLOCATION
+     * (and the matching $INDEX_ROOT writes) across all FCBs on this volume.
+     *
+     * Held SHARED by readers (BrowseIndexEntries / NtfsFindMftRecord and
+     * the recursive BrowseSubNodeIndexEntries) and EXCLUSIVE by writers
+     * (UpdateIndexEntryFileNameSize, NtfsAddFilenameToDirectory,
+     *  NtfsRemoveFilenameFromDirectory). Without this, a writer's R/M/W
+     * cycle on a parent directory's $INDEX_ALLOCATION can race a concurrent
+     * path-walk read of the same cluster and the reader observes the
+     * cluster mid-write — most visibly the cluster's first 4 bytes are
+     * no longer 'INDX' and BrowseSubNodeIndexEntries trips
+     * ASSERT(IndexRecord->Ntfs.Type == NRH_INDX_TYPE) (mft.c:3689). See
+     * Kreijstal/reactos#14.
+     *
+     * Locking discipline:
+     *   - Sits BELOW DirResource and Fcb->MainResource in the hierarchy.
+     *   - Writers (called from NtfsSetInformation / NtfsWrite) hold the
+     *     child Fcb->MainResource but no parent lock; readers from
+     *     NtfsCreate / NtfsDirControl hold DirResource exclusive. Neither
+     *     pair shares another lock with this one, so no AB-BA is added. */
+    ERESOURCE IndexResource;
+
+    /* Serializes the read-modify-write of the volume $Bitmap across
+     * NtfsAllocateClusters / FreeClusters. The bitmap is read into a local
+     * buffer, modified with RtlFindClearBitsAndSet / RtlClearBits, then
+     * written back with WriteAttribute. Without serialization, two
+     * concurrent allocators each load a private copy of the bitmap, both
+     * see the same LCN as free, both mark it set, and both write the
+     * bitmap back — and now two attributes own the same cluster. The
+     * symptom is BrowseSubNodeIndexEntries reading a directory's
+     * $INDEX_ALLOCATION cluster and finding file data (e.g., a .lnk
+     * shortcut) instead of an INDX block, tripping the
+     * IndexRecord->Ntfs.Type == NRH_INDX_TYPE assertion in mft.c. See
+     * Kreijstal/reactos#14.
+     *
+     * Locking discipline:
+     *   - Always held EXCLUSIVE; the bitmap is short and contended only
+     *     during allocation/free, so a shared mode would buy nothing.
+     *   - Sits BELOW IndexResource (and therefore below DirResource and
+     *     Fcb->MainResource) in the hierarchy: WriteAttribute is the
+     *     primary path that triggers cluster allocation, and writers in
+     *     mft.c already hold IndexResource exclusive when they call into
+     *     it. Acquired recursively from WriteAttribute(bitmap) inside
+     *     NtfsAllocateClusters — ERESOURCE supports recursive exclusive. */
+    ERESOURCE BitmapResource;
+
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
 
@@ -122,9 +231,54 @@ typedef struct
     ULONG Flags;
     ULONG OpenHandleCount;
 
+    /* Cached MFT $Bitmap for fast free-record allocation */
+    PUCHAR MftBitmapBuffer;         /* Original allocation (for freeing) */
+    PULONG MftBitmapData;           /* ULONG-aligned pointer within buffer */
+    ULONG MftBitmapSize;
+    ULONG MftNextFreeHint;          /* Next index to start searching from */
+
+    /* Tracking bitmap for VACBs (256KB regions) that have been populated by
+     * NtfsReadDiskCached via CcMapData. NtfsWriteDiskCached only needs to
+     * call the (very expensive) CcPurgeCacheSection when the written range
+     * overlaps a region we actually mapped. The cached region is bounded
+     * by NTFS_MAX_CACHED_OFFSET (128 MB = 512 VACBs), so 64 bytes of bitmap
+     * is enough. A bit is set BEFORE CcMapData is called, so an over-set
+     * bit is safe (it just causes an extra purge; we never miss one).
+     *
+     * NTFS_CACHED_VACB_COUNT = NTFS_MAX_CACHED_OFFSET / VACB_MAPPING_GRANULARITY
+     *                        = (128 MB) / (256 KB) = 512
+     */
+    volatile ULONG CachedVacbBitmap[512 / 32];
+
+    /* $UsnJrnl first-slice state (Kreijstal/reactos#33).
+     *
+     * When this volume has a journal, UsnJournalFcb points at an FCB-like
+     * shim that owns the MFT index of \$Extend\$UsnJrnl so usn.c can
+     * Read/WriteAttribute against its $J (:$DATA, non-resident, sparse)
+     * and $Max (:$DATA, resident, 32-byte USN_JOURNAL_DATA_V0) streams
+     * without re-walking the directory every time.  NULL means "no
+     * journal" — NtfsUsnEmitRecord and the FSCTL dispatcher both gate
+     * on that so un-journalled volumes pay nothing.
+     *
+     * UsnJournalId is the per-lifetime ID callers stamp into every
+     * READ_USN_JOURNAL request; it must match the one returned by
+     * CREATE_USN_JOURNAL or the read is rejected by Windows.
+     * UsnMaxSize / UsnAllocationDelta mirror the on-disk $Max fields.
+     * UsnNextUsn is the byte offset inside $J where the *next* record
+     * will land.  It's 8-byte aligned and persists across remounts by
+     * being (re)written into $Max whenever we emit a record. */
+    struct _FCB *UsnJournalFcb;
+    ULONGLONG UsnJournalId;
+    ULONGLONG UsnMaxSize;
+    ULONGLONG UsnAllocationDelta;
+    ULONGLONG UsnNextUsn;
+    ERESOURCE UsnResource;
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
+#define VCB_VOLUME_CORRUPT      0x0002
+#define VCB_DISMOUNT_PENDING    0x0004
 
 typedef struct
 {
@@ -132,6 +286,7 @@ typedef struct
     LIST_ENTRY     NextCCB;
     PFILE_OBJECT   PtrFileObject;
     LARGE_INTEGER  CurrentByteOffset;
+    ULONG Flags;
     /* for DirectoryControl */
     ULONG Entry;
     /* for DirectoryControl */
@@ -139,6 +294,8 @@ typedef struct
     ULONG LastCluster;
     ULONG LastOffset;
 } NTFS_CCB, *PNTFS_CCB;
+
+#define NTFS_CCB_FLAG_COUNTED 0x00000001
 
 typedef struct
 {
@@ -153,6 +310,17 @@ typedef struct
     NPAGED_LOOKASIDE_LIST FcbLookasideList;
     NPAGED_LOOKASIDE_LIST AttrCtxtLookasideList;
     BOOLEAN EnableWriteSupport;
+
+    /* Zombie FCB list — FCBs we tried to destroy but whose
+     * SectionObjectPointers MM still references via a live data or image
+     * section.  We can't free the FCB while MM might still issue paging
+     * I/O against the section's stored FileObject (whose FsContext points
+     * here), so we put the FCB on this list and reap it later, when MM
+     * has finally cleared the SOP slots from MmDereferenceSegmentWithLock.
+     * Reaping is opportunistic: NtfsCreateFCB and NtfsDestroyFCB walk the
+     * list and free any whose SOP is now clean.  Protected by ZombieLock. */
+    LIST_ENTRY ZombieFcbList;
+    KSPIN_LOCK ZombieLock;
 } NTFS_GLOBAL_DATA, *PNTFS_GLOBAL_DATA;
 
 
@@ -453,6 +621,9 @@ typedef struct _B_TREE_FILENAME_NODE
 typedef struct
 {
     PB_TREE_FILENAME_NODE RootNode;
+    PDEVICE_EXTENSION Vcb;
+    PINDEX_ROOT_ATTRIBUTE IndexRoot;
+    struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
 } B_TREE, *PB_TREE;
 
 typedef struct
@@ -502,12 +673,20 @@ typedef struct _NTFS_ATTR_CONTEXT
     LARGE_MCB           DataRunsMCB;
     ULONGLONG           FileMFTIndex;
     ULONGLONG           FileOwnerMFTIndex; /* If attribute list attribute, reference the original file */
+    /* Phase 4A.5: when MigrateAttributeToList moves this attribute into a child
+     * file record, set MigratedToMFTIndex to the child's MFT index.  Subsequent
+     * AddRun calls then re-read that child record from disk and operate on it
+     * instead of the (caller-supplied) base FileRecord, which no longer holds
+     * the attribute slot.  Zero means "not migrated, attribute lives in the
+     * base FileRecord". */
+    ULONGLONG           MigratedToMFTIndex;
     PNTFS_ATTR_RECORD    pRecord;
 } NTFS_ATTR_CONTEXT, *PNTFS_ATTR_CONTEXT;
 
 #define FCB_CACHE_INITIALIZED   0x0001
 #define FCB_IS_VOLUME_STREAM    0x0002
 #define FCB_IS_VOLUME           0x0004
+#define FCB_DELETE_PENDING      0x0008
 #define MAX_PATH                260
 
 typedef struct _FCB
@@ -515,7 +694,30 @@ typedef struct _FCB
     NTFSIDENTIFIER Identifier;
 
     FSRTL_COMMON_FCB_HEADER RFCB;
-    SECTION_OBJECT_POINTERS SectionObjectPointers;
+
+    /* Pointer to a separately-allocated SECTION_OBJECT_POINTERS struct
+     * (tag TAG_SOP).  This struct may outlive the FCB: when MM still
+     * holds a reference to the data/image section at FCB destruction
+     * time, NtfsDestroyFCB orphans this allocation (clearing the back-
+     * pointer here so it isn't double-freed) and frees the rest of the
+     * FCB normally.  MmDereferenceSegmentWithLock will eventually clear
+     * the leaked SOP's DataSectionObject slot when the segment refcount
+     * finally drops to zero — by which point nothing reads it.
+     *
+     * The previous design embedded the SOP struct directly inside the
+     * FCB, which forced the entire FCB (with its two ERESOURCEs, FILE_LOCK
+     * and 520-byte path strings, ~5 KB total) to be leaked instead of
+     * just the 24-byte pointer struct.  Under any sustained file open/
+     * close workload that exhausted paged pool and froze the system. */
+    PSECTION_OBJECT_POINTERS SectionObjectPointers;
+
+    /* FsRtl-managed byte-range lock state for IRP_MJ_LOCK_CONTROL.
+     * Initialized in NtfsCreateFCB via FsRtlInitializeFileLock and torn
+     * down in NtfsDestroyFCB via FsRtlUninitializeFileLock. Used by
+     * lock.c!NtfsLockControl through FsRtlProcessFileLock and consulted
+     * by NtfsRead / NtfsWrite via FsRtlCheckLockForReadAccess /
+     * FsRtlCheckLockForWriteAccess so locks are actually enforced. */
+    FILE_LOCK FileLock;
 
     PFILE_OBJECT FileObject;
     PNTFS_VCB Vcb;
@@ -528,6 +730,12 @@ typedef struct _FCB
     ERESOURCE MainResource;
 
     LIST_ENTRY FcbListEntry;
+    /* When this FCB has been "destroyed" but is still kept alive as a
+     * zombie because MM has live references via SectionObjectPointers,
+     * it lives on NtfsGlobalData->ZombieFcbList linked through this
+     * field instead of FcbListEntry.  See NtfsDestroyFCB for the
+     * orphan-vs-zombie decision and NtfsReapZombieFcbs for cleanup. */
+    LIST_ENTRY ZombieListEntry;
     struct _FCB* ParentFcb;
 
     ULONG DirIndex;
@@ -535,6 +743,13 @@ typedef struct _FCB
     LONG RefCount;
     ULONG Flags;
     ULONG OpenHandleCount;
+
+    /* Share access tracking — used by IoCheckShareAccess /
+     * IoSetShareAccess / IoUpdateShareAccess / IoRemoveShareAccess.
+     * The MM filter callback PreAcquireForSectionSynchronization
+     * inspects ShareAccess.Writers to decide whether to report
+     * STATUS_FILE_LOCKED_WITH_WRITERS or STATUS_FILE_LOCKED_WITH_ONLY_READERS. */
+    SHARE_ACCESS ShareAccess;
 
     ULONGLONG MFTIndex;
     USHORT LinkCount;
@@ -599,6 +814,21 @@ AddRun(PNTFS_VCB Vcb,
        PFILE_RECORD_HEADER FileRecord,
        ULONGLONG NextAssignedCluster,
        ULONG RunLength);
+
+NTSTATUS
+MigrateAttributeToList(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseFileRecord,
+                       PNTFS_ATTR_CONTEXT AttrContext,
+                       ULONG AttrOffset,
+                       PFILE_RECORD_HEADER *OutChildRecord,
+                       PULONG OutNewAttrOffset);
+
+NTSTATUS
+CoalesceAttributeFromList(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER BaseFileRecord,
+                          ULONG AttributeType,
+                          PCWSTR Name,
+                          USHORT NameLength);
 
 NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
@@ -708,6 +938,12 @@ FreeClusters(PNTFS_VCB Vcb,
 /* blockdev.c */
 
 NTSTATUS
+NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
+                   IN LONGLONG StartingOffset,
+                   IN ULONG Length,
+                   IN OUT PUCHAR Buffer);
+
+NTSTATUS
 NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
              IN LONGLONG StartingOffset,
              IN ULONG Length,
@@ -721,6 +957,12 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
               IN ULONG Length,
               IN ULONG SectorSize,
               IN const PUCHAR Buffer);
+
+NTSTATUS
+NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
+                    IN LONGLONG StartingOffset,
+                    IN ULONG Length,
+                    IN const PUCHAR Buffer);
 
 NTSTATUS
 NtfsReadSectors(IN PDEVICE_OBJECT DeviceObject,
@@ -810,6 +1052,12 @@ NtfsInsertKey(PB_TREE Tree,
               ULONG IndexRecordSize,
               PB_TREE_KEY *MedianKey,
               PB_TREE_FILENAME_NODE *NewRightHandSibling);
+
+NTSTATUS
+NtfsRemoveKey(PB_TREE Tree,
+              ULONGLONG FileReference,
+              PUNICODE_STRING FileName,
+              BOOLEAN CaseSensitive);
 
 NTSTATUS
 SplitBTreeNode(PB_TREE Tree,
@@ -925,6 +1173,9 @@ NtfsCreateFCB(PCWSTR FileName,
 
 VOID
 NtfsDestroyFCB(PNTFS_FCB Fcb);
+
+VOID
+NtfsReapZombieFcbs(VOID);
 
 BOOLEAN
 NtfsFCBIsDirectory(PNTFS_FCB Fcb);
@@ -1060,6 +1311,144 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
 
 ULONGLONG
 AttributeDataLength(PNTFS_ATTR_RECORD AttrRecord);
+
+NTSTATUS
+AddResidentAttribute(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     ULONG Type,
+                     PCWSTR Name,
+                     USHORT NameLength,
+                     const VOID *Data,
+                     ULONG DataLength);
+
+NTSTATUS
+RemoveResidentAttribute(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        PNTFS_ATTR_RECORD AttrAddress);
+
+/*
+ * Per-file $SECURITY_DESCRIPTOR worker primitives — see security.c and
+ * Kreijstal/reactos#36.  This is the NT4-era per-record SD, NOT the
+ * \$Secure:$SDS shared-SD pool (that's a later slice).
+ */
+NTSTATUS
+NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        const VOID *SD,
+                        ULONG SdLength);
+
+NTSTATUS
+NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER FileRecord,
+                          PVOID Buf,
+                          ULONG BufLen,
+                          PULONG LenOut);
+
+NTSTATUS
+NtfsDeleteSecurityFromRecord(PNTFS_VCB Vcb,
+                             PFILE_RECORD_HEADER FileRecord);
+
+/*
+ * $UsnJrnl workers (first slice, Kreijstal/reactos#33).  These operate
+ * directly on the in-memory journal state and the on-disk $J / $Max
+ * attributes; IRP dispatch (fsctl.c) and the emission hooks
+ * (create.c / cleanup.c) call into them.
+ *
+ * NtfsUsnInitJournal      — either creates \$Extend\$UsnJrnl or loads
+ *                           an existing one, and populates the Vcb->Usn*
+ *                           fields.  Idempotent.
+ * NtfsUsnEmitRecord       — serialise one USN_RECORD_V2 into $J.  Callers
+ *                           must gate on Vcb->UsnJournalFcb != NULL.
+ * NtfsUsnReadRange        — linear scan of $J filtered by reason mask;
+ *                           matches FSCTL_READ_USN_JOURNAL semantics.
+ * NtfsUsnEnumerate        — MFT walk with per-record synthesis;
+ *                           matches FSCTL_ENUM_USN_DATA semantics.
+ *                           Reason=0, Usn=0 on synthesised records.
+ *
+ * These are all worker-style helpers: pure functions of the Vcb and
+ * caller buffers, no IRP plumbing.
+ */
+NTSTATUS
+NtfsUsnInitJournal(PDEVICE_EXTENSION Vcb,
+                   ULONGLONG MaximumSize,
+                   ULONGLONG AllocationDelta);
+
+NTSTATUS
+NtfsUsnLoadJournal(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsUsnEmitRecord(PDEVICE_EXTENSION Vcb,
+                  ULONGLONG FileRef,
+                  ULONGLONG ParentRef,
+                  ULONG Reason,
+                  ULONG SourceInfo,
+                  PCWSTR Name,
+                  USHORT NameLength);
+
+NTSTATUS
+NtfsUsnReadRange(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG StartUsn,
+                 ULONG ReasonMask,
+                 PVOID Buffer,
+                 ULONG BufferLength,
+                 PULONG BytesReturned);
+
+NTSTATUS
+NtfsUsnEnumerate(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG StartRef,
+                 LONGLONG LowUsn,
+                 LONGLONG HighUsn,
+                 PVOID Buffer,
+                 ULONG BufferLength,
+                 PULONG BytesReturned);
+
+VOID
+NtfsUsnFreeJournalFcb(struct _FCB *Fcb);
+
+/*
+ * LZNT1 codec + compressed-$DATA read dispatch (issue #35, slice 1a).
+ * lznt1.c owns the pure buffer-in/buffer-out decompressor; compress.c
+ * owns the MCB walk + per-compression-unit classification.
+ *
+ * Slice 1a is decompression-only — the matching write path
+ * (NtfsLznt1Compress / NtfsCompressedWriteLogical) is slice 1b and
+ * WriteAttribute against a compressed attribute still returns
+ * STATUS_NOT_IMPLEMENTED via the existing non-resident write code.
+ */
+NTSTATUS
+NtfsLznt1Decompress(const UCHAR *In,
+                    ULONG InLen,
+                    UCHAR *Out,
+                    ULONG OutLen,
+                    PULONG OutUsed);
+
+/* Callback used by NtfsCompressedReadLogicalEx so the worker itself is
+ * transport-agnostic.  The kernel wrapper plugs NtfsReadDiskCached in;
+ * the userspace test harness plugs a file-backed reader against a
+ * synthetic LCN space. */
+typedef NTSTATUS (*NtfsCompressedRawReadFn)(PNTFS_ATTR_CONTEXT Context,
+                                            LONGLONG Lcn,
+                                            ULONG Length,
+                                            PUCHAR Buffer,
+                                            PVOID Ctx);
+
+NTSTATUS
+NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
+                            ULONGLONG Offset,
+                            ULONG Len,
+                            PUCHAR Out,
+                            ULONG BytesPerCluster,
+                            NtfsCompressedRawReadFn RawRead,
+                            PVOID RawCtx,
+                            PULONG BytesReadOut);
+
+NTSTATUS
+NtfsCompressedReadLogical(PDEVICE_EXTENSION Vcb,
+                          PNTFS_ATTR_CONTEXT Context,
+                          ULONGLONG Offset,
+                          ULONG Len,
+                          PUCHAR Out,
+                          PULONG BytesReadOut);
 
 NTSTATUS
 InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
@@ -1198,6 +1587,26 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
                  PULONGLONG MFTIndex,
                  ULONGLONG CurrentMFTIndex);
 
+NTSTATUS
+NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
+                                ULONGLONG ParentMftIndex,
+                                ULONGLONG FileReferenceNumber,
+                                PUNICODE_STRING FileName,
+                                BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     ULONGLONG NewParentMftIndex,
+                     PUNICODE_STRING NewFileName,
+                     BOOLEAN ReplaceIfExists,
+                     BOOLEAN CaseSensitive);
+
 VOID
 NtfsDumpFileRecord(PDEVICE_EXTENSION Vcb,
                    PFILE_RECORD_HEADER FileRecord);
@@ -1260,6 +1669,33 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext);
 
 NTSTATUS
 NtfsWrite(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* ea.c */
+
+NTSTATUS
+NtfsQueryEa(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsSetEa(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* lock.c */
+
+NTSTATUS
+NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* pnp.c */
+
+NTSTATUS
+NtfsPnp(PNTFS_IRP_CONTEXT IrpContext);
+
+
+/* shutdown.c */
+
+NTSTATUS
+NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext);
 
 
 /* volinfo.c */

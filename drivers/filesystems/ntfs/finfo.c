@@ -61,7 +61,7 @@ NtfsGetStandardInformation(PNTFS_FCB Fcb,
     StandardInfo->AllocationSize = Fcb->RFCB.AllocationSize;
     StandardInfo->EndOfFile = Fcb->RFCB.FileSize;
     StandardInfo->NumberOfLinks = Fcb->LinkCount;
-    StandardInfo->DeletePending = FALSE;
+    StandardInfo->DeletePending = BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING);
     StandardInfo->Directory = NtfsFCBIsDirectory(Fcb);
 
     *BufferLength -= sizeof(FILE_STANDARD_INFORMATION);
@@ -76,7 +76,7 @@ NtfsGetPositionInformation(PFILE_OBJECT FileObject,
                            PFILE_POSITION_INFORMATION PositionInfo,
                            PULONG BufferLength)
 {
-    DPRINT1("NtfsGetPositionInformation(%p, %p, %p)\n", FileObject, PositionInfo, BufferLength);
+    DPRINT("NtfsGetPositionInformation(%p, %p, %p)\n", FileObject, PositionInfo, BufferLength);
 
     if (*BufferLength < sizeof(FILE_POSITION_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
@@ -178,7 +178,7 @@ NtfsGetInternalInformation(PNTFS_FCB Fcb,
                            PFILE_INTERNAL_INFORMATION InternalInfo,
                            PULONG BufferLength)
 {
-    DPRINT1("NtfsGetInternalInformation(%p, %p, %p)\n", Fcb, InternalInfo, BufferLength);
+    DPRINT("NtfsGetInternalInformation(%p, %p, %p)\n", Fcb, InternalInfo, BufferLength);
 
     ASSERT(InternalInfo);
     ASSERT(Fcb);
@@ -288,6 +288,144 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
 
     FindCloseAttribute(&Context);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+/*
+ * Retrieve the 8.3 DOS short name for the file, if any.  Returns
+ * STATUS_OBJECT_NAME_NOT_FOUND when the file has no DOS-namespace
+ * $FILE_NAME attribute (true for most files created by ReactOS since we
+ * don't auto-generate short names yet).  Returns STATUS_BUFFER_OVERFLOW
+ * if the caller's buffer is large enough for the header but not the
+ * full name.
+ */
+static
+NTSTATUS
+NtfsGetAlternateNameInformation(PNTFS_FCB Fcb,
+                                PDEVICE_EXTENSION DeviceExt,
+                                PFILE_NAME_INFORMATION NameInfo,
+                                PULONG BufferLength)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PFILENAME_ATTRIBUTE ShortName;
+    NTSTATUS Status;
+    ULONG NameBytes;
+    ULONG BytesToCopy;
+
+    ASSERT(Fcb != NULL);
+    ASSERT(NameInfo != NULL);
+
+    if (*BufferLength < (ULONG)FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    ShortName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
+    if (ShortName == NULL)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    NameBytes = (ULONG)ShortName->NameLength * sizeof(WCHAR);
+    NameInfo->FileNameLength = NameBytes;
+
+    BytesToCopy = min(NameBytes,
+                      *BufferLength - FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]));
+    RtlCopyMemory(NameInfo->FileName, ShortName->Name, BytesToCopy);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (BytesToCopy < NameBytes)
+    {
+        *BufferLength -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]) + BytesToCopy;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    *BufferLength -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName[0]) + NameBytes;
+    return STATUS_SUCCESS;
+}
+
+/*
+ * Retrieve FILE_ALL_INFORMATION by calling the per-class handlers in
+ * order and stitching the output into the caller's buffer.  The layout
+ * of FILE_ALL_INFORMATION is a fixed prefix (Basic..Alignment) followed
+ * by a variable-length FILE_NAME_INFORMATION.  We return
+ * STATUS_BUFFER_OVERFLOW (with a truncated name) if the buffer is too
+ * small for the full name, matching Win32 behavior.
+ */
+static
+NTSTATUS
+NtfsGetAllInformation(PFILE_OBJECT FileObject,
+                      PNTFS_FCB Fcb,
+                      PDEVICE_OBJECT DeviceObject,
+                      PFILE_ALL_INFORMATION AllInfo,
+                      PULONG BufferLength)
+{
+    NTSTATUS Status;
+    ULONG NameOffset;
+    ULONG NameBufferLength;
+
+    /* The fixed prefix runs from BasicInformation through
+     * AlignmentInformation; the NameInformation is the last field. */
+    NameOffset = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation);
+
+    if (*BufferLength < NameOffset)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    /* Fill the fixed prefix.  Each helper subtracts its own struct size
+     * from *BufferLength on success, so track that via local copies. */
+    {
+        ULONG Tmp = sizeof(FILE_BASIC_INFORMATION);
+        Status = NtfsGetBasicInformation(FileObject, Fcb, DeviceObject,
+                                         &AllInfo->BasicInformation, &Tmp);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    {
+        ULONG Tmp = sizeof(FILE_STANDARD_INFORMATION);
+        Status = NtfsGetStandardInformation(Fcb, DeviceObject,
+                                            &AllInfo->StandardInformation, &Tmp);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    {
+        ULONG Tmp = sizeof(FILE_INTERNAL_INFORMATION);
+        Status = NtfsGetInternalInformation(Fcb,
+                                            &AllInfo->InternalInformation, &Tmp);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* EA, Access, Mode, Alignment — NTFS doesn't track these per-file
+     * so report the safe defaults the other ReactOS file systems use. */
+    AllInfo->EaInformation.EaSize = 0;
+    AllInfo->AccessInformation.AccessFlags = 0;
+    AllInfo->PositionInformation.CurrentByteOffset = FileObject->CurrentByteOffset;
+    AllInfo->ModeInformation.Mode = 0;
+    AllInfo->AlignmentInformation.AlignmentRequirement = 0;
+
+    /* Fill NameInformation from the remaining buffer space. */
+    NameBufferLength = *BufferLength - NameOffset;
+    Status = NtfsGetNameInformation(FileObject, Fcb, DeviceObject,
+                                    &AllInfo->NameInformation, &NameBufferLength);
+
+    /* Update the caller's buffer length to reflect what we consumed.
+     * NtfsGetNameInformation already decremented NameBufferLength; we
+     * return the total consumed = fixed prefix + whatever it wrote. */
+    *BufferLength = (*BufferLength - NameOffset) - NameBufferLength + NameOffset;
+
+    /* NtfsGetNameInformation returns STATUS_BUFFER_OVERFLOW if the name
+     * didn't fully fit — propagate that up. */
     return Status;
 }
 
@@ -499,9 +637,48 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case FileAlternateNameInformation:
+            Status = NtfsGetAlternateNameInformation(Fcb,
+                                                     DeviceObject->DeviceExtension,
+                                                     SystemBuffer,
+                                                     &BufferLength);
+            break;
+
         case FileAllInformation:
-            DPRINT1("Unimplemented information class: %s\n", GetInfoClassName(FileInformationClass));
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = NtfsGetAllInformation(FileObject,
+                                           Fcb,
+                                           DeviceObject,
+                                           SystemBuffer,
+                                           &BufferLength);
+            break;
+
+        case FileEaInformation:
+            if (BufferLength < sizeof(FILE_EA_INFORMATION))
+                Status = STATUS_BUFFER_TOO_SMALL;
+            else
+            {
+                PNTFS_ATTR_CONTEXT EaContext;
+                PFILE_RECORD_HEADER FileRecord;
+                ULONG EaSize = 0;
+
+                FileRecord = ExAllocateFromNPagedLookasideList(&((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->FileRecLookasideList);
+                if (FileRecord &&
+                    NT_SUCCESS(ReadFileRecord((PDEVICE_EXTENSION)DeviceObject->DeviceExtension,
+                                              Fcb->MFTIndex, FileRecord)))
+                {
+                    if (NT_SUCCESS(FindAttribute((PDEVICE_EXTENSION)DeviceObject->DeviceExtension,
+                                                  FileRecord, AttributeEA, L"", 0, &EaContext, NULL)))
+                    {
+                        EaSize = (ULONG)AttributeDataLength(EaContext->pRecord);
+                        ReleaseAttributeContext(EaContext);
+                    }
+                }
+                if (FileRecord)
+                    ExFreeToNPagedLookasideList(&((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->FileRecLookasideList, FileRecord);
+
+                ((PFILE_EA_INFORMATION)SystemBuffer)->EaSize = EaSize;
+                BufferLength -= sizeof(FILE_EA_INFORMATION);
+                Status = STATUS_SUCCESS;
+            }
             break;
 
         default:
@@ -650,7 +827,9 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     }
 
     // set the attribute data length
+    DPRINT("NtfsSetEndOfFile: calling SetAttributeDataLength for MFT %I64u size %I64u\n", Fcb->MFTIndex, NewFileSize->QuadPart);
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, NewFileSize);
+    DPRINT("NtfsSetEndOfFile: SetAttributeDataLength returned 0x%lx\n", Status);
     if (!NT_SUCCESS(Status))
     {
         ReleaseAttributeContext(DataContext);
@@ -660,6 +839,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     // now we need to update this file's size in every directory index entry that references it
     // TODO: expand to work with every filename / hardlink stored in the file record.
+    DPRINT("NtfsSetEndOfFile: calling GetBestFileNameFromRecord\n");
     FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
     if (FileNameAttribute == NULL)
     {
@@ -677,6 +857,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     AllocationSize = AttributeAllocatedLength(DataContext->pRecord);
 
+    DPRINT("NtfsSetEndOfFile: calling UpdateFileNameRecord parent=%I64u allocSize=%I64u\n", ParentMFTId, AllocationSize);
     Status = UpdateFileNameRecord(Fcb->Vcb,
                                   ParentMFTId,
                                   &FileName,
@@ -684,11 +865,262 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                                   NewFileSize->QuadPart,
                                   AllocationSize,
                                   CaseSensitive);
+    DPRINT("NtfsSetEndOfFile: UpdateFileNameRecord returned 0x%lx\n", Status);
 
     ReleaseAttributeContext(DataContext);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
+    DPRINT("NtfsSetEndOfFile: returning 0x%lx\n", Status);
     return Status;
+}
+
+/**
+* @name NtfsSetBasicInformation
+* @implemented
+*
+* Sets the basic file information (timestamps and attributes) for a file.
+*/
+static
+NTSTATUS
+NtfsSetBasicInformation(PNTFS_FCB Fcb,
+                        PDEVICE_EXTENSION DeviceExt,
+                        PFILE_BASIC_INFORMATION BasicInfo)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PSTANDARD_INFORMATION StdInfo;
+    NTSTATUS Status;
+
+    DPRINT1("NtfsSetBasicInformation: FCB %p MFT %I64u\n", Fcb, Fcb->MFTIndex);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
+    if (StdInfo == NULL)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    /* Only update fields that the caller provided (non-zero means set) */
+    if (BasicInfo->CreationTime.QuadPart != 0)
+    {
+        StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
+        Fcb->Entry.CreationTime = BasicInfo->CreationTime.QuadPart;
+    }
+    if (BasicInfo->LastAccessTime.QuadPart != 0)
+    {
+        StdInfo->LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+        Fcb->Entry.LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+    }
+    if (BasicInfo->LastWriteTime.QuadPart != 0)
+    {
+        StdInfo->LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+        Fcb->Entry.LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+    }
+    if (BasicInfo->ChangeTime.QuadPart != 0)
+    {
+        StdInfo->ChangeTime = BasicInfo->ChangeTime.QuadPart;
+        Fcb->Entry.ChangeTime = BasicInfo->ChangeTime.QuadPart;
+    }
+    if (BasicInfo->FileAttributes != 0)
+    {
+        StdInfo->FileAttribute = (StdInfo->FileAttribute & ~0x3FB7) |
+                                 (BasicInfo->FileAttributes & 0x3FB7);
+    }
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    DPRINT1("NtfsSetBasicInformation: UpdateFileRecord returned 0x%lx\n", Status);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+static
+BOOLEAN
+NtfsIsDotName(PUNICODE_STRING Name)
+{
+    if (Name->Length == sizeof(WCHAR) &&
+        Name->Buffer[0] == L'.')
+    {
+        return TRUE;
+    }
+
+    if (Name->Length == 2 * sizeof(WCHAR) &&
+        Name->Buffer[0] == L'.' &&
+        Name->Buffer[1] == L'.')
+    {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static
+VOID
+NtfsUpdateFcbPathName(PNTFS_FCB Fcb,
+                      PUNICODE_STRING PathName)
+{
+    WCHAR *ObjectName;
+
+    ASSERT(PathName->Length / sizeof(WCHAR) < MAX_PATH);
+
+    RtlCopyMemory(Fcb->PathName, PathName->Buffer, PathName->Length);
+    Fcb->PathName[PathName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    ObjectName = wcsrchr(Fcb->PathName, L'\\');
+    if (ObjectName != NULL && ObjectName[1] != UNICODE_NULL)
+        Fcb->ObjectName = ObjectName + 1;
+    else
+        Fcb->ObjectName = Fcb->PathName;
+}
+
+static
+NTSTATUS
+NtfsBuildRenamePath(PNTFS_FCB Fcb,
+                    PFILE_RENAME_INFORMATION RenameInfo,
+                    PFILE_OBJECT TargetFileObject,
+                    PUNICODE_STRING FullPath,
+                    PUNICODE_STRING ParentPath,
+                    PUNICODE_STRING LeafName)
+{
+    UNICODE_STRING RenameName;
+    UNICODE_STRING Prefix;
+    UNICODE_STRING LeafComponent;
+    PWCHAR LastSeparator;
+    USHORT TotalLength;
+    BOOLEAN AddSeparator = FALSE;
+    PNTFS_FCB TargetFcb = NULL;
+
+    RenameName.Buffer = RenameInfo->FileName;
+    RenameName.Length = (USHORT)RenameInfo->FileNameLength;
+    RenameName.MaximumLength = RenameName.Length;
+
+    if (RenameName.Length == 0 || FsRtlDoesNameContainWildCards(&RenameName))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    RtlInitEmptyUnicodeString(&Prefix, NULL, 0);
+    LeafComponent = RenameName;
+
+    if (RenameInfo->RootDirectory != NULL)
+    {
+        if (TargetFileObject == NULL || TargetFileObject->FsContext == NULL)
+            return STATUS_INVALID_PARAMETER;
+
+        TargetFcb = TargetFileObject->FsContext;
+        if (TargetFcb->Vcb != Fcb->Vcb)
+            return STATUS_NOT_SAME_DEVICE;
+
+        Prefix.Buffer = TargetFcb->PathName;
+        Prefix.Length = Prefix.MaximumLength = (USHORT)(wcslen(TargetFcb->PathName) * sizeof(WCHAR));
+        AddSeparator = !NtfsFCBIsRoot(TargetFcb);
+    }
+    else if (RenameName.Buffer[0] == L'\\' &&
+             TargetFileObject != NULL &&
+             TargetFileObject->FsContext != NULL)
+    {
+        TargetFcb = TargetFileObject->FsContext;
+        if (TargetFcb->Vcb != Fcb->Vcb)
+            return STATUS_NOT_SAME_DEVICE;
+
+        Prefix.Buffer = TargetFcb->PathName;
+        Prefix.Length = Prefix.MaximumLength = (USHORT)(wcslen(TargetFcb->PathName) * sizeof(WCHAR));
+        AddSeparator = !NtfsFCBIsRoot(TargetFcb);
+
+        LastSeparator = wcsrchr(RenameName.Buffer, L'\\');
+        if (LastSeparator == NULL || LastSeparator[1] == UNICODE_NULL)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        LeafComponent.Buffer = LastSeparator + 1;
+        LeafComponent.Length = (USHORT)(RenameName.Length - ((PUCHAR)LeafComponent.Buffer - (PUCHAR)RenameName.Buffer));
+        LeafComponent.MaximumLength = LeafComponent.Length;
+    }
+    else if (RenameName.Buffer[0] != L'\\')
+    {
+        WCHAR *CurrentName = wcsrchr(Fcb->PathName, L'\\');
+        if (CurrentName == NULL)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        Prefix.Buffer = Fcb->PathName;
+        if (CurrentName == Fcb->PathName)
+            Prefix.Length = Prefix.MaximumLength = sizeof(WCHAR);
+        else
+            Prefix.Length = Prefix.MaximumLength = (USHORT)((CurrentName - Fcb->PathName) * sizeof(WCHAR));
+        AddSeparator = (Prefix.Length != sizeof(WCHAR));
+    }
+
+    if (Prefix.Length != 0)
+    {
+        TotalLength = Prefix.Length + LeafComponent.Length + sizeof(WCHAR);
+        if (AddSeparator)
+            TotalLength += sizeof(WCHAR);
+
+        if (TotalLength / sizeof(WCHAR) >= MAX_PATH)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        FullPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, TotalLength, TAG_NTFS);
+        if (FullPath->Buffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        FullPath->Length = 0;
+        FullPath->MaximumLength = TotalLength;
+
+        RtlCopyMemory(FullPath->Buffer, Prefix.Buffer, Prefix.Length);
+        FullPath->Length = Prefix.Length;
+        if (AddSeparator)
+        {
+            FullPath->Buffer[FullPath->Length / sizeof(WCHAR)] = L'\\';
+            FullPath->Length += sizeof(WCHAR);
+        }
+
+        RtlCopyMemory((PUCHAR)FullPath->Buffer + FullPath->Length,
+                      LeafComponent.Buffer,
+                      LeafComponent.Length);
+        FullPath->Length += LeafComponent.Length;
+        FullPath->Buffer[FullPath->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+    else
+    {
+        if (RenameName.Length / sizeof(WCHAR) >= MAX_PATH)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        FullPath->MaximumLength = RenameName.Length + sizeof(WCHAR);
+        FullPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, FullPath->MaximumLength, TAG_NTFS);
+        if (FullPath->Buffer == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        RtlCopyMemory(FullPath->Buffer, RenameName.Buffer, RenameName.Length);
+        FullPath->Length = RenameName.Length;
+        FullPath->Buffer[FullPath->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
+    LastSeparator = wcsrchr(FullPath->Buffer, L'\\');
+    if (LastSeparator == NULL || LastSeparator[1] == UNICODE_NULL)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    ParentPath->Buffer = FullPath->Buffer;
+    ParentPath->MaximumLength = FullPath->MaximumLength;
+    if (LastSeparator == FullPath->Buffer)
+        ParentPath->Length = sizeof(WCHAR);
+    else
+        ParentPath->Length = (USHORT)((LastSeparator - FullPath->Buffer) * sizeof(WCHAR));
+
+    LeafName->Buffer = LastSeparator + 1;
+    LeafName->Length = (USHORT)(FullPath->Length - ((PUCHAR)LeafName->Buffer - (PUCHAR)FullPath->Buffer));
+    LeafName->MaximumLength = LeafName->Length;
+
+    if (NtfsIsDotName(LeafName))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -728,6 +1160,11 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
+    PFILE_RECORD_HEADER ParentFileRecord = NULL;
+    ULONGLONG ParentMftIndex = NTFS_FILE_ROOT;
+    UNICODE_STRING RenamePath;
+    UNICODE_STRING RenameParentPath;
+    UNICODE_STRING RenameLeafName;
 
     DPRINT("NtfsSetInformation(%p)\n", IrpContext);
 
@@ -735,14 +1172,20 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     Stack = IrpContext->Stack;
     DeviceObject = IrpContext->DeviceObject;
     DeviceExt = DeviceObject->DeviceExtension;
-    FileInformationClass = Stack->Parameters.QueryFile.FileInformationClass;
+    FileInformationClass = Stack->Parameters.SetFile.FileInformationClass;
     FileObject = IrpContext->FileObject;
     Fcb = FileObject->FsContext;
 
-    SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
-    BufferLength = Stack->Parameters.QueryFile.Length;
+    DPRINT("NtfsSetInformation: class=%d FCB=%p\n", (int)FileInformationClass, Fcb);
+    DPRINT("INSTRUMENT: NtfsSetInformation acquiring MainResource exclusive...\n");
 
-    if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
+    SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
+    BufferLength = Stack->Parameters.SetFile.Length;
+    RtlInitEmptyUnicodeString(&RenamePath, NULL, 0);
+    RtlInitEmptyUnicodeString(&RenameParentPath, NULL, 0);
+    RtlInitEmptyUnicodeString(&RenameLeafName, NULL, 0);
+
+    if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
         return NtfsMarkIrpContextForQueue(IrpContext);
@@ -751,6 +1194,26 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     switch (FileInformationClass)
     {
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
+        PFILE_DISPOSITION_INFORMATION DispositionInfo;
+        PFILE_RENAME_INFORMATION RenameInfo;
+        PFILE_POSITION_INFORMATION PositionInfo;
+
+        case FileBasicInformation:
+            Status = NtfsSetBasicInformation(Fcb,
+                                             DeviceExt,
+                                             (PFILE_BASIC_INFORMATION)SystemBuffer);
+            break;
+
+        case FilePositionInformation:
+            if (BufferLength < sizeof(FILE_POSITION_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+            PositionInfo = (PFILE_POSITION_INFORMATION)SystemBuffer;
+            FileObject->CurrentByteOffset = PositionInfo->CurrentByteOffset;
+            Status = STATUS_SUCCESS;
+            break;
 
         /* TODO: Allocation size is not actually the same as file end for NTFS,
            however, few applications are likely to make the distinction. */
@@ -766,6 +1229,114 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                       &EndOfFileInfo->EndOfFile);
             break;
 
+        case FileDispositionInformation:
+            if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            DispositionInfo = (PFILE_DISPOSITION_INFORMATION)SystemBuffer;
+            if (!DispositionInfo->DeleteFile)
+            {
+                ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
+            if (NtfsFCBIsDirectory(Fcb))
+            {
+                Status = STATUS_FILE_IS_A_DIRECTORY;
+                break;
+            }
+
+            if (Fcb->OpenHandleCount <= 1)
+            {
+                Status = NtfsDeleteFileRecord(DeviceExt,
+                                              Fcb,
+                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+                if (NT_SUCCESS(Status))
+                    ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
+            }
+            else
+            {
+                SetFlag(Fcb->Flags, FCB_DELETE_PENDING);
+                Status = STATUS_SUCCESS;
+            }
+            break;
+
+        case FileRenameInformation:
+        {
+            PNTFS_FCB TargetFcb = NULL;
+
+            if (BufferLength < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            RenameInfo = (PFILE_RENAME_INFORMATION)SystemBuffer;
+            if (BufferLength < FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + RenameInfo->FileNameLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (Fcb->Stream[0] != UNICODE_NULL)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            Status = NtfsBuildRenamePath(Fcb,
+                                         RenameInfo,
+                                         Stack->Parameters.SetFile.FileObject,
+                                         &RenamePath,
+                                         &RenameParentPath,
+                                         &RenameLeafName);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            if (Stack->Parameters.SetFile.FileObject != NULL &&
+                Stack->Parameters.SetFile.FileObject->FsContext != NULL)
+            {
+                TargetFcb = Stack->Parameters.SetFile.FileObject->FsContext;
+                if (TargetFcb->Vcb == Fcb->Vcb)
+                {
+                    ParentMftIndex = TargetFcb->MFTIndex;
+                }
+            }
+
+            if (ParentMftIndex == NTFS_FILE_ROOT &&
+                (RenameParentPath.Length != sizeof(WCHAR) ||
+                 RenameParentPath.Buffer[0] != L'\\'))
+            {
+                Status = NtfsLookupFile(DeviceExt,
+                                        &RenameParentPath,
+                                        BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                        &ParentFileRecord,
+                                        &ParentMftIndex);
+                if (!NT_SUCCESS(Status))
+                    break;
+
+                if (!(ParentFileRecord->Flags & FRH_DIRECTORY))
+                {
+                    Status = STATUS_NOT_A_DIRECTORY;
+                    break;
+                }
+            }
+
+            Status = NtfsRenameFileRecord(DeviceExt,
+                                          Fcb,
+                                          ParentMftIndex,
+                                          &RenameLeafName,
+                                          RenameInfo->ReplaceIfExists,
+                                          BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+            if (NT_SUCCESS(Status))
+                NtfsUpdateFcbPathName(Fcb, &RenamePath);
+            break;
+        }
+
         // TODO: all other information classes
 
         default:
@@ -773,14 +1344,20 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = STATUS_NOT_IMPLEMENTED;
     }
 
+    if (ParentFileRecord != NULL)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+    if (RenamePath.Buffer != NULL)
+        ExFreePoolWithTag(RenamePath.Buffer, TAG_NTFS);
+
     ExReleaseResourceLite(&Fcb->MainResource);
 
     if (NT_SUCCESS(Status))
         Irp->IoStatus.Information =
-        Stack->Parameters.QueryFile.Length - BufferLength;
+        Stack->Parameters.SetFile.Length - BufferLength;
     else
         Irp->IoStatus.Information = 0;
 
+    DPRINT("NtfsSetInformation: returning 0x%lx\n", Status);
     return Status;
 }
 /* EOF */
