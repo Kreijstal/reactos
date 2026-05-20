@@ -120,3 +120,16 @@ cabs==_cabs
 hypot==_hypot
 logb==_logb
 nextafter==_nextafter
+; POSIX large-file aliases pulled in by mingw-w64 GCC 16.x libstdc++ and
+; libmingwex.  basic_file.cc and ext/stdio_sync_filebuf.h unconditionally
+; call lseek64 / fstat64 / fseeko64 / ftello64 instead of the Microsoft
+; _lseeki64 / _fstati64 / _fseeki64 / _ftelli64 names earlier libstdc++
+; versions used.  msvcrt.dll already exports the underlying MS-CRT entry
+; points, so these are pure name aliases.
+lseek64==_lseeki64
+fstat64==_fstati64
+fseeko64==_fseeki64
+ftello64==_ftelli64
+; New-in-mingw-w64 16.x: libmingwex's _assert.o references an msvcrt entry
+; point with the __msvcrt_ prefix.  Same signature as _assert().
+__msvcrt_assert==_assert
