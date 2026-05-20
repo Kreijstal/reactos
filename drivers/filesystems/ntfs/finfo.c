@@ -906,7 +906,7 @@ NtfsSetBasicInformation(PNTFS_FCB Fcb,
     PSTANDARD_INFORMATION StdInfo;
     NTSTATUS Status;
 
-    DPRINT1("NtfsSetBasicInformation: FCB %p MFT %I64u\n", Fcb, Fcb->MFTIndex);
+    DPRINT("NtfsSetBasicInformation: FCB %p MFT %I64u\n", Fcb, Fcb->MFTIndex);
 
     /* Invalidate FCB-level MFT record cache: timestamps / attributes about
      * to change on disk. */
@@ -958,7 +958,7 @@ NtfsSetBasicInformation(PNTFS_FCB Fcb,
     }
 
     Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
-    DPRINT1("NtfsSetBasicInformation: UpdateFileRecord returned 0x%lx\n", Status);
+    DPRINT("NtfsSetBasicInformation: UpdateFileRecord returned 0x%lx\n", Status);
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
     return Status;
