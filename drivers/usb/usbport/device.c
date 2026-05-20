@@ -1068,6 +1068,49 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
     DeviceHandle->PortNumber = Port;
     DeviceHandle->HubDeviceHandle = HubDeviceHandle;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB3)
+    {
+        USB_PORT_STATUS PortStatusView;
+        UCHAR NegotiatedSpeed;
+
+        /*
+         * USB 3.0 root-hub miniports report NegotiatedDeviceSpeed in bits
+         * 10-12 of the port status word (Windows 10 port-status layout).
+         * The 3-bit code uses the xHCI PORTSC.PortSpeed encoding:
+         *   1 = Full, 2 = Low, 3 = High, 4 = SuperSpeed.
+         */
+        PortStatusView.AsUshort16 = PortStatus;
+        NegotiatedSpeed = (UCHAR)PortStatusView.Usb30PortStatus.NegotiatedDeviceSpeed;
+
+        switch (NegotiatedSpeed)
+        {
+            case 1:
+                DeviceHandle->DeviceSpeed = UsbFullSpeed;
+                break;
+            case 2:
+                DeviceHandle->DeviceSpeed = UsbLowSpeed;
+                break;
+            case 3:
+                DeviceHandle->DeviceSpeed = UsbHighSpeed;
+                break;
+            case 4:
+            default:
+                DeviceHandle->DeviceSpeed = UsbSuperSpeed;
+                break;
+            case 0:
+                /* Field unpopulated: fall back to legacy port-status bits. */
+                if (PortStatus & USB_PORT_STATUS_LOW_SPEED)
+                    DeviceHandle->DeviceSpeed = UsbLowSpeed;
+                else if (PortStatus & USB_PORT_STATUS_HIGH_SPEED)
+                    DeviceHandle->DeviceSpeed = UsbHighSpeed;
+                else
+                    DeviceHandle->DeviceSpeed = UsbFullSpeed;
+                break;
+        }
+    }
+    else
+#endif
     if (PortStatus & USB_PORT_STATUS_LOW_SPEED)
     {
         DeviceHandle->DeviceSpeed = UsbLowSpeed;
@@ -1192,10 +1235,16 @@ USBPORT_CreateDevice(IN OUT PUSB_DEVICE_HANDLE *pUsbdDeviceHandle,
             
             DPRINT1("USBPORT_CreateDevice: MaxPacketSize=%d\n", MaxPacketSize);
 
+            /* USB 2.x devices encode bMaxPacketSize0 as the actual EP0 packet
+             * size in bytes (must be 8, 16, 32, or 64).
+             * USB 3.x devices encode bMaxPacketSize0 as a log2 exponent; the
+             * only legal value is 9, meaning 2^9 = 512 bytes. */
             if (MaxPacketSize == 8 ||
                 MaxPacketSize == 16 ||
                 MaxPacketSize == 32 ||
-                MaxPacketSize == 64)
+                MaxPacketSize == 64 ||
+                (MaxPacketSize == 9 &&
+                 DeviceHandle->DeviceDescriptor.bcdUSB >= 0x0300))
             {
                 DPRINT1("USBPORT_CreateDevice: Success! Valid MaxPacketSize\n");
                 USBPORT_AddDeviceHandle(FdoDevice, DeviceHandle);
@@ -1410,7 +1459,18 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
     DeviceHandle->DeviceAddress = DeviceAddress;
     Endpoint = DeviceHandle->PipeHandle.Endpoint;
 
-    Endpoint->EndpointProperties.TotalMaxPacketSize = DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+    /* Translate bMaxPacketSize0: USB 2.x stores literal bytes, USB 3.x stores
+     * a log2 exponent (only 9 is legal -> 512). */
+    if (DeviceHandle->DeviceDescriptor.bcdUSB >= 0x0300)
+    {
+        Endpoint->EndpointProperties.TotalMaxPacketSize =
+            1u << DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+    }
+    else
+    {
+        Endpoint->EndpointProperties.TotalMaxPacketSize =
+            DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
+    }
     Endpoint->EndpointProperties.DeviceAddress = DeviceAddress;
 
   //  Status = USBPORT_ReopenPipe(FdoDevice, Endpoint); ???
@@ -1446,11 +1506,15 @@ USBPORT_InitializeDevice(IN PUSBPORT_DEVICE_HANDLE DeviceHandle,
                     TransferedLen);
         }
 
-        /* Use the known bMaxPacketSize0 (was obtained prior to SetAddress) */
+        /* Use the known bMaxPacketSize0 (was obtained prior to SetAddress).
+         * USB 2.x: literal byte count (8/16/32/64).
+         * USB 3.x: log2 exponent; only 9 is legal (2^9 = 512). */
         MaxPacketSize = DeviceHandle->DeviceDescriptor.bMaxPacketSize0;
 
         if (!(MaxPacketSize == 8 || MaxPacketSize == 16 ||
-              MaxPacketSize == 32 || MaxPacketSize == 64))
+              MaxPacketSize == 32 || MaxPacketSize == 64 ||
+              (MaxPacketSize == 9 &&
+               DeviceHandle->DeviceDescriptor.bcdUSB >= 0x0300)))
         {
             DPRINT1("USBPORT_InitializeDevice: Invalid MPS0 %u\n", MaxPacketSize);
             Status = STATUS_DEVICE_DATA_ERROR;

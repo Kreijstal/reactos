@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
 
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/virtio)
 
@@ -20,7 +20,8 @@ else()
     # is resynced.
     target_compile_options(viostor PRIVATE
         -Wno-switch -Wno-unused-function -Wno-unused-variable
-        -Wno-unused-but-set-variable -Wno-attributes -Wno-overflow)
+        -Wno-unused-but-set-variable -Wno-old-style-declaration
+        -Wno-attributes -Wno-overflow)
 endif()
 
 target_compile_definitions(viostor PUBLIC

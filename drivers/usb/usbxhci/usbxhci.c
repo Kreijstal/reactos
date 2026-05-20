@@ -890,6 +890,20 @@ XHCI_InitializeHardware(IN PXHCI_EXTENSION XhciExtension)
     StructuralParams_1.AsULONG = READ_REGISTER_ULONG(BaseIoAdress + XHCI_HCSP1); // HCSPARAMS1 register
 
     XhciExtension->NumberOfPorts = StructuralParams_1.NumberOfPorts;
+    RtlZeroMemory(XhciExtension->PortConnectStatus, sizeof(XhciExtension->PortConnectStatus));
+    RtlZeroMemory(XhciExtension->PortConnectChange, sizeof(XhciExtension->PortConnectChange));
+    {
+        ULONG Port;
+
+        for (Port = 1; Port <= XhciExtension->NumberOfPorts && Port <= XHCI_MAX_PORTS; Port++)
+        {
+            PULONG PortReg = OperationalRegs + XHCI_PORTSC + ((Port - 1) * 4);
+            XHCI_PORT_STATUS_CONTROL PortStatus;
+
+            PortStatus.AsULONG = READ_REGISTER_ULONG(PortReg);
+            XhciExtension->PortConnectStatus[Port] = PortStatus.CurrentConnectStatus ? 1 : 0;
+        }
+    }
     
     DPRINT1("XHCI_InitializeHardware: xHCI controller supports %d device slots\n", 
             StructuralParams_1.NumberOfDeviceSlots);
@@ -1453,51 +1467,57 @@ XHCI_Get32BitFrameNumber(IN PVOID xhciExtension)
 {
     PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     PULONG RunTimeRegisterBase;
-    ULONG FrameNumber;
-    static ULONG FrameQueryCount = 0;
-    static ULONG LastFrameNumber = 0;
-    static LARGE_INTEGER LastQueryTime = {0};
-    LARGE_INTEGER CurrentTime;
-    LARGE_INTEGER TimeDiff;
-    
+    ULONG Fn;
+    ULONG Stored;
+    ULONG Composed;
+
+    /* xHCI MFINDEX is a 14-bit register (0..0x3FFF) that increments every
+     * microframe (125us) and wraps every ~2s.  usbport.sys's scheduler
+     * expects a monotonically increasing 32-bit frame number from
+     * RegPacket.Get32BitFrameNumber and uses `FrameNumber > Endpoint->FrameNumber`
+     * to decide when an endpoint is ready for state-change processing.
+     *
+     * A stalling / 14-bit-wrapping counter (as the previous 1 ms-cached
+     * implementation produced) makes that compare fail forever and results
+     * in a DPC storm from USBPORT_IsrDpcHandler via InterruptNextSOF.
+     *
+     * We read MFINDEX live on every call (no time-based cache) and keep
+     * a software 32-bit value in XhciExtension->FrameHighPart: on each
+     * call we detect wrap by comparing the live low 14 bits to the low
+     * 14 bits we stored last time and, if it regressed, bump the upper
+     * part by one full 14-bit range.
+     *
+     * Callers hold MiniportSpinLock at DISPATCH_LEVEL so the RMW on
+     * FrameHighPart is serialised with the other miniport entry points. */
+#define XHCI_MFINDEX_MASK       0x3FFFUL
+#define XHCI_MFINDEX_RANGE      0x4000UL
+
     if (!XhciExtension)
     {
         return 0;
     }
-    
-    // Get current time to avoid excessive register reads
-    KeQuerySystemTime(&CurrentTime);
-    
-    // If we've queried recently (within 1ms), return cached value
-    if (LastQueryTime.QuadPart != 0)
-    {
-        TimeDiff.QuadPart = CurrentTime.QuadPart - LastQueryTime.QuadPart;
-        // If less than 1ms has passed, return cached frame number
-        if (TimeDiff.QuadPart < 10000) // 1ms in 100ns units
-        {
-            return LastFrameNumber;
-        }
-    }
-    
+
     RunTimeRegisterBase = XhciExtension->RunTimeRegisterBase;
-    
-    // Read the Microframe Index Register (MFINDEX)
-    // MFINDEX contains a 14-bit value that increments every 125μs (microframe)
-    // We return the microframe index as the frame number
-    FrameNumber = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_MFINDEX) & 0x3FFF;
-    
-    // Cache the result
-    LastFrameNumber = FrameNumber;
-    LastQueryTime = CurrentTime;
-    
-    FrameQueryCount++;
-    if ((FrameQueryCount % 5000) == 1)
+    if (!RunTimeRegisterBase)
     {
-        DPRINT1("XHCI_Get32BitFrameNumber: query #%d returning frame number %d\n", 
-                FrameQueryCount, FrameNumber);
+        return XhciExtension->FrameHighPart;
     }
-    
-    return FrameNumber;
+
+    Fn = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_MFINDEX) & XHCI_MFINDEX_MASK;
+    Stored = XhciExtension->FrameHighPart;
+
+    /* If the live low part is below the low part we stored last time, the
+     * hardware counter wrapped at least once - advance the epoch by the
+     * full 14-bit range.  We also advance on exact equality-from-above,
+     * i.e. only when Fn strictly wrapped backwards. */
+    if (Fn < (Stored & XHCI_MFINDEX_MASK))
+    {
+        Stored = (Stored & ~XHCI_MFINDEX_MASK) + XHCI_MFINDEX_RANGE;
+    }
+
+    Composed = (Stored & ~XHCI_MFINDEX_MASK) | Fn;
+    XhciExtension->FrameHighPart = Composed;
+    return Composed;
 }
 
 VOID
@@ -1795,6 +1815,17 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
                               USB_MINIPORT_FLAGS_USB2 |
                               USB_MINIPORT_FLAGS_POLLING |
                               USB_MINIPORT_FLAGS_WAKE_SUPPORT;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /*
+     * Advertise SuperSpeed capability so usbport will honour the
+     * Usb30PortStatus.NegotiatedDeviceSpeed field populated by
+     * XHCI_RH_GetPortStatus. Without this, USBPORT_CreateDevice falls back
+     * to the legacy USB 2.0 port-status bits and misclassifies SuperSpeed
+     * connects as UsbHighSpeed, producing xHCI slot-context Speed=3 and a
+     * Parameter Error on CONFIGURE_ENDPOINT for EP MaxPacketSize=1024.
+     */
+    RegPacket.MiniPortFlags |= USB_MINIPORT_FLAGS_USB3;
+#endif
 
     RegPacket.MiniPortBusBandwidth = TOTAL_USB30_BUS_BANDWIDTH;
 

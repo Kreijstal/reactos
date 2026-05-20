@@ -106,20 +106,24 @@ typedef struct _NPI_PROVIDER_CHARACTERISTICS {
 } NPI_PROVIDER_CHARACTERISTICS;
 
 NTSTATUS
+NTAPI
 NmrRegisterClient(
   _In_ PNPI_CLIENT_CHARACTERISTICS ClientCharacteristics,
   _In_opt_ __drv_aliasesMem PVOID ClientContext,
   _Out_ PHANDLE NmrClientHandle);
 
 NTSTATUS
+NTAPI
 NmrDeregisterClient(
   _In_ HANDLE NmrClientHandle);
 
 NTSTATUS
+NTAPI
 NmrWaitForClientDeregisterComplete(
   _In_ HANDLE NmrClientHandle);
 
 NTSTATUS
+NTAPI
 NmrClientAttachProvider(
   _In_ HANDLE NmrBindingHandle,
   _In_ __drv_aliasesMem PVOID ClientBindingContext,
@@ -128,26 +132,73 @@ NmrClientAttachProvider(
   _Out_ CONST VOID* *ProviderDispatch);
 
 VOID
+NTAPI
 NmrClientDetachProviderComplete(
   _In_ HANDLE NmrBindingHandle);
 
 NTSTATUS
+NTAPI
 NmrRegisterProvider(
   _In_ PNPI_PROVIDER_CHARACTERISTICS ProviderCharacteristics,
   _In_opt_ __drv_aliasesMem PVOID ProviderContext,
   _Out_ PHANDLE NmrProviderHandle);
 
 NTSTATUS
+NTAPI
 NmrDeregisterProvider(
   _In_ HANDLE NmrProviderHandle);
 
 NTSTATUS
+NTAPI
 NmrWaitForProviderDeregisterComplete(
   _In_ HANDLE NmrProviderHandle);
 
 VOID
+NTAPI
 NmrProviderDetachClientComplete(
   _In_ HANDLE NmrBindingHandle);
+
+#endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
+
+
+/* ============================================================================
+ *  Kernel-mode counterparts of the user-mode netioapi.h v2 API family.
+ *  Added on the dev-nt6-1 branch so kernel callers (WFP callouts, NDIS 6
+ *  protocol drivers) can use the same interface identifier helpers without
+ *  pulling in the user-mode psdk netioapi.h.
+ *
+ *  These forward to the same implementation that backs user-mode iphlpapi.
+ *  At this stage the calls are stubs; wire them up properly in Phase F/G.
+ * ============================================================================ */
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+
+/* MIB_IF_ROW2 and friends already live in the psdk netioapi.h, which is
+ * designed to be includable from kernel code too (it only needs ifdef.h
+ * and nldef.h). Kernel consumers should include <netioapi.h> directly
+ * via the psdk search path after including <ws2ipdef.h>. The declarations
+ * below cover just the helpers that the kernel-mode netio.sys exports
+ * for its own clients. */
+
+/* ConvertInterface* helpers — these exist in user-mode iphlpapi and in
+ * kernel-mode netio.sys with identical signatures. Declare them here so
+ * kernel callers don't have to include the psdk header. */
+NTSTATUS
+NTAPI
+ConvertInterfaceLuidToIndexKernel(
+  _In_  CONST ULONG64 *InterfaceLuid,
+  _Out_ PULONG         InterfaceIndex);
+
+NTSTATUS
+NTAPI
+ConvertInterfaceIndexToLuidKernel(
+  _In_  ULONG    InterfaceIndex,
+  _Out_ ULONG64* InterfaceLuid);
+
+/* FreeMibTable — symmetric counterpart to user-mode FreeMibTable */
+VOID
+NTAPI
+FreeMibTableKernel(
+  _Inout_ PVOID Table);
 
 #endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
 

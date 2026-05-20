@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x600)
 
 include_directories(
@@ -42,4 +42,3 @@ set_target_cpp_properties(zipfldr WITH_EXCEPTIONS)
 add_importlibs(zipfldr oleaut32 ole32 shlwapi comctl32 shell32 user32 advapi32 msvcrt kernel32 ntdll)
 add_pch(zipfldr precomp.h SOURCE)
 add_cd_file(TARGET zipfldr DESTINATION reactos/system32 FOR all)
-

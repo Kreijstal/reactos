@@ -620,19 +620,23 @@ typedef struct _LOADER_PARAMETER_EXTENSION
     ULONG VsmConfigured:1;
     ULONG IumEnabled:1;
 #endif
+    /* ReactOS-specific UEFI boot flag — used by freeldr/winldr.c regardless
+     * of NT target. Steal one bit from each version's Reserved count below. */
+#ifdef __REACTOS__
+    ULONG BootViaEFI:1;
+#endif
 #if (OSVER(NTDDI_VERSION) == NTDDI_LONGHORN)
-    ULONG Reserved:31;
+    ULONG Reserved:30;
 #elif (NTDDI_VERSION == NTDDI_WIN7)
-    ULONG Reserved:29;
-#elif (NTDDI_VERSION == NTDDI_WIN8)
     ULONG Reserved:28;
+#elif (NTDDI_VERSION == NTDDI_WIN8)
+    ULONG Reserved:27;
 #elif (NTDDI_VERSION == NTDDI_WINBLUE)
-    ULONG Reserved:25;
+    ULONG Reserved:24;
 #elif (NTDDI_VERSION == NTDDI_WIN10)
-    ULONG Reserved:22;
+    ULONG Reserved:21;
 #elif defined(__REACTOS__)
     ULONG BootViaWinload:1;
-    ULONG BootViaEFI:1;
     ULONG Reserved:30;
 #endif
 /********************************/

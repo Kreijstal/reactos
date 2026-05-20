@@ -469,7 +469,7 @@ OFFSET(PbRspBase, KPRCB, RspBase),
 OFFSET(PbPrcbLock, KPRCB, PrcbLock),
 #if (NTDDI_VERSION >= NTDDI_VISTA)
 OFFSET(PbPriorityState, KPRCB, PriorityState),
-#endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
+#endif
 OFFSET(PbSetMember, KPRCB, SetMember), // not Win 10
 OFFSET(PbProcessorState, KPRCB, ProcessorState),
 OFFSET(PbCpuType, KPRCB, CpuType),
@@ -858,18 +858,16 @@ SIZE(XsaHeaderLength, XSAVE_AREA_HEADER),
 
 //CONSTANT(CFlushSize),
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
 HEADER("KTHREAD offsets"),
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-OFFSET(ThTebMappedLowVa, KTHREAD, TebMappedLowVa), // not Win 10
+OFFSET(ThTebMappedLowVa, KTHREAD, TebMappedLowVa),
 OFFSET(ThUcb, KTHREAD, Ucb),
-//OFFSET(ThBase, KTHREAD, Base?),
-//OFFSET(ThLimit, KTHREAD, Limit?),
 #endif
 
 #if (NTDDI_VERSION >= NTDDI_VISTA)
 HEADER("KPROCESS offsets"),
-OFFSET(PrLdtSystemDescriptor, KPROCESS, LdtSystemDescriptor), // not Win 10
-OFFSET(PrLdtBaseAddress, KPROCESS, LdtBaseAddress), // not Win 10
+OFFSET(PrLdtSystemDescriptor, KPROCESS, LdtSystemDescriptor),
+OFFSET(PrLdtBaseAddress, KPROCESS, LdtBaseAddress),
 #endif
 
 
@@ -1047,7 +1045,10 @@ OFFSET(KTHREAD_TrapFrame, KTHREAD, TrapFrame),
 OFFSET(KTHREAD_PreviousMode, KTHREAD, PreviousMode),
 OFFSET(KTHREAD_KernelStack, KTHREAD, KernelStack),
 OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
+/* KTHREAD.LargeStack lives in the pre-Win8 KTHREAD layout. */
+#if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
+#endif
 
 HEADER("KINTERRUPT"),
 OFFSET(KINTERRUPT_Type, KINTERRUPT, Type),

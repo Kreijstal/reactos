@@ -200,6 +200,7 @@ static void test_Alloc(void)
     ok(res == TRUE, "Expected TRUE, got %d\n", res);
 }
 
+#if _WIN32_WINNT >= 0x0600
 static void test_LoadIconWithScaleDown(void)
 {
     static const WCHAR nonexisting_fileW[] = {'n','o','n','e','x','i','s','t','i','n','g','.','i','c','o',0};
@@ -337,6 +338,7 @@ static void test_LoadIconWithScaleDown(void)
     DeleteFileW(icon_path);
     FreeLibrary(hinst);
 }
+#endif
 
 static void check_class( const char *name, int must_exist, UINT style, UINT ignore, BOOL v6 )
 {
@@ -427,7 +429,9 @@ START_TEST(misc)
 
     test_comctl32_classes(TRUE);
     test_builtin_classes();
+#if _WIN32_WINNT >= 0x0600
     test_LoadIconWithScaleDown();
+#endif
 
     unload_v6_module(ctx_cookie, hCtx);
 }

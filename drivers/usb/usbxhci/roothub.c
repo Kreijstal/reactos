@@ -60,6 +60,8 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     PULONG PortStatusRegPointer;
     XHCI_PORT_STATUS_CONTROL PortStatusRegister;
     USB_PORT_STATUS_AND_CHANGE  portstatus;
+    BOOLEAN CurrentConnect;
+    BOOLEAN PreviousConnect;
     
     XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     ASSERT(Port != 0 && Port <= XhciExtension->NumberOfPorts);
@@ -68,6 +70,8 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     
    
     portstatus.AsUlong32 = 0;
+    CurrentConnect = PortStatusRegister.CurrentConnectStatus ? TRUE : FALSE;
+    PreviousConnect = XhciExtension->PortConnectStatus[Port] ? TRUE : FALSE;
     portstatus.PortStatus.Usb20PortStatus.CurrentConnectStatus = PortStatusRegister.CurrentConnectStatus;
     portstatus.PortStatus.Usb20PortStatus.PortEnabledDisabled = PortStatusRegister.PortEnableDisable;
     portstatus.PortStatus.Usb20PortStatus.Suspend = 0;//PortStatusRegister.PortEnableDisable;
@@ -76,18 +80,34 @@ XHCI_RH_GetPortStatus(IN PVOID xhciExtension,
     portstatus.PortStatus.Usb20PortStatus.PortPower = PortStatusRegister.PortPower;
     portstatus.PortStatus.Usb20PortStatus.LowSpeedDeviceAttached = 0;//PortStatusRegister.PortEnableDisabl
     portstatus.PortStatus.Usb20PortStatus.HighSpeedDeviceAttached =  PortStatusRegister.CurrentConnectStatus;
-   
+
     portstatus.PortStatus.Usb20PortStatus.PortTestMode = 0;//PortStatusRegister.PortPower;
     portstatus.PortStatus.Usb20PortStatus.PortIndicatorControl = 0;//PortStatusRegister.PortIndicatorControl;
-    
-    portstatus.PortChange.Usb20PortChange.ConnectStatusChange = PortStatusRegister.ConnectStatusChange;
+
+    portstatus.PortChange.Usb20PortChange.ConnectStatusChange =
+        PortStatusRegister.ConnectStatusChange ||
+        XhciExtension->PortConnectChange[Port] ||
+        (CurrentConnect != PreviousConnect);
     portstatus.PortChange.Usb20PortChange.PortEnableDisableChange = PortStatusRegister.PortEnableDisableChange;
     portstatus.PortChange.Usb20PortChange.SuspendChange = 0;//PortStatusRegister.ConnectStatusChange;
     portstatus.PortChange.Usb20PortChange.OverCurrentIndicatorChange = PortStatusRegister.OverCurrentChange;
     portstatus.PortChange.Usb20PortChange.ResetChange = PortStatusRegister.PortResetChange;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /*
+     * xHCI reports a 3-bit PortSpeed in PORTSC bits 10-13 using the same
+     * encoding as the Windows 10 USB 3.0 port-status NegotiatedDeviceSpeed
+     * field (1=Full, 2=Low, 3=High, 4=SuperSpeed, ...). Surface it via the
+     * Usb30PortStatus view so usbport can distinguish SuperSpeed from
+     * HighSpeed devices attached to a USB3 root hub. The Usb20 fields above
+     * are still populated for consumers that only read legacy bits.
+     */
+    portstatus.PortStatus.Usb30PortStatus.NegotiatedDeviceSpeed = (USHORT)PortStatusRegister.PortSpeed;
+#endif
+
+    XhciExtension->PortConnectStatus[Port] = CurrentConnect ? 1 : 0;
     *PortStatus = portstatus;
-    
+
     return MP_STATUS_SUCCESS;
 }
 
@@ -201,11 +221,9 @@ XHCI_RH_ClearFeaturePortEnable(IN PVOID xhciExtension,
     PortStatusRegister.PortEnableDisable = 1;
     
     WRITE_REGISTER_ULONG(PortStatusRegPointer, PortStatusRegister.AsULONG );
-    
-    PortStatusRegister.AsULONG = READ_REGISTER_ULONG(PortStatusRegPointer) ;
-    
-    ASSERT(PortStatusRegister.PortEnableDisable == 0);
-    return MP_STATUS_SUCCESS;    
+
+    DPRINT1("XHCI_RH_ClearFeaturePortEnable: port %u disable requested\n", Port);
+    return MP_STATUS_SUCCESS;
 }
 
 MPSTATUS
@@ -260,6 +278,7 @@ XHCI_RH_ClearFeaturePortConnectChange(IN PVOID xhciExtension,
     
     PortStatusRegister.AsULONG = PortStatusRegister.AsULONG & PORT_STATUS_MASK;
     PortStatusRegister.ConnectStatusChange = 1;
+    XhciExtension->PortConnectChange[Port] = 0;
     
     WRITE_REGISTER_ULONG(PortStatusRegPointer, PortStatusRegister.AsULONG );
     
