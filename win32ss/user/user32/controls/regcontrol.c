@@ -68,6 +68,7 @@ static const struct
     { &IME_builtin_class,       FNID_IME,       ICLS_IME},
 };
 
+
 BOOL WINAPI RegisterSystemControls(VOID)
 {
     WNDCLASSEXW WndClass;
@@ -211,3 +212,17 @@ BOOL WINAPI RegisterClientPFN(VOID)
   
   return NT_SUCCESS(Status) ? TRUE : FALSE;
 }
+
+#if defined(BUILD_WOW6432)
+    
+/* FIXME? */
+WNDPROC GETPFNCLIENTA(int fnid)
+{
+    return WOW64_CAST_TO_PTR(((UINT64*)&pfnClientA)[fnid - FNID_FIRST]);
+}
+
+WNDPROC GETPFNCLIENTW(int fnid)
+{
+    return WOW64_CAST_TO_PTR(((UINT64*)&pfnClientW)[fnid - FNID_FIRST]);
+}
+#endif

@@ -252,7 +252,7 @@ DefineDosDeviceW(
     WPARAM wParam;
 
     /* Get status about local device mapping */
-    LUIDDeviceMapsEnabled = BaseStaticServerData->LUIDDeviceMapsEnabled;
+    LUIDDeviceMapsEnabled = WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, LUIDDeviceMapsEnabled);
 
     /* Validate input & flags */
     if ((dwFlags & 0xFFFFFFE0) ||
@@ -325,6 +325,7 @@ DefineDosDeviceW(
     DefineDosDeviceRequest->DeviceName.MaximumLength = CsrAllocateMessagePointer(CaptureBuffer,
                                                                                  DeviceNameU.MaximumLength,
                                                                                  (PVOID*)&DefineDosDeviceRequest->DeviceName.Buffer);
+    
     /* And copy it while upcasing it */
     RtlUpcaseUnicodeString(&DefineDosDeviceRequest->DeviceName, &DeviceNameU, FALSE);
 
@@ -334,6 +335,7 @@ DefineDosDeviceW(
         DefineDosDeviceRequest->TargetPath.MaximumLength = CsrAllocateMessagePointer(CaptureBuffer,
                                                                                      NtTargetPathU.MaximumLength,
                                                                                      (PVOID*)&DefineDosDeviceRequest->TargetPath.Buffer);
+        
         RtlCopyUnicodeString(&DefineDosDeviceRequest->TargetPath, &NtTargetPathU);
 
         if (!(dwFlags & DDD_RAW_TARGET_PATH))
@@ -655,7 +657,7 @@ QueryDosDeviceW(
          * Global?? for global devices
          */
         GlobalNeeded = FALSE;
-        if (BaseStaticServerData->LUIDDeviceMapsEnabled)
+        if (WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, LUIDDeviceMapsEnabled))
         {
             /* Assume ?? == Global?? */
             IsGlobal = TRUE;
@@ -808,7 +810,8 @@ QueryDosDeviceW(
         }
 
         /* Now, if we had to handle GLOBAL??, go for it! */
-        if (BaseStaticServerData->LUIDDeviceMapsEnabled && NT_SUCCESS(Status) && GlobalNeeded)
+        if (WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, LUIDDeviceMapsEnabled) &&
+            NT_SUCCESS(Status) && GlobalNeeded)
         {
             NtClose(DirectoryHandle);
             DirectoryHandle = 0;

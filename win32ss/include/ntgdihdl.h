@@ -13,6 +13,21 @@
 
 #include <winddi.h>
 
+/* WoW64 cast macros: identity on native builds, pointer-width conversion on WoW64 */
+#ifndef WOW64_CAST_TO_PTR
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#define WOW64_CAST_TO_PTR(x) (x)
+#define WOW64_CAST_FROM_PTR(x) (x)
+#define WOW64_CAST_TO_HANDLE(x) (x)
+#define WOW64_CAST_FROM_HANDLE(x) (x)
+#else
+#define WOW64_CAST_TO_PTR(x) ((PVOID)(ULONG_PTR)(x))
+#define WOW64_CAST_FROM_PTR(x) ((UINT64)(ULONG_PTR)(x))
+#define WOW64_CAST_TO_HANDLE(x) ((HANDLE)(ULONG_PTR)(x))
+#define WOW64_CAST_FROM_HANDLE(x) ((UINT64)(ULONG_PTR)(x))
+#endif
+#endif
+
 /* DEFINES *******************************************************************/
 
 /* GDI handle table can hold 0x10000 handles */
@@ -202,7 +217,11 @@
 
 typedef struct _GDI_TABLE_ENTRY
 {
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
     PVOID KernelData; /* Points to the kernel mode structure */
+#else
+    UINT64 KernelData;
+#endif
     DWORD ProcessId;  /* process id that created the object, 0 for stock objects */
     union{            /* temp union structure. */
     LONG  Type;       /* the first 16 bit is the object type including the stock obj flag, the last 16 bits is just the object type */
@@ -211,7 +230,11 @@ typedef struct _GDI_TABLE_ENTRY
     UCHAR  ObjectType; /* objt */
     UCHAR  Flags;      /* Flags */
     };};
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
     PVOID UserData;   /* pUser Points to the user mode structure, usually NULL though */
+#else
+    UINT64 UserData;
+#endif
 } GDI_TABLE_ENTRY, *PGDI_TABLE_ENTRY;
 
 typedef struct _ENTRY
@@ -246,10 +269,31 @@ typedef struct __GDI_SHARED_HANDLE_TABLE /* Must match win32k/include/gdiobj.h *
     GDI_TABLE_ENTRY Entries[GDI_HANDLE_COUNT]; /* Handle table. */
     DEVCAPS         DevCaps;                   /* Shared device capabilities. */
     FLONG           flDeviceUniq;              /* Device settings uniqueness. */
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
     PVOID           pvLangPack;                /* Lanuage Pack. */
+#else
+    UINT64          pvLangPack;
+#endif
     CFONT           cfPublic[GDI_CFONT_MAX];   /* Public Fonts. */
     DWORD           dwCFCount;
 } GDI_SHARED_HANDLE_TABLE, *PGDI_SHARED_HANDLE_TABLE;
+
+#if (defined(BUILD_WOW6432) && defined(_M_IX86))
+    
+typedef struct _MATRIX64
+{
+    FLOAT efM11;
+    FLOAT efM12;
+    FLOAT efM21;
+    FLOAT efM22;
+    FLOAT efDx;
+    FLOAT efDy;
+    FIX fxDx;
+    FIX fxDy;
+    FLONG flAccel;
+} MATRIX64, *PMATRIX64;
+
+#endif
 
 typedef struct _RGN_ATTR
 {
@@ -290,6 +334,7 @@ typedef struct _LDC
  */
 typedef struct _DC_ATTR
 {
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
     PVOID pvLDC;
     ULONG ulDirty_;
     HANDLE hbrush;
@@ -348,6 +393,67 @@ typedef struct _DC_ATTR
     SIZEL szlVirtualDeviceSize;
     POINTL ptlBrushOrigin;
     RGN_ATTR VisRectRegion;
+#else
+    /* WIP */
+    UINT64 pvLDC;
+    ULONG ulDirty_;
+    UINT64 hbrush;
+    UINT64 hpen;
+    COLORREF crBackgroundClr;
+    ULONG ulBackgroundClr;
+    COLORREF crForegroundClr;
+    ULONG ulForegroundClr;
+    COLORREF crBrushClr;
+    ULONG ulBrushClr;
+    COLORREF crPenClr;
+    ULONG ulPenClr;
+    DWORD iCS_CP;
+    INT iGraphicsMode;
+    BYTE jROP2;
+    BYTE jBkMode;
+    BYTE jFillMode;
+    BYTE jStretchBltMode;
+    POINTL ptlCurrent;
+    POINTL ptfxCurrent;
+    LONG lBkMode;
+    LONG lFillMode;
+    LONG lStretchBltMode;
+    FLONG flFontMapper;
+    LONG lIcmMode;
+    UINT64 hcmXform;
+    UINT64 hColorSpace;
+    FLONG flIcmFlags;
+    INT IcmBrushColor;
+    INT IcmPenColor;
+    UINT64 pvLIcm;
+    FLONG flTextAlign;
+    LONG lTextAlign;
+    LONG lTextExtra;
+    LONG lRelAbs;
+    LONG lBreakExtra;
+    LONG cBreak;
+    UINT64 hlfntNew;
+    MATRIX64 mxWorldToDevice;
+    MATRIX64 mxDeviceToWorld;
+    MATRIX64 mxWorldToPage;
+    FLOAT efM11PtoD;
+    FLOAT efM22PtoD;
+    FLOAT efDxPtoD;
+    FLOAT efDyPtoD;
+    INT iMapMode;
+    DWORD dwLayout;
+    LONG lWindowOrgx;
+    POINTL ptlWindowOrg;
+    SIZEL szlWindowExt;
+    POINTL ptlViewportOrg;
+    SIZEL szlViewportExt;
+    FLONG flXform;
+    SIZEL szlVirtualDevicePixel;
+    SIZEL szlVirtualDeviceMm;
+    SIZEL szlVirtualDeviceSize;
+    POINTL ptlBrushOrigin;
+    RGN_ATTR VisRectRegion;
+#endif
 } DC_ATTR, *PDC_ATTR;
 
 typedef struct _BRUSH_ATTR /* Used with pen too. */

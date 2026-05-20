@@ -36,7 +36,6 @@ PVOID LockRequest( PIRP Irp,
             ASSERT(IrpSp->Parameters.DeviceIoControl.Type3InputBuffer);
             ASSERT(IrpSp->Parameters.DeviceIoControl.InputBufferLength);
 
-
             Irp->MdlAddress =
             IoAllocateMdl( IrpSp->Parameters.DeviceIoControl.Type3InputBuffer,
                           IrpSp->Parameters.DeviceIoControl.InputBufferLength,
@@ -205,7 +204,9 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
 PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                          PVOID AddressBuf, PINT AddressLen,
                          BOOLEAN Write, BOOLEAN LockAddress,
-                         KPROCESSOR_MODE LockMode) {
+                         KPROCESSOR_MODE LockMode,
+                         BOOLEAN Wow64Is32Bit) 
+{
     UINT i;
     /* Copy the buffer array so we don't lose it */
     UINT Lock = LockAddress ? 2 : 0;
@@ -222,7 +223,21 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
         MapBuf = (PAFD_MAPBUF)(NewBuf + Count + Lock);
 
         _SEH2_TRY {
-            RtlCopyMemory( NewBuf, Buf, sizeof(AFD_WSABUF) * Count );
+#ifdef _WIN64
+            if (Wow64Is32Bit)
+            {
+                for (i = 0; i < Count; i++)
+                {
+                    NewBuf[i].buf = (PVOID)(ULONG_PTR)((PAFD_WSABUF32)Buf)[i].buf;
+                    NewBuf[i].len = ((PAFD_WSABUF32)Buf)[i].len;
+                }
+            }
+            else
+#endif
+            {
+                RtlCopyMemory(NewBuf, Buf, sizeof(AFD_WSABUF) * Count);
+            }
+            
             if( LockAddress ) {
                 if (AddressBuf && AddressLen) {
                     NewBuf[Count].buf = AddressBuf;
@@ -307,37 +322,60 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
 
 /* Produce a kernel-land handle array with handles replaced by object
  * pointers.  This will allow the system to do proper alerting */
-PAFD_HANDLE LockHandles( PAFD_HANDLE HandleArray, UINT HandleCount ) {
+PAFD_HANDLE LockHandles(PAFD_HANDLE HandleArray, 
+                        UINT HandleCount, 
+                        BOOLEAN Wow64Is32Bit) 
+{
     UINT i;
     NTSTATUS Status = STATUS_SUCCESS;
+#ifdef _WIN64
+    PAFD_HANDLE32 HandleArray32 = (PAFD_HANDLE32)HandleArray;
+#endif
+    SOCKET handle;
 
     PAFD_HANDLE FileObjects = ExAllocatePoolWithTag(NonPagedPool,
                                                     HandleCount * sizeof(AFD_HANDLE),
                                                     TAG_AFD_POLL_HANDLE);
 
-    for( i = 0; FileObjects && i < HandleCount; i++ ) {
+    for( i = 0; FileObjects && i < HandleCount; i++ ) 
+    {
+#ifdef _WIN64
+        if (Wow64Is32Bit)
+        {
+            handle = HandleArray32[i].Handle;
+            FileObjects[i].Events = HandleArray32[i].Events;
+        }
+        else
+#endif
+        {
+            handle = HandleArray[i].Handle;
+            FileObjects[i].Events = HandleArray[i].Events;
+        }
+    
         FileObjects[i].Status = 0;
-        FileObjects[i].Events = HandleArray[i].Events;
         FileObjects[i].Handle = 0;
-        if( !HandleArray[i].Handle ) continue;
-        if( NT_SUCCESS(Status) ) {
-                Status = ObReferenceObjectByHandle
-                    ( (PVOID)HandleArray[i].Handle,
-                      FILE_ALL_ACCESS,
-                      NULL,
-                       KernelMode,
-                       (PVOID*)&FileObjects[i].Handle,
-                       NULL );
+        
+        if(!handle) continue;
+        
+        if(NT_SUCCESS(Status)) 
+        {
+            Status = ObReferenceObjectByHandle((PVOID)handle,
+                                               FILE_ALL_ACCESS,
+                                               NULL,
+                                               KernelMode,
+                                               (PVOID*)&FileObjects[i].Handle,
+                                               NULL);
         }
 
-        if( !NT_SUCCESS(Status) )
+        if(!NT_SUCCESS(Status))
         {
             AFD_DbgPrint(MIN_TRACE,("Failed to reference handles (0x%x)\n", Status));
             FileObjects[i].Handle = 0;
         }
     }
 
-    if( !NT_SUCCESS(Status) ) {
+    if(!NT_SUCCESS(Status)) 
+    {
         UnlockHandles( FileObjects, HandleCount );
         return NULL;
     }
@@ -438,4 +476,4 @@ NTSTATUS LeaveIrpUntilLater( PAFD_FCB FCB, PIRP Irp, UINT Function ) {
     SocketStateUnlock( FCB );
 
     return Status;
-}
+} 

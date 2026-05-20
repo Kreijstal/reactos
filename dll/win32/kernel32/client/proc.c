@@ -54,11 +54,18 @@ VOID
 WINAPI
 StuffStdHandle(IN HANDLE ProcessHandle,
                IN HANDLE StandardHandle,
-               IN PHANDLE Address)
+#ifndef BUILD_WOW6432
+               IN PHANDLE Address
+#else
+               IN UINT64 Address
+#endif
+               )
 {
     NTSTATUS Status;
     HANDLE DuplicatedHandle;
-    SIZE_T NumberOfBytesWritten;
+#ifdef BUILD_WOW6432
+    UINT64 Tmp;
+#endif
 
     /* If there is no handle to duplicate, return immediately */
     if (!StandardHandle) return;
@@ -75,11 +82,20 @@ StuffStdHandle(IN HANDLE ProcessHandle,
     if (!NT_SUCCESS(Status)) return;
 
     /* Write it */
+#ifndef BUILD_WOW6432
     NtWriteVirtualMemory(ProcessHandle,
                          Address,
                          &DuplicatedHandle,
                          sizeof(HANDLE),
-                         &NumberOfBytesWritten);
+                         NULL);
+#else
+    Tmp = (ULONG_PTR)DuplicatedHandle;
+    NtWow64WriteVirtualMemory64(ProcessHandle,
+                                Address,
+                                &Tmp,
+                                sizeof(Tmp),
+                                NULL);
+#endif
 }
 
 BOOLEAN
@@ -477,11 +493,189 @@ BaseProcessStartup(
     _SEH2_END;
 }
 
+#ifdef BUILD_WOW6432
+static
+VOID
+CopyParameterString(PWCHAR *Ptr,
+                    PUNICODE_STRING64 Destination,
+                    PUNICODE_STRING Source,
+                    USHORT Size)
+{
+    Destination->Length = Source->Length;
+    Destination->MaximumLength = Size ? Size : Source->MaximumLength;
+    Destination->Buffer = WOW64_CAST_FROM_PTR(*Ptr);
+    if (Source->Length)
+        memmove(WOW64_CAST_TO_PTR(Destination->Buffer), Source->Buffer, Source->Length);
+    ((LPWSTR)WOW64_CAST_TO_PTR(Destination->Buffer))[Destination->Length / sizeof(WCHAR)] = 0;
+    *Ptr += Destination->MaximumLength / sizeof(WCHAR);
+}
+
+/* TODO: This is duplicated code, find a better way to handle this. */
+static
+NTSTATUS
+CreateProcessParameters64(
+    PRTL_USER_PROCESS_PARAMETERS64 *ProcessParameters,
+    PUNICODE_STRING ImagePathName,
+    PUNICODE_STRING DllPath,
+    PUNICODE_STRING CurrentDirectory,
+    PUNICODE_STRING CommandLine,
+    PWSTR Environment,
+    PUNICODE_STRING WindowTitle,
+    PUNICODE_STRING DesktopInfo,
+    PUNICODE_STRING ShellInfo,
+    PUNICODE_STRING RuntimeData)
+{
+    PRTL_USER_PROCESS_PARAMETERS64 Param = NULL;
+    ULONG Length = 0;
+    PWCHAR Dest;
+    UNICODE_STRING EmptyString;
+    HANDLE CurrentDirectoryHandle;
+    HANDLE ConsoleHandle;
+    ULONG ConsoleFlags;
+
+    DPRINT("CreateProcessParameters64\n");
+
+    RtlAcquirePebLock();
+
+    EmptyString.Length = 0;
+    EmptyString.MaximumLength = sizeof(WCHAR);
+    EmptyString.Buffer = L"";
+
+    if (DllPath == NULL)
+        DllPath = &NtCurrentPeb()->ProcessParameters->DllPath;
+    if (Environment == NULL)
+        Environment = NtCurrentPeb()->ProcessParameters->Environment;
+    if (CurrentDirectory == NULL)
+        CurrentDirectory = &NtCurrentPeb()->ProcessParameters->CurrentDirectory.DosPath;
+    CurrentDirectoryHandle = NtCurrentPeb()->ProcessParameters->CurrentDirectory.Handle;
+    ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
+    ConsoleFlags = NtCurrentPeb()->ProcessParameters->ConsoleFlags;
+
+
+    if (CommandLine == NULL)
+        CommandLine = &EmptyString;
+    if (WindowTitle == NULL)
+        WindowTitle = &EmptyString;
+    if (DesktopInfo == NULL)
+        DesktopInfo = &EmptyString;
+    if (ShellInfo == NULL)
+        ShellInfo = &EmptyString;
+    if (RuntimeData == NULL)
+        RuntimeData = &EmptyString;
+
+    /* size of process parameter block */
+    Length = sizeof(RTL_USER_PROCESS_PARAMETERS64);
+
+    /* size of current directory buffer */
+    Length += (MAX_PATH * sizeof(WCHAR));
+
+    /* add string lengths */
+    Length += ALIGN_UP_BY(DllPath->MaximumLength, sizeof(ULONG));
+    Length += ALIGN_UP_BY(ImagePathName->Length + sizeof(WCHAR), sizeof(ULONG));
+    Length += ALIGN_UP_BY(CommandLine->Length + sizeof(WCHAR), sizeof(ULONG));
+    Length += ALIGN_UP_BY(WindowTitle->MaximumLength, sizeof(ULONG));
+    Length += ALIGN_UP_BY(DesktopInfo->MaximumLength, sizeof(ULONG));
+    Length += ALIGN_UP_BY(ShellInfo->MaximumLength, sizeof(ULONG));
+    Length += ALIGN_UP_BY(RuntimeData->MaximumLength, sizeof(ULONG));
+
+    /* Calculate the required block size */
+    Param = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, Length);
+    if (!Param)
+    {
+        RtlReleasePebLock();
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DPRINT("Process parameters allocated\n");
+
+    Param->MaximumLength = Length;
+    Param->Length = Length;
+    Param->Flags = RTL_USER_PROCESS_PARAMETERS_NORMALIZED;
+    Param->Environment = WOW64_CAST_FROM_PTR(Environment);
+    Param->CurrentDirectory.Handle = WOW64_CAST_FROM_HANDLE(CurrentDirectoryHandle);
+    Param->ConsoleHandle = WOW64_CAST_FROM_HANDLE(ConsoleHandle);
+    Param->ConsoleFlags = ConsoleFlags;
+
+    Dest = (PWCHAR)(((PBYTE)Param) + sizeof(RTL_USER_PROCESS_PARAMETERS64));
+
+    /* copy current directory */
+    CopyParameterString(&Dest, &Param->CurrentDirectory.DosPath, CurrentDirectory, MAX_PATH * sizeof(WCHAR));
+
+    /* make sure the current directory has a trailing backslash */
+    if (Param->CurrentDirectory.DosPath.Length > 0)
+    {
+        Length = Param->CurrentDirectory.DosPath.Length / sizeof(WCHAR);
+        if (((LPWSTR)WOW64_CAST_TO_PTR(Param->CurrentDirectory.DosPath.Buffer))[Length - 1] != L'\\')
+        {
+            ((LPWSTR)WOW64_CAST_TO_PTR(Param->CurrentDirectory.DosPath.Buffer))[Length] = L'\\';
+            ((LPWSTR)WOW64_CAST_TO_PTR(Param->CurrentDirectory.DosPath.Buffer))[Length + 1] = 0;
+            Param->CurrentDirectory.DosPath.Length += sizeof(WCHAR);
+        }
+    }
+
+    /* copy dll path */
+    CopyParameterString(&Dest, &Param->DllPath, DllPath, 0);
+
+    /* copy image path name */
+    CopyParameterString(&Dest, &Param->ImagePathName, ImagePathName, ImagePathName->Length + sizeof(WCHAR));
+
+    /* copy command line */
+    CopyParameterString(&Dest, &Param->CommandLine, CommandLine, CommandLine->Length + sizeof(WCHAR));
+
+    /* copy title */
+    CopyParameterString(&Dest, &Param->WindowTitle, WindowTitle, 0);
+
+    /* copy desktop */
+    CopyParameterString(&Dest, &Param->DesktopInfo, DesktopInfo, 0);
+
+    /* copy shell info */
+    CopyParameterString(&Dest, &Param->ShellInfo, ShellInfo, 0);
+
+    /* copy runtime info */
+    CopyParameterString(&Dest, &Param->RuntimeData, RuntimeData, 0);
+
+#define DENORMALIZE(x,addr) {if(x) x=(UINT64)((ULONG_PTR)(x)-(ULONG_PTR)(addr));}
+    if (Param && (Param->Flags & RTL_USER_PROCESS_PARAMETERS_NORMALIZED))
+    {
+        DENORMALIZE(Param->CurrentDirectory.DosPath.Buffer, Param);
+        DENORMALIZE(Param->DllPath.Buffer, Param);
+        DENORMALIZE(Param->ImagePathName.Buffer, Param);
+        DENORMALIZE(Param->CommandLine.Buffer, Param);
+        DENORMALIZE(Param->WindowTitle.Buffer, Param);
+        DENORMALIZE(Param->DesktopInfo.Buffer, Param);
+        DENORMALIZE(Param->ShellInfo.Buffer, Param);
+        DENORMALIZE(Param->RuntimeData.Buffer, Param);
+
+        Param->Flags &= ~RTL_USER_PROCESS_PARAMETERS_NORMALIZED;
+    }
+#undef DENORMALIZE
+
+    *ProcessParameters = Param;
+    RtlReleasePebLock();
+
+    return STATUS_SUCCESS;
+}
+
+/* TODO: This is duplicated code, find a better way to handle this. */
+static
+NTSTATUS
+DestroyProcessParameters64(IN PRTL_USER_PROCESS_PARAMETERS64 ProcessParameters)
+{
+    RtlFreeHeap(RtlGetProcessHeap(), 0, ProcessParameters);
+    return STATUS_SUCCESS;
+}
+#endif
+
+
 BOOLEAN
 WINAPI
 BasePushProcessParameters(IN ULONG ParameterFlags,
                           IN HANDLE ProcessHandle,
+#ifndef BUILD_WOW6432
                           IN PPEB RemotePeb,
+#else
+                          IN UINT64 RemotePeb,
+#endif
                           IN LPCWSTR ApplicationPathName,
                           IN LPWSTR lpCurrentDirectory,
                           IN LPWSTR lpCommandLine,
@@ -495,7 +689,13 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
 {
     WCHAR FullPath[MAX_PATH + 5];
     PWCHAR Remaining, DllPathString, ScanChar;
+#ifndef BUILD_WOW6432
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters, RemoteParameters;
+#else
+    PRTL_USER_PROCESS_PARAMETERS64 ProcessParameters, RemoteParameters;
+    UINT64 Tmp;
+#endif
+
     PVOID RemoteAppCompatData;
     UNICODE_STRING DllPath, ImageName, CommandLine, CurrentDirectory;
     UNICODE_STRING Desktop, Shell, Runtime, Title;
@@ -589,7 +789,11 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     DPRINT("Desktop  : '%wZ'\n", &Desktop);
     DPRINT("Shell    : '%wZ'\n", &Shell);
     DPRINT("Runtime  : '%wZ'\n", &Runtime);
+#ifndef BUILD_WOW6432
     Status = RtlCreateProcessParameters(&ProcessParameters,
+#else
+    Status = CreateProcessParameters64(&ProcessParameters,
+#endif
                                         &ImageName,
                                         &DllPath,
                                         lpCurrentDirectory ?
@@ -603,14 +807,14 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     if (!NT_SUCCESS(Status)) goto FailPath;
 
     /* Clear the current directory handle if not inheriting */
-    if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = NULL;
+    if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = WOW64_CAST_FROM_HANDLE(NULL);
 
     /* Check if the user passed in an environment */
     if (lpEnvironment)
     {
         /* We should've made it part of the parameters block, enforce this */
-        ASSERT(ProcessParameters->Environment == lpEnvironment);
-        lpEnvironment = ProcessParameters->Environment;
+        ASSERT(ProcessParameters->Environment == WOW64_CAST_FROM_PTR(lpEnvironment));
+        lpEnvironment = WOW64_CAST_TO_PTR(ProcessParameters->Environment);
     }
     else
     {
@@ -630,7 +834,7 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
 
         /* Allocate and Initialize new Environment Block */
         Size = EnviroSize;
-        ProcessParameters->Environment = NULL;
+        ProcessParameters->Environment = WOW64_CAST_FROM_PTR(NULL);
         Status = NtAllocateVirtualMemory(ProcessHandle,
                                          (PVOID*)&ProcessParameters->Environment,
                                          0,
@@ -641,7 +845,7 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
 
         /* Write the Environment Block */
         Status = NtWriteVirtualMemory(ProcessHandle,
-                                      ProcessParameters->Environment,
+                                      WOW64_CAST_TO_PTR(ProcessParameters->Environment),
                                       lpEnvironment,
                                       EnviroSize,
                                       NULL);
@@ -673,28 +877,28 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     if (StartupInfo->dwFlags &
         (STARTF_USESTDHANDLES | STARTF_USEHOTKEY | STARTF_SHELLPRIVATE))
     {
-        ProcessParameters->StandardInput = StartupInfo->hStdInput;
-        ProcessParameters->StandardOutput = StartupInfo->hStdOutput;
-        ProcessParameters->StandardError = StartupInfo->hStdError;
+        ProcessParameters->StandardInput = WOW64_CAST_FROM_HANDLE(StartupInfo->hStdInput);
+        ProcessParameters->StandardOutput = WOW64_CAST_FROM_HANDLE(StartupInfo->hStdOutput);
+        ProcessParameters->StandardError = WOW64_CAST_FROM_HANDLE(StartupInfo->hStdError);
     }
 
     /* Use Special Flags for ConDllInitialize in Kernel32 */
     if (CreationFlags & DETACHED_PROCESS)
     {
-        ProcessParameters->ConsoleHandle = HANDLE_DETACHED_PROCESS;
+        ProcessParameters->ConsoleHandle = WOW64_CAST_FROM_HANDLE(HANDLE_DETACHED_PROCESS);
     }
     else if (CreationFlags & CREATE_NEW_CONSOLE)
     {
-        ProcessParameters->ConsoleHandle = HANDLE_CREATE_NEW_CONSOLE;
+        ProcessParameters->ConsoleHandle = WOW64_CAST_FROM_HANDLE(HANDLE_CREATE_NEW_CONSOLE);
     }
     else if (CreationFlags & CREATE_NO_WINDOW)
     {
-        ProcessParameters->ConsoleHandle = HANDLE_CREATE_NO_WINDOW;
+        ProcessParameters->ConsoleHandle = WOW64_CAST_FROM_HANDLE(HANDLE_CREATE_NO_WINDOW);
     }
     else
     {
         /* Inherit our Console Handle */
-        ProcessParameters->ConsoleHandle = Peb->ProcessParameters->ConsoleHandle;
+        ProcessParameters->ConsoleHandle = WOW64_CAST_FROM_HANDLE(Peb->ProcessParameters->ConsoleHandle);
 
         /* Make sure that the shell isn't trampling on our handles first */
         if (!(StartupInfo->dwFlags &
@@ -704,17 +908,17 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
             if ((InheritHandles) ||
                 (IsConsoleHandle(Peb->ProcessParameters->StandardInput)))
             {
-                ProcessParameters->StandardInput = Peb->ProcessParameters->StandardInput;
+                ProcessParameters->StandardInput = WOW64_CAST_FROM_HANDLE(Peb->ProcessParameters->StandardInput);
             }
             if ((InheritHandles) ||
                 (IsConsoleHandle(Peb->ProcessParameters->StandardOutput)))
             {
-                ProcessParameters->StandardOutput = Peb->ProcessParameters->StandardOutput;
+                ProcessParameters->StandardOutput = WOW64_CAST_FROM_HANDLE(Peb->ProcessParameters->StandardOutput);
             }
             if ((InheritHandles) ||
                 (IsConsoleHandle(Peb->ProcessParameters->StandardError)))
             {
-                ProcessParameters->StandardError = Peb->ProcessParameters->StandardError;
+                ProcessParameters->StandardError = WOW64_CAST_FROM_HANDLE(Peb->ProcessParameters->StandardError);
             }
         }
     }
@@ -771,11 +975,20 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     if (!NT_SUCCESS(Status)) goto FailPath;
 
     /* Write the PEB Pointer */
+#ifndef BUILD_WOW6432
     Status = NtWriteVirtualMemory(ProcessHandle,
                                   &RemotePeb->ProcessParameters,
                                   &RemoteParameters,
                                   sizeof(PVOID),
                                   NULL);
+#else
+    Tmp = (ULONG_PTR)RemoteParameters;
+    Status = NtWow64WriteVirtualMemory64(ProcessHandle,
+                                         RemotePeb + offsetof(PEB64, ProcessParameters),
+                                         &Tmp,
+                                         sizeof(Tmp),
+                                         NULL);
+#endif
     if (!NT_SUCCESS(Status)) goto FailPath;
 
     /* Check if there's any app compat data to write */
@@ -802,21 +1015,39 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     }
 
     /* Write the PEB Pointer to the app compat data (might be NULL) */
+#ifndef BUILD_WOW6432
     Status = NtWriteVirtualMemory(ProcessHandle,
                                   &RemotePeb->pShimData,
                                   &RemoteAppCompatData,
                                   sizeof(PVOID),
                                   NULL);
+#else
+    Tmp = (ULONG_PTR)RemoteAppCompatData;
+    Status = NtWow64WriteVirtualMemory64(ProcessHandle,
+                                         RemotePeb + offsetof(PEB64, pShimData),
+                                         &Tmp,
+                                         sizeof(Tmp),
+                                         NULL);
+#endif
     if (!NT_SUCCESS(Status)) goto FailPath;
 
     /* Now write Peb->ImageSubSystem */
     if (ImageSubsystem)
     {
+#ifndef BUILD_WOW6432
         NtWriteVirtualMemory(ProcessHandle,
                              &RemotePeb->ImageSubsystem,
                              &ImageSubsystem,
                              sizeof(ImageSubsystem),
                              NULL);
+#else
+        Tmp = ImageSubsystem;
+        NtWow64WriteVirtualMemory64(ProcessHandle,
+                                    RemotePeb + offsetof(PEB64, ImageSubsystem),
+                                    &Tmp,
+                                    sizeof(Tmp),
+                                    NULL);
+#endif
     }
 
     /* Success path */
@@ -826,7 +1057,11 @@ Quickie:
     /* Cleanup */
     if (HavePebLock) RtlReleasePebLock();
     RtlFreeHeap(RtlGetProcessHeap(), 0, DllPath.Buffer);
+#ifndef BUILD_WOW6432
     if (ProcessParameters) RtlDestroyProcessParameters(ProcessParameters);
+#else
+    if (ProcessParameters) DestroyProcessParameters64(ProcessParameters);
+#endif
     return Result;
 FailPath:
     DPRINT1("Failure to create process parameters: %lx\n", Status);
@@ -880,7 +1115,9 @@ GetProcessAffinityMask(IN HANDLE hProcess,
 
     /* Copy the affinity mask, and get the system one from our shared data */
     *lpProcessAffinityMask = (DWORD)ProcessInfo.AffinityMask;
-    *lpSystemAffinityMask = (DWORD)BaseStaticServerData->SysInfo.ActiveProcessorsAffinityMask;
+    *lpSystemAffinityMask = WOW64_READ_ULONG_FIELD(BaseStaticServerData,
+                                                   BASE_STATIC_SERVER_DATA,
+                                                   SysInfo.ActiveProcessorsAffinityMask);
     return TRUE;
 }
 
@@ -2074,6 +2311,13 @@ ProcessIdToSessionId(IN DWORD dwProcessId,
 
 #define AddToHandle(x,y)       ((x) = (HANDLE)((ULONG_PTR)(x) | (y)))
 #define RemoveFromHandle(x,y)  ((x) = (HANDLE)((ULONG_PTR)(x) & ~(y)))
+#ifdef USE_LPC6432
+#define AddToLpcHandle(x,y)       ((x) = (LPC_HANDLE)((x) | (y)))
+#define RemoveFromLpcHandle(x,y)  ((x) = (LPC_HANDLE)((x) & ~(y)))
+#else
+#define AddToLpcHandle    AddToHandle
+#define RemoveFromLpcHandle RemoveFromHandle
+#endif
 C_ASSERT(PROCESS_PRIORITY_CLASS_REALTIME == (PROCESS_PRIORITY_CLASS_HIGH + 1));
 
 /*
@@ -2120,13 +2364,20 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     ULONG ResumeCount;
     PROCESS_PRIORITY_CLASS PriorityClass;
     NTSTATUS Status, AppCompatStatus, SaferStatus, IFEOStatus, ImageDbgStatus;
-    PPEB Peb, RemotePeb;
+#ifndef BUILD_WOW6432
+    PPEB RemotePeb;
+    PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
+    PVOID TibValue;
+#else
+    UINT64 ProcessParameters;
+    UINT64 RemotePeb;
+    UINT64 TibValue;
+#endif
+    PPEB Peb;
     PTEB Teb;
     INITIAL_TEB InitialTeb;
-    PVOID TibValue;
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
-    PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     UNICODE_STRING DebuggerString;
     BOOL Result;
     //
@@ -2283,7 +2534,9 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     DPRINT("CreateProcessInternalW: '%S' '%S' %lx\n", lpApplicationName, lpCommandLine, dwCreationFlags);
 
     /* Finally, set our TEB and PEB */
+#ifndef BUILD_WOW6432
     Teb = NtCurrentTeb();
+#endif
     Peb = NtCurrentPeb();
 
     /* This combination is illegal (see MSDN) */
@@ -2345,7 +2598,7 @@ CreateProcessInternalW(IN HANDLE hUserToken,
         return FALSE;
     }
     else if (!(dwCreationFlags & CREATE_SHARED_WOW_VDM) &&
-             (BaseStaticServerData->DefaultSeparateVDM))
+             (WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, DefaultSeparateVDM)))
     {
         /* A shared WoW VDM was not requested but system enforces separation */
         dwCreationFlags |= CREATE_SEPARATE_WOW_VDM;
@@ -2830,7 +3083,7 @@ StartScan:
 
         /* Is a DOS VDM being forced, but we already have a WOW32 instance ready? */
         if ((dwCreationFlags & CREATE_FORCEDOS) &&
-            (BaseStaticServerData->IsWowTaskReady))
+            (WOW64_READ_BYTE_FIELD(BaseStaticServerData, BASE_STATIC_SERVER_DATA, IsWowTaskReady)))
         {
             /* This request can't be satisfied, instead, a separate VDM is needed */
             dwCreationFlags &= ~(CREATE_FORCEDOS | CREATE_SHARED_WOW_VDM);
@@ -3471,6 +3724,11 @@ StartScan:
         }
     }
 
+#if defined(_M_AMD64) || defined(BUILD_WOW6432)
+    /* Allow x86_32 */
+    if (ImageInformation.Machine == IMAGE_FILE_MACHINE_I386) {}
+    else
+#endif
     /* Make sure the image was compiled for this processor */
     if ((ImageInformation.Machine < SharedUserData->ImageNumberLow) ||
         (ImageInformation.Machine > SharedUserData->ImageNumberHigh))
@@ -3708,7 +3966,11 @@ StartScan:
     }
 
     /* Save the current TIB value since kernel overwrites it to store PEB */
+#ifndef BUILD_WOW6432
     TibValue = Teb->NtTib.ArbitraryUserPointer;
+#else
+    TibValue = NtCurrentTeb64()->NtTib.ArbitraryUserPointer;
+#endif
 
     /* Tell the kernel to create the process */
     Status = NtCreateProcessEx(&ProcessHandle,
@@ -3722,10 +3984,15 @@ StartScan:
                                InJob);
 
     /* Load the PEB address from the hacky location where the kernel stores it */
+#ifndef BUILD_WOW6432
     RemotePeb = Teb->NtTib.ArbitraryUserPointer;
-
+    
     /* And restore the old TIB value */
     Teb->NtTib.ArbitraryUserPointer = TibValue;
+#else
+    RemotePeb = NtCurrentTeb64()->NtTib.ArbitraryUserPointer;
+    NtCurrentTeb64()->NtTib.ArbitraryUserPointer = TibValue;
+#endif
 
     /* Release the large page privilege if we had acquired it */
     if (HavePrivilege) RtlReleasePrivilege(PrivilegeState);
@@ -3982,11 +4249,19 @@ StartScan:
         (ImageInformation.SubSystemType == IMAGE_SUBSYSTEM_WINDOWS_CUI))
     {
         /* Get the remote parameters */
+#ifndef BUILD_WOW6432
         Status = NtReadVirtualMemory(ProcessHandle,
                                      &RemotePeb->ProcessParameters,
                                      &ProcessParameters,
                                      sizeof(PRTL_USER_PROCESS_PARAMETERS),
                                      NULL);
+#else
+        Status = NtWow64ReadVirtualMemory64(ProcessHandle,
+                                            RemotePeb + offsetof(PEB64, ProcessParameters),
+                                            &ProcessParameters,
+                                            sizeof(ProcessParameters),
+                                            NULL);
+#endif
         if (NT_SUCCESS(Status))
         {
             /* Duplicate standard input unless it's a console handle */
@@ -3994,7 +4269,7 @@ StartScan:
             {
                 StuffStdHandle(ProcessHandle,
                                Peb->ProcessParameters->StandardInput,
-                               &ProcessParameters->StandardInput);
+                               WOW64_FIELD_PTR(ProcessParameters, RTL_USER_PROCESS_PARAMETERS64, StandardInput));
             }
 
             /* Duplicate standard output unless it's a console handle */
@@ -4002,7 +4277,7 @@ StartScan:
             {
                 StuffStdHandle(ProcessHandle,
                                Peb->ProcessParameters->StandardOutput,
-                               &ProcessParameters->StandardOutput);
+                               WOW64_FIELD_PTR(ProcessParameters, RTL_USER_PROCESS_PARAMETERS64, StandardOutput));
             }
 
             /* Duplicate standard error unless it's a console handle */
@@ -4010,7 +4285,7 @@ StartScan:
             {
                 StuffStdHandle(ProcessHandle,
                                Peb->ProcessParameters->StandardError,
-                               &ProcessParameters->StandardError);
+                               WOW64_FIELD_PTR(ProcessParameters, RTL_USER_PROCESS_PARAMETERS64, StandardError));
             }
         }
     }
@@ -4030,11 +4305,19 @@ StartScan:
     }
 
     /* Create the Thread's Context */
+#ifndef BUILD_WOW6432
     BaseInitializeContext(&Context,
                           RemotePeb,
                           ImageInformation.TransferAddress,
                           InitialTeb.StackBase,
                           0);
+#else
+    BaseInitializeContext(&Context,
+                          NULL,
+                          ImageInformation.TransferAddress,
+                          InitialTeb.StackBase,
+                          0);
+#endif
 
     /* Convert the thread attributes */
     ObjectAttributes = BaseFormatObjectAttributes(&LocalObjectAttributes,
@@ -4069,19 +4352,25 @@ StartScan:
     }
 
     /* Begin filling out the CSRSS message, first with our IDs and handles */
-    CreateProcessMsg->ProcessHandle = ProcessHandle;
-    CreateProcessMsg->ThreadHandle = ThreadHandle;
-    CreateProcessMsg->ClientId = ClientId;
+    CreateProcessMsg->ProcessHandle = TO_LPC_HANDLE(ProcessHandle);
+    CreateProcessMsg->ThreadHandle = TO_LPC_HANDLE(ThreadHandle);
+    CreateProcessMsg->ClientId.UniqueProcess = TO_LPC_HANDLE(ClientId.UniqueProcess);
+    CreateProcessMsg->ClientId.UniqueThread = TO_LPC_HANDLE(ClientId.UniqueThread);
 
     /* Write the remote PEB address and clear it locally, we no longer use it */
-    CreateProcessMsg->PebAddressNative = RemotePeb;
+    CreateProcessMsg->PebAddressNative = (LPC_PVOID)RemotePeb;
 #ifdef _WIN64
     DPRINT("TODO: WOW64 is not supported yet\n");
     CreateProcessMsg->PebAddressWow64 = 0;
 #else
     CreateProcessMsg->PebAddressWow64 = (ULONG)RemotePeb;
 #endif
+
+#ifndef BUILD_WOW6432
     RemotePeb = NULL;
+#else
+    RemotePeb = 0;
+#endif
 
     /* Now check what kind of architecture this image was made for */
     switch (ImageInformation.Machine)
@@ -4118,7 +4407,7 @@ StartScan:
          * (basesrv in particular) to know whether or not this is a GUI or a
          * TUI application.
          */
-        AddToHandle(CreateProcessMsg->ProcessHandle, 2);
+        AddToLpcHandle(CreateProcessMsg->ProcessHandle, 2);
 
         /* Also check if the parent is also a GUI process */
         NtHeaders = RtlImageNtHeader(GetModuleHandle(NULL));
@@ -4126,7 +4415,7 @@ StartScan:
             (NtHeaders->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI))
         {
             /* Let it know that it should display the hourglass mouse cursor */
-            AddToHandle(CreateProcessMsg->ProcessHandle, 1);
+            AddToLpcHandle(CreateProcessMsg->ProcessHandle, 1);
         }
     }
 
@@ -4134,11 +4423,11 @@ StartScan:
      * Likewise, the opposite holds as well, and no-feedback has precedence. */
     if (StartupInfo.dwFlags & STARTF_FORCEONFEEDBACK)
     {
-        AddToHandle(CreateProcessMsg->ProcessHandle, 1);
+        AddToLpcHandle(CreateProcessMsg->ProcessHandle, 1);
     }
     if (StartupInfo.dwFlags & STARTF_FORCEOFFFEEDBACK)
     {
-        RemoveFromHandle(CreateProcessMsg->ProcessHandle, 1);
+        RemoveFromLpcHandle(CreateProcessMsg->ProcessHandle, 1);
     }
 
     /* Also store which kind of VDM app (if any) this is */
@@ -4148,7 +4437,7 @@ StartScan:
     if (VdmBinaryType)
     {
         /* Store the VDM console handle (none if inherited or WOW app) and the task ID */
-        CreateProcessMsg->hVDM = VdmTask ? NULL : Peb->ProcessParameters->ConsoleHandle;
+        CreateProcessMsg->hVDM = TO_LPC_HANDLE(VdmTask ? NULL : Peb->ProcessParameters->ConsoleHandle);
         CreateProcessMsg->VdmTask = VdmTask;
     }
     else if (VdmReserve)

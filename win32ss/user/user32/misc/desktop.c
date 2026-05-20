@@ -129,7 +129,11 @@ RealGetSystemMetrics(int nIndex)
 {
   //FIXME("Global Server Data -> %x\n",gpsi);
   if (nIndex < 0 || nIndex >= SM_CMETRICS) return 0;
+#if !defined(BUILD_WOW6432)
   return gpsi->aiSysMet[nIndex];
+#else
+  return (signed int)WOW64_READ_ULONG_FIELD(gpsi, SERVERINFO, aiSysMet[nIndex]);
+#endif
 }
 
 /*
@@ -652,7 +656,7 @@ GetShellWindow(VOID)
 {
    PDESKTOPINFO pdi;
    pdi = GetThreadDesktopInfo();
-   if (pdi) return pdi->hShellWindow;
+   if (pdi) return WOW64_CAST_TO_HANDLE(pdi->hShellWindow);
    return NULL;
 }
 

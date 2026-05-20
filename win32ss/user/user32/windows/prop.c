@@ -37,6 +37,7 @@ HANDLE
 FASTCALL
 IntGetProp(HWND hWnd, ATOM Atom, BOOLEAN SystemProp)
 {
+#if !defined(BUILD_WOW6432)
   PLIST_ENTRY ListEntry, temp;
   PPROPERTY Property;
   PWND pWnd;
@@ -58,6 +59,29 @@ IntGetProp(HWND hWnd, ATOM Atom, BOOLEAN SystemProp)
       temp = ListEntry->Flink;
       ListEntry = SharedPtrToUser(temp);
   }
+#else
+  UINT64 ListEntry, temp;
+  UINT64 Property;
+  PWND pWnd;
+  int i;
+  WORD SystemFlag = SystemProp ? PROPERTY_FLAG_SYSTEM : 0;
+
+  pWnd = ValidateHwnd(hWnd);
+  if (!pWnd) return NULL;
+
+  ListEntry = SharedPtrToUser(WOW64_READ_PTR_FIELD(pWnd, WND, PropListHead[0]));
+  for (i = 0; i < pWnd->PropListItems; i++ )
+  {
+      Property = WOW64_CONTAINING_RECORD(ListEntry, PROPERTY, PropListEntry);
+      if (WOW64_READ_WORD_FIELD(Property, PROPERTY, Atom) == Atom &&
+          (WOW64_READ_ULONG_FIELD(Property, PROPERTY, fs) & PROPERTY_FLAG_SYSTEM) == SystemFlag)
+      {
+         return (HANDLE)(ULONG_PTR)Property;
+      }
+      temp = WOW64_READ_PTR_FIELD(ListEntry, LIST_ENTRY, Flink);
+      ListEntry = SharedPtrToUser(temp);
+  }
+#endif
   return NULL;
 }
 
@@ -67,7 +91,7 @@ UserGetProp(HWND hWnd, ATOM Atom, BOOLEAN SystemProp)
 {
   PPROPERTY Prop;
   Prop = IntGetProp(hWnd, Atom, SystemProp);
-  return Prop ? Prop->Data : NULL;
+  return Prop ? WOW64_CAST_TO_HANDLE(Prop->Data) : NULL;
 }
 
 /* FUNCTIONS *****************************************************************/
@@ -386,7 +410,7 @@ GetPropW(HWND hWnd, LPCWSTR lpString)
      Atom = LOWORD((DWORD_PTR)lpString);
   }
   Prop = IntGetProp(hWnd, Atom, FALSE);
-  if (Prop != NULL) Data = Prop->Data;
+  if (Prop != NULL) Data = WOW64_CAST_TO_HANDLE(Prop->Data);
   return Data;
 }
 

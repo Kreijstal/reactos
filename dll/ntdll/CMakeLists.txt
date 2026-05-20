@@ -1,7 +1,11 @@
 
 add_subdirectory(nt_0600)
 
-spec2def(ntdll.dll def/ntdll.spec ADD_IMPORTLIB)
+if(SARCH STREQUAL "wow64")
+    spec2def(ntdll.dll def/ntdllwow.spec ADD_IMPORTLIB)
+else()
+    spec2def(ntdll.dll def/ntdll.spec ADD_IMPORTLIB)
+endif()
 
 # Link GCC stack protector lib
 if (STACK_PROTECTOR)
@@ -47,6 +51,11 @@ elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE dispatch/arm/stubs_asm.s)
 else()
     list(APPEND SOURCE dispatch/dispatch.c)
+endif()
+
+if(ARCH STREQUAL "i386")
+    list(APPEND ASM_SOURCE wow64/gsfuncs.S)
+    list(APPEND SOURCE wow64/memory.c)
 endif()
 
 add_asm_files(ntdll_asm ${ASM_SOURCE})

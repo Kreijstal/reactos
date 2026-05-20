@@ -1,0 +1,359 @@
+/*
+ * WoW64 syscall wrapping
+ *
+ * Copyright 2021 Alexandre Julliard
+ * Copyright 2025 Marcin Jabłoński
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifndef __REACTOS__
+#include <stdarg.h>
+
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
+#include "windef.h"
+#include "winbase.h"
+#include "winnt.h"
+#include "winternl.h"
+#endif
+#include "wow64win_private.h"
+
+#ifdef __REACTOS__
+#define SVC_(name,numArgs) extern NTSTATUS WINAPI wow64_Nt ## name( UINT *args );
+#include "../../../win32ss/w32ksvc32.h"
+#undef SVC_
+
+#define SVC_(name,numArgs) static int Num ## name = __COUNTER__;
+#include "../../../win32ss/w32ksvc32.h"
+#undef SVC_
+
+static NTSTATUS wow64win_Unimplemented(UINT* pArgs)
+{
+    DPRINT1("UNIMPLEMENTED SYSCALL\n");
+    return STATUS_NOT_IMPLEMENTED;
+}
+#endif
+
+#ifndef __REACTOS__
+static void * const win32_syscalls[] =
+#else
+static void* win32_syscalls[] =
+#endif
+{
+#ifdef __REACTOS__
+#define SVC_(name, argc) NULL,
+#include "../../../win32ss/w32ksvc32.h"
+#undef SVC_
+#else
+#define SYSCALL_ENTRY(id,name,args) wow64_ ## name,
+    ALL_SYSCALLS32
+#undef SYSCALL_ENTRY
+#endif
+};
+
+#ifdef __REACTOS__
+#define ARRAY_SIZE(x) (sizeof(x)/sizeof(*x))
+#endif
+
+static BYTE arguments[ARRAY_SIZE(win32_syscalls)] =
+{
+#ifdef __REACTOS__
+#define SVC_(name, argc) argc,
+#include "../../../win32ss/w32ksvc32.h"
+#undef SVC_
+#else
+#define SYSCALL_ENTRY(id,name,args) args,
+    ALL_SYSCALLS32
+#undef SYSCALL_ENTRY
+#endif
+};
+
+#ifdef __REACTOS__
+__declspec(dllexport)
+#endif
+const SYSTEM_SERVICE_TABLE sdwhwin32 =
+{
+    (ULONG_PTR *)win32_syscalls,
+    NULL,
+    ARRAY_SIZE(win32_syscalls),
+    arguments
+}; 
+
+#ifdef __REACTOS__
+
+__declspec(allocate(".text"))
+static unsigned char ReadFsDwordImpl[] =
+{
+    0x64, 0x8B, 0x01, /* mov eax, fs:[rcx] */
+    0xC3              /* ret */
+};
+
+#ifndef __clang__
+ULONG __readfsdword(ULONG x)
+{
+    typedef ULONG(*__readfsdwordImplType)(ULONG);
+    return ((__readfsdwordImplType)ReadFsDwordImpl)(x);
+}
+#endif
+
+PSERVERINFO g_ServerInfo = NULL;
+
+NTSTATUS WINAPI wow64_NtGdiInit(UINT* pArgs)
+{
+    return NtGdiInit() ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+static VOID InitServiceTable(VOID)
+{
+#define IMPLEMENT_SERVICE(name) do { win32_syscalls[Num ## name] = (PVOID*)wow64_Nt ## name; } while(0)
+
+    IMPLEMENT_SERVICE(UserProcessConnect);
+    IMPLEMENT_SERVICE(UserInitializeClientPfnArrays);
+    IMPLEMENT_SERVICE(GdiInit);
+    IMPLEMENT_SERVICE(GdiCreateBitmap);
+    IMPLEMENT_SERVICE(GdiCreateCompatibleDC);
+    IMPLEMENT_SERVICE(GdiDeleteObjectApp);
+    IMPLEMENT_SERVICE(UserCallNoParam);
+    IMPLEMENT_SERVICE(UserCallOneParam);
+    IMPLEMENT_SERVICE(UserCallHwndLock);
+    IMPLEMENT_SERVICE(UserGetThreadState);
+    IMPLEMENT_SERVICE(UserGetMessage);
+    IMPLEMENT_SERVICE(UserMessageCall);
+    IMPLEMENT_SERVICE(UserRegisterClassExWOW);
+    IMPLEMENT_SERVICE(UserGetClassInfo);
+    IMPLEMENT_SERVICE(UserCreateWindowEx);
+    IMPLEMENT_SERVICE(UserShowWindow);
+    IMPLEMENT_SERVICE(UserGetMessage);
+    IMPLEMENT_SERVICE(UserDispatchMessage);
+    IMPLEMENT_SERVICE(UserFindExistingCursorIcon);
+    IMPLEMENT_SERVICE(UserBeginPaint);
+    IMPLEMENT_SERVICE(UserEndPaint);
+    IMPLEMENT_SERVICE(GdiPatBlt);
+    IMPLEMENT_SERVICE(UserSetFocus);
+    IMPLEMENT_SERVICE(GdiSelectBitmap);
+    IMPLEMENT_SERVICE(GdiStretchDIBitsInternal);
+    IMPLEMENT_SERVICE(GdiSetDIBitsToDeviceInternal);
+    IMPLEMENT_SERVICE(GdiGetDeviceCaps);
+    IMPLEMENT_SERVICE(GdiCreateCompatibleBitmap);
+    IMPLEMENT_SERVICE(GdiGetAppClipBox);
+    IMPLEMENT_SERVICE(GdiFlush);
+    IMPLEMENT_SERVICE(UserDestroyWindow);
+    IMPLEMENT_SERVICE(UserThunkedMenuItemInfo);
+    IMPLEMENT_SERVICE(GdiCreateSolidBrush);
+    IMPLEMENT_SERVICE(UserGetAtomName);
+    IMPLEMENT_SERVICE(GdiGetTextMetricsW);
+    IMPLEMENT_SERVICE(GdiHfontCreate);
+    IMPLEMENT_SERVICE(UserGetDC);
+    IMPLEMENT_SERVICE(GdiSelectFont);
+    IMPLEMENT_SERVICE(UserCallHwndParam);
+    IMPLEMENT_SERVICE(UserCallHwnd);
+    IMPLEMENT_SERVICE(UserSetWindowLong);
+    IMPLEMENT_SERVICE(UserSetWindowLongPtr);
+    IMPLEMENT_SERVICE(UserBuildHwndList);
+    IMPLEMENT_SERVICE(UserCallTwoParam);
+    IMPLEMENT_SERVICE(UserSetWindowFNID);
+    IMPLEMENT_SERVICE(UserDefSetText);
+    IMPLEMENT_SERVICE(UserGetClassName);
+    IMPLEMENT_SERVICE(GdiTransformPoints);
+    IMPLEMENT_SERVICE(GdiGetOutlineTextMetricsInternalW);
+    IMPLEMENT_SERVICE(GdiCreatePatternBrushInternal);
+    IMPLEMENT_SERVICE(UserGetDoubleClickTime);
+    IMPLEMENT_SERVICE(GdiEllipse);
+    IMPLEMENT_SERVICE(GdiMaskBlt);
+    IMPLEMENT_SERVICE(GdiExtGetObjectW);
+    IMPLEMENT_SERVICE(GdiGetTextExtent);
+    IMPLEMENT_SERVICE(UserInternalGetWindowText);
+    IMPLEMENT_SERVICE(GdiSetPixel);
+    IMPLEMENT_SERVICE(GdiGetPixel);
+    IMPLEMENT_SERVICE(GdiExtFloodFill);
+    IMPLEMENT_SERVICE(GdiTransparentBlt);
+    IMPLEMENT_SERVICE(UserDrawIconEx);
+    IMPLEMENT_SERVICE(GdiPolyPolyDraw);
+    IMPLEMENT_SERVICE(GdiGetStockObject);
+    IMPLEMENT_SERVICE(GdiGetFontData);
+    IMPLEMENT_SERVICE(GdiOpenDCW);
+    IMPLEMENT_SERVICE(GdiGetDCObject);
+    IMPLEMENT_SERVICE(GdiGetDCforBitmap);
+    IMPLEMENT_SERVICE(GdiGetCharABCWidthsW);
+    IMPLEMENT_SERVICE(GdiGetGlyphIndicesW);
+    IMPLEMENT_SERVICE(GdiGetTransform);
+    IMPLEMENT_SERVICE(GdiGetRandomRgn);
+    IMPLEMENT_SERVICE(GdiIntersectClipRect);
+    IMPLEMENT_SERVICE(GdiCreateRectRgn);
+    IMPLEMENT_SERVICE(GdiExtTextOutW);
+    IMPLEMENT_SERVICE(GdiExtSelectClipRgn);
+    IMPLEMENT_SERVICE(GdiCreateDIBitmapInternal);
+    IMPLEMENT_SERVICE(UserSetClassWord);
+    IMPLEMENT_SERVICE(UserSetClassLong);
+    IMPLEMENT_SERVICE(UserSetCapture);
+    IMPLEMENT_SERVICE(UserSetActiveWindow);
+    IMPLEMENT_SERVICE(UserGetControlBrush);
+    IMPLEMENT_SERVICE(GdiGetTextExtentExW);
+    IMPLEMENT_SERVICE(UserSystemParametersInfo);
+    IMPLEMENT_SERVICE(UserTrackMouseEvent);
+    IMPLEMENT_SERVICE(GdiRectangle);
+    IMPLEMENT_SERVICE(UserShowScrollBar);
+    IMPLEMENT_SERVICE(UserSetScrollInfo);
+    IMPLEMENT_SERVICE(GdiBitBlt);
+    IMPLEMENT_SERVICE(UserGetDCEx);
+    IMPLEMENT_SERVICE(UserSetParent);
+    IMPLEMENT_SERVICE(UserSetWindowPos);
+    IMPLEMENT_SERVICE(UserDestroyMenu);
+    IMPLEMENT_SERVICE(GdiSetLayout);
+    IMPLEMENT_SERVICE(GdiGetCharWidthW);
+    IMPLEMENT_SERVICE(UserAlterWindowStyle);
+    IMPLEMENT_SERVICE(UserSetWindowRgn);
+    IMPLEMENT_SERVICE(UserHideCaret);
+    IMPLEMENT_SERVICE(UserScrollWindowEx);
+    IMPLEMENT_SERVICE(UserGetScrollBarInfo);
+    IMPLEMENT_SERVICE(UserHiliteMenuItem);
+    IMPLEMENT_SERVICE(UserGetScrollBarInfo);
+    IMPLEMENT_SERVICE(UserSBGetParms);
+    IMPLEMENT_SERVICE(UserPeekMessage);
+    IMPLEMENT_SERVICE(GdiCreatePen);
+    IMPLEMENT_SERVICE(UserGetIconSize);
+    IMPLEMENT_SERVICE(GdiLineTo);
+    IMPLEMENT_SERVICE(UserSetScrollBarInfo);
+    IMPLEMENT_SERVICE(UserSetCursorIconData);
+    IMPLEMENT_SERVICE(UserMapVirtualKeyEx);
+    IMPLEMENT_SERVICE(UserToUnicodeEx);
+    IMPLEMENT_SERVICE(UserGetKeyboardState);
+    IMPLEMENT_SERVICE(UserPostMessage);
+    IMPLEMENT_SERVICE(UserTranslateMessage);
+    IMPLEMENT_SERVICE(UserGetAsyncKeyState);
+    IMPLEMENT_SERVICE(UserGetAncestor);
+    IMPLEMENT_SERVICE(UserTranslateAccelerator);
+    IMPLEMENT_SERVICE(UserPrintWindow);
+    IMPLEMENT_SERVICE(UserPostThreadMessage);
+    IMPLEMENT_SERVICE(UserIsClipboardFormatAvailable);
+    IMPLEMENT_SERVICE(UserOpenClipboard);
+    IMPLEMENT_SERVICE(UserMonitorFromRect);
+    IMPLEMENT_SERVICE(UserGetMonitorInfo);
+    IMPLEMENT_SERVICE(UserSetMenu);
+    IMPLEMENT_SERVICE(UserDestroyCursor);
+    IMPLEMENT_SERVICE(UserCreateCaret);
+    IMPLEMENT_SERVICE(UserMoveWindow);
+    IMPLEMENT_SERVICE(UserRedrawWindow);
+    IMPLEMENT_SERVICE(UserEnableMenuItem);
+    IMPLEMENT_SERVICE(UserShowCaret);
+    IMPLEMENT_SERVICE(UserInvalidateRect);
+    IMPLEMENT_SERVICE(UserInvalidateRgn);
+    IMPLEMENT_SERVICE(UserSetProp);
+    IMPLEMENT_SERVICE(UserGetIconInfo);
+    IMPLEMENT_SERVICE(UserSetCursor);
+    IMPLEMENT_SERVICE(UserSetWindowPlacement);
+    IMPLEMENT_SERVICE(UserGetWindowPlacement);
+    IMPLEMENT_SERVICE(UserGetKeyState);
+    IMPLEMENT_SERVICE(GdiRectVisible);
+    IMPLEMENT_SERVICE(UserKillTimer);
+    IMPLEMENT_SERVICE(UserSetTimer);
+    IMPLEMENT_SERVICE(UserDeferWindowPos);
+    IMPLEMENT_SERVICE(GdiGetDIBitsInternal);
+    IMPLEMENT_SERVICE(GdiCreateDIBSection);
+    IMPLEMENT_SERVICE(UserMonitorFromWindow);
+    IMPLEMENT_SERVICE(GdiAlphaBlend);
+    IMPLEMENT_SERVICE(UserCreateAcceleratorTable);
+    IMPLEMENT_SERVICE(UserGetControlColor);
+    IMPLEMENT_SERVICE(UserDragDetect);
+    IMPLEMENT_SERVICE(UserDragObject);
+    IMPLEMENT_SERVICE(UserDrawCaptionTemp);
+    IMPLEMENT_SERVICE(UserDrawMenuBarTemp);
+    IMPLEMENT_SERVICE(UserEmptyClipboard);
+    IMPLEMENT_SERVICE(UserEnableMenuItem);
+    IMPLEMENT_SERVICE(UserEnableScrollBar);
+    IMPLEMENT_SERVICE(UserEndDeferWindowPosEx);
+    IMPLEMENT_SERVICE(UserEndMenu);
+    IMPLEMENT_SERVICE(GdiStretchBlt);
+    IMPLEMENT_SERVICE(UserFindWindowEx);
+    IMPLEMENT_SERVICE(UserDeleteMenu);
+    IMPLEMENT_SERVICE(UserRemoveMenu);
+    IMPLEMENT_SERVICE(GdiSaveDC);
+    IMPLEMENT_SERVICE(GdiRestoreDC);
+    IMPLEMENT_SERVICE(UserRemoveProp);
+    IMPLEMENT_SERVICE(UserEnumDisplaySettings);
+    IMPLEMENT_SERVICE(GdiExcludeClipRect);
+    IMPLEMENT_SERVICE(UserRegisterWindowMessage);
+    IMPLEMENT_SERVICE(UserQueryWindow);
+    IMPLEMENT_SERVICE(UserGetGuiResources);
+    IMPLEMENT_SERVICE(UserCheckMenuItem);
+    IMPLEMENT_SERVICE(UserShowWindowAsync);
+    IMPLEMENT_SERVICE(GdiExtCreatePen);
+    IMPLEMENT_SERVICE(UserWindowFromPoint);
+    IMPLEMENT_SERVICE(UserSetClipboardData);
+    IMPLEMENT_SERVICE(UserGetClipboardData);
+    IMPLEMENT_SERVICE(UserCreateLocalMemHandle);
+    IMPLEMENT_SERVICE(UserCloseClipboard);
+    IMPLEMENT_SERVICE(UserConvertMemHandle);
+    IMPLEMENT_SERVICE(UserClipCursor);
+    IMPLEMENT_SERVICE(UserCloseClipboard);
+    IMPLEMENT_SERVICE(UserCloseDesktop);
+    IMPLEMENT_SERVICE(UserCloseWindowStation);
+    IMPLEMENT_SERVICE(GdiGetTextCharsetInfo);
+    IMPLEMENT_SERVICE(UserSelectPalette);
+    IMPLEMENT_SERVICE(UserTrackPopupMenuEx);
+    IMPLEMENT_SERVICE(GdiGetDeviceGammaRamp);
+    IMPLEMENT_SERVICE(UserGetKeyboardLayoutName);
+    IMPLEMENT_SERVICE(UserLoadKeyboardLayoutEx);
+    IMPLEMENT_SERVICE(UserSetImeHotKey);
+    IMPLEMENT_SERVICE(UserGetKeyboardLayoutList);
+    IMPLEMENT_SERVICE(UserEnumDisplayDevices);
+    IMPLEMENT_SERVICE(UserEnumDisplayMonitors);
+    IMPLEMENT_SERVICE(GdiGetFontFamilyInfo);
+    IMPLEMENT_SERVICE(GdiModifyWorldTransform);
+    IMPLEMENT_SERVICE(GdiGetGlyphOutline);
+    IMPLEMENT_SERVICE(GdiGetRegionData);
+    IMPLEMENT_SERVICE(UserWaitMessage);
+    IMPLEMENT_SERVICE(GdiOffsetRgn);
+    IMPLEMENT_SERVICE(UserGetUpdateRect);
+    IMPLEMENT_SERVICE(GdiCombineRgn);
+    IMPLEMENT_SERVICE(GdiSetBrushOrg);
+    IMPLEMENT_SERVICE(UserGetCaretBlinkTime);
+    IMPLEMENT_SERVICE(UserGetGUIThreadInfo);
+    IMPLEMENT_SERVICE(UserSetKeyboardState);
+    IMPLEMENT_SERVICE(UserFlashWindowEx);
+    IMPLEMENT_SERVICE(UserGetUpdateRgn);
+    IMPLEMENT_SERVICE(UserUnregisterClass);
+    IMPLEMENT_SERVICE(UserDestroyAcceleratorTable);
+    IMPLEMENT_SERVICE(UserGetSystemMenu);
+    IMPLEMENT_SERVICE(UserGetForegroundWindow);
+    IMPLEMENT_SERVICE(UserSetThreadState);
+    IMPLEMENT_SERVICE(UserGetComboBoxInfo);
+    IMPLEMENT_SERVICE(UserGetWindowDC);
+    IMPLEMENT_SERVICE(GdiGetCharSet);
+    IMPLEMENT_SERVICE(GdiExtCreateRegion);
+    IMPLEMENT_SERVICE(GdiExtCreatePen);
+    IMPLEMENT_SERVICE(UserUnhookWindowsHookEx);
+    IMPLEMENT_SERVICE(GdiAddFontMemResourceEx);
+    IMPLEMENT_SERVICE(UserUnregisterHotKey);
+    IMPLEMENT_SERVICE(UserUnhookWinEvent);
+    IMPLEMENT_SERVICE(UserUpdateLayeredWindow);
+#undef IMPLEMENT_SERVICE
+}
+
+#endif
+
+BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, void *reserved )
+{
+    if (reason != DLL_PROCESS_ATTACH) return TRUE;
+#ifndef __REACTOS__
+    LdrDisableThreadCalloutsForDll( inst );
+    NtCurrentTeb()->Peb->KernelCallbackTable = user_callbacks;
+#else
+    NtCurrentPeb()->KernelCallbackTable = UserCallbacks;
+    InitServiceTable();
+#endif
+    return TRUE;
+}

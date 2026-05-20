@@ -75,6 +75,10 @@ add_definitions(
     -D__REACTOS__
 )
 
+if (ARCH STREQUAL "amd64")
+    add_definitions(-DBUILD_WOW64_ENABLED)
+endif()
+
 # There doesn't seem to be a standard for __FILE__ being relative or absolute, so detect it at runtime.
 file(RELATIVE_PATH _PATH_PREFIX ${REACTOS_BINARY_DIR} ${REACTOS_SOURCE_DIR})
 if (NOT MSVC AND ((CMAKE_C_COMPILER_ID STREQUAL "GNU") AND (CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "8.0.0")
@@ -256,6 +260,10 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             add_definitions(-DSARCH_XBOX)
         elseif(SARCH STREQUAL "pc98")
             add_definitions(-DSARCH_PC98)
+        elseif(SARCH STREQUAL "wow64")
+            add_definitions(-DBUILD_WOW6432)
+            # WoW64 build intentionally stores 32-bit pointers in 64-bit LPC fields
+            add_compile_options(-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast)
         endif()
     elseif(ARCH STREQUAL "amd64")
         # clang-cl defines this one for itself

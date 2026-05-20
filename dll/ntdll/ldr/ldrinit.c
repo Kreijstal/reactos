@@ -25,6 +25,7 @@ UNICODE_STRING ImageExecOptionsString = RTL_CONSTANT_STRING(L"\\Registry\\Machin
 UNICODE_STRING Wow64OptionsString = RTL_CONSTANT_STRING(L"");
 UNICODE_STRING NtDllString = RTL_CONSTANT_STRING(L"ntdll.dll");
 UNICODE_STRING Kernel32String = RTL_CONSTANT_STRING(L"kernel32.dll");
+UNICODE_STRING Wow64String = RTL_CONSTANT_STRING(L"wow64.dll");
 const UNICODE_STRING LdrpDotLocal = RTL_CONSTANT_STRING(L".Local");
 
 BOOLEAN LdrpInLdrInit;
@@ -97,6 +98,11 @@ extern BOOLEAN RtlpUse16ByteSLists;
 
 #ifdef _M_AMD64
 extern ULONG NTAPI RtlGetCurrentDirectory_U_RtlpMsysDecoy(ULONG MaximumLength, PWSTR Buffer);
+VOID (*LdrpWow64LdrpInitialize)(PVOID) = NULL;
+BOOLEAN (*LdrpWow64PassExceptionToGuest)(PCONTEXT, PVOID) = NULL;
+ANSI_STRING LdrpWow64LdrpInitializeImportName = RTL_CONSTANT_STRING("Wow64LdrpInitialize");
+ANSI_STRING LdrpWow64PassExceptionToGuestImportName = RTL_CONSTANT_STRING("Wow64PassExceptionToGuest");
+PVOID LdrpWow64BaseAddress = NULL;
 #endif
 
 #ifdef _WIN64
@@ -106,6 +112,67 @@ extern ULONG NTAPI RtlGetCurrentDirectory_U_RtlpMsysDecoy(ULONG MaximumLength, P
 #endif
 
 /* FUNCTIONS *****************************************************************/
+
+#ifdef _M_AMD64
+
+BOOLEAN
+LdrpTryWow64Exception(PCONTEXT Context, PVOID Ptr2)
+{
+    if (LdrpWow64PassExceptionToGuest != NULL &&
+        Context->SegCs == 0x23)
+    {
+        return LdrpWow64PassExceptionToGuest(Context, Ptr2);
+    }
+    
+    return FALSE;
+}
+
+static
+NTSTATUS
+LdrpLoadWow64(VOID)
+{
+    NTSTATUS Status;
+    
+    DPRINT1("Loading WOW64.DLL\n");
+    
+    if (LdrpWow64LdrpInitialize != NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+    
+    Status = LdrLoadDll(NULL, NULL, &Wow64String, &LdrpWow64BaseAddress);
+    
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("LDR: Unable to load %wZ, Status=0x%08lx\n", &Wow64String, Status);
+        return Status;
+    }
+    
+    Status = LdrGetProcedureAddress(LdrpWow64BaseAddress,
+                                    &LdrpWow64LdrpInitializeImportName,
+                                    0,
+                                    (PVOID*)&LdrpWow64LdrpInitialize);
+                                    
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("LDR: Unable to find WOW64 init function, Status=0x%08lx\n", Status);
+        return Status;
+    }
+    
+    Status = LdrGetProcedureAddress(LdrpWow64BaseAddress,
+                                    &LdrpWow64PassExceptionToGuestImportName,
+                                    0,
+                                    (PVOID*)&LdrpWow64PassExceptionToGuest);
+                                    
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("LDR: Unable to find WOW64 exception passing function, Status=0x%08lx\n", Status);
+        return Status;
+    }
+    
+    return STATUS_SUCCESS;
+}
+#endif
 
 /*
  * @implemented
@@ -514,6 +581,9 @@ LdrpInitializeThread(IN PCONTEXT Context)
     RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
     NTSTATUS Status;
     PVOID EntryPoint;
+#ifdef _M_AMD64
+    PIMAGE_NT_HEADERS NtHeader;
+#endif
 
     DPRINT("LdrpInitializeThread() called for %wZ (%p/%p)\n",
             &LdrpImageEntry->BaseDllName,
@@ -531,8 +601,28 @@ LdrpInitializeThread(IN PCONTEXT Context)
         DPRINT1("Warning: Unable to allocate ActivationContextStack\n");
     }
 
+#ifdef _M_AMD64 
+    /* Get the NT Headers */
+    NtHeader = RtlImageNtHeader(Peb->ImageBaseAddress);
+    
+    /* FIXME */
+    if (NtHeader->FileHeader.Machine == IMAGE_FILE_MACHINE_I386)
+    {
+        Status = LdrpLoadWow64();
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Loading WOW64 failed\n");
+            ASSERT(FALSE);
+        }
+        
+        LdrpWow64LdrpInitialize(Context);
+        goto Exit;
+    }
+#endif
+
     /* Make sure we are not shutting down */
-    if (LdrpShutdownInProgress) goto Exit;
+    if (LdrpShutdownInProgress)
+        goto Exit;
 
     /* Allocate TLS */
     LdrpAllocateTls();
@@ -2292,6 +2382,22 @@ LdrpInitializeProcess(IN PCONTEXT Context,
 
     /* Initialize Wine's active context implementation for the current process */
     RtlpInitializeActCtx(&OldShimData);
+
+#ifdef _M_AMD64
+    if (NtHeader->FileHeader.Machine == IMAGE_FILE_MACHINE_I386)
+    {
+        Status = LdrpLoadWow64();
+        if (!NT_SUCCESS(Status))
+        {
+             DPRINT1("Loading WOW64 failed\n");
+            return Status;
+        }
+        
+        _InterlockedIncrement(&LdrpProcessInitialized);
+        LdrpWow64LdrpInitialize(Context);
+        return STATUS_SUCCESS;
+    }
+#endif
 
     /* Set the current directory */
     Status = RtlSetCurrentDirectory_U(&CurrentDirectory);

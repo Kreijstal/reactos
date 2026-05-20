@@ -180,6 +180,11 @@ CsrApiHandleConnectionRequest(IN PCSR_API_MESSAGE ApiMessage)
             CsrLockedDereferenceProcess(CsrProcess);
         }
     }
+    
+    if (AllowConnection == FALSE)
+    {
+        DPRINT1("CsrThread %p, CsrProcess %p, status %lX\n", CsrThread, CsrProcess, Status);
+    }
 
     /* Release the Process Lock */
     CsrReleaseProcessLock();

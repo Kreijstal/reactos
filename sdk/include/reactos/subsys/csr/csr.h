@@ -39,7 +39,7 @@ NTAPI
 CsrAllocateMessagePointer(
     _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
     _In_ ULONG MessageLength,
-    _Out_ PVOID* CapturedData);
+    _Out_ LPC_PVOID* CapturedData);
 
 VOID
 NTAPI
@@ -47,7 +47,71 @@ CsrCaptureMessageBuffer(
     _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
     _In_opt_ PVOID MessageBuffer,
     _In_ ULONG MessageLength,
-    _Out_ PVOID* CapturedData);
+    _Out_ LPC_PVOID* CapturedData);
+    
+#ifdef USE_LPC6432 
+
+__attribute__((unused)) static
+ULONG
+CsrAllocateMessagePointerNative(
+    _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
+    _In_ ULONG MessageLength,
+    _Out_ LPC_PVOID* CapturedData)
+{
+    return CsrAllocateMessagePointer(CaptureBuffer, MessageLength, CapturedData);
+}
+
+__attribute__((unused)) static
+VOID
+CsrCaptureMessageBufferNative(
+    _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
+    _In_opt_ PVOID MessageBuffer,
+    _In_ ULONG MessageLength,
+    _Out_ LPC_PVOID* CapturedData)
+{
+    CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, CapturedData);
+}
+
+__attribute__((unused)) static
+ULONG
+CsrAllocateMessagePointer32(
+    _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
+    _In_ ULONG MessageLength,
+    _Out_ PVOID* CapturedData)
+{
+    LPC_PVOID Temp;
+    ULONG Result;
+    
+    Result = CsrAllocateMessagePointer(CaptureBuffer, MessageLength, &Temp);
+    ASSERT((((ULONGLONG)Temp) & 0xFFFFFFFF00000000ULL) == 0);
+    
+    *CapturedData = (PVOID)(ULONG_PTR)Temp;
+    return Result;
+}
+
+__attribute__((unused)) static
+VOID
+CsrCaptureMessageBuffer32(
+    _Inout_ PCSR_CAPTURE_BUFFER CaptureBuffer,
+    _In_opt_ PVOID MessageBuffer,
+    _In_ ULONG MessageLength,
+    _Out_ PVOID* CapturedData)
+{
+    LPC_PVOID Temp;
+    CsrCaptureMessageBuffer(CaptureBuffer, MessageBuffer, MessageLength, &Temp);
+    ASSERT((((ULONGLONG)Temp) & 0xFFFFFFFF00000000ULL) == 0);
+    *CapturedData = (PVOID)(ULONG_PTR)Temp;
+}
+
+#define CsrAllocateMessagePointer CsrAllocateMessagePointer32
+#define CsrCaptureMessageBuffer CsrCaptureMessageBuffer32
+
+#else
+    
+#define CsrAllocateMessagePointerNative CsrAllocateMessagePointer
+#define CsrCaptureMessageBufferNative CsrCaptureMessageBuffer
+
+#endif
 
 VOID
 NTAPI

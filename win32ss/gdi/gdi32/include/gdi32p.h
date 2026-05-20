@@ -412,6 +412,10 @@ GdiAllocBatchCommand(
     USHORT cjSize;
     PGDIBATCHHDR pHdr;
 
+#if defined(BUILD_WOW6432) && defined(_M_IX86)
+    return NULL;
+#endif
+
     /* Get a pointer to the TEB */
     pTeb = NtCurrentTeb();
 

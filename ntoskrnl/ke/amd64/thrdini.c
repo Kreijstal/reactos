@@ -175,6 +175,9 @@ KiSwapContextResume(
 {
     PKIPCR Pcr = (PKIPCR)KeGetPcr();
     PKPROCESS OldProcess, NewProcess;
+#ifdef _M_AMD64
+    PEPROCESS ENewProcess;
+#endif
 
     /* Setup ring 0 stack pointer */
     Pcr->TssBase->Rsp0 = (ULONG64)NewThread->InitialStack;
@@ -210,6 +213,20 @@ KiSwapContextResume(
     {
        /* This will switch the usermode gs */
        __writemsr(MSR_GS_SWAP, (ULONG64)NewThread->Teb);
+       
+       ENewProcess = (PEPROCESS) NewProcess; 
+       if (ENewProcess->Wow64Process != NULL) 
+       {
+          ULONG_PTR base = ROUND_TO_PAGES((ULONG_PTR)(NewThread->Teb + 1));
+          
+          PKGDTENTRY64 CmTebEntry = KiGetGdtEntry(Pcr->GdtBase, KGDT64_R3_CMTEB);
+          CmTebEntry->LimitLow = 0xFFFF;
+          CmTebEntry->Bits.LimitHigh = 0xFFFF;
+          
+          CmTebEntry->BaseLow = base & 0xFFFF;
+          CmTebEntry->Bits.BaseMiddle = (base & 0xFF0000) >> 16;
+          CmTebEntry->Bits.BaseHigh = (base & 0xFF000000) >> 24;
+       }
     }
 
     /* Increase context switch count */
