@@ -5,6 +5,7 @@ add_rpc_files(server ${REACTOS_SOURCE_DIR}/sdk/include/reactos/idl/wlansvc.idl)
 list(APPEND SOURCE
     wlansvc.c
     rpcserver.c
+    regkey.c
     precomp.h
     ${CMAKE_CURRENT_BINARY_DIR}/wlansvc_s.c)
 
