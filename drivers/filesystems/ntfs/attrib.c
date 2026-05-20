@@ -2937,30 +2937,38 @@ FreeClusters(PNTFS_VCB Vcb,
 
     RtlInitializeBitMap(&Bitmap, (PULONG)BitmapData, Vcb->NtfsInfo.ClusterCount);
 
-    // free clusters in $BITMAP file
-    while (ClustersLeftToFree > 0)
+    /* free clusters in $BITMAP file. Track HighestVCN as signed so it can
+     * step from 0 to -1 (sentinel for "no clusters") on the final iteration
+     * without unsigned wrap. */
     {
-        LONGLONG LargeVbn, LargeLbn;
+        LONGLONG NextHighestVcn = (LONGLONG)AttrContext->pRecord->NonResident.HighestVCN;
 
-        if (!FsRtlLookupLastLargeMcbEntry(&AttrContext->DataRunsMCB, &LargeVbn, &LargeLbn))
+        while (ClustersLeftToFree > 0)
         {
-            Status = STATUS_INVALID_PARAMETER;
-            DPRINT1("DRIVER ERROR: FreeClusters called to free %lu clusters, which is %lu more clusters than are assigned to attribute!",
-                    ClustersToFree,
-                    ClustersLeftToFree);
-            break;
+            LONGLONG LargeVbn, LargeLbn;
+
+            if (!FsRtlLookupLastLargeMcbEntry(&AttrContext->DataRunsMCB, &LargeVbn, &LargeLbn))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                DPRINT1("DRIVER ERROR: FreeClusters called to free %lu clusters, which is %lu more clusters than are assigned to attribute!\n",
+                        ClustersToFree,
+                        ClustersLeftToFree);
+                ASSERT(FALSE);
+                break;
+            }
+
+            if (LargeLbn != -1)
+            {
+                // deallocate this cluster
+                RtlClearBits(&Bitmap, LargeLbn, 1);
+            }
+            FsRtlTruncateLargeMcb(&AttrContext->DataRunsMCB, NextHighestVcn);
+
+            NextHighestVcn--;
+            ClustersLeftToFree--;
         }
 
-        if (LargeLbn != -1)
-        {
-            // deallocate this cluster
-            RtlClearBits(&Bitmap, LargeLbn, 1);
-        }
-        FsRtlTruncateLargeMcb(&AttrContext->DataRunsMCB, AttrContext->pRecord->NonResident.HighestVCN);
-
-        // decrement HighestVCN, but don't let it go below 0
-        AttrContext->pRecord->NonResident.HighestVCN = min(AttrContext->pRecord->NonResident.HighestVCN, AttrContext->pRecord->NonResident.HighestVCN - 1);
-        ClustersLeftToFree--;
+        AttrContext->pRecord->NonResident.HighestVCN = (ULONGLONG)NextHighestVcn;
     }
 
     // update $BITMAP file on disk
