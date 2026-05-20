@@ -379,6 +379,21 @@ MiniportStartIo(
     DPRINT1("MiniportHwStartIo(%p %p)\n",
             Miniport, Srb);
 
+    /* Storport calls HwBuildIo (if registered) before HwStartIo so the
+     * miniport can do per-SRB setup at lower IRQL — assemble SG lists,
+     * populate descriptor counts, validate addressing, etc. — outside the
+     * interrupt-locked HwStartIo path. Skipping this leaves miniport
+     * descriptor state (e.g., viostor's srbExt->out/in) zero, so the
+     * subsequent virtqueue_add_buf pushes an empty SG and the device
+     * completes nothing. */
+    if (Miniport->InitData->HwBuildIo != NULL)
+    {
+        BOOLEAN BuildOk = Miniport->InitData->HwBuildIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
+        DPRINT1("HwBuildIo() returned %u\n", BuildOk);
+        if (!BuildOk)
+            return FALSE;
+    }
+
     Result = Miniport->InitData->HwStartIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
     DPRINT1("HwStartIo() returned %u\n", Result);
 
