@@ -322,20 +322,175 @@ PortDispatchClose(
 
 static
 NTSTATUS
+PortPdoQueryProperty(
+    IN PPDO_DEVICE_EXTENSION PdoExt,
+    IN PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PSTORAGE_PROPERTY_QUERY Query;
+    PVOID OutBuf = Irp->AssociatedIrp.SystemBuffer;
+    ULONG InLen = Stack->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG OutLen = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+    ULONG Required;
+
+    if (InLen < sizeof(STORAGE_PROPERTY_QUERY) || OutBuf == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Query = (PSTORAGE_PROPERTY_QUERY)OutBuf;
+
+    if (Query->QueryType == PropertyExistsQuery)
+    {
+        if (Query->PropertyId == StorageAdapterProperty ||
+            Query->PropertyId == StorageDeviceProperty)
+        {
+            Irp->IoStatus.Information = 0;
+            return STATUS_SUCCESS;
+        }
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    if (Query->QueryType != PropertyStandardQuery)
+        return STATUS_NOT_SUPPORTED;
+
+    if (Query->PropertyId == StorageAdapterProperty)
+    {
+        STORAGE_ADAPTER_DESCRIPTOR Desc = {0};
+
+        Required = RTL_SIZEOF_THROUGH_FIELD(STORAGE_ADAPTER_DESCRIPTOR, BusMinorVersion);
+        Desc.Version = Required;
+        Desc.Size = Required;
+        Desc.MaximumTransferLength = 64 * 1024;
+        Desc.MaximumPhysicalPages = 17;
+        Desc.AlignmentMask = 0;
+        Desc.AdapterUsesPio = FALSE;
+        Desc.AdapterScansDown = FALSE;
+        Desc.CommandQueueing = FALSE;
+        Desc.AcceleratedTransfer = FALSE;
+        Desc.BusType = BusTypeScsi;
+        Desc.BusMajorVersion = 1;
+        Desc.BusMinorVersion = 0;
+
+        if (OutLen < sizeof(STORAGE_DESCRIPTOR_HEADER))
+            return STATUS_INFO_LENGTH_MISMATCH;
+
+        if (OutLen < Required)
+        {
+            PSTORAGE_DESCRIPTOR_HEADER Hdr = OutBuf;
+            Hdr->Version = Desc.Version;
+            Hdr->Size = Desc.Size;
+            Irp->IoStatus.Information = sizeof(STORAGE_DESCRIPTOR_HEADER);
+            return STATUS_SUCCESS;
+        }
+
+        RtlCopyMemory(OutBuf, &Desc, Required);
+        Irp->IoStatus.Information = Required;
+        return STATUS_SUCCESS;
+    }
+
+    if (Query->PropertyId == StorageDeviceProperty)
+    {
+        STORAGE_DEVICE_DESCRIPTOR Desc = {0};
+
+        Required = FIELD_OFFSET(STORAGE_DEVICE_DESCRIPTOR, RawDeviceProperties);
+        Desc.Version = Required;
+        Desc.Size = Required;
+        Desc.DeviceType = 0;
+        Desc.DeviceTypeModifier = 0;
+        Desc.RemovableMedia = FALSE;
+        Desc.CommandQueueing = FALSE;
+        Desc.VendorIdOffset = 0;
+        Desc.ProductIdOffset = 0;
+        Desc.ProductRevisionOffset = 0;
+        Desc.SerialNumberOffset = 0;
+        Desc.BusType = BusTypeScsi;
+        Desc.RawPropertiesLength = 0;
+
+        if (OutLen < sizeof(STORAGE_DESCRIPTOR_HEADER))
+            return STATUS_INFO_LENGTH_MISMATCH;
+
+        if (OutLen < Required)
+        {
+            PSTORAGE_DESCRIPTOR_HEADER Hdr = OutBuf;
+            Hdr->Version = Desc.Version;
+            Hdr->Size = Desc.Size;
+            Irp->IoStatus.Information = sizeof(STORAGE_DESCRIPTOR_HEADER);
+            return STATUS_SUCCESS;
+        }
+
+        RtlCopyMemory(OutBuf, &Desc, Required);
+        Irp->IoStatus.Information = Required;
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_NOT_SUPPORTED;
+}
+
+
+static
+NTSTATUS
 NTAPI
 PortDispatchDeviceControl(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp)
 {
-    DPRINT1("PortDispatchDeviceControl(%p %p)\n",
-            DeviceObject, Irp);
+    PPDO_DEVICE_EXTENSION DeviceExtension;
+    PIO_STACK_LOCATION Stack;
+    PSCSI_REQUEST_BLOCK Srb;
+    ULONG IoControlCode;
+    NTSTATUS Status;
 
-    Irp->IoStatus.Status = STATUS_SUCCESS;
+    DPRINT("PortDispatchDeviceControl(%p %p)\n", DeviceObject, Irp);
+
+    DeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    Stack = IoGetCurrentIrpStackLocation(Irp);
+    IoControlCode = Stack->Parameters.DeviceIoControl.IoControlCode;
+
+    /* Internal bus-scan / port-private inquiries arrive as IOCTL_SCSI_EXECUTE_*.
+     * PortSendInquiry stores the SRB pointer in IrpStack->Parameters.Scsi.Srb,
+     * which on x86/x64 overlaps OutputBufferLength but leaves IoControlCode at
+     * offset 8 untouched, so we can still discriminate by the IOCTL code here. */
+    if (DeviceExtension->ExtensionType == PdoExtension &&
+        (IoControlCode == IOCTL_SCSI_EXECUTE_IN ||
+         IoControlCode == IOCTL_SCSI_EXECUTE_OUT ||
+         IoControlCode == IOCTL_SCSI_EXECUTE_NONE))
+    {
+        Srb = Stack->Parameters.Scsi.Srb;
+        if (Srb == NULL)
+        {
+            Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        Status = PortDispatchSrb(DeviceExtension, Irp, Srb);
+        if (Status != STATUS_PENDING)
+        {
+            Srb->SrbStatus = SRB_STATUS_ERROR;
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        }
+        return Status;
+    }
+
+    if (DeviceExtension->ExtensionType == PdoExtension &&
+        IoControlCode == IOCTL_STORAGE_QUERY_PROPERTY)
+    {
+        Status = PortPdoQueryProperty(DeviceExtension, Irp);
+        Irp->IoStatus.Status = Status;
+        if (!NT_SUCCESS(Status))
+            Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
+    }
+
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
     Irp->IoStatus.Information = 0;
 
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-    return STATUS_SUCCESS;
+    return STATUS_NOT_SUPPORTED;
 }
 
 
@@ -823,22 +978,24 @@ StorPortGetPhysicalAddress(
         return PhysicalAddress;
     }
 
-    // FIXME
-
-
+    /* Generic VA — compute the physical address and report bytes remaining in
+     * the current physical page so the caller can chain across page breaks
+     * itself. Returning Length=1 (as the previous stub did) caused storahci
+     * to treat per-SRB command tables as 1-byte contiguous; miniport relied
+     * on the contiguity guarantee for the AHCI command-table DMA target. */
     PhysicalAddress = MmGetPhysicalAddress(VirtualAddress);
-    *Length = 1;
-//    UNIMPLEMENTED;
-
-//    *Length = 0;
-//    PhysicalAddress.QuadPart = (LONGLONG)0;
-
+    *Length = PAGE_SIZE - (ULONG)((ULONG_PTR)VirtualAddress & (PAGE_SIZE - 1));
     return PhysicalAddress;
 }
 
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * Returns the scatter/gather list built for this SRB by PortBuildScatterGatherList
+ * before HwStartIo was called. The list lives inside the SRB_PORT_CONTEXT, which
+ * the port layer stashed at the front of Srb->SrbExtension. The miniport never
+ * frees this list — it dies with the SRB context when PortCompleteSrb runs.
  */
 STORPORT_API
 PSTOR_SCATTER_GATHER_LIST
@@ -847,9 +1004,21 @@ StorPortGetScatterGatherList(
     _In_ PVOID DeviceExtension,
     _In_ PSCSI_REQUEST_BLOCK Srb)
 {
-    DPRINT1("StorPortGetScatterGatherList()\n");
-    UNIMPLEMENTED;
-    return NULL;
+    PSRB_PORT_CONTEXT Context;
+
+    UNREFERENCED_PARAMETER(DeviceExtension);
+
+    if (Srb == NULL || Srb->SrbExtension == NULL)
+        return NULL;
+
+    Context = CONTAINING_RECORD(Srb->SrbExtension, SRB_PORT_CONTEXT, MiniportExtension);
+    if (Context->Magic != SRB_CONTEXT_MAGIC)
+    {
+        DPRINT1("StorPortGetScatterGatherList: bad context magic 0x%08lx\n", Context->Magic);
+        return NULL;
+    }
+
+    return &Context->Sgl;
 }
 
 
@@ -904,7 +1073,11 @@ StorPortGetUncachedExtension(
 
     // FIXME: Set DMA stuff here?
 
-    /* Allocate the uncached extension */
+    /* Allocate the uncached extension. The cache type is MmNonCached so the
+     * CPU and the storage controller see a coherent view of DMA-target
+     * structures (AHCI command lists, received-FIS buffers, etc.). MmCached
+     * would silently work most of the time but allows stale-cache races on
+     * weakly-ordered systems and on cores without snooping. */
     Alignment.QuadPart = 0;
     LowestAddress.QuadPart = 0;
     HighestAddress.QuadPart = 0x00000000FFFFFFFF;
@@ -912,7 +1085,7 @@ StorPortGetUncachedExtension(
                                                                                            LowestAddress,
                                                                                            HighestAddress,
                                                                                            Alignment,
-                                                                                           MmCached);
+                                                                                           MmNonCached);
     if (DeviceExtension->UncachedExtensionVirtualBase == NULL)
         return NULL;
 
@@ -1129,15 +1302,29 @@ StorPortNotification(
     switch (NotificationType)
     {
         case RequestComplete:
-            DPRINT1("RequestComplete\n");
-            Srb = (PSCSI_REQUEST_BLOCK)va_arg(ap, PSCSI_REQUEST_BLOCK);
-            DPRINT1("Srb %p\n", Srb);
-            if (Srb->OriginalRequest != NULL)
-            {
-                DPRINT1("Need to complete the IRP!\n");
+        {
+            PSRB_PORT_CONTEXT Context;
 
+            DPRINT("RequestComplete\n");
+            Srb = (PSCSI_REQUEST_BLOCK)va_arg(ap, PSCSI_REQUEST_BLOCK);
+            DPRINT("Srb %p\n", Srb);
+
+            if (Srb == NULL || Srb->SrbExtension == NULL)
+            {
+                DPRINT1("RequestComplete: SRB has no port context, dropping\n");
+                break;
             }
+
+            Context = CONTAINING_RECORD(Srb->SrbExtension, SRB_PORT_CONTEXT, MiniportExtension);
+            if (Context->Magic != SRB_CONTEXT_MAGIC)
+            {
+                DPRINT1("RequestComplete: bad context magic 0x%08lx\n", Context->Magic);
+                break;
+            }
+
+            PortCompleteSrb(Context);
             break;
+        }
 
         case GetExtendedFunctionTable:
             DPRINT1("GetExtendedFunctionTable\n");
@@ -1163,17 +1350,32 @@ StorPortNotification(
             break;
 
         case InitializeDpc:
-            DPRINT1("InitializeDpc\n");
+            DPRINT("InitializeDpc\n");
             Dpc = (PSTOR_DPC)va_arg(ap, PSTOR_DPC);
-            DPRINT1("Dpc %p\n", Dpc);
             HwDpcRoutine = (PHW_DPC_ROUTINE)va_arg(ap, PHW_DPC_ROUTINE);
-            DPRINT1("HwDpcRoutine %p\n", HwDpcRoutine);
 
+            /* Push the HwDeviceExtension (not the FDO's DeviceExtension) as the
+             * DPC context so the HwDpcRoutine receives the same pointer the
+             * miniport handed to HwInitialize. */
             KeInitializeDpc((PRKDPC)&Dpc->Dpc,
                             (PKDEFERRED_ROUTINE)HwDpcRoutine,
-                            (PVOID)DeviceExtension);
+                            HwDeviceExtension);
             KeInitializeSpinLock(&Dpc->Lock);
             break;
+
+        case IssueDpc:
+        {
+            PVOID SystemArgument1;
+            PVOID SystemArgument2;
+
+            DPRINT("IssueDpc\n");
+            Dpc = (PSTOR_DPC)va_arg(ap, PSTOR_DPC);
+            SystemArgument1 = va_arg(ap, PVOID);
+            SystemArgument2 = va_arg(ap, PVOID);
+
+            KeInsertQueueDpc((PRKDPC)&Dpc->Dpc, SystemArgument1, SystemArgument2);
+            break;
+        }
 
         case AcquireSpinLock:
             DPRINT1("AcquireSpinLock\n");
@@ -1390,7 +1592,11 @@ StorPortSetBusDataByOffset(
 
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * Store the miniport's per-LU queue depth on the matching PDO. The value is
+ * informational for storport — we do not enforce serialization at this depth
+ * yet, but it travels with the PDO so future code can.
  */
 STORPORT_API
 BOOLEAN
@@ -1402,9 +1608,42 @@ StorPortSetDeviceQueueDepth(
     _In_ UCHAR Lun,
     _In_ ULONG Depth)
 {
-    DPRINT1("StorPortSetDeviceQueueDepth()\n");
-    UNIMPLEMENTED;
-    return FALSE;
+    PMINIPORT_DEVICE_EXTENSION MiniportExtension;
+    PFDO_DEVICE_EXTENSION DeviceExtension;
+    PPDO_DEVICE_EXTENSION PdoExt;
+    PLIST_ENTRY ListEntry;
+    KLOCK_QUEUE_HANDLE LockHandle;
+    BOOLEAN Found = FALSE;
+
+    DPRINT("StorPortSetDeviceQueueDepth(%u %u %u Depth=%lu)\n",
+           PathId, TargetId, Lun, Depth);
+
+    if (HwDeviceExtension == NULL)
+        return FALSE;
+
+    MiniportExtension = CONTAINING_RECORD(HwDeviceExtension,
+                                          MINIPORT_DEVICE_EXTENSION,
+                                          HwDeviceExtension);
+    DeviceExtension = MiniportExtension->Miniport->DeviceExtension;
+
+    KeAcquireInStackQueuedSpinLock(&DeviceExtension->PdoListLock, &LockHandle);
+
+    for (ListEntry = DeviceExtension->PdoListHead.Flink;
+         ListEntry != &DeviceExtension->PdoListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        PdoExt = CONTAINING_RECORD(ListEntry, PDO_DEVICE_EXTENSION, PdoListEntry);
+        if (PdoExt->Bus == PathId && PdoExt->Target == TargetId && PdoExt->Lun == Lun)
+        {
+            PdoExt->QueueDepth = Depth;
+            Found = TRUE;
+            break;
+        }
+    }
+
+    KeReleaseInStackQueuedSpinLock(&LockHandle);
+
+    return Found;
 }
 
 

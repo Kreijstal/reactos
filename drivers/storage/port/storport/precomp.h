@@ -31,6 +31,16 @@
 #define TAG_ADDRESS_MAPPING 'MAtS'
 #define TAG_INQUIRY_DATA    'QItS'
 #define TAG_SENSE_DATA      'NStS'
+#define TAG_SRB_CONTEXT     'CStS'
+
+#define SRB_CONTEXT_MAGIC   'xCBS'
+#define STORPORT_MAX_SGL_ENTRIES 257
+
+/* Windows storport guarantees SrbExtension is 128-byte aligned so DMA-target
+ * miniport structures placed at SrbExtension (e.g. AHCI command tables) meet
+ * the hardware alignment requirement. ExAllocatePoolWithTag only guarantees
+ * 16-byte alignment, so we have to over-allocate and align manually. */
+#define SRB_EXTENSION_ALIGNMENT 128
 
 typedef enum
 {
@@ -130,10 +140,54 @@ typedef struct _PDO_DEVICE_EXTENSION
     ULONG Bus;
     ULONG Target;
     ULONG Lun;
+    ULONG QueueDepth;
     PINQUIRYDATA InquiryBuffer;
 
 
 } PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
+
+
+/*
+ * Per-SRB context that the port layer hangs off the SRB's SrbExtension pointer.
+ * Layout: [SRB_PORT_CONTEXT header][miniport extension bytes]
+ * SrbExtension passed to the miniport points at the end of the header so the
+ * miniport sees an opaque buffer of the size it asked for in HW_INITIALIZATION_DATA.
+ * From a miniport-facing SrbExtension we can recover the context via
+ * CONTAINING_RECORD(ext, SRB_PORT_CONTEXT, MiniportExtension).
+ */
+typedef struct _SRB_PORT_CONTEXT
+{
+    /* The raw pool allocation that backs this context. Free this — not
+     * `this` — in PortCompleteSrb. The context pointer itself is offset
+     * forward into RawAlloc so MiniportExtension lands on a 128-byte boundary
+     * suitable for AHCI command-table DMA. */
+    PVOID RawAlloc;
+    ULONG Magic;
+    PIRP Irp;
+    PSCSI_REQUEST_BLOCK Srb;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    PPDO_DEVICE_EXTENSION PdoExtension;
+
+    /* Deferred completion DPC. RequestComplete fires from the miniport's ISR
+     * or DPC, which may run inside an interrupt spinlock at DIRQL — too high
+     * for ExFreePoolWithTag and IoCompleteRequest. When that's the case the
+     * completion is queued here and replayed at DISPATCH_LEVEL. */
+    KDPC CompleteDpc;
+
+    /* Single scatter/gather list, built before HwStartIo. NumberOfElements is 0
+     * for non-data SRBs. STOR_SCATTER_GATHER_LIST is variable-length, so we
+     * over-allocate the trailing element array to STORPORT_MAX_SGL_ENTRIES. */
+    STOR_SCATTER_GATHER_LIST Sgl;
+    STOR_SCATTER_GATHER_ELEMENT SglOverflow[STORPORT_MAX_SGL_ENTRIES - 1];
+
+    /* MiniportExtension MUST start on a 128-byte boundary for AHCI miniports
+     * (and generally for any miniport that hands SrbExtension to hardware as
+     * a DMA address). The DECLSPEC_ALIGN ensures the field's offset within
+     * the struct is a multiple of 128. PortDispatchSrb must additionally
+     * compute the context pointer such that the struct base is 128-aligned
+     * (via over-allocate + align). */
+    DECLSPEC_ALIGN(SRB_EXTENSION_ALIGNMENT) UCHAR MiniportExtension[ANYSIZE_ARRAY];
+} SRB_PORT_CONTEXT, *PSRB_PORT_CONTEXT;
 
 
 /* fdo.c */
@@ -149,6 +203,16 @@ NTAPI
 PortFdoPnp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp);
+
+NTSTATUS
+PortDispatchSrb(
+    _In_ PPDO_DEVICE_EXTENSION PdoExtension,
+    _In_ PIRP Irp,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
+
+VOID
+PortCompleteSrb(
+    _In_ PSRB_PORT_CONTEXT Context);
 
 
 /* miniport.c */
