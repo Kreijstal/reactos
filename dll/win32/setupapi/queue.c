@@ -1026,11 +1026,26 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
     TRACE("copy %s to %s style 0x%x\n",debugstr_w(source),debugstr_w(target),style);
 
 #ifdef __REACTOS__
-    /* Get a temp file name */
-    if (!GetTempPathW(ARRAYSIZE(TempPath), TempPath))
+    /* Pick a directory for the intermediate (LZ-extracted) temp file.
+     * Prefer the target's own directory: create_full_pathW has already
+     * been called for it, so it exists and is writable; using it makes
+     * the final MoveFileExW an atomic same-volume rename.  Falling back
+     * to the system TEMP would break when it lives on a read-only volume
+     * (e.g. the "Install ReactOS" wizard launched from the non-overlay
+     * LiveCD where X:\ is the CD-ROM itself). */
     {
-        ERR("GetTempPathW error\n");
-        return FALSE;
+        LPCWSTR slash = wcsrchr(target, L'\\');
+        if (slash && (slash - target) + 2 < (LONG_PTR)ARRAYSIZE(TempPath))
+        {
+            SIZE_T dirlen = (slash - target) + 1;
+            memcpy(TempPath, target, dirlen * sizeof(WCHAR));
+            TempPath[dirlen] = L'\0';
+        }
+        else if (!GetTempPathW(ARRAYSIZE(TempPath), TempPath))
+        {
+            ERR("GetTempPathW error\n");
+            return FALSE;
+        }
     }
 
     /* Try to open the source file */
