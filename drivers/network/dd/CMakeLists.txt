@@ -17,3 +17,7 @@ endif()
 add_subdirectory(pcnet)
 add_subdirectory(rtl8139)
 add_subdirectory(rtl8168)
+# ar9485 is an NDIS 6.20 native-802.11 miniport - same NT 6.0+ gating as e1000e.
+if(_E1000E_NT_NUM GREATER_EQUAL 1536)
+    add_subdirectory(ar9485)
+endif()
