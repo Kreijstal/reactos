@@ -281,11 +281,29 @@ WlanQueryInterface(IN HANDLE hClientHandle,
                    OUT PVOID *ppData,
                    WLAN_OPCODE_VALUE_TYPE *pWlanOpcodeValueType)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+    DWORD dwOpcodeValue = wlan_opcode_value_type_query_only;
+
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (pdwDataSize == NULL) || (ppData == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *pdwDataSize = 0;
+    *ppData = NULL;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcQueryInterface(hClientHandle, pInterfaceGuid, (long)OpCode,
+                                      pdwDataSize, (LPBYTE *)ppData, &dwOpcodeValue);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = WlanRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (pWlanOpcodeValueType != NULL)
+        *pWlanOpcodeValueType = (WLAN_OPCODE_VALUE_TYPE)dwOpcodeValue;
+    return dwResult;
 }
 
 DWORD
@@ -295,11 +313,24 @@ WlanGetInterfaceCapability(IN HANDLE hClientHandle,
                            PVOID pReserved,
                            OUT PWLAN_INTERFACE_CAPABILITY *ppCapability)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (ppCapability == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *ppCapability = NULL;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcGetInterfaceCapability(hClientHandle, pInterfaceGuid, ppCapability);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = WlanRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD WINAPI WlanRegisterNotification(IN HANDLE hClientHandle,
@@ -310,8 +341,34 @@ DWORD WINAPI WlanRegisterNotification(IN HANDLE hClientHandle,
                                       PVOID pReserved,
                                       PDWORD pdwPrevNotifSource)
 {
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    DWORD dwResult = ERROR_SUCCESS;
+    DWORD dwPrev = 0;
+
+    if (hClientHandle == NULL || pReserved != NULL)
+        return ERROR_INVALID_PARAMETER;
+
+    /* No notification pump exists yet (the service has no driver to receive
+     * events from), so we record the subscription bitmask server-side but
+     * the callback itself will never fire.  When the kernel side lands,
+     * stash the callback in a per-handle table here and dispatch from
+     * _RpcAsyncGetNotification responses. */
+    (void)funcCallback;
+    (void)pCallbackContext;
+    (void)bIgnoreDuplicate;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcRegisterNotification(hClientHandle, dwNotifSource, &dwPrev);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = WlanRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    if (pdwPrevNotifSource != NULL)
+        *pdwPrevNotifSource = dwPrev;
+    return dwResult;
 }
 
 DWORD
@@ -321,10 +378,22 @@ WlanReasonCodeToString(IN DWORD dwReasonCode,
                        IN PWCHAR pStringBuffer,
                        PVOID pReserved)
 {
+    /* Windows ships a fully translated table of WLAN reason-code strings.
+     * Without that table we still satisfy the contract (NUL-terminated
+     * caller buffer, ERROR_SUCCESS) by formatting the numeric code.  Apps
+     * such as netsh use this only for human-readable display, so a numeric
+     * representation degrades gracefully. */
+    WCHAR Scratch[64];
+    SIZE_T Len;
+
     if ((pReserved != NULL) || (pStringBuffer == NULL) || (dwBufferSize == 0))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
+    Len = (SIZE_T)swprintf(Scratch, L"WLAN reason code 0x%08lx", dwReasonCode);
+    if (Len >= dwBufferSize)
+        Len = dwBufferSize - 1;
+    RtlCopyMemory(pStringBuffer, Scratch, Len * sizeof(WCHAR));
+    pStringBuffer[Len] = L'\0';
     return ERROR_SUCCESS;
 }
 
@@ -339,11 +408,27 @@ WlanIhvControl(IN HANDLE hClientHandle,
                PVOID pOutBuffer,
                OUT PDWORD pdwBytesReturned)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((hClientHandle == NULL) || (pInterfaceGuid == NULL) || (pdwBytesReturned == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *pdwBytesReturned = 0;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcIhvControl(hClientHandle, pInterfaceGuid, (DWORD)Type,
+                                  dwInBufferSize, pInBuffer,
+                                  dwOutBufferSize, pOutBuffer,
+                                  pdwBytesReturned);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = WlanRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD
@@ -378,11 +463,25 @@ WlanGetAvailableNetworkList(IN HANDLE hClientHandle,
                             PVOID pReserved,
                             OUT PWLAN_AVAILABLE_NETWORK_LIST *ppAvailableNetworkList)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (pInterfaceGuid == NULL) || (hClientHandle == NULL) || (ppAvailableNetworkList == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *ppAvailableNetworkList = NULL;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcGetAvailableNetworkList(hClientHandle, pInterfaceGuid, dwFlags,
+                                               ppAvailableNetworkList);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = WlanRpcStatusToWinError(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 void __RPC_FAR * __RPC_USER
