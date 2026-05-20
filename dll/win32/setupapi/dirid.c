@@ -147,8 +147,17 @@ static const WCHAR *get_csidl_dir( DWORD csidl )
 
     if (!SHGetSpecialFolderPathW( NULL, buffer, csidl, TRUE ))
     {
-        FIXME( "CSIDL %x not found\n", csidl );
-        return get_unknown_dirid();
+        /* CSIDL_FLAG_CREATE failed (e.g. read-only LiveCD volume X:\).
+         * Retry without CSIDL_FLAG_DONT_VERIFY check so we still get the
+         * resolved path even if the directory itself cannot be created.
+         * Falling back to "<system32>\unknown" instead mis-routes copy
+         * targets and produces a confusing "X:\reactos\System32\unknown\..."
+         * in error logs when the real path was just "X:\Program Files\...". */
+        if (!SHGetSpecialFolderPathW( NULL, buffer, csidl | CSIDL_FLAG_DONT_VERIFY, FALSE ))
+        {
+            FIXME( "CSIDL %x not found\n", csidl );
+            return get_unknown_dirid();
+        }
     }
     len = (strlenW(buffer) + 1) * sizeof(WCHAR);
     if ((str = HeapAlloc( GetProcessHeap(), 0, len ))) memcpy( str, buffer, len );
