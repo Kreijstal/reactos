@@ -93,11 +93,26 @@ WlanGetProfile(IN HANDLE hClientHandle,
                DWORD *pdwFlags,
                PDWORD pdwGrantedAccess)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (pstrProfileXml  == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *pstrProfileXml = NULL;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcGetProfile(hClientHandle, pInterfaceGuid,
+                                  (LPWSTR)strProfileName, pstrProfileXml,
+                                  pdwFlags, pdwGrantedAccess);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD
@@ -111,11 +126,27 @@ WlanSetProfile(IN HANDLE hClientHandle,
                PVOID pReserved,
                OUT DWORD *pdwReasonCode)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileXml == NULL) || (pdwReasonCode == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *pdwReasonCode = 0;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcSetProfile(hClientHandle, pInterfaceGuid, dwFlags,
+                                  (LPWSTR)strProfileXml,
+                                  (LPWSTR)strAllUserProfileSecurity,
+                                  bOverwrite, pdwReasonCode);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD
@@ -127,11 +158,29 @@ WlanGetProfileCustomUserData(IN HANDLE hClientHandle,
                              OUT DWORD *pdwDataSize,
                              OUT PBYTE *ppData)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
+    if (pdwDataSize == NULL || ppData == NULL)
+        return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *pdwDataSize = 0;
+    *ppData = NULL;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcGetProfileCustomUserData(hClientHandle, pInterfaceGuid,
+                                                (LPWSTR)strProfileName,
+                                                pdwDataSize, ppData);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD
@@ -143,14 +192,27 @@ WlanSetProfileCustomUserData(IN HANDLE hClientHandle,
                              IN const PBYTE pData,
                              PVOID pReserved)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileName == NULL))
         return ERROR_INVALID_PARAMETER;
 
     if ((dwDataSize != 0) && (pData == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    RpcTryExcept
+    {
+        dwResult = _RpcSetProfileCustomUserData(hClientHandle, pInterfaceGuid,
+                                                (LPWSTR)strProfileName,
+                                                dwDataSize, pData);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD
@@ -160,11 +222,24 @@ WlanGetProfileList(IN HANDLE hClientHandle,
                    PVOID pReserved,
                    OUT PWLAN_PROFILE_INFO_LIST *ppProfileList)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (ppProfileList  == NULL))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    *ppProfileList = NULL;
+
+    RpcTryExcept
+    {
+        dwResult = _RpcGetProfileList(hClientHandle, pInterfaceGuid, ppProfileList);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
 
 DWORD
@@ -175,9 +250,21 @@ WlanSetProfileList(IN HANDLE hClientHandle,
                    IN LPCWSTR *strProfileNames,
                    PVOID pReserved)
 {
+    DWORD dwResult = ERROR_SUCCESS;
+
     if ((pReserved != NULL) || (hClientHandle == NULL) || (pInterfaceGuid == NULL) || (strProfileNames  == NULL) || (dwItems == 0))
         return ERROR_INVALID_PARAMETER;
 
-    UNIMPLEMENTED;
-    return ERROR_SUCCESS;
+    RpcTryExcept
+    {
+        dwResult = _RpcSetProfileList(hClientHandle, pInterfaceGuid, dwItems,
+                                      (BYTE **)strProfileNames);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    return dwResult;
 }
