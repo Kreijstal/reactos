@@ -1,6 +1,15 @@
 #ifndef _SRBHELPER_H_
 #define _SRBHELPER_H_
 
+/* GCC's __forceinline uses extern __inline__ with __gnu_inline__, which
+   doesn't emit standalone function bodies. Override to static inline for
+   this header so each function gets emitted in every TU that includes it. */
+#if defined(__GNUC__) && !defined(__cplusplus)
+#undef FORCEINLINE
+#define FORCEINLINE static __inline__ __attribute__((__always_inline__))
+#define _SRBHELPER_FORCEINLINE_REDEFINED_
+#endif
+
 #if !defined(_NTSTORPORT_) && !defined(_NTSTORPORTP_) && !defined(_NTSRB_)
 #include <scsi.h>
 #include <srb.h>
@@ -1411,4 +1420,10 @@ SrbSetPortContext(
 }
 
 #endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
+
+/* Note: FORCEINLINE remains redefined to static inline for the rest
+   of this translation unit. This is intentional — any code that
+   includes srbhelper.h is in the storage stack and its inline
+   functions must have static linkage on GCC. */
+
 #endif /* _SRBHELPER_H_ */
