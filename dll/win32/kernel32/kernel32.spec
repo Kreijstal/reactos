@@ -1136,6 +1136,8 @@
 @ stdcall -version=0x600+ SetThreadpoolThreadMinimum(ptr long) ntdll.TpSetPoolMinThreads
 @ stdcall -version=0x600+ SetThreadpoolTimer(ptr ptr long long) ntdll.TpSetTimer
 @ stdcall -version=0x600+ SetThreadpoolWait(ptr long ptr) ntdll.TpSetWait
+@ stdcall -version=0x601+ SetThreadpoolStackInformation(ptr ptr)
+@ stdcall -version=0x601+ QueryThreadpoolStackInformation(ptr ptr)
 @ stdcall SetTimeZoneInformation(ptr)
 @ stdcall SetTimerQueueTimer(long ptr ptr long long long)
 @ stdcall SetUnhandledExceptionFilter(ptr)
