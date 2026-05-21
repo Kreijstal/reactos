@@ -59,7 +59,7 @@
 @ stdcall CancelIo(long)
 @ stdcall -stub -version=0x600+ CancelIoEx(ptr ptr)
 @ stdcall -stub -version=0x600+ CancelSynchronousIo(ptr)
-@ stdcall -stub -version=0x600+ CancelThreadpoolIo(ptr)
+@ stdcall -version=0x600+ CancelThreadpoolIo(ptr) ntdll.TpCancelAsyncIoOperation
 @ stdcall CancelTimerQueueTimer(long long)
 @ stdcall CancelWaitableTimer(long)
 @ stdcall ChangeTimerQueueTimer(ptr ptr long long)
@@ -75,13 +75,13 @@
 @ stdcall CloseHandle(long)
 @ stdcall -stub -version=0x600+ ClosePrivateNamespace(ptr long)
 @ stdcall CloseProfileUserMapping()
-@ stdcall -stub -version=0x600+ CloseThreadpool(ptr)
-@ stdcall -stub -version=0x600+ CloseThreadpoolCleanupGroup(ptr)
-@ stdcall -stub -version=0x600+ CloseThreadpoolCleanupGroupMembers(ptr long ptr)
-@ stdcall -stub -version=0x600+ CloseThreadpoolIo(ptr)
-@ stdcall -stub -version=0x600+ CloseThreadpoolTimer(ptr)
-@ stdcall -stub -version=0x600+ CloseThreadpoolWait(ptr)
-@ stdcall -stub -version=0x600+ CloseThreadpoolWork(ptr)
+@ stdcall -version=0x600+ CloseThreadpool(ptr) ntdll.TpReleasePool
+@ stdcall -version=0x600+ CloseThreadpoolCleanupGroup(ptr) ntdll.TpReleaseCleanupGroup
+@ stdcall -version=0x600+ CloseThreadpoolCleanupGroupMembers(ptr long ptr) ntdll.TpReleaseCleanupGroupMembers
+@ stdcall -version=0x600+ CloseThreadpoolIo(ptr) ntdll.TpReleaseIoCompletion
+@ stdcall -version=0x600+ CloseThreadpoolTimer(ptr) ntdll.TpReleaseTimer
+@ stdcall -version=0x600+ CloseThreadpoolWait(ptr) ntdll.TpReleaseWait
+@ stdcall -version=0x600+ CloseThreadpoolWork(ptr) ntdll.TpReleaseWork
 @ stdcall CmdBatNotification(long)
 @ stdcall CommConfigDialogA(str long ptr)
 @ stdcall CommConfigDialogW(wstr long ptr)
@@ -171,12 +171,12 @@
 @ stdcall -version=0x600+ CreateSymbolicLinkW(wstr wstr long)
 @ stdcall CreateTapePartition(long long long long)
 @ stdcall CreateThread(ptr long ptr long long ptr)
-@ stdcall -stub -version=0x600+ CreateThreadpool(ptr)
-@ stdcall -stub -version=0x600+ CreateThreadpoolCleanupGroup()
-@ stdcall -stub -version=0x600+ CreateThreadpoolIo(ptr ptr ptr ptr)
-@ stdcall -stub -version=0x600+ CreateThreadpoolTimer(ptr ptr ptr)
-@ stdcall -stub -version=0x600+ CreateThreadpoolWait(ptr ptr ptr)
-@ stdcall -stub -version=0x600+ CreateThreadpoolWork(ptr ptr ptr)
+@ stdcall -version=0x600+ CreateThreadpool(ptr)
+@ stdcall -version=0x600+ CreateThreadpoolCleanupGroup()
+@ stdcall -version=0x600+ CreateThreadpoolIo(ptr ptr ptr ptr)
+@ stdcall -version=0x600+ CreateThreadpoolTimer(ptr ptr ptr)
+@ stdcall -version=0x600+ CreateThreadpoolWait(ptr ptr ptr)
+@ stdcall -version=0x600+ CreateThreadpoolWork(ptr ptr ptr)
 @ stdcall CreateTimerQueue()
 @ stdcall CreateTimerQueueTimer(ptr long ptr ptr long long long)
 @ stdcall CreateToolhelp32Snapshot(long long)
@@ -758,7 +758,7 @@
 @ stdcall IsProcessorFeaturePresent(long)
 @ stdcall IsSystemResumeAutomatic()
 @ stdcall -version=0x600+ IsThreadAFiber()
-@ stub -version=0x600+ IsThreadpoolTimerSet
+@ stdcall -version=0x600+ IsThreadpoolTimerSet(ptr) ntdll.TpIsTimerSet
 @ stdcall IsTimeZoneRedirectionEnabled()
 @ stub -version=0x600+ IsValidCalDateTime
 @ stdcall IsValidCodePage(long)
@@ -1128,10 +1128,12 @@
 @ stdcall SetThreadPriorityBoost(long long)
 @ stdcall SetThreadStackGuarantee(ptr)
 @ stdcall SetThreadUILanguage(long)
-@ stub -version=0x600+ SetThreadpoolThreadMaximum
-@ stub -version=0x600+ SetThreadpoolThreadMinimum
-@ stub -version=0x600+ SetThreadpoolTimer
-@ stub -version=0x600+ SetThreadpoolWait
+@ stdcall -version=0x600+ SetThreadpoolThreadMaximum(ptr long) ntdll.TpSetPoolMaxThreads
+@ stdcall -version=0x600+ SetThreadpoolThreadMinimum(ptr long) ntdll.TpSetPoolMinThreads
+@ stdcall -version=0x600+ SetThreadpoolTimer(ptr ptr long long) ntdll.TpSetTimer
+@ stdcall -version=0x600+ SetThreadpoolWait(ptr long ptr) ntdll.TpSetWait
+@ stdcall -version=0x601+ SetThreadpoolStackInformation(ptr ptr)
+@ stdcall -version=0x601+ QueryThreadpoolStackInformation(ptr ptr)
 @ stdcall SetTimeZoneInformation(ptr)
 @ stdcall SetTimerQueueTimer(long ptr ptr long long long)
 @ stdcall SetUnhandledExceptionFilter(ptr)
@@ -1150,8 +1152,8 @@
 @ stdcall -version=0x600+ SleepConditionVariableCS(ptr ptr long)
 @ stdcall -version=0x600+ SleepConditionVariableSRW(ptr ptr long long)
 @ stdcall SleepEx(long long)
-@ stub -version=0x600+ StartThreadpoolIo
-@ stdcall -stub -version=0x600+ SubmitThreadpoolWork(ptr)
+@ stdcall -version=0x600+ StartThreadpoolIo(ptr) ntdll.TpStartAsyncIoOperation
+@ stdcall -version=0x600+ SubmitThreadpoolWork(ptr) ntdll.TpPostWork
 @ stdcall SuspendThread(long)
 @ stdcall SwitchToFiber(ptr)
 @ stdcall SwitchToThread()
@@ -1219,10 +1221,10 @@
 @ stdcall WaitForMultipleObjectsEx(long ptr long long long)
 @ stdcall WaitForSingleObject(long long)
 @ stdcall WaitForSingleObjectEx(long long long)
-@ stdcall -stub -version=0x600+ WaitForThreadpoolIoCallbacks(ptr long)
-@ stdcall -stub -version=0x600+ WaitForThreadpoolTimerCallbacks(ptr long)
-@ stdcall -stub -version=0x600+ WaitForThreadpoolWaitCallbacks(ptr long)
-@ stdcall -stub -version=0x600+ WaitForThreadpoolWorkCallbacks(ptr long)
+@ stdcall -version=0x600+ WaitForThreadpoolIoCallbacks(ptr long) ntdll.TpWaitForIoCompletion
+@ stdcall -version=0x600+ WaitForThreadpoolTimerCallbacks(ptr long) ntdll.TpWaitForTimer
+@ stdcall -version=0x600+ WaitForThreadpoolWaitCallbacks(ptr long) ntdll.TpWaitForWait
+@ stdcall -version=0x600+ WaitForThreadpoolWorkCallbacks(ptr long) ntdll.TpWaitForWork
 @ stdcall WaitNamedPipeA(str long)
 @ stdcall WaitNamedPipeW(wstr long)
 @ stdcall -version=0x602+ WaitOnAddress(ptr ptr long long)
