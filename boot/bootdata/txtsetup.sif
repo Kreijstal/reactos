@@ -90,6 +90,7 @@ sacdrv.sys   = 1,,,,,,x,4,,,,1,4
 ;uniata.sys   = 1,,,,,,x,4,,,,1,4
 atapi.sys    = 1,,,,,,x,4,,,,1,4
 buslogic.sys = 1,,,,,,x,4,,,,1,4
+viostor.sys  = 1,,,,,,x,4,,,,1,4
 blue.sys     = 1,,,,,,x,4,,,,1,4
 vgafonts.cab = 1,,,,,,,1,,,,1,1
 bootvid.dll  = 1,,,,,,,2,,,,1,2
@@ -167,7 +168,9 @@ PCI\CC_0101 = pciide
 PCI\CC_0104 = pciide
 PCI\CC_0105 = pciide
 PCI\CC_0106 = pciide
-; PCI\CC_010601 = storahci   ; held back pending 0x7E LPC crash investigation
+PCI\CC_010601 = storahci
+PCI\VEN_1AF4&DEV_1001 = viostor
+PCI\VEN_1AF4&DEV_1042 = viostor
 ;*PNP0600 = uniata
 *PNP0600 = atapi
 USB\CLASS_09 = usbhub
@@ -218,6 +221,7 @@ atapi = atapi.sys
 atapi = atapi.sys
 buslogic = buslogic.sys
 storahci = storahci.sys
+viostor = viostor.sys
 disk = disk.sys
 
 [MouseDrivers.Load]
