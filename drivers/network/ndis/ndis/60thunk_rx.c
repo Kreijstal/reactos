@@ -654,7 +654,13 @@ NdisMIndicateStatusEx(
     case NDIS_STATUS_DOT11_ROAMING_START:
     case NDIS_STATUS_DOT11_ROAMING_COMPLETION:
     case NDIS_STATUS_DOT11_DISASSOCIATION:
-        /* 802.11 WLAN indications — no legacy WLAN stack in ReactOS, drop. */
+        /* 802.11 WLAN indication.  There is no legacy NDIS 5 WLAN stack
+         * to fan this out to, and the NDIS 6 ndisdot11 protocol driver
+         * that would route these to wlansvc is not yet implemented.
+         * Log so producers (vwifi, future ath9k) can verify their
+         * indication path is reaching the thunk, and drop. */
+        DPRINT1("NDIS6: dropping DOT11 indication 0x%08lx (no protocol consumer)\n",
+                StatusIndication->StatusCode);
         return;
 
     default:
