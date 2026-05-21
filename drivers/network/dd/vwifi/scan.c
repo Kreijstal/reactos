@@ -12,6 +12,25 @@
 #define NDEBUG
 #include <debug.h>
 
+static VOID
+VwifiIndicateScanConfirm(_In_ PVWIFI_ADAPTER A, _In_ NDIS_STATUS ScanStatus)
+{
+    NDIS_STATUS_INDICATION Indication;
+
+    NdisZeroMemory(&Indication, sizeof(Indication));
+    Indication.Header.Type     = NDIS_OBJECT_TYPE_STATUS_INDICATION;
+    Indication.Header.Revision = NDIS_STATUS_INDICATION_REVISION_1;
+    Indication.Header.Size     = sizeof(NDIS_STATUS_INDICATION);
+    Indication.SourceHandle    = A->MiniportAdapterHandle;
+    Indication.StatusCode      = NDIS_STATUS_DOT11_SCAN_CONFIRM;
+    Indication.StatusBuffer    = &ScanStatus;
+    Indication.StatusBufferSize = sizeof(ScanStatus);
+
+    DPRINT1("vwifi: indicating NDIS_STATUS_DOT11_SCAN_CONFIRM (0x%08lx)\n",
+            ScanStatus);
+    NdisMIndicateStatusEx(A->MiniportAdapterHandle, &Indication);
+}
+
 NDIS_STATUS
 VwifiHandleScanRequest(_In_ PVWIFI_ADAPTER A, _In_ PNDIS_OID_REQUEST R)
 {
@@ -23,11 +42,15 @@ VwifiHandleScanRequest(_In_ PVWIFI_ADAPTER A, _In_ PNDIS_OID_REQUEST R)
         Oid = R->DATA.SET_INFORMATION.Oid;
         if (Oid == OID_DOT11_SCAN_REQUEST)
         {
-            /* Caller wants us to start a scan.  Our canned list never
-             * changes; we acknowledge immediately and a future commit
-             * will queue NDIS_STATUS_DOT11_SCAN_CONFIRM indication.  */
+            /* Our canned BSS list never changes, so the "scan" is
+             * instantaneous.  Acknowledge the OID synchronously, then
+             * indicate NDIS_STATUS_DOT11_SCAN_CONFIRM so any bound
+             * NDIS 6 protocol (eventually ndisdot11 / wlansvc) sees the
+             * completion event.  A future commit may DPC-defer this to
+             * better match real silicon's async behaviour. */
             DPRINT1("vwifi: OID_DOT11_SCAN_REQUEST acknowledged, %u canned BSSes\n",
                     A->BssCount);
+            VwifiIndicateScanConfirm(A, NDIS_STATUS_SUCCESS);
             return NDIS_STATUS_SUCCESS;
         }
         return NDIS_STATUS_NOT_SUPPORTED;
