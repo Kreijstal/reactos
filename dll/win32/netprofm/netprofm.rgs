@@ -1,0 +1,18 @@
+HKCR
+{
+    NoRemove Interface
+    {
+    }
+    NoRemove CLSID
+    {
+        '{DCB00C01-570F-4A9B-8D69-199FDBA5723B}' = s 'Network List Manager'
+        {
+            InprocServer32 = s '%MODULE%' { val ThreadingModel = s 'Both' }
+            ProgId = s 'NetworkListManager'
+        }
+    }
+    'NetworkListManager' = s 'Network List Manager'
+    {
+        CLSID = s '{DCB00C01-570F-4A9B-8D69-199FDBA5723B}'
+    }
+}
