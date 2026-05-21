@@ -89,6 +89,7 @@ list(APPEND SOURCE
     natupnp.idl
     netcon.idl
     netfw.idl
+    netlistmgr.idl
     oaidl.idl
     objectarray.idl
     objidl.idl
