@@ -39,6 +39,25 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(netprofm);
 
+#if _WIN32_WINNT >= 0x0600
+#define netprofm_convert_interface_index_to_luid ConvertInterfaceIndexToLuid
+#define netprofm_convert_interface_luid_to_guid ConvertInterfaceLuidToGuid
+#else
+static DWORD netprofm_convert_interface_index_to_luid(NET_IFINDEX index, NET_LUID *luid)
+{
+    (void)index;
+    (void)luid;
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+static DWORD netprofm_convert_interface_luid_to_guid(const NET_LUID *luid, GUID *guid)
+{
+    (void)luid;
+    (void)guid;
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+#endif
+
 struct network
 {
     INetwork             INetwork_iface;
@@ -646,10 +665,10 @@ static HRESULT WINAPI cost_manager_GetDataPlanStatus(
         if ((ret = GetBestInterface( dst4->sin_addr.S_un.S_addr, &index )))
             return HRESULT_FROM_WIN32( ret );
 
-        if ((ret = ConvertInterfaceIndexToLuid( index, &luid )))
+        if ((ret = netprofm_convert_interface_index_to_luid( index, &luid )))
             return HRESULT_FROM_WIN32( ret );
 
-        if ((ret = ConvertInterfaceLuidToGuid( &luid, &pDataPlanStatus->InterfaceGuid )))
+        if ((ret = netprofm_convert_interface_luid_to_guid( &luid, &pDataPlanStatus->InterfaceGuid )))
             return HRESULT_FROM_WIN32( ret );
     }
     else
@@ -1863,8 +1882,9 @@ static void init_networks( struct list_manager *mgr )
 
         if (!wcscmp( aa->FriendlyName, L"lo" )) continue;
 
-        ConvertInterfaceIndexToLuid(aa->IfIndex, &luid);
-        ConvertInterfaceLuidToGuid(&luid, &id);
+        if (netprofm_convert_interface_index_to_luid( aa->IfIndex, &luid ) ||
+            netprofm_convert_interface_luid_to_guid( &luid, &id ))
+            memset( &id, 0, sizeof(id) );
 
         /* assume a one-to-one mapping between networks and connections */
         if (!(network = create_network( &id ))) goto done;
