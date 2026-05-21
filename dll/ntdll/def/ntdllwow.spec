@@ -818,7 +818,7 @@
 @ stdcall RtlEqualString(ptr ptr long)
 @ stdcall RtlEqualUnicodeString(ptr ptr long)
 @ stdcall RtlEraseUnicodeString(ptr)
-@ stdcall -stub -version=0x600+ RtlExitUserProcess(long)
+@ stdcall -version=0x600+ RtlExitUserProcess(long)
 @ stdcall RtlExitUserThread(long)
 @ stdcall -stub -version=0x600+ RtlExpandEnvironmentStrings(long ptr long ptr long ptr)
 @ stdcall RtlExpandEnvironmentStrings_U(ptr ptr ptr ptr)
