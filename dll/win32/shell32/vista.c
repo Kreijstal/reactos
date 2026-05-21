@@ -253,9 +253,54 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE
         csidl = CSIDL_SYSTEM;
     else if (IsEqualGUID(rfid, &FOLDERID_Windows))
         csidl = CSIDL_WINDOWS;
+    else if (IsEqualGUID(rfid, &FOLDERID_Music))
+        csidl = CSIDL_MYMUSIC;
+    else if (IsEqualGUID(rfid, &FOLDERID_Pictures))
+        csidl = CSIDL_MYPICTURES;
+    else if (IsEqualGUID(rfid, &FOLDERID_Videos))
+        csidl = CSIDL_MYVIDEO;
+    else if (IsEqualGUID(rfid, &FOLDERID_Programs))
+        csidl = CSIDL_PROGRAMS;
+    else if (IsEqualGUID(rfid, &FOLDERID_ProgramData))
+        csidl = CSIDL_COMMON_APPDATA;
+    else if (IsEqualGUID(rfid, &FOLDERID_PublicDocuments))
+        csidl = CSIDL_COMMON_DOCUMENTS;
+    else if (IsEqualGUID(rfid, &FOLDERID_PublicDesktop))
+        csidl = CSIDL_COMMON_DESKTOPDIRECTORY;
+    else if (IsEqualGUID(rfid, &FOLDERID_CommonPrograms))
+        csidl = CSIDL_COMMON_PROGRAMS;
+    else if (IsEqualGUID(rfid, &FOLDERID_CommonStartMenu))
+        csidl = CSIDL_COMMON_STARTMENU;
+    else if (IsEqualGUID(rfid, &FOLDERID_StartMenu))
+        csidl = CSIDL_STARTMENU;
+    else if (IsEqualGUID(rfid, &FOLDERID_Startup))
+        csidl = CSIDL_STARTUP;
+    else if (IsEqualGUID(rfid, &FOLDERID_CommonStartup))
+        csidl = CSIDL_COMMON_STARTUP;
+    else if (IsEqualGUID(rfid, &FOLDERID_Fonts))
+        csidl = CSIDL_FONTS;
+    else if (IsEqualGUID(rfid, &FOLDERID_Downloads))
+    {
+        /* No legacy CSIDL for Downloads — synthesize %USERPROFILE%\Downloads. */
+        WCHAR profile[MAX_PATH];
+        static const WCHAR downloads[] = L"\\Downloads";
+        hr = SHGetFolderPathW(NULL, CSIDL_PROFILE, hToken, 0, profile);
+        if (SUCCEEDED(hr))
+        {
+            *ppszPath = CoTaskMemAlloc((lstrlenW(profile) + ARRAYSIZE(downloads)) * sizeof(WCHAR));
+            if (*ppszPath)
+            {
+                lstrcpyW(*ppszPath, profile);
+                lstrcatW(*ppszPath, downloads);
+                return S_OK;
+            }
+            hr = E_OUTOFMEMORY;
+        }
+        return hr;
+    }
     else
     {
-        FIXME("Unknown folder ID, returning E_INVALIDARG\n");
+        FIXME("Unknown folder ID %s, returning E_INVALIDARG\n", debugstr_guid(rfid));
         return E_INVALIDARG;
     }
 
