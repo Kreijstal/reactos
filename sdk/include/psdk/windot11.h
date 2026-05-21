@@ -23,6 +23,12 @@
 #include <ntddndis.h>
 #endif
 
+#ifdef __WIDL__
+# ifndef __C89_NAMELESS
+#  define __C89_NAMELESS
+# endif
+#endif
+
 #include <wlantypes.h>
 
 #if NTDDI_VERSION >= NTDDI_WIN7 || NDIS_SUPPORT_NDIS620
@@ -84,7 +90,8 @@ enum _DOT11_PHY_TYPE {
   dot11_phy_type_eht = 11,
   dot11_phy_type_IHV_start = 0x80000000,
   dot11_phy_type_IHV_end = 0xffffffff
-} DOT11_PHY_TYPE, *PDOT11_PHY_TYPE;
+} DOT11_PHY_TYPE;
+typedef DOT11_PHY_TYPE *PDOT11_PHY_TYPE;
 
 typedef struct _DOT11_RATE_SET {
   ULONG uRateSetLength;
@@ -1280,7 +1287,7 @@ typedef struct DOT11_OFDM_PHY_ATTRIBUTES {
 } DOT11_OFDM_PHY_ATTRIBUTES, *PDOT11_OFDM_PHY_ATTRIBUTES;
 
 typedef struct DOT11_ERP_PHY_ATTRIBUTES {
-#ifdef __cplusplus
+#if defined(__cplusplus) || defined(__WIDL__)
   DOT11_HRDSSS_PHY_ATTRIBUTES HRDSSSAttributes;
 #else
   __C89_NAMELESS struct {
@@ -1810,6 +1817,7 @@ typedef struct DOT11_EXTSTA_RECV_CONTEXT {
 
 #define DOT11_PMKID_CANDIDATE_PREAUTH_ENABLED 0x00000001U
 
+#ifndef __WIDL__
 #define DEFINE_NWF_GUID(NAME, ORD) DEFINE_GUID (NAME, 0x6cb9a43e + (ORD), 0xc45f, 0x4039, 0x9f, 0xe6, 0xd0, 0x8c, 0xb0, 0x57, 0x18, 0x4c)
 
 DEFINE_NWF_GUID (GUID_NWF_OFFLOAD_CAPABILITY, 0);
@@ -1968,6 +1976,7 @@ DEFINE_NWF_GUID (GUID_NWF_PERMANENT_ADDRESS, 1027);
 DEFINE_NWF_GUID (GUID_NWF_MULTICAST_LIST, 1028);
 DEFINE_NWF_GUID (GUID_NWF_MAXIMUM_LIST_SIZE, 1029);
 #endif
+#endif
 
 #ifdef NWF_EXTAP_SUPPORTED
 #define NWF_EXTAP_OID (0x03U)
@@ -2087,10 +2096,17 @@ typedef struct _DOT11_STOP_AP_PARAMETERS {
 typedef struct _DOT11_PHY_FREQUENCY_ADOPTED_PARAMETERS {
   NDIS_OBJECT_HEADER Header;
   ULONG ulPhyId;
+#ifdef __WIDL__
+  union {
+    ULONG ulChannel;
+    ULONG ulFrequency;
+  } DUMMYUNIONNAME;
+#else
   __C89_NAMELESS union {
     ULONG ulChannel;
     ULONG ulFrequency;
   };
+#endif
 } DOT11_PHY_FREQUENCY_ADOPTED_PARAMETERS, *PDOT11_PHY_FREQUENCY_ADOPTED_PARAMETERS;
 
 typedef struct _DOT11_CAN_SUSTAIN_AP_PARAMETERS {
