@@ -242,6 +242,27 @@ VwifiMiniportInitializeEx(
             A->CurrentMac[0], A->CurrentMac[1], A->CurrentMac[2],
             A->CurrentMac[3], A->CurrentMac[4], A->CurrentMac[5],
             A->BssCount);
+
+    /* Self-indicate one DOT11_SCAN_CONFIRM at adapter bring-up so the
+     * producer / 60thunk_rx-observer wiring is exercised once per init,
+     * without needing a userspace OID_DOT11_SCAN_REQUEST.  Safe to call
+     * after NdisMSetMiniportAttributes has returned success. */
+    {
+        NDIS_STATUS_INDICATION Indication;
+        NDIS_STATUS ScanStatus = NDIS_STATUS_SUCCESS;
+
+        NdisZeroMemory(&Indication, sizeof(Indication));
+        Indication.Header.Type      = NDIS_OBJECT_TYPE_STATUS_INDICATION;
+        Indication.Header.Revision  = NDIS_STATUS_INDICATION_REVISION_1;
+        Indication.Header.Size      = sizeof(NDIS_STATUS_INDICATION);
+        Indication.SourceHandle     = A->MiniportAdapterHandle;
+        Indication.StatusCode       = NDIS_STATUS_DOT11_SCAN_CONFIRM;
+        Indication.StatusBuffer     = &ScanStatus;
+        Indication.StatusBufferSize = sizeof(ScanStatus);
+
+        DPRINT1("vwifi: init - self-indicating DOT11_SCAN_CONFIRM\n");
+        NdisMIndicateStatusEx(A->MiniportAdapterHandle, &Indication);
+    }
     return NDIS_STATUS_SUCCESS;
 
 Fail:
@@ -278,31 +299,8 @@ NDIS_STATUS
 NTAPI
 VwifiMiniportRestart(_In_ NDIS_HANDLE Ctx, _In_ PNDIS_MINIPORT_RESTART_PARAMETERS Params)
 {
-    PVWIFI_ADAPTER A = (PVWIFI_ADAPTER)Ctx;
-    NDIS_STATUS_INDICATION Indication;
-    NDIS_STATUS ScanStatus = NDIS_STATUS_SUCCESS;
-
+    UNREFERENCED_PARAMETER(Ctx);
     UNREFERENCED_PARAMETER(Params);
-
-    /* Self-indicate one DOT11_SCAN_CONFIRM at datapath bring-up so the
-     * upstream wiring (miniport → ndis.sys NDIS6 thunk → drop log) is
-     * exercised without needing a userspace OID_DOT11_SCAN_REQUEST.
-     * Once ndisdot11.sys lands this becomes a real consumer-visible
-     * event; until then the drop is logged in 60thunk_rx.c. */
-    if (A != NULL && A->MiniportAdapterHandle != NULL)
-    {
-        NdisZeroMemory(&Indication, sizeof(Indication));
-        Indication.Header.Type      = NDIS_OBJECT_TYPE_STATUS_INDICATION;
-        Indication.Header.Revision  = NDIS_STATUS_INDICATION_REVISION_1;
-        Indication.Header.Size      = sizeof(NDIS_STATUS_INDICATION);
-        Indication.SourceHandle     = A->MiniportAdapterHandle;
-        Indication.StatusCode       = NDIS_STATUS_DOT11_SCAN_CONFIRM;
-        Indication.StatusBuffer     = &ScanStatus;
-        Indication.StatusBufferSize = sizeof(ScanStatus);
-
-        DPRINT1("vwifi: restart - self-indicating DOT11_SCAN_CONFIRM\n");
-        NdisMIndicateStatusEx(A->MiniportAdapterHandle, &Indication);
-    }
     return NDIS_STATUS_SUCCESS;
 }
 
