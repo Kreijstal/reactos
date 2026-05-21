@@ -389,7 +389,10 @@ WlanReasonCodeToString(IN DWORD dwReasonCode,
     if ((pReserved != NULL) || (pStringBuffer == NULL) || (dwBufferSize == 0))
         return ERROR_INVALID_PARAMETER;
 
-    Len = (SIZE_T)swprintf(Scratch, L"WLAN reason code 0x%08lx", dwReasonCode);
+    Len = (SIZE_T)swprintf(Scratch,
+                           ARRAYSIZE(Scratch),
+                           L"WLAN reason code 0x%08lx",
+                           dwReasonCode);
     if (Len >= dwBufferSize)
         Len = dwBufferSize - 1;
     RtlCopyMemory(pStringBuffer, Scratch, Len * sizeof(WCHAR));
@@ -495,4 +498,3 @@ midl_user_free(void __RPC_FAR * ptr)
 {
     HeapFree(GetProcessHeap(), 0, ptr);
 }
-
