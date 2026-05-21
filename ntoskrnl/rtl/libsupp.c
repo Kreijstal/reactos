@@ -147,6 +147,13 @@ LdrShutdownThread(VOID)
     return STATUS_SUCCESS;
 }
 
+NTSTATUS
+NTAPI
+LdrShutdownProcess(VOID)
+{
+    return STATUS_SUCCESS;
+}
+
 
 PPEB
 NTAPI
