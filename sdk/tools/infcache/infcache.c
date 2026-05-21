@@ -583,6 +583,7 @@ architecture_name(const char *Architecture)
     static const WCHAR Amd64[] = {'A','M','D','6','4',0};
     static const WCHAR Arm[] = {'A','R','M',0};
     static const WCHAR Arm64[] = {'A','R','M','6','4',0};
+    static const WCHAR Empty[] = {0};
 
     if (strcmp(Architecture, "i386") == 0 || strcmp(Architecture, "x86") == 0)
         return X86;
@@ -592,7 +593,7 @@ architecture_name(const char *Architecture)
         return Arm;
     if (strcmp(Architecture, "arm64") == 0)
         return Arm64;
-    return (const WCHAR[]){0};
+    return Empty;
 }
 
 int
