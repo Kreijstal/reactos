@@ -2795,6 +2795,12 @@ RtlDestroyProcessParameters(
 NTSYSAPI
 VOID
 NTAPI
+RtlExitUserProcess(
+    _In_ ULONG ExitStatus);
+
+NTSYSAPI
+VOID
+NTAPI
 RtlExitUserThread(
     _In_ NTSTATUS Status);
 
