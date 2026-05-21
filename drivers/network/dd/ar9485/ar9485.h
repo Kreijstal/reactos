@@ -25,6 +25,14 @@
  * miniport doesn't have to reach into a sibling tree. */
 #include "../e1000e/ndis6_compat.h"
 
+/* Linux-kernel-primitive compat shim for the verbatim ath9k port.  The
+ * ath9k/ subdirectory carries Linux source files (reg.h, future hw.[ch],
+ * ar9003_xxx) modified only at the include layer to pull this header
+ * instead of the Linux kernel ones.  Pulled into the miniport-side
+ * ar9485.h so any conflict between the compat types and NDIS headers
+ * surfaces at build time. */
+#include "linux-compat.h"
+
 /* Register offsets (subset; full set arrives with ath9k/reg.h in Phase 2a). */
 #define AR_SREV                     0x4020
 #define AR_SREV_VERSION_MASK        0x0FFF0000
