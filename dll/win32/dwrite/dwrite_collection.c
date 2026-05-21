@@ -91,7 +91,15 @@ struct font_obj
 {
     const void *lpVtbl;
     LONG ref;
-    font_family_obj_t *family;       /* Weak — family owns us. */
+    /* Stable handle back to the family.  An earlier impl held a direct
+     * font_family_obj_t* but that pointer is invalidated whenever
+     * collection_find_or_add_family HeapReAlloc()s coll->families[], so
+     * every font attached before the realloc would be left with a
+     * dangling family ptr (its first 8 bytes — the vtable — read 0 once
+     * the old buffer is freed).  Indexing through (coll, family_idx)
+     * stays valid across reallocs because coll itself is standalone. */
+    font_collection_obj_t *coll;
+    UINT32 family_idx;
     face_record_t rec;
 };
 
@@ -226,7 +234,8 @@ static BOOL family_append_face(font_family_obj_t *fam, const face_record_t *rec)
 
     fam->fonts[fam->nfonts].lpVtbl = g_font_vtbl;
     fam->fonts[fam->nfonts].ref = 1;
-    fam->fonts[fam->nfonts].family = fam;
+    fam->fonts[fam->nfonts].coll = fam->coll;
+    fam->fonts[fam->nfonts].family_idx = (UINT32)(fam - fam->coll->families);
     fam->fonts[fam->nfonts].rec = *rec;
     fam->nfonts++;
     return TRUE;
@@ -554,9 +563,11 @@ static HRESULT STDMETHODCALLTYPE font_QueryInterface(
 static HRESULT STDMETHODCALLTYPE font_GetFontFamily(void *iface, void **out)
 {
     font_obj_t *self = (font_obj_t *)iface;
+    font_family_obj_t *fam;
     if (!out) return E_POINTER;
-    *out = self->family;
-    dwrite_common_AddRef(self->family);
+    fam = &self->coll->families[self->family_idx];
+    *out = fam;
+    dwrite_common_AddRef(fam);
     return S_OK;
 }
 
@@ -618,7 +629,9 @@ static HRESULT STDMETHODCALLTYPE font_CreateFontFace(void *iface, void **out)
         ? DWRITE_FONT_FACE_TYPE_TRUETYPE
         : DWRITE_FONT_FACE_TYPE_TYPE1; /* generic non-TT bucket */
     face->simulations = DWRITE_FONT_SIMULATIONS_NONE;
-    lstrcpynW(face->family_name, self->family->family_name, LF_FACESIZE);
+    lstrcpynW(face->family_name,
+              self->coll->families[self->family_idx].family_name,
+              LF_FACESIZE);
     face->weight = self->rec.weight;
     face->italic = self->rec.italic;
     face->charset = self->rec.charset;
