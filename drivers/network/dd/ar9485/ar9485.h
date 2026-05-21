@@ -33,15 +33,16 @@
  * surfaces at build time. */
 #include "linux-compat.h"
 
-/* Register offsets (subset; full set arrives with ath9k/reg.h in Phase 2a). */
-#define AR_SREV                     0x4020
-#define AR_SREV_VERSION_MASK        0x0FFF0000
-#define AR_SREV_VERSION_SHIFT       16
-#define AR_SREV_REVISION_MASK       0xF0000000
-#define AR_SREV_REVISION_SHIFT      28
+/* Register offsets and bit math now live under ath9k/reg.h (slice 1) and
+ * are consumed via ath9k/hw_min.h's verbatim AR_SREV_* constants
+ * (slice 2).  The miniport keeps one byte-offset constant for the
+ * diagnostic raw-register read after chip detection — named with an
+ * AR9485_ prefix to avoid colliding with upstream ath9k/reg.h's
+ * AR_SREV(_ah) function-form macro for the same register. */
+#define AR9485_AR_SREV_OFFSET       0x4020
 
-/* Chip-version constants from ath9k/reg.h.  AR9485 reads back 0x240 in the
- * macVersion field after AR_SREV is masked and shifted as above. */
+/* Chip-version constant used as the acceptance check after
+ * ar9485_read_revisions() returns. */
 #define AR_SREV_VERSION_9485        0x240
 
 #define AR9485_TAG                  'A584'

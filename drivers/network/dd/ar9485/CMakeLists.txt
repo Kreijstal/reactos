@@ -21,10 +21,12 @@ list(APPEND SOURCE
     oid.c
     send.c
     receive.c
+    ath9k/hw_chip.c
     ar9485.h
     linux-compat.h
     ath9k/ath_reg.h
-    ath9k/reg.h)
+    ath9k/reg.h
+    ath9k/hw_min.h)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 

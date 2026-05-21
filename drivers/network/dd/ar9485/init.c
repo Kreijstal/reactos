@@ -7,6 +7,7 @@
  */
 
 #include "ar9485.h"
+#include "ath9k/hw_min.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -374,13 +375,33 @@ AR9485MapHardwareResources(
 static VOID
 AR9485DetectChip(_In_ PAR9485_ADAPTER Adapter)
 {
-    ULONG Sreg;
+    u32  macVersion = 0;
+    u16  macRev = 0;
+    bool isPciExpress = false;
+    bool ok;
 
-    Sreg = AR9485_READ_REG(Adapter, AR_SREV);
-    Adapter->SregRaw     = Sreg;
-    Adapter->MacVersion  = (Sreg & AR_SREV_VERSION_MASK)  >> AR_SREV_VERSION_SHIFT;
-    Adapter->MacRevision = (Sreg & AR_SREV_REVISION_MASK) >> AR_SREV_REVISION_SHIFT;
+    /* Slice 2 of the ath9k port: delegate chip-revision decode to the
+     * verbatim ath9k_hw_read_revisions() body in ath9k/hw_chip.c.  The
+     * AR9485 PCIe variant carries devid 0x0032; the upstream function
+     * looks up the AR_SREV register offset, reads it via REG_READ, and
+     * decodes the version / revision fields per the AR9300+ encoding. */
+    ok = ar9485_read_revisions(Adapter->IoBase,
+                               AR9300_DEVID_AR9485_PCIE,
+                               &macVersion, &macRev, &isPciExpress);
+    if (!ok)
+    {
+        DPRINT1("AR9485: ath9k_hw_read_revisions failed\n");
+        Adapter->SregRaw = 0;
+        Adapter->MacVersion = 0;
+        Adapter->MacRevision = 0;
+        return;
+    }
 
-    DPRINT1("AR9485: AR_SREV raw=0x%08x version=0x%03x revision=%u\n",
-            Sreg, Adapter->MacVersion, Adapter->MacRevision);
+    Adapter->SregRaw     = AR9485_READ_REG(Adapter, AR9485_AR_SREV_OFFSET);
+    Adapter->MacVersion  = macVersion;
+    Adapter->MacRevision = macRev;
+
+    DPRINT1("AR9485: AR_SREV raw=0x%08x version=0x%03x revision=%u pcie=%d\n",
+            Adapter->SregRaw, Adapter->MacVersion,
+            Adapter->MacRevision, isPciExpress ? 1 : 0);
 }
