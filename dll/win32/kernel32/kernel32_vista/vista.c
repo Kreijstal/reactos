@@ -633,8 +633,63 @@ GetProcessPreferredUILanguages(
 #endif
 
 /*
-* @unimplemented
-*/
+ * Synthesize a single-language double-null-terminated multi-string
+ * ("en-US\0\0" for MUI_LANGUAGE_NAME, "0409\0\0" for MUI_LANGUAGE_ID).
+ * Returns the MSDN-documented (count, char-length, optional buffer) triple
+ * and honours the two-phase (probe → full) calling convention used by
+ * Qt6, MSI, .NET, modern Win7+ installers.
+ */
+static BOOL
+SynthesizeSingleLangList(
+    DWORD dwFlags,
+    PULONG pulNumLanguages,
+    PZZWSTR pwszLanguagesBuffer,
+    PULONG pcchLanguagesBuffer)
+{
+    /* Layout: language string + extra terminating null. */
+    static const WCHAR langName[] = { 'e','n','-','U','S',0,0 }; /* 7 WCHAR */
+    static const WCHAR langId[]   = { '0','4','0','9',0,0 };     /* 6 WCHAR */
+    const WCHAR *src;
+    ULONG srcLen;
+
+    if (!pulNumLanguages || !pcchLanguagesBuffer)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (dwFlags & MUI_LANGUAGE_ID)
+    {
+        src = langId;
+        srcLen = ARRAYSIZE(langId);
+    }
+    else
+    {
+        src = langName;
+        srcLen = ARRAYSIZE(langName);
+    }
+
+    *pulNumLanguages = 1;
+
+    if (pwszLanguagesBuffer == NULL || *pcchLanguagesBuffer == 0)
+    {
+        /* Probe call: report required size without writing. */
+        *pcchLanguagesBuffer = srcLen;
+        return TRUE;
+    }
+
+    if (*pcchLanguagesBuffer < srcLen)
+    {
+        *pcchLanguagesBuffer = srcLen;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    RtlCopyMemory(pwszLanguagesBuffer, src, srcLen * sizeof(WCHAR));
+    *pcchLanguagesBuffer = srcLen;
+    return TRUE;
+}
+
 BOOL
 WINAPI
 GetSystemPreferredUILanguages(
@@ -643,14 +698,9 @@ GetSystemPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    return SynthesizeSingleLangList(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 GetThreadPreferredUILanguages(
@@ -659,9 +709,7 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    return SynthesizeSingleLangList(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
@@ -694,9 +742,6 @@ GetUILanguageInfo(
 }
 
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 GetUserPreferredUILanguages(
@@ -705,9 +750,7 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    return SynthesizeSingleLangList(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
