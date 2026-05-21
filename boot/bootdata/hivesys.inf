@@ -1798,6 +1798,33 @@ HKLM,"SYSTEM\CurrentControlSet\Services\swenum","ImagePath",0x00020000,"system32
 HKLM,"SYSTEM\CurrentControlSet\Services\swenum","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\swenum","Type",0x00010001,0x00000001
 
+; vwifi - software-only NDIS 6.20 native-802.11 miniport.  Seeded under
+; Root\vwifi so PnP enumerates it at boot and NDIS invokes
+; MiniportInitializeEx without requiring the user to install netvwifi.inf
+; by hand.  Until a real Wi-Fi miniport ships in tree this synthetic
+; adapter is the only producer of NDIS_STATUS_DOT11_* indications, which
+; the 60thunk_rx logger now reports on COM1.
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","ClassGUID",0x00000000,"{4D36E972-E325-11CE-BFC1-08002BE10318}"
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","Class",0x00000000,"Net"
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","Service",0x00000000,"vwifi"
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","HardwareID",0x00010000,"Root\vwifi"
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","ConfigFlags",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","DeviceDesc",0x00000000,"ReactOS Virtual Wi-Fi Adapter"
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","Mfg",0x00000000,"ReactOS"
+HKLM,"SYSTEM\CurrentControlSet\Enum\Root\vwifi\0000","Driver",0x00000000,"{4D36E972-E325-11CE-BFC1-08002BE10318}\0042"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042","DriverDesc",0x00000000,"ReactOS Virtual Wi-Fi Adapter"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042","NetCfgInstanceId",0x00000000,"{4F8B7E32-7E32-4F8B-AAAA-000000000042}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Linkage","Export",0x00000000,"\Device\{4F8B7E32-7E32-4F8B-AAAA-000000000042}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Ndi","Service",0x00000000,"vwifi"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Ndi\Interfaces","UpperRange",0x00000000,"ndis5"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Ndi\Interfaces","LowerRange",0x00000000,"wlan"
+HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","ImagePath",0x00020000,"system32\drivers\vwifi.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Group",0x00000000,"NDIS"
+HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","DisplayName",0x00000000,"ReactOS Virtual Wi-Fi Adapter"
+
 ; Base Filtering Engine (BFE) — stub, dev-nt6-1 branch
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","DisplayName",0x00000000,"Base Filtering Engine"
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Description",0x00000000,"Manages WFP filters and callouts. Stub — accepts filter add/delete but never evaluates them."
