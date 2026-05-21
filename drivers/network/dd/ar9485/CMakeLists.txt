@@ -21,7 +21,12 @@ list(APPEND SOURCE
     oid.c
     send.c
     receive.c
-    ar9485.h)
+    ar9485.h
+    linux-compat.h
+    ath9k/ath_reg.h
+    ath9k/reg.h)
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(ar9485 MODULE ${SOURCE} ar9485.rc)
 set_module_type(ar9485 kernelmodedriver)
