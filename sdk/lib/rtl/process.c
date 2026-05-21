@@ -11,6 +11,7 @@
 /* INCLUDES ****************************************************************/
 
 #include <rtl.h>
+#include <ndk/umfuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -739,6 +740,49 @@ RtlSetProcessIsCritical(IN BOOLEAN NewValue,
                                    ProcessBreakOnTermination,
                                    &BreakOnTermination,
                                    sizeof(ULONG));
+}
+
+/*
+ * @implemented
+ *
+ * Win6+ ntdll process-termination entry point.  Earlier code paths used
+ * kernel32!ExitProcess, which performs the same dance inline; binaries
+ * built against Win6+ ucrt/Qt6 sometimes call this directly via ntdll,
+ * which historically would hit a no-op stub on ReactOS and leave the
+ * process running silent.
+ */
+VOID
+NTAPI
+RtlExitUserProcess(_In_ ULONG ExitStatus)
+{
+    /* Serialize with concurrent loader/PEB updates. */
+    RtlAcquirePebLock();
+
+    _SEH2_TRY
+    {
+        /* Tear down every other thread first so DLL_PROCESS_DETACH runs
+         * in a single-threaded process (Windows guarantees this). */
+        NtTerminateProcess(NULL, ExitStatus);
+
+        /* Walk the loaded-module list invoking DLL_PROCESS_DETACH. */
+        LdrShutdownProcess();
+
+        /* Terminate ourselves; this call does not return. */
+        NtTerminateProcess(NtCurrentProcess(), ExitStatus);
+    }
+    _SEH2_FINALLY
+    {
+        RtlReleasePebLock();
+    }
+    _SEH2_END;
+}
+
+ULONG
+NTAPI
+RtlGetCurrentProcessorNumber(VOID)
+{
+    /* Forward to kernel */
+    return NtGetCurrentProcessorNumber();
 }
 
 _IRQL_requires_max_(APC_LEVEL)
