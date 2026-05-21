@@ -39,6 +39,57 @@
 
 LIST_ENTRY WlanSvcHandleListHead;
 
+static DWORD
+WlanSvcDeleteProfileKey(HKEY hProfiles, LPCWSTR ProfileName)
+{
+#if _WIN32_WINNT >= 0x0600
+    return RegDeleteTreeW(hProfiles, ProfileName);
+#else
+    HKEY hProfile;
+    DWORD Status;
+    WCHAR SubKeyName[256];
+
+    Status = RegOpenKeyExW(hProfiles,
+                           ProfileName,
+                           0,
+                           KEY_ENUMERATE_SUB_KEYS | DELETE,
+                           &hProfile);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    for (;;)
+    {
+        DWORD NameLength = ARRAYSIZE(SubKeyName);
+
+        Status = RegEnumKeyExW(hProfile,
+                               0,
+                               SubKeyName,
+                               &NameLength,
+                               NULL,
+                               NULL,
+                               NULL,
+                               NULL);
+        if (Status == ERROR_NO_MORE_ITEMS)
+            break;
+        if (Status != ERROR_SUCCESS)
+        {
+            RegCloseKey(hProfile);
+            return Status;
+        }
+
+        Status = WlanSvcDeleteProfileKey(hProfile, SubKeyName);
+        if (Status != ERROR_SUCCESS)
+        {
+            RegCloseKey(hProfile);
+            return Status;
+        }
+    }
+
+    RegCloseKey(hProfile);
+    return RegDeleteKeyW(hProfiles, ProfileName);
+#endif
+}
+
 DWORD WINAPI RpcThreadRoutine(LPVOID lpParameter)
 {
     RPC_STATUS Status;
@@ -594,7 +645,7 @@ DWORD _RpcDeleteProfile(
     if (Status != ERROR_SUCCESS)
         return Status;
 
-    Status = RegDeleteTreeW(hProfiles, strProfileName);
+    Status = WlanSvcDeleteProfileKey(hProfiles, strProfileName);
     RegCloseKey(hProfiles);
     return Status == ERROR_FILE_NOT_FOUND ? ERROR_NOT_FOUND : Status;
 }
@@ -605,7 +656,7 @@ DWORD _RpcRenameProfile(
     const wchar_t *strOldProfileName,
     const wchar_t *strNewProfileName)
 {
-    HKEY hProfiles, hSrc;
+    HKEY hProfiles, hSrc = NULL;
     DWORD Status;
 
     if (!WlanSvcGetHandleEntry(hClientHandle))
@@ -632,8 +683,12 @@ DWORD _RpcRenameProfile(
         return ERROR_ALREADY_EXISTS;
     }
 
+#if _WIN32_WINNT >= 0x0600
     Status = RegRenameKey(hProfiles, strOldProfileName, strNewProfileName);
     if (Status == ERROR_PROC_NOT_FOUND || Status == ERROR_CALL_NOT_IMPLEMENTED)
+#else
+    Status = ERROR_CALL_NOT_IMPLEMENTED;
+#endif
     {
         /* RegRenameKey isn't available on older runtimes - fall back to
          * read-then-recreate-then-delete. */
@@ -659,7 +714,10 @@ DWORD _RpcRenameProfile(
                     break;
                 Buf = HeapAlloc(GetProcessHeap(), 0, DataSize);
                 if (Buf == NULL)
+                {
+                    Status = ERROR_NOT_ENOUGH_MEMORY;
                     break;
+                }
                 NameLen = ARRAYSIZE(ValueName);
                 if (RegEnumValueW(hSrc, Index, ValueName, &NameLen,
                                   NULL, &Type, Buf, &DataSize) == ERROR_SUCCESS)
@@ -672,7 +730,7 @@ DWORD _RpcRenameProfile(
         if (hSrc) RegCloseKey(hSrc);
         if (hDst) RegCloseKey(hDst);
         if (Status == ERROR_SUCCESS)
-            RegDeleteTreeW(hProfiles, strOldProfileName);
+            Status = WlanSvcDeleteProfileKey(hProfiles, strOldProfileName);
     }
 
     RegCloseKey(hProfiles);
