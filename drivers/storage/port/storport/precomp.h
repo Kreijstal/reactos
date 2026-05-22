@@ -147,6 +147,13 @@ typedef struct _PDO_DEVICE_EXTENSION
 } PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
 
 
+typedef struct _STORPORT_SCATTER_GATHER_LIST
+{
+    ULONG NumberOfElements;
+    ULONG_PTR Reserved;
+    STOR_SCATTER_GATHER_ELEMENT List[STORPORT_MAX_SGL_ENTRIES];
+} STORPORT_SCATTER_GATHER_LIST, *PSTORPORT_SCATTER_GATHER_LIST;
+
 /*
  * Per-SRB context that the port layer hangs off the SRB's SrbExtension pointer.
  * Layout: [SRB_PORT_CONTEXT header][miniport extension bytes]
@@ -177,8 +184,7 @@ typedef struct _SRB_PORT_CONTEXT
     /* Single scatter/gather list, built before HwStartIo. NumberOfElements is 0
      * for non-data SRBs. STOR_SCATTER_GATHER_LIST is variable-length, so we
      * over-allocate the trailing element array to STORPORT_MAX_SGL_ENTRIES. */
-    STOR_SCATTER_GATHER_LIST Sgl;
-    STOR_SCATTER_GATHER_ELEMENT SglOverflow[STORPORT_MAX_SGL_ENTRIES - 1];
+    STORPORT_SCATTER_GATHER_LIST Sgl;
 
     /* MiniportExtension MUST start on a 128-byte boundary for AHCI miniports
      * (and generally for any miniport that hands SrbExtension to hardware as
