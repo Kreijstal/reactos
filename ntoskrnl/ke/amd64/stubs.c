@@ -176,7 +176,7 @@ KeExpandKernelStackAndCalloutEx(
 #endif
 
         Pcr = (PKIPCR)KeGetPcr();
-        Pcr->Prcb.RspBase = SavedInitialStack;
+        Pcr->Prcb.RspBase = (UINT64)SavedInitialStack;
         Pcr->TssBase->Rsp0 = (ULONG64)SavedInitialStack;
 
         __writeeflags(Eflags);

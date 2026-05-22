@@ -1018,7 +1018,7 @@ StorPortGetScatterGatherList(
         return NULL;
     }
 
-    return &Context->Sgl;
+    return (PSTOR_SCATTER_GATHER_LIST)&Context->Sgl;
 }
 
 
