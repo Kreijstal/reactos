@@ -35,6 +35,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#define NTFS_MFT_GROW_RECORDS 4096
+
 /* FUNCTIONS ****************************************************************/
 
 PNTFS_ATTR_CONTEXT
@@ -330,7 +332,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     LARGE_INTEGER BitmapSize;
     LARGE_INTEGER DataSize;
     LONGLONG BitmapSizeDifference;
-    ULONG NewRecords = ATTR_RECORD_ALIGNMENT * 8;  // Allocate one new record for every bit of every byte we'll be adding to the bitmap
+    ULONG NewRecords = NTFS_MFT_GROW_RECORDS;
     ULONG DataSizeDifference = Vcb->NtfsInfo.BytesPerFileRecord * NewRecords;
     ULONG BitmapOffset;
     PUCHAR BitmapBuffer;
@@ -343,7 +345,7 @@ IncreaseMftSize(PDEVICE_EXTENSION Vcb, BOOLEAN CanWait)
     ULONG i;
     NTSTATUS Status;
 
-    DPRINT1("IncreaseMftSize(%p, %s)\n", Vcb, CanWait ? "TRUE" : "FALSE");
+    DPRINT("IncreaseMftSize(%p, %s)\n", Vcb, CanWait ? "TRUE" : "FALSE");
 
     // We need exclusive access to the mft while we change its size
     if (!ExAcquireResourceExclusiveLite(&(Vcb->DirResource), CanWait))
@@ -1085,7 +1087,7 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                 ULONG EndAttributeOffset;
                 ULONG LengthWritten;
 
-                DPRINT1("Converting attribute to non-resident.\n");
+                DPRINT("Converting attribute to non-resident.\n");
 
                 AttribDataSize.QuadPart = AttrContext->pRecord->Resident.ValueLength;
 
@@ -2618,7 +2620,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
                                        DeviceExt->MftNextFreeHint ? DeviceExt->MftNextFreeHint : 24);
     if ((LONG)MftIndex == -1)
     {
-        DPRINT1("Couldn't find free space in MFT, increasing size.\n");
+        DPRINT("Couldn't find free space in MFT, increasing size.\n");
         BitmapData[2] = SystemReservedBits;
         ReleaseAttributeContext(BitmapContext);
 
