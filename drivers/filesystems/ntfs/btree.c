@@ -261,21 +261,28 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
         PINDEX_BUFFER NewIndexBuffer;
         ULONG BytesWrittenIdx;
         ULONG UsaCount;
+        ULONG FirstEntryOffset;
 
         NewIndexBuffer = ExAllocatePoolWithTag(NonPagedPool, IndexBufferSize, TAG_NTFS);
         if (NewIndexBuffer)
         {
             RtlZeroMemory(NewIndexBuffer, IndexBufferSize);
 
-            // Initialize INDX record header
+            // Initialize INDX record header. The USA array lives between the
+            // index header and the first entry; don't overlap either one.
             NewIndexBuffer->Ntfs.Type = NRH_INDX_TYPE;
             UsaCount = IndexBufferSize / DeviceExt->NtfsInfo.BytesPerSector + 1;
-            NewIndexBuffer->Ntfs.UsaOffset = FIELD_OFFSET(INDEX_BUFFER, Header);
+            NewIndexBuffer->Ntfs.UsaOffset = FIELD_OFFSET(INDEX_BUFFER, Header) +
+                                             sizeof(INDEX_HEADER_ATTRIBUTE);
             NewIndexBuffer->Ntfs.UsaCount = UsaCount;
+            FirstEntryOffset = ALIGN_UP_BY(NewIndexBuffer->Ntfs.UsaOffset +
+                                           UsaCount * sizeof(USHORT),
+                                           ATTR_RECORD_ALIGNMENT) -
+                               FIELD_OFFSET(INDEX_BUFFER, Header);
 
             // Initialize index header with an empty end entry
-            NewIndexBuffer->Header.FirstEntryOffset = sizeof(INDEX_HEADER_ATTRIBUTE);
-            NewIndexBuffer->Header.TotalSizeOfEntries = sizeof(INDEX_HEADER_ATTRIBUTE) + sizeof(INDEX_ENTRY_ATTRIBUTE);
+            NewIndexBuffer->Header.FirstEntryOffset = FirstEntryOffset;
+            NewIndexBuffer->Header.TotalSizeOfEntries = FirstEntryOffset + sizeof(INDEX_ENTRY_ATTRIBUTE);
             NewIndexBuffer->Header.AllocatedSize = IndexBufferSize - FIELD_OFFSET(INDEX_BUFFER, Header);
             NewIndexBuffer->Header.Flags = 0;
 
@@ -1277,19 +1284,21 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
     PINDEX_ENTRY_ATTRIBUTE CurrentNodeEntry;
     NTSTATUS Status;
 
-    // TODO: Fix magic, do math
     RtlZeroMemory(IndexBuffer, BufferSize);
     IndexBuffer->Ntfs.Type = NRH_INDX_TYPE;
-    IndexBuffer->Ntfs.UsaOffset = 0x28;
-    IndexBuffer->Ntfs.UsaCount = 9;
+    IndexBuffer->Ntfs.UsaOffset = FIELD_OFFSET(INDEX_BUFFER, Header) +
+                                  sizeof(INDEX_HEADER_ATTRIBUTE);
+    IndexBuffer->Ntfs.UsaCount = BufferSize / DeviceExt->NtfsInfo.BytesPerSector + 1;
 
     // TODO: Check bitmap for VCN
     ASSERT(Node->HasValidVCN);
     IndexBuffer->VCN = Node->VCN;
 
-    // Windows seems to alternate between using 0x28 and 0x40 for the first entry offset of each index buffer.
-    // Interestingly, neither Windows nor chkdsk seem to mind if we just use 0x28 for every index record.
-    IndexBuffer->Header.FirstEntryOffset = 0x28;
+    IndexBuffer->Header.FirstEntryOffset =
+        ALIGN_UP_BY(IndexBuffer->Ntfs.UsaOffset +
+                    IndexBuffer->Ntfs.UsaCount * sizeof(USHORT),
+                    ATTR_RECORD_ALIGNMENT) -
+        FIELD_OFFSET(INDEX_BUFFER, Header);
     IndexBuffer->Header.AllocatedSize = BufferSize - FIELD_OFFSET(INDEX_BUFFER, Header);
 
     // Start summing the total size of this node's entries
@@ -2690,16 +2699,16 @@ SplitBTreeNode(PB_TREE Tree,
     *MedianKey = LastKeyBeforeMedian->NextKey;
     FirstKeyAfterMedian = (*MedianKey)->NextKey;
 
-    DPRINT1("%lu keys, %lu median\n", Node->KeyCount, MedianKeyIndex);
+    DPRINT("%lu keys, %lu median\n", Node->KeyCount, MedianKeyIndex);
     if (Tree->CollationRule == COLLATION_FILE_NAME ||
         Tree->CollationRule == COLLATION_UNICODE_STRING)
     {
-        DPRINT1("\t\tMedian: %.*S\n", (*MedianKey)->IndexEntry->FileName.NameLength, (*MedianKey)->IndexEntry->FileName.Name);
+        DPRINT("\t\tMedian: %.*S\n", (*MedianKey)->IndexEntry->FileName.NameLength, (*MedianKey)->IndexEntry->FileName.Name);
     }
     else
     {
-        DPRINT1("\t\tMedian: collation 0x%lx, KeyLen %u\n",
-                Tree->CollationRule, (*MedianKey)->IndexEntry->KeyLength);
+        DPRINT("\t\tMedian: collation 0x%lx, KeyLen %u\n",
+               Tree->CollationRule, (*MedianKey)->IndexEntry->KeyLength);
     }
 
     // "Node" will be the left hand sibling after the split, containing all keys prior to the median key
