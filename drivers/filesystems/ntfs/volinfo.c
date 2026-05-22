@@ -228,6 +228,9 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
             *AssignedClusters = RtlFindLongestRunClear(&Bitmap, FirstAssignedCluster);
         }
 
+        if (*AssignedClusters > DesiredClusters)
+            *AssignedClusters = DesiredClusters;
+
         if (*AssignedClusters != 0)
         {
             // Mark the allocated clusters as in-use in the bitmap

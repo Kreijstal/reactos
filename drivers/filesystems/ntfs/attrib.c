@@ -1566,7 +1566,25 @@ AddRun(PNTFS_VCB Vcb,
     }
 
     if (FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB) != 0)
-        NextVBN = AttrContext->pRecord->NonResident.HighestVCN + 1;
+    {
+        LONGLONG LastVbn;
+        LONGLONG LastLbn;
+        LONGLONG LastCount;
+        LONG LastRun = FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB) - 1;
+
+        if (FsRtlGetNextLargeMcbEntry(&AttrContext->DataRunsMCB,
+                                      LastRun,
+                                      &LastVbn,
+                                      &LastLbn,
+                                      &LastCount))
+        {
+            NextVBN = LastVbn + LastCount;
+        }
+        else
+        {
+            NextVBN = AttrContext->pRecord->NonResident.HighestVCN + 1;
+        }
+    }
 
     // Add newly-assigned clusters to mcb
     _SEH2_TRY

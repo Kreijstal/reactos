@@ -301,6 +301,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     PIRP Irp;
     PMDL Mdl;
     NTSTATUS Status;
+    BOOLEAN PagingCompletion = FALSE;
     ULONGLONG RealReadOffset;
     ULONG RealLength;
     BOOLEAN AllocatedBuffer = FALSE;
@@ -352,18 +353,18 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
 
     /*
      * NtfsReadDisk can be called from a page fault handler where kernel APCs
-     * are disabled. IoBuildSynchronousFsdRequest creates an IRP with Flags=0,
-     * so IofCompleteRequest uses APC-based completion. With APCs disabled the
-     * completion APC never fires and KeWaitForSingleObject deadlocks.
-     *
-     * Setting paging IO flags makes IofCompleteRequest signal UserEvent
-     * directly instead of queuing an APC. We must also remove the IRP from
-     * the thread's IRP list first, because the paging IO completion path
-     * calls IoFreeIrp which asserts ThreadListEntry is empty.
+     * are disabled. IoBuildSynchronousFsdRequest normally completes through a
+     * kernel APC, which cannot run in that state. Only use the paging-IO
+     * completion shortcut for those APC-disabled callers; normal metadata
+     * reads must keep the standard synchronous IRP completion path.
      */
-    RemoveEntryList(&Irp->ThreadListEntry);
-    InitializeListHead(&Irp->ThreadListEntry);
-    Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+    if (KeAreAllApcsDisabled())
+    {
+        RemoveEntryList(&Irp->ThreadListEntry);
+        InitializeListHead(&Irp->ThreadListEntry);
+        Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+        PagingCompletion = TRUE;
+    }
 
     if (Override)
     {
@@ -386,9 +387,10 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
         Status = IoStatus.Status;
     }
 
-    /* Irp has been freed by IofCompleteRequest (paging IO path).
-     * Unlock and free the MDL that IoBuildSynchronousFsdRequest allocated. */
-    if (Mdl)
+    /* In the paging-IO completion path, IofCompleteRequest frees the IRP but
+     * does not unlock/free the MDL that IoBuildSynchronousFsdRequest allocated.
+     * The normal APC completion path owns both the IRP and MDL. */
+    if (PagingCompletion && Mdl)
     {
         if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
         {
@@ -454,6 +456,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
     PIRP Irp;
     PMDL Mdl;
     NTSTATUS Status;
+    BOOLEAN PagingCompletion = FALSE;
     ULONGLONG RealWriteOffset;
     ULONG RealLength;
     BOOLEAN AllocatedBuffer = FALSE;
@@ -558,10 +561,15 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* See comment in NtfsReadDisk — avoid APC-based completion deadlock */
-    RemoveEntryList(&Irp->ThreadListEntry);
-    InitializeListHead(&Irp->ThreadListEntry);
-    Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+    /* See comment in NtfsReadDisk -- avoid APC-based completion deadlock only
+     * for callers that cannot receive the normal completion APC. */
+    if (KeAreAllApcsDisabled())
+    {
+        RemoveEntryList(&Irp->ThreadListEntry);
+        InitializeListHead(&Irp->ThreadListEntry);
+        Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+        PagingCompletion = TRUE;
+    }
 
     Mdl = Irp->MdlAddress;
 
@@ -572,7 +580,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
         Status = IoStatus.Status;
     }
 
-    if (Mdl)
+    if (PagingCompletion && Mdl)
     {
         if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
         {
