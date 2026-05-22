@@ -25,76 +25,6 @@
 #define NDEBUG
 #include <debug.h>
 
-#if DBG
-/*
- * Heap audit ring: records every Insert/Remove on freelists with the calling
- * site so the choke-point ASSERTs at heap.c:448 (FreeHintBitmap) and
- * heap.c:1185 (FreeEntry->PreviousSize == CurrentEntry->Size) can show who
- * produced an inconsistent freelist when they fire.
- */
-typedef struct _RTLP_HEAP_TRACE_ENTRY
-{
-    PVOID Heap;
-    PVOID Entry;
-    USHORT Size;
-    USHORT PreviousSize;
-    PVOID Caller;
-    UCHAR Op;       /* 'I' insert, 'R' remove */
-    UCHAR Cpu;
-} RTLP_HEAP_TRACE_ENTRY;
-
-#define RTLP_HEAP_TRACE_ENTRIES 0x8000
-#define RTLP_HEAP_TRACE_MASK    (RTLP_HEAP_TRACE_ENTRIES - 1)
-static RTLP_HEAP_TRACE_ENTRY RtlpHeapTrace[RTLP_HEAP_TRACE_ENTRIES];
-static volatile LONG RtlpHeapTraceIdx;
-
-static VOID
-RtlpTraceHeap(UCHAR Op, PVOID Heap, PHEAP_FREE_ENTRY Entry, PVOID Caller)
-{
-    LONG idx = InterlockedIncrement(&RtlpHeapTraceIdx) - 1;
-    RTLP_HEAP_TRACE_ENTRY *e = &RtlpHeapTrace[idx & RTLP_HEAP_TRACE_MASK];
-    e->Heap = Heap;
-    e->Entry = Entry;
-    e->Size = Entry->Size;
-    e->PreviousSize = Entry->PreviousSize;
-    e->Caller = Caller;
-    e->Op = Op;
-    e->Cpu = 0;
-}
-
-VOID
-NTAPI
-RtlpDumpHeapTrace(PVOID Heap, PHEAP_FREE_ENTRY Entry)
-{
-    LONG head = RtlpHeapTraceIdx;
-    LONG start = (head > RTLP_HEAP_TRACE_ENTRIES) ? (head - RTLP_HEAP_TRACE_ENTRIES) : 0;
-    LONG matches = 0;
-    ULONG_PTR ea = (ULONG_PTR)Entry;
-    ULONG_PTR neighbor_lo = (ea > 0x1000) ? (ea - 0x1000) : 0;
-    ULONG_PTR neighbor_hi = ea + 0x1000;
-    LONG i;
-
-    DbgPrint("=== Heap trace match: Heap=%p Entry=%p ===\n", Heap, Entry);
-    DbgPrint("    [trace head=%ld, scanning %ld..%ld]\n", head, start, head);
-    for (i = start; i < head; i++)
-    {
-        RTLP_HEAP_TRACE_ENTRY *e = &RtlpHeapTrace[i & RTLP_HEAP_TRACE_MASK];
-        ULONG_PTR ea2 = (ULONG_PTR)e->Entry;
-        if (e->Heap == Heap &&
-            ea2 >= neighbor_lo && ea2 <= neighbor_hi)
-        {
-            DbgPrint("  [%6ld] %c Heap=%p Entry=%p Size=%u Prev=%u Caller=%p\n",
-                     i, e->Op, e->Heap, e->Entry,
-                     e->Size, e->PreviousSize, e->Caller);
-            matches++;
-        }
-    }
-    DbgPrint("=== %ld matches; ring %s ===\n", matches,
-             (head > RTLP_HEAP_TRACE_ENTRIES) ? "WRAPPED (older events lost)"
-                                              : "intact");
-}
-#endif /* DBG */
-
 /* Bitmaps stuff */
 
 /* How many least significant bits are clear */
@@ -436,10 +366,6 @@ RtlpInsertFreeBlock(PHEAP Heap,
 
     DPRINT("RtlpInsertFreeBlock(%p %p %x)\n", Heap, FreeEntry, BlockSize);
 
-#if DBG
-    RtlpTraceHeap('I', Heap, FreeEntry, _ReturnAddress());
-#endif
-
     /* Increase the free size counter */
     Heap->TotalFreeSize += BlockSize;
 
@@ -513,20 +439,12 @@ RtlpRemoveFreeBlock(PHEAP Heap,
      * It may not be needed now, but is left just for safety. */
     ASSERT(FreeEntry->Size != 0);
 
-#if DBG
-    RtlpTraceHeap('R', Heap, FreeEntry, _ReturnAddress());
-#endif
-
     /* Remove the free block */
     if (FreeEntry->Size > Heap->DeCommitFreeBlockThreshold)
         HintIndex = 0;
     else
         HintIndex = FreeEntry->Size - 1;
 
-#if DBG
-    if (!RtlTestBit(&Heap->FreeHintBitmap, HintIndex))
-        RtlpDumpHeapTrace(Heap, FreeEntry);
-#endif
     ASSERT(RtlTestBit(&Heap->FreeHintBitmap, HintIndex));
 
     /* Are we removing the hint entry for this size ? */
@@ -544,17 +462,6 @@ RtlpRemoveFreeBlock(PHEAP Heap,
              */
             if ((HintIndex != 0) && (NewHintEntry->Size != FreeEntry->Size))
             {
-#if DBG
-                if (NewHintEntry->Size <= FreeEntry->Size)
-                {
-                    DbgPrint("heap.c:%d freelist out-of-order: HintIndex=%lu "
-                             "FreeEntry=%p Size=%u NewHintEntry=%p Size=%u\n",
-                             __LINE__, HintIndex, FreeEntry, FreeEntry->Size,
-                             NewHintEntry, NewHintEntry->Size);
-                    RtlpDumpHeapTrace(Heap, FreeEntry);
-                    RtlpDumpHeapTrace(Heap, NewHintEntry);
-                }
-#endif
                 /* Of course this must be a larger one after us */
                 ASSERT(NewHintEntry->Size > FreeEntry->Size);
                 NewHintEntry = NULL;
@@ -1275,17 +1182,6 @@ RtlpCoalesceFreeBlocks (PHEAP Heap,
         !(CurrentEntry->Flags & HEAP_ENTRY_BUSY) &&
         (*FreeSize + CurrentEntry->Size) <= HEAP_MAX_BLOCK_SIZE)
     {
-#if DBG
-        if (FreeEntry->PreviousSize != CurrentEntry->Size)
-        {
-            DbgPrint("heap.c:%d coalesce mismatch: FreeEntry=%p PrevSize=%u "
-                     "CurrentEntry=%p Size=%u\n",
-                     __LINE__, FreeEntry, FreeEntry->PreviousSize,
-                     CurrentEntry, CurrentEntry->Size);
-            RtlpDumpHeapTrace(Heap, FreeEntry);
-            RtlpDumpHeapTrace(Heap, CurrentEntry);
-        }
-#endif
         ASSERT(FreeEntry->PreviousSize == CurrentEntry->Size);
 
         /* Remove it if asked for */
