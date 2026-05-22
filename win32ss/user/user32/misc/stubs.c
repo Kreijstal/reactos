@@ -617,6 +617,22 @@ BOOL WINAPI AreDpiAwarenessContextsEqual(HANDLE dpiContextA, HANDLE dpiContextB)
     return dpiContextA == dpiContextB;
 }
 
+BOOL WINAPI IsValidDpiAwarenessContext(DPI_AWARENESS_CONTEXT dpiContext)
+{
+    switch ((LONG_PTR)dpiContext)
+    {
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_UNAWARE:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_SYSTEM_AWARE:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
 BOOL WINAPI EnableNonClientDpiScaling(HWND hwnd)
 {
     UNREFERENCED_PARAMETER(hwnd);

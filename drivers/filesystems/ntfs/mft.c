@@ -585,6 +585,7 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Destination + Destination->Length);
     PNTFS_ATTR_RECORD FinalAttribute;
     ULONG OldAttributeLength = Destination->Length;
+    ULONG OldValueLength = Destination->Resident.ValueLength;
     ULONG NextAttributeOffset;
 
     DPRINT("InternalSetResidentAttributeLength( %p, %p, %p, %lu, %lu )\n", DeviceExt, AttrContext, FileRecord, AttrOffset, DataSize);
@@ -644,9 +645,16 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
         FinalAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute - OldAttributeLength + Destination->Length);
     }
 
+    if (DataSize > OldValueLength)
+    {
+        RtlZeroMemory((PCHAR)Destination + Destination->Resident.ValueOffset + OldValueLength,
+                      DataSize - OldValueLength);
+    }
+
     // Update pRecord's length
     AttrContext->pRecord->Length = Destination->Length;
     AttrContext->pRecord->Resident.ValueLength = DataSize;
+    RtlCopyMemory(AttrContext->pRecord, Destination, Destination->Length);
 
     // set the file record end
     SetFileRecordEnd(FileRecord, FinalAttribute, FILE_RECORD_END);
@@ -867,6 +875,8 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     ULONG PersistedClusters = AttrContext->pRecord->NonResident.AllocatedSize / BytesPerCluster;
     ULONG ExistingClusters = PersistedClusters;
     ULONG ActualClusters = 0;
+    LONGLONG LastRunLcn = 0;
+    LONGLONG LastRunCount = 0;
     LONG RunCount;
 
     ASSERT(AttrContext->pRecord->IsNonResident);
@@ -886,10 +896,12 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                                       &LastCount))
         {
             ActualClusters = (ULONG)(LastVbn + LastCount);
+            LastRunLcn = LastLbn;
+            LastRunCount = LastCount;
         }
     }
 
-    ExistingClusters = max(ExistingClusters, ActualClusters);
+    ExistingClusters = ActualClusters;
     if (ActualClusters > PersistedClusters)
         AllocationSize = max(AllocationSize, (ULONGLONG)ActualClusters * BytesPerCluster);
 
@@ -923,13 +935,7 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         }
         else
         {
-            if (!FsRtlLookupLargeMcbEntry(&AttrContext->DataRunsMCB,
-                                          (LONGLONG)AttrContext->pRecord->NonResident.HighestVCN,
-                                          (PLONGLONG)&LastClusterInDataRun.QuadPart,
-                                          NULL,
-                                          NULL,
-                                          NULL,
-                                          NULL))
+            if (RunCount == 0 || LastRunLcn == -1 || LastRunCount <= 0)
             {
                 DPRINT1("Error looking up final large MCB entry!\n");
 
@@ -937,6 +943,8 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                 DPRINT1("Highest VCN of record: %I64u\n", AttrContext->pRecord->NonResident.HighestVCN);
                 return STATUS_INVALID_PARAMETER;
             }
+
+            LastClusterInDataRun.QuadPart = LastRunLcn + LastRunCount - 1;
         }
 
         DPRINT("LastClusterInDataRun: %I64u\n", LastClusterInDataRun.QuadPart);
@@ -1801,6 +1809,9 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
             }
             else
             {
+                if (DataRunLength == 0)
+                    goto RepairTailMapping;
+
                 /* Sparse data run — hole-fill: allocate real clusters and
                  * splice them into the MCB, then restart the walk so the
                  * write proceeds against the now-backed run.
@@ -1945,7 +1956,8 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                 break;
             }
 
-            if (*DataRun == 0)
+RepairTailMapping:
+            if (*DataRun == 0 || DataRunLength == 0)
             {
                 /* The runlist ended before the requested write offset. Repair
                  * the tail mapping and retry instead of failing the write. */
