@@ -444,7 +444,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
         FsRtlDissectName(Remaining, &Current, &Remaining);
     }
 
-    DPRINT1("MFT Index of parent: %I64u\n", CurrentMFTIndex);
+    DPRINT("MFT Index of parent: %I64u\n", CurrentMFTIndex);
 
     // set reference to parent directory
     FileNameAttribute->DirectoryFileReferenceNumber = CurrentMFTIndex;
@@ -469,7 +469,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
         ParentFileRecord = NULL;
     }
 
-    DPRINT1("SequenceNumber: 0x%02x\n", ParentSequenceNumber);
+    DPRINT("SequenceNumber: 0x%02x\n", ParentSequenceNumber);
 
     // The highest 2 bytes should be the sequence number, unless the parent happens to be root
     if (CurrentMFTIndex == NTFS_FILE_ROOT)
@@ -477,7 +477,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     else
         FileNameAttribute->DirectoryFileReferenceNumber |= (ULONGLONG)ParentSequenceNumber << 48;
 
-    DPRINT1("FileNameAttribute->DirectoryFileReferenceNumber: 0x%016I64x\n", FileNameAttribute->DirectoryFileReferenceNumber);
+    DPRINT("FileNameAttribute->DirectoryFileReferenceNumber: 0x%016I64x\n", FileNameAttribute->DirectoryFileReferenceNumber);
 
     FileNameAttribute->NameLength = FilenameNoPath.Length / sizeof(WCHAR);
     RtlCopyMemory(FileNameAttribute->Name, FilenameNoPath.Buffer, FilenameNoPath.Length);
@@ -1692,7 +1692,7 @@ AddRun(PNTFS_VCB Vcb,
                 return STATUS_NOT_IMPLEMENTED;
             }
 
-            DPRINT1("Moving attribute(s) after this one starting with type 0x%lx\n", NextAttribute->Type);
+            DPRINT("Moving attribute(s) after this one starting with type 0x%lx\n", NextAttribute->Type);
 
             // Move the trailing attributes; FinalAttribute will point to the end marker
             FinalAttribute = MoveAttributes(Vcb, NextAttribute, NextAttributeOffset, MoveTo);
