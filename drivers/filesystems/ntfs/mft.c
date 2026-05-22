@@ -864,12 +864,37 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
     ULONGLONG AllocationSize = ROUND_UP(DataSize->QuadPart, BytesPerCluster);
     PNTFS_ATTR_RECORD DestinationAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
-    ULONG ExistingClusters = AttrContext->pRecord->NonResident.AllocatedSize / BytesPerCluster;
+    ULONG PersistedClusters = AttrContext->pRecord->NonResident.AllocatedSize / BytesPerCluster;
+    ULONG ExistingClusters = PersistedClusters;
+    ULONG ActualClusters = 0;
+    LONG RunCount;
 
     ASSERT(AttrContext->pRecord->IsNonResident);
 
+    ActualClusters = 0;
+    RunCount = FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB);
+    if (RunCount != 0)
+    {
+        LONGLONG LastVbn;
+        LONGLONG LastLbn;
+        LONGLONG LastCount;
+
+        if (FsRtlGetNextLargeMcbEntry(&AttrContext->DataRunsMCB,
+                                      RunCount - 1,
+                                      &LastVbn,
+                                      &LastLbn,
+                                      &LastCount))
+        {
+            ActualClusters = (ULONG)(LastVbn + LastCount);
+        }
+    }
+
+    ExistingClusters = max(ExistingClusters, ActualClusters);
+    if (ActualClusters > PersistedClusters)
+        AllocationSize = max(AllocationSize, (ULONGLONG)ActualClusters * BytesPerCluster);
+
     // do we need to increase the allocation size?
-    if (AttrContext->pRecord->NonResident.AllocatedSize < AllocationSize)
+    if ((ULONGLONG)ExistingClusters * BytesPerCluster < AllocationSize)
     {
         ULONG ClustersNeeded = (AllocationSize / BytesPerCluster) - ExistingClusters;
         LARGE_INTEGER LastClusterInDataRun;
@@ -945,21 +970,7 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     }
     else if (AttrContext->pRecord->NonResident.AllocatedSize > AllocationSize)
     {
-        /* Shrink allocation. Compute the number of clusters to free from
-         * the actual MCB extent (HighestVCN+1), not from AllocatedSize/BPC.
-         * They should match by NTFS invariant; if they don't, an upstream
-         * caller pre-set AllocatedSize without finishing the corresponding
-         * AddRun work, and trusting that stale value here would have us
-         * walk off the end of the MCB inside FreeClusters. ASSERT the
-         * invariant loudly so the producer gets caught in debug builds. */
         ULONG NewClusters = AllocationSize / BytesPerCluster;
-        ULONG ActualClusters;
-        if (FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB) == 0)
-            ActualClusters = 0;
-        else
-            ActualClusters = (ULONG)(AttrContext->pRecord->NonResident.HighestVCN + 1);
-
-        ASSERT(ActualClusters == ExistingClusters);
 
         if (ActualClusters > NewClusters)
         {
@@ -985,6 +996,25 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
      * writes to compressed attributes upstream.  Encrypted / pure sparse
      * pre-existing behaviour is unchanged. */
 
+    RunCount = FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB);
+    if (RunCount != 0)
+    {
+        LONGLONG LastVbn;
+        LONGLONG LastLbn;
+        LONGLONG LastCount;
+
+        if (FsRtlGetNextLargeMcbEntry(&AttrContext->DataRunsMCB,
+                                      RunCount - 1,
+                                      &LastVbn,
+                                      &LastLbn,
+                                      &LastCount))
+        {
+            ActualClusters = (ULONG)(LastVbn + LastCount);
+        }
+    }
+
+    AllocationSize = max(AllocationSize, (ULONGLONG)ActualClusters * BytesPerCluster);
+
     AttrContext->pRecord->NonResident.AllocatedSize = AllocationSize;
     AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
     AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
@@ -1004,9 +1034,7 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
     }
 
-    // HighestVCN seems to be set incorrectly somewhere. Apply a hack-fix to reset it.
-    // HACKHACK FIXME: Fix for sparse files; this math won't work in that case.
-    AttrContext->pRecord->NonResident.HighestVCN = ((ULONGLONG)AllocationSize / Vcb->NtfsInfo.BytesPerCluster) - 1;
+    AttrContext->pRecord->NonResident.HighestVCN = ActualClusters ? ActualClusters - 1 : 0;
     if (DestinationAttribute->Type == AttrContext->pRecord->Type)
         DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;
 
@@ -2479,6 +2507,38 @@ FixupUpdateSequenceArray(PDEVICE_EXTENSION Vcb,
     USHORT USANumber;
     USHORT USACount;
     USHORT *Block;
+    ULONG UsaLength;
+
+    if (Record->Type != NRH_FILE_TYPE &&
+        Record->Type != NRH_INDX_TYPE &&
+        Record->Type != NRH_RSTR_TYPE &&
+        Record->Type != NRH_RCRD_TYPE &&
+        Record->Type != NRH_CHKD_TYPE)
+    {
+        DPRINT("Invalid NTFS record type 0x%08lx\n", Record->Type);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+
+    if (Record->UsaCount < 2 ||
+        Record->UsaOffset < sizeof(NTFS_RECORD_HEADER))
+    {
+        DPRINT("Invalid USA header: offset=%u count=%u type=0x%08lx\n",
+               Record->UsaOffset,
+               Record->UsaCount,
+               Record->Type);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+
+    UsaLength = Record->UsaCount * sizeof(USHORT);
+    if (Record->UsaOffset > Vcb->NtfsInfo.BytesPerSector ||
+        UsaLength > Vcb->NtfsInfo.BytesPerSector - Record->UsaOffset)
+    {
+        DPRINT("Invalid USA bounds: offset=%u count=%u type=0x%08lx\n",
+               Record->UsaOffset,
+               Record->UsaCount,
+               Record->Type);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
     USA = (USHORT*)((PCHAR)Record + Record->UsaOffset);
     USANumber = *(USA++);
@@ -2649,20 +2709,20 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     FileRecord->MFTRecordNumber = MftIndex;
     BitmapData[2] = SystemReservedBits;
 
-    // Write bitmap to disk
-    Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, DeviceExt->MasterFileTable);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
-        ReleaseAttributeContext(BitmapContext);
-        return Status;
-    }
-
     // Write the file record to disk
     Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Unable to write file record!\n");
+        ReleaseAttributeContext(BitmapContext);
+        return Status;
+    }
+
+    // Write bitmap to disk only after the record body is valid on disk.
+    Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, DeviceExt->MasterFileTable);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
         ReleaseAttributeContext(BitmapContext);
         return Status;
     }
