@@ -478,7 +478,7 @@
 @ stdcall IsSETEnabled()
 @ stdcall IsServerSideWindow(long)
 @ stdcall -version=0x601+ IsTouchWindow(long ptr)
-@ stdcall -stub -version=0xA00+ IsValidDpiAwarenessContext(long)
+@ stdcall -version=0xA00+ IsValidDpiAwarenessContext(long)
 @ stdcall IsWinEventHookInstalled(long)
 @ stdcall IsWindow(long)
 @ stdcall IsWindowEnabled(long)
