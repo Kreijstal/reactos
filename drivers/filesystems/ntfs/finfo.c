@@ -195,6 +195,55 @@ NtfsGetInternalInformation(PNTFS_FCB Fcb,
 
 static
 NTSTATUS
+NtfsGetAttributeTagInformation(PNTFS_FCB Fcb,
+                               PDEVICE_EXTENSION DeviceExt,
+                               PFILE_ATTRIBUTE_TAG_INFORMATION AttributeTagInfo,
+                               PULONG BufferLength)
+{
+    PFILENAME_ATTRIBUTE FileName = &Fcb->Entry;
+
+    DPRINT("NtfsGetAttributeTagInformation(%p, %p, %p, %p)\n", Fcb, DeviceExt, AttributeTagInfo, BufferLength);
+
+    if (*BufferLength < sizeof(FILE_ATTRIBUTE_TAG_INFORMATION))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    NtfsFileFlagsToAttributes(FileName->FileAttributes,
+                              &AttributeTagInfo->FileAttributes);
+    AttributeTagInfo->ReparseTag = 0;
+
+    if (NtfsFCBIsReparsePoint(Fcb))
+    {
+        PFILE_RECORD_HEADER FileRecord;
+
+        FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (FileRecord == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        if (NT_SUCCESS(ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord)))
+        {
+            ULONG ReparseTag;
+
+            if (NT_SUCCESS(NtfsGetReparsePointFromRecord(DeviceExt,
+                                                         FileRecord,
+                                                         &ReparseTag,
+                                                         NULL,
+                                                         0,
+                                                         NULL)))
+            {
+                AttributeTagInfo->ReparseTag = ReparseTag;
+            }
+        }
+
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    }
+
+    *BufferLength -= sizeof(FILE_ATTRIBUTE_TAG_INFORMATION);
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
 NtfsGetNetworkOpenInformation(PNTFS_FCB Fcb,
                               PDEVICE_EXTENSION DeviceExt,
                               PFILE_NETWORK_OPEN_INFORMATION NetworkInfo,
@@ -627,6 +676,13 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
                                                    DeviceObject->DeviceExtension,
                                                    SystemBuffer,
                                                    &BufferLength);
+            break;
+
+        case FileAttributeTagInformation:
+            Status = NtfsGetAttributeTagInformation(Fcb,
+                                                    DeviceObject->DeviceExtension,
+                                                    SystemBuffer,
+                                                    &BufferLength);
             break;
 
         case FileStreamInformation:
