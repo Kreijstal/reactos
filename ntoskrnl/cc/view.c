@@ -1049,7 +1049,15 @@ CcRosEnsureVacbResident(
                                                         Length,
                                                         &SharedCacheMap->ValidDataLength);
             if (!NT_SUCCESS(Status))
+            {
+                if ((Status == STATUS_NO_MEMORY) ||
+                    (Status == STATUS_INSUFFICIENT_RESOURCES))
+                {
+                    return FALSE;
+                }
+
                 ExRaiseStatus(Status);
+            }
         }
     }
 
