@@ -8321,8 +8321,7 @@ RxQueryInternalInfo(
     PRX_CONTEXT RxContext,
     PFILE_INTERNAL_INFORMATION InternalInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    return RxpQueryInfoMiniRdr(RxContext, FileInternalInformation, InternalInfo);
 }
 
 /*
