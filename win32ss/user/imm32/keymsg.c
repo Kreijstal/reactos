@@ -876,7 +876,7 @@ ImmGenerateMessage(_In_ HIMC hIMC)
 {
     PCLIENTIMC pClientImc;
     LPINPUTCONTEXT pIC;
-    LPTRANSMSG pMsgs = NULL, pTrans = NULL, pItem;
+    LPTRANSMSG pMsgs, pTrans = NULL, pItem;
     HWND hWnd;
     DWORD dwIndex, dwCount, cbTrans;
     HIMCC hMsgBuf = NULL;
@@ -941,7 +941,7 @@ ImmGenerateMessage(_In_ HIMC hIMC)
 
 Quit:
     ImmLocalFree(pTrans);
-    if (hMsgBuf && pMsgs)
+    if (hMsgBuf)
         ImmUnlockIMCC(hMsgBuf);
     pIC->dwNumMsgBuf = 0; /* done */
     ImmUnlockIMC(hIMC);
@@ -1102,9 +1102,14 @@ ImmTranslateMessage(
             if (kret > 0)
             {
                 if ((BYTE)vk == VK_PACKET)
+                {
+                    vk &= 0xFF;
                     vk |= (wChar << 8);
+                }
                 else
+                {
                     vk = MAKEWORD(vk, wChar);
+                }
             }
         }
     }

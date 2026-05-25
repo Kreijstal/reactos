@@ -51,8 +51,14 @@ add_compile_options(-mlong-double-64)
 # The case for C++ is handled through the reactos_c++ INTERFACE library
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:CXX>>:-nostdinc>")
 
+
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     add_compile_options(-fno-aggressive-loop-optimizations)
+    # GCC 14+ made -Wincompatible-pointer-types and -Wint-conversion hard errors.
+    # Demote them back to warnings for compatibility with older C code.
+    if(CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
+        add_compile_options(-Wno-error=incompatible-pointer-types -Wno-error=int-conversion)
+    endif()
     if (DBG)
         add_compile_options("$<$<COMPILE_LANGUAGE:C>:-Wold-style-declaration>")
     endif()
@@ -316,7 +322,7 @@ if(SEPARATE_DBG)
         "${CMAKE_STRIP} --only-keep-debug <TARGET> -o ${REACTOS_BINARY_DIR}/symbols/${SYMBOL_FILE}"
         ${strip_debug})
     set(CMAKE_RC_CREATE_SHARED_LIBRARY
-        "<CMAKE_C_COMPILER> -Wl,--start-group <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group"
+        "<CMAKE_C_COMPILER> -shared -Wl,--start-group <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group"
         "${CMAKE_STRIP} --only-keep-debug <TARGET> -o ${REACTOS_BINARY_DIR}/symbols/${SYMBOL_FILE}"
         ${strip_debug})
 elseif(NO_ROSSYM)
@@ -326,7 +332,7 @@ elseif(NO_ROSSYM)
     set(CMAKE_CXX_LINK_EXECUTABLE "<CMAKE_CXX_COMPILER> -Wl,--start-group ${CMAKE_CXX_FLAGS} <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
     set(CMAKE_C_CREATE_SHARED_LIBRARY "<CMAKE_C_COMPILER> -Wl,--start-group ${CMAKE_C_FLAGS} <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
     set(CMAKE_CXX_CREATE_SHARED_LIBRARY "<CMAKE_CXX_COMPILER> -Wl,--start-group ${CMAKE_CXX_FLAGS} <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
-    set(CMAKE_RC_CREATE_SHARED_LIBRARY "<CMAKE_C_COMPILER> -Wl,--start-group ${CMAKE_C_FLAGS} <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
+    set(CMAKE_RC_CREATE_SHARED_LIBRARY "<CMAKE_C_COMPILER> -shared -Wl,--start-group ${CMAKE_C_FLAGS} <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
 else()
     # Normal rsym build
     get_target_property(RSYM native-rsym IMPORTED_LOCATION)
@@ -344,7 +350,7 @@ else()
         "<CMAKE_CXX_COMPILER> -Wl,--start-group ${CMAKE_CXX_FLAGS} <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group"
         "${RSYM} -s ${REACTOS_SOURCE_DIR} <TARGET> <TARGET>")
     set(CMAKE_RC_CREATE_SHARED_LIBRARY
-        "<CMAKE_C_COMPILER> -Wl,--start-group ${CMAKE_C_FLAGS} <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_C_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
+        "<CMAKE_C_COMPILER> -shared -Wl,--start-group ${CMAKE_C_FLAGS} <CMAKE_SHARED_LIBRARY_C_FLAGS> <LINK_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES> -Wl,--end-group")
 endif()
 
 set(CMAKE_C_CREATE_SHARED_MODULE ${CMAKE_C_CREATE_SHARED_LIBRARY})
@@ -644,8 +650,9 @@ if(LIBWINPTHREAD_LOCATION MATCHES "mingw32")
     string(STRIP ${LIBWINPTHREAD_LOCATION} LIBWINPTHREAD_LOCATION)
     message(STATUS "Using libwinpthread from ${LIBWINPTHREAD_LOCATION}")
     set_target_properties(libwinpthread PROPERTIES IMPORTED_LOCATION ${LIBWINPTHREAD_LOCATION})
-    # libwinpthread needs kernel32 imports, a CRT and msvcrtex
-    target_link_libraries(libwinpthread INTERFACE libkernel32 libmsvcrt msvcrtex)
+    # Some MinGW runtimes call Vista-era kernel32 exports such as GetTickCount64.
+    # An appropriate CRT must be linked manually by the final target.
+    target_link_libraries(libwinpthread INTERFACE libkernel32_vista libkernel32)
 else()
     add_library(libwinpthread INTERFACE)
 endif()
@@ -657,12 +664,27 @@ set_target_properties(libgcc PROPERTIES IMPORTED_LOCATION ${LIBGCC_LOCATION})
 # libgcc needs kernel32 and winpthread (an appropriate CRT must be linked manually)
 target_link_libraries(libgcc INTERFACE libwinpthread libkernel32)
 
+add_library(libgcc_eh STATIC IMPORTED)
+execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libgcc_eh.a OUTPUT_VARIABLE LIBGCC_EH_LOCATION)
+string(STRIP ${LIBGCC_EH_LOCATION} LIBGCC_EH_LOCATION)
+if(EXISTS ${LIBGCC_EH_LOCATION})
+    set_target_properties(libgcc_eh PROPERTIES IMPORTED_LOCATION ${LIBGCC_EH_LOCATION})
+else()
+    # libgcc_eh.a not available (e.g. SJLJ exceptions), make it a no-op
+    set_target_properties(libgcc_eh PROPERTIES IMPORTED_LOCATION ${LIBGCC_LOCATION})
+endif()
+
 add_library(libsupc++ STATIC IMPORTED GLOBAL)
 execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libsupc++.a OUTPUT_VARIABLE LIBSUPCXX_LOCATION)
 string(STRIP ${LIBSUPCXX_LOCATION} LIBSUPCXX_LOCATION)
 set_target_properties(libsupc++ PROPERTIES IMPORTED_LOCATION ${LIBSUPCXX_LOCATION})
 # libsupc++ requires libgcc and stdc++compat
 target_link_libraries(libsupc++ INTERFACE libgcc stdc++compat)
+execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libgcc_eh.a OUTPUT_VARIABLE LIBGCC_EH_LOCATION2)
+string(STRIP ${LIBGCC_EH_LOCATION2} LIBGCC_EH_LOCATION2)
+if(EXISTS "${LIBGCC_EH_LOCATION2}" AND NOT LIBGCC_EH_LOCATION2 STREQUAL "libgcc_eh.a")
+    target_link_libraries(libsupc++ INTERFACE ${LIBGCC_EH_LOCATION2})
+endif()
 
 add_library(libmingwex STATIC IMPORTED)
 execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libmingwex.a OUTPUT_VARIABLE LIBMINGWEX_LOCATION)
@@ -670,6 +692,23 @@ string(STRIP ${LIBMINGWEX_LOCATION} LIBMINGWEX_LOCATION)
 set_target_properties(libmingwex PROPERTIES IMPORTED_LOCATION ${LIBMINGWEX_LOCATION})
 # libmingwex requires a CRT and imports from kernel32
 target_link_libraries(libmingwex INTERFACE libmsvcrt libkernel32)
+
+# MSYS2/ucrt64's libsupc++ and libwinpthread are compiled with stack protector
+# and __mingw_snprintf, pulling in symbols not available in ReactOS's msvcrt.
+# Detect this and link a small compat shim instead of the full libmingwex
+# (which itself depends on ucrt-specific symbols).
+find_program(_nm_executable NAMES nm)
+if(_nm_executable)
+    execute_process(
+        COMMAND ${_nm_executable} ${LIBSUPCXX_LOCATION}
+        OUTPUT_VARIABLE _supcxx_syms
+        ERROR_QUIET)
+    if(_supcxx_syms MATCHES "__stack_chk_fail")
+        message(STATUS "libsupc++ needs stack protector shim (MSYS2/ucrt64 toolchain)")
+        target_link_libraries(libsupc++ INTERFACE gcc_ssp_compat)
+        target_link_libraries(libwinpthread INTERFACE gcc_ssp_compat)
+    endif()
+endif()
 
 add_library(libstdc++ STATIC IMPORTED GLOBAL)
 execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libstdc++.a OUTPUT_VARIABLE LIBSTDCCXX_LOCATION)
@@ -680,6 +719,25 @@ target_link_libraries(libstdc++ INTERFACE libsupc++ libmingwex oldnames)
 # this is for our SAL annotations
 target_compile_definitions(libstdc++ INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:PAL_STDCPP_COMPAT>")
 
+# Re-add C++ standard library include paths for targets that use the STL.
+# We use -nostdinc globally for C++, so we need to explicitly add back the
+# C++ headers and the system MinGW C headers (for #include_next from C++ headers).
+execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=include OUTPUT_VARIABLE _gcc_include)
+string(STRIP "${_gcc_include}" _gcc_include)
+execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=include-fixed OUTPUT_VARIABLE _gcc_include_fixed)
+string(STRIP "${_gcc_include_fixed}" _gcc_include_fixed)
+execute_process(COMMAND ${CMAKE_C_COMPILER} -dumpmachine OUTPUT_VARIABLE _gcc_target)
+string(STRIP "${_gcc_target}" _gcc_target)
+get_filename_component(_gcc_libdir "${_gcc_include}" DIRECTORY)
+get_filename_component(_gcc_sysroot "${_gcc_libdir}/../../../../${_gcc_target}" ABSOLUTE)
+set(_cxx_ver "${CMAKE_CXX_COMPILER_VERSION}")
+# Provide an interface library for the system C++ include paths
+# For C++ targets using the STL, we need to ensure that system C headers
+# (used internally by libstdc++) are not shadowed by ReactOS CRT headers.
+# We use -nostdinc to clear default paths, then re-add system C++ and C
+# paths via -isystem, and demote ReactOS CRT/vcruntime to -idirafter.
+add_library(cxx_system_includes INTERFACE)
+target_link_libraries(libstdc++ INTERFACE cxx_system_includes)
+
 # Create our alias libraries
 add_library(cppstl ALIAS libstdc++)
-
