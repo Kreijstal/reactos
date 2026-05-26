@@ -765,6 +765,48 @@ GetVolumePathNameW(IN LPCWSTR lpszFileName,
         return FALSE;
     }
 
+    /* UNC fast path: for a path of the form \\server\share[\rest] the volume
+     * root is just \\server\share\.  The mount-point walker below cannot
+     * find UNC roots because MountMgr only tracks DOS volumes / reparse
+     * mount points, so it would otherwise loop back to \\server (and even
+     * to \\) and return FALSE — which surfaces in cmd as
+     * "Invalid drive specification" for any UNC argument. */
+    if (lpszFileName != NULL &&
+        lpszFileName[0] == L'\\' && lpszFileName[1] == L'\\' &&
+        lpszFileName[2] != L'.' && lpszFileName[2] != L'?' &&
+        lpszFileName[2] != L'\\' && lpszFileName[2] != UNICODE_NULL)
+    {
+        const WCHAR *p = lpszFileName + 2;
+        const WCHAR *share_end;
+        DWORD needed;
+
+        /* Walk past the server name. */
+        while (*p && *p != L'\\') p++;
+        if (*p != L'\\' || p[1] == UNICODE_NULL)
+        {
+            /* \\server with no share — not a volume root. */
+            SetLastError(ERROR_INVALID_NAME);
+            return FALSE;
+        }
+        p++;                     /* step onto share name */
+        while (*p && *p != L'\\') p++;
+        share_end = p;           /* points past share name */
+
+        /* Build "\\server\share\". */
+        needed = (DWORD)(share_end - lpszFileName) + 2; /* trailing '\' + NUL */
+        if (cchBufferLength < needed)
+        {
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return FALSE;
+        }
+
+        RtlCopyMemory(lpszVolumePathName, lpszFileName,
+                      (share_end - lpszFileName) * sizeof(WCHAR));
+        lpszVolumePathName[share_end - lpszFileName] = L'\\';
+        lpszVolumePathName[share_end - lpszFileName + 1] = UNICODE_NULL;
+        return TRUE;
+    }
+
     /* Allocate a big enough buffer to receive it */
     FullPathBuf = RtlAllocateHeap(RtlGetProcessHeap(), 0, (FullPathLen + 10) * sizeof(WCHAR));
     if (FullPathBuf == NULL)
