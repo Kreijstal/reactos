@@ -1164,6 +1164,28 @@ MmUnsharePageEntrySectionSegment(PMEMORY_AREA MemoryArea,
 
     if (IsDataMap)
     {
+        /*
+         * Under memory pressure, do not retain a clean data-file page just
+         * because nobody currently maps it.  Without this, MmUnmapViewOfSegment
+         * (called from CcRosTrimCache when a VACB is freed) leaves the backing
+         * MC_USER pages on the user LRU with SHARE_COUNT==0.  Those pages
+         * would only be reclaimed by a subsequent MmTrimUserMemory pass that
+         * happens to revisit each of them via MmPageOutPhysicalAddress, which
+         * is O(LRU) per balancer wake and lets the install heap exhaust
+         * physical memory long before pages flow back to the free list.
+         * Reclaiming the page synchronously when CcRosTrimCache drops the
+         * last view restores the prompt page-recycle behaviour that the
+         * balancer expects.
+         */
+        if (MmAvailablePages < MmLowMemoryThreshold &&
+            !IS_DIRTY_SSE(Entry) &&
+            MmGetSavedSwapEntryPage(Page) == 0)
+        {
+            MmSetPageEntrySectionSegment(Segment, Offset, 0);
+            MmReleasePageMemoryConsumer(MC_USER, Page);
+            return TRUE;
+        }
+
         /* We can always keep memory in for data maps */
         MmSetPageEntrySectionSegment(Segment, Offset, Entry);
         return FALSE;
