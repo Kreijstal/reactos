@@ -110,8 +110,6 @@ MiDecrementAvailablePages(
     {
         /* FIXME: Should wake up the MPW and working set manager, if we had one */
 
-        DPRINT1("Running low on pages: %lu remaining\n", MmAvailablePages);
-
         /* Call RosMm and see if it can release any pages for us */
         MmRebalanceMemoryConsumers();
     }
