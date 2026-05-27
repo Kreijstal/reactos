@@ -284,7 +284,6 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
         }
         else if (CurrentPage == FirstPage)
         {
-            DPRINT1("We are back at the start, abort!\n");
             return STATUS_SUCCESS;
         }
     }
