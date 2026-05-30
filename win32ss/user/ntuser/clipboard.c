@@ -140,6 +140,27 @@ IntIsClipboardOpenByMe(PWINSTATION_OBJECT pWinSta)
             pWinSta->ptiClipLock == PsGetCurrentThreadWin32Thread());
 }
 
+static VOID FASTCALL
+IntNotifyClipboardListeners(PWINSTATION_OBJECT pWinStaObj)
+{
+    if (pWinStaObj->spwndClipViewer)
+    {
+        TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n",
+              UserHMGetHandle(pWinStaObj->spwndClipViewer));
+        // For 32-bit applications this message is sent as a notification
+        co_IntSendMessageNoWait(UserHMGetHandle(pWinStaObj->spwndClipViewer),
+                                WM_DRAWCLIPBOARD, 0, 0);
+    }
+
+    if (pWinStaObj->spwndClipboardListener)
+    {
+        TRACE("Clipboard: posting WM_CLIPBOARDUPDATE to %p\n",
+              UserHMGetHandle(pWinStaObj->spwndClipboardListener));
+        UserPostMessage(UserHMGetHandle(pWinStaObj->spwndClipboardListener),
+                        WM_CLIPBOARDUPDATE, 0, 0);
+    }
+}
+
 static VOID NTAPI
 IntSynthesizeDib(
     PWINSTATION_OBJECT pWinStaObj,
@@ -396,14 +417,9 @@ UserClipboardRelease(PWND pWindow)
         /* Add synthesized formats - they are rendered later */
         IntAddSynthesizedFormats(pWinStaObj);
 
-        /* Notify viewer windows in chain */
+        /* Notify clipboard viewers and listeners */
         pWinStaObj->fClipboardChanged = FALSE;
-        if (pWinStaObj->spwndClipViewer)
-        {
-            TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n", UserHMGetHandle(pWinStaObj->spwndClipViewer));
-            // For 32-bit applications this message is sent as a notification
-            co_IntSendMessageNoWait(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_DRAWCLIPBOARD, 0, 0);
-        }
+        IntNotifyClipboardListeners(pWinStaObj);
     }
 
     ObDereferenceObject(pWinStaObj);
@@ -435,6 +451,9 @@ UserClipboardFreeWindow(PWND pWindow)
     /* Remove window from window chain */
     if (pWindow == pWinStaObj->spwndClipViewer)
         pWinStaObj->spwndClipViewer = NULL;
+
+    if (pWindow == pWinStaObj->spwndClipboardListener)
+        pWinStaObj->spwndClipboardListener = NULL;
 
     ObDereferenceObject(pWinStaObj);
 }
@@ -568,14 +587,9 @@ UserCloseClipboard(VOID)
         /* Add synthesized formats - they are rendered later */
         IntAddSynthesizedFormats(pWinStaObj);
 
-        /* Notify viewer windows in chain */
+        /* Notify clipboard viewers and listeners */
         pWinStaObj->fClipboardChanged = FALSE;
-        if (pWinStaObj->spwndClipViewer)
-        {
-            TRACE("Clipboard: sending WM_DRAWCLIPBOARD to %p\n", UserHMGetHandle(pWinStaObj->spwndClipViewer));
-            // For 32-bit applications this message is sent as a notification
-            co_IntSendMessageNoWait(UserHMGetHandle(pWinStaObj->spwndClipViewer), WM_DRAWCLIPBOARD, 0, 0);
-        }
+        IntNotifyClipboardListeners(pWinStaObj);
     }
 
 cleanup:
@@ -866,6 +880,128 @@ cleanup:
 
     return iRet;
 
+}
+
+BOOL APIENTRY
+NtUserAddClipboardFormatListener(HWND hWnd)
+{
+    BOOL bRet = FALSE;
+    PWINSTATION_OBJECT pWinStaObj;
+    PWND pWindow;
+
+    UserEnterExclusive();
+
+    pWinStaObj = IntGetWinStaForCbAccess();
+    if (!pWinStaObj)
+        goto cleanup;
+
+    pWindow = UserGetWindowObject(hWnd);
+    if (!pWindow)
+    {
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        goto cleanup;
+    }
+
+    pWinStaObj->spwndClipboardListener = pWindow;
+    bRet = TRUE;
+
+cleanup:
+    if (pWinStaObj)
+        ObDereferenceObject(pWinStaObj);
+
+    UserLeave();
+    return bRet;
+}
+
+BOOL APIENTRY
+NtUserRemoveClipboardFormatListener(HWND hWnd)
+{
+    BOOL bRet = FALSE;
+    PWINSTATION_OBJECT pWinStaObj;
+    PWND pWindow;
+
+    UserEnterExclusive();
+
+    pWinStaObj = IntGetWinStaForCbAccess();
+    if (!pWinStaObj)
+        goto cleanup;
+
+    pWindow = UserGetWindowObject(hWnd);
+    if (!pWindow)
+    {
+        EngSetLastError(ERROR_INVALID_WINDOW_HANDLE);
+        goto cleanup;
+    }
+
+    if (pWinStaObj->spwndClipboardListener == pWindow)
+    {
+        pWinStaObj->spwndClipboardListener = NULL;
+        bRet = TRUE;
+    }
+    else
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+    }
+
+cleanup:
+    if (pWinStaObj)
+        ObDereferenceObject(pWinStaObj);
+
+    UserLeave();
+    return bRet;
+}
+
+BOOL APIENTRY
+NtUserGetUpdatedClipboardFormats(PUINT lpuiFormats,
+                                 UINT cFormats,
+                                 PUINT pcFormatsOut)
+{
+    BOOL bRet = FALSE;
+    UINT cFormatsOut = 0;
+    PWINSTATION_OBJECT pWinStaObj;
+
+    UserEnterShared();
+
+    pWinStaObj = IntGetWinStaForCbAccess();
+    if (!pWinStaObj)
+        goto cleanup;
+
+    _SEH2_TRY
+    {
+        ProbeForWrite(pcFormatsOut, sizeof(*pcFormatsOut), sizeof(UINT));
+        cFormatsOut = pWinStaObj->cNumClipFormats;
+
+        if (cFormatsOut > cFormats)
+        {
+            *pcFormatsOut = cFormatsOut;
+            EngSetLastError(ERROR_INSUFFICIENT_BUFFER);
+            _SEH2_YIELD(goto cleanup;)
+        }
+
+        if (cFormatsOut)
+        {
+            UINT i;
+
+            ProbeForWrite(lpuiFormats, cFormatsOut * sizeof(UINT), sizeof(UINT));
+            for (i = 0; i < cFormatsOut; ++i)
+                lpuiFormats[i] = pWinStaObj->pClipBase[i].fmt;
+        }
+
+        *pcFormatsOut = cFormatsOut;
+        bRet = TRUE;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        SetLastNtError(_SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+cleanup:
+    if (pWinStaObj)
+        ObDereferenceObject(pWinStaObj);
+
+    UserLeave();
+    return bRet;
 }
 
 BOOL APIENTRY

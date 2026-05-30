@@ -2864,6 +2864,7 @@ RxCommonFileSystemControl(
     PRX_CONTEXT Context)
 {
     PIRP Irp;
+    NTSTATUS Status;
     ULONG ControlCode;
     PIO_STACK_LOCATION Stack;
 
@@ -2873,10 +2874,27 @@ RxCommonFileSystemControl(
     Stack = Context->CurrentIrpSp;
     ControlCode = Stack->Parameters.FileSystemControl.FsControlCode;
 
-    DPRINT1("RxCommonFileSystemControl: %p, %p, %d, %lx\n", Context, Irp, Stack->MinorFunction, ControlCode);
+    DPRINT("RxCommonFileSystemControl: %p, %p, %d, %lx\n", Context, Irp, Stack->MinorFunction, ControlCode);
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    switch (ControlCode)
+    {
+        case FSCTL_NETWORK_SET_CONFIGURATION_INFO:
+            Irp->IoStatus.Information = 0;
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            return STATUS_SUCCESS;
+
+        default:
+            break;
+    }
+
+    RxInitializeLowIoContext(&Context->LowIoContext, LOWIO_OP_FSCTL);
+    Status = RxLowIoSubmit(Context, RxLowIoIoCtlShellCompletion);
+    if (Status == STATUS_PENDING)
+    {
+        RxDereferenceAndDeleteRxContext_Real(Context);
+    }
+
+    return Status;
 }
 
 /*
@@ -6126,12 +6144,35 @@ RxFirstCanonicalize(
         }
         else
         {
-            UNIMPLEMENTED;
-            DPRINT1("WARNING: Assuming not special + disk!\n");
-            Type = NET_ROOT_DISK;
+            PWSTR ShareName, ShareEnd;
+            UNICODE_STRING Share;
+            static const UNICODE_STRING IpcShare = RTL_CONSTANT_STRING(L"IPC$");
+            static const UNICODE_STRING MailslotShare = RTL_CONSTANT_STRING(L"MAILSLOT");
+
+            ShareName = FirstSlash + 1;
+            ShareEnd = ShareName;
+            while (ShareEnd != EndOfString && *ShareEnd != OBJ_NAME_PATH_SEPARATOR)
+            {
+                ++ShareEnd;
+            }
+
+            Share.Buffer = ShareName;
+            Share.Length = Share.MaximumLength = (USHORT)((ULONG_PTR)ShareEnd - (ULONG_PTR)ShareName);
+
+            if (RtlEqualUnicodeString(&Share, &IpcShare, TRUE))
+            {
+                Type = NET_ROOT_PIPE;
+            }
+            else if (RtlEqualUnicodeString(&Share, &MailslotShare, TRUE))
+            {
+                Type = NET_ROOT_MAILSLOT;
+            }
+            else
+            {
+                Type = NET_ROOT_DISK;
+            }
+
             Status = STATUS_SUCCESS;
-            //Status = STATUS_NOT_IMPLEMENTED;
-            /* Should be check against IPC, mailslot, and so on */
         }
     }
 
@@ -6185,8 +6226,6 @@ RxFirstCanonicalize(
             CanonicalName->Length = 3 * sizeof(WCHAR);
             RtlAppendUnicodeStringToString(CanonicalName, &SessionIdString);
             RtlAppendUnicodeStringToString(CanonicalName, FileName);
-
-            DPRINT1("CanonicalName: %wZ\n", CanonicalName);
         }
         /* Otherwise, that's a simple copy */
         else
@@ -7746,10 +7785,12 @@ RxpQueryInfoMiniRdr(
     /* Set the RX_CONTEXT */
     RxContext->Info.FileInformationClass = FileInfoClass;
     RxContext->Info.Buffer = Buffer;
+    RxContext->Info.LengthRemaining = RxContext->Info.Length;
 
     /* Pass down */
     MINIRDR_CALL(Status, RxContext, Fcb->MRxDispatch, MRxQueryFileInfo, (RxContext));
 
+    RxContext->Info.Length = RxContext->Info.LengthRemaining;
     return Status;
 }
 
@@ -8312,8 +8353,18 @@ RxQueryEaInfo(
     PRX_CONTEXT RxContext,
     PFILE_EA_INFORMATION EaInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PAGED_CODE();
+
+    if (RxContext->Info.Length < sizeof(FILE_EA_INFORMATION))
+    {
+        RxContext->Info.Length = -1;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    EaInfo->EaSize = 0;
+    RxContext->Info.Length -= sizeof(FILE_EA_INFORMATION);
+    RxContext->Info.LengthRemaining = RxContext->Info.Length;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -8334,45 +8385,51 @@ RxQueryNameInfo(
 {
     PFCB Fcb;
     PFOBX Fobx;
+    LONG LengthRemaining;
     PAGED_CODE();
 
     DPRINT("RxQueryNameInfo(%p, %p)\n", RxContext, NameInfo);
 
+    LengthRemaining = RxContext->Info.Length;
+
     /* Check we can at least copy name size */
-    if (RxContext->Info.LengthRemaining < FIELD_OFFSET(FILE_NAME_INFORMATION, FileName))
+    if (LengthRemaining < FIELD_OFFSET(FILE_NAME_INFORMATION, FileName))
     {
-        DPRINT1("Buffer too small: %d\n", RxContext->Info.LengthRemaining);
-        RxContext->Info.Length = 0;
+        DPRINT("Buffer too small: %d\n", LengthRemaining);
+        RxContext->Info.Length = -1;
         return STATUS_BUFFER_OVERFLOW;
     }
 
-    RxContext->Info.LengthRemaining -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    LengthRemaining -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
 
     Fcb = (PFCB)RxContext->pFcb;
     Fobx = (PFOBX)RxContext->pFobx;
     /* Get the UNC name */
     RxConjureOriginalName(Fcb, Fobx, &NameInfo->FileNameLength, &NameInfo->FileName[0],
-                          &RxContext->Info.Length, VNetRoot_As_UNC_Name);
+                          &LengthRemaining, VNetRoot_As_UNC_Name);
 
     /* If RxConjureOriginalName returned a negative len (-1) then output buffer
      * was too small, return the appropriate length & status.
      */
-    if (RxContext->Info.LengthRemaining < 0)
+    if (LengthRemaining < 0)
     {
-        DPRINT1("Buffer too small!\n");
-        RxContext->Info.Length = 0;
+        DPRINT("Buffer too small!\n");
+        RxContext->Info.Length = -1;
         return STATUS_BUFFER_OVERFLOW;
     }
 
 #if 1 // CORE-13938, rfb: please note I replaced 0 with 1 here
     if (NodeType(Fcb) == RDBSS_NTC_STORAGE_TYPE_DIRECTORY &&
-        RxContext->Info.LengthRemaining >= sizeof(WCHAR))
+        LengthRemaining >= sizeof(WCHAR))
     {
         NameInfo->FileName[NameInfo->FileNameLength / sizeof(WCHAR)] = L'\\';
         NameInfo->FileNameLength += sizeof(WCHAR);
-        RxContext->Info.LengthRemaining -= sizeof(WCHAR);
+        LengthRemaining -= sizeof(WCHAR);
     }
 #endif
+
+    RxContext->Info.Length = LengthRemaining;
+    RxContext->Info.LengthRemaining = LengthRemaining;
 
     /* All correct */
     return STATUS_SUCCESS;
@@ -8392,8 +8449,21 @@ RxQueryPositionInfo(
     PRX_CONTEXT RxContext,
     PFILE_POSITION_INFORMATION PositionInfo)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFILE_OBJECT FileObject;
+
+    PAGED_CODE();
+
+    FileObject = RxContext->CurrentIrpSp->FileObject;
+    if (RxContext->Info.Length < sizeof(FILE_POSITION_INFORMATION))
+    {
+        RxContext->Info.Length = -1;
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    PositionInfo->CurrentByteOffset = FileObject->CurrentByteOffset;
+    RxContext->Info.Length -= sizeof(FILE_POSITION_INFORMATION);
+    RxContext->Info.LengthRemaining = RxContext->Info.Length;
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -8411,6 +8481,12 @@ RxQueryStandardInfo(
     PAGED_CODE();
 
     DPRINT("RxQueryStandardInfo(%p, %p)\n", RxContext, StandardInfo);
+
+    if (RxContext->Info.Length < sizeof(FILE_STANDARD_INFORMATION))
+    {
+        RxContext->Info.Length = -1;
+        return STATUS_BUFFER_OVERFLOW;
+    }
 
     /* Zero output buffer */
     RtlZeroMemory(StandardInfo, sizeof(FILE_STANDARD_INFORMATION));
@@ -8447,7 +8523,8 @@ RxQueryStandardInfo(
     }
     else
     {
-        RxContext->IoStatusBlock.Information -= sizeof(FILE_STANDARD_INFORMATION);
+        RxContext->Info.Length -= sizeof(FILE_STANDARD_INFORMATION);
+        RxContext->Info.LengthRemaining = RxContext->Info.Length;
     }
 
     return Status;
@@ -9079,8 +9156,29 @@ NTSTATUS
 RxSetPositionInfo(
     PRX_CONTEXT RxContext)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PIO_STACK_LOCATION Stack;
+    PFILE_OBJECT FileObject;
+    PFILE_POSITION_INFORMATION PositionInfo;
+
+    PAGED_CODE();
+
+    Stack = RxContext->CurrentIrpSp;
+    FileObject = Stack->FileObject;
+    PositionInfo = (PFILE_POSITION_INFORMATION)RxContext->CurrentIrp->AssociatedIrp.SystemBuffer;
+
+    if (PositionInfo == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (BooleanFlagOn(FileObject->Flags, FO_NO_INTERMEDIATE_BUFFERING) &&
+        ((PositionInfo->CurrentByteOffset.LowPart &
+          Stack->DeviceObject->AlignmentRequirement) != 0))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    FileObject->CurrentByteOffset = PositionInfo->CurrentByteOffset;
+    RxContext->CurrentIrp->IoStatus.Information = 0;
+    return STATUS_SUCCESS;
 }
 
 /*

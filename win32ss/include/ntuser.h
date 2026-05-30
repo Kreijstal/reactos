@@ -1647,6 +1647,11 @@ NtUserRemoveMenu(
 
 BOOL
 NTAPI
+NtUserRemoveClipboardFormatListener(
+    HWND hWnd);
+
+BOOL
+NTAPI
 NtUserSetMenu(
     HWND hWnd,
     HMENU hMenu,
@@ -2015,6 +2020,11 @@ NtUserCallTwoParam(
     DWORD_PTR Param1,
     DWORD_PTR Param2,
     DWORD Routine);
+
+BOOL
+NTAPI
+NtUserAddClipboardFormatListener(
+    HWND hWnd);
 
 BOOL
 NTAPI
@@ -2564,6 +2574,13 @@ NtUserGetClipboardSequenceNumber(VOID);
 HWND
 NTAPI
 NtUserGetClipboardViewer(VOID);
+
+BOOL
+NTAPI
+NtUserGetUpdatedClipboardFormats(
+    PUINT lpuiFormats,
+    UINT cFormats,
+    PUINT pcFormatsOut);
 
 BOOL
 NTAPI
