@@ -1011,6 +1011,62 @@ MI_WRITE_INVALID_PTE(IN PMMPTE PointerPte,
 }
 
 //
+// Reserved-mapping helper PTEs.
+//
+// MmAllocateMappingAddress() reserves two extra PTEs just before the returned
+// range and stashes the reserved size and the pool tag in them;
+// MmFreeMappingAddress() / MmMapLockedPagesWithReservedMapping() /
+// MmUnmapReservedMapping() read them back. Windows 8 packs both values into the
+// upper software-PTE bits on amd64 (so that ProcessLUIDDeviceMaps-style probes
+// and the kmtest suite see the documented layout); earlier targets and x86 keep
+// the legacy layout - the tag in the low bits with the Valid bit cleared and the
+// size in the MMPTE_LIST.NextEntry field. These helpers keep the encode and
+// decode paths in sync regardless of which layout is in effect.
+//
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
+#define MI_RESERVED_MAPPING_SHIFT 28
+#endif
+
+FORCEINLINE
+MMPTE
+MI_MAKE_RESERVED_MAPPING_TAG_PTE(IN ULONG PoolTag)
+{
+    MMPTE TempPte;
+#ifdef MI_RESERVED_MAPPING_SHIFT
+    TempPte.u.Long = (((ULONG_PTR)PoolTag & ~1ULL) + 1) << MI_RESERVED_MAPPING_SHIFT;
+#else
+    TempPte.u.Long = PoolTag;
+    TempPte.u.Hard.Valid = 0;
+#endif
+    return TempPte;
+}
+
+FORCEINLINE
+MMPTE
+MI_MAKE_RESERVED_MAPPING_SIZE_PTE(IN PFN_NUMBER SizeInPages)
+{
+    MMPTE TempPte;
+    TempPte.u.Long = 0;
+#ifdef MI_RESERVED_MAPPING_SHIFT
+    TempPte.u.Long = (ULONG_PTR)SizeInPages << MI_RESERVED_MAPPING_SHIFT;
+#else
+    TempPte.u.List.NextEntry = SizeInPages;
+#endif
+    return TempPte;
+}
+
+FORCEINLINE
+PFN_NUMBER
+MI_GET_RESERVED_MAPPING_SIZE(IN MMPTE Pte)
+{
+#ifdef MI_RESERVED_MAPPING_SHIFT
+    return (PFN_NUMBER)(Pte.u.Long >> MI_RESERVED_MAPPING_SHIFT);
+#else
+    return (PFN_NUMBER)Pte.u.List.NextEntry;
+#endif
+}
+
+//
 // Erase the PTE completely
 //
 FORCEINLINE
