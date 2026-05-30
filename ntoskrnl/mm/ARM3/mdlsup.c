@@ -1661,8 +1661,7 @@ MmMapLockedPagesWithReservedMapping(
            !PointerPte[1].u.Hard.Valid);
 
     // Verify that the pool tag matches
-    TempPte.u.Long = PoolTag;
-    TempPte.u.Hard.Valid = 0;
+    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
     if (PointerPte[1].u.Long != TempPte.u.Long)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
@@ -1673,7 +1672,7 @@ MmMapLockedPagesWithReservedMapping(
     }
 
     // We must have a size, and our helper PTEs must be invalid
-    if (PointerPte[0].u.List.NextEntry < 3)
+    if (MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) < 3)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
                      PTE_MAPPING_ADDRESS_INVALID, /* Trying to map an invalid address */
@@ -1683,11 +1682,11 @@ MmMapLockedPagesWithReservedMapping(
     }
 
     // If the mapping isn't big enough, fail
-    if (PointerPte[0].u.List.NextEntry - 2 < PageCount)
+    if (MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) - 2 < PageCount)
     {
         DPRINT1("Reserved mapping too small. Need %Iu pages, have %Iu\n",
                         PageCount,
-                        PointerPte[0].u.List.NextEntry - 2);
+                        MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) - 2);
         return NULL;
     }
     // Skip our two helper PTEs
@@ -1732,8 +1731,15 @@ MmMapLockedPagesWithReservedMapping(
         Mdl->MdlFlags |= MDL_PARTIAL_HAS_BEEN_MAPPED;
     }
 
-    // Return the mapped address
+    // Return the mapped address. The reserved range is page granular, so the
+    // mapping always begins at the page that contains MappingAddress; Windows 8
+    // ignores any sub-page offset the caller passed and returns the page-aligned
+    // base plus the MDL's byte offset. Older targets return the address as given.
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    return (PVOID)((ULONG_PTR)PAGE_ALIGN(MappingAddress) + Mdl->ByteOffset);
+#else
     return (PVOID)((ULONG_PTR)MappingAddress + Mdl->ByteOffset);
+#endif
 }
 
 /*
@@ -1771,8 +1777,7 @@ MmUnmapReservedMapping(
            !PointerPte[1].u.Hard.Valid);
 
     // Verify that the pool tag matches
-    TempPte.u.Long = PoolTag;
-    TempPte.u.Hard.Valid = 0;
+    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
     if (PointerPte[1].u.Long != TempPte.u.Long)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
@@ -1783,7 +1788,7 @@ MmUnmapReservedMapping(
     }
 
     // We must have a size
-    if (PointerPte[0].u.List.NextEntry < 3)
+    if (MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) < 3)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
                      PTE_MAPPING_ADDRESS_EMPTY, /* Mapping apparently empty */
