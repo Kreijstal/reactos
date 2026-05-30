@@ -170,26 +170,8 @@ VOID
 MUIDisplayPage(
     IN ULONG page)
 {
-    static const char* const PageNames[] = {
-        "SETUP_INIT", "LANGUAGE", "WELCOME", "LICENSE", "INSTALL_INTRO",
-        "REPAIR_INTRO", "UPGRADE_REPAIR",
-        "DEVICE_SETTINGS", "COMPUTER_SETTINGS", "DISPLAY_SETTINGS",
-        "KEYBOARD_SETTINGS", "LAYOUT_SETTINGS",
-        "SELECT_PARTITION", "CREATE_PARTITION", "CHANGE_SYSTEM_PARTITION",
-        "CONFIRM_DELETE_SYSTEM_PARTITION", "DELETE_PARTITION",
-        "START_PARTITION_OPERATIONS", "SELECT_FILE_SYSTEM", "FORMAT_PARTITION",
-        "CHECK_FILE_SYSTEM", "BOOTLOADER_SELECT",
-        "PREPARE_COPY", "INSTALL_DIRECTORY", "FILE_COPY",
-        "REGISTRY", "BOOTLOADER_INSTALL", "BOOTLOADER_REMOVABLE_DISK",
-        "SUCCESS", "QUIT", "FLUSH", "REBOOT", "RECOVERY"
-    };
     const MUI_ENTRY * entry;
     ULONG index;
-
-    if (page < sizeof(PageNames)/sizeof(PageNames[0]))
-        DPRINT1("SETUP_PAGE:%s\n", PageNames[page]);
-    else
-        DPRINT1("SETUP_PAGE:UNKNOWN_%lu\n", page);
 
     entry = FindMUIEntriesOfPage(page);
     if (!entry)

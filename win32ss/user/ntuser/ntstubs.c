@@ -911,32 +911,6 @@ NtUserQuerySendMessage(DWORD Unknown0)
     return 0;
 }
 
-BOOL APIENTRY NtUserAddClipboardFormatListener(
-    HWND hwnd
-)
-{
-    STUB;
-    return FALSE;
-}
-
-BOOL APIENTRY NtUserRemoveClipboardFormatListener(
-    HWND hwnd
-)
-{
-    STUB;
-    return FALSE;
-}
-
-BOOL APIENTRY NtUserGetUpdatedClipboardFormats(
-    PUINT lpuiFormats,
-    UINT cFormats,
-    PUINT pcFormatsOut
-)
-{
-    STUB;
-    return FALSE;
-}
-
 // Yes, I know, these do not belong here, just tell me where to put them
 BOOL
 APIENTRY

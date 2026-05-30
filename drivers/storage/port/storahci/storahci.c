@@ -671,15 +671,60 @@ AhciInterruptHandler (
     // signified by the setting of PxIS.HBFS, PxIS.HBDS, PxIS.IFS, or PxIS.TFES
     if (PxIS.HBFS || PxIS.HBDS || PxIS.IFS || PxIS.TFES)
     {
-        // In this state, the HBA shall not issue any new commands nor acknowledge DMA Setup FISes to process
-        // any native command queuing commands. To recover, the port must be restarted
-        // To detect an error that requires software recovery actions to be performed,
-        // software should check whether any of the following status bits are set on an interrupt:
-        // PxIS.HBFS, PxIS.HBDS, PxIS.IFS, and PxIS.TFES.  If any of these bits are set,
-        // software should perform the appropriate error recovery actions based on whether
-        // non-queued commands were being issued or native command queuing commands were being issued.
+        AHCI_PORT_CMD cmd;
+        ULONG ticks, failedSlots, i;
+        ULONG NCS;
 
         AhciDebugPrint("\tFatal Error: %x\n", PxIS.Status);
+
+        // 6.2.2.1 non-queued error recovery:
+        //   clear PxCMD.ST, wait CR=0, clear PxSERR/PxIS, set PxCMD.ST=1
+        cmd.Status = StorPortReadRegisterUlong(AdapterExtension, &PortExtension->Port->CMD);
+        cmd.ST = 0;
+        StorPortWriteRegisterUlong(AdapterExtension, &PortExtension->Port->CMD, cmd.Status);
+
+        for (ticks = 0; ticks < 10; ticks++)
+        {
+            cmd.Status = StorPortReadRegisterUlong(AdapterExtension, &PortExtension->Port->CMD);
+            if (cmd.CR == 0)
+                break;
+            StorPortStallExecution(50000);
+        }
+
+        StorPortWriteRegisterUlong(AdapterExtension, &PortExtension->Port->SERR, (ULONG)~0);
+        StorPortWriteRegisterUlong(AdapterExtension, &PortExtension->Port->IS, PxIS.Status);
+
+        if (cmd.CR == 0)
+        {
+            cmd.ST = 1;
+            StorPortWriteRegisterUlong(AdapterExtension, &PortExtension->Port->CMD, cmd.Status);
+        }
+
+        // Fail every in-flight SRB on this port; the class driver will retry.
+        // We must NOT route through AhciCompleteIssuedSrb because it asserts
+        // SrbStatus==PENDING and dispatches CompletionRoutine DPCs that expect
+        // a valid task-file response.
+        failedSlots = PortExtension->CommandIssuedSlots;
+        NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
+        for (i = 0; i < NCS; i++)
+        {
+            PSCSI_REQUEST_BLOCK FailedSrb;
+            if (((1 << i) & failedSlots) == 0)
+                continue;
+            FailedSrb = PortExtension->Slot[i];
+            PortExtension->Slot[i] = NULL;
+            if (FailedSrb == NULL)
+                continue;
+            FailedSrb->SrbStatus = SRB_STATUS_ERROR;
+            StorPortNotification(RequestComplete, AdapterExtension, FailedSrb);
+        }
+        PortExtension->CommandIssuedSlots = 0;
+
+        // Clear the port interrupt that signalled this fatal condition.
+        StorPortWriteRegisterUlong(AdapterExtension,
+                                   AdapterExtension->IS,
+                                   (1 << PortExtension->PortNumber));
+        return;
     }
 
     // Normal Command Completion
@@ -799,6 +844,13 @@ AhciHwInterrupt (
  * return TRUE if the request was accepted
  * return FALSE if the request must be submitted later
  */
+UCHAR
+AhciATAPICommand (
+    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
+    __in PSCSI_REQUEST_BLOCK Srb,
+    __in PCDB Cdb
+    );
+
 BOOLEAN
 NTAPI
 AhciHwStartIo (
@@ -907,9 +959,23 @@ AhciHwStartIo (
                         Srb->SrbStatus = DeviceRequestReadWrite(AdapterExtension, Srb, cdb);
                         break;
                     default:
-                        AhciDebugPrint("\tOperationCode: %d\n", cdb->CDB10.OperationCode);
-                        Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+                    {
+                        PAHCI_PORT_EXTENSION PortExt = &AdapterExtension->PortExtension[Srb->PathId];
+                        /* For ATAPI devices the AHCI controller transmits the CDB verbatim
+                         * as the PACKET payload, so any SCSI opcode the device itself
+                         * understands (READ_TOC / GET_CONFIGURATION / GET_EVENT_STATUS /
+                         * MODE_SENSE10 / etc.) can be passed straight through. */
+                        if (PortExt->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI)
+                        {
+                            Srb->SrbStatus = AhciATAPICommand(AdapterExtension, Srb, cdb);
+                        }
+                        else
+                        {
+                            AhciDebugPrint("\tOperationCode: %d\n", cdb->CDB10.OperationCode);
+                            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+                        }
                         break;
+                    }
                 }
             }
             break;
@@ -1959,6 +2025,8 @@ AhciATAPICommand (
     ULONG SrbFlags, DataBufferLength;
     PAHCI_SRB_EXTENSION SrbExtension;
     PAHCI_PORT_EXTENSION PortExtension;
+    PAHCI_COMMAND_TABLE CmdTable;
+    ULONG CdbCopyLen;
 
     AhciDebugPrint("AhciATAPICommand()\n");
 
@@ -1966,6 +2034,17 @@ AhciATAPICommand (
     SrbExtension = GetSrbExtension(Srb);
     DataBufferLength = Srb->DataTransferLength;
     PortExtension = &AdapterExtension->PortExtension[Srb->PathId];
+
+    /* Copy the SCSI CDB into the ATAPI command (ACMD) field of the command
+     * table; the AHCI controller transmits these bytes as the ATAPI PACKET
+     * payload when CommandHeader.A=1. Without this, the device receives a
+     * zero-filled CDB and returns garbage data. */
+    CmdTable = (PAHCI_COMMAND_TABLE)SrbExtension;
+    AhciZeroMemory((PCHAR)CmdTable->ACMD, sizeof(CmdTable->ACMD));
+    CdbCopyLen = Srb->CdbLength;
+    if (CdbCopyLen > sizeof(CmdTable->ACMD))
+        CdbCopyLen = sizeof(CmdTable->ACMD);
+    RtlCopyMemory(CmdTable->ACMD, &Srb->Cdb[0], CdbCopyLen);
 
     NT_ASSERT(PortExtension->DeviceParams.DeviceType == AHCI_DEVICE_TYPE_ATAPI);
 
