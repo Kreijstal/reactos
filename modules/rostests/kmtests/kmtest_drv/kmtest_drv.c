@@ -91,8 +91,22 @@ DriverEntry(
     DPRINT("DriverEntry\n");
 
     Prcb = KeGetCurrentPrcb();
+#if DBG
+    /* The driver is built with the same DBG flag as the running kernel, so
+     * a compile-time check is more reliable than reading Prcb->BuildType.
+     * Tests built against a different NTDDI than the kernel land the
+     * BuildType field at the wrong offset and would otherwise mis-gate
+     * checked-build-specific paths (e.g. KeSpinLock would call
+     * KeAcquireSpinLockAtDpcLevel at PASSIVE and bugcheck 0x9). */
+    KmtIsCheckedBuild = TRUE;
+#else
     KmtIsCheckedBuild = (Prcb->BuildType & PRCB_BUILD_DEBUG) != 0;
+#endif
+#ifdef CONFIG_SMP
+    KmtIsMultiProcessorBuild = TRUE;
+#else
     KmtIsMultiProcessorBuild = (Prcb->BuildType & PRCB_BUILD_UNIPROCESSOR) == 0;
+#endif
     KmtIsVirtualMachine = KmtDetectVirtualMachine();
     KmtDriverObject = DriverObject;
 
@@ -374,8 +388,78 @@ DriverIoControl(
 
                 if (!RtlCompareString(&TestName, &EntryName, FALSE))
                 {
+                    PKMT_DEVICE_EXTENSION DevExt = DeviceObject->DeviceExtension;
+
+                    KIRQL StartIrql = KeGetCurrentIrql();
+                    BOOLEAN StartApcsDisabled = KeAreApcsDisabled();
                     DPRINT1("DriverIoControl. Starting test %Z\n", &EntryName);
-                    TestEntry->TestFunction();
+                    /* Wrap the test in SEH so an assertion (with
+                     * FLG_DISABLE_DEBUG_PROMPTS set, RtlAssert raises
+                     * STATUS_ASSERTION_FAILURE) or a stray access violation
+                     * inside a test doesn't tear down the whole runner — it
+                     * is recorded as a failure and the next test runs. */
+                    _SEH2_TRY
+                    {
+                        TestEntry->TestFunction();
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        NTSTATUS ExceptionCode = _SEH2_GetExceptionCode();
+                        DPRINT1("DriverIoControl. Test %Z raised 0x%08lx irql %u->%u apcs %u->%u\n",
+                                &EntryName, ExceptionCode,
+                                StartIrql, KeGetCurrentIrql(),
+                                StartApcsDisabled, KeAreApcsDisabled());
+                        if (DevExt->ResultBuffer)
+                            InterlockedIncrement(&DevExt->ResultBuffer->Failures);
+                    }
+                    _SEH2_END;
+                    if (KeGetCurrentIrql() > StartIrql)
+                        KeLowerIrql(StartIrql);
+                    /* A test that asserted mid-acquire never reached its
+                     * matching KeLeave*Region call, leaving APCs disabled.
+                     * If the user thread returned to PspExitThread in that
+                     * state, the kernel would bugcheck 0x20
+                     * (KERNEL_APC_PENDING_DURING_EXIT). The driver targets
+                     * an older NTDDI than the running kernel so we can't
+                     * read KTHREAD APC counters directly — repeatedly call
+                     * KeLeave*Region until the public KeAreApcsDisabled
+                     * predicate matches the entry state. Cap the loops to
+                     * avoid runaway on the corner case where both counters
+                     * stayed negative. */
+                    /* KeLeaveCriticalRegion and KeLeaveGuardedRegion each
+                     * ASSERT that THEIR specific counter is < 0 before
+                     * decrementing; we don't know which one(s) the test left
+                     * negative. Wrap each call so a wrong-counter assert
+                     * (raised as STATUS_ASSERTION_FAILURE under
+                     * FLG_DISABLE_DEBUG_PROMPTS) is caught and we try the
+                     * other counter. Bound the loop so a counter we can't
+                     * touch doesn't hang us. */
+                    if (!StartApcsDisabled)
+                    {
+                        ULONG Guard;
+                        for (Guard = 0; Guard < 32 && KeAreApcsDisabled(); ++Guard)
+                        {
+                            BOOLEAN Progress = FALSE;
+                            _SEH2_TRY
+                            {
+                                KeLeaveCriticalRegion();
+                                Progress = TRUE;
+                            }
+                            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+                            _SEH2_END;
+                            if (!KeAreApcsDisabled())
+                                break;
+                            _SEH2_TRY
+                            {
+                                KeLeaveGuardedRegion();
+                                Progress = TRUE;
+                            }
+                            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { }
+                            _SEH2_END;
+                            if (!Progress)
+                                break;
+                        }
+                    }
                     DPRINT1("DriverIoControl. Finished test %Z\n", &EntryName);
                     break;
                 }

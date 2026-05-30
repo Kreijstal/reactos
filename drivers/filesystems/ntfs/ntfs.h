@@ -1449,6 +1449,12 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
                PULONGLONG DestinationIndex,
                BOOLEAN CanWait);
 
+NTSTATUS
+NtfsSetMftBitmapInUse(PDEVICE_EXTENSION DeviceExt,
+                      ULONGLONG MftIndex,
+                      BOOLEAN InUse,
+                      BOOLEAN CanWait);
+
 VOID
 NtfsDumpData(ULONG_PTR Buffer, ULONG Length);
 

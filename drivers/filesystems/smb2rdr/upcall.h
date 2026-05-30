@@ -293,7 +293,8 @@ VOID     SmbRdrInitUpcall(VOID);
 VOID     SmbRdrShutdownUpcall(VOID);
 
 /*
- * Synchronous upcall: pack InBuffer, enqueue, wait up to TimeoutSec,
+ * Synchronous upcall: pack InBuffer, enqueue, wait up to TimeoutSec
+ * seconds (or indefinitely when TimeoutSec is 0),
  * fill *OutStatus and write up to OutBufferLen bytes of daemon-produced
  * reply into OutBuffer, returning the bytes actually written via
  * *OutActualLength.  Returns STATUS_SUCCESS if the round-trip completed

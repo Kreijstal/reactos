@@ -506,6 +506,7 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
     UNICODE_STRING PathName, VolumeString;
     FILE_FS_DEVICE_INFORMATION FileFsDevice;
     WCHAR Buffer[MAX_PATH], VolumeName[MAX_PATH];
+    BOOLEAN IsUncPath = FALSE;
 
     /* If no path, get one */
     if (lpRootPathName == NULL)
@@ -526,6 +527,7 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
         }
 
         RootPath = lpRootPathName;
+        IsUncPath = (RtlDetermineDosPathNameType_U(RootPath) == RtlPathTypeUncAbsolute);
         /* If provided path is 2-len, it might be a drive letter... */
         if (wcslen(lpRootPathName) == 2)
         {
@@ -681,7 +683,7 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
     NtClose(RootHandle);
     if (!NT_SUCCESS(Status))
     {
-        return DRIVE_UNKNOWN;
+        return IsUncPath ? DRIVE_REMOTE : DRIVE_UNKNOWN;
     }
 
     /* Do we have a remote device? Return so! */
@@ -722,6 +724,11 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
     }
 
     /* Nothing matching, just fail */
+    if (IsUncPath)
+    {
+        return DRIVE_REMOTE;
+    }
+
     return DRIVE_UNKNOWN;
 }
 
