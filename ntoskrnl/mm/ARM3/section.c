@@ -2651,11 +2651,17 @@ MmMapViewOfArm3Section(
     ASSERT(Section->u.Flags.WriteCombined == 0);
     ASSERT(ControlArea->u.Flags.PhysicalMemory == 0);
 
-    /* FIXME */
+    /*
+     * MEM_RESERVE is only meaningful when mapping a view larger than the
+     * backing of an image- or file-backed section, so that the excess
+     * address space is merely reserved.  Pagefile-backed sections (which is
+     * all ARM3 currently handles here) have no such backing, so Windows
+     * rejects the request rather than implementing a no-op reservation.
+     */
     if ((AllocationType & MEM_RESERVE) != 0)
     {
-        DPRINT1("MmMapViewOfArm3Section called with MEM_RESERVE, this is not implemented yet!!!\n");
-        return STATUS_NOT_IMPLEMENTED;
+        DPRINT1("MEM_RESERVE is not valid for a pagefile-backed section\n");
+        return STATUS_INVALID_PARAMETER_9;
     }
 
     /* Check if the mapping protection is compatible with the create */
