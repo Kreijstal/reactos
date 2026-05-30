@@ -221,7 +221,7 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
     NTSTATUS Status;
     PWCHAR Name;
 
-    *Length -= sizeof(*InfoBuffer);
+    *Length -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
 
     if (Ccb->NodeType == NPFS_NTC_ROOT_DCB_CCB)
     {
@@ -262,6 +262,9 @@ NpQueryInternalInfo(IN PNP_CCB Ccb,
     *Length -= sizeof(*InfoBuffer);
 
     RtlZeroMemory(InfoBuffer, sizeof(*InfoBuffer));
+
+    /* Report a unique, non-zero file id, like Windows does for a pipe */
+    InfoBuffer->IndexNumber.QuadPart = (ULONG_PTR)Ccb;
 
     return STATUS_SUCCESS;
 }
