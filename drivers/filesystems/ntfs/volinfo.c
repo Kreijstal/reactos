@@ -94,9 +94,9 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
     ReadAttribute(DeviceExt, DataContext, 0, (PCHAR)BitmapData, (ULONG)BitmapDataSize);
     ReleaseAttributeContext(DataContext);
 
-    DPRINT1("Total clusters: %I64x\n", DeviceExt->NtfsInfo.ClusterCount);
-    DPRINT1("Total clusters in bitmap: %I64x\n", BitmapDataSize * 8);
-    DPRINT1("Diff in size: %I64d B\n", ((BitmapDataSize * 8) - DeviceExt->NtfsInfo.ClusterCount) * DeviceExt->NtfsInfo.SectorsPerCluster * DeviceExt->NtfsInfo.BytesPerSector);
+    DPRINT("Total clusters: %I64x\n", DeviceExt->NtfsInfo.ClusterCount);
+    DPRINT("Total clusters in bitmap: %I64x\n", BitmapDataSize * 8);
+    DPRINT("Diff in size: %I64d B\n", ((BitmapDataSize * 8) - DeviceExt->NtfsInfo.ClusterCount) * DeviceExt->NtfsInfo.SectorsPerCluster * DeviceExt->NtfsInfo.BytesPerSector);
 
     RtlInitializeBitMap(&Bitmap, (PULONG)BitmapData, DeviceExt->NtfsInfo.ClusterCount);
     FreeClusters = RtlNumberOfClearBits(&Bitmap);

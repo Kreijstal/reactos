@@ -248,8 +248,21 @@ MmAccessFault(IN ULONG FaultCode,
         return MmArmAccessFault(FaultCode, Address, Mode, TrapInformation);
     }
 
+    /*
+     * Classifying the fault below takes a working set lock. If the fault
+     * happened while the current thread already owns any working set, taking
+     * another one would recurse into ARM3 locking and assert. This can happen
+     * for kernel-mode faults in locked paths such as interrupt connection.
+     */
+    if (MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()))
+    {
+        if (Mode == KernelMode)
+        {
+            return STATUS_IN_PAGE_ERROR | 0x10000000;
+        }
+    }
     /* Is there a ReactOS address space yet? */
-    if (MmGetKernelAddressSpace())
+    else if (MmGetKernelAddressSpace())
     {
         if (Address > MM_HIGHEST_USER_ADDRESS)
         {
@@ -312,4 +325,3 @@ Retry:
 
     return Status;
 }
-

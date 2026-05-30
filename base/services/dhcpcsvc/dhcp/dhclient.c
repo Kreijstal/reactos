@@ -577,7 +577,7 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
 
     /* Set up our default router if we got one from the DHCP server */
     if( new_lease->options[DHO_SUBNET_MASK].len ) {
-        NTSTATUS Status;
+        DWORD Status;
 
         memcpy( netmask.iabuf,
                 new_lease->options[DHO_SUBNET_MASK].data,
@@ -609,12 +609,12 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
             RegSetValueExA(hkey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
         }
 
-        if( !NT_SUCCESS(Status) )
+        if (Status != NO_ERROR)
             warning("AddIPAddress: %lx\n", Status);
     }
 
     if( new_lease->options[DHO_ROUTERS].len ) {
-        NTSTATUS Status;
+        DWORD Status;
 
         Adapter->RouterMib.dwForwardDest = 0; /* Default route */
         Adapter->RouterMib.dwForwardMask = 0;
@@ -631,7 +631,7 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
 
         Status = CreateIpForwardEntry( &Adapter->RouterMib );
 
-        if( !NT_SUCCESS(Status) )
+        if (Status != NO_ERROR)
             warning("CreateIpForwardEntry: %lx\n", Status);
 
         if (hkey) {
@@ -1231,7 +1231,7 @@ state_panic(void *ipp)
     DWORD ret;
     HKEY hKey = NULL;
     PDHCP_ADAPTER Adapter = AdapterFindInfo(ip);
-    NTSTATUS Status;
+    DWORD Status;
     DWORD lease = 0;
     time_t cur_time, never_time = 0x7FFFFFFF;
     struct in_addr addr;
@@ -1260,7 +1260,7 @@ state_panic(void *ipp)
                                   Adapter->IfMib.dwIndex,
                                   &Adapter->NteContext,
                                   &Adapter->NteInstance);
-            if (!NT_SUCCESS(Status))
+            if (Status != NO_ERROR)
                 DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
 
             /* DefaultGateway */
@@ -1280,7 +1280,7 @@ state_panic(void *ipp)
                 Adapter->RouterMib.dwForwardNextHop = htonl(Adapter->AlternateConfiguration->DefaultGateway);
 
                 Status = CreateIpForwardEntry(&Adapter->RouterMib);
-                if (!NT_SUCCESS(Status))
+                if (Status != NO_ERROR)
                     DH_DbgPrint(MID_TRACE,("CreateIpForwardEntry: %lx\n", Status));
             }
 
@@ -1368,7 +1368,7 @@ state_panic(void *ipp)
                                           Adapter->IfMib.dwIndex,
                                           &Adapter->NteContext,
                                           &Adapter->NteInstance);
-                    if (!NT_SUCCESS(Status))
+                    if (Status != NO_ERROR)
                         DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
 
                     if (hKey)
