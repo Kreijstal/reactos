@@ -6,6 +6,7 @@
 #define LIBSMB2_RX_WSAPOLL_H
 
 #include <winsock2.h>
+#include <mswsock.h>
 
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
 

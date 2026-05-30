@@ -256,6 +256,28 @@ IsDotDirectoryN(
             (Length == 2 && pPath[0] == _T('.') && pPath[1] == _T('.')));
 }
 
+static BOOL
+IsUncShareRoot(
+    IN LPCTSTR pszPath)
+{
+    LPCTSTR pServer;
+    LPCTSTR pShare;
+
+    if (pszPath[0] != _T('\\') || pszPath[1] != _T('\\'))
+        return FALSE;
+
+    pServer = pszPath + 2;
+    if (*pServer == 0 || *pServer == _T('\\'))
+        return FALSE;
+
+    pShare = _tcschr(pServer, _T('\\'));
+    if (pShare == NULL || pShare[1] == 0 || pShare[1] == _T('\\'))
+        return FALSE;
+
+    pShare = _tcschr(pShare + 1, _T('\\'));
+    return (pShare == NULL || pShare[1] == 0);
+}
+
 /*
  * DirReadParameters
  *
@@ -1798,10 +1820,8 @@ ResolvePattern(
     }
     else if (pszPatternPart == NULL)
     {
-        ASSERT(pszFullPath[_tcslen(pszFullPath)-1] == _T('\\'));
-
         /* Anything NOT being "." or ".." (the special directories) must be fully restored */
-        if (*pNextDir && !IsDotDirectory(pNextDir))
+        if (*pNextDir && !IsDotDirectory(pNextDir) && !IsUncShareRoot(pszFullPath))
         {
             pszPatternPart = &pszFullPath[_tcslen(pszFullPath)];
             _tcscpy(pszPatternPart, pNextDir);

@@ -254,6 +254,7 @@ inline int writev(t_socket sock, struct iovec *iov, int nvecs)
   if (res == 0) {
     return (int)ret;
   }
+  errno = (WSAGetLastError() == WSAEWOULDBLOCK) ? EAGAIN : WSAGetLastError();
   return -1;
 }
 
@@ -267,6 +268,7 @@ inline int readv(t_socket sock, struct iovec *iov, int nvecs)
   if (res == 0) {
     return (int)ret;
   }
+  errno = (WSAGetLastError() == WSAEWOULDBLOCK) ? EAGAIN : WSAGetLastError();
   return -1;
 }
 #endif

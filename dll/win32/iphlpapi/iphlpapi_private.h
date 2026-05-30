@@ -143,6 +143,7 @@ typedef enum _IPHLPAddrType {
 
 /** Prototypes **/
 NTSTATUS getNthIpEntity( HANDLE tcpFile, DWORD index, TDIEntityID *ent );
+NTSTATUS getIpEntityByInterfaceIndex( HANDLE tcpFile, DWORD index, TDIEntityID *ent );
 NTSTATUS tdiGetIpAddrsForIpEntity( HANDLE tcpFile, TDIEntityID *ent,
 				   IPAddrEntry **addrs, PDWORD numAddrs );
 int GetLongestChildKeyName( HANDLE RegHandle );
@@ -165,6 +166,9 @@ NTSTATUS getIPAddrEntryForIf(HANDLE tcpFile,
                              char *name,
                              DWORD index,
                              IFInfo *ifInfo);
+NTSTATUS getInterfaceInfoByIndex(HANDLE tcpFile,
+                                 DWORD index,
+                                 IFInfo *ifInfo);
 DWORD TCPSendIoctl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer, PULONG pInBufferSize, LPVOID lpOutBuffer, PULONG pOutBufferSize);
 
 #include <w32api.h>

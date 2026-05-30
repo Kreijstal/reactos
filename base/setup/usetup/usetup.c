@@ -3214,7 +3214,6 @@ FileCopyCallback(PVOID Context,
 
                 if (!s_pszCopying)
                     s_pszCopying = MUIGetString(STRING_COPYING);
-                DPRINT1("COPY_FILE:%S\n", DstFileName);
                 CONSOLE_SetStatusText(s_pszCopying, DstFileName);
 #ifdef __REACTOS__ /* HACK */
                 DoWatchDestFileName(DstFileName);
@@ -3240,21 +3239,6 @@ FileCopyCallback(PVOID Context,
         {
             CopyContext->CompletedOperations++;
             CopyContext->OverallCompleted++;
-
-            /* SYSREG checkpoint */
-            if (CopyContext->TotalOperations >> 1 == CopyContext->CompletedOperations)
-                DPRINT1("CHECKPOINT:HALF_COPIED\n");
-
-            /* Emit overall progress to serial */
-            {
-                static ULONG LastProgress = (ULONG)-1;
-                ULONG Progress = (100 * CopyContext->OverallCompleted + (CopyContext->OverallTotal / 2)) / CopyContext->OverallTotal;
-                if (Progress != LastProgress)
-                {
-                    LastProgress = Progress;
-                    DPRINT1("PROGRESS:%lu%%\n", Progress);
-                }
-            }
 
             ProgressNextStep(CopyContext->ProgressBar);
             SetupUpdateMemoryInfo(CopyContext, FALSE);

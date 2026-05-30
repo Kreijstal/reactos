@@ -1725,11 +1725,15 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     ForEachInterface(IF) {
 	TI_DbgPrint(MID_TRACE,("Looking at adapter %d\n", IF->Index));
 
-        if( IF->Unicast.Address.IPv4Address == IpAddrChange->Address ) {
-            Status = STATUS_DUPLICATE_OBJECTID;
-            break;
-        }
         if( IF->Index == IpAddrChange->NteIndex ) {
+            if ((IF->Unicast.Address.IPv4Address == IpAddrChange->Address) &&
+                (IF->Netmask.Address.IPv4Address == IpAddrChange->Netmask)) {
+                IpAddrChange->Address = IF->Index;
+                Irp->IoStatus.Information = IF->Index;
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
             IPRemoveInterfaceRoute( IF );
 
             IF->Unicast.Type = IP_ADDRESS_V4;
@@ -1755,6 +1759,10 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
             Irp->IoStatus.Information = IF->Index;
             break;
         }
+        if( IF->Unicast.Address.IPv4Address == IpAddrChange->Address ) {
+            Status = STATUS_DUPLICATE_OBJECTID;
+            break;
+        }
     } EndFor(IF);
 
     Irp->IoStatus.Status = Status;
@@ -1763,7 +1771,7 @@ NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
 
 NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
-    PUSHORT NteIndex = Irp->AssociatedIrp.SystemBuffer;
+    PULONG NteIndex = Irp->AssociatedIrp.SystemBuffer;
     IF_LIST_ITER(IF);
 
     ForEachInterface(IF) {

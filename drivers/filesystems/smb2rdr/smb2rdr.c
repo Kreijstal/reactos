@@ -100,6 +100,9 @@ typedef struct _SMB2RDR_SRV_OPEN_EXTENSION {
 #define Smb2RdrGetSrvOpenExtension(S) \
     (((S) == NULL) ? NULL : (PSMB2RDR_SRV_OPEN_EXTENSION)((S)->Context))
 
+static VOID
+Smb2RefreshFcbSizes(PMRX_FCB Fcb, PFILE_OBJECT FileObject, ULONGLONG FileSize);
+
 /* Resolve the SRV_OPEN that owns the daemon-side handle for the I/O an
  * RX_CONTEXT is carrying.  For LowIo (paging) reads the caller's FOBX is
  * the authoritative link; pRelevantSrvOpen is set by rdbss on the Create/
@@ -226,7 +229,7 @@ Smb2RdrKaWorker(PVOID Context)
         NTSTATUS dStatus = STATUS_UNSUCCESSFUL;
         ULONG outActual = 0;
 
-        DPRINT1("SMB2RDR: KA reap server=%wZ share=%wZ handle=0x%llx\n",
+        DPRINT("SMB2RDR: KA reap server=%wZ share=%wZ handle=0x%llx\n",
                 &e->Server, &e->Share, handle);
 
         if (handle != 0) {
@@ -328,8 +331,8 @@ Smb2RdrKaShutdown(VOID)
     }
 }
 
-/* Split "\server" / "\server\share" into bare components (no leading
- * backslashes).  Returns FALSE on a malformed input. */
+/* Split RDBSS server/net-root names into bare server and share components.
+ * NetRootName may be either "\server\share" or just "\share". */
 static BOOLEAN
 Smb2RdrKaSplit(PUNICODE_STRING SrvCallName,
                PUNICODE_STRING NetRootName,
@@ -338,7 +341,7 @@ Smb2RdrKaSplit(PUNICODE_STRING SrvCallName,
 {
     PWCHAR srv, sh;
     USHORT srvBytes, shBytes;
-    USHORT srvPrefix;
+    USHORT srvPrefix, srvChars;
 
     if (SrvCallName == NULL || SrvCallName->Buffer == NULL ||
         SrvCallName->Length < sizeof(WCHAR))
@@ -350,15 +353,29 @@ Smb2RdrKaSplit(PUNICODE_STRING SrvCallName,
     srvBytes = (USHORT)(SrvCallName->Length - sizeof(WCHAR));
 
     srvPrefix = SrvCallName->Length;
-    if (NetRootName->Length <= srvPrefix + sizeof(WCHAR))
-        return FALSE;
-    sh = (PWCHAR)((PUCHAR)NetRootName->Buffer + srvPrefix);
-    if (*sh == L'\\') {
-        sh++;
-        shBytes = (USHORT)(NetRootName->Length - srvPrefix - sizeof(WCHAR));
-    } else {
+    srvChars = srvPrefix / sizeof(WCHAR);
+    if (NetRootName->Length > srvPrefix &&
+        RtlCompareMemory(NetRootName->Buffer,
+                         SrvCallName->Buffer,
+                         srvPrefix) == srvPrefix)
+    {
+        sh = NetRootName->Buffer + srvChars;
         shBytes = (USHORT)(NetRootName->Length - srvPrefix);
     }
+    else
+    {
+        sh = NetRootName->Buffer;
+        shBytes = NetRootName->Length;
+    }
+
+    if (shBytes == 0)
+        return FALSE;
+
+    if (*sh == L'\\') {
+        sh++;
+        shBytes -= sizeof(WCHAR);
+    }
+
     /* Strip a path tail "\rest" if rdbss handed us a longer name. */
     {
         USHORT i;
@@ -500,6 +517,91 @@ smb2rdr_Unimplemented(PRX_CONTEXT RxContext)
     return STATUS_NOT_IMPLEMENTED;
 }
 
+static NTSTATUS NTAPI
+smb2rdr_QueryVolumeInfo(IN OUT PRX_CONTEXT RxContext)
+{
+    PVOID Buffer;
+    ULONG Length;
+
+    if (RxContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Buffer = RxContext->Info.Buffer;
+    Length = RxContext->Info.Length;
+    if (Buffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    switch (RxContext->Info.FsInformationClass)
+    {
+        case FileFsDeviceInformation:
+        {
+            PFILE_FS_DEVICE_INFORMATION DeviceInfo = Buffer;
+
+            if (Length < sizeof(*DeviceInfo))
+            {
+                RxContext->Info.Length = 0;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            DeviceInfo->DeviceType = FILE_DEVICE_NETWORK_FILE_SYSTEM;
+            DeviceInfo->Characteristics = FILE_REMOTE_DEVICE | FILE_DEVICE_IS_MOUNTED;
+            RxContext->Info.Length = Length - sizeof(*DeviceInfo);
+            return STATUS_SUCCESS;
+        }
+
+        case FileFsAttributeInformation:
+        {
+            static const WCHAR FsName[] = L"SMB2";
+            PFILE_FS_ATTRIBUTE_INFORMATION AttrInfo = Buffer;
+            ULONG FsNameLength = sizeof(FsName) - sizeof(UNICODE_NULL);
+            ULONG Required = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName) + FsNameLength;
+
+            if (Length < FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName))
+            {
+                RxContext->Info.Length = 0;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            AttrInfo->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES |
+                                             FILE_UNICODE_ON_DISK |
+                                             FILE_PERSISTENT_ACLS;
+            AttrInfo->MaximumComponentNameLength = 255;
+            AttrInfo->FileSystemNameLength = FsNameLength;
+
+            if (Length < Required)
+            {
+                RxContext->Info.Length = 0;
+                return STATUS_BUFFER_OVERFLOW;
+            }
+
+            RtlCopyMemory(AttrInfo->FileSystemName, FsName, FsNameLength);
+            RxContext->Info.Length = Length - Required;
+            return STATUS_SUCCESS;
+        }
+
+        case FileFsVolumeInformation:
+        {
+            PFILE_FS_VOLUME_INFORMATION VolumeInfo = Buffer;
+            ULONG Required = FIELD_OFFSET(FILE_FS_VOLUME_INFORMATION, VolumeLabel);
+
+            if (Length < Required)
+            {
+                RxContext->Info.Length = 0;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            RtlZeroMemory(VolumeInfo, Required);
+            RxContext->Info.Length = Length - Required;
+            return STATUS_SUCCESS;
+        }
+
+        default:
+            DPRINT("SMB2RDR: QueryVolumeInfo class=%d NOT_SUPPORTED\n",
+                   RxContext->Info.FsInformationClass);
+            return STATUS_NOT_SUPPORTED;
+    }
+}
+
 NTSTATUS NTAPI
 smb2rdr_AreFilesAliased(PFCB a, PFCB b)
 {
@@ -592,7 +694,7 @@ smb2rdr_Start(IN OUT PRX_CONTEXT RxContext,
 {
     UNREFERENCED_PARAMETER(RxContext);
     UNREFERENCED_PARAMETER(dev);
-    DPRINT1("SMB2RDR: Start called\n");
+    DPRINT("SMB2RDR: Start called\n");
     return STATUS_SUCCESS;
 }
 
@@ -602,7 +704,7 @@ smb2rdr_Stop(IN OUT PRX_CONTEXT RxContext,
 {
     UNREFERENCED_PARAMETER(RxContext);
     UNREFERENCED_PARAMETER(dev);
-    DPRINT1("SMB2RDR: Stop called\n");
+    DPRINT("SMB2RDR: Stop called\n");
     return STATUS_SUCCESS;
 }
 
@@ -620,7 +722,7 @@ smb2rdr_CreateSrvCall(IN OUT PMRX_SRV_CALL SrvCall,
     ASSERT(SrvCall != NULL);
     ASSERT(NodeType(SrvCall) == RDBSS_NTC_SRVCALL);
 
-    DPRINT1("SMB2RDR: MRxCreateSrvCall name=%wZ\n", SrvCall->pSrvCallName);
+    DPRINT("SMB2RDR: MRxCreateSrvCall name=%wZ\n", SrvCall->pSrvCallName);
 
     Calldown = (PMRX_SRVCALLDOWN_STRUCTURE)CallbackContext->SrvCalldownStructure;
     CallbackContext->Status = STATUS_SUCCESS;
@@ -644,7 +746,7 @@ smb2rdr_SrvCallWinnerNotify(IN OUT PMRX_SRV_CALL SrvCall,
     UNREFERENCED_PARAMETER(SrvCall);
     UNREFERENCED_PARAMETER(ThisMinirdrIsTheWinner);
     UNREFERENCED_PARAMETER(RecommunicateContext);
-    DPRINT1("SMB2RDR: SrvCallWinnerNotify winner=%u\n",
+    DPRINT("SMB2RDR: SrvCallWinnerNotify winner=%u\n",
             ThisMinirdrIsTheWinner);
     return STATUS_SUCCESS;
 }
@@ -663,47 +765,27 @@ smb2rdr_PackConnectShare(PMRX_SRV_CALL SrvCall,
                           OUT PVOID *OutBuf,
                           OUT PULONG OutLen)
 {
-    USHORT serverBytes, shareBytes;
-    USHORT srvPrefixBytes;
-    PWCHAR srvChars, shareStart;
+    UNICODE_STRING Server, Share;
     ULONG totalBytes;
     PUCHAR buf;
     PUCHAR cursor;
 
-    /* SrvCall->pSrvCallName is of the form "\server".  Strip the leading
-     * backslash to get the bare hostname the way libsmb2 expects it. */
-    if (SrvCall->pSrvCallName->Length < sizeof(WCHAR))
+    if (!Smb2RdrKaSplit(SrvCall->pSrvCallName, FullNetRootName, &Server, &Share))
         return STATUS_INVALID_PARAMETER;
-    srvChars = SrvCall->pSrvCallName->Buffer + 1;
-    serverBytes = (USHORT)(SrvCall->pSrvCallName->Length - sizeof(WCHAR));
 
-    /* FullNetRootName ("\server\share") starts with the SrvCall prefix.
-     * The share portion starts right after it, with its own leading
-     * backslash that we also drop. */
-    srvPrefixBytes = SrvCall->pSrvCallName->Length;
-    if (FullNetRootName->Length <= srvPrefixBytes + sizeof(WCHAR))
-        return STATUS_INVALID_PARAMETER;
-    shareStart = (PWCHAR)((PUCHAR)FullNetRootName->Buffer + srvPrefixBytes);
-    if (*shareStart == L'\\') {
-        shareStart++;
-        shareBytes = FullNetRootName->Length - srvPrefixBytes - sizeof(WCHAR);
-    } else {
-        shareBytes = FullNetRootName->Length - srvPrefixBytes;
-    }
-
-    totalBytes = 2 * sizeof(USHORT) + serverBytes + shareBytes;
+    totalBytes = 2 * sizeof(USHORT) + Server.Length + Share.Length;
     buf = ExAllocatePoolWithTag(NonPagedPool, totalBytes, 'pucS');
     if (buf == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
 
     cursor = buf;
-    *(PUSHORT)cursor = serverBytes;
+    *(PUSHORT)cursor = Server.Length;
     cursor += sizeof(USHORT);
-    RtlCopyMemory(cursor, srvChars, serverBytes);
-    cursor += serverBytes;
-    *(PUSHORT)cursor = shareBytes;
+    RtlCopyMemory(cursor, Server.Buffer, Server.Length);
+    cursor += Server.Length;
+    *(PUSHORT)cursor = Share.Length;
     cursor += sizeof(USHORT);
-    RtlCopyMemory(cursor, shareStart, shareBytes);
+    RtlCopyMemory(cursor, Share.Buffer, Share.Length);
 
     *OutBuf = buf;
     *OutLen = totalBytes;
@@ -729,7 +811,7 @@ smb2rdr_CreateVNetRootInner(PVOID pContext)
     pNetRoot = pVNetRoot->pNetRoot;
     pSrvCall = pNetRoot->pSrvCall;
 
-    DPRINT1("SMB2RDR: MRxCreateVNetRoot (worker) srv=%wZ netroot=%wZ\n",
+    DPRINT("SMB2RDR: MRxCreateVNetRoot (worker) srv=%wZ netroot=%wZ\n",
             pSrvCall->pSrvCallName, pNetRoot->pNetRootName);
 
     if (pNetRoot->Type != NET_ROOT_DISK && pNetRoot->Type != NET_ROOT_WILD) {
@@ -757,7 +839,7 @@ smb2rdr_CreateVNetRootInner(PVOID pContext)
                 ext->DaemonHandle = cached;
                 pNetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
                 pNetRoot->DeviceType = FILE_DEVICE_DISK;
-                DPRINT1("SMB2RDR: MRxCreateVNetRoot cache hit srv=%wZ share=%wZ "
+                DPRINT("SMB2RDR: MRxCreateVNetRoot cache hit srv=%wZ share=%wZ "
                         "handle=0x%llx\n", &kaServer, &kaShare, cached);
                 status = STATUS_SUCCESS;
                 goto out;
@@ -778,21 +860,21 @@ smb2rdr_CreateVNetRootInner(PVOID pContext)
         30 /* seconds */);
 
     if (bridgeStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: CreateVNetRoot bridge failed 0x%08lx\n",
+        DPRINT("SMB2RDR: CreateVNetRoot bridge failed 0x%08lx\n",
                 bridgeStatus);
         status = STATUS_BAD_NETWORK_PATH;
         goto out;
     }
 
     if (daemonStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: CreateVNetRoot daemon failed 0x%08lx\n",
+        DPRINT("SMB2RDR: CreateVNetRoot daemon failed 0x%08lx\n",
                 daemonStatus);
         status = daemonStatus;
         goto out;
     }
 
     if (outActual < sizeof(handle) || handle == 0) {
-        DPRINT1("SMB2RDR: CreateVNetRoot bad daemon reply outlen=%lu "
+        DPRINT("SMB2RDR: CreateVNetRoot bad daemon reply outlen=%lu "
                 "handle=0x%llx\n", outActual, handle);
         status = STATUS_UNEXPECTED_NETWORK_ERROR;
         goto out;
@@ -802,7 +884,7 @@ smb2rdr_CreateVNetRootInner(PVOID pContext)
     pNetRoot->MRxNetRootState = MRX_NET_ROOT_STATE_GOOD;
     pNetRoot->DeviceType = FILE_DEVICE_DISK;
 
-    DPRINT1("SMB2RDR: MRxCreateVNetRoot success handle=0x%llx\n", handle);
+    DPRINT("SMB2RDR: MRxCreateVNetRoot success handle=0x%llx\n", handle);
     status = STATUS_SUCCESS;
 
 out:
@@ -820,7 +902,7 @@ smb2rdr_CreateVNetRoot(IN OUT PMRX_CREATENETROOT_CONTEXT Context)
 {
     NTSTATUS status;
 
-    DPRINT1("SMB2RDR: MRxCreateVNetRoot\n");
+    DPRINT("SMB2RDR: MRxCreateVNetRoot\n");
 
     if (IoGetCurrentProcess() == RxGetRDBSSProcess()) {
         smb2rdr_CreateVNetRootInner(Context);
@@ -829,7 +911,7 @@ smb2rdr_CreateVNetRoot(IN OUT PMRX_CREATENETROOT_CONTEXT Context)
                                           smb2rdr_CreateVNetRootInner,
                                           Context);
         if (status != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: CreateVNetRoot RxDispatchToWorkerThread "
+            DPRINT("SMB2RDR: CreateVNetRoot RxDispatchToWorkerThread "
                     "-> 0x%08lx\n", status);
             Context->VirtualNetRootStatus = status;
             Context->NetRootStatus = status;
@@ -878,7 +960,7 @@ smb2rdr_ExtractNetRootName(IN PUNICODE_STRING FilePathName,
             (USHORT)((PCHAR)wlimit - (PCHAR)w);
     }
 
-    DPRINT1("SMB2RDR: ExtractNetRootName path=%wZ srv=%wZ -> root=%wZ\n",
+    DPRINT("SMB2RDR: ExtractNetRootName path=%wZ srv=%wZ -> root=%wZ\n",
             FilePathName, SrvCall->pSrvCallName, NetRootName);
 }
 
@@ -888,7 +970,7 @@ smb2rdr_FinalizeSrvCall(IN OUT PMRX_SRV_CALL SrvCall,
 {
     UNREFERENCED_PARAMETER(SrvCall);
     UNREFERENCED_PARAMETER(Force);
-    DPRINT1("SMB2RDR: FinalizeSrvCall\n");
+    DPRINT("SMB2RDR: FinalizeSrvCall\n");
     return STATUS_SUCCESS;
 }
 
@@ -898,7 +980,7 @@ smb2rdr_FinalizeNetRoot(IN OUT PMRX_NET_ROOT NetRoot,
 {
     UNREFERENCED_PARAMETER(NetRoot);
     UNREFERENCED_PARAMETER(Force);
-    DPRINT1("SMB2RDR: FinalizeNetRoot\n");
+    DPRINT("SMB2RDR: FinalizeNetRoot\n");
     return STATUS_SUCCESS;
 }
 
@@ -916,7 +998,7 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
     forced = (Force != NULL && *Force);
 
     if (ext == NULL || ext->DaemonHandle == 0) {
-        DPRINT1("SMB2RDR: FinalizeVNetRoot (no handle)\n");
+        DPRINT("SMB2RDR: FinalizeVNetRoot (no handle)\n");
         return STATUS_SUCCESS;
     }
 
@@ -937,7 +1019,7 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
                            &kaServer, &kaShare)) {
             parked = Smb2RdrKaPut(&kaServer, &kaShare, handle);
             if (parked) {
-                DPRINT1("SMB2RDR: FinalizeVNetRoot park srv=%wZ share=%wZ "
+                DPRINT("SMB2RDR: FinalizeVNetRoot park srv=%wZ share=%wZ "
                         "handle=0x%llx\n", &kaServer, &kaShare, handle);
             }
         }
@@ -946,7 +1028,7 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
     if (!parked) {
         NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
         ULONG outActual = 0;
-        DPRINT1("SMB2RDR: FinalizeVNetRoot disconnect handle=0x%llx forced=%u\n",
+        DPRINT("SMB2RDR: FinalizeVNetRoot disconnect handle=0x%llx forced=%u\n",
                 handle, forced);
         /* Best-effort: ask the daemon to tear down its libsmb2 context.
          * If the bridge is down or the daemon is gone the kernel side
@@ -1008,7 +1090,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
     if (vNetExt == NULL || fcbExt == NULL || soExt == NULL ||
         vNetExt->DaemonHandle == 0)
     {
-        DPRINT1("SMB2RDR: MRxCreate: no daemon share handle on vnet\n");
+        DPRINT("SMB2RDR: MRxCreate: no daemon share handle on vnet\n");
         return STATUS_DEVICE_NOT_CONNECTED;
     }
 
@@ -1065,15 +1147,15 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
     ExFreePoolWithTag(inBuf, 'rCcS');
 
     if (bridgeStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxCreate bridge failed 0x%08lx\n", bridgeStatus);
+        DPRINT("SMB2RDR: MRxCreate bridge failed 0x%08lx\n", bridgeStatus);
         return STATUS_UNEXPECTED_NETWORK_ERROR;
     }
     if (daemonStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxCreate daemon failed 0x%08lx\n", daemonStatus);
+        DPRINT("SMB2RDR: MRxCreate daemon failed 0x%08lx\n", daemonStatus);
         return daemonStatus;
     }
     if (outActual < sizeof(out) || out.FileHandle == 0) {
-        DPRINT1("SMB2RDR: MRxCreate short reply outlen=%lu handle=0x%llx\n",
+        DPRINT("SMB2RDR: MRxCreate short reply outlen=%lu handle=0x%llx\n",
                 outActual, out.FileHandle);
         return STATUS_UNEXPECTED_NETWORK_ERROR;
     }
@@ -1124,6 +1206,8 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
         storageType = out.IsDirectory ? FileTypeDirectory : FileTypeFile;
         RxFinishFcbInitialization(Fcb, RDBSS_STORAGE_NTC(storageType),
                                    &initPkt);
+        if (!out.IsDirectory)
+            Smb2RefreshFcbSizes(Fcb, RxContext->CurrentIrpSp->FileObject, out.EndOfFile.QuadPart);
     }
 
     /* SRV_OPEN owns the daemon handle for its lifetime — see
@@ -1159,7 +1243,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
             fcbExt->Path.MaximumLength = pathBytes;
         } else {
             /* Non-fatal — rename/unlink will refuse when Path is empty. */
-            DPRINT1("SMB2RDR: MRxCreate path-stash alloc failed, "
+            DPRINT("SMB2RDR: MRxCreate path-stash alloc failed, "
                     "rename/unlink disabled on this fcb\n");
         }
     }
@@ -1248,7 +1332,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
         /* Nothing to close daemon-side — either MRxCreate never ran to
          * completion, or a prior CloseSrvOpen already cleared the slot
          * (rdbss can call us twice on the scavenger path). */
-        DPRINT1("SMB2RDR: MRxCloseSrvOpen (no handle)\n");
+        DPRINT("SMB2RDR: MRxCloseSrvOpen (no handle)\n");
         return STATUS_SUCCESS;
     }
 
@@ -1276,7 +1360,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
         15 /* seconds */);
 
     if (bridgeStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxCloseSrvOpen bridge failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxCloseSrvOpen bridge failed 0x%08lx\n",
                 bridgeStatus);
         /* Still report SUCCESS to rdbss: the kernel side has already
          * dropped its reference, and leaking a daemon-side handle is
@@ -1284,7 +1368,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
         return STATUS_SUCCESS;
     }
     if (daemonStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxCloseSrvOpen daemon reply 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxCloseSrvOpen daemon reply 0x%08lx\n",
                 daemonStatus);
     }
 
@@ -1319,16 +1403,16 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
                 &unlinkDaemon,
                 15 /* seconds */);
 
-            DPRINT1("SMB2RDR: CloseSrvOpen delete-on-close unlink "
+            DPRINT("SMB2RDR: CloseSrvOpen delete-on-close unlink "
                     "bridge=0x%08lx daemon=0x%08lx\n",
                     unlinkBridge, unlinkDaemon);
 
             ExFreePoolWithTag(unlinkIn, 'UDcS');
         } else {
-            DPRINT1("SMB2RDR: CloseSrvOpen delete-on-close alloc failed\n");
+            DPRINT("SMB2RDR: CloseSrvOpen delete-on-close alloc failed\n");
         }
     } else if (wantUnlink) {
-        DPRINT1("SMB2RDR: CloseSrvOpen delete-on-close skipped "
+        DPRINT("SMB2RDR: CloseSrvOpen delete-on-close skipped "
                 "(no path or no vnet handle)\n");
     }
 
@@ -1371,7 +1455,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
         return STATUS_INVALID_USER_BUFFER;
 
     if (soExt == NULL || soExt->DaemonFileHandle == 0 || !soExt->IsDirectory) {
-        DPRINT1("SMB2RDR: MRxQueryDirectory: no daemon dir handle\n");
+        DPRINT("SMB2RDR: MRxQueryDirectory: no daemon dir handle\n");
         return STATUS_INVALID_HANDLE;
     }
 
@@ -1390,7 +1474,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
     case FileNamesInformation:
         break;
     default:
-        DPRINT1("SMB2RDR: MRxQueryDirectory: unhandled info class %d\n",
+        DPRINT("SMB2RDR: MRxQueryDirectory: unhandled info class %d\n",
                 (int)infoClass);
         return STATUS_INVALID_INFO_CLASS;
     }
@@ -1452,7 +1536,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
         30 /* seconds */);
 
     if (bridgeStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxQueryDirectory bridge failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxQueryDirectory bridge failed 0x%08lx\n",
                 bridgeStatus);
         status = STATUS_UNEXPECTED_NETWORK_ERROR;
         goto out;
@@ -1465,7 +1549,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
          * a zero-entry completion. */
         status = (daemonStatus != STATUS_SUCCESS) ? daemonStatus
                                                  : STATUS_UNEXPECTED_NETWORK_ERROR;
-        DPRINT1("SMB2RDR: MRxQueryDirectory short reply outlen=%lu ds=0x%08lx\n",
+        DPRINT("SMB2RDR: MRxQueryDirectory short reply outlen=%lu ds=0x%08lx\n",
                 outActual, daemonStatus);
         goto out;
     }
@@ -1479,7 +1563,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
     }
 
     if (daemonStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxQueryDirectory daemon failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxQueryDirectory daemon failed 0x%08lx\n",
                 daemonStatus);
         status = daemonStatus;
         goto out;
@@ -1488,7 +1572,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
     if (opOut->BytesWritten > (ULONG)userBufLen ||
         sizeof(OP_READDIR_OUT) + opOut->BytesWritten > outActual)
     {
-        DPRINT1("SMB2RDR: MRxQueryDirectory bad reply bw=%lu bufcap=%d "
+        DPRINT("SMB2RDR: MRxQueryDirectory bad reply bw=%lu bufcap=%d "
                 "actual=%lu\n",
                 opOut->BytesWritten, userBufLen, outActual);
         status = STATUS_UNEXPECTED_NETWORK_ERROR;
@@ -1564,7 +1648,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
     ASSERT(soExt != NULL);
     ASSERT(soExt->DaemonFileHandle != 0);
     if (soExt->IsDirectory) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] on directory handle=0x%llx\n",
+        DPRINT("SMB2RDR: MRxLowIOSubmit[READ] on directory handle=0x%llx\n",
                 soExt->DaemonFileHandle);
         return STATUS_FILE_IS_A_DIRECTORY;
     }
@@ -1579,13 +1663,13 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         return STATUS_SUCCESS;
     }
     if (mdl == NULL) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] NULL MDL\n");
+        DPRINT("SMB2RDR: MRxLowIOSubmit[READ] NULL MDL\n");
         return STATUS_INVALID_USER_BUFFER;
     }
 
     dst = (PUCHAR)MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
     if (dst == NULL) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] MmGetSystemAddressForMdlSafe "
+        DPRINT("SMB2RDR: MRxLowIOSubmit[READ] MmGetSystemAddressForMdlSafe "
                 "failed\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1628,10 +1712,10 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
             &in, (ULONG)sizeof(in),
             out, outCap, &outActual,
             &daemonStatus,
-            60 /* seconds */);
+            0 /* no timeout for paging/data reads */);
 
         if (bridgeStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] bridge failed 0x%08lx\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[READ] bridge failed 0x%08lx\n",
                     bridgeStatus);
             ExFreePoolWithTag(out, 'RDrS');
             if (done > 0) {
@@ -1642,7 +1726,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
             break;
         }
         if (daemonStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] daemon failed 0x%08lx\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[READ] daemon failed 0x%08lx\n",
                     daemonStatus);
             ExFreePoolWithTag(out, 'RDrS');
             if (done > 0) {
@@ -1653,7 +1737,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
             break;
         }
         if (outActual < sizeof(OP_READ_OUT)) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] short reply outlen=%lu\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[READ] short reply outlen=%lu\n",
                     outActual);
             ExFreePoolWithTag(out, 'RDrS');
             if (done == 0)
@@ -1670,7 +1754,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         if (ro->BytesRead > chunk ||
             sizeof(OP_READ_OUT) + ro->BytesRead > outActual)
         {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[READ] bad reply br=%lu chunk=%lu "
+            DPRINT("SMB2RDR: MRxLowIOSubmit[READ] bad reply br=%lu chunk=%lu "
                     "actual=%lu\n",
                     ro->BytesRead, chunk, outActual);
             ExFreePoolWithTag(out, 'RDrS');
@@ -1777,7 +1861,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
     ASSERT(soExt != NULL);
     ASSERT(soExt->DaemonFileHandle != 0);
     if (soExt->IsDirectory) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] on directory handle=0x%llx\n",
+        DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] on directory handle=0x%llx\n",
                 soExt->DaemonFileHandle);
         return STATUS_FILE_IS_A_DIRECTORY;
     }
@@ -1792,13 +1876,13 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
         return STATUS_SUCCESS;
     }
     if (mdl == NULL) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] NULL MDL\n");
+        DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] NULL MDL\n");
         return STATUS_INVALID_USER_BUFFER;
     }
 
     src = (PUCHAR)MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority);
     if (src == NULL) {
-        DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] MmGetSystemAddressForMdlSafe "
+        DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] MmGetSystemAddressForMdlSafe "
                 "failed\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -1848,12 +1932,12 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
             in, inLen,
             &out, (ULONG)sizeof(out), &outActual,
             &daemonStatus,
-            60 /* seconds */);
+            0 /* no timeout for paging/data writes */);
 
         ExFreePoolWithTag(in, 'WDrS');
 
         if (bridgeStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] bridge failed 0x%08lx\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] bridge failed 0x%08lx\n",
                     bridgeStatus);
             if (done > 0) {
                 status = STATUS_SUCCESS;
@@ -1863,7 +1947,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
             break;
         }
         if (daemonStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] daemon failed 0x%08lx\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] daemon failed 0x%08lx\n",
                     daemonStatus);
             if (done > 0) {
                 status = STATUS_SUCCESS;
@@ -1873,7 +1957,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
             break;
         }
         if (outActual < sizeof(out)) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] short reply outlen=%lu\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] short reply outlen=%lu\n",
                     outActual);
             if (done == 0)
                 status = STATUS_UNEXPECTED_NETWORK_ERROR;
@@ -1885,7 +1969,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
             break;
         }
         if (out.BytesWritten > chunk) {
-            DPRINT1("SMB2RDR: MRxLowIOSubmit[WRITE] bad reply bw=%lu chunk=%lu\n",
+            DPRINT("SMB2RDR: MRxLowIOSubmit[WRITE] bad reply bw=%lu chunk=%lu\n",
                     out.BytesWritten, chunk);
             if (done == 0)
                 status = STATUS_UNEXPECTED_NETWORK_ERROR;
@@ -1993,6 +2077,37 @@ Smb2FillNetworkOpenInfo(PFILE_NETWORK_OPEN_INFORMATION noi,
                                          : FILE_ATTRIBUTE_NORMAL;
 }
 
+static VOID
+Smb2RefreshFcbSizes(PMRX_FCB Fcb, PFILE_OBJECT FileObject, ULONGLONG FileSize)
+{
+    LONGLONG EndOfFile = (LONGLONG)FileSize;
+    LONGLONG AllocationSize = (LONGLONG)((FileSize + 4095ULL) & ~4095ULL);
+
+    if (Fcb == NULL || NodeType(Fcb) != RDBSS_NTC_STORAGE_TYPE_FILE)
+        return;
+
+    Fcb->Header.AllocationSize.QuadPart = AllocationSize;
+    RxSetFileSizeWithLock((PFCB)Fcb, &EndOfFile);
+    Fcb->Header.ValidDataLength.QuadPart = EndOfFile;
+    ClearFlag(Fcb->FcbState, FCB_STATE_FILESIZECACHEING_ENABLED);
+
+    if (FileObject != NULL &&
+        FileObject->SectionObjectPointer != NULL &&
+        FileObject->SectionObjectPointer->SharedCacheMap != NULL)
+    {
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize);
+    }
+}
+
+static VOID
+Smb2RefreshFcbSizesFromStat(PMRX_FCB Fcb, PFILE_OBJECT FileObject, const SMB2RDR_STAT *st)
+{
+    if (st == NULL || (st->Attributes & FILE_ATTRIBUTE_DIRECTORY))
+        return;
+
+    Smb2RefreshFcbSizes(Fcb, FileObject, st->Size);
+}
+
 static NTSTATUS NTAPI
 smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
 {
@@ -2012,7 +2127,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     if (RxContext->Info.Buffer == NULL)
         return STATUS_INVALID_USER_BUFFER;
     if (soExt == NULL || soExt->DaemonFileHandle == 0) {
-        DPRINT1("SMB2RDR: MRxQueryFileInfo: no daemon handle\n");
+        DPRINT("SMB2RDR: MRxQueryFileInfo: no daemon handle\n");
         return STATUS_INVALID_HANDLE;
     }
 
@@ -2030,7 +2145,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     case FileAlternateNameInformation:
     case FileStreamInformation:
     case FileCompressionInformation:
-        DPRINT1("SMB2RDR: MRxQueryFileInfo class=%d returning NOT_IMPLEMENTED\n",
+        DPRINT("SMB2RDR: MRxQueryFileInfo class=%d returning NOT_IMPLEMENTED\n",
                 (int)infoClass);
         return STATUS_NOT_IMPLEMENTED;
     case FileBasicInformation:
@@ -2042,7 +2157,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     case FileAttributeTagInformation:
         break;
     default:
-        DPRINT1("SMB2RDR: MRxQueryFileInfo unhandled class=%d\n",
+        DPRINT("SMB2RDR: MRxQueryFileInfo unhandled class=%d\n",
                 (int)infoClass);
         return STATUS_INVALID_INFO_CLASS;
     }
@@ -2084,17 +2199,17 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
         30 /* seconds */);
 
     if (bridgeStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxQueryFileInfo bridge failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxQueryFileInfo bridge failed 0x%08lx\n",
                 bridgeStatus);
         return STATUS_UNEXPECTED_NETWORK_ERROR;
     }
     if (daemonStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxQueryFileInfo daemon failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxQueryFileInfo daemon failed 0x%08lx\n",
                 daemonStatus);
         return daemonStatus;
     }
     if (outActual < sizeof(out)) {
-        DPRINT1("SMB2RDR: MRxQueryFileInfo short reply outlen=%lu\n",
+        DPRINT("SMB2RDR: MRxQueryFileInfo short reply outlen=%lu\n",
                 outActual);
         return STATUS_UNEXPECTED_NETWORK_ERROR;
     }
@@ -2108,6 +2223,7 @@ HaveStat:
     {
         out.Stat.Attributes |= FILE_ATTRIBUTE_DIRECTORY;
     }
+    Smb2RefreshFcbSizesFromStat(RxContext->pFcb, RxContext->CurrentIrpSp->FileObject, &out.Stat);
 
     switch (infoClass) {
     case FileBasicInformation:
@@ -2274,12 +2390,12 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
         30 /* seconds */);
 
     if (bridgeStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxFlush bridge failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxFlush bridge failed 0x%08lx\n",
                 bridgeStatus);
         return bridgeStatus;
     }
     if (daemonStatus != STATUS_SUCCESS) {
-        DPRINT1("SMB2RDR: MRxFlush daemon failed 0x%08lx\n",
+        DPRINT("SMB2RDR: MRxFlush daemon failed 0x%08lx\n",
                 daemonStatus);
         return daemonStatus;
     }
@@ -2325,7 +2441,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
     NTSTATUS status;
 
     if (fcbExt == NULL || soExt == NULL || soExt->DaemonFileHandle == 0) {
-        DPRINT1("SMB2RDR: MRxSetFileInfo no daemon handle\n");
+        DPRINT("SMB2RDR: MRxSetFileInfo no daemon handle\n");
         return STATUS_INVALID_HANDLE;
     }
 
@@ -2373,7 +2489,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
         einfo = (PFILE_END_OF_FILE_INFORMATION)userBuf;
 
         if (soExt->IsDirectory) {
-            DPRINT1("SMB2RDR: SetFileInfo EOF on directory handle=0x%llx\n",
+            DPRINT("SMB2RDR: SetFileInfo EOF on directory handle=0x%llx\n",
                     soExt->DaemonFileHandle);
             return STATUS_FILE_IS_A_DIRECTORY;
         }
@@ -2396,12 +2512,12 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
             30 /* seconds */);
 
         if (bridgeStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: SetFileInfo EOF bridge failed 0x%08lx\n",
+            DPRINT("SMB2RDR: SetFileInfo EOF bridge failed 0x%08lx\n",
                     bridgeStatus);
             return STATUS_UNEXPECTED_NETWORK_ERROR;
         }
         if (daemonStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: SetFileInfo EOF daemon failed 0x%08lx\n",
+            DPRINT("SMB2RDR: SetFileInfo EOF daemon failed 0x%08lx\n",
                     daemonStatus);
             return daemonStatus;
         }
@@ -2431,7 +2547,7 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
             /* rdbss only supplies paths through the OpenTargetDir route,
              * which never carries a RootDirectory handle.  If we get one,
              * it's a pass-through from user space we can't honour. */
-            DPRINT1("SMB2RDR: SetFileInfo Rename rejected: RootDirectory!=NULL\n");
+            DPRINT("SMB2RDR: SetFileInfo Rename rejected: RootDirectory!=NULL\n");
             return STATUS_INVALID_PARAMETER;
         }
 
@@ -2450,11 +2566,11 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
             newPathBytes -= sizeof(WCHAR);
         }
         if (newPathBytes == 0) {
-            DPRINT1("SMB2RDR: SetFileInfo Rename empty dest\n");
+            DPRINT("SMB2RDR: SetFileInfo Rename empty dest\n");
             return STATUS_OBJECT_NAME_INVALID;
         }
         if (fcbExt->Path.Buffer == NULL || fcbExt->Path.Length == 0) {
-            DPRINT1("SMB2RDR: SetFileInfo Rename source-path missing\n");
+            DPRINT("SMB2RDR: SetFileInfo Rename source-path missing\n");
             return STATUS_INVALID_PARAMETER;
         }
 
@@ -2489,12 +2605,12 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
         ExFreePoolWithTag(renameIn, 'RNcS');
 
         if (bridgeStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: SetFileInfo Rename bridge failed 0x%08lx\n",
+            DPRINT("SMB2RDR: SetFileInfo Rename bridge failed 0x%08lx\n",
                     bridgeStatus);
             return STATUS_UNEXPECTED_NETWORK_ERROR;
         }
         if (daemonStatus != STATUS_SUCCESS) {
-            DPRINT1("SMB2RDR: SetFileInfo Rename daemon failed 0x%08lx\n",
+            DPRINT("SMB2RDR: SetFileInfo Rename daemon failed 0x%08lx\n",
                     daemonStatus);
             return daemonStatus;
         }
@@ -2531,13 +2647,13 @@ smb2rdr_SetFileInfo(IN OUT PRX_CONTEXT RxContext)
     case FilePipeRemoteInformation:
         /* Known NT classes we don't translate today.  STATUS_NOT_IMPLEMENTED
          * lets rdbss surface a clean failure upstream. */
-        DPRINT1("SMB2RDR: MRxSetFileInfo class=%d NOT_IMPLEMENTED\n",
+        DPRINT("SMB2RDR: MRxSetFileInfo class=%d NOT_IMPLEMENTED\n",
                 (int)infoClass);
         status = STATUS_NOT_IMPLEMENTED;
         break;
 
     default:
-        DPRINT1("SMB2RDR: MRxSetFileInfo unknown class=%d\n",
+        DPRINT("SMB2RDR: MRxSetFileInfo unknown class=%d\n",
                 (int)infoClass);
         status = STATUS_INVALID_INFO_CLASS;
         break;
@@ -2590,7 +2706,7 @@ smb2rdr_init_ops(void)
     smb2rdr_ops.MRxDeallocateForFobx = smb2rdr_DeallocateForFobx;
 
     smb2rdr_ops.MRxQueryDirectory    = smb2rdr_QueryDirectory;
-    smb2rdr_ops.MRxQueryVolumeInfo   = smb2rdr_Unimplemented;
+    smb2rdr_ops.MRxQueryVolumeInfo   = smb2rdr_QueryVolumeInfo;
     smb2rdr_ops.MRxQueryFileInfo     = smb2rdr_QueryFileInfo;
     smb2rdr_ops.MRxSetFileInfo       = smb2rdr_SetFileInfo;
 
@@ -2726,11 +2842,11 @@ DriverEntry(PDRIVER_OBJECT drv, PUNICODE_STRING path)
         StartCtx = RxCreateRxContext(NULL, smb2rdr_dev, CtxFlags);
         if (StartCtx != NULL) {
             StartStatus = RxStartMinirdr(StartCtx, &PostRequest);
-            DPRINT1("SMB2RDR: self-start RxStartMinirdr -> 0x%08lx (post=%u)\n",
+            DPRINT("SMB2RDR: self-start RxStartMinirdr -> 0x%08lx (post=%u)\n",
                     StartStatus, PostRequest);
             RxDereferenceAndDeleteRxContext(StartCtx);
         } else {
-            DPRINT1("SMB2RDR: self-start RxCreateRxContext returned NULL\n");
+            DPRINT("SMB2RDR: self-start RxCreateRxContext returned NULL\n");
         }
     }
 

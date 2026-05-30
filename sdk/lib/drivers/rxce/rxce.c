@@ -276,7 +276,27 @@ NTAPI
 RxAcquireFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    PAGED_CODE();
+
+    if (FileObject == NULL)
+    {
+        return;
+    }
+
+    Fcb = FileObject->FsContext;
+    if (Fcb == NULL || NodeType(Fcb) != RDBSS_NTC_FCB)
+    {
+        return;
+    }
+
+    ASSERT_CORRECT_FCB_STRUCTURE(Fcb);
+
+    if (Fcb->Header.Resource != NULL)
+    {
+        ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+    }
 }
 
 NTSTATUS
@@ -1269,6 +1289,7 @@ RxConstructSrvCall(
     PRDBSS_DEVICE_OBJECT RxDeviceObject;
     PMRX_SRVCALLDOWN_STRUCTURE Calldown;
     PMRX_SRVCALL_CALLBACK_CONTEXT CallbackContext;
+    BOOLEAN WasAsync;
 
     PAGED_CODE();
 
@@ -1308,15 +1329,14 @@ RxConstructSrvCall(
 
     RxReferenceSrvCall(SrvCall);
 
-    /* If we're async, we'll post, otherwise, we'll have to wait for completion */
-    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
-    {
-        RxPrePostIrp(RxContext, RxContext->CurrentIrp);
-    }
-    else
-    {
-        KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
-    }
+    /*
+     * The callers of RxConstructSrvCall expect a stable SRV_CALL on return and
+     * treat STATUS_PENDING as failure. Complete this construction synchronously,
+     * even when the create RX_CONTEXT itself is asynchronous.
+     */
+    WasAsync = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
 
     Calldown->NumberToWait = 1;
     Calldown->NumberRemaining = 1;
@@ -1335,23 +1355,24 @@ RxConstructSrvCall(
     /* It has to return STATUS_PENDING! */
     ASSERT(Status == STATUS_PENDING);
 
-    /* No async, start completion */
-    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
-    {
-        KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
+    KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
 
-        /* Finish construction - we'll notify mini-rdr it's the winner */
-        Status = RxFinishSrvCallConstruction(Calldown);
-        if (!NT_SUCCESS(Status))
-        {
-            RxReleasePrefixTableLock(PrefixTable);
-            *LockHoldingState = LHS_LockNotHeld;
-        }
-        else
-        {
-            ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
-            *LockHoldingState = LHS_ExclusiveLockHeld;
-        }
+    /* Finish construction - we'll notify mini-rdr it's the winner */
+    Status = RxFinishSrvCallConstruction(Calldown);
+    if (!NT_SUCCESS(Status))
+    {
+        RxReleasePrefixTableLock(PrefixTable);
+        *LockHoldingState = LHS_LockNotHeld;
+    }
+    else
+    {
+        ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
+        *LockHoldingState = LHS_ExclusiveLockHeld;
+    }
+
+    if (WasAsync)
+    {
+        SetFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
     }
 
     DPRINT("RxConstructSrvCall() = Status: %x\n", Status);
@@ -7582,7 +7603,27 @@ NTAPI
 RxReleaseFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    PAGED_CODE();
+
+    if (FileObject == NULL)
+    {
+        return;
+    }
+
+    Fcb = FileObject->FsContext;
+    if (Fcb == NULL || NodeType(Fcb) != RDBSS_NTC_FCB)
+    {
+        return;
+    }
+
+    ASSERT_CORRECT_FCB_STRUCTURE(Fcb);
+
+    if (Fcb->Header.Resource != NULL)
+    {
+        ExReleaseResourceLite(Fcb->Header.Resource);
+    }
 }
 
 NTSTATUS
@@ -8661,7 +8702,10 @@ RxTrackPagingIoResource(
     _In_ ULONG Line,
     _In_ PCSTR File)
 {
-    UNIMPLEMENTED;
+    UNREFERENCED_PARAMETER(Instance);
+    UNREFERENCED_PARAMETER(Type);
+    UNREFERENCED_PARAMETER(Line);
+    UNREFERENCED_PARAMETER(File);
 }
 
 /*

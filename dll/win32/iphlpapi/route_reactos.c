@@ -41,7 +41,9 @@ DWORD createIpForwardEntry( PMIB_IPFORWARDROW pRoute ) {
     TRACE("Called.\n");
 
     if( NT_SUCCESS(status) ) {
-        status = getNthIpEntity( tcpFile, pRoute->dwForwardIfIndex, &id );
+        status = getIpEntityByInterfaceIndex( tcpFile,
+                                              pRoute->dwForwardIfIndex,
+                                              &id );
 
         if( NT_SUCCESS(status) ) {
             req.Req.ID.toi_class                = INFO_CLASS_PROTOCOL;
@@ -106,7 +108,9 @@ DWORD deleteIpForwardEntry( PMIB_IPFORWARDROW pRoute ) {
     TRACE("Called.\n");
 
     if( NT_SUCCESS(status) ) {
-        status = getNthIpEntity( tcpFile, pRoute->dwForwardIfIndex, &id );
+        status = getIpEntityByInterfaceIndex( tcpFile,
+                                              pRoute->dwForwardIfIndex,
+                                              &id );
 
         if( NT_SUCCESS(status) ) {
             req.Req.ID.toi_class                = INFO_CLASS_PROTOCOL;
