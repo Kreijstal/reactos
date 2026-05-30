@@ -749,3 +749,6 @@
     SVC_(GdiDdDDIWaitForSynchronizationObject, 1)
     SVC_(UserRdpInjectMouse, 2)
     SVC_(UserRdpInjectKeyboard, 2)
+    SVC_(UserAddClipboardFormatListener, 1)
+    SVC_(UserRemoveClipboardFormatListener, 1)
+    SVC_(UserGetUpdatedClipboardFormats, 3)

@@ -374,36 +374,25 @@ SetClipboardData(UINT uFormat, HANDLE hMem)
     return hRet;
 }
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 AddClipboardFormatListener(HWND hwnd)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    return NtUserAddClipboardFormatListener(hwnd);
 }
-/*
- * @unimplemented
- */
+
 BOOL
 WINAPI
 RemoveClipboardFormatListener(HWND hwnd)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    return NtUserRemoveClipboardFormatListener(hwnd);
 }
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 GetUpdatedClipboardFormats(PUINT lpuiFormats,
                            UINT cFormats,
                            PUINT pcFormatsOut)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    return NtUserGetUpdatedClipboardFormats(lpuiFormats, cFormats, pcFormatsOut);
 }
