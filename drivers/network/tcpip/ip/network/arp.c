@@ -135,6 +135,9 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
     if (!Address)
         Address = &Interface->Unicast;
 
+    if (!Interface->Address || !Interface->AddressLength)
+        return FALSE;
+
     switch (Address->Type) {
         case IP_ADDRESS_V4:
             ProtoType    = (USHORT)ETYPE_IPv4; /* IPv4 */
@@ -301,6 +304,13 @@ VOID ARPReceive(
     }
 
     if (Header->Opcode != ARP_OPCODE_REQUEST)
+    {
+        ExFreePool(DataBuffer);
+        Packet->Free(Packet);
+        return;
+    }
+
+    if (!Interface->Address || !Interface->AddressLength)
     {
         ExFreePool(DataBuffer);
         Packet->Free(Packet);

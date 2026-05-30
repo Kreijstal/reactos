@@ -2442,15 +2442,24 @@ UserFault:
         /* Is this a guard page? */
         if ((ProtectionCode & MM_PROTECT_SPECIAL) == MM_GUARDPAGE)
         {
-            /* The VAD protection cannot be MM_DECOMMIT! */
-            ASSERT(ProtectionCode != MM_DECOMMIT);
+            /* The VAD protection cannot be MM_DECOMMIT and we don't yet
+             * support guard pages backed by a prototype PTE. Both cases
+             * used to ASSERT, but on a kernel built with
+             * FLG_DISABLE_DEBUG_PROMPTS the assertion raises and unwinds
+             * the working-set lock, which then bugchecks the next time
+             * something locks the address space. Fail the fault cleanly
+             * instead — drop the WS lock and return an error status, the
+             * same path the supported case takes. */
+            if (ProtectionCode == MM_DECOMMIT || ProtoPte != NULL)
+            {
+                MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+                return STATUS_ACCESS_VIOLATION;
+            }
 
             /* Remove the bit */
             TempPte.u.Soft.Protection = ProtectionCode & ~MM_GUARDPAGE;
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
 
-            /* Not supported */
-            ASSERT(ProtoPte == NULL);
 #if (NTDDI_VERSION < NTDDI_LONGHORN)
             ASSERT(CurrentThread->ApcNeeded == 0);
 #endif

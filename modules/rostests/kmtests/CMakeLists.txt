@@ -9,6 +9,7 @@ add_subdirectory(example)
 add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
+add_subdirectory(kmt_exit_drv)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_io)
 add_subdirectory(ntos_mm)
@@ -202,6 +203,7 @@ add_rostests_file(TARGET kmtest)
 add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
+    kmt_exit_drv
     example_drv
     hidp_drv
     iocreatefile_drv

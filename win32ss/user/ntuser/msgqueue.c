@@ -1957,9 +1957,17 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
 
    if (!filter_contains_hw_range( MsgFilterLow, MsgFilterHigh )) return FALSE;
 
-   ListHead = MessageQueue->HardwareMessagesListHead.Flink;
+   if (MessageQueue->HardwareMessagesListHead.Flink == NULL ||
+       MessageQueue->HardwareMessagesListHead.Blink == NULL)
+   {
+      InitializeListHead(&MessageQueue->HardwareMessagesListHead);
+      ClearMsgBitsMask(pti, QS_MOUSE | QS_KEY);
+      return FALSE;
+   }
 
    if (IsListEmpty(&MessageQueue->HardwareMessagesListHead)) return FALSE;
+
+   ListHead = MessageQueue->HardwareMessagesListHead.Flink;
 
    if (!MessageQueue->ptiSysLock)
    {

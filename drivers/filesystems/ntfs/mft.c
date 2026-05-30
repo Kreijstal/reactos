@@ -632,7 +632,6 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
             DPRINT1("InternalSetResidentAttributeLength OVERFLOW: MoveEnd=0x%Ix RecordEnd=0x%Ix TrailingSize=%lu NewLen=%lu OldLen=%lu\n",
                     MoveEnd, (ULONG_PTR)FileRecord + DeviceExt->NtfsInfo.BytesPerFileRecord,
                     TrailingSize, Destination->Length, OldAttributeLength);
-            ASSERT(FALSE);
             return STATUS_BUFFER_OVERFLOW;
         }
 
@@ -2575,6 +2574,119 @@ FixupUpdateSequenceArray(PDEVICE_EXTENSION Vcb,
     return STATUS_SUCCESS;
 }
 
+/*
+ * Update one bit in $MFT::$BITMAP.  Used to roll back failed creates and to
+ * make deleted file records reusable.
+ */
+NTSTATUS
+NtfsSetMftBitmapInUse(PDEVICE_EXTENSION DeviceExt,
+                      ULONGLONG MftIndex,
+                      BOOLEAN InUse,
+                      BOOLEAN CanWait)
+{
+    NTSTATUS Status;
+    PNTFS_ATTR_CONTEXT BitmapContext;
+    ULONGLONG BitmapDataSize;
+    ULONGLONG AttrBytesRead;
+    PUCHAR BitmapData;
+    PUCHAR BitmapBuffer = NULL;
+    ULONG LengthWritten;
+    LARGE_INTEGER BitmapBits;
+    RTL_BITMAP Bitmap;
+
+    if (MftIndex > MAXULONG)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, CanWait))
+        return STATUS_CANT_WAIT;
+
+    Status = FindAttribute(DeviceExt,
+                           DeviceExt->MasterFileTable,
+                           AttributeBitmap,
+                           L"",
+                           0,
+                           &BitmapContext,
+                           NULL);
+    if (!NT_SUCCESS(Status))
+        goto CleanupLock;
+
+    BitmapDataSize = AttributeDataLength(BitmapContext->pRecord);
+    if (MftIndex >= BitmapDataSize * 8)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto CleanupContext;
+    }
+
+    if (DeviceExt->MftBitmapData && DeviceExt->MftBitmapSize == BitmapDataSize)
+    {
+        BitmapData = (PUCHAR)DeviceExt->MftBitmapData;
+    }
+    else
+    {
+        ULONG AllocSize = ALIGN_UP_BY(BitmapDataSize, sizeof(ULONG));
+
+        BitmapBuffer = ExAllocatePoolWithTag(NonPagedPool,
+                                             AllocSize + sizeof(ULONG),
+                                             TAG_NTFS);
+        if (!BitmapBuffer)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto CleanupContext;
+        }
+
+        RtlZeroMemory(BitmapBuffer, AllocSize + sizeof(ULONG));
+        BitmapData = (PUCHAR)ALIGN_UP_BY((ULONG_PTR)BitmapBuffer, sizeof(ULONG));
+
+        AttrBytesRead = ReadAttribute(DeviceExt,
+                                      BitmapContext,
+                                      0,
+                                      (PCHAR)BitmapData,
+                                      BitmapDataSize);
+        if (AttrBytesRead != BitmapDataSize)
+        {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto CleanupContext;
+        }
+
+        if (DeviceExt->MftBitmapBuffer)
+            ExFreePoolWithTag(DeviceExt->MftBitmapBuffer, TAG_NTFS);
+        DeviceExt->MftBitmapBuffer = BitmapBuffer;
+        DeviceExt->MftBitmapData = (PULONG)BitmapData;
+        DeviceExt->MftBitmapSize = BitmapDataSize;
+        BitmapBuffer = NULL;
+    }
+
+    BitmapBits.QuadPart = AttributeDataLength(DeviceExt->MFTContext->pRecord) /
+                          DeviceExt->NtfsInfo.BytesPerFileRecord;
+    if (BitmapBits.HighPart != 0 || BitmapBits.LowPart == MAXULONG)
+        BitmapBits.QuadPart = MAXULONG - 1;
+
+    RtlInitializeBitMap(&Bitmap, (PULONG)BitmapData, BitmapBits.LowPart);
+    if (InUse)
+        RtlSetBits(&Bitmap, (ULONG)MftIndex, 1);
+    else
+        RtlClearBits(&Bitmap, (ULONG)MftIndex, 1);
+
+    Status = WriteAttribute(DeviceExt,
+                            BitmapContext,
+                            0,
+                            BitmapData,
+                            BitmapDataSize,
+                            &LengthWritten,
+                            DeviceExt->MasterFileTable);
+    if (NT_SUCCESS(Status) && LengthWritten != BitmapDataSize)
+        Status = STATUS_UNSUCCESSFUL;
+
+CleanupContext:
+    if (BitmapBuffer)
+        ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
+    ReleaseAttributeContext(BitmapContext);
+
+CleanupLock:
+    ExReleaseResourceLite(&DeviceExt->DirResource);
+    return Status;
+}
+
 /**
 * @name AddNewMftEntry
 * @implemented
@@ -2618,15 +2730,20 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     PNTFS_ATTR_CONTEXT BitmapContext;
     LARGE_INTEGER BitmapBits;
     UCHAR SystemReservedBits;
+    BOOLEAN MftLockHeld = FALSE;
 
     DPRINT("AddNewMftEntry(%p, %p, %p, %s)\n", FileRecord, DeviceExt, DestinationIndex, CanWait ? "TRUE" : "FALSE");
+
+    if (!ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, CanWait))
+        return STATUS_CANT_WAIT;
+    MftLockHeld = TRUE;
 
     // Find the $Bitmap attribute
     Status = FindAttribute(DeviceExt, DeviceExt->MasterFileTable, AttributeBitmap, L"", 0, &BitmapContext, NULL);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Couldn't find $Bitmap attribute of master file table!\n");
-        return Status;
+        goto CleanupLock;
     }
 
     BitmapDataSize = AttributeDataLength(BitmapContext->pRecord);
@@ -2644,7 +2761,8 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
         if (!BitmapBuffer)
         {
             ReleaseAttributeContext(BitmapContext);
-            return STATUS_INSUFFICIENT_RESOURCES;
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto CleanupLock;
         }
         RtlZeroMemory(BitmapBuffer, AllocSize + sizeof(ULONG));
         BitmapData = (PUCHAR)ALIGN_UP_BY((ULONG_PTR)BitmapBuffer, sizeof(ULONG));
@@ -2655,7 +2773,8 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
             DPRINT1("ERROR: Unable to read $Bitmap attribute of master file table!\n");
             ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
             ReleaseAttributeContext(BitmapContext);
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto CleanupLock;
         }
 
         if (DeviceExt->MftBitmapBuffer)
@@ -2705,6 +2824,9 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
             DeviceExt->MftBitmapSize = 0;
         }
 
+        ExReleaseResourceLite(&DeviceExt->DirResource);
+        MftLockHeld = FALSE;
+
         Status = IncreaseMftSize(DeviceExt, CanWait);
         if (!NT_SUCCESS(Status))
         {
@@ -2727,7 +2849,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     {
         DPRINT1("ERROR: Unable to write file record!\n");
         ReleaseAttributeContext(BitmapContext);
-        return Status;
+        goto CleanupLock;
     }
 
     // Write bitmap to disk only after the record body is valid on disk.
@@ -2736,11 +2858,15 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     {
         DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
         ReleaseAttributeContext(BitmapContext);
-        return Status;
+        goto CleanupLock;
     }
 
     *DestinationIndex = MftIndex;
     ReleaseAttributeContext(BitmapContext);
+
+CleanupLock:
+    if (MftLockHeld)
+        ExReleaseResourceLite(&DeviceExt->DirResource);
 
     return Status;
 }
@@ -3046,7 +3172,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     NodeSize = GetSizeOfIndexEntries(NewTree->RootNode);
     if (NodeSize > NewMaxIndexRootSize)
     {
-        DPRINT1("Demoting index root.\nNodeSize: 0x%lx\nNewMaxIndexRootSize: 0x%lx\n", NodeSize, NewMaxIndexRootSize);
+        DPRINT("Demoting index root.\nNodeSize: 0x%lx\nNewMaxIndexRootSize: 0x%lx\n", NodeSize, NewMaxIndexRootSize);
 
         Status = DemoteBTreeRoot(NewTree);
         if (!NT_SUCCESS(Status))
@@ -3446,6 +3572,37 @@ NtfsRemoveFilenameFromDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
 
     DestroyBTree(NewTree);
 
+    /*
+     * UpdateIndexAllocation() may have grown or rewritten $INDEX_ALLOCATION /
+     * $BITMAP runs in the parent directory record.  Do not write our stale
+     * pre-update ParentFileRecord back over those changes.
+     */
+    Status = ReadFileRecord(DeviceExt, ParentMftIndex, ParentFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    ReleaseAttributeContext(IndexRootContext);
+    Status = FindAttribute(DeviceExt,
+                           ParentFileRecord,
+                           AttributeIndexRoot,
+                           L"$I30",
+                           4,
+                           &IndexRootContext,
+                           &IndexRootOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
     AttributeLength = NewIndexRoot->Header.AllocatedSize + FIELD_OFFSET(INDEX_ROOT_ATTRIBUTE, Header);
     if (AttributeLength != IndexRootContext->pRecord->Resident.ValueLength)
     {
@@ -3570,6 +3727,10 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     FileRecord->LinkCount = 0;
     Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsSetMftBitmapInUse(DeviceExt, Fcb->MFTIndex, FALSE, TRUE);
+    }
     if (NT_SUCCESS(Status))
         Fcb->LinkCount = 0;
 
@@ -4477,14 +4638,14 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
     ULONG CurrentEntry = 0;
     BOOLEAN IndexLockHeld = FALSE;
 
-    DPRINT("NtfsFindMftRecord(%p, %I64d, %wZ, %lu, %s, %s, %p)\n",
-           Vcb,
-           MFTIndex,
-           FileName,
-           *FirstEntry,
-           DirSearch ? "TRUE" : "FALSE",
-           CaseSensitive ? "TRUE" : "FALSE",
-           OutMFTIndex);
+    NTFS_TRACE("NtfsFindMftRecord(%p, %I64d, %wZ, %lu, %s, %s, %p)\n",
+               Vcb,
+               MFTIndex,
+               FileName,
+               *FirstEntry,
+               DirSearch ? "TRUE" : "FALSE",
+               CaseSensitive ? "TRUE" : "FALSE",
+               OutMFTIndex);
     NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: find mft record begin name=%wZ\n", FileName);
 
     /* Take IndexResource shared so a writer (UpdateFileNameRecord /

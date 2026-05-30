@@ -2947,8 +2947,6 @@ GetInstallSourceWin32(
             /* Logging */
             wsprintf(wszBuf, L"GetInstallSourceWin32: %s", pwszPath);
             LogItem(NULL, wszBuf);
-            wcscat(wszBuf, L"\n");
-            OutputDebugStringW(wszBuf);
 
             return TRUE;
         }

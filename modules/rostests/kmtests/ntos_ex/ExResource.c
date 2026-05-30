@@ -129,9 +129,25 @@ TestResourceSharedAccess(
     ok_bool_false(ExAcquireResourceExclusiveLite(Res, FALSE), "ExAcquireResourceExclusiveLite returned");
     CheckResourceStatus(Res, FALSE, Count, 0LU, 0LU);
 
-    /* this asserts */
+    /* This call asserts on the shared-held resource. Under interactive
+     * RtlAssert the tester picks Ignore and execution continues. Under
+     * FLG_DISABLE_DEBUG_PROMPTS (headless mode) the assert raises
+     * STATUS_ASSERTION_FAILURE; without local SEH the stack unwinds past
+     * the 6 ExReleaseResourceLite + KeLeaveCriticalRegion below, leaving
+     * the resource held shared and APCs disabled — which bugchecks the
+     * system shortly after. Wrap so cleanup runs in both modes. */
     if (!KmtIsCheckedBuild)
-        ExConvertExclusiveToSharedLite(Res);
+    {
+        _SEH2_TRY
+        {
+            ExConvertExclusiveToSharedLite(Res);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            /* Expected under headless assert-raise mode. */
+        }
+        _SEH2_END;
+    }
     CheckResourceStatus(Res, FALSE, Count, 0LU, 0LU);
 
     while (Count--)

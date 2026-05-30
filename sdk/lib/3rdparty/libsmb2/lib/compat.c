@@ -406,7 +406,17 @@ ssize_t writev(t_socket fd, const struct iovec* vector, int count)
                 if (to_copy == 0)
                         break;
         }
-        bytes_written = write((int)fd, buffer, bytes);
+        bytes_written =
+#ifdef _WINDOWS
+            send(fd, buffer, (int)bytes, 0);
+        if (bytes_written == SOCKET_ERROR) {
+                int wsa_error = WSAGetLastError();
+                errno = (wsa_error == WSAEWOULDBLOCK) ? EAGAIN : wsa_error;
+                bytes_written = -1;
+        }
+#else
+            write((int)fd, buffer, bytes);
+#endif
         free(buffer);
         return bytes_written;
 }
@@ -435,7 +445,16 @@ ssize_t readv(t_socket fd, const struct iovec* vector, int count)
                 return -1;
 
         /* Read the data.  */
+#ifdef _WINDOWS
+        bytes_read = recv(fd, buffer, (int)bytes, 0);
+        if (bytes_read == SOCKET_ERROR) {
+                int wsa_error = WSAGetLastError();
+                errno = (wsa_error == WSAEWOULDBLOCK) ? EAGAIN : wsa_error;
+                bytes_read = -1;
+        }
+#else
         bytes_read = read((int)fd, buffer, bytes);
+#endif
         if (bytes_read < 0) {
                 free(buffer);
                 return -1;

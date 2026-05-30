@@ -423,7 +423,10 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         PollReeval( FCB->DeviceExt, FCB->FileObject );
     }
 
-    /* Succeed pending irps on the FUNCTION_CONNECT list */
+    if( NT_SUCCESS(Status) ) {
+        Status = MakeSocketIntoConnection( FCB );
+    }
+
     while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_CONNECT] ) ) {
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_CONNECT]);
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
@@ -436,11 +439,6 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     }
 
     if( NT_SUCCESS(Status) ) {
-        Status = MakeSocketIntoConnection( FCB );
-
-        if( !NT_SUCCESS(Status) ) {
-            goto end;
-        }
 
         FCB->FilledConnectData = MIN(FCB->ConnectReturnInfo->UserDataLength, FCB->ConnectDataSize);
         if (FCB->FilledConnectData)
@@ -492,7 +490,6 @@ StreamSocketConnectComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         }
     }
 
-end:
     while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_CONNECTEX]))
     {
         NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_CONNECTEX]);

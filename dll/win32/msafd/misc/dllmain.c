@@ -1269,9 +1269,17 @@ WSPSelect(IN int nfds,
                 return SOCKET_ERROR;
             }
             PollInfo->Handles[j].Handle = writefds->fd_array[i];
-            PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
             if (Socket->SharedData->NonBlocking != 0)
-                PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT;
+            {
+                if (Socket->SharedData->State == SocketConnected)
+                    PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
+                else
+                    PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT;
+            }
+            else
+            {
+                PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
+            }
         }
     }
     if (exceptfds != NULL)
@@ -1380,8 +1388,18 @@ WSPSelect(IN int nfds,
                     TRACE("Event %x on handle %x\n",
                         Events,
                         Handle);
-                    if (writefds)
+                    if (Socket->SharedData->NonBlocking != 0 &&
+                        Socket->SharedData->State != SocketConnected)
+                    {
+                        INT updErr = 0;
+                        MsafdUpdateConnectionContext(Handle, &updErr);
+                    }
+                    if (writefds &&
+                        (Socket->SharedData->NonBlocking == 0 ||
+                         Socket->SharedData->State == SocketConnected))
+                    {
                         FD_SET(Handle, writefds);
+                    }
                     break;
                 case AFD_EVENT_CONNECT:
                     TRACE("Event %x on handle %x\n",
@@ -1396,8 +1414,12 @@ WSPSelect(IN int nfds,
                         INT updErr = 0;
                         MsafdUpdateConnectionContext(Handle, &updErr);
                     }
-                    if( writefds && Socket->SharedData->NonBlocking != 0 )
+                    if( writefds &&
+                        Socket->SharedData->NonBlocking != 0 &&
+                        Socket->SharedData->State == SocketConnected )
+                    {
                         FD_SET(Handle, writefds);
+                    }
                     break;
                 case AFD_EVENT_OOB_RECEIVE:
                     TRACE("Event %x on handle %x\n",
@@ -3057,6 +3079,15 @@ MsafdUpdateConnectionContext(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
+    Socket->SharedData->State = SharedData.State;
+
+    if (SharedData.State != SocketConnected)
+    {
+        NtClose(SockEvent);
+        if (lpErrno) *lpErrno = WSAENOTCONN;
+        return SOCKET_ERROR;
+    }
+
     ULONG flags = AFD_CONNECTION_HANDLE | AFD_ADDRESS_HANDLE;
 
     /* Get TDI handles from AFD */
@@ -3081,27 +3112,22 @@ MsafdUpdateConnectionContext(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
-    Socket->SharedData->State = SharedData.State;
+    /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
+    Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
+    Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
+    Socket->SharedData->ConnectTime = SharedData.ConnectTime;
 
-    if (SharedData.State == SocketConnected)
-    {
-        /* Socket is now connected, update usermode msafd socket structure, same as the end of WSPConnect */
-        Socket->TdiConnectionHandle = HandleData.TdiConnectionHandle;
-        Socket->TdiAddressHandle = HandleData.TdiAddressHandle;
-        Socket->SharedData->ConnectTime = SharedData.ConnectTime;
+    /* Re-enable Async Event */
+    SockReenableAsyncSelectEvent(Socket, FD_WRITE);
 
-        /* Re-enable Async Event */
-        SockReenableAsyncSelectEvent(Socket, FD_WRITE);
+    /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
+    SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
 
-        /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
-        SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
-
-        Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                      Socket->Handle,
-                                      Socket->TdiAddressHandle,
-                                      Socket->TdiConnectionHandle,
-                                      WSH_NOTIFY_CONNECT);
-    }
+    Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                  Socket->Handle,
+                                  Socket->TdiAddressHandle,
+                                  Socket->TdiConnectionHandle,
+                                  WSH_NOTIFY_CONNECT);
 
     NtClose(SockEvent);
 

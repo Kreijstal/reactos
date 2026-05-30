@@ -890,6 +890,7 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
     PFILENAME_ATTRIBUTE FilenameAttribute;
     ULONGLONG ParentMftIndex;
     ULONGLONG FileMftIndex;
+    ULONGLONG RawFileMftIndex;
     PB_TREE Tree;
     PINDEX_ROOT_ATTRIBUTE NewIndexRoot;
     ULONG MaxIndexRootSize;
@@ -985,6 +986,8 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
     Status = AddNewMftEntry(FileRecord, DeviceExt, &FileMftIndex, CanWait);
     if (NT_SUCCESS(Status))
     {
+        RawFileMftIndex = FileMftIndex;
+
         // The highest 2 bytes should be the sequence number, unless the parent happens to be root
         if (FileMftIndex == NTFS_FILE_ROOT)
             FileMftIndex = FileMftIndex + ((ULONGLONG)NTFS_FILE_ROOT << 48);
@@ -999,6 +1002,13 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
                                             FileMftIndex,
                                             FilenameAttribute,
                                             CaseSensitive);
+        if (!NT_SUCCESS(Status))
+        {
+            ClearFlag(FileRecord->Flags, FRH_IN_USE);
+            FileRecord->LinkCount = 0;
+            UpdateFileRecord(DeviceExt, RawFileMftIndex, FileRecord);
+            NtfsSetMftBitmapInUse(DeviceExt, RawFileMftIndex, FALSE, CanWait);
+        }
     }
 
     ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
@@ -1099,6 +1109,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     PFILENAME_ATTRIBUTE FilenameAttribute;
     ULONGLONG ParentMftIndex;
     ULONGLONG FileMftIndex;
+    ULONGLONG RawFileMftIndex;
 
     DPRINT("NtfsCreateFileRecord(%p, %p, %s, %s)\n",
             DeviceExt,
@@ -1149,6 +1160,8 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     Status = AddNewMftEntry(FileRecord, DeviceExt, &FileMftIndex, CanWait);
     if (NT_SUCCESS(Status))
     {
+        RawFileMftIndex = FileMftIndex;
+
         // The highest 2 bytes should be the sequence number, unless the parent happens to be root
         if (FileMftIndex == NTFS_FILE_ROOT)
             FileMftIndex = FileMftIndex + ((ULONGLONG)NTFS_FILE_ROOT << 48);
@@ -1163,6 +1176,13 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                                             FileMftIndex,
                                             FilenameAttribute,
                                             CaseSensitive);
+        if (!NT_SUCCESS(Status))
+        {
+            ClearFlag(FileRecord->Flags, FRH_IN_USE);
+            FileRecord->LinkCount = 0;
+            UpdateFileRecord(DeviceExt, RawFileMftIndex, FileRecord);
+            NtfsSetMftBitmapInUse(DeviceExt, RawFileMftIndex, FALSE, CanWait);
+        }
         NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file add-name returned 0x%lx for %.*S\n",
                     Status,
                     FilenameAttribute->NameLength,

@@ -488,27 +488,30 @@ GetFileInformationByHandle(HANDLE hFile,
 				    &FileInternal,
 				    sizeof(FILE_INTERNAL_INFORMATION),
 				    FileInternalInformation);
-   if (!NT_SUCCESS(errCode))
+   if (NT_SUCCESS(errCode))
      {
-	BaseSetLastNTError(errCode);
-	return FALSE;
+	lpFileInformation->nFileIndexHigh = FileInternal.IndexNumber.u.HighPart;
+	lpFileInformation->nFileIndexLow = FileInternal.IndexNumber.u.LowPart;
      }
-
-   lpFileInformation->nFileIndexHigh = FileInternal.IndexNumber.u.HighPart;
-   lpFileInformation->nFileIndexLow = FileInternal.IndexNumber.u.LowPart;
+   else
+     {
+	lpFileInformation->nFileIndexHigh = 0;
+	lpFileInformation->nFileIndexLow = 0;
+     }
 
    errCode = NtQueryVolumeInformationFile(hFile,
 					  &IoStatusBlock,
 					  &FileFsVolume,
 					  sizeof(FileFsVolume),
 					  FileFsVolumeInformation);
-   if (!NT_SUCCESS(errCode))
+   if (NT_SUCCESS(errCode) || errCode == STATUS_BUFFER_OVERFLOW)
      {
-	BaseSetLastNTError(errCode);
-	return FALSE;
+	lpFileInformation->dwVolumeSerialNumber = FileFsVolume.FileFsVolume.VolumeSerialNumber;
      }
-
-   lpFileInformation->dwVolumeSerialNumber = FileFsVolume.FileFsVolume.VolumeSerialNumber;
+   else
+     {
+	lpFileInformation->dwVolumeSerialNumber = 0;
+     }
 
    errCode = NtQueryInformationFile(hFile,
 				    &IoStatusBlock,

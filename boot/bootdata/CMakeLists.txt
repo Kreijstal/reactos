@@ -51,11 +51,19 @@ endif()
 # freeldr.ini
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR bootcd)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_regtest.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR regtest)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/kmtestcd/kmtestcd.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR kmtestcd)
 
 # Unattend
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd/unattend.inf DESTINATION reactos NO_CAB FOR bootcd)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/unattend.inf DESTINATION reactos NO_CAB FOR regtest)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/livecd/unattend.inf DESTINATION reactos NO_CAB FOR livecd)
+
+# kmtestcd: ship the kmtest driver and exit driver into system32\drivers.
+# kmtestcd inherits the livecd file set at iso-assembly time, so the kernel,
+# HAL, freeldr, FS drivers, and everything else livecd has is already there.
+# These two are kmtestcd-only.
+add_cd_file(TARGET kmtest_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
+add_cd_file(TARGET kmt_exit_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
 
 # LiveImage shortcuts
 add_custom_target(livecd_links)

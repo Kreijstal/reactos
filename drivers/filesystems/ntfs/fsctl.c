@@ -50,7 +50,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
     PBOOT_SECTOR BootSector;
     NTSTATUS Status;
 
-    DPRINT1("NtfsHasFileSystem() called for device %p\n", DeviceToMount);
+    DPRINT("NtfsHasFileSystem() called for device %p\n", DeviceToMount);
 
     Size = sizeof(DISK_GEOMETRY);
     Status = NtfsDeviceIoControl(DeviceToMount,
@@ -62,7 +62,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
                                  TRUE);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
+        DPRINT("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
         return Status;
     }
 
@@ -79,13 +79,13 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
                                      TRUE);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
+            DPRINT("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
             return Status;
         }
 
         if (PartitionInfo.PartitionType != PARTITION_IFS)
         {
-            DPRINT1("Invalid partition type\n");
+            DPRINT("Invalid partition type\n");
             return STATUS_UNRECOGNIZED_VOLUME;
         }
     }
@@ -1921,7 +1921,7 @@ NtfsFileSystemControl(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
 
     DPRINT("NtfsFileSystemControl() called\n");
-    DPRINT1("NtfsFileSystemControl: MinorFunction=%d\n", IrpContext->MinorFunction);
+    DPRINT("NtfsFileSystemControl: MinorFunction=%d\n", IrpContext->MinorFunction);
 
     DeviceObject = IrpContext->DeviceObject;
     Irp = IrpContext->Irp;

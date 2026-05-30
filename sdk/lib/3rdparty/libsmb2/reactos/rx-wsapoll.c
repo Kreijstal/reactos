@@ -65,7 +65,28 @@ rx_WSAPoll(LPWSAPOLLFD fdArray, ULONG fds, INT timeout)
             fdArray[i].revents |= (fdArray[i].events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         }
         if (FD_ISSET(fdArray[i].fd, &efds)) {
-            fdArray[i].revents |= POLLERR;
+            int error = 0;
+            int error_length = sizeof(error);
+
+            if (getsockopt(fdArray[i].fd,
+                           SOL_SOCKET,
+                           SO_ERROR,
+                           (char *)&error,
+                           &error_length) == 0 && error == 0) {
+                int option = 0;
+
+                if (setsockopt(fdArray[i].fd,
+                               SOL_SOCKET,
+                               SO_UPDATE_CONNECT_CONTEXT,
+                               (char *)&option,
+                               sizeof(option)) == 0) {
+                    fdArray[i].revents |= (fdArray[i].events & (POLLOUT | POLLWRNORM | POLLWRBAND));
+                } else {
+                    fdArray[i].revents |= POLLERR;
+                }
+            } else {
+                fdArray[i].revents |= POLLERR;
+            }
         }
         if (fdArray[i].revents) {
             nready++;
