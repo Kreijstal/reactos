@@ -181,7 +181,7 @@ static NTSTATUS getInterfaceInfoSet( HANDLE tcpFile,
                 TRACE("tdiGetMibForIfEntity: %08x\n", status);
                 if( NT_SUCCESS(status) ) {
                     DWORD numAddrs;
-                    IPAddrEntry *addrs;
+                    IPAddrEntry *addrs = NULL;
                     TDIEntityID ip_ent;
                     int j;
 
@@ -196,12 +196,20 @@ static NTSTATUS getInterfaceInfoSet( HANDLE tcpFile,
                             memcpy( &infoSetInt[curInterf].ip_addr,
                                     &addrs[j],
                                     sizeof( addrs[j] ) );
-                            curInterf++;
                             break;
                         }
                     }
-                    if ( NT_SUCCESS(status) )
+                    if ( NT_SUCCESS(status) && addrs )
                         tdiFreeThingSet(addrs);
+
+                    /*
+                     * GetIfTable/GetInterfaceInfo must report interfaces even
+                     * before DHCP assigns an address.  Treat the address table
+                     * as optional per-interface data, not as membership in the
+                     * interface table.
+                     */
+                    curInterf++;
+                    status = STATUS_SUCCESS;
                 }
             }
         }
@@ -322,6 +330,19 @@ NTSTATUS getInterfaceInfoByIndex( HANDLE tcpFile, DWORD index, IFInfo *info ) {
     }
 
     return status;
+}
+
+NTSTATUS getIpEntityByInterfaceIndex( HANDLE tcpFile, DWORD index, TDIEntityID *ent ) {
+    IFInfo ifInfo;
+    NTSTATUS status = getInterfaceInfoByIndex( tcpFile, index, &ifInfo );
+
+    if( !NT_SUCCESS(status) )
+        return status;
+
+    *ent = ifInfo.entity_id;
+    ent->tei_entity = CL_NL_ENTITY;
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS getInterfaceInfoByName( HANDLE tcpFile, char *name, IFInfo *info ) {
@@ -699,7 +720,7 @@ NTSTATUS deleteIpAddress( ULONG NteContext )
                                   &Iosb,
                                   IOCTL_DELETE_IP_ADDRESS,
                                   &NteContext,
-                                  sizeof(USHORT),
+                                  sizeof(NteContext),
                                   NULL,
                                   0 );
 

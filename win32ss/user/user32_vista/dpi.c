@@ -76,7 +76,16 @@ WINAPI
 SetProcessDpiAwarenessContext(
     _In_ DPI_AWARENESS_CONTEXT context)
 {
-    UNIMPLEMENTED;
+    switch ((LONG_PTR)context)
+    {
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_UNAWARE:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_SYSTEM_AWARE:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2:
+        case (LONG_PTR)DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED:
+            return TRUE;
+    }
+
     return FALSE;
 }
 
@@ -132,4 +141,3 @@ LogicalToPhysicalPoint(
     UNIMPLEMENTED;
     return TRUE;
 }
-

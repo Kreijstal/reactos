@@ -365,6 +365,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     UNICODE_STRING Current, Remaining, FilenameNoPath;
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG FirstEntry;
+    PNTFS_FCB RelatedFcb;
 
     if (AttributeAddress->Type != AttributeEnd)
     {
@@ -392,6 +393,17 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
 
     // we need to extract the filename from the path
     DPRINT("Pathname: %wZ\n", &FileObject->FileName);
+
+    if (FileObject->RelatedFileObject != NULL &&
+        FileObject->FileName.Length != 0 &&
+        FileObject->FileName.Buffer[0] != OBJ_NAME_PATH_SEPARATOR)
+    {
+        RelatedFcb = FileObject->RelatedFileObject->FsContext;
+        if (RelatedFcb == NULL || !NtfsFCBIsDirectory(RelatedFcb))
+            return STATUS_INVALID_PARAMETER;
+
+        CurrentMFTIndex = RelatedFcb->MFTIndex;
+    }
 
     FsRtlDissectName(FileObject->FileName, &Current, &Remaining);
 
@@ -425,7 +437,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
              * directory misparents the new file.
              */
             if (Remaining.Length != 0 || Current.Length == 0)
-                return Status;
+                return STATUS_OBJECT_PATH_NOT_FOUND;
 
             Status = STATUS_SUCCESS;
             break;

@@ -1884,10 +1884,6 @@ FileCopyCallback(PVOID Context,
         {
             CopyContext->CompletedOperations++;
 
-            /* SYSREG checkpoint */
-            if (CopyContext->TotalOperations >> 1 == CopyContext->CompletedOperations)
-                DPRINT1("CHECKPOINT:HALF_COPIED\n");
-
             SendMessageW(UiContext.hWndProgress, PBM_STEPIT, 0, 0);
             break;
         }

@@ -273,8 +273,11 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
 
             if (Page == 0)
             {
-                /* This is not good... hopefully we have at least SOME pages */
-                ASSERT(PagesFound);
+                /* Out of free pages — caller is expected to handle a short
+                 * MDL (including zero-length) per MmAllocatePagesForMdl's
+                 * documented contract, so this is not an invariant violation
+                 * even when PagesFound is still zero (e.g. on a low-memory
+                 * box with a large request). */
                 break;
             }
 

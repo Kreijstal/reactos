@@ -106,6 +106,7 @@ SmbRdrIssueUpcall(
     NTSTATUS status;
     SMB2RDR_UPCALL_ENTRY entry;
     LARGE_INTEGER timeout;
+    PLARGE_INTEGER timeoutPtr = NULL;
     KIRQL irql;
 
     if (OutActualLength != NULL)
@@ -139,10 +140,14 @@ SmbRdrIssueUpcall(
     KeSetEvent(&gUpcallEvent, 0, FALSE);
     KeReleaseSpinLock(&gUpcallLock, irql);
 
-    /* Block waiting for the daemon. */
-    timeout.QuadPart = -((LONGLONG)TimeoutSec * 10000000LL);
+    /* Block waiting for the daemon.  TimeoutSec == 0 means no timeout. */
+    if (TimeoutSec != 0)
+    {
+        timeout.QuadPart = -((LONGLONG)TimeoutSec * 10000000LL);
+        timeoutPtr = &timeout;
+    }
     status = KeWaitForSingleObject(&entry.Completed, Executive, KernelMode,
-                                   FALSE, &timeout);
+                                   FALSE, timeoutPtr);
 
     if (status == STATUS_TIMEOUT) {
         /* Best-effort yank from whichever queue it still sits on.  If the

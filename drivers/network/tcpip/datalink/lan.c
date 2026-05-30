@@ -798,7 +798,7 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
                               &Adapter->MTU,
                               sizeof(Adapter->MTU));
         if (NdisStatus != NDIS_STATUS_SUCCESS)
-            return FALSE;
+            Adapter->MTU = 1500;
 
         Interface->MTU = Adapter->MTU;
 
@@ -809,7 +809,7 @@ BOOLEAN ReconfigureAdapter(PRECONFIGURE_CONTEXT Context)
                               &Adapter->MaxPacketSize,
                               sizeof(Adapter->MaxPacketSize));
         if (NdisStatus != NDIS_STATUS_SUCCESS)
-            return FALSE;
+            Adapter->MaxPacketSize = Adapter->MTU + Adapter->HeaderSize;
     }
 
     Adapter->State = Context->State;
@@ -1353,6 +1353,7 @@ BOOLEAN BindAdapter(
     ULONG Lookahead = LOOKAHEAD_SIZE;
     NTSTATUS Status;
     NDIS_MEDIA_STATE MediaState;
+    RECONFIGURE_CONTEXT ReconfigureContext;
 
     TI_DbgPrint(DEBUG_DATALINK, ("Called.\n"));
 
@@ -1423,10 +1424,15 @@ BOOLEAN BindAdapter(
         return FALSE;
     }
 
-    /* Indicate the current media state */
-    ProtocolStatus(Adapter,
-                   (MediaState == NdisMediaStateConnected) ? NDIS_STATUS_MEDIA_CONNECT : NDIS_STATUS_MEDIA_DISCONNECT,
-                   NULL, 0);
+    ReconfigureContext.Adapter = Adapter;
+    ReconfigureContext.State = (MediaState == NdisMediaStateConnected) ? LAN_STATE_STARTED : LAN_STATE_STOPPED;
+    ReconfigureContext.Adapter->CompletingReset = FALSE;
+    if (!ReconfigureAdapter(&ReconfigureContext))
+    {
+        IPUnregisterInterface(IF);
+        IPDestroyInterface(IF);
+        return FALSE;
+    }
 
     /* Set packet filter so we can send and receive packets */
     NdisStatus = NDISCall(Adapter,

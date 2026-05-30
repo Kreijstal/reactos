@@ -576,7 +576,7 @@ smb2_add_to_outqueue(struct smb2_context *smb2, struct smb2_pdu *pdu)
         SMB2_LIST_ADD_END(&smb2->outqueue, pdu);
 
         /* opportunistically try to write it to the socket right away */
-        if (smb2->outqueue == pdu) {
+        if (smb2->outqueue == pdu && SMB2_VALID_SOCKET(smb2->fd)) {
                 smb2_write_to_socket(smb2);
         }
 
@@ -1156,4 +1156,3 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 pdu = next;
         }
 }
-
