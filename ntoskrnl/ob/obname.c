@@ -183,13 +183,17 @@ ObpCreateDosDevicesDirectory(VOID)
     NTSTATUS Status;
 
     /*
-     * Enable LUID mappings only if not explicitely disabled
-     * and if protection mode is set
+     * LUID device maps require per-logon DosDevices directories - a private
+     * \?? for each logon session, carrying a restrictive DACL - which ReactOS
+     * does not implement yet: \?? always resolves to the global \GLOBAL??
+     * directory. Advertising the feature as enabled while \?? still exposes the
+     * global directory is inconsistent (a process queries
+     * ProcessLUIDDeviceMapsEnabled, sees TRUE, then finds the unrestricted
+     * global DACL on \??), so report it as disabled regardless of
+     * ProtectionMode. Symbolic-link reparsing then uses the per-process device
+     * map, which ReactOS does support. Revisit once per-LUID device maps exist.
      */
-    if (ObpProtectionMode == 0 || ObpLUIDDeviceMapsDisabled != 0)
-        ObpLUIDDeviceMapsEnabled = 0;
-    else
-        ObpLUIDDeviceMapsEnabled = 1;
+    ObpLUIDDeviceMapsEnabled = 0;
 
     /* Create a custom security descriptor for the global DosDevices directory */
     Status = ObpGetDosDevicesProtection(&DosDevicesSD);
