@@ -253,7 +253,14 @@ KeInitializeTimerEx(OUT PKTIMER Timer,
     Timer->Header.Type = TimerNotificationObject + Type;
     //Timer->Header.TimerControlFlags = 0; // win does not init this field
     Timer->Header.Hand = sizeof(KTIMER) / sizeof(ULONG);
-    Timer->Header.Inserted = 0; // win7: Timer->Header.TimerMiscFlags = 0;
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    /* Win7+ clears the whole TimerMiscFlags byte (Index/Inserted/Expired),
+     * not just the Inserted bit - otherwise the Index/Expired bits keep
+     * whatever garbage the caller's storage held. */
+    Timer->Header.TimerMiscFlags = 0;
+#else
+    Timer->Header.Inserted = 0;
+#endif
     Timer->Header.SignalState = 0;
     InitializeListHead(&(Timer->Header.WaitListHead));
 
