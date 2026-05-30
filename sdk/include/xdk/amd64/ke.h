@@ -116,11 +116,9 @@ FORCEINLINE
 KIRQL
 KeRaiseIrqlToSynchLevel(VOID)
 {
-#ifdef CONFIG_SMP
-    return KfRaiseIrql(12); // SYNCH_LEVEL = IPI_LEVEL - 2
-#else
-    return KfRaiseIrql(2); // SYNCH_LEVEL = DISPATCH_LEVEL
-#endif
+    /* On amd64 the synchronization IRQL is always IPI_LEVEL - 2 (== 12),
+     * regardless of UP/MP - matching the Windows WDK. */
+    return KfRaiseIrql(IPI_LEVEL - 2);
 }
 
 FORCEINLINE
