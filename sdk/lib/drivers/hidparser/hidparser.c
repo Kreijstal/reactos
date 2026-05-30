@@ -27,6 +27,12 @@ HidParser_GetCollectionDescription(
     PVOID ParserContext;
 
     //
+    // zero description up front, so that all failure paths return a clean
+    // descriptor to the caller (Windows leaves no garbage on failure)
+    //
+    ZeroFunction(DeviceDescription, sizeof(HIDP_DEVICE_DESC));
+
+    //
     // first parse the report descriptor
     //
     ParserStatus = HidParser_ParseReportDescriptor(ReportDesc, DescLength, &ParserContext);
@@ -51,11 +57,6 @@ HidParser_GetCollectionDescription(
         ASSERT(FALSE);
         return STATUS_NO_DATA_DETECTED;
     }
-
-    //
-    // zero description
-    //
-    ZeroFunction(DeviceDescription, sizeof(HIDP_DEVICE_DESC));
 
     //
     // allocate collection
@@ -132,16 +133,21 @@ HidParser_GetCollectionDescription(
         }
 
         //
-        // windows seems to prepend the report id, regardless if it is required
+        // windows prepends the report id byte to every report that exists,
+        // regardless of whether the descriptor explicitly declared one.  A
+        // report type that has no report at all stays at length 0.
         //
         DeviceDescription->CollectionDesc[Index].CollectionNumber = Index + 1;
         DeviceDescription->CollectionDesc[Index].InputLength = DeviceDescription->ReportIDs[Index].InputLength;
         DeviceDescription->CollectionDesc[Index].OutputLength = DeviceDescription->ReportIDs[Index].OutputLength;
         DeviceDescription->CollectionDesc[Index].FeatureLength = DeviceDescription->ReportIDs[Index].FeatureLength;
 
-        DeviceDescription->CollectionDesc[Index].InputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_INPUT) == FALSE ? 1 : 0);
-        DeviceDescription->CollectionDesc[Index].OutputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_OUTPUT) == FALSE ? 1 : 0);
-        DeviceDescription->CollectionDesc[Index].FeatureLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_FEATURE) == FALSE ? 1 : 0);
+        if (HidParser_GetReportLength((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_INPUT) != 0)
+            DeviceDescription->CollectionDesc[Index].InputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_INPUT) == FALSE ? 1 : 0);
+        if (HidParser_GetReportLength((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_OUTPUT) != 0)
+            DeviceDescription->CollectionDesc[Index].OutputLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_OUTPUT) == FALSE ? 1 : 0);
+        if (HidParser_GetReportLength((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_FEATURE) != 0)
+            DeviceDescription->CollectionDesc[Index].FeatureLength += (HidParser_UsesReportId((PVOID)DeviceDescription->CollectionDesc[Index].PreparsedData, HID_REPORT_TYPE_FEATURE) == FALSE ? 1 : 0);
 
 
     }
