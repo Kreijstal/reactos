@@ -1,5 +1,9 @@
 
-file(GLOB xdk_headers "*.h")
+# Both the top-level fragments and the per-arch subdirectory headers
+# (e.g. amd64/ke.h) are inlined into the generated wdm.h/ntddk.h/ntifs.h by
+# native-hpp, so all of them must be dependencies - otherwise editing an
+# arch-specific fragment leaves the generated header stale.
+file(GLOB_RECURSE xdk_headers "*.h")
 
 function(add_xdk_header _template _out)
     get_filename_component(_out_filename ${_out} NAME)
