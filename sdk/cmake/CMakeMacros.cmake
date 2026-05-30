@@ -382,6 +382,27 @@ function(add_cd_file)
             #endif()
         endif()
     endif() #end bootcd
+
+    # do we add it to kmtestcd?
+    # kmtestcd is a headless test-runner variant that inherits the livecd
+    # file set at iso-assembly time (see create_iso_lists), so files declared
+    # only as FOR livecd already land on kmtestcd. The KMTESTCD_FILE_LIST is
+    # only for files that are kmtestcd-specific or that override a livecd
+    # entry at the same destination (e.g. the hives or freeldr.ini).
+    list(FIND _CD_FOR kmtestcd __cd)
+    if(NOT __cd EQUAL -1)
+        foreach(item ${_CD_FILE})
+            if(_CD_NAME_ON_CD)
+                set(__file ${_CD_NAME_ON_CD})
+            else()
+                get_filename_component(__file ${item} NAME)
+            endif()
+            set_property(GLOBAL APPEND PROPERTY KMTESTCD_FILE_LIST "${_CD_DESTINATION}/${__file}=${item}")
+        endforeach()
+        if(_CD_TARGET)
+            add_dependencies(kmtestcd ${_CD_TARGET})
+        endif()
+    endif() #end kmtestcd
 endfunction()
 
 function(create_iso_lists)
@@ -475,6 +496,64 @@ endif()
     file(GENERATE
          OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.$<CONFIG>.lst
          INPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst)
+
+    # Write the KmtestCD file list. kmtestcd is a standalone bootable ISO that
+    # inherits BOTH bootcd's bootloader files (loader/*, ${ARCH}/system32/*) AND
+    # livecd's userland file set (reactos/system32/*, hives), then overrides
+    # specific entries (freeldr.ini, system hive, software hive, ...) via the
+    # KMTESTCD_FILE_LIST. We filter inherited entries that the kmtestcd list
+    # overrides at the same destination so mkisofs sees no duplicates.
+    get_property(_kmtestcd_filelist GLOBAL PROPERTY KMTESTCD_FILE_LIST)
+    set(_kmtestcd_override_paths)
+    foreach(_entry ${_kmtestcd_filelist})
+        if(_entry MATCHES "^([^=]+)=")
+            list(APPEND _kmtestcd_override_paths "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
+    file(READ ${REACTOS_BINARY_DIR}/boot/bootcd.cmake.lst _bootcd_list)
+    string(REPLACE "\n" ";" _bootcd_lines "${_bootcd_list}")
+    set(_kmtestcd_inherited "")
+    set(_seen_destinations "")
+    foreach(_line ${_bootcd_lines})
+        if(_line STREQUAL "")
+            # skip blank lines
+        else()
+            set(_skip FALSE)
+            if(_line MATCHES "^([^=]+)=")
+                set(_dest "${CMAKE_MATCH_1}")
+                # Skip if kmtestcd overrides this destination.
+                foreach(_override ${_kmtestcd_override_paths})
+                    if(_dest STREQUAL _override)
+                        set(_skip TRUE)
+                        break()
+                    endif()
+                endforeach()
+                # Skip duplicates from bootcd+livecd concatenation.
+                if(NOT _skip)
+                    list(FIND _seen_destinations "${_dest}" _seen_idx)
+                    if(NOT _seen_idx EQUAL -1)
+                        set(_skip TRUE)
+                    else()
+                        list(APPEND _seen_destinations "${_dest}")
+                    endif()
+                endif()
+            endif()
+            if(NOT _skip)
+                string(APPEND _kmtestcd_inherited "${_line}\n")
+            endif()
+        endif()
+    endforeach()
+    file(APPEND ${REACTOS_BINARY_DIR}/boot/kmtestcd.cmake.lst "${_kmtestcd_inherited}")
+    string(REPLACE ";" "\n" _kmtestcd_extra "${_kmtestcd_filelist}")
+    file(APPEND ${REACTOS_BINARY_DIR}/boot/kmtestcd.cmake.lst "${_kmtestcd_extra}\n")
+    unset(_kmtestcd_filelist)
+    unset(_bootcd_list)
+    unset(_bootcd_lines)
+    unset(_kmtestcd_inherited)
+    unset(_seen_destinations)
+    file(GENERATE
+         OUTPUT ${REACTOS_BINARY_DIR}/boot/kmtestcd.$<CONFIG>.lst
+         INPUT ${REACTOS_BINARY_DIR}/boot/kmtestcd.cmake.lst)
 endfunction()
 
 # Create module_clean targets
@@ -895,6 +974,39 @@ function(create_registry_hives)
         TARGET livecd_hives
         DESTINATION reactos/system32/config
         FOR livecd)
+
+    # KmtestCD hives. Same input set as livecd, plus a kmtestcd-specific INF
+    # that overrides BootExecute to launch kmtestrunner.exe and pre-registers
+    # the Kmtest and KmtExit driver services. Output to a separate directory so
+    # the file names ('system', 'software', etc.) don't collide with livecd's.
+    set(_kmtestcd_inf_files ${_livecd_inf_files}
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/kmtestcd/kmtestcd_setup.inf)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd)
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/system
+               ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/software
+               ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/default
+               ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/sam
+               ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/security
+        COMMAND native-mkhive -h:SYSTEM,SOFTWARE,DEFAULT,SAM,SECURITY -d:${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd ${_kmtestcd_inf_files}
+        DEPENDS native-mkhive ${_kmtestcd_inf_files})
+
+    add_custom_target(kmtestcd_hives
+        DEPENDS ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/system
+                ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/software
+                ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/default
+                ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/sam
+                ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/security)
+
+    add_cd_file(
+        FILE ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/system
+             ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/software
+             ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/default
+             ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/sam
+             ${CMAKE_BINARY_DIR}/boot/bootdata/kmtestcd/security
+        TARGET kmtestcd_hives
+        DESTINATION reactos/system32/config
+        FOR kmtestcd)
 
     # BCD hive (for EFI-compatible platforms)
     if(NOT ARCH STREQUAL "i386" OR NOT (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox"))

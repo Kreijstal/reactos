@@ -180,6 +180,20 @@ add_custom_target(livecd
     DEPENDS native-mkisofs
     VERBATIM)
 
+## KmtestCD -- Headless kernel-test bootable. Boots into kmtestrunner.exe via
+## BootExecute, runs kmtest drivers, writes results to COM1, and terminates
+## QEMU via the isa-debug-exit port. ISO content is the livecd file set with
+## hive + freeldr.ini overrides (see add_cd_file's kmtestcd arm and
+## create_registry_hives's kmtestcd_hives target).
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/kmtestcd.cmake.lst "${CMAKE_CURRENT_BINARY_DIR}/empty\n")
+add_custom_target(kmtestcd
+    COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/kmtestcd.iso
+        ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
+        -path-list ${CMAKE_CURRENT_BINARY_DIR}/kmtestcd.$<CONFIG>.lst
+    COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/kmtestcd.iso
+    DEPENDS isombr native-isohybrid native-mkisofs bootcd
+    VERBATIM)
+
 
 if(DEFINED EFI_PLATFORM_ID)
     # For devices such as USB drives, add also the EFI boot image into efi/boot.
