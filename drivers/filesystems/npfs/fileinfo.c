@@ -234,6 +234,12 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
         Name = Ccb->Fcb->FullName.Buffer;
     }
 
+    /* Report the full name length, even when only part of it fits.
+       Windows fills as much of the name as the buffer allows but still
+       returns the complete FileNameLength so the caller can size a
+       follow-up query (see CDFS CdQueryNameInfo). */
+    InfoBuffer->FileNameLength = NameLength;
+
     if (*Length < NameLength)
     {
         Status = STATUS_BUFFER_OVERFLOW;
@@ -245,7 +251,6 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
     }
 
     RtlCopyMemory(InfoBuffer->FileName, Name, NameLength);
-    InfoBuffer->FileNameLength = NameLength;
 
     *Length -= NameLength;
     return Status;
