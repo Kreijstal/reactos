@@ -262,14 +262,21 @@ CmpGetNameControlBlock(IN PUNICODE_STRING NodeName)
         /* Clear it out */
         RtlZeroMemory(Ncb, NcbSize);
 
-        /* Check if the name was compressed */
+        /*
+         * Store the name preserving its original case. Lookups are
+         * case-insensitive because the hash (COMPUTE_HASH_CHAR) and the
+         * name comparisons (CmpCompareCompressedName / the manual compare
+         * above) both upcase, so the stored case does not affect matching.
+         * Keeping the original case lets KeyNameInformation and key
+         * enumeration report names exactly as stored, matching Windows.
+         */
         if (IsCompressed)
         {
             /* Copy the compressed name */
             for (i = 0; i < NodeName->Length / sizeof(WCHAR); i++)
             {
                 /* Copy Unicode to ANSI */
-                ((PCHAR)Ncb->Name)[i] = (CHAR)RtlUpcaseUnicodeChar(NodeName->Buffer[i]);
+                ((PCHAR)Ncb->Name)[i] = (CHAR)NodeName->Buffer[i];
             }
         }
         else
@@ -278,7 +285,7 @@ CmpGetNameControlBlock(IN PUNICODE_STRING NodeName)
             for (i = 0; i < NodeName->Length / sizeof(WCHAR); i++)
             {
                 /* Copy each unicode character */
-                Ncb->Name[i] = RtlUpcaseUnicodeChar(NodeName->Buffer[i]);
+                Ncb->Name[i] = NodeName->Buffer[i];
             }
         }
 
