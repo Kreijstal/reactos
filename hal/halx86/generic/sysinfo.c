@@ -39,6 +39,12 @@ HAL_AMLI_BAD_IO_ADDRESS_LIST HalAMLIBadIOAddressList[] =
     { 0x0000, 0x00, 0, NULL } // Reserved
 };
 
+/* The standard PCI configuration mechanism #1 occupies ports CF8h-CFFh */
+#define PCI_CONFIG_PORT_BASE 0xCF8
+#define PCI_CONFIG_PORT_SIZE 0x08
+
+extern KSPIN_LOCK HalpPCIConfigLock;
+
 /* FUNCTIONS ******************************************************************/
 
 NTSTATUS
@@ -48,9 +54,59 @@ HaliHandlePCIConfigSpaceAccess(_In_ BOOLEAN IsRead,
                                _In_ ULONG Length,
                                _Inout_ PULONG Buffer)
 {
-    DPRINT1("HaliHandlePCIConfigSpaceAccess: IsRead %X, Port 0x%X, Length %u, Buffer %p\n", IsRead, Port, Length, Buffer);
-    //ASSERT(FALSE);
-    return STATUS_NOT_IMPLEMENTED;
+    KIRQL OldIrql;
+
+    /*
+     * AML may only reach the PCI configuration ports (CF8h-CFFh) through this
+     * handler. Reject any access that does not fall entirely within that range.
+     */
+    if (Port < PCI_CONFIG_PORT_BASE ||
+        Port + Length > PCI_CONFIG_PORT_BASE + PCI_CONFIG_PORT_SIZE)
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    /*
+     * Serialize with the HAL's own configuration-space accesses and block
+     * interrupts on this processor, exactly like HalpPCISynchronizeType1, so
+     * an OS-side access cannot interleave with the AML one.
+     */
+    KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+    KeAcquireSpinLockAtDpcLevel(&HalpPCIConfigLock);
+
+    if (IsRead)
+    {
+        switch (Length)
+        {
+            case sizeof(UCHAR):
+                *(PUCHAR)Buffer = READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)Port);
+                break;
+            case sizeof(USHORT):
+                *(PUSHORT)Buffer = READ_PORT_USHORT((PUSHORT)(ULONG_PTR)Port);
+                break;
+            case sizeof(ULONG):
+                *Buffer = READ_PORT_ULONG((PULONG)(ULONG_PTR)Port);
+                break;
+        }
+    }
+    else
+    {
+        switch (Length)
+        {
+            case sizeof(UCHAR):
+                WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)Port, *(PUCHAR)Buffer);
+                break;
+            case sizeof(USHORT):
+                WRITE_PORT_USHORT((PUSHORT)(ULONG_PTR)Port, *(PUSHORT)Buffer);
+                break;
+            case sizeof(ULONG):
+                WRITE_PORT_ULONG((PULONG)(ULONG_PTR)Port, *Buffer);
+                break;
+        }
+    }
+
+    KeReleaseSpinLock(&HalpPCIConfigLock, OldIrql);
+    return STATUS_SUCCESS;
 }
 
 static
