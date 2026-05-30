@@ -1,0 +1,4 @@
+#define REACTOS_STR_FILE_DESCRIPTION  "Headless kernel-mode test runner"
+#define REACTOS_STR_INTERNAL_NAME     "kmtestrunner"
+#define REACTOS_STR_ORIGINAL_FILENAME "kmtestrunner.exe"
+#include <reactos/version.rc>

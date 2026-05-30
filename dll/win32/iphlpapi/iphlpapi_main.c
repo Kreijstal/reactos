@@ -84,6 +84,398 @@ DWORD getInterfaceGatewayByIndex(DWORD index)
     return retVal;
 }
 
+static DWORD
+getInterfaceInfoForLuid(const NET_LUID *InterfaceLuid, IFInfo *IfInfo)
+{
+    HANDLE tcpFile;
+    NTSTATUS status;
+
+    if (!InterfaceLuid || !IfInfo || InterfaceLuid->Value == 0)
+        return ERROR_INVALID_PARAMETER;
+
+    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    if (!NT_SUCCESS(status))
+        return RtlNtStatusToDosError(status);
+
+    status = getInterfaceInfoByIndex(tcpFile,
+                                     (DWORD)InterfaceLuid->Info.NetLuidIndex,
+                                     IfInfo);
+    closeTcpFile(tcpFile);
+    if (!NT_SUCCESS(status))
+        return ERROR_NOT_FOUND;
+
+    if ((USHORT)IfInfo->if_info.ent.if_type != InterfaceLuid->Info.IfType)
+        return ERROR_NOT_FOUND;
+
+    return NO_ERROR;
+}
+
+static VOID
+luidFromMibIfRow(const MIB_IFROW *Row, PNET_LUID InterfaceLuid)
+{
+    InterfaceLuid->Value = 0;
+    InterfaceLuid->Info.NetLuidIndex = Row->dwIndex;
+    InterfaceLuid->Info.IfType = Row->dwType;
+}
+
+static DWORD
+interfaceNameFromRow(const MIB_IFROW *Row, PWSTR InterfaceName, SIZE_T Length)
+{
+    WCHAR fallback[16];
+    PWSTR name = fallback;
+    WCHAR converted[IF_MAX_STRING_SIZE + 1];
+    SIZE_T required;
+    int convertedLength;
+
+    if (!InterfaceName || !Length || Length > IF_MAX_STRING_SIZE + 1)
+        return ERROR_INVALID_PARAMETER;
+
+    if (Row->dwDescrLen)
+    {
+        DWORD descrLen = min(Row->dwDescrLen, IF_MAX_STRING_SIZE);
+
+        convertedLength = MultiByteToWideChar(CP_ACP,
+                                              0,
+                                              (PCSTR)Row->bDescr,
+                                              descrLen,
+                                              converted,
+                                              IF_MAX_STRING_SIZE);
+        if (convertedLength > 0)
+        {
+            converted[convertedLength] = UNICODE_NULL;
+            name = converted;
+        }
+    }
+
+    if (name == fallback)
+        StringCchPrintfW(fallback, _countof(fallback), L"if%lu", Row->dwIndex);
+
+    required = wcslen(name) + 1;
+    if (Length < required)
+    {
+        InterfaceName[0] = UNICODE_NULL;
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    StringCchCopyW(InterfaceName, Length, name);
+    return NO_ERROR;
+}
+
+DWORD WINAPI ConvertInterfaceIndexToLuid(NET_IFINDEX InterfaceIndex,
+                                         PNET_LUID InterfaceLuid)
+{
+    HANDLE tcpFile;
+    IFInfo ifInfo;
+    NTSTATUS status;
+
+    TRACE("InterfaceIndex %lu, InterfaceLuid %p\n", InterfaceIndex, InterfaceLuid);
+
+    if (!InterfaceLuid)
+        return ERROR_INVALID_PARAMETER;
+
+    InterfaceLuid->Value = 0;
+
+    status = openTcpFile(&tcpFile, FILE_READ_DATA);
+    if (!NT_SUCCESS(status))
+        return RtlNtStatusToDosError(status);
+
+    status = getInterfaceInfoByIndex(tcpFile, InterfaceIndex, &ifInfo);
+    closeTcpFile(tcpFile);
+    if (!NT_SUCCESS(status))
+        return ERROR_NOT_FOUND;
+
+    InterfaceLuid->Info.NetLuidIndex = ifInfo.if_info.ent.if_index;
+    InterfaceLuid->Info.IfType = ifInfo.if_info.ent.if_type;
+    return NO_ERROR;
+}
+
+DWORD WINAPI ConvertInterfaceLuidToIndex(const NET_LUID *InterfaceLuid,
+                                         PNET_IFINDEX InterfaceIndex)
+{
+    IFInfo ifInfo;
+    DWORD ret;
+
+    TRACE("InterfaceLuid %p, InterfaceIndex %p\n", InterfaceLuid, InterfaceIndex);
+
+    if (!InterfaceLuid || !InterfaceIndex)
+        return ERROR_INVALID_PARAMETER;
+
+    *InterfaceIndex = 0;
+    ret = getInterfaceInfoForLuid(InterfaceLuid, &ifInfo);
+    if (ret != NO_ERROR)
+        return ret;
+
+    *InterfaceIndex = ifInfo.if_info.ent.if_index;
+    return NO_ERROR;
+}
+
+DWORD WINAPI ConvertInterfaceLuidToNameW(const NET_LUID *InterfaceLuid,
+                                         PWSTR InterfaceName,
+                                         SIZE_T Length)
+{
+    IFInfo ifInfo;
+    MIB_IFROW row;
+    DWORD ret;
+
+    TRACE("InterfaceLuid %p, InterfaceName %p, Length %lu\n",
+          InterfaceLuid, InterfaceName, (ULONG)Length);
+
+    if (!InterfaceLuid || !InterfaceName)
+        return ERROR_INVALID_PARAMETER;
+
+    ret = getInterfaceInfoForLuid(InterfaceLuid, &ifInfo);
+    if (ret != NO_ERROR)
+        return ret;
+
+    ZeroMemory(&row, sizeof(row));
+    row.dwIndex = ifInfo.if_info.ent.if_index;
+    row.dwType = ifInfo.if_info.ent.if_type;
+    row.dwDescrLen = min(ifInfo.if_info.ent.if_descrlen, MAX_INTERFACE_DESCRIPTION);
+    CopyMemory(row.bDescr, ifInfo.if_info.ent.if_descr, row.dwDescrLen);
+
+    return interfaceNameFromRow(&row, InterfaceName, Length);
+}
+
+DWORD WINAPI ConvertInterfaceLuidToNameA(const NET_LUID *InterfaceLuid,
+                                         PSTR InterfaceName,
+                                         SIZE_T Length)
+{
+    WCHAR nameW[IF_MAX_STRING_SIZE + 1];
+    int required;
+    DWORD ret;
+
+    TRACE("InterfaceLuid %p, InterfaceName %p, Length %lu\n",
+          InterfaceLuid, InterfaceName, (ULONG)Length);
+
+    if (!InterfaceName || !Length || Length > IF_MAX_STRING_SIZE + 1)
+        return ERROR_INVALID_PARAMETER;
+
+    ret = ConvertInterfaceLuidToNameW(InterfaceLuid, nameW, _countof(nameW));
+    if (ret != NO_ERROR)
+        return ret;
+
+    required = WideCharToMultiByte(CP_ACP, 0, nameW, -1, NULL, 0, NULL, NULL);
+    if (required <= 0)
+        return GetLastError();
+
+    if (Length < (SIZE_T)required)
+    {
+        InterfaceName[0] = ANSI_NULL;
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    WideCharToMultiByte(CP_ACP, 0, nameW, -1, InterfaceName, Length, NULL, NULL);
+    return NO_ERROR;
+}
+
+static DWORD
+convertInterfaceNameToLuidW(const WCHAR *InterfaceName,
+                            PNET_LUID InterfaceLuid)
+{
+    PMIB_IFTABLE table;
+    ULONG size = 0;
+    DWORD ret;
+    DWORD i;
+    ULONG parsedIndex;
+    WCHAR *end;
+
+    if (!InterfaceName || !InterfaceLuid)
+        return ERROR_INVALID_PARAMETER;
+
+    if (wcslen(InterfaceName) > IF_MAX_STRING_SIZE)
+        return ERROR_BUFFER_OVERFLOW;
+
+    InterfaceLuid->Value = 0;
+
+    if ((InterfaceName[0] == L'i' || InterfaceName[0] == L'I') &&
+        (InterfaceName[1] == L'f' || InterfaceName[1] == L'F'))
+    {
+        parsedIndex = wcstoul(InterfaceName + 2, &end, 10);
+        if (parsedIndex != 0 && *end == UNICODE_NULL)
+            return ConvertInterfaceIndexToLuid(parsedIndex, InterfaceLuid);
+    }
+
+    ret = GetIfTable(NULL, &size, FALSE);
+    if (ret != ERROR_INSUFFICIENT_BUFFER)
+        return ret;
+
+    table = HeapAlloc(GetProcessHeap(), 0, size);
+    if (!table)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    ret = GetIfTable(table, &size, FALSE);
+    if (ret != NO_ERROR)
+    {
+        HeapFree(GetProcessHeap(), 0, table);
+        return ret;
+    }
+
+    for (i = 0; i < table->dwNumEntries; i++)
+    {
+        WCHAR name[IF_MAX_STRING_SIZE + 1];
+
+        if (interfaceNameFromRow(&table->table[i], name, _countof(name)) == NO_ERROR &&
+            !wcscmp(name, InterfaceName))
+        {
+            luidFromMibIfRow(&table->table[i], InterfaceLuid);
+            HeapFree(GetProcessHeap(), 0, table);
+            return NO_ERROR;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, table);
+    return ERROR_INVALID_NAME;
+}
+
+DWORD WINAPI ConvertInterfaceNameToLuidW(const WCHAR *InterfaceName,
+                                         PNET_LUID InterfaceLuid)
+{
+    TRACE("InterfaceName %s, InterfaceLuid %p\n",
+          debugstr_w(InterfaceName), InterfaceLuid);
+
+    return convertInterfaceNameToLuidW(InterfaceName, InterfaceLuid);
+}
+
+DWORD WINAPI ConvertInterfaceNameToLuidA(const char *InterfaceName,
+                                         PNET_LUID InterfaceLuid)
+{
+    WCHAR nameW[IF_MAX_STRING_SIZE + 1];
+    int required;
+
+    TRACE("InterfaceName %s, InterfaceLuid %p\n",
+          debugstr_a(InterfaceName), InterfaceLuid);
+
+    if (!InterfaceName || !InterfaceLuid)
+        return ERROR_INVALID_PARAMETER;
+
+    required = MultiByteToWideChar(CP_ACP, 0, InterfaceName, -1, NULL, 0);
+    if (required <= 0)
+        return GetLastError();
+
+    if (required > _countof(nameW))
+        return ERROR_BUFFER_OVERFLOW;
+
+    MultiByteToWideChar(CP_ACP, 0, InterfaceName, -1, nameW, _countof(nameW));
+    return convertInterfaceNameToLuidW(nameW, InterfaceLuid);
+}
+
+static BOOL
+guidFromInterfaceName(const BYTE *Name, ULONG NameLength, GUID *InterfaceGuid)
+{
+    char buffer[64];
+    unsigned int d1, d2, d3, d4[8];
+    int count;
+
+    if (!Name || !NameLength || !InterfaceGuid)
+        return FALSE;
+
+    if (NameLength >= sizeof(buffer))
+        return FALSE;
+
+    memcpy(buffer, Name, NameLength);
+    buffer[NameLength] = 0;
+
+    count = sscanf(buffer,
+                   "{%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x}",
+                   &d1, &d2, &d3,
+                   &d4[0], &d4[1], &d4[2], &d4[3],
+                   &d4[4], &d4[5], &d4[6], &d4[7]);
+    if (count != 11)
+    {
+        count = sscanf(buffer,
+                       "%8x-%4x-%4x-%2x%2x-%2x%2x%2x%2x%2x%2x",
+                       &d1, &d2, &d3,
+                       &d4[0], &d4[1], &d4[2], &d4[3],
+                       &d4[4], &d4[5], &d4[6], &d4[7]);
+        if (count != 11)
+            return FALSE;
+    }
+
+    InterfaceGuid->Data1 = d1;
+    InterfaceGuid->Data2 = (USHORT)d2;
+    InterfaceGuid->Data3 = (USHORT)d3;
+    for (count = 0; count < 8; count++)
+        InterfaceGuid->Data4[count] = (BYTE)d4[count];
+
+    return TRUE;
+}
+
+DWORD WINAPI ConvertInterfaceLuidToGuid(const NET_LUID *InterfaceLuid,
+                                        GUID *InterfaceGuid)
+{
+    IFInfo ifInfo;
+    DWORD ret;
+
+    TRACE("InterfaceLuid %p, InterfaceGuid %p\n", InterfaceLuid, InterfaceGuid);
+
+    if (!InterfaceLuid || !InterfaceGuid)
+        return ERROR_INVALID_PARAMETER;
+
+    ZeroMemory(InterfaceGuid, sizeof(*InterfaceGuid));
+    ret = getInterfaceInfoForLuid(InterfaceLuid, &ifInfo);
+    if (ret != NO_ERROR)
+        return ret;
+
+    if (!guidFromInterfaceName(ifInfo.if_info.ent.if_descr,
+                               ifInfo.if_info.ent.if_descrlen,
+                               InterfaceGuid))
+    {
+        return ERROR_NOT_FOUND;
+    }
+
+    return NO_ERROR;
+}
+
+DWORD WINAPI ConvertInterfaceGuidToLuid(const GUID *InterfaceGuid,
+                                        PNET_LUID InterfaceLuid)
+{
+    PMIB_IFTABLE table;
+    ULONG size = 0;
+    DWORD ret;
+    DWORD i;
+
+    TRACE("InterfaceGuid %p, InterfaceLuid %p\n", InterfaceGuid, InterfaceLuid);
+
+    if (!InterfaceGuid || !InterfaceLuid)
+        return ERROR_INVALID_PARAMETER;
+
+    InterfaceLuid->Value = 0;
+
+    ret = GetIfTable(NULL, &size, FALSE);
+    if (ret != ERROR_INSUFFICIENT_BUFFER)
+        return ret;
+
+    table = HeapAlloc(GetProcessHeap(), 0, size);
+    if (!table)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    ret = GetIfTable(table, &size, FALSE);
+    if (ret != NO_ERROR)
+    {
+        HeapFree(GetProcessHeap(), 0, table);
+        return ret;
+    }
+
+    for (i = 0; i < table->dwNumEntries; i++)
+    {
+        GUID guid;
+
+        if (guidFromInterfaceName(table->table[i].bDescr,
+                                  table->table[i].dwDescrLen,
+                                  &guid) &&
+            IsEqualGUID(&guid, InterfaceGuid))
+        {
+            InterfaceLuid->Info.NetLuidIndex = table->table[i].dwIndex;
+            InterfaceLuid->Info.IfType = table->table[i].dwType;
+            HeapFree(GetProcessHeap(), 0, table);
+            return NO_ERROR;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, table);
+    return ERROR_NOT_FOUND;
+}
+
 /******************************************************************
  *    AllocateAndGetIfTableFromStack (IPHLPAPI.@)
  *
@@ -2862,7 +3254,9 @@ DWORD WINAPI SetIpNetEntry(PMIB_IPNETROW pArpEntry)
   if (!NT_SUCCESS(openTcpFile( &tcpFile, FILE_READ_DATA | FILE_WRITE_DATA )))
       return ERROR_NOT_SUPPORTED;
 
-  if (!NT_SUCCESS(getNthIpEntity( tcpFile, pArpEntry->dwIndex, &id )))
+  if (!NT_SUCCESS(getIpEntityByInterfaceIndex( tcpFile,
+                                               pArpEntry->dwIndex,
+                                               &id )))
   {
       closeTcpFile(tcpFile);
       return ERROR_INVALID_PARAMETER;

@@ -401,10 +401,6 @@ SetupCopyFile(
     RegionSize = (ULONG)PAGE_ROUND_UP(FileStandard.EndOfFile.u.LowPart);
     IoStatusBlock.Status = 0;
     ByteOffset.QuadPart = 0ULL;
-    DPRINT1("COPYWRITE_BEGIN:%S size=%lu map=%p\n",
-            DestinationFileName,
-            RegionSize,
-            SourceFileMap);
     Status = NtWriteFile(FileHandleDest,
                          NULL,
                          NULL,
@@ -414,11 +410,6 @@ SetupCopyFile(
                          RegionSize,
                          &ByteOffset,
                          NULL);
-    DPRINT1("COPYWRITE_END:%S status=0x%lx iosb=0x%lx info=%Iu\n",
-            DestinationFileName,
-            Status,
-            IoStatusBlock.Status,
-            IoStatusBlock.Information);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtWriteFile failed: %x:%x, iosb: %p src: %p, size: %x\n",

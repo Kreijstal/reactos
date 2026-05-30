@@ -1,0 +1,66 @@
+; KmtestCD registry delta.
+;
+; Applied after hivesys.inf and livecd.inf during native-mkhive baking, so
+; entries here override matching ones from those files. The kmtestcd uses
+; the livecd's full hive content as a base and then overrides the userland
+; entry point + adds the test driver services.
+
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; Phase-3 boot path: let SMSS proceed past BootExecute through full subsystem
+; startup (CSRSS, services.exe, lsass, winlogon). Winlogon's Shell value is
+; overridden below to launch kmtcdrunner.exe instead of explorer.exe.
+; kmtcdrunner.exe iterates kmtest_.exe --list, spawns each named test (this
+; covers BOTH the bundled kmtest_drv tests AND the standalone driver tests
+; with their userland halves like NtCreateSection_user.c which the native-mode
+; kmtestrunner cannot run), then fires IOCTL_KMT_EXIT_QEMU to terminate QEMU.
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","BootExecute",0x00010000,""
+
+; Launch kmtcdrunner.exe via the Run key — the same mechanism hello.exe uses
+; in hivesft.inf:562 (HKLM\...\Run\ReactOSSerialShell). Explorer.exe processes
+; this list after it starts, so we don't need to override the Shell value
+; (overwriting an existing SOFTWARE-hive REG_EXPAND_SZ with a longer string
+; tripped a cmlib bug: kernel HvSyncHive asserts CellBlock < Storage[X].Length
+; once services.exe runs CheckForLiveCD, then bugchecks 0x50; ADDING a fresh
+; Run value steers around it because no existing cell is being resized).
+; The single argv[1] is the test name kmtcdrunner runs in isolation; empty
+; would mean "run every test in kmtest_.exe --list". A targeted smoke run
+; sidesteps latent kernel ASSERTs that some tests (e.g. IoFilesystem hits
+; resource.c:844 ActiveCount) trip when run in sequence — those ASSERTs
+; drop the kernel into KDB on COM1, hang the runner, and waste the boot.
+; RtlIntSafeKM is self-contained (no FS/MM/IO surface) and known-passing.
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","KmtestRunner",0x00020000,"%SystemRoot%\system32\kmtcdrunner.exe"
+
+; Suppress the default Run-key entry that launches hello.exe (the COM2 serial
+; shell from hivesft.inf:562). hello.exe opens \\.\COM2 exclusively, which
+; would prevent kmtcdrunner.exe from attaching its structured marker stream
+; to the same port. We need COM2 for the runner's KMTCD-* markers.
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","ReactOSSerialShell",0x00020000,""
+
+; Userinit chain stays minimal — kmtcdrunner runs to completion + fires
+; QEMU exit, so userinit's normal logon shell startup is moot but we leave
+; the chain unchanged from livecd defaults.
+
+; FLG_DISABLE_DEBUG_PROMPTS (0x08000000) — RtlAssert raises STATUS_ASSERTION_FAILURE
+; instead of opening the interactive KDB "boipt" prompt. The kmtest_drv RUN_TEST
+; path wraps test invocation in SEH, so a failed ASSERT becomes a recorded
+; failure and the run continues to the next test rather than hanging in KDB.
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","GlobalFlag",0x00010001,0x08000000
+
+; Kmtest service: the main kmtest_drv that hosts ~84 kernel tests including
+; the "Example" smoke test. Start=3 (demand) so it loads only when the runner
+; calls NtLoadDriver.
+HKLM,"SYSTEM\CurrentControlSet\Services\Kmtest","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Kmtest","ImagePath",0x00020000,"system32\drivers\kmtest_drv.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\Kmtest","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\Kmtest","Type",0x00010001,0x00000001
+
+; KmtExit service: the runner uses this to write a byte to QEMU's
+; isa-debug-exit port (0xF4) so the VM terminates with a predictable exit code.
+HKLM,"SYSTEM\CurrentControlSet\Services\KmtExit","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\KmtExit","ImagePath",0x00020000,"system32\drivers\kmt_exit_drv.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\KmtExit","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\KmtExit","Type",0x00010001,0x00000001
