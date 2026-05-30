@@ -1961,8 +1961,77 @@ IopQueryNameInternal(IN PVOID ObjectBody,
     /* Validate length */
     if (Length < sizeof(OBJECT_NAME_INFORMATION))
     {
-        /* Wrong length, fail */
+        /* The buffer cannot even hold the structure header */
         *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+        /*
+         * Windows Vista and later still report the full length required to
+         * hold the complete object name in this case; older releases just
+         * returned sizeof(OBJECT_NAME_INFORMATION). Compute that length using a
+         * scratch buffer, without touching the caller's (too small) buffer. The
+         * total mirrors the regular too-small path below (device-name length
+         * plus the file-name length).
+         */
+        {
+            POBJECT_NAME_INFORMATION ScratchInfo;
+            PFILE_NAME_INFORMATION ScratchFileInfo;
+            ULONG DeviceLength = sizeof(OBJECT_NAME_INFORMATION);
+            ULONG FileNameLength = 0, Dummy;
+            NTSTATUS LocalStatus;
+
+            ScratchInfo = ExAllocatePoolWithTag(PagedPool,
+                                                sizeof(OBJECT_NAME_INFORMATION),
+                                                TAG_IO);
+            if (ScratchInfo == NULL) return STATUS_INFO_LENGTH_MISMATCH;
+
+            /*
+             * Device-name part. ObQueryNameString reports the full length
+             * required even when the supplied buffer is too small to hold it.
+             */
+            ObQueryNameString(FileObject->DeviceObject,
+                              ScratchInfo,
+                              sizeof(OBJECT_NAME_INFORMATION),
+                              &DeviceLength);
+            if (DeviceLength < sizeof(OBJECT_NAME_INFORMATION))
+                DeviceLength = sizeof(OBJECT_NAME_INFORMATION);
+
+            /*
+             * File-name part. The file system fills in FileNameLength with the
+             * full name length regardless of how much actually fit. Treat a
+             * driver that does not implement the query as a zero-length name,
+             * exactly as the regular path does.
+             */
+            ScratchFileInfo = (PFILE_NAME_INFORMATION)ScratchInfo;
+            ScratchFileInfo->FileNameLength = 0;
+            if (PreviousMode == KernelMode &&
+                BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
+            {
+                LocalStatus = IopGetFileInformation(FileObject,
+                                                    sizeof(OBJECT_NAME_INFORMATION),
+                                                    FileNameInformation,
+                                                    ScratchFileInfo,
+                                                    &Dummy);
+            }
+            else
+            {
+                LocalStatus = IoQueryFileInformation(FileObject,
+                                                     FileNameInformation,
+                                                     sizeof(OBJECT_NAME_INFORMATION),
+                                                     ScratchFileInfo,
+                                                     &Dummy);
+            }
+            if (!NT_ERROR(LocalStatus) ||
+                LocalStatus == STATUS_BUFFER_OVERFLOW ||
+                LocalStatus == STATUS_INFO_LENGTH_MISMATCH)
+            {
+                FileNameLength = ScratchFileInfo->FileNameLength;
+            }
+
+            *ReturnLength = DeviceLength + FileNameLength;
+            ExFreePoolWithTag(ScratchInfo, TAG_IO);
+        }
+#endif
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
