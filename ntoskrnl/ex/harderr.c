@@ -129,13 +129,24 @@ ExpRaiseHardError(IN NTSTATUS ErrorStatus,
         if (!SeSinglePrivilegeCheck(SeTcbPrivilege, PreviousMode) ||
             !SeSinglePrivilegeCheck(SeShutdownPrivilege, PreviousMode))
         {
-            /* No rights */
-            *Response = ResponseNotHandled;
+            /* No rights: report back to the caller without handling */
+            *Response = ResponseReturnToCaller;
             return STATUS_PRIVILEGE_NOT_HELD;
         }
 
         /* Don't handle any new hard errors */
         ExReadyForErrors = FALSE;
+    }
+    else if (ValidResponseOptions > OptionCancelTryContinue)
+    {
+        /*
+         * Unknown response option: there is no way the hard-error port
+         * could present such a request, so it cannot be handled. Report
+         * back to the caller instead of contacting the port (which would
+         * otherwise reject it and leave the response as ResponseNotHandled).
+         */
+        *Response = ResponseReturnToCaller;
+        return STATUS_SUCCESS;
     }
 
     /* Check if hard errors are not disabled */
