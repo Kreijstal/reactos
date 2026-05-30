@@ -461,8 +461,11 @@ RtlGetFirstRange(IN PRTL_RANGE_LIST RangeList,
         return STATUS_NO_MORE_ENTRIES;
     }
 
-    Iterator->Current = RangeList->ListHead.Flink;
-    *Range = &((PRTL_RANGE_ENTRY)Iterator->Current)->Range;
+    /* Current points at the public RTL_RANGE we hand back, not at the internal
+     * list entry, so a caller comparing Iterator.Current with the returned
+     * range sees them match (as on Windows). */
+    *Range = &((PRTL_RANGE_ENTRY)RangeList->ListHead.Flink)->Range;
+    Iterator->Current = *Range;
 
     return STATUS_SUCCESS;
 }
@@ -505,13 +508,15 @@ RtlGetNextRange(IN OUT PRTL_RANGE_LIST_ITERATOR Iterator,
         return STATUS_NO_MORE_ENTRIES;
     }
 
+    /* Current points at the embedded RTL_RANGE; recover the entry to walk the
+     * list links. */
     if (MoveForwards)
     {
-        Next = ((PRTL_RANGE_ENTRY)Iterator->Current)->Entry.Flink;
+        Next = CONTAINING_RECORD(Iterator->Current, RTL_RANGE_ENTRY, Range)->Entry.Flink;
     }
     else
     {
-        Next = ((PRTL_RANGE_ENTRY)Iterator->Current)->Entry.Blink;
+        Next = CONTAINING_RECORD(Iterator->Current, RTL_RANGE_ENTRY, Range)->Entry.Blink;
     }
 
     if (Next == Iterator->RangeListHead)
@@ -521,8 +526,8 @@ RtlGetNextRange(IN OUT PRTL_RANGE_LIST_ITERATOR Iterator,
         return STATUS_NO_MORE_ENTRIES;
     }
 
-    Iterator->Current = Next;
     *Range = &((PRTL_RANGE_ENTRY)Next)->Range;
+    Iterator->Current = *Range;
 
     return STATUS_SUCCESS;
 }
@@ -693,10 +698,13 @@ RtlIsRangeAvailable(IN PRTL_RANGE_LIST RangeList,
     {
         Current = CONTAINING_RECORD (Entry, RTL_RANGE_ENTRY, Entry);
 
-        if (!((Current->Range.Start >= End && Current->Range.End > End) ||
-              (Current->Range.Start <= Start && Current->Range.End < Start &&
-               (!(Flags & RTL_RANGE_SHARED) ||
-                !(Current->Range.Flags & RTL_RANGE_SHARED)))))
+        /* A conflict exists when this range overlaps [Start, End] inclusively,
+         * unless it is waved through: either both ranges are shared, or every
+         * attribute it carries is one the caller said it can ignore
+         * (AttributeAvailableMask). */
+        if (Current->Range.Start <= End && Current->Range.End >= Start &&
+            !((Flags & RTL_RANGE_SHARED) && (Current->Range.Flags & RTL_RANGE_SHARED)) &&
+            (Current->Range.Attributes & AttributeAvailableMask) == 0)
         {
             if (Callback != NULL)
             {
