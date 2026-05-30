@@ -26,7 +26,7 @@ MM_PAGED_POOL_INFO MmPagedPoolInfo;
 SIZE_T MmAllocatedNonPagedPool;
 SIZE_T MmTotalNonPagedPoolQuota;
 SIZE_T MmTotalPagedPoolQuota;
-ULONG MmSpecialPoolTag;
+ULONG MmSpecialPoolTag = '0ftN';
 ULONG MmConsumedPoolPercentage;
 BOOLEAN MmProtectFreedNonPagedPool;
 SLIST_HEADER MiNonPagedPoolSListHead;
@@ -1608,11 +1608,9 @@ MmAllocateMappingAddress(
     }
 
     ASSERT(SizeInPages <= MM_EMPTY_PTE_LIST);
-    TempPte.u.Long = 0;
-    TempPte.u.List.NextEntry = SizeInPages;
+    TempPte = MI_MAKE_RESERVED_MAPPING_SIZE_PTE(SizeInPages);
     MI_WRITE_INVALID_PTE(&PointerPte[0], TempPte);
-    TempPte.u.Long = PoolTag;
-    TempPte.u.Hard.Valid = 0;
+    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
     MI_WRITE_INVALID_PTE(&PointerPte[1], TempPte);
     return MiPteToAddress(PointerPte + 2);
 }
@@ -1650,8 +1648,7 @@ MmFreeMappingAddress(
     PointerPte = MiAddressToPte(BaseAddress) - 2;
 
     /* Verify that the pool tag matches */
-    TempPte.u.Long = PoolTag;
-    TempPte.u.Hard.Valid = 0;
+    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
     if (PointerPte[1].u.Long != TempPte.u.Long)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
@@ -1662,7 +1659,7 @@ MmFreeMappingAddress(
     }
 
     /* We must have a size */
-    SizeInPages = PointerPte[0].u.List.NextEntry;
+    SizeInPages = MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]);
     if (SizeInPages < 3)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
