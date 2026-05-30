@@ -57,9 +57,13 @@ DpcHandler(
     if (GetNTVersion() == _WIN32_WINNT_WS03)
     {
         ok_eq_uint(Prcb->DpcRoutineActive, 1);
-        /* this DPC is not in the list anymore, but it was at the head! */
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
+        /* this DPC is not in the list anymore, but it was at the head!
+         * (pre-Longhorn KDPC_DATA used a doubly-linked DpcListHead; Vista+
+         * replaced it with the singly-linked KDPC_LIST DpcList) */
         ok_eq_pointer(Prcb->DpcData[DPC_NORMAL].DpcListHead.Flink, Dpc->DpcListEntry.Flink);
         ok_eq_pointer(Prcb->DpcData[DPC_NORMAL].DpcListHead.Blink, Dpc->DpcListEntry.Blink);
+#endif
     }
 }
 
