@@ -48,9 +48,10 @@ static WCHAR g_KmtestExePath[MAX_PATH];
  * the structured KMTCD-* markers reach the qemu -serial line. COM1 is owned
  * exclusively by the kernel debugger (/DEBUGPORT=COM1 in freeldr.ini), so we
  * use COM2 — the second qemu -serial backend collects our marker stream while
- * COM1 stays dedicated to the kernel debug log + DbgPrint output. Child
- * kmtest_.exe processes inherit this handle as stdout/stderr so their ok()
- * /trace() lines also reach the marker log. */
+ * COM1 stays dedicated to the kernel debug log + DbgPrint output. Each child
+ * kmtest_.exe is run with its stdout/stderr on a pipe we drain (see
+ * RunOneTest): we forward every byte here so its ok()/trace() lines reach the
+ * marker log, and tally the failure markers as they stream past. */
 static HANDLE g_SerialHandle = INVALID_HANDLE_VALUE;
 
 static
@@ -169,17 +170,40 @@ CaptureList(_Out_writes_(BufferSize) PCHAR Buffer,
     return TotalRead;
 }
 
-/* Spawn kmtest_.exe with a single test name. Inherits stdout/stderr so the
- * child's output lands on the same console (i.e., the serial line). */
+/* The kmtest framework prints exactly one ": Test failed: " line per failing
+ * ok()/ok_*() check (kmt_test.h). Counting these is the only reliable failure
+ * signal: kmtest_.exe's *exit code* is a Win32 error reflecting whether the
+ * test could be *run* (service start, device open) — not whether its assertions
+ * passed. A test can fail dozens of ok()s and still exit 0, or exit non-zero
+ * (e.g. 128) without running a single check. So we report both, distinctly. */
+#define KMT_FAIL_MARKER      ": Test failed: "
+#define KMT_FAIL_MARKER_LEN  (sizeof(KMT_FAIL_MARKER) - 1)
+
+/* Spawn kmtest_.exe with a single test name. Child stdout/stderr is piped
+ * through us so we can both forward every byte to the serial log AND count the
+ * failure markers. Returns the child Win32 exit code; the number of failed
+ * assertions is written to *OutFailures. */
 static
 DWORD
-RunOneTest(_In_z_ PCSTR TestName)
+RunOneTest(_In_z_ PCSTR TestName, _Out_ PLONG OutFailures)
 {
     WCHAR CmdLine[MAX_PATH + 128];
     PROCESS_INFORMATION ProcInfo;
     STARTUPINFOW StartInfo;
+    SECURITY_ATTRIBUTES SecAttrs;
+    HANDLE ReadPipe = NULL, WritePipe = NULL;
     DWORD ExitCode = (DWORD)-1;
+    LONG Failures = 0;
     int Written;
+    BOOL Ok;
+    /* The last (marker-1) bytes of each chunk are carried to the front of the
+     * next read so a marker split across two reads is still found. A whole
+     * marker can never fit inside the carry (carry < marker length), so
+     * re-scanning [0..Total) every iteration cannot double-count. */
+    CHAR Scan[4096 + KMT_FAIL_MARKER_LEN];
+    DWORD CarryLen = 0;
+
+    *OutFailures = 0;
 
     Written = _snwprintf(CmdLine, sizeof(CmdLine) / sizeof(WCHAR) - 1,
                          L"\"%s\" %hs", g_KmtestExePath, TestName);
@@ -187,29 +211,82 @@ RunOneTest(_In_z_ PCSTR TestName)
         return ExitCode;
     CmdLine[Written] = L'\0';
 
+    SecAttrs.nLength = sizeof(SecAttrs);
+    SecAttrs.bInheritHandle = TRUE;
+    SecAttrs.lpSecurityDescriptor = NULL;
+    if (!CreatePipe(&ReadPipe, &WritePipe, &SecAttrs, 0))
+    {
+        EmitLine("KMTCD-SPAWN-FAIL %s pipe-err=%lu", TestName, GetLastError());
+        return ExitCode;
+    }
+    SetHandleInformation(ReadPipe, HANDLE_FLAG_INHERIT, 0);
+
     ZeroMemory(&StartInfo, sizeof(StartInfo));
     StartInfo.cb = sizeof(StartInfo);
     StartInfo.dwFlags = STARTF_USESTDHANDLES;
     StartInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    /* Route child stdout/stderr to our COM1 handle so kmtest_.exe ok()/trace()
-     * messages land on the serial log. Without this they would write to a
-     * detached Win32 console and vanish. */
-    StartInfo.hStdOutput = (g_SerialHandle != INVALID_HANDLE_VALUE)
-                           ? g_SerialHandle : GetStdHandle(STD_OUTPUT_HANDLE);
-    StartInfo.hStdError = StartInfo.hStdOutput;
+    StartInfo.hStdOutput = WritePipe;
+    StartInfo.hStdError = WritePipe;
 
     ZeroMemory(&ProcInfo, sizeof(ProcInfo));
-    if (!CreateProcessW(NULL, CmdLine, NULL, NULL, TRUE,
-                        0, NULL, NULL, &StartInfo, &ProcInfo))
+    Ok = CreateProcessW(NULL, CmdLine, NULL, NULL, TRUE,
+                        0, NULL, NULL, &StartInfo, &ProcInfo);
+    CloseHandle(WritePipe);
+    if (!Ok)
     {
         EmitLine("KMTCD-SPAWN-FAIL %s err=%lu", TestName, GetLastError());
+        CloseHandle(ReadPipe);
         return ExitCode;
     }
+
+    /* Drain the pipe continuously — a stalled reader would deadlock the child
+     * once the ~4 KB pipe buffer fills. Forward each fresh chunk to the serial
+     * log, then count failure markers over carry+chunk. */
+    for (;;)
+    {
+        DWORD JustRead = 0;
+        DWORD Total, i;
+
+        if (!ReadFile(ReadPipe, Scan + CarryLen, 4096, &JustRead, NULL) ||
+            JustRead == 0)
+        {
+            break;  /* child closed its end / pipe broken => child exiting */
+        }
+
+        if (g_SerialHandle != INVALID_HANDLE_VALUE)
+        {
+            DWORD SerWritten;
+            WriteFile(g_SerialHandle, Scan + CarryLen, JustRead, &SerWritten, NULL);
+        }
+
+        Total = CarryLen + JustRead;
+        if (Total >= KMT_FAIL_MARKER_LEN)
+        {
+            for (i = 0; i + KMT_FAIL_MARKER_LEN <= Total; ++i)
+            {
+                if (Scan[i] == ':' &&
+                    memcmp(Scan + i, KMT_FAIL_MARKER, KMT_FAIL_MARKER_LEN) == 0)
+                {
+                    ++Failures;
+                }
+            }
+            /* Carry the last (marker-1) bytes into the next read. */
+            CarryLen = KMT_FAIL_MARKER_LEN - 1;
+            memmove(Scan, Scan + Total - CarryLen, CarryLen);
+        }
+        else
+        {
+            CarryLen = Total;  /* not enough bytes to scan yet; carry them all */
+        }
+    }
+    CloseHandle(ReadPipe);
 
     WaitForSingleObject(ProcInfo.hProcess, INFINITE);
     GetExitCodeProcess(ProcInfo.hProcess, &ExitCode);
     CloseHandle(ProcInfo.hThread);
     CloseHandle(ProcInfo.hProcess);
+
+    *OutFailures = Failures;
     return ExitCode;
 }
 
@@ -279,6 +356,8 @@ main(void)
     PCHAR Cursor;
     LONG TestsRun = 0;
     LONG TestsFailed = 0;
+    LONG TestsErrored = 0;
+    LONG TotalAssertFailures = 0;
     UCHAR ExitStatus;
     int ArgC = 0;
     LPWSTR *ArgV = CommandLineToArgvW(GetCommandLineW(), &ArgC);
@@ -318,6 +397,7 @@ main(void)
         PCHAR LineEnd;
         PCHAR Name;
         DWORD ExitCode;
+        LONG Failures = 0;
 
         LineEnd = strpbrk(LineStart, "\r\n");
         if (LineEnd)
@@ -342,24 +422,42 @@ main(void)
         if (*Name == '\0')
             continue;
 
-        if (g_FilterTest[0] && strcmp(Name, g_FilterTest) != 0)
+        /* Prefix match: argv[1]="KeMutex" runs exactly that test, argv[1]="Ke"
+         * runs every Ke* test. A leading '!' inverts it: argv[1]="!IoFilesystem"
+         * runs every test EXCEPT IoFilesystem* (lets one boot cover the whole
+         * suite minus a slow/hanging test). Empty filter runs all. */
+        if (g_FilterTest[0] == '!')
+        {
+            if (strncmp(Name, &g_FilterTest[1], strlen(&g_FilterTest[1])) == 0)
+                continue;
+        }
+        else if (g_FilterTest[0] && strncmp(Name, g_FilterTest, strlen(g_FilterTest)) != 0)
             continue;
 
         /* No diagnostic skips here — bisection now inside ExResource itself
          * (see ExResource.c TestResourceWithThreads conditional). */
 
         EmitLine("KMTCD-BEGIN %s", Name);
-        ExitCode = RunOneTest(Name);
-        EmitLine("KMTCD-END %s exit=%lu", Name, ExitCode);
+        ExitCode = RunOneTest(Name, &Failures);
+        EmitLine("KMTCD-END %s exit=%lu failures=%ld", Name, ExitCode, Failures);
         ++TestsRun;
-        if (ExitCode != 0)
+        TotalAssertFailures += Failures;
+        if (Failures > 0)
             ++TestsFailed;
+        if (ExitCode != 0)
+            ++TestsErrored;
     }
 
-    EmitLine("KMTCD-SUMMARY tests_run=%ld tests_failed=%ld", TestsRun, TestsFailed);
+    /* tests_failed counts tests with >=1 failed ok() assertion (the real
+     * pass/fail signal); errored counts tests kmtest_.exe could not run at all
+     * (non-zero Win32 exit, no assertions executed); assert_failures is the
+     * grand total of failed checks across the suite. */
+    EmitLine("KMTCD-SUMMARY tests_run=%ld tests_failed=%ld errored=%ld assert_failures=%ld",
+             TestsRun, TestsFailed, TestsErrored, TotalAssertFailures);
 
-    /* Status: 0 = all passed (QEMU exit code 1), 1 = any failure (exit code 3). */
-    ExitStatus = (TestsFailed == 0 && TestsRun > 0) ? 0 : 1;
+    /* Status: 0 = fully clean (QEMU exit code 1); 1 = any assertion failure or
+     * a test that could not be run (exit code 3). */
+    ExitStatus = (TestsFailed == 0 && TestsErrored == 0 && TestsRun > 0) ? 0 : 1;
     FireExitDriver(ExitStatus);
 
     /* Reached only on bare hardware / non-QEMU runs. Returning here lets
