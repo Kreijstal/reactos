@@ -237,20 +237,16 @@ NtSystemDebugControl(
         switch (Command)
         {
             case SysDbgQueryModuleInformation:
-                /* Removed in WinNT4 */
-                Status = STATUS_INVALID_INFO_CLASS;
-                break;
-
-#ifdef _M_IX86
             case SysDbgQueryTraceInformation:
             case SysDbgSetTracepoint:
             case SysDbgSetSpecialCall:
             case SysDbgClearSpecialCalls:
             case SysDbgQuerySpecialCalls:
+                /* These are legacy BBT/tracing commands that are
+                 * recognized but not available to user-mode callers */
                 UNIMPLEMENTED;
                 Status = STATUS_NOT_IMPLEMENTED;
                 break;
-#endif
 
             case SysDbgQueryVersion:
             case SysDbgReadVirtual:
@@ -266,18 +262,13 @@ NtSystemDebugControl(
             case SysDbgReadBusData:
             case SysDbgWriteBusData:
             case SysDbgCheckLowMemory:
-                /* Those are implemented in KdSystemDebugControl */
-                if (InitIsWinPEMode)
-                {
-                    Status = KdSystemDebugControl(Command,
-                                                  InputBuffer, InputBufferLength,
-                                                  OutputBuffer, OutputBufferLength,
-                                                  &Length, PreviousMode);
-                }
-                else
-                {
-                    Status = STATUS_NOT_IMPLEMENTED;
-                }
+                /*
+                 * These system-critical commands are not accessible anymore
+                 * for user-mode usage with this API on NT 5.2+ systems (see
+                 * CVE-2004-2339). They are only available from kernel-mode
+                 * via KdSystemDebugControl().
+                 */
+                Status = STATUS_NOT_IMPLEMENTED;
                 break;
 
             case SysDbgBreakPoint:
@@ -401,6 +392,19 @@ NtSystemDebugControl(
                                         OutputBuffer,
                                         &Length);
                 break;
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+            case SysDbgRegisterForUmBreakInfo:
+            case SysDbgGetUmBreakPid:
+            case SysDbgClearUmBreakPid:
+            case SysDbgGetUmAttachPid:
+            case SysDbgClearUmAttachPid:
+                /* User-mode break/attach commands, recognized since Vista
+                 * but not yet implemented in ReactOS */
+                UNIMPLEMENTED;
+                Status = STATUS_NOT_IMPLEMENTED;
+                break;
+#endif
 
             default:
                 Status = STATUS_INVALID_INFO_CLASS;
