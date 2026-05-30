@@ -452,7 +452,8 @@ IopInitializeDriverModule(
     _Out_ PDRIVER_OBJECT *OutDriverObject,
     _Out_ NTSTATUS *DriverEntryStatus)
 {
-    UNICODE_STRING DriverName, RegistryPath, ServiceName;
+    UNICODE_STRING DriverName, ServiceName;
+    PUNICODE_STRING RegistryPath = NULL;
     NTSTATUS Status;
 
     PAGED_CODE();
@@ -477,7 +478,15 @@ IopInitializeDriverModule(
     ASSERT(ModuleObject->SizeOfImage == ROUND_TO_PAGES(NtHeaders->OptionalHeader.SizeOfImage));
     ASSERT(ModuleObject->EntryPoint == RVA(ModuleObject->DllBase, NtHeaders->OptionalHeader.AddressOfEntryPoint));
 
-    /* Obtain the registry path for the DriverInit routine */
+    /*
+     * Obtain the registry path for the DriverInit routine.
+     *
+     * Windows passes DriverInit a page-aligned allocation that holds the
+     * UNICODE_STRING header immediately followed by its character buffer
+     * (RegistryPath->Buffer == RegistryPath + 1), with MaximumLength == Length.
+     * We build the same layout here. A page-sized pool allocation is returned
+     * page-aligned by the pool allocator.
+     */
     PKEY_NAME_INFORMATION nameInfo;
     ULONG infoLength;
     Status = ZwQueryKey(ServiceHandle, KeyNameInformation, NULL, 0, &infoLength);
@@ -493,14 +502,30 @@ IopInitializeDriverModule(
                                 &infoLength);
             if (NT_SUCCESS(Status))
             {
-                RegistryPath.Length = nameInfo->NameLength;
-                RegistryPath.MaximumLength = nameInfo->NameLength;
-                RegistryPath.Buffer = nameInfo->Name;
+                /* The registry key name must fit alongside the header in one page */
+                if (sizeof(UNICODE_STRING) + nameInfo->NameLength > PAGE_SIZE)
+                {
+                    Status = STATUS_NAME_TOO_LONG;
+                }
+                else
+                {
+                    RegistryPath = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, TAG_IO);
+                    if (RegistryPath)
+                    {
+                        RegistryPath->Length = (USHORT)nameInfo->NameLength;
+                        RegistryPath->MaximumLength = (USHORT)nameInfo->NameLength;
+                        RegistryPath->Buffer = (PWCHAR)(RegistryPath + 1);
+                        RtlCopyMemory(RegistryPath->Buffer,
+                                      nameInfo->Name,
+                                      nameInfo->NameLength);
+                    }
+                    else
+                    {
+                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                    }
+                }
             }
-            else
-            {
-                ExFreePoolWithTag(nameInfo, TAG_IO);
-            }
+            ExFreePoolWithTag(nameInfo, TAG_IO);
         }
         else
         {
@@ -541,7 +566,7 @@ IopInitializeDriverModule(
                             (PVOID*)&driverObject);
     if (!NT_SUCCESS(Status))
     {
-        ExFreePoolWithTag(nameInfo, TAG_IO); // container for RegistryPath
+        ExFreePoolWithTag(RegistryPath, TAG_IO);
         RtlFreeUnicodeString(&ServiceName);
         RtlFreeUnicodeString(&DriverName);
         MmUnloadSystemImage(ModuleObject);
@@ -579,7 +604,7 @@ IopInitializeDriverModule(
     Status = ObInsertObject(driverObject, NULL, FILE_READ_DATA, 0, NULL, &hDriver);
     if (!NT_SUCCESS(Status))
     {
-        ExFreePoolWithTag(nameInfo, TAG_IO);
+        ExFreePoolWithTag(RegistryPath, TAG_IO);
         RtlFreeUnicodeString(&ServiceName);
         RtlFreeUnicodeString(&DriverName);
         return Status;
@@ -598,7 +623,7 @@ IopInitializeDriverModule(
 
     if (!NT_SUCCESS(Status))
     {
-        ExFreePoolWithTag(nameInfo, TAG_IO); // container for RegistryPath
+        ExFreePoolWithTag(RegistryPath, TAG_IO);
         RtlFreeUnicodeString(&ServiceName);
         RtlFreeUnicodeString(&DriverName);
         return Status;
@@ -616,7 +641,7 @@ IopInitializeDriverModule(
     {
         ObMakeTemporaryObject(driverObject);
         ObDereferenceObject(driverObject);
-        ExFreePoolWithTag(nameInfo, TAG_IO); // container for RegistryPath
+        ExFreePoolWithTag(RegistryPath, TAG_IO);
         RtlFreeUnicodeString(&ServiceName);
         RtlFreeUnicodeString(&DriverName);
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -627,11 +652,12 @@ IopInitializeDriverModule(
     RtlFreeUnicodeString(&ServiceName);
     driverObject->DriverExtension->ServiceKeyName = serviceKeyName;
 
-    /* Make a copy of the driver name to store in the driver object */
+    /* Make a copy of the driver name to store in the driver object.
+     * Windows stores the name with MaximumLength == Length (no extra space
+     * for a terminating NUL), so allocate exactly the string length. */
     UNICODE_STRING driverNamePaged;
     driverNamePaged.Length = 0;
-    // NULL-terminate for Windows compatibility
-    driverNamePaged.MaximumLength = DriverName.MaximumLength + sizeof(UNICODE_NULL);
+    driverNamePaged.MaximumLength = DriverName.Length;
     driverNamePaged.Buffer = ExAllocatePoolWithTag(PagedPool,
                                                    driverNamePaged.MaximumLength,
                                                    TAG_IO);
@@ -639,7 +665,7 @@ IopInitializeDriverModule(
     {
         ObMakeTemporaryObject(driverObject);
         ObDereferenceObject(driverObject);
-        ExFreePoolWithTag(nameInfo, TAG_IO); // container for RegistryPath
+        ExFreePoolWithTag(RegistryPath, TAG_IO);
         RtlFreeUnicodeString(&DriverName);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
@@ -648,7 +674,7 @@ IopInitializeDriverModule(
     driverObject->DriverName = driverNamePaged;
 
     /* Finally, call its init function */
-    Status = driverObject->DriverInit(driverObject, &RegistryPath);
+    Status = driverObject->DriverInit(driverObject, RegistryPath);
     *DriverEntryStatus = Status;
     if (!NT_SUCCESS(Status))
     {
@@ -687,7 +713,7 @@ IopInitializeDriverModule(
 
     // TODO: for legacy drivers, unload the driver if it didn't create any DO
 
-    ExFreePoolWithTag(nameInfo, TAG_IO); // container for RegistryPath
+    ExFreePoolWithTag(RegistryPath, TAG_IO); // page-aligned RegistryPath block
     RtlFreeUnicodeString(&DriverName);
 
     if (!NT_SUCCESS(Status))
@@ -1405,6 +1431,21 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
     }
 
     /*
+     * Check whether the driver may be unloaded at all. A driver without an
+     * unload routine, or a PnP driver (when not explicitly unloading those),
+     * cannot be unloaded; Windows returns STATUS_INVALID_DEVICE_REQUEST here,
+     * before performing any further work (such as querying the image path).
+     */
+    if (!DriverObject->DriverUnload || !DriverObject->DriverSection ||
+        !(UnloadPnpDrivers || (DriverObject->Flags & DRVO_LEGACY_DRIVER)))
+    {
+        DPRINT1("No DriverUnload function! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
+        ObDereferenceObject(DriverObject);
+        ReleaseCapturedUnicodeString(&CapturedServiceName, PreviousMode);
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    /*
      * Get path of service...
      */
     RtlZeroMemory(QueryTable, sizeof(QueryTable));
@@ -1450,64 +1491,53 @@ IopUnloadDriver(PUNICODE_STRING DriverServiceName, BOOLEAN UnloadPnpDrivers)
      * Unload the module and release the references to the device object
      */
 
-    /* Call the load/unload routine, depending on current process */
-    if (DriverObject->DriverUnload && DriverObject->DriverSection &&
-        (UnloadPnpDrivers || (DriverObject->Flags & DRVO_LEGACY_DRIVER)))
+    /* Call the load/unload routine, depending on current process.
+     * Eligibility (unload routine present, not a PnP driver unless requested)
+     * was already verified above. */
+
+    /* Loop through each device object of the driver
+       and set DOE_UNLOAD_PENDING flag */
+    DeviceObject = DriverObject->DeviceObject;
+    while (DeviceObject)
     {
-        /* Loop through each device object of the driver
-           and set DOE_UNLOAD_PENDING flag */
-        DeviceObject = DriverObject->DeviceObject;
-        while (DeviceObject)
+        /* Set the unload pending flag for the device */
+        DeviceExtension = IoGetDevObjExtension(DeviceObject);
+        DeviceExtension->ExtensionFlags |= DOE_UNLOAD_PENDING;
+
+        /* Make sure there are no attached devices or no reference counts */
+        if ((DeviceObject->ReferenceCount) || (DeviceObject->AttachedDevice))
         {
-            /* Set the unload pending flag for the device */
-            DeviceExtension = IoGetDevObjExtension(DeviceObject);
-            DeviceExtension->ExtensionFlags |= DOE_UNLOAD_PENDING;
+            /* Not safe to unload */
+            DPRINT1("Drivers device object is referenced or has attached devices\n");
 
-            /* Make sure there are no attached devices or no reference counts */
-            if ((DeviceObject->ReferenceCount) || (DeviceObject->AttachedDevice))
-            {
-                /* Not safe to unload */
-                DPRINT1("Drivers device object is referenced or has attached devices\n");
-
-                SafeToUnload = FALSE;
-            }
-
-            DeviceObject = DeviceObject->NextDevice;
+            SafeToUnload = FALSE;
         }
 
-        /* If not safe to unload, then return success */
-        if (!SafeToUnload)
-        {
-            ObDereferenceObject(DriverObject);
-            return STATUS_SUCCESS;
-        }
-
-        DPRINT1("Unloading driver '%wZ' (manual)\n", &DriverObject->DriverName);
-
-        /* Set the unload invoked flag and call the unload routine */
-        DriverObject->Flags |= DRVO_UNLOAD_INVOKED;
-        Status = IopDoLoadUnloadDriver(NULL, &DriverObject);
-        ASSERT(Status == STATUS_SUCCESS);
-
-        /* Mark the driver object temporary, so it could be deleted later */
-        ObMakeTemporaryObject(DriverObject);
-
-        /* Dereference it 2 times */
-        ObDereferenceObject(DriverObject);
-        ObDereferenceObject(DriverObject);
-
-        return Status;
+        DeviceObject = DeviceObject->NextDevice;
     }
-    else
+
+    /* If not safe to unload, then return success */
+    if (!SafeToUnload)
     {
-        DPRINT1("No DriverUnload function! '%wZ' will not be unloaded!\n", &DriverObject->DriverName);
-
-        /* Dereference one time (refd inside this function) */
         ObDereferenceObject(DriverObject);
-
-        /* Return unloading failure */
-        return STATUS_INVALID_DEVICE_REQUEST;
+        return STATUS_SUCCESS;
     }
+
+    DPRINT1("Unloading driver '%wZ' (manual)\n", &DriverObject->DriverName);
+
+    /* Set the unload invoked flag and call the unload routine */
+    DriverObject->Flags |= DRVO_UNLOAD_INVOKED;
+    Status = IopDoLoadUnloadDriver(NULL, &DriverObject);
+    ASSERT(Status == STATUS_SUCCESS);
+
+    /* Mark the driver object temporary, so it could be deleted later */
+    ObMakeTemporaryObject(DriverObject);
+
+    /* Dereference it 2 times */
+    ObDereferenceObject(DriverObject);
+    ObDereferenceObject(DriverObject);
+
+    return Status;
 }
 
 VOID
