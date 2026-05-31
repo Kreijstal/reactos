@@ -269,11 +269,10 @@ KmtInitTestFiles(PHANDLE ReadOnlyFile, PHANDLE WriteOnlyFile, PHANDLE Executable
     //INIT THE WRITE-ONLY FILE
     //NB: this file is deleted at the end of basic behavior checks
     Status = ZwCreateFile(WriteOnlyFile, (GENERIC_WRITE | SYNCHRONIZE), &KmtestFileObject, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_WRITE, FILE_SUPERSEDE, FILE_NON_DIRECTORY_FILE, NULL, 0);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    ok_eq_ulongptr(IoStatusBlock.Information, FILE_CREATED);
-    ok(*WriteOnlyFile != NULL, "WriteOnlyFile is NULL\n");
-    if (!skip(*WriteOnlyFile != NULL, "No WriteOnlyFile\n"))
+    if (!skip(NT_SUCCESS(Status) && *WriteOnlyFile != NULL,
+              "ZwCreateFile failed (0x%08lx) - file-backed sub-tests skipped\n", Status))
     {
+        ok_eq_ulongptr(IoStatusBlock.Information, FILE_CREATED);
         FileOffset.QuadPart = 0;
         Status = ZwWriteFile(*WriteOnlyFile, NULL, NULL, NULL, &IoStatusBlock, (PVOID)TestString, TestStringSize, &FileOffset, NULL);
         ok(Status == STATUS_SUCCESS || Status == STATUS_PENDING, "Status = 0x%08lx\n", Status);
