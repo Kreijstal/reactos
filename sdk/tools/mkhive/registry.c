@@ -359,7 +359,7 @@ HIVE_LIST_ENTRY RegistryHives[/*MAX_NUMBER_OF_REGISTRY_HIVES*/] =
     { "SOFTWARE", L"Registry\\Machine\\SOFTWARE"   , &SoftwareHive, SoftwareSecurity, sizeof(SoftwareSecurity) },
     { "DEFAULT" , L"Registry\\User\\.DEFAULT"      , &DefaultHive , SystemSecurity  , sizeof(SystemSecurity)   },
     { "SAM"     , L"Registry\\Machine\\SAM"        , &SamHive     , SystemSecurity  , sizeof(SystemSecurity)   },
-    { "SECURITY", L"Registry\\Machine\\SECURITY"   , &SecurityHive, NULL            , 0                        },
+    { "SECURITY", L"Registry\\Machine\\SECURITY"   , &SecurityHive, SystemSecurity  , sizeof(SystemSecurity)   },
     { "BCD"     , L"Registry\\Machine\\BCD00000000", &BcdHive     , BcdSecurity     , sizeof(BcdSecurity)      },
 };
 C_ASSERT(_countof(RegistryHives) == MAX_NUMBER_OF_REGISTRY_HIVES);
