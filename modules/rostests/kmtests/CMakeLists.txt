@@ -141,6 +141,8 @@ add_dependencies(kmtest_drv bugcodes xdk)
 target_compile_definitions(kmtest_drv PRIVATE KMT_KERNEL_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest_drv include/kmt_test.h)
 add_rostests_file(TARGET kmtest_drv)
+add_cd_file(TARGET kmtest_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
+add_cd_file(TARGET kmt_exit_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
 
 add_library(kmtest_printf
     kmtest_drv/printf_stubs.c

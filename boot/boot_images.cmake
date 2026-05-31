@@ -194,6 +194,39 @@ add_custom_target(kmtestcd
     DEPENDS isombr native-isohybrid native-mkisofs bootcd
     VERBATIM)
 
+## KmtestIMG -- writable FAT disk image variant of KmtestCD.
+set(KMTEST_IMAGE_SIZE_MB 1536 CACHE STRING "Kmtest disk image size in MB")
+math(EXPR _kmtestimg_partition_sectors "${KMTEST_IMAGE_SIZE_MB} * 2048")
+set(_kmtestimg_partition_file ${CMAKE_CURRENT_BINARY_DIR}/kmtest.partition.fat32)
+set(_kmtestimg_image_file ${REACTOS_BINARY_DIR}/kmtest.img)
+set(_dosmbr_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/dosmbr.bin)
+set(_fat32_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/fat32.bin)
+set(_freeldr_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/freeldr/freeldr.sys)
+set(_kmtestimg_ini ${CMAKE_SOURCE_DIR}/boot/bootdata/kmtestcd/kmtestimg.ini)
+
+add_custom_target(kmtestimg_partition
+    COMMAND ${CMAKE_COMMAND}
+        -D FATTEN=$<TARGET_FILE:native-fatten>
+        -D IMAGE=${_kmtestimg_partition_file}
+        -D SECTORS=${_kmtestimg_partition_sectors}
+        -D BOOTSECTOR=${_fat32_file}
+        -D FILELIST=${CMAKE_CURRENT_BINARY_DIR}/kmtestcd.$<CONFIG>.lst
+        -D FREELDR_SYS=${_freeldr_file}
+        -D FREELDR_INI=${_kmtestimg_ini}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/create_fat_image.cmake
+    DEPENDS native-fatten fat32 freeldr kmtestcd
+    VERBATIM)
+
+add_custom_target(kmtestimg
+    COMMAND native-mkdiskimg
+        -o ${_kmtestimg_image_file}
+        -mbr ${_dosmbr_file}
+        -partition ${_kmtestimg_partition_file}
+        -start 2048
+        -type 0c
+    DEPENDS native-mkdiskimg dosmbr kmtestimg_partition
+    VERBATIM)
+
 
 if(DEFINED EFI_PLATFORM_ID)
     # For devices such as USB drives, add also the EFI boot image into efi/boot.
