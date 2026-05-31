@@ -8,6 +8,8 @@
 #include "precomp.h"
 #include <windows.h>
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+
 static ULONG s_ProcessorNumber;
 
 static
@@ -353,3 +355,12 @@ START_TEST(XStateSave)
         Test_AVX512();
     }
 }
+
+#else
+
+START_TEST(XStateSave)
+{
+    skip("XStateSave test is not implemented for this architecture\n");
+}
+
+#endif

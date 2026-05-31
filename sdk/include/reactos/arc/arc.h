@@ -237,6 +237,31 @@ typedef struct _FILEINFORMATION
     CHAR FileName[32];
 } FILEINFORMATION;
 
+typedef struct _LOADER_PARAMETER_FRAMEBUFFER
+{
+    LARGE_INTEGER FrameBufferBase;
+    ULONG FrameBufferSize;
+    ULONG HorizontalResolution;
+    ULONG VerticalResolution;
+    ULONG PixelsPerScanLine;
+    ULONG PixelFormat;
+    ULONG RedMask;
+    ULONG GreenMask;
+    ULONG BlueMask;
+    ULONG Reserved;
+} LOADER_PARAMETER_FRAMEBUFFER, *PLOADER_PARAMETER_FRAMEBUFFER;
+
+typedef struct _LOADER_PARAMETER_BGRT
+{
+    BOOLEAN Valid;
+    UCHAR ImageType;
+    USHORT Reserved;
+    ULONGLONG ImageAddress;
+    ULONG ImageSize;
+    ULONG ImageOffsetX;
+    ULONG ImageOffsetY;
+} LOADER_PARAMETER_BGRT, *PLOADER_PARAMETER_BGRT;
+
 typedef
 ARC_STATUS
 (*ARC_CLOSE)(
@@ -620,23 +645,31 @@ typedef struct _LOADER_PARAMETER_EXTENSION
     ULONG VsmConfigured:1;
     ULONG IumEnabled:1;
 #endif
-    /* ReactOS-specific UEFI boot flag — used by freeldr/winldr.c regardless
-     * of NT target. Steal one bit from each version's Reserved count below. */
-#ifdef __REACTOS__
-    ULONG BootViaEFI:1;
-#endif
 #if (OSVER(NTDDI_VERSION) == NTDDI_LONGHORN)
+#if defined(__REACTOS__)
+    ULONG BootViaEFI:1;
     ULONG Reserved:30;
+#else
+    ULONG Reserved:31;
+#endif
 #elif (NTDDI_VERSION == NTDDI_WIN7)
-    ULONG Reserved:28;
-#elif (NTDDI_VERSION == NTDDI_WIN8)
+#if defined(__REACTOS__)
+    /* ReactOS-specific flags consumed by freeldr/ntoskrnl UEFI path */
+    ULONG BootViaWinload:1;
+    ULONG BootViaEFI:1;
     ULONG Reserved:27;
+#else
+    ULONG Reserved:29;
+#endif
+#elif (NTDDI_VERSION == NTDDI_WIN8)
+    ULONG Reserved:28;
 #elif (NTDDI_VERSION == NTDDI_WINBLUE)
-    ULONG Reserved:24;
+    ULONG Reserved:25;
 #elif (NTDDI_VERSION == NTDDI_WIN10)
-    ULONG Reserved:21;
+    ULONG Reserved:22;
 #elif defined(__REACTOS__)
     ULONG BootViaWinload:1;
+    ULONG BootViaEFI:1;
     ULONG Reserved:30;
 #endif
 /********************************/
@@ -696,6 +729,12 @@ typedef struct _LOADER_PARAMETER_EXTENSION
     LOADER_PARAMETER_CI_EXTENSION *CodeIntegrityData;
     ULONG CodeIntegrityDataSize;
 #endif
+#if defined(__REACTOS__)
+    /* ReactOS extension: placed after all Windows-defined fields to preserve
+     * Windows-compatible offsets for WINBLUE+ and WIN10+ fields above. */
+    LOADER_PARAMETER_FRAMEBUFFER GopFramebuffer;
+    LOADER_PARAMETER_BGRT BgrtInfo;
+#endif
 } LOADER_PARAMETER_EXTENSION, *PLOADER_PARAMETER_EXTENSION;
 
 //
@@ -745,6 +784,40 @@ typedef struct _ARM_LOADER_BLOCK
     ULONG PlaceHolder;
 #endif
 } ARM_LOADER_BLOCK, *PARM_LOADER_BLOCK;
+
+#define ARM64_LOADER_MAX_EARLY_DEVICE_RANGES 16
+
+typedef struct _ARM64_LOADER_EARLY_DEVICE_RANGE
+{
+    ULONGLONG BaseAddress;
+    ULONGLONG Length;
+} ARM64_LOADER_EARLY_DEVICE_RANGE, *PARM64_LOADER_EARLY_DEVICE_RANGE;
+
+typedef struct _ARM64_LOADER_BLOCK
+{
+#if defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+    ULONG FirstLevelDcacheSize;
+    ULONG FirstLevelDcacheFillSize;
+    ULONG FirstLevelIcacheSize;
+    ULONG FirstLevelIcacheFillSize;
+    ULONG SecondLevelDcacheSize;
+    ULONG SecondLevelDcacheFillSize;
+    ULONG SecondLevelIcacheSize;
+    ULONG SecondLevelIcacheFillSize;
+    ULONG PsciConduit;
+    ULONG PsciFlags;
+    ULONG_PTR PanicStack;
+    ULONG_PTR InterruptStack;
+    ULONG_PTR PcrPage;
+    ULONG_PTR PdrPage;
+    ULONGLONG EarlyUartAddress;
+    ULONG EarlyUartInterface;
+    ULONG EarlyDeviceRangeCount;
+    ARM64_LOADER_EARLY_DEVICE_RANGE EarlyDeviceRanges[ARM64_LOADER_MAX_EARLY_DEVICE_RANGES];
+#else
+    ULONG PlaceHolder;
+#endif
+} ARM64_LOADER_BLOCK, *PARM64_LOADER_BLOCK;
 
 //
 // Firmware information block (NT6+)
@@ -867,6 +940,7 @@ typedef struct _LOADER_PARAMETER_BLOCK
         IA64_LOADER_BLOCK IA64;
         PPC_LOADER_BLOCK PowerPC;
         ARM_LOADER_BLOCK Arm;
+        ARM64_LOADER_BLOCK Arm64;
     } u;
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     FIRMWARE_INFORMATION_LOADER_BLOCK FirmwareInformation;

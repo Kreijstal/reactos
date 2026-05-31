@@ -15,18 +15,29 @@ errno_t __cdecl rand_s(_Out_ unsigned int* _RandomValue);
 typedef int __cdecl rand_s_t(unsigned int*);
 rand_s_t *p_rand_s;
 
+static unsigned long long read_perf_counter(void)
+{
+#if defined(_M_ARM64)
+    unsigned long long value;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(value));
+    return value;
+#else
+    return __rdtsc();
+#endif
+}
+
 void test_rand_s_performance(void)
 {
     unsigned long long start, end;
     unsigned int val;
     int i;
 
-    start = __rdtsc();
+    start = read_perf_counter();
     for (i = 0; i < 10000; i++)
     {
         p_rand_s(&val);
     }
-    end = __rdtsc();
+    end = read_perf_counter();
     printf("rand_s took %I64u cycles\n", end - start);
 }
 

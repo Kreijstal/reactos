@@ -49,6 +49,9 @@ elseif(ARCH STREQUAL "amd64")
         compat/amd64/msys2.S)
 elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE dispatch/arm/stubs_asm.s)
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND ASM_SOURCE dispatch/arm64/dispatch.S)
+    list(APPEND SOURCE dispatch/dispatch.c)
 else()
     list(APPEND SOURCE dispatch/dispatch.c)
 endif()
@@ -62,6 +65,13 @@ add_asm_files(ntdll_asm ${ASM_SOURCE})
 
 list(APPEND PCH_SKIP_SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/ntdll_stubs.c)
+
+if(ARCH STREQUAL "arm64")
+    list(APPEND SOURCE
+        arm64/ehandler.c
+        arm64/stubs.c
+        chpe.c)
+endif()
 
 add_library(ntdll MODULE
     ${SOURCE}

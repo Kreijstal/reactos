@@ -14,6 +14,12 @@ ULONG g_NoopSyscallNumber = 0;
 ULONG g_HandlerCalled = 0;
 ULONG g_RandomSeed = 0x63c28b49;
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+#define HAVE_SYSCALL_CONTEXT_TESTS 1
+#else
+#define HAVE_SYSCALL_CONTEXT_TESTS 0
+#endif
+
 VOID
 DoSyscallAndCaptureContext(
     _In_ ULONG SyscallNumber,
@@ -192,7 +198,9 @@ ValidateSyscall_(
 
     // TODO:Debug regs, mxcsr, floating point, etc.
 #else
-#error Unsupported architecture
+    skip("Syscall context validation is not implemented for this architecture\n");
+    (void)SyscallId;
+    (void)Result;
 #endif
 }
 
@@ -265,6 +273,19 @@ Test_SyscallNumbers()
 }
 
 static
+ULONG64
+ReadPerformanceCounter(VOID)
+{
+#if defined(_M_ARM64)
+    ULONG64 Value;
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(Value));
+    return Value;
+#else
+    return __rdtsc();
+#endif
+}
+
+static
 VOID
 Test_SyscallPerformance()
 {
@@ -279,9 +300,9 @@ Test_SyscallPerformance()
 
     for (ULONG64 i = 0; i < Count; i++)
     {
-        Start = __rdtsc();
+        Start = ReadPerformanceCounter();
         NtFlushWriteBuffer();
-        End = __rdtsc();
+        End = ReadPerformanceCounter();
         Cycles = End - Start;
         if (Cycles > 2000)
         {
@@ -303,6 +324,11 @@ Test_SyscallPerformance()
 
 START_TEST(SystemCall)
 {
+#if !HAVE_SYSCALL_CONTEXT_TESTS
+    skip("Syscall tests are not implemented for this architecture\n");
+    return;
+#endif
+
     if (!InitSysCalls())
     {
         skip("Failed to initialize.\n");

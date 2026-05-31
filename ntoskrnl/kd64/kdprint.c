@@ -14,8 +14,103 @@
 #include <debug.h>
 
 #define KD_PRINT_MAX_BYTES 512
+#define KD_TIMESTAMP_MAX_CHARS 32
+#define KD_100NS_PER_SECOND 10000000ULL
+#define KD_100NS_PER_MICROSECOND 10ULL
+
+#if defined(_M_ARM64)
+static
+BOOLEAN
+KdpArm64DebuggerLockOwnedByCurrentThread(VOID)
+{
+    PKTHREAD Thread = KeGetCurrentThread();
+    return (((KSPIN_LOCK)Thread | 1) == KdpDebuggerLock);
+}
+#else
+#define KdpArm64DebuggerLockOwnedByCurrentThread() FALSE
+#endif
 
 /* FUNCTIONS *****************************************************************/
+
+#if defined(_M_ARM64)
+static
+ULONGLONG
+KdpArm64QueryCounterTime(VOID)
+{
+    ULONGLONG Counter;
+    ULONGLONG Frequency;
+    ULONGLONG Seconds;
+    ULONGLONG Remainder;
+
+#if defined(__clang__) || defined(__GNUC__)
+    __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(Counter));
+    __asm__ __volatile__("mrs %0, cntfrq_el0" : "=r"(Frequency));
+#else
+    return 0;
+#endif
+
+    if ((Frequency == 0) || (Frequency > 10000000000ULL))
+    {
+        return 0;
+    }
+
+    Seconds = Counter / Frequency;
+    Remainder = Counter % Frequency;
+
+    return (Seconds * KD_100NS_PER_SECOND) +
+           ((Remainder * KD_100NS_PER_SECOND) / Frequency);
+}
+#endif
+
+static
+USHORT
+NTAPI
+KdpBuildTimestampPrefix(
+    _Out_writes_bytes_(BufferSize) PCHAR Buffer,
+    _In_ SIZE_T BufferSize)
+{
+    ULONGLONG InterruptTime;
+    ULONGLONG Seconds;
+    ULONGLONG Microseconds;
+    LONG Length;
+
+    if (BufferSize == 0)
+        return 0;
+
+    InterruptTime = KeQueryInterruptTime();
+#if defined(_M_ARM64)
+    {
+        ULONGLONG CounterTime = KdpArm64QueryCounterTime();
+
+        /*
+         * ARM64 keeps GIC Group 1 delivery masked during early MM bring-up, so
+         * SharedUserData->InterruptTime remains zero until the clock ISR can run.
+         * The architectural counter is already live and gives useful monotonic
+         * debug timestamps without enabling interrupts too early.
+         */
+        if (CounterTime > InterruptTime)
+        {
+            InterruptTime = CounterTime;
+        }
+    }
+#endif
+    Seconds = InterruptTime / KD_100NS_PER_SECOND;
+    Microseconds = (InterruptTime % KD_100NS_PER_SECOND) /
+                   KD_100NS_PER_MICROSECOND;
+
+    Length = _snprintf(Buffer,
+                       BufferSize,
+                       "[%5I64u.%06I64u] ",
+                       Seconds,
+                       Microseconds);
+    if (Length < 0)
+    {
+        /* Keep logging functional even if formatting fails. */
+        return 0;
+    }
+
+    return (USHORT)min((SIZE_T)Length, BufferSize - 1);
+}
 
 KIRQL
 NTAPI
@@ -233,6 +328,9 @@ KdpCommandString(IN PSTRING NameString,
 
     /* Check if we need to do anything */
     if ((PreviousMode != KernelMode) || (KdDebuggerNotPresent)) return;
+#if defined(_M_ARM64)
+    if (TrapFrame == NULL) return;
+#endif
 
     /* Enter the debugger */
     Enable = KdEnterDebugger(TrapFrame, ExceptionFrame);
@@ -273,6 +371,9 @@ KdpSymbol(IN PSTRING DllPath,
 
     /* Check if we need to do anything */
     if ((PreviousMode != KernelMode) || (KdDebuggerNotPresent)) return;
+#if defined(_M_ARM64)
+    if (TrapFrame == NULL) return;
+#endif
 
     /* Enter the debugger */
     Enable = KdEnterDebugger(TrapFrame, ExceptionFrame);
@@ -455,6 +556,9 @@ KdpPrint(
     NTSTATUS Status;
     BOOLEAN Enable;
     STRING OutputString;
+    CHAR TimestampPrefix[KD_TIMESTAMP_MAX_CHARS];
+    CHAR OutputBuffer[KD_PRINT_MAX_BYTES];
+    USHORT PrefixLength, OutputLength;
 
     if (NtQueryDebugFilterState(ComponentId, Level) == (NTSTATUS)FALSE)
     {
@@ -488,8 +592,29 @@ KdpPrint(
     }
 
     /* Setup the output string */
-    OutputString.Buffer = String;
-    OutputString.Length = OutputString.MaximumLength = Length;
+    PrefixLength = KdpBuildTimestampPrefix(TimestampPrefix,
+                                           sizeof(TimestampPrefix));
+    PrefixLength = (USHORT)min((SIZE_T)PrefixLength, sizeof(OutputBuffer));
+
+    /* Keep the complete entry in the fixed-size KD print buffer. */
+    OutputLength = Length;
+    if ((PrefixLength + OutputLength) > sizeof(OutputBuffer))
+    {
+        OutputLength = sizeof(OutputBuffer) - PrefixLength;
+    }
+
+    if (PrefixLength != 0)
+    {
+        KdpMoveMemory(OutputBuffer, TimestampPrefix, PrefixLength);
+    }
+
+    if (OutputLength != 0)
+    {
+        KdpMoveMemory(OutputBuffer + PrefixLength, String, OutputLength);
+    }
+
+    OutputString.Buffer = OutputBuffer;
+    OutputString.Length = OutputString.MaximumLength = PrefixLength + OutputLength;
 
     /* Log the print */
     KdLogDbgPrint(&OutputString);
@@ -501,6 +626,14 @@ KdpPrint(
         *Handled = TRUE;
         return STATUS_DEVICE_NOT_CONNECTED;
     }
+
+#if defined(_M_ARM64)
+    if (KdEnteredDebugger || KdpArm64DebuggerLockOwnedByCurrentThread())
+    {
+        *Handled = TRUE;
+        return STATUS_SUCCESS;
+    }
+#endif
 
     /* Enter the debugger */
     Enable = KdEnterDebugger(TrapFrame, ExceptionFrame);
@@ -531,16 +664,38 @@ KdpDprintf(
 {
     STRING String;
     USHORT Length;
+    USHORT PrefixLength;
+    INT FormatLength;
     va_list ap;
     CHAR Buffer[512];
+    CHAR TimestampPrefix[KD_TIMESTAMP_MAX_CHARS];
 
-    /* Format the string */
+    PrefixLength = KdpBuildTimestampPrefix(TimestampPrefix,
+                                           sizeof(TimestampPrefix));
+    PrefixLength = (USHORT)min((SIZE_T)PrefixLength, sizeof(Buffer));
+
+    if (PrefixLength != 0)
+    {
+        KdpMoveMemory(Buffer, TimestampPrefix, PrefixLength);
+    }
+
+    /* Format the string after the timestamp prefix */
     va_start(ap, Format);
-    Length = (USHORT)_vsnprintf(Buffer,
-                                sizeof(Buffer),
-                                Format,
-                                ap);
+    FormatLength = _vsnprintf(Buffer + PrefixLength,
+                              sizeof(Buffer) - PrefixLength,
+                              Format,
+                              ap);
     va_end(ap);
+
+    if (FormatLength < 0)
+    {
+        /* _vsnprintf reports truncation with -1. */
+        Length = sizeof(Buffer) - 1;
+    }
+    else
+    {
+        Length = PrefixLength + (USHORT)FormatLength;
+    }
 
     /* Set it up */
     String.Buffer = Buffer;

@@ -1573,7 +1573,11 @@ MiQueryAddressState(IN PVOID Va,
     if (ValidPte)
     {
         /* FIXME: watch out for large pages */
+#ifdef _M_ARM64
+        ASSERT(PointerPde->u.Hard.NotLargePage == TRUE);
+#else
         ASSERT(PointerPde->u.Hard.LargePage == FALSE);
+#endif
 
         /* Capture the PTE */
         TempPte = *PointerPte;
@@ -5736,7 +5740,11 @@ MmGetPhysicalAddress(PVOID Address)
     {
         /* Check for large pages */
         TempPde = *MiAddressToPde(Address);
+#ifdef _M_ARM64
+        if (!TempPde.u.Hard.NotLargePage)
+#else
         if (TempPde.u.Hard.LargePage)
+#endif
         {
             /* Physical address is base page + large page offset */
             PhysicalAddress.QuadPart = (ULONG64)TempPde.u.Hard.PageFrameNumber << PAGE_SHIFT;

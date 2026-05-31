@@ -39,14 +39,13 @@
 
 // AVS
 // skip inline comments, empty lines
-static char * getline(istream& i, char* buf, int size){
+static char * getline(FILE* file, char* buf, int size){
 
 	int len = 0;
 
 	while (1) {
 		memset(buf,0,size);
-		if (i.eof()) break;
-		i.getline(buf,size,'\n');
+		if (!fgets(buf, size, file)) break;
 
 		while (buf[len]) {
 			if ( /*(buf[len]>=0) &&*/ buf[len]< ' ' ) buf[len] = ' ';
@@ -433,12 +432,12 @@ int TMapLoader::LoadCharMap(string buf) {
 // AVS
 // ignore long comment [comment] ... [end comment]
 // recursive!
-int getLongComment(istream& is, char* wbuf, size_t sz) {
+int getLongComment(FILE* file, char* wbuf, size_t sz) {
 
 	int bufLen;
-    while ( is ) {
+    while ( !feof(file) ) {
 		wbuf[0] = 0;
-		getline(is, wbuf, sz);
+		getline(file, wbuf, sz);
 		if ( wbuf[0]==0 ) return 1;
 		bufLen = strlen(wbuf);
 		if ( wbuf[0] == '[' && wbuf[bufLen-1] == ']' ) {
@@ -451,7 +450,7 @@ int getLongComment(istream& is, char* wbuf, size_t sz) {
 			};
 			if ( stricmp(temps.c_str(),"[comment]") == 0 ) {
 				// do recursive call
-				if ( !getLongComment(is, wbuf, sz) ) return 0;
+				if ( !getLongComment(file, wbuf, sz) ) return 0;
 				continue;
 			};
 			if ( stricmp(temps.c_str(),"[end comment]") == 0 ) return 1;
@@ -467,15 +466,18 @@ int TMapLoader::Load(const char * filename, const char * szActiveEmul) {
 	char buf[256];
 	int bufLen;
 
-	ifstream inpfile(filename);
+	FILE* inpfile = fopen(filename, "r");
 	KeyTrans.DeleteAllDefs();
 	Charmap.init();
+
+	if (inpfile == NULL)
+		return 0;
 
 	// it is an array for store [...] ... [end ...] parts from file
 	stringArray SA(0,0,sizeof(string));
 	int AllOk = 0;
 
-	while ( inpfile ) {
+	while ( !feof(inpfile) ) {
 
 		getline(inpfile, buf, 255);
 		bufLen = strlen(buf);
@@ -591,7 +593,7 @@ int TMapLoader::Load(const char * filename, const char * szActiveEmul) {
 		};
 	};
 
-	inpfile.close();
+	fclose(inpfile);
 
 	if ( !AllOk ) return 0;
 

@@ -19,6 +19,8 @@
 
 #include <freeldr.h>
 
+extern const UIVTBL FbGuiVtbl;
+
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(UI);
 
@@ -130,16 +132,18 @@ BOOLEAN UiInitialize(BOOLEAN ShowUi)
     }
 
     if (UiDisplayMode == VideoGraphicsMode)
-#if 0 // We don't support a GUI mode yet.
-        UiVtbl = GuiVtbl;
-#else
     {
-        // Switch back to text mode.
+#ifdef UEFIBOOT
+        /* UEFI graphics uses the framebuffer UI backend. */
+        UiVtbl = FbGuiVtbl;
+#else
+        /* Graphics-mode UI is only implemented for UEFI. */
         MachVideoSetDisplayMode(NULL, TRUE);
         UiDisplayMode = VideoTextMode;
-    }
+        UiVtbl = (UiMinimal ? MiniTuiVtbl : TuiVtbl);
 #endif
-    else // if (UiDisplayMode == VideoTextMode)
+    }
+    else
         UiVtbl = (UiMinimal ? MiniTuiVtbl : TuiVtbl);
 
     /* Load the UI and initialize its default settings */
@@ -515,7 +519,7 @@ UiEscapeString(PCHAR String)
             String[Idx] = '\n';
 
             // Move the rest of the string up
-            strcpy(&String[Idx+1], &String[Idx+2]);
+            memmove(&String[Idx+1], &String[Idx+2], strlen(&String[Idx+2]) + 1);
         }
     }
 }
