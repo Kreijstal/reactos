@@ -23,12 +23,6 @@ UefiVideoGetFontsFromFirmware(PULONG RomFontPointers)
 }
 
 VOID
-UefiVideoSync(VOID)
-{
-
-}
-
-VOID
 UefiGetExtendedBIOSData(PULONG ExtendedBIOSDataArea,
                         PULONG ExtendedBIOSDataSize)
 {
@@ -40,3 +34,10 @@ UefiPcBeep(VOID)
 {
     /* Not possible on UEFI, for now */
 }
+
+#if defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+VOID
+UefiSerialDisableFirmware(VOID)
+{
+}
+#endif

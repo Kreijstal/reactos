@@ -123,6 +123,7 @@ list(APPEND SOURCE
     ${REACTOS_SOURCE_DIR}/ntoskrnl/fstub/translate.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/inbv/bootanim.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/inbv/inbv.c
+    ${REACTOS_SOURCE_DIR}/ntoskrnl/inbv/inbvgop.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/inbv/inbvport.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/adapter.c
     ${REACTOS_SOURCE_DIR}/ntoskrnl/io/iomgr/arcname.c
@@ -389,12 +390,58 @@ elseif(ARCH STREQUAL "arm")
         ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/ARM3/arm/init.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/ps/arm/psctx.c
         ${REACTOS_SOURCE_DIR}/ntoskrnl/rtl/arm/rtlexcpt.c)
+elseif(ARCH STREQUAL "arm64")
+    include_directories(${REACTOS_SOURCE_DIR}/ntoskrnl/arch/arm64/include)
+    list(REMOVE_ITEM SOURCE ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/ipi.c)
+    list(APPEND ASM_SOURCE
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/chkstk.S
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/earlyvec.S
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/trapvec.S
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/trapret.S
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/ctxswitch.S
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/usercall_asm.S
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/bootstack.S)
+    list(APPEND SOURCE
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/config/arm64/cmhardwr.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm64/init.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm64/probe.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ex/arm64/ioport.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/kd64/arm64/kdarm64.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/atomics.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/boot.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/context.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/cpu.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/early_uart.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/exceptinit.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/exp.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/floatstubs.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/freeze.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/interrupt.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/ipi.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/irql.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/kiinit.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/rtlshim.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/spinlock.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/stubs.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/thrdini.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/trapc.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/trapdump.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/arm64/usercall.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/arm64/page.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/arm64/section.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/arm64/procsup.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/ARM3/arm64/init.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/mm/ARM3/arm64/maputils.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/ps/arm64/psctx.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/rtl/arm64/ehandler.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/rtl/arm64/rtlexcpt.c
+        ${REACTOS_SOURCE_DIR}/ntoskrnl/rtl/arm64/rtlstubs.c)
 endif()
 
 if(NOT _WINKD_)
-    if(KDBG)
-        add_definitions(-DKDBG)
-    endif()
+if(KDBG)
+    add_definitions(-DKDBG)
+endif()
 
     if(ARCH STREQUAL "i386")
         list(APPEND SOURCE ${REACTOS_SOURCE_DIR}/ntoskrnl/kd/i386/kdserial.c)
@@ -410,6 +457,14 @@ if(NOT _WINKD_)
         endif()
     elseif(ARCH STREQUAL "arm")
         list(APPEND SOURCE ${REACTOS_SOURCE_DIR}/ntoskrnl/kd/arm/kdserial.c)
+    elseif(ARCH STREQUAL "arm64")
+        list(APPEND SOURCE ${REACTOS_SOURCE_DIR}/ntoskrnl/kd/arm64/kdserial.c)
+        if(KDBG)
+            list(APPEND ASM_SOURCE ${REACTOS_SOURCE_DIR}/ntoskrnl/kdbg/arm64/kdb_help.S)
+            list(APPEND SOURCE
+                ${REACTOS_SOURCE_DIR}/ntoskrnl/kdbg/arm64/arm64-dis.c
+                ${REACTOS_SOURCE_DIR}/ntoskrnl/kdbg/arm64/kdb_shim.c)
+        endif()
     endif()
 
     if(KDBG)

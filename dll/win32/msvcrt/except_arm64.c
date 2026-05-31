@@ -112,7 +112,9 @@ ULONG_PTR get_exception_pc( DISPATCHER_CONTEXT *dispatch )
 /*******************************************************************
  *		_setjmp (MSVCRT.@)
  */
+#ifndef __clang__
 __ASM_GLOBAL_FUNC( _setjmp, "b _setjmpex" );
+#endif
 
 
 /*********************************************************************

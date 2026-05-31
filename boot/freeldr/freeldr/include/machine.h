@@ -82,6 +82,9 @@ extern MACHVTBL MachVtbl;
 
 /* NOTE: Implemented by each architecture */
 VOID MachInit(const char *CmdLine);
+VOID StallExecutionProcessor(ULONG Microseconds);
+UCHAR DriveMapGetBiosDriveNumber(PCSTR DeviceName);
+VOID __cdecl Reboot(VOID);
 
 #define MachConsPutChar(Ch) \
     MachVtbl.ConsPutChar(Ch)

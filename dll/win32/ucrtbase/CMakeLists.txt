@@ -28,6 +28,13 @@ endif()
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # Silence warnings in ucrtbase_stubs.c
     target_compile_options(ucrtbase PRIVATE -Wno-incompatible-library-redeclaration)
+    target_compile_options(ucrtbase PRIVATE
+        -fno-builtin-_lrotl
+        -fno-builtin-_lrotr
+        -fno-builtin-_rotl
+        -fno-builtin-_rotr
+        -fno-builtin-_rotl64
+        -fno-builtin-_rotr64)
 endif()
 
 set_entrypoint(ucrtbase __acrt_DllMain 12)

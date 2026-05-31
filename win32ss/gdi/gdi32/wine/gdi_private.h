@@ -234,6 +234,8 @@ BOOL WINAPI SetWorldTransformForMetafile(HDC hdc, const XFORM *pxform);
 #endif
 #ifdef _M_ARM
 #define DbgRaiseAssertionFailure() __emit(0xdefc)
+#elif defined(_M_ARM64)
+#define DbgRaiseAssertionFailure() __asm__ __volatile__("brk #0xf001")
 #else
 #define DbgRaiseAssertionFailure() __int2c()
 #endif // _M_ARM
@@ -273,4 +275,3 @@ HBITMAP EMFDRV_SelectBitmap( WINEDC *dc, HBITMAP hbitmap );
 
 
 #endif /* __WINE_GDI_PRIVATE_H */
-

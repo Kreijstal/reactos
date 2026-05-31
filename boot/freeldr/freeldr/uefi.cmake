@@ -9,18 +9,39 @@ include_directories(BEFORE
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/edk2
     ${REACTOS_SOURCE_DIR}/boot/freeldr/freeldr
     ${REACTOS_SOURCE_DIR}/boot/freeldr/freeldr/include
-    ${REACTOS_SOURCE_DIR}/boot/freeldr/freeldr/include/arch/uefi)
+    ${REACTOS_SOURCE_DIR}/boot/freeldr/freeldr/include/arch/uefi
+    ${CMAKE_CURRENT_BINARY_DIR})
+
+set(UEFILDR_FONT_C ${CMAKE_CURRENT_BINARY_DIR}/uefi_fb_font.c)
+set(UEFILDR_FONT_H ${CMAKE_CURRENT_BINARY_DIR}/uefi_fb_font.h)
+
+add_custom_command(
+    OUTPUT ${UEFILDR_FONT_C} ${UEFILDR_FONT_H}
+    COMMAND native-bin2c
+            ${REACTOS_SOURCE_DIR}/media/fonts/lucon.ttf
+            ${UEFILDR_FONT_C}
+            ${UEFILDR_FONT_H}
+            BIN
+            uefi_fb_font_data
+    DEPENDS
+            native-bin2c
+            ${REACTOS_SOURCE_DIR}/media/fonts/lucon.ttf)
 
 list(APPEND UEFILDR_ARC_SOURCE
     ${FREELDR_ARC_SOURCE}
+    ${UEFILDR_FONT_C}
+    arch/uefi/ftglue.c
     arch/uefi/stubs.c
     arch/uefi/ueficon.c
     arch/uefi/uefidisk.c
     arch/uefi/uefihw.c
     arch/uefi/uefimem.c
+    arch/uefi/uefireboot.c
     arch/uefi/uefisetup.c
     arch/uefi/uefiutil.c
     arch/uefi/uefivid.c
+    arch/uefi/uefisym.c
+    arch/uefi/uefibacktrace.c
     arch/vidfb.c
     arch/vgafont.c)
 
@@ -39,7 +60,10 @@ elseif(ARCH STREQUAL "arm")
         arch/arm/debug.c)
     #TBD
 elseif(ARCH STREQUAL "arm64")
-    #TBD
+    list(APPEND UEFILDR_ARC_SOURCE
+        arch/uefi/arm64/early_uart.c)
+    list(APPEND UEFILDR_COMMON_ASM_SOURCE
+        arch/uefi/arm64/uefiasm.S)
 else()
     #TBD
 endif()
@@ -49,6 +73,7 @@ list(APPEND UEFILDR_BOOTMGR_SOURCE
     custom.c
     options.c
     oslist.c
+    ui/guifb.c
 )
 
 add_asm_files(uefifreeldr_common_asm ${FREELDR_COMMON_ASM_SOURCE} ${UEFILDR_COMMON_ASM_SOURCE})
@@ -76,6 +101,9 @@ elseif(ARCH STREQUAL "amd64")
 elseif(ARCH STREQUAL "arm")
     list(APPEND FREELDR_NTLDR_SOURCE
         ntldr/arch/arm/winldr.c)
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND FREELDR_NTLDR_SOURCE
+        ntldr/arch/arm64/winldr.c)
 else()
     #TBD
 endif()
@@ -87,9 +115,17 @@ add_library(uefifreeldr_common
     ${UEFILDR_BOOTMGR_SOURCE}
     ${FREELDR_NTLDR_SOURCE})
 
-target_compile_definitions(uefifreeldr_common PRIVATE _FRLDRLIB_ UEFIBOOT)
+# Keep setjmp before freetype so the archive does not satisfy FreeType's
+# longjmp reference with the vcruntime implementation, which needs RtlUnwind.
+target_link_libraries(uefifreeldr_common setjmp freetype)
 
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+target_compile_definitions(uefifreeldr_common PRIVATE _FRLDRLIB_ UEFIBOOT)
+if(FREELDR_WIM_RAMDISK)
+    target_compile_definitions(uefifreeldr_common PRIVATE FREELDR_WIM_RAMDISK=1)
+endif()
+
+if((CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang") AND
+   (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
     # Prevent using SSE (no support in freeldr)
     target_compile_options(uefifreeldr_common PUBLIC -mno-sse)
 endif()
@@ -128,20 +164,31 @@ set_target_properties(uefildr PROPERTIES SUFFIX ".efi")
 
 target_compile_definitions(uefildr PRIVATE UEFIBOOT)
 
-# On AMD64 we only map 1GB with freeloader, tell UEFI to keep us low!
+# On AMD64 we only map 1GB with freeloader, tell UEFI to keep us low.
+# On ARM64, match the Windows boot manager preferred base to keep PE metadata
+# and early VA/PA assumptions close to the platform loader this path emulates.
 if(ARCH STREQUAL "amd64")
     set_image_base(uefildr 0x10000)
+elseif(ARCH STREQUAL "arm64")
+    set_image_base(uefildr 0x10000000)
 endif()
 
 if(MSVC)
 if(NOT ARCH STREQUAL "arm")
     target_link_options(uefildr PRIVATE /DYNAMICBASE:NO)
 endif()
+    if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+        target_link_options(uefildr PRIVATE /FILEALIGN:512 /ALIGN:512)
+    endif()
     target_link_options(uefildr PRIVATE /NXCOMPAT:NO /ignore:4078 /ignore:4254 /DRIVER)
     # We don't need hotpatching
     remove_target_compile_option(uefildr "/hotpatch")
 else()
-    target_link_options(uefildr PRIVATE -Wl,--exclude-all-symbols,--file-alignment,0x200,--section-alignment,0x200)
+    if(ARCH STREQUAL "arm64")
+        target_link_options(uefildr PRIVATE -Wl,--exclude-all-symbols,--file-alignment,0x200,--section-alignment,0x1000)
+    else()
+        target_link_options(uefildr PRIVATE -Wl,--exclude-all-symbols,--file-alignment,0x200,--section-alignment,0x200)
+    endif()
     # Strip everything, including rossym data
     add_custom_command(TARGET uefildr
                     POST_BUILD
@@ -151,6 +198,17 @@ endif()
 
 if(MSVC)
     set_subsystem(uefildr EFI_APPLICATION)
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    if(ARCH STREQUAL "arm64")
+        target_link_options(uefildr PRIVATE
+            -Wl,--subsystem,efi_application:1.00
+            -Wl,--major-os-version,0
+            -Wl,--minor-os-version,0
+            -Wl,--major-subsystem-version,1
+            -Wl,--minor-subsystem-version,0)
+    else()
+        set_subsystem(uefildr efi_application)
+    endif()
 else()
     set_subsystem(uefildr 10)
 endif()
@@ -158,6 +216,12 @@ endif()
 set_entrypoint(uefildr EfiEntry)
 
 target_link_libraries(uefildr uefifreeldr_common cportlib blcmlib blrtl libcntpr)
+if(FREELDR_WIM_RAMDISK)
+    target_link_libraries(uefildr freeldr_wimcore)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_link_libraries(uefildr setjmp)
+endif()
 if(ARCH STREQUAL "i386")
     target_link_libraries(uefildr mini_hal)
 endif()

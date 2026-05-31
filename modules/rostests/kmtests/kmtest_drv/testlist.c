@@ -17,7 +17,9 @@ KMT_TESTFUNC Test_ExInterlocked;
 KMT_TESTFUNC Test_ExPools;
 KMT_TESTFUNC Test_ExPushLock;
 KMT_TESTFUNC Test_ExResource;
+#if !defined(_M_ARM64)
 KMT_TESTFUNC Test_ExSequencedList;
+#endif
 KMT_TESTFUNC Test_ExSingleList;
 KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExUuid;
@@ -106,7 +108,9 @@ const KMT_TEST TestList[] =
     { "ExPools",                            Test_ExPools },
     { "ExPushLock",                         Test_ExPushLock },
     { "ExResource",                         Test_ExResource },
+#if !defined(_M_ARM64)
     { "ExSequencedList",                    Test_ExSequencedList },
+#endif
     { "ExSingleList",                       Test_ExSingleList },
     { "-ExTimer",                           Test_ExTimer },
     { "ExUuid",                             Test_ExUuid },

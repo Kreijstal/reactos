@@ -1,3 +1,5 @@
+#include <sdkddkver.h>
+
 #ifndef SYSFUNCS_NT6_ONLY
     SVC_(AcceptConnectPort, 6)
     SVC_(AccessCheck, 8)
@@ -17,13 +19,14 @@
     SVC_(AllocateLocallyUniqueId, 1)
     SVC_(AllocateUserPhysicalPages, 3)
     SVC_(AllocateUuids, 4)
-    SVC_(AllocateVirtualMemory, 6)
+    SVC_WRAP_(AllocateVirtualMemory, 6)
     SVC_(ApphelpCacheControl, 2)
     SVC_(AreMappedFilesTheSame, 2)
     SVC_(AssignProcessToJobObject, 2)
     SVC_(CallbackReturn, 3)
     SVC_(CancelDeviceWakeupRequest, 1)
     SVC_(CancelIoFile, 2)
+    SVC_(CancelIoFileEx, 3)
     SVC_(CancelTimer, 2)
     SVC_(ClearEvent, 1)
     SVC_(Close, 1)
@@ -81,12 +84,12 @@
     SVC_(FilterToken, 6)
     SVC_(FindAtom, 3)
     SVC_(FlushBuffersFile, 2)
-    SVC_(FlushInstructionCache, 3)
+    SVC_WRAP_(FlushInstructionCache, 3)
     SVC_(FlushKey, 1)
     SVC_(FlushVirtualMemory, 4)
     SVC_(FlushWriteBuffer, 0)
     SVC_(FreeUserPhysicalPages, 3)
-    SVC_(FreeVirtualMemory, 4)
+    SVC_WRAP_(FreeVirtualMemory, 4)
     SVC_(FsControlFile, 10)
     SVC_(GetContextThread, 2)
     SVC_(GetDevicePowerState, 2)
@@ -112,7 +115,7 @@
     SVC_(MakeTemporaryObject, 1)
     SVC_(MapUserPhysicalPages, 3)
     SVC_(MapUserPhysicalPagesScatter, 3)
-    SVC_(MapViewOfSection, 10)
+    SVC_WRAP_(MapViewOfSection, 10)
     SVC_(ModifyBootEntry, 1)
     SVC_(ModifyDriverEntry, 1)
     SVC_(NotifyChangeDirectoryFile, 9)
@@ -142,7 +145,7 @@
     SVC_(PrivilegeCheck, 3)
     SVC_(PrivilegeObjectAuditAlarm, 6)
     SVC_(PrivilegedServiceAuditAlarm, 5)
-    SVC_(ProtectVirtualMemory, 5)
+    SVC_WRAP_(ProtectVirtualMemory, 5)
     SVC_(PulseEvent, 2)
     SVC_(QueryAttributesFile, 2)
     SVC_(QueryBootEntryOrder, 2)
@@ -276,7 +279,7 @@
     SVC_(UnloadKeyEx, 2)
     SVC_(UnlockFile, 5)
     SVC_(UnlockVirtualMemory, 4)
-    SVC_(UnmapViewOfSection, 2)
+    SVC_WRAP_(UnmapViewOfSection, 2)
     SVC_(VdmControl, 2)
     SVC_(WaitForDebugEvent, 4)
     SVC_(WaitForMultipleObjects, 5)
@@ -304,9 +307,7 @@
 
 #ifndef SYSFUNCS_NT5_ONLY
     SVC_(GetCurrentProcessorNumberEx, 1)
-/* NTDDI_VISTA = 0x06000000. Use the literal so the assembler preprocessor
- * (which doesn't include sdkddkver.h) gates this correctly too. */
-#if (NTDDI_VERSION >= 0x06000000)
+#if (NTDDI_VERSION >= NTDDI_VISTA)
     SVC_(CreateUserProcess, 11)
 #endif
 #endif

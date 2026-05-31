@@ -316,6 +316,7 @@ _Check_return_ _ACRTIMP double __cdecl _logb(_In_ double _X);
 _Check_return_ _ACRTIMP double __cdecl _nextafter(_In_ double _X, _In_ double _Y);
 _Check_return_ _ACRTIMP int    __cdecl _finite(_In_ double _X);
 _Check_return_ _ACRTIMP int    __cdecl _isnan(_In_ double _X);
+_Check_return_ _ACRTIMP int    __cdecl _isnanf(_In_ float _X);
 _Check_return_ _ACRTIMP int    __cdecl _fpclass(_In_ double _X);
 
 #ifdef _M_X64

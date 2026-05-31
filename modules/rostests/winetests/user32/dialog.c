@@ -2294,7 +2294,11 @@ static INT_PTR CALLBACK custom_test_dialog_proc(HWND hdlg, UINT msg, WPARAM wpar
 
 static void test_dialog_custom_data(void)
 {
+#ifdef _M_ARM64
+    win_skip("llvm-rc does not support dialog control creation data.\n");
+#else
     DialogBoxA(g_hinst, "CUSTOM_TEST_DIALOG", NULL, custom_test_dialog_proc);
+#endif
 }
 
 static INT_PTR CALLBACK capture_release_proc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam)

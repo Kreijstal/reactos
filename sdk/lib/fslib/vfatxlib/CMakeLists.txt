@@ -9,7 +9,11 @@ add_pch(vfatxlib vfatxlib.h SOURCE)
 target_link_libraries(vfatxlib chkstk)
 
 if(NOT MSVC)
-    target_link_libraries(vfatxlib -lgcc)
+    if(TARGET libgcc)
+        target_link_libraries(vfatxlib libgcc)
+    else()
+        target_link_libraries(vfatxlib -lgcc)
+    endif()
 endif()
 
 add_dependencies(vfatxlib psdk)

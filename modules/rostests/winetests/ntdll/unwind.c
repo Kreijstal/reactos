@@ -1811,7 +1811,6 @@ static void call_virtual_unwind_arm64( void *code_mem, int testnum, const struct
     }
 }
 
-#ifndef __REACTOS__
 #define DW(dword) ((dword >> 0) & 0xff), ((dword >> 8) & 0xff), ((dword >> 16) & 0xff), ((dword >> 24) & 0xff)
 
 static void test_virtual_unwind_arm64(void)
@@ -2644,8 +2643,6 @@ static void test_virtual_unwind_arm64(void)
     for (i = 0; i < ARRAY_SIZE(tests); i++)
         call_virtual_unwind_arm64( code_mem, i, &tests[i] );
 }
-
-#endif // __REACTOS__
 
 #undef UWOP_ALLOC_SMALL
 #undef UWOP_ALLOC_LARGE

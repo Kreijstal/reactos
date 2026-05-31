@@ -8,6 +8,13 @@
 #include "precomp.h"
 #include <pseh/pseh2.h>
 
+#if !defined(_M_IX86) && !defined(_M_AMD64)
+START_TEST(UserModeException)
+{
+    win_skip("UserModeException instruction fault tests are only implemented on x86/AMD64.\n");
+}
+#else
+
 typedef enum _CPU_VENDOR
 {
     CPU_VENDOR_INTEL,
@@ -322,3 +329,5 @@ START_TEST(UserModeException)
 
     Test_InstructionFaults();
 }
+
+#endif

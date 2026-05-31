@@ -1,16 +1,13 @@
 
-/* INCLUDES ******************************************************************/
-
-/* We need one of these first! */
-/* #include <kxarm64.h> */
-
 /* CODE **********************************************************************/
 
-    TEXTAREA
+    .text
+    .align 2
 
-    LEAF_ENTRY atan2
-    /* TODO: add an assert fail call, as this is unimplemented */
-    LEAF_END atan2
+    .globl atan2
+    .def atan2; .scl 2; .type 32; .endef
+atan2:
+    fmov d0, xzr
+    ret
 
-    END
 /* EOF */
