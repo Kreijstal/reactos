@@ -109,7 +109,7 @@ __declspec(noreturn) void __cdecl
 __report_gsfailure (ULONG_PTR StackCookie)
 {
   volatile UINT_PTR cookie[2] __MINGW_ATTRIB_UNUSED;
-#ifdef _WIN64
+#if defined(_WIN64) && !defined(_M_ARM64)
   ULONG64 controlPC, imgBase, establisherFrame;
   PRUNTIME_FUNCTION fctEntry;
   PVOID hndData;
@@ -123,9 +123,12 @@ __report_gsfailure (ULONG_PTR StackCookie)
 			&GS_ContextRecord, &hndData, &establisherFrame, NULL);
     }
   else
-#endif /* _WIN64 */
+#endif /* _WIN64 && !_M_ARM64 */
     {
-#ifdef _WIN64
+#if defined(_M_ARM64)
+      GS_ContextRecord.Pc = (ULONGLONG) _ReturnAddress();
+      GS_ContextRecord.Sp = (ULONGLONG) _AddressOfReturnAddress() + 8;
+#elif defined(_WIN64)
       GS_ContextRecord.Rip = (ULONGLONG) _ReturnAddress();
       GS_ContextRecord.Rsp = (ULONGLONG) _AddressOfReturnAddress() + 8;
 #else
@@ -134,7 +137,10 @@ __report_gsfailure (ULONG_PTR StackCookie)
 #endif /* _WIN64 */
     }
 
-#ifdef _WIN64
+#if defined(_M_ARM64)
+  GS_ExceptionRecord.ExceptionAddress = (PVOID) GS_ContextRecord.Pc;
+  GS_ContextRecord.X0 = StackCookie;
+#elif defined(_WIN64)
   GS_ExceptionRecord.ExceptionAddress = (PVOID) GS_ContextRecord.Rip;
   GS_ContextRecord.Rcx = StackCookie;
 #else

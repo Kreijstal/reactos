@@ -165,7 +165,7 @@ KdInitSystem(
     _In_ ULONG BootPhase,
     _In_opt_ PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
-    BOOLEAN EnableKd = FALSE, DisableKdAfterInit = FALSE, BlockEnable = FALSE;
+    BOOLEAN EnableKd, DisableKdAfterInit = FALSE, BlockEnable = FALSE;
     PLDR_DATA_TABLE_ENTRY LdrEntry;
     ULONG i;
 
