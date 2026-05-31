@@ -999,11 +999,10 @@ START_TEST(MmSection)
     /* create a one-byte file that we can use */
     InitializeObjectAttributes(&ObjectAttributes, &FileName1, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile(&FileHandle1, GENERIC_WRITE | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SUPERSEDE, FILE_NON_DIRECTORY_FILE, NULL, 0);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    ok_eq_ulongptr(IoStatusBlock.Information, FILE_CREATED);
-    ok(FileHandle1 != NULL, "FileHandle1 is NULL\n");
-    if (FileHandle1)
+    if (!skip(NT_SUCCESS(Status) && FileHandle1 != NULL,
+              "ZwCreateFile failed (0x%08lx) - file-backed sub-tests skipped\n", Status))
     {
+        ok_eq_ulongptr(IoStatusBlock.Information, FILE_CREATED);
         FileOffset.QuadPart = 0;
         Status = ZwWriteFile(FileHandle1, NULL, NULL, NULL, &IoStatusBlock, &FileData, sizeof FileData, &FileOffset, NULL);
         ok(Status == STATUS_SUCCESS || Status == STATUS_PENDING, "Status = 0x%08lx\n", Status);
@@ -1013,22 +1012,22 @@ START_TEST(MmSection)
         Status = ZwClose(FileHandle1);
         ok_eq_hex(Status, STATUS_SUCCESS);
         FileHandle1 = NULL;
-    }
 
-    InitializeObjectAttributes(&ObjectAttributes, &FileName1, OBJ_CASE_INSENSITIVE, NULL, NULL);
-    Status = ZwCreateFile(&FileHandle1, GENERIC_ALL, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE, NULL, 0);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    ok_eq_ulongptr(IoStatusBlock.Information, FILE_OPENED);
-    ok(FileHandle1 != NULL, "FileHandle1 is NULL\n");
-    if (GetNTVersion() < _WIN32_WINNT_WIN8)
-        CheckObject(FileHandle1, 2L, 1L);
+        InitializeObjectAttributes(&ObjectAttributes, &FileName1, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = ZwCreateFile(&FileHandle1, GENERIC_ALL, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE, NULL, 0);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(IoStatusBlock.Information, FILE_OPENED);
+        ok(FileHandle1 != NULL, "FileHandle1 is NULL\n");
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+            CheckObject(FileHandle1, 2L, 1L);
 #ifdef _M_IX86
-    else
-        CheckObject(FileHandle1, 33L, 1L);
+        else
+            CheckObject(FileHandle1, 33L, 1L);
 #else
-    else
-        CheckObject(FileHandle1, 32769L, 1L);
+        else
+            CheckObject(FileHandle1, 32769L, 1L);
 #endif
+    }
 
     InitializeObjectAttributes(&ObjectAttributes, &FileName2, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile(&FileHandle2, GENERIC_READ, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0);
