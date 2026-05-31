@@ -28,6 +28,23 @@ BOOLEAN UserPdeFault = FALSE;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+/*
+ * Minimum amount of committed stack the kernel keeps available below the
+ * point where it raises STATUS_STACK_OVERFLOW, reserved for the user-mode
+ * exception dispatcher. On amd64 a single __except after a stack overflow
+ * runs KiUserExceptionDispatcher -> RtlDispatchException -> RtlpUnwindInternal
+ * (find handler) -> language handler -> RtlUnwindEx -> RtlpUnwindInternal
+ * (unwind); each RtlpUnwindInternal frame alone holds two full CONTEXT
+ * structures (~1.2 KB each on amd64) and the chain nests, so a few KB are
+ * needed. x86 needs far less. This mirrors the per-thread stack guarantee
+ * Windows keeps for stack-overflow recovery (see RtlSetThreadStackGuarantee).
+ */
+#ifdef _WIN64
+#define MI_STACK_OVERFLOW_GUARANTEE (4 * PAGE_SIZE)
+#else
+#define MI_STACK_OVERFLOW_GUARANTEE PAGE_SIZE
+#endif
+
 static
 NTSTATUS
 NTAPI
@@ -37,7 +54,7 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     PETHREAD CurrentThread = PsGetCurrentThread();
     PTEB Teb = CurrentThread->Tcb.Teb;
     PVOID StackBase, DeallocationStack, NextStackAddress;
-    SIZE_T GuaranteedSize;
+    SIZE_T GuaranteedSize, RegionSize;
     NTSTATUS Status;
 
     /* Do we own the address space lock? */
@@ -64,11 +81,13 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     DPRINT("Handling guard page fault with Stacks Addresses 0x%p and 0x%p, guarantee: %lx\n",
             StackBase, DeallocationStack, GuaranteedSize);
 
-    /* Guarantees make this code harder, for now, assume there aren't any */
-    ASSERT(GuaranteedSize == 0);
+    /* Honor a per-thread stack guarantee if one was set, but never reserve
+     * less than the minimum the user-mode exception dispatcher needs. */
+    if (GuaranteedSize < MI_STACK_OVERFLOW_GUARANTEE)
+        GuaranteedSize = MI_STACK_OVERFLOW_GUARANTEE;
 
-    /* So allocate only the minimum guard page size */
-    GuaranteedSize = PAGE_SIZE;
+    /* Round the guarantee up to a page boundary */
+    GuaranteedSize = ROUND_TO_PAGES(GuaranteedSize);
 
     /* Does this faulting stack address actually exist in the stack? */
     if ((Address >= StackBase) || (Address < DeallocationStack))
@@ -79,23 +98,31 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         return STATUS_GUARD_PAGE_VIOLATION;
     }
 
-    /* This is where the stack will start now */
-    NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - GuaranteedSize);
+    /* The new guard page goes one page below the faulting page */
+    NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - PAGE_SIZE);
 
-    /* Do we have at least one page between here and the end of the stack? */
-    if (((ULONG_PTR)NextStackAddress - PAGE_SIZE) < (ULONG_PTR)DeallocationStack)
+    /* Do we still have room to move the guard page down while keeping the
+     * committed "stack guarantee" region reserved for the stack-overflow
+     * exception dispatcher, plus a hard guard page below it down to
+     * DeallocationStack? If continuing to grow would eat into that guarantee,
+     * raise the overflow now -- while the faulting page is still above the
+     * guarantee region -- so KiUserExceptionDispatcher and the user-mode
+     * handler run in the clean guarantee region rather than the few bytes
+     * left in the last user-consumed page. */
+    if ((ULONG_PTR)NextStackAddress < (ULONG_PTR)DeallocationStack + GuaranteedSize + PAGE_SIZE)
     {
-        /* We don't -- Trying to make this guard page valid now */
-        DPRINT1("Close to our death...\n");
-
-        /* Calculate the next memory address */
-        NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + GuaranteedSize);
+        /* This is a real stack overflow. Commit the guarantee region, right
+         * above the final hard guard page, so the handler has room to run. */
+        DPRINT1("Stack overflow for %.16s at %p (DeallocationStack %p)\n",
+                PsGetCurrentProcess()->ImageFileName, Address, DeallocationStack);
+        NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + PAGE_SIZE);
+        RegionSize = GuaranteedSize;
 
         /* Allocate the memory */
         Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
                                          &NextStackAddress,
                                          0,
-                                         &GuaranteedSize,
+                                         &RegionSize,
                                          MEM_COMMIT,
                                          PAGE_READWRITE);
         if (NT_SUCCESS(Status))
@@ -122,8 +149,9 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     /* Don't handle this flag yet */
     ASSERT((PsGetCurrentProcess()->Peb->NtGlobalFlag & FLG_DISABLE_STACK_EXTENSION) == 0);
 
-    /* Update the stack limit */
-    Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + GuaranteedSize);
+    /* The faulting page (already un-guarded by the caller) becomes the lowest
+     * committed page of the stack */
+    Teb->NtTib.StackLimit = PAGE_ALIGN(Address);
 
 #ifdef _WIN64
     /* Update WOW64 32-bit TEB stack limit */
@@ -133,11 +161,12 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     }
 #endif
 
-    /* Now move the guard page to the next page */
+    /* Now move the guard page down by one page */
+    RegionSize = PAGE_SIZE;
     Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
                                      &NextStackAddress,
                                      0,
-                                     &GuaranteedSize,
+                                     &RegionSize,
                                      MEM_COMMIT,
                                      PAGE_READWRITE | PAGE_GUARD);
     if ((NT_SUCCESS(Status) || (Status == STATUS_ALREADY_COMMITTED)))
