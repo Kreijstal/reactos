@@ -213,12 +213,16 @@ PUBLIC KiUserExceptionDispatcher
 
 .NoWow64:
 
-    /* Dispatch the exception */
-    push rcx
-    push rdx
+    /* Dispatch the exception. RtlDispatchException(ExceptionRecord, ContextRecord)
+       takes its arguments in rcx/rdx; both records live at fixed offsets in our
+       frame. Load them from there rather than pushing the incoming pointers
+       across the call: a push/pop after .ENDPROLOG would move RSP without any
+       matching unwind information, so unwinding back through this dispatcher
+       frame would read the trailing MACHINE_FRAME from the wrong offset and
+       recover a bogus faulting context (breaking RtlUnwindEx through here). */
+    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rdx, [rsp]                        /* ContextRecord */
     call RtlDispatchException
-    pop rdx
-    pop rcx
 
     /* Check for success */
     or al, al
