@@ -197,18 +197,30 @@ static void init(void)
 #if !defined (__REACTOS__) || (DLL_EXPORT_VERSION >= 0x600)
 static BOOL create_process_machine( char *cmdline, DWORD flags, USHORT machine, PROCESS_INFORMATION *pi )
 {
+    BOOL (WINAPI *pInitializeProcThreadAttributeList)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD, PSIZE_T);
+    BOOL (WINAPI *pUpdateProcThreadAttribute)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD_PTR, PVOID, SIZE_T, PVOID, PSIZE_T);
+    void (WINAPI *pDeleteProcThreadAttributeList)(LPPROC_THREAD_ATTRIBUTE_LIST);
     struct _PROC_THREAD_ATTRIBUTE_LIST *list;
     STARTUPINFOEXA si = {{ sizeof(si) }};
     SIZE_T size = 1024;
     BOOL ret;
 
+    pInitializeProcThreadAttributeList = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ),
+                                                                 "InitializeProcThreadAttributeList" );
+    pUpdateProcThreadAttribute = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ),
+                                                         "UpdateProcThreadAttribute" );
+    pDeleteProcThreadAttributeList = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ),
+                                                             "DeleteProcThreadAttributeList" );
+    if (!pInitializeProcThreadAttributeList || !pUpdateProcThreadAttribute || !pDeleteProcThreadAttributeList)
+        return FALSE;
+
     si.lpAttributeList = list = malloc( size );
-    InitializeProcThreadAttributeList( list, 1, 0, &size );
-    UpdateProcThreadAttribute( list, 0, PROC_THREAD_ATTRIBUTE_MACHINE_TYPE,
-                               &machine, sizeof(machine), NULL, NULL );
+    pInitializeProcThreadAttributeList( list, 1, 0, &size );
+    pUpdateProcThreadAttribute( list, 0, PROC_THREAD_ATTRIBUTE_MACHINE_TYPE,
+                                &machine, sizeof(machine), NULL, NULL );
     ret = CreateProcessA( NULL, cmdline, NULL, NULL, FALSE,
                           EXTENDED_STARTUPINFO_PRESENT | flags, NULL, NULL, &si.StartupInfo, pi );
-    DeleteProcThreadAttributeList( list );
+    pDeleteProcThreadAttributeList( list );
     free( list );
     return ret;
 }
@@ -3177,6 +3189,38 @@ static void test_exception_dispatcher(void)
 }
 
 #endif  /* _WIN64 */
+
+#if defined(__REACTOS__) && (DLL_EXPORT_VERSION < 0x600) && defined(__aarch64__)
+static BOOL create_process_machine( char *cmdline, DWORD flags, USHORT machine, PROCESS_INFORMATION *pi )
+{
+    BOOL (WINAPI *pInitializeProcThreadAttributeList)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD, PSIZE_T);
+    BOOL (WINAPI *pUpdateProcThreadAttribute)(LPPROC_THREAD_ATTRIBUTE_LIST, DWORD, DWORD_PTR, PVOID, SIZE_T, PVOID, PSIZE_T);
+    void (WINAPI *pDeleteProcThreadAttributeList)(LPPROC_THREAD_ATTRIBUTE_LIST);
+    struct _PROC_THREAD_ATTRIBUTE_LIST *list;
+    STARTUPINFOEXA si = {{ sizeof(si) }};
+    SIZE_T size = 1024;
+    BOOL ret;
+
+    pInitializeProcThreadAttributeList = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ),
+                                                                 "InitializeProcThreadAttributeList" );
+    pUpdateProcThreadAttribute = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ),
+                                                         "UpdateProcThreadAttribute" );
+    pDeleteProcThreadAttributeList = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ),
+                                                             "DeleteProcThreadAttributeList" );
+    if (!pInitializeProcThreadAttributeList || !pUpdateProcThreadAttribute || !pDeleteProcThreadAttributeList)
+        return FALSE;
+
+    si.lpAttributeList = list = malloc( size );
+    pInitializeProcThreadAttributeList( list, 1, 0, &size );
+    pUpdateProcThreadAttribute( list, 0, PROC_THREAD_ATTRIBUTE_MACHINE_TYPE,
+                                &machine, sizeof(machine), NULL, NULL );
+    ret = CreateProcessA( NULL, cmdline, NULL, NULL, FALSE,
+                          EXTENDED_STARTUPINFO_PRESENT | flags, NULL, NULL, &si.StartupInfo, pi );
+    pDeleteProcThreadAttributeList( list );
+    free( list );
+    return ret;
+}
+#endif
 
 static void test_arm64ec(void)
 {

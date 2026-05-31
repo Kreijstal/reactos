@@ -12,7 +12,7 @@
 // char (*__kaboom1)[FIELD_OFFSET(IO_STACK_LOCATION, Parameters.Create.EaLength)] = 1;
 // Taken from https://stackoverflow.com/a/35261673
 
-#if !defined(_AMD64_)
+#if !defined(_AMD64_) && !defined(_ARM64_)
 
 C_ASSERT(sizeof(IO_STACK_LOCATION) == 36);
 
@@ -40,7 +40,7 @@ C_ASSERT(FIELD_OFFSET(IO_STACK_LOCATION, Parameters.SetFile.AdvanceOnly) == 17);
 C_ASSERT(FIELD_OFFSET(IO_STACK_LOCATION, Parameters.SetFile.ClusterCount) == 16);
 C_ASSERT(FIELD_OFFSET(IO_STACK_LOCATION, Parameters.SetFile.DeleteHandle) == 16);
 
-#else
+#elif defined(_AMD64_)
 
 C_ASSERT(sizeof(IO_STACK_LOCATION) == 72);
 

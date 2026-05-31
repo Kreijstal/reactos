@@ -20,7 +20,10 @@
 #pragma once
 
 extern char __ImageBase;
-#ifdef __GNUC__
+#ifdef __clang__
+/* .text, .rdata, .buildid, .data, .pdata and .reloc */
+#define FREELDR_SECTION_COUNT 6
+#elif defined(__GNUC__)
 /* .text/.data/.rdata, .edata and .bss */
 #define FREELDR_SECTION_COUNT 3
 #else
@@ -63,10 +66,26 @@ typedef struct _FREELDR_MEMORY_DESCRIPTOR
 #define MM_PAGE_SIZE    4096
 #define MM_PAGE_MASK    0xFFF
 #define MM_PAGE_SHIFT    12
-//HACK: ReactOS AMD64 can't handle the full memory range yet CORE-20265
+// CORE-20265: Expanded from 0x1FFFFF (8GB) to 0xFFFFFF (64GB).
+// The original 36-bit value (0xFFFFFFFFF = 262TB) produces impractically
+// large page lookup tables. 64GB is sufficient for typical VMs/hardware.
 //#define MM_MAX_PAGE        0xFFFFFFFFF /* 36 bits for the PFN */
-#define MM_MAX_PAGE        0x1FFFFF
-#define MM_MAX_PAGE_LOADER 0x3FFFF /* on x64 freeldr only maps 1 GB */
+#define MM_MAX_PAGE        0xFFFFFF
+#define MM_MAX_PAGE_LOADER 0xFFFFF /* on x64 freeldr maps 4 GB */
+
+#define MM_SIZE_TO_PAGES(a)  \
+    ( ((a) >> MM_PAGE_SHIFT) + ((a) & MM_PAGE_MASK ? 1 : 0) )
+
+#endif
+
+#if defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+
+#define MM_PAGE_SIZE    4096
+#define MM_PAGE_MASK    0xFFF
+#define MM_PAGE_SHIFT    12
+#define MM_MAX_PAGE                0xFFFFFFFFFULL /* 36-bit PFN span */
+#define MM_MAX_PAGE_LOADER         0x200000       /* 8 GB allocation range */
+#define MM_MAX_PAGE_LOADER_MAPPED  0x200000       /* 8 GB mapped range */
 
 #define MM_SIZE_TO_PAGES(a)  \
     ( ((a) >> MM_PAGE_SHIFT) + ((a) & MM_PAGE_MASK ? 1 : 0) )

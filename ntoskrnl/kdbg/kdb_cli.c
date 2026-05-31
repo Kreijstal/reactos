@@ -57,6 +57,7 @@
 static BOOLEAN KdbpCmdEvalExpression(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdDisassembleX(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdRegs(ULONG Argc, PCHAR Argv[]);
+static BOOLEAN KdbpCmdContextRecord(ULONG Argc, PCHAR Argv[]);
 static BOOLEAN KdbpCmdBackTrace(ULONG Argc, PCHAR Argv[]);
 
 static BOOLEAN KdbpCmdContinue(ULONG Argc, PCHAR Argv[]);
@@ -356,6 +357,7 @@ static const struct
     { "cregs", "cregs", "Display control, descriptor table and task segment registers.", KdbpCmdRegs },
     { "sregs", "sregs", "Display status registers.", KdbpCmdRegs },
     { "dregs", "dregs", "Display debug registers.", KdbpCmdRegs },
+    { ".cxr", ".cxr [address]", "Set or reset context record. With address: display context at address. Without: reset to current trap frame.", KdbpCmdContextRecord },
     { "bt", "bt [*frameaddr|thread id]", "Prints current backtrace or from given frame address.", KdbpCmdBackTrace },
 #ifdef __ROS_DWARF__
     { "dt", "dt [mod] [type] [addr]", "Print a struct. The address is optional.", KdbpCmdPrintStruct },
@@ -459,7 +461,7 @@ KdbpGetHexNumber(
         pszNum += 2;
 
     /* Make a number from the string (hex) */
-    *pulValue = strtoul(pszNum, &endptr, 16);
+    *pulValue = strtoulptr(pszNum, &endptr, 16);
 
     return (*endptr == '\0');
 }
@@ -924,6 +926,7 @@ KdbpCmdRegs(
     PCHAR Argv[])
 {
     PCONTEXT Context = KdbCurrentTrapFrame;
+#if !defined(_M_ARM64)
     INT i;
     static const PCHAR EflagsBits[32] = { " CF", NULL, " PF", " BIT3", " AF", " BIT5",
                                           " ZF", " SF", " TF", " IF", " DF", " OF",
@@ -932,6 +935,7 @@ KdbpCmdRegs(
                                           " BIT23", " BIT24", " BIT25", " BIT26",
                                           " BIT27", " BIT28", " BIT29", " BIT30",
                                           " BIT31" };
+#endif
 
     if (Argv[0][0] == 'r') /* regs */
     {
@@ -948,7 +952,7 @@ KdbpCmdRegs(
                   Context->Ecx, Context->Edx,
                   Context->Esi, Context->Edi,
                   Context->Ebp);
-#else
+#elif defined(_M_AMD64)
         KdbpPrint("CS:RIP  0x%04x:0x%p\n"
                   "SS:RSP  0x%04x:0x%p\n"
                   "   RAX  0x%p     RBX  0x%p\n"
@@ -961,7 +965,60 @@ KdbpCmdRegs(
                   Context->Rcx, Context->Rdx,
                   Context->Rsi, Context->Rdi,
                   Context->Rbp);
+#elif defined(_M_ARM64)
+        KdbpPrint("PC  0x%p     SP  0x%p\n"
+                  "LR  0x%p     FP  0x%p\n"
+                  "X0  0x%p     X1  0x%p\n"
+                  "X2  0x%p     X3  0x%p\n"
+                  "X4  0x%p     X5  0x%p\n"
+                  "X6  0x%p     X7  0x%p\n"
+                  "X8  0x%p     X9  0x%p\n"
+                  "X10 0x%p     X11 0x%p\n"
+                  "X12 0x%p     X13 0x%p\n"
+                  "X14 0x%p     X15 0x%p\n"
+                  "X16 0x%p     X17 0x%p\n"
+                  "X18 0x%p     X19 0x%p\n"
+                  "X20 0x%p     X21 0x%p\n"
+                  "X22 0x%p     X23 0x%p\n"
+                  "X24 0x%p     X25 0x%p\n"
+                  "X26 0x%p     X27 0x%p\n"
+                  "X28 0x%p     CPSR 0x%08x\n",
+                  (PVOID)(ULONG_PTR)Context->Pc,
+                  (PVOID)(ULONG_PTR)Context->Sp,
+                  (PVOID)(ULONG_PTR)Context->Lr,
+                  (PVOID)(ULONG_PTR)Context->Fp,
+                  (PVOID)(ULONG_PTR)Context->X0,
+                  (PVOID)(ULONG_PTR)Context->X1,
+                  (PVOID)(ULONG_PTR)Context->X2,
+                  (PVOID)(ULONG_PTR)Context->X3,
+                  (PVOID)(ULONG_PTR)Context->X4,
+                  (PVOID)(ULONG_PTR)Context->X5,
+                  (PVOID)(ULONG_PTR)Context->X6,
+                  (PVOID)(ULONG_PTR)Context->X7,
+                  (PVOID)(ULONG_PTR)Context->X8,
+                  (PVOID)(ULONG_PTR)Context->X9,
+                  (PVOID)(ULONG_PTR)Context->X10,
+                  (PVOID)(ULONG_PTR)Context->X11,
+                  (PVOID)(ULONG_PTR)Context->X12,
+                  (PVOID)(ULONG_PTR)Context->X13,
+                  (PVOID)(ULONG_PTR)Context->X14,
+                  (PVOID)(ULONG_PTR)Context->X15,
+                  (PVOID)(ULONG_PTR)Context->X16,
+                  (PVOID)(ULONG_PTR)Context->X17,
+                  (PVOID)(ULONG_PTR)Context->X18,
+                  (PVOID)(ULONG_PTR)Context->X19,
+                  (PVOID)(ULONG_PTR)Context->X20,
+                  (PVOID)(ULONG_PTR)Context->X21,
+                  (PVOID)(ULONG_PTR)Context->X22,
+                  (PVOID)(ULONG_PTR)Context->X23,
+                  (PVOID)(ULONG_PTR)Context->X24,
+                  (PVOID)(ULONG_PTR)Context->X25,
+                  (PVOID)(ULONG_PTR)Context->X26,
+                  (PVOID)(ULONG_PTR)Context->X27,
+                  (PVOID)(ULONG_PTR)Context->X28,
+                  Context->Cpsr);
 #endif
+#if !defined(_M_ARM64)
         /* Display the EFlags */
         KdbpPrint("EFLAGS  0x%08x ", Context->EFlags);
         for (i = 0; i < 32; i++)
@@ -984,11 +1041,34 @@ KdbpCmdRegs(
             }
         }
         KdbpPrint("\n");
+#endif
     }
     else if (Argv[0][0] == 'c') /* cregs */
     {
+#if defined(_M_ARM64)
+        ULONG64 CurrentEl, Daif, Sctlr, Tcr, Ttbr0, Ttbr1, Mair, Vbar, Esr, Far, SpEl0;
+
+        __asm__ __volatile__("mrs %0, CurrentEL" : "=r"(CurrentEl));
+        __asm__ __volatile__("mrs %0, DAIF" : "=r"(Daif));
+        __asm__ __volatile__("mrs %0, SCTLR_EL1" : "=r"(Sctlr));
+        __asm__ __volatile__("mrs %0, TCR_EL1" : "=r"(Tcr));
+        __asm__ __volatile__("mrs %0, TTBR0_EL1" : "=r"(Ttbr0));
+        __asm__ __volatile__("mrs %0, TTBR1_EL1" : "=r"(Ttbr1));
+        __asm__ __volatile__("mrs %0, MAIR_EL1" : "=r"(Mair));
+        __asm__ __volatile__("mrs %0, VBAR_EL1" : "=r"(Vbar));
+        __asm__ __volatile__("mrs %0, ESR_EL1" : "=r"(Esr));
+        __asm__ __volatile__("mrs %0, FAR_EL1" : "=r"(Far));
+        __asm__ __volatile__("mrs %0, SP_EL0" : "=r"(SpEl0));
+
+        KdbpPrint("CurrentEL 0x%p     DAIF      0x%p\n", (PVOID)(ULONG_PTR)CurrentEl, (PVOID)(ULONG_PTR)Daif);
+        KdbpPrint("SCTLR_EL1 0x%p     TCR_EL1   0x%p\n", (PVOID)(ULONG_PTR)Sctlr, (PVOID)(ULONG_PTR)Tcr);
+        KdbpPrint("TTBR0_EL1 0x%p     TTBR1_EL1 0x%p\n", (PVOID)(ULONG_PTR)Ttbr0, (PVOID)(ULONG_PTR)Ttbr1);
+        KdbpPrint("MAIR_EL1  0x%p     VBAR_EL1  0x%p\n", (PVOID)(ULONG_PTR)Mair, (PVOID)(ULONG_PTR)Vbar);
+        KdbpPrint("ESR_EL1   0x%p     FAR_EL1   0x%p\n", (PVOID)(ULONG_PTR)Esr, (PVOID)(ULONG_PTR)Far);
+        KdbpPrint("SP_EL0    0x%p\n", (PVOID)(ULONG_PTR)SpEl0);
+#else
         ULONG Cr0, Cr2, Cr3, Cr4;
-        KDESCRIPTOR Gdtr = {0, 0, 0}, Idtr = {0, 0, 0};
+        KDESCRIPTOR Gdtr = {0}, Idtr = {0};
         USHORT Ldtr, Tr;
         static const PCHAR Cr0Bits[32] = { " PE", " MP", " EM", " TS", " ET", " NE", NULL, NULL,
                                            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -1062,9 +1142,13 @@ KdbpCmdRegs(
         KdbpPrint("LDTR 0x%04x\n", Ldtr);
         KdbpPrint("IDTR Base 0x%08x  Size 0x%04x\n", Idtr.Base, Idtr.Limit);
         KdbpPrint("TR   0x%04x\n", Tr);
+#endif
     }
     else if (Argv[0][0] == 's') /* sregs */
     {
+#if defined(_M_ARM64)
+        KdbpPrint("Segment registers are not present on ARM64.\n");
+#else
         KdbpPrint("CS  0x%04x  Index 0x%04x  %cDT RPL%d\n",
                   Context->SegCs & 0xffff, (Context->SegCs & 0xffff) >> 3,
                   (Context->SegCs & (1 << 2)) ? 'L' : 'G', Context->SegCs & 3);
@@ -1078,10 +1162,28 @@ KdbpCmdRegs(
                   Context->SegGs, Context->SegGs >> 3, (Context->SegGs & (1 << 2)) ? 'L' : 'G', Context->SegGs & 3);
         KdbpPrint("SS  0x%04x  Index 0x%04x  %cDT RPL%d\n",
                   Context->SegSs, Context->SegSs >> 3, (Context->SegSs & (1 << 2)) ? 'L' : 'G', Context->SegSs & 3);
+#endif
     }
     else /* dregs */
     {
         ASSERT(Argv[0][0] == 'd');
+#if defined(_M_ARM64)
+        ULONG i;
+
+        for (i = 0; i < RTL_NUMBER_OF(Context->Bcr); i++)
+        {
+            KdbpPrint("BVR%lu 0x%p     BCR%lu 0x%08lx\n",
+                      i, (PVOID)(ULONG_PTR)Context->Bvr[i],
+                      i, Context->Bcr[i]);
+        }
+
+        for (i = 0; i < RTL_NUMBER_OF(Context->Wcr); i++)
+        {
+            KdbpPrint("WVR%lu 0x%p     WCR%lu 0x%08lx\n",
+                      i, (PVOID)(ULONG_PTR)Context->Wvr[i],
+                      i, Context->Wcr[i]);
+        }
+#else
         KdbpPrint("DR0  0x%08x\n"
                   "DR1  0x%08x\n"
                   "DR2  0x%08x\n"
@@ -1090,7 +1192,141 @@ KdbpCmdRegs(
                   "DR7  0x%08x\n",
                   Context->Dr0, Context->Dr1, Context->Dr2, Context->Dr3,
                   Context->Dr6, Context->Dr7);
+#endif
     }
+
+    return TRUE;
+}
+
+/*!\brief Implements the ".cxr" (set/reset context record) command.
+ *
+ * With an address argument: reads a CONTEXT structure from the given
+ * address and makes it the active context for register display, backtrace,
+ * and expression evaluation (like WinDbg's .cxr command).
+ *
+ * Without arguments: resets back to the original trap frame context.
+ */
+static BOOLEAN
+KdbpCmdContextRecord(
+    ULONG Argc,
+    PCHAR Argv[])
+{
+    static CONTEXT KdbSavedContextRecord;
+    static BOOLEAN KdbContextRecordActive = FALSE;
+    static PKDB_KTRAP_FRAME KdbSavedTrapFrame = NULL;
+    ULONG_PTR Address;
+    NTSTATUS Status;
+
+    if (Argc < 2)
+    {
+        /* No argument: reset to original trap frame */
+        if (KdbContextRecordActive)
+        {
+            KdbCurrentTrapFrame = KdbSavedTrapFrame;
+            KdbSavedTrapFrame = NULL;
+            KdbContextRecordActive = FALSE;
+            KdbpPrint("Resetting default context.\n");
+        }
+        else
+        {
+            KdbpPrint("No context record is currently active.\n"
+                      "Usage: .cxr <address>  - Set context to CONTEXT at address\n"
+                      "       .cxr            - Reset to current trap frame\n");
+        }
+        return TRUE;
+    }
+
+    /* Parse the address argument */
+    if (!KdbpGetHexNumber(Argv[1], &Address))
+    {
+        KdbpPrint("Invalid address: %s\n", Argv[1]);
+        return TRUE;
+    }
+
+    if (Address == 0)
+    {
+        KdbpPrint("Invalid context record address 0.\n");
+        return TRUE;
+    }
+
+    /* Read the CONTEXT structure from the specified address */
+    Status = KdbpSafeReadMemory(&KdbSavedContextRecord,
+                                (PVOID)Address,
+                                sizeof(CONTEXT));
+    if (!NT_SUCCESS(Status))
+    {
+        KdbpPrint("Failed to read CONTEXT at 0x%p: status 0x%08x\n",
+                  (PVOID)Address, Status);
+        return TRUE;
+    }
+
+    /* Basic sanity check: ContextFlags should have at least CONTEXT_CONTROL set */
+    if ((KdbSavedContextRecord.ContextFlags & CONTEXT_CONTROL) == 0)
+    {
+        KdbpPrint("WARNING: ContextFlags (0x%08x) does not include CONTEXT_CONTROL.\n"
+                  "         The data at 0x%p may not be a valid CONTEXT record.\n",
+                  KdbSavedContextRecord.ContextFlags, (PVOID)Address);
+    }
+
+    /* Save the current trap frame pointer and switch to the loaded context */
+    if (!KdbContextRecordActive)
+        KdbSavedTrapFrame = KdbCurrentTrapFrame;
+    KdbCurrentTrapFrame = (PKDB_KTRAP_FRAME)&KdbSavedContextRecord;
+    KdbContextRecordActive = TRUE;
+
+    /* Display the context */
+#ifdef _M_IX86
+    KdbpPrint("Context record @ 0x%08x:\n"
+              "CS:EIP  0x%04x:0x%08x\n"
+              "SS:ESP  0x%04x:0x%08x\n"
+              "   EAX  0x%08x   EBX  0x%08x\n"
+              "   ECX  0x%08x   EDX  0x%08x\n"
+              "   ESI  0x%08x   EDI  0x%08x\n"
+              "   EBP  0x%08x\n"
+              "EFLAGS  0x%08x\n",
+              Address,
+              KdbSavedContextRecord.SegCs & 0xFFFF, KdbSavedContextRecord.Eip,
+              KdbSavedContextRecord.SegSs, KdbSavedContextRecord.Esp,
+              KdbSavedContextRecord.Eax, KdbSavedContextRecord.Ebx,
+              KdbSavedContextRecord.Ecx, KdbSavedContextRecord.Edx,
+              KdbSavedContextRecord.Esi, KdbSavedContextRecord.Edi,
+              KdbSavedContextRecord.Ebp,
+              KdbSavedContextRecord.EFlags);
+#elif defined(_M_AMD64)
+    KdbpPrint("Context record @ 0x%p:\n"
+              "CS:RIP  0x%04x:0x%p\n"
+              "SS:RSP  0x%04x:0x%p\n"
+              "   RAX  0x%p     RBX  0x%p\n"
+              "   RCX  0x%p     RDX  0x%p\n"
+              "   RSI  0x%p     RDI  0x%p\n"
+              "   RBP  0x%p\n"
+              "EFLAGS  0x%08x\n",
+              (PVOID)Address,
+              KdbSavedContextRecord.SegCs & 0xFFFF, KdbSavedContextRecord.Rip,
+              KdbSavedContextRecord.SegSs, KdbSavedContextRecord.Rsp,
+              KdbSavedContextRecord.Rax, KdbSavedContextRecord.Rbx,
+              KdbSavedContextRecord.Rcx, KdbSavedContextRecord.Rdx,
+              KdbSavedContextRecord.Rsi, KdbSavedContextRecord.Rdi,
+              KdbSavedContextRecord.Rbp,
+              KdbSavedContextRecord.EFlags);
+#elif defined(_M_ARM64)
+    KdbpPrint("Context record @ 0x%p:\n"
+              "PC  0x%p     SP  0x%p\n"
+              "LR  0x%p     FP  0x%p\n"
+              "X0  0x%p     X1  0x%p\n"
+              "X2  0x%p     X3  0x%p\n"
+              "CPSR 0x%08x\n",
+              (PVOID)Address,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.Pc,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.Sp,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.Lr,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.Fp,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.X0,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.X1,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.X2,
+              (PVOID)(ULONG_PTR)KdbSavedContextRecord.X3,
+              KdbSavedContextRecord.Cpsr);
+#endif
 
     return TRUE;
 }
@@ -1220,13 +1456,19 @@ KdbpContextFromPrevTss(
 }
 #endif // _M_IX86
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_ARM64)
 
 static
 BOOLEAN
 GetNextFrame(
-    _Inout_ PCONTEXT Context)
+    _Inout_ PCONTEXT Context
+#ifdef _M_ARM64
+    ,
+    _Inout_ PBOOLEAN UsedLiveLr
+#endif
+    )
 {
+#ifdef _M_AMD64
     PRUNTIME_FUNCTION FunctionEntry;
     ULONG64 ImageBase, EstablisherFrame;
     PVOID HandlerData;
@@ -1262,6 +1504,54 @@ GetNextFrame(
     _SEH2_END
 
     return TRUE;
+#else
+    ULONG_PTR NextFrame;
+    ULONG_PTR ReturnAddress;
+
+    if (!*UsedLiveLr &&
+        (Context->Lr != 0) &&
+        (Context->Lr != Context->Pc))
+    {
+        *UsedLiveLr = TRUE;
+        Context->Pc = Context->Lr;
+        return TRUE;
+    }
+
+    if ((Context->Fp == 0) || (Context->Fp & (sizeof(ULONG_PTR) - 1)))
+    {
+        return FALSE;
+    }
+
+    if (!NT_SUCCESS(KdbpSafeReadMemory(&NextFrame,
+                                       (PVOID)(ULONG_PTR)Context->Fp,
+                                       sizeof(NextFrame))))
+    {
+        return FALSE;
+    }
+
+    if (!NT_SUCCESS(KdbpSafeReadMemory(&ReturnAddress,
+                                       (PVOID)(ULONG_PTR)(Context->Fp + sizeof(ULONG_PTR)),
+                                       sizeof(ReturnAddress))))
+    {
+        return FALSE;
+    }
+
+    if (ReturnAddress == 0)
+    {
+        return FALSE;
+    }
+
+    if ((NextFrame != 0) && (NextFrame <= Context->Fp))
+    {
+        return FALSE;
+    }
+
+    Context->Sp = Context->Fp + 2 * sizeof(ULONG_PTR);
+    Context->Fp = NextFrame;
+    Context->Lr = ReturnAddress;
+    Context->Pc = ReturnAddress;
+    return TRUE;
+#endif
 }
 
 static BOOLEAN
@@ -1270,30 +1560,85 @@ KdbpCmdBackTrace(
     PCHAR Argv[])
 {
     CONTEXT Context = *KdbCurrentTrapFrame;
+#ifdef _M_ARM64
+    BOOLEAN UsedLiveLr = FALSE;
+#endif
+
+#ifdef _M_ARM64
+    KdbPrintf("Context:\n");
+    KdbPrintf("PC  %p  SP  %p  FP  %p  LR  %p  CPSR %08x\n",
+              (PVOID)(ULONG_PTR)Context.Pc,
+              (PVOID)(ULONG_PTR)Context.Sp,
+              (PVOID)(ULONG_PTR)Context.Fp,
+              (PVOID)(ULONG_PTR)Context.Lr,
+              Context.Cpsr);
+    KdbPrintf("X0  %p  X1  %p  X2  %p  X3  %p\n",
+              (PVOID)(ULONG_PTR)Context.X0,
+              (PVOID)(ULONG_PTR)Context.X1,
+              (PVOID)(ULONG_PTR)Context.X2,
+              (PVOID)(ULONG_PTR)Context.X3);
+    KdbPrintf("X4  %p  X5  %p  X6  %p  X7  %p\n",
+              (PVOID)(ULONG_PTR)Context.X4,
+              (PVOID)(ULONG_PTR)Context.X5,
+              (PVOID)(ULONG_PTR)Context.X6,
+              (PVOID)(ULONG_PTR)Context.X7);
+    KdbPrintf("X8  %p  X9  %p  X10 %p  X11 %p\n",
+              (PVOID)(ULONG_PTR)Context.X8,
+              (PVOID)(ULONG_PTR)Context.X9,
+              (PVOID)(ULONG_PTR)Context.X10,
+              (PVOID)(ULONG_PTR)Context.X11);
+    KdbPrintf("X12 %p  X13 %p  X14 %p  X15 %p\n",
+              (PVOID)(ULONG_PTR)Context.X12,
+              (PVOID)(ULONG_PTR)Context.X13,
+              (PVOID)(ULONG_PTR)Context.X14,
+              (PVOID)(ULONG_PTR)Context.X15);
+    KdbPrintf("X16 %p  X17 %p  X18 %p\n",
+              (PVOID)(ULONG_PTR)Context.X16,
+              (PVOID)(ULONG_PTR)Context.X17,
+              (PVOID)(ULONG_PTR)Context.X18);
+#endif
 
     /* Walk through the frames */
-    KdbpPrint("Frames:\n");
+    KdbPrintf("Frames:\n");
     do
     {
         BOOLEAN GotNextFrame;
 
+#ifdef _M_AMD64
         KdbpPrint("[%p] ", (PVOID)Context.Rsp);
 
         /* Print the location after the call instruction */
         if (!KdbSymPrintAddress((PVOID)Context.Rip, &Context))
             KdbpPrint("<%p>", (PVOID)Context.Rip);
+#else
+        KdbpPrint("[%p] ", (PVOID)(ULONG_PTR)Context.Sp);
+
+        if (!KdbSymPrintAddress((PVOID)(ULONG_PTR)Context.Pc, &Context))
+            KdbpPrint("<%p>", (PVOID)(ULONG_PTR)Context.Pc);
+        KdbpPrint(" fp=%p lr=%p",
+                  (PVOID)(ULONG_PTR)Context.Fp,
+                  (PVOID)(ULONG_PTR)Context.Lr);
+#endif
         KdbpPrint("\n");
 
         if (KdbOutputAborted)
             break;
 
+#ifdef _M_ARM64
+        GotNextFrame = GetNextFrame(&Context, &UsedLiveLr);
+#else
         GotNextFrame = GetNextFrame(&Context);
+#endif
         if (!GotNextFrame)
         {
             KdbpPrint("Couldn't get next frame\n");
             break;
         }
+#ifdef _M_AMD64
     } while ((Context.Rip != 0) && (Context.Rsp != 0));
+#else
+    } while ((Context.Pc != 0) && (Context.Sp != 0));
+#endif
 
     return TRUE;
 }
@@ -1471,7 +1816,7 @@ CheckForParentTSS:
     return TRUE;
 }
 
-#endif // M_AMD64
+#endif // _M_AMD64 || _M_ARM64
 
 /*!\brief Continues execution of the system/leaves KDB.
  */
@@ -1959,7 +2304,7 @@ KdbpCmdThread(
                   "  Stack Base:     0x%08x\n"
                   "  Kernel Stack:   0x%08x\n"
                   "  Trap Frame:     0x%08x\n"
-#ifndef _M_AMD64
+#ifdef _M_IX86
                   "  NPX State:      %s (0x%x)\n"
 #endif
                   , (Argc < 2) ? "Current Thread:\n" : ""
@@ -1972,7 +2317,7 @@ KdbpCmdThread(
                   , Thread->Tcb.StackBase
                   , Thread->Tcb.KernelStack
                   , Thread->Tcb.TrapFrame
-#ifndef _M_AMD64
+#ifdef _M_IX86
                   , NPX_STATE_TO_STRING(Thread->Tcb.NpxState), Thread->Tcb.NpxState
 #endif
             );
@@ -2176,6 +2521,10 @@ KdbpCmdGdtLdtIdt(
     ULONG Argc,
     PCHAR Argv[])
 {
+#if defined(_M_ARM64)
+    KdbpPrint("%s is not an ARM64 descriptor-table command.\n", Argv[0]);
+    return TRUE;
+#else
     KDESCRIPTOR Reg;
     ULONG SegDesc[2];
     ULONG SegBase;
@@ -2386,6 +2735,7 @@ KdbpCmdGdtLdtIdt(
     }
 
     return TRUE;
+#endif
 }
 
 /*!\brief Displays the KPCR
@@ -2442,6 +2792,19 @@ KdbpCmdPcr(
               , Pcr->SecondLevelCacheSize
               , Pcr->InterruptMode);
 #else
+#ifdef _M_ARM64
+    KdbpPrint("  Self:                          0x%p\n", Pcr->Self);
+    KdbpPrint("  CurrentPrcb:                   0x%p\n", Pcr->CurrentPrcb);
+    KdbpPrint("  LockArray:                     0x%p\n", Pcr->LockArray);
+    KdbpPrint("  Used_Self:                     0x%p\n", Pcr->Used_Self);
+    KdbpPrint("  CurrentIrql:                   %u\n", Pcr->CurrentIrql);
+    KdbpPrint("  SecondLevelCacheAssociativity: 0x%u\n", Pcr->SecondLevelCacheAssociativity);
+    KdbpPrint("  MajorVersion:                  0x%x\n", Pcr->MajorVersion);
+    KdbpPrint("  MinorVersion:                  0x%x\n", Pcr->MinorVersion);
+    KdbpPrint("  StallScaleFactor:              0x%lx\n", Pcr->StallScaleFactor);
+    KdbpPrint("  SecondLevelCacheSize:          0x%lx\n", Pcr->SecondLevelCacheSize);
+    KdbpPrint("  KdVersionBlock:                0x%p\n", Pcr->KdVersionBlock);
+#else
     KdbpPrint("  GdtBase:                       0x%p\n", Pcr->GdtBase);
     KdbpPrint("  TssBase:                       0x%p\n", Pcr->TssBase);
     KdbpPrint("  UserRsp:                       0x%p\n", (PVOID)Pcr->UserRsp);
@@ -2458,6 +2821,7 @@ KdbpCmdPcr(
     KdbpPrint("  StallScaleFactor:              0x%lx\n", Pcr->StallScaleFactor);
     KdbpPrint("  SecondLevelCacheSize:          0x%lx\n", Pcr->SecondLevelCacheSize);
     KdbpPrint("  KdVersionBlock:                0x%p\n", Pcr->KdVersionBlock);
+#endif
 #endif
 
     return TRUE;
