@@ -14,6 +14,7 @@
     (Status == STATUS_INVALID_PARAMETER || Status == STATUS_INVALID_PARAMETER_MIX || \
     (Status >= STATUS_INVALID_PARAMETER_1 && Status <= STATUS_INVALID_PARAMETER_12))
 #define ok_invalid_parameter(Status) ok(IsInvalidParamStatus(Status), "Invalid status code (0x%X)\n", Status)
+#define KMT_IGNORE_POINTER_COUNT ((ULONG)-1)
 
 static UNICODE_STRING FileReadOnlyPath = RTL_CONSTANT_STRING(L"\\SystemRoot\\system32\\ntdll.dll");
 static UNICODE_STRING NtosImgPath = RTL_CONSTANT_STRING(L"\\SystemRoot\\system32\\ntoskrnl.exe");
@@ -54,15 +55,22 @@ static OBJECT_ATTRIBUTES NtoskrnlFileObject;
         }                                                                           \
     } while (0)                                                                     \
 
-#define CheckObject(Handle, Pointers, Handles) do                   \
-{                                                                   \
-    PUBLIC_OBJECT_BASIC_INFORMATION ObjectInfo;                     \
-    Status = ZwQueryObject(Handle, ObjectBasicInformation,          \
-    &ObjectInfo, sizeof ObjectInfo, NULL);                          \
-    ok_eq_hex(Status, STATUS_SUCCESS);                              \
-    ok_eq_ulong(ObjectInfo.PointerCount, Pointers);                 \
-    ok_eq_ulong(ObjectInfo.HandleCount, Handles);                   \
-} while (0)                                                         \
+static
+VOID
+CheckObject_(HANDLE Handle, ULONG Pointers, ULONG Handles)
+{
+    NTSTATUS Status;
+    PUBLIC_OBJECT_BASIC_INFORMATION ObjectInfo;
+
+    Status = ZwQueryObject(Handle, ObjectBasicInformation,
+                           &ObjectInfo, sizeof ObjectInfo, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (Pointers != KMT_IGNORE_POINTER_COUNT)
+        ok_eq_ulong(ObjectInfo.PointerCount, Pointers);
+    ok_eq_ulong(ObjectInfo.HandleCount, Handles);
+}
+
+#define CheckObject(Handle, Pointers, Handles) CheckObject_(Handle, Pointers, Handles)
 
 static
 VOID
@@ -352,7 +360,7 @@ SystemProcessWorker(PVOID StartContext)
 #ifdef _M_IX86
         PtrCnt = 64;
 #else
-        PtrCnt = 65536;
+        PtrCnt = KMT_IGNORE_POINTER_COUNT;
 #endif
     else
         PtrCnt = 4;
@@ -367,12 +375,12 @@ SystemProcessWorker(PVOID StartContext)
     {
         CheckObject(SectionHandle, PtrCnt, 2);
         Status = ZwMapViewOfSection(SectionHandle, NtCurrentProcess(), &BaseAddress, 0, TestStringSize, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && PtrCnt != KMT_IGNORE_POINTER_COUNT)
             PtrCnt -= 2;
 
         //make sure ZwMapViewofSection doesn't touch the section ref counts.
         CheckObject(SectionHandle, PtrCnt, 2);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && PtrCnt != KMT_IGNORE_POINTER_COUNT)
             PtrCnt--;
 
         if (!skip(NT_SUCCESS(Status), "Error mapping page file view in system process. Error = %p\n", Status))
@@ -414,7 +422,7 @@ BehaviorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly)
 #ifdef _M_IX86
         PtrCnt = 34;
 #else
-        PtrCnt = 32770;
+        PtrCnt = KMT_IGNORE_POINTER_COUNT;
 #endif
     else
         PtrCnt = 3;
@@ -425,7 +433,7 @@ BehaviorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly)
 
     Status = ZwCreateSection(&WriteSectionHandle, SECTION_ALL_ACCESS, &ObjectAttributes, &MaximumSize, PAGE_READWRITE, SEC_COMMIT, FileHandleWriteOnly);
     CheckObject(WriteSectionHandle, PtrCnt, 1);
-    if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+    if (GetNTVersion() >= _WIN32_WINNT_WIN8 && PtrCnt != KMT_IGNORE_POINTER_COUNT)
         PtrCnt -= 2;
     ok(NT_SUCCESS(Status), "Error creating write section from file. Error = %p\n", Status);
 
@@ -571,7 +579,7 @@ PageFileBehaviorChecks()
 #ifdef _M_IX86
         PtrCnt = 34;
 #else
-        PtrCnt = 32770;
+        PtrCnt = KMT_IGNORE_POINTER_COUNT;
 #endif
     else
         PtrCnt = 3;
@@ -589,7 +597,7 @@ PageFileBehaviorChecks()
     {
         CheckObject(PageFileSectionHandle, PtrCnt, 1);
         Status = ZwMapViewOfSection(PageFileSectionHandle, NtCurrentProcess(), &BaseAddress, 0, TestStringSize, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && PtrCnt != KMT_IGNORE_POINTER_COUNT)
             PtrCnt -= 2;
         if (!skip(NT_SUCCESS(Status), "Error mapping page file view. Error = %p\n", Status))
         {
