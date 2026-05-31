@@ -385,4 +385,16 @@ HidParser_GetReportInCollection(
     IN PVOID Context,
     IN UCHAR ReportType);
 
+ULONG
+HidParser_GetReportIds(
+    IN PVOID Context,
+    OUT PUCHAR ReportIds OPTIONAL,
+    IN ULONG MaxReportIds);
+
+ULONG
+HidParser_GetReportLengthByReportId(
+    IN PVOID Context,
+    IN UCHAR ReportType,
+    IN UCHAR ReportID);
+
 #endif /* _HIDPARSER_H_ */
