@@ -58,13 +58,6 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd/unattend.inf DESTINATION rea
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/unattend.inf DESTINATION reactos NO_CAB FOR regtest)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/livecd/unattend.inf DESTINATION reactos NO_CAB FOR livecd)
 
-if(TARGET kmtest_drv AND TARGET kmt_exit_drv)
-    # kmtestcd inherits the livecd file set at iso-assembly time. These two
-    # drivers are kmtestcd-only and exist only when rostests are enabled.
-    add_cd_file(TARGET kmtest_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
-    add_cd_file(TARGET kmt_exit_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
-endif()
-
 # LiveImage shortcuts
 add_custom_target(livecd_links)
 function(add_livecd_shortcut name path)
