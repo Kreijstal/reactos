@@ -68,7 +68,19 @@ VOID
 UefiVideoSync(VOID);
 
 VOID
+UefiVideoScrollUp(UCHAR Attr);
+
+VOID
+UefiVideoPrepareForExitBootServices(VOID);
+
+VOID
+UefiVideoExitBootServices(VOID);
+
+VOID
 UefiPcBeep(VOID);
+
+VOID
+UefiSerialDisableFirmware(VOID);
 
 PFREELDR_MEMORY_DESCRIPTOR
 UefiMemGetMemoryMap(ULONG *MemoryMapSize);

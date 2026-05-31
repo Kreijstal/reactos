@@ -81,7 +81,7 @@ typedef ULONG_PTR SWAPENTRY;
 //
 #define MMDBG_COPY_MAX_SIZE         0x8
 
-#if defined(_X86_) // intenal for marea.c
+#if defined(_X86_) || defined(_M_ARM64) // internal for marea.c
 #define MI_STATIC_MEMORY_AREAS              (14)
 #else
 #define MI_STATIC_MEMORY_AREAS              (13)
@@ -141,6 +141,7 @@ typedef ULONG_PTR SWAPENTRY;
      PAGE_EXECUTE_READWRITE | \
      PAGE_EXECUTE_WRITECOPY | \
      PAGE_NOACCESS | \
+     PAGE_GUARD | \
      PAGE_NOCACHE | \
      PAGE_WRITECOMBINE)
 
@@ -173,7 +174,7 @@ typedef ULONG_PTR SWAPENTRY;
 //
 #ifdef _M_IX86
 #define MM_WAIT_ENTRY            0x7ffffc00
-#elif defined(_M_AMD64)
+#elif defined(_M_AMD64) || defined(_M_ARM64) || defined(__aarch64__)
 #define MM_WAIT_ENTRY            0x7FFFFFFFFFFFFC00ULL
 #else
 #error Unsupported architecture!
@@ -197,6 +198,7 @@ typedef struct _MM_SECTION_SEGMENT
 {
     LONG64 RefCount;
     PFILE_OBJECT FileObject;
+    LIST_ENTRY FileObjectList;
 
     FAST_MUTEX Lock;		/* lock which protects the page directory */
     LARGE_INTEGER RawLength;		/* length of the segment which is part of the mapped file */
@@ -241,6 +243,7 @@ typedef struct _MM_IMAGE_SECTION_OBJECT
 #define MM_SEGMENT_INDELETE                 (0x4)
 #define MM_SEGMENT_INCREATE                 (0x8)
 #define MM_IMAGE_SECTION_FLUSH_DELETE       (0x10)
+#define MM_DATAFILE_SEGMENT_FILE_REF        (0x20)
 
 
 #define MA_GetStartingAddress(_MemoryArea) ((_MemoryArea)->VadNode.StartingVpn << PAGE_SHIFT)
@@ -850,16 +853,21 @@ MmAccessFault(
     IN PVOID TrapInformation
 );
 
+NTSTATUS
+NTAPI
+MmAccessFaultEx(
+    IN ULONG FaultCode,
+    IN PVOID Address,
+    IN KPROCESSOR_MODE Mode,
+    IN PVOID TrapInformation,
+    IN BOOLEAN AddressSpaceLocked
+);
+
 /* process.c *****************************************************************/
 
 PVOID
 NTAPI
 MmCreateKernelStack(BOOLEAN GuiStack, UCHAR Node);
-
-NTSTATUS
-NTAPI
-MmGrowKernelStackEx(IN PVOID StackPointer,
-                    IN ULONG GrowSize);
 
 VOID
 NTAPI
@@ -974,61 +982,6 @@ MmDeleteRmap(
     PVOID Address
 );
 
-BOOLEAN
-NTAPI
-MmRmapEntryExists(
-    PFN_NUMBER Page,
-    struct _EPROCESS *Process,
-    PVOID Address
-);
-
-#if DBG
-VOID
-NTAPI
-MmDumpRmapTrace(
-    PFN_NUMBER Page,
-    struct _EPROCESS *Process,
-    PVOID Address
-);
-
-VOID
-NTAPI
-MmTracePte(
-    UCHAR Op,
-    PVOID Va,
-    ULONG_PTR OldPte,
-    ULONG_PTR NewPte,
-    PVOID Caller
-);
-
-VOID
-NTAPI
-MmDumpPteTrace(PVOID Va);
-
-VOID
-NTAPI
-MmValidateRmapChain(
-    PFN_NUMBER Page,
-    struct _EPROCESS *Process,
-    PVOID Address
-);
-
-#define MI_TRACE_PTE_CLEAR(va, pte_ptr) do { \
-    ULONG_PTR _oldpte = (pte_ptr)->u.Long; \
-    (pte_ptr)->u.Long = 0; \
-    MmTracePte('C', (va), _oldpte, 0, _ReturnAddress()); \
-} while (0)
-
-#define MI_TRACE_PTE_VALID(va, pte_ptr, newval) do { \
-    ULONG_PTR _oldpte = (pte_ptr)->u.Long; \
-    (pte_ptr)->u.Long = (newval); \
-    MmTracePte('V', (va), _oldpte, (newval), _ReturnAddress()); \
-} while (0)
-#else
-#define MI_TRACE_PTE_CLEAR(va, pte_ptr)        ((pte_ptr)->u.Long = 0)
-#define MI_TRACE_PTE_VALID(va, pte_ptr, newval) ((pte_ptr)->u.Long = (newval))
-#endif
-
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -1042,6 +995,46 @@ PMM_SECTION_SEGMENT
 NTAPI
 MmGetSectionAssociation(PFN_NUMBER Page,
                         PLARGE_INTEGER Offset);
+
+#if DBG
+VOID
+NTAPI
+MmTracePte(
+    UCHAR Op,
+    PVOID Va,
+    ULONG_PTR OldPte,
+    ULONG_PTR NewPte,
+    PVOID Caller
+);
+
+VOID
+NTAPI
+MmDumpRmapTrace(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address
+);
+
+VOID
+NTAPI
+MmDumpPteTrace(PVOID Va);
+
+VOID
+NTAPI
+MmValidateRmapChain(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address
+);
+#endif
+
+BOOLEAN
+NTAPI
+MmRmapEntryExists(
+    PFN_NUMBER Page,
+    struct _EPROCESS *Process,
+    PVOID Address
+);
 
 /* freelist.c **********************************************************/
 _IRQL_raises_(DISPATCH_LEVEL)

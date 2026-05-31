@@ -8,6 +8,9 @@
 #include "precomp.h"
 #include <windows.h>
 #include <versionhelpers.h>
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+
 #include <x86x64/Cpuid.h>
 
 // These are not officially documented
@@ -440,3 +443,12 @@ START_TEST(XStateConfig)
             break;
     }
 }
+
+#else
+
+START_TEST(XStateConfig)
+{
+    skip("XStateConfig test is not implemented for this architecture\n");
+}
+
+#endif

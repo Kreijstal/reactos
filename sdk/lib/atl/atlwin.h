@@ -2070,4 +2070,3 @@ struct _ATL_WNDCLASSINFOW
 }; // namespace ATL
 
 #pragma pop_macro("SubclassWindow")
-

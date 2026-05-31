@@ -20,21 +20,28 @@ $if (_WDMDDK_)
 #define PAGE_SIZE               0x1000
 #define PAGE_SHIFT              12L
 
-#define YieldProcessor __yield
+#ifndef __ASSEMBLER__
+typedef struct _KFLOATING_SAVE
+{
+    ULONG Reserved;
+} KFLOATING_SAVE, *PKFLOATING_SAVE;
+#endif
+
 #define PAUSE_PROCESSOR YieldProcessor();
 
-/* FIXME: Based on AMD64 but needed to compile apps */
-#define KERNEL_STACK_SIZE                   12288
-#define KERNEL_LARGE_STACK_SIZE             61440
-#define KERNEL_LARGE_STACK_COMMIT KERNEL_STACK_SIZE
-/* FIXME End */
+FORCEINLINE
+VOID
+YieldProcessor(
+    VOID)
+{
+    __dmb(_ARM64_BARRIER_ISHST);
+    __asm__ __volatile__("yield" ::: "memory");
+}
 
-#define EXCEPTION_READ_FAULT    0
-#define EXCEPTION_WRITE_FAULT   1
-#define EXCEPTION_EXECUTE_FAULT 8
-
-#define KeQueryTickCount(CurrentCount) \
-    *(ULONG64*)(CurrentCount) = *(volatile ULONG64*)SharedTickCount
+#define MemoryBarrier()         __dmb(_ARM64_BARRIER_SY)
+#define PreFetchCacheLine(l,a)  __prefetch((const void *) (a))
+#define PrefetchForWrite(p)     __prefetch((const void *) (p))
+#define ReadForWriteAccess(p)   (*(p))
 
 FORCEINLINE
 VOID
@@ -47,12 +54,25 @@ KeMemoryBarrier(
 
 #define KeMemoryBarrierWithoutFence() _ReadWriteBarrier()
 
-/* The kernel keeps the FP and SIMD state of every thread, nothing to save */
-typedef struct _KFLOATING_SAVE
-{
-    ULONG Dummy;
-} KFLOATING_SAVE, *PKFLOATING_SAVE;
+#define KeQueryTickCount(CurrentCount) \
+    *(ULONG64*)(CurrentCount) = *(volatile ULONG64*)SharedTickCount
 
+/* Verified against modern NT/arm64 */
+#define KERNEL_STACK_SIZE                   0x8000
+#define KERNEL_LARGE_STACK_SIZE             0x12000
+#define KERNEL_LARGE_STACK_COMMIT KERNEL_STACK_SIZE
+
+#define EXCEPTION_READ_FAULT    0
+#define EXCEPTION_WRITE_FAULT   1
+#define EXCEPTION_EXECUTE_FAULT 8
+
+NTSYSAPI
+PKTHREAD
+NTAPI
+KeGetCurrentThread(VOID);
+
+_Always_(_Post_satisfies_(return<=0))
+_Must_inspect_result_
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _Kernel_float_saved_
 _At_(*FloatSave, _Kernel_requires_resource_not_held_(FloatState) _Kernel_acquires_resource_(FloatState))
@@ -106,46 +126,31 @@ KfRaiseIrql(
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _IRQL_saves_
 _IRQL_raises_(DISPATCH_LEVEL)
-FORCEINLINE
+NTHALAPI
 KIRQL
-KeRaiseIrqlToDpcLevel(
-    VOID)
-{
-    return KfRaiseIrql(DISPATCH_LEVEL);
-}
+NTAPI
+KeRaiseIrqlToDpcLevel(VOID);
 
-FORCEINLINE
+NTHALAPI
 KIRQL
-KeRaiseIrqlToSynchLevel(VOID)
-{
-#ifdef CONFIG_SMP
-    return KfRaiseIrql(12); // SYNCH_LEVEL = IPI_LEVEL - 2
-#else
-    return KfRaiseIrql(2); // SYNCH_LEVEL = DISPATCH_LEVEL
-#endif
-}
+NTAPI
+KeRaiseIrqlToSynchLevel(VOID);
 
-/* KPRCB::CurrentThread */
-FORCEINLINE
-struct _KTHREAD *
-KeGetCurrentThread(VOID)
-{
-    return (struct _KTHREAD *)__readx18qword(0x988);
-}
+NTSYSAPI
+ULONG
+NTAPI
+KeGetCurrentProcessorNumber(VOID);
 
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-/* KPRCB::Number, the PRCB starts at PCR offset 0x980 */
 FORCEINLINE
 ULONG
 KeGetCurrentProcessorIndex(VOID)
 {
-    return __readx18dword(0x9a4);
+    extern ULONG NTAPI KeGetCurrentProcessorNumberEx(
+        _Out_opt_ PPROCESSOR_NUMBER ProcNumber);
+    return KeGetCurrentProcessorNumberEx(NULL);
 }
-#endif
 
-NTKERNELAPI
 VOID
-NTAPI
 KeFlushIoBuffers(
     _In_ PMDL Mdl,
     _In_ BOOLEAN ReadOperation,
@@ -166,7 +171,6 @@ $if (_NTDDK_)
 #define CONTEXT_DEBUG_REGISTERS (CONTEXT_ARM64 | 0x00000008L)
 #define CONTEXT_X18             (CONTEXT_ARM64 | 0x00000010L)
 #define CONTEXT_FULL            (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT)
-#define CONTEXT_ALL             (CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS | CONTEXT_X18)
 
 typedef union NEON128 {
     struct {
@@ -180,7 +184,7 @@ typedef union NEON128 {
 } NEON128, *PNEON128;
 typedef NEON128 NEON128, *PNEON128;
 
-typedef struct DECLSPEC_ALIGN(16) _CONTEXT {
+typedef struct _CONTEXT {
 
     //
     // Control flags.
@@ -251,96 +255,4 @@ typedef struct DECLSPEC_ALIGN(16) _CONTEXT {
     ULONG64 Wvr[ARM64_MAX_WATCHPOINTS];
 
 } CONTEXT, *PCONTEXT;
-
-#define PCR_MINOR_VERSION 1
-#define PCR_MAJOR_VERSION 1
-
-typedef struct _KPCR
-{
-    _ANONYMOUS_UNION union
-    {
-        NT_TIB NtTib;
-        _ANONYMOUS_STRUCT struct
-        {
-            PVOID TibPad0[2];
-            PVOID Spare1;
-            struct _KPCR *Self;
-            PVOID PcrReserved0;
-            PKSPIN_LOCK_QUEUE LockArray;
-            PVOID Used_Self;
-        };
-    };
-    KIRQL CurrentIrql;
-    UCHAR SecondLevelCacheAssociativity;
-    UCHAR Pad1[2];
-    USHORT MajorVersion;
-    USHORT MinorVersion;
-    ULONG StallScaleFactor;
-    ULONG SecondLevelCacheSize;
-    _ANONYMOUS_UNION union
-    {
-        USHORT SoftwareInterruptPending;
-        _ANONYMOUS_STRUCT struct
-        {
-            UCHAR ApcInterrupt;
-            UCHAR DispatchInterrupt;
-        };
-    };
-    USHORT InterruptPad;
-    _ANONYMOUS_UNION union
-    {
-        UCHAR BtiMitigation;
-        _ANONYMOUS_STRUCT struct
-        {
-            UCHAR KvaVbar:1;
-            UCHAR BtiVbar:3;
-            UCHAR BtiCswapHvc:1;
-            UCHAR BtiCswapSmc:1;
-        };
-    };
-    _ANONYMOUS_UNION union
-    {
-        UCHAR SsbMitigationFlags;
-        _ANONYMOUS_STRUCT struct
-        {
-            UCHAR SsbMitigationFirmware:1;
-            UCHAR SsbMitigationDynamic:1;
-            UCHAR SsbMitigationKernel:1;
-            UCHAR SsbMitigationUser:1;
-            UCHAR SsbMitigationReserved:4;
-        };
-    };
-    UCHAR BhbMitigation;
-    _ANONYMOUS_UNION union
-    {
-        UCHAR CachePrefetcherMitigationFlags;
-        _ANONYMOUS_STRUCT struct
-        {
-            UCHAR CachePrefetcherMitigation:1;
-            UCHAR Pad2:7;
-        };
-    };
-    ULONG64 PanicStorage[6];
-    PVOID KdVersionBlock;
-    PVOID HalReserved[14];
-    PVOID KvaUserModeTtbr1;
-} KPCR, *PKPCR;
-
-/* x18 holds the PCR address in kernel mode */
-FORCEINLINE
-PKPCR
-KeGetPcr(VOID)
-{
-    return (PKPCR)__getReg(18);
-}
-
-#if (NTDDI_VERSION < NTDDI_WIN7) || !defined(NT_PROCESSOR_GROUPS)
-FORCEINLINE
-ULONG
-KeGetCurrentProcessorNumber(VOID)
-{
-    return __readx18dword(0x9a4);
-}
-#endif /* (NTDDI_VERSION < NTDDI_WIN7) || !defined(NT_PROCESSOR_GROUPS) */
-
 $endif

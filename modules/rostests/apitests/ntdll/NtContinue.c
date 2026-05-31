@@ -125,7 +125,7 @@ void check(CONTEXT * pContext)
     ok((pContext->SegSs & NTC_SEGMENT_BITS) ==
        (continueContext.SegSs & NTC_SEGMENT_BITS),
        "SegSs: 0x%lx != 0x%lx\n", pContext->SegSs, continueContext.SegSs);
-#else
+#elif defined(_M_AMD64)
     ok_eq_hex64(pContext->ContextFlags, CONTEXT_FULL | CONTEXT_SEGMENTS);
     ok_eq_hex(pContext->MxCsr, continueContext.MxCsr);
     ok_eq_hex(pContext->SegCs, continueContext.SegCs);
@@ -170,6 +170,8 @@ void check(CONTEXT * pContext)
 
     // Clear the frame register to prevent unwinding, which is broken
     ((_JUMP_BUFFER*)&jmpbuf)->Frame = 0;
+#else
+    skip("NtContinue context validation is only implemented on x86/AMD64.\n");
 #endif
 
     /* Return where we came from */
@@ -178,6 +180,11 @@ void check(CONTEXT * pContext)
 
 START_TEST(NtContinue)
 {
+#if !defined(_M_IX86) && !defined(_M_AMD64)
+    win_skip("NtContinue test is only implemented on x86/AMD64.\n");
+    return;
+#endif
+
     initrand();
 
     RtlFillMemory(&continueContext, sizeof(continueContext), 0xBBBBBBBB);

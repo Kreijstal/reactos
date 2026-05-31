@@ -6,6 +6,16 @@
     TEXTAREA
 
 #define SVC_(name, argcount) STUB_K name
+#define SVC_WRAP_(name, argcount) STUB_K name
+
+#include <sysfuncs.h>
+
+#elif defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+
+    .text
+
+#define SVC_(name, argcount) STUB_K name, argcount
+#define SVC_WRAP_(name, argcount) STUB_K name, argcount
 
 #include <sysfuncs.h>
 
@@ -22,9 +32,12 @@ EXTERN KiZwSystemService:PROC
 .code
 
 #define SVC_(name, argcount) STUB_K name, argcount
+#define SVC_WRAP_(name, argcount) STUB_K name, argcount
 
 #include <sysfuncs.h>
 
 #endif
 
+#ifndef _M_ARM64
     END
+#endif

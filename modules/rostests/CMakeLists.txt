@@ -1,7 +1,7 @@
 
 start_module_group(rostests)
 
-if(NOT MSVC)
+if(NOT MSVC AND NOT ARCH STREQUAL "arm64")
     add_link_options("-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/test-section.lds")
 endif()
 

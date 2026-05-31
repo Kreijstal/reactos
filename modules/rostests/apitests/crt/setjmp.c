@@ -199,12 +199,15 @@ static void TEST_setjmp_zero_longjmp_check(void)
     }
 }
 
+#ifdef _M_AMD64
 void call_setjmp(_JUMP_BUFFER *Buf);
 ULONG_PTR get_sp(void);
 extern char setjmp_return_address;
-#ifdef _M_AMD64
 void call_setjmpex(_JUMP_BUFFER *Buf);
 #elif defined(_M_IX86)
+void call_setjmp(_JUMP_BUFFER *Buf);
+ULONG_PTR get_sp(void);
+extern char setjmp_return_address;
 int _setjmp3(jmp_buf env, int count, /* void* UnwindFunc, unsigned TryLevel, */ ...);
 int _setjmp1(jmp_buf env); // ASM call wrapper around _setjmp, which is an intrinsic on MSVC
 void call_setjmp3(_JUMP_BUFFER *Buf);
@@ -261,6 +264,7 @@ static void check_buffer_registers_(ULONG Line, _JUMP_BUFFER* Buf, ULONG_PTR Sp,
 
 static void TEST_buffer_contents(void)
 {
+#if defined(_M_AMD64) || defined(_M_IX86)
     _JUMP_BUFFER buf;
 
     memset(&buf, 0xCC, sizeof(buf));
@@ -328,6 +332,9 @@ static void TEST_buffer_contents(void)
     todo_pseh ok_eq_hex(buf.TryLevel, 1);
     ok_eq_hex(buf.Cookie, 0xCCCCCCCC);
     ok_eq_hex(buf.UnwindFunc, 0xCCCCCCCC);
+#endif
+#else
+    skip("setjmp buffer content checks are only implemented on x86/AMD64.\n");
 #endif
 }
 
