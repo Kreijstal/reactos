@@ -144,6 +144,8 @@ _Check_return_ _CRTIMP double __cdecl _hypot(_In_ double x, _In_ double y);
 _Check_return_ _CRTIMP double __cdecl _j0(_In_ double x);
 _Check_return_ _CRTIMP double __cdecl _j1(_In_ double x);
 _Check_return_ _CRTIMP double __cdecl _jn(_In_ int x, _In_ double y);
+_Check_return_ _CRTIMP int __cdecl _finite(_In_ double x);
+_Check_return_ _CRTIMP int __cdecl _isnan(_In_ double x);
 _Check_return_ _CRTIMP double __cdecl _nextafter(_In_ double x, _In_ double y);
 _Check_return_ _CRTIMP double __cdecl _y0(_In_ double x);
 _Check_return_ _CRTIMP double __cdecl _y1(_In_ double x);
@@ -171,6 +173,7 @@ _Check_return_ _CRTIMP int __cdecl _fpclassf(_In_ float x);
 #if defined(__x86_64) || defined(_M_AMD64) || \
     defined(__arm__) || defined(_M_ARM)  || \
     defined(__arm64__) || defined(_M_ARM64)
+_Check_return_ _CRTIMP int __cdecl _isnanf(_In_ float x);
 _Check_return_ _CRTIMP int __cdecl _finitef(_In_ float x);
 _Check_return_ _CRTIMP float __cdecl _logbf(_In_ float x);
 #endif /* _M_AMD64 || _M_ARM || _M_ARM64 */
@@ -340,6 +343,14 @@ _CRT_NONSTDC_DEPRECATE(_yn) _CRTIMP double __cdecl yn(_In_ int x, _In_ double y)
 
 #ifdef __cplusplus
 }
+#if defined(_LIBCPP_MSVCRT)
+extern "C++" {
+_Check_return_ inline bool isinf(_In_ float x) throw() { return _finitef(x) == 0 && _isnanf(x) == 0; }
+_Check_return_ inline bool isinf(_In_ double x) throw() { return _finite(x) == 0 && _isnan(x) == 0; }
+_Check_return_ inline bool isinf(_In_ long double x) throw() { return isinf((double)x); }
+}
+#endif
+#if !defined(_LIBCPP_MSVCRT) && !defined(_LIBCPP_MATH_H)
 #ifndef _CMATH_
 extern "C++" {
 
@@ -399,6 +410,7 @@ _Check_return_ inline long double tan(_In_ long double x) throw() { return tanl(
 _Check_return_ inline long double tanh(_In_ long double x) throw() { return tanhl(x); }
 }
 #endif /* !_CMATH_ */
+#endif /* !_LIBCPP_MSVCRT && !_LIBCPP_MATH_H */
 #endif /* __cplusplus */
 
 #pragma pack(pop)

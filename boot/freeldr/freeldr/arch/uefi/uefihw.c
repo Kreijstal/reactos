@@ -9,6 +9,12 @@
 
 #include <uefildr.h>
 #include "../vidfb.h"
+#if defined(_M_IX86) || defined(_M_AMD64)
+#include <arch/pc/pcbios.h>
+#endif
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+#include <reactos/arc/loaderblk.h>
+#endif
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(HWDETECT);
@@ -23,186 +29,191 @@ extern ULONG_PTR VramAddress;
 extern ULONG VramSize;
 extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
 
+#ifndef TAG_HW_RESOURCE_LIST
+#define TAG_HW_RESOURCE_LIST    'lRwH'
+#endif
+
 BOOLEAN AcpiPresent = FALSE;
-
-/**
- * @brief Register an ISA bus in the hardware configuration tree.
- *
- * ScsiPort and other drivers use IoQueryDeviceDescription with
- * InterfaceType=Isa to verify the bus exists before scanning.
- */
-static
-VOID
-DetectIsaBus(
-    _In_ PCONFIGURATION_COMPONENT_DATA SystemKey,
-    _Inout_ PULONG BusNumber)
-{
-    PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
-    PCONFIGURATION_COMPONENT_DATA BusKey;
-    ULONG Size;
-
-    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
-    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
-    if (!PartialResourceList)
-        return;
-
-    RtlZeroMemory(PartialResourceList, Size);
-    PartialResourceList->Version = 1;
-    PartialResourceList->Revision = 1;
-    PartialResourceList->Count = 0;
-
-    FldrCreateComponentKey(SystemKey,
-                           AdapterClass,
-                           MultiFunctionAdapter,
-                           0, 0, 0xFFFFFFFF,
-                           "ISA",
-                           PartialResourceList,
-                           Size,
-                           &BusKey);
-    (*BusNumber)++;
-}
-
-#define PCI_CONFIG_ADDRESS  0xCF8
-#define PCI_CONFIG_DATA     0xCFC
-
-/**
- * @brief Detect PCI bus presence by probing config space mechanism 1
- * and register the PCI bus in the hardware configuration tree.
- *
- * This replaces the BIOS INT 1Ah PCI detection for UEFI boots.
- * PCI config mechanism 1 (I/O ports 0xCF8/0xCFC) is architecture-defined
- * and works identically on BIOS and UEFI.
- */
-static
-VOID
-DetectPci(
-    _In_ PCONFIGURATION_COMPONENT_DATA SystemKey,
-    _Inout_ PULONG BusNumber)
-{
-    PCI_REGISTRY_INFO BusData;
-    PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
-    PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
-    PCONFIGURATION_COMPONENT_DATA BiosKey;
-    PCONFIGURATION_COMPONENT_DATA BusKey;
-    ULONG Size;
-    ULONG OldValue;
-    ULONG TestValue;
-    ULONG i;
-
-    /*
-     * Probe PCI configuration mechanism 1:
-     * Save old value at 0xCF8, write a known pattern, read back.
-     */
-    OldValue = __indword(PCI_CONFIG_ADDRESS);
-    __outdword(PCI_CONFIG_ADDRESS, 0x80000000);
-    TestValue = __indword(PCI_CONFIG_ADDRESS);
-    __outdword(PCI_CONFIG_ADDRESS, OldValue);
-
-    if (TestValue != 0x80000000)
-    {
-        TRACE("PCI mechanism 1 not detected (got 0x%lx)\n", TestValue);
-        return;
-    }
-
-    /* Read vendor ID at bus 0, device 0, function 0 to confirm PCI works */
-    __outdword(PCI_CONFIG_ADDRESS, 0x80000000);
-    TestValue = __indword(PCI_CONFIG_DATA);
-    if ((TestValue & 0xFFFF) == 0xFFFF)
-    {
-        TRACE("No PCI device at 0:0.0\n");
-        return;
-    }
-
-    TRACE("PCI mechanism 1 detected, host bridge vendor:device = %04lx:%04lx\n",
-          TestValue & 0xFFFF, (TestValue >> 16) & 0xFFFF);
-
-    /* Count PCI buses by scanning bus numbers for valid devices */
-    BusData.NoBuses = 1;
-    for (i = 1; i < 256; i++)
-    {
-        __outdword(PCI_CONFIG_ADDRESS, 0x80000000 | (i << 16));
-        TestValue = __indword(PCI_CONFIG_DATA);
-        if ((TestValue & 0xFFFF) != 0xFFFF)
-            BusData.NoBuses = (UCHAR)(i + 1);
-    }
-
-    BusData.MajorRevision = 2;
-    BusData.MinorRevision = 0;
-    BusData.HardwareMechanism = 1;
-
-    TRACE("Found %u PCI bus(es)\n", (ULONG)BusData.NoBuses);
-
-    /* Create the "PCI BIOS" MultiFunctionAdapter key (same as BIOS path) */
-    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
-    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
-    if (!PartialResourceList)
-        return;
-
-    RtlZeroMemory(PartialResourceList, Size);
-
-    FldrCreateComponentKey(SystemKey,
-                           AdapterClass,
-                           MultiFunctionAdapter,
-                           0,
-                           0,
-                           0xFFFFFFFF,
-                           "PCI BIOS",
-                           PartialResourceList,
-                           Size,
-                           &BiosKey);
-    (*BusNumber)++;
-
-    /* Report PCI buses */
-    for (i = 0; i < (ULONG)BusData.NoBuses; i++)
-    {
-        if (i == 0)
-        {
-            /* First bus gets the PCI_REGISTRY_INFO data */
-            Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) +
-                   sizeof(BusData);
-            PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
-            if (!PartialResourceList)
-                return;
-
-            RtlZeroMemory(PartialResourceList, Size);
-            PartialResourceList->Version = 1;
-            PartialResourceList->Revision = 1;
-            PartialResourceList->Count = 1;
-
-            PartialDescriptor = &PartialResourceList->PartialDescriptors[0];
-            PartialDescriptor->Type = CmResourceTypeDeviceSpecific;
-            PartialDescriptor->ShareDisposition = CmResourceShareUndetermined;
-            PartialDescriptor->u.DeviceSpecificData.DataSize = sizeof(BusData);
-
-            RtlCopyMemory(&PartialResourceList->PartialDescriptors[1],
-                          &BusData, sizeof(BusData));
-        }
-        else
-        {
-            Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors);
-            PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
-            if (!PartialResourceList)
-                return;
-
-            RtlZeroMemory(PartialResourceList, Size);
-        }
-
-        FldrCreateComponentKey(SystemKey,
-                               AdapterClass,
-                               MultiFunctionAdapter,
-                               0,
-                               0,
-                               0xFFFFFFFF,
-                               "PCI",
-                               PartialResourceList,
-                               Size,
-                               &BusKey);
-        (*BusNumber)++;
-    }
-}
 static EFI_EVENT IdleTimerEvent = NULL;
 
 /* FUNCTIONS *****************************************************************/
+
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+
+static
+const CHAR*
+UefiSmbiosGetString(
+    _In_ PSMBIOS_HEADER Header,
+    _In_ UCHAR StringIndex)
+{
+    const CHAR *String;
+    UCHAR Index;
+
+    if ((StringIndex == 0) || (Header->Length < sizeof(SMBIOS_HEADER)))
+        return NULL;
+
+    String = (const CHAR*)((UINTN)Header + Header->Length);
+
+    for (Index = 1; Index < StringIndex; ++Index)
+    {
+        ULONG Guard = 0;
+
+        while ((String[0] != ANSI_NULL) && (++Guard < 1024))
+            ++String;
+
+        if ((Guard >= 1024) || (String[1] == ANSI_NULL))
+            return NULL;
+
+        ++String;
+    }
+
+    return (String[0] != ANSI_NULL) ? String : NULL;
+}
+
+static
+PSMBIOS_HEADER
+UefiSmbiosNextStructure(
+    _In_ PSMBIOS_HEADER Header)
+{
+    const CHAR *String;
+    ULONG Guard = 0;
+
+    if (Header->Length < sizeof(SMBIOS_HEADER))
+        return NULL;
+
+    String = (const CHAR*)((UINTN)Header + Header->Length);
+
+    while (((String[0] != ANSI_NULL) || (String[1] != ANSI_NULL)) &&
+           (++Guard < 4096))
+    {
+        ++String;
+    }
+
+    if (Guard >= 4096)
+        return NULL;
+
+    return (PSMBIOS_HEADER)(String + 2);
+}
+
+static
+PSMBIOS_HEADER
+UefiGetSmbiosTable(VOID)
+{
+    EFI_GUID Smbios3Guid = SMBIOS3_TABLE_GUID;
+    EFI_GUID SmbiosGuid = SMBIOS_TABLE_GUID;
+    UINTN Index;
+
+    if (!GlobalSystemTable)
+        return NULL;
+
+    for (Index = 0; Index < GlobalSystemTable->NumberOfTableEntries; ++Index)
+    {
+        EFI_CONFIGURATION_TABLE *Entry = &GlobalSystemTable->ConfigurationTable[Index];
+
+        if (!memcmp(&Entry->VendorGuid, &Smbios3Guid, sizeof(EFI_GUID)))
+        {
+            PSMBIOS3_ENTRY_POINT Entry3 = (PSMBIOS3_ENTRY_POINT)Entry->VendorTable;
+
+            if (Entry3 &&
+                (memcmp(Entry3->Anchor, "_SM3_", sizeof(Entry3->Anchor)) == 0) &&
+                (Entry3->TableAddress != 0))
+            {
+                return (PSMBIOS_HEADER)(UINTN)Entry3->TableAddress;
+            }
+        }
+
+        if (!memcmp(&Entry->VendorGuid, &SmbiosGuid, sizeof(EFI_GUID)))
+        {
+            PSMBIOS_ENTRY_POINT Entry2 = (PSMBIOS_ENTRY_POINT)Entry->VendorTable;
+
+            if (Entry2 &&
+                (memcmp(Entry2->Anchor, "_SM_", sizeof(Entry2->Anchor)) == 0) &&
+                (Entry2->TableAddress != 0))
+            {
+                return (PSMBIOS_HEADER)(UINTN)Entry2->TableAddress;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static
+BOOLEAN
+UefiIsUsableSmbiosString(
+    _In_opt_ PCSTR String)
+{
+    if (!String || (String[0] == ANSI_NULL))
+        return FALSE;
+
+    if (!strcmp(String, "To Be Filled By O.E.M.") ||
+        !strcmp(String, "Default string") ||
+        !strcmp(String, "System Product Name") ||
+        !strcmp(String, "System manufacturer") ||
+        !strcmp(String, "Not Specified"))
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
+BOOLEAN
+UefiGetSmbiosSystemIdentifier(
+    _Out_writes_bytes_(BufferSize) PCHAR Buffer,
+    _In_ SIZE_T BufferSize)
+{
+    PSMBIOS_HEADER Header;
+    ULONG Count;
+
+    Header = UefiGetSmbiosTable();
+    if (!Header)
+        return FALSE;
+
+    for (Count = 0; Count < 256 && Header && Header->Type != 127; ++Count)
+    {
+        if (Header->Type == 1)
+        {
+            PSMBIOS_SYSTEM_INFO SystemInfo = (PSMBIOS_SYSTEM_INFO)Header;
+            PCSTR Manufacturer;
+            PCSTR ProductName;
+
+            if (Header->Length < FIELD_OFFSET(SMBIOS_SYSTEM_INFO, Version))
+                return FALSE;
+
+            Manufacturer = UefiSmbiosGetString(Header, SystemInfo->Manufacturer);
+            ProductName = UefiSmbiosGetString(Header, SystemInfo->ProductName);
+
+            if (UefiIsUsableSmbiosString(Manufacturer) &&
+                UefiIsUsableSmbiosString(ProductName))
+            {
+                if (strstr(ProductName, Manufacturer))
+                    return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, ProductName));
+
+                return NT_SUCCESS(RtlStringCbPrintfA(Buffer,
+                                                     BufferSize,
+                                                     "%s %s",
+                                                     Manufacturer,
+                                                     ProductName));
+            }
+
+            if (UefiIsUsableSmbiosString(ProductName))
+                return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, ProductName));
+
+            if (UefiIsUsableSmbiosString(Manufacturer))
+                return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, Manufacturer));
+
+            return FALSE;
+        }
+
+        Header = UefiSmbiosNextStructure(Header);
+    }
+
+    return FALSE;
+}
+
+#endif
 
 VOID
 StallExecutionProcessor(ULONG Microseconds)
@@ -323,7 +334,7 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
     PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
     PRSDP_DESCRIPTOR Rsdp;
-    PACPI_BIOS_DATA AcpiBiosData;
+    PACPI_BIOS_MULTI_NODE AcpiBiosData;
     ULONG TableSize, Size;
 
     Rsdp = FindAcpiBios();
@@ -334,7 +345,7 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
         AcpiPresent = TRUE;
 
         /* Calculate the table size */
-        TableSize = sizeof(ACPI_BIOS_DATA);
+        TableSize = sizeof(ACPI_BIOS_MULTI_NODE);
 
         /* Set 'Configuration Data' value */
         Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) + TableSize;
@@ -356,17 +367,17 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
         PartialDescriptor->u.DeviceSpecificData.DataSize = TableSize;
 
         /* Fill the table */
-        AcpiBiosData = (PACPI_BIOS_DATA)(PartialDescriptor + 1);
+        AcpiBiosData = (PACPI_BIOS_MULTI_NODE)(PartialDescriptor + 1);
 
         if (Rsdp->revision > 0)
         {
             TRACE("ACPI >1.0, using XSDT address\n");
-            AcpiBiosData->RSDTAddress.QuadPart = Rsdp->xsdt_physical_address;
+            AcpiBiosData->RsdtAddress.QuadPart = Rsdp->xsdt_physical_address;
         }
         else
         {
             TRACE("ACPI 1.0, using RSDT address\n");
-            AcpiBiosData->RSDTAddress.LowPart = Rsdp->rsdt_physical_address;
+            AcpiBiosData->RsdtAddress.LowPart = Rsdp->rsdt_physical_address;
         }
 
         AcpiBiosData->Count = 0;
@@ -512,19 +523,24 @@ UefiHwDetect(
     FldrCreateSystemKey(&SystemKey, "AT/AT COMPATIBLE");
 #elif defined(_M_IA64)
     FldrCreateSystemKey(&SystemKey, "Intel Itanium processor family");
-#elif defined(_M_ARM) || defined(_M_ARM64)
-    FldrCreateSystemKey(&SystemKey, "ARM processor family");
+#elif defined(_M_ARM) || defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+    {
+        CHAR SystemIdentifier[128];
+
+        RtlStringCbCopyA(SystemIdentifier,
+                         sizeof(SystemIdentifier),
+                         "ARM processor family");
+        UefiGetSmbiosSystemIdentifier(SystemIdentifier, sizeof(SystemIdentifier));
+        FldrCreateSystemKey(&SystemKey, SystemIdentifier);
+    }
 #else
     #error Please define a system key for your architecture
 #endif
 
     /* Detect buses */
     DetectInternal(SystemKey, &BusNumber);
-    DetectPci(SystemKey, &BusNumber);
-    DetectIsaBus(SystemKey, &BusNumber);
+    // TODO: DetectPciBios
     DetectAcpiBios(SystemKey, &BusNumber);
-
-    /* TODO: Detect ISA sub-devices (serial ports, keyboard, etc.) */
 
     TRACE("DetectHardware() Done\n");
     return SystemKey;

@@ -9,6 +9,12 @@
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(WARNING);
+#if DBG
+static void __attribute__((unused)) UefiSetupKeepDebugChannel(void)
+{
+    (void)DbgDefaultChannel;
+}
+#endif
 
 /* GLOBALS ********************************************************************/
 
@@ -51,7 +57,7 @@ MachInit(const char *CmdLine)
     MachVtbl.HwDetect = UefiHwDetect;
     MachVtbl.HwIdle = UefiHwIdle;
 
-    /* Setup GOP */
+    /* Setup GOP (common to all UEFI architectures) */
     if (UefiInitializeVideo() != EFI_SUCCESS)
     {
         ERR("Failed to setup GOP\n");

@@ -79,6 +79,15 @@ _Check_return_ unsigned long __cdecl _byteswap_ulong(_In_ unsigned long);
 _Check_return_ unsigned short __cdecl _byteswap_ushort(_In_ unsigned short);
 void __cdecl _disable(void);
 void __cdecl _enable(void);
+
+#if defined(_M_ARM64)
+static __inline void __break(unsigned int _Code)
+{
+    (void)_Code;
+    __asm__ __volatile__("brk #0xf001");
+}
+#endif
+
 unsigned char _interlockedbittestandreset(long volatile *, long);
 unsigned char _interlockedbittestandset(long volatile *, long);
 _Check_return_ unsigned long __cdecl _lrotl(_In_ unsigned long, _In_ int);
@@ -730,10 +739,14 @@ __m64 _mm_sub_si64(__m64, __m64);
 
 #endif /* _M_IX86 */
 
-#if defined(_M_X64)
+#if defined(_M_X64) || defined(_M_ARM64)
 
 unsigned char _BitScanForward64(unsigned long * _Index, unsigned __int64 _Mask);
 unsigned char _BitScanReverse64(unsigned long * _Index, unsigned __int64 _Mask);
+
+#endif
+
+#if defined(_M_X64) || defined(_M_ARM64)
 short _InterlockedAnd16_np(short volatile * _Value, short _Mask);
 __int64 _InterlockedAnd64_np(__int64 volatile * _Value, __int64 _Mask);
 char _InterlockedAnd8_np(char volatile * _Value, char _Mask);
@@ -832,8 +845,9 @@ void _mm_stream_si64x(__int64 *, __int64);
 #endif
 #endif /* _M_X64 */
 
-#if defined(_M_ARM) || defined(_M_X64)
+#if defined(_M_ARM) || defined(_M_X64) || defined(_M_ARM64)
 
+__int64 _InterlockedAdd64(_Interlocked_operand_ __int64 volatile * _Addend, __int64 _Value);
 __int64 _InterlockedAnd64(_Interlocked_operand_ __int64 volatile * _Value, __int64 _Mask);
 __int64 _InterlockedDecrement64(_Interlocked_operand_ __int64 volatile * _Addend);
 __int64 _InterlockedExchange64(_Interlocked_operand_ __int64 volatile * _Target, __int64 _Value);
@@ -842,7 +856,7 @@ __int64 _InterlockedIncrement64(_Interlocked_operand_ __int64 volatile * _Addend
 __int64 _InterlockedOr64(_Interlocked_operand_ __int64 volatile * _Value, __int64 _Mask);
 __int64 _InterlockedXor64(_Interlocked_operand_ __int64 volatile * _Value, __int64 _Mask);
 
-#endif /* _M_ARM || _M_X64 */
+#endif /* _M_ARM || _M_X64 || _M_ARM64 */
 
 #if defined(_M_ARM)
 
@@ -1023,11 +1037,11 @@ long _InterlockedIncrement(_Interlocked_operand_ long volatile * _Addend);
 }
 #endif /* __cplusplus */
 
-#if (defined(__GNUC__) || defined(__clang__)) && defined(_WIN32) // We can't use __MINGW32__ here
+#if (defined(__GNUC__) || defined(__clang__)) && defined(_WIN32) && !defined(_M_ARM64) // We can't use __MINGW32__ here
 #  include "mingw32/intrin.h"
 #elif defined(_MSC_VER)
 #  include "msc/intrin.h"
-#else
+#elif !defined(_M_ARM64)
 #  error Please implement intrinsics for your target compiler
 #endif
 

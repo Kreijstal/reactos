@@ -103,6 +103,14 @@ foreach(_keyboard_layout ${_keyboard_layouts})
     if(MSVC)
         # Merge the .text and .rdata section into the .data section
         target_link_options(${_keyboard_layout} PRIVATE "/ignore:4254;/SECTION:.data,ER;/MERGE:.text=.data;/MERGE:.rdata=.data;/MERGE:.bss=.data;/MERGE:.edata=.data")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        target_link_options(${_keyboard_layout} PRIVATE
+            "SHELL:-Xlinker /ignore:4254"
+            "SHELL:-Xlinker /SECTION:.data,ER"
+            "SHELL:-Xlinker /MERGE:.text=.data"
+            "SHELL:-Xlinker /MERGE:.rdata=.data"
+            "SHELL:-Xlinker /MERGE:.bss=.data"
+            "SHELL:-Xlinker /MERGE:.edata=.data")
     else()
         # Use a custom linker script
         target_link_options(${_keyboard_layout} PRIVATE "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/kbdlayout.lds")
