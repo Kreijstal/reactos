@@ -10,7 +10,9 @@
 #include <windows.h>
 
 #include <apitest.h>
+#if defined(_M_IX86) || defined(_M_AMD64)
 #include <xmmintrin.h>
+#endif
 #include <float.h>
 #include <pseh/pseh2.h>
 
@@ -27,6 +29,8 @@ unsigned int get_native_fpcw(void)
     __asm__ __volatile__("fstsw %0" : "=m" (fpcw) : );
 #endif
     return fpcw;
+#elif defined(_M_ARM) || defined(_M_ARM64)
+    return 0;
 #else
     #error "Unsupported architecture"
     return 0;
@@ -44,6 +48,8 @@ void set_native_fpcw(unsigned int value)
 #else
     __asm__ __volatile__("fldcw %0" : : "m" (fpcw));
 #endif
+#elif defined(_M_ARM) || defined(_M_ARM64)
+    (void)value;
 #else
 #error "Unsupported architecture"
 #endif
@@ -70,7 +76,7 @@ void set_native_fpcw(unsigned int value)
 #define ON_AMD64(x)
 #endif
 
-#ifdef _M_ARM
+#if defined(_M_ARM) || defined(_M_ARM64)
 #define ON_ARM(x) x
 #else
 #define ON_ARM(x)

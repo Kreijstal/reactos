@@ -593,6 +593,24 @@ extern "C" {
     _In_opt_ _locale_t _Locale);
 
   _Check_return_
+  _CRTIMP
+  float
+  __cdecl
+  _strtof_l(
+    _In_z_ const char *_Str,
+    _Out_opt_ _Deref_post_z_ char **_EndPtr,
+    _In_opt_ _locale_t _Locale);
+
+  _Check_return_
+  _CRTIMP
+  long double
+  __cdecl
+  _strtold_l(
+    _In_z_ const char *_Str,
+    _Out_opt_ _Deref_post_z_ char **_EndPtr,
+    _In_opt_ _locale_t _Locale);
+
+  _Check_return_
   long
   __cdecl
   strtol(

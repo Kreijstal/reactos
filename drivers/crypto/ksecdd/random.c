@@ -78,6 +78,9 @@ KsecReadMachineSpecificCounters(
 #elif defined(_M_ARM)
     /* Read the Cycle Counter Register */
     MachineSpecificCounters->Ccr = _MoveFromCoprocessor(CP15_PMCCNTR);
+#elif defined(_M_ARM64)
+    /* Read the architectural virtual counter */
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(MachineSpecificCounters->Cntvct));
 #else
     #error Implement me!
 #endif

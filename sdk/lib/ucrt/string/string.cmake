@@ -58,7 +58,8 @@ list(APPEND UCRT_STRING_SOURCES
 )
 
 # Special handling for GCC and Clang
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+if((CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang") AND
+   (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
     list(APPEND UCRT_STRING_SOURCES
         string/strnlen-avx2.cpp
         string/strnlen-sse2.cpp
@@ -106,10 +107,9 @@ elseif(${ARCH} STREQUAL "amd64")
     )
 else()
     if(${ARCH} STREQUAL "arm64")
-        list(APPEND UCRT_STRING_ASM_SOURCES
-            string/arm64/strlen.s
-            string/arm64/wcslen.s
-    )
+        list(APPEND UCRT_STRING_SOURCES
+            string/arm/strlen.c
+        )
     else()
         list(APPEND UCRT_STRING_SOURCES
             string/arm/strlen.c
