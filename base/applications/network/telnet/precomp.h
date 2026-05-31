@@ -20,7 +20,7 @@
 #ifdef __BORLANDC__
 #include <fstream.h>
 #else
-#include <fstream>
+#include <stdio.h>
 #endif
 
 #include "src/tnconfig.h"

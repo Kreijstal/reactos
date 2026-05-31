@@ -253,7 +253,7 @@ RtlWalkFrameChain(OUT PVOID *Callers,
                   IN ULONG Flags)
 {
     ULONG_PTR Stack, NewStack, StackBegin, StackEnd = 0;
-    ULONG Eip;
+    ULONG_PTR Eip;
     BOOLEAN Result, StopSearch = FALSE;
     ULONG i = 0;
 
@@ -275,6 +275,8 @@ RtlWalkFrameChain(OUT PVOID *Callers,
     // FIXME: Hack. Probably won't work if this ever actually manages to run someday.
     Stack = (ULONG_PTR)&Stack;
 #endif
+#elif defined(_M_ARM64)
+    __asm__("mov %0, x29" : "=r"(Stack) : );
 #else
 #error Unknown architecture
 #endif

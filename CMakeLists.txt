@@ -18,6 +18,16 @@ project(REACTOS)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 set(CMAKE_INCLUDE_DIRECTORIES_PROJECT_BEFORE ON)
+if(ARCH STREQUAL "arm64" AND DEFINED LLVM_MINGW_LIBCXX_INCLUDE)
+    add_compile_definitions(
+        "$<$<COMPILE_LANGUAGE:CXX>:_LIBCPP_MSVCRT>"
+        "$<$<COMPILE_LANGUAGE:CXX>:__STDC_CONSTANT_MACROS>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-I${LLVM_MINGW_LIBCXX_INCLUDE}>")
+    if(DEFINED LLVM_MINGW_CLANG_INCLUDE)
+        add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-isystem${LLVM_MINGW_CLANG_INCLUDE}>")
+    endif()
+    include_directories(BEFORE "${LLVM_MINGW_LIBCXX_INCLUDE}")
+endif()
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 set(CMAKE_SHARED_MODULE_PREFIX "")
 set(CMAKE_SKIP_PREPROCESSED_SOURCE_RULES TRUE)
@@ -301,7 +311,7 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         endif()
     elseif(ARCH STREQUAL "arm64")
         # GNU tools refer to arm64 as aarch64
-        add_definitions(-D_ARM64_ -D__arm64__ -D__aarch64__ -D_WIN64)
+        add_definitions(-D_ARM64_ -D_M_ARM64 -D__arm64__ -D__aarch64__ -D_WIN64)
     endif()
 
     # Other

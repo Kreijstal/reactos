@@ -8,6 +8,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <uefildr.h>
+#include <DevicePath.h>
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(DISK);
@@ -19,6 +20,13 @@ DBG_DEFAULT_CHANNEL(DISK);
 
 /* Maximum block size we support (8KB) - filters out flash devices */
 #define MAX_SUPPORTED_BLOCK_SIZE 8192
+/*
+ * A one-page transfer size forces large Block I/O reads to be split into
+ * many small firmware requests, which hurts throughput on some UEFI devices.
+ * Use a larger default chunk size and keep the bounce buffer only as an
+ * alignment aid for callers that need it.
+ */
+#define UEFI_BLOCKIO_CHUNK_SIZE (128 * 1024)
 
 #include "disk/part_gpt.h"
 
@@ -63,6 +71,7 @@ static ULONG UefiBootRootIndex = 0;
 static ULONG PublicBootArcDisk = 0;
 static INTERNAL_UEFI_DISK* InternalUefiDisk = NULL;
 static EFI_GUID BlockIoGuid = BLOCK_IO_PROTOCOL;
+static EFI_GUID DevicePathProtocolGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
 static EFI_HANDLE* handles = NULL;
 static ULONG HandleCount = 0;
 
@@ -155,6 +164,242 @@ UefiEnsureDiskReadBufferAligned(
     }
 
     return TRUE;
+}
+
+static
+EFI_STATUS
+UefiReadBlocks(
+    IN EFI_BLOCK_IO* BlockIo,
+    IN ULONGLONG SectorNumber,
+    IN ULONG BlockSize,
+    OUT PVOID Buffer,
+    IN ULONG SectorCount)
+{
+    if (!BlockIo || !Buffer || SectorCount == 0 || BlockSize == 0)
+        return EFI_INVALID_PARAMETER;
+
+    return BlockIo->ReadBlocks(BlockIo,
+                               BlockIo->Media->MediaId,
+                               SectorNumber,
+                               (UINTN)SectorCount * BlockSize,
+                               Buffer);
+}
+
+static
+ULONG
+UefiGetMaxChunkSectors(
+    IN ULONG BlockSize)
+{
+    if (BlockSize == 0 || DiskReadBufferSize < BlockSize)
+        return 0;
+
+    return DiskReadBufferSize / BlockSize;
+}
+
+static
+EFI_STATUS
+UefiReadBlocksChunked(
+    IN EFI_BLOCK_IO* BlockIo,
+    IN ULONGLONG SectorNumber,
+    IN ULONG BlockSize,
+    OUT PVOID Buffer,
+    IN ULONG SectorCount)
+{
+    EFI_STATUS Status;
+    ULONG MaxSectors;
+    PUCHAR CurrentBuffer;
+
+    if (!BlockIo || !Buffer || SectorCount == 0 || BlockSize == 0)
+        return EFI_INVALID_PARAMETER;
+
+    MaxSectors = UefiGetMaxChunkSectors(BlockSize);
+    if (MaxSectors == 0)
+        return EFI_BAD_BUFFER_SIZE;
+
+    CurrentBuffer = (PUCHAR)Buffer;
+
+    while (SectorCount)
+    {
+        ULONG ReadSectors = min(SectorCount, MaxSectors);
+        UINTN ReadSize = (UINTN)ReadSectors * BlockSize;
+
+        Status = UefiReadBlocks(BlockIo,
+                                SectorNumber,
+                                BlockSize,
+                                CurrentBuffer,
+                                ReadSectors);
+        if (EFI_ERROR(Status))
+            return Status;
+
+        CurrentBuffer += ReadSize;
+        SectorNumber += ReadSectors;
+        SectorCount -= ReadSectors;
+    }
+
+    return EFI_SUCCESS;
+}
+
+static
+BOOLEAN
+UefiDetectIsoVolume(
+    _In_ EFI_BLOCK_IO* BlockIo)
+{
+    EFI_STATUS Status;
+    VOID* ReadBuffer = NULL;
+    UINT32 BlockSize;
+    UINT64 IsoOffsetBytes;
+    UINT64 ReadLba;
+    UINTN DescriptorOffset;
+    UINTN ReadSize;
+    UINTN BlockCount;
+    PUCHAR Descriptor;
+    BOOLEAN IsIso = FALSE;
+
+    if (!BlockIo || !BlockIo->Media ||
+        !BlockIo->Media->MediaPresent ||
+        BlockIo->Media->BlockSize == 0)
+    {
+        return FALSE;
+    }
+
+    BlockSize = BlockIo->Media->BlockSize;
+    IsoOffsetBytes = 16ULL * 2048ULL;
+    ReadLba = IsoOffsetBytes / BlockSize;
+    DescriptorOffset = (UINTN)(IsoOffsetBytes % BlockSize);
+    ReadSize = DescriptorOffset + 2048;
+
+    if (ReadSize % BlockSize)
+        ReadSize = ((ReadSize + BlockSize - 1) / BlockSize) * BlockSize;
+
+    BlockCount = ReadSize / BlockSize;
+    if (BlockIo->Media->LastBlock < ReadLba + BlockCount - 1)
+        return FALSE;
+
+    Status = GlobalSystemTable->BootServices->AllocatePool(EfiLoaderData,
+                                                           ReadSize,
+                                                           &ReadBuffer);
+    if (EFI_ERROR(Status) || !ReadBuffer)
+        return FALSE;
+
+    Status = BlockIo->ReadBlocks(BlockIo,
+                                 BlockIo->Media->MediaId,
+                                 ReadLba,
+                                 ReadSize,
+                                 ReadBuffer);
+    if (!EFI_ERROR(Status))
+    {
+        Descriptor = (PUCHAR)ReadBuffer + DescriptorOffset;
+        IsIso = (Descriptor[0] == 0x01 &&
+                 Descriptor[1] == 'C' &&
+                 Descriptor[2] == 'D' &&
+                 Descriptor[3] == '0' &&
+                 Descriptor[4] == '0' &&
+                 Descriptor[5] == '1');
+    }
+
+    GlobalSystemTable->BootServices->FreePool(ReadBuffer);
+    return IsIso;
+}
+
+static
+BOOLEAN
+UefiDevicePathHasCdRomNode(
+    _In_ EFI_HANDLE Handle)
+{
+    EFI_DEVICE_PATH_PROTOCOL* DevicePath = NULL;
+
+    if (EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(
+            Handle,
+            &DevicePathProtocolGuid,
+            (VOID**)&DevicePath)) ||
+        !DevicePath)
+    {
+        return FALSE;
+    }
+
+    while (!IsDevicePathEnd(DevicePath))
+    {
+        if (DevicePath->Type == MEDIA_DEVICE_PATH &&
+            DevicePath->SubType == MEDIA_CDROM_DP)
+        {
+            return TRUE;
+        }
+
+        DevicePath = NextDevicePathNode(DevicePath);
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+UefiDevicePathMatchesParentDisk(
+    _In_ EFI_DEVICE_PATH_PROTOCOL* CandidateDiskPath,
+    _In_ EFI_DEVICE_PATH_PROTOCOL* PartitionPath)
+{
+    EFI_DEVICE_PATH_PROTOCOL* DiskNode = CandidateDiskPath;
+    EFI_DEVICE_PATH_PROTOCOL* PartNode = PartitionPath;
+
+    if (!CandidateDiskPath || !PartitionPath)
+        return FALSE;
+
+    while (!IsDevicePathEnd(PartNode))
+    {
+        if (PartNode->Type == MEDIA_DEVICE_PATH &&
+            PartNode->SubType == MEDIA_HARDDRIVE_DP)
+        {
+            return IsDevicePathEnd(DiskNode);
+        }
+
+        if (IsDevicePathEnd(DiskNode))
+            return FALSE;
+
+        if (DevicePathNodeLength(PartNode) != DevicePathNodeLength(DiskNode))
+            return FALSE;
+
+        if (memcmp(PartNode, DiskNode, DevicePathNodeLength(PartNode)) != 0)
+        {
+            return FALSE;
+        }
+
+        PartNode = NextDevicePathNode(PartNode);
+        DiskNode = NextDevicePathNode(DiskNode);
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+UefiIsCdRomHandle(
+    _In_ EFI_HANDLE Handle)
+{
+    EFI_BLOCK_IO* BlockIo = NULL;
+
+    if (!Handle)
+        return FALSE;
+
+    if (UefiDevicePathHasCdRomNode(Handle))
+        return TRUE;
+
+    if (EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(
+            Handle,
+            &BlockIoGuid,
+            (VOID**)&BlockIo)) ||
+        !BlockIo ||
+        !BlockIo->Media ||
+        !BlockIo->Media->MediaPresent)
+    {
+        return FALSE;
+    }
+
+    if (BlockIo->Media->RemovableMedia && BlockIo->Media->BlockSize == 2048)
+        return TRUE;
+
+    if (BlockIo->Media->ReadOnly && !BlockIo->Media->LogicalPartition)
+        return TRUE;
+
+    return (!BlockIo->Media->LogicalPartition && UefiDetectIsoVolume(BlockIo));
 }
 
 /* GPT Support Functions *****************************************************/
@@ -261,12 +506,11 @@ UefiGetBootPartitionEntry(
             ULONG EntryOffset = (i % EntriesPerBlock) * GptHeader.SizeOfPartitionEntry;
 
             /* Read the block containing the partition entry */
-            Status = RootBlockIo->ReadBlocks(
-                RootBlockIo,
-                RootBlockIo->Media->MediaId,
-                EntryLba,
-                BlockSize,
-                DiskReadBuffer);
+            Status = UefiReadBlocks(RootBlockIo,
+                                    EntryLba,
+                                    BlockSize,
+                                    DiskReadBuffer,
+                                    1);
 
             if (EFI_ERROR(Status))
                 continue;
@@ -515,11 +759,18 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
     EFI_BLOCK_IO* BlockIo;
     EFI_STATUS Status;
     ULONG ArcDriveIndex;
+    ULONG IoAlign;
 
     ASSERT(DiskReadBufferSize > 0);
 
+    if (N == 0)
+    {
+        *Count = 0;
+        return ESUCCESS;
+    }
+
     TotalSectors = (N + Context->SectorSize - 1) / Context->SectorSize;
-    MaxSectors   = DiskReadBufferSize / Context->SectorSize;
+    MaxSectors   = UefiGetMaxChunkSectors(Context->SectorSize);
     SectorOffset = Context->SectorOffset + Context->SectorNumber;
 
     // If MaxSectors is 0, this will lead to infinite loop.
@@ -554,7 +805,35 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
         return EIO;
     }
 
-    if (!UefiEnsureDiskReadBufferAligned(BlockIo->Media->IoAlign))
+    IoAlign = BlockIo->Media->IoAlign;
+
+    /*
+     * Large RAM disk loads pass a page-aligned destination and sector-aligned
+     * sizes. In that case read directly into the caller's buffer instead of
+     * bouncing every chunk through DiskReadBuffer.
+     */
+    if ((N % Context->SectorSize) == 0 &&
+        UefiIsAlignedPointer(Buffer, (IoAlign == 0) ? 1 : IoAlign))
+    {
+        Status = UefiReadBlocksChunked(BlockIo,
+                                       SectorOffset,
+                                       Context->SectorSize,
+                                       Buffer,
+                                       TotalSectors);
+        if (EFI_ERROR(Status))
+        {
+            ERR("ReadBlocks failed: DriveNumber=%d, SectorNumber=%llu, SectorCount=%lu, Status=0x%lx\n",
+                Context->DriveNumber, SectorOffset, TotalSectors, (ULONG)Status);
+            *Count = 0;
+            return EIO;
+        }
+
+        *Count = N;
+        Context->SectorNumber = SectorOffset + TotalSectors - Context->SectorOffset;
+        return ESUCCESS;
+    }
+
+    if (!UefiEnsureDiskReadBufferAligned(IoAlign))
     {
         ERR("Failed to align disk read buffer\n");
         *Count = 0;
@@ -567,16 +846,16 @@ UefiDiskRead(ULONG FileId, VOID *Buffer, ULONG N, ULONG *Count)
     {
         ReadSectors = min(TotalSectors, MaxSectors);
 
-        Status = BlockIo->ReadBlocks(
-            BlockIo,
-            BlockIo->Media->MediaId,
-            SectorOffset,
-            ReadSectors * Context->SectorSize,
-            DiskReadBuffer);
+        Status = UefiReadBlocks(BlockIo,
+                                SectorOffset,
+                                Context->SectorSize,
+                                DiskReadBuffer,
+                                ReadSectors);
 
         if (EFI_ERROR(Status))
         {
-            ERR("ReadBlocks failed: Status = 0x%lx\n", (ULONG)Status);
+            ERR("ReadBlocks failed: DriveNumber=%d, SectorNumber=%llu, SectorCount=%lu, Status=0x%lx\n",
+                Context->DriveNumber, SectorOffset, ReadSectors, (ULONG)Status);
             ret = FALSE;
             break;
         }
@@ -894,10 +1173,19 @@ UefiSetupBlockDevices(VOID)
 
         if (!EFI_ERROR(Status) && BlockIo != NULL && BlockIo->Media->LogicalPartition)
         {
+            EFI_DEVICE_PATH_PROTOCOL* BootPath = NULL;
             TRACE("Boot handle is a logical partition, searching for parent root device\n");
             TRACE("Boot partition: BlockSize=%lu, RemovableMedia=%s\n",
                 BlockIo->Media->BlockSize,
                 BlockIo->Media->RemovableMedia ? "TRUE" : "FALSE");
+
+            if (EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(
+                    handles[UefiBootRootIndex],
+                    &DevicePathProtocolGuid,
+                    (VOID**)&BootPath)))
+            {
+                BootPath = NULL;
+            }
 
             /* Find the root device that matches the boot partition's characteristics */
             /* For CD-ROMs: match BlockSize=2048 and RemovableMedia=TRUE */
@@ -906,6 +1194,7 @@ UefiSetupBlockDevices(VOID)
             for (i = 0; i < BlockDeviceIndex; i++)
             {
                 EFI_BLOCK_IO* RootBlockIo;
+                EFI_DEVICE_PATH_PROTOCOL* RootPath = NULL;
                 Status = GlobalSystemTable->BootServices->HandleProtocol(
                     InternalUefiDisk[i].Handle,
                     &BlockIoGuid,
@@ -913,6 +1202,30 @@ UefiSetupBlockDevices(VOID)
 
                 if (EFI_ERROR(Status) || RootBlockIo == NULL)
                     continue;
+
+                if (BootPath &&
+                    !EFI_ERROR(GlobalSystemTable->BootServices->HandleProtocol(
+                        InternalUefiDisk[i].Handle,
+                        &DevicePathProtocolGuid,
+                        (VOID**)&RootPath)) &&
+                    UefiDevicePathMatchesParentDisk(RootPath, BootPath))
+                {
+                    PublicBootArcDisk = i;
+                    InternalUefiDisk[i].IsThisTheBootDrive = TRUE;
+                    FoundBootDevice = TRUE;
+                    TRACE("Found boot parent device by device path at ARC drive index %lu\n", i);
+                    break;
+                }
+
+                if (UefiDevicePathHasCdRomNode(handles[UefiBootRootIndex]) &&
+                    UefiIsCdRomHandle(InternalUefiDisk[i].Handle))
+                {
+                    PublicBootArcDisk = i;
+                    InternalUefiDisk[i].IsThisTheBootDrive = TRUE;
+                    FoundBootDevice = TRUE;
+                    TRACE("Found CD-ROM boot parent by device path at ARC drive index %lu\n", i);
+                    break;
+                }
 
                 /* For CD-ROM: match BlockSize=2048 and RemovableMedia */
                 if (BlockIo->Media->BlockSize == 2048 && BlockIo->Media->RemovableMedia)
@@ -962,8 +1275,10 @@ BOOLEAN
 UefiSetBootpath(VOID)
 {
     EFI_BLOCK_IO* BootBlockIo = NULL;
+    EFI_BLOCK_IO* RootBlockIo = NULL;
     EFI_STATUS Status;
     ULONG ArcDriveIndex;
+    BOOLEAN TreatAsCd = FALSE;
 
     TRACE("UefiSetBootpath: Setting up boot path\n");
 
@@ -981,21 +1296,54 @@ UefiSetBootpath(VOID)
     }
 
     Status = GlobalSystemTable->BootServices->HandleProtocol(
-        handles[UefiBootRootIndex],
+        PublicBootHandle,
         &BlockIoGuid,
         (VOID**)&BootBlockIo);
 
     if (EFI_ERROR(Status) || BootBlockIo == NULL)
     {
-        ERR("Failed to get Block I/O protocol for boot handle\n");
+        TRACE("Failed to get Block I/O protocol for loaded boot handle, using root handle\n");
+        BootBlockIo = NULL;
+    }
+
+    Status = GlobalSystemTable->BootServices->HandleProtocol(
+        InternalUefiDisk[ArcDriveIndex].Handle,
+        &BlockIoGuid,
+        (VOID**)&RootBlockIo);
+
+    if (EFI_ERROR(Status) || RootBlockIo == NULL)
+    {
+        ERR("Failed to get Block I/O protocol for boot root handle\n");
         return FALSE;
     }
 
     FrldrBootDrive = (FIRST_BIOS_DISK + ArcDriveIndex);
 
-    /* Check if booting from CD-ROM by checking the boot handle properties.
-     * CD-ROMs have BlockSize=2048 and RemovableMedia=TRUE. */
-    if (BootBlockIo->Media->RemovableMedia == TRUE && BootBlockIo->Media->BlockSize == 2048)
+    if (UefiIsCdRomHandle(PublicBootHandle) ||
+        UefiIsCdRomHandle(InternalUefiDisk[ArcDriveIndex].Handle))
+    {
+        TreatAsCd = TRUE;
+    }
+
+    if (!TreatAsCd && BootBlockIo && BootBlockIo->Media &&
+        BootBlockIo->Media->LogicalPartition &&
+        RootBlockIo->Media &&
+        !RootBlockIo->Media->LogicalPartition &&
+        UefiDetectIsoVolume(RootBlockIo))
+    {
+        TRACE("Boot handle is a logical partition on ISO9660 media, using CD-ROM ARC path\n");
+        TreatAsCd = TRUE;
+    }
+
+    if (!TreatAsCd && RootBlockIo->Media &&
+        RootBlockIo->Media->ReadOnly &&
+        !RootBlockIo->Media->LogicalPartition)
+    {
+        TRACE("Boot root media is read-only, using CD-ROM ARC path\n");
+        TreatAsCd = TRUE;
+    }
+
+    if (TreatAsCd)
     {
         /* Boot Partition 0xFF is the magic value that indicates booting from CD-ROM */
         FrldrBootPartition = 0xFF;
@@ -1009,7 +1357,7 @@ UefiSetBootpath(VOID)
 
         /* This is a hard disk */
         /* If boot handle is a logical partition, we need to determine which partition number */
-        if (BootBlockIo->Media->LogicalPartition)
+        if (BootBlockIo && BootBlockIo->Media && BootBlockIo->Media->LogicalPartition)
         {
             EFI_GUID DevicePathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID;
             EFI_DEVICE_PATH_PROTOCOL *DevicePath = NULL;
@@ -1070,7 +1418,7 @@ UefiInitializeBootDevices(VOID)
     EFI_STATUS Status;
     ULONG ArcDriveIndex;
 
-    DiskReadBufferSize = EFI_PAGE_SIZE;
+    DiskReadBufferSize = UEFI_BLOCKIO_CHUNK_SIZE;
     DiskReadBuffer = NULL;
     DiskReadBufferRaw = NULL;
     DiskReadBufferAlignment = 1;
@@ -1114,7 +1462,9 @@ UefiInitializeBootDevices(VOID)
         return FALSE;
     }
 
-    if (BlockIo->Media->RemovableMedia == TRUE && BlockIo->Media->BlockSize == 2048)
+    if (FrldrBootPartition == 0xFF ||
+        UefiIsCdRomHandle(InternalUefiDisk[ArcDriveIndex].Handle) ||
+        (BlockIo->Media->RemovableMedia == TRUE && BlockIo->Media->BlockSize == 2048))
     {
         ARC_STATUS Status;
 
@@ -1207,27 +1557,26 @@ UefiDiskReadLogicalSectors(
     if (!UefiIsAlignedPointer(Buffer, (IoAlign == 0) ? 1 : IoAlign))
     {
         ULONG TotalSectors = SectorCount;
-        ULONG MaxSectors = DiskReadBufferSize / BlockSize;
+        ULONG MaxSectors = UefiGetMaxChunkSectors(BlockSize);
         ULONGLONG CurrentSector = SectorNumber;
         PUCHAR OutPtr = (PUCHAR)Buffer;
 
         if (MaxSectors == 0)
         {
-            ERR("DiskReadBufferSize too small for block size %lu\n", BlockSize);
+            ERR("UEFI Block I/O chunk size too small for block size %lu\n", BlockSize);
             return FALSE;
         }
 
         while (TotalSectors)
         {
             ULONG ReadSectors = min(TotalSectors, MaxSectors);
-            UINTN ReadSize = ReadSectors * BlockSize;
+            UINTN ReadSize;
 
-            Status = BlockIo->ReadBlocks(
-                BlockIo,
-                BlockIo->Media->MediaId,
-                CurrentSector,
-                ReadSize,
-                DiskReadBuffer);
+            Status = UefiReadBlocks(BlockIo,
+                                    CurrentSector,
+                                    BlockSize,
+                                    DiskReadBuffer,
+                                    ReadSectors);
 
             if (EFI_ERROR(Status))
             {
@@ -1242,6 +1591,7 @@ UefiDiskReadLogicalSectors(
                 return FALSE;
             }
 
+            ReadSize = (UINTN)ReadSectors * BlockSize;
             RtlCopyMemory(OutPtr, DiskReadBuffer, ReadSize);
             OutPtr += ReadSize;
             CurrentSector += ReadSectors;
@@ -1251,24 +1601,24 @@ UefiDiskReadLogicalSectors(
         return TRUE;
     }
 
-    Status = BlockIo->ReadBlocks(
-        BlockIo,
-        BlockIo->Media->MediaId,
-        SectorNumber,
-        SectorCount * BlockSize,
-        Buffer);
-
-    if (EFI_ERROR(Status))
     {
-        ERR("ReadBlocks failed: DriveNumber=%d, SectorNumber=%llu, SectorCount=%lu, Status=0x%lx\n",
-            DriveNumber, SectorNumber, SectorCount, (ULONG)Status);
-        ERR("ReadBlocks details: BlockSize=%lu, IoAlign=%lu, Buffer=%p, DiskReadBuffer=%p, MediaId=0x%lx\n",
-            BlockSize, IoAlign, Buffer, DiskReadBuffer, (ULONG)BlockIo->Media->MediaId);
-        ERR("ReadBlocks media: LastBlock=%llu, LogicalPartition=%s, RemovableMedia=%s\n",
-            BlockIo->Media->LastBlock,
-            BlockIo->Media->LogicalPartition ? "TRUE" : "FALSE",
-            BlockIo->Media->RemovableMedia ? "TRUE" : "FALSE");
-        return FALSE;
+        Status = UefiReadBlocksChunked(BlockIo,
+                                       SectorNumber,
+                                       BlockSize,
+                                       Buffer,
+                                       SectorCount);
+        if (EFI_ERROR(Status))
+        {
+            ERR("ReadBlocks failed: DriveNumber=%d, SectorNumber=%llu, SectorCount=%lu, Status=0x%lx\n",
+                DriveNumber, SectorNumber, SectorCount, (ULONG)Status);
+            ERR("ReadBlocks details: BlockSize=%lu, IoAlign=%lu, Buffer=%p, DiskReadBuffer=%p, MediaId=0x%lx\n",
+                BlockSize, IoAlign, Buffer, DiskReadBuffer, (ULONG)BlockIo->Media->MediaId);
+            ERR("ReadBlocks media: LastBlock=%llu, LogicalPartition=%s, RemovableMedia=%s\n",
+                BlockIo->Media->LastBlock,
+                BlockIo->Media->LogicalPartition ? "TRUE" : "FALSE",
+                BlockIo->Media->RemovableMedia ? "TRUE" : "FALSE");
+            return FALSE;
+        }
     }
 
     return TRUE;

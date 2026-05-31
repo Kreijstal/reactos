@@ -1296,6 +1296,26 @@ typedef struct _IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY {
 
 typedef struct _IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY ARM64_RUNTIME_FUNCTION, *PARM64_RUNTIME_FUNCTION;
 
+typedef union _IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_XDATA {
+    DWORD HeaderData;
+    struct {
+        DWORD FunctionLength : 18;
+        DWORD Version : 2;
+        DWORD ExceptionDataPresent : 1;
+        DWORD EpilogInHeader : 1;
+        DWORD EpilogCount : 5;
+        DWORD CodeWords : 5;
+    } DUMMYSTRUCTNAME;
+} IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_XDATA, *PIMAGE_ARM64_RUNTIME_FUNCTION_ENTRY_XDATA;
+
+#ifndef UNW_FLAG_NHANDLER
+#define UNW_FLAG_NHANDLER 0x0
+#define UNW_FLAG_EHANDLER 0x1
+#define UNW_FLAG_UHANDLER 0x2
+#define UNW_FLAG_CHAININFO 0x4
+#define UNW_FLAG_NO_EPILOGUE  0x80000000UL
+#endif
+
 /* FIXME: add more machines */
 #if defined(_X86_)
 #define SIZE_OF_80387_REGISTERS    80
@@ -2341,6 +2361,117 @@ typedef struct _CONTEXT {
 
 } _CONTEXT, *P_CONTEXT;
 typedef _CONTEXT CONTEXT, *PCONTEXT;
+
+typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
+    union {
+        PNEON128 FloatingContext[32];
+        struct {
+            PNEON128 V0;
+            PNEON128 V1;
+            PNEON128 V2;
+            PNEON128 V3;
+            PNEON128 V4;
+            PNEON128 V5;
+            PNEON128 V6;
+            PNEON128 V7;
+            PNEON128 V8;
+            PNEON128 V9;
+            PNEON128 V10;
+            PNEON128 V11;
+            PNEON128 V12;
+            PNEON128 V13;
+            PNEON128 V14;
+            PNEON128 V15;
+            PNEON128 V16;
+            PNEON128 V17;
+            PNEON128 V18;
+            PNEON128 V19;
+            PNEON128 V20;
+            PNEON128 V21;
+            PNEON128 V22;
+            PNEON128 V23;
+            PNEON128 V24;
+            PNEON128 V25;
+            PNEON128 V26;
+            PNEON128 V27;
+            PNEON128 V28;
+            PNEON128 V29;
+            PNEON128 V30;
+            PNEON128 V31;
+        } DUMMYSTRUCTNAME;
+        struct {
+            PULONG64 D0;
+            PULONG64 D1;
+            PULONG64 D2;
+            PULONG64 D3;
+            PULONG64 D4;
+            PULONG64 D5;
+            PULONG64 D6;
+            PULONG64 D7;
+            PULONG64 D8;
+            PULONG64 D9;
+            PULONG64 D10;
+            PULONG64 D11;
+            PULONG64 D12;
+            PULONG64 D13;
+            PULONG64 D14;
+            PULONG64 D15;
+            PULONG64 D16;
+            PULONG64 D17;
+            PULONG64 D18;
+            PULONG64 D19;
+            PULONG64 D20;
+            PULONG64 D21;
+            PULONG64 D22;
+            PULONG64 D23;
+            PULONG64 D24;
+            PULONG64 D25;
+            PULONG64 D26;
+            PULONG64 D27;
+            PULONG64 D28;
+            PULONG64 D29;
+            PULONG64 D30;
+            PULONG64 D31;
+        } DUMMYSTRUCTNAME2;
+    } DUMMYUNIONNAME;
+
+    union {
+        PULONG64 IntegerContext[31];
+        struct {
+            PULONG64 X0;
+            PULONG64 X1;
+            PULONG64 X2;
+            PULONG64 X3;
+            PULONG64 X4;
+            PULONG64 X5;
+            PULONG64 X6;
+            PULONG64 X7;
+            PULONG64 X8;
+            PULONG64 X9;
+            PULONG64 X10;
+            PULONG64 X11;
+            PULONG64 X12;
+            PULONG64 X13;
+            PULONG64 X14;
+            PULONG64 X15;
+            PULONG64 X16;
+            PULONG64 X17;
+            PULONG64 X18;
+            PULONG64 X19;
+            PULONG64 X20;
+            PULONG64 X21;
+            PULONG64 X22;
+            PULONG64 X23;
+            PULONG64 X24;
+            PULONG64 X25;
+            PULONG64 X26;
+            PULONG64 X27;
+            PULONG64 X28;
+            PULONG64 Fp;
+            PULONG64 Lr;
+        } DUMMYSTRUCTNAME;
+    } DUMMYUNIONNAME2;
+} KNONVOLATILE_CONTEXT_POINTERS, *PKNONVOLATILE_CONTEXT_POINTERS;
 
 typedef struct _IMAGE_ARM64_RUNTIME_FUNCTION_ENTRY RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
 typedef SCOPE_TABLE_ARM64 SCOPE_TABLE, *PSCOPE_TABLE;
@@ -4750,7 +4881,7 @@ DbgRaiseAssertionFailure(VOID)
 #elif defined(_M_ARM)
 #define YieldProcessor __yield
 #elif defined(_M_ARM64)
-#define YieldProcessor __yield
+#define YieldProcessor() __asm__ __volatile__("yield");
 #else
 #error Unknown architecture
 #endif

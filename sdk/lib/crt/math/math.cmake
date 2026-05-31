@@ -223,6 +223,17 @@ elseif(ARCH STREQUAL "arm")
     list(APPEND CRT_MATH_ASM_SOURCE
         math/arm/_logb.s
     )
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND LIBCNTPR_MATH_SOURCE
+        math/arm64/_set_statfp.c
+        math/arm64/stubs.c
+        math/ceil.c
+        math/cos.c
+        math/fabs.c
+        math/floor.c
+        math/libm_sse2/_handle_error.c
+        math/sin.c
+        math/sqrt.c)
 endif()
 
 if(NOT ARCH STREQUAL "i386")
@@ -277,7 +288,11 @@ elseif(ARCH STREQUAL "amd64")
 elseif(ARCH STREQUAL "arm")
     list(APPEND ATAN2_ASM_SOURCE math/arm/atan2.s)
 elseif(ARCH STREQUAL "arm64")
-    list(APPEND ATAN2_ASM_SOURCE math/arm64/atan2.s)
+    list(APPEND ATAN2_SOURCE
+        math/_invoke_matherr.c
+        math/arm64/_set_statfp.c
+        math/libm_sse2/_handle_error.c
+        math/libm_sse2/atan2.c)
 endif()
 
 add_asm_files(atan2_asm ${ATAN2_ASM_SOURCE})

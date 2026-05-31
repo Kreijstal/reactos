@@ -42,7 +42,13 @@ PBYTE _GetPEImageBase (void);
 int __mingw_init_ehandler (void);
 extern void __cdecl _fpreset (void);
 
-#if defined(_WIN64) && !defined(_MSC_VER)
+#if defined(_WIN64) && !defined(_MSC_VER) && defined(_M_ARM64)
+int
+__mingw_init_ehandler (void)
+{
+  return 1;
+}
+#elif defined(_WIN64) && !defined(_MSC_VER)
 EXCEPTION_DISPOSITION __mingw_SEH_error_handler(struct _EXCEPTION_RECORD *, void *, struct _CONTEXT *, void *);
 
 #define MAX_PDATA_ENTRIES 32

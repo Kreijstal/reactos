@@ -225,6 +225,30 @@ struct thunkCode
 };
 #pragma pack(pop)
 
+#elif defined(_M_ARM64)
+
+#pragma pack(push,4)
+struct thunkCode
+{
+    DWORD m_ldr_x0;  /* ldr x0, m_this */
+    DWORD m_ldr_x17; /* ldr x17, m_proc */
+    DWORD m_br_x17;  /* br x17 */
+    ULONG64 m_this;
+    ULONG64 m_proc;
+
+    void
+    Init(WNDPROC proc, void *pThis)
+    {
+        m_ldr_x0 = 0x58000060;
+        m_ldr_x17 = 0x58000091;
+        m_br_x17 = 0xd61f0220;
+        m_this = (ULONG64)pThis;
+        m_proc = (ULONG64)proc;
+        FlushInstructionCache(GetCurrentProcess(), this, sizeof(thunkCode));
+    }
+};
+#pragma pack(pop)
+
 #else
 #error ARCH not supported
 #endif
@@ -2044,4 +2068,3 @@ struct _ATL_WNDCLASSINFOW
 }; // namespace ATL
 
 #pragma pop_macro("SubclassWindow")
-

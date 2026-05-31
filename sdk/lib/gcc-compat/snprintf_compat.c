@@ -9,6 +9,7 @@
 #include <stdarg.h>
 
 #undef snprintf
+#undef vsnprintf
 
 int __cdecl snprintf(char *s, size_t n, const char *fmt, ...)
 {
@@ -22,8 +23,18 @@ int __cdecl snprintf(char *s, size_t n, const char *fmt, ...)
     return ret;
 }
 
+int __cdecl vsnprintf(char *s, size_t n, const char *fmt, va_list ap)
+{
+    int ret = _vsnprintf(s, n, fmt, ap);
+    if (s && n > 0)
+        s[n - 1] = '\0';
+    return ret;
+}
+
 #ifdef _M_IX86
 void *_imp__snprintf = snprintf;
+void *_imp__vsnprintf = vsnprintf;
 #else
 void *__imp_snprintf = snprintf;
+void *__imp_vsnprintf = vsnprintf;
 #endif
