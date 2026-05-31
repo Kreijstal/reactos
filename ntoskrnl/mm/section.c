@@ -5012,6 +5012,14 @@ MmCreateSection (OUT PVOID  * Section,
 
     if (AllocationAttributes & SEC_IMAGE)
     {
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        if (HaveFileObject)
+        {
+            Status = STATUS_INVALID_PARAMETER_6;
+            goto Exit;
+        }
+#endif
+
         Status = MmCreateImageSection(SectionObject,
                                       DesiredAccess,
                                       ObjectAttributes,
