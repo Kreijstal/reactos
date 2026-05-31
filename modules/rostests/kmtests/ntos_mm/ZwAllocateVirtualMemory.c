@@ -134,8 +134,12 @@ SimpleErrorChecks(VOID)
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_4, STATUS_MEMORY_NOT_ALLOCATED);
     RegionSize = 0;
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_4, STATUS_MEMORY_NOT_ALLOCATED);
-    RegionSize = 0xFFFFFFFF; // 4 gb  is invalid
+    RegionSize = 0xFFFFFFFF; // 4 GB is invalid on 32-bit
+#ifdef _WIN64
+    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
+#else
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_4, STATUS_MEMORY_NOT_ALLOCATED);
+#endif
 
     //Allocation type tests
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, MEM_PHYSICAL, PAGE_READWRITE, STATUS_INVALID_PARAMETER_5, STATUS_MEMORY_NOT_ALLOCATED);
@@ -502,11 +506,19 @@ START_TEST(ZwAllocateVirtualMemory)
     CustomBaseAllocation();
 
     Status = StressTesting(MEM_RESERVE);
+#ifdef _WIN64
+    ok_eq_hex(Status, STATUS_SUCCESS);
+#else
     ok_eq_hex(Status, STATUS_NO_MEMORY);
+#endif
 
     Status = STATUS_SUCCESS;
     Status = StressTesting(MEM_COMMIT);
+#ifdef _WIN64
+    ok_eq_hex(Status, STATUS_SUCCESS);
+#else
     ok_eq_hex(Status, STATUS_NO_MEMORY);
+#endif
 
     SystemProcessTest();
 }
