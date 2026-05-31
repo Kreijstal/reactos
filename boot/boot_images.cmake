@@ -1,4 +1,7 @@
 
+# Include ARM64 hardware boot media configuration.
+include(${CMAKE_SOURCE_DIR}/media/boot/arm64_boot_media.cmake)
+
 # EFI platform ID - Used for naming the EFI boot image on supported platforms.
 if(ARCH STREQUAL "i386")
     if(NOT (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox"))
@@ -18,11 +21,19 @@ endif()
 
 ## efisys.bin
 if(DEFINED EFI_PLATFORM_ID)
+    if(FREELDR_HAS_BIOS_BOOT)
+        set(_efisys_boot_options -boot ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/fat.bin)
+        set(_efisys_boot_depends fat)
+    else()
+        unset(_efisys_boot_options)
+        unset(_efisys_boot_depends)
+    endif()
+
     add_custom_target(efisys
-        COMMAND native-fatten ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin -format 2880 EFIBOOT
-            -boot ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/fat.bin
+        COMMAND native-fatten ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin -format 5760 EFIBOOT
+            ${_efisys_boot_options}
             -mkdir EFI -mkdir EFI/BOOT -add $<TARGET_FILE:uefildr> EFI/BOOT/boot${EFI_PLATFORM_ID}.efi
-        DEPENDS native-fatten fat uefildr
+        DEPENDS native-fatten ${_efisys_boot_depends} uefildr
         VERBATIM)
 endif()
 
@@ -31,10 +42,12 @@ endif()
 # arbitrary empty directories to the ISO image using mkisofs.
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/empty)
 
-# Retrieve the full paths to the generated files of the 'isombr', 'isoboot', 'isobtrt' and 'efisys' targets
-set(_isombr_file  ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/isombr.bin)  # get_target_property(_isombr_file  isombr  LOCATION)
-set(_isoboot_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/isoboot.bin) # get_target_property(_isoboot_file isoboot LOCATION)
-set(_isobtrt_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/isobtrt.bin) # get_target_property(_isobtrt_file isobtrt LOCATION)
+# Retrieve the full paths to the generated boot files.
+if(FREELDR_HAS_BIOS_BOOT)
+    set(_isombr_file  ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/isombr.bin)  # get_target_property(_isombr_file  isombr  LOCATION)
+    set(_isoboot_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/isoboot.bin) # get_target_property(_isoboot_file isoboot LOCATION)
+    set(_isobtrt_file ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/isobtrt.bin) # get_target_property(_isobtrt_file isobtrt LOCATION)
+endif()
 if(DEFINED EFI_PLATFORM_ID)
     set(_efisys_file  ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin) # get_target_property(_efisys_file  efisys  LOCATION)
 endif()
@@ -56,11 +69,10 @@ endif()
 # - since its contents are included by mkisofs at the root of the ISO image,
 #   using the empty directory ensures that no extra unwanted files are added.
 #
-set(ISO_SORT_FILE_DATA "\
-${CMAKE_CURRENT_BINARY_DIR}/empty/boot.catalog 4
-${_isoboot_file} 3
-${_isobtrt_file} 2
-")
+set(ISO_SORT_FILE_DATA "${CMAKE_CURRENT_BINARY_DIR}/empty/boot.catalog 4\n")
+if(FREELDR_HAS_BIOS_BOOT)
+    string(APPEND ISO_SORT_FILE_DATA "${_isoboot_file} 3\n${_isobtrt_file} 2\n")
+endif()
 if(DEFINED EFI_PLATFORM_ID)
     string(APPEND ISO_SORT_FILE_DATA "${_efisys_file} 1\n")
 endif()
@@ -88,6 +100,13 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         -eltorito-platform x86 -eltorito-boot loader/isoboot.bin -no-emul-boot -boot-load-size 4)
     set(ISO_BOOT_OPTIONS_REGTEST
         -eltorito-platform x86 -eltorito-boot loader/isobtrt.bin -no-emul-boot -boot-load-size 4)
+    set(ISOHYBRID_BOOTCD_COMMAND
+        COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcd.iso)
+    set(ISOHYBRID_BOOTCDREGTEST_COMMAND
+        COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcdregtest.iso)
+    set(ISOHYBRID_KMTESTCD_COMMAND
+        COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/kmtestcd.iso)
+    set(ISOHYBRID_DEPENDS isombr native-isohybrid)
 endif()
 
 # EFI boot entry
@@ -147,8 +166,8 @@ add_custom_target(bootcd
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/bootcd.iso
         ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
         -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcd.$<CONFIG>.lst
-    COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcd.iso
-    DEPENDS isombr native-isohybrid native-mkisofs livecd
+    ${ISOHYBRID_BOOTCD_COMMAND}
+    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs livecd
     VERBATIM)
 
 ## BootCDRegTest
@@ -159,8 +178,8 @@ add_custom_target(bootcdregtest
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/bootcdregtest.iso
         ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS_REGTEST} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
         -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcdregtest.$<CONFIG>.lst
-    COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcdregtest.iso
-    DEPENDS isombr native-isohybrid native-mkisofs
+    ${ISOHYBRID_BOOTCDREGTEST_COMMAND}
+    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs
     VERBATIM)
 
 ## LiveImage -- Constitutes a small RAMDISK ISO, and is also merged with the BootCD
@@ -190,8 +209,8 @@ add_custom_target(kmtestcd
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/kmtestcd.iso
         ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
         -path-list ${CMAKE_CURRENT_BINARY_DIR}/kmtestcd.$<CONFIG>.lst
-    COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/kmtestcd.iso
-    DEPENDS isombr native-isohybrid native-mkisofs bootcd
+    ${ISOHYBRID_KMTESTCD_COMMAND}
+    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs bootcd
     VERBATIM)
 
 ## KmtestIMG -- writable FAT disk image variant of KmtestCD.
