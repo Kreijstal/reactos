@@ -776,6 +776,15 @@ CmpHiveRootSecurityDescriptor(
     VOID
 );
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+VOID
+NTAPI
+CmpAssignBootHiveRootSecurity(
+    IN PCMHIVE CmHive,
+    IN BOOLEAN SecurityHive
+);
+#endif
+
 NTSTATUS
 NTAPI
 CmpLinkHiveToMaster(
