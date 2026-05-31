@@ -286,6 +286,142 @@ HidParser_GetReportInCollection(
     return HidParser_SearchReportInCollection(CollectionContext, (PHID_COLLECTION)&CollectionContext->RawData, ReportType);
 }
 
+PHID_REPORT
+HidParser_SearchReportInCollectionByReportId(
+    IN PHID_COLLECTION_CONTEXT CollectionContext,
+    IN PHID_COLLECTION Collection,
+    IN UCHAR ReportType,
+    IN UCHAR ReportID)
+{
+    ULONG Index;
+    PHID_REPORT Report;
+    PHID_COLLECTION SubCollection;
+
+    //
+    // search the reports stored directly in this collection
+    //
+    for(Index = 0; Index < Collection->ReportCount; Index++)
+    {
+        Report = (PHID_REPORT)(CollectionContext->RawData + Collection->Offsets[Index]);
+        if (Report->Type == ReportType && Report->ReportID == ReportID)
+            return Report;
+    }
+
+    //
+    // recurse into sub collections
+    //
+    for(Index = 0; Index < Collection->NodeCount; Index++)
+    {
+        SubCollection = (PHID_COLLECTION)(CollectionContext->RawData + Collection->Offsets[Collection->ReportCount + Index]);
+        Report = HidParser_SearchReportInCollectionByReportId(CollectionContext, SubCollection, ReportType, ReportID);
+        if (Report)
+            return Report;
+    }
+
+    //
+    // not found
+    //
+    return NULL;
+}
+
+VOID
+HidParser_CollectReportIds(
+    IN PHID_COLLECTION_CONTEXT CollectionContext,
+    IN PHID_COLLECTION Collection,
+    IN OUT PUCHAR ReportIds,
+    IN OUT PULONG ReportIdCount,
+    IN ULONG MaxReportIds)
+{
+    ULONG Index, Scan;
+    PHID_REPORT Report;
+    PHID_COLLECTION SubCollection;
+    BOOLEAN Found;
+
+    //
+    // collect the distinct report ids of the reports in this collection,
+    // preserving the order in which they are first encountered
+    //
+    for(Index = 0; Index < Collection->ReportCount; Index++)
+    {
+        Report = (PHID_REPORT)(CollectionContext->RawData + Collection->Offsets[Index]);
+
+        Found = FALSE;
+        for(Scan = 0; Scan < *ReportIdCount; Scan++)
+        {
+            if (ReportIds[Scan] == Report->ReportID)
+            {
+                Found = TRUE;
+                break;
+            }
+        }
+
+        if (!Found && *ReportIdCount < MaxReportIds)
+        {
+            ReportIds[*ReportIdCount] = Report->ReportID;
+            (*ReportIdCount)++;
+        }
+    }
+
+    //
+    // recurse into sub collections
+    //
+    for(Index = 0; Index < Collection->NodeCount; Index++)
+    {
+        SubCollection = (PHID_COLLECTION)(CollectionContext->RawData + Collection->Offsets[Collection->ReportCount + Index]);
+        HidParser_CollectReportIds(CollectionContext, SubCollection, ReportIds, ReportIdCount, MaxReportIds);
+    }
+}
+
+ULONG
+HidParser_GetReportIds(
+    IN PVOID Context,
+    OUT PUCHAR ReportIds OPTIONAL,
+    IN ULONG MaxReportIds)
+{
+    PHID_COLLECTION_CONTEXT CollectionContext = (PHID_COLLECTION_CONTEXT)Context;
+    ULONG Count = 0;
+
+    if (ReportIds == NULL)
+    {
+        //
+        // caller only wants the count; a report id is a UCHAR so there can be
+        // at most 256 distinct values
+        //
+        UCHAR LocalIds[256];
+        HidParser_CollectReportIds(CollectionContext, (PHID_COLLECTION)CollectionContext->RawData, LocalIds, &Count, RTL_NUMBER_OF(LocalIds));
+        return Count;
+    }
+
+    HidParser_CollectReportIds(CollectionContext, (PHID_COLLECTION)CollectionContext->RawData, ReportIds, &Count, MaxReportIds);
+    return Count;
+}
+
+ULONG
+HidParser_GetReportLengthByReportId(
+    IN PVOID Context,
+    IN UCHAR ReportType,
+    IN UCHAR ReportID)
+{
+    PHID_COLLECTION_CONTEXT CollectionContext = (PHID_COLLECTION_CONTEXT)Context;
+    PHID_REPORT Report;
+    ULONG ReportLength;
+
+    Report = HidParser_SearchReportInCollectionByReportId(CollectionContext, (PHID_COLLECTION)CollectionContext->RawData, ReportType, ReportID);
+    if (!Report)
+        return 0;
+
+    //
+    // byte aligned report length
+    //
+    ReportLength = Report->ReportSize;
+    if (ReportLength)
+    {
+        ASSERT(ReportLength % 8 == 0);
+        return ReportLength / 8;
+    }
+    return ReportLength;
+}
+
 PHID_COLLECTION
 HidParser_GetCollectionFromContext(
     IN PVOID Context)
