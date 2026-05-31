@@ -41,9 +41,11 @@ NmiDbgCallback(IN PVOID Context,
     /* Clear the NMI flag */
     NmiClearFlag();
 
+#if defined(_M_IX86) || defined(_M_AMD64)
     /* Get NMI status signature */
     __indwordstring(0x80, (PULONG)NmiBegin, 1);
     ((void(*)())&KiBugCheckData[4])();
+#endif
 
     /* Handle the NMI safely */
 #ifdef _M_IX86

@@ -25,6 +25,8 @@ include_directories(
 
 add_definitions(-D_NTHAL_ -D_BLDR_ -D_NTSYSTEM_ -DNTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 
+option(FREELDR_WIM_RAMDISK "Enable FreeLDR boot.wim ramdisk decompression support" ON)
+
 list(APPEND FREELDR_ARC_SOURCE
     arcname.c
     arch/arcemul.c
@@ -49,12 +51,46 @@ list(APPEND FREELDR_BOOTLIB_SOURCE
     lib/fs/fs.c
     lib/fs/iso.c
     lib/fs/ntfs.c
+    lib/ramdisk_format.c
+    lib/ramdisk_fatwrite.c
     lib/inifile/ini_init.c
     lib/inifile/inifile.c
     lib/inifile/parse.c
     lib/mm/meminit.c
     lib/mm/mm.c
     lib/mm/heap.c)
+
+if(FREELDR_WIM_RAMDISK)
+    list(APPEND FREELDR_BOOTLIB_SOURCE
+        lib/wim/wim_freeldr.c)
+
+    add_library(freeldr_wimcore STATIC
+        ${REACTOS_SOURCE_DIR}/sdk/lib/libwim/sha1.c
+        ${REACTOS_SOURCE_DIR}/sdk/lib/libwim/wimcore.c
+        ${REACTOS_SOURCE_DIR}/sdk/lib/libwim/xpress_huff.c)
+    set_property(TARGET freeldr_wimcore PROPERTY C_STANDARD 11)
+    target_include_directories(freeldr_wimcore PRIVATE
+        ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/libwim
+        ${REACTOS_SOURCE_DIR}/boot/freeldr/freeldr/include)
+    target_compile_definitions(freeldr_wimcore PRIVATE
+        XPRESS_HUFF_DECOMPRESS_ONLY=1
+        _NTHAL_
+        _BLDR_
+        _NTSYSTEM_)
+    if((CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang") AND
+       (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
+        target_compile_options(freeldr_wimcore PUBLIC -mno-sse)
+    endif()
+
+    # The XPRESS decoder shared with sdk/lib/libwim is built in decompress-only
+    # mode for freeldr: this disables the SIMD dispatch table and the compressor
+    # paths, keeping the file freestanding and pulling in zero runtime helpers
+    # beyond memcpy/memset.
+    set_source_files_properties(
+        lib/wim/wim_freeldr.c
+        PROPERTIES
+            INCLUDE_DIRECTORIES "${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/libwim")
+endif()
 
 list(APPEND FREELDR_BOOTMGR_SOURCE
     include/freeldr.h
@@ -88,6 +124,25 @@ elseif(ARCH STREQUAL "amd64")
 
 elseif(ARCH STREQUAL "arm")
     #TBD
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND FREELDR_BOOTLIB_SOURCE
+        lib/math_stubs.c
+        lib/unwind_stubs.c)
+
+    list(APPEND FREELDR_COMMON_ASM_SOURCE
+        arch/arm64/entry.S
+        arch/arm64/except.S
+        arch/arm64/kernel_jump.S
+        arch/arm64/misc.S
+        arch/arm64/cache_v2.S)
+
+    list(APPEND FREELDR_ARC_SOURCE
+        arch/arm64/macharm64.c
+        arch/arm64/stubs.c
+        arch/arm64/mmu_v2.c
+        arch/arm64/gic.c
+        arch/arm64/timer.c
+        arch/arm64/trap.c)
 else()
     #TBD
 endif()
@@ -103,8 +158,10 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         ${CMAKE_CURRENT_BINARY_DIR}/freeldr.def)
 endif()
 
-include(pcat.cmake)
-include(rosload.cmake)
+if(FREELDR_HAS_BIOS_BOOT)
+    include(pcat.cmake)
+    include(rosload.cmake)
+endif()
 if(NOT ARCH STREQUAL "i386" OR NOT (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox"))
     include(uefi.cmake)
 endif()

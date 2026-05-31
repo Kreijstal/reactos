@@ -110,12 +110,17 @@ C_ASSERT(SYSTEM_PD_SIZE == PAGE_SIZE);
 //
 // Access Flags
 //
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#define PTE_WRITE_MASK          0x0000000000000802ULL
+#else
+#define PTE_WRITE_MASK          0x0000000000000002ULL
+#endif
 #define PTE_READONLY            0x8000000000000000ULL
 #define PTE_EXECUTE             0x0000000000000000ULL
 #define PTE_EXECUTE_READ        PTE_EXECUTE /* EXECUTE implies READ on x64 */
-#define PTE_READWRITE           0x8000000000000002ULL
+#define PTE_READWRITE           (0x8000000000000000ULL | PTE_WRITE_MASK)
 #define PTE_WRITECOPY           0x8000000000000200ULL
-#define PTE_EXECUTE_READWRITE   0x0000000000000002ULL
+#define PTE_EXECUTE_READWRITE   PTE_WRITE_MASK
 #define PTE_EXECUTE_WRITECOPY   0x0000000000000200ULL
 #define PTE_PROTOTYPE           0x0000000000000400ULL
 
@@ -132,7 +137,11 @@ C_ASSERT(SYSTEM_PD_SIZE == PAGE_SIZE);
 #define PTE_ENABLE_CACHE        0x0000000000000000ULL
 #define PTE_DISABLE_CACHE       0x0000000000000010ULL
 #define PTE_WRITECOMBINED_CACHE 0x0000000000000010ULL
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#define PTE_PROTECT_MASK        0x8000000000000E12ULL
+#else
 #define PTE_PROTECT_MASK        0x8000000000000612ULL
+#endif
 #elif defined(_M_ARM)
 #define PTE_READONLY            0x200
 #define PTE_EXECUTE             0 // Not worrying about NX yet
@@ -150,6 +159,12 @@ C_ASSERT(SYSTEM_PD_SIZE == PAGE_SIZE);
 #define PTE_DISABLE_CACHE       0x10
 #define PTE_WRITECOMBINED_CACHE 0x10
 #define PTE_PROTECT_MASK        0x610
+#elif defined(_M_ARM64)
+/* ARM64 PTE definitions are supplied by ntoskrnl/include/internal/arm64/mm.h. */
+#include <arch/arm64/include/arm3_compat.h>
+#ifndef PTE_PROTECT_MASK
+#error Missing ARM64 PTE definitions
+#endif
 #else
 #error Define these please!
 #endif
@@ -175,6 +190,33 @@ C_ASSERT(SYSTEM_PD_SIZE == PAGE_SIZE);
 
 extern const ULONG_PTR MmProtectToPteMask[32];
 extern const ULONG MmProtectToValue[32];
+
+FORCEINLINE
+MMPTE
+MI_MAKE_RESERVED_MAPPING_SIZE_PTE(_In_ ULONG_PTR SizeInPages)
+{
+    MMPTE TempPte;
+
+    TempPte.u.Long = SizeInPages << 1;
+    return TempPte;
+}
+
+FORCEINLINE
+MMPTE
+MI_MAKE_RESERVED_MAPPING_TAG_PTE(_In_ ULONG PoolTag)
+{
+    MMPTE TempPte;
+
+    TempPte.u.Long = (ULONG_PTR)PoolTag << 1;
+    return TempPte;
+}
+
+FORCEINLINE
+ULONG_PTR
+MI_GET_RESERVED_MAPPING_SIZE(_In_ MMPTE PointerPte)
+{
+    return PointerPte.u.Long >> 1;
+}
 
 //
 // Assertions for session images, addresses, and PTEs
@@ -753,6 +795,10 @@ MiDetermineUserGlobalPteMask(IN PVOID PointerPte)
     /* Make it valid and accessed */
     TempPte.u.Hard.Valid = TRUE;
     MI_MAKE_ACCESSED_PAGE(&TempPte);
+#if defined(_M_ARM64)
+    TempPte.u.Hard.NotLargePage = TRUE;
+    TempPte.u.Hard.Shareability = 3;
+#endif
 
     /* Is this for user-mode? */
     if (
@@ -796,11 +842,17 @@ MI_MAKE_HARDWARE_PTE_KERNEL(IN PMMPTE NewPte,
     ASSERT(ProtectionMask != MM_OUTSWAPPED_KSTACK && ((ProtectionMask & ~MM_OUTSWAPPED_KSTACK) == 0));
 
     /* Start fresh */
+#if defined(_M_ARM64)
+    NewPte->u.Long = ValidKernelPte.u.Long;
+    NewPte->u.Long &= ~PTE_PROTECT_MASK;
+    NewPte->u.Long |= MmProtectToPteMaskKernel[ProtectionMask];
+#else
     NewPte->u.Long = 0;
 
     /* Set the protection and page */
-    NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
+#endif
+    NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
 
     /* Make this valid & global */
 #ifdef _GLOBAL_PAGES_ARE_AWESOME_
@@ -808,6 +860,12 @@ MI_MAKE_HARDWARE_PTE_KERNEL(IN PMMPTE NewPte,
         NewPte->u.Hard.Global = 1;
 #endif
     NewPte->u.Hard.Valid = 1;
+#if defined(_M_ARM64)
+    NewPte->u.Hard.NotLargePage = 1;
+    NewPte->u.Hard.Accessed = 1;
+    NewPte->u.Hard.Shareability = 3;
+    NewPte->u.Hard.NotDirty = (NewPte->u.Hard.Writable == 0);
+#endif
 }
 
 //
@@ -829,6 +887,11 @@ MI_MAKE_HARDWARE_PTE(IN PMMPTE NewPte,
     NewPte->u.Long = MiDetermineUserGlobalPteMask(MappingPte);
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
     NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
+#if defined(_M_ARM64)
+    NewPte->u.Hard.NotLargePage = 1;
+    NewPte->u.Hard.Accessed = 1;
+    NewPte->u.Hard.Shareability = 3;
+#endif
 }
 
 //
@@ -854,11 +917,16 @@ MI_MAKE_HARDWARE_PTE_USER(IN PMMPTE NewPte,
 
     NewPte->u.Hard.Valid = TRUE;
     NewPte->u.Hard.Owner = TRUE;
+#if defined(_M_ARM64)
+    NewPte->u.Hard.NotLargePage = TRUE;
+    NewPte->u.Hard.Accessed = TRUE;
+    NewPte->u.Hard.Shareability = 3;
+#endif
     NewPte->u.Hard.PageFrameNumber = PageFrameNumber;
     NewPte->u.Long |= MmProtectToPteMask[ProtectionMask];
 }
 
-#ifndef _M_AMD64
+#if !defined(_M_AMD64) && !defined(_M_ARM64)
 //
 // Builds a Prototype PTE for the address of the PTE
 //
@@ -953,6 +1021,7 @@ MI_MAKE_TRANSITION_PTE(_Out_ PMMPTE NewPte,
 // Returns if the page is physically resident (ie: a large page)
 // FIXFIX: CISC/x86 only?
 //
+#ifndef MI_HAS_ARCH_IS_PHYSICAL_ADDRESS
 FORCEINLINE
 BOOLEAN
 MI_IS_PHYSICAL_ADDRESS(IN PVOID Address)
@@ -963,10 +1032,84 @@ MI_IS_PHYSICAL_ADDRESS(IN PVOID Address)
     PointerPde = MiAddressToPde(Address);
     return ((PointerPde->u.Hard.LargePage) && (PointerPde->u.Hard.Valid));
 }
+#endif
 
 //
 // Writes a valid PTE
 //
+#if defined(_M_ARM64)
+FORCEINLINE
+MMPTE
+MI_ARM64_PREPARE_VALID_PTE(IN PMMPTE PointerPte,
+                           IN MMPTE TempPte)
+{
+    ULONG_PTR EntryAddress = (ULONG_PTR)PointerPte;
+
+    /*
+     * Windows/ARM64 keeps table descriptors distinct from L3 leaf descriptors.
+     * Common ARM3 creates demand-zero page-table pages through this helper; when
+     * the target is a PXE/PPE/PDE slot, publish a clean table descriptor and keep
+     * leaf permission bits out of the hardware walk.
+     */
+    if (((EntryAddress >= PXE_BASE) && (EntryAddress <= PXE_TOP)) ||
+        ((EntryAddress >= PPE_BASE) && (EntryAddress <= PPE_TOP)) ||
+        ((EntryAddress >= PDE_BASE) && (EntryAddress <= PDE_TOP)))
+    {
+        MMPTE TablePte;
+
+        TablePte.u.Long = ValidKernelPde.u.Long;
+        TablePte.u.Hard.PageFrameNumber = TempPte.u.Hard.PageFrameNumber;
+        TempPte = TablePte;
+    }
+
+    return TempPte;
+}
+
+FORCEINLINE
+VOID
+MI_ARM64_SYNC_VALID_PTE(IN PMMPTE PointerPte)
+{
+    ULONG_PTR EntryAddress = (ULONG_PTR)PointerPte;
+
+    if (((EntryAddress >= PXE_BASE) && (EntryAddress <= PXE_TOP)) ||
+        ((EntryAddress >= PPE_BASE) && (EntryAddress <= PPE_TOP)) ||
+        ((EntryAddress >= PDE_BASE) && (EntryAddress <= PDE_TOP)))
+    {
+        MiArm64SyncKernelHierarchyEntryWrite(PointerPte);
+    }
+    else
+    {
+        MiArm64SyncKernelLeafPteWrite(PointerPte);
+    }
+}
+
+FORCEINLINE
+VOID
+MI_ARM64_FLUSH_VALID_PTE(IN PMMPTE PointerPte)
+{
+    ULONG_PTR Va = (ULONG_PTR)MiPteToAddress(PointerPte) >> PAGE_SHIFT;
+
+    MI_ARM64_SYNC_VALID_PTE(PointerPte);
+    __asm__ __volatile__("dsb ishst" ::: "memory");
+    __asm__ __volatile__("tlbi vaae1is, %0" :: "r"(Va) : "memory");
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
+FORCEINLINE
+VOID
+MI_WRITE_VALID_PTE_NO_FLUSH(IN PMMPTE PointerPte,
+                            IN MMPTE TempPte)
+{
+    ASSERT(PointerPte->u.Hard.Valid == 0);
+    ASSERT(TempPte.u.Hard.Valid == 1);
+
+    *PointerPte = MI_ARM64_PREPARE_VALID_PTE(PointerPte, TempPte);
+    MI_ARM64_SYNC_VALID_PTE(PointerPte);
+    __asm__ __volatile__("dsb ishst" ::: "memory");
+}
+#endif
+
 FORCEINLINE
 VOID
 MI_WRITE_VALID_PTE(IN PMMPTE PointerPte,
@@ -979,7 +1122,13 @@ MI_WRITE_VALID_PTE(IN PMMPTE PointerPte,
     ASSERT(!MI_IS_PAGE_TABLE_ADDRESS(MiPteToAddress(PointerPte)) ||
            (TempPte.u.Hard.NoExecute == 0));
 #endif
+#if defined(_M_ARM64)
+    TempPte = MI_ARM64_PREPARE_VALID_PTE(PointerPte, TempPte);
+#endif
     *PointerPte = TempPte;
+#if defined(_M_ARM64)
+    MI_ARM64_FLUSH_VALID_PTE(PointerPte);
+#endif
 }
 
 //
@@ -1011,77 +1160,15 @@ MI_WRITE_INVALID_PTE(IN PMMPTE PointerPte,
 }
 
 //
-// Reserved-mapping helper PTEs.
-//
-// MmAllocateMappingAddress() reserves two extra PTEs just before the returned
-// range and stashes the reserved size and the pool tag in them;
-// MmFreeMappingAddress() / MmMapLockedPagesWithReservedMapping() /
-// MmUnmapReservedMapping() read them back. Windows 8 packs both values into the
-// upper software-PTE bits on amd64 (so that ProcessLUIDDeviceMaps-style probes
-// and the kmtest suite see the documented layout); earlier targets and x86 keep
-// the legacy layout - the tag in the low bits with the Valid bit cleared and the
-// size in the MMPTE_LIST.NextEntry field. These helpers keep the encode and
-// decode paths in sync regardless of which layout is in effect.
-//
-#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
-#define MI_RESERVED_MAPPING_SHIFT 28
-#endif
-
-FORCEINLINE
-MMPTE
-MI_MAKE_RESERVED_MAPPING_TAG_PTE(IN ULONG PoolTag)
-{
-    MMPTE TempPte;
-#ifdef MI_RESERVED_MAPPING_SHIFT
-    TempPte.u.Long = (((ULONG_PTR)PoolTag & ~1ULL) + 1) << MI_RESERVED_MAPPING_SHIFT;
-#else
-    TempPte.u.Long = PoolTag;
-    TempPte.u.Hard.Valid = 0;
-#endif
-    return TempPte;
-}
-
-FORCEINLINE
-MMPTE
-MI_MAKE_RESERVED_MAPPING_SIZE_PTE(IN PFN_NUMBER SizeInPages)
-{
-    MMPTE TempPte;
-    TempPte.u.Long = 0;
-#ifdef MI_RESERVED_MAPPING_SHIFT
-    TempPte.u.Long = (ULONG_PTR)SizeInPages << MI_RESERVED_MAPPING_SHIFT;
-#else
-    TempPte.u.List.NextEntry = SizeInPages;
-#endif
-    return TempPte;
-}
-
-FORCEINLINE
-PFN_NUMBER
-MI_GET_RESERVED_MAPPING_SIZE(IN MMPTE Pte)
-{
-#ifdef MI_RESERVED_MAPPING_SHIFT
-    return (PFN_NUMBER)(Pte.u.Long >> MI_RESERVED_MAPPING_SHIFT);
-#else
-    return (PFN_NUMBER)Pte.u.List.NextEntry;
-#endif
-}
-
-//
 // Erase the PTE completely
 //
 FORCEINLINE
 VOID
 MI_ERASE_PTE(IN PMMPTE PointerPte)
 {
-#if DBG
-    ULONG_PTR _oldpte = PointerPte->u.Long;
-#endif
     /* Zero out the PTE */
     ASSERT(PointerPte->u.Long != 0);
     PointerPte->u.Long = 0;
-#if DBG
-    MmTracePte('E', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
-#endif
 }
 
 //
@@ -1092,6 +1179,11 @@ VOID
 MI_WRITE_VALID_PDE(IN PMMPDE PointerPde,
                    IN MMPDE TempPde)
 {
+#if defined(_M_ARM64)
+    ULONG_PTR EntryAddress = (ULONG_PTR)PointerPde;
+    PVOID FlushAddress = NULL;
+#endif
+
     /* Write the valid PDE */
     ASSERT(PointerPde->u.Hard.Valid == 0);
 #ifdef _M_AMD64
@@ -1099,6 +1191,35 @@ MI_WRITE_VALID_PDE(IN PMMPDE PointerPde,
 #endif
     ASSERT(TempPde.u.Hard.Valid == 1);
     *PointerPde = TempPde;
+#if defined(_M_ARM64)
+    MiArm64SyncKernelHierarchyEntryWrite((PMMPTE)PointerPde);
+
+    if ((EntryAddress >= PXE_BASE) && (EntryAddress <= PXE_TOP))
+    {
+        FlushAddress = MiPxeToAddress((PMMPTE)PointerPde);
+    }
+    else if ((EntryAddress >= PPE_BASE) && (EntryAddress <= PPE_TOP))
+    {
+        FlushAddress = MiPpeToAddress((PMMPTE)PointerPde);
+    }
+    else if ((EntryAddress >= PDE_BASE) && (EntryAddress <= PDE_TOP))
+    {
+        FlushAddress = MiPdeToAddress((PMMPTE)PointerPde);
+    }
+
+    if ((FlushAddress != NULL) &&
+        ((ULONG_PTR)FlushAddress >= (ULONG_PTR)MmSystemRangeStart) &&
+        !(((ULONG_PTR)FlushAddress >= PTE_BASE) &&
+          ((ULONG_PTR)FlushAddress <= HYPER_SPACE_END)))
+    {
+        ULONG_PTR Va = (ULONG_PTR)FlushAddress >> PAGE_SHIFT;
+
+        __asm__ __volatile__("dsb ishst" ::: "memory");
+        __asm__ __volatile__("tlbi vaae1is, %0" :: "r"(Va) : "memory");
+        __asm__ __volatile__("dsb ish" ::: "memory");
+        __asm__ __volatile__("isb" ::: "memory");
+    }
+#endif
 }
 
 //
@@ -1109,6 +1230,11 @@ VOID
 MI_WRITE_INVALID_PDE(IN PMMPDE PointerPde,
                      IN MMPDE InvalidPde)
 {
+#if defined(_M_ARM64)
+    ULONG_PTR EntryAddress = (ULONG_PTR)PointerPde;
+    PVOID FlushAddress = NULL;
+#endif
+
     /* Write the invalid PDE */
     ASSERT(InvalidPde.u.Hard.Valid == 0);
     ASSERT(InvalidPde.u.Long != 0);
@@ -1116,6 +1242,35 @@ MI_WRITE_INVALID_PDE(IN PMMPDE PointerPde,
     ASSERT(InvalidPde.u.Soft.Protection == MM_EXECUTE_READWRITE);
 #endif
     *PointerPde = InvalidPde;
+#if defined(_M_ARM64)
+    MiArm64SyncKernelHierarchyEntryWrite((PMMPTE)PointerPde);
+
+    if ((EntryAddress >= PXE_BASE) && (EntryAddress <= PXE_TOP))
+    {
+        FlushAddress = MiPxeToAddress((PMMPTE)PointerPde);
+    }
+    else if ((EntryAddress >= PPE_BASE) && (EntryAddress <= PPE_TOP))
+    {
+        FlushAddress = MiPpeToAddress((PMMPTE)PointerPde);
+    }
+    else if ((EntryAddress >= PDE_BASE) && (EntryAddress <= PDE_TOP))
+    {
+        FlushAddress = MiPdeToAddress((PMMPTE)PointerPde);
+    }
+
+    if ((FlushAddress != NULL) &&
+        ((ULONG_PTR)FlushAddress >= (ULONG_PTR)MmSystemRangeStart) &&
+        !(((ULONG_PTR)FlushAddress >= PTE_BASE) &&
+          ((ULONG_PTR)FlushAddress <= HYPER_SPACE_END)))
+    {
+        ULONG_PTR Va = (ULONG_PTR)FlushAddress >> PAGE_SHIFT;
+
+        __asm__ __volatile__("dsb ishst" ::: "memory");
+        __asm__ __volatile__("tlbi vaae1is, %0" :: "r"(Va) : "memory");
+        __asm__ __volatile__("dsb ish" ::: "memory");
+        __asm__ __volatile__("isb" ::: "memory");
+    }
+#endif
 }
 
 //
@@ -1346,6 +1501,22 @@ MiLockWorkingSet(IN PETHREAD Thread,
     ASSERT(MI_IS_SESSION_ADDRESS((PVOID)WorkingSet) == FALSE);
 
     /* Thread shouldn't already be owning something */
+#if defined(_M_ARM64)
+    if (MM_ANY_WS_LOCK_HELD(Thread))
+    {
+        DPRINT1("[arm64][WSLOCK] nested exclusive caller=%p thread=%p ws=%p "
+                "sys=%u/%u session=%u/%u process=%u/%u\n",
+                _ReturnAddress(),
+                Thread,
+                WorkingSet,
+                Thread->OwnsSystemWorkingSetExclusive,
+                Thread->OwnsSystemWorkingSetShared,
+                Thread->OwnsSessionWorkingSetExclusive,
+                Thread->OwnsSessionWorkingSetShared,
+                Thread->OwnsProcessWorkingSetExclusive,
+                Thread->OwnsProcessWorkingSetShared);
+    }
+#endif
     ASSERT(!MM_ANY_WS_LOCK_HELD(Thread));
 
     /* Lock this working set */
@@ -1388,6 +1559,22 @@ MiLockWorkingSetShared(
     ASSERT(MI_IS_SESSION_ADDRESS((PVOID)WorkingSet) == FALSE);
 
     /* Thread shouldn't already be owning something */
+#if defined(_M_ARM64)
+    if (MM_ANY_WS_LOCK_HELD(Thread))
+    {
+        DPRINT1("[arm64][WSLOCK] nested shared caller=%p thread=%p ws=%p "
+                "sys=%u/%u session=%u/%u process=%u/%u\n",
+                _ReturnAddress(),
+                Thread,
+                WorkingSet,
+                Thread->OwnsSystemWorkingSetExclusive,
+                Thread->OwnsSystemWorkingSetShared,
+                Thread->OwnsSessionWorkingSetExclusive,
+                Thread->OwnsSessionWorkingSetShared,
+                Thread->OwnsProcessWorkingSetExclusive,
+                Thread->OwnsProcessWorkingSetShared);
+    }
+#endif
     ASSERT(!MM_ANY_WS_LOCK_HELD(Thread));
 
     /* Lock this working set */

@@ -1962,77 +1962,8 @@ IopQueryNameInternal(IN PVOID ObjectBody,
     /* Validate length */
     if (Length < sizeof(OBJECT_NAME_INFORMATION))
     {
-        /* The buffer cannot even hold the structure header */
+        /* Wrong length, fail */
         *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
-
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-        /*
-         * Windows Vista and later still report the full length required to
-         * hold the complete object name in this case; older releases just
-         * returned sizeof(OBJECT_NAME_INFORMATION). Compute that length using a
-         * scratch buffer, without touching the caller's (too small) buffer. The
-         * total mirrors the regular too-small path below (device-name length
-         * plus the file-name length).
-         */
-        {
-            POBJECT_NAME_INFORMATION ScratchInfo;
-            PFILE_NAME_INFORMATION ScratchFileInfo;
-            ULONG DeviceLength = sizeof(OBJECT_NAME_INFORMATION);
-            ULONG FileNameLength = 0, Dummy;
-            NTSTATUS LocalStatus;
-
-            ScratchInfo = ExAllocatePoolWithTag(PagedPool,
-                                                sizeof(OBJECT_NAME_INFORMATION),
-                                                TAG_IO);
-            if (ScratchInfo == NULL) return STATUS_INFO_LENGTH_MISMATCH;
-
-            /*
-             * Device-name part. ObQueryNameString reports the full length
-             * required even when the supplied buffer is too small to hold it.
-             */
-            ObQueryNameString(FileObject->DeviceObject,
-                              ScratchInfo,
-                              sizeof(OBJECT_NAME_INFORMATION),
-                              &DeviceLength);
-            if (DeviceLength < sizeof(OBJECT_NAME_INFORMATION))
-                DeviceLength = sizeof(OBJECT_NAME_INFORMATION);
-
-            /*
-             * File-name part. The file system fills in FileNameLength with the
-             * full name length regardless of how much actually fit. Treat a
-             * driver that does not implement the query as a zero-length name,
-             * exactly as the regular path does.
-             */
-            ScratchFileInfo = (PFILE_NAME_INFORMATION)ScratchInfo;
-            ScratchFileInfo->FileNameLength = 0;
-            if (PreviousMode == KernelMode &&
-                BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
-            {
-                LocalStatus = IopGetFileInformation(FileObject,
-                                                    sizeof(OBJECT_NAME_INFORMATION),
-                                                    FileNameInformation,
-                                                    ScratchFileInfo,
-                                                    &Dummy);
-            }
-            else
-            {
-                LocalStatus = IoQueryFileInformation(FileObject,
-                                                     FileNameInformation,
-                                                     sizeof(OBJECT_NAME_INFORMATION),
-                                                     ScratchFileInfo,
-                                                     &Dummy);
-            }
-            if (!NT_ERROR(LocalStatus) ||
-                LocalStatus == STATUS_BUFFER_OVERFLOW ||
-                LocalStatus == STATUS_INFO_LENGTH_MISMATCH)
-            {
-                FileNameLength = ScratchFileInfo->FileNameLength;
-            }
-
-            *ReturnLength = DeviceLength + FileNameLength;
-            ExFreePoolWithTag(ScratchInfo, TAG_IO);
-        }
-#endif
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
@@ -3203,16 +3134,9 @@ IoCreateStreamFileObjectEx(IN PFILE_OBJECT FileObject OPTIONAL,
     /* Set File Object Data */
     RtlZeroMemory(CreatedFileObject, sizeof(FILE_OBJECT));
     CreatedFileObject->DeviceObject = DeviceObject;
-    CreatedFileObject->Vpb = FileObject ? FileObject->Vpb : DeviceObject->Vpb;
     CreatedFileObject->Type = IO_TYPE_FILE;
     CreatedFileObject->Size = sizeof(FILE_OBJECT);
     CreatedFileObject->Flags = FO_STREAM_FILE;
-    if ((FileObject == NULL) &&
-        ((CreatedFileObject->Vpb == NULL) ||
-         (CreatedFileObject->Vpb->DeviceObject == NULL)))
-    {
-        CreatedFileObject->Flags |= FO_DIRECT_DEVICE_OPEN;
-    }
 
     /* Initialize the wait event */
     KeInitializeEvent(&CreatedFileObject->Event, SynchronizationEvent, FALSE);
@@ -4216,6 +4140,235 @@ NtCancelIoFile(IN HANDLE FileHandle,
     /* Dereference the file object and return success */
     ObDereferenceObject(FileObject);
     return STATUS_SUCCESS;
+}
+
+typedef struct _IOP_CANCEL_IO_APC_CONTEXT
+{
+    KAPC Apc;
+    KEVENT Event;
+    PFILE_OBJECT FileObject;
+    PIO_STATUS_BLOCK IoRequestToCancel;
+    NTSTATUS Status;
+    BOOLEAN Found;
+} IOP_CANCEL_IO_APC_CONTEXT, *PIOP_CANCEL_IO_APC_CONTEXT;
+
+static
+BOOLEAN
+IopCancelMatchingIrpsInCurrentThread(
+    _In_ PFILE_OBJECT FileObject,
+    _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel)
+{
+    PETHREAD Thread;
+    PLIST_ENTRY ListHead, NextEntry;
+    PIRP Irp;
+    KIRQL OldIrql;
+    BOOLEAN Found = FALSE;
+
+    KeRaiseIrql(APC_LEVEL, &OldIrql);
+
+    Thread = PsGetCurrentThread();
+    ListHead = &Thread->IrpList;
+    NextEntry = ListHead->Flink;
+    while (NextEntry != ListHead)
+    {
+        Irp = CONTAINING_RECORD(NextEntry, IRP, ThreadListEntry);
+        NextEntry = NextEntry->Flink;
+
+        if ((Irp->Tail.Overlay.OriginalFileObject == FileObject) &&
+            (!IoRequestToCancel || (Irp->UserIosb == IoRequestToCancel)))
+        {
+            IoCancelIrp(Irp);
+            Found = TRUE;
+        }
+    }
+
+    KeLowerIrql(OldIrql);
+    return Found;
+}
+
+static
+VOID
+NTAPI
+IopCancelIoFileExKernelApc(
+    _In_ PKAPC Apc,
+    _Inout_ PKNORMAL_ROUTINE *NormalRoutine,
+    _Inout_ PVOID *NormalContext,
+    _Inout_ PVOID *SystemArgument1,
+    _Inout_ PVOID *SystemArgument2)
+{
+    PIOP_CANCEL_IO_APC_CONTEXT Context = *SystemArgument1;
+
+    UNREFERENCED_PARAMETER(Apc);
+    UNREFERENCED_PARAMETER(NormalRoutine);
+    UNREFERENCED_PARAMETER(NormalContext);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    Context->Found = IopCancelMatchingIrpsInCurrentThread(Context->FileObject,
+                                                          Context->IoRequestToCancel);
+    Context->Status = STATUS_SUCCESS;
+    KeSetEvent(&Context->Event, IO_NO_INCREMENT, FALSE);
+}
+
+static
+VOID
+NTAPI
+IopCancelIoFileExRundownApc(
+    _In_ PKAPC Apc)
+{
+    PIOP_CANCEL_IO_APC_CONTEXT Context;
+
+    Context = CONTAINING_RECORD(Apc, IOP_CANCEL_IO_APC_CONTEXT, Apc);
+    Context->Status = STATUS_SUCCESS;
+    Context->Found = FALSE;
+    KeSetEvent(&Context->Event, IO_NO_INCREMENT, FALSE);
+}
+
+static
+NTSTATUS
+IopCancelIoFileExInThread(
+    _In_ PETHREAD Thread,
+    _In_ PFILE_OBJECT FileObject,
+    _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel,
+    _Out_ PBOOLEAN Found)
+{
+    IOP_CANCEL_IO_APC_CONTEXT Context;
+    NTSTATUS Status;
+
+    *Found = FALSE;
+
+    if (Thread == PsGetCurrentThread())
+    {
+        *Found = IopCancelMatchingIrpsInCurrentThread(FileObject, IoRequestToCancel);
+        return STATUS_SUCCESS;
+    }
+
+    KeInitializeEvent(&Context.Event, NotificationEvent, FALSE);
+    Context.FileObject = FileObject;
+    Context.IoRequestToCancel = IoRequestToCancel;
+    Context.Status = STATUS_PENDING;
+    Context.Found = FALSE;
+
+    KeInitializeApc(&Context.Apc,
+                    &Thread->Tcb,
+                    OriginalApcEnvironment,
+                    IopCancelIoFileExKernelApc,
+                    IopCancelIoFileExRundownApc,
+                    NULL,
+                    KernelMode,
+                    NULL);
+
+    if (!KeInsertQueueApc(&Context.Apc, &Context, NULL, IO_NO_INCREMENT))
+        return STATUS_SUCCESS;
+
+    /*
+     * Thread IRP lists are synchronized by disabling special kernel APCs in
+     * the owning thread.  Run the scan in that same thread context, then wait
+     * until the APC has either run or been rundown.
+     */
+    Status = KeWaitForSingleObject(&Context.Event,
+                                   Executive,
+                                   KernelMode,
+                                   FALSE,
+                                   NULL);
+
+    if (NT_SUCCESS(Status))
+    {
+        Status = Context.Status;
+        *Found = Context.Found;
+    }
+
+    return Status;
+}
+
+/**
+ * @name NtCancelIoFileEx
+ *
+ * Cancel matching pending I/O operations for a file object in the current
+ * process, regardless of the issuing thread.
+ *
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+NtCancelIoFileEx(IN HANDLE FileHandle,
+                 IN PIO_STATUS_BLOCK IoRequestToCancel OPTIONAL,
+                 OUT PIO_STATUS_BLOCK IoStatusBlock)
+{
+    PFILE_OBJECT FileObject;
+    PEPROCESS Process;
+    PETHREAD Thread;
+    BOOLEAN FoundAny = FALSE;
+    BOOLEAN Found;
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    NTSTATUS Status;
+    NTSTATUS ApcStatus;
+
+    PAGED_CODE();
+    IOTRACE(IO_API_DEBUG,
+            "FileHandle: %p IoRequestToCancel: %p\n",
+            FileHandle,
+            IoRequestToCancel);
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Status = ObReferenceObjectByHandle(FileHandle,
+                                       0,
+                                       IoFileObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&FileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    IopUpdateOperationCount(IopOtherTransfer);
+
+    Process = PsGetCurrentProcess();
+    Thread = PsGetNextProcessThread(Process, NULL);
+    while (Thread)
+    {
+        ApcStatus = IopCancelIoFileExInThread(Thread,
+                                             FileObject,
+                                             IoRequestToCancel,
+                                             &Found);
+        if (NT_SUCCESS(ApcStatus))
+        {
+            if (Found)
+                FoundAny = TRUE;
+        }
+        else if (Status == STATUS_SUCCESS)
+        {
+            Status = ApcStatus;
+        }
+
+        Thread = PsGetNextProcessThread(Process, Thread);
+    }
+
+    if ((Status == STATUS_SUCCESS) && !FoundAny)
+        Status = STATUS_NOT_FOUND;
+
+    _SEH2_TRY
+    {
+        IoStatusBlock->Status = Status;
+        IoStatusBlock->Information = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+
+    ObDereferenceObject(FileObject);
+    return Status;
 }
 
 /*

@@ -7,7 +7,10 @@
 
 #include "precomp.h"
 
+#if defined(_M_IX86) || defined(_M_AMD64)
 #include <xmmintrin.h>
+#define HAVE_SSE_EXCEPTION_TESTS 1
+#endif
 
 /*
  * Keep these returning different values, to prevent compiler folding
@@ -37,6 +40,7 @@ TestSetUnhandledExceptionFilter(VOID)
     ok(p1 == Filter2, "SetUnhandledExceptionFilter didn't return previous filter\n");
 }
 
+#ifdef HAVE_SSE_EXCEPTION_TESTS
 static LONG WINAPI ExceptionFilterSSESupport(LPEXCEPTION_POINTERS exp)
 {
     PEXCEPTION_RECORD rec = exp->ExceptionRecord;
@@ -196,9 +200,14 @@ VOID TestSSEExceptions(VOID)
     p = SetUnhandledExceptionFilter(NULL);
     ok(p == ExceptionFilterSSEException, "Unexpected old filter : 0x%p", p);
 }
+#endif /* HAVE_SSE_EXCEPTION_TESTS */
 
 START_TEST(SetUnhandledExceptionFilter)
 {
     TestSetUnhandledExceptionFilter();
+#ifdef HAVE_SSE_EXCEPTION_TESTS
     TestSSEExceptions();
+#else
+    skip("SSE exception tests are only supported on x86/AMD64.\n");
+#endif
 }
