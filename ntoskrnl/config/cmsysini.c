@@ -1634,6 +1634,26 @@ CmpInitializeHiveList(VOID)
     /* Get rid of the SD */
     ExFreePoolWithTag(SecurityDescriptor, TAG_CMSD);
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* The persistent hives (SAM, SECURITY, SOFTWARE, SYSTEM, .DEFAULT) carry
+     * legacy security descriptors baked by mkhive. On an NT 6.2 target the
+     * kernel owns the canonical key security, so stamp the Windows 8 shape on
+     * each persistent hive root. HARDWARE is volatile and already received the
+     * registry-root descriptor when its link node was created. */
+    for (i = 0; i < CM_NUMBER_OF_MACHINE_HIVES; i++)
+    {
+        PCMHIVE BootHive = CmpMachineHiveList[i].CmHive2 ?
+                           CmpMachineHiveList[i].CmHive2 :
+                           CmpMachineHiveList[i].CmHive;
+
+        if (BootHive == NULL) continue;
+        if (!_wcsicmp(CmpMachineHiveList[i].Name, L"HARDWARE")) continue;
+
+        CmpAssignBootHiveRootSecurity(BootHive,
+                                      !_wcsicmp(CmpMachineHiveList[i].Name, L"SECURITY"));
+    }
+#endif
+
     /* Link SECURITY to SAM */
     CmpLinkKeyToHive(L"\\Registry\\Machine\\Security\\SAM",
                      L"\\Registry\\Machine\\SAM\\SAM");
