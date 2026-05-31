@@ -44,8 +44,11 @@ endif()
 # note: -fno-common is default since GCC 10
 add_compile_options(-pipe -fms-extensions -fno-strict-aliasing -fno-common)
 
-# A long double is 64 bits
-add_compile_options(-mlong-double-64)
+# A long double is 64 bits. Clang's aarch64 Windows target already uses this
+# ABI and rejects the x86-specific command-line option.
+if(NOT ARCH STREQUAL "arm64")
+    add_compile_options(-mlong-double-64)
+endif()
 
 # Prevent GCC from searching any of the default directories.
 # The case for C++ is handled through the reactos_c++ INTERFACE library
@@ -380,7 +383,11 @@ set(CMAKE_DEPFILE_FLAGS_RC "--preprocessor=\"${CMAKE_C_COMPILER}\" ${RC_PREPROCE
 # Optional 3rd parameter: stdcall stack bytes
 function(set_entrypoint MODULE ENTRYPOINT)
     if(${ENTRYPOINT} STREQUAL "0")
-        target_link_options(${MODULE} PRIVATE "-Wl,-entry,0")
+        if(ARCH STREQUAL "arm64")
+            target_link_options(${MODULE} PRIVATE "-Wl,--entry=")
+        else()
+            target_link_options(${MODULE} PRIVATE "-Wl,-entry,0")
+        endif()
     elseif(ARCH STREQUAL "i386")
         set(_entrysymbol _${ENTRYPOINT})
         if(${ARGC} GREATER 2)
@@ -413,12 +420,16 @@ function(set_module_type_toolchain MODULE TYPE)
 
         target_link_options(${MODULE} PRIVATE -Wl,--exclude-all-symbols,-file-alignment=0x1000,-section-alignment=0x1000)
 
-        if(${TYPE} STREQUAL "wdmdriver")
+        if(${TYPE} STREQUAL "wdmdriver" AND NOT (ARCH STREQUAL "arm64" AND CMAKE_C_COMPILER_ID STREQUAL "Clang"))
             target_link_options(${MODULE} PRIVATE "-Wl,--wdmdriver")
         endif()
 
-        # Place INIT &.rsrc section at the tail of the module, before .reloc
-        add_linker_script(${MODULE} ${REACTOS_SOURCE_DIR}/sdk/cmake/init-section.lds)
+        # Place INIT &.rsrc section at the tail of the module, before .reloc.
+        # lld-link's MinGW/COFF frontend used for ARM64 does not support GNU
+        # linker scripts.
+        if(NOT (ARCH STREQUAL "arm64" AND CMAKE_C_COMPILER_ID STREQUAL "Clang"))
+            add_linker_script(${MODULE} ${REACTOS_SOURCE_DIR}/sdk/cmake/init-section.lds)
+        endif()
 
         # Fixup section characteristics
         #  - Remove flags that LD overzealously puts (alignment flag, Initialized flags for code sections)
@@ -660,6 +671,25 @@ endif()
 add_library(libgcc STATIC IMPORTED)
 execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libgcc.a OUTPUT_VARIABLE LIBGCC_LOCATION)
 string(STRIP ${LIBGCC_LOCATION} LIBGCC_LOCATION)
+if(NOT EXISTS "${LIBGCC_LOCATION}" OR LIBGCC_LOCATION STREQUAL "libgcc.a")
+    execute_process(COMMAND ${GXX_EXECUTABLE} -print-libgcc-file-name OUTPUT_VARIABLE LIBGCC_LOCATION)
+    string(STRIP ${LIBGCC_LOCATION} LIBGCC_LOCATION)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND ARCH STREQUAL "arm64" AND
+   (NOT EXISTS "${LIBGCC_LOCATION}" OR LIBGCC_LOCATION STREQUAL "libgcc.a"))
+    execute_process(COMMAND ${CMAKE_C_COMPILER} -print-libgcc-file-name OUTPUT_VARIABLE LIBGCC_LOCATION)
+    string(STRIP ${LIBGCC_LOCATION} LIBGCC_LOCATION)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND ARCH STREQUAL "arm64")
+    execute_process(
+        COMMAND ${CMAKE_C_COMPILER} --print-resource-dir
+        OUTPUT_VARIABLE CLANG_RESOURCE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    set(CLANG_ARM64_BUILTINS "${CLANG_RESOURCE_DIR}/lib/windows/libclang_rt.builtins-aarch64.a")
+    if(EXISTS "${CLANG_ARM64_BUILTINS}")
+        set(LIBGCC_LOCATION "${CLANG_ARM64_BUILTINS}")
+    endif()
+endif()
 set_target_properties(libgcc PROPERTIES IMPORTED_LOCATION ${LIBGCC_LOCATION})
 # libgcc needs kernel32 and winpthread (an appropriate CRT must be linked manually)
 target_link_libraries(libgcc INTERFACE libwinpthread libkernel32)
@@ -675,6 +705,11 @@ endif()
 add_library(libsupc++ STATIC IMPORTED GLOBAL)
 execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libsupc++.a OUTPUT_VARIABLE LIBSUPCXX_LOCATION)
 string(STRIP ${LIBSUPCXX_LOCATION} LIBSUPCXX_LOCATION)
+if(NOT EXISTS "${LIBSUPCXX_LOCATION}" OR LIBSUPCXX_LOCATION STREQUAL "libsupc++.a")
+    execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libc++abi.a OUTPUT_VARIABLE LIBSUPCXX_LOCATION)
+    string(STRIP ${LIBSUPCXX_LOCATION} LIBSUPCXX_LOCATION)
+    set(USE_LLVM_CXXABI TRUE)
+endif()
 set_target_properties(libsupc++ PROPERTIES IMPORTED_LOCATION ${LIBSUPCXX_LOCATION})
 target_link_libraries(libsupc++ INTERFACE libgcc_eh libgcc stdc++compat)
 
@@ -684,6 +719,14 @@ string(STRIP ${LIBMINGWEX_LOCATION} LIBMINGWEX_LOCATION)
 set_target_properties(libmingwex PROPERTIES IMPORTED_LOCATION ${LIBMINGWEX_LOCATION})
 # libmingwex requires a CRT and imports from kernel32
 target_link_libraries(libmingwex INTERFACE libmsvcrt libkernel32)
+
+if(USE_LLVM_CXXABI)
+    execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libc++.a OUTPUT_VARIABLE LIBCXX_LOCATION)
+    string(STRIP ${LIBCXX_LOCATION} LIBCXX_LOCATION)
+    execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libunwind.a OUTPUT_VARIABLE LIBUNWIND_LOCATION)
+    string(STRIP ${LIBUNWIND_LOCATION} LIBUNWIND_LOCATION)
+    target_link_libraries(libsupc++ INTERFACE ${LIBCXX_LOCATION} ${LIBUNWIND_LOCATION} libmingwex oldnames)
+endif()
 
 # MSYS2/ucrt64's libsupc++ and libwinpthread are compiled with stack protector
 # and __mingw_snprintf, pulling in symbols not available in ReactOS's msvcrt.
@@ -705,9 +748,16 @@ endif()
 add_library(libstdc++ STATIC IMPORTED GLOBAL)
 execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libstdc++.a OUTPUT_VARIABLE LIBSTDCCXX_LOCATION)
 string(STRIP ${LIBSTDCCXX_LOCATION} LIBSTDCCXX_LOCATION)
+if(NOT EXISTS "${LIBSTDCCXX_LOCATION}" OR LIBSTDCCXX_LOCATION STREQUAL "libstdc++.a")
+    execute_process(COMMAND ${GXX_EXECUTABLE} -print-file-name=libc++.a OUTPUT_VARIABLE LIBSTDCCXX_LOCATION)
+    string(STRIP ${LIBSTDCCXX_LOCATION} LIBSTDCCXX_LOCATION)
+endif()
 set_target_properties(libstdc++ PROPERTIES IMPORTED_LOCATION ${LIBSTDCCXX_LOCATION})
 # libstdc++ requires libsupc++ and mingwex provided by GCC
 target_link_libraries(libstdc++ INTERFACE libsupc++ libmingwex oldnames)
+if(ARCH STREQUAL "arm64" AND LIBSTDCCXX_LOCATION MATCHES "libc\\+\\+\\.a$")
+    target_link_libraries(libstdc++ INTERFACE libucrtbase)
+endif()
 # this is for our SAL annotations
 target_compile_definitions(libstdc++ INTERFACE "$<$<COMPILE_LANGUAGE:CXX>:PAL_STDCPP_COMPAT>")
 

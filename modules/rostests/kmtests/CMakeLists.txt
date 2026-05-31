@@ -125,6 +125,10 @@ list(APPEND KMTEST_DRV_SOURCE
 
     kmtest_drv/kmtest_drv.rc)
 
+if(ARCH STREQUAL "arm64")
+    list(REMOVE_ITEM KMTEST_DRV_SOURCE ntos_ex/ExSequencedList.c)
+endif()
+
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     add_asm_files(KMTEST_DRV_ASM
         kmtest_drv/vm_detect.S)

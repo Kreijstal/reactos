@@ -29,7 +29,7 @@ add_executable(umkm_apitest
     ${umkm_apitest_asm}
     ${PCH_SKIP_SOURCE})
 
-if(NOT MSVC)
+if(NOT MSVC AND (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
     target_compile_options(umkm_apitest PRIVATE -mxsave)
 endif()
 
@@ -40,4 +40,3 @@ add_pch(umkm_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_dependencies(umkm_apitest psdk load_notifications)
 
 add_rostests_file(TARGET umkm_apitest)
-

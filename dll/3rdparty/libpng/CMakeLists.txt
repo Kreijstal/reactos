@@ -5,6 +5,10 @@ add_definitions(
     -D_WINDOWS
     -DPNG_BUILD_DLL)
 
+if(ARCH STREQUAL "arm64")
+    add_definitions(-DPNG_ARM_NEON_OPT=0)
+endif()
+
 include_directories(
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/libpng
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/zlib)

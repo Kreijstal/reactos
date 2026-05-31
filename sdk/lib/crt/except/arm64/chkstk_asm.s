@@ -1,19 +1,16 @@
 
-/* INCLUDES ******************************************************************/
-
-/* We need one of these first! */
-/* #include <kxarm64.h> */
-
 /* CODE **********************************************************************/
-    TEXTAREA
 
-    LEAF_ENTRY __chkstk
-    /* TODO: add an assert fail call, as this is unimplemented */
-    LEAF_END __chkstk
+    .text
+    .align 2
 
-    LEAF_ENTRY __alloca_probe
-    /* TODO: add an assert fail call, as this is unimplemented */
-    LEAF_END __alloca_probe
+    .globl __chkstk
+    .def __chkstk; .scl 2; .type 32; .endef
+__chkstk:
+    ret
 
-    END
+    .globl __alloca_probe
+    .def __alloca_probe; .scl 2; .type 32; .endef
+__alloca_probe:
+    ret
 /* EOF */
