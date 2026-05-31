@@ -1,8 +1,9 @@
 
-add_subdirectory(bootsect)
-add_subdirectory(fdebug)
+if(FREELDR_HAS_BIOS_BOOT)
+    add_subdirectory(bootsect)
+    add_subdirectory(fdebug)
+endif()
 add_subdirectory(freeldr)
-
-if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+if(FREELDR_HAS_BIOS_BOOT)
     add_subdirectory(install)
 endif()
