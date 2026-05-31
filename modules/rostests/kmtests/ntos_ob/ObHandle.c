@@ -26,6 +26,7 @@
 #define IsKernelHandle(h) (((ULONG_PTR)(h) & KERNEL_HANDLE_FLAG) == KERNEL_HANDLE_FLAG)
 
 static HANDLE SystemProcessHandle;
+static BOOLEAN IsReactOS;
 
 static
 VOID
@@ -61,7 +62,7 @@ TestDuplicate(
           DIRECTORY_ALL_ACCESS, 0 },
     };
 
-    if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+    if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
     {
 #ifdef _M_IX86
         PtrCnt1 = 65UL;
@@ -100,16 +101,16 @@ TestDuplicate(
         {
             ok(IsUserHandle(NewHandle), "New handle = %p\n", NewHandle);
             CheckObject(NewHandle, PtrCnt1, 2UL, Tests[i].ExpectedAttributes, Tests[i].GrantedAccess);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
                 PtrCnt1--;
             CheckObject(Handle, PtrCnt1, 2UL, 0UL, DIRECTORY_ALL_ACCESS);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
                 PtrCnt1--;
 
             Status = ObCloseHandle(NewHandle, UserMode);
             ok_eq_hex(Status, STATUS_SUCCESS);
             CheckObject(Handle, PtrCnt2, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
                 PtrCnt2 -= 2;
         }
     }
@@ -127,15 +128,15 @@ TestDuplicate(
     {
         ok(IsKernelHandle(NewHandle), "New handle = %p\n", NewHandle);
         CheckObject(NewHandle, PtrCnt1, 2UL, 0, DIRECTORY_ALL_ACCESS);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
                 PtrCnt1--;
         CheckObject(Handle, PtrCnt1, 2UL, 0UL, DIRECTORY_ALL_ACCESS);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
             PtrCnt1--;
         Status = ObCloseHandle(NewHandle, UserMode);
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);
         CheckObject(NewHandle, PtrCnt1, 2UL, 0, DIRECTORY_ALL_ACCESS);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
             PtrCnt1--;
         CheckObject(Handle, PtrCnt1, 2UL, 0UL, DIRECTORY_ALL_ACCESS);
 
@@ -143,7 +144,7 @@ TestDuplicate(
         {
             Status = ObCloseHandle(NewHandle, KernelMode);
             ok_eq_hex(Status, STATUS_SUCCESS);
-            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+            if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
                 PtrCnt2--;
             CheckObject(Handle, PtrCnt2, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
         }
@@ -156,6 +157,8 @@ START_TEST(ObHandle)
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE KernelDirectoryHandle;
     HANDLE UserDirectoryHandle;
+
+    IsReactOS = *(PULONG)(KI_USER_SHARED_DATA + PAGE_SIZE - sizeof(ULONG)) == 0x8eac705;
 
     Status = ObOpenObjectByPointer(PsInitialSystemProcess,
                                    OBJ_KERNEL_HANDLE,
@@ -182,7 +185,7 @@ START_TEST(ObHandle)
     if (!skip(NT_SUCCESS(Status), "No directory handle\n"))
     {
         ok(IsUserHandle(UserDirectoryHandle), "User handle = %p\n", UserDirectoryHandle);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
 #ifdef _M_IX86
             CheckObject(UserDirectoryHandle, 33UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 #else
@@ -209,7 +212,7 @@ START_TEST(ObHandle)
     if (!skip(NT_SUCCESS(Status), "No directory handle\n"))
     {
         ok(IsKernelHandle(KernelDirectoryHandle), "Kernel handle = %p\n", KernelDirectoryHandle);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
 #ifdef _M_IX86
             CheckObject(KernelDirectoryHandle, 33UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 #else
@@ -222,7 +225,7 @@ START_TEST(ObHandle)
 
         Status = ObCloseHandle(KernelDirectoryHandle, UserMode);
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
 #ifdef _M_IX86
             CheckObject(KernelDirectoryHandle, 17UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 #else
@@ -255,7 +258,7 @@ START_TEST(ObHandle)
             ok_eq_hex(Status, STATUS_INVALID_HANDLE);
         DPRINT("Closing 123 handle (NtClose)\n");
         Status = NtClose(LongToHandle(123));
-        if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && !IsReactOS)
             ok_eq_hex(Status, STATUS_SUCCESS);
         else if (GetNTVersion() != _WIN32_WINNT_WS03)
             ok_eq_hex(Status, STATUS_INVALID_HANDLE);
