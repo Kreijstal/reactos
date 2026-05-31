@@ -100,6 +100,7 @@ EmitLine(PCSTR Fmt, ...)
     if (g_SerialHandle != INVALID_HANDLE_VALUE)
         WriteFile(g_SerialHandle, Buf, Len, &Written, NULL);
 
+    OutputDebugStringA(Buf);
     fputs(Buf, stdout);
     fflush(stdout);
 }
