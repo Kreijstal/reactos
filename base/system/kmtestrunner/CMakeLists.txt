@@ -5,6 +5,6 @@ include_directories(
 
 add_executable(kmtestrunner kmtestrunner.c kmtestrunner.rc)
 set_module_type(kmtestrunner nativecui)
-target_link_libraries(kmtestrunner nt)
+target_link_libraries(kmtestrunner nt chkstk)
 add_importlibs(kmtestrunner ntdll)
 add_cd_file(TARGET kmtestrunner DESTINATION reactos/system32 FOR kmtestcd)
