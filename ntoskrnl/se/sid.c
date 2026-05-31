@@ -20,6 +20,9 @@ SID_IDENTIFIER_AUTHORITY SeWorldSidAuthority = {SECURITY_WORLD_SID_AUTHORITY};
 SID_IDENTIFIER_AUTHORITY SeLocalSidAuthority = {SECURITY_LOCAL_SID_AUTHORITY};
 SID_IDENTIFIER_AUTHORITY SeCreatorSidAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
 SID_IDENTIFIER_AUTHORITY SeNtSidAuthority = {SECURITY_NT_AUTHORITY};
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+SID_IDENTIFIER_AUTHORITY SeAppPackageSidAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
+#endif
 
 PSID SeNullSid = NULL;
 PSID SeWorldSid = NULL;
@@ -51,6 +54,9 @@ PSID SeRestrictedSid = NULL;
 PSID SeAnonymousLogonSid = NULL;
 PSID SeLocalServiceSid = NULL;
 PSID SeNetworkServiceSid = NULL;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+PSID SeAllAppPackagesSid = NULL;
+#endif
 
 typedef struct _SID_VALIDATE
 {
@@ -99,6 +105,11 @@ FreeInitializedSids(VOID)
     if (SeAuthenticatedUsersSid) ExFreePoolWithTag(SeAuthenticatedUsersSid, TAG_SID);
     if (SeRestrictedSid) ExFreePoolWithTag(SeRestrictedSid, TAG_SID);
     if (SeAnonymousLogonSid) ExFreePoolWithTag(SeAnonymousLogonSid, TAG_SID);
+    if (SeLocalServiceSid) ExFreePoolWithTag(SeLocalServiceSid, TAG_SID);
+    if (SeNetworkServiceSid) ExFreePoolWithTag(SeNetworkServiceSid, TAG_SID);
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    if (SeAllAppPackagesSid) ExFreePoolWithTag(SeAllAppPackagesSid, TAG_SID);
+#endif
 }
 
 /**
@@ -154,6 +165,9 @@ SepInitSecurityIDs(VOID)
     SeAnonymousLogonSid = ExAllocatePoolWithTag(PagedPool, SidLength1, TAG_SID);
     SeLocalServiceSid = ExAllocatePoolWithTag(PagedPool, SidLength1, TAG_SID);
     SeNetworkServiceSid = ExAllocatePoolWithTag(PagedPool, SidLength1, TAG_SID);
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    SeAllAppPackagesSid = ExAllocatePoolWithTag(PagedPool, SidLength2, TAG_SID);
+#endif
 
     if (SeNullSid == NULL || SeWorldSid == NULL ||
         SeLocalSid == NULL || SeCreatorOwnerSid == NULL ||
@@ -169,6 +183,9 @@ SepInitSecurityIDs(VOID)
         SeAliasPrintOpsSid == NULL || SeAliasBackupOpsSid == NULL ||
         SeAuthenticatedUsersSid == NULL || SeRestrictedSid == NULL ||
         SeAnonymousLogonSid == NULL || SeLocalServiceSid == NULL ||
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        SeAllAppPackagesSid == NULL ||
+#endif
         SeNetworkServiceSid == NULL)
     {
         FreeInitializedSids();
@@ -205,6 +222,9 @@ SepInitSecurityIDs(VOID)
     RtlInitializeSid(SeAnonymousLogonSid, &SeNtSidAuthority, 1);
     RtlInitializeSid(SeLocalServiceSid, &SeNtSidAuthority, 1);
     RtlInitializeSid(SeNetworkServiceSid, &SeNtSidAuthority, 1);
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    RtlInitializeSid(SeAllAppPackagesSid, &SeAppPackageSidAuthority, 2);
+#endif
 
     SubAuthority = RtlSubAuthoritySid(SeNullSid, 0);
     *SubAuthority = SECURITY_NULL_RID;
@@ -280,6 +300,12 @@ SepInitSecurityIDs(VOID)
     *SubAuthority = SECURITY_LOCAL_SERVICE_RID;
     SubAuthority = RtlSubAuthoritySid(SeNetworkServiceSid, 0);
     *SubAuthority = SECURITY_NETWORK_SERVICE_RID;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    SubAuthority = RtlSubAuthoritySid(SeAllAppPackagesSid, 0);
+    *SubAuthority = SECURITY_APP_PACKAGE_BASE_RID;
+    SubAuthority = RtlSubAuthoritySid(SeAllAppPackagesSid, 1);
+    *SubAuthority = SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE;
+#endif
 
     return TRUE;
 }

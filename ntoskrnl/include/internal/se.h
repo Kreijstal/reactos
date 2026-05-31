@@ -213,6 +213,9 @@ extern PSID SeRestrictedSid;
 extern PSID SeAnonymousLogonSid;
 extern PSID SeLocalServiceSid;
 extern PSID SeNetworkServiceSid;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+extern PSID SeAllAppPackagesSid;
+#endif
 
 //
 // Privileges
