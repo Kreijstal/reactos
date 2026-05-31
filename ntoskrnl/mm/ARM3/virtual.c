@@ -4626,6 +4626,22 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         return STATUS_INVALID_PARAMETER_4;
     }
 
+#ifdef _M_AMD64
+    /*
+     * On x64 Windows treats blind allocations with high ZeroBits values
+     * differently from i386: 21 exhausts the constrained low range, while
+     * values above it are invalid parameter 3.  Smaller values are accepted
+     * and the VAD inserter will cap the search at the user VAD limit.
+     */
+    if (!PBaseAddress)
+    {
+        if (ZeroBits == 21)
+            return STATUS_NO_MEMORY;
+        if (ZeroBits > 21)
+            return STATUS_INVALID_PARAMETER_3;
+    }
+#endif
+
     //
     // If this is for the current process, just use PsGetCurrentProcess
     //
@@ -4682,9 +4698,15 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     }
     if ((AllocationType & MEM_PHYSICAL) == MEM_PHYSICAL)
     {
-        DPRINT1("MEM_PHYSICAL not supported\n");
-        Status = STATUS_INVALID_PARAMETER;
-        goto FailPathNoLock;
+        if (AllocationType & MEM_COMMIT)
+        {
+            DPRINT1("MEM_PHYSICAL not supported\n");
+            Status = STATUS_INVALID_PARAMETER;
+            goto FailPathNoLock;
+        }
+
+        /* Reserve the address range; actual AWE page mapping is separate. */
+        AllocationType &= ~MEM_PHYSICAL;
     }
     if ((AllocationType & MEM_WRITE_WATCH) == MEM_WRITE_WATCH)
     {
@@ -4730,11 +4752,13 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
                 // Calculate the highest address and check if it's valid
                 //
                 HighestAddress = MAXULONG_PTR >> ZeroBits;
+#ifndef _M_AMD64
                 if (HighestAddress > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS)
                 {
                     Status = STATUS_INVALID_PARAMETER_3;
                     goto FailPathNoLock;
                 }
+#endif
             }
         }
         else
