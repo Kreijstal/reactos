@@ -733,10 +733,20 @@ extern NTKERNELAPI BOOLEAN KeArm64DpcRoutineActive;
  */
 #if defined(_M_ARM64) && !defined(_NTOSKRNL_EARLY_INIT_)
 /* Runtime path: Read PCR from TPIDR_EL1 (per-CPU, SMP-safe) */
+#if defined(_MSC_VER)
+#define ARM64_SYSREG(op0, op1, crn, crm, op2) \
+    (((op0) << 14) | ((op1) << 11) | ((crn) << 7) | ((crm) << 3) | (op2))
+#define ARM64_TPIDR_EL1 ARM64_SYSREG(3, 0, 13, 0, 4)
+#endif
+
 static __inline PKIPCR KeGetPcr(VOID)
 {
     PKIPCR Pcr;
+#if defined(_MSC_VER)
+    Pcr = (PKIPCR)(ULONG_PTR)_ReadStatusReg(ARM64_TPIDR_EL1);
+#else
     __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(Pcr));
+#endif
     return Pcr;
 }
 #else
