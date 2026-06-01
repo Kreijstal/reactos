@@ -252,6 +252,7 @@ NTSTATUS
 NTAPI
 _MiMapViewOfSegment(PMMSUPPORT AddressSpace,
                     PMM_SECTION_SEGMENT Segment,
+                    PVOID SectionObject,
                     PVOID* BaseAddress,
                     SIZE_T ViewSize,
                     ULONG Protect,
@@ -261,7 +262,7 @@ _MiMapViewOfSegment(PMMSUPPORT AddressSpace,
                     int line);
 
 #define MiMapViewOfSegment(AddressSpace,Segment,BaseAddress,ViewSize,Protect,ViewOffset,AllocationType) \
-    _MiMapViewOfSegment(AddressSpace,Segment,BaseAddress,ViewSize,Protect,ViewOffset,AllocationType,__FILE__,__LINE__)
+    _MiMapViewOfSegment(AddressSpace,Segment,NULL,BaseAddress,ViewSize,Protect,ViewOffset,AllocationType,__FILE__,__LINE__)
 
 NTSTATUS
 NTAPI
