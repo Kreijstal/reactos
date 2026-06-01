@@ -394,15 +394,15 @@ MACRO(START_PROC, Name, StackBytes)
     .PROC &Name
 ENDM
 MACRO(STUB_U, Name, ArgCount)
-    MAKE_LABEL Zw&Name, %ArgCount * 4
-    START_PROC Nt&Name, %ArgCount * 4
-    STUBCODE_U Name, SyscallId, %ArgCount
+    MAKE_LABEL Zw&Name, 0
+    START_PROC Nt&Name, 0
+    STUBCODE_U Name, SyscallId, ArgCount
     .ENDP
     SyscallId = SyscallId + 1
 ENDM
 MACRO(STUB_K, Name, ArgCount)
-    START_PROC Zw&Name, %ArgCount * 4
-    STUBCODE_K Name, SyscallId, %ArgCount
+    START_PROC Zw&Name, 0
+    STUBCODE_K Name, SyscallId, ArgCount
     .ENDP
     SyscallId = SyscallId + 1
 ENDM
