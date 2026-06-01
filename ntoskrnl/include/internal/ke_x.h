@@ -539,15 +539,9 @@ KiTryThreadLock(IN PKTHREAD Thread)
 {
     LONG Value;
 
-    /* If the lock isn't acquired, return false */
-    if (!Thread->ThreadLock) return FALSE;
-
-    /* Otherwise, try to acquire it and check the result */
-    Value = 1;
-    Value = InterlockedExchange((PLONG)&Thread->ThreadLock, Value);
-
-    /* Return the lock state */
-    return (Value == 1);
+    /* Try to acquire it. Return TRUE only if somebody else owns it. */
+    Value = InterlockedExchange((PLONG)&Thread->ThreadLock, 1);
+    return (Value != 0);
 }
 
 FORCEINLINE
