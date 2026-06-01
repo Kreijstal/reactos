@@ -318,7 +318,7 @@ BOOLEAN IPRegisterInterface(
 
     TI_DbgPrint(MID_TRACE, ("Called. IF (0x%X).\n", IF));
 
-    TcpipAcquireSpinLock(&IF->Lock, &OldIrql);
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
 
     /* Choose an index */
     do {
@@ -334,11 +334,9 @@ BOOLEAN IPRegisterInterface(
     IF->Index = ChosenIndex;
 
     /* Add interface to the global interface list */
-    TcpipInterlockedInsertTailList(&InterfaceListHead,
-				   &IF->ListEntry,
-				   &InterfaceListLock);
+    InsertTailList(&InterfaceListHead, &IF->ListEntry);
 
-    TcpipReleaseSpinLock(&IF->Lock, OldIrql);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
     return TRUE;
 }
@@ -374,6 +372,8 @@ VOID IPUnregisterInterface(
     TI_DbgPrint(DEBUG_IP, ("Called. IF (0x%X).\n", IF));
 
     IPRemoveInterfaceRoute( IF );
+    RouterRemoveRoutesForInterface( IF );
+    NBDestroyNeighborsForInterface( IF );
 
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql3);
     RemoveEntryList(&IF->ListEntry);
