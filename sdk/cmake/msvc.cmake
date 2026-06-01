@@ -244,6 +244,8 @@ if (NOT MSVC_IDE)
     endif()
 endif()
 
+set(REACTOS_GENERATE_MS_ASM TRUE)
+
 if(_VS_ANALYZE_)
     message("-- VS static analysis enabled!")
     add_compile_options(/analyze:WX-)
