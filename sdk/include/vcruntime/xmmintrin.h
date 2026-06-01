@@ -25,8 +25,14 @@
 /* When building with Clang, use Clang's own intrinsics headers instead.
  * ReactOS's versions use GCC-specific __builtin_ia32_* builtins that
  * don't exist in Clang. */
-#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64)) && __has_include_next(<xmmintrin.h>)
+#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64))
+#if __has_include_next(<xmmintrin.h>)
 #include_next <xmmintrin.h>
+#define _REACTOS_XMMINTRIN_USING_NEXT
+#endif
+#endif
+
+#if defined(_REACTOS_XMMINTRIN_USING_NEXT)
 /* Define ReactOS-specific macros that code may depend on */
 #ifndef __ATTRIBUTE_SSE__
 #define __ATTRIBUTE_SSE__

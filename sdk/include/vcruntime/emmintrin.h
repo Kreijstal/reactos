@@ -12,8 +12,14 @@
 #define _INCLUDED_EMM
 
 /* When building with Clang, use Clang's own intrinsics headers instead. */
-#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64)) && __has_include_next(<emmintrin.h>)
+#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64))
+#if __has_include_next(<emmintrin.h>)
 #include_next <emmintrin.h>
+#define _REACTOS_EMMINTRIN_USING_NEXT
+#endif
+#endif
+
+#if defined(_REACTOS_EMMINTRIN_USING_NEXT)
 #elif defined(_M_ARM64) || defined(__aarch64__)
 /* ARM64: no x86 intrinsics */
 #else
