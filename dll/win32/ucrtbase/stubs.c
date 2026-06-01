@@ -8,7 +8,7 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 #define UCRTBASE_EXPORT_NAME(name) name
 #define UCRTBASE_ASM_NAME(name)
 #pragma function(_lrotl, _lrotr, _rotl, _rotr, _rotl64, _rotr64)
@@ -53,7 +53,7 @@ int __cdecl __acrt_initialize_fma3(void)
 
 int __cdecl __intrinsic_setjmp(jmp_buf buffer)
 {
-#ifdef _MSC_VER
+#if defined(_M_IX86) || defined(_MSC_VER)
     return _setjmp(buffer);
 #else
     return _setjmp(buffer, NULL);
@@ -62,7 +62,7 @@ int __cdecl __intrinsic_setjmp(jmp_buf buffer)
 
 int __cdecl __intrinsic_setjmpex(jmp_buf buffer, void *frame)
 {
-#ifdef _MSC_VER
+#if defined(_M_IX86) || defined(_MSC_VER)
     (void)frame;
     return _setjmp(buffer);
 #else
