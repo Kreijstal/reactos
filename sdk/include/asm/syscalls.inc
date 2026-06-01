@@ -346,10 +346,9 @@ MACRO(START_PROC, Name, StackBytes)
 ENDM
 MACRO(START_PROC_DIRECT, Name, StackBytes)
     PUBLIC _&Name&@&StackBytes
-_&Name&@&StackBytes PROC
+_&Name&@&StackBytes:
 ENDM
 MACRO(END_PROC_DIRECT, Name, StackBytes)
-_&Name&@&StackBytes ENDP
 ENDM
 MACRO(STUB_U, Name, ArgCount)
     StackBytes = 4 * &ArgCount
