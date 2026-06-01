@@ -78,9 +78,17 @@ typedef struct {                /* 50 bytes */
 
 #pragma pack(pop)
 
-_Static_assert(sizeof(WimResHdr) == 24, "WimResHdr must be 24 bytes");
-_Static_assert(sizeof(WimHeader) == 208, "WimHeader must be 208 bytes");
-_Static_assert(sizeof(WimLookupEntry) == 50, "WimLookupEntry must be 50 bytes");
+#if defined(_MSC_VER) && !defined(__clang__)
+#define WIM_STATIC_ASSERT2(expr, line) typedef char wim_static_assert_##line[(expr) ? 1 : -1]
+#define WIM_STATIC_ASSERT1(expr, line) WIM_STATIC_ASSERT2(expr, line)
+#define WIM_STATIC_ASSERT(expr, msg) WIM_STATIC_ASSERT1(expr, __LINE__)
+#else
+#define WIM_STATIC_ASSERT(expr, msg) _Static_assert(expr, msg)
+#endif
+
+WIM_STATIC_ASSERT(sizeof(WimResHdr) == 24, "WimResHdr must be 24 bytes");
+WIM_STATIC_ASSERT(sizeof(WimHeader) == 208, "WimHeader must be 208 bytes");
+WIM_STATIC_ASSERT(sizeof(WimLookupEntry) == 50, "WimLookupEntry must be 50 bytes");
 
 /* ---- WimResHdr helpers ---- */
 
