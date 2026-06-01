@@ -30,8 +30,8 @@ typedef struct _WIM_EXTRACT_STATE
 static
 PVOID
 WimCoreAlloc(
-    _In_ SIZE_T Size,
-    _In_opt_ PVOID Context)
+    _In_ size_t Size,
+    _In_opt_ void *Context)
 {
     UNREFERENCED_PARAMETER(Context);
     return FrLdrTempAlloc(Size, TAG_WIM_CORE);
@@ -40,8 +40,8 @@ WimCoreAlloc(
 static
 VOID
 WimCoreFree(
-    _In_opt_ PVOID Ptr,
-    _In_opt_ PVOID Context)
+    _In_opt_ void *Ptr,
+    _In_opt_ void *Context)
 {
     UNREFERENCED_PARAMETER(Context);
 
