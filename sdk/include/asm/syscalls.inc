@@ -274,7 +274,7 @@ MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
 ENDM
 MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
 #ifdef _USE_ML
-    StackBytes = 4 * &ArgCount
+    StackBytes = 4 * ArgCount
 #else
     StackBytes = 4 * ArgCount
 #endif
@@ -297,8 +297,8 @@ ENDM
 MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
     .ENDPROLOG
 #ifdef _USE_ML
-    EXTERN Nt&Name:PROC
-    lea rax, Nt&Name[rip]
+    EXTERN Nt&Name&:PROC
+    lea rax, Nt&Name&[rip]
 #else
     EXTERN Nt\Name:PROC
     lea rax, Nt\Name[rip]
