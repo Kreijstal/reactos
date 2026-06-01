@@ -35,7 +35,11 @@ YieldProcessor(
     VOID)
 {
     __dmb(_ARM64_BARRIER_ISHST);
+#if defined(_MSC_VER)
+    __yield();
+#else
     __asm__ __volatile__("yield" ::: "memory");
+#endif
 }
 
 #define MemoryBarrier()         __dmb(_ARM64_BARRIER_SY)
