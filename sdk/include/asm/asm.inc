@@ -47,18 +47,18 @@ rip = 0
 
 /* To avoid reverse syntax we provide a new macro .PROC, replacing PROC... */
 .PROC MACRO name
-__current_function_name EQU %name
+__current_function_name TEXTEQU <name>
 #ifdef _M_IX86
-    %name PROC
+    name PROC
 #else
-    %name PROC FRAME
+    name PROC FRAME
 #endif
 ENDM
 #define FUNC .PROC
 
 /* ... and .ENDP, replacing ENDP */
 .ENDP MACRO
-    %__current_function_name ENDP
+    __current_function_name ENDP
 ENDM
 #define ENDFUNC .ENDP
 
