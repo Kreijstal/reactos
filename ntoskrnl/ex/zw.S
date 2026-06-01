@@ -31,8 +31,13 @@ EXTERN KiZwSystemService:PROC
 
 .code
 
+#ifdef _USE_ML
+#define SVC_(name, argcount) STUB_K <name>, argcount
+#define SVC_WRAP_(name, argcount) STUB_K <name>, argcount
+#else
 #define SVC_(name, argcount) STUB_K name, argcount
 #define SVC_WRAP_(name, argcount) STUB_K name, argcount
+#endif
 
 #include <sysfuncs.h>
 
