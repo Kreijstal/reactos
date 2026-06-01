@@ -5,7 +5,7 @@ target_compile_definitions(genincdata PRIVATE NTDDI_VERSION=${REACTOS_TARGET_NTD
 set_entrypoint(genincdata 0)
 add_dependencies(genincdata bugcodes psdk xdk)
 
-if(MSVC)
+if(MSVC OR CMAKE_ASM_MASM_COMPILER)
     set(OPT_MS "-ms")
 else()
     set(OPT_MS "")
