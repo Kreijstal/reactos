@@ -296,8 +296,13 @@ MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
 ENDM
 MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
     .ENDPROLOG
+#ifdef _USE_ML
+    EXTERN Nt&Name:PROC
+    lea rax, Nt&Name[rip]
+#else
     EXTERN Nt\Name:PROC
     lea rax, Nt\Name[rip]
+#endif
     mov r10, ArgCount * 8
     jmp KiZwSystemService
 ENDM
