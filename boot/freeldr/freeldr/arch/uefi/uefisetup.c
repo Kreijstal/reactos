@@ -10,7 +10,11 @@
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(WARNING);
 #if DBG
-static void __attribute__((unused)) UefiSetupKeepDebugChannel(void)
+static void
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
+UefiSetupKeepDebugChannel(void)
 {
     (void)DbgDefaultChannel;
 }
