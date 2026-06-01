@@ -9,7 +9,7 @@
 #include <setjmp.h>
 #include <stddef.h>
 
-#if defined(_M_IX86) || defined(_M_X64)
+#if (defined(_M_IX86) || defined(_M_X64)) && (!defined(__clang__) || defined(_MSC_VER))
 #include <immintrin.h>
 //#include <ammintrin.h>
 #include <xmmintrin.h> // native headers: immintrin.h -> wmmintrin.h -> nmmintrin.h -> smmintrin.h -> tmmintrin.h -> pmmintrin.h -> emmintrin.h
@@ -80,7 +80,7 @@ _Check_return_ unsigned short __cdecl _byteswap_ushort(_In_ unsigned short);
 void __cdecl _disable(void);
 void __cdecl _enable(void);
 
-#if defined(_M_ARM64)
+#if defined(_M_ARM64) && !defined(_MSC_VER)
 static __inline void __break(unsigned int _Code)
 {
     (void)_Code;
