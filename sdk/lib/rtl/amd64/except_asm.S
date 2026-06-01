@@ -102,12 +102,36 @@ PUBLIC RtlCaptureContext
     movups [rcx + CxXmm14], xmm14
     movups [rcx + CxXmm15], xmm15
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /*
+     * Windows 8+ initializes the minimal floating-point save header even for
+     * kernel callers, without saving the legacy floating-point registers.
+     */
+    mov word ptr [rcx + CxFltSave + LfControlWord], HEX(27f)
+    mov word ptr [rcx + CxFltSave + LfStatusWord], 0
+    mov byte ptr [rcx + CxFltSave + LfTagWord], 0
+    mov byte ptr [rcx + CxFltSave + LfTagWord + 1], 0
+    stmxcsr [rcx + CxFltSave + LfMxCsr]
+#endif
+
     jmp RtlCaptureContextExit
 
 RtlCaptureContextUM:
 
     /* Store MXCSR, legacy floating point, MMX and XMM registers */
     fxsave [rcx + CxFltSave]
+
+    /*
+     * Match Windows' normalized XSAVE header values. Some CPUs/VMs expose a
+     * narrower MXCSR mask through FXSAVE, and FXSAVE can preserve stale x87
+     * exception instruction/data pointers.
+     */
+    mov dword ptr [rcx + CxFltSave + LfMxCsr_Mask], HEX(2ffff)
+    mov word ptr [rcx + CxFltSave + LfErrorOpcode], 0
+    mov dword ptr [rcx + CxFltSave + LfErrorOffset], 0
+    mov word ptr [rcx + CxFltSave + LfErrorSelector], 0
+    mov dword ptr [rcx + CxFltSave + LfDataOffset], 0
+    mov word ptr [rcx + CxFltSave + LfDataSelector], 0
 
 RtlCaptureContextExit:
 
@@ -335,5 +359,3 @@ RaiseStatus:
 
 
 END
-
-
