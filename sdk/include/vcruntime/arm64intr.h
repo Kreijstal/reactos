@@ -30,10 +30,16 @@ typedef enum _tag_ARM64INTR_BARRIER_TYPE
 void __dmb(unsigned int _Type);
 void __dsb(unsigned int _Type);
 void __isb(unsigned int _Type);
+__int64 _ReadStatusReg(int _Register);
+void __break(int _Code);
+void __yield(void);
 
 #pragma intrinsic(__dmb)
 #pragma intrinsic(__dsb)
 #pragma intrinsic(__isb)
+#pragma intrinsic(_ReadStatusReg)
+#pragma intrinsic(__break)
+#pragma intrinsic(__yield)
 
 #if defined(__cplusplus)
 } // extern "C"
