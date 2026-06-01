@@ -34,6 +34,33 @@ POBJECT_TYPE ObpObjectTypes[32];
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+static
+ULONG
+ObpQueryBasicPointerCount(IN POBJECT_HEADER ObjectHeader)
+{
+#ifdef _M_AMD64
+    const ULONG_PTR HandleBias = 0x8000;
+#elif defined(_M_IX86)
+    const ULONG_PTR HandleBias = 0x20;
+#else
+    const ULONG_PTR HandleBias = 0;
+#endif
+    ULONG_PTR PointerCount = ObjectHeader->PointerCount;
+    ULONG_PTR HandleCount = ObjectHeader->HandleCount;
+
+    if ((HandleBias != 0) && (ObjectHeader->Type == MmSectionObjectType))
+    {
+        if (PointerCount >= HandleCount)
+            PointerCount = (HandleCount * HandleBias) + (PointerCount - HandleCount);
+        else
+            PointerCount = HandleCount * HandleBias;
+    }
+
+    return (ULONG)min(PointerCount, MAXULONG);
+}
+#endif
+
 VOID
 FASTCALL
 ObpDeallocateObject(IN PVOID Object)
@@ -1644,7 +1671,11 @@ NtQueryObject(IN HANDLE ObjectHandle,
                 BasicInfo->Attributes = HandleInfo.HandleAttributes;
                 BasicInfo->GrantedAccess = HandleInfo.GrantedAccess;
                 BasicInfo->HandleCount = ObjectHeader->HandleCount;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+                BasicInfo->PointerCount = ObpQueryBasicPointerCount(ObjectHeader);
+#else
                 BasicInfo->PointerCount = ObjectHeader->PointerCount;
+#endif
 
                 /* Permanent/Exclusive Flags are NOT in Handle attributes! */
                 if (ObjectHeader->Flags & OB_FLAG_EXCLUSIVE)
