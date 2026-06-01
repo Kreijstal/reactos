@@ -407,7 +407,9 @@ Wow64SystemServiceEx(ULONG syscallNum,
     static const char* mapping[] = 
     {
 #define SVC_(name, argc) ""#name ,
+#define SVC_WRAP_(name, argc) ""#name ,
 #include "../../../ntoskrnl/include/sysfuncs.h"   
+#undef SVC_WRAP_
 #undef SVC_
     };
     
