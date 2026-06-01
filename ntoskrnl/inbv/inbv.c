@@ -209,6 +209,8 @@ InbvDriverInitialize(
     /* Quit if we're already installed */
     if (InbvBootDriverInstalled) return TRUE;
 
+    Extension = LoaderBlock->Extension;
+
     /* Initialize the lock and check the current display state */
     KeInitializeSpinLock(&BootDriverLock);
     if (InbvDisplayState == INBV_DISPLAY_STATE_OWNED)
@@ -222,11 +224,19 @@ InbvDriverInitialize(
          * framebuffer at kernel handoff. Resetting the boot display here
          * clears that framebuffer before the UEFI logo path can draw.
          */
-        if (LoaderBlock->Extension && LoaderBlock->Extension->BootViaEFI)
+#if (NTDDI_VERSION < NTDDI_WIN8)
+        if (Extension && Extension->BootViaEFI)
+#else
+        if (Extension &&
+            Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer) &&
+            Extension->GopFramebuffer.FrameBufferBase.QuadPart != 0 &&
+            Extension->GopFramebuffer.FrameBufferSize != 0)
+#endif
+        {
             ResetMode = FALSE;
+        }
     }
 
-    Extension = LoaderBlock->Extension;
     if (Extension &&
         Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer))
     {
