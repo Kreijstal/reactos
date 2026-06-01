@@ -339,6 +339,19 @@ MACRO(START_PROC, Name, StackBytes)
     PUBLIC _&Name&@&StackBytes
     .PROC _&Name&@&StackBytes
 ENDM
+MACRO(STUB_U, Name, ArgCount)
+    MAKE_LABEL Zw&Name, %ArgCount * 4
+    START_PROC Nt&Name, %ArgCount * 4
+    STUBCODE_U Name, SyscallId, %ArgCount
+    .ENDP
+    SyscallId = SyscallId + 1
+ENDM
+MACRO(STUB_K, Name, ArgCount)
+    START_PROC Zw&Name, %ArgCount * 4
+    STUBCODE_K Name, SyscallId, %ArgCount
+    .ENDP
+    SyscallId = SyscallId + 1
+ENDM
 #else
 MACRO(MAKE_LABEL, Name, StackBytes)
     PUBLIC _\Name\()@\StackBytes
@@ -348,18 +361,6 @@ MACRO(START_PROC, Name, StackBytes)
     PUBLIC _\Name\()@\StackBytes
     .PROC _\Name\()@\StackBytes
 ENDM
-#endif
-#else
-MACRO(MAKE_LABEL, Name, StackBytes)
-    PUBLIC \Name
-    \Name:
-ENDM
-MACRO(START_PROC, Name, StackBytes)
-    PUBLIC \Name
-    .PROC \Name
-ENDM
-#endif
-
 MACRO(STUB_U, Name, ArgCount)
     MAKE_LABEL Zw\Name, %ArgCount * 4
     START_PROC Nt\Name, %ArgCount * 4
@@ -374,5 +375,53 @@ MACRO(STUB_K, Name, ArgCount)
     .ENDP
     SyscallId = SyscallId + 1
 ENDM
+#endif
+#else
+#ifdef _USE_ML
+MACRO(MAKE_LABEL, Name, StackBytes)
+    PUBLIC &Name
+    &Name:
+ENDM
+MACRO(START_PROC, Name, StackBytes)
+    PUBLIC &Name
+    .PROC &Name
+ENDM
+MACRO(STUB_U, Name, ArgCount)
+    MAKE_LABEL Zw&Name, %ArgCount * 4
+    START_PROC Nt&Name, %ArgCount * 4
+    STUBCODE_U Name, SyscallId, %ArgCount
+    .ENDP
+    SyscallId = SyscallId + 1
+ENDM
+MACRO(STUB_K, Name, ArgCount)
+    START_PROC Zw&Name, %ArgCount * 4
+    STUBCODE_K Name, SyscallId, %ArgCount
+    .ENDP
+    SyscallId = SyscallId + 1
+ENDM
+#else
+MACRO(MAKE_LABEL, Name, StackBytes)
+    PUBLIC \Name
+    \Name:
+ENDM
+MACRO(START_PROC, Name, StackBytes)
+    PUBLIC \Name
+    .PROC \Name
+ENDM
+MACRO(STUB_U, Name, ArgCount)
+    MAKE_LABEL Zw\Name, %ArgCount * 4
+    START_PROC Nt\Name, %ArgCount * 4
+    STUBCODE_U Name, SyscallId, %ArgCount
+    .ENDP
+    SyscallId = SyscallId + 1
+ENDM
+MACRO(STUB_K, Name, ArgCount)
+    START_PROC Zw\Name, %ArgCount * 4
+    STUBCODE_K Name, SyscallId, %ArgCount
+    .ENDP
+    SyscallId = SyscallId + 1
+ENDM
+#endif
+#endif
 
 #endif
