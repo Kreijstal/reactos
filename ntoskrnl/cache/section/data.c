@@ -538,6 +538,7 @@ NTSTATUS
 NTAPI
 _MiMapViewOfSegment(PMMSUPPORT AddressSpace,
                     PMM_SECTION_SEGMENT Segment,
+                    PVOID SectionObject,
                     PVOID* BaseAddress,
                     SIZE_T ViewSize,
                     ULONG Protect,
@@ -580,6 +581,7 @@ _MiMapViewOfSegment(PMMSUPPORT AddressSpace,
             line);
 
     MArea->Data.SectionData.Segment = Segment;
+    MArea->Data.SectionData.SectionObject = SectionObject;
     if (ViewOffset)
         MArea->Data.SectionData.ViewOffset = *ViewOffset;
     else
@@ -718,6 +720,7 @@ MmUnmapViewOfCacheSegment(PMMSUPPORT AddressSpace,
     PVOID Context[2];
     PMEMORY_AREA MemoryArea;
     PMM_SECTION_SEGMENT Segment;
+    PVOID SectionObject;
 
     MemoryArea = MmLocateMemoryAreaByAddress(AddressSpace, BaseAddress);
     if (MemoryArea == NULL || MemoryArea->Type == MEMORY_AREA_OWNED_BY_ARM3 || MemoryArea->DeleteInProgress)
@@ -728,7 +731,9 @@ MmUnmapViewOfCacheSegment(PMMSUPPORT AddressSpace,
 
     MemoryArea->DeleteInProgress = TRUE;
     Segment = MemoryArea->Data.SectionData.Segment;
+    SectionObject = MemoryArea->Data.SectionData.SectionObject;
     MemoryArea->Data.SectionData.Segment = NULL;
+    MemoryArea->Data.SectionData.SectionObject = NULL;
 
     MmLockSectionSegment(Segment);
 
@@ -746,6 +751,9 @@ MmUnmapViewOfCacheSegment(PMMSUPPORT AddressSpace,
     MmUnlockAddressSpace(AddressSpace);
 
     MmUnlockSectionSegment(Segment);
+
+    if (SectionObject)
+        ObDereferenceObject(SectionObject);
 
     DPRINTC("MiUnmapViewOfSegment %p %p %p\n",
             MmGetAddressSpaceOwner(AddressSpace),
