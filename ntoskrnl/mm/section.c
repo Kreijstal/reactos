@@ -3522,7 +3522,10 @@ MmMapViewOfSegment(
         LARGE_INTEGER FileOffset;
         FileOffset.QuadPart = ViewOffset;
         ObReferenceObject(Section);
-        return _MiMapViewOfSegment(AddressSpace, Segment, BaseAddress, ViewSize, Protect, &FileOffset, AllocationType, __FILE__, __LINE__);
+        Status = _MiMapViewOfSegment(AddressSpace, Segment, Section, BaseAddress, ViewSize, Protect, &FileOffset, AllocationType, __FILE__, __LINE__);
+        if (!NT_SUCCESS(Status))
+            ObDereferenceObject(Section);
+        return Status;
     }
 #endif
     Status = MmCreateMemoryArea(AddressSpace,
@@ -4658,55 +4661,34 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
         }
     }
 
-    /* Data section: grab the segment to bump its refcount, peek at the
-     * count to decide whether anyone else still holds a reference, and
-     * either drop our temp grab and report failure (DelayClose=FALSE,
-     * other users still hold the segment) or drop the grab and let the
-     * caller proceed (DelayClose=TRUE).
-     *
-     * NOTE: this only handles the trivial cases.  For the realistic
-     * "data segment with cached pages still in the page table" case the
-     * RefCount is bumped per-page by MiSetPageEntrySectionSegment, so a
-     * grab/deref pair is a no-op net change and the segment's
-     * DataSectionObject slot stays set.  Properly forcing such a segment
-     * closed means walking its PageTable, dropping each page reference,
-     * then waiting for the natural cleanup at MmDereferenceSegmentWithLock
-     * to clear the slot.  That requires locking the segment against
-     * concurrent users, validating no live mappings remain, and avoiding
-     * the segment-cleanup-vs-FCB-destruction race that NtfsDestroyFCB
-     * already documents — significantly more involved than fits in this
-     * change.  For now we report failure when the segment can't be
-     * trivially dropped, which preserves the pre-existing FCB-leak
-     * fallback in NtfsDestroyFCB instead of corrupting MM state by
-     * forcibly clearing the slot. */
+    /* Data section: with no open section objects, purge any unshared cached
+     * pages so their segment references are dropped and normal segment cleanup
+     * can clear DataSectionObject. If a section object or live mapping still
+     * holds the segment, only DelayClose callers may proceed. */
     if (SectionObjectPointer->DataSectionObject != NULL)
     {
         Segment = MiGrabDataSection(SectionObjectPointer);
         if (Segment != NULL)
         {
-            /* Drop our temp grab.  If we held the only reference the
-             * legacy cleanup runs synchronously and clears the slot.
-             * Otherwise the slot stays set and we report based on the
-             * current state. */
+            BOOLEAN CanPurge;
+
+            MmLockSectionSegment(Segment);
+            CanPurge = (Segment->SectionCount == 0);
+            MmUnlockSectionSegment(Segment);
             MmDereferenceSegment(Segment);
 
-            if (SectionObjectPointer->DataSectionObject == NULL)
+            if (CanPurge)
             {
-                /* Cleanup ran on our deref — slot is clean. */
-                DataOk = TRUE;
+                DataOk = MmPurgeSegment(SectionObjectPointer, NULL, 0);
+                if (DataOk && SectionObjectPointer->DataSectionObject != NULL)
+                    DataOk = DelayClose;
             }
             else if (DelayClose)
             {
-                /* Slot still set but caller authorised deferral — return
-                 * TRUE so they can proceed.  The caller is expected to
-                 * tolerate the slot still being non-NULL (NTFS' fallback
-                 * path leaks the FCB rather than free pool memory MM is
-                 * still using). */
                 DataOk = TRUE;
             }
             else
             {
-                /* Slot still set and caller can't defer.  Report failure. */
                 DataOk = FALSE;
             }
         }

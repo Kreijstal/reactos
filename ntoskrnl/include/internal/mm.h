@@ -266,6 +266,7 @@ typedef struct _MEMORY_AREA
     {
         LONGLONG ViewOffset;
         PMM_SECTION_SEGMENT Segment;
+        PVOID SectionObject;
         LIST_ENTRY RegionListHead;
     } SectionData;
 } MEMORY_AREA, *PMEMORY_AREA;
@@ -1743,6 +1744,12 @@ MmGrowKernelStack(
     IN PVOID StackPointer
 );
 
+NTSTATUS
+NTAPI
+MmGrowKernelStackEx(
+    _In_ PVOID StackPointer,
+    _In_ ULONG GrowSize);
+
 
 FORCEINLINE
 VOID
@@ -1757,7 +1764,7 @@ MmLockAddressSpace(PMMSUPPORT AddressSpace)
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     /*
      * At Vista+, AddressCreationLock is EX_PUSH_LOCK.
-     * Enter guarded region to disable APCs — callers downstream
+     * Enter guarded region to disable APCs - callers downstream
      * (MiLockProcessWorkingSetUnsafe) assert APCs are disabled.
      * KeAcquireGuardedMutex did this implicitly at pre-Vista.
      */
