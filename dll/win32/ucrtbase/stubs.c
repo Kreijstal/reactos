@@ -8,6 +8,15 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
+#ifdef _MSC_VER
+#define UCRTBASE_EXPORT_NAME(name) name
+#define UCRTBASE_ASM_NAME(name)
+#pragma function(_lrotl, _lrotr, _rotl, _rotr, _rotl64, _rotr64)
+#else
+#define UCRTBASE_EXPORT_NAME(name) ucrtbase##name
+#define UCRTBASE_ASM_NAME(name) __asm__(#name)
+#endif
+
 // atexit is needed by libsupc++
 extern int __cdecl _crt_atexit(void (__cdecl*)(void));
 int __cdecl atexit(void (__cdecl* function)(void))
@@ -44,12 +53,21 @@ int __cdecl __acrt_initialize_fma3(void)
 
 int __cdecl __intrinsic_setjmp(jmp_buf buffer)
 {
+#ifdef _MSC_VER
+    return _setjmp(buffer);
+#else
     return _setjmp(buffer, NULL);
+#endif
 }
 
 int __cdecl __intrinsic_setjmpex(jmp_buf buffer, void *frame)
 {
+#ifdef _MSC_VER
+    (void)frame;
+    return _setjmp(buffer);
+#else
     return _setjmp(buffer, frame);
+#endif
 }
 
 unsigned int __cdecl _clearfp(void)
@@ -74,48 +92,49 @@ unsigned int __cdecl _controlfp(unsigned int new_value, unsigned int mask)
     return _control87(new_value, mask);
 }
 
-void __cdecl _set_FMA3_enable(int flag)
+int __cdecl _set_FMA3_enable(int flag)
 {
     (void)flag;
+    return 0;
 }
 
-unsigned long __cdecl ucrtbase_lrotl(unsigned long value, int shift) __asm__("_lrotl");
-unsigned long __cdecl ucrtbase_lrotl(unsigned long value, int shift)
+unsigned long __cdecl UCRTBASE_EXPORT_NAME(_lrotl)(unsigned long value, int shift) UCRTBASE_ASM_NAME(_lrotl);
+unsigned long __cdecl UCRTBASE_EXPORT_NAME(_lrotl)(unsigned long value, int shift)
 {
     shift &= 0x1f;
     return (value << shift) | (value >> ((32 - shift) & 0x1f));
 }
 
-unsigned long __cdecl ucrtbase_lrotr(unsigned long value, int shift) __asm__("_lrotr");
-unsigned long __cdecl ucrtbase_lrotr(unsigned long value, int shift)
+unsigned long __cdecl UCRTBASE_EXPORT_NAME(_lrotr)(unsigned long value, int shift) UCRTBASE_ASM_NAME(_lrotr);
+unsigned long __cdecl UCRTBASE_EXPORT_NAME(_lrotr)(unsigned long value, int shift)
 {
     shift &= 0x1f;
     return (value >> shift) | (value << ((32 - shift) & 0x1f));
 }
 
-unsigned int __cdecl ucrtbase_rotl(unsigned int value, int shift) __asm__("_rotl");
-unsigned int __cdecl ucrtbase_rotl(unsigned int value, int shift)
+unsigned int __cdecl UCRTBASE_EXPORT_NAME(_rotl)(unsigned int value, int shift) UCRTBASE_ASM_NAME(_rotl);
+unsigned int __cdecl UCRTBASE_EXPORT_NAME(_rotl)(unsigned int value, int shift)
 {
     shift &= 0x1f;
     return (value << shift) | (value >> ((32 - shift) & 0x1f));
 }
 
-unsigned int __cdecl ucrtbase_rotr(unsigned int value, int shift) __asm__("_rotr");
-unsigned int __cdecl ucrtbase_rotr(unsigned int value, int shift)
+unsigned int __cdecl UCRTBASE_EXPORT_NAME(_rotr)(unsigned int value, int shift) UCRTBASE_ASM_NAME(_rotr);
+unsigned int __cdecl UCRTBASE_EXPORT_NAME(_rotr)(unsigned int value, int shift)
 {
     shift &= 0x1f;
     return (value >> shift) | (value << ((32 - shift) & 0x1f));
 }
 
-uint64_t __cdecl ucrtbase_rotl64(uint64_t value, int shift) __asm__("_rotl64");
-uint64_t __cdecl ucrtbase_rotl64(uint64_t value, int shift)
+uint64_t __cdecl UCRTBASE_EXPORT_NAME(_rotl64)(uint64_t value, int shift) UCRTBASE_ASM_NAME(_rotl64);
+uint64_t __cdecl UCRTBASE_EXPORT_NAME(_rotl64)(uint64_t value, int shift)
 {
     shift &= 0x3f;
     return (value << shift) | (value >> ((64 - shift) & 0x3f));
 }
 
-uint64_t __cdecl ucrtbase_rotr64(uint64_t value, int shift) __asm__("_rotr64");
-uint64_t __cdecl ucrtbase_rotr64(uint64_t value, int shift)
+uint64_t __cdecl UCRTBASE_EXPORT_NAME(_rotr64)(uint64_t value, int shift) UCRTBASE_ASM_NAME(_rotr64);
+uint64_t __cdecl UCRTBASE_EXPORT_NAME(_rotr64)(uint64_t value, int shift)
 {
     shift &= 0x3f;
     return (value >> shift) | (value << ((64 - shift) & 0x3f));
