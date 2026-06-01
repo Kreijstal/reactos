@@ -36,7 +36,7 @@ int main(int argc, char* argv[])
     FILE *input, *output;
     ASMGENDATA data;
     int i, result = -1;
-    int ms_format = 0;
+    int ms_format = 0, both_formats = 0;
     char header[20];
     uint32_t e_lfanew, signature;
     uint16_t Machine, NumberOfSections, SizeOfOptionalHeader;
@@ -55,7 +55,11 @@ int main(int argc, char* argv[])
     } SECTION;
     SECTION section;
 
-    if (argc >= 4 && _stricmp(argv[3], "-ms") == 0) ms_format = 1;
+    if (argc >= 4)
+    {
+        if (_stricmp(argv[3], "-ms") == 0) ms_format = 1;
+        else if (_stricmp(argv[3], "-both") == 0) both_formats = 1;
+    }
 
     /* Open the input file */
     input = fopen(argv[1], "rb");
@@ -185,6 +189,19 @@ int main(int argc, char* argv[])
                 continue;
 
             case TYPE_CONSTANT:
+                if (both_formats)
+                {
+                    fprintf(output,
+                            "#ifdef _USE_ML\n"
+                            "%s equ 0%"PRIx64"h\n"
+                            "#else\n"
+                            "%s = 0x%"PRIx64"\n"
+                            "#endif\n",
+                            data.Name, data.Value,
+                            data.Name, data.Value);
+                    continue;
+                }
+
                 if (ms_format)
                 {
                     if (Machine == IMAGE_FILE_MACHINE_ARMNT)
@@ -203,6 +220,19 @@ int main(int argc, char* argv[])
                 continue;
 
             case TYPE_HEADER:
+                if (both_formats)
+                {
+                    fprintf(output,
+                            "\n#ifdef _USE_ML\n"
+                            "; %s\n"
+                            "#else\n"
+                            "/* %s */\n"
+                            "#endif\n",
+                            data.Name,
+                            data.Name);
+                    continue;
+                }
+
                 if (ms_format)
                 {
                     fprintf(output, "\n; %s\n", data.Name);
