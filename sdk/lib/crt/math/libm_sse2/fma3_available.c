@@ -39,6 +39,12 @@ THE SOFTWARE.
 
 typedef int (__cdecl *_PIFV)(void); // FIXME: include process.h?
 
+#if defined(__GNUC__) || defined(__clang__)
+#define FMA3_USED __attribute__((used))
+#else
+#define FMA3_USED
+#endif
+
 int __fma3_is_available = 0;
 int __use_fma3_lib = 0;
 
@@ -51,7 +57,7 @@ int __cdecl _set_FMA3_enable(int flag)
 
 int __fma3_lib_init(void);
 
-_CRTALLOC(".CRT$XIC") static __attribute__((used)) _PIFV init_fma3 = __fma3_lib_init;
+_CRTALLOC(".CRT$XIC") static FMA3_USED _PIFV init_fma3 = __fma3_lib_init;
 
 int __fma3_lib_init(void)
 {
