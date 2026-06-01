@@ -264,7 +264,11 @@ SyscallId = 0
 #ifdef _M_IX86
 #define KUSER_SHARED_SYSCALL HEX(7ffe0300)
 #define KGDT_R0_CODE 8
+#ifdef _USE_ML
+STUBCODE_U MACRO Name, SyscallId, ArgCount
+#else
 MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
+#endif
     StackBytes = 4 * ArgCount
     FPO 0, 0, 0, 0, 0, FRAME_FPO
     mov eax, SyscallId
@@ -272,12 +276,12 @@ MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
     call dword ptr [edx]
     ret StackBytes
 ENDM
-MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
 #ifdef _USE_ML
-    StackBytes = 4 * ArgCount
+STUBCODE_K MACRO Name, SyscallId, ArgCount
 #else
-    StackBytes = 4 * ArgCount
+MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
 #endif
+    StackBytes = 4 * ArgCount
     FPO 0, 0, 0, 0, 0, FRAME_FPO
     mov eax, SyscallId
     lea edx, [esp + 4]
@@ -287,14 +291,22 @@ MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
     ret StackBytes
 ENDM
 #elif defined(_M_AMD64)
+#ifdef _USE_ML
+STUBCODE_U MACRO Name, SyscallId, ArgCount
+#else
 MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
+#endif
     .ENDPROLOG
     mov eax, SyscallId
     mov r10, rcx
     syscall
     ret
 ENDM
+#ifdef _USE_ML
+STUBCODE_K MACRO Name, SyscallId, ArgCount
+#else
 MACRO(STUBCODE_K, Name, SyscallId, ArgCount)
+#endif
     .ENDPROLOG
 #ifdef _USE_ML
     EXTERN Nt&Name&:PROC
@@ -336,21 +348,21 @@ ENDM
 
 #ifdef _M_IX86
 #ifdef _USE_ML
-MACRO(MAKE_LABEL, Name, StackBytes)
+MAKE_LABEL MACRO Name, StackBytes
     PUBLIC _&Name&@&StackBytes
     _&Name&@&StackBytes:
 ENDM
-MACRO(START_PROC, Name, StackBytes)
+START_PROC MACRO Name, StackBytes
     PUBLIC _&Name&@&StackBytes
     .PROC _&Name&@&StackBytes
 ENDM
-MACRO(START_PROC_DIRECT, Name, StackBytes)
+START_PROC_DIRECT MACRO Name, StackBytes
     PUBLIC _&Name&@&StackBytes
 _&Name&@&StackBytes:
 ENDM
-MACRO(END_PROC_DIRECT, Name, StackBytes)
+END_PROC_DIRECT MACRO Name, StackBytes
 ENDM
-MACRO(STUB_U, Name, ArgCount)
+STUB_U MACRO Name, ArgCount
     StackBytes = 4 * ArgCount
     MAKE_LABEL Zw&Name&, %StackBytes
     START_PROC_DIRECT Nt&Name&, %StackBytes
@@ -358,7 +370,7 @@ MACRO(STUB_U, Name, ArgCount)
     END_PROC_DIRECT Nt&Name&, %StackBytes
     SyscallId = SyscallId + 1
 ENDM
-MACRO(STUB_K, Name, ArgCount)
+STUB_K MACRO Name, ArgCount
     StackBytes = 4 * ArgCount
     START_PROC_DIRECT Zw&Name&, %StackBytes
     STUBCODE_K Name, SyscallId, ArgCount
@@ -391,15 +403,15 @@ ENDM
 #endif
 #else
 #ifdef _USE_ML
-MACRO(MAKE_LABEL, Name, StackBytes)
+MAKE_LABEL MACRO Name, StackBytes
     PUBLIC &Name
     &Name:
 ENDM
-MACRO(START_PROC, Name, StackBytes)
+START_PROC MACRO Name, StackBytes
     PUBLIC &Name
     .PROC &Name
 ENDM
-MACRO(STUB_U, Name, ArgCount)
+STUB_U MACRO Name, ArgCount
     PUBLIC Zw&Name&
 Zw&Name&:
     PUBLIC Nt&Name&
@@ -408,7 +420,7 @@ Nt&Name& PROC FRAME
 Nt&Name& ENDP
     SyscallId = SyscallId + 1
 ENDM
-MACRO(STUB_K, Name, ArgCount)
+STUB_K MACRO Name, ArgCount
     PUBLIC Zw&Name&
 Zw&Name& PROC FRAME
     STUBCODE_K Name, SyscallId, ArgCount
