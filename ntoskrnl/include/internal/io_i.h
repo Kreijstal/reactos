@@ -29,7 +29,7 @@ UCHAR IopQueryOperationLength[] =
     0,
     sizeof(FILE_MODE_INFORMATION),
     sizeof(FILE_ALIGNMENT_INFORMATION),
-    FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName),
+    sizeof(FILE_ALL_INFORMATION),
     0,
     0,
     sizeof(FILE_NAME_INFORMATION),
@@ -216,7 +216,7 @@ ACCESS_MASK IopSetOperationAccess[] =
     DELETE,
 #if (NTDDI_VERSION >= NTDDI_VISTA)
     /* Vista+ file info classes (Set-side access). All hint/optimisation
-     * classes — no specific access mask required. */
+     * classes - no specific access mask required. */
     0, /* 41 FileIoCompletionNotificationInformation */
     0, /* 42 FileIoStatusBlockRangeInformation */
     0, /* 43 FileIoPriorityHintInformation */
