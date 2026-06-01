@@ -358,9 +358,10 @@ START_PROC MACRO Name, StackBytes
 ENDM
 START_PROC_DIRECT MACRO Name, StackBytes
     PUBLIC _&Name&@&StackBytes
-_&Name&@&StackBytes:
+    .PROC _&Name&@&StackBytes
 ENDM
 END_PROC_DIRECT MACRO Name, StackBytes
+    .ENDP
 ENDM
 STUB_U MACRO Name, ArgCount
     StackBytes = 4 * ArgCount
