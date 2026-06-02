@@ -9,16 +9,11 @@
 #define ForEachInterface(n) \
     TIPASTE(n,Entry) = InterfaceListHead.Flink; \
     while (TIPASTE(n,Entry) != &InterfaceListHead) { \
-              TI_DbgPrint \
-                  (MAX_TRACE,( # n ": %x\n", \
-                               TIPASTE(n,Entry))); \
               ASSERT(TIPASTE(n,Entry)); \
 	      n = CONTAINING_RECORD(TIPASTE(n,Entry), IP_INTERFACE, \
 				    ListEntry); \
 	      ASSERT(n);
 
 #define EndFor(n) \
-     TI_DbgPrint(MAX_TRACE,("Next " # n " %x\n",  \
-			    TIPASTE(n,Entry->Flink))); \
      TIPASTE(n,Entry) = TIPASTE(n,Entry)->Flink; \
 }
