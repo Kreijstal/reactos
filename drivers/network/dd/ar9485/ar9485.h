@@ -36,7 +36,7 @@
 /* Register offsets and bit math now live under ath9k/reg.h (slice 1) and
  * are consumed via ath9k/hw_min.h's verbatim AR_SREV_* constants
  * (slice 2).  The miniport keeps one byte-offset constant for the
- * diagnostic raw-register read after chip detection — named with an
+ * diagnostic raw-register read after chip detection - named with an
  * AR9485_ prefix to avoid colliding with upstream ath9k/reg.h's
  * AR_SREV(_ah) function-form macro for the same register. */
 #define AR9485_AR_SREV_OFFSET       0x4020

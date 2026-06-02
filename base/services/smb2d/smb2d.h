@@ -1,5 +1,5 @@
 /*
- * smb2d — shared definitions between service.c and daemon.c.
+ * smb2d - shared definitions between service.c and daemon.c.
  */
 #ifndef _SMB2D_H_
 #define _SMB2D_H_
