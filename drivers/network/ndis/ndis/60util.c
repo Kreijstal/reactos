@@ -9,11 +9,11 @@
  *              (60adapter.c), datapath (60thunk_*.c), or registration
  *              (60driver.c, 60stubs.c) files:
  *
- *                - Timer object API (NdisAllocateTimerObject etc.) —
+ *                - Timer object API (NdisAllocateTimerObject etc.) -
  *                  KTIMER + KDPC wrapper used for periodic work
- *                - RW lock API (NdisAllocateRWLock etc.) — shared/exclusive
+ *                - RW lock API (NdisAllocateRWLock etc.) - shared/exclusive
  *                  synchronization primitive on top of EX_PUSH_LOCK
- *                - NdisAllocateNetBufferMdlAndData — combined helper used
+ *                - NdisAllocateNetBufferMdlAndData - combined helper used
  *                  by drivers building synthetic NBs from a backing buffer
  *
  *              The legacy DDK header doesn't carry these declarations
@@ -358,7 +358,7 @@ NdisAllocateNetBufferMdlAndData(
  *
  *  NdisMSleep and NdisGetCurrentProcessorCounts are already implemented
  *  in the legacy NDIS 5 library (miniport.c / misc.c) and callable from
- *  NDIS 6 drivers unchanged — nothing extra needed here.
+ *  NDIS 6 drivers unchanged - nothing extra needed here.
  *
  *  NdisGetSystemUpTimeEx is new (NDIS 6.0+) and returns a LARGE_INTEGER
  *  in 100ns units since boot. Wraps KeQueryTickCount * KeQueryTimeIncrement.
@@ -379,7 +379,7 @@ NdisGetSystemUpTimeEx(
 }
 
 /* ============================================================================
- *  E4: NDIS 6.30+ polling API — NdisRegisterPoll / NdisMPollComplete
+ *  E4: NDIS 6.30+ polling API - NdisRegisterPoll / NdisMPollComplete
  *
  *  The polling API lets a driver run its RX/TX work via a kernel poll
  *  callback instead of DPC-based dispatch. We model each registered poll
@@ -387,7 +387,7 @@ NdisGetSystemUpTimeEx(
  *  calls back into the driver's NDIS_POLL routine, which does work and
  *  optionally re-requests.
  *
- *  This is a minimal functional implementation — no NUMA affinity, no
+ *  This is a minimal functional implementation - no NUMA affinity, no
  *  budget tracking, no separate DPC queue priority. Sufficient for
  *  drivers that opt-in but not full-performance poll mode.
  * ============================================================================ */

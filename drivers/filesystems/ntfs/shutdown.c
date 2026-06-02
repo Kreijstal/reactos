@@ -34,8 +34,8 @@
  * used by NtfsRead/WriteDiskCached) hits disk.
  *
  * The snapshot-then-flush pattern is required because CcFlushCache can
- * block — it acquires the section's resource and may wait on paging
- * I/O — so it cannot be called at DISPATCH_LEVEL while the spinlock is
+ * block - it acquires the section's resource and may wait on paging
+ * I/O - so it cannot be called at DISPATCH_LEVEL while the spinlock is
  * held. Each snapshotted FCB has its RefCount bumped under the lock so
  * NtfsReleaseFCB cannot tear it down while we are flushing it.
  */
@@ -91,7 +91,7 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
 
     /* Second pass: re-walk under the lock and bump RefCount on each FCB
      * we capture. The capacity may have grown since the first pass; if
-     * so we just stop at SnapshotCapacity and miss the new entries —
+     * so we just stop at SnapshotCapacity and miss the new entries -
      * they belong to in-flight IRPs that the I/O Manager will quiesce
      * before phase 2 of shutdown anyway. RefCount is normally bumped
      * via NtfsGrabFCB, which itself takes FcbListLock; we can't call it
@@ -169,7 +169,7 @@ NtfsShutdownStorageDevice(PDEVICE_OBJECT StorageDevice)
  * drivers themselves are torn down).
  *
  * The I/O Manager only delivers a single shutdown IRP to the file system
- * control device, not one per mounted volume — so we have to walk every
+ * control device, not one per mounted volume - so we have to walk every
  * device the NTFS driver owns and flush each VCB explicitly. The driver
  * doesn't keep a separate VCB list, but DriverObject->DeviceObject is the
  * head of a singly linked list of every IoCreateDevice that this driver
@@ -190,7 +190,7 @@ NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext)
     DeviceObject = NtfsGlobalData->DriverObject->DeviceObject;
     while (DeviceObject != NULL)
     {
-        /* Skip the control device — its extension is NTFS_GLOBAL_DATA, not a VCB. */
+        /* Skip the control device - its extension is NTFS_GLOBAL_DATA, not a VCB. */
         if (DeviceObject != NtfsGlobalData->DeviceObject &&
             DeviceObject->DeviceExtension != NULL)
         {

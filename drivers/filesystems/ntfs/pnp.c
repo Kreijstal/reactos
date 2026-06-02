@@ -9,8 +9,8 @@
  * and Play manager uses (via IopGetRelatedTargetDevice in
  * ntoskrnl/io/iomgr/device.c) to walk from a file object back to its
  * underlying physical device. The PnP manager asserts that the response
- * is non-NULL on success — see the ASSERT(DeviceRelations) at line 680
- * — so we cannot just acknowledge the IRP with STATUS_SUCCESS without
+ * is non-NULL on success - see the ASSERT(DeviceRelations) at line 680
+ * - so we cannot just acknowledge the IRP with STATUS_SUCCESS without
  * filling in the out parameters; that crashes text-mode setup as soon
  * as it tries to enumerate disks.
  *
@@ -54,7 +54,7 @@ NtfsForwardPnpIrp(PNTFS_VCB Vcb,
 /*
  * Mark the volume so subsequent CREATE / READ / WRITE will refuse and
  * the FS knows the underlying device is going away. This is the bare
- * minimum response to a removal request — fastfat does much more
+ * minimum response to a removal request - fastfat does much more
  * (volume lock, dismount, VPB swap) but for now we at least flag the
  * VCB and let the PnP manager / disk driver deal with the rest.
  */
@@ -76,7 +76,7 @@ NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
 
     DPRINT("NtfsPnp(%p): MinorFunction %u\n", DeviceObject, Stack->MinorFunction);
 
-    /* PNP doesn't apply to the control device — it has no underlying
+    /* PNP doesn't apply to the control device - it has no underlying
      * storage to forward to, and the I/O Manager normally doesn't send
      * PNP IRPs there anyway. */
     if (DeviceObject == NtfsGlobalData->DeviceObject)
@@ -106,7 +106,7 @@ NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
              * underlying device. We don't yet implement the volume
              * lock / open-handle check that fastfat does, but for a
              * fixed-disk install this code path effectively never
-             * fires. Forward the question to the disk driver — it
+             * fires. Forward the question to the disk driver - it
              * will refuse if it has good reason. */
             Status = NtfsForwardPnpIrp(Vcb, Irp);
             IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
@@ -135,7 +135,7 @@ NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
             /* IopGetRelatedTargetDevice sends this with type
              * TargetDeviceRelation to walk from a file back to its
              * physical device. The disk driver fills in the
-             * DEVICE_RELATIONS for itself, so we must forward — not
+             * DEVICE_RELATIONS for itself, so we must forward - not
              * complete with STATUS_SUCCESS, which would leave
              * DeviceRelations NULL and trip the assertion that broke
              * the install before. */

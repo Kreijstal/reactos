@@ -206,7 +206,7 @@ CcLazyWriteScan(VOID)
          * cycles to drain. Without this branch, ScanActive flips off as
          * soon as the deferred-write list empties and the remaining dirty
          * pages stagnate until the next write activity restarts the
-         * scheduler — leaving stale data in cache and unflushed clusters
+         * scheduler - leaving stale data in cache and unflushed clusters
          * on disk if a crash hits. */
         CcScheduleLazyWriteScan(FALSE);
     }

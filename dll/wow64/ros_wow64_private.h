@@ -312,7 +312,7 @@ RedirectPath(const WOW64_PATH_REDIRECTION* Redirection,
     if (_wcsnicmp(ObjectName->Buffer, From.Buffer, From.Length / sizeof(WCHAR)) != 0)
         return FALSE;
 
-    /* Match found — expand the To pattern */
+    /* Match found - expand the To pattern */
     RtlInitEmptyUnicodeString(&To, ToBuffer, sizeof(ToBuffer));
     Status = RtlExpandEnvironmentStrings_U(NULL,
                                            (PUNICODE_STRING)ToUnexpanded,

@@ -10,7 +10,7 @@
  * FsRtlProcessFileLock, which uses the per-FCB FILE_LOCK state that
  * fcb.c initializes via FsRtlInitializeFileLock.
  *
- * FsRtlProcessFileLock owns the IRP from the moment we call it — it
+ * FsRtlProcessFileLock owns the IRP from the moment we call it - it
  * either completes the IRP synchronously (most cases) or queues it
  * waiting for a conflicting lock to drop. Either way, NtfsDispatch
  * must NOT touch the IRP afterwards, so we clear IRPCONTEXT_COMPLETE
@@ -18,7 +18,7 @@
  * is skipped.
  *
  * Note that just registering the lock IRP isn't enough to actually
- * enforce locks against concurrent reads / writes — those have to
+ * enforce locks against concurrent reads / writes - those have to
  * consult the FILE_LOCK via FsRtlCheckLockForReadAccess /
  * FsRtlCheckLockForWriteAccess in NtfsRead / NtfsWrite. That part is
  * also done as part of this change so byte-range locks behave the way
@@ -68,7 +68,7 @@ NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     /* Hand the IRP to FsRtl. From here on the IRP is owned by the
-     * lock package — it will be completed (synchronously, in the
+     * lock package - it will be completed (synchronously, in the
      * common case) before this call returns, or queued waiting for
      * a conflicting lock. Either way, the dispatch loop in
      * dispatch.c must not touch it. */

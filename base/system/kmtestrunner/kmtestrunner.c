@@ -380,7 +380,7 @@ _main(
             PCSTR TestName = Cursor;
 
             /* Names starting with '-' are interactive/manual (e.g.
-             * ExHardErrorInteractive, ObTypeClean). Skip them — the
+             * ExHardErrorInteractive, ObTypeClean). Skip them - the
              * userland kmtest.exe runner applies the same filter. */
             if (TestName[0] == '-')
             {

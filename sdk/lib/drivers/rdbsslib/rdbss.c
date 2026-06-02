@@ -2898,7 +2898,7 @@ RxCommonFileSystemControl(
 }
 
 /*
- * RxCommonFlushBuffers — IRP_MJ_FLUSH_BUFFERS entry point.  The minimal
+ * RxCommonFlushBuffers - IRP_MJ_FLUSH_BUFFERS entry point.  The minimal
  * correct behaviour is to forward the request to the active mini-rdr's
  * MRxFlush callback so it can translate the flush into whatever the
  * wire protocol needs (an SMB2 FLUSH, a pipe sync, etc.).  Volume /

@@ -114,7 +114,7 @@ DriverEntry(
     DPRINT("E1000: Registering miniport driver with NDIS 6.%d\n",
              NDIS_MINIPORT_MINOR_VERSION);
 
-    /* Register with NDIS — NdisMRegisterMiniportDriver is the correct
+    /* Register with NDIS - NdisMRegisterMiniportDriver is the correct
      * MS DDK name; the dev branch had the M-less typo. */
     Status = NdisMRegisterMiniportDriver(
                 DriverObject,
@@ -224,7 +224,7 @@ E1000MiniportInitializeEx(
                            &Adapter->PhysicalDeviceObject,
                            NULL,    /* FDO not needed */
                            NULL,    /* NextDeviceObject not needed */
-                           NULL,    /* AllocatedResources — use param below */
+                           NULL,    /* AllocatedResources - use param below */
                            NULL);
     if (Adapter->PhysicalDeviceObject != NULL)
     {

@@ -10,7 +10,7 @@
  * QPlatformFontDatabase::registerFont(name, ...).
  *
  * The actual glyph/metric/outline plumbing is intentionally deferred to
- * Phase 2 — for now CreateFontFace returns a face object whose only
+ * Phase 2 - for now CreateFontFace returns a face object whose only
  * working methods are QueryInterface/AddRef/Release/GetType.  Qt's
  * populate path does not exercise the rest.
  *
@@ -95,7 +95,7 @@ struct font_obj
      * font_family_obj_t* but that pointer is invalidated whenever
      * collection_find_or_add_family HeapReAlloc()s coll->families[], so
      * every font attached before the realloc would be left with a
-     * dangling family ptr (its first 8 bytes — the vtable — read 0 once
+     * dangling family ptr (its first 8 bytes - the vtable - read 0 once
      * the old buffer is freed).  Indexing through (coll, family_idx)
      * stays valid across reallocs because coll itself is standalone. */
     font_collection_obj_t *coll;
@@ -107,7 +107,7 @@ struct font_family_obj
 {
     const void *lpVtbl;
     LONG ref;
-    font_collection_obj_t *coll;     /* Weak — collection owns us. */
+    font_collection_obj_t *coll;     /* Weak - collection owns us. */
     WCHAR family_name[LF_FACESIZE];
     font_obj_t *fonts;
     UINT32 nfonts;
@@ -148,7 +148,7 @@ struct font_face_obj
     UINT16 em_units;
     UINT16 ascent_du;      /* tmAscent in design units */
     UINT16 descent_du;     /* tmDescent in design units */
-    /* Cached results — populated under cs. */
+    /* Cached results - populated under cs. */
     UINT16 glyph_count;    /* 0 == not yet cached */
     BOOL   metrics_ready;
     DWRITE_FONT_METRICS metrics_cache;
@@ -205,7 +205,7 @@ static BOOL family_append_face(font_family_obj_t *fam, const face_record_t *rec)
 {
     UINT32 i;
 
-    /* Dedupe by (style_name, weight, italic, charset) — EnumFont can return
+    /* Dedupe by (style_name, weight, italic, charset) - EnumFont can return
      * the same face for multiple charsets. */
     for (i = 0; i < fam->nfonts; ++i)
     {
@@ -382,7 +382,7 @@ static UINT32 STDMETHODCALLTYPE collection_GetFontFamilyCount(void *iface)
 }
 
 /* HRESULT GetFontFamily(UINT32 index, IDWriteFontFamily **out)
- * The same impl serves slots 4 (Family*), 8 (Family1*), and 9 (Family2*) —
+ * The same impl serves slots 4 (Family*), 8 (Family1*), and 9 (Family2*) -
  * all three are vtable-prefix compatible when our Family object covers
  * the largest extension. */
 static HRESULT STDMETHODCALLTYPE collection_GetFontFamily(
@@ -419,7 +419,7 @@ static HRESULT STDMETHODCALLTYPE collection_FindFamilyName(
     return S_OK;
 }
 
-/* DWRITE_FONT_FAMILY_MODEL GetFontFamilyModel(void) — slot 11.
+/* DWRITE_FONT_FAMILY_MODEL GetFontFamilyModel(void) - slot 11.
  * Phase 1: always claim TYPOGRAPHIC (== 0). */
 static DWRITE_FONT_FAMILY_MODEL STDMETHODCALLTYPE collection_GetFontFamilyModel(void *iface)
 {
@@ -484,7 +484,7 @@ static UINT32 STDMETHODCALLTYPE family_GetFontCount(void *iface)
     return self->nfonts;
 }
 
-/* HRESULT GetFont(UINT32 index, IDWriteFont **out) — also serves slot 10
+/* HRESULT GetFont(UINT32 index, IDWriteFont **out) - also serves slot 10
  * (Family1::GetFont -> Font3*). */
 static HRESULT STDMETHODCALLTYPE family_GetFont(void *iface, UINT32 index, void **out)
 {
@@ -499,7 +499,7 @@ static HRESULT STDMETHODCALLTYPE family_GetFont(void *iface, UINT32 index, void 
 
 /* HRESULT GetMatchingFonts(weight, stretch, style, IDWriteFontList **out)
  * Phase 1: ignore the weight/stretch/style filter, return the whole family.
- * IDWriteFontFamily extends IDWriteFontList — the first six vtable slots
+ * IDWriteFontFamily extends IDWriteFontList - the first six vtable slots
  * (IUnknown + GetFontCollection + GetFontCount + GetFont) are identical, so
  * Qt's IDWriteFontList::GetFontCount/GetFont calls land on our existing
  * family_GetFontCount/family_GetFont. */
@@ -613,7 +613,7 @@ static DWRITE_FONT_SIMULATIONS STDMETHODCALLTYPE font_GetSimulations(void *iface
     return DWRITE_FONT_SIMULATIONS_NONE;
 }
 
-/* HRESULT CreateFontFace(IDWriteFontFace **out) — also slot 19 for Font3::
+/* HRESULT CreateFontFace(IDWriteFontFace **out) - also slot 19 for Font3::
  * CreateFontFace -> IDWriteFontFace3.  Vtable-prefix compatible. */
 static HRESULT STDMETHODCALLTYPE font_CreateFontFace(void *iface, void **out)
 {
@@ -641,21 +641,21 @@ static HRESULT STDMETHODCALLTYPE font_CreateFontFace(void *iface, void **out)
     return S_OK;
 }
 
-/* BOOL IsMonospacedFont(void) — Font1 slot 17 */
+/* BOOL IsMonospacedFont(void) - Font1 slot 17 */
 static BOOL STDMETHODCALLTYPE font_IsMonospacedFont(void *iface)
 {
     (void)iface;
     return FALSE;
 }
 
-/* BOOL IsColorFont(void) — Font2 slot 18 */
+/* BOOL IsColorFont(void) - Font2 slot 18 */
 static BOOL STDMETHODCALLTYPE font_IsColorFont(void *iface)
 {
     (void)iface;
     return FALSE;
 }
 
-/* DWRITE_LOCALITY GetLocality(void) — Font3 slot 23 */
+/* DWRITE_LOCALITY GetLocality(void) - Font3 slot 23 */
 static DWRITE_LOCALITY STDMETHODCALLTYPE font_GetLocality(void *iface)
 {
     (void)iface;
@@ -777,7 +777,7 @@ static BOOL gdi_face_ensure(font_face_obj_t *face)
             face->prev_obj = SelectObject(face->hdc, face->hfont);
         }
         /* If CreateFontIndirectW fails at em size, keep the probe HFONT
-         * and rescale outputs by em_units/2048 in callers — but for
+         * and rescale outputs by em_units/2048 in callers - but for
          * common TT fonts the em-sized create works. */
     }
 
@@ -858,7 +858,7 @@ static BOOL STDMETHODCALLTYPE face_IsSymbolFont(void *iface)
     return self->charset == SYMBOL_CHARSET;
 }
 
-/* void GetMetrics(DWRITE_FONT_METRICS *metrics) — slot 8.
+/* void GetMetrics(DWRITE_FONT_METRICS *metrics) - slot 8.
  * Returns void; caller-provided struct is filled (or zero-filled on
  * failure). */
 static void STDMETHODCALLTYPE face_GetMetrics(void *iface, DWRITE_FONT_METRICS *out)
@@ -871,7 +871,7 @@ static void STDMETHODCALLTYPE face_GetMetrics(void *iface, DWRITE_FONT_METRICS *
     *out = self->metrics_cache;
 }
 
-/* UINT16 GetGlyphCount(void) — slot 9.
+/* UINT16 GetGlyphCount(void) - slot 9.
  * Read 'maxp' table; numGlyphs is BE16 at offset 4. */
 static UINT16 STDMETHODCALLTYPE face_GetGlyphCount(void *iface)
 {
@@ -930,7 +930,7 @@ static HRESULT STDMETHODCALLTYPE face_GetDesignGlyphMetrics(
 }
 
 /* HRESULT GetGlyphIndices(UINT32 const *codepoints, UINT32 count,
- *      UINT16 *glyph_indices) — slot 11. */
+ *      UINT16 *glyph_indices) - slot 11. */
 static HRESULT STDMETHODCALLTYPE face_GetGlyphIndices(
     void *iface, UINT32 const *codepoints, UINT32 count, UINT16 *indices)
 {
@@ -1002,7 +1002,7 @@ static HRESULT STDMETHODCALLTYPE face_GetGlyphIndices(
 }
 
 /* HRESULT TryGetFontTable(UINT32 tag, void const **table_data,
- *      UINT32 *table_size, void **context, BOOL *exists) — slot 12. */
+ *      UINT32 *table_size, void **context, BOOL *exists) - slot 12. */
 static HRESULT STDMETHODCALLTYPE face_TryGetFontTable(
     void *iface, UINT32 tag, const void **table_data, UINT32 *table_size,
     void **context, BOOL *exists)
@@ -1045,7 +1045,7 @@ static HRESULT STDMETHODCALLTYPE face_TryGetFontTable(
     return S_OK;
 }
 
-/* void ReleaseFontTable(void *context) — slot 13.
+/* void ReleaseFontTable(void *context) - slot 13.
  * Declared as HRESULT-returning in IDWriteFontFace IDL; treat the return
  * value as ignored and use the slot for both. */
 static void STDMETHODCALLTYPE face_ReleaseFontTable(void *iface, void *context)
@@ -1163,7 +1163,7 @@ static void emit_glyph_outline(void *sink, BYTE *buf, DWORD len,
                     HeapFree(GetProcessHeap(), 0, cubics);
                 }
             }
-            /* TT_PRIM_CSPLINE (cubic) — GDI emits this for PostScript Type1
+            /* TT_PRIM_CSPLINE (cubic) - GDI emits this for PostScript Type1
              * outlines.  apfx is groups of 3 points: (ctrl1, ctrl2, end). */
             else if (cur->wType == TT_PRIM_CSPLINE && npts >= 3 && (npts % 3) == 0)
             {
@@ -1196,7 +1196,7 @@ static void emit_glyph_outline(void *sink, BYTE *buf, DWORD len,
 /* HRESULT GetGlyphRunOutline(FLOAT em_size, UINT16 const *glyph_indices,
  *      FLOAT const *glyph_advances, DWRITE_GLYPH_OFFSET const *glyph_offsets,
  *      UINT32 glyph_count, BOOL is_sideways, BOOL is_rtl,
- *      IDWriteGeometrySink *sink) — slot 14. */
+ *      IDWriteGeometrySink *sink) - slot 14. */
 static HRESULT STDMETHODCALLTYPE face_GetGlyphRunOutline(
     void *iface, FLOAT em_size, UINT16 const *glyph_indices,
     FLOAT const *glyph_advances, DWRITE_GLYPH_OFFSET const *glyph_offsets,
@@ -1271,7 +1271,7 @@ static HRESULT STDMETHODCALLTYPE face_GetGlyphRunOutline(
 
 /* HRESULT GetRecommendedRenderingMode(FLOAT em_size, FLOAT pixels_per_dip,
  *      DWRITE_MEASURING_MODE mode, IDWriteRenderingParams *params,
- *      DWRITE_RENDERING_MODE *mode_out) — slot 15. */
+ *      DWRITE_RENDERING_MODE *mode_out) - slot 15. */
 static HRESULT STDMETHODCALLTYPE face_GetRecommendedRenderingMode(
     void *iface, FLOAT em_size, FLOAT pixels_per_dip,
     DWRITE_MEASURING_MODE mode, void *params, DWRITE_RENDERING_MODE *mode_out)
@@ -1283,7 +1283,7 @@ static HRESULT STDMETHODCALLTYPE face_GetRecommendedRenderingMode(
 }
 
 /* HRESULT GetGdiCompatibleMetrics(FLOAT em_size, FLOAT pixels_per_dip,
- *      DWRITE_MATRIX const *transform, DWRITE_FONT_METRICS *out) — slot 16.
+ *      DWRITE_MATRIX const *transform, DWRITE_FONT_METRICS *out) - slot 16.
  * For Phase 2 we ignore the GDI compatibility tweaks and return the design
  * metrics. */
 static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleMetrics(
@@ -1299,7 +1299,7 @@ static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleMetrics(
 /* HRESULT GetGdiCompatibleGlyphMetrics(FLOAT em_size, FLOAT pixels_per_dip,
  *      DWRITE_MATRIX const *transform, BOOL use_gdi_natural,
  *      UINT16 const *glyph_indices, UINT32 glyph_count,
- *      DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways) — slot 17. */
+ *      DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways) - slot 17. */
 static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphMetrics(
     void *iface, FLOAT em_size, FLOAT pixels_per_dip,
     DWRITE_MATRIX const *transform, BOOL use_gdi_natural,
@@ -1311,7 +1311,7 @@ static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphMetrics(
                                       metrics, is_sideways);
 }
 
-/* IDWriteFontFace1::GetMetrics(DWRITE_FONT_METRICS1 *out) — slot 18.
+/* IDWriteFontFace1::GetMetrics(DWRITE_FONT_METRICS1 *out) - slot 18.
  * Same as GetMetrics, additional fields zeroed. */
 static void STDMETHODCALLTYPE face_GetMetrics1(void *iface, DWRITE_FONT_METRICS1 *out)
 {
@@ -1339,7 +1339,7 @@ static void STDMETHODCALLTYPE face_GetMetrics1(void *iface, DWRITE_FONT_METRICS1
     }
 }
 
-/* IDWriteFontFace3::HasCharacter(UINT32 codepoint) — return TRUE if any
+/* IDWriteFontFace3::HasCharacter(UINT32 codepoint) - return TRUE if any
  * non-zero glyph maps.  Slot for IDWriteFontFace3::HasCharacter lives in
  * the FontFace3 extension. */
 static BOOL STDMETHODCALLTYPE face_HasCharacter(void *iface, UINT32 codepoint)
@@ -1349,7 +1349,7 @@ static BOOL STDMETHODCALLTYPE face_HasCharacter(void *iface, UINT32 codepoint)
     return SUCCEEDED(hr) && gid != 0;
 }
 
-/* IDWriteFontFace1::IsMonospacedFont(void) — slot 22.
+/* IDWriteFontFace1::IsMonospacedFont(void) - slot 22.
  * GDI doesn't expose this directly without parsing 'post'.  Treat
  * known monospace family names heuristically as monospace, else FALSE. */
 static BOOL STDMETHODCALLTYPE face_IsMonospacedFont(void *iface)

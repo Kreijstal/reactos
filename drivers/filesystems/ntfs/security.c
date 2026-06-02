@@ -2,7 +2,7 @@
  * COPYRIGHT:        See COPYING in the top level directory
  * PROJECT:          ReactOS kernel
  * FILE:             drivers/filesystem/ntfs/security.c
- * PURPOSE:          NTFS filesystem driver — per-file $SECURITY_DESCRIPTOR
+ * PURPOSE:          NTFS filesystem driver - per-file $SECURITY_DESCRIPTOR
  *                   round-trip workers + thin IRP wrappers
  *
  * This slice implements the legacy (NT4-era) per-file SD form: each MFT
@@ -35,7 +35,7 @@
 /* World-readable default SD surfaced when a file has no $SECURITY_DESCRIPTOR
  * attribute yet and a caller asks for one via IRP_MJ_QUERY_SECURITY.  This is
  * a minimal self-relative SECURITY_DESCRIPTOR_RELATIVE with no Owner / Group /
- * DACL / SACL — Windows clients treat that as "no access control information
+ * DACL / SACL - Windows clients treat that as "no access control information
  * present, inherit or use defaults".  SECURITY_DESCRIPTOR_RELATIVE::Control
  * has SE_SELF_RELATIVE set (0x8000, low-endian 00 80). */
 static const UCHAR NtfsDefaultSelfRelativeSd[] =
@@ -89,7 +89,7 @@ NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
 
     /* Basic SECURITY_DESCRIPTOR_RELATIVE sanity.  The buffer must at least
      * hold the fixed-size header (revision + control + four DWORD offsets);
-     * beyond that we don't try to walk the ACL — that's the upper layer's
+     * beyond that we don't try to walk the ACL - that's the upper layer's
      * concern (and it was presumably produced by RtlCreateSecurityDescriptor
      * or similar). */
     if (SdLength < NTFS_MIN_SELF_RELATIVE_SD_BYTES)
@@ -134,7 +134,7 @@ NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
  *
  * Reads the file's $SECURITY_DESCRIPTOR attribute into the caller's buffer.
  * If the attribute is absent, synthesises the minimal default self-relative
- * SD above so callers always get something valid back — mirrors how Windows
+ * SD above so callers always get something valid back - mirrors how Windows
  * synthesises a default SD from the Objects-Directory template when a file
  * has no explicit one.
  *
@@ -147,7 +147,7 @@ NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,
  *
  * @return STATUS_SUCCESS on full copy,
  *         STATUS_BUFFER_OVERFLOW if BufLen is too small (LenOut set to the
- *                                required size — matches IRP_MJ_QUERY_SECURITY
+ *                                required size - matches IRP_MJ_QUERY_SECURITY
  *                                contract).
  */
 NTSTATUS
@@ -188,7 +188,7 @@ NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
     AttrLength = AttributeDataLength(AttrCtx->pRecord);
     if (AttrLength == 0 || AttrLength > MAXULONG)
     {
-        /* Corrupted / bogus $SECURITY_DESCRIPTOR attribute — length makes
+        /* Corrupted / bogus $SECURITY_DESCRIPTOR attribute - length makes
          * no sense.  Fall back to the default rather than crashing the
          * caller; this gives IRP consumers something parseable while an
          * operator can rewrite a real SD via IRP_MJ_SET_SECURITY. */
@@ -226,7 +226,7 @@ NtfsGetSecurityFromRecord(PNTFS_VCB Vcb,
  * @implemented
  *
  * Removes the $SECURITY_DESCRIPTOR attribute from FileRecord (if present).
- * Analogous to NtfsDelete{ObjectId,ReparsePoint}FromRecord — the attribute
+ * Analogous to NtfsDelete{ObjectId,ReparsePoint}FromRecord - the attribute
  * must be resident and live in the base record; non-resident / migrated
  * cases are explicitly out of scope for this slice and return
  * STATUS_NOT_IMPLEMENTED so callers see a stable error instead of silent
@@ -264,7 +264,7 @@ NtfsDeleteSecurityFromRecord(PNTFS_VCB Vcb,
 
 /* IRP wrappers for IRP_MJ_QUERY_SECURITY / IRP_MJ_SET_SECURITY live in
  * dispatch.c (alongside NtfsQueryEa / NtfsSetEa) so the worker TU stays
- * harness-friendly — the IRP types are `{int dummy;}` under the userspace
+ * harness-friendly - the IRP types are `{int dummy;}` under the userspace
  * mock and would not compile against the wrappers. */
 
 /* EOF */

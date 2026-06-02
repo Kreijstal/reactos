@@ -1825,7 +1825,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Type",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Group",0x00000000,"NDIS"
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","DisplayName",0x00000000,"ReactOS Virtual Wi-Fi Adapter"
 
-; Base Filtering Engine (BFE) — stub, dev-nt6-1 branch
+; Base Filtering Engine (BFE) - stub, dev-nt6-1 branch
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","DisplayName",0x00000000,"Base Filtering Engine"
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Description",0x00000000,"Manages WFP filters and callouts. Stub — accepts filter add/delete but never evaluates them."
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","ErrorControl",0x00010001,0x00000001

@@ -1,4 +1,4 @@
-; SMB2 usermode daemon — kernel-mode smb2rdr minirdr uses this service as
+; SMB2 usermode daemon - kernel-mode smb2rdr minirdr uses this service as
 ; its upcall endpoint.  Start=2 (automatic) because direct MUP/RDBSS UNC
 ; opens bypass the user-mode network provider and cannot demand-start a
 ; Win32 service before the redirector needs its daemon.

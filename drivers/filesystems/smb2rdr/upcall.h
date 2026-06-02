@@ -96,7 +96,7 @@ typedef struct _OP_CLOSE_IN {
  * by OP_CREATE for a directory open), the NT file-information class the
  * caller wants entries encoded as, the maximum bytes the kernel can ingest,
  * scan-control flags, and an optional UTF-16LE filename filter.  Output is
- * a compact header followed by a flat packed run of NT dir-info records —
+ * a compact header followed by a flat packed run of NT dir-info records -
  * the daemon has already formatted them in the NT layout so the kernel side
  * can memcpy straight into the caller's buffer.
  */
@@ -174,7 +174,7 @@ typedef struct _OP_WRITE_OUT {
 
 /*
  * FSYNC wire format.  Input carries the opaque daemon file handle.  There
- * is no output payload — the downcall Status is the whole answer.  Fires
+ * is no output payload - the downcall Status is the whole answer.  Fires
  * on MRxFlush (FlushFileBuffers / cache-manager flush paths).
  */
 typedef struct _OP_FSYNC_IN {
@@ -223,7 +223,7 @@ typedef struct _OP_QUERY_FILE_INFO_OUT {
  * converts to UTF-8 and rewrites backslashes into forward slashes for
  * libsmb2.  VNetHandle selects the share context since smb2_rename() takes
  * a context + two paths rather than an open file handle.  There is no
- * output payload — the downcall Status is the whole answer.
+ * output payload - the downcall Status is the whole answer.
  */
 typedef struct _OP_RENAME_IN {
     ULONGLONG VNetHandle;     /* share context handle */
@@ -250,7 +250,7 @@ typedef struct _OP_UNLINK_IN {
 
 /*
  * FTRUNCATE wire format.  Fires from MRxSetFileInfo for
- * FileEndOfFileInformation.  No output payload — the downcall Status is
+ * FileEndOfFileInformation.  No output payload - the downcall Status is
  * the whole answer.  Sign-extended to 64 bits even on 32-bit NT; the
  * caller already validated non-negative before shipping.
  */

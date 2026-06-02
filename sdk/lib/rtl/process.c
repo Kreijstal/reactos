@@ -260,7 +260,7 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         /* Build attribute list */
         AttrCount = 0;
 
-        /* Image name attribute (required) — pristine NT form, not affected by
+        /* Image name attribute (required) - pristine NT form, not affected by
          * the in-place rewrites of ProcessParameters below. */
         AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_IMAGE_NAME;
         AttrList->Attributes[AttrCount].Size = LocalImageNameLen;
@@ -315,10 +315,10 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         /*
          * Windows invariant: the DOS-form fields of RTL_USER_PROCESS_PARAMETERS
          * (ImagePathName, CurrentDirectory.DosPath) really are DOS paths.
-         * Downstream consumers — LDR_DATA_TABLE_ENTRY.FullDllName,
+         * Downstream consumers - LDR_DATA_TABLE_ENTRY.FullDllName,
          * BaseComputeProcessDllPath (feeding SearchPathW), activation-context
          * resource probing, GetCurrentDirectoryW, inherited CWD for spawned
-         * children, etc. — are DOS-path APIs and don't understand the native
+         * children, etc. - are DOS-path APIs and don't understand the native
          * "\??\" or "\SystemRoot\" prefix.  Callers (the NT6 kernel spawning
          * SMSS, SMSS spawning subsystems, kernel32 CreateProcessW inheriting
          * an NT-form CWD) legitimately reuse the same NT-form string for both

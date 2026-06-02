@@ -978,7 +978,7 @@ StorPortGetPhysicalAddress(
         return PhysicalAddress;
     }
 
-    /* Generic VA — compute the physical address and report bytes remaining in
+    /* Generic VA - compute the physical address and report bytes remaining in
      * the current physical page so the caller can chain across page breaks
      * itself. Returning Length=1 (as the previous stub did) caused storahci
      * to treat per-SRB command tables as 1-byte contiguous; miniport relied
@@ -995,7 +995,7 @@ StorPortGetPhysicalAddress(
  * Returns the scatter/gather list built for this SRB by PortBuildScatterGatherList
  * before HwStartIo was called. The list lives inside the SRB_PORT_CONTEXT, which
  * the port layer stashed at the front of Srb->SrbExtension. The miniport never
- * frees this list — it dies with the SRB context when PortCompleteSrb runs.
+ * frees this list - it dies with the SRB context when PortCompleteSrb runs.
  */
 STORPORT_API
 PSTOR_SCATTER_GATHER_LIST
@@ -1595,7 +1595,7 @@ StorPortSetBusDataByOffset(
  * @implemented
  *
  * Store the miniport's per-LU queue depth on the matching PDO. The value is
- * informational for storport — we do not enforce serialization at this depth
+ * informational for storport - we do not enforce serialization at this depth
  * yet, but it travels with the PDO so future code can.
  */
 STORPORT_API

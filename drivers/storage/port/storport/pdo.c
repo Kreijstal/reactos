@@ -690,8 +690,8 @@ PortPdoPnp(
         default:
             /* Unhandled minor: preserve incoming IoStatus.Status unchanged.
              * Bus PDOs (versus filter FDOs) must not complete unknown PnP
-             * IRPs with STATUS_NOT_SUPPORTED — that would break things like
-             * resource queries — so we just pass-through. */
+             * IRPs with STATUS_NOT_SUPPORTED - that would break things like
+             * resource queries - so we just pass-through. */
             Status = DefaultStatus;
             break;
     }

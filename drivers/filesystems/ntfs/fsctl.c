@@ -555,7 +555,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     /* $UsnJrnl bootstrap (Kreijstal/reactos#33): if the volume already has
      * a journal on disk, bring its state into the Vcb so subsequent
      * FSCTLs and emission hooks see a live UsnJournalFcb.  A failure is
-     * benign — the volume mounts, the journal simply stays inactive. */
+     * benign - the volume mounts, the journal simply stays inactive. */
     (void)NtfsUsnLoadJournal(Vcb);
 
     /* Disk-quota bootstrap (Kreijstal/reactos#37): probe \$Extend\$Quota
@@ -1313,7 +1313,7 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
      * state from the (now freshly written) on-disk metadata.  The VPB
      * we want to clear is the one shared with the storage device, which
      * NtfsMountVolume hooked into the file system DeviceObject as
-     * `NewDeviceObject->Vpb = DeviceToMount->Vpb;` — read it directly
+     * `NewDeviceObject->Vpb = DeviceToMount->Vpb;` - read it directly
      * from DeviceObject rather than from DeviceExt->Vpb (which the mount
      * path never assigns and is therefore NULL). */
     DeviceExt->Flags |= VCB_DISMOUNT_PENDING;
@@ -1782,7 +1782,7 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
-        /* USN journal FSCTLs — first slice (Kreijstal/reactos#33).
+        /* USN journal FSCTLs - first slice (Kreijstal/reactos#33).
          * CREATE / ENUM / READ are wired; the remaining four keep the
          * legacy "no journal" fallback for now, since their semantics
          * depend on bookkeeping (LowestValidUsn, CCB-cached reasons,

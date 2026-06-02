@@ -88,7 +88,7 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
 
     /* Read the entire bitmap in one ReadAttribute call.  Doing this
      * sector-by-sector (the previous code) issued ~600 separate I/Os on
-     * a 10 GiB volume — fine on a fast disk, ~tens-of-seconds on USB-MSC.
+     * a 10 GiB volume - fine on a fast disk, ~tens-of-seconds on USB-MSC.
      * ReadAttribute handles the run list internally and coalesces
      * contiguous extents, so the underlying I/O count drops to ~run-count. */
     ReadAttribute(DeviceExt, DataContext, 0, (PCHAR)BitmapData, (ULONG)BitmapDataSize);
@@ -140,7 +140,7 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     /* Serialize the entire read-modify-write of the volume bitmap. Without
      * this lock two concurrent allocators each load a private copy of the
      * bitmap, both find the same LCN free, both mark it set, and both
-     * write the bitmap back — handing out the same cluster twice. The
+     * write the bitmap back - handing out the same cluster twice. The
      * writeback below reads $Bitmap's MFT record and may itself recurse
      * back into NtfsAllocateClusters if WriteAttribute needs to grow the
      * bitmap, but ERESOURCE supports recursive exclusive acquisition so

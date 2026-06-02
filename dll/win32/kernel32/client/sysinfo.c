@@ -600,7 +600,7 @@ SetSystemFileCacheSize(IN SIZE_T MinimumFileCacheSize,
  *
  * Win8+ packaged-app identity probes.  ReactOS never runs packaged apps,
  * so every entry returns APPMODEL_ERROR_NO_PACKAGE.  That's the value
- * Windows uses to tell the caller "this process is not packaged" — the
+ * Windows uses to tell the caller "this process is not packaged" - the
  * documented signal for legacy-app fallback paths in Win8+ runtimes.
  */
 LONG

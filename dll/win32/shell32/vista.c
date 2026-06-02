@@ -281,7 +281,7 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE
         csidl = CSIDL_FONTS;
     else if (IsEqualGUID(rfid, &FOLDERID_Downloads))
     {
-        /* No legacy CSIDL for Downloads — synthesize %USERPROFILE%\Downloads. */
+        /* No legacy CSIDL for Downloads - synthesize %USERPROFILE%\Downloads. */
         WCHAR profile[MAX_PATH];
         static const WCHAR downloads[] = L"\\Downloads";
         hr = SHGetFolderPathW(NULL, CSIDL_PROFILE, hToken, 0, profile);

@@ -12,7 +12,7 @@
  *              defined; default tcpip.sys build still uses the legacy path.
  *
  *              This is a SCAFFOLD. The callbacks do not actually process
- *              traffic — they log + return NDIS_STATUS_SUCCESS so a
+ *              traffic - they log + return NDIS_STATUS_SUCCESS so a
  *              bound miniport can make the registration succeed. The full
  *              port (NET_BUFFER_LIST receive path, TCP/IP state migration)
  *              is deferred to the next phase of the dev-nt6-1 branch.
