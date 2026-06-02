@@ -95,6 +95,13 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
     MMPTE TempPte;
     KIRQL OldIrql;
     PFN_NUMBER PageFrameIndex;
+    PIMAGE_NT_HEADERS NtHeader;
+    PIMAGE_SECTION_HEADER SectionHeader;
+    IO_STATUS_BLOCK IoStatusBlock;
+    KEVENT Event;
+    PMDL Mdl;
+    PFILE_OBJECT FileObject;
+    ULONG i, ReadSize;
     PAGED_CODE();
 
     /* Detect session load */
@@ -130,7 +137,7 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
                                 &ViewSize,
                                 ViewUnmap,
                                 0,
-                                PAGE_EXECUTE);
+                                PAGE_EXECUTE_READ);
 
     /* Re-enable the flag */
     if (LoadSymbols) NtGlobalFlag |= FLG_ENABLE_KDEBUG_SYMBOL_LOAD;
@@ -205,6 +212,70 @@ MiLoadImageSection(_Inout_ PSECTION *SectionPtr,
     /* Copy the image */
     RtlCopyMemory(DriverBase, Base, PteCount << PAGE_SHIFT);
 
+    /*
+     * The temporary SEC_IMAGE view can contain demand-zero pages for later raw
+     * sections on the legacy section path. Re-read the export section through
+     * the paging path so the system-PTE image has the bytes import resolution
+     * needs without consulting the normal cached-read path.
+     */
+    NtHeader = RtlImageNtHeader(DriverBase);
+    if (NtHeader)
+    {
+        FileObject = ((PMM_IMAGE_SECTION_OBJECT)Section->Segment)->FileObject;
+        SectionHeader = IMAGE_FIRST_SECTION(NtHeader);
+        for (i = 0; i < NtHeader->FileHeader.NumberOfSections; i++, SectionHeader++)
+        {
+            LARGE_INTEGER ByteOffset;
+            PVOID ReadAddress;
+
+            if ((strncmp((PCCH)SectionHeader->Name, ".edata", 6) != 0) ||
+                (SectionHeader->PointerToRawData == 0) ||
+                (SectionHeader->SizeOfRawData == 0) ||
+                (SectionHeader->VirtualAddress >= NtHeader->OptionalHeader.SizeOfImage))
+            {
+                continue;
+            }
+
+            ReadSize = min(SectionHeader->SizeOfRawData,
+                           NtHeader->OptionalHeader.SizeOfImage -
+                               SectionHeader->VirtualAddress);
+            ReadAddress = Add2Ptr(DriverBase, SectionHeader->VirtualAddress);
+
+            Mdl = IoAllocateMdl(ReadAddress, ReadSize, FALSE, FALSE, NULL);
+            if (!Mdl)
+            {
+                MmUnmapViewOfSection(Process, Base);
+                KeUnstackDetachProcess(&ApcState);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            MmBuildMdlForNonPagedPool(Mdl);
+            Mdl->MdlFlags |= MDL_IO_PAGE_READ;
+            ByteOffset.QuadPart = SectionHeader->PointerToRawData;
+            KeInitializeEvent(&Event, NotificationEvent, FALSE);
+
+            Status = IoPageRead(FileObject, Mdl, &ByteOffset, &Event, &IoStatusBlock);
+            if (Status == STATUS_PENDING)
+            {
+                KeWaitForSingleObject(&Event, WrPageIn, KernelMode, FALSE, NULL);
+                Status = IoStatusBlock.Status;
+            }
+
+            if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+            {
+                MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+            }
+
+            IoFreeMdl(Mdl);
+            if (!NT_SUCCESS(Status))
+            {
+                MmUnmapViewOfSection(Process, Base);
+                KeUnstackDetachProcess(&ApcState);
+                return Status;
+            }
+        }
+    }
+
     /* Now unmap the view */
     Status = MmUnmapViewOfSection(Process, Base);
     ASSERT(NT_SUCCESS(Status));
@@ -249,7 +320,7 @@ MiUnmapSystemImage(
 #define RVA(m, b) ((PVOID)((ULONG_PTR)(b) + (ULONG_PTR)(m)))
 #endif
 
-USHORT
+ULONG
 NTAPI
 NameToOrdinal(
     _In_ PCSTR ExportName,
@@ -262,7 +333,7 @@ NameToOrdinal(
 
     /* Fail if no names */
     if (!NumberOfNames)
-        return -1;
+        return MAXULONG;
 
     /* Do a binary search */
     Low = Mid = 0;
@@ -293,7 +364,22 @@ NameToOrdinal(
 
     /* Check if we couldn't find it */
     if (High < Low)
-        return -1;
+    {
+        ULONG i;
+
+        /*
+         * The PE/COFF export name pointer table is expected to be sorted, but
+         * a malformed table must not be allowed to turn a failed lookup into a
+         * bogus ordinal.
+         */
+        for (i = 0; i < NumberOfNames; i++)
+        {
+            if (!strcmp(ExportName, (PCHAR)RVA(ImageBase, NameTable[i])))
+                return OrdinalTable[i];
+        }
+
+        return MAXULONG;
+    }
 
     /* Otherwise, this is the ordinal */
     return OrdinalTable[Mid];
@@ -348,7 +434,7 @@ RtlpFindExportedRoutineByName(
     PULONG NameTable;
     PUSHORT OrdinalTable;
     ULONG ExportSize;
-    USHORT Ordinal;
+    ULONG Ordinal;
     PULONG ExportTable;
     ULONG_PTR FunctionAddress;
 
@@ -374,7 +460,7 @@ RtlpFindExportedRoutineByName(
                             OrdinalTable);
 
     /* Check if we couldn't find it */
-    if (Ordinal == -1)
+    if (Ordinal == MAXULONG)
         return NotFoundStatus;
 
     /* Validate the ordinal */
@@ -786,7 +872,7 @@ MiSnapThunk(IN PVOID DllBase,
             OUT PCHAR *MissingApi)
 {
     BOOLEAN IsOrdinal;
-    USHORT Ordinal;
+    ULONG Ordinal;
     PULONG NameTable;
     PUSHORT OrdinalTable;
     PIMAGE_IMPORT_BY_NAME NameImport;
@@ -852,7 +938,7 @@ MiSnapThunk(IN PVOID DllBase,
                                     OrdinalTable);
 
             /* Check if we couldn't find it */
-            if (Ordinal == -1)
+            if (Ordinal == MAXULONG)
             {
                 DPRINT1("Warning: Driver failed to load, %s not found\n", NameImport->Name);
                 return STATUS_DRIVER_ENTRYPOINT_NOT_FOUND;
