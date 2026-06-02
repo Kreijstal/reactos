@@ -431,6 +431,17 @@ HalpDmaAllocateMasterAdapter(VOID)
 
     RtlZeroMemory(MasterAdapter->MapRegisterBase,
                   SizeOfBitmap * sizeof(ROS_MAP_REGISTER_ENTRY));
+
+#ifdef _M_AMD64
+    /*
+     * The global map-buffer pool is used by bus-master devices on amd64.
+     * Do not exhaust the scarce ISA 24-bit window for this pool; individual
+     * legacy adapters still carry their own addressing limits.
+     */
+    MasterAdapter->MasterDevice = TRUE;
+    MasterAdapter->Dma32BitAddresses = TRUE;
+#endif
+
     if (!HalpGrowMapBuffers(MasterAdapter, 0x10000))
     {
         ExFreePool(MasterAdapter);
@@ -703,15 +714,19 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
     /*
      * Calculate the number of map registers.
      *
-     * - For EISA and PCI scatter/gather no map registers are needed.
+     * - For EISA and 64-bit PCI scatter/gather no map registers are needed.
      * - For ISA slave scatter/gather one map register is needed.
      * - For all other cases the number of map registers depends on
      *   DeviceDescription->MaximumLength.
+     *
+     * PCI scatter/gather devices with only 32-bit addressing still need map
+     * registers so IoMapTransfer can bounce buffers above the device limit.
      */
     MaximumLength = DeviceDescription->MaximumLength & MAXLONG;
     if ((DeviceDescription->ScatterGather) &&
         ((DeviceDescription->InterfaceType == Eisa) ||
-         (DeviceDescription->InterfaceType == PCIBus)))
+         ((DeviceDescription->InterfaceType == PCIBus) &&
+          (DeviceDescription->Dma64BitAddresses))))
     {
         MapRegisters = 0;
     }
@@ -1139,29 +1154,58 @@ HalpScatterGatherAdapterControl(IN PDEVICE_OBJECT DeviceObject,
  *
  * @implemented
  */
- VOID
- NTAPI
- HalPutScatterGatherList(IN PADAPTER_OBJECT AdapterObject,
-                         IN PSCATTER_GATHER_LIST ScatterGather,
-						 IN BOOLEAN WriteToDevice)
+VOID
+NTAPI
+HalPutScatterGatherList(IN PADAPTER_OBJECT AdapterObject,
+                        IN PSCATTER_GATHER_LIST ScatterGather,
+                        IN BOOLEAN WriteToDevice)
 {
     PSCATTER_GATHER_CONTEXT AdapterControlContext = (PSCATTER_GATHER_CONTEXT)ScatterGather->Reserved;
-	ULONG i;
+    PVOID MapRegisterBase;
+    ULONG i;
 
-	for (i = 0; i < ScatterGather->NumberOfElements; i++)
-	{
-	     IoFlushAdapterBuffers(AdapterObject,
-		                       AdapterControlContext->Mdl,
-							   AdapterControlContext->MapRegisterBase,
-							   AdapterControlContext->CurrentVa,
-							   ScatterGather->Elements[i].Length,
-							   AdapterControlContext->WriteToDevice);
-		 AdapterControlContext->CurrentVa += ScatterGather->Elements[i].Length;
-	}
+    for (i = 0; i < ScatterGather->NumberOfElements; i++)
+    {
+        MapRegisterBase = AdapterControlContext->MapRegisterBase;
+        if ((MapRegisterBase != NULL) &&
+            !((ULONG_PTR)MapRegisterBase & MAP_BASE_SW_SG))
+        {
+            PROS_MAP_REGISTER_ENTRY MapRegister;
+            PHYSICAL_ADDRESS ElementAddress;
+            ULONG j;
 
-	IoFreeMapRegisters(AdapterObject,
-	                   AdapterControlContext->MapRegisterBase,
-					   AdapterControlContext->MapRegisterCount);
+            MapRegister = MapRegisterBase;
+            ElementAddress = ScatterGather->Elements[i].Address;
+            ElementAddress.QuadPart -= BYTE_OFFSET(ElementAddress.LowPart);
+
+            for (j = 0; j < AdapterControlContext->MapRegisterCount; j++)
+            {
+                if (MapRegister[j].PhysicalAddress.QuadPart == ElementAddress.QuadPart)
+                {
+                    MapRegisterBase = &MapRegister[j];
+                    break;
+                }
+            }
+        }
+
+        IoFlushAdapterBuffers(AdapterObject,
+                              AdapterControlContext->Mdl,
+                              MapRegisterBase,
+                              AdapterControlContext->CurrentVa,
+                              ScatterGather->Elements[i].Length,
+                              AdapterControlContext->WriteToDevice);
+        AdapterControlContext->CurrentVa += ScatterGather->Elements[i].Length;
+    }
+
+    if ((AdapterControlContext->MapRegisterBase != NULL) &&
+        !((ULONG_PTR)AdapterControlContext->MapRegisterBase & MAP_BASE_SW_SG))
+    {
+        ((PROS_MAP_REGISTER_ENTRY)AdapterControlContext->MapRegisterBase)->Counter = 0;
+    }
+
+    IoFreeMapRegisters(AdapterObject,
+                       AdapterControlContext->MapRegisterBase,
+                       AdapterControlContext->MapRegisterCount);
 
 
 	ExFreePoolWithTag(ScatterGather, TAG_DMA);
@@ -1585,6 +1629,12 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
 
     AdapterObject->CurrentWcb = WaitContextBlock;
 
+    if ((AdapterObject->MapRegisterBase != NULL) &&
+        !((ULONG_PTR)AdapterObject->MapRegisterBase & MAP_BASE_SW_SG))
+    {
+        AdapterObject->MapRegisterBase->Counter = 0;
+    }
+
     Result = ExecutionRoutine(WaitContextBlock->DeviceObject,
                               WaitContextBlock->CurrentIrp,
                               AdapterObject->MapRegisterBase,
@@ -1806,6 +1856,10 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
         {
             AdapterObject->MapRegisterBase =
                 (PROS_MAP_REGISTER_ENTRY)((ULONG_PTR)AdapterObject->MapRegisterBase | MAP_BASE_SW_SG);
+        }
+        else
+        {
+            AdapterObject->MapRegisterBase->Counter = 0;
         }
 
         Result = ((PDRIVER_CONTROL)AdapterObject->CurrentWcb->DeviceRoutine)(AdapterObject->CurrentWcb->DeviceObject,
