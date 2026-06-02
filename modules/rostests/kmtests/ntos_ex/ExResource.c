@@ -134,7 +134,7 @@ TestResourceSharedAccess(
      * FLG_DISABLE_DEBUG_PROMPTS (headless mode) the assert raises
      * STATUS_ASSERTION_FAILURE; without local SEH the stack unwinds past
      * the 6 ExReleaseResourceLite + KeLeaveCriticalRegion below, leaving
-     * the resource held shared and APCs disabled — which bugchecks the
+     * the resource held shared and APCs disabled - which bugchecks the
      * system shortly after. Wrap so cleanup runs in both modes. */
     if (!KmtIsCheckedBuild)
     {

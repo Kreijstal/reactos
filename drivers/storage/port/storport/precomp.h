@@ -164,8 +164,8 @@ typedef struct _STORPORT_SCATTER_GATHER_LIST
  */
 typedef struct _SRB_PORT_CONTEXT
 {
-    /* The raw pool allocation that backs this context. Free this — not
-     * `this` — in PortCompleteSrb. The context pointer itself is offset
+    /* The raw pool allocation that backs this context. Free this - not
+     * `this` - in PortCompleteSrb. The context pointer itself is offset
      * forward into RawAlloc so MiniportExtension lands on a 128-byte boundary
      * suitable for AHCI command-table DMA. */
     PVOID RawAlloc;
@@ -176,7 +176,7 @@ typedef struct _SRB_PORT_CONTEXT
     PPDO_DEVICE_EXTENSION PdoExtension;
 
     /* Deferred completion DPC. RequestComplete fires from the miniport's ISR
-     * or DPC, which may run inside an interrupt spinlock at DIRQL — too high
+     * or DPC, which may run inside an interrupt spinlock at DIRQL - too high
      * for ExFreePoolWithTag and IoCompleteRequest. When that's the case the
      * completion is queued here and replayed at DISPATCH_LEVEL. */
     KDPC CompleteDpc;

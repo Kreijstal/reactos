@@ -113,7 +113,7 @@ typedef struct _MKNTFS_STATE {
 static ULONGLONG mkntfs_time(void)
 {
 #if defined(NTOS_MODE_USER)
-    /* Use NtQuerySystemTime — returns NTFS-epoch 100ns ticks directly */
+    /* Use NtQuerySystemTime - returns NTFS-epoch 100ns ticks directly */
     LARGE_INTEGER SystemTime;
     NtQuerySystemTime(&SystemTime);
     return (ULONGLONG)SystemTime.QuadPart;
@@ -600,7 +600,7 @@ static ULONG make_index_entry(UCHAR *buf, ULONG mft_num, USHORT seq,
     return entry_size;
 }
 
-/* Build root directory (record 5) — uses INDEX_ALLOCATION for all system files */
+/* Build root directory (record 5) - uses INDEX_ALLOCATION for all system files */
 static void build_root(MKNTFS_STATE *s)
 {
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 5 * s->mft_record_size);
@@ -615,7 +615,7 @@ static void build_root(MKNTFS_STATE *s)
                   FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM | FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT,
                   0, 0);
 
-    /* $INDEX_ROOT for $I30 — large index (entries in INDX block) */
+    /* $INDEX_ROOT for $I30 - large index (entries in INDX block) */
     WCHAR i30_name[] = { '$', 'I', '3', '0' };
     {
         /* INDEX_ROOT with just an end entry pointing to sub-node VCN 0 */
@@ -633,7 +633,7 @@ static void build_root(MKNTFS_STATE *s)
         ir->Header.EntriesOffset = sizeof(INDEX_HEADER);
         ir->Header.IndexLength = sizeof(INDEX_HEADER) + sizeof(INDEX_ENTRY) + 8;
         ir->Header.AllocatedSize = sizeof(INDEX_HEADER) + sizeof(INDEX_ENTRY) + 8;
-        ir->Header.Flags = 1; /* Large index — has sub-nodes */
+        ir->Header.Flags = 1; /* Large index - has sub-nodes */
 
         ie = (INDEX_ENTRY *)(idx_buf + sizeof(INDEX_ROOT));
         ie->Length = sizeof(INDEX_ENTRY) + 8; /* +8 for sub-node VCN */
@@ -645,12 +645,12 @@ static void build_root(MKNTFS_STATE *s)
                           idx_buf, sizeof(INDEX_ROOT) + sizeof(INDEX_ENTRY) + 8, 0);
     }
 
-    /* $INDEX_ALLOCATION — non-resident $I30 pointing to INDX cluster */
+    /* $INDEX_ALLOCATION - non-resident $I30 pointing to INDX cluster */
     add_nonresident_attr(s, rec, AT_INDEX_ALLOCATION, i30_name, 4,
                          s->root_idx_lcn, 1, /* 1 cluster */
                          s->index_record_size, s->index_record_size);
 
-    /* $BITMAP for $I30 — 1 bit set (block 0 in use) */
+    /* $BITMAP for $I30 - 1 bit set (block 0 in use) */
     {
         UCHAR bmp[8];
         memset(bmp, 0, sizeof(bmp));
@@ -924,7 +924,7 @@ static void build_secure(MKNTFS_STATE *s)
     sd_len = build_default_sd(sd_buf, sizeof(sd_buf));
     hash_val = sd_hash(sd_buf, sd_len);
 
-    /* $SDS named data stream — contains SECURITY_DESCRIPTOR_HEADER + SD data */
+    /* $SDS named data stream - contains SECURITY_DESCRIPTOR_HEADER + SD data */
     {
         ULONG sds_entry_len = sizeof(SECURITY_DESCRIPTOR_HEADER) + sd_len;
         ULONG sds_padded = NTFS_ALIGN_UP(sds_entry_len, 16);
@@ -942,7 +942,7 @@ static void build_secure(MKNTFS_STATE *s)
         add_resident_attr(s, rec, AT_DATA, sds_name, 4, sds_buf, sds_padded, 0);
     }
 
-    /* $SDH index root — one entry + end */
+    /* $SDH index root - one entry + end */
     {
         /* SDH index entry: key is SECURITY_DESCRIPTOR_HEADER, data is SECURITY_DESCRIPTOR_HEADER */
         UCHAR idx_buf[sizeof(INDEX_ROOT) + 128];
@@ -997,7 +997,7 @@ static void build_secure(MKNTFS_STATE *s)
                           idx_buf, sizeof(INDEX_ROOT) + entries_size, 0);
     }
 
-    /* $SII index root — one entry + end */
+    /* $SII index root - one entry + end */
     {
         UCHAR idx_buf[sizeof(INDEX_ROOT) + 128];
         INDEX_ROOT *ir = (INDEX_ROOT *)idx_buf;
@@ -1176,7 +1176,7 @@ static void apply_lfs_fixup(UCHAR *page, ULONG page_size, ULONG sector_size,
 static void build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
                              ULONGLONG file_size)
 {
-    /* NTFS_RECORD_HEADER field offsets — match driver layout exactly. */
+    /* NTFS_RECORD_HEADER field offsets - match driver layout exactly. */
     NTFS_LFS_RESTART_AREA area;
     USHORT usa_offset = 0x28;
     USHORT usa_count  = (USHORT)(page_size / sector_size + 1);
@@ -1192,7 +1192,7 @@ static void build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
     *(USHORT *)(page + 0x06) = usa_count;
     *(ULONGLONG *)(page + 0x08) = 0;              /* Lsn = 0 */
 
-    /* RestartOffset at 0x10 — the field the ReactOS driver parser reads.
+    /* RestartOffset at 0x10 - the field the ReactOS driver parser reads.
      * Keep a mirror at 0x16 so libfsntfs dumpers see the same value. */
     *(USHORT *)(page + 0x10) = restart_offset;
     *(USHORT *)(page + 0x12) = (USHORT)page_size; /* SystemPageSize */
@@ -1210,7 +1210,7 @@ static void build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
      * CLEAN flag set.  RestartAreaLength / ClientArrayOffset let a
      * future replayer locate the LOG_CLIENT_RECORD array that starts
      * immediately after.  LogClients=1, ClientFreeList=0 (client 0 is
-     * on the free list — no active clients on a fresh volume),
+     * on the free list - no active clients on a fresh volume),
      * ClientInUseList = 0xFFFF (no in-use chain). */
     memset(&area, 0, sizeof(area));
     area.CurrentLsn          = 0;

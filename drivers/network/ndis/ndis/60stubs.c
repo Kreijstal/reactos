@@ -18,7 +18,7 @@
  *   - Filter driver registration stubs (no real filter chain yet)
  *   - Protocol driver registration stubs (no NDIS 6 protocols yet)
  *   - Datapath callbacks (NdisMSendNetBufferListsComplete, etc.) that
- *     still return STATUS_SUCCESS without doing thunk work — Phase 3/4
+ *     still return STATUS_SUCCESS without doing thunk work - Phase 3/4
  *     of the dev-nt6-1 plan will move these to 60thunk.c
  *
  * Like every NDIS 6 file in this directory, this one is compiled with
@@ -133,17 +133,17 @@ NdisFDeregisterFilterDriver(
 /* ============================================================================
  *  Phase 7B filter attach/detach helpers
  *
- *  Ndis6AttachFiltersToAdapter — called from Ndis6CreateLogicalAdapter
+ *  Ndis6AttachFiltersToAdapter - called from Ndis6CreateLogicalAdapter
  *  after MiniportInitializeEx populates GeneralAttrs. Walks the global
  *  filter driver list and calls each AttachHandler with a freshly built
  *  NDIS_FILTER_ATTACH_PARAMETERS, then stores the FilterModuleContext on
  *  the adapter's FilterModuleList.
  *
- *  Ndis6DetachFiltersFromAdapter — called from Ndis6DestroyLogicalAdapter
+ *  Ndis6DetachFiltersFromAdapter - called from Ndis6DestroyLogicalAdapter
  *  on REMOVE. Walks the per-adapter filter module list and calls each
  *  filter's DetachHandler, then frees the modules.
  *
- *  The TX/RX datapath does not yet walk the filter chain — registration
+ *  The TX/RX datapath does not yet walk the filter chain - registration
  *  is functional, but filters won't see traffic until a future phase.
  * ============================================================================ */
 
@@ -277,7 +277,7 @@ Ndis6DetachFiltersFromAdapter(
 /*  Phase 6: real registration. The driver is added to                */
 /*  g_Ndis6ProtocolDriverList. The per-adapter ProtocolBindAdapterEx  */
 /*  fan-out on adapter create / driver register is left as a future   */
-/*  exercise — current ReactOS has no NDIS 6 protocol drivers in tree */
+/*  exercise - current ReactOS has no NDIS 6 protocol drivers in tree */
 /*  to bind. The native-NBL TX path (NdisSendNetBufferLists) is still */
 /*  a no-op stub below.                                               */
 /* ------------------------------------------------------------------ */
@@ -344,7 +344,7 @@ Ndis6BuildBindParameters(
 }
 
 /* ============================================================================
- *  Ndis6BindProtocolToAllAdapters — when a protocol registers, walk the
+ *  Ndis6BindProtocolToAllAdapters - when a protocol registers, walk the
  *  global LOGICAL_ADAPTER list and call its BindAdapterHandlerEx for every
  *  NDIS 6 adapter.
  * ============================================================================ */
@@ -390,7 +390,7 @@ Ndis6BindProtocolToAllAdapters(
 }
 
 /* ============================================================================
- *  Ndis6BindAllProtocolsToAdapter — when a new adapter is created, walk
+ *  Ndis6BindAllProtocolsToAdapter - when a new adapter is created, walk
  *  the registered protocol list and call each one's BindAdapterHandlerEx.
  *  Called from Ndis6CreateLogicalAdapter (60adapter.c) at the end of adapter
  *  setup, after GeneralAttrs are populated.
@@ -476,7 +476,7 @@ NdisRegisterProtocolDriver(
     /* Phase 7A: bind this new protocol to every NDIS 6 adapter that
      * already exists. The protocol's BindAdapterHandlerEx is expected
      * to call NdisOpenAdapterEx synchronously to actually take the
-     * binding — without that API the bind is informational only. */
+     * binding - without that API the bind is informational only. */
     Ndis6BindProtocolToAllAdapters(Block);
 
     return NDIS_STATUS_SUCCESS;
@@ -515,7 +515,7 @@ NdisDeregisterProtocolDriver(
  *  medium array, frame type array, and selected medium index pointer.
  *  We pick the first NdisMedium802_3 we find and report it back.
  *
- *  Synchronous open only — the protocol's OpenAdapterCompleteHandlerEx
+ *  Synchronous open only - the protocol's OpenAdapterCompleteHandlerEx
  *  is invoked before this returns. PENDING completion would need a
  *  per-binding waiter we don't yet implement.
  * ============================================================================ */
@@ -554,7 +554,7 @@ NdisOpenAdapterEx(
     Adapter = NULL;
     if (BindContext != (NDIS_HANDLE)Block)
     {
-        /* The driver passed a different value as BindContext — interpret
+        /* The driver passed a different value as BindContext - interpret
          * it as the MiniportHandle (= adapter pointer) the bridge gave
          * via NDIS_BIND_PARAMETERS. */
         Adapter = (PLOGICAL_ADAPTER)BindContext;
@@ -609,13 +609,13 @@ NdisOpenAdapterEx(
                 return NDIS_STATUS_UNSUPPORTED_MEDIA;
             }
         }
-        /* FrameTypeArray: ignored — we deliver raw Ethernet II frames
+        /* FrameTypeArray: ignored - we deliver raw Ethernet II frames
          * to the protocol and let it decode. */
     }
 
     *NdisBindingHandle = (NDIS_HANDLE)Binding;
 
-    /* Synchronous open complete — call the protocol's
+    /* Synchronous open complete - call the protocol's
      * OpenAdapterCompleteHandlerEx if it has one, then return SUCCESS. */
     if (Block->Characteristics.OpenAdapterCompleteHandlerEx != NULL)
     {
@@ -653,7 +653,7 @@ NdisCloseAdapterEx(
 
 /* ------------------------------------------------------------------ */
 /*  Protocol-side datapath stubs                                      */
-/*  (Native NDIS 6 protocols only — currently nothing in the tree)    */
+/*  (Native NDIS 6 protocols only - currently nothing in the tree)    */
 /* ------------------------------------------------------------------ */
 
 VOID
@@ -765,7 +765,7 @@ NdisOidRequest(
         return NDIS_STATUS_PENDING;
     }
 
-    /* Synchronous completion — restore the original RequestId and
+    /* Synchronous completion - restore the original RequestId and
      * pop the pending entry. */
     if (Pending != NULL)
     {

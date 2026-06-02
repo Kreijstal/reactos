@@ -1128,7 +1128,7 @@ RegCleanupRegistry(
     }
 
     /*
-     * Create the SYSTEM.ALT hive — a copy of the SYSTEM hive used by
+     * Create the SYSTEM.ALT hive - a copy of the SYSTEM hive used by
      * FreeLDR as a fallback if the primary SYSTEM hive appears corrupt.
      * Windows NT also creates this during setup.
      */

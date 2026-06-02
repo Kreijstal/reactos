@@ -94,7 +94,7 @@ HRESULT STDMETHODCALLTYPE dwrite_common_method_e_notimpl(void *iface, ...)
 }
 
 /* Aliases used by the rest of this translation unit (the factory/
- * gdi-interop vtables) — keep the historical short names. */
+ * gdi-interop vtables) - keep the historical short names. */
 #define common_AddRef           dwrite_common_AddRef
 #define common_Release          dwrite_common_Release
 #define common_method_e_notimpl dwrite_common_method_e_notimpl
@@ -204,7 +204,7 @@ static HRESULT STDMETHODCALLTYPE factory6_GetSystemFontCollection(
  *     FLOAT pixels_per_dip, DWRITE_MATRIX const *,
  *     DWRITE_RENDERING_MODE, DWRITE_MEASURING_MODE,
  *     FLOAT baseline_x, FLOAT baseline_y,
- *     IDWriteGlyphRunAnalysis **out) — slot 23.
+ *     IDWriteGlyphRunAnalysis **out) - slot 23.
  *
  * Qt 6's QFontEngineDirectWrite::imageForGlyph calls this to rasterize
  * each glyph into an alpha texture for blitting.  Without it Qt logs
@@ -224,7 +224,7 @@ static HRESULT STDMETHODCALLTYPE factory_CreateGlyphRunAnalysis(
         baseline_x, baseline_y, out);
 }
 
-/* IDWriteFactory2::CreateGlyphRunAnalysis — slot 30.
+/* IDWriteFactory2::CreateGlyphRunAnalysis - slot 30.
  * Signature drops the pixels-per-dip argument and adds grid_fit_mode +
  * antialias_mode (both ignored in Phase 2.5).  Qt 6 prefers this
  * overload when QI(IDWriteFactory2) succeeded, which it does for us. */
@@ -306,7 +306,7 @@ static const void * const dwrite_factory_vtbl[80] = {
     common_method_e_notimpl,              /* 54 CreateTextFormat */
     /* IDWriteFactory7 (slots 55-56) */
     common_method_e_notimpl,              /* 55 GetSystemFontSet */
-    factory6_GetSystemFontCollection,     /* 56 GetSystemFontCollection (Factory7 — same impl) */
+    factory6_GetSystemFontCollection,     /* 56 GetSystemFontCollection (Factory7 - same impl) */
     /* IDWriteFactory8 reserve */
     common_method_e_notimpl,              /* 57 reserved */
     /* tail padding */

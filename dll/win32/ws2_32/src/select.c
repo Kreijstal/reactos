@@ -137,7 +137,7 @@ WPUFDIsSet(IN SOCKET s,
  * back. This matches the semantics clients such as libsmb2 rely on for
  * async connect() completion (POLLOUT once the TCP handshake finishes).
  *
- * Only compiled when the target supports WSAPoll — the export is gated the
+ * Only compiled when the target supports WSAPoll - the export is gated the
  * same way in ws2_32.spec (-version=0x600+).
  */
 INT

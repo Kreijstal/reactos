@@ -180,7 +180,7 @@ typedef struct {
 } SMB2D_OP_WRITE_OUT;
 
 /* Kernel->daemon FSYNC wire layout, mirror of OP_FSYNC_IN in
- * drivers/filesystems/smb2rdr/upcall.h.  No reply payload — the downcall
+ * drivers/filesystems/smb2rdr/upcall.h.  No reply payload - the downcall
  * Status is the whole answer. */
 typedef struct {
     ULONGLONG FileHandle;
@@ -502,7 +502,7 @@ FindShareLocked(const char *server, const char *share)
 }
 
 /* g_conn_lock must be held by the caller.  Takes ownership of `ctx` and
- * starts the share at refcount 0 — caller bumps it after picking a slot. */
+ * starts the share at refcount 0 - caller bumps it after picking a slot. */
 static SMB2D_SHARE *
 AddShareLocked(const char *server, const char *share, struct smb2_context *ctx)
 {
@@ -1415,7 +1415,7 @@ PatchNextOffset(BYTE *base, ULONG recOffset, ULONG delta)
  * Paging semantics: the smb2dir iterator position persists inside libsmb2
  * across calls on the same FCB, so a follow-up OP_READDIR with RestartScan=0
  * continues from where we left off.  If a record doesn't fit into the
- * buffer, we re-queue nothing — libsmb2 has already advanced past that
+ * buffer, we re-queue nothing - libsmb2 has already advanced past that
  * entry, so it'll come back on the next call.  Rather than trying to
  * peek/rewind one entry, we simply defer: the NT semantics of dir queries
  * is that each call returns as many whole records as fit.
@@ -1483,7 +1483,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
         smb2_rewinddir(ctx, dir);
     }
 
-    /* Clamp the caller's declared max against the actual staging capacity —
+    /* Clamp the caller's declared max against the actual staging capacity -
      * the kernel side has MaxOutputLen == userbuffer_size and sized outBuf
      * to accommodate it, but defend against a bogus header. */
     payloadCap = outCap - (ULONG)sizeof(SMB2D_OP_READDIR_OUT);
@@ -1519,7 +1519,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
             wlen = MultiByteToWideChar(CP_UTF8, 0, e->name, -1,
                                         scratch, (int)(sizeof(scratch)/sizeof(WCHAR)));
             if (wlen <= 1) {
-                /* Conversion failed or returned only the NUL — skip the
+                /* Conversion failed or returned only the NUL - skip the
                  * entry rather than emit a zero-length name. */
                 smb2d_log("smb2d: readdir name conversion failed for \"%s\"\n",
                           e->name ? e->name : "(null)");
@@ -1566,7 +1566,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
 
         if (hdr.ReturnSingleEntry) {
             /* Single-entry contract: emit exactly one record and stop, but
-             * leave `more` unset — the iterator position decides whether
+             * leave `more` unset - the iterator position decides whether
              * the next call returns anything. */
             more = FALSE;
             break;
@@ -1588,7 +1588,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
               entryCount, bytesWritten, (unsigned)more);
 
     if (entryCount == 0) {
-        /* No entries produced and end-of-dir reached — surface the NT
+        /* No entries produced and end-of-dir reached - surface the NT
          * terminating status so rdbss completes the IRP cleanly. */
         return STATUS_NO_MORE_FILES;
     }
@@ -1738,7 +1738,7 @@ HandleOpWrite(const BYTE *in, ULONG inLen,
 /*
  * OP_FSYNC: fire libsmb2's smb2_fsync() on the target file handle so the
  * server forces a disk flush of the open stream.  Directory handles are
- * a no-op — SMB2 has no directory-flush op, and pretending one failed
+ * a no-op - SMB2 has no directory-flush op, and pretending one failed
  * would break FlushFileBuffers() on directory handles that applications
  * happen to open.  A negative rc from libsmb2 is surfaced as a network
  * error so FlushFileBuffers propagates failure to user code.
@@ -1889,7 +1889,7 @@ MapSmb2ErrnoToNtStatus(struct smb2_context *ctx, int rc)
     /* smb2_get_error returns a human-readable sentence that libsmb2
      * assembles from the server-provided STATUS_* token, so a substring
      * match catches the common cases without pulling in a full error
-     * table.  Case-sensitive is fine — libsmb2's wording is stable. */
+     * table.  Case-sensitive is fine - libsmb2's wording is stable. */
     if (strstr(msg, "NOT_FOUND")        != NULL ||
         strstr(msg, "No such")          != NULL ||
         strstr(msg, "does not exist")   != NULL)
@@ -2084,8 +2084,8 @@ HandleDisconnect(const BYTE *in, ULONG inLen)
 
     /* RemoveConn now consults the share pool: if the slot was pool-backed
      * it drops the refcount (and the pool disconnects the libsmb2 context
-     * on the last release) and returns NULL.  Only orphan/legacy slots —
-     * which own their context outright — come back with a non-NULL ctx
+     * on the last release) and returns NULL.  Only orphan/legacy slots -
+     * which own their context outright - come back with a non-NULL ctx
      * for us to destroy here.
      *
      * Distinguish "slot was pool-backed and just released" from "handle was
@@ -2279,7 +2279,7 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
                 break;
             }
             memcpy(&rdhdr, payload, sizeof(rdhdr));
-            /* Cap at 1 MB — dir listings on NT are usually 4K–64K, but
+            /* Cap at 1 MB - dir listings on NT are usually 4K–64K, but
              * don't let a bogus header wedge the daemon. */
             if (rdhdr.MaxOutputLen > (1u << 20))
                 rdhdr.MaxOutputLen = (1u << 20);
@@ -2309,7 +2309,7 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
                 break;
             }
             memcpy(&rhdr, payload, sizeof(rhdr));
-            /* Cap at 1 MiB — matches the kernel-side chunk bound and keeps
+            /* Cap at 1 MiB - matches the kernel-side chunk bound and keeps
              * the daemon's heap footprint predictable. */
             if (rhdr.Length > (1u << 20))
                 rhdr.Length = (1u << 20);

@@ -453,7 +453,7 @@ AcpiOsExecute (
     DPRINT("AcpiOsExecute\n");
 
     /*
-     * ACPICA may call this from the SCI ISR (DIRQL) — e.g. when dispatching
+     * ACPICA may call this from the SCI ISR (DIRQL) - e.g. when dispatching
      * GPE Notify() handlers for hot-plug events. Creating a thread directly
      * would assert at PASSIVE_LEVEL; instead queue a system worker that
      * runs the callback at PASSIVE_LEVEL.

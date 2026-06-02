@@ -6,7 +6,7 @@
  *              On real Windows these live in netio.sys, so this file
  *              hosts the ReactOS equivalents at the same layer.
  *
- *              All functions are functional stubs — they record the
+ *              All functions are functional stubs - they record the
  *              client/provider characteristics in a static table but do
  *              not actually dispatch attach callbacks. A follow-up phase
  *              (G/I in the dev-nt6-1 upgrade plan) will make them real.

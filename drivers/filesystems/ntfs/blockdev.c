@@ -51,7 +51,7 @@ C_ASSERT(NTFS_CACHED_VACB_COUNT == 512);
 C_ASSERT(sizeof(((PDEVICE_EXTENSION)0)->CachedVacbBitmap) * 8 >= NTFS_CACHED_VACB_COUNT);
 
 /* Mark a VACB index (0..NTFS_CACHED_VACB_COUNT-1) as populated.
- * Safe to call concurrently — uses an atomic OR. */
+ * Safe to call concurrently - uses an atomic OR. */
 FORCEINLINE
 VOID
 NtfsMarkCachedVacb(IN PDEVICE_EXTENSION Vcb, IN ULONG VacbIndex)
@@ -147,7 +147,7 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
 
         /* Mark this VACB as populated BEFORE CcMapData runs, so a
          * concurrent NtfsWriteDiskCached observes it and performs the
-         * purge rather than skipping. Over-marking is harmless — it
+         * purge rather than skipping. Over-marking is harmless - it
          * just costs an extra purge call. */
         VacbIndex = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
         if (VacbIndex < NTFS_CACHED_VACB_COUNT)
@@ -197,7 +197,7 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
  * purges the corresponding byte range from the volume stream cache so
  * that subsequent NtfsReadDiskCached calls return the fresh data.
  *
- * CcPurgeCacheSection is expensive on ReactOS — it takes the global
+ * CcPurgeCacheSection is expensive on ReactOS - it takes the global
  * LockQueueMasterLock spinlock, walks the VACB list, and then calls
  * MmPurgeSegment which walks the section's pages. To avoid paying that
  * cost on every metadata write during install we track a per-VACB
@@ -373,7 +373,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     }
 
     /*
-     * Save the MDL pointer — the paging IO completion path frees the IRP
+     * Save the MDL pointer - the paging IO completion path frees the IRP
      * via IoFreeIrp but does NOT unlock or free the MDL. The storage
      * driver may have called MmProbeAndLockPages on it, so we must call
      * MmUnlockPages + IoFreeMdl ourselves after the IRP completes.

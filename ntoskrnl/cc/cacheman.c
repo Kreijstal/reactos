@@ -300,7 +300,7 @@ CcSetAdditionalCacheAttributes (
 /*
  * @unimplemented
  *
- * Win8 superset of CcSetAdditionalCacheAttributes — the only documented flag
+ * Win8 superset of CcSetAdditionalCacheAttributes - the only documented flag
  * is CC_ENABLE_DISK_IO_ACCOUNTING, which feeds per-process counters via
  * PsUpdateDiskCounters. Stub until the counter infrastructure is wired up.
  */

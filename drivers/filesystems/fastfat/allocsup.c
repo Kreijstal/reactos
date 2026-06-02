@@ -5408,7 +5408,7 @@ Return Value:
 //  Inside the reconciliation routine we operate on the underlying NT
 //  RTL_BITMAP directly.  The <dbgbitmap.h> wrappers revalidate cached
 //  counts/hashes on every call, which is unsafe when we mutate many bits
-//  in a loop with CC reads interleaving — the cached BitmapHash only
+//  in a loop with CC reads interleaving - the cached BitmapHash only
 //  covers the first 512 ULONGs of the buffer, and the incremental
 //  RtlSetBitsDbg can trip the consistency check across hundreds of
 //  iterations.  Bypass the wrappers here and resync once at the end.
@@ -5907,7 +5907,7 @@ FatReconMarkChain(
                                          Fat0CachedStart, Fat0CachedLen );
 
         //
-        //  Stop on EOF, bad/reserved, or available (chain corrupt — refuse
+        //  Stop on EOF, bad/reserved, or available (chain corrupt - refuse
         //  to walk into other files' clusters).
         //
         if (Entry == FAT_CLUSTER_AVAILABLE ||

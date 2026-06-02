@@ -273,7 +273,7 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
 
             if (Page == 0)
             {
-                /* Out of free pages — caller is expected to handle a short
+                /* Out of free pages - caller is expected to handle a short
                  * MDL (including zero-length) per MmAllocatePagesForMdl's
                  * documented contract, so this is not an invariant violation
                  * even when PagesFound is still zero (e.g. on a low-memory
@@ -587,7 +587,7 @@ MmDereferencePage(PFN_NUMBER Pfn)
          * drift, dup-rmap on shared image fault): a page must not be
          * returned to the free list while any rmap still references it.
          * If this fires, the leaker is on the call stack at the moment of
-         * leak — fix it there rather than papering over the consumer.
+         * leak - fix it there rather than papering over the consumer.
          */
         if (MmGetRmapListHeadPage(Pfn) != NULL)
         {

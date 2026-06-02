@@ -2,7 +2,7 @@
 # ReactOS USB RNDIS Network Driver
 #
 # Uses NDIS 6.20 with NET_BUFFER_LIST send/receive. On the dev-nt6-1 branch
-# the NDIS 6 stubs live in drivers/network/ndis/ndis/60stubs.c — this
+# the NDIS 6 stubs live in drivers/network/ndis/ndis/60stubs.c - this
 # driver links against those symbols and the usbrndis/ndis6_compat.h
 # shim fills in anything that the mainline ndis.h is still missing.
 #

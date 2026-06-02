@@ -42,6 +42,6 @@ PrefetchVirtualMemory(
         return FALSE;
     }
 
-    /* Advisory hint — accept and do nothing. */
+    /* Advisory hint - accept and do nothing. */
     return TRUE;
 }

@@ -8,7 +8,7 @@
  * through IDWriteFactory::CreateGlyphRunAnalysis +
  * IDWriteGlyphRunAnalysis::GetAlphaTextureBounds + CreateAlphaTexture.
  * Without this path Qt logs "CreateGlyphRunAnalysis failed (0x80004001)"
- * and the QImage it returns is empty — every text-rendering call ends
+ * and the QImage it returns is empty - every text-rendering call ends
  * up drawing nothing, leaving the dialog body blank even when the font
  * collection populates correctly.
  *
@@ -16,7 +16,7 @@
  * composite the resulting 6-bit alpha bitmap into the output texture
  * at the per-glyph pen origin.  Both ALIASED_1x1 (8 bpp grayscale) and
  * CLEARTYPE_3x1 (24 bpp RGB) are supported; for CLEARTYPE we triplicate
- * the grayscale value into the R/G/B subpixel triple — Qt averages the
+ * the grayscale value into the R/G/B subpixel triple - Qt averages the
  * three channels back into a single alpha value, so the visual result
  * matches grayscale.
  */
@@ -52,7 +52,7 @@ typedef struct glyph_run_analysis
     HGDIOBJ prev_obj;
     UINT32 glyph_count;
     glyph_data_t *glyphs;
-    /* Computed bounds — union of all glyph black-boxes. */
+    /* Computed bounds - union of all glyph black-boxes. */
     BOOL    bounds_ready;
     RECT    bounds;
     BOOL    empty;
