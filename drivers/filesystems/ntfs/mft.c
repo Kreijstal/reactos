@@ -912,11 +912,11 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         ULONG NextAssignedCluster;
         ULONG AssignedClusters;
 
-        /* Pre-set the size fields (NOT HighestVCN — that's still maintained
+        /* Pre-set the size fields (NOT HighestVCN - that's still maintained
          * incrementally by AddRun, and the MCB-lookup code below relies on it
          * matching the current MCB state) so that anything which copies
-         * AttrContext->pRecord during the AddRun loop — notably
-         * MigrateAttributeToList — captures the new sizes.  Without this,
+         * AttrContext->pRecord during the AddRun loop - notably
+         * MigrateAttributeToList - captures the new sizes.  Without this,
          * a migrated attribute lands on disk with stale AllocatedSize/DataSize. */
         AttrContext->pRecord->NonResident.AllocatedSize = AllocationSize;
         AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
@@ -1305,7 +1305,7 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
      * raw compressed bytes; route through NtfsCompressedReadLogical
      * instead, which decompresses per-CU and zero-fills sparse CUs.
      * Encrypted / other attribute flags still fall through to the
-     * legacy walker (they currently return raw bytes — not regressed
+     * legacy walker (they currently return raw bytes - not regressed
      * by this change). */
     if (Context->pRecord->NonResident.CompressionUnit != 0)
     {
@@ -1811,7 +1811,7 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                 if (DataRunLength == 0)
                     goto RepairTailMapping;
 
-                /* Sparse data run — hole-fill: allocate real clusters and
+                /* Sparse data run - hole-fill: allocate real clusters and
                  * splice them into the MCB, then restart the walk so the
                  * write proceeds against the now-backed run.
                  *
@@ -1824,7 +1824,7 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                  * We deliberately do NOT call AddRun here: AddRun is the
                  * "extend at the end" path and would append a duplicate run
                  * past HighestVCN. Hole-fill keeps AllocatedSize/HighestVCN
-                 * the same — only the mapping-pair encoding changes.
+                 * the same - only the mapping-pair encoding changes.
                  */
                 ULONG HoleVCN = (ULONG)(CurrentOffset / Vcb->NtfsInfo.BytesPerCluster);
                 ULONG HoleLen = (ULONG)DataRunLength;
@@ -1852,8 +1852,8 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                 {
                     /* Phase 3.1 only handles full-hole fills. Partial allocs
                      * (disk near full) would need a more elaborate splice that
-                     * leaves part of the hole sparse — defer. */
-                    DPRINT1("WriteAttribute: partial hole alloc (%lu of %lu) — not handled\n",
+                     * leaves part of the hole sparse - defer. */
+                    DPRINT1("WriteAttribute: partial hole alloc not handled (%lu of %lu)\n",
                             AssignedCount, HoleLen);
                     Status = STATUS_DISK_FULL;
                     goto Cleanup;
@@ -1909,7 +1909,7 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
                 {
                     /* Phase 3.1 punt: if the new mapping pairs no longer fit
                      * in the existing slot, we'd need to grow the slot (and
-                     * possibly migrate to $ATTRIBUTE_LIST). Defer for now —
+                     * possibly migrate to $ATTRIBUTE_LIST). Defer for now -
                      * fill-and-fit covers the common case. */
                     DPRINT1("WriteAttribute: hole-fill mapping pairs grew (%lu > %lu); slot grow not yet supported\n",
                             NewRunBufSize, SlotMaxRuns);
@@ -2066,7 +2066,7 @@ RepairTailMapping:
         // Are we dealing with a sparse data run?
         if (DataRunStartLCN == -1)
         {
-            /* See the matching comment above — same MCB-roundtrip blocker.
+            /* See the matching comment above - same MCB-roundtrip blocker.
              * Crossing into a sparse hole mid-write needs hole-fill support. */
             DPRINT1("WriteAttribute: write spans sparse hole, hole-fill not supported yet\n");
             Status = STATUS_NOT_SUPPORTED;
@@ -2792,7 +2792,7 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     // Calculate bit count.  The RTL bitmap API is 32-bit (ULONG bit
     // count, ULONG search result), so cap at MAXULONG - 1 when the MFT
     // on-disk bitmap exceeds 4 billion entries.  This only limits NEW
-    // MFT allocation to the first ~4 billion records — a filesystem
+    // MFT allocation to the first ~4 billion records - a filesystem
     // with that many files is not a realistic scenario, and even if
     // one exists we degrade gracefully to read-only semantics for the
     // out-of-range portion instead of disabling write support entirely.
@@ -2979,8 +2979,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
                            &IndexRootOffset);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ERROR: Couldn't find $I30 $INDEX_ROOT attribute for parent directory with MFT #: %I64u!\n",
-                DirectoryMftIndex);
+        DPRINT1("ERROR: Couldn't find $I30 $INDEX_ROOT attribute for parent directory with MFT #: %I64u (FindAttr=0x%lx)!\n",
+                DirectoryMftIndex, Status);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -4333,7 +4333,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
                     return STATUS_SUCCESS;
                 }
-                // DOS-name or system entry match — skip, continue to next
+                // DOS-name or system entry match - skip, continue to next
             }
             // Cmp > 0: search_key > entry, advance to next entry
             (*CurrentEntry) += 1;
@@ -4542,7 +4542,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                     }
                     return STATUS_SUCCESS;
                 }
-                // DOS-name or system entry match — skip, continue to next
+                // DOS-name or system entry match - skip, continue to next
             }
             // Cmp > 0: search_key > entry, advance to next entry
             (*CurrentEntry) += 1;
@@ -4650,7 +4650,7 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
 
     /* Take IndexResource shared so a writer (UpdateFileNameRecord /
      * NtfsAddFilenameToDirectory / NtfsRemoveFilenameFromDirectory) can't
-     * mutate any directory's $INDEX_ALLOCATION underneath us — see
+     * mutate any directory's $INDEX_ALLOCATION underneath us - see
      * Kreijstal/reactos#14. ERESOURCE allows recursive shared acquisition,
      * so it's safe even if a caller higher up the stack already holds it.
      * Normal kernel APCs are already disabled by FsRtlEnterFileSystem in
