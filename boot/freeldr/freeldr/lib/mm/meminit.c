@@ -441,6 +441,7 @@ PVOID MmFindLocationForPageLookupTable(PFN_NUMBER TotalPageCount)
     PFN_NUMBER RequiredPages;
     PFN_NUMBER CandidateBasePage = 0;
     PFN_NUMBER CandidatePageCount = 0;
+    PFN_NUMBER BlockEndPage;
     PFN_NUMBER PageLookupTableEndPage;
     PVOID PageLookupTableMemAddress;
 
@@ -454,18 +455,19 @@ PVOID MmFindLocationForPageLookupTable(PFN_NUMBER TotalPageCount)
         // Continue, if memory is not free
         if (MemoryDescriptor->MemoryType != LoaderFree) continue;
 
-        // Continue, if the block is not big enough
-        if (MemoryDescriptor->PageCount < RequiredPages) continue;
+        BlockEndPage = min(MemoryDescriptor->BasePage + MemoryDescriptor->PageCount,
+                           MM_MAX_PAGE_LOADER);
+
+        // Continue, if the block is not big enough in mapped loader memory
+        if (BlockEndPage <= MemoryDescriptor->BasePage) continue;
+        if ((BlockEndPage - MemoryDescriptor->BasePage) < RequiredPages) continue;
 
         // Continue, if it is not at a higher address than previous address
-        if (MemoryDescriptor->BasePage < CandidateBasePage) continue;
-
-        // Continue, if the address is too high
-        if (MemoryDescriptor->BasePage + RequiredPages >= MM_MAX_PAGE_LOADER) continue;
+        if (BlockEndPage < CandidateBasePage + CandidatePageCount) continue;
 
         // Memory block is more suitable than the previous one
         CandidateBasePage = MemoryDescriptor->BasePage;
-        CandidatePageCount = MemoryDescriptor->PageCount;
+        CandidatePageCount = BlockEndPage - MemoryDescriptor->BasePage;
     }
 
     // Calculate the end address for the lookup table
@@ -681,8 +683,11 @@ VOID MmUpdateLastFreePageHint(PVOID PageLookupTable, PFN_NUMBER TotalPageCount)
 {
     PPAGE_LOOKUP_TABLE_ITEM        RealPageLookupTable = (PPAGE_LOOKUP_TABLE_ITEM)PageLookupTable;
     PFN_NUMBER                            Index;
+    PFN_NUMBER                            SearchLimit;
 
-    for (Index=TotalPageCount-1; Index>0; Index--)
+    SearchLimit = min(TotalPageCount, MM_MAX_PAGE_LOADER - MmLowestPhysicalPage);
+
+    for (Index=SearchLimit-1; Index>0; Index--)
     {
         if (RealPageLookupTable[Index].PageAllocated == LoaderFree)
         {
