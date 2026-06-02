@@ -1155,6 +1155,18 @@ Return Value:
 
                 SectorSize = (ULONG)Vcb->Bpb.BytesPerSector;
 
+                if (FcbOrDcb->Header.AllocationSize.QuadPart == FCB_LOOKUP_ALLOCATIONSIZE_HINT) {
+
+                    FatLookupFileAllocationSize( IrpContext, FcbOrDcb );
+                }
+
+                if ( FileSize > FcbOrDcb->Header.AllocationSize.LowPart ) {
+
+                    FatPopUpFileCorrupt( IrpContext, FcbOrDcb );
+
+                    FatRaiseStatus( IrpContext, STATUS_FILE_CORRUPT_ERROR );
+                }
+
                 //
                 //  Start by zeroing any part of the read after Valid Data
                 //
@@ -1742,5 +1754,3 @@ Return Value:
 
     return;
 }
-
-
