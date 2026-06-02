@@ -1431,13 +1431,13 @@ MmMakeSegmentResident(
             /* Clamp to VDL */
             if (ValidDataLength && ((FileOffset.QuadPart + ReadLength) > ValidDataLength->QuadPart))
             {
-                if (FileOffset.QuadPart > ValidDataLength->QuadPart)
+                if (FileOffset.QuadPart >= ValidDataLength->QuadPart)
                 {
-                    /* Great, nothing to read. */
+                    /* The page comes from the zero list; there is no valid file data to read. */
                     goto AssignPagesToSegment;
                 }
 
-                Mdl->Size = (FileOffset.QuadPart + ReadLength) - ValidDataLength->QuadPart;
+                Mdl->ByteCount = (ULONG)(ValidDataLength->QuadPart - FileOffset.QuadPart);
             }
 
             KEVENT Event;
@@ -1863,7 +1863,12 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
 
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
 
-        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, &FcbHeader->ValidDataLength, FALSE);
+        Status = MmMakeSegmentResident(Segment,
+                                       Offset.QuadPart,
+                                       PAGE_SIZE,
+                                       MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap ?
+                                           NULL : &FcbHeader->ValidDataLength,
+                                       FALSE);
 
         FsRtlReleaseFile(Segment->FileObject);
 
@@ -2522,6 +2527,15 @@ MmCreateDataFileSection(PSECTION *SectionObject,
 
         if (MaximumSize.QuadPart > FileSize.QuadPart)
         {
+            if (!(SectionPageProtection & (PAGE_READWRITE |
+                                           PAGE_EXECUTE_READWRITE |
+                                           PAGE_WRITECOPY |
+                                           PAGE_EXECUTE_WRITECOPY)))
+            {
+                ObDereferenceObject(Section);
+                return STATUS_SECTION_TOO_BIG;
+            }
+
             Status = IoSetInformation(FileObject,
                                       FileEndOfFileInformation,
                                       sizeof(LARGE_INTEGER),
@@ -2531,6 +2545,11 @@ MmCreateDataFileSection(PSECTION *SectionObject,
                 ObDereferenceObject(Section);
                 return STATUS_SECTION_NOT_EXTENDED;
             }
+        }
+        else if (MaximumSize.QuadPart < 0)
+        {
+            ObDereferenceObject(Section);
+            return STATUS_SECTION_TOO_BIG;
         }
     }
 
@@ -3555,6 +3574,13 @@ MmMapViewOfSegment(
     MmInitializeRegion(&MArea->SectionData.RegionListHead,
                        ViewSize, 0, Protect);
 
+    /* A view mapped into system space carries no per-process rmap, so the
+     * data-segment cleanup paths (pageout trimmer and purge-on-close) cannot
+     * find such a view through the rmap list. Track it explicitly so they
+     * leave this segment's pages resident while a system-space view maps it. */
+    if (AddressSpace == MmGetKernelAddressSpace())
+        InterlockedIncrement(&Segment->SystemMapCount);
+
     return STATUS_SUCCESS;
 }
 
@@ -3701,6 +3727,12 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
                                   AddressSpace);
     }
     MmUnlockSectionSegment(Segment);
+
+    /* Balance the SystemMapCount bump taken in MmMapViewOfSegment for
+     * system-space views (see comment there). */
+    if (AddressSpace == MmGetKernelAddressSpace())
+        InterlockedDecrement(&Segment->SystemMapCount);
+
     MmDereferenceSegment(Segment);
     return Status;
 }
@@ -4283,6 +4315,7 @@ MmMapViewOfSection(
     {
         PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
         LONGLONG ViewOffset;
+        LONGLONG RawViewOffset;
 
         ASSERT(Segment->RefCount > 0);
 
@@ -4311,26 +4344,40 @@ MmMapViewOfSection(
         if (SectionOffset == NULL)
         {
             ViewOffset = 0;
+            RawViewOffset = 0;
         }
         else
         {
-            SectionOffset->QuadPart &= ~(PAGE_SIZE - 1);
-            ViewOffset = SectionOffset->QuadPart;
+            RawViewOffset = SectionOffset->QuadPart;
+            ViewOffset = RawViewOffset & ~(PAGE_SIZE - 1);
+            SectionOffset->QuadPart = ViewOffset;
         }
 
         /* Check if the offset and size would cause an overflow */
-        if (((ULONG64)ViewOffset + *ViewSize) < (ULONG64)ViewOffset)
+        if (((ULONG64)RawViewOffset + *ViewSize) < (ULONG64)RawViewOffset)
         {
             DPRINT1("Section offset overflows\n");
             Status = STATUS_INVALID_VIEW_SIZE;
             goto Exit;
         }
 
+        if (FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT) &&
+            (*ViewSize != 0) &&
+            ((ULONG64)RawViewOffset >= (ULONG64)Segment->RawLength.QuadPart))
+        {
+            DPRINT1("Section offset is larger than section\n");
+            Status = STATUS_INVALID_VIEW_SIZE;
+            goto Exit;
+        }
+
         /* Check if the offset and size are bigger than the section itself */
-        if (((ULONG64)ViewOffset + *ViewSize) > (ULONG64)Section->SizeOfSection.QuadPart)
+        if (((ULONG64)RawViewOffset + *ViewSize) >
+            (ULONG64)(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT) ?
+                      Segment->RawLength.QuadPart :
+                      Section->SizeOfSection.QuadPart))
         {
             /* This is allowed for physical memory sections and kernel mode callers */
-            if (!Section->u.Flags.PhysicalMemory || (ExGetPreviousMode() == UserMode))
+            if (!(AllocationType & MEM_RESERVE) && !Section->u.Flags.PhysicalMemory)
             {
                 DPRINT1("Section offset and size are larger than section\n");
                 Status = STATUS_INVALID_VIEW_SIZE;
@@ -4359,6 +4406,12 @@ MmMapViewOfSection(
             (*ViewSize) = MIN(Section->SizeOfSection.QuadPart - ViewOffset, SIZE_T_MAX - PAGE_SIZE);
         }
 
+        if ((CommitSize > *ViewSize) && !(AllocationType & MEM_RESERVE))
+        {
+            Status = STATUS_INVALID_PARAMETER_5;
+            goto Exit;
+        }
+
         *ViewSize = PAGE_ROUND_UP(*ViewSize);
 
         MmLockSectionSegment(Segment);
@@ -4369,7 +4422,7 @@ MmMapViewOfSection(
                                     *ViewSize,
                                     Protect,
                                     ViewOffset,
-                                    AllocationType & (MEM_TOP_DOWN|SEC_NO_CHANGE));
+                                    AllocationType & (MEM_TOP_DOWN|MEM_RESERVE|SEC_NO_CHANGE));
         MmUnlockSectionSegment(Segment);
         if (!NT_SUCCESS(Status))
         {
@@ -4450,6 +4503,94 @@ MmCanFileBeTruncated(
     DPRINT("FIXME: didn't check for outstanding write probes\n");
 
     return Ret;
+}
+
+static
+BOOLEAN
+MiDataSegmentHasPageEntries(
+    _In_ PMM_SECTION_SEGMENT Segment)
+{
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+
+    for (PageTable = RtlEnumerateGenericTable(&Segment->PageTable, TRUE);
+         PageTable != NULL;
+         PageTable = RtlEnumerateGenericTable(&Segment->PageTable, FALSE))
+    {
+        ULONG i;
+
+        for (i = 0; i < _countof(PageTable->PageEntries); i++)
+        {
+            if (PageTable->PageEntries[i] != 0)
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+MiPurgeDataSegmentForClose(
+    _In_ PMM_SECTION_SEGMENT Segment)
+{
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+
+    MmLockSectionSegment(Segment);
+
+    for (PageTable = RtlEnumerateGenericTable(&Segment->PageTable, TRUE);
+         PageTable != NULL;
+         PageTable = RtlEnumerateGenericTable(&Segment->PageTable, FALSE))
+    {
+        ULONG i;
+
+        for (i = 0; i < _countof(PageTable->PageEntries); i++)
+        {
+            ULONG_PTR Entry = PageTable->PageEntries[i];
+            LARGE_INTEGER Offset;
+
+            if (Entry == 0)
+                continue;
+
+            if (IS_SWAP_FROM_SSE(Entry) || IS_WRITE_SSE(Entry))
+            {
+                MmUnlockSectionSegment(Segment);
+                return FALSE;
+            }
+
+            if (SHARE_COUNT_FROM_SSE(Entry) > 0)
+            {
+                PMM_RMAP_ENTRY Rmap;
+                BOOLEAN HasUserRmap;
+                KIRQL OldIrql;
+
+                if (SHARE_COUNT_FROM_SSE(Entry) != 1)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    return FALSE;
+                }
+
+                OldIrql = MiAcquirePfnLock();
+                Rmap = MmGetRmapListHeadPage(PFN_FROM_SSE(Entry));
+                while ((Rmap != NULL) && RMAP_IS_SEGMENT(Rmap->Address))
+                    Rmap = Rmap->Next;
+                HasUserRmap = (Rmap != NULL);
+                MiReleasePfnLock(OldIrql);
+
+                if (HasUserRmap)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    return FALSE;
+                }
+            }
+
+            Offset.QuadPart = PageTable->FileOffset.QuadPart + (i << PAGE_SHIFT);
+            MmSetPageEntrySectionSegment(Segment, &Offset, 0);
+            MmReleasePageMemoryConsumer(MC_USER, PFN_FROM_SSE(Entry));
+        }
+    }
+
+    MmUnlockSectionSegment(Segment);
+    return TRUE;
 }
 
 static
@@ -4673,24 +4814,51 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
             BOOLEAN CanPurge;
 
             MmLockSectionSegment(Segment);
-            CanPurge = (Segment->SectionCount == 0);
-            MmUnlockSectionSegment(Segment);
-            MmDereferenceSegment(Segment);
-
-            if (CanPurge)
+            if (Segment->SectionCount > 1)
             {
-                DataOk = MmPurgeSegment(SectionObjectPointer, NULL, 0);
-                if (DataOk && SectionObjectPointer->DataSectionObject != NULL)
-                    DataOk = DelayClose;
+                DataOk = DelayClose;
+                CanPurge = FALSE;
             }
-            else if (DelayClose)
+            else if (Segment->SystemMapCount > 0)
             {
-                DataOk = TRUE;
+                /* A system-space view (e.g. a win32k font mapping) still maps
+                 * this segment. Such a view carries no per-process rmap, so the
+                 * MiPurgeDataSegmentForClose rmap walk cannot see it and would
+                 * free pages the view is actively reading. Refuse to purge. */
+                DataOk = DelayClose;
+                CanPurge = FALSE;
+            }
+            else if (!MiDataSegmentHasPageEntries(Segment))
+            {
+                DataOk = DelayClose;
+                CanPurge = FALSE;
             }
             else
             {
-                DataOk = FALSE;
+                DataOk = TRUE;
+                CanPurge = TRUE;
             }
+            MmUnlockSectionSegment(Segment);
+
+            if (CanPurge)
+                DataOk = MmPurgeSegment(SectionObjectPointer, NULL, 0);
+
+            if (!DataOk && CanPurge)
+                DataOk = MiPurgeDataSegmentForClose(Segment);
+
+            if (DataOk && CanPurge)
+            {
+                if (SectionObjectPointer->DataSectionObject == Segment)
+                {
+                    KIRQL OldIrql;
+
+                    OldIrql = MiAcquirePfnLock();
+                    if (SectionObjectPointer->DataSectionObject == Segment)
+                        SectionObjectPointer->DataSectionObject = NULL;
+                    MiReleasePfnLock(OldIrql);
+                }
+            }
+            MmDereferenceSegment(Segment);
         }
     }
 
@@ -4989,6 +5157,12 @@ MmCreateSection (OUT PVOID  * Section,
     if (FileObject == NULL)
     {
         Status = STATUS_INVALID_FILE_FOR_SECTION;
+        goto Exit;
+    }
+
+    if ((MaximumSize != NULL) && (MaximumSize->QuadPart < 0))
+    {
+        Status = STATUS_SECTION_TOO_BIG;
         goto Exit;
     }
 
