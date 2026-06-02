@@ -280,7 +280,7 @@ VOID ARPReceive(
              WN2H(Header->Opcode), Interface->Unicast.Address.IPv4Address);
     if (!AddrIsEqual(&DstAddress, &Interface->Unicast))
     {
-        DPRINT("TCPIP-ARP:   not for us — ignoring\n");
+        DPRINT("TCPIP-ARP:   ignoring packet not addressed to us\n");
         ExFreePool(DataBuffer);
         Packet->Free(Packet);
         return;

@@ -32,7 +32,7 @@
 #define NDIS6_ADAPTER_TAG  'aDNn'  /* "nNDa" */
 
 /* ============================================================================
- *  Ndis6ReadExportName — read "\Device\{NetCfgInstanceId}" from the
+ *  Ndis6ReadExportName - read "\Device\{NetCfgInstanceId}" from the
  *  device's Class\<GUID>\<Instance>\Linkage key in the registry.
  *
  *  Ported from the legacy NDIS 5 NdisIAddDevice (miniport.c:2500-2588).
@@ -117,7 +117,7 @@ Ndis6FreeAdapterName(_Inout_ PUNICODE_STRING Name)
  *
  *  Called from Ndis6AddDevice (60driver.c) when PnP enumerates a device
  *  the driver claims. Builds the LOGICAL_ADAPTER + extension and inserts
- *  on AdapterListHead. Does NOT call the driver's InitializeHandlerEx —
+ *  on AdapterListHead. Does NOT call the driver's InitializeHandlerEx -
  *  that happens at IRP_MN_START_DEVICE time after PnP has assigned
  *  resources.
  * ============================================================================ */
@@ -150,7 +150,7 @@ Ndis6CreateLogicalAdapter(
         return Status;
 
     /* Create an FDO whose DeviceExtension is our LOGICAL_ADAPTER.
-     * The device object IS named — it's \Device\{GUID} — so that
+     * The device object IS named - it's \Device\{GUID} - so that
      * ObReferenceObjectByName in the legacy NdisOpenAdapter path
      * can open it in addition to MiniLocateDevice finding it. */
     Status = IoCreateDevice(
@@ -192,13 +192,13 @@ Ndis6CreateLogicalAdapter(
     /* Phase 3 TX thunk: in-flight wrapper NBL list. */
     KeInitializeSpinLock(&Ext->TxLookupLock);
     InitializeListHead(&Ext->InFlightNblsTx);
-    /* A1: drain event — notification, manually reset when a send lands on
+    /* A1: drain event - notification, manually reset when a send lands on
      * the in-flight list, set when the count decrements. HaltEx waits
      * for count == 0 with a timeout. */
     Ext->TxInFlightCount = 0;
     KeInitializeEvent(&Ext->TxDrainEvent, NotificationEvent, TRUE);
 
-    /* A4: Pause/Restart state machine — starts in RUNNING after init.
+    /* A4: Pause/Restart state machine - starts in RUNNING after init.
      * The Pause/Restart events are synchronization events (auto-reset)
      * signaled when the driver calls the respective Complete routine. */
     Ext->PauseState    = NDIS6_PAUSE_STATE_RUNNING;
@@ -215,7 +215,7 @@ Ndis6CreateLogicalAdapter(
     KeInitializeSpinLock(&Ext->FilterModuleListLock);
     InitializeListHead(&Ext->FilterModuleList);
 
-    /* Phase 3 TX wrapper NBL pool — allocate using the bridge's own
+    /* Phase 3 TX wrapper NBL pool - allocate using the bridge's own
      * NdisAllocateNetBufferListPool. fAllocateNetBuffer=TRUE so each NBL
      * comes with an embedded NB; we wrap the caller's MDL chain into the
      * embedded NB instead of allocating a backing data buffer. */
@@ -233,7 +233,7 @@ Ndis6CreateLogicalAdapter(
         Ext->TxWrapperNblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
     }
 
-    /* Phase 3 RX legacy packet/buffer pools — used to wrap incoming NBs
+    /* Phase 3 RX legacy packet/buffer pools - used to wrap incoming NBs
      * as legacy NDIS_PACKETs for tcpip's ProtocolReceivePacketHandler.
      * Sized to e1000e's typical RX batch (64 NBs per DPC budget). */
     {
@@ -354,7 +354,7 @@ Ndis6CallMiniportInitializeEx(
     Params.MediaType              = NdisMedium802_3;
     Params.PhysicalDeviceObject   = Ext->PhysicalDeviceObject;
     /* AllocatedResources is a PNDIS_RESOURCE_LIST which is really
-     * PCM_PARTIAL_RESOURCE_LIST — the inner partial list, NOT the outer
+     * PCM_PARTIAL_RESOURCE_LIST - the inner partial list, NOT the outer
      * CM_RESOURCE_LIST. Skip one level of indirection from what PnP
      * handed us. e1000e walks ResourceList->PartialDescriptors[] and
      * expects the real CmResourceTypeMemory/Port/Interrupt descriptors. */
@@ -385,7 +385,7 @@ Ndis6CallMiniportInitializeEx(
 }
 
 /* ============================================================================
- *  Ndis6CallMiniportHaltEx — symmetric tear-down
+ *  Ndis6CallMiniportHaltEx - symmetric tear-down
  * ============================================================================ */
 
 VOID
@@ -415,7 +415,7 @@ Ndis6CallMiniportHaltEx(
      * NdisMSendNetBufferListsComplete (60thunk_tx.c) decrements
      * TxInFlightCount and signals TxDrainEvent when it hits zero. We
      * wait up to 5 seconds for the count to drain, then push through
-     * regardless — an NBL leak is preferable to hanging REMOVE_DEVICE.
+     * regardless - an NBL leak is preferable to hanging REMOVE_DEVICE.
      *
      * The common case is count == 0 because the stack has already
      * stopped sending by the time PnP sends REMOVE; we just sample
@@ -428,7 +428,7 @@ Ndis6CallMiniportHaltEx(
 
         /* Clear the event so we wait for the NEXT decrement. We own
          * the event setter side (TerminalSendComplete), so clearing
-         * here can't race the setter in a problematic way — if the
+         * here can't race the setter in a problematic way - if the
          * count is about to hit zero we'll see it in the re-sample
          * after the wait. */
         KeClearEvent(&Ext->TxDrainEvent);
@@ -449,7 +449,7 @@ Ndis6CallMiniportHaltEx(
             RemainingCount = Ext->TxInFlightCount;
             if (WaitStatus == STATUS_TIMEOUT && RemainingCount > 0)
             {
-                DPRINT("NDIS6: HaltEx drain TIMEOUT, %ld NBLs still in flight — leaking\n",
+                DPRINT("NDIS6: HaltEx drain timed out with %ld NBLs still in flight; leaking them\n",
                          RemainingCount);
                 /* Fall through. The send-completion path will still
                  * try to call MiniSendComplete on an adapter whose
@@ -498,7 +498,7 @@ Ndis6CallMiniportPauseEx(
         Ext->DriverBlock->Characteristics.PauseHandler == NULL ||
         Ext->MiniportAdapterContext == NULL)
     {
-        /* Driver has no pause handler — treat as already paused. Many
+        /* Driver has no pause handler - treat as already paused. Many
          * simple miniports don't need pause semantics and fall through. */
         Ext->PauseState = NDIS6_PAUSE_STATE_PAUSED;
         return NDIS_STATUS_SUCCESS;
@@ -602,7 +602,7 @@ Ndis6CallMiniportRestartEx(
 }
 
 /* ============================================================================
- *  NdisMPauseComplete / NdisMRestartComplete — driver-side callbacks
+ *  NdisMPauseComplete / NdisMRestartComplete - driver-side callbacks
  *
  *  A driver returning PENDING from its PauseHandler or RestartHandler must
  *  call these when the transition finishes. We record the status and set
@@ -649,7 +649,7 @@ NdisMRestartComplete(
 }
 
 /* ============================================================================
- *  Ndis6DestroyLogicalAdapter — full tear-down (called from REMOVE_DEVICE)
+ *  Ndis6DestroyLogicalAdapter - full tear-down (called from REMOVE_DEVICE)
  * ============================================================================ */
 
 VOID
@@ -669,7 +669,7 @@ Ndis6DestroyLogicalAdapter(
     Fdo = Ext ? Ext->FunctionalDeviceObject : NULL;
 
     /* Phase 7B: detach any NDIS 6 filter modules attached to this adapter
-     * BEFORE we tear anything else down — filters may try to issue OID
+     * BEFORE we tear anything else down - filters may try to issue OID
      * requests during DetachHandler and need the adapter still wired. */
     {
         extern VOID Ndis6DetachFiltersFromAdapter(PLOGICAL_ADAPTER);
@@ -736,7 +736,7 @@ Ndis6DestroyLogicalAdapter(
         ExFreePoolWithTag(Ext, NDIS6_ADAPTER_TAG);
 
     /* Finally delete the FDO. After this Adapter (which lives inside
-     * Fdo->DeviceExtension) is gone — do NOT touch it again. */
+     * Fdo->DeviceExtension) is gone - do NOT touch it again. */
     if (Fdo)
         IoDeleteDevice(Fdo);
 }
