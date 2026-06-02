@@ -1842,6 +1842,7 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
     HANDLE Database;
     NTSTATUS Status;
     BOOLEAN PreviousMode;
+    ULONG CreateDisposition;
     IO_STATUS_BLOCK IoStatusBlock;
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING DeviceRemoteDatabase;
@@ -1873,6 +1874,18 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
     /* Disable hard errors */
     PreviousMode = IoSetThreadHardErrorMode(FALSE);
 
+    CreateDisposition = (!MigrateDatabase || DeviceInformation->Migrated == 0) ? FILE_OPEN_IF : FILE_OPEN;
+    if (CreateDisposition == FILE_OPEN_IF)
+    {
+        Status = RtlCreateSystemVolumeInformationFolder(&DeviceInformation->DeviceName);
+        if (!NT_SUCCESS(Status))
+        {
+            IoSetThreadHardErrorMode(PreviousMode);
+            FreePool(DeviceRemoteDatabase.Buffer);
+            return 0;
+        }
+    }
+
     Status = IoCreateFile(&Database,
                           SYNCHRONIZE | READ_CONTROL | FILE_WRITE_ATTRIBUTES |
                           FILE_READ_ATTRIBUTES | FILE_WRITE_EA | FILE_READ_EA |
@@ -1882,7 +1895,7 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
                           NULL,
                           FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN,
                           0,
-                          (!MigrateDatabase || DeviceInformation->Migrated == 0) ? FILE_OPEN_IF : FILE_OPEN,
+                          CreateDisposition,
                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_ALERT,
                           NULL,
                           0,
