@@ -544,6 +544,8 @@
 @ stdcall IoValidateDeviceIoControlAccess(ptr long)
 @ stdcall IoVerifyPartitionTable(ptr long)
 @ stdcall IoVerifyVolume(ptr long)
+@ stdcall -version=0xA00+ IoVolumeDeviceToGuid(ptr ptr)
+@ stdcall -version=0xA00+ IoVolumeDeviceToGuidPath(ptr ptr)
 @ stdcall IoVolumeDeviceToDosName(ptr ptr)
 @ stdcall IoWMIAllocateInstanceIds(ptr long ptr)
 @ stdcall IoWMIDeviceObjectToInstanceName(ptr ptr ptr)
