@@ -438,7 +438,7 @@ SHCreateShellItemArrayFromDataObject(_In_ IDataObject *pdo, _In_ REFIID riid, _O
  * absolute PIDL and QIs it to the requested riid (typically
  * IID_IShellItem or IID_IShellItem2).  Functionally identical to
  * "SHCreateShellItem(NULL, NULL, pidl, &psi); psi->QI(riid, ppv); psi->Release();"
- * which is exactly the wrapper Windows itself exposes — the only reason
+ * which is exactly the wrapper Windows itself exposes - the only reason
  * it's a separate entry-point is that callers want a one-shot
  * "PIDL + riid -> shell item" without juggling intermediates.
  */
@@ -494,7 +494,7 @@ SHCreateItemFromParsingName(PCWSTR pszPath, IBindCtx *pbc, REFIID riid, void **p
  *
  * Vista+ entry-point: build an IShellItem from a (parent-folder,
  * child-pidl) pair, where the parent is either supplied as a PIDL
- * (pidlParent) or as a live IShellFolder (psfParent) — one of the
+ * (pidlParent) or as a live IShellFolder (psfParent) - one of the
  * two must be non-NULL.  Wraps SHCreateShellItem, which already
  * accepts that exact shape.
  */

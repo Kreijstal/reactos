@@ -472,7 +472,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     DPRINT("Buffer=%p tofind=%S\n", Buffer, Ccb->DirectorySearchPattern);
 
     /* Synthesize '.' and '..' entries (indices 0 and 1).
-     * NTFS does not store them in the $I30 index — the Windows NTFS
+     * NTFS does not store them in the $I30 index - the Windows NTFS
      * driver generates them on the fly.  Without them, FindFirstFile
      * on an empty directory returns ERROR_FILE_NOT_FOUND instead of
      * finding at least '.' and '..', which breaks CopyDirectory. */
@@ -581,7 +581,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                      * GetBestFileNameFromRecord return our synthetic name.
                      *
                      * Instead of building a fake record, directly fill the
-                     * output structures ourselves — it's simpler and avoids
+                     * output structures ourselves - it's simpler and avoids
                      * touching shared state. */
                     {
                         ULONG DotNameBytes = DotLen * sizeof(WCHAR);

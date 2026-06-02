@@ -7,7 +7,7 @@
 #include <winbase.h>
 
 /* NTDDI_VERSION is set globally from REACTOS_TARGET_NT (and overridden to
- * 0x600 here by CMakeLists.txt). Do not force WS03SP1 — that would silently
+ * 0x600 here by CMakeLists.txt). Do not force WS03SP1 - that would silently
  * downgrade NDK struct layouts and create the same ABI mismatches that hid
  * RAM in System Properties (see kernel32/k32.h fix). */
 
