@@ -3186,6 +3186,11 @@ NtCreateSection(OUT PHANDLE SectionHandle,
     NTSTATUS Status;
     PAGED_CODE();
 
+    if (AllocationAttributes == MAXULONG)
+    {
+        return STATUS_INVALID_PARAMETER_6;
+    }
+
     /* Check for non-existing flags */
     if ((AllocationAttributes & ~(SEC_COMMIT | SEC_RESERVE | SEC_BASED |
                                   SEC_LARGE_PAGES | SEC_IMAGE | SEC_NOCACHE |
@@ -3195,6 +3200,23 @@ NtCreateSection(OUT PHANDLE SectionHandle,
         {
             DPRINT1("Bogus allocation attribute: %lx\n", AllocationAttributes);
             return STATUS_INVALID_PARAMETER_6;
+        }
+    }
+
+    if ((FileHandle == NULL) &&
+        ((AllocationAttributes & (SEC_LARGE_PAGES | SEC_COMMIT)) ==
+         (SEC_LARGE_PAGES | SEC_COMMIT)))
+    {
+        ULONG LargePageMinimum = SharedUserData->LargePageMinimum;
+
+        if (LargePageMinimum == 0)
+            LargePageMinimum = 4 * 1024 * 1024;
+
+        if ((MaximumSize != NULL) &&
+            ((MaximumSize->QuadPart <= 0) ||
+             ((MaximumSize->QuadPart & (LargePageMinimum - 1)) != 0)))
+        {
+            return STATUS_INVALID_PARAMETER_4;
         }
     }
 
@@ -3456,6 +3478,27 @@ NtMapViewOfSection(
     /* Check for invalid zero bits */
     if (ZeroBits)
     {
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
+        if (ZeroBits == (ULONG_PTR)-1)
+        {
+            ZeroBits = 0;
+        }
+        else if (ZeroBits < 20)
+        {
+            DPRINT1("Invalid zero bits\n");
+            return STATUS_INVALID_PARAMETER_4;
+        }
+        else if (ZeroBits <= 21)
+        {
+            return STATUS_NO_MEMORY;
+        }
+        else
+        {
+            DPRINT1("Invalid zero bits\n");
+            return STATUS_INVALID_PARAMETER_4;
+        }
+#endif
+
         if (ZeroBits > MI_MAX_ZERO_BITS)
         {
             DPRINT1("Invalid zero bits\n");
@@ -3507,6 +3550,15 @@ NtMapViewOfSection(
             ObDereferenceObject(Process);
             return STATUS_INVALID_PARAMETER_6;
         }
+    }
+    else if (MiIsRosSectionObject(Section) &&
+             !Section->u.Flags.Image &&
+             (AllocationType & MEM_RESERVE) &&
+             !(Win32Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+    {
+        ObDereferenceObject(Section);
+        ObDereferenceObject(Process);
+        return STATUS_SECTION_PROTECTION;
     }
     else if (!(AllocationType & MEM_DOS_LIM))
     {
