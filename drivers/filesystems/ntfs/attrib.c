@@ -246,7 +246,7 @@ AddResidentAttribute(PNTFS_VCB Vcb,
     PNTFS_ATTR_RECORD AttributeAddress;
     PNTFS_ATTR_RECORD NextSlot;
 
-    /* Locate the current end marker — caller invariant for all Add* helpers. */
+    /* Locate the current end marker - caller invariant for all Add* helpers. */
     AttributeAddress = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
     while (AttributeAddress->Type != AttributeEnd &&
            (ULONG_PTR)AttributeAddress < (ULONG_PTR)FileRecord + FileRecord->BytesInUse)
@@ -731,7 +731,7 @@ AddIndexRoot(PNTFS_VCB Vcb,
 * child file record, replacing the attribute slot in the base record with an
 * $ATTRIBUTE_LIST entry that points at the child. This is used by AddRun() when a
 * non-resident attribute's mapping pairs grow too large to fit in the base record's
-* attribute slot — by relocating the entire attribute (header + mapping pairs) to a
+* attribute slot - by relocating the entire attribute (header + mapping pairs) to a
 * fresh, mostly-empty child record, we get a full file record's worth of room for
 * the mapping pairs to grow into.
 *
@@ -775,12 +775,12 @@ AddIndexRoot(PNTFS_VCB Vcb,
 * STATUS_INVALID_PARAMETER if AttrContext describes a resident attribute.
 * STATUS_INSUFFICIENT_RESOURCES on allocation failure.
 * STATUS_NOT_IMPLEMENTED if the base record cannot accommodate the new $ATTRIBUTE_LIST
-*   slot — this is the "Phase A.2" follow-up case where we'd need to either spill the
+*   slot - this is the "Phase A.2" follow-up case where we'd need to either spill the
 *   attribute list itself or pick a different attribute to migrate.
 * Other status codes propagated from AddNewMftEntry / UpdateFileRecord.
 *
 * @remarks
-* This is "Phase A" of $ATTRIBUTE_LIST support — whole-attribute migration only,
+* This is "Phase A" of $ATTRIBUTE_LIST support - whole-attribute migration only,
 * no per-VCN-range splitting, no coalescing back on shrink, no migration of
 * $STANDARD_INFORMATION/$FILE_NAME (which are never spilled in canonical NTFS).
 */
@@ -939,7 +939,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
         }
         else
         {
-            /* No trailing attributes — just collapse the end markers to where the
+            /* No trailing attributes - just collapse the end markers to where the
              * migrated attribute used to start. */
             SetFileRecordEnd(BaseFileRecord, AttrInBase, FILE_RECORD_END);
         }
@@ -989,7 +989,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
         {
             DPRINT1("MigrateAttributeToList: existing $ATTRIBUTE_LIST is non-resident; "
                     "appending to non-resident list not yet implemented (Phase A.2)\n");
-            /* Best-effort rollback: free the child's MFT bit?  Skipped for now —
+            /* Best-effort rollback: free the child's MFT bit?  Skipped for now -
              * the orphaned bit just wastes one MFT entry, the volume is still consistent. */
             ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
             return STATUS_NOT_IMPLEMENTED;
@@ -1053,13 +1053,13 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
     }
     else
     {
-        /* No existing $ATTRIBUTE_LIST — create a fresh one in place of the
+        /* No existing $ATTRIBUTE_LIST - create a fresh one in place of the
          * migrated attribute slot.  We'll insert it at the BEGINNING of the
          * attribute chain (after $STANDARD_INFORMATION) so the reader code
          * picks it up via FindFirstAttribute's AttributeAttributeList branch.
          *
          * For Phase A simplicity we put the new $ATTRIBUTE_LIST at the END of
-         * the attribute chain instead — the reader (FindAttribute in mft.c)
+         * the attribute chain instead - the reader (FindAttribute in mft.c)
          * walks the regular chain first and only falls back to list traversal
          * for misses, so position doesn't affect correctness for the cases we
          * care about right now. */
@@ -1083,7 +1083,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
             return STATUS_NOT_IMPLEMENTED;
         }
 
-        /* Find the current AttributeEnd marker — that's where the new list goes. */
+        /* Find the current AttributeEnd marker - that's where the new list goes. */
         CurrentEnd = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse - 2 * sizeof(ULONG));
         ASSERT(CurrentEnd->Type == AttributeEnd);
 
@@ -1133,7 +1133,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
      * their own FileRecord buffer (which is still the base), so leaving the
      * field pointing at the base keeps those callers correct.  AddRun's own
      * post-migration UpdateFileRecord uses FileRecord->MFTRecordNumber (the
-     * child's index) instead — see the AddRun code path. */
+     * child's index) instead - see the AddRun code path. */
     if (AttrContext->pRecord)
         ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
     AttrContext->pRecord = ExAllocatePoolWithTag(NonPagedPool, MigratedAttrLength, TAG_NTFS);
@@ -1160,7 +1160,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
         return Status;
     }
 
-    DPRINT("MigrateAttributeToList: success — attr type 0x%x now in MFT %I64u offset 0x%x (was MFT %I64u offset 0x%x)\n",
+    DPRINT("MigrateAttributeToList: success; attr type 0x%x now in MFT %I64u offset 0x%x (was MFT %I64u offset 0x%x)\n",
            AttrInChild->Type, ChildMftIndex, ChildAttrOffset,
            BaseFileRecord->MFTRecordNumber, AttrOffset);
 
@@ -1210,7 +1210,7 @@ MigrateAttributeToList(PNTFS_VCB Vcb,
 * the child MFT bit (the driver currently has no FreeMftEntry primitive). The
 * child record becomes orphaned, wasting one MFT slot but leaving the volume
 * consistent. Production use needs $LogFile journaling for crash safety AND a
-* working FreeMftEntry — both are out of scope for the harness-testable core.
+* working FreeMftEntry - both are out of scope for the harness-testable core.
 */
 NTSTATUS
 CoalesceAttributeFromList(PNTFS_VCB Vcb,
@@ -1273,7 +1273,7 @@ CoalesceAttributeFromList(PNTFS_VCB Vcb,
     }
 
     /* Step 2: walk the list, find the matching entry. Also count how many
-     * entries (if any) reference the same child MFT — multi-extent attributes
+     * entries (if any) reference the same child MFT - multi-extent attributes
      * (e.g. an attribute that itself spans several child records) cannot be
      * coalesced as a single block, so bail in that case. */
     ListContent = (PUCHAR)ListAttr + ListAttr->Resident.ValueOffset;
@@ -1454,7 +1454,7 @@ CoalesceAttributeFromList(PNTFS_VCB Vcb,
     /* Step 5b: insert the coalesced attribute at the end (just before AttributeEnd). */
     if (BaseFileRecord->BytesInUse + ChildAttrLen > Vcb->NtfsInfo.BytesPerFileRecord)
     {
-        /* Defensive: shouldn't happen — we checked NewBytesInUse above. */
+        /* Defensive: shouldn't happen - we checked NewBytesInUse above. */
         DPRINT1("CoalesceAttributeFromList: insert would overflow despite size check\n");
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
         return STATUS_NOT_IMPLEMENTED;
@@ -1466,7 +1466,7 @@ CoalesceAttributeFromList(PNTFS_VCB Vcb,
     SetFileRecordEnd(BaseFileRecord, NewEnd, FILE_RECORD_END);
 
     /* Step 6: persist the modified base. The orphaned child record stays on disk
-     * (no FreeMftEntry yet) — see remarks. */
+     * (no FreeMftEntry yet) - see remarks. */
     Status = UpdateFileRecord(Vcb, BaseFileRecord->MFTRecordNumber, BaseFileRecord);
     if (!NT_SUCCESS(Status))
     {
@@ -1647,7 +1647,7 @@ AddRun(PNTFS_VCB Vcb,
             ULONG NewAttrOffsetInChild = 0;
             NTSTATUS MigrateStatus;
 
-            DPRINT("AddRun: base record full (need %u, have %d) — migrating attr type 0x%x to $ATTRIBUTE_LIST\n",
+            DPRINT("AddRun: base record full (need %u, have %d); migrating attr type 0x%x to $ATTRIBUTE_LIST\n",
                    RunBufferSize, DataRunMaxLength,
                    AttrContext->pRecord->Type);
 
@@ -1675,7 +1675,7 @@ AddRun(PNTFS_VCB Vcb,
             NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
             NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + NextAttributeOffset);
 
-            /* Recompute available room — should be the entire rest of the child record. */
+            /* Recompute available room - should be the entire rest of the child record. */
             DataRunMaxLength = AttrContext->pRecord->Length - AttrContext->pRecord->NonResident.MappingPairsOffset
                              + (Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse);
 
@@ -1683,7 +1683,7 @@ AddRun(PNTFS_VCB Vcb,
             {
                 /* Even the child record can't fit the mapping pairs.  This means a
                  * single attribute's mapping pairs exceed an entire file record's
-                 * worth — extremely unlikely with realistic file sizes, but bail
+                 * worth - extremely unlikely with realistic file sizes, but bail
                  * cleanly if it ever happens. */
                 DPRINT1("AddRun: child record also too small (need %u, have %d)\n",
                         RunBufferSize, DataRunMaxLength);
@@ -1694,7 +1694,7 @@ AddRun(PNTFS_VCB Vcb,
 
             /* The child record is fresh (BytesInUse covers only the migrated
              * attribute and the end markers), so the trailing-attribute logic
-             * below doesn't need to move anything — fall through into the rest of
+             * below doesn't need to move anything - fall through into the rest of
              * the existing AddRun path with the new (FileRecord, AttrOffset). */
         }
 
@@ -1785,7 +1785,7 @@ AddRun(PNTFS_VCB Vcb,
     NtfsDumpDataRuns((PUCHAR)((ULONG_PTR)DestinationAttribute + DestinationAttribute->NonResident.MappingPairsOffset), 0);
 
     /* If we migrated the attribute to a child record above, FileRecord points at
-     * the child buffer we own — release it here.  The caller's original base
+     * the child buffer we own - release it here.  The caller's original base
      * record buffer was already written back inside MigrateAttributeToList(). */
     if (MigratedChildRecord)
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MigratedChildRecord);
@@ -1978,7 +1978,7 @@ ConvertLargeMCBToDataRuns(PLARGE_MCB DataRunsMCB,
 
         // If there's a Vbn gap before this entry, emit a sparse run for the
         // hole.  The MCB doesn't store explicit sparse markers (we drop them
-        // in ConvertDataRunsToLargeMCB) — gaps in Vbn ARE the sparse holes,
+        // in ConvertDataRunsToLargeMCB) - gaps in Vbn ARE the sparse holes,
         // and round-trip stability requires re-emitting them here.
         if (Vbn > ExpectedVbn)
         {
@@ -3151,7 +3151,7 @@ InternalGetNextAttributeListItem(PFIND_ATTR_CONTXT Context)
 
     NextItem = (PNTFS_ATTRIBUTE_LIST_ITEM)((PCHAR)Context->NonResidentCur + Context->NonResidentCur->Length);
 
-    /* Bounds check FIRST — the next item may be exactly at NonResidentEnd
+    /* Bounds check FIRST - the next item may be exactly at NonResidentEnd
      * (one-past-the-last byte) when the previous item was the last in the list.
      * The original code dereferenced NextItem->Length/Type before validating
      * the pointer, which is OOB when the list contains exactly the right number

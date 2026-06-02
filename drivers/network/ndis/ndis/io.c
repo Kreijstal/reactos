@@ -36,11 +36,11 @@ VOID NTAPI HandleDeferredProcessing(
   /* dev-nt6-1: NDIS 6 adapters route their DPC through Ndis6DpcWrapper in
    * 60io.c. The legacy DriverHandle is NULL for these adapters, so the
    * dereference below would crash. If we got here it means a stale legacy
-   * DPC was queued against an NDIS 6 adapter — that should not happen
+   * DPC was queued against an NDIS 6 adapter - that should not happen
    * after Phase 2, but bail defensively. */
   if (Adapter && Adapter->IsNdis6)
   {
-      NDIS_DbgPrint(MIN_TRACE, ("Legacy HandleDeferredProcessing called on NDIS 6 adapter %p — bridge bug\n", Adapter));
+      NDIS_DbgPrint(MIN_TRACE, ("Legacy HandleDeferredProcessing called on NDIS 6 adapter %p; bridge bug\n", Adapter));
       return;
   }
 
@@ -79,7 +79,7 @@ BOOLEAN NTAPI ServiceRoutine(
 
   /* dev-nt6-1: NDIS 6 adapters install Ndis6IsrWrapper directly via
    * IoConnectInterrupt and never use the legacy NDIS_MINIPORT_INTERRUPT
-   * object — so this routine should never be called for them. The legacy
+   * object - so this routine should never be called for them. The legacy
    * DriverHandle is NULL for NDIS 6 adapters, so any access below would
    * crash. Defensive bail. */
   if (NdisMiniportBlock != NULL)
@@ -88,7 +88,7 @@ BOOLEAN NTAPI ServiceRoutine(
           CONTAINING_RECORD(NdisMiniportBlock, LOGICAL_ADAPTER, NdisMiniportBlock);
       if (Adapter->IsNdis6)
       {
-          NDIS_DbgPrint(MIN_TRACE, ("Legacy ServiceRoutine called on NDIS 6 adapter %p — bridge bug\n", Adapter));
+          NDIS_DbgPrint(MIN_TRACE, ("Legacy ServiceRoutine called on NDIS 6 adapter %p; bridge bug\n", Adapter));
           return FALSE;
       }
   }
