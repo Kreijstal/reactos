@@ -165,29 +165,23 @@ PIP_INTERFACE GetDefaultInterface(VOID)
    /* DHCP hack: Always return the adapter without an IP address */
    ForEachInterface(CurrentIF) {
       if (CurrentIF->Context && AddrIsUnspecified(&CurrentIF->Unicast)) {
-          TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
-
           GetInterfaceConnectionStatus(CurrentIF, &IfStatus);
           if (IfStatus == MIB_IF_OPER_STATUS_OPERATIONAL) {
+              TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
               return CurrentIF;
           }
-
-          TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
       }
    } EndFor(CurrentIF);
 
    /* Try to continue from the next adapter */
    ForEachInterface(CurrentIF) {
       if (CurrentIF->Context && (Index++ == NextDefaultAdapter)) {
-          TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
-
           GetInterfaceConnectionStatus(CurrentIF, &IfStatus);
           if (IfStatus == MIB_IF_OPER_STATUS_OPERATIONAL) {
               NextDefaultAdapter++;
+              TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
               return CurrentIF;
           }
-
-          TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
       }
    } EndFor(CurrentIF);
 
@@ -196,15 +190,12 @@ PIP_INTERFACE GetDefaultInterface(VOID)
    ForEachInterface(CurrentIF) {
       if (CurrentIF->Context) {
           Index++;
-          TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
-
           GetInterfaceConnectionStatus(CurrentIF, &IfStatus);
           if (IfStatus == MIB_IF_OPER_STATUS_OPERATIONAL) {
               NextDefaultAdapter = Index;
+              TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
               return CurrentIF;
           }
-
-          TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
       }
    } EndFor(CurrentIF);
 
