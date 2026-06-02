@@ -216,7 +216,7 @@ NTSTATUS RawIPSendDatagram(
 
         default:
             UnlockObject(AddrFile);
-            DPRINT("TCPIP-RAWIP: bad AddressType %d — STATUS_UNSUCCESSFUL\n",
+            DPRINT("TCPIP-RAWIP: bad AddressType %d; returning STATUS_UNSUCCESSFUL\n",
                      RemoteAddressTa->Address[0].AddressType);
             return STATUS_UNSUCCESSFUL;
     }
