@@ -132,7 +132,7 @@ NtfsCreateFCB(PCWSTR FileName,
     Fcb->RFCB.PagingIoResource = &(Fcb->PagingIoResource);
 
     /* Byte-range file locks. The completion / unlock callbacks are
-     * optional and we don't need them — FsRtlProcessFileLock and the
+     * optional and we don't need them - FsRtlProcessFileLock and the
      * default unlock path do everything we want. Used by lock.c
      * (NtfsLockControl) and consulted by NtfsRead / NtfsWrite via
      * FsRtlCheckLockForReadAccess / FsRtlCheckLockForWriteAccess. */
@@ -188,12 +188,12 @@ NtfsFreeFcbStorage(PNTFS_FCB Fcb)
 /* Walk the global zombie list and free any FCB whose SOP slots have all
  * been cleared by MM (MmDereferenceSegmentWithLock writes
  * SectionObjectPointer->DataSectionObject = NULL when the segment finally
- * dies — see ntoskrnl/mm/section.c).  Called opportunistically from
+ * dies - see ntoskrnl/mm/section.c).  Called opportunistically from
  * NtfsCreateFCB and NtfsDestroyFCB so we don't need a dedicated worker
  * thread; the cost is one short critical-section walk per FCB churn,
  * which is negligible compared to the I/O the same code path is doing.
  *
- * Runs at PASSIVE/APC level — same constraints as the call sites. */
+ * Runs at PASSIVE/APC level - same constraints as the call sites. */
 VOID
 NtfsReapZombieFcbs(VOID)
 {
@@ -222,7 +222,7 @@ NtfsReapZombieFcbs(VOID)
     }
     KeReleaseSpinLock(&NtfsGlobalData->ZombieLock, OldIrql);
 
-    /* Free outside the lock — ExDeleteResourceLite / ExFreePool can be
+    /* Free outside the lock - ExDeleteResourceLite / ExFreePool can be
      * slow and may acquire other locks. */
     while (!IsListEmpty(&ToFree))
     {
@@ -275,7 +275,7 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
                 Fcb->SectionObjectPointers->SharedCacheMap);
 
         /* Flush dirty image-section pages so MmForceSectionClosed doesn't
-         * refuse on account of them.  Ignore the return value — it returns
+         * refuse on account of them.  Ignore the return value - it returns
          * FALSE only when there's no image section to flush, which is fine. */
         if (Fcb->SectionObjectPointers->ImageSectionObject != NULL)
         {
@@ -411,7 +411,7 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
         /* Do NOT ObDereferenceObject(tmpFileObject) here.
          * NtfsAttachFCBToFileObject already dropped its reference (line 395).
          * The remaining references belong to the cache manager and the MM
-         * section segment — they will be released by CcUninitializeCacheMap
+         * section segment - they will be released by CcUninitializeCacheMap
          * and MmDereferenceSegmentWithLock respectively. An extra deref here
          * causes a use-after-free: the FileObject is freed while the MM
          * segment still holds a pointer to it. */
@@ -739,7 +739,8 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     newCCB->PtrFileObject = FileObject;
     Fcb->Vcb = Vcb;
 
-    if (!(Fcb->Flags & FCB_CACHE_INITIALIZED))
+    if (!NtfsFCBIsDirectory(Fcb) &&
+        !(Fcb->Flags & FCB_CACHE_INITIALIZED))
     {
         _SEH2_TRY
         {
