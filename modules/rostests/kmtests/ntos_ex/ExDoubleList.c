@@ -19,7 +19,7 @@ LIST_ENTRY Entries[5];
 #define ok_eq_free(Value, Expected) do              \
 {                                                   \
     if (KmtIsCheckedBuild)                          \
-        ok_eq_pointer(Value, (PVOID)0x0BADD0FF);    \
+        ok_eq_pointer(Value, (PVOID)(ULONG_PTR)0xBADDD0FFBADDD0FFULL);    \
     else                                            \
         ok_eq_pointer(Value, Expected);             \
 } while (0)
