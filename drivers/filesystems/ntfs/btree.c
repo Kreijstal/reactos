@@ -610,7 +610,7 @@ NtfsCompareKeyBytes(const VOID *Key1, ULONG Key1Len,
 
         /* Revision */
         if (s1[0] != s2[0]) return (s1[0] < s2[0]) ? -1 : 1;
-        /* IdAuthority (bytes 2..7 — 6-byte big-endian per SID spec) */
+        /* IdAuthority (bytes 2..7 - 6-byte big-endian per SID spec) */
         {
             int r = NtfsCompareBytes(s1 + 2, s2 + 2, 6);
             if (r != 0) return (r < 0) ? -1 : 1;
@@ -669,7 +669,7 @@ NtfsCompareKeyBytes(const VOID *Key1, ULONG Key1Len,
     }
 
     default:
-        /* Unknown collation — treat as binary so the tree stays totally
+        /* Unknown collation - treat as binary so the tree stays totally
          * ordered rather than silently violating the invariant. */
         DPRINT1("NtfsCompareKeyBytes: unknown collation 0x%lx, falling back to binary.\n",
                 CollationRule);
@@ -991,7 +991,7 @@ CreateBTreeFromIndexEx(PDEVICE_EXTENSION Vcb,
                                                 + IndexRoot->Header.FirstEntryOffset);
 
     // Create a key for each entry in the node.
-    // Child nodes are NOT loaded here — they are loaded lazily by NtfsInsertKey
+    // Child nodes are NOT loaded here - they are loaded lazily by NtfsInsertKey
     // when it needs to descend into a child. This makes tree creation O(root keys)
     // instead of O(all nodes), turning the per-file insert from O(n) to O(log n).
     while (CurrentOffset < IndexRoot->Header.TotalSizeOfEntries)
@@ -1029,7 +1029,7 @@ CreateBTreeFromIndexEx(PDEVICE_EXTENSION Vcb,
             // Copy the current entry to its key
             RtlCopyMemory(CurrentKey->IndexEntry, CurrentNodeEntry, CurrentNodeEntry->Length);
 
-            // LesserChild stays NULL — loaded lazily when needed
+            // LesserChild stays NULL - loaded lazily when needed
 
             // Advance to the next entry
             CurrentOffset += CurrentNodeEntry->Length;
@@ -1065,7 +1065,7 @@ Cleanup:
     return Status;
 }
 
-/* Backwards-compatible wrapper — $I30 $INDEX_ALLOCATION lookup.  All existing
+/* Backwards-compatible wrapper - $I30 $INDEX_ALLOCATION lookup.  All existing
  * callers hit this overload; new view-index code (quota, etc.) should call
  * CreateBTreeFromIndexEx with the actual index name. */
 NTSTATUS
@@ -2037,10 +2037,10 @@ NtfsBTreeInsertBlob(PB_TREE Tree,
         }
     }
 
-    /* Not found — do a full insert on the root node.  We can't recurse into
+    /* Not found - do a full insert on the root node.  We can't recurse into
      * children here unless we mirror NtfsInsertKey's split bubble-up.  For
      * the view-index workloads today (quota is shallow: at most a few
-     * hundred entries), root-only insert is enough — the existing
+     * hundred entries), root-only insert is enough - the existing
      * NtfsInsertKey handles the full recursive case for $I30.  If we hit a
      * tree that would overflow the root, return STATUS_NOT_IMPLEMENTED so
      * the caller knows to fall back. */
@@ -2061,7 +2061,7 @@ NtfsBTreeInsertBlob(PB_TREE Tree,
             if (CurrentKey->LesserChild)
             {
                 /* Descend into the loaded child using the recursive $I30
-                 * machinery — only valid for FILE_NAME collation today.
+                 * machinery - only valid for FILE_NAME collation today.
                  * For view indexes, in practice the tree stays shallow
                  * (root only) until the root overflows, at which point
                  * split handling would need generalization.  Assert the
@@ -2410,7 +2410,7 @@ DumpBTreeKey(PB_TREE Tree, PB_TREE_KEY Key, ULONG Number, ULONG Depth)
             DumpBTreeNode(Tree, Key->LesserChild, Number, Depth + 1);
         else
         {
-            // Child not loaded (lazy loading) — this is expected
+            // Child not loaded (lazy loading) - this is expected
             DPRINT("Child node not loaded (lazy)\n");
         }
     }

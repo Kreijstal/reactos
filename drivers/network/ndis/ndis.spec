@@ -295,7 +295,7 @@
 
 ; ====================================================================
 ; NDIS 6 / NDIS 6.20 stub exports (implemented in ndis/60stubs.c).
-; All entry points are functional stubs — registration succeeds, datapath
+; All entry points are functional stubs - registration succeeds, datapath
 ; ops are no-ops. Added for the dev-nt6-1 branch (NT 5.2 -> NT 6.1 upgrade).
 ; ====================================================================
  @ stdcall NdisAllocateNetBufferListPool(ptr ptr)
@@ -343,7 +343,7 @@
  @ stdcall NdisMDeregisterScatterGatherDma(ptr)
  @ stdcall NdisMAllocateNetBufferSGList(ptr ptr ptr long ptr long)
  @ stdcall NdisMFreeNetBufferSGList(ptr ptr ptr)
-; NDIS 6 filter helper APIs (Phase 8 — implemented in 60filter.c)
+; NDIS 6 filter helper APIs (Phase 8 - implemented in 60filter.c)
  @ stdcall NdisFSetAttributes(ptr ptr ptr)
  @ stdcall NdisFSendNetBufferLists(ptr ptr long long)
  @ stdcall NdisFSendNetBufferListsComplete(ptr ptr long)
@@ -354,7 +354,7 @@
 ; NDIS 6 protocol open/close (Phase 9C)
  @ stdcall NdisOpenAdapterEx(ptr ptr ptr ptr ptr)
  @ stdcall NdisCloseAdapterEx(ptr)
-; NDIS 6 utility APIs (Phase 9 — implemented in 60util.c)
+; NDIS 6 utility APIs (Phase 9 - implemented in 60util.c)
  @ stdcall NdisAllocateTimerObject(ptr ptr ptr)
  @ stdcall NdisFreeTimerObject(ptr)
  @ stdcall NdisSetTimerObject(ptr int64 long ptr)

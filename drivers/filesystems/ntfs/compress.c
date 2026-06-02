@@ -6,7 +6,7 @@
  *
  * Walks an attribute's DataRunsMCB one compression unit (CU) at a time,
  * classifies each CU, and feeds compressed CUs to the LZNT1 codec in
- * lznt1.c.  The write path stays STATUS_NOT_IMPLEMENTED — slice 1b
+ * lznt1.c.  The write path stays STATUS_NOT_IMPLEMENTED - slice 1b
  * will add that in a separate issue.
  *
  * Classification per CU (CU_clusters = 1 << CompressionUnit):
@@ -149,7 +149,7 @@ NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
 
         if (!Found || Lcn == -1)
         {
-            /* Case 3: sparse CU — zero-fill the caller's slice of it.
+            /* Case 3: sparse CU - zero-fill the caller's slice of it.
              * Also covers Found==FALSE (VCN not in any run), which on a
              * compressed attribute is likewise the implicit sparse tail. */
             RtlZeroMemory(Out + BytesCopied, CopyLen);
@@ -166,7 +166,7 @@ NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
          * CuClusters long, but the physical storage is MappedCount < CuClusters.
          *
          * A "raw" CU has the run covering all CuClusters clusters (possibly
-         * as part of a longer run — MappedCount can be > CuClusters, in
+         * as part of a longer run - MappedCount can be > CuClusters, in
          * which case we still have the full physical coverage). */
 
         if (MappedCount >= (LONGLONG)CuClusters)
@@ -186,7 +186,7 @@ NtfsCompressedReadLogicalEx(PNTFS_ATTR_CONTEXT Context,
         /* Case 2: compressed CU.  The compressed payload occupies the
          * first MappedCount clusters; the decoder handles short inputs
          * via the end-of-CU header marker.  We read exactly
-         * MappedCount*BytesPerCluster bytes — not the full CU — because
+         * MappedCount*BytesPerCluster bytes - not the full CU - because
          * the tail clusters are the implicit sparse encoding marker and
          * are not physically present. */
         {

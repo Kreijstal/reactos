@@ -144,7 +144,7 @@ NtfsFormatFlush(void *ctx)
 }
 
 /* ============================================================
- * NtfsFormat — PULIB_FORMAT implementation
+ * NtfsFormat - PULIB_FORMAT implementation
  * ============================================================ */
 
 BOOLEAN

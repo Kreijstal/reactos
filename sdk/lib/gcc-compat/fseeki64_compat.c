@@ -10,7 +10,7 @@
  */
 
 /*
- * Avoid including <stdio.h> — the CRT headers declare _fseeki64/_ftelli64
+ * Avoid including <stdio.h> - the CRT headers declare _fseeki64/_ftelli64
  * with __declspec(dllimport), which conflicts with our local definitions.
  */
 typedef struct _iobuf FILE;
@@ -28,7 +28,7 @@ long long __cdecl _ftelli64(FILE *stream)
 }
 
 /*
- * fseeko64/ftello64 — POSIX names that GCC 15 libstdc++ ext11-inst.o
+ * fseeko64/ftello64 - POSIX names that GCC 15 libstdc++ ext11-inst.o
  * (stdio_sync_filebuf) expects. Map to our _fseeki64/_ftelli64 above.
  */
 int __cdecl fseeko64(FILE *stream, long long offset, int origin)

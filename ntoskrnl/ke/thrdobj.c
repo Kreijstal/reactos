@@ -171,7 +171,7 @@ KeAlertResumeThread(IN PKTHREAD Thread)
              * all waiters regardless of suspend depth), and KAPC
              * SuspendApc was folded into the multi-purpose SchedulerApc
              * slot. We poke the dispatcher header directly because the
-             * dispatcher lock is already held — KeSetEvent would
+             * dispatcher lock is already held - KeSetEvent would
              * re-acquire and deadlock. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
             Thread->SuspendSemaphore.Header.SignalState++;
@@ -375,7 +375,7 @@ KeFreezeAllThreads(VOID)
             if (!(OldCount) && !(Current->SuspendCount))
             {
                 /* Did we already insert it? Win8 multiplexed
-                 * SuspendApc into SchedulerApc — same KAPC slot, same
+                 * SuspendApc into SchedulerApc - same KAPC slot, same
                  * Inserted flag semantics. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
                 if (!Current->SuspendApc.Inserted)
@@ -649,7 +649,7 @@ KiSuspendThread(IN PVOID NormalContext,
                 IN PVOID SystemArgument2)
 {
     /* Non-alertable kernel-mode suspended wait. Win8 swapped the
-     * counted KSEMAPHORE for a KEVENT NotificationEvent — semantically
+     * counted KSEMAPHORE for a KEVENT NotificationEvent - semantically
      * the wait still blocks until the resume path satisfies the object,
      * but the satisfy uses the binary event interface. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
@@ -730,7 +730,7 @@ KeSuspendThread(PKTHREAD Thread)
             {
                 /* Already pending: clear the event so the future
                  * resume has to set it again. Binary state, not a
-                 * counter — SuspendCount carries the actual depth. */
+                 * counter - SuspendCount carries the actual depth. */
                 KiAcquireDispatcherLockAtSynchLevel();
                 Thread->SuspendEvent.Header.SignalState = 0;
                 KiReleaseDispatcherLockFromSynchLevel();
@@ -916,8 +916,8 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Initialize the Suspend APC. Win8 reorganised the KTHREAD: the
      * dedicated SuspendApc/SuspendSemaphore pair was replaced with a
      * multi-purpose SchedulerApc + a binary SuspendEvent
-     * (NotificationEvent). The semantics shift accordingly — the
-     * counted KSEMAPHORE became a single notification — but the
+     * (NotificationEvent). The semantics shift accordingly - the
+     * counted KSEMAPHORE became a single notification - but the
      * caller-visible KeSuspendThread/KeResumeThread contract is
      * preserved by tracking depth in SuspendCount and using
      * SetEvent-on-final-resume to release all waiters. */
@@ -943,7 +943,7 @@ KeInitThread(IN OUT PKTHREAD Thread,
                     KernelMode,
                     NULL);
 
-    /* Initialize the Suspend Event as a NotificationEvent — a single
+    /* Initialize the Suspend Event as a NotificationEvent - a single
      * SetEvent on full resume releases all waiters atomically. */
     KeInitializeEvent(&Thread->SuspendEvent, NotificationEvent, FALSE);
 #endif

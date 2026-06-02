@@ -196,7 +196,7 @@ typedef enum D2D1_PATH_SEGMENT
     D2D1_PATH_SEGMENT_FORCE_ROUND_LINE_JOIN = 0x2,
 } D2D1_PATH_SEGMENT;
 
-/* IDWriteGeometrySink == ID2D1SimplifiedGeometrySink — 10 vtable slots.
+/* IDWriteGeometrySink == ID2D1SimplifiedGeometrySink - 10 vtable slots.
  * Phase 2 GetGlyphRunOutline calls slots 5..9 to emit each glyph as a
  * filled, closed figure consisting of line segments and cubic Beziers
  * (quadratics from TrueType outlines are converted to cubics). */
@@ -280,7 +280,7 @@ HRESULT dwrite_create_glyph_run_analysis(
     DWRITE_MEASURING_MODE measuring_mode,
     FLOAT baseline_x, FLOAT baseline_y, void **out);
 
-/* Accessor for the font face's design EM units — used by glyph-run
+/* Accessor for the font face's design EM units - used by glyph-run
  * analysis when the family/emsize ratio matters.  Implemented in
  * dwrite_collection.c. */
 UINT16 dwrite_face_get_em_units(void *face);
@@ -288,7 +288,7 @@ HRESULT dwrite_face_get_logfont(void *face, LOGFONTW *lf);
 
 /* Slot ordinals (cumulative across base + extension interfaces).
  * Counted from the IDWriteFactory IDL chain in Wine's
- * include/dwrite{,_1,_2,_3}.idl as of 2026-05 — keep these in sync
+ * include/dwrite{,_1,_2,_3}.idl as of 2026-05 - keep these in sync
  * with the IDLs when bumping. */
 #define DW_FACTORY_GetGdiInterop                   17
 /* IDWriteFactory6 block starts at slot 48. */

@@ -2,7 +2,7 @@
  * COPYRIGHT:        See COPYING in the top level directory
  * PROJECT:          ReactOS kernel
  * FILE:             drivers/filesystem/ntfs/usn.c
- * PURPOSE:          NTFS filesystem driver — $UsnJrnl first-slice workers.
+ * PURPOSE:          NTFS filesystem driver - $UsnJrnl first-slice workers.
  *
  * This slice brings up a functional (but deliberately minimal) change journal:
  *
@@ -45,12 +45,12 @@
 /* Compact in-memory "FCB-lite" for the journal: a tiny handle that keeps
  * the MFT index around so workers don't repeat the \$Extend\$UsnJrnl path
  * walk on every call.  We deliberately don't register this with the FCB
- * table — it's private state owned by the Vcb, never exposed to create
+ * table - it's private state owned by the Vcb, never exposed to create
  * dispatch, and torn down on dismount.  Allocated with TAG_FCB so pool
  * tracking names it consistently with real FCBs.
  *
  * We reuse the full _FCB storage (via NtfsCreateFCB-compatible alloc) so
- * the type match in DEVICE_EXTENSION stays honest — we only fill in the
+ * the type match in DEVICE_EXTENSION stays honest - we only fill in the
  * fields we need (Identifier, MFTIndex, Vcb).
  */
 
@@ -85,7 +85,7 @@ static const WCHAR kUsnStreamMax[] = { L'$', L'M', L'a', L'x', 0 };
 /**
  * @internal
  * @brief  Allocate + seed a thin FCB to serve as the in-memory journal
- *         handle.  Only fields a worker might consult are populated —
+ *         handle.  Only fields a worker might consult are populated -
  *         the FCB is never attached to the FCB table.
  */
 static PNTFS_FCB
@@ -105,7 +105,7 @@ UsnAllocJournalFcb(PDEVICE_EXTENSION Vcb, ULONGLONG MftIndex)
     return Fcb;
 }
 
-/* UsnFreeJournalFcb — future dismount / re-mount tear-down.  Emplaced here
+/* UsnFreeJournalFcb - future dismount / re-mount tear-down.  Emplaced here
  * so the alloc/free pair lives next door; NtfsUsnInitJournal currently
  * attaches once per mount and never detaches.  Follow-up slice will wire
  * dismount to call this. */
@@ -226,7 +226,7 @@ UsnLookupJournalFile(PDEVICE_EXTENSION Vcb,
  *
  * Attach an existing on-disk journal to the Vcb.  Called from
  * NtfsMountVolume.  No-op (STATUS_OBJECT_NAME_NOT_FOUND) when the volume
- * has never had a journal — the mount path continues regardless.
+ * has never had a journal - the mount path continues regardless.
  */
 NTSTATUS
 NtfsUsnLoadJournal(PDEVICE_EXTENSION Vcb)
@@ -281,7 +281,7 @@ Error:
  * @brief  Create a new \$Extend\$UsnJrnl file record with $Max (resident)
  *         and $J (non-resident, zero-length sparse-like).
  *
- * This slice does not actually emit sparse runs for $J — since the first
+ * This slice does not actually emit sparse runs for $J - since the first
  * emission is what extends the attribute, we only need the attribute to
  * exist at zero length.  WriteAttribute on a zero-length non-resident
  * attribute will allocate clusters lazily via AddRun.
@@ -324,7 +324,7 @@ UsnCreateJournalFile(PDEVICE_EXTENSION Vcb,
  *
  * Handle FSCTL_CREATE_USN_JOURNAL semantics.  If the journal already
  * exists, reuse it.  Otherwise create it (currently STATUS_NOT_IMPLEMENTED
- * when the file doesn't exist yet — the userspace fixture pre-seeds it).
+ * when the file doesn't exist yet - the userspace fixture pre-seeds it).
  */
 NTSTATUS
 NtfsUsnInitJournal(PDEVICE_EXTENSION Vcb,
@@ -334,7 +334,7 @@ NtfsUsnInitJournal(PDEVICE_EXTENSION Vcb,
     NTSTATUS Status;
     ULONGLONG MftIndex = 0;
 
-    /* Already journalled? CREATE is idempotent — accept but don't
+    /* Already journalled? CREATE is idempotent - accept but don't
      * reset NextUsn, mirroring Windows where a second CREATE with the
      * same params returns the existing journal ID. */
     if (Vcb->UsnJournalFcb != NULL)
@@ -459,7 +459,7 @@ UsnSerialiseRecord(PUCHAR Buffer,
  *
  * NB: Relies on the existing sparse-write path in WriteAttribute to
  * extend the non-resident $J as needed.  Issue #33 explicitly calls out
- * that we do NOT reinvent that here — it's proven by test_sparse_write.
+ * that we do NOT reinvent that here - it's proven by test_sparse_write.
  */
 static NTSTATUS
 UsnAppendToJournal(PDEVICE_EXTENSION Vcb,

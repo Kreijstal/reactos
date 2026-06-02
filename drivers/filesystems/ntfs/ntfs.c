@@ -56,7 +56,7 @@ PNTFS_GLOBAL_DATA NtfsGlobalData = NULL;
  * FastIoDispatch.AcquireFileForNtCreateSection / ReleaseFileForNtCreateSection
  * handlers below.  Without them, FsRtlReleaseFile's default release path
  * would call ExReleaseResourceLite(FcbHeader->Resource) **unconditionally**
- * — even for FileObjects whose FsContext is an NTFS volume/global-data
+ * - even for FileObjects whose FsContext is an NTFS volume/global-data
  * structure (not a real FCB), where we *didn't* acquire here.  On such
  * objects the FSRTL header offset points at uninitialized or unrelated
  * memory, so the default release reads garbage at Resource and eventually
@@ -83,7 +83,7 @@ NtfsFilterCallbackAcquireForCreateSection(IN PFS_FILTER_CALLBACK_DATA CallbackDa
         return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
     }
 
-    /* Volume opens have no per-file resource — let MM proceed.  The paired
+    /* Volume opens have no per-file resource - let MM proceed.  The paired
      * FastIoDispatch.ReleaseFileForNtCreateSection handler below will also
      * skip releasing in this case, so the acquire/release stays balanced. */
     if (Fcb->Identifier.Type != NTFS_TYPE_FCB)
@@ -115,12 +115,12 @@ NtfsFilterCallbackAcquireForCreateSection(IN PFS_FILTER_CALLBACK_DATA CallbackDa
  *
  * Called by FsRtlAcquireFileExclusiveCommon when the filter callback
  * returns an unrecognized status code (the fall-through path).  For the
- * normal section-creation path this is not reached — the filter callback
+ * normal section-creation path this is not reached - the filter callback
  * returns STATUS_FILE_LOCKED_WITH_*. We still provide a typed handler
  * so any fallback acquire is bounded to real NTFS_TYPE_FCB objects and
  * stays symmetric with NtfsReleaseFileForNtCreateSection.
  *
- * See issue #11 for why a typed handler is required — without it the
+ * See issue #11 for why a typed handler is required - without it the
  * default release path touches FcbHeader->Resource for non-FCB FileObjects
  * and corrupts accounting. */
 VOID
@@ -145,7 +145,7 @@ NtfsAcquireFileForNtCreateSection(IN PFILE_OBJECT FileObject)
  * AcquireFileForNtCreateSection).  Pairing this with the filter callback
  * and the acquire handler above guarantees that releases are only
  * performed on NTFS_TYPE_FCB objects whose RFCB.Resource is initialized
- * — which is what the filter callback check above guards on the acquire
+ * - which is what the filter callback check above guards on the acquire
  * side.  Without this typed handler, FsRtlReleaseFile's default path
  * would release on every FileObject FsContext (including NTFS volumes
  * and the driver's global-data device extension), reading Resource from

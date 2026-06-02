@@ -107,7 +107,7 @@
  * MM_READWRITE, so MI_IS_PAGE_WRITEABLE / MI_MAKE_WRITE_PAGE must read and
  * write the bit-1 field too or probes will think every R/W user page is
  * read-only.  The NDK MMPTE_HARDWARE struct renames bit 1 to `Dirty1` at
- * NTDDI_LONGHORN+ for software dirty-tracking purposes — we ignore that
+ * NTDDI_LONGHORN+ for software dirty-tracking purposes - we ignore that
  * layering here because the MM on our side is the one that owns the bit
  * and treats it strictly as the hardware R/W permission. */
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)

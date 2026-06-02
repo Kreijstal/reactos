@@ -97,7 +97,7 @@ WSPAcceptEx(
 
     OutputLength = dwReceiveDataLength + dwLocalAddressLength + dwRemoteAddressLength;
 
-    /* Set up for IOCP/overlapped — match pattern from WSPRecv */
+    /* Set up for IOCP/overlapped - match pattern from WSPRecv */
     IOSB = (PIO_STATUS_BLOCK)&lpOverlapped->Internal;
     IOSB->Status = STATUS_PENDING;
     IOSB->Information = 0;
