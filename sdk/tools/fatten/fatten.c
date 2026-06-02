@@ -122,8 +122,35 @@ int need_mount(void)
     return FR_OK;
 }
 
+int force_mount(void)
+{
+    int r;
+
+    if (isMounted)
+    {
+        r = f_mount(NULL, "0:", 0);
+        isMounted = 0;
+        if (r)
+            return r;
+    }
+
+    r = f_mount(&g_Filesystem, "0:", 1);
+    if (r)
+        return r;
+
+    isMounted = 1;
+    return FR_OK;
+}
+
 #define NEED_MOUNT() \
     do { ret = need_mount(); if(ret) \
+    {\
+        fprintf(stderr, "Error: Could not mount disk (%d).\n", ret); \
+        goto exit; \
+    } } while(0)
+
+#define FORCE_MOUNT() \
+    do { ret = force_mount(); if(ret) \
     {\
         fprintf(stderr, "Error: Could not mount disk (%d).\n", ret); \
         goto exit; \
@@ -211,6 +238,14 @@ int main(int oargc, char* oargv[])
                 goto exit;
             }
 
+            ret = f_mount(NULL, "0:", 0);
+            isMounted = 0;
+            if (ret)
+            {
+                fprintf(stderr, "Error: Could not unmount formatted disk (%d).\n", ret);
+                goto exit;
+            }
+
             // Arg 2: custom header label (optional)
             if (nargs > 1)
             {
@@ -258,6 +293,8 @@ int main(int oargc, char* oargv[])
                     ret = 1;
                     goto exit;
                 }
+
+                FORCE_MOUNT();
 
                 if (disk_read(0, buff, 0, 1))
                 {
@@ -322,7 +359,7 @@ int main(int oargc, char* oargv[])
 
             fclose(fe);
 
-            NEED_MOUNT();
+            FORCE_MOUNT();
 
             if (disk_read(0, temp, 0, 1))
             {
