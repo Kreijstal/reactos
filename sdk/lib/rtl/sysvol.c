@@ -296,7 +296,7 @@ RtlpSysVolCheckOwnerAndSecurity(IN HANDLE DirectoryHandle,
            size of a self-relative security descriptor */
         ASSERT(AbsSDSize > DescriptorSize);
 
-        AbsSD = RtlpAllocateMemory(DescriptorSize,
+        AbsSD = RtlpAllocateMemory(AbsSDSize,
                                    'dSeS');
         if (AbsSD == NULL)
         {
