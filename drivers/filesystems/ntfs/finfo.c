@@ -455,7 +455,7 @@ NtfsGetAllInformation(PFILE_OBJECT FileObject,
             return Status;
     }
 
-    /* EA, Access, Mode, Alignment — NTFS doesn't track these per-file
+    /* EA, Access, Mode, Alignment - NTFS doesn't track these per-file
      * so report the safe defaults the other ReactOS file systems use. */
     AllInfo->EaInformation.EaSize = 0;
     AllInfo->AccessInformation.AccessFlags = 0;
@@ -474,7 +474,7 @@ NtfsGetAllInformation(PFILE_OBJECT FileObject,
     *BufferLength = (*BufferLength - NameOffset) - NameBufferLength + NameOffset;
 
     /* NtfsGetNameInformation returns STATUS_BUFFER_OVERFLOW if the name
-     * didn't fully fit — propagate that up. */
+     * didn't fully fit - propagate that up. */
     return Status;
 }
 

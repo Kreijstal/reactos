@@ -647,7 +647,7 @@ NTSTATUS AfdSuperAccept( PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return Status;
     }
 
-    /* No pending connection — pend the IRP for later completion */
+    /* No pending connection - pend the IRP for later completion */
     AFD_DbgPrint(MID_TRACE,("SuperAccept: pending IRP\n"));
     return LeaveIrpUntilLater(FCB, Irp, FUNCTION_SUPERACCEPT);
 }

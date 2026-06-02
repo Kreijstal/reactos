@@ -1,5 +1,5 @@
 /*
- * smb2rdr — SMB2/3 mini-redirector for ReactOS.
+ * smb2rdr - SMB2/3 mini-redirector for ReactOS.
  * Pairs with a usermode daemon linked against libsmb2 for the wire-protocol
  * work; the driver just handles RDBSS integration and IRP dispatch.
  */

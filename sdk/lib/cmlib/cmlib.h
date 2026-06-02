@@ -26,7 +26,7 @@
     #define NTDDI_VISTA                         NTDDI_WIN6
     #define NTDDI_WIN7                          0x06010000
 
-    // Track the kernel's NTDDI level — CMakeLists.txt forwards
+    // Track the kernel's NTDDI level - CMakeLists.txt forwards
     // -DNTDDI_VERSION=${REACTOS_TARGET_NTDDI} for both kernel and host builds.
     // Fall back to WS03SP4 if no explicit value was provided (legacy behaviour).
     #ifndef NTDDI_VERSION

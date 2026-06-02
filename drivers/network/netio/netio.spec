@@ -3,7 +3,7 @@
 @ stdcall WskRegister(ptr ptr)
 @ stdcall WskReleaseProviderNPI(ptr)
 
-; Network Module Registrar (NMR) stubs — dev-nt6-1 branch
+; Network Module Registrar (NMR) stubs - dev-nt6-1 branch
 @ stdcall NmrRegisterClient(ptr ptr ptr)
 @ stdcall NmrDeregisterClient(ptr)
 @ stdcall NmrWaitForClientDeregisterComplete(ptr)
@@ -14,7 +14,7 @@
 @ stdcall NmrClientDetachProviderComplete(ptr)
 @ stdcall NmrProviderDetachClientComplete(ptr)
 
-; Windows Filtering Platform (WFP) kernel stubs — dev-nt6-1 branch
+; Windows Filtering Platform (WFP) kernel stubs - dev-nt6-1 branch
 @ stdcall FwpsCalloutRegister0(ptr ptr ptr)
 @ stdcall FwpsCalloutUnregisterById0(long)
 @ stdcall FwpsCalloutUnregisterByKey0(ptr)
