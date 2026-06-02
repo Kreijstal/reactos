@@ -224,7 +224,7 @@ KiInsertQueueApc(IN PKAPC Apc,
                 {
                     /* Lock the thread.
                      * On NTDDI_WIN8+, KTHREAD::ApcQueueLock has been
-                     * consolidated into KTHREAD::ThreadLock — the caller of
+                     * consolidated into KTHREAD::ThreadLock - the caller of
                      * KiInsertQueueApc (KeInsertQueueApc et al.) already holds
                      * this thread's ApcLock, which IS the ThreadLock at Win8+,
                      * so a second acquire would self-deadlock. See

@@ -79,7 +79,7 @@ Ndis6DispatchUnknown(
     _In_ PIRP           Irp);
 
 /* ============================================================================
- *  NdisMRegisterMiniportDriver — the entry point e1000e (and others) call
+ *  NdisMRegisterMiniportDriver - the entry point e1000e (and others) call
  *  from DriverEntry to register themselves as an NDIS 6 miniport.
  * ============================================================================ */
 
@@ -102,7 +102,7 @@ NdisMRegisterMiniportDriver(
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
-    /* Validate the characteristics minimally — we don't enforce every
+    /* Validate the characteristics minimally - we don't enforce every
      * required handler because the bridge can tolerate some being NULL. */
     if (MiniportDriverCharacteristics->Header.Type !=
         NDIS_OBJECT_TYPE_MINIPORT_DRIVER_CHARACTERISTICS)
@@ -160,7 +160,7 @@ NdisMRegisterMiniportDriver(
     /* Default-handle every other major function so the IO manager
      * doesn't return STATUS_INVALID_DEVICE_REQUEST. IRP_MJ_DEVICE_CONTROL,
      * IRP_MJ_CREATE, IRP_MJ_CLOSE, etc. stay at STATUS_NOT_SUPPORTED
-     * until someone needs them — e1000e doesn't use them. */
+     * until someone needs them - e1000e doesn't use them. */
     for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
     {
         if (DriverObject->MajorFunction[i] == NULL)
@@ -198,7 +198,7 @@ NdisMDeregisterMiniportDriver(
 }
 
 /* ============================================================================
- *  NdisMSetMiniportAttributes — driver pushes its per-adapter context and
+ *  NdisMSetMiniportAttributes - driver pushes its per-adapter context and
  *  capabilities back to the library during MiniportInitializeEx.
  *
  *  The driver may call this several times with different Header.Type
@@ -280,13 +280,13 @@ NdisMSetMiniportAttributes(
 
         case NDIS_OBJECT_TYPE_DEFAULT:
         default:
-            /* RSS and other attributes — accept and ignore for now. */
+            /* RSS and other attributes - accept and ignore for now. */
             return NDIS_STATUS_SUCCESS;
     }
 }
 
 /* ============================================================================
- *  PnP dispatchers — proper WDM function-driver pattern
+ *  PnP dispatchers - proper WDM function-driver pattern
  *
  *  An NDIS 6 miniport is a function driver sitting on top of the PCI bus
  *  driver's PDO. Every PnP IRP MUST pass through our FDO AND reach the
@@ -446,7 +446,7 @@ Ndis6DispatchPnp(
         {
             /* ---------------------------------------------------------
              *  Forward START down first so PCI (the PDO's driver)
-             *  finishes its own device setup — DMA adapter registration,
+             *  finishes its own device setup - DMA adapter registration,
              *  power state transition, and the per-device bus-interface
              *  context that IRP_MN_QUERY_INTERFACE later depends on.
              * --------------------------------------------------------- */
@@ -488,7 +488,7 @@ Ndis6DispatchPnp(
             /* Now call the miniport's InitializeHandlerEx. If it succeeds,
              * mark the adapter as initialized so the matching HaltEx will
              * run on REMOVE. If it fails, the driver has cleaned up
-             * internally — we must NOT call HaltEx (MS DDK contract). */
+             * internally - we must NOT call HaltEx (MS DDK contract). */
             NdisStatus = Ndis6CallMiniportInitializeEx(Adapter);
             if (NdisStatus == NDIS_STATUS_SUCCESS)
             {
@@ -551,11 +551,11 @@ Ndis6DispatchPnp(
             return Ndis6PassThroughIrp(LowerDevice, Irp);
 
         default:
-            /* Every other PnP IRP — IRP_MN_QUERY_INTERFACE (critical:
+            /* Every other PnP IRP - IRP_MN_QUERY_INTERFACE (critical:
              * BUS_INTERFACE_STANDARD), IRP_MN_QUERY_CAPABILITIES,
              * IRP_MN_QUERY_PNP_DEVICE_STATE, IRP_MN_FILTER_RESOURCE_REQUIREMENTS,
              * IRP_MN_QUERY_DEVICE_RELATIONS, IRP_MN_QUERY_ID,
-             * IRP_MN_QUERY_BUS_INFORMATION, etc. — pass through to PCI. */
+             * IRP_MN_QUERY_BUS_INFORMATION, etc. - pass through to PCI. */
             return Ndis6PassThroughIrp(LowerDevice, Irp);
     }
 }
@@ -665,7 +665,7 @@ Ndis6NotifyMiniportDevicePnPEvent(
         (struct _NET_DEVICE_PNP_EVENT*)&NetEvent);
 }
 
-/* D3: Ndis6IndicateNetPnPEvent — fan a NET_PNP_EVENT out to every
+/* D3: Ndis6IndicateNetPnPEvent - fan a NET_PNP_EVENT out to every
  * bound legacy protocol driver. The protocol's PnPEventHandler is
  * called with the event struct. */
 VOID
@@ -706,7 +706,7 @@ Ndis6IndicateNetPnPEvent(
 
         Context = Binding->NdisOpenBlock.ProtocolBindingContext;
 
-        /* Drop lock across callback — protocols re-enter the bridge. */
+        /* Drop lock across callback - protocols re-enter the bridge. */
         KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
         CallbackStatus = Handler(Context, &Event);
         (void)CallbackStatus;
@@ -756,7 +756,7 @@ Ndis6DispatchPower(
      *   - On D0 entry: forward down first so PCI restores power, then
      *     call RestartHandler so the miniport resumes.
      *
-     * The miniport's pause/restart handlers may be NULL — most NDIS 6
+     * The miniport's pause/restart handlers may be NULL - most NDIS 6
      * drivers register them but a few don't. We treat NULL as "nothing
      * to do" and just pass the IRP through. */
     if (Ext != NULL &&
@@ -768,7 +768,7 @@ Ndis6DispatchPower(
 
         if (NewState != PowerDeviceD0 && Ext->Initialized)
         {
-            /* Going to a low-power state — pause the miniport now,
+            /* Going to a low-power state - pause the miniport now,
              * then forward down. */
             if (Ext->DriverBlock != NULL &&
                 Ext->DriverBlock->Characteristics.PauseHandler != NULL)
@@ -784,7 +784,7 @@ Ndis6DispatchPower(
         }
         else if (NewState == PowerDeviceD0 && Ext->Initialized)
         {
-            /* Going to D0 — forward down first so PCI restores power,
+            /* Going to D0 - forward down first so PCI restores power,
              * then call RestartHandler from the completion routine
              * (Ndis6PowerCompletionRoutine). The completion routine
              * runs after PCI has finished its async resume work. */
@@ -802,7 +802,7 @@ Ndis6DispatchPower(
                 PoStartNextPowerIrp(Irp);
                 return PoCallDriver(LowerDevice, Irp);
             }
-            /* Allocation failed — fall through to the simple path. */
+            /* Allocation failed - fall through to the simple path. */
         }
     }
 
@@ -815,7 +815,7 @@ Ndis6DispatchPower(
     return PoCallDriver(LowerDevice, Irp);
 }
 
-/* System control (WMI) dispatch — pass through to PCI unchanged. */
+/* System control (WMI) dispatch - pass through to PCI unchanged. */
 static NTSTATUS NTAPI
 Ndis6DispatchSystemControl(
     _In_ PDEVICE_OBJECT DeviceObject,

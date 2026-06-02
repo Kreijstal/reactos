@@ -1,5 +1,5 @@
 /*
- * smbclient.exe — libsmb2-backed SMB2/3 client for ReactOS.
+ * smbclient.exe - libsmb2-backed SMB2/3 client for ReactOS.
  * Supports: ls <smb-url>
  */
 

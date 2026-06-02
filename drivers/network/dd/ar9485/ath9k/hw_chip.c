@@ -7,7 +7,7 @@
  *              builds a small struct ath_hw on the caller's stack so the
  *              verbatim code can run without the full upstream struct.
  *
- *              Slice 2 of the AR9485 Phase 2a port — see linux-compat.h
+ *              Slice 2 of the AR9485 Phase 2a port - see linux-compat.h
  *              and ath9k/hw_min.h for the typed shim that lets this
  *              verbatim source compile against NDIS.
  */
@@ -34,7 +34,7 @@ ar9485_reg_write(void *ctx, u32 val, u32 reg_offset)
  *  VERBATIM from Linux drivers/net/wireless/ath/ath9k/hw.c:254
  *
  *  Only modification: removed AR_SREV_9100 PCIe override (Linux late-init
- *  path) — the AR9485 always reports the new (val==0xFF sentinel) layout
+ *  path) - the AR9485 always reports the new (val==0xFF sentinel) layout
  *  so the relevant code path is the if-branch below.  The dead branches
  *  are kept verbatim so a future cherry-pick from upstream merges
  *  cleanly with `git apply`.

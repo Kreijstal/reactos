@@ -8,14 +8,14 @@
  * codec that turns one NTFS compression unit of raw compressed bytes
  * back into uncompressed bytes.  A compression unit is typically 16
  * KiB (16 clusters of 1 KiB, or 4 clusters of 4 KiB); the codec is
- * independent of the cluster size — it only cares about byte buffers.
+ * independent of the cluster size - it only cares about byte buffers.
  *
  * This is a fresh re-implementation from public LZNT1 documentation:
  *
  *   - [MS-XCA] Xpress Compression Algorithm Specification
  *     (section for the LZNT1 variant), Microsoft Open Specifications.
  *   - ntfs-3g libntfs-3g/compress.c (GPL-2.0+, license-compatible with
- *     the rest of this driver) — referenced for algorithmic shape
+ *     the rest of this driver) - referenced for algorithmic shape
  *     (block header format, symbol-split heuristic) but not copied.
  *
  * NOT copied from Linux ntfs3's fs/ntfs3/lznt.c (GPL-2.0-only,
@@ -116,7 +116,7 @@ NtfsLznt1Decompress(const UCHAR *In,
         return STATUS_INVALID_PARAMETER;
 
     /* Zero the full output up front; the end-of-CU marker below then
-     * only needs to stop consuming — trailing bytes are already zero.
+     * only needs to stop consuming - trailing bytes are already zero.
      * This also guarantees the caller sees a defined buffer on early
      * error returns. */
     RtlZeroMemory(Out, OutLen);

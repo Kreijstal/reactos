@@ -6,7 +6,7 @@
 # wlanapi / ndisuio / DOT11 OID surface can be exercised under QEMU
 # without any real silicon.
 #
-# Same NT 6.0+ gate as e1000e — needs NDIS 6.20 NET_BUFFER_LIST datapath
+# Same NT 6.0+ gate as e1000e - needs NDIS 6.20 NET_BUFFER_LIST datapath
 # and the DOT11 OID surface (added 2026-05 in sdk/include/psdk/windot11.h).
 #
 

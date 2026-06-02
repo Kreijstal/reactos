@@ -62,7 +62,7 @@ KeWaitForGate(IN PKGATE Gate,
 
             /* Lock the thread.
              * On NTDDI_WIN8+, KTHREAD::ApcQueueLock has been consolidated into
-             * KTHREAD::ThreadLock — the queued ApcLock acquired above already
+             * KTHREAD::ThreadLock - the queued ApcLock acquired above already
              * holds the only per-thread lock, so a second acquire would
              * self-deadlock against itself. See KiApcLockOf() in ke_x.h. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
@@ -119,7 +119,7 @@ KeWaitForGate(IN PKGATE Gate,
             /* Set swap busy */
             KiSetThreadSwapBusy(Thread);
 
-            /* Release the thread lock (only acquired pre-Win8 — see above). */
+            /* Release the thread lock (only acquired pre-Win8 - see above). */
 #if (NTDDI_VERSION < NTDDI_WIN8)
             KiReleaseThreadLock(Thread);
 #endif

@@ -49,7 +49,7 @@ unsigned int __cdecl btowc(int c)
 }
 
 /*
- * wcrtomb — convert wide char to multibyte (restartable).
+ * wcrtomb - convert wide char to multibyte (restartable).
  * ReactOS CRT only supports single-byte locales, so mbstate_t is unused.
  */
 size_t __cdecl wcrtomb(char *s, wchar_t wc, void *ps)
@@ -63,7 +63,7 @@ size_t __cdecl wcrtomb(char *s, wchar_t wc, void *ps)
 }
 
 /*
- * mbrtowc — convert multibyte to wide char (restartable).
+ * mbrtowc - convert multibyte to wide char (restartable).
  */
 size_t __cdecl mbrtowc(wchar_t *pwc, const char *s, size_t n, void *ps)
 {
@@ -85,7 +85,7 @@ size_t __cdecl mbrtowc(wchar_t *pwc, const char *s, size_t n, void *ps)
 #endif /* DLL_EXPORT_VERSION < 0x600 */
 
 /*
- * lseek64 / fstat64 — POSIX names that GCC 15 libstdc++ basic_file.o expects.
+ * lseek64 / fstat64 - POSIX names that GCC 15 libstdc++ basic_file.o expects.
  * Map to the MSVC CRT underscore-prefixed versions.
  */
 long long __cdecl _lseeki64(long fd, long long offset, long origin);

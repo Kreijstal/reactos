@@ -2246,7 +2246,7 @@ XHCI_EnableSlot(IN PXHCI_EXTENSION XhciExtension,
     PXHCI_TRB enqueue_pointer = HcResourcesVA->CommandRing.enqueue_pointer;
     
     // Calculate the exact physical address where this TRB will be placed
-    ULONG TrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer - 
+    ULONG TrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer -
                             (ULONG_PTR)&HcResourcesVA->CommandRing.firstSeg.XhciTrb[0]) / sizeof(XHCI_TRB);
     TrbPA.QuadPart = HcResourcesPA.QuadPart + 
                      FIELD_OFFSET(XHCI_HC_RESOURCES, CommandRing.firstSeg.XhciTrb[0]) +
@@ -2475,7 +2475,7 @@ XHCI_AddressDevice(IN PXHCI_EXTENSION XhciExtension,
     PXHCI_TRB enqueue_pointer = HcResourcesVA->CommandRing.enqueue_pointer;
     
     // Calculate the exact physical address where this TRB will be placed
-    ULONG TrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer - 
+    ULONG TrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer -
                             (ULONG_PTR)&HcResourcesVA->CommandRing.firstSeg.XhciTrb[0]) / sizeof(XHCI_TRB);
     TrbPA.QuadPart = HcResourcesPA.QuadPart + 
                      FIELD_OFFSET(XHCI_HC_RESOURCES, CommandRing.firstSeg.XhciTrb[0]) +
@@ -2581,7 +2581,7 @@ XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
      * SlotState==1), Configure Endpoint will fail with Context State Error
      * (completion code 19 in this driver's hardware.h table).  Our
      * XHCI_AddressDevice is only ever called with BlockSetRequest=FALSE,
-     * which encodes BSR=1 in the TRB — so after first-stage enumeration
+     * which encodes BSR=1 in the TRB - so after first-stage enumeration
      * the slot is stuck in Default.  Transition Default -> Addressed here
      * by re-issuing AddressDevice with BSR=0 (BlockSetRequest=TRUE).  The
      * DCBAA fix in XHCI_SetupDCBAAEntry now makes OutputContext->SlotContext
@@ -3022,7 +3022,7 @@ XHCI_SetupDCBAAEntry(IN PXHCI_EXTENSION XhciExtension,
      *
      * Without this, the controller writes the Slot Context on top of our
      * InputControlContext bytes, and subsequent reads of
-     * OutputContext->SlotContext return stale zeros — causing Configure
+     * OutputContext->SlotContext return stale zeros - causing Configure
      * Endpoint to see an invalid Slot Context (Parameter Error). */
     OutputContextPA = MmGetPhysicalAddress(&OutputContext->SlotContext);
 
