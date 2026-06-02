@@ -219,7 +219,8 @@
       if ( ( face->kern_avail_bits & mask ) == 0 )
         goto NextTable;
 
-      FT_ASSERT( p + 8 <= next ); /* tested in tt_face_load_kern */
+      if ( p + 8 > next )  /* tested in tt_face_load_kern */
+        goto NextTable;
 
       num_pairs = FT_NEXT_USHORT( p );
       p        += 6;
