@@ -277,7 +277,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     Fcb = (PNTFS_FCB)FileObject->FsContext;
 
-    // Volume and volume stream reads go directly to the storage device —
+    // Volume and volume stream reads go directly to the storage device -
     // don't route through MFT attributes (MFTIndex 0 is $MFT, and the
     // volume stream represents the raw volume for the cache manager).
     if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
@@ -292,6 +292,11 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         if (NT_SUCCESS(VStatus))
             *LengthRead = Length;
         return VStatus;
+    }
+
+    if (NtfsFCBIsDirectory(Fcb))
+    {
+        return STATUS_INVALID_DEVICE_REQUEST;
     }
 
     if (NtfsFCBIsCompressed(Fcb))
@@ -310,7 +315,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     /* Cache hit: reuse the FCB-owned MFT record buffer.  NtfsRead has
      * already taken the FCB resource shared, so the cached pointer is
-     * stable for the duration of this call — writers take it exclusive
+     * stable for the duration of this call - writers take it exclusive
      * and call NtfsInvalidateCachedFileRecord before mutating disk. */
     FileRecord = Fcb->CachedFileRecord;
 
@@ -372,7 +377,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         FindCloseAttribute(&Context);
 
         ReleaseAttributeContext(DataContext);
-        /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
+        /* FileRecord owned by Fcb->CachedFileRecord - do not free here. */
         return Status;
     }
 
@@ -381,7 +386,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     {
         NTFS_TRACE("Reading beyond stream end!\n");
         ReleaseAttributeContext(DataContext);
-        /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
+        /* FileRecord owned by Fcb->CachedFileRecord - do not free here. */
         return STATUS_END_OF_FILE;
     }
 
@@ -409,7 +414,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         {
             DPRINT1("Not enough memory!\n");
             ReleaseAttributeContext(DataContext);
-            /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
+            /* FileRecord owned by Fcb->CachedFileRecord - do not free here. */
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         AllocatedBuffer = TRUE;
@@ -422,7 +427,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     {
         DPRINT1("Read failure!\n");
         ReleaseAttributeContext(DataContext);
-        /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
+        /* FileRecord owned by Fcb->CachedFileRecord - do not free here. */
         if (AllocatedBuffer)
         {
             ExFreePoolWithTag(ReadBuffer, TAG_NTFS);
@@ -431,7 +436,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     }
 
     ReleaseAttributeContext(DataContext);
-    /* FileRecord owned by Fcb->CachedFileRecord — do not free here. */
+    /* FileRecord owned by Fcb->CachedFileRecord - do not free here. */
 
     *LengthRead = ToRead;
 
@@ -729,7 +734,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     DPRINT("Fcb->PathName: %wS\n", Fcb->PathName);
     DPRINT("Fcb->ObjectName: %wS\n", Fcb->ObjectName);
 
-    // Volume writes go directly to the storage device — don't route through
+    // Volume writes go directly to the storage device - don't route through
     // MFT attributes. The volume FCB has MFTIndex 0 ($MFT), so WriteAttribute
     // would write INTO the MFT data, corrupting it.
     if (Fcb->Flags & FCB_IS_VOLUME)
@@ -845,7 +850,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                     Fcb->ObjectName, WriteOffset, Length, StreamSize);
             if (WriteOffset >= StreamSize)
             {
-                // Nothing to write — the entire range is past EOF.
+                // Nothing to write - the entire range is past EOF.
                 NTFS_TRACE("NtfsWriteFile PAGING: SKIP (past EOF)\n");
                 ReleaseAttributeContext(DataContext);
                 ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -1127,7 +1132,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         !NonCachedIo &&
         !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
     {
-        /* Extend the file if needed — allocate clusters and update sizes */
+        /* Extend the file if needed - allocate clusters and update sizes */
         if (ByteOffset.QuadPart + Length > Fcb->RFCB.FileSize.QuadPart)
         {
             LARGE_INTEGER NewSize;
