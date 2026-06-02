@@ -40,6 +40,156 @@ extern BOOLEAN CmFirstTime;
 
 /* FUNCTIONS ******************************************************************/
 
+typedef struct _CMP_BOOT_USER_KEY_ACE
+{
+    PSID *Sid;
+    ACCESS_MASK AccessMask;
+    UCHAR AceFlags;
+} CMP_BOOT_USER_KEY_ACE, *PCMP_BOOT_USER_KEY_ACE;
+
+static PSECURITY_DESCRIPTOR
+CmpBuildBootUserKeySecurityDescriptor(
+    _In_reads_(AceCount) const CMP_BOOT_USER_KEY_ACE *Aces,
+    _In_ ULONG AceCount)
+{
+    SECURITY_DESCRIPTOR AbsoluteSd;
+    PSECURITY_DESCRIPTOR SelfRelativeSd = NULL;
+    PACL Dacl;
+    ULONG AclLength, Length = 0, i;
+    NTSTATUS Status;
+
+    AclLength = sizeof(ACL);
+    for (i = 0; i < AceCount; i++)
+    {
+        AclLength += FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                     RtlLengthSid(*Aces[i].Sid);
+    }
+
+    Dacl = ExAllocatePoolWithTag(PagedPool, AclLength, TAG_CMSD);
+    if (Dacl == NULL)
+        return NULL;
+
+    Status = RtlCreateAcl(Dacl, AclLength, ACL_REVISION);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    for (i = 0; i < AceCount; i++)
+    {
+        Status = RtlAddAccessAllowedAceEx(Dacl,
+                                          ACL_REVISION,
+                                          Aces[i].AceFlags,
+                                          Aces[i].AccessMask,
+                                          *Aces[i].Sid);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+    }
+
+    Status = RtlCreateSecurityDescriptor(&AbsoluteSd,
+                                         SECURITY_DESCRIPTOR_REVISION);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = RtlSetOwnerSecurityDescriptor(&AbsoluteSd, SeAliasAdminsSid, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = RtlSetGroupSecurityDescriptor(&AbsoluteSd, SeLocalSystemSid, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = RtlSetDaclSecurityDescriptor(&AbsoluteSd, TRUE, Dacl, FALSE);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = RtlAbsoluteToSelfRelativeSD(&AbsoluteSd, NULL, &Length);
+    if (Status == STATUS_BUFFER_TOO_SMALL)
+    {
+        SelfRelativeSd = ExAllocatePoolWithTag(PagedPool, Length, TAG_CMSD);
+        if (SelfRelativeSd != NULL)
+        {
+            Status = RtlAbsoluteToSelfRelativeSD(&AbsoluteSd,
+                                                 SelfRelativeSd,
+                                                 &Length);
+            if (!NT_SUCCESS(Status))
+            {
+                ExFreePoolWithTag(SelfRelativeSd, TAG_CMSD);
+                SelfRelativeSd = NULL;
+            }
+        }
+    }
+
+Cleanup:
+    ExFreePoolWithTag(Dacl, TAG_CMSD);
+    return SelfRelativeSd;
+}
+
+static VOID
+CmpCreateBootUserKey(
+    _In_ PCWSTR KeyName,
+    _In_reads_(AceCount) const CMP_BOOT_USER_KEY_ACE *Aces,
+    _In_ ULONG AceCount)
+{
+    UNICODE_STRING KeyNameString;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    PSECURITY_DESCRIPTOR SecurityDescriptor;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+
+    SecurityDescriptor = CmpBuildBootUserKeySecurityDescriptor(Aces, AceCount);
+    if (SecurityDescriptor == NULL)
+        return;
+
+    RtlInitUnicodeString(&KeyNameString, KeyName);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &KeyNameString,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               SecurityDescriptor);
+
+    Status = ZwCreateKey(&KeyHandle,
+                         KEY_ALL_ACCESS,
+                         &ObjectAttributes,
+                         0,
+                         NULL,
+                         REG_OPTION_VOLATILE,
+                         NULL);
+    if (NT_SUCCESS(Status))
+        ZwClose(KeyHandle);
+
+    ExFreePoolWithTag(SecurityDescriptor, TAG_CMSD);
+}
+
+static VOID
+CmpCreateBootServiceProfileKeys(VOID)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    static const CMP_BOOT_USER_KEY_ACE NetworkServiceAces[] =
+    {
+        { &SeNetworkServiceSid, KEY_ALL_ACCESS, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE },
+        { &SeLocalSystemSid,    KEY_ALL_ACCESS, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE },
+        { &SeAliasAdminsSid,    KEY_ALL_ACCESS, OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE },
+        { &SeRestrictedSid,     KEY_READ,       OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE },
+        { &SeAllAppPackagesSid, KEY_READ,       0 },
+    };
+#else
+    static const CMP_BOOT_USER_KEY_ACE NetworkServiceAces[] =
+    {
+        { &SeNetworkServiceSid, KEY_ALL_ACCESS, 0 },
+        { &SeLocalSystemSid,    KEY_ALL_ACCESS, 0 },
+        { &SeAliasAdminsSid,    KEY_ALL_ACCESS, 0 },
+        { &SeRestrictedSid,     KEY_READ,       0 },
+        { &SeNetworkServiceSid, GENERIC_ALL,    INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE },
+        { &SeLocalSystemSid,    GENERIC_ALL,    INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE },
+        { &SeAliasAdminsSid,    GENERIC_ALL,    INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE },
+        { &SeRestrictedSid,     GENERIC_READ,   INHERIT_ONLY_ACE | CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE },
+    };
+#endif
+
+    CmpCreateBootUserKey(L"\\Registry\\User\\S-1-5-20",
+                         NetworkServiceAces,
+                         RTL_NUMBER_OF(NetworkServiceAces));
+}
+
 BOOLEAN
 NTAPI
 CmpLinkKeyToHive(
@@ -1658,10 +1808,10 @@ CmpInitializeHiveList(VOID)
     CmpLinkKeyToHive(L"\\Registry\\Machine\\Security\\SAM",
                      L"\\Registry\\Machine\\SAM\\SAM");
 
-    /* Link S-1-5-18 to .Default */
     CmpNoVolatileCreates = FALSE;
     CmpLinkKeyToHive(L"\\Registry\\User\\S-1-5-18",
-                     L"\\Registry\\User\\.Default");
+                     L"\\REGISTRY\\USER\\.DEFAULT");
+    CmpCreateBootServiceProfileKeys();
     CmpNoVolatileCreates = TRUE;
 }
 
