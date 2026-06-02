@@ -213,7 +213,7 @@ GetLogicalProcessorInformationEx(
 
             default:
                 /* RelationGroup / future relationships aren't produced by the
-                 * legacy info-class — skip silently. */
+                 * legacy info-class - skip silently. */
                 break;
         }
 

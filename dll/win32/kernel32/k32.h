@@ -30,7 +30,7 @@
 
 #include <tlhelp32.h>
 
-/* NTDDI_VERSION is set globally from REACTOS_TARGET_NT — do not override here.
+/* NTDDI_VERSION is set globally from REACTOS_TARGET_NT - do not override here.
  * Forcing WS03SP1 caused SYSTEM_PERFORMANCE_INFORMATION (and other NDK structs)
  * to be the pre-Vista size, while ntoskrnl/HAL/win32k all use the configured
  * NTDDI level. The size mismatch made NtQuerySystemInformation reject calls

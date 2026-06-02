@@ -1,5 +1,5 @@
 /*
- * smb2d — usermode SMB2 daemon service.  This file hosts the SCM plumbing
+ * smb2d - usermode SMB2 daemon service.  This file hosts the SCM plumbing
  * (ServiceMain / control handler) and spawns a worker thread that runs
  * the upcall loop in daemon.c.  The daemon itself owns all interaction
  * with the smb2rdr driver; service.c just keeps SCM informed.
