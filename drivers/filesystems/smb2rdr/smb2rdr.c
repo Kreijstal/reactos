@@ -1,5 +1,5 @@
 /*
- * smb2rdr — SMB2/3 mini-redirector, skeleton.
+ * smb2rdr - SMB2/3 mini-redirector, skeleton.
  *
  * Shape follows drivers/filesystems/nfs/nfs41_driver.c: DriverEntry calls
  * RxDriverEntry + RxRegisterMinirdr, installs a MINIRDR_DISPATCH ops table,
@@ -89,8 +89,8 @@ typedef struct _SMB2RDR_FCB_EXTENSION {
 
 /* SRV_OPEN extension: tracks the per-SRV_OPEN daemon file handle returned
  * by OP_CREATE.  Lives until rdbss calls MRxCloseSrvOpen, which is driven
- * off IRP_MJ_CLOSE (last reference gone, image sections included) — not
- * IRP_MJ_CLEANUP — so a section keeps its backing daemon handle as long
+ * off IRP_MJ_CLOSE (last reference gone, image sections included) - not
+ * IRP_MJ_CLEANUP - so a section keeps its backing daemon handle as long
  * as MM may issue paging reads against it. */
 typedef struct _SMB2RDR_SRV_OPEN_EXTENSION {
     ULONG64 DaemonFileHandle;   /* 0 if no daemon-side open */
@@ -107,7 +107,7 @@ Smb2RefreshFcbSizes(PMRX_FCB Fcb, PFILE_OBJECT FileObject, ULONGLONG FileSize);
  * RX_CONTEXT is carrying.  For LowIo (paging) reads the caller's FOBX is
  * the authoritative link; pRelevantSrvOpen is set by rdbss on the Create/
  * Cleanup/Close/SetInfo paths.  Both routes ultimately point at the same
- * SRV_OPEN — fall back from one to the other so we don't depend on which
+ * SRV_OPEN - fall back from one to the other so we don't depend on which
  * path armed the RX_CONTEXT. */
 static PMRX_SRV_OPEN
 Smb2RdrSrvOpenFromContext(PRX_CONTEXT RxContext)
@@ -148,7 +148,7 @@ static PRDBSS_DEVICE_OBJECT     smb2rdr_dev;
  * disconnected immediately as if there were no keep-alive at all.
  *
  * Reuse safety: the cached handle owns a libsmb2 smb2_context on the
- * daemon side.  Nothing else holds a reference to it once we cache it —
+ * daemon side.  Nothing else holds a reference to it once we cache it -
  * any prior SRV_OPEN / FCB on top of the VNetRoot has been torn down by
  * rdbss before MRxFinalizeVNetRoot fires (the V_NET_ROOT cannot be
  * finalized otherwise).  A subsequent OP_CREATE under a reused handle
@@ -158,8 +158,8 @@ static PRDBSS_DEVICE_OBJECT     smb2rdr_dev;
 
 typedef struct _SMB2RDR_KA_ENTRY {
     LIST_ENTRY        ListEntry;
-    UNICODE_STRING    Server;       /* "server" — no leading backslash */
-    UNICODE_STRING    Share;        /* "share"  — no leading backslash */
+    UNICODE_STRING    Server;       /* "server" - no leading backslash */
+    UNICODE_STRING    Share;        /* "share" - no leading backslash */
     ULONG64           DaemonHandle;
     LARGE_INTEGER     DeadlineTick; /* KeQueryTickCount() value at which to reap */
 } SMB2RDR_KA_ENTRY, *PSMB2RDR_KA_ENTRY;
@@ -444,7 +444,7 @@ Smb2RdrKaTake(PUNICODE_STRING Server, PUNICODE_STRING Share)
 }
 
 /* Park a daemon handle in the cache for SMB2RDR_KA_TTL_SEC.  On allocation
- * failure the caller MUST disconnect the handle itself — we never silently
+ * failure the caller MUST disconnect the handle itself - we never silently
  * leak a libsmb2 context. */
 static BOOLEAN
 Smb2RdrKaPut(PUNICODE_STRING Server, PUNICODE_STRING Share, ULONG64 Handle)
@@ -732,7 +732,7 @@ smb2rdr_CreateSrvCall(IN OUT PMRX_SRV_CALL SrvCall,
     return STATUS_PENDING;
 }
 
-/* SrvCallWinnerNotify — rdbss invokes this on the mini-rdr that won the
+/* SrvCallWinnerNotify - rdbss invokes this on the mini-rdr that won the
  * CreateSrvCall race.  Required to exist and return STATUS_SUCCESS; a NULL
  * entry makes MINIRDR_CALL_THROUGH synthesise STATUS_NOT_IMPLEMENTED and
  * the whole SrvCall is marked Condition_Bad (which is what was happening
@@ -1032,7 +1032,7 @@ smb2rdr_FinalizeVNetRoot(IN OUT PMRX_V_NET_ROOT VNetRoot,
                 handle, forced);
         /* Best-effort: ask the daemon to tear down its libsmb2 context.
          * If the bridge is down or the daemon is gone the kernel side
-         * still unwinds cleanly — the handle reference is dropped either
+         * still unwinds cleanly - the handle reference is dropped either
          * way, and leaking a daemon-side context is recoverable at
          * smb2d restart.  SmbRdrIssueUpcall is self-gating via gUpcallInit
          * and simply returns STATUS_DEVICE_NOT_READY if the bridge is
@@ -1210,7 +1210,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
             Smb2RefreshFcbSizes(Fcb, RxContext->CurrentIrpSp->FileObject, out.EndOfFile.QuadPart);
     }
 
-    /* SRV_OPEN owns the daemon handle for its lifetime — see
+    /* SRV_OPEN owns the daemon handle for its lifetime - see
      * SMB2RDR_SRV_OPEN_EXTENSION.  Setting it here also guards against the
      * second (collapsed-FCB but distinct SRV_OPEN) opener clobbering the
      * first opener's image-section-backing handle, which used to land in
@@ -1228,7 +1228,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
      * backslash stripped), matching the OP_CREATE path format so the daemon
      * sees consistent shape across all file ops. */
     if (fcbExt->Path.Buffer != NULL) {
-        /* Should not happen — MRxCreate runs once per FCB — but defend. */
+        /* Should not happen - MRxCreate runs once per FCB - but defend. */
         ExFreePoolWithTag(fcbExt->Path.Buffer, 'pFcS');
         fcbExt->Path.Buffer = NULL;
         fcbExt->Path.Length = 0;
@@ -1242,7 +1242,7 @@ smb2rdr_Create(IN OUT PRX_CONTEXT RxContext)
             fcbExt->Path.Length        = pathBytes;
             fcbExt->Path.MaximumLength = pathBytes;
         } else {
-            /* Non-fatal — rename/unlink will refuse when Path is empty. */
+            /* Non-fatal - rename/unlink will refuse when Path is empty. */
             DPRINT("SMB2RDR: MRxCreate path-stash alloc failed, "
                     "rename/unlink disabled on this fcb\n");
         }
@@ -1329,7 +1329,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
     NTSTATUS daemonStatus = STATUS_UNSUCCESSFUL;
 
     if (soExt == NULL || soExt->DaemonFileHandle == 0) {
-        /* Nothing to close daemon-side — either MRxCreate never ran to
+        /* Nothing to close daemon-side - either MRxCreate never ran to
          * completion, or a prior CloseSrvOpen already cleared the slot
          * (rdbss can call us twice on the scavenger path). */
         DPRINT("SMB2RDR: MRxCloseSrvOpen (no handle)\n");
@@ -1374,7 +1374,7 @@ smb2rdr_CloseSrvOpen(IN OUT PRX_CONTEXT RxContext)
 
     /* If MRxSetFileInfo armed DeleteOnClose, fire an OP_UNLINK now that the
      * daemon has released its libsmb2 handle.  We deliberately swallow
-     * errors from the unlink — NT semantics treat the disposition flag as
+     * errors from the unlink - NT semantics treat the disposition flag as
      * best-effort at close time, and failing the close would strand the
      * kernel-side FCB in an inconsistent state. */
     if (wantUnlink &&
@@ -1545,7 +1545,7 @@ smb2rdr_QueryDirectory(IN OUT PRX_CONTEXT RxContext)
     if (outActual < sizeof(OP_READDIR_OUT)) {
         /* Daemon-side failures (unknown handle, stat error, ...) come back
          * as a status-only downcall with no payload.  Surface the NTSTATUS
-         * unchanged — for STATUS_NO_MORE_FILES the caller already expects
+         * unchanged - for STATUS_NO_MORE_FILES the caller already expects
          * a zero-entry completion. */
         status = (daemonStatus != STATUS_SUCCESS) ? daemonStatus
                                                  : STATUS_UNEXPECTED_NETWORK_ERROR;
@@ -1782,7 +1782,7 @@ smb2rdr_Read(IN OUT PRX_CONTEXT RxContext)
         ExFreePoolWithTag(out, 'RDrS');
 
         if (bytesRead < chunk) {
-            /* Short read — either EOF mid-chunk or server bounded us. */
+            /* Short read - either EOF mid-chunk or server bounded us. */
             break;
         }
     }
@@ -1792,7 +1792,7 @@ done_out:
      * STATUS_END_OF_FILE; a non-zero partial fill is STATUS_SUCCESS with
      * Information == done.  rdbss's RxLowIoReadShellCompletion remaps
      * the paging-IO case internally.  InformationToReturn and IoStatusBlock
-     * share a union in RX_CONTEXT — setting the status block fills both. */
+     * share a union in RX_CONTEXT - setting the status block fills both. */
     if (done > 0)
         status = STATUS_SUCCESS;
     else if (status == STATUS_SUCCESS)
@@ -1809,7 +1809,7 @@ done_out:
  * extend the file past its current AllocationSize, and refuses to issue
  * the IRP if the slot returns STATUS_NOT_IMPLEMENTED.  The contract is
  * just "acknowledge the new end-of-file and hand back an allocation size
- * that's at least that large" — the actual on-disk extension happens
+ * that's at least that large" - the actual on-disk extension happens
  * when smb2_pwrite() lands on the server.  We mirror the nfs41 miniport
  * here: set the FCB's StandardInfo if we tracked it (we don't yet), and
  * round the allocation size up by a small slack so we don't have to
@@ -1982,7 +1982,7 @@ smb2rdr_Write(IN OUT PRX_CONTEXT RxContext)
         done += out.BytesWritten;
 
         if (out.BytesWritten < chunk) {
-            /* Short write — surface a partial success to the caller so
+            /* Short write - surface a partial success to the caller so
              * it can decide whether to retry at offset+done. */
             break;
         }
@@ -2138,7 +2138,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     if (userBufLen <= 0)
         return STATUS_BUFFER_TOO_SMALL;
 
-    /* Classes we know are irrelevant for cmd.exe copy — fail them quickly
+    /* Classes we know are irrelevant for cmd.exe copy - fail them quickly
      * so rdbss/NtQueryInformationFile can fall back without round-tripping
      * through the daemon. */
     switch (infoClass) {
@@ -2162,7 +2162,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
         return STATUS_INVALID_INFO_CLASS;
     }
 
-    /* FileEaInformation doesn't need a round-trip — we never expose
+    /* FileEaInformation doesn't need a round-trip - we never expose
      * extended attributes over SMB2, so the answer is always zero. */
     if (infoClass == FileEaInformation) {
         PFILE_EA_INFORMATION ei = (PFILE_EA_INFORMATION)userBuf;
@@ -2215,7 +2215,7 @@ smb2rdr_QueryFileInfo(IN OUT PRX_CONTEXT RxContext)
     }
 
 HaveStat:
-    /* Stamp DIRECTORY if the daemon told us and the FCB agrees — old
+    /* Stamp DIRECTORY if the daemon told us and the FCB agrees - old
      * smb2d builds may only set Type=1 without translating it to the NT
      * attribute bitmap. */
     if ((out.Stat.Attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
@@ -2302,7 +2302,7 @@ HaveStat:
          * round-trip through FileNameInformation separately). */
         needed = sizeof(FILE_ALL_INFORMATION);
         if ((ULONG)userBufLen < sizeof(FILE_BASIC_INFORMATION)) {
-            /* Not enough room for even the first field — bail out. */
+            /* Not enough room for even the first field - bail out. */
             RxContext->InformationToReturn = needed;
             status = STATUS_BUFFER_OVERFLOW;
             break;
@@ -2336,7 +2336,7 @@ HaveStat:
     }
 
     default:
-        /* Shouldn't reach here — earlier switch filters unknown classes. */
+        /* Shouldn't reach here - earlier switch filters unknown classes. */
         status = STATUS_INVALID_INFO_CLASS;
         break;
     }
@@ -2354,7 +2354,7 @@ HaveStat:
  * We ship an OP_FSYNC upcall so the daemon can call libsmb2's smb2_fsync()
  * and have the server force an on-disk flush of the open handle.  Nothing
  * to flush (handle already closed, or opened as a directory) is a trivial
- * success — directories don't have SMB2 flush semantics, and a missing
+ * success - directories don't have SMB2 flush semantics, and a missing
  * daemon handle means there's no dirty server-side state to begin with.
  */
 static NTSTATUS NTAPI
@@ -2368,7 +2368,7 @@ smb2rdr_Flush(IN OUT PRX_CONTEXT RxContext)
     NTSTATUS bridgeStatus;
 
     if (soExt == NULL || soExt->DaemonFileHandle == 0) {
-        /* Nothing open on the daemon side — nothing to flush. */
+        /* Nothing open on the daemon side - nothing to flush. */
         return STATUS_SUCCESS;
     }
     if (soExt->IsDirectory) {

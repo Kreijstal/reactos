@@ -188,7 +188,7 @@ typedef struct
      *  NtfsRemoveFilenameFromDirectory). Without this, a writer's R/M/W
      * cycle on a parent directory's $INDEX_ALLOCATION can race a concurrent
      * path-walk read of the same cluster and the reader observes the
-     * cluster mid-write — most visibly the cluster's first 4 bytes are
+     * cluster mid-write - most visibly the cluster's first 4 bytes are
      * no longer 'INDX' and BrowseSubNodeIndexEntries trips
      * ASSERT(IndexRecord->Ntfs.Type == NRH_INDX_TYPE) (mft.c:3689). See
      * Kreijstal/reactos#14.
@@ -207,7 +207,7 @@ typedef struct
      * written back with WriteAttribute. Without serialization, two
      * concurrent allocators each load a private copy of the bitmap, both
      * see the same LCN as free, both mark it set, and both write the
-     * bitmap back — and now two attributes own the same cluster. The
+     * bitmap back - and now two attributes own the same cluster. The
      * symptom is BrowseSubNodeIndexEntries reading a directory's
      * $INDEX_ALLOCATION cluster and finding file data (e.g., a .lnk
      * shortcut) instead of an INDX block, tripping the
@@ -222,7 +222,7 @@ typedef struct
      *     primary path that triggers cluster allocation, and writers in
      *     mft.c already hold IndexResource exclusive when they call into
      *     it. Acquired recursively from WriteAttribute(bitmap) inside
-     *     NtfsAllocateClusters — ERESOURCE supports recursive exclusive. */
+     *     NtfsAllocateClusters - ERESOURCE supports recursive exclusive. */
     ERESOURCE BitmapResource;
 
     KSPIN_LOCK FcbListLock;
@@ -282,7 +282,7 @@ typedef struct
      * Read/WriteAttribute against its $J (:$DATA, non-resident, sparse)
      * and $Max (:$DATA, resident, 32-byte USN_JOURNAL_DATA_V0) streams
      * without re-walking the directory every time.  NULL means "no
-     * journal" — NtfsUsnEmitRecord and the FSCTL dispatcher both gate
+     * journal" - NtfsUsnEmitRecord and the FSCTL dispatcher both gate
      * on that so un-journalled volumes pay nothing.
      *
      * UsnJournalId is the per-lifetime ID callers stamp into every
@@ -321,7 +321,7 @@ typedef struct
      * and the restart pages disagree / fail verification / carry a non-clean
      * CurrentLsn landmark.  When set, NtfsDispatch short-circuits IRP_MJ_WRITE,
      * IRP_MJ_SET_INFORMATION, IRP_MJ_SET_SECURITY, IRP_MJ_SET_EA and every
-     * mutating FSCTL with STATUS_MEDIA_WRITE_PROTECTED — the volume mounts
+     * mutating FSCTL with STATUS_MEDIA_WRITE_PROTECTED - the volume mounts
      * read-only until the caller reboots into a log-replaying driver or runs
      * chkdsk externally.  This matches the spec intent of the VPB_READ_ONLY
      * plumbing in the issue body; we use a VCB-private flag because the
@@ -377,7 +377,7 @@ typedef struct
     NPAGED_LOOKASIDE_LIST AttrCtxtLookasideList;
     BOOLEAN EnableWriteSupport;
 
-    /* Zombie FCB list — FCBs we tried to destroy but whose
+    /* Zombie FCB list - FCBs we tried to destroy but whose
      * SectionObjectPointers MM still references via a live data or image
      * section.  We can't free the FCB while MM might still issue paging
      * I/O against the section's stored FileObject (whose FsContext points
@@ -479,9 +479,9 @@ typedef struct
 /* NTFS_RECORD_HEADER.Type */
 #define NRH_FILE_TYPE  0x454C4946  /* 'FILE' */
 #define NRH_INDX_TYPE  0x58444E49  /* 'INDX' */
-#define NRH_RSTR_TYPE  0x52545352  /* 'RSTR' — $LogFile restart page */
-#define NRH_RCRD_TYPE  0x44524352  /* 'RCRD' — $LogFile record page */
-#define NRH_CHKD_TYPE  0x444B4843  /* 'CHKD' — chkdsk-cleaned page */
+#define NRH_RSTR_TYPE  0x52545352  /* 'RSTR' - $LogFile restart page */
+#define NRH_RCRD_TYPE  0x44524352  /* 'RCRD' - $LogFile record page */
+#define NRH_CHKD_TYPE  0x444B4843  /* 'CHKD' - chkdsk-cleaned page */
 
 
 typedef struct _FILE_RECORD_HEADER
@@ -695,13 +695,13 @@ typedef struct
     struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
     /* Collation rule for this B-tree's keys (COLLATION_FILE_NAME by default
      * for $I30 indexes).  Generalised per [MS-FSCC] / NTFS-3G:
-     *   COLLATION_BINARY              — memcmp on key bytes
-     *   COLLATION_FILE_NAME           — filename (case-insensitive)
-     *   COLLATION_UNICODE_STRING      — filename (case-sensitive)
-     *   COLLATION_NTOFS_ULONG         — 4-byte LE unsigned compare ($Q)
-     *   COLLATION_NTOFS_SID           — $O keys
-     *   COLLATION_NTOFS_SECURITY_HASH — $SDH
-     *   COLLATION_NTOFS_ULONGS        — $ObjId / n-ULONG compare
+     *   COLLATION_BINARY - memcmp on key bytes
+     *   COLLATION_FILE_NAME - filename (case-insensitive)
+     *   COLLATION_UNICODE_STRING - filename (case-sensitive)
+     *   COLLATION_NTOFS_ULONG - 4-byte LE unsigned compare ($Q)
+     *   COLLATION_NTOFS_SID - $O keys
+     *   COLLATION_NTOFS_SECURITY_HASH - $SDH
+     *   COLLATION_NTOFS_ULONGS - $ObjId / n-ULONG compare
      */
     ULONG CollationRule;
 } B_TREE, *PB_TREE;
@@ -782,7 +782,7 @@ typedef struct _FCB
      * pointer here so it isn't double-freed) and frees the rest of the
      * FCB normally.  MmDereferenceSegmentWithLock will eventually clear
      * the leaked SOP's DataSectionObject slot when the segment refcount
-     * finally drops to zero — by which point nothing reads it.
+     * finally drops to zero - by which point nothing reads it.
      *
      * The previous design embedded the SOP struct directly inside the
      * FCB, which forced the entire FCB (with its two ERESOURCEs, FILE_LOCK
@@ -824,7 +824,7 @@ typedef struct _FCB
     ULONG Flags;
     ULONG OpenHandleCount;
 
-    /* Share access tracking — used by IoCheckShareAccess /
+    /* Share access tracking - used by IoCheckShareAccess /
      * IoSetShareAccess / IoUpdateShareAccess / IoRemoveShareAccess.
      * The MM filter callback PreAcquireForSectionSynchronization
      * inspects ShareAccess.Writers to decide whether to report
@@ -842,7 +842,7 @@ typedef struct _FCB
      * every paging IRP.  Allocated from non-paged pool with TAG_NTFS at
      * BytesPerFileRecord bytes; freed in NtfsDestroyFCB.  Installed
      * lock-free via InterlockedCompareExchangePointer so concurrent
-     * shared-resource readers can race the install — the loser frees
+     * shared-resource readers can race the install - the loser frees
      * its buffer.  Invalidated by FCB-aware write paths via
      * NtfsInvalidateCachedFileRecord before they commit changes through
      * UpdateFileRecord, so the next reader re-reads the fresh state. */
@@ -1097,7 +1097,7 @@ CompareTreeKeys(PB_TREE_KEY Key1,
 /* Pure collation comparator on raw key bytes.  Used directly by view-index
  * code (quota, security, objid) and by CompareTreeKeys under the covers.
  * Returns -1/0/+1 per the collation rule.  Does not know about the END
- * sentinel — callers must filter that out first. */
+ * sentinel - callers must filter that out first. */
 LONG
 NtfsCompareKeyBytes(const VOID *Key1,
                     ULONG Key1Len,
@@ -1110,7 +1110,7 @@ NtfsCompareKeyBytes(const VOID *Key1,
  * Builds an INDEX_ENTRY_ATTRIBUTE that carries arbitrary key bytes followed
  * by arbitrary value bytes, and inserts it using the tree's CollationRule.
  * If the key already exists, the value is overwritten in place and
- * STATUS_OBJECT_NAME_COLLISION is NOT returned — caller uses this for
+ * STATUS_OBJECT_NAME_COLLISION is NOT returned - caller uses this for
  * insert-or-update semantics (matching Windows $Q/$O behaviour). */
 NTSTATUS
 NtfsBTreeInsertBlob(PB_TREE Tree,
@@ -1969,10 +1969,10 @@ VOID
 NTAPI
 NtfsInitializeFunctionPointers(PDRIVER_OBJECT DriverObject);
 
-/* lfsparse.c — $LogFile Phase 0 (read-only parser) + Phase 1 (clean-shutdown
+/* lfsparse.c - $LogFile Phase 0 (read-only parser) + Phase 1 (clean-shutdown
  * gate) structures and worker prototypes.  Layout authority is libfsntfs
  * (Apache/LGPL reference) + Microsoft public LFS docs; ntfs3 (GPL-2.0-only)
- * is algorithm-only reference — NO code copy.  See Kreijstal/reactos#34.
+ * is algorithm-only reference - NO code copy.  See Kreijstal/reactos#34.
  *
  * The names mirror the libfsntfs wording (RESTART_AREA, LFS_RECORD_HEADER)
  * and, where possible, match the public MSDN/LFS terminology so forensic
@@ -1991,24 +1991,24 @@ NtfsInitializeFunctionPointers(PDRIVER_OBJECT DriverObject);
  * documentation (documentation/NTFS%20File%20System.asciidoc §14). */
 typedef struct _NTFS_LFS_RESTART_AREA
 {
-    ULONGLONG CurrentLsn;               /* 0x00 — last LSN ever written      */
-    USHORT    LogClients;               /* 0x08 — count of client records    */
-    USHORT    ClientFreeList;           /* 0x0A — head of free client chain  */
-    USHORT    ClientInUseList;          /* 0x0C — head of in-use chain       */
-    USHORT    Flags;                    /* 0x0E — restart flags              */
-    ULONG     SeqNumberBits;            /* 0x10 — bits for the seq number    */
-    USHORT    RestartAreaLength;        /* 0x14 — byte length of this area   */
-    USHORT    ClientArrayOffset;        /* 0x16 — offset to first LogClient  */
-    ULONGLONG FileSize;                 /* 0x18 — size of $LogFile:$DATA     */
-    ULONG     LastLsnDataLength;        /* 0x20 — serialised data len of the
-                                         *        record at CurrentLsn — the
+    ULONGLONG CurrentLsn;               /* 0x00 - last LSN ever written      */
+    USHORT    LogClients;               /* 0x08 - count of client records    */
+    USHORT    ClientFreeList;           /* 0x0A - head of free client chain  */
+    USHORT    ClientInUseList;          /* 0x0C - head of in-use chain       */
+    USHORT    Flags;                    /* 0x0E - restart flags              */
+    ULONG     SeqNumberBits;            /* 0x10 - bits for the seq number    */
+    USHORT    RestartAreaLength;        /* 0x14 - byte length of this area   */
+    USHORT    ClientArrayOffset;        /* 0x16 - offset to first LogClient  */
+    ULONGLONG FileSize;                 /* 0x18 - size of $LogFile:$DATA     */
+    ULONG     LastLsnDataLength;        /* 0x20 - serialised data len of the
+                                         *        record at CurrentLsn - the
                                          *        Phase-1 clean-shutdown
                                          *        landmark (must equal zero
                                          *        on a clean-mount restart) */
-    USHORT    RecordHeaderLength;       /* 0x24 — fixed len of LFS_RECORD    */
-    USHORT    LogPageDataOffset;        /* 0x26 — first byte of client data  */
-    ULONG     RestartOpenLogCount;      /* 0x28 — incremented on each open   */
-    ULONG     Reserved;                 /* 0x2C — reserved, must be zero     */
+    USHORT    RecordHeaderLength;       /* 0x24 - fixed len of LFS_RECORD    */
+    USHORT    LogPageDataOffset;        /* 0x26 - first byte of client data  */
+    ULONG     RestartOpenLogCount;      /* 0x28 - incremented on each open   */
+    ULONG     Reserved;                 /* 0x2C - reserved, must be zero     */
 } NTFS_LFS_RESTART_AREA, *PNTFS_LFS_RESTART_AREA;
 
 /* Restart flags bits (NTFS_LFS_RESTART_AREA.Flags). */
@@ -2021,24 +2021,24 @@ typedef struct _NTFS_LFS_RESTART_AREA
  * documentation §14.3. */
 typedef struct _NTFS_LFS_RECORD_HEADER
 {
-    ULONGLONG ThisLsn;                  /* 0x00 — this record's LSN          */
-    ULONGLONG ClientPreviousLsn;        /* 0x08 — client's previous LSN      */
-    ULONGLONG ClientUndoNextLsn;        /* 0x10 — undo-chain predecessor     */
-    ULONG     ClientDataLength;         /* 0x18 — total payload bytes        */
-    USHORT    ClientId;                 /* 0x1C — originating client index   */
-    USHORT    Alignment;                /* 0x1E — should be 0                */
-    ULONG     RecordType;               /* 0x20 — 1=UPDATE 2=CHECKPOINT ...  */
-    ULONG     TransactionId;            /* 0x24 — opaque per-TX id           */
-    USHORT    Flags;                    /* 0x28 — record flags               */
+    ULONGLONG ThisLsn;                  /* 0x00 - this record's LSN          */
+    ULONGLONG ClientPreviousLsn;        /* 0x08 - client's previous LSN      */
+    ULONGLONG ClientUndoNextLsn;        /* 0x10 - undo-chain predecessor     */
+    ULONG     ClientDataLength;         /* 0x18 - total payload bytes        */
+    USHORT    ClientId;                 /* 0x1C - originating client index   */
+    USHORT    Alignment;                /* 0x1E - should be 0                */
+    ULONG     RecordType;               /* 0x20 - 1=UPDATE 2=CHECKPOINT ...  */
+    ULONG     TransactionId;            /* 0x24 - opaque per-TX id           */
+    USHORT    Flags;                    /* 0x28 - record flags               */
     USHORT    Reserved1[3];             /* 0x2A                              */
-    USHORT    RedoOperation;            /* 0x30 — redo opcode                */
-    USHORT    UndoOperation;            /* 0x32 — undo opcode                */
-    USHORT    RedoOffset;               /* 0x34 — offset of redo payload     */
-    USHORT    RedoLength;               /* 0x36 — size of redo payload       */
-    USHORT    UndoOffset;               /* 0x38 — offset of undo payload     */
-    USHORT    UndoLength;               /* 0x3A — size of undo payload       */
-    USHORT    TargetAttribute;          /* 0x3C — attr index this touches    */
-    USHORT    LcnsToFollow;             /* 0x3E — LCN list length            */
+    USHORT    RedoOperation;            /* 0x30 - redo opcode                */
+    USHORT    UndoOperation;            /* 0x32 - undo opcode                */
+    USHORT    RedoOffset;               /* 0x34 - offset of redo payload     */
+    USHORT    RedoLength;               /* 0x36 - size of redo payload       */
+    USHORT    UndoOffset;               /* 0x38 - offset of undo payload     */
+    USHORT    UndoLength;               /* 0x3A - size of undo payload       */
+    USHORT    TargetAttribute;          /* 0x3C - attr index this touches    */
+    USHORT    LcnsToFollow;             /* 0x3E - LCN list length            */
     USHORT    RecordOffset;             /* 0x40                              */
     USHORT    AttributeOffset;          /* 0x42                              */
     USHORT    MftClusterIndex;          /* 0x44                              */
@@ -2063,9 +2063,9 @@ typedef struct _NTFS_LFS_RECORD_HEADER
  * coherent.  @p RestartOffsetOut is optional; callers who want to walk
  * client array use it to locate the base.
  *
- * @return  STATUS_SUCCESS          — page looks good, fields populated
- *          STATUS_FILE_CORRUPT_ERROR — magic wrong / USA mismatch
- *          STATUS_INVALID_PARAMETER — buffer shape wrong              */
+ * @return  STATUS_SUCCESS - page looks good, fields populated
+ *          STATUS_FILE_CORRUPT_ERROR - magic wrong / USA mismatch
+ *          STATUS_INVALID_PARAMETER - buffer shape wrong              */
 NTSTATUS
 NtfsLfsParseRestartPage(PDEVICE_EXTENSION Vcb,
                         PUCHAR Page,
@@ -2078,8 +2078,8 @@ NtfsLfsParseRestartPage(PDEVICE_EXTENSION Vcb,
  * in the page.  Phase-0 only inspects the first record; walking the rest
  * is left to Phase 2+.
  *
- * @return  STATUS_SUCCESS          — page looks good, pointer populated
- *          STATUS_FILE_CORRUPT_ERROR — magic wrong / USA mismatch     */
+ * @return  STATUS_SUCCESS - page looks good, pointer populated
+ *          STATUS_FILE_CORRUPT_ERROR - magic wrong / USA mismatch     */
 NTSTATUS
 NtfsLfsParseRecordPage(PDEVICE_EXTENSION Vcb,
                        PUCHAR Page,
@@ -2088,13 +2088,13 @@ NtfsLfsParseRecordPage(PDEVICE_EXTENSION Vcb,
 
 /* Phase-1 clean-shutdown gate.  Called from NtfsMountVolume after the
  * MFT is up and before the mount succeeds.  Reads the first two restart
- * pages from $LogFile:$DATA (both copies — primary at offset 0, backup
+ * pages from $LogFile:$DATA (both copies - primary at offset 0, backup
  * at offset PageSize), parses each, and returns:
  *
- *   STATUS_SUCCESS          — both copies agree, CurrentLsn landmarks
+ *   STATUS_SUCCESS - both copies agree, CurrentLsn landmarks
  *                             match, and restart flags carry the
  *                             "clean" bit.  Caller mounts RW.
- *   STATUS_LOG_FILE_FULL    — pages disagree / landmark mismatch / one
+ *   STATUS_LOG_FILE_FULL - pages disagree / landmark mismatch / one
  *                             copy torn.  Caller sets VCB_VOLUME_READ_ONLY
  *                             and mounts RO.
  *
@@ -2121,11 +2121,11 @@ NtfsLfsDumpLogfile(PDEVICE_EXTENSION Vcb,
 /* Private FSCTL code for the Phase-0 dump.  Sits in the driver-private
  * range (code 0x300) and uses METHOD_BUFFERED so the I/O Manager copies
  * the result through SystemBuffer.  Not shipped to userspace via
- * winioctl.h — lives here so the kernel dispatch and the userspace test
+ * winioctl.h - lives here so the kernel dispatch and the userspace test
  * can share the macro through this header.  The userspace test harness's
  * ntfs_mock.h doesn't provide CTL_CODE; gate on its presence so the mock
  * just skips this define instead of failing to compile.  Userspace tests
- * don't need the macro — they call NtfsLfsDumpLogfile directly. */
+ * don't need the macro - they call NtfsLfsDumpLogfile directly. */
 #if defined(CTL_CODE) && !defined(FSCTL_NTFS_DUMP_LOGFILE)
 #define FSCTL_NTFS_DUMP_LOGFILE                                 \
     CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x300,                    \

@@ -47,7 +47,7 @@ MiniIndicateReceivePacket(
     IN UINT          NumberOfPackets);
 
 /* ============================================================================
- *  Ndis6RxBuildLegacyPacket — wrap a NET_BUFFER in a legacy NDIS_PACKET.
+ *  Ndis6RxBuildLegacyPacket - wrap a NET_BUFFER in a legacy NDIS_PACKET.
  *
  *  The wrapper is allocated from Ext->RxLegacyPacketPool, with a single
  *  NDIS_BUFFER chained on that re-uses the NB's CurrentMdl directly (no
@@ -81,7 +81,7 @@ Ndis6RxBuildLegacyPacket(
     LONG bc;
 
     /* Note: RxLegacyBufferPool is always NULL because NdisAllocateBufferPool
-     * is a no-op stub in the legacy library — NdisAllocateBuffer ignores
+     * is a no-op stub in the legacy library - NdisAllocateBuffer ignores
      * the handle and just calls IoAllocateMdl. Only the packet pool needs
      * to be non-NULL. */
     if (Ext->RxLegacyPacketPool == NULL)
@@ -102,7 +102,7 @@ Ndis6RxBuildLegacyPacket(
     if (CurrentMdl == NULL || DataLength == 0)
     {
         if (bc <= 5)
-            DPRINT("NDIS6-RX: BuildLegacyPacket NULL Mdl or zero len — drop\n");
+            DPRINT("NDIS6-RX: dropping BuildLegacyPacket with NULL Mdl or zero len\n");
         return NULL;
     }
 
@@ -117,7 +117,7 @@ Ndis6RxBuildLegacyPacket(
     /* A2: walk the NET_BUFFER MDL chain and chain a PNDIS_BUFFER per MDL.
      * The first MDL starts at NET_BUFFER_CURRENT_MDL_OFFSET; subsequent
      * MDLs start at offset 0. The total of all segments must equal
-     * DataLength — we stop when Remaining hits 0. Works for single-MDL
+     * DataLength - we stop when Remaining hits 0. Works for single-MDL
      * NBs (e1000e) AND multi-MDL NBs (jumbo frames, virtio-net, etc.). */
     Remaining        = DataLength;
     MdlSegmentOffset = DataOffset;
@@ -130,7 +130,7 @@ Ndis6RxBuildLegacyPacket(
          * what's remaining in the total payload. */
         if (MdlSegmentOffset >= MdlSize)
         {
-            /* Offset puts us past this MDL — shouldn't normally happen
+            /* Offset puts us past this MDL - shouldn't normally happen
              * for first MDL (CurrentMdl is CURRENT_MDL by definition),
              * but defensively skip to the next MDL and try again. */
             MdlSegmentOffset = 0;
@@ -171,7 +171,7 @@ Ndis6RxBuildLegacyPacket(
         }
         else
         {
-            /* Chain after the previous buffer — legacy NDIS_BUFFER is just
+            /* Chain after the previous buffer - legacy NDIS_BUFFER is just
              * an MDL so NDIS_BUFFER_LINKAGE is the MDL Next pointer. */
             NDIS_BUFFER_LINKAGE(PrevBuffer) = NdisBuffer;
         }
@@ -186,7 +186,7 @@ Ndis6RxBuildLegacyPacket(
     if (FirstBuffer == NULL || Remaining > 0)
     {
         if (bc <= 5)
-            DPRINT("NDIS6-RX: BuildLegacyPacket short chain (Remaining=%lu) — drop\n",
+            DPRINT("NDIS6-RX: dropping BuildLegacyPacket short chain (Remaining=%lu)\n",
                      Remaining);
         {
             PNDIS_BUFFER toFree = FirstBuffer;
@@ -214,7 +214,7 @@ Ndis6RxBuildLegacyPacket(
     /* B2: translate RX offload result from NBL info to legacy packet info.
      * NDIS_TCP_IP_CHECKSUM_PACKET_INFO.Receive and
      * NDIS_TCP_IP_CHECKSUM_NET_BUFFER_LIST_INFO.Receive share the same
-     * bit layout — raw PVOID copy carries it across. */
+     * bit layout - raw PVOID copy carries it across. */
     {
         PVOID ChecksumValue =
             NET_BUFFER_LIST_INFO(Nbl, TcpIpChecksumNetBufferListInfo);
@@ -231,7 +231,7 @@ Ndis6RxBuildLegacyPacket(
             NDIS_PER_PACKET_INFO_FROM_PACKET(Packet, Ieee8021QInfo) = VlanValue;
     }
 
-    /* Initial refcount of zero — protocols increment as they hold the
+    /* Initial refcount of zero - protocols increment as they hold the
      * packet across async work. */
     Packet->WrapperReserved[0] = 0;
 
@@ -243,10 +243,10 @@ Ndis6RxBuildLegacyPacket(
 }
 
 /* ============================================================================
- *  Ndis6RxFreeLegacyPacket — return a wrapper NDIS_PACKET to the pool.
+ *  Ndis6RxFreeLegacyPacket - return a wrapper NDIS_PACKET to the pool.
  *
  *  Frees the NDIS_BUFFER and the NDIS_PACKET. Does NOT touch the underlying
- *  NB MDL — that belongs to the original NBL.
+ *  NB MDL - that belongs to the original NBL.
  * ============================================================================ */
 
 static VOID
@@ -255,7 +255,7 @@ Ndis6RxFreeLegacyPacket(
 {
     PNDIS_BUFFER NdisBuffer;
 
-    /* A2: walk the chain — there may be more than one NDIS_BUFFER if the
+    /* A2: walk the chain - there may be more than one NDIS_BUFFER if the
      * original NET_BUFFER spanned multiple MDLs. NdisUnchainBufferAtFront
      * pops the head; NDIS_BUFFER_LINKAGE lets us walk the rest. */
     NdisUnchainBufferAtFront(Packet, &NdisBuffer);
@@ -271,7 +271,7 @@ Ndis6RxFreeLegacyPacket(
 }
 
 /* ============================================================================
- *  Ndis6RxReturnLegacyPacket — called from miniport.c:NdisReturnPackets via
+ *  Ndis6RxReturnLegacyPacket - called from miniport.c:NdisReturnPackets via
  *  the IsNdis6 gate when a legacy protocol releases a held wrapper packet.
  *
  *  Decrements the per-NBL refcount stored in NBL->MiniportReserved[2]; when
@@ -312,7 +312,7 @@ Ndis6RxReturnLegacyPacket(
 }
 
 /* ============================================================================
- *  NdisMIndicateReceiveNetBufferLists — driver-side receive entry point.
+ *  NdisMIndicateReceiveNetBufferLists - driver-side receive entry point.
  *
  *  The NDIS 6 miniport calls this when its RX DPC has packets to indicate.
  *  We walk the chain, build wrapper NDIS_PACKETs, count them per NBL, and
@@ -343,7 +343,7 @@ NdisMIndicateReceiveNetBufferLists(
         DPRINT("NDIS6-RX: NdisMIndicateReceiveNetBufferLists #%ld NumNbls=%lu Flags=0x%lx\n",
                  MyCount, NumberOfNetBufferLists, ReceiveFlags);
 
-    /* Phase 8: walk the chain bottom→top — bottommost filter sees the
+    /* Phase 8: walk the chain bottom→top - bottommost filter sees the
      * RX first, then up through each filter, finally to the terminal
      * which wraps NBs in legacy NDIS_PACKETs and indicates to bound
      * NDIS 5 protocols.
@@ -362,7 +362,7 @@ NdisMIndicateReceiveNetBufferLists(
 }
 
 /* ============================================================================
- *  Ndis6FilterTerminalReceive — top-of-chain RX handler. Called by
+ *  Ndis6FilterTerminalReceive - top-of-chain RX handler. Called by
  *  Ndis6FilterDispatchReceive when no filters are attached, and by
  *  NdisFIndicateReceiveNetBufferLists when the topmost filter's call
  *  reaches the head of the chain. Wraps each NB in a legacy NDIS_PACKET
@@ -429,7 +429,7 @@ Ndis6FilterTerminalReceive(
 
         if (PacketCount == 0)
         {
-            /* Nothing to indicate — return the NBL immediately via the
+            /* Nothing to indicate - return the NBL immediately via the
              * filter chain (TX direction). */
             if (!ResourcesFlag)
                 Ndis6FilterDispatchReturn(Adapter, CurrentNbl, 0);
@@ -459,7 +459,7 @@ Ndis6FilterTerminalReceive(
         }
         MiniIndicateReceivePacket((NDIS_HANDLE)Adapter, PacketArray, PacketCount);
 
-        /* B3: RESOURCES path — the miniport needs the NBL back before
+        /* B3: RESOURCES path - the miniport needs the NBL back before
          * we return, and protocols are contractually required to copy
          * the data inline (they cannot hold the wrapper). So we free
          * every wrapper immediately WITHOUT touching the per-NBL
@@ -470,7 +470,7 @@ Ndis6FilterTerminalReceive(
             UINT j;
             for (j = 0; j < PacketCount; j++)
             {
-                /* Direct free — does not touch the NBL refcount. */
+                /* Direct free - does not touch the NBL refcount. */
                 Ndis6RxFreeLegacyPacket(PacketArray[j]);
             }
             Ndis6FilterDispatchReturn(Adapter, CurrentNbl, 0);
@@ -487,7 +487,7 @@ Ndis6FilterTerminalReceive(
             {
                 if (PacketArray[j]->WrapperReserved[0] == 0)
                 {
-                    /* No protocol held it — free wrapper and drop the
+                    /* No protocol held it - free wrapper and drop the
                      * outstanding-NBL ref. Last decrement returns NBL. */
                     Ndis6RxReturnLegacyPacket(PacketArray[j]);
                 }
@@ -497,7 +497,7 @@ Ndis6FilterTerminalReceive(
 }
 
 /* ============================================================================
- *  Ndis6FilterTerminalReturn — bottom-of-chain return-NBL handler. Called
+ *  Ndis6FilterTerminalReturn - bottom-of-chain return-NBL handler. Called
  *  by Ndis6FilterDispatchReturn when no filters are attached, and by
  *  NdisFReturnNetBufferLists when the bottommost filter's call falls off
  *  the end of the chain. Hands the NBL back to the miniport's
@@ -528,12 +528,12 @@ Ndis6FilterTerminalReturn(
 }
 
 /* ============================================================================
- *  NdisMIndicateStatusEx — driver-side status indication entry point.
+ *  NdisMIndicateStatusEx - driver-side status indication entry point.
  *
  *  Translates the NDIS 6 NDIS_STATUS_INDICATION (NDIS_STATUS_LINK_STATE,
  *  NDIS_STATUS_MEDIA_CONNECT, etc.) into a legacy NDIS_STATUS, updates the
  *  cached GeneralAttrs in Ext (so subsequent cached OID queries reflect the
- *  new state — fixes the boot-time spurious MEDIA_DISCONNECT line), and
+ *  new state - fixes the boot-time spurious MEDIA_DISCONNECT line), and
  *  walks the bound-protocol list calling each protocol's StatusHandler +
  *  StatusCompleteHandler.
  *
@@ -585,7 +585,7 @@ NdisMIndicateStatusEx(
     }
     case NDIS_STATUS_MEDIA_CONNECT:
     case NDIS_STATUS_MEDIA_DISCONNECT:
-        /* Identical legacy code — pass through. */
+        /* Identical legacy code - pass through. */
         LegacyStatus = StatusIndication->StatusCode;
         Ext->GeneralAttrs.MediaConnectState =
             (StatusIndication->StatusCode == NDIS_STATUS_MEDIA_CONNECT)
@@ -607,7 +607,7 @@ NdisMIndicateStatusEx(
     case NDIS_STATUS_LINK_SPEED_CHANGE:
         /* New link speed in StatusBuffer (ULONG64). Update the cache so
          * subsequent OID_GEN_LINK_SPEED queries reflect the new rate.
-         * Don't fan out to legacy protocols — there's no legacy parallel
+         * Don't fan out to legacy protocols - there's no legacy parallel
          * to "link speed change" status. */
         if (StatusIndication->StatusBuffer != NULL &&
             StatusIndication->StatusBufferSize >= sizeof(ULONG64))
@@ -625,12 +625,12 @@ NdisMIndicateStatusEx(
         break;
 
     case NDIS_STATUS_TASK_OFFLOAD_CURRENT_CONFIG:
-        /* Offload reconfigured — silently drop, the bridge doesn't
+        /* Offload reconfigured - silently drop, the bridge doesn't
          * advertise offloads to legacy protocols. */
         return;
 
     case NDIS_STATUS_PACKET_FILTER:
-        /* Driver changed effective packet filter — legacy protocols
+        /* Driver changed effective packet filter - legacy protocols
          * don't care (they drive the filter via OID_GEN_CURRENT_PACKET_FILTER
          * which is round-tripped via Ndis6OidForward). Drop. */
         return;
@@ -664,7 +664,7 @@ NdisMIndicateStatusEx(
         return;
 
     default:
-        /* Unknown indication — drop with debug log. */
+        /* Unknown indication - drop with debug log. */
         DPRINT("NDIS6: unhandled status indication 0x%08lx\n",
                  StatusIndication->StatusCode);
         return;
@@ -675,12 +675,12 @@ NdisMIndicateStatusEx(
 
     /* Snapshot the protocol bindings under the lock, then call the
      * StatusHandlers OUTSIDE the lock. Holding NdisMiniportBlock.Lock
-     * across protocol callbacks is a recipe for deadlock — protocols
+     * across protocol callbacks is a recipe for deadlock - protocols
      * commonly call back into NDIS from their status handlers (e.g.
      * tcpip queries OIDs from inside ProtocolStatus when the link
      * comes up), and the OID forward path takes its own waiter lock.
      *
-     * The snapshot is bounded to 16 bindings — adapters with more than
+     * The snapshot is bounded to 16 bindings - adapters with more than
      * that bound at once are extremely rare, and we silently truncate
      * (each binding still gets the indication on the next change). */
     {

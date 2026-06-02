@@ -139,7 +139,7 @@ DGDeliverData(
                 AddrIsUnspecified(DstAddress)))
             {
                 if (mc <= 10)
-                    DPRINT("TCPIP-DG: MATCH — delivering to recv request %p buf=%p sz=%lu\n",
+                    DPRINT("TCPIP-DG: delivering to matched recv request %p buf=%p sz=%lu\n",
                              Current, Current->Buffer, Current->BufferSize);
 
                 /* Remove the request from the queue */
