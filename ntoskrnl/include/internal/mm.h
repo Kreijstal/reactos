@@ -223,6 +223,13 @@ typedef struct _MM_SECTION_SEGMENT
 
 	ULONG SegFlags;
 
+	/* Number of MmMapViewInSystemSpace views currently mapping this segment.
+	 * System-space views carry no per-process rmap, so the rmap-blind reclaim
+	 * paths (the pageout trimmer and MiPurgeDataSegmentForClose on file close)
+	 * cannot find such a view and would free a frame it still maps. Both honor
+	 * this count and leave the segment's pages resident while it is nonzero. */
+	LONG SystemMapCount;
+
     ULONGLONG LastPage;
 
 	RTL_GENERIC_TABLE PageTable;
