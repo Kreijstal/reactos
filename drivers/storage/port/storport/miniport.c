@@ -380,8 +380,8 @@ MiniportStartIo(
             Miniport, Srb);
 
     /* Storport calls HwBuildIo (if registered) before HwStartIo so the
-     * miniport can do per-SRB setup at lower IRQL — assemble SG lists,
-     * populate descriptor counts, validate addressing, etc. — outside the
+     * miniport can do per-SRB setup at lower IRQL - assemble SG lists,
+     * populate descriptor counts, validate addressing, etc. - outside the
      * interrupt-locked HwStartIo path. Skipping this leaves miniport
      * descriptor state (e.g., viostor's srbExt->out/in) zero, so the
      * subsequent virtqueue_add_buf pushes an empty SG and the device

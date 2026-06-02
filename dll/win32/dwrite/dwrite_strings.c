@@ -1,7 +1,7 @@
 /*
  * PROJECT:     ReactOS DirectWrite
  * LICENSE:     LGPL-2.1+ (https://spdx.org/licenses/LGPL-2.1+)
- * PURPOSE:     IDWriteLocalizedStrings — single-entry en-us holder.
+ * PURPOSE:     IDWriteLocalizedStrings - single-entry en-us holder.
  *
  * The Qt 6 font-database populate path retrieves family/face names by
  * GetString(index=0, ...).  It does not enumerate locales, so a single

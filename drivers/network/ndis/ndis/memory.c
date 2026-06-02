@@ -364,7 +364,7 @@ NdisMAllocateSharedMemoryAsync(
   /* dev-nt6-1: NDIS 6 adapters have a NULL legacy SystemAdapterObject
    * (the bridge owns DMA via Ext->DmaAdapter). The async work item
    * would crash dereferencing it. NDIS 6 also has no
-   * AllocateCompleteHandlerEx — drivers don't expose async shared-mem
+   * AllocateCompleteHandlerEx - drivers don't expose async shared-mem
    * alloc completion. Do a synchronous allocation via the bridge and
    * return SUCCESS; the driver doesn't expect a callback. */
   if (Adapter->IsNdis6)

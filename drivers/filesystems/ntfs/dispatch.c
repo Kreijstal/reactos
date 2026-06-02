@@ -41,7 +41,7 @@ static WORKER_THREAD_ROUTINE NtfsDoRequest;
  * IRP_MJ_QUERY_SECURITY handler.  Looks up the FCB from
  * IrpSp->FileObject->FsContext, reads the owning file record, calls the
  * NtfsGetSecurityFromRecord worker (security.c), and surfaces the result
- * back through the IRP.  Kreijstal/reactos#36 — per-file $SECURITY_DESCRIPTOR
+ * back through the IRP.  Kreijstal/reactos#36 - per-file $SECURITY_DESCRIPTOR
  * (NOT \$Secure:$SDS, that's a follow-up slice).
  *
  * IoStatus contract:
@@ -75,7 +75,7 @@ NtfsQuerySecurity(PNTFS_IRP_CONTEXT IrpContext)
 
     Vcb = (PNTFS_VCB)IrpContext->DeviceObject->DeviceExtension;
 
-    /* For direct I/O IRPs the user buffer is owned by the caller — dereference
+    /* For direct I/O IRPs the user buffer is owned by the caller - dereference
      * via the Mdl when one was supplied, else the direct UserBuffer pointer.
      * Mirrors btrfs's map_user_buffer helper. */
     if (Irp->MdlAddress != NULL)
@@ -153,7 +153,7 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
         return STATUS_INVALID_PARAMETER;
 
     /* RtlLengthSecurityDescriptor returns the serialized byte count of a
-     * self-relative SD — the form the IO manager always gives us. */
+     * self-relative SD - the form the IO manager always gives us. */
     InLength = RtlLengthSecurityDescriptor(InSd);
     if (InLength == 0)
         return STATUS_INVALID_SECURITY_DESCR;
@@ -442,7 +442,7 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         case IRP_MJ_QUERY_SECURITY:
             /* Read the on-disk $SECURITY_DESCRIPTOR (or synthesise the
              * default world-readable SD if absent) into the caller's
-             * buffer.  Kreijstal/reactos#36 — see security.c. */
+             * buffer.  Kreijstal/reactos#36 - see security.c. */
             Status = NtfsQuerySecurity(IrpContext);
             break;
 
