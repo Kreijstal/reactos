@@ -254,9 +254,15 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     endif()
 
     if(ENABLE_CCACHE)
+        find_program(CCACHE_PROGRAM ccache)
+        if(NOT CCACHE_PROGRAM)
+            message(FATAL_ERROR "ENABLE_CCACHE is set but 'ccache' was not found in PATH. "
+                                "Install ccache or reconfigure without -DENABLE_CCACHE.")
+        endif()
+        message(STATUS "Using ccache: ${CCACHE_PROGRAM}")
         message(WARNING "-- Disabling precompiled headers support (ccache).")
         option(PCH "Whether to use precompiled headers" OFF)
-        set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
+        set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_PROGRAM}")
     elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
         message(WARNING "-- Disabling precompiled headers on GCC by default CORE-17108.")
         option(PCH "Whether to use precompiled headers" OFF)
