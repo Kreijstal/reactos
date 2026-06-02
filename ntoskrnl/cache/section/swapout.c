@@ -362,6 +362,17 @@ MmpPageOutPhysicalAddress(PFN_NUMBER Page)
     ExAcquireFastMutex(&MiGlobalPageOperation);
     if ((Segment = MmGetSectionAssociation(Page, &FileOffset)))
     {
+        /* If this segment is mapped in system space, the rmap walk below
+         * cannot reach those views (system-space views carry no rmap), so
+         * paging the page out would free a frame still mapped in system
+         * space - the view would then read a stale/zeroed page. Spare it. */
+        if (Segment->SystemMapCount > 0)
+        {
+            MmDereferenceSegment(Segment);
+            ExReleaseFastMutex(&MiGlobalPageOperation);
+            return STATUS_UNSUCCESSFUL;
+        }
+
         DPRINTC("Withdrawing page (%x) %p:%x\n",
                 Page,
                 Segment,
