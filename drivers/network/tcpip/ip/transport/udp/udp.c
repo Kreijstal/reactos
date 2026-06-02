@@ -332,7 +332,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     static volatile LONG UdpDelivered = 0;
     LONG ud = InterlockedIncrement(&UdpDelivered);
     if (ud <= 10)
-        DPRINT("TCPIP-UDP: matched AddrFile=%p — delivering\n", AddrFile);
+        DPRINT("TCPIP-UDP: delivering to matched AddrFile=%p\n", AddrFile);
     do {
       DGDeliverData(AddrFile,
 		    SrcAddress,
@@ -354,7 +354,7 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
         extern KSPIN_LOCK AddressFileListLock;
         PLIST_ENTRY entry;
         KIRQL OldIrql;
-        DPRINT("TCPIP-UDP: NO MATCH for dst=0x%08x:%u proto=UDP — listing all bound:\n",
+        DPRINT("TCPIP-UDP: no match for dst=0x%08x:%u proto=UDP; listing all bound:\n",
                  DstAddress->Address.IPv4Address, WH2N(UDPHeader->DestPort));
         TcpipAcquireSpinLock(&AddressFileListLock, &OldIrql);
         for (entry = AddressFileListHead.Flink;

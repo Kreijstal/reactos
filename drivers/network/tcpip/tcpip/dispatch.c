@@ -1322,7 +1322,7 @@ VOID DispTdiQueryInformationExComplete(
                     CONTEXT_SIZE);
 #endif
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-                /* User buffer went away — keep going. */
+                /* User buffer went away - keep going. */
             } _SEH2_END;
         }
         else if (QueryContext->InputMdl)
@@ -1356,7 +1356,7 @@ VOID DispTdiQueryInformationExComplete(
                               QueryContext->KernelOutputBuffer,
                               CopyLen);
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-                /* User buffer went away — keep going. */
+                /* User buffer went away - keep going. */
             } _SEH2_END;
         }
     }
@@ -1431,7 +1431,7 @@ NTSTATUS DispTdiQueryInformationEx(
         break;
 
     default:
-        TI_DbgPrint(MIN_TRACE, ("TCPIP-TDI: invalid FsContext2=%p — returning STATUS_INVALID_PARAMETER\n",
+        TI_DbgPrint(MIN_TRACE, ("TCPIP-TDI: invalid FsContext2=%p; returning STATUS_INVALID_PARAMETER\n",
                  IrpSp->FileObject ? IrpSp->FileObject->FsContext2 : NULL));
         return STATUS_INVALID_PARAMETER;
     }
