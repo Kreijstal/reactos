@@ -10,7 +10,7 @@
  *     containing PackedEaSize, NeedEaCount, UnpackedEaSize
  *
  * The data inside $EA is exactly the same FILE_FULL_EA_INFORMATION layout
- * the NT API exposes — same NextEntryOffset / Flags / EaNameLength /
+ * the NT API exposes - same NextEntryOffset / Flags / EaNameLength /
  * EaValueLength fields. So query is "read $EA, walk it, copy entries that
  * match the filter into the user buffer", and set is "validate the input
  * with IoCheckEaBufferValidity, write the new list back into $EA, update
@@ -88,7 +88,7 @@ NtfsReadEaAttribute(PNTFS_VCB Vcb,
     Status = FindAttribute(Vcb, FileRecord, AttributeEA, L"", 0, &EaContext, NULL);
     if (!NT_SUCCESS(Status))
     {
-        /* No $EA attribute — file has no EAs. Not an error here; the
+        /* No $EA attribute - file has no EAs. Not an error here; the
          * caller distinguishes by checking *Buffer. */
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
         return STATUS_SUCCESS;
@@ -283,7 +283,7 @@ NtfsQueryEa(PNTFS_IRP_CONTEXT IrpContext)
         if (UserEaList != NULL && UserEaListLength > 0)
         {
             /* The filter is itself a chained FILE_GET_EA_INFORMATION
-             * list — but every implementation simply walks the file's
+             * list - but every implementation simply walks the file's
              * own EA list and returns the union. We do the same: if
              * the source EA's name doesn't appear in the filter, skip. */
             PFILE_GET_EA_INFORMATION GetEa =

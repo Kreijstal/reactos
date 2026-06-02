@@ -579,7 +579,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
          * upper layer can resolve the reparse.
          *
          * Return STATUS_REPARSE for any reparse tag (mount point,
-         * symlink, third-party, etc.) — the tag goes into
+         * symlink, third-party, etc.) - the tag goes into
          * IoStatus.Information and the reparse data stays in
          * Irp->Tail.Overlay.AuxiliaryBuffer for the I/O manager, which
          * owns (and frees) that buffer once the reparse is handled.
@@ -772,7 +772,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
             if (Fcb->OpenHandleCount == 0)
             {
-                /* First open of this FCB — establish share access. */
+                /* First open of this FCB - establish share access. */
                 IoSetShareAccess(DesiredAccess,
                                  ShareAccess,
                                  FileObject,
@@ -780,7 +780,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             }
             else
             {
-                /* Subsequent open — must be compatible with existing
+                /* Subsequent open - must be compatible with existing
                  * sharing.  IoCheckShareAccess validates and (when the
                  * fourth argument is TRUE) updates the access counters
                  * atomically. */

@@ -163,7 +163,7 @@ FsRtlGetSectorSizeInformation(IN PDEVICE_OBJECT DeviceObject,
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Sensible legacy defaults — overwritten if the IOCTL succeeds. */
+    /* Sensible legacy defaults - overwritten if the IOCTL succeeds. */
     SectorSize = (DeviceObject->SectorSize != 0) ? DeviceObject->SectorSize : 512;
     SectorSizeInfo->LogicalBytesPerSector = SectorSize;
     SectorSizeInfo->PhysicalBytesPerSectorForAtomicity = SectorSize;
@@ -190,7 +190,7 @@ FsRtlGetSectorSizeInformation(IN PDEVICE_OBJECT DeviceObject,
                                         &Iosb);
     if (Irp == NULL)
     {
-        /* Out of memory building the IRP — defaults are already filled in. */
+        /* Out of memory building the IRP - defaults are already filled in. */
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 

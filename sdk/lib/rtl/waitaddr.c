@@ -55,7 +55,7 @@ ULONG
 AddrHash(IN PVOID Address)
 {
     ULONG_PTR p = (ULONG_PTR)Address;
-    /* Drop the bottom couple of bits — typical addresses are aligned —
+    /* Drop the bottom couple of bits - typical addresses are aligned -
        then fold the remaining bits with a multiplicative hash. */
     p >>= 2;
     p ^= p >> 16;
@@ -71,12 +71,12 @@ AddrEnsureInit(VOID)
 {
     ULONG i;
 
-    /* Cheap check first — the buckets are zero-initialized BSS, so once
+    /* Cheap check first - the buckets are zero-initialized BSS, so once
        Initialized is set on bucket 0 everything else is set too. */
     if (AddrWaitBuckets[0].Initialized)
         return;
 
-    /* Slow path — winning thread initializes everyone, losers spin briefly. */
+    /* Slow path - winning thread initializes everyone, losers spin briefly. */
     if (InterlockedCompareExchange(&AddrWaitInitOnce, 1, 0) == 0)
     {
         for (i = 0; i < ADDR_HASH_BUCKETS; i++)
@@ -151,13 +151,13 @@ RtlWaitOnAddress(
     InsertTailList(&Bucket->WaiterList, &Entry.ListEntry);
     RtlLeaveCriticalSection(&Bucket->Lock);
 
-    /* Block.  The keyed event "key" is &Entry — the same pointer the
+    /* Block.  The keyed event "key" is &Entry - the same pointer the
        wake side will pass to NtReleaseKeyedEvent. */
     Status = NtWaitForKeyedEvent(NULL, &Entry, FALSE, Timeout);
 
     if (Status == STATUS_SUCCESS)
     {
-        /* A waker rendezvoused with us — they already removed us
+        /* A waker rendezvoused with us - they already removed us
            from the list. */
         return STATUS_SUCCESS;
     }
@@ -172,7 +172,7 @@ RtlWaitOnAddress(
     RtlEnterCriticalSection(&Bucket->Lock);
     if (!Entry.Removed)
     {
-        /* No waker reached us — pull ourselves out and return the
+        /* No waker reached us - pull ourselves out and return the
            original timeout/error status. */
         RemoveEntryList(&Entry.ListEntry);
         RtlLeaveCriticalSection(&Bucket->Lock);
@@ -180,7 +180,7 @@ RtlWaitOnAddress(
     }
     RtlLeaveCriticalSection(&Bucket->Lock);
 
-    /* A waker has us flagged Removed — it has either already called
+    /* A waker has us flagged Removed - it has either already called
        NtReleaseKeyedEvent (in which case our wait would have succeeded
        and we wouldn't be here) or it is about to.  Drain the matching
        release with an unbounded wait — keyed events guarantee a 1:1
@@ -221,7 +221,7 @@ RtlWakeAddressSingle(_In_ PVOID Address)
 
     if (Found != NULL)
     {
-        /* Rendezvous with the waiter.  Use NULL timeout (infinite) —
+        /* Rendezvous with the waiter.  Use NULL timeout (infinite) -
            keyed events guarantee 1:1 matching, so the waiter is
            obligated to either be in the wait already (rendezvous
            succeeds immediately) or to drain it from its timeout-cleanup

@@ -23,7 +23,7 @@
 #include "ath_reg.h"
 #include "reg.h"
 
-/* Verbatim copy of include/ath9k/hw.h:524 — struct ath9k_hw_version. */
+/* Verbatim copy of include/ath9k/hw.h:524 - struct ath9k_hw_version. */
 typedef enum { ATH_USB_UNUSED = 0 } ath_usb_dev;
 struct ath9k_hw_version {
     u32 magic;
@@ -37,7 +37,7 @@ struct ath9k_hw_version {
     ath_usb_dev usbdev;
 };
 
-/* Subset of struct ath_ops from include/ath.h:127 — only the two function
+/* Subset of struct ath_ops from include/ath.h:127 - only the two function
  * pointers ath9k_hw_read_revisions exercises via REG_READ. */
 struct ath_ops {
     unsigned int (*read)(void *, u32 reg_offset);
@@ -54,17 +54,17 @@ struct ath_hw {
     u16          (*get_mac_revision)(void);
 };
 
-/* REG_READ / REG_WRITE — copy of hw.h:80,82 macros. */
+/* REG_READ / REG_WRITE - copy of hw.h:80,82 macros. */
 #define REG_READ(_ah, _reg) \
     (_ah)->reg_ops.read((_ah)->reg_ctx, (_reg))
 #define REG_WRITE(_ah, _reg, _val) \
     (_ah)->reg_ops.write((_ah)->reg_ctx, (_val), (_reg))
 
-/* MS / SM — copy of hw.h:122,121 macros (mask-shift / shift-mask). */
+/* MS / SM - copy of hw.h:122,121 macros (mask-shift / shift-mask). */
 #define MS(_v, _f) (((_v) & (_f)) >> _f##_S)
 #define SM(_v, _f) (((_v) << _f##_S) & (_f))
 
-/* Device IDs — copy of hw.h:35-72.  Slice 2 cares only about AR9485 but
+/* Device IDs - copy of hw.h:35-72.  Slice 2 cares only about AR9485 but
  * we copy a few neighbours for documentation and to make the upstream
  * function body compile without trimming the devid switch. */
 #define AR5416_AR9100_DEVID          0x000b
@@ -83,10 +83,10 @@ struct ath_hw {
  * AR_SREV_9485, AR_SREV_9565, ...) and the AR_SREV(_ah) offset macro
  * come from the verbatim ath9k/reg.h dropped in slice 1.  They depend
  * on ah->hw_version.macVersion which our struct ath_hw above provides
- * with the same field name and type — so the upstream macros expand
+ * with the same field name and type - so the upstream macros expand
  * without modification. */
 
-/* ath_err logging stub — upstream funnels into a printk-like macro; we
+/* ath_err logging stub - upstream funnels into a printk-like macro; we
  * land in DPRINT1 so failures show up on COM1. */
 #define ath9k_hw_common(_ah)  (_ah)
 struct _ath_common_dummy { int unused; };

@@ -43,7 +43,7 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
 
         if (NT_SUCCESS(Status) && !FCB->Recv.Window)
         {
-            /* dev-nt6-1: NonPagedPool — tcpip's DGDeliverData runs from
+            /* dev-nt6-1: NonPagedPool - tcpip's DGDeliverData runs from
              * the network RX DPC at DISPATCH_LEVEL and writes into this
              * buffer via RtlCopyMemory. PagedPool would bugcheck 0x50
              * (PAGE_FAULT_IN_NONPAGED_AREA) on first delivery. The

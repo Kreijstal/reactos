@@ -181,7 +181,7 @@ NtfsQuotaOpenIndex(PDEVICE_EXTENSION Vcb,
 
 /* Persist an in-memory B+tree back into the file record's INDEX_ROOT
  * attribute and flush the MFT record to disk.  Only handles the root-only
- * case (no index allocation) — sufficient for the common quota sizes; see
+ * case (no index allocation) - sufficient for the common quota sizes; see
  * the banner for deferred items. */
 static NTSTATUS
 NtfsQuotaFlushIndex(PDEVICE_EXTENSION Vcb, PQUOTA_INDEX_HANDLE Handle)
@@ -578,7 +578,7 @@ NtfsQuotaDeleteEntry(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
         goto Done;
 
-    /* Best-effort — OK if not found. */
+    /* Best-effort - OK if not found. */
     (void)NtfsBTreeRemoveBlob(QHandle.Tree, &OwnerId, sizeof(OwnerId));
 
     Status = NtfsQuotaFlushIndex(Vcb, &OHandle);

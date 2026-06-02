@@ -15,7 +15,7 @@
  *              NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES the driver pushed
  *              during NdisMSetMiniportAttributes. No round-trip to the
  *              NDIS 6 miniport's OidRequestHandler is needed for these
- *              informational OIDs — the values are fixed at init time.
+ *              informational OIDs - the values are fixed at init time.
  *
  *              Set-OIDs (OID_GEN_CURRENT_LOOKAHEAD, OID_GEN_CURRENT_PACKET_FILTER)
  *              are accepted silently for now; Phase 3 will forward them
@@ -36,12 +36,12 @@
 #undef UNIMPLEMENTED
 #include <reactos/debug.h>
 
-/* ETH_HEADER_SIZE — fixed Ethernet II header length. Used to derive
+/* ETH_HEADER_SIZE - fixed Ethernet II header length. Used to derive
  * OID_GEN_MAXIMUM_TOTAL_SIZE from the MTU the driver reported. */
 #define NDIS6_ETH_HEADER_SIZE   14
 
 /* ============================================================================
- *  Ndis6OidForward — synchronous forwarder from a legacy NDIS_REQUEST to
+ *  Ndis6OidForward - synchronous forwarder from a legacy NDIS_REQUEST to
  *  the NDIS 6 miniport's OidRequestHandler.
  *
  *  Builds an NDIS_OID_REQUEST from the legacy fields, registers a waiter on
@@ -143,7 +143,7 @@ Ndis6OidForward(
     }
     else
     {
-        /* Synchronous completion — pull the waiter off the list ourselves
+        /* Synchronous completion - pull the waiter off the list ourselves
          * (NdisMOidRequestComplete may or may not have done so). */
         KeAcquireSpinLock(&Ext->OidWaiterLock, &OldIrql);
         if (Waiter.ListEntry.Flink != NULL && Waiter.ListEntry.Blink != NULL)
@@ -175,7 +175,7 @@ Ndis6OidForward(
 }
 
 /* ============================================================================
- *  NdisMOidRequestComplete — driver-side OID-completion callback.
+ *  NdisMOidRequestComplete - driver-side OID-completion callback.
  *
  *  The miniport calls this from its OidRequestHandler (or from a worker
  *  thread / DPC) to signal that an asynchronously-completing OID is done.
@@ -187,7 +187,7 @@ Ndis6OidForward(
  * ============================================================================ */
 
 /* ============================================================================
- *  Phase 4 helpers — exported by name for the legacy library to call from
+ *  Phase 4 helpers - exported by name for the legacy library to call from
  *  miniport.c. The legacy file is compiled with NDIS51 PCH and can't see
  *  PNDIS6_ADAPTER_EXT, so it forward-declares these prototypes and calls
  *  them via extern.
@@ -264,14 +264,14 @@ NdisMOidRequestComplete(
         return;
 
     /* Two possible RequestId types:
-     *   1. PNDIS6_OID_WAITER — a legacy-NDIS-5 forwarded request. Signal
+     *   1. PNDIS6_OID_WAITER - a legacy-NDIS-5 forwarded request. Signal
      *      the event and let Ndis6OidForward wake up.
-     *   2. PNDIS6_PROTOCOL_PENDING_OID — a native NDIS 6 protocol async
+     *   2. PNDIS6_PROTOCOL_PENDING_OID - a native NDIS 6 protocol async
      *      request. Restore the original RequestId, pop the entry, and
      *      call the protocol's OidRequestCompleteHandler.
      *
      * We disambiguate by walking the legacy waiter list first (cheap,
-     * one spinlock) — if found, treat as case 1. Otherwise case 2. */
+     * one spinlock) - if found, treat as case 1. Otherwise case 2. */
 
     IsProtocolPending = TRUE;
     KeAcquireSpinLock(&Ext->OidWaiterLock, &OldIrql);
@@ -328,7 +328,7 @@ NdisMOidRequestComplete(
 }
 
 /* ============================================================================
- *  Ndis6LegacyDoRequest — services NDIS 5 NDIS_REQUEST for NDIS 6 adapters
+ *  Ndis6LegacyDoRequest - services NDIS 5 NDIS_REQUEST for NDIS 6 adapters
  *
  *  Called from the legacy MiniDoRequest in miniport.c via an IsNdis6 check.
  *  Returns an NDIS_STATUS just like MiniDoRequest would.
@@ -399,7 +399,7 @@ Ndis6LegacyDoRequest(
             /* B1: batch up to 64 sends per miniport call. The bridge's
              * TX thunk handles chained NBLs and the driver's
              * SendNetBufferListsHandler sees the whole batch in one
-             * invocation — critical for gigabit line-rate sends. */
+             * invocation - critical for gigabit line-rate sends. */
             *(PULONG)Buffer = 64;
             Request->DATA.QUERY_INFORMATION.BytesWritten = sizeof(ULONG);
             return NDIS_STATUS_SUCCESS;
@@ -481,7 +481,7 @@ Ndis6LegacyDoRequest(
                 Request->DATA.QUERY_INFORMATION.BytesNeeded = sizeof(ULONG);
                 return NDIS_STATUS_BUFFER_TOO_SHORT;
             }
-            /* MTU + Ethernet header (14) — legacy consumers add their
+            /* MTU + Ethernet header (14) - legacy consumers add their
              * own VLAN / LLC padding on top. */
             if (Ext->GeneralAttrsValid && gen->MtuSize)
             {
@@ -564,7 +564,7 @@ Ndis6LegacyDoRequest(
             return NDIS_STATUS_SUCCESS;
 
         default:
-            /* Unknown query — forward to the driver's OidRequestHandler
+            /* Unknown query - forward to the driver's OidRequestHandler
              * via the Phase 3 thunk. The driver may serve it directly
              * (e.g. statistics OIDs that live in hardware counters) or
              * return NDIS_STATUS_NOT_SUPPORTED. */

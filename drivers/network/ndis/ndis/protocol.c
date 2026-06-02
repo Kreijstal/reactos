@@ -692,7 +692,7 @@ ProTransferData(
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
-    /* dev-nt6-1: NDIS 6 miniports never get TransferDataHandler calls —
+    /* dev-nt6-1: NDIS 6 miniports never get TransferDataHandler calls -
      * the NDIS 6 receive path always delivers the full payload in the
      * NB chain, so the lookahead-mismatch path that legacy protocols
      * would take is unused. Return NOT_SUPPORTED defensively. */

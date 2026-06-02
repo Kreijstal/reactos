@@ -396,7 +396,7 @@ DriverIoControl(
                     /* Wrap the test in SEH so an assertion (with
                      * FLG_DISABLE_DEBUG_PROMPTS set, RtlAssert raises
                      * STATUS_ASSERTION_FAILURE) or a stray access violation
-                     * inside a test doesn't tear down the whole runner — it
+                     * inside a test doesn't tear down the whole runner - it
                      * is recorded as a failure and the next test runs. */
                     _SEH2_TRY
                     {
@@ -421,7 +421,7 @@ DriverIoControl(
                      * state, the kernel would bugcheck 0x20
                      * (KERNEL_APC_PENDING_DURING_EXIT). The driver targets
                      * an older NTDDI than the running kernel so we can't
-                     * read KTHREAD APC counters directly — repeatedly call
+                     * read KTHREAD APC counters directly - repeatedly call
                      * KeLeave*Region until the public KeAreApcsDisabled
                      * predicate matches the entry state. Cap the loops to
                      * avoid runaway on the corner case where both counters

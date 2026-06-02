@@ -282,7 +282,7 @@ NdisReturnPackets(
 
             /* dev-nt6-1: NDIS 6 adapters route returns through the
              * Phase 3 RX thunk. The legacy ReturnPacketHandler is NULL
-             * for them — defer to the bridge which decrements the per-NBL
+             * for them - defer to the bridge which decrements the per-NBL
              * refcount and possibly returns the NBL to the miniport. */
             if (Adapter->IsNdis6)
             {
@@ -943,7 +943,7 @@ MiniReset(
    }
 
    /* dev-nt6-1: NDIS 6 adapters use ResetHandlerEx via the bridge helper.
-    * Returns NOT_SUPPORTED if the driver didn't register one — legacy
+    * Returns NOT_SUPPORTED if the driver didn't register one - legacy
     * protocols tolerate this. Pause/Restart-based reset is Phase 6. */
    if (Adapter->IsNdis6)
    {
@@ -1972,7 +1972,7 @@ NdisIPnPStartDevice(
   PLOGICAL_ADAPTER Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
   NDIS_WRAPPER_CONTEXT WrapperContext;
   /* dev-nt6-1: legacy NdisIPnPStartDevice must NEVER run for NDIS 6
-   * adapters — Ndis6DispatchPnp in 60driver.c owns the dispatch table
+   * adapters - Ndis6DispatchPnp in 60driver.c owns the dispatch table
    * for NDIS 6 drivers. If this fires, the driver-object hijack is
    * broken and we'd crash on DriverHandle below anyway. */
   ASSERT(!Adapter->IsNdis6);

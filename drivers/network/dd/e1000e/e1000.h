@@ -21,7 +21,7 @@
 #include <ntintsafe.h>
 #include <wdmguid.h>  /* For GUID_BUS_INTERFACE_STANDARD */
 
-/* DPRINT/DPRINT1 — ReactOS debug output macros. Use the explicit
+/* DPRINT/DPRINT1 - ReactOS debug output macros. Use the explicit
  * reactos/ prefix because the e1000 source dir has its own local
  * debug.h (legacy NDIS_DbgPrint helper) that would otherwise win
  * the include search. */
@@ -36,7 +36,7 @@
 
 /* DPRINT/DPRINT1 already provided by <reactos/debug.h> above. The
  * legacy local debug.h (NDIS_DbgPrint helper) is intentionally not
- * included — it lives in drivers/network/dd/e1000/ for the NDIS 5.0
+ * included - it lives in drivers/network/dd/e1000/ for the NDIS 5.0
  * variant only. */
 
 /* ============================================================================

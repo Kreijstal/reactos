@@ -60,7 +60,7 @@ PVOID LockRequest( PIRP Irp,
                 return NULL;
             }
 
-            /* SEH-guarded copy from user space — bypasses ReactOS's
+            /* SEH-guarded copy from user space - bypasses ReactOS's
              * broken MmProbeAndLockPages. */
             _SEH2_TRY {
                 RtlCopyMemory(KernelBuffer, UserBuffer, BufferLength);
@@ -254,7 +254,7 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
         _SEH2_TRY {
             RtlCopyMemory(UserBuffer, KernelBuffer, ByteCount);
         } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-            /* User buffer went away — keep going. */
+            /* User buffer went away - keep going. */
         } _SEH2_END;
         if (Attached)
             KeUnstackDetachProcess(&ApcState);
@@ -399,7 +399,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                 ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
                 return NULL;
             }
-            /* Lock the MDL via KernelMode probe — kernel pool is always
+            /* Lock the MDL via KernelMode probe - kernel pool is always
              * resident so this should always succeed. We deliberately
              * do NOT use MmBuildMdlForNonPagedPool because that sets
              * MDL_SOURCE_IS_NONPAGED_POOL which trips an assertion in
@@ -426,7 +426,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
              * reuse BufferAddress here because SatisfyPacketRecvRequest,
              * TryToSatisfyRecvRequestFromBuffer, and AfdConnectedSocketWriteData
              * all transiently overwrite BufferAddress with the result of
-             * MmMapLockedPages — which destroys the user pointer before
+             * MmMapLockedPages - which destroys the user pointer before
              * UnlockBuffers can read it. SEND buffers don't need a
              * writeback (kernel only reads from them). */
             MapBuf[i].BufferAddress = NULL;
@@ -458,7 +458,7 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
 
     /* dev-nt6-1: each MapBuf entry now wraps a kernel-pool buffer that
      * was set up by LockBuffers. For read (RX) buffers, Map[i].OriginalUserBuffer
-     * holds the original user-mode pointer — copy back via SEH so the
+     * holds the original user-mode pointer - copy back via SEH so the
      * user-mode recv() returns the data. For write (TX) buffers,
      * OriginalUserBuffer is NULL and there's nothing to copy back.
      * BufferAddress is NOT used here because downstream callers
@@ -489,7 +489,7 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
                 _SEH2_TRY {
                     RtlCopyMemory(UserBuf, KernelBuf, Len);
                 } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-                    /* User buffer went away — keep going. */
+                    /* User buffer went away - keep going. */
                 } _SEH2_END;
                 if (Attached)
                     KeUnstackDetachProcess(&ApcState);

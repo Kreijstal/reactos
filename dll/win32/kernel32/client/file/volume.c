@@ -769,7 +769,7 @@ GetVolumePathNameW(IN LPCWSTR lpszFileName,
      * root is just \\server\share\.  The mount-point walker below cannot
      * find UNC roots because MountMgr only tracks DOS volumes / reparse
      * mount points, so it would otherwise loop back to \\server (and even
-     * to \\) and return FALSE — which surfaces in cmd as
+     * to \\) and return FALSE - which surfaces in cmd as
      * "Invalid drive specification" for any UNC argument. */
     if (lpszFileName != NULL &&
         lpszFileName[0] == L'\\' && lpszFileName[1] == L'\\' &&
@@ -784,7 +784,7 @@ GetVolumePathNameW(IN LPCWSTR lpszFileName,
         while (*p && *p != L'\\') p++;
         if (*p != L'\\' || p[1] == UNICODE_NULL)
         {
-            /* \\server with no share — not a volume root. */
+            /* \\server with no share - not a volume root. */
             SetLastError(ERROR_INVALID_NAME);
             return FALSE;
         }
