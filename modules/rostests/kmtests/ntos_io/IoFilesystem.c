@@ -842,10 +842,87 @@ Cleanup:
     }
 }
 
+#define IOFS_STRESS_ITERATIONS 32
+#define IOFS_STRESS_ALLOCATIONS 128
+#define IOFS_STRESS_MAX_ALLOCATION (64 * 1024)
+
+static
+VOID
+FreeStressBlocks(
+    _Inout_updates_(Count) PVOID *Blocks,
+    _In_ ULONG Count)
+{
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        if (Blocks[i])
+        {
+            ExFreePoolWithTag(Blocks[i], 'sFoI');
+            Blocks[i] = NULL;
+        }
+    }
+}
+
+static
+VOID
+ChurnPool(
+    _Inout_updates_(Count) PVOID *Blocks,
+    _In_ ULONG Count,
+    _In_ ULONG Iteration)
+{
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+    {
+        SIZE_T Size;
+        POOL_TYPE PoolType;
+
+        Size = PAGE_SIZE + (((i * 1103515245u) + Iteration) %
+                            (IOFS_STRESS_MAX_ALLOCATION - PAGE_SIZE + 1));
+        PoolType = ((i + Iteration) & 1) ? PagedPool : NonPagedPool;
+
+        Blocks[i] = ExAllocatePoolWithTag(PoolType, Size, 'sFoI');
+        if (Blocks[i])
+            RtlFillMemory(Blocks[i], Size, (UCHAR)(0xa0 + (i & 0x1f)));
+    }
+
+    for (i = 0; i < Count; i += 3)
+    {
+        if (Blocks[i])
+        {
+            ExFreePoolWithTag(Blocks[i], 'sFoI');
+            Blocks[i] = NULL;
+        }
+    }
+}
+
 START_TEST(IoFilesystem)
 {
     /* TestAllInformation() has to be first since we detect the filesystem there */
     TestAllInformation();
     TestRelativeNames();
     TestSharedCacheMap();
+}
+
+START_TEST(IoFilesystemStress)
+{
+    ULONG Iteration;
+    PVOID Blocks[IOFS_STRESS_ALLOCATIONS];
+
+    trace("Running IoFilesystemStress for %u iterations\n", IOFS_STRESS_ITERATIONS);
+
+    for (Iteration = 0; Iteration < IOFS_STRESS_ITERATIONS; Iteration++)
+    {
+        RtlZeroMemory(Blocks, sizeof(Blocks));
+        ChurnPool(Blocks, RTL_NUMBER_OF(Blocks), Iteration);
+
+        TestAllInformation();
+        TestSharedCacheMap();
+
+        if ((Iteration & 7) == 0)
+            TestRelativeNames();
+
+        FreeStressBlocks(Blocks, RTL_NUMBER_OF(Blocks));
+    }
 }
