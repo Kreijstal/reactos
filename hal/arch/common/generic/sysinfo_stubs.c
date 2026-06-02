@@ -21,6 +21,9 @@
 #define NDEBUG
 #include <debug.h>
 
+#undef HalRequestInterrupt
+#undef HalEnumerateUnmaskedInterrupts
+
 #if defined(_M_ARM64)
 #define HALP_ARM64_MSI_DEFAULT_IRQL 4
 
@@ -349,6 +352,24 @@ HalGetMessageRoutingInfo(
 #endif
     return STATUS_SUCCESS;
 }
+
+#if !defined(_M_ARM64)
+NTSTATUS
+NTAPI
+HalpGetInterruptTargetInformation(
+    _Inout_ PHAL_INTERRUPT_TARGET_INFORMATION TargetInformation)
+{
+    return HalGetInterruptTargetInformation(TargetInformation);
+}
+
+NTSTATUS
+NTAPI
+HalpGetMessageRoutingInfo(
+    _Inout_ PHAL_MESSAGE_ROUTING_INFO RoutingInfo)
+{
+    return HalGetMessageRoutingInfo(RoutingInfo);
+}
+#endif
 
 NTSTATUS
 NTAPI
