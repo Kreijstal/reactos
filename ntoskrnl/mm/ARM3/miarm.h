@@ -191,13 +191,21 @@ C_ASSERT(SYSTEM_PD_SIZE == PAGE_SIZE);
 extern const ULONG_PTR MmProtectToPteMask[32];
 extern const ULONG MmProtectToValue[32];
 
+#if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
+#define MI_RESERVED_MAPPING_SHIFT 28
+#define MI_RESERVED_MAPPING_TAG(PoolTag) (((ULONG_PTR)(PoolTag & ~1UL) + 1) << MI_RESERVED_MAPPING_SHIFT)
+#else
+#define MI_RESERVED_MAPPING_SHIFT 1
+#define MI_RESERVED_MAPPING_TAG(PoolTag) ((ULONG_PTR)(PoolTag) << MI_RESERVED_MAPPING_SHIFT)
+#endif
+
 FORCEINLINE
 MMPTE
 MI_MAKE_RESERVED_MAPPING_SIZE_PTE(_In_ ULONG_PTR SizeInPages)
 {
     MMPTE TempPte;
 
-    TempPte.u.Long = SizeInPages << 1;
+    TempPte.u.Long = SizeInPages << MI_RESERVED_MAPPING_SHIFT;
     return TempPte;
 }
 
@@ -207,7 +215,7 @@ MI_MAKE_RESERVED_MAPPING_TAG_PTE(_In_ ULONG PoolTag)
 {
     MMPTE TempPte;
 
-    TempPte.u.Long = (ULONG_PTR)PoolTag << 1;
+    TempPte.u.Long = MI_RESERVED_MAPPING_TAG(PoolTag);
     return TempPte;
 }
 
@@ -215,7 +223,7 @@ FORCEINLINE
 ULONG_PTR
 MI_GET_RESERVED_MAPPING_SIZE(_In_ MMPTE PointerPte)
 {
-    return PointerPte.u.Long >> 1;
+    return PointerPte.u.Long >> MI_RESERVED_MAPPING_SHIFT;
 }
 
 //
