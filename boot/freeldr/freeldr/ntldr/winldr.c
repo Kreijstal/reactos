@@ -112,7 +112,9 @@ AllocateAndInitLPB(
 #endif
 
 #ifdef UEFIBOOT
+#if (NTDDI_VERSION < NTDDI_WIN8)
     Extension->BootViaEFI = 1;
+#endif
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     LoaderBlock->FirmwareInformation.FirmwareTypeEfi = 1;
 #endif
@@ -532,7 +534,7 @@ WinLdrDetectVersion(VOID)
 
     /* TODO: read CurrentControlSet\Control\Windows\CSDVersion or the
      * ProductVersion under the installed Software hive. Until that lands,
-     * fall back to the version this freeldr was built to load — the same
+     * fall back to the version this freeldr was built to load - the same
      * build emits both freeldr and ntoskrnl, so the build-time target is
      * a sound default. */
     return FRLDR_TARGET_NT_VERSION;
