@@ -3700,27 +3700,54 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    FileNameAttribute = GetBestFileNameFromRecord(DeviceExt, FileRecord);
-    if (FileNameAttribute == NULL)
+    /* A file record can carry more than one $FILE_NAME attribute - typically a
+     * Win32 long name together with its generated DOS 8.3 short-name alias (and,
+     * for hardlinked files, names in several directories) - and each of them has
+     * its own entry in a parent directory's $I30 index.  Remove every one of
+     * them: dropping only the "best" name (as we used to) leaves the other index
+     * entries behind, and once this MFT record is freed and later reused those
+     * stale entries cross-link the directory index to an unrelated record. */
     {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
+        FIND_ATTR_CONTXT FindContext;
+        PNTFS_ATTR_RECORD Attribute;
+        BOOLEAN FoundName = FALSE;
+        NTSTATUS FindStatus;
 
-    ParentMftIndex = FileNameAttribute->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
-    FileName.Length = FileNameAttribute->NameLength * sizeof(WCHAR);
-    FileName.MaximumLength = FileName.Length;
-    FileName.Buffer = FileNameAttribute->Name;
+        FindStatus = FindFirstAttribute(&FindContext, DeviceExt, FileRecord, FALSE, &Attribute);
+        while (NT_SUCCESS(FindStatus))
+        {
+            if (Attribute->Type == AttributeFileName)
+            {
+                FileNameAttribute = (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
 
-    Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
-                                             ParentMftIndex,
-                                             Fcb->MFTIndex,
-                                             &FileName,
-                                             CaseSensitive);
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
+                ParentMftIndex = FileNameAttribute->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+                FileName.Length = FileName.MaximumLength = FileNameAttribute->NameLength * sizeof(WCHAR);
+                FileName.Buffer = FileNameAttribute->Name;
+
+                Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                                         ParentMftIndex,
+                                                         Fcb->MFTIndex,
+                                                         &FileName,
+                                                         CaseSensitive);
+                if (!NT_SUCCESS(Status))
+                {
+                    FindCloseAttribute(&FindContext);
+                    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                    return Status;
+                }
+
+                FoundName = TRUE;
+            }
+
+            FindStatus = FindNextAttribute(&FindContext, &Attribute);
+        }
+        FindCloseAttribute(&FindContext);
+
+        if (!FoundName)
+        {
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
     }
 
     ClearFlag(FileRecord->Flags, FRH_IN_USE);
