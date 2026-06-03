@@ -3373,11 +3373,17 @@ RxCommonRead(
             if (!NT_SUCCESS(Irp->IoStatus.Status))
             {
                 Status = Irp->IoStatus.Status;
+                RxReleaseFcb(RxContext, Fcb);
                 _SEH2_LEAVE;
             }
 
             RxAcquirePagingIoResource(RxContext, Fcb);
             RxReleasePagingIoResource(RxContext, Fcb);
+
+            /* The exclusive FCB was only needed to safely flush the cache;
+             * release it now so the main read lock acquired below is balanced
+             * by the single release in the completion path. */
+            RxReleaseFcb(RxContext, Fcb);
         }
 
         /* Acquire the appropriate lock */
