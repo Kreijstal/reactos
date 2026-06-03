@@ -2244,7 +2244,30 @@ NtfsRemoveKeyFromNode(PB_TREE Tree,
                 if (Replacement == NULL ||
                     (Replacement->IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
                 {
-                    return FALSE;
+                    /* This separator points at a child subtree that no longer
+                     * holds any keys: earlier deletions emptied it, and the
+                     * index code never merges or frees emptied index nodes.
+                     * An index node is read in full or not at all, and
+                     * NtfsFindRightmostKey() yields a real key whenever any node
+                     * on the rightmost path has one, so a NULL result means the
+                     * subtree is genuinely empty - there is no in-order
+                     * predecessor to promote into this slot.  Drop the separator
+                     * outright: every key the empty child could legally hold
+                     * sorts below the following entry's key as well, so removing
+                     * this entry together with its empty child keeps the index
+                     * well-ordered.  Without this, a key promoted to an internal
+                     * node becomes permanently undeletable once its subtree
+                     * empties out. */
+                    if (PreviousKey != NULL)
+                        PreviousKey->NextKey = CurrentKey->NextKey;
+                    else
+                        Node->FirstKey = CurrentKey->NextKey;
+
+                    Node->KeyCount--;
+                    Node->DiskNeedsUpdating = TRUE;
+                    CurrentKey->NextKey = NULL;
+                    DestroyBTreeKey(CurrentKey);
+                    return TRUE;
                 }
 
                 ChildVCN = GetIndexEntryVCN(CurrentKey->IndexEntry);
