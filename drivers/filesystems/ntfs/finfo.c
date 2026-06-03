@@ -1073,6 +1073,7 @@ NtfsBuildRenamePath(PNTFS_FCB Fcb,
     UNICODE_STRING LeafComponent;
     PWCHAR LastSeparator;
     USHORT TotalLength;
+    USHORT Index;
     BOOLEAN AddSeparator = FALSE;
     PNTFS_FCB TargetFcb = NULL;
 
@@ -1111,9 +1112,24 @@ NtfsBuildRenamePath(PNTFS_FCB Fcb,
         Prefix.Length = Prefix.MaximumLength = (USHORT)(wcslen(TargetFcb->PathName) * sizeof(WCHAR));
         AddSeparator = !NtfsFCBIsRoot(TargetFcb);
 
-        LastSeparator = wcsrchr(RenameName.Buffer, L'\\');
-        if (LastSeparator == NULL || LastSeparator[1] == UNICODE_NULL)
+        /* RenameInfo->FileName is a counted buffer and is not guaranteed to be
+         * NUL-terminated, so bound the search to RenameName.Length instead of
+         * using wcsrchr(), which would scan past the buffer into adjacent pool
+         * and yield a negative leaf length (overflowing TotalLength below). */
+        LastSeparator = NULL;
+        for (Index = RenameName.Length / sizeof(WCHAR); Index > 0; Index--)
+        {
+            if (RenameName.Buffer[Index - 1] == L'\\')
+            {
+                LastSeparator = &RenameName.Buffer[Index - 1];
+                break;
+            }
+        }
+        if (LastSeparator == NULL ||
+            (PUCHAR)(LastSeparator + 1) >= (PUCHAR)RenameName.Buffer + RenameName.Length)
+        {
             return STATUS_OBJECT_NAME_INVALID;
+        }
 
         LeafComponent.Buffer = LastSeparator + 1;
         LeafComponent.Length = (USHORT)(RenameName.Length - ((PUCHAR)LeafComponent.Buffer - (PUCHAR)RenameName.Buffer));
