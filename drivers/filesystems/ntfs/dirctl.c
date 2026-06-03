@@ -725,7 +725,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
              */
             if (MFTRecord == OldMFTRecord)
             {
-                DPRINT1("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
+                DPRINT("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
                 Ccb->Entry++;
                 ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
                 continue;
