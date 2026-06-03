@@ -320,8 +320,17 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
     if (*BufferLength < (sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 8))
         return STATUS_BUFFER_OVERFLOW;
 
+    /* Report FILE_PERSISTENT_ACLS like Windows NTFS: the driver stores and
+     * returns per-file security descriptors (see security.c / $SECURITY), and
+     * FileInternalInformation returns a stable, unique IndexNumber (the MFT
+     * record number).  POSIX layers such as the Cygwin/MSYS2 runtime gate their
+     * "good inode" path on this flag; without it they fall back to synthesising
+     * inodes by hashing the path name, which is both slower and (on the runtime
+     * side) buggy, so an unpatched MSYS2 install misbehaves on ReactOS NTFS even
+     * though it works on Windows NTFS.  FILE_READ_ONLY_VOLUME must not be set -
+     * the volume is mounted read/write. */
     FsAttributeInfo->FileSystemAttributes =
-        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_READ_ONLY_VOLUME;
+        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_PERSISTENT_ACLS;
     FsAttributeInfo->MaximumComponentNameLength = 255;
     FsAttributeInfo->FileSystemNameLength = 8;
 
