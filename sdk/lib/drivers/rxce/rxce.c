@@ -8104,22 +8104,29 @@ RxSpinUpRequestsDispatcher(
                                        KernelMode, FALSE, &RxSpinUpDispatcherWaitInterval);
         ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_TIMEOUT));
 
-        KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
-        if (!IsListEmpty(&RxDispatcher->SpinUpRequests))
-        {
-            ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
-        }
-        else
-        {
-            ListEntry = &RxDispatcher->SpinUpRequests;
-        }
-        KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
-        KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
-
-        while (ListEntry != &RxDispatcher->SpinUpRequests)
+        /* Drain every pending spin-up request that has accumulated */
+        for (;;)
         {
             PWORK_QUEUE_ITEM WorkItem;
             PRX_WORK_QUEUE WorkQueue;
+
+            KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
+            if (!IsListEmpty(&RxDispatcher->SpinUpRequests))
+            {
+                ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
+            }
+            else
+            {
+                ListEntry = &RxDispatcher->SpinUpRequests;
+            }
+            KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
+            KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
+
+            /* No more requests: go back to waiting */
+            if (ListEntry == &RxDispatcher->SpinUpRequests)
+            {
+                break;
+            }
 
             WorkItem = CONTAINING_RECORD(ListEntry, WORK_QUEUE_ITEM, List);
             WorkQueue = WorkItem->Parameter;
@@ -8198,11 +8205,66 @@ RxSpinUpWorkerThread(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Worker routine queued to the spin-up requests dispatcher. It runs in the
+ * context of the dedicated RxSpinUpRequestsDispatcher thread (always at
+ * PASSIVE_LEVEL) so that it can legally create a new worker system thread.
+ */
+VOID
+NTAPI
+RxpSpinUpWorkerThread(
+    PVOID Context)
+{
+    PRX_WORK_QUEUE WorkQueue;
+
+    PAGED_CODE();
+
+    WorkQueue = Context;
+
+    /* We are no longer pending a spin-up: allow further requests to be queued */
+    WorkQueue->SpinUpRequestPending = FALSE;
+
+    /* Create the new worker thread, running the standard dispatcher loop */
+    RxSpinUpWorkerThread(WorkQueue, RxBootstrapWorkerThreadDispatcher, WorkQueue);
+}
+
+/*
+ * @implemented
+ *
+ * Defer the creation of an additional worker thread to the spin-up requests
+ * dispatcher thread. RxInsertWorkQueueItem may run at DISPATCH_LEVEL (from I/O
+ * completion paths), where PsCreateSystemThread is illegal, so the request is
+ * handed to the always-passive RxSpinUpRequestsDispatcher thread.
+ */
 VOID
 RxSpinUpWorkerThreads(
    PRX_WORK_QUEUE WorkQueue)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+
+    /*
+     * RxInsertWorkQueueItem only calls us after atomically setting
+     * SpinUpRequestPending under the work-queue spinlock, so at most one
+     * spin-up request per work queue is ever outstanding and the shared
+     * WorkQueueItemForSpinUpWorkerThread item is free to (re)use here. Mark it
+     * in use - the spin-up dispatcher decrements this once it picks the item up.
+     */
+    InterlockedIncrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse);
+    ++WorkQueue->NumberOfSpinUpRequests;
+
+    /* Set up the work item that the dispatcher will execute */
+    WorkQueue->WorkQueueItemForSpinUpWorkerThread.WorkerRoutine = RxpSpinUpWorkerThread;
+    WorkQueue->WorkQueueItemForSpinUpWorkerThread.Parameter = WorkQueue;
+
+    /* Queue the request and wake up the spin-up dispatcher thread */
+    KeAcquireSpinLock(&RxDispatcher.SpinUpRequestsLock, &OldIrql);
+    InsertTailList(&RxDispatcher.SpinUpRequests,
+                   &WorkQueue->WorkQueueItemForSpinUpWorkerThread.List);
+    KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+
+    KeSetEvent(&RxDispatcher.SpinUpRequestsEvent, IO_NO_INCREMENT, FALSE);
 }
 
 VOID
