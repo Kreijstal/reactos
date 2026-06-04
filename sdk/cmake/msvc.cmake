@@ -479,9 +479,14 @@ function(CreateBootSectorTarget _target_name _asm_file _binary_file _base_addres
         set(_no_std_includes_flag "/X")
     endif()
 
+    # cl /EP keeps surviving '#pragma' directives in its output (unlike GAS,
+    # which treats '#' as a comment); ml/ml64 reject the leading '#' with
+    # A2044. Strip any left-over column-zero '#' directive lines before the
+    # assembler sees them.
     add_custom_command(
         OUTPUT ${_temp_file}
-        COMMAND ${CMAKE_C_COMPILER} /nologo ${_no_std_includes_flag} /I${REACTOS_SOURCE_DIR}/sdk/include/asm /I${REACTOS_BINARY_DIR}/sdk/include/asm ${_includes} ${_defines} /D__ASM__ /D_USE_ML /EP /c ${_asm_file} > ${_temp_file}
+        COMMAND ${CMAKE_C_COMPILER} /nologo ${_no_std_includes_flag} /I${REACTOS_SOURCE_DIR}/sdk/include/asm /I${REACTOS_BINARY_DIR}/sdk/include/asm ${_includes} ${_defines} /D__ASM__ /D_USE_ML /EP /c ${_asm_file} > ${_temp_file}.tmp
+        COMMAND ${CMAKE_COMMAND} -DIN=${_temp_file}.tmp -DOUT=${_temp_file} -P ${REACTOS_SOURCE_DIR}/sdk/cmake/strip-asm-pragmas.cmake
         DEPENDS ${_asm_file})
 
     set(_asm16_command ${CMAKE_ASM16_COMPILER} /nologo ${_quiet_flag} /Cp /Fo${_object_file} /c /Ta ${_temp_file})
@@ -523,9 +528,14 @@ macro(add_asm_files _target)
                     list(APPEND _source_file_defines -D${_define})
                 endif()
             endforeach()
+            # cl /EP preserves surviving '#pragma' directives (e.g. the
+            # '#pragma once' pulled in via <sdkddkver.h>); ml/ml64 reject the
+            # leading '#' with A2044, whereas GAS treats '#' as a comment.
+            # Strip left-over column-zero '#' directive lines before assembly.
             add_custom_command(
                 OUTPUT ${_preprocessed_asm_file}
-                COMMAND cl /nologo /X /I${REACTOS_SOURCE_DIR}/sdk/include/asm /I${REACTOS_BINARY_DIR}/sdk/include/asm ${_directory_includes} ${_source_file_defines} ${_directory_defines} /D__ASM__ /D_USE_ML /EP /c ${_source_file_full_path} > ${_preprocessed_asm_file}
+                COMMAND cl /nologo /X /I${REACTOS_SOURCE_DIR}/sdk/include/asm /I${REACTOS_BINARY_DIR}/sdk/include/asm ${_directory_includes} ${_source_file_defines} ${_directory_defines} /D__ASM__ /D_USE_ML /EP /c ${_source_file_full_path} > ${_preprocessed_asm_file}.tmp
+                COMMAND ${CMAKE_COMMAND} -DIN=${_preprocessed_asm_file}.tmp -DOUT=${_preprocessed_asm_file} -P ${REACTOS_SOURCE_DIR}/sdk/cmake/strip-asm-pragmas.cmake
                 DEPENDS ${_source_file_full_path})
             list(APPEND ${_target} ${_preprocessed_asm_file})
         endif()
