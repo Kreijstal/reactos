@@ -1,0 +1,65 @@
+name: asmrepro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clangcl-bootsector:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+
+    - name: Install LLVM 13.0.1 (the CI clang-cl version)
+      shell: cmd
+      run: choco install -y --allow-downgrade llvm --version 13.0.1
+
+    - name: clang-cl version
+      shell: cmd
+      run: '"C:\Program Files\LLVM\bin\clang-cl.exe" --version'
+
+    # Mirror CreateBootSectorTarget's preprocess command from sdk/cmake/msvc.cmake.
+    # The boot-sector .S relies on /D_USE_ML to pick asm.inc's MASM macro branch.
+    # If clang-cl drops the /D for a .S input, asm.inc emits its GAS branch
+    # (.macro/.endm) which ml/ml64 then rejects (A2008/A2109).
+    - name: Preprocess amd64.S WITHOUT /TC (current behaviour)
+      shell: cmd
+      run: |
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > notc.asm 2> notc_err.txt
+        echo EP_EXIT=%errorlevel%
+        type notc_err.txt
+
+    - name: Preprocess amd64.S WITH /TC (candidate fix)
+      shell: cmd
+      run: |
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /TC /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > tc.asm 2> tc_err.txt
+        echo EP_EXIT=%errorlevel%
+        type tc_err.txt
+
+    - name: Verdict (count GAS .macro/.endm leakage in each)
+      shell: pwsh
+      run: |
+        function Count-Macro($f) {
+          if (-not (Test-Path $f)) { return -1 }
+          (Select-String -Path $f -Pattern '(^\s*\.macro\b)|(\.endm\b)' -AllMatches | Measure-Object).Count
+        }
+        $notc = Count-Macro 'notc.asm'
+        $tc   = Count-Macro 'tc.asm'
+        Write-Host "=================== RESULT ==================="
+        Write-Host "NO /TC : .macro/.endm lines = $notc   (>0 => bug reproduced, _USE_ML dropped, GAS branch leaked)"
+        Write-Host "  /TC  : .macro/.endm lines = $tc     (0  => /TC fixes it: _USE_ML honored, MASM branch)"
+        Write-Host "=============================================="
+        Write-Host "--- sample of NO-/TC output around any .macro ---"
+        Select-String -Path 'notc.asm' -Pattern '\.macro|\.endm' -Context 0,1 | Select-Object -First 6
+        if ($notc -gt 0 -and $tc -eq 0) { Write-Host 'CONCLUSION: /TC FIXES the clang-cl boot-sector failure.' }
+        elseif ($notc -eq 0) { Write-Host 'CONCLUSION: bug did NOT reproduce here (root-cause assumptions need revisiting).' }
+        else { Write-Host 'CONCLUSION: /TC does NOT fix it; need a stronger approach (e.g. .c-rename).' }
+
+    - name: Upload preprocessed asm
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: clangcl_bootsector_asm
+        path: |
+          notc.asm
+          tc.asm
