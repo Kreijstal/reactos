@@ -4257,6 +4257,19 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     DPRINT("BrowseSubNodeIndexEntries: VCN=%I64d searching for '%wZ' (DirSearch=%d)\n",
             VCN, FileName, DirSearch);
 
+    // A corrupt B-tree node can carry a sub-node VCN that lies outside the
+    // $INDEX_ALLOCATION (e.g. with garbage high bits set).  NodeNumber below is
+    // a ULONG, so such a VCN is silently truncated and can pass the $BITMAP
+    // check - but the full 64-bit Offset (VCN * BytesPerCluster) is then turned
+    // into a read far past the attribute, which translates to a wild disk
+    // offset that never completes and hangs the volume.  Reject it up front.
+    if (VCN >= AttributeDataLength(IndexAllocationContext->pRecord) / Vcb->NtfsInfo.BytesPerCluster)
+    {
+        DPRINT1("File system corruption detected, index node VCN %I64u is outside the $INDEX_ALLOCATION (%I64u bytes).\n",
+                VCN, AttributeDataLength(IndexAllocationContext->pRecord));
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+
     // Calculate node number as VCN / Clusters per index record
     NodeNumber = VCN / (Vcb->NtfsInfo.BytesPerIndexRecord / Vcb->NtfsInfo.BytesPerCluster);
 
