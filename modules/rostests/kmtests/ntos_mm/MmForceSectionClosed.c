@@ -248,7 +248,7 @@ TestSystemViewSurvivesForceClose(
     PVOID SystemView = NULL;
     SIZE_T ViewSize = 0;
     BOOLEAN Result;
-    volatile PUCHAR View;
+    volatile UCHAR *View;
     UCHAR Seen;
     ULONG i;
     PVOID *Churn;
@@ -309,7 +309,7 @@ TestSystemViewSurvivesForceClose(
     }
 
     /* Fault the page in through the view and confirm it shows the marker. */
-    View = (volatile PUCHAR)SystemView;
+    View = (volatile UCHAR *)SystemView;
     Seen = View[0];
     MMFSC_OK(Seen == 0xA5,
              "System view byte before close = 0x%02x, expected 0xA5\n", Seen);
