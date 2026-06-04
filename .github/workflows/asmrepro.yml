@@ -4,11 +4,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  clangcl-bootsector:
+  clangcl-probe:
     runs-on: windows-latest
     steps:
     - name: Checkout
       uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
 
     - name: Install LLVM 13.0.1 (the CI clang-cl version)
       shell: cmd
@@ -18,57 +20,48 @@ jobs:
       shell: cmd
       run: '"C:\Program Files\LLVM\bin\clang-cl.exe" --version'
 
-    # Mirror CreateBootSectorTarget's preprocess command from sdk/cmake/msvc.cmake.
-    # The boot-sector .S relies on /D_USE_ML to pick asm.inc's MASM macro branch.
-    # If clang-cl drops the /D for a .S input, asm.inc emits its GAS branch
-    # (.macro/.endm) which ml/ml64 then rejects (A2008/A2109).
-    - name: Candidate A - baseline .S, no force (reproduces bug)
-      shell: cmd
-      run: |
-        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > a_baseline.asm 2> a_err.txt
-        echo A_EXIT=%errorlevel%
-        type a_err.txt
-
-    - name: Candidate B - copy to .c so clang-cl classifies it as C
-      shell: cmd
-      run: |
-        copy /Y boot\freeldr\freeldr\arch\realmode\amd64.S amd64_pp.c >nul
-        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c amd64_pp.c > b_dotc.asm 2> b_err.txt
-        echo B_EXIT=%errorlevel%
-        type b_err.txt
-
-    - name: Candidate C - force C language via clang passthrough (/clang:-x /clang:c)
-      shell: cmd
-      run: |
-        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /clang:-x /clang:c /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > c_xc.asm 2> c_err.txt
-        echo C_EXIT=%errorlevel%
-        type c_err.txt
-
-    - name: Verdict (count GAS .macro/.endm leakage in each candidate)
+    - name: Probe 1 - is /D_USE_ML honored at all (.S input)?
       shell: pwsh
       run: |
-        function Count-Macro($f) {
-          if (-not (Test-Path $f)) { return -1 }
-          (Select-String -Path $f -Pattern '(^\s*\.macro\b)|(\.endm\b)' -AllMatches | Measure-Object).Count
-        }
-        $a = Count-Macro 'a_baseline.asm'
-        $b = Count-Macro 'b_dotc.asm'
-        $c = Count-Macro 'c_xc.asm'
-        Write-Host "=================== RESULT ==================="
-        Write-Host "A baseline .S        : .macro/.endm = $a   (>0 = bug)"
-        Write-Host "B copy-to-.c         : .macro/.endm = $b   (0 = fixed)"
-        Write-Host "C /clang:-x /clang:c : .macro/.endm = $c   (0 = fixed)"
-        Write-Host "=============================================="
-        if ($b -eq 0) { Write-Host 'WINNER: copy-to-.c works.' }
-        if ($c -eq 0) { Write-Host 'WINNER: /clang:-x c works.' }
-        if ($b -ne 0 -and $c -ne 0) { Write-Host 'Neither candidate fixed it; investigate artifacts.' }
+        "#ifdef _USE_ML`nUSEML_DEFINED`n#else`nUSEML_NOTDEF`n#endif" | Set-Content probe.S
+        & "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /D_USE_ML /EP /c probe.S > probeS.out 2>$null
+        & "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /D_USE_ML /EP /TP /c probe.S > probeTP.out 2>$null
+        Copy-Item probe.S probe.c
+        & "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /D_USE_ML /EP /c probe.c > probeC.out 2>$null
+        Write-Host ".S  input  =>" (Select-String -Path probeS.out  -Pattern 'USEML_DEFINED|USEML_NOTDEF').Line
+        Write-Host ".S /TP     =>" (Select-String -Path probeTP.out -Pattern 'USEML_DEFINED|USEML_NOTDEF').Line
+        Write-Host ".c  input  =>" (Select-String -Path probeC.out  -Pattern 'USEML_DEFINED|USEML_NOTDEF').Line
 
-    - name: Upload preprocessed asm
+    - name: Probe 2 - CURRENT asm.inc, preprocess amd64.S
+      shell: cmd
+      run: |
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > cur.asm 2>cur_err.txt
+        echo EXIT=%errorlevel%
+
+    - name: Probe 3 - GREEN-checkpoint asm.inc (25e46d8d9f2), preprocess amd64.S
+      shell: cmd
+      run: |
+        git show 25e46d8d9f2:sdk/include/asm/asm.inc > sdk\include\asm\asm.inc
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > green.asm 2>green_err.txt
+        echo EXIT=%errorlevel%
+
+    - name: Verdict
+      shell: pwsh
+      run: |
+        function CM($f){ if(-not(Test-Path $f)){return -1}; (Select-String -Path $f -Pattern '(^\s*\.macro\b)|(\.endm\b)' -AllMatches|Measure-Object).Count }
+        Write-Host "================= RESULT ================="
+        Write-Host ("CURRENT asm.inc : .macro/.endm = {0}" -f (CM 'cur.asm'))
+        Write-Host ("GREEN   asm.inc : .macro/.endm = {0}" -f (CM 'green.asm'))
+        Write-Host "----- first .macro lines in CURRENT (with line numbers) -----"
+        Select-String -Path cur.asm -Pattern '\.macro|\.endm' | Select-Object -First 8 | ForEach-Object { "{0}: {1}" -f $_.LineNumber, $_.Line }
+
+    - name: Upload
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: clangcl_bootsector_asm
+        name: clangcl_probe
         path: |
-          a_baseline.asm
-          b_dotc.asm
-          c_xc.asm
+          cur.asm
+          green.asm
+          probeS.out
+          probeC.out
