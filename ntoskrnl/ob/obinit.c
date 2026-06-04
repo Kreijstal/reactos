@@ -11,6 +11,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <ntoskrnl.h>
+#include <reactos/unaligned.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -118,7 +119,11 @@ ObpCreateKernelObjectsSD(OUT PSECURITY_DESCRIPTOR *SecurityDescriptor)
     if (!NT_SUCCESS(Status))
         goto done;
 
+#ifdef _M_ARM64
+    WriteUnalignedUlongPtr((ULONG_PTR*)SecurityDescriptor, (ULONG_PTR)Sd);
+#else
     *SecurityDescriptor = Sd;
+#endif
 
 done:
     if (!NT_SUCCESS(Status))

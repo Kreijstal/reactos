@@ -88,9 +88,6 @@ SepInitExports(VOID)
     SepExports.SeAnonymousLogonSid = SeAnonymousLogonSid;
     SepExports.SeLocalServiceSid = SeLocalServiceSid;
     SepExports.SeNetworkServiceSid = SeNetworkServiceSid;
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-    SepExports.SeAllAppPackagesSid = SeAllAppPackagesSid;
-#endif
 
     SepExports.SeUndockPrivilege = SeUndockPrivilege;
     SepExports.SeSyncAgentPrivilege = SeSyncAgentPrivilege;

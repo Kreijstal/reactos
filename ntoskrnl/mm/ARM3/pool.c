@@ -26,7 +26,7 @@ MM_PAGED_POOL_INFO MmPagedPoolInfo;
 SIZE_T MmAllocatedNonPagedPool;
 SIZE_T MmTotalNonPagedPoolQuota;
 SIZE_T MmTotalPagedPoolQuota;
-ULONG MmSpecialPoolTag = '0ftN';
+ULONG MmSpecialPoolTag;
 ULONG MmConsumedPoolPercentage;
 BOOLEAN MmProtectFreedNonPagedPool;
 SLIST_HEADER MiNonPagedPoolSListHead;
@@ -649,20 +649,42 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
         KeFlushEntireTb(TRUE, TRUE);
 
         /* Setup a demand-zero writable PTE */
+#if defined(_M_ARM64)
+        TempPte = ValidKernelPte;
+        TempPte.u.Hard.PrivilegedNoExecute = 1;
+        TempPte.u.Hard.UserNoExecute = 1;
+#else
         MI_MAKE_SOFTWARE_PTE(&TempPte, MM_READWRITE);
+#endif
 
         //
         // Find the first and last PTE, then loop them all
         //
         PointerPte = MiAddressToPte(BaseVa);
         StartPte = PointerPte + SizeInPages;
+#if defined(_M_ARM64)
+        OldIrql = MiAcquirePfnLock();
+#endif
         do
         {
             //
             // Write the demand zero PTE and keep going
             //
+#if defined(_M_ARM64)
+            PageFrameNumber = MiRemoveAnyPage(MI_GET_NEXT_COLOR());
+            TempPte.u.Hard.PageFrameNumber = PageFrameNumber;
+            MI_WRITE_VALID_PTE(PointerPte, TempPte);
+            MiInitializePfnForOtherProcess(PageFrameNumber,
+                                           PointerPte,
+                                           PFN_FROM_PTE(MiAddressToPde(BaseVa)));
+#else
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
+#endif
         } while (++PointerPte < StartPte);
+#if defined(_M_ARM64)
+        MiReleasePfnLock(OldIrql);
+        RtlZeroMemory(BaseVa, SizeInPages << PAGE_SHIFT);
+#endif
 
         //
         // Return the allocation address to the caller
@@ -866,6 +888,10 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
     // Loop the pages
     //
     TempPte = ValidKernelPte;
+#if defined(_M_ARM64)
+    TempPte.u.Hard.PrivilegedNoExecute = 1;
+    TempPte.u.Hard.UserNoExecute = 1;
+#endif
     do
     {
         /* Allocate a page */
@@ -1282,7 +1308,7 @@ MiInitializeSessionPool(VOID)
     PMM_SESSION_SPACE SessionGlobal;
     PMM_PAGED_POOL_INFO PagedPoolInfo;
     NTSTATUS Status;
-    ULONG Index, PoolSize, BitmapSize;
+    ULONG PoolSize, BitmapSize;
     PAGED_CODE();
 
     /* Lock session pool */
@@ -1332,12 +1358,17 @@ MiInitializeSessionPool(VOID)
                                       TRUE);
     ASSERT(NT_SUCCESS(Status) == TRUE);
 
+#if (_MI_PAGING_LEVELS < 3)
     /* Initialize the first page table */
-    Index = (ULONG_PTR)MmSessionSpace->PagedPoolStart - (ULONG_PTR)MmSessionBase;
-    Index >>= 22;
-#ifndef _M_AMD64 // FIXME
-    ASSERT(MmSessionSpace->PageTables[Index].u.Long == 0);
-    MmSessionSpace->PageTables[Index] = *PointerPde;
+    {
+        ULONG Index;
+
+        Index = (ULONG_PTR)MmSessionSpace->PagedPoolStart - (ULONG_PTR)MmSessionBase;
+        Index >>= 22;
+
+        ASSERT(MmSessionSpace->PageTables[Index].u.Long == 0);
+        MmSessionSpace->PageTables[Index] = *PointerPde;
+    }
 #endif
 
     /* Bump up counters */
@@ -1608,9 +1639,11 @@ MmAllocateMappingAddress(
     }
 
     ASSERT(SizeInPages <= MM_EMPTY_PTE_LIST);
-    TempPte = MI_MAKE_RESERVED_MAPPING_SIZE_PTE(SizeInPages);
+    TempPte.u.Long = 0;
+    TempPte.u.List.NextEntry = SizeInPages;
     MI_WRITE_INVALID_PTE(&PointerPte[0], TempPte);
-    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
+    TempPte.u.Long = PoolTag;
+    TempPte.u.Hard.Valid = 0;
     MI_WRITE_INVALID_PTE(&PointerPte[1], TempPte);
     return MiPteToAddress(PointerPte + 2);
 }
@@ -1648,7 +1681,8 @@ MmFreeMappingAddress(
     PointerPte = MiAddressToPte(BaseAddress) - 2;
 
     /* Verify that the pool tag matches */
-    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
+    TempPte.u.Long = PoolTag;
+    TempPte.u.Hard.Valid = 0;
     if (PointerPte[1].u.Long != TempPte.u.Long)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
@@ -1659,7 +1693,7 @@ MmFreeMappingAddress(
     }
 
     /* We must have a size */
-    SizeInPages = MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]);
+    SizeInPages = PointerPte[0].u.List.NextEntry;
     if (SizeInPages < 3)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,

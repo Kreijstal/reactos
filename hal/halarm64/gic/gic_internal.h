@@ -925,6 +925,9 @@ HalpGicrBase(
     if (Cpu < RTL_NUMBER_OF(HalpGicrCpuBase) && HalpGicrCpuBase[Cpu])
         return HalpGicrCpuBase[Cpu];
 
+    if (!HalpGicUseSysRegs || (HalpGicrRegionBase == 0) || (HalpGicrStride == 0))
+        return 0;
+
     return (ULONG_PTR)(HalpGicrRegionBase + ((ULONG_PTR)Cpu * HalpGicrStride));
 }
 
@@ -933,7 +936,9 @@ ULONG_PTR
 HalpGicrSgiBase(
     _In_ ULONG Cpu)
 {
-    return HalpGicrBase(Cpu) + HalpGicrSgiOffset;
+    ULONG_PTR Base = HalpGicrBase(Cpu);
+
+    return Base ? (Base + HalpGicrSgiOffset) : 0;
 }
 
 /*

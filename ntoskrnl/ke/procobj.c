@@ -44,7 +44,7 @@ KiAttachProcess(IN PKTHREAD Thread,
     ASSERT(Process != Thread->ApcState.Process);
 
     /* Increase Stack Count */
-    ASSERT(Process->StackCount != MAXULONG_PTR);
+    ASSERT(Process->StackCount != MAXULONG);
     Process->StackCount++;
 
     /* Swap the APC Environment */
@@ -61,11 +61,9 @@ KiAttachProcess(IN PKTHREAD Thread,
     /* Update Environment Pointers if needed*/
     if (SavedApcState == &Thread->SavedApcState)
     {
-#if (NTDDI_VERSION < NTDDI_WIN10)
         Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->
                                                           SavedApcState;
         Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->ApcState;
-#endif
         Thread->ApcStateIndex = AttachedApcEnvironment;
     }
 
@@ -136,7 +134,7 @@ KeInitializeProcess(IN OUT PKPROCESS Process,
     Process->Affinity = Affinity;
     Process->BasePriority = (CHAR)Priority;
     Process->QuantumReset = 6;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) && !defined(_M_ARM64)
     Process->DirectoryTableBase = DirectoryTableBase[0];
     Process->Unused0 = DirectoryTableBase[1];
 #else
@@ -670,10 +668,8 @@ KeDetachProcess(VOID)
     /* Restore the APC State */
     KiMoveApcState(&Thread->SavedApcState, &Thread->ApcState);
     Thread->SavedApcState.Process = NULL;
-#if (NTDDI_VERSION < NTDDI_WIN10)
     Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
     Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
-#endif
     Thread->ApcStateIndex = OriginalApcEnvironment;
 
     /* Release lock */
@@ -839,10 +835,8 @@ KeUnstackDetachProcess(IN PRKAPC_STATE ApcState)
         KiMoveApcState(&Thread->SavedApcState, &Thread->ApcState);
         Thread->SavedApcState.Process = NULL;
         Thread->ApcStateIndex = OriginalApcEnvironment;
-#if (NTDDI_VERSION < NTDDI_WIN10)
         Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
         Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
-#endif
     }
 
     /* Release lock */

@@ -400,6 +400,11 @@ LoadReactOSSetup(
     CHAR FilePath[MAX_PATH];
     CHAR UserBootOptions[MAX_OPTIONS_LENGTH+1];
     PCSTR BootOptions;
+#if (_WIN32_WINNT > _WIN32_WINNT_WS03)
+    USHORT OperatingSystemVersion = _WIN32_WINNT;
+#else
+    USHORT OperatingSystemVersion = _WIN32_WINNT_WS03;
+#endif
 
     static PCSTR SourcePaths[] =
     {
@@ -502,17 +507,28 @@ LoadReactOSSetup(
         BootOptions = "";
     TRACE("BootOptions(1): '%s'\n", BootOptions);
 
-    /* Check if a RAM disk file was given */
+    /* Check if a RAM disk is needed: either an explicit RDPATH= file,
+     * a writable ramdisk size request (RDRAMSIZE=), or the boot path
+     * itself targets the ramdisk device. */
     FileName = (PSTR)NtLdrGetOptionEx(BootOptions, "RDPATH=", &FileNameLength);
-    if (FileName && (FileNameLength >= 7))
+    if ((FileName && (FileNameLength >= 7)) ||
+        NtLdrGetOption(BootOptions, "RDRAMSIZE=") ||
+        _strnicmp(BootPath, "ramdisk(", 8) == 0)
     {
         /* Load the RAM disk */
         Status = RamDiskInitialize(FALSE, BootOptions, SystemPartition);
         if (Status != ESUCCESS)
         {
-            FileName += 7; FileNameLength -= 7;
-            UiMessageBox("Failed to load RAM disk file '%.*s'",
-                         FileNameLength, FileName);
+            if (FileName && (FileNameLength >= 7))
+            {
+                FileName += 7; FileNameLength -= 7;
+                UiMessageBox("Failed to load RAM disk file '%.*s'",
+                             FileNameLength, FileName);
+            }
+            else
+            {
+                UiMessageBox("Failed to initialize RAM disk");
+            }
             return Status;
         }
     }
@@ -696,7 +712,7 @@ LoadReactOSSetup(
         UiResetForSOS();
 
     /* Allocate and minimally-initialize the Loader Parameter Block */
-    AllocateAndInitLPB(FRLDR_TARGET_NT_VERSION, &LoaderBlock);
+    AllocateAndInitLPB(OperatingSystemVersion, &LoaderBlock);
 
     /* Allocate and initialize the setup loader block */
     SetupBlock = &WinLdrSystemBlock->SetupBlock;
@@ -738,7 +754,7 @@ LoadReactOSSetup(
     UiDrawStatusText("The Setup program is starting...");
 
     /* Finish loading */
-    return LoadAndBootWindowsCommon(FRLDR_TARGET_NT_VERSION,
+    return LoadAndBootWindowsCommon(OperatingSystemVersion,
                                     LoaderBlock,
                                     BootOptions,
                                     SystemPartition,

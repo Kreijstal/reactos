@@ -1008,46 +1008,6 @@ NTAPI
 MmGetSectionAssociation(PFN_NUMBER Page,
                         PLARGE_INTEGER Offset);
 
-#if DBG
-VOID
-NTAPI
-MmTracePte(
-    UCHAR Op,
-    PVOID Va,
-    ULONG_PTR OldPte,
-    ULONG_PTR NewPte,
-    PVOID Caller
-);
-
-VOID
-NTAPI
-MmDumpRmapTrace(
-    PFN_NUMBER Page,
-    struct _EPROCESS *Process,
-    PVOID Address
-);
-
-VOID
-NTAPI
-MmDumpPteTrace(PVOID Va);
-
-VOID
-NTAPI
-MmValidateRmapChain(
-    PFN_NUMBER Page,
-    struct _EPROCESS *Process,
-    PVOID Address
-);
-#endif
-
-BOOLEAN
-NTAPI
-MmRmapEntryExists(
-    PFN_NUMBER Page,
-    struct _EPROCESS *Process,
-    PVOID Address
-);
-
 /* freelist.c **********************************************************/
 _IRQL_raises_(DISPATCH_LEVEL)
 _IRQL_requires_max_(DISPATCH_LEVEL)
@@ -1100,7 +1060,19 @@ MiReleasePfnLockFromDpcLevel(VOID)
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 }
 
+#if defined(_M_ARM64)
+extern volatile LONG MiArm64PfnLockDepth[MAXIMUM_PROCESSORS];
+#define MI_ASSERT_PFN_LOCK_HELD()                                      \
+    do                                                                 \
+    {                                                                  \
+        ULONG CpuIndex = KeGetCurrentProcessorNumber();                \
+        NT_ASSERT((KeGetCurrentIrql() >= DISPATCH_LEVEL) &&            \
+                  (CpuIndex < MAXIMUM_PROCESSORS) &&                   \
+                  (MiArm64PfnLockDepth[CpuIndex] > 0));                \
+    } while (0)
+#else
 #define MI_ASSERT_PFN_LOCK_HELD() NT_ASSERT((KeGetCurrentIrql() >= DISPATCH_LEVEL) && (MmPfnLock != 0))
+#endif
 
 FORCEINLINE
 PMMPFN
@@ -1603,8 +1575,7 @@ MmCheckDirtySegment(
     PMM_SECTION_SEGMENT Segment,
     PLARGE_INTEGER Offset,
     BOOLEAN ForceDirty,
-    BOOLEAN PageOut,
-    PIO_STATUS_BLOCK Iosb OPTIONAL);
+    BOOLEAN PageOut);
 
 BOOLEAN
 NTAPI

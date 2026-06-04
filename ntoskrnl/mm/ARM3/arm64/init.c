@@ -42,6 +42,9 @@ extern PKIPCR KeArm64CurrentPcr;
 extern PKTHREAD KeArm64CurrentThread;
 extern PVOID KiArm64P0BootStack;
 extern PVOID KiArm64P0BootStackLimit;
+extern const UINT64 KiArm64EarlyVectorTable[];
+extern const UINT64 KiArm64VectorTable[];
+extern BOOLEAN KiArm64FinalVectorsInstalled;
 
 static LONG MiArm64SelfMapProbe = -1;
 /* Control whether MiMapPTEs zeroes newly allocated leaf pages (data pages). */
@@ -633,6 +636,8 @@ MiArm64MapLoaderProcessorState(
 {
     PARM64_LOADER_BLOCK Arm64Block;
     UINT64 Ttbr0, Ttbr1;
+    ULONG_PTR VectorPa;
+    ULONG_PTR VectorVa;
 
     if (LoaderBlock == NULL)
     {
@@ -646,6 +651,25 @@ MiArm64MapLoaderProcessorState(
 
     MiArm64MapCurrentStackAlias();
     MiArm64MapEarlyDeviceRanges(Arm64Block);
+
+    if (KiArm64FinalVectorsInstalled)
+    {
+        VectorVa = (ULONG_PTR)&KiArm64VectorTable;
+    }
+    else
+    {
+        VectorPa = (ULONG_PTR)&KiArm64EarlyVectorTable;
+        if (VectorPa >= (ULONG_PTR)MI_ARM64_BOOT_IMAGE_BASE)
+            VectorPa -= (ULONG_PTR)MI_ARM64_BOOT_IMAGE_BASE;
+        else if (VectorPa >= (ULONG_PTR)KSEG0_BASE)
+            VectorPa -= (ULONG_PTR)KSEG0_BASE;
+
+        VectorVa = (ULONG_PTR)MI_ARM64_BOOT_IMAGE_BASE + VectorPa;
+        MiArm64MapEarlyAliasRange((PVOID)VectorVa, PAGE_SIZE);
+    }
+
+    __asm__ __volatile__("msr vbar_el1, %0" :: "r"(VectorVa) : "memory");
+    __asm__ __volatile__("isb" ::: "memory");
 
     if (MI_ARM64_TTBR_TO_PA(Ttbr0) != 0)
     {
@@ -848,6 +872,7 @@ MiArm64InitLoaderMappedPfnEntries(_In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
                     if (L1Pfn <= MmHighestPhysicalPage)
                     {
                         Pfn = MiGetPfnEntry(L1Pfn);
+                        MI_MAKE_SOFTWARE_PTE(&Pfn->OriginalPte, MM_READWRITE);
                         if (Pfn->u3.e2.ReferenceCount == 0)
                         {
                             Pfn->u3.e2.ReferenceCount = 1;
@@ -880,6 +905,7 @@ MiArm64InitLoaderMappedPfnEntries(_In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
                     if (L2Pfn <= MmHighestPhysicalPage)
                     {
                         Pfn = MiGetPfnEntry(L2Pfn);
+                        MI_MAKE_SOFTWARE_PTE(&Pfn->OriginalPte, MM_READWRITE);
                         if (Pfn->u3.e2.ReferenceCount == 0)
                         {
                             Pfn->u3.e2.ReferenceCount = 1;
@@ -911,6 +937,7 @@ MiArm64InitLoaderMappedPfnEntries(_In_ PLOADER_PARAMETER_BLOCK LoaderBlock)
                     if (L3Pfn <= MmHighestPhysicalPage)
                     {
                         PfnL3 = MiGetPfnEntry(L3Pfn);
+                        MI_MAKE_SOFTWARE_PTE(&PfnL3->OriginalPte, MM_READWRITE);
                         if (PfnL3->u3.e2.ReferenceCount == 0)
                         {
                             PfnL3->u3.e2.ReferenceCount = 1;

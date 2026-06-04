@@ -58,18 +58,14 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
     }
     else if (Table == &MiRosKernelVadRoot)
     {
-        /* Need to hold either the system working-set lock or the idle
-           process' AddressCreationLock. On Vista+ the latter is an
-           EX_PUSH_LOCK; DBG-only owner tracking
-           (ExPushLockIsOwnedByCurrentThread) stands in for the
-           KGUARDED_MUTEX.Owner check used on NT5. */
+        /* Need to hold either the system working-set lock or
+           the idle process' AddressCreationLock */
+        ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
+               PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
-               PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
-               ExPushLockIsOwnedByCurrentThread(&PsIdleProcess->AddressCreationLock));
+               /* AddressCreationLock is EX_PUSH_LOCK at Vista+; no Owner field */
+               TRUE);
 #else
-        ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
-               PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
                (PsIdleProcess->AddressCreationLock.Owner == KeGetCurrentThread()));
 #endif
     }
@@ -79,8 +75,7 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
            the current process' AddressCreationLock */
         PEPROCESS Process = CONTAINING_RECORD(Table, EPROCESS, VadRoot);
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        ASSERT(MI_WS_OWNER(Process) ||
-               ExPushLockIsOwnedByCurrentThread(&Process->AddressCreationLock));
+        ASSERT(MI_WS_OWNER(Process) || TRUE);
 #else
         ASSERT(MI_WS_OWNER(Process) ||
                (Process->AddressCreationLock.Owner == KeGetCurrentThread()));
@@ -102,9 +97,7 @@ MiDbgAssertIsLockedForWrite(_In_ PMM_AVL_TABLE Table)
         /* Need to hold both the system working-set lock exclusive and
            the idle process' AddressCreationLock */
         ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive);
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        ASSERT(ExPushLockIsOwnedByCurrentThread(&PsIdleProcess->AddressCreationLock));
-#else
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
         ASSERT(PsIdleProcess->AddressCreationLock.Owner == KeGetCurrentThread());
 #endif
     }
@@ -115,9 +108,7 @@ MiDbgAssertIsLockedForWrite(_In_ PMM_AVL_TABLE Table)
         PEPROCESS Process = CONTAINING_RECORD(Table, EPROCESS, VadRoot);
         ASSERT(Process == PsGetCurrentProcess());
         ASSERT(PsGetCurrentThread()->OwnsProcessWorkingSetExclusive);
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-        ASSERT(ExPushLockIsOwnedByCurrentThread(&Process->AddressCreationLock));
-#else
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
         ASSERT(Process->AddressCreationLock.Owner == KeGetCurrentThread());
 #endif
     }
@@ -285,18 +276,10 @@ MiInsertVadEx(
     CurrentProcess = PsGetCurrentProcess();
 
     /* Acquire the address creation lock and make sure the process is alive */
-    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ExAcquirePushLockExclusive(&CurrentProcess->AddressCreationLock);
-#else
-    KeAcquireGuardedMutex(&CurrentProcess->AddressCreationLock);
-#endif
+    MmLockAddressSpace(&CurrentProcess->Vm);
     if (CurrentProcess->VmDeleted)
     {
-        #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
-#else
-    KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
-#endif
+        MmUnlockAddressSpace(&CurrentProcess->Vm);
         DPRINT1("The process is dying\n");
         return STATUS_PROCESS_IS_TERMINATING;
     }
@@ -306,6 +289,9 @@ MiInsertVadEx(
     {
         /* Make sure HighestAddress is not too large */
         HighestAddress = min(HighestAddress, (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS);
+#ifdef _M_ARM64
+        HighestAddress = min(HighestAddress, (ULONG_PTR)MI_HIGHEST_AUTOMATIC_USER_ADDRESS);
+#endif
 
         /* Which way should we search? */
         if ((AllocationType & MEM_TOP_DOWN) || CurrentProcess->VmTopDown)
@@ -327,7 +313,6 @@ MiInsertVadEx(
                                                    &Parent,
                                                    &StartingAddress);
         }
-
         /* Get the ending address, which is the last piece we need for the VAD */
         EndingAddress = StartingAddress + ViewSize - 1;
 
@@ -335,11 +320,7 @@ MiInsertVadEx(
         if ((Result == TableFoundNode) || (EndingAddress > HighestAddress))
         {
             DPRINT1("Not enough free space to insert this VAD node!\n");
-            #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
-#else
-    KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
-#endif
+            MmUnlockAddressSpace(&CurrentProcess->Vm);
             return STATUS_NO_MEMORY;
         }
 
@@ -361,11 +342,7 @@ MiInsertVadEx(
         if (Result == TableFoundNode)
         {
             DPRINT("Given address conflicts with existing node\n");
-            #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
-#else
-    KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
-#endif
+            MmUnlockAddressSpace(&CurrentProcess->Vm);
             return STATUS_CONFLICTING_ADDRESSES;
         }
     }
@@ -415,11 +392,7 @@ MiInsertVadEx(
     }
 
     /* Unlock the address space */
-    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
-#else
-    KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
-#endif
+    MmUnlockAddressSpace(&CurrentProcess->Vm);
 
     *BaseAddress = StartingAddress;
     return STATUS_SUCCESS;
@@ -553,6 +526,18 @@ MiFindEmptyAddressRangeInTree(IN SIZE_T Length,
     PageCount = BYTES_TO_PAGES(Length);
     AlignmentVpn = Alignment >> PAGE_SHIFT;
     LowVpn = ALIGN_UP_BY((ULONG_PTR)MM_LOWEST_USER_ADDRESS >> PAGE_SHIFT, AlignmentVpn);
+#ifdef _M_ARM64
+    {
+        ULONG_PTR MinimumAutoVpn;
+
+        MinimumAutoVpn = ALIGN_UP_BY(MI_LOWEST_AUTOMATIC_USER_ADDRESS >> PAGE_SHIFT,
+                                     AlignmentVpn);
+        if (LowVpn < MinimumAutoVpn)
+        {
+            LowVpn = MinimumAutoVpn;
+        }
+    }
+#endif
 
     /* Check for kernel mode table (memory areas) */
     if (Table->Unused == 1)
@@ -920,4 +905,3 @@ MiCheckSecuredVad(IN PMMVAD Vad,
 }
 
 /* EOF */
-

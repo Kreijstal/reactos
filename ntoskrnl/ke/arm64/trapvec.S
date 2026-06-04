@@ -326,9 +326,10 @@ KiArm64SyncVectorCommon:
     dsb sy
     isb
 
-    /* Allow IRQs during the C handler (page faults may require progress). */
-    msr daifclr, #0x2
-    isb
+    /*
+     * Keep IRQs masked here. During early boot the GIC/HAL path is not ready,
+     * and unmasking here can trap the CPU in a pre-HAL IRQ storm.
+     */
 
     /* Call C handler */
     mov x0, sp
@@ -662,6 +663,7 @@ KiArm64PermVectorIrqSp0_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -719,6 +721,7 @@ KiArm64PermVectorFiqSp0_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -776,6 +779,7 @@ KiArm64PermVectorIrqSpx_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -833,6 +837,7 @@ KiArm64PermVectorFiqSpx_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -910,6 +915,7 @@ KiArm64PermVectorIrqLowerA64_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -972,6 +978,7 @@ KiArm64PermVectorFiqLowerA64_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -1033,6 +1040,7 @@ KiArm64PermVectorIrqLowerA32_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE
@@ -1094,6 +1102,7 @@ KiArm64PermVectorFiqLowerA32_Handler:
     ldp x29, x30, [sp, #0xB0]
     ldp x20, x21, [sp, #0xC0]
     msr elr_el1, x20
+    orr x21, x21, #0xC0
     msr spsr_el1, x21
     ldp x20, x21, [sp, #0xA0]
     add sp, sp, #ARM64_IRQ_FRAME_SIZE

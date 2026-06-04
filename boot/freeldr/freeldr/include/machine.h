@@ -82,9 +82,6 @@ extern MACHVTBL MachVtbl;
 
 /* NOTE: Implemented by each architecture */
 VOID MachInit(const char *CmdLine);
-VOID StallExecutionProcessor(ULONG Microseconds);
-UCHAR DriveMapGetBiosDriveNumber(PCSTR DeviceName);
-VOID __cdecl Reboot(VOID);
 
 #define MachConsPutChar(Ch) \
     MachVtbl.ConsPutChar(Ch)
@@ -144,5 +141,11 @@ VOID MachPrepareForReactOS(VOID);
 VOID MachGetExtendedBIOSData(PULONG ExtendedBIOSDataArea, PULONG ExtendedBIOSDataSize);
 VOID MachVideoGetFontsFromFirmware(PULONG RomFontPointers);
 ULONG MachGetBootSectorLoadAddress(IN UCHAR DriveNumber);
+
+#ifdef UEFIBOOT
+BOOLEAN UefiFirmwareSetupSupported(VOID);
+VOID UefiBootToFirmware(VOID);
+VOID StallExecutionProcessor(ULONG Microseconds);
+#endif
 
 /* EOF */

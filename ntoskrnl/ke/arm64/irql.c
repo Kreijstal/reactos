@@ -71,6 +71,9 @@ extern KIRQL KeArm64CurrentIrql;
  */
 BOOLEAN KiHalInitialized = FALSE;
 
+#define KI_ARM64_HIGH_TRANSITION_ACTIVE          1
+#define KI_ARM64_HIGH_UNMASK_DEFERRED            2
+
 #undef KeLowerIrql
 #undef KeRaiseIrql
 #undef KeGetCurrentIrql
@@ -357,7 +360,11 @@ KiApplyIrqMaskForIrqlTransition(
         PKPRCB Prcb = KeGetCurrentPrcb();
 
         /*
-         * Lowering from HIGH_LEVEL: Unmask interrupts via DAIF and set GIC PMR.
+         * Lowering from HIGH_LEVEL: set GIC PMR first. If the destination IRQL
+         * is still elevated, keep DAIF.I/F masked until a later drop below
+         * DISPATCH_LEVEL. This avoids delivering a pending timer IRQ while code
+         * such as KeSetSystemTime still owns dispatcher/timer state at
+         * SYNCH_LEVEL.
          *
          * Re-entrancy guard: If we're already in a HIGH_LEVEL->lower transition,
          * skip the unmask to prevent interrupt storms. The outer transition will
@@ -369,7 +376,9 @@ KiApplyIrqMaskForIrqlTransition(
          */
         if (Prcb)
         {
-            LONG OldFlag = InterlockedCompareExchange(&Prcb->InHighLevelTransition, 1, 0);
+            LONG OldFlag = InterlockedCompareExchange(&Prcb->InHighLevelTransition,
+                                                       KI_ARM64_HIGH_TRANSITION_ACTIVE,
+                                                       0);
             if (OldFlag != 0)
             {
                 /* Re-entrancy detected - just update GIC PMR, don't touch DAIF or flag */
@@ -377,9 +386,20 @@ KiApplyIrqMaskForIrqlTransition(
                 return;
             }
 
-            /* We won the race - perform full unmask sequence and clear flag */
+            /* We won the race - perform the transition and update the state. */
             HalSetGicPriorityMask(NewIrql);
             ARM64_SYNC_BARRIER();
+
+            if (NewIrql >= DISPATCH_LEVEL)
+            {
+                KiUpdateSerrorMaskOnlyForIrql(NewIrql);
+                ARM64_SYNC_BARRIER();
+                InterlockedExchange(&Prcb->InHighLevelTransition,
+                                    KI_ARM64_HIGH_UNMASK_DEFERRED);
+                KiTraceSerrorPolicy("high-drop-deferred", OldIrql, NewIrql);
+                return;
+            }
+
             /* Apply SError policy based on new IRQL */
             KiUpdateDaifForIrql(NewIrql, FALSE);
             ARM64_SYNC_BARRIER();
@@ -401,6 +421,14 @@ KiApplyIrqMaskForIrqlTransition(
              */
             HalSetGicPriorityMask(NewIrql);
             ARM64_SYNC_BARRIER();
+            if (NewIrql >= DISPATCH_LEVEL)
+            {
+                KiUpdateSerrorMaskOnlyForIrql(NewIrql);
+                ARM64_SYNC_BARRIER();
+                KiTraceSerrorPolicy("high-drop-deferred-noprcb", OldIrql, NewIrql);
+                return;
+            }
+
             /* Apply SError policy based on new IRQL */
             KiUpdateDaifForIrql(NewIrql, FALSE);
             ARM64_SYNC_BARRIER();
@@ -418,18 +446,10 @@ KiApplyIrqMaskForIrqlTransition(
      *
      * ARM64 CRITICAL FIX: When LOWERING IRQL, we must ensure DAIF.I is cleared!
      *
-     * Various code paths may have called _disable() (which sets DAIF.I=1) for
-     * critical sections, spinlocks, or atomic operations. Unlike x86 where
-     * cli/sti is automatically restored on function return via RFLAGS, ARM64's
-     * DAIF.I persists across function calls.
-     *
-     * If DAIF.I is left set after lowering IRQL, the timer interrupt (PPI 27)
-     * cannot be delivered to the CPU even though the GIC has it pending. This
-     * causes catastrophic timer stalls (100+ second gaps between timer ticks).
-     *
-     * We clear DAIF.I when lowering IRQL to ensure interrupts can be delivered
-     * according to the GIC priority mask. Code that needs interrupts disabled
-     * must use proper IRQL raising (KfRaiseIrql to HIGH_LEVEL), not just _disable().
+     * That only applies to DAIF.I state owned by IRQL masking itself: the
+     * HIGH_LEVEL drop path above clears it after programming the GIC PMR.
+     * Normal non-HIGH_LEVEL transitions must not undo a caller's explicit
+     * _disable(); those callers reopen the interrupt window themselves.
      */
     NeedsPmrUpdate = KiIrqlTransitionNeedsGicPmrUpdate(OldIrql, NewIrql);
     if (NeedsPmrUpdate)
@@ -439,18 +459,16 @@ KiApplyIrqMaskForIrqlTransition(
     }
 
     /*
-     * Enforce SError policy on every non-HIGH_LEVEL transition.
-     * Lowering needs the full helper (it also fixes stale DAIF.I).
-     * Raising only updates DAIF.A to avoid perturbing IRQ/FIQ masking.
-     *
-     * CRITICAL FIX: IsHighLevelTransition parameter must be FALSE for normal
-     * IRQL transitions. Passing TRUE causes KiUpdateDaifForIrql to return early
-     * without unmasking interrupts, leading to 715-second stalls in pool allocator.
+     * Enforce SError policy on transitions that actually touch the GIC PMR.
+     * DAIF.I is left unchanged here; non-HIGH_LEVEL IRQL is represented by PMR.
      */
     if (NewIrql < OldIrql)
     {
-        KiUpdateDaifForIrql(NewIrql, FALSE);
-        ARM64_SYNC_BARRIER();
+        if (NeedsPmrUpdate)
+        {
+            KiUpdateSerrorMaskOnlyForIrql(NewIrql);
+            ARM64_SYNC_BARRIER();
+        }
         KiTraceSerrorPolicy("lower", OldIrql, NewIrql);
     }
     else if (NewIrql > OldIrql)
@@ -461,6 +479,20 @@ KiApplyIrqMaskForIrqlTransition(
             ARM64_SYNC_BARRIER();
         }
         KiTraceSerrorPolicy("raise", OldIrql, NewIrql);
+    }
+
+    if ((NewIrql < DISPATCH_LEVEL) && (OldIrql > DISPATCH_LEVEL))
+    {
+        PKPRCB Prcb = KeGetCurrentPrcb();
+
+        if (Prcb &&
+            (Prcb->InHighLevelTransition == KI_ARM64_HIGH_UNMASK_DEFERRED))
+        {
+            KiUpdateDaifForIrql(NewIrql, FALSE);
+            ARM64_SYNC_BARRIER();
+            InterlockedExchange(&Prcb->InHighLevelTransition, 0);
+            KiTraceSerrorPolicy("deferred-high-drop", OldIrql, NewIrql);
+        }
     }
 }
 

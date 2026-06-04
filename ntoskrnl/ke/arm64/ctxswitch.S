@@ -4,11 +4,37 @@
     .text
     .align 4
 
-	.global KiThreadStartup
-	.global KiSwapContext
-	.global KiSwapContextInternal
-	.extern KfLowerIrql
-	.extern KiTrapReturn
+		.global KiThreadStartup
+		.global KiSwapContext
+		.global KiSwapContextInternal
+		.extern KfLowerIrql
+		.extern KiRetireDpcList
+		.extern KiTrapReturn
+
+    .global KiRetireDpcListInDpcStack
+    .seh_proc KiRetireDpcListInDpcStack
+KiRetireDpcListInDpcStack:
+    stp     x29, x30, [sp, #-16]!
+    .seh_save_fplr_x 16
+    mov     x29, sp
+    .seh_set_fp
+    .seh_endprologue
+
+    cbz     x1, .Lretire_dpc_current_stack
+
+    mov     sp, x1
+    sub     sp, sp, #16
+    bl      KiRetireDpcList
+    mov     sp, x29
+    b       .Lretire_dpc_done
+
+.Lretire_dpc_current_stack:
+    bl      KiRetireDpcList
+
+.Lretire_dpc_done:
+    ldp     x29, x30, [sp], #16
+    ret
+    .seh_endproc
 
 /*
  * KiThreadStartup
@@ -37,10 +63,18 @@ KiThreadStartup:
      * SP already points to KSWITCH_FRAME set up by KiInitializeContextThread.
      * We declare no frame here since we consume the existing switch frame.
      */
-    .seh_endprologue
+	    .seh_endprologue
 
-    /*
-     * ARM64 ABI: keep x18 as the kernel platform register while still in EL1.
+	    ldr     x9, =0xFFFFFC0009000000
+	    mov     w10, #'T'
+	    strb    w10, [x9]
+	    mov     w10, #'E'
+	    strb    w10, [x9]
+	    mov     w10, #'\n'
+	    strb    w10, [x9]
+
+	    /*
+	     * ARM64 ABI: keep x18 as the kernel platform register while still in EL1.
      *
      * User-mode TEB state is programmed only in KiTrapReturn immediately
      * before ERET to EL0. Clobbering x18 with KTHREAD.Teb here corrupts the
@@ -70,12 +104,20 @@ KiThreadStartup:
 
     /* Load startup parameters from KSTART_FRAME (SP now points to it).
      * Preserve them in callee-saved registers across KfLowerIrql. */
-    ldr     x21, [sp, #SfSystemRoutine]
-    ldr     x19, [sp, #SfStartRoutine]
-    ldr     x20, [sp, #SfStartContext]
+	    ldr     x21, [sp, #SfSystemRoutine]
+	    ldr     x19, [sp, #SfStartRoutine]
+	    ldr     x20, [sp, #SfStartContext]
 
-    /* Pop the start frame before invoking the system routine; SP stays aligned */
-    add     sp, sp, #KSTART_FRAME_LENGTH
+	    ldr     x9, =0xFFFFFC0009000000
+	    mov     w10, #'T'
+	    strb    w10, [x9]
+	    mov     w10, #'L'
+	    strb    w10, [x9]
+	    mov     w10, #'\n'
+	    strb    w10, [x9]
+
+	    /* Pop the start frame before invoking the system routine; SP stays aligned */
+	    add     sp, sp, #KSTART_FRAME_LENGTH
 
     /*
      * CRITICAL: Lower IRQL to APC_LEVEL before calling the system routine.
@@ -89,19 +131,38 @@ KiThreadStartup:
      * 2. PspSystemThreadStartup can further lower to PASSIVE_LEVEL
      * 3. Kernel APCs can be delivered when appropriate
      */
-    mov     w0, #APC_LEVEL
-    bl      KfLowerIrql
+	    mov     w0, #APC_LEVEL
+	    bl      KfLowerIrql
 
-    /* ARM64: x2 = SystemRoutine, x0 = StartRoutine, x1 = StartContext */
-    mov     x0, x19
+	    ldr     x9, =0xFFFFFC0009000000
+	    mov     w10, #'T'
+	    strb    w10, [x9]
+	    mov     w10, #'I'
+	    strb    w10, [x9]
+	    mov     w10, #'\n'
+	    strb    w10, [x9]
+
+	    /* ARM64: x2 = SystemRoutine, x0 = StartRoutine, x1 = StartContext */
+	    mov     x0, x19
     mov     x1, x20
     mov     x2, x21
 
-    /* Validate SystemRoutine is non-NULL before calling */
-    cbz     x21, .Lbad_sysroutine
+	    /* Validate SystemRoutine is non-NULL before calling */
+	    cbz     x21, .Lbad_sysroutine
 
-    /* Start the thread - call SystemRoutine(StartRoutine, StartContext) */
-    blr     x2
+	    ldr     x9, =0xFFFFFC0009000000
+	    mov     w10, #'T'
+	    strb    w10, [x9]
+	    mov     w10, #'C'
+	    strb    w10, [x9]
+	    mov     w10, #'\n'
+	    strb    w10, [x9]
+	    mov     x0, x19
+	    mov     x1, x20
+	    mov     x2, x21
+
+	    /* Start the thread - call SystemRoutine(StartRoutine, StartContext) */
+	    blr     x2
 
 	    /*
 	     * If the system routine returned, this must be a user thread.
@@ -138,13 +199,11 @@ KiThreadStartup:
     strb    w10, [x9]
     brk     #0xf001
 
-    /* Should never return */
-    brk     #0xf000
-    .seh_endproc
+	    /* Should never return */
+	    brk     #0xf000
+	    .seh_endproc
 
-
-    .extern KiSwapContextResume
-    .extern KeArm64CurrentPcr
+	    .extern KiSwapContextResume
 
 /*
  * BOOLEAN
@@ -188,44 +247,21 @@ KiSwapContext:
     str     x9, [sp, #SwLr]        /* Save for KiSwapContextInternal */
 
     /*
-     * ARM64 FIX: Initialize ApcBypass to prevent IRQL corruption.
-     * When a thread switches away, it creates a KSWITCH_FRAME on its stack.
-     * The ApcBypass field (at offset 0x68) stores the WaitIrql for this thread.
-     * However, the stack memory is not zeroed when we allocate the frame (line 67).
-     * If ApcBypass is not explicitly initialized, it contains garbage from whatever
-     * was previously on the stack.
-     *
-     * The corruption sequence:
-     * 1. Thread switches away: saves WaitIrql to ApcBypass, switches to another thread
-     * 2. Thread switches back: restores registers, POPS the switch frame (line 101)
-     * 3. Thread executes, then switches away again later
-     * 4. NEW switch frame created at current SP - ApcBypass contains garbage!
-     * 5. Another thread switches TO this thread, reads garbage from ApcBypass
-     * 6. KfLowerIrql called with corrupted IRQL value (e.g., 0xC0 = 192)
-     *
-     * The fix: Initialize ApcBypass to 0 when creating the switch frame.
-     * This will be immediately overwritten by KiSwapContextInternal (line 133),
-     * but ensures no garbage is read if something goes wrong.
-     */
-    strb    wzr, [sp, #SwApcBypass]
-
-    /*
      * Locate the target (new) thread from the per-CPU PCR.
      * TPIDR_EL1 holds the per-CPU PCR pointer (set in KiInitializePcr).
      * Do NOT use the global KeArm64CurrentPcr - it's shared and wrong on SMP.
      */
     mrs     x9, tpidr_el1
-    cbz     x9, .Lfallback_thread
+    cbz     x9, .Lbad_current_thread
     ldr     x2, [x9, #PcCurrentThread]
-    cbz     x2, .Lfallback_thread
-    b       .Lcall_internal
+    cbz     x2, .Lbad_current_thread
 
-.Lfallback_thread:
-    /* Fallback to the caller's thread if the PCR path is unavailable */
-    mov     x2, x1
-
-.Lcall_internal:
     bl      KiSwapContextInternal
+    b       .Lrestore_context
+
+.Lbad_current_thread:
+    brk     #0xf000
+    b       .Lbad_current_thread
 
 .Lrestore_context:
     /* Restore the saved non-volatile register bank */
@@ -235,7 +271,6 @@ KiSwapContext:
     ldp     x25, x26, [sp, #SwX25]
     ldp     x27, x28, [sp, #SwX27]
     ldr     x29, [sp, #SwFp]
-    ldr     x30, [sp, #SwLr]       /* Load (but don't use - we use SwReturn) */
 
     /*
      * ARM64 ABI: x18 remains the EL1 platform register across context

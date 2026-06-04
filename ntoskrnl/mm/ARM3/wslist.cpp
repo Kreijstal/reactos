@@ -92,15 +92,7 @@ static void FreeWsleIndex(PMMWSL WsList, ULONG Index)
                 MiDecrementShareCount(Pfn, Page);
             }
 
-#if DBG
-            {
-                ULONG_PTR _oldpte = PointerPte->u.Long;
-                PointerPte->u.Long = 0;
-                MmTracePte('W', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
-            }
-#else
             PointerPte->u.Long = 0;
-#endif
 
             KeInvalidateTlbEntry(Wsle + LastInitializedWsle - 1);
             LastInitializedWsle -= PAGE_SIZE / sizeof(MMWSLE);

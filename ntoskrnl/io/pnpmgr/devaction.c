@@ -236,6 +236,13 @@ IopCreateDeviceInstancePath(
         return Status;
     }
 
+    if (IoStatusBlock.Information == 0)
+    {
+        DPRINT1("IopInitiatePnpIrp(BusQueryDeviceID) returned no device ID. DeviceNode - %p\n",
+                DeviceNode);
+        return STATUS_NOT_SUPPORTED;
+    }
+
     IsValidID = IopValidateID((PWCHAR)IoStatusBlock.Information, BusQueryDeviceID);
 
     if (!IsValidID)
@@ -971,6 +978,7 @@ IopQueryHardwareIds(PDEVICE_NODE DeviceNode,
     DPRINT("Sending IRP_MN_QUERY_ID.BusQueryHardwareIDs to device stack\n");
 
     RtlZeroMemory(&Stack, sizeof(Stack));
+    RtlZeroMemory(&IoStatusBlock, sizeof(IoStatusBlock));
     Stack.Parameters.QueryId.IdType = BusQueryHardwareIDs;
     Status = IopInitiatePnpIrp(DeviceNode->PhysicalDeviceObject,
                                &IoStatusBlock,
@@ -978,6 +986,11 @@ IopQueryHardwareIds(PDEVICE_NODE DeviceNode,
                                &Stack);
     if (NT_SUCCESS(Status))
     {
+        if (IoStatusBlock.Information == 0)
+        {
+            return Status;
+        }
+
         IsValidID = IopValidateID((PWCHAR)IoStatusBlock.Information, BusQueryHardwareIDs);
 
         if (!IsValidID)
@@ -1036,6 +1049,7 @@ IopQueryCompatibleIds(PDEVICE_NODE DeviceNode,
     DPRINT("Sending IRP_MN_QUERY_ID.BusQueryCompatibleIDs to device stack\n");
 
     RtlZeroMemory(&Stack, sizeof(Stack));
+    RtlZeroMemory(&IoStatusBlock, sizeof(IoStatusBlock));
     Stack.Parameters.QueryId.IdType = BusQueryCompatibleIDs;
     Status = IopInitiatePnpIrp(DeviceNode->PhysicalDeviceObject,
                                &IoStatusBlock,

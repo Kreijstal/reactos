@@ -16,7 +16,7 @@
 
 /* DebugDpcTime removed from KPRCB at Vista+ */
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-#define KiResetDebugDpcTime(Prcb) ((void)0)
+#define KiResetDebugDpcTime(Prcb) ((void)(Prcb))
 #else
 #define KiResetDebugDpcTime(Prcb) ((Prcb)->DebugDpcTime = 0)
 #endif
@@ -99,9 +99,7 @@ KiTimerExpiration(IN PKDPC Dpc,
     ULONG Period;
     DPC_QUEUE_ENTRY DpcEntry[MAX_TIMER_DPCS];
     PKSPIN_LOCK_QUEUE LockQueue;
-#if defined(CONFIG_SMP) || (DBG && (NTDDI_VERSION < NTDDI_LONGHORN))
     PKPRCB Prcb = KeGetCurrentPrcb();
-#endif
 
     /* Disable interrupts */
     _disable();
@@ -355,9 +353,7 @@ KiTimerListExpire(IN PLIST_ENTRY ExpiredListHead,
     PKDPC TimerDpc;
     ULONG Period;
     DPC_QUEUE_ENTRY DpcEntry[MAX_TIMER_DPCS];
-#if defined(CONFIG_SMP) || (DBG && (NTDDI_VERSION < NTDDI_LONGHORN))
     PKPRCB Prcb = KeGetCurrentPrcb();
-#endif
 
     /* Query system */
     KeQuerySystemTime((PLARGE_INTEGER)&SystemTime);
@@ -573,10 +569,10 @@ FASTCALL
 KiRetireDpcList(IN PKPRCB Prcb)
 {
     PKDPC_DATA DpcData;
-    PLIST_ENTRY DpcEntry;
 #if (NTDDI_VERSION < NTDDI_LONGHORN)
     PLIST_ENTRY ListHead;
 #endif
+    PLIST_ENTRY DpcEntry;
     PKDPC Dpc;
     PKDEFERRED_ROUTINE DeferredRoutine;
     PVOID DeferredContext, SystemArgument1, SystemArgument2;

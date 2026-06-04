@@ -109,7 +109,6 @@ HalpArm64DiscoverGicFromMadt(
     ULONGLONG Mpidr;
     BOOLEAN FoundGicd = FALSE;
     BOOLEAN FoundGicr = FALSE;
-    BOOLEAN FoundCpuGicr = FALSE;
     BOOLEAN FoundGiccEntry = FALSE;
     BOOLEAN FoundGiccBase = FALSE;
     ULONG Cpu = KeGetCurrentProcessorNumber();
@@ -186,7 +185,6 @@ HalpArm64DiscoverGicFromMadt(
                 if (Cpu < RTL_NUMBER_OF(HalpGicrCpuBase))
                 {
                     HalpGicrCpuBase[Cpu] = (ULONG_PTR)Entry->GicrBase;
-                    FoundCpuGicr = TRUE;
                 }
                 break;
             }
@@ -280,15 +278,12 @@ HalpArm64DiscoverGicFromMadt(
     {
         HalpGiccPresent = TRUE;
     }
-    if (!FoundCpuGicr && HalpGicrRegionBase)
-    {
-        ULONG_PTR Base = HalpArm64FindGicrForMpidr(Mpidr);
-        if (Base && Cpu < RTL_NUMBER_OF(HalpGicrCpuBase))
-        {
-            HalpGicrCpuBase[Cpu] = Base;
-            DPRINT1("[arm64][GIC] MADT: selected GICR CPU base @0x%p\n", (PVOID)Base);
-        }
-    }
+    /*
+     * Do not scan GICR frames during MADT discovery.  At this point the HAL has
+     * not selected the GIC interface yet, and QEMU GICv2 boots can still expose
+     * stale/default redistributor-looking addresses.  The GICv3 path performs
+     * per-CPU redistributor lookup when it actually initializes the GICR.
+     */
 
     if (HalpGicItsPresent)
     {

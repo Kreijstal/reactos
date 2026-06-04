@@ -162,6 +162,10 @@ KiSignalTimer(IN PKTIMER Timer)
     return RequestInterrupt;
 }
 
+#if defined(__GNUC__) && !defined(__clang__) && (__GNUC__ >= 12)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
 VOID
 FASTCALL
 KiCompleteTimer(IN PKTIMER Timer,
@@ -175,10 +179,8 @@ KiCompleteTimer(IN PKTIMER Timer,
     KiRemoveEntryTimer(Timer);
 
     /* Link the timer list to our stack */
-    ListHead.Flink = &Timer->TimerListEntry;
-    ListHead.Blink = &Timer->TimerListEntry;
-    Timer->TimerListEntry.Flink = &ListHead;
-    Timer->TimerListEntry.Blink = &ListHead;
+    InitializeListHead(&ListHead);
+    InsertHeadList(&ListHead, &Timer->TimerListEntry);
 
     /* Release the timer lock */
     KiReleaseTimerLock(LockQueue);
@@ -189,12 +191,27 @@ KiCompleteTimer(IN PKTIMER Timer,
     /* Signal the timer if it's still on our list */
     if (!IsListEmpty(&ListHead)) RequestInterrupt = KiSignalTimer(Timer);
 
+    /*
+     * KiSignalTimer may leave a one-shot timer detached from the timer table
+     * with the temporary stack list still referenced from TimerListEntry.
+     * Clear that transient state before returning.
+     */
+    if ((Timer->TimerListEntry.Flink == &ListHead) &&
+        (Timer->TimerListEntry.Blink == &ListHead))
+    {
+        Timer->TimerListEntry.Flink = NULL;
+        Timer->TimerListEntry.Blink = NULL;
+    }
+
     /* Release the dispatcher lock */
     KiReleaseDispatcherLockFromSynchLevel();
 
     /* Request a DPC if needed */
     if (RequestInterrupt) HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
 }
+#if defined(__GNUC__) && !defined(__clang__) && (__GNUC__ >= 12)
+#pragma GCC diagnostic pop
+#endif
 
 /* PUBLIC FUNCTIONS **********************************************************/
 
@@ -253,14 +270,7 @@ KeInitializeTimerEx(OUT PKTIMER Timer,
     Timer->Header.Type = TimerNotificationObject + Type;
     //Timer->Header.TimerControlFlags = 0; // win does not init this field
     Timer->Header.Hand = sizeof(KTIMER) / sizeof(ULONG);
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    /* Win7+ clears the whole TimerMiscFlags byte (Index/Inserted/Expired),
-     * not just the Inserted bit - otherwise the Index/Expired bits keep
-     * whatever garbage the caller's storage held. */
-    Timer->Header.TimerMiscFlags = 0;
-#else
-    Timer->Header.Inserted = 0;
-#endif
+    Timer->Header.Inserted = 0; // win7: Timer->Header.TimerMiscFlags = 0;
     Timer->Header.SignalState = 0;
     InitializeListHead(&(Timer->Header.WaitListHead));
 
@@ -347,4 +357,3 @@ KeSetTimerEx(IN OUT PKTIMER Timer,
     /* Return old state */
     return Inserted;
 }
-

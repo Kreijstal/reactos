@@ -46,23 +46,41 @@ KiPcToFileHeader(IN PVOID Pc,
                  IN BOOLEAN DriversOnly,
                  OUT PBOOLEAN InKernel)
 {
-    ULONG i = 0;
+    ULONG i;
     PVOID ImageBase, PcBase = NULL;
     PLDR_DATA_TABLE_ENTRY Entry;
     PLIST_ENTRY ListHead, NextEntry;
+    PLIST_ENTRY ListHeads[2];
+    ULONG ListCount = 0, ListIndex;
 
-    /* Check which list we should use */
-    ListHead = (KeLoaderBlock) ? &KeLoaderBlock->LoadOrderListHead :
-                                 &PsLoadedModuleList;
+    if ((PsLoadedModuleList.Flink != NULL) &&
+        (PsLoadedModuleList.Blink != NULL) &&
+        (PsLoadedModuleList.Flink != &PsLoadedModuleList))
+    {
+        ListHeads[ListCount++] = &PsLoadedModuleList;
+    }
+
+    if (KeLoaderBlock)
+    {
+        ListHeads[ListCount++] = &KeLoaderBlock->LoadOrderListHead;
+    }
 
     /* Assume no */
     *InKernel = FALSE;
 
-    /* Set list pointers and make sure it's valid */
-    NextEntry = ListHead->Flink;
-    if (NextEntry)
+    for (ListIndex = 0; ListIndex < ListCount; ListIndex++)
     {
+        ListHead = ListHeads[ListIndex];
+
+        /* Set list pointers and make sure it's valid */
+        NextEntry = ListHead->Flink;
+        if (!NextEntry)
+        {
+            continue;
+        }
+
         /* Start loop */
+        i = 0;
         while (NextEntry != ListHead)
         {
             /* Increase entry */
@@ -98,6 +116,11 @@ KiPcToFileHeader(IN PVOID Pc,
                 break;
             }
         }
+
+        if (PcBase)
+        {
+            break;
+        }
     }
 
     /* Return the base address */
@@ -118,11 +141,8 @@ KiRosPcToUserFileHeader(IN PVOID Pc,
      * succesfull address from RtlWalkFrameChain for UserMode, which
      * validates everything for us.
      */
-    /* KTHREAD::Teb is PVOID at NTDDI_WIN8+ (Microsoft made it opaque to
-     * drivers); cast through PTEB so this compiles at every NTDDI level
-     * we build the kernel at. */
-    ListHead = &((PTEB)KeGetCurrentThread()->
-                 Teb)->ProcessEnvironmentBlock->Ldr->InLoadOrderModuleList;
+    ListHead = &KeGetCurrentThread()->
+               Teb->ProcessEnvironmentBlock->Ldr->InLoadOrderModuleList;
 
     /* Set list pointers and make sure it's valid */
     NextEntry = ListHead->Flink;
@@ -567,6 +587,12 @@ KiDumpParameterImages(IN PCHAR Message,
                                      &InSystem);
         if (!ImageBase)
         {
+            if ((Parameters[i] == 0) ||
+                (Parameters[i] < (ULONG_PTR)MmSystemRangeStart))
+            {
+                continue;
+            }
+
             /* FIXME: Add code to check for unloaded drivers */
             DPRINT1("Potentially unloaded driver!\n");
             continue;
@@ -1108,6 +1134,35 @@ KeBugCheckWithTf(IN ULONG BugCheckCode,
         // TODO/FIXME: Run the registered reason-callbacks from
         // the KeBugcheckReasonCallbackListHead list with the
         // KbCallbackReserved1 reason.
+
+#if defined(_M_ARM64)
+        {
+            static const CHAR Hex[] = "0123456789ABCDEF";
+            volatile UCHAR *Uart = (volatile UCHAR *)0xFFFFFC0009000000ULL;
+            ULONG Index;
+            ULONG Shift;
+            ULONG_PTR Values[5];
+
+            Values[0] = KiBugCheckData[0];
+            Values[1] = KiBugCheckData[1];
+            Values[2] = KiBugCheckData[2];
+            Values[3] = KiBugCheckData[3];
+            Values[4] = KiBugCheckData[4];
+
+            for (const CHAR *Text = "[arm64][bugcheck] "; *Text; ++Text) *Uart = *Text;
+            for (Index = 0; Index < RTL_NUMBER_OF(Values); ++Index)
+            {
+                if (Index != 0) *Uart = ' ';
+                for (Shift = (sizeof(ULONG_PTR) * 8) - 4;
+                     Shift < (sizeof(ULONG_PTR) * 8);
+                     Shift -= 4)
+                {
+                    *Uart = Hex[(Values[Index] >> Shift) & 0xF];
+                }
+            }
+            *Uart = '\n';
+        }
+#endif
 
         /* Check if the debugger is disabled but we can enable it */
         if (!(KdDebuggerEnabled) && !(KdPitchDebugger))

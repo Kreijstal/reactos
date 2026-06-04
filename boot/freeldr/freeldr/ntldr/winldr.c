@@ -15,6 +15,10 @@
 
 #include <drivers/bootvid/framebuf.h> // For CM_FRAMEBUF_DEVICE_DATA
 
+#if defined(_M_ARM64)
+#include <arch/arm64/arm64.h>
+#endif
+
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(WINDOWS);
 
@@ -276,6 +280,39 @@ WinLdrInitializePhase1(
         Extension->AcpiTable = (PVOID)1;
         // FIXME: Extension->AcpiTableSize;
     }
+
+#ifdef UEFIBOOT
+    /*
+     * Hand off the active UEFI framebuffer so ntoskrnl can keep using the
+     * firmware-owned display for the GOP boot animation path.
+     */
+    {
+        extern ULONG_PTR VramAddress;
+        extern ULONG VramSize;
+        extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
+
+        if (FrameBufferData != NULL &&
+            VramAddress != 0 &&
+            VramSize != 0 &&
+            FrameBufferData->ScreenWidth != 0 &&
+            FrameBufferData->ScreenHeight != 0 &&
+            FrameBufferData->PixelsPerScanLine != 0 &&
+            FrameBufferData->BitsPerPixel != 0)
+        {
+            Extension->GopFramebuffer.FrameBufferBase.QuadPart =
+                (ULONGLONG)(VramAddress + FrameBufferData->FrameBufferOffset);
+            Extension->GopFramebuffer.FrameBufferSize = VramSize;
+            Extension->GopFramebuffer.HorizontalResolution = FrameBufferData->ScreenWidth;
+            Extension->GopFramebuffer.VerticalResolution = FrameBufferData->ScreenHeight;
+            Extension->GopFramebuffer.PixelsPerScanLine = FrameBufferData->PixelsPerScanLine;
+            Extension->GopFramebuffer.PixelFormat = FrameBufferData->BitsPerPixel;
+            Extension->GopFramebuffer.RedMask = FrameBufferData->PixelMasks.RedMask;
+            Extension->GopFramebuffer.GreenMask = FrameBufferData->PixelMasks.GreenMask;
+            Extension->GopFramebuffer.BlueMask = FrameBufferData->PixelMasks.BlueMask;
+            Extension->GopFramebuffer.Reserved = FrameBufferData->PixelMasks.ReservedMask;
+        }
+    }
+#endif
 
     if (OperatingSystemVersion >= _WIN32_WINNT_VISTA)
     {
@@ -1425,6 +1462,7 @@ LoadAndBootWindowsCommon(
     BOOLEAN Success;
     PLDR_DATA_TABLE_ENTRY KernelDTE;
     KERNEL_ENTRY_POINT KiSystemStartup;
+    PFN_NUMBER FinalLoaderPagesSpanned;
 
     TRACE("LoadAndBootWindowsCommon()\n");
 
@@ -1485,11 +1523,12 @@ LoadAndBootWindowsCommon(
     UiUpdateProgressBar(100, NULL);
 
     /* Save entry-point pointer and Loader block VAs */
+#if defined(_M_ARM64)
+    KiSystemStartup = (KERNEL_ENTRY_POINT)PaToVa(KernelDTE->EntryPoint);
+#else
     KiSystemStartup = (KERNEL_ENTRY_POINT)KernelDTE->EntryPoint;
+#endif
     LoaderBlockVA = PaToVa(LoaderBlock);
-
-    /* "Stop all motors", change videomode */
-    MachPrepareForReactOS();
 
     /* Show the "debug mode" notice if needed */
     /* Match KdInitSystem() conditions */
@@ -1521,18 +1560,37 @@ LoadAndBootWindowsCommon(
     /* Debugging... */
     //DumpMemoryAllocMap();
 
+#if defined(_M_ARM64)
+    /*
+     * ARM64 needs the final loader allocations and memory descriptor list
+     * before ExitBootServices so the handoff TTBRs can cover loader data.
+     */
+    WinLdrSetupMachineDependent(LoaderBlock);
+    WinLdrSetupMemoryLayout(LoaderBlock);
+    extern VOID Arm64PreparePageTables(VOID);
+    Arm64PreparePageTables();
+
+    /* Exit firmware services after the final loader layout is mapped. */
+    MachPrepareForReactOS();
+#else
+    /* "Stop all motors", change videomode */
+    MachPrepareForReactOS();
+
     /* Do the machine specific initialization */
     WinLdrSetupMachineDependent(LoaderBlock);
 
     /* Map pages and create memory descriptors */
     WinLdrSetupMemoryLayout(LoaderBlock);
+#endif
+
+    FinalLoaderPagesSpanned = MmGetLoaderPagesSpanned();
 
     /* Set processor context */
     WinLdrSetProcessorContext(OperatingSystemVersion);
 
 #if (NTDDI_VERSION < NTDDI_WIN8)
     /* Save final value of LoaderPagesSpanned */
-    LoaderBlock->Extension->LoaderPagesSpanned = MmGetLoaderPagesSpanned();
+    LoaderBlock->Extension->LoaderPagesSpanned = FinalLoaderPagesSpanned;
 #endif
 
     TRACE("Hello from paged mode, KiSystemStartup %p, LoaderBlockVA %p!\n",
@@ -1547,8 +1605,14 @@ LoadAndBootWindowsCommon(
     WinLdrpDumpArcDisks(LoaderBlockVA);
 #endif
 
+#if defined(_M_ARM64)
+    Arm64JumpToKernel((ULONGLONG)(ULONG_PTR)KiSystemStartup,
+                      (ULONGLONG)(ULONG_PTR)LoaderBlockVA,
+                      (ULONGLONG)LoaderBlock->KernelStack);
+#else
     /* Pass control */
     (*KiSystemStartup)(LoaderBlockVA);
+#endif
 
     UNREACHABLE; // return ESUCCESS;
 }

@@ -746,10 +746,15 @@ SeSinglePrivilegeCheck(
     _In_ KPROCESSOR_MODE PreviousMode)
 {
     SECURITY_SUBJECT_CONTEXT SubjectContext;
-    PRIVILEGE_SET Priv;
+    PRIVILEGE_SET DECLSPEC_ALIGN(8) Priv;
     BOOLEAN Result;
 
     PAGED_CODE();
+
+    if (PreviousMode == KernelMode)
+    {
+        return TRUE;
+    }
 
     SeCaptureSubjectContext(&SubjectContext);
 
@@ -807,7 +812,7 @@ SeCheckPrivilegedObject(
     _In_ KPROCESSOR_MODE PreviousMode)
 {
     SECURITY_SUBJECT_CONTEXT SubjectContext;
-    PRIVILEGE_SET Priv;
+    PRIVILEGE_SET DECLSPEC_ALIGN(8) Priv;
     BOOLEAN Result;
 
     PAGED_CODE();

@@ -1185,7 +1185,6 @@
 @ stdcall RtlEqualUnicodeString(ptr ptr long)
 @ stdcall -arch=win32 RtlExtendedIntegerMultiply(long long long)
 @ stdcall -arch=win32 RtlExtendedLargeIntegerDivide(long long long ptr)
-@ stdcall -arch=arm64 -ret64 RtlExtendedLargeIntegerDivide(double long ptr)
 @ stdcall -arch=win32 RtlExtendedMagicDivide(long long long long long)
 @ stdcall RtlFillMemory(ptr long long)
 @ stdcall -arch=i386,arm,arm64 RtlFillMemoryUlong(ptr long long)
@@ -1709,7 +1708,6 @@
 @ stdcall -arch=arm __rt_srsh()
 @ cdecl -arch=arm64 _disable()
 @ cdecl -arch=arm64 _enable()
-@ stdcall -arch=arm64 KeGetCurrentProcessorNumber()
 @ stdcall -arch=arm64 KeGetCurrentProcessorNumberEx(ptr)
 
 ; ARM64 HAL dependencies

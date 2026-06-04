@@ -119,30 +119,8 @@ NTAPI
 PspAssignProcessToJob(PEPROCESS Process,
     PEJOB Job)
 {
-    PKTHREAD CurrentThread;
-    NTSTATUS Status = STATUS_SUCCESS;
-
-    CurrentThread = KeGetCurrentThread();
-
-    KeEnterGuardedRegionThread(CurrentThread);
-    ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
-
-    if ((Job->ActiveProcessLimit != 0) &&
-        (Job->ActiveProcesses >= Job->ActiveProcessLimit))
-    {
-        Status = STATUS_QUOTA_EXCEEDED;
-    }
-    else
-    {
-        InsertTailList(&Job->ProcessListHead, &Process->JobLinks);
-        Job->TotalProcesses++;
-        Job->ActiveProcesses++;
-    }
-
-    ExReleaseResourceLite(&Job->JobLock);
-    KeLeaveGuardedRegionThread(CurrentThread);
-
-    return Status;
+    DPRINT("PspAssignProcessToJob() is unimplemented!\n");
+    return STATUS_NOT_IMPLEMENTED;
 }
 
 NTSTATUS
@@ -160,30 +138,7 @@ NTAPI
 PspRemoveProcessFromJob(IN PEPROCESS Process,
                         IN PEJOB Job)
 {
-    PKTHREAD CurrentThread;
-    BOOLEAN Exited;
-
-    CurrentThread = KeGetCurrentThread();
-
-    KeEnterGuardedRegionThread(CurrentThread);
-    ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
-
-    if (Process->JobLinks.Flink != NULL)
-    {
-        Exited = BooleanFlagOn(Process->JobStatus, 2);
-
-        RemoveEntryList(&Process->JobLinks);
-        Process->JobLinks.Flink = NULL;
-        Process->JobLinks.Blink = NULL;
-
-        if (!Exited && Job->ActiveProcesses != 0)
-        {
-            Job->ActiveProcesses--;
-        }
-    }
-
-    ExReleaseResourceLite(&Job->JobLock);
-    KeLeaveGuardedRegionThread(CurrentThread);
+    /* FIXME */
 }
 
 VOID
@@ -191,27 +146,7 @@ NTAPI
 PspExitProcessFromJob(IN PEJOB Job,
                       IN PEPROCESS Process)
 {
-    PKTHREAD CurrentThread;
-
-    CurrentThread = KeGetCurrentThread();
-
-    KeEnterGuardedRegionThread(CurrentThread);
-    ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
-
-    if (!BooleanFlagOn(Process->JobStatus, 2))
-    {
-        SetFlag(Process->JobStatus, 2);
-
-        if (Job->ActiveProcesses != 0)
-        {
-            Job->ActiveProcesses--;
-        }
-
-        Job->TotalTerminatedProcesses++;
-    }
-
-    ExReleaseResourceLite(&Job->JobLock);
-    KeLeaveGuardedRegionThread(CurrentThread);
+    /* FIXME */
 }
 
 /*
@@ -237,22 +172,13 @@ NtAssignProcessToJobObject (
     I open the process handle before the job handle is that a simple test showed
     that it first complains about a invalid process handle! The other way around
     would be simpler though... */
-    if (ProcessHandle == NtCurrentProcess())
-    {
-        Process = PsGetCurrentProcess();
-        ObReferenceObject(Process);
-        Status = STATUS_SUCCESS;
-    }
-    else
-    {
-        Status = ObReferenceObjectByHandle(
-            ProcessHandle,
-            PROCESS_TERMINATE,
-            PsProcessType,
-            PreviousMode,
-            (PVOID*)&Process,
-            NULL);
-    }
+    Status = ObReferenceObjectByHandle(
+        ProcessHandle,
+        PROCESS_TERMINATE,
+        PsProcessType,
+        PreviousMode,
+        (PVOID*)&Process,
+        NULL);
     if(NT_SUCCESS(Status))
     {
         if(Process->Job == NULL)
@@ -294,19 +220,6 @@ NtAssignProcessToJobObject (
                         /* let's actually assign the process to the job as we're not holding
                         the process lock anymore! */
                         Status = PspAssignProcessToJob(Process, Job);
-                        if(!NT_SUCCESS(Status))
-                        {
-                            if(ExAcquireRundownProtection(&Process->RundownProtect))
-                            {
-                                if(Process->Job == Job)
-                                {
-                                    Process->Job = NULL;
-                                    ObDereferenceObject(Job);
-                                }
-
-                                ExReleaseRundownProtection(&Process->RundownProtect);
-                            }
-                        }
                     }
                 }
 
@@ -860,7 +773,6 @@ NtSetInformationJobObject (
     ACCESS_MASK DesiredAccess;
     KPROCESSOR_MODE PreviousMode;
     ULONG RequiredLength, RequiredAlign;
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION ExtendedLimit;
 
     PAGED_CODE();
 
@@ -920,66 +832,12 @@ NtSetInformationJobObject (
         return Status;
     }
 
-    _SEH2_TRY
-    {
-        if (JobInformationClass == JobObjectBasicLimitInformation)
-        {
-            RtlZeroMemory(&ExtendedLimit, sizeof(ExtendedLimit));
-            RtlCopyMemory(&ExtendedLimit.BasicLimitInformation,
-                          JobInformation,
-                          sizeof(JOBOBJECT_BASIC_LIMIT_INFORMATION));
-        }
-        else if (JobInformationClass == JobObjectExtendedLimitInformation)
-        {
-            RtlCopyMemory(&ExtendedLimit,
-                          JobInformation,
-                          sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
-        }
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        ObDereferenceObject(Job);
-        _SEH2_YIELD(return _SEH2_GetExceptionCode());
-    }
-    _SEH2_END;
-
     /* And set the information */
     KeEnterGuardedRegionThread(CurrentThread);
     switch (JobInformationClass)
     {
-        case JobObjectBasicLimitInformation:
         case JobObjectExtendedLimitInformation:
-            ExAcquireResourceExclusiveLite(&Job->JobLock, TRUE);
-
-            Job->LimitFlags = ExtendedLimit.BasicLimitInformation.LimitFlags;
-            Job->MinimumWorkingSetSize = ExtendedLimit.BasicLimitInformation.MinimumWorkingSetSize;
-            Job->MaximumWorkingSetSize = ExtendedLimit.BasicLimitInformation.MaximumWorkingSetSize;
-            Job->ActiveProcessLimit = ExtendedLimit.BasicLimitInformation.ActiveProcessLimit;
-            Job->PriorityClass = ExtendedLimit.BasicLimitInformation.PriorityClass;
-            Job->SchedulingClass = ExtendedLimit.BasicLimitInformation.SchedulingClass;
-            Job->Affinity = ExtendedLimit.BasicLimitInformation.Affinity;
-            Job->PerProcessUserTimeLimit.QuadPart =
-                ExtendedLimit.BasicLimitInformation.PerProcessUserTimeLimit.QuadPart;
-            Job->PerJobUserTimeLimit.QuadPart =
-                ExtendedLimit.BasicLimitInformation.PerJobUserTimeLimit.QuadPart;
-
-            if (JobInformationClass == JobObjectExtendedLimitInformation)
-            {
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-                ExAcquirePushLockExclusive(&Job->MemoryLimitsLock);
-#else
-                KeAcquireGuardedMutexUnsafe(&Job->MemoryLimitsLock);
-#endif
-                Job->ProcessMemoryLimit = BYTES_TO_PAGES(ExtendedLimit.ProcessMemoryLimit);
-                Job->JobMemoryLimit = BYTES_TO_PAGES(ExtendedLimit.JobMemoryLimit);
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-                ExReleasePushLockExclusive(&Job->MemoryLimitsLock);
-#else
-                KeReleaseGuardedMutexUnsafe(&Job->MemoryLimitsLock);
-#endif
-            }
-
-            ExReleaseResourceLite(&Job->JobLock);
+            DPRINT1("Class JobObjectExtendedLimitInformation not implemented\n");
             Status = STATUS_SUCCESS;
             break;
 
@@ -1078,7 +936,7 @@ PsSetJobUIRestrictionsClass(PEJOB Job,
     ULONG UIRestrictionsClass)
 {
     ASSERT(Job);
-    (void)InterlockedExchangeUL(&Job->UIRestrictionsClass, UIRestrictionsClass);
+    Job->UIRestrictionsClass = UIRestrictionsClass;
     /* FIXME - walk through the job process list and update the restrictions? */
 }
 

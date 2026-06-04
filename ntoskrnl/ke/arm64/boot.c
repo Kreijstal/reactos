@@ -1080,8 +1080,16 @@ KiSystemStartup(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
     KiArm64CaptureMmuState(&BootContext);
     KiArm64EnsureIdentityMapping(&BootContext);
 
+    /*
+     * Recompute the stack bounds from the array at runtime. The exported
+     * pointer globals are used later by initialization code, but the live SP
+     * must be based on the kernel image mapping, not a stale physical alias.
+     */
+    KiArm64P0BootStackLimit = &KiArm64P0BootStackData[0];
+    KiArm64P0BootStack = &KiArm64P0BootStackData[ARM64_P0_BOOT_STACK_SIZE];
+
     /* Switch to a clean boot stack before entering KiInitializeSystem */
-    LoaderBlock->KernelStack = (ULONG_PTR)KiArm64P0BootStack;
+    LoaderBlock->KernelStack = (ULONG_PTR)&KiArm64P0BootStackData[ARM64_P0_BOOT_STACK_SIZE];
     if (LoaderBlock->KernelStack < ARM64_KSEG0_BASE)
     {
         LoaderBlock->KernelStack += ARM64_KSEG0_BASE;

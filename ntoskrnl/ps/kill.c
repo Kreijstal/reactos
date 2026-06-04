@@ -186,11 +186,7 @@ PspReapRoutine(IN PVOID Context)
 
             /* Delete this entry's kernel stack */
             MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-                                Thread->LargeStack);
-#else
                                 Thread->Tcb.LargeStack);
-#endif
             Thread->Tcb.InitialStack = NULL;
 
             /* Move to the next entry */
@@ -382,17 +378,6 @@ PspDeleteProcess(IN PVOID ObjectBody)
     /* Dereference the Device Map */
     ObDereferenceDeviceMap(Process);
 
-#ifdef _WIN64
-    /* Check if this is a WOW64 process  */
-    if (Process->Wow64Process && Process->Wow64Process != (PVOID)TRUE)
-    {
-        /* Free WOW64_PROCESS structure */
-        ExFreePool(Process->Wow64Process);
-
-        PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-    }
-#endif
-
     /*
      * Dereference the quota block, the function
      * will invoke a quota block cleanup if the
@@ -417,11 +402,7 @@ PspDeleteThread(IN PVOID ObjectBody)
     {
         /* Release it */
         MmDeleteKernelStack((PVOID)Thread->Tcb.StackBase,
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-                            Thread->LargeStack);
-#else
                             Thread->Tcb.LargeStack);
-#endif
     }
 
     /* Check if we have a CID Handle */
@@ -536,9 +517,7 @@ PspExitThread(IN NTSTATUS ExitStatus)
     ExWaitForRundownProtectionRelease(&Thread->RundownProtect);
 
     /* Cleanup the power state */
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-    PopCleanupPowerState((PPOWER_STATE)&Thread->PowerState);
-#elif (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN7)
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.LargeStack);
 #else
     PopCleanupPowerState((PPOWER_STATE)&Thread->Tcb.PowerState);

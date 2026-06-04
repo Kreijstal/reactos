@@ -24,6 +24,19 @@ SIZE_T MmSystemLockPagesCount;
 ULONG MiCacheOverride[MiNotMapped + 1];
 
 /* INTERNAL FUNCTIONS *********************************************************/
+
+#ifdef _M_ARM64
+
+NTSTATUS
+MiArm64ProbeAndLockUserPages(
+    _Inout_ PMDL Mdl,
+    _In_ PVOID StartAddress,
+    _In_ ULONG TotalPages,
+    _In_ LOCK_OPERATION Operation,
+    _In_ PEPROCESS CurrentProcess);
+
+#endif
+
 static
 PVOID
 NTAPI
@@ -67,12 +80,6 @@ MiMapLockedPagesInUserSpace(
 
     IsIoMapping = (Mdl->MdlFlags & MDL_IO_SPACE) != 0;
     CacheAttribute = MiPlatformCacheAttributes[IsIoMapping][CacheType];
-
-    /* Large pages are always cached, make sure we're not asking for those */
-    if (CacheAttribute != MiCached)
-    {
-        DPRINT1("FIXME: Need to check for large pages\n");
-    }
 
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
@@ -1014,6 +1021,23 @@ MmProbeAndLockPages(IN PMDL Mdl,
     /* Large pages not supported */
     ASSERT(!MI_IS_PHYSICAL_ADDRESS(Address));
 
+#ifdef _M_ARM64
+    if (CurrentProcess != NULL)
+    {
+        Status = MiArm64ProbeAndLockUserPages(Mdl,
+                                              StartAddress,
+                                              TotalPages,
+                                              Operation,
+                                              CurrentProcess);
+        if (!NT_SUCCESS(Status))
+        {
+            ExRaiseStatus(Status);
+        }
+
+        return;
+    }
+#endif
+
     //
     // Now probe them
     //
@@ -1664,7 +1688,8 @@ MmMapLockedPagesWithReservedMapping(
            !PointerPte[1].u.Hard.Valid);
 
     // Verify that the pool tag matches
-    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
+    TempPte.u.Long = PoolTag;
+    TempPte.u.Hard.Valid = 0;
     if (PointerPte[1].u.Long != TempPte.u.Long)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
@@ -1675,7 +1700,7 @@ MmMapLockedPagesWithReservedMapping(
     }
 
     // We must have a size, and our helper PTEs must be invalid
-    if (MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) < 3)
+    if (PointerPte[0].u.List.NextEntry < 3)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
                      PTE_MAPPING_ADDRESS_INVALID, /* Trying to map an invalid address */
@@ -1685,11 +1710,13 @@ MmMapLockedPagesWithReservedMapping(
     }
 
     // If the mapping isn't big enough, fail
-    if (MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) - 2 < PageCount)
+    if ((PointerPte[0].u.List.NextEntry < 2) ||
+        (PointerPte[0].u.List.NextEntry - 2 < PageCount))
     {
         DPRINT1("Reserved mapping too small. Need %Iu pages, have %Iu\n",
-                        PageCount,
-                        MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) - 2);
+                PageCount,
+                (PointerPte[0].u.List.NextEntry >= 2) ?
+                    (SIZE_T)(PointerPte[0].u.List.NextEntry - 2) : 0);
         return NULL;
     }
     // Skip our two helper PTEs
@@ -1736,15 +1763,8 @@ MmMapLockedPagesWithReservedMapping(
         Mdl->MdlFlags |= MDL_PARTIAL_HAS_BEEN_MAPPED;
     }
 
-    // Return the mapped address. The reserved range is page granular, so the
-    // mapping always begins at the page that contains MappingAddress; Windows 8
-    // ignores any sub-page offset the caller passed and returns the page-aligned
-    // base plus the MDL's byte offset. Older targets return the address as given.
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-    return (PVOID)((ULONG_PTR)PAGE_ALIGN(MappingAddress) + Mdl->ByteOffset);
-#else
+    // Return the mapped address
     return (PVOID)((ULONG_PTR)MappingAddress + Mdl->ByteOffset);
-#endif
 }
 
 /*
@@ -1782,7 +1802,8 @@ MmUnmapReservedMapping(
            !PointerPte[1].u.Hard.Valid);
 
     // Verify that the pool tag matches
-    TempPte = MI_MAKE_RESERVED_MAPPING_TAG_PTE(PoolTag);
+    TempPte.u.Long = PoolTag;
+    TempPte.u.Hard.Valid = 0;
     if (PointerPte[1].u.Long != TempPte.u.Long)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
@@ -1793,7 +1814,7 @@ MmUnmapReservedMapping(
     }
 
     // We must have a size
-    if (MI_GET_RESERVED_MAPPING_SIZE(PointerPte[0]) < 3)
+    if (PointerPte[0].u.List.NextEntry < 3)
     {
         KeBugCheckEx(SYSTEM_PTE_MISUSE,
                      PTE_MAPPING_ADDRESS_EMPTY, /* Mapping apparently empty */
@@ -1847,134 +1868,16 @@ MmUnmapReservedMapping(
                        MDL_FREE_EXTRA_PTES);
 }
 
+/*
+ * @unimplemented
+ */
 NTSTATUS
 NTAPI
 MmPrefetchPages(IN ULONG NumberOfLists,
                 IN PREAD_LIST *ReadLists)
 {
-    ULONG ListIndex;
-
-    if (KeGetCurrentIrql() > PASSIVE_LEVEL)
-    {
-        return STATUS_INVALID_DEVICE_STATE;
-    }
-
-    if (NumberOfLists != 0 && ReadLists == NULL)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    /* First pass: validate. */
-    for (ListIndex = 0; ListIndex < NumberOfLists; ListIndex++)
-    {
-        PREAD_LIST ReadList = ReadLists[ListIndex];
-
-        if (ReadList == NULL)
-        {
-            return STATUS_INVALID_PARAMETER;
-        }
-
-        if (ReadList->NumberOfEntries != 0 && ReadList->FileObject == NULL)
-        {
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
-
-    /*
-     * MmPrefetchPages is advisory.  Page-in failures are not surfaced to the
-     * caller, and the caller must still tolerate normal demand paging of any
-     * requested page that wasn't successfully prefetched.
-     *
-     * For each ReadList, group consecutive pages from the FILE_SEGMENT_ELEMENT
-     * array into contiguous file ranges and prefetch each range through the
-     * existing data-section / image-section page-in path.  This reuses
-     * MmMakeSegmentResident's clustering and the FS's paging-IO handler
-     * (IRP_PAGING_IO), which is recursion-safe with respect to ordinary FS
-     * locks the caller may hold.
-     */
-    for (ListIndex = 0; ListIndex < NumberOfLists; ListIndex++)
-    {
-        PREAD_LIST ReadList = ReadLists[ListIndex];
-        PSECTION_OBJECT_POINTERS Pointers;
-        BOOLEAN UseImageSection;
-        ULONG EntryIndex;
-        LONGLONG RangeStart = 0;
-        LONGLONG RangeEnd = 0;
-        BOOLEAN HaveRange = FALSE;
-
-        if (ReadList->NumberOfEntries == 0)
-        {
-            continue;
-        }
-
-        Pointers = ReadList->FileObject->SectionObjectPointer;
-        if (Pointers == NULL)
-        {
-            /* Nothing to prefetch into; skip. */
-            continue;
-        }
-
-        UseImageSection = (ReadList->IsImage != 0) && (Pointers->ImageSectionObject != NULL);
-
-        if (!UseImageSection && Pointers->DataSectionObject == NULL)
-        {
-            continue;
-        }
-
-        for (EntryIndex = 0; EntryIndex <= ReadList->NumberOfEntries; EntryIndex++)
-        {
-            LONGLONG ThisStart;
-            LONGLONG ThisEnd;
-            BOOLEAN Flush;
-
-            if (EntryIndex < ReadList->NumberOfEntries)
-            {
-                /* Strip flag bits stored in the low PAGE_SIZE-1 bits. */
-                ThisStart = (LONGLONG)(ReadList->List[EntryIndex].Alignment &
-                                       ~((ULONG_PTR)PAGE_SIZE - 1));
-                ThisEnd = ThisStart + PAGE_SIZE;
-                Flush = HaveRange && (ThisStart != RangeEnd);
-            }
-            else
-            {
-                /* Sentinel pass: flush whatever range remains. */
-                ThisStart = 0;
-                ThisEnd = 0;
-                Flush = HaveRange;
-            }
-
-            if (Flush)
-            {
-                LARGE_INTEGER VDL;
-                ULONG Length = (ULONG)(RangeEnd - RangeStart);
-
-                VDL.QuadPart = MAXLONGLONG;
-                (VOID)MmMakeDataSectionResident(Pointers,
-                                                RangeStart,
-                                                Length,
-                                                &VDL);
-                HaveRange = FALSE;
-            }
-
-            if (EntryIndex == ReadList->NumberOfEntries)
-            {
-                break;
-            }
-
-            if (!HaveRange)
-            {
-                RangeStart = ThisStart;
-                RangeEnd = ThisEnd;
-                HaveRange = TRUE;
-            }
-            else
-            {
-                RangeEnd = ThisEnd;
-            }
-        }
-    }
-
-    return STATUS_SUCCESS;
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
 }
 
 /*

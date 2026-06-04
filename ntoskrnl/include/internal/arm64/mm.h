@@ -6,6 +6,8 @@
  */
 #pragma once
 
+#include <reactos/arm64/early_uart.h>
+
 extern NTKERNELAPI ULONG64 MmUserProbeAddress;
 #define MM_USER_PROBE_ADDRESS MmUserProbeAddress
 
@@ -267,6 +269,21 @@ extern BOOLEAN MiArm64SelfMapReady;
 VOID
 MiArm64MapKseg0Page(
     _In_ PFN_NUMBER PageFrameNumber);
+
+VOID
+MiArm64FillSystemPageDirectory(
+    _In_ PVOID Base,
+    _In_ SIZE_T NumberOfBytes);
+
+NTSTATUS
+MiArm64EnsureUserPte(
+    _Inout_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Outptr_ PMMPTE *PointerPte);
+
+VOID
+MiArm64IncrementUserPageTableReferences(
+    _In_ PVOID Address);
 #endif
 
 FORCEINLINE
@@ -988,9 +1005,11 @@ MiArm64SyncKernelHierarchyEntryWrite(
         return;
     }
 
-    ASSERT(Kseg0Entry != NULL);
     if (Kseg0Entry == NULL)
+    {
+        ASSERT(Kseg0Entry != NULL);
         return;
+    }
 
     *(volatile ULONG64 *)Kseg0Entry = PointerEntry->u.Long;
     __asm__ __volatile__("dsb ishst" ::: "memory");

@@ -376,7 +376,7 @@ MiInsertInSystemSpace(IN PMMSESSION Session,
     NT_ASSERT(((ULONG_PTR)Base & (MI_SYSTEM_VIEW_BUCKET_SIZE - 1)) == 0);
 
     /* Get the hash entry for this allocation */
-    Entry = (ULONG_PTR)Base + Buckets;
+    Entry = ((ULONG_PTR)Base & ~((ULONG_PTR)(MI_SYSTEM_VIEW_BUCKET_SIZE - 1))) + Buckets;
     Hash = (Entry >> 16) % Session->SystemSpaceHashKey;
 
     /* Loop hash entries until a free one is found */
@@ -699,16 +699,7 @@ MiSegmentDelete(IN PSEGMENT Segment)
         }
 
         /* Zero the PTE and keep going */
-#if DBG
-        {
-            ULONG_PTR _oldpte = PointerPte->u.Long;
-            PointerPte->u.Long = 0;
-            if (_oldpte)
-                MmTracePte('S', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
-        }
-#else
         PointerPte->u.Long = 0;
-#endif
         PointerPte++;
     }
 
@@ -952,7 +943,7 @@ MiSessionCommitPageTables(IN PVOID StartVa,
     Index = ((ULONG_PTR)StartVa - (ULONG_PTR)MmSessionBase) >> 22;
     while (StartPde <= EndPde)
     {
-#ifndef _M_AMD64
+#if (_MI_PAGING_LEVELS < 3)
         /* If we don't already have a page table for it, increment count */
         if (MmSessionSpace->PageTables[Index].u.Long == 0) PageCount++;
 #endif
@@ -971,10 +962,11 @@ MiSessionCommitPageTables(IN PVOID StartVa,
     /* Loop each PDE while holding the working set lock */
 //  MiLockWorkingSet(PsGetCurrentThread(),
 //                   &MmSessionSpace->GlobalVirtualAddress->Vm);
-#ifdef _M_AMD64
-_WARN("MiSessionCommitPageTables halfplemented for amd64")
+#if (_MI_PAGING_LEVELS >= 3)
+_WARN("MiSessionCommitPageTables halfplemented for 3+ paging levels")
     DBG_UNREFERENCED_LOCAL_VARIABLE(OldIrql);
     DBG_UNREFERENCED_LOCAL_VARIABLE(Color);
+    DBG_UNREFERENCED_LOCAL_VARIABLE(Index);
     DBG_UNREFERENCED_LOCAL_VARIABLE(TempPde);
     DBG_UNREFERENCED_LOCAL_VARIABLE(Pfn1);
     DBG_UNREFERENCED_LOCAL_VARIABLE(PageFrameNumber);
@@ -1296,7 +1288,13 @@ MiMapViewOfDataSection(
     Vad->ControlArea = ControlArea;
     Vad->u.VadFlags.CommitCharge = 0;
     Vad->u.VadFlags.Protection = ProtectionMask;
-    Vad->u2.VadFlags2.FileOffset = (ULONG)(SectionOffset->QuadPart >> 16);
+    {
+        volatile ULONG *OffsetParts = (volatile ULONG *)SectionOffset;
+        ULONG OffsetLow = OffsetParts[0];
+        ULONG OffsetHigh = OffsetParts[1];
+
+        Vad->u2.VadFlags2.FileOffset = (OffsetLow >> 16) | (OffsetHigh << 16);
+    }
     Vad->u2.VadFlags2.Inherit = (InheritDisposition == ViewShare);
     if ((AllocationType & SEC_NO_CHANGE) || (Section->u.Flags.NoChange))
     {
@@ -1443,9 +1441,6 @@ MiCreatePagingFileMap(OUT PSEGMENT *Segment,
     PSEGMENT NewSegment;
     PSUBSECTION Subsection;
     PAGED_CODE();
-
-    /* No large pages in ARM3 yet */
-    ASSERT((AllocationAttributes & SEC_LARGE_PAGES) == 0);
 
     /* Pagefile-backed sections need a known size */
     if (MaximumSize == 0)
@@ -1775,25 +1770,12 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
     PMEMORY_SECTION_NAME SectionName = NULL;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
 
-    /* Vista+ Windows accepts either PROCESS_QUERY_INFORMATION or
-     * PROCESS_QUERY_LIMITED_INFORMATION for NtQueryVirtualMemory; fall
-     * back to the latter to match handles opened by Cygwin/MSYS2 fork
-     * emulation. */
     Status = ObReferenceObjectByHandle(ProcessHandle,
                                        PROCESS_QUERY_INFORMATION,
                                        NULL,
                                        PreviousMode,
                                        (PVOID*)(&Process),
                                        NULL);
-    if (Status == STATUS_ACCESS_DENIED)
-    {
-        Status = ObReferenceObjectByHandle(ProcessHandle,
-                                           PROCESS_QUERY_LIMITED_INFORMATION,
-                                           NULL,
-                                           PreviousMode,
-                                           (PVOID*)(&Process),
-                                           NULL);
-    }
 
     if (!NT_SUCCESS(Status))
     {
@@ -2022,38 +2004,8 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
             }
         }
 
-        /* MiRemoveMappedPtes is the section-view-unmap path; ARM3 has no
-         * rmap awareness so it cannot clean up legacy MM rmap entries here.
-         * If a rmap entry exists at this point, the upstream view-unmap path
-         * forgot to call MmDeleteRmap, and the next fault on this address
-         * would trip section.c:1971 dup-rmap ASSERT. Trap the producer here
-         * with full PFN context so we catch the leak at its origin. */
-#if DBG
-        if (PteContents.u.Hard.Valid == 1)
-        {
-            PFN_NUMBER UnmapPfn = PFN_FROM_PTE(&PteContents);
-            if (MmGetRmapListHeadPage(UnmapPfn) != NULL)
-            {
-                PVOID UnmapVa = MiPteToAddress(PointerPte);
-                DbgPrint("MiRemoveMappedPtes: stale rmap on PFN %p VA %p Proc %p\n",
-                         (PVOID)UnmapPfn, UnmapVa, PsGetCurrentProcess());
-                MmDumpRmapTrace(UnmapPfn, PsGetCurrentProcess(), UnmapVa);
-                ASSERT(MmGetRmapListHeadPage(UnmapPfn) == NULL);
-            }
-        }
-#endif
-
         /* Make the PTE into a zero PTE */
-#if DBG
-        {
-            ULONG_PTR _oldpte = PointerPte->u.Long;
-            PointerPte->u.Long = 0;
-            if (_oldpte)
-                MmTracePte('R', MiPteToAddress(PointerPte), _oldpte, 0, _ReturnAddress());
-        }
-#else
         PointerPte->u.Long = 0;
-#endif
 
         /* Move to the next PTE */
         PointerPte++;
@@ -2069,33 +2021,6 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
     /* Decrement the accounting counters */
     ControlArea->NumberOfUserReferences--;
     ControlArea->NumberOfMappedViews--;
-
-    /*
-     * MiResolveDemandZeroFault writes a hardware-valid PTE directly into
-     * the prototype PTE for pagefile-backed sections, but MiSegmentDelete
-     * later requires the proto to be 0 / Soft.Transition / Soft.PageFileHigh.
-     * On the last view of such a section, walk the prototype array and
-     * release the proto's residual ShareCount before MiCheckControlArea
-     * can hand the segment off to MiSegmentDelete.
-     */
-    if ((ControlArea->NumberOfMappedViews == 0) &&
-        (ControlArea->NumberOfSectionReferences == 0) &&
-        !ControlArea->u.Flags.Image &&
-        (ControlArea->FilePointer == NULL))
-    {
-        PSUBSECTION Sub = (PSUBSECTION)(ControlArea + 1);
-        PMMPTE Proto = Sub->SubsectionBase;
-        PMMPTE LastProto = Proto + Sub->PtesInSubsection;
-        for (; Proto < LastProto; Proto++)
-        {
-            if (Proto->u.Hard.Valid)
-            {
-                PMMPFN ProtoPfn = MiGetPfnEntry(PFN_FROM_PTE(Proto));
-                MiDecrementShareCount(ProtoPfn, PFN_FROM_PTE(Proto));
-                Proto->u.Long = 0;
-            }
-        }
-    }
 
     /* Check if we should destroy the CA and release the lock */
     MiCheckControlArea(ControlArea, OldIrql);
@@ -2384,14 +2309,11 @@ MmCreateArm3Section(OUT PVOID *SectionObject,
         /* A handle must be supplied with SEC_IMAGE, as this is the no-handle path */
         if (AllocationAttributes & SEC_IMAGE) return STATUS_INVALID_FILE_FOR_SECTION;
 
-        /* Not yet supported */
-        ASSERT((AllocationAttributes & SEC_LARGE_PAGES) == 0);
-
         /* So this must be a pagefile-backed section, create the mappings needed */
         Status = MiCreatePagingFileMap(&NewSegment,
                                        InputMaximumSize->QuadPart,
                                        ProtectionMask,
-                                       AllocationAttributes);
+                                       AllocationAttributes & ~SEC_LARGE_PAGES);
         if (!NT_SUCCESS(Status)) return Status;
 
         /* Set the size here, and read the control area */
@@ -2644,17 +2566,11 @@ MmMapViewOfArm3Section(
     ASSERT(Section->u.Flags.WriteCombined == 0);
     ASSERT(ControlArea->u.Flags.PhysicalMemory == 0);
 
-    /*
-     * MEM_RESERVE is only meaningful when mapping a view larger than the
-     * backing of an image- or file-backed section, so that the excess
-     * address space is merely reserved.  Pagefile-backed sections (which is
-     * all ARM3 currently handles here) have no such backing, so Windows
-     * rejects the request rather than implementing a no-op reservation.
-     */
+    /* One can only reserve a file-based mapping, not shared memory. */
     if ((AllocationType & MEM_RESERVE) != 0)
     {
-        DPRINT1("MEM_RESERVE is not valid for a pagefile-backed section\n");
-        return STATUS_INVALID_PARAMETER_9;
+        if (ControlArea->FilePointer == NULL)
+            return STATUS_INVALID_PARAMETER_9;
     }
 
     /* Check if the mapping protection is compatible with the create */
@@ -2760,17 +2676,6 @@ MmDisableModifiedWriteOfSection(IN PSECTION_OBJECT_POINTERS SectionObjectPointer
    UNIMPLEMENTED;
    return FALSE;
 }
-
-/*
- * @implemented
- *
- * The real implementation lives in ntoskrnl/mm/section.c next to the
- * legacy data-section helpers it depends on (MiGrabDataSection,
- * MmDereferenceSegment).  This stub used to return UNIMPLEMENTED here,
- * which is the chain of consequences documented in
- * Kreijstal/reactos#14.  See the kmtest in
- * modules/rostests/kmtests/ntos_mm/MmForceSectionClosed.c.
- */
 
 /*
  * @implemented
@@ -3497,14 +3402,20 @@ NtMapViewOfSection(
             DPRINT1("Invalid zero bits\n");
             return STATUS_INVALID_PARAMETER_4;
         }
+        else if ((SafeBaseAddress == NULL) && (ZeroBits >= 20))
+        {
+            return STATUS_NO_MEMORY;
+        }
 
-        if ((((ULONG_PTR)SafeBaseAddress << ZeroBits) >> ZeroBits) != (ULONG_PTR)SafeBaseAddress)
+        if (ZeroBits &&
+            ((((ULONG_PTR)SafeBaseAddress << ZeroBits) >> ZeroBits) != (ULONG_PTR)SafeBaseAddress))
         {
             DPRINT1("Invalid zero bits\n");
             return STATUS_INVALID_PARAMETER_4;
         }
 
-        if (((((ULONG_PTR)SafeBaseAddress + SafeViewSize) << ZeroBits) >> ZeroBits) != ((ULONG_PTR)SafeBaseAddress + SafeViewSize))
+        if (ZeroBits &&
+            (((((ULONG_PTR)SafeBaseAddress + SafeViewSize) << ZeroBits) >> ZeroBits) != ((ULONG_PTR)SafeBaseAddress + SafeViewSize)))
         {
             DPRINT1("Invalid zero bits\n");
             return STATUS_INVALID_PARAMETER_4;
@@ -3572,6 +3483,27 @@ NtMapViewOfSection(
             ObDereferenceObject(Process);
             return STATUS_MAPPED_ALIGNMENT;
         }
+    }
+
+    if ((AllocationType & MEM_RESERVE) &&
+        MiIsRosSectionObject(Section) &&
+        !Section->u.Flags.Image &&
+        !(Section->InitialPageProtection & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+    {
+        ObDereferenceObject(Section);
+        ObDereferenceObject(Process);
+        return STATUS_SECTION_PROTECTION;
+    }
+
+    if (CommitSize &&
+        (SafeViewSize == 0) &&
+        !(AllocationType & MEM_RESERVE) &&
+        MiIsRosSectionObject(Section) &&
+        !Section->u.Flags.Image)
+    {
+        ObDereferenceObject(Section);
+        ObDereferenceObject(Process);
+        return STATUS_INVALID_PARAMETER_5;
     }
 
     /* Now do the actual mapping */

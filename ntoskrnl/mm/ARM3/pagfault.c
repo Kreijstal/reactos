@@ -12,6 +12,10 @@
 #define NDEBUG
 #include <debug.h>
 
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
+
 #define MODULE_INVOLVED_IN_ARM3
 #include <mm/ARM3/miarm.h>
 
@@ -28,21 +32,42 @@ BOOLEAN UserPdeFault = FALSE;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
-/*
- * Minimum amount of committed stack the kernel keeps available below the
- * point where it raises STATUS_STACK_OVERFLOW, reserved for the user-mode
- * exception dispatcher. On amd64 a single __except after a stack overflow
- * runs KiUserExceptionDispatcher -> RtlDispatchException -> RtlpUnwindInternal
- * (find handler) -> language handler -> RtlUnwindEx -> RtlpUnwindInternal
- * (unwind); each RtlpUnwindInternal frame alone holds two full CONTEXT
- * structures (~1.2 KB each on amd64) and the chain nests, so a few KB are
- * needed. x86 needs far less. This mirrors the per-thread stack guarantee
- * Windows keeps for stack-overflow recovery (see RtlSetThreadStackGuarantee).
- */
-#ifdef _WIN64
-#define MI_STACK_OVERFLOW_GUARANTEE (4 * PAGE_SIZE)
-#else
-#define MI_STACK_OVERFLOW_GUARANTEE PAGE_SIZE
+#if defined(_M_ARM64)
+static
+VOID
+MiArm64CompleteFaultPteUpdate(
+    _In_ PVOID FaultAddress,
+    _In_ PMMPTE ValidPte)
+{
+    PVOID PageAddress;
+    ULONG64 Ctr;
+    ULONG ILine;
+    ULONG_PTR Start, End, Addr;
+
+    PageAddress = PAGE_ALIGN(FaultAddress);
+
+    /*
+     * MI_WRITE_VALID_PTE can only derive the VA from the PTE address. That is
+     * correct for actual page-table PTEs but wrong for prototype-PTE writes.
+     * Fault completion must publish the faulting VA after the final leaf PTE
+     * becomes valid, otherwise ARM64 can keep replaying a cached translation
+     * fault for the System View address.
+     */
+    KeInvalidateTlbEntry(PageAddress);
+
+    if (MI_IS_PAGE_EXECUTABLE(ValidPte))
+    {
+        __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(Ctr));
+        ILine = 4u << (Ctr & 0xF);
+        Start = (ULONG_PTR)PageAddress & ~(ULONG_PTR)(ILine - 1);
+        End = (ULONG_PTR)PageAddress + PAGE_SIZE;
+        for (Addr = Start; Addr < End; Addr += ILine)
+        {
+            __asm__ __volatile__("ic ivau, %0" :: "r"(Addr) : "memory");
+        }
+        __asm__ __volatile__("dsb ish\n\tisb" ::: "memory");
+    }
+}
 #endif
 
 static
@@ -54,7 +79,7 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     PETHREAD CurrentThread = PsGetCurrentThread();
     PTEB Teb = CurrentThread->Tcb.Teb;
     PVOID StackBase, DeallocationStack, NextStackAddress;
-    SIZE_T GuaranteedSize, RegionSize;
+    SIZE_T GuaranteedSize;
     NTSTATUS Status;
 
     /* Do we own the address space lock? */
@@ -81,13 +106,11 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     DPRINT("Handling guard page fault with Stacks Addresses 0x%p and 0x%p, guarantee: %lx\n",
             StackBase, DeallocationStack, GuaranteedSize);
 
-    /* Honor a per-thread stack guarantee if one was set, but never reserve
-     * less than the minimum the user-mode exception dispatcher needs. */
-    if (GuaranteedSize < MI_STACK_OVERFLOW_GUARANTEE)
-        GuaranteedSize = MI_STACK_OVERFLOW_GUARANTEE;
+    /* Guarantees make this code harder, for now, assume there aren't any */
+    ASSERT(GuaranteedSize == 0);
 
-    /* Round the guarantee up to a page boundary */
-    GuaranteedSize = ROUND_TO_PAGES(GuaranteedSize);
+    /* So allocate only the minimum guard page size */
+    GuaranteedSize = PAGE_SIZE;
 
     /* Does this faulting stack address actually exist in the stack? */
     if ((Address >= StackBase) || (Address < DeallocationStack))
@@ -98,45 +121,29 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         return STATUS_GUARD_PAGE_VIOLATION;
     }
 
-    /* The new guard page goes one page below the faulting page */
-    NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - PAGE_SIZE);
+    /* This is where the stack will start now */
+    NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(Address) - GuaranteedSize);
 
-    /* Do we still have room to move the guard page down while keeping the
-     * committed "stack guarantee" region reserved for the stack-overflow
-     * exception dispatcher, plus a hard guard page below it down to
-     * DeallocationStack? If continuing to grow would eat into that guarantee,
-     * raise the overflow now -- while the faulting page is still above the
-     * guarantee region -- so KiUserExceptionDispatcher and the user-mode
-     * handler run in the clean guarantee region rather than the few bytes
-     * left in the last user-consumed page. */
-    if ((ULONG_PTR)NextStackAddress < (ULONG_PTR)DeallocationStack + GuaranteedSize + PAGE_SIZE)
+    /* Do we have at least one page between here and the end of the stack? */
+    if (((ULONG_PTR)NextStackAddress - PAGE_SIZE) <= (ULONG_PTR)DeallocationStack)
     {
-        /* This is a real stack overflow. Commit the guarantee region, right
-         * above the final hard guard page, so the handler has room to run. */
-        DPRINT1("Stack overflow for %.16s at %p (DeallocationStack %p)\n",
-                PsGetCurrentProcess()->ImageFileName, Address, DeallocationStack);
-        NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + PAGE_SIZE);
-        RegionSize = GuaranteedSize;
+        /* We don't -- Trying to make this guard page valid now */
+        DPRINT1("Close to our death...\n");
+
+        /* Calculate the next memory address */
+        NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + GuaranteedSize);
 
         /* Allocate the memory */
         Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
                                          &NextStackAddress,
                                          0,
-                                         &RegionSize,
+                                         &GuaranteedSize,
                                          MEM_COMMIT,
                                          PAGE_READWRITE);
         if (NT_SUCCESS(Status))
         {
             /* Success! */
             Teb->NtTib.StackLimit = NextStackAddress;
-
-#ifdef _WIN64
-            /* Update WOW64 32-bit TEB stack limit */
-            if (THREAD_TO_PROCESS(CurrentThread)->Wow64Process != NULL)
-            {
-                ((PTEB32)(ROUND_TO_PAGES(Teb + 1)))->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-            }
-#endif
         }
         else
         {
@@ -149,24 +156,14 @@ MiCheckForUserStackOverflow(IN PVOID Address,
     /* Don't handle this flag yet */
     ASSERT((PsGetCurrentProcess()->Peb->NtGlobalFlag & FLG_DISABLE_STACK_EXTENSION) == 0);
 
-    /* The faulting page (already un-guarded by the caller) becomes the lowest
-     * committed page of the stack */
-    Teb->NtTib.StackLimit = PAGE_ALIGN(Address);
+    /* Update the stack limit */
+    Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + GuaranteedSize);
 
-#ifdef _WIN64
-    /* Update WOW64 32-bit TEB stack limit */
-    if (THREAD_TO_PROCESS(CurrentThread)->Wow64Process != NULL)
-    {
-        ((PTEB32)(ROUND_TO_PAGES(Teb + 1)))->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-    }
-#endif
-
-    /* Now move the guard page down by one page */
-    RegionSize = PAGE_SIZE;
+    /* Now move the guard page to the next page */
     Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
                                      &NextStackAddress,
                                      0,
-                                     &RegionSize,
+                                     &GuaranteedSize,
                                      MEM_COMMIT,
                                      PAGE_READWRITE | PAGE_GUARD);
     if ((NT_SUCCESS(Status) || (Status == STATUS_ALREADY_COMMITTED)))
@@ -793,8 +790,20 @@ MiResolveDemandZeroFault(IN PVOID Address,
     /* Set it dirty if it's a writable page */
     if (MI_IS_PAGE_WRITEABLE(&TempPte)) MI_MAKE_DIRTY_PAGE(&TempPte);
 
+#if defined(_M_ARM64)
+    if (MI_IS_PAGE_TABLE_ADDRESS(PointerPte))
+    {
+        MI_WRITE_VALID_PTE_NO_FLUSH(PointerPte, TempPte);
+        MiArm64CompleteFaultPteUpdate(Address, &TempPte);
+    }
+    else
+    {
+        MI_WRITE_VALID_PTE(PointerPte, TempPte);
+    }
+#else
     /* Write it */
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
+#endif
 
     /* Did we manually acquire the lock */
     if (HaveLock)
@@ -928,8 +937,13 @@ MiCompleteProtoPteFault(IN BOOLEAN StoreInstruction,
     /* Set the dirty flag if needed */
     if (DirtyPage) MI_MAKE_DIRTY_PAGE(&TempPte);
 
+#if defined(_M_ARM64)
+    MI_WRITE_VALID_PTE_NO_FLUSH(PointerPte, TempPte);
+    MiArm64CompleteFaultPteUpdate(Address, &TempPte);
+#else
     /* Write the PTE */
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
+#endif
 
     /* Reset the protection if needed */
     if (OriginalProtection) Protection = MM_ZERO_ACCESS;
@@ -1817,6 +1831,15 @@ MmArmAccessFault(IN ULONG FaultCode,
         ASSERT(MI_IS_PAGE_LARGE(PointerPde) == FALSE);
         ASSERT((!MI_IS_NOT_PRESENT_FAULT(FaultCode) && MI_IS_PAGE_COPY_ON_WRITE(PointerPte)) == FALSE);
 
+#if defined(_M_ARM64)
+        if ((PointerPte->u.Hard.Valid != 0) &&
+            (PointerPte->u.Hard.Accessed == 0))
+        {
+            PointerPte->u.Hard.Accessed = 1;
+            KeInvalidateTlbEntry(Address);
+        }
+#endif
+
         /* Check if this was a write */
         if (MI_IS_WRITE_ACCESS(FaultCode))
         {
@@ -1886,6 +1909,15 @@ MmArmAccessFault(IN ULONG FaultCode,
                 TempPte = *PointerPte;
                 if (TempPte.u.Hard.Valid)
                 {
+#if defined(_M_ARM64)
+                    if (TempPte.u.Hard.Accessed == 0)
+                    {
+                        TempPte.u.Hard.Accessed = 1;
+                        MI_UPDATE_VALID_PTE(PointerPte, TempPte);
+                        KeInvalidateTlbEntry(Address);
+                    }
+#endif
+
                     /* Check if this was a write */
                     if (MI_IS_WRITE_ACCESS(FaultCode))
                     {
@@ -1990,6 +2022,22 @@ _WARN("Session space stuff is not implemented yet!")
             }
         }
 RetryKernel:
+#if defined(_M_ARM64)
+        /*
+         * ARM64 can fault on a valid PTE solely because the hardware Accessed
+         * bit is clear. Handle that before taking working-set locks; early
+         * boot can fault on the lock data itself.
+         */
+        TempPte = *PointerPte;
+        if ((TempPte.u.Hard.Valid == 1) && (TempPte.u.Hard.Accessed == 0))
+        {
+            TempPte.u.Hard.Accessed = 1;
+            *PointerPte = TempPte;
+            KeInvalidateTlbEntry(Address);
+            return STATUS_SUCCESS;
+        }
+#endif
+
         /* Acquire the working set lock */
         KeRaiseIrql(APC_LEVEL, &LockIrql);
         MiLockWorkingSet(CurrentThread, WorkingSet);
@@ -1998,6 +2046,15 @@ RetryKernel:
         TempPte = *PointerPte;
         if (TempPte.u.Hard.Valid == 1)
         {
+#if defined(_M_ARM64)
+            if (TempPte.u.Hard.Accessed == 0)
+            {
+                TempPte.u.Hard.Accessed = 1;
+                MI_UPDATE_VALID_PTE(PointerPte, TempPte);
+                KeInvalidateTlbEntry(Address);
+            }
+#endif
+
             /* Check if this was a write */
             if (MI_IS_WRITE_ACCESS(FaultCode))
             {
@@ -2009,6 +2066,13 @@ RetryKernel:
                 {
                     /* Case not yet handled */
                     ASSERT(!IsSessionAddress);
+
+#if defined(_M_ARM64)
+                    if (TrapInformation)
+                    {
+                        PKTRAP_FRAME TrapFrame = TrapInformation;
+                    }
+#endif
 
                     /* Crash with distinguished bugcheck code */
                     KeBugCheckEx(ATTEMPTED_WRITE_TO_READONLY_MEMORY,
@@ -2471,24 +2535,15 @@ UserFault:
         /* Is this a guard page? */
         if ((ProtectionCode & MM_PROTECT_SPECIAL) == MM_GUARDPAGE)
         {
-            /* The VAD protection cannot be MM_DECOMMIT and we don't yet
-             * support guard pages backed by a prototype PTE. Both cases
-             * used to ASSERT, but on a kernel built with
-             * FLG_DISABLE_DEBUG_PROMPTS the assertion raises and unwinds
-             * the working-set lock, which then bugchecks the next time
-             * something locks the address space. Fail the fault cleanly
-             * instead — drop the WS lock and return an error status, the
-             * same path the supported case takes. */
-            if (ProtectionCode == MM_DECOMMIT || ProtoPte != NULL)
-            {
-                MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
-                return STATUS_ACCESS_VIOLATION;
-            }
+            /* The VAD protection cannot be MM_DECOMMIT! */
+            ASSERT(ProtectionCode != MM_DECOMMIT);
 
             /* Remove the bit */
             TempPte.u.Soft.Protection = ProtectionCode & ~MM_GUARDPAGE;
             MI_WRITE_INVALID_PTE(PointerPte, TempPte);
 
+            /* Not supported */
+            ASSERT(ProtoPte == NULL);
 #if (NTDDI_VERSION < NTDDI_LONGHORN)
             ASSERT(CurrentThread->ApcNeeded == 0);
 #endif

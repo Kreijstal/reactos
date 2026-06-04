@@ -42,6 +42,13 @@ KxAcquireSpinLock(
 #if defined(_M_IX86) && DBG
         /* On x86 debug builds, we use a much slower but useful routine */
         Kii386SpinOnSpinLock(SpinLock, 5);
+#elif defined(_M_ARM64)
+        /* ARM64: use WFE for power-efficient spinning; unlock sends SEV */
+        while (*(volatile KSPIN_LOCK *)SpinLock & 1)
+        {
+            __asm__ __volatile__("yield" ::: "memory");
+            __asm__ __volatile__("wfe" ::: "memory");
+        }
 #else
         /* It's locked... spin until it's unlocked */
         while (*(volatile KSPIN_LOCK *)SpinLock & 1)
@@ -81,12 +88,6 @@ KxReleaseSpinLock(
     /* Make sure that the threads match */
     if (((KSPIN_LOCK)KeGetCurrentThread() | 1) != *SpinLock)
     {
-        DbgPrint("SPIN_LOCK_NOT_OWNED: lock=%p value=%p current=%p caller=%p\n",
-                 SpinLock,
-                 (PVOID)*SpinLock,
-                 KeGetCurrentThread(),
-                 _ReturnAddress());
-
         /* They don't, bugcheck */
         KeBugCheckEx(SPIN_LOCK_NOT_OWNED, (ULONG_PTR)SpinLock, 0, 0, 0);
     }
@@ -98,6 +99,10 @@ KxReleaseSpinLock(
     InterlockedAnd64((PLONG64)SpinLock, 0);
 #else
     InterlockedAnd((PLONG)SpinLock, 0);
+#endif
+#ifdef _M_ARM64
+    /* Wake any WFE-waiting cores */
+    __asm__ __volatile__("sev" ::: "memory");
 #endif
 #endif
 

@@ -822,6 +822,17 @@ Arm64AllocateKernelDataStructures(VOID)
                 (unsigned long long)map_size);
             return FALSE;
         }
+
+        if (!Arm64MapVirtualMemory(ARM64_PHYS_MAP_BASE | block_pa,
+                                   block_pa,
+                                   map_size,
+                                   map_attrs))
+        {
+            ERR("ARM64: Failed to map kernel data block physical alias (PA=0x%llx size=0x%llx)\n",
+                (unsigned long long)block_pa,
+                (unsigned long long)map_size);
+            return FALSE;
+        }
     }
 
     if (!Arm64EnsureSharedUserDataMapped())

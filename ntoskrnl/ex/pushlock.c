@@ -679,6 +679,9 @@ ExfAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
             WaitBlock->PushLock = PushLock;
 #endif
 
+            /* Set up the Wait Gate before publishing this wait block */
+            KeInitializeGate(&WaitBlock->WakeGate);
+
             /* Sanity check */
             ASSERT(NewValue.Waiting);
             ASSERT(NewValue.Locked);
@@ -701,9 +704,6 @@ ExfAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
                 /* Scan the Waiters and Wake PushLocks */
                 ExpOptimizePushLockList(PushLock, TempValue);
             }
-
-            /* Set up the Wait Gate */
-            KeInitializeGate(&WaitBlock->WakeGate);
 
 #ifdef CONFIG_SMP
             /* Now spin on the push lock if necessary */
@@ -850,6 +850,9 @@ ExfAcquirePushLockShared(PEX_PUSH_LOCK PushLock)
             WaitBlock->PushLock = PushLock;
 #endif
 
+            /* Set up the Wait Gate before publishing this wait block */
+            KeInitializeGate(&WaitBlock->WakeGate);
+
             /* Write the new value */
             NewValue.Ptr = InterlockedCompareExchangePointer(&PushLock->Ptr,
                                                              NewValue.Ptr,
@@ -870,9 +873,6 @@ ExfAcquirePushLockShared(PEX_PUSH_LOCK PushLock)
                 /* Scan the Waiters and Wake PushLocks */
                 ExpOptimizePushLockList(PushLock, OldValue);
             }
-
-            /* Set up the Wait Gate */
-            KeInitializeGate(&WaitBlock->WakeGate);
 
 #ifdef CONFIG_SMP
             /* Now spin on the push lock if necessary */

@@ -1964,6 +1964,32 @@ PUCHAR KdComPortInUse = NULL;
 #define GICC_IAR          0x00C
 #define GICC_EOIR         0x010
 
+#define HAL_ARM64_EARLY_PL011_BASE 0x09000000ULL
+#define HAL_ARM64_PL011_DR         0x000
+#define HAL_ARM64_PL011_FR         0x018
+#define HAL_ARM64_PL011_FR_TXFF    (1u << 5)
+
+static VOID
+HalpArm64EarlyTrace(_In_z_ PCSTR String)
+{
+    volatile ULONG *Dr = (volatile ULONG *)(ULONG_PTR)(HAL_ARM64_EARLY_PL011_BASE + HAL_ARM64_PL011_DR);
+    volatile ULONG *Fr = (volatile ULONG *)(ULONG_PTR)(HAL_ARM64_EARLY_PL011_BASE + HAL_ARM64_PL011_FR);
+
+    while (*String)
+    {
+        CHAR Ch = *String++;
+
+        if (Ch == '\n')
+        {
+            while ((*Fr & HAL_ARM64_PL011_FR_TXFF) != 0) { }
+            *Dr = '\r';
+        }
+
+        while ((*Fr & HAL_ARM64_PL011_FR_TXFF) != 0) { }
+        *Dr = Ch;
+    }
+}
+
 /* GICv3 Redistributor (SGI/PPI) registers */
 #define GICR_CTLR         0x000
 #define GICR_TYPER        0x008
@@ -2662,6 +2688,7 @@ HalpGicItsInitLpiTables(VOID)
 
 /* Forward declaration */
 static BOOLEAN HalpGicItsSendInvall(_In_ ULONG CollectionId);
+static VOID HalpGicItsMarkFailed(_In_z_ const CHAR *Reason);
 
 static VOID
 HalpGicItsEnableLpi(_In_ ULONG EventId)
@@ -2675,6 +2702,9 @@ HalpGicItsEnableLpi(_In_ ULONG EventId)
                 EventId, HalpGicLpiConfig, HalpGicLpiCount);
         return;
     }
+
+    if (!HalpGicItsEnabled || HalpGicItsInitFailed)
+        return;
 
     LpiNum = HAL_ARM64_LPI_BASE + EventId;
     DPRINT1("[arm64][ITS] HalpGicItsEnableLpi: Enabling LPI %lu (EventId=%lu)\n", LpiNum, EventId);
@@ -2826,6 +2856,10 @@ HalpGicItsPostCommand(_In_reads_(4) const UINT64 *Cmd)
     ULONG Index;
     ULONG Spins;
     ULONGLONG Target;
+    ULONGLONG PrevRead;
+    ULONGLONG ToIdx;
+    ULONGLONG LinearIdx;
+    ULONGLONG QueueBytes;
     KIRQL OldIrql;
     static ULONG CommandCount = 0;
 
@@ -2834,6 +2868,9 @@ HalpGicItsPostCommand(_In_reads_(4) const UINT64 *Cmd)
         DPRINT1("[arm64][ITS] PostCommand: no queue\n");
         return FALSE;
     }
+
+    if (HalpGicItsInitFailed)
+        return FALSE;
 
     KeAcquireSpinLock(&HalpGicItsLock, &OldIrql);
 
@@ -2872,6 +2909,21 @@ HalpGicItsPostCommand(_In_reads_(4) const UINT64 *Cmd)
                     (ULONGLONG)HalpGicItsCmdWrite * HAL_ARM64_ITS_CMD_ENTRY_SIZE);
 
     Target = (ULONGLONG)HalpGicItsCmdWrite * HAL_ARM64_ITS_CMD_ENTRY_SIZE;
+
+    /*
+     * Sample CREADR while the lock is still held: at this instant the read
+     * pointer cannot have advanced past our just-written command, so it is a
+     * valid baseline for the completion wait below. The lock is dropped before
+     * that wait, so a concurrent poster can bump CWRITER and let the ITS run
+     * CREADR *past* our Target before we first sample it. A plain
+     * "CREADR == Target" test would then never match and wrongly time out,
+     * permanently disabling MSI for the whole machine. Track linearized
+     * read-pointer progress instead (cf. Linux its_wait_for_range_completion).
+     */
+    PrevRead = HalpMmioRead64(HalpGicItsVa, GITS_CREADR) & ~1ULL;
+    QueueBytes = (ULONGLONG)HalpGicItsCmdEntries * HAL_ARM64_ITS_CMD_ENTRY_SIZE;
+    ToIdx = (Target < PrevRead) ? (Target + QueueBytes) : Target;
+    LinearIdx = PrevRead;
     KeReleaseSpinLock(&HalpGicItsLock, OldIrql);
 
     CommandCount++;
@@ -2881,7 +2933,27 @@ HalpGicItsPostCommand(_In_reads_(4) const UINT64 *Cmd)
     for (Spins = 1000000; Spins != 0; --Spins)
     {
         ULONGLONG ReadOffset = HalpMmioRead64(HalpGicItsVa, GITS_CREADR);
-        if (ReadOffset == Target)
+        ULONGLONG Delta;
+        if (ReadOffset & 1)
+        {
+            DPRINT1("[arm64][ITS] PostCommand #%u: stalled immediately, CREADR=0x%llx Target=0x%llx\n",
+                    CommandCount, ReadOffset, Target);
+            HalpMmioWrite64(HalpGicItsVa, GITS_CREADR, ReadOffset);
+            HalpGicItsMarkFailed("command queue stalled");
+            return FALSE;
+        }
+
+        /*
+         * Accumulate read-pointer progress (accounting for queue wrap) instead
+         * of testing for exact equality, so a CREADR that has already advanced
+         * past our Target - e.g. because a concurrent poster's command ran in
+         * between - still counts as completion rather than timing out.
+         */
+        Delta = (ReadOffset < PrevRead) ? (ReadOffset - PrevRead + QueueBytes)
+                                        : (ReadOffset - PrevRead);
+        LinearIdx += Delta;
+        PrevRead = ReadOffset;
+        if (LinearIdx >= ToIdx)
         {
             DPRINT1("[arm64][ITS] PostCommand #%u: completed\n", CommandCount);
             return TRUE;
@@ -2903,6 +2975,7 @@ HalpGicItsPostCommand(_In_reads_(4) const UINT64 *Cmd)
             DPRINT1("[arm64][ITS] PostCommand: Clearing stall by writing CREADR=0x%llx\n", ReadOffset);
             HalpMmioWrite64(HalpGicItsVa, GITS_CREADR, ReadOffset);
         }
+        HalpGicItsMarkFailed("command completion timed out");
     }
     return FALSE;
 }
@@ -2917,6 +2990,15 @@ HalpGicItsSendMapd(
 
     HalpGicItsBuildMapdCmd(Cmd, DeviceId, IttEntries, IttPa, TRUE);
     return HalpGicItsPostCommand(Cmd);
+}
+
+static VOID
+HalpGicItsMarkFailed(_In_z_ const CHAR *Reason)
+{
+    DPRINT1("[arm64][ITS] disabling ITS after command failure: %s\n", Reason);
+    HalpGicItsEnabled = FALSE;
+    HalpGicItsInitFailed = TRUE;
+    InterlockedExchange(&HalpGicItsInitState, -1);
 }
 
 static BOOLEAN
@@ -3328,7 +3410,7 @@ BOOLEAN
 NTAPI
 HalIsPciMsiSupported(VOID)
 {
-    return (HalpGicItsPresent || HalpGicMsiPresent);
+    return ((HalpGicItsPresent && !HalpGicItsInitFailed) || HalpGicMsiPresent);
 }
 
 BOOLEAN
@@ -3519,7 +3601,7 @@ HalGetMsiVectorRange(
     if (!BaseVector || !VectorCount)
         return FALSE;
 
-    if (HalpGicItsPresent && !HalpGicItsEnabled)
+    if (HalpGicItsPresent && !HalpGicItsEnabled && !HalpGicItsInitFailed)
     {
         HalpGicItsInitialize();
     }
@@ -3554,7 +3636,7 @@ HalQueryPciMsiSupport(
 {
     UNREFERENCED_PARAMETER(Bus);
 
-    if (Supported) *Supported = (HalpGicItsPresent || HalpGicMsiPresent);
+    if (Supported) *Supported = ((HalpGicItsPresent && !HalpGicItsInitFailed) || HalpGicMsiPresent);
     if (OscStatusFlags) *OscStatusFlags = 0;
     if (OscControlGranted) *OscControlGranted = 0;
     if (OscMaskedControls) *OscMaskedControls = 0;
@@ -3595,7 +3677,7 @@ HalQueryPciMsiSupport(
         *EffectiveSegment = EffSeg;
     }
 
-    return (HalpGicItsPresent || HalpGicMsiPresent);
+    return ((HalpGicItsPresent && !HalpGicItsInitFailed) || HalpGicMsiPresent);
 }
 
 static __inline PVOID HalpPhysToKseg0(ULONGLONG Physical)
@@ -4028,19 +4110,25 @@ HalpArm64ProgramGicTrigger(
      */
     if (IntId < 32)
     {
-        ULONG Cpu = KeGetCurrentProcessorNumber();
-        ULONG_PTR SgiBase = HalpGicrSgiBase(Cpu);
-
-        if (SgiBase == 0)
+        if (HalpGicUseSysRegs)
         {
-            DPRINT1("[arm64] PPI %lu: GICR SGI base unavailable for CPU %lu\n", IntId, Cpu);
-            return;
+            ULONG Cpu = KeGetCurrentProcessorNumber();
+            ULONG_PTR SgiBase = HalpGicrSgiBase(Cpu);
+
+            if (SgiBase == 0)
+            {
+                DPRINT1("[arm64] PPI %lu: GICR SGI base unavailable for CPU %lu\n", IntId, Cpu);
+                return;
+            }
+
+            RegPtr = HalpMmio(SgiBase, GICR_ICFGR1);
+        }
+        else
+        {
+            RegPtr = HalpMmio((ULONG_PTR)HalpGicdBase, GICD_ICFGR + (IntId / 16) * 4);
         }
 
-        /* Calculate bit position within GICR_ICFGR1 */
-        BitPos = ((IntId - 16) % 16) * 2;
-
-        RegPtr = HalpMmio(SgiBase, GICR_ICFGR1);
+        BitPos = (IntId % 16) * 2;
         OldVal = *RegPtr;
 
         /* Clear the 2-bit field and set new value */
@@ -4056,7 +4144,7 @@ HalpArm64ProgramGicTrigger(
         /* Ensure the write completes before returning */
         __asm__ __volatile__("dsb sy" ::: "memory");
 
-        DPRINT("[arm64] PPI %lu: GICR_ICFGR1 0x%08lx -> 0x%08lx (%s)\n",
+        DPRINT("[arm64] PPI %lu: ICFGR1 0x%08lx -> 0x%08lx (%s)\n",
                IntId, OldVal, NewVal, EdgeTriggered ? "edge" : "level");
         return;
     }
@@ -5117,6 +5205,13 @@ HalpArm64SendSgi(
     __asm__ __volatile__("dsb sy; sev" ::: "memory");
 }
 
+/* HALDISPATCH HalGetDmaAdapter factory; wired up in HalInitSystem (see below). */
+static PDMA_ADAPTER NTAPI
+HalpArm64GetDmaAdapter(
+    _In_ PVOID Context,
+    _In_ PDEVICE_DESCRIPTION DeviceDescription,
+    _Out_ PULONG NumberOfMapRegisters);
+
 BOOLEAN
 NTAPI
 HalInitSystem(
@@ -5526,6 +5621,16 @@ HalInitSystem(
     HalInitPnpDriver = HaliInitPnpDriver;
     HalQuerySystemInformation = HaliQuerySystemInformation;
     HalSetSystemInformation = HaliSetSystemInformation;
+
+    /*
+     * Wire up the DMA-adapter factory. The HALDISPATCH HalGetDmaAdapter entry
+     * is left NULL by the kernel HAL stub (halstub.c); halx86 sets it in dma.c
+     * but halarm64 never did. Without it, IoGetDmaAdapter's fallback for
+     * non-PCI devices (e.g. the Raspberry Pi 5 on-chip SD host, whose parent
+     * bus offers no GUID_BUS_INTERFACE_STANDARD) calls through a NULL pointer
+     * and bugchecks 0x7E.
+     */
+    HalGetDmaAdapter = HalpArm64GetDmaAdapter;
 
     /*
      * CRITICAL: Lower IRQL back to the original level before returning.
@@ -6133,7 +6238,7 @@ HalEnableSystemInterrupt(
     ULONG prioShift;
     ULONG prioVal;
     UCHAR priority;
-    UNREFERENCED_PARAMETER(InterruptMode);
+    BOOLEAN EdgeTriggered;
 
     if (!HalpGicPhase0Complete)
     {
@@ -6180,6 +6285,7 @@ HalEnableSystemInterrupt(
 
     /* Calculate GIC priority from IRQL */
     priority = HalpIrqlToGicPriority(Irql);
+    EdgeTriggered = (InterruptMode == Latched);
 
     if (HalpGicUseSysRegs && Vector < 32)
     {
@@ -6231,6 +6337,12 @@ HalEnableSystemInterrupt(
 
         DPRINT1("[arm64][LPI] Enabling LPI %lu (index %lu)\n", Vector, LpiIndex);
 
+        if (!HalpGicItsEnabled || HalpGicItsInitFailed)
+        {
+            DPRINT1("[arm64][LPI] ITS unavailable, not enabling LPI %lu\n", Vector);
+            return FALSE;
+        }
+
         if (!HalpGicLpiConfig || LpiIndex >= HalpGicLpiCount)
         {
             DPRINT1("[arm64][LPI] ERROR: Invalid LPI %lu (index %lu >= count %lu)\n",
@@ -6259,6 +6371,7 @@ HalEnableSystemInterrupt(
     else if (Vector < 1020)
     {
         /* SPI (32-1019): use Distributor registers */
+        HalpArm64ProgramGicTrigger(Vector, EdgeTriggered);
 
         /* Set priority for this interrupt */
         prioReg = GICD_IPRIORITYR + (Vector & ~3);
@@ -7251,6 +7364,25 @@ HalGetAdapter(
     }
 
     return &HalpArm64DmaAdapter;
+}
+
+/*
+ * HalpArm64GetDmaAdapter - HALDISPATCH HalGetDmaAdapter implementation.
+ *
+ * Thin wrapper over HalGetAdapter (mirrors halx86 HalpGetDmaAdapter) so that
+ * IoGetDmaAdapter returns a valid PDMA_ADAPTER for devices whose parent bus
+ * provides no GUID_BUS_INTERFACE_STANDARD - e.g. HAL-enumerated platform
+ * devices such as the Raspberry Pi 5 on-chip SD host controller. Returns NULL
+ * safely when HalGetAdapter fails (DmaHeader is the first ADAPTER_OBJECT field).
+ */
+static PDMA_ADAPTER NTAPI
+HalpArm64GetDmaAdapter(
+    _In_ PVOID Context,
+    _In_ PDEVICE_DESCRIPTION DeviceDescription,
+    _Out_ PULONG NumberOfMapRegisters)
+{
+    UNREFERENCED_PARAMETER(Context);
+    return &HalGetAdapter(DeviceDescription, NumberOfMapRegisters)->DmaHeader;
 }
 
 /*

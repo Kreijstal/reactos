@@ -25,8 +25,8 @@ else()
 endif()
 
 set(CMAKE_ASM_COMPILER_ID "GNU")
-set(CMAKE_C_COMPILER_TARGET aarch64-w64-mingw32)
-set(CMAKE_CXX_COMPILER_TARGET aarch64-w64-mingw32)
+set(CMAKE_C_COMPILER_TARGET aarch64-w64-mingw32 CACHE STRING "C compiler target triple")
+set(CMAKE_CXX_COMPILER_TARGET aarch64-w64-mingw32 CACHE STRING "C++ compiler target triple")
 
 get_filename_component(_LLVM_MINGW_BIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
 get_filename_component(_LLVM_MINGW_ROOT_DIR "${_LLVM_MINGW_BIN_DIR}" DIRECTORY)

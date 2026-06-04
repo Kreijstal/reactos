@@ -4,6 +4,7 @@
  */
 
 #include <ntoskrnl.h>
+#include <reactos/arm64/early_uart.h>
 #define NDEBUG
 #include <debug.h>
 

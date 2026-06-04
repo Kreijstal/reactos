@@ -15,6 +15,10 @@
 #define LQ_WAIT     1
 #define LQ_OWN      2
 
+#if defined(_M_ARM64)
+static LONG KiArm64QueuedSpinTraceBudget = 48;
+#endif
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 #if 0
@@ -101,6 +105,40 @@ VOID
 FASTCALL
 KeAcquireQueuedSpinLockAtDpcLevel(_Inout_ PKSPIN_LOCK_QUEUE LockHandle)
 {
+#if defined(_M_ARM64)
+    PKPRCB Prcb;
+    LONG_PTR LockIndex = -1;
+    PKSPIN_LOCK Lock = NULL;
+
+    Prcb = KeGetCurrentPrcb();
+    if (LockHandle != NULL)
+    {
+        Lock = LockHandle->Lock;
+        if ((Prcb != NULL) &&
+            (LockHandle >= &Prcb->LockQueue[0]) &&
+            (LockHandle < &Prcb->LockQueue[LockQueueMaximumLock]))
+        {
+            LockIndex = LockHandle - &Prcb->LockQueue[0];
+        }
+    }
+
+    if (KiArm64QueuedSpinTraceBudget > 0)
+    {
+        LONG OldBudget = InterlockedDecrement(&KiArm64QueuedSpinTraceBudget);
+        if (OldBudget >= 0)
+        {
+            DPRINT1("[arm64][QSL] acquire-at-dpc handle=%p lock=%p index=%Id irql=%u prcb=%p thread=%p caller=%p\n",
+                    LockHandle,
+                    Lock,
+                    LockIndex,
+                    KeGetCurrentIrql(),
+                    Prcb,
+                    KeGetCurrentThread(),
+                    _ReturnAddress());
+        }
+    }
+#endif
+
 #if defined(CONFIG_SMP) || DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
@@ -116,6 +154,16 @@ KeAcquireQueuedSpinLockAtDpcLevel(_Inout_ PKSPIN_LOCK_QUEUE LockHandle)
 
     /* Do the inlined function */
     KxAcquireSpinLock(LockHandle->Lock);
+
+    if (LockIndex == LockQueuePfnLock)
+    {
+        ULONG CpuIndex = KeGetCurrentProcessorNumber();
+        if (CpuIndex < MAXIMUM_PROCESSORS)
+        {
+            extern volatile LONG MiArm64PfnLockDepth[MAXIMUM_PROCESSORS];
+            InterlockedIncrement(&MiArm64PfnLockDepth[CpuIndex]);
+        }
+    }
 }
 
 _IRQL_requires_min_(DISPATCH_LEVEL)
@@ -125,6 +173,30 @@ VOID
 FASTCALL
 KeReleaseQueuedSpinLockFromDpcLevel(_Inout_ PKSPIN_LOCK_QUEUE LockHandle)
 {
+#if defined(_M_ARM64)
+    PKPRCB Prcb;
+    LONG_PTR LockIndex = -1;
+
+    Prcb = KeGetCurrentPrcb();
+    if ((LockHandle != NULL) &&
+        (Prcb != NULL) &&
+        (LockHandle >= &Prcb->LockQueue[0]) &&
+        (LockHandle < &Prcb->LockQueue[LockQueueMaximumLock]))
+    {
+        LockIndex = LockHandle - &Prcb->LockQueue[0];
+    }
+
+    if (LockIndex == LockQueuePfnLock)
+    {
+        ULONG CpuIndex = KeGetCurrentProcessorNumber();
+        if (CpuIndex < MAXIMUM_PROCESSORS)
+        {
+            extern volatile LONG MiArm64PfnLockDepth[MAXIMUM_PROCESSORS];
+            InterlockedDecrement(&MiArm64PfnLockDepth[CpuIndex]);
+        }
+    }
+#endif
+
 #if defined(CONFIG_SMP) || DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
@@ -197,6 +269,7 @@ VOID
 NTAPI
 KeAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
+#if DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
@@ -207,6 +280,7 @@ KeAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxAcquireSpinLock(SpinLock);
@@ -220,6 +294,7 @@ VOID
 NTAPI
 KeReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
+#if DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
@@ -230,6 +305,7 @@ KeReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxReleaseSpinLock(SpinLock);
@@ -242,6 +318,7 @@ VOID
 FASTCALL
 KefAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
+#if DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
@@ -252,6 +329,7 @@ KefAcquireSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxAcquireSpinLock(SpinLock);
@@ -264,6 +342,7 @@ VOID
 FASTCALL
 KefReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
 {
+#if DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
@@ -274,6 +353,7 @@ KefReleaseSpinLockFromDpcLevel(IN PKSPIN_LOCK SpinLock)
                      0,
                      0);
     }
+#endif
 
     /* Do the inlined function */
     KxReleaseSpinLock(SpinLock);
@@ -370,6 +450,7 @@ KeAcquireInStackQueuedSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock,
 #if 0
     KeAcquireQueuedSpinLockAtDpcLevel(LockHandle->LockQueue.Next);
 #else
+#if DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
@@ -380,6 +461,7 @@ KeAcquireInStackQueuedSpinLockAtDpcLevel(IN PKSPIN_LOCK SpinLock,
                      0,
                      0);
     }
+#endif
 #endif
 #endif
 
@@ -399,6 +481,7 @@ KeReleaseInStackQueuedSpinLockFromDpcLevel(IN PKLOCK_QUEUE_HANDLE LockHandle)
     /* Call the internal function */
     KeReleaseQueuedSpinLockFromDpcLevel(LockHandle->LockQueue.Next);
 #else
+#if DBG
     /* Make sure we are at DPC or above! */
     if (KeGetCurrentIrql() < DISPATCH_LEVEL)
     {
@@ -409,6 +492,7 @@ KeReleaseInStackQueuedSpinLockFromDpcLevel(IN PKLOCK_QUEUE_HANDLE LockHandle)
                      0,
                      0);
     }
+#endif
 #endif
 #endif
 

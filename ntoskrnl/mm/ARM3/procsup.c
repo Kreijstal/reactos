@@ -9,6 +9,9 @@
 /* INCLUDES *******************************************************************/
 
 #include <ntoskrnl.h>
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
 #define NDEBUG
 #include <debug.h>
 
@@ -16,7 +19,7 @@
 #include <mm/ARM3/miarm.h>
 
 /* DirectoryTableBase compatibility: single value at Vista+, array pre-Vista */
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) && !defined(_M_ARM64)
 #define DTB0 DirectoryTableBase
 #define DTB1 Unused0
 #else
@@ -45,13 +48,6 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     ULONG_PTR HighestAddress, RandomBase;
     ULONG AlignedSize;
     LARGE_INTEGER CurrentTime;
-#ifdef _WIN64
-    BOOLEAN IsWow64;
-#endif
-    BOOLEAN IsPeb;
-
-    ASSERT(sizeof(TEB) != sizeof(PEB));
-    IsPeb = (sizeof(PEB) == Size);
 
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
@@ -83,51 +79,23 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     Vad->ControlArea = NULL; // For Memory-Area hack
     Vad->FirstPrototypePte = NULL;
 
-    HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
-
-#ifdef _M_AMD64
-    IsWow64 = FALSE;
-
-    if (Process->SectionBaseAddress != NULL)
-    {
-        if (RtlImageNtHeader(Process->SectionBaseAddress)->FileHeader.Machine
-             != IMAGE_FILE_MACHINE_AMD64)
-        {
-            IsWow64 = TRUE;
-        }
-    }
-
-    if (IsWow64)
-    {
-        /* Make sure the structure resides in the 32-bit address space */
-        HighestAddress &= ROUND_DOWN(0xFFFFFFFFULL, PAGE_SIZE);
-    }
-#endif
-
     /* Check if this is a PEB creation */
-    if (IsPeb)
+    ASSERT(sizeof(TEB) != sizeof(PEB));
+    if (Size == sizeof(PEB))
     {
-#ifdef _WIN64
-        /* If this is a WOW64 process, allocate enough space for the 32 bit PEB */
-        if (IsWow64)
-        {
-            Size += ROUND_TO_PAGES(sizeof(PEB32));
-        }
-#endif
-
         /* Create a random value to select one page in a 64k region */
         KeQueryTickCount(&CurrentTime);
         CurrentTime.LowPart &= (_64K / PAGE_SIZE) - 1;
 
         /* Calculate a random base address */
-        RandomBase = HighestAddress + 1;
+        RandomBase = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1;
         RandomBase -= CurrentTime.LowPart << PAGE_SHIFT;
 
         /* Make sure the base address is not too high */
         AlignedSize = ROUND_TO_PAGES(Size);
-        if ((RandomBase + AlignedSize) > HighestAddress + 1)
+        if ((RandomBase + AlignedSize) > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1)
         {
-            RandomBase = HighestAddress + 1 - AlignedSize;
+            RandomBase = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS + 1 - AlignedSize;
         }
 
         /* Calculate the highest allowed address */
@@ -135,13 +103,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
     }
     else
     {
-#ifdef _WIN64
-        /* If this is a WOW64 process, allocate enough space for the 32 bit TEB */
-        if (IsWow64)
-        {
-            Size += ROUND_TO_PAGES(sizeof(TEB32));
-        }
-#endif
+        HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
     }
 
     *BaseAddress = 0;
@@ -149,7 +111,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
                            BaseAddress,
                            Size,
                            HighestAddress,
-                           MM_VIRTMEM_GRANULARITY,
+                           PAGE_SIZE,
                            MEM_TOP_DOWN);
     if (!NT_SUCCESS(Status))
     {
@@ -158,12 +120,6 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
         goto FailPath;
     }
 
-#ifdef _WIN64
-    if (IsPeb && IsWow64)
-    {
-        Process->Wow64Process = (PVOID)TRUE;
-    }
-#endif
 
     /* Success */
     return STATUS_SUCCESS;
@@ -188,31 +144,11 @@ MmDeleteTeb(IN PEPROCESS Process,
     /* TEB is one page */
     TebEnd = (ULONG_PTR)Teb + ROUND_TO_PAGES(sizeof(TEB)) - 1;
 
-#ifdef _WIN64
-    /* If this is a WOW64 process, the TEB is followed by a TEB32 */
-    if (Process->Wow64Process)
-    {
-        TebEnd += ROUND_TO_PAGES(sizeof(TEB32));
-    }
-#endif
-
     /* Attach to the process */
     KeAttachProcess(&Process->Pcb);
 
     /* Lock the process address space */
-    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    /*
-     * Vista+ converted AddressCreationLock from KGUARDED_MUTEX to EX_PUSH_LOCK.
-     * KeAcquireGuardedMutex implicitly entered a guarded region, so APCs were
-     * disabled; ExAcquirePushLockExclusive does NOT, so downstream callers such
-     * as MiLockProcessWorkingSetUnsafe would see APCs still enabled. Enter a
-     * guarded region explicitly to match the Win7 contract.
-     */
-    KeEnterGuardedRegion();
-    ExAcquirePushLockExclusive(&Process->AddressCreationLock);
-#else
-    KeAcquireGuardedMutex(&Process->AddressCreationLock);
-#endif
+    MmLockAddressSpace(&Process->Vm);
 
     /* Find the VAD, make sure it's a TEB VAD */
     Vad = MiLocateAddress(Teb);
@@ -253,12 +189,7 @@ MmDeleteTeb(IN PEPROCESS Process,
     }
 
     /* Release the address space lock */
-    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-    ExReleasePushLockExclusive(&Process->AddressCreationLock);
-    KeLeaveGuardedRegion();
-#else
-    KeReleaseGuardedMutex(&Process->AddressCreationLock);
-#endif
+    MmUnlockAddressSpace(&Process->Vm);
 
     /* Detach */
     KeDetachProcess();
@@ -550,11 +481,7 @@ MmGrowKernelStackEx(IN PVOID StackPointer,
     //
     // Set the new limit
     //
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-    Thread->StackLimit = (volatile PVOID)MiPteToAddress(NewLimitPte);
-#else
     Thread->StackLimit = (ULONG_PTR)MiPteToAddress(NewLimitPte);
-#endif
     return STATUS_SUCCESS;
 }
 
@@ -1053,7 +980,7 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     Process->AddressSpaceInitialized = 2;
 
     /* Initialize the Addresss Space lock */
-    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ExInitializePushLock(&Process->AddressCreationLock);
 #else
     KeInitializeGuardedMutex(&Process->AddressCreationLock);
@@ -1065,6 +992,11 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
     Process->VadRoot.BalancedRoot.u1.Parent = &Process->VadRoot.BalancedRoot;
 
     /* Lock our working set */
+#if defined(_M_ARM64)
+    {
+        PETHREAD CurrentThread = PsGetCurrentThread();
+    }
+#endif
     MiLockProcessWorkingSet(Process, PsGetCurrentThread());
 
     /* Lock PFN database */
@@ -1222,7 +1154,7 @@ MmInitializeHandBuiltProcess(IN PEPROCESS Process,
     DirectoryTableBase[1] = PsGetCurrentProcess()->Pcb.DTB1;
 
     /* Initialize the Addresss Space */
-    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ExInitializePushLock(&Process->AddressCreationLock);
 #else
     KeInitializeGuardedMutex(&Process->AddressCreationLock);
@@ -1270,7 +1202,7 @@ MmCreateProcessAddressSpace(IN ULONG MinWs,
     ASSERT(Process->WorkingSetPage == 0);
 
     /* Choose a process color */
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     Process->Spare7 =
 #else
     Process->NextPageColor =
@@ -1467,7 +1399,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
     KIRQL OldIrql;
     PFN_NUMBER PageFrameIndex;
 
-#ifndef _M_AMD64
+#if !defined(_M_AMD64) && !defined(_M_ARM64)
     OldIrql = MiAcquireExpansionLock();
     RemoveEntryList(&Process->MmProcessLinks);
     MiReleaseExpansionLock(OldIrql);
@@ -1495,9 +1427,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
         MI_SET_PFN_DELETED(Pfn1);
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MiDecrementShareCount(Pfn1, Process->WorkingSetPage);
-        /* Outstanding writeback (WIP) or MmProbeAndLockPages-style I/O holds
-         * leave ref>0 here; MI_PFN_DELETED routes the deferred free. */
-        ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
+        ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
 
         /* Now map hyperspace and its page table */
         PageFrameIndex = Process->Pcb.DTB1 >> PAGE_SHIFT;
@@ -1508,7 +1438,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
         MI_SET_PFN_DELETED(Pfn1);
         MiDecrementShareCount(Pfn2, Pfn1->u4.PteFrame);
         MiDecrementShareCount(Pfn1, PageFrameIndex);
-        ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
+        ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
 
         /* Finally, nuke the PDE itself */
         PageFrameIndex = Process->Pcb.DTB0 >> PAGE_SHIFT;
@@ -1518,7 +1448,7 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
         MiDecrementShareCount(Pfn1, PageFrameIndex);
 
         /* Page table is now dead. Bye bye... */
-        ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
+        ASSERT((Pfn1->u3.e2.ReferenceCount == 0) || (Pfn1->u3.e1.WriteInProgress));
     }
     else
     {

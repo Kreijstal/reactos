@@ -299,6 +299,7 @@ MmAllocateSpecialPool(SIZE_T NumberOfBytes, ULONG Tag, POOL_TYPE PoolType, ULONG
     {
         /* Release the PFN database lock */
         MiReleasePfnLock(Irql);
+        DPRINT1("Special pool: MmAvailablePages 0x%x is too small\n", MmAvailablePages);
         return NULL;
     }
 

@@ -1084,6 +1084,19 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     Timer->Header.Hand = (UCHAR)*Hand;
 }
 
+FORCEINLINE
+VOID
+KiSetNextWaitBlock(
+    _Inout_ PKWAIT_BLOCK WaitBlock,
+    _In_ PKWAIT_BLOCK NextWaitBlock)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    WaitBlock->SparePtr = NextWaitBlock;
+#else
+    WaitBlock->NextWaitBlock = NextWaitBlock;
+#endif
+}
+
 #define KxDelayThreadWait()                                                 \
                                                                             \
     /* Setup the Wait Block */                                              \
@@ -1281,11 +1294,27 @@ KxUnwaitThread(IN DISPATCHER_HEADER *Object,
     WaitEntry = WaitList->Flink;
     do
     {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if ((ULONG_PTR)WaitEntry < 0xFFFF000000000000ULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
+
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
 
         /* Get the waiting thread */
         WaitThread = WaitBlock->Thread;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if (WaitThread == NULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
 
         /* Check the current Wait Mode */
         if (WaitBlock->WaitType == WaitAny)
@@ -1325,11 +1354,27 @@ KxUnwaitThreadForEvent(IN PKEVENT Event,
     WaitEntry = WaitList->Flink;
     do
     {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if ((ULONG_PTR)WaitEntry < 0xFFFF000000000000ULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
+
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
 
         /* Get the waiting thread */
         WaitThread = WaitBlock->Thread;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if (WaitThread == NULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
 
         /* Check the current Wait Mode */
         if (WaitBlock->WaitType == WaitAny)

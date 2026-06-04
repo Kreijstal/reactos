@@ -69,7 +69,7 @@ KiUnlinkThread(IN PKTHREAD Thread,
         RemoveEntryList(&WaitBlock->WaitListEntry);
 
         /* Go to the next one */
-        WaitBlock = KiGetNextWaitBlock(WaitBlock);
+        WaitBlock = WaitBlock->NextWaitBlock;
     } while (WaitBlock != Thread->WaitBlockList);
 
     /* Remove the thread from the wait list! */
@@ -231,6 +231,13 @@ KiExitDispatcher(IN KIRQL OldIrql)
     /* Get the next and current threads now */
     NextThread = Prcb->NextThread;
     Thread = Prcb->CurrentThread;
+
+#if defined(_M_ARM64)
+    if ((Thread == Prcb->IdleThread) && (Thread->State == Initialized))
+    {
+        Thread->State = Running;
+    }
+#endif
 
     /* Set current thread's swap busy to true */
     KiSetThreadSwapBusy(Thread);
@@ -762,7 +769,7 @@ KeWaitForMultipleObjects(IN ULONG Count,
                         KiSatisfyObjectWait(CurrentObject, Thread);
 
                         /* Go to the next block */
-                        WaitBlock = KiGetNextWaitBlock(WaitBlock);
+                        WaitBlock = WaitBlock->NextWaitBlock;
                     } while(WaitBlock != WaitBlockArray);
 
                     /* Set the wait status and get out */
@@ -791,15 +798,12 @@ KeWaitForMultipleObjects(IN ULONG Count,
                 /* It didn't, so activate it */
                 Timer->Header.Inserted = TRUE;
 
-                /* Link the timeout block into the wait chain and timer */
-                KiSetNextWaitBlock(WaitBlock, TimerBlock);
-                Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;
-                Timer->Header.WaitListHead.Blink = &TimerBlock->WaitListEntry;
+                /* Link the wait blocks */
+                WaitBlock->NextWaitBlock = TimerBlock;
             }
 
             /* Insert into Object's Wait List*/
             WaitBlock = WaitBlockArray;
-            Index = 0;
             do
             {
                 /* Get the Current Object */
@@ -810,9 +814,8 @@ KeWaitForMultipleObjects(IN ULONG Count,
                                &WaitBlock->WaitListEntry);
 
                 /* Move to the next Wait Block */
-                WaitBlock = KiGetNextWaitBlock(WaitBlock);
-                Index++;
-            } while (Index < Count);
+                WaitBlock = WaitBlock->NextWaitBlock;
+            } while (WaitBlock != WaitBlockArray);
 
             /* Handle Kernel Queues */
             if (Thread->Queue) KiActivateWaiterQueue(Thread->Queue);

@@ -1595,7 +1595,7 @@ typedef struct _KTHREAD
             UCHAR WaitBlockFill6[2 * sizeof(KWAIT_BLOCK) + FIELD_OFFSET(KWAIT_BLOCK, SpareLong)];
             ULONG WaitTime;
         };
-#if (NTDDI_VERSION >= NTDDI_WIN7) // [
+#if (NTDDI_VERSION >= NTDDI_VISTA) // [
         struct
         {
             UCHAR WaitBlockFill7[168];
@@ -1605,7 +1605,7 @@ typedef struct _KTHREAD
 #endif // ]
         struct
         {
-#if (NTDDI_VERSION >= NTDDI_WIN7) // [
+#if (NTDDI_VERSION >= NTDDI_VISTA) // [
             UCHAR WaitBlockFill8[188];
 #else // ][
             UCHAR WaitBlockFill7[3 * sizeof(KWAIT_BLOCK) + FIELD_OFFSET(KWAIT_BLOCK, SpareLong)];
@@ -1718,7 +1718,11 @@ typedef struct _KTHREAD
 #endif // ]
 #if defined(_M_IX86) // [
 #if (NTDDI_VERSION >= NTDDI_LONGHORN) // [
-    UCHAR OtherPlatformFill;
+    union
+    {
+        UCHAR OtherPlatformFill;
+        UCHAR Iopl;
+    };
 #else // ][
     UCHAR Iopl;
 #endif // ]
@@ -2069,7 +2073,6 @@ typedef struct _KTHREAD
     union
     {
         ULONG NextProcessor;
-        ULONG DeferredProcessor; /* Win8+ folded the deferred CPU into NextProcessor's slot */
         struct
         {
             ULONG NextProcessorNumber : 31;
@@ -2259,7 +2262,10 @@ typedef struct _KPROCESS
 {
     DISPATCHER_HEADER Header;
     LIST_ENTRY ProfileListHead;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#if defined(_M_ARM64) || defined(__aarch64__)
+    ULONG_PTR DirectoryTableBase[2];
+    ULONG_PTR Unused0;
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
     ULONG_PTR DirectoryTableBase;
     ULONG_PTR Unused0;
 #else

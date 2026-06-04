@@ -56,6 +56,18 @@ Arm64JumpToKernel:
 
     /* Mask interrupts during the hand-off */
     msr daifset, #0xF
+    isb
+
+    /*
+     * UEFI may leave the architectural timers enabled or pending. Mask both
+     * EL0-visible physical and virtual timer interrupt outputs before handing
+     * control to the kernel; the kernel enables its chosen timer later after
+     * GIC/HAL setup.
+     */
+    mov x0, #2
+    msr cntp_ctl_el0, x0
+    msr cntv_ctl_el0, x0
+    isb
 
     /* Flush caches to ensure kernel sees consistent memory */
     bl Arm64CompleteCacheMaintenance

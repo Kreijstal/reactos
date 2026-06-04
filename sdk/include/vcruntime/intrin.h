@@ -80,14 +80,6 @@ _Check_return_ unsigned short __cdecl _byteswap_ushort(_In_ unsigned short);
 void __cdecl _disable(void);
 void __cdecl _enable(void);
 
-#if defined(_M_ARM64) && !defined(_MSC_VER)
-static __inline void __break(unsigned int _Code)
-{
-    (void)_Code;
-    __asm__ __volatile__("brk #0xf001");
-}
-#endif
-
 unsigned char _interlockedbittestandreset(long volatile *, long);
 unsigned char _interlockedbittestandset(long volatile *, long);
 _Check_return_ unsigned long __cdecl _lrotl(_In_ unsigned long, _In_ int);

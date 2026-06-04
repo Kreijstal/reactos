@@ -63,15 +63,8 @@ KeQueryBasePriorityThread(IN PKTHREAD Thread)
     /* Lock the thread */
     KiAcquireThreadLock(Thread);
 
-    /* Get the Process via the OriginalApcEnvironment pointer. */
-#if (NTDDI_VERSION >= NTDDI_WIN10)
-    /* Win10 KTHREAD: when attached, SavedApcState carries the parent process;
-     * otherwise ApcState is the only environment. */
-    Process = (Thread->ApcStateIndex == AttachedApcEnvironment) ?
-              Thread->SavedApcState.Process : Thread->ApcState.Process;
-#else
-    Process = Thread->ApcStatePointer[OriginalApcEnvironment]->Process;
-#endif
+    /* Get the Process */
+    Process = Thread->ApcStatePointer[0]->Process;
 
     /* Calculate the base increment */
     BaseIncrement = Thread->BasePriority - Process->BasePriority;
@@ -197,15 +190,19 @@ KeAlertThread(IN PKTHREAD Thread,
 {
     BOOLEAN PreviousState;
     KLOCK_QUEUE_HANDLE ApcLock;
+    UCHAR AlertModeIndex;
     ASSERT_THREAD(Thread);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
+
+    ASSERT((AlertMode == KernelMode) || (AlertMode == UserMode));
+    AlertModeIndex = (UCHAR)AlertMode;
 
     /* Lock the Dispatcher Database and the APC Queue */
     KiAcquireApcLockRaiseToSynch(Thread, &ApcLock);
     KiAcquireDispatcherLockAtSynchLevel();
 
     /* Save the Previous State */
-    PreviousState = Thread->Alerted[AlertMode];
+    PreviousState = Thread->Alerted[AlertModeIndex];
 
     /* Check if it's already alerted */
     if (!PreviousState)
@@ -221,7 +218,7 @@ KeAlertThread(IN PKTHREAD Thread,
         else
         {
             /* Otherwise, merely set the alerted state */
-            Thread->Alerted[AlertMode] = TRUE;
+            Thread->Alerted[AlertModeIndex] = TRUE;
         }
     }
 
@@ -306,14 +303,9 @@ KeForceResumeThread(IN PKTHREAD Thread)
         /* Lock the dispatcher */
         KiAcquireDispatcherLockAtSynchLevel();
 
-        /* Signal and satisfy. Same Win8 mechanism note as KeAlertResumeThread. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
+        /* Signal and satisfy */
         Thread->SuspendSemaphore.Header.SignalState++;
         KiWaitTest(&Thread->SuspendSemaphore.Header, IO_NO_INCREMENT);
-#else
-        Thread->SuspendEvent.Header.SignalState = 1;
-        KiWaitTest(&Thread->SuspendEvent.Header, IO_NO_INCREMENT);
-#endif
 
         /* Release the dispatcher */
         KiReleaseDispatcherLockFromSynchLevel();
@@ -398,18 +390,19 @@ KeFreezeAllThreads(VOID)
 #else
                 if (!Current->SchedulerApc.Inserted)
                 {
+                    /* Insert the APC */
                     Current->SchedulerApc.Inserted = TRUE;
                     KiInsertQueueApc(&Current->SchedulerApc, IO_NO_INCREMENT);
                 }
                 else
                 {
-                    /* The APC already pending: clear the suspend event
-                     * so the resume below has to re-signal it. With a
-                     * NotificationEvent there's no per-call counter to
-                     * decrement; the binary state plus SuspendCount
-                     * carries the depth. */
+                    /* Lock the dispatcher */
                     KiAcquireDispatcherLockAtSynchLevel();
+
+                    /* Unsignal the event, the APC was already inserted */
                     Current->SuspendEvent.Header.SignalState = 0;
+
+                    /* Release the dispatcher */
                     KiReleaseDispatcherLockFromSynchLevel();
                 }
 #endif
@@ -455,14 +448,9 @@ KeResumeThread(IN PKTHREAD Thread)
             /* Acquire the dispatcher lock */
             KiAcquireDispatcherLockAtSynchLevel();
 
-            /* Signal and satisfy. Win8 mechanism note as above. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
+            /* Signal the Suspend Semaphore */
             Thread->SuspendSemaphore.Header.SignalState++;
             KiWaitTest(&Thread->SuspendSemaphore.Header, IO_NO_INCREMENT);
-#else
-            Thread->SuspendEvent.Header.SignalState = 1;
-            KiWaitTest(&Thread->SuspendEvent.Header, IO_NO_INCREMENT);
-#endif
 
             /* Release the dispatcher lock */
             KiReleaseDispatcherLockFromSynchLevel();
@@ -549,7 +537,7 @@ KeStartThread(IN OUT PKTHREAD Thread)
 
     /* Setup static fields from parent */
     Thread->DisableBoost = Process->DisableBoost;
-#if defined(_M_IX86) && (NTDDI_VERSION < NTDDI_LONGHORN)
+#if defined(_M_IX86)
     Thread->Iopl = Process->Iopl;
 #endif
     Thread->Quantum = Process->QuantumReset;
@@ -610,7 +598,7 @@ KeStartThread(IN OUT PKTHREAD Thread)
     InsertTailList(&Process->ThreadListHead, &Thread->ThreadListEntry);
 
     /* Increase the stack count */
-    ASSERT(Process->StackCount != MAXULONG_PTR);
+    ASSERT(Process->StackCount != MAXULONG);
     Process->StackCount++;
 
     /* Release locks and return */
@@ -699,9 +687,7 @@ KeSuspendThread(PKTHREAD Thread)
         /* Check if we should suspend it */
         if (!(PreviousCount) && !(Thread->FreezeCount))
         {
-            /* Is the APC already inserted? Win8: the suspend hook lives
-             * in the multi-purpose SchedulerApc; the resume path is a
-             * single-shot KEVENT::SetEvent. */
+            /* Is the APC already inserted? */
 #if (NTDDI_VERSION < NTDDI_WIN8)
             if (!Thread->SuspendApc.Inserted)
             {
@@ -783,14 +769,9 @@ KeThawAllThreads(VOID)
                 /* Lock the dispatcher */
                 KiAcquireDispatcherLockAtSynchLevel();
 
-                /* Signal and satisfy. Win8 mechanism note as above. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
+                /* Signal the suspend semaphore and wake it */
                 Current->SuspendSemaphore.Header.SignalState++;
                 KiWaitTest(&Current->SuspendSemaphore, 0);
-#else
-                Current->SuspendEvent.Header.SignalState = 1;
-                KiWaitTest(&Current->SuspendEvent, 0);
-#endif
 
                 /* Unlock the dispatcher */
                 KiReleaseDispatcherLockFromSynchLevel();
@@ -819,20 +800,24 @@ KeTestAlertThread(IN KPROCESSOR_MODE AlertMode)
     PKTHREAD Thread = KeGetCurrentThread();
     BOOLEAN OldState;
     KLOCK_QUEUE_HANDLE ApcLock;
+    UCHAR AlertModeIndex;
     ASSERT_THREAD(Thread);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
+
+    ASSERT((AlertMode == KernelMode) || (AlertMode == UserMode));
+    AlertModeIndex = (UCHAR)AlertMode;
 
     /* Lock the Dispatcher Database and the APC Queue */
     KiAcquireApcLockRaiseToSynch(Thread, &ApcLock);
 
     /* Save the old State */
-    OldState = Thread->Alerted[AlertMode];
+    OldState = Thread->Alerted[AlertModeIndex];
 
     /* Check the Thread is alerted */
     if (OldState)
     {
         /* Disable alert for this mode */
-        Thread->Alerted[AlertMode] = FALSE;
+        Thread->Alerted[AlertModeIndex] = FALSE;
     }
     else if ((AlertMode != KernelMode) &&
              (!IsListEmpty(&Thread->ApcState.ApcListHead[UserMode])))
@@ -892,8 +877,15 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Initialize the lock */
     KeInitializeSpinLock(&Thread->ThreadLock);
 
-    /* Setup the Service Descriptor Table for Native Calls. */
-#if !defined(_WIN64) || (NTDDI_VERSION < NTDDI_WIN7)
+    /* Setup the Service Descriptor Table for Native Calls */
+#if defined(_WIN64) && (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* TODO(NT6.1): ServiceTable was removed from KTHREAD on amd64 starting at Vista
+     * (per ndk/ketypes.h KTHREAD definition). Real NT routes the syscall table via
+     * KeServiceDescriptorTable[Shadow] + Thread->GuiThread flag instead. We currently
+     * just skip the per-thread assignment here so the build compiles for NT6.x x64,
+     * but the actual GuiThread plumbing for the descriptor lookup needs to be wired
+     * up properly. See traphandler.c for the matching read-side TODOs. */
+#else
     Thread->ServiceTable = KeServiceDescriptorTable;
 #endif
 
@@ -955,7 +947,7 @@ KeInitThread(IN OUT PKTHREAD Thread,
     TimerWaitBlock->Object = Timer;
     TimerWaitBlock->WaitKey = STATUS_TIMEOUT;
     TimerWaitBlock->WaitType = WaitAny;
-    KiSetNextWaitBlock(TimerWaitBlock, NULL);
+    TimerWaitBlock->NextWaitBlock = NULL;
 
     /* Link the two wait lists together */
     TimerWaitBlock->WaitListEntry.Flink = &Timer->Header.WaitListHead;
@@ -969,7 +961,14 @@ KeInitThread(IN OUT PKTHREAD Thread,
     if (!KernelStack)
     {
         /* We don't, allocate one */
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: MmCreateKernelStack\n");
+#endif
         KernelStack = MmCreateKernelStack(FALSE, 0);
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: MmCreateKernelStack returned %p\n",
+                KernelStack);
+#endif
         if (!KernelStack) return STATUS_INSUFFICIENT_RESOURCES;
 
         /* Remember for later */
@@ -979,11 +978,7 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Set the Thread Stacks */
     Thread->InitialStack = KernelStack;
     Thread->StackBase = KernelStack;
-#if (NTDDI_VERSION >= NTDDI_WIN8)
-    Thread->StackLimit = (volatile PVOID)((ULONG_PTR)KernelStack - KERNEL_STACK_SIZE);
-#else
     Thread->StackLimit = (ULONG_PTR)KernelStack - KERNEL_STACK_SIZE;
-#endif
     Thread->KernelStackResident = TRUE;
 
     /* Enter SEH to avoid crashes due to user mode */
@@ -991,11 +986,20 @@ KeInitThread(IN OUT PKTHREAD Thread,
     _SEH2_TRY
     {
         /* Initialize the Thread Context */
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: KiInitializeContextThread stack=%p limit=%p\n",
+                Thread->InitialStack,
+                (PVOID)Thread->StackLimit);
+#endif
         KiInitializeContextThread(Thread,
                                   SystemRoutine,
                                   StartRoutine,
                                   StartContext,
                                   Context);
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: KiInitializeContextThread done kernelStack=%p\n",
+                Thread->KernelStack);
+#endif
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1160,20 +1164,8 @@ KeRevertToUserAffinityThread(VOID)
     /* Lock the Dispatcher Database */
     OldIrql = KiAcquireDispatcherLock();
 
-    /* Set the user affinity and processor and disable system affinity.
-     * On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes) whose
-     * trailing Reserved[] bytes overlap separate KTHREAD fields per union
-     * (Affinity hides ApcStateIndex/WaitBlockCount/IdealProcessor;
-     * UserAffinity hides PreviousMode/BasePriority/...). A whole-struct
-     * assignment would clobber ApcStateIndex with PreviousMode and later
-     * crash KiInsertQueueApc when an APC with a matching state index gets
-     * queued. Copy only the affinity bits. */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    CurrentThread->Affinity.Mask = CurrentThread->UserAffinity.Mask;
-    CurrentThread->Affinity.Group = CurrentThread->UserAffinity.Group;
-#else
+    /* Set the user affinity and processor and disable system affinity */
     CurrentThread->Affinity = CurrentThread->UserAffinity;
-#endif
     CurrentThread->IdealProcessor = CurrentThread->UserIdealProcessor;
     CurrentThread->SystemAffinityActive = FALSE;
 

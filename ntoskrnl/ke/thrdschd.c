@@ -25,39 +25,16 @@
 KAFFINITY KiIdleSummary;
 KAFFINITY KiIdleSMTSummary;
 
-static
-BOOLEAN
-KiIsThreadCurrentOnAnyProcessor(
-    _In_ PKTHREAD Thread)
-{
-#ifdef CONFIG_SMP
-    CCHAR Cpu;
-    PKPRCB Prcb;
-
-    for (Cpu = 0; Cpu < KeNumberProcessors; Cpu++)
-    {
-        Prcb = KiProcessorBlock[Cpu];
-        if ((Prcb != NULL) && (Prcb->CurrentThread == Thread))
-        {
-            return TRUE;
-        }
-    }
-#else
-    UNREFERENCED_PARAMETER(Thread);
-#endif
-
-    return FALSE;
-}
-
 /* FUNCTIONS *****************************************************************/
 
 PKTHREAD
 FASTCALL
 KiIdleSchedule(IN PKPRCB Prcb)
 {
-    /* FIXME: TODO */
-    ASSERTMSG("SMP: Not yet implemented\n", FALSE);
-    return NULL;
+    /* TODO: real SMP semantics should be done here : should drain Prcb->DeferredReadyListHead
+     * and promote a queued thread per KiSelectNextThread, instead of unconditionally staying on the idle thread
+      */
+    return Prcb->IdleThread;
 }
 
 VOID
@@ -352,23 +329,13 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
 
     /* Get the next scheduled thread */
     NextThread = Prcb->NextThread;
-    if ((NextThread != NULL) &&
-        ((NextThread == Prcb->CurrentThread) ||
-         ((NextThread->State != Standby) &&
-          KiIsThreadCurrentOnAnyProcessor(NextThread))))
-    {
-        Prcb->NextThread = NULL;
-        NextThread = NULL;
-    }
-
     if (NextThread)
     {
         /* Sanity check */
         ASSERT(NextThread->State == Standby);
 
         /* Check if priority changed */
-        if ((OldPriority > NextThread->Priority) &&
-            (KeGetCurrentProcessorNumber() == Processor))
+        if (OldPriority > NextThread->Priority)
         {
             /* Preempt the thread */
             NextThread->Preempted = TRUE;
@@ -377,14 +344,11 @@ KiDeferredReadyThread(IN PKTHREAD Thread)
             Thread->State = Standby;
             Prcb->NextThread = Thread;
 
-            /* Put the displaced standby thread back on this PRCB's ready list. */
-            NextThread->State = Ready;
-            NextThread->WaitTime = KeTickCount.LowPart;
-            InsertHeadList(&Prcb->DispatcherReadyListHead[NextThread->Priority],
-                           &NextThread->WaitListEntry);
-            Prcb->ReadySummary |= PRIORITY_MASK(NextThread->Priority);
-
+            /* Set it in deferred ready mode */
+            NextThread->State = DeferredReady;
+            NextThread->DeferredProcessor = Prcb->Number;
             KiReleasePrcbLock(Prcb);
+            KiDeferredReadyThread(NextThread);
             return;
         }
     }
@@ -553,7 +517,7 @@ KiReadyThread(IN PKTHREAD Thread)
     else if (!Thread->KernelStackResident)
     {
         /* Increase the stack count */
-        ASSERT(Process->StackCount != MAXULONG_PTR);
+        ASSERT(Process->StackCount != MAXULONG);
         Process->StackCount++;
 
         /* Set the thread to transition */
@@ -778,14 +742,9 @@ KiSetPriorityThread(IN PKTHREAD Thread,
             }
             else if (Thread->State == DeferredReady)
             {
-                /* The thread is on a per-CPU deferred-ready list waiting
-                 * for KiProcessDeferredReadyList to dispatch it. Update
-                 * its priority in place; the deferred-ready processor
-                 * will queue it on the appropriate ready list at the
-                 * new priority when it runs. No list shuffle is needed
-                 * because DeferredReady threads aren't on a ready list
-                 * yet. */
-                Thread->Priority = (SCHAR)Priority;
+                /* FIXME: TODO */
+                DPRINT1("Deferred state not yet supported\n");
+                ASSERT(FALSE);
             }
             else
             {
@@ -814,20 +773,8 @@ KiUpdateEffectiveAffinityThread(
     Prcb = KiProcessorBlock[Thread->NextProcessor];
     KiAcquirePrcbLock(Prcb);
 
-    /* Set the thread's affinity and ideal processor.
-     * NB: On Win7+, Affinity/UserAffinity are GROUP_AFFINITY (16 bytes).
-     * The trailing Reserved[] bytes overlap distinct KTHREAD fields in
-     * each union (Affinity hides ApcStateIndex/WaitBlockCount/IdealProcessor;
-     * UserAffinity hides PreviousMode/BasePriority/PriorityDecrement/...).
-     * A whole-struct copy would clobber ApcStateIndex with PreviousMode and
-     * crash KiInsertQueueApc the next time the thread receives an APC with
-     * a matching ApcStateIndex. Copy only the affinity bits. */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    Thread->Affinity.Mask = Thread->UserAffinity.Mask;
-    Thread->Affinity.Group = Thread->UserAffinity.Group;
-#else
+    /* Set the thread's affinity and ideal processor */
     Thread->Affinity = Thread->UserAffinity;
-#endif
     Thread->IdealProcessor = Thread->UserIdealProcessor;
 
     /* Check if the affinity doesn't match with the current processor */
@@ -982,15 +929,7 @@ NtYieldExecution(VOID)
         KiAcquirePrcbLock(Prcb);
 
         /* Find a new thread to run if none was selected */
-        if (!Prcb->NextThread)
-        {
-            NextThread = KiSelectReadyThread(1, Prcb);
-            if (NextThread)
-            {
-                NextThread->State = Standby;
-                Prcb->NextThread = NextThread;
-            }
-        }
+        if (!Prcb->NextThread) Prcb->NextThread = KiSelectReadyThread(1, Prcb);
 
         /* Make sure we still have a next thread to schedule */
         NextThread = Prcb->NextThread;

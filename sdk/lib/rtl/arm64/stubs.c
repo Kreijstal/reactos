@@ -17,12 +17,47 @@ GET_RUNTIME_FUNCTION_CALLBACK(
     _In_opt_ PVOID Context);
 typedef GET_RUNTIME_FUNCTION_CALLBACK *PGET_RUNTIME_FUNCTION_CALLBACK;
 
-typedef struct _ARM64_SLIST_HEADER
+static
+PSLIST_ENTRY
+RtlpArm64FirstEntrySList(
+    _In_ const SLIST_HEADER *SListHead)
 {
-    SLIST_ENTRY Next;
-    USHORT Depth;
-    USHORT Sequence;
-} ARM64_SLIST_HEADER, *PARM64_SLIST_HEADER;
+    union
+    {
+        ULONG64 Region;
+        struct
+        {
+            ULONG64 Reserved:4;
+            ULONG64 NextEntry:39;
+            ULONG64 Reserved2:21;
+        } Bits;
+    } Pointer;
+
+    if (SListHead->Header16.HeaderType)
+        return (PVOID)(SListHead->Region & ~0xFULL);
+
+    if (SListHead->Header8.NextEntry == 0)
+        return NULL;
+
+    Pointer.Region = (ULONG64)SListHead;
+    Pointer.Bits.NextEntry = SListHead->Header8.NextEntry;
+    return (PVOID)Pointer.Region;
+}
+
+static
+VOID
+RtlpArm64SetNextEntrySList(
+    _Inout_ SLIST_HEADER *SListHead,
+    _In_opt_ PSLIST_ENTRY NextEntry)
+{
+    if (SListHead->Header16.HeaderType)
+    {
+        SListHead->Region = (ULONG64)NextEntry;
+        return;
+    }
+
+    SListHead->Header8.NextEntry = (ULONG64)NextEntry >> 4;
+}
 
 PLIST_ENTRY
 NTAPI
@@ -56,14 +91,13 @@ RtlInterlockedPushEntrySList(
     _Inout_ PSLIST_HEADER SListHead,
     _Inout_ __drv_aliasesMem PSLIST_ENTRY SListEntry)
 {
-    PARM64_SLIST_HEADER Header = (PARM64_SLIST_HEADER)SListHead;
     PSLIST_ENTRY OldEntry;
 
-    OldEntry = Header->Next.Next;
+    OldEntry = RtlpArm64FirstEntrySList(SListHead);
     SListEntry->Next = OldEntry;
-    Header->Next.Next = SListEntry;
-    Header->Depth++;
-    Header->Sequence++;
+    RtlpArm64SetNextEntrySList(SListHead, SListEntry);
+    SListHead->Header8.Depth++;
+    SListHead->Header8.Sequence++;
     return OldEntry;
 }
 
@@ -72,16 +106,15 @@ NTAPI
 RtlInterlockedPopEntrySList(
     _Inout_ PSLIST_HEADER SListHead)
 {
-    PARM64_SLIST_HEADER Header = (PARM64_SLIST_HEADER)SListHead;
     PSLIST_ENTRY OldEntry;
 
-    OldEntry = Header->Next.Next;
+    OldEntry = RtlpArm64FirstEntrySList(SListHead);
     if (OldEntry == NULL)
         return NULL;
 
-    Header->Next.Next = OldEntry->Next;
-    Header->Depth--;
-    Header->Sequence++;
+    RtlpArm64SetNextEntrySList(SListHead, OldEntry->Next);
+    SListHead->Header8.Depth--;
+    SListHead->Header8.Sequence++;
     return OldEntry;
 }
 
@@ -90,12 +123,11 @@ NTAPI
 RtlInterlockedFlushSList(
     _Inout_ PSLIST_HEADER SListHead)
 {
-    PARM64_SLIST_HEADER Header = (PARM64_SLIST_HEADER)SListHead;
     PSLIST_ENTRY OldEntry;
 
-    OldEntry = Header->Next.Next;
-    Header->Next.Next = NULL;
-    Header->Depth = 0;
-    Header->Sequence++;
+    OldEntry = RtlpArm64FirstEntrySList(SListHead);
+    RtlpArm64SetNextEntrySList(SListHead, NULL);
+    SListHead->Header8.Depth = 0;
+    SListHead->Header8.Sequence++;
     return OldEntry;
 }
