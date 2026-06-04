@@ -25,6 +25,10 @@ include_directories(
 
 add_definitions(-D_NTHAL_ -D_BLDR_ -D_NTSYSTEM_ -DNTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 
+# The NT version this freeldr is built to load. winldr uses it as the default
+# OS version reported to the kernel when the registry doesn't provide one.
+add_definitions(-DFRLDR_TARGET_NT_VERSION=${REACTOS_TARGET_NT})
+
 option(FREELDR_WIM_RAMDISK "Enable FreeLDR boot.wim ramdisk decompression support" ON)
 
 list(APPEND FREELDR_ARC_SOURCE
