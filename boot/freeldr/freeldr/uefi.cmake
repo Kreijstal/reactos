@@ -198,18 +198,17 @@ endif()
 
 if(MSVC)
     set_subsystem(uefildr EFI_APPLICATION)
-elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    if(ARCH STREQUAL "arm64")
-        target_link_options(uefildr PRIVATE
-            -Wl,--subsystem,efi_application:1.00
-            -Wl,--major-os-version,0
-            -Wl,--minor-os-version,0
-            -Wl,--major-subsystem-version,1
-            -Wl,--minor-subsystem-version,0)
-    else()
-        set_subsystem(uefildr efi_application)
-    endif()
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND ARCH STREQUAL "arm64")
+    # llvm-mingw drives lld, which understands the EFI subsystem by name.
+    target_link_options(uefildr PRIVATE
+        -Wl,--subsystem,efi_application:1.00
+        -Wl,--major-os-version,0
+        -Wl,--minor-os-version,0
+        -Wl,--major-subsystem-version,1
+        -Wl,--minor-subsystem-version,0)
 else()
+    # GCC and GNU-mode Clang both drive a GNU binutils ld that only accepts the
+    # numeric subsystem (10 == IMAGE_SUBSYSTEM_EFI_APPLICATION), not the name.
     set_subsystem(uefildr 10)
 endif()
 
