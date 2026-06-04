@@ -155,6 +155,7 @@ KeAcquireQueuedSpinLockAtDpcLevel(_Inout_ PKSPIN_LOCK_QUEUE LockHandle)
     /* Do the inlined function */
     KxAcquireSpinLock(LockHandle->Lock);
 
+#if defined(_M_ARM64)
     if (LockIndex == LockQueuePfnLock)
     {
         ULONG CpuIndex = KeGetCurrentProcessorNumber();
@@ -164,6 +165,7 @@ KeAcquireQueuedSpinLockAtDpcLevel(_Inout_ PKSPIN_LOCK_QUEUE LockHandle)
             InterlockedIncrement(&MiArm64PfnLockDepth[CpuIndex]);
         }
     }
+#endif
 }
 
 _IRQL_requires_min_(DISPATCH_LEVEL)
