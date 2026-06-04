@@ -468,10 +468,17 @@ NtfsGetAllInformation(PFILE_OBJECT FileObject,
     Status = NtfsGetNameInformation(FileObject, Fcb, DeviceObject,
                                     &AllInfo->NameInformation, &NameBufferLength);
 
-    /* Update the caller's buffer length to reflect what we consumed.
-     * NtfsGetNameInformation already decremented NameBufferLength; we
-     * return the total consumed = fixed prefix + whatever it wrote. */
-    *BufferLength = (*BufferLength - NameOffset) - NameBufferLength + NameOffset;
+    /* Report the remaining (unwritten) buffer space, matching the
+     * convention of the other NtfsGetXxxInformation helpers, so the caller
+     * computes Information = requested length - remaining = bytes written.
+     * The fixed prefix always consumes exactly NameOffset bytes, so the
+     * leftover is whatever NtfsGetNameInformation did not use.  This must
+     * hold on the STATUS_BUFFER_OVERFLOW path too: Windows fills the entire
+     * fixed prefix and reports the bytes written even when the trailing
+     * name does not fit, and callers (e.g. the Cygwin/MSYS2 runtime, which
+     * passes a buffer of exactly sizeof(FILE_ALL_INFORMATION)) rely on the
+     * prefix being copied back on overflow. */
+    *BufferLength = NameBufferLength;
 
     /* NtfsGetNameInformation returns STATUS_BUFFER_OVERFLOW if the name
      * didn't fully fit - propagate that up. */
@@ -744,7 +751,12 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
 
     ExReleaseResourceLite(&Fcb->MainResource);
 
-    if (NT_SUCCESS(Status))
+    /* On STATUS_BUFFER_OVERFLOW the variable-length information classes
+     * (e.g. FileAllInformation, FileNameInformation) still wrote the part
+     * that fit; report those bytes so the I/O manager copies them back, as
+     * Windows does.  Returning Information == 0 here would leave the caller's
+     * buffer untouched even though we populated the fixed prefix. */
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
         Irp->IoStatus.Information =
             Stack->Parameters.QueryFile.Length - BufferLength;
     else
