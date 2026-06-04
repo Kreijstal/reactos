@@ -726,7 +726,13 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
             if (MFTRecord == OldMFTRecord)
             {
                 DPRINT("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
-                Ccb->Entry++;
+                /* Advance the B-tree cursor, not Ccb->Entry: the loop below
+                 * re-queries NtfsFindFileAt() with BTreeEntry, and Ccb->Entry
+                 * is only synced back from BTreeEntry after the loop.  Bumping
+                 * Ccb->Entry here leaves BTreeEntry unchanged, so the next
+                 * NtfsFindFileAt() returns the very same duplicate entry and we
+                 * spin forever. */
+                BTreeEntry++;
                 ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
                 continue;
             }
