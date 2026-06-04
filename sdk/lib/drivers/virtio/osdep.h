@@ -19,7 +19,9 @@
 #ifdef __REACTOS__
 #ifdef __GNUC__
 #undef FORCEINLINE
-#define FORCEINLINE __attribute__((__always_inline__))
+/* GCC rejects always_inline on a function that is not also declared inline
+ * (-Werror=attributes), so keep the inline keyword here. */
+#define FORCEINLINE __inline__ __attribute__((__always_inline__))
 #endif
 #endif
 
