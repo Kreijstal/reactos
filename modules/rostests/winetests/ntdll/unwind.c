@@ -1513,7 +1513,7 @@ static void test_virtual_unwind_arm(void)
 
 #endif  /* __arm__ */
 
-#if defined(__aarch64__) || defined(__x86_64__)
+#if defined(__aarch64__) || (defined(__x86_64__) && !defined(__REACTOS__))
 
 #define UWOP_TWOBYTES(x) (((x) >> 8) & 0xff), ((x) & 0xff)
 
@@ -2647,7 +2647,7 @@ static void test_virtual_unwind_arm64(void)
 #undef UWOP_ALLOC_SMALL
 #undef UWOP_ALLOC_LARGE
 
-#endif  /* __aarch64__ || __x86_64__ */
+#endif  /* __aarch64__ || (__x86_64__ && !__REACTOS__) */
 
 #ifdef __x86_64__
 
