@@ -8,7 +8,7 @@
 
 .code16
 
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
 .macro call target:vararg
     .byte HEX(E8)
     .word \target - (. + 2)
@@ -332,7 +332,7 @@ InRealMode:
 
     /* Do the callback, specified by bx */
     shl bx, 1
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_near16_indirect_bx CallbackTable
 #else
     call word ptr ds:CallbackTable[bx]

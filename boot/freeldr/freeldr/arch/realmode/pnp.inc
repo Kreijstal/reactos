@@ -14,7 +14,7 @@ PnpBiosGetDeviceNodeCount:
 
     push 0
 
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_far32 BSS_PnpBiosEntryPoint
 #else
     call dword ptr ds:[BSS_PnpBiosEntryPoint]
@@ -51,7 +51,7 @@ PnpBiosGetDeviceNode:
     push 1
 
     /* call entry point */
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_far32 BSS_PnpBiosEntryPoint
 #else
     call dword ptr ds:[BSS_PnpBiosEntryPoint]
@@ -80,7 +80,7 @@ PnpBiosGetDockStationInformation:
     push 5
 
     /* call entry point */
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_far32 BSS_PnpBiosEntryPoint
 #else
     call dword ptr ds:[BSS_PnpBiosEntryPoint]

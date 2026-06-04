@@ -98,7 +98,7 @@ LoadFile3:
     push ax
     xor  bx,bx              // Load ROSLDR starting at 0000:8000h
     push es
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_far32_ss_bp -ReadClusterOffset
 #else
     call ReadCluster
@@ -143,7 +143,7 @@ ReadFatIntoMemory:
     mov bx, HEX(7000)
     mov es,bx
     xor bx,bx
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_far32_ss_bp -ReadSectorsOffset
 #else
     call ReadSectors
@@ -240,7 +240,7 @@ CS_PutChars:
     mov ds, ax
 
     /* Display the message */
-#ifdef __clang__
+#if defined(__clang__) && !defined(_USE_ML)
     call_far32_ss_bp -PutCharsOffset
 #else
     call PutChars
