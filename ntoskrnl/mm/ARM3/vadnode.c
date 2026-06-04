@@ -60,12 +60,14 @@ MiDbgAssertIsLockedForRead(_In_ PMM_AVL_TABLE Table)
     {
         /* Need to hold either the system working-set lock or
            the idle process' AddressCreationLock */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        /* AddressCreationLock is EX_PUSH_LOCK at Vista+; no Owner field */
         ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
                PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
-               /* AddressCreationLock is EX_PUSH_LOCK at Vista+; no Owner field */
                TRUE);
 #else
+        ASSERT(PsGetCurrentThread()->OwnsSystemWorkingSetExclusive ||
+               PsGetCurrentThread()->OwnsSystemWorkingSetShared ||
                (PsIdleProcess->AddressCreationLock.Owner == KeGetCurrentThread()));
 #endif
     }

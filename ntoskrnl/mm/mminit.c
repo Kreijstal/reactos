@@ -152,15 +152,17 @@ MiDbgDumpAddressSpace(VOID)
     //
     // Print the memory layout
     //
-    DPRINT1("          0x%p - 0x%p\t%s\n",
 #ifdef _M_ARM64
+    DPRINT1("          0x%p - 0x%p\t%s\n",
             (PVOID)(ULONG_PTR)MI_ARM64_BOOT_IMAGE_BASE,
             (PVOID)(ULONG_PTR)(MI_ARM64_BOOT_IMAGE_BASE + MmBootImageSize),
+            "Boot Loaded Image");
 #else
+    DPRINT1("          0x%p - 0x%p\t%s\n",
             KSEG0_BASE,
             (ULONG_PTR)KSEG0_BASE + MmBootImageSize,
-#endif
             "Boot Loaded Image");
+#endif
 #ifdef _M_IX86
     DPRINT1("          0x%p - 0x%p\t%s\n",
             MmSystemPteSpaceStart,
