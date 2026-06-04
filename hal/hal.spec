@@ -102,7 +102,6 @@
 @ stdcall -arch=x86_64,arm64 KeAcquireInStackQueuedSpinLockRaiseToSynch(ptr ptr) ntoskrnl.KeAcquireInStackQueuedSpinLockRaiseToSynch
 @ stdcall -arch=x86_64,arm64 KeAcquireQueuedSpinLock(ptr) ntoskrnl.KeAcquireQueuedSpinLock
 @ stdcall -arch=x86_64,arm64 KeAcquireQueuedSpinLockRaiseToSynch(ptr) ntoskrnl.KeAcquireQueuedSpinLockRaiseToSynch
-@ stdcall -arch=x86_64 KeAcquireSpinLock(ptr ptr) ntoskrnl.KeAcquireSpinLock
 @ stdcall -arch=arm64 KeAcquireSpinLock(ptr ptr) ntoskrnl.KeAcquireSpinLock
 @ stdcall -arch=x86_64,arm64 KeAcquireSpinLockRaiseToSynch(ptr) ntoskrnl.KeAcquireSpinLockRaiseToSynch
 @ stdcall KeFlushWriteBuffer()
@@ -113,12 +112,10 @@
 @ stdcall -arch=x86_64,arm64 KeLowerIrql(long) ntoskrnl.KeLowerIrql
 @ stdcall KeQueryPerformanceCounter(ptr)
 @ stdcall -arch=i386,arm KeRaiseIrql(long ptr)
-@ stdcall -arch=x86_64 KeRaiseIrql(long ptr) ntoskrnl.KeRaiseIrql
 @ stdcall -arch=arm64 KeRaiseIrql(long ptr) ntoskrnl.KeRaiseIrql
 @ stdcall -arch=i386,arm KeRaiseIrqlToDpcLevel()
 @ stdcall -arch=x86_64,arm64 KeRaiseIrqlToDpcLevel() ntoskrnl.KeRaiseIrqlToDpcLevel
 @ stdcall -arch=i386,arm KeRaiseIrqlToSynchLevel()
-@ stdcall -arch=x86_64 KeRaiseIrqlToSynchLevel() ntoskrnl.KeRaiseIrqlToSynchLevel
 @ stdcall -arch=arm64 KeRaiseIrqlToSynchLevel() ntoskrnl.KeRaiseIrqlToSynchLevel
 @ fastcall -arch=i386,arm KeReleaseInStackQueuedSpinLock(ptr)
 @ fastcall -arch=i386,arm KeReleaseQueuedSpinLock(ptr long)
@@ -135,12 +132,9 @@
 @ fastcall -arch=i386,arm KfLowerIrql(long)
 @ fastcall -arch=i386,arm KfRaiseIrql(long)
 @ fastcall -arch=i386,arm KfReleaseSpinLock(ptr long)
-@ stdcall -arch=x86_64 KfAcquireSpinLock(ptr) ntoskrnl.KfAcquireSpinLock
 @ stdcall -arch=arm64 KfAcquireSpinLock(ptr) ntoskrnl.KfAcquireSpinLock
-@ stdcall -arch=x86_64 KfLowerIrql(long) ntoskrnl.KfLowerIrql
 @ stdcall -arch=arm64 KfLowerIrql(long) ntoskrnl.KfLowerIrql
 @ stdcall -arch=x86_64,arm64 KfRaiseIrql(long) ntoskrnl.KfRaiseIrql
-@ stdcall -arch=x86_64 KfReleaseSpinLock(ptr long) ntoskrnl.KfReleaseSpinLock
 @ stdcall -arch=arm64 KfReleaseSpinLock(ptr long) ntoskrnl.KfReleaseSpinLock
 @ stdcall -arch=i386,arm,arm64,x86_64 READ_PORT_BUFFER_UCHAR(ptr ptr long)
 @ stdcall -arch=i386,arm,arm64,x86_64 READ_PORT_BUFFER_ULONG(ptr ptr long)
