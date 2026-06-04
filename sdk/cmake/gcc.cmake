@@ -650,24 +650,27 @@ endif()
 
 # Find default G++ libraries
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    if(EXISTS "${CMAKE_CXX_COMPILER}")
-        set(GXX_EXECUTABLE ${CMAKE_CXX_COMPILER})
-    else()
-        if(NOT CMAKE_CXX_COMPILER_TARGET)
-            get_filename_component(_cxx_compiler_name "${CMAKE_CXX_COMPILER}" NAME)
-            if(_cxx_compiler_name MATCHES "^([^-]+-[^-]+-[^-]+)-")
-                set(CMAKE_CXX_COMPILER_TARGET "${CMAKE_MATCH_1}")
-            elseif(CMAKE_C_COMPILER_TARGET)
-                set(CMAKE_CXX_COMPILER_TARGET "${CMAKE_C_COMPILER_TARGET}")
-            endif()
-        endif()
-        set(GXX_EXECUTABLE ${CMAKE_CXX_COMPILER_TARGET}-g++)
-    endif()
-    if(NOT GXX_EXECUTABLE)
+    # The runtime libraries we want here (libgcc, libmingwex, libstdc++, ...)
+    # ship with the MinGW GNU toolchain, not with clang's own resource dir, so
+    # query them through the cross g++ for the target triplet. Asking the clang
+    # driver directly (whose -print-file-name knows nothing about MinGW unless a
+    # default sysroot happens to be configured) returns the bare "lib*.a" name,
+    # which downstream becomes a bogus IMPORTED_LOCATION ninja cannot build.
+    if(NOT CMAKE_CXX_COMPILER_TARGET)
         get_filename_component(_cxx_compiler_name "${CMAKE_CXX_COMPILER}" NAME)
         if(_cxx_compiler_name MATCHES "^([^-]+-[^-]+-[^-]+)-")
-            set(GXX_EXECUTABLE ${CMAKE_MATCH_1}-g++)
+            set(CMAKE_CXX_COMPILER_TARGET "${CMAKE_MATCH_1}")
+        elseif(CMAKE_C_COMPILER_TARGET)
+            set(CMAKE_CXX_COMPILER_TARGET "${CMAKE_C_COMPILER_TARGET}")
         endif()
+    endif()
+    find_program(_mingw_gxx NAMES ${CMAKE_CXX_COMPILER_TARGET}-g++)
+    if(_mingw_gxx)
+        set(GXX_EXECUTABLE ${_mingw_gxx})
+    else()
+        # No GNU g++ for this target (e.g. arm64 llvm-mingw); the clang driver
+        # there bundles its own runtime libraries and resolves them correctly.
+        set(GXX_EXECUTABLE ${CMAKE_CXX_COMPILER})
     endif()
 else()
     set(GXX_EXECUTABLE ${CMAKE_CXX_COMPILER})
