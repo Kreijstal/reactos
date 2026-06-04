@@ -215,6 +215,26 @@ WRITE_REGISTER_USHORT(
 
 #else
 
+/*
+ * On amd64 the I/O port accessors are normally inlined via intrinsics.
+ * The HAL itself, however, exports these routines (see hal.spec) and
+ * implements them in hal/halx86/generic/portio.c, so when the HAL is being
+ * built it must see plain prototypes instead of inline bodies (a FORCEINLINE
+ * body and an out-of-line definition of the same name collide under MSVC,
+ * error C2084). freeldr defines _NTHAL_ too but has no HAL to link against,
+ * so it keeps the inline versions (_BLDR_).
+ */
+#if (defined(_NTHAL_) || defined(_NTOSP_)) && !defined(_BLDR_)
+
+NTHALAPI VOID NTAPI READ_PORT_BUFFER_UCHAR(IN PUCHAR Port, IN PUCHAR Buffer, IN ULONG Count);
+NTHALAPI VOID NTAPI READ_PORT_BUFFER_ULONG(IN PULONG Port, IN PULONG Buffer, IN ULONG Count);
+NTHALAPI VOID NTAPI READ_PORT_BUFFER_USHORT(IN PUSHORT Port, IN PUSHORT Buffer, IN ULONG Count);
+NTHALAPI UCHAR NTAPI READ_PORT_UCHAR(IN PUCHAR Port);
+NTHALAPI ULONG NTAPI READ_PORT_ULONG(IN PULONG Port);
+NTHALAPI USHORT NTAPI READ_PORT_USHORT(IN PUSHORT Port);
+
+#else
+
 FORCEINLINE
 VOID
 READ_PORT_BUFFER_UCHAR(
@@ -269,6 +289,8 @@ READ_PORT_USHORT(
   return __inword((USHORT)(ULONG_PTR)Port);
 }
 
+#endif /* (_NTHAL_ || _NTOSP_) && !_BLDR_ */
+
 FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_UCHAR(
@@ -322,6 +344,17 @@ READ_REGISTER_USHORT(
 {
   return *Register;
 }
+
+#if (defined(_NTHAL_) || defined(_NTOSP_)) && !defined(_BLDR_)
+
+NTHALAPI VOID NTAPI WRITE_PORT_BUFFER_UCHAR(IN PUCHAR Port, IN PUCHAR Buffer, IN ULONG Count);
+NTHALAPI VOID NTAPI WRITE_PORT_BUFFER_ULONG(IN PULONG Port, IN PULONG Buffer, IN ULONG Count);
+NTHALAPI VOID NTAPI WRITE_PORT_BUFFER_USHORT(IN PUSHORT Port, IN PUSHORT Buffer, IN ULONG Count);
+NTHALAPI VOID NTAPI WRITE_PORT_UCHAR(IN PUCHAR Port, IN UCHAR Value);
+NTHALAPI VOID NTAPI WRITE_PORT_ULONG(IN PULONG Port, IN ULONG Value);
+NTHALAPI VOID NTAPI WRITE_PORT_USHORT(IN PUSHORT Port, IN USHORT Value);
+
+#else
 
 FORCEINLINE
 VOID
@@ -379,6 +412,8 @@ WRITE_PORT_USHORT(
 {
   __outword((USHORT)(ULONG_PTR)Port, Value);
 }
+
+#endif /* (_NTHAL_ || _NTOSP_) && !_BLDR_ */
 
 FORCEINLINE
 VOID
