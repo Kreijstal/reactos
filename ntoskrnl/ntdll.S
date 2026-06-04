@@ -25,13 +25,8 @@
 
 .code
 
-#ifdef _USE_ML
-#define SVC_(name, argcount) STUB_U <name>, argcount
-#define SVC_WRAP_(name, argcount) STUB_U <name>, argcount
-#else
 #define SVC_(name, argcount) STUB_U name, argcount
 #define SVC_WRAP_(name, argcount) STUB_U name, argcount
-#endif
 
 #include <sysfuncs.h>
 
