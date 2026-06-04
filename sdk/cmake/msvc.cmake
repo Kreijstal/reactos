@@ -475,8 +475,15 @@ function(CreateBootSectorTarget _target_name _asm_file _binary_file _base_addres
 
     if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
         set(_no_std_includes_flag "-nostdinc")
+        # clang-cl routes a .S input through its assembler-with-cpp path, where
+        # the MSVC-style /D defines are not applied to the preprocessor. That
+        # left _USE_ML undefined, so asm.inc emitted its GAS helper-macro branch
+        # (.macro/.endm) into the output and ml/ml64 rejected it (A2008/A2109).
+        # Force the source to be preprocessed as C so /D_USE_ML is honored.
+        set(_force_c_flag "/TC")
     else()
         set(_no_std_includes_flag "/X")
+        set(_force_c_flag "")
     endif()
 
     # cl /EP keeps surviving '#pragma' directives in its output (unlike GAS,
@@ -485,7 +492,7 @@ function(CreateBootSectorTarget _target_name _asm_file _binary_file _base_addres
     # assembler sees them.
     add_custom_command(
         OUTPUT ${_temp_file}
-        COMMAND ${CMAKE_C_COMPILER} /nologo ${_no_std_includes_flag} /I${REACTOS_SOURCE_DIR}/sdk/include/asm /I${REACTOS_BINARY_DIR}/sdk/include/asm ${_includes} ${_defines} /D__ASM__ /D_USE_ML /EP /c ${_asm_file} > ${_temp_file}.tmp
+        COMMAND ${CMAKE_C_COMPILER} /nologo ${_no_std_includes_flag} ${_force_c_flag} /I${REACTOS_SOURCE_DIR}/sdk/include/asm /I${REACTOS_BINARY_DIR}/sdk/include/asm ${_includes} ${_defines} /D__ASM__ /D_USE_ML /EP /c ${_asm_file} > ${_temp_file}.tmp
         COMMAND ${CMAKE_COMMAND} -DIN=${_temp_file}.tmp -DOUT=${_temp_file} -P ${REACTOS_SOURCE_DIR}/sdk/cmake/strip-asm-pragmas.cmake
         DEPENDS ${_asm_file})
 
