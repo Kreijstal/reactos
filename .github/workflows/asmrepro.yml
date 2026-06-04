@@ -22,38 +22,46 @@ jobs:
     # The boot-sector .S relies on /D_USE_ML to pick asm.inc's MASM macro branch.
     # If clang-cl drops the /D for a .S input, asm.inc emits its GAS branch
     # (.macro/.endm) which ml/ml64 then rejects (A2008/A2109).
-    - name: Preprocess amd64.S WITHOUT /TC (current behaviour)
+    - name: Candidate A - baseline .S, no force (reproduces bug)
       shell: cmd
       run: |
-        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > notc.asm 2> notc_err.txt
-        echo EP_EXIT=%errorlevel%
-        type notc_err.txt
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > a_baseline.asm 2> a_err.txt
+        echo A_EXIT=%errorlevel%
+        type a_err.txt
 
-    - name: Preprocess amd64.S WITH /TC (candidate fix)
+    - name: Candidate B - copy to .c so clang-cl classifies it as C
       shell: cmd
       run: |
-        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /TC /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > tc.asm 2> tc_err.txt
-        echo EP_EXIT=%errorlevel%
-        type tc_err.txt
+        copy /Y boot\freeldr\freeldr\arch\realmode\amd64.S amd64_pp.c >nul
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c amd64_pp.c > b_dotc.asm 2> b_err.txt
+        echo B_EXIT=%errorlevel%
+        type b_err.txt
 
-    - name: Verdict (count GAS .macro/.endm leakage in each)
+    - name: Candidate C - force C language via clang passthrough (/clang:-x /clang:c)
+      shell: cmd
+      run: |
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /clang:-x /clang:c /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > c_xc.asm 2> c_err.txt
+        echo C_EXIT=%errorlevel%
+        type c_err.txt
+
+    - name: Verdict (count GAS .macro/.endm leakage in each candidate)
       shell: pwsh
       run: |
         function Count-Macro($f) {
           if (-not (Test-Path $f)) { return -1 }
           (Select-String -Path $f -Pattern '(^\s*\.macro\b)|(\.endm\b)' -AllMatches | Measure-Object).Count
         }
-        $notc = Count-Macro 'notc.asm'
-        $tc   = Count-Macro 'tc.asm'
+        $a = Count-Macro 'a_baseline.asm'
+        $b = Count-Macro 'b_dotc.asm'
+        $c = Count-Macro 'c_xc.asm'
         Write-Host "=================== RESULT ==================="
-        Write-Host "NO /TC : .macro/.endm lines = $notc   (>0 => bug reproduced, _USE_ML dropped, GAS branch leaked)"
-        Write-Host "  /TC  : .macro/.endm lines = $tc     (0  => /TC fixes it: _USE_ML honored, MASM branch)"
+        Write-Host "A baseline .S        : .macro/.endm = $a   (>0 = bug)"
+        Write-Host "B copy-to-.c         : .macro/.endm = $b   (0 = fixed)"
+        Write-Host "C /clang:-x /clang:c : .macro/.endm = $c   (0 = fixed)"
         Write-Host "=============================================="
-        Write-Host "--- sample of NO-/TC output around any .macro ---"
-        Select-String -Path 'notc.asm' -Pattern '\.macro|\.endm' -Context 0,1 | Select-Object -First 6
-        if ($notc -gt 0 -and $tc -eq 0) { Write-Host 'CONCLUSION: /TC FIXES the clang-cl boot-sector failure.' }
-        elseif ($notc -eq 0) { Write-Host 'CONCLUSION: bug did NOT reproduce here (root-cause assumptions need revisiting).' }
-        else { Write-Host 'CONCLUSION: /TC does NOT fix it; need a stronger approach (e.g. .c-rename).' }
+        if ($b -eq 0) { Write-Host 'WINNER: copy-to-.c works.' }
+        if ($c -eq 0) { Write-Host 'WINNER: /clang:-x c works.' }
+        if ($b -ne 0 -and $c -ne 0) { Write-Host 'Neither candidate fixed it; investigate artifacts.' }
 
     - name: Upload preprocessed asm
       if: always()
@@ -61,5 +69,6 @@ jobs:
       with:
         name: clangcl_bootsector_asm
         path: |
-          notc.asm
-          tc.asm
+          a_baseline.asm
+          b_dotc.asm
+          c_xc.asm
