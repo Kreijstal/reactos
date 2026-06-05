@@ -9,7 +9,12 @@
 #include <setjmp.h>
 #include <stddef.h>
 
-#if (defined(_M_IX86) || defined(_M_X64)) && (!defined(__clang__) || defined(_MSC_VER))
+#if (defined(_M_IX86) || defined(_M_X64))
+/* GNU-mode Clang is included here too: the ReactOS x86 intrinsic headers carry
+ * Clang-aware paths (immintrin.h uses __target__ attributes and clang builtins,
+ * while mmintrin/xmmintrin/emmintrin forward to Clang's own headers), so the SSE
+ * /AVX/xsave declarations these pull in (__m128i, __m256i, _mm_*, _xsave64, ...)
+ * must be visible for Clang exactly as they are for GCC and clang-cl. */
 #include <immintrin.h>
 //#include <ammintrin.h>
 #include <xmmintrin.h> // native headers: immintrin.h -> wmmintrin.h -> nmmintrin.h -> smmintrin.h -> tmmintrin.h -> pmmintrin.h -> emmintrin.h
