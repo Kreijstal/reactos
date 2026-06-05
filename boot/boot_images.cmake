@@ -29,8 +29,12 @@ if(DEFINED EFI_PLATFORM_ID)
         unset(_efisys_boot_depends)
     endif()
 
+    # The EFI boot image is consumed by mkisofs with -no-emul-boot, so it is not
+    # bound to real floppy geometry and can be sized freely. amd64 Debug uefildr.efi
+    # (full debug info) exceeds the 2.88 MB (5760-sector) image, so use a 5.76 MB
+    # (11520-sector) image to leave headroom across all archs and configurations.
     add_custom_target(efisys
-        COMMAND native-fatten ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin -format 5760 EFIBOOT
+        COMMAND native-fatten ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin -format 11520 EFIBOOT
             ${_efisys_boot_options}
             -mkdir EFI -mkdir EFI/BOOT -add $<TARGET_FILE:uefildr> EFI/BOOT/boot${EFI_PLATFORM_ID}.efi
         DEPENDS native-fatten ${_efisys_boot_depends} uefildr
