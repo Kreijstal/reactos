@@ -109,7 +109,6 @@
 @ stdcall -arch=x86_64 KeGetCurrentIrql() ntoskrnl.KeGetCurrentIrql
 @ stdcall -arch=arm64 KeGetCurrentIrql() ntoskrnl.KeGetCurrentIrql
 @ stdcall -arch=i386,arm KeLowerIrql(long)
-@ stdcall -arch=x86_64,arm64 KeLowerIrql(long) ntoskrnl.KeLowerIrql
 @ stdcall KeQueryPerformanceCounter(ptr)
 @ stdcall -arch=i386,arm KeRaiseIrql(long ptr)
 @ stdcall -arch=arm64 KeRaiseIrql(long ptr) ntoskrnl.KeRaiseIrql
