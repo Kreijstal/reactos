@@ -14,12 +14,19 @@
 /* When building with Clang, use Clang's own intrinsics headers instead. */
 #if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64))
 #if __has_include_next(<emmintrin.h>)
+/* Pull in the ReactOS SSE1 layer first: it forwards to Clang's own
+ * <xmmintrin.h> and, crucially, defines the __ATTRIBUTE_SSE__ compat macro
+ * that ReactOS code (e.g. msvcrt/math.c) relies on.  Without this the macro
+ * is left undefined here, because the include below sits in the #else arm. */
+#include <xmmintrin.h>
 #include_next <emmintrin.h>
 #define _REACTOS_EMMINTRIN_USING_NEXT
 #endif
 #endif
 
 #if defined(_REACTOS_EMMINTRIN_USING_NEXT)
+/* Clang supplies the SSE2 intrinsics and types; __ATTRIBUTE_SSE__ comes from
+ * the <xmmintrin.h> pulled in above. */
 #elif defined(_M_ARM64) || defined(__aarch64__)
 /* ARM64: no x86 intrinsics */
 #else

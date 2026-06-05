@@ -22,6 +22,19 @@
 #ifndef _MMINTRIN_H_INCLUDED
 #define _MMINTRIN_H_INCLUDED
 
+/* When building with Clang, use Clang's own intrinsics header instead.  The
+ * ReactOS version uses GCC __builtin_ia32_* builtins and typedefs; Clang's own
+ * SSE headers reach down to <mmintrin.h> and expect their own vector typedefs
+ * (e.g. __v2di), so forward to Clang's <mmintrin.h> to keep them consistent. */
+#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64))
+#if __has_include_next(<mmintrin.h>)
+#include_next <mmintrin.h>
+#define _REACTOS_MMINTRIN_USING_NEXT
+#endif
+#endif
+
+#if !defined(_REACTOS_MMINTRIN_USING_NEXT) && !defined(_M_ARM64) && !defined(__aarch64__)
+
 #include <vcruntime.h>
 
 #ifdef __cplusplus
@@ -658,5 +671,7 @@ __INTRIN_INLINE_MMX __m64 _mm_set1_pi8(char b)
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* !_REACTOS_MMINTRIN_USING_NEXT */
 
 #endif /* _MMINTRIN_H_INCLUDED */
