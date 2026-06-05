@@ -1406,6 +1406,165 @@ PatchNextOffset(BYTE *base, ULONG recOffset, ULONG delta)
     *p = delta;
 }
 
+/* ASCII-fold a single UTF-16 code unit for case-insensitive name matching.
+ * Filenames on the wire are predominantly ASCII; non-ASCII units compare
+ * exactly, which is correct (just not Unicode-case-folded). */
+static __inline WCHAR
+Smb2dUpcaseW(WCHAR c)
+{
+    return (c >= L'a' && c <= L'z') ? (WCHAR)(c - (L'a' - L'A')) : c;
+}
+
+/* NT DOS wildcards (xdk/iotypes.h, unavailable in usermode) that the
+ * Win32->NT layer substitutes for patterns like "*.bat": DOS_STAR matches a
+ * run up to the final dot, DOS_QM a single non-dot unit, DOS_DOT a dot or the
+ * implicit end-of-name. */
+#define SMB2D_DOS_STAR  (L'<')
+#define SMB2D_DOS_QM    (L'>')
+#define SMB2D_DOS_DOT   (L'"')
+
+/*
+ * Match a directory entry name against the NT search expression that
+ * FindFirstFile/QueryDirectory shipped (e.g. "test.txt", "*", "*.txt",
+ * or the DOS-wildcard form).  This is a faithful port of the ntoskrnl
+ * FsRtlIsNameInExpressionPrivate backtracking matcher (case-insensitive via
+ * ASCII fold), so '*' '?' and DOS_STAR/DOS_QM/DOS_DOT behave exactly as the
+ * kernel's.  Without it the daemon returns the WHOLE directory for every
+ * query, so `dir \\srv\f` / `copy \\srv\f dst` (both expand via
+ * FindFirstFile) end up walking the entire share.  patLen/nameLen are WCHAR
+ * counts.  Positions mirror the kernel's byte-based "pos*2(+offset)" scheme.
+ *
+ * The back-tracking arrays grow at most ~2*patLen+1 entries; SMB path
+ * components cap at 255 WCHARs, so 520 fixed slots never overflow and no
+ * dynamic allocation (the kernel's rare-case path) is needed.
+ */
+static int
+Smb2dNameMatchesSpec(const WCHAR *Expr, int patLen,
+                     const WCHAR *Name, int nameLen)
+{
+    const int ExprLen = patLen * (int)sizeof(WCHAR);   /* byte length */
+    const int NameLen = nameLen * (int)sizeof(WCHAR);
+    int Offset, Position, BackTrackingPosition, OldBackTrackingPosition;
+    USHORT BackTrackingBuffer[520], OldBackTrackingBuffer[520];
+    USHORT *BackTrackingSwap, *BackTracking = BackTrackingBuffer;
+    USHORT *OldBackTracking = OldBackTrackingBuffer;
+    int ExpressionPosition, NamePosition = 0, MatchingChars = 1;
+    int EndOfName = 0;
+    int DontSkipDot;
+    WCHAR CompareChar, ExprChar;
+
+    if (NameLen == 0 || ExprLen == 0)
+        return (NameLen == 0 && ExprLen == 0) ? 1 : 0;
+
+    /* Shortcut: a bare "*" matches everything. */
+    if (patLen == 1 && Expr[0] == L'*')
+        return 1;
+
+    /* Patterns longer than the back-tracking buffers can describe don't occur
+     * for real path components; match conservatively rather than overflow. */
+    if (patLen > 255)
+        return 1;
+
+    memset(OldBackTrackingBuffer, 0, sizeof(OldBackTrackingBuffer));
+
+    for (; !EndOfName; MatchingChars = BackTrackingPosition, NamePosition++)
+    {
+        OldBackTrackingPosition = BackTrackingPosition = 0;
+
+        if (NamePosition >= nameLen)
+        {
+            EndOfName = 1;
+            if (MatchingChars && OldBackTracking[MatchingChars - 1] == ExprLen * 2)
+                break;
+        }
+
+        while (MatchingChars > OldBackTrackingPosition)
+        {
+            ExpressionPosition = (OldBackTracking[OldBackTrackingPosition++] + 1) / 2;
+
+            for (Offset = 0; ExpressionPosition < ExprLen; Offset = (int)sizeof(WCHAR))
+            {
+                ExpressionPosition += Offset;
+
+                if (ExpressionPosition == ExprLen)
+                {
+                    BackTracking[BackTrackingPosition++] = (USHORT)(ExprLen * 2);
+                    break;
+                }
+
+                ExprChar = Expr[ExpressionPosition / sizeof(WCHAR)];
+                CompareChar = (NamePosition >= nameLen)
+                              ? 0 : Smb2dUpcaseW(Name[NamePosition]);
+
+                if (Smb2dUpcaseW(ExprChar) == CompareChar && !EndOfName)
+                {
+                    BackTracking[BackTrackingPosition++] =
+                        (USHORT)((ExpressionPosition + sizeof(WCHAR)) * 2);
+                }
+                else if (ExprChar == L'?' && !EndOfName)
+                {
+                    BackTracking[BackTrackingPosition++] =
+                        (USHORT)((ExpressionPosition + sizeof(WCHAR)) * 2);
+                }
+                else if (ExprChar == L'*')
+                {
+                    BackTracking[BackTrackingPosition++] = (USHORT)(ExpressionPosition * 2);
+                    BackTracking[BackTrackingPosition++] = (USHORT)((ExpressionPosition * 2) + 3);
+                    continue;
+                }
+                else if (ExprChar == SMB2D_DOS_STAR)
+                {
+                    DontSkipDot = 1;
+                    if (!EndOfName && Name[NamePosition] == L'.')
+                    {
+                        for (Position = NamePosition + 1; Position < nameLen; Position++)
+                        {
+                            if (Name[Position] == L'.') { DontSkipDot = 0; break; }
+                        }
+                    }
+                    if (EndOfName || Name[NamePosition] != L'.' || !DontSkipDot)
+                        BackTracking[BackTrackingPosition++] = (USHORT)(ExpressionPosition * 2);
+                    BackTracking[BackTrackingPosition++] = (USHORT)((ExpressionPosition * 2) + 3);
+                    continue;
+                }
+                else if (ExprChar == SMB2D_DOS_DOT)
+                {
+                    if (EndOfName) continue;
+                    if (Name[NamePosition] == L'.')
+                        BackTracking[BackTrackingPosition++] =
+                            (USHORT)((ExpressionPosition + sizeof(WCHAR)) * 2);
+                }
+                else if (ExprChar == SMB2D_DOS_QM)
+                {
+                    if (EndOfName || Name[NamePosition] == L'.') continue;
+                    BackTracking[BackTrackingPosition++] =
+                        (USHORT)((ExpressionPosition + sizeof(WCHAR)) * 2);
+                }
+
+                break;
+            }
+
+            for (Position = 0;
+                 MatchingChars > OldBackTrackingPosition && Position < BackTrackingPosition;
+                 Position++)
+            {
+                while (MatchingChars > OldBackTrackingPosition &&
+                       BackTracking[Position] > OldBackTracking[OldBackTrackingPosition])
+                {
+                    ++OldBackTrackingPosition;
+                }
+            }
+        }
+
+        BackTrackingSwap = BackTracking;
+        BackTracking = OldBackTracking;
+        OldBackTracking = BackTrackingSwap;
+    }
+
+    return (MatchingChars > 0 &&
+            OldBackTracking[MatchingChars - 1] == ExprLen * 2) ? 1 : 0;
+}
+
 /*
  * OP_READDIR: walk smb2_readdir() and lay down NT dir-info records into a
  * staging buffer.  The kernel side hands us MaxOutputLen bytes of capacity
@@ -1443,12 +1602,24 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
     BOOL haveLast = FALSE;
     BOOL more = FALSE;
     ULONG totalReply;
+    const WCHAR *spec = NULL;
+    int specLen = 0;
 
     *outWritten = 0;
 
     if (inLen < sizeof(hdr)) return STATUS_INVALID_PARAMETER;
     if (outCap < sizeof(SMB2D_OP_READDIR_OUT)) return STATUS_INVALID_PARAMETER;
     memcpy(&hdr, in, sizeof(hdr));
+
+    /* The NT search expression (FileSpecLen bytes of UTF-16, not NUL-
+     * terminated) follows the header.  Entries that don't match it must be
+     * skipped; otherwise FindFirstFile-driven callers see the whole dir. */
+    if (hdr.FileSpecLen > 0 &&
+        inLen >= sizeof(SMB2D_OP_READDIR_IN) + hdr.FileSpecLen)
+    {
+        spec = (const WCHAR *)(in + sizeof(SMB2D_OP_READDIR_IN));
+        specLen = (int)(hdr.FileSpecLen / sizeof(WCHAR));
+    }
 
     smb2d_log("smb2d: OP_READDIR fh=0x%llx class=%lu maxout=%lu restart=%lu "
               "single=%lu\n",
@@ -1532,6 +1703,12 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
             wnameBytes = (ULONG)wlen * (ULONG)sizeof(WCHAR);
             (void)wnameBytes;
         }
+
+        /* Apply the NT search expression.  "." and ".." are synthesised by
+         * rdbss for the root, so only real entries reach here; skip any that
+         * the caller's pattern excludes. */
+        if (spec != NULL && !Smb2dNameMatchesSpec(spec, specLen, wname, wlen))
+            continue;
 
         recTotal = EncodeDirEntry(hdr.InfoClass, payload, bytesWritten,
                                   payloadCap, e, wname, wlen);
