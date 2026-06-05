@@ -118,7 +118,7 @@ PspDumpProcessInfoClassName(
         return ProcessInfoClasses[ProcessInformationClass];
     }
 
-    sprintf(UnknownClassName, "%lu", ProcessInformationClass);
+    sprintf(UnknownClassName, "%lu", (ULONG)ProcessInformationClass);
     return UnknownClassName;
 }
 
@@ -196,7 +196,7 @@ PspDumpThreadInfoClassName(
         return ThreadInfoClasses[ThreadInformationClass];
     }
 
-    sprintf(UnknownClassName, "%lu", ThreadInformationClass);
+    sprintf(UnknownClassName, "%lu", (ULONG)ThreadInformationClass);
     return UnknownClassName;
 }
 #endif // #if DBG
@@ -1271,43 +1271,12 @@ NtQueryInformationProcess(
                                                NULL);
             if (!NT_SUCCESS(Status)) break;
 
-#ifdef _WIN64
+#if defined(_WIN64) && defined(_M_AMD64)
             /* Make sure the process isn't dying */
             if (ExAcquireRundownProtection(&Process->RundownProtect))
             {
-                /* FIXME: A two-part hack: delay setting Process->Wow64Process,
-                   so 64-bit NTDLL can use IO to init stuff. */
-                if (Process->Wow64Process == (PVOID)TRUE)
-                {
-                    PsChargeProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-                    Process->Wow64Process = ExAllocatePool(NonPagedPool, sizeof(WOW64_PROCESS));
-                    if (!Process->Wow64Process)
-                    {
-                        PsReturnProcessNonPagedPoolQuota(Process, sizeof(WOW64_PROCESS));
-
-                        Status = STATUS_NO_MEMORY;
-                        Process->Wow64Process = (PVOID)TRUE;
-                    }
-                    else
-                    {
-                        Process->Wow64Process->Wow64 = (PVOID)((ULONG_PTR)(Process->Peb) + ROUND_TO_PAGES(sizeof(PEB)));
-                    }
-                }
-
                 /* Get the WOW64 process structure */
-                if (Process->Wow64Process == NULL)
-                {
-                    Wow64 = 0;
-                }
-                /* FIXME */
-                else if (Process->Wow64Process == (PVOID)TRUE)
-                {
-                    Wow64 = TRUE;
-                }
-                else
-                {
-                    Wow64 = (ULONG_PTR)Process->Wow64Process->Wow64;
-                }
+                Wow64 = (ULONG_PTR)Process->Wow64Process;
                 /* Release the lock */
                 ExReleaseRundownProtection(&Process->RundownProtect);
             }
@@ -2278,7 +2247,7 @@ NtSetInformationProcess(
             DPRINT1("Handle tracing not implemented\n");
             Status = STATUS_NOT_IMPLEMENTED;
             break;
-        
+
         /* Anything else is invalid */
         default:
 #if DBG

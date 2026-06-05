@@ -29,6 +29,9 @@
 
 #include <cportlib/cportlib.h>
 #include <cportlib/uartinfo.h>
+#if defined(_M_ARM64) && defined(UEFIBOOT)
+#include <reactos/arm64/early_uart.h>
+#endif
 
 /* STATIC VARIABLES ***********************************************************/
 
@@ -44,6 +47,16 @@ Rs232PortInitialize(
     _In_ ULONG BaudRate)
 {
     NTSTATUS Status;
+
+#if defined(_M_ARM64) && defined(UEFIBOOT)
+    UNREFERENCED_PARAMETER(BaudRate);
+
+    if (PortAddress)
+        return FALSE;
+
+    EarlyUartInitialize(0);
+    return EarlyUartReady();
+#endif
 
     /* Check whether it's the first time we initialize a COM port.
      * If not, check whether the specified one was already initialized. */
@@ -64,6 +77,9 @@ Rs232PortInitialize(
         for (ComPort = MAX_COM_PORTS; ComPort > 0; ComPort--)
         {
             PortAddress = UlongToPtr(BaseArray[ComPort]);
+            if (!PortAddress)
+                continue;
+
             if (CpDoesPortExist(PortAddress))
                 break;
         }
@@ -100,6 +116,11 @@ BOOLEAN Rs232PortPollByte(PUCHAR ByteReceived)
 
 VOID Rs232PortPutByte(UCHAR ByteToSend)
 {
+#if defined(_M_ARM64) && defined(UEFIBOOT)
+    EarlyUartPutc((CHAR)ByteToSend);
+    return;
+#endif
+
     if (!Rs232ComPort) return;
     CpPutByte(&Rs232ComPortInfo, ByteToSend);
 }

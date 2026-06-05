@@ -50,7 +50,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
     PBOOT_SECTOR BootSector;
     NTSTATUS Status;
 
-    DPRINT1("NtfsHasFileSystem() called for device %p\n", DeviceToMount);
+    DPRINT("NtfsHasFileSystem() called for device %p\n", DeviceToMount);
 
     Size = sizeof(DISK_GEOMETRY);
     Status = NtfsDeviceIoControl(DeviceToMount,
@@ -62,7 +62,7 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
                                  TRUE);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
+        DPRINT("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
         return Status;
     }
 
@@ -79,13 +79,13 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
                                      TRUE);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
+            DPRINT("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
             return Status;
         }
 
         if (PartitionInfo.PartitionType != PARTITION_IFS)
         {
-            DPRINT1("Invalid partition type\n");
+            DPRINT("Invalid partition type\n");
             return STATUS_UNRECOGNIZED_VOLUME;
         }
     }
@@ -555,7 +555,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     /* $UsnJrnl bootstrap (Kreijstal/reactos#33): if the volume already has
      * a journal on disk, bring its state into the Vcb so subsequent
      * FSCTLs and emission hooks see a live UsnJournalFcb.  A failure is
-     * benign — the volume mounts, the journal simply stays inactive. */
+     * benign - the volume mounts, the journal simply stays inactive. */
     (void)NtfsUsnLoadJournal(Vcb);
 
     /* Disk-quota bootstrap (Kreijstal/reactos#37): probe \$Extend\$Quota
@@ -585,6 +585,19 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
                     LogStatus);
             Vcb->Flags |= VCB_VOLUME_READ_ONLY;
         }
+    }
+
+    /* Precompute and cache the free-cluster count so the first
+     * IRP_MJ_QUERY_VOLUME_INFORMATION returns immediately.  On slow media
+     * (USB-MSC) reading $Bitmap sector-by-sector takes tens of seconds;
+     * doing it once here, behind the mount IRP rather than on the hot
+     * loader path, hides that cost.  Failures fall back to lazy compute
+     * (cache stays invalid). */
+    {
+        ULONGLONG FreeClusters = NtfsGetFreeClusters(Vcb);
+        /* NtfsGetFreeClusters already stores the value and sets
+         * CachedFreeClustersValid=1 on success; nothing else to do. */
+        (void)FreeClusters;
     }
 
     Status = STATUS_SUCCESS;
@@ -1300,7 +1313,7 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
      * state from the (now freshly written) on-disk metadata.  The VPB
      * we want to clear is the one shared with the storage device, which
      * NtfsMountVolume hooked into the file system DeviceObject as
-     * `NewDeviceObject->Vpb = DeviceToMount->Vpb;` — read it directly
+     * `NewDeviceObject->Vpb = DeviceToMount->Vpb;` - read it directly
      * from DeviceObject rather than from DeviceExt->Vpb (which the mount
      * path never assigns and is therefore NULL). */
     DeviceExt->Flags |= VCB_DISMOUNT_PENDING;
@@ -1344,6 +1357,9 @@ FsctlSetReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
         return STATUS_INVALID_PARAMETER;
     if ((ULONG)Input->ReparseDataLength + REPARSE_DATA_BUFFER_HEADER_SIZE > InputLength)
         return STATUS_IO_REPARSE_DATA_INVALID;
+
+    /* Invalidate FCB-level MFT record cache: reparse data about to change. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -1435,6 +1451,9 @@ FsctlDeleteReparsePoint(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
         return STATUS_INVALID_PARAMETER;
     Fcb = FileObject->FsContext;
 
+    /* Invalidate FCB-level MFT record cache: reparse data about to be removed. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1520,6 +1539,9 @@ FsctlSetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     if (Input == NULL || InputLength < sizeof(FILE_OBJECTID_BUFFER))
         return STATUS_INVALID_PARAMETER;
 
+    /* Invalidate FCB-level MFT record cache: $OBJECT_ID about to change. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -1562,6 +1584,9 @@ FsctlCreateOrGetObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
     if (Output == NULL || OutputLength < sizeof(FILE_OBJECTID_BUFFER))
         return STATUS_BUFFER_TOO_SMALL;
+
+    /* Invalidate FCB-level MFT record cache: may create a new $OBJECT_ID. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -1612,6 +1637,9 @@ FsctlDeleteObjectId(PDEVICE_EXTENSION DeviceExt, PIRP Irp)
     if (FileObject == NULL || FileObject->FsContext == NULL)
         return STATUS_INVALID_PARAMETER;
     Fcb = FileObject->FsContext;
+
+    /* Invalidate FCB-level MFT record cache: $OBJECT_ID about to be removed. */
+    NtfsInvalidateCachedFileRecord(Fcb);
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -1754,7 +1782,7 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
-        /* USN journal FSCTLs — first slice (Kreijstal/reactos#33).
+        /* USN journal FSCTLs - first slice (Kreijstal/reactos#33).
          * CREATE / ENUM / READ are wired; the remaining four keep the
          * legacy "no journal" fallback for now, since their semantics
          * depend on bookkeeping (LowestValidUsn, CCB-cached reasons,
@@ -1893,7 +1921,7 @@ NtfsFileSystemControl(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_OBJECT DeviceObject;
 
     DPRINT("NtfsFileSystemControl() called\n");
-    DPRINT1("NtfsFileSystemControl: MinorFunction=%d\n", IrpContext->MinorFunction);
+    DPRINT("NtfsFileSystemControl: MinorFunction=%d\n", IrpContext->MinorFunction);
 
     DeviceObject = IrpContext->DeviceObject;
     Irp = IrpContext->Irp;

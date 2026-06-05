@@ -16,7 +16,9 @@ KMT_TESTFUNC Test_ExHardErrorInteractive;
 KMT_TESTFUNC Test_ExInterlocked;
 KMT_TESTFUNC Test_ExPools;
 KMT_TESTFUNC Test_ExResource;
+#if !defined(_M_ARM64)
 KMT_TESTFUNC Test_ExSequencedList;
+#endif
 KMT_TESTFUNC Test_ExSingleList;
 KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExUuid;
@@ -34,6 +36,7 @@ KMT_TESTFUNC Test_IoCreateFile;
 KMT_TESTFUNC Test_IoDeviceInterface;
 KMT_TESTFUNC Test_IoEvent;
 KMT_TESTFUNC Test_IoFilesystem;
+KMT_TESTFUNC Test_IoFilesystemStress;
 KMT_TESTFUNC Test_IoInterrupt;
 KMT_TESTFUNC Test_IoIrp;
 KMT_TESTFUNC Test_IoMdl;
@@ -91,6 +94,7 @@ KMT_TESTFUNC Test_ZwAllocateVirtualMemory;
 KMT_TESTFUNC Test_ZwCreateSection;
 KMT_TESTFUNC Test_ZwMapViewOfSection;
 KMT_TESTFUNC Test_ZwWaitForMultipleObjects;
+KMT_TESTFUNC Test_XhciBulkTrb;
 
 const KMT_TEST TestList[] =
 {
@@ -103,7 +107,9 @@ const KMT_TEST TestList[] =
     { "ExInterlocked",                      Test_ExInterlocked },
     { "ExPools",                            Test_ExPools },
     { "ExResource",                         Test_ExResource },
+#if !defined(_M_ARM64)
     { "ExSequencedList",                    Test_ExSequencedList },
+#endif
     { "ExSingleList",                       Test_ExSingleList },
     { "-ExTimer",                           Test_ExTimer },
     { "ExUuid",                             Test_ExUuid },
@@ -122,6 +128,7 @@ const KMT_TEST TestList[] =
     { "IoDeviceInterface",                  Test_IoDeviceInterface },
     { "IoEvent",                            Test_IoEvent },
     { "IoFilesystem",                       Test_IoFilesystem },
+    { "IoFilesystemStress",                 Test_IoFilesystemStress },
     { "IoInterrupt",                        Test_IoInterrupt },
     { "IoIrp",                              Test_IoIrp },
     { "IoMdl",                              Test_IoMdl },
@@ -178,6 +185,7 @@ const KMT_TEST TestList[] =
     { "ZwCreateSection",                    Test_ZwCreateSection },
     { "ZwMapViewOfSection",                 Test_ZwMapViewOfSection },
     { "ZwWaitForMultipleObjects",           Test_ZwWaitForMultipleObjects},
+    { "XhciBulkTrb",                        Test_XhciBulkTrb },
 #ifdef _M_AMD64
     { "RtlCaptureContextKM",                Test_RtlCaptureContext },
 #endif

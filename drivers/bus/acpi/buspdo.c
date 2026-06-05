@@ -817,6 +817,15 @@ Bus_PDO_QueryResources(
     ULONG i;
     ULONGLONG BusNumber;
     struct acpi_device *device;
+    BOOLEAN IsPciIrqLink;
+
+    /* PNP0C0F is the PCI Interrupt Link Device.  Its _CRS reports the
+     * single ISA-side IRQ that one or more PCI INTx pins are wired to via
+     * _PRT.  PCI INTx is shareable by definition, so an IRQ exposed
+     * through a PCI link device is shareable too -- regardless of what
+     * the IRQNoFlags() byte in the BIOS template happened to say. */
+    IsPciIrqLink = (DeviceData->HardwareIDs != NULL &&
+                    wcsstr(DeviceData->HardwareIDs, L"PNP0C0F") != NULL);
 
     if (!DeviceData->AcpiHandle)
     {
@@ -984,9 +993,9 @@ Bus_PDO_QueryResources(
                     ResourceDescriptor->Type = CmResourceTypeInterrupt;
 
                     ResourceDescriptor->ShareDisposition =
-                    (irq_data->Shareable == ACPI_SHARED ? CmResourceShareShared : CmResourceShareDeviceExclusive);
+                    ((irq_data->Shareable == ACPI_SHARED) || IsPciIrqLink ? CmResourceShareShared : CmResourceShareDeviceExclusive);
                     ResourceDescriptor->Flags =
-                    (irq_data->Triggering == ACPI_LEVEL_SENSITIVE ? CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE : CM_RESOURCE_INTERRUPT_LATCHED);
+                    ((irq_data->Triggering == ACPI_LEVEL_SENSITIVE) || IsPciIrqLink ? CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE : CM_RESOURCE_INTERRUPT_LATCHED);
                     ResourceDescriptor->u.Interrupt.Level =
                     ResourceDescriptor->u.Interrupt.Vector = irq_data->Interrupts[i];
                     ResourceDescriptor->u.Interrupt.Affinity = (KAFFINITY)(-1);
@@ -1003,9 +1012,9 @@ Bus_PDO_QueryResources(
                     ResourceDescriptor->Type = CmResourceTypeInterrupt;
 
                     ResourceDescriptor->ShareDisposition =
-                    (irq_data->Shareable == ACPI_SHARED ? CmResourceShareShared : CmResourceShareDeviceExclusive);
+                    ((irq_data->Shareable == ACPI_SHARED) || IsPciIrqLink ? CmResourceShareShared : CmResourceShareDeviceExclusive);
                     ResourceDescriptor->Flags =
-                    (irq_data->Triggering == ACPI_LEVEL_SENSITIVE ? CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE : CM_RESOURCE_INTERRUPT_LATCHED);
+                    ((irq_data->Triggering == ACPI_LEVEL_SENSITIVE) || IsPciIrqLink ? CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE : CM_RESOURCE_INTERRUPT_LATCHED);
                     ResourceDescriptor->u.Interrupt.Level =
                     ResourceDescriptor->u.Interrupt.Vector = irq_data->Interrupts[i];
                     ResourceDescriptor->u.Interrupt.Affinity = (KAFFINITY)(-1);

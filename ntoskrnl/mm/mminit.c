@@ -70,13 +70,31 @@ MiInitSystemMemoryAreas(VOID)
 
     MmLockAddressSpace(MmGetKernelAddressSpace());
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_ARM64)
     // Reserved range FFFF800000000000 - FFFFF68000000000
     MiCreateArm3StaticMemoryArea((PVOID)MI_REAL_SYSTEM_RANGE_START, PTE_BASE - MI_REAL_SYSTEM_RANGE_START, FALSE);
-#endif /* _M_AMD64 */
+#endif
 
     // The loader mappings. The only Executable area.
+#ifdef _M_ARM64
+    MiCreateArm3StaticMemoryArea((PVOID)MI_ARM64_BOOT_IMAGE_BASE, MmBootImageSize, TRUE);
+#else
     MiCreateArm3StaticMemoryArea((PVOID)KSEG0_BASE, MmBootImageSize, TRUE);
+#endif
+
+#ifdef _M_ARM64
+    /*
+     * The boot image lives in the first Win64-style loader slot. Keep the
+     * rest of that slot out of the generic memory-area allocator.
+     */
+    if ((MI_ARM64_BOOT_IMAGE_BASE + MmBootImageSize) < MI_SYSTEM_SPACE_START)
+    {
+        MiCreateArm3StaticMemoryArea((PVOID)(MI_ARM64_BOOT_IMAGE_BASE + MmBootImageSize),
+                                     MI_SYSTEM_SPACE_START -
+                                         (MI_ARM64_BOOT_IMAGE_BASE + MmBootImageSize),
+                                     FALSE);
+    }
+#endif
 
     // The PTE base
     MiCreateArm3StaticMemoryArea((PVOID)PTE_BASE, PTE_TOP - PTE_BASE + 1, FALSE);
@@ -113,8 +131,10 @@ MiInitSystemMemoryAreas(VOID)
     MiCreateArm3StaticMemoryArea((PVOID)MM_HAL_VA_START, MM_HAL_VA_END - MM_HAL_VA_START + 1, FALSE);
 #else /* _X86_ */
 #ifndef _M_AMD64
+#if !defined(_M_ARM64)
     // KPCR, one page per CPU. Only for 32-bit kernel.
     MiCreateArm3StaticMemoryArea(PCR, PAGE_SIZE * KeNumberProcessors, FALSE);
+#endif
 #endif /* _M_AMD64 */
 
     // KUSER_SHARED_DATA
@@ -132,10 +152,17 @@ MiDbgDumpAddressSpace(VOID)
     //
     // Print the memory layout
     //
+#ifdef _M_ARM64
+    DPRINT1("          0x%p - 0x%p\t%s\n",
+            (PVOID)(ULONG_PTR)MI_ARM64_BOOT_IMAGE_BASE,
+            (PVOID)(ULONG_PTR)(MI_ARM64_BOOT_IMAGE_BASE + MmBootImageSize),
+            "Boot Loaded Image");
+#else
     DPRINT1("          0x%p - 0x%p\t%s\n",
             KSEG0_BASE,
             (ULONG_PTR)KSEG0_BASE + MmBootImageSize,
             "Boot Loaded Image");
+#endif
 #ifdef _M_IX86
     DPRINT1("          0x%p - 0x%p\t%s\n",
             MmSystemPteSpaceStart,
@@ -311,4 +338,3 @@ MmInitSystem(IN ULONG Phase,
 
     return TRUE;
 }
-

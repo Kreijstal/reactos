@@ -162,7 +162,9 @@ KiInitializeContextThread(IN PKTHREAD Thread,
 
         /* Set the Thread's NPX State */
         Thread->NpxState = NPX_STATE_NOT_LOADED;
+#if (NTDDI_VERSION < NTDDI_WIN7)
         Thread->Header.NpxIrql = PASSIVE_LEVEL;
+#endif
 
         /* Disable any debug registers */
         Context->ContextFlags &= ~CONTEXT_DEBUG_REGISTERS;
@@ -355,14 +357,18 @@ KiSwapContextExit(IN PKTHREAD OldThread,
         }
 
         /* Switch address space and flush TLB */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        __writecr3(NewProcess->DirectoryTableBase);
+#else
         __writecr3(NewProcess->DirectoryTableBase[0]);
+#endif
     }
 
     /* Clear GS */
     Ke386SetGs(0);
 
     /* Set the TEB */
-    KiSetTebBase((PKPCR)Pcr, &NewThread->Teb->NtTib);
+    KiSetTebBase((PKPCR)Pcr, &((PTEB)NewThread->Teb)->NtTib);
 
     /* Set new TSS fields */
     Pcr->TSS->Esp0 = (ULONG_PTR)NewThread->InitialStack;
@@ -438,7 +444,9 @@ KiSwapContextEntry(IN PKSWITCHFRAME SwitchFrame,
     OldThread->KernelStack = SwitchFrame;
 
     /* Set swapbusy to false for the new thread */
+#if (NTDDI_VERSION < NTDDI_WIN7)
     NewThread->SwapBusy = FALSE;
+#endif
 
     /* ISRs can change FPU state, so disable interrupts while checking */
     _disable();

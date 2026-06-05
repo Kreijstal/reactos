@@ -2,8 +2,20 @@
 #include <stdint.h>
 #include <intrin.h>
 #include <malloc.h>
+#include <setjmp.h>
+#include <string.h>
+#include <wchar.h>
 #define _USE_MATH_DEFINES
 #include <math.h>
+
+#if defined(_MSC_VER) && !defined(__clang__)
+#define UCRTBASE_EXPORT_NAME(name) name
+#define UCRTBASE_ASM_NAME(name)
+#pragma function(_lrotl, _lrotr, _rotl, _rotr, _rotl64, _rotr64)
+#else
+#define UCRTBASE_EXPORT_NAME(name) ucrtbase##name
+#define UCRTBASE_ASM_NAME(name) __asm__(#name)
+#endif
 
 // atexit is needed by libsupc++
 extern int __cdecl _crt_atexit(void (__cdecl*)(void));

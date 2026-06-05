@@ -122,8 +122,35 @@ int need_mount(void)
     return FR_OK;
 }
 
+int force_mount(void)
+{
+    int r;
+
+    if (isMounted)
+    {
+        r = f_mount(NULL, "0:", 0);
+        isMounted = 0;
+        if (r)
+            return r;
+    }
+
+    r = f_mount(&g_Filesystem, "0:", 1);
+    if (r)
+        return r;
+
+    isMounted = 1;
+    return FR_OK;
+}
+
 #define NEED_MOUNT() \
     do { ret = need_mount(); if(ret) \
+    {\
+        fprintf(stderr, "Error: Could not mount disk (%d).\n", ret); \
+        goto exit; \
+    } } while(0)
+
+#define FORCE_MOUNT() \
+    do { ret = force_mount(); if(ret) \
     {\
         fprintf(stderr, "Error: Could not mount disk (%d).\n", ret); \
         goto exit; \
@@ -211,6 +238,14 @@ int main(int oargc, char* oargv[])
                 goto exit;
             }
 
+            ret = f_mount(NULL, "0:", 0);
+            isMounted = 0;
+            if (ret)
+            {
+                fprintf(stderr, "Error: Could not unmount formatted disk (%d).\n", ret);
+                goto exit;
+            }
+
             // Arg 2: custom header label (optional)
             if (nargs > 1)
             {
@@ -259,6 +294,8 @@ int main(int oargc, char* oargv[])
                     goto exit;
                 }
 
+                FORCE_MOUNT();
+
                 if (disk_read(0, buff, 0, 1))
                 {
                     fprintf(stderr, "Error: Unable to read existing boot sector from image.");
@@ -297,6 +334,7 @@ int main(int oargc, char* oargv[])
         {
             FILE* fe;
             BYTE* temp = buff + 1024;
+            size_t bootSectorSize;
 
             NEED_PARAMS(1, 1);
 
@@ -310,7 +348,8 @@ int main(int oargc, char* oargv[])
                 goto exit;
             }
 
-            if (!fread(buff, 512, 1, fe))
+            bootSectorSize = fread(buff, 1, 1024, fe);
+            if (bootSectorSize < 512)
             {
                 fprintf(stderr, "Error: Unable to read boot sector from file '%s'.", argv[0]);
                 fclose(fe);
@@ -320,7 +359,7 @@ int main(int oargc, char* oargv[])
 
             fclose(fe);
 
-            NEED_MOUNT();
+            FORCE_MOUNT();
 
             if (disk_read(0, temp, 0, 1))
             {
@@ -331,9 +370,31 @@ int main(int oargc, char* oargv[])
 
             if (g_Filesystem.fs_type == FS_FAT32)
             {
-                printf("TODO: Writing boot sectors for FAT32 images not yet supported.");
-                ret = 1;
-                goto exit;
+#define FAT32_HEADER_START 3
+#define FAT32_HEADER_END 90
+#define FAT32_EXTRA_BOOT_SECTOR 14
+
+                if (bootSectorSize < 1024)
+                {
+                    fprintf(stderr, "Error: FAT32 boot sector file '%s' is too small.", argv[0]);
+                    ret = 1;
+                    goto exit;
+                }
+
+                memcpy(buff + FAT32_HEADER_START, temp + FAT32_HEADER_START, FAT32_HEADER_END - FAT32_HEADER_START);
+                if (disk_write(0, buff, 0, 1))
+                {
+                    fprintf(stderr, "Error: Unable to write new boot sector to image.");
+                    ret = 1;
+                    goto exit;
+                }
+
+                if (disk_write(0, buff + 512, FAT32_EXTRA_BOOT_SECTOR, 1))
+                {
+                    fprintf(stderr, "Error: Unable to write FAT32 extra boot sector to image.");
+                    ret = 1;
+                    goto exit;
+                }
             }
             else
             {
@@ -341,13 +402,13 @@ int main(int oargc, char* oargv[])
 #define FAT16_HEADER_END 62
 
                 memcpy(buff + FAT16_HEADER_START, temp + FAT16_HEADER_START, FAT16_HEADER_END - FAT16_HEADER_START);
-            }
 
-            if (disk_write(0, buff, 0, 1))
-            {
-                fprintf(stderr, "Error: Unable to write new boot sector to image.");
-                ret = 1;
-                goto exit;
+                if (disk_write(0, buff, 0, 1))
+                {
+                    fprintf(stderr, "Error: Unable to write new boot sector to image.");
+                    ret = 1;
+                    goto exit;
+                }
             }
         }
         else if (strcmp(parg, "add") == 0)

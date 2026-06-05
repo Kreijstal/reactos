@@ -84,7 +84,7 @@ typedef ULONG_PTR SWAPENTRY;
 //
 #define MMDBG_COPY_MAX_SIZE         0x8
 
-#if defined(_X86_) // intenal for marea.c
+#if defined(_X86_) || defined(_M_ARM64) // internal for marea.c
 #define MI_STATIC_MEMORY_AREAS              (14)
 #else
 #define MI_STATIC_MEMORY_AREAS              (13)
@@ -145,6 +145,7 @@ typedef ULONG_PTR SWAPENTRY;
      PAGE_EXECUTE_READWRITE | \
      PAGE_EXECUTE_WRITECOPY | \
      PAGE_NOACCESS | \
+     PAGE_GUARD | \
      PAGE_NOCACHE | \
      PAGE_WRITECOMBINE)
 
@@ -177,7 +178,7 @@ typedef ULONG_PTR SWAPENTRY;
 //
 #ifdef _M_IX86
 #define MM_WAIT_ENTRY            0x7ffffc00
-#elif defined(_M_AMD64)
+#elif defined(_M_AMD64) || defined(_M_ARM64) || defined(__aarch64__)
 #define MM_WAIT_ENTRY            0x7FFFFFFFFFFFFC00ULL
 #else
 #error Unsupported architecture!
@@ -201,6 +202,7 @@ typedef struct _MM_SECTION_SEGMENT
 {
     LONG64 RefCount;
     PFILE_OBJECT FileObject;
+    LIST_ENTRY FileObjectList;
 
     FAST_MUTEX Lock;		/* lock which protects the page directory */
     LARGE_INTEGER RawLength;		/* length of the segment which is part of the mapped file */
@@ -220,6 +222,13 @@ typedef struct _MM_SECTION_SEGMENT
 	} Image;
 
 	ULONG SegFlags;
+
+	/* Number of MmMapViewInSystemSpace views currently mapping this segment.
+	 * System-space views carry no per-process rmap, so the rmap-blind reclaim
+	 * paths (the pageout trimmer and MiPurgeDataSegmentForClose on file close)
+	 * cannot find such a view and would free a frame it still maps. Both honor
+	 * this count and leave the segment's pages resident while it is nonzero. */
+	LONG SystemMapCount;
 
     ULONGLONG LastPage;
 
@@ -245,6 +254,7 @@ typedef struct _MM_IMAGE_SECTION_OBJECT
 #define MM_SEGMENT_INDELETE                 (0x4)
 #define MM_SEGMENT_INCREATE                 (0x8)
 #define MM_IMAGE_SECTION_FLUSH_DELETE       (0x10)
+#define MM_DATAFILE_SEGMENT_FILE_REF        (0x20)
 
 
 #define MA_GetStartingAddress(_MemoryArea) ((_MemoryArea)->VadNode.StartingVpn << PAGE_SHIFT)
@@ -263,6 +273,7 @@ typedef struct _MEMORY_AREA
     {
         LONGLONG ViewOffset;
         PMM_SECTION_SEGMENT Segment;
+        PVOID SectionObject;
         LIST_ENTRY RegionListHead;
     } SectionData;
 } MEMORY_AREA, *PMEMORY_AREA;
@@ -854,6 +865,16 @@ MmAccessFault(
     IN PVOID TrapInformation
 );
 
+NTSTATUS
+NTAPI
+MmAccessFaultEx(
+    IN ULONG FaultCode,
+    IN PVOID Address,
+    IN KPROCESSOR_MODE Mode,
+    IN PVOID TrapInformation,
+    IN BOOLEAN AddressSpaceLocked
+);
+
 /* process.c *****************************************************************/
 
 PVOID
@@ -1039,7 +1060,19 @@ MiReleasePfnLockFromDpcLevel(VOID)
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 }
 
+#if defined(_M_ARM64)
+extern volatile LONG MiArm64PfnLockDepth[MAXIMUM_PROCESSORS];
+#define MI_ASSERT_PFN_LOCK_HELD()                                      \
+    do                                                                 \
+    {                                                                  \
+        ULONG CpuIndex = KeGetCurrentProcessorNumber();                \
+        NT_ASSERT((KeGetCurrentIrql() >= DISPATCH_LEVEL) &&            \
+                  (CpuIndex < MAXIMUM_PROCESSORS) &&                   \
+                  (MiArm64PfnLockDepth[CpuIndex] > 0));                \
+    } while (0)
+#else
 #define MI_ASSERT_PFN_LOCK_HELD() NT_ASSERT((KeGetCurrentIrql() >= DISPATCH_LEVEL) && (MmPfnLock != 0))
+#endif
 
 FORCEINLINE
 PMMPFN
@@ -1689,6 +1722,12 @@ MmGrowKernelStack(
     IN PVOID StackPointer
 );
 
+NTSTATUS
+NTAPI
+MmGrowKernelStackEx(
+    _In_ PVOID StackPointer,
+    _In_ ULONG GrowSize);
+
 
 FORCEINLINE
 VOID
@@ -1703,7 +1742,7 @@ MmLockAddressSpace(PMMSUPPORT AddressSpace)
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     /*
      * At Vista+, AddressCreationLock is EX_PUSH_LOCK.
-     * Enter guarded region to disable APCs — callers downstream
+     * Enter guarded region to disable APCs - callers downstream
      * (MiLockProcessWorkingSetUnsafe) assert APCs are disabled.
      * KeAcquireGuardedMutex did this implicitly at pre-Vista.
      */

@@ -15,6 +15,8 @@
 
 #include <ntoskrnl.h>
 
+#ifndef _M_ARM64
+
 #define KBD_STATUS_REG          0x64
 #define KBD_CNTL_REG            0x64
 #define KBD_DATA_REG            0x60
@@ -143,5 +145,26 @@ KdbpTryGetCharKeyboard(PULONG ScanCode, ULONG Retry)
 
     return -1;
 }
+
+#else
+
+VOID KbdEnableMouse(VOID)
+{
+}
+
+VOID KbdDisableMouse(VOID)
+{
+}
+
+CHAR
+KdbpTryGetCharKeyboard(PULONG ScanCode, ULONG Retry)
+{
+    UNREFERENCED_PARAMETER(ScanCode);
+    UNREFERENCED_PARAMETER(Retry);
+
+    return -1;
+}
+
+#endif
 
 /* EOF */

@@ -3183,10 +3183,12 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
     FT_Error Error;
     NTSTATUS Status = STATUS_NOT_FOUND;
     ANSI_STRING AnsiName;
+    UNICODE_STRING LocalName;
     PSHARED_FACE_CACHE Cache;
     FT_Face Face = SharedFace->Face;
 
-    RtlFreeUnicodeString(pNameW);
+    ASSERT(pNameW->Buffer == NULL);
+    RtlInitUnicodeString(&LocalName, NULL);
 
     /* select cache */
     if (PRIMARYLANGID(LangID) == LANG_ENGLISH)
@@ -3263,17 +3265,21 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
             Tmp.Buffer = (PWCH)Name.string;
             Tmp.Length = Tmp.MaximumLength = Name.string_len;
 
-            pNameW->Length = 0;
-            pNameW->MaximumLength = Name.string_len + sizeof(WCHAR);
-            pNameW->Buffer = ExAllocatePoolWithTag(PagedPool, pNameW->MaximumLength, TAG_USTR);
+            LocalName.Length = 0;
+            LocalName.MaximumLength = Name.string_len + sizeof(WCHAR);
+            LocalName.Buffer = ExAllocatePoolWithTag(PagedPool, LocalName.MaximumLength, TAG_USTR);
 
-            if (pNameW->Buffer)
+            if (LocalName.Buffer)
             {
-                Status = RtlAppendUnicodeStringToString(pNameW, &Tmp);
+                Status = RtlAppendUnicodeStringToString(&LocalName, &Tmp);
                 if (Status == STATUS_SUCCESS)
                 {
                     /* Convert UTF-16 big endian to little endian */
-                    IntSwapEndian(pNameW->Buffer, pNameW->Length);
+                    IntSwapEndian(LocalName.Buffer, LocalName.Length);
+                }
+                else
+                {
+                    RtlFreeUnicodeString(&LocalName);
                 }
             }
             else
@@ -3285,16 +3291,18 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
 
     if (!NT_SUCCESS(Status))
     {
+        RtlFreeUnicodeString(&LocalName);
+
         /* defaulted */
         if (NameID == TT_NAME_ID_FONT_SUBFAMILY)
         {
             RtlInitAnsiString(&AnsiName, Face->style_name);
-            Status = RtlAnsiStringToUnicodeString(pNameW, &AnsiName, TRUE);
+            Status = RtlAnsiStringToUnicodeString(&LocalName, &AnsiName, TRUE);
         }
         else
         {
             RtlInitAnsiString(&AnsiName, Face->family_name);
-            Status = RtlAnsiStringToUnicodeString(pNameW, &AnsiName, TRUE);
+            Status = RtlAnsiStringToUnicodeString(&LocalName, &AnsiName, TRUE);
         }
     }
 
@@ -3305,14 +3313,16 @@ IntGetFontLocalizedName(PUNICODE_STRING pNameW, PSHARED_FACE SharedFace,
         {
             ASSERT_FREETYPE_LOCK_HELD();
             if (!Cache->FontFamily.Buffer)
-                IntDuplicateUnicodeString(pNameW, &Cache->FontFamily);
+                IntDuplicateUnicodeString(&LocalName, &Cache->FontFamily);
         }
         else if (NameID == TT_NAME_ID_FULL_NAME)
         {
             ASSERT_FREETYPE_LOCK_HELD();
             if (!Cache->FullName.Buffer)
-                IntDuplicateUnicodeString(pNameW, &Cache->FullName);
+                IntDuplicateUnicodeString(&LocalName, &Cache->FullName);
         }
+
+        *pNameW = LocalName;
     }
 
     return Status;
@@ -5778,9 +5788,18 @@ FindBestFontFromList(FONTOBJ **FontObj, ULONG *MatchPenalty,
     ASSERT(LogFont);
     ASSERT(Head);
 
-    /* Start with a pretty big buffer */
-    OldOtmSize = 0x200;
+    /*
+     * Use a single fixed buffer for the entire iteration; never reallocate
+     * mid-loop.  Reallocating inside the loop has been observed to land the
+     * Otm allocation on a paged-pool slot whose POOL_HEADER is clobbered by
+     * an unrelated FreeType OOB writer, causing BAD_POOL_CALLER (0xC2) on
+     * the deferred free.  4 KiB covers all common fonts (typical OTM with
+     * names is ~600 B).  Fonts whose OTM exceeds this are skipped.
+     */
+    OldOtmSize = 0x1000;
     Otm = ExAllocatePoolWithTag(PagedPool, OldOtmSize, GDITAG_TEXT);
+    if (!Otm)
+        return;
 
     /* get the FontObj of lowest penalty */
     for (Entry = Head->Flink; Entry != Head; Entry = Entry->Flink)
@@ -5794,37 +5813,29 @@ FindBestFontFromList(FONTOBJ **FontObj, ULONG *MatchPenalty,
         /* get text metrics */
         ASSERT_FREETYPE_LOCK_HELD();
         OtmSize = IntGetOutlineTextMetrics(FontGDI, 0, NULL, TRUE);
-        if (OtmSize > OldOtmSize)
+        if (OtmSize == 0 || OtmSize > OldOtmSize)
         {
-            if (Otm)
-                ExFreePoolWithTag(Otm, GDITAG_TEXT);
-            Otm = ExAllocatePoolWithTag(PagedPool, OtmSize, GDITAG_TEXT);
+            DPRINT1("Skip font: required OTM %u > buffer %u\n", OtmSize, OldOtmSize);
+            continue;
         }
 
-        /* update FontObj if lowest penalty */
-        if (Otm)
+        ASSERT_FREETYPE_LOCK_HELD();
+        IntRequestFontSize(FontGDI, LogFont->lfWidth, LogFont->lfHeight);
+
+        ASSERT_FREETYPE_LOCK_HELD();
+        OtmSize = IntGetOutlineTextMetrics(FontGDI, OldOtmSize, Otm, TRUE);
+        if (!OtmSize)
+            continue;
+
+        Penalty = GetFontPenalty(LogFont, Otm, Face->style_name);
+        if (*MatchPenalty == MAXULONG || Penalty < *MatchPenalty)
         {
-            ASSERT_FREETYPE_LOCK_HELD();
-            IntRequestFontSize(FontGDI, LogFont->lfWidth, LogFont->lfHeight);
-
-            ASSERT_FREETYPE_LOCK_HELD();
-            OtmSize = IntGetOutlineTextMetrics(FontGDI, OtmSize, Otm, TRUE);
-            if (!OtmSize)
-                continue;
-
-            OldOtmSize = OtmSize;
-
-            Penalty = GetFontPenalty(LogFont, Otm, Face->style_name);
-            if (*MatchPenalty == MAXULONG || Penalty < *MatchPenalty)
-            {
-                *FontObj = GDIToObj(FontGDI, FONT);
-                *MatchPenalty = Penalty;
-            }
+            *FontObj = GDIToObj(FontGDI, FONT);
+            *MatchPenalty = Penalty;
         }
     }
 
-    if (Otm)
-        ExFreePoolWithTag(Otm, GDITAG_TEXT);
+    ExFreePoolWithTag(Otm, GDITAG_TEXT);
 }
 
 static

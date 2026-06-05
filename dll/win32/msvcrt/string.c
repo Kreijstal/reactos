@@ -38,6 +38,9 @@ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
 #ifdef _MSC_VER
 #pragma function(_strset,memchr,memcmp,memcpy,memset,strcat,strcmp,strcpy,strlen)
+#if _MSC_VER >= 1930
+#pragma function(strncmp,strncpy)
+#endif
 #endif
 
 /*********************************************************************
@@ -1074,7 +1077,7 @@ double CDECL strtod( const char *str, char **end )
     return _strtod_l( str, end, NULL );
 }
 
-#if _MSVCR_VER>=120
+#if 1 /* _MSVCR_VER>=120, enabled as UCRT host */
 
 /*********************************************************************
  *		strtof_l  (MSVCR120.@)

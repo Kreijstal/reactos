@@ -2125,7 +2125,7 @@ wchar_t* CDECL _wsetlocale(int category, const wchar_t* wlocale)
     return ret ? current_lc_all : NULL;
 }
 
-#if _MSVCR_VER >= 80
+#if 1 /* _MSVCR_VER >= 80, enabled as UCRT host */
 /*********************************************************************
  *		_configthreadlocale (MSVCR80.@)
  */

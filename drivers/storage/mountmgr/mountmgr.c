@@ -39,6 +39,46 @@ LONG Unloading;
 static const WCHAR Cunc[] = L"\\??\\C:";
 #define Cunc_LETTER_POSITION 4
 
+static
+VOID
+NTAPI
+MountMgrDriverReinitialization(
+    _In_ PDRIVER_OBJECT DriverObject,
+    _In_opt_ PVOID Context,
+    _In_ ULONG Count)
+{
+    PDEVICE_EXTENSION DeviceExtension;
+
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(Count);
+
+    DeviceExtension = Context;
+    if (!DeviceExtension)
+    {
+        return;
+    }
+
+    DPRINT1("MountMgr DriverReinitialization: assigning drive letters\n");
+
+    KeWaitForSingleObject(&(DeviceExtension->DeviceLock),
+                          Executive,
+                          KernelMode,
+                          FALSE,
+                          NULL);
+
+    if (!DeviceExtension->AutomaticDriveLetter)
+    {
+        DeviceExtension->AutomaticDriveLetter = TRUE;
+    }
+
+    MountMgrAssignDriveLetters(DeviceExtension);
+    ReconcileAllDatabasesWithMaster(DeviceExtension);
+
+    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    WaitForOnlinesToComplete(DeviceExtension);
+    DPRINT1("MountMgr DriverReinitialization: done\n");
+}
+
 /**
  * @brief
  * Sends a synchronous IOCTL to the specified device object.
@@ -1237,11 +1277,23 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     {
         DeviceInformation->SuggestedDriveLetter = 0;
     }
-    /* Else, it's time to set up one */
+    /* Else, it's time to set up one. Volumes that already supplied a
+     * suggested letter or a GPT drive-letter attribute keep using those.
+     * For any other volume that is automountable and not blacklisted,
+     * fall through to CreateNewDriveLetterName, which will scan from
+     * C: upwards (or A:/D: for floppies/CD-ROMs) for a free letter.
+     *
+     * CD-ROMs arriving before fstub has issued IOCTL_MOUNTMGR_AUTO_DL_ASSIGNMENTS
+     * are skipped here: the boot CD must be reachable from
+     * xHalIoAssignDriveLetters' MININT branch as 'no letter yet' so it
+     * can take X:, and fstub's CD-ROM loop covers all other cold-boot CDs
+     * via HalpNextDriveLetter. Hot-plugged CDs (post-IOCTL) auto-assign
+     * normally. */
     else if ((!DeviceExtension->NoAutoMount || DeviceInformation->Removable) &&
              DeviceExtension->AutomaticDriveLetter &&
-             (HasGptDriveLetter || DeviceInformation->SuggestedDriveLetter) &&
-             !HasNoDriveLetterEntry(UniqueId))
+             !HasNoDriveLetterEntry(UniqueId) &&
+             (DeviceExtension->AutoDLAssignmentsRequested ||
+              !RtlPrefixUnicodeString(&DeviceCdRom, &TargetDeviceName, TRUE)))
     {
         /* Create a new drive letter */
         Status = CreateNewDriveLetterName(&DriveLetter, &TargetDeviceName,
@@ -1249,10 +1301,15 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                           NULL);
         if (!NT_SUCCESS(Status))
         {
+            DPRINT1("MountMgr: CreateNewDriveLetterName(%wZ) failed 0x%08lx\n",
+                    &TargetDeviceName, Status);
             CreateNoDriveLetterEntry(UniqueId);
         }
         else
         {
+            DPRINT1("MountMgr: assigned %wZ -> %wZ\n",
+                    &DriveLetter, &TargetDeviceName);
+
             /* Save it to global database */
             RtlWriteRegistryValue(RTL_REGISTRY_ABSOLUTE,
                                   DatabasePath,
@@ -1275,6 +1332,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                &(SymlinkInformation->SymbolicLinksListEntry));
 
                 SendLinkCreated(&DriveLetter);
+                DeviceInformation->LetterAssigned = TRUE;
             }
         }
     }
@@ -1713,6 +1771,8 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     PDEVICE_OBJECT DeviceObject;
     PDEVICE_EXTENSION DeviceExtension;
 
+    DPRINT1("MountMgr DriverEntry: registry path %wZ\n", RegistryPath);
+
     RtlCreateRegistryKey(RTL_REGISTRY_ABSOLUTE, DatabasePath);
 
     Status = IoCreateDevice(DriverObject,
@@ -1767,6 +1827,18 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
 
     DeviceExtension->NoAutoMount = MountmgrReadNoAutoMount(&(DeviceExtension->RegistryPath));
 
+    /* Enable automatic drive-letter assignment from the very first arrival.
+     * The flag has no external policy in this driver (no registry binding,
+     * never set FALSE) and is otherwise toggled to TRUE only inside
+     * MountMgrDriverReinitialization, which runs *after* IoRegisterPlugPlayNotification
+     * has already fired arrivals (synchronously, via PNPNOTIFY_DEVICE_INTERFACE_INCLUDE_EXISTING_INTERFACES,
+     * and asynchronously for any volume that surfaces during early enumeration).
+     * Leaving it FALSE forces those early arrivals into MountMgrAssignDriveLetters
+     * → MountMgrNextDriveLetterWorker, which does not exercise the same arrival
+     * code path and has been observed to silently drop boot-attached MBR volumes.
+     * Setting it TRUE here makes early and late arrivals follow the same proven path. */
+    DeviceExtension->AutomaticDriveLetter = TRUE;
+
     GlobalCreateSymbolicLink(&DosDevicesMount, &DeviceMount);
 
     /* Register for device arrival & removal. Ask to be notified for already
@@ -1798,6 +1870,12 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     if (!NT_SUCCESS(Status))
     {
         IoDeleteDevice(DeviceObject);
+    }
+    else
+    {
+        IoRegisterDriverReinitialization(DriverObject,
+                                         MountMgrDriverReinitialization,
+                                         DeviceExtension);
     }
 
     return Status;

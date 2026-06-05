@@ -80,9 +80,10 @@ KdbpSymFindModule(
 {
     LONG Count = 0;
     PEPROCESS CurrentProcess;
+    KIRQL OldIrql;
 
     /* First try to look up the module in the kernel module list. */
-    KeAcquireSpinLockAtDpcLevel(&PsLoadedModuleSpinLock);
+    KeAcquireSpinLock(&PsLoadedModuleSpinLock, &OldIrql);
     if(KdbpSymSearchModuleList(PsLoadedModuleList.Flink,
                                &PsLoadedModuleList,
                                &Count,
@@ -90,10 +91,10 @@ KdbpSymFindModule(
                                Index,
                                pLdrEntry))
     {
-        KeReleaseSpinLockFromDpcLevel(&PsLoadedModuleSpinLock);
+        KeReleaseSpinLock(&PsLoadedModuleSpinLock, OldIrql);
         return TRUE;
     }
-    KeReleaseSpinLockFromDpcLevel(&PsLoadedModuleSpinLock);
+    KeReleaseSpinLock(&PsLoadedModuleSpinLock, OldIrql);
 
     /* That didn't succeed. Try the module list of the current process now. */
     CurrentProcess = PsGetCurrentProcess();
@@ -298,6 +299,8 @@ KdbSymProcessSymbols(
     _Inout_ PLDR_DATA_TABLE_ENTRY LdrEntry,
     _In_ BOOLEAN Load)
 {
+    KIRQL OldIrql;
+
     if (!LoadSymbols)
         return;
 
@@ -322,9 +325,9 @@ KdbSymProcessSymbols(
     LdrEntry->LoadCount++;
 
     /* Tell our worker thread to read from it */
-    KeAcquireSpinLockAtDpcLevel(&SymbolsToLoadLock);
+    KeAcquireSpinLock(&SymbolsToLoadLock, &OldIrql);
     InsertTailList(&SymbolsToLoad, &LdrEntry->InInitializationOrderLinks);
-    KeReleaseSpinLockFromDpcLevel(&SymbolsToLoadLock);
+    KeReleaseSpinLock(&SymbolsToLoadLock, OldIrql);
 
     KeSetEvent(&SymbolsToLoadEvent, IO_NO_INCREMENT, FALSE);
 }

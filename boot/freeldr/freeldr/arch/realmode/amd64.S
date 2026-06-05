@@ -8,6 +8,31 @@
 
 .code16
 
+#if defined(__clang__) && !defined(_USE_ML)
+.macro call target:vararg
+    .byte HEX(E8)
+    .word \target - (. + 2)
+.endm
+
+.macro ret
+    .byte HEX(C3)
+.endm
+
+.macro call_far32 address
+    .byte HEX(FF), HEX(1E)
+    .word \address
+.endm
+
+.macro call_far32_ss_bp displacement
+    .byte HEX(FF), HEX(5E), \displacement
+.endm
+
+.macro call_near16_indirect_bx table
+    .byte HEX(FF), HEX(97)
+    .word \table
+.endm
+#endif
+
 /* FAT helper code */
 #include "fathelp.inc"
 
@@ -204,33 +229,41 @@ BuildPageTables:
     xor di, di
 
     /* One entry in the PML4 pointing to PDP */
-    mov eax, PDP_ADDRESS
-    or eax, HEX(0F)
+    mov ax, PDP_ADDRESS + HEX(0F)
     stosd
 
-    /* clear rest */
+    /* clear rest of PML4 */
     xor eax, eax
     mov cx, 1023
     rep stosd
 
-    /* One entry in the PDP pointing to PD */
-    mov eax, PD_ADDRESS
-    or eax, HEX(0F)
+    /* Four entries in the PDP pointing to PD0 through PD3 (4GB identity map).
+     * eax upper 16 bits are 0 from the PML4 clear above. */
+    mov ax, PD_ADDRESS + HEX(0F)
+    mov cx, 4
+.FillPDP:
     stosd
+    push ax
+    xor ax, ax
+    stosd
+    pop ax
+    add ax, HEX(1000)
+    dec cx
+    jnz .FillPDP
 
-    /* clear rest */
+    /* clear rest of PDP (508 entries * 2 dwords = 1016 dwords) */
     xor eax, eax
-    mov ecx, 1023
+    mov cx, 1016
     rep stosd
 
-    /* 512 entries in the PD, each defining a 2MB page each */
-    mov ecx, 512
-    mov eax, HEX(008f)
+    /* 2048 entries across 4 PD pages (PD0-PD3), each defining a 2MB large page */
+    mov cx, 2048
+    mov ax, HEX(008f)
 
 .Bpt2:
     mov es:[di], eax
     mov dword ptr es:[di + 4], 0
-    add eax, 512 * 4096 // add 512 4k pages
+    add eax, 512 * 4096 // add 2MB per entry
     add di, 8
 
     /* Loop all PDEs */
@@ -299,7 +332,11 @@ InRealMode:
 
     /* Do the callback, specified by bx */
     shl bx, 1
+#if defined(__clang__) && !defined(_USE_ML)
+    call_near16_indirect_bx CallbackTable
+#else
     call word ptr ds:CallbackTable[bx]
+#endif
 
 ExitToLongMode:
     /* Disable interrupts */

@@ -1643,6 +1643,11 @@ NtUserRemoveMenu(
 
 BOOL
 NTAPI
+NtUserRemoveClipboardFormatListener(
+    HWND hWnd);
+
+BOOL
+NTAPI
 NtUserSetMenu(
     HWND hWnd,
     HMENU hMenu,
@@ -2014,6 +2019,11 @@ NtUserCallTwoParam(
 
 BOOL
 NTAPI
+NtUserAddClipboardFormatListener(
+    HWND hWnd);
+
+BOOL
+NTAPI
 NtUserChangeClipboardChain(
     HWND hWndRemove,
     HWND hWndNewNext);
@@ -2069,6 +2079,81 @@ BOOL
 NTAPI
 NtUserCloseWindowStation(
     HWINSTA hWinSta);
+
+#define NTUSER_RDP_FRAME_FORMAT_BGRA32 1
+#define NTUSER_RDP_MOUSE_FLAG_MOVE 0x00000800
+#define NTUSER_RDP_MOUSE_FLAG_BUTTON1 0x00001000
+#define NTUSER_RDP_MOUSE_FLAG_BUTTON2 0x00002000
+#define NTUSER_RDP_MOUSE_FLAG_BUTTON3 0x00004000
+#define NTUSER_RDP_MOUSE_FLAG_DOWN 0x00008000
+#define NTUSER_RDP_KEYBOARD_FLAG_EXTENDED 0x00000100
+#define NTUSER_RDP_KEYBOARD_FLAG_RELEASE 0x00008000
+
+typedef struct _NTUSER_RDP_FRAME
+{
+    ULONG Size;
+    ULONG SessionId;
+    ULONG Width;
+    ULONG Height;
+    ULONG BitsPerPixel;
+    ULONG Pitch;
+    ULONG Format;
+    ULONG FrameId;
+    ULONG RequiredBufferSize;
+    ULONG Flags;
+} NTUSER_RDP_FRAME, *PNTUSER_RDP_FRAME;
+
+typedef struct _NTUSER_RDP_MOUSE_INPUT
+{
+    ULONG Size;
+    ULONG SessionId;
+    ULONG PointerFlags;
+    USHORT PointerX;
+    USHORT PointerY;
+    ULONG Flags;
+} NTUSER_RDP_MOUSE_INPUT, *PNTUSER_RDP_MOUSE_INPUT;
+
+typedef struct _NTUSER_RDP_KEYBOARD_INPUT
+{
+    ULONG Size;
+    ULONG SessionId;
+    USHORT KeyboardFlags;
+    USHORT KeyCode;
+    ULONG Flags;
+} NTUSER_RDP_KEYBOARD_INPUT, *PNTUSER_RDP_KEYBOARD_INPUT;
+
+HANDLE
+NTAPI
+NtUserRdpOpenSession(
+    _In_ ULONG SessionId,
+    _In_opt_ PUNICODE_STRING WinStationName,
+    _In_opt_ PUNICODE_STRING DesktopName);
+
+BOOL
+NTAPI
+NtUserRdpCaptureFrame(
+    _In_ HANDLE hRdpSession,
+    _Out_ PNTUSER_RDP_FRAME Frame,
+    _Out_writes_bytes_to_opt_(PixelBufferSize, *BytesReturned) PVOID PixelBuffer,
+    _In_ ULONG PixelBufferSize,
+    _Out_opt_ PULONG BytesReturned);
+
+BOOL
+NTAPI
+NtUserRdpCloseSession(
+    _In_ HANDLE hRdpSession);
+
+BOOL
+NTAPI
+NtUserRdpInjectMouse(
+    _In_ ULONG SessionId,
+    _In_ PNTUSER_RDP_MOUSE_INPUT Input);
+
+BOOL
+NTAPI
+NtUserRdpInjectKeyboard(
+    _In_ ULONG SessionId,
+    _In_ PNTUSER_RDP_KEYBOARD_INPUT Input);
 
 /* Console commands for NtUserConsoleControl */
 typedef enum _CONSOLECONTROL
@@ -2485,6 +2570,13 @@ NtUserGetClipboardSequenceNumber(VOID);
 HWND
 NTAPI
 NtUserGetClipboardViewer(VOID);
+
+BOOL
+NTAPI
+NtUserGetUpdatedClipboardFormats(
+    PUINT lpuiFormats,
+    UINT cFormats,
+    PUINT pcFormatsOut);
 
 BOOL
 NTAPI

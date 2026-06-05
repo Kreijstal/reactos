@@ -10,6 +10,9 @@
 /* INCLUDES ****************************************************************/
 
 #include <ntoskrnl.h>
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
 #define NDEBUG
 #include <debug.h>
 
@@ -140,12 +143,30 @@ PspSystemThreadStartup(IN PKSTART_ROUTINE StartRoutine,
                        IN PVOID StartContext)
 {
     PETHREAD Thread;
+#if defined(_M_ARM64)
+    static LONG PspArm64SystemThreadTraceBudget = 16;
+#endif
     PSTRACE(PS_THREAD_DEBUG,
             "StartRoutine: %p StartContext: %p\n", StartRoutine, StartContext);
 
     /* Unlock the dispatcher Database */
     KeLowerIrql(PASSIVE_LEVEL);
     Thread = PsGetCurrentThread();
+
+#if defined(_M_ARM64)
+    if (PspArm64SystemThreadTraceBudget > 0)
+    {
+        LONG OldBudget = InterlockedDecrement(&PspArm64SystemThreadTraceBudget);
+        if (OldBudget >= 0)
+        {
+            DPRINT("[arm64][ps] PspSystemThreadStartup: thread=%p start=%p context=%p irql=%u\n",
+                    Thread,
+                    StartRoutine,
+                    StartContext,
+                    KeGetCurrentIrql());
+        }
+    }
+#endif
 
     /* Make sure the thread isn't gone */
     _SEH2_TRY
@@ -182,7 +203,7 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
                 IN PVOID StartContext OPTIONAL)
 {
     HANDLE hThread;
-    PEPROCESS Process;
+    PEPROCESS Process = NULL;
     PETHREAD Thread;
     PTEB TebBase = NULL;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
@@ -198,6 +219,14 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     PSTRACE(PS_THREAD_DEBUG,
             "ThreadContext: %p TargetProcess: %p ProcessHandle: %p\n",
             ThreadContext, TargetProcess, ProcessHandle);
+
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: begin processHandle=%p target=%p start=%p context=%p\n",
+            ProcessHandle,
+            TargetProcess,
+            StartRoutine,
+            StartContext);
+#endif
 
     /* If we were called from PsCreateSystemThread, then we're kernel mode */
     if (StartRoutine) PreviousMode = KernelMode;
@@ -230,6 +259,11 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
             Status = STATUS_INVALID_HANDLE;
         }
     }
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: process reference status=0x%08lx process=%p\n",
+            Status,
+            Process);
+#endif
 
     /* Check for success */
     if (!NT_SUCCESS(Status)) return Status;
@@ -252,6 +286,11 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
                             0,
                             0,
                             (PVOID*)&Thread);
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: ObCreateObject status=0x%08lx thread=%p\n",
+            Status,
+            Thread);
+#endif
     if (!NT_SUCCESS(Status))
     {
         /* We failed; dereference the process and exit */
@@ -281,6 +320,10 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     CidEntry.Object = Thread;
     CidEntry.GrantedAccess = 0;
     Thread->Cid.UniqueThread = ExCreateHandle(PspCidTable, &CidEntry);
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: UniqueThread=%p\n",
+            Thread->Cid.UniqueThread);
+#endif
     if (!Thread->Cid.UniqueThread)
     {
         /* We couldn't create the CID, dereference the thread and fail */
@@ -354,6 +397,9 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
         PspSetCrossThreadFlag(Thread, CT_SYSTEM_THREAD_BIT);
 
         /* Let the kernel intialize the Thread */
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ps] PspCreateThread: KeInitThread system\n");
+#endif
         Status = KeInitThread(&Thread->Tcb,
                               NULL,
                               PspSystemThreadStartup,
@@ -362,6 +408,11 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
                               NULL,
                               NULL,
                               &Process->Pcb);
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ps] PspCreateThread: KeInitThread status=0x%08lx kernelStack=%p\n",
+                Status,
+                Thread->Tcb.KernelStack);
+#endif
     }
 
     /* Check if we failed */
@@ -377,6 +428,9 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     }
 
     /* Lock the process */
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: locking process\n");
+#endif
     KeEnterCriticalRegion();
     ExAcquirePushLockExclusive(&Process->ProcessLock);
 
@@ -386,7 +440,7 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     /* Check if the thread was ours, terminated and it was user mode */
     if ((Thread->Terminated) &&
         (ThreadContext) &&
-        (Thread->ThreadsProcess == Process))
+        (THREAD_TO_PROCESS(Thread) == Process))
     {
         /* Cleanup, we don't want to start it up and context switch */
         goto Quickie;
@@ -401,7 +455,13 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     Process->ActiveThreads++;
 
     /* Start the thread */
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: KeStartThread\n");
+#endif
     KeStartThread(&Thread->Tcb);
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: KeStartThread done\n");
+#endif
 
     /* Release the process lock */
     ExReleasePushLockExclusive(&Process->ProcessLock);
@@ -427,6 +487,9 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     if (Thread->Terminated) KeForceResumeThread(&Thread->Tcb);
 
     /* Create an access state */
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: SeCreateAccessStateEx\n");
+#endif
     Status = SeCreateAccessStateEx(NULL,
                                    ThreadContext ?
                                    PsGetCurrentProcess() : Process,
@@ -434,6 +497,10 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
                                    &AuxData,
                                    DesiredAccess,
                                    &PsThreadType->TypeInfo.GenericMapping);
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: SeCreateAccessStateEx status=0x%08lx\n",
+            Status);
+#endif
     if (!NT_SUCCESS(Status))
     {
         /* Access state failed, thread is dead */
@@ -451,12 +518,20 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     }
 
     /* Insert the Thread into the Object Manager */
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: ObInsertObject\n");
+#endif
     Status = ObInsertObject(Thread,
                             AccessState,
                             DesiredAccess,
                             0,
                             NULL,
                             &hThread);
+#if defined(_M_ARM64)
+    DPRINT("[arm64][ps] PspCreateThread: ObInsertObject status=0x%08lx handle=%p\n",
+            Status,
+            hThread);
+#endif
 
     /* Delete the access state if we had one */
     if (AccessState) SeDeleteAccessState(AccessState);

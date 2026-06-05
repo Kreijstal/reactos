@@ -164,7 +164,7 @@ KeAlertResumeThread(IN PKTHREAD Thread)
              * all waiters regardless of suspend depth), and KAPC
              * SuspendApc was folded into the multi-purpose SchedulerApc
              * slot. We poke the dispatcher header directly because the
-             * dispatcher lock is already held — KeSetEvent would
+             * dispatcher lock is already held - KeSetEvent would
              * re-acquire and deadlock. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
             Thread->SuspendSemaphore.Header.SignalState++;
@@ -190,15 +190,19 @@ KeAlertThread(IN PKTHREAD Thread,
 {
     BOOLEAN PreviousState;
     KLOCK_QUEUE_HANDLE ApcLock;
+    UCHAR AlertModeIndex;
     ASSERT_THREAD(Thread);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
+
+    ASSERT((AlertMode == KernelMode) || (AlertMode == UserMode));
+    AlertModeIndex = (UCHAR)AlertMode;
 
     /* Lock the Dispatcher Database and the APC Queue */
     KiAcquireApcLockRaiseToSynch(Thread, &ApcLock);
     KiAcquireDispatcherLockAtSynchLevel();
 
     /* Save the Previous State */
-    PreviousState = Thread->Alerted[AlertMode];
+    PreviousState = Thread->Alerted[AlertModeIndex];
 
     /* Check if it's already alerted */
     if (!PreviousState)
@@ -214,7 +218,7 @@ KeAlertThread(IN PKTHREAD Thread,
         else
         {
             /* Otherwise, merely set the alerted state */
-            Thread->Alerted[AlertMode] = TRUE;
+            Thread->Alerted[AlertModeIndex] = TRUE;
         }
     }
 
@@ -299,14 +303,9 @@ KeForceResumeThread(IN PKTHREAD Thread)
         /* Lock the dispatcher */
         KiAcquireDispatcherLockAtSynchLevel();
 
-        /* Signal and satisfy. Same Win8 mechanism note as KeAlertResumeThread. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
+        /* Signal and satisfy */
         Thread->SuspendSemaphore.Header.SignalState++;
         KiWaitTest(&Thread->SuspendSemaphore.Header, IO_NO_INCREMENT);
-#else
-        Thread->SuspendEvent.Header.SignalState = 1;
-        KiWaitTest(&Thread->SuspendEvent.Header, IO_NO_INCREMENT);
-#endif
 
         /* Release the dispatcher */
         KiReleaseDispatcherLockFromSynchLevel();
@@ -368,7 +367,7 @@ KeFreezeAllThreads(VOID)
             if (!(OldCount) && !(Current->SuspendCount))
             {
                 /* Did we already insert it? Win8 multiplexed
-                 * SuspendApc into SchedulerApc — same KAPC slot, same
+                 * SuspendApc into SchedulerApc - same KAPC slot, same
                  * Inserted flag semantics. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
                 if (!Current->SuspendApc.Inserted)
@@ -391,18 +390,19 @@ KeFreezeAllThreads(VOID)
 #else
                 if (!Current->SchedulerApc.Inserted)
                 {
+                    /* Insert the APC */
                     Current->SchedulerApc.Inserted = TRUE;
                     KiInsertQueueApc(&Current->SchedulerApc, IO_NO_INCREMENT);
                 }
                 else
                 {
-                    /* The APC already pending: clear the suspend event
-                     * so the resume below has to re-signal it. With a
-                     * NotificationEvent there's no per-call counter to
-                     * decrement; the binary state plus SuspendCount
-                     * carries the depth. */
+                    /* Lock the dispatcher */
                     KiAcquireDispatcherLockAtSynchLevel();
+
+                    /* Unsignal the event, the APC was already inserted */
                     Current->SuspendEvent.Header.SignalState = 0;
+
+                    /* Release the dispatcher */
                     KiReleaseDispatcherLockFromSynchLevel();
                 }
 #endif
@@ -448,14 +448,9 @@ KeResumeThread(IN PKTHREAD Thread)
             /* Acquire the dispatcher lock */
             KiAcquireDispatcherLockAtSynchLevel();
 
-            /* Signal and satisfy. Win8 mechanism note as above. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
+            /* Signal the Suspend Semaphore */
             Thread->SuspendSemaphore.Header.SignalState++;
             KiWaitTest(&Thread->SuspendSemaphore.Header, IO_NO_INCREMENT);
-#else
-            Thread->SuspendEvent.Header.SignalState = 1;
-            KiWaitTest(&Thread->SuspendEvent.Header, IO_NO_INCREMENT);
-#endif
 
             /* Release the dispatcher lock */
             KiReleaseDispatcherLockFromSynchLevel();
@@ -603,7 +598,7 @@ KeStartThread(IN OUT PKTHREAD Thread)
     InsertTailList(&Process->ThreadListHead, &Thread->ThreadListEntry);
 
     /* Increase the stack count */
-    ASSERT(Process->StackCount != MAXULONG_PTR);
+    ASSERT(Process->StackCount != MAXULONG);
     Process->StackCount++;
 
     /* Release locks and return */
@@ -642,7 +637,7 @@ KiSuspendThread(IN PVOID NormalContext,
                 IN PVOID SystemArgument2)
 {
     /* Non-alertable kernel-mode suspended wait. Win8 swapped the
-     * counted KSEMAPHORE for a KEVENT NotificationEvent — semantically
+     * counted KSEMAPHORE for a KEVENT NotificationEvent - semantically
      * the wait still blocks until the resume path satisfies the object,
      * but the satisfy uses the binary event interface. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
@@ -692,9 +687,7 @@ KeSuspendThread(PKTHREAD Thread)
         /* Check if we should suspend it */
         if (!(PreviousCount) && !(Thread->FreezeCount))
         {
-            /* Is the APC already inserted? Win8: the suspend hook lives
-             * in the multi-purpose SchedulerApc; the resume path is a
-             * single-shot KEVENT::SetEvent. */
+            /* Is the APC already inserted? */
 #if (NTDDI_VERSION < NTDDI_WIN8)
             if (!Thread->SuspendApc.Inserted)
             {
@@ -723,7 +716,7 @@ KeSuspendThread(PKTHREAD Thread)
             {
                 /* Already pending: clear the event so the future
                  * resume has to set it again. Binary state, not a
-                 * counter — SuspendCount carries the actual depth. */
+                 * counter - SuspendCount carries the actual depth. */
                 KiAcquireDispatcherLockAtSynchLevel();
                 Thread->SuspendEvent.Header.SignalState = 0;
                 KiReleaseDispatcherLockFromSynchLevel();
@@ -776,14 +769,9 @@ KeThawAllThreads(VOID)
                 /* Lock the dispatcher */
                 KiAcquireDispatcherLockAtSynchLevel();
 
-                /* Signal and satisfy. Win8 mechanism note as above. */
-#if (NTDDI_VERSION < NTDDI_WIN8)
+                /* Signal the suspend semaphore and wake it */
                 Current->SuspendSemaphore.Header.SignalState++;
                 KiWaitTest(&Current->SuspendSemaphore, 0);
-#else
-                Current->SuspendEvent.Header.SignalState = 1;
-                KiWaitTest(&Current->SuspendEvent, 0);
-#endif
 
                 /* Unlock the dispatcher */
                 KiReleaseDispatcherLockFromSynchLevel();
@@ -812,20 +800,24 @@ KeTestAlertThread(IN KPROCESSOR_MODE AlertMode)
     PKTHREAD Thread = KeGetCurrentThread();
     BOOLEAN OldState;
     KLOCK_QUEUE_HANDLE ApcLock;
+    UCHAR AlertModeIndex;
     ASSERT_THREAD(Thread);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
+
+    ASSERT((AlertMode == KernelMode) || (AlertMode == UserMode));
+    AlertModeIndex = (UCHAR)AlertMode;
 
     /* Lock the Dispatcher Database and the APC Queue */
     KiAcquireApcLockRaiseToSynch(Thread, &ApcLock);
 
     /* Save the old State */
-    OldState = Thread->Alerted[AlertMode];
+    OldState = Thread->Alerted[AlertModeIndex];
 
     /* Check the Thread is alerted */
     if (OldState)
     {
         /* Disable alert for this mode */
-        Thread->Alerted[AlertMode] = FALSE;
+        Thread->Alerted[AlertModeIndex] = FALSE;
     }
     else if ((AlertMode != KernelMode) &&
              (!IsListEmpty(&Thread->ApcState.ApcListHead[UserMode])))
@@ -885,11 +877,15 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Initialize the lock */
     KeInitializeSpinLock(&Thread->ThreadLock);
 
-    /* Setup the Service Descriptor Table for Native Calls.
-     * NDK ketypes.h gates ServiceTable as:
-     *   #if (NTDDI_VERSION < NTDDI_LONGHORN) || ((NTDDI_VERSION < NTDDI_WIN7) && !defined(_WIN64))
-     * so on amd64 it disappears already at NT 6.0 (Vista). Mirror that here. */
-#if (NTDDI_VERSION < NTDDI_LONGHORN) || ((NTDDI_VERSION < NTDDI_WIN7) && !defined(_WIN64))
+    /* Setup the Service Descriptor Table for Native Calls */
+#if defined(_WIN64) && (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* TODO(NT6.1): ServiceTable was removed from KTHREAD on amd64 starting at Vista
+     * (per ndk/ketypes.h KTHREAD definition). Real NT routes the syscall table via
+     * KeServiceDescriptorTable[Shadow] + Thread->GuiThread flag instead. We currently
+     * just skip the per-thread assignment here so the build compiles for NT6.x x64,
+     * but the actual GuiThread plumbing for the descriptor lookup needs to be wired
+     * up properly. See traphandler.c for the matching read-side TODOs. */
+#else
     Thread->ServiceTable = KeServiceDescriptorTable;
 #endif
 
@@ -897,8 +893,10 @@ KeInitThread(IN OUT PKTHREAD Thread,
     InitializeListHead(&Thread->ApcState.ApcListHead[KernelMode]);
     InitializeListHead(&Thread->ApcState.ApcListHead[UserMode]);
     Thread->ApcState.Process = Process;
+#if (NTDDI_VERSION < NTDDI_WIN10)
     Thread->ApcStatePointer[OriginalApcEnvironment] = &Thread->ApcState;
     Thread->ApcStatePointer[AttachedApcEnvironment] = &Thread->SavedApcState;
+#endif
     Thread->ApcStateIndex = OriginalApcEnvironment;
     Thread->ApcQueueable = TRUE;
 #if (NTDDI_VERSION < NTDDI_WIN8)
@@ -910,8 +908,8 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Initialize the Suspend APC. Win8 reorganised the KTHREAD: the
      * dedicated SuspendApc/SuspendSemaphore pair was replaced with a
      * multi-purpose SchedulerApc + a binary SuspendEvent
-     * (NotificationEvent). The semantics shift accordingly — the
-     * counted KSEMAPHORE became a single notification — but the
+     * (NotificationEvent). The semantics shift accordingly - the
+     * counted KSEMAPHORE became a single notification - but the
      * caller-visible KeSuspendThread/KeResumeThread contract is
      * preserved by tracking depth in SuspendCount and using
      * SetEvent-on-final-resume to release all waiters. */
@@ -937,7 +935,7 @@ KeInitThread(IN OUT PKTHREAD Thread,
                     KernelMode,
                     NULL);
 
-    /* Initialize the Suspend Event as a NotificationEvent — a single
+    /* Initialize the Suspend Event as a NotificationEvent - a single
      * SetEvent on full resume releases all waiters atomically. */
     KeInitializeEvent(&Thread->SuspendEvent, NotificationEvent, FALSE);
 #endif
@@ -963,7 +961,14 @@ KeInitThread(IN OUT PKTHREAD Thread,
     if (!KernelStack)
     {
         /* We don't, allocate one */
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: MmCreateKernelStack\n");
+#endif
         KernelStack = MmCreateKernelStack(FALSE, 0);
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: MmCreateKernelStack returned %p\n",
+                KernelStack);
+#endif
         if (!KernelStack) return STATUS_INSUFFICIENT_RESOURCES;
 
         /* Remember for later */
@@ -981,11 +986,20 @@ KeInitThread(IN OUT PKTHREAD Thread,
     _SEH2_TRY
     {
         /* Initialize the Thread Context */
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: KiInitializeContextThread stack=%p limit=%p\n",
+                Thread->InitialStack,
+                (PVOID)Thread->StackLimit);
+#endif
         KiInitializeContextThread(Thread,
                                   SystemRoutine,
                                   StartRoutine,
                                   StartContext,
                                   Context);
+#if defined(_M_ARM64)
+        DPRINT("[arm64][ke] KeInitThread: KiInitializeContextThread done kernelStack=%p\n",
+                Thread->KernelStack);
+#endif
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {

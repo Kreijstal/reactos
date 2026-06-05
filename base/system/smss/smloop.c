@@ -51,8 +51,17 @@ SmpSessionComplete(IN PSM_API_MSG SmApiMsg,
                    IN PSMP_CLIENT_CONTEXT ClientContext,
                    IN HANDLE SmApiPort)
 {
-    DPRINT1("%s is not yet implemented\n", __FUNCTION__);
-    return STATUS_NOT_IMPLEMENTED;
+    PSM_SESSION_COMPLETE_MSG SessionComplete = &SmApiMsg->u.SessionComplete;
+
+    UNREFERENCED_PARAMETER(ClientContext);
+    UNREFERENCED_PARAMETER(SmApiPort);
+
+    DPRINT("SMSS: Session %lu completed with status 0x%08lx\n",
+           SessionComplete->SessionId,
+           SessionComplete->SessionStatus);
+
+    SmpDeleteSession(SessionComplete->SessionId);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -251,8 +260,99 @@ SmpStopCsr(IN PSM_API_MSG SmApiMsg,
            IN PSMP_CLIENT_CONTEXT ClientContext,
            IN HANDLE SmApiPort)
 {
-    DPRINT1("%s is not yet implemented\n", __FUNCTION__);
-    return STATUS_NOT_IMPLEMENTED;
+    ULONG MuSessionId = SmApiMsg->u.StopCsr.MuSessionId;
+    NTSTATUS Status;
+    PSMP_SUBSYSTEM Subsystem;
+    PLIST_ENTRY NextEntry;
+    PVOID State;
+    BOOLEAN Found = FALSE;
+
+    UNREFERENCED_PARAMETER(ClientContext);
+    UNREFERENCED_PARAMETER(SmApiPort);
+
+    if (MuSessionId == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    while (TRUE)
+    {
+        Subsystem = NULL;
+
+        RtlEnterCriticalSection(&SmpKnownSubSysLock);
+
+        NextEntry = SmpKnownSubSysHead.Flink;
+        while (NextEntry != &SmpKnownSubSysHead)
+        {
+            Subsystem = CONTAINING_RECORD(NextEntry, SMP_SUBSYSTEM, Entry);
+            NextEntry = NextEntry->Flink;
+
+            if (Subsystem->MuSessionId == MuSessionId && !Subsystem->Terminating)
+            {
+                Subsystem->Terminating = TRUE;
+                RemoveEntryList(&Subsystem->Entry);
+                break;
+            }
+
+            Subsystem = NULL;
+        }
+
+        RtlLeaveCriticalSection(&SmpKnownSubSysLock);
+
+        if (Subsystem == NULL)
+            break;
+
+        Found = TRUE;
+
+        if (Subsystem->Event != NULL)
+            NtSetEvent(Subsystem->Event, NULL);
+
+        if (Subsystem->ProcessHandle != NULL)
+        {
+            Status = NtTerminateProcess(Subsystem->ProcessHandle, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("SMSS: StopCsr failed to terminate subsystem %p, status=0x%08lx\n",
+                        Subsystem->ClientId.UniqueProcess,
+                        Status);
+            }
+        }
+
+        SmpDereferenceSubsystem(Subsystem);
+    }
+
+    if (!Found)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    SmpDeleteSession(MuSessionId);
+
+    if (AttachedSessionId != MuSessionId)
+    {
+        DPRINT1("SMSS: StopCsr for MuSessionId %lu while attached to %lu\n",
+                MuSessionId,
+                AttachedSessionId);
+        return STATUS_SUCCESS;
+    }
+
+    Status = SmpAcquirePrivilege(SE_LOAD_DRIVER_PRIVILEGE, &State);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtSetSystemInformation(SystemSessionDetach,
+                                    &MuSessionId,
+                                    sizeof(MuSessionId));
+    SmpReleasePrivilege(State);
+
+    if (NT_SUCCESS(Status))
+    {
+        AttachedSessionId = -1;
+    }
+    else
+    {
+        DPRINT1("SMSS: StopCsr failed to detach MuSessionId %lu, status=0x%08lx\n",
+                MuSessionId,
+                Status);
+    }
+
+    return Status;
 }
 
 PSM_API_HANDLER SmpApiDispatch[SmpMaxApiNumber - SmpCreateForeignSessionApi] =

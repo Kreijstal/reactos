@@ -9,6 +9,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <ws2_32.h>
+#include <mswsock.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -136,7 +137,7 @@ WPUFDIsSet(IN SOCKET s,
  * back. This matches the semantics clients such as libsmb2 rely on for
  * async connect() completion (POLLOUT once the TCP handshake finishes).
  *
- * Only compiled when the target supports WSAPoll — the export is gated the
+ * Only compiled when the target supports WSAPoll - the export is gated the
  * same way in ws2_32.spec (-version=0x600+).
  */
 INT
@@ -214,11 +215,34 @@ WSAPoll(LPWSAPOLLFD fdArray,
             fdArray[i].revents |= (fdArray[i].events & POLLWRNORM);
         if (__WSAFDIsSet(fdArray[i].fd, &efds))
         {
-            /* select() signals both "urgent data" and "connect failure /
-             * OOB" via the except set. Report POLLERR so callers that
-             * poll connecting sockets can distinguish failure from
-             * readiness by inspecting SO_ERROR. */
-            fdArray[i].revents |= POLLERR;
+            INT Error = 0;
+            INT ErrorLength = sizeof(Error);
+
+            if (getsockopt(fdArray[i].fd,
+                           SOL_SOCKET,
+                           SO_ERROR,
+                           (CHAR *)&Error,
+                           &ErrorLength) == 0 && Error == 0)
+            {
+                INT Option = 0;
+
+                if (setsockopt(fdArray[i].fd,
+                               SOL_SOCKET,
+                               SO_UPDATE_CONNECT_CONTEXT,
+                               (CHAR *)&Option,
+                               sizeof(Option)) == 0)
+                {
+                    fdArray[i].revents |= (fdArray[i].events & POLLWRNORM);
+                }
+                else
+                {
+                    fdArray[i].revents |= POLLERR;
+                }
+            }
+            else
+            {
+                fdArray[i].revents |= POLLERR;
+            }
         }
 
         if (fdArray[i].revents)

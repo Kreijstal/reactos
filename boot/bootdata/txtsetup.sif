@@ -90,6 +90,7 @@ sacdrv.sys   = 1,,,,,,x,4,,,,1,4
 ;uniata.sys   = 1,,,,,,x,4,,,,1,4
 atapi.sys    = 1,,,,,,x,4,,,,1,4
 buslogic.sys = 1,,,,,,x,4,,,,1,4
+viostor.sys  = 1,,,,,,x,4,,,,1,4
 blue.sys     = 1,,,,,,x,4,,,,1,4
 vgafonts.cab = 1,,,,,,,1,,,,1,1
 bootvid.dll  = 1,,,,,,,2,,,,1,2
@@ -122,6 +123,7 @@ l_intl.nls   = 1,,,,,,,2,,,,1,2
 pci.sys      = 1,,,,,,x,4,,,,1,4
 scsiport.sys = 1,,,,,,,4,,,,1,4
 storport.sys = 1,,,,,,,4,,,,1,4
+storahci.sys = 1,,,,,,,4,,,,1,4
 fastfat.sys  = 1,,,,,,x,4,,,,1,4
 ntfs.sys     = 1,,,,,,x,4,,,,1,4
 btrfs.sys    = 1,,,,,,x,4,,,,1,4
@@ -167,7 +169,9 @@ PCI\CC_0101 = pciide
 PCI\CC_0104 = pciide
 PCI\CC_0105 = pciide
 PCI\CC_0106 = pciide
-;PCI\CC_0106 = storahci
+PCI\CC_010601 = storahci
+PCI\VEN_1AF4&DEV_1001 = viostor
+PCI\VEN_1AF4&DEV_1042 = viostor
 ;*PNP0600 = uniata
 *PNP0600 = atapi
 USB\CLASS_09 = usbhub
@@ -218,6 +222,7 @@ atapi = atapi.sys
 atapi = atapi.sys
 buslogic = buslogic.sys
 storahci = storahci.sys
+viostor = viostor.sys
 disk = disk.sys
 
 [MouseDrivers.Load]
@@ -306,8 +311,8 @@ ntoskrnl.exe = 1,,,,,,,2,,,,1,2
 hal.dll      = 1,,,,,,,2,,,,1,2
 
 [Files.x64_mp]
-ntkrnlmp.exe = 1,,,,,,,2,,,ntoskrnl.exe,1,2
-halmp.dll    = 1,,,,,,,2,,,hal.dll,1,2
+ntkrnlmp.exe = 1,,,,,,,2,,,,1,2
+halmp.dll    = 1,,,,,,,2,,,,1,2
 
 [Display]
 ;<id> = <user friendly name>,<spare>,<service key name>,<width>,<height>,<bpp>

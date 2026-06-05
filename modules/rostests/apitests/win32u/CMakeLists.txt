@@ -1,7 +1,9 @@
 
-add_subdirectory(win32u_xpsp2)
-add_subdirectory(win32u_2k3sp2)
-add_subdirectory(win32u_vista)
+if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+    add_subdirectory(win32u_xpsp2)
+    add_subdirectory(win32u_2k3sp2)
+    add_subdirectory(win32u_vista)
+endif()
 
 add_definitions(-D_DLL -D__USE_CRTIMP)
 include_directories(${REACTOS_SOURCE_DIR}/win32ss/include ../gditools)
@@ -68,6 +70,8 @@ list(APPEND SOURCE
     ntuser/NtUserGetThreadState.c
     ntuser/NtUserGetTitleBarInfo.c
     ntuser/NtUserProcessConnect.c
+    ntuser/NtUserRdpCapture.c
+    ntuser/NtUserRdpInput.c
     ntuser/NtUserRedrawWindow.c
     ntuser/NtUserScrollDC.c
     ntuser/NtUserSelectPalette.c

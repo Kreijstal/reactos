@@ -44,7 +44,7 @@ KiAttachProcess(IN PKTHREAD Thread,
     ASSERT(Process != Thread->ApcState.Process);
 
     /* Increase Stack Count */
-    ASSERT(Process->StackCount != MAXULONG_PTR);
+    ASSERT(Process->StackCount != MAXULONG);
     Process->StackCount++;
 
     /* Swap the APC Environment */
@@ -134,7 +134,7 @@ KeInitializeProcess(IN OUT PKPROCESS Process,
     Process->Affinity = Affinity;
     Process->BasePriority = (CHAR)Priority;
     Process->QuantumReset = 6;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) && !defined(_M_ARM64)
     Process->DirectoryTableBase = DirectoryTableBase[0];
     Process->Unused0 = DirectoryTableBase[1];
 #else

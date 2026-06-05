@@ -12,6 +12,10 @@
 #define NDEBUG
 #include <debug.h>
 
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
+
 #define MODULE_INVOLVED_IN_ARM3
 #include <mm/ARM3/miarm.h>
 
@@ -27,6 +31,44 @@ BOOLEAN UserPdeFault = FALSE;
 #endif
 
 /* PRIVATE FUNCTIONS **********************************************************/
+
+#if defined(_M_ARM64)
+static
+VOID
+MiArm64CompleteFaultPteUpdate(
+    _In_ PVOID FaultAddress,
+    _In_ PMMPTE ValidPte)
+{
+    PVOID PageAddress;
+    ULONG64 Ctr;
+    ULONG ILine;
+    ULONG_PTR Start, End, Addr;
+
+    PageAddress = PAGE_ALIGN(FaultAddress);
+
+    /*
+     * MI_WRITE_VALID_PTE can only derive the VA from the PTE address. That is
+     * correct for actual page-table PTEs but wrong for prototype-PTE writes.
+     * Fault completion must publish the faulting VA after the final leaf PTE
+     * becomes valid, otherwise ARM64 can keep replaying a cached translation
+     * fault for the System View address.
+     */
+    KeInvalidateTlbEntry(PageAddress);
+
+    if (MI_IS_PAGE_EXECUTABLE(ValidPte))
+    {
+        __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(Ctr));
+        ILine = 4u << (Ctr & 0xF);
+        Start = (ULONG_PTR)PageAddress & ~(ULONG_PTR)(ILine - 1);
+        End = (ULONG_PTR)PageAddress + PAGE_SIZE;
+        for (Addr = Start; Addr < End; Addr += ILine)
+        {
+            __asm__ __volatile__("ic ivau, %0" :: "r"(Addr) : "memory");
+        }
+        __asm__ __volatile__("dsb ish\n\tisb" ::: "memory");
+    }
+}
+#endif
 
 static
 NTSTATUS
@@ -102,14 +144,6 @@ MiCheckForUserStackOverflow(IN PVOID Address,
         {
             /* Success! */
             Teb->NtTib.StackLimit = NextStackAddress;
-
-#ifdef _WIN64
-            /* Update WOW64 32-bit TEB stack limit */
-            if (THREAD_TO_PROCESS(CurrentThread)->Wow64Process != NULL)
-            {
-                ((PTEB32)(ROUND_TO_PAGES(Teb + 1)))->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-            }
-#endif
         }
         else
         {
@@ -124,14 +158,6 @@ MiCheckForUserStackOverflow(IN PVOID Address,
 
     /* Update the stack limit */
     Teb->NtTib.StackLimit = (PVOID)((ULONG_PTR)NextStackAddress + GuaranteedSize);
-
-#ifdef _WIN64
-    /* Update WOW64 32-bit TEB stack limit */
-    if (THREAD_TO_PROCESS(CurrentThread)->Wow64Process != NULL)
-    {
-        ((PTEB32)(ROUND_TO_PAGES(Teb + 1)))->NtTib.StackLimit = PtrToUlong(Teb->NtTib.StackLimit);
-    }
-#endif
 
     /* Now move the guard page to the next page */
     Status = ZwAllocateVirtualMemory(NtCurrentProcess(),
@@ -764,8 +790,20 @@ MiResolveDemandZeroFault(IN PVOID Address,
     /* Set it dirty if it's a writable page */
     if (MI_IS_PAGE_WRITEABLE(&TempPte)) MI_MAKE_DIRTY_PAGE(&TempPte);
 
+#if defined(_M_ARM64)
+    if (MI_IS_PAGE_TABLE_ADDRESS(PointerPte))
+    {
+        MI_WRITE_VALID_PTE_NO_FLUSH(PointerPte, TempPte);
+        MiArm64CompleteFaultPteUpdate(Address, &TempPte);
+    }
+    else
+    {
+        MI_WRITE_VALID_PTE(PointerPte, TempPte);
+    }
+#else
     /* Write it */
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
+#endif
 
     /* Did we manually acquire the lock */
     if (HaveLock)
@@ -899,8 +937,13 @@ MiCompleteProtoPteFault(IN BOOLEAN StoreInstruction,
     /* Set the dirty flag if needed */
     if (DirtyPage) MI_MAKE_DIRTY_PAGE(&TempPte);
 
+#if defined(_M_ARM64)
+    MI_WRITE_VALID_PTE_NO_FLUSH(PointerPte, TempPte);
+    MiArm64CompleteFaultPteUpdate(Address, &TempPte);
+#else
     /* Write the PTE */
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
+#endif
 
     /* Reset the protection if needed */
     if (OriginalProtection) Protection = MM_ZERO_ACCESS;
@@ -1788,6 +1831,15 @@ MmArmAccessFault(IN ULONG FaultCode,
         ASSERT(MI_IS_PAGE_LARGE(PointerPde) == FALSE);
         ASSERT((!MI_IS_NOT_PRESENT_FAULT(FaultCode) && MI_IS_PAGE_COPY_ON_WRITE(PointerPte)) == FALSE);
 
+#if defined(_M_ARM64)
+        if ((PointerPte->u.Hard.Valid != 0) &&
+            (PointerPte->u.Hard.Accessed == 0))
+        {
+            PointerPte->u.Hard.Accessed = 1;
+            KeInvalidateTlbEntry(Address);
+        }
+#endif
+
         /* Check if this was a write */
         if (MI_IS_WRITE_ACCESS(FaultCode))
         {
@@ -1857,6 +1909,15 @@ MmArmAccessFault(IN ULONG FaultCode,
                 TempPte = *PointerPte;
                 if (TempPte.u.Hard.Valid)
                 {
+#if defined(_M_ARM64)
+                    if (TempPte.u.Hard.Accessed == 0)
+                    {
+                        TempPte.u.Hard.Accessed = 1;
+                        MI_UPDATE_VALID_PTE(PointerPte, TempPte);
+                        KeInvalidateTlbEntry(Address);
+                    }
+#endif
+
                     /* Check if this was a write */
                     if (MI_IS_WRITE_ACCESS(FaultCode))
                     {
@@ -1961,6 +2022,22 @@ _WARN("Session space stuff is not implemented yet!")
             }
         }
 RetryKernel:
+#if defined(_M_ARM64)
+        /*
+         * ARM64 can fault on a valid PTE solely because the hardware Accessed
+         * bit is clear. Handle that before taking working-set locks; early
+         * boot can fault on the lock data itself.
+         */
+        TempPte = *PointerPte;
+        if ((TempPte.u.Hard.Valid == 1) && (TempPte.u.Hard.Accessed == 0))
+        {
+            TempPte.u.Hard.Accessed = 1;
+            *PointerPte = TempPte;
+            KeInvalidateTlbEntry(Address);
+            return STATUS_SUCCESS;
+        }
+#endif
+
         /* Acquire the working set lock */
         KeRaiseIrql(APC_LEVEL, &LockIrql);
         MiLockWorkingSet(CurrentThread, WorkingSet);
@@ -1969,6 +2046,15 @@ RetryKernel:
         TempPte = *PointerPte;
         if (TempPte.u.Hard.Valid == 1)
         {
+#if defined(_M_ARM64)
+            if (TempPte.u.Hard.Accessed == 0)
+            {
+                TempPte.u.Hard.Accessed = 1;
+                MI_UPDATE_VALID_PTE(PointerPte, TempPte);
+                KeInvalidateTlbEntry(Address);
+            }
+#endif
+
             /* Check if this was a write */
             if (MI_IS_WRITE_ACCESS(FaultCode))
             {
@@ -1980,6 +2066,13 @@ RetryKernel:
                 {
                     /* Case not yet handled */
                     ASSERT(!IsSessionAddress);
+
+#if defined(_M_ARM64)
+                    if (TrapInformation)
+                    {
+                        PKTRAP_FRAME TrapFrame = TrapInformation;
+                    }
+#endif
 
                     /* Crash with distinguished bugcheck code */
                     KeBugCheckEx(ATTEMPTED_WRITE_TO_READONLY_MEMORY,

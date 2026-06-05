@@ -81,6 +81,16 @@
 /* EPROCESS.ExceptionPort -> ExceptionPortData at Vista+ (union member) */
 #define ExceptionPort   ExceptionPortData
 
+/* KPROCESS.DirectoryTableBase is scalar at Vista+ except on ARM64.
+ * Keep old code explicit about the primary and hyperspace directory bases. */
+#if !defined(_M_ARM64)
+#define KPROCESS_DTB0(Process)  ((Process)->DirectoryTableBase)
+#define KPROCESS_DTB1(Process)  ((Process)->Unused0)
+#else
+#define KPROCESS_DTB0(Process)  ((Process)->DirectoryTableBase[0])
+#define KPROCESS_DTB1(Process)  ((Process)->DirectoryTableBase[1])
+#endif
+
 /* ETHREAD.LpcReplyMessageId -> AlpcMessageId at Vista+ */
 /* (also defined in lpc.h for LPC subsystem files) */
 
@@ -114,6 +124,11 @@
 /* (handled per-file where needed) */
 
 #endif /* NTDDI_VERSION >= NTDDI_LONGHORN */
+
+#ifndef KPROCESS_DTB0
+#define KPROCESS_DTB0(Process)  ((Process)->DirectoryTableBase[0])
+#define KPROCESS_DTB1(Process)  ((Process)->DirectoryTableBase[1])
+#endif
 
 #include "tag.h"
 #include "ke.h"
@@ -154,7 +169,7 @@
 /* for x86 and x86-64 the MSB is 1 so we can simply test on that */
 #define IsPointerOffset(Ptr) ((LONG_PTR)(Ptr) >= 0)
 
-#elif defined(_IA64_)
+#elif defined(_IA64_) || defined(_M_ARM64) || defined(__aarch64__)
 
 /* on Itanium if the 24 most significant bits are set, we're not dealing with
    offsets anymore. */
@@ -194,7 +209,9 @@ C_ASSERT(FIELD_OFFSET(KTHREAD, PreviousMode) == FIELD_OFFSET(KTHREAD, WaitBlock)
 C_ASSERT(FIELD_OFFSET(KTHREAD, ResourceIndex) == FIELD_OFFSET(KTHREAD, WaitBlock) + 2*sizeof(KWAIT_BLOCK) + FIELD_OFFSET(KWAIT_BLOCK, SpareByte));
 C_ASSERT(FIELD_OFFSET(KTHREAD, LargeStack) == FIELD_OFFSET(KTHREAD, WaitBlock) + 3*sizeof(KWAIT_BLOCK) + FIELD_OFFSET(KWAIT_BLOCK, SpareByte));
 C_ASSERT(FIELD_OFFSET(KTHREAD, TrapFrame) == KTHREAD_TRAP_FRAME);
+#if (NTDDI_VERSION < NTDDI_WIN8)
 C_ASSERT(FIELD_OFFSET(KTHREAD, CallbackStack) == KTHREAD_CALLBACK_STACK);
+#endif
 C_ASSERT(FIELD_OFFSET(KTHREAD, ServiceTable) == KTHREAD_SERVICE_TABLE);
 C_ASSERT(FIELD_OFFSET(KTHREAD, FreezeCount) == FIELD_OFFSET(KTHREAD, SavedApcState.UserApcPending) + 1);
 C_ASSERT(FIELD_OFFSET(KTHREAD, Quantum) == FIELD_OFFSET(KTHREAD, SuspendApc.SpareByte0));

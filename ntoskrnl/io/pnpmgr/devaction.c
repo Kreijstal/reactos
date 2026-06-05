@@ -236,6 +236,13 @@ IopCreateDeviceInstancePath(
         return Status;
     }
 
+    if (IoStatusBlock.Information == 0)
+    {
+        DPRINT1("IopInitiatePnpIrp(BusQueryDeviceID) returned no device ID. DeviceNode - %p\n",
+                DeviceNode);
+        return STATUS_NOT_SUPPORTED;
+    }
+
     IsValidID = IopValidateID((PWCHAR)IoStatusBlock.Information, BusQueryDeviceID);
 
     if (!IsValidID)
@@ -971,6 +978,7 @@ IopQueryHardwareIds(PDEVICE_NODE DeviceNode,
     DPRINT("Sending IRP_MN_QUERY_ID.BusQueryHardwareIDs to device stack\n");
 
     RtlZeroMemory(&Stack, sizeof(Stack));
+    RtlZeroMemory(&IoStatusBlock, sizeof(IoStatusBlock));
     Stack.Parameters.QueryId.IdType = BusQueryHardwareIDs;
     Status = IopInitiatePnpIrp(DeviceNode->PhysicalDeviceObject,
                                &IoStatusBlock,
@@ -978,6 +986,11 @@ IopQueryHardwareIds(PDEVICE_NODE DeviceNode,
                                &Stack);
     if (NT_SUCCESS(Status))
     {
+        if (IoStatusBlock.Information == 0)
+        {
+            return Status;
+        }
+
         IsValidID = IopValidateID((PWCHAR)IoStatusBlock.Information, BusQueryHardwareIDs);
 
         if (!IsValidID)
@@ -1036,6 +1049,7 @@ IopQueryCompatibleIds(PDEVICE_NODE DeviceNode,
     DPRINT("Sending IRP_MN_QUERY_ID.BusQueryCompatibleIDs to device stack\n");
 
     RtlZeroMemory(&Stack, sizeof(Stack));
+    RtlZeroMemory(&IoStatusBlock, sizeof(IoStatusBlock));
     Stack.Parameters.QueryId.IdType = BusQueryCompatibleIDs;
     Status = IopInitiatePnpIrp(DeviceNode->PhysicalDeviceObject,
                                &IoStatusBlock,
@@ -2079,6 +2093,26 @@ IopRemoveDevice(PDEVICE_NODE DeviceNode)
 
     BOOLEAN surpriseRemoval = (_Bool)(DeviceNode->Flags & DNF_DEVICE_GONE);
 
+    /*
+     * Remove children bottom-up before removing the parent.  Otherwise
+     * IopFreeDeviceNode asserts on DeviceNode->Child == NULL when a
+     * surprise-removed parent (e.g. USBSTOR) still has mounted children
+     * (e.g. STORAGE\Partition holding a FAT volume).
+     */
+    {
+        PDEVICE_NODE child = DeviceNode->Child;
+        while (child)
+        {
+            PDEVICE_NODE next = child->Sibling;
+            /* Mark as surprise-removed if the parent was surprise-removed */
+            if (surpriseRemoval)
+                child->Flags |= DNF_DEVICE_GONE;
+            PiSetDevNodeState(child, DeviceNodeAwaitingQueuedRemoval);
+            IopRemoveDevice(child);
+            child = next;
+        }
+    }
+
     Status = IopPrepareDeviceForRemoval(DeviceNode->PhysicalDeviceObject, surpriseRemoval);
 
     if (surpriseRemoval)
@@ -2603,6 +2637,17 @@ PipDeviceActionWorker(
                     !(deviceNode->Flags & DNF_HAS_PROBLEM))
                 {
                     PiDevNodeStateMachine(deviceNode);
+                }
+                else if (deviceNode->State == DeviceNodeStarted &&
+                         !(deviceNode->Flags & DNF_HAS_PROBLEM))
+                {
+                    /*
+                     * The device may already have been started by kernel-mode
+                     * enumeration before user-mode setup installs or finalizes
+                     * the matching driver package. Treat that as success: the
+                     * requested post-install state has already been reached.
+                     */
+                    status = STATUS_SUCCESS;
                 }
                 else
                 {

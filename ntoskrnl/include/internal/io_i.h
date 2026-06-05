@@ -216,7 +216,7 @@ ACCESS_MASK IopSetOperationAccess[] =
     DELETE,
 #if (NTDDI_VERSION >= NTDDI_VISTA)
     /* Vista+ file info classes (Set-side access). All hint/optimisation
-     * classes — no specific access mask required. */
+     * classes - no specific access mask required. */
     0, /* 41 FileIoCompletionNotificationInformation */
     0, /* 42 FileIoStatusBlockRangeInformation */
     0, /* 43 FileIoPriorityHintInformation */

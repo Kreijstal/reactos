@@ -2317,7 +2317,9 @@ NtQueryInformationFile(IN HANDLE FileHandle,
         }
 
         /* Validate the length */
-        if (Length < IopQueryOperationLength[FileInformationClass])
+        if ((Length < IopQueryOperationLength[FileInformationClass]) &&
+            !((FileInformationClass == FileAllInformation) &&
+              (Length >= FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName))))
         {
             /* Invalid length */
             return STATUS_INFO_LENGTH_MISMATCH;
@@ -2352,7 +2354,9 @@ NtQueryInformationFile(IN HANDLE FileHandle,
         }
 
         /* Validate the length */
-        if (Length < IopQueryOperationLength[FileInformationClass])
+        if ((Length < IopQueryOperationLength[FileInformationClass]) &&
+            !((FileInformationClass == FileAllInformation) &&
+              (Length >= FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation.FileName))))
         {
             /* Invalid length */
             return STATUS_INFO_LENGTH_MISMATCH;
@@ -3390,7 +3394,7 @@ NtSetInformationFile(IN HANDLE FileHandle,
     else if (FileInformationClass == FileIoCompletionNotificationInformation)
     {
         /* Vista+ optimisation hint set via kernel32!SetFileCompletionNotificationModes.
-         * Validate the flags, store them on the FileObject, complete locally — the
+         * Validate the flags, store them on the FileObject, complete locally - the
          * driver doesn't need to see this IRP. */
         PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION ioNotif =
             (PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION)Irp->AssociatedIrp.SystemBuffer;

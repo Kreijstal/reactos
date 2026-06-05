@@ -524,7 +524,7 @@ MsqPostMouseMove(PTHREADINFO pti, MSG* Msg, LONG_PTR ExtraInfo)
     ListHead = &MessageQueue->HardwareMessagesListHead;
 
     // Do nothing if empty.
-    if (!IsListEmpty(ListHead->Flink))
+    if (!IsListEmpty(ListHead))
     {
        // Look at the end of the list,
        Message = CONTAINING_RECORD(ListHead->Blink, USER_MESSAGE, ListEntry);
@@ -1957,9 +1957,17 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
 
    if (!filter_contains_hw_range( MsgFilterLow, MsgFilterHigh )) return FALSE;
 
-   ListHead = MessageQueue->HardwareMessagesListHead.Flink;
+   if (MessageQueue->HardwareMessagesListHead.Flink == NULL ||
+       MessageQueue->HardwareMessagesListHead.Blink == NULL)
+   {
+      InitializeListHead(&MessageQueue->HardwareMessagesListHead);
+      ClearMsgBitsMask(pti, QS_MOUSE | QS_KEY);
+      return FALSE;
+   }
 
-   if (IsListEmpty(ListHead)) return FALSE;
+   if (IsListEmpty(&MessageQueue->HardwareMessagesListHead)) return FALSE;
+
+   ListHead = MessageQueue->HardwareMessagesListHead.Flink;
 
    if (!MessageQueue->ptiSysLock)
    {
@@ -2350,6 +2358,12 @@ MsqCleanupMessageQueue(PTHREADINFO pti)
       {
          CurrentEntry = MessageQueue->HardwareMessagesListHead.Flink;
          CurrentMessage = CONTAINING_RECORD(CurrentEntry, USER_MESSAGE, ListEntry);
+
+         if (MessageQueue->idSysPeek == (ULONG_PTR)CurrentMessage)
+         {
+            break;
+         }
+
          ERR("MQ Cleanup Post Messages %p\n",CurrentMessage);
          MsqDestroyMessage(CurrentMessage);
       }

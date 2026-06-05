@@ -8,6 +8,10 @@ extern UNICODE_STRING ProcessorHardwareIds;
 extern LPWSTR ProcessorIdString;
 extern LPWSTR ProcessorNameString;
 
+/* Set in Bus_AddDevice; consumed by the ACPI Notify dispatcher to issue a
+ * BusRelations invalidation when a device hot-plug arrives. */
+extern struct _FDO_DEVICE_DATA *AcpiFdo;
+
 typedef enum _DEVICE_PNP_STATE {
 
     NotStarted = 0,         // Not started yet
@@ -47,6 +51,11 @@ typedef struct _PDO_DEVICE_DATA
     LIST_ENTRY  Link;
     ULONG       InterfaceRefCount;
     UNICODE_STRING InterfaceName;
+
+    /* For PCI host bridges (PNP0A03/PNP0A08): cached _PRT result. The
+     * buffer is owned by the PDO and freed in Bus_DestroyPdo. */
+    PVOID       PciRoutingTable;
+    ULONG       PciRoutingTableSize;
 
 } PDO_DEVICE_DATA, *PPDO_DEVICE_DATA;
 

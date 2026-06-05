@@ -253,7 +253,7 @@ RtlWalkFrameChain(OUT PVOID *Callers,
                   IN ULONG Flags)
 {
     ULONG_PTR Stack, NewStack, StackBegin, StackEnd = 0;
-    ULONG Eip;
+    ULONG_PTR Eip;
     BOOLEAN Result, StopSearch = FALSE;
     ULONG i = 0;
 
@@ -275,6 +275,8 @@ RtlWalkFrameChain(OUT PVOID *Callers,
     // FIXME: Hack. Probably won't work if this ever actually manages to run someday.
     Stack = (ULONG_PTR)&Stack;
 #endif
+#elif defined(_M_ARM64)
+    __asm__("mov %0, x29" : "=r"(Stack) : );
 #else
 #error Unknown architecture
 #endif
@@ -1025,44 +1027,22 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
 static DWORD
 LdrpApisetVersion(VOID)
 {
-    static DWORD CachedApisetVersion = ~0u;
-
-    if (CachedApisetVersion == ~0u)
-    {
-        DWORD CompatVersion = RosGetProcessCompatVersion();
-
-        switch (CompatVersion)
-        {
-            case 0:
-                break;
-            case _WIN32_WINNT_VISTA:
-                /* No apisets in vista yet*/
-                CachedApisetVersion = 0;
-                break;
-            case _WIN32_WINNT_WIN7:
-                CachedApisetVersion = APISET_WIN7;
-                DPRINT1("Activating apisets for Win7\n");
-                break;
-            case _WIN32_WINNT_WIN8:
-                CachedApisetVersion = APISET_WIN8;
-                DPRINT1("Activating apisets for Win8\n");
-                break;
-            case _WIN32_WINNT_WINBLUE:
-                CachedApisetVersion = APISET_WIN81;
-                DPRINT1("Activating apisets for Win8.1\n");
-                break;
-            case _WIN32_WINNT_WIN10:
-                CachedApisetVersion = APISET_WIN10;
-                DPRINT1("Activating apisets for Win10\n");
-                break;
-            default:
-                DPRINT1("Unknown version 0x%x\n", CompatVersion);
-                CachedApisetVersion = 0;
-                break;
-        }
-    }
-
-    return CachedApisetVersion;
+    /* Windows resolves api-sets against the system schema unconditionally.
+     * The app's manifested compat version controls shims/behaviors, not
+     * loader name resolution: a Vista-manifested EXE on Win10 still has
+     * its api-ms-win-* imports resolved, otherwise nothing would run.
+     * Pick the bit matching this build's target NT version. */
+#if (_WIN32_WINNT >= 0x0A00)
+    return APISET_WIN10;
+#elif (_WIN32_WINNT >= 0x0603)
+    return APISET_WIN81;
+#elif (_WIN32_WINNT >= 0x0602)
+    return APISET_WIN8;
+#elif (_WIN32_WINNT >= 0x0601)
+    return APISET_WIN7;
+#else
+    return 0;
+#endif
 }
 
 NTSYSAPI
@@ -1148,7 +1128,7 @@ LdrpApplyFileNameRedirection(
         RtlAppendUnicodeStringToString(ResultPath, &NtSystemRoot);
         RtlAppendUnicodeStringToString(ResultPath, &System32);
         RtlAppendUnicodeStringToString(ResultPath, &ApisetName);
-        DPRINT1("ApiSetResolveToHost redirected %wZ to %wZ\n", OriginalName, ResultPath);
+        DPRINT("ApiSetResolveToHost redirected %wZ to %wZ\n", OriginalName, ResultPath);
         *NewName = ResultPath;
     }
     else

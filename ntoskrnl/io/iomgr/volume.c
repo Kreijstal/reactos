@@ -4,7 +4,7 @@
  * FILE:            ntoskrnl/io/iomgr/volume.c
  * PURPOSE:         Volume and File System I/O Support
  * PROGRAMMERS:     Alex Ionescu (alex.ionescu@reactos.org)
- *                  Hervé Poussineau (hpoussin@reactos.org)
+ *                  Hervï¿½ Poussineau (hpoussin@reactos.org)
  *                  Eric Kohl
  *                  Pierre Schweitzer (pierre.schweitzer@reactos.org)
  */
@@ -81,6 +81,18 @@ IopCheckVpbMounted(IN POPEN_PACKET OpenPacket,
     BOOLEAN Alertable, Raw;
     KIRQL OldIrql;
     PVPB Vpb = NULL;
+
+    /*
+     * Mounting a volume is a synchronous, pageable operation which may have
+     * to send IRP_MN_MOUNT_VOLUME to file systems and wait for completion.
+     * Do not enter that path from DPC or higher IRQL; callers which cannot
+     * wait must retry from a wait-capable context.
+     */
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        *Status = STATUS_CANT_WAIT;
+        return NULL;
+    }
 
     /* Lock the VPBs */
     IoAcquireVpbSpinLock(&OldIrql);
@@ -228,7 +240,9 @@ IopReferenceVerifyVpb(IN PDEVICE_OBJECT DeviceObject,
 
     /* Get the VPB and make sure it's mounted */
     LocalVpb = DeviceObject->Vpb;
-    if ((LocalVpb) && (LocalVpb->Flags & VPB_MOUNTED))
+    if ((LocalVpb) &&
+        (LocalVpb->Flags & VPB_MOUNTED) &&
+        (LocalVpb->DeviceObject != NULL))
     {
         /* Return it */
         *Vpb = LocalVpb;
@@ -475,6 +489,16 @@ IopMountVolume(IN PDEVICE_OBJECT DeviceObject,
     PDEVICE_OBJECT AttachedDeviceObject = DeviceObject;
     PDEVICE_OBJECT FileSystemDeviceObject, ParentFsDeviceObject;
     ULONG FsStackOverhead, RegistrationOps;
+    /*
+     * This routine takes pageable locks, calls file systems, and may block
+     * waiting for mount completion. It is therefore illegal above APC_LEVEL.
+     */
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        *Vpb = NULL;
+        return STATUS_CANT_WAIT;
+    }
+
     PAGED_CODE();
 
     /* Check if the device isn't already locked */
@@ -601,6 +625,10 @@ IopMountVolume(IN PDEVICE_OBJECT DeviceObject,
             Irp->Tail.Overlay.Thread = PsGetCurrentThread();
             Irp->Flags = IRP_MOUNT_COMPLETION | IRP_SYNCHRONOUS_PAGING_IO;
             Irp->RequestorMode = KernelMode;
+            Irp->IoStatus.Status = STATUS_UNRECOGNIZED_VOLUME;
+            Irp->IoStatus.Information = 0;
+            IoStatusBlock.Status = STATUS_UNRECOGNIZED_VOLUME;
+            IoStatusBlock.Information = 0;
 
             /* Get the I/O Stack location and set it up */
             StackPtr = IoGetNextIrpStackLocation(Irp);
@@ -902,7 +930,7 @@ IoVerifyVolume(IN PDEVICE_OBJECT DeviceObject,
 
         /* Find the actual File System DO */
         //WasNotMounted = FALSE;
-        FileSystemDeviceObject = DeviceObject->Vpb->DeviceObject;
+        FileSystemDeviceObject = Vpb->DeviceObject;
         while (FileSystemDeviceObject->AttachedDevice)
         {
             /* Go to the next one */
@@ -930,8 +958,7 @@ IoVerifyVolume(IN PDEVICE_OBJECT DeviceObject,
         StackPtr->MinorFunction = IRP_MN_VERIFY_VOLUME;
         StackPtr->Flags = AllowRawMount ? SL_ALLOW_RAW_MOUNT : 0;
         StackPtr->Parameters.VerifyVolume.Vpb = Vpb;
-        StackPtr->Parameters.VerifyVolume.DeviceObject =
-            DeviceObject->Vpb->DeviceObject;
+        StackPtr->Parameters.VerifyVolume.DeviceObject = Vpb->DeviceObject;
 
         /* Call the driver */
         Status = IoCallDriver(FileSystemDeviceObject, Irp);
@@ -1428,5 +1455,60 @@ Quit:
     ObDereferenceObject(FileObject);
     return Status;
 }
+
+#if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
+
+/*
+ * @unimplemented
+ *
+ * Windows 10 exposes IoVolumeDeviceToGuid for translating a volume device
+ * object into its associated volume GUID. ReactOS does not yet maintain
+ * persistent volume GUIDs, so this returns STATUS_NOT_IMPLEMENTED. Callers
+ * such as fastfat mount-time bookkeeping handle the failure gracefully.
+ */
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuid(
+    _In_ PVOID VolumeDeviceObject,
+    _Out_ GUID *Guid)
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(VolumeDeviceObject);
+
+    if (Guid)
+    {
+        RtlZeroMemory(Guid, sizeof(GUID));
+    }
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*
+ * @unimplemented
+ *
+ * Companion to IoVolumeDeviceToGuid: returns the "\??\Volume{GUID}\" path
+ * for a volume device object. ReactOS does not yet emit such names, so
+ * we report STATUS_NOT_IMPLEMENTED and leave the output string empty.
+ */
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuidPath(
+    _In_ PVOID VolumeDeviceObject,
+    _Out_ PUNICODE_STRING GuidPath)
+{
+    PAGED_CODE();
+
+    UNREFERENCED_PARAMETER(VolumeDeviceObject);
+
+    if (GuidPath)
+    {
+        GuidPath->Length = 0;
+        GuidPath->MaximumLength = 0;
+        GuidPath->Buffer = NULL;
+    }
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+#endif /* NTDDI_VERSION >= NTDDI_WINTHRESHOLD */
 
 /* EOF */

@@ -127,6 +127,16 @@ elseif(ARCH STREQUAL "arm")
         arm/except.c
         byteswap.c
         mem.c)
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND ASM_SOURCE
+        arm64/context_asm.S
+        arm64/debug_asm.S)
+    list(APPEND SOURCE
+        arm64/except.c
+        arm64/stubs.c
+        arm64/unwind.c
+        byteswap.c
+        mem.c)
 endif()
 
 add_asm_files(rtl_asm ${ASM_SOURCE})
@@ -143,7 +153,8 @@ list(APPEND SOURCE_VISTA
     srw.c
     threadpool.c
     unicode_vista.c
-    utf8.c)
+    utf8.c
+    waitaddr.c)
 
 add_library(rtl_vista ${SOURCE_VISTA})
 add_pch(rtl_vista rtl_vista.h SOURCE_VISTA)

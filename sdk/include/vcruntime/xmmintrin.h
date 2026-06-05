@@ -22,6 +22,25 @@
 #ifndef _INCLUDED_MM2
 #define _INCLUDED_MM2
 
+/* When building with Clang, use Clang's own intrinsics headers instead.
+ * ReactOS's versions use GCC-specific __builtin_ia32_* builtins that
+ * don't exist in Clang. */
+#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64))
+#if __has_include_next(<xmmintrin.h>)
+#include_next <xmmintrin.h>
+#define _REACTOS_XMMINTRIN_USING_NEXT
+#endif
+#endif
+
+#if defined(_REACTOS_XMMINTRIN_USING_NEXT)
+/* Define ReactOS-specific macros that code may depend on */
+#ifndef __ATTRIBUTE_SSE__
+#define __ATTRIBUTE_SSE__
+#endif
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
+#else
+
 #include <mmintrin.h>
 
 #if defined(_MM2_FUNCTIONALITY) && !defined(_MM_FUNCTIONALITY)
@@ -1241,4 +1260,5 @@ __INTRIN_INLINE_SSE __m64 _mm_sad_pu8(__m64 __a, __m64 __b)
 }
 #endif // __cplusplus
 
+#endif /* !(__clang__ && !_MSC_VER) */
 #endif /* _INCLUDED_MM2 */

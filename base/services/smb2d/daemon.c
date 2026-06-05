@@ -57,9 +57,10 @@
 
 /*
  * smb2d runs as a service where stdout/stderr have nowhere to go, so we
- * route all log lines through OutputDebugStringA — KD/DbgPrint is the
- * only sink COM1 observers can actually read in that context.
+ * route trace lines through OutputDebugStringA only when explicitly enabled;
+ * per-operation logging is otherwise far too expensive on serial COM1.
  */
+#ifdef SMB2D_ENABLE_TRACE
 static void
 smb2d_log(const char *fmt, ...)
 {
@@ -71,6 +72,9 @@ smb2d_log(const char *fmt, ...)
     buf[sizeof(buf) - 1] = '\0';
     OutputDebugStringA(buf);
 }
+#else
+#define smb2d_log(...) ((void)0)
+#endif
 
 /* We pull in only the IOCTLs we need from the driver header without
  * dragging in any DDK types.  Keep this in sync with drivers/filesystems/
@@ -176,7 +180,7 @@ typedef struct {
 } SMB2D_OP_WRITE_OUT;
 
 /* Kernel->daemon FSYNC wire layout, mirror of OP_FSYNC_IN in
- * drivers/filesystems/smb2rdr/upcall.h.  No reply payload — the downcall
+ * drivers/filesystems/smb2rdr/upcall.h.  No reply payload - the downcall
  * Status is the whole answer. */
 typedef struct {
     ULONGLONG FileHandle;
@@ -434,12 +438,28 @@ enum {
 
 #define SMB2D_MAX_HANDLES 64
 
+/*
+ * Per-(server,share) refcounted SMB2 context.  All vnet handles pointing at
+ * the same UNC share share one libsmb2 context, so concurrent V_NET_ROOTs
+ * don't re-run NEGOTIATE/SESSION_SETUP/TREE_CONNECT (and don't multiply
+ * libsmb2 / server-side failure surface).
+ */
+typedef struct _SMB2D_SHARE {
+    struct _SMB2D_SHARE *next;
+    char                *server;     /* ASCII, lower-cased for compare */
+    char                *share;
+    struct smb2_context *ctx;
+    int                  refcount;
+} SMB2D_SHARE;
+
 typedef struct {
     ULONG64              handle;      /* 0 = free slot */
-    struct smb2_context *ctx;
+    struct smb2_context *ctx;         /* == share->ctx; cached for hot lookups */
+    SMB2D_SHARE         *share;       /* owning pool entry; NULL = legacy/orphan */
 } SMB2D_CONN;
 
 static SMB2D_CONN       g_conns[SMB2D_MAX_HANDLES];
+static SMB2D_SHARE     *g_shares;     /* head of (server,share)->ctx pool */
 static CRITICAL_SECTION g_conn_lock;
 static BOOL             g_conn_lock_init;
 static ULONG64          g_next_handle = 1;
@@ -468,42 +488,98 @@ EnsureConnLock(void)
     }
 }
 
-static ULONG64
-InsertConn(struct smb2_context *ctx)
+/* g_conn_lock must be held by the caller. */
+static SMB2D_SHARE *
+FindShareLocked(const char *server, const char *share)
 {
-    int i;
-    ULONG64 h = 0;
-
-    EnterCriticalSection(&g_conn_lock);
-    for (i = 0; i < SMB2D_MAX_HANDLES; i++) {
-        if (g_conns[i].handle == 0) {
-            h = g_next_handle++;
-            if (g_next_handle == 0) g_next_handle = 1;
-            g_conns[i].handle = h;
-            g_conns[i].ctx    = ctx;
-            break;
-        }
+    SMB2D_SHARE *s;
+    for (s = g_shares; s != NULL; s = s->next) {
+        if (_stricmp(s->server, server) == 0 &&
+            _stricmp(s->share,  share)  == 0)
+            return s;
     }
-    LeaveCriticalSection(&g_conn_lock);
-    return h;
+    return NULL;
 }
 
+/* g_conn_lock must be held by the caller.  Takes ownership of `ctx` and
+ * starts the share at refcount 0 - caller bumps it after picking a slot. */
+static SMB2D_SHARE *
+AddShareLocked(const char *server, const char *share, struct smb2_context *ctx)
+{
+    SMB2D_SHARE *s;
+
+    s = (SMB2D_SHARE *)HeapAlloc(GetProcessHeap(), 0, sizeof(*s));
+    if (s == NULL) return NULL;
+
+    s->server = _strdup(server);
+    s->share  = _strdup(share);
+    if (s->server == NULL || s->share == NULL) {
+        if (s->server) free(s->server);
+        if (s->share)  free(s->share);
+        HeapFree(GetProcessHeap(), 0, s);
+        return NULL;
+    }
+    s->ctx      = ctx;
+    s->refcount = 0;
+    s->next     = g_shares;
+    g_shares    = s;
+    return s;
+}
+
+/* g_conn_lock must be held by the caller.  Disconnects + destroys the
+ * underlying libsmb2 context when the last vnet handle releases the share. */
+static void
+ReleaseShareLocked(SMB2D_SHARE *s)
+{
+    SMB2D_SHARE **pp;
+
+    if (s == NULL) return;
+    if (--s->refcount > 0)
+        return;
+
+    /* Unlink from the global list. */
+    for (pp = &g_shares; *pp != NULL; pp = &(*pp)->next) {
+        if (*pp == s) { *pp = s->next; break; }
+    }
+
+    smb2d_log("smb2d: share pool drop server=%s share=%s\n",
+              s->server, s->share);
+
+    if (s->ctx != NULL) {
+        smb2_disconnect_share(s->ctx);
+        smb2_destroy_context(s->ctx);
+    }
+    free(s->server);
+    free(s->share);
+    HeapFree(GetProcessHeap(), 0, s);
+}
+
+/* Frees the vnet slot identified by `h` and releases the share refcount.
+ * Returns the smb2_context * the slot was wired to so callers that owned
+ * the context directly (no pool entry) can destroy it themselves.  When the
+ * slot was pool-backed, this routine handled the disconnect already and
+ * returns NULL so the caller does NOT double-destroy. */
 static struct smb2_context *
 RemoveConn(ULONG64 h)
 {
     int i;
     struct smb2_context *ctx = NULL;
+    SMB2D_SHARE *share = NULL;
 
     if (h == 0) return NULL;
     EnterCriticalSection(&g_conn_lock);
     for (i = 0; i < SMB2D_MAX_HANDLES; i++) {
         if (g_conns[i].handle == h) {
-            ctx = g_conns[i].ctx;
+            share = g_conns[i].share;
+            if (share == NULL) ctx = g_conns[i].ctx;
             g_conns[i].handle = 0;
             g_conns[i].ctx    = NULL;
+            g_conns[i].share  = NULL;
             break;
         }
     }
+    if (share != NULL)
+        ReleaseShareLocked(share);
     LeaveCriticalSection(&g_conn_lock);
     return ctx;
 }
@@ -668,6 +744,7 @@ Utf8Free(char *s)
     if (s) HeapFree(GetProcessHeap(), 0, s);
 }
 
+#ifdef SMB2D_ENABLE_TRACE
 static const char *
 OpcodeName(ULONG op)
 {
@@ -687,6 +764,7 @@ OpcodeName(ULONG op)
     default:                     return "INVALID";
     }
 }
+#endif
 
 static HANDLE
 OpenSmbRdr(void)
@@ -792,6 +870,50 @@ HandleConnectShare(const BYTE *in, ULONG inLen,
 
     EnsureWsaStartup();
 
+    /* Pool lookup: if a previous V_NET_ROOT for the same (server,share)
+     * is still alive in the daemon (its OP_DISCONNECT hasn't fired yet),
+     * graft a new vnet handle onto that context instead of re-running
+     * NEGOTIATE/SESSION_SETUP/TREE_CONNECT.  This eliminates the
+     * "Explorer browsed fine, second VNetRoot returns BAD_NETWORK_NAME"
+     * window where a transient libsmb2/server-side failure on the
+     * redundant TREE_CONNECT propagated all the way back as
+     * STATUS_BAD_NETWORK_NAME. */
+    EnterCriticalSection(&g_conn_lock);
+    {
+        SMB2D_SHARE *pooled = FindShareLocked(server, share);
+        if (pooled != NULL) {
+            handle = 0;
+            {
+                int i;
+                for (i = 0; i < SMB2D_MAX_HANDLES; i++) {
+                    if (g_conns[i].handle == 0) {
+                        handle = g_next_handle++;
+                        if (g_next_handle == 0) g_next_handle = 1;
+                        g_conns[i].handle = handle;
+                        g_conns[i].ctx    = pooled->ctx;
+                        g_conns[i].share  = pooled;
+                        pooled->refcount++;
+                        break;
+                    }
+                }
+            }
+            LeaveCriticalSection(&g_conn_lock);
+            if (handle == 0) {
+                smb2d_log("smb2d: handle table full (pool hit)\n");
+                status = (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
+                goto out;
+            }
+            smb2d_log("smb2d: connect_share pool hit (%s, %s) -> handle=0x%llx "
+                      "refcount=%d\n",
+                      server, share, (unsigned long long)handle,
+                      pooled->refcount);
+            *outHandle = handle;
+            status = SMB2D_STATUS_SUCCESS;
+            goto out;
+        }
+    }
+    LeaveCriticalSection(&g_conn_lock);
+
     ctx = smb2_init_context();
     if (!ctx) {
         smb2d_log("smb2d: smb2_init_context returned NULL\n");
@@ -814,17 +936,48 @@ HandleConnectShare(const BYTE *in, ULONG inLen,
         goto out;
     }
 
-    handle = InsertConn(ctx);
-    if (handle == 0) {
-        smb2d_log("smb2d: handle table full, disconnecting\n");
-        smb2_disconnect_share(ctx);
-        smb2_destroy_context(ctx);
-        ctx = NULL;
-        status = (LONG)0xC0000017L; /* STATUS_NO_MEMORY */
-        goto out;
-    }
+    /* Install into the pool and hand out a vnet handle. */
+    EnterCriticalSection(&g_conn_lock);
+    {
+        SMB2D_SHARE *pooled = AddShareLocked(server, share, ctx);
+        if (pooled == NULL) {
+            LeaveCriticalSection(&g_conn_lock);
+            smb2d_log("smb2d: AddShareLocked OOM, disconnecting\n");
+            smb2_disconnect_share(ctx);
+            smb2_destroy_context(ctx);
+            ctx = NULL;
+            status = (LONG)0xC0000017L;
+            goto out;
+        }
+        ctx = NULL; /* ownership moved into the pool */
 
-    smb2d_log("smb2d: connect_share(%s, %s) -> ok handle=0x%llx\n",
+        handle = 0;
+        {
+            int i;
+            for (i = 0; i < SMB2D_MAX_HANDLES; i++) {
+                if (g_conns[i].handle == 0) {
+                    handle = g_next_handle++;
+                    if (g_next_handle == 0) g_next_handle = 1;
+                    g_conns[i].handle = handle;
+                    g_conns[i].ctx    = pooled->ctx;
+                    g_conns[i].share  = pooled;
+                    pooled->refcount++;
+                    break;
+                }
+            }
+        }
+        if (handle == 0) {
+            /* Drop the just-created share: refcount is 0 so this disconnects. */
+            ReleaseShareLocked(pooled);
+            LeaveCriticalSection(&g_conn_lock);
+            smb2d_log("smb2d: handle table full (pool miss)\n");
+            status = (LONG)0xC0000017L;
+            goto out;
+        }
+    }
+    LeaveCriticalSection(&g_conn_lock);
+
+    smb2d_log("smb2d: connect_share(%s, %s) -> ok handle=0x%llx (new pool entry)\n",
               server, share, (unsigned long long)handle);
 
     *outHandle = handle;
@@ -1262,7 +1415,7 @@ PatchNextOffset(BYTE *base, ULONG recOffset, ULONG delta)
  * Paging semantics: the smb2dir iterator position persists inside libsmb2
  * across calls on the same FCB, so a follow-up OP_READDIR with RestartScan=0
  * continues from where we left off.  If a record doesn't fit into the
- * buffer, we re-queue nothing — libsmb2 has already advanced past that
+ * buffer, we re-queue nothing - libsmb2 has already advanced past that
  * entry, so it'll come back on the next call.  Rather than trying to
  * peek/rewind one entry, we simply defer: the NT semantics of dir queries
  * is that each call returns as many whole records as fit.
@@ -1330,7 +1483,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
         smb2_rewinddir(ctx, dir);
     }
 
-    /* Clamp the caller's declared max against the actual staging capacity —
+    /* Clamp the caller's declared max against the actual staging capacity -
      * the kernel side has MaxOutputLen == userbuffer_size and sized outBuf
      * to accommodate it, but defend against a bogus header. */
     payloadCap = outCap - (ULONG)sizeof(SMB2D_OP_READDIR_OUT);
@@ -1366,7 +1519,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
             wlen = MultiByteToWideChar(CP_UTF8, 0, e->name, -1,
                                         scratch, (int)(sizeof(scratch)/sizeof(WCHAR)));
             if (wlen <= 1) {
-                /* Conversion failed or returned only the NUL — skip the
+                /* Conversion failed or returned only the NUL - skip the
                  * entry rather than emit a zero-length name. */
                 smb2d_log("smb2d: readdir name conversion failed for \"%s\"\n",
                           e->name ? e->name : "(null)");
@@ -1413,7 +1566,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
 
         if (hdr.ReturnSingleEntry) {
             /* Single-entry contract: emit exactly one record and stop, but
-             * leave `more` unset — the iterator position decides whether
+             * leave `more` unset - the iterator position decides whether
              * the next call returns anything. */
             more = FALSE;
             break;
@@ -1435,7 +1588,7 @@ HandleOpReaddir(const BYTE *in, ULONG inLen,
               entryCount, bytesWritten, (unsigned)more);
 
     if (entryCount == 0) {
-        /* No entries produced and end-of-dir reached — surface the NT
+        /* No entries produced and end-of-dir reached - surface the NT
          * terminating status so rdbss completes the IRP cleanly. */
         return STATUS_NO_MORE_FILES;
     }
@@ -1585,7 +1738,7 @@ HandleOpWrite(const BYTE *in, ULONG inLen,
 /*
  * OP_FSYNC: fire libsmb2's smb2_fsync() on the target file handle so the
  * server forces a disk flush of the open stream.  Directory handles are
- * a no-op — SMB2 has no directory-flush op, and pretending one failed
+ * a no-op - SMB2 has no directory-flush op, and pretending one failed
  * would break FlushFileBuffers() on directory handles that applications
  * happen to open.  A negative rc from libsmb2 is surfaced as a network
  * error so FlushFileBuffers propagates failure to user code.
@@ -1736,7 +1889,7 @@ MapSmb2ErrnoToNtStatus(struct smb2_context *ctx, int rc)
     /* smb2_get_error returns a human-readable sentence that libsmb2
      * assembles from the server-provided STATUS_* token, so a substring
      * match catches the common cases without pulling in a full error
-     * table.  Case-sensitive is fine — libsmb2's wording is stable. */
+     * table.  Case-sensitive is fine - libsmb2's wording is stable. */
     if (strstr(msg, "NOT_FOUND")        != NULL ||
         strstr(msg, "No such")          != NULL ||
         strstr(msg, "does not exist")   != NULL)
@@ -1929,18 +2082,41 @@ HandleDisconnect(const BYTE *in, ULONG inLen)
     if (inLen < sizeof(handle)) return STATUS_INVALID_PARAMETER;
     memcpy(&handle, in, sizeof(handle));
 
-    ctx = RemoveConn(handle);
-    if (ctx == NULL) {
-        smb2d_log("smb2d: OP_DISCONNECT handle=0x%llx not found\n",
-                  (unsigned long long)handle);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+    /* RemoveConn now consults the share pool: if the slot was pool-backed
+     * it drops the refcount (and the pool disconnects the libsmb2 context
+     * on the last release) and returns NULL.  Only orphan/legacy slots -
+     * which own their context outright - come back with a non-NULL ctx
+     * for us to destroy here.
+     *
+     * Distinguish "slot was pool-backed and just released" from "handle was
+     * never valid": RemoveConn returns NULL in both cases, so look up the
+     * existence of the handle one more time after the call would race; we
+     * instead peek under the lock before calling. */
+    {
+        BOOL was_known = FALSE;
+        int  i;
+        EnterCriticalSection(&g_conn_lock);
+        for (i = 0; i < SMB2D_MAX_HANDLES; i++) {
+            if (g_conns[i].handle == handle) { was_known = TRUE; break; }
+        }
+        LeaveCriticalSection(&g_conn_lock);
+        if (!was_known) {
+            smb2d_log("smb2d: OP_DISCONNECT handle=0x%llx not found\n",
+                      (unsigned long long)handle);
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+        }
     }
+
+    ctx = RemoveConn(handle);
 
     smb2d_log("smb2d: OP_DISCONNECT handle=0x%llx -> ok\n",
               (unsigned long long)handle);
 
-    smb2_disconnect_share(ctx);
-    smb2_destroy_context(ctx);
+    if (ctx != NULL) {
+        /* Legacy/orphan slot: we own the context outright. */
+        smb2_disconnect_share(ctx);
+        smb2_destroy_context(ctx);
+    }
     return SMB2D_STATUS_SUCCESS;
 }
 
@@ -2103,7 +2279,7 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
                 break;
             }
             memcpy(&rdhdr, payload, sizeof(rdhdr));
-            /* Cap at 1 MB — dir listings on NT are usually 4K–64K, but
+            /* Cap at 1 MB - dir listings on NT are usually 4K–64K, but
              * don't let a bogus header wedge the daemon. */
             if (rdhdr.MaxOutputLen > (1u << 20))
                 rdhdr.MaxOutputLen = (1u << 20);
@@ -2133,7 +2309,7 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
                 break;
             }
             memcpy(&rhdr, payload, sizeof(rhdr));
-            /* Cap at 1 MiB — matches the kernel-side chunk bound and keeps
+            /* Cap at 1 MiB - matches the kernel-side chunk bound and keeps
              * the daemon's heap footprint predictable. */
             if (rhdr.Length > (1u << 20))
                 rhdr.Length = (1u << 20);

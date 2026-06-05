@@ -124,7 +124,7 @@ FwpsCalloutUnregisterByKey0(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Network buffer list helpers — all stubs                           */
+/*  Network buffer list helpers - all stubs                           */
 /* ------------------------------------------------------------------ */
 
 NTSTATUS NTAPI
@@ -245,7 +245,7 @@ FwpsNetBufferListRelease0(
 }
 
 /* ------------------------------------------------------------------ */
-/*  Management API (FWPM_* kernel side) — all stubs                   */
+/*  Management API (FWPM_* kernel side) - all stubs                   */
 /* ------------------------------------------------------------------ */
 
 NTSTATUS NTAPI

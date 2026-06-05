@@ -691,6 +691,9 @@
     SVC_(UserMonitorFromRect, 2)
     SVC_(UserMonitorFromWindow, 2)
     SVC_(UserSetScrollBarInfo, 3)
+    SVC_(UserRdpOpenSession, 3)
+    SVC_(UserRdpCaptureFrame, 5)
+    SVC_(UserRdpCloseSession, 1)
 // For Wine DX
     SVC_(GdiDdDDICreateDCFromMemory, 1)
     SVC_(GdiDdDDIDestroyDCFromMemory, 1)
@@ -750,3 +753,8 @@
     SVC_(GdiDdDDISharedPrimaryUnLockNotification, 1)
     SVC_(GdiDdDDISignalSynchronizationObject, 1)
     SVC_(GdiDdDDIWaitForSynchronizationObject, 1)
+    SVC_(UserRdpInjectMouse, 2)
+    SVC_(UserRdpInjectKeyboard, 2)
+    SVC_(UserAddClipboardFormatListener, 1)
+    SVC_(UserRemoveClipboardFormatListener, 1)
+    SVC_(UserGetUpdatedClipboardFormats, 3)

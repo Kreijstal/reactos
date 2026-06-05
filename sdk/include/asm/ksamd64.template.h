@@ -842,8 +842,8 @@ OFFSET(UcbUmsTeb, UMS_CONTROL_BLOCK, UmsTeb),
 HEADER("XSTATE_CONFIGURATION offsets"),
 OFFSET(XcfgEnabledFeatures, XSTATE_CONFIGURATION, EnabledFeatures),
 #if (NTDDI_VERSION >= NTDDI_WIN10)
-OFFSET(XcfgEnabledVolatileFeatures, XSTATE_CONFIGURATION, EnabledFeatures),
-OFFSET(XcfgEnabledSupervisorFeatures, XSTATE_CONFIGURATION, EnabledSupervisorFeaturestures),
+OFFSET(XcfgEnabledVolatileFeatures, XSTATE_CONFIGURATION, EnabledVolatileFeatures),
+OFFSET(XcfgEnabledSupervisorFeatures, XSTATE_CONFIGURATION, EnabledSupervisorFeatures),
 #endif
 
 HEADER("XSTATE_CONTEXT offsets"),
@@ -1045,9 +1045,16 @@ OFFSET(KTHREAD_TrapFrame, KTHREAD, TrapFrame),
 OFFSET(KTHREAD_PreviousMode, KTHREAD, PreviousMode),
 OFFSET(KTHREAD_KernelStack, KTHREAD, KernelStack),
 OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
-/* KTHREAD.LargeStack lives in the pre-Win8 KTHREAD layout. */
+/* LargeStack moved from KTHREAD to ETHREAD in Win8.
+ * Define both offsets unconditionally so the generated .inc is
+ * safe regardless of which NTDDI the asm preprocessor resolves.
+ * trap.S selects the correct one with its own #if guard. */
 #if (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
+CONSTANTX(ETHREAD_LargeStack, 0),
+#else
+CONSTANTX(KTHREAD_LargeStack, 0),
+OFFSET(ETHREAD_LargeStack, ETHREAD, LargeStack),
 #endif
 
 HEADER("KINTERRUPT"),

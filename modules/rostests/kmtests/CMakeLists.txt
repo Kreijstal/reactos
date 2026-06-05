@@ -1,5 +1,6 @@
 
 include_directories(include)
+include_directories(${REACTOS_SOURCE_DIR}/drivers/usb/usbxhci)
 
 #
 # subdirectories containing special-purpose drivers
@@ -8,6 +9,7 @@ add_subdirectory(example)
 add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
+add_subdirectory(kmt_exit_drv)
 add_subdirectory(ntos_cc)
 add_subdirectory(ntos_io)
 add_subdirectory(ntos_mm)
@@ -118,8 +120,14 @@ list(APPEND KMTEST_DRV_SOURCE
     rtl/RtlIsValidOemCharacter.c
     rtl/RtlRangeList.c
     ${COMMON_SOURCE}
+    usb_xhci/XhciBulkTrb.c
+    ${REACTOS_SOURCE_DIR}/drivers/usb/usbxhci/trb.c
 
     kmtest_drv/kmtest_drv.rc)
+
+if(ARCH STREQUAL "arm64")
+    list(REMOVE_ITEM KMTEST_DRV_SOURCE ntos_ex/ExSequencedList.c)
+endif()
 
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     add_asm_files(KMTEST_DRV_ASM
@@ -134,9 +142,11 @@ set_module_type(kmtest_drv kernelmodedriver)
 target_link_libraries(kmtest_drv kmtest_printf chkstk memcmp ntoskrnl_vista ${PSEH_LIB})
 add_importlibs(kmtest_drv ntoskrnl hal)
 add_dependencies(kmtest_drv bugcodes xdk)
-target_compile_definitions(kmtest_drv PRIVATE KMT_KERNEL_MODE NTDDI_VERSION=NTDDI_WS03SP1)
+target_compile_definitions(kmtest_drv PRIVATE KMT_KERNEL_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest_drv include/kmt_test.h)
 add_rostests_file(TARGET kmtest_drv)
+add_cd_file(TARGET kmtest_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
+add_cd_file(TARGET kmt_exit_drv DESTINATION reactos/system32/drivers FOR kmtestcd)
 
 add_library(kmtest_printf
     kmtest_drv/printf_stubs.c
@@ -188,7 +198,7 @@ add_executable(kmtest ${KMTEST_SOURCE})
 set_module_type(kmtest win32cui)
 target_link_libraries(kmtest ${PSEH_LIB})
 add_importlibs(kmtest fltlib advapi32 ws2_32 msvcrt kernel32 ntdll)
-target_compile_definitions(kmtest PRIVATE KMT_USER_MODE NTDDI_VERSION=NTDDI_WS03SP1)
+target_compile_definitions(kmtest PRIVATE KMT_USER_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest include/kmt_test.h)
 set_target_properties(kmtest PROPERTIES OUTPUT_NAME "kmtest_")
 add_rostests_file(TARGET kmtest)
@@ -199,6 +209,7 @@ add_rostests_file(TARGET kmtest)
 add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
+    kmt_exit_drv
     example_drv
     hidp_drv
     iocreatefile_drv

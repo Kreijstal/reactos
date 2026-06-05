@@ -157,9 +157,10 @@ RtlCaptureStackBackTrace(IN ULONG FramesToSkip,
         /* Don't go past the limit */
         if ((FramesToSkip + i) >= FrameCount) break;
 
-        /* Save this entry and hash it */
-        BackTrace[i] = Frames[FramesToSkip + i];
-        Hash += PtrToUlong(BackTrace[i]);
+        /* Save this entry (when a buffer was supplied) and hash it. Vista and
+         * later tolerate a NULL BackTrace pointer instead of faulting. */
+        if (BackTrace) BackTrace[i] = Frames[FramesToSkip + i];
+        Hash += PtrToUlong(Frames[FramesToSkip + i]);
     }
 
     /* Write the hash */

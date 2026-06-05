@@ -688,6 +688,9 @@
     SVC_(UserSetDbgTagCount, 1)	//
     SVC_(UserSetRipFlags, 1)	//
     SVC_(UserSetScrollBarInfo, 3)	//
+    SVC_(UserRdpOpenSession, 3)	//
+    SVC_(UserRdpCaptureFrame, 5)	//
+    SVC_(UserRdpCloseSession, 1)	//
 // ReactOS Display Driver Model
     SVC_(GdiDdDDICheckExclusiveOwnership, 0)
     SVC_(GdiDdDDICreateAllocation, 1)
@@ -744,3 +747,8 @@
     SVC_(GdiDdDDISharedPrimaryUnLockNotification, 1)
     SVC_(GdiDdDDISignalSynchronizationObject, 1)
     SVC_(GdiDdDDIWaitForSynchronizationObject, 1)
+    SVC_(UserRdpInjectMouse, 2)
+    SVC_(UserRdpInjectKeyboard, 2)
+    SVC_(UserAddClipboardFormatListener, 1)
+    SVC_(UserRemoveClipboardFormatListener, 1)
+    SVC_(UserGetUpdatedClipboardFormats, 3)

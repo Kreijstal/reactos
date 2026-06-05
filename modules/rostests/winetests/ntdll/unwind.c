@@ -1513,7 +1513,7 @@ static void test_virtual_unwind_arm(void)
 
 #endif  /* __arm__ */
 
-#if defined(__aarch64__) || defined(__x86_64__)
+#if defined(__aarch64__) || (defined(__x86_64__) && !defined(__REACTOS__))
 
 #define UWOP_TWOBYTES(x) (((x) >> 8) & 0xff), ((x) & 0xff)
 
@@ -1811,7 +1811,6 @@ static void call_virtual_unwind_arm64( void *code_mem, int testnum, const struct
     }
 }
 
-#ifndef __REACTOS__
 #define DW(dword) ((dword >> 0) & 0xff), ((dword >> 8) & 0xff), ((dword >> 16) & 0xff), ((dword >> 24) & 0xff)
 
 static void test_virtual_unwind_arm64(void)
@@ -2645,12 +2644,10 @@ static void test_virtual_unwind_arm64(void)
         call_virtual_unwind_arm64( code_mem, i, &tests[i] );
 }
 
-#endif // __REACTOS__
-
 #undef UWOP_ALLOC_SMALL
 #undef UWOP_ALLOC_LARGE
 
-#endif  /* __aarch64__ || __x86_64__ */
+#endif  /* __aarch64__ || (__x86_64__ && !__REACTOS__) */
 
 #ifdef __x86_64__
 

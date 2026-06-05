@@ -579,7 +579,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
          * upper layer can resolve the reparse.
          *
          * Return STATUS_REPARSE for any reparse tag (mount point,
-         * symlink, third-party, etc.) — the tag goes into
+         * symlink, third-party, etc.) - the tag goes into
          * IoStatus.Information and the reparse data stays in
          * Irp->Tail.Overlay.AuxiliaryBuffer for the I/O manager, which
          * owns (and frees) that buffer once the reparse is handled.
@@ -708,6 +708,9 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                                               FileObject,
                                               BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                               BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+                NTFS_TRACE("DRVIDX: top create record returned 0x%lx for %wZ\n",
+                        Status,
+                        &FileObject->FileName);
             }
 
             if (!NT_SUCCESS(Status))
@@ -722,7 +725,11 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
             // Now we should be able to open the file using NtfsCreateFile()
             DPRINT("NtfsCreateFile: Recursive call to re-open created file/dir\n");
+            NTFS_TRACE("DRVIDX: recursive open begin for %wZ\n", &FileObject->FileName);
             Status = NtfsCreateFile(DeviceObject, IrpContext);
+            NTFS_TRACE("DRVIDX: recursive open returned 0x%lx for %wZ\n",
+                    Status,
+                    &FileObject->FileName);
             if (NT_SUCCESS(Status))
             {
                 // We need to change Irp->IoStatus.Information to reflect creation
@@ -765,7 +772,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
             if (Fcb->OpenHandleCount == 0)
             {
-                /* First open of this FCB — establish share access. */
+                /* First open of this FCB - establish share access. */
                 IoSetShareAccess(DesiredAccess,
                                  ShareAccess,
                                  FileObject,
@@ -773,7 +780,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             }
             else
             {
-                /* Subsequent open — must be compatible with existing
+                /* Subsequent open - must be compatible with existing
                  * sharing.  IoCheckShareAccess validates and (when the
                  * fourth argument is TRUE) updates the access counters
                  * atomically. */
@@ -883,6 +890,7 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
     PFILENAME_ATTRIBUTE FilenameAttribute;
     ULONGLONG ParentMftIndex;
     ULONGLONG FileMftIndex;
+    ULONGLONG RawFileMftIndex;
     PB_TREE Tree;
     PINDEX_ROOT_ATTRIBUTE NewIndexRoot;
     ULONG MaxIndexRootSize;
@@ -978,6 +986,8 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
     Status = AddNewMftEntry(FileRecord, DeviceExt, &FileMftIndex, CanWait);
     if (NT_SUCCESS(Status))
     {
+        RawFileMftIndex = FileMftIndex;
+
         // The highest 2 bytes should be the sequence number, unless the parent happens to be root
         if (FileMftIndex == NTFS_FILE_ROOT)
             FileMftIndex = FileMftIndex + ((ULONGLONG)NTFS_FILE_ROOT << 48);
@@ -992,6 +1002,13 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
                                             FileMftIndex,
                                             FilenameAttribute,
                                             CaseSensitive);
+        if (!NT_SUCCESS(Status))
+        {
+            ClearFlag(FileRecord->Flags, FRH_IN_USE);
+            FileRecord->LinkCount = 0;
+            UpdateFileRecord(DeviceExt, RawFileMftIndex, FileRecord);
+            NtfsSetMftBitmapInUse(DeviceExt, RawFileMftIndex, FALSE, CanWait);
+        }
     }
 
     ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
@@ -1092,6 +1109,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     PFILENAME_ATTRIBUTE FilenameAttribute;
     ULONGLONG ParentMftIndex;
     ULONGLONG FileMftIndex;
+    ULONGLONG RawFileMftIndex;
 
     DPRINT("NtfsCreateFileRecord(%p, %p, %s, %s)\n",
             DeviceExt,
@@ -1142,6 +1160,8 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     Status = AddNewMftEntry(FileRecord, DeviceExt, &FileMftIndex, CanWait);
     if (NT_SUCCESS(Status))
     {
+        RawFileMftIndex = FileMftIndex;
+
         // The highest 2 bytes should be the sequence number, unless the parent happens to be root
         if (FileMftIndex == NTFS_FILE_ROOT)
             FileMftIndex = FileMftIndex + ((ULONGLONG)NTFS_FILE_ROOT << 48);
@@ -1156,6 +1176,17 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                                             FileMftIndex,
                                             FilenameAttribute,
                                             CaseSensitive);
+        if (!NT_SUCCESS(Status))
+        {
+            ClearFlag(FileRecord->Flags, FRH_IN_USE);
+            FileRecord->LinkCount = 0;
+            UpdateFileRecord(DeviceExt, RawFileMftIndex, FileRecord);
+            NtfsSetMftBitmapInUse(DeviceExt, RawFileMftIndex, FALSE, CanWait);
+        }
+        NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file add-name returned 0x%lx for %.*S\n",
+                    Status,
+                    FilenameAttribute->NameLength,
+                    FilenameAttribute->Name);
 
         /* Emit a USN_REASON_FILE_CREATE record into the change journal
          * if one is active on this volume.  Gated so un-journalled
@@ -1174,6 +1205,10 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    NTFS_TRACE_IF(ParentMftIndex == 27, "DRVIDX: create file record return 0x%lx for %.*S\n",
+                Status,
+                FilenameAttribute->NameLength,
+                FilenameAttribute->Name);
 
     return Status;
 }

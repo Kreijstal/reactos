@@ -221,7 +221,7 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
     NTSTATUS Status;
     PWCHAR Name;
 
-    *Length -= sizeof(*InfoBuffer);
+    *Length -= FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
 
     if (Ccb->NodeType == NPFS_NTC_ROOT_DCB_CCB)
     {
@@ -234,6 +234,12 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
         Name = Ccb->Fcb->FullName.Buffer;
     }
 
+    /* Report the full name length, even when only part of it fits.
+       Windows fills as much of the name as the buffer allows but still
+       returns the complete FileNameLength so the caller can size a
+       follow-up query (see CDFS CdQueryNameInfo). */
+    InfoBuffer->FileNameLength = NameLength;
+
     if (*Length < NameLength)
     {
         Status = STATUS_BUFFER_OVERFLOW;
@@ -245,7 +251,6 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
     }
 
     RtlCopyMemory(InfoBuffer->FileName, Name, NameLength);
-    InfoBuffer->FileNameLength = NameLength;
 
     *Length -= NameLength;
     return Status;
@@ -262,6 +267,9 @@ NpQueryInternalInfo(IN PNP_CCB Ccb,
     *Length -= sizeof(*InfoBuffer);
 
     RtlZeroMemory(InfoBuffer, sizeof(*InfoBuffer));
+
+    /* Report a unique, non-zero file id, like Windows does for a pipe */
+    InfoBuffer->IndexNumber.QuadPart = (ULONG_PTR)Ccb;
 
     return STATUS_SUCCESS;
 }

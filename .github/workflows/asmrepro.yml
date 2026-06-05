@@ -1,0 +1,67 @@
+name: asmrepro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clangcl-probe:
+    runs-on: windows-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+
+    - name: Install LLVM 13.0.1 (the CI clang-cl version)
+      shell: cmd
+      run: choco install -y --allow-downgrade llvm --version 13.0.1
+
+    - name: clang-cl version
+      shell: cmd
+      run: '"C:\Program Files\LLVM\bin\clang-cl.exe" --version'
+
+    - name: Probe 1 - is /D_USE_ML honored at all (.S input)?
+      shell: pwsh
+      run: |
+        "#ifdef _USE_ML`nUSEML_DEFINED`n#else`nUSEML_NOTDEF`n#endif" | Set-Content probe.S
+        & "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /D_USE_ML /EP /c probe.S > probeS.out 2>$null
+        & "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /D_USE_ML /EP /TP /c probe.S > probeTP.out 2>$null
+        Copy-Item probe.S probe.c
+        & "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo /D_USE_ML /EP /c probe.c > probeC.out 2>$null
+        Write-Host ".S  input  =>" (Select-String -Path probeS.out  -Pattern 'USEML_DEFINED|USEML_NOTDEF').Line
+        Write-Host ".S /TP     =>" (Select-String -Path probeTP.out -Pattern 'USEML_DEFINED|USEML_NOTDEF').Line
+        Write-Host ".c  input  =>" (Select-String -Path probeC.out  -Pattern 'USEML_DEFINED|USEML_NOTDEF').Line
+
+    - name: Probe 2 - CURRENT asm.inc, preprocess amd64.S
+      shell: cmd
+      run: |
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > cur.asm 2>cur_err.txt
+        echo EXIT=%errorlevel%
+
+    - name: Probe 3 - GREEN-checkpoint asm.inc (25e46d8d9f2), preprocess amd64.S
+      shell: cmd
+      run: |
+        git show 25e46d8d9f2:sdk/include/asm/asm.inc > sdk\include\asm\asm.inc
+        "C:\Program Files\LLVM\bin\clang-cl.exe" /nologo -nostdinc /I sdk\include\asm /I boot\freeldr\freeldr /I boot\freeldr\freeldr\arch\i386 /I boot\freeldr\freeldr\arch\realmode /D__ASM__ /D_USE_ML /D_M_AMD64 /D__REACTOS__ /EP /c boot\freeldr\freeldr\arch\realmode\amd64.S > green.asm 2>green_err.txt
+        echo EXIT=%errorlevel%
+
+    - name: Verdict
+      shell: pwsh
+      run: |
+        function CM($f){ if(-not(Test-Path $f)){return -1}; (Select-String -Path $f -Pattern '(^\s*\.macro\b)|(\.endm\b)' -AllMatches|Measure-Object).Count }
+        Write-Host "================= RESULT ================="
+        Write-Host ("CURRENT asm.inc : .macro/.endm = {0}" -f (CM 'cur.asm'))
+        Write-Host ("GREEN   asm.inc : .macro/.endm = {0}" -f (CM 'green.asm'))
+        Write-Host "----- first .macro lines in CURRENT (with line numbers) -----"
+        Select-String -Path cur.asm -Pattern '\.macro|\.endm' | Select-Object -First 8 | ForEach-Object { "{0}: {1}" -f $_.LineNumber, $_.Line }
+
+    - name: Upload
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: clangcl_probe
+        path: |
+          cur.asm
+          green.asm
+          probeS.out
+          probeC.out

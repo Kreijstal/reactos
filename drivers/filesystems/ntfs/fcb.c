@@ -132,7 +132,7 @@ NtfsCreateFCB(PCWSTR FileName,
     Fcb->RFCB.PagingIoResource = &(Fcb->PagingIoResource);
 
     /* Byte-range file locks. The completion / unlock callbacks are
-     * optional and we don't need them — FsRtlProcessFileLock and the
+     * optional and we don't need them - FsRtlProcessFileLock and the
      * default unlock path do everything we want. Used by lock.c
      * (NtfsLockControl) and consulted by NtfsRead / NtfsWrite via
      * FsRtlCheckLockForReadAccess / FsRtlCheckLockForWriteAccess. */
@@ -141,6 +141,27 @@ NtfsCreateFCB(PCWSTR FileName,
     return Fcb;
 }
 
+
+/* Drop the cached MFT record (if any) and clear the slot.  Called from
+ * the FCB teardown path and from FCB-aware write paths that mutate the
+ * on-disk file record so the next reader picks up fresh data.  Uses an
+ * atomic exchange so a concurrent NtfsReadFile install loses cleanly:
+ * either the installer's CAS sees NULL and stores its buffer (which
+ * this exchange then claims and frees), or it sees the old pointer
+ * we just nulled out and frees its own buffer.  Invocation happens
+ * under the FCB MainResource taken exclusive by writers, so racing
+ * readers never observe a half-replaced cache. */
+VOID
+NtfsInvalidateCachedFileRecord(PNTFS_FCB Fcb)
+{
+    PFILE_RECORD_HEADER Old;
+
+    Old = InterlockedExchangePointer((PVOID *)&Fcb->CachedFileRecord, NULL);
+    if (Old != NULL)
+    {
+        ExFreePoolWithTag(Old, TAG_NTFS);
+    }
+}
 
 /* Free an FCB whose SectionObjectPointers slot is fully clean: tear down
  * the resources, FILE_LOCK, the SOP struct itself, and return the FCB
@@ -155,6 +176,8 @@ NtfsFreeFcbStorage(PNTFS_FCB Fcb)
         Fcb->SectionObjectPointers = NULL;
     }
 
+    NtfsInvalidateCachedFileRecord(Fcb);
+
     FsRtlUninitializeFileLock(&Fcb->FileLock);
     ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
@@ -165,12 +188,12 @@ NtfsFreeFcbStorage(PNTFS_FCB Fcb)
 /* Walk the global zombie list and free any FCB whose SOP slots have all
  * been cleared by MM (MmDereferenceSegmentWithLock writes
  * SectionObjectPointer->DataSectionObject = NULL when the segment finally
- * dies — see ntoskrnl/mm/section.c).  Called opportunistically from
+ * dies - see ntoskrnl/mm/section.c).  Called opportunistically from
  * NtfsCreateFCB and NtfsDestroyFCB so we don't need a dedicated worker
  * thread; the cost is one short critical-section walk per FCB churn,
  * which is negligible compared to the I/O the same code path is doing.
  *
- * Runs at PASSIVE/APC level — same constraints as the call sites. */
+ * Runs at PASSIVE/APC level - same constraints as the call sites. */
 VOID
 NtfsReapZombieFcbs(VOID)
 {
@@ -199,7 +222,7 @@ NtfsReapZombieFcbs(VOID)
     }
     KeReleaseSpinLock(&NtfsGlobalData->ZombieLock, OldIrql);
 
-    /* Free outside the lock — ExDeleteResourceLite / ExFreePool can be
+    /* Free outside the lock - ExDeleteResourceLite / ExFreePool can be
      * slow and may acquire other locks. */
     while (!IsListEmpty(&ToFree))
     {
@@ -252,7 +275,7 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
                 Fcb->SectionObjectPointers->SharedCacheMap);
 
         /* Flush dirty image-section pages so MmForceSectionClosed doesn't
-         * refuse on account of them.  Ignore the return value — it returns
+         * refuse on account of them.  Ignore the return value - it returns
          * FALSE only when there's no image section to flush, which is fine. */
         if (Fcb->SectionObjectPointers->ImageSectionObject != NULL)
         {
@@ -388,7 +411,7 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
         /* Do NOT ObDereferenceObject(tmpFileObject) here.
          * NtfsAttachFCBToFileObject already dropped its reference (line 395).
          * The remaining references belong to the cache manager and the MM
-         * section segment — they will be released by CcUninitializeCacheMap
+         * section segment - they will be released by CcUninitializeCacheMap
          * and MmDereferenceSegmentWithLock respectively. An extra deref here
          * causes a use-after-free: the FileObject is freed while the MM
          * segment still holds a pointer to it. */
@@ -716,7 +739,8 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     newCCB->PtrFileObject = FileObject;
     Fcb->Vcb = Vcb;
 
-    if (!(Fcb->Flags & FCB_CACHE_INITIALIZED))
+    if (!NtfsFCBIsDirectory(Fcb) &&
+        !(Fcb->Flags & FCB_CACHE_INITIALIZED))
     {
         _SEH2_TRY
         {
@@ -799,6 +823,11 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     }
 
     Status = NtfsLookupFileAt(Vcb, &File, CaseSensitive, &FileRecord, &MFTIndex, CurrentDir);
+    NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: dirfind lookup returned 0x%lx file=%wZ dir=%I64u mft=%I64u\n",
+                Status,
+                &File,
+                CurrentDir,
+                MFTIndex);
     if (!NT_SUCCESS(Status))
     {
         return Status;
@@ -824,7 +853,16 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
         ReleaseAttributeContext(DataContext);
     }
 
+    NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: make fcb begin file=%wZ mft=%I64u record=%p\n",
+                &File,
+                MFTIndex,
+                FileRecord);
     Status = NtfsMakeFCBFromDirEntry(Vcb, DirectoryFcb, &File, Colon, FileRecord, MFTIndex, FoundFCB);
+    NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: make fcb returned 0x%lx file=%wZ mft=%I64u fcb=%p\n",
+                Status,
+                &File,
+                MFTIndex,
+                FoundFCB ? *FoundFCB : NULL);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
 
     return Status;
@@ -930,8 +968,8 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
             Status = NtfsDirFindFile(Vcb, parentFCB, elementName, CaseSensitive, &FCB);
             if (!NT_SUCCESS(Status))
             {
-                DPRINT1("NtfsDirFindFile('%S' in MFT %I64u '%S') failed: 0x%lx\n",
-                        elementName, parentFCB->MFTIndex, parentFCB->ObjectName, Status);
+                DPRINT("NtfsDirFindFile('%S' in MFT %I64u '%S') failed: 0x%lx\n",
+                       elementName, parentFCB->MFTIndex, parentFCB->ObjectName, Status);
             }
             if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
             {

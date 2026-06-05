@@ -159,6 +159,9 @@ add_library(freeldr_common
     ${PCATLDR_BOOTMGR_SOURCE}
 )
 target_compile_definitions(freeldr_common PRIVATE _FRLDRLIB_)
+if(FREELDR_WIM_RAMDISK)
+    target_compile_definitions(freeldr_common PRIVATE FREELDR_WIM_RAMDISK=1)
+endif()
 
 if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # We need to reduce the binary size
@@ -221,6 +224,9 @@ set_subsystem(freeldr_pe native)
 set_entrypoint(freeldr_pe RealEntryPoint)
 
 target_link_libraries(freeldr_pe freeldr_common cportlib libcntpr blrtl)
+if(FREELDR_WIM_RAMDISK)
+    target_link_libraries(freeldr_pe freeldr_wimcore)
+endif()
 if(ARCH STREQUAL "i386")
     target_link_libraries(freeldr_pe mini_hal)
 endif()
@@ -255,4 +261,5 @@ else()
     add_custom_target(freeldr ALL DEPENDS freeldr_pe)
 endif()
 
-add_cd_file(TARGET freeldr FILE ${CMAKE_CURRENT_BINARY_DIR}/freeldr.sys DESTINATION loader NO_CAB FOR bootcd regtest)
+add_cd_file(TARGET freeldr FILE ${CMAKE_CURRENT_BINARY_DIR}/freeldr.sys DESTINATION loader NO_CAB FOR bootcd regtest livecd)
+add_cd_file(TARGET freeldr FILE ${CMAKE_CURRENT_BINARY_DIR}/freeldr.sys DESTINATION root NO_CAB FOR preinstall)

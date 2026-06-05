@@ -22,6 +22,185 @@ KiSwitchKernelStackHelper(
     LONG_PTR StackOffset,
     PVOID OldStackBase);
 
+VOID
+NTAPI
+KiCalloutOnNewStack(
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ PVOID NewStackTop);
+
+NTSTATUS
+NTAPI
+KeExpandKernelStackAndCalloutEx(
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ SIZE_T Size,
+    _In_ BOOLEAN Wait,
+    _In_opt_ PVOID Context)
+{
+    PKTHREAD CurrentThread;
+    PETHREAD CurrentEthread;
+    PVOID NewStackBase;
+    PVOID NewStackLimit;
+    PVOID SavedStackBase;
+    ULONG_PTR SavedStackLimit;
+    PVOID SavedInitialStack;
+    BOOLEAN SavedLargeStack;
+    SIZE_T CommitSize;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Context);
+
+    if (Callout == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    CurrentThread = KeGetCurrentThread();
+    CurrentEthread = CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb);
+
+    CommitSize = max(Size, KERNEL_LARGE_STACK_COMMIT);
+    if (CommitSize > MAXIMUM_EXPANSION_SIZE)
+    {
+        CommitSize = MAXIMUM_EXPANSION_SIZE;
+    }
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    if (CurrentEthread->LargeStack)
+#else
+    if (CurrentThread->LargeStack)
+#endif
+    {
+        Status = MmGrowKernelStackEx(CurrentThread->StackBase, CommitSize);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        Callout(Parameter);
+        return STATUS_SUCCESS;
+    }
+
+    /*
+     * Allocate a temporary large kernel stack on which to run the callout.
+     * The thread's original stack is left intact so that any pointers from
+     * heap structures (such as Irp->UserEvent populated by IopMountVolume)
+     * into our caller's frames remain valid for the duration of the
+     * callout and after it returns.
+     */
+    NewStackBase = MmCreateKernelStack(TRUE, 0);
+    if (NewStackBase == NULL)
+    {
+        return STATUS_NO_MEMORY;
+    }
+
+    /* Save the thread's stack bookkeeping so we can restore it afterwards. */
+    SavedStackBase = CurrentThread->StackBase;
+    SavedStackLimit = (ULONG_PTR)CurrentThread->StackLimit;
+    SavedInitialStack = CurrentThread->InitialStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    SavedLargeStack = CurrentEthread->LargeStack;
+#else
+    SavedLargeStack = CurrentThread->LargeStack;
+#endif
+
+    /*
+     * Point the thread at the new stack while the callout runs so that
+     * stack-overflow checks and unwinding queries inside the callout see a
+     * consistent stack range. The callout's RSP itself is switched by the
+     * KiCalloutOnNewStack assembly helper.
+     */
+    CurrentThread->StackBase = NewStackBase;
+    NewStackLimit = Add2Ptr(NewStackBase, -KERNEL_LARGE_STACK_COMMIT);
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    CurrentThread->StackLimit = (volatile PVOID)NewStackLimit;
+#else
+    CurrentThread->StackLimit = (ULONG_PTR)NewStackLimit;
+#endif
+    CurrentThread->InitialStack = NewStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    CurrentEthread->LargeStack = TRUE;
+#else
+    CurrentThread->LargeStack = TRUE;
+#endif
+
+    Status = MmGrowKernelStackEx(NewStackBase, CommitSize);
+    if (!NT_SUCCESS(Status))
+    {
+        CurrentThread->StackBase = SavedStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
+#else
+        CurrentThread->StackLimit = SavedStackLimit;
+#endif
+        CurrentThread->InitialStack = SavedInitialStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        CurrentEthread->LargeStack = SavedLargeStack;
+#else
+        CurrentThread->LargeStack = SavedLargeStack;
+#endif
+        MmDeleteKernelStack(NewStackBase, TRUE);
+        return Status;
+    }
+
+    KiCalloutOnNewStack(Callout, Parameter, NewStackBase);
+
+    /*
+     * Restore the thread's original stack bookkeeping.  KiSwapContextResume
+     * mirrors KTHREAD::InitialStack into the per-CPU Pcr->Prcb.RspBase and
+     * the TSS Rsp0 on every context switch.  If the callout caused us to be
+     * preempted (likely for FS mount paths), those per-CPU fields now point
+     * at the temporary stack we are about to free, which would corrupt any
+     * subsequent syscall entry on this processor (KiSystemCallEntry64 reads
+     * gs:[PcRspBase]).  Sync them back to the old stack under interrupt
+     * disable so the freed stack is never reachable from a new syscall.
+     */
+    {
+        PKIPCR Pcr;
+        ULONG Eflags;
+
+        Eflags = __readeflags();
+        _disable();
+
+        CurrentThread->StackBase = SavedStackBase;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        CurrentThread->StackLimit = (volatile PVOID)SavedStackLimit;
+#else
+        CurrentThread->StackLimit = SavedStackLimit;
+#endif
+        CurrentThread->InitialStack = SavedInitialStack;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+        CurrentEthread->LargeStack = SavedLargeStack;
+#else
+        CurrentThread->LargeStack = SavedLargeStack;
+#endif
+
+        Pcr = (PKIPCR)KeGetPcr();
+        Pcr->Prcb.RspBase = (UINT64)SavedInitialStack;
+        Pcr->TssBase->Rsp0 = (ULONG64)SavedInitialStack;
+
+        __writeeflags(Eflags);
+    }
+
+    MmDeleteKernelStack(NewStackBase, TRUE);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+KeExpandKernelStackAndCallout(
+    _In_ PEXPAND_STACK_CALLOUT Callout,
+    _In_opt_ PVOID Parameter,
+    _In_ SIZE_T Size)
+{
+    return KeExpandKernelStackAndCalloutEx(Callout,
+                                           Parameter,
+                                           Size,
+                                           TRUE,
+                                           NULL);
+}
+
 /*
  * Kernel stack layout (example pointers):
  * 0xFFFFFC0F'2D008000 KTHREAD::StackBase
@@ -53,7 +232,7 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
     OldStackBase = CurrentThread->StackBase;
 
     /* Get the size of the current stack */
-    StackSize = (ULONG_PTR)CurrentThread->StackBase - CurrentThread->StackLimit;
+    StackSize = (ULONG_PTR)CurrentThread->StackBase - (ULONG_PTR)CurrentThread->StackLimit;
     ASSERT(StackSize <= (ULONG_PTR)StackBase - (ULONG_PTR)StackLimit);
 
     /* Copy the current stack contents to the new stack */
@@ -83,7 +262,11 @@ KiSwitchKernelStack(PVOID StackBase, PVOID StackLimit)
     /* Set the new stack limits */
     CurrentThread->StackBase = StackBase;
     CurrentThread->StackLimit = (ULONG_PTR)StackLimit;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    CONTAINING_RECORD(CurrentThread, ETHREAD, Tcb)->LargeStack = TRUE;
+#else
     CurrentThread->LargeStack = TRUE;
+#endif
 
     /* Adjust RspBase in the PCR */
     Pcr = (PKIPCR)KeGetPcr();

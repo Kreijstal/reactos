@@ -60,7 +60,7 @@
 
 #define USB_MAXCHILDREN 16
 #define MAX_LUN 0xF
-#define USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH 0x10000
+#define USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH 0x100000
 
 #define CBW_SIGNATURE 0x43425355
 #define CSW_SIGNATURE 0x53425355
@@ -97,13 +97,12 @@ typedef struct
 typedef struct
 {
     PIRP Irp;
+    PDEVICE_OBJECT PDODeviceObject;
+    PSCSI_REQUEST_BLOCK Srb;
     ULONG ErrorIndex;
     ULONG StallRetryCount;                                            // the number of retries after receiving USBD_STATUS_STALL_PID status
-    union
-    {
-        CBW cbw;
-        CSW csw;
-    };
+    CBW cbw;
+    CSW csw;
     URB Urb;
     SCSI_REQUEST_BLOCK SenseSrb;
 } IRP_CONTEXT, *PIRP_CONTEXT;

@@ -42,10 +42,19 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
     ULONGLONG BitmapDataSize;
     PCHAR BitmapData;
     ULONGLONG FreeClusters = 0;
-    ULONG Read = 0;
     RTL_BITMAP Bitmap;
 
     DPRINT("NtfsGetFreeClusters(%p)\n", DeviceExt);
+
+    /* Fast path: return the cached count if the cache is still valid.
+     * NtfsAllocateClusters / FreeClusters invalidate it on every cluster
+     * state change, so the value is always at least as fresh as the last
+     * commit.  Reading the entire bitmap is O(volume_size) and fatally
+     * slow on USB-MSC, so this cache is load-bearing. */
+    if (InterlockedCompareExchange(&DeviceExt->CachedFreeClustersValid, 1, 1) == 1)
+    {
+        return DeviceExt->CachedFreeClusters;
+    }
 
     BitmapRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (BitmapRecord == NULL)
@@ -77,22 +86,29 @@ NtfsGetFreeClusters(PDEVICE_EXTENSION DeviceExt)
         return 0;
     }
 
-    /* FIXME: Totally underoptimized! */
-    for (; Read < BitmapDataSize; Read += DeviceExt->NtfsInfo.BytesPerSector)
-    {
-        ReadAttribute(DeviceExt, DataContext, Read, (PCHAR)((ULONG_PTR)BitmapData + Read), DeviceExt->NtfsInfo.BytesPerSector);
-    }
+    /* Read the entire bitmap in one ReadAttribute call.  Doing this
+     * sector-by-sector (the previous code) issued ~600 separate I/Os on
+     * a 10 GiB volume - fine on a fast disk, ~tens-of-seconds on USB-MSC.
+     * ReadAttribute handles the run list internally and coalesces
+     * contiguous extents, so the underlying I/O count drops to ~run-count. */
+    ReadAttribute(DeviceExt, DataContext, 0, (PCHAR)BitmapData, (ULONG)BitmapDataSize);
     ReleaseAttributeContext(DataContext);
 
-    DPRINT1("Total clusters: %I64x\n", DeviceExt->NtfsInfo.ClusterCount);
-    DPRINT1("Total clusters in bitmap: %I64x\n", BitmapDataSize * 8);
-    DPRINT1("Diff in size: %I64d B\n", ((BitmapDataSize * 8) - DeviceExt->NtfsInfo.ClusterCount) * DeviceExt->NtfsInfo.SectorsPerCluster * DeviceExt->NtfsInfo.BytesPerSector);
+    DPRINT("Total clusters: %I64x\n", DeviceExt->NtfsInfo.ClusterCount);
+    DPRINT("Total clusters in bitmap: %I64x\n", BitmapDataSize * 8);
+    DPRINT("Diff in size: %I64d B\n", ((BitmapDataSize * 8) - DeviceExt->NtfsInfo.ClusterCount) * DeviceExt->NtfsInfo.SectorsPerCluster * DeviceExt->NtfsInfo.BytesPerSector);
 
     RtlInitializeBitMap(&Bitmap, (PULONG)BitmapData, DeviceExt->NtfsInfo.ClusterCount);
     FreeClusters = RtlNumberOfClearBits(&Bitmap);
 
     ExFreePoolWithTag(BitmapData, TAG_NTFS);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+
+    /* Cache result.  A concurrent racer may overwrite it with a slightly
+     * different value, but the cache only needs to be "approximately right
+     * between commits", which both readers compute. */
+    DeviceExt->CachedFreeClusters = FreeClusters;
+    InterlockedExchange(&DeviceExt->CachedFreeClustersValid, 1);
 
     return FreeClusters;
 }
@@ -124,7 +140,7 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     /* Serialize the entire read-modify-write of the volume bitmap. Without
      * this lock two concurrent allocators each load a private copy of the
      * bitmap, both find the same LCN free, both mark it set, and both
-     * write the bitmap back — handing out the same cluster twice. The
+     * write the bitmap back - handing out the same cluster twice. The
      * writeback below reads $Bitmap's MFT record and may itself recurse
      * back into NtfsAllocateClusters if WriteAttribute needs to grow the
      * bitmap, but ERESOURCE supports recursive exclusive acquisition so
@@ -212,6 +228,9 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
             *AssignedClusters = RtlFindLongestRunClear(&Bitmap, FirstAssignedCluster);
         }
 
+        if (*AssignedClusters > DesiredClusters)
+            *AssignedClusters = DesiredClusters;
+
         if (*AssignedClusters != 0)
         {
             // Mark the allocated clusters as in-use in the bitmap
@@ -225,6 +244,10 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
 
     ExFreePoolWithTag(BitmapData, TAG_NTFS);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+
+    /* Cluster state changed; invalidate the cached free-clusters count.
+     * Next IRP_MJ_QUERY_VOLUME_INFORMATION will recompute on demand. */
+    InterlockedExchange(&DeviceExt->CachedFreeClustersValid, 0);
 
     if (BitmapLockHeld)
         ExReleaseResourceLite(&DeviceExt->BitmapResource);
@@ -297,8 +320,17 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
     if (*BufferLength < (sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 8))
         return STATUS_BUFFER_OVERFLOW;
 
+    /* Report FILE_PERSISTENT_ACLS like Windows NTFS: the driver stores and
+     * returns per-file security descriptors (see security.c / $SECURITY), and
+     * FileInternalInformation returns a stable, unique IndexNumber (the MFT
+     * record number).  POSIX layers such as the Cygwin/MSYS2 runtime gate their
+     * "good inode" path on this flag; without it they fall back to synthesising
+     * inodes by hashing the path name, which is both slower and (on the runtime
+     * side) buggy, so an unpatched MSYS2 install misbehaves on ReactOS NTFS even
+     * though it works on Windows NTFS.  FILE_READ_ONLY_VOLUME must not be set -
+     * the volume is mounted read/write. */
     FsAttributeInfo->FileSystemAttributes =
-        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_READ_ONLY_VOLUME;
+        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_PERSISTENT_ACLS;
     FsAttributeInfo->MaximumComponentNameLength = 255;
     FsAttributeInfo->FileSystemNameLength = 8;
 

@@ -223,6 +223,44 @@ WINAPI
 GdiProcessSetup(VOID);
 
 BOOL
+User32EnsureUserConnect(VOID)
+{
+    NTSTATUS Status;
+    USERCONNECT UserCon;
+    PCLIENTINFO ClientInfo;
+
+    if (gpsi && gHandleTable && gHandleEntries)
+        return TRUE;
+
+    RtlZeroMemory(&UserCon, sizeof(UserCon));
+    UserCon.ulVersion = USER_VERSION;
+
+    Status = NtUserProcessConnect(NtCurrentProcess(),
+                                  &UserCon,
+                                  sizeof(UserCon));
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    gSharedInfo = UserCon.siClient;
+    gpsi = gSharedInfo.psi;
+    gHandleTable = gSharedInfo.aheList;
+
+    if (!gpsi || !gHandleTable)
+        return FALSE;
+
+    ClientInfo = GetWin32ClientInfo();
+    g_ppi = ClientInfo ? ClientInfo->ppi : NULL;
+
+#if !defined(BUILD_WOW6432)
+    gHandleEntries = SharedPtrToUser(gHandleTable->handles);
+#else
+    gHandleEntries = SharedPtrToUser(WOW64_READ_PTR_FIELD(gHandleTable, USER_HANDLE_TABLE, handles));
+#endif
+
+    return gHandleEntries != NULL;
+}
+
+BOOL
 WINAPI
 ClientThreadSetupHelper(BOOL IsCallback)
 {
@@ -239,11 +277,20 @@ ClientThreadSetupHelper(BOOL IsCallback)
     if (IsFirstThread)
         GdiProcessSetup();
 
-    /* Check for already initialized thread, and bail out if so */
+    /*
+     * Bail out if the thread is already initialized.  ClientThreadSetupHelper
+     * has multiple potential callers per thread (Init() from DllMain,
+     * User32CallClientThreadSetupFromKernel, and the exported
+     * ClientThreadSetup), so a redundant invocation must not be reported as a
+     * failure -- the thread is already in the desired state and the heavy
+     * lifting was performed by the first caller.  Returning FALSE here would
+     * propagate as STATUS_DLL_INIT_FAILED through DllMain and abort the
+     * process load.
+     */
     if (ClientInfo->CI_flags & CI_INITTHREAD)
     {
-        ERR("ClientThreadSetup: Thread already initialized.\n");
-        return FALSE;
+        TRACE("ClientThreadSetup: Thread already initialized.\n");
+        return TRUE;
     }
 
     /*
@@ -254,31 +301,8 @@ ClientThreadSetupHelper(BOOL IsCallback)
      */
     if (gfServerProcess && IsFirstThread)
     {
-        NTSTATUS Status;
-        USERCONNECT UserCon;
-
-        RtlZeroMemory(&UserCon, sizeof(UserCon));
-
-        /* Minimal setup of the connect info structure */
-        UserCon.ulVersion = USER_VERSION;
-        // UserCon.dwDispatchCount;
-
-        /* Connect to win32k */
-        Status = NtUserProcessConnect(NtCurrentProcess(),
-                                      &UserCon,
-                                      sizeof(UserCon));
-        if (!NT_SUCCESS(Status)) return FALSE;
-
-        /* Retrieve data */
-        g_ppi = ClientInfo->ppi; // Snapshot PI, used as pointer only!
-        gSharedInfo = UserCon.siClient;
-        gpsi = gSharedInfo.psi;
-        gHandleTable = gSharedInfo.aheList;
-#if !defined(BUILD_WOW6432)
-        /* ReactOS-Specific! */ gHandleEntries = SharedPtrToUser(gHandleTable->handles);
-#else
-        /* ReactOS-Specific! */ gHandleEntries = SharedPtrToUser(WOW64_READ_PTR_FIELD(gHandleTable, USER_HANDLE_TABLE, handles));
-#endif
+        if (!User32EnsureUserConnect())
+            return FALSE;
 
         // ERR("1 SI 0x%x : HT 0x%x : D 0x%x\n",
         //     gSharedInfo.psi, gSharedInfo.aheList, gSharedInfo.ulSharedDelta);
@@ -408,35 +432,8 @@ Init(PUSERCONNECT UserCon /*PUSERSRV_API_CONNECTINFO*/)
         //
         // HACK(2): This call is necessary since we disabled
         // the CSR call in DllMain...
-        {
-            RtlZeroMemory(UserCon, sizeof(*UserCon));
-
-            /* Minimal setup of the connect info structure */
-            UserCon->ulVersion = USER_VERSION;
-            // UserCon->dwDispatchCount;
-
-            TRACE("HACK: Hackish NtUserProcessConnect call!!\n");
-            /* Connect to win32k */
-            Status = NtUserProcessConnect(NtCurrentProcess(),
-                                          UserCon,
-                                          sizeof(*UserCon));
-            if (!NT_SUCCESS(Status)) return FALSE;
-        }
-
-        //
-        // We continue as we should do normally...
-        //
-
-        /* Retrieve data */
-        g_ppi = GetWin32ClientInfo()->ppi; // Snapshot PI, used as pointer only!
-        gSharedInfo = UserCon->siClient;
-        gpsi = gSharedInfo.psi;
-        gHandleTable = gSharedInfo.aheList;
-#if !defined(BUILD_WOW6432)
-        /* ReactOS-Specific! */ gHandleEntries = SharedPtrToUser(gHandleTable->handles);
-#else
-        /* ReactOS-Specific! */ gHandleEntries = SharedPtrToUser(WOW64_READ_PTR_FIELD(gHandleTable, USER_HANDLE_TABLE, handles));
-#endif
+        if (!User32EnsureUserConnect())
+            return FALSE;
     }
 
     // FIXME: Yet another hack... This call should normally not be done here, but

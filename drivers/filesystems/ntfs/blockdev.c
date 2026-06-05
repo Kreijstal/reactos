@@ -51,7 +51,7 @@ C_ASSERT(NTFS_CACHED_VACB_COUNT == 512);
 C_ASSERT(sizeof(((PDEVICE_EXTENSION)0)->CachedVacbBitmap) * 8 >= NTFS_CACHED_VACB_COUNT);
 
 /* Mark a VACB index (0..NTFS_CACHED_VACB_COUNT-1) as populated.
- * Safe to call concurrently — uses an atomic OR. */
+ * Safe to call concurrently - uses an atomic OR. */
 FORCEINLINE
 VOID
 NtfsMarkCachedVacb(IN PDEVICE_EXTENSION Vcb, IN ULONG VacbIndex)
@@ -114,10 +114,18 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
     ULONG ChunkLength;
     ULONG VacbOffset;
 
+    /* The cache manager faults pages in by issuing IRP_PAGING_IO back to
+     * NtfsFsdRead on the volume StreamFileObject.  NtfsReadFile shortcuts
+     * any FCB_IS_VOLUME or FCB_IS_VOLUME_STREAM read to NtfsReadDisk
+     * (rw.c), which talks directly to the storage stack and does not
+     * re-enter NtfsReadDiskCached.  The recursion chain therefore has a
+     * fixed depth of two and terminates without a guard.
+     *
+     * This matches Windows ntfs.sys: cached reads on the volume stream
+     * are not gated by TopLevelIrp; the paging-IO path on the volume
+     * stream FCB is the recursion terminator. */
     if (Vcb->StreamFileObject == NULL ||
-        Vcb->StreamFileObject->PrivateCacheMap == NULL ||
-        IoGetTopLevelIrp() != NULL ||
-        StartingOffset + Length > NTFS_MAX_CACHED_OFFSET)
+        Vcb->StreamFileObject->PrivateCacheMap == NULL)
     {
         return NtfsReadDisk(Vcb->StorageDevice,
                             StartingOffset,
@@ -139,7 +147,7 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
 
         /* Mark this VACB as populated BEFORE CcMapData runs, so a
          * concurrent NtfsWriteDiskCached observes it and performs the
-         * purge rather than skipping. Over-marking is harmless — it
+         * purge rather than skipping. Over-marking is harmless - it
          * just costs an extra purge call. */
         VacbIndex = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
         if (VacbIndex < NTFS_CACHED_VACB_COUNT)
@@ -189,7 +197,7 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
  * purges the corresponding byte range from the volume stream cache so
  * that subsequent NtfsReadDiskCached calls return the fresh data.
  *
- * CcPurgeCacheSection is expensive on ReactOS — it takes the global
+ * CcPurgeCacheSection is expensive on ReactOS - it takes the global
  * LockQueueMasterLock spinlock, walks the VACB list, and then calls
  * MmPurgeSegment which walks the section's pages. To avoid paying that
  * cost on every metadata write during install we track a per-VACB
@@ -207,9 +215,11 @@ NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
     NTSTATUS Status;
     LARGE_INTEGER PurgeOffset;
     LARGE_INTEGER PurgeLength;
+    LARGE_INTEGER CacheOffset;
     LONGLONG EndOffset;
     ULONG FirstVacb;
     ULONG LastVacb;
+    BOOLEAN CacheMayContainRange = TRUE;
 
     Status = NtfsWriteDisk(Vcb->StorageDevice,
                            StartingOffset,
@@ -222,27 +232,49 @@ NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
 
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->SectionObjectPointer == NULL ||
-        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap == NULL ||
-        StartingOffset >= NTFS_MAX_CACHED_OFFSET)
+        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap == NULL)
     {
         return Status;
     }
 
-    /* Compute the VACB range for the written bytes, clamped to the
-     * cached region. */
+    /* For writes inside the 128-MB region covered by CachedVacbBitmap,
+     * skip the purge if no VACB in that range has ever been mapped.
+     * Writes that cross above NTFS_MAX_CACHED_OFFSET fall through to the
+     * unconditional purge (the bitmap doesn't cover them, so we must
+     * conservatively assume coherence is needed). */
     EndOffset = StartingOffset + (LONGLONG)Length;
-    if (EndOffset > NTFS_MAX_CACHED_OFFSET)
-        EndOffset = NTFS_MAX_CACHED_OFFSET;
+    if (EndOffset <= NTFS_MAX_CACHED_OFFSET)
+    {
+        FirstVacb = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
+        LastVacb = (ULONG)((EndOffset - 1) / VACB_MAPPING_GRANULARITY);
+        if (LastVacb >= NTFS_CACHED_VACB_COUNT)
+            LastVacb = NTFS_CACHED_VACB_COUNT - 1;
 
-    FirstVacb = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
-    LastVacb = (ULONG)((EndOffset - 1) / VACB_MAPPING_GRANULARITY);
-    if (LastVacb >= NTFS_CACHED_VACB_COUNT)
-        LastVacb = NTFS_CACHED_VACB_COUNT - 1;
+        CacheMayContainRange = NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb);
+        if (!CacheMayContainRange)
+            return Status;
+    }
 
-    /* Fast path: if no VACB in the written range has ever been mapped
-     * via CcMapData on this volume, there's nothing to purge. */
-    if (!NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb))
+    /*
+     * Keep the volume stream cache coherent with metadata writes.  A purge is
+     * not sufficient on every ReactOS cache-manager path: a following
+     * CcMapData can still observe the old VACB contents.  Updating the cache
+     * with the bytes that just reached disk makes immediate metadata re-reads
+     * deterministic.  During format, however, the volume stream cache can
+     * still describe the pre-format section size.  Do not call CcCopyWrite
+     * beyond that size; the cache manager asserts on such writes.
+     */
+    CacheOffset.QuadPart = StartingOffset;
+    if (CacheMayContainRange &&
+        EndOffset <= CcGetFileSizePointer(Vcb->StreamFileObject)->QuadPart &&
+        CcCopyWrite(Vcb->StreamFileObject,
+                    &CacheOffset,
+                    Length,
+                    FALSE,
+                    (PVOID)Buffer))
+    {
         return Status;
+    }
 
     PurgeOffset.QuadPart = StartingOffset;
     PurgeLength.QuadPart = EndOffset - StartingOffset;
@@ -269,6 +301,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     PIRP Irp;
     PMDL Mdl;
     NTSTATUS Status;
+    BOOLEAN PagingCompletion = FALSE;
     ULONGLONG RealReadOffset;
     ULONG RealLength;
     BOOLEAN AllocatedBuffer = FALSE;
@@ -320,18 +353,18 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
 
     /*
      * NtfsReadDisk can be called from a page fault handler where kernel APCs
-     * are disabled. IoBuildSynchronousFsdRequest creates an IRP with Flags=0,
-     * so IofCompleteRequest uses APC-based completion. With APCs disabled the
-     * completion APC never fires and KeWaitForSingleObject deadlocks.
-     *
-     * Setting paging IO flags makes IofCompleteRequest signal UserEvent
-     * directly instead of queuing an APC. We must also remove the IRP from
-     * the thread's IRP list first, because the paging IO completion path
-     * calls IoFreeIrp which asserts ThreadListEntry is empty.
+     * are disabled. IoBuildSynchronousFsdRequest normally completes through a
+     * kernel APC, which cannot run in that state. Only use the paging-IO
+     * completion shortcut for those APC-disabled callers; normal metadata
+     * reads must keep the standard synchronous IRP completion path.
      */
-    RemoveEntryList(&Irp->ThreadListEntry);
-    InitializeListHead(&Irp->ThreadListEntry);
-    Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+    if (KeAreAllApcsDisabled())
+    {
+        RemoveEntryList(&Irp->ThreadListEntry);
+        InitializeListHead(&Irp->ThreadListEntry);
+        Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+        PagingCompletion = TRUE;
+    }
 
     if (Override)
     {
@@ -340,7 +373,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     }
 
     /*
-     * Save the MDL pointer — the paging IO completion path frees the IRP
+     * Save the MDL pointer - the paging IO completion path frees the IRP
      * via IoFreeIrp but does NOT unlock or free the MDL. The storage
      * driver may have called MmProbeAndLockPages on it, so we must call
      * MmUnlockPages + IoFreeMdl ourselves after the IRP completes.
@@ -354,9 +387,10 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
         Status = IoStatus.Status;
     }
 
-    /* Irp has been freed by IofCompleteRequest (paging IO path).
-     * Unlock and free the MDL that IoBuildSynchronousFsdRequest allocated. */
-    if (Mdl)
+    /* In the paging-IO completion path, IofCompleteRequest frees the IRP but
+     * does not unlock/free the MDL that IoBuildSynchronousFsdRequest allocated.
+     * The normal APC completion path owns both the IRP and MDL. */
+    if (PagingCompletion && Mdl)
     {
         if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
         {
@@ -422,6 +456,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
     PIRP Irp;
     PMDL Mdl;
     NTSTATUS Status;
+    BOOLEAN PagingCompletion = FALSE;
     ULONGLONG RealWriteOffset;
     ULONG RealLength;
     BOOLEAN AllocatedBuffer = FALSE;
@@ -526,10 +561,15 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* See comment in NtfsReadDisk — avoid APC-based completion deadlock */
-    RemoveEntryList(&Irp->ThreadListEntry);
-    InitializeListHead(&Irp->ThreadListEntry);
-    Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+    /* See comment in NtfsReadDisk -- avoid APC-based completion deadlock only
+     * for callers that cannot receive the normal completion APC. */
+    if (KeAreAllApcsDisabled())
+    {
+        RemoveEntryList(&Irp->ThreadListEntry);
+        InitializeListHead(&Irp->ThreadListEntry);
+        Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
+        PagingCompletion = TRUE;
+    }
 
     Mdl = Irp->MdlAddress;
 
@@ -540,7 +580,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
         Status = IoStatus.Status;
     }
 
-    if (Mdl)
+    if (PagingCompletion && Mdl)
     {
         if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
         {

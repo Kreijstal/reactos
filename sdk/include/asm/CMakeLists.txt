@@ -5,12 +5,6 @@ target_compile_definitions(genincdata PRIVATE NTDDI_VERSION=${REACTOS_TARGET_NTD
 set_entrypoint(genincdata 0)
 add_dependencies(genincdata bugcodes psdk xdk)
 
-if(MSVC)
-    set(OPT_MS "-ms")
-else()
-    set(OPT_MS "")
-endif()
-
 if(ARCH STREQUAL "i386")
     set(_filename ks386.inc)
 elseif(ARCH STREQUAL "amd64")
@@ -19,6 +13,12 @@ elseif(ARCH STREQUAL "arm")
     set(_filename ksarm.h)
 elseif(ARCH STREQUAL "arm64")
     set(_filename ksarm64.h)
+endif()
+
+if(REACTOS_GENERATE_MS_ASM)
+    set(OPT_MS "-ms")
+else()
+    set(OPT_MS "")
 endif()
 
 add_custom_command(

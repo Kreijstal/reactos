@@ -392,6 +392,7 @@ Return Value:
 
 {
     PBCB EaBcb;
+    PBCB LocalEaBcb;
     BOOLEAN LockedEaFcb;
 
     PEA_SET_HEADER EaSetHeader = NULL;
@@ -644,7 +645,9 @@ Return Value:
         //  Unpin the dirents for the EaFcb and EaSetFcb if necessary.
         //
 
-        FatUnpinBcb( IrpContext, EaBcb );
+        LocalEaBcb = EaBcb;
+        EaBcb = NULL;
+        FatUnpinBcb( IrpContext, LocalEaBcb );
         FatUnpinEaRange( IrpContext, &EaSetRange );
 
         DebugTrace(-1, Dbg, "FatCreateEa -> Exit\n", 0);
@@ -3557,6 +3560,7 @@ Return Value:
     PVOID Buffer;
     PCHAR DestinationBuffer = NULL;
     BOOLEAN FirstPage = TRUE;
+    USHORT BcbCount;
 
     PAGED_CODE();
 
@@ -3605,20 +3609,29 @@ Return Value:
     //  the request.
     //
 
-    EaRange->BcbChainLength = (USHORT) (((StartingVbo & (PAGE_SIZE - 1)) + Length + PAGE_SIZE - 1) / PAGE_SIZE);
+    BcbCount = (USHORT) (((StartingVbo & (PAGE_SIZE - 1)) + Length + PAGE_SIZE - 1) / PAGE_SIZE);
 
-    if (EaRange->BcbChainLength > EA_BCB_ARRAY_SIZE) {
+    if (BcbCount > EA_BCB_ARRAY_SIZE) {
 
         EaRange->BcbChain = FsRtlAllocatePoolWithTag( PagedPool,
-                                                      sizeof( PBCB ) * EaRange->BcbChainLength,
+                                                      sizeof( PBCB ) * BcbCount,
                                                       TAG_BCB );
 
-        RtlZeroMemory( EaRange->BcbChain, sizeof( PBCB ) * EaRange->BcbChainLength );
+        if (EaRange->BcbChain == NULL) {
+
+            FatRaiseStatus( IrpContext, STATUS_INSUFFICIENT_RESOURCES );
+        }
+
+        RtlZeroMemory( EaRange->BcbChain, sizeof( PBCB ) * BcbCount );
 
     } else {
 
-        EaRange->BcbChain = (PBCB *) &EaRange->BcbArray;
+        RtlZeroMemory( EaRange->BcbArray, sizeof( EaRange->BcbArray ));
+
+        EaRange->BcbChain = &EaRange->BcbArray[0];
     }
+
+    EaRange->BcbChainLength = 0;
 
     //
     //  Store the byte range data in the Ea Range structure.
@@ -3653,6 +3666,8 @@ Return Value:
             ByteCount = Length;
         }
 
+        *NextBcb = NULL;
+
         if (!CcPinRead( VirtualEaFile,
                         &LargeVbo,
                         ByteCount,
@@ -3666,6 +3681,8 @@ Return Value:
 
             FatRaiseStatus( IrpContext, STATUS_CANT_WAIT );
         }
+
+        EaRange->BcbChainLength += 1;
 
         //
         //  Increment the Bcb pointer and copy to the auxilary buffer if necessary.
@@ -3803,6 +3820,9 @@ Return Value:
 
 {
     PBCB *NextBcb;
+    PBCB *BcbChain;
+    USHORT BcbChainLength;
+    BOOLEAN FreeBcbChain;
     ULONG BcbCount;
 
     PAGED_CODE();
@@ -3825,8 +3845,18 @@ Return Value:
 
     if (EaRange->BcbChain != NULL) {
 
-        BcbCount = EaRange->BcbChainLength;
-        NextBcb = EaRange->BcbChain;
+        BcbChain = EaRange->BcbChain;
+        BcbChainLength = EaRange->BcbChainLength;
+        FreeBcbChain = (BcbChain != &EaRange->BcbArray[0]);
+
+        EaRange->BcbChain = NULL;
+        EaRange->BcbChainLength = 0;
+        EaRange->Data = NULL;
+        EaRange->StartingVbo = 0;
+        EaRange->Length = 0;
+
+        BcbCount = BcbChainLength;
+        NextBcb = BcbChain;
 
         while (BcbCount--) {
 
@@ -3843,14 +3873,11 @@ Return Value:
         //  If we allocated a Bcb chain, deallocate it here.
         //
 
-        if (EaRange->BcbChain != &EaRange->BcbArray[0]) {
+        if (FreeBcbChain) {
 
-            ExFreePool( EaRange->BcbChain );
+            ExFreePool( BcbChain );
         }
-
-        EaRange->BcbChain = NULL;
     }
 
     return;
 }
-

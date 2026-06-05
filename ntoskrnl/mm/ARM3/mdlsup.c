@@ -24,6 +24,19 @@ SIZE_T MmSystemLockPagesCount;
 ULONG MiCacheOverride[MiNotMapped + 1];
 
 /* INTERNAL FUNCTIONS *********************************************************/
+
+#ifdef _M_ARM64
+
+NTSTATUS
+MiArm64ProbeAndLockUserPages(
+    _Inout_ PMDL Mdl,
+    _In_ PVOID StartAddress,
+    _In_ ULONG TotalPages,
+    _In_ LOCK_OPERATION Operation,
+    _In_ PEPROCESS CurrentProcess);
+
+#endif
+
 static
 PVOID
 NTAPI
@@ -67,12 +80,6 @@ MiMapLockedPagesInUserSpace(
 
     IsIoMapping = (Mdl->MdlFlags & MDL_IO_SPACE) != 0;
     CacheAttribute = MiPlatformCacheAttributes[IsIoMapping][CacheType];
-
-    /* Large pages are always cached, make sure we're not asking for those */
-    if (CacheAttribute != MiCached)
-    {
-        DPRINT1("FIXME: Need to check for large pages\n");
-    }
 
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
@@ -1014,6 +1021,23 @@ MmProbeAndLockPages(IN PMDL Mdl,
     /* Large pages not supported */
     ASSERT(!MI_IS_PHYSICAL_ADDRESS(Address));
 
+#ifdef _M_ARM64
+    if (CurrentProcess != NULL)
+    {
+        Status = MiArm64ProbeAndLockUserPages(Mdl,
+                                              StartAddress,
+                                              TotalPages,
+                                              Operation,
+                                              CurrentProcess);
+        if (!NT_SUCCESS(Status))
+        {
+            ExRaiseStatus(Status);
+        }
+
+        return;
+    }
+#endif
+
     //
     // Now probe them
     //
@@ -1686,11 +1710,13 @@ MmMapLockedPagesWithReservedMapping(
     }
 
     // If the mapping isn't big enough, fail
-    if (PointerPte[0].u.List.NextEntry - 2 < PageCount)
+    if ((PointerPte[0].u.List.NextEntry < 2) ||
+        (PointerPte[0].u.List.NextEntry - 2 < PageCount))
     {
         DPRINT1("Reserved mapping too small. Need %Iu pages, have %Iu\n",
-                        PageCount,
-                        PointerPte[0].u.List.NextEntry - 2);
+                PageCount,
+                (PointerPte[0].u.List.NextEntry >= 2) ?
+                    (SIZE_T)(PointerPte[0].u.List.NextEntry - 2) : 0);
         return NULL;
     }
     // Skip our two helper PTEs

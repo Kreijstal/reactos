@@ -407,7 +407,9 @@ Wow64SystemServiceEx(ULONG syscallNum,
     static const char* mapping[] = 
     {
 #define SVC_(name, argc) ""#name ,
+#define SVC_WRAP_(name, argc) ""#name ,
 #include "../../../ntoskrnl/include/sysfuncs.h"   
+#undef SVC_WRAP_
 #undef SVC_
     };
     
@@ -1342,7 +1344,7 @@ Wow64InitThread(PCONTEXT pContext)
        THEN load FS so it picks up the correct base from the GDT. */
     while(NtYieldExecution() == STATUS_NO_YIELD_PERFORMED);
 
-    /* Now load FS — the GDT CMTEB entry has the correct TEB32 base */
+    /* Now load FS - the GDT CMTEB entry has the correct TEB32 base */
     SetupFs(0x0053);
     DPRINT1("WOW64: FS loaded with selector 0x53, TEB32=%p\n", WowTeb);
 

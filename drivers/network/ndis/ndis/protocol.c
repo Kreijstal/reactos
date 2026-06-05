@@ -692,7 +692,7 @@ ProTransferData(
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
-    /* dev-nt6-1: NDIS 6 miniports never get TransferDataHandler calls —
+    /* dev-nt6-1: NDIS 6 miniports never get TransferDataHandler calls -
      * the NDIS 6 receive path always delivers the full payload in the
      * NB chain, so the lookahead-mismatch path that legacy protocols
      * would take is unused. Return NOT_SUPPORTED defensively. */
@@ -1119,14 +1119,17 @@ ndisBindMiniportsToProtocol(OUT PNDIS_STATUS Status, IN PPROTOCOL_BINDING Protoc
 
         {
             BIND_HANDLER BindHandler = ProtocolCharacteristics->BindAdapterHandler;
+            NDIS_STATUS BindStatus = NDIS_STATUS_SUCCESS;
             if(BindHandler)
             {
-                BindHandler(Status, BindContext, &DeviceName, &RegistryPath, 0);
-                NDIS_DbgPrint(MID_TRACE, ("%wZ's BindAdapter handler returned 0x%x for %wZ\n", &ProtocolCharacteristics->Name, *Status, &DeviceName));
+                BindHandler(&BindStatus, BindContext, &DeviceName, &RegistryPath, 0);
+                NDIS_DbgPrint(MID_TRACE, ("%wZ's BindAdapter handler returned 0x%x for %wZ\n", &ProtocolCharacteristics->Name, BindStatus, &DeviceName));
             }
             else
                 NDIS_DbgPrint(MID_TRACE, ("No protocol bind handler specified\n"));
         }
+
+        ExFreePool(RegistryPathStr);
 
     next:
         if (KeyInformation)

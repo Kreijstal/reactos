@@ -58,7 +58,14 @@
 
 extern MMSESSION MmSession;
 
+typedef struct _MM_SECTION_FILE_OBJECT_REF
+{
+    LIST_ENTRY ListEntry;
+    PFILE_OBJECT FileObject;
+} MM_SECTION_FILE_OBJECT_REF, *PMM_SECTION_FILE_OBJECT_REF;
+
 static LARGE_INTEGER TinyTime = {{-1L, -1L}};
+static ULONG_PTR MiRosSystemCacheViewHint;
 
 #ifndef NEWCC
 KEVENT MmWaitPageEvent;
@@ -114,6 +121,71 @@ MiGrabDataSection(PSECTION_OBJECT_POINTERS SectionObjectPointer)
     return Segment;
 }
 
+static
+NTSTATUS
+MmpReferenceSegmentFileObject(
+    _Inout_ PMM_SECTION_SEGMENT Segment,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PLIST_ENTRY Entry;
+    PMM_SECTION_FILE_OBJECT_REF FileObjectRef;
+
+    if (Segment->FileObject == FileObject)
+        return STATUS_SUCCESS;
+
+    FileObjectRef = ExAllocatePoolWithTag(NonPagedPool,
+                                          sizeof(*FileObjectRef),
+                                          TAG_MM_SECTION_SEGMENT);
+    if (FileObjectRef == NULL)
+        return STATUS_NO_MEMORY;
+
+    ObReferenceObject(FileObject);
+    FileObjectRef->FileObject = FileObject;
+
+    MmLockSectionSegment(Segment);
+    for (Entry = Segment->FileObjectList.Flink;
+         Entry != &Segment->FileObjectList;
+         Entry = Entry->Flink)
+    {
+        PMM_SECTION_FILE_OBJECT_REF ExistingRef;
+
+        ExistingRef = CONTAINING_RECORD(Entry,
+                                        MM_SECTION_FILE_OBJECT_REF,
+                                        ListEntry);
+        if (ExistingRef->FileObject == FileObject)
+        {
+            MmUnlockSectionSegment(Segment);
+            ObDereferenceObject(FileObject);
+            ExFreePoolWithTag(FileObjectRef, TAG_MM_SECTION_SEGMENT);
+            return STATUS_SUCCESS;
+        }
+    }
+
+    InsertTailList(&Segment->FileObjectList, &FileObjectRef->ListEntry);
+    MmUnlockSectionSegment(Segment);
+
+    return STATUS_SUCCESS;
+}
+
+static
+VOID
+MmpDereferenceSegmentFileObjects(
+    _Inout_ PMM_SECTION_SEGMENT Segment)
+{
+    while (!IsListEmpty(&Segment->FileObjectList))
+    {
+        PLIST_ENTRY Entry;
+        PMM_SECTION_FILE_OBJECT_REF FileObjectRef;
+
+        Entry = RemoveHeadList(&Segment->FileObjectList);
+        FileObjectRef = CONTAINING_RECORD(Entry,
+                                          MM_SECTION_FILE_OBJECT_REF,
+                                          ListEntry);
+        ObDereferenceObject(FileObjectRef->FileObject);
+        ExFreePoolWithTag(FileObjectRef, TAG_MM_SECTION_SEGMENT);
+    }
+}
+
 /* Somewhat grotesque, but eh... */
 PMM_IMAGE_SECTION_OBJECT ImageSectionObjectFromSegment(PMM_SECTION_SEGMENT Segment)
 {
@@ -128,6 +200,62 @@ MiMapViewInSystemSpace(IN PVOID Section,
                        OUT PVOID *MappedBase,
                        IN OUT PSIZE_T ViewSize,
                        IN PLARGE_INTEGER SectionOffset);
+
+VOID
+NTAPI
+MiFillSystemPageDirectory(IN PVOID Base,
+                          IN SIZE_T NumberOfBytes);
+
+static
+PVOID
+MiRosFindSystemCacheView(
+    _In_ PMMSUPPORT AddressSpace,
+    _In_ SIZE_T ViewSize)
+{
+    ULONG_PTR Start;
+    ULONG_PTR End;
+    ULONG_PTR Base;
+    ULONG_PTR Length;
+    ULONG_PTR Attempts;
+    ULONG_PTR MaxAttempts;
+
+    Start = (ULONG_PTR)MmSystemCacheStart;
+    End = (ULONG_PTR)MmSystemCacheEnd + 1;
+    Length = (ULONG_PTR)MM_ROUND_UP(ViewSize, MM_ALLOCATION_GRANULARITY);
+
+    if ((Length == 0) || (Length > (End - Start)))
+    {
+        return NULL;
+    }
+
+    Base = MiRosSystemCacheViewHint;
+    if ((Base < Start) || (Base >= End))
+    {
+        Base = Start;
+    }
+
+    Base = (ULONG_PTR)MM_ROUND_UP(Base, MM_ALLOCATION_GRANULARITY);
+    Attempts = 0;
+    MaxAttempts = (End - Start) / MM_ALLOCATION_GRANULARITY;
+
+    while (Attempts++ < MaxAttempts)
+    {
+        if ((Base >= End) || (Length > (End - Base)))
+        {
+            Base = Start;
+        }
+
+        if (MmIsAddressRangeFree(AddressSpace, (PVOID)Base, Length))
+        {
+            MiRosSystemCacheViewHint = Base + Length;
+            return (PVOID)Base;
+        }
+
+        Base += MM_ALLOCATION_GRANULARITY;
+    }
+
+    return NULL;
+}
 
 NTSTATUS
 NTAPI
@@ -275,6 +403,48 @@ MiWritePage(PMM_SECTION_SEGMENT Segment,
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
 
+    return Status;
+}
+
+static
+NTSTATUS
+MiWritePageRun(
+    _In_ PMM_SECTION_SEGMENT Segment,
+    _In_ LONGLONG SegOffset,
+    _In_reads_(PageCount) PPFN_NUMBER Pages,
+    _In_ ULONG PageCount)
+{
+    NTSTATUS Status;
+    IO_STATUS_BLOCK IoStatus;
+    KEVENT Event;
+    PMDL Mdl;
+    PFILE_OBJECT FileObject = Segment->FileObject;
+    LARGE_INTEGER FileOffset;
+
+    ASSERT(PageCount != 0);
+
+    FileOffset.QuadPart = Segment->Image.FileOffset + SegOffset;
+
+    Mdl = IoAllocateMdl(NULL, PageCount * PAGE_SIZE, FALSE, FALSE, NULL);
+    if (Mdl == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlCopyMemory(MmGetMdlPfnArray(Mdl), Pages, PageCount * sizeof(PFN_NUMBER));
+    Mdl->MdlFlags |= MDL_PAGES_LOCKED;
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Status = IoSynchronousPageWrite(FileObject, Mdl, &FileOffset, &Event, &IoStatus);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
+    {
+        MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
+    }
+
+    IoFreeMdl(Mdl);
     return Status;
 }
 
@@ -590,9 +760,6 @@ l_ReadHeaderFromFile:
 
         if(RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfImage))
         {
-            if(pioh64OptHeader->SizeOfImage > MAXULONG_PTR)
-                DIE(("SizeOfImage exceeds the address space\n"));
-
             ImageSectionObject->ImageInformation.ImageFileSize = pioh64OptHeader->SizeOfImage;
         }
 
@@ -984,15 +1151,6 @@ FreeSegmentPage(PMM_SECTION_SEGMENT Segment, PLARGE_INTEGER Offset)
     if (IS_DIRTY_SSE(Entry))
         MiWritePage(Segment, Offset->QuadPart, Page);
 
-    /* Remove the section association (rmap entry) BEFORE releasing the page.
-     * MmFreePageTablesSectionSegment will free the CACHE_SECTION_PAGE_TABLE
-     * that the rmap points to.  If we don't remove the rmap first, a concurrent
-     * MmGetSectionAssociation call from the balancer thread can follow the rmap
-     * to a freed page table, read a stale Segment pointer, and dereference
-     * Segment->FileObject->SectionObjectPointer through freed memory — causing
-     * a NULL/garbage pointer dereference at DISPATCH_LEVEL (PFN lock held). */
-    MmDeleteSectionAssociation(Page);
-
     MmReleasePageMemoryConsumer(MC_USER, Page);
 }
 
@@ -1025,41 +1183,17 @@ MmDereferenceSegmentWithLock(
     /* Flush the segment */
     if (*Segment->Flags & MM_DATAFILE_SEGMENT)
     {
-        /* Cache FileObject and SectionObjectPointer BEFORE dropping the PFN lock.
-         * Segment->FileObject won't change (we own the segment), but the
-         * FileObject itself or its SectionObjectPointer could be freed by
-         * another thread after we release the lock. */
-        PFILE_OBJECT FileObject = Segment->FileObject;
-        PSECTION_OBJECT_POINTERS SectionObjectPointer = FileObject ? FileObject->SectionObjectPointer : NULL;
-
         MiReleasePfnLock(OldIrql);
         /* Free the page table. This will flush any remaining dirty data */
         MmFreePageTablesSectionSegment(Segment, FreeSegmentPage);
 
         OldIrql = MiAcquirePfnLock();
-        /* Delete the pointer on the file.
-         * Only clear DataSectionObject if it still points to us — another
-         * thread might have replaced it with a new segment. */
-        if (SectionObjectPointer && SectionObjectPointer->DataSectionObject == Segment)
-            SectionObjectPointer->DataSectionObject = NULL;
+        /* Delete the pointer on the file */
+        ASSERT(Segment->FileObject->SectionObjectPointer->DataSectionObject == Segment);
+        Segment->FileObject->SectionObjectPointer->DataSectionObject = NULL;
         MiReleasePfnLock(OldIrql);
-        {
-            /* Validate the FileObject before dereferencing. Under heavy memory
-             * pressure, the NTFS driver's close path may race with segment
-             * cleanup, causing FileObject to be freed before we get here.
-             * Check that the OBJECT_HEADER still has a valid Type pointer. */
-            POBJECT_HEADER ObjHdr = OBJECT_TO_OBJECT_HEADER(FileObject);
-            if (ObjHdr->Type != NULL && ObjHdr->PointerCount > 0)
-            {
-                ObDereferenceObject(FileObject);
-            }
-            else
-            {
-                DPRINT1("MmDereferenceSegmentWithLock: FileObject %p already freed "
-                        "(Type=%p PointerCount=%lld), skipping deref\n",
-                        FileObject, ObjHdr->Type, (long long)ObjHdr->PointerCount);
-            }
-        }
+        MmpDereferenceSegmentFileObjects(Segment);
+        ObDereferenceObject(Segment->FileObject);
 
         ExFreePoolWithTag(Segment, TAG_MM_SECTION_SEGMENT);
     }
@@ -1233,7 +1367,7 @@ MmMakeSegmentResident(
     _In_ BOOLEAN SetDirty)
 {
     /* Let's use a 64K granularity. */
-    LONGLONG RangeStart, RangeEnd;
+    LONGLONG RangeStart, RangeEnd, RequestedEnd;
     NTSTATUS Status;
     PFILE_OBJECT FileObject = Segment->FileObject;
 
@@ -1242,11 +1376,15 @@ MmMakeSegmentResident(
     ASSERT(NT_SUCCESS(Status));
     if (!NT_SUCCESS(Status))
         return Status;
+    RequestedEnd = RangeEnd;
 
-    /* If the file is not random access and we are not the page out thread
-     * read a 64K Chunk. */
-    if (((ULONG_PTR)IoGetTopLevelIrp() != FSRTL_MOD_WRITE_TOP_LEVEL_IRP)
-        && !FlagOn(FileObject->Flags, FO_RANDOM_ACCESS))
+    /*
+     * Only cluster page-ins when the caller already asked for a large range.
+     * Small Cc reads and single-page faults are observable API boundaries.
+     */
+    if ((Length >= _64K) &&
+        ((ULONG_PTR)IoGetTopLevelIrp() != FSRTL_MOD_WRITE_TOP_LEVEL_IRP) &&
+        !FlagOn(FileObject->Flags, FO_RANDOM_ACCESS))
     {
         RangeStart = Offset - (Offset % _64K);
         if (RangeEnd % _64K)
@@ -1257,6 +1395,13 @@ MmMakeSegmentResident(
         RangeStart = Offset  - (Offset % PAGE_SIZE);
         if (RangeEnd % PAGE_SIZE)
             RangeEnd += PAGE_SIZE - (RangeEnd % PAGE_SIZE);
+    }
+
+    if (ValidDataLength &&
+        RequestedEnd <= ValidDataLength->QuadPart &&
+        RangeEnd > ValidDataLength->QuadPart)
+    {
+        RangeEnd = PAGE_ROUND_UP_64(ValidDataLength->QuadPart);
     }
 
     /* Clamp if needed */
@@ -1399,6 +1544,8 @@ MmMakeSegmentResident(
                         MmReleasePageMemoryConsumer(MC_USER, Pages[j]);
                     goto Failed;
                 }
+
+                MiZeroPhysicalPage(Pages[i]);
             }
 
             Mdl->MdlFlags |= MDL_PAGES_LOCKED | MDL_IO_PAGE_READ;
@@ -1406,16 +1553,16 @@ MmMakeSegmentResident(
             LARGE_INTEGER FileOffset;
             FileOffset.QuadPart = Segment->Image.FileOffset + ChunkOffset;
 
-            /* Clamp to VDL */
+            /* Pages are pre-zeroed; skip page-in once the chunk is beyond valid data. */
             if (ValidDataLength && ((FileOffset.QuadPart + ReadLength) > ValidDataLength->QuadPart))
             {
-                if (FileOffset.QuadPart > ValidDataLength->QuadPart)
+                if (FileOffset.QuadPart >= ValidDataLength->QuadPart)
                 {
-                    /* Great, nothing to read. */
+                    /* The page comes from the zero list; there is no valid file data to read. */
                     goto AssignPagesToSegment;
                 }
 
-                Mdl->Size = (FileOffset.QuadPart + ReadLength) - ValidDataLength->QuadPart;
+                Mdl->ByteCount = (ULONG)(ValidDataLength->QuadPart - FileOffset.QuadPart);
             }
 
             KEVENT Event;
@@ -1611,17 +1758,19 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
 
     ASSERT(Locked);
 
+    PAddress = MM_ROUND_DOWN(Address, PAGE_SIZE);
+
     /*
      * There is a window between taking the page fault and locking the
      * address space when another thread could load the page so we check
      * that.
      */
-    if (MmIsPagePresent(Process, Address))
+    if (MmIsPagePresent(Process, PAddress))
     {
         return STATUS_SUCCESS;
     }
 
-    if (MmIsDisabledPage(Process, Address))
+    if (MmIsDisabledPage(Process, PAddress))
     {
         return STATUS_ACCESS_VIOLATION;
     }
@@ -1634,7 +1783,6 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         return STATUS_UNSUCCESSFUL;
     }
 
-    PAddress = MM_ROUND_DOWN(Address, PAGE_SIZE);
     Offset.QuadPart = (ULONG_PTR)PAddress - MA_GetStartingAddress(MemoryArea)
                       + MemoryArea->SectionData.ViewOffset;
 
@@ -1837,7 +1985,12 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
 
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
 
-        Status = MmMakeSegmentResident(Segment, Offset.QuadPart, PAGE_SIZE, &FcbHeader->ValidDataLength, FALSE);
+        Status = MmMakeSegmentResident(Segment,
+                                       Offset.QuadPart,
+                                       PAGE_SIZE,
+                                       MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap ?
+                                           NULL : &FcbHeader->ValidDataLength,
+                                       FALSE);
 
         FsRtlReleaseFile(Segment->FileObject);
 
@@ -1990,6 +2143,8 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
 
     DPRINT("MmAccessFaultSectionView(%p, %p, %p)\n", AddressSpace, MemoryArea, Address);
 
+    PAddress = MM_ROUND_DOWN(Address, PAGE_SIZE);
+
     /* Get the region for this address */
     Region = MmFindRegion((PVOID)MA_GetStartingAddress(MemoryArea),
                         &MemoryArea->SectionData.RegionListHead,
@@ -2012,8 +2167,12 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
     /*
      * Check if the page has already been set readwrite
      */
-    if (MmGetPageProtect(Process, Address) & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE))
+    if (MmGetPageProtect(Process, PAddress) & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE))
     {
+#if defined(_M_ARM64)
+        if (!Arm64CpuFeatures.HdEnabled)
+            MmSetDirtyPage(Process, PAddress);
+#endif
         DPRINT("Address 0x%p\n", Address);
         return STATUS_SUCCESS;
     }
@@ -2047,7 +2206,6 @@ MmAccessFaultSectionView(PMMSUPPORT AddressSpace,
     /*
      * Find the offset of the page
      */
-    PAddress = MM_ROUND_DOWN(Address, PAGE_SIZE);
     Offset.QuadPart = (ULONG_PTR)PAddress - MA_GetStartingAddress(MemoryArea)
                       + MemoryArea->SectionData.ViewOffset;
 
@@ -2330,6 +2488,7 @@ MmCreatePhysicalMemorySection(VOID)
 
     Segment->ReferenceCount = &Segment->RefCount;
     Segment->Flags = &Segment->SegFlags;
+    InitializeListHead(&Segment->FileObjectList);
 
     ExInitializeFastMutex(&Segment->Lock);
     Segment->Image.FileOffset = 0;
@@ -2411,6 +2570,7 @@ MmCreateDataFileSection(PSECTION *SectionObject,
     LARGE_INTEGER MaximumSize;
     PMM_SECTION_SEGMENT Segment;
     KIRQL OldIrql;
+    BOOLEAN ReferenceFileObject = FALSE;
 
     /*
      * Create the section
@@ -2463,6 +2623,12 @@ MmCreateDataFileSection(PSECTION *SectionObject,
          */
         if ((UMaximumSize != NULL) && (UMaximumSize->QuadPart != 0))
         {
+            if (UMaximumSize->QuadPart < 0)
+            {
+                ObDereferenceObject(Section);
+                return STATUS_SECTION_TOO_BIG;
+            }
+
             MaximumSize = *UMaximumSize;
         }
         else
@@ -2478,6 +2644,15 @@ MmCreateDataFileSection(PSECTION *SectionObject,
 
         if (MaximumSize.QuadPart > FileSize.QuadPart)
         {
+            if (!(SectionPageProtection & (PAGE_READWRITE |
+                                           PAGE_EXECUTE_READWRITE |
+                                           PAGE_WRITECOPY |
+                                           PAGE_EXECUTE_WRITECOPY)))
+            {
+                ObDereferenceObject(Section);
+                return STATUS_SECTION_TOO_BIG;
+            }
+
             Status = IoSetInformation(FileObject,
                                       FileEndOfFileInformation,
                                       sizeof(LARGE_INTEGER),
@@ -2487,6 +2662,11 @@ MmCreateDataFileSection(PSECTION *SectionObject,
                 ObDereferenceObject(Section);
                 return STATUS_SECTION_NOT_EXTENDED;
             }
+        }
+        else if (MaximumSize.QuadPart < 0)
+        {
+            ObDereferenceObject(Section);
+            return STATUS_SECTION_TOO_BIG;
         }
     }
 
@@ -2563,12 +2743,14 @@ grab_segment:
         /* Self-referencing segment */
         Segment->Flags = &Segment->SegFlags;
         Segment->ReferenceCount = &Segment->RefCount;
+        InitializeListHead(&Segment->FileObjectList);
 
         Segment->SectionCount = 1;
 
         ExInitializeFastMutex(&Segment->Lock);
         Segment->FileObject = FileObject;
         ObReferenceObject(FileObject);
+        Segment->SegFlags |= MM_DATAFILE_SEGMENT_FILE_REF;
 
         Segment->Image.FileOffset = 0;
         Segment->Protection = SectionPageProtection;
@@ -2595,10 +2777,34 @@ grab_segment:
     else
     {
         Section->Segment = (PSEGMENT)Segment;
+        if (!(Segment->SegFlags & MM_DATAFILE_SEGMENT_FILE_REF))
+        {
+            Segment->SegFlags |= MM_DATAFILE_SEGMENT_FILE_REF;
+            ReferenceFileObject = TRUE;
+        }
+
         InterlockedIncrement64(&Segment->RefCount);
         InterlockedIncrementUL(&Segment->SectionCount);
 
         MiReleasePfnLock(OldIrql);
+
+        if (ReferenceFileObject && Segment->FileObject == FileObject)
+        {
+            ObReferenceObject(FileObject);
+        }
+        else
+        {
+            Status = MmpReferenceSegmentFileObject(Segment, FileObject);
+            if (!NT_SUCCESS(Status))
+            {
+                KIRQL OldIrql2 = MiAcquirePfnLock();
+                Segment->SectionCount--;
+                MmDereferenceSegmentWithLock(Segment, OldIrql2);
+                Section->Segment = NULL;
+                ObDereferenceObject(Section);
+                return Status;
+            }
+        }
 
         MmLockSectionSegment(Segment);
 
@@ -3265,6 +3471,11 @@ MmCreateImageSection(PSECTION *SectionObject,
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
 
+    if ((UMaximumSize != NULL) && (UMaximumSize->QuadPart < 0))
+    {
+        return STATUS_SECTION_TOO_BIG;
+    }
+
     /*
      * Create the section
      */
@@ -3473,12 +3684,15 @@ MmMapViewOfSegment(
         Granularity = PAGE_SIZE;
 
 #ifdef NEWCC
-    if (Segment->Flags & MM_DATAFILE_SEGMENT)
+    if (*Segment->Flags & MM_DATAFILE_SEGMENT)
     {
         LARGE_INTEGER FileOffset;
         FileOffset.QuadPart = ViewOffset;
         ObReferenceObject(Section);
-        return _MiMapViewOfSegment(AddressSpace, Segment, BaseAddress, ViewSize, Protect, &FileOffset, AllocationType, __FILE__, __LINE__);
+        Status = _MiMapViewOfSegment(AddressSpace, Segment, Section, BaseAddress, ViewSize, Protect, &FileOffset, AllocationType, __FILE__, __LINE__);
+        if (!NT_SUCCESS(Status))
+            ObDereferenceObject(Section);
+        return Status;
     }
 #endif
     Status = MmCreateMemoryArea(AddressSpace,
@@ -3507,6 +3721,13 @@ MmMapViewOfSegment(
 
     MmInitializeRegion(&MArea->SectionData.RegionListHead,
                        ViewSize, 0, Protect);
+
+    /* A view mapped into system space carries no per-process rmap, so the
+     * data-segment cleanup paths (pageout trimmer and purge-on-close) cannot
+     * find such a view through the rmap list. Track it explicitly so they
+     * leave this segment's pages resident while a system-space view maps it. */
+    if (AddressSpace == MmGetKernelAddressSpace())
+        InterlockedIncrement(&Segment->SystemMapCount);
 
     return STATUS_SUCCESS;
 }
@@ -3617,7 +3838,7 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
     Segment = MemoryArea->SectionData.Segment;
 
 #ifdef NEWCC
-    if (Segment->Flags & MM_DATAFILE_SEGMENT)
+    if (*Segment->Flags & MM_DATAFILE_SEGMENT)
     {
         MmUnlockAddressSpace(AddressSpace);
         Status = MmUnmapViewOfCacheSegment(AddressSpace, BaseAddress);
@@ -3654,6 +3875,12 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
                                   AddressSpace);
     }
     MmUnlockSectionSegment(Segment);
+
+    /* Balance the SystemMapCount bump taken in MmMapViewOfSegment for
+     * system-space views (see comment there). */
+    if (AddressSpace == MmGetKernelAddressSpace())
+        InterlockedDecrement(&Segment->SystemMapCount);
+
     MmDereferenceSegment(Segment);
     return Status;
 }
@@ -3757,53 +3984,6 @@ MiRosUnmapViewOfSection(
 
         ViewSize = PAGE_SIZE + ((Vad->EndingVpn - Vad->StartingVpn) << PAGE_SHIFT);
 
-        if (FlagOn(*Segment->Flags, MM_PHYSICALMEMORY_SEGMENT))
-        {
-            Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
-            ASSERT(NT_SUCCESS(Status));
-            MmDereferenceSegment(Segment);
-            return STATUS_SUCCESS;
-        }
-        ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
-
-        FileObject = Segment->FileObject;
-        FsRtlAcquireFileExclusive(FileObject);
-
-        /* Don't bother for auto-delete closed file. */
-        if (FlagOn(FileObject->Flags, FO_DELETE_ON_CLOSE) && FlagOn(FileObject->Flags, FO_CLEANUP_COMPLETE))
-        {
-            FsRtlReleaseFile(FileObject);
-            Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
-            ASSERT(NT_SUCCESS(Status));
-            MmDereferenceSegment(Segment);
-            return STATUS_SUCCESS;
-        }
-
-        /*
-         * Flush dirty pages BEFORE unmapping.  MmUnmapViewOfSegment drops
-         * PFN reference counts, which can free pages.  If we flush after
-         * unmapping, MiWritePage operates on pages whose PFN entries are
-         * already on the free list, causing PageLocation != ActiveAndValid
-         * assertions in MmProbeAndLockPages.
-         */
-        if (ControlArea == NULL || ControlArea->NumberOfMappedViews == 1)
-        {
-            SIZE_T FlushViewSize = ViewSize;
-            LARGE_INTEGER FlushOffset = ViewOffset;
-            while (FlushViewSize > 0)
-            {
-                ULONG FlushSize = min(FlushViewSize, PAGE_ROUND_DOWN(MAXULONG));
-                MmFlushSegment(FileObject->SectionObjectPointer,
-                               &FlushOffset,
-                               FlushSize,
-                               NULL);
-                FlushViewSize -= FlushSize;
-                FlushOffset.QuadPart += FlushSize;
-            }
-        }
-
-        FsRtlReleaseFile(FileObject);
-
         Status = MmUnmapViewOfSegment(AddressSpace, BaseAddress);
         if (!NT_SUCCESS(Status))
         {
@@ -3816,6 +3996,44 @@ MiRosUnmapViewOfSection(
         Vad = NULL;
         MemoryArea = NULL;
 
+        if (FlagOn(*Segment->Flags, MM_PHYSICALMEMORY_SEGMENT))
+        {
+            /* Don't bother */
+            MmDereferenceSegment(Segment);
+            return STATUS_SUCCESS;
+        }
+        ASSERT(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT));
+
+        FileObject = Segment->FileObject;
+        FsRtlAcquireFileExclusive(FileObject);
+
+        /* Don't bother for auto-delete closed file. */
+        if (FlagOn(FileObject->Flags, FO_DELETE_ON_CLOSE) && FlagOn(FileObject->Flags, FO_CLEANUP_COMPLETE))
+        {
+            FsRtlReleaseFile(FileObject);
+            MmDereferenceSegment(Segment);
+            return STATUS_SUCCESS;
+        }
+
+        /*
+         * Flush only when last mapping is deleted.
+         * FIXME: Why ControlArea == NULL? Or rather: is ControlArea ever not NULL here?
+         */
+        if (ControlArea == NULL || ControlArea->NumberOfMappedViews == 1)
+        {
+            while (ViewSize > 0)
+            {
+                ULONG FlushSize = min(ViewSize, PAGE_ROUND_DOWN(MAXULONG));
+                MmFlushSegment(FileObject->SectionObjectPointer,
+                               &ViewOffset,
+                               FlushSize,
+                               NULL);
+                ViewSize -= FlushSize;
+                ViewOffset.QuadPart += FlushSize;
+            }
+        }
+
+        FsRtlReleaseFile(FileObject);
         MmDereferenceSegment(Segment);
     }
 
@@ -4236,6 +4454,7 @@ MmMapViewOfSection(
     {
         PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)Section->Segment;
         LONGLONG ViewOffset;
+        LONGLONG RawViewOffset;
 
         ASSERT(Segment->RefCount > 0);
 
@@ -4264,26 +4483,40 @@ MmMapViewOfSection(
         if (SectionOffset == NULL)
         {
             ViewOffset = 0;
+            RawViewOffset = 0;
         }
         else
         {
-            SectionOffset->QuadPart &= ~(PAGE_SIZE - 1);
-            ViewOffset = SectionOffset->QuadPart;
+            RawViewOffset = SectionOffset->QuadPart;
+            ViewOffset = RawViewOffset & ~(PAGE_SIZE - 1);
+            SectionOffset->QuadPart = ViewOffset;
         }
 
         /* Check if the offset and size would cause an overflow */
-        if (((ULONG64)ViewOffset + *ViewSize) < (ULONG64)ViewOffset)
+        if (((ULONG64)RawViewOffset + *ViewSize) < (ULONG64)RawViewOffset)
         {
             DPRINT1("Section offset overflows\n");
             Status = STATUS_INVALID_VIEW_SIZE;
             goto Exit;
         }
 
+        if (FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT) &&
+            (*ViewSize != 0) &&
+            ((ULONG64)RawViewOffset >= (ULONG64)Segment->RawLength.QuadPart))
+        {
+            DPRINT1("Section offset is larger than section\n");
+            Status = STATUS_INVALID_VIEW_SIZE;
+            goto Exit;
+        }
+
         /* Check if the offset and size are bigger than the section itself */
-        if (((ULONG64)ViewOffset + *ViewSize) > (ULONG64)Section->SizeOfSection.QuadPart)
+        if (((ULONG64)RawViewOffset + *ViewSize) >
+            (ULONG64)(FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT) ?
+                      Segment->RawLength.QuadPart :
+                      Section->SizeOfSection.QuadPart))
         {
             /* This is allowed for physical memory sections and kernel mode callers */
-            if (!Section->u.Flags.PhysicalMemory || (ExGetPreviousMode() == UserMode))
+            if (!(AllocationType & MEM_RESERVE) && !Section->u.Flags.PhysicalMemory)
             {
                 DPRINT1("Section offset and size are larger than section\n");
                 Status = STATUS_INVALID_VIEW_SIZE;
@@ -4312,6 +4545,12 @@ MmMapViewOfSection(
             (*ViewSize) = MIN(Section->SizeOfSection.QuadPart - ViewOffset, SIZE_T_MAX - PAGE_SIZE);
         }
 
+        if ((CommitSize > *ViewSize) && !(AllocationType & MEM_RESERVE))
+        {
+            Status = STATUS_INVALID_PARAMETER_5;
+            goto Exit;
+        }
+
         *ViewSize = PAGE_ROUND_UP(*ViewSize);
 
         MmLockSectionSegment(Segment);
@@ -4322,7 +4561,7 @@ MmMapViewOfSection(
                                     *ViewSize,
                                     Protect,
                                     ViewOffset,
-                                    AllocationType & (MEM_TOP_DOWN|SEC_NO_CHANGE));
+                                    AllocationType & (MEM_TOP_DOWN|MEM_RESERVE|SEC_NO_CHANGE));
         MmUnlockSectionSegment(Segment);
         if (!NT_SUCCESS(Status))
         {
@@ -4403,6 +4642,94 @@ MmCanFileBeTruncated(
     DPRINT("FIXME: didn't check for outstanding write probes\n");
 
     return Ret;
+}
+
+static
+BOOLEAN
+MiDataSegmentHasPageEntries(
+    _In_ PMM_SECTION_SEGMENT Segment)
+{
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+
+    for (PageTable = RtlEnumerateGenericTable(&Segment->PageTable, TRUE);
+         PageTable != NULL;
+         PageTable = RtlEnumerateGenericTable(&Segment->PageTable, FALSE))
+    {
+        ULONG i;
+
+        for (i = 0; i < _countof(PageTable->PageEntries); i++)
+        {
+            if (PageTable->PageEntries[i] != 0)
+                return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+MiPurgeDataSegmentForClose(
+    _In_ PMM_SECTION_SEGMENT Segment)
+{
+    PCACHE_SECTION_PAGE_TABLE PageTable;
+
+    MmLockSectionSegment(Segment);
+
+    for (PageTable = RtlEnumerateGenericTable(&Segment->PageTable, TRUE);
+         PageTable != NULL;
+         PageTable = RtlEnumerateGenericTable(&Segment->PageTable, FALSE))
+    {
+        ULONG i;
+
+        for (i = 0; i < _countof(PageTable->PageEntries); i++)
+        {
+            ULONG_PTR Entry = PageTable->PageEntries[i];
+            LARGE_INTEGER Offset;
+
+            if (Entry == 0)
+                continue;
+
+            if (IS_SWAP_FROM_SSE(Entry) || IS_WRITE_SSE(Entry))
+            {
+                MmUnlockSectionSegment(Segment);
+                return FALSE;
+            }
+
+            if (SHARE_COUNT_FROM_SSE(Entry) > 0)
+            {
+                PMM_RMAP_ENTRY Rmap;
+                BOOLEAN HasUserRmap;
+                KIRQL OldIrql;
+
+                if (SHARE_COUNT_FROM_SSE(Entry) != 1)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    return FALSE;
+                }
+
+                OldIrql = MiAcquirePfnLock();
+                Rmap = MmGetRmapListHeadPage(PFN_FROM_SSE(Entry));
+                while ((Rmap != NULL) && RMAP_IS_SEGMENT(Rmap->Address))
+                    Rmap = Rmap->Next;
+                HasUserRmap = (Rmap != NULL);
+                MiReleasePfnLock(OldIrql);
+
+                if (HasUserRmap)
+                {
+                    MmUnlockSectionSegment(Segment);
+                    return FALSE;
+                }
+            }
+
+            Offset.QuadPart = PageTable->FileOffset.QuadPart + (i << PAGE_SHIFT);
+            MmSetPageEntrySectionSegment(Segment, &Offset, 0);
+            MmReleasePageMemoryConsumer(MC_USER, PFN_FROM_SSE(Entry));
+        }
+    }
+
+    MmUnlockSectionSegment(Segment);
+    return TRUE;
 }
 
 static
@@ -4614,57 +4941,63 @@ MmForceSectionClosed(IN PSECTION_OBJECT_POINTERS SectionObjectPointer,
         }
     }
 
-    /* Data section: grab the segment to bump its refcount, peek at the
-     * count to decide whether anyone else still holds a reference, and
-     * either drop our temp grab and report failure (DelayClose=FALSE,
-     * other users still hold the segment) or drop the grab and let the
-     * caller proceed (DelayClose=TRUE).
-     *
-     * NOTE: this only handles the trivial cases.  For the realistic
-     * "data segment with cached pages still in the page table" case the
-     * RefCount is bumped per-page by MiSetPageEntrySectionSegment, so a
-     * grab/deref pair is a no-op net change and the segment's
-     * DataSectionObject slot stays set.  Properly forcing such a segment
-     * closed means walking its PageTable, dropping each page reference,
-     * then waiting for the natural cleanup at MmDereferenceSegmentWithLock
-     * to clear the slot.  That requires locking the segment against
-     * concurrent users, validating no live mappings remain, and avoiding
-     * the segment-cleanup-vs-FCB-destruction race that NtfsDestroyFCB
-     * already documents — significantly more involved than fits in this
-     * change.  For now we report failure when the segment can't be
-     * trivially dropped, which preserves the pre-existing FCB-leak
-     * fallback in NtfsDestroyFCB instead of corrupting MM state by
-     * forcibly clearing the slot. */
+    /* Data section: with no open section objects, purge any unshared cached
+     * pages so their segment references are dropped and normal segment cleanup
+     * can clear DataSectionObject. If a section object or live mapping still
+     * holds the segment, only DelayClose callers may proceed. */
     if (SectionObjectPointer->DataSectionObject != NULL)
     {
         Segment = MiGrabDataSection(SectionObjectPointer);
         if (Segment != NULL)
         {
-            /* Drop our temp grab.  If we held the only reference the
-             * legacy cleanup runs synchronously and clears the slot.
-             * Otherwise the slot stays set and we report based on the
-             * current state. */
-            MmDereferenceSegment(Segment);
+            BOOLEAN CanPurge;
 
-            if (SectionObjectPointer->DataSectionObject == NULL)
+            MmLockSectionSegment(Segment);
+            if (Segment->SectionCount > 1)
             {
-                /* Cleanup ran on our deref — slot is clean. */
-                DataOk = TRUE;
+                DataOk = DelayClose;
+                CanPurge = FALSE;
             }
-            else if (DelayClose)
+            else if (Segment->SystemMapCount > 0)
             {
-                /* Slot still set but caller authorised deferral — return
-                 * TRUE so they can proceed.  The caller is expected to
-                 * tolerate the slot still being non-NULL (NTFS' fallback
-                 * path leaks the FCB rather than free pool memory MM is
-                 * still using). */
-                DataOk = TRUE;
+                /* A system-space view (e.g. a win32k font mapping) still maps
+                 * this segment. Such a view carries no per-process rmap, so the
+                 * MiPurgeDataSegmentForClose rmap walk cannot see it and would
+                 * free pages the view is actively reading. Refuse to purge. */
+                DataOk = DelayClose;
+                CanPurge = FALSE;
+            }
+            else if (!MiDataSegmentHasPageEntries(Segment))
+            {
+                DataOk = DelayClose;
+                CanPurge = FALSE;
             }
             else
             {
-                /* Slot still set and caller can't defer.  Report failure. */
-                DataOk = FALSE;
+                DataOk = TRUE;
+                CanPurge = TRUE;
             }
+            MmUnlockSectionSegment(Segment);
+
+            if (CanPurge)
+                DataOk = MmPurgeSegment(SectionObjectPointer, NULL, 0);
+
+            if (!DataOk && CanPurge)
+                DataOk = MiPurgeDataSegmentForClose(Segment);
+
+            if (DataOk && CanPurge)
+            {
+                if (SectionObjectPointer->DataSectionObject == Segment)
+                {
+                    KIRQL OldIrql;
+
+                    OldIrql = MiAcquirePfnLock();
+                    if (SectionObjectPointer->DataSectionObject == Segment)
+                        SectionObjectPointer->DataSectionObject = NULL;
+                    MiReleasePfnLock(OldIrql);
+                }
+            }
+            MmDereferenceSegment(Segment);
         }
     }
 
@@ -4766,6 +5099,19 @@ MmMapViewInSystemSpaceEx (
 
     MmLockAddressSpace(AddressSpace);
 
+    *MappedBase = MiRosFindSystemCacheView(AddressSpace, *ViewSize);
+    if (*MappedBase == NULL)
+    {
+        MmUnlockAddressSpace(AddressSpace);
+        return STATUS_NO_MEMORY;
+    }
+
+    MmUnlockAddressSpace(AddressSpace);
+
+    MiFillSystemPageDirectory(*MappedBase, *ViewSize);
+
+    MmLockAddressSpace(AddressSpace);
+
     MmLockSectionSegment(Segment);
 
     Status = MmMapViewOfSegment(AddressSpace,
@@ -4864,11 +5210,27 @@ MmCreateSection (OUT PVOID  * Section,
     BOOLEAN FileLock = FALSE;
     BOOLEAN HaveFileObject = FALSE;
 
-    // FIXME: Implement support for large pages
+    if (!(AllocationAttributes & (SEC_COMMIT | SEC_RESERVE | SEC_IMAGE)))
+    {
+        return STATUS_INVALID_PARAMETER_6;
+    }
+
     if (AllocationAttributes & SEC_LARGE_PAGES)
     {
-        DPRINT1("SEC_LARGE_PAGES is not supported\n");
-        return STATUS_INVALID_PARAMETER_6;
+        ULONG LargePageMinimum;
+
+        if ((AllocationAttributes & SEC_COMMIT) == 0 || FileHandle || FileObject || !MaximumSize)
+        {
+            return STATUS_INVALID_PARAMETER_6;
+        }
+
+        LargePageMinimum = SharedUserData->LargePageMinimum ?
+            SharedUserData->LargePageMinimum : (4 * 1024 * 1024);
+        if ((MaximumSize->QuadPart <= 0) ||
+            (MaximumSize->QuadPart % LargePageMinimum) != 0)
+        {
+            return STATUS_INVALID_PARAMETER_4;
+        }
     }
 
     /* Check if an ARM3 section is being created instead */
@@ -4966,20 +5328,27 @@ MmCreateSection (OUT PVOID  * Section,
         goto Exit;
     }
 
+    if ((MaximumSize != NULL) && (MaximumSize->QuadPart < 0))
+    {
+        Status = STATUS_SECTION_TOO_BIG;
+        goto Exit;
+    }
+
     if (AllocationAttributes & SEC_IMAGE)
     {
-        Status = MmCreateImageSection(SectionObject,
-                                      DesiredAccess,
-                                      ObjectAttributes,
-                                      MaximumSize,
-                                      SectionPageProtection,
-                                      AllocationAttributes,
-                                      FileObject);
-
-        /* If the file was ivalid, and we got a FileObject passed, fall back to data section */
-        if (!NT_SUCCESS(Status) && HaveFileObject)
+        if (HaveFileObject)
         {
             AllocationAttributes &= ~SEC_IMAGE;
+        }
+        else
+        {
+            Status = MmCreateImageSection(SectionObject,
+                                          DesiredAccess,
+                                          ObjectAttributes,
+                                          MaximumSize,
+                                          SectionPageProtection,
+                                          AllocationAttributes,
+                                          FileObject);
         }
     }
 
@@ -5349,10 +5718,56 @@ MmFlushSegment(
 
         if (IS_DIRTY_SSE(Entry))
         {
-            MmCheckDirtySegment(Segment, &FlushStart, FALSE, FALSE);
+            LARGE_INTEGER RunStart = FlushStart;
+            ULONG RunPages = 0;
+            PFN_NUMBER Pages[VACB_MAPPING_GRANULARITY / PAGE_SIZE];
+            NTSTATUS WriteStatus;
 
-            if (Iosb)
-                Iosb->Information += PAGE_SIZE;
+            do
+            {
+                PFN_NUMBER Page = PFN_FROM_SSE(Entry);
+
+                Pages[RunPages++] = Page;
+                Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) + 1);
+                Entry = WRITE_SSE(Entry);
+                MmSetPageEntrySectionSegment(Segment, &FlushStart, Entry);
+
+                FlushStart.QuadPart += PAGE_SIZE;
+                if (FlushStart.QuadPart >= FlushEnd.QuadPart ||
+                    RunPages == RTL_NUMBER_OF(Pages))
+                {
+                    break;
+                }
+
+                Entry = MmGetPageEntrySectionSegment(Segment, &FlushStart);
+            }
+            while (IS_DIRTY_SSE(Entry));
+
+            MmUnlockSectionSegment(Segment);
+            WriteStatus = MiWritePageRun(Segment, RunStart.QuadPart, Pages, RunPages);
+            MmLockSectionSegment(Segment);
+
+            for (ULONG i = 0; i < RunPages; i++)
+            {
+                LARGE_INTEGER CurrentOffset;
+                BOOLEAN DirtyAgain;
+
+                CurrentOffset.QuadPart = RunStart.QuadPart + (i * PAGE_SIZE);
+                Entry = MmGetPageEntrySectionSegment(Segment, &CurrentOffset);
+                ASSERT(PFN_FROM_SSE(Entry) == Pages[i]);
+
+                DirtyAgain = !NT_SUCCESS(WriteStatus) || IS_DIRTY_SSE(Entry);
+                Entry = MAKE_SSE(Pages[i] << PAGE_SHIFT, SHARE_COUNT_FROM_SSE(Entry) - 1);
+                if (DirtyAgain)
+                    Entry = DIRTY_SSE(Entry);
+
+                MmSetPageEntrySectionSegment(Segment, &CurrentOffset, Entry);
+            }
+
+            if (Iosb && NT_SUCCESS(WriteStatus))
+                Iosb->Information += RunPages * PAGE_SIZE;
+
+            continue;
         }
 
         FlushStart.QuadPart += PAGE_SIZE;
@@ -5408,30 +5823,6 @@ MmCheckDirtySegment(
         Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) + 1);
         Entry = WRITE_SSE(Entry);
         MmSetPageEntrySectionSegment(Segment, Offset, Entry);
-
-        /*
-         * Pin the page so it stays ActiveAndValid while we write it.
-         * After unlocking the segment, the page's PFN refcount can be
-         * dropped to 0 by concurrent unmaps, moving it to the free list.
-         * MmProbeAndLockPages in the storage driver would then find
-         * PageLocation != ActiveAndValid and assert.
-         *
-         * If the refcount is already 0 the page was freed — skip the write.
-         */
-        {
-            KIRQL PfnIrql = MiAcquirePfnLock();
-            PMMPFN Pfn1 = MiGetPfnEntry(Page);
-            if (Pfn1->u3.e2.ReferenceCount == 0)
-            {
-                MiReleasePfnLock(PfnIrql);
-                /* Page already freed, treat as clean */
-                Entry = MAKE_SSE(PAGE_FROM_SSE(Entry), SHARE_COUNT_FROM_SSE(Entry) - 1);
-                MmSetPageEntrySectionSegment(Segment, Offset, Entry);
-                return FALSE;
-            }
-            MmReferencePage(Page);
-            MiReleasePfnLock(PfnIrql);
-        }
 
         MmUnlockSectionSegment(Segment);
 
@@ -5519,13 +5910,6 @@ MmCheckDirtySegment(
                 DPRINT1("Failed to allocate a swap page!\n");
                 Status = STATUS_INSUFFICIENT_RESOURCES;
             }
-        }
-
-        /* Release the PFN pin we took before the write */
-        {
-            KIRQL PfnIrql = MiAcquirePfnLock();
-            MmDereferencePage(Page);
-            MiReleasePfnLock(PfnIrql);
         }
 
         MmLockSectionSegment(Segment);

@@ -2795,6 +2795,12 @@ RtlDestroyProcessParameters(
 NTSYSAPI
 VOID
 NTAPI
+RtlExitUserProcess(
+    _In_ ULONG ExitStatus);
+
+NTSYSAPI
+VOID
+NTAPI
 RtlExitUserThread(
     _In_ NTSTATUS Status);
 
@@ -4739,6 +4745,35 @@ RtlSleepConditionVariableSRW(
     _Inout_ PRTL_SRWLOCK SRWLock,
     _In_opt_ PLARGE_INTEGER TimeOut,
     _In_ ULONG Flags);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+//
+// Wait-on-address synchronization (Win8+)
+//
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWaitOnAddress(
+    _In_ volatile VOID *Address,
+    _In_reads_bytes_(AddressSize) PVOID CompareAddress,
+    _In_ SIZE_T AddressSize,
+    _In_opt_ PLARGE_INTEGER Timeout);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressAll(_In_ PVOID Address);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressAllNoFence(_In_ PVOID Address);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressSingle(_In_ PVOID Address);
 #endif
 
 //

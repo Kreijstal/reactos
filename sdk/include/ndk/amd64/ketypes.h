@@ -373,11 +373,13 @@ typedef enum
 //
 // Synchronization-level IRQL
 //
-#ifndef CONFIG_SMP
-#define SYNCH_LEVEL             DISPATCH_LEVEL
-#else
+// On amd64 there is no uniprocessor kernel variant: the synchronization IRQL
+// is the architectural IPI_LEVEL - 2 (== 12) regardless of the consumer's
+// build flags, matching the Windows WDK. Gating this on the kernel-private
+// CONFIG_SMP made every non-kernel module (drivers, public inlines) compute
+// DISPATCH_LEVEL while the MP kernel actually synchronizes at IPI_LEVEL - 2.
+//
 #define SYNCH_LEVEL             (IPI_LEVEL - 2)
-#endif
 
 //
 // Number of pool lookaside lists per pool in the PRCB
@@ -947,10 +949,10 @@ typedef struct _KPRCB
     ULONG CacheCount;
 #endif
 #ifdef __REACTOS__
-#if  (NTDDI_VERSION < NTDDI_WINBLUE)
-    // On Win 8.1+ the FeatureBits field is extended to 64 bits
+    /* On Win 8.1+ the FeatureBits field was widened to 64 bits; carry the
+     * upper half as a sibling ULONG so the existing init code can populate
+     * the combined feature set. The slot is unused on <8.1 and harmless. */
     ULONG FeatureBitsHigh;
-#endif
 #endif
 } KPRCB, *PKPRCB;
 

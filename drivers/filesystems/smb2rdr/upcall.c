@@ -41,6 +41,7 @@ static LIST_ENTRY   gInFlightList;  /* WAIT_REPLY entries */
 static KEVENT       gUpcallEvent;   /* signalled when gUpcallQueue non-empty */
 static volatile LONG64 gXidNext = 0;
 static BOOLEAN      gUpcallInit = FALSE;
+static volatile LONG gDaemonObserved = 0;
 
 VOID
 SmbRdrInitUpcall(VOID)
@@ -53,9 +54,10 @@ SmbRdrInitUpcall(VOID)
     InitializeListHead(&gInFlightList);
     KeInitializeEvent(&gUpcallEvent, NotificationEvent, FALSE);
     gXidNext = 0;
+    gDaemonObserved = 0;
     gUpcallInit = TRUE;
 
-    DbgPrint("SMB2RDR: upcall bridge initialised\n");
+    DPRINT("SMB2RDR: upcall bridge initialised\n");
 }
 
 VOID
@@ -104,6 +106,7 @@ SmbRdrIssueUpcall(
     NTSTATUS status;
     SMB2RDR_UPCALL_ENTRY entry;
     LARGE_INTEGER timeout;
+    PLARGE_INTEGER timeoutPtr = NULL;
     KIRQL irql;
 
     if (OutActualLength != NULL)
@@ -112,6 +115,8 @@ SmbRdrIssueUpcall(
         *OutStatus = STATUS_UNSUCCESSFUL;
 
     if (!gUpcallInit)
+        return STATUS_DEVICE_NOT_READY;
+    if (InterlockedCompareExchange(&gDaemonObserved, 0, 0) == 0)
         return STATUS_DEVICE_NOT_READY;
 
     RtlZeroMemory(&entry, sizeof(entry));
@@ -127,7 +132,7 @@ SmbRdrIssueUpcall(
     entry.OutActualLength = 0;
     KeInitializeEvent(&entry.Completed, NotificationEvent, FALSE);
 
-    DbgPrint("SMB2RDR: enqueue upcall xid=%lld opcode=%lu inlen=%lu\n",
+    DPRINT("SMB2RDR: enqueue upcall xid=%lld opcode=%lu inlen=%lu\n",
              entry.Xid, entry.Opcode, entry.InLength);
 
     KeAcquireSpinLock(&gUpcallLock, &irql);
@@ -135,10 +140,14 @@ SmbRdrIssueUpcall(
     KeSetEvent(&gUpcallEvent, 0, FALSE);
     KeReleaseSpinLock(&gUpcallLock, irql);
 
-    /* Block waiting for the daemon. */
-    timeout.QuadPart = -((LONGLONG)TimeoutSec * 10000000LL);
+    /* Block waiting for the daemon.  TimeoutSec == 0 means no timeout. */
+    if (TimeoutSec != 0)
+    {
+        timeout.QuadPart = -((LONGLONG)TimeoutSec * 10000000LL);
+        timeoutPtr = &timeout;
+    }
     status = KeWaitForSingleObject(&entry.Completed, Executive, KernelMode,
-                                   FALSE, &timeout);
+                                   FALSE, timeoutPtr);
 
     if (status == STATUS_TIMEOUT) {
         /* Best-effort yank from whichever queue it still sits on.  If the
@@ -154,12 +163,12 @@ SmbRdrIssueUpcall(
             entry.State = SMB2RDR_UPCALL_ABANDONED;
         }
         KeReleaseSpinLock(&gUpcallLock, irql);
-        DbgPrint("SMB2RDR: upcall xid=%lld TIMED OUT after %lu s\n",
+        DPRINT("SMB2RDR: upcall xid=%lld TIMED OUT after %lu s\n",
                  entry.Xid, TimeoutSec);
         return STATUS_IO_TIMEOUT;
     }
 
-    DbgPrint("SMB2RDR: upcall xid=%lld woke with status=0x%08lx outlen=%lu\n",
+    DPRINT("SMB2RDR: upcall xid=%lld woke with status=0x%08lx outlen=%lu\n",
              entry.Xid, entry.Status, entry.OutActualLength);
 
     if (OutStatus != NULL)
@@ -189,6 +198,8 @@ SmbRdrUpcallIoctl(
     if (!gUpcallInit)
         return STATUS_DEVICE_NOT_READY;
 
+    InterlockedExchange(&gDaemonObserved, 1);
+
     for (;;) {
         /* Look for a pending upcall; if none, wait for the event. */
         KeAcquireSpinLock(&gUpcallLock, &irql);
@@ -216,7 +227,7 @@ SmbRdrUpcallIoctl(
             InsertHeadList(&gUpcallQueue, &up->ListEntry);
             KeSetEvent(&gUpcallEvent, 0, FALSE);
             KeReleaseSpinLock(&gUpcallLock, irql);
-            DbgPrint("SMB2RDR: IOCTL_SMB2RDR_READ buffer too small: "
+            DPRINT("SMB2RDR: IOCTL_SMB2RDR_READ buffer too small: "
                      "have=%lu need=%lu\n", outBufLen, needed);
             return STATUS_BUFFER_TOO_SMALL;
         }
@@ -255,7 +266,7 @@ SmbRdrUpcallIoctl(
         }
 
         *Information = needed;
-        DbgPrint("SMB2RDR: IOCTL_SMB2RDR_READ served xid=%lld opcode=%lu "
+        DPRINT("SMB2RDR: IOCTL_SMB2RDR_READ served xid=%lld opcode=%lu "
                  "bytes=%lu\n", up->Xid, up->Opcode, needed);
         return STATUS_SUCCESS;
     }
@@ -284,7 +295,7 @@ SmbRdrDowncallIoctl(
     if ((ULONG)(inBufLen - sizeof(hdr)) < hdr.OutLength)
         return STATUS_INVALID_PARAMETER;
 
-    DbgPrint("SMB2RDR: IOCTL_SMB2RDR_WRITE received xid=%lld status=0x%08lx "
+    DPRINT("SMB2RDR: IOCTL_SMB2RDR_WRITE received xid=%lld status=0x%08lx "
              "outlen=%lu\n", hdr.Xid, hdr.Status, hdr.OutLength);
 
     KeAcquireSpinLock(&gUpcallLock, &irql);
@@ -299,7 +310,7 @@ SmbRdrDowncallIoctl(
     }
     if (!found) {
         KeReleaseSpinLock(&gUpcallLock, irql);
-        DbgPrint("SMB2RDR: IOCTL_SMB2RDR_WRITE no in-flight xid=%lld\n",
+        DPRINT("SMB2RDR: IOCTL_SMB2RDR_WRITE no in-flight xid=%lld\n",
                  hdr.Xid);
         return STATUS_NOT_FOUND;
     }

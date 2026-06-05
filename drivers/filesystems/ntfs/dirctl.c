@@ -472,7 +472,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     DPRINT("Buffer=%p tofind=%S\n", Buffer, Ccb->DirectorySearchPattern);
 
     /* Synthesize '.' and '..' entries (indices 0 and 1).
-     * NTFS does not store them in the $I30 index — the Windows NTFS
+     * NTFS does not store them in the $I30 index - the Windows NTFS
      * driver generates them on the fly.  Without them, FindFirstFile
      * on an empty directory returns ERROR_FILE_NOT_FOUND instead of
      * finding at least '.' and '..', which breaks CopyDirectory. */
@@ -581,7 +581,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                      * GetBestFileNameFromRecord return our synthetic name.
                      *
                      * Instead of building a fake record, directly fill the
-                     * output structures ourselves — it's simpler and avoids
+                     * output structures ourselves - it's simpler and avoids
                      * touching shared state. */
                     {
                         ULONG DotNameBytes = DotLen * sizeof(WCHAR);
@@ -725,8 +725,14 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
              */
             if (MFTRecord == OldMFTRecord)
             {
-                DPRINT1("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
-                Ccb->Entry++;
+                DPRINT("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
+                /* Advance the B-tree cursor, not Ccb->Entry: the loop below
+                 * re-queries NtfsFindFileAt() with BTreeEntry, and Ccb->Entry
+                 * is only synced back from BTreeEntry after the loop.  Bumping
+                 * Ccb->Entry here leaves BTreeEntry unchanged, so the next
+                 * NtfsFindFileAt() returns the very same duplicate entry and we
+                 * spin forever. */
+                BTreeEntry++;
                 ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
                 continue;
             }

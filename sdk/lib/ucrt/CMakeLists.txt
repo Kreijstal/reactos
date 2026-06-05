@@ -123,5 +123,17 @@ add_library(ucrt OBJECT
     ${UCRT_VCRUNTIME_SOURCES}
 )
 
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(ucrt PRIVATE
+        -fno-builtin-strnlen
+        -fno-builtin-wcsnlen
+        -fno-builtin-_lrotl
+        -fno-builtin-_lrotr
+        -fno-builtin-_rotl
+        -fno-builtin-_rotr
+        -fno-builtin-_rotl64
+        -fno-builtin-_rotr64)
+endif()
+
 target_link_libraries(ucrt vcruntime)
 add_dependencies(ucrt psdk asm)

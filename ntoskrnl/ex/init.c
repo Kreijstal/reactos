@@ -29,6 +29,20 @@ MmArmInitSystem(
     IN PLOADER_PARAMETER_BLOCK LoaderBlock
 );
 
+#if defined(_M_ARM64)
+VOID
+NTAPI
+ExArchPostHalInitSystemPhase0(VOID);
+
+VOID
+NTAPI
+ExArchPostHalInitSystemPhase1(VOID);
+
+VOID
+NTAPI
+KeReenableTimerInterrupt(VOID);
+#endif
+
 typedef struct _INIT_BUFFER
 {
     WCHAR DebugBuffer[256];
@@ -60,6 +74,10 @@ ULONG CmNtCSDVersion;
 ULONG CmNtCSDReleaseType;
 UNICODE_STRING CmVersionString;
 UNICODE_STRING CmCSDVersionString;
+#if defined(_M_ARM64)
+static WCHAR ExpArm64CsdVersionBuffer[256];
+static WCHAR ExpArm64VersionBuffer[64];
+#endif
 
 CHAR NtBuildLab[] = KERNEL_VERSION_BUILD_STR "."
                     REACTOS_COMPILER_NAME "_" REACTOS_COMPILER_VERSION;
@@ -94,6 +112,41 @@ BOOLEAN ExCmosClockIsSane = TRUE;
 BOOLEAN ExpRealTimeIsUniversal;
 
 /* FUNCTIONS ****************************************************************/
+
+static
+PCHAR
+ExpFindBootOption(
+    _In_opt_ PCHAR CommandLine,
+    _In_z_ PCSTR OptionName)
+{
+    SIZE_T NameLength, OptionLength;
+    PCHAR Current;
+
+    if ((CommandLine == NULL) || (OptionName == NULL) || (*OptionName == ANSI_NULL))
+        return NULL;
+
+    NameLength = strlen(OptionName);
+    Current = CommandLine;
+
+    while (*Current)
+    {
+        Current += strspn(Current, " \t/");
+
+        OptionLength = strcspn(Current, " \t/");
+        if ((OptionLength >= NameLength) &&
+            (_strnicmp(Current, OptionName, NameLength) == 0) &&
+            ((OptionLength == NameLength) ||
+             (OptionName[NameLength - 1] == '=') ||
+             (OptionName[NameLength - 1] == ':')))
+        {
+            return Current;
+        }
+
+        Current += OptionLength;
+    }
+
+    return NULL;
+}
 
 CODE_SEG("INIT")
 NTSTATUS
@@ -212,12 +265,12 @@ VOID
 NTAPI
 ExpInitNls(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
-    LARGE_INTEGER SectionSize;
+    LARGE_INTEGER DECLSPEC_ALIGN(8) SectionSize;
     NTSTATUS Status;
     HANDLE NlsSection;
     PVOID SectionBase = NULL;
     SIZE_T ViewSize = 0;
-    LARGE_INTEGER SectionOffset = {{0, 0}};
+    LARGE_INTEGER DECLSPEC_ALIGN(8) SectionOffset = {{0, 0}};
     PLIST_ENTRY ListHead, NextEntry;
     PMEMORY_ALLOCATION_DESCRIPTOR MdBlock;
     ULONG NlsTablesEncountered = 0;
@@ -284,6 +337,10 @@ ExpInitNls(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                           NlsTableSizes[1]),
                           LoaderBlock->NlsData->UnicodeCodePageData,
                           NlsTableSizes[2]);
+
+            ExpAnsiCodePageDataOffset = 0;
+            ExpOemCodePageDataOffset = (ULONG)NlsTableSizes[0];
+            ExpUnicodeCaseTableDataOffset = (ULONG)(NlsTableSizes[0] + NlsTableSizes[1]);
             /* End of Hack */
         }
 
@@ -1080,6 +1137,10 @@ ExpInitializeExecutive(IN ULONG Cpu,
         KeBugCheck(HAL_INITIALIZATION_FAILED);
     }
 
+#if defined(_M_ARM64)
+    ExArchPostHalInitSystemPhase0();
+#endif
+
     /* Make sure interrupts are active now */
     _enable();
 
@@ -1091,7 +1152,6 @@ ExpInitializeExecutive(IN ULONG Cpu,
     NtGlobalFlag |= FLG_ENABLE_CLOSE_EXCEPTIONS |
                     FLG_ENABLE_KDEBUG_SYMBOL_LOAD;
 #endif
-
     /* Setup NT System Root Path */
     sprintf(Buffer, "C:%s", LoaderBlock->NtBootPathName);
 
@@ -1103,14 +1163,11 @@ ExpInitializeExecutive(IN ULONG Cpu,
     RtlInitEmptyUnicodeString(&NtSystemRoot,
                               SharedUserData->NtSystemRoot,
                               sizeof(SharedUserData->NtSystemRoot));
-
     /* Now fill it in */
     Status = RtlAnsiStringToUnicodeString(&NtSystemRoot, &AnsiPath, FALSE);
     if (!NT_SUCCESS(Status)) KeBugCheck(SESSION3_INITIALIZATION_FAILED);
-
     /* Setup bugcheck messages */
     KiInitializeBugCheck();
-
     /* Setup initial system settings */
     CmGetSystemControlValues(LoaderBlock->RegistryBase, CmControlVector);
 
@@ -1143,7 +1200,6 @@ ExpInitializeExecutive(IN ULONG Cpu,
         /* Setup headless terminal settings */
         HeadlessInit(LoaderBlock);
     }
-
     /* Set system ranges */
 #ifdef _M_AMD64
     SharedUserData->Reserved1 = MM_HIGHEST_USER_ADDRESS_WOW64;
@@ -1269,9 +1325,18 @@ ExpInitializeExecutive(IN ULONG Cpu,
 
     /* Now setup the final string */
     RtlInitAnsiString(&CSDString, Buffer);
+#if defined(_M_ARM64)
+    RtlInitEmptyUnicodeString(&CmCSDVersionString,
+                              ExpArm64CsdVersionBuffer,
+                              sizeof(ExpArm64CsdVersionBuffer));
+    Status = RtlAnsiStringToUnicodeString(&CmCSDVersionString,
+                                          &CSDString,
+                                          FALSE);
+#else
     Status = RtlAnsiStringToUnicodeString(&CmCSDVersionString,
                                           &CSDString,
                                           TRUE);
+#endif
     if (!NT_SUCCESS(Status))
     {
         /* Fail */
@@ -1291,7 +1356,21 @@ ExpInitializeExecutive(IN ULONG Cpu,
     }
 
     /* Build the final version string */
+#if defined(_M_ARM64)
+    RtlInitAnsiString(&CSDString, VersionBuffer);
+    RtlInitEmptyUnicodeString(&CmVersionString,
+                              ExpArm64VersionBuffer,
+                              sizeof(ExpArm64VersionBuffer));
+    Status = RtlAnsiStringToUnicodeString(&CmVersionString,
+                                          &CSDString,
+                                          FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        KeBugCheckEx(PHASE0_INITIALIZATION_FAILED, Status, 0, 0, 0);
+    }
+#else
     RtlCreateUnicodeStringFromAsciiz(&CmVersionString, VersionBuffer);
+#endif
 
     /* Check if the user wants a kernel stack trace database */
     if (NtGlobalFlag & FLG_KERNEL_STACK_TRACE_DB)
@@ -1355,7 +1434,11 @@ ExpInitializeExecutive(IN ULONG Cpu,
     SharedUserData->NtMinorVersion = NtMinorVersion;
 
     /* Set the machine type */
+#if defined(_M_ARM64)
+    SharedUserData->ImageNumberLow = IMAGE_FILE_MACHINE_AMD64;
+#else
     SharedUserData->ImageNumberLow = IMAGE_FILE_MACHINE_NATIVE;
+#endif
     SharedUserData->ImageNumberHigh = IMAGE_FILE_MACHINE_NATIVE;
 
     /* ReactOS magic */
@@ -1375,7 +1458,7 @@ Phase1InitializationDiscard(IN PVOID Context)
     NTSTATUS Status, MsgStatus;
     TIME_FIELDS TimeFields;
     LARGE_INTEGER SystemBootTime, UniversalBootTime, OldTime, Timeout;
-    BOOLEAN NoGuiBoot, ResetBias = FALSE, AlternateShell = FALSE;
+    BOOLEAN NoGuiBoot, ResetBias = FALSE, AlternateShell = FALSE, ClockOk = FALSE;
     PLDR_DATA_TABLE_ENTRY NtosEntry;
     PMESSAGE_RESOURCE_ENTRY MsgEntry;
     PCHAR CommandLine, Y2KHackRequired, SafeBoot, Environment;
@@ -1391,6 +1474,7 @@ Phase1InitializationDiscard(IN PVOID Context)
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE KeyHandle, OptionHandle;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters = NULL;
+
 
     /* Allocate the initialization buffer */
     InitBuffer = ExAllocatePoolWithTag(NonPagedPool,
@@ -1411,7 +1495,11 @@ Phase1InitializationDiscard(IN PVOID Context)
     /* Do Phase 1 HAL Initialization */
     if (!HalInitSystem(1, LoaderBlock)) KeBugCheck(HAL1_INITIALIZATION_FAILED);
 
-    /* Get the command line and upcase it */
+#if defined(_M_ARM64)
+    KeReenableTimerInterrupt();
+    ExArchPostHalInitSystemPhase1();
+#endif
+
     CommandLine = (LoaderBlock->LoadOptions ? _strupr(LoaderBlock->LoadOptions) : NULL);
 
     /* Check if GUI Boot is enabled */
@@ -1452,6 +1540,18 @@ Phase1InitializationDiscard(IN PVOID Context)
     NtosEntry = CONTAINING_RECORD(LoaderBlock->LoadOrderListHead.Flink,
                                   LDR_DATA_TABLE_ENTRY,
                                   InLoadOrderLinks);
+#if defined(_M_ARM64)
+    /* ARM64: FreeLDR may store list links as raw physical offsets that get
+     * sign-extended to 64-bit.  Mask to 48-bit PA and convert to KSEG0 VA. */
+    {
+        ULONG_PTR Raw = (ULONG_PTR)LoaderBlock->LoadOrderListHead.Flink;
+        ULONG_PTR Kva = KSEG0_BASE | (Raw & 0x0000FFFFFFFFFFFFULL);
+        LoaderBlock->LoadOrderListHead.Flink = (PLIST_ENTRY)Kva;
+        NtosEntry = CONTAINING_RECORD(LoaderBlock->LoadOrderListHead.Flink,
+                                      LDR_DATA_TABLE_ENTRY,
+                                      InLoadOrderLinks);
+    }
+#endif
 
     /* Find the banner message */
     MsgStatus = RtlFindMessage(NtosEntry->DllBase,
@@ -1546,8 +1646,18 @@ Phase1InitializationDiscard(IN PVOID Context)
     if (Y2KHackRequired) YearHack = atol(Y2KHackRequired + 1);
 
     /* Query the clock */
-    if ((ExCmosClockIsSane) && (HalQueryRealTimeClock(&TimeFields)))
+    if (ExCmosClockIsSane)
     {
+        ClockOk = HalQueryRealTimeClock(&TimeFields);
+    }
+#if defined(_M_ARM64)
+    else
+    {
+    }
+#endif
+    if ((ExCmosClockIsSane) && ClockOk)
+    {
+
         /* Check if we're using the Y2K hack */
         if (Y2KHackRequired) TimeFields.Year = (CSHORT)YearHack;
 
@@ -1651,7 +1761,7 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Get total RAM size, in MiB */
     /* Round size up. Assumed to better match actual physical RAM size */
-    Size = ALIGN_UP_BY(MmNumberOfPhysicalPages * PAGE_SIZE, 1024 * 1024) / (1024 * 1024);
+    Size = ALIGN_UP_BY((SIZE_T)MmNumberOfPhysicalPages * PAGE_SIZE, 1024 * 1024) / (1024 * 1024);
 
     /* Create the string */
     StringBuffer = InitBuffer->VersionBuffer;
@@ -1706,6 +1816,9 @@ Phase1InitializationDiscard(IN PVOID Context)
     }
 
     /* Set up Region Maps, Sections and the Paging File */
+#if defined(_M_ARM64)
+    extern char __ImageBase;
+#endif
     if (!MmInitSystem(1, LoaderBlock)) KeBugCheck(MEMORY1_INITIALIZATION_FAILED);
 
     /* Create NLS section */
@@ -1770,26 +1883,26 @@ Phase1InitializationDiscard(IN PVOID Context)
     if (CommandLine)
     {
         /* Check if this is a safe mode boot */
-        SafeBoot = strstr(CommandLine, "SAFEBOOT:");
+        SafeBoot = ExpFindBootOption(CommandLine, "SAFEBOOT:");
         if (SafeBoot)
         {
             /* Check what kind of boot this is */
             SafeBoot += 9;
-            if (!strncmp(SafeBoot, "MINIMAL", 7))
+            if (!_strnicmp(SafeBoot, "MINIMAL", 7))
             {
                 /* Minimal mode */
                 InitSafeBootMode = 1;
                 SafeBoot += 7;
                 MessageCode = BOOTING_IN_SAFEMODE_MINIMAL;
             }
-            else if (!strncmp(SafeBoot, "NETWORK", 7))
+            else if (!_strnicmp(SafeBoot, "NETWORK", 7))
             {
                 /* With Networking */
                 InitSafeBootMode = 2;
                 SafeBoot += 7;
                 MessageCode = BOOTING_IN_SAFEMODE_NETWORK;
             }
-            else if (!strncmp(SafeBoot, "DSREPAIR", 8))
+            else if (!_strnicmp(SafeBoot, "DSREPAIR", 8))
             {
                 /* Domain Server Repair */
                 InitSafeBootMode = 3;
@@ -1807,7 +1920,7 @@ Phase1InitializationDiscard(IN PVOID Context)
             if (*SafeBoot)
             {
                 /* Check if an alternate shell was requested */
-                if (!strncmp(SafeBoot, "(ALTERNATESHELL)", 16))
+                if (!_strnicmp(SafeBoot, "(ALTERNATESHELL)", 16))
                 {
                     /* Remember this for later */
                     AlternateShell = TRUE;
@@ -1827,6 +1940,8 @@ Phase1InitializationDiscard(IN PVOID Context)
             }
         }
     }
+
+    SharedUserData->SafeBootMode = (InitSafeBootMode != 0);
 
     /* Make sure we have a command line */
     if (CommandLine)
@@ -1865,6 +1980,42 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Set maximum update to 75% */
     InbvSetProgressBarSubset(25, 75);
+
+    /* Create the MiniNT key before I/O init so that boot drivers
+     * (e.g. mountmgr) can detect WinPE mode during DriverEntry */
+    if (InitIsWinPEMode)
+    {
+        RtlInitUnicodeString(&KeyName,
+                             L"\\REGISTRY\\MACHINE\\SYSTEM\\CURRENTCONTROLSET"
+                             L"\\CONTROL");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &KeyName,
+                                   OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   NULL);
+        Status = ZwOpenKey(&KeyHandle, KEY_ALL_ACCESS, &ObjectAttributes);
+        if (NT_SUCCESS(Status))
+        {
+            RtlInitUnicodeString(&KeyName, L"MiniNT");
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &KeyName,
+                                       OBJ_CASE_INSENSITIVE,
+                                       KeyHandle,
+                                       NULL);
+            Status = ZwCreateKey(&OptionHandle,
+                                KEY_ALL_ACCESS,
+                                &ObjectAttributes,
+                                0,
+                                NULL,
+                                REG_OPTION_VOLATILE,
+                                &Disposition);
+            if (NT_SUCCESS(Status))
+            {
+                NtClose(OptionHandle);
+            }
+            NtClose(KeyHandle);
+        }
+    }
 
     /* Initialize the I/O Subsystem */
     if (!IoInitSystem(LoaderBlock)) KeBugCheck(IO1_INITIALIZATION_FAILED);
@@ -1952,49 +2103,6 @@ Phase1InitializationDiscard(IN PVOID Context)
         }
     }
 
-    /* Are we in Win PE mode? */
-    if (InitIsWinPEMode)
-    {
-        /* Open the safe control key */
-        RtlInitUnicodeString(&KeyName,
-                             L"\\REGISTRY\\MACHINE\\SYSTEM\\CURRENTCONTROLSET"
-                             L"\\CONTROL");
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   &KeyName,
-                                   OBJ_CASE_INSENSITIVE,
-                                   NULL,
-                                   NULL);
-        Status = ZwOpenKey(&KeyHandle, KEY_ALL_ACCESS, &ObjectAttributes);
-        if (!NT_SUCCESS(Status))
-        {
-            /* Bugcheck */
-            KeBugCheckEx(PHASE1_INITIALIZATION_FAILED, Status, 6, 0, 0);
-        }
-
-        /* Create the MiniNT key */
-        RtlInitUnicodeString(&KeyName, L"MiniNT");
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   &KeyName,
-                                   OBJ_CASE_INSENSITIVE,
-                                   KeyHandle,
-                                   NULL);
-        Status = ZwCreateKey(&OptionHandle,
-                             KEY_ALL_ACCESS,
-                             &ObjectAttributes,
-                             0,
-                             NULL,
-                             REG_OPTION_VOLATILE,
-                             &Disposition);
-        if (!NT_SUCCESS(Status))
-        {
-            /* Bugcheck */
-            KeBugCheckEx(PHASE1_INITIALIZATION_FAILED, Status, 6, 0, 0);
-        }
-
-        /* Close the handles */
-        NtClose(KeyHandle);
-        NtClose(OptionHandle);
-    }
 
     /* FIXME: This doesn't do anything for now */
     MmArmInitSystem(2, LoaderBlock);

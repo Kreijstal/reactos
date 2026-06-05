@@ -1550,17 +1550,24 @@ typedef struct _ETHREAD
     PUNICODE_STRING ThreadName;
     // TODO: Missing Win10+ members
 #endif
-#if DBG
+#if (NTDDI_VERSION >= NTDDI_WIN8) && defined(__REACTOS__)
+    UCHAR LargeStack;
+    UCHAR PowerState;
+    PVOID CallbackStack;
+    PKWAIT_BLOCK WaitBlockNext[THREAD_WAIT_OBJECTS + 1];
+#endif
     //
-    // ReactOS-only debug owner tracking for EX_PUSH_LOCK.
-    // Stores push-locks currently held by this thread so that debug
-    // assertions can verify push-lock ownership the same way
-    // KGUARDED_MUTEX.Owner used to. Kept at the tail to avoid shifting
-    // any existing field offsets. Non-DBG builds do not emit these.
+    // ReactOS-only owner tracking for EX_PUSH_LOCK.
+    // Stores push-locks currently held by this thread so that
+    // assertions (and ExPushLockIsOwnedByCurrentThread) can verify
+    // push-lock ownership the same way KGUARDED_MUTEX.Owner used to.
+    // Always emitted — win32k user-mode callouts nest deeply enough
+    // (KeUserModeCallback → user → re-entrant syscall) that the
+    // 8-slot original overflowed silently and the helper missed real
+    // owners. Kept at the tail to avoid shifting any existing offsets.
     //
     PVOID HeldPushLocks[8];
     UCHAR HeldPushLockCount;
-#endif
 } ETHREAD;
 
 //
@@ -1637,7 +1644,7 @@ typedef struct _EPROCESS
     PVOID LockedPagesList;
     LIST_ENTRY ThreadListHead;
     PVOID SecurityPort;
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_ARM64)
     struct _WOW64_PROCESS *Wow64Process;
 #else
     PVOID PaeTop;

@@ -280,6 +280,9 @@
 281 stdcall SHCreateProcessAsUserW(ptr)
 282 stdcall SHCreateQueryCancelAutoPlayMoniker(ptr)
 283 stdcall SHCreateShellItem(ptr ptr ptr ptr)
+@ stdcall -version=0x600+ SHCreateItemFromIDList(ptr ptr ptr)
+@ stdcall -version=0x600+ SHCreateItemFromParsingName(wstr ptr ptr ptr)
+@ stdcall -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr)
 @ stdcall -version=0x600+ SHCreateShellItemArrayFromDataObject(ptr ptr ptr)
 284 stdcall SHEmptyRecycleBinA(long str long)
 285 stdcall SHEmptyRecycleBinW(long wstr long)
@@ -367,6 +370,7 @@
 366 stdcall Shell_NotifyIcon(long ptr) Shell_NotifyIconA
 367 stdcall Shell_NotifyIconA(long ptr)
 368 stdcall Shell_NotifyIconW(long ptr)
+@ stdcall -version=0x600+ Shell_NotifyIconGetRect(ptr ptr)
 369 stdcall StrChrA(str long) shlwapi.StrChrA
 370 stdcall StrChrIA(str long) shlwapi.StrChrIA
 371 stdcall StrChrIW(wstr long) shlwapi.StrChrIW
@@ -473,3 +477,4 @@
 @ stdcall -version=0x600+ SHGetKnownFolderPath(ptr long ptr ptr)
 @ stdcall -version=0x600+ SHGetKnownFolderIDList(ptr long ptr ptr)
 @ stdcall -version=0x600+ SHSetKnownFolderPath(ptr long ptr wstr)
+@ stdcall -version=0x600+ SHGetStockIconInfo(long long ptr)

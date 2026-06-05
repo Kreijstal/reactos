@@ -65,8 +65,8 @@ XHCI_OpenEndpoint(IN PVOID xhciExtension,
     ULONG TransferType;
     MPSTATUS MPStatus;
 
-    DPRINT1("XHCI_OpenEndpoint: function initiated\n");
-    DPRINT1("XHCI_OpenEndpoint: EndpointProperties=%p, DeviceAddress=%d, EndpointAddress=%d, TransferType=%d, MaxPacketSize=%d\n",
+    DPRINT("XHCI_OpenEndpoint: function initiated\n");
+    DPRINT("XHCI_OpenEndpoint: EndpointProperties=%p, DeviceAddress=%d, EndpointAddress=%d, TransferType=%d, MaxPacketSize=%d\n",
             EndpointProperties, 
             EndpointProperties ? EndpointProperties->DeviceAddress : -1,
             EndpointProperties ? EndpointProperties->EndpointAddress : -1,
@@ -74,7 +74,7 @@ XHCI_OpenEndpoint(IN PVOID xhciExtension,
             EndpointProperties ? EndpointProperties->MaxPacketSize : -1);
             
     if (!EndpointProperties || !XhciExtension || !XhciEndpoint) {
-        DPRINT1("XHCI_OpenEndpoint: Invalid parameters - EndpointProperties=%p, XhciExtension=%p, XhciEndpoint=%p\n",
+        DPRINT("XHCI_OpenEndpoint: Invalid parameters - EndpointProperties=%p, XhciExtension=%p, XhciEndpoint=%p\n",
                 EndpointProperties, XhciExtension, XhciEndpoint);
         return MP_STATUS_FAILURE;
     }
@@ -107,12 +107,12 @@ XHCI_OpenEndpoint(IN PVOID xhciExtension,
                                                   XhciEndpoint);
             break;
         default:
-            DPRINT1("XHCI_OpenEndpoint: Unsupported transfer type %d\n", TransferType);
+            DPRINT("XHCI_OpenEndpoint: Unsupported transfer type %d\n", TransferType);
             return MP_STATUS_NOT_SUPPORTED;
             break;
     }
 
-    DPRINT1("XHCI_OpenEndpoint: Endpoint open completed with status 0x%x (MP_STATUS_SUCCESS=0x%x)\n", 
+    DPRINT("XHCI_OpenEndpoint: Endpoint open completed with status 0x%x (MP_STATUS_SUCCESS=0x%x)\n", 
             MPStatus, MP_STATUS_SUCCESS);
     return MPStatus;
 }
@@ -126,7 +126,7 @@ XHCI_ReopenEndpoint(IN PVOID xhciExtension,
     PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
     MPSTATUS Status;
-    __debugbreak();
+
     DPRINT1("XHCI_ReopenEndpoint: function initiated\n");
     
     if (!XhciExtension || !XhciEndpoint || !endpointParameters)
@@ -158,7 +158,8 @@ XHCI_ReopenEndpoint(IN PVOID xhciExtension,
     
     // CRITICAL FIX: Update the xHCI controller's endpoint context with the new transfer ring state
     // This tells the controller where to find the new transfer ring after reinitialization
-    ULONG SlotId = endpointParameters->DeviceAddress;  // Device address is the slot ID
+    // Retrieve the slot ID from FirstTD (stored during endpoint creation), NOT from DeviceAddress
+    ULONG SlotId = *(PULONG)&XhciEndpoint->FirstTD;
     ULONG EndpointIndex = ((endpointParameters->EndpointAddress & 0x0F) * 2) + 
                           ((endpointParameters->EndpointAddress & 0x80) ? 1 : 0);  // Convert to endpoint index
     
@@ -296,11 +297,11 @@ XHCI_CloseEndpoint(IN PVOID xhciExtension,
     }
 
     DeviceAddress = XhciEndpoint->EndpointProperties.DeviceAddress;
-    SlotId = DeviceAddress;
-    DBG_UNREFERENCED_LOCAL_VARIABLE(SlotId);
+    // Retrieve the slot ID from FirstTD, where it was stored during endpoint creation
+    SlotId = *(PULONG)&XhciEndpoint->FirstTD;
 
-    DPRINT1("XHCI_CloseEndpoint: Closing endpoint for device %d, endpoint %d\n",
-            DeviceAddress, XhciEndpoint->EndpointProperties.EndpointAddress);
+    DPRINT1("XHCI_CloseEndpoint: Closing endpoint for device %d, endpoint %d, slot %d\n",
+            DeviceAddress, XhciEndpoint->EndpointProperties.EndpointAddress, SlotId);
     
     // Mark endpoint as inactive first
     XhciEndpoint->EndpointState = USBPORT_ENDPOINT_REMOVE;
@@ -308,7 +309,19 @@ XHCI_CloseEndpoint(IN PVOID xhciExtension,
     // Clear any pending transfers from the transfer ring
     DPRINT1("XHCI_CloseEndpoint: Clearing transfer ring for device %d\n", DeviceAddress);
     // Reset transfer ring to clean state - this will clear any pending TRBs
-    // TODO: Update device context to disable this endpoint
+    
+    // When closing EP0 of an addressed device (not during default-address
+    // enumeration), disable the hardware slot so it can be reused.
+    // DeviceAddress == 0 means the initial EP0 before SET_ADDRESS;
+    // we must NOT disable the slot in that case.
+    if (XhciEndpoint->EndpointProperties.EndpointAddress == 0 &&
+        SlotId != 0 && DeviceAddress != 0)
+    {
+        DPRINT1("XHCI_CloseEndpoint: Disabling slot %d for device %d\n", SlotId, DeviceAddress);
+        XHCI_DisableSlot(XhciExtension, SlotId);
+        // Also clean up software slot tracking
+        CleanupSlotResources(XhciExtension, SlotId);
+    }
     
     // Clean up the endpoint structure
     if (!IsListEmpty(&XhciEndpoint->ListTDs))
@@ -331,7 +344,7 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     PXHCI_TRB dequeue_pointer;
     ULONG TRBType;
     XHCI_EVENT_TRB eventTRB;
-    static ULONG DebugCounter = 0;
+    ULONG EventsProcessed = 0;
 
     HcResourcesVA = XhciExtension -> HcResourcesVA;
     HcResourcesPA = XhciExtension -> HcResourcesPA;
@@ -339,72 +352,25 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     RunTimeRegisterBase = XhciExtension-> RunTimeRegisterBase;
     dequeue_pointer = HcResourcesVA-> EventRing.dequeue_pointer;
 
-    // Enhanced debugging every 100 calls to avoid log spam but catch real events
-    DebugCounter++;
-    if ((DebugCounter % 100) == 1 || DebugCounter <= 10)
-    {
-        DPRINT1("XHCI_ProcessEvent: DEBUG #%d - dequeue_pointer=%p, ConsumerCycleState=%d\n", 
-                DebugCounter, dequeue_pointer, HcResourcesVA->EventRing.ConsumerCycleState);
-        DPRINT1("XHCI_ProcessEvent: First TRB content: Word0=0x%08x, Word1=0x%08x, Word2=0x%08x, Word3=0x%08x\n",
-                dequeue_pointer->GenericTRB.Word0, dequeue_pointer->GenericTRB.Word1,
-                dequeue_pointer->GenericTRB.Word2, dequeue_pointer->GenericTRB.Word3);
-        DPRINT1("XHCI_ProcessEvent: TRB Cycle bit = %d, Expected = %d\n",
-                dequeue_pointer->EventTRB.EventGenericTRB.CycleBit, HcResourcesVA->EventRing.ConsumerCycleState);
-    }
-
-    ULONG EventsProcessedInThisCall = 0;
-    const ULONG MaxEventsPerCall = 16; // Limit events processed per interrupt
-    PXHCI_TRB PreviousDequeuePointer = NULL;
-    ULONG SamePointerCount = 0;
-    
     while (TRUE)
     {
-        // Throttle event processing to prevent overwhelming the system
-        if (EventsProcessedInThisCall >= MaxEventsPerCall)
+        if (EventsProcessed >= 256)
         {
-            DPRINT1("XHCI_ProcessEvent: Event processing throttled at %d events, will continue in next interrupt\n", 
-                    MaxEventsPerCall);
+            DPRINT1("XHCI_ProcessEvent: event ring did not terminate after %lu TRBs\n",
+                    EventsProcessed);
             break;
-        }
-        
-        // Detect infinite loops with the same dequeue pointer
-        if (PreviousDequeuePointer == dequeue_pointer)
-        {
-            SamePointerCount++;
-            if (SamePointerCount >= 3)
-            {
-                DPRINT1("XHCI_ProcessEvent: ERROR - Infinite loop detected! Dequeue pointer %p stuck for %d iterations\n",
-                        dequeue_pointer, SamePointerCount);
-                DPRINT1("XHCI_ProcessEvent: Breaking loop to prevent system hang\n");
-                break;
-            }
-        }
-        else
-        {
-            SamePointerCount = 0;
-            PreviousDequeuePointer = dequeue_pointer;
         }
         
         eventTRB = (*dequeue_pointer).EventTRB;
         if (eventTRB.EventGenericTRB.CycleBit != HcResourcesVA->EventRing.ConsumerCycleState)
         {
-            if ((DebugCounter % 100) == 1 || DebugCounter <= 5)
-            {
-                DPRINT1("XHCI_ProcessEvent: cycle bit mismatch - TRB.CycleBit=%d, Expected=%d (no more events to process)\n",
-                        eventTRB.EventGenericTRB.CycleBit, HcResourcesVA->EventRing.ConsumerCycleState);
-            }
             break;
         }
         TRBType = eventTRB.EventGenericTRB.TRBType;
         
-        // Only log event processing for the first few or periodically
-        if (EventsProcessedInThisCall < 5 || (DebugCounter % 100) == 1)
-        {
-            DPRINT1("XHCI_ProcessEvent: Processing TRB Type %d (0x%x), event #%d in this call\n", 
-                    TRBType, TRBType, EventsProcessedInThisCall + 1);
-        }
-        
-        EventsProcessedInThisCall++;
+        DPRINT("XHCI_ProcessEvent: Processing TRB Type %d (0x%x)\n",
+               TRBType, TRBType);
+        EventsProcessed++;
         
         switch (TRBType)
         {
@@ -416,12 +382,12 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
                 DPRINT("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT\n");
                 // Always process completion events regardless of success/failure
                 // The ProcessCommandCompletion function will handle the status appropriately
-                DPRINT1("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT, completion code %i\n",
-                         eventTRB.CommandCompletionTRB.CompletionCode);
+                DPRINT("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT, completion code %i\n",
+                       eventTRB.CommandCompletionTRB.CompletionCode);
                 XHCI_ProcessCommandCompletion(XhciExtension, &eventTRB);
                 break;
             case PORT_STATUS_CHANGE_EVENT: 
-                DPRINT1("XHCI_ProcessEvent: Port Status change event\n");
+                DPRINT("XHCI_ProcessEvent: Port Status change event\n");
                 /* Call a private function to handle port status events */
                 PXHCI_PortStatusChange(XhciExtension, eventTRB.PortStatusChangeTRB.PortID);
                 break;
@@ -456,10 +422,11 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
         if (dequeue_pointer == &(HcResourcesVA->EventRing.firstSeg.XhciTrb[256]))
         {
             DPRINT("XHCI_ProcessEvent: Wrapping event ring, flipping cycle state from %d to %d\n",
-                    HcResourcesVA->EventRing.ConsumerCycleState, ~(HcResourcesVA->EventRing.ConsumerCycleState));
+                    HcResourcesVA->EventRing.ConsumerCycleState,
+                    HcResourcesVA->EventRing.ConsumerCycleState ? 0 : 1);
                     
-            HcResourcesVA->EventRing.ConsumerCycleState = ~(HcResourcesVA->EventRing.ConsumerCycleState);
-            HcResourcesVA->EventRing.ProducerCycleState = ~(HcResourcesVA->EventRing.ProducerCycleState); 
+            HcResourcesVA->EventRing.ConsumerCycleState = HcResourcesVA->EventRing.ConsumerCycleState ? 0 : 1;
+            HcResourcesVA->EventRing.ProducerCycleState = HcResourcesVA->EventRing.ProducerCycleState ? 0 : 1;
             dequeue_pointer = &(HcResourcesVA->EventRing.firstSeg.XhciTrb[0]);
         }
         
@@ -469,22 +436,19 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     
     HcResourcesVA->EventRing.dequeue_pointer = dequeue_pointer;
     
-    // Update the Event Ring Dequeue Pointer register to tell hardware where we are
-    // Only update if we actually processed any events to avoid redundant writes
-    if (EventsProcessedInThisCall > 0)
-    {
-        erstdp.AsULONGLONG = HcResourcesPA.QuadPart + ((ULONG_PTR)dequeue_pointer - (ULONG_PTR)HcResourcesVA);
-        ASSERT(erstdp.AsULONGLONG >= HcResourcesPA.QuadPart && erstdp.AsULONGLONG < HcResourcesPA.QuadPart + sizeof(XHCI_HC_RESOURCES)) ;
-        erstdp.DequeueERSTIndex = 0;
-        
-        DPRINT("XHCI_ProcessEvent: Updating event ring dequeue register to 0x%I64x (dequeue_ptr=%p) after processing %d events\n", 
-                erstdp.AsULONGLONG, dequeue_pointer, EventsProcessedInThisCall);
-        XHCI_Write64bitReg(RunTimeRegisterBase + XHCI_ERSTDP, erstdp.AsULONGLONG);
-    }
-    else
-    {
-        DPRINT("XHCI_ProcessEvent: No events processed, skipping dequeue pointer register update\n");
-    }
+    /*
+     * Always update ERDP, even when no TRB was consumed.  The EHB bit is
+     * write-1-to-clear; if an interrupt arrives while the next event TRB is
+     * not yet visible, skipping this write leaves the interrupter busy and
+     * QEMU can spin with IMAN.IP asserted without delivering the pending
+     * transfer completion.
+     */
+    erstdp.AsULONGLONG = HcResourcesPA.QuadPart + ((ULONG_PTR)dequeue_pointer - (ULONG_PTR)HcResourcesVA);
+    ASSERT(erstdp.AsULONGLONG >= HcResourcesPA.QuadPart && erstdp.AsULONGLONG < HcResourcesPA.QuadPart + sizeof(XHCI_HC_RESOURCES)) ;
+    erstdp.DequeueERSTIndex = 0;
+    erstdp.EventHandlerBusy = 1;
+
+    XHCI_Write64bitReg(RunTimeRegisterBase + XHCI_ERSTDP, erstdp.AsULONGLONG);
     
     return MP_STATUS_SUCCESS;
 }
@@ -712,7 +676,6 @@ XHCI_InitializeResources(IN PXHCI_EXTENSION XhciExtension,
     //Primary Interrupter init
     RunTimeRegisterBase =  XhciExtension -> RunTimeRegisterBase;
 
-    // dont change imod now
     erstz.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_ERSTSZ) ;
     erstz.EventRingSegTableSize = 1;
     DPRINT1("XHCI_InitializeResources  : erstz.AsULONG   %p\n", erstz.AsULONG );
@@ -756,17 +719,7 @@ XHCI_InitializeResources(IN PXHCI_EXTENSION XhciExtension,
 
     /* Initalize Transfer Ring */
 
-    HcResourcesVA->TransferRing.enqueue_pointer = &(HcResourcesVA->TransferRing.firstSeg.XhciTrb[0]);
-    HcResourcesVA->TransferRing.dequeue_pointer = &(HcResourcesVA->TransferRing.firstSeg.XhciTrb[0]);
-    for (i=0; i<256; i++)
-    {
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word0 = 0;
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word1 = 0;
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word2 = 0;
-        HcResourcesVA->TransferRing.firstSeg.XhciTrb[i].GenericTRB.Word3 = 0;
-    }
-    HcResourcesVA->TransferRing.ProducerCycleState = 1;
-    HcResourcesVA->TransferRing.ConsumerCycleState = 1;
+    XHCI_InitializeTransferRing(&HcResourcesVA->TransferRing);
 
     /* Initialize Per-Slot Transfer Rings for EP0 */
     DPRINT1("XHCI_InitializeResources: Initializing per-slot transfer rings\n");
@@ -1157,12 +1110,15 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     if (Iman.InterruptPending == 1)
     {
         ValidCount++;
-        if ((ValidCount % 10) == 1)
-        {
-            DPRINT1("XHCI_InterruptService: Valid IMAN interrupt #%d detected (will be cleared by DPC)\n", ValidCount);
-        }
-        // Don't clear the interrupt here - let the DPC clear it after processing events
-        // This ensures events aren't lost between ISR and DPC execution
+
+        /*
+         * Acknowledge the interrupter in the ISR.  The event ring entries are
+         * persistent until the DPC advances ERDP, but leaving IMAN.IP asserted
+         * here causes an interrupt storm that can starve the DPC before the
+         * transfer completion is drained.
+         */
+        Iman.InterruptPending = 1;
+        WRITE_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN, Iman.AsULONG);
         return TRUE;
     }
     
@@ -1222,16 +1178,19 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
 {
     PXHCI_EXTENSION XhciExtension;
     PULONG RunTimeRegisterBase;
+    PULONG OperationalRegs;
     XHCI_INTERRUPTER_MANAGEMENT Iman;
+    XHCI_USB_STATUS UsbStatus;
     
     XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     RunTimeRegisterBase = XhciExtension->RunTimeRegisterBase;
+    OperationalRegs = XhciExtension->OperationalRegs;
     
-    DPRINT1("XHCI_InterruptDpc: Called with IsDoEnableInterrupts=%d\n", IsDoEnableInterrupts);
+    DPRINT("XHCI_InterruptDpc: Called with IsDoEnableInterrupts=%d\n", IsDoEnableInterrupts);
     
     // Read current interrupt status
     Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
-    DPRINT1("XHCI_InterruptDpc: Current IMAN=0x%08x, InterruptPending=%d\n", 
+    DPRINT("XHCI_InterruptDpc: Current IMAN=0x%08x, InterruptPending=%d\n", 
             Iman.AsULONG, Iman.InterruptPending);
     
     // Process any pending events
@@ -1240,17 +1199,27 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
     // Clear the interrupt pending bit now that we've processed events
     if (Iman.InterruptPending == 1)
     {
-        DPRINT1("XHCI_InterruptDpc: Clearing interrupt pending bit\n");
+        DPRINT("XHCI_InterruptDpc: Clearing interrupt pending bit\n");
         Iman.InterruptPending = 1; // Write 1 to clear
         WRITE_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN, Iman.AsULONG);
         
         // Verify it was cleared
         Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
-        DPRINT1("XHCI_InterruptDpc: After clearing, IMAN=0x%08x, InterruptPending=%d\n", 
+        DPRINT("XHCI_InterruptDpc: After clearing, IMAN=0x%08x, InterruptPending=%d\n", 
                 Iman.AsULONG, Iman.InterruptPending);
     }
+
+    UsbStatus.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
+    if (UsbStatus.EventInterrupt)
+    {
+        XHCI_USB_STATUS UsbStatusClear;
+
+        UsbStatusClear.AsULONG = 0;
+        UsbStatusClear.EventInterrupt = 1;
+        WRITE_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS, UsbStatusClear.AsULONG);
+    }
     
-    DPRINT1("XHCI_InterruptDpc: Completed\n");
+    DPRINT("XHCI_InterruptDpc: Completed\n");
 }
 
 MPSTATUS
@@ -1270,19 +1239,19 @@ XHCI_SubmitTransfer(IN PVOID xhciExtension,
     ULONG TransferLength;
     MPSTATUS Status = MP_STATUS_SUCCESS;
     
-    DPRINT1("XHCI_SubmitTransfer: function initiated\n");
-    
+    DPRINT("XHCI_SubmitTransfer: function initiated\n");
+
     if (!XhciExtension || !XhciEndpoint || !TransferParameters || !XhciTransfer)
     {
         DPRINT1("XHCI_SubmitTransfer: Invalid parameters\n");
         return MP_STATUS_FAILURE;
     }
-    
+
     TransferDirection = TransferParameters->TransferFlags; //& USBPORT_TRANSFER_DIRECTION_FLAG;
     TransferType = XhciEndpoint->EndpointProperties.TransferType;
     TransferLength = TransferParameters->TransferBufferLength;
-    
-    DPRINT1("XHCI_SubmitTransfer: TransferType=%d, TransferDirection=%d, TransferLength=%d\n",
+
+    DPRINT("XHCI_SubmitTransfer: TransferType=%d, TransferDirection=%d, TransferLength=%d\n",
             TransferType, TransferDirection, TransferLength);
     
     // Initialize transfer structure
@@ -1318,7 +1287,7 @@ XHCI_SubmitTransfer(IN PVOID xhciExtension,
     
     if (Status == MP_STATUS_SUCCESS)
     {
-        DPRINT1("XHCI_SubmitTransfer: Transfer submitted successfully\n");
+        DPRINT("XHCI_SubmitTransfer: Transfer submitted successfully\n");
     }
     else
     {
@@ -1385,12 +1354,11 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
                       IN PVOID xhciEndpoint,
                       IN ULONG EndpointState)
 {
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
     
-    UNREFERENCED_PARAMETER(xhciExtension);
-    
-    DPRINT1("XHCI_SetEndpointState: function initiated, setting state to %d\n", EndpointState);
-    
+    DPRINT("XHCI_SetEndpointState: function initiated, setting state to %d\n", EndpointState);
+
     if (!XhciEndpoint) {
         DPRINT1("XHCI_SetEndpointState: Invalid endpoint pointer\n");
         return;
@@ -1402,34 +1370,99 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
     // Handle specific state transitions
     switch (EndpointState) {
         case 3: // USBPORT_ENDPOINT_ACTIVE
-            DPRINT1("XHCI_SetEndpointState: Activating endpoint (EP addr 0x%02x)\n", 
+            DPRINT("XHCI_SetEndpointState: Activating endpoint (EP addr 0x%02x)\n",
                     XhciEndpoint->EndpointProperties.EndpointAddress);
             // For control endpoints (EP0), we've already configured them during OpenEndpoint
             // Just mark them as active
             if ((XhciEndpoint->EndpointProperties.EndpointAddress & 0x0F) == 0) {
-                DPRINT1("XHCI_SetEndpointState: Control endpoint already configured, marking as active\n");
+                DPRINT("XHCI_SetEndpointState: Control endpoint already configured, marking as active\n");
             } else {
-                // For other endpoint types, we would need to configure them here
-                DPRINT1("XHCI_SetEndpointState: Non-control endpoint activation not yet implemented\n");
+                /*
+                 * USBPORT toggles SetEndpointState(ACTIVE) on every transfer
+                 * completion's idle->active transition. On xHCI, an endpoint
+                 * that's already in the Running state only needs a doorbell
+                 * write to pick up newly-queued TRBs - issuing Set TR Dequeue
+                 * Pointer floods the 256-entry command ring on sustained I/O
+                 * (mass-storage walks file system metadata at ~one transfer
+                 * per filesystem block) and stalls the controller.
+                 *
+                 * Only restart the EP via Set TR Dequeue after a real Halted
+                 * or Stopped event (recorded in EndpointStatus). Otherwise,
+                 * a doorbell ring is sufficient and idempotent.
+                 */
+                ULONG SlotId;
+                ULONG DCI = XhciEndpoint->ContextIndex;
+
+                SlotId = *(PULONG)&XhciEndpoint->FirstTD;
+                if (SlotId == 0)
+                    SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
+
+                if (XhciEndpoint->EndpointStatus != 0)
+                {
+                    PHYSICAL_ADDRESS DequeuePA;
+                    MPSTATUS Status;
+
+                    DequeuePA = MmGetPhysicalAddress(
+                        XhciEndpoint->TransferRing.dequeue_pointer);
+
+                    DPRINT1("XHCI_SetEndpointState: Restarting halted EP slot=%d DCI=%d dequeue=0x%I64x cycle=%d status=0x%x\n",
+                            SlotId, DCI, DequeuePA.QuadPart,
+                            XhciEndpoint->TransferRing.ConsumerCycleState,
+                            XhciEndpoint->EndpointStatus);
+
+                    Status = XHCI_SetTransferRingDequeuePointer(
+                        XhciExtension, SlotId, DCI,
+                        DequeuePA,
+                        XhciEndpoint->TransferRing.ConsumerCycleState);
+
+                    if (Status == MP_STATUS_SUCCESS)
+                    {
+                        XhciEndpoint->EndpointStatus = 0;
+                    }
+                    else
+                    {
+                        DPRINT1("XHCI_SetEndpointState: SetTRDequeue failed (0x%x) slot=%d DCI=%d\n",
+                                Status, SlotId, DCI);
+                    }
+                }
+
+                /* Doorbell is idempotent: it tells HC to pick up new TRBs.
+                 * Safe to ring whether or not we just issued SetTRDequeue. */
+                XHCI_RingDoorbell(XhciExtension, SlotId, DCI);
             }
             break;
             
         case 4: // USBPORT_ENDPOINT_REMOVE
-            DPRINT1("XHCI_SetEndpointState: Removing endpoint\n");
-            // TODO: Issue Stop Endpoint command if needed
+            DPRINT("XHCI_SetEndpointState: Removing endpoint\n");
+            if ((XhciEndpoint->EndpointProperties.EndpointAddress & 0x0F) == 0)
+            {
+        }
+        else
+        {
+            ULONG SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
+            ULONG EndpointIndex = XhciEndpoint->ContextIndex;
+            MPSTATUS DropStatus;
+
+            DropStatus = XHCI_DropEndpoint(XhciExtension, SlotId, EndpointIndex);
+            if (DropStatus != MP_STATUS_SUCCESS)
+            {
+                    DPRINT1("XHCI_SetEndpointState: XHCI_DropEndpoint failed for slot %d DCI %d with status 0x%x\n",
+                            SlotId, EndpointIndex, DropStatus);
+                }
+            }
             break;
             
         case 5: // USBPORT_ENDPOINT_CLOSED
-            DPRINT1("XHCI_SetEndpointState: Closing endpoint\n");
+            DPRINT("XHCI_SetEndpointState: Closing endpoint\n");
             // TODO: Clean up endpoint resources
             break;
-            
+
         default:
-            DPRINT1("XHCI_SetEndpointState: Setting endpoint to state %d\n", EndpointState);
+            DPRINT("XHCI_SetEndpointState: Setting endpoint to state %d\n", EndpointState);
             break;
     }
-    
-    DPRINT1("XHCI_SetEndpointState: endpoint state set successfully to %d\n", EndpointState);
+
+    DPRINT("XHCI_SetEndpointState: endpoint state set successfully to %d\n", EndpointState);
 }
 
 VOID
@@ -1438,27 +1471,35 @@ XHCI_PollEndpoint(IN PVOID xhciExtension,
                   IN PVOID xhciEndpoint)
 {
     PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     static ULONG PollCount = 0;
     
     PollCount++;
     if ((PollCount % 100) == 1)
     {
-        DPRINT1("XHCI_PollEndpoint: poll #%d initiated\n", PollCount);
+        DPRINT("XHCI_PollEndpoint: poll #%d initiated\n", PollCount);
         if (XhciEndpoint) {
-            DPRINT1("XHCI_PollEndpoint: DeviceAddress=%d, EndpointAddress=%d, EndpointState=%d\n",
+            DPRINT("XHCI_PollEndpoint: DeviceAddress=%d, EndpointAddress=%d, EndpointState=%d\n",
                     XhciEndpoint->EndpointProperties.DeviceAddress,
                     XhciEndpoint->EndpointProperties.EndpointAddress,
                     XhciEndpoint->EndpointState);
         }
     }
+
+    if (XhciExtension)
+        XHCI_ProcessEvent(XhciExtension);
 }
 
 VOID
 NTAPI
 XHCI_CheckController(IN PVOID xhciExtension)
 {
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
+
     DPRINT("XHCI_CheckController: function initiated\n");
-  //  XHCI_ProcessEvent(xhciExtension);
+
+    if (XhciExtension)
+        XHCI_ProcessEvent(XhciExtension);
 }
 
 ULONG
@@ -1531,7 +1572,7 @@ XHCI_InterruptNextSOF(IN PVOID xhciExtension)
         return;
     }
     
-    DPRINT1("XHCI_InterruptNextSOF: Triggering soft interrupt via UsbPortInvalidateController\n");
+    DPRINT("XHCI_InterruptNextSOF: Triggering soft interrupt via UsbPortInvalidateController\n");
     
     // Use the same approach as EHCI driver - trigger a soft interrupt through the USB port layer
     // This is much more reliable than manipulating hardware registers directly
@@ -1620,7 +1661,16 @@ XHCI_SetEndpointStatus(IN PVOID xhciExtension,
                        IN PVOID xhciEndpoint,
                        IN ULONG EndpointStatus)
 {
-    DPRINT1("XHCI_SetEndpointStatus: function initiated\n");
+    PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+
+    DPRINT1("XHCI_SetEndpointStatus: setting status=0x%x\n", EndpointStatus);
+    if (XhciEndpoint != NULL)
+    {
+        /* Tracked so SetEndpointState(ACTIVE) can decide whether the EP
+         * Context needs Set TR Dequeue Pointer (on real Halted/Stopped
+         * state) or just a doorbell ring (normal idle->active). */
+        XhciEndpoint->EndpointStatus = EndpointStatus;
+    }
 }
 
 MPSTATUS

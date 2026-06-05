@@ -11,6 +11,7 @@
 /* INCLUDES ****************************************************************/
 
 #include <rtl.h>
+#include <ndk/umfuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -259,7 +260,7 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         /* Build attribute list */
         AttrCount = 0;
 
-        /* Image name attribute (required) — pristine NT form, not affected by
+        /* Image name attribute (required) - pristine NT form, not affected by
          * the in-place rewrites of ProcessParameters below. */
         AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_IMAGE_NAME;
         AttrList->Attributes[AttrCount].Size = LocalImageNameLen;
@@ -314,10 +315,10 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
         /*
          * Windows invariant: the DOS-form fields of RTL_USER_PROCESS_PARAMETERS
          * (ImagePathName, CurrentDirectory.DosPath) really are DOS paths.
-         * Downstream consumers — LDR_DATA_TABLE_ENTRY.FullDllName,
+         * Downstream consumers - LDR_DATA_TABLE_ENTRY.FullDllName,
          * BaseComputeProcessDllPath (feeding SearchPathW), activation-context
          * resource probing, GetCurrentDirectoryW, inherited CWD for spawned
-         * children, etc. — are DOS-path APIs and don't understand the native
+         * children, etc. - are DOS-path APIs and don't understand the native
          * "\??\" or "\SystemRoot\" prefix.  Callers (the NT6 kernel spawning
          * SMSS, SMSS spawning subsystems, kernel32 CreateProcessW inheriting
          * an NT-form CWD) legitimately reuse the same NT-form string for both
@@ -739,6 +740,41 @@ RtlSetProcessIsCritical(IN BOOLEAN NewValue,
                                    ProcessBreakOnTermination,
                                    &BreakOnTermination,
                                    sizeof(ULONG));
+}
+
+/*
+ * @implemented
+ *
+ * Win6+ ntdll process-termination entry point.  Earlier code paths used
+ * kernel32!ExitProcess, which performs the same dance inline; binaries
+ * built against Win6+ ucrt/Qt6 sometimes call this directly via ntdll,
+ * which historically would hit a no-op stub on ReactOS and leave the
+ * process running silent.
+ */
+VOID
+NTAPI
+RtlExitUserProcess(_In_ ULONG ExitStatus)
+{
+    /* Serialize with concurrent loader/PEB updates. */
+    RtlAcquirePebLock();
+
+    _SEH2_TRY
+    {
+        /* Tear down every other thread first so DLL_PROCESS_DETACH runs
+         * in a single-threaded process (Windows guarantees this). */
+        NtTerminateProcess(NULL, ExitStatus);
+
+        /* Walk the loaded-module list invoking DLL_PROCESS_DETACH. */
+        LdrShutdownProcess();
+
+        /* Terminate ourselves; this call does not return. */
+        NtTerminateProcess(NtCurrentProcess(), ExitStatus);
+    }
+    _SEH2_FINALLY
+    {
+        RtlReleasePebLock();
+    }
+    _SEH2_END;
 }
 
 ULONG

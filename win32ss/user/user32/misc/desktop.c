@@ -129,6 +129,7 @@ RealGetSystemMetrics(int nIndex)
 {
   //FIXME("Global Server Data -> %x\n",gpsi);
   if (nIndex < 0 || nIndex >= SM_CMETRICS) return 0;
+  if (!User32EnsureUserConnect()) return 0;
 #if !defined(BUILD_WOW6432)
   return gpsi->aiSysMet[nIndex];
 #else
@@ -145,7 +146,7 @@ GetSystemMetrics(int nIndex)
    BOOL Hook;
    int Ret = 0;
 
-   if (!gpsi) // Fixme! Hax! Need Timos delay load support?
+   if (!gpsi && !User32EnsureUserConnect())
    {
       return RealGetSystemMetrics(nIndex);
    }

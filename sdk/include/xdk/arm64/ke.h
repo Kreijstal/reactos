@@ -19,22 +19,232 @@ $if (_WDMDDK_)
 #define PAGE_SIZE               0x1000
 #define PAGE_SHIFT              12L
 
+#ifndef __ASSEMBLER__
+typedef struct _KFLOATING_SAVE
+{
+    ULONG Reserved;
+} KFLOATING_SAVE, *PKFLOATING_SAVE;
+#endif
+
 #define PAUSE_PROCESSOR YieldProcessor();
 
-/* FIXME: Based on AMD64 but needed to compile apps */
-#define KERNEL_STACK_SIZE                   12288
-#define KERNEL_LARGE_STACK_SIZE             61440
+/* Verified against modern NT/arm64 */
+#define KERNEL_STACK_SIZE                   0x8000
+#define KERNEL_LARGE_STACK_SIZE             0x12000
 #define KERNEL_LARGE_STACK_COMMIT KERNEL_STACK_SIZE
-/* FIXME End */
 
 #define EXCEPTION_READ_FAULT    0
 #define EXCEPTION_WRITE_FAULT   1
 #define EXCEPTION_EXECUTE_FAULT 8
 
+extern NTKERNELAPI volatile KSYSTEM_TIME KeTickCount;
+
+#ifndef _ReadWriteBarrier
+#if defined(__GNUC__) || defined(__clang__)
+#define _ReadWriteBarrier() __asm__ __volatile__("" ::: "memory")
+#endif /* MSVC supplies _ReadWriteBarrier as an intrinsic */
+#endif
+
+FORCEINLINE
+VOID
+YieldProcessor(
+    VOID)
+{
+#if defined(__clang__) || defined(__GNUC__)
+    __asm__ __volatile__("yield" ::: "memory");
+#else
+    __yield();
+#endif
+}
+
+#ifndef MemoryBarrier
+#if defined(__GNUC__) || defined(__clang__)
+#define MemoryBarrier()                      __asm__ __volatile__("dmb sy" ::: "memory")
+#else
+#define MemoryBarrier()                      __dmb(_ARM64_BARRIER_SY)
+#endif
+#endif
+#ifndef PreFetchCacheLine
+#if defined(__GNUC__) || defined(__clang__)
+#define PreFetchCacheLine(l,a)               __builtin_prefetch((const void *)(a))
+#else
+#define PreFetchCacheLine(l,a)               __prefetch((const void *)(a))
+#endif
+#endif
+#ifndef PrefetchForWrite
+#if defined(__GNUC__) || defined(__clang__)
+#define PrefetchForWrite(p)                  __builtin_prefetch((const void *)(p), 1)
+#else
+#define PrefetchForWrite(p)                  __prefetch((const void *)(p))
+#endif
+#endif
+#ifndef ReadForWriteAccess
+#define ReadForWriteAccess(p)                (*(p))
+#endif
+
+FORCEINLINE
+VOID
+KeMemoryBarrier(
+    VOID)
+{
+    _ReadWriteBarrier();
+    MemoryBarrier();
+}
+
+_IRQL_requires_max_(HIGH_LEVEL)
+_IRQL_saves_
+NTHALAPI
+KIRQL
+NTAPI
+KeGetCurrentIrql(
+    VOID);
+
+_IRQL_requires_max_(HIGH_LEVEL)
+NTHALAPI
+VOID
+FASTCALL
+KfLowerIrql(
+    _In_ _IRQL_restores_ _Notliteral_ KIRQL NewIrql);
+#define KeLowerIrql(a) KfLowerIrql(a)
+
+_IRQL_requires_max_(HIGH_LEVEL)
+_IRQL_raises_(NewIrql)
+_IRQL_saves_
+NTHALAPI
+KIRQL
+FASTCALL
+KfRaiseIrql(
+    _In_ KIRQL NewIrql);
+#define KeRaiseIrql(a,b) *(b) = KfRaiseIrql(a)
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_saves_
+_IRQL_raises_(DISPATCH_LEVEL)
+NTHALAPI
+KIRQL
+NTAPI
+KeRaiseIrqlToDpcLevel(VOID);
+
+NTHALAPI
+KIRQL
+NTAPI
+KeRaiseIrqlToSynchLevel(VOID);
+
+#if !defined(_NTOSKRNL_) && !defined(_NTSYSTEM_)
+FORCEINLINE
+ULONG
+KeGetCurrentProcessorNumber(VOID)
+{
+    extern NTKERNELAPI ULONG NTAPI KeGetCurrentProcessorNumberEx(
+        _Out_opt_ PPROCESSOR_NUMBER ProcNumber);
+    return KeGetCurrentProcessorNumberEx(NULL);
+}
+#endif
+
+_Requires_lock_not_held_(*SpinLock)
+_Acquires_lock_(*SpinLock)
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_saves_
+_IRQL_raises_(DISPATCH_LEVEL)
+NTHALAPI
+KIRQL
+FASTCALL
+KfAcquireSpinLock(
+  _Inout_ PKSPIN_LOCK SpinLock);
+
+_Requires_lock_held_(*SpinLock)
+_Releases_lock_(*SpinLock)
+_IRQL_requires_(DISPATCH_LEVEL)
+NTHALAPI
+VOID
+FASTCALL
+KfReleaseSpinLock(
+  _Inout_ PKSPIN_LOCK SpinLock,
+  _In_ _IRQL_restores_ KIRQL NewIrql);
+
+_Requires_lock_not_held_(*SpinLock)
+_Acquires_lock_(*SpinLock)
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+FASTCALL
+KefAcquireSpinLockAtDpcLevel(
+  _Inout_ PKSPIN_LOCK SpinLock);
+
+_Requires_lock_held_(*SpinLock)
+_Releases_lock_(*SpinLock)
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+FASTCALL
+KefReleaseSpinLockFromDpcLevel(
+  _Inout_ PKSPIN_LOCK SpinLock);
+
 NTSYSAPI
 PKTHREAD
 NTAPI
 KeGetCurrentThread(VOID);
+
+_Always_(_Post_satisfies_(return<=0))
+_Must_inspect_result_
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Kernel_float_saved_
+_At_(*FloatSave, _Kernel_requires_resource_not_held_(FloatState) _Kernel_acquires_resource_(FloatState))
+FORCEINLINE
+NTSTATUS
+KeSaveFloatingPointState(
+    _Out_ PKFLOATING_SAVE FloatSave)
+{
+    UNREFERENCED_PARAMETER(FloatSave);
+    return STATUS_SUCCESS;
+}
+
+_Success_(1)
+_Kernel_float_restored_
+_At_(*FloatSave, _Kernel_requires_resource_held_(FloatState) _Kernel_releases_resource_(FloatState))
+FORCEINLINE
+NTSTATUS
+KeRestoreFloatingPointState(
+    _In_ PKFLOATING_SAVE FloatSave)
+{
+    UNREFERENCED_PARAMETER(FloatSave);
+    return STATUS_SUCCESS;
+}
+
+FORCEINLINE
+ULONG
+KeGetCurrentProcessorIndex(VOID)
+{
+    extern NTKERNELAPI ULONG NTAPI KeGetCurrentProcessorNumberEx(
+        _Out_opt_ PPROCESSOR_NUMBER ProcNumber);
+    return KeGetCurrentProcessorNumberEx(NULL);
+}
+
+VOID
+KeFlushIoBuffers(
+    _In_ PMDL Mdl,
+    _In_ BOOLEAN ReadOperation,
+    _In_ BOOLEAN DmaOperation);
+
+FORCEINLINE
+VOID
+_KeQueryTickCount(
+  OUT PLARGE_INTEGER CurrentCount)
+{
+  for (;;) {
+#ifdef NONAMELESSUNION
+    CurrentCount->s.HighPart = KeTickCount.High1Time;
+    CurrentCount->s.LowPart = KeTickCount.LowPart;
+    if (CurrentCount->s.HighPart == KeTickCount.High2Time) break;
+#else
+    CurrentCount->HighPart = KeTickCount.High1Time;
+    CurrentCount->LowPart = KeTickCount.LowPart;
+    if (CurrentCount->HighPart == KeTickCount.High2Time) break;
+#endif
+    YieldProcessor();
+  }
+}
+#define KeQueryTickCount(CurrentCount) _KeQueryTickCount(CurrentCount)
 
 #define DbgRaiseAssertionFailure() __break(0xf001)
 

@@ -34,12 +34,12 @@ Abstract:
 //
 
 #define CollectCreateHitStatistics(VCB) {                                                \
-    PFILE_SYSTEM_STATISTICS Stats = &(VCB)->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors];   \
+    PFILE_SYSTEM_STATISTICS Stats = &(VCB)->Statistics[FatGetCurrentProcessorIndex() % FatData.NumberProcessors];   \
     Stats->Fat.CreateHits += 1;                                                          \
 }
 
 #define CollectCreateStatistics(VCB,STATUS) {                                            \
-    PFILE_SYSTEM_STATISTICS Stats = &(VCB)->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors];   \
+    PFILE_SYSTEM_STATISTICS Stats = &(VCB)->Statistics[FatGetCurrentProcessorIndex() % FatData.NumberProcessors];   \
     if ((STATUS) == STATUS_SUCCESS) {                                                    \
         Stats->Fat.SuccessfulCreates += 1;                                               \
     } else {                                                                             \
@@ -429,19 +429,19 @@ Return Value:
     //  exceptions here and deal with them.
     //
 
-    try {
+    _SEH2_TRY {
 
         CalloutParameters->IrpStatus = FatCommonCreate( CalloutParameters->Create.IrpContext,
                                                         CalloutParameters->Create.Irp );
 
-    } except (FatExceptionFilter( CalloutParameters->Create.IrpContext, GetExceptionInformation() )) {
+    } _SEH2_EXCEPT (FatExceptionFilter( CalloutParameters->Create.IrpContext, _SEH2_GetExceptionInformation() )) {
 
         //
         //  Return the resulting status.
         //
 
-        CalloutParameters->ExceptionStatus = GetExceptionCode();
-    }
+        CalloutParameters->ExceptionStatus = _SEH2_GetExceptionCode();
+    } _SEH2_END;
 
 }
 
@@ -495,7 +495,7 @@ Return Value:
 
     SetFlag( IrpContext->Flags, IRP_CONTEXT_FLAG_SWAPPED_STACK );
 
-    status = KeExpandKernelStackAndCalloutEx( FatCommonCreateCallout,
+    status = KeExpandKernelStackAndCalloutEx( (PEXPAND_STACK_CALLOUT)FatCommonCreateCallout,
                                               &CalloutParameters,
                                               KERNEL_STACK_SIZE,
                                               FALSE,
@@ -910,7 +910,11 @@ Return Value:
                                      &Fcb,
                                      &Ccb ) == UserVolumeOpen) {
 
-                NT_ASSERT( RelatedFileObject == NULL || Vcb == DecodeVcb );
+                if ((RelatedFileObject != NULL) &&
+                    (Vcb != DecodeVcb)) {
+
+                    try_return( Iosb.Status = STATUS_OBJECT_PATH_NOT_FOUND );
+                }
 
                 //
                 //  Check if we were to open a directory
@@ -1188,10 +1192,16 @@ Return Value:
                                                  FinalName.Length);
 
                     Status = RtlDowncaseUnicodeString(&UpcasedFinalName, &FinalName, FALSE );
-                    NT_ASSERT( NT_SUCCESS( Status ));
+                    if (!NT_SUCCESS(Status)) {
+
+                        try_return( Iosb.Status = Status );
+                    }
 
                     Status = RtlUpcaseUnicodeString( &UpcasedFinalName, &UpcasedFinalName, FALSE );
-                    NT_ASSERT( NT_SUCCESS( Status ));
+                    if (!NT_SUCCESS(Status)) {
+
+                        try_return( Iosb.Status = Status );
+                    }
 
 
                     NextFcb = FatFindFcb( IrpContext,

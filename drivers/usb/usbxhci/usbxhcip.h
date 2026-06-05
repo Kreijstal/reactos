@@ -20,6 +20,7 @@ typedef enum {
     COMMAND_ADDRESS_DEVICE,
     COMMAND_DISABLE_SLOT,
     COMMAND_CONFIGURE_ENDPOINT,
+    COMMAND_DROP_ENDPOINT,
     COMMAND_SET_TR_DEQUEUE_POINTER,
     COMMAND_UNKNOWN
 } XHCI_COMMAND_TYPE;
@@ -123,6 +124,18 @@ XHCI_SubmitIsochronousTransfer(IN PXHCI_EXTENSION XhciExtension,
 
 /* Device context and TRB management functions *********************************************************/
 
+#define XHCI_TRANSFER_RING_LINK_INDEX (XHCI_RING_TRB_COUNT - 1)
+#define XHCI_MAX_BULK_NORMAL_TRBS XHCI_TRANSFER_RING_LINK_INDEX
+#define XHCI_MAX_NORMAL_TRB_TRANSFER_LENGTH 0x10000
+
+MPSTATUS
+NTAPI
+XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
+                         IN ULONG TransferLength,
+                         OUT PXHCI_TRB Trbs,
+                         IN ULONG MaxTrbs,
+                         OUT PULONG TrbCount);
+
 MPSTATUS
 NTAPI
 XHCI_CreateDataTRB(IN PXHCI_EXTENSION XhciExtension,
@@ -218,6 +231,11 @@ NTAPI
 XHCI_DisableSlot(IN PXHCI_EXTENSION XhciExtension,
                 IN ULONG SlotId);
 
+VOID
+NTAPI
+CleanupSlotResources(IN PXHCI_EXTENSION XhciExtension,
+                    IN ULONG SlotId);
+
 MPSTATUS
 NTAPI
 XHCI_AddressDevice(IN PXHCI_EXTENSION XhciExtension,
@@ -246,6 +264,22 @@ XHCI_SetTransferRingDequeuePointer(IN PXHCI_EXTENSION XhciExtension,
                                    IN ULONG EndpointIndex,
                                    IN PHYSICAL_ADDRESS DequeuePointer,
                                    IN ULONG CycleState);
+
+MPSTATUS
+NTAPI
+XHCI_ConfigureEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                       IN ULONG SlotId,
+                       IN ULONG EndpointIndex,
+                       IN ULONG EndpointType,
+                       IN ULONG MaxPacketSize,
+                       IN ULONG Interval,
+                       IN PHYSICAL_ADDRESS TransferRingPA);
+
+MPSTATUS
+NTAPI
+XHCI_DropEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                  IN ULONG SlotId,
+                  IN ULONG EndpointIndex);
 
 ULONG
 NTAPI

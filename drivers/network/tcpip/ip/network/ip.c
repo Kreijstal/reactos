@@ -10,6 +10,12 @@
 
 #include "precomp.h"
 
+/* Silence the TCPIP-* trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 #define __LWIP_INET_H__
 #include "lwip/netifapi.h"
 
@@ -175,7 +181,7 @@ VOID IPDispatchProtocol(
         static volatile LONG DispCount = 0;
         LONG dc = InterlockedIncrement(&DispCount);
         if (dc <= 5)
-            DbgPrint("TCPIP-IP: IPDispatchProtocol #%ld proto=%d handler=%p\n",
+            DPRINT("TCPIP-IP: IPDispatchProtocol #%ld proto=%d handler=%p\n",
                      dc, Protocol,
                      Protocol < IP_PROTOCOL_TABLE_SIZE ? ProtocolTable[Protocol] : NULL);
     }
@@ -312,7 +318,7 @@ BOOLEAN IPRegisterInterface(
 
     TI_DbgPrint(MID_TRACE, ("Called. IF (0x%X).\n", IF));
 
-    TcpipAcquireSpinLock(&IF->Lock, &OldIrql);
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
 
     /* Choose an index */
     do {
@@ -328,11 +334,9 @@ BOOLEAN IPRegisterInterface(
     IF->Index = ChosenIndex;
 
     /* Add interface to the global interface list */
-    TcpipInterlockedInsertTailList(&InterfaceListHead,
-				   &IF->ListEntry,
-				   &InterfaceListLock);
+    InsertTailList(&InterfaceListHead, &IF->ListEntry);
 
-    TcpipReleaseSpinLock(&IF->Lock, OldIrql);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
     return TRUE;
 }
@@ -368,6 +372,8 @@ VOID IPUnregisterInterface(
     TI_DbgPrint(DEBUG_IP, ("Called. IF (0x%X).\n", IF));
 
     IPRemoveInterfaceRoute( IF );
+    RouterRemoveRoutesForInterface( IF );
+    NBDestroyNeighborsForInterface( IF );
 
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql3);
     RemoveEntryList(&IF->ListEntry);

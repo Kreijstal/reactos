@@ -16,3 +16,14 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
 endif()
 add_subdirectory(pcnet)
 add_subdirectory(rtl8139)
+add_subdirectory(rtl8168)
+# ar9485 is an NDIS 6.20 native-802.11 miniport - same NT 6.0+ gating as e1000e.
+if(_E1000E_NT_NUM GREATER_EQUAL 1536)
+    add_subdirectory(ar9485)
+endif()
+# vwifi is a software-only NDIS 6.20 native-802.11 miniport used for
+# wlan upper-stack development under QEMU when no real Wi-Fi silicon is
+# available. Same NT 6.0+ gate.
+if(_E1000E_NT_NUM GREATER_EQUAL 1536)
+    add_subdirectory(vwifi)
+endif()

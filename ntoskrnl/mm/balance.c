@@ -160,6 +160,12 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
                 {
                     FirstPage = 0;
                 }
+                CurrentPage = MmGetLRUFirstUserPage();
+                if (FirstPage == 0)
+                {
+                    FirstPage = CurrentPage;
+                }
+                continue;
             }
         }
         else
@@ -251,10 +257,18 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
                 Status = MmPageOutPhysicalAddress(CurrentPage);
                 if (NT_SUCCESS(Status))
                 {
+                    Target--;
+                    (*NrFreedPages)++;
                     if (CurrentPage == FirstPage)
                     {
                         FirstPage = 0;
                     }
+                    CurrentPage = MmGetLRUFirstUserPage();
+                    if (FirstPage == 0)
+                    {
+                        FirstPage = CurrentPage;
+                    }
+                    continue;
                 }
                 // DPRINT1("Paged-out one page: %s\n", NT_SUCCESS(Status) ? "Yes" : "No");
             }
@@ -270,7 +284,6 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
         }
         else if (CurrentPage == FirstPage)
         {
-            DPRINT1("We are back at the start, abort!\n");
             return STATUS_SUCCESS;
         }
     }

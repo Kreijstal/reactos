@@ -276,7 +276,27 @@ NTAPI
 RxAcquireFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    PAGED_CODE();
+
+    if (FileObject == NULL)
+    {
+        return;
+    }
+
+    Fcb = FileObject->FsContext;
+    if (Fcb == NULL || NodeType(Fcb) != RDBSS_NTC_FCB)
+    {
+        return;
+    }
+
+    ASSERT_CORRECT_FCB_STRUCTURE(Fcb);
+
+    if (Fcb->Header.Resource != NULL)
+    {
+        ExAcquireResourceExclusiveLite(Fcb->Header.Resource, TRUE);
+    }
 }
 
 NTSTATUS
@@ -1269,6 +1289,7 @@ RxConstructSrvCall(
     PRDBSS_DEVICE_OBJECT RxDeviceObject;
     PMRX_SRVCALLDOWN_STRUCTURE Calldown;
     PMRX_SRVCALL_CALLBACK_CONTEXT CallbackContext;
+    BOOLEAN WasAsync;
 
     PAGED_CODE();
 
@@ -1308,15 +1329,14 @@ RxConstructSrvCall(
 
     RxReferenceSrvCall(SrvCall);
 
-    /* If we're async, we'll post, otherwise, we'll have to wait for completion */
-    if (BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
-    {
-        RxPrePostIrp(RxContext, RxContext->CurrentIrp);
-    }
-    else
-    {
-        KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
-    }
+    /*
+     * The callers of RxConstructSrvCall expect a stable SRV_CALL on return and
+     * treat STATUS_PENDING as failure. Complete this construction synchronously,
+     * even when the create RX_CONTEXT itself is asynchronous.
+     */
+    WasAsync = BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    ClearFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
+    KeInitializeEvent(&Calldown->FinishEvent, SynchronizationEvent, FALSE);
 
     Calldown->NumberToWait = 1;
     Calldown->NumberRemaining = 1;
@@ -1335,23 +1355,24 @@ RxConstructSrvCall(
     /* It has to return STATUS_PENDING! */
     ASSERT(Status == STATUS_PENDING);
 
-    /* No async, start completion */
-    if (!BooleanFlagOn(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION))
-    {
-        KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
+    KeWaitForSingleObject(&Calldown->FinishEvent, Executive, KernelMode, FALSE, NULL);
 
-        /* Finish construction - we'll notify mini-rdr it's the winner */
-        Status = RxFinishSrvCallConstruction(Calldown);
-        if (!NT_SUCCESS(Status))
-        {
-            RxReleasePrefixTableLock(PrefixTable);
-            *LockHoldingState = LHS_LockNotHeld;
-        }
-        else
-        {
-            ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
-            *LockHoldingState = LHS_ExclusiveLockHeld;
-        }
+    /* Finish construction - we'll notify mini-rdr it's the winner */
+    Status = RxFinishSrvCallConstruction(Calldown);
+    if (!NT_SUCCESS(Status))
+    {
+        RxReleasePrefixTableLock(PrefixTable);
+        *LockHoldingState = LHS_LockNotHeld;
+    }
+    else
+    {
+        ASSERT(RxIsPrefixTableLockAcquired(PrefixTable));
+        *LockHoldingState = LHS_ExclusiveLockHeld;
+    }
+
+    if (WasAsync)
+    {
+        SetFlag(RxContext->Flags, RX_CONTEXT_FLAG_ASYNC_OPERATION);
     }
 
     DPRINT("RxConstructSrvCall() = Status: %x\n", Status);
@@ -3415,13 +3436,17 @@ RxFinalizeVNetRoot(
         return FALSE;
     }
 
-    /* If there's an associated device, notify mini-rdr */
+    /* If there's an associated device, notify mini-rdr.  Propagate the
+     * ForceFinalize flag so a mini-RDR that keeps a per-VNetRoot keep-alive
+     * cache can bypass it on an FSCTL_DELETE_CONNECTION / forced-unmount
+     * teardown (RxFinalizeConnection calls us with ForceFinalize=TRUE). */
     if (NetRoot->pSrvCall->RxDeviceObject != NULL)
     {
         NTSTATUS Status;
+        BOOLEAN MrxForce = ForceFinalize;
 
         MINIRDR_CALL_THROUGH(Status, NetRoot->pSrvCall->RxDeviceObject->Dispatch,
-                             MRxFinalizeVNetRoot, ((PMRX_V_NET_ROOT)ThisVNetRoot, FALSE));
+                             MRxFinalizeVNetRoot, ((PMRX_V_NET_ROOT)ThisVNetRoot, &MrxForce));
         (void)Status;
     }
 
@@ -7578,7 +7603,27 @@ NTAPI
 RxReleaseFileForNtCreateSection(
     PFILE_OBJECT FileObject)
 {
-    UNIMPLEMENTED;
+    PFCB Fcb;
+
+    PAGED_CODE();
+
+    if (FileObject == NULL)
+    {
+        return;
+    }
+
+    Fcb = FileObject->FsContext;
+    if (Fcb == NULL || NodeType(Fcb) != RDBSS_NTC_FCB)
+    {
+        return;
+    }
+
+    ASSERT_CORRECT_FCB_STRUCTURE(Fcb);
+
+    if (Fcb->Header.Resource != NULL)
+    {
+        ExReleaseResourceLite(Fcb->Header.Resource);
+    }
 }
 
 NTSTATUS
@@ -8059,22 +8104,29 @@ RxSpinUpRequestsDispatcher(
                                        KernelMode, FALSE, &RxSpinUpDispatcherWaitInterval);
         ASSERT((Status == STATUS_SUCCESS) || (Status == STATUS_TIMEOUT));
 
-        KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
-        if (!IsListEmpty(&RxDispatcher->SpinUpRequests))
-        {
-            ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
-        }
-        else
-        {
-            ListEntry = &RxDispatcher->SpinUpRequests;
-        }
-        KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
-        KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
-
-        while (ListEntry != &RxDispatcher->SpinUpRequests)
+        /* Drain every pending spin-up request that has accumulated */
+        for (;;)
         {
             PWORK_QUEUE_ITEM WorkItem;
             PRX_WORK_QUEUE WorkQueue;
+
+            KeAcquireSpinLock(&RxDispatcher->SpinUpRequestsLock, &OldIrql);
+            if (!IsListEmpty(&RxDispatcher->SpinUpRequests))
+            {
+                ListEntry = RemoveHeadList(&RxDispatcher->SpinUpRequests);
+            }
+            else
+            {
+                ListEntry = &RxDispatcher->SpinUpRequests;
+            }
+            KeClearEvent(&RxDispatcher->SpinUpRequestsEvent);
+            KeReleaseSpinLock(&RxDispatcher->SpinUpRequestsLock, OldIrql);
+
+            /* No more requests: go back to waiting */
+            if (ListEntry == &RxDispatcher->SpinUpRequests)
+            {
+                break;
+            }
 
             WorkItem = CONTAINING_RECORD(ListEntry, WORK_QUEUE_ITEM, List);
             WorkQueue = WorkItem->Parameter;
@@ -8153,11 +8205,66 @@ RxSpinUpWorkerThread(
     return Status;
 }
 
+/*
+ * @implemented
+ *
+ * Worker routine queued to the spin-up requests dispatcher. It runs in the
+ * context of the dedicated RxSpinUpRequestsDispatcher thread (always at
+ * PASSIVE_LEVEL) so that it can legally create a new worker system thread.
+ */
+VOID
+NTAPI
+RxpSpinUpWorkerThread(
+    PVOID Context)
+{
+    PRX_WORK_QUEUE WorkQueue;
+
+    PAGED_CODE();
+
+    WorkQueue = Context;
+
+    /* We are no longer pending a spin-up: allow further requests to be queued */
+    WorkQueue->SpinUpRequestPending = FALSE;
+
+    /* Create the new worker thread, running the standard dispatcher loop */
+    RxSpinUpWorkerThread(WorkQueue, RxBootstrapWorkerThreadDispatcher, WorkQueue);
+}
+
+/*
+ * @implemented
+ *
+ * Defer the creation of an additional worker thread to the spin-up requests
+ * dispatcher thread. RxInsertWorkQueueItem may run at DISPATCH_LEVEL (from I/O
+ * completion paths), where PsCreateSystemThread is illegal, so the request is
+ * handed to the always-passive RxSpinUpRequestsDispatcher thread.
+ */
 VOID
 RxSpinUpWorkerThreads(
    PRX_WORK_QUEUE WorkQueue)
 {
-    UNIMPLEMENTED;
+    KIRQL OldIrql;
+
+    /*
+     * RxInsertWorkQueueItem only calls us after atomically setting
+     * SpinUpRequestPending under the work-queue spinlock, so at most one
+     * spin-up request per work queue is ever outstanding and the shared
+     * WorkQueueItemForSpinUpWorkerThread item is free to (re)use here. Mark it
+     * in use - the spin-up dispatcher decrements this once it picks the item up.
+     */
+    InterlockedIncrement(&WorkQueue->WorkQueueItemForSpinUpWorkerThreadInUse);
+    ++WorkQueue->NumberOfSpinUpRequests;
+
+    /* Set up the work item that the dispatcher will execute */
+    WorkQueue->WorkQueueItemForSpinUpWorkerThread.WorkerRoutine = RxpSpinUpWorkerThread;
+    WorkQueue->WorkQueueItemForSpinUpWorkerThread.Parameter = WorkQueue;
+
+    /* Queue the request and wake up the spin-up dispatcher thread */
+    KeAcquireSpinLock(&RxDispatcher.SpinUpRequestsLock, &OldIrql);
+    InsertTailList(&RxDispatcher.SpinUpRequests,
+                   &WorkQueue->WorkQueueItemForSpinUpWorkerThread.List);
+    KeReleaseSpinLock(&RxDispatcher.SpinUpRequestsLock, OldIrql);
+
+    KeSetEvent(&RxDispatcher.SpinUpRequestsEvent, IO_NO_INCREMENT, FALSE);
 }
 
 VOID
@@ -8657,7 +8764,10 @@ RxTrackPagingIoResource(
     _In_ ULONG Line,
     _In_ PCSTR File)
 {
-    UNIMPLEMENTED;
+    UNREFERENCED_PARAMETER(Instance);
+    UNREFERENCED_PARAMETER(Type);
+    UNREFERENCED_PARAMETER(Line);
+    UNREFERENCED_PARAMETER(File);
 }
 
 /*

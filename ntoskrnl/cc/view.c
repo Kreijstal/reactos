@@ -966,7 +966,15 @@ CcRosEnsureVacbResident(
                                                         Length,
                                                         &SharedCacheMap->ValidDataLength);
             if (!NT_SUCCESS(Status))
+            {
+                if ((Status == STATUS_NO_MEMORY) ||
+                    (Status == STATUS_INSUFFICIENT_RESOURCES))
+                {
+                    return FALSE;
+                }
+
                 ExRaiseStatus(Status);
+            }
         }
     }
 
@@ -1120,8 +1128,20 @@ CcFlushCache (
 
     if (!SectionObjectPointers->SharedCacheMap)
     {
+        if (IoStatus)
+        {
+            IoStatus->Status = STATUS_SUCCESS;
+            IoStatus->Information = 0;
+        }
+
         /* Forward this to Mm */
-        MmFlushSegment(SectionObjectPointers, FileOffset, Length, IoStatus);
+        Status = MmFlushSegment(SectionObjectPointers, FileOffset, Length, IoStatus);
+
+        if (IoStatus)
+        {
+            IoStatus->Status = Status;
+        }
+
         return;
     }
 
@@ -1329,7 +1349,12 @@ CcRosInitializeFileCache (
         InitializeListHead(&SharedCacheMap->BcbList);
         KeInitializeGuardedMutex(&SharedCacheMap->FlushCacheLock);
 
-        SharedCacheMap->Flags = SHARED_CACHE_MAP_IN_CREATION;
+        /* PinAccess streams (e.g. FAT VirtualVolumeFile) are modified-no-write:
+         * the file system flushes them explicitly via CcUnpinRepinnedBcb /
+         * FatFlushFat.  Suppress lazy-writer flushing to avoid writing partial
+         * cluster chains to disk between consecutive file-extend IRPs. */
+        SharedCacheMap->Flags = SHARED_CACHE_MAP_IN_CREATION |
+                                (PinAccess ? WRITEBEHIND_DISABLED : 0);
 
         ObReferenceObjectByPointer(FileObject,
                                    FILE_ALL_ACCESS,

@@ -46,6 +46,7 @@ IopCreateArcNames(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     UNICODE_STRING SystemDevice, LoaderPathNameW, BootDeviceName;
     PARC_DISK_INFORMATION ArcDiskInfo = LoaderBlock->ArcDiskInformation;
     ANSI_STRING ArcString, LanmanRedirector, LoaderPathNameA;
+    BOOLEAN RamdiskBoot = (_strnicmp(LoaderBlock->ArcBootDeviceName, "ramdisk(0)", 10) == 0);
 
     /* Check if we only have one disk on the machine */
     SingleDisk = (ArcDiskInfo->DiskSignatureListHead.Flink->Flink ==
@@ -83,6 +84,11 @@ IopCreateArcNames(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     {
         /* Then disable single-disk mode, since there's a CD drive out there */
         SingleDisk = FALSE;
+    }
+
+    if (RamdiskBoot)
+    {
+        return STATUS_SUCCESS;
     }
 
     /* If we are doing remote booting */

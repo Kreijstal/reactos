@@ -11,7 +11,7 @@ extern "C"
 {
 #endif
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 FORCEINLINE
 KPROCESSOR_MODE
 KeGetPreviousMode(VOID)
@@ -285,7 +285,9 @@ FORCEINLINE
 PKSPIN_LOCK_QUEUE
 KiAcquireTimerLock(IN ULONG Hand)
 {
+#ifndef _M_ARM64
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
+#endif
 
     /* Nothing to do on UP */
     UNREFERENCED_PARAMETER(Hand);
@@ -296,7 +298,9 @@ FORCEINLINE
 VOID
 KiReleaseTimerLock(IN PKSPIN_LOCK_QUEUE LockQueue)
 {
+#ifndef _M_ARM64
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
+#endif
 
     /* Nothing to do on UP */
     UNREFERENCED_PARAMETER(LockQueue);
@@ -496,19 +500,8 @@ KiAcquireThreadLock(IN PKTHREAD Thread)
     /* Make sure we're at a safe level to touch the thread lock */
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
-    /* Start acquire loop */
-    for (;;)
-    {
-        /* Acquire the lock and break out if we acquired it first */
-        if (!InterlockedExchange((PLONG)&Thread->ThreadLock, 1)) break;
-
-        /* Loop until the other CPU releases it */
-        do
-        {
-            /* Let the CPU know that this is a loop */
-            YieldProcessor();
-        } while (Thread->ThreadLock);
-    }
+    /* Acquire the lock */
+    KiAcquireSpinLock(&Thread->ThreadLock);
 }
 
 //
@@ -526,24 +519,15 @@ KiReleaseThreadLock(IN PKTHREAD Thread)
     ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
     /* Release it */
-    InterlockedAnd((PLONG)&Thread->ThreadLock, 0);
+    KiReleaseSpinLock(&Thread->ThreadLock);
 }
 
 FORCEINLINE
 BOOLEAN
 KiTryThreadLock(IN PKTHREAD Thread)
 {
-    LONG Value;
-
-    /* If the lock isn't acquired, return false */
-    if (!Thread->ThreadLock) return FALSE;
-
-    /* Otherwise, try to acquire it and check the result */
-    Value = 1;
-    Value = InterlockedExchange((PLONG)&Thread->ThreadLock, Value);
-
-    /* Return the lock state */
-    return (Value == 1);
+    /* Try to acquire it. Return TRUE only if somebody else owns it. */
+    return !KeTryToAcquireSpinLockAtDpcLevel(&Thread->ThreadLock);
 }
 
 FORCEINLINE
@@ -612,7 +596,7 @@ KiReleaseTimerLock(IN PKSPIN_LOCK_QUEUE LockQueue)
  * Per-thread APC-queue lock chokepoint.
  *
  * Microsoft consolidated the pre-Win8 KTHREAD::ApcQueueLock into the
- * always-present KTHREAD::ThreadLock at NTDDI_WIN8 — see KTHREAD layout
+ * always-present KTHREAD::ThreadLock at NTDDI_WIN8 - see KTHREAD layout
  * gates in <ndk/ketypes.h>. Stay faithful to the genuine Microsoft
  * NTDDI surface: name the field Microsoft names at each NTDDI level,
  * don't paper over the layout flip.
@@ -1100,6 +1084,19 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     Timer->Header.Hand = (UCHAR)*Hand;
 }
 
+FORCEINLINE
+VOID
+KiSetNextWaitBlock(
+    _Inout_ PKWAIT_BLOCK WaitBlock,
+    _In_ PKWAIT_BLOCK NextWaitBlock)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    WaitBlock->SparePtr = NextWaitBlock;
+#else
+    WaitBlock->NextWaitBlock = NextWaitBlock;
+#endif
+}
+
 #define KxDelayThreadWait()                                                 \
                                                                             \
     /* Setup the Wait Block */                                              \
@@ -1112,7 +1109,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     DueTime.QuadPart = Timer->DueTime.QuadPart;                             \
                                                                             \
     /* Link the timer to this Wait Block */                                 \
-    TimerBlock->NextWaitBlock = TimerBlock;                                 \
+    KiSetNextWaitBlock(TimerBlock, TimerBlock);                                 \
     Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;          \
     Timer->Header.WaitListHead.Blink = &TimerBlock->WaitListEntry;          \
                                                                             \
@@ -1149,12 +1146,12 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
         WaitBlock->Thread = Thread;                                         \
                                                                             \
         /* Link to next block */                                            \
-        WaitBlock->NextWaitBlock = &WaitBlockArray[Index + 1];              \
+        KiSetNextWaitBlock(WaitBlock, &WaitBlockArray[Index + 1]);              \
         Index++;                                                            \
     } while (Index < Count);                                                \
                                                                             \
     /* Link the last block */                                               \
-    WaitBlock->NextWaitBlock = WaitBlockArray;                              \
+    KiSetNextWaitBlock(WaitBlock, WaitBlockArray);                              \
                                                                             \
     /* Set default wait status */                                           \
     Thread->WaitStatus = STATUS_WAIT_0;                                     \
@@ -1163,7 +1160,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     if (Timeout)                                                            \
     {                                                                       \
         /* Link to the block */                                             \
-        TimerBlock->NextWaitBlock = WaitBlockArray;                         \
+        KiSetNextWaitBlock(TimerBlock, WaitBlockArray);                         \
                                                                             \
         /* Setup the timer */                                               \
         KxSetTimerForThreadWait(Timer, *Timeout, &Hand);                    \
@@ -1207,8 +1204,8 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
         DueTime.QuadPart = Timer->DueTime.QuadPart;                         \
                                                                             \
         /* Pointer to timer block */                                        \
-        WaitBlock->NextWaitBlock = TimerBlock;                              \
-        TimerBlock->NextWaitBlock = WaitBlock;                              \
+        KiSetNextWaitBlock(WaitBlock, TimerBlock);                              \
+        KiSetNextWaitBlock(TimerBlock, WaitBlock);                              \
                                                                             \
         /* Link the timer to this Wait Block */                             \
         Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;      \
@@ -1217,7 +1214,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     else                                                                    \
     {                                                                       \
         /* No timer block, just ourselves */                                \
-        WaitBlock->NextWaitBlock = WaitBlock;                               \
+        KiSetNextWaitBlock(WaitBlock, WaitBlock);                               \
     }                                                                       \
                                                                             \
     /* Set wait settings */                                                 \
@@ -1253,8 +1250,8 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
         DueTime.QuadPart = Timer->DueTime.QuadPart;                         \
                                                                             \
         /* Pointer to timer block */                                        \
-        WaitBlock->NextWaitBlock = TimerBlock;                              \
-        TimerBlock->NextWaitBlock = WaitBlock;                              \
+        KiSetNextWaitBlock(WaitBlock, TimerBlock);                              \
+        KiSetNextWaitBlock(TimerBlock, WaitBlock);                              \
                                                                             \
         /* Link the timer to this Wait Block */                             \
         Timer->Header.WaitListHead.Flink = &TimerBlock->WaitListEntry;      \
@@ -1263,7 +1260,7 @@ KxSetTimerForThreadWait(IN PKTIMER Timer,
     else                                                                    \
     {                                                                       \
         /* No timer block, just ourselves */                                \
-        WaitBlock->NextWaitBlock = WaitBlock;                               \
+        KiSetNextWaitBlock(WaitBlock, WaitBlock);                               \
     }                                                                       \
                                                                             \
     /* Set wait settings */                                                 \
@@ -1297,11 +1294,27 @@ KxUnwaitThread(IN DISPATCHER_HEADER *Object,
     WaitEntry = WaitList->Flink;
     do
     {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if ((ULONG_PTR)WaitEntry < 0xFFFF000000000000ULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
+
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
 
         /* Get the waiting thread */
         WaitThread = WaitBlock->Thread;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if (WaitThread == NULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
 
         /* Check the current Wait Mode */
         if (WaitBlock->WaitType == WaitAny)
@@ -1341,11 +1354,27 @@ KxUnwaitThreadForEvent(IN PKEVENT Event,
     WaitEntry = WaitList->Flink;
     do
     {
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if ((ULONG_PTR)WaitEntry < 0xFFFF000000000000ULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
+
         /* Get the current wait block */
         WaitBlock = CONTAINING_RECORD(WaitEntry, KWAIT_BLOCK, WaitListEntry);
 
         /* Get the waiting thread */
         WaitThread = WaitBlock->Thread;
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+        if (WaitThread == NULL)
+        {
+            InitializeListHead(WaitList);
+            break;
+        }
+#endif
 
         /* Check the current Wait Mode */
         if (WaitBlock->WaitType == WaitAny)

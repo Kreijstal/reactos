@@ -1997,7 +1997,7 @@ RndisRxComplete(
              * Set DPC affinity to current CPU to keep RX processing
              * on the same CPU as the completion for better cache locality.
              */
-            CCHAR CpuNumber = (CCHAR)KeGetCurrentProcessorNumber();
+            CCHAR CpuNumber = (CCHAR)RndisGetCurrentProcessorIndex();
             KeSetTargetProcessorDpc(&Adapter->RxResubmitDpc, CpuNumber);
             KeInsertQueueDpc(&Adapter->RxResubmitDpc, NULL, NULL);
         }
@@ -2206,7 +2206,7 @@ RndisTxComplete(
             if (InterlockedExchange(&Adapter->TxHot.TxResubmitScheduled, 1) == 0)
             {
                 /* Set DPC affinity to current CPU for cache locality */
-                CCHAR CpuNumber = (CCHAR)KeGetCurrentProcessorNumber();
+                CCHAR CpuNumber = (CCHAR)RndisGetCurrentProcessorIndex();
                 KeSetTargetProcessorDpc(&Adapter->TxResubmitDpc, CpuNumber);
                 KeInsertQueueDpc(&Adapter->TxResubmitDpc, NULL, NULL);
             }

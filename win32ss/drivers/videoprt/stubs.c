@@ -120,7 +120,7 @@ VideoPortInterlockedExchange(
     return InterlockedExchange(Target, Value);
 }
 
-#ifdef _M_AMD64
+#if defined(_M_AMD64) || defined(_M_ARM64)
 UCHAR
 NTAPI
 VideoPortReadPortUchar(
@@ -343,6 +343,8 @@ VideoPortWriteRegisterBufferUlong(
     WRITE_REGISTER_BUFFER_ULONG(Register, Buffer, Count);
 }
 
+#endif /* _M_AMD64 || _M_ARM64 */
+
 VOID
 NTAPI
 VideoPortQuerySystemTime(
@@ -350,5 +352,3 @@ VideoPortQuerySystemTime(
 {
     KeQuerySystemTime(CurrentTime);
 }
-
-#endif /* _M_AMD64 */

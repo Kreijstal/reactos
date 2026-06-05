@@ -31,9 +31,10 @@ PKTHREAD
 FASTCALL
 KiIdleSchedule(IN PKPRCB Prcb)
 {
-    /* FIXME: TODO */
-    ASSERTMSG("SMP: Not yet implemented\n", FALSE);
-    return NULL;
+    /* TODO: real SMP semantics should be done here : should drain Prcb->DeferredReadyListHead
+     * and promote a queued thread per KiSelectNextThread, instead of unconditionally staying on the idle thread
+      */
+    return Prcb->IdleThread;
 }
 
 VOID
@@ -516,7 +517,7 @@ KiReadyThread(IN PKTHREAD Thread)
     else if (!Thread->KernelStackResident)
     {
         /* Increase the stack count */
-        ASSERT(Process->StackCount != MAXULONG_PTR);
+        ASSERT(Process->StackCount != MAXULONG);
         Process->StackCount++;
 
         /* Set the thread to transition */

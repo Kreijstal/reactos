@@ -682,12 +682,15 @@ QSI_DEF(SystemProcessorInformation)
 QSI_DEF(SystemPerformanceInformation)
 {
     LONG i;
+#if defined(_M_ARM64)
+    ULONGLONG IdleKernel;
+#else
     ULONG IdleUser, IdleKernel;
+    PEPROCESS TheIdleProcess;
+#endif
     PKPRCB Prcb;
     PSYSTEM_PERFORMANCE_INFORMATION Spi
         = (PSYSTEM_PERFORMANCE_INFORMATION) Buffer;
-
-    PEPROCESS TheIdleProcess;
 
     *ReqSize = sizeof(SYSTEM_PERFORMANCE_INFORMATION);
 
@@ -697,10 +700,29 @@ QSI_DEF(SystemPerformanceInformation)
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
+#if defined(_M_ARM64)
+    /*
+     * ARM64 keeps idle runtime on each per-CPU idle thread. Sample the
+     * monotonic counters directly; this is intentionally not a locked
+     * cross-CPU freeze, matching the racy nature of performance counters.
+     */
+    IdleKernel = 0;
+    for (i = 0; i < KeNumberProcessors; i++)
+    {
+        Prcb = KiProcessorBlock[i];
+        if (Prcb && Prcb->IdleThread)
+        {
+            IdleKernel += ReadULongAcquire(&Prcb->IdleThread->KernelTime);
+        }
+    }
+
+    Spi->IdleProcessTime.QuadPart = (LONGLONG)(IdleKernel * (ULONGLONG)KeMaximumIncrement);
+#else
     TheIdleProcess = PsIdleProcess;
 
     IdleKernel = KeQueryRuntimeProcess(&TheIdleProcess->Pcb, &IdleUser);
     Spi->IdleProcessTime.QuadPart = UInt32x32To64(IdleKernel, KeMaximumIncrement);
+#endif
     Spi->IoReadTransferCount = IoReadTransferCount;
     Spi->IoWriteTransferCount = IoWriteTransferCount;
     Spi->IoOtherTransferCount = IoOtherTransferCount;
@@ -1789,7 +1811,7 @@ QSI_DEF(SystemExceptionInformation)
     PKPRCB Prcb;
     ULONG AlignmentFixupCount = 0, ExceptionDispatchCount = 0;
     ULONG FloatingEmulationCount = 0, ByteWordEmulationCount = 0;
-    CHAR i;
+    ULONG i;
 
     /* Check size of a buffer, it must match our expectations */
     if (sizeof(SYSTEM_EXCEPTION_INFORMATION) != Size)
@@ -1857,7 +1879,7 @@ QSI_DEF(SystemContextSwitchInformation)
         (PSYSTEM_CONTEXT_SWITCH_INFORMATION)Buffer;
     ULONG ContextSwitches;
     PKPRCB Prcb;
-    CHAR i;
+    ULONG i;
 
     /* Check size of a buffer, it must match our expectations */
     if (sizeof(SYSTEM_CONTEXT_SWITCH_INFORMATION) != Size)
@@ -2493,36 +2515,6 @@ QSI_DEF(SystemNumaAvailableMemory)
     return STATUS_SUCCESS;
 }
 
-/* Class 62 - Emulation basic information */
-QSI_DEF(SystemEmulationBasicInformation)
-{
-    PSYSTEM_BASIC_INFORMATION Sbi
-        = (PSYSTEM_BASIC_INFORMATION) Buffer;
-
-    *ReqSize = sizeof(SYSTEM_BASIC_INFORMATION);
-
-    /* Check user buffer's size */
-    if (Size != sizeof(SYSTEM_BASIC_INFORMATION))
-    {
-        return STATUS_INFO_LENGTH_MISMATCH;
-    }
-
-    RtlZeroMemory(Sbi, Size);
-    Sbi->Reserved = 0;
-    Sbi->TimerResolution = KeMaximumIncrement;
-    Sbi->PageSize = PAGE_SIZE;
-    Sbi->NumberOfPhysicalPages = MmNumberOfPhysicalPages;
-    Sbi->LowestPhysicalPageNumber = (ULONG)MmLowestPhysicalPage;
-    Sbi->HighestPhysicalPageNumber = (ULONG)MmHighestPhysicalPage;
-    Sbi->AllocationGranularity = MM_VIRTMEM_GRANULARITY; /* hard coded on Intel? */
-    Sbi->MinimumUserModeAddress = 0x10000; /* Top of 64k */
-    Sbi->MaximumUserModeAddress = (ULONG_PTR)0xFFFFFFFF; /* FIXME */
-    Sbi->ActiveProcessorsAffinityMask = KeActiveProcessors;
-    Sbi->NumberOfProcessors = KeNumberProcessors;
-
-    return STATUS_SUCCESS;
-}
-
 /* Class 64 - Extended handle information */
 QSI_DEF(SystemExtendedHandleInformation)
 {
@@ -2940,7 +2932,7 @@ CallQS[] =
     SI_XX(SystemComPlusPackage),
     SI_QX(SystemNumaAvailableMemory),
     SI_XX(SystemProcessorPowerInformation), /* FIXME: not implemented */
-    SI_QX(SystemEmulationBasicInformation),
+    SI_XX(SystemEmulationBasicInformation), /* FIXME: not implemented */
     SI_XX(SystemEmulationProcessorInformation), /* FIXME: not implemented */
     SI_QX(SystemExtendedHandleInformation),
     SI_XX(SystemLostDelayedWriteInformation), /* FIXME: not implemented */

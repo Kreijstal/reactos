@@ -95,7 +95,7 @@ FatOverflowPagingFileRead (
 //
 
 #define CollectReadStats(VCB,OPEN_TYPE,BYTE_COUNT) {                                         \
-    PFILESYSTEM_STATISTICS Stats = &(VCB)->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common; \
+    PFILESYSTEM_STATISTICS Stats = &(VCB)->Statistics[FatGetCurrentProcessorIndex() % FatData.NumberProcessors].Common; \
     if (((OPEN_TYPE) == UserFileOpen)) {                                                     \
         Stats->UserFileReads += 1;                                                           \
         Stats->UserFileReadBytes += (ULONG)(BYTE_COUNT);                                     \
@@ -843,7 +843,7 @@ Return Value:
             //  Virtual volume file open -- increment performance counters.
             //
 
-            Vcb->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common.MetaDataDiskReads += 1;
+            Vcb->Statistics[FatGetCurrentProcessorIndex() % FatData.NumberProcessors].Common.MetaDataDiskReads += 1;
 
         }
 
@@ -1154,6 +1154,18 @@ Return Value:
                 //
 
                 SectorSize = (ULONG)Vcb->Bpb.BytesPerSector;
+
+                if (FcbOrDcb->Header.AllocationSize.QuadPart == FCB_LOOKUP_ALLOCATIONSIZE_HINT) {
+
+                    FatLookupFileAllocationSize( IrpContext, FcbOrDcb );
+                }
+
+                if ( FileSize > FcbOrDcb->Header.AllocationSize.LowPart ) {
+
+                    FatPopUpFileCorrupt( IrpContext, FcbOrDcb );
+
+                    FatRaiseStatus( IrpContext, STATUS_FILE_CORRUPT_ERROR );
+                }
 
                 //
                 //  Start by zeroing any part of the read after Valid Data
@@ -1742,6 +1754,3 @@ Return Value:
 
     return;
 }
-
-
-

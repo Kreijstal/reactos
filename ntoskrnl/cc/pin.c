@@ -150,15 +150,16 @@ CcpGetAppropriateBcb(
         {
             if (BooleanFlagOn(PinFlags, PIN_EXCLUSIVE))
             {
-                Result = ExAcquireResourceExclusiveLite(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
+                Result = ExAcquireResourceExclusiveLite(&DupBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
             else
             {
-                Result = ExAcquireSharedStarveExclusive(&iBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
+                Result = ExAcquireSharedStarveExclusive(&DupBcb->Lock, BooleanFlagOn(PinFlags, PIN_WAIT));
             }
 
             if (Result)
             {
+                DupBcb->ResourceThreadId = ExGetCurrentResourceThread();
                 DupBcb->PinCount++;
             }
             else
@@ -198,6 +199,8 @@ CcpGetAppropriateBcb(
             }
 
             ASSERT(Result);
+
+            iBcb->ResourceThreadId = ExGetCurrentResourceThread();
         }
 
         InsertTailList(&SharedCacheMap->BcbList, &iBcb->BcbEntry);
@@ -254,6 +257,7 @@ CcpPinData(
         }
 
         NewBcb->PinCount++;
+        NewBcb->ResourceThreadId = ExGetCurrentResourceThread();
     }
     else
     {
@@ -464,9 +468,9 @@ CcPinMappedData (
     ++CcPinMappedDataCount;
 
     Result = CcpPinData(SharedCacheMap, FileOffset, Length, Flags, Bcb, &Buffer);
-    if (Result)
+    if (Result && iBcb != NULL)
     {
-        CcUnpinData(&iBcb->PFCB);
+        CcpDereferenceBcb(SharedCacheMap, iBcb);
     }
 
     return Result;
@@ -589,16 +593,28 @@ CcUnpinDataForThread (
     IN	ERESOURCE_THREAD ResourceThreadId)
 {
     PINTERNAL_BCB iBcb = CONTAINING_RECORD(Bcb, INTERNAL_BCB, PFCB);
+    PROS_SHARED_CACHE_MAP SharedCacheMap = iBcb->Vacb->SharedCacheMap;
 
     CCTRACE(CC_API_DEBUG, "Bcb=%p ResourceThreadId=%lu\n", Bcb, ResourceThreadId);
 
     if (iBcb->PinCount != 0)
     {
+        if ((ExIsResourceAcquiredLite(&iBcb->Lock) == 0) &&
+            (iBcb->ResourceThreadId != 0))
+        {
+            ResourceThreadId = iBcb->ResourceThreadId;
+        }
+
         ExReleaseResourceForThreadLite(&iBcb->Lock, ResourceThreadId);
         iBcb->PinCount--;
+
+        if (iBcb->PinCount == 0)
+        {
+            iBcb->ResourceThreadId = 0;
+        }
     }
 
-    CcpDereferenceBcb(iBcb->Vacb->SharedCacheMap, iBcb);
+    CcpDereferenceBcb(SharedCacheMap, iBcb);
 }
 
 /*
@@ -656,8 +672,20 @@ CcUnpinRepinnedBcb (
 
         if (iBcb->PinCount != 0)
         {
-            ExReleaseResourceLite(&iBcb->Lock);
-            iBcb->PinCount--;
+            if (iBcb->Lock.ActiveEntries != 0)
+            {
+                ExReleaseResourceForThreadLite(&iBcb->Lock,
+                                               iBcb->ResourceThreadId != 0 ?
+                                               iBcb->ResourceThreadId :
+                                               ExGetCurrentResourceThread());
+            }
+            else
+            {
+                ExReinitializeResourceLite(&iBcb->Lock);
+            }
+
+            iBcb->PinCount = 0;
+            iBcb->ResourceThreadId = 0;
             ASSERT(iBcb->PinCount == 0);
         }
 

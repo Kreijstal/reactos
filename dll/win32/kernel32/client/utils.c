@@ -428,6 +428,18 @@ BaseCreateStack(
     StackCommit = ROUND_UP(StackCommit, PageSize);
     StackReserve = ROUND_UP(StackReserve, AllocationGranularity);
 
+#ifdef _M_AMD64
+    /*
+     * The AMD64 Cygwin/MSYS runtime obtains per-thread reentrancy data from
+     * the initial stack allocation by addressing below StackBase before any
+     * normal stack probing takes place.  Windows provides enough committed
+     * initial stack for this top-of-stack runtime area even when the PE stack
+     * commit field is only one page.
+     */
+    if (StackCommit < 0x10000)
+        StackCommit = 0x10000;
+#endif
+
     MinimumStackCommit = NtCurrentPeb()->MinimumStackCommit;
     if ((MinimumStackCommit != 0) && (StackCommit < MinimumStackCommit))
     {
@@ -652,6 +664,31 @@ BaseInitializeContext(IN PCONTEXT Context,
     }
 
     /* Set the Context Flags */
+    Context->ContextFlags = CONTEXT_FULL;
+#elif defined(_M_ARM64)
+    DPRINT("BaseInitializeContext: %p\n", Context);
+    ASSERT(((ULONG_PTR)StackAddress & 15) == 0);
+
+    RtlZeroMemory(Context, sizeof(*Context));
+
+    Context->X0 = (ULONG_PTR)StartAddress;
+    Context->X1 = (ULONG_PTR)Parameter;
+    Context->Sp = (ULONG_PTR)StackAddress;
+    Context->Lr = (ULONG_PTR)ExitThread;
+
+    if (ContextType == 1)      /* For Threads */
+    {
+        Context->Pc = (ULONG_PTR)BaseThreadStartup;
+    }
+    else if (ContextType == 2) /* For Fibers */
+    {
+        Context->Pc = (ULONG_PTR)BaseFiberStartup;
+    }
+    else                       /* For first thread in a Process */
+    {
+        Context->Pc = (ULONG_PTR)BaseProcessStartup;
+    }
+
     Context->ContextFlags = CONTEXT_FULL;
 #elif defined(_M_ARM)
     DPRINT("BaseInitializeContext: %p\n", Context);

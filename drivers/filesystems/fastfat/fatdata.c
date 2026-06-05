@@ -199,7 +199,6 @@ Return Value:
 }
 #endif
 
-
 ULONG
 FatExceptionFilter (
     IN PIRP_CONTEXT IrpContext,
@@ -306,12 +305,12 @@ Return Value:
     } else {
 
         //
-        //  We raised this code explicitly ourselves, so it had better be
-        //  expected.
+        //  An earlier FastFAT helper already recorded the status that should
+        //  complete this request.  During unwinding or cleanup a later fault
+        //  may be less specific than the original I/O failure; do not replace
+        //  or validate the saved status against that secondary exception.
         //
-
-        NT_ASSERT( IrpContext->ExceptionStatus == ExceptionCode );
-        NT_ASSERT( FsRtlIsNtstatusExpected( ExceptionCode ) );
+        NT_ASSERT( FsRtlIsNtstatusExpected( IrpContext->ExceptionStatus ) );
     }
 
     return EXCEPTION_EXECUTE_HANDLER;
@@ -771,9 +770,9 @@ Return Value:
 
     if (IrpContext != NULL) {
 
-        NT_ASSERT( IrpContext->Repinned.Bcb[0] == NULL );
-
         FatUnpinRepinnedBcbs( IrpContext );
+
+        NT_ASSERT( IrpContext->Repinned.Bcb[0] == NULL );
     }
 
     //
@@ -1006,7 +1005,7 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
+    _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
 
     PAGED_CODE();
     UNREFERENCED_PARAMETER( DeviceObject );
@@ -1040,6 +1039,16 @@ Return Value:
         return Results;
     }
 
+    //
+    //  Ensure Fcb is valid. Defensive check against races or
+    //  corrupted file object state on NT6+ where FastIo paths
+    //  can be entered before the FCB is fully initialized.
+    //
+    if (!Fcb) {
+
+        return Results;
+    }
+
     FsRtlEnterFileSystem();
 
     //
@@ -1047,7 +1056,6 @@ Return Value:
     //
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
-
         if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
 
             FsRtlExitFileSystem();
@@ -1130,7 +1138,11 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( Fcb->Header.Resource ); }
+        if (FcbAcquired) {
+
+            FcbAcquired = FALSE;
+            ExReleaseResourceLite( Fcb->Header.Resource );
+        }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1186,7 +1198,7 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
+    _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
 
     PAGED_CODE();
 
@@ -1222,13 +1234,22 @@ Return Value:
     }
 
     //
+    //  Ensure Fcb is valid. Defensive check against races or
+    //  corrupted file object state on NT6+ where FastIo paths
+    //  can be entered before the FCB is fully initialized.
+    //
+    if (!Fcb) {
+
+        return Results;
+    }
+
+    //
     //  Get access to the Fcb but only if it is not the paging file
     //
 
     FsRtlEnterFileSystem();
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
-
         if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
 
             FsRtlExitFileSystem();
@@ -1291,7 +1312,11 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( Fcb->Header.Resource ); }
+        if (FcbAcquired) {
+
+            FcbAcquired = FALSE;
+            ExReleaseResourceLite( Fcb->Header.Resource );
+        }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1347,7 +1372,7 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
+    _SEH2_VOLATILE BOOLEAN FcbAcquired = FALSE;
 
     PAGED_CODE();
 
@@ -1382,6 +1407,16 @@ Return Value:
         return Results;
     }
 
+    //
+    //  Ensure Fcb is valid. Defensive check against races or
+    //  corrupted file object state on NT6+ where FastIo paths
+    //  can be entered before the FCB is fully initialized.
+    //
+    if (!Fcb) {
+
+        return Results;
+    }
+
     FsRtlEnterFileSystem();
 
     //
@@ -1389,7 +1424,6 @@ Return Value:
     //
 
     if (!FlagOn( Fcb->FcbState, FCB_STATE_PAGING_FILE )) {
-
         if (!ExAcquireResourceSharedLite( Fcb->Header.Resource, Wait )) {
 
             FsRtlExitFileSystem();
@@ -1491,7 +1525,11 @@ Return Value:
     try_exit: NOTHING;
     } _SEH2_FINALLY {
 
-        if (FcbAcquired) { ExReleaseResourceLite( Fcb->Header.Resource ); }
+        if (FcbAcquired) {
+
+            FcbAcquired = FALSE;
+            ExReleaseResourceLite( Fcb->Header.Resource );
+        }
 
         FsRtlExitFileSystem();
     } _SEH2_END;
@@ -1573,4 +1611,3 @@ Return Value:
                                    &Fcb->FullFileName,
                                    Thread);
 }
-

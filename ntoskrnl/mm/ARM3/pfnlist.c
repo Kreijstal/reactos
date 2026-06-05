@@ -9,6 +9,9 @@
 /* INCLUDES *******************************************************************/
 
 #include <ntoskrnl.h>
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
 #define NDEBUG
 #include <debug.h>
 

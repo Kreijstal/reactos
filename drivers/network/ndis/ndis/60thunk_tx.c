@@ -34,21 +34,27 @@
 
 #include "ndis6_internal.h"
 
+/* Silence the trace prints below by default; comment out the
+ * "#define NDEBUG" to re-enable. */
+#define NDEBUG
+#undef UNIMPLEMENTED
+#include <reactos/debug.h>
+
 /* MiniSendComplete is declared in miniport.h (pulled in via ndis6_internal.h)
  * and is the canonical way to wake up a legacy NDIS 5 protocol's
  * SendCompleteHandler. */
 
 /* ============================================================================
- *  Ndis6TxSendPacket — wraps an NDIS_PACKET in an NBL and sends it to the
+ *  Ndis6TxSendPacket - wraps an NDIS_PACKET in an NBL and sends it to the
  *  NDIS 6 miniport. Called from protocol.c:proSendPacketToMiniport via the
  *  IsNdis6 gate.
  *
  *  Returns:
- *    NDIS_STATUS_PENDING — the wrapped NBL has been handed off; the legacy
+ *    NDIS_STATUS_PENDING - the wrapped NBL has been handed off; the legacy
  *      protocol will eventually be woken via MiniSendComplete.
- *    NDIS_STATUS_RESOURCES — wrapper allocation failed; the protocol should
+ *    NDIS_STATUS_RESOURCES - wrapper allocation failed; the protocol should
  *      treat the packet as failed (legacy ProSend handles this case).
- *    NDIS_STATUS_FAILURE — invalid arguments or driver has no send handler.
+ *    NDIS_STATUS_FAILURE - invalid arguments or driver has no send handler.
  * ============================================================================ */
 
 NDIS_STATUS
@@ -99,7 +105,7 @@ Ndis6TxSendPacket(
     /* Stash the original NDIS_PACKET in MiniportReserved[0] so the
      * send-complete callback can recover it. NDIS contracts say
      * MiniportReserved is owned by NDIS (which is us, the bridge),
-     * not the miniport — the miniport touches its own ScratchPad and
+     * not the miniport - the miniport touches its own ScratchPad and
      * the per-NBL Context block. */
     Nbl->MiniportReserved[0] = Packet;
 
@@ -117,7 +123,7 @@ Ndis6TxSendPacket(
         if (ChecksumValue != NULL)
             NET_BUFFER_LIST_INFO(Nbl, TcpIpChecksumNetBufferListInfo) = ChecksumValue;
 
-        /* Large-send / LSO — same pattern, same layout. */
+        /* Large-send / LSO - same pattern, same layout. */
         {
             PVOID LsoValue = NDIS_PER_PACKET_INFO_FROM_PACKET(
                 Packet, TcpLargeSendPacketInfo);
@@ -153,7 +159,7 @@ Ndis6TxSendPacket(
         KeReleaseSpinLock(&Ext->TxLookupLock, OldIrql);
     }
 
-    DbgPrint("NDIS6-TX: Ndis6TxSendPacket Adapter=%p Packet=%p Nbl=%p Len=%u\n",
+    DPRINT("NDIS6-TX: Ndis6TxSendPacket Adapter=%p Packet=%p Nbl=%p Len=%u\n",
              Adapter, Packet, Nbl, TotalLength);
 
     /* Phase 8: route through the filter chain. If no filters are
@@ -164,13 +170,13 @@ Ndis6TxSendPacket(
     Ndis6FilterDispatchSend(Adapter, Nbl);
 
     /* Either way the call is asynchronous from the legacy protocol's
-     * perspective — the SendCompleteHandler will eventually fire via
+     * perspective - the SendCompleteHandler will eventually fire via
      * MiniSendComplete. */
     return NDIS_STATUS_PENDING;
 }
 
 /* ============================================================================
- *  Ndis6FilterTerminalSend — bottom-of-chain TX handler. Called by
+ *  Ndis6FilterTerminalSend - bottom-of-chain TX handler. Called by
  *  Ndis6FilterDispatchSend (when no filters are attached) and by
  *  NdisFSendNetBufferLists (when the bottommost filter's call falls
  *  off the end of the chain). Hands the NBL to the miniport.
@@ -190,13 +196,13 @@ Ndis6FilterTerminalSend(
     if (Ext == NULL || Ext->DriverBlock == NULL ||
         Ext->DriverBlock->Characteristics.SendNetBufferListsHandler == NULL)
     {
-        DbgPrint("NDIS6-TX: TerminalSend Ext=%p DriverBlock=%p Handler=%p — DROPPING\n",
+        DPRINT("NDIS6-TX: dropping TerminalSend Ext=%p DriverBlock=%p Handler=%p\n",
                  Ext, Ext ? Ext->DriverBlock : NULL,
                  (Ext && Ext->DriverBlock) ? Ext->DriverBlock->Characteristics.SendNetBufferListsHandler : NULL);
         return;
     }
 
-    DbgPrint("NDIS6-TX: TerminalSend → driver Nbl=%p\n", NetBufferList);
+    DPRINT("NDIS6-TX: TerminalSend → driver Nbl=%p\n", NetBufferList);
     Ext->DriverBlock->Characteristics.SendNetBufferListsHandler(
         Ext->MiniportAdapterContext,
         NetBufferList,
@@ -205,7 +211,7 @@ Ndis6FilterTerminalSend(
 }
 
 /* ============================================================================
- *  NdisMSendNetBufferListsComplete — driver-side completion callback.
+ *  NdisMSendNetBufferListsComplete - driver-side completion callback.
  *
  *  Called by the NDIS 6 miniport (or its TX completion DPC) when one or more
  *  wrapper NBLs have been transmitted. Walks the chain, recovers the original
@@ -229,12 +235,12 @@ NdisMSendNetBufferListsComplete(
     if (Adapter == NULL || !Adapter->IsNdis6)
         return;
 
-    /* Phase 8: walk the chain in reverse order — bottommost filter sees
+    /* Phase 8: walk the chain in reverse order - bottommost filter sees
      * the completion first, then up through each filter, finally to
      * Ndis6FilterTerminalSendComplete which routes to MiniSendComplete.
      *
      * The driver may complete a chain of NBLs in one call. We split the
-     * chain so each NBL gets its own walk through the filter stack —
+     * chain so each NBL gets its own walk through the filter stack -
      * filters are allowed to reorder, drop, or hold NBLs independently. */
     for (CurrentNbl = NetBufferList; CurrentNbl != NULL; CurrentNbl = NextNbl)
     {
@@ -246,7 +252,7 @@ NdisMSendNetBufferListsComplete(
 }
 
 /* ============================================================================
- *  Ndis6FilterTerminalSendComplete — top-of-chain TX completion handler.
+ *  Ndis6FilterTerminalSendComplete - top-of-chain TX completion handler.
  *  Called by Ndis6FilterDispatchSendComplete when the chain is empty,
  *  and by NdisFSendNetBufferListsComplete when the topmost filter's
  *  call falls off the head of the chain. Recovers the original
@@ -307,7 +313,7 @@ Ndis6FilterTerminalSendComplete(
 }
 
 /* ============================================================================
- *  B1: Ndis6TxSendPackets — batch send entry
+ *  B1: Ndis6TxSendPackets - batch send entry
  *
  *  Called from protocol.c:NDIS_SendPackets when a legacy protocol hands
  *  us an array of NDIS_PACKETs. Wrap each in an NBL, chain them via
@@ -370,7 +376,7 @@ Ndis6TxSendPackets(
             0, 0, (PMDL)FirstBuffer, 0, TotalLength);
         if (Nbl == NULL)
         {
-            /* Out of wrapper NBLs — drop with RESOURCES so the caller
+            /* Out of wrapper NBLs - drop with RESOURCES so the caller
              * can retry. */
             MiniSendComplete(Adapter, Packet, NDIS_STATUS_RESOURCES);
             continue;
@@ -423,7 +429,7 @@ Ndis6TxSendPackets(
 
     if (HeadNbl != NULL)
     {
-        DbgPrint("NDIS6-TX: Ndis6TxSendPackets batch=%lu adapter=%p\n",
+        DPRINT("NDIS6-TX: Ndis6TxSendPackets batch=%lu adapter=%p\n",
                  Wrapped, Adapter);
         /* Route through the filter chain. With no filters attached, this
          * goes straight to Ndis6FilterTerminalSend which hands the chain
@@ -484,7 +490,7 @@ NdisMCancelSendNetBufferLists(
          entry != &Ext->InFlightNblsTx;
          entry = entry->Flink)
     {
-        /* The LIST_ENTRY link is at MiniportReserved[3] — back-compute the
+        /* The LIST_ENTRY link is at MiniportReserved[3] - back-compute the
          * enclosing NBL. sizeof(PVOID) is the stride of MiniportReserved. */
         PNET_BUFFER_LIST Nbl = (PNET_BUFFER_LIST)
             ((PUCHAR)entry - offsetof(NET_BUFFER_LIST, MiniportReserved) -

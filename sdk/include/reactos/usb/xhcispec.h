@@ -99,9 +99,11 @@ typedef struct  _XHCI_DEVICE_CONTEXT_BASE_ADD_ARRAY
     PHYSICAL_ADDRESS ContextBaseAddr [256];
 } XHCI_DEVICE_CONTEXT_BASE_ADD_ARRAY, *PXHCI_DEVICE_CONTEXT_BASE_ADD_ARRAY;
 
-typedef struct _XHCI_SEGMENT 
+#define XHCI_RING_TRB_COUNT 512
+
+typedef struct _XHCI_SEGMENT
 {
-    XHCI_TRB XhciTrb[256];
+    XHCI_TRB XhciTrb[XHCI_RING_TRB_COUNT];
     PVOID nextSegment;
 } XHCI_SEGMENT, *PXHCI_SEGMENT;
 
@@ -112,6 +114,7 @@ typedef struct _XHCI_RING
     PXHCI_TRB enqueue_pointer;
     PXHCI_SEGMENT enqueue_segment;
     PXHCI_SEGMENT dequeue_segment;
+    ULONG UsedTrbs;
     struct 
     {
         UCHAR ProducerCycleState : 1;
@@ -182,7 +185,23 @@ typedef struct _XHCI_ENDPOINT_CONTEXT
         ULONG AverageTRBLength               : 16;
         ULONG MaxESITPayload                 : 16;
     };
+    /* Offset 14h */
+    struct
+    {
+        ULONG RsvdZ4                         : 32;
+    };
+    /* Offset 18h */
+    struct
+    {
+        ULONG RsvdZ5                         : 32;
+    };
+    /* Offset 1Ch */
+    struct
+    {
+        ULONG RsvdZ6                         : 32;
+    };
 } XHCI_ENDPOINT_CONTEXT, *PXHCI_ENDPOINT_CONTEXT;
+C_ASSERT(sizeof(XHCI_ENDPOINT_CONTEXT) == 32);
 
 typedef struct _XHCI_ISO_ENDPOINT
 {

@@ -1,5 +1,5 @@
 #
-# E1000E — Intel PRO/1000 PCIe NDIS 6.20 driver
+# E1000E - Intel PRO/1000 PCIe NDIS 6.20 driver
 #
 # This is a separate driver from the legacy ../e1000/ NDIS 5.0 variant.
 # It targets NT 6.0+ and uses the NDIS 6 NET_BUFFER_LIST datapath, MSI-X,
@@ -20,8 +20,7 @@ add_definitions(
     -DNDIS_MINIPORT_DRIVER
     -DNDIS_LEGACY_DRIVER=1
     -DNDIS_LEGACY_MINIPORT=1
-    -DNTDDI_VERSION=0x06010000
-    -D_WIN32_WINNT=0x0601)
+    -DNTDDI_VERSION=0x06010000)
 
 list(APPEND SOURCE
     init.c

@@ -3136,7 +3136,7 @@ typedef struct _ACPI_INTERFACE_STANDARD2 {
   PUNREGISTER_FOR_DEVICE_NOTIFICATIONS2 UnregisterForDeviceNotifications;
 } ACPI_INTERFACE_STANDARD2, *PACPI_INTERFACE_STANDARD2;
 
-#if !defined(_AMD64_) && !defined(_ARM_)
+#if !defined(_AMD64_) && !defined(_ARM_) && !defined(_ARM64_)
 #include <pshpack4.h>
 #endif
 
@@ -3348,7 +3348,7 @@ typedef struct _IO_STACK_LOCATION {
   PVOID Context;
 } IO_STACK_LOCATION, *PIO_STACK_LOCATION;
 
-#if !defined(_AMD64_) && !defined(_ARM_)
+#if !defined(_AMD64_) && !defined(_ARM_) && !defined(_ARM64_)
 #include "poppack.h"
 #endif
 
@@ -7671,4 +7671,60 @@ typedef struct _D3COLD_AUX_POWER_AND_TIMING_INTERFACE
     PD3COLD_REQUEST_AUX_POWER RequestAuxPower;
     PD3COLD_REQUEST_PERST_DELAY RequestPerstDelay;
 } D3COLD_AUX_POWER_AND_TIMING_INTERFACE, *PD3COLD_AUX_POWER_AND_TIMING_INTERFACE;
+
+typedef enum _ACPI_REG_TYPE {
+    PM1a_ENABLE,
+    PM1b_ENABLE,
+    PM1a_STATUS,
+    PM1b_STATUS,
+    PM1a_CONTROL,
+    PM1b_CONTROL,
+    GP_STATUS,
+    GP_ENABLE,
+    SMI_CMD,
+    MaxRegType
+} ACPI_REG_TYPE, *PACPI_REG_TYPE;
+
+typedef USHORT (*PREAD_ACPI_REGISTER) (
+  _In_ ACPI_REG_TYPE AcpiReg,
+  _In_ ULONG         Register);
+
+typedef VOID (*PWRITE_ACPI_REGISTER) (
+  _In_ ACPI_REG_TYPE AcpiReg,
+  _In_ ULONG         Register,
+  _In_ USHORT        Value
+  );
+
+typedef struct _ACPI_REGS_INTERFACE_STANDARD {
+    USHORT Size;
+    USHORT Version;
+    PVOID  Context;
+    PINTERFACE_REFERENCE   InterfaceReference;
+    PINTERFACE_DEREFERENCE InterfaceDereference;
+    PREAD_ACPI_REGISTER  ReadAcpiRegister;
+    PWRITE_ACPI_REGISTER WriteAcpiRegister;
+} ACPI_REGS_INTERFACE_STANDARD, *PACPI_REGS_INTERFACE_STANDARD;
+
+typedef NTSTATUS (*PHAL_QUERY_ALLOCATE_PORT_RANGE) (
+  _In_ BOOLEAN IsSparse,
+  _In_ BOOLEAN PrimaryIsMmio,
+  _In_opt_ PVOID VirtBaseAddr,
+  _In_ PHYSICAL_ADDRESS PhysBaseAddr,
+  _In_ ULONG Length,
+  _Out_ PUSHORT NewRangeId
+  );
+
+typedef VOID (*PHAL_FREE_PORT_RANGE)(
+    _In_ USHORT RangeId
+    );
+
+typedef struct _HAL_PORT_RANGE_INTERFACE {
+    USHORT Size;
+    USHORT Version;
+    PVOID  Context;
+    PINTERFACE_REFERENCE   InterfaceReference;
+    PINTERFACE_DEREFERENCE InterfaceDereference;
+    PHAL_QUERY_ALLOCATE_PORT_RANGE QueryAllocateRange;
+    PHAL_FREE_PORT_RANGE FreeRange;
+} HAL_PORT_RANGE_INTERFACE, *PHAL_PORT_RANGE_INTERFACE;
 $endif(_WDMDDK_)

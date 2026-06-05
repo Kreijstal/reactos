@@ -880,8 +880,6 @@ Return Value:
 
             if (Dcb->Specific.Dcb.DirectoryFile == NULL) {
 
-                PDEVICE_OBJECT RealDevice;
-
                 //
                 //  Create the special file object for the directory file, and set
                 //  up its pointers back to the Dcb and the section object pointer.
@@ -891,9 +889,7 @@ Return Value:
                 //  Preallocate a close context since we have no Ccb for this object.
                 //
 
-                RealDevice = Dcb->Vcb->CurrentDevice;
-
-                DirectoryFileObject = IoCreateStreamFileObject( NULL, RealDevice );
+                DirectoryFileObject = IoCreateStreamFileObject( Dcb->Vcb->VirtualVolumeFile, NULL );
                 FatPreallocateCloseContext( Dcb->Vcb);
 
                 FatSetFileObject( DirectoryFileObject,
@@ -999,7 +995,6 @@ Return Value:
 
 {
     PFILE_OBJECT EaFileObject = NULL;
-    PDEVICE_OBJECT RealDevice;
 
     PAGED_CODE();
 
@@ -1011,9 +1006,7 @@ Return Value:
     //  up its pointers back to the Fcb and the section object pointer
     //
 
-    RealDevice = EaFcb->Vcb->CurrentDevice;
-
-    EaFileObject = IoCreateStreamFileObject( NULL, RealDevice );
+    EaFileObject = IoCreateStreamFileObject( EaFcb->Vcb->VirtualVolumeFile, NULL );
 
     _SEH2_TRY {
 
@@ -1496,6 +1489,9 @@ Return Value:
 
                 IO_STATUS_BLOCK Iosb;
 
+                Iosb.Status = STATUS_SUCCESS;
+                Iosb.Information = 0;
+
                 if (WriteThroughToDisk &&
                     FlagOn(IrpContext->Vcb->VcbState, VCB_STATE_FLAG_DEFERRED_FLUSH)) {
 
@@ -1573,6 +1569,9 @@ Return Value:
                                 if (RepinnedToPurge->Bcb[j] != NULL) {
 
                                     if (CcGetFileObjectFromBcb( RepinnedToPurge->Bcb[j] ) == FileObject) {
+
+                                        Iosb.Status = STATUS_SUCCESS;
+                                        Iosb.Information = 0;
 
                                         CcUnpinRepinnedBcb( RepinnedToPurge->Bcb[j],
                                                             FALSE,
@@ -2014,4 +2013,3 @@ Cleanup:
     return Status;
 }
 #endif
-

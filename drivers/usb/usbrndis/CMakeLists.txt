@@ -2,7 +2,7 @@
 # ReactOS USB RNDIS Network Driver
 #
 # Uses NDIS 6.20 with NET_BUFFER_LIST send/receive. On the dev-nt6-1 branch
-# the NDIS 6 stubs live in drivers/network/ndis/ndis/60stubs.c — this
+# the NDIS 6 stubs live in drivers/network/ndis/ndis/60stubs.c - this
 # driver links against those symbols and the usbrndis/ndis6_compat.h
 # shim fills in anything that the mainline ndis.h is still missing.
 #
@@ -15,8 +15,11 @@ add_definitions(
     -DNDIS620_MINIPORT
     -DNDIS_MINIPORT_DRIVER
     -DNDIS_LEGACY_DRIVER=1
-    -DNTDDI_VERSION=0x06010000
-    -D_WIN32_WINNT=0x0601)
+    -DNTDDI_VERSION=0x06010000)
+
+if(REACTOS_TARGET_NT LESS 0x601)
+    add_definitions(-D_WIN32_WINNT=0x0601)
+endif()
 
 list(APPEND SOURCE
     usbrndis.c

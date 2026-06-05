@@ -172,11 +172,15 @@ PartitionHandleStartDevice(
     status = IoSetDeviceInterfaceState(&interfaceName, TRUE);
     if (!NT_SUCCESS(status))
     {
+        ERR("IoSetDeviceInterfaceState VOLUME for %wZ failed 0x%08lx\n",
+            &PartExt->DeviceName, status);
         RtlFreeUnicodeString(&interfaceName);
         RtlInitUnicodeString(&PartExt->VolumeInterfaceName, NULL);
         return status;
     }
 
+    DPRINT1("partmgr: %wZ ready, MountMgr will be notified via %wZ\n",
+            &PartExt->DeviceName, &PartExt->VolumeInterfaceName);
     return STATUS_SUCCESS;
 }
 
@@ -350,11 +354,18 @@ PartitionHandleRemove(
 
     if (FinalRemove)
     {
-        ASSERT(PartExt->DeviceName.Buffer);
         if (PartExt->DeviceName.Buffer)
         {
             INFO("Removed device %wZ\n", &PartExt->DeviceName);
             RtlFreeUnicodeString(&PartExt->DeviceName);
+        }
+        else
+        {
+            /*
+             * DeviceName was never allocated (e.g. surprise removal
+             * arrived before the partition was fully started).
+             */
+            DPRINT1("PartitionHandleRemove: DeviceName already NULL, skipping free\n");
         }
 
         IoDeleteDevice(PartExt->DeviceObject);
@@ -762,6 +773,8 @@ PartitionHandleDeviceControl(
         case IOCTL_DISK_VERIFY:
         {
             PVERIFY_INFORMATION verifyInfo = Irp->AssociatedIrp.SystemBuffer;
+            PIO_STACK_LOCATION nextStack;
+
             if (!VerifyIrpInBufferSize(Irp, sizeof(*verifyInfo)))
             {
                 status = STATUS_INFO_LENGTH_MISMATCH;
@@ -769,8 +782,11 @@ PartitionHandleDeviceControl(
             }
 
             // Partition device should just adjust the starting offset
+            IoCopyCurrentIrpStackLocationToNext(Irp);
+            nextStack = IoGetNextIrpStackLocation(Irp);
             verifyInfo->StartingOffset.QuadPart += partExt->StartingOffset;
-            return ForwardIrpAndForget(DeviceObject, Irp);
+            nextStack->Parameters.DeviceIoControl.Type3InputBuffer = verifyInfo;
+            return IoCallDriver(partExt->LowerDevice, Irp);
         }
         case IOCTL_DISK_UPDATE_PROPERTIES:
         {

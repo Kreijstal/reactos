@@ -1038,19 +1038,17 @@ FORCEINLINE
 VOID
 ExAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
 {
+#if defined(_M_ARM64)
+    if (InterlockedCompareExchangePointer(&PushLock->Ptr,
+                                          (PVOID)EX_PUSH_LOCK_LOCK,
+                                          NULL) != NULL)
+#else
     /* Try acquiring the lock */
     if (InterlockedBitTestAndSet((PLONG)PushLock, EX_PUSH_LOCK_LOCK_V))
-    {
-        /* Someone changed it, use the slow path
-         * (which tracks ownership for DBG builds internally). */
-        ExfAcquirePushLockExclusive(PushLock);
-    }
-    else
-    {
-#if DBG
-        /* Fast path succeeded: record ownership for debug assertions */
-        ExpTrackAcquirePushLock(PushLock);
 #endif
+    {
+        /* Someone changed it, use the slow path */
+        ExfAcquirePushLockExclusive(PushLock);
     }
 
     /* Sanity check */
@@ -1080,17 +1078,18 @@ FORCEINLINE
 BOOLEAN
 ExTryToAcquirePushLockExclusive(PEX_PUSH_LOCK PushLock)
 {
+#if defined(_M_ARM64)
+    if (InterlockedCompareExchangePointer(&PushLock->Ptr,
+                                          (PVOID)EX_PUSH_LOCK_LOCK,
+                                          NULL) != NULL)
+#else
     /* Try acquiring the lock */
     if (InterlockedBitTestAndSet((PLONG)PushLock, EX_PUSH_LOCK_LOCK_V))
+#endif
     {
         /* Can't acquire */
         return FALSE;
     }
-
-#if DBG
-    /* Record ownership for debug assertions */
-    ExpTrackAcquirePushLock(PushLock);
-#endif
 
     /* Got acquired */
     ASSERT (PushLock->Locked);
@@ -1126,16 +1125,8 @@ ExAcquirePushLockShared(PEX_PUSH_LOCK PushLock)
     NewValue.Value = EX_PUSH_LOCK_LOCK | EX_PUSH_LOCK_SHARE_INC;
     if (ExpChangePushlock(PushLock, NewValue.Ptr, 0))
     {
-        /* Someone changed it, use the slow path
-         * (which tracks ownership for DBG builds internally). */
+        /* Someone changed it, use the slow path */
         ExfAcquirePushLockShared(PushLock);
-    }
-    else
-    {
-#if DBG
-        /* Fast path succeeded: record ownership for debug assertions */
-        ExpTrackAcquirePushLock(PushLock);
-#endif
     }
 
     /* Sanity checks */
@@ -1245,16 +1236,8 @@ ExReleasePushLockShared(PEX_PUSH_LOCK PushLock)
     OldValue.Value = EX_PUSH_LOCK_LOCK | EX_PUSH_LOCK_SHARE_INC;
     if (ExpChangePushlock(PushLock, 0, OldValue.Ptr) != OldValue.Ptr)
     {
-        /* There are still other people waiting on it
-         * (slow path drops the tracking entry internally). */
+        /* There are still other people waiting on it */
         ExfReleasePushLockShared(PushLock);
-    }
-    else
-    {
-#if DBG
-        /* Fast path cleared the lock: drop our tracking entry */
-        ExpTrackReleasePushLock(PushLock);
-#endif
     }
 }
 
@@ -1287,13 +1270,6 @@ ExReleasePushLockExclusive(PEX_PUSH_LOCK PushLock)
 
     /* Sanity checks */
     ASSERT(PushLock->Locked);
-
-#if DBG
-    /* Drop our ownership record before the lock word flips. The
-     * fast-path below never routes through the Exf slow path, so
-     * this is the only place tracking can happen for it. */
-    ExpTrackReleasePushLock(PushLock);
-#endif
 
     /* Unlock the pushlock */
     OldValue.Value = InterlockedExchangeAddSizeT((PSIZE_T)PushLock,
@@ -1357,16 +1333,8 @@ ExReleasePushLock(PEX_PUSH_LOCK PushLock)
         (ExpChangePushlock(PushLock, NewValue.Ptr, OldValue.Ptr) !=
          OldValue.Ptr))
     {
-        /* We have waiters, use the long path
-         * (which drops the tracking entry internally). */
+        /* We have waiters, use the long path */
         ExfReleasePushLock(PushLock);
-    }
-    else
-    {
-#if DBG
-        /* Fast path succeeded: drop our tracking entry */
-        ExpTrackReleasePushLock(PushLock);
-#endif
     }
 }
 

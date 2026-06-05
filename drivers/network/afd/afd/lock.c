@@ -60,7 +60,7 @@ PVOID LockRequest( PIRP Irp,
                 return NULL;
             }
 
-            /* SEH-guarded copy from user space — bypasses ReactOS's
+            /* SEH-guarded copy from user space - bypasses ReactOS's
              * broken MmProbeAndLockPages. */
             _SEH2_TRY {
                 RtlCopyMemory(KernelBuffer, UserBuffer, BufferLength);
@@ -93,9 +93,15 @@ PVOID LockRequest( PIRP Irp,
 
             /* DriverContext[0] = the working kernel buffer.
              * DriverContext[1] = original user buffer if writeback needed,
-             *                    NULL otherwise. */
+             *                    NULL otherwise.
+             * DriverContext[2] = originating PEPROCESS (for KeStackAttachProcess
+             *                    in UnlockRequest, since IRP completion may
+             *                    fire from a TDI worker thread that is not
+             *                    in the requestor's address space). */
             Irp->Tail.Overlay.DriverContext[0] = KernelBuffer;
             Irp->Tail.Overlay.DriverContext[1] = Output ? UserBuffer : NULL;
+            Irp->Tail.Overlay.DriverContext[2] = (Output && UserBuffer) ?
+                                                 PsGetCurrentProcess() : NULL;
 
             if (LockMode != NULL)
                 *LockMode = UserMode;
@@ -181,6 +187,8 @@ PVOID LockRequest( PIRP Irp,
              * kernel buffer and there's no writeback needed. */
             Irp->Tail.Overlay.DriverContext[1] =
                 (IrpSp->MajorFunction == IRP_MJ_READ) ? UserBuffer : NULL;
+            Irp->Tail.Overlay.DriverContext[2] =
+                (IrpSp->MajorFunction == IRP_MJ_READ) ? PsGetCurrentProcess() : NULL;
 
             if (LockMode != NULL)
                 *LockMode = KernelMode;
@@ -233,11 +241,23 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
 
     if (UserBuffer != NULL && KernelBuffer != NULL)
     {
+        /* IRP completion may run from a TDI worker thread; attach back to
+         * the requestor before touching the user-mode VA. */
+        PEPROCESS OriginalProcess = (PEPROCESS)Irp->Tail.Overlay.DriverContext[2];
+        KAPC_STATE ApcState;
+        BOOLEAN Attached = FALSE;
+        if (OriginalProcess != NULL && OriginalProcess != PsGetCurrentProcess())
+        {
+            KeStackAttachProcess((PKPROCESS)OriginalProcess, &ApcState);
+            Attached = TRUE;
+        }
         _SEH2_TRY {
             RtlCopyMemory(UserBuffer, KernelBuffer, ByteCount);
         } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-            /* User buffer went away — keep going. */
+            /* User buffer went away - keep going. */
         } _SEH2_END;
+        if (Attached)
+            KeUnstackDetachProcess(&ApcState);
     }
 
     if (IsRecvInfo)
@@ -379,7 +399,7 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
                 ExFreePoolWithTag(NewBuf, TAG_AFD_WSA_BUFFER);
                 return NULL;
             }
-            /* Lock the MDL via KernelMode probe — kernel pool is always
+            /* Lock the MDL via KernelMode probe - kernel pool is always
              * resident so this should always succeed. We deliberately
              * do NOT use MmBuildMdlForNonPagedPool because that sets
              * MDL_SOURCE_IS_NONPAGED_POOL which trips an assertion in
@@ -406,11 +426,16 @@ PAFD_WSABUF LockBuffers( PAFD_WSABUF Buf, UINT Count,
              * reuse BufferAddress here because SatisfyPacketRecvRequest,
              * TryToSatisfyRecvRequestFromBuffer, and AfdConnectedSocketWriteData
              * all transiently overwrite BufferAddress with the result of
-             * MmMapLockedPages — which destroys the user pointer before
+             * MmMapLockedPages - which destroys the user pointer before
              * UnlockBuffers can read it. SEND buffers don't need a
              * writeback (kernel only reads from them). */
             MapBuf[i].BufferAddress = NULL;
             MapBuf[i].OriginalUserBuffer = Write ? UserBuf : NULL;
+            /* Capture the originating process. UnlockBuffers can run from
+             * a TDI completion (ReceiveComplete → ReceiveActivity) in the
+             * context of an unrelated thread, so we must KeStackAttachProcess
+             * back to this process before touching OriginalUserBuffer. */
+            MapBuf[i].OriginalProcess = (Write && UserBuf) ? PsGetCurrentProcess() : NULL;
 
             /* Re-point the WSABUF entry at the kernel copy so that any
              * downstream code (e.g. DGDeliverData copying into Current->Buffer
@@ -433,7 +458,7 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
 
     /* dev-nt6-1: each MapBuf entry now wraps a kernel-pool buffer that
      * was set up by LockBuffers. For read (RX) buffers, Map[i].OriginalUserBuffer
-     * holds the original user-mode pointer — copy back via SEH so the
+     * holds the original user-mode pointer - copy back via SEH so the
      * user-mode recv() returns the data. For write (TX) buffers,
      * OriginalUserBuffer is NULL and there's nothing to copy back.
      * BufferAddress is NOT used here because downstream callers
@@ -445,20 +470,36 @@ VOID UnlockBuffers( PAFD_WSABUF Buf, UINT Count, BOOL Address ) {
             PVOID KernelBuf = Buf[i].buf;                /* kernel copy */
             PVOID UserBuf   = Map[i].OriginalUserBuffer; /* original user ptr */
             ULONG Len       = Buf[i].len;
+            PEPROCESS OriginalProcess = Map[i].OriginalProcess;
 
             if (UserBuf != NULL && KernelBuf != NULL && Len > 0)
             {
+                /* IRP completion may fire from a TDI worker thread in
+                 * arbitrary process context. Attach back to the requestor
+                 * so the user-mode VA resolves correctly; without this the
+                 * writeback hits whatever process is currently on the CPU
+                 * and recv() returns N bytes of zeros to the caller. */
+                KAPC_STATE ApcState;
+                BOOLEAN Attached = FALSE;
+                if (OriginalProcess != NULL && OriginalProcess != PsGetCurrentProcess())
+                {
+                    KeStackAttachProcess((PKPROCESS)OriginalProcess, &ApcState);
+                    Attached = TRUE;
+                }
                 _SEH2_TRY {
                     RtlCopyMemory(UserBuf, KernelBuf, Len);
                 } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-                    /* User buffer went away — keep going. */
+                    /* User buffer went away - keep going. */
                 } _SEH2_END;
+                if (Attached)
+                    KeUnstackDetachProcess(&ApcState);
             }
 
             MmUnlockPages( Map[i].Mdl );
             IoFreeMdl( Map[i].Mdl );
             Map[i].Mdl = NULL;
             Map[i].OriginalUserBuffer = NULL;
+            Map[i].OriginalProcess = NULL;
 
             if (KernelBuf != NULL)
                 ExFreePoolWithTag(KernelBuf, TAG_AFD_DATA_BUFFER);

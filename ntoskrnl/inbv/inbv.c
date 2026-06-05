@@ -10,7 +10,9 @@
 /* INCLUDES ******************************************************************/
 
 #include <ntoskrnl.h>
+#include <reactos/arc/arc.h>
 #include "inbv/logo.h"
+#include "inbv/inbvgop.h"
 
 /* GLOBALS *******************************************************************/
 
@@ -49,6 +51,10 @@ static BT_PROGRESS_INDICATOR InbvProgressIndicator = {0, 25, 0};
 
 static ULONG ResourceCount = 0;
 static PUCHAR ResourceList[1 + IDB_MAX_RESOURCES]; // First entry == NULL, followed by 'ResourceCount' entries.
+static LOADER_PARAMETER_FRAMEBUFFER InbvGopFramebuffer;
+static BOOLEAN InbvGopInfoValid = FALSE;
+static LOADER_PARAMETER_BGRT InbvBgrtInfo;
+static BOOLEAN InbvBgrtInfoValid = FALSE;
 
 
 /*
@@ -176,6 +182,21 @@ InbvGetResourceAddress(
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI
+InbvQueryBgrtInfo(
+    _Out_opt_ PLOADER_PARAMETER_BGRT BgrtInfo)
+{
+    if (!InbvBgrtInfoValid)
+        return FALSE;
+
+    if (BgrtInfo)
+        RtlCopyMemory(BgrtInfo, &InbvBgrtInfo, sizeof(*BgrtInfo));
+
+    return TRUE;
+}
+
+CODE_SEG("INIT")
+BOOLEAN
+NTAPI
 InbvDriverInitialize(
     _In_ PLOADER_PARAMETER_BLOCK LoaderBlock,
     _In_ ULONG Count)
@@ -183,9 +204,12 @@ InbvDriverInitialize(
     PCHAR CommandLine;
     BOOLEAN ResetMode = FALSE; // By default do not reset the video mode
     ULONG i;
+    PLOADER_PARAMETER_EXTENSION Extension;
 
     /* Quit if we're already installed */
     if (InbvBootDriverInstalled) return TRUE;
+
+    Extension = LoaderBlock->Extension;
 
     /* Initialize the lock and check the current display state */
     KeInitializeSpinLock(&BootDriverLock);
@@ -194,6 +218,46 @@ InbvDriverInitialize(
         /* Reset the video mode in case we do not have a custom boot logo */
         CommandLine = (LoaderBlock->LoadOptions ? _strupr(LoaderBlock->LoadOptions) : NULL);
         ResetMode   = (CommandLine == NULL) || (strstr(CommandLine, "BOOTLOGO") == NULL);
+
+        /*
+         * On UEFI, the firmware BGRT image is already present in the GOP
+         * framebuffer at kernel handoff. Resetting the boot display here
+         * clears that framebuffer before the UEFI logo path can draw.
+         */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+        if (Extension && Extension->BootViaEFI)
+#else
+        if (Extension &&
+            Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer) &&
+            Extension->GopFramebuffer.FrameBufferBase.QuadPart != 0 &&
+            Extension->GopFramebuffer.FrameBufferSize != 0)
+#endif
+        {
+            ResetMode = FALSE;
+        }
+    }
+
+    if (Extension &&
+        Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer))
+    {
+        if ((Extension->GopFramebuffer.FrameBufferBase.QuadPart != 0) &&
+            (Extension->GopFramebuffer.FrameBufferSize != 0))
+        {
+            RtlCopyMemory(&InbvGopFramebuffer,
+                          &Extension->GopFramebuffer,
+                          sizeof(InbvGopFramebuffer));
+            InbvGopInfoValid = TRUE;
+        }
+
+        if (Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, BgrtInfo) &&
+            Extension->BgrtInfo.Valid &&
+            Extension->BgrtInfo.ImageAddress != 0)
+        {
+            RtlCopyMemory(&InbvBgrtInfo,
+                          &Extension->BgrtInfo,
+                          sizeof(InbvBgrtInfo));
+            InbvBgrtInfoValid = TRUE;
+        }
     }
 
     /* Initialize the video */
@@ -410,6 +474,8 @@ NTAPI
 InbvNotifyDisplayOwnershipLost(
     _In_ INBV_RESET_DISPLAY_PARAMETERS Callback)
 {
+    InbvGopSpinnerStop();
+
     /* Check if we're installed */
     if (InbvBootDriverInstalled)
     {
@@ -709,6 +775,18 @@ InbvUpdateProgressBar(
 
         BootAnimTickProgressBar(TotalProgress);
     }
+}
+
+BOOLEAN
+NTAPI
+InbvGetGopFrameBufferInfo(
+    _Out_ PLOADER_PARAMETER_FRAMEBUFFER FrameBufferInfo)
+{
+    if (!FrameBufferInfo || !InbvGopInfoValid)
+        return FALSE;
+
+    RtlCopyMemory(FrameBufferInfo, &InbvGopFramebuffer, sizeof(InbvGopFramebuffer));
+    return TRUE;
 }
 
 NTSTATUS

@@ -770,6 +770,9 @@ NtCreateDirectoryObject(OUT PHANDLE DirectoryHandle,
     HANDLE NewHandle;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     NTSTATUS Status;
+#ifdef _M_ARM64
+    ULONG i;
+#endif
     PAGED_CODE();
 
     /* Check if we need to do any probing */
@@ -801,7 +804,20 @@ NtCreateDirectoryObject(OUT PHANDLE DirectoryHandle,
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Setup the object */
+#ifdef _M_ARM64
+    for (i = 0; i < NUMBER_HASH_BUCKETS; i++)
+    {
+        Directory->HashBuckets[i] = NULL;
+    }
+    Directory->DeviceMap = NULL;
+    Directory->SessionId = 0;
+#if (NTDDI_VERSION == NTDDI_WINXP)
+    Directory->Reserved = 0;
+    Directory->SymbolicLinkUsageCount = 0;
+#endif
+#else
     RtlZeroMemory(Directory, sizeof(OBJECT_DIRECTORY));
+#endif
     ExInitializePushLock(&Directory->Lock);
     Directory->SessionId = -1;
 

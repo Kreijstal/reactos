@@ -84,6 +84,12 @@ _dump_context(PCONTEXT pc)
     DbgPrint("R4:  %08lx   R5:  %08lx   R6:  %08lx   R7:  %08lx\n", pc->R4, pc->R5, pc->R6, pc->R7);
     DbgPrint("R8:  %08lx   R9:  %08lx   R10: %08lx   R11: %08lx\n", pc->R8, pc->R9, pc->R10, pc->R11);
     DbgPrint("R12: %08lx   CPSR: %08lx  FPSCR: %08lx\n", pc->R12, pc->Cpsr, pc->Fpscr);
+#elif defined(_M_ARM64)
+    DbgPrint("PC:  %I64x   LR:  %I64x   SP:  %I64x\n", pc->Pc, pc->Lr, pc->Sp);
+    DbgPrint("X0:  %I64x   X1:  %I64x   X2:  %I64x   X3:  %I64x\n", pc->X0, pc->X1, pc->X2, pc->X3);
+    DbgPrint("X4:  %I64x   X5:  %I64x   X6:  %I64x   X7:  %I64x\n", pc->X4, pc->X5, pc->X6, pc->X7);
+    DbgPrint("X8:  %I64x   X9:  %I64x   X10: %I64x   X11: %I64x\n", pc->X8, pc->X9, pc->X10, pc->X11);
+    DbgPrint("X12: %I64x   FP:  %I64x   CPSR: %08lx\n", pc->X12, pc->Fp, pc->Cpsr);
 #else
     #error "Unknown architecture"
 #endif
@@ -1044,5 +1050,30 @@ GetLastError(VOID)
     /* Return the current value */
     return NtCurrentTeb()->LastErrorValue;
 }
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+/*
+ * @implemented
+ *
+ * Win7+ fail-fast exception API: terminate the process unconditionally
+ * with the fail-fast status, bypassing all unhandled-exception filters.
+ * Used by CRT __fastfail and friends to abort on integrity violations
+ * (stack-cookie failure, heap corruption, etc.).  Real Windows can
+ * optionally route through a Watson-style reporter; we just terminate,
+ * which is the documented worst-case behaviour and matches the runtime
+ * contract callers rely on.
+ */
+VOID
+WINAPI
+RaiseFailFastException(IN PEXCEPTION_RECORD ExceptionRecord OPTIONAL,
+                       IN PCONTEXT ContextRecord OPTIONAL,
+                       IN DWORD Flags)
+{
+    (void)ExceptionRecord;
+    (void)ContextRecord;
+    (void)Flags;
+    TerminateProcess(GetCurrentProcess(), STATUS_FAIL_FAST_EXCEPTION);
+}
+#endif
 
 /* EOF */
