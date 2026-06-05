@@ -21,7 +21,12 @@ list(APPEND DISPLAY_SOURCE
     virtgpu_shared.h)
 
 add_library(virtgpu_disp MODULE ${DISPLAY_SOURCE})
-set_target_properties(virtgpu_disp PROPERTIES OUTPUT_NAME "virtgpu")
+# The miniport (virtgpu.sys) and the display driver (virtgpu.dll) intentionally
+# share the "virtgpu" output name, but every MSVC link PDB lands in the shared
+# msvc_pdb directory named after OUTPUT_NAME - so both would write virtgpu.pdb
+# concurrently and the linker fails with LNK1201. Give the display PDB its own
+# name; the shipped binary stays virtgpu.dll.
+set_target_properties(virtgpu_disp PROPERTIES OUTPUT_NAME "virtgpu" PDB_NAME "virtgpu_disp")
 set_module_type(virtgpu_disp kerneldll ENTRYPOINT DrvEnableDriver 12)
 target_link_libraries(virtgpu_disp libcntpr)
 add_importlibs(virtgpu_disp win32k)
