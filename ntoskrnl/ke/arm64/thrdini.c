@@ -405,6 +405,7 @@ KiSwapContextResume(
     {
         Prcb->KeContextSwitches++;
         Prcb->CurrentThread = NewThread;
+        Prcb->RspBase = (ULONG_PTR)NewThread->InitialStack;
     }
 #ifndef CONFIG_SMP
     KeArm64CurrentThread = NewThread;
@@ -591,6 +592,8 @@ KiDispatchInterrupt(VOID)
         KxQueueReadyThread(OldThread, Prcb);
 
         KiSwapContext(APC_LEVEL, OldThread);
+
+        KiReleasePrcbLock(Prcb);
     }
 
     /*

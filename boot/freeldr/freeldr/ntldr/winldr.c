@@ -1387,17 +1387,27 @@ LoadAndBootWindows(
     NtLdrNormalizeOptions(BootOptions);
     TRACE("BootOptions(2): '%s'\n", BootOptions);
 
-    /* Check if a RAM disk file was given */
+    /* Check if a RAM disk is needed: either an explicit RDPATH= file,
+     * a writable ramdisk size request, or a ramdisk boot path. */
     FileName = NtLdrGetOptionEx(BootOptions, "RDPATH=", &FileNameLength);
-    if (FileName && (FileNameLength >= 7))
+    if ((FileName && (FileNameLength >= 7)) ||
+        NtLdrGetOption(BootOptions, "RDRAMSIZE=") ||
+        _strnicmp(BootPath, "ramdisk(", 8) == 0)
     {
         /* Load the RAM disk */
         Status = RamDiskInitialize(FALSE, BootOptions, SystemPartition);
         if (Status != ESUCCESS)
         {
-            FileName += 7; FileNameLength -= 7;
-            UiMessageBox("Failed to load RAM disk file '%.*s'",
-                         FileNameLength, FileName);
+            if (FileName && (FileNameLength >= 7))
+            {
+                FileName += 7; FileNameLength -= 7;
+                UiMessageBox("Failed to load RAM disk file '%.*s'",
+                             FileNameLength, FileName);
+            }
+            else
+            {
+                UiMessageBox("Failed to initialize RAM disk");
+            }
             return Status;
         }
     }

@@ -23,8 +23,14 @@ list(APPEND UCRT_STDLIB_SOURCES
     stdlib/rotr.cpp
 )
 
-if(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT ARCH STREQUAL "arm64")
-    add_asm_files(UCRT_STDLIB_ASM stdlib/clang-hacks.s)
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    if(ARCH STREQUAL "arm64")
+        list(APPEND UCRT_STDLIB_ASM_SOURCES stdlib/arm64/clang-hacks.s)
+    else()
+        list(APPEND UCRT_STDLIB_ASM_SOURCES stdlib/clang-hacks.s)
+    endif()
+
+    add_asm_files(UCRT_STDLIB_ASM ${UCRT_STDLIB_ASM_SOURCES})
     list(APPEND UCRT_STDLIB_SOURCES
         ${UCRT_STDLIB_ASM}
     )

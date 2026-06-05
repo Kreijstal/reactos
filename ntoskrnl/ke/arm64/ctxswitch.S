@@ -65,16 +65,8 @@ KiThreadStartup:
      */
 	    .seh_endprologue
 
-	    ldr     x9, =0xFFFFFC0009000000
-	    mov     w10, #'T'
-	    strb    w10, [x9]
-	    mov     w10, #'E'
-	    strb    w10, [x9]
-	    mov     w10, #'\n'
-	    strb    w10, [x9]
-
-	    /*
-	     * ARM64 ABI: keep x18 as the kernel platform register while still in EL1.
+		    /*
+		     * ARM64 ABI: keep x18 as the kernel platform register while still in EL1.
      *
      * User-mode TEB state is programmed only in KiTrapReturn immediately
      * before ERET to EL0. Clobbering x18 with KTHREAD.Teb here corrupts the
@@ -108,16 +100,8 @@ KiThreadStartup:
 	    ldr     x19, [sp, #SfStartRoutine]
 	    ldr     x20, [sp, #SfStartContext]
 
-	    ldr     x9, =0xFFFFFC0009000000
-	    mov     w10, #'T'
-	    strb    w10, [x9]
-	    mov     w10, #'L'
-	    strb    w10, [x9]
-	    mov     w10, #'\n'
-	    strb    w10, [x9]
-
-	    /* Pop the start frame before invoking the system routine; SP stays aligned */
-	    add     sp, sp, #KSTART_FRAME_LENGTH
+		    /* Pop the start frame before invoking the system routine; SP stays aligned */
+		    add     sp, sp, #KSTART_FRAME_LENGTH
 
     /*
      * CRITICAL: Lower IRQL to APC_LEVEL before calling the system routine.
@@ -134,31 +118,16 @@ KiThreadStartup:
 	    mov     w0, #APC_LEVEL
 	    bl      KfLowerIrql
 
-	    ldr     x9, =0xFFFFFC0009000000
-	    mov     w10, #'T'
-	    strb    w10, [x9]
-	    mov     w10, #'I'
-	    strb    w10, [x9]
-	    mov     w10, #'\n'
-	    strb    w10, [x9]
-
-	    /* ARM64: x2 = SystemRoutine, x0 = StartRoutine, x1 = StartContext */
-	    mov     x0, x19
+		    /* ARM64: x2 = SystemRoutine, x0 = StartRoutine, x1 = StartContext */
+		    mov     x0, x19
     mov     x1, x20
     mov     x2, x21
 
 	    /* Validate SystemRoutine is non-NULL before calling */
 	    cbz     x21, .Lbad_sysroutine
 
-	    ldr     x9, =0xFFFFFC0009000000
-	    mov     w10, #'T'
-	    strb    w10, [x9]
-	    mov     w10, #'C'
-	    strb    w10, [x9]
-	    mov     w10, #'\n'
-	    strb    w10, [x9]
-	    mov     x0, x19
-	    mov     x1, x20
+		    mov     x0, x19
+		    mov     x1, x20
 	    mov     x2, x21
 
 	    /* Start the thread - call SystemRoutine(StartRoutine, StartContext) */
@@ -245,6 +214,7 @@ KiSwapContext:
     str     x30, [sp, #SwReturn]   /* Save caller's return address */
     adr     x9, .Lrestore_context  /* Get address of restore label */
     str     x9, [sp, #SwLr]        /* Save for KiSwapContextInternal */
+    strb    wzr, [sp, #SwApcBypass]
 
     /*
      * Locate the target (new) thread from the per-CPU PCR.

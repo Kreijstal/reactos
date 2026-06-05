@@ -124,10 +124,13 @@
 @ stdcall -stub -version=0x600+ EtwpNotificationThread() ; doesn't exist in win11
 @ stdcall -stub -version=0x502 EtwpSetHWConfigFunction(ptr long)
 @ stdcall -arch=x86_64 ExpInterlockedPopEntrySListEnd()
+@ stdcall -arch=arm64 ExpInterlockedPopEntrySListEnd(ptr)
 @ stub -version=0x600+ -arch=x86_64 ExpInterlockedPopEntrySListEnd8
 @ stdcall -arch=x86_64 ExpInterlockedPopEntrySListFault()
+@ stdcall -arch=arm64 ExpInterlockedPopEntrySListFault(ptr)
 @ stub -version=0x600+ -arch=x86_64 ExpInterlockedPopEntrySListFault8
 @ stdcall -arch=x86_64 ExpInterlockedPopEntrySListResume()
+@ stdcall -arch=arm64 ExpInterlockedPopEntrySListResume(ptr)
 @ stub -version=0x600+ -arch=x86_64 ExpInterlockedPopEntrySListResume8
 @ stdcall -arch=i386 KiFastSystemCall()
 @ stdcall -arch=i386 KiFastSystemCallRet()
@@ -1250,7 +1253,8 @@
 @ stdcall RtlUpperChar(long)
 @ stdcall RtlUpperString(ptr ptr)
 @ stdcall -version=0x502 RtlUsageHeap(ptr long ptr)
-@ stdcall -stub -version=0x600+ RtlUserThreadStart(long long)
+@ stdcall -stub -version=0x600+ -arch=i386,x86_64,arm RtlUserThreadStart(long long)
+@ stdcall -version=0x600+ -arch=arm64 RtlUserThreadStart(long long)
 @ stdcall RtlValidAcl(ptr)
 @ stdcall RtlValidRelativeSecurityDescriptor(ptr long long)
 @ stdcall RtlValidSecurityDescriptor(ptr)
@@ -1803,6 +1807,7 @@
 @ cdecl _itow(long ptr long)
 @ cdecl _lfind(ptr ptr ptr long ptr)
 @ cdecl -arch=x86_64 _local_unwind()
+@ cdecl -arch=arm64 _local_unwind(ptr ptr)
 @ cdecl _ltoa(long ptr long)
 @ cdecl _ltow(long ptr long)
 @ cdecl _memccpy(ptr ptr long long)

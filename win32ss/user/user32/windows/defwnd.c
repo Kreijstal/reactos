@@ -20,6 +20,8 @@ GetSysColor(int nIndex)
 {
   if(nIndex >= 0 && nIndex < NUM_SYSCOLORS)
   {
+    if (!User32EnsureUserConnect())
+        return 0;
 #if !defined(BUILD_WOW6432)
     return gpsi->argbSystem[nIndex];
 #else
@@ -41,6 +43,8 @@ GetSysColorBrush(int nIndex)
 {
   if(nIndex >= 0 && nIndex < NUM_SYSCOLORS)
   {
+    if (!User32EnsureUserConnect())
+        return NULL;
 #if !defined(BUILD_WOW6432)
     return gpsi->ahbrSystem[nIndex];
 #else

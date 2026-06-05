@@ -59,6 +59,8 @@ extern HINSTANCE ghmodUserApiHook;
 extern HICON hIconSmWindows, hIconWindows;
 extern Imm32ApiTable gImmApiEntries;
 
+BOOL User32EnsureUserConnect(VOID);
+
 #define IMM_FN(name) gImmApiEntries.p##name
 
 #define IS_ATOM(x) \

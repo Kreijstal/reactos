@@ -758,27 +758,13 @@ KfLowerIrql(
     {
         PKTHREAD Thread = KeGetCurrentThread();
 
-        /*
-         * Only deliver APCs when interrupts are enabled. During
-         * KeThawExecution (KdExitDebugger path), KeLowerIrql is called
-         * while DAIF.I is still set. Delivering APCs with interrupts
-         * disabled can hang because APC routines may need I/O interrupts.
-         * Also skip if lowering from HIGH_LEVEL (debugger/freeze context)
-         * to avoid re-entrancy in the KD path.
-         */
         if (Thread &&
             Thread->ApcState.KernelApcPending &&
             !Thread->SpecialApcDisable)
         {
-            ULONG64 Daif;
-            __asm__ __volatile__("mrs %0, daif" : "=r"(Daif));
-            if (!(Daif & (1ULL << 7)))  /* Check DAIF.I (bit 7) - IRQ not masked */
-            {
-                /* Deliver kernel APCs at APC_LEVEL */
-                KiSetCurrentIrql(APC_LEVEL);
-                KiDeliverApc(KernelMode, NULL, NULL);
-                KiSetCurrentIrql(PASSIVE_LEVEL);
-            }
+            KiSetCurrentIrql(APC_LEVEL);
+            KiDeliverApc(KernelMode, NULL, NULL);
+            KiSetCurrentIrql(PASSIVE_LEVEL);
         }
     }
 }

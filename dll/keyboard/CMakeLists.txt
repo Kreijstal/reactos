@@ -104,6 +104,15 @@ foreach(_keyboard_layout ${_keyboard_layouts})
         # Merge the .text and .rdata section into the .data section. Clang-cl
         # also satisfies MSVC here and drives lld-link, which accepts these.
         target_link_options(${_keyboard_layout} PRIVATE "/ignore:4254;/SECTION:.data,ER;/MERGE:.text=.data;/MERGE:.rdata=.data;/MERGE:.bss=.data;/MERGE:.edata=.data")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang" AND DEFINED LLVM_MINGW_PREFIX)
+        # LLVM-MinGW drives ld.lld's PE/COFF frontend. It does not support GNU
+        # linker scripts for PE images, so pass the equivalent COFF options.
+        target_link_options(${_keyboard_layout} PRIVATE
+            "SHELL:-Xlinker --Xlink -Xlinker /section:.data,ER"
+            "SHELL:-Xlinker --Xlink -Xlinker /merge:.text=.data"
+            "SHELL:-Xlinker --Xlink -Xlinker /merge:.rdata=.data"
+            "SHELL:-Xlinker --Xlink -Xlinker /merge:.bss=.data"
+            "SHELL:-Xlinker --Xlink -Xlinker /merge:.edata=.data")
     else()
         # GNU driver (GCC or GNU-mode Clang) drives a GNU-syntax linker that
         # does not understand the MSVC /MERGE switches; use a linker script.
