@@ -40,7 +40,9 @@ typedef struct _KFLOATING_SAVE
 extern NTKERNELAPI volatile KSYSTEM_TIME KeTickCount;
 
 #ifndef _ReadWriteBarrier
+#if defined(__GNUC__) || defined(__clang__)
 #define _ReadWriteBarrier() __asm__ __volatile__("" ::: "memory")
+#endif /* MSVC supplies _ReadWriteBarrier as an intrinsic */
 #endif
 
 FORCEINLINE
@@ -56,13 +58,25 @@ YieldProcessor(
 }
 
 #ifndef MemoryBarrier
+#if defined(__GNUC__) || defined(__clang__)
 #define MemoryBarrier()                      __asm__ __volatile__("dmb sy" ::: "memory")
+#else
+#define MemoryBarrier()                      __dmb(_ARM64_BARRIER_SY)
+#endif
 #endif
 #ifndef PreFetchCacheLine
+#if defined(__GNUC__) || defined(__clang__)
 #define PreFetchCacheLine(l,a)               __builtin_prefetch((const void *)(a))
+#else
+#define PreFetchCacheLine(l,a)               __prefetch((const void *)(a))
+#endif
 #endif
 #ifndef PrefetchForWrite
+#if defined(__GNUC__) || defined(__clang__)
 #define PrefetchForWrite(p)                  __builtin_prefetch((const void *)(p), 1)
+#else
+#define PrefetchForWrite(p)                  __prefetch((const void *)(p))
+#endif
 #endif
 #ifndef ReadForWriteAccess
 #define ReadForWriteAccess(p)                (*(p))
