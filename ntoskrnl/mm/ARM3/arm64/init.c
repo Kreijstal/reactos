@@ -712,64 +712,6 @@ MiArm64MapLoaderProcessorState(
 
 
 /*
- * MiArm64InitPoolPfnEntries - Initialize PFN database entries for nonpaged pool
- *
- * Walks the hardware page tables via KSEG0 direct mapping to find all physical
- * pages mapped in the nonpaged pool VA range, then initializes their PFN entries.
- *
- * This replaces the generic MiBuildPfnDatabaseFromPages scan on ARM64, which
- * iterated 131K PDEs via MmIsAddressValid (taking ~30 seconds on 8GB systems)
- * to do useful work on only the nonpaged pool range.
- *
- * Note: Kernel image / boot driver pages are handled separately by
- * MiArm64InitLoaderMappedPfnEntries() which walks the loader module list.
- */
-CODE_SEG("INIT")
-VOID
-MiArm64InitPoolPfnEntries(VOID)
-{
-    ULONG_PTR PoolStart, PoolEnd, Va;
-
-    PoolStart = (ULONG_PTR)MmNonPagedPoolStart;
-    PoolEnd = PoolStart + MmSizeOfNonPagedPoolInBytes;
-
-    for (Va = PoolStart; Va < PoolEnd; Va += PAGE_SIZE)
-    {
-        PMMPDE PointerPde;
-        PMMPTE PointerPte;
-        PFN_NUMBER DataPfn;
-        PMMPFN Pfn;
-
-        PointerPde = MiAddressToPde((PVOID)Va);
-        if ((PointerPde->u.Long & ARM64_PTE_TYPE_MASK) != ARM64_PTE_TYPE_TABLE)
-        {
-            continue;
-        }
-
-        PointerPte = MiAddressToPte((PVOID)Va);
-        if ((PointerPte->u.Long & ARM64_PTE_TYPE_MASK) != ARM64_PTE_TYPE_PAGE)
-        {
-            continue;
-        }
-
-        DataPfn = PFN_FROM_PTE(PointerPte);
-        if (DataPfn > MmHighestPhysicalPage)
-        {
-            continue;
-        }
-
-        Pfn = MiGetPfnEntry(DataPfn);
-        RtlZeroMemory(Pfn, sizeof(*Pfn));
-        Pfn->u4.PteFrame = PFN_FROM_PDE(PointerPde);
-        Pfn->PteAddress = MiAddressToPte((PVOID)Va);
-        Pfn->u2.ShareCount = 1;
-        Pfn->u3.e2.ReferenceCount = 1;
-        Pfn->u3.e1.PageLocation = ActiveAndValid;
-        Pfn->u3.e1.CacheAttribute = MiNonCached;
-    }
-}
-
-/*
  * MiArm64InitLoaderMappedPfnEntries - Initialize PFN entries for boot-loaded modules
  *
  * Walk the TTBR1 recursive self-map to initialize PFN entries for both data
@@ -1934,7 +1876,6 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
         KeInitializeSpinLock(&MmNonPagedPoolLock);
         InitializePool(NonPagedPool, 0);
         KeInitializeSpinLock(&NonPagedPoolLock);
-        KeInitializeSpinLock(&MmNonPagedPoolLock);
         ExpArm64PoolBootstrapMode = FALSE;
 
         MiBuildSystemPteSpace();
@@ -2299,13 +2240,29 @@ MiMapPTEs(
     {
         if (!PointerPte->u.Hard.Valid)
         {
-            TmplPte.u.Hard.PageFrameNumber = MiArm64AllocatePageTablePage();
+            PFN_NUMBER PageFrameNumber;
+            PMMPDE PointerPde;
+            PMMPFN Pfn;
+
+            PageFrameNumber = MiArm64AllocatePageTablePage();
+            TmplPte.u.Hard.PageFrameNumber = PageFrameNumber;
             *PointerPte = TmplPte;
 
             if (MiArm64ZeroLeafPages)
             {
                 RtlZeroMemory(MiPteToAddress(PointerPte), PAGE_SIZE);
             }
+
+            Pfn = MiGetPfnEntry(PageFrameNumber);
+            ASSERT(Pfn != NULL);
+            ASSERT(Pfn->u3.e2.ReferenceCount == 0);
+
+            PointerPde = MiAddressToPde(MiPteToAddress(PointerPte));
+            Pfn->u4.PteFrame = PFN_FROM_PDE(PointerPde);
+            Pfn->PteAddress = PointerPte;
+            Pfn->u2.ShareCount = 1;
+            Pfn->u3.e2.ReferenceCount = 1;
+            Pfn->u3.e1.PageLocation = ActiveAndValid;
 
             PerformedMappings = TRUE;
         }
@@ -2321,6 +2278,8 @@ static
 VOID
 MiBuildNonPagedPool(VOID)
 {
+    PFN_NUMBER PoolSizingPages = MmNumberOfPhysicalPages;
+
     if (!MxFreeDescriptor)
     {
         KeBugCheckEx(INSTALL_MORE_MEMORY,
@@ -2329,8 +2288,14 @@ MiBuildNonPagedPool(VOID)
                      MmHighestPhysicalPage,
                      1);
     }
+
+    if (PoolSizingPages > MI_ARM64_BOOT_POOL_SIZING_PAGES)
+    {
+        PoolSizingPages = MI_ARM64_BOOT_POOL_SIZING_PAGES;
+    }
+
     /* Check if this is a machine with less than 256MB of RAM, and no override */
-    if ((MmNumberOfPhysicalPages <= MI_MIN_PAGES_FOR_NONPAGED_POOL_TUNING) &&
+    if ((PoolSizingPages <= MI_MIN_PAGES_FOR_NONPAGED_POOL_TUNING) &&
         !(MmSizeOfNonPagedPoolInBytes))
     {
         /* Force the non paged pool to be 2MB so we can reduce RAM usage */
@@ -2353,10 +2318,10 @@ MiBuildNonPagedPool(VOID)
         /* Start with the minimum (256 KB) and add 32 KB for each MB above 4 */
         MmSizeOfNonPagedPoolInBytes = MmMinimumNonPagedPoolSize;
 
-        if (MmNumberOfPhysicalPages > 1024)
+        if (PoolSizingPages > 1024)
         {
             /* 256 pages (4 KiB each) represent one MiB of physical memory */
-            AdditionalMb = (SIZE_T)((MmNumberOfPhysicalPages - 1024) / 256);
+            AdditionalMb = (SIZE_T)((PoolSizingPages - 1024) / 256);
             MmSizeOfNonPagedPoolInBytes += AdditionalMb *
                                            (SIZE_T)MmMinAdditionNonPagedPoolPerMb;
         }
@@ -2386,10 +2351,10 @@ MiBuildNonPagedPool(VOID)
         /* Start with the default (1MB) and add 400 KB for each MB above 4 */
         MmMaximumNonPagedPoolInBytes = MmDefaultMaximumNonPagedPool;
 
-        if (MmNumberOfPhysicalPages > 1024)
+        if (PoolSizingPages > 1024)
         {
             /* 256 pages (4 KiB each) represent one MiB of physical memory */
-            AdditionalMb = (SIZE_T)((MmNumberOfPhysicalPages - 1024) / 256);
+            AdditionalMb = (SIZE_T)((PoolSizingPages - 1024) / 256);
             MmMaximumNonPagedPoolInBytes += AdditionalMb *
                                              (SIZE_T)MmMaxAdditionNonPagedPoolPerMb;
         }
@@ -2422,8 +2387,6 @@ MiBuildNonPagedPool(VOID)
     MiArm64ZeroLeafPages = FALSE;
     MiMapPTEs(MmNonPagedPoolStart, (PCHAR)MmNonPagedPoolExpansionStart - 1);
     MiArm64ZeroLeafPages = TRUE;
-
-    MiArm64InitPoolPfnEntries();
 
     MiInitializeNonPagedPool();
     MiInitializeNonPagedPoolThresholds();
