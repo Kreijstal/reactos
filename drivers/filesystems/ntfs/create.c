@@ -491,6 +491,24 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             return Status;
         }
 
+        /*
+         * For a target-directory open the file object now refers to the parent
+         * directory, so its name must read as that directory's name (matching a
+         * plain open of the same directory) rather than the full path that was
+         * requested. The opened parent FCB carries that path; copy it over the
+         * existing name buffer when it fits (the parent path is a prefix of the
+         * absolute request, and shorter than the relative leaf in practice).
+         */
+        {
+            USHORT ParentNameLength = (USHORT)(wcslen(Fcb->PathName) * sizeof(WCHAR));
+
+            if (ParentNameLength <= FileObject->FileName.MaximumLength)
+            {
+                RtlCopyMemory(FileObject->FileName.Buffer, Fcb->PathName, ParentNameLength);
+                FileObject->FileName.Length = ParentNameLength;
+            }
+        }
+
         Fcb->OpenHandleCount++;
         DeviceExt->OpenHandleCount++;
         ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
