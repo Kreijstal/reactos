@@ -273,6 +273,11 @@ elseif(ARCH STREQUAL "arm")
     add_definitions(-D__MSVCRT__) # DUBIOUS
 endif()
 
+# ARM64 has no PSEH backend; Clang provides real __try/__except, so use it.
+if(ARCH STREQUAL "arm64" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    add_definitions(-D_USE_NATIVE_SEH=1)
+endif()
+
 # Fix build with GLIBCXX + our c++ headers
 add_definitions(-D_GLIBCXX_HAVE_BROKEN_VSWPRINTF)
 
