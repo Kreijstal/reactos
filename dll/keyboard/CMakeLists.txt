@@ -104,8 +104,14 @@ foreach(_keyboard_layout ${_keyboard_layouts})
         # Merge the .text and .rdata section into the .data section. Clang-cl
         # also satisfies MSVC here and drives lld-link, which accepts these.
         target_link_options(${_keyboard_layout} PRIVATE "/ignore:4254;/SECTION:.data,ER;/MERGE:.text=.data;/MERGE:.rdata=.data;/MERGE:.bss=.data;/MERGE:.edata=.data")
+    elseif(ARCH STREQUAL "arm64")
+        # LLVM-MinGW drives ld.lld, whose PE/COFF driver supports neither the
+        # MSVC /MERGE switches nor GNU linker scripts (-T). Link with the default
+        # section layout; merging everything into a single .data section is a
+        # layout optimisation to mirror the original keyboard DLLs, not a
+        # requirement for the layout to load.
     else()
-        # GNU driver (GCC or GNU-mode Clang) drives a GNU-syntax linker that
+        # GNU driver (GCC or GNU-mode Clang) driving a GNU binutils ld, which
         # does not understand the MSVC /MERGE switches; use a linker script.
         target_link_options(${_keyboard_layout} PRIVATE "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/kbdlayout.lds")
     endif()
