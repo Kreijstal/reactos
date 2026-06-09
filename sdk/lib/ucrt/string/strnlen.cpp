@@ -201,8 +201,6 @@ static __forceinline size_t __cdecl common_strnlen(
     return common_strnlen_c<Mode>(string, maximum_count);
 }
 
-#if !defined(_M_ARM64) && !defined(_M_ARM64EC)
-
 extern "C" size_t __cdecl strnlen(
     char const* const string,
     size_t      const maximum_count
@@ -218,6 +216,10 @@ extern "C" size_t __cdecl wcsnlen(
 {
     return common_strnlen<bounded>(reinterpret_cast<uint16_t const*>(string), maximum_count);
 }
+
+// ARM64 provides wcslen out of line in assembly; on the other targets it is
+// defined here in terms of the shared unbounded scan.
+#if !defined(_M_ARM64) && !defined(_M_ARM64EC)
 
 #pragma function(wcslen)
 
