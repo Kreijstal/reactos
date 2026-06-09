@@ -1949,7 +1949,7 @@ IopQueryNameInternal(IN PVOID ObjectBody,
     POBJECT_NAME_INFORMATION LocalInfo;
     PFILE_NAME_INFORMATION LocalFileInfo;
     PFILE_OBJECT FileObject = (PFILE_OBJECT)ObjectBody;
-    ULONG LocalReturnLength, FileLength;
+    ULONG LocalReturnLength, FileLength, AllocLength;
     BOOLEAN LengthMismatch = FALSE;
     NTSTATUS Status;
     PWCHAR p;
@@ -1961,13 +1961,28 @@ IopQueryNameInternal(IN PVOID ObjectBody,
     /* Validate length */
     if (Length < sizeof(OBJECT_NAME_INFORMATION))
     {
-        /* Wrong length, fail */
+#if (NTDDI_VERSION < NTDDI_VISTA)
+        /*
+         * On Windows <= 2003 a buffer too small to even hold the structure
+         * fails immediately, reporting only the structure size.
+         */
         *ReturnLength = sizeof(OBJECT_NAME_INFORMATION);
         return STATUS_INFO_LENGTH_MISMATCH;
+#else
+        /*
+         * On Vista+ the full required length is still computed and returned
+         * (with STATUS_INFO_LENGTH_MISMATCH), so keep going. The name lengths
+         * are probed through a structure-sized scratch buffer instead of the
+         * caller's (too-small) one, and nothing is written back to it.
+         */
+        NOTHING;
+#endif
     }
 
-    /* Allocate Buffer */
-    LocalInfo = ExAllocatePoolWithTag(PagedPool, Length, TAG_IO);
+    /* Allocate the scratch buffer, large enough to at least probe the name */
+    AllocLength = (Length >= sizeof(OBJECT_NAME_INFORMATION)) ?
+                  Length : sizeof(OBJECT_NAME_INFORMATION);
+    LocalInfo = ExAllocatePoolWithTag(PagedPool, AllocLength, TAG_IO);
     if (!LocalInfo) return STATUS_INSUFFICIENT_RESOURCES;
 
     /* Query DOS name if the caller asked to */
@@ -2054,8 +2069,9 @@ IopQueryNameInternal(IN PVOID ObjectBody,
                           Length : LocalReturnLength);
         }
 
-        /* Set buffer pointer */
-        ObjectNameInfo->Name.Buffer = p;
+        /* Set buffer pointer (only when the caller's buffer can hold it) */
+        if (Length >= sizeof(OBJECT_NAME_INFORMATION))
+            ObjectNameInfo->Name.Buffer = p;
 
         /* Advance in buffer */
         p += (LocalInfo->Name.Length / sizeof(WCHAR));
@@ -2083,7 +2099,7 @@ IopQueryNameInternal(IN PVOID ObjectBody,
             BooleanFlagOn(FileObject->Flags, FO_SYNCHRONOUS_IO))
         {
             Status = IopGetFileInformation(FileObject,
-                                           LengthMismatch ? Length : FileLength,
+                                           LengthMismatch ? AllocLength : FileLength,
                                            FileNameInformation,
                                            LocalFileInfo,
                                            &LocalReturnLength);
@@ -2092,7 +2108,7 @@ IopQueryNameInternal(IN PVOID ObjectBody,
         {
             Status = IoQueryFileInformation(FileObject,
                                             FileNameInformation,
-                                            LengthMismatch ? Length : FileLength,
+                                            LengthMismatch ? AllocLength : FileLength,
                                             LocalFileInfo,
                                             &LocalReturnLength);
         }
@@ -2126,8 +2142,13 @@ IopQueryNameInternal(IN PVOID ObjectBody,
             /* Add the required length */
             *ReturnLength += LocalFileInfo->FileNameLength;
 
-            /* Free the allocated buffer and return failure */
-            Status = STATUS_BUFFER_OVERFLOW;
+            /*
+             * Free the allocated buffer and return failure. A buffer too small
+             * to even hold the structure reports the classic length mismatch;
+             * a partially-fitting one overflows.
+             */
+            Status = (Length >= sizeof(OBJECT_NAME_INFORMATION)) ?
+                     STATUS_BUFFER_OVERFLOW : STATUS_INFO_LENGTH_MISMATCH;
             _SEH2_LEAVE;
         }
 
