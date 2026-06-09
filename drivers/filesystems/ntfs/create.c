@@ -462,6 +462,19 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         DPRINT1("Open by ID: %I64x -> %wZ\n", (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK, &FullPath);
     }
 
+    /* A trailing backslash names a directory; drop it so the file object's
+     * stored name matches a plain open of that directory (a later
+     * FileNameInformation query or name compare must not see the separator).
+     * fastfat does the same in FatCommonCreate. Never touch the lone
+     * backslash of the volume root, and leave open-by-id names alone. */
+    if (!(RequestedOptions & FILE_OPEN_BY_FILE_ID) &&
+        FileObject->FileName.Length > sizeof(WCHAR) &&
+        FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR) - 1] == L'\\')
+    {
+        FileObject->FileName.Length -= sizeof(WCHAR);
+        FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
     if (OpenTargetDir)
     {
         ULONG IoInformation;
