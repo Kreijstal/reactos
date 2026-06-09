@@ -1,29 +1,22 @@
 /*
- * PROJECT:     ReactOS system libraries
- * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     ARM64 fiber entry points
+ * PROJECT:     ReactOS System Libraries
+ * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
+ * PURPOSE:     ARM64 fiber stubs
  */
 
 #include <k32.h>
 
-#define NDEBUG
-#include <debug.h>
-
-DECLSPEC_NORETURN
 VOID
-WINAPI
+NTAPI
 BaseFiberStartup(VOID)
 {
-    UNIMPLEMENTED;
-    DbgBreakPoint();
-    ExitThread(ERROR_CALL_NOT_IMPLEMENTED);
+    RtlRaiseStatus(STATUS_NOT_IMPLEMENTED);
 }
 
 VOID
 WINAPI
-SwitchToFiber(IN PVOID Fiber)
+SwitchToFiber(_In_ LPVOID Fiber)
 {
     UNREFERENCED_PARAMETER(Fiber);
-    UNIMPLEMENTED;
-    DbgBreakPoint();
+    RtlRaiseStatus(STATUS_NOT_IMPLEMENTED);
 }
