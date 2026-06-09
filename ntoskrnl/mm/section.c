@@ -4405,7 +4405,8 @@ MmMapViewOfSection(
         }
         else if ((ExGetPreviousMode() == UserMode) &&
             (((*ViewSize)+ViewOffset) > Section->SizeOfSection.QuadPart) &&
-            (!Section->u.Flags.Reserve))
+            (!Section->u.Flags.Reserve) &&
+            (!Section->u.Flags.PhysicalMemory))
         {
             /* Dubious */
             (*ViewSize) = MIN(Section->SizeOfSection.QuadPart - ViewOffset, SIZE_T_MAX - PAGE_SIZE);
