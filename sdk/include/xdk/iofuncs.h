@@ -490,9 +490,23 @@ WRITE_REGISTER_USHORT(
 
 #define DMA_MACROS_DEFINED
 
+/* IoAllocateAdapterChannel has a real, out-of-line kernel implementation
+   (ntoskrnl/io/iomgr/adapter.c) in addition to this driver-side inline
+   wrapper. The GCC/Clang gnu_inline extern-inline form provides the inline
+   body for callers while leaving the actual symbol to that definition, which
+   is exactly the contract here. A plain static inline (what FORCEINLINE
+   expands to on some targets, e.g. ARM64/Clang) would instead emit a second
+   definition and collide with the kernel one, so spell out the gnu_inline
+   form explicitly for this single export-backed wrapper. */
+#if defined(__GNUC__) || defined(__clang__)
+#define FORCEINLINE_DDK_EXPORT extern __inline__ __attribute__((__always_inline__,__gnu_inline__))
+#else
+#define FORCEINLINE_DDK_EXPORT FORCEINLINE
+#endif
+
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _IRQL_requires_min_(DISPATCH_LEVEL)
-FORCEINLINE
+FORCEINLINE_DDK_EXPORT
 NTSTATUS
 IoAllocateAdapterChannel(
   _In_ PDMA_ADAPTER DmaAdapter,
