@@ -189,6 +189,14 @@ allow GCC to optimize away some EH unwind code, at least in DW2 case.  */
 # define __ptr64
 # ifdef __cplusplus
 #  define __forceinline inline __attribute__((__always_inline__))
+# elif defined(__clang__) && defined(_M_ARM64)
+/* On ARM64 with native SEH, clang refuses to inline an always_inline
+   gnu_inline extern-inline function when the call site sits inside a __try
+   scope: it emits an out-of-line call, but the gnu_inline form emits no
+   out-of-line body, leaving undefined references at link time. Use a static
+   inline so each translation unit emits its own copy when one is actually
+   needed (the same form storport.h and srbhelper.h already use). */
+#  define __forceinline static __inline__ __attribute__((__always_inline__))
 # else
 #  if (( __MINGW_GNUC_PREREQ(4, 3)  &&  __STDC_VERSION__ >= 199901L) || defined(__clang__))
 #   define __forceinline extern inline __attribute__((__always_inline__,__gnu_inline__))
