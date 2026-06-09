@@ -371,7 +371,18 @@ set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS_INIT} -Wl,--disable-s
 
 set(CMAKE_C_COMPILE_OBJECT "<CMAKE_C_COMPILER> <DEFINES> ${_compress_debug_sections_flag} <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
 # FIXME: Once the GCC toolchain bugs are fixed, add _compress_debug_sections_flag to CXX too
-set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
+if(ARCH STREQUAL "arm64" AND DEFINED LLVM_MINGW_LIBCXX_INCLUDE)
+    # libc++'s headers must be searched before ReactOS' own C headers, otherwise
+    # <cstddef> & co. pick up sdk/include/crt/stddef.h instead of libc++'s
+    # wrapper and abort. The <INCLUDES> slot (the project include directories)
+    # comes before <FLAGS>, so neither add_compile_options nor CMAKE_CXX_FLAGS
+    # can win the ordering; inject the libc++ -I into the compile rule itself,
+    # ahead of <INCLUDES>. It only holds the C++ standard library and so does
+    # not shadow any ReactOS header.
+    set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> -I${LLVM_MINGW_LIBCXX_INCLUDE} <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
+else()
+    set(CMAKE_CXX_COMPILE_OBJECT "<CMAKE_CXX_COMPILER> <DEFINES> <INCLUDES> <FLAGS> -o <OBJECT> -c <SOURCE>")
+endif()
 set(CMAKE_ASM_COMPILE_OBJECT "<CMAKE_ASM_COMPILER> ${_compress_debug_sections_flag} -x assembler-with-cpp -o <OBJECT> -I${REACTOS_SOURCE_DIR}/sdk/include/asm -I${REACTOS_BINARY_DIR}/sdk/include/asm <INCLUDES> <FLAGS> <DEFINES> -D__ASM__ -c <SOURCE>")
 
 set(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> -O coff <INCLUDES> <FLAGS> -DRC_INVOKED -D__WIN32__=1 -D__FLAT__=1 ${I18N_DEFS} <DEFINES> <SOURCE> <OBJECT>")

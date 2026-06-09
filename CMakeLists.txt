@@ -22,11 +22,22 @@ if(ARCH STREQUAL "arm64" AND DEFINED LLVM_MINGW_LIBCXX_INCLUDE)
     add_compile_definitions(
         "$<$<COMPILE_LANGUAGE:CXX>:_LIBCPP_MSVCRT>"
         "$<$<COMPILE_LANGUAGE:CXX>:__STDC_CONSTANT_MACROS>")
-    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:-I${LLVM_MINGW_LIBCXX_INCLUDE}>")
     if(DEFINED LLVM_MINGW_CLANG_INCLUDE)
         add_compile_options("$<$<COMPILE_LANGUAGE:C,CXX>:-isystem${LLVM_MINGW_CLANG_INCLUDE}>")
     endif()
-    include_directories(BEFORE "${LLVM_MINGW_LIBCXX_INCLUDE}")
+    # libc++'s standard headers must be searched before ReactOS' own C headers,
+    # or <cstddef> & co. pick up sdk/include/crt/stddef.h instead of libc++'s
+    # wrapper and abort. Clang refuses to keep a -I pointing at the toolchain's
+    # real libc++ directory ahead of the user includes (it recognises the path
+    # and demotes it to the system-include position, behind ReactOS' headers).
+    # Copy the headers into the build tree, which Clang does not treat as a
+    # standard library path, and use that copy. The CXX compile rule in
+    # gcc.cmake injects it ahead of the project <INCLUDES>.
+    set(_REACTOS_LIBCXX_COPY "${CMAKE_BINARY_DIR}/host-libcxx")
+    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${LLVM_MINGW_LIBCXX_INCLUDE}" "${_REACTOS_LIBCXX_COPY}")
+    set(LLVM_MINGW_LIBCXX_INCLUDE "${_REACTOS_LIBCXX_COPY}"
+        CACHE PATH "LLVM-MinGW libc++ include directory" FORCE)
 endif()
 set(CMAKE_SHARED_LIBRARY_PREFIX "")
 set(CMAKE_SHARED_MODULE_PREFIX "")
