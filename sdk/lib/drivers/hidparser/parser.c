@@ -1,11 +1,10 @@
 /*
  * PROJECT:     ReactOS HID Parser Library
- * LICENSE:     GPL - See COPYING in the top level directory
- * FILE:        lib/drivers/hidparser/parser.c
- * PURPOSE:     HID Parser
- * PROGRAMMERS:
- *              Michael Martin (michael.martin@reactos.org)
- *              Johannes Anderwald (johannes.anderwald@reactos.org)
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     HID report descriptor parser producing the Windows-compatible
+ *              "HidP KDR" preparsed data blob.
+ * COPYRIGHT:   Copyright 2021 Rémi Bernon for CodeWeavers
+ *              Adapted for ReactOS from Wine's dlls/hidparse.sys/main.c
  */
 
 #include "parser.h"
@@ -13,1357 +12,800 @@
 #define NDEBUG
 #include <debug.h>
 
-static UCHAR ItemSize[4] = { 0, 1, 2, 4 };
-
-VOID
-HidParser_DeleteReport(
-    IN PHID_REPORT Report)
+/* Flags that are defined in the document
+   "Device Class Definition for Human Interface Devices" */
+enum
 {
-    //
-    // not implemented
-    //
+    INPUT_DATA_CONST = 0x01, /* Data (0)             | Constant (1)       */
+    INPUT_ARRAY_VAR = 0x02,  /* Array (0)            | Variable (1)       */
+    INPUT_ABS_REL = 0x04,    /* Absolute (0)         | Relative (1)       */
+    INPUT_WRAP = 0x08,       /* No Wrap (0)          | Wrap (1)           */
+    INPUT_LINEAR = 0x10,     /* Linear (0)           | Non Linear (1)     */
+    INPUT_PREFSTATE = 0x20,  /* Preferred State (0)  | No Preferred (1)   */
+    INPUT_NULL = 0x40,       /* No Null position (0) | Null state(1)      */
+    INPUT_VOLATILE = 0x80,   /* Non Volatile (0)     | Volatile (1)       */
+    INPUT_BITFIELD = 0x100   /* Bit Field (0)        | Buffered Bytes (1) */
+};
+
+enum
+{
+    TAG_TYPE_MAIN = 0x0,
+    TAG_TYPE_GLOBAL,
+    TAG_TYPE_LOCAL,
+    TAG_TYPE_RESERVED,
+};
+
+enum
+{
+    TAG_MAIN_INPUT = 0x08,
+    TAG_MAIN_OUTPUT = 0x09,
+    TAG_MAIN_FEATURE = 0x0B,
+    TAG_MAIN_COLLECTION = 0x0A,
+    TAG_MAIN_END_COLLECTION = 0x0C
+};
+
+enum
+{
+    TAG_GLOBAL_USAGE_PAGE = 0x0,
+    TAG_GLOBAL_LOGICAL_MINIMUM,
+    TAG_GLOBAL_LOGICAL_MAXIMUM,
+    TAG_GLOBAL_PHYSICAL_MINIMUM,
+    TAG_GLOBAL_PHYSICAL_MAXIMUM,
+    TAG_GLOBAL_UNIT_EXPONENT,
+    TAG_GLOBAL_UNIT,
+    TAG_GLOBAL_REPORT_SIZE,
+    TAG_GLOBAL_REPORT_ID,
+    TAG_GLOBAL_REPORT_COUNT,
+    TAG_GLOBAL_PUSH,
+    TAG_GLOBAL_POP
+};
+
+enum
+{
+    TAG_LOCAL_USAGE = 0x0,
+    TAG_LOCAL_USAGE_MINIMUM,
+    TAG_LOCAL_USAGE_MAXIMUM,
+    TAG_LOCAL_DESIGNATOR_INDEX,
+    TAG_LOCAL_DESIGNATOR_MINIMUM,
+    TAG_LOCAL_DESIGNATOR_MAXIMUM,
+    TAG_LOCAL_STRING_INDEX = 0x7,
+    TAG_LOCAL_STRING_MINIMUM,
+    TAG_LOCAL_STRING_MAXIMUM,
+    TAG_LOCAL_DELIMITER
+};
+
+struct hid_parser_state
+{
+    USAGE usage;
+    USAGE usage_page;
+    USHORT input_report_byte_length;
+    USHORT output_report_byte_length;
+    USHORT feature_report_byte_length;
+    USHORT number_link_collection_nodes;
+
+    USAGE usages_page[256];
+    USAGE usages_min[256];
+    USAGE usages_max[256];
+    ULONG usages_size;
+
+    struct hid_value_caps items;
+
+    struct hid_value_caps *stack;
+    ULONG                  stack_size;
+    ULONG                  global_idx;
+    ULONG                  collection_idx;
+
+    struct hid_value_caps *collections;
+    ULONG                  collections_size;
+
+    struct hid_value_caps *values[3];
+    ULONG                  values_size[3];
+
+    ULONG  bit_size[3][256];
+    USHORT byte_length[3];
+    USHORT caps_count[3];
+    USHORT empty_caps[3];
+    USHORT data_count[3];
+};
+
+static PVOID
+ReallocFunction(
+    IN PVOID Old,
+    IN ULONG OldSize,
+    IN ULONG NewSize)
+{
+    PVOID New = AllocFunction(NewSize);
+    if (New == NULL)
+        return NULL;
+    if (Old)
+    {
+        CopyFunction(New, Old, min(OldSize, NewSize));
+        FreeFunction(Old);
+    }
+    return New;
 }
 
-VOID
-HidParser_FreeCollection(
-    IN PHID_COLLECTION Collection)
+static BOOLEAN
+array_reserve(
+    IN OUT PVOID *array,
+    IN OUT PULONG array_size,
+    IN ULONG index,
+    IN ULONG elem_size)
 {
-    //
-    // not implemented
-    //
+    ULONG new_size;
+    PVOID new_array;
+
+    if (index < *array_size)
+        return TRUE;
+
+    /*
+     * Grow geometrically, but never below 32: a small *array_size (e.g. 1)
+     * would make (n * 3 / 2) stall at the same value through integer
+     * truncation and loop forever.
+     */
+    new_size = *array_size;
+    if (new_size < 32)
+        new_size = 32;
+    while (new_size <= index)
+        new_size += new_size / 2;
+
+    new_array = ReallocFunction(*array, *array_size * elem_size, new_size * elem_size);
+    if (new_array == NULL)
+        return FALSE;
+
+    *array = new_array;
+    *array_size = new_size;
+    return TRUE;
 }
 
-NTSTATUS
-HidParser_AllocateCollection(
-    IN PHID_COLLECTION ParentCollection,
-    IN UCHAR Type,
-    IN PLOCAL_ITEM_STATE LocalItemState,
-    OUT PHID_COLLECTION * OutCollection)
+static void copy_global_items( struct hid_value_caps *dst, const struct hid_value_caps *src )
 {
-    PHID_COLLECTION Collection;
-    USAGE_VALUE UsageValue;
-
-    //
-    // first allocate the collection
-    //
-    Collection = (PHID_COLLECTION)AllocFunction(sizeof(HID_COLLECTION));
-    if (!Collection)
-    {
-        //
-        // no memory
-        //
-        return HIDP_STATUS_INTERNAL_ERROR;
-    }
-
-    //
-    // init collection
-    //
-    Collection->Root = ParentCollection;
-    Collection->Type = Type;
-    Collection->StringID = LocalItemState->StringIndex;
-    Collection->PhysicalID = LocalItemState->DesignatorIndex;
-
-    //
-    // set Usage
-    //
-    ASSERT(LocalItemState);
-    ASSERT(LocalItemState->UsageStack);
-
-    if (LocalItemState->UsageStackUsed > 0)
-    {
-        //
-        // usage value from first local stack item
-        //
-        UsageValue.u.Extended = LocalItemState->UsageStack[0].u.Extended;
-    }
-    else if (LocalItemState->UsageMinimumSet)
-    {
-        //
-        // use value from minimum
-        //
-        UsageValue.u.Extended = LocalItemState->UsageMinimum.u.Extended;
-    }
-    else if (LocalItemState->UsageMaximumSet)
-    {
-        //
-        // use value from maximum
-        //
-        UsageValue.u.Extended = LocalItemState->UsageMaximum.u.Extended;
-    }
-    else if (Type == COLLECTION_LOGICAL)
-    {
-        //
-        // root collection
-        //
-        UsageValue.u.Extended = 0;
-    }
-    else
-    {
-        //
-        // no usage set
-        //
-        DebugFunction("HIDPARSE] No usage set\n");
-        UsageValue.u.Extended = 0;
-    }
-
-    //
-    // store usage
-    //
-    Collection->Usage = UsageValue.u.Extended;
-
-    //
-    // store result
-    //
-    *OutCollection = Collection;
-
-    //
-    // done
-    //
-    return HIDP_STATUS_SUCCESS;
+    dst->usage_page = src->usage_page;
+    dst->logical_min = src->logical_min;
+    dst->logical_max = src->logical_max;
+    dst->physical_min = src->physical_min;
+    dst->physical_max = src->physical_max;
+    dst->units_exp = src->units_exp;
+    dst->units = src->units;
+    dst->bit_size = src->bit_size;
+    dst->report_id = src->report_id;
+    dst->report_count = src->report_count;
 }
 
-NTSTATUS
-HidParser_AddCollection(
-    IN PHID_COLLECTION CurrentCollection,
-    IN PHID_COLLECTION NewCollection)
+static void copy_collection_items( struct hid_value_caps *dst, const struct hid_value_caps *src )
 {
-    PHID_COLLECTION * NewAllocCollection;
-    ULONG CollectionCount;
-
-    //
-    // increment collection array
-    //
-    CollectionCount = CurrentCollection->NodeCount + 1;
-
-    //
-    // allocate new collection
-    //
-    NewAllocCollection = (PHID_COLLECTION*)AllocFunction(sizeof(PHID_COLLECTION) * CollectionCount);
-    if (!NewAllocCollection)
-    {
-        //
-        // no memory
-        //
-        return HIDP_STATUS_INTERNAL_ERROR;
-    }
-
-    if (CurrentCollection->NodeCount)
-    {
-        //
-        // copy old array
-        //
-        CopyFunction(NewAllocCollection, CurrentCollection->Nodes, CurrentCollection->NodeCount * sizeof(PHID_COLLECTION));
-
-        //
-        // delete old array
-        //
-        FreeFunction(CurrentCollection->Nodes);
-    }
-
-    //
-    // insert new item
-    //
-    NewAllocCollection[CurrentCollection->NodeCount] = (struct __HID_COLLECTION__*)NewCollection;
-
-
-    //
-    // store new array
-    //
-    CurrentCollection->Nodes = NewAllocCollection;
-    CurrentCollection->NodeCount++;
-
-    //
-    // done
-    //
-    return HIDP_STATUS_SUCCESS;
+    dst->link_collection = src->link_collection;
+    dst->link_usage_page = src->link_usage_page;
+    dst->link_usage = src->link_usage;
 }
 
-NTSTATUS
-HidParser_FindReportInCollection(
-    IN PHID_COLLECTION Collection,
-    IN UCHAR ReportType,
-    IN UCHAR ReportID,
-    OUT PHID_REPORT *OutReport)
+static void reset_local_items( struct hid_parser_state *state )
 {
-    ULONG Index;
-    NTSTATUS Status;
+    struct hid_value_caps tmp;
+    copy_global_items( &tmp, &state->items );
+    copy_collection_items( &tmp, &state->items );
+    RtlZeroMemory( &state->items, sizeof(state->items) );
+    copy_global_items( &state->items, &tmp );
+    copy_collection_items( &state->items, &tmp );
+    RtlZeroMemory( &state->usages_page, sizeof(state->usages_page) );
+    RtlZeroMemory( &state->usages_min, sizeof(state->usages_min) );
+    RtlZeroMemory( &state->usages_max, sizeof(state->usages_max) );
+    state->usages_size = 0;
+}
 
-    //
-    // search in local list
-    //
-    for(Index = 0; Index < Collection->ReportCount; Index++)
+static BOOLEAN parse_global_push( struct hid_parser_state *state )
+{
+    if (!array_reserve( (PVOID *)&state->stack, &state->stack_size, state->global_idx, sizeof(*state->stack) ))
     {
-        if (Collection->Reports[Index]->Type == ReportType && Collection->Reports[Index]->ReportID == ReportID)
+        DPRINT1( "HID parser stack overflow!\n" );
+        return FALSE;
+    }
+
+    copy_global_items( state->stack + state->global_idx, &state->items );
+    state->global_idx++;
+    return TRUE;
+}
+
+static BOOLEAN parse_global_pop( struct hid_parser_state *state )
+{
+    if (!state->global_idx)
+    {
+        DPRINT1( "HID parser global stack underflow!\n" );
+        return FALSE;
+    }
+
+    state->global_idx--;
+    copy_global_items( &state->items, state->stack + state->global_idx );
+    return TRUE;
+}
+
+static BOOLEAN parse_local_usage( struct hid_parser_state *state, USAGE usage_page, USAGE usage )
+{
+    if (!usage_page) usage_page = state->items.usage_page;
+    if (state->items.flags & HID_VALUE_CAPS_IS_RANGE) state->usages_size = 0;
+    state->usages_page[state->usages_size] = usage_page;
+    state->usages_min[state->usages_size] = usage;
+    state->usages_max[state->usages_size] = usage;
+    state->items.usage_min = usage;
+    state->items.usage_max = usage;
+    state->items.flags &= ~HID_VALUE_CAPS_IS_RANGE;
+    if (state->usages_size++ == 255) DPRINT1( "HID parser usages stack overflow!\n" );
+    return state->usages_size <= 255;
+}
+
+static void parse_local_usage_min( struct hid_parser_state *state, USAGE usage_page, USAGE usage )
+{
+    if (!usage_page) usage_page = state->items.usage_page;
+    if (!(state->items.flags & HID_VALUE_CAPS_IS_RANGE)) state->usages_max[0] = 0;
+    state->usages_page[0] = usage_page;
+    state->usages_min[0] = usage;
+    state->items.usage_min = usage;
+    state->items.flags |= HID_VALUE_CAPS_IS_RANGE;
+    state->usages_size = 1;
+}
+
+static void parse_local_usage_max( struct hid_parser_state *state, USAGE usage_page, USAGE usage )
+{
+    if (!usage_page) usage_page = state->items.usage_page;
+    if (!(state->items.flags & HID_VALUE_CAPS_IS_RANGE)) state->usages_min[0] = 0;
+    state->usages_page[0] = usage_page;
+    state->usages_max[0] = usage;
+    state->items.usage_max = usage;
+    state->items.flags |= HID_VALUE_CAPS_IS_RANGE;
+    state->usages_size = 1;
+}
+
+static BOOLEAN parse_new_collection( struct hid_parser_state *state )
+{
+    if (!array_reserve( (PVOID *)&state->stack, &state->stack_size, state->collection_idx, sizeof(*state->stack) ))
+    {
+        DPRINT1( "HID parser stack overflow!\n" );
+        return FALSE;
+    }
+
+    if (!array_reserve( (PVOID *)&state->collections, &state->collections_size, state->number_link_collection_nodes, sizeof(*state->collections) ))
+    {
+        DPRINT1( "HID parser collections overflow!\n" );
+        return FALSE;
+    }
+
+    copy_collection_items( state->stack + state->collection_idx, &state->items );
+    state->collection_idx++;
+
+    state->items.usage_min = state->usages_min[0];
+    state->items.usage_max = state->usages_max[0];
+
+    state->collections[state->number_link_collection_nodes] = state->items;
+    state->items.link_collection = state->number_link_collection_nodes;
+    state->items.link_usage_page = state->items.usage_page;
+    state->items.link_usage = state->items.usage_min;
+    if (!state->number_link_collection_nodes)
+    {
+        state->usage_page = state->items.usage_page;
+        state->usage = state->items.usage_min;
+    }
+    state->number_link_collection_nodes++;
+
+    reset_local_items( state );
+    return TRUE;
+}
+
+static BOOLEAN parse_end_collection( struct hid_parser_state *state )
+{
+    if (!state->collection_idx)
+    {
+        DPRINT1( "HID parser collection stack underflow!\n" );
+        return FALSE;
+    }
+
+    state->collection_idx--;
+    copy_collection_items( &state->items, state->stack + state->collection_idx );
+    reset_local_items( state );
+    return TRUE;
+}
+
+static void add_new_value_caps( struct hid_parser_state *state, struct hid_value_caps *values,
+                                LONG i, ULONG start_bit )
+{
+    ULONG count, usages_size = max( 1, state->usages_size );
+
+    state->items.start_byte = start_bit / 8;
+    state->items.start_bit = start_bit % 8;
+    state->items.total_bits = state->items.report_count * state->items.bit_size;
+    state->items.end_byte = (start_bit + state->items.total_bits + 7) / 8;
+    state->items.usage_page = state->usages_page[usages_size - 1 - i];
+    state->items.usage_min = state->usages_min[usages_size - 1 - i];
+    state->items.usage_max = state->usages_max[usages_size - 1 - i];
+    if (!state->items.usage_max && !state->items.usage_min) count = -1;
+    else count = state->items.usage_max - state->items.usage_min;
+    state->items.data_index_min = state->items.data_index_max + 1;
+    state->items.data_index_max = state->items.data_index_min + count;
+    values[i] = state->items;
+
+    if (values[i].flags & HID_VALUE_CAPS_IS_BUTTON)
+    {
+        if (!HID_VALUE_CAPS_IS_ARRAY( values + i )) values[i].logical_min = 0;
+        else values[i].logical_min = values[i].logical_max;
+        values[i].logical_max = 0;
+        values[i].physical_min = 0;
+        values[i].physical_max = 0;
+    }
+}
+
+static BOOLEAN parse_new_value_caps( struct hid_parser_state *state, HIDP_REPORT_TYPE type )
+{
+    struct hid_value_caps *values;
+    USAGE usage_page = state->items.usage_page;
+    USHORT report_count = state->items.report_count;
+    ULONG i, usages_size = max( 1, state->usages_size );
+    USHORT *byte_length = &state->byte_length[type];
+    ULONG start_bit, *bit_size = &state->bit_size[type][state->items.report_id];
+    BOOLEAN is_array;
+
+    if (!*bit_size) *bit_size = 8;
+    *bit_size += state->items.bit_size * state->items.report_count;
+    *byte_length = max( *byte_length, (*bit_size + 7) / 8 );
+    start_bit = *bit_size;
+
+    if (!state->items.report_count)
+    {
+        state->empty_caps[type] += usages_size;
+        reset_local_items( state );
+        return TRUE;
+    }
+
+    /*
+     * A constant field that carries no usage and whose report size is a whole
+     * number of bytes is a reserved/padding byte (e.g. the boot-keyboard
+     * reserved byte). Windows accounts for its report bits but does not expose
+     * a value cap for it, unlike sub-byte constant bit padding. The report
+     * length was already accumulated above, so skipping the cap keeps the
+     * report layout intact while matching the Windows preparsed-data size.
+     */
+    if ((state->items.bit_field & INPUT_DATA_CONST) && state->usages_size == 0 &&
+        state->items.bit_size != 0 && (state->items.bit_size % 8) == 0)
+    {
+        reset_local_items( state );
+        return TRUE;
+    }
+
+    if (!array_reserve( (PVOID *)&state->values[type], &state->values_size[type],
+                        state->caps_count[type] + usages_size, sizeof(*state->values[type]) ))
+    {
+        DPRINT1( "HID parser values overflow!\n" );
+        return FALSE;
+    }
+    values = state->values[type] + state->caps_count[type];
+
+    if (!(is_array = HID_VALUE_CAPS_IS_ARRAY( &state->items ))) state->items.report_count -= usages_size - 1;
+    else start_bit -= state->items.report_count * state->items.bit_size;
+
+    if (!(state->items.bit_field & INPUT_ABS_REL)) state->items.flags |= HID_VALUE_CAPS_IS_ABSOLUTE;
+    if (state->items.bit_field & INPUT_DATA_CONST) state->items.flags |= HID_VALUE_CAPS_IS_CONSTANT;
+    if (state->items.bit_size == 1 || is_array) state->items.flags |= HID_VALUE_CAPS_IS_BUTTON;
+
+    if (is_array) state->items.null_value = state->items.logical_min;
+    else if (!(state->items.bit_field & INPUT_NULL)) state->items.null_value = 0;
+    else state->items.null_value = 1;
+
+    state->items.data_index_max = state->data_count[type] - 1;
+    for (i = 0; i < usages_size; ++i)
+    {
+        if (!is_array) start_bit -= state->items.report_count * state->items.bit_size;
+        else if (i) state->items.flags |= HID_VALUE_CAPS_ARRAY_HAS_MORE;
+        else state->items.flags &= ~HID_VALUE_CAPS_ARRAY_HAS_MORE;
+        add_new_value_caps( state, values, is_array ? usages_size - i - 1 : i, start_bit );
+        if (!is_array) state->items.report_count = 1;
+    }
+    state->caps_count[type] += usages_size;
+    state->data_count[type] = state->items.data_index_max + 1;
+
+    state->items.usage_page = usage_page;
+    state->items.report_count = report_count;
+    reset_local_items( state );
+    return TRUE;
+}
+
+static void free_parser_state( struct hid_parser_state *state )
+{
+    if (state->global_idx) DPRINT1( "%lu unpopped device caps on the stack\n", state->global_idx );
+    if (state->collection_idx) DPRINT1( "%lu unpopped device collection on the stack\n", state->collection_idx );
+    if (state->stack) FreeFunction( state->stack );
+    if (state->collections) FreeFunction( state->collections );
+    if (state->values[HidP_Input]) FreeFunction( state->values[HidP_Input] );
+    if (state->values[HidP_Output]) FreeFunction( state->values[HidP_Output] );
+    if (state->values[HidP_Feature]) FreeFunction( state->values[HidP_Feature] );
+    FreeFunction( state );
+}
+
+static struct hid_preparsed_data *build_preparsed_data( struct hid_parser_state *state )
+{
+    struct hid_collection_node *nodes;
+    struct hid_preparsed_data *data;
+    struct hid_value_caps *caps;
+    ULONG i, size, caps_size;
+
+    caps_size = state->caps_count[HidP_Input] + state->caps_count[HidP_Output] +
+                state->caps_count[HidP_Feature];
+    caps_size += state->empty_caps[HidP_Input] + state->empty_caps[HidP_Output] +
+                 state->empty_caps[HidP_Feature];
+    caps_size *= sizeof(struct hid_value_caps);
+
+    size = caps_size + FIELD_OFFSET(struct hid_preparsed_data, value_caps[0]) +
+           state->number_link_collection_nodes * sizeof(struct hid_collection_node);
+    if (!(data = AllocFunction( size ))) return NULL;
+
+    RtlCopyMemory( data->magic, "HidP KDR", 8 );
+    data->usage = state->usage;
+    data->usage_page = state->usage_page;
+    data->input_caps_start = 0;
+    data->input_caps_count = state->caps_count[HidP_Input] + state->empty_caps[HidP_Input];
+    data->input_caps_end = data->input_caps_start + state->caps_count[HidP_Input];
+    data->input_report_byte_length = state->byte_length[HidP_Input];
+    data->output_caps_start = data->input_caps_end;
+    data->output_caps_count = state->caps_count[HidP_Output] + state->empty_caps[HidP_Output];
+    data->output_caps_end = data->output_caps_start + state->caps_count[HidP_Output];
+    data->output_report_byte_length = state->byte_length[HidP_Output];
+    data->feature_caps_start = data->output_caps_end;
+    data->feature_caps_count = state->caps_count[HidP_Feature] + state->empty_caps[HidP_Feature];
+    data->feature_caps_end = data->feature_caps_start + state->caps_count[HidP_Feature];
+    data->feature_report_byte_length = state->byte_length[HidP_Feature];
+    data->caps_size = caps_size;
+    data->number_link_collection_nodes = state->number_link_collection_nodes;
+
+    caps = HID_INPUT_VALUE_CAPS( data );
+    RtlCopyMemory( caps, state->values[HidP_Input], state->caps_count[HidP_Input] * sizeof(*caps) );
+    caps = HID_OUTPUT_VALUE_CAPS( data );
+    RtlCopyMemory( caps, state->values[HidP_Output], state->caps_count[HidP_Output] * sizeof(*caps) );
+    caps = HID_FEATURE_VALUE_CAPS( data );
+    RtlCopyMemory( caps, state->values[HidP_Feature], state->caps_count[HidP_Feature] * sizeof(*caps) );
+
+    nodes = HID_COLLECTION_NODES( data );
+    for (i = 0; i < data->number_link_collection_nodes; ++i)
+    {
+        nodes[i].usage_page = state->collections[i].usage_page;
+        nodes[i].usage = state->collections[i].usage_min;
+        nodes[i].parent = state->collections[i].link_collection;
+        nodes[i].collection_type = state->collections[i].bit_field;
+        nodes[i].first_child = 0;
+        nodes[i].next_sibling = 0;
+        nodes[i].number_of_children = 0;
+
+        if (i > 0)
         {
-            //
-            // found report
-            //
-            *OutReport = Collection->Reports[Index];
-            return HIDP_STATUS_SUCCESS;
+            nodes[i].next_sibling = nodes[nodes[i].parent].first_child;
+            nodes[nodes[i].parent].first_child = i;
+            nodes[nodes[i].parent].number_of_children++;
         }
     }
 
-    //
-    // search in sub collections
-    //
-    for(Index = 0; Index < Collection->NodeCount; Index++)
-    {
-        Status = HidParser_FindReportInCollection(Collection->Nodes[Index], ReportType, ReportID, OutReport);
-        if (Status == HIDP_STATUS_SUCCESS)
-            return Status;
-    }
-
-    //
-    // no such report found
-    //
-    *OutReport = NULL;
-    return HIDP_STATUS_REPORT_DOES_NOT_EXIST;
+    return data;
 }
 
-
-NTSTATUS
-HidParser_FindReport(
-    IN PHID_PARSER_CONTEXT ParserContext,
-    IN UCHAR ReportType,
-    IN UCHAR ReportID,
-    OUT PHID_REPORT *OutReport)
+static struct hid_preparsed_data *parse_descriptor( PUCHAR descriptor, ULONG length )
 {
-    //
-    // search in current top level collection
-    //
-    return HidParser_FindReportInCollection(ParserContext->RootCollection->Nodes[ParserContext->RootCollection->NodeCount-1], ReportType, ReportID, OutReport);
-}
+    struct hid_preparsed_data *data = NULL;
+    struct hid_parser_state *state;
+    ULONG size, value;
+    LONG signed_value;
+    PUCHAR ptr, end;
 
-NTSTATUS
-HidParser_AllocateReport(
-    IN UCHAR ReportType,
-    IN UCHAR ReportID,
-    OUT PHID_REPORT *OutReport)
-{
-    PHID_REPORT Report;
+    if (!(state = AllocFunction( sizeof(*state) ))) return NULL;
 
-    //
-    // allocate report
-    //
-    Report = (PHID_REPORT)AllocFunction(sizeof(HID_REPORT));
-    if (!Report)
+    for (ptr = descriptor, end = descriptor + length; ptr != end; ptr += size + 1)
     {
-        //
-        // no memory
-        //
-        return HIDP_STATUS_INTERNAL_ERROR;
-    }
-
-    //
-    // init report
-    //
-    Report->ReportID = ReportID;
-    Report->Type = ReportType;
-
-    //
-    // done
-    //
-    *OutReport = Report;
-    return HIDP_STATUS_SUCCESS;
-}
-
-NTSTATUS
-HidParser_AddReportToCollection(
-    IN PHID_PARSER_CONTEXT ParserContext,
-    IN PHID_COLLECTION CurrentCollection,
-    IN PHID_REPORT NewReport)
-{
-    PHID_REPORT * NewReportArray;
-
-    //
-    // allocate new report array
-    //
-    NewReportArray = (PHID_REPORT*)AllocFunction(sizeof(PHID_REPORT) * (CurrentCollection->ReportCount + 1));
-    if (!NewReportArray)
-    {
-        //
-        // no memory
-        //
-        return HIDP_STATUS_INTERNAL_ERROR;
-    }
-
-    if (CurrentCollection->ReportCount)
-    {
-        //
-        // copy old array contents
-        //
-        CopyFunction(NewReportArray, CurrentCollection->Reports, sizeof(PHID_REPORT) * CurrentCollection->ReportCount);
-
-        //
-        // free old array
-        //
-        FreeFunction(CurrentCollection->Reports);
-    }
-
-    //
-    // store result
-    //
-    NewReportArray[CurrentCollection->ReportCount] = NewReport;
-    CurrentCollection->Reports = NewReportArray;
-    CurrentCollection->ReportCount++;
-
-    //
-    // completed successfully
-    //
-    return HIDP_STATUS_SUCCESS;
-}
-
-NTSTATUS
-HidParser_GetReport(
-    IN PHID_PARSER_CONTEXT ParserContext,
-    IN PHID_COLLECTION Collection,
-    IN UCHAR ReportType,
-    IN UCHAR ReportID,
-    IN UCHAR CreateIfNotExists,
-    OUT PHID_REPORT *OutReport)
-{
-    NTSTATUS Status;
-
-    //
-    // try finding existing report
-    //
-    Status = HidParser_FindReport(ParserContext, ReportType, ReportID, OutReport);
-    if (Status == HIDP_STATUS_SUCCESS || CreateIfNotExists == FALSE)
-    {
-        //
-        // founed report
-        //
-        return Status;
-    }
-
-    //
-    // allocate new report
-    //
-    Status = HidParser_AllocateReport(ReportType, ReportID, OutReport);
-    if (Status != HIDP_STATUS_SUCCESS)
-    {
-        //
-        // failed to allocate report
-        //
-        return Status;
-    }
-
-    //
-    // add report
-    //
-    Status = HidParser_AddReportToCollection(ParserContext, Collection, *OutReport);
-    if (Status != HIDP_STATUS_SUCCESS)
-    {
-        //
-        // failed to allocate report
-        //
-        FreeFunction(*OutReport);
-    }
-
-    //
-    // done
-    //
-    return Status;
-}
-
-NTSTATUS
-HidParser_ReserveReportItems(
-    IN PHID_REPORT Report,
-    IN ULONG ReportCount,
-    OUT PHID_REPORT *OutReport)
-{
-    PHID_REPORT NewReport;
-    ULONG OldSize, Size;
-
-    if (Report->ItemCount + ReportCount <= Report->ItemAllocated)
-    {
-        //
-        // space is already allocated
-        //
-        *OutReport = Report;
-        return HIDP_STATUS_SUCCESS;
-    }
-
-    //
-    //calculate new size
-    //
-    OldSize = sizeof(HID_REPORT) + (Report->ItemCount) * sizeof(HID_REPORT_ITEM);
-    Size =  ReportCount * sizeof(HID_REPORT_ITEM);
-
-    //
-    // allocate memory
-    //
-    NewReport = (PHID_REPORT)AllocFunction(Size + OldSize);
-    if (!NewReport)
-    {
-        //
-        // no memory
-        //
-        return HIDP_STATUS_INTERNAL_ERROR;
-    }
-
-
-    //
-    // copy old report
-    //
-    CopyFunction(NewReport, Report, OldSize);
-
-    //
-    // increase array size
-    //
-    NewReport->ItemAllocated += ReportCount;
-
-    //
-    // store result
-    //
-    *OutReport = NewReport;
-
-    //
-    // completed sucessfully
-    //
-    return HIDP_STATUS_SUCCESS;
-}
-
-VOID
-HidParser_SignRange(
-    IN ULONG Minimum,
-    IN ULONG Maximum,
-    OUT PULONG NewMinimum,
-    OUT PULONG NewMaximum)
-{
-    ULONG Mask = 0x80000000;
-    ULONG Index;
-
-    for (Index = 0; Index < 4; Index++)
-    {
-        if (Minimum & Mask)
+        size = (*ptr & 0x03);
+        if (size == 3) size = 4;
+        if (ptr + size > end)
         {
-            Minimum |= Mask;
-            if (Maximum & Mask)
-                Maximum |= Mask;
-            return;
+            DPRINT1( "Need %lu bytes to read item value\n", size );
+            goto done;
         }
 
-        Mask >>= 8;
-        Mask |= 0xff000000;
-    }
-
-    *NewMinimum = Minimum;
-    *NewMaximum = Maximum;
-}
-
-NTSTATUS
-HidParser_InitReportItem(
-    IN PHID_REPORT Report,
-    IN PHID_REPORT_ITEM ReportItem,
-    IN PGLOBAL_ITEM_STATE GlobalItemState,
-    IN PLOCAL_ITEM_STATE LocalItemState,
-    IN PMAIN_ITEM_DATA ItemData,
-    IN ULONG ReportItemIndex)
-{
-    ULONG LogicalMinimum;
-    ULONG LogicalMaximum;
-    ULONG PhysicalMinimum;
-    ULONG PhysicalMaximum;
-    ULONG UsageMinimum;
-    ULONG UsageMaximum;
-    USAGE_VALUE UsageValue;
-
-    //
-    // get logical bounds
-    //
-    LogicalMinimum = GlobalItemState->LogicalMinimum;
-    LogicalMaximum = GlobalItemState->LogicialMaximum;
-    if (LogicalMinimum > LogicalMaximum)
-    {
-        //
-        // make them signed
-        //
-        HidParser_SignRange(LogicalMinimum, LogicalMaximum, &LogicalMinimum, &LogicalMaximum);
-    }
-    //ASSERT(LogicalMinimum <= LogicalMaximum);
-
-    //
-    // get physical bounds
-    //
-    PhysicalMinimum = GlobalItemState->PhysicalMinimum;
-    PhysicalMaximum = GlobalItemState->PhysicalMaximum;
-    if (PhysicalMinimum > PhysicalMaximum)
-    {
-        //
-        // make them signed
-        //
-        HidParser_SignRange(PhysicalMinimum, PhysicalMaximum, &PhysicalMinimum, &PhysicalMaximum);
-    }
-    //ASSERT(PhysicalMinimum <= PhysicalMaximum);
-
-    //
-    // get usage bounds
-    //
-    UsageMinimum = 0;
-    UsageMaximum = 0;
-    if (ItemData->ArrayVariable == FALSE)
-    {
-        //
-        // get usage bounds
-        //
-        UsageMinimum = LocalItemState->UsageMinimum.u.Extended;
-        UsageMaximum = LocalItemState->UsageMaximum.u.Extended;
-    }
-    else
-    {
-        //
-        // get usage value from stack
-        //
-        if (ReportItemIndex < LocalItemState->UsageStackUsed)
-        {
-            //
-            // use stack item
-            //
-            UsageValue = LocalItemState->UsageStack[ReportItemIndex];
-        }
+        if (size == 0) signed_value = value = 0;
+        else if (size == 1) signed_value = (CHAR)(value = *(PUCHAR)(ptr + 1));
+        else if (size == 2) signed_value = (SHORT)(value = *(PUSHORT)(ptr + 1));
+        else if (size == 4) signed_value = (LONG)(value = *(PULONG)(ptr + 1));
         else
         {
-            //
-            // get usage minimum from local state
-            //
-            UsageValue = LocalItemState->UsageMinimum;
+            DPRINT1( "Unexpected item value size %lu.\n", size );
+            goto done;
+        }
 
-            //
-            // append item index
-            //
-            UsageValue.u.Extended += ReportItemIndex;
+        state->items.bit_field = value;
 
-            if (LocalItemState->UsageMaximumSet)
+#define SHORT_ITEM( tag, type ) (((tag) << 4) | ((type) << 2))
+        switch (*ptr & SHORT_ITEM( 0xf, 0x3 ))
+        {
+        case SHORT_ITEM( TAG_MAIN_INPUT, TAG_TYPE_MAIN ):
+            if (!parse_new_value_caps( state, HidP_Input )) goto done;
+            break;
+        case SHORT_ITEM( TAG_MAIN_OUTPUT, TAG_TYPE_MAIN ):
+            if (!parse_new_value_caps( state, HidP_Output )) goto done;
+            break;
+        case SHORT_ITEM( TAG_MAIN_FEATURE, TAG_TYPE_MAIN ):
+            if (!parse_new_value_caps( state, HidP_Feature )) goto done;
+            break;
+        case SHORT_ITEM( TAG_MAIN_COLLECTION, TAG_TYPE_MAIN ):
+            if (!parse_new_collection( state )) goto done;
+            break;
+        case SHORT_ITEM( TAG_MAIN_END_COLLECTION, TAG_TYPE_MAIN ):
+            if (!parse_end_collection( state )) goto done;
+            break;
+
+        case SHORT_ITEM( TAG_GLOBAL_USAGE_PAGE, TAG_TYPE_GLOBAL ):
+            state->items.usage_page = value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_LOGICAL_MINIMUM, TAG_TYPE_GLOBAL ):
+            state->items.logical_min = signed_value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_LOGICAL_MAXIMUM, TAG_TYPE_GLOBAL ):
+            state->items.logical_max = signed_value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_PHYSICAL_MINIMUM, TAG_TYPE_GLOBAL ):
+            state->items.physical_min = signed_value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_PHYSICAL_MAXIMUM, TAG_TYPE_GLOBAL ):
+            state->items.physical_max = signed_value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_UNIT_EXPONENT, TAG_TYPE_GLOBAL ):
+            state->items.units_exp = signed_value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_UNIT, TAG_TYPE_GLOBAL ):
+            state->items.units = signed_value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_REPORT_SIZE, TAG_TYPE_GLOBAL ):
+            state->items.bit_size = value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_REPORT_ID, TAG_TYPE_GLOBAL ):
+            state->items.report_id = value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_REPORT_COUNT, TAG_TYPE_GLOBAL ):
+            state->items.report_count = value;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_PUSH, TAG_TYPE_GLOBAL ):
+            if (!parse_global_push( state )) goto done;
+            break;
+        case SHORT_ITEM( TAG_GLOBAL_POP, TAG_TYPE_GLOBAL ):
+            if (!parse_global_pop( state )) goto done;
+            break;
+
+        case SHORT_ITEM( TAG_LOCAL_USAGE, TAG_TYPE_LOCAL ):
+            if (!parse_local_usage( state, value >> 16, value & 0xffff )) goto done;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_USAGE_MINIMUM, TAG_TYPE_LOCAL ):
+            parse_local_usage_min( state, value >> 16, value & 0xffff );
+            break;
+        case SHORT_ITEM( TAG_LOCAL_USAGE_MAXIMUM, TAG_TYPE_LOCAL ):
+            parse_local_usage_max( state, value >> 16, value & 0xffff );
+            break;
+        case SHORT_ITEM( TAG_LOCAL_DESIGNATOR_INDEX, TAG_TYPE_LOCAL ):
+            state->items.designator_min = state->items.designator_max = value;
+            state->items.flags &= ~HID_VALUE_CAPS_IS_DESIGNATOR_RANGE;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_DESIGNATOR_MINIMUM, TAG_TYPE_LOCAL ):
+            state->items.designator_min = value;
+            state->items.flags |= HID_VALUE_CAPS_IS_DESIGNATOR_RANGE;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_DESIGNATOR_MAXIMUM, TAG_TYPE_LOCAL ):
+            state->items.designator_max = value;
+            state->items.flags |= HID_VALUE_CAPS_IS_DESIGNATOR_RANGE;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_STRING_INDEX, TAG_TYPE_LOCAL ):
+            state->items.string_min = state->items.string_max = value;
+            state->items.flags &= ~HID_VALUE_CAPS_IS_STRING_RANGE;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_STRING_MINIMUM, TAG_TYPE_LOCAL ):
+            state->items.string_min = value;
+            state->items.flags |= HID_VALUE_CAPS_IS_STRING_RANGE;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_STRING_MAXIMUM, TAG_TYPE_LOCAL ):
+            state->items.string_max = value;
+            state->items.flags |= HID_VALUE_CAPS_IS_STRING_RANGE;
+            break;
+        case SHORT_ITEM( TAG_LOCAL_DELIMITER, TAG_TYPE_LOCAL ):
+            DPRINT1( "delimiter %lu not implemented!\n", value );
+            goto done;
+
+        default:
+            DPRINT1( "item type %x not implemented!\n", *ptr );
+            break;
+        }
+#undef SHORT_ITEM
+    }
+
+    data = build_preparsed_data( state );
+
+done:
+    free_parser_state( state );
+    return data;
+}
+
+static PUCHAR *parse_top_level_collections( PUCHAR descriptor, ULONG length, PULONG count )
+{
+    PUCHAR ptr, end, *tmp, *tlcs;
+    ULONG size, depth = 0, capacity = 1;
+
+    if (!(tlcs = AllocFunction( sizeof(*tlcs) ))) return NULL;
+    tlcs[0] = descriptor;
+    *count = 0;
+
+    for (ptr = descriptor, end = descriptor + length; ptr != end; ptr += size + 1)
+    {
+        size = (*ptr & 0x03);
+        if (size == 3) size = 4;
+        if (ptr + size > end)
+        {
+            DPRINT1( "Need %lu bytes to read item value\n", size );
+            break;
+        }
+
+#define SHORT_ITEM( tag, type ) (((tag) << 4) | ((type) << 2))
+        switch (*ptr & SHORT_ITEM( 0xf, 0x3 ))
+        {
+        case SHORT_ITEM( TAG_MAIN_COLLECTION, TAG_TYPE_MAIN ):
+            if (depth++) break;
+            break;
+        case SHORT_ITEM( TAG_MAIN_END_COLLECTION, TAG_TYPE_MAIN ):
+            if (--depth) break;
+            *count = *count + 1;
+            if (!array_reserve( (PVOID *)&tlcs, &capacity, *count + 1, sizeof(*tlcs) ))
             {
-                if (UsageValue.u.Extended > LocalItemState->UsageMaximum.u.Extended)
-                {
-                    //
-                    // maximum reached
-                    //
-                    UsageValue.u.Extended = LocalItemState->UsageMaximum.u.Extended;
-                }
+                DPRINT1( "Failed to allocate memory for TLCs\n" );
+                return tlcs;
             }
+            tmp = tlcs;
+            (void)tmp;
+            tlcs[*count] = ptr + size + 1;
+            break;
         }
-
-        //
-        // usage usage bounds
-        //
-        UsageMinimum = UsageMaximum = UsageValue.u.Extended;
+#undef SHORT_ITEM
     }
 
-    //
-    // now store all values
-    //
-    ReportItem->ByteOffset = (Report->ReportSize / 8);
-    ReportItem->Shift = (Report->ReportSize % 8);
-    ReportItem->Mask = ~(0xFFFFFFFF << GlobalItemState->ReportSize);
-    ReportItem->BitCount = GlobalItemState->ReportSize;
-    ReportItem->HasData = (ItemData->DataConstant == FALSE);
-    ReportItem->Array = (ItemData->ArrayVariable == 0);
-    ReportItem->Relative = (ItemData->Relative != FALSE);
-    ReportItem->Minimum = LogicalMinimum;
-    ReportItem->Maximum = LogicalMaximum;
-    ReportItem->UsageMinimum = UsageMinimum;
-    ReportItem->UsageMaximum = UsageMaximum;
-
-    //
-    // increment report size
-    //
-    Report->ReportSize += GlobalItemState->ReportSize;
-
-    //
-    // completed successfully
-    //
-    return HIDP_STATUS_SUCCESS;
-}
-
-BOOLEAN
-HidParser_UpdateCurrentCollectionReport(
-    IN PHID_COLLECTION Collection,
-    IN PHID_REPORT Report,
-    IN PHID_REPORT NewReport)
-{
-    ULONG Index;
-    BOOLEAN Found = FALSE, TempFound;
-
-    //
-    // search in local list
-    //
-    for(Index = 0; Index < Collection->ReportCount; Index++)
-    {
-        if (Collection->Reports[Index] == Report)
-        {
-            //
-            // update report
-            //
-            Collection->Reports[Index] = NewReport;
-            Found = TRUE;
-        }
-    }
-
-    //
-    // search in sub collections
-    //
-    for(Index = 0; Index < Collection->NodeCount; Index++)
-    {
-        //
-        // was it found
-        //
-        TempFound = HidParser_UpdateCurrentCollectionReport(Collection->Nodes[Index], Report, NewReport);
-        if (TempFound)
-        {
-            //
-            // the same report should not be found in different collections
-            //
-            ASSERT(Found == FALSE);
-            Found = TRUE;
-        }
-    }
-
-    //
-    // done
-    //
-    return Found;
-}
-
-BOOLEAN
-HidParser_UpdateCollectionReport(
-    IN PHID_PARSER_CONTEXT ParserContext,
-    IN PHID_REPORT Report,
-    IN PHID_REPORT NewReport)
-{
-    //
-    // update in current collection
-    //
-    return HidParser_UpdateCurrentCollectionReport(ParserContext->RootCollection->Nodes[ParserContext->RootCollection->NodeCount-1], Report, NewReport);
-}
-
-
-NTSTATUS
-HidParser_AddMainItem(
-    IN PHID_PARSER_CONTEXT ParserContext,
-    IN PHID_REPORT Report,
-    IN PGLOBAL_ITEM_STATE GlobalItemState,
-    IN PLOCAL_ITEM_STATE LocalItemState,
-    IN PMAIN_ITEM_DATA ItemData,
-    IN PHID_COLLECTION Collection)
-{
-    NTSTATUS Status;
-    ULONG Index;
-    PHID_REPORT NewReport;
-    BOOLEAN Found;
-
-    //
-    // first grow report item array
-    //
-    Status = HidParser_ReserveReportItems(Report, GlobalItemState->ReportCount, &NewReport);
-    if (Status != HIDP_STATUS_SUCCESS)
-    {
-        //
-        // failed to allocate memory
-        //
-        return Status;
-    }
-
-    if (NewReport != Report)
-    {
-        //
-        // update current top level collection
-        //
-        Found = HidParser_UpdateCollectionReport(ParserContext, Report, NewReport);
-        ASSERT(Found);
-    }
-
-    //
-    // sanity check
-    //
-    ASSERT(NewReport->ItemCount + GlobalItemState->ReportCount <= NewReport->ItemAllocated);
-
-    for(Index = 0; Index < GlobalItemState->ReportCount; Index++)
-    {
-        Status = HidParser_InitReportItem(NewReport, &NewReport->Items[NewReport->ItemCount], GlobalItemState, LocalItemState, ItemData, Index);
-        if (Status != HIDP_STATUS_SUCCESS)
-        {
-            //
-            // failed to init report item
-            //
-            return Status;
-        }
-
-        //
-        // increment report item count
-        //
-        NewReport->ItemCount++;
-    }
-
-    //
-    // done
-    //
-    return HIDP_STATUS_SUCCESS;
+    DPRINT( "Found %lu TLCs\n", *count );
+    return tlcs;
 }
 
 NTSTATUS
-HidParser_ParseReportDescriptor(
-    IN PUCHAR ReportDescriptor,
-    IN ULONG ReportLength,
-    OUT PVOID *OutParser)
+NTAPI
+HidParser_GetCollectionDescription(
+    IN PHIDP_REPORT_DESCRIPTOR ReportDesc,
+    IN ULONG DescLength,
+    IN POOL_TYPE PoolType,
+    OUT PHIDP_DEVICE_DESC DeviceDescription)
 {
-    PGLOBAL_ITEM_STATE LinkedGlobalItemState, NextLinkedGlobalItemState;
-    ULONG Index;
-    PUSAGE_VALUE NewUsageStack, UsageValue;
-    NTSTATUS Status;
-    PHID_COLLECTION CurrentCollection, NewCollection;
-    PUCHAR CurrentOffset, ReportEnd;
-    PITEM_PREFIX CurrentItem;
-    ULONG CurrentItemSize;
-    PLONG_ITEM CurrentLongItem;
-    PSHORT_ITEM CurrentShortItem;
-    ULONG Data;
-    UCHAR ReportType;
-    PHID_REPORT Report;
-    PMAIN_ITEM_DATA MainItemData;
-    PHID_PARSER_CONTEXT ParserContext;
+    ULONG i, len, tlc_count, report_count = 0;
+    PULONG input_len, output_len, feature_len, collection;
+    PULONG scratch;
+    struct hid_value_caps *caps, *caps_end;
+    struct hid_preparsed_data *preparsed;
+    PUCHAR *tlcs;
 
-    CurrentOffset = ReportDescriptor;
-    ReportEnd = ReportDescriptor + ReportLength;
+    UNREFERENCED_PARAMETER(PoolType);
 
-    if (ReportDescriptor >= ReportEnd)
-        return HIDP_STATUS_USAGE_NOT_FOUND;
+    RtlZeroMemory( DeviceDescription, sizeof(*DeviceDescription) );
 
-    //
-    // allocate parser
-    //
-    ParserContext = AllocFunction(sizeof(HID_PARSER_CONTEXT));
-    if (!ParserContext)
-        return HIDP_STATUS_INTERNAL_ERROR;
+    /* per-report-id scratch space, kept off the (small) kernel stack */
+    scratch = AllocFunction( 4 * 256 * sizeof(ULONG) );
+    if (!scratch) return HIDP_STATUS_INTERNAL_ERROR;
+    input_len = scratch;
+    output_len = scratch + 256;
+    feature_len = scratch + 512;
+    collection = scratch + 768;
 
-
-    //
-    // allocate usage stack
-    //
-    ParserContext->LocalItemState.UsageStackAllocated = 10;
-    ParserContext->LocalItemState.UsageStack = (PUSAGE_VALUE)AllocFunction(ParserContext->LocalItemState.UsageStackAllocated * sizeof(USAGE_VALUE));
-    if (!ParserContext->LocalItemState.UsageStack)
+    if (!(tlcs = parse_top_level_collections( ReportDesc, DescLength, &tlc_count )))
     {
-        //
-        // no memory
-        //
-        FreeFunction(ParserContext);
-        return HIDP_STATUS_INTERNAL_ERROR;
+        FreeFunction( scratch );
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    //
-    // now allocate root collection
-    //
-    Status = HidParser_AllocateCollection(NULL, COLLECTION_LOGICAL, &ParserContext->LocalItemState, &ParserContext->RootCollection);
-    if (Status != HIDP_STATUS_SUCCESS)
+    if (tlc_count == 0)
     {
-        //
-        // no memory
-        //
-        FreeFunction(ParserContext->LocalItemState.UsageStack);
-        ParserContext->LocalItemState.UsageStack = NULL;
-        FreeFunction(ParserContext);
-        return HIDP_STATUS_INTERNAL_ERROR;
+        /* an empty or collection-less descriptor yields no data */
+        FreeFunction( tlcs );
+        FreeFunction( scratch );
+        return STATUS_NO_DATA_DETECTED;
     }
 
-    //
-    // start parsing
-    //
-    CurrentCollection = ParserContext->RootCollection;
+    len = sizeof(*DeviceDescription->CollectionDesc) * tlc_count;
+    if (!(DeviceDescription->CollectionDesc = AllocFunction( len ))) goto failed;
 
-    do
+    for (i = 0; i < tlc_count; ++i)
     {
-        //
-        // get current item
-        //
-        CurrentItem = (PITEM_PREFIX)CurrentOffset;
+        if (!(preparsed = parse_descriptor( tlcs[i], tlcs[i + 1] - tlcs[i] ))) goto failed;
 
-        //
-        // get item size
-        //
-        CurrentItemSize = ItemSize[CurrentItem->Size];
-        Data = 0;
+        len = preparsed->caps_size + FIELD_OFFSET(struct hid_preparsed_data, value_caps[0]) +
+              preparsed->number_link_collection_nodes * sizeof(struct hid_collection_node);
 
-        if (CurrentItem->Type == ITEM_TYPE_LONG)
+        DeviceDescription->CollectionDescLength++;
+        DeviceDescription->CollectionDesc[i].UsagePage = preparsed->usage_page;
+        DeviceDescription->CollectionDesc[i].Usage = preparsed->usage;
+        DeviceDescription->CollectionDesc[i].CollectionNumber = i + 1;
+        DeviceDescription->CollectionDesc[i].InputLength = preparsed->input_report_byte_length;
+        DeviceDescription->CollectionDesc[i].OutputLength = preparsed->output_report_byte_length;
+        DeviceDescription->CollectionDesc[i].FeatureLength = preparsed->feature_report_byte_length;
+        DeviceDescription->CollectionDesc[i].PreparsedDataLength = len;
+        DeviceDescription->CollectionDesc[i].PreparsedData = (PHIDP_PREPARSED_DATA)preparsed;
+
+        caps = HID_INPUT_VALUE_CAPS( preparsed );
+        caps_end = caps + preparsed->input_caps_end - preparsed->input_caps_start;
+        for (; caps != caps_end; ++caps)
         {
-            //
-            // increment item size with size of data item
-            //
-            CurrentLongItem = (PLONG_ITEM)CurrentItem;
-            CurrentItemSize += CurrentLongItem->DataSize;
-        }
-        else
-        {
-            //
-            // get short item
-            //
-            CurrentShortItem = (PSHORT_ITEM)CurrentItem;
-
-            //
-            // get associated data
-            //
-            //ASSERT(CurrentItemSize == 1 || CurrentItemSize == 2 || CurrentItemSize == 4);
-            if (CurrentItemSize == 1)
-                Data = CurrentShortItem->Data.UData8[0];
-            else if (CurrentItemSize == 2)
-                Data = CurrentShortItem->Data.UData16[0];
-            else if (CurrentItemSize == 4)
-                Data = CurrentShortItem->Data.UData32;
-            else
-            {
-                //
-                // invalid item size
-                //
-                //DebugFunction("CurrentItem invalid item size %lu\n", CurrentItemSize);
-            }
-
-        }
-        DebugFunction("Tag %x Type %x Size %x Offset %lu Length %lu\n", CurrentItem->Tag, CurrentItem->Type, CurrentItem->Size,  ((ULONG_PTR)CurrentItem - (ULONG_PTR)ReportDescriptor), ReportLength);
-        //
-        // handle items
-        //
-        ASSERT(CurrentItem->Type >= ITEM_TYPE_MAIN && CurrentItem->Type <= ITEM_TYPE_LONG);
-        switch(CurrentItem->Type)
-        {
-            case ITEM_TYPE_MAIN:
-            {
-                // preprocess the local state if relevant (usages for
-                // collections and report items)
-                if (CurrentItem->Tag != ITEM_TAG_MAIN_END_COLLECTION)
-                {
-                    // make all usages extended for easier later processing
-                    for (Index = 0; Index < ParserContext->LocalItemState.UsageStackUsed; Index++)
-                    {
-                        //
-                        // is it already extended
-                        //
-                        if (ParserContext->LocalItemState.UsageStack[Index].IsExtended)
-                            continue;
-
-                        //
-                        // extend usage item
-                        //
-                        ParserContext->LocalItemState.UsageStack[Index].u.s.UsagePage = ParserContext->GlobalItemState.UsagePage;
-                        ParserContext->LocalItemState.UsageStack[Index].IsExtended = TRUE;
-                    }
-
-                    if (!ParserContext->LocalItemState.UsageMinimum.IsExtended) {
-                        // the specs say if one of them is extended they must
-                        // both be extended, so if the minimum isn't, the
-                        // maximum mustn't either.
-                        ParserContext->LocalItemState.UsageMinimum.u.s.UsagePage
-                            = ParserContext->LocalItemState.UsageMaximum.u.s.UsagePage
-                                = ParserContext->GlobalItemState.UsagePage;
-                        ParserContext->LocalItemState.UsageMinimum.IsExtended
-                            = ParserContext->LocalItemState.UsageMaximum.IsExtended = TRUE;
-                    }
-
-                    //LocalItemState.usage_stack = usageStack;
-                    //ParserContext->LocalItemState.UsageStackUsed = UsageStackUsed;
-                }
-
-                if (CurrentItem->Tag == ITEM_TAG_MAIN_COLLECTION) {
-
-                    //
-                    // allocate new collection
-                    //
-                    Status = HidParser_AllocateCollection(CurrentCollection, (UCHAR)Data, &ParserContext->LocalItemState, &NewCollection);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                    //
-                    // add new collection to current collection
-                    //
-                    Status = HidParser_AddCollection(CurrentCollection, NewCollection);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                    //
-                    // make new collection current
-                    //
-                    CurrentCollection = NewCollection;
-                }
-                else if (CurrentItem->Tag == ITEM_TAG_MAIN_END_COLLECTION)
-                {
-                    //
-                    // assert on ending the root collection
-                    //
-                    ASSERT(CurrentCollection != ParserContext->RootCollection);
-
-                    //
-                    // use parent of current collection
-                    //
-                    CurrentCollection = CurrentCollection->Root;
-                    ASSERT(CurrentCollection);
-                }
-                else
-                {
-                    ReportType = HID_REPORT_TYPE_ANY;
-
-                    switch (CurrentItem->Tag) {
-                        case ITEM_TAG_MAIN_INPUT:
-                            ReportType = HID_REPORT_TYPE_INPUT;
-                            break;
-
-                        case ITEM_TAG_MAIN_OUTPUT:
-                            ReportType = HID_REPORT_TYPE_OUTPUT;
-                            break;
-
-                        case ITEM_TAG_MAIN_FEATURE:
-                            ReportType = HID_REPORT_TYPE_FEATURE;
-                            break;
-
-                        default:
-                            DebugFunction("[HIDPARSE] Unknown ReportType Tag %x Type %x Size %x CurrentItemSize %x\n", CurrentItem->Tag, CurrentItem->Type, CurrentItem->Size, CurrentItemSize);
-                            ASSERT(FALSE);
-                            break;
-                    }
-
-                    if (ReportType == HID_REPORT_TYPE_ANY)
-                        break;
-
-                    //
-                    // get report
-                    //
-                    Status = HidParser_GetReport(ParserContext, CurrentCollection, ReportType, ParserContext->GlobalItemState.ReportId, TRUE, &Report);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                    // fill in a sensible default if the index isn't set
-                    if (!ParserContext->LocalItemState.DesignatorIndexSet) {
-                        ParserContext->LocalItemState.DesignatorIndex
-                            = ParserContext->LocalItemState.DesignatorMinimum;
-                    }
-
-                    if (!ParserContext->LocalItemState.StringIndexSet)
-                        ParserContext->LocalItemState.StringIndex = ParserContext->LocalItemState.StringMinimum;
-
-                    //
-                    // get main item data
-                    //
-                    MainItemData = (PMAIN_ITEM_DATA)&Data;
-
-                    //
-                    // add states & data to the report
-                    //
-                    Status = HidParser_AddMainItem(ParserContext, Report, &ParserContext->GlobalItemState, &ParserContext->LocalItemState, MainItemData, CurrentCollection);
-                    ASSERT(Status == HIDP_STATUS_SUCCESS);
-                }
-
-                //
-                // backup stack
-                //
-                Index = ParserContext->LocalItemState.UsageStackAllocated;
-                NewUsageStack = ParserContext->LocalItemState.UsageStack;
-
-                //
-                // reset the local item state and clear the usage stack
-                //
-                ZeroFunction(&ParserContext->LocalItemState, sizeof(LOCAL_ITEM_STATE));
-
-                //
-                // restore stack
-                //
-                ParserContext->LocalItemState.UsageStack = NewUsageStack;
-                ParserContext->LocalItemState.UsageStackAllocated = Index;
-                break;
-            }
-            case ITEM_TYPE_GLOBAL:
-            {
-                switch (CurrentItem->Tag) {
-                    case ITEM_TAG_GLOBAL_USAGE_PAGE:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_USAGE_PAGE %x\n", Data);
-                        ParserContext->GlobalItemState.UsagePage = Data;
-                        break;
-                    case ITEM_TAG_GLOBAL_LOGICAL_MINIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_LOGICAL_MINIMUM %x\n", Data);
-                        ParserContext->GlobalItemState.LogicalMinimum = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_LOGICAL_MAXIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_LOCAL_MAXIMUM %x\n", Data);
-                        ParserContext->GlobalItemState.LogicialMaximum = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_PHYSICAL_MINIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_PHYSICAL_MINIMUM %x\n", Data);
-                        ParserContext->GlobalItemState.PhysicalMinimum = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_PHYSICAL_MAXIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_PHYSICAL_MAXIMUM %x\n", Data);
-                        ParserContext->GlobalItemState.PhysicalMaximum = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_UNIT_EXPONENT:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_UNIT_EXPONENT %x\n", Data);
-                        ParserContext->GlobalItemState.UnitExponent = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_UNIT:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_UNIT %x\n", Data);
-                        ParserContext->GlobalItemState.Unit = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_REPORT_SIZE:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_SIZE %x\n", Data);
-                        ParserContext->GlobalItemState.ReportSize = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_REPORT_ID:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_ID %x\n", Data);
-                        ParserContext->GlobalItemState.ReportId = Data;
-                        ParserContext->UseReportIDs = TRUE;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_REPORT_COUNT:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_REPORT_COUNT %x\n", Data);
-                        ParserContext->GlobalItemState.ReportCount = Data;
-                        break;
-
-                    case ITEM_TAG_GLOBAL_PUSH:
-                    {
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_PUSH\n");
-                        //
-                        // allocate global item state
-                        //
-                        LinkedGlobalItemState = (PGLOBAL_ITEM_STATE)AllocFunction(sizeof(GLOBAL_ITEM_STATE));
-                        ASSERT(LinkedGlobalItemState);
-
-                        //
-                        // copy global item state
-                        //
-                        CopyFunction(LinkedGlobalItemState, &ParserContext->GlobalItemState, sizeof(GLOBAL_ITEM_STATE));
-
-                        //
-                        // store pushed item in link member
-                        //
-                        ParserContext->GlobalItemState.Next = (struct __GLOBAL_ITEM_STATE__*)LinkedGlobalItemState;
-                        break;
-                    }
-                    case ITEM_TAG_GLOBAL_POP:
-                    {
-                        DebugFunction("[HIDPARSE] ITEM_TAG_GLOBAL_POP\n");
-                        if (ParserContext->GlobalItemState.Next == NULL)
-                        {
-                            //
-                            // pop without push
-                            //
-                            ASSERT(FALSE);
-                            break;
-                        }
-
-                        //
-                        // get link
-                        //
-                        LinkedGlobalItemState = (PGLOBAL_ITEM_STATE)ParserContext->GlobalItemState.Next;
-
-                        //
-                        // replace current item with linked one
-                        //
-                        CopyFunction(&ParserContext->GlobalItemState, LinkedGlobalItemState, sizeof(GLOBAL_ITEM_STATE));
-
-                        //
-                        // free item
-                        //
-                        FreeFunction(LinkedGlobalItemState);
-                        break;
-                    }
-
-                    default:
-                        //
-                        // unknown  / unsupported tag
-                        //
-                        ASSERT(FALSE);
-                        break;
-                }
-
-                break;
-            }
-            case ITEM_TYPE_LOCAL:
-            {
-                switch (CurrentItem->Tag)
-                {
-                    case ITEM_TAG_LOCAL_USAGE:
-                    {
-                        if (ParserContext->LocalItemState.UsageStackUsed >= ParserContext->LocalItemState.UsageStackAllocated)
-                        {
-                            //
-                            // increment stack size
-                            //
-                            ParserContext->LocalItemState.UsageStackAllocated += 10;
-
-                            //
-                            // build new usage stack
-                            //
-                            NewUsageStack = (PUSAGE_VALUE)AllocFunction(sizeof(USAGE_VALUE) * ParserContext->LocalItemState.UsageStackAllocated);
-                            ASSERT(NewUsageStack);
-
-                            //
-                            // copy old usage stack
-                            //
-                            CopyFunction(NewUsageStack, ParserContext->LocalItemState.UsageStack, sizeof(USAGE_VALUE) * (ParserContext->LocalItemState.UsageStackAllocated - 10));
-
-                            //
-                            // free old usage stack
-                            //
-                            FreeFunction(ParserContext->LocalItemState.UsageStack);
-
-                            //
-                            // replace with new usage stack
-                            //
-                            ParserContext->LocalItemState.UsageStack = NewUsageStack;
-                        }
-
-                        //
-                        // get fresh usage value
-                        //
-                        UsageValue = &ParserContext->LocalItemState.UsageStack[ParserContext->LocalItemState.UsageStackUsed];
-
-                        //
-                        // init usage stack
-                        //
-                        UsageValue->IsExtended = CurrentItemSize == sizeof(ULONG);
-                        UsageValue->u.Extended = Data;
-
-                        //
-                        // increment usage stack usage count
-                        //
-                        ParserContext->LocalItemState.UsageStackUsed++;
-                        break;
-                    }
-
-                    case ITEM_TAG_LOCAL_USAGE_MINIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_USAGE_MINIMUM Data %x\n", Data);
-                        ParserContext->LocalItemState.UsageMinimum.u.Extended = Data;
-                        ParserContext->LocalItemState.UsageMinimum.IsExtended
-                            = CurrentItemSize == sizeof(ULONG);
-                        ParserContext->LocalItemState.UsageMinimumSet = TRUE;
-                        break;
-
-                    case ITEM_TAG_LOCAL_USAGE_MAXIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_USAGE_MAXIMUM Data %x ItemSize %x %x\n", Data, CurrentItemSize, CurrentItem->Size);
-                        ParserContext->LocalItemState.UsageMaximum.u.Extended = Data;
-                        ParserContext->LocalItemState.UsageMaximum.IsExtended
-                            = CurrentItemSize == sizeof(ULONG);
-                        ParserContext->LocalItemState.UsageMaximumSet = TRUE;
-                        break;
-
-                    case ITEM_TAG_LOCAL_DESIGNATOR_INDEX:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_DESIGNATOR_INDEX Data %x\n", Data);
-                        ParserContext->LocalItemState.DesignatorIndex = Data;
-                        ParserContext->LocalItemState.DesignatorIndexSet = TRUE;
-                        break;
-
-                    case ITEM_TAG_LOCAL_DESIGNATOR_MINIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_DESIGNATOR_MINIMUM Data %x\n", Data);
-                        ParserContext->LocalItemState.DesignatorMinimum = Data;
-                        break;
-
-                    case ITEM_TAG_LOCAL_DESIGNATOR_MAXIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_DESIGNATOR_MAXIMUM Data %x\n", Data);
-                        ParserContext->LocalItemState.DesignatorMaximum = Data;
-                        break;
-
-                    case ITEM_TAG_LOCAL_STRING_INDEX:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_STRING_INDEX Data %x\n", Data);
-                        ParserContext->LocalItemState.StringIndex = Data;
-                        ParserContext->LocalItemState.StringIndexSet = TRUE;
-                        break;
-
-                    case ITEM_TAG_LOCAL_STRING_MINIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_STRING_MINIMUM Data %x\n", Data);
-                        ParserContext->LocalItemState.StringMinimum = Data;
-                        break;
-
-                    case ITEM_TAG_LOCAL_STRING_MAXIMUM:
-                        DebugFunction("[HIDPARSE] ITEM_TAG_LOCAL_STRING_MAXIMUM Data %x\n", Data);
-                        ParserContext->LocalItemState.StringMaximum = Data;
-                        break;
-
-                    default:
-                        DebugFunction("Unknown Local Item Tag %x\n", CurrentItem->Tag);
-                        ASSERT(FALSE);
-                        break;
-                }
-                break;
-            }
-
-            case ITEM_TYPE_LONG:
-            {
-                CurrentLongItem = (PLONG_ITEM)CurrentItem;
-                DebugFunction("Unsupported ITEM_TYPE_LONG Tag %x\n", CurrentLongItem->LongItemTag);
-                break;
-            }
+            len = caps->start_byte * 8 + caps->start_bit + caps->bit_size * caps->report_count;
+            if (!input_len[caps->report_id]) report_count++;
+            input_len[caps->report_id] = max(input_len[caps->report_id], len);
+            collection[caps->report_id] = i;
         }
 
-        //
-        // move to next item
-        //
-        CurrentOffset += CurrentItemSize + sizeof(ITEM_PREFIX);
+        caps = HID_OUTPUT_VALUE_CAPS( preparsed );
+        caps_end = caps + preparsed->output_caps_end - preparsed->output_caps_start;
+        for (; caps != caps_end; ++caps)
+        {
+            len = caps->start_byte * 8 + caps->start_bit + caps->bit_size * caps->report_count;
+            if (!input_len[caps->report_id] && !output_len[caps->report_id]) report_count++;
+            output_len[caps->report_id] = max(output_len[caps->report_id], len);
+            collection[caps->report_id] = i;
+        }
 
-    }while (CurrentOffset < ReportEnd);
-
-
-    //
-    // cleanup global stack
-    //
-    LinkedGlobalItemState = (PGLOBAL_ITEM_STATE)ParserContext->GlobalItemState.Next;
-    while(LinkedGlobalItemState != NULL)
-    {
-        DebugFunction("[HIDPARSE] Freeing GlobalState %p\n", LinkedGlobalItemState);
-        //
-        // free global item state
-        //
-        NextLinkedGlobalItemState = (PGLOBAL_ITEM_STATE)LinkedGlobalItemState->Next;
-
-        //
-        // free state
-        //
-        FreeFunction(LinkedGlobalItemState);
-
-        //
-        // move to next global state
-        //
-        LinkedGlobalItemState = NextLinkedGlobalItemState;
+        caps = HID_FEATURE_VALUE_CAPS( preparsed );
+        caps_end = caps + preparsed->feature_caps_end - preparsed->feature_caps_start;
+        for (; caps != caps_end; ++caps)
+        {
+            len = caps->start_byte * 8 + caps->start_bit + caps->bit_size * caps->report_count;
+            if (!input_len[caps->report_id] && !output_len[caps->report_id] && !feature_len[caps->report_id]) report_count++;
+            feature_len[caps->report_id] = max(feature_len[caps->report_id], len);
+            collection[caps->report_id] = i;
+        }
     }
 
-    //
-    // free usage stack
-    //
-    FreeFunction(ParserContext->LocalItemState.UsageStack);
-    ParserContext->LocalItemState.UsageStack = NULL;
+    len = sizeof(*DeviceDescription->ReportIDs) * report_count;
+    if (!(DeviceDescription->ReportIDs = AllocFunction( len ))) goto failed;
 
-    //
-    // store result
-    //
-    *OutParser = ParserContext;
-
-    //
-    // done
-    //
-    return HIDP_STATUS_SUCCESS;
-}
-
-PHID_COLLECTION
-HidParser_GetCollection(
-    PHID_PARSER_CONTEXT ParserContext,
-    IN ULONG CollectionNumber)
-{
-    //
-    // sanity checks
-    //
-    ASSERT(ParserContext);
-    ASSERT(ParserContext->RootCollection);
-    ASSERT(ParserContext->RootCollection->NodeCount);
-
-    //
-    // is collection index out of bounds
-    //
-    if (CollectionNumber < ParserContext->RootCollection->NodeCount)
+    for (i = 0, report_count = 0; i < 256; ++i)
     {
-        //
-        // valid collection
-        //
-        return ParserContext->RootCollection->Nodes[CollectionNumber];
+        /*
+         * The caps reserve a leading byte for the report id (Wine starts every
+         * report at bit 8). Reports that belong to report id 0 carry no id byte
+         * on the wire, so the per-report id length excludes it; reports with a
+         * real id keep it. The collection-level length always includes it.
+         */
+        ULONG id_byte = (i == 0) ? 1 : 0;
+
+        if (!input_len[i] && !output_len[i] && !feature_len[i]) continue;
+        DeviceDescription->ReportIDs[report_count].ReportID = i;
+        DeviceDescription->ReportIDs[report_count].CollectionNumber = collection[i] + 1;
+        DeviceDescription->ReportIDs[report_count].InputLength = input_len[i] ? (input_len[i] + 7) / 8 - id_byte : 0;
+        DeviceDescription->ReportIDs[report_count].OutputLength = output_len[i] ? (output_len[i] + 7) / 8 - id_byte : 0;
+        DeviceDescription->ReportIDs[report_count].FeatureLength = feature_len[i] ? (feature_len[i] + 7) / 8 - id_byte : 0;
+        report_count++;
     }
+    DeviceDescription->ReportIDsLength = report_count;
 
-    //
-    // no such collection
-    //
-    DebugFunction("HIDPARSE] No such collection %lu\n", CollectionNumber);
-    return NULL;
-}
+    FreeFunction( tlcs );
+    FreeFunction( scratch );
+    return STATUS_SUCCESS;
 
-
-ULONG
-HidParser_NumberOfTopCollections(
-    IN PVOID ParserCtx)
-{
-    PHID_PARSER_CONTEXT ParserContext;
-
-    //
-    // get parser context
-    //
-    ParserContext = (PHID_PARSER_CONTEXT)ParserCtx;
-
-    //
-    // sanity checks
-    //
-    ASSERT(ParserContext);
-    ASSERT(ParserContext->RootCollection);
-    ASSERT(ParserContext->RootCollection->NodeCount);
-
-    //
-    // number of top collections
-    //
-    return ParserContext->RootCollection->NodeCount;
-}
-
-NTSTATUS
-HidParser_BuildContext(
-    IN PVOID ParserContext,
-    IN ULONG CollectionIndex,
-    IN ULONG ContextSize,
-    OUT PVOID *CollectionContext)
-{
-    PHID_COLLECTION Collection;
-    PVOID Context;
-    NTSTATUS Status;
-
-    //
-    // lets get the collection
-    //
-    Collection = HidParser_GetCollection((PHID_PARSER_CONTEXT)ParserContext, CollectionIndex);
-    ASSERT(Collection);
-
-    //
-    // lets allocate the context
-    //
-    Context = AllocFunction(ContextSize);
-    if (Context == NULL)
+failed:
+    if (DeviceDescription->CollectionDesc)
     {
-        //
-        // no memory
-        //
-        return HIDP_STATUS_INTERNAL_ERROR;
+        for (i = 0; i < DeviceDescription->CollectionDescLength; ++i)
+            FreeFunction( DeviceDescription->CollectionDesc[i].PreparsedData );
+        FreeFunction( DeviceDescription->CollectionDesc );
     }
-
-    //
-    // lets build the context
-    //
-    Status = HidParser_BuildCollectionContext(Collection, Context, ContextSize);
-    if (Status == HIDP_STATUS_SUCCESS)
-    {
-        //
-        // store context
-        //
-        *CollectionContext = Context;
-    }
-
-    //
-    // done
-    //
-    return Status;
+    FreeFunction( tlcs );
+    FreeFunction( scratch );
+    return STATUS_INSUFFICIENT_RESOURCES;
 }
 
-
-ULONG
-HidParser_GetContextSize(
-    IN PVOID ParserContext,
-    IN ULONG CollectionIndex)
+VOID
+NTAPI
+HidParser_FreeCollectionDescription(
+    IN PHIDP_DEVICE_DESC DeviceDescription)
 {
-    PHID_COLLECTION Collection;
-    ULONG Size;
+    ULONG i;
 
-    //
-    // lets get the collection
-    //
-    Collection = HidParser_GetCollection((PHID_PARSER_CONTEXT)ParserContext, CollectionIndex);
-
-    //
-    // calculate size
-    //
-    Size = HidParser_CalculateContextSize(Collection);
-    return Size;
+    for (i = 0; i < DeviceDescription->CollectionDescLength; ++i)
+        FreeFunction( DeviceDescription->CollectionDesc[i].PreparsedData );
+    FreeFunction( DeviceDescription->CollectionDesc );
+    FreeFunction( DeviceDescription->ReportIDs );
 }
-
