@@ -63,24 +63,6 @@ BOOLEAN KiArm64HasSme = FALSE;
 ULONG KiArm64MaxSveVectorLength = 0;
 ULONG KiArm64SveStateSize = KI_NEON_STATE_SIZE;
 
-NTSTATUS
-NTAPI
-KxSaveFloatingPointState(
-    _Out_ PKFLOATING_SAVE FloatingState)
-{
-    UNREFERENCED_PARAMETER(FloatingState);
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS
-NTAPI
-KxRestoreFloatingPointState(
-    _In_ PKFLOATING_SAVE FloatingState)
-{
-    UNREFERENCED_PARAMETER(FloatingState);
-    return STATUS_SUCCESS;
-}
-
 #define KI_ARM64_SVE_SAVE_ZREG(_Reg, _Ptr) \
     __asm__ __volatile__(".arch_extension sve\n\tstr z" #_Reg ", [%0]\n\taddvl %0, %0, #1\n" \
                          : "+r"(_Ptr) : : "memory")
