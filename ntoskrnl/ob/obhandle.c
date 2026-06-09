@@ -1767,8 +1767,23 @@ ObpCloseHandle(IN HANDLE Handle,
     OBTRACE(OB_HANDLE_DEBUG,
             "%s - Closing handle: %p\n", __FUNCTION__, Handle);
 
-    if (AccessMode == KernelMode && Handle == (HANDLE)-1)
+    /*
+     * Closing the current-process pseudo-handle ((HANDLE)-1, NtCurrentProcess)
+     * silently succeeds on Windows 10+, whereas earlier releases reject it with
+     * STATUS_INVALID_HANDLE. Honor the behavior of the targeted NT version. On
+     * earlier versions a user-mode close of this value would otherwise reach the
+     * same STATUS_INVALID_HANDLE result via the "handle not found" path below
+     * (it is exempt from the invalid-handle exception/bugcheck there), so this
+     * short-circuit keeps the value handled identically in every processor mode.
+     */
+    if (Handle == NtCurrentProcess())
+    {
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+        return STATUS_SUCCESS;
+#else
         return STATUS_INVALID_HANDLE;
+#endif
+    }
 
     /* Check if we're dealing with a kernel handle */
     if (ObpIsKernelHandle(Handle, AccessMode))
