@@ -659,6 +659,78 @@ __INTRIN_INLINE unsigned int _CountOneBits64(unsigned __int64 value)
 }
 #endif
 
+/* x86-flavoured spellings of the same two operations; ARM64 code shared with
+   the x86 ports calls these names. */
+#if !HAS_BUILTIN(__lzcnt)
+__INTRIN_INLINE unsigned int __lzcnt(unsigned int value)
+{
+    if (!value)
+        return 32;
+    return __builtin_clz(value);
+}
+#endif
+
+#if !HAS_BUILTIN(__lzcnt16)
+__INTRIN_INLINE unsigned short __lzcnt16(unsigned short value)
+{
+    if (!value)
+        return 16;
+    return (unsigned short)(__builtin_clz((unsigned int)value) - 16);
+}
+#endif
+
+#if !HAS_BUILTIN(__lzcnt64)
+__INTRIN_INLINE unsigned long long __lzcnt64(unsigned long long value)
+{
+    if (!value)
+        return 64;
+    return __builtin_clzll(value);
+}
+#endif
+
+#if !HAS_BUILTIN(__popcnt)
+__INTRIN_INLINE unsigned int __popcnt(unsigned int value)
+{
+    return __builtin_popcount(value);
+}
+#endif
+
+#if !HAS_BUILTIN(__popcnt16)
+__INTRIN_INLINE unsigned short __popcnt16(unsigned short value)
+{
+    return __builtin_popcount(value);
+}
+#endif
+
+#if !HAS_BUILTIN(__popcnt64)
+__INTRIN_INLINE unsigned long long __popcnt64(unsigned long long value)
+{
+    return __builtin_popcountll(value);
+}
+#endif
+
+/*** 64-bit shifts ***/
+#if !HAS_BUILTIN(__ll_lshift)
+__INTRIN_INLINE unsigned long long __ll_lshift(unsigned long long Mask, int Bit)
+{
+    return Mask << (Bit & 0x3F);
+}
+#endif
+
+#if !HAS_BUILTIN(__ll_rshift)
+__INTRIN_INLINE long long __ll_rshift(long long Mask, int Bit)
+{
+    return Mask >> (Bit & 0x3F);
+}
+#endif
+
+#if !HAS_BUILTIN(__ull_rshift)
+__INTRIN_INLINE unsigned long long __ull_rshift(unsigned long long Mask, int Bit)
+{
+    return Mask >> (Bit & 0x3F);
+}
+#endif
+
 /*** 64-bit math ***/
 #if !HAS_BUILTIN(__mulh)
 __INTRIN_INLINE long long __mulh(long long a, long long b)
@@ -682,6 +754,14 @@ __INTRIN_INLINE long long __cdecl _abs64(long long value)
 #endif
 
 /*** ARM64 hints and barriers ***/
+#if !HAS_BUILTIN(_mm_pause)
+/* Spin-loop hint spelled the x86 way; YIELD is the ARM64 equivalent. */
+__INTRIN_INLINE void _mm_pause(void)
+{
+    __asm__ __volatile__("yield" : : : "memory");
+}
+#endif
+
 #if !HAS_BUILTIN(__yield)
 /* YIELD is a pure scheduling hint; no memory ordering per MS docs. */
 __INTRIN_INLINE void __yield(void)
