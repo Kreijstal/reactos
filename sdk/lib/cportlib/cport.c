@@ -33,6 +33,13 @@ NTAPI
 CpDoesPortExist(
     _In_ PUCHAR Address)
 {
+    /* A port at a NULL base does not exist. On platforms where port access is
+     * memory-mapped (e.g. ARM64) probing such an address would fault, unlike
+     * x86 I/O-port space where it is merely harmless. This mirrors the NULL
+     * check already performed by CpInitialize(). */
+    if (Address == NULL)
+        return FALSE;
+
     return Uart16550DoesPortExist(Address);
 }
 
