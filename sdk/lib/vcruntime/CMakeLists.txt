@@ -46,10 +46,10 @@ elseif(${ARCH} STREQUAL "arm")
 elseif(${ARCH} STREQUAL "arm64")
     list(APPEND VCRT_SETJMP_SOURCES
         arm64/longjmp.c
-        arm64/setjmp_stubs.c
     )
     list(APPEND VCRT_SETJMP_ASM_SOURCES
-        #arm64/_setjmp.s
+        arm64/__longjmp_noframe.s
+        arm64/_setjmp.s
     )
 endif()
 add_asm_files(vcrt_setjmp_asm ${VCRT_SETJMP_ASM_SOURCES})
