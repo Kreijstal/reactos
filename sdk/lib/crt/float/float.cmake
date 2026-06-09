@@ -47,4 +47,17 @@ elseif(ARCH STREQUAL "arm")
         float/arm/__getfp.s
         float/arm/__setfp.s
     )
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND CRT_FLOAT_SOURCE
+        float/arm64/_clearfp.c
+        float/arm64/_controlfp.c
+        float/arm64/_fpreset.c
+        float/arm64/_statusfp.c
+        # FMA3 is an x86 feature, but ucrtbase still exports _set_FMA3_enable
+        # (and the CRT registers __acrt_initialize_fma3) on win64 targets.
+        math/libm_sse2/fma3_available.c
+    )
+    list(APPEND LIBCNTPR_FLOAT_SOURCE
+        float/arm64/_controlfp.c
+    )
 endif()
