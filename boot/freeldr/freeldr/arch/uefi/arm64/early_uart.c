@@ -26,10 +26,213 @@ volatile UINT64 EarlyUartBaseAddress = 0;
 volatile ARM64_PLATFORM_ID EarlyUartPlatformId = Arm64PlatformUnknown;
 volatile ARM64_UART_INTERFACE EarlyUartInterface = Arm64UartUnknown;
 volatile BOOLEAN EarlyUartInitialized = FALSE;
+volatile BOOLEAN EarlyUartHardwareInitialized = FALSE;
+volatile UINT32 EarlyUartRxCachedBytes = 0;
+volatile UINT32 EarlyUartRxCachedByteCount = 0;
 
 /* External UEFI globals */
 extern EFI_SYSTEM_TABLE* GlobalSystemTable;
 extern EFI_HANDLE GlobalImageHandle;
+extern VOID UefiSerialPutChar(_In_ UCHAR Character);
+
+static VOID
+EarlyUartDiagPutChar(_In_ UCHAR Character)
+{
+    if (Character == '\n')
+        UefiSerialPutChar('\r');
+
+    UefiSerialPutChar(Character);
+}
+
+static VOID
+EarlyUartDiagPuts(_In_ PCSTR String)
+{
+    if (String == NULL)
+        return;
+
+    while (*String)
+        EarlyUartDiagPutChar(*String++);
+}
+
+static VOID
+EarlyUartDiagHex(_In_ UINT64 Value, _In_ ULONG Nibbles)
+{
+    static const CHAR HexDigits[] = "0123456789ABCDEF";
+    LONG Index;
+
+    if (Nibbles > 16)
+        Nibbles = 16;
+
+    for (Index = (LONG)Nibbles - 1; Index >= 0; --Index)
+        EarlyUartDiagPutChar(HexDigits[(Value >> (Index * 4)) & 0xFULL]);
+}
+
+static VOID
+EarlyUartDiagDec(_In_ ULONG Value)
+{
+    CHAR Buffer[11];
+    ULONG Position = 0;
+
+    if (Value == 0)
+    {
+        EarlyUartDiagPutChar('0');
+        return;
+    }
+
+    while (Value != 0 && Position < sizeof(Buffer))
+    {
+        Buffer[Position++] = '0' + (Value % 10);
+        Value /= 10;
+    }
+
+    while (Position != 0)
+        EarlyUartDiagPutChar(Buffer[--Position]);
+}
+
+static VOID
+EarlyUartDiagFixedAscii(
+    _In_reads_bytes_(Length) const UCHAR *String,
+    _In_ ULONG Length)
+{
+    ULONG Index;
+
+    while (Length != 0 &&
+           (String[Length - 1] == '\0' || String[Length - 1] == ' '))
+    {
+        --Length;
+    }
+
+    if (Length == 0)
+    {
+        EarlyUartDiagPutChar('-');
+        return;
+    }
+
+    for (Index = 0; Index < Length; ++Index)
+    {
+        UCHAR Character = String[Index];
+
+        EarlyUartDiagPutChar((Character >= 0x20 && Character <= 0x7E) ?
+                             Character :
+                             '.');
+    }
+}
+
+static PCSTR
+EarlyUartDiagInterfaceName(_In_ ARM64_UART_INTERFACE Interface)
+{
+    switch (Interface)
+    {
+        case Arm64UartPl011:
+            return "pl011";
+
+        case Arm64UartNs16550:
+            return "ns16550";
+
+        case Arm64UartQcomGeni:
+            return "qcom-geni";
+
+        case Arm64UartBcm2835Mini:
+            return "bcm2835-mini";
+
+        default:
+            return "unknown";
+    }
+}
+
+static UINT32
+EarlyUartDiagRead32(_In_ UINT64 Address)
+{
+    return *(volatile UINT32 *)(ULONG_PTR)Address;
+}
+
+static VOID
+EarlyUartDiagAcpiHeader(
+    _In_ PCSTR TableName,
+    _In_ PDESCRIPTION_HEADER Header)
+{
+    EarlyUartDiagPuts("[EUART] ");
+    EarlyUartDiagPuts(TableName);
+    EarlyUartDiagPuts(": rev=0x");
+    EarlyUartDiagHex(Header->Revision, 2);
+    EarlyUartDiagPuts(" len=0x");
+    EarlyUartDiagHex(Header->Length, 8);
+    EarlyUartDiagPuts(" oem=");
+    EarlyUartDiagFixedAscii(Header->OEMID, sizeof(Header->OEMID));
+    EarlyUartDiagPuts(" table=");
+    EarlyUartDiagFixedAscii(Header->OEMTableID, sizeof(Header->OEMTableID));
+    EarlyUartDiagPuts(" oemrev=0x");
+    EarlyUartDiagHex(Header->OEMRevision, 8);
+    EarlyUartDiagPuts(" creator=");
+    EarlyUartDiagFixedAscii(Header->CreatorID, sizeof(Header->CreatorID));
+    EarlyUartDiagPuts(" creatorrev=0x");
+    EarlyUartDiagHex(Header->CreatorRev, 8);
+    EarlyUartDiagPuts("\n");
+}
+
+static VOID
+EarlyUartDiagDbg2String(
+    _In_ PUCHAR Entry,
+    _In_ USHORT EntryLength,
+    _In_ USHORT Offset,
+    _In_ USHORT Length)
+{
+    if (Length == 0 ||
+        Offset == 0 ||
+        Offset > EntryLength ||
+        Length > EntryLength - Offset)
+    {
+        EarlyUartDiagPutChar('-');
+        return;
+    }
+
+    EarlyUartDiagFixedAscii(Entry + Offset, Length);
+}
+
+static VOID
+EarlyUartDiagBcmProbe(_In_ UINT64 Address)
+{
+    UINT32 AuxRelativeLsr;
+    UINT32 MiniUartRelativeLsr;
+
+    AuxRelativeLsr = EarlyUartDiagRead32(Address + ARM64_BCM2835_MINI_UART_LSR);
+    MiniUartRelativeLsr = EarlyUartDiagRead32(Address +
+                                              ARM64_BCM2835_MINI_UART_LSR -
+                                              ARM64_BCM2835_MINI_UART_IO);
+
+    EarlyUartDiagPuts("[EUART] BCM probe: lsr@base+0x");
+    EarlyUartDiagHex(ARM64_BCM2835_MINI_UART_LSR, 3);
+    EarlyUartDiagPuts("=0x");
+    EarlyUartDiagHex(AuxRelativeLsr, 8);
+    EarlyUartDiagPuts(" lsr@base+0x");
+    EarlyUartDiagHex(ARM64_BCM2835_MINI_UART_LSR -
+                     ARM64_BCM2835_MINI_UART_IO, 3);
+    EarlyUartDiagPuts("=0x");
+    EarlyUartDiagHex(MiniUartRelativeLsr, 8);
+    EarlyUartDiagPuts("\n");
+}
+
+/* Log the GENI SE identity while UEFI Serial I/O is still available. */
+static BOOLEAN
+EarlyUartDiagGeniProbe(_In_ UINT64 Address)
+{
+    UINT32 FwRevision = EarlyUartDiagRead32(Address + ARM64_QCOM_GENI_FW_REVISION_RO);
+    UINT32 Status     = EarlyUartDiagRead32(Address + ARM64_QCOM_GENI_STATUS);
+    UINT32 Protocol   = (FwRevision & ARM64_QCOM_GENI_FW_REV_PROTOCOL_MASK) >>
+                        ARM64_QCOM_GENI_FW_REV_PROTOCOL_SHIFT;
+
+    EarlyUartDiagPuts("[EUART] GENI probe: fw_rev=0x");
+    EarlyUartDiagHex(FwRevision, 8);
+    EarlyUartDiagPuts(" proto=0x");
+    EarlyUartDiagHex(Protocol, 2);
+    EarlyUartDiagPuts(" status=0x");
+    EarlyUartDiagHex(Status, 8);
+    EarlyUartDiagPuts(" (SE_UART=0x02)\n");
+
+    return FwRevision != 0xFFFFFFFFU &&
+           FwRevision != 0 &&
+           Protocol == ARM64_QCOM_GENI_SE_UART;
+}
 
 /*
  * SPCR table definitions for ACPI Serial Port Console Redirection.
@@ -53,7 +256,9 @@ extern EFI_HANDLE GlobalImageHandle;
 #define SERIAL_SUBTYPE_ARM_SBSA_32      0x000D
 #define SERIAL_SUBTYPE_ARM_SBSA_GENERIC 0x000E /* also legacy SPCR PL011 */
 #define SERIAL_SUBTYPE_BCM2835          0x0010
+#define SERIAL_SUBTYPE_SDM845_1_8432MHZ 0x0011
 #define SERIAL_SUBTYPE_16550_WITH_GAS   0x0012
+#define SERIAL_SUBTYPE_SDM845_7_372MHZ  0x0013
 
 #define DBG2_PORT_TYPE_SERIAL           0x8000
 
@@ -213,18 +418,47 @@ EarlyUartInterfaceFromSubtype(USHORT Subtype)
         case SERIAL_SUBTYPE_16550_SUBSET:
         case SERIAL_SUBTYPE_NS16550_NV:
         case SERIAL_SUBTYPE_16550_WITH_GAS:
-        case SERIAL_SUBTYPE_BCM2835:    /* RPi mini UART - 16550-ish */
             return Arm64UartNs16550;
 
+        case SERIAL_SUBTYPE_BCM2835:    /* Raspberry Pi AUX mini UART */
+            return Arm64UartBcm2835Mini;
+
+        case SERIAL_SUBTYPE_SDM845_1_8432MHZ:
+        case SERIAL_SUBTYPE_SDM845_7_372MHZ:
+            return Arm64UartQcomGeni;
+
         /*
-         * Qualcomm MSM/SDM/SM GENI/QUP, i.MX, OMAP, USIF, SAM5250, DCC: all
-         * have their own register layouts. TODO: add proper drivers; until
-         * then we report Unknown so EarlyUartReady() blocks any I/O and
-         * EarlyUartPutc becomes a no-op rather than scribbling on whatever
-         * device happens to live at that MMIO base.
+         * Older Qualcomm MSM debug UARTs, i.MX, OMAP, USIF, SAM5250, DCC:
+         * all have their own register layouts. Keep them disabled until they
+         * have explicit drivers.
          */
         default:
             return Arm64UartUnknown;
+    }
+}
+
+/*
+ * ACPI gives us candidates: a serial subtype and an MMIO base. Do not infer a
+ * register model from the address. Select a candidate only after the declared
+ * backend accepts it; backends with a safe hardware signature should verify it.
+ */
+static BOOLEAN
+EarlyUartProbeCandidate(
+    _In_ UINT64 Address,
+    _In_ ARM64_UART_INTERFACE Interface)
+{
+    switch (Interface)
+    {
+        case Arm64UartQcomGeni:
+            return EarlyUartDiagGeniProbe(Address);
+
+        case Arm64UartPl011:
+        case Arm64UartNs16550:
+        case Arm64UartBcm2835Mini:
+            return TRUE;
+
+        default:
+            return FALSE;
     }
 }
 
@@ -236,22 +470,63 @@ static UINT64
 EarlyUartLocateSpcrAddress(_Out_opt_ ARM64_UART_INTERFACE *UartInterface)
 {
     PSPCR_TABLE Spcr;
+    ARM64_UART_INTERFACE Interface;
 
     if (UartInterface)
         *UartInterface = Arm64UartUnknown;
 
+    EarlyUartDiagPuts("[EUART] SPCR: search\n");
+
     Spcr = (PSPCR_TABLE)EarlyUartFindAcpiTable(SPCR_SIGNATURE);
-    if (!Spcr || Spcr->Header.Length < sizeof(*Spcr))
+    if (!Spcr)
+    {
+        EarlyUartDiagPuts("[EUART] SPCR: not found\n");
         return 0;
+    }
+
+    if (Spcr->Header.Length < sizeof(*Spcr))
+    {
+        EarlyUartDiagPuts("[EUART] SPCR: short length=0x");
+        EarlyUartDiagHex(Spcr->Header.Length, 8);
+        EarlyUartDiagPuts("\n");
+        return 0;
+    }
+
+    EarlyUartDiagAcpiHeader("SPCR", &Spcr->Header);
+
+    EarlyUartDiagPuts("[EUART] SPCR: type=0x");
+    EarlyUartDiagHex(Spcr->InterfaceType, 2);
+    EarlyUartDiagPuts(" space=0x");
+    EarlyUartDiagHex(Spcr->SerialPort.AddressSpaceID, 2);
+    EarlyUartDiagPuts(" addr=0x");
+    EarlyUartDiagHex(Spcr->SerialPort.Address.QuadPart, 16);
+    EarlyUartDiagPuts("\n");
 
     if (Spcr->SerialPort.AddressSpaceID != ACPI_GAS_SPACE_SYSTEM_MEMORY)
+    {
+        EarlyUartDiagPuts("[EUART] SPCR: skip non-MMIO GAS\n");
         return 0;
+    }
 
     if (Spcr->SerialPort.Address.QuadPart == 0)
+    {
+        EarlyUartDiagPuts("[EUART] SPCR: skip zero address\n");
         return 0;
+    }
+
+    Interface = EarlyUartInterfaceFromSubtype(Spcr->InterfaceType);
+    EarlyUartDiagPuts("[EUART] SPCR: interface=");
+    EarlyUartDiagPuts(EarlyUartDiagInterfaceName(Interface));
+    EarlyUartDiagPuts("\n");
+
+    if (!EarlyUartProbeCandidate(Spcr->SerialPort.Address.QuadPart, Interface))
+    {
+        EarlyUartDiagPuts("[EUART] SPCR: skip unsupported interface\n");
+        return 0;
+    }
 
     if (UartInterface)
-        *UartInterface = EarlyUartInterfaceFromSubtype(Spcr->InterfaceType);
+        *UartInterface = Interface;
 
     return Spcr->SerialPort.Address.QuadPart;
 }
@@ -273,51 +548,130 @@ EarlyUartLocateDbg2Address(_Out_opt_ ARM64_UART_INTERFACE *UartInterface)
     if (UartInterface)
         *UartInterface = Arm64UartUnknown;
 
+    EarlyUartDiagPuts("[EUART] DBG2: search\n");
+
     Dbg2 = (PDBG2_TABLE)EarlyUartFindAcpiTable(DBG2_SIGNATURE);
-    if (!Dbg2 || Dbg2->Header.Length < sizeof(*Dbg2))
+    if (!Dbg2)
+    {
+        EarlyUartDiagPuts("[EUART] DBG2: not found\n");
         return 0;
+    }
+
+    if (Dbg2->Header.Length < sizeof(*Dbg2))
+    {
+        EarlyUartDiagPuts("[EUART] DBG2: short length=0x");
+        EarlyUartDiagHex(Dbg2->Header.Length, 8);
+        EarlyUartDiagPuts("\n");
+        return 0;
+    }
+
+    EarlyUartDiagAcpiHeader("DBG2", &Dbg2->Header);
+
+    EarlyUartDiagPuts("[EUART] DBG2: count=");
+    EarlyUartDiagDec(Dbg2->NumberDbgDeviceInfo);
+    EarlyUartDiagPuts(" offset=0x");
+    EarlyUartDiagHex(Dbg2->OffsetDbgDeviceInfo, 8);
+    EarlyUartDiagPuts(" length=0x");
+    EarlyUartDiagHex(Dbg2->Header.Length, 8);
+    EarlyUartDiagPuts("\n");
 
     TableEnd = (PUCHAR)Dbg2 + Dbg2->Header.Length;
     Cursor = (PUCHAR)Dbg2 + Dbg2->OffsetDbgDeviceInfo;
     if (Cursor < (PUCHAR)Dbg2 || Cursor > TableEnd)
+    {
+        EarlyUartDiagPuts("[EUART] DBG2: bad device-info offset\n");
         return 0;
+    }
 
     for (Index = 0; Index < Dbg2->NumberDbgDeviceInfo; ++Index)
     {
         PDBG2_DEVICE_INFO Dev;
         PGEN_ADDR Gas;
+        ARM64_UART_INTERFACE Interface;
 
         if (Cursor + sizeof(*Dev) > TableEnd)
+        {
+            EarlyUartDiagPuts("[EUART] DBG2: truncated entry header at index ");
+            EarlyUartDiagDec(Index);
+            EarlyUartDiagPuts("\n");
             break;
+        }
 
         Dev = (PDBG2_DEVICE_INFO)Cursor;
 
         if (Dev->Length < sizeof(*Dev) || Cursor + Dev->Length > TableEnd)
+        {
+            EarlyUartDiagPuts("[EUART] DBG2: bad entry length at index ");
+            EarlyUartDiagDec(Index);
+            EarlyUartDiagPuts(" length=0x");
+            EarlyUartDiagHex(Dev->Length, 4);
+            EarlyUartDiagPuts("\n");
             break;
+        }
+
+        EarlyUartDiagPuts("[EUART] DBG2: entry ");
+        EarlyUartDiagDec(Index);
+        EarlyUartDiagPuts(" type=0x");
+        EarlyUartDiagHex(Dev->PortType, 4);
+        EarlyUartDiagPuts(" subtype=0x");
+        EarlyUartDiagHex(Dev->PortSubtype, 4);
+        EarlyUartDiagPuts(" regs=");
+        EarlyUartDiagDec(Dev->NumberOfGenericAddressRegisters);
+        EarlyUartDiagPuts(" baroff=0x");
+        EarlyUartDiagHex(Dev->BaseAddressRegisterOffset, 4);
+        EarlyUartDiagPuts(" name=");
+        EarlyUartDiagDbg2String(Cursor,
+                                Dev->Length,
+                                Dev->NameSpaceStringOffset,
+                                Dev->NameSpaceStringLength);
+        EarlyUartDiagPuts(" oemdata-len=0x");
+        EarlyUartDiagHex(Dev->OemDataLength, 4);
+        EarlyUartDiagPuts("\n");
 
         if (Dev->PortType != DBG2_PORT_TYPE_SERIAL ||
             Dev->NumberOfGenericAddressRegisters == 0 ||
             Dev->BaseAddressRegisterOffset == 0 ||
             (USHORT)(Dev->BaseAddressRegisterOffset + sizeof(GEN_ADDR)) > Dev->Length)
         {
+            EarlyUartDiagPuts("[EUART] DBG2: skip unusable entry\n");
             Cursor += Dev->Length;
             continue;
         }
 
         Gas = (PGEN_ADDR)(Cursor + Dev->BaseAddressRegisterOffset);
+        EarlyUartDiagPuts("[EUART] DBG2: GAS space=0x");
+        EarlyUartDiagHex(Gas->AddressSpaceID, 2);
+        EarlyUartDiagPuts(" addr=0x");
+        EarlyUartDiagHex(Gas->Address.QuadPart, 16);
+        EarlyUartDiagPuts("\n");
+
         if (Gas->AddressSpaceID != ACPI_GAS_SPACE_SYSTEM_MEMORY ||
             Gas->Address.QuadPart == 0)
         {
+            EarlyUartDiagPuts("[EUART] DBG2: skip non-MMIO or zero GAS\n");
+            Cursor += Dev->Length;
+            continue;
+        }
+
+        Interface = EarlyUartInterfaceFromSubtype(Dev->PortSubtype);
+        EarlyUartDiagPuts("[EUART] DBG2: interface=");
+        EarlyUartDiagPuts(EarlyUartDiagInterfaceName(Interface));
+        EarlyUartDiagPuts("\n");
+
+        if (!EarlyUartProbeCandidate(Gas->Address.QuadPart, Interface))
+        {
+            EarlyUartDiagPuts("[EUART] DBG2: skip unsupported interface\n");
             Cursor += Dev->Length;
             continue;
         }
 
         if (UartInterface)
-            *UartInterface = EarlyUartInterfaceFromSubtype(Dev->PortSubtype);
+            *UartInterface = Interface;
 
         return Gas->Address.QuadPart;
     }
 
+    EarlyUartDiagPuts("[EUART] DBG2: no usable serial entry\n");
     return 0;
 }
 
@@ -326,6 +680,8 @@ EarlyUartDetectPlatform(VOID)
 {
     ARM64_UART_INTERFACE Interface;
     UINT64 Address;
+
+    EarlyUartDiagPuts("[EUART] detect: begin\n");
 
     Address = EarlyUartLocateSpcrAddress(&Interface);
     if (Address == 0)
@@ -336,12 +692,25 @@ EarlyUartDetectPlatform(VOID)
         EarlyUartBaseAddress = 0;
         EarlyUartInterface = Arm64UartUnknown;
         EarlyUartPlatformId = Arm64PlatformUnknown;
+        EarlyUartDiagPuts("[EUART] detect: no UART\n");
         return EarlyUartPlatformId;
     }
 
     EarlyUartBaseAddress = Address;
     EarlyUartInterface = Interface;
     EarlyUartPlatformId = Arm64PlatformGenericAcpi;
+
+    EarlyUartDiagPuts("[EUART] detect: base=0x");
+    EarlyUartDiagHex(EarlyUartBaseAddress, 16);
+    EarlyUartDiagPuts(" interface=");
+    EarlyUartDiagPuts(EarlyUartDiagInterfaceName(EarlyUartInterface));
+    EarlyUartDiagPuts(" ready=");
+    EarlyUartDiagDec(EarlyUartReady() ? 1 : 0);
+    EarlyUartDiagPuts("\n");
+
+    if (EarlyUartInterface == Arm64UartBcm2835Mini)
+        EarlyUartDiagBcmProbe(EarlyUartBaseAddress);
+
     return EarlyUartPlatformId;
 }
 
@@ -360,7 +729,22 @@ EarlyUartInitializeWithInterface(
     ARM64_UART_INTERFACE UartInterfaceOverride)
 {
     if (EarlyUartInitialized)
+    {
+        EarlyUartDiagPuts("[EUART] init: already initialized base=0x");
+        EarlyUartDiagHex(EarlyUartBaseAddress, 16);
+        EarlyUartDiagPuts(" interface=");
+        EarlyUartDiagPuts(EarlyUartDiagInterfaceName(EarlyUartInterface));
+        EarlyUartDiagPuts(" ready=");
+        EarlyUartDiagDec(EarlyUartReady() ? 1 : 0);
+        EarlyUartDiagPuts("\n");
         return TRUE;
+    }
+
+    EarlyUartDiagPuts("[EUART] init: override=0x");
+    EarlyUartDiagHex(UartBaseOverride, 16);
+    EarlyUartDiagPuts(" override-interface=");
+    EarlyUartDiagPuts(EarlyUartDiagInterfaceName(UartInterfaceOverride));
+    EarlyUartDiagPuts("\n");
 
     if (UartBaseOverride != 0)
     {
@@ -381,6 +765,14 @@ EarlyUartInitializeWithInterface(
     }
 
     EarlyUartInitialized = TRUE;
+
+    EarlyUartDiagPuts("[EUART] init: done base=0x");
+    EarlyUartDiagHex(EarlyUartBaseAddress, 16);
+    EarlyUartDiagPuts(" interface=");
+    EarlyUartDiagPuts(EarlyUartDiagInterfaceName(EarlyUartInterface));
+    EarlyUartDiagPuts(" ready=");
+    EarlyUartDiagDec(EarlyUartReady() ? 1 : 0);
+    EarlyUartDiagPuts("\n");
 
     return TRUE;
 }
