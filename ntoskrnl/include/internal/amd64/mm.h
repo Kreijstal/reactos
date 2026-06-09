@@ -20,6 +20,7 @@
 #define MI_DEBUG_MAPPING                (PVOID)0xFFFFF89FFFFFF000ULL // FIXME should be allocated from System PTEs
 #define MI_PAGED_POOL_START             (PVOID)0xFFFFF8A000000000ULL // 128 GB paged pool [MiVaPagedPool]
 //#define MI_PAGED_POOL_END                    0xFFFFF8BFFFFFFFFFULL
+#define MI_PAGED_POOL_SIZE                     (128ULL * 1024 * 1024 * 1024) // 128 GB paged pool VA window
 //#define MI_SESSION_SPACE_START               0xFFFFF90000000000ULL // 512 GB session space [MiVaSessionSpace]
 //#define MI_SESSION_VIEW_END                    0xFFFFF97FFF000000ULL
 #define MI_SESSION_SPACE_END                   0xFFFFF98000000000ULL

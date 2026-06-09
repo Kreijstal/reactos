@@ -1865,6 +1865,20 @@ MiBuildPagedPool(VOID)
         MmSizeOfPagedPoolInBytes = (ULONG_PTR)MmNonPagedPoolExpansionStart -
                                    (ULONG_PTR)MmPagedPoolStart;
     }
+#elif defined(_M_AMD64)
+    //
+    // Size paged pool the same way as x86 (twice the size of nonpaged pool),
+    // but bound it to the VA window dedicated to paged pool. On x64 the nonpaged
+    // pool expansion area lives in a separate, far higher region, so it cannot
+    // be used as the upper bound the way it is on x86. Leaving paged pool at the
+    // 32 MB static minimum (as happened when this whole block was x86-only) made
+    // every allocation larger than that fail outright.
+    //
+    MmSizeOfPagedPoolInBytes = 2 * MmMaximumNonPagedPoolInBytes;
+    if (MmSizeOfPagedPoolInBytes > MI_PAGED_POOL_SIZE)
+    {
+        MmSizeOfPagedPoolInBytes = MI_PAGED_POOL_SIZE;
+    }
 #endif // _M_IX86
 
     //
