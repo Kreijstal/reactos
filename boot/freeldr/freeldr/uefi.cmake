@@ -64,6 +64,7 @@ elseif(ARCH STREQUAL "arm")
 elseif(ARCH STREQUAL "arm64")
     list(APPEND UEFILDR_ARC_SOURCE
         arch/uefi/arm64/early_uart.c
+        arch/uefi/uefiserial.c
         arch/hwpci.c)
     list(APPEND UEFILDR_COMMON_ASM_SOURCE
         arch/uefi/arm64/uefiasm.S)

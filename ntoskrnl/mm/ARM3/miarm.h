@@ -19,6 +19,11 @@ extern "C" {
 #define _1MB (1024 * _1KB)
 #define _1GB (1024 * _1MB)
 
+#if defined(_M_ARM64)
+/* Pages the ARM64 boot path reserves for early non-paged pool sizing. */
+#define MI_ARM64_BOOT_POOL_SIZING_PAGES ((512 * _1MB) / PAGE_SIZE)
+#endif
+
 /* Everyone loves 64K */
 #define _64K (64 * _1KB)
 
