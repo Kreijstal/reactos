@@ -91,3 +91,11 @@ endif()
 if(DEFINED FREELDR_INI)
     run_fatten(-add "${FREELDR_INI}" "freeldr.ini")
 endif()
+
+# Empty directories to create that aren't implied by any file in the list
+# (e.g. profile roots a test expects to exist on the volume).
+if(DEFINED EXTRADIRS)
+    foreach(_extradir IN LISTS EXTRADIRS)
+        ensure_dir("${_extradir}")
+    endforeach()
+endif()

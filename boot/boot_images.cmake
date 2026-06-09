@@ -232,6 +232,7 @@ add_custom_target(kmtestimg_partition
         -D FILELIST=${CMAKE_CURRENT_BINARY_DIR}/kmtestcd.$<CONFIG>.lst
         -D FREELDR_SYS=${_freeldr_file}
         -D FREELDR_INI=${_kmtestimg_ini}
+        -D "EXTRADIRS=Documents and Settings"
         -P ${CMAKE_CURRENT_SOURCE_DIR}/create_fat_image.cmake
     DEPENDS native-fatten fat32 freeldr kmtestcd
     VERBATIM)
