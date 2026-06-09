@@ -1428,16 +1428,21 @@ MmMakeSegmentResident(
             LARGE_INTEGER FileOffset;
             FileOffset.QuadPart = Segment->Image.FileOffset + ChunkOffset;
 
-            /* Clamp to VDL */
-            if (ValidDataLength && ((FileOffset.QuadPart + ReadLength) > ValidDataLength->QuadPart))
+            /* If the whole range lies beyond the valid data length there is no
+             * file data to read at all, so the zeroed pages are served as-is.
+             * Otherwise the read is issued at its full (page-granular) length and
+             * the filesystem is left to bound it to the valid data and zero-fill
+             * the tail past ValidDataLength, exactly as the Windows data-section
+             * fault path does. The pages were allocated zeroed (MiRemoveZeroPage),
+             * so any bytes the filesystem leaves untouched beyond the valid data
+             * remain zero. Clamping the read down to ValidDataLength here would
+             * keep the request from ever crossing the end of file, hiding it from
+             * filesystems that only zero-fill (or report STATUS_END_OF_FILE) once
+             * a read actually reaches past it. */
+            if (ValidDataLength && (FileOffset.QuadPart >= ValidDataLength->QuadPart))
             {
-                if (FileOffset.QuadPart >= ValidDataLength->QuadPart)
-                {
-                    /* The page comes from the zero list; there is no valid file data to read. */
-                    goto AssignPagesToSegment;
-                }
-
-                Mdl->ByteCount = (ULONG)(ValidDataLength->QuadPart - FileOffset.QuadPart);
+                /* The page comes from the zero list; there is no valid file data to read. */
+                goto AssignPagesToSegment;
             }
 
             KEVENT Event;
