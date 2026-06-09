@@ -2225,6 +2225,17 @@ MmCreateArm3Section(OUT PVOID *SectionObject,
     if (AllocationAttributes & SEC_NOCACHE)
         SectionPageProtection |= PAGE_NOCACHE;
 
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    /* Windows 10 reads the maximum size before it validates the page
+     * protection. The size is mandatory for every section that reaches this
+     * function (a pagefile-backed section needs it, and the file-backed path
+     * uses it as the view size), so reading it through a NULL pointer raises an
+     * access violation here instead of returning STATUS_INVALID_PAGE_PROTECTION
+     * below. The volatile access keeps the read from being hoisted past the
+     * protection check. */
+    (void)*(volatile LONGLONG *)&InputMaximumSize->QuadPart;
+#endif
+
     /* Check to make sure the protection is correct. Nt* does this already */
     ProtectionMask = MiMakeProtectionMask(SectionPageProtection);
     if (ProtectionMask == MM_INVALID_PROTECTION)
@@ -3542,6 +3553,10 @@ NtMapViewOfSection(
 
     if (Section->u.Flags.PhysicalMemory)
     {
+#if (NTDDI_VERSION < NTDDI_WIN10)
+        /* Before Windows 10, user mode was not allowed to map a physical memory
+         * view that extended past the highest physical page. Windows 10 dropped
+         * that restriction and lets the mapping succeed. */
         if (PreviousMode == UserMode &&
             SafeSectionOffset.QuadPart + SafeViewSize > MmHighestPhysicalPage << PAGE_SHIFT)
         {
@@ -3550,6 +3565,7 @@ NtMapViewOfSection(
             ObDereferenceObject(Process);
             return STATUS_INVALID_PARAMETER_6;
         }
+#endif
     }
     else if (MiIsRosSectionObject(Section) &&
              !Section->u.Flags.Image &&
