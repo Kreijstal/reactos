@@ -1504,9 +1504,9 @@ HKLM,"SYSTEM\CurrentControlSet\Control\ProductOptions","ProductSuite",0x00010002
 ; ReactOS specific - by default we report ourselves as Server for the user,
 ; but we can also report as Workstation if some application needs it.
 HKLM,"SYSTEM\CurrentControlSet\Control\ReactOS\Settings\Version","ReportAsWorkstation",0x00010001,0x00000000
-; Some installers check for SP2
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDReleaseType",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDVersion",0x00010001,0x00000200
+; CSDVersion (the reported Service Pack level) is generated per target from
+; REACTOS_TARGET_CSDVERSION at CMake configure time; see csdversion.inf.in.
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","Directory",0x00020002,"%SystemRoot%"
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","ErrorMode",0x00010003,0x00000000
