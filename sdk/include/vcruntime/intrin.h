@@ -81,11 +81,15 @@ void __cdecl _disable(void);
 void __cdecl _enable(void);
 
 #if defined(_M_ARM64) && !defined(_MSC_VER)
-static __inline void __break(unsigned int _Code)
+/* Clang already provides __break(int) as a builtin; only define it ourselves
+ * when it does not, and match the builtin's signature to avoid a conflict. */
+#if !defined(__clang__) || !__has_builtin(__break)
+static __inline void __break(int _Code)
 {
     (void)_Code;
     __asm__ __volatile__("brk #0xf001");
 }
+#endif
 #endif
 
 unsigned char _interlockedbittestandreset(long volatile *, long);
