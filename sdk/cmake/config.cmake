@@ -117,6 +117,21 @@ set(USE_DUMMY_PSEH FALSE CACHE BOOL
 set(REACTOS_TARGET_NT "0x502" CACHE STRING
 "Target NT version (e.g. 0x502, 0x600, 0x601)")
 
+# Service Pack level reported through the registry CSDVersion value, which
+# RtlGetVersion() surfaces as wServicePackMajor/Minor. The historical NT 5.2
+# (Server 2003) persona reports Service Pack 2; every newer target defaults to
+# RTM with no service pack, matching real Windows (Vista+ and Windows 10 carry
+# no service pack at RTM). Packed DWORD: high byte = SP major, low byte = SP
+# minor (e.g. 0x00000200 = SP2). Override on the command line to report a
+# specific service pack for a given target.
+if(REACTOS_TARGET_NT STREQUAL "0x502")
+    set(_default_csdversion "0x00000200")
+else()
+    set(_default_csdversion "0x00000000")
+endif()
+set(REACTOS_TARGET_CSDVERSION "${_default_csdversion}" CACHE STRING
+"Service Pack level reported via the registry CSDVersion (packed DWORD: high byte = SP major, low byte = SP minor).")
+
 # Keep the derived export version synchronized with the selected target NT.
 # This is consumed by spec2def invocations and CMake-side NT6 feature gates.
 set(DLL_EXPORT_VERSION "${REACTOS_TARGET_NT}" CACHE INTERNAL

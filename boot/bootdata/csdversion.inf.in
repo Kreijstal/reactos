@@ -1,0 +1,10 @@
+[Version]
+Signature = "$Windows NT$"
+
+[AddReg]
+
+; Service Pack level, generated from REACTOS_TARGET_CSDVERSION at CMake configure
+; time (see sdk/cmake/config.cmake) instead of being hardcoded. The kernel loads
+; this into CmNtCSDVersion, which RtlGetVersion() surfaces as the
+; wServicePackMajor/Minor fields.
+HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDVersion",0x00010001,@REACTOS_TARGET_CSDVERSION@

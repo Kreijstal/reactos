@@ -883,9 +883,15 @@ function(get_defines OUTPUT_VAR)
 endfunction()
 
 function(add_registry_inf)
-    # Add to the inf files list
+    # Add to the inf files list. Accept both plain names (resolved against the
+    # current source dir) and absolute paths (e.g. configure_file-generated
+    # INFs living under the binary dir).
     foreach(_file ${ARGN})
-        set(_source_file "${CMAKE_CURRENT_SOURCE_DIR}/${_file}")
+        if(IS_ABSOLUTE "${_file}")
+            set(_source_file "${_file}")
+        else()
+            set(_source_file "${CMAKE_CURRENT_SOURCE_DIR}/${_file}")
+        endif()
         set_property(GLOBAL APPEND PROPERTY REGISTRY_INF_LIST ${_source_file})
     endforeach()
 endfunction()
@@ -901,7 +907,13 @@ function(create_registry_hives)
     # Convert files to utf16le
     foreach(_file ${_inf_files})
         get_filename_component(_file_name ${_file} NAME_WE)
-        file(RELATIVE_PATH _subdir ${CMAKE_SOURCE_DIR} ${_file})
+        # Generated INFs live under the binary dir; source INFs under the source
+        # dir. Compute the converted-file subdir relative to whichever applies.
+        if(_file MATCHES "^${CMAKE_BINARY_DIR}")
+            file(RELATIVE_PATH _subdir ${CMAKE_BINARY_DIR} ${_file})
+        else()
+            file(RELATIVE_PATH _subdir ${CMAKE_SOURCE_DIR} ${_file})
+        endif()
         get_filename_component(_subdir ${_subdir}  DIRECTORY)
         set(_converted_file ${CMAKE_BINARY_DIR}/${_subdir}/${_file_name}_utf16.inf)
         utf16le_convert(${_file} ${_converted_file})
