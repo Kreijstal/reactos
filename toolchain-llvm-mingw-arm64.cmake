@@ -39,7 +39,12 @@ execute_process(
 set(LLVM_MINGW_CLANG_INCLUDE "${_LLVM_MINGW_CLANG_RESOURCE_DIR}/include" CACHE PATH "LLVM-MinGW clang builtin include directory")
 set(CMAKE_CXX_FLAGS "" CACHE STRING "C++ flags" FORCE)
 
-require_program(CMAKE_MC_COMPILER ${LLVM_MINGW_PREFIX}windmc)
+# windmc produces architecture-neutral message-table resources, and LLVM-MinGW
+# does not ship one; fall back to a host windmc (the arch-specific step is windres).
+find_program(CMAKE_MC_COMPILER NAMES ${LLVM_MINGW_PREFIX}windmc x86_64-w64-mingw32-windmc windmc)
+if(NOT CMAKE_MC_COMPILER)
+    message(FATAL_ERROR "windmc not found")
+endif()
 require_program(CMAKE_RC_COMPILER ${LLVM_MINGW_PREFIX}windres)
 require_program(CMAKE_DLLTOOL ${LLVM_MINGW_PREFIX}dlltool)
 require_program(CMAKE_AR ${LLVM_MINGW_PREFIX}ar)
