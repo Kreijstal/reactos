@@ -10,6 +10,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#include "hardware.h"
+
 /**
  * @brief IoCompletion routine that signals an event when the lower driver finishes.
  *
@@ -339,6 +341,8 @@ SdBusInitializeController(
         return STATUS_IO_TIMEOUT;
     }
 
+    SdBusHardwareInitializeController(FdoExtension);
+
     /* Set initial clock to 400 kHz for identification mode */
     if (FdoExtension->MaxClockFrequency > 0)
     {
@@ -444,10 +448,19 @@ SdBusInitializeController(
                     SDHCI_INT_CMD_ERROR_MASK |
                     SDHCI_INT_DATA_ERROR_MASK);
 
-    /* Try ADMA2 first (scatter-gather directly to caller pages, no bounce buffer) */
+    /*
+     * Try ADMA2 first (scatter-gather directly to caller pages, no bounce buffer).
+     *
+     * Only when no DMA address mapping is required. Direct ADMA2 puts the
+     * caller's buffer pages into 32-bit descriptor addresses, which truncates
+     * any page above 4 GB. On platforms whose RAM lives above 4 GB (e.g. the
+     * Raspberry Pi 5) the HAL DMA adapter provides no map registers / bounce,
+     * so direct ADMA2 silently targets the wrong physical address and the data
+     * transfer never completes. In that case fall through to the SDMA path,
+     * which DMAs into the guaranteed-below-4 GB bounce buffer and copies up.
+     */
     FdoExtension->UseAdma2 = FALSE;
-    if ((Caps & SDHCI_CAP_ADMA2_SUPPORT) &&
-        (!NeedDmaMappingForAdma2 || FdoExtension->DmaAdapter != NULL))
+    if ((Caps & SDHCI_CAP_ADMA2_SUPPORT) && !NeedDmaMappingForAdma2)
     {
         PHYSICAL_ADDRESS HighestAcceptable;
         HighestAcceptable.QuadPart = 0xFFFFFFFF; /* 32-bit addressable */
@@ -653,6 +666,19 @@ SdBusFdoStartDevice(
     FdoExtension->RegisterLength = Length;
     FdoExtension->RegistersMapped = TRUE;
 
+    Status = SdBusHardwareMapResources(FdoExtension,
+                                       PhysicalAddress,
+                                       PartialList);
+    if (!NT_SUCCESS(Status))
+    {
+        MmUnmapIoSpace(FdoExtension->RegisterBase, FdoExtension->RegisterLength);
+        FdoExtension->RegisterBase = NULL;
+        FdoExtension->RegistersMapped = FALSE;
+        Irp->IoStatus.Status = Status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
+    }
+
     /* Connect the interrupt if available */
     if (FoundInterrupt)
     {
@@ -670,6 +696,7 @@ SdBusFdoStartDevice(
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("SdBusFdoStartDevice: IoConnectInterrupt failed (0x%08lx)\n", Status);
+            SdBusHardwareRelease(FdoExtension);
             MmUnmapIoSpace(FdoExtension->RegisterBase, FdoExtension->RegisterLength);
             FdoExtension->RegisterBase = NULL;
             FdoExtension->RegistersMapped = FALSE;
@@ -705,6 +732,7 @@ SdBusFdoStartDevice(
         }
 
         SdBusReleaseDmaAdapter(FdoExtension);
+        SdBusHardwareRelease(FdoExtension);
         MmUnmapIoSpace(FdoExtension->RegisterBase, FdoExtension->RegisterLength);
         FdoExtension->RegisterBase = NULL;
         FdoExtension->RegistersMapped = FALSE;
@@ -951,6 +979,8 @@ SdBusFdoRemoveDevice(
     }
 
     /* Unmap registers after all in-flight work has completed */
+    SdBusHardwareRelease(FdoExtension);
+
     if (FdoExtension->RegistersMapped)
     {
         MmUnmapIoSpace(FdoExtension->RegisterBase, FdoExtension->RegisterLength);

@@ -1,16 +1,14 @@
-
-/* CODE **********************************************************************/
-
     .text
     .align 2
-
-    .globl __chkstk
-    .def __chkstk; .scl 2; .type 32; .endef
+    .global __chkstk
 __chkstk:
     ret
 
-    .globl __alloca_probe
-    .def __alloca_probe; .scl 2; .type 32; .endef
+    .align 2
+    .global __alloca_probe
 __alloca_probe:
     ret
-/* EOF */
+
+    .section .drectve,"yn"
+    .ascii " -export:__chkstk"
+    .ascii " -export:__alloca_probe"
