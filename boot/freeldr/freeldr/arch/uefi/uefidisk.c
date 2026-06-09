@@ -66,6 +66,17 @@ UCHAR FrldrBootDrive;
 ULONG FrldrBootPartition;
 SIZE_T DiskReadBufferSize;
 
+/*
+ * Upper bound on the byte count handed to a single EFI_BLOCK_IO.ReadBlocks
+ * call. It starts unbounded (capped only by DiskReadBufferSize) but is reduced
+ * on the fly when a firmware rejects a large transfer: some UEFI block-I/O
+ * stacks (notably ATAPI/SCSI CD-ROM paths) cannot allocate a bounce buffer for
+ * a 128 KiB request under memory pressure and return an error (e.g. SCSI Check
+ * Condition) instead of splitting it. Halving the request on failure lets the
+ * read succeed without hard-coding a firmware-specific transfer ceiling.
+ */
+static SIZE_T UefiMaxTransferBytes = 0;
+
 /* UEFI-specific */
 static ULONG UefiBootRootIndex = 0;
 static ULONG PublicBootArcDisk = 0;
@@ -190,10 +201,48 @@ ULONG
 UefiGetMaxChunkSectors(
     IN ULONG BlockSize)
 {
-    if (BlockSize == 0 || DiskReadBufferSize < BlockSize)
+    SIZE_T MaxBytes = DiskReadBufferSize;
+
+    if (BlockSize == 0)
         return 0;
 
-    return DiskReadBufferSize / BlockSize;
+    /* Honour the adaptive transfer cap if one has been established */
+    if (UefiMaxTransferBytes != 0 && UefiMaxTransferBytes < MaxBytes)
+        MaxBytes = UefiMaxTransferBytes;
+
+    if (MaxBytes < BlockSize)
+        return 0;
+
+    return (ULONG)(MaxBytes / BlockSize);
+}
+
+/*
+ * Lower the per-ReadBlocks transfer cap after the firmware rejected a chunk.
+ * Returns TRUE if the cap could be reduced (so the caller should retry with a
+ * smaller transfer), FALSE once a single block already fails (genuine I/O error).
+ */
+static
+BOOLEAN
+UefiReduceMaxTransfer(
+    IN ULONG BlockSize,
+    IN ULONG FailedSectors)
+{
+    SIZE_T FailedBytes;
+
+    if (BlockSize == 0 || FailedSectors <= 1)
+        return FALSE;
+
+    /* Halve relative to the transfer that just failed */
+    FailedBytes = (SIZE_T)FailedSectors * BlockSize;
+    UefiMaxTransferBytes = FailedBytes / 2;
+
+    /* Never drop below a single block */
+    if (UefiMaxTransferBytes < BlockSize)
+        UefiMaxTransferBytes = BlockSize;
+
+    WARN("UEFI ReadBlocks rejected a %lu-sector transfer; capping at 0x%lx bytes\n",
+         FailedSectors, (ULONG)UefiMaxTransferBytes);
+    return TRUE;
 }
 
 static
@@ -212,16 +261,18 @@ UefiReadBlocksChunked(
     if (!BlockIo || !Buffer || SectorCount == 0 || BlockSize == 0)
         return EFI_INVALID_PARAMETER;
 
-    MaxSectors = UefiGetMaxChunkSectors(BlockSize);
-    if (MaxSectors == 0)
-        return EFI_BAD_BUFFER_SIZE;
-
     CurrentBuffer = (PUCHAR)Buffer;
 
     while (SectorCount)
     {
-        ULONG ReadSectors = min(SectorCount, MaxSectors);
-        UINTN ReadSize = (UINTN)ReadSectors * BlockSize;
+        ULONG ReadSectors;
+        UINTN ReadSize;
+
+        MaxSectors = UefiGetMaxChunkSectors(BlockSize);
+        if (MaxSectors == 0)
+            return EFI_BAD_BUFFER_SIZE;
+
+        ReadSectors = min(SectorCount, MaxSectors);
 
         Status = UefiReadBlocks(BlockIo,
                                 SectorNumber,
@@ -229,8 +280,15 @@ UefiReadBlocksChunked(
                                 CurrentBuffer,
                                 ReadSectors);
         if (EFI_ERROR(Status))
+        {
+            /* The firmware may have refused an over-large transfer: shrink
+             * the cap and retry this same range with a smaller request. */
+            if (UefiReduceMaxTransfer(BlockSize, ReadSectors))
+                continue;
             return Status;
+        }
 
+        ReadSize = (UINTN)ReadSectors * BlockSize;
         CurrentBuffer += ReadSize;
         SectorNumber += ReadSectors;
         SectorCount -= ReadSectors;
@@ -1557,20 +1615,23 @@ UefiDiskReadLogicalSectors(
     if (!UefiIsAlignedPointer(Buffer, (IoAlign == 0) ? 1 : IoAlign))
     {
         ULONG TotalSectors = SectorCount;
-        ULONG MaxSectors = UefiGetMaxChunkSectors(BlockSize);
+        ULONG MaxSectors;
         ULONGLONG CurrentSector = SectorNumber;
         PUCHAR OutPtr = (PUCHAR)Buffer;
 
-        if (MaxSectors == 0)
-        {
-            ERR("UEFI Block I/O chunk size too small for block size %lu\n", BlockSize);
-            return FALSE;
-        }
-
         while (TotalSectors)
         {
-            ULONG ReadSectors = min(TotalSectors, MaxSectors);
+            ULONG ReadSectors;
             UINTN ReadSize;
+
+            MaxSectors = UefiGetMaxChunkSectors(BlockSize);
+            if (MaxSectors == 0)
+            {
+                ERR("UEFI Block I/O chunk size too small for block size %lu\n", BlockSize);
+                return FALSE;
+            }
+
+            ReadSectors = min(TotalSectors, MaxSectors);
 
             Status = UefiReadBlocks(BlockIo,
                                     CurrentSector,
@@ -1580,6 +1641,11 @@ UefiDiskReadLogicalSectors(
 
             if (EFI_ERROR(Status))
             {
+                /* The firmware may have refused an over-large transfer:
+                 * shrink the cap and retry this same range. */
+                if (UefiReduceMaxTransfer(BlockSize, ReadSectors))
+                    continue;
+
                 ERR("ReadBlocks failed: DriveNumber=%d, SectorNumber=%llu, SectorCount=%lu, Status=0x%lx\n",
                     DriveNumber, CurrentSector, ReadSectors, (ULONG)Status);
                 ERR("ReadBlocks details: BlockSize=%lu, IoAlign=%lu, Buffer=%p, DiskReadBuffer=%p, MediaId=0x%lx\n",
