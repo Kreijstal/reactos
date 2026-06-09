@@ -406,6 +406,25 @@ NtSystemDebugControl(
                 break;
 #endif
 
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+            case SysDbgGetLiveKernelDump:
+                /* Live kernel dump generation, recognized since Windows 8.1
+                 * but not yet implemented in ReactOS */
+                UNIMPLEMENTED;
+                Status = STATUS_NOT_IMPLEMENTED;
+                break;
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_VB)
+            case SysDbgKdPullRemoteFile:
+                /* Pull a file over the KD transport, recognized since
+                 * Windows 10, version 2004 (20H1, build 19041), but not
+                 * yet implemented in ReactOS */
+                UNIMPLEMENTED;
+                Status = STATUS_NOT_IMPLEMENTED;
+                break;
+#endif
+
             default:
                 Status = STATUS_INVALID_INFO_CLASS;
                 break;
