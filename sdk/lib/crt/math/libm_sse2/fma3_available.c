@@ -61,6 +61,7 @@ _CRTALLOC(".CRT$XIC") static FMA3_USED _PIFV init_fma3 = __fma3_lib_init;
 
 int __fma3_lib_init(void)
 {
+#if defined(_M_IX86) || defined(_M_AMD64)
     int CPUID[4]; // CPUID[2] is ECX;
 
     __fma3_is_available = 0;
@@ -70,5 +71,11 @@ int __fma3_lib_init(void)
     }
 
     __use_fma3_lib = __fma3_is_available;
+#else
+    /* FMA3 is an x86 instruction-set extension. On other architectures the
+       scalar/portable math paths are always used, so report it unavailable. */
+    __fma3_is_available = 0;
+    __use_fma3_lib = 0;
+#endif
     return 0;
 }
