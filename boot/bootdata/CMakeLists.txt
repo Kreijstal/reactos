@@ -20,6 +20,11 @@ if(ARCH STREQUAL "arm64")
     add_registry_inf(hivesys_arm64.inf)
 endif()
 
+# Service Pack (CSDVersion) value, generated from REACTOS_TARGET_CSDVERSION so
+# it is configurable per target at CMake time instead of being hardcoded.
+configure_file(csdversion.inf.in ${CMAKE_CURRENT_BINARY_DIR}/csdversion.inf @ONLY)
+add_registry_inf(${CMAKE_CURRENT_BINARY_DIR}/csdversion.inf)
+
 # Regtest
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/regtest.cmd DESTINATION reactos/bin FOR all)
 
