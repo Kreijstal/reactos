@@ -172,27 +172,33 @@ __INTRIN_INLINE void __cdecl _mm256_zeroupper(void)
 }
 #endif
 
+#ifndef _REACTOS_INTRIN_RDRAND16_STEP
 __INTRIN_INLINE int _rdrand16_step(unsigned short* random_val)
 {
     unsigned char ok;
     __asm__ __volatile__("rdrand %0; setc %1" : "=r"(*random_val), "=qm"(ok));
     return (int)ok;
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_RDRAND32_STEP
 __INTRIN_INLINE int _rdrand32_step(unsigned int* random_val)
 {
     unsigned char ok;
     __asm__ __volatile__("rdrand %0; setc %1" : "=r"(*random_val), "=qm"(ok));
     return (int)ok;
 }
+#endif
 
 #if defined(__x86_64__)
+#ifndef _REACTOS_INTRIN_RDRAND64_STEP
 __INTRIN_INLINE int _rdrand64_step(unsigned __int64* random_val)
 {
     unsigned char ok;
     __asm__ __volatile__("rdrand %0; setc %1" : "=r"(*random_val), "=qm"(ok));
     return (int)ok;
 }
+#endif
 #endif // __x86_64__
 
 __INTRIN_INLINE int _rdseed16_step(unsigned short* random_val)
