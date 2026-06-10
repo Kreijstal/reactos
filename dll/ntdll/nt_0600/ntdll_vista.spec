@@ -27,7 +27,7 @@
 @ stdcall RtlLocaleNameToLcid(wstr ptr long)
 @ stdcall RtlCompareUnicodeStrings(wstr long wstr long long)
 @ stdcall RtlGetCurrentProcessorNumberEx(ptr)
-@ stdcall -arch=i386 RtlInterlockedPushListSListEx(ptr ptr ptr long)
+@ stdcall -arch=i386 RtlInterlockedPushListSListEx(ptr ptr ptr long) ntdll.RtlInterlockedPushListSList
 @ stdcall -arch=!i386 RtlInterlockedPushListSListEx(ptr ptr ptr long) ntdll.RtlInterlockedPushListSList
 @ stdcall RtlIsProcessorFeaturePresent(long)
 
