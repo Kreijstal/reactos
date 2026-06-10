@@ -69,7 +69,7 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
     // FIXME: This doesn't respect PAE, but we currently don't
     // define a PAE build flag since there is no such build.
     //
-#if !defined(_M_AMD64)
+#if !defined(_M_AMD64) && !defined(_M_ARM64)
     ASSERT(PhysicalAddress.HighPart == 0);
 #endif
 
@@ -132,6 +132,20 @@ MmMapIoSpace(IN PHYSICAL_ADDRESS PhysicalAddress,
             //
             MI_PAGE_DISABLE_CACHE(&TempPte);
             MI_PAGE_WRITE_THROUGH(&TempPte);
+#if defined(_M_ARM64)
+            //
+            // The macros above select Device-nGnRnE memory, which is required
+            // for real device MMIO but faults on the unaligned/vector accesses
+            // the compiler emits for ordinary struct reads and memcpy. A non-
+            // cached mapping of real RAM (e.g. a DMA common buffer) must be
+            // Normal Non-Cacheable instead. IsIoMapping is FALSE only when the
+            // physical range is backed by the PFN database, i.e. real RAM.
+            //
+            if (!IsIoMapping)
+            {
+                MI_PAGE_NORMAL_NONCACHED(&TempPte);
+            }
+#endif
             break;
 
         case MiCached:
