@@ -17,6 +17,13 @@ endif()
 add_subdirectory(pcnet)
 add_subdirectory(rtl8139)
 add_subdirectory(rtl8168)
+# rp1gem is the Gigabit Ethernet miniport for the RP1 southbridge on the
+# Raspberry Pi 5; ARM64-only silicon. hivesys_arm64.inf registers it as a
+# boot-start service, so the binary must be present on every ARM64 image or
+# the boot loader aborts with "Cannot load boot driver".
+if(ARCH STREQUAL "arm64")
+    add_subdirectory(rp1gem)
+endif()
 # ar9485 is an NDIS 6.20 native-802.11 miniport - same NT 6.0+ gating as e1000e.
 if(_E1000E_NT_NUM GREATER_EQUAL 1536)
     add_subdirectory(ar9485)
