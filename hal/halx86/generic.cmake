@@ -25,6 +25,7 @@ if(ARCH STREQUAL "i386")
         generic/v86.S)
 elseif(ARCH STREQUAL "amd64")
     list(APPEND HAL_GENERIC_SOURCE
+        generic/amd64/irql_exports.c
         generic/portio.c
         ${REACTOS_SOURCE_DIR}/hal/arch/common/generic/sysinfo_stubs.c)
 endif()
