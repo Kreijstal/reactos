@@ -145,6 +145,15 @@ KbdHid_ReadCompletion(
         DeviceExtension->Report[3], DeviceExtension->Report[4], DeviceExtension->Report[5],
         DeviceExtension->Report[6], DeviceExtension->Report[7], DeviceExtension->Report[8]);
 
+    /* HidP_UsageAndPageListDifference treats the usage lists as zero-terminated,
+     * but HidP_GetUsagesEx only writes the usages that are actually set in the
+     * report and leaves the remaining entries untouched. When a key is released
+     * the list shrinks, so without clearing it first the slot keeps the stale
+     * usage from the previous report and the difference finds no change - the
+     * key break is then lost until a later report happens to overwrite the slot.
+     * Clear the list so released keys leave a zero terminator behind. */
+    RtlZeroMemory(DeviceExtension->CurrentUsageList,
+                  sizeof(USAGE_AND_PAGE) * DeviceExtension->UsageListLength);
 
     /* get current usages */
     ButtonLength = DeviceExtension->UsageListLength;
