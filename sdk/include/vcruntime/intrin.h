@@ -70,18 +70,6 @@ static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_setzero_si128(void)
     return (__m128i){0, 0};
 }
 
-static __inline__ unsigned int _mm_getcsr(void)
-{
-    unsigned int _Value;
-    __asm__ __volatile__("stmxcsr %0" : "=m"(_Value));
-    return _Value;
-}
-
-static __inline__ void _mm_setcsr(unsigned int _Value)
-{
-    __asm__ __volatile__("ldmxcsr %0" : : "m"(_Value));
-}
-
 static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_loadu_si128(__m128i const *_Address)
 {
     __m128i _Value;
@@ -126,7 +114,7 @@ static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_cmpeq_epi16(__m128i _Left, __m1
 
 static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_cvtsi32_si128(int _Value)
 {
-    return (__m128i){(unsigned int)_Value, 0, 0, 0};
+    return (__m128i){(unsigned int)_Value, 0};
 }
 
 static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_unpacklo_epi8(__m128i _Left, __m128i _Right)
