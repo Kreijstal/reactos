@@ -255,7 +255,7 @@ static NTSTATUS get_usage_value( const struct hid_value_caps *caps, void *user )
     RtlZeroMemory( params->value_buf, params->value_len );
 
     report_buf = (unsigned char *)params->report_buf + caps->start_byte + bit_offset / 8;
-    copy_bits( params->value_buf, report_buf, bit_count, -(start_bit + bit_offset % 8) );
+    copy_bits( params->value_buf, report_buf, bit_count, -(int)(start_bit + bit_offset % 8) );
 
     return HIDP_STATUS_NULL;
 }
