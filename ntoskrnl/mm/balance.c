@@ -49,6 +49,14 @@ MmInitializeBalancer(ULONG NrAvailablePages, ULONG NrSystemPages)
     MiMinimumAvailablePages = 256;
     MiMinimumPagesPerRun = 256;
     MiMemoryConsumers[MC_USER].PagesTarget = NrAvailablePages / 2;
+
+    /* Initialize the dispatcher objects now: MmRebalanceMemoryConsumers can
+     * signal MiBalancerEvent as soon as a page request fails, which may be
+     * long before MiInitBalancerThread runs. KeSetEvent on a zero-initialized
+     * event walks a garbage wait list head and crashes. */
+    KeInitializeEvent(&MiBalancerEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&MiBalancerDoneEvent, SynchronizationEvent, FALSE);
+    KeInitializeTimerEx(&MiBalancerTimer, SynchronizationTimer);
 }
 
 CODE_SEG("INIT")
@@ -444,10 +452,8 @@ MiInitBalancerThread(VOID)
     NTSTATUS Status;
     LARGE_INTEGER Timeout;
 
-    KeInitializeEvent(&MiBalancerEvent, SynchronizationEvent, FALSE);
-    KeInitializeEvent(&MiBalancerDoneEvent, SynchronizationEvent, FALSE);
-    KeInitializeTimerEx(&MiBalancerTimer, SynchronizationTimer);
-
+    /* MiBalancerEvent, MiBalancerDoneEvent and MiBalancerTimer are
+     * initialized in MmInitializeBalancer */
     Timeout.QuadPart = -20000000; /* 2 sec */
     KeSetTimerEx(&MiBalancerTimer,
                  Timeout,
