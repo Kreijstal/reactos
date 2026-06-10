@@ -7,6 +7,10 @@
 
 #include <uefildr.h>
 
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
+
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(WARNING);
 
@@ -30,6 +34,15 @@ EfiEntry(
 
     GlobalImageHandle = ImageHandle;
     GlobalSystemTable = SystemTable;
+
+#if defined(_M_ARM64)
+    /* Detect the platform serial port from ACPI SPCR/DBG2 while the UEFI
+     * configuration tables are still mapped. Everything downstream
+     * (EarlyUartPuts diagnostics, the UART page-table mappings, the
+     * loader-block hand-off to the kernel) keys off this detection; without
+     * it EarlyUartBaseAddress stays 0 and all of it silently no-ops. */
+    EarlyUartInitialize(0);
+#endif
 
     /* Load the default settings from the command-line */
     LoadSettings(CmdLine);
