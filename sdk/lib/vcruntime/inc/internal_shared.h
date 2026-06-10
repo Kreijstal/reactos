@@ -13,8 +13,17 @@
 #include <corecrt_startup.h>
 #include <crtdbg.h>
 #include <malloc.h>
+#include <pseh/pseh2.h>
 #include <windef.h>
 #include <winbase.h>
+
+#if defined(__cplusplus) && defined(__GNUC__) && !defined(__clang__) && !defined(__try)
+#define __try _SEH2_TRY
+#define __except _SEH2_EXCEPT
+#define __finally _SEH2_FINALLY
+#define __endtry _SEH2_END
+#define __leave _SEH2_LEAVE
+#endif
 
 #ifdef __cplusplus
 extern "C" {
