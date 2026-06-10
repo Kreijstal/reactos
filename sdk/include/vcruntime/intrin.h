@@ -205,6 +205,8 @@ static __inline__ float __ATTRIBUTE_SSE__ _mm_cvtss_f32(__m128 _Value)
 #define _REACTOS_INTRIN_MM256_MOVEMASK_EPI8
 #define _REACTOS_INTRIN_MM256_CMPEQ_EPI8
 #define _REACTOS_INTRIN_MM256_CMPEQ_EPI16
+#define _REACTOS_INTRIN_RDRAND16_STEP
+#define _REACTOS_INTRIN_RDRAND32_STEP
 static __inline__ __m256i __ATTRIBUTE_AVX__ _mm256_setzero_si256(void)
 {
     return (__m256i){0, 0, 0, 0};
@@ -230,7 +232,22 @@ static __inline__ __m256i __ATTRIBUTE_AVX2__ _mm256_cmpeq_epi16(__m256i _Left, _
     return (__m256i)((__ros_v16hi)_Left == (__ros_v16hi)_Right);
 }
 
+static __inline__ int _rdrand16_step(unsigned short *_Value)
+{
+    unsigned char _Ok;
+    __asm__ __volatile__("rdrand %0; setc %1" : "=r"(*_Value), "=qm"(_Ok));
+    return (int)_Ok;
+}
+
+static __inline__ int _rdrand32_step(unsigned int *_Value)
+{
+    unsigned char _Ok;
+    __asm__ __volatile__("rdrand %0; setc %1" : "=r"(*_Value), "=qm"(_Ok));
+    return (int)_Ok;
+}
+
 #if defined(_M_X64)
+#define _REACTOS_INTRIN_RDRAND64_STEP
 static __inline__ int _rdrand64_step(unsigned __int64 *_Value)
 {
     unsigned char _Ok;
