@@ -3020,7 +3020,46 @@ static VOID setup_pgtables(VOID)
     {
         /* Post-EBS: skip the bulk identity-mapping pre-reservation. The
          * per-region Arm64MapVirtualMemory calls done later still walk the
-         * page-table tree on demand. */
+         * page-table tree on demand.
+         *
+         * The physical-memory alias window (ARM64_PHYS_MAP_BASE) however has
+         * no demand path: the kernel and HAL (HalpAcpiTableCacheInit, SMP
+         * startup, KD) dereference ARM64_PHYS_MAP_BASE|pa directly and fault
+         * if the alias is absent. Firmware must not be called after
+         * ExitBootServices, so build the alias from the memory map cached by
+         * MmInitializeMemoryManager instead of UefiMemGetMemoryMap. */
+        {
+            PFREELDR_MEMORY_DESCRIPTOR CachedMap;
+            ULONG CachedCount = MmGetBiosMemoryMap(&CachedMap);
+            const UINT64 map_limit = ((UINT64)MM_MAX_PAGE_LOADER_MAPPED << PAGE_SHIFT);
+
+            for (i = 0; i < CachedCount; ++i)
+            {
+                const FREELDR_MEMORY_DESCRIPTOR *Descriptor = &CachedMap[i];
+                UINT64 PhysicalStart = (UINT64)Descriptor->BasePage * PAGE_SIZE;
+                UINT64 Size = (UINT64)Descriptor->PageCount * PAGE_SIZE;
+                UINT64 Attributes;
+
+                if (Size == 0 || !Arm64DescriptorIsSystemMemory(Descriptor))
+                    continue;
+                if (PhysicalStart >= map_limit)
+                    continue;
+                if (PhysicalStart + Size > map_limit)
+                    Size = map_limit - PhysicalStart;
+
+                Attributes = Arm64MemoryAttributesForDescriptor(Descriptor, FALSE) |
+                             PTE_BLOCK_PXN | PTE_BLOCK_UXN;
+
+                if (!map_region_hierarchical(ARM64_PHYS_MAP_BASE | PhysicalStart,
+                                             PhysicalStart,
+                                             Size,
+                                             Attributes))
+                {
+                    UartPuts("[PT] FAILED to map physical alias (post-EBS)\n");
+                    break;
+                }
+            }
+        }
         return;
     }
 
