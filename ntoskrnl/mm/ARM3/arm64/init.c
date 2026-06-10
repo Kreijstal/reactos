@@ -1882,6 +1882,12 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
 
         MiMapPPEs((PVOID)MI_MAPPING_RANGE_START, (PVOID)MI_MAPPING_RANGE_END);
         MiMapPDEs((PVOID)MI_MAPPING_RANGE_START, (PVOID)MI_MAPPING_RANGE_END);
+
+        /* Set up the PDE and PTEs for the VAD bitmap and working set list */
+        MiMapPPEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
+        MiMapPDEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
+        MiMapPTEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
+
         MmFirstReservedMappingPte = MiAddressToPte((PVOID)MI_MAPPING_RANGE_START);
         MmLastReservedMappingPte = MiAddressToPte((PVOID)MI_MAPPING_RANGE_END);
 
@@ -1960,6 +1966,47 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
         }
 
         MiMapPPEs(MmSystemCacheStart, (PVOID)MI_SYSTEM_CACHE_END);
+
+        {
+            NTSTATUS Status;
+            ULONG ProcessFlags = 0;
+            PMMPFN Pfn1;
+
+            /* Reset the ref/share count so that MmInitializeProcessAddressSpace works */
+            Pfn1 = MiGetPfnEntry(PFN_FROM_PTE((PMMPTE)PXE_SELFMAP));
+            Pfn1->u2.ShareCount = 0;
+            Pfn1->u3.e2.ReferenceCount = 0;
+
+            Pfn1 = MiGetPfnEntry(PFN_FROM_PDE(MiAddressToPde((PVOID)HYPER_SPACE)));
+            Pfn1->u2.ShareCount = 0;
+            Pfn1->u3.e2.ReferenceCount = 0;
+
+            Pfn1 = MiGetPfnEntry(PFN_FROM_PPE(MiAddressToPpe((PVOID)HYPER_SPACE)));
+            Pfn1->u2.ShareCount = 0;
+            Pfn1->u3.e2.ReferenceCount = 0;
+
+            Pfn1 = MiGetPfnEntry(PFN_FROM_PXE(MiAddressToPxe((PVOID)HYPER_SPACE)));
+            Pfn1->u2.ShareCount = 0;
+            Pfn1->u3.e2.ReferenceCount = 0;
+
+            Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(MiAddressToPte(MmWorkingSetList)));
+            Pfn1->u2.ShareCount = 0;
+            Pfn1->u3.e2.ReferenceCount = 0;
+
+            /* Initialize the boot process address space, like the other
+             * architectures do at the end of their machine-dependent init.
+             * Among other things this initializes AddressCreationLock,
+             * which backs MmLockAddressSpace for the kernel address space. */
+            Status = MmInitializeProcessAddressSpace(PsGetCurrentProcess(),
+                                                     NULL,
+                                                     NULL,
+                                                     &ProcessFlags,
+                                                     NULL);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("MmInitializeProcessAddressSpace failed: 0x%lx\n", Status);
+            }
+        }
 
         __asm__ __volatile__(
             "dsb ishst\n\t"
