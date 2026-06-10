@@ -613,15 +613,13 @@ BOOL HCR_GetFolderAttributes(LPCITEMIDLIST pidlFolder, LPDWORD pdwAttributes)
     }
     
     lResult = RegOpenKeyExW(HKEY_CLASSES_ROOT, wszShellFolderKey, 0, KEY_READ, &hSFKey);
-#ifdef __REACTOS__
     if (lResult != ERROR_SUCCESS)
     {
+#ifdef __REACTOS__
         ERR("Cannot open key: %ls\n", wszShellFolderKey);
+#endif
         return FALSE;
     }
-#else
-    if (lResult != ERROR_SUCCESS) return FALSE;
-#endif
     
     dwLen = sizeof(DWORD);
     lResult = RegQueryValueExW(hSFKey, L"CallForAttributes", 0, NULL, (LPBYTE)&dwTemp, &dwLen);
