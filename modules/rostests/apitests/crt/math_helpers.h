@@ -11,6 +11,9 @@
 #include <math.h>
 #include <float.h>
 #include <stdint.h>
+#if defined(__i386__) || defined(__x86_64__)
+#include <intrin.h>
+#endif
 #include <apitest.h>
 
 #if defined(__GNUC__) || defined(__clang__)

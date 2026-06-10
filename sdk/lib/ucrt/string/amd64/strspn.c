@@ -186,7 +186,6 @@ char * __cdecl strpbrk (
 }
 
 #if defined(STRSPN_USE_SSE2)
-#include <emmintrin.h>
 #include <intrin.h>
 #pragma intrinsic(_BitScanForward)
 #pragma optimize("t", on)

@@ -15,6 +15,250 @@
 #include <xmmintrin.h> // native headers: immintrin.h -> wmmintrin.h -> nmmintrin.h -> smmintrin.h -> tmmintrin.h -> pmmintrin.h -> emmintrin.h
 #endif /* _M_IX86 || _M_X64 */
 
+#if defined(__clang__) && !defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+#if !defined(_INCLUDED_MM2)
+typedef float __m128 __attribute__((__vector_size__(16), __aligned__(16)));
+#endif
+#if !defined(_INCLUDED_EMM)
+typedef double __m128d __attribute__((__vector_size__(16), __aligned__(16)));
+typedef long long __m128i __attribute__((__vector_size__(16), __aligned__(16)));
+#endif
+#if !defined(_INCLUDED_IMM)
+typedef long long __m256i __attribute__((__vector_size__(32), __aligned__(32)));
+#endif
+
+typedef char __ros_v16qi __attribute__((__vector_size__(16)));
+typedef short __ros_v8hi __attribute__((__vector_size__(16)));
+typedef int __ros_v4si __attribute__((__vector_size__(16)));
+typedef long long __ros_v2di __attribute__((__vector_size__(16)));
+typedef char __ros_v32qi __attribute__((__vector_size__(32)));
+typedef short __ros_v16hi __attribute__((__vector_size__(32)));
+
+#ifndef __ATTRIBUTE_SSE__
+#define __ATTRIBUTE_SSE__ __attribute__((__target__("sse"), __min_vector_width__(128)))
+#endif
+#ifndef __ATTRIBUTE_SSE2__
+#define __ATTRIBUTE_SSE2__ __attribute__((__target__("sse2"), __min_vector_width__(128)))
+#endif
+#ifndef __ATTRIBUTE_AVX__
+#define __ATTRIBUTE_AVX__ __attribute__((__target__("avx"), __min_vector_width__(256)))
+#endif
+#ifndef __ATTRIBUTE_AVX2__
+#define __ATTRIBUTE_AVX2__ __attribute__((__target__("avx2"), __min_vector_width__(256)))
+#endif
+
+#ifndef _MM_EXCEPT_MASK
+#define _MM_EXCEPT_MASK       0x003f
+#define _MM_EXCEPT_INVALID    0x0001
+#define _MM_EXCEPT_DENORM     0x0002
+#define _MM_EXCEPT_DIV_ZERO   0x0004
+#define _MM_EXCEPT_OVERFLOW   0x0008
+#define _MM_EXCEPT_UNDERFLOW  0x0010
+#define _MM_EXCEPT_INEXACT    0x0020
+#define _MM_MASK_MASK         0x1f80
+#define _MM_MASK_INVALID      0x0080
+#define _MM_MASK_DENORM       0x0100
+#define _MM_MASK_DIV_ZERO     0x0200
+#define _MM_MASK_OVERFLOW     0x0400
+#define _MM_MASK_UNDERFLOW    0x0800
+#define _MM_MASK_INEXACT      0x1000
+#endif
+
+#if !defined(_INCLUDED_EMM)
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_setzero_si128(void)
+{
+    return (__m128i){0, 0};
+}
+
+static __inline__ unsigned int _mm_getcsr(void)
+{
+    unsigned int _Value;
+    __asm__ __volatile__("stmxcsr %0" : "=m"(_Value));
+    return _Value;
+}
+
+static __inline__ void _mm_setcsr(unsigned int _Value)
+{
+    __asm__ __volatile__("ldmxcsr %0" : : "m"(_Value));
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_loadu_si128(__m128i const *_Address)
+{
+    __m128i _Value;
+    __builtin_memcpy(&_Value, _Address, sizeof(_Value));
+    return _Value;
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_xor_si128(__m128i _Left, __m128i _Right)
+{
+    return _Left ^ _Right;
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_or_si128(__m128i _Left, __m128i _Right)
+{
+    return _Left | _Right;
+}
+
+static __inline__ __m128d __ATTRIBUTE_SSE2__ _mm_set_sd(double _Value)
+{
+    return (__m128d){_Value, 0.0};
+}
+
+static __inline__ double __ATTRIBUTE_SSE2__ _mm_cvtsd_f64(__m128d _Value)
+{
+    return _Value[0];
+}
+
+static __inline__ int __ATTRIBUTE_SSE2__ _mm_movemask_epi8(__m128i _Value)
+{
+    return __builtin_ia32_pmovmskb128((__ros_v16qi)_Value);
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_cmpeq_epi8(__m128i _Left, __m128i _Right)
+{
+    return (__m128i)((__ros_v16qi)_Left == (__ros_v16qi)_Right);
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_cmpeq_epi16(__m128i _Left, __m128i _Right)
+{
+    return (__m128i)((__ros_v8hi)_Left == (__ros_v8hi)_Right);
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_cvtsi32_si128(int _Value)
+{
+    return (__m128i){(unsigned int)_Value, 0, 0, 0};
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_unpacklo_epi8(__m128i _Left, __m128i _Right)
+{
+    return (__m128i)__builtin_shufflevector((__ros_v16qi)_Left, (__ros_v16qi)_Right, 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_shuffle_epi32(__m128i _Value, int _Select)
+{
+    unsigned int _Input[4], _Output[4];
+    __builtin_memcpy(_Input, &_Value, sizeof(_Input));
+    _Output[0] = _Input[(_Select >> 0) & 3];
+    _Output[1] = _Input[(_Select >> 2) & 3];
+    _Output[2] = _Input[(_Select >> 4) & 3];
+    _Output[3] = _Input[(_Select >> 6) & 3];
+    __builtin_memcpy(&_Value, _Output, sizeof(_Output));
+    return _Value;
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_srli_si128(__m128i _Value, int _Count)
+{
+    unsigned char _Input[16], _Output[16] = {0};
+    unsigned int _Index;
+    __builtin_memcpy(_Input, &_Value, sizeof(_Input));
+    if (_Count < 16)
+    {
+        for (_Index = 0; _Index < 16 - (unsigned int)_Count; ++_Index)
+            _Output[_Index] = _Input[_Index + _Count];
+    }
+    __builtin_memcpy(&_Value, _Output, sizeof(_Output));
+    return _Value;
+}
+
+static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_slli_si128(__m128i _Value, int _Count)
+{
+    unsigned char _Input[16], _Output[16] = {0};
+    unsigned int _Index;
+    __builtin_memcpy(_Input, &_Value, sizeof(_Input));
+    if (_Count < 16)
+    {
+        for (_Index = 0; _Index < 16 - (unsigned int)_Count; ++_Index)
+            _Output[_Index + _Count] = _Input[_Index];
+    }
+    __builtin_memcpy(&_Value, _Output, sizeof(_Output));
+    return _Value;
+}
+#endif
+
+#if !defined(_INCLUDED_MM2)
+static __inline__ __m128 __ATTRIBUTE_SSE__ _mm_set_ps1(float _Value)
+{
+    return (__m128){_Value, _Value, _Value, _Value};
+}
+
+static __inline__ float __ATTRIBUTE_SSE__ _mm_cvtss_f32(__m128 _Value)
+{
+    return _Value[0];
+}
+#endif
+
+#if !defined(_INCLUDED_IMM)
+static __inline__ __m256i __ATTRIBUTE_AVX__ _mm256_setzero_si256(void)
+{
+    return (__m256i){0, 0, 0, 0};
+}
+
+static __inline__ void __ATTRIBUTE_AVX__ _mm256_zeroupper(void)
+{
+    __asm__ __volatile__("vzeroupper");
+}
+
+static __inline__ int __ATTRIBUTE_AVX2__ _mm256_movemask_epi8(__m256i _Value)
+{
+    return __builtin_ia32_pmovmskb256((__ros_v32qi)_Value);
+}
+
+static __inline__ __m256i __ATTRIBUTE_AVX2__ _mm256_cmpeq_epi8(__m256i _Left, __m256i _Right)
+{
+    return (__m256i)((__ros_v32qi)_Left == (__ros_v32qi)_Right);
+}
+
+static __inline__ __m256i __ATTRIBUTE_AVX2__ _mm256_cmpeq_epi16(__m256i _Left, __m256i _Right)
+{
+    return (__m256i)((__ros_v16hi)_Left == (__ros_v16hi)_Right);
+}
+
+#if defined(_M_X64)
+static __inline__ int _rdrand64_step(unsigned __int64 *_Value)
+{
+    unsigned char _Ok;
+    __asm__ __volatile__("rdrand %0; setc %1" : "=r"(*_Value), "=qm"(_Ok));
+    return (int)_Ok;
+}
+
+static __inline__ void _fxsave64(void *_Buffer)
+{
+    __asm__ __volatile__("fxsave64 (%0)" : : "r"(_Buffer) : "memory");
+}
+
+static __inline__ void _fxrstor64(void const *_Buffer)
+{
+    __asm__ __volatile__("fxrstor64 (%0)" : : "r"(_Buffer) : "memory");
+}
+
+static __inline__ void _xsave64(void *_Buffer, unsigned __int64 _Mask)
+{
+    __asm__ __volatile__("xsave64 %0" : "=m"(*(char *)_Buffer) : "a"((unsigned int)_Mask), "d"((unsigned int)(_Mask >> 32)) : "memory");
+}
+
+static __inline__ void _xsaveopt64(void *_Buffer, unsigned __int64 _Mask)
+{
+    __asm__ __volatile__("xsaveopt64 %0" : "=m"(*(char *)_Buffer) : "a"((unsigned int)_Mask), "d"((unsigned int)(_Mask >> 32)) : "memory");
+}
+
+static __inline__ void _xsaves64(void *_Buffer, unsigned __int64 _Mask)
+{
+    __asm__ __volatile__("xsaves64 %0" : "=m"(*(char *)_Buffer) : "a"((unsigned int)_Mask), "d"((unsigned int)(_Mask >> 32)) : "memory");
+}
+
+static __inline__ void _xrstor64(void const *_Buffer, unsigned __int64 _Mask)
+{
+    __asm__ __volatile__("xrstor64 %0" : : "m"(*(char const *)_Buffer), "a"((unsigned int)_Mask), "d"((unsigned int)(_Mask >> 32)) : "memory");
+}
+
+static __inline__ void _xrstors64(void const *_Buffer, unsigned __int64 _Mask)
+{
+    __asm__ __volatile__("xrstors64 %0" : : "m"(*(char const *)_Buffer), "a"((unsigned int)_Mask), "d"((unsigned int)(_Mask >> 32)) : "memory");
+}
+#endif
+#endif
+#endif
+
 #if defined(_M_IX86)
 //#include <mm3dnow.h>
 #endif /* _M_IX86 */
