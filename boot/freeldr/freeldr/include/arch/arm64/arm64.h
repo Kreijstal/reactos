@@ -57,7 +57,16 @@ VOID Arm64ClearIdentityMappings(VOID);
 #define ARM64_SYSTEM_RANGE_BASE        0xFFFF800000000000ULL
 #define ARM64_KERNEL_IMAGE_BASE        0xFFFFF80000000000ULL
 #define ARM64_PHYS_MAP_BASE            0xFFFFFC0000000000ULL
-#define ARM64_KSEG0_BASE               ARM64_KERNEL_IMAGE_BASE
+/*
+ * KSEG0 (the physical-memory alias used for the PaToVa()/VaToPa() identity
+ * window, loader structures, stacks and the read destinations the PE loader
+ * fills) must match the kernel's KSEG0_BASE (NDK <arm64/ketypes.h> and
+ * ntoskrnl <internal/arm64/mm.h>), which is 0xFFFF800000000000 — NOT the
+ * amd64-style image base 0xFFFFF80000000000. Using the latter put FreeLoader's
+ * KSEG0 mapping at a different base than the NDK KSEG0_BASE that other TUs
+ * (e.g. peloader.c) resolve, so PaToVa()'d buffers landed unmapped.
+ */
+#define ARM64_KSEG0_BASE               ARM64_SYSTEM_RANGE_BASE
 #ifdef KSEG0_BASE
 #undef KSEG0_BASE
 #endif
