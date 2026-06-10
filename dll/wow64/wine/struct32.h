@@ -933,7 +933,9 @@ typedef struct _RTL_USER_PROCESS_PARAMETERS64
     UNICODE_STRING64 ShellInfo;
     UNICODE_STRING64 RuntimeData;
     RTL_DRIVE_LETTER_CURDIR64 CurrentDirectories[RTL_MAX_DRIVE_LETTERS];
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* Match the field gating of the native RTL_USER_PROCESS_PARAMETERS in
+     * <ndk/rtltypes.h>: ReactOS carries EnvironmentSize on every target. */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN) || defined(__REACTOS__)
     UINT64 EnvironmentSize;
 #endif
 #if (NTDDI_VERSION >= NTDDI_WIN7)
