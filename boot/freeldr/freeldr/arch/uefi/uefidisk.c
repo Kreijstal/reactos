@@ -189,6 +189,24 @@ UefiReadBlocks(
     if (!BlockIo || !Buffer || SectorCount == 0 || BlockSize == 0)
         return EFI_INVALID_PARAMETER;
 
+#if defined(_M_ARM64)
+    /*
+     * UEFI Boot Services run on the firmware's identity mappings and cannot
+     * translate the high half (TTBR1) of the address space. Callers above us
+     * may pass a destination that lives in FreeLoader's KSEG0/kernel-image
+     * alias (0xFFFF.... ). Firmware ReadBlocks (and its bounce-buffer fallback)
+     * would fault writing through such a pointer. Since KSEG0/image VAs are a
+     * fixed-offset alias of physical RAM, hand the firmware the physical
+     * address instead; the data lands in the same page the high-half VA aliases.
+     */
+    if (((ULONG_PTR)Buffer & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL)
+    {
+        /* High-half base bits sit above bit 41 for every kernel region
+         * (KSEG0/image/phys-map); the physical offset is the low 42 bits. */
+        Buffer = (PVOID)((ULONG_PTR)Buffer & 0x000003FFFFFFFFFFULL);
+    }
+#endif
+
     return BlockIo->ReadBlocks(BlockIo,
                                BlockIo->Media->MediaId,
                                SectorNumber,
