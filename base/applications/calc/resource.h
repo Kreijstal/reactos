@@ -6,8 +6,10 @@
 
 /* The 16-bit CW_USEDEFAULT, used as a dialog coordinate. Written as a signed
    value so llvm-rc accepts it: 0x8000 is out of the 16-bit signed range it
-   range-checks, while -32768 yields the identical 16-bit field. */
-#define CW_USEDEFAULT16 -32768
+   range-checks, while -32768 yields the identical 16-bit field. Parenthesized
+   because binutils windres cannot parse a leading unary minus in the DIALOGEX
+   coordinate list. */
+#define CW_USEDEFAULT16 (-32768)
 
 #define IDS_CALC_NAME                   1
 #define IDS_MATH_ERROR                  2
