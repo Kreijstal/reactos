@@ -1131,8 +1131,15 @@ VOID
 NTAPI
 MiInitializePfnDatabase(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
-    /* Scan memory and start setting up PFN entries */
+#if !defined(_M_ARM64)
+    /* Scan memory and start setting up PFN entries. This scan assumes the
+     * x86 layout where the whole PDE space is contiguously mapped; on ARM64,
+     * dereferencing PDE space for ranges whose upper translation levels are
+     * not present faults before the free lists exist. The equivalent work is
+     * done there by the level-checked walkers (MiArm64RegisterFreeLdrPageTables
+     * and MiArm64InitLoaderMappedPfnEntries in mm/ARM3/arm64/init.c). */
     MiBuildPfnDatabaseFromPages(LoaderBlock);
+#endif
 
     /* Add the zero page */
     MiBuildPfnDatabaseZeroPage();
@@ -1491,6 +1498,26 @@ MiAddHalIoMappings(VOID)
 
     while (PointerPde <= LastPde)
     {
+#if (_MI_PAGING_LEVELS == 4)
+        /* Without a valid PXE, the PPE/PDE space below it is unmapped and
+         * dereferencing PointerPde itself would fault */
+        if (MiAddressToPxe(BaseAddress)->u.Hard.Valid == 0)
+        {
+            BaseAddress = (PVOID)((ULONG_PTR)BaseAddress + PDE_MAPPED_VA);
+            PointerPde++;
+            continue;
+        }
+#endif
+#if (_MI_PAGING_LEVELS >= 3)
+        /* Same for the PPE and the PDE space below it */
+        if (MiAddressToPpe(BaseAddress)->u.Hard.Valid == 0)
+        {
+            BaseAddress = (PVOID)((ULONG_PTR)BaseAddress + PDE_MAPPED_VA);
+            PointerPde++;
+            continue;
+        }
+#endif
+
         /* Does the HAL own this mapping? */
         if ((PointerPde->u.Hard.Valid == 1) &&
             (MI_IS_PAGE_LARGE(PointerPde) == FALSE))
