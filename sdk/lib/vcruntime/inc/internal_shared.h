@@ -17,7 +17,15 @@
 #include <windef.h>
 #include <winbase.h>
 
-#if defined(__cplusplus) && defined(__GNUC__) && !defined(__try)
+/*
+ * Route MSVC-style SEH syntax through PSEH2 only when PSEH2 is emulated. When
+ * the compiler provides native SEH (e.g. clang on ARM64), pseh2.h defines
+ * _SEH2_NATIVE_SEH and maps _SEH2_EXCEPT back to the native __except keyword;
+ * redefining __except to _SEH2_EXCEPT here would then form a macro cycle
+ * (__except -> _SEH2_EXCEPT -> __except) and fail to compile. In that case the
+ * native __try/__except/__finally keywords are used as-is.
+ */
+#if defined(__cplusplus) && defined(__GNUC__) && !defined(__try) && !defined(_SEH2_NATIVE_SEH)
 #define __try _SEH2_TRY
 #define __except _SEH2_EXCEPT
 #define __finally _SEH2_FINALLY
