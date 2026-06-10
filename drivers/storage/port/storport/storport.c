@@ -176,6 +176,7 @@ PortAddDevice(
     UNICODE_STRING DeviceName;
     PDEVICE_OBJECT Fdo = NULL;
     KLOCK_QUEUE_HANDLE LockHandle;
+    ULONG ThisPortNumber;
     NTSTATUS Status;
 
     DPRINT1("PortAddDevice(%p %p)\n",
@@ -184,9 +185,10 @@ PortAddDevice(
     ASSERT(DriverObject);
     ASSERT(PhysicalDeviceObject);
 
+    ThisPortNumber = PortNumber;
     _swprintf(NameBuffer,
               L"\\Device\\RaidPort%lu",
-              PortNumber);
+              ThisPortNumber);
     RtlInitUnicodeString(&DeviceName, NameBuffer);
     PortNumber++;
 
@@ -220,6 +222,7 @@ PortAddDevice(
 
     DeviceExtension->Device = Fdo;
     DeviceExtension->PhysicalDevice = PhysicalDeviceObject;
+    DeviceExtension->PortNumber = ThisPortNumber;
 
     DeviceExtension->PnpState = dsStopped;
 
@@ -483,6 +486,31 @@ PortDispatchDeviceControl(
             Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return Status;
+    }
+
+    if (DeviceExtension->ExtensionType == PdoExtension &&
+        IoControlCode == IOCTL_SCSI_GET_ADDRESS)
+    {
+        PSCSI_ADDRESS Address = Irp->AssociatedIrp.SystemBuffer;
+
+        if (Stack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(SCSI_ADDRESS))
+        {
+            Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        Address->Length = sizeof(SCSI_ADDRESS);
+        Address->PortNumber = (UCHAR)DeviceExtension->FdoExtension->PortNumber;
+        Address->PathId = (UCHAR)DeviceExtension->Bus;
+        Address->TargetId = (UCHAR)DeviceExtension->Target;
+        Address->Lun = (UCHAR)DeviceExtension->Lun;
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = sizeof(SCSI_ADDRESS);
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
     }
 
     Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
