@@ -668,7 +668,9 @@
 @ stdcall KeLeaveCriticalRegion() _KeLeaveCriticalRegion
 @ stdcall KeLeaveGuardedRegion() _KeLeaveGuardedRegion
 @ extern KeLoaderBlock
-@ cdecl -arch=x86_64,arm64 -private KeLowerIrql(long) KxLowerIrql
+@ cdecl -arch=x86_64 KeGetCurrentIrql() KxGetCurrentIrql
+@ cdecl -arch=x86_64 KeLowerIrql(long) KxLowerIrql
+@ cdecl -arch=arm64 -private KeLowerIrql(long) KxLowerIrql
 @ extern KeNumberProcessors
 @ stdcall -arch=i386,arm,arm64 KeProfileInterrupt(ptr)
 @ stdcall KeProfileInterruptWithSource(ptr long)
