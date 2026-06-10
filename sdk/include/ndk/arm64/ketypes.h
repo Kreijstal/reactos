@@ -732,11 +732,23 @@ extern NTKERNELAPI BOOLEAN KeArm64DpcRoutineActive;
  * _NTOSKRNL_EARLY_INIT_ can still be used to force the fallback path.
  */
 #if defined(_M_ARM64) && !defined(_NTOSKRNL_EARLY_INIT_)
+#ifndef ARM64_SYSREG
+#define ARM64_SYSREG(op0, op1, crn, crm, op2) \
+    (((op0 & 1) << 14) | ((op1 & 7) << 11) | ((crn & 15) << 7) | ((crm & 15) << 3) | (op2 & 7))
+#endif
+#ifndef ARM64_TPIDR_EL1
+#define ARM64_TPIDR_EL1 ARM64_SYSREG(3, 0, 13, 0, 4)
+#endif
+
 /* Runtime path: Read PCR from TPIDR_EL1 (per-CPU, SMP-safe) */
 static __inline PKIPCR KeGetPcr(VOID)
 {
     PKIPCR Pcr;
+#if defined(_MSC_VER)
+    Pcr = (PKIPCR)(ULONG_PTR)_ReadStatusReg(ARM64_TPIDR_EL1);
+#else
     __asm__ __volatile__("mrs %0, tpidr_el1" : "=r"(Pcr));
+#endif
     return Pcr;
 }
 #else

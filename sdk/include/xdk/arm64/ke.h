@@ -39,7 +39,7 @@ typedef struct _KFLOATING_SAVE
 
 extern NTKERNELAPI volatile KSYSTEM_TIME KeTickCount;
 
-#ifndef _ReadWriteBarrier
+#if !defined(_MSC_VER) && !defined(_ReadWriteBarrier)
 #define _ReadWriteBarrier() __asm__ __volatile__("" ::: "memory")
 #endif
 
@@ -55,7 +55,9 @@ YieldProcessor(
 #endif
 }
 
-#ifndef MemoryBarrier
+#if defined(_MSC_VER) && !defined(MemoryBarrier)
+#define MemoryBarrier()                      __dmb(_ARM64_BARRIER_SY)
+#elif !defined(MemoryBarrier)
 #define MemoryBarrier()                      __asm__ __volatile__("dmb sy" ::: "memory")
 #endif
 #ifndef PreFetchCacheLine
