@@ -235,6 +235,21 @@ struct usage_value_params
     void *report_buf;
 };
 
+/* Determine the report value that maps to an array's first usage. Per HID 1.11
+ * section 6.2.2.5 an array field reports usage = Usage Minimum + (report value -
+ * Logical Minimum); the report value corresponding to Usage Minimum is therefore
+ * the Logical Minimum, which the parser preserves in null_value before the
+ * button adjustment overwrites logical_min. A single value cap (a usage range,
+ * e.g. a keyboard's key array with Logical Minimum 0) uses that directly so the
+ * raw report value maps to the matching usage. Chained caps describe a
+ * non-contiguous list of individual usages whose report value is the positional
+ * 1-based index across the chain. */
+static ULONG array_usage_index_min( const struct hid_value_caps *caps, const struct hid_value_caps *end )
+{
+    if (end == caps) return caps->null_value;
+    return end - caps + 1;
+}
+
 static LONG sign_extend( ULONG value, const struct hid_value_caps *caps )
 {
     ULONG sign = 1 << (caps->bit_size - 1);
@@ -417,7 +432,7 @@ static NTSTATUS get_usage( const struct hid_value_caps *caps, void *user )
     if (HID_VALUE_CAPS_IS_ARRAY( caps ))
     {
         while (end->flags & HID_VALUE_CAPS_ARRAY_HAS_MORE) end++;
-        index_min = end - caps + 1;
+        index_min = array_usage_index_min( caps, end );
         index_max = index_min + caps->usage_max - caps->usage_min;
 
         for (bit = caps->start_bit, last = bit + caps->report_count * caps->bit_size - 1; bit <= last; bit += 8)
@@ -705,7 +720,7 @@ static NTSTATUS set_usage( const struct hid_value_caps *caps, void *user )
     if (HID_VALUE_CAPS_IS_ARRAY( caps ))
     {
         while (end->flags & HID_VALUE_CAPS_ARRAY_HAS_MORE) end++;
-        index_min = end - caps + 1;
+        index_min = array_usage_index_min( caps, end );
 
         for (bit = caps->start_bit, last = bit + caps->report_count * caps->bit_size - 1; bit <= last; bit += 8)
         {
@@ -1022,7 +1037,7 @@ static NTSTATUS get_usage_and_page( const struct hid_value_caps *caps, void *use
     if (HID_VALUE_CAPS_IS_ARRAY( caps ))
     {
         while (end->flags & HID_VALUE_CAPS_ARRAY_HAS_MORE) end++;
-        index_min = end - caps + 1;
+        index_min = array_usage_index_min( caps, end );
         index_max = index_min + caps->usage_max - caps->usage_min;
 
         for (bit = caps->start_bit, last = bit + caps->report_count * caps->bit_size - 1; bit <= last; bit += 8)
