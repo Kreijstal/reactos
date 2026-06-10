@@ -1932,6 +1932,15 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
         MiArm64PfnFreeListsReady = TRUE;
         MiArm64PfnDatabaseReady = TRUE;
 
+        /*
+         * Early allocations consumed the head of the free descriptor by
+         * advancing its base page. Reset it to its original extent so the
+         * physical memory block (and with it the PFN bitmap) still covers
+         * the consumed pages; from here on page-table pages come from the
+         * PFN free lists, not from the descriptor.
+         */
+        *MxFreeDescriptor = MxOldFreeDescriptor;
+
         {
             PVOID PagedPoolEnd = (PVOID)(((ULONG_PTR)MmPagedPoolStart +
                                           MmSizeOfPagedPoolInBytes) - 1);
