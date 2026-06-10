@@ -21,6 +21,8 @@ endif()
 
 ## efisys.bin
 if(DEFINED EFI_PLATFORM_ID)
+    set(EFI_SYSTEM_IMAGE_SECTORS 8192)
+
     if(FREELDR_HAS_BIOS_BOOT)
         set(_efisys_boot_options -boot ${CMAKE_CURRENT_BINARY_DIR}/freeldr/bootsect/fat.bin)
         set(_efisys_boot_depends fat)
@@ -30,7 +32,7 @@ if(DEFINED EFI_PLATFORM_ID)
     endif()
 
     add_custom_target(efisys
-        COMMAND native-fatten ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin -format 5760 EFIBOOT
+        COMMAND native-fatten ${CMAKE_CURRENT_BINARY_DIR}/efisys.bin -format ${EFI_SYSTEM_IMAGE_SECTORS} EFIBOOT
             ${_efisys_boot_options}
             -mkdir EFI -mkdir EFI/BOOT -add $<TARGET_FILE:uefildr> EFI/BOOT/boot${EFI_PLATFORM_ID}.efi
         DEPENDS native-fatten ${_efisys_boot_depends} uefildr
