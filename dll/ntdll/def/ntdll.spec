@@ -1808,7 +1808,7 @@
 @ cdecl _itoa(long ptr long)
 @ cdecl _itow(long ptr long)
 @ cdecl _lfind(ptr ptr ptr long ptr)
-@ cdecl -arch=x86_64 _local_unwind()
+@ cdecl -arch=x86_64,arm64 _local_unwind()
 @ cdecl _ltoa(long ptr long)
 @ cdecl _ltow(long ptr long)
 @ cdecl _memccpy(ptr ptr long long)
