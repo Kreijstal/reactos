@@ -137,30 +137,40 @@ void __cdecl _xsetbv(unsigned int, unsigned __int64);
 #define __INTRIN_INLINE_AVX __INTRIN_INLINE __ATTRIBUTE_AVX__
 #define __INTRIN_INLINE_AVX2 __INTRIN_INLINE __ATTRIBUTE_AVX2__
 
+#ifndef _REACTOS_INTRIN_MM256_CMPEQ_EPI8
 __INTRIN_INLINE_AVX __m256i __cdecl _mm256_cmpeq_epi8(__m256i __A, __m256i __B)
 {
     return (__m256i)((__v32qi)__A == (__v32qi)__B);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM256_CMPEQ_EPI16
 __INTRIN_INLINE_AVX __m256i __cdecl _mm256_cmpeq_epi16(__m256i __A, __m256i __B)
 {
     return (__m256i)((__v16hi)__A == (__v16hi)__B);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM256_MOVEMASK_EPI8
 __INTRIN_INLINE_AVX2 int __cdecl _mm256_movemask_epi8(__m256i __A)
 {
     return __builtin_ia32_pmovmskb256((__v32qi)__A);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM256_SETZERO_SI256
 __INTRIN_INLINE_AVX __m256i __cdecl _mm256_setzero_si256(void)
 {
     return __extension__ (__m256i)(__v4di){ 0, 0, 0, 0 };
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM256_ZEROUPPER
 __INTRIN_INLINE void __cdecl _mm256_zeroupper(void)
 {
     __asm__ __volatile__("vzeroupper");
 }
+#endif
 
 __INTRIN_INLINE int _rdrand16_step(unsigned short* random_val)
 {
