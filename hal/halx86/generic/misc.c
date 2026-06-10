@@ -297,24 +297,3 @@ KeReleaseSpinLock(PKSPIN_LOCK SpinLock,
 }
 
 #endif /* _M_IX86 */
-
-#ifdef _M_AMD64
-/* amd64 IRQL exports */
-
-#undef KeGetCurrentIrql
-KIRQL
-NTAPI
-KeGetCurrentIrql(VOID)
-{
-    return (KIRQL)__readcr8();
-}
-
-#undef KeLowerIrql
-VOID
-NTAPI
-KeLowerIrql(KIRQL NewIrql)
-{
-    __writecr8(NewIrql);
-}
-
-#endif /* _M_AMD64 */
