@@ -937,10 +937,12 @@ __INTRIN_INLINE_SSE __m128 _mm_cvtpi32_ps(__m128 __a, __m64 __b)
     return __builtin_ia32_cvtpi2ps((__v4sf)__a, (__v2si)__b);
 }
 
+#ifndef _REACTOS_INTRIN_MM_CVTSS_F32
 __INTRIN_INLINE_SSE float _mm_cvtss_f32(__m128 __a)
 {
     return __a[0];
 }
+#endif
 
 __INTRIN_INLINE_SSE __m128 _mm_loadh_pi(__m128 __a, const __m64 *__p)
 {
@@ -1021,11 +1023,13 @@ __INTRIN_INLINE_SSE __m128 _mm_set_ss(float __w)
     return __extension__ (__m128){ __w, 0, 0, 0 };
 }
 
+#ifndef _REACTOS_INTRIN_MM_SET_PS1
 // _mm_set_ps1
 __INTRIN_INLINE_SSE __m128 _mm_set1_ps(float __w)
 {
     return __extension__ (__m128){ __w, __w, __w, __w };
 }
+#endif
 
 __INTRIN_INLINE_SSE __m128 _mm_set_ps(float __z, float __y, float __x, float __w)
 {
