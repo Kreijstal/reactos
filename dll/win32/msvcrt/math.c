@@ -43,6 +43,9 @@
 #include <limits.h>
 #include <locale.h>
 #include <math.h>
+#if defined(__i386__) || defined(__x86_64__)
+#include <intrin.h>
+#endif
 
 #include "msvcrt.h"
 #include "winternl.h"
