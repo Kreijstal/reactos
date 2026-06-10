@@ -1445,7 +1445,7 @@ ExConvertExclusiveToSharedLite(IN PERESOURCE Resource)
  * @implemented NT4
  *
  *     The ExConvertExclusiveToSharedLite routine deletes a given resource
- *     from the system’s resource list.
+ *     from the system's resource list.
  *
  * @param Resource
  *        Pointer to the resource to delete.
@@ -2184,7 +2184,8 @@ ExTryToAcquireResourceExclusiveLite(IN PERESOURCE Resource)
  * @param Resource
  *        Pointer to the resource to acquire.
  *
- * @return Pointer to the Win32K thread pointer of the current thread.
+ * @return Pointer to the Win32K thread pointer of the current thread before
+ *         Windows 8. Windows 8 and newer return NULL.
  *
  * @remarks See ExAcquireResourceExclusiveLite.
  *
@@ -2199,8 +2200,12 @@ ExEnterCriticalRegionAndAcquireResourceExclusive(IN PERESOURCE Resource)
     /* Acquire the resource */
     NT_VERIFY(ExAcquireResourceExclusiveLite(Resource, TRUE));
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    return NULL;
+#else
     /* Return the Win32 Thread */
     return KeGetCurrentThread()->Win32Thread;
+#endif
 }
 
 /*++
@@ -2213,7 +2218,8 @@ ExEnterCriticalRegionAndAcquireResourceExclusive(IN PERESOURCE Resource)
  * @param Resource
  *        Pointer to the resource to acquire.
  *
- * @return Pointer to the Win32K thread pointer of the current thread.
+ * @return Pointer to the Win32K thread pointer of the current thread before
+ *         Windows 8. Windows 8 and newer return NULL.
  *
  * @remarks See ExAcquireResourceSharedLite.
  *
@@ -2228,8 +2234,12 @@ ExEnterCriticalRegionAndAcquireResourceShared(IN PERESOURCE Resource)
     /* Acquire the resource */
     NT_VERIFY(ExAcquireResourceSharedLite(Resource, TRUE));
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    return NULL;
+#else
     /* Return the Win32 Thread */
     return KeGetCurrentThread()->Win32Thread;
+#endif
 }
 
 /*++
@@ -2244,7 +2254,8 @@ ExEnterCriticalRegionAndAcquireResourceShared(IN PERESOURCE Resource)
  * @param Resource
  *        Pointer to the resource to acquire.
  *
- * @return Pointer to the Win32K thread pointer of the current thread.
+ * @return Pointer to the Win32K thread pointer of the current thread before
+ *         Windows 8. Windows 8 and newer return NULL.
  *
  * @remarks See ExAcquireSharedWaitForExclusive.
  *
@@ -2259,8 +2270,12 @@ ExEnterCriticalRegionAndAcquireSharedWaitForExclusive(IN PERESOURCE Resource)
     /* Acquire the resource */
     NT_VERIFY(ExAcquireSharedWaitForExclusive(Resource, TRUE));
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    return NULL;
+#else
     /* Return the Win32 Thread */
     return KeGetCurrentThread()->Win32Thread;
+#endif
 }
 
 /*++
