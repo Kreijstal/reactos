@@ -11,7 +11,7 @@
 
 #include <apitest.h>
 #if defined(_M_IX86) || defined(_M_AMD64)
-#include <xmmintrin.h>
+#include <intrin.h>
 #endif
 #include <float.h>
 #include <pseh/pseh2.h>
