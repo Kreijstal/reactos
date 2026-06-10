@@ -21,7 +21,9 @@ list(APPEND DISPLAY_SOURCE
     virtgpu_shared.h)
 
 add_library(virtgpu_disp MODULE ${DISPLAY_SOURCE})
-set_target_properties(virtgpu_disp PROPERTIES OUTPUT_NAME "virtgpu")
+set_target_properties(virtgpu_disp PROPERTIES
+    OUTPUT_NAME "virtgpu"
+    PDB_NAME "virtgpu_disp")
 set_module_type(virtgpu_disp kerneldll ENTRYPOINT DrvEnableDriver 12)
 target_link_libraries(virtgpu_disp libcntpr)
 add_importlibs(virtgpu_disp win32k)
