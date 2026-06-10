@@ -108,6 +108,7 @@ typedef struct _FDO_DEVICE_EXTENSION
     DEVICE_STATE PnpState;
     LIST_ENTRY AdapterListEntry;
     MINIPORT Miniport;
+    ULONG PortNumber;
     ULONG BusNumber;
     ULONG SlotNumber;
     PCM_RESOURCE_LIST AllocatedResources;
