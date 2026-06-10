@@ -122,6 +122,15 @@ MmAllocateNonCachedMemory(IN SIZE_T NumberOfBytes)
             //
             MI_PAGE_DISABLE_CACHE(&TempPte);
             MI_PAGE_WRITE_THROUGH(&TempPte);
+#if defined(_M_ARM64)
+            //
+            // MmAllocateNonCachedMemory always backs the mapping with real
+            // RAM, so use Normal Non-Cacheable rather than Device-nGnRnE: the
+            // latter faults on the unaligned/vector accesses the compiler
+            // emits for ordinary struct and memcpy operations on the buffer.
+            //
+            MI_PAGE_NORMAL_NONCACHED(&TempPte);
+#endif
             break;
 
         case MiWriteCombined:

@@ -244,6 +244,18 @@ C_ASSERT(MI_SECONDARY_COLORS == 64);
     } while (0)
 #define MI_PAGE_DISABLE_CACHE(x)   MI_SET_PTE_ATTR_INDEX((x), 1)
 #define MI_PAGE_WRITE_THROUGH(x)   MI_SET_PTE_ATTR_INDEX((x), 1)
+/*
+ * MI_PAGE_NORMAL_NONCACHED - map a page as Normal Non-Cacheable (AttrIndx 2).
+ *
+ * MI_PAGE_DISABLE_CACHE selects Device-nGnRnE memory, which is correct for
+ * real device MMIO but faults on the unaligned and vector (LDP/LDUR Q)
+ * accesses the compiler freely emits for ordinary C struct reads and inlined
+ * memcpy. RAM-backed non-cached mappings (DMA common buffers handed to drivers
+ * as ordinary memory) must instead be Normal Non-Cacheable: still uncached for
+ * DMA on non-coherent systems, but with normal-memory access semantics. This
+ * matches how Windows maps non-cached RAM versus device space on ARM64.
+ */
+#define MI_PAGE_NORMAL_NONCACHED(x) MI_SET_PTE_ATTR_INDEX((x), MI_ARM64_MAIR_NORMAL_NC_IDX)
 #define MI_PAGE_WRITE_COMBINED(x)  MI_SET_PTE_ATTR_INDEX((x), MI_ARM64_MAIR_NORMAL_WC_IDX)
 #define MI_IS_PAGE_LARGE(x)        ((x)->u.Hard.NotLargePage == 0)
 #define MI_IS_PAGE_WRITEABLE(x)    ((x)->u.Hard.Writable == 1)
