@@ -17,7 +17,7 @@
 #include <windef.h>
 #include <winbase.h>
 
-#if defined(__cplusplus) && defined(__GNUC__) && !defined(__clang__) && !defined(__try)
+#if defined(__cplusplus) && defined(__GNUC__) && !defined(__try)
 #define __try _SEH2_TRY
 #define __except _SEH2_EXCEPT
 #define __finally _SEH2_FINALLY

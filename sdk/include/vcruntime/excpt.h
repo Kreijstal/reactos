@@ -12,7 +12,7 @@
 #include <pseh/pseh2.h>
 #endif
 
-#if (defined(_MSC_VER) || defined(__GNUC__)) && !defined(__endtry)
+#if defined(_MSC_VER) && !defined(__endtry)
 #define __endtry
 #endif
 
