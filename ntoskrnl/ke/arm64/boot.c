@@ -33,7 +33,18 @@ KiArm64EarlyVectorHandler(_In_ UINT64 VectorId,
 #define ARM64_SYSTEM_RANGE_BASE     0xFFFF800000000000ULL
 #define ARM64_KERNEL_IMAGE_BASE     0xFFFFF80000000000ULL
 #define ARM64_PHYS_MAP_BASE         0xFFFFFC0000000000ULL
-#define ARM64_KSEG0_BASE            ARM64_KERNEL_IMAGE_BASE
+/*
+ * The kernel image, its boot stacks and the loader-provided structures all
+ * live in the KSEG0 system range (KSEG0_BASE == 0xFFFF800000000000, see
+ * <internal/arm64/mm.h>), which is where the loader maps the image and where
+ * we are executing.  KSEG0_BASE must therefore be the system-range base, NOT
+ * the 0xFFFFF800.... image-base alias: using the latter made the
+ * "relocate a still-physical pointer" guard below mis-classify an already
+ * valid 0xFFFF8000.... stack VA as physical (0xFFFF8000.... < 0xFFFFF800....),
+ * double-add the base and wrap the boot stack pointer to a non-canonical
+ * 0xFFFF7800.... address that faults on the first push.
+ */
+#define ARM64_KSEG0_BASE            ARM64_SYSTEM_RANGE_BASE
 /* Memory attribute indices in MAIR_EL1 */
 #define ARM64_MEM_ATTR_DEVICE_nGnRnE 0x1ULL
 #define ARM64_MEM_ATTR_NORMAL_NC     0x2ULL
