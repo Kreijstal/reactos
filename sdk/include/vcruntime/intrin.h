@@ -62,9 +62,31 @@ typedef short __ros_v16hi __attribute__((__vector_size__(32)));
 #define _MM_MASK_OVERFLOW     0x0400
 #define _MM_MASK_UNDERFLOW    0x0800
 #define _MM_MASK_INEXACT      0x1000
+#define _MM_ROUND_MASK        0x6000
+#define _MM_ROUND_NEAREST     0x0000
+#define _MM_ROUND_DOWN        0x2000
+#define _MM_ROUND_UP          0x4000
+#define _MM_ROUND_TOWARD_ZERO 0x6000
+#define _MM_FLUSH_ZERO_MASK   0x8000
+#define _MM_FLUSH_ZERO_ON     0x8000
+#define _MM_FLUSH_ZERO_OFF    0x0000
 #endif
 
 #if !defined(_INCLUDED_EMM)
+#define _REACTOS_INTRIN_MM_SETZERO_SI128
+#define _REACTOS_INTRIN_MM_LOADU_SI128
+#define _REACTOS_INTRIN_MM_XOR_SI128
+#define _REACTOS_INTRIN_MM_OR_SI128
+#define _REACTOS_INTRIN_MM_SET_SD
+#define _REACTOS_INTRIN_MM_CVTSD_F64
+#define _REACTOS_INTRIN_MM_MOVEMASK_EPI8
+#define _REACTOS_INTRIN_MM_CMPEQ_EPI8
+#define _REACTOS_INTRIN_MM_CMPEQ_EPI16
+#define _REACTOS_INTRIN_MM_CVTSI32_SI128
+#define _REACTOS_INTRIN_MM_UNPACKLO_EPI8
+#define _REACTOS_INTRIN_MM_SHUFFLE_EPI32
+#define _REACTOS_INTRIN_MM_SRLI_SI128
+#define _REACTOS_INTRIN_MM_SLLI_SI128
 static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_setzero_si128(void)
 {
     return (__m128i){0, 0};
@@ -164,6 +186,8 @@ static __inline__ __m128i __ATTRIBUTE_SSE2__ _mm_slli_si128(__m128i _Value, int 
 #endif
 
 #if !defined(_INCLUDED_MM2)
+#define _REACTOS_INTRIN_MM_SET_PS1
+#define _REACTOS_INTRIN_MM_CVTSS_F32
 static __inline__ __m128 __ATTRIBUTE_SSE__ _mm_set_ps1(float _Value)
 {
     return (__m128){_Value, _Value, _Value, _Value};
@@ -176,6 +200,11 @@ static __inline__ float __ATTRIBUTE_SSE__ _mm_cvtss_f32(__m128 _Value)
 #endif
 
 #if !defined(_INCLUDED_IMM)
+#define _REACTOS_INTRIN_MM256_SETZERO_SI256
+#define _REACTOS_INTRIN_MM256_ZEROUPPER
+#define _REACTOS_INTRIN_MM256_MOVEMASK_EPI8
+#define _REACTOS_INTRIN_MM256_CMPEQ_EPI8
+#define _REACTOS_INTRIN_MM256_CMPEQ_EPI16
 static __inline__ __m256i __ATTRIBUTE_AVX__ _mm256_setzero_si256(void)
 {
     return (__m256i){0, 0, 0, 0};
