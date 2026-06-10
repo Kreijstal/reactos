@@ -106,11 +106,10 @@
 @ stdcall -arch=x86_64,arm64 KeAcquireSpinLockRaiseToSynch(ptr) ntoskrnl.KeAcquireSpinLockRaiseToSynch
 @ stdcall KeFlushWriteBuffer()
 @ stdcall -arch=i386,arm KeGetCurrentIrql()
-@ stdcall -arch=x86_64 KeGetCurrentIrql()
+@ stdcall -arch=x86_64 KeGetCurrentIrql() ntoskrnl.KeGetCurrentIrql
 @ stdcall -arch=arm64 KeGetCurrentIrql() ntoskrnl.KeGetCurrentIrql
 @ stdcall -arch=i386,arm KeLowerIrql(long)
-@ stdcall -arch=x86_64 KeLowerIrql(long)
-@ stdcall -arch=arm64 KeLowerIrql(long) ntoskrnl.KeLowerIrql
+@ stdcall -arch=x86_64,arm64 KeLowerIrql(long) ntoskrnl.KeLowerIrql
 @ stdcall KeQueryPerformanceCounter(ptr)
 @ stdcall -arch=i386,arm KeRaiseIrql(long ptr)
 @ stdcall -arch=arm64 KeRaiseIrql(long ptr) ntoskrnl.KeRaiseIrql
