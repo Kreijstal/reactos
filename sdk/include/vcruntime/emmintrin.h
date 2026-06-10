@@ -946,10 +946,12 @@ __INTRIN_INLINE_MMXSSE2 __m128d _mm_cvtpi32_pd(__m64 a)
     return __builtin_ia32_cvtpi2pd((__v2si)a);
 }
 
+#ifndef _REACTOS_INTRIN_MM_CVTSD_F64
 __INTRIN_INLINE_SSE2 double _mm_cvtsd_f64(__m128d a)
 {
     return a[0];
 }
+#endif
 
 __INTRIN_INLINE_SSE2 __m128d _mm_load_pd(double const *dp)
 {
@@ -1056,10 +1058,12 @@ __INTRIN_INLINE_SSE2 __m128d _mm_undefined_pd(void)
 #endif
 }
 
+#ifndef _REACTOS_INTRIN_MM_SET_SD
 __INTRIN_INLINE_SSE2 __m128d _mm_set_sd(double w)
 {
     return __extension__(__m128d){w, 0};
 }
+#endif
 
 __INTRIN_INLINE_SSE2 __m128d _mm_set1_pd(double w)
 {
@@ -1387,16 +1391,21 @@ __INTRIN_INLINE_SSE2 __m128i _mm_andnot_si128(__m128i a, __m128i b)
     return (__m128i)(~(__v2du)a & (__v2du)b);
 }
 
+#ifndef _REACTOS_INTRIN_MM_OR_SI128
 __INTRIN_INLINE_SSE2 __m128i _mm_or_si128(__m128i a, __m128i b)
 {
     return (__m128i)((__v2du)a | (__v2du)b);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM_XOR_SI128
 __INTRIN_INLINE_SSE2 __m128i _mm_xor_si128(__m128i a, __m128i b)
 {
     return (__m128i)((__v2du)a ^ (__v2du)b);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM_SLLI_SI128
 #ifdef __clang__
 #define _mm_slli_si128(a, imm) \
     ((__m128i)__builtin_ia32_pslldqi128_byteshift((__v2di)(__m128i)(a), (int)(imm)))
@@ -1407,6 +1416,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_slli_si128(__m128i a, const int imm)
 {
   return (__m128i)__builtin_ia32_pslldqi128(a, imm * 8);
 }
+#endif
 #endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_slli_epi16(__m128i a, int count)
@@ -1459,6 +1469,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_sra_epi32(__m128i a, __m128i count)
     return (__m128i)__builtin_ia32_psrad128((__v4si)a, (__v4si)count);
 }
 
+#ifndef _REACTOS_INTRIN_MM_SRLI_SI128
 #ifdef __clang__
 #define _mm_srli_si128(a, imm) \
     ((__m128i)__builtin_ia32_psrldqi128_byteshift((__v2di)(__m128i)(a), (int)(imm)))
@@ -1469,6 +1480,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_srli_si128(__m128i a, const int imm)
 {
     return (__m128i)__builtin_ia32_psrldqi128(a, imm * 8);
 }
+#endif
 #endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_srli_epi16(__m128i a, int count)
@@ -1501,15 +1513,19 @@ __INTRIN_INLINE_SSE2 __m128i _mm_srl_epi64(__m128i a, __m128i count)
     return __builtin_ia32_psrlq128((__v2di)a, (__v2di)count);
 }
 
+#ifndef _REACTOS_INTRIN_MM_CMPEQ_EPI8
 __INTRIN_INLINE_SSE2 __m128i _mm_cmpeq_epi8(__m128i a, __m128i b)
 {
     return (__m128i)((__v16qi)a == (__v16qi)b);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM_CMPEQ_EPI16
 __INTRIN_INLINE_SSE2 __m128i _mm_cmpeq_epi16(__m128i a, __m128i b)
 {
     return (__m128i)((__v8hi)a == (__v8hi)b);
 }
+#endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_cmpeq_epi32(__m128i a, __m128i b)
 {
@@ -1588,10 +1604,12 @@ __INTRIN_INLINE_SSE2 __m128i _mm_cvttps_epi32(__m128 a)
     return (__m128i)__builtin_ia32_cvttps2dq((__v4sf)a);
 }
 
+#ifndef _REACTOS_INTRIN_MM_CVTSI32_SI128
 __INTRIN_INLINE_SSE2 __m128i _mm_cvtsi32_si128(int a)
 {
     return __extension__(__m128i)(__v4si){a, 0, 0, 0};
 }
+#endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_cvtsi64_si128(long long a)
 {
@@ -1614,6 +1632,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_load_si128(__m128i const *p)
     return *p;
 }
 
+#ifndef _REACTOS_INTRIN_MM_LOADU_SI128
 __INTRIN_INLINE_SSE2 __m128i _mm_loadu_si128(__m128i_u const *p)
 {
     struct __loadu_si128 {
@@ -1621,6 +1640,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_loadu_si128(__m128i_u const *p)
     } __attribute__((__packed__, __may_alias__));
     return ((const struct __loadu_si128 *)p)->__v;
 }
+#endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_loadl_epi64(__m128i_u const *p)
 {
@@ -1729,10 +1749,12 @@ __INTRIN_INLINE_SSE2 __m128i _mm_setr_epi8(
                         b7, b6, b5, b4, b3, b2, b1, b0);
 }
 
+#ifndef _REACTOS_INTRIN_MM_SETZERO_SI128
 __INTRIN_INLINE_SSE2 __m128i _mm_setzero_si128(void)
 {
     return __extension__(__m128i)(__v2di){0LL, 0LL};
 }
+#endif
 
 __INTRIN_INLINE_SSE2 void _mm_store_si128(__m128i *p, __m128i b)
 {
@@ -1847,13 +1869,17 @@ __INTRIN_INLINE_SSE2 __m128i _mm_packus_epi16(__m128i a, __m128i b)
     ((__m128i)__builtin_ia32_vec_set_v8hi((__v8hi)(__m128i)(a), (int)(b),        \
                                           (int)(imm)))
 
+#ifndef _REACTOS_INTRIN_MM_MOVEMASK_EPI8
 __INTRIN_INLINE_SSE2 int _mm_movemask_epi8(__m128i a)
 {
     return __builtin_ia32_pmovmskb128((__v16qi)a);
 }
+#endif
 
+#ifndef _REACTOS_INTRIN_MM_SHUFFLE_EPI32
 #define _mm_shuffle_epi32(a, imm)                                              \
     ((__m128i)__builtin_ia32_pshufd((__v4si)(__m128i)(a), (int)(imm)))
+#endif
 
 #define _mm_shufflelo_epi16(a, imm)                                            \
     ((__m128i)__builtin_ia32_pshuflw((__v8hi)(__m128i)(a), (int)(imm)))
@@ -1909,6 +1935,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpackhi_epi64(__m128i a, __m128i b)
 #endif
 }
 
+#ifndef _REACTOS_INTRIN_MM_UNPACKLO_EPI8
 __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_shufflevector)
@@ -1921,6 +1948,7 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi8(__m128i a, __m128i b)
     return (__m128i)__builtin_ia32_punpcklbw128((__v16qi)a, (__v16qi)b);
 #endif
 }
+#endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi16(__m128i a, __m128i b)
 {
