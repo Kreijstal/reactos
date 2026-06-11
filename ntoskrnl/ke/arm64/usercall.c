@@ -391,6 +391,14 @@ KiExceptionExit(
     _In_ PKTRAP_FRAME TrapFrame,
     _In_ PKEXCEPTION_FRAME ExceptionFrame)
 {
+    /*
+     * NtRaiseException and NtContinue leave through here instead of the
+     * system-service epilogue, so pending user APCs must be delivered
+     * before the exception return or a thread that loops through
+     * exception dispatch (e.g. a repeatedly raised unhandled exception)
+     * never picks up its terminate APC and becomes unkillable.
+     */
+    KiArm64DeliverPendingUserApc(ExceptionFrame, TrapFrame);
     KiTrapReturn(TrapFrame, ExceptionFrame);
     UNREACHABLE;
 }
