@@ -1,19 +1,25 @@
 /*
- * PROJECT:         ReactOS Kernel (ARM64)
- * PURPOSE:         C specific exception handler for SEH metadata
+ * PROJECT:     ReactOS Kernel (ARM64)
+ * LICENSE:     GPL-2.0-or-later
+ * PURPOSE:     C specific exception/unwind handler for ARM64 SEH metadata
+ * NOTES:       Modeled on Wine's dlls/ntdll/unwind.c __C_specific_handler
+ *              (Copyright 2009, 2019 Martin Storsjo).
+ *              Kernel-mode counterpart of dll/ntdll/arm64/ehandler.c;
+ *              filters and __finally funclets execute with the parent
+ *              frame's non-volatile registers via __C_ExecuteExceptionFilter
+ *              (sdk/lib/rtl/arm64/unwind_asm.S).
  */
 
 #include <ntoskrnl.h>
 #include <ndk/rtltypes.h>
 
+#define NDEBUG
+#include <debug.h>
+
 typedef struct _RUNTIME_FUNCTION {
     ULONG BeginAddress;
     ULONG UnwindData;
 } RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
-
-#define NDEBUG
-#include <debug.h>
-#include <debug.h>
 
 #ifndef _ARM64_DISPATCHER_CONTEXT_DEFINED
 #define _ARM64_DISPATCHER_CONTEXT_DEFINED 1
@@ -58,24 +64,13 @@ RtlUnwindEx(
     _In_opt_ PCONTEXT ContextRecord,
     _In_opt_ struct _UNWIND_HISTORY_TABLE *HistoryTable);
 
-typedef EXCEPTION_DISPOSITION (__cdecl *PTERMINATION_HANDLER)(BOOLEAN, PVOID);
-typedef EXCEPTION_DISPOSITION (__cdecl *PEXCEPTION_FILTER)(PEXCEPTION_POINTERS, PVOID);
-
-static LONG KiSehAbnormalTerminationFlag[MAXIMUM_PROCESSORS];
-
-LONG *
-__cdecl
-__seh_get_abnormal_termination_flag_pointer(VOID)
-{
-    ULONG Cpu = KeGetCurrentProcessorNumber();
-    if (Cpu < MAXIMUM_PROCESSORS)
-    {
-        return &KiSehAbnormalTerminationFlag[Cpu];
-    }
-
-    /* Fallback to CPU0 slot if the CPU number is out of range. */
-    return &KiSehAbnormalTerminationFlag[0];
-}
+/* sdk/lib/rtl/arm64/unwind_asm.S */
+LONG
+__C_ExecuteExceptionFilter(
+    _In_ PVOID ExceptionPointers,
+    _In_ PVOID EstablisherFrame,
+    _In_ PVOID Filter,
+    _In_ PUCHAR NonVolatileRegisters);
 
 EXCEPTION_DISPOSITION
 __cdecl
@@ -85,106 +80,79 @@ __C_specific_handler(
     struct _CONTEXT *ContextRecord,
     struct _DISPATCHER_CONTEXT *DispatcherContext)
 {
-    PSCOPE_TABLE ScopeTable;
-    ULONG i, BeginAddress, EndAddress, Handler;
-    ULONG64 ImageBase, JumpTarget, IpOffset, TargetIpOffset;
+    PSCOPE_TABLE ScopeTable = (PSCOPE_TABLE)DispatcherContext->HandlerData;
+    ULONG_PTR ImageBase = DispatcherContext->ImageBase;
+    ULONG_PTR ControlPc = DispatcherContext->ControlPc;
     EXCEPTION_POINTERS ExceptionPointers;
-    LONG PreviousAbnormalState;
-    LONG *AbnormalFlagPtr;
-    PTERMINATION_HANDLER TerminationHandler;
-    PEXCEPTION_FILTER ExceptionFilter;
-    LONG FilterResult;
+    PVOID Handler;
+    ULONG i;
 
-    ExceptionPointers.ExceptionRecord = ExceptionRecord;
-    ExceptionPointers.ContextRecord = ContextRecord;
+    if (DispatcherContext->ControlPcIsUnwound)
+        ControlPc -= 4;
 
-    AbnormalFlagPtr = __seh_get_abnormal_termination_flag_pointer();
-    ImageBase = (ULONG64)DispatcherContext->ImageBase;
-
-    IpOffset = DispatcherContext->ControlPc - ImageBase;
-    TargetIpOffset = DispatcherContext->TargetPc - ImageBase;
-    ScopeTable = (PSCOPE_TABLE)DispatcherContext->HandlerData;
-
-    while (DispatcherContext->ScopeIndex < ScopeTable->Count)
+    if (ExceptionRecord->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
     {
-        i = DispatcherContext->ScopeIndex++;
-
-        BeginAddress = ScopeTable->ScopeRecord[i].BeginAddress;
-        EndAddress = ScopeTable->ScopeRecord[i].EndAddress;
-
-        if ((IpOffset < BeginAddress) || (IpOffset >= EndAddress))
+        for (i = DispatcherContext->ScopeIndex; i < ScopeTable->Count; i++)
         {
-            continue;
-        }
-
-        if (ExceptionRecord->ExceptionFlags & EXCEPTION_UNWIND)
-        {
-            if (ExceptionRecord->ExceptionFlags & EXCEPTION_TARGET_UNWIND)
-            {
-                if ((TargetIpOffset >= BeginAddress) &&
-                    (TargetIpOffset < EndAddress))
-                {
-                    return ExceptionContinueSearch;
-                }
-            }
-
-            if (ScopeTable->ScopeRecord[i].JumpTarget == 0)
-            {
-                Handler = ScopeTable->ScopeRecord[i].HandlerAddress;
-                TerminationHandler = (PTERMINATION_HANDLER)(ImageBase + Handler);
-
-                PreviousAbnormalState = *AbnormalFlagPtr;
-                *AbnormalFlagPtr = TRUE;
-                TerminationHandler(TRUE, EstablisherFrame);
-                *AbnormalFlagPtr = PreviousAbnormalState;
-            }
-            else if (ScopeTable->ScopeRecord[i].JumpTarget == TargetIpOffset)
-            {
-                return ExceptionContinueSearch;
-            }
-        }
-        else
-        {
-            if (ScopeTable->ScopeRecord[i].JumpTarget == 0)
-            {
+            if (ControlPc < ImageBase + ScopeTable->ScopeRecord[i].BeginAddress)
                 continue;
-            }
+            if (ControlPc >= ImageBase + ScopeTable->ScopeRecord[i].EndAddress)
+                continue;
+            if (ScopeTable->ScopeRecord[i].JumpTarget)
+                continue;
 
-            Handler = ScopeTable->ScopeRecord[i].HandlerAddress;
-
-            if (Handler == EXCEPTION_EXECUTE_HANDLER)
+            if ((ExceptionRecord->ExceptionFlags & EXCEPTION_TARGET_UNWIND) &&
+                (DispatcherContext->TargetPc >= ImageBase + ScopeTable->ScopeRecord[i].BeginAddress) &&
+                (DispatcherContext->TargetPc < ImageBase + ScopeTable->ScopeRecord[i].EndAddress))
             {
-                FilterResult = EXCEPTION_EXECUTE_HANDLER;
+                break;
             }
-            else
+
+            /* __finally termination handler */
+            Handler = (PVOID)(ImageBase + ScopeTable->ScopeRecord[i].HandlerAddress);
+            DispatcherContext->ScopeIndex = i + 1;
+            __C_ExecuteExceptionFilter(ULongToPtr(TRUE),
+                                       EstablisherFrame,
+                                       Handler,
+                                       DispatcherContext->NonVolatileRegisters);
+        }
+    }
+    else
+    {
+        for (i = DispatcherContext->ScopeIndex; i < ScopeTable->Count; i++)
+        {
+            if (ControlPc < ImageBase + ScopeTable->ScopeRecord[i].BeginAddress)
+                continue;
+            if (ControlPc >= ImageBase + ScopeTable->ScopeRecord[i].EndAddress)
+                continue;
+            if (!ScopeTable->ScopeRecord[i].JumpTarget)
+                continue;
+
+            if (ScopeTable->ScopeRecord[i].HandlerAddress != EXCEPTION_EXECUTE_HANDLER)
             {
-                ExceptionFilter = (PEXCEPTION_FILTER)(ImageBase + Handler);
-                PreviousAbnormalState = *AbnormalFlagPtr;
-                *AbnormalFlagPtr = FALSE;
-                FilterResult = ExceptionFilter(&ExceptionPointers, EstablisherFrame);
-                *AbnormalFlagPtr = PreviousAbnormalState;
+                LONG FilterResult;
+
+                ExceptionPointers.ExceptionRecord = ExceptionRecord;
+                ExceptionPointers.ContextRecord = ContextRecord;
+
+                Handler = (PVOID)(ImageBase + ScopeTable->ScopeRecord[i].HandlerAddress);
+                FilterResult = __C_ExecuteExceptionFilter(&ExceptionPointers,
+                                                          EstablisherFrame,
+                                                          Handler,
+                                                          DispatcherContext->NonVolatileRegisters);
+                if (FilterResult == EXCEPTION_CONTINUE_SEARCH)
+                    continue;
+                if (FilterResult == EXCEPTION_CONTINUE_EXECUTION)
+                    return ExceptionContinueExecution;
             }
 
-            if (FilterResult < 0)
-            {
-                return ExceptionContinueExecution;
-            }
-
-            if (FilterResult > 0)
-            {
-                JumpTarget = ImageBase + ScopeTable->ScopeRecord[i].JumpTarget;
-
-                RtlUnwindEx(EstablisherFrame,
-                            (PVOID)JumpTarget,
-                            ExceptionRecord,
-                            UlongToPtr(ExceptionRecord->ExceptionCode),
-                            DispatcherContext->ContextRecord,
-                            DispatcherContext->HistoryTable);
-
-                DispatcherContext->ContextRecord->Pc = JumpTarget;
-                DispatcherContext->ContextRecord->X[0] = ExceptionRecord->ExceptionCode;
-                return ExceptionContinueExecution;
-            }
+            /* Unwind to the jump target; this call does not return */
+            RtlUnwindEx(EstablisherFrame,
+                        (PVOID)(ImageBase + ScopeTable->ScopeRecord[i].JumpTarget),
+                        ExceptionRecord,
+                        UlongToPtr(ExceptionRecord->ExceptionCode),
+                        DispatcherContext->ContextRecord,
+                        DispatcherContext->HistoryTable);
         }
     }
 
