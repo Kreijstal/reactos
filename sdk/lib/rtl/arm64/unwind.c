@@ -256,6 +256,37 @@ RtlpArm64RestoreAnyReg(
     }
 }
 
+/*
+ * Trap save area built by the kernel exception vectors. MSFT_OP_TRAP_FRAME
+ * marks a frame whose Sp points at this OS-private record so the unwinder can
+ * cross a hardware-exception boundary and continue in the interrupted code.
+ * Must stay in sync with the ARM64_EARLY_STATE_* layout in
+ * ntoskrnl/ke/arm64/trapvec.S.
+ */
+typedef struct _ARM64_TRAP_STATE
+{
+    ULONG64 VectorId;               /* 0x000 */
+    ULONG64 Esr;                    /* 0x008 */
+    ULONG64 Far;                    /* 0x010 */
+    ULONG64 Elr;                    /* 0x018 */
+    ULONG64 Spsr;                   /* 0x020 */
+    ULONG64 X[31];                  /* 0x028 */
+    ULONG64 Sp;                     /* 0x120 */
+    ULONG64 Pc;                     /* 0x128 */
+    ULONG64 Pstate;                 /* 0x130 */
+    ULONG64 TrapPtr;                /* 0x138 */
+    ULONG64 ExcPtr;                 /* 0x140 */
+    UCHAR EmbeddedFrames[0x238];    /* 0x148 */
+    NEON128 V[32];                  /* 0x380 */
+    ULONG64 Fpcr;                   /* 0x580 */
+    ULONG64 Fpsr;                   /* 0x588 */
+} ARM64_TRAP_STATE, *PARM64_TRAP_STATE;  /* size 0x590 */
+
+C_ASSERT(FIELD_OFFSET(ARM64_TRAP_STATE, X) == 0x28);
+C_ASSERT(FIELD_OFFSET(ARM64_TRAP_STATE, Sp) == 0x120);
+C_ASSERT(FIELD_OFFSET(ARM64_TRAP_STATE, V) == 0x380);
+C_ASSERT(sizeof(ARM64_TRAP_STATE) == 0x590);
+
 static VOID
 RtlpArm64PacAuth(
     _Inout_ PCONTEXT Context)
@@ -355,6 +386,31 @@ RtlpArm64ProcessUnwindCodes(
         {
             RtlpArm64RestoreAnyReg(Ptr[1], (Ptr[1] & 0x40) ? SaveNext : 1,
                                    Ptr[2] >> 6, Ptr[2] & 0x3F, Context, Ptrs);
+        }
+        else if (*Ptr == 0xE8)  /* MSFT_OP_TRAP_FRAME */
+        {
+            PARM64_TRAP_STATE State = (PARM64_TRAP_STATE)Context->Sp;
+
+            for (i = 0; i <= 28; i++)
+                Context->X[i] = State->X[i];
+            Context->Fp = State->X[29];
+            Context->Lr = State->X[30];
+            Context->Sp = State->Sp;
+            Context->Pc = State->Pc;
+            Context->Cpsr = (ULONG)State->Pstate;
+            for (i = 0; i < 32; i++)
+                Context->V[i] = State->V[i];
+            Context->Fpcr = (ULONG)State->Fpcr;
+            Context->Fpsr = (ULONG)State->Fpsr;
+            if (Ptrs)
+            {
+                for (i = 19; i < 29; i++)
+                    (&Ptrs->X19)[i - 19] = &State->X[i];
+                for (i = 8; i < 16; i++)
+                    (&Ptrs->D8)[i - 8] = &State->V[i].Low;
+            }
+            Context->ContextFlags &= ~CONTEXT_UNWOUND_TO_CALL;
+            *FinalPcFromLr = FALSE;
         }
         else if (*Ptr == 0xE9)  /* MSFT_OP_MACHINE_FRAME */
         {
