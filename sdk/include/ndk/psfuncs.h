@@ -458,6 +458,9 @@ NtCreateUserProcess(
 #endif
 
 #ifndef NTOS_MODE_USER
+#if defined (_M_ARM64)
+NTSYSAPI PVOID NTAPI PsGetCurrentThreadTeb(VOID);
+#endif
 FORCEINLINE struct _TEB * NtCurrentTeb(VOID)
 {
 #if defined(_M_IX86)
@@ -468,7 +471,9 @@ FORCEINLINE struct _TEB * NtCurrentTeb(VOID)
     // return (struct _TEB *)KeGetPcr()->Used_Self;
     return (struct _TEB *)(ULONG_PTR)_MoveFromCoprocessor(CP15_TPIDRURW);
 #elif defined (_M_ARM64)
-    return (struct _TEB *)__getReg(18);
+    /* In ARM64 kernel mode x18 holds the KPCR, not the TEB, and TPIDR_EL0
+       is user-writable, so the TEB must come from the current KTHREAD. */
+    return (struct _TEB *)PsGetCurrentThreadTeb();
 // #elif defined(_M_PPC)
 //     return (struct _TEB *)_read_teb_dword(0x18);
 #else
