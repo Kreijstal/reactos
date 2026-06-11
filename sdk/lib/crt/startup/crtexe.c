@@ -143,6 +143,20 @@ int __cdecl WinMainCRTStartup (void);
 int __cdecl WinMainCRTStartup (void)
 {
   int ret = 255;
+#if defined(__SEH__) && defined(__aarch64__)
+  /* The inline-asm scope-table trick below is an x86-64 GAS idiom; on ARM64
+     Clang it splits the function's unwind data and leaves most of the body
+     without a .pdata entry, so use the real thing. */
+  __try
+    {
+      mingw_app_type = 1;
+      __security_init_cookie ();
+      ret = __tmainCRTStartup ();
+    }
+  __except (_gnu_exception_handler (GetExceptionInformation ()))
+    {
+    }
+#else
 #ifdef __SEH__
   asm ("\t.l_startw:\n"
     "\t.seh_handler __C_specific_handler, @except\n"
@@ -158,6 +172,7 @@ int __cdecl WinMainCRTStartup (void)
 #ifdef __SEH__
   asm ("\tnop\n"
     "\t.l_endw: nop\n");
+#endif
 #endif
   return ret;
 }
@@ -178,6 +193,19 @@ int __cdecl mainCRTStartup (void)
       return -1;
   }
 #endif
+#if defined(__SEH__) && defined(__aarch64__)
+  /* See WinMainCRTStartup: the GAS scope-table trick breaks ARM64 unwind
+     data, use real SEH instead. */
+  __try
+    {
+      mingw_app_type = 0;
+      __security_init_cookie ();
+      ret = __tmainCRTStartup ();
+    }
+  __except (_gnu_exception_handler (GetExceptionInformation ()))
+    {
+    }
+#else
 #ifdef __SEH__
   asm ("\t.l_start:\n"
     "\t.seh_handler __C_specific_handler, @except\n"
@@ -193,6 +221,7 @@ int __cdecl mainCRTStartup (void)
 #ifdef __SEH__
   asm ("\tnop\n"
     "\t.l_end: nop\n");
+#endif
 #endif
   return ret;
 }
