@@ -826,8 +826,7 @@ BasePushProcessParameters(IN ULONG ParameterFlags,
     /* Check if the user passed in an environment */
     if (lpEnvironment)
     {
-        /* We should've made it part of the parameters block, enforce this */
-        ASSERT(ProcessParameters->Environment == WOW64_CAST_FROM_PTR(lpEnvironment));
+        /* We made it part of the parameters block, use the copy from there */
         lpEnvironment = WOW64_CAST_TO_PTR(ProcessParameters->Environment);
     }
     else
