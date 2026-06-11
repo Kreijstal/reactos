@@ -54,6 +54,17 @@ static WCHAR g_KmtestExePath[MAX_PATH];
  * marker log, and tally the failure markers as they stream past. */
 static HANDLE g_SerialHandle = INVALID_HANDLE_VALUE;
 
+/* Serializes serial/marker output between the main thread (KMTCD-* lines)
+ * and the per-test pipe-drain thread (child stdout forwarding) so marker
+ * lines are never interleaved mid-line. */
+static CRITICAL_SECTION g_SerialLock;
+
+/* Upper bound for one kmtest_.exe child. Individual tests normally finish
+ * in seconds even from CD; a child that exceeds this is wedged (e.g. a
+ * hard-error prompt or a kernel deadlock) and must not stall the rest of
+ * the suite. */
+#define KMTCD_TEST_TIMEOUT_MS   120000
+
 static
 VOID
 OpenSerialPort(VOID)
@@ -97,12 +108,14 @@ EmitLine(PCSTR Fmt, ...)
     Buf[Len++] = '\n';
     Buf[Len] = '\0';
 
+    EnterCriticalSection(&g_SerialLock);
     if (g_SerialHandle != INVALID_HANDLE_VALUE)
         WriteFile(g_SerialHandle, Buf, Len, &Written, NULL);
 
     OutputDebugStringA(Buf);
     fputs(Buf, stdout);
     fflush(stdout);
+    LeaveCriticalSection(&g_SerialLock);
 }
 
 /* Pipe-and-read the output of "kmtest_.exe --list" into Buffer. Returns the
@@ -180,6 +193,72 @@ CaptureList(_Out_writes_(BufferSize) PCHAR Buffer,
 #define KMT_FAIL_MARKER      ": Test failed: "
 #define KMT_FAIL_MARKER_LEN  (sizeof(KMT_FAIL_MARKER) - 1)
 
+/* Drains the child's stdout/stderr pipe until EOF, forwarding every chunk to
+ * the serial log and counting failure markers. Runs on its own thread so the
+ * main thread can bound the child's lifetime with a timed wait — with the
+ * drain inline, a wedged child that produces no output would block ReadFile
+ * forever and no timeout could ever fire. */
+typedef struct _PIPE_DRAIN_CONTEXT
+{
+    HANDLE ReadPipe;
+    LONG Failures;
+} PIPE_DRAIN_CONTEXT, *PPIPE_DRAIN_CONTEXT;
+
+static
+DWORD
+WINAPI
+DrainPipeThread(_In_ LPVOID Parameter)
+{
+    PPIPE_DRAIN_CONTEXT Ctx = Parameter;
+    /* The last (marker-1) bytes of each chunk are carried to the front of the
+     * next read so a marker split across two reads is still found. A whole
+     * marker can never fit inside the carry (carry < marker length), so
+     * re-scanning [0..Total) every iteration cannot double-count. */
+    CHAR Scan[4096 + KMT_FAIL_MARKER_LEN];
+    DWORD CarryLen = 0;
+
+    for (;;)
+    {
+        DWORD JustRead = 0;
+        DWORD Total, i;
+
+        if (!ReadFile(Ctx->ReadPipe, Scan + CarryLen, 4096, &JustRead, NULL) ||
+            JustRead == 0)
+        {
+            break;  /* child closed its end / pipe broken => child exiting */
+        }
+
+        EnterCriticalSection(&g_SerialLock);
+        if (g_SerialHandle != INVALID_HANDLE_VALUE)
+        {
+            DWORD SerWritten;
+            WriteFile(g_SerialHandle, Scan + CarryLen, JustRead, &SerWritten, NULL);
+        }
+        LeaveCriticalSection(&g_SerialLock);
+
+        Total = CarryLen + JustRead;
+        if (Total >= KMT_FAIL_MARKER_LEN)
+        {
+            for (i = 0; i + KMT_FAIL_MARKER_LEN <= Total; ++i)
+            {
+                if (Scan[i] == ':' &&
+                    memcmp(Scan + i, KMT_FAIL_MARKER, KMT_FAIL_MARKER_LEN) == 0)
+                {
+                    InterlockedIncrement(&Ctx->Failures);
+                }
+            }
+            /* Carry the last (marker-1) bytes into the next read. */
+            CarryLen = KMT_FAIL_MARKER_LEN - 1;
+            memmove(Scan, Scan + Total - CarryLen, CarryLen);
+        }
+        else
+        {
+            CarryLen = Total;  /* not enough bytes to scan yet; carry them all */
+        }
+    }
+    return 0;
+}
+
 /* Spawn kmtest_.exe with a single test name. Child stdout/stderr is piped
  * through us so we can both forward every byte to the serial log AND count the
  * failure markers. Returns the child Win32 exit code; the number of failed
@@ -193,16 +272,13 @@ RunOneTest(_In_z_ PCSTR TestName, _Out_ PLONG OutFailures)
     STARTUPINFOW StartInfo;
     SECURITY_ATTRIBUTES SecAttrs;
     HANDLE ReadPipe = NULL, WritePipe = NULL;
+    HANDLE ReaderThread;
+    PIPE_DRAIN_CONTEXT DrainCtx;
     DWORD ExitCode = (DWORD)-1;
-    LONG Failures = 0;
+    DWORD WaitResult;
+    BOOL ReaderDone = FALSE;
     int Written;
     BOOL Ok;
-    /* The last (marker-1) bytes of each chunk are carried to the front of the
-     * next read so a marker split across two reads is still found. A whole
-     * marker can never fit inside the carry (carry < marker length), so
-     * re-scanning [0..Total) every iteration cannot double-count. */
-    CHAR Scan[4096 + KMT_FAIL_MARKER_LEN];
-    DWORD CarryLen = 0;
 
     *OutFailures = 0;
 
@@ -240,54 +316,43 @@ RunOneTest(_In_z_ PCSTR TestName, _Out_ PLONG OutFailures)
         return ExitCode;
     }
 
-    /* Drain the pipe continuously — a stalled reader would deadlock the child
-     * once the ~4 KB pipe buffer fills. Forward each fresh chunk to the serial
-     * log, then count failure markers over carry+chunk. */
-    for (;;)
+    /* Drain the pipe on a worker thread — a stalled reader would deadlock the
+     * child once the ~4 KB pipe buffer fills, and an inline drain would block
+     * ReadFile forever on a wedged-but-silent child. */
+    DrainCtx.ReadPipe = ReadPipe;
+    DrainCtx.Failures = 0;
+    ReaderThread = CreateThread(NULL, 0, DrainPipeThread, &DrainCtx, 0, NULL);
+
+    WaitResult = WaitForSingleObject(ProcInfo.hProcess, KMTCD_TEST_TIMEOUT_MS);
+    if (WaitResult == WAIT_TIMEOUT)
     {
-        DWORD JustRead = 0;
-        DWORD Total, i;
+        EmitLine("KMTCD-TIMEOUT %s after %u ms, terminating", TestName,
+                 KMTCD_TEST_TIMEOUT_MS);
+        TerminateProcess(ProcInfo.hProcess, WAIT_TIMEOUT);
 
-        if (!ReadFile(ReadPipe, Scan + CarryLen, 4096, &JustRead, NULL) ||
-            JustRead == 0)
-        {
-            break;  /* child closed its end / pipe broken => child exiting */
-        }
-
-        if (g_SerialHandle != INVALID_HANDLE_VALUE)
-        {
-            DWORD SerWritten;
-            WriteFile(g_SerialHandle, Scan + CarryLen, JustRead, &SerWritten, NULL);
-        }
-
-        Total = CarryLen + JustRead;
-        if (Total >= KMT_FAIL_MARKER_LEN)
-        {
-            for (i = 0; i + KMT_FAIL_MARKER_LEN <= Total; ++i)
-            {
-                if (Scan[i] == ':' &&
-                    memcmp(Scan + i, KMT_FAIL_MARKER, KMT_FAIL_MARKER_LEN) == 0)
-                {
-                    ++Failures;
-                }
-            }
-            /* Carry the last (marker-1) bytes into the next read. */
-            CarryLen = KMT_FAIL_MARKER_LEN - 1;
-            memmove(Scan, Scan + Total - CarryLen, CarryLen);
-        }
-        else
-        {
-            CarryLen = Total;  /* not enough bytes to scan yet; carry them all */
-        }
+        /* A thread parked in an uninterruptible kernel wait (e.g. a hard
+         * error pending in csrss) can survive TerminateProcess; bound this
+         * wait too and leak the zombie rather than wedging the suite. */
+        if (WaitForSingleObject(ProcInfo.hProcess, 30 * 1000) == WAIT_TIMEOUT)
+            EmitLine("KMTCD-ZOMBIE %s refuses to die, leaking it", TestName);
     }
-    CloseHandle(ReadPipe);
-
-    WaitForSingleObject(ProcInfo.hProcess, INFINITE);
     GetExitCodeProcess(ProcInfo.hProcess, &ExitCode);
+
+    if (ReaderThread)
+    {
+        /* EOF reaches the drain thread once the child is really gone; give a
+         * zombie's reader a moment, then abandon it (its stack and the pipe
+         * handle leak with it). */
+        ReaderDone = (WaitForSingleObject(ReaderThread, 10 * 1000) == WAIT_OBJECT_0);
+        CloseHandle(ReaderThread);
+    }
+    if (ReaderDone)
+        CloseHandle(ReadPipe);
+
     CloseHandle(ProcInfo.hThread);
     CloseHandle(ProcInfo.hProcess);
 
-    *OutFailures = Failures;
+    *OutFailures = DrainCtx.Failures;
     return ExitCode;
 }
 
@@ -372,6 +437,15 @@ main(void)
     }
     if (ArgV)
         LocalFree(ArgV);
+
+    InitializeCriticalSection(&g_SerialLock);
+
+    /* Children inherit our error mode. Without SEM_FAILCRITICALERRORS a
+     * kernel hard error raised by a test (ExHardError) is forwarded to csrss
+     * as a message box and ExRaiseHardError blocks on a desktop nobody can
+     * click; with UI disabled it returns ResponseReturnToCaller immediately,
+     * which is also what the non-interactive test expects. */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
 
     OpenSerialPort();
     ResolveKmtestPath();
