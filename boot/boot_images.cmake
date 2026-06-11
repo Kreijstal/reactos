@@ -190,6 +190,9 @@ file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/TEMP=${CMAKE_C
 file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "ProgramData/Microsoft/Windows/Start Menu/Programs/Startup=${CMAKE_CURRENT_BINARY_DIR}/empty\n")
 add_allusers_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "Users")
 add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "Users" "Default")
+# The LiveCD logs on as LocalSystem; retain its profile directories.
+# Match the lowercase config graft for FreeLdr's case-sensitive ISO lookup.
+add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/system32/config" "SystemProfile")
 
 add_custom_target(livecd
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/liveimg.iso
