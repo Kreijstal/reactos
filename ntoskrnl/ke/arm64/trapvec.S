@@ -8,6 +8,7 @@
     .extern KiArm64BugCheckEntry
     .extern KiTrapReturn
     .extern KiArm64VectorLogOnly
+    .extern PsConvertToGuiThread
 
 .equ ARM64_EARLY_STATE_VECTORID,      0x0
 .equ ARM64_EARLY_STATE_ESR,           0x8
@@ -339,14 +340,39 @@ KiArm64SyncVectorCommon:
     msr daifclr, #0x2
     isb
 
-    /* Call C handler */
+    /* Call C handler.
+     * Results: 0 = unhandled (bugcheck), 1 = handled (trap return),
+     * 2 = the system call needs a GUI thread conversion first.
+     * w1 tells the handler whether a conversion was already attempted. */
+    mov w1, wzr
+.Lsync_dispatch:
     mov x0, sp
     bl KiArm64HandleSynchronousException
     dsb sy
     isb
 
     /* Check result */
-    cbz x0, .Lsync_bugcheck
+    cmp w0, #2
+    b.ne .Lsync_dispatch_done
+
+    /*
+     * First win32k system call: convert the thread to a GUI thread HERE,
+     * where no C frame is live below the trap context. PsConvertToGuiThread
+     * calls KeSwitchKernelStack, which copies the kernel stack to a new,
+     * larger one and adjusts the live SP/FP — a C caller could keep stack-
+     * derived addresses in callee-saved registers across the call and end
+     * up referencing the freed old stack (this is why x86-64 performs the
+     * conversion in KiConvertToGuiThread assembly as well). After the
+     * attempt, re-dispatch the system call from the saved context with
+     * w1 = 1 so a failed conversion falls through to the invalid-service
+     * exit instead of looping.
+     */
+    bl PsConvertToGuiThread
+    mov w1, #1
+    b .Lsync_dispatch
+
+.Lsync_dispatch_done:
+    cbz w0, .Lsync_bugcheck
 
     /* Success path */
     dsb ishst
