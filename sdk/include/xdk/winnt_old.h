@@ -4822,9 +4822,18 @@ FORCEINLINE PVOID GetCurrentFiber(VOID)
 #endif
 }
 #elif defined (_M_ARM64)
+#ifdef _WIN32K_
+NTSYSAPI PVOID NTAPI PsGetCurrentThreadTeb(VOID);
+#endif
 FORCEINLINE struct _TEB * NtCurrentTeb(VOID)
 {
+#ifdef _WIN32K_
+    /* In ARM64 kernel mode x18 holds the KPCR, not the TEB, and TPIDR_EL0
+       is user-writable, so the TEB must come from the current KTHREAD. */
+    return (struct _TEB *)PsGetCurrentThreadTeb();
+#else
     return (struct _TEB *)__getReg(18);
+#endif
 }
 FORCEINLINE PVOID GetCurrentFiber(VOID)
 {
