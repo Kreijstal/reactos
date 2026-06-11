@@ -148,6 +148,19 @@ elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
         add_compile_options(-fno-builtin-stpcpy)
     endif()
 
+    if(ARCH STREQUAL "arm64")
+        # With native SEH, clang turns recognized mem* calls into LLVM
+        # intrinsics whose late libcall expansion is not covered by the
+        # __try scope tables, so a fault inside e.g.
+        # __try { RtlCopyMemory(UserBuffer, ...) } bypasses the __except
+        # and becomes an unhandled exception. Keep these as plain calls
+        # so they get a proper SEH scope.
+        add_compile_options(-fno-builtin-memcpy)
+        add_compile_options(-fno-builtin-memmove)
+        add_compile_options(-fno-builtin-memset)
+        add_compile_options(-fno-builtin-memcmp)
+    endif()
+
     set(CMAKE_LINK_DEF_FILE_FLAG "")
     set(CMAKE_STATIC_LIBRARY_SUFFIX ".a")
     set(CMAKE_LINK_LIBRARY_SUFFIX "")
