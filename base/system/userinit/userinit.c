@@ -200,7 +200,22 @@ StartProcess(
     {
         DWORD PathSize = _countof(ProfilePath);
         if (GetUserProfileDirectoryW(hToken, ProfilePath, &PathSize))
-            WorkingDir = ProfilePath;
+        {
+            /* Use the profile directory only if it actually exists;
+             * CreateProcessW fails with ERROR_DIRECTORY on an invalid
+             * working directory (e.g. an unmaterialized profile when
+             * running from read-only media) */
+            DWORD Attribs = GetFileAttributesW(ProfilePath);
+            if (Attribs != INVALID_FILE_ATTRIBUTES &&
+                (Attribs & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                WorkingDir = ProfilePath;
+            }
+            else
+            {
+                WARN("Profile directory '%s' is not accessible\n", debugstr_w(ProfilePath));
+            }
+        }
         CloseHandle(hToken);
     }
 
