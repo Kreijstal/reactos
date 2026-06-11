@@ -1023,26 +1023,36 @@ RunLiveCD(
 
     while (pState->NextPage != DONE)
     {
+        INT_PTR ret = 0;
+
         switch (pState->NextPage)
         {
             case LOCALEPAGE:
-                DialogBoxParamW(hInstance,
-                                MAKEINTRESOURCEW(IDD_LOCALEPAGE),
-                                NULL,
-                                LocaleDlgProc,
-                                (LPARAM)pState);
+                ret = DialogBoxParamW(hInstance,
+                                      MAKEINTRESOURCEW(IDD_LOCALEPAGE),
+                                      NULL,
+                                      LocaleDlgProc,
+                                      (LPARAM)pState);
                 break;
 
             case STARTPAGE:
-                DialogBoxParamW(hInstance,
-                                MAKEINTRESOURCEW(IDD_STARTPAGE),
-                                NULL,
-                                StartDlgProc,
-                                (LPARAM)pState);
+                ret = DialogBoxParamW(hInstance,
+                                      MAKEINTRESOURCEW(IDD_STARTPAGE),
+                                      NULL,
+                                      StartDlgProc,
+                                      (LPARAM)pState);
                 break;
 
             default:
                 break;
+        }
+
+        if (ret == 0 || ret == -1)
+        {
+            /* Dialog creation failed; bail out instead of retrying forever */
+            ERR("LiveCD dialog box failed (page %d, error %lu)\n",
+                pState->NextPage, GetLastError());
+            pState->NextPage = DONE;
         }
     }
 
