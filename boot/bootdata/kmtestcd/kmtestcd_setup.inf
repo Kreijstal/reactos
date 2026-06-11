@@ -32,7 +32,13 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","BootExecute",0x00010000
 ; resource.c:844 ActiveCount) trip when run in sequence — those ASSERTs
 ; drop the kernel into KDB on COM1, hang the runner, and waste the boot.
 ; RtlIntSafeKM is self-contained (no FS/MM/IO surface) and known-passing.
-HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","KmtestRunner",0x00020000,"%SystemRoot%\system32\kmtcdrunner.exe"
+;
+; ExHardError is excluded ("!" inverts the prefix filter): it parks a thread
+; in an unkillable kernel wait, and the zombie's still-registered result
+; buffer then fails IOCTL_KMTEST_SET_RESULTBUFFER (STATUS_ACCESS_DENIED) for
+; every following test. kmtcdrunner's 120s timeout contains the wedge, but
+; excluding the test keeps the rest of the suite's results meaningful.
+HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","KmtestRunner",0x00020000,"%SystemRoot%\system32\kmtcdrunner.exe !ExHardError"
 
 ; Suppress the default Run-key entry that launches hello.exe (the COM2 serial
 ; shell from hivesft.inf:562). hello.exe opens \\.\COM2 exclusively, which
