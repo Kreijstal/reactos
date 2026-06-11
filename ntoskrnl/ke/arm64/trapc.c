@@ -903,10 +903,9 @@ extern volatile ULONG_PTR MiArm64SessionWsSp;
  */
 static volatile LONG KiArm64TrapActive[MAXIMUM_PROCESSORS] = {0};
 
-static
 VOID
 KiArm64DeliverPendingUserApc(
-    _Inout_ PKEXCEPTION_FRAME ExceptionFrame,
+    _Inout_opt_ PKEXCEPTION_FRAME ExceptionFrame,
     _Inout_ PKTRAP_FRAME TrapFrame)
 {
     PKTHREAD Thread;
