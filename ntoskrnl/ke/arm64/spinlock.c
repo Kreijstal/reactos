@@ -77,6 +77,21 @@ KeAcquireSpinLockRaiseToSynch(
     KxAcquireSpinLock(SpinLock);
     return OldIrql;
 }
+static
+VOID
+KiArm64TrackQueuedLockAcquire(
+    _In_ KSPIN_LOCK_QUEUE_NUMBER LockNumber)
+{
+    if (LockNumber == LockQueuePfnLock)
+    {
+        ULONG CpuIndex = KeGetCurrentProcessorNumber();
+        if (CpuIndex < MAXIMUM_PROCESSORS)
+        {
+            InterlockedIncrement(&MiArm64PfnLockDepth[CpuIndex]);
+        }
+    }
+}
+
 KIRQL
 FASTCALL
 KeAcquireQueuedSpinLock(
@@ -106,14 +121,7 @@ KeAcquireQueuedSpinLock(
     }
 
     KxAcquireSpinLock(Lock);
-    if (LockNumber == LockQueuePfnLock)
-    {
-        ULONG CpuIndex = KeGetCurrentProcessorNumber();
-        if (CpuIndex < MAXIMUM_PROCESSORS)
-        {
-            InterlockedIncrement(&MiArm64PfnLockDepth[CpuIndex]);
-        }
-    }
+    KiArm64TrackQueuedLockAcquire(LockNumber);
     return OldIrql;
 }
 
@@ -126,6 +134,7 @@ KeAcquireQueuedSpinLockRaiseToSynch(
 
     KeRaiseIrql(SYNCH_LEVEL, &OldIrql);
     KxAcquireSpinLock(KeGetCurrentPrcb()->LockQueue[LockNumber].Lock);
+    KiArm64TrackQueuedLockAcquire(LockNumber);
     return OldIrql;
 }
 
@@ -208,15 +217,19 @@ KeTryToAcquireQueuedSpinLock(
     _In_ KSPIN_LOCK_QUEUE_NUMBER LockNumber,
     _Out_ PKIRQL OldIrql)
 {
+    /* This raises IRQL even if locking fails */
     KeRaiseIrql(DISPATCH_LEVEL, OldIrql);
 
-#ifdef CONFIG_SMP
-    return KeTryToAcquireSpinLockAtDpcLevel(
-               KeGetCurrentPrcb()->LockQueue[LockNumber].Lock);
-#else
-    KeMemoryBarrierWithoutFence();
+    /* KeTryToAcquireSpinLockAtDpcLevel performs the DBG ownership marking
+       that KxReleaseSpinLock verifies, on UP builds too */
+    if (!KeTryToAcquireSpinLockAtDpcLevel(
+            KeGetCurrentPrcb()->LockQueue[LockNumber].Lock))
+    {
+        return FALSE;
+    }
+
+    KiArm64TrackQueuedLockAcquire(LockNumber);
     return TRUE;
-#endif
 }
 
 BOOLEAN
@@ -225,13 +238,17 @@ KeTryToAcquireQueuedSpinLockRaiseToSynch(
     _In_ KSPIN_LOCK_QUEUE_NUMBER LockNumber,
     _Out_ PKIRQL OldIrql)
 {
+    /* This raises IRQL even if locking fails */
     KeRaiseIrql(SYNCH_LEVEL, OldIrql);
 
-#ifdef CONFIG_SMP
-    return KeTryToAcquireSpinLockAtDpcLevel(
-               KeGetCurrentPrcb()->LockQueue[LockNumber].Lock);
-#else
-    KeMemoryBarrierWithoutFence();
+    /* KeTryToAcquireSpinLockAtDpcLevel performs the DBG ownership marking
+       that KxReleaseSpinLock verifies, on UP builds too */
+    if (!KeTryToAcquireSpinLockAtDpcLevel(
+            KeGetCurrentPrcb()->LockQueue[LockNumber].Lock))
+    {
+        return FALSE;
+    }
+
+    KiArm64TrackQueuedLockAcquire(LockNumber);
     return TRUE;
-#endif
 }
