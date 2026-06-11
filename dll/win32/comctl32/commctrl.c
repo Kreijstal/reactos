@@ -3,7 +3,7 @@
  *
  * Copyright 1997 Dimitrie O. Paun
  * Copyright 1998,2000 Eric Kohl
- * Copyright 2014-2015 Michael Müller
+ * Copyright 2014-2015 Michael Mï¿½ller
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -106,6 +106,8 @@ static const WCHAR strCC32SubclassInfo[] = {
 #define ARCH L"x86"
 #elif defined __x86_64__
 #define ARCH L"amd64"
+#elif defined __aarch64__ || defined __arm64ec__
+#define ARCH L"arm64"
 #else
 #define ARCH L"none"
 #endif
