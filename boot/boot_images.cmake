@@ -193,6 +193,12 @@ file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/TEMP=${CMAKE_C
 # Create user profile directories
 add_allusers_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "Profiles")
 add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "Profiles" "Default User")
+# The LocalSystem profile (ProfileList\S-1-5-18 points here); the LiveCD logon
+# runs as SYSTEM, so userinit and shell32 expect this directory to exist.
+# Keep the path lowercase to match the existing config directory graft,
+# or mkisofs renames the merged directory and FreeLdr's case-sensitive
+# ISO9660 lookup can no longer find config\system (hive load failure).
+add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/system32/config" "SystemProfile")
 
 add_custom_target(livecd
     COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/liveimg.iso
