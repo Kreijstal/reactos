@@ -1462,7 +1462,6 @@ MmCreateVirtualMappingUnsafeEx(
     PMMPTE PointerPte;
     MMPTE TempPte;
     ULONG ProtectionMask;
-    PETHREAD CurrentThread = PsGetCurrentThread();
 
     ASSERT(((ULONG_PTR)Address & (PAGE_SIZE - 1)) == 0);
 
@@ -1486,13 +1485,28 @@ MmCreateVirtualMappingUnsafeEx(
         ASSERT(ProtectionMask != MM_EXECUTE_WRITECOPY);
 
         /*
-         * MiMakeSystemAddressValid may have to fault in the page table page
-         * containing this PTE. Kernel page-table VAs are protected by the
-         * system working set, so satisfy that helper's lock contract here.
+         * The page-table page containing this PTE may not be materialized
+         * yet; fault it in directly. Page-table addresses route straight to
+         * the ARM3 fault handler, which demand-zeroes the missing table
+         * page. MiMakeSystemAddressValid cannot be used here: its
+         * drop-and-reacquire contract is the process working set, while a
+         * system-space mapping is covered by the system working set.
          */
-        MiLockWorkingSet(CurrentThread, &MmSystemCacheWs);
-        MiMakeSystemAddressValid(MiAddressToPte(Address), PsGetCurrentProcess());
-        MiUnlockWorkingSet(CurrentThread, &MmSystemCacheWs);
+        while (!MmIsAddressValid(MiAddressToPte(Address)))
+        {
+            NTSTATUS Status = MmAccessFault(FALSE,
+                                            MiAddressToPte(Address),
+                                            KernelMode,
+                                            NULL);
+            if (!NT_SUCCESS(Status))
+            {
+                KeBugCheckEx(KERNEL_DATA_INPAGE_ERROR,
+                             1,
+                             Status,
+                             0,
+                             (ULONG_PTR)MiAddressToPte(Address));
+            }
+        }
     }
     else
     {
