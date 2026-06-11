@@ -148,10 +148,12 @@ RtlpArm64VirtualUnwindFrame(
 
     if (DispatcherContext->FunctionEntry == NULL)
     {
-        /* Leaf function: the return address is still in Lr */
-        if (Pc == Context->Lr)
+        /* Only the interrupted frame itself can be a leaf function. A frame
+         * reached by unwinding sits at a call site, so missing unwind data
+         * there means a broken function table; treating it as a leaf would
+         * reassign Pc = Lr (already equal after a real unwind) forever. */
+        if (DispatcherContext->ControlPcIsUnwound || (Pc == Context->Lr))
         {
-            /* Invalid leaf function, no way to continue */
             return STATUS_INVALID_DISPOSITION;
         }
         Context->ContextFlags |= CONTEXT_UNWOUND_TO_CALL;
