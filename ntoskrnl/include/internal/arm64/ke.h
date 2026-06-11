@@ -476,6 +476,11 @@ KiInitializeDebugRegisterCounts(VOID);
 #define Ki386PerfEnd()
 #define KiEndInterrupt(TrapFrame, TrapStatus)
 
+VOID
+KiArm64DeliverPendingUserApc(
+    _Inout_opt_ PKEXCEPTION_FRAME ExceptionFrame,
+    _Inout_ PKTRAP_FRAME TrapFrame);
+
 DECLSPEC_NORETURN
 VOID
 KiUserCallbackExit(
