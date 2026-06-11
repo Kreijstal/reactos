@@ -2150,16 +2150,38 @@ KiArm64HandleSynchronousException(
                 /* not reached */
             }
 
-            /* Otherwise, dispatch an access violation through KiDispatchException
-             * so KD can catch first/second chance and print the crash context. */
+            /* Otherwise, dispatch the fault through KiDispatchException
+             * so KD can catch first/second chance and print the crash context.
+             * Map the MmAccessFault status to the exception code the same way
+             * the x86-64 page fault trap does: access violations stay access
+             * violations, guard page hits and stack overflows are raised with
+             * their own status (the RtlException stack-probe test and real
+             * stack-extension consumers depend on STATUS_STACK_OVERFLOW), and
+             * everything else becomes an in-page error carrying the original
+             * status as the third parameter. */
             {
                 EXCEPTION_RECORD ExceptionRecord;
                 RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
-                ExceptionRecord.ExceptionCode = STATUS_ACCESS_VIOLATION;
+                if ((Status == STATUS_GUARD_PAGE_VIOLATION) ||
+                    (Status == STATUS_STACK_OVERFLOW))
+                {
+                    ExceptionRecord.ExceptionCode = Status;
+                    ExceptionRecord.NumberParameters = 2;
+                }
+                else if (Status == STATUS_ACCESS_VIOLATION)
+                {
+                    ExceptionRecord.ExceptionCode = STATUS_ACCESS_VIOLATION;
+                    ExceptionRecord.NumberParameters = 2;
+                }
+                else
+                {
+                    ExceptionRecord.ExceptionCode = STATUS_IN_PAGE_ERROR;
+                    ExceptionRecord.NumberParameters = 3;
+                    ExceptionRecord.ExceptionInformation[2] = (ULONG_PTR)Status;
+                }
                 ExceptionRecord.ExceptionFlags = 0;
                 ExceptionRecord.ExceptionRecord = NULL;
                 ExceptionRecord.ExceptionAddress = (PVOID)(ULONG_PTR)Context->State.Elr;
-                ExceptionRecord.NumberParameters = 2;
                 ExceptionRecord.ExceptionInformation[0] = KiArm64AccessTypeToExceptionInfo(WriteAccess, FALSE);
                 ExceptionRecord.ExceptionInformation[1] = (ULONG_PTR)Context->State.FaultAddress;
 
