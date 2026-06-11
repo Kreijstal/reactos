@@ -1,7 +1,9 @@
 /*
  * PROJECT:     ReactOS Run-Time Library
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
- * PURPOSE:     ARM64 exception support
+ * PURPOSE:     ARM64 exception dispatching
+ * NOTES:       Modeled on Wine's dlls/ntdll/signal_arm64.c
+ *              (Copyright 1999, 2005 Alexandre Julliard).
  */
 
 #include <rtl.h>
@@ -10,26 +12,23 @@
 #define NDEBUG
 #include <debug.h>
 
-#define ARM64_UNWIND_FLAG_MASK 0x3UL
-#define ARM64_XDATA_FUNCTION_LENGTH_MASK 0x3FFFFUL
-#define ARM64_XDATA_EPILOGUE_PACKED (1UL << 21)
-#define ARM64_XDATA_EXCEPTION_DATA  (1UL << 20)
-#define ARM64_XDATA_EPILOGUE_COUNT_SHIFT 22
-#define ARM64_XDATA_EPILOGUE_COUNT_MASK 0x1FUL
-#define ARM64_XDATA_CODE_WORDS_SHIFT 27
-#define ARM64_XDATA_CODE_WORDS_MASK 0x1FUL
-#ifndef UNW_FLAG_EHANDLER
+#ifndef UNW_FLAG_NHANDLER
+#define UNW_FLAG_NHANDLER 0x0
 #define UNW_FLAG_EHANDLER 0x1
 #define UNW_FLAG_UHANDLER 0x2
+#endif
+
+#ifndef CONTEXT_UNWOUND_TO_CALL
+#define CONTEXT_UNWOUND_TO_CALL CONTEXT_ARM64_UNWOUND_TO_CALL
 #endif
 
 NTSYSAPI
 PRUNTIME_FUNCTION
 NTAPI
 RtlLookupFunctionEntry(
-    _In_ ULONG_PTR ControlPc,
-    _Out_ PULONG_PTR ImageBase,
-    _Inout_opt_ struct _UNWIND_HISTORY_TABLE *HistoryTable);
+    _In_ DWORD64 ControlPc,
+    _Out_ PDWORD64 ImageBase,
+    _Inout_opt_ PVOID HistoryTable);
 
 NTSYSAPI
 PEXCEPTION_ROUTINE
@@ -44,135 +43,140 @@ RtlVirtualUnwind(
     _Out_ PULONG64 EstablisherFrame,
     _Inout_opt_ PVOID ContextPointers);
 
-static
-BOOLEAN
-RtlpArm64IsStackPointerValid(
-    _In_ ULONG_PTR Pointer,
-    _In_ ULONG_PTR StackLow,
-    _In_ ULONG_PTR StackHigh)
+/* unwind_asm.S */
+EXCEPTION_DISPOSITION
+RtlpCallSehHandler(
+    _In_ PEXCEPTION_RECORD ExceptionRecord,
+    _In_ ULONG_PTR EstablisherFrame,
+    _Inout_ PCONTEXT ContextRecord,
+    _In_ PVOID DispatcherContext,
+    _In_ PEXCEPTION_ROUTINE ExceptionRoutine);
+
+/*
+ * Handler for exceptions that happen inside an exception handler call.
+ * Referenced by RtlpCallSehHandler's unwind data.
+ */
+EXCEPTION_DISPOSITION
+NTAPI
+RtlpNestedExceptionHandler(
+    _In_ PEXCEPTION_RECORD ExceptionRecord,
+    _In_ PVOID EstablisherFrame,
+    _Inout_ PCONTEXT ContextRecord,
+    _Inout_ PVOID DispatcherContext)
 {
-    return (Pointer >= StackLow) &&
-           (Pointer < StackHigh) &&
-           ((Pointer & (sizeof(ULONG64) - 1)) == 0);
+    (VOID)EstablisherFrame;
+    (VOID)ContextRecord;
+    (VOID)DispatcherContext;
+
+    if (ExceptionRecord->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
+        return ExceptionContinueSearch;
+    return ExceptionNestedException;
 }
 
-static
-BOOLEAN
-RtlpArm64UnwindFrameChain(
-    _Inout_ PCONTEXT Context,
-    _In_ ULONG_PTR StackLow,
-    _In_ ULONG_PTR StackHigh,
-    _Out_opt_ PULONG64 EstablisherFrame)
+/*
+ * Handler for exceptions that happen inside an unwind handler call.
+ * Referenced by RtlpCallUnwindHandler's unwind data. Restores the original
+ * dispatcher context (saved at frame[-2] by RtlpCallUnwindHandler) and
+ * reports a collided unwind.
+ */
+EXCEPTION_DISPOSITION
+NTAPI
+RtlpUnwindHandler(
+    _In_ PEXCEPTION_RECORD ExceptionRecord,
+    _In_ PVOID EstablisherFrame,
+    _Inout_ PCONTEXT ContextRecord,
+    _Inout_ PVOID DispatcherContext)
 {
-    ULONG64 FrameFp = Context->Fp;
-    ULONG64 NextFp;
-    ULONG64 NextLr;
+    PDISPATCHER_CONTEXT Dispatch = (PDISPATCHER_CONTEXT)DispatcherContext;
+    PDISPATCHER_CONTEXT OrigDispatch = ((PDISPATCHER_CONTEXT *)EstablisherFrame)[-2];
 
-    if (!RtlpArm64IsStackPointerValid((ULONG_PTR)FrameFp,
-                                      StackLow,
-                                      StackHigh) ||
-        !RtlpArm64IsStackPointerValid((ULONG_PTR)(FrameFp + sizeof(ULONG64)),
-                                      StackLow,
-                                      StackHigh))
+    (VOID)ExceptionRecord;
+    (VOID)ContextRecord;
+
+    /* Copy the original dispatcher into the current one, except TargetPc */
+    Dispatch->ControlPc          = OrigDispatch->ControlPc;
+    Dispatch->ImageBase          = OrigDispatch->ImageBase;
+    Dispatch->FunctionEntry      = OrigDispatch->FunctionEntry;
+    Dispatch->EstablisherFrame   = OrigDispatch->EstablisherFrame;
+    Dispatch->LanguageHandler    = OrigDispatch->LanguageHandler;
+    Dispatch->HandlerData        = OrigDispatch->HandlerData;
+    Dispatch->HistoryTable       = OrigDispatch->HistoryTable;
+    Dispatch->ScopeIndex         = OrigDispatch->ScopeIndex;
+    Dispatch->ControlPcIsUnwound = OrigDispatch->ControlPcIsUnwound;
+    *Dispatch->ContextRecord     = *OrigDispatch->ContextRecord;
+    if (Dispatch->NonVolatileRegisters && OrigDispatch->NonVolatileRegisters)
     {
-        return FALSE;
+        RtlCopyMemory(Dispatch->NonVolatileRegisters,
+                      OrigDispatch->NonVolatileRegisters,
+                      sizeof(DISPATCHER_CONTEXT_NONVOLREG_ARM64));
     }
 
-    NextFp = *(PULONG64)(ULONG_PTR)FrameFp;
-    NextLr = *(PULONG64)(ULONG_PTR)(FrameFp + sizeof(ULONG64));
-
-    if ((NextLr == 0) ||
-        ((NextFp != 0) &&
-         (!RtlpArm64IsStackPointerValid((ULONG_PTR)NextFp,
-                                        StackLow,
-                                        StackHigh) ||
-          (NextFp <= FrameFp))))
-    {
-        return FALSE;
-    }
-
-    if (EstablisherFrame != NULL)
-        *EstablisherFrame = FrameFp;
-
-    Context->Lr = NextLr;
-    Context->Sp = FrameFp + (2 * sizeof(ULONG64));
-    Context->Fp = NextFp;
-    Context->Pc = NextLr;
-    return TRUE;
+    return ExceptionCollidedUnwind;
 }
 
-static
-PULONG
-RtlpArm64Xdata(
-    _In_ ULONG_PTR ImageBase,
-    _In_ PRUNTIME_FUNCTION FunctionEntry)
+/* Unwind one frame, refreshing the dispatcher context */
+static NTSTATUS
+RtlpArm64VirtualUnwindFrame(
+    _In_ ULONG HandlerType,
+    _Inout_ PDISPATCHER_CONTEXT DispatcherContext,
+    _Inout_ PCONTEXT Context)
 {
-    if ((FunctionEntry == NULL) ||
-        ((FunctionEntry->UnwindData & ARM64_UNWIND_FLAG_MASK) != 0))
+    DISPATCHER_CONTEXT_NONVOLREG_ARM64 *NonVolRegs;
+    DWORD64 Pc = Context->Pc;
+    ULONG64 ImageBase;
+    ULONG i;
+
+    DispatcherContext->ScopeIndex = 0;
+    DispatcherContext->ControlPc = Pc;
+    DispatcherContext->ControlPcIsUnwound =
+        (Context->ContextFlags & CONTEXT_UNWOUND_TO_CALL) != 0;
+    if (DispatcherContext->ControlPcIsUnwound)
+        Pc -= 4;
+
+    NonVolRegs = (DISPATCHER_CONTEXT_NONVOLREG_ARM64 *)DispatcherContext->NonVolatileRegisters;
+    if (NonVolRegs)
     {
-        return NULL;
+        RtlCopyMemory(NonVolRegs->GpNvRegs, &Context->X19, sizeof(NonVolRegs->GpNvRegs));
+        for (i = 0; i < NONVOL_FP_NUMREG_ARM64; i++)
+            NonVolRegs->FpNvRegs[i] = Context->V[i + 8].D[0];
     }
 
-    return (PULONG)(ImageBase + FunctionEntry->UnwindData);
-}
+    DispatcherContext->FunctionEntry = RtlLookupFunctionEntry(Pc,
+                                                              &ImageBase,
+                                                              DispatcherContext->HistoryTable);
+    DispatcherContext->ImageBase = ImageBase;
 
-static
-BOOLEAN
-RtlpArm64GetExceptionHandler(
-    _In_ ULONG_PTR ImageBase,
-    _In_ PRUNTIME_FUNCTION FunctionEntry,
-    _Out_ PEXCEPTION_ROUTINE *ExceptionRoutine,
-    _Out_ PVOID *HandlerData)
-{
-    PULONG Xdata;
-    ULONG Header;
-    ULONG CodeWords;
-    ULONG EpilogueScopes = 0;
-    ULONG Offset;
-    ULONG HeaderWords;
-    ULONG HandlerRva;
-
-    Xdata = RtlpArm64Xdata(ImageBase, FunctionEntry);
-    if (Xdata == NULL)
-        return FALSE;
-
-    Header = Xdata[0];
-    if ((Header & ARM64_XDATA_EXCEPTION_DATA) == 0)
-        return FALSE;
-
-    CodeWords = (Header >> ARM64_XDATA_CODE_WORDS_SHIFT) &
-                ARM64_XDATA_CODE_WORDS_MASK;
-
-    /*
-     * Handle extended .xdata header: when both CodeWords and EpilogCount
-     * in word 0 are 0 and the E bit is not set, word 1 contains
-     * Extended Epilog Count (low 16 bits) and Extended Code Words (high 8 bits).
-     */
-    if (CodeWords == 0 &&
-        ((Header >> ARM64_XDATA_EPILOGUE_COUNT_SHIFT) &
-         ARM64_XDATA_EPILOGUE_COUNT_MASK) == 0 &&
-        (Header & ARM64_XDATA_EPILOGUE_PACKED) == 0)
+    if (DispatcherContext->FunctionEntry == NULL)
     {
-        HeaderWords = 2;
-        CodeWords = (Xdata[1] >> 16) & 0xFF;
-        EpilogueScopes = Xdata[1] & 0xFFFF;
-    }
-    else
-    {
-        HeaderWords = 1;
-        if ((Header & ARM64_XDATA_EPILOGUE_PACKED) == 0)
+        /* Leaf function: the return address is still in Lr. Handle this here
+           because the kernel's RtlVirtualUnwind does not accept NULL. */
+        if (Pc == Context->Lr)
         {
-            EpilogueScopes = (Header >> ARM64_XDATA_EPILOGUE_COUNT_SHIFT) &
-                             ARM64_XDATA_EPILOGUE_COUNT_MASK;
+            /* Invalid leaf function, no way to continue */
+            return STATUS_INVALID_DISPOSITION;
         }
+        Context->ContextFlags |= CONTEXT_UNWOUND_TO_CALL;
+        Context->Pc = Context->Lr;
+        DispatcherContext->EstablisherFrame = Context->Sp;
+        DispatcherContext->LanguageHandler = NULL;
+        DispatcherContext->HandlerData = NULL;
+        return STATUS_SUCCESS;
     }
 
-    Offset = HeaderWords + EpilogueScopes + CodeWords;
+    DispatcherContext->LanguageHandler =
+        RtlVirtualUnwind(HandlerType,
+                         ImageBase,
+                         Pc,
+                         DispatcherContext->FunctionEntry,
+                         Context,
+                         &DispatcherContext->HandlerData,
+                         (PULONG64)&DispatcherContext->EstablisherFrame,
+                         NULL);
 
-    HandlerRva = Xdata[Offset++];
-    *ExceptionRoutine = (PEXCEPTION_ROUTINE)(ImageBase + HandlerRva);
-    *HandlerData = &Xdata[Offset];
-    return TRUE;
+    if (Context->Pc == 0)
+        return STATUS_INVALID_DISPOSITION;
+
+    return STATUS_SUCCESS;
 }
 
 VOID
@@ -191,18 +195,16 @@ RtlDispatchException(
     _In_ PEXCEPTION_RECORD ExceptionRecord,
     _In_ PCONTEXT ContextRecord)
 {
-    CONTEXT UnwindContext;
-    ULONG_PTR ImageBase;
-    PRUNTIME_FUNCTION FunctionEntry;
-    PEXCEPTION_ROUTINE ExceptionRoutine;
+    DISPATCHER_CONTEXT_NONVOLREG_ARM64 NonVolRegs;
     DISPATCHER_CONTEXT DispatcherContext;
-    PVOID HandlerData;
+    CONTEXT UnwindContext;
     EXCEPTION_DISPOSITION Disposition;
-    ULONG Frames;
-    ULONG64 EstablisherFrame;
-    ULONG_PTR StackLow;
-    ULONG_PTR StackHigh;
+    NTSTATUS Status;
+    ULONG_PTR StackLow, StackHigh;
+    ULONG64 Frame;
+    PVOID HandlerData;
 
+    /* Call vectored exception handlers first */
     if (RtlCallVectoredExceptionHandlers(ExceptionRecord, ContextRecord))
     {
         RtlCallVectoredContinueHandlers(ExceptionRecord, ContextRecord);
@@ -212,137 +214,76 @@ RtlDispatchException(
     UnwindContext = *ContextRecord;
     RtlpGetStackLimits(&StackLow, &StackHigh);
 
-    for (Frames = 0; Frames < 64; Frames++)
-    {
-        ImageBase = 0;
-        FunctionEntry = RtlLookupFunctionEntry(UnwindContext.Pc,
-                                                (PULONG_PTR)&ImageBase,
-                                                NULL);
-        if (FunctionEntry == NULL)
-        {
-            if ((UnwindContext.Lr == 0) ||
-                (UnwindContext.Lr == UnwindContext.Pc))
-            {
-                if (RtlpArm64UnwindFrameChain(&UnwindContext,
-                                              StackLow,
-                                              StackHigh,
-                                              &EstablisherFrame))
-                {
-                    continue;
-                }
+    DispatcherContext.TargetPc = 0;
+    DispatcherContext.ContextRecord = &UnwindContext;
+    DispatcherContext.HistoryTable = NULL;
+    DispatcherContext.NonVolatileRegisters = NonVolRegs.Buffer;
 
-                break;
-            }
-            UnwindContext.Pc = UnwindContext.Lr;
-            continue;
+    for (;;)
+    {
+        Status = RtlpArm64VirtualUnwindFrame(UNW_FLAG_EHANDLER,
+                                             &DispatcherContext,
+                                             &UnwindContext);
+        if (Status != STATUS_SUCCESS)
+            break;
+
+    UnwindDone:
+        if (!DispatcherContext.EstablisherFrame)
+            break;
+
+        if ((DispatcherContext.EstablisherFrame < StackLow) ||
+            (DispatcherContext.EstablisherFrame > StackHigh) ||
+            (DispatcherContext.EstablisherFrame & 0x7))
+        {
+            DPRINT1("RtlDispatchException: invalid frame %p (%p-%p)\n",
+                    (PVOID)(ULONG_PTR)DispatcherContext.EstablisherFrame,
+                    (PVOID)StackLow,
+                    (PVOID)StackHigh);
+            ExceptionRecord->ExceptionFlags |= EXCEPTION_STACK_INVALID;
+            break;
         }
 
-        /*
-         * Try RtlVirtualUnwind for proper PE/COFF unwinding first.
-         * If it returns meaningful results, use those instead of FP fallback.
-         */
+        if (DispatcherContext.LanguageHandler)
         {
-            CONTEXT VuContext = UnwindContext;
-            ULONG_PTR FrameControlPc = UnwindContext.Pc;
-            ULONG64 VuEstablisherFrame;
-            PEXCEPTION_ROUTINE VuRoutine;
-            PVOID VuHandlerData;
-            BOOLEAN UsingVu = FALSE;
+            Disposition = RtlpCallSehHandler(ExceptionRecord,
+                                             DispatcherContext.EstablisherFrame,
+                                             ContextRecord,
+                                             &DispatcherContext,
+                                             DispatcherContext.LanguageHandler);
 
-            VuRoutine = RtlVirtualUnwind(UNW_FLAG_EHANDLER,
-                                         ImageBase,
-                                         UnwindContext.Pc,
-                                         FunctionEntry,
-                                         &VuContext,
-                                         &VuHandlerData,
-                                         &VuEstablisherFrame,
-                                         NULL);
+            ExceptionRecord->ExceptionFlags &= EXCEPTION_NONCONTINUABLE;
 
-            if (VuContext.Pc != UnwindContext.Pc &&
-                VuContext.Sp > UnwindContext.Sp)
+            switch (Disposition)
             {
-                UnwindContext = VuContext;
-                EstablisherFrame = VuEstablisherFrame;
-                ExceptionRoutine = VuRoutine;
-                HandlerData = VuHandlerData;
-                UsingVu = TRUE;
-            }
-
-            if (!UsingVu)
-            {
-                ULONG64 FrameFp = UnwindContext.Fp;
-                ULONG64 NextFp;
-                ULONG64 NextLr;
-
-                HandlerData = NULL;
-                ExceptionRoutine = NULL;
-                if (!RtlpArm64GetExceptionHandler(ImageBase,
-                                                   FunctionEntry,
-                                                   &ExceptionRoutine,
-                                                   &HandlerData))
-                {
-                    ExceptionRoutine = NULL;
-                    HandlerData = NULL;
-                }
-
-                if (!RtlpArm64IsStackPointerValid((ULONG_PTR)FrameFp,
-                                                  StackLow,
-                                                  StackHigh) ||
-                    !RtlpArm64IsStackPointerValid((ULONG_PTR)(FrameFp + sizeof(ULONG64)),
-                                                  StackLow,
-                                                  StackHigh))
-                {
-                    break;
-                }
-
-                EstablisherFrame = FrameFp;
-                NextFp = *(PULONG64)(ULONG_PTR)FrameFp;
-                NextLr = *(PULONG64)(ULONG_PTR)(FrameFp + sizeof(ULONG64));
-
-                if ((NextLr == 0) ||
-                    ((NextFp != 0) &&
-                     (!RtlpArm64IsStackPointerValid((ULONG_PTR)NextFp,
-                                                    StackLow,
-                                                    StackHigh) ||
-                      (NextFp <= FrameFp))))
-                {
-                    break;
-                }
-
-                UnwindContext.Lr = NextLr;
-                UnwindContext.Sp = UnwindContext.Fp + (2 * sizeof(ULONG64));
-                UnwindContext.Fp = NextFp;
-                UnwindContext.Pc = UnwindContext.Lr;
-
-            }
-
-            if (ExceptionRoutine != NULL)
-            {
-                RtlZeroMemory(&DispatcherContext, sizeof(DispatcherContext));
-                DispatcherContext.ControlPc = FrameControlPc;
-                DispatcherContext.ImageBase = ImageBase;
-                DispatcherContext.FunctionEntry = FunctionEntry;
-                DispatcherContext.EstablisherFrame = EstablisherFrame;
-                DispatcherContext.ContextRecord = ContextRecord;
-                DispatcherContext.LanguageHandler = ExceptionRoutine;
-                DispatcherContext.HandlerData = HandlerData;
-
-                Disposition = ExceptionRoutine(ExceptionRecord,
-                                               (PVOID)DispatcherContext.EstablisherFrame,
-                                               ContextRecord,
-                                               &DispatcherContext);
-                if (Disposition == ExceptionContinueExecution)
-                {
+                case ExceptionContinueExecution:
+                    if (ExceptionRecord->ExceptionFlags & EXCEPTION_NONCONTINUABLE)
+                        return FALSE;
                     RtlCallVectoredContinueHandlers(ExceptionRecord, ContextRecord);
                     return TRUE;
-                }
-
-                if (Disposition != ExceptionContinueSearch)
-                {
+                case ExceptionContinueSearch:
                     break;
-                }
+                case ExceptionNestedException:
+                    ExceptionRecord->ExceptionFlags |= EXCEPTION_NESTED_CALL;
+                    break;
+                case ExceptionCollidedUnwind:
+                    /* UnwindContext was already replaced with the collided
+                       dispatcher's context by RtlpUnwindHandler */
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER,
+                                     DispatcherContext.ImageBase,
+                                     DispatcherContext.ControlPc,
+                                     DispatcherContext.FunctionEntry,
+                                     &UnwindContext,
+                                     &HandlerData,
+                                     &Frame,
+                                     NULL);
+                    goto UnwindDone;
+                default:
+                    return FALSE;
             }
         }
+
+        if (UnwindContext.Sp >= StackHigh)
+            break;
     }
 
     RtlCallVectoredContinueHandlers(ExceptionRecord, ContextRecord);
