@@ -175,6 +175,15 @@ KiArm64SyncBugcheckLoop:
     .global KiArm64SyncVectorCommon
     .seh_proc KiArm64SyncVectorCommon
 KiArm64SyncVectorCommon:
+    /*
+     * MSFT_OP_TRAP_FRAME: a virtual unwind out of the C exception handler
+     * arrives here with Sp = the ARM64_EARLY_STATE save area.  The opcode
+     * (implemented in sdk/lib/rtl/arm64/unwind.c, layout kept in sync with
+     * the ARM64_EARLY_STATE_* equates above) reloads the full interrupted
+     * register state so two-phase SEH can cross the hardware-exception
+     * boundary, e.g. RtlUnwindEx targeting a __try frame below a fault.
+     */
+    .seh_trap_frame
     .seh_endprologue
 
     /*
