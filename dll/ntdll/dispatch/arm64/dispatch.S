@@ -1,4 +1,5 @@
 #include <asm.h>
+#include <ksarm64.h>
 
     .text
     .align 4
@@ -8,6 +9,24 @@
     .extern RtlExitUserThread
     .extern RtlRaiseStatus
     .extern ChpeRtlUserThreadStart
+    .extern KiUserExceptionDispatcherC
+
+    /*
+     * The kernel pushes a KUSER_EXCEPTION_STACK (CONTEXT at sp, followed by
+     * the EXCEPTION_RECORD) on the user stack and points Pc here. The
+     * .seh_context unwind opcode lets RtlUnwindEx unwind THROUGH this
+     * dispatcher back into the exception-time frames.
+     */
+    .global KiUserExceptionDispatcher
+    .seh_proc KiUserExceptionDispatcher
+KiUserExceptionDispatcher:
+    .seh_context
+    .seh_endprologue
+    add x0, sp, #CONTEXT_FRAME_LENGTH   /* ExceptionRecord */
+    mov x1, sp                          /* Context */
+    bl KiUserExceptionDispatcherC
+    brk #1
+    .seh_endproc
 
     .global LdrInitializeThunk
     .seh_proc LdrInitializeThunk
