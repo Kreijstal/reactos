@@ -1466,8 +1466,10 @@ MmCreateVirtualMappingUnsafeEx(
 
     ASSERT(((ULONG_PTR)Address & (PAGE_SIZE - 1)) == 0);
 
-    /* Reject PFN 0 - physical page 0 is reserved and should never be mapped */
-    if (Page == 0)
+    /* Reject PFN 0 for managed pages - it is the free-list sentinel and
+       must never be mapped. A physical mapping (\Device\PhysicalMemory
+       view) of physical page 0 is legitimate, though. */
+    if ((Page == 0) && !IsPhysical)
     {
         return STATUS_INVALID_PARAMETER;
     }
