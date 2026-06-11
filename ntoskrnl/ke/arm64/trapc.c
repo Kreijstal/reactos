@@ -918,7 +918,13 @@ KiArm64DeliverPendingUserApc(
     }
 
     Thread = KeGetCurrentThread();
-    if (!Thread->ApcState.UserApcPending)
+    /* Kernel APCs (e.g. the terminate APC) must also be flushed before
+     * returning to user mode: with HalRequestSoftwareInterrupt a no-op on
+     * ARM64 there is no later delivery point. KiDeliverApc(UserMode)
+     * processes the kernel queue first and the user queue only when
+     * UserApcPending is set. */
+    if (!Thread->ApcState.UserApcPending &&
+        !(Thread->ApcState.KernelApcPending && !Thread->SpecialApcDisable))
     {
         return;
     }
