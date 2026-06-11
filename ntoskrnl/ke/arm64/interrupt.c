@@ -688,7 +688,35 @@ KiArm64InterruptDispatchEntry(_In_ ULONG VectorId)
     KiArm64DispatchChain(IntId, OldIrql);
     KiArm64CurrentInterruptTrapFrame[Cpu] = NULL;
 
-    UNREFERENCED_PARAMETER(VectorId);
+    /*
+     * Deliver pending kernel APCs before returning to user mode. On x86/x64
+     * the APC software interrupt fires as IRQL drops during interrupt exit;
+     * our HalRequestSoftwareInterrupt is a no-op and KeLowerIrql skips
+     * delivery while DAIF.I is masked (which it is on this path). Without
+     * this, a thread that never re-enters the kernel through a syscall —
+     * e.g. one spinning in user mode — can never be terminated, because
+     * PsExitSpecialApc is a kernel-mode APC. User APCs are intentionally
+     * not delivered here; NT only releases those at alertable waits and
+     * syscall/exception exits.
+     */
+    if (VectorId >= 8)
+    {
+        PKTHREAD Thread = KeGetCurrentThread();
+
+        if ((Thread != NULL) &&
+            Thread->ApcState.KernelApcPending &&
+            !Thread->SpecialApcDisable &&
+            (KeGetCurrentIrql() < APC_LEVEL))
+        {
+            KIRQL ApcIrql;
+
+            KeRaiseIrql(APC_LEVEL, &ApcIrql);
+            _enable();
+            KiDeliverApc(KernelMode, NULL, NULL);
+            _disable();
+            KeLowerIrql(ApcIrql);
+        }
+    }
 }
 
 /*
