@@ -54,64 +54,51 @@ RtlpArm64FunctionLength(
 
 PRUNTIME_FUNCTION
 NTAPI
+RtlLookupFunctionTable(
+    _In_ DWORD64 ControlPc,
+    _Out_ PDWORD64 ImageBase,
+    _Out_ PULONG Length)
+{
+    PVOID Table;
+    ULONG Size;
+
+    /* Find the corresponding file header from the code address. This works
+       in both modes: user mode walks the PEB loader lists, kernel mode walks
+       PsLoadedModuleList (ntoskrnl/rtl/libsupp.c). */
+    if (!RtlPcToFileHeader((PVOID)(ULONG_PTR)ControlPc, (PVOID*)ImageBase))
+    {
+        *Length = 0;
+        return NULL;
+    }
+
+    /* Locate the exception directory */
+    Table = RtlImageDirectoryEntryToData((PVOID)(ULONG_PTR)*ImageBase,
+                                         TRUE,
+                                         IMAGE_DIRECTORY_ENTRY_EXCEPTION,
+                                         &Size);
+
+    *Length = Size / sizeof(RUNTIME_FUNCTION);
+    return Table;
+}
+
+PRUNTIME_FUNCTION
+NTAPI
 RtlLookupFunctionEntry(
     _In_ DWORD64 ControlPc,
     _Out_ PDWORD64 ImageBase,
     _Inout_opt_ PVOID HistoryTable)
 {
-    PIMAGE_DOS_HEADER DosHeader = NULL;
-    PIMAGE_NT_HEADERS NtHeaders;
-    PIMAGE_DATA_DIRECTORY ExceptionDir;
     PRUNTIME_FUNCTION FunctionTable, FunctionEntry;
     ULONG TableLength;
     ULONG_PTR ControlRva;
     ULONG IndexLow, IndexHigh, IndexMid;
-    ULONG_PTR Cookie = 0;
-    PLIST_ENTRY ListHead, Entry;
-    PLDR_DATA_TABLE_ENTRY LdrEntry;
 
     (VOID)HistoryTable;
 
-    if (!NT_SUCCESS(LdrLockLoaderLock(0, NULL, &Cookie)))
-    {
-        *ImageBase = 0;
-        return NULL;
-    }
-
-    ListHead = &NtCurrentPeb()->Ldr->InLoadOrderModuleList;
-    for (Entry = ListHead->Flink; Entry != ListHead; Entry = Entry->Flink)
-    {
-        LdrEntry = CONTAINING_RECORD(Entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-        if (ControlPc >= (ULONG_PTR)LdrEntry->DllBase &&
-            ControlPc < (ULONG_PTR)LdrEntry->DllBase + LdrEntry->SizeOfImage)
-        {
-            DosHeader = (PIMAGE_DOS_HEADER)LdrEntry->DllBase;
-            break;
-        }
-    }
-
-    LdrUnlockLoaderLock(0, Cookie);
-
-    if (DosHeader == NULL || DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
-    {
-        *ImageBase = 0;
-        return NULL;
-    }
-
-    *ImageBase = (DWORD64)(ULONG_PTR)DosHeader;
-    NtHeaders = (PIMAGE_NT_HEADERS)((ULONG_PTR)DosHeader + DosHeader->e_lfanew);
-    if (NtHeaders->Signature != IMAGE_NT_SIGNATURE)
-    {
-        *ImageBase = 0;
-        return NULL;
-    }
-
-    ExceptionDir = &NtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
-    if (ExceptionDir->VirtualAddress == 0 || ExceptionDir->Size == 0)
+    FunctionTable = RtlLookupFunctionTable(ControlPc, ImageBase, &TableLength);
+    if (FunctionTable == NULL)
         return NULL;
 
-    FunctionTable = (PRUNTIME_FUNCTION)((ULONG_PTR)DosHeader + ExceptionDir->VirtualAddress);
-    TableLength = ExceptionDir->Size / sizeof(RUNTIME_FUNCTION);
     ControlRva = (ULONG_PTR)(ControlPc - *ImageBase);
 
     IndexLow = 0;
@@ -989,19 +976,4 @@ RtlDeleteFunctionTable(
 {
     (VOID)FunctionTable;
     return FALSE;
-}
-
-PRUNTIME_FUNCTION
-NTAPI
-RtlLookupFunctionTable(
-    _In_ ULONG_PTR ControlPc,
-    _Out_ PULONG_PTR ImageBase,
-    _Out_ PULONG Length)
-{
-    (VOID)ControlPc;
-    if (ImageBase)
-        *ImageBase = 0;
-    if (Length)
-        *Length = 0;
-    return NULL;
 }
