@@ -148,8 +148,7 @@ RtlpArm64VirtualUnwindFrame(
 
     if (DispatcherContext->FunctionEntry == NULL)
     {
-        /* Leaf function: the return address is still in Lr. Handle this here
-           because the kernel's RtlVirtualUnwind does not accept NULL. */
+        /* Leaf function: the return address is still in Lr */
         if (Pc == Context->Lr)
         {
             /* Invalid leaf function, no way to continue */
