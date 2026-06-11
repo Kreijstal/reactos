@@ -49,6 +49,13 @@ KmtUserCallbackThread(
     {
         if (!DeviceIoControl(LocalKmtHandle, IOCTL_KMTEST_USERMODE_AWAIT_REQ, NULL, 0, &RequestPacket, sizeof(RequestPacket), &BytesReturned, NULL))
             error_goto(Error, cleanup);
+        if (BytesReturned == 0)
+        {
+            /* The driver-side wait timed out with no work posted (long-running
+             * test); STATUS_TIMEOUT is a success status, so DeviceIoControl
+             * succeeds with no payload. Re-arm the wait. */
+            continue;
+        }
         ASSERT(BytesReturned == sizeof(RequestPacket));
 
         switch (RequestPacket.OperationClass)
