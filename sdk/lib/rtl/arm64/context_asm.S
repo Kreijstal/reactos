@@ -55,15 +55,27 @@ RtlCaptureContext:
     str     w10, [x9, #CxCpsr]
 
     /*
-     * Clear FP/vector and debug state so callers do not see stale stack data
-     * in portions of CONTEXT that are not captured here.
+     * Capture the full SIMD register file. RtlUnwindEx restores the captured
+     * context at the unwind target, so the callee-saved d8-d15 (and the rest
+     * of the V file) must hold their live values, not zeros.
      */
     add     x10, x9, #CxV
-    mov     x11, #(CONTEXT_FRAME_LENGTH - CxV)
-1:
-    stp     xzr, xzr, [x10], #16
-    subs    x11, x11, #16
-    b.ne    1b
+    stp     q0,  q1,  [x10, #0x000]
+    stp     q2,  q3,  [x10, #0x020]
+    stp     q4,  q5,  [x10, #0x040]
+    stp     q6,  q7,  [x10, #0x060]
+    stp     q8,  q9,  [x10, #0x080]
+    stp     q10, q11, [x10, #0x0a0]
+    stp     q12, q13, [x10, #0x0c0]
+    stp     q14, q15, [x10, #0x0e0]
+    stp     q16, q17, [x10, #0x100]
+    stp     q18, q19, [x10, #0x120]
+    stp     q20, q21, [x10, #0x140]
+    stp     q22, q23, [x10, #0x160]
+    stp     q24, q25, [x10, #0x180]
+    stp     q26, q27, [x10, #0x1a0]
+    stp     q28, q29, [x10, #0x1c0]
+    stp     q30, q31, [x10, #0x1e0]
 
     mrs     x10, fpcr
     str     w10, [x9, #CxFpcr]
