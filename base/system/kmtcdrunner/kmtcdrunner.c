@@ -244,6 +244,26 @@ DrainPipeThread(_In_ LPVOID Parameter)
                 if (Scan[i] == ':' &&
                     memcmp(Scan + i, KMT_FAIL_MARKER, KMT_FAIL_MARKER_LEN) == 0)
                 {
+                    /* Mirror the whole failing line to the kernel debug log:
+                     * the COM2 serial mirror is best-effort and the failure
+                     * text is otherwise lost when COM2 cannot be opened. */
+                    CHAR Line[256];
+                    DWORD Start = i;
+                    DWORD End = i;
+                    DWORD Len;
+
+                    while (Start > 0 && Scan[Start - 1] != '\n')
+                        Start--;
+                    while (End < Total && Scan[End] != '\n' &&
+                           End - Start < sizeof(Line) - 16)
+                        End++;
+                    Len = End - Start;
+                    memcpy(Line, Scan + Start, Len);
+                    Line[Len] = 0;
+                    OutputDebugStringA("KMTCD-FAIL ");
+                    OutputDebugStringA(Line);
+                    OutputDebugStringA("\n");
+
                     InterlockedIncrement(&Ctx->Failures);
                 }
             }
