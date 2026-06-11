@@ -289,6 +289,17 @@ endif()
 # ARM64 has no PSEH backend; Clang provides real __try/__except, so use it.
 if(ARCH STREQUAL "arm64" AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     add_definitions(-D_USE_NATIVE_SEH=1)
+    # By default Clang only considers call instructions as potentially
+    # throwing, so a plain memory access inside __try gets no scope-table
+    # entry and a hardware fault there is never matched to its __except.
+    # Async-exception semantics (MSVC /EHa) put every faulting instruction
+    # in scope. The driver does not forward the flag for mingw targets, so
+    # pass it at the cc1 level. C only: combining it with C++ exceptions
+    # crashes the clang frontend (and C++ SEH users keep call coverage).
+    # Byte-compressed jump tables are sized before the async-EH expansion
+    # and their 8-bit offsets can overflow ("value evaluated as N is out of
+    # range" at assembly time), so keep jump table entries word-sized.
+    add_compile_options("$<$<COMPILE_LANGUAGE:C>:-Xclang;-fasync-exceptions;-mllvm;-aarch64-enable-compress-jump-tables=false>")
 endif()
 
 # Fix build with GLIBCXX + our c++ headers
