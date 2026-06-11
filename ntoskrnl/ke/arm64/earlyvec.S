@@ -92,6 +92,9 @@ KiArm64VectorSyncSp0:
     str xzr, [sp, #ARM64_EARLY_STATE_TRAP_PTR]
     str xzr, [sp, #ARM64_EARLY_STATE_EXC_PTR]
     mov x0, sp
+    /* Early vectors never perform GUI thread conversion (win32k callouts
+     * are not registered yet): pass GuiConvertAttempted = 1 */
+    mov w1, #1
     mov x19, sp
     bl KiArm64HandleSynchronousException
     cbz x0, .Lsync0_bugcheck
@@ -172,6 +175,9 @@ KiArm64VectorSyncSpx:
     str xzr, [sp, #ARM64_EARLY_STATE_TRAP_PTR]
     str xzr, [sp, #ARM64_EARLY_STATE_EXC_PTR]
     mov x0, sp
+    /* Early vectors never perform GUI thread conversion (win32k callouts
+     * are not registered yet): pass GuiConvertAttempted = 1 */
+    mov w1, #1
     mov x19, sp
     bl KiArm64HandleSynchronousException
     cbz x0, .Lsync4_bugcheck
@@ -253,6 +259,9 @@ KiArm64VectorSyncLowerA64:
     str xzr, [sp, #ARM64_EARLY_STATE_TRAP_PTR]
     str xzr, [sp, #ARM64_EARLY_STATE_EXC_PTR]
     mov x0, sp
+    /* Early vectors never perform GUI thread conversion (win32k callouts
+     * are not registered yet): pass GuiConvertAttempted = 1 */
+    mov w1, #1
     mov x19, sp
     bl KiArm64HandleSynchronousException
     cbz x0, .Lsync8_bugcheck
