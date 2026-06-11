@@ -20,7 +20,13 @@ typedef NTSTATUS (NTAPI *USER_CALL)(PVOID Argument, ULONG ArgumentLength);
 
 /*
  * @implemented
+ *
+ * On ARM64 the entry point is an assembly thunk (dispatch/arm64/dispatch.S)
+ * carrying .seh_context unwind data, which calls this C worker.
  */
+#ifdef _M_ARM64
+#define KiUserExceptionDispatcher KiUserExceptionDispatcherC
+#endif
 VOID
 NTAPI
 KiUserExceptionDispatcher(PEXCEPTION_RECORD ExceptionRecord,
@@ -50,6 +56,9 @@ KiUserExceptionDispatcher(PEXCEPTION_RECORD ExceptionRecord,
     /* Raise the exception */
     RtlRaiseException(&NestedExceptionRecord);
 }
+#ifdef _M_ARM64
+#undef KiUserExceptionDispatcher
+#endif
 
 /*
  * @implemented
