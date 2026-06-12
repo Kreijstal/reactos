@@ -272,8 +272,16 @@ MACRO(STUBCODE_U, Name, SyscallId, ArgCount)
     StackBytes = 4 * ArgCount
     FPO 0, 0, 0, 0, 0, FRAME_FPO
     mov eax, SyscallId
+#ifdef BUILD_WOW6432
+    /* WoW64 guest: dispatch through the heaven's-gate thunk in TEB32->WOW32Reserved
+       (fs:[0xC0]); the 64-bit host transitions to long mode and services the call.
+       SharedUserData->SystemCall is never populated for a WoW64 process. */
+    lea edx, [esp + 4]
+    call dword ptr fs:[HEX(0c0)]
+#else
     mov edx, KUSER_SHARED_SYSCALL
     call dword ptr [edx]
+#endif
     ret StackBytes
 ENDM
 #ifdef _USE_ML
