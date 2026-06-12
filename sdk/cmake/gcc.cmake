@@ -190,7 +190,9 @@ endif()
 add_compile_options(-march=${OARCH} -mtune=${TUNE})
 
 # Warnings, errors
-if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" AND
+option(ENABLE_WERROR "Treat compilation warnings as errors" ON)
+if(ENABLE_WERROR AND
+   NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" AND
    NOT ARCH STREQUAL "amd64" AND
    NOT CMAKE_BUILD_TYPE STREQUAL "Release" AND
    NOT CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" AND
