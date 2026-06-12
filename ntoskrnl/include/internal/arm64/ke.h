@@ -410,6 +410,11 @@ KeReenableTimerInterrupt(
 
 VOID
 NTAPI
+ExArchPostHalInitSystemPhase1(
+    VOID);
+
+VOID
+NTAPI
 KeStartArm64ProcessorTimer(
     VOID);
 
