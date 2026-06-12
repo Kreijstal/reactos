@@ -3490,23 +3490,14 @@ NtMapViewOfSection(
     if (ZeroBits)
     {
 #if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
+        /* A ZeroBits value of -1 requests no high-bit constraint. Otherwise let
+         * the generic MI_MAX_ZERO_BITS (53 on amd64) and shift validation below
+         * accept it - a 32-bit (WoW64) view legitimately passes ZeroBits == 32 to
+         * keep the mapping within the low 4 GB, which the previous early-out
+         * rejected outright. */
         if (ZeroBits == (ULONG_PTR)-1)
         {
             ZeroBits = 0;
-        }
-        else if (ZeroBits < 20)
-        {
-            DPRINT1("Invalid zero bits\n");
-            return STATUS_INVALID_PARAMETER_4;
-        }
-        else if (ZeroBits <= 21)
-        {
-            return STATUS_NO_MEMORY;
-        }
-        else
-        {
-            DPRINT1("Invalid zero bits\n");
-            return STATUS_INVALID_PARAMETER_4;
         }
 #endif
 
