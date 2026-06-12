@@ -71,6 +71,14 @@ extern KIRQL KeArm64CurrentIrql;
  */
 BOOLEAN KiHalInitialized = FALSE;
 
+/*
+ * Interrupt mask state captured when IRQL crosses up into HIGH_LEVEL on the
+ * pre-HAL DAIF-only path, restored when it crosses back down. Pre-HAL boot is
+ * single-processor and HIGH_LEVEL masks all interrupts, so a single slot
+ * cannot be raced.
+ */
+static BOOLEAN KiEarlyHighLevelIrqsWereEnabled = FALSE;
+
 #undef KeLowerIrql
 #undef KeRaiseIrql
 #undef KeGetCurrentIrql
@@ -309,19 +317,43 @@ KiApplyIrqMaskForIrqlTransition(
         /* Fallback to binary DAIF masking before HAL is initialized */
         if (NewIrql >= HIGH_LEVEL)
         {
+            /*
+             * Capture the interrupt mask state at the raise so the matching
+             * drop below HIGH_LEVEL can restore it. Before the executive's
+             * post-HAL-phase-0 _enable() this records "masked" and lowering
+             * keeps interrupts off; after it, a HIGH_LEVEL round trip (e.g.
+             * the KD port lock around every debug print) must hand back the
+             * enabled state it found, or the CPU stays masked forever.
+             */
+            if (OldIrql < HIGH_LEVEL)
+            {
+                ULONG64 Daif;
+                __asm__ __volatile__("mrs %0, daif" : "=r"(Daif));
+                KiEarlyHighLevelIrqsWereEnabled = !(Daif & (1ULL << 7));
+            }
             ARM64_MASK_ALL();
             ARM64_SYNC_BARRIER();
             KiTraceSerrorPolicy("early-high", OldIrql, NewIrql);
         }
         else if (OldIrql >= HIGH_LEVEL && NewIrql < HIGH_LEVEL)
         {
-            /*
-             * Before HAL phase 0, lowering IRQL is only a logical transition.
-             * Keep IRQ/FIQ masked until ExpInitializeExecutive has completed
-             * HalInitSystem(0), re-enabled the timer PPI, and called _enable().
-             */
-            KiUpdateSerrorMaskOnlyForIrql(NewIrql);
-            KiTraceSerrorPolicy("early-drop-masked", OldIrql, NewIrql);
+            /* Restore the interrupt mask state captured at the raise */
+            if (KiEarlyHighLevelIrqsWereEnabled)
+            {
+                ARM64_UNMASK_ALL_NO_SERROR();
+                ARM64_SYNC_BARRIER();
+                KiTraceSerrorPolicy("early-drop-unmask", OldIrql, NewIrql);
+            }
+            else
+            {
+                /*
+                 * Interrupts were masked when HIGH_LEVEL was entered. Keep
+                 * IRQ/FIQ masked; the executive enables them explicitly
+                 * after HAL phase 0 has configured the GIC.
+                 */
+                KiUpdateSerrorMaskOnlyForIrql(NewIrql);
+                KiTraceSerrorPolicy("early-drop-masked", OldIrql, NewIrql);
+            }
         }
         else if (NewIrql != OldIrql)
         {
