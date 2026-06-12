@@ -224,7 +224,12 @@ KiSwapContextResume(
        ENewProcess = (PEPROCESS) NewProcess; 
        if (ENewProcess->Wow64Process != NULL) 
        {
-          ULONG_PTR base = ROUND_TO_PAGES((ULONG_PTR)(NewThread->Teb + 1));
+          /* The 32-bit CMTEB lives on the page immediately after the 64-bit
+           * TEB, matching where wow64.dll places it (ROUND_TO_PAGES(Teb + 1)
+           * with a typed PTEB).  KTHREAD.Teb is PVOID, so add sizeof(TEB)
+           * explicitly -- a bare "+ 1" would advance a single byte and leave
+           * the GDT base a page short of the real TEB32. */
+          ULONG_PTR base = ROUND_TO_PAGES((ULONG_PTR)NewThread->Teb + sizeof(TEB));
           
           PKGDTENTRY64 CmTebEntry = KiGetGdtEntry(Pcr->GdtBase, KGDT64_R3_CMTEB);
           CmTebEntry->LimitLow = 0xFFFF;
@@ -243,6 +248,15 @@ KiSwapContextResume(
     /* DPCs shouldn't be active */
     if (Pcr->Prcb.DpcRoutineActive)
     {
+        extern PVOID KiLastDpcDeferredRoutine;
+        extern PVOID KiLastDpcDeferredContext;
+        extern PVOID KiLastDpcSysArg1;
+        extern PVOID KiLastDpcSysArg2;
+        DPRINT1("ATTEMPTED_SWITCH_FROM_DPC: last DPC routine=%p ctx=%p sa1=%p sa2=%p "
+                "OldThread=%p NewThread=%p\n",
+                KiLastDpcDeferredRoutine, KiLastDpcDeferredContext,
+                KiLastDpcSysArg1, KiLastDpcSysArg2,
+                OldThread, NewThread);
         /* Crash the machine */
         KeBugCheckEx(ATTEMPTED_SWITCH_FROM_DPC,
                      (ULONG_PTR)OldThread,
