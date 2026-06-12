@@ -71,7 +71,7 @@ static char *alloc_buffer(size_t size)
 static void free_buffers(void)
 {
     int slot = find_thread_slot();
-    if (slot != -1)
+    if (slot == -1)
     {
         return;
     }
@@ -99,7 +99,7 @@ const char *wine_dbg_vsprintf(const char *format, va_list valist)
     {
         return "<allocation failed>";
     }
-    len = vsnprintf(buffer, len, format, valist);
+    len = vsnprintf(buffer, len + 1, format, valist);
     buffer[len] = 0;
     return buffer;
 }
