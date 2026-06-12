@@ -437,6 +437,30 @@ Arm64AddEarlyDeviceRange(
     LoaderBlock->u.Arm64.EarlyDeviceRanges[Count].BaseAddress = BaseAddress;
     LoaderBlock->u.Arm64.EarlyDeviceRanges[Count].Length = Length;
     LoaderBlock->u.Arm64.EarlyDeviceRangeCount = Count + 1;
+
+    /*
+     * The HAL reaches these registers through the private physical-memory
+     * alias window from its very first GIC access in phase 0, before Mm has
+     * built any mappings of its own, so the alias must already exist in the
+     * loader page tables when the kernel is entered.
+     */
+    {
+        ULONGLONG MapBase = BaseAddress & ~((ULONGLONG)PAGE_SIZE - 1);
+        ULONGLONG MapEnd = (BaseAddress + Length + PAGE_SIZE - 1) &
+                           ~((ULONGLONG)PAGE_SIZE - 1);
+
+        if (!Arm64MapVirtualMemory(ARM64_PHYS_MAP_BASE | MapBase,
+                                   MapBase,
+                                   MapEnd - MapBase,
+                                   ARM64_MAP_ATTR_DEVICE |
+                                   ARM64_MAP_ATTR_UXN |
+                                   ARM64_MAP_ATTR_PXN))
+        {
+            ERR("ARM64: Failed to map device alias (PA=0x%llx len=0x%llx)\n",
+                (unsigned long long)MapBase,
+                (unsigned long long)(MapEnd - MapBase));
+        }
+    }
 }
 
 static
