@@ -1948,6 +1948,17 @@ MiReloadBootLoadedDrivers(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
             /* Write it */
             MI_WRITE_VALID_PTE(PointerPte, TempPte);
 
+            /*
+             * Transfer the PFN linkage from the loader mapping to the new
+             * PTE and account for it in the new page table, so a later
+             * MiDeleteSystemPageableVm of the relocated image releases the
+             * page table that actually maps it, not the loader's.
+             */
+            Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(&OldPte));
+            Pfn1->PteAddress = PointerPte;
+            Pfn1->u4.PteFrame = PFN_FROM_PTE(MiAddressToPte(PointerPte));
+            MiGetPfnEntry(Pfn1->u4.PteFrame)->u2.ShareCount++;
+
             /* Move on */
             PointerPte++;
             StartPte++;
@@ -1995,8 +2006,6 @@ MiReloadBootLoadedDrivers(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         LdrEntry->EntryPoint = (PVOID)((ULONG_PTR)NewImageAddress +
                                 NtHeader->OptionalHeader.AddressOfEntryPoint);
         LdrEntry->SizeOfImage = PteCount << PAGE_SHIFT;
-
-        /* FIXME: We'll need to fixup the PFN linkage when switching to ARM3 */
     }
 }
 
