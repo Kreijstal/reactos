@@ -239,141 +239,9 @@ RtlInterlockedPushListSListEx(
 }
 #endif
 
-#if !defined(_M_IX86) && !defined(_M_AMD64)
+#if !defined(_M_IX86) && !defined(_M_AMD64) && !defined(_M_ARM64)
 
 _WARN("C based S-List functions can bugcheck, if not handled properly in kernel")
-
-#if defined(_M_ARM64)
-
-PSLIST_ENTRY
-NTAPI
-RtlInterlockedPushEntrySList(
-    _Inout_ PSLIST_HEADER SListHead,
-    _Inout_ __drv_aliasesMem PSLIST_ENTRY SListEntry)
-{
-    SLIST_HEADER OldHeader, NewHeader;
-    PSLIST_ENTRY FirstEntry;
-    BOOLEAN exchanged;
-
-    ASSERT(SListHead != NULL);
-    ASSERT(SListEntry != NULL);
-    ASSERT(((ULONG_PTR)SListHead & 0xF) == 0);
-    ASSERT(((ULONG_PTR)SListEntry & 0xF) == 0);
-
-    if (RtlpUse16ByteSLists == (BOOLEAN)-1)
-    {
-        RtlpUse16ByteSLists = TRUE;
-    }
-
-    do
-    {
-        OldHeader = *SListHead;
-        FirstEntry = RTL_SLIST_DECODE_NEXT16(OldHeader);
-        SListEntry->Next = FirstEntry;
-
-        NewHeader = OldHeader;
-        NewHeader.Header16.Depth++;
-        NewHeader.Header16.Sequence++;
-        NewHeader.Header16.NextEntry = RTL_SLIST_ENCODE_NEXT16(SListEntry);
-        NewHeader.Header16.HeaderType = 1;
-        NewHeader.Header16.Init = 1;
-
-        exchanged = _InterlockedCompareExchange128((PLONG64)SListHead,
-                                                   NewHeader.Region,
-                                                   NewHeader.Alignment,
-                                                   (PLONG64)&OldHeader);
-    } while (!exchanged);
-
-    return FirstEntry;
-}
-
-PSLIST_ENTRY
-NTAPI
-RtlInterlockedPopEntrySList(
-    _Inout_ PSLIST_HEADER SListHead)
-{
-    SLIST_HEADER OldHeader, NewHeader;
-    PSLIST_ENTRY FirstEntry, NextEntry;
-    BOOLEAN exchanged;
-
-    ASSERT(SListHead != NULL);
-    ASSERT(((ULONG_PTR)SListHead & 0xF) == 0);
-
-    if (RtlpUse16ByteSLists == (BOOLEAN)-1)
-    {
-        RtlpUse16ByteSLists = TRUE;
-    }
-
-    do
-    {
-        OldHeader = *SListHead;
-        FirstEntry = RTL_SLIST_DECODE_NEXT16(OldHeader);
-        if (FirstEntry == NULL)
-        {
-            return NULL;
-        }
-
-        NextEntry = FirstEntry->Next;
-
-        NewHeader = OldHeader;
-        NewHeader.Header16.Depth--;
-        NewHeader.Header16.Sequence++;
-        NewHeader.Header16.NextEntry = RTL_SLIST_ENCODE_NEXT16(NextEntry);
-        NewHeader.Header16.HeaderType = 1;
-        NewHeader.Header16.Init = 1;
-
-        exchanged = _InterlockedCompareExchange128((PLONG64)SListHead,
-                                                   NewHeader.Region,
-                                                   NewHeader.Alignment,
-                                                   (PLONG64)&OldHeader);
-    } while (!exchanged);
-
-    return FirstEntry;
-}
-
-PSLIST_ENTRY
-NTAPI
-RtlInterlockedFlushSList(
-    _Inout_ PSLIST_HEADER SListHead)
-{
-    SLIST_HEADER OldHeader, NewHeader;
-    PSLIST_ENTRY FirstEntry;
-    BOOLEAN exchanged;
-
-    ASSERT(SListHead != NULL);
-    ASSERT(((ULONG_PTR)SListHead & 0xF) == 0);
-
-    if (RtlpUse16ByteSLists == (BOOLEAN)-1)
-    {
-        RtlpUse16ByteSLists = TRUE;
-    }
-
-    do
-    {
-        OldHeader = *SListHead;
-        FirstEntry = RTL_SLIST_DECODE_NEXT16(OldHeader);
-        if (FirstEntry == NULL)
-        {
-            return NULL;
-        }
-
-        NewHeader = OldHeader;
-        NewHeader.Header16.Depth = 0;
-        NewHeader.Header16.Sequence++;
-        NewHeader.Header16.NextEntry = 0;
-        NewHeader.Header16.HeaderType = 1;
-        NewHeader.Header16.Init = 1;
-
-        exchanged = _InterlockedCompareExchange128((PLONG64)SListHead,
-                                                   NewHeader.Region,
-                                                   NewHeader.Alignment,
-                                                   (PLONG64)&OldHeader);
-    } while (!exchanged);
-
-    return FirstEntry;
-}
-
-#else /* !_M_ARM64 */
 
 #ifdef _WIN64
 #error "No generic S-List functions for WIN64!"
@@ -515,18 +383,11 @@ RtlInterlockedFlushSList(
 
 }
 
-#endif /* _M_ARM64 */
-
 #ifdef _MSC_VER
 #pragma comment(linker, "/alternatename:ExpInterlockedPopEntrySList=RtlInterlockedPopEntrySList")
 #pragma comment(linker, "/alternatename:ExpInterlockedPushEntrySList=RtlInterlockedPushEntrySList")
 #pragma comment(linker, "/alternatename:ExpInterlockedFlushSList=RtlInterlockedFlushSList")
-#elif !defined(_M_ARM64)
-/*
- * ARM64: Don't use #pragma redefine_extname - it behaves differently between
- * GCC (renames symbol entirely) and clang (doesn't work on COFF targets).
- * Instead, the kernel provides explicit ExpInterlocked*SList wrappers.
- */
+#else
 #pragma redefine_extname RtlInterlockedPopEntrySList ExpInterlockedPopEntrySList
 #pragma redefine_extname RtlInterlockedPushEntrySList ExpInterlockedPushEntrySList
 #pragma redefine_extname RtlInterlockedFlushSList ExpInterlockedFlushSList

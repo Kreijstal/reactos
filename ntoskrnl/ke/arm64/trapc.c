@@ -28,6 +28,13 @@
 
 /* Forward declaration for SError handler */
 BOOLEAN NTAPI KiSErrorHandler(_In_ PKTRAP_FRAME TrapFrame);
+
+/* User-mode SLIST pop fault rollback labels (ntdll exports, set by psmgr) */
+extern PVOID KeUserPopEntrySListFault;
+extern PVOID KeUserPopEntrySListResume;
+/* Kernel-mode equivalents: labels inside the kernel's own RTL S-List pop */
+VOID ExpInterlockedPopEntrySListFault(VOID);
+VOID ExpInterlockedPopEntrySListResume(VOID);
 extern PVOID KiArm64PanicStack;
 DECLSPEC_NORETURN
 VOID
@@ -1797,6 +1804,39 @@ KiArm64HandleSynchronousException(
                 Context->ExceptionFramePointer = &Context->ExceptionFrame;
                 KiArm64ClearTrapActive();
                 return TRUE;
+            }
+
+            /*
+             * S-List pop rollback: RtlInterlockedPopEntrySList dereferences
+             * the snapshotted first entry without protection. If another
+             * thread popped and freed that entry in the window, the load
+             * faults; restart the operation at the resume label instead of
+             * raising an exception.
+             */
+            {
+                PVOID FaultPc = (PVOID)(ULONG_PTR)Context->State.Elr;
+                PVOID FaultLabel, ResumeLabel;
+
+                if (PreviousMode == UserMode)
+                {
+                    FaultLabel = KeUserPopEntrySListFault;
+                    ResumeLabel = KeUserPopEntrySListResume;
+                }
+                else
+                {
+                    FaultLabel = (PVOID)&ExpInterlockedPopEntrySListFault;
+                    ResumeLabel = (PVOID)&ExpInterlockedPopEntrySListResume;
+                }
+
+                if ((FaultLabel != NULL) && (FaultPc == FaultLabel))
+                {
+                    TrapFrame->Pc = (ULONG64)(ULONG_PTR)ResumeLabel;
+                    Context->State.Elr = TrapFrame->Pc;
+                    Context->TrapFramePointer = TrapFrame;
+                    Context->ExceptionFramePointer = &Context->ExceptionFrame;
+                    KiArm64ClearTrapActive();
+                    return TRUE;
+                }
             }
 
             /* Not resolved by Mm - unhandled data abort. */
