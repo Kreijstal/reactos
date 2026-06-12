@@ -300,18 +300,68 @@ AcpiOsPhysicalTableOverride(
     return AE_OK;
 }
 
+static
+BOOLEAN
+OslIsRamRange(
+    ULONG64 Start,
+    ULONG64 Length)
+{
+    static ULONG64 RamBase = 0, RamEnd = 0;
+    ULONG64 End = Start + Length;
+
+    if (RamEnd == 0)
+    {
+        PPHYSICAL_MEMORY_RANGE Ranges, Range;
+
+        Ranges = MmGetPhysicalMemoryRanges();
+        if (!Ranges)
+            return FALSE;
+
+        RamBase = ~0ULL;
+        for (Range = Ranges; Range->NumberOfBytes.QuadPart != 0; Range++)
+        {
+            ULONG64 RangeStart = (ULONG64)Range->BaseAddress.QuadPart;
+            ULONG64 RangeEnd = RangeStart + (ULONG64)Range->NumberOfBytes.QuadPart;
+
+            if (RangeStart < RamBase) RamBase = RangeStart;
+            if (RangeEnd > RamEnd) RamEnd = RangeEnd;
+        }
+        ExFreePool(Ranges);
+
+        if (RamEnd == 0)
+            return FALSE;
+    }
+
+    /*
+     * Treat the whole RAM envelope as RAM-backed: the ACPI tables live in
+     * firmware reclaim/NVS regions that the memory manager excludes from
+     * its physical memory ranges, yet they are ordinary RAM. MMIO sits
+     * outside the RAM envelope on the supported platforms.
+     */
+    return (Start >= RamBase) && (End <= RamEnd);
+}
+
 void *
 AcpiOsMapMemory (
     ACPI_PHYSICAL_ADDRESS   phys,
     ACPI_SIZE               length)
 {
     PHYSICAL_ADDRESS Address;
+    MEMORY_CACHING_TYPE CacheType;
     PVOID Ptr;
 
     DPRINT("AcpiOsMapMemory(phys 0x%p  size 0x%X)\n", phys, length);
 
+    /*
+     * ACPI tables live in RAM and ACPICA accesses them with arbitrary
+     * (unaligned, byte-granular) loads and stores. Map RAM-backed ranges
+     * cached: on ARM64 a non-cached mapping has Device memory semantics,
+     * where unaligned accesses take alignment faults. Only real MMIO
+     * (operation regions on device memory) gets a non-cached mapping.
+     */
     Address.QuadPart = (ULONGLONG)phys;
-    Ptr = MmMapIoSpace(Address, length, MmNonCached);
+    CacheType = OslIsRamRange((ULONG64)phys, length) ? MmCached : MmNonCached;
+    Ptr = MmMapIoSpace(Address, length, CacheType);
     if (!Ptr)
     {
         DPRINT1("Mapping failed\n");
