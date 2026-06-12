@@ -13,7 +13,7 @@
 @ stdcall -version=0x602+ SetCoalescableTimer(long long long ptr long)
 @ stdcall -version=0x602+ SystemParametersInfoForDpi(long long ptr long long)
 @ stdcall -version=0x602+ GetPointerDeviceRects(long ptr ptr)
-@ stdcall -version=0x602+ GetPointerFrameTouchInfo(long ptr ptr ptr)
+@ stdcall -version=0x602+ GetPointerFrameTouchInfo(long ptr ptr)
 @ stdcall -version=0x602+ GetPointerFrameTouchInfoHistory(long ptr ptr ptr)
 @ stdcall -version=0x602+ GetPointerPenInfo(long ptr)
 @ stdcall -version=0x602+ GetPointerPenInfoHistory(long ptr ptr)
