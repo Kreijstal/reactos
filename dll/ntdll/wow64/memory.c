@@ -9,11 +9,13 @@
 #include "ntdll32.h"
 
 /*
- * These access a 64-bit address space from a 32-bit WoW64 process and require
- * the cross-bitness syscall path to be in place. They are exported so the
- * 32-bit ntdll links and loads; returning STATUS_NOT_IMPLEMENTED until the
- * heaven's-gate thunk wires them through to the native NtReadVirtualMemory.
+ * On a real WoW64 guest (BUILD_WOW6432) these are emitted as heaven's-gate
+ * syscall stubs by ntoskrnl/ntdll.S so the 64-bit host services them against a
+ * full 64-bit address space.  On a plain 32-bit build there is no 64-bit space
+ * to reach, so they stay STATUS_NOT_IMPLEMENTED placeholders to keep ntdll
+ * linking and exporting the symbols.
  */
+#ifndef BUILD_WOW6432
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -37,3 +39,4 @@ NtWow64WriteVirtualMemory64(HANDLE ProcessHandle,
 {
     return STATUS_NOT_IMPLEMENTED;
 }
+#endif /* !BUILD_WOW6432 */
