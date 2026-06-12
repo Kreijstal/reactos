@@ -1411,6 +1411,16 @@ Phase1InitializationDiscard(IN PVOID Context)
     /* Do Phase 1 HAL Initialization */
     if (!HalInitSystem(1, LoaderBlock)) KeBugCheck(HAL1_INITIALIZATION_FAILED);
 
+#if defined(_M_ARM64)
+    /*
+     * The GIC is fully configured now, so switch IRQL transitions from the
+     * early boot DAIF-only masking to the HAL's GIC priority mask path.
+     * Without this, raising to a device IRQL never masks that device's
+     * interrupt and ISRs preempt their own interrupt spinlock holders.
+     */
+    ExArchPostHalInitSystemPhase1();
+#endif
+
     /* Get the command line and upcase it */
     CommandLine = (LoaderBlock->LoadOptions ? _strupr(LoaderBlock->LoadOptions) : NULL);
 
