@@ -1557,17 +1557,81 @@ typedef struct _MOVEFILE_DESCRIPTOR {
      ULONG          Reserved1;
 } MOVEFILE_DESCRIPTOR, *PMOVEFILE_DESCRIPTOR;
 
+typedef struct _OBJECT_BASIC_INFO {
+    ULONG           Attributes;
+    ACCESS_MASK     GrantedAccess;
+    ULONG           HandleCount;
+    ULONG           ReferenceCount;
+    ULONG           PagedPoolUsage;
+    ULONG           NonPagedPoolUsage;
+    ULONG           Reserved[3];
+    ULONG           NameInformationLength;
+    ULONG           TypeInformationLength;
+    ULONG           SecurityDescriptorLength;
+    LARGE_INTEGER   CreateTime;
+} OBJECT_BASIC_INFO, *POBJECT_BASIC_INFO;
+
+typedef struct _OBJECT_HANDLE_ATTRIBUTE_INFO {
+    BOOLEAN Inherit;
+    BOOLEAN ProtectFromClose;
+} OBJECT_HANDLE_ATTRIBUTE_INFO, *POBJECT_HANDLE_ATTRIBUTE_INFO;
+
+typedef struct _OBJECT_NAME_INFO {
+    UNICODE_STRING  ObjectName;
+    WCHAR           ObjectNameBuffer[1];
+} OBJECT_NAME_INFO, *POBJECT_NAME_INFO;
+
+typedef struct _OBJECT_PROTECTION_INFO {
+    BOOLEAN Inherit;
+    BOOLEAN ProtectHandle;
+} OBJECT_PROTECTION_INFO, *POBJECT_PROTECTION_INFO;
+
+typedef struct _OBJECT_TYPE_INFO {
+    UNICODE_STRING  ObjectTypeName;
+    UCHAR           Unknown[0x58];
+    WCHAR           ObjectTypeNameBuffer[1];
+} OBJECT_TYPE_INFO, *POBJECT_TYPE_INFO;
+
+typedef struct _OBJECT_ALL_TYPES_INFO {
+    ULONG               NumberOfObjectTypes;
+    OBJECT_TYPE_INFO    ObjectsTypeInfo[1];
+} OBJECT_ALL_TYPES_INFO, *POBJECT_ALL_TYPES_INFO;
+
+/* LPC_ULONG_PTR is the shared sentinel with lpctypes.h and csrmsg.h: whichever
+ * header is included first supplies the full portable LPC macro set and the
+ * others defer to it. The set must be defined completely here so that a header
+ * deferring to ntifs.h (e.g. csrmsg.h, which uses LPC_PTR and friends) still
+ * finds every macro, and so the LPC_CLIENT_ID macro does not clash with their
+ * typedef form in a WoW64 build. */
+#ifndef LPC_ULONG_PTR
 #if defined(USE_LPC6432)
-#define LPC_CLIENT_ID CLIENT_ID64
 #define LPC_SIZE_T ULONGLONG
 #define LPC_PVOID ULONGLONG
 #define LPC_HANDLE ULONGLONG
+#define LPC_ULONG_PTR ULONGLONG
+typedef struct
+{
+    LPC_HANDLE UniqueProcess;
+    LPC_HANDLE UniqueThread;
+} LPC_CLIENT_ID;
+#define LPC_UNICODE_STRING UNICODE_STRING64
+#define LPC_PTR(x) LPC_PVOID
+#define LPC_PTRTYPE(x) LPC_PVOID
+#define TO_LPC_HANDLE(h) ((LPC_HANDLE)(h))
+#define FROM_LPC_HANDLE(h) ((HANDLE)(h))
 #else
 #define LPC_CLIENT_ID CLIENT_ID
 #define LPC_SIZE_T SIZE_T
 #define LPC_PVOID PVOID
 #define LPC_HANDLE HANDLE
+#define LPC_ULONG_PTR ULONG_PTR
+#define LPC_UNICODE_STRING UNICODE_STRING
+#define LPC_PTR(x) x*
+#define LPC_PTRTYPE(x) x
+#define TO_LPC_HANDLE(h) h
+#define FROM_LPC_HANDLE(h) h
 #endif
+#endif /* LPC_ULONG_PTR */
 
 typedef struct _PORT_MESSAGE
 {
