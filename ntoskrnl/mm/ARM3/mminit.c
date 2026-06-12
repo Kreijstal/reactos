@@ -1139,6 +1139,14 @@ MiInitializePfnDatabase(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
      * done there by the level-checked walkers (MiArm64RegisterFreeLdrPageTables
      * and MiArm64InitLoaderMappedPfnEntries in mm/ARM3/arm64/init.c). */
     MiBuildPfnDatabaseFromPages(LoaderBlock);
+#else
+    /* Level-checked walk over the boot-loaded module mappings. This gives
+     * every page table PFN ShareCount = 1 + (valid leaf PTEs), the invariant
+     * MiDeleteSystemPageableVm relies on when it discards INIT sections:
+     * each PTE delete decrements the page table once, and the table must not
+     * reach ShareCount 0 while it still maps live pages. The FreeLdr table
+     * registration alone leaves leaf counts at the baseline of 1. */
+    MiArm64BuildPfnDatabaseFromPages(LoaderBlock);
 #endif
 
     /* Add the zero page */
