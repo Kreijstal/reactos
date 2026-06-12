@@ -132,6 +132,7 @@ elseif(ARCH STREQUAL "arm64")
     list(APPEND ASM_SOURCE
         arm64/context_asm.S
         arm64/debug_asm.S
+        arm64/slist.S
         arm64/unwind_asm.S)
     list(APPEND SOURCE
         arm64/except.c
