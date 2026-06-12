@@ -9,8 +9,13 @@
 #include "ntdll32.h"
 
 /*
+ * These access a 64-bit address space from a 32-bit WoW64 process and require
+ * the cross-bitness syscall path to be in place. They are exported so the
+ * 32-bit ntdll links and loads; returning STATUS_NOT_IMPLEMENTED until the
+ * heaven's-gate thunk wires them through to the native NtReadVirtualMemory.
+ */
 NTSYSAPI
-NTSTATUS 
+NTSTATUS
 NTAPI
 NtWow64ReadVirtualMemory64(HANDLE ProcessHandle,
                            UINT64 BaseAddress,
@@ -22,7 +27,7 @@ NtWow64ReadVirtualMemory64(HANDLE ProcessHandle,
 }
 
 NTSYSAPI
-NTSTATUS 
+NTSTATUS
 NTAPI
 NtWow64WriteVirtualMemory64(HANDLE ProcessHandle,
                             UINT64 BaseAddress,
@@ -32,4 +37,3 @@ NtWow64WriteVirtualMemory64(HANDLE ProcessHandle,
 {
     return STATUS_NOT_IMPLEMENTED;
 }
-*/
