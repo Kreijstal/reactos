@@ -44,6 +44,7 @@ PVOID NtDll32KiUserExceptionDispatcher = NULL;
 
 void SetupFs(ULONG_PTR segSelector);
 void EnterApc32(PVOID pEnterCtx, SIZE_T cbCtxSize);
+void KiWow64SystemCall32(void);
 __declspec(dllexport) void WINAPI Wow64LdrpInitialize(PCONTEXT pContext);
 
 /* FIXME: this is an incomplete implementation */
@@ -1354,9 +1355,11 @@ Wow64InitThread(PCONTEXT pContext)
     NtCurrentTeb()->TlsSlots[WOW64_TLS_USERCALLBACKDATA] = NULL;
     NtCurrentTeb()->TlsSlots[WOW64_TLS_FILESYSREDIR] = (PVOID)TRUE;
 
-    /* Make sure the handler routine pointer fits into the 32-bit TEB */
-    ASSERT((((ULONG_PTR)Wow64SystemServiceEx) & ~0xFFFFFFFF) == 0);
-    WowTeb->WOW32Reserved = PtrToUlong(Wow64SystemServiceEx);
+    /* Point the 32-bit syscall dispatch (fs:[0xC0]) at the heaven's-gate thunk.
+       The guest ntdll stub does `call dword ptr fs:[0xC0]` in compat mode, so this
+       must be a 32-bit-callable address below 4 GB - not the 64-bit dispatcher. */
+    ASSERT((((ULONG_PTR)KiWow64SystemCall32) & ~0xFFFFFFFF) == 0);
+    WowTeb->WOW32Reserved = PtrToUlong(KiWow64SystemCall32);
 
     WowTeb->ClientId.UniqueProcess = HandleToULong(Teb->ClientId.UniqueProcess);
     WowTeb->ClientId.UniqueThread = HandleToULong(Teb->ClientId.UniqueThread);
