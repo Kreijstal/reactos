@@ -4630,22 +4630,6 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         return STATUS_INVALID_PARAMETER_4;
     }
 
-#ifdef _M_AMD64
-    /*
-     * On x64 Windows treats blind allocations with high ZeroBits values
-     * differently from i386: 21 exhausts the constrained low range, while
-     * values above it are invalid parameter 3.  Smaller values are accepted
-     * and the VAD inserter will cap the search at the user VAD limit.
-     */
-    if (!PBaseAddress)
-    {
-        if (ZeroBits == 21)
-            return STATUS_NO_MEMORY;
-        if (ZeroBits > 21)
-            return STATUS_INVALID_PARAMETER_3;
-    }
-#endif
-
     //
     // If this is for the current process, just use PsGetCurrentProcess
     //
