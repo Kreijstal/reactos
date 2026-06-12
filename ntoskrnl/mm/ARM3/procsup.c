@@ -85,9 +85,10 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 
     HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
 
-#ifdef _M_AMD64
+#ifdef _WIN64
     IsWow64 = FALSE;
 
+#ifdef _M_AMD64
     if (Process->SectionBaseAddress != NULL)
     {
         if (RtlImageNtHeader(Process->SectionBaseAddress)->FileHeader.Machine
@@ -96,6 +97,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
             IsWow64 = TRUE;
         }
     }
+#endif
 
     if (IsWow64)
     {
@@ -1467,7 +1469,9 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
     KIRQL OldIrql;
     PFN_NUMBER PageFrameIndex;
 
-#ifndef _M_AMD64
+#if _MI_PAGING_LEVELS <= 2
+    /* MmProcessList is only maintained where MiInitializeLargePageSupport
+     * sets it up and the arch create path inserts into it */
     OldIrql = MiAcquireExpansionLock();
     RemoveEntryList(&Process->MmProcessLinks);
     MiReleaseExpansionLock(OldIrql);
