@@ -11,6 +11,12 @@
 
 #include <ntifs.h>
 
+/* Platforms without VGA text-mode hardware render
+ * the console onto the boot display framebuffer */
+#if defined(_M_ARM) || defined(_M_ARM64)
+#define BLUE_USE_FRAMEBUFFER 1
+#endif
+
 #define TAG_BLUE    'EULB'
 
 #define TAB_WIDTH   8
@@ -119,5 +125,44 @@ typedef struct tagCONSOLE_CURSOR_INFO
 #define PELDATA      (PUCHAR)0x3c9
 
 VOID ScrSetFont(_In_ PUCHAR FontBitfield);
+
+typedef struct _DEVICE_EXTENSION
+{
+    PUCHAR  VideoMemory;    /* Pointer to video memory */
+    SIZE_T  VideoMemorySize;
+    BOOLEAN Enabled;
+    PUCHAR  ScreenBuffer;   /* Pointer to screenbuffer */
+    SIZE_T  ScreenBufferSize;
+    ULONG   CursorSize;
+    INT     CursorVisible;
+    USHORT  CharAttribute;
+    ULONG   Mode;
+    UCHAR   ScanLines;  /* Height of a text line */
+    USHORT  Rows;       /* Number of rows        */
+    USHORT  Columns;    /* Number of columns     */
+    USHORT  CursorX, CursorY; /* Cursor position */
+    PUCHAR  FontBitfield; /* Specifies the font  */
+} DEVICE_EXTENSION, *PDEVICE_EXTENSION;
+
+#ifdef BLUE_USE_FRAMEBUFFER
+
+NTSTATUS ScrFbInitialize(VOID);
+VOID ScrFbAcquireOwnership(_In_ PDEVICE_EXTENSION DeviceExtension);
+PUCHAR ScrFbAllocVideoMemory(_In_ PDEVICE_EXTENSION DeviceExtension);
+VOID ScrFbFreeVideoMemory(_In_ PDEVICE_EXTENSION DeviceExtension);
+VOID ScrFbRenderRange(_In_ PDEVICE_EXTENSION DeviceExtension, _In_ ULONG First, _In_ ULONG Count);
+VOID ScrFbRenderAll(_In_ PDEVICE_EXTENSION DeviceExtension);
+VOID ScrFbSetCursor(_In_ PDEVICE_EXTENSION DeviceExtension);
+VOID ScrFbSetCursorShape(_In_ PDEVICE_EXTENSION DeviceExtension);
+
+#define ScrFbRender(Ext, First, Count)  ScrFbRenderRange((Ext), (First), (Count))
+#define ScrFbRenderScreen(Ext)          ScrFbRenderAll((Ext))
+
+#else
+
+#define ScrFbRender(Ext, First, Count)  ((VOID)0)
+#define ScrFbRenderScreen(Ext)          ((VOID)0)
+
+#endif /* BLUE_USE_FRAMEBUFFER */
 
 #endif /* _BLUE_PCH_ */
