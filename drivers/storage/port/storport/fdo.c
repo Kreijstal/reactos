@@ -680,6 +680,11 @@ SrbStatusToNtStatus(
  * Build a single-list scatter/gather table for the SRB's data buffer.
  * Works for both DO_DIRECT_IO IRPs (Irp->MdlAddress non-NULL) and
  * port-internal kernel buffers (no MDL, contiguous virtual address only).
+ *
+ * With an MDL the physical pages come from the MDL's PFN array, never from
+ * virtual address translation: paging-read MDLs built straight from PFNs
+ * (MmBuildMdlFromPages) carry StartVa == NULL, so Srb->DataBuffer is only
+ * meaningful as an offset relative to MmGetMdlVirtualAddress(Mdl).
  */
 static
 NTSTATUS
@@ -699,25 +704,69 @@ PortBuildScatterGatherList(
     Context->Sgl.NumberOfElements = 0;
     Context->Sgl.Reserved = 0;
 
-    if (Srb->DataTransferLength == 0 || Srb->DataBuffer == NULL)
+    if (Srb->DataTransferLength == 0)
         return STATUS_SUCCESS;
+
+    BytesRemaining = Srb->DataTransferLength;
 
     if (Mdl != NULL)
     {
-        Va = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
-        if (Va == NULL)
-            return STATUS_INSUFFICIENT_RESOURCES;
+        PPFN_NUMBER PfnArray = MmGetMdlPfnArray(Mdl);
+        ULONG_PTR MdlOffset;
 
-        /* The MDL may describe more bytes than this SRB transfers (e.g. when a
-         * class driver hands us a re-used IRP). DataTransferLength wins. */
-    }
-    else
-    {
-        /* Kernel-mode buffer in non-paged pool. Trust DataBuffer as VA. */
-        Va = (PUCHAR)Srb->DataBuffer;
+        /* Byte position of the transfer start within the MDL's pages */
+        MdlOffset = ((ULONG_PTR)Srb->DataBuffer -
+                     (ULONG_PTR)MmGetMdlVirtualAddress(Mdl)) +
+                    Mdl->ByteOffset;
+
+        if (MdlOffset + BytesRemaining >
+            (ULONG_PTR)Mdl->ByteOffset + Mdl->ByteCount)
+        {
+            DPRINT1("PortBuildScatterGatherList: transfer exceeds MDL (offset %Iu length %lu MDL %lu+%lu)\n",
+                    MdlOffset, BytesRemaining, Mdl->ByteOffset, Mdl->ByteCount);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        while (BytesRemaining > 0)
+        {
+            OffsetInPage = (ULONG)(MdlOffset & (PAGE_SIZE - 1));
+            Phys.QuadPart =
+                ((ULONGLONG)PfnArray[MdlOffset >> PAGE_SHIFT] << PAGE_SHIFT) +
+                OffsetInPage;
+            BytesThisPage = PAGE_SIZE - OffsetInPage;
+            if (BytesThisPage > BytesRemaining)
+                BytesThisPage = BytesRemaining;
+
+            /* Coalesce with the previous element if physically contiguous. */
+            if (Count > 0 &&
+                Context->Sgl.List[Count - 1].PhysicalAddress.QuadPart +
+                    Context->Sgl.List[Count - 1].Length == Phys.QuadPart)
+            {
+                Context->Sgl.List[Count - 1].Length += BytesThisPage;
+            }
+            else
+            {
+                if (Count >= STORPORT_MAX_SGL_ENTRIES)
+                    return STATUS_INSUFFICIENT_RESOURCES;
+
+                Context->Sgl.List[Count].PhysicalAddress = Phys;
+                Context->Sgl.List[Count].Length = BytesThisPage;
+                Count++;
+            }
+
+            MdlOffset += BytesThisPage;
+            BytesRemaining -= BytesThisPage;
+        }
+
+        Context->Sgl.NumberOfElements = Count;
+        return STATUS_SUCCESS;
     }
 
-    BytesRemaining = Srb->DataTransferLength;
+    if (Srb->DataBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Kernel-mode buffer in non-paged pool. Trust DataBuffer as VA. */
+    Va = (PUCHAR)Srb->DataBuffer;
 
     while (BytesRemaining > 0)
     {
