@@ -11,6 +11,8 @@
 
 #include "blue.h"
 
+#ifndef BLUE_USE_FRAMEBUFFER
+
 //
 // FIXME: For the moment we support only a fixed 256-char 8-bit font.
 //
@@ -111,3 +113,5 @@ LoadFont(
         }
     }
 }
+
+#endif /* !BLUE_USE_FRAMEBUFFER */
