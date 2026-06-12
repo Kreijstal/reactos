@@ -355,6 +355,45 @@ KeLowerIrql(_In_ KIRQL NewIrql);
 #undef WRITE_PORT_BUFFER_USHORT
 #undef WRITE_PORT_BUFFER_ULONG
 
+/*
+ * ARM64 has no CPU port I/O instructions; legacy x86 I/O ports only exist as
+ * a translated window provided by a PCI host bridge (described by the _CRS
+ * I/O resource of the bridge, with a translation offset into CPU physical
+ * address space). Port arguments below 64K are I/O port numbers and must be
+ * routed through that window; anything higher is already a mapped MMIO VA.
+ * When no host bridge published an I/O window, the platform simply has no
+ * legacy I/O: writes are dropped and reads return all-ones, exactly like a
+ * bus access nothing decodes.
+ */
+#define HALP_ARM64_LEGACY_IO_LIMIT 0x10000
+
+static PVOID HalpArm64IoPortWindowVa = NULL;
+static ULONGLONG HalpArm64IoPortWindowBase = 0;
+static ULONGLONG HalpArm64IoPortWindowLimit = 0;
+
+static
+volatile VOID*
+HalpArm64TranslatePort(
+    _In_ ULONG_PTR Port)
+{
+    if (Port >= HALP_ARM64_LEGACY_IO_LIMIT)
+    {
+        /* Already a virtual MMIO address */
+        return (volatile VOID*)Port;
+    }
+
+    if ((HalpArm64IoPortWindowVa != NULL) &&
+        (Port >= HalpArm64IoPortWindowBase) &&
+        (Port <= HalpArm64IoPortWindowLimit))
+    {
+        return (volatile UCHAR*)HalpArm64IoPortWindowVa +
+               (Port - HalpArm64IoPortWindowBase);
+    }
+
+    /* No I/O window on this platform: the port does not exist */
+    return NULL;
+}
+
 FORCEINLINE
 VOID
 HalpReadRegisterBufferUchar(
@@ -440,7 +479,13 @@ READ_PORT_BUFFER_UCHAR(
     _Out_writes_(Count) PUCHAR Buffer,
     _In_ ULONG Count)
 {
-    HalpReadRegisterBufferUchar(Port, Buffer, Count);
+    volatile UCHAR* Va = (volatile UCHAR*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL)
+    {
+        RtlFillMemory(Buffer, Count, 0xFF);
+        return;
+    }
+    HalpReadRegisterBufferUchar((PUCHAR)Va, Buffer, Count);
 }
 
 VOID
@@ -450,7 +495,13 @@ READ_PORT_BUFFER_USHORT(
     _Out_writes_(Count) PUSHORT Buffer,
     _In_ ULONG Count)
 {
-    HalpReadRegisterBufferUshort(Port, Buffer, Count);
+    volatile USHORT* Va = (volatile USHORT*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL)
+    {
+        RtlFillMemory(Buffer, Count * sizeof(USHORT), 0xFF);
+        return;
+    }
+    HalpReadRegisterBufferUshort((PUSHORT)Va, Buffer, Count);
 }
 
 VOID
@@ -460,7 +511,13 @@ READ_PORT_BUFFER_ULONG(
     _Out_writes_(Count) PULONG Buffer,
     _In_ ULONG Count)
 {
-    HalpReadRegisterBufferUlong(Port, Buffer, Count);
+    volatile ULONG* Va = (volatile ULONG*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL)
+    {
+        RtlFillMemory(Buffer, Count * sizeof(ULONG), 0xFF);
+        return;
+    }
+    HalpReadRegisterBufferUlong((PULONG)Va, Buffer, Count);
 }
 
 UCHAR
@@ -468,7 +525,9 @@ NTAPI
 READ_PORT_UCHAR(
     _In_ PUCHAR Port)
 {
-    return READ_REGISTER_UCHAR(Port);
+    volatile UCHAR* Va = (volatile UCHAR*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return 0xFF;
+    return READ_REGISTER_UCHAR((PUCHAR)Va);
 }
 
 USHORT
@@ -476,7 +535,9 @@ NTAPI
 READ_PORT_USHORT(
     _In_ PUSHORT Port)
 {
-    return READ_REGISTER_USHORT(Port);
+    volatile USHORT* Va = (volatile USHORT*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return 0xFFFF;
+    return READ_REGISTER_USHORT((PUSHORT)Va);
 }
 
 ULONG
@@ -484,7 +545,9 @@ NTAPI
 READ_PORT_ULONG(
     _In_ PULONG Port)
 {
-    return READ_REGISTER_ULONG(Port);
+    volatile ULONG* Va = (volatile ULONG*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return 0xFFFFFFFF;
+    return READ_REGISTER_ULONG((PULONG)Va);
 }
 
 VOID
@@ -494,7 +557,9 @@ WRITE_PORT_BUFFER_UCHAR(
     _In_reads_(Count) PUCHAR Buffer,
     _In_ ULONG Count)
 {
-    HalpWriteRegisterBufferUchar(Port, Buffer, Count);
+    volatile UCHAR* Va = (volatile UCHAR*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return;
+    HalpWriteRegisterBufferUchar((PUCHAR)Va, Buffer, Count);
 }
 
 VOID
@@ -504,7 +569,9 @@ WRITE_PORT_BUFFER_USHORT(
     _In_reads_(Count) PUSHORT Buffer,
     _In_ ULONG Count)
 {
-    HalpWriteRegisterBufferUshort(Port, Buffer, Count);
+    volatile USHORT* Va = (volatile USHORT*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return;
+    HalpWriteRegisterBufferUshort((PUSHORT)Va, Buffer, Count);
 }
 
 VOID
@@ -514,7 +581,9 @@ WRITE_PORT_BUFFER_ULONG(
     _In_reads_(Count) PULONG Buffer,
     _In_ ULONG Count)
 {
-    HalpWriteRegisterBufferUlong(Port, Buffer, Count);
+    volatile ULONG* Va = (volatile ULONG*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return;
+    HalpWriteRegisterBufferUlong((PULONG)Va, Buffer, Count);
 }
 
 VOID
@@ -523,7 +592,9 @@ WRITE_PORT_UCHAR(
     _In_ PUCHAR Port,
     _In_ UCHAR Value)
 {
-    WRITE_REGISTER_UCHAR(Port, Value);
+    volatile UCHAR* Va = (volatile UCHAR*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return;
+    WRITE_REGISTER_UCHAR((PUCHAR)Va, Value);
 }
 
 VOID
@@ -532,7 +603,9 @@ WRITE_PORT_USHORT(
     _In_ PUSHORT Port,
     _In_ USHORT Value)
 {
-    WRITE_REGISTER_USHORT(Port, Value);
+    volatile USHORT* Va = (volatile USHORT*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return;
+    WRITE_REGISTER_USHORT((PUSHORT)Va, Value);
 }
 
 VOID
@@ -541,7 +614,9 @@ WRITE_PORT_ULONG(
     _In_ PULONG Port,
     _In_ ULONG Value)
 {
-WRITE_REGISTER_ULONG(Port, Value);
+    volatile ULONG* Va = (volatile ULONG*)HalpArm64TranslatePort((ULONG_PTR)Port);
+    if (Va == NULL) return;
+    WRITE_REGISTER_ULONG((PULONG)Va, Value);
 }
 
 KSPIN_LOCK HalpPCIConfigLock;
@@ -1662,6 +1737,38 @@ HalpConfigurePciRootBridge(
         DPRINT1("[arm64][PCI]   IO Window: [0x%I64x - 0x%I64x]\n",
                 Info->IoWindow.Base,
                 Info->IoWindow.Limit);
+
+        /* Map the I/O port window so the PORT accessors can reach it. The
+         * window's CPU physical address is the port range shifted by the
+         * bridge's translation offset. */
+        if ((HalpArm64IoPortWindowVa == NULL) &&
+            (Info->IoWindow.Limit >= Info->IoWindow.Base))
+        {
+            PHYSICAL_ADDRESS WindowPa;
+            SIZE_T WindowSize;
+            PVOID WindowVa;
+
+            WindowPa.QuadPart = Info->IoWindow.Base;
+            if (Info->IoWindow.HasTranslation)
+            {
+                WindowPa.QuadPart += Info->IoWindow.Translation;
+            }
+            WindowSize = (SIZE_T)(Info->IoWindow.Limit - Info->IoWindow.Base + 1);
+
+            WindowVa = MmMapIoSpace(WindowPa, WindowSize, MmNonCached);
+            if (WindowVa != NULL)
+            {
+                HalpArm64IoPortWindowBase = Info->IoWindow.Base;
+                HalpArm64IoPortWindowLimit = Info->IoWindow.Limit;
+                KeMemoryBarrier();
+                HalpArm64IoPortWindowVa = WindowVa;
+                DPRINT1("[arm64][PCI]   IO ports [0x%I64x-0x%I64x] mapped at %p (PA 0x%I64x)\n",
+                        Info->IoWindow.Base,
+                        Info->IoWindow.Limit,
+                        WindowVa,
+                        WindowPa.QuadPart);
+            }
+        }
     }
 
     if (Info->MemoryWindow.Present)
