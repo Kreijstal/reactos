@@ -179,7 +179,12 @@ CsrpConnectToServer(
     NtCurrentPeb()->ReadOnlyStaticServerData = ConnectionInfo.SharedStaticServerData;
 #else
     NtCurrentPeb64()->ReadOnlySharedMemoryBase = ConnectionInfo.SharedSectionBase;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* ReadOnlySharedMemoryHeap was replaced by HotpatchInformation at Vista */
+    NtCurrentPeb64()->HotpatchInformation = ConnectionInfo.SharedSectionHeap;
+#else
     NtCurrentPeb64()->ReadOnlySharedMemoryHeap = ConnectionInfo.SharedSectionHeap;
+#endif
     NtCurrentPeb64()->ReadOnlyStaticServerData = ConnectionInfo.SharedStaticServerData;
 #endif
 
