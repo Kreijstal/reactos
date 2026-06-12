@@ -2354,30 +2354,23 @@ HalpUnmapVirtualAddress(
 volatile ULONG *HalpMmio(ULONG_PTR Base, ULONG Offset)
 {
     /*
-     * Convert physical address to the appropriate virtual address based on
-     * the current mapping mode.
+     * Convert a physical MMIO address to its kernel virtual alias.
      *
-     * During early boot (HalpUseIdentityMapping == TRUE):
-     *   - Use the physical address directly because the kernel's TTBR0
-     *     identity mapping maps PA == VA for low addresses.
-     *   - This is critical for MMIO regions above 4GB (like GICR) that
-     *     are only mapped in TTBR0's identity page tables.
+     * Addresses already in high VA space (e.g. the GICD/GICC bases that
+     * phase 1 re-points at MmMapIoSpace mappings) pass through unchanged.
      *
-     * After boot (HalpUseIdentityMapping == FALSE), physical MMIO uses the
-     * private ARM64 physical alias. The public FFFF8000... system range is
-     * reserved for NT-visible kernel VA contracts and is not a direct map.
+     * Raw physical addresses go through the private physical alias window.
+     * The loader maps every early device range there before the kernel is
+     * entered, so this works from the first GIC access in phase 0 and never
+     * relies on an identity (PA == VA) mapping in the low VA half: that half
+     * belongs to user address spaces, and MMIO mappings there would be
+     * invisible to Mm's VAD bookkeeping.
      */
     ULONG_PTR Va = Base;
 
-    /* Don't modify addresses that are already in high VA space */
     if (Va >= HAL_ARM64_SYSTEM_RANGE_BASE)
         return (volatile ULONG *)(Va + Offset);
 
-    /* During early boot, use identity mapping (PA == VA) via TTBR0 */
-    if (HalpUseIdentityMapping)
-        return (volatile ULONG *)(Va + Offset);
-
-    /* After boot, convert to the private physical alias via TTBR1 */
     Va = HAL_ARM64_PHYS_MAP_BASE | (Va & HAL_ARM64_PHYS_ADDR_MASK);
     return (volatile ULONG *)(Va + Offset);
 }
@@ -2880,30 +2873,22 @@ HalInitSystem(
         KIRQL SwitchIrql;
 
         /*
-         * CRITICAL: Transition from identity-mapped PA to proper kernel VA
-         * for all GIC MMIO accesses.
+         * Transition GIC MMIO from the early physical-alias window to proper
+         * MmMapIoSpace kernel VAs.
          *
-         * By Phase 1, the kernel MM has completed initialization and the TTBR0
-         * identity mapping (PA == VA) that was used during early boot may have
-         * been torn down.  Any MMIO access through HalpMmio() that still uses
-         * the identity-mapping path will fault.
+         * Until here, HalpMmio() reaches the GIC frames through the private
+         * physical alias the loader mapped for every early device range.
+         * MmMapIoSpace() overwrites HalpGicdBase/HalpGiccBase with kernel-VA
+         * values; HalpMmio() passes high-VA addresses through unchanged, so
+         * the swap is safe against concurrent interrupts (for GICv2, timer
+         * PPIs are already firing at 100Hz and every acknowledge reads
+         * GICC_IAR via HalpMmio()).
          *
-         * For GICv2, timer PPI interrupts are already firing at 100Hz.  The
-         * interrupt handler calls HalpGicv2AcknowledgeInterrupt() which reads
-         * GICC_IAR via HalpMmio().  If we do not remap GICC/GICD BEFORE the
-         * identity mapping becomes invalid, interrupt handling will data-abort.
-         *
-         * Strategy:
-         *   1. Map GIC MMIO frames via MmMapIoSpace() (for GICv2).
-         *      MmMapIoSpace() overwrites HalpGicdBase/HalpGiccBase with
-         *      kernel-VA values.  HalpMmio() handles high-VA addresses
-         *      correctly even while HalpUseIdentityMapping is still TRUE,
-         *      because it checks (Va >= KSEG0_BASE) first.  This makes the
-         *      swap safe against concurrent interrupts.
-         *   2. Raise to HIGH_LEVEL (masks all interrupts via DAIF.I).
-         *   3. Set HalpUseIdentityMapping = FALSE atomically.
-         *   4. Full barrier (DSB SY + ISB).
-         *   5. Lower IRQL.
+         * HalpUseIdentityMapping afterwards only governs the RAM-side
+         * helpers (HalpPhysToKseg0 / HalpMapPhysicalMemory64 /
+         * HalpUnmapVirtualAddress), whose early-boot callers run before Mm
+         * exists and dereference physical addresses under the boot identity
+         * root.
          *
          * For GICv3, the CPU interface uses system registers (no MMIO).
          */
@@ -2914,8 +2899,7 @@ HalInitSystem(
             MmioRemapped = HalpMapGicv3RuntimeMmioWindows();
             if (!MmioRemapped)
             {
-                DPRINT1("[arm64][HAL] Phase1: MmMapIoSpace failed for GICv3 MMIO; "
-                        "keeping identity mapping enabled\n");
+                DPRINT1("[arm64][HAL] Phase1: MmMapIoSpace failed for GICv3 MMIO\n");
             }
         }
         else
@@ -2923,18 +2907,13 @@ HalInitSystem(
             MmioRemapped = HalpMapGicv2RuntimeMmioWindows();
             if (!MmioRemapped)
             {
-                DPRINT1("[arm64][HAL] Phase1: MmMapIoSpace failed for GICv2 MMIO; "
-                        "keeping identity mapping enabled\n");
+                DPRINT1("[arm64][HAL] Phase1: MmMapIoSpace failed for GICv2 MMIO\n");
             }
         }
 
         /*
-         * Only tear down the identity mapping once the GIC MMIO windows have been
-         * successfully remapped to kernel VAs. If the remap failed, leaving the
-         * identity mapping enabled keeps HalpMmio() functional via the TTBR0
-         * PA==VA path; clearing it would data-abort on the next GIC access. We
-         * bugcheck because the system register / GICC interface cannot operate
-         * correctly without valid GIC MMIO after the identity mapping is gone.
+         * The GIC MMIO windows are required for all further interrupt
+         * handling; there is no usable degraded mode without them.
          */
         if (!MmioRemapped)
         {
