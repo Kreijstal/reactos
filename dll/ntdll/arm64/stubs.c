@@ -27,30 +27,3 @@ RtlQueueApcWow64Thread(
     (VOID)SystemArgument2;
     return STATUS_NOT_IMPLEMENTED;
 }
-
-/*
- * ExpInterlockedPopEntrySList* entry points.
- * These are the ABI entry points for the kernel's SList fault/retry handling.
- * Currently reference-counted by the ntdll export table and matched against the
- * ARM64 trap handler (KiHandleKernelSListFaultArm64).  Passing through to the
- * RTL inline implementation which uses _InterlockedCompareExchange128.
- */
-PSLIST_ENTRY NTAPI ExpInterlockedPopEntrySList(PSLIST_HEADER H)
-{
-    return RtlInterlockedPopEntrySList(H);
-}
-
-PSLIST_ENTRY NTAPI ExpInterlockedPopEntrySListEnd(PSLIST_HEADER H)
-{
-    return RtlInterlockedPopEntrySList(H);
-}
-
-PSLIST_ENTRY NTAPI ExpInterlockedPopEntrySListFault(PSLIST_HEADER H)
-{
-    return RtlInterlockedPopEntrySList(H);
-}
-
-PSLIST_ENTRY NTAPI ExpInterlockedPopEntrySListResume(PSLIST_HEADER H)
-{
-    return RtlInterlockedPopEntrySList(H);
-}
