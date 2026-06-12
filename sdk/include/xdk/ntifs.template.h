@@ -1586,17 +1586,41 @@ typedef struct _OBJECT_ALL_TYPES_INFO {
     OBJECT_TYPE_INFO    ObjectsTypeInfo[1];
 } OBJECT_ALL_TYPES_INFO, *POBJECT_ALL_TYPES_INFO;
 
+/* LPC_ULONG_PTR is the shared sentinel with lpctypes.h and csrmsg.h: whichever
+ * header is included first supplies the full portable LPC macro set and the
+ * others defer to it. The set must be defined completely here so that a header
+ * deferring to ntifs.h (e.g. csrmsg.h, which uses LPC_PTR and friends) still
+ * finds every macro, and so the LPC_CLIENT_ID macro does not clash with their
+ * typedef form in a WoW64 build. */
+#ifndef LPC_ULONG_PTR
 #if defined(USE_LPC6432)
-#define LPC_CLIENT_ID CLIENT_ID64
 #define LPC_SIZE_T ULONGLONG
 #define LPC_PVOID ULONGLONG
 #define LPC_HANDLE ULONGLONG
+#define LPC_ULONG_PTR ULONGLONG
+typedef struct
+{
+    LPC_HANDLE UniqueProcess;
+    LPC_HANDLE UniqueThread;
+} LPC_CLIENT_ID;
+#define LPC_UNICODE_STRING UNICODE_STRING64
+#define LPC_PTR(x) LPC_PVOID
+#define LPC_PTRTYPE(x) LPC_PVOID
+#define TO_LPC_HANDLE(h) ((LPC_HANDLE)(h))
+#define FROM_LPC_HANDLE(h) ((HANDLE)(h))
 #else
 #define LPC_CLIENT_ID CLIENT_ID
 #define LPC_SIZE_T SIZE_T
 #define LPC_PVOID PVOID
 #define LPC_HANDLE HANDLE
+#define LPC_ULONG_PTR ULONG_PTR
+#define LPC_UNICODE_STRING UNICODE_STRING
+#define LPC_PTR(x) x*
+#define LPC_PTRTYPE(x) x
+#define TO_LPC_HANDLE(h) h
+#define FROM_LPC_HANDLE(h) h
 #endif
+#endif /* LPC_ULONG_PTR */
 
 typedef struct _PORT_MESSAGE
 {
