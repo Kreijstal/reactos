@@ -2109,6 +2109,15 @@ MiInitMachineDependent(
     IN PLOADER_PARAMETER_BLOCK LoaderBlock
 );
 
+#ifdef _M_ARM64
+CODE_SEG("INIT")
+VOID
+NTAPI
+MiArm64BuildPfnDatabaseFromPages(
+    _In_ PLOADER_PARAMETER_BLOCK LoaderBlock
+);
+#endif
+
 CODE_SEG("INIT")
 VOID
 NTAPI
