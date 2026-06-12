@@ -846,7 +846,15 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     args_alignment = (current_machine == IMAGE_FILE_MACHINE_I386) ? sizeof(ULONG) : sizeof(ULONG64);
     NtQuerySystemInformation( SystemEmulationBasicInformation, &info, sizeof(info), NULL );
     highest_user_address = (ULONG_PTR)info.HighestUserAddress;
+#ifdef __REACTOS__
+    /* The ReactOS kernel interprets the NtMapView/NtAllocateVirtualMemory
+     * ZeroBits argument as a count of high zero bits, not a Windows-style
+     * address mask.  Use 32 so WoW64 mappings stay within the low 4 GB
+     * (matching the ZeroBits build_wow64_parameters() already passes). */
+    default_zero_bits = 32;
+#else
     default_zero_bits = (ULONG_PTR)info.HighestUserAddress | 0x7fffffff;
+#endif
     NtQueryInformationProcess( GetCurrentProcess(), ProcessWow64Information, &peb32, sizeof(peb32), NULL );
     wow64info = (WOW64INFO *)(peb32 + 1);
     wow64info->NativeSystemPageSize = 0x1000;
