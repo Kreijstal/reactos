@@ -23,23 +23,7 @@
 
 /* TYPEDEFS ***************************************************************/
 
-typedef struct _DEVICE_EXTENSION
-{
-    PUCHAR  VideoMemory;    /* Pointer to video memory */
-    SIZE_T  VideoMemorySize;
-    BOOLEAN Enabled;
-    PUCHAR  ScreenBuffer;   /* Pointer to screenbuffer */
-    SIZE_T  ScreenBufferSize;
-    ULONG   CursorSize;
-    INT     CursorVisible;
-    USHORT  CharAttribute;
-    ULONG   Mode;
-    UCHAR   ScanLines;  /* Height of a text line */
-    USHORT  Rows;       /* Number of rows        */
-    USHORT  Columns;    /* Number of columns     */
-    USHORT  CursorX, CursorY; /* Cursor position */
-    PUCHAR  FontBitfield; /* Specifies the font  */
-} DEVICE_EXTENSION, *PDEVICE_EXTENSION;
+#ifndef BLUE_USE_FRAMEBUFFER
 
 typedef struct _VGA_REGISTERS
 {
@@ -85,6 +69,8 @@ static const UCHAR DefaultPalette[] =
     0xFF, 0xFF, 0,
     0xFF, 0xFF, 0xFF
 };
+
+#endif /* !BLUE_USE_FRAMEBUFFER */
 
 /* INBV MANAGEMENT FUNCTIONS **************************************************/
 
@@ -303,6 +289,8 @@ ScrInbvCleanup(VOID)
 
 /* FUNCTIONS **************************************************************/
 
+#ifndef BLUE_USE_FRAMEBUFFER
+
 static VOID
 FASTCALL
 ScrSetRegisters(const VGA_REGISTERS *Registers)
@@ -493,6 +481,45 @@ ScrAcquireOwnership(
            DeviceExtension->ScanLines);
 }
 
+#else /* BLUE_USE_FRAMEBUFFER */
+
+static VOID
+FASTCALL
+ScrSetCursor(
+    _In_ PDEVICE_EXTENSION DeviceExtension)
+{
+    if (!DeviceExtension->VideoMemory)
+        return;
+
+    ScrFbSetCursor(DeviceExtension);
+}
+
+static VOID
+FASTCALL
+ScrSetCursorShape(
+    _In_ PDEVICE_EXTENSION DeviceExtension)
+{
+    if (!DeviceExtension->VideoMemory)
+        return;
+
+    ScrFbSetCursorShape(DeviceExtension);
+}
+
+static VOID
+FASTCALL
+ScrAcquireOwnership(
+    _In_ PDEVICE_EXTENSION DeviceExtension)
+{
+    ScrFbAcquireOwnership(DeviceExtension);
+
+    DPRINT("%d Columns  %d Rows %d Scanlines\n",
+           DeviceExtension->Columns,
+           DeviceExtension->Rows,
+           DeviceExtension->ScanLines);
+}
+
+#endif /* BLUE_USE_FRAMEBUFFER */
+
 static BOOLEAN
 ScrResetScreen(
     _In_ PDEVICE_EXTENSION DeviceExtension,
@@ -501,7 +528,9 @@ ScrResetScreen(
 {
 #define FOREGROUND_LIGHTGRAY (FOREGROUND_BLUE | FOREGROUND_GREEN | FOREGROUND_RED)
 
+#ifndef BLUE_USE_FRAMEBUFFER
     PHYSICAL_ADDRESS BaseAddress;
+#endif
 
     /* Allow resets to the same state only for full resets */
     if (!FullReset && (Enable == DeviceExtension->Enabled))
@@ -538,7 +567,11 @@ ScrResetScreen(
             if (DeviceExtension->VideoMemory)
             {
                 ASSERT(DeviceExtension->VideoMemorySize != 0);
+#ifdef BLUE_USE_FRAMEBUFFER
+                ScrFbFreeVideoMemory(DeviceExtension);
+#else
                 MmUnmapIoSpace(DeviceExtension->VideoMemory, DeviceExtension->VideoMemorySize);
+#endif
             }
             DeviceExtension->VideoMemory = NULL;
             DeviceExtension->VideoMemorySize = 0;
@@ -558,9 +591,13 @@ ScrResetScreen(
                 return FALSE; // STATUS_INVALID_VIEW_SIZE; STATUS_MAPPED_FILE_SIZE_ZERO;
 
             /* Map the video memory */
+#ifdef BLUE_USE_FRAMEBUFFER
+            DeviceExtension->VideoMemory = ScrFbAllocVideoMemory(DeviceExtension);
+#else
             BaseAddress.QuadPart = VIDMEM_BASE;
             DeviceExtension->VideoMemory =
                 (PUCHAR)MmMapIoSpace(BaseAddress, DeviceExtension->VideoMemorySize, MmNonCached);
+#endif
             if (!DeviceExtension->VideoMemory)
             {
                 DeviceExtension->VideoMemorySize = 0;
@@ -598,6 +635,7 @@ ScrResetScreen(
                               DeviceExtension->ScreenBuffer,
                               DeviceExtension->VideoMemorySize);
             }
+            ScrFbRenderScreen(DeviceExtension);
 
             /* Restore the cursor state */
             ScrSetCursor(DeviceExtension);
@@ -621,7 +659,11 @@ ScrResetScreen(
             if (DeviceExtension->VideoMemory)
             {
                 ASSERT(DeviceExtension->VideoMemorySize != 0);
+#ifdef BLUE_USE_FRAMEBUFFER
+                ScrFbFreeVideoMemory(DeviceExtension);
+#else
                 MmUnmapIoSpace(DeviceExtension->VideoMemory, DeviceExtension->VideoMemorySize);
+#endif
             }
             DeviceExtension->VideoMemory = NULL;
             DeviceExtension->VideoMemorySize = 0;
@@ -701,6 +743,10 @@ ScrWrite(
     USHORT cursorx, cursory;
     USHORT rows, columns;
     BOOLEAN processed = !!(DeviceExtension->Mode & ENABLE_PROCESSED_OUTPUT);
+#ifdef BLUE_USE_FRAMEBUFFER
+    ULONG renderFirst, renderEnd;
+    BOOLEAN renderAll = FALSE;
+#endif
 
     if (!DeviceExtension->Enabled || !DeviceExtension->VideoMemory)
     {
@@ -718,6 +764,9 @@ ScrWrite(
     columns = DeviceExtension->Columns;
     cursorx = DeviceExtension->CursorX;
     cursory = DeviceExtension->CursorY;
+#ifdef BLUE_USE_FRAMEBUFFER
+    renderFirst = cursorx + cursory * columns;
+#endif
 
     if (!processed)
     {
@@ -823,9 +872,24 @@ ScrWrite(
                     vidmem[offset * 2] = ' ';
                     vidmem[offset * 2 + 1] = (char)DeviceExtension->CharAttribute;
                 }
+#ifdef BLUE_USE_FRAMEBUFFER
+                renderAll = TRUE;
+#endif
             }
         }
     }
+
+#ifdef BLUE_USE_FRAMEBUFFER
+    /* Every cell touched above lies between the old
+     * and the new cursor offsets, unless we scrolled */
+    renderEnd = cursorx + cursory * columns;
+    if (renderAll)
+        ScrFbRenderAll(DeviceExtension);
+    else if (renderEnd >= renderFirst)
+        ScrFbRenderRange(DeviceExtension, renderFirst, renderEnd - renderFirst + 1);
+    else
+        ScrFbRenderRange(DeviceExtension, renderEnd, renderFirst - renderEnd + 1);
+#endif
 
     /* Set the cursor position */
     ASSERT((0 <= cursorx) && (cursorx < DeviceExtension->Columns));
@@ -1087,6 +1151,10 @@ ScrIoControl(
                     vidmem[offset + (dwCount * 2)] = attr;
                 }
                 Buf->dwTransfered = dwCount;
+
+                ScrFbRender(DeviceExtension,
+                            Buf->dwCoord.X + Buf->dwCoord.Y * DeviceExtension->Columns,
+                            dwCount);
             }
 
             Status = STATUS_SUCCESS;
@@ -1217,6 +1285,10 @@ ScrIoControl(
                     vidmem[offset + (dwCount * 2)] = *((PCHAR)pAttr);
                 }
                 Irp->IoStatus.Information = dwCount * sizeof(USHORT);
+
+                ScrFbRender(DeviceExtension,
+                            dwCoord.X + dwCoord.Y * DeviceExtension->Columns,
+                            dwCount);
             }
 
             Status = STATUS_SUCCESS;
@@ -1287,6 +1359,10 @@ ScrIoControl(
                     vidmem[offset + (dwCount * 2)] = ch;
                 }
                 Buf->dwTransfered = dwCount;
+
+                ScrFbRender(DeviceExtension,
+                            Buf->dwCoord.X + Buf->dwCoord.Y * DeviceExtension->Columns,
+                            dwCount);
             }
 
             Status = STATUS_SUCCESS;
@@ -1414,6 +1490,10 @@ ScrIoControl(
                     vidmem[offset + (dwCount * 2)] = *pChar;
                 }
                 Irp->IoStatus.Information = dwCount * sizeof(CHAR);
+
+                ScrFbRender(DeviceExtension,
+                            dwCoord.X + dwCoord.Y * DeviceExtension->Columns,
+                            dwCount);
             }
 
             Status = STATUS_SUCCESS;
@@ -1491,6 +1571,10 @@ ScrIoControl(
                     Src += SrcDelta;
                     Dest += DestDelta;
                 }
+
+                ScrFbRender(DeviceExtension,
+                            ConsoleDraw.Y * DeviceExtension->Columns,
+                            (ULONG)ConsoleDraw.SizeY * DeviceExtension->Columns);
             }
 
             Status = STATUS_SUCCESS;
@@ -1523,7 +1607,14 @@ ScrIoControl(
 
             /* Set the font if needed */
             if (DeviceExtension->Enabled && DeviceExtension->VideoMemory)
+            {
+#ifdef BLUE_USE_FRAMEBUFFER
+                /* Redraw the screen with the new glyphs */
+                ScrFbRenderScreen(DeviceExtension);
+#else
                 ScrSetFont(DeviceExtension->FontBitfield);
+#endif
+            }
 
             Irp->IoStatus.Information = 0;
             Status = STATUS_SUCCESS;
@@ -1574,6 +1665,14 @@ DriverEntry(
     UNICODE_STRING SymlinkName = RTL_CONSTANT_STRING(L"\\??\\BlueScreen");
 
     DPRINT("Screen Driver 0.0.6\n");
+
+#ifdef BLUE_USE_FRAMEBUFFER
+    /* Locate and map the boot display framebuffer. This must happen now:
+     * the loader block that describes the display is freed soon after the
+     * boot drivers have initialized. If no display is found, the device
+     * still gets created, but enabling the screen will fail. */
+    ScrFbInitialize();
+#endif
 
     DriverObject->MajorFunction[IRP_MJ_CREATE] = ScrCreateClose;
     DriverObject->MajorFunction[IRP_MJ_CLOSE]  = ScrCreateClose;
