@@ -125,7 +125,13 @@ RtlInsertElementGenericTable(IN PRTL_GENERIC_TABLE Table,
                              IN ULONG BufferSize,
                              OUT PBOOLEAN NewElement OPTIONAL)
 {
-    PRTL_SPLAY_LINKS NodeOrParent;
+    /*
+     * Initialize: on an empty tree the search does not write NodeOrParent,
+     * and passing an indeterminate value to the full insert below is
+     * undefined behavior that lets the compiler discard the empty-tree
+     * path entirely.
+     */
+    PRTL_SPLAY_LINKS NodeOrParent = NULL;
     TABLE_SEARCH_RESULT Result;
 
     /* Get the splay links and table search result immediately */
