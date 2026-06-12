@@ -275,6 +275,14 @@ MiArm64MapEarlyAliasRangeWithAttr(
         return;
     }
 
+    /*
+     * Early alias mappings exist only for kernel-range addresses. The low
+     * VA half belongs to user address spaces: a PA == VA alias there would
+     * be invisible to VAD bookkeeping and later torn apart by user-range
+     * allocate/free.
+     */
+    ASSERT((ULONG_PTR)BaseAddress >= (ULONG_PTR)KSEG0_BASE);
+
     StartVa = ALIGN_DOWN_BY((ULONG_PTR)BaseAddress, PAGE_SIZE);
     EndVa = ALIGN_DOWN_BY((ULONG_PTR)BaseAddress + Size - 1, PAGE_SIZE);
 
@@ -347,12 +355,17 @@ MiArm64MapEarlyDeviceRange(
         return;
     }
 
+    /*
+     * Only the physical-alias window mapping is re-asserted here. The HAL
+     * reaches early device registers exclusively through that window, so no
+     * PA == VA alias may be created: those land in the low VA half, which
+     * belongs to user address spaces, and Mm has no VAD describing them —
+     * a later user-range allocate/free over such a PTE would try to treat
+     * MMIO frames as managed pages.
+     */
     MiArm64MapKseg0IdentityRangeWithAttr((PVOID)(ULONG_PTR)BaseAddress,
                                          Size,
                                          MI_ARM64_MAIR_DEVICE_nGnRnE_IDX);
-    MiArm64MapEarlyAliasRangeWithAttr((PVOID)(ULONG_PTR)BaseAddress,
-                                      Size,
-                                      MI_ARM64_MAIR_DEVICE_nGnRnE_IDX);
 }
 
 static
