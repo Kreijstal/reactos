@@ -111,6 +111,13 @@ typedef enum _PORT_INFORMATION_CLASS
 //
 // Portable LPC Types for 32/64-bit compatibility
 //
+// The same set of macros is duplicated in ntifs.h and csrmsg.h; LPC_ULONG_PTR
+// acts as the shared include-once sentinel so that whichever header is pulled
+// in first wins and the others defer to it. This keeps the LPC_CLIENT_ID
+// typedef (below) from colliding with the macro form ntifs.h would otherwise
+// emit when both headers meet in one translation unit (e.g. win32k).
+//
+#ifndef LPC_ULONG_PTR
 #ifdef USE_LPC6432
 
 #define LPC_SIZE_T ULONGLONG
@@ -120,7 +127,7 @@ typedef enum _PORT_INFORMATION_CLASS
 typedef struct
 {
     LPC_HANDLE UniqueProcess;
-    LPC_HANDLE UniqueThread; 
+    LPC_HANDLE UniqueThread;
 } LPC_CLIENT_ID;
 #define LPC_UNICODE_STRING UNICODE_STRING64
 #define LPC_PTR(x) LPC_PVOID
@@ -129,7 +136,7 @@ typedef struct
 #define FROM_LPC_HANDLE(h) ((HANDLE)(h))
 
 #else
-    
+
 #define LPC_CLIENT_ID CLIENT_ID
 #define LPC_SIZE_T SIZE_T
 #define LPC_PVOID PVOID
@@ -142,6 +149,7 @@ typedef struct
 #define FROM_LPC_HANDLE(h) h
 
 #endif
+#endif /* LPC_ULONG_PTR */
 
 //
 // LPC Port Message
