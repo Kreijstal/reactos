@@ -355,6 +355,9 @@ static VOID InitServiceTable(VOID)
     IMPLEMENT_SERVICE(UserUnregisterHotKey);
     IMPLEMENT_SERVICE(UserUnhookWinEvent);
     IMPLEMENT_SERVICE(UserUpdateLayeredWindow);
+    IMPLEMENT_SERVICE(UserQueryInputContext);
+    IMPLEMENT_SERVICE(UserUpdateInputContext);
+    IMPLEMENT_SERVICE(UserValidateHandleSecure);
 #undef IMPLEMENT_SERVICE
 }
 
