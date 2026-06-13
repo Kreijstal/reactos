@@ -621,6 +621,7 @@ Wow64SystemServiceEx(ULONG syscallNum,
         WINE_WOW_IMPL_CASE(CreateProcess);
         WINE_WOW_IMPL_CASE(CreateProcessEx);
         WINE_WOW_IMPL_CASE(QueryInformationThread);
+        WINE_WOW_IMPL_CASE(SetInformationThread);
         WINE_WOW_IMPL_CASE(QueryInformationProcess);
         WINE_WOW_IMPL_CASE(SetInformationProcess);
         WINE_WOW_IMPL_CASE(ResumeThread);
@@ -1065,6 +1066,51 @@ wow64_NtQueryInformationThread(UINT* pArgs)
 
     DPRINT1("Invalid class %X given to %s, investigate.\n", InfoClass, __func__);
     return STATUS_INVALID_INFO_CLASS;
+}
+
+NTSTATUS
+NTAPI
+wow64_NtSetInformationThread(UINT* pArgs)
+{
+    HANDLE hThread = get_handle(&pArgs);
+    THREADINFOCLASS InfoClass = get_ulong(&pArgs);
+    PVOID pThreadInfo32 = get_ptr(&pArgs);
+    ULONG uInfoLength32 = get_ulong(&pArgs);
+
+    switch (InfoClass)
+    {
+        /*
+         * Classes whose data is a single pointer-sized value: the 32-bit client
+         * passes a 4-byte value but the 64-bit kernel expects a ULONG_PTR/HANDLE,
+         * so widen it through a native-sized local.
+         */
+        case ThreadAffinityMask:
+        case ThreadImpersonationToken:
+        case ThreadQuerySetWin32StartAddress:
+        {
+            ULONG_PTR NativeValue;
+
+            if (uInfoLength32 < sizeof(ULONG))
+                return STATUS_INFO_LENGTH_MISMATCH;
+
+            NativeValue = *(PULONG)pThreadInfo32;
+            return NtSetInformationThread(hThread,
+                                          InfoClass,
+                                          &NativeValue,
+                                          sizeof(NativeValue));
+        }
+
+        /*
+         * Remaining set classes take a LONG/ULONG/BOOLEAN scalar or no buffer at
+         * all (e.g. ThreadHideFromDebugger), all of which are binary-compatible
+         * between the 32-bit and 64-bit views, so forward them as-is.
+         */
+        default:
+            return NtSetInformationThread(hThread,
+                                          InfoClass,
+                                          pThreadInfo32,
+                                          uInfoLength32);
+    }
 }
 
 BOOL
