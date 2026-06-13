@@ -66,22 +66,33 @@ static USHORT native_machine = IMAGE_FILE_MACHINE_AMD64;
 
 unsigned long __readfsdword(unsigned long);
 
+/* These are raw machine-code thunks that get called as functions, so they must
+ * live in an executable section.  MSVC honours __declspec(allocate(".text")),
+ * but under GCC/Clang ReactOS expands __declspec(x) to __attribute__((x)) and
+ * there is no "allocate" attribute, so the blobs silently fall back into the
+ * non-executable .data section and faulting on instruction fetch when invoked.
+ * Use the real section attribute on those toolchains. */
+#if defined(__GNUC__) || defined(__clang__)
+#define WOW64_EXEC_SECTION __attribute__((section(".text")))
+#else
 #pragma section(".text")
+#define WOW64_EXEC_SECTION __declspec(allocate(".text"))
+#endif
 
-__declspec(allocate(".text"))
-static unsigned char FarReturn64Impl[] = 
+WOW64_EXEC_SECTION
+static unsigned char FarReturn64Impl[] =
 {
     0x48, /* REX.W */
     0xCB  /* retf*/
 };
 
-__declspec(allocate(".text"))
+WOW64_EXEC_SECTION
 static unsigned char FarReturn32Impl[] =
 {
     0xCB  /* retf */
 };
 
-__declspec(allocate(".text"))
+WOW64_EXEC_SECTION
 static unsigned char Enter32Impl[] =
 {
     0x48, 0x89, 0xCC, /* mov rsp, rcx */

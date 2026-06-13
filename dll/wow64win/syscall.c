@@ -94,7 +94,15 @@ const SYSTEM_SERVICE_TABLE sdwhwin32 =
 
 #ifdef __REACTOS__
 
+/* Raw machine-code thunk invoked as a function: must sit in an executable
+ * section.  Under GCC/Clang __declspec(allocate(".text")) is a no-op (it maps
+ * to an unknown __attribute__((allocate(...)))), leaving the blob in .data and
+ * faulting on instruction fetch, so use the real section attribute there. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((section(".text")))
+#else
 __declspec(allocate(".text"))
+#endif
 static unsigned char ReadFsDwordImpl[] =
 {
     0x64, 0x8B, 0x01, /* mov eax, fs:[rcx] */
