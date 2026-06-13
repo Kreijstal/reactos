@@ -374,10 +374,17 @@ Wow64WinHandler(ULONG syscallNum,
         DPRINT1("Wow64Win service table is empty.\n");
         return STATUS_NOT_IMPLEMENTED;
     }
-    
+
+    if (syscallNum >= pServiceTable->ServiceLimit)
+    {
+        DPRINT1("Wow64Win service %lX out of range (limit %Iu).\n",
+                syscallNum, pServiceTable->ServiceLimit);
+        return STATUS_INVALID_SYSTEM_SERVICE;
+    }
+
     if (HandlerTable[syscallNum] == 0)
     {
-        DPRINT1("Wow64Win service table doesn't define service %lX:%s.\n", 
+        DPRINT1("Wow64Win service table doesn't define service %lX:%s.\n",
                 syscallNum, mapping[syscallNum]);
         return STATUS_NOT_IMPLEMENTED;
     }
