@@ -246,9 +246,15 @@ typedef struct _THRDESKHEAD
 typedef struct tagIMC
 {
     THRDESKHEAD    head;
+#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
     struct tagIMC *pImcNext;
     ULONG_PTR      dwClientImcData;
     HWND           hImeWnd;
+#else
+    UINT64         pImcNext;
+    UINT64         dwClientImcData;
+    UINT64         hImeWnd;
+#endif
 } IMC, *PIMC;
 
 #if !(defined(_WIN64) || defined(BUILD_WOW6432))
@@ -258,6 +264,12 @@ C_ASSERT(offsetof(IMC, head.pti) == 0x8);
 C_ASSERT(offsetof(IMC, pImcNext) == 0x14);
 C_ASSERT(offsetof(IMC, dwClientImcData) == 0x18);
 C_ASSERT(offsetof(IMC, hImeWnd) == 0x1c);
+#elif defined(BUILD_WOW6432) && defined(_M_IX86)
+/* The 32-bit WoW64 view must match the 64-bit kernel layout so that fields
+ * written by the kernel are read back from the same offset by 32-bit clients. */
+C_ASSERT(offsetof(IMC, pImcNext) == 0x28);
+C_ASSERT(offsetof(IMC, dwClientImcData) == 0x30);
+C_ASSERT(offsetof(IMC, hImeWnd) == 0x38);
 #endif
 
 typedef struct _PROCDESKHEAD
