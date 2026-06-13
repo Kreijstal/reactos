@@ -170,10 +170,28 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
         {
             /* DbgPrint */
             case BREAKPOINT_PRINT:
+            {
+                ULONG ComponentId = (ULONG)KdpGetParameterThree(ContextRecord);
+                ULONG Level = (ULONG)KdpGetParameterFour(ContextRecord);
+
+#if defined(_AMD64_)
+                /*
+                 * A WoW64 (compat-mode) thread issues int 2Dh using the i386
+                 * DebugService convention, which passes the ComponentId and
+                 * Level in EBX/EDI rather than the amd64 R8/R9 that
+                 * KdpGetParameterThree/Four read. Without this the filter state
+                 * is queried with garbage and the output is silently dropped.
+                 */
+                if (ContextRecord->SegCs == (KGDT64_R3_CMCODE | RPL_MASK))
+                {
+                    ComponentId = (ULONG)ContextRecord->Rbx;
+                    Level = (ULONG)ContextRecord->Rdi;
+                }
+#endif
 
                 /* Call the worker routine */
-                ReturnStatus = KdpPrint((ULONG)KdpGetParameterThree(ContextRecord),
-                                        (ULONG)KdpGetParameterFour(ContextRecord),
+                ReturnStatus = KdpPrint(ComponentId,
+                                        Level,
                                         (PCHAR)ExceptionRecord->ExceptionInformation[1],
                                         (USHORT)ExceptionRecord->ExceptionInformation[2],
                                         PreviousMode,
@@ -184,6 +202,7 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
                 /* Update the return value for the caller */
                 KeSetContextReturnRegister(ContextRecord, ReturnStatus);
                 break;
+            }
 
             /* DbgPrompt */
             case BREAKPOINT_PROMPT:
