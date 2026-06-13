@@ -121,7 +121,14 @@ PSERVERINFO g_ServerInfo = NULL;
 
 NTSTATUS WINAPI wow64_NtGdiInit(UINT* pArgs)
 {
-    return NtGdiInit() ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    /*
+     * NtGdiInit returns a BOOLEAN (TRUE on success), and the 32-bit gdi32
+     * caller in GdiDllInitialize tests it as a BOOLEAN ("if (!NtGdiInit())").
+     * Pass the value straight through to EAX rather than remapping it to an
+     * NTSTATUS, which would turn success (STATUS_SUCCESS == 0) into FALSE and
+     * fail gdi32 init -> user32 DllMain -> every WoW64 GUI process.
+     */
+    return (NTSTATUS)NtGdiInit();
 }
 
 static VOID InitServiceTable(VOID)
