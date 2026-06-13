@@ -5258,7 +5258,6 @@ NTSTATUS WINAPI wow64_NtUserUnregisterHotKey( UINT *args )
     return NtUserUnregisterHotKey( hwnd, id );
 }
 
-#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserUpdateInputContext( UINT *args )
 {
     HIMC handle = get_handle( &args );
@@ -5267,7 +5266,16 @@ NTSTATUS WINAPI wow64_NtUserUpdateInputContext( UINT *args )
 
     return NtUserUpdateInputContext( handle, attr, value );
 }
-#endif
+
+NTSTATUS WINAPI wow64_NtUserValidateHandleSecure( UINT *args )
+{
+    HANDLE handle = get_handle( &args );
+
+    /* NtUserValidateHandleSecure returns a BOOLEAN that the 32-bit caller
+     * tests directly; pass the value straight through to EAX rather than
+     * remapping it to an NTSTATUS. */
+    return (NTSTATUS)NtUserValidateHandleSecure( handle );
+}
 
 NTSTATUS WINAPI wow64_NtUserUpdateLayeredWindow( UINT *args )
 {
