@@ -1493,13 +1493,40 @@ typedef struct tagCURSORDATA
 #define IS_CICERO_COMPAT_DISABLED() \
     (GetWin32ClientInfo()->dwCompatFlags2 & COMPAT_FLAG_2_CICERO_DISABLED)
 
+/*
+ * The IMEUI pointed at by IMEWND.pimeui is allocated by the 32-bit client
+ * (user32!ImeWndProc, sizeof(IMEUI) bytes) but is read and written by the
+ * 64-bit kernel (co_IntCreateDefaultImeWindow et al.), which accesses hwndUI,
+ * hwndIMC, nCntInIMEProc and the flag bitfield by their structure offsets and
+ * ProbeForWrite()s the whole structure.  Under WoW64 the leading handle/pointer
+ * fields are only 32-bit wide, which would place every later field (and the
+ * total size) below the offsets the 64-bit kernel uses, so the kernel would
+ * overrun the smaller client allocation and corrupt the process heap.
+ *
+ * Pad each leading field to the 64-bit width under WoW64 (keeping the native
+ * field types so client code is unchanged) so the client and kernel agree on
+ * all offsets: hwndUI 0x20, nCntInIMEProc 0x28, flags 0x2c, dwLastStatus 0x30,
+ * sizeof 0x38.  The high halves stay zero (HEAP_ZERO_MEMORY) and the kernel
+ * reads the handles back correctly on little-endian.
+ */
+#if defined(BUILD_WOW6432) && defined(_M_IX86)
+#define IMEUI_WOW64_PAD(n) DWORD Wow64Pad##n;
+#else
+#define IMEUI_WOW64_PAD(n)
+#endif
+
 typedef struct tagIMEUI
 {
     PWND spwnd;
+    IMEUI_WOW64_PAD(0)
     HIMC hIMC;
+    IMEUI_WOW64_PAD(1)
     HWND hwndIMC;
+    IMEUI_WOW64_PAD(2)
     HKL hKL;
+    IMEUI_WOW64_PAD(3)
     HWND hwndUI;
+    IMEUI_WOW64_PAD(4)
     LONG nCntInIMEProc;
     struct {
         UINT fShowStatus:1;
@@ -1511,7 +1538,22 @@ typedef struct tagIMEUI
         UINT fFreeActiveEvent:1;
     };
     DWORD dwLastStatus;
+    IMEUI_WOW64_PAD(5)
 } IMEUI, *PIMEUI;
+
+#if defined(_WIN64) || (defined(BUILD_WOW6432) && defined(_M_IX86))
+/* 64-bit kernel layout, and the 32-bit WoW64 client view that must match it. */
+C_ASSERT(FIELD_OFFSET(IMEUI, hwndUI) == 0x20);
+C_ASSERT(FIELD_OFFSET(IMEUI, nCntInIMEProc) == 0x28);
+C_ASSERT(FIELD_OFFSET(IMEUI, dwLastStatus) == 0x30);
+C_ASSERT(sizeof(IMEUI) == 0x38);
+#elif defined(_M_IX86)
+/* Native 32-bit layout. */
+C_ASSERT(FIELD_OFFSET(IMEUI, hwndUI) == 0x10);
+C_ASSERT(FIELD_OFFSET(IMEUI, nCntInIMEProc) == 0x14);
+C_ASSERT(FIELD_OFFSET(IMEUI, dwLastStatus) == 0x1c);
+C_ASSERT(sizeof(IMEUI) == 0x20);
+#endif
 
 typedef struct tagIMEWND
 {
