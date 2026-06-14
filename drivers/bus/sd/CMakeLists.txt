@@ -24,5 +24,13 @@ set_module_type(sdbus kernelmodedriver)
 add_importlibs(sdbus ntoskrnl hal)
 add_pch(sdbus sdbus.h SOURCE)
 add_cd_file(TARGET sdbus DESTINATION reactos/system32/drivers NO_CAB FOR all)
-add_registry_inf(sdbus_reg.inf)
+# Pre-register sdbus as a boot-start "System Bus Extender" service only on
+# platforms that actually boot off an SD/eMMC device (Raspberry Pi / ARM64).
+# On PC targets the SD host is a hot-pluggable PCI/ACPI device that PnP
+# enumerates on demand through sdbus.inf, exactly like upstream; forcing it
+# boot-start there makes freeldr fail fatally ("Cannot load boot driver
+# sdbus.sys") when the image cannot be loaded, taking the whole system down.
+if(ARCH STREQUAL "arm64")
+    add_registry_inf(sdbus_reg.inf)
+endif()
 add_driver_inf(sdbus sdbus.inf)
