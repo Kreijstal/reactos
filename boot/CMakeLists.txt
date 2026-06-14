@@ -27,7 +27,13 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/remaster.sh DESTINATION loader NO_C
 # mirrors the CD layout below reactos/ is grafted verbatim.
 #
 # The files are added to the LiveCD file set, which the BootCD image inherits,
-# so 32-bit programs can run on the live system.
+# so 32-bit programs can run on the live system. They are also added to the
+# BootCD set so they end up inside reactos.cab and the text-mode installer
+# deploys them to the installed system's SysWOW64 (and x86 winsxs) directory;
+# without this the installer would create an empty SysWOW64 and no WoW64
+# process could launch from a clean install. The reactos/SysWOW64 and x86
+# winsxs destinations map to cab directory IDs in sdk/cmake/CMakeMacros.cmake
+# (dir_to_num) and boot/bootdata/packages/reactos.dff.in ([Directories]).
 if(ARCH STREQUAL "amd64" AND REACTOS_WOW64_GUEST_DIR)
     file(GLOB _wow64_lst "${REACTOS_WOW64_GUEST_DIR}/boot/livecd.*.lst")
     if(_wow64_lst)
@@ -57,12 +63,12 @@ if(ARCH STREQUAL "amd64" AND REACTOS_WOW64_GUEST_DIR)
                    _wow64_name STREQUAL "drvmain.sdb")
                     continue()
                 endif()
-                add_cd_file(FILE "${_wow64_src}" DESTINATION reactos/SysWOW64 FOR livecd)
+                add_cd_file(FILE "${_wow64_src}" DESTINATION reactos/SysWOW64 FOR livecd bootcd)
             elseif(_wow64_cddest MATCHES "^reactos/winsxs/(.+)/[^/]+$")
                 add_cd_file(FILE "${_wow64_src}"
-                            DESTINATION "reactos/winsxs/${CMAKE_MATCH_1}" FOR livecd)
+                            DESTINATION "reactos/winsxs/${CMAKE_MATCH_1}" FOR livecd bootcd)
             elseif(_wow64_cddest MATCHES "^reactos/winsxs/[^/]+$")
-                add_cd_file(FILE "${_wow64_src}" DESTINATION reactos/winsxs FOR livecd)
+                add_cd_file(FILE "${_wow64_src}" DESTINATION reactos/winsxs FOR livecd bootcd)
             endif()
         endforeach()
     else()
