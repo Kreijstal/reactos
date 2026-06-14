@@ -560,12 +560,20 @@ wow64_NtUserBuildHwndList(UINT *pArgs)
 
     if (phwndList32 != NULL)
     {
-        for (i = 0; i < *pcHwndNeeded; i++)
+        /* The kernel writes at most cHwnd entries into the buffer but reports
+         * the full window count in *pcHwndNeeded (which may exceed cHwnd when
+         * the buffer is too small).  Copy only what was actually written, or
+         * we over-read the 64-bit temp and over-write the 32-bit caller buffer
+         * (heap corruption).  The 32-bit caller still sees the full count in
+         * *pcHwndNeeded and retries with a larger buffer, exactly as native. */
+        ULONG CopyCount = (*pcHwndNeeded < cHwnd) ? *pcHwndNeeded : cHwnd;
+
+        for (i = 0; i < CopyCount; i++)
         {
             phwndList32[i] = HandleToUlong(phwndList[i]);
         }
     }
-    
+
     return Status;
 }
 
