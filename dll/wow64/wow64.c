@@ -1154,6 +1154,22 @@ Wow64KiUserCallbackDispatcher(ULONG nCallback,
     
     if (!setjmp(frame.jmpbuf))
     {
+        /*
+         * The user-mode callback returns by longjmp()ing back here from
+         * wow64_NtCallbackReturn().  On amd64 the CRT longjmp() performs a full
+         * SEH stack unwind (RtlUnwind) whenever the jump buffer carries a frame
+         * pointer.  The stack between the longjmp() site and this setjmp()
+         * crosses the hand-written 32<->64 transition trampolines (the
+         * "heaven's gate" in srasm.S and the Call32 thunk), which carry no
+         * unwind information, so that unwind walks off into garbage and wedges
+         * the thread (observed when a window-proc callback creates a second GUI
+         * thread, e.g. Task Manager's page-refresh worker).  A callback return
+         * is a context restore, not a C++/SEH unwind, so clear the saved frame
+         * pointer to force longjmp() down its non-unwinding register-restore
+         * path (__longjmp_noframe) -- matching the Wine wow64 layer, which uses
+         * __wine_setjmpex with a NULL frame for exactly this reason.
+         */
+        ((_JUMP_BUFFER *)(void *)frame.jmpbuf)->Frame = 0;
         Call32(GetKernelCallbackTable32()[nCallback], 2, Args64);
     }
    
