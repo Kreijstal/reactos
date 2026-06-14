@@ -4084,16 +4084,31 @@ NTSTATUS WINAPI wow64_NtUserMsgWaitForMultipleObjectsEx( UINT *args )
 
     return NtUserMsgWaitForMultipleObjectsEx( count, handles, timeout, mask, flags );
 }
+#endif /* !__REACTOS__ */
 
+/* The IME owner/notify services are issued by 32-bit imm32 during window
+ * creation, so these thunks must be compiled (and registered) for WoW64. */
 NTSTATUS WINAPI wow64_NtUserNotifyIMEStatus( UINT *args )
 {
     HWND hwnd = get_handle( &args );
-    ULONG status = get_ulong( &args );
+    BOOL fOpen = get_ulong( &args );
+    DWORD conversion = get_ulong( &args );
 
-    NtUserNotifyIMEStatus( hwnd, status );
+    NtUserNotifyIMEStatus( hwnd, fOpen, conversion );
     return 0;
 }
 
+NTSTATUS WINAPI wow64_NtUserSetImeOwnerWindow( UINT *args )
+{
+    HWND imewnd = get_handle( &args );
+    HWND focus = get_handle( &args );
+
+    /* NtUserSetImeOwnerWindow returns a BOOLEAN that the 32-bit caller tests
+     * directly; pass it straight through to EAX rather than remapping it. */
+    return (NTSTATUS)NtUserSetImeOwnerWindow( imewnd, focus );
+}
+
+#ifndef __REACTOS__
 NTSTATUS WINAPI wow64_NtUserNotifyWinEvent( UINT *args )
 {
     DWORD event = get_ulong( &args );
