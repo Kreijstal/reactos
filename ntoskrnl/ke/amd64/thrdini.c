@@ -248,15 +248,6 @@ KiSwapContextResume(
     /* DPCs shouldn't be active */
     if (Pcr->Prcb.DpcRoutineActive)
     {
-        extern PVOID KiLastDpcDeferredRoutine;
-        extern PVOID KiLastDpcDeferredContext;
-        extern PVOID KiLastDpcSysArg1;
-        extern PVOID KiLastDpcSysArg2;
-        DPRINT1("ATTEMPTED_SWITCH_FROM_DPC: last DPC routine=%p ctx=%p sa1=%p sa2=%p "
-                "OldThread=%p NewThread=%p\n",
-                KiLastDpcDeferredRoutine, KiLastDpcDeferredContext,
-                KiLastDpcSysArg1, KiLastDpcSysArg2,
-                OldThread, NewThread);
         /* Crash the machine */
         KeBugCheckEx(ATTEMPTED_SWITCH_FROM_DPC,
                      (ULONG_PTR)OldThread,
