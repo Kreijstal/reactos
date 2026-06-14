@@ -358,6 +358,8 @@ static VOID InitServiceTable(VOID)
     IMPLEMENT_SERVICE(UserQueryInputContext);
     IMPLEMENT_SERVICE(UserUpdateInputContext);
     IMPLEMENT_SERVICE(UserValidateHandleSecure);
+    IMPLEMENT_SERVICE(UserNotifyIMEStatus);
+    IMPLEMENT_SERVICE(UserSetImeOwnerWindow);
 #undef IMPLEMENT_SERVICE
 }
 
