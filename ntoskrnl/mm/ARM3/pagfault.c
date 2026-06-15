@@ -2358,6 +2358,20 @@ UserFault:
                 MiInitializePfn(PageFrameIndex, PointerPte, TRUE);
                 TempPte.u.Hard.PageFrameNumber = PageFrameIndex;
                 TempPte.u.Hard.Write = 1;
+                /*
+                 * Set the hardware-enforced R/W bit as well.  On amd64 the CPU
+                 * writability bit is bit 1, which the NDK MMPTE_HARDWARE struct
+                 * names `Write`/`Writable` pre-LONGHORN but renames to `Dirty1`
+                 * at NTDDI_LONGHORN+ (where `Write` becomes the software bit 11).
+                 * MI_MAKE_WRITE_PAGE() / MI_IS_PAGE_WRITEABLE() track that bit.
+                 * Without this, a LONGHORN+ build leaves the freshly copied page
+                 * hardware-read-only (Dirty1 = 0): the faulting write retries,
+                 * faults again as non-COW, and MiResolveTransitionFault's
+                 * writability check returns STATUS_ACCESS_VIOLATION -> spurious
+                 * c0000005 on the first write to any copy-on-write page
+                 * (e.g. image .data first write / MSYS2 process churn).
+                 */
+                MI_MAKE_WRITE_PAGE(&TempPte);
                 TempPte.u.Hard.CopyOnWrite = 0;
 
                 MI_WRITE_VALID_PTE(PointerPte, TempPte);
