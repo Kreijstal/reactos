@@ -757,7 +757,20 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
         else
             Fcb->RFCB.AllocationSize = *DataSize;
         Fcb->RFCB.FileSize = *DataSize;
-        Fcb->RFCB.ValidDataLength = *DataSize;
+        /* ValidDataLength tracks how far real data has actually been written,
+         * which is NOT the same as the (possibly larger) file size on an
+         * extend.  Raising VDL to FileSize here - before the caller writes the
+         * data - would tell the cache manager that the freshly allocated, still
+         * uninitialized tail of the file is valid: CcRosEnsureVacbResident
+         * would then read those clusters from disk (garbage/stale) instead of
+         * zero-filling, and a lazy-writer/trim flush could write an unwritten
+         * page tail back as committed data and mark it clean - exactly the
+         * "head valid, tail zeroed to the page boundary" corruption seen under
+         * memory pressure.  Match FastFat: never advance VDL past the real
+         * valid extent here; only clamp it down when the file shrinks below it.
+         * The cached write path advances VDL after CcCopyWrite lands the data. */
+        if (Fcb->RFCB.ValidDataLength.QuadPart > DataSize->QuadPart)
+            Fcb->RFCB.ValidDataLength = *DataSize;
 
         if (Shrinking && FileObject->SectionObjectPointer)
         {
@@ -879,6 +892,49 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     LONG RunCount;
 
     ASSERT(AttrContext->pRecord->IsNonResident);
+
+    /* Preallocation: for a regular file's unnamed $DATA stream that is being
+     * extended, reserve clusters in a geometrically-growing contiguous chunk
+     * instead of rounding the allocation up to exactly the new data size.  A
+     * file written by many small appends would otherwise grow its allocation
+     * one cluster at a time; under concurrent writers those single-cluster
+     * allocations interleave across files and shatter each file into hundreds
+     * of non-contiguous runs.  Besides being slow, that can grow the encoded
+     * mapping pairs past what a single MFT record can hold (~896 bytes for an
+     * unnamed $DATA attribute), at which point AddRun fails.  Reserving space
+     * ahead keeps the file contiguous so the run list stays small.  This
+     * mirrors Windows, where AllocatedSize runs ahead of FileSize while a file
+     * is being written and the excess is reclaimed when the file is closed.
+     * DataSize / InitializedSize (set below) still track the real written
+     * extent, so reads past valid data return zero and on-disk semantics are
+     * unchanged - only AllocatedSize (reserved, cluster-aligned) is larger.
+     * System metadata files (MFT, $Bitmap, ...) are sized precisely by their
+     * own callers and must not be preallocated, so gate on a regular file's
+     * unnamed data stream. */
+    if (AttrContext->pRecord->Type == AttributeData &&
+        AttrContext->pRecord->NameLength == 0 &&
+        FileRecord->MFTRecordNumber >= NTFS_FILE_FIRST_USER_FILE &&
+        (ULONGLONG)DataSize->QuadPart >= AttrContext->pRecord->NonResident.DataSize)
+    {
+        /* Growing (or rewriting in place) a regular file's data stream.
+         * Reserve clusters ahead, and never drop AllocationSize below what is
+         * already reserved - otherwise the truncate branch below would free
+         * the preallocated tail on the very next append, thrashing the
+         * allocator and re-fragmenting the file.  Only an explicit shrink
+         * (DataSize below the current data size, which skips this branch) or a
+         * close-time trim reclaims preallocation. */
+        ULONGLONG Headroom = (ULONGLONG)DataSize->QuadPart / 4;
+        ULONGLONG Reserved;
+
+        if (Headroom > NTFS_DATA_PREALLOC_MAX_BYTES)
+            Headroom = NTFS_DATA_PREALLOC_MAX_BYTES;
+
+        Reserved = ROUND_UP((ULONGLONG)DataSize->QuadPart + Headroom, BytesPerCluster);
+        if (Reserved < AttrContext->pRecord->NonResident.AllocatedSize)
+            Reserved = AttrContext->pRecord->NonResident.AllocatedSize;
+
+        AllocationSize = Reserved;
+    }
 
     ActualClusters = 0;
     RunCount = FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB);
