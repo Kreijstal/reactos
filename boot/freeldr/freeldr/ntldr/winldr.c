@@ -448,10 +448,25 @@ WinLdrLoadBootDrivers(PLOADER_PARAMETER_BLOCK LoaderBlock,
         }
         else
         {
-            /* Loading failed: cry loudly */
-            ERR("Cannot load boot driver '%wZ'!\n", &BootDriver->FilePath);
-            UiMessageBox("Cannot load boot driver '%wZ'!", &BootDriver->FilePath);
-            ret = FALSE;
+            /*
+             * Loading failed. How loudly we complain depends on the driver's
+             * ErrorControl, just like the NT kernel loader: a driver marked
+             * SERVICE_ERROR_IGNORE or _NORMAL is optional, so we log the
+             * failure and keep booting without bothering the user; only a
+             * SEVERE/CRITICAL driver is important enough to interrupt with a
+             * message box. This prevents a stale or wrong-architecture
+             * boot-start registration (e.g. an SD/eMMC bus driver that only
+             * applies to another platform) from wedging every boot behind a
+             * modal dialog.
+             */
+            ERR("Cannot load boot driver '%wZ' (ErrorControl %lu)!\n",
+                &BootDriver->FilePath, DriverNode->ErrorControl);
+
+            if (DriverNode->ErrorControl >= SERVICE_ERROR_SEVERE)
+            {
+                UiMessageBox("Cannot load boot driver '%wZ'!", &BootDriver->FilePath);
+                ret = FALSE;
+            }
 
             /* Remove it from the list and try to continue */
             RemoveEntryList(&BootDriver->Link);
