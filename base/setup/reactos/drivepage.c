@@ -416,12 +416,19 @@ FormatDlgProcWorker(
 
             if (SetupData.bUnattend)
             {
-                /* In unattended mode, preselect the file system */
+                /* In unattended mode, preselect the file system. Same encoding
+                 * as the 'FsType' key in unattend.inf and the usetup TUI path:
+                 * 1 == BtrFS, 2 == NTFS, anything else (incl. 0) == FAT. */
                 switch (SetupData.USetupData.FsType)
                 {
                     /* 1 is for BtrFS */
                     case 1:
                         DefaultFs = L"BTRFS";
+                        break;
+
+                    /* 2 is for NTFS */
+                    case 2:
+                        DefaultFs = L"NTFS";
                         break;
 
                     /* If we don't understand input, default to FAT */
