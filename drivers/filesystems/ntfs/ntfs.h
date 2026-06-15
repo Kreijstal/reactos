@@ -440,6 +440,12 @@ typedef enum
 
 #define NTFS_MFT_MASK 0x0000FFFFFFFFFFFFULL
 
+/* Upper bound on how far a regular file's unnamed $DATA allocation is
+ * reserved ahead of its data size while it grows (see preallocation in
+ * SetNonResidentAttributeDataLength).  Bounds the per-file reserved-but-
+ * unwritten overshoot; the excess is reclaimed when the file is closed. */
+#define NTFS_DATA_PREALLOC_MAX_BYTES (256 * 1024)
+
 #define COLLATION_BINARY              0x00
 #define COLLATION_FILE_NAME           0x01
 #define COLLATION_UNICODE_STRING      0x02
