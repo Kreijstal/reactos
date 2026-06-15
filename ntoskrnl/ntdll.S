@@ -31,19 +31,16 @@
 #define SVC_(name, argcount) STUB_U name, argcount
 #define SVC_WRAP_(name, argcount) STUB_U name, argcount
 
-#ifdef BUILD_WOW6432
 /*
- * A WoW64 guest's syscall numbers MUST match the 64-bit host's table.  The
- * host is built for a newer NT version than the 32-bit guest, so force the
- * host's (newest) NTDDI gating here.  Otherwise version-gated syscalls (e.g.
- * CreateUserProcess) are absent from the guest, shifting every later number -
- * including the appended Wow64* services - out of sync with the host's
- * dll/wow64/sysfuncnum.h dispatch.
+ * A WoW64 guest's syscall numbers MUST match the 64-bit host's KiServiceTable
+ * and wow64.dll's Wow64SystemServiceEx() dispatch table.  All three are
+ * generated from sysfuncs.h, and the guest (ARCH=i386 SARCH=wow64) and host
+ * (ARCH=amd64) are configured with the same project NTDDI_VERSION, so they
+ * already agree -- do NOT override NTDDI_VERSION here.  Forcing a different
+ * (newer) value adds version-gated syscalls absent from the host table,
+ * shifting every later number out of sync and, in particular, dispatching the
+ * appended Wow64* services (below) to the wrong handler.
  */
-#undef NTDDI_VERSION
-#define NTDDI_VERSION 0x0A000000
-#endif
-
 #include <sysfuncs.h>
 
 #ifdef BUILD_WOW6432
