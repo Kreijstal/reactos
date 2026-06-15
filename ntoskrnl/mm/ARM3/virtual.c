@@ -2304,16 +2304,131 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
             goto FailPath;
         }
 
-        /* Check if data or page file mapping protection PTE is compatible */
-        if (!Vad->ControlArea->u.Flags.Image)
+        /* Image section views can not have their protection changed yet */
+        if (Vad->ControlArea->u.Flags.Image)
         {
-            /* Not yet */
-            DPRINT1("Fixme: Not checking for valid protection\n");
+            DPRINT1("Section protection on image views not yet supported\n");
+            OldProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
         }
+        else
+        {
+            /*
+             * Page-file backed (data) section view. ReactOS applies the
+             * requested protection to the view's PTEs. This is required by
+             * JIT/script engines (e.g. Qt's QV4) that map a section view
+             * writable, emit code into it, then VirtualProtect it executable.
+             * The pages are shared through a prototype PTE, so we only ever
+             * touch the local (per-process) PTEs and never the segment-wide
+             * Pfn->OriginalPte protection.
+             */
+            MiLockProcessWorkingSetUnsafe(Process, Thread);
 
-        /* This is a section, and this is not yet supported */
-        DPRINT1("Section protection not yet supported\n");
-        OldProtect = 0;
+            /* Compute starting and ending PTE and PDE addresses */
+            PointerPde = MiAddressToPde(StartingAddress);
+            PointerPte = MiAddressToPte(StartingAddress);
+            LastPte = MiAddressToPte(EndingAddress);
+
+            /* Make the PDE valid */
+            MiMakePdeExistAndMakeValid(PointerPde, Process, MM_NOIRQL);
+
+            /* Capture the protection of the first page */
+            if (PointerPte->u.Long != 0)
+            {
+                OldProtect = MiGetPageProtection(PointerPte);
+
+                /* MiGetPageProtection may have dropped and re-taken the lock */
+                MiMakePdeExistAndMakeValid(PointerPde, Process, MM_NOIRQL);
+            }
+            else
+            {
+                /* Grab the old protection from the VAD itself */
+                OldProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
+            }
+
+            /* Loop all the PTEs that describe this view */
+            while (PointerPte <= LastPte)
+            {
+                /* Keep the page table valid across PDE boundaries */
+                if (MiIsPteOnPdeBoundary(PointerPte))
+                {
+                    PointerPde = MiPteToPde(PointerPte);
+                    MiMakePdeExistAndMakeValid(PointerPde, Process, MM_NOIRQL);
+                }
+
+                /* Capture the PTE */
+                PteContents = *PointerPte;
+                if (PteContents.u.Hard.Valid == 1)
+                {
+                    /* Get the PFN entry for this resident, shared page */
+                    Pfn1 = MiGetPfnEntry(PFN_FROM_PTE(&PteContents));
+
+                    /* Check if the page should not be accessible at all */
+                    if ((NewAccessProtection & PAGE_NOACCESS) ||
+                        (NewAccessProtection & PAGE_GUARD))
+                    {
+                        KIRQL OldIrql = MiAcquirePfnLock();
+
+                        /* Mark the PTE as transition and change its protection */
+                        PteContents.u.Hard.Valid = 0;
+                        PteContents.u.Soft.Transition = 1;
+                        PteContents.u.Trans.Protection = ProtectionMask;
+                        /* Decrease PFN share count and write the PTE */
+                        MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
+                        MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+#ifdef CONFIG_SMP
+                        // FIXME: Should invalidate entry in every CPU TLB
+                        ASSERT(KeNumberProcessors == 1);
+#endif
+                        KeInvalidateTlbEntry(MiPteToAddress(PointerPte));
+
+                        MiReleasePfnLock(OldIrql);
+                    }
+                    else
+                    {
+                        /*
+                         * Rebuild the local PTE with the new protection. Unlike
+                         * private memory we deliberately do NOT stamp
+                         * Pfn1->OriginalPte: that protection belongs to the
+                         * shared segment and is not per-view.
+                         */
+                        MiFlushTbAndCapture(Vad,
+                                            PointerPte,
+                                            ProtectionMask,
+                                            Pfn1,
+                                            TRUE);
+                    }
+                }
+                else if (PteContents.u.Long != 0)
+                {
+                    /*
+                     * The page is not resident but the view PTE already carries
+                     * protection (a prototype-lookup, transition or page-file
+                     * PTE). Update it in place so the next fault honours the new
+                     * protection.
+                     */
+                    PteContents.u.Soft.Protection = ProtectionMask;
+                    MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+                }
+                /* A zero PTE faults in from the VAD protection, updated below */
+
+                /* Move to the next PTE */
+                PointerPte++;
+            }
+
+            /* Unlock the working set */
+            MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+            /*
+             * If the request covers the whole view, update the VAD protection
+             * too, so VirtualQuery reports it and pages not yet faulted in pick
+             * up the new protection on their first fault.
+             */
+            if (((ULONG_PTR)StartingAddress >> PAGE_SHIFT == Vad->StartingVpn) &&
+                ((ULONG_PTR)EndingAddress >> PAGE_SHIFT == Vad->EndingVpn))
+            {
+                Vad->u.VadFlags.Protection = ProtectionMask;
+            }
+        }
     }
     else
     {
