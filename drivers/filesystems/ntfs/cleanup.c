@@ -58,6 +58,17 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     ASSERT(DeviceExt->OpenHandleCount > 0);
     DeviceExt->OpenHandleCount--;
 
+    /* Complete and remove any directory-change-notification watches that
+     * were registered through this handle (see NtfsDirectoryControl).  The
+     * Ccb is the same subject context passed to FsRtlNotifyFullChangeDirectory.
+     * Safe to call even when none were registered; matches FastFat/CDFS.  Done
+     * before the MainResource acquire below so it still runs on the
+     * STATUS_PENDING retry path (a second call is a harmless no-op). */
+    if (NtfsFCBIsDirectory(Fcb))
+    {
+        FsRtlNotifyCleanup(DeviceExt->NotifySync, &DeviceExt->NotifyList, Ccb);
+    }
+
     /* Emit USN_REASON_CLOSE if this volume has an active journal and we
      * aren't looking at the volume-stream FCB.  Gated so un-journalled
      * volumes stay on the fast path.  Per-handle CCB-cached reasons
