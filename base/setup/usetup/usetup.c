@@ -2437,6 +2437,11 @@ Restart:
                 DefaultFs = L"BTRFS";
                 break;
 
+            /* 2 is for NTFS */
+            case 2:
+                DefaultFs = L"NTFS";
+                break;
+
             /* If we don't understand input, default to FAT */
             default:
                 DefaultFs = L"FAT";

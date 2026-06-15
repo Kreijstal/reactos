@@ -413,8 +413,15 @@ FormatDlgProcWorker(
                     SendDlgItemMessageW(hDlg, IDC_FSTYPE, CB_SETITEMDATA, iItem, (LPARAM)NULL);
             }
 
-            // FIXME: Read from SetupData.FsType; select the "FAT" FS instead.
-            DefaultFs = L"FAT";
+            /* Honor the unattended FsType selection (same encoding as the
+             * 'FsType' key in unattend.inf and the usetup TUI path):
+             * 1 == BtrFS, 2 == NTFS, anything else (incl. 0) == FAT. */
+            switch (SetupData.USetupData.FsType)
+            {
+                case 1:  DefaultFs = L"BTRFS"; break;
+                case 2:  DefaultFs = L"NTFS";  break;
+                default: DefaultFs = L"FAT";   break;
+            }
 
             /* Retrieve the selected volume and create information */
             ASSERT(PartCreateCtx->PartItem->Volume == PartCreateCtx->PartItem->PartEntry->Volume);
