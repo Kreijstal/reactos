@@ -481,6 +481,23 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     InitializeListHead(&Vcb->FcbListHead);
 
+    /* Initialise the directory-change-notification package (matches
+     * FastFat/CDFS).  FsRtlNotifyInitializeSync can raise on allocation
+     * failure, so guard it; the matching teardown is in the dismount /
+     * mount-failure cleanup path. */
+    InitializeListHead(&Vcb->NotifyList);
+    Vcb->NotifySync = NULL;
+    _SEH2_TRY
+    {
+        FsRtlNotifyInitializeSync(&Vcb->NotifySync);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        _SEH2_YIELD(goto ByeBye);
+    }
+    _SEH2_END;
+
     Fcb = NtfsCreateFCB(NULL, NULL, Vcb);
     if (Fcb == NULL)
     {
@@ -606,6 +623,9 @@ ByeBye:
     if (!NT_SUCCESS(Status))
     {
         /* Cleanup */
+        if (Vcb && Vcb->NotifySync)
+            FsRtlNotifyUninitializeSync(&Vcb->NotifySync);
+
         if (Vcb && Vcb->StreamFileObject)
             ObDereferenceObject(Vcb->StreamFileObject);
 

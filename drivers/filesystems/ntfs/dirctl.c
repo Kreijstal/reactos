@@ -849,9 +849,39 @@ NtfsDirectoryControl(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case IRP_MN_NOTIFY_CHANGE_DIRECTORY:
-            DPRINT1("IRP_MN_NOTIFY_CHANGE_DIRECTORY\n");
-            Status = STATUS_NOT_IMPLEMENTED;
+        {
+            PDEVICE_EXTENSION DeviceExt = IrpContext->DeviceObject->DeviceExtension;
+            PIO_STACK_LOCATION Stack = IrpContext->Stack;
+            PFILE_OBJECT FileObject = IrpContext->FileObject;
+
+            DPRINT("IRP_MN_NOTIFY_CHANGE_DIRECTORY\n");
+
+            /* Hand the request to the FsRtl directory-notify package, like
+             * FastFat/CDFS.  The package holds the IRP pending until a change
+             * is reported (NtfsReportChange) or the handle is cleaned up
+             * (FsRtlNotifyCleanup in NtfsCleanupFile).  It synchronises on
+             * DeviceExt->NotifySync internally, and only does byte-matching on
+             * the name, so casting the UNICODE FileName to a STRING is fine.
+             * Previously this returned STATUS_NOT_IMPLEMENTED, which made the
+             * shell's overlapped ReadDirectoryChangesW fail synchronously
+             * (error 1) instead of pending like on FAT/Windows. */
+            FsRtlNotifyFullChangeDirectory(DeviceExt->NotifySync,
+                                           &DeviceExt->NotifyList,
+                                           FileObject->FsContext2,
+                                           (PSTRING)&FileObject->FileName,
+                                           BooleanFlagOn(Stack->Flags, SL_WATCH_TREE),
+                                           FALSE,
+                                           Stack->Parameters.NotifyDirectory.CompletionFilter,
+                                           IrpContext->Irp,
+                                           NULL,
+                                           NULL);
+
+            /* The notify package now owns the IRP; don't let NtfsDispatch
+             * complete or re-queue it. */
+            IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
+            Status = STATUS_PENDING;
             break;
+        }
 
         default:
             Status = STATUS_INVALID_DEVICE_REQUEST;
