@@ -228,6 +228,15 @@ typedef struct
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
 
+    /* Directory change notification (IRP_MN_NOTIFY_CHANGE_DIRECTORY).
+     * Ported from FastFat/CDFS: the FsRtlNotify* package state.  NotifySync is
+     * created at mount and destroyed at dismount; NotifyList holds the pending
+     * watch entries.  Without these NtfsDirectoryControl returned
+     * STATUS_NOT_IMPLEMENTED, so the shell's overlapped ReadDirectoryChangesW
+     * failed synchronously (error 1) instead of pending like FAT/Windows. */
+    PNOTIFY_SYNC NotifySync;
+    LIST_ENTRY NotifyList;
+
     PVPB Vpb;
     PDEVICE_OBJECT StorageDevice;
     PFILE_OBJECT StreamFileObject;
