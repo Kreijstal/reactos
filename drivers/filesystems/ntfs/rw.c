@@ -1184,6 +1184,20 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
                          &FlushIoStatus);
         }
 
+        /* The data is now on disk, so the just-written range is genuinely
+         * valid.  Advance ValidDataLength to cover it (FastFat advances VDL
+         * after the copy, never before - see SetAttributeDataLength).  Keeping
+         * the FCB's VDL in step with what is really on disk is essential:
+         * CcSetFileSizes() overwrites the cache manager's VDL unconditionally
+         * from this field, so a later extend that passed a stale-low VDL would
+         * mark already-written data invalid and have it re-read as zeros. */
+        if (ByteOffset.QuadPart + Length > Fcb->RFCB.ValidDataLength.QuadPart)
+        {
+            Fcb->RFCB.ValidDataLength.QuadPart = ByteOffset.QuadPart + Length;
+            if (FileObject->SectionObjectPointer->SharedCacheMap != NULL)
+                CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+        }
+
         Irp->IoStatus.Status = STATUS_SUCCESS;
         Irp->IoStatus.Information = Length;
 
