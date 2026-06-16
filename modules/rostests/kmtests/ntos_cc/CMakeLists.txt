@@ -32,6 +32,21 @@ target_compile_definitions(cccopywrite_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET cccopywrite_drv)
 
 #
+# CcLazyWriteRace
+#
+list(APPEND CCLAZYWRITERACE_DRV_SOURCE
+    ../kmtest_drv/kmtest_standalone.c
+    CcLazyWriteRace_drv.c)
+
+add_library(cclazywriterace_drv MODULE ${CCLAZYWRITERACE_DRV_SOURCE})
+set_module_type(cclazywriterace_drv kernelmodedriver)
+target_link_libraries(cclazywriterace_drv kmtest_printf ${PSEH_LIB})
+add_importlibs(cclazywriterace_drv ntoskrnl hal)
+target_compile_definitions(cclazywriterace_drv PRIVATE KMT_STANDALONE_DRIVER)
+#add_pch(cclazywriterace_drv ../include/kmt_test.h)
+add_rostests_file(TARGET cclazywriterace_drv)
+
+#
 # CcMapData
 #
 list(APPEND CCMAPDATA_DRV_SOURCE
