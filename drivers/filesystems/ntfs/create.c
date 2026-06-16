@@ -835,6 +835,21 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         Fcb->OpenHandleCount++;
         DeviceExt->OpenHandleCount++;
         ((PNTFS_CCB)FileObject->FsContext2)->Flags |= NTFS_CCB_FLAG_COUNTED;
+
+        /* FILE_DELETE_ON_CLOSE: the file must be gone once the last handle is
+         * cleaned up. Mark the FCB delete-pending so NtfsCleanupFile removes the
+         * record and its $I30 entry, exactly as FileDispositionInformation does.
+         * Windows honours this disposition at create time; without it a
+         * delete-on-close open (cygwin/msys2 unlink, temp files) silently leaks
+         * the file and a later same-name create wrongly collides. Directories
+         * are not deletable through this driver yet, so leave them alone. */
+        if ((RequestedOptions & FILE_DELETE_ON_CLOSE) &&
+            Fcb->Identifier.Type == NTFS_TYPE_FCB &&
+            !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME) &&
+            !NtfsFCBIsDirectory(Fcb))
+        {
+            SetFlag(Fcb->Flags, FCB_DELETE_PENDING);
+        }
     }
 
     /*
