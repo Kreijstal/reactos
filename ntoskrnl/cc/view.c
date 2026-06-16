@@ -165,10 +165,33 @@ CcRosFlushVacb (
     _Out_opt_ PIO_STATUS_BLOCK Iosb)
 {
     NTSTATUS Status;
+    KIRQL OldIrql;
     BOOLEAN HaveLock = FALSE;
     PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
 
-    CcRosUnmarkDirtyVacb(Vacb, TRUE);
+    /* Atomically test and clear the dirty state under the master lock. The
+     * lazy writer (CcRosFlushDirtyPages) drops the master lock to call
+     * AcquireForLazyWrite, which can block; while it is parked there a
+     * concurrent CcFlushCache can flush and unmark this very VACB. If that
+     * has already happened the data is on disk and there is nothing left for
+     * us to do, so skip the (otherwise unconditional) unmark that would
+     * trip ASSERT(Vacb->Dirty). */
+    OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+    KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
+    if (!Vacb->Dirty)
+    {
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+        if (Iosb)
+        {
+            Iosb->Status = STATUS_SUCCESS;
+            Iosb->Information = 0;
+        }
+        return STATUS_SUCCESS;
+    }
+    CcRosUnmarkDirtyVacb(Vacb, FALSE);
+    KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+    KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
 
     /* Lock for flush, if we are not already the top-level */
     if (IoGetTopLevelIrp() != (PIRP)FSRTL_CACHE_TOP_LEVEL_IRP)
