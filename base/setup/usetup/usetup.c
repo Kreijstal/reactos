@@ -2453,6 +2453,29 @@ Restart:
         DefaultFs = L"FAT";
     }
 
+    /*
+     * In unattended mode, if the destination volume already holds a usable
+     * file system of the requested type, keep it and install over the
+     * existing files instead of reformatting it (which is expensive). Only
+     * format when the volume is new, unformatted or damaged, holds an
+     * unrecognized file system, or one that differs from the requested type.
+     */
+    if (IsUnattendedSetup && !ForceFormat &&
+        (Volume->FormatState == Formatted) &&
+        IsFormatted(&Volume->Info) &&
+        (_wcsicmp(Volume->Info.FileSystem, DefaultFs) == 0))
+    {
+        DPRINT("Keeping existing %S file system on the destination volume\n",
+               Volume->Info.FileSystem);
+
+        /* Mirror the interactive "keep existing filesystem" path: skip the
+         * file system check unless this is the system or installation volume. */
+        if ((Volume != SystemVolume) && (Volume != InstallVolume))
+            Volume->NeedsCheck = FALSE;
+
+        return FSVOL_SKIP;
+    }
+
     /* Create the file system list */
     // TODO: Display only the FSes compatible with the selected volume!
     FileSystemList = CreateFileSystemList(6, 26, ForceFormat, DefaultFs);
