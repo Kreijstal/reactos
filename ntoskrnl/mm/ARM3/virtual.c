@@ -2192,6 +2192,7 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     PMMPFN Pfn1;
     ULONG ProtectionMask, OldProtect;
     BOOLEAN Committed;
+    BOOLEAN FlushTlb = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PETHREAD Thread = PsGetCurrentThread();
     TABLE_SEARCH_RESULT Result;
@@ -2375,11 +2376,11 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                         /* Decrease PFN share count and write the PTE */
                         MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
                         MI_WRITE_INVALID_PTE(PointerPte, PteContents);
-#ifdef CONFIG_SMP
-                        // FIXME: Should invalidate entry in every CPU TLB
-                        ASSERT(KeNumberProcessors == 1);
-#endif
-                        KeInvalidateTlbEntry(MiPteToAddress(PointerPte));
+
+                        /* The page is no longer mapped: defer an all-CPU TLB
+                         * flush to after the loop rather than a local-only
+                         * invalidate that leaves stale entries on other CPUs. */
+                        FlushTlb = TRUE;
 
                         MiReleasePfnLock(OldIrql);
                     }
@@ -2417,6 +2418,9 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
 
             /* Unlock the working set */
             MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+            /* If we invalidated any mapping above, flush the TLB on all CPUs */
+            if (FlushTlb) KeFlushEntireTb(TRUE, TRUE);
 
             /*
              * If the request covers the whole view, update the VAD protection
@@ -2521,11 +2525,13 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
                     // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
-#ifdef CONFIG_SMP
-                    // FIXME: Should invalidate entry in every CPU TLB
-                    ASSERT(KeNumberProcessors == 1);
-#endif
-                    KeInvalidateTlbEntry(MiPteToAddress(PointerPte));
+
+                    /* The page is no longer mapped: its TLB entry must be
+                     * invalidated on every processor.  Defer that to a single
+                     * all-CPU flush after the loop (as MiDeleteSystemPagableVm
+                     * does) instead of a local-only invalidate that would leave
+                     * stale entries on other CPUs. */
+                    FlushTlb = TRUE;
 
                     /* We are done for this PTE */
                     MiReleasePfnLock(OldIrql);
@@ -2559,6 +2565,9 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
 
         /* Unlock the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);
+
+        /* If we invalidated any mapping above, flush the TLB on all processors */
+        if (FlushTlb) KeFlushEntireTb(TRUE, TRUE);
     }
 
     /* Unlock the address space */
