@@ -165,34 +165,25 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     ZeroMemory(&StartupInfo, sizeof(StartupInfo));
     StartupInfo.cb = sizeof(StartupInfo);
 
-    if (hUserToken)
+    /* Device installation writes to privileged registry locations - the
+     * driver key under HKLM\SYSTEM\CurrentControlSet\Control\Class and the
+     * device's Enum key - which are not writable by the interactive user.
+     * Impersonating the logged-on user (CreateProcessAsUserW) therefore made
+     * SetupDiInstallDevice fail with ERROR_ACCESS_DENIED while opening the
+     * Class key, which surfaced as a spurious ERROR_INVALID_HANDLE and left
+     * hot-plugged devices (e.g. network adapters) uninstalled.
+     *
+     * Windows performs the installation in the SYSTEM context of the PnP
+     * manager and only uses the user context for the new-hardware wizard UI.
+     * ReactOS has no session-0 isolation, so running the installer with our
+     * LocalSystem token still lets any wizard UI appear on the interactive
+     * desktop while granting the privileges the installation requires. This
+     * matches the SYSTEM context already used for boot-time and 2nd-stage
+     * setup installs. */
+    if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
     {
-        /* newdev has to run under the environment of the current user */
-        if (!CreateEnvironmentBlock(&Environment, hUserToken, FALSE))
-        {
-            DPRINT1("CreateEnvironmentBlock failed with error %d\n", GetLastError());
-            goto cleanup;
-        }
-
-        if (!CreateProcessAsUserW(hUserToken, NULL, CommandLine, NULL, NULL, FALSE, CREATE_UNICODE_ENVIRONMENT, Environment, NULL, &StartupInfo, &ProcessInfo))
-        {
-            DPRINT1("CreateProcessAsUserW failed with error %u\n", GetLastError());
-            goto cleanup;
-        }
-    }
-    else
-    {
-        /* FIXME: This is probably not correct, I guess newdev should never be run with SYSTEM privileges.
-
-           Still, we currently do that in 2nd stage setup and probably Console mode as well, so allow it here.
-           (ShowWizard is only set to FALSE for these two modes) */
-        ASSERT(!ShowWizard);
-
-        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
-        {
-            DPRINT1("CreateProcessW failed with error %u\n", GetLastError());
-            goto cleanup;
-        }
+        DPRINT1("CreateProcessW failed with error %u\n", GetLastError());
+        goto cleanup;
     }
 
     /* Wait for the function to connect to our pipe */
