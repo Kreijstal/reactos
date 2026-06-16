@@ -20,6 +20,7 @@ EXTERN KiGeneralProtectionFaultHandler:PROC
 EXTERN KiXmmExceptionHandler:PROC
 EXTERN KiDeliverApc:PROC
 EXTERN KiDpcInterruptHandler:PROC
+EXTERN KiIpiInterruptHandler:PROC
 EXTERN PsConvertToGuiThread:PROC
 EXTERN MmCreateKernelStack:PROC
 EXTERN MmDeleteKernelStack:PROC
@@ -710,7 +711,16 @@ PUBLIC KiIpiInterrupt
     /* End the interrupt */
     mov dword ptr [APIC_EOI], 0
 
-    int 3
+    /* Process the generic-call IPI packet */
+    call KiIpiInterruptHandler
+
+    /* Lower back to the IRQL we interrupted before returning.  ExitTrap
+       asserts (on DBG builds) that cr8 already equals the saved
+       KTRAP_FRAME_PreviousIrql, so we cannot leave it at IPI_LEVEL here.
+       rbp still points at the KTRAP_FRAME (it is callee-saved across the
+       call above). */
+    movzx rax, byte ptr [rbp + KTRAP_FRAME_PreviousIrql]
+    mov cr8, rax
 
     /* Return */
     ExitTrap (TF_SAVE_ALL or TF_IRQL)
