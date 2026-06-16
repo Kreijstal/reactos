@@ -332,6 +332,7 @@ MiniportInitialize (
     if (adapter->IoRangeStart == 0 || adapter->InterruptVector == 0)
     {
         NDIS_DbgPrint(MIN_TRACE, ("Adapter didn't receive enough resources\n"));
+        status = NDIS_STATUS_RESOURCES;
         goto Cleanup;
     }
 
