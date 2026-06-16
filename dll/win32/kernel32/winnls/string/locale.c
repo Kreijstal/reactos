@@ -793,6 +793,15 @@ static inline HANDLE create_registry_key(void)
         RtlInitUnicodeString( &nameW, intlW );
         if (NtCreateKey( &hkey, KEY_ALL_ACCESS, &attr, 0, NULL, 0, NULL )) hkey = 0;
     }
+    else
+    {
+        /* Failed to open "Control Panel" (e.g. STATUS_ACCESS_DENIED): hkey still
+           refers to the current-user root, which is closed just below.  Returning
+           it would hand the caller a stale handle, making NtQueryValueKey fail with
+           STATUS_INVALID_HANDLE instead of letting GetLocaleInfoW fall back to the
+           default NLS data.  Return NULL so the registry-override lookup is skipped. */
+        hkey = 0;
+    }
     NtClose( attr.RootDirectory );
     return hkey;
 }
