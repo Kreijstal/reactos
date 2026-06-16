@@ -64,6 +64,7 @@ KMT_TESTFUNC Test_NpfsCreate;
 KMT_TESTFUNC Test_NpfsFileInfo;
 KMT_TESTFUNC Test_NpfsReadWrite;
 KMT_TESTFUNC Test_NpfsVolumeInfo;
+KMT_TESTFUNC Test_NtfsDirIndex;
 KMT_TESTFUNC Test_ObHandle;
 KMT_TESTFUNC Test_ObQuery;
 KMT_TESTFUNC Test_ObReference;
@@ -157,6 +158,7 @@ const KMT_TEST TestList[] =
     { "NpfsFileInfo",                       Test_NpfsFileInfo },
     { "NpfsReadWrite",                      Test_NpfsReadWrite },
     { "NpfsVolumeInfo",                     Test_NpfsVolumeInfo },
+    { "NtfsDirIndex",                       Test_NtfsDirIndex },
     { "ObHandle",                           Test_ObHandle },
     { "ObQuery",                            Test_ObQuery },
     { "ObReference",                        Test_ObReference },
