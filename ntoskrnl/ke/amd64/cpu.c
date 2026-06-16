@@ -568,6 +568,20 @@ KiRestoreProcessorState(
     KiRestoreProcessorControlState(&Prcb->ProcessorState);
 }
 
+#ifdef CONFIG_SMP
+static
+ULONG_PTR
+NTAPI
+KiFlushCurrentTbWorker(IN ULONG_PTR Argument)
+{
+    UNREFERENCED_PARAMETER(Argument);
+
+    /* Flush this processor's TLB */
+    KeFlushCurrentTb();
+    return 0;
+}
+#endif
+
 VOID
 NTAPI
 KeFlushEntireTb(IN BOOLEAN Invalid,
@@ -575,8 +589,26 @@ KeFlushEntireTb(IN BOOLEAN Invalid,
 {
     KIRQL OldIrql;
 
-    // FIXME: halfplemented
-    /* Raise the IRQL for the TB Flush */
+    UNREFERENCED_PARAMETER(Invalid);
+
+#ifdef CONFIG_SMP
+    /*
+     * If requested, flush the TLB on every processor.  KeIpiGenericCall runs
+     * the worker on all processors (including this one) at IPI_LEVEL and does
+     * not return until they have all completed, giving real cross-processor
+     * TLB coherency to the ARM3 invalidation paths that call us.
+     */
+    if (AllProcessors && (KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember))
+    {
+        KeIpiGenericCall(KiFlushCurrentTbWorker, 0);
+        InterlockedExchangeAdd(&KiTbFlushTimeStamp, 1);
+        return;
+    }
+#else
+    UNREFERENCED_PARAMETER(AllProcessors);
+#endif
+
+    /* Uniprocessor (or this is the only active CPU): just flush locally */
     OldIrql = KeRaiseIrqlToSynchLevel();
 
     /* Flush the TB for the Current CPU, and update the flush stamp */
@@ -585,7 +617,6 @@ KeFlushEntireTb(IN BOOLEAN Invalid,
     /* Update the flush stamp and return to original IRQL */
     InterlockedExchangeAdd(&KiTbFlushTimeStamp, 1);
     KeLowerIrql(OldIrql);
-
 }
 
 NTSTATUS
