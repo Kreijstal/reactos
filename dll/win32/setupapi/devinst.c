@@ -6123,8 +6123,12 @@ cleanup:
         if (hKey != NULL && hKey != key)
             RegCloseKey(hKey);
 
-    TRACE("Returning 0x%p\n", hKey);
-    return hKey;
+    /* On failure 'key' stays INVALID_HANDLE_VALUE while 'hKey' is still NULL.
+     * Return 'key' so callers can detect the failure with their usual
+     * '== INVALID_HANDLE_VALUE' check (returning the NULL 'hKey' made them
+     * proceed with a NULL key and later fail with ERROR_INVALID_HANDLE). */
+    TRACE("Returning 0x%p\n", key);
+    return key;
 }
 
 HKEY SETUPDI_OpenDevKey(HKEY RootKey, struct DeviceInfo *devInfo, REGSAM samDesired)
