@@ -132,12 +132,20 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
          * cleaned up. */
         IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
 
+        /* Delete a delete-pending file once its last handle is cleaned up.
+         * We just flushed (CcFlushCache) and tore down this file object's cache
+         * map (CcUninitializeCacheMap) above, so the data stream is consistent;
+         * the data section / shared cache map pointers can still linger because
+         * MM releases them lazily, and waiting for them to reach NULL means
+         * FILE_DELETE_ON_CLOSE (and a deferred FileDispositionInformation
+         * delete) essentially never fire after any cached I/O.  Only a live
+         * image section must block the delete - removing the record out from
+         * under a running mapped image would be unsafe.  This matches the
+         * unconditional delete the FileDispositionInformation path performs. */
         if (Fcb->OpenHandleCount == 0 &&
             BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
-            Fcb->SectionObjectPointers != NULL &&
-            Fcb->SectionObjectPointers->DataSectionObject == NULL &&
-            Fcb->SectionObjectPointers->ImageSectionObject == NULL &&
-            Fcb->SectionObjectPointers->SharedCacheMap == NULL)
+            (Fcb->SectionObjectPointers == NULL ||
+             Fcb->SectionObjectPointers->ImageSectionObject == NULL))
         {
             Status = NtfsDeleteFileRecord(DeviceExt, Fcb, FALSE);
             if (NT_SUCCESS(Status))
