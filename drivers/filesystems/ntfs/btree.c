@@ -2196,8 +2196,22 @@ NtfsFindRightmostKey(PB_TREE Tree,
 
         if (CurrentKey->IndexEntry->Flags & NTFS_INDEX_ENTRY_END)
         {
+            /* The END entry's child holds the keys that sort after every real
+             * key in this node, so the rightmost key of the whole subtree lives
+             * there - but only if that child still has a key.  Earlier
+             * deletions can leave the rightmost child empty (emptied index
+             * nodes are never merged or freed), in which case the recursion
+             * yields NULL and the rightmost real key is LastKey at this level.
+             * Returning the bare recursion result would report a non-empty
+             * subtree as empty, and NtfsRemoveKeyFromNode would then drop this
+             * node's separator together with all of its non-rightmost children,
+             * orphaning their keys from the index. */
             if (CurrentKey->LesserChild != NULL)
-                return NtfsFindRightmostKey(Tree, CurrentKey->LesserChild);
+            {
+                PB_TREE_KEY DeepKey = NtfsFindRightmostKey(Tree, CurrentKey->LesserChild);
+                if (DeepKey != NULL)
+                    return DeepKey;
+            }
 
             return LastKey;
         }

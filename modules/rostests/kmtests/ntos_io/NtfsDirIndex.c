@@ -15,7 +15,6 @@
 #include <kmt_test.h>
 
 #define FILE_COUNT       1500
-#define NAME_BUFFER_CCH  64
 
 /* Scatter insertion order the way a real archive extraction does, instead of
  * inserting in already-sorted order (which only ever appends to the rightmost
@@ -23,6 +22,49 @@
  * (i * 2654435761) overflows and stops being a bijection, fabricating duplicate
  * names. With gcd(2654435761,1500)==1 the 64-bit form is a true permutation. */
 #define SCATTER(i)  ((ULONG)(((ULONGLONG)(i) * 2654435761ull) % FILE_COUNT))
+
+/* Build the Nth test file name. The variable part is a bijective base-26 word
+ * (a, b, ... z, aa, ab, ...), so names span several lengths and many are
+ * prefixes of one another - exactly the shape of the ncurses man set that the
+ * install extracts (curs_in.3x.gz, curs_inch.3x.gz, curs_inchstr.3x.gz, ...).
+ * Mixed-length keys exercise the $I30 B-Tree's interior separator-key
+ * navigation and the "shorter key is a prefix of the longer" comparison branch
+ * that uniform fixed-width names never reach. */
+static
+VOID
+BuildName(
+    _Out_writes_(MAX_PATH) PWCHAR Path,
+    _In_ PCWSTR Dir,
+    _In_ ULONG Index)
+{
+    WCHAR rev[8];
+    WCHAR word[8];
+    WCHAR tail[64];
+    ULONG n = Index + 1;   /* 1-based so index 0 maps to "a" */
+    ULONG len = 0;
+    ULONG tailLen;
+    ULONG k;
+
+    while (n > 0 && len < RTL_NUMBER_OF(rev))
+    {
+        rev[len++] = (WCHAR)(L'a' + (n - 1) % 26);
+        n = (n - 1) / 26;
+    }
+    for (k = 0; k < len; k++)
+        word[k] = rev[len - 1 - k];
+    word[len] = UNICODE_NULL;
+
+    /* The base-26 word is unique per index; append a 'x' run of index-dependent
+     * length (delimited by '_' so it can never collide with another word) to
+     * spread the full name length over 12..62 chars, matching the real man3
+     * directory the install extracts. */
+    tailLen = Index % 48;
+    for (k = 0; k < tailLen; k++)
+        tail[k] = L'x';
+    tail[tailLen] = UNICODE_NULL;
+
+    RtlStringCchPrintfW(Path, MAX_PATH, L"%ls\\curs_%ls_%ls.3x.gz", Dir, word, tail);
+}
 
 static
 BOOLEAN
@@ -213,8 +255,7 @@ NtfsDirIndexTest(VOID)
      * the real result. (The data disk is reused across runs.) */
     for (i = 0; i < FILE_COUNT; i++)
     {
-        RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                            L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+        BuildName(filePath, dirPath, i);
         DeleteOne(filePath);
     }
 
@@ -224,8 +265,7 @@ NtfsDirIndexTest(VOID)
      * the kmtest SEH wrapper under FLG_DISABLE_DEBUG_PROMPTS). */
     for (i = 0; i < FILE_COUNT; i++)
     {
-        RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                            L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, SCATTER(i));
+        BuildName(filePath, dirPath, SCATTER(i));
         Status = CreateOne(filePath, FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL);
         if (NT_SUCCESS(Status))
             created++;
@@ -244,8 +284,7 @@ NtfsDirIndexTest(VOID)
      * inserts). A miss here means the index lookup descends the B-Tree wrong. */
     for (i = 0; i < FILE_COUNT; i++)
     {
-        RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                            L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+        BuildName(filePath, dirPath, i);
         Status = CreateOne(filePath, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL);
         if (!NT_SUCCESS(Status))
         {
@@ -262,8 +301,7 @@ NtfsDirIndexTest(VOID)
      * inserted, exactly the install-time corruption). */
     for (i = 0; i < FILE_COUNT; i++)
     {
-        RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                            L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+        BuildName(filePath, dirPath, i);
         Status = CreateOne(filePath, FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL);
         if (Status == STATUS_OBJECT_NAME_COLLISION)
             collisionOk++;
@@ -291,8 +329,7 @@ NtfsDirIndexTest(VOID)
         for (i = 0; i < FILE_COUNT; i++)
         {
             ULONG_PTR info = 0;
-            RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+            BuildName(filePath, dirPath, i);
             Status = CreateOne(filePath, FILE_OVERWRITE_IF, FILE_NON_DIRECTORY_FILE, &info);
             if (NT_SUCCESS(Status) && info == FILE_OVERWRITTEN)
                 overOk++;
@@ -306,8 +343,7 @@ NtfsDirIndexTest(VOID)
         for (i = 0; i < FILE_COUNT; i++)
         {
             ULONG_PTR info = 0;
-            RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+            BuildName(filePath, dirPath, i);
             Status = CreateOne(filePath, FILE_SUPERSEDE, FILE_NON_DIRECTORY_FILE, &info);
             if (NT_SUCCESS(Status) && info == FILE_SUPERSEDED)
                 supOk++;
@@ -339,8 +375,7 @@ NtfsDirIndexTest(VOID)
         {
             for (i = 0; i < FILE_COUNT; i++)
             {
-                RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                    L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+                BuildName(filePath, dirPath, i);
                 Status = DeleteOne(filePath);
                 if (!NT_SUCCESS(Status))
                 {
@@ -352,8 +387,7 @@ NtfsDirIndexTest(VOID)
             /* every name must now be gone */
             for (i = 0; i < FILE_COUNT; i++)
             {
-                RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                    L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+                BuildName(filePath, dirPath, i);
                 Status = CreateOne(filePath, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL);
                 if (NT_SUCCESS(Status))
                 {
@@ -365,8 +399,7 @@ NtfsDirIndexTest(VOID)
             /* re-extract: re-create all in scattered order */
             for (i = 0; i < FILE_COUNT; i++)
             {
-                RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                    L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, SCATTER(i));
+                BuildName(filePath, dirPath, SCATTER(i));
                 Status = CreateOne(filePath, FILE_CREATE, FILE_NON_DIRECTORY_FILE, NULL);
                 if (!NT_SUCCESS(Status))
                 {
@@ -378,8 +411,7 @@ NtfsDirIndexTest(VOID)
             /* and every re-created name must be found again */
             for (i = 0; i < FILE_COUNT; i++)
             {
-                RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                    L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+                BuildName(filePath, dirPath, i);
                 Status = CreateOne(filePath, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL);
                 if (!NT_SUCCESS(Status))
                 {
@@ -405,8 +437,7 @@ NtfsDirIndexTest(VOID)
         ULONG docFail = 0, docStale = 0;
         for (i = 0; i < FILE_COUNT; i++)
         {
-            RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+            BuildName(filePath, dirPath, i);
             Status = DeleteOnCloseOne(filePath);
             if (!NT_SUCCESS(Status))
             {
@@ -417,8 +448,7 @@ NtfsDirIndexTest(VOID)
         }
         for (i = 0; i < FILE_COUNT; i++)
         {
-            RtlStringCchPrintfW(filePath, RTL_NUMBER_OF(filePath),
-                                L"%ls\\curs_%05u_indexfill.3x.gz", dirPath, i);
+            BuildName(filePath, dirPath, i);
             Status = CreateOne(filePath, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL);
             if (NT_SUCCESS(Status))
             {
