@@ -853,10 +853,24 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     }
 
     /*
-     * If the directory containing the file to open doesn't exist then
-     * fail immediately
+     * Report the disposition outcome. A plain open reports FILE_OPENED, but the
+     * FILE_OVERWRITE(_IF)/FILE_SUPERSEDE path on an existing file already set
+     * Irp->IoStatus.Information to FILE_OVERWRITTEN / FILE_SUPERSEDED above;
+     * Windows preserves those, so only overwrite it for the plain-open case.
      */
-    Irp->IoStatus.Information = (NT_SUCCESS(Status)) ? FILE_OPENED : 0;
+    if (NT_SUCCESS(Status))
+    {
+        if (RequestedDisposition != FILE_OVERWRITE &&
+            RequestedDisposition != FILE_OVERWRITE_IF &&
+            RequestedDisposition != FILE_SUPERSEDE)
+        {
+            Irp->IoStatus.Information = FILE_OPENED;
+        }
+    }
+    else
+    {
+        Irp->IoStatus.Information = 0;
+    }
 
     return Status;
 }
