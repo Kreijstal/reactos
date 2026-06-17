@@ -43,6 +43,44 @@
  *   safe to reference) + Microsoft public LFS documentation.  Linux ntfs3's
  *   fslog.c is GPL-2.0-only (NO code copy permitted); used only as a field
  *   cross-check.
+ *
+ * FORMAT FACTS CONFIRMED AGAINST ntfs-3g (/usr/include/ntfs-3g/logfile.h,
+ * a documentation-only on-disk-layout header) - resolving the slice-1
+ * unconfirmed assumptions:
+ *
+ *   (1) SeqNumberBits is NOT a constant.  It is derived from the $LogFile
+ *       byte size as  67 - bit_length(FileSize)  (RESTART_AREA::seq_number_bits
+ *       doc; libntfs-3g/logfile.c ntfs_check_restart_area).  See
+ *       NtfsLfsSeqNumberBits.  Slice 1's hardcoded 0x2D only happened to be
+ *       correct for the ~2-4 MiB default log.
+ *
+ *   (2) RedoOffset / UndoOffset in a record are measured from the START OF
+ *       THE LOG RECORD (LOG_RECORD byte 0 == this_lsn), not from client-data
+ *       start.  ntfs-3g's LOG_RECORD struct begins at the record start: a
+ *       0x30-byte generic header, then the attribute-log fields 0x30..0x50,
+ *       then lcn_list[0] / redo / undo data at 0x50 when lcns_to_follow == 0.
+ *       Our NTFS_LFS_RECORD_HEADER is byte-identical (sizeof 0x50).  Slice 1
+ *       wrote these client-data-relative; corrected to record-relative here.
+ *
+ *   (3) Multi-page continuation (LcnsToFollow > 0 array + a record larger
+ *       than one page):
+ *         - LcnsToFollow (USHORT @ 0x3E) counts LCN entries; when > 0 an
+ *           array of LcnsToFollow * 8 bytes (leLCN) sits at record offset
+ *           0x50, BEFORE the redo/undo payload (so RedoOffset/UndoOffset are
+ *           pushed past the array).
+ *         - A record whose ClientDataLength runs past the page's record area
+ *           continues onto the next RCRD page.  The producer sets
+ *           NTFS_LFS_RECORD_FLAG_MULTI_PAGE (0x0001) and the page header's
+ *           PageCount / PagePosition (1-based index within the multi-page
+ *           set); the continued tail resumes at the next page's
+ *           LogPageDataOffset (right after RCRD header + USA, i.e. 0x40 for a
+ *           4K/512 page).  RECORD_PAGE_HEADER carries NextRecordOffset and
+ *           LastEndLsn so the reader can stitch tail onto head.
+ *       This module EMITS single-page records only: it always sets
+ *       LcnsToFollow = 0 and clears the MULTI_PAGE flag, and refuses
+ *       (STATUS_LOG_FILE_FULL) any record that would not fit one page.  The
+ *       multi-page emitter is a later slice; the format is documented here so
+ *       it can be added without re-deriving the layout.
  */
 
 /* INCLUDES *****************************************************************/
@@ -64,6 +102,44 @@
 #define LFS_RCRD_NEXTREC_FIELD     0x22
 
 /* FUNCTIONS ****************************************************************/
+
+/**
+ * @name NtfsLfsSeqNumberBits
+ * @implemented
+ *
+ * Derive the restart area's SeqNumberBits from the $LogFile byte size.
+ *
+ * Microsoft / ntfs-3g formula (libntfs-3g/logfile.c ntfs_check_restart_area,
+ * confirmed against /usr/include/ntfs-3g/logfile.h RESTART_AREA::seq_number_bits
+ * doc comment "67 - the number of bits required to store the logfile size in
+ * bytes"):
+ *
+ *     SeqNumberBits = 67 - bit_length(FileSize)
+ *
+ * where bit_length(x) is the number of significant bits in x
+ * (floor(log2(x)) + 1).  The argument is the FULL byte size of $LogFile:$DATA,
+ * NOT FileSize >> 3.  For the common ~2 MiB / 4 MiB default log this yields
+ * 45 (0x2D), which is why the slice-1 hardcode happened to match those sizes;
+ * it is wrong for every other log size, so we compute it here.
+ */
+ULONG
+NtfsLfsSeqNumberBits(ULONGLONG FileSize)
+{
+    ULONG Bits = 0;
+
+    while (FileSize != 0)
+    {
+        FileSize >>= 1;
+        Bits++;
+    }
+
+    /* A degenerate / tiny log would push this above 64; clamp so the LSN
+     * encode/decode field math stays well-defined.  Real logs are megabytes
+     * (bit_length >= 21), so the result is comfortably in the 40s. */
+    if (Bits >= 67)
+        return 1;
+    return 67 - Bits;
+}
 
 /**
  * @name NtfsLfsMakeLsn
@@ -181,7 +257,7 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     Area.ClientFreeList      = 0;
     Area.ClientInUseList     = 0xFFFF;
     Area.Flags               = Clean ? NTFS_LFS_RESTART_FLAG_CLEAN : 0;
-    Area.SeqNumberBits       = 0x2D;
+    Area.SeqNumberBits       = NtfsLfsSeqNumberBits(FileSize);
     Area.RestartAreaLength   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
     Area.ClientArrayOffset   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
     Area.FileSize            = FileSize;
@@ -271,7 +347,7 @@ NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
     Ctx->PageSize = PageSize;
     Ctx->SectorSize = SectorSize;
     Ctx->FirstRcrdOffset = PageSize * 2;
-    Ctx->SeqNumberBits = 0x2D;
+    Ctx->SeqNumberBits = NtfsLfsSeqNumberBits((ULONGLONG)ImageLength);
     Ctx->CurrentSeqNumber = 1;
     Ctx->WriteOffset = PageSize * 2 + LFS_RCRD_FIRST_RECORD;
     Ctx->LastLsn = 0;
@@ -344,7 +420,6 @@ NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
 {
     PNTFS_LFS_RECORD_HEADER Rec;
     ULONG RedoAbs, UndoAbs;       /* absolute offsets from record start     */
-    USHORT RedoRel, UndoRel;      /* offsets from client-data start (0x30)   */
     ULONG ClientDataLength;
     ULONG TotalLength;
 
@@ -353,9 +428,6 @@ NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
 
     LfsRecordGeometry(Params->RedoLength, Params->UndoLength,
                       &RedoAbs, &UndoAbs, &ClientDataLength, &TotalLength);
-
-    RedoRel = (USHORT)(RedoAbs - NTFS_LFS_RECORD_HEADER_LENGTH);
-    UndoRel = (USHORT)(UndoAbs - NTFS_LFS_RECORD_HEADER_LENGTH);
 
     if (BufferLength < TotalLength)
         return STATUS_BUFFER_TOO_SMALL;
@@ -374,9 +446,17 @@ NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
     Rec->Flags = 0;
     Rec->RedoOperation = Params->RedoOperation;
     Rec->UndoOperation = Params->UndoOperation;
-    Rec->RedoOffset = RedoRel;
+    /* RedoOffset / UndoOffset are measured from the START OF THE LOG RECORD
+     * (the NTFS_LFS_RECORD_HEADER == ntfs-3g LOG_RECORD start at byte 0), NOT
+     * from the client-data start.  Confirmed against ntfs-3g
+     * /usr/include/ntfs-3g/logfile.h struct LOG_RECORD: this_lsn is at offset
+     * 0, the fixed header runs to 0x50 (lcn_list[0]), and redo_offset/
+     * undo_offset point at the redo/undo payload which, with lcns_to_follow==0,
+     * begins at 0x50.  Slice 1 wrote these client-data-relative (abs - 0x30);
+     * that is corrected here to be record-relative. */
+    Rec->RedoOffset = (USHORT)RedoAbs;
     Rec->RedoLength = Params->RedoLength;
-    Rec->UndoOffset = UndoRel;
+    Rec->UndoOffset = (USHORT)UndoAbs;
     Rec->UndoLength = Params->UndoLength;
     Rec->TargetAttribute = Params->TargetAttribute;
     Rec->LcnsToFollow = 0;
