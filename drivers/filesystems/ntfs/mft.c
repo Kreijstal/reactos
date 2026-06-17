@@ -1350,8 +1350,19 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     /*
      * Non-resident attribute
      */
-    DirectDiskRead = (Context == Vcb->MFTContext ||
-                      Context->pRecord->Type != AttributeData);
+    /*
+     * Route metadata reads (the $MFT $DATA stream, $INDEX_ALLOCATION nodes,
+     * $BITMAP, etc.) through the volume stream cache just like file $DATA.
+     * WriteAttribute() always writes through NtfsWriteDiskCached(), which keeps
+     * that cache coherent for every attribute type, so cached reads observe the
+     * bytes that last reached disk.  Reading this metadata uncached forced a
+     * synchronous device IRP for every MFT record, B-tree node and bitmap
+     * lookup; during install the resulting tens of thousands of tiny blocking
+     * reads dominated wall-clock time.  NtfsReadDiskCached() falls back to a
+     * raw NtfsReadDisk() while the volume cache is not yet initialised (mount
+     * bootstrap), so early MFT reads remain correct.
+     */
+    DirectDiskRead = FALSE;
 
     /*
      * Compressed $DATA fast path (issue #35, slice 1a).  A non-zero
