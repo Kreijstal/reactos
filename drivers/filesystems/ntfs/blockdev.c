@@ -38,69 +38,11 @@
  *
  * Uses CcMapData on the volume stream to avoid building synchronous IRPs.
  * This prevents deadlocks when called from page fault or section flush
- * contexts where kernel APCs are disabled.
- *
- * Only caches reads within the first 128MB of the volume (MFT zone) to
- * avoid paged pool exhaustion from accumulated BCBs during large installs.
+ * contexts where kernel APCs are disabled, and lets metadata reads hit the
+ * same volume stream cache that NtfsWriteDiskCached writes through.
  *
  * Falls back to NtfsReadDisk if the cache is not initialized.
  */
-#define NTFS_MAX_CACHED_OFFSET (128 * 1024 * 1024LL)
-#define NTFS_CACHED_VACB_COUNT ((ULONG)(NTFS_MAX_CACHED_OFFSET / VACB_MAPPING_GRANULARITY))
-C_ASSERT(NTFS_CACHED_VACB_COUNT == 512);
-C_ASSERT(sizeof(((PDEVICE_EXTENSION)0)->CachedVacbBitmap) * 8 >= NTFS_CACHED_VACB_COUNT);
-
-/* Mark a VACB index (0..NTFS_CACHED_VACB_COUNT-1) as populated.
- * Safe to call concurrently - uses an atomic OR. */
-FORCEINLINE
-VOID
-NtfsMarkCachedVacb(IN PDEVICE_EXTENSION Vcb, IN ULONG VacbIndex)
-{
-    ULONG Word = VacbIndex / 32;
-    ULONG Bit = 1UL << (VacbIndex & 31);
-    if ((Vcb->CachedVacbBitmap[Word] & Bit) == 0)
-    {
-        InterlockedOr((volatile LONG *)&Vcb->CachedVacbBitmap[Word], (LONG)Bit);
-    }
-}
-
-/* Check whether any VACB in [FirstVacb..LastVacb] (inclusive) is marked. */
-FORCEINLINE
-BOOLEAN
-NtfsAnyCachedVacbInRange(IN PDEVICE_EXTENSION Vcb,
-                        IN ULONG FirstVacb,
-                        IN ULONG LastVacb)
-{
-    ULONG FirstWord = FirstVacb / 32;
-    ULONG LastWord = LastVacb / 32;
-    ULONG Word;
-    ULONG Mask;
-
-    if (FirstWord == LastWord)
-    {
-        Mask = ((LastVacb - FirstVacb == 31) ? (ULONG)-1
-                : (((1UL << (LastVacb - FirstVacb + 1)) - 1) << (FirstVacb & 31)));
-        return (Vcb->CachedVacbBitmap[FirstWord] & Mask) != 0;
-    }
-
-    /* First partial word */
-    Mask = (ULONG)-1 << (FirstVacb & 31);
-    if (Vcb->CachedVacbBitmap[FirstWord] & Mask)
-        return TRUE;
-
-    /* Full middle words */
-    for (Word = FirstWord + 1; Word < LastWord; Word++)
-    {
-        if (Vcb->CachedVacbBitmap[Word] != 0)
-            return TRUE;
-    }
-
-    /* Last partial word */
-    Mask = ((LastVacb & 31) == 31) ? (ULONG)-1
-           : ((1UL << ((LastVacb & 31) + 1)) - 1);
-    return (Vcb->CachedVacbBitmap[LastWord] & Mask) != 0;
-}
-
 NTSTATUS
 NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
                    IN LONGLONG StartingOffset,
@@ -139,19 +81,9 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
        Split the read into chunks that each stay within one VACB. */
     while (Length > 0)
     {
-        ULONG VacbIndex;
-
         VolumeOffset.QuadPart = StartingOffset;
         VacbOffset = (ULONG)(StartingOffset % VACB_MAPPING_GRANULARITY);
         ChunkLength = min(Length, VACB_MAPPING_GRANULARITY - VacbOffset);
-
-        /* Mark this VACB as populated BEFORE CcMapData runs, so a
-         * concurrent NtfsWriteDiskCached observes it and performs the
-         * purge rather than skipping. Over-marking is harmless - it
-         * just costs an extra purge call. */
-        VacbIndex = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
-        if (VacbIndex < NTFS_CACHED_VACB_COUNT)
-            NtfsMarkCachedVacb(Vcb, VacbIndex);
 
         Mapped = FALSE;
         _SEH2_TRY
@@ -191,20 +123,28 @@ NtfsReadDiskCached(IN PDEVICE_EXTENSION Vcb,
 }
 
 /**
- * @brief Write disk data and keep the volume stream cache coherent.
+ * @brief Write metadata through the volume stream cache (write-back).
  *
- * Wraps NtfsWriteDisk: after writing directly to the storage device,
- * purges the corresponding byte range from the volume stream cache so
- * that subsequent NtfsReadDiskCached calls return the fresh data.
+ * Metadata updates (MFT records, $INDEX_ALLOCATION nodes, $BITMAP, ...) are
+ * copied into the volume stream cache with CcCopyWrite, which marks the pages
+ * dirty and leaves the actual device write to the Cc lazy writer.  The lazy
+ * writer flushes the dirty volume stream pages asynchronously by issuing a
+ * paging write that NtfsWriteFile() routes - for the FCB_IS_VOLUME_STREAM
+ * stream - to NtfsWriteDisk().  IRP_MJ_SHUTDOWN (NtfsFlushVolume) and volume
+ * dismount both CcFlushCache the same stream, so dirty metadata reaches disk
+ * on a clean stop.
  *
- * CcPurgeCacheSection is expensive on ReactOS - it takes the global
- * LockQueueMasterLock spinlock, walks the VACB list, and then calls
- * MmPurgeSegment which walks the section's pages. To avoid paying that
- * cost on every metadata write during install we track a per-VACB
- * bitmap of regions actually mapped via CcMapData and skip the purge
- * for any write whose VACBs are all unmarked. Setup writes heavily to
- * the MFT (offset ~3 MB on small volumes), so the bitmap tends to
- * stay sparse and most writes get the fast path.
+ * This replaces the previous synchronous write-through: an install issues tens
+ * of thousands of tiny metadata writes, and paying a blocking device IRP for
+ * each one dominated wall-clock time.  Writing through the cache lets those
+ * updates coalesce and removes the per-write round-trip from the hot path.
+ * Reads of the same metadata use the same cache (NtfsReadDiskCached), so the
+ * cached copy is the single coherent source until it is flushed.
+ *
+ * When the cache is not available - mount and format run before
+ * CcInitializeCacheMap, and CcCopyWrite cannot describe a range beyond the
+ * cached stream size - the write falls back to a synchronous, immediately
+ * durable NtfsWriteDisk().
  */
 NTSTATUS
 NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
@@ -212,78 +152,44 @@ NtfsWriteDiskCached(IN PDEVICE_EXTENSION Vcb,
                     IN ULONG Length,
                     IN const PUCHAR Buffer)
 {
-    NTSTATUS Status;
-    LARGE_INTEGER PurgeOffset;
-    LARGE_INTEGER PurgeLength;
     LARGE_INTEGER CacheOffset;
     LONGLONG EndOffset;
-    ULONG FirstVacb;
-    ULONG LastVacb;
-    BOOLEAN CacheMayContainRange = TRUE;
+    BOOLEAN CachedWrite = FALSE;
 
-    Status = NtfsWriteDisk(Vcb->StorageDevice,
-                           StartingOffset,
-                           Length,
-                           Vcb->NtfsInfo.BytesPerSector,
-                           Buffer);
-
-    if (!NT_SUCCESS(Status))
-        return Status;
-
-    if (Vcb->StreamFileObject == NULL ||
-        Vcb->StreamFileObject->SectionObjectPointer == NULL ||
-        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap == NULL)
-    {
-        return Status;
-    }
-
-    /* For writes inside the 128-MB region covered by CachedVacbBitmap,
-     * skip the purge if no VACB in that range has ever been mapped.
-     * Writes that cross above NTFS_MAX_CACHED_OFFSET fall through to the
-     * unconditional purge (the bitmap doesn't cover them, so we must
-     * conservatively assume coherence is needed). */
     EndOffset = StartingOffset + (LONGLONG)Length;
-    if (EndOffset <= NTFS_MAX_CACHED_OFFSET)
-    {
-        FirstVacb = (ULONG)(StartingOffset / VACB_MAPPING_GRANULARITY);
-        LastVacb = (ULONG)((EndOffset - 1) / VACB_MAPPING_GRANULARITY);
-        if (LastVacb >= NTFS_CACHED_VACB_COUNT)
-            LastVacb = NTFS_CACHED_VACB_COUNT - 1;
 
-        CacheMayContainRange = NtfsAnyCachedVacbInRange(Vcb, FirstVacb, LastVacb);
-        if (!CacheMayContainRange)
-            return Status;
+    if (Vcb->StreamFileObject != NULL &&
+        Vcb->StreamFileObject->SectionObjectPointer != NULL &&
+        Vcb->StreamFileObject->SectionObjectPointer->SharedCacheMap != NULL &&
+        EndOffset <= CcGetFileSizePointer(Vcb->StreamFileObject)->QuadPart)
+    {
+        CacheOffset.QuadPart = StartingOffset;
+        _SEH2_TRY
+        {
+            CcCopyWrite(Vcb->StreamFileObject,
+                        &CacheOffset,
+                        Length,
+                        TRUE,
+                        (PVOID)Buffer);
+            CachedWrite = TRUE;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            CachedWrite = FALSE;
+        }
+        _SEH2_END;
+
+        if (CachedWrite)
+            return STATUS_SUCCESS;
     }
 
-    /*
-     * Keep the volume stream cache coherent with metadata writes.  A purge is
-     * not sufficient on every ReactOS cache-manager path: a following
-     * CcMapData can still observe the old VACB contents.  Updating the cache
-     * with the bytes that just reached disk makes immediate metadata re-reads
-     * deterministic.  During format, however, the volume stream cache can
-     * still describe the pre-format section size.  Do not call CcCopyWrite
-     * beyond that size; the cache manager asserts on such writes.
-     */
-    CacheOffset.QuadPart = StartingOffset;
-    if (CacheMayContainRange &&
-        EndOffset <= CcGetFileSizePointer(Vcb->StreamFileObject)->QuadPart &&
-        CcCopyWrite(Vcb->StreamFileObject,
-                    &CacheOffset,
-                    Length,
-                    FALSE,
-                    (PVOID)Buffer))
-    {
-        return Status;
-    }
-
-    PurgeOffset.QuadPart = StartingOffset;
-    PurgeLength.QuadPart = EndOffset - StartingOffset;
-    CcPurgeCacheSection(Vcb->StreamFileObject->SectionObjectPointer,
-                        &PurgeOffset,
-                        (ULONG)PurgeLength.QuadPart,
-                        FALSE);
-
-    return Status;
+    /* Cache not yet initialised (mount/format bootstrap) or CcCopyWrite could
+     * not take the data: write straight to the device so it is durable now. */
+    return NtfsWriteDisk(Vcb->StorageDevice,
+                         StartingOffset,
+                         Length,
+                         Vcb->NtfsInfo.BytesPerSector,
+                         Buffer);
 }
 
 NTSTATUS
