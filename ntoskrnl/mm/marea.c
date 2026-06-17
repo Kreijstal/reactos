@@ -283,35 +283,81 @@ MmFreeMemoryArea(
         }
 
         EndAddress = MM_ROUND_UP(MA_GetEndingAddress(MemoryArea), PAGE_SIZE);
-        for (Address = MA_GetStartingAddress(MemoryArea);
-                Address < (ULONG_PTR)EndAddress;
-                Address += PAGE_SIZE)
-        {
-            BOOLEAN Dirty = FALSE;
-            SWAPENTRY SwapEntry = 0;
-            PFN_NUMBER Page = 0;
-            BOOLEAN DoFree;
 
-            if (MmIsPageSwapEntry(Process, (PVOID)Address))
+        /*
+         * Tear the range down in batches.  Each page is unmapped with only a
+         * local TLB invalidation (MmDeleteVirtualMappingNoBroadcast); once a
+         * batch has been unmapped we issue a single cross-processor TLB
+         * shootdown and only then hand the frames to FreePage (which may release
+         * them to the free list).  This preserves the invariant that no other
+         * processor can still hold a stale translation to a page that is about
+         * to be reused, while replacing one synchronous IPI per page - which
+         * made teardown of large mapped views very slow on MP - with one IPI
+         * per batch.
+         */
+#define MI_FREE_AREA_BATCH 32
+        {
+            struct
             {
-                MmDeletePageFileMapping(Process, (PVOID)Address, &SwapEntry);
-                /* We'll have to do some cleanup when we're on the page file */
-                DoFree = TRUE;
+                PVOID Address;
+                PFN_NUMBER Page;
+                SWAPENTRY SwapEntry;
+                BOOLEAN Dirty;
+            } Batch[MI_FREE_AREA_BATCH];
+            ULONG BatchCount = 0;
+            ULONG i;
+
+            for (Address = MA_GetStartingAddress(MemoryArea);
+                    Address < (ULONG_PTR)EndAddress;
+                    Address += PAGE_SIZE)
+            {
+                BOOLEAN Dirty = FALSE;
+                SWAPENTRY SwapEntry = 0;
+                PFN_NUMBER Page = 0;
+                BOOLEAN DoFree;
+
+                if (MmIsPageSwapEntry(Process, (PVOID)Address))
+                {
+                    MmDeletePageFileMapping(Process, (PVOID)Address, &SwapEntry);
+                    /* We'll have to do some cleanup when we're on the page file */
+                    DoFree = TRUE;
+                }
+                else if (FreePage == NULL)
+                {
+                    DoFree = MmDeletePhysicalMapping(Process, (PVOID)Address, &Dirty, &Page);
+                }
+                else
+                {
+                    DoFree = MmDeleteVirtualMappingNoBroadcast(Process, (PVOID)Address, &Dirty, &Page);
+                }
+
+                if (DoFree && (FreePage != NULL))
+                {
+                    Batch[BatchCount].Address = (PVOID)Address;
+                    Batch[BatchCount].Page = Page;
+                    Batch[BatchCount].SwapEntry = SwapEntry;
+                    Batch[BatchCount].Dirty = Dirty;
+                    if (++BatchCount == MI_FREE_AREA_BATCH)
+                    {
+                        KeFlushEntireTb(TRUE, TRUE);
+                        for (i = 0; i < BatchCount; i++)
+                            FreePage(FreePageContext, MemoryArea, Batch[i].Address,
+                                     Batch[i].Page, Batch[i].SwapEntry, Batch[i].Dirty);
+                        BatchCount = 0;
+                    }
+                }
             }
-            else if (FreePage == NULL)
+
+            /* Shoot down and release whatever is left in the final partial batch. */
+            if (BatchCount != 0)
             {
-                DoFree = MmDeletePhysicalMapping(Process, (PVOID)Address, &Dirty, &Page);
-            }
-            else
-            {
-                DoFree = MmDeleteVirtualMapping(Process, (PVOID)Address, &Dirty, &Page);
-            }
-            if (DoFree && (FreePage != NULL))
-            {
-                FreePage(FreePageContext, MemoryArea, (PVOID)Address,
-                         Page, SwapEntry, (BOOLEAN)Dirty);
+                KeFlushEntireTb(TRUE, TRUE);
+                for (i = 0; i < BatchCount; i++)
+                    FreePage(FreePageContext, MemoryArea, Batch[i].Address,
+                             Batch[i].Page, Batch[i].SwapEntry, Batch[i].Dirty);
             }
         }
+#undef MI_FREE_AREA_BATCH
 
         if (MemoryArea->VadNode.StartingVpn < (ULONG_PTR)MmSystemRangeStart >> PAGE_SHIFT)
         {
