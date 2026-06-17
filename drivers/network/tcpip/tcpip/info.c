@@ -50,15 +50,20 @@ VOID RemoveEntityByContext(PVOID Context)
 
    TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
 
-   for (i = 0; i < EntityCount; i++) {
+   for (i = 0; i < EntityCount; ) {
 	if( EntityList[i].context == Context ) {
 	    if( i != EntityCount - 1 ) {
 		memcpy( &EntityList[i],
 			&EntityList[--EntityCount],
 			sizeof(EntityList[i]) );
+		/* The slot now holds the entry moved from the end, which may
+		 * also match Context (an interface registers several entities
+		 * sharing the same context), so re-examine it without advancing. */
 	    } else {
 		EntityCount--;
 	    }
+	} else {
+	    i++;
 	}
     }
 
