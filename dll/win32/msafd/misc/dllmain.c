@@ -233,6 +233,19 @@ WSPSocket(int AddressFamily,
     Socket->RemoteAddress = &Socket->SharedData->WSRemoteAddress;
     Socket->SanData = NULL;
     RtlCopyMemory(&Socket->ProtocolInfo, lpProtocolInfo, sizeof(Socket->ProtocolInfo));
+    /* dwServiceFlags3/dwServiceFlags4 are msafd's private channel for the
+     * WSPDuplicateSocket -> WSPSocket handoff (the duplicated SharedData mapping
+     * and AFD handle). They are meaningful only for the single WSPSocket() call
+     * that consumes them; they must not persist in the socket's stored
+     * ProtocolInfo. Otherwise reusing that ProtocolInfo to create another socket
+     * (e.g. WSPAccept passing &Socket->ProtocolInfo to WSPSocket) re-enters the
+     * duplicate path above and hands back this socket's own handle instead of a
+     * fresh one -- which made accept() on a post-fork (Cygwin/MSYS2) listening
+     * socket return the listener itself (NewFileObject == FileObject in
+     * AfdAccept). WSPDuplicateSocket always repopulates these fields, so clearing
+     * the stored copy is safe. */
+    Socket->ProtocolInfo.dwServiceFlags3 = 0;
+    Socket->ProtocolInfo.dwServiceFlags4 = 0;
     if (SharedData)
         goto ok;
 
