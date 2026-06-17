@@ -16,7 +16,6 @@
  * linking and exporting the symbols.
  */
 #ifndef BUILD_WOW6432
-NTSYSAPI
 NTSTATUS
 NTAPI
 NtWow64ReadVirtualMemory64(HANDLE ProcessHandle,
@@ -28,7 +27,6 @@ NtWow64ReadVirtualMemory64(HANDLE ProcessHandle,
     return STATUS_NOT_IMPLEMENTED;
 }
 
-NTSYSAPI
 NTSTATUS
 NTAPI
 NtWow64WriteVirtualMemory64(HANDLE ProcessHandle,
