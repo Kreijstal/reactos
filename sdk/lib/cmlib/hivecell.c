@@ -78,6 +78,19 @@ HvpGetCellData(
     _In_ PHHIVE Hive,
     _In_ HCELL_INDEX CellIndex)
 {
+    /*
+     * Reject an out-of-bounds cell index instead of returning a wild pointer.
+     * A corrupt hive can hand us a bogus HCELL_INDEX whose block number is past
+     * the storage block list; HvpGetCellHeader only ASSERTs that bound (a no-op
+     * in release builds) and would then index BlockList[] out of bounds, read a
+     * garbage block address and return a wild pointer that the caller faults on.
+     * HvIsCellAllocated performs exactly this bounds check (and returns TRUE for
+     * flat hives), so a valid index is unaffected while a bogus one yields NULL,
+     * which every HvGetCell caller already handles.
+     */
+    if (!HvIsCellAllocated(Hive, CellIndex))
+        return NULL;
+
     return (PCELL_DATA)(HvpGetCellHeader(Hive, CellIndex) + 1);
 }
 
