@@ -231,6 +231,25 @@ RtlpInitializeHeap(OUT PHEAP Heap,
     for (Index = 0; Index < NumUCRs; ++Index)
         InsertTailList(&Heap->UCRList, &UcrDescriptor[Index].ListEntry);
 
+    /* Decide whether the low-fragmentation front-end may be used. It needs the
+       heap lock for its metadata and a growable back-end to carve subsegments
+       from, so it is left disabled for non-serialised, non-growable and
+       kernel-mode heaps. Eligible heaps create the front-end lazily on the first
+       small allocation (FrontEndHeapType 0 -> 2); ineligible heaps are pinned to
+       the back-end (FrontEndHeapType 1). */
+    Heap->FrontEndHeap = NULL;
+    Heap->FrontHeapLockCount = 0;
+    if ((RtlpGetMode() != UserMode) ||
+        (Flags & (HEAP_NO_SERIALIZE | HEAP_CREATE_ALIGN_16)) ||
+        !(Flags & HEAP_GROWABLE))
+    {
+        Heap->FrontEndHeapType = 1;
+    }
+    else
+    {
+        Heap->FrontEndHeapType = 0;
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -2132,6 +2151,30 @@ RtlAllocateHeap(IN PVOID HeapPtr,
         HeapLocked = TRUE;
     }
 
+    /* Try the low-fragmentation front-end for small, plain allocations. Blocks
+       that need extra stuff or settable user flags, and heaps running with the
+       fill/validation debug features, are served by the back-end instead. */
+    if ((Heap->FrontEndHeapType != 1) &&
+        (AllocationSize <= RTL_LFH_MAX_BLOCK_SIZE) &&
+        !(EntryFlags & (HEAP_ENTRY_EXTRA_PRESENT | HEAP_ENTRY_SETTABLE_FLAGS)) &&
+        !(Heap->Flags & (HEAP_TAIL_CHECKING_ENABLED | HEAP_FREE_CHECKING_ENABLED | HEAP_VALIDATE_ALL_ENABLED)))
+    {
+        PVOID Result = RtlpLowFragHeapAllocate(Heap, AllocationSize);
+        if (Result != NULL)
+        {
+            /* Release the lock */
+            if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
+
+            /* Zero memory if that was requested */
+            if (Flags & HEAP_ZERO_MEMORY)
+                RtlZeroMemory(Result, Size);
+
+            return Result;
+        }
+
+        /* Front-end could not satisfy it; fall back to the back-end */
+    }
+
     /* Depending on the size, the allocation is going to be done from dedicated,
        non-dedicated lists or a virtual block of memory */
     if (Index <= Heap->VirtualMemoryThreshold)
@@ -2314,10 +2357,12 @@ BOOLEAN NTAPI RtlFreeHeap(
     /* Protect with SEH in case the pointer is not valid */
     _SEH2_TRY
     {
-        /* Check this entry, fail if it's invalid */
+        /* Check this entry, fail if it's invalid. Low-fragmentation front-end
+           blocks carry the LFH marker in SegmentOffset instead of a real
+           segment index, so exempt them from the segment-offset check. */
         if (!(HeapEntry->Flags & HEAP_ENTRY_BUSY) ||
             (((ULONG_PTR)Ptr & 0x7) != 0) ||
-            (HeapEntry->SegmentOffset >= HEAP_SEGMENTS))
+            (!RtlpHeapIsLFHEntry(HeapEntry) && (HeapEntry->SegmentOffset >= HEAP_SEGMENTS)))
         {
             /* This is an invalid block */
             DPRINT1("HEAP: Trying to free an invalid address %p!\n", Ptr);
@@ -2339,6 +2384,17 @@ BOOLEAN NTAPI RtlFreeHeap(
     {
         RtlEnterHeapLock(Heap->LockVariable, TRUE);
         Locked = TRUE;
+    }
+
+    /* Hand low-fragmentation front-end blocks to the front-end */
+    if (RtlpHeapIsLFHEntry(HeapEntry))
+    {
+        BOOLEAN Success = RtlpLowFragHeapFree(Heap, Ptr);
+
+        /* Release the heap lock */
+        if (Locked) RtlLeaveHeapLock(Heap->LockVariable);
+
+        return Success;
     }
 
     if (HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC)
@@ -2724,6 +2780,11 @@ RtlReAllocateHeap(HANDLE HeapPtr,
         RtlSetLastWin32ErrorAndNtStatusFromNtStatus(STATUS_NO_MEMORY);
         return NULL;
     }
+
+    /* Reallocating a low-fragmentation front-end block is handled by the
+       front-end (it locks the heap itself through the public routines). */
+    if (RtlpHeapIsLFHEntry((PHEAP_ENTRY)Ptr - 1))
+        return RtlpLowFragHeapReAllocate(Heap, Flags, Ptr, Size);
 
     /* Calculate allocation size and index */
     if (Size)
@@ -3297,6 +3358,10 @@ RtlpValidateHeapEntry(
     if (!HeapEntry) goto invalid_entry;
     if ((ULONG_PTR)HeapEntry & (HEAP_ENTRY_SIZE - 1)) goto invalid_entry;
     if (!(HeapEntry->Flags & HEAP_ENTRY_BUSY)) goto invalid_entry;
+
+    /* Low-fragmentation front-end blocks live inside a back-end block and carry
+       the LFH marker instead of a segment index; the front-end owns them. */
+    if (RtlpHeapIsLFHEntry(HeapEntry)) return TRUE;
 
     BigAllocation = HeapEntry->Flags & HEAP_ENTRY_VIRTUAL_ALLOC;
     Segment = Heap->Segments[HeapEntry->SegmentOffset];
@@ -4085,7 +4150,27 @@ RtlSetHeapInformation(IN HANDLE HeapHandle OPTIONAL,
             return STATUS_UNSUCCESSFUL;
         }
 
-        DPRINT1("RtlSetHeapInformation() needs to enable LFH\n");
+        /* Nothing to do for special heaps or when it is already enabled */
+        if (HeapHandle != NULL && !RtlpHeapIsSpecial(((PHEAP)HeapHandle)->Flags))
+        {
+            PHEAP Heap = (PHEAP)HeapHandle;
+            BOOLEAN Locked = FALSE;
+
+            if (!(Heap->Flags & HEAP_NO_SERIALIZE))
+            {
+                RtlEnterHeapLock(Heap->LockVariable, TRUE);
+                Locked = TRUE;
+            }
+
+            /* Enable the low-fragmentation front-end unless it is disallowed for
+               this heap (non-growable, non-serialised or kernel-mode). */
+            if (Heap->FrontEndHeapType != 1 && Heap->FrontEndHeap == NULL)
+                RtlpLowFragHeapEnable(Heap);
+
+            if (Locked)
+                RtlLeaveHeapLock(Heap->LockVariable);
+        }
+
         return STATUS_SUCCESS;
     }
 

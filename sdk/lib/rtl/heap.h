@@ -312,6 +312,31 @@ typedef struct _HEAP_ENTRY_EXTRA
 
 typedef HEAP_ENTRY_EXTRA HEAP_FREE_ENTRY_EXTRA, *PHEAP_FREE_ENTRY_EXTRA;
 
+/* Low-fragmentation front-end heap (heaplfh.c) */
+
+/* Largest back-end block size (header + payload) served by the front-end;
+   larger requests go straight to the back-end. */
+#define RTL_LFH_MAX_BLOCK_SIZE  0x4000
+
+/* Number of compact size-class buckets (see RtlpLowFragHeapBucketIndex). */
+#define RTL_LFH_BUCKET_COUNT    64
+
+/* Marker stored in the SegmentOffset/LFHFlags header byte of every LFH block.
+   Back-end blocks always carry a real segment index (< HEAP_SEGMENTS), so this
+   value unambiguously identifies a front-end owned block. */
+#define RTL_LFH_ENTRY_MARKER    0xFF
+
+/* Sentinel terminating a subsegment's intrusive free list. */
+#define RTL_LFH_NO_BLOCK        0xFFFF
+
+/* TRUE if the block belongs to the low-fragmentation front-end. */
+FORCEINLINE
+BOOLEAN
+RtlpHeapIsLFHEntry(PHEAP_ENTRY HeapEntry)
+{
+    return HeapEntry->SegmentOffset == RTL_LFH_ENTRY_MARKER;
+}
+
 typedef struct _HEAP_VIRTUAL_ALLOC_ENTRY
 {
     LIST_ENTRY Entry;
@@ -345,6 +370,19 @@ RtlpValidateHeapEntry(PHEAP Heap, PHEAP_ENTRY HeapEntry);
 
 BOOLEAN NTAPI
 RtlpValidateHeapHeaders(PHEAP Heap, BOOLEAN Recalculate);
+
+/* heaplfh.c */
+BOOLEAN NTAPI
+RtlpLowFragHeapEnable(PHEAP Heap);
+
+PVOID NTAPI
+RtlpLowFragHeapAllocate(PHEAP Heap, SIZE_T AllocationSize);
+
+BOOLEAN NTAPI
+RtlpLowFragHeapFree(PHEAP Heap, PVOID Ptr);
+
+PVOID NTAPI
+RtlpLowFragHeapReAllocate(PHEAP Heap, ULONG Flags, PVOID Ptr, SIZE_T Size);
 
 /* heapdbg.c */
 NTSYSAPI
