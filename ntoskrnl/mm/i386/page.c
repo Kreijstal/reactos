@@ -109,6 +109,53 @@ ULONG MmProtectToValue[32] =
 
 /* FUNCTIONS ***************************************************************/
 
+#ifdef CONFIG_SMP
+static
+ULONG_PTR
+NTAPI
+MiInvalidateSingleTbWorker(IN ULONG_PTR Address)
+{
+    /* Runs on every processor via KeIpiGenericCall: drop the stale entry */
+    KeInvalidateTlbEntry((PVOID)Address);
+    return 0;
+}
+#endif
+
+/*
+ * Invalidate the TLB entry for Address on ALL processors.
+ *
+ * KeInvalidateTlbEntry / KeFlushProcessTb only touch the current processor's
+ * TLB.  That is fine for a protection change, but a page that is being
+ * UNMAPPED here may be released to the free list and handed to a different
+ * owner moments later, possibly on another processor.  If that processor still
+ * holds a stale (writable) translation for the frame it will corrupt the new
+ * owner - a cross-processor page double-use that manifests as the rotating
+ * MEMORY_MANAGEMENT / heap / pool corruption only ever seen on MP.  Broadcast
+ * the invalidation so no processor keeps a translation to a page we are about
+ * to free.
+ *
+ * NOTE: this issues a synchronous IPI per call.  That is the right trade-off
+ * for the single-page eviction paths (the pageout trimmer in rmap.c, the
+ * copy-on-write/protect path in section.c), which steal one page at a time
+ * from a still-running process and must drop that one translation everywhere
+ * before the frame can be reused.  Bulk teardown loops (MmFreeMemoryArea)
+ * instead unmap with MmDeleteVirtualMappingNoBroadcast and issue a single
+ * KeFlushEntireTb shootdown for the whole batch.
+ */
+FORCEINLINE
+VOID
+MiInvalidateTlbEntryAllProcessors(IN PVOID Address)
+{
+#ifdef CONFIG_SMP
+    if (KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember)
+    {
+        KeIpiGenericCall(MiInvalidateSingleTbWorker, (ULONG_PTR)Address);
+        return;
+    }
+#endif
+    KeInvalidateTlbEntry(Address);
+}
+
 NTSTATUS
 NTAPI
 MiFillSystemPageDirectory(IN PVOID Base,
@@ -239,7 +286,8 @@ MmDeleteVirtualMappingEx(
     _In_ PVOID Address,
     _Out_opt_ BOOLEAN* WasDirty,
     _Out_opt_ PPFN_NUMBER Page,
-    _In_ BOOLEAN IsPhysical)
+    _In_ BOOLEAN IsPhysical,
+    _In_ BOOLEAN BroadcastTlb)
 {
     PMMPTE PointerPte;
     MMPTE OldPte;
@@ -297,7 +345,18 @@ MmDeleteVirtualMappingEx(
             MmTracePte('D', Address, OldPte.u.Long, 0, _ReturnAddress());
 #endif
 
-        KeInvalidateTlbEntry(Address);
+        /*
+         * The frame this PTE referenced may be freed and reused right after we
+         * return, so the stale translation must be dropped on every processor,
+         * not just this one (see MiInvalidateTlbEntryAllProcessors).  A batched
+         * caller (BroadcastTlb == FALSE) takes responsibility for the cross-
+         * processor shootdown itself, after it has unmapped the whole run, and
+         * here only needs the cheap local invalidation.
+         */
+        if (BroadcastTlb)
+            MiInvalidateTlbEntryAllProcessors(Address);
+        else
+            KeInvalidateTlbEntry(Address);
 
         if (OldPte.u.Long != 0)
         {
@@ -372,7 +431,7 @@ MmDeleteVirtualMapping(
     _Out_opt_ BOOLEAN * WasDirty,
     _Out_opt_ PPFN_NUMBER Page)
 {
-    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, FALSE);
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, FALSE, TRUE);
 }
 
 _Success_(return)
@@ -383,7 +442,25 @@ MmDeletePhysicalMapping(
     _Out_opt_ BOOLEAN * WasDirty,
     _Out_opt_ PPFN_NUMBER Page)
 {
-    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, TRUE);
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, TRUE, TRUE);
+}
+
+/*
+ * Like MmDeleteVirtualMapping, but only invalidates the local TLB.  The caller
+ * is unmapping a batch of pages and MUST issue a cross-processor shootdown
+ * (KeFlushEntireTb(TRUE, TRUE)) for the whole run before any of the unmapped
+ * frames are released, so that no other processor keeps a stale translation to
+ * a page that is about to be reused.
+ */
+_Success_(return)
+BOOLEAN
+MmDeleteVirtualMappingNoBroadcast(
+    _Inout_opt_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Out_opt_ BOOLEAN * WasDirty,
+    _Out_opt_ PPFN_NUMBER Page)
+{
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, FALSE, FALSE);
 }
 
 VOID
