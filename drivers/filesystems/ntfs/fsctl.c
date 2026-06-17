@@ -604,6 +604,17 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         }
     }
 
+    /* $LogFile Phase-2 slice-2 write-context bootstrap (Kreijstal/reactos#34).
+     *
+     * Prepare the Vcb-resident logging context so the write-ahead-logging hook
+     * in UpdateFileRecord can run if logging is later enabled.  Logging is
+     * left DISABLED here: NtfsLfsMountInitWriteContext sets LoggingEnabled =
+     * FALSE, so the metadata write path stays byte-for-byte identical to a
+     * volume with no journal.  A failure to build the context is non-fatal -
+     * the volume mounts and behaves exactly as today, just without the (still
+     * inert) journal context. */
+    (void)NtfsLfsMountInitWriteContext(Vcb);
+
     /* Precompute and cache the free-cluster count so the first
      * IRP_MJ_QUERY_VOLUME_INFORMATION returns immediately.  On slow media
      * (USB-MSC) reading $Bitmap sector-by-sector takes tens of seconds;
@@ -1286,6 +1297,13 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
     FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
 
     ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
+
+    /* $LogFile clean-dismount flush (Kreijstal/reactos#34 slice 2).  No-op
+     * unless logging was enabled.  Runs while MFTContext / MasterFileTable are
+     * still alive (it writes the CLEAN restart landmark and clears the on-disk
+     * $Volume DIRTY bit), then tears the logging context down. */
+    (void)NtfsLfsDismountFlush(DeviceExt);
+    NtfsLfsTeardownWriteContext(DeviceExt);
 
     /* Drop the cached $MFT $Bitmap.  After dismount the on-disk bitmap may
      * have been rewritten under us (this is exactly what mkntfs does during

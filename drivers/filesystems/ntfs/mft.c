@@ -2551,6 +2551,47 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
 
     NTFS_CHECK_POOL(FileRecord, "UpdateFileRecord:pre");
 
+    /* $LogFile write-ahead-logging hook (Kreijstal/reactos#34 slice 2).
+     *
+     * When Vcb->LoggingEnabled is FALSE (the default for every mounted
+     * volume) this is a pass-through returning STATUS_SUCCESS that touches
+     * nothing - the path below is then byte-for-byte unchanged.  When logging
+     * is on, it emits a redo/undo record for this FILE_RECORD change, flushes
+     * the log RCRD page + dirty restart to $LogFile, runs the $Volume DIRTY
+     * handshake, and returns the assigned LSN so we can stamp it into the
+     * record's Lsn field BEFORE the metadata page is written (the WAL
+     * invariant).  The redo payload is the post-change record image; the
+     * pre-image (undo) is left for slice 3 (replay), which is the consumer of
+     * these records.  Emission failure aborts the metadata write so we never
+     * write a metadata page ahead of its log record. */
+    if (Vcb->LoggingEnabled)
+    {
+        ULONGLONG PageLsn = 0;
+        USHORT RedoLen = (USHORT)min(Vcb->NtfsInfo.BytesPerFileRecord,
+                                     (ULONG)0xFFFF);
+
+        Status = NtfsLfsLogMetadataPage(Vcb,
+                                        NTFS_LFS_OP_UPDATE_RESIDENT_VALUE,
+                                        NTFS_LFS_OP_UPDATE_RESIDENT_VALUE,
+                                        0,
+                                        MftIndex,
+                                        FileRecord,
+                                        RedoLen,
+                                        NULL,
+                                        0,
+                                        &PageLsn);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("UpdateFileRecord: WAL emission failed 0x%08lx; "
+                    "aborting metadata write\n", Status);
+            return Status;
+        }
+
+        /* Stamp the assigned LSN into the record so a future replay can tell
+         * whether this on-disk image is at or past the logged change. */
+        FileRecord->Ntfs.Lsn = PageLsn;
+    }
+
     // Add the fixup array to prepare the data for writing to disk
     AddFixupArray(Vcb, &FileRecord->Ntfs);
 
