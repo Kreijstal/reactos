@@ -2057,6 +2057,116 @@ typedef struct _NTFS_LFS_RECORD_HEADER
 #define NTFS_LFS_RECTYPE_NORMAL        0x00000001  /* normal log record      */
 #define NTFS_LFS_RECTYPE_CHECKPOINT    0x00000002  /* restart checkpoint     */
 
+/* LFS redo/undo operation codes (Microsoft-documented; the same numbering
+ * libfsntfs and ntfs3 use).  Phase 2 (slice 1) only needs Noop, the two
+ * page-data ops, and the open/commit/forget transaction markers to format
+ * a well-formed record; the full matrix is carried for completeness so the
+ * emission layer and a future replayer share one enumeration. */
+#define NTFS_LFS_OP_NOOP                       0x00
+#define NTFS_LFS_OP_COMPENSATION_LOG_RECORD    0x01
+#define NTFS_LFS_OP_INITIALIZE_FILE_RECORD_SEGMENT  0x02
+#define NTFS_LFS_OP_DEALLOCATE_FILE_RECORD_SEGMENT  0x03
+#define NTFS_LFS_OP_WRITE_END_OF_FILE_RECORD_SEGMENT 0x04
+#define NTFS_LFS_OP_CREATE_ATTRIBUTE           0x05
+#define NTFS_LFS_OP_DELETE_ATTRIBUTE           0x06
+#define NTFS_LFS_OP_UPDATE_RESIDENT_VALUE      0x07
+#define NTFS_LFS_OP_UPDATE_NONRESIDENT_VALUE   0x08
+#define NTFS_LFS_OP_UPDATE_MAPPING_PAIRS       0x09
+#define NTFS_LFS_OP_SET_NEW_ATTRIBUTE_SIZES    0x0B
+#define NTFS_LFS_OP_ADD_INDEX_ENTRY_ROOT       0x0C
+#define NTFS_LFS_OP_DELETE_INDEX_ENTRY_ROOT    0x0D
+#define NTFS_LFS_OP_ADD_INDEX_ENTRY_ALLOCATION 0x0E
+#define NTFS_LFS_OP_DELETE_INDEX_ENTRY_ALLOCATION 0x0F
+#define NTFS_LFS_OP_SET_INDEX_ENTRY_VCN_ALLOCATION 0x12
+#define NTFS_LFS_OP_UPDATE_FILE_NAME_ROOT      0x13
+#define NTFS_LFS_OP_UPDATE_FILE_NAME_ALLOCATION 0x14
+#define NTFS_LFS_OP_SET_BITS_IN_NONRESIDENT_BITMAP 0x15
+#define NTFS_LFS_OP_CLEAR_BITS_IN_NONRESIDENT_BITMAP 0x16
+#define NTFS_LFS_OP_OPEN_NONRESIDENT_ATTRIBUTE 0x1B
+#define NTFS_LFS_OP_FORGET_TRANSACTION         0x20
+
+/* NTFS_LFS_RECORD_HEADER.Flags bits. */
+#define NTFS_LFS_RECORD_FLAG_MULTI_PAGE        0x0001  /* spans >1 page      */
+
+/* Two header lengths matter for an LFS log record (libfsntfs layout):
+ *
+ *   NTFS_LFS_RECORD_HEADER_LENGTH (0x30) - the GENERIC LFS record header
+ *      (ThisLsn .. Flags + reserved).  ClientDataLength counts everything
+ *      AFTER this; the restart area's RecordHeaderLength field carries it.
+ *
+ *   NTFS_LFS_ATTR_HEADER_LENGTH (0x20) - the NTFS attribute-log-record
+ *      sub-header that begins the client data (RedoOperation .. TargetVcn).
+ *      It is sizeof(NTFS_LFS_RECORD_HEADER) - 0x30.
+ *
+ * On-disk a record is: generic header (0x30) | NTFS sub-header (0x20) |
+ * LCN list (LcnsToFollow*8) | redo payload | undo payload.  RedoOffset and
+ * UndoOffset are measured from the start of the client data (offset 0x30),
+ * so a record with no LCNs and the sub-header in place has its redo payload
+ * at client-relative 0x20 (absolute 0x50). */
+#define NTFS_LFS_RECORD_HEADER_LENGTH          0x30
+#define NTFS_LFS_ATTR_HEADER_LENGTH            0x20
+
+/* In-memory write-side emission context (slice 1, Kreijstal/reactos#34).
+ *
+ * This is the standalone, unit-testable cursor over an in-memory image of
+ * $LogFile:$DATA.  It is deliberately NOT wired into the live metadata
+ * write path yet; the emission functions mutate only the caller-supplied
+ * Image buffer.  Field layout mirrors what a future Vcb-resident logging
+ * context would carry.
+ *
+ *   Image / ImageLength : caller-owned $LogFile:$DATA buffer (>= 4 pages:
+ *                         two RSTR copies + at least two RCRD pages).
+ *   PageSize / SectorSize : page = USA stride container, sector = USA
+ *                         fixup stride (matches Vcb->NtfsInfo).
+ *   FirstRcrdOffset     : byte offset of the first RCRD page (2 * PageSize:
+ *                         past both restart copies).
+ *   SeqNumberBits       : sequence-number bit width copied out of the
+ *                         restart area; the LSN = (Seq << (64 - bits)) |
+ *                         (offset/8) encoding uses it.
+ *   CurrentSeqNumber    : sequence number of the page the write cursor is
+ *                         in; bumped each time the RCRD region wraps.
+ *   WriteOffset         : byte offset (into Image) of the next free record
+ *                         slot, 8-byte aligned.  The record's ThisLsn is
+ *                         derived from this offset.
+ *   LastLsn             : ThisLsn of the most recently emitted record (0
+ *                         before the first emit).
+ *   ClientId            : log client index (NTFS uses 0).
+ */
+typedef struct _LFS_WRITE_CONTEXT
+{
+    PUCHAR    Image;
+    ULONG     ImageLength;
+    ULONG     PageSize;
+    ULONG     SectorSize;
+    ULONG     FirstRcrdOffset;
+    ULONG     SeqNumberBits;
+    ULONGLONG CurrentSeqNumber;
+    ULONG     WriteOffset;
+    ULONGLONG LastLsn;
+    USHORT    ClientId;
+} LFS_WRITE_CONTEXT, *PLFS_WRITE_CONTEXT;
+
+/* Parameters describing one log record to format/emit.  Redo and Undo are
+ * the before/after byte images of the metadata change (Windows logs the
+ * redo = post-change image and undo = pre-change image so analysis can
+ * roll forward committed TXs and roll back uncommitted ones). */
+typedef struct _LFS_EMIT_PARAMS
+{
+    USHORT       RedoOperation;
+    USHORT       UndoOperation;
+    const VOID  *RedoData;
+    USHORT       RedoLength;
+    const VOID  *UndoData;
+    USHORT       UndoLength;
+    ULONG        TransactionId;
+    ULONGLONG    ClientPreviousLsn;
+    ULONGLONG    ClientUndoNextLsn;
+    USHORT       TargetAttribute;
+    ULONGLONG    TargetVcn;
+    USHORT       RecordOffset;
+    USHORT       AttributeOffset;
+} LFS_EMIT_PARAMS, *PLFS_EMIT_PARAMS;
+
 /* lfsparse.c worker prototypes. */
 
 /* Parse a single RSTR page from @p Page (size @p PageSize).  Applies USA
@@ -2133,5 +2243,75 @@ NtfsLfsDumpLogfile(PDEVICE_EXTENSION Vcb,
     CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x300,                    \
              METHOD_BUFFERED, FILE_ANY_ACCESS)
 #endif
+
+/* lfs.c - $LogFile Phase 2 slice 1: write-side emission layer.  These
+ * functions are standalone (operate on a caller-owned in-memory image)
+ * and are NOT yet wired into the live metadata write path. */
+
+/* Compose / decompose an LSN.  An LSN packs a sequence number in the high
+ * @p SeqNumberBits and the log-file byte offset (divided by 8) in the low
+ * (64 - SeqNumberBits) bits - the Microsoft LFS encoding. */
+ULONGLONG
+NtfsLfsMakeLsn(ULONG SeqNumberBits, ULONGLONG SeqNumber, ULONG ByteOffset);
+
+ULONG
+NtfsLfsLsnToOffset(ULONG SeqNumberBits, ULONGLONG Lsn);
+
+/* Build a fresh CLEAN RSTR restart page into @p Page (size @p PageSize),
+ * USA stamped via AddFixupArray so NtfsLfsParseRestartPage round-trips it.
+ * Mirrors mkntfs's build_rstr_page byte-for-byte so a driver-formatted and
+ * a mkntfs-formatted restart page are identical.  @p Clean selects the
+ * CLEAN landmark flag; @p CurrentLsn / @p LastLsnDataLength stamp the
+ * restart-area landmark fields. */
+NTSTATUS
+NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
+                        PUCHAR Page,
+                        ULONG PageSize,
+                        ULONGLONG FileSize,
+                        ULONGLONG CurrentLsn,
+                        ULONG LastLsnDataLength,
+                        BOOLEAN Clean);
+
+/* Initialise an emission context over @p Image (the full $LogFile:$DATA
+ * image).  Lays down two CLEAN RSTR copies + empty RCRD pages and primes
+ * the write cursor at the first RCRD page.  @p Image must be at least
+ * 4 * PageSize bytes. */
+NTSTATUS
+NtfsLfsInitWriteContext(PDEVICE_EXTENSION Vcb,
+                        PLFS_WRITE_CONTEXT Ctx,
+                        PUCHAR Image,
+                        ULONG ImageLength,
+                        ULONG PageSize);
+
+/* Format one log record (header + redo + undo payload) into @p Buffer.
+ * @p BufferLength must be >= NTFS_LFS_RECORD_HEADER_LENGTH + RedoLength +
+ * UndoLength.  Fills ThisLsn = @p ThisLsn.  Returns the total record byte
+ * length in @p RecordLengthOut.  No USA, no page placement - pure codec. */
+NTSTATUS
+NtfsLfsFormatRecord(PLFS_WRITE_CONTEXT Ctx,
+                    const LFS_EMIT_PARAMS *Params,
+                    ULONGLONG ThisLsn,
+                    PUCHAR Buffer,
+                    ULONG BufferLength,
+                    PULONG RecordLengthOut);
+
+/* Emit one log record: format it, place it at the write cursor inside the
+ * current RCRD page, assign its ThisLsn from the cursor offset, apply the
+ * page USA, advance the cursor, and flip the restart area to dirty with
+ * CurrentLsn = the new record's LSN.  @p LsnOut receives the assigned LSN.
+ * Records that would cross a page boundary advance to the next page first
+ * (slice 1 does not split a record across pages). */
+NTSTATUS
+NtfsLfsEmitRecord(PLFS_WRITE_CONTEXT Ctx,
+                  const LFS_EMIT_PARAMS *Params,
+                  PULONGLONG LsnOut);
+
+/* Flush the restart area to the CLEAN state (called at clean dismount):
+ * stamp both RSTR copies with CLEAN flag + CurrentLsn = Ctx->LastLsn and
+ * LastLsnDataLength = 0 so a subsequent Phase-1 mount sees a clean log. */
+NTSTATUS
+NtfsLfsWriteRestart(PLFS_WRITE_CONTEXT Ctx,
+                    PDEVICE_EXTENSION Vcb,
+                    BOOLEAN Clean);
 
 #endif /* NTFS_H */
