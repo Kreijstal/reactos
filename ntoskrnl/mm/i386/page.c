@@ -142,7 +142,7 @@ MiInvalidateSingleTbWorker(IN ULONG_PTR Address)
  * instead unmap with MmDeleteVirtualMappingNoBroadcast and issue a single
  * KeFlushEntireTb shootdown for the whole batch.
  */
-FORCEINLINE
+static
 VOID
 MiInvalidateTlbEntryAllProcessors(IN PVOID Address)
 {
