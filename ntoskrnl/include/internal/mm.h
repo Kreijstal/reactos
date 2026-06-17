@@ -1374,6 +1374,15 @@ MmDeletePhysicalMapping(
     _Out_opt_ PPFN_NUMBER Page
 );
 
+_Success_(return)
+BOOLEAN
+MmDeleteVirtualMappingNoBroadcast(
+    _Inout_opt_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Out_opt_ BOOLEAN * WasDirty,
+    _Out_opt_ PPFN_NUMBER Page
+);
+
 /* arch/procsup.c ************************************************************/
 
 BOOLEAN
