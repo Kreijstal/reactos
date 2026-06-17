@@ -639,6 +639,59 @@ CmpValidateValueList(
  * the whole subkeys list. If the damage is so bad that there's
  * possibility the key itself is even damaged, no healing is done.
  */
+
+/**
+ * @brief
+ * Ensures a subkeys index cell is large enough to physically hold the
+ * number of entries it declares in its Count field.
+ *
+ * @remarks
+ * A corrupt hive can carry an index whose Count is larger than the cell
+ * that backs it. Without this check the subkey walk (CmpFindSubKeyByNumber)
+ * would read List[] entries past the end of the cell and treat unrelated
+ * hive bytes (e.g. key-name characters) as a HCELL_INDEX. That bogus index
+ * is then handed to HvGetCell, whose block lookup only ASSERTs its bounds
+ * (a no-op in release builds), yielding a wild pointer dereference and a
+ * kernel fault instead of a graceful "registry corrupt" result.
+ *
+ * @return
+ * TRUE if the cell can hold all declared entries, FALSE if the index is
+ * too big for its cell (i.e. the index is corrupt).
+ */
+static
+BOOLEAN
+CmpIsKeyIndexCellSizeSane(
+    _In_ PHHIVE Hive,
+    _In_ PCM_KEY_INDEX KeyIndex)
+{
+    ULONG CellSize, EntrySize, RequiredSize;
+
+    CellSize = (ULONG)HvGetCellSize(Hive, KeyIndex);
+
+    /* Fast and hash leaves store CM_INDEX entries; plain leaves and roots
+     * store bare HCELL_INDEX entries. */
+    if (KeyIndex->Signature == CM_KEY_FAST_LEAF ||
+        KeyIndex->Signature == CM_KEY_HASH_LEAF)
+    {
+        EntrySize = sizeof(CM_INDEX);
+    }
+    else
+    {
+        EntrySize = sizeof(HCELL_INDEX);
+    }
+
+    /* Count is a USHORT and EntrySize <= 8, so this cannot overflow ULONG. */
+    RequiredSize = FIELD_OFFSET(CM_KEY_INDEX, List) + KeyIndex->Count * EntrySize;
+    if (RequiredSize > CellSize)
+    {
+        DPRINT1("Key index (sig 0x%x) declares %u entries (%u bytes) but its cell only holds %u bytes\n",
+                KeyIndex->Signature, KeyIndex->Count, RequiredSize, CellSize);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static
 CM_CHECK_REGISTRY_STATUS
 CmpValidateSubKeyList(
@@ -722,6 +775,17 @@ CmpValidateSubKeyList(
             RootKeyIndex->Signature == CM_KEY_FAST_LEAF ||
             RootKeyIndex->Signature == CM_KEY_HASH_LEAF)
         {
+            /*
+             * Before we trust the leaf's count for the subkey walk, make sure
+             * the leaf cell can physically hold that many entries. A corrupt
+             * count would otherwise drive the walk to dereference garbage.
+             */
+            if (!CmpIsKeyIndexCellSizeSane(Hive, RootKeyIndex))
+            {
+                *DoRepair = TRUE;
+                return CM_CHECK_REGISTRY_BAD_SUBKEY_COUNT;
+            }
+
             if (SubKeyCounts != RootKeyIndex->Count)
             {
                 if (!CmpRepairSubKeyCounts(Hive,
@@ -745,6 +809,17 @@ CmpValidateSubKeyList(
          */
         if (RootKeyIndex->Signature == CM_KEY_INDEX_ROOT)
         {
+            /*
+             * The root index cell must be large enough to hold all the leaf
+             * pointers it claims to have, otherwise the loop below would read
+             * List[] entries past the end of the cell.
+             */
+            if (!CmpIsKeyIndexCellSizeSane(Hive, RootKeyIndex))
+            {
+                *DoRepair = TRUE;
+                return CM_CHECK_REGISTRY_BAD_SUBKEY_COUNT;
+            }
+
             /*
              * For the root we have to loop each leaf
              * from it and increase the total leaf count
@@ -776,6 +851,13 @@ CmpValidateSubKeyList(
                     LeafKeyIndex->Signature != CM_KEY_HASH_LEAF)
                 {
                     DPRINT1("The leaf's signature is invalid!\n");
+                    *DoRepair = TRUE;
+                    return CM_CHECK_REGISTRY_CORRUPT_LEAF_SIGNATURE;
+                }
+
+                /* The leaf cell must be able to hold all of its entries. */
+                if (!CmpIsKeyIndexCellSizeSane(Hive, LeafKeyIndex))
+                {
                     *DoRepair = TRUE;
                     return CM_CHECK_REGISTRY_CORRUPT_LEAF_SIGNATURE;
                 }
