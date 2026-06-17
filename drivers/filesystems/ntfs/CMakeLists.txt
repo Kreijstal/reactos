@@ -16,6 +16,7 @@ list(APPEND SOURCE
     finfo.c
     fsctl.c
     lfs.c
+    lfslog.c
     lfsparse.c
     lock.c
     lznt1.c
