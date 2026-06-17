@@ -271,19 +271,6 @@ typedef struct
     ULONG MftBitmapSize;
     ULONG MftNextFreeHint;          /* Next index to start searching from */
 
-    /* Tracking bitmap for VACBs (256KB regions) that have been populated by
-     * NtfsReadDiskCached via CcMapData. NtfsWriteDiskCached only needs to
-     * call the (very expensive) CcPurgeCacheSection when the written range
-     * overlaps a region we actually mapped. The cached region is bounded
-     * by NTFS_MAX_CACHED_OFFSET (128 MB = 512 VACBs), so 64 bytes of bitmap
-     * is enough. A bit is set BEFORE CcMapData is called, so an over-set
-     * bit is safe (it just causes an extra purge; we never miss one).
-     *
-     * NTFS_CACHED_VACB_COUNT = NTFS_MAX_CACHED_OFFSET / VACB_MAPPING_GRANULARITY
-     *                        = (128 MB) / (256 KB) = 512
-     */
-    volatile ULONG CachedVacbBitmap[512 / 32];
-
     /* $UsnJrnl first-slice state (Kreijstal/reactos#33).
      *
      * When this volume has a journal, UsnJournalFcb points at an FCB-like
