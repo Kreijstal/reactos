@@ -55,6 +55,7 @@ list(APPEND SOURCE
     handle.c
     heap.c
     heapdbg.c
+    heaplfh.c
     heappage.c
     heapuser.c
     image.c
