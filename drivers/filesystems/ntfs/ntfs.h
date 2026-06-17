@@ -331,6 +331,34 @@ typedef struct
     BOOLEAN LogFileDirty;
     ULONGLONG LogFileLsn;
 
+    /* $LogFile Phase 2 slice 2: live write-ahead-logging (WAL) state.
+     *
+     * LoggingEnabled gates the ENTIRE emission path and defaults to FALSE.
+     * When FALSE (the default for every normally-mounted volume) the metadata
+     * write path is byte-for-byte identical to a volume with no journal at all:
+     * NtfsLfsLogMetadataPage() returns STATUS_SUCCESS immediately without
+     * touching $LogFile, no LSN is stamped, and no $Volume DIRTY handshake
+     * runs.  Emission without recovery (slice 3) gives zero durability and a
+     * wrong format/ordering corrupts a real volume, so this stays OFF until
+     * replay exists; it is flipped ON only by the userspace harness (and, in
+     * a future slice, by an explicit opt-in once recovery lands).
+     *
+     * LfsContextValid says whether LfsLogContext / LfsImage are initialised.
+     * LfsImage is the in-memory mirror of $LogFile:$DATA the emission layer
+     * writes into; LfsImageLength is its byte size; LfsPageSize the log page
+     * size.  VolumeDirtyOnDisk tracks whether the on-disk $Volume DIRTY bit is
+     * currently set, so the set/clear handshake is idempotent. */
+    BOOLEAN LoggingEnabled;
+    BOOLEAN LfsContextValid;
+    BOOLEAN VolumeDirtyOnDisk;
+    /* PLFS_WRITE_CONTEXT - opaque here (the struct is declared further down in
+     * this header, after DEVICE_EXTENSION).  Allocated only when logging is
+     * turned on, freed at teardown. */
+    struct _LFS_WRITE_CONTEXT *LfsLogContext;
+    PUCHAR LfsImage;
+    ULONG LfsImageLength;
+    ULONG LfsPageSize;
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
@@ -2248,6 +2276,12 @@ NtfsLfsDumpLogfile(PDEVICE_EXTENSION Vcb,
  * functions are standalone (operate on a caller-owned in-memory image)
  * and are NOT yet wired into the live metadata write path. */
 
+/* Derive the restart-area SeqNumberBits from the $LogFile byte size:
+ * 67 - bit_length(FileSize) (ntfs-3g RESTART_AREA::seq_number_bits formula).
+ * NOT a constant - it depends on the log size. */
+ULONG
+NtfsLfsSeqNumberBits(ULONGLONG FileSize);
+
 /* Compose / decompose an LSN.  An LSN packs a sequence number in the high
  * @p SeqNumberBits and the log-file byte offset (divided by 8) in the low
  * (64 - SeqNumberBits) bits - the Microsoft LFS encoding. */
@@ -2313,5 +2347,82 @@ NTSTATUS
 NtfsLfsWriteRestart(PLFS_WRITE_CONTEXT Ctx,
                     PDEVICE_EXTENSION Vcb,
                     BOOLEAN Clean);
+
+/* On-disk $VOLUME_INFORMATION attribute body (AttributeVolumeInformation,
+ * 0x70).  The DIRTY bit lives in Flags.  This is the resident value of the
+ * $Volume (MFT #3) file's $VOLUME_INFORMATION attribute. */
+typedef struct _NTFS_VOLUME_INFORMATION
+{
+    ULONGLONG Reserved;     /* 0x00 - always zero                            */
+    UCHAR     MajorVersion; /* 0x08                                          */
+    UCHAR     MinorVersion; /* 0x09                                          */
+    USHORT    Flags;        /* 0x0A - volume flags (DIRTY = 0x0001)          */
+} NTFS_VOLUME_INFORMATION, *PNTFS_VOLUME_INFORMATION;
+
+/* $VOLUME_INFORMATION.Flags: the on-disk "volume is dirty" bit chkdsk acts
+ * on.  Same numeric value as the public VOLUME_IS_DIRTY FSCTL constant. */
+#define NTFS_VOLUME_FLAG_DIRTY  0x0001
+
+/* lfslog.c - $LogFile Phase 2 slice 2: live write-ahead-logging glue.
+ *
+ * These functions bridge the standalone emission layer (lfs.c) into the live
+ * driver.  Every one of them is a NO-OP / pass-through when
+ * Vcb->LoggingEnabled is FALSE, which is the default for every mounted volume:
+ * a normal mount behaves exactly as it did before this slice. */
+
+/* Initialise the Vcb-resident logging context at mount: read $LogFile:$DATA
+ * into an in-memory mirror, parse the existing restart cursor (Phase-0
+ * parser) to seed the LSN cursor, and build the LFS_WRITE_CONTEXT.  Does NOT
+ * format/overwrite a real $LogFile and does NOT turn logging on - it only
+ * makes the context available so NtfsLfsLogMetadataPage can run once
+ * LoggingEnabled is set.  Returns STATUS_SUCCESS on a usable context. */
+NTSTATUS
+NtfsLfsMountInitWriteContext(PDEVICE_EXTENSION Vcb);
+
+/* Tear down the logging context (free the in-memory mirror).  Safe to call
+ * whether or not the context was initialised. */
+VOID
+NtfsLfsTeardownWriteContext(PDEVICE_EXTENSION Vcb);
+
+/* Enable / disable live logging at runtime.  Enabling lazily initialises the
+ * context if needed.  Default state is DISABLED. */
+NTSTATUS
+NtfsLfsSetLoggingEnabled(PDEVICE_EXTENSION Vcb, BOOLEAN Enable);
+
+/* The write-ahead emission hook.  Called from the metadata write path
+ * (UpdateFileRecord for MFT FILE_RECORDs, the INDX writer for
+ * $INDEX_ALLOCATION pages) BEFORE the metadata page is handed to the disk.
+ *
+ *   - When Vcb->LoggingEnabled is FALSE: returns STATUS_SUCCESS immediately,
+ *     touches nothing, stamps no LSN.  The caller's path is unchanged.
+ *   - When TRUE: emits a redo+undo record for the change, stamps the assigned
+ *     LSN into *PageLsn (the caller writes it into the page's Lsn field),
+ *     flushes the log RCRD page + the dirty restart area to $LogFile:$DATA,
+ *     and runs the $Volume DIRTY handshake - all BEFORE the caller writes the
+ *     metadata page, preserving the WAL invariant.
+ *
+ * RedoData/RedoLength + UndoData/UndoLength describe the change; pass the new
+ * image as redo and the old image as undo (slice 3 replay consumes them). */
+NTSTATUS
+NtfsLfsLogMetadataPage(PDEVICE_EXTENSION Vcb,
+                       USHORT RedoOperation,
+                       USHORT UndoOperation,
+                       USHORT TargetAttribute,
+                       ULONGLONG TargetVcn,
+                       const VOID *RedoData,
+                       USHORT RedoLength,
+                       const VOID *UndoData,
+                       USHORT UndoLength,
+                       PULONGLONG PageLsn);
+
+/* Set or clear the on-disk $Volume DIRTY bit.  Idempotent (tracks
+ * Vcb->VolumeDirtyOnDisk).  No-op when LoggingEnabled is FALSE. */
+NTSTATUS
+NtfsLfsSetVolumeDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
+
+/* Clean-dismount flush: write the CLEAN restart landmark and clear the
+ * on-disk DIRTY bit.  No-op when LoggingEnabled is FALSE. */
+NTSTATUS
+NtfsLfsDismountFlush(PDEVICE_EXTENSION Vcb);
 
 #endif /* NTFS_H */
