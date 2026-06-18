@@ -490,11 +490,21 @@ NTSTATUS TdiListen(
         return STATUS_INVALID_PARAMETER;
     }
 
-    *Irp = TdiBuildInternalDeviceControlIrp(TDI_LISTEN,
-                                            DeviceObject,
-                                            ConnectionObject,
-                                            NULL,
-                                            NULL);
+    /*
+     * Allocate the listen IRP with IoAllocateIrp rather than
+     * TdiBuildInternalDeviceControlIrp (which uses IoBuildDeviceIoControlRequest).
+     * IoBuildDeviceIoControlRequest queues the IRP on the requesting thread's
+     * cancel/cleanup list, so a listen that is still pending when that thread --
+     * or its whole process -- exits gets cancelled by IopCancelIrpsInThread.
+     * That is wrong for a listening socket: the socket can legitimately be
+     * inherited or duplicated to another process that still owns it (e.g. a
+     * daemon created with fork(), where the process that called listen() exits
+     * and a child keeps accepting).  An IoAllocateIrp'd IRP is owned by AFD, is
+     * not tied to any user thread, and is torn down only when the socket itself
+     * is closed -- so the listen survives the creator's exit.  AFD frees this
+     * IRP itself in its completion routine (ListenComplete).
+     */
+    *Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
     if (*Irp == NULL)
         return STATUS_INSUFFICIENT_RESOURCES;
 
