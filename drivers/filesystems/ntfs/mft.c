@@ -3965,9 +3965,18 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
         else
         {
             RtlZeroMemory(&ExistingFcb, sizeof(ExistingFcb));
+            /* Copy only the fixed FILENAME_ATTRIBUTE header (up to but not
+             * including the Name array).  FCB::Entry embeds a FILENAME_ATTRIBUTE
+             * whose Name is declared Name[1], so appending the variable-length
+             * name here would overrun Entry straight into the adjacent
+             * CachedFileRecord pointer - which NtfsInvalidateCachedFileRecord
+             * then frees, faulting in ExFreePoolWithTag.  NtfsDeleteFileRecord
+             * re-reads every $FILE_NAME from the on-disk record via MFTIndex and
+             * never consults Entry.Name, so the header (which carries
+             * FileAttributes for the directory check) is all it needs. */
             RtlCopyMemory(&ExistingFcb.Entry,
                           ExistingName,
-                          FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + ExistingName->NameLength * sizeof(WCHAR));
+                          FIELD_OFFSET(FILENAME_ATTRIBUTE, Name));
             ExistingFcb.MFTIndex = ExistingMftIndex;
             ExistingFcb.LinkCount = ExistingRecord->LinkCount;
 
