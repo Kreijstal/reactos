@@ -403,6 +403,33 @@ NetioComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Contex
     return STATUS_SUCCESS;
 }
 
+/* Completion routine for the WskReceive path.  TdiReceive now allocates its IRP
+ * with IoAllocateIrp (so a receive left pending when its arming thread exits is
+ * not cancelled), which means the IRP -- and the MDL TdiReceive locked over the
+ * caller's buffer -- are not freed by the I/O manager.  Do the common
+ * NetioComplete work, then free the MDL and IRP ourselves and tell the I/O
+ * manager we are done with it. */
+static NTSTATUS NTAPI
+NetioReceiveComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID ContextParam)
+{
+    PMDL Mdl, NextMdl;
+
+    FUNCTION_TRACE;
+
+    NetioComplete(DeviceObject, Irp, ContextParam);
+
+    for (Mdl = Irp->MdlAddress; Mdl != NULL; Mdl = NextMdl)
+    {
+        NextMdl = Mdl->Next;
+        MmUnlockPages(Mdl);
+        IoFreeMdl(Mdl);
+    }
+    Irp->MdlAddress = NULL;
+
+    IoFreeIrp(Irp);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
 typedef struct _LISTEN_CONTEXT
 {
     PWSK_SOCKET_INTERNAL ListenSocket;
@@ -1240,7 +1267,7 @@ WskStreamIo(
     else
     {
         status = TdiReceive(&tdiIrp, Socket->ConnectionFile, 0, ((char *)BufferData) + Buffer->Offset,
-                       Buffer->Length, NetioComplete, NetioContext);
+                       Buffer->Length, NetioReceiveComplete, NetioContext);
     }
 
     /* If allocating tdiIrp fails we get here.
