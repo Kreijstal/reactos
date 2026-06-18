@@ -729,6 +729,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 Status = NtfsCreateDirectory(DeviceExt,
                                              FileObject,
                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                             Stack->Parameters.Create.FileAttributes,
                                              BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
                 DPRINT("NtfsCreateFile: NtfsCreateDirectory returned 0x%lx\n", Status);
             }
@@ -738,6 +739,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 Status = NtfsCreateFileRecord(DeviceExt,
                                               FileObject,
                                               BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                              Stack->Parameters.Create.FileAttributes,
                                               BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
                 NTFS_TRACE("DRVIDX: top create record returned 0x%lx for %wZ\n",
                         Status,
@@ -941,6 +943,7 @@ NTSTATUS
 NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
                     PFILE_OBJECT FileObject,
                     BOOLEAN CaseSensitive,
+                    ULONG FileAttributes,
                     BOOLEAN CanWait)
 {
 
@@ -977,13 +980,13 @@ NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
 
     // add first attribute, $STANDARD_INFORMATION
-    AddStandardInformation(FileRecord, NextAttribute);
+    AddStandardInformation(FileRecord, NextAttribute, FileAttributes);
 
     // advance NextAttribute pointer to the next attribute
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
     // Add the $FILE_NAME attribute
-    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, &ParentMftIndex);
+    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, FileAttributes, &ParentMftIndex);
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -1161,6 +1164,7 @@ NTSTATUS
 NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PFILE_OBJECT FileObject,
                      BOOLEAN CaseSensitive,
+                     ULONG FileAttributes,
                      BOOLEAN CanWait)
 {
     NTSTATUS Status = STATUS_SUCCESS;
@@ -1189,13 +1193,13 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
 
     // add first attribute, $STANDARD_INFORMATION
-    AddStandardInformation(FileRecord, NextAttribute);
+    AddStandardInformation(FileRecord, NextAttribute, FileAttributes);
 
     // advance NextAttribute pointer to the next attribute
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
     // Add the $FILE_NAME attribute
-    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, &ParentMftIndex);
+    Status = AddFileName(FileRecord, NextAttribute, DeviceExt, FileObject, CaseSensitive, FileAttributes, &ParentMftIndex);
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
