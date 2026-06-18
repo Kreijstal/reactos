@@ -3780,6 +3780,47 @@ NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
 }
 
 NTSTATUS
+NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG DirMFTIndex,
+                     BOOLEAN CaseSensitive,
+                     PBOOLEAN Empty)
+{
+    UNICODE_STRING Star = RTL_CONSTANT_STRING(L"*");
+    ULONGLONG OutMFTIndex = 0;
+    ULONG FirstEntry = 0;
+    NTSTATUS Status;
+
+    /* Enumerate the directory's $I30 index for any user entry. A wildcard
+     * directory search returns the first child file/subdir (NtfsFindMftRecord
+     * already skips system records and DOS-only short-name aliases), so
+     * STATUS_SUCCESS means the directory still has contents. */
+    Status = NtfsFindMftRecord(DeviceExt,
+                               DirMFTIndex,
+                               &Star,
+                               &FirstEntry,
+                               TRUE,
+                               CaseSensitive,
+                               &OutMFTIndex);
+    if (NT_SUCCESS(Status))
+    {
+        *Empty = FALSE;
+        return STATUS_SUCCESS;
+    }
+
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+        Status == STATUS_OBJECT_PATH_NOT_FOUND ||
+        Status == STATUS_NO_MORE_FILES ||
+        Status == STATUS_NO_SUCH_FILE)
+    {
+        *Empty = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    /* A genuine error (I/O, allocation, corruption) - don't claim emptiness. */
+    return Status;
+}
+
+NTSTATUS
 NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
                      BOOLEAN CaseSensitive)
@@ -3790,8 +3831,24 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     ULONGLONG ParentMftIndex;
     PFILE_RECORD_HEADER FileRecord;
 
+    /* A directory can only be deleted once it is empty. This is the choke
+     * point for both the immediate (last-handle) and the deferred
+     * (delete-on-close) disposition paths, so re-verify emptiness here even
+     * if the caller already checked: a delete-pending directory may still be
+     * the target of a create between the disposition set and the final close. */
     if (NtfsFCBIsDirectory(Fcb))
-        return STATUS_FILE_IS_A_DIRECTORY;
+    {
+        BOOLEAN Empty = FALSE;
+
+        if (NtfsFCBIsRoot(Fcb))
+            return STATUS_CANNOT_DELETE;
+
+        Status = NtfsIsDirectoryEmpty(DeviceExt, Fcb->MFTIndex, CaseSensitive, &Empty);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (!Empty)
+            return STATUS_DIRECTORY_NOT_EMPTY;
+    }
 
     /* Invalidate FCB-level MFT record cache: deletion clears FRH_IN_USE
      * and LinkCount in the on-disk record. */
