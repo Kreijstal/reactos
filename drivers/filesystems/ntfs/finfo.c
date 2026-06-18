@@ -1227,6 +1227,73 @@ NtfsBuildRenamePath(PNTFS_FCB Fcb,
     return STATUS_SUCCESS;
 }
 
+/*
+ * Shared delete-disposition logic for both FileDispositionInformation and
+ * FileDispositionInformationEx.  Setting DeleteFile clears any pending delete;
+ * otherwise the file is deleted now (if this is the last handle) or marked
+ * FCB_DELETE_PENDING for deletion at cleanup time.
+ *
+ * Like fastfat (and Windows), a still-mapped executable image cannot be
+ * deleted out from under the running process: MmFlushImageSection with
+ * MmFlushForDelete returns FALSE while any view of the image section is
+ * mapped, in which case STATUS_CANNOT_DELETE is returned.  Callers such as
+ * cygwin's unlink_nt rely on that status to fall back to rename-then-delete.
+ */
+static
+NTSTATUS
+NtfsSetDispositionInformation(PDEVICE_EXTENSION DeviceExt,
+                              PNTFS_FCB Fcb,
+                              BOOLEAN DeleteFile,
+                              BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+
+    if (!DeleteFile)
+    {
+        ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
+        return STATUS_SUCCESS;
+    }
+
+    if (Fcb->SectionObjectPointers != NULL &&
+        !MmFlushImageSection(Fcb->SectionObjectPointers, MmFlushForDelete))
+    {
+        return STATUS_CANNOT_DELETE;
+    }
+
+    if (NtfsFCBIsDirectory(Fcb))
+    {
+        BOOLEAN Empty = FALSE;
+
+        /* The volume root can never be deleted. */
+        if (NtfsFCBIsRoot(Fcb))
+            return STATUS_CANNOT_DELETE;
+
+        /* Windows reports a non-empty directory immediately when the delete
+         * disposition is set, rather than deferring the error to close time.
+         * NtfsDeleteFileRecord re-checks at the choke point in case the
+         * directory is repopulated while a handle is still open. */
+        Status = NtfsIsDirectoryEmpty(DeviceExt, Fcb->MFTIndex, CaseSensitive, &Empty);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (!Empty)
+            return STATUS_DIRECTORY_NOT_EMPTY;
+    }
+
+    /* Like Windows/fastfat, setting the delete disposition never removes the
+     * file here - it only records the intent.  The on-disk record is freed by
+     * NtfsCleanupFile once the last handle is cleaned up (OpenHandleCount drops
+     * to 0).  Deleting the record immediately while this (or any) handle is
+     * still open frees the MFT entry out from under a live FCB: the FCB lingers
+     * in the table with LinkCount == 0, and a subsequent open of the same name
+     * (e.g. an installer re-extracting the file it just unlinked) reuses that
+     * zombie FCB instead of creating a fresh record, after which the redundant
+     * delete fails with STATUS_OBJECT_NAME_NOT_FOUND and the unlink is reported
+     * as failed. */
+    SetFlag(Fcb->Flags, FCB_DELETE_PENDING);
+
+    return STATUS_SUCCESS;
+}
+
 /**
 * @name NtfsSetInformation
 * @implemented
@@ -1342,33 +1409,36 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             }
 
             DispositionInfo = (PFILE_DISPOSITION_INFORMATION)SystemBuffer;
-            if (!DispositionInfo->DeleteFile)
-            {
-                ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
-                Status = STATUS_SUCCESS;
-                break;
-            }
-
-            if (NtfsFCBIsDirectory(Fcb))
-            {
-                Status = STATUS_FILE_IS_A_DIRECTORY;
-                break;
-            }
-
-            if (Fcb->OpenHandleCount <= 1)
-            {
-                Status = NtfsDeleteFileRecord(DeviceExt,
-                                              Fcb,
-                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
-                if (NT_SUCCESS(Status))
-                    ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
-            }
-            else
-            {
-                SetFlag(Fcb->Flags, FCB_DELETE_PENDING);
-                Status = STATUS_SUCCESS;
-            }
+            Status = NtfsSetDispositionInformation(DeviceExt,
+                                                   Fcb,
+                                                   DispositionInfo->DeleteFile,
+                                                   BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
             break;
+
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+        case FileDispositionInformationEx:
+        {
+            PFILE_DISPOSITION_INFORMATION_EX DispositionInfoEx;
+
+            if (BufferLength < sizeof(FILE_DISPOSITION_INFORMATION_EX))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            /* Win10 RS1 POSIX/extended delete-disposition.  The interesting
+             * flag for delete semantics is FILE_DISPOSITION_DELETE; the POSIX
+             * and image-section-check refinements collapse to the same
+             * "delete now or at last close, but never out from under a mapped
+             * image" behaviour the shared helper implements. */
+            DispositionInfoEx = (PFILE_DISPOSITION_INFORMATION_EX)SystemBuffer;
+            Status = NtfsSetDispositionInformation(DeviceExt,
+                                                   Fcb,
+                                                   BooleanFlagOn(DispositionInfoEx->Flags, FILE_DISPOSITION_DELETE),
+                                                   BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+            break;
+        }
+#endif
 
         case FileRenameInformation:
         {
