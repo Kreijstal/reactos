@@ -495,6 +495,15 @@ typedef enum
 #define NTFS_FILE_TYPE_ENCRYPTED  0x4000
 #define NTFS_FILE_TYPE_DIRECTORY  0x10000000
 
+/* Win32 file-attribute bits a caller is allowed to set on a freshly created
+ * file/directory.  These share the same bit values as the FILE_ATTRIBUTE_*
+ * flags, so the create disposition's FileAttributes can be masked with this
+ * directly.  The DIRECTORY bit is structural (NTFS_FILE_TYPE_DIRECTORY) and
+ * handled separately, so it is deliberately excluded here. */
+#define NTFS_FILE_ATTRIBUTE_VALID_FLAGS \
+    (NTFS_FILE_TYPE_READ_ONLY | NTFS_FILE_TYPE_HIDDEN | NTFS_FILE_TYPE_SYSTEM | \
+     NTFS_FILE_TYPE_ARCHIVE | NTFS_FILE_TYPE_TEMPORARY | NTFS_FILE_TYPE_OFFLINE)
+
 /* Indexed Flag in Resident attributes - still somewhat speculative */
 #define RA_INDEXED    0x01
 
@@ -986,11 +995,13 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
             PDEVICE_EXTENSION DeviceExt,
             PFILE_OBJECT FileObject,
             BOOLEAN CaseSensitive,
+            ULONG FileAttributes,
             PULONGLONG ParentMftIndex);
 
 NTSTATUS
 AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
-                       PNTFS_ATTR_RECORD AttributeAddress);
+                       PNTFS_ATTR_RECORD AttributeAddress,
+                       ULONG FileAttributes);
 
 NTSTATUS
 ConvertDataRunsToLargeMCB(PUCHAR DataRun,
@@ -1297,6 +1308,7 @@ NTSTATUS
 NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
                     PFILE_OBJECT FileObject,
                     BOOLEAN CaseSensitive,
+                    ULONG FileAttributes,
                     BOOLEAN CanWait);
 
 PFILE_RECORD_HEADER
@@ -1306,6 +1318,7 @@ NTSTATUS
 NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PFILE_OBJECT FileObject,
                      BOOLEAN CaseSensitive,
+                     ULONG FileAttributes,
                      BOOLEAN CanWait);
 
 /* devctl.c */
