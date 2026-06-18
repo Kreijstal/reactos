@@ -122,6 +122,27 @@ UCHAR IopSetOperationLength[] =
     0,                                                   /* 48 FileNormalizedNameInformation */
     0,                                                   /* 49 FileNetworkPhysicalNameInformation */
 #endif
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    /* Win7/Win8/8.1 set-side classes (50-63) are not handled here; keep them
+     * at 0 so they report STATUS_INVALID_INFO_CLASS rather than reading past
+     * the end of the table.  Index 64 enables FileDispositionInformationEx,
+     * the Win10 (RS1) POSIX/extended delete-disposition class. */
+    0, /* 50 FileIdGlobalTxDirectoryInformation */
+    0, /* 51 FileIsRemoteDeviceInformation */
+    0, /* 52 FileUnusedInformation */
+    0, /* 53 FileNumaNodeInformation */
+    0, /* 54 FileStandardLinkInformation */
+    0, /* 55 FileRemoteProtocolInformation */
+    0, /* 56 FileRenameInformationBypassAccessCheck */
+    0, /* 57 FileLinkInformationBypassAccessCheck */
+    0, /* 58 FileVolumeNameInformation */
+    0, /* 59 FileIdInformation */
+    0, /* 60 FileIdExtdDirectoryInformation */
+    0, /* 61 FileReplaceCompletionInformation */
+    0, /* 62 FileHardLinkFullIdInformation */
+    0, /* 63 FileIdExtdBothDirectoryInformation */
+    sizeof(FILE_DISPOSITION_INFORMATION_EX),             /* 64 FileDispositionInformationEx */
+#endif
     0xFF
 };
 
@@ -226,6 +247,14 @@ ACCESS_MASK IopSetOperationAccess[] =
     0, /* 47 FileProcessIdsUsingFileInformation */
     0, /* 48 FileNormalizedNameInformation */
     0, /* 49 FileNetworkPhysicalNameInformation */
+#endif
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    /* Indices 50-63 unused here (see IopSetOperationLength). Index 64,
+     * FileDispositionInformationEx, deletes the file - requires DELETE. */
+    0, /* 50 */ 0, /* 51 */ 0, /* 52 */ 0, /* 53 */ 0, /* 54 */ 0, /* 55 */
+    0, /* 56 */ 0, /* 57 */ 0, /* 58 */ 0, /* 59 */ 0, /* 60 */ 0, /* 61 */
+    0, /* 62 */ 0, /* 63 */
+    DELETE, /* 64 FileDispositionInformationEx */
 #endif
     0xFFFFFFFF
 };

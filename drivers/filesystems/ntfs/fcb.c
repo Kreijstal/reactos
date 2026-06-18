@@ -416,8 +416,15 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
          * causes a use-after-free: the FileObject is freed while the MM
          * segment still holds a pointer to it. */
     }
-    else if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
+    else if (Fcb->RefCount <= 0 &&
+             (!NtfsFCBIsDirectory(Fcb) || Fcb->LinkCount == 0))
     {
+        /* Non-directory FCBs are evicted as soon as the last reference goes
+         * away. Live directory FCBs are intentionally kept cached in the
+         * table, but a *deleted* directory (LinkCount == 0, set by
+         * NtfsDeleteFileRecord) must be evicted too - otherwise its stale FCB
+         * shadows the name and a later create at the same path wrongly sees
+         * STATUS_OBJECT_NAME_COLLISION even though the on-disk entry is gone. */
         PFILE_OBJECT tmpFileObject = NULL;
 
         /* If cache is still initialized, tear it down before freeing the FCB.
@@ -493,6 +500,21 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
         DPRINT("Comparing '%S' and '%S'\n", FileName, Fcb->PathName);
         if (_wcsicmp(FileName, Fcb->PathName) == 0)
         {
+            /* A fully deleted file (its last name removed and MFT record freed
+             * by NtfsDeleteFileRecord, which zeroes LinkCount) may still linger
+             * in the table while a cache/section reference keeps it from being
+             * evicted.  It no longer has a name on disk, so it must not satisfy
+             * a lookup by path: returning it would let a fresh open of the same
+             * name (e.g. an installer re-creating a file it just unlinked) reuse
+             * the freed record instead of creating a new one.  Keep scanning -
+             * a live FCB for the same path, if any, appears elsewhere in the
+             * list. */
+            if (Fcb->LinkCount == 0)
+            {
+                current_entry = current_entry->Flink;
+                continue;
+            }
+
             Fcb->RefCount++;
             KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
             return Fcb;
