@@ -1025,11 +1025,25 @@ NTSTATUS TdiReceive(
         return STATUS_INVALID_PARAMETER;
     }
 
-    *Irp = TdiBuildInternalDeviceControlIrp(TDI_RECEIVE,
-                                            DeviceObject,
-                                            TransportObject,
-                                            NULL,
-                                            NULL);
+    /*
+     * Allocate the receive IRP with IoAllocateIrp rather than
+     * TdiBuildInternalDeviceControlIrp (which uses IoBuildDeviceIoControlRequest).
+     * IoBuildDeviceIoControlRequest queues the IRP on the requesting thread's
+     * cancel/cleanup list, so a receive that is still pending when that thread --
+     * or its whole process -- exits gets cancelled by IopCancelIrpsInThread.
+     * That is wrong for a connected socket: the receive IRP is armed in whatever
+     * thread happened to drive the connection (e.g. the user thread that called
+     * accept()), but it stays pending for the lifetime of the connection, which
+     * may legitimately outlive that thread when the socket is inherited or
+     * duplicated to a forked child (e.g. a daemon created with fork(), where the
+     * process that accept()ed exits and a child keeps reading).  If the receive
+     * is cancelled, ReceiveComplete sets TdiReceiveClosed and never re-arms, so
+     * the socket silently stops receiving forever.  An IoAllocateIrp'd IRP is
+     * owned by the consumer, is not tied to any user thread, and is torn down
+     * only when the socket itself is closed.  The consumer frees this IRP in its
+     * completion routine.
+     */
+    *Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
 
     if (!*Irp) {
         DPRINT("Insufficient resources.\n");
@@ -1045,19 +1059,22 @@ NTSTATUS TdiReceive(
                         NULL);          /* Don't use IRP */
     if (!Mdl) {
         DPRINT("Insufficient resources.\n");
-        IoCompleteRequest(*Irp, IO_NO_INCREMENT);
+        IoFreeIrp(*Irp);
         *Irp = NULL;
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     _SEH2_TRY {
         DPRINT("probe and lock\n");
-        MmProbeAndLockPages(Mdl, (*Irp)->RequestorMode, IoModifyAccess);
+        /* The receive window is a kernel-mode buffer (AFD's Recv.Window pool
+         * allocation / netio's system-mapped MDL address), and the IoAllocateIrp'd
+         * IRP carries no RequestorMode, so probe as KernelMode. */
+        MmProbeAndLockPages(Mdl, KernelMode, IoModifyAccess);
         DPRINT("probe and lock done\n");
     } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
         DPRINT("MmProbeAndLockPages() failed.\n");
         IoFreeMdl(Mdl);
-        IoCompleteRequest(*Irp, IO_NO_INCREMENT);
+        IoFreeIrp(*Irp);
         *Irp = NULL;
         _SEH2_YIELD(return STATUS_INSUFFICIENT_RESOURCES);
     } _SEH2_END;
