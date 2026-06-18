@@ -353,6 +353,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
             PDEVICE_EXTENSION DeviceExt,
             PFILE_OBJECT FileObject,
             BOOLEAN CaseSensitive,
+            ULONG FileAttributes,
             PULONGLONG ParentMftIndex)
 {
     ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
@@ -385,11 +386,13 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     FileNameAttribute->LastWriteTime = SystemTime.QuadPart;
     FileNameAttribute->LastAccessTime = SystemTime.QuadPart;
 
-    // Is this a directory?
+    // Honor the caller-requested attributes (SYSTEM/HIDDEN/READONLY/...),
+    // keeping the structural DIRECTORY bit for directories and defaulting a
+    // file to ARCHIVE when nothing else was asked for.
     if(FileRecord->Flags & FRH_DIRECTORY)
-        FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_DIRECTORY;
+        FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_DIRECTORY | (FileAttributes & NTFS_FILE_ATTRIBUTE_VALID_FLAGS);
     else
-        FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_ARCHIVE;
+        FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_ARCHIVE | (FileAttributes & NTFS_FILE_ATTRIBUTE_VALID_FLAGS);
 
     // we need to extract the filename from the path
     DPRINT("Pathname: %wZ\n", &FileObject->FileName);
@@ -1821,7 +1824,8 @@ AddRun(PNTFS_VCB Vcb,
 */
 NTSTATUS
 AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
-                       PNTFS_ATTR_RECORD AttributeAddress)
+                       PNTFS_ATTR_RECORD AttributeAddress,
+                       ULONG FileAttributes)
 {
     ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
     PSTANDARD_INFORMATION StandardInfo = (PSTANDARD_INFORMATION)((LONG_PTR)AttributeAddress + ResidentHeaderLength);
@@ -1847,7 +1851,7 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
     StandardInfo->ChangeTime = SystemTime.QuadPart;
     StandardInfo->LastWriteTime = SystemTime.QuadPart;
     StandardInfo->LastAccessTime = SystemTime.QuadPart;
-    StandardInfo->FileAttribute = NTFS_FILE_TYPE_ARCHIVE;
+    StandardInfo->FileAttribute = NTFS_FILE_TYPE_ARCHIVE | (FileAttributes & NTFS_FILE_ATTRIBUTE_VALID_FLAGS);
 
     // move the attribute-end and file-record-end markers to the end of the file record
     AttributeAddress = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttributeAddress + AttributeAddress->Length);
