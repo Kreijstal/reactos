@@ -104,7 +104,13 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     UNREFERENCED_PARAMETER(DeviceObject);
 
     if( !SocketAcquireStateLock( FCB ) )
-        return STATUS_FILE_CLOSED;
+    {
+        /* The listen IRP is allocated and owned by AFD (IoAllocateIrp, not
+         * tied to any thread), so AFD must free it on every completion path
+         * and stop further IRP processing. */
+        IoFreeIrp(Irp);
+        return STATUS_MORE_PROCESSING_REQUIRED;
+    }
 
     ASSERT(FCB->ListenIrp.InFlightRequest == Irp);
     FCB->ListenIrp.InFlightRequest = NULL;
@@ -139,7 +145,8 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
         }
 
         SocketStateUnlock( FCB );
-        return STATUS_FILE_CLOSED;
+        IoFreeIrp(Irp);
+        return STATUS_MORE_PROCESSING_REQUIRED;
     }
 
     AFD_DbgPrint(MID_TRACE,("Completing listen request.\n"));
@@ -148,7 +155,8 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
         SocketStateUnlock(FCB);
-        return Irp->IoStatus.Status;
+        IoFreeIrp(Irp);
+        return STATUS_MORE_PROCESSING_REQUIRED;
     }
 
     Qelt = ExAllocatePoolWithTag(NonPagedPool,
@@ -234,7 +242,11 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
     SocketStateUnlock( FCB );
 
-    return Status;
+    /* This listen IRP is owned by AFD (IoAllocateIrp); a fresh one was posted
+     * above for the next connection.  Free the completed IRP ourselves and tell
+     * the I/O manager we are done with it. */
+    IoFreeIrp(Irp);
+    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 NTSTATUS AfdListenSocket( PDEVICE_OBJECT DeviceObject, PIRP Irp,
