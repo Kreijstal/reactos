@@ -1746,6 +1746,12 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
                  ULONGLONG CurrentMFTIndex);
 
 NTSTATUS
+NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG DirMFTIndex,
+                     BOOLEAN CaseSensitive,
+                     PBOOLEAN Empty);
+
+NTSTATUS
 NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
                      BOOLEAN CaseSensitive);
