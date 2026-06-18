@@ -484,6 +484,34 @@ CmpDoCreate(IN PHHIVE Hive,
     /* Make the cell dirty for now */
     HvMarkCellDirty(Hive, Cell, FALSE);
 
+    /*
+     * Inherit security from the parent key. SeAssignSecurity needs the parent's
+     * descriptor to propagate inheritable ACEs to the new child; without it the
+     * child falls back to the subject's restrictive default DACL. Copy the
+     * parent descriptor into pool because CmpDoCreateChild's cell allocations
+     * may move the hive and invalidate the mapped security cell.
+     */
+    if (KeyNode->Security != HCELL_NIL)
+    {
+        PCM_KEY_SECURITY ParentSecurity;
+
+        ParentSecurity = (PCM_KEY_SECURITY)HvGetCell(Hive, KeyNode->Security);
+        if (ParentSecurity != NULL)
+        {
+            ULONG SdLength = RtlLengthSecurityDescriptor(&ParentSecurity->Descriptor);
+
+            SecurityDescriptor = ExAllocatePoolWithTag(PagedPool, SdLength, TAG_CM);
+            if (SecurityDescriptor != NULL)
+            {
+                RtlCopyMemory(SecurityDescriptor,
+                              &ParentSecurity->Descriptor,
+                              SdLength);
+            }
+
+            HvReleaseCell(Hive, KeyNode->Security);
+        }
+    }
+
     /* Do the actual create operation */
     Status = CmpDoCreateChild(Hive,
                               Cell,
@@ -496,6 +524,14 @@ CmpDoCreate(IN PHHIVE Hive,
                               0,
                               &KeyCell,
                               Object);
+
+    /* The parent descriptor has been consumed by SeAssignSecurity; release it */
+    if (SecurityDescriptor != NULL)
+    {
+        ExFreePoolWithTag(SecurityDescriptor, TAG_CM);
+        SecurityDescriptor = NULL;
+    }
+
     if (NT_SUCCESS(Status))
     {
         /* Get the key body */
