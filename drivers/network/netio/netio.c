@@ -537,7 +537,12 @@ ListenComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Conte
 
     QueueListening(ListenSocket);
 
-    return STATUS_SUCCESS;
+    /* TdiListen now allocates this IRP with IoAllocateIrp (so a pending listen
+     * is not cancelled when the requesting thread/process exits), which means
+     * it is not freed by a thread completion APC.  Free it here and stop the
+     * I/O manager from processing it any further. */
+    IoFreeIrp(Irp);
+    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 static NTSTATUS
