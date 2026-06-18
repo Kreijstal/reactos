@@ -265,6 +265,30 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
     return RetStatus;
 }
 
+/*
+ * The connected-socket receive IRP is allocated by TdiReceive with
+ * IoAllocateIrp, so that a receive left pending when its arming thread (or
+ * process) exits is not cancelled by IopCancelIrpsInThread -- the connection
+ * may legitimately be inherited or duplicated to a forked child.  Because the
+ * IRP is driver-owned, AFD frees it (and the MDL TdiReceive locked over the
+ * receive window) itself on every completion path, and returns
+ * STATUS_MORE_PROCESSING_REQUIRED so the I/O manager does no further processing.
+ */
+static VOID FreeReceiveIrp( PIRP Irp )
+{
+    PMDL Mdl, NextMdl;
+
+    for( Mdl = Irp->MdlAddress; Mdl; Mdl = NextMdl )
+    {
+        NextMdl = Mdl->Next;
+        MmUnlockPages( Mdl );
+        IoFreeMdl( Mdl );
+    }
+    Irp->MdlAddress = NULL;
+
+    IoFreeIrp( Irp );
+}
+
 NTSTATUS NTAPI ReceiveComplete
 ( PDEVICE_OBJECT DeviceObject,
   PIRP Irp,
@@ -280,7 +304,10 @@ NTSTATUS NTAPI ReceiveComplete
     AFD_DbgPrint(MID_TRACE,("Called\n"));
 
     if( !SocketAcquireStateLock( FCB ) )
-        return STATUS_FILE_CLOSED;
+    {
+        FreeReceiveIrp( Irp );
+        return STATUS_MORE_PROCESSING_REQUIRED;
+    }
 
     ASSERT(FCB->ReceiveIrp.InFlightRequest == Irp);
     FCB->ReceiveIrp.InFlightRequest = NULL;
@@ -300,11 +327,13 @@ NTSTATUS NTAPI ReceiveComplete
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
         SocketStateUnlock( FCB );
-        return STATUS_FILE_CLOSED;
+        FreeReceiveIrp( Irp );
+        return STATUS_MORE_PROCESSING_REQUIRED;
     } else if( FCB->SharedData.State == SOCKET_STATE_LISTENING ) {
         AFD_DbgPrint(MIN_TRACE,("!!! LISTENER GOT A RECEIVE COMPLETE !!!\n"));
         SocketStateUnlock( FCB );
-        return STATUS_INVALID_PARAMETER;
+        FreeReceiveIrp( Irp );
+        return STATUS_MORE_PROCESSING_REQUIRED;
     }
 
     HandleReceiveComplete( FCB, Irp->IoStatus.Status, Irp->IoStatus.Information );
@@ -313,7 +342,8 @@ NTSTATUS NTAPI ReceiveComplete
 
     SocketStateUnlock( FCB );
 
-    return STATUS_SUCCESS;
+    FreeReceiveIrp( Irp );
+    return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
 static NTSTATUS NTAPI
