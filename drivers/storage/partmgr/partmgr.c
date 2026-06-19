@@ -927,6 +927,168 @@ FdoIoctlDiskUpdateProperties(
 static
 CODE_SEG("PAGE")
 NTSTATUS
+FdoIoctlDiskGrowPartition(
+    _In_ PFDO_EXTENSION FdoExtension,
+    _In_ PIRP Irp)
+{
+    PDISK_GROW_PARTITION input = Irp->AssociatedIrp.SystemBuffer;
+    PPARTITION_EXTENSION partExt = NULL;
+    PDRIVE_LAYOUT_INFORMATION_EX layoutEx, cache;
+    INT64 bytesToGrow;
+    UINT64 oldEnd, newEnd, newLength;
+    BOOLEAN matched;
+    size_t layoutSize;
+    NTSTATUS status;
+
+    PAGED_CODE();
+
+    if (!VerifyIrpInBufferSize(Irp, sizeof(*input)))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    bytesToGrow = input->BytesToGrow.QuadPart;
+    if (bytesToGrow <= 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PartMgrAcquireLayoutLock(FdoExtension);
+
+    // Only MBR disks are supported for now.
+    if (FdoExtension->DiskData.PartitionStyle != PARTITION_STYLE_MBR)
+    {
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    if (!FdoExtension->LayoutValid || !FdoExtension->LayoutCache)
+    {
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    // Locate the target partition device by its reported (detected) number.
+    for (PSINGLE_LIST_ENTRY entry = FdoExtension->PartitionList.Next;
+         entry != NULL;
+         entry = entry->Next)
+    {
+        PPARTITION_EXTENSION pe = CONTAINING_RECORD(entry, PARTITION_EXTENSION, ListEntry);
+        if (pe->DetectedNumber == input->PartitionNumber)
+        {
+            partExt = pe;
+            break;
+        }
+    }
+    if (partExt == NULL)
+    {
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    oldEnd = partExt->StartingOffset + partExt->PartitionLength;
+    newLength = partExt->PartitionLength + (UINT64)bytesToGrow;
+    newEnd = partExt->StartingOffset + newLength;
+
+    // The grown partition must still fit on the physical disk.
+    if (newEnd > (UINT64)FdoExtension->DiskData.DiskSize)
+    {
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // The grown region [oldEnd, newEnd) must not collide with any other partition.
+    for (PSINGLE_LIST_ENTRY entry = FdoExtension->PartitionList.Next;
+         entry != NULL;
+         entry = entry->Next)
+    {
+        PPARTITION_EXTENSION pe = CONTAINING_RECORD(entry, PARTITION_EXTENSION, ListEntry);
+        if (pe == partExt)
+            continue;
+        if (pe->StartingOffset >= oldEnd && pe->StartingOffset < newEnd)
+        {
+            PartMgrReleaseLayoutLock(FdoExtension);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    // Copy the cached layout and enlarge only the target entry, rewriting just
+    // that MBR slot so existing entries stay byte-for-byte identical on disk.
+    cache = FdoExtension->LayoutCache;
+    layoutSize = FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry[0]) +
+                 cache->PartitionCount * sizeof(PARTITION_INFORMATION_EX);
+
+    layoutEx = ExAllocatePoolWithTag(PagedPool, layoutSize, TAG_PARTMGR);
+    if (layoutEx == NULL)
+    {
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(layoutEx, cache, layoutSize);
+
+    matched = FALSE;
+    for (UINT32 i = 0; i < layoutEx->PartitionCount; i++)
+    {
+        PPARTITION_INFORMATION_EX pi = &layoutEx->PartitionEntry[i];
+
+        pi->RewritePartition = FALSE;
+        if (!matched &&
+            pi->StartingOffset.QuadPart == (LONGLONG)partExt->StartingOffset &&
+            pi->PartitionLength.QuadPart == (LONGLONG)partExt->PartitionLength)
+        {
+            pi->PartitionLength.QuadPart = (LONGLONG)newLength;
+            pi->RewritePartition = TRUE;
+            matched = TRUE;
+        }
+    }
+    if (!matched)
+    {
+        ExFreePoolWithTag(layoutEx, TAG_PARTMGR);
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Persist the enlarged partition table.
+    status = IoWritePartitionTableEx(FdoExtension->LowerDevice, layoutEx);
+    if (!NT_SUCCESS(status))
+    {
+        ExFreePoolWithTag(layoutEx, TAG_PARTMGR);
+        PartMgrReleaseLayoutLock(FdoExtension);
+        return status;
+    }
+
+    // Grow the existing partition device in place: the same \Device\HarddiskVolumeN
+    // (and its mounted file system) now simply reports a larger size, so a
+    // subsequent FSCTL_EXTEND_VOLUME can extend the file system into it.
+    partExt->PartitionLength = newLength;
+
+    if (FdoExtension->LayoutCache)
+        ExFreePool(FdoExtension->LayoutCache);
+    FdoExtension->LayoutCache = layoutEx;
+    FdoExtension->LayoutValid = TRUE;
+    FdoExtension->IsSuperFloppy = PartMgrIsDiskSuperFloppy(FdoExtension);
+
+    PartMgrReleaseLayoutLock(FdoExtension);
+
+    // Notify listeners that the on-disk layout changed.
+    TARGET_DEVICE_CUSTOM_NOTIFICATION notification;
+    notification.Event = GUID_IO_DISK_LAYOUT_CHANGE;
+    notification.Version = 1;
+    notification.Size = FIELD_OFFSET(TARGET_DEVICE_CUSTOM_NOTIFICATION, CustomDataBuffer);
+    notification.FileObject = NULL;
+    notification.NameBufferOffset = -1;
+    IoReportTargetDeviceChangeAsynchronous(FdoExtension->PhysicalDiskDO,
+                                           &notification,
+                                           NULL,
+                                           NULL);
+
+    Irp->IoStatus.Information = 0;
+    return STATUS_SUCCESS;
+}
+
+static
+CODE_SEG("PAGE")
+NTSTATUS
 FdoIoctlDiskCreateDisk(
     _In_ PFDO_EXTENSION FdoExtension,
     _In_ PIRP Irp)
@@ -1325,7 +1487,11 @@ PartMgrDeviceControl(
         case IOCTL_DISK_DELETE_DRIVE_LAYOUT:
             status = FdoIoctlDiskDeleteDriveLayout(fdoExtension, Irp);
             break;
-        // case IOCTL_DISK_GROW_PARTITION: // todo
+
+        case IOCTL_DISK_GROW_PARTITION:
+            status = FdoIoctlDiskGrowPartition(fdoExtension, Irp);
+            break;
+
         default:
             return ForwardIrpAndForget(DeviceObject, Irp);
     }
