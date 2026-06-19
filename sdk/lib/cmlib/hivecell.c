@@ -351,9 +351,19 @@ HvpCreateHiveFreeCellList(
 
                 FreeOffset += FreeBlock->Size;
             }
-            else
+            else if (FreeBlock->Size < 0)
             {
                 FreeOffset -= FreeBlock->Size;
+            }
+            else
+            {
+                /*
+                 * A zero-sized cell advances neither branch (Size > 0 is false
+                 * and FreeOffset -= 0 is a no-op), so it would spin this loop
+                 * forever.  Such a cell only appears in a corrupt bin; stop
+                 * scanning it rather than hang the whole hive load.
+                 */
+                break;
             }
         }
 
