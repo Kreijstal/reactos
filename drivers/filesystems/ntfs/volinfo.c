@@ -377,6 +377,39 @@ NtfsGetFsSizeInformation(PDEVICE_OBJECT DeviceObject,
 
 static
 NTSTATUS
+NtfsGetFsFullSizeInformation(PDEVICE_OBJECT DeviceObject,
+                             PFILE_FS_FULL_SIZE_INFORMATION FsFullSizeInfo,
+                             PULONG BufferLength)
+{
+    PDEVICE_EXTENSION DeviceExt;
+    ULONGLONG FreeClusters;
+
+    DPRINT("NtfsGetFsFullSizeInformation()\n");
+    DPRINT("FsFullSizeInfo = %p\n", FsFullSizeInfo);
+
+    if (*BufferLength < sizeof(FILE_FS_FULL_SIZE_INFORMATION))
+        return STATUS_BUFFER_OVERFLOW;
+
+    DeviceExt = DeviceObject->DeviceExtension;
+    FreeClusters = NtfsGetFreeClusters(DeviceExt);
+
+    FsFullSizeInfo->TotalAllocationUnits.QuadPart = DeviceExt->NtfsInfo.ClusterCount;
+    /* No per-user quota support: caller-available equals actual-available. */
+    FsFullSizeInfo->CallerAvailableAllocationUnits.QuadPart = FreeClusters;
+    FsFullSizeInfo->ActualAvailableAllocationUnits.QuadPart = FreeClusters;
+    FsFullSizeInfo->SectorsPerAllocationUnit = DeviceExt->NtfsInfo.SectorsPerCluster;
+    FsFullSizeInfo->BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
+
+    DPRINT("Finished NtfsGetFsFullSizeInformation()\n");
+
+    *BufferLength -= sizeof(FILE_FS_FULL_SIZE_INFORMATION);
+
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
 NtfsGetFsDeviceInformation(PDEVICE_OBJECT DeviceObject,
                            PFILE_FS_DEVICE_INFORMATION FsDeviceInfo,
                            PULONG BufferLength)
@@ -454,6 +487,12 @@ NtfsQueryVolumeInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsGetFsSizeInformation(DeviceObject,
                                               SystemBuffer,
                                               &BufferLength);
+            break;
+
+        case FileFsFullSizeInformation:
+            Status = NtfsGetFsFullSizeInformation(DeviceObject,
+                                                  SystemBuffer,
+                                                  &BufferLength);
             break;
 
         case FileFsDeviceInformation:
