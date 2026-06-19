@@ -1079,9 +1079,43 @@ ExtendVolume(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
         return Status;
 
+    /* Persist the new volume size to the boot sector so the grow survives a
+     * remount.  $Bitmap was already grown on disk above; updating
+     * EBPB.SectorCount makes NtfsMountVolume() compute the larger ClusterCount
+     * on the next mount.  Done after the bitmap grow on purpose: if this write
+     * fails we leave the on-disk SectorCount unchanged, so a remount simply
+     * sees the old (still-consistent) size instead of a half-applied grow.
+     * The backup boot sector at the volume's last sector is refreshed too. */
+    {
+        ULONG BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
+        PUCHAR Sector = ExAllocatePoolWithTag(NonPagedPool, BytesPerSector, TAG_NTFS);
+
+        if (Sector == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Status = NtfsReadSectors(DeviceExt->StorageDevice, 0, 1, BytesPerSector, Sector, FALSE);
+        if (NT_SUCCESS(Status))
+        {
+            ((PBOOT_SECTOR)Sector)->EBPB.SectorCount = NumberOfSectors;
+
+            Status = NtfsWriteDisk(DeviceExt->StorageDevice, 0, BytesPerSector, BytesPerSector, Sector);
+            if (NT_SUCCESS(Status))
+            {
+                /* Backup boot sector lives at the last sector of the volume. */
+                NtfsWriteDisk(DeviceExt->StorageDevice,
+                              (LONGLONG)NumberOfSectors * BytesPerSector,
+                              BytesPerSector, BytesPerSector, Sector);
+            }
+        }
+
+        ExFreePoolWithTag(Sector, TAG_NTFS);
+
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
     /* Last step: bump the in-core cluster count so follow-up allocations
-     * can land in the freshly-grown region.  TODO: persist via boot-sector
-     * / $Volume rewrite (see Kreijstal/reactos#32). */
+     * can land in the freshly-grown region. */
     DeviceExt->NtfsInfo.ClusterCount = NewClusterCount;
     DeviceExt->NtfsInfo.SectorCount = NumberOfSectors;
 
