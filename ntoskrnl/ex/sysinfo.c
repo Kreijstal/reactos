@@ -2553,6 +2553,37 @@ QSI_DEF(SystemEmulationProcessorInformation)
     return Status;
 }
 
+/* Class 63 - Emulation Processor Information */
+QSI_DEF(SystemEmulationProcessorInformation)
+{
+    PSYSTEM_PROCESSOR_INFORMATION Spi
+        = (PSYSTEM_PROCESSOR_INFORMATION) Buffer;
+
+    *ReqSize = sizeof(SYSTEM_PROCESSOR_INFORMATION);
+
+    /* Check user buffer's size */
+    if (Size < sizeof(SYSTEM_PROCESSOR_INFORMATION))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    /* Report the 32-bit x86 processor that WoW64 emulates. The host CPU model,
+       level and revision are unchanged (the same silicon executes the emulated
+       code); only the reported architecture differs from the native one. On a
+       native x86 build this is identical to SystemProcessorInformation. */
+    Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
+    Spi->ProcessorLevel = KeProcessorLevel;
+    Spi->ProcessorRevision = KeProcessorRevision;
+#if (NTDDI_VERSION < NTDDI_WIN8)
+    Spi->Reserved = 0;
+#else
+    Spi->MaximumProcessors = 0;
+#endif
+    Spi->ProcessorFeatureBits = (ULONG)KeFeatureBits;
+
+    return STATUS_SUCCESS;
+}
+
 /* Class 64 - Extended handle information */
 QSI_DEF(SystemExtendedHandleInformation)
 {
