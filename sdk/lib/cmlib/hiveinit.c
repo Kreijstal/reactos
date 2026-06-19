@@ -368,8 +368,10 @@ HvpInitializeMemoryHive(
     {
         Bin = (PHBIN)((ULONG_PTR)ChunkBase + (BlockIndex + 1) * HBLOCK_SIZE);
         if (Bin->Signature != HV_HBIN_SIGNATURE ||
+           Bin->Size < HBLOCK_SIZE ||
            (Bin->Size % HBLOCK_SIZE) != 0 ||
-           (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex)
+           (Bin->FileOffset / HBLOCK_SIZE) != BlockIndex ||
+           (BlockIndex + Bin->Size / HBLOCK_SIZE) > Hive->Storage[Stable].Length)
         {
             /*
              * Bin is toast but luckily either the signature, size or offset
@@ -377,6 +379,15 @@ HvpInitializeMemoryHive(
              * to do, for the offset we are re-positioning the bin back to where it
              * was and for the size we will set it up to a block size, since technically
              * a hive bin is large as a block itself to accommodate cells.
+             *
+             * A bin whose size is zero (or otherwise smaller than a single block)
+             * is especially dangerous: BlockIndex is advanced by Bin->Size /
+             * HBLOCK_SIZE below, so a zero-sized bin that slips through (its size
+             * is a valid multiple of HBLOCK_SIZE) would leave BlockIndex unchanged
+             * and spin this loop forever.  A size that runs past the end of the
+             * hive would likewise overflow the block list.  Treat both as corrupt
+             * and clamp the bin back to a single block so the walk always makes
+             * forward progress and stays in bounds.
              */
             if (!CmIsSelfHealEnabled(FALSE))
             {
@@ -392,6 +403,18 @@ HvpInitializeMemoryHive(
             Bin->Size = HBLOCK_SIZE;
             Bin->FileOffset = BlockIndex * HBLOCK_SIZE;
             ChunkBase->BootType |= HBOOT_TYPE_SELF_HEAL;
+
+            /*
+             * Repairing only the bin header is not enough: the cell data of a
+             * toast bin cannot be trusted.  In particular a leftover zero-sized
+             * cell makes the cell walkers (e.g. HvpCreateHiveFreeCellList) loop
+             * forever, because a zero-sized cell never advances their offset.
+             * Re-initialize the body as a single free cell spanning the whole
+             * block, exactly like a freshly allocated empty bin (HvpAddBin), so
+             * the repaired bin is consistent and walkable.
+             */
+            RtlZeroMemory((PUCHAR)Bin + sizeof(HBIN), HBLOCK_SIZE - sizeof(HBIN));
+            ((PHCELL)(Bin + 1))->Size = (LONG)(HBLOCK_SIZE - sizeof(HBIN));
             DPRINT1("Bin at index %lu is corrupt and it has been repaired!\n", (unsigned long)BlockIndex);
         }
 
