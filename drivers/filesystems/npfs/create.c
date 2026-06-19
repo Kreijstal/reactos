@@ -584,14 +584,38 @@ NpCreateExistingNamedPipe(IN PNP_FCB Fcb,
         return IoStatus;
     }
 
-    if (Fcb->CurrentInstances >= Fcb->MaximumInstances)
+    /*
+     * Limit the number of instances against the count of currently-open
+     * server ends, not against CurrentInstances.  CurrentInstances counts
+     * every CCB until both ends are fully closed, so a pipe whose server end
+     * has already been cleaned up while a client handle still lingers keeps
+     * occupying a slot.  ServerOpenCount is decremented as soon as the server
+     * end is cleaned up (see NpCommonCleanup), which is when the instance slot
+     * becomes reusable on Windows.  Using CurrentInstances here makes
+     * CreatePipe() fail with STATUS_INSTANCE_NOT_AVAILABLE when a same-named,
+     * single-instance pipe was created by a process that has since exited but
+     * left an inherited client handle alive (e.g. the Cygwin/MSYS2 fork
+     * process-tracker pipe after the parent exits and its PID is reused).
+     */
+    if (Fcb->ServerOpenCount >= Fcb->MaximumInstances)
     {
         IoStatus.Status = STATUS_INSTANCE_NOT_AVAILABLE;
         TRACE("Leaving, IoStatus.Status = %lx\n", IoStatus.Status);
         return IoStatus;
     }
 
-    if (Disposition == FILE_CREATE)
+    /*
+     * FILE_CREATE means "fail if the pipe already exists".  It must only be
+     * refused while a server end is still open (ServerOpenCount != 0): such an
+     * FCB is a live, connectable pipe.  When ServerOpenCount is 0 the only CCBs
+     * left on this FCB are client ends whose server has already been cleaned up
+     * (zombies kept alive until the client handle closes); the name is free for
+     * reuse, so FILE_CREATE must be allowed to start a fresh server instance on
+     * it - exactly what CreatePipe()/Cygwin fork does when a PID is reused while
+     * an inherited client handle still lingers.  The fresh server CCB is an
+     * independent instance; the lingering client drains its own CCB unaffected.
+     */
+    if (Disposition == FILE_CREATE && Fcb->ServerOpenCount != 0)
     {
         IoStatus.Status = STATUS_ACCESS_DENIED;
         TRACE("Leaving, IoStatus.Status = %lx\n", IoStatus.Status);
@@ -635,7 +659,13 @@ NpCreateExistingNamedPipe(IN PNP_FCB Fcb,
                                      List);
     if (!NT_SUCCESS(IoStatus.Status))
     {
-        --Ccb->Fcb->CurrentInstances;
+        /*
+         * NpCreateCcb() bumped both CurrentInstances and ServerOpenCount.
+         * NpDeleteCcb() undoes CurrentInstances, so only ServerOpenCount has
+         * to be rolled back here (previously this decremented CurrentInstances
+         * a second time and leaked ServerOpenCount).
+         */
+        --Ccb->Fcb->ServerOpenCount;
         NpDeleteCcb(Ccb, List);
         TRACE("Leaving, IoStatus.Status = %lx\n", IoStatus.Status);
         return IoStatus;
