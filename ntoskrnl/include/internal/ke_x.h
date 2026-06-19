@@ -432,9 +432,19 @@ KiSetThreadSwapBusy(IN PKTHREAD Thread)
     /* Set it ourselves */
     Thread->SwapBusy = TRUE;
 #else
-    /* Win7+ removed SwapBusy from KTHREAD; swap synchronization is
-     * handled through ThreadLock and the dispatcher database lock. */
-    UNREFERENCED_PARAMETER(Thread);
+    /* The Win7+ KTHREAD layout dropped the dedicated SwapBusy byte, so the
+     * context-switch asm was pointed at the (otherwise unused) Running field
+     * instead (ThSwapBusy -> KTHREAD.Running). ReactOS still implements the
+     * NT5/6 swap handshake -- KiSwapContextInternal spins on the incoming
+     * thread's flag before loading its KernelStack -- so that flag must still
+     * be driven. Reuse Running as the swap-busy flag here, mirroring the
+     * SwapBusy path: set on the outgoing thread before the swap and cleared by
+     * KiSwapContextResume once its KernelStack has been saved. Without this the
+     * spin reads a field nobody maintains, the handshake never blocks, and a
+     * second CPU can load a not-yet-saved KernelStack (SMP-only wild RSP/RIP
+     * crash that scales with processor count). */
+    ASSERT(Thread->Running == FALSE);
+    Thread->Running = TRUE;
 #endif
 }
 

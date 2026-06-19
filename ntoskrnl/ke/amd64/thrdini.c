@@ -294,9 +294,16 @@ KiSwapContextResume(
                      0);
     }
 
-    /* Old thread is no longer busy */
+    /* Old thread is no longer busy. Its KernelStack has now been saved by
+     * KiSwapContextInternal, so it is safe for another processor to switch to
+     * it: release the swap-busy flag the spin in KiSwapContextInternal waits
+     * on. Pre-Win7 this is the dedicated SwapBusy byte; Win7+ reuses Running
+     * (see KiSetThreadSwapBusy). x86/x64 store ordering guarantees the
+     * KernelStack store above is visible before this release. */
 #if (NTDDI_VERSION < NTDDI_WIN7)
     OldThread->SwapBusy = FALSE;
+#else
+    OldThread->Running = FALSE;
 #endif
 
     /* Kernel APCs may be pending */
