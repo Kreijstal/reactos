@@ -529,8 +529,38 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         return STATUS_SUCCESS;
     }
 
+    /* A relative open with an empty name whose RootDirectory is an existing
+     * FILE (not the volume) is a reopen-by-handle: reopen the very same file
+     * with the newly requested access and options.  cygwin/msys2's unlink_nt
+     * uses this (init_reopen_attr) to retry a delete with FILE_DELETE_ON_CLOSE
+     * after a plain delete disposition returned STATUS_CANNOT_DELETE.  Resolve
+     * the related FCB and let the normal existing-file path below run so that
+     * share access, the image-section check and FILE_DELETE_ON_CLOSE all apply.
+     * Without this the open falls into the volume-open path and wrongly
+     * succeeds against the volume, so the in-use file is never moved aside
+     * (e.g. replacing a running msys-2.0.dll during pacman fails with
+     * "Can't create"). */
+    if (Fcb == NULL &&
+        FileObject->FileName.Length == 0 &&
+        FileObject->RelatedFileObject != NULL &&
+        FileObject->RelatedFileObject->FsContext != NULL &&
+        ((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Identifier.Type == NTFS_TYPE_FCB &&
+        !BooleanFlagOn(((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Flags, FCB_IS_VOLUME))
+    {
+        PNTFS_FCB RelatedFcb = FileObject->RelatedFileObject->FsContext;
+
+        Fcb = NtfsGrabFCBFromTable(DeviceExt, RelatedFcb->PathName);
+        if (Fcb != NULL)
+        {
+            Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
+            if (!NT_SUCCESS(Status))
+                return Status;
+        }
+    }
+
     /* This a open operation for the volume itself */
-    if (FileObject->FileName.Length == 0 &&
+    if (Fcb == NULL &&
+        FileObject->FileName.Length == 0 &&
         (FileObject->RelatedFileObject == NULL || FileObject->RelatedFileObject->FsContext2 != NULL))
     {
         if (RequestedDisposition != FILE_OPEN &&
@@ -799,6 +829,37 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
          * Lock order: DirResource (held by NtfsCreate) -> MainResource here.
          * Matches NtfsCleanup -> NtfsCleanupFile.  The filter callback
          * never acquires DirResource, so no AB-BA is possible. */
+        /* Like fastfat (and Windows): an open that intends to write the file
+         * or delete it on close cannot proceed while the file is mapped as a
+         * running executable image.  MmFlushImageSection(MmFlushForWrite)
+         * returns FALSE while any view of the image section is still mapped.
+         * A write open is then rejected with STATUS_SHARING_VIOLATION, a
+         * delete-on-close open with STATUS_CANNOT_DELETE.
+         *
+         * cygwin/msys2's unlink_nt depends on the delete-on-close case: when
+         * the plain delete disposition returns STATUS_CANNOT_DELETE it reopens
+         * the file with FILE_DELETE_ON_CLOSE, and only when THAT open also
+         * fails does it fall back to moving the in-use file into the recycle
+         * bin so a replacement can be created.  Without this check the
+         * delete-on-close open wrongly succeeds, the file is never moved aside,
+         * and replacing a running image (e.g. msys-2.0.dll during pacman -U)
+         * fails with "Can't create".  For a freshly created/superseded file
+         * there is no image section, so MmFlushImageSection returns TRUE and
+         * this is a no-op. */
+        if (Fcb->Identifier.Type == NTFS_TYPE_FCB &&
+            !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME) &&
+            !NtfsFCBIsDirectory(Fcb) &&
+            (BooleanFlagOn(DesiredAccess, FILE_WRITE_DATA) ||
+             BooleanFlagOn(RequestedOptions, FILE_DELETE_ON_CLOSE)) &&
+            Fcb->SectionObjectPointers != NULL &&
+            !MmFlushImageSection(Fcb->SectionObjectPointers, MmFlushForWrite))
+        {
+            Status = BooleanFlagOn(RequestedOptions, FILE_DELETE_ON_CLOSE)
+                     ? STATUS_CANNOT_DELETE : STATUS_SHARING_VIOLATION;
+            NtfsCloseFile(DeviceExt, FileObject);
+            return Status;
+        }
+
         if (Fcb->Identifier.Type == NTFS_TYPE_FCB &&
             !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME))
         {
