@@ -452,9 +452,13 @@ KiSwapContextEntry(IN PKSWITCHFRAME SwitchFrame,
     /* Get the old thread and set its kernel stack */
     OldThread->KernelStack = SwitchFrame;
 
-    /* Set swapbusy to false for the new thread */
+    /* Set swapbusy to false for the new thread. Win7+ dropped the dedicated
+       SwapBusy byte, so ReactOS reuses Running as the swap-busy handshake flag
+       the context-switch spin waits on (see KiSetThreadSwapBusy). */
 #if (NTDDI_VERSION < NTDDI_WIN7)
     NewThread->SwapBusy = FALSE;
+#else
+    NewThread->Running = FALSE;
 #endif
 
     /* ISRs can change FPU state, so disable interrupts while checking */
