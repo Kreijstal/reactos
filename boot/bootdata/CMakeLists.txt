@@ -1,8 +1,27 @@
 
 add_subdirectory(packages)
 
-# Setup settings file
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/txtsetup.sif DESTINATION reactos NO_CAB FOR bootcd regtest)
+# Setup settings file.
+#
+# On amd64 with a WoW64 guest build, register the dedicated wow64.cab (built in
+# boot/CMakeLists.txt) in the installer's [Cabinets] list so the 32-bit guest
+# image is deployed into the installed system's SysWOW64. The line is gated by
+# architecture because the cabinet only exists for that configuration; other
+# targets get a harmless comment instead of a dangling cabinet reference.
+set(_wow64_cab FALSE)
+if(ARCH STREQUAL "amd64" AND REACTOS_WOW64_GUEST_DIR)
+    file(GLOB _wow64_lst "${REACTOS_WOW64_GUEST_DIR}/boot/livecd.*.lst")
+    if(_wow64_lst)
+        set(_wow64_cab TRUE)
+    endif()
+endif()
+if(_wow64_cab)
+    set(WOW64_CABINET_LINE "Cabinet = wow64.cab")
+else()
+    set(WOW64_CABINET_LINE "; (no WoW64 installer cabinet for this architecture)")
+endif()
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/txtsetup.sif ${CMAKE_CURRENT_BINARY_DIR}/txtsetup.sif @ONLY)
+add_cd_file(FILE ${CMAKE_CURRENT_BINARY_DIR}/txtsetup.sif DESTINATION reactos NO_CAB FOR bootcd regtest)
 
 add_custom_target(converted_caroots_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
 utf16le_convert(${CMAKE_CURRENT_SOURCE_DIR}/caroots.inf ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
