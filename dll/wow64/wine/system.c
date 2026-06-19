@@ -406,18 +406,23 @@ NTSTATUS WINAPI wow64_NtQuerySystemInformation( UINT *args )
 #ifdef __REACTOS__
     case SystemProcessorInformation:  /* SYSTEM_PROCESSOR_INFORMATION */
     {
-        /* The native (x64) SYSTEM_PROCESSOR_INFORMATION is larger than the
-         * 32-bit guest's: its trailing ProcessorFeatureBits field grew from
-         * ULONG to ULONG64 on x64/Win10. The record has no embedded pointers
-         * and a common leading layout, but the native kernel rejects a buffer
+        /* Report the emulated x86 processor to the 32-bit caller, matching the
+         * way SystemBasicInformation is answered from SystemEmulationBasicInformation
+         * above; otherwise GetSystemInfo() would expose the native (amd64)
+         * architecture to a WoW64 process.
+         *
+         * The native SYSTEM_PROCESSOR_INFORMATION is also larger than the
+         * 32-bit guest's (its trailing ProcessorFeatureBits field grew from
+         * ULONG to ULONG64 on x64/Win10) and the kernel rejects a buffer
          * smaller than its own struct (STATUS_INFO_LENGTH_MISMATCH), which
-         * would make a 32-bit GetSystemInfo() fail and leave its output
-         * uninitialized. Query the native-sized record and copy back only as
-         * many bytes as the 32-bit caller requested. */
+         * would make GetSystemInfo() fail and leave its output uninitialized.
+         * The record has no embedded pointers and a common leading layout, so
+         * query the native-sized record and copy back only as many bytes as
+         * the 32-bit caller requested. */
         SYSTEM_PROCESSOR_INFORMATION info;
         ULONG copy = min( len, (ULONG)sizeof(info) );
 
-        status = NtQuerySystemInformation( SystemProcessorInformation, &info, sizeof(info), NULL );
+        status = NtQuerySystemInformation( SystemEmulationProcessorInformation, &info, sizeof(info), NULL );
         if (!status) memcpy( ptr, &info, copy );
         if (retlen) *retlen = copy;
         return status;
