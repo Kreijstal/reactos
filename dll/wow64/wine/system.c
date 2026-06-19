@@ -400,10 +400,29 @@ NTSTATUS WINAPI wow64_NtQuerySystemInformation( UINT *args )
     case SystemProcessorBrandString:  /* char[] */
     case SystemProcessorFeaturesInformation:  /* SYSTEM_PROCESSOR_FEATURES_INFORMATION */
     case SystemWineVersionInformation:  /* char[] */
-#else
-    case SystemProcessorInformation:
 #endif
         return NtQuerySystemInformation( class, ptr, len, retlen );
+
+#ifdef __REACTOS__
+    case SystemProcessorInformation:  /* SYSTEM_PROCESSOR_INFORMATION */
+    {
+        /* The native (x64) SYSTEM_PROCESSOR_INFORMATION is larger than the
+         * 32-bit guest's: its trailing ProcessorFeatureBits field grew from
+         * ULONG to ULONG64 on x64/Win10. The record has no embedded pointers
+         * and a common leading layout, but the native kernel rejects a buffer
+         * smaller than its own struct (STATUS_INFO_LENGTH_MISMATCH), which
+         * would make a 32-bit GetSystemInfo() fail and leave its output
+         * uninitialized. Query the native-sized record and copy back only as
+         * many bytes as the 32-bit caller requested. */
+        SYSTEM_PROCESSOR_INFORMATION info;
+        ULONG copy = min( len, (ULONG)sizeof(info) );
+
+        status = NtQuerySystemInformation( SystemProcessorInformation, &info, sizeof(info), NULL );
+        if (!status) memcpy( ptr, &info, copy );
+        if (retlen) *retlen = copy;
+        return status;
+    }
+#endif
 
 #ifndef __REACTOS__
     /* FIXME */
