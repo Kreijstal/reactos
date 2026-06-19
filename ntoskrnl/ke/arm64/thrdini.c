@@ -425,12 +425,19 @@ KiSwapContextResume(
     __asm__ __volatile__("msr daifclr, #0xb" ::: "memory");
     __asm__ __volatile__("isb" ::: "memory");
 
+    /* Old thread is no longer busy; release the swap-busy flag the switch-to
+       spin waits on, now that its KernelStack has been saved. Win7+ dropped the
+       dedicated SwapBusy byte and reuses Running (see KiSetThreadSwapBusy). */
 #if (NTDDI_VERSION < NTDDI_WIN7)
     OldThread->SwapBusy = FALSE;
+#else
+    OldThread->Running = FALSE;
+#endif
 #ifdef _M_ARM64
+    /* ARM64 has weak ordering: publish the KernelStack store before the flag
+       release, and wake any processor parked (WFE) on the flag. */
     __asm__ __volatile__("dmb ishst" ::: "memory");
     __asm__ __volatile__("sev" ::: "memory");
-#endif
 #endif
 
     /*
