@@ -236,6 +236,7 @@ inport = inport.sys
 
 [Cabinets]
 Cabinet = reactos.cab
+@WOW64_CABINET_LINE@
 
 [SetupData]
 DefaultPath = \ReactOS
