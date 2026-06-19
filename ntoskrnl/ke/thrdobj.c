@@ -885,6 +885,11 @@ KeInitThread(IN OUT PKTHREAD Thread,
     Thread->IdealProcessor = 1;
 #if (NTDDI_VERSION < NTDDI_WIN7)
     Thread->SwapBusy = FALSE;
+#else
+    /* Win7+ reuses Running as the swap-busy handshake flag (see
+     * KiSetThreadSwapBusy); start it cleared so the first switch-to spin
+     * doesn't block on a stale value. */
+    Thread->Running = FALSE;
 #endif
     Thread->KernelStackResident = TRUE;
     Thread->AdjustReason = AdjustNone;
