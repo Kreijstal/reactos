@@ -20,6 +20,9 @@ _1 = %cdname%,%cdtagfile%,,""
 [SourceDisksNames.amd64]
 1 = %cdname%,%cdtagfilea%,,\amd64
 
+[SourceDisksNames.arm64]
+1 = %cdname%,%cdtagfile%,,\arm64
+
 ;
 ; The directories listed in the [Directories] or [WinntDirectories] sections
 ; are relative to the installation source or destination directories.
