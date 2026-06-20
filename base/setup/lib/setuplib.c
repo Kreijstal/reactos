@@ -679,6 +679,7 @@ LoadSetupInf(
 BOOLEAN
 NTAPI
 InitSystemPartition(
+    _In_ ARCHITECTURE_TYPE ArchType,
     /**/_In_ PPARTLIST PartitionList,       /* HACK HACK! */
     /**/_In_ PPARTENTRY InstallPartition,   /* HACK HACK! */
     /**/_Out_ PPARTENTRY* pSystemPartition, /* HACK HACK! */
@@ -693,8 +694,16 @@ InitSystemPartition(
      * If we install on a fixed disk, try to find a supported system
      * partition on the system. Otherwise if we install on a removable disk
      * use the install partition as the system partition.
+     *
+     * On UEFI platforms the legacy notion of an "active" BIOS system
+     * partition does not apply: the firmware boots an EFI application from a
+     * FAT EFI System Partition. FreeLoader's UEFI loader (uefildr.efi) and its
+     * configuration are placed directly on the (FAT) installation partition,
+     * which the firmware can read, so use that partition as the system
+     * partition -- exactly as is already done for removable media below.
      */
-    if (InstallPartition->DiskEntry->MediaType == FixedMedia)
+    if (InstallPartition->DiskEntry->MediaType == FixedMedia &&
+        ArchType != ARCH_Efi)
     {
         SystemPartition = FindSupportedSystemPartition(PartitionList,
                                                        FALSE,
@@ -716,7 +725,7 @@ InitSystemPartition(
                 return FALSE;
         }
     }
-    else // if (InstallPartition->DiskEntry->MediaType == RemovableMedia)
+    else // RemovableMedia, or any UEFI install (the installation partition is the ESP)
     {
         SystemPartition = InstallPartition;
         /* Don't specify any old active partition hint */
@@ -1088,13 +1097,17 @@ InitializeSetup(
     DPRINT1("SourceRootDir (2): '%wZ'\n", &pSetupData->SourceRootDir);
 
     /* Retrieve the target machine architecture type */
-    // FIXME: This should be determined at runtime!!
     // FIXME: Allow for (pre-)installing on an architecture
     //        different from the current one?
 #if defined(SARCH_XBOX)
     pSetupData->ArchType = ARCH_Xbox;
 // #elif defined(SARCH_PC98)
-#else // TODO: Arc, UEFI
+#elif defined(_M_ARM64) || defined(_M_ARM)
+    /* ARM/ARM64 ReactOS is booted exclusively by UEFI firmware: there is no
+     * legacy-BIOS boot path on these platforms, so the firmware type is known
+     * at compile time and need not be probed at runtime. */
+    pSetupData->ArchType = ARCH_Efi;
+#else // TODO: Determine BIOS-vs-UEFI at runtime on x86/amd64 (which support both)
     pSetupData->ArchType = (IsNEC_98 ? ARCH_NEC98x86 : ARCH_PcAT);
 #endif
 
