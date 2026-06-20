@@ -323,7 +323,7 @@ PortPdoQueryDeviceId(
 
     if (PdoExtension->InquiryBuffer == NULL)
     {
-        DPRINT1("PortPdoQueryDeviceId: no inquiry data cached\n");
+        DPRINT("PortPdoQueryDeviceId: no inquiry data cached\n");
         return STATUS_DEVICE_DOES_NOT_EXIST;
     }
 
