@@ -761,6 +761,15 @@ AhciInterruptHandler (
         PortExtension->CommandIssuedSlots &= outstanding;
     }
 
+    // Completing the above commands freed their command slots. Re-drive the
+    // port so requests waiting in the SRB queue -- and any slots that were
+    // populated but not yet issued -- get programmed now. We run in the ISR,
+    // which already holds the port's interrupt lock, so do not re-acquire it.
+    // This is essential: the class driver throttles on outstanding requests and
+    // is blocked waiting on these completions, so nothing else will ever come
+    // along to re-drive the queue.
+    AhciDrivePortQueue(PortExtension);
+
     return;
 }// -- AhciInterruptHandler();
 
@@ -1646,15 +1655,15 @@ AhciActivatePort (
     )
 {
     AHCI_PORT_CMD cmd;
-    ULONG QueueSlots, slotToActivate, tmp;
+    ULONG slotToActivate;
     PAHCI_ADAPTER_EXTENSION AdapterExtension;
 
     AhciDebugPrint("AhciActivatePort()\n");
 
     AdapterExtension = PortExtension->AdapterExtension;
-    QueueSlots = PortExtension->QueueSlots;
+    slotToActivate = PortExtension->QueueSlots;
 
-    if (QueueSlots == 0)
+    if (slotToActivate == 0)
     {
         return;
     }
@@ -1668,22 +1677,17 @@ AhciActivatePort (
         return;
     }
 
-    // get the lowest set bit
-    tmp = QueueSlots & (QueueSlots - 1);
-
-    if (tmp == 0)
-        slotToActivate = QueueSlots;
-    else
-        slotToActivate = (QueueSlots & (~tmp));
-
-    // mark that bit off in QueueSlots
-    // so we can know we it is really needed to activate port or not
+    // Issue every populated-but-not-yet-issued command slot at once. PxCI is a
+    // bitmask and the HBA processes each command slot whose bit is set, so there
+    // is no need to drip-feed one slot per call -- doing so (with no re-pump on
+    // completion) would strand the remaining slots once the upstream driver
+    // stops feeding new requests.
     PortExtension->QueueSlots &= ~slotToActivate;
-    // mark this CommandIssuedSlots
+    // mark these CommandIssuedSlots
     // to validate in completeIssuedCommand
     PortExtension->CommandIssuedSlots |= slotToActivate;
 
-    // tell the HBA to issue this Command Slot to the given port
+    // tell the HBA to issue these Command Slots to the given port
     StorPortWriteRegisterUlong(AdapterExtension, &PortExtension->Port->CI, slotToActivate);
 
     return;
@@ -1692,6 +1696,65 @@ AhciActivatePort (
 #ifdef _MSC_VER     // avoid MSVC C4700
     #pragma warning(pop)
 #endif
+
+/**
+ * @name AhciDrivePortQueue
+ * @implemented
+ *
+ * Pull queued SRBs into free command slots and issue them. Safe to call from
+ * either the StartIo path or the completion path -- both run under the port's
+ * interrupt lock. This is what keeps the port moving: a command completion
+ * frees slots, and this re-fills them from the pending SRB queue. Without a
+ * call from the completion path the port stalls forever once the class driver
+ * stops submitting new requests, because it is itself blocked waiting on the
+ * very completions that should have re-driven the queue.
+ *
+ * @param PortExtension
+ *
+ */
+VOID
+AhciDrivePortQueue (
+    __in PAHCI_PORT_EXTENSION PortExtension
+    )
+{
+    PAHCI_ADAPTER_EXTENSION AdapterExtension;
+    PSCSI_REQUEST_BLOCK tmpSrb;
+    ULONG commandSlotMask, occupiedSlots, slotIndex, NCS;
+
+    AdapterExtension = PortExtension->AdapterExtension;
+
+    if (PortExtension->DeviceParams.IsActive == FALSE)
+    {
+        return; // we should wait for device to get active
+    }
+
+    occupiedSlots = (PortExtension->QueueSlots | PortExtension->CommandIssuedSlots); // Busy command slots for given port
+    NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
+    commandSlotMask = ((1 << NCS) - 1) & ~occupiedSlots; // available slots mask
+
+    // iterate over HBA port slots and pull a queued SRB into each free one
+    for (slotIndex = 0; slotIndex < NCS; slotIndex++)
+    {
+        if ((commandSlotMask & (1 << slotIndex)) == 0)
+        {
+            continue; // slot busy -- skip it, a later slot may still be free
+        }
+
+        tmpSrb = RemoveQueue(&PortExtension->SrbQueue);
+        if (tmpSrb == NULL)
+        {
+            break; // no more queued requests
+        }
+
+        NT_ASSERT(tmpSrb->PathId == PortExtension->PortNumber);
+        AhciProcessSrb(PortExtension, tmpSrb, slotIndex);
+    }
+
+    // program HBA port
+    AhciActivatePort(PortExtension);
+
+    return;
+}// -- AhciDrivePortQueue();
 
 /**
  * @name AhciProcessIO
@@ -1712,10 +1775,8 @@ AhciProcessIO (
     __in PSCSI_REQUEST_BLOCK Srb
     )
 {
-    PSCSI_REQUEST_BLOCK tmpSrb;
     STOR_LOCK_HANDLE lockhandle = {0};
     PAHCI_PORT_EXTENSION PortExtension;
-    ULONG commandSlotMask, occupiedSlots, slotIndex, NCS;
 
     AhciDebugPrint("AhciProcessIO()\n");
     AhciDebugPrint("\tPathId: %d\n", PathId);
@@ -1730,46 +1791,8 @@ AhciProcessIO (
     // add Srb to queue
     AddQueue(&PortExtension->SrbQueue, Srb);
 
-    if (PortExtension->DeviceParams.IsActive == FALSE)
-    {
-        // Release Lock
-        StorPortReleaseSpinLock(AdapterExtension, &lockhandle);
-        return; // we should wait for device to get active
-    }
-
-    occupiedSlots = (PortExtension->QueueSlots | PortExtension->CommandIssuedSlots); // Busy command slots for given port
-    NCS = AHCI_Global_Port_CAP_NCS(AdapterExtension->CAP);
-    commandSlotMask = (1 << NCS) - 1; // available slots mask
-
-    commandSlotMask = (commandSlotMask & ~occupiedSlots);
-    if(commandSlotMask != 0)
-    {
-        // iterate over HBA port slots
-        for (slotIndex = 0; slotIndex < NCS; slotIndex++)
-        {
-            // find first free slot
-            if ((commandSlotMask & (1 << slotIndex)) != 0)
-            {
-                tmpSrb = RemoveQueue(&PortExtension->SrbQueue);
-                if (tmpSrb != NULL)
-                {
-                    NT_ASSERT(tmpSrb->PathId == PathId);
-                    AhciProcessSrb(PortExtension, tmpSrb, slotIndex);
-                }
-                else
-                {
-                    break;
-                }
-            }
-            else
-            {
-                break;
-            }
-        }
-    }
-
-    // program HBA port
-    AhciActivatePort(PortExtension);
+    // populate free command slots from the queue and program the port
+    AhciDrivePortQueue(PortExtension);
 
     // Release Lock
     StorPortReleaseSpinLock(AdapterExtension, &lockhandle);
