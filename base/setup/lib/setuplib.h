@@ -190,6 +190,7 @@ LoadSetupInf(
 BOOLEAN
 NTAPI
 InitSystemPartition(
+    _In_ ARCHITECTURE_TYPE ArchType,
     /**/_In_ PPARTLIST PartitionList,       /* HACK HACK! */
     /**/_In_ PPARTENTRY InstallPartition,   /* HACK HACK! */
     /**/_Out_ PPARTENTRY* pSystemPartition, /* HACK HACK! */
