@@ -2000,6 +2000,29 @@ cleanup:
 }
 
 
+static
+BOOL
+ProfileListKeyExists(
+    _In_ PWSTR pszSidString)
+{
+    HKEY hKey;
+    WCHAR szKeyName[MAX_PATH];
+
+    StringCbCopyW(szKeyName, sizeof(szKeyName),
+                  L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\");
+    StringCbCatW(szKeyName, sizeof(szKeyName), pszSidString);
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szKeyName, 0,
+                      KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    RegCloseKey(hKey);
+    return TRUE;
+}
+
+
 BOOL
 WINAPI
 LoadUserProfileW(
@@ -2085,9 +2108,23 @@ LoadUserProfileW(
         StringCbCatW(szUserHivePath, sizeof(szUserHivePath), L"\\ntuser.dat");
         DPRINT("szUserHivePath: %S\n", szUserHivePath);
 
-        /* Create user profile directory if needed */
-        if (GetFileAttributesW(szUserHivePath) == INVALID_FILE_ATTRIBUTES)
+        /*
+         * Create the user profile if it has not been registered yet.  A
+         * profile counts as registered only when the ProfileList key has an
+         * entry for the current SID -- not merely when an ntuser.dat file
+         * happens to exist on disk.  The latter can be true while the former
+         * is not, for example after an in-place reinstall that regenerates the
+         * SAM (hence a new account SID) while the previous user profile
+         * directory survives on a non-formatted volume.  The old logic keyed
+         * solely off the ntuser.dat file, so it skipped CreateUserProfile in
+         * that case and IncrementRefCount() below then failed with
+         * ERROR_FILE_NOT_FOUND, aborting logon.
+         */
+        if (GetFileAttributesW(szUserHivePath) == INVALID_FILE_ATTRIBUTES ||
+            !ProfileListKeyExists(SidString.Buffer))
         {
+            WCHAR szProfileDir[MAX_PATH];
+
             /* Get user sid */
             if (GetTokenInformation(hToken, TokenUser, NULL, 0, &dwLength) ||
                 GetLastError() != ERROR_INSUFFICIENT_BUFFER)
@@ -2110,14 +2147,32 @@ LoadUserProfileW(
                 goto cleanup;
             }
 
-            /* Create profile */
-            ret = CreateUserProfileW(UserSid->User.Sid, lpProfileInfo->lpUserName);
+            /*
+             * Create the profile.  When the default profile directory already
+             * exists, CreateUserProfileExW registers a fresh "<user>.NNN"
+             * directory instead; reload the hive path from the directory it
+             * actually used so the RegLoadKeyW() below matches the registered
+             * ProfileImagePath.
+             */
+            szProfileDir[0] = UNICODE_NULL;
+            ret = CreateUserProfileExW(UserSid->User.Sid,
+                                       lpProfileInfo->lpUserName,
+                                       NULL,
+                                       szProfileDir,
+                                       ARRAYSIZE(szProfileDir),
+                                       FALSE);
             if (!ret)
             {
-                DPRINT1("CreateUserProfileW() failed\n");
+                DPRINT1("CreateUserProfileExW() failed\n");
                 goto cleanup;
             }
             ret = FALSE;
+
+            if (szProfileDir[0] != UNICODE_NULL)
+            {
+                StringCbCopyW(szUserHivePath, sizeof(szUserHivePath), szProfileDir);
+                StringCbCatW(szUserHivePath, sizeof(szUserHivePath), L"\\ntuser.dat");
+            }
         }
 
         /* Acquire restore privilege */
