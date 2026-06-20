@@ -262,6 +262,35 @@ KiIdleLoop(VOID)
         }
 
         /*
+         * No thread was handed to us via NextThread, but a runnable thread may
+         * still be sitting in the ready queue at a priority that did not
+         * preempt the idle thread -- for example the priority-0 zero-page
+         * thread, readied while we run as the priority-0 idle thread. The
+         * reschedule path only promotes a thread to NextThread when it can
+         * preempt the current thread, so such a thread would otherwise never be
+         * dispatched and the box would idle forever with runnable work pending
+         * (this is exactly what hangs system shutdown, which waits on a worker
+         * APC delivered to the zero-page thread). Select and dispatch it here,
+         * the same way KiSwapThread does. We run with interrupts disabled on
+         * this UP kernel, so the ready queue cannot change underneath us.
+         */
+        if (Prcb->ReadySummary)
+        {
+            PKTHREAD OldThread = Prcb->CurrentThread;
+            PKTHREAD NewThread = KiSelectReadyThread(0, Prcb);
+
+            if (NewThread != NULL)
+            {
+                NewThread->State = Running;
+                Prcb->CurrentThread = NewThread;
+
+                ASSERT(OldThread != NULL);
+                KiSwapContext(OldThread->WaitIrql, OldThread);
+                continue;
+            }
+        }
+
+        /*
          * KiInitializeKernel enters the idle loop after raising to HIGH_LEVEL.
          * On ARM64, clearing DAIF.I alone is not enough because the GIC PMR may
          * still be masking every interrupt. Drop the logical IRQL before opening
