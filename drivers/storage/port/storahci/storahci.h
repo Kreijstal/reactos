@@ -586,6 +586,16 @@ AhciProcessIO (
     __in PSCSI_REQUEST_BLOCK Srb
     );
 
+VOID
+AhciActivatePort (
+    __in PAHCI_PORT_EXTENSION PortExtension
+    );
+
+VOID
+AhciDrivePortQueue (
+    __in PAHCI_PORT_EXTENSION PortExtension
+    );
+
 BOOLEAN
 AhciAdapterReset (
     __in PAHCI_ADAPTER_EXTENSION AdapterExtension
