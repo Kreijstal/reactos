@@ -1662,6 +1662,29 @@ MmDeletePhysicalMapping(
     return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, TRUE);
 }
 
+/*
+ * Like MmDeleteVirtualMapping, but the caller (MmDeleteProcessAddressSpace via
+ * marea.c) is unmapping a batch of pages and issues a single cross-processor
+ * shootdown (KeFlushEntireTb) for the whole run before any unmapped frame is
+ * released.  On ARM64 the per-page invalidation is already an inner-shareable
+ * (vaale1is) broadcast, so the local TLB is consistent here and the caller's
+ * batch flush keeps every other processor consistent before reuse -- the
+ * "no broadcast" contract is satisfied.  A future SMP optimization could thread
+ * a local-only (non-IS) tlbi through MmDeleteVirtualMappingEx to skip the
+ * redundant per-page broadcast; on the current single-processor ARM64 target
+ * the IS form is equivalent to a local invalidate.
+ */
+BOOLEAN
+NTAPI
+MmDeleteVirtualMappingNoBroadcast(
+    _Inout_opt_ PEPROCESS Process,
+    _In_ PVOID Address,
+    _Out_opt_ PBOOLEAN WasDirty,
+    _Out_opt_ PPFN_NUMBER Page)
+{
+    return MmDeleteVirtualMappingEx(Process, Address, WasDirty, Page, FALSE);
+}
+
 static
 BOOLEAN
 MmDeleteVirtualMappingEx(
