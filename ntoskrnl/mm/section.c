@@ -5953,8 +5953,19 @@ MmCheckDirtySegment(
     }
 
     /* Were this page hanging there just for the sake of being present ? */
-    if (!IS_DIRTY_SSE(Entry) && (SHARE_COUNT_FROM_SSE(Entry) == 0) && PageOut)
+    if (!IS_DIRTY_SSE(Entry) && (SHARE_COUNT_FROM_SSE(Entry) == 0) && PageOut &&
+        (Segment->SystemMapCount == 0))
     {
+        /*
+         * SystemMapCount == 0 is required: a system-space view (e.g. a Cc VACB
+         * mapping) carries no per-process rmap, and MmMakeSegmentResident installs
+         * its pages at SHARE_COUNT == 0 until the view's VA is first faulted. So a
+         * page can sit here clean with SHARE_COUNT == 0 while a VACB still maps it
+         * through Vacb->BaseAddress. Freeing it would return the frame to the free
+         * list while Cc can still read it -> page double-use. Same hazard the
+         * MmForceSectionClosed purge guard guards against. Leave it resident; it is
+         * reclaimed once the view is unmapped and SystemMapCount drops to 0.
+         */
         ULONG_PTR NewEntry = 0;
         /* Restore the swap entry here */
         if (!FlagOn(*Segment->Flags, MM_DATAFILE_SEGMENT))
