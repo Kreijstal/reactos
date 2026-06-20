@@ -1929,7 +1929,8 @@ PrepareAndDoCopyThread(
     SetDlgItemTextW(hwndDlg, IDC_ITEM, L"");
 
     /* Find or set the active system partition before starting formatting */
-    Success = InitSystemPartition(pSetupData->PartitionList,
+    Success = InitSystemPartition(pSetupData->USetupData.ArchType,
+                                  pSetupData->PartitionList,
                                   InstallPartition,
                                   &SystemPartition,
                                   FsVolCallback,
