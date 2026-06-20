@@ -191,6 +191,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/NtfsDirIndex_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
+    ntos_mm/MmPageoutSysView_user.c
     ntos_mm/NtCreateSection_user.c
     ntos_po/PoIrp_user.c
     tcpip/TcpIp_user.c
@@ -221,6 +222,7 @@ add_dependencies(kmtest_drivers
     ioreadwrite_drv
     kernel32_drv
     mmmaplockedpagesspecifycache_drv
+    mmpageoutsysview_drv
     ntcreatesection_drv
     poirp_drv
     tcpip_drv
