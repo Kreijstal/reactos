@@ -918,6 +918,90 @@ InstallBootloaderFiles(
     return STATUS_SUCCESS;
 }
 
+/*
+ * Default file name of FreeLoader's UEFI boot application within the
+ * \EFI\BOOT default-boot directory. Per the UEFI specification, when no
+ * Boot#### NVRAM entry applies, the firmware loads \EFI\BOOT\BOOT<arch>.EFI
+ * from a FAT volume; the architecture suffix below must match the EFI image
+ * produced for the target machine (see boot/boot_images.cmake EFI_PLATFORM_ID).
+ */
+#if defined(_M_IX86)
+#define EFI_BOOT_FILE_NAME  L"bootia32.efi"
+#elif defined(_M_AMD64)
+#define EFI_BOOT_FILE_NAME  L"bootx64.efi"
+#elif defined(_M_ARM)
+#define EFI_BOOT_FILE_NAME  L"bootarm.efi"
+#elif defined(_M_ARM64)
+#define EFI_BOOT_FILE_NAME  L"bootaa64.efi"
+#elif defined(_M_IA64)
+#define EFI_BOOT_FILE_NAME  L"bootia64.efi"
+#else
+#error "Unknown architecture: no UEFI default boot file name defined"
+#endif
+
+/*
+ * Installs FreeLoader's UEFI loader and its configuration onto a UEFI
+ * EFI System Partition. The system partition is a FAT volume from which the
+ * firmware loads the boot application; there is no VBR/MBR boot code involved.
+ */
+static
+NTSTATUS
+InstallUefiBootLoaderFiles(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCUNICODE_STRING SourceRootPath,
+    _In_ PCUNICODE_STRING DestinationArcPath)
+{
+    NTSTATUS Status;
+    WCHAR SrcPath[MAX_PATH];
+    WCHAR DstPath[MAX_PATH];
+
+    /* The firmware loads its boot application from \EFI\BOOT on a FAT
+     * volume; ensure that directory exists on the system partition. */
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, L"EFI");
+    Status = SetupCreateDirectory(DstPath);
+    if (!NT_SUCCESS(Status) && (Status != STATUS_OBJECT_NAME_COLLISION))
+    {
+        DPRINT1("SetupCreateDirectory(%S) failed (Status 0x%08lx)\n", DstPath, Status);
+        return Status;
+    }
+
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, L"EFI\\BOOT");
+    Status = SetupCreateDirectory(DstPath);
+    if (!NT_SUCCESS(Status) && (Status != STATUS_OBJECT_NAME_COLLISION))
+    {
+        DPRINT1("SetupCreateDirectory(%S) failed (Status 0x%08lx)\n", DstPath, Status);
+        return Status;
+    }
+
+    /* Copy FreeLoader's UEFI application to the default-boot path, always
+     * overwriting any older version. The image is shipped on the installation
+     * media under \EFI\BOOT (see boot/boot_images.cmake). */
+    CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2,
+                 SourceRootPath->Buffer, L"\\efi\\boot\\" EFI_BOOT_FILE_NAME);
+    CombinePaths(DstPath, ARRAYSIZE(DstPath), 2,
+                 SystemRootPath->Buffer, L"EFI\\BOOT\\" EFI_BOOT_FILE_NAME);
+
+    DPRINT1("Copy UEFI loader: %S ==> %S\n", SrcPath, DstPath);
+    Status = SetupCopyFile(SrcPath, DstPath, FALSE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SetupCopyFile(%S) failed (Status 0x%08lx)\n", SrcPath, Status);
+        return Status;
+    }
+
+    /* Create FreeLoader's configuration on the system-partition root; the
+     * UEFI loader reads it from the volume it was started from. */
+    DPRINT("Create new 'freeldr.ini'\n");
+    Status = CreateFreeLoaderIniForReactOS(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CreateFreeLoaderIniForReactOS() failed (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static
 NTSTATUS
 InstallFatBootcodeToPartition(
@@ -1496,7 +1580,16 @@ InstallBootManagerAndBootEntriesWorker(
     BOOLEAN IsBIOS = ((ArchType == ARCH_PcAT) || (ArchType == ARCH_NEC98x86));
     UCHAR InstallType = (Options & 0x03);
 
-    // FIXME: We currently only support BIOS-based PCs
+    /* On UEFI platforms the firmware boots an EFI application from the FAT
+     * system partition; there is no VBR/MBR boot code to write. */
+    if (ArchType == ARCH_Efi)
+    {
+        return InstallUefiBootLoaderFiles(SystemRootPath,
+                                          SourceRootPath,
+                                          DestinationArcPath);
+    }
+
+    // FIXME: We currently only support BIOS-based PCs and UEFI (above)
     // TODO: Support other platforms
     if (!IsBIOS)
         return STATUS_NOT_SUPPORTED;

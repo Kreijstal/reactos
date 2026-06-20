@@ -2283,7 +2283,8 @@ StartPartitionOperationsPage(PINPUT_RECORD Ir)
     }
 
     /* Find or set the active system partition before starting formatting */
-    Success = InitSystemPartition(PartitionList,
+    Success = InitSystemPartition(USetupData.ArchType,
+                                  PartitionList,
                                   InstallPartition,
                                   &SystemPartition,
                                   FsVolCallback,
