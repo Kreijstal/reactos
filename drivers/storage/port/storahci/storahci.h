@@ -81,8 +81,18 @@
 #define AHCI_Global_Port_CAP_NCS(x)         (((x) & 0xF00) >> 8)
 
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
-//#define AhciDebugPrint(format, ...) StorPortDebugPrint(0, format, __VA_ARGS__)
+/*
+ * AhciDebugPrint traces are emitted on every I/O. On a synchronous debug port
+ * (e.g. ARM64/QEMU serial, ~10ms per line) that floods the boot and throttles
+ * it so badly userland is never reached. Keep the tracing off by default;
+ * define AHCI_VERBOSE_TRACE to restore the per-operation prints. The disabled
+ * form still type-checks the arguments so the call sites cannot bit-rot.
+ */
+#if defined(AHCI_VERBOSE_TRACE)
 #define AhciDebugPrint(format, ...) DbgPrint("(%s:%d) " format, __RELFILE__, __LINE__, ##__VA_ARGS__)
+#else
+#define AhciDebugPrint(format, ...) do { if (0) DbgPrint("(%s:%d) " format, __RELFILE__, __LINE__, ##__VA_ARGS__); } while (0)
+#endif
 
 typedef
 VOID
