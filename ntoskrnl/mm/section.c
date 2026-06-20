@@ -5985,6 +5985,58 @@ MmCheckDirtySegment(
     return FALSE;
 }
 
+/*
+ * Regression-test support for the MmPageoutSysView kmtest (ntos_mm). Pages out
+ * exactly the data segment's page at Offset - the working-set-trimmer producer
+ * path (MmPageOutPhysicalAddress -> WriteSegment -> MmCheckDirtySegment with
+ * PageOut) - and reports whether the page survived. The kmtest sets the segment
+ * up (via Cc) so this page is clean, SHARE_COUNT == 0 and mapped only by a
+ * system-space view (no per-process rmap); without the SystemMapCount guard in
+ * MmCheckDirtySegment the trimmer would free it out from under the view.
+ *
+ * Attaches to the System process because MmPageOutPhysicalAddress asserts that
+ * context (it normally runs in the MiBalancerThread). Returns:
+ *    1 = page still resident after page-out  (guard held - PASS)
+ *    0 = page was freed by the page-out       (bug reproduced - FAIL)
+ *   -1 = no segment
+ *   -2 = page was not resident to begin with  (test setup invalid)
+ */
+LONG
+NTAPI
+MmTestPageOutSegmentOffset(
+    IN PVOID DataSectionObject,
+    IN LONGLONG Offset)
+{
+    PMM_SECTION_SEGMENT Segment = (PMM_SECTION_SEGMENT)DataSectionObject;
+    LARGE_INTEGER Off;
+    ULONG_PTR Entry;
+    PFN_NUMBER Page;
+    KAPC_STATE ApcState;
+
+    if (Segment == NULL)
+        return -1;
+
+    Off.QuadPart = Offset;
+
+    MmLockSectionSegment(Segment);
+    Entry = MmGetPageEntrySectionSegment(Segment, &Off);
+    MmUnlockSectionSegment(Segment);
+    if (Entry == 0 || IS_SWAP_FROM_SSE(Entry) || PFN_FROM_SSE(Entry) == 0)
+        return -2;
+    Page = PFN_FROM_SSE(Entry);
+
+    KeStackAttachProcess(&PsInitialSystemProcess->Pcb, &ApcState);
+    MmPageOutPhysicalAddress(Page);
+    KeUnstackDetachProcess(&ApcState);
+
+    MmLockSectionSegment(Segment);
+    Entry = MmGetPageEntrySectionSegment(Segment, &Off);
+    MmUnlockSectionSegment(Segment);
+    if (Entry != 0 && !IS_SWAP_FROM_SSE(Entry) && PFN_FROM_SSE(Entry) != 0)
+        return 1;
+    return 0;
+}
+
 /* This function is not used. It is left for future use, when per-process
  * address space is considered. */
 #if 0

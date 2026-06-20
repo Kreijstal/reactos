@@ -865,6 +865,7 @@
 @ stdcall MmSetBankedSection(long long long long long long)
 @ stdcall MmSizeOfMdl(ptr long)
 @ extern MmSystemRangeStart
+@ stdcall MmTestPageOutSegmentOffset(ptr int64)
 @ stdcall MmTrimAllSystemPagableMemory(long) MmTrimAllSystemPageableMemory
 @ stdcall MmUnlockPagableImageSection(ptr) MmUnlockPageableImageSection
 @ stdcall MmUnlockPages(ptr)
