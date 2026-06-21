@@ -793,6 +793,53 @@ NTSTATUS DispTdiQueryInformation(
 
           return STATUS_SUCCESS;
      }
+
+      case TDI_QUERY_PROVIDER_INFO:
+      {
+          PTDI_PROVIDER_INFO ProviderInfo;
+
+          /* The IP device does not implement the provider-info query */
+          if (DeviceObject == IPDeviceObject)
+              return STATUS_NOT_IMPLEMENTED;
+
+          /* The multicast control device rejects it */
+          if (DeviceObject == MulticastDeviceObject)
+              return STATUS_INVALID_PARAMETER;
+
+          if (MmGetMdlByteCount(Irp->MdlAddress) < sizeof(*ProviderInfo)) {
+              TI_DbgPrint(MID_TRACE, ("MDL buffer too small.\n"));
+              return STATUS_BUFFER_TOO_SMALL;
+          }
+
+          ProviderInfo = (PTDI_PROVIDER_INFO)
+            MmGetSystemAddressForMdl(Irp->MdlAddress);
+
+          RtlZeroMemory(ProviderInfo, sizeof(*ProviderInfo));
+          ProviderInfo->Version = 0x0100;
+          ProviderInfo->MaxSendSize = 0xFFFFFFFF;
+          ProviderInfo->MaxConnectionUserData = 0;
+          ProviderInfo->MaxDatagramSize = 65507;
+          ProviderInfo->ServiceFlags = TDI_SERVICE_CONNECTION_MODE |
+                                       TDI_SERVICE_ORDERLY_RELEASE |
+                                       TDI_SERVICE_CONNECTIONLESS_MODE |
+                                       TDI_SERVICE_ERROR_FREE_DELIVERY |
+                                       TDI_SERVICE_BROADCAST_SUPPORTED |
+                                       TDI_SERVICE_DELAYED_ACCEPTANCE |
+                                       TDI_SERVICE_EXPEDITED_DATA |
+                                       TDI_SERVICE_NO_ZERO_LENGTH |
+                                       TDI_SERVICE_DGRAM_CONNECTION |
+                                       TDI_SERVICE_FORCE_ACCESS_CHECK |
+                                       TDI_SERVICE_SEND_AND_DISCONNECT |
+                                       TDI_SERVICE_ACCEPT_LOCAL_ADDR |
+                                       TDI_SERVICE_ADDRESS_SECURITY |
+                                       TDI_SERVICE_PREPOST_RECVS |
+                                       TDI_SERVICE_NO_PUSH;
+          ProviderInfo->MinimumLookaheadData = 1;
+          ProviderInfo->MaximumLookaheadData = 65535;
+          ProviderInfo->NumberOfResources = 0;
+
+          return STATUS_SUCCESS;
+      }
   }
 
   return STATUS_NOT_IMPLEMENTED;
