@@ -17,6 +17,7 @@
 #define DD_UDP_DEVICE_NAME      L"\\Device\\NTUdp"
 #define DD_IP_DEVICE_NAME       L"\\Device\\NTIp"
 #define DD_RAWIP_DEVICE_NAME    L"\\Device\\NTRawIp"
+#define DD_MULTICAST_DEVICE_NAME L"\\Device\\NTIPMULTICAST"
 
 /* For NDIS protocol registration */
 #define IP_DEVICE_NAME          L"\\Device\\NTIp"
@@ -25,6 +26,7 @@
 #define DD_UDP_DEVICE_NAME      L"\\Device\\Udp"
 #define DD_IP_DEVICE_NAME       L"\\Device\\Ip"
 #define DD_RAWIP_DEVICE_NAME    L"\\Device\\RawIp"
+#define DD_MULTICAST_DEVICE_NAME L"\\Device\\IPMULTICAST"
 
 /* For NDIS protocol registration */
 /* The DDK says you have to register with the name that's registered with SCM, e.g. tcpip */
