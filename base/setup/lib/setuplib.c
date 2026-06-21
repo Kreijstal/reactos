@@ -929,6 +929,24 @@ InitDestinationPaths(
 #endif
             DPRINT1("Fixed disk found by BIOS, using MULTI ARC path '%S'\n", PathBuffer);
         }
+        else if (pSetupData->ArchType == ARCH_Efi)
+        {
+            /*
+             * On UEFI there is no BIOS INT13 disk table, so BiosFound is never
+             * set. The UEFI FreeLoader enumerates the firmware block devices and
+             * names each fixed disk 'multi(0)disk(0)rdisk(N)' (N being the
+             * 0-based fixed-disk index, see uefidisk.c!GetHarddiskInformation),
+             * and never registers any 'scsi(...)' ARC name. Emitting a SCSI ARC
+             * path here would make freeldr.ini unresolvable at boot and the
+             * loader would fail to read the kernel and the registry hives. Use
+             * the MULTI form matching the loader's own naming instead.
+             */
+            Status = RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
+                             L"multi(0)disk(0)rdisk(%lu)partition(%lu)\\",
+                             DiskEntry->DiskNumber,
+                             PartEntry->OnDiskPartitionNumber);
+            DPRINT1("UEFI fixed disk, using MULTI ARC path '%S'\n", PathBuffer);
+        }
         else
         {
             Status = RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
