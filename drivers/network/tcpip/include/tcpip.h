@@ -159,6 +159,7 @@ extern PDEVICE_OBJECT TCPDeviceObject;
 extern PDEVICE_OBJECT UDPDeviceObject;
 extern PDEVICE_OBJECT IPDeviceObject;
 extern PDEVICE_OBJECT RawIPDeviceObject;
+extern PDEVICE_OBJECT MulticastDeviceObject;
 extern LIST_ENTRY InterfaceListHead;
 extern KSPIN_LOCK InterfaceListLock;
 extern LIST_ENTRY AddressFileListHead;
