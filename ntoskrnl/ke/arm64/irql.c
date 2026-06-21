@@ -391,21 +391,37 @@ KiApplyIrqMaskForIrqlTransition(
         /*
          * Lowering from HIGH_LEVEL: Unmask interrupts via DAIF and set GIC PMR.
          *
-         * Re-entrancy guard: If we're already in a HIGH_LEVEL->lower transition,
-         * skip the unmask to prevent interrupt storms. The outer transition will
-         * complete the unmask.
+         * Re-entrancy guard: the per-CPU InHighLevelTransition flag tracks which
+         * transition owns the flag so that only its winner clears it. Re-entrant
+         * callers must NOT touch the flag.
+         *
+         * They MUST, however, still drop the CPU interrupt mask for the level we
+         * are lowering to. DAIF.I is only meant to be set at HIGH_LEVEL; once we
+         * lower below it the GIC PMR alone gates interrupts by priority and the
+         * CPU mask has to be cleared. Skipping the DAIF unmask on the re-entrant
+         * path (trusting "the outer transition" to do it) can leave the CPU
+         * stranded with interrupts masked at a sub-HIGH IRQL such as PASSIVE: if
+         * the owning transition is descheduled, or the flag is observed set by an
+         * unrelated lowering on this CPU, DAIF.I is never cleared. That strands
+         * timer/SGI delivery and blocks special-kernel-APC completion (seen as
+         * DAIF=0x3c0 at IRQL 0, which corrupts synchronous-IRP UserEvent
+         * signaling). The unmask is idempotent, so doing it here as well as in
+         * the owning transition is safe.
          *
          * CRITICAL: Only the thread that successfully sets the flag (wins the
-         * CompareExchange) is responsible for clearing it. Re-entrant threads
-         * must NOT touch the flag.
+         * CompareExchange) is responsible for clearing it.
          */
         if (Prcb)
         {
             LONG OldFlag = InterlockedCompareExchange(&Prcb->InHighLevelTransition, 1, 0);
             if (OldFlag != 0)
             {
-                /* Re-entrancy detected - just update GIC PMR, don't touch DAIF or flag */
+                /* Re-entrancy: update the GIC PMR and unmask DAIF for the target
+                 * IRQL, but leave the flag to its owning transition. */
                 HalSetGicPriorityMask(NewIrql);
+                ARM64_SYNC_BARRIER();
+                KiUpdateDaifForIrql(NewIrql, FALSE);
+                ARM64_SYNC_BARRIER();
                 return;
             }
 
