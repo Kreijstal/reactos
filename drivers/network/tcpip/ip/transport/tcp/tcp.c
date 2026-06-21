@@ -332,6 +332,24 @@ NTSTATUS TCPConnect
                  RemoteAddress.Address.IPv4Address,
                  RemotePort));
 
+    /* Report the peer we are connecting to in the caller's return information.
+     * RemotePort and IPv4Address were taken verbatim from the TDI request
+     * address, so they are already in network byte order. */
+    if (ReturnInfo != NULL &&
+        ReturnInfo->RemoteAddress != NULL &&
+        ReturnInfo->RemoteAddressLength >= sizeof(TA_IP_ADDRESS))
+    {
+        PTA_IP_ADDRESS ReturnAddress = (PTA_IP_ADDRESS)ReturnInfo->RemoteAddress;
+
+        ReturnAddress->TAAddressCount = 1;
+        ReturnAddress->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
+        ReturnAddress->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+        ReturnAddress->Address[0].Address[0].sin_port = RemotePort;
+        ReturnAddress->Address[0].Address[0].in_addr = RemoteAddress.Address.IPv4Address;
+        RtlZeroMemory(&ReturnAddress->Address[0].Address[0].sin_zero,
+                      sizeof(ReturnAddress->Address[0].Address[0].sin_zero));
+    }
+
     LockObject(Connection);
 
     if (!Connection->AddressFile)

@@ -29,14 +29,18 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
     WhoIsConnecting = (PTDI_CONNECTION_INFORMATION)Request->ReturnConnectionInformation;
     RemoteAddress = (PTA_IP_ADDRESS)WhoIsConnecting->RemoteAddress;
 
+    u16_t peerport = 0;
+
     RemoteAddress->TAAddressCount = 1;
     RemoteAddress->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
     RemoteAddress->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
 
     Status = TCPTranslateError(LibTCPGetPeerName(newpcb,
                                                  &ipaddr,
-                                                 &RemoteAddress->Address[0].Address[0].sin_port));
+                                                 &peerport));
 
+    /* lwIP keeps the port in host byte order; TDI addresses are network order */
+    RemoteAddress->Address[0].Address[0].sin_port = lwip_htons(peerport);
     RemoteAddress->Address[0].Address[0].in_addr = ipaddr.addr;
 
     return Status;
