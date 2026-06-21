@@ -112,7 +112,9 @@ KernelModeTest(IN PVOID Context)
         {
             /* At that point, file object must point to \SystemRoot
              * But must not be the same FO than target (diverted file object)
-             * This means FCB & FileName are equal
+             * This means the FCB is equal (same directory), while the FSD has
+             * replaced the file object's name with the remaining (leaf)
+             * component to be operated on in that directory - here regedit.exe.
              * But CCB & FO are different
              * CCB must be != NULL, otherwise it means open failed
              */
@@ -121,7 +123,7 @@ KernelModeTest(IN PVOID Context)
             ok_eq_pointer(ParentFileObject->FsContext, TargetFileObject->FsContext);
             ok(ParentFileObject->FsContext2 != 0x0, "Parent must be open!\n");
             ok(ParentFileObject->FsContext2 != TargetFileObject->FsContext2, "Parent open must have its own context!\n");
-            ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &TargetFileObject->FileName, FALSE), 0);
+            ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &Regedit, FALSE), 0);
             ObDereferenceObject(ParentFileObject);
         }
         /* Because target exists FSD must signal it */
@@ -184,7 +186,7 @@ KernelModeTest(IN PVOID Context)
                 ok_eq_pointer(ParentFileObject->FsContext, TargetFileObject->FsContext);
                 ok(ParentFileObject->FsContext2 != 0x0, "Parent must be open!\n");
                 ok(ParentFileObject->FsContext2 != TargetFileObject->FsContext2, "Parent open must have its own context!\n");
-                ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &TargetFileObject->FileName, FALSE), 0);
+                ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &Regedit, FALSE), 0);
                 Status = ObReferenceObjectByHandle(SystemRootHandle,
                                                    FILE_READ_DATA,
                                                    *IoFileObjectType,
@@ -252,7 +254,7 @@ KernelModeTest(IN PVOID Context)
             ok_eq_pointer(ParentFileObject->FsContext, TargetFileObject->FsContext);
             ok(ParentFileObject->FsContext2 != 0x0, "Parent must be open!\n");
             ok(ParentFileObject->FsContext2 != TargetFileObject->FsContext2, "Parent open must have its own context!\n");
-            ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &TargetFileObject->FileName, FALSE), 0);
+            ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &Foobar, FALSE), 0);
             ObDereferenceObject(ParentFileObject);
         }
         ok_eq_long(IoStatusBlock.Information, FILE_DOES_NOT_EXIST);
@@ -313,7 +315,7 @@ KernelModeTest(IN PVOID Context)
                 ok_eq_pointer(ParentFileObject->FsContext, TargetFileObject->FsContext);
                 ok(ParentFileObject->FsContext2 != 0x0, "Parent must be open!\n");
                 ok(ParentFileObject->FsContext2 != TargetFileObject->FsContext2, "Parent open must have its own context!\n");
-                ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &TargetFileObject->FileName, FALSE), 0);
+                ok_eq_long(RtlCompareUnicodeString(&ParentFileObject->FileName, &Foobar, FALSE), 0);
                 Status = ObReferenceObjectByHandle(SystemRootHandle,
                                                    FILE_READ_DATA,
                                                    *IoFileObjectType,
