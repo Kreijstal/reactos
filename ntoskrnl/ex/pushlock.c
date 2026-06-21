@@ -1024,6 +1024,14 @@ ExfReleasePushLock(PEX_PUSH_LOCK PushLock)
                                                                      NewValue.Ptr,
                                                                      OldValue.Ptr);
                     if (NewValue.Value == OldValue.Value) return;
+
+                    /*
+                     * The compare-exchange failed because another processor
+                     * changed the lock word. Reload the observed value and retry
+                     * the wake handshake; otherwise we would spin forever testing
+                     * a stale OldValue that can never match again.
+                     */
+                    OldValue = NewValue;
                 }
                 else
                 {
@@ -1043,7 +1051,17 @@ ExfReleasePushLock(PEX_PUSH_LOCK PushLock)
                     NewValue.Ptr = InterlockedCompareExchangePointer(&PushLock->Ptr,
                                                                      NewValue.Ptr,
                                                                      OldValue.Ptr);
-                    if (NewValue.Value != OldValue.Value) continue;
+                    if (NewValue.Value != OldValue.Value)
+                    {
+                        /*
+                         * The compare-exchange failed. Reload the observed value
+                         * before retrying so the next iteration tests the current
+                         * lock word instead of the stale OldValue (which would
+                         * never match again and spin the CPU forever).
+                         */
+                        OldValue = NewValue;
+                        continue;
+                    }
 
                     /* The write was successful. The pushlock is Unlocked and Waking */
                     ExfWakePushLock(PushLock, WakeValue);
