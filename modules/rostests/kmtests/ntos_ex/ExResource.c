@@ -390,6 +390,36 @@ FinishThread(
     KeClearEvent(&ThreadData->OutEvent);
 }
 
+/* Bounded wait for a worker thread to register as a resource waiter.
+ * A worker started to block on the resource bumps NumberOfExclusiveWaiters /
+ * NumberOfSharedWaiters only once it actually reaches ExpWaitForResource; on a
+ * multiprocessor system that can happen after the caller's short OutEvent
+ * timeout. Poll until both counts reach the expected values, bailing out if the
+ * worker unexpectedly acquired the resource instead (AcquiredEvent signalled)
+ * so we never loop forever. */
+static
+VOID
+WaitForResourceWaiters(
+    IN PERESOURCE Res,
+    IN PKEVENT AcquiredEvent,
+    IN ULONG ExpectedExclusive,
+    IN ULONG ExpectedShared)
+{
+    LARGE_INTEGER Delay;
+    ULONG i;
+
+    Delay.QuadPart = -1 * 1000 * 10; /* 1 ms */
+    for (i = 0; i < 1000; i++)
+    {
+        if (ExGetExclusiveWaiterCount(Res) >= ExpectedExclusive &&
+            ExGetSharedWaiterCount(Res) >= ExpectedShared)
+            break;
+        if (KeReadStateEvent(AcquiredEvent))
+            break;
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+}
+
 static
 VOID
 TestResourceWithThreads(
@@ -445,6 +475,12 @@ TestResourceWithThreads(
     /* as above, but this time it should block */
     Status = StartThread(&ThreadDataExclusive, &Timeout, TRUE, TRUE);
     ok_eq_hex(Status, STATUS_TIMEOUT);
+    /* StartThread's short OutEvent wait timing out only proves the worker has
+     * not acquired the resource; on SMP it does not prove the worker has already
+     * reached ExpWaitForResource and incremented NumberOfExclusiveWaiters. The
+     * worker is blocked on a resource we hold shared, so it will register as an
+     * exclusive waiter -- wait for that instead of sampling the count once. */
+    WaitForResourceWaiters(Res, &ThreadDataExclusive.OutEvent, 1, 0);
     CheckResourceStatus(Res, FALSE, 0LU, 1LU, 0LU);
     ok_eq_int(Res->ActiveCount, 1);
 
@@ -482,6 +518,9 @@ TestResourceWithThreads(
     /* block another shared one */
     Status = StartThread(&ThreadDataShared2, &Timeout, TRUE, TRUE);
     ok_eq_hex(Status, STATUS_TIMEOUT);
+    /* The exclusive waiter from above is still parked; wait for the new shared
+     * worker to register too before sampling (see WaitForResourceWaiters). */
+    WaitForResourceWaiters(Res, &ThreadDataShared2.OutEvent, 1, 1);
     CheckResourceStatus(Res, FALSE, 0LU, 1LU, 1LU);
     ok_eq_int(Res->ActiveCount, 1);
 
