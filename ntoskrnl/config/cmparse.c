@@ -1507,7 +1507,7 @@ CmpLookInCache(
     LONG RemainingSubkeys;
     ULONG TotalLevels;
     BOOLEAN SubkeysMatch;
-    PCM_KEY_CONTROL_BLOCK CurrentKcb, ParentKcb;
+    PCM_KEY_CONTROL_BLOCK CurrentKcb, ParentKcb, PreviousKcb;
     PCM_KEY_HASH HashEntry = NULL;
     BOOLEAN KeyFoundInCache = FALSE;
     PULONG LockedKcbs = NULL;
@@ -1646,23 +1646,40 @@ CmpLookInCache(
     if (KeyFoundInCache)
     {
         /*
-         * Before we change the KCB we must dereference the prior
-         * KCB that we no longer need it.
+         * We are about to switch to the KCB we found in cache and drop our
+         * reference on the prior one. That dereference may take the last
+         * reference and, on its slow path, acquire the prior KCB's hash-bucket
+         * lock to clean it up. But that bucket is part of the KCB array we
+         * still hold locked here (it was added by CmpBuildAndLockKcbArray), and
+         * KCB locks are non-recursive push locks. Dereferencing under the lock
+         * therefore self-deadlocks on SMP: the exclusive acquire waits for the
+         * shared/exclusive reference this very thread already holds on that
+         * bucket, which can never drain. So reference the new KCB while we still
+         * hold the array (as the locking protocol requires), then release the
+         * array and only afterwards drop the prior KCB -- mirroring the
+         * unlock-then-dereference order already used on the retry paths above.
          */
-        CmpDereferenceKeyControlBlock(*Kcb);
+        PreviousKcb = *Kcb;
         *Kcb = CurrentKcb;
 
-        /* Reference the new KCB now */
+        /* Reference the new KCB now, still under the array lock */
         if (!CmpReferenceKeyControlBlock(*Kcb))
         {
             /* This key is opened too many times, bail out */
             DPRINT1("Could not reference the KCB, too many references (KCB 0x%p)\n", Kcb);
+            CmpUnLockKcbArray(LockedKcbs);
+            CmpDereferenceKeyControlBlock(PreviousKcb);
             return STATUS_UNSUCCESSFUL;
         }
 
         /* Update hive and cell data from current KCB */
         *Hive = CurrentKcb->KeyHive;
         *Cell = CurrentKcb->KeyCell;
+
+        /* Unlock the KCBs, then drop the prior KCB outside the lock */
+        CmpUnLockKcbArray(LockedKcbs);
+        CmpDereferenceKeyControlBlock(PreviousKcb);
+        return STATUS_SUCCESS;
     }
 
     /* Unlock the KCBs */
