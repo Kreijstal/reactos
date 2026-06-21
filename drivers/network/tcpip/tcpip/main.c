@@ -27,6 +27,7 @@ PDEVICE_OBJECT TCPDeviceObject   = NULL;
 PDEVICE_OBJECT UDPDeviceObject   = NULL;
 PDEVICE_OBJECT IPDeviceObject    = NULL;
 PDEVICE_OBJECT RawIPDeviceObject = NULL;
+PDEVICE_OBJECT MulticastDeviceObject = NULL;
 NDIS_HANDLE GlobalPacketPool     = NULL;
 NDIS_HANDLE GlobalBufferPool     = NULL;
 KSPIN_LOCK EntityListLock;
@@ -821,6 +822,9 @@ VOID NTAPI TiUnload(
 
     /* Release all device objects */
 
+    if (MulticastDeviceObject)
+        IoDeleteDevice(MulticastDeviceObject);
+
     if (TCPDeviceObject)
         IoDeleteDevice(TCPDeviceObject);
 
@@ -859,6 +863,7 @@ DriverEntry(
     UNICODE_STRING strRawDeviceName = RTL_CONSTANT_STRING(DD_RAWIP_DEVICE_NAME);
     UNICODE_STRING strUdpDeviceName = RTL_CONSTANT_STRING(DD_UDP_DEVICE_NAME);
     UNICODE_STRING strTcpDeviceName = RTL_CONSTANT_STRING(DD_TCP_DEVICE_NAME);
+    UNICODE_STRING strMulticastDeviceName = RTL_CONSTANT_STRING(DD_MULTICAST_DEVICE_NAME);
     UNICODE_STRING strNdisDeviceName = RTL_CONSTANT_STRING(TCPIP_PROTOCOL_NAME);
     NDIS_STATUS NdisStatus;
     LARGE_INTEGER DueTime;
@@ -908,6 +913,16 @@ DriverEntry(
         FILE_DEVICE_NETWORK, 0, FALSE, &TCPDeviceObject);
     if (!NT_SUCCESS(Status)) {
         TI_DbgPrint(MIN_TRACE, ("Failed to create TCP device object. Status (0x%X).\n", Status));
+        TiUnload(DriverObject);
+        return Status;
+    }
+
+    /* Create IP multicast device object. It exposes the IGMP/multicast control
+       channel; the transport queries (e.g. provider info) are not valid on it. */
+    Status = IoCreateDevice(DriverObject, 0, &strMulticastDeviceName,
+        FILE_DEVICE_NETWORK, 0, FALSE, &MulticastDeviceObject);
+    if (!NT_SUCCESS(Status)) {
+        TI_DbgPrint(MIN_TRACE, ("Failed to create multicast device object. Status (0x%X).\n", Status));
         TiUnload(DriverObject);
         return Status;
     }
