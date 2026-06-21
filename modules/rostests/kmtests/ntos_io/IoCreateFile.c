@@ -565,6 +565,23 @@ TestSymlinks(VOID)
                              Size,
                              NULL,
                              0);
+    /* Filesystems that don't implement reparse points (e.g. FAT) fail the FSCTL
+     * with STATUS_INVALID_DEVICE_REQUEST. The remainder of this test needs a
+     * volume that supports reparse points, so skip it cleanly there instead of
+     * reporting a spurious failure (on Windows \SystemRoot is NTFS and this
+     * succeeds). */
+    if (Status == STATUS_INVALID_DEVICE_REQUEST)
+    {
+        skip(FALSE, "Filesystem does not support reparse points\n");
+        ZwSetInformationFile(ReparseHandle, &IoStatusBlock, &ToDelete,
+                             sizeof(ToDelete), FileDispositionInformation);
+        ZwClose(ReparseHandle);
+        ExFreePool(Regedit.Buffer);
+        ExFreePool(Foobar.Buffer);
+        ExFreePool(SysDir.Buffer);
+        ExFreePool(Reparse);
+        return;
+    }
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status))
     {
