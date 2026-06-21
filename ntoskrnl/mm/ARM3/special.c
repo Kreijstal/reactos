@@ -72,6 +72,43 @@ typedef struct _MI_FREED_SPECIAL_POOL
 
 VOID NTAPI MiTestSpecialPool(VOID);
 
+#ifdef CONFIG_SMP
+static
+ULONG_PTR
+NTAPI
+MiSpecialPoolFlushSingleTbWorker(IN ULONG_PTR Address)
+{
+    /* Runs on every processor via KeIpiGenericCall: drop the stale entry */
+    KeInvalidateTlbEntry((PVOID)Address);
+    return 0;
+}
+#endif
+
+/*
+ * Invalidate the single special-pool page just unmapped, on every processor.
+ *
+ * The freed PTE goes back on the special-pool free list and is handed to a
+ * later allocation that maps a different frame at the same virtual address, so
+ * any processor still holding the stale translation would read the wrong page.
+ * The invalidation therefore has to reach all processors - but only for this
+ * one page: a full KeFlushEntireTb() shootdown per free wipes every CPU's
+ * entire TLB and makes special pool unusably slow on MP (each NTFS metadata
+ * operation frees many tagged blocks). Flush just the one VA instead.
+ */
+static
+VOID
+MiFlushSpecialPoolTbEntry(IN PVOID Address)
+{
+#ifdef CONFIG_SMP
+    if (KeActiveProcessors & ~KeGetCurrentPrcb()->SetMember)
+    {
+        KeIpiGenericCall(MiSpecialPoolFlushSingleTbWorker, (ULONG_PTR)Address);
+        return;
+    }
+#endif
+    KeInvalidateTlbEntry(Address);
+}
+
 BOOLEAN
 NTAPI
 MmUseSpecialPool(SIZE_T NumberOfBytes, ULONG Tag)
@@ -610,9 +647,9 @@ MmFreeSpecialPool(PVOID P)
 
         MI_ERASE_PTE(PointerPte);
 
-        /* Flush the TLB */
-        //FIXME: Use KeFlushSingleTb() instead
-        KeFlushEntireTb(TRUE, TRUE);
+        /* Flush just this page on every processor (a full-TLB shootdown here
+         * is what makes special pool unusably slow on MP). */
+        MiFlushSpecialPoolTbEntry(PAGE_ALIGN(P));
     }
     else
     {
