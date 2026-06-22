@@ -4861,16 +4861,18 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
             if (ZeroBits != 0)
             {
                 //
-                // Calculate the highest address and check if it's valid
+                // Translate ZeroBits into the highest address the blind commit
+                // may occupy. On x64 a small count (1..21) limits the upper
+                // (32 + count) bits; 22..31 are invalid; and a value >= 32 acts
+                // as a high-zero-bit mask, with 32 being the WoW64 "low 4 GB"
+                // request. On x86 the classic MAXULONG_PTR >> ZeroBits ceiling
+                // applies. MiZeroBitsToHighestAddress() rejects invalid values.
                 //
-                HighestAddress = MAXULONG_PTR >> ZeroBits;
-#ifndef _M_AMD64
-                if (HighestAddress > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS)
+                if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
                 {
                     Status = STATUS_INVALID_PARAMETER_3;
                     goto FailPathNoLock;
                 }
-#endif
             }
         }
         else
