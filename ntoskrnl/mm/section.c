@@ -3510,7 +3510,8 @@ MmMapViewOfSegment(
     SIZE_T ViewSize,
     ULONG Protect,
     LONGLONG ViewOffset,
-    ULONG AllocationType)
+    ULONG AllocationType,
+    ULONG_PTR HighestAddress)
 {
     PMEMORY_AREA MArea;
     NTSTATUS Status;
@@ -3539,6 +3540,24 @@ MmMapViewOfSegment(
         Granularity = MM_ALLOCATION_GRANULARITY;
     else
         Granularity = PAGE_SIZE;
+
+    /* A ZeroBits-constrained blind placement (HighestAddress != 0) must keep the
+     * view below the requested ceiling. MmCreateMemoryArea's gap search is
+     * unbounded, so locate a bounded gap up-front and hand it the fixed base. */
+    if (*BaseAddress == NULL && HighestAddress != 0)
+    {
+        PVOID Gap = MmFindGap(AddressSpace,
+                              (ULONG_PTR)MM_ROUND_UP(ViewSize, PAGE_SIZE),
+                              Granularity,
+                              FALSE,
+                              HighestAddress);
+        if (Gap == NULL)
+        {
+            DPRINT("No suitable gap below the ZeroBits ceiling 0x%p\n", HighestAddress);
+            return STATUS_NO_MEMORY;
+        }
+        *BaseAddress = Gap;
+    }
 
 #ifdef NEWCC
     if (Segment->Flags & MM_DATAFILE_SEGMENT)
@@ -4173,6 +4192,7 @@ MmMapViewOfSection(
     BOOLEAN NotAtBase = FALSE;
     BOOLEAN IsAttached = FALSE;
     KAPC_STATE ApcState;
+    ULONG_PTR HighestAddress = 0;
 
     if (MiIsRosSectionObject(SectionObject) == FALSE)
     {
@@ -4196,6 +4216,12 @@ MmMapViewOfSection(
     {
         return STATUS_INVALID_PAGE_PROTECTION;
     }
+
+    /* A non-zero ZeroBits constrains a blind placement to the low part of the
+     * address space. NtMapViewOfSection has already validated the value, so a
+     * failed translation here simply leaves the placement unconstrained. */
+    if (ZeroBits != 0)
+        (VOID)MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress);
 
     if (PsGetCurrentProcess() != Process)
     {
@@ -4269,7 +4295,7 @@ MmMapViewOfSection(
                 goto Exit;
             }
             /* Otherwise find a gap to map the image. */
-            ImageBase = (ULONG_PTR)MmFindGap(AddressSpace, PAGE_ROUND_UP(ImageSize), MM_VIRTMEM_GRANULARITY, FALSE);
+            ImageBase = (ULONG_PTR)MmFindGap(AddressSpace, PAGE_ROUND_UP(ImageSize), MM_VIRTMEM_GRANULARITY, FALSE, HighestAddress);
             if (ImageBase == 0)
             {
                 Status = STATUS_CONFLICTING_ADDRESSES;
@@ -4290,6 +4316,7 @@ MmMapViewOfSection(
                                         &SBaseAddress,
                                         SectionSegments[i].Length.QuadPart,
                                         SectionSegments[i].Protection,
+                                        0,
                                         0,
                                         0);
             MmUnlockSectionSegment(&SectionSegments[i]);
@@ -4428,7 +4455,8 @@ MmMapViewOfSection(
                                     *ViewSize,
                                     Protect,
                                     ViewOffset,
-                                    AllocationType & (MEM_TOP_DOWN|MEM_RESERVE|SEC_NO_CHANGE));
+                                    AllocationType & (MEM_TOP_DOWN|MEM_RESERVE|SEC_NO_CHANGE),
+                                    HighestAddress);
         MmUnlockSectionSegment(Segment);
         if (!NT_SUCCESS(Status))
         {
@@ -4975,7 +5003,8 @@ MmMapViewInSystemSpaceEx (
                                 *ViewSize,
                                 PAGE_READWRITE,
                                 SectionOffset->QuadPart,
-                                SEC_RESERVE);
+                                SEC_RESERVE,
+                                0);
 
     MmUnlockSectionSegment(Segment);
     MmUnlockAddressSpace(AddressSpace);
