@@ -2,7 +2,13 @@
 remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x602 -DWINVER=0x602)
 
-spec2def(kernelbase.dll kernelbase.spec ADD_IMPORTLIB)
+# NOTE: no ADD_IMPORTLIB here. This slim kernelbase.dll exists only so that the
+# Cygwin/msys2 runtimes can LoadLibrary("kernelbase.dll") + GetProcAddress the
+# few Win7+/Win8 entry points they probe; nothing link-imports it. The consumer
+# facing "kernelbase" import library is the libkernelbase INTERFACE below, which
+# forwards to the full kernelbase_ros.dll. Generating an import lib here as well
+# would shadow that INTERFACE and starve consumers of the kernelbase_ros exports.
+spec2def(kernelbase.dll kernelbase.spec)
 
 list(APPEND SOURCE
     kernelbase.c
@@ -29,3 +35,8 @@ set_module_type(kernelbase win32dll ENTRYPOINT DllMain 12)
 add_importlibs(kernelbase kernel32 ntdll)
 add_dependencies(kernelbase psdk)
 add_cd_file(TARGET kernelbase DESTINATION reactos/system32 FOR all)
+
+# Fake import library, so consumers can link against it without needing to know
+# about the actual implementation in kernelbase_ros.dll.
+add_library(libkernelbase INTERFACE)
+target_link_libraries(libkernelbase INTERFACE libkernelbase_ros)
