@@ -176,6 +176,16 @@ PUBLIC KiUserThreadStartupExit
     .allocstack (6 * 8)
     .endprolog
 
+    /* If we are switching a thread to itself (OldThread in rdx == NewThread in
+       r8) there is no swap-busy handshake to wait for - the flag we would spin
+       on is our own. A self-swap can arise when a still-current thread is woken
+       and re-selected to run on its own processor; with its swap-busy flag set
+       (it set it on the way into the wait) the loop below would spin forever,
+       hanging the CPU on SMP. Skip the wait: the save/restore that follows is an
+       identity for a self-swap and KiSwapContextResume clears the flag. */
+    cmp rdx, r8
+    je .SwapBusyClear
+
     /* Wait for SwapBusy */
 .SwapBusySet:
     cmp byte ptr [r8 + ThSwapBusy], 0
