@@ -657,8 +657,15 @@ CmSetValueKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     BOOLEAN FirstTry = TRUE, FlusherLocked = FALSE;
     HCELL_INDEX ParentCell = HCELL_NIL, ChildCell = HCELL_NIL;
 
-    /* Acquire hive and KCB lock */
-    CmpLockRegistry();
+    /*
+     * Acquire hive and KCB lock. Setting a value allocates value/data cells
+     * (CmpSetValueDataNew -> HvAllocateCell -> HvpAddBin), which can grow the
+     * hive and reallocate+free Storage[].BlockList. That must not run while
+     * another CPU walks the same hive under a shared registry lock, so take the
+     * registry exclusively (the per-KCB lock only serializes the same key, not
+     * the shared hive storage).
+     */
+    CmpLockRegistryExclusive();
     CmpAcquireKcbLockShared(Kcb);
 
     /* Sanity check */
@@ -924,8 +931,12 @@ CmDeleteValueKey(IN PCM_KEY_CONTROL_BLOCK Kcb,
     ULONG ChildIndex;
     BOOLEAN Result;
 
-    /* Acquire hive lock */
-    CmpLockRegistry();
+    /*
+     * Acquire hive lock exclusively: freeing the value's cells (HvFreeCell)
+     * structurally mutates the hive's shared storage, which must exclude other
+     * CPUs walking the same hive under a shared registry lock.
+     */
+    CmpLockRegistryExclusive();
 
     /* Lock KCB exclusively */
     CmpAcquireKcbLockExclusive(Kcb);
@@ -1835,8 +1846,12 @@ CmDeleteKey(IN PCM_KEY_BODY KeyBody)
     HCELL_INDEX Cell, ParentCell;
     PCM_KEY_CONTROL_BLOCK Kcb;
 
-    /* Acquire hive lock */
-    CmpLockRegistry();
+    /*
+     * Acquire hive lock exclusively: deleting a key frees its cells (HvFreeCell)
+     * and structurally mutates the hive's shared storage, which must exclude
+     * other CPUs walking the same hive under a shared registry lock.
+     */
+    CmpLockRegistryExclusive();
 
     /* Get the kcb */
     Kcb = KeyBody->KeyControlBlock;
@@ -2100,8 +2115,20 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
         return Status;
     }
 
-    /* Lock the registry shared */
-    CmpLockRegistry();
+    /*
+     * Lock the registry exclusively.
+     *
+     * We are about to modify global registry state: link the new hive into the
+     * master hive, register it in the hive file list, and synchronize it. In
+     * particular CmpAddToHiveFileList() writes the hive-list value through
+     * NtSetValueKey() -> CmSetValueKey(), which itself acquires CmpRegistryLock
+     * exclusively. Holding the lock merely shared here would turn that nested
+     * acquisition into a shared-to-exclusive self-upgrade and deadlock the
+     * calling thread against itself (it would wait forever for its own shared
+     * ownership to drain). The early "already loaded" path above already locks
+     * exclusively for the same reason.
+     */
+    CmpLockRegistryExclusive();
 
     /* Lock loading */
     ExAcquirePushLockExclusive(&CmpLoadHiveLock);
