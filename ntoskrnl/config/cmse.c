@@ -540,8 +540,17 @@ CmpSecurityMethod(IN PVOID ObjectBody,
 
     Kcb = ((PCM_KEY_BODY)ObjectBody)->KeyControlBlock;
 
-    /* Acquire the hive lock */
-    CmpLockRegistry();
+    /*
+     * Acquire the hive lock. Assigning/setting a security descriptor can
+     * allocate or free security cells (CmpAssignSecurityToCell -> HvAllocateCell),
+     * structurally mutating the hive's shared storage; that must exclude other
+     * CPUs walking the same hive under a shared registry lock. A pure query only
+     * reads, so it takes the registry shared.
+     */
+    if (OperationCode == QuerySecurityDescriptor)
+        CmpLockRegistry();
+    else
+        CmpLockRegistryExclusive();
 
     /* Acquire the KCB lock */
     if (OperationCode == QuerySecurityDescriptor)
