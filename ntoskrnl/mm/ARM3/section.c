@@ -1183,6 +1183,7 @@ MiMapViewOfDataSection(
     PMMPTE PointerPte, LastPte;
     MMPTE TempPte;
     ULONG Granularity = MM_VIRTMEM_GRANULARITY;
+    ULONG_PTR HighestVadAddress;
 
     DPRINT("Mapping ARM3 data section\n");
 
@@ -1386,11 +1387,18 @@ MiMapViewOfDataSection(
         return Status;
     }
 
+    /* Translate a non-zero ZeroBits into the highest permitted address (count
+     * regime on x64, classic shift on x86). ZeroBits == 0 keeps the exact
+     * legacy ceiling (MAXULONG_PTR), and a direct kernel caller passing a value
+     * NtMapViewOfSection would have rejected falls back to the legacy shift. */
+    if (ZeroBits == 0 || !MiZeroBitsToHighestAddress(ZeroBits, &HighestVadAddress))
+        HighestVadAddress = MAXULONG_PTR >> ZeroBits;
+
     /* Insert the VAD */
     Status = MiInsertVadEx((PMMVAD)Vad,
                            &StartAddress,
                            ViewSizeInPages * PAGE_SIZE,
-                           MAXULONG_PTR >> ZeroBits,
+                           HighestVadAddress,
                            Granularity,
                            AllocationType);
     if (!NT_SUCCESS(Status))
@@ -3490,17 +3498,34 @@ NtMapViewOfSection(
     if (ZeroBits)
     {
 #if defined(_M_AMD64) && (NTDDI_VERSION >= NTDDI_WIN8)
-        /* A ZeroBits value of -1 requests no high-bit constraint. Otherwise let
-         * the generic MI_MAX_ZERO_BITS (53 on amd64) and shift validation below
-         * accept it - a 32-bit (WoW64) view legitimately passes ZeroBits == 32 to
-         * keep the mapping within the low 4 GB, which the previous early-out
-         * rejected outright. */
+        ULONG_PTR HighestZeroBitsAddress;
+
+        /* A ZeroBits value of -1 requests no high-bit constraint. */
         if (ZeroBits == (ULONG_PTR)-1)
         {
             ZeroBits = 0;
         }
-#endif
 
+        /* On x64 Win8+ a small count (1..21) limits the upper (32 + count) bits;
+         * 22..31 are invalid; 32 is the WoW64 "low 4 GB" mask. Reject anything
+         * MiZeroBitsToHighestAddress cannot translate, and verify a requested
+         * base address fits under the resulting ceiling. */
+        if (ZeroBits != 0)
+        {
+            if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestZeroBitsAddress))
+            {
+                DPRINT1("Invalid zero bits\n");
+                return STATUS_INVALID_PARAMETER_4;
+            }
+
+            if (SafeBaseAddress != NULL &&
+                ((ULONG_PTR)SafeBaseAddress + SafeViewSize - 1) > HighestZeroBitsAddress)
+            {
+                DPRINT1("Base address violates zero bits\n");
+                return STATUS_INVALID_PARAMETER_4;
+            }
+        }
+#else
         if (ZeroBits > MI_MAX_ZERO_BITS)
         {
             DPRINT1("Invalid zero bits\n");
@@ -3518,6 +3543,7 @@ NtMapViewOfSection(
             DPRINT1("Invalid zero bits\n");
             return STATUS_INVALID_PARAMETER_4;
         }
+#endif
     }
 
     /* Reference the process */
