@@ -123,19 +123,21 @@ SimpleErrorChecks(VOID)
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, MEM_COMMIT, PAGE_READWRITE, STATUS_INVALID_PARAMETER_2, STATUS_INVALID_PARAMETER_2);
 
     //ZERO BITS TESTS
-#ifdef _WIN64
-    /* On x64 MI_MAX_ZERO_BITS is 53, so a 21/22 leading-zero-bit constraint
-     * still leaves an enormous low VA range (up to ~8 TB / ~2 TB) and the
-     * blind allocation succeeds.  WoW64 relies on this to place 32-bit
-     * process parameters below 4 GB via ZeroBits=32. */
-    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 21, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
-    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 22, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
-#else
+    /* ZeroBits constrains the blind allocation to the low part of the address
+     * space. On x64 a count of N means the upper (32 + N) bits must be zero, so
+     * 21 leaves only an ~0x7FF ceiling with no 64K-granular room (NO_MEMORY) and
+     * counts above 21 are invalid -- the same boundary as i386's 21-bit limit. */
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 21, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_NO_MEMORY, STATUS_MEMORY_NOT_ALLOCATED);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 22, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_3, STATUS_MEMORY_NOT_ALLOCATED);
-#endif
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, -1, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_INVALID_PARAMETER_3, STATUS_MEMORY_NOT_ALLOCATED);
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 3, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
+#ifdef _WIN64
+    /* ZeroBits == 32 is the WoW64 "low 4 GB" request (mask regime): on x64 it
+     * caps the blind allocation at 0xFFFFFFFF and must succeed. WOW64.DLL relies
+     * on this to place the 32-bit process parameters below 4 GB, so rejecting it
+     * (as a naive count-only check does) breaks every WoW64 process launch. */
+    ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 32, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);
+#endif
 
     //REGION SIZE TESTS
     ALLOC_MEMORY_WITH_FREE(NtCurrentProcess(), Base, 0, RegionSize, (MEM_COMMIT | MEM_RESERVE), PAGE_READWRITE, STATUS_SUCCESS, STATUS_SUCCESS);

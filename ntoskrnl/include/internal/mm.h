@@ -654,7 +654,15 @@ MmFindGap(
     PMMSUPPORT AddressSpace,
     SIZE_T Length,
     ULONG_PTR Granularity,
-    BOOLEAN TopDown
+    BOOLEAN TopDown,
+    ULONG_PTR HighestAddress
+);
+
+BOOLEAN
+NTAPI
+MiZeroBitsToHighestAddress(
+    _In_ ULONG_PTR ZeroBits,
+    _Out_ PULONG_PTR HighestAddress
 );
 
 /* npool.c *******************************************************************/

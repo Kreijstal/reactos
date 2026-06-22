@@ -191,22 +191,31 @@ MmFindGap(
     PMMSUPPORT AddressSpace,
     ULONG_PTR Length,
     ULONG_PTR Granularity,
-    BOOLEAN TopDown)
+    BOOLEAN TopDown,
+    ULONG_PTR HighestAddress)
 {
     PEPROCESS Process;
     PMM_AVL_TABLE VadRoot;
     TABLE_SEARCH_RESULT Result;
     PMMADDRESS_NODE Parent;
-    ULONG_PTR StartingAddress, HighestAddress;
+    ULONG_PTR StartingAddress, Ceiling;
 
     Process = MmGetAddressSpaceOwner(AddressSpace);
     VadRoot = Process ? &Process->VadRoot : &MiRosKernelVadRoot;
-    if (TopDown)
+
+    /* A caller-supplied ceiling (e.g. derived from ZeroBits) constrains the
+     * search; 0 means "no constraint" and falls back to the address-space top. */
+    Ceiling = Process ? (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS : (ULONG_PTR)-1;
+    if (HighestAddress != 0 && HighestAddress < Ceiling)
+        Ceiling = HighestAddress;
+
+    if (TopDown || HighestAddress != 0)
     {
-        /* Find an address top-down */
-        HighestAddress = Process ? (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS : (LONG_PTR)-1;
+        /* Find an address top-down, bounded by the ceiling. A bottom-up search
+         * cannot honor an upper bound, so a constrained request is satisfied
+         * from the top of the permitted range instead. */
         Result = MiFindEmptyAddressRangeDownTree(Length,
-                                                 HighestAddress,
+                                                 Ceiling,
                                                  Granularity,
                                                  VadRoot,
                                                  &StartingAddress,
@@ -226,7 +235,60 @@ MmFindGap(
         return NULL;
     }
 
+    /* Reject a result that would breach the requested ceiling. */
+    if (HighestAddress != 0 &&
+        (StartingAddress + Length - 1) > HighestAddress)
+    {
+        return NULL;
+    }
+
     return (PVOID)StartingAddress;
+}
+
+/*
+ * Translate a ZeroBits count/mask into the highest address a blind allocation
+ * may occupy, returning FALSE for an invalid ZeroBits value.
+ *
+ * On x64 Windows a small ZeroBits value N (1..21) is a count: the upper
+ * (32 + N) address bits must be zero, giving a ceiling of MAXULONG_PTR >>
+ * (32 + N). Values 22..31 are neither a usable count nor a mask and are
+ * rejected. Values >= 32 act as a bit-mask of high zero bits (32 is the WoW64
+ * "low 4 GB" case). On x86 the classic MAXULONG_PTR >> N ceiling applies.
+ */
+BOOLEAN NTAPI
+MiZeroBitsToHighestAddress(
+    _In_ ULONG_PTR ZeroBits,
+    _Out_ PULONG_PTR HighestAddress)
+{
+    if (ZeroBits == 0)
+    {
+        *HighestAddress = (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS;
+        return TRUE;
+    }
+
+#ifdef _M_AMD64
+    if (ZeroBits <= 21)
+    {
+        *HighestAddress = MAXULONG_PTR >> (32 + ZeroBits);
+        return TRUE;
+    }
+
+    if (ZeroBits >= 32 && ZeroBits <= MI_MAX_ZERO_BITS)
+    {
+        *HighestAddress = MAXULONG_PTR >> ZeroBits;
+        return TRUE;
+    }
+
+    return FALSE;
+#else
+    {
+        ULONG_PTR Highest = MAXULONG_PTR >> ZeroBits;
+        if (Highest > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS)
+            return FALSE;
+        *HighestAddress = Highest;
+        return TRUE;
+    }
+#endif
 }
 
 VOID
@@ -481,7 +543,8 @@ MmCreateMemoryArea(PMMSUPPORT AddressSpace,
         *BaseAddress = MmFindGap(AddressSpace,
                                  tmpLength,
                                  Granularity,
-                                 (AllocationFlags & MEM_TOP_DOWN) == MEM_TOP_DOWN);
+                                 (AllocationFlags & MEM_TOP_DOWN) == MEM_TOP_DOWN,
+                                 0);
         if ((*BaseAddress) == 0)
         {
             DPRINT("No suitable gap\n");
