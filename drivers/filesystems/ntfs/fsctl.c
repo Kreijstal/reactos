@@ -1335,6 +1335,32 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
 
     FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
 
+    /* Flush (and purge) the volume-stream cache before tearing the mount down.
+     * A formatter that opened the raw volume (mkntfs during a quick format)
+     * wrote the new $MFT/$Bitmap through the FCB_IS_VOLUME path, i.e. via
+     * CcCopyWrite on Vcb->StreamFileObject (see NtfsWriteDiskCached) - those
+     * writes land in this volume-stream cache as DIRTY pages, not on disk.
+     * The formatter's own NtFlushBuffersFile flushes its handle's (volume FCB)
+     * section, which has no cache map, so it is a no-op for that data.  If we
+     * dismount without flushing here, the freshly written metadata reaches disk
+     * only if the lazy writer happened to drain it first; the next mount reads
+     * $MFT raw from disk (NtfsGetVolumeData) and intermittently sees a torn MFT
+     * - some records still zero - so the very first create after format fails
+     * with "ReadFileRecord failed: 0 read" / STATUS_PARTIAL_COPY.  Flushing on
+     * dismount makes the formatter's writes durable deterministically (this
+     * mirrors the shutdown-time NtfsFlushVolume and what Windows ntfs.sys does).
+     * The volume is exclusively locked here (VCB_VOLUME_LOCKED), so no other
+     * thread is touching the stream while we flush. */
+    if (DeviceExt->StreamFileObject != NULL &&
+        DeviceExt->StreamFileObject->SectionObjectPointer != NULL)
+    {
+        IO_STATUS_BLOCK FlushIosb;
+        CcFlushCache(DeviceExt->StreamFileObject->SectionObjectPointer,
+                     NULL, 0, &FlushIosb);
+        CcPurgeCacheSection(DeviceExt->StreamFileObject->SectionObjectPointer,
+                            NULL, 0, FALSE);
+    }
+
     ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
 
     /* $LogFile clean-dismount flush (Kreijstal/reactos#34 slice 2).  No-op
