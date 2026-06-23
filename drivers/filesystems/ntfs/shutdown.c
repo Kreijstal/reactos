@@ -36,8 +36,10 @@
  * The snapshot-then-flush pattern is required because CcFlushCache can
  * block - it acquires the section's resource and may wait on paging
  * I/O - so it cannot be called at DISPATCH_LEVEL while the spinlock is
- * held. Each snapshotted FCB has its RefCount bumped under the lock so
- * NtfsReleaseFCB cannot tear it down while we are flushing it.
+ * held. Each snapshotted FCB has its RefCount bumped under the lock so a
+ * concurrent NtfsReleaseFCB cannot free it while we are flushing it, and
+ * the bump is undone afterwards with a matching raw decrement (NOT via
+ * NtfsReleaseFCB - see the third pass for why evicting here is harmful).
  */
 static
 VOID
@@ -107,7 +109,20 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
     }
     KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
 
-    /* Third pass: flush each FCB outside the lock, then drop our refs. */
+    /* Third pass: flush each FCB outside the lock.  We deliberately do NOT
+     * drop these references via NtfsReleaseFCB: that routine's behaviour is
+     * keyed on the resulting RefCount value, and a cached, closed file FCB
+     * sits at RefCount == 1 (NtfsMakeFCBFromDirEntry leaves it there with its
+     * cache map live).  Our pass-2 snapshot bumped it to 2, so NtfsReleaseFCB
+     * would bring it back to 1 and fire the cache-map teardown branch
+     * (CcFlushCache + CcPurgeCacheSection + CcUninitializeCacheMap, NULLing
+     * FileObject).  Tearing a cache map down during the final shutdown flush
+     * re-enters NTFS write-back - it reacquires the FCB PagingIoResource and
+     * issues synchronous disk writes against an already-quiescing storage
+     * stack, which can wedge shutdown - and it drops the last data-section
+     * reference at a point where MmDereferenceSegmentWithLock can re-enter
+     * the page-out path.  Shutdown must *flush*, not *evict*: push the dirty
+     * pages and leave eviction to volume dismount. */
     for (i = 0; i < SnapshotCount; i++)
     {
         Fcb = Snapshot[i];
@@ -121,9 +136,16 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
                          0,
                          &IoStatus);
         }
-
-        NtfsReleaseFCB(Vcb, Fcb);
     }
+
+    /* Drop the snapshot references with a raw decrement that exactly mirrors
+     * the raw increment taken in pass 2, under the same lock.  This is a true
+     * no-op on the FCB lifecycle and cannot trip the value-keyed cache
+     * teardown or NtfsDestroyFCB paths inside NtfsReleaseFCB. */
+    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+    for (i = 0; i < SnapshotCount; i++)
+        Snapshot[i]->RefCount--;
+    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
 
     ExFreePoolWithTag(Snapshot, TAG_FCB);
 }
