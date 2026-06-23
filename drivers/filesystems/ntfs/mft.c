@@ -2211,6 +2211,7 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
                PFILE_RECORD_HEADER file)
 {
     ULONGLONG BytesRead;
+    BOOLEAN MftLockHeld = FALSE;
 
     DPRINT("ReadFileRecord(%p, %I64x, %p)\n", Vcb, index, file);
 
@@ -2219,7 +2220,22 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
     NTFS_TRACE_IF(index == 144, "DRVIDX: ReadFileRecord begin index=%I64u offset=%I64u\n",
                 index,
                 index * Vcb->NtfsInfo.BytesPerFileRecord);
+    /* Serialize against MFT growth: IncreaseMftSize rewrites and reallocates
+     * the shared Vcb->MFTContext->pRecord runlist in place (AddRun).  This
+     * ReadAttribute walks that same buffer, so without serialization a
+     * concurrent grow can free/rewrite the runlist mid-walk and truncate the
+     * read, yielding STATUS_PARTIAL_COPY.  MftContextResource is a dedicated
+     * LEAF lock (below DirResource/IndexResource/BitmapResource): ReadFileRecord
+     * is called both standalone and while holding IndexResource exclusive, so
+     * reusing a higher lock here would invert the Dir->Index hierarchy.  Taken
+     * SHARED here (concurrent reads allowed) and EXCLUSIVE around the grow in
+     * IncreaseMftSize.  Skipped during mount bootstrap, before the resource
+     * exists (MftReadLockReady == FALSE; that path is single-threaded). */
+    if (Vcb->MftReadLockReady)
+        MftLockHeld = ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
     BytesRead = ReadAttribute(Vcb, Vcb->MFTContext, index * Vcb->NtfsInfo.BytesPerFileRecord, (PCHAR)file, Vcb->NtfsInfo.BytesPerFileRecord);
+    if (MftLockHeld)
+        ExReleaseResourceLite(&Vcb->MftContextResource);
     NTFS_TRACE_IF(index == 144, "DRVIDX: ReadFileRecord readattr bytes=%I64u expected=%lu\n",
                 BytesRead,
                 Vcb->NtfsInfo.BytesPerFileRecord);
