@@ -225,6 +225,22 @@ typedef struct
      *     NtfsAllocateClusters - ERESOURCE supports recursive exclusive. */
     ERESOURCE BitmapResource;
 
+    /* Protects the shared Vcb->MFTContext->pRecord (the in-memory $MFT $DATA
+     * attribute record, including its encoded runlist) against the
+     * free/realloc/rewrite that MFT growth performs in AddRun.  Held SHARED by
+     * ReadFileRecord around its ReadAttribute walk and EXCLUSIVE in AddRun
+     * around the pRecord mutation.
+     *
+     * Locking discipline: this is a LEAF - it is the LOWEST lock in the
+     * hierarchy (below BitmapResource).  It must be, because ReadFileRecord is
+     * called both standalone and while holding IndexResource exclusive AND
+     * while holding BitmapResource exclusive (FreeClusters), so it can only ever
+     * be acquired last.  Correspondingly, nothing else is acquired while it is
+     * held: AddRun takes it only after its caller already allocated clusters and
+     * dropped BitmapResource, and the ReadFileRecord walk under it touches no
+     * other NTFS resource. */
+    ERESOURCE MftContextResource;
+
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
 
@@ -244,6 +260,17 @@ typedef struct
     struct _NTFS_ATTR_CONTEXT* MFTContext;
     struct _FILE_RECORD_HEADER* MasterFileTable;
     struct _FCB *VolumeFcb;
+
+    /* Set TRUE once MftContextResource is initialized (end of NtfsMountVolume).
+     * ReadFileRecord acquires MftContextResource SHARED around its walk of the
+     * shared MFTContext->pRecord, because a concurrent IncreaseMftSize frees and
+     * rewrites that encoded runlist in place (AddRun); without the shared
+     * acquire a reader can walk a buffer that is being reallocated mid-read and
+     * get a truncated result (STATUS_PARTIAL_COPY).  During mount bootstrap
+     * (NtfsGetVolumeData reads $Volume before the resource exists) this stays
+     * FALSE and the lock is skipped - that path is single-threaded, so there is
+     * no MFTContext writer to race. */
+    BOOLEAN MftReadLockReady;
 
     NTFS_INFO NtfsInfo;
 

@@ -555,6 +555,11 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     ExInitializeResourceLite(&Vcb->DirResource);
     ExInitializeResourceLite(&Vcb->IndexResource);
     ExInitializeResourceLite(&Vcb->BitmapResource);
+    ExInitializeResourceLite(&Vcb->MftContextResource);
+
+    /* MftContextResource now exists: from here on ReadFileRecord serializes its
+     * MFTContext walk against MFT growth (see MftReadLockReady in ntfs.h). */
+    Vcb->MftReadLockReady = TRUE;
 
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
