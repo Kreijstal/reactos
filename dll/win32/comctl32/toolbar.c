@@ -355,7 +355,13 @@ TOOLBAR_DumpToolbar(const TOOLBAR_INFO *iP, INT line)
 static inline BOOL
 TOOLBAR_ButtonHasString(const TBUTTON_INFO *btnPtr)
 {
-    return HIWORD(btnPtr->iString) && btnPtr->iString != -1;
+    /* iString is an INT_PTR that holds either a small string-table index or a
+     * heap WCHAR* pointer.  HIWORD() only inspects bits 16-31, so on 64-bit it
+     * misclassifies a real pointer whose bits 16-31 happen to be zero as "no
+     * string" -> the live pointer is mishandled and a stale/garbage value later
+     * reaches ReAlloc (the explorer first-boot toolbar crash).  Use the same
+     * 64-bit-safe test as TOOLBAR_GetText() above. */
+    return !IS_INTRESOURCE(btnPtr->iString) && btnPtr->iString != -1;
 }
 
 static void set_string_index( TBUTTON_INFO *btn, INT_PTR str, BOOL unicode )
