@@ -2165,9 +2165,24 @@ RtlAllocateHeap(IN PVOID HeapPtr,
             /* Release the lock */
             if (HeapLocked) RtlLeaveHeapLock(Heap->LockVariable);
 
-            /* Zero memory if that was requested */
+            /* Zero memory if that was requested.  Zero the WHOLE front-end block,
+               not just the requested Size: the low-fragmentation front-end hands
+               out bucket-rounded blocks recycled from previously freed
+               allocations, so the slack beyond Size still holds stale bytes.  A
+               later in-place HEAP_ZERO_MEMORY realloc that grows the request into
+               that slack (RtlpLowFragHeapReAllocate keeps the block when the
+               bucket does not change) would otherwise expose the stale bytes
+               instead of zeros, breaking the HEAP_ZERO_MEMORY / LMEM_ZEROINIT
+               contract (observed as a crash in comctl32 TOOLBAR_AddStringW, whose
+               grown strings[] slot was left holding recycled garbage and then
+               passed to ReAlloc by Str_SetPtrW).  Zeroing the whole block keeps a
+               zero-initialised allocation's slack zero so such grows stay correct. */
             if (Flags & HEAP_ZERO_MEMORY)
-                RtlZeroMemory(Result, Size);
+            {
+                PHEAP_ENTRY LfhEntry = (PHEAP_ENTRY)Result - 1;
+                SIZE_T BlockData = ((SIZE_T)LfhEntry->Size << HEAP_ENTRY_SHIFT) - HEAP_ENTRY_SIZE;
+                RtlZeroMemory(Result, BlockData);
+            }
 
             return Result;
         }
