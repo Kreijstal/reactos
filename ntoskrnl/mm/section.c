@@ -5693,7 +5693,7 @@ MmFlushSegment(
     _Out_opt_ PIO_STATUS_BLOCK Iosb)
 {
     LARGE_INTEGER FlushStart, FlushEnd;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
 
     if (Offset)
     {
