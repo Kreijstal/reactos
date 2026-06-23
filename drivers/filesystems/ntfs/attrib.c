@@ -1542,6 +1542,7 @@ AddRun(PNTFS_VCB Vcb,
 
     PUCHAR RunBuffer;
     ULONG RunBufferSize;
+    BOOLEAN MftCtxLockHeld = FALSE;
 
     if (!AttrContext->pRecord->IsNonResident)
         return STATUS_INVALID_PARAMETER;
@@ -1632,6 +1633,16 @@ AddRun(PNTFS_VCB Vcb,
     // Get the amount of free space between the start of the of the first data run and the attribute end
     DataRunMaxLength = AttrContext->pRecord->Length - AttrContext->pRecord->NonResident.MappingPairsOffset;
 
+    /* From here on we free/realloc and/or rewrite AttrContext->pRecord's encoded
+     * runlist.  When this is the shared $MFT $DATA context, take the MftContext
+     * LEAF lock EXCLUSIVE so a concurrent ReadFileRecord (which walks the same
+     * buffer under the SHARED lock) cannot observe a freed or half-rewritten
+     * runlist and short-read (STATUS_PARTIAL_COPY).  This is reached only after
+     * the caller already allocated clusters and dropped BitmapResource, so the
+     * leaf invariant (nothing else held) holds.  Released on every exit below. */
+    if (AttrContext == Vcb->MFTContext && Vcb->MftReadLockReady)
+        MftCtxLockHeld = ExAcquireResourceExclusiveLite(&Vcb->MftContextResource, TRUE);
+
     // Do we need to extend the attribute (or convert to attribute list)?
     if (DataRunMaxLength < RunBufferSize)
     {
@@ -1664,6 +1675,8 @@ AddRun(PNTFS_VCB Vcb,
             {
                 DPRINT1("AddRun: MigrateAttributeToList failed 0x%x\n", (unsigned)MigrateStatus);
                 ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+                if (MftCtxLockHeld)
+                    ExReleaseResourceLite(&Vcb->MftContextResource);
                 return MigrateStatus;
             }
 
@@ -1692,6 +1705,8 @@ AddRun(PNTFS_VCB Vcb,
                         RunBufferSize, DataRunMaxLength);
                 ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
                 ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+                if (MftCtxLockHeld)
+                    ExReleaseResourceLite(&Vcb->MftContextResource);
                 return STATUS_NOT_IMPLEMENTED;
             }
 
@@ -1722,6 +1737,8 @@ AddRun(PNTFS_VCB Vcb,
                         MoveTo, TrailingBytes,
                         (ULONG_PTR)FileRecord + Vcb->NtfsInfo.BytesPerFileRecord);
                 ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+                if (MftCtxLockHeld)
+                    ExReleaseResourceLite(&Vcb->MftContextResource);
                 return STATUS_NOT_IMPLEMENTED;
             }
 
@@ -1775,6 +1792,15 @@ AddRun(PNTFS_VCB Vcb,
     RtlCopyMemory((PVOID)((ULONG_PTR)AttrContext->pRecord + AttrContext->pRecord->NonResident.MappingPairsOffset),
                   RunBuffer,
                   RunBufferSize);
+
+    /* pRecord is now fully consistent again: drop the MftContext leaf so
+     * readers can resume.  The disk write-back below touches the on-disk record,
+     * not the in-memory runlist a reader walks. */
+    if (MftCtxLockHeld)
+    {
+        ExReleaseResourceLite(&Vcb->MftContextResource);
+        MftCtxLockHeld = FALSE;
+    }
 
     /* Write the (possibly migrated) file record back.  Use FileRecord's own
      * MFTRecordNumber rather than AttrContext->FileMFTIndex: when migration
