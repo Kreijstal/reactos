@@ -1442,7 +1442,13 @@ MmFindRegion(
 
 /* section.c *****************************************************************/
 
+#ifdef _WIN64
+/* On 64-bit the share count lives above the PFN field (see the SSE layout
+ * comment below), so mask it off before extracting the PFN. */
+#define PFN_FROM_SSE(E)          ((PFN_NUMBER)(((E) & 0xFFFFFFF000ULL) >> PAGE_SHIFT))
+#else
 #define PFN_FROM_SSE(E)          ((PFN_NUMBER)((E) >> PAGE_SHIFT))
+#endif
 #define IS_SWAP_FROM_SSE(E)      ((E) & 0x00000001)
 #define MM_IS_WAIT_PTE(E)        \
     (IS_SWAP_FROM_SSE(E) && SWAPENTRY_FROM_SSE(E) == MM_WAIT_ENTRY)
@@ -1454,16 +1460,45 @@ MmFindRegion(
 #define IS_DIRTY_SSE(E)          ((E) & 2)
 #define WRITE_SSE(E)             ((E) | 4)
 #define IS_WRITE_SSE(E)          ((E) & 4)
+/*
+ * Section-Segment Entry (SSE) bit layout for a resident (non-swap) page.
+ *
+ * A swap entry is distinguished by bit 0 (IS_SWAP_FROM_SSE); it occupies the
+ * whole word and is encoded/decoded only through MAKE_SWAP_SSE/SWAPENTRY_FROM_SSE,
+ * so the share-count widening below does not affect it.
+ *
+ * 32-bit (ULONG SSE):
+ *   bit  0      : swap flag (always 0 for a resident page)
+ *   bit  1      : dirty
+ *   bit  2      : write
+ *   bits 3..11  : share count (9 bits, max 511)
+ *   bits 12..31 : PFN (PAGE_FROM_SSE mask 0xFFFFF000)
+ *
+ * 64-bit (ULONG_PTR SSE): the PFN field is capped at bit 39 (PAGE_FROM_SSE mask
+ * 0xFFFFFFF000, i.e. a 40-bit / 1 TB physical address space), leaving bits
+ * 40..63 unused. We relocate the share count there to give it 24 bits, so a
+ * heavily-shared image page (cmd.exe/ntdll/kernel32 mapped by thousands of
+ * processes) no longer overflows the old 9-bit field and bugchecks. Bits 3..11
+ * stay reserved/unused on 64-bit. The low flag bits (0..2) and the PFN field are
+ * unchanged, so PFN_FROM_SSE / PAGE_FROM_SSE / DIRTY / WRITE / swap all keep
+ * working as before.
+ */
 #ifdef _WIN64
 #define PAGE_FROM_SSE(E)         ((E) & 0xFFFFFFF000ULL)
+#define SHARE_COUNT_SSE_SHIFT    40
+#define MAX_SHARE_COUNT          0xFFFFFF
+#define SHARE_COUNT_FROM_SSE(E)  (((E) >> SHARE_COUNT_SSE_SHIFT) & MAX_SHARE_COUNT)
+#define MAKE_SSE(P, C)           ((ULONG_PTR)((P) | ((ULONG_PTR)(C) << SHARE_COUNT_SSE_SHIFT)))
+#define BUMPREF_SSE(E)           (PAGE_FROM_SSE(E) | ((ULONG_PTR)(SHARE_COUNT_FROM_SSE(E) + 1) << SHARE_COUNT_SSE_SHIFT) | ((E) & 0x7))
+#define DECREF_SSE(E)            (PAGE_FROM_SSE(E) | ((ULONG_PTR)(SHARE_COUNT_FROM_SSE(E) - 1) << SHARE_COUNT_SSE_SHIFT) | ((E) & 0x7))
 #else
 #define PAGE_FROM_SSE(E)         ((E) & 0xFFFFF000)
-#endif
-#define SHARE_COUNT_FROM_SSE(E)  (((E) & 0x00000FFC) >> 3)
 #define MAX_SHARE_COUNT          0x1FF
+#define SHARE_COUNT_FROM_SSE(E)  (((E) & 0x00000FFC) >> 3)
 #define MAKE_SSE(P, C)           ((ULONG_PTR)((P) | ((C) << 3)))
 #define BUMPREF_SSE(E)           (PAGE_FROM_SSE(E) | ((SHARE_COUNT_FROM_SSE(E) + 1) << 3) | ((E) & 0x7))
 #define DECREF_SSE(E)            (PAGE_FROM_SSE(E) | ((SHARE_COUNT_FROM_SSE(E) - 1) << 3) | ((E) & 0x7))
+#endif
 
 VOID
 NTAPI
