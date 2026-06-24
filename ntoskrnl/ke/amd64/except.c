@@ -667,17 +667,17 @@ KiGeneralProtectionFaultHandler(
         return STATUS_ACCESS_VIOLATION;
     }
 
-    DPRINT1("KiGeneralProtectionFaultHandler: unhandled kernel GPF at RIP=%p\n"
-            "  Instruction bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n"
-            "  RAX=%p RCX=%p RDX=%p\n"
-            "  ErrorCode=%p\n",
-            (PVOID)TrapFrame->Rip,
-            Instructions[0], Instructions[1], Instructions[2], Instructions[3],
-            Instructions[4], Instructions[5], Instructions[6], Instructions[7],
-            (PVOID)TrapFrame->Rax, (PVOID)TrapFrame->Rcx, (PVOID)TrapFrame->Rdx,
-            (PVOID)(ULONG_PTR)TrapFrame->ErrorCode);
-    ASSERT(FALSE);
-    return STATUS_UNSUCCESSFUL;
+    /* Any other kernel-mode #GP is, in practice, a bad memory reference - most
+     * often a non-canonical address from dereferencing a corrupt or
+     * out-of-range pointer.  Kernel routines that touch user-supplied or
+     * pageable data wrap those accesses in __try/__except expecting to recover
+     * exactly as they would from a page fault (KiPrepareUserDebugData walking
+     * the user loader module list, the various probe/capture helpers, ...).
+     * Report it to the faulting code as an access violation - the trap stub
+     * dispatches that through the SEH frames - instead of bugchecking here.  A
+     * genuinely unguarded fault still ends in KMODE_EXCEPTION_NOT_HANDLED via
+     * the normal second-chance dispatch path. */
+    return STATUS_ACCESS_VIOLATION;
 }
 
 NTSTATUS
