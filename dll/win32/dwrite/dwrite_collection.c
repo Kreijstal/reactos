@@ -830,10 +830,19 @@ static ULONG STDMETHODCALLTYPE face_Release(void *iface)
     return r < 0 ? 0 : (ULONG)r;
 }
 
-/* DWRITE_FONT_FACE_TYPE GetType(void) */
+/* DWRITE_FONT_FACE_TYPE GetType(void)
+ * The GDI EnumFontFamiliesExW FontType flag is unreliable for the family's
+ * representative face (it can come back without TRUETYPE_FONTTYPE for a real
+ * TrueType font such as Tahoma), which makes Qt 6 reject the font for its
+ * DirectWrite engine and fall back to a zero-metric box engine -> 0x0 window.
+ * Determine the type authoritatively from the font itself: a font that yields
+ * an OUTLINETEXTMETRIC (em_units != 0) is a scalable outline (TrueType/OpenType)
+ * face; only genuine raster/bitmap fonts keep the originally-enumerated type. */
 static DWRITE_FONT_FACE_TYPE STDMETHODCALLTYPE face_GetType(void *iface)
 {
     font_face_obj_t *self = (font_face_obj_t *)iface;
+    if (gdi_face_ensure(self) && self->em_units != 0)
+        return DWRITE_FONT_FACE_TYPE_TRUETYPE;
     return self->face_type;
 }
 
@@ -1311,6 +1320,55 @@ static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphMetrics(
                                       metrics, is_sideways);
 }
 
+/* HRESULT GetDesignGlyphAdvances(UINT32 glyph_count,
+ *      UINT16 const *glyph_indices, INT32 *glyph_advances,
+ *      BOOL is_sideways) - IDWriteFontFace1 slot 23.
+ * Advances are returned in font design units. Qt 6 calls this to lay out
+ * text; without it (E_NOTIMPL) advances are zero and widgets collapse. */
+static HRESULT STDMETHODCALLTYPE face_GetDesignGlyphAdvances(
+    void *iface, UINT32 glyph_count, UINT16 const *glyph_indices,
+    INT32 *glyph_advances, BOOL is_sideways)
+{
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    static const MAT2 ident = { {0,1}, {0,0}, {0,0}, {0,1} };
+    UINT32 i;
+    if (!glyph_indices || !glyph_advances) return E_POINTER;
+    if (!gdi_face_ensure(self)) return E_FAIL;
+    memset(glyph_advances, 0, glyph_count * sizeof(*glyph_advances));
+    if (!self->em_units) return S_OK;
+
+    EnterCriticalSection(&self->cs);
+    for (i = 0; i < glyph_count; ++i)
+    {
+        GLYPHMETRICS gm;
+        DWORD r = GetGlyphOutlineW(self->hdc, glyph_indices[i],
+                                   GGO_METRICS | GGO_GLYPH_INDEX,
+                                   &gm, 0, NULL, &ident);
+        if (r == GDI_ERROR) continue;
+        glyph_advances[i] = is_sideways
+            ? (INT32)self->ascent_du + (INT32)self->descent_du
+            : (INT32)gm.gmCellIncX;
+    }
+    LeaveCriticalSection(&self->cs);
+    return S_OK;
+}
+
+/* HRESULT GetGdiCompatibleGlyphAdvances(FLOAT em_size, FLOAT pixels_per_dip,
+ *      DWRITE_MATRIX const *transform, BOOL use_gdi_natural, BOOL is_sideways,
+ *      UINT32 glyph_count, UINT16 const *glyph_indices, INT32 *glyph_advances)
+ * IDWriteFontFace1 slot 24. Approximated with the design-unit advances,
+ * consistent with face_GetGdiCompatibleGlyphMetrics delegating to the
+ * design path. */
+static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphAdvances(
+    void *iface, FLOAT em_size, FLOAT pixels_per_dip,
+    DWRITE_MATRIX const *transform, BOOL use_gdi_natural, BOOL is_sideways,
+    UINT32 glyph_count, UINT16 const *glyph_indices, INT32 *glyph_advances)
+{
+    (void)em_size; (void)pixels_per_dip; (void)transform; (void)use_gdi_natural;
+    return face_GetDesignGlyphAdvances(iface, glyph_count, glyph_indices,
+                                       glyph_advances, is_sideways);
+}
+
 /* IDWriteFontFace1::GetMetrics(DWRITE_FONT_METRICS1 *out) - slot 18.
  * Same as GetMetrics, additional fields zeroed. */
 static void STDMETHODCALLTYPE face_GetMetrics1(void *iface, DWRITE_FONT_METRICS1 *out)
@@ -1388,8 +1446,8 @@ static const void * const g_face_vtbl[60] =
     dwrite_common_method_e_notimpl,        /* 20 FontFace1::GetCaretMetrics */
     dwrite_common_method_e_notimpl,        /* 21 FontFace1::GetUnicodeRanges */
     face_IsMonospacedFont,                 /* 22 FontFace1::IsMonospacedFont */
-    dwrite_common_method_e_notimpl,        /* 23 FontFace1::GetDesignGlyphAdvances */
-    dwrite_common_method_e_notimpl,        /* 24 FontFace1::GetGdiCompatibleGlyphAdvances */
+    face_GetDesignGlyphAdvances,           /* 23 FontFace1::GetDesignGlyphAdvances */
+    face_GetGdiCompatibleGlyphAdvances,    /* 24 FontFace1::GetGdiCompatibleGlyphAdvances */
     dwrite_common_method_e_notimpl,        /* 25 FontFace1::GetKerningPairAdjustments */
     dwrite_common_method_e_notimpl,        /* 26 FontFace1::HasKerningPairs */
     dwrite_common_method_e_notimpl,        /* 27 FontFace1::GetRecommendedRenderingMode */
