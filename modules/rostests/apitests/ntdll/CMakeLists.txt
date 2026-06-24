@@ -126,6 +126,7 @@ list(APPEND SOURCE
     RtlImageRvaToVa.c
     RtlIsNameLegalDOS8Dot3.c
     RtlLocale.c
+    RtlLowFragHeap.c
     RtlMemoryStream.c
     RtlMultipleAllocateHeap.c
     RtlNtPathNameToDosPathName.c
