@@ -62,13 +62,34 @@
 #include "libsmb2-raw.h"
 #include "libsmb2-private.h"
 
+/*
+ * Process-global abort flag.  A host that drives libsmb2 from a single
+ * worker thread (ReactOS' smb2d service) sets this from its service
+ * control handler on SERVICE_CONTROL_STOP / SHUTDOWN so that an in-flight
+ * synchronous op bails out of its poll loop within one tick instead of
+ * running out its full stall watchdog.  Without it, a slow or stalled op
+ * pins the single-threaded daemon for up to the watchdog window and the
+ * whole process cannot terminate promptly on reboot.  Default 0 = no abort
+ * (preserves the upstream behaviour for every other libsmb2 consumer).
+ */
+volatile int smb2_sync_abort = 0;
+
 static int wait_for_reply(struct smb2_context *smb2,
                           struct sync_cb_data *cb_data)
 {
         time_t t = time(NULL);
+        int idle_polls = 0;          /* DIAG: consecutive revents==0 polls */
 
         while (!cb_data->is_finished) {
 		struct pollfd pfd;
+
+		if (smb2_sync_abort) {
+			/* Host requested shutdown: abandon the op immediately so
+			 * the daemon loop can notice its stop event and exit. */
+			smb2_set_error(smb2, "wait_for_reply aborted (host shutdown)");
+			return -1;
+		}
+
 		memset(&pfd, 0, sizeof(struct pollfd));
 		pfd.fd = smb2_get_fd(smb2);
 		pfd.events = smb2_which_events(smb2);
@@ -84,10 +105,35 @@ static int wait_for_reply(struct smb2_context *smb2,
 		{
 			smb2_set_error(smb2, "Timeout expired and no connection exists\n");
 			return -1;
-		}                
+		}
                 if (pfd.revents == 0) {
+                        /* DIAG/STALL-WATCHDOG: the socket is idle and the op is
+                         * not finished.  If this persists, we are wedged (lost
+                         * response or a queued PDU that the credit gate will not
+                         * release).  Dump the decisive state once and bail with
+                         * an error so a single stuck op cannot hang the whole
+                         * single-threaded daemon forever. */
+                        if (++idle_polls == 20) {
+                                FILE *df = fopen("C:\\smb2d_stall.log", "a");
+                                if (df) {
+                                        fprintf(df,
+                                          "STALL: idle=%ds finished=%d dialect=0x%x "
+                                          "credits=%d outqueue=%s waitqueue=%s events=0x%x fd=%lld\n",
+                                          idle_polls, cb_data->is_finished,
+                                          (unsigned)smb2->dialect, smb2->credits,
+                                          smb2->outqueue ? "PRESENT" : "null",
+                                          smb2->waitqueue ? "PRESENT" : "null",
+                                          smb2_which_events(smb2),
+                                          (long long)smb2->fd);
+                                        fclose(df);
+                                }
+                                smb2_set_error(smb2, "wait_for_reply stalled "
+                                          "(idle socket, op not finished)");
+                                return -1;
+                        }
                         continue;
                 }
+                idle_polls = 0;
 		if (smb2_service(smb2, pfd.revents) < 0) {
 			smb2_set_error(smb2, "smb2_service failed with : "
                                         "%s\n", smb2_get_error(smb2));
