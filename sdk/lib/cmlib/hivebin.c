@@ -21,6 +21,7 @@ HvpAddBin(
     ULONG BitmapSize;
     ULONG BlockCount;
     ULONG OldBlockListSize;
+    ULONG NewBlockListSize;
     PHCELL Block;
 
     BinSize = ROUND_UP(Size + sizeof(HBIN), HBLOCK_SIZE);
@@ -36,26 +37,72 @@ HvpAddBin(
                       HBLOCK_SIZE;
     Bin->Size = BinSize;
 
-    /* Allocate new block list */
+    /*
+     * Grow the block list.  It is over-allocated to BlockListCapacity entries
+     * and grown by doubling, so the common case reuses the existing array with
+     * no reallocation - and therefore no window in which a concurrent lock-free
+     * reader (HvIsCellAllocated()/HvpGetCellData(), possibly on another CPU)
+     * could observe a freed BlockList.  When a real grow is required the old
+     * array is superseded but NOT freed inline (a reader may still hold it); it
+     * is retired onto StaleBlockLists and released only at hive teardown.  This
+     * fixes the SMP 0x50 (PAGE_FAULT_IN_NONPAGED_AREA) seen in HvIsCellAllocated
+     * <- HvpGetCellData <- CmpFindSubKeyByName during boot-time PnP key creation.
+     */
     OldBlockListSize = RegistryHive->Storage[Storage].Length;
-    BlockList = RegistryHive->Allocate(sizeof(HMAP_ENTRY) *
-                                       (OldBlockListSize + BlockCount),
-                                       TRUE,
-                                       TAG_CM);
-    if (BlockList == NULL)
-    {
-        RegistryHive->Free(Bin, 0);
-        return NULL;
-    }
+    NewBlockListSize = OldBlockListSize + BlockCount;
 
-    if (OldBlockListSize > 0)
+    if (RegistryHive->Storage[Storage].BlockList == NULL ||
+        NewBlockListSize > RegistryHive->Storage[Storage].BlockListCapacity)
     {
-        RtlCopyMemory(BlockList, RegistryHive->Storage[Storage].BlockList,
-                      OldBlockListSize * sizeof(HMAP_ENTRY));
-        RegistryHive->Free(RegistryHive->Storage[Storage].BlockList, 0);
-    }
+        ULONG NewCapacity = RegistryHive->Storage[Storage].BlockListCapacity * 2;
 
-    RegistryHive->Storage[Storage].BlockList = BlockList;
+        if (NewCapacity < NewBlockListSize)
+            NewCapacity = NewBlockListSize;
+
+        BlockList = RegistryHive->Allocate(sizeof(HMAP_ENTRY) * NewCapacity,
+                                           TRUE, TAG_CM);
+        if (BlockList == NULL)
+        {
+            RegistryHive->Free(Bin, 0);
+            return NULL;
+        }
+
+        /* PagedPool is not zeroed: clear the whole array so the spare tail
+           (indices >= Length) reads as unallocated for any racing reader. */
+        RtlZeroMemory(BlockList, sizeof(HMAP_ENTRY) * NewCapacity);
+
+        if (OldBlockListSize > 0)
+        {
+            PHMAP_ENTRY OldBlockList = RegistryHive->Storage[Storage].BlockList;
+            PHV_STALE_BLOCKLIST Stale;
+
+            RtlCopyMemory(BlockList, OldBlockList,
+                          OldBlockListSize * sizeof(HMAP_ENTRY));
+
+            /* Retire the old array instead of freeing it: a reader on another
+               CPU may still hold the pointer.  Freed in HvpFreeHiveBins(). */
+            Stale = RegistryHive->Allocate(sizeof(HV_STALE_BLOCKLIST), TRUE, TAG_CM);
+            if (Stale != NULL)
+            {
+                Stale->BlockList = OldBlockList;
+                Stale->Next = RegistryHive->Storage[Storage].StaleBlockLists;
+                RegistryHive->Storage[Storage].StaleBlockLists = Stale;
+            }
+            /* If the bookkeeping node can't be allocated we still must not free
+               the in-use old array; accept the bounded one-array leak. */
+        }
+
+        /*
+         * Publish the new array (and capacity) BEFORE Length is bumped below.
+         * On the amd64 TSO memory model a reader that observes the grown Length
+         * has necessarily already observed the new BlockList pointer, so it can
+         * never pair the old (shorter) pointer with the new (larger) Length.
+         */
+        RegistryHive->Storage[Storage].BlockList = BlockList;
+        RegistryHive->Storage[Storage].BlockListCapacity = NewCapacity;
+    }
+    /* else: reuse the existing over-allocated array (no realloc, no free). */
+
     RegistryHive->Storage[Storage].Length += BlockCount;
 
     for (i = 0; i < BlockCount; i++)
