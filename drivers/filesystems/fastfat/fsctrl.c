@@ -5404,7 +5404,8 @@ Return Value:
                                       EndingCluster + 2 - 1,
                                       FALSE,
                                       NULL,
-                                      (PULONG)&OutputBuffer->Buffer[0] );
+                                      (PULONG)&OutputBuffer->Buffer[0],
+                                      FALSE );
             }
 
         } _SEH2_EXCEPT( Irp->RequestorMode != KernelMode ? EXCEPTION_EXECUTE_HANDLER: EXCEPTION_CONTINUE_SEARCH ) {
