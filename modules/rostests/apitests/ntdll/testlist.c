@@ -114,6 +114,7 @@ extern void func_RtlIntSafe(void);
 extern void func_RtlIsNameInExpression(void);
 extern void func_RtlIsNameLegalDOS8Dot3(void);
 extern void func_RtlLocale(void);
+extern void func_RtlLowFragHeap(void);
 extern void func_RtlMemIoResource(void);
 extern void func_RtlMemoryStream(void);
 extern void func_RtlMultipleAllocateHeap(void);
@@ -253,6 +254,7 @@ const struct test winetest_testlist[] =
     { "RtlIsNameInExpression",          func_RtlIsNameInExpression},
     { "RtlIsNameLegalDOS8Dot3",         func_RtlIsNameLegalDOS8Dot3 },
     { "RtlLocale",                      func_RtlLocale },
+    { "RtlLowFragHeap",                 func_RtlLowFragHeap },
     { "RtlMemIoResource",               func_RtlMemIoResource },
     { "RtlMemoryStream",                func_RtlMemoryStream },
     { "RtlMultipleAllocateHeap",        func_RtlMultipleAllocateHeap },
