@@ -15,6 +15,22 @@ static SERVICE_STATUS_HANDLE g_ssHandle;
 static HANDLE                g_hStopEvent;
 static HANDLE                g_hWorker;
 
+/* libsmb2 (sync.c) poll-loop abort flag.  Set from the control handler so an
+ * in-flight synchronous op bails out of wait_for_reply() within one poll tick
+ * on stop/shutdown instead of pinning the single worker thread for the full
+ * stall watchdog window. */
+extern volatile int smb2_sync_abort;
+
+/* No-op user APC used only to wake the worker thread out of the driver's
+ * alertable wait (KeWaitForSingleObject(..., UserMode, Alertable) inside the
+ * IOCTL_SMB2RDR_READ upcall fetch).  We cannot use CancelIoEx/CancelSynchronousIo
+ * here because both are -stub on ReactOS. */
+static VOID CALLBACK
+Smb2dStopApc(ULONG_PTR param)
+{
+    UNREFERENCED_PARAMETER(param);
+}
+
 static VOID
 UpdateStatus(DWORD state, DWORD waitHint)
 {
@@ -48,8 +64,24 @@ ControlHandler(DWORD ctrl, DWORD eventType, LPVOID eventData, LPVOID ctx)
     case SERVICE_CONTROL_STOP:
     case SERVICE_CONTROL_SHUTDOWN:
         UpdateStatus(SERVICE_STOP_PENDING, 2000);
+        /* Tell libsmb2's synchronous poll loop to abandon any in-flight op
+         * immediately.  The worker may be parked inside wait_for_reply()
+         * servicing a slow/stalled SMB op (a paging read/write has no upcall
+         * timeout at all); the queued user APC below is swallowed by msafd's
+         * MsafdWaitForAlert (it discards WAIT_IO_COMPLETION), so without this
+         * flag the op would run to its watchdog and the process could take
+         * tens of seconds to terminate on reboot. */
+        smb2_sync_abort = 1;
         if (g_hStopEvent)
             SetEvent(g_hStopEvent);
+        /* The worker is almost always parked in the driver's alertable wait
+         * inside IOCTL_SMB2RDR_READ; SetEvent alone cannot wake it.  Queue a
+         * user APC so that wait returns (STATUS_USER_APC), the IOCTL unblocks,
+         * and the loop notices g_hStopEvent and exits.  Without this the
+         * service hangs forever in STOP_PENDING and the process becomes
+         * un-killable (the thread is stuck in an un-aborted kernel wait). */
+        if (g_hWorker)
+            QueueUserAPC(Smb2dStopApc, g_hWorker, 0);
         return NO_ERROR;
     case SERVICE_CONTROL_INTERROGATE:
         return NO_ERROR;
