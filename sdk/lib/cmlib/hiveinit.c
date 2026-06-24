@@ -112,6 +112,16 @@ HvpFreeHiveBins(
 
         if (Hive->Storage[Storage].Length)
             Hive->Free(Hive->Storage[Storage].BlockList, 0);
+
+        /* Release the retired (superseded) block lists that HvpAddBin deferred
+           freeing to avoid a use-after-free against lock-free hive readers. */
+        while (Hive->Storage[Storage].StaleBlockLists != NULL)
+        {
+            PHV_STALE_BLOCKLIST Stale = Hive->Storage[Storage].StaleBlockLists;
+            Hive->Storage[Storage].StaleBlockLists = Stale->Next;
+            Hive->Free(Stale->BlockList, 0);
+            Hive->Free(Stale, 0);
+        }
     }
 }
 
@@ -363,6 +373,9 @@ HvpInitializeMemoryHive(
         Hive->Free(Hive->BaseBlock, Hive->BaseBlockAlloc);
         return STATUS_NO_MEMORY;
     }
+    /* The block list is allocated exactly Length entries here; record that as its
+       capacity so HvpAddBin's grow-by-doubling reuse check is consistent. */
+    Hive->Storage[Stable].BlockListCapacity = Hive->Storage[Stable].Length;
 
     for (BlockIndex = 0; BlockIndex < Hive->Storage[Stable].Length; )
     {

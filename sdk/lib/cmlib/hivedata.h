@@ -296,6 +296,18 @@ typedef struct _HMAP_DIRECTORY
     PHMAP_TABLE Directory[2048];
 } HMAP_DIRECTORY, *PHMAP_DIRECTORY;
 
+/*
+ * ReactOS: a retired (superseded) flat BlockList array.  When HvpAddBin grows
+ * the BlockList it must not free the old array inline, because a lock-free hive
+ * reader (HvIsCellAllocated/HvpGetCellData) may still hold the old pointer on
+ * another CPU.  Old arrays are chained here and freed only at hive teardown.
+ */
+typedef struct _HV_STALE_BLOCKLIST
+{
+    struct _HV_STALE_BLOCKLIST *Next;
+    PVOID BlockList;
+} HV_STALE_BLOCKLIST, *PHV_STALE_BLOCKLIST;
+
 typedef struct _DUAL
 {
     ULONG Length;
@@ -305,6 +317,10 @@ typedef struct _DUAL
     HCELL_INDEX FreeDisplay[24]; // FREE_DISPLAY FreeDisplay[24];
     ULONG FreeSummary;
     LIST_ENTRY FreeBins;
+    /* ReactOS: BlockList is over-allocated to BlockListCapacity entries and grown
+       by doubling; superseded arrays are retired onto StaleBlockLists (see above). */
+    ULONG BlockListCapacity;
+    PHV_STALE_BLOCKLIST StaleBlockLists;
 } DUAL, *PDUAL;
 
 typedef struct _HHIVE
