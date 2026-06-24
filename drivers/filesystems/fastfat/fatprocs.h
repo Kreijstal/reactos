@@ -2766,7 +2766,8 @@ FatExamineFatEntries(
     IN ULONG EndIndex OPTIONAL,
     IN BOOLEAN SetupWindows,
     IN PFAT_WINDOW SwitchToWindow OPTIONAL,
-    IN PULONG BitMapBuffer OPTIONAL
+    IN PULONG BitMapBuffer OPTIONAL,
+    IN BOOLEAN MountTime
     );
 
 BOOLEAN
