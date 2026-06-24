@@ -114,9 +114,6 @@ SetProcessDpiAwarenessInternal(
     return FALSE;
 }
 
-/*
- * @stub
- */
 BOOL
 WINAPI
 GetDpiForMonitorInternal(
@@ -125,8 +122,30 @@ GetDpiForMonitorInternal(
     _Out_ UINT *x,
     _Out_ UINT *y)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    HDC hDC;
+    UINT dpiX, dpiY;
+
+    UNREFERENCED_PARAMETER(monitor);
+
+    /* MONITOR_DPI_TYPE: MDT_EFFECTIVE_DPI(0), MDT_ANGULAR_DPI(1), MDT_RAW_DPI(2) */
+    if (type > 2 || x == NULL || y == NULL)
+        return FALSE;
+
+    /* ReactOS does not virtualize per-monitor DPI, so report the system DPI
+     * (LOGPIXELS from the display DC) for every monitor and DPI type. */
+    hDC = NtUserGetDC(NULL);
+    dpiX = GetDeviceCaps(hDC, LOGPIXELSX);
+    dpiY = GetDeviceCaps(hDC, LOGPIXELSY);
+    ReleaseDC(NULL, hDC);
+
+    if (dpiX == 0)
+        dpiX = USER_DEFAULT_SCREEN_DPI;
+    if (dpiY == 0)
+        dpiY = USER_DEFAULT_SCREEN_DPI;
+
+    *x = dpiX;
+    *y = dpiY;
+    return TRUE;
 }
 
 /*
