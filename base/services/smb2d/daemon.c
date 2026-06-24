@@ -554,6 +554,38 @@ ReleaseShareLocked(SMB2D_SHARE *s)
     HeapFree(GetProcessHeap(), 0, s);
 }
 
+/* Tear down every pooled share connection.  Called once when the daemon
+ * loop exits (service stop / shutdown) so the libsmb2 contexts - and the
+ * live TCP sockets they own - are destroyed deterministically here instead
+ * of being leaked to process-rundown handle close, which can stall the
+ * terminating process while AFD/TCP drains each abandoned socket.  By the
+ * time we get here smb2_sync_abort is set, so the per-context
+ * smb2_disconnect_share() returns immediately without a wire round-trip. */
+static void
+DrainAllShares(void)
+{
+    SMB2D_SHARE *s;
+
+    EnterCriticalSection(&g_conn_lock);
+    s = g_shares;
+    g_shares = NULL;
+    LeaveCriticalSection(&g_conn_lock);
+
+    while (s != NULL) {
+        SMB2D_SHARE *next = s->next;
+        smb2d_log("smb2d: shutdown drain server=%s share=%s\n",
+                  s->server, s->share);
+        if (s->ctx != NULL) {
+            smb2_disconnect_share(s->ctx);
+            smb2_destroy_context(s->ctx);
+        }
+        free(s->server);
+        free(s->share);
+        HeapFree(GetProcessHeap(), 0, s);
+        s = next;
+    }
+}
+
 /* Frees the vnet slot identified by `h` and releases the share refcount.
  * Returns the smb2_context * the slot was wired to so callers that owned
  * the context directly (no pool entry) can destroy it themselves.  When the
@@ -2559,6 +2591,11 @@ Smb2dDaemonLoop(HANDLE hStopEvent)
             break;
         }
     }
+
+    /* Deterministically tear down every pooled share connection so the
+     * libsmb2 contexts and their TCP sockets are gone before the process
+     * exits, rather than leaking to handle-rundown on terminate. */
+    DrainAllShares();
 
     if (hDev != INVALID_HANDLE_VALUE)
         CloseHandle(hDev);
