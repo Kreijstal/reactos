@@ -1984,11 +1984,13 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
    while (ListHead != &MessageQueue->HardwareMessagesListHead)
    {
       CurrentMessage = CONTAINING_RECORD(ListHead, USER_MESSAGE, ListEntry);
-      ListHead = ListHead->Flink;
 
       if (MessageQueue->idSysPeek == (ULONG_PTR)CurrentMessage)
       {
          TRACE("Skip this message due to it is in play!\n");
+         /* CurrentMessage is owned by an outer (re-entered) peek and is
+          * protected from destruction by idSysPeek, so its Flink is stable. */
+         ListHead = ListHead->Flink;
          continue;
       }
 /*
@@ -2003,6 +2005,7 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
             ( is_mouse_message(CurrentMessage->Msg.message) ) ) && // Null window for anything mouse.
             ( CurrentMessage->QS_Flags & QSflags ) )
       {
+         PLIST_ENTRY NextEntry;
          idSave = MessageQueue->idSysPeek;
          MessageQueue->idSysPeek = (ULONG_PTR)CurrentMessage;
 
@@ -2016,6 +2019,14 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
          UpdateKeyStateFromMsg(MessageQueue, &msg);
          AcceptMessage = co_IntProcessHardwareMessage(&msg, &Remove, &NotForUs, ExtraInfo, MsgFilterLow, MsgFilterHigh);
 
+         /* co_IntProcessHardwareMessage may re-enter and drop the win32k lock
+          * (e.g. the IME key callback in co_IntImmProcessKey), during which the
+          * hardware message list can be modified. CurrentMessage itself is
+          * protected from destruction while idSysPeek points at it, so re-read
+          * its Flink here to safely advance the walk; a pre-cached next pointer
+          * could have been freed by the re-entrant code. */
+         NextEntry = CurrentMessage->ListEntry.Flink;
+
          if (!NotForUs && (MsgFilterLow != 0 || MsgFilterHigh != 0))
          {
              /* Don't return message if not in range */
@@ -2023,6 +2034,7 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
              {
                  MessageQueue->msgDblClk = clk_msg;
                  MessageQueue->idSysPeek = idSave;
+                 ListHead = NextEntry;
                  continue;
              }
          }
@@ -2031,12 +2043,17 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
          {
              if (CurrentMessage->pti != NULL && (MessageQueue->idSysPeek == (ULONG_PTR)CurrentMessage))
              {
+                /* Destruction unlinks CurrentMessage; NextEntry was captured above. */
                 MsqDestroyMessage(CurrentMessage);
              }
              ClearMsgBitsMask(pti, QS_Flags);
          }
 
          MessageQueue->idSysPeek = idSave;
+
+         /* Advance from the re-validated next entry rather than a stale,
+          * possibly-freed pointer cached before the re-entrant processing. */
+         ListHead = NextEntry;
 
          if (NotForUs)
          {
@@ -2058,6 +2075,12 @@ co_MsqPeekHardwareMessage(IN PTHREADINFO pti,
             Ret = TRUE;
             break;
          }
+      }
+      else
+      {
+         /* This message is not for us: no re-entrant processing happened, so
+          * the entry is still valid and we can advance to its Flink. */
+         ListHead = CurrentMessage->ListEntry.Flink;
       }
    }
 
@@ -2133,6 +2156,25 @@ co_MsqWaitForNewMessages(PTHREADINFO pti, PWND WndFilter,
    if (pti->MessageQueue->QF_flags & QF_MOUSEMOVED)
    {
       IntCoalesceMouseMove(pti);
+   }
+
+   /* Re-check for pending sent messages at block time, while we still hold the
+      win32k lock. pEventQueueServer is an auto-reset (Synchronization) event, so
+      the wake of a cross-thread send (MsqWakeQueue -> KeSetEvent) is an edge, not
+      a level. A sender can queue a message and signal the event in the window
+      between the caller draining its sent-message list and this thread actually
+      arming the wait below; if that single edge has already been consumed (e.g. by
+      an earlier wake in the same idle cycle), the receiver would block forever with
+      a sent message still pending -> cross-thread SendMessage lost wakeup.
+
+      Wine keeps this wake level-triggered: req_get_message services pending sent
+      messages first and re-derives the wait signal from the current queue state
+      before blocking (server/queue.c). Mirror that invariant here by returning to
+      the caller (which re-peeks and dispatches) whenever the sent-message list is
+      already non-empty, instead of sleeping on the stale event. */
+   if (!IsListEmpty(&pti->SentMessagesListHead))
+   {
+      return STATUS_SUCCESS;
    }
 
    UserLeaveCo();
