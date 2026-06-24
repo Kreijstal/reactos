@@ -286,6 +286,16 @@ CcpPinData(
         if (NewBcb == NULL)
         {
             CcRosReleaseVacb(SharedCacheMap, Vacb, FALSE, FALSE);
+            /*
+             * A FALSE return means "couldn't pin without waiting", which is
+             * only valid for a non-waiting caller.  When PIN_WAIT is set the
+             * caller is promised either success or a raised exception, never
+             * FALSE (see CcMapData, which raises here too).  Returning FALSE
+             * to a waiting caller trips e.g. fastfat's FatPrepareWriteVolumeFile
+             * ASSERT and bugchecks under low memory, so raise instead.
+             */
+            if (BooleanFlagOn(Flags, PIN_WAIT))
+                ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
             return FALSE;
         }
     }
@@ -316,6 +326,15 @@ CcpPinData(
     {
         *Bcb = &NewBcb->PFCB;
         *Buffer = (PVOID)((ULONG_PTR)NewBcb->Vacb->BaseAddress + VacbOffset);
+    }
+    else if (BooleanFlagOn(Flags, PIN_WAIT))
+    {
+        /*
+         * CcRosEnsureVacbResident only returns FALSE for a waiting caller when
+         * the data could not be made resident due to low memory.  As above,
+         * a waiting caller must be given an exception rather than FALSE.
+         */
+        ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
     }
 
     return Result;
@@ -424,6 +443,15 @@ CcMapData (
     {
         *pBcb = &iBcb->PFCB;
         *pBuffer = (PVOID)((ULONG_PTR)iBcb->Vacb->BaseAddress + VacbOffset);
+    }
+    else if (BooleanFlagOn(Flags, MAP_WAIT))
+    {
+        /*
+         * A waiting caller is promised success or a raised exception, never
+         * FALSE.  CcRosEnsureVacbResident only fails a waiting caller on low
+         * memory, so raise it (the BCB-allocation path above raises too).
+         */
+        ExRaiseStatus(STATUS_INSUFFICIENT_RESOURCES);
     }
 
     CCTRACE(CC_API_DEBUG, "FileObject=%p FileOffset=%p Length=%lu Flags=0x%lx -> TRUE Bcb=%p, Buffer %p\n",
