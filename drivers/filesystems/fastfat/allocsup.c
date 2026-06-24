@@ -523,7 +523,8 @@ Arguments:
                                   Vcb->AllocationSupport.NumberOfClusters + 2 - 1,
                                   TRUE,
                                   NULL,
-                                  NULL);
+                                  NULL,
+                                  TRUE);
 
 
             //
@@ -553,7 +554,8 @@ Arguments:
                               0,
                               FALSE,
                               Vcb->CurrentWindow,
-                              NULL);
+                              NULL,
+                              TRUE);
 
         //
         //  Now set the ClusterHint to the first free bit in our favorite
@@ -2001,7 +2003,8 @@ Arguments:
                                               0,
                                               FALSE,
                                               Window,
-                                              NULL);
+                                              NULL,
+                                              FALSE);
 
                     } _SEH2_FINALLY {
 
@@ -2466,7 +2469,8 @@ Arguments:
                                           0,
                                           FALSE,
                                           &Vcb->Windows[FaveWindow],
-                                          NULL);
+                                          NULL,
+                                          FALSE);
 
                     if (!Wait) {
 
@@ -4772,7 +4776,8 @@ FatExamineFatEntries(
     IN ULONG EndIndex OPTIONAL,
     IN BOOLEAN SetupWindows,
     IN PFAT_WINDOW SwitchToWindow OPTIONAL,
-    IN PULONG BitMapBuffer OPTIONAL
+    IN PULONG BitMapBuffer OPTIONAL,
+    IN BOOLEAN MountTime
     )
 /*++
 
@@ -5308,7 +5313,8 @@ Return Value:
 
         if (Vcb->Bpb.Fats >= 2 &&
             BitMap != NULL &&
-            BitMapBuffer == NULL) {
+            BitMapBuffer == NULL &&
+            MountTime) {
 
             //
             //  Release the FAT0 BCB we still hold so the cache manager
@@ -5338,7 +5344,16 @@ Return Value:
         //  the dirent).  Skip when there is no real bitmap to update or when
         //  populating a transient caller buffer for GetVolumeBitmap.
         //
-        if (BitMap != NULL && BitMapBuffer == NULL) {
+        //  Gated on MountTime: the hazards both routines defend against are
+        //  static pre-existing on-disk states (a prior crash's FAT0/FAT1
+        //  divergence, or an external tool that cleared FAT entries without
+        //  clearing dirents).  Normal consistent allocation by this driver
+        //  cannot re-introduce them, so the reconcile only needs to run once,
+        //  during the mount-time bitmap build.  Running it on every runtime
+        //  FAT32 window switch made allocation O(window-switches x whole-volume
+        //  dirent tree) and crippled write throughput.
+        //
+        if (BitMap != NULL && BitMapBuffer == NULL && MountTime) {
 
             FatReconcileDirentBitmap(
                 IrpContext,
