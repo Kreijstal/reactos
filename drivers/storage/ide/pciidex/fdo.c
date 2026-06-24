@@ -666,7 +666,20 @@ PciIdeXPdoCreateDevice(
 
     PdoExtension->Channel = ChannelNumber;
     PdoExtension->ChanData = FdoExtension->Controller.Channels[ChannelNumber];
-    ASSERT(PdoExtension->ChanData);
+    if (!PdoExtension->ChanData)
+    {
+        /*
+         * The controller has advertised this channel in its bitmap, but the
+         * matching per-channel data block has not been published yet. This
+         * happens when a bus-relations query races the controller start that
+         * fills Controller->Channels[]. Don't dereference the NULL slot; tear
+         * down the half-built PDO and let the next enumeration pick it up once
+         * the channel data is in place.
+         */
+        ERR("CH %lu: Channel data not yet available, skipping\n", ChannelNumber);
+        IoDeleteDevice(Pdo);
+        return NULL;
+    }
     PdoExtension->ChanData->PdoExt = PdoExtension;
 
     Pdo->Flags &= ~DO_DEVICE_INITIALIZING;
