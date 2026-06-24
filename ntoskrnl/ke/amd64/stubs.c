@@ -341,8 +341,34 @@ KiIdleLoop(VOID)
         }
         else
         {
+#ifdef CONFIG_SMP
+            /*
+             * The idle loop runs at DISPATCH_LEVEL, which masks the
+             * DISPATCH_VECTOR reschedule IPI another processor sends (via
+             * KiIpiSend/IPI_DPC) when it readies a thread for us: at CR8 ==
+             * DISPATCH_LEVEL that vector's priority class is not greater than
+             * the processor priority, so the local APIC holds it pending and
+             * the halt is never woken by it -- only the periodic clock tick
+             * frees us, adding up to a full tick (~15 ms) of latency to every
+             * cross-processor wakeup. Drop to APC_LEVEL across the halt so the
+             * DISPATCH_VECTOR is deliverable (it still masks APC and below).
+             * A wakeup IPI made pending while interrupts were disabled here is
+             * delivered by the sti;hlt in the HAL idle routine. APC_LEVEL is
+             * restored to DISPATCH_LEVEL before the next loop iteration touches
+             * scheduler state. KiDpcInterruptHandler recognises the idle thread
+             * and leaves NextThread set for the switch below rather than
+             * enqueueing the idle thread itself. */
+            KeLowerIrql(APC_LEVEL);
+
             /* Continue staying idle. Note the HAL returns with interrupts on */
             Prcb->PowerState.IdleFunction(&Prcb->PowerState);
+
+            /* Back to DISPATCH_LEVEL before re-checking the scheduler state */
+            KfRaiseIrql(DISPATCH_LEVEL);
+#else
+            /* Continue staying idle. Note the HAL returns with interrupts on */
+            Prcb->PowerState.IdleFunction(&Prcb->PowerState);
+#endif
         }
     }
 }

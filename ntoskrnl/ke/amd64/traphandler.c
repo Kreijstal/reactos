@@ -64,19 +64,33 @@ KiDpcInterruptHandler(VOID)
         OldThread = Prcb->CurrentThread;
         NewThread = Prcb->NextThread;
 
-        /* Set new thread data */
-        Prcb->NextThread = NULL;
-        Prcb->CurrentThread = NewThread;
+        /*
+         * If a reschedule IPI broke the idle halt (see KiIdleLoop, which now
+         * idles at APC_LEVEL so this DISPATCH_VECTOR interrupt can be
+         * delivered), don't swap here: KxQueueReadyThread would put the idle
+         * thread onto the ready list. Leave NextThread set and return so the
+         * idle loop performs its idle-aware switch instead.
+         */
+        if (OldThread == Prcb->IdleThread)
+        {
+            KiReleasePrcbLock(Prcb);
+        }
+        else
+        {
+            /* Set new thread data */
+            Prcb->NextThread = NULL;
+            Prcb->CurrentThread = NewThread;
 
-        /* The thread is now running */
-        NewThread->State = Running;
-        OldThread->WaitReason = WrDispatchInt;
+            /* The thread is now running */
+            NewThread->State = Running;
+            OldThread->WaitReason = WrDispatchInt;
 
-        /* Make the old thread ready */
-        KxQueueReadyThread(OldThread, Prcb);
+            /* Make the old thread ready */
+            KxQueueReadyThread(OldThread, Prcb);
 
-        /* Swap to the new thread */
-        KiSwapContext(APC_LEVEL, OldThread);
+            /* Swap to the new thread */
+            KiSwapContext(APC_LEVEL, OldThread);
+        }
     }
 
     /* Disable interrupts and go back to old irql */
