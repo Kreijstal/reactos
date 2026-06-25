@@ -327,6 +327,7 @@ CWineTest::GetNextTestInfo()
             StringOut(e.GetMessage());
             StringOut("\n");
             m_CurrentFile.clear();
+            m_ListBuffer = NULL;
             m_ListString.clear();
         }
     }
