@@ -42,13 +42,24 @@ START_TEST(IoMdl)
 
     IoFreeMdl(Mdl);
 
-    // Test maximum size for an MDL
+    // Test maximum size for an MDL.
+    // Pre-Vista IoAllocateMdl rejected MDLs whose 16-bit Size field would
+    // overflow; Vista+ raised the limit to the 2GB cap, so these allocations
+    // succeed there. See IoAllocateMdl in ntoskrnl/io/iomgr/iomdl.c.
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize, FALSE, FALSE, NULL);
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    ok(Mdl != NULL, "Mdl allocation for %lu bytes failed\n", TooLargeMdlSize);
+#else
     ok(Mdl == NULL, "Mdl allocation for %lu bytes succeeded\n", TooLargeMdlSize);
+#endif
     if (Mdl) IoFreeMdl(Mdl);
 
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize - PAGE_SIZE + 1, FALSE, FALSE, NULL);
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    ok(Mdl != NULL, "Mdl allocation for %lu bytes failed\n", TooLargeMdlSize - PAGE_SIZE + 1);
+#else
     ok(Mdl == NULL, "Mdl allocation for %lu bytes succeeded\n", TooLargeMdlSize - PAGE_SIZE + 1);
+#endif
     if (Mdl) IoFreeMdl(Mdl);
 
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize - PAGE_SIZE, FALSE, FALSE, NULL);
