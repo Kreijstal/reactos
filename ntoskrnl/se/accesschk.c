@@ -2070,9 +2070,17 @@ SeAccessCheck(
 
     if (DesiredAccess == 0)
     {
-        *GrantedAccess = PreviouslyGrantedAccess;
-        *AccessStatus = STATUS_SUCCESS;
-        ret = TRUE;
+        if (PreviouslyGrantedAccess == 0)
+        {
+            *AccessStatus = STATUS_ACCESS_DENIED;
+            ret = FALSE;
+        }
+        else
+        {
+            *GrantedAccess = PreviouslyGrantedAccess;
+            *AccessStatus = STATUS_SUCCESS;
+            ret = TRUE;
+        }
     }
     else
     {
