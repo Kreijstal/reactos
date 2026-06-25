@@ -2627,6 +2627,17 @@ MmCreateArm3Section(OUT PVOID *SectionObject,
     return Status;
 }
 
+//
+// Windows 10 collapsed the parameter-indexed STATUS_INVALID_PARAMETER_N
+// mapping-validation failures in MmMapViewOfArm3Section/NtMapViewOfSection to a
+// bare STATUS_INVALID_PARAMETER. Gate on the build's NTDDI to match.
+//
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+#define MI_MAPVIEW_INVALID_PARAMETER(n) STATUS_INVALID_PARAMETER
+#else
+#define MI_MAPVIEW_INVALID_PARAMETER(n) STATUS_INVALID_PARAMETER_##n
+#endif
+
 /*
  * @implemented
  */
@@ -2680,7 +2691,7 @@ MmMapViewOfArm3Section(
     if ((AllocationType & MEM_RESERVE) != 0)
     {
         DPRINT1("MEM_RESERVE is not valid for a pagefile-backed section\n");
-        return STATUS_INVALID_PARAMETER_9;
+        return MI_MAPVIEW_INVALID_PARAMETER(9);
     }
 
     /* Check if the mapping protection is compatible with the create */
@@ -3433,7 +3444,7 @@ NtMapViewOfSection(
     if (AllocationType & ~ValidAllocationType)
     {
         DPRINT1("Invalid allocation type\n");
-        return STATUS_INVALID_PARAMETER_9;
+        return MI_MAPVIEW_INVALID_PARAMETER(9);
     }
 
     /* Convert the protection mask, and validate it */
@@ -3484,14 +3495,14 @@ NtMapViewOfSection(
     if (SafeBaseAddress > MM_HIGHEST_VAD_ADDRESS)
     {
         DPRINT1("Kernel base not allowed\n");
-        return STATUS_INVALID_PARAMETER_3;
+        return MI_MAPVIEW_INVALID_PARAMETER(3);
     }
 
     /* Check for range entering kernel-mode */
     if (((ULONG_PTR)MM_HIGHEST_VAD_ADDRESS - (ULONG_PTR)SafeBaseAddress) < SafeViewSize)
     {
         DPRINT1("Overflowing into kernel base not allowed\n");
-        return STATUS_INVALID_PARAMETER_3;
+        return MI_MAPVIEW_INVALID_PARAMETER(3);
     }
 
     /* Check for invalid zero bits */
@@ -3515,14 +3526,14 @@ NtMapViewOfSection(
             if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestZeroBitsAddress))
             {
                 DPRINT1("Invalid zero bits\n");
-                return STATUS_INVALID_PARAMETER_4;
+                return MI_MAPVIEW_INVALID_PARAMETER(4);
             }
 
             if (SafeBaseAddress != NULL &&
                 ((ULONG_PTR)SafeBaseAddress + SafeViewSize - 1) > HighestZeroBitsAddress)
             {
                 DPRINT1("Base address violates zero bits\n");
-                return STATUS_INVALID_PARAMETER_4;
+                return MI_MAPVIEW_INVALID_PARAMETER(4);
             }
         }
 #else
