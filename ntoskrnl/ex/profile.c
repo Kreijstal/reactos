@@ -102,17 +102,19 @@ NtCreateProfile(OUT PHANDLE ProfileHandle,
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
-    ULONG Log2 = 0;
     ULONG_PTR Segment = 0;
-    ULONG BucketsRequired;
+    SIZE_T BucketsRequired;
     PAGED_CODE();
 
     /* Easy way out */
     if(!BufferSize) return STATUS_INVALID_PARAMETER_7;
 
+#ifndef _WIN64
     /* Check if this is a low-memory profile */
     if ((!BucketSize) && (RangeBase < (PVOID)(0x10000)))
     {
+        ULONG Log2 = 0;
+
         /* Validate size */
         if (BufferSize < sizeof(ULONG)) return STATUS_INVALID_PARAMETER_7;
 
@@ -128,6 +130,7 @@ NtCreateProfile(OUT PHANDLE ProfileHandle,
         while (BucketSize >>= 1) Log2++;
         BucketSize += Log2 + 1;
     }
+#endif
 
     /* Validate bucket size */
     if ((BucketSize > 31) || (BucketSize < 2))
@@ -138,7 +141,7 @@ NtCreateProfile(OUT PHANDLE ProfileHandle,
 
     /* Make sure that the buckets can map the range */
     BucketsRequired = RangeSize >> BucketSize;
-    if (RangeSize & ((1 << BucketSize) - 1))
+    if (RangeSize & (((SIZE_T)1 << BucketSize) - 1))
     {
         BucketsRequired++;
     }
