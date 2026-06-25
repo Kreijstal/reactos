@@ -633,7 +633,15 @@ RepeatChainedInfo:
                 break;
 
             case UWOP_SPARE_CODE:
-                ASSERT(FALSE);
+                /* UWOP_SPARE_CODE (formerly the deprecated 64-bit UWOP_SAVE_XMM_FAR)
+                 * has no effect on the unwound context: it is a placeholder that
+                 * only consumes its 3 unwind-code slots.  It can legitimately be
+                 * present in the unwind data, so it must NOT raise or assert here.
+                 * Windows (and Wine's RtlVirtualUnwind, dlls/ntdll/unwind.c) simply
+                 * skip it and keep interpreting the remaining codes.  Asserting
+                 * raised STATUS_ASSERTION_FAILURE from inside the unwinder, which
+                 * - dispatched while still unwinding - escaped the caller's handler
+                 * and terminated the process. */
                 i += 3;
                 break;
 
