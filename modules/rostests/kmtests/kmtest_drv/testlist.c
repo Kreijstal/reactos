@@ -29,6 +29,8 @@ KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
+KMT_TESTFUNC Test_FatPerf;
+KMT_TESTFUNC Test_CmResize;
 #if defined(_M_IX86) || defined(_M_AMD64)
 KMT_TESTFUNC Test_HalPortIo;
 #endif
@@ -59,6 +61,7 @@ KMT_TESTFUNC Test_MmForceSectionClosed;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
 KMT_TESTFUNC Test_MmReservedMapping;
+KMT_TESTFUNC Test_MmVadLock;
 KMT_TESTFUNC Test_NpfsConnect;
 KMT_TESTFUNC Test_NpfsCreate;
 KMT_TESTFUNC Test_NpfsFileInfo;
@@ -123,6 +126,8 @@ const KMT_TEST TestList[] =
     { "FsRtlMcb",                           Test_FsRtlMcb },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
+    { "FatPerf",                            Test_FatPerf },
+    { "CmResize",                           Test_CmResize },
 #if defined(_M_IX86) || defined(_M_AMD64)
     { "HalPortIo",                          Test_HalPortIo },
 #endif
@@ -153,6 +158,7 @@ const KMT_TEST TestList[] =
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
     { "MmReservedMapping",                  Test_MmReservedMapping },
+    { "MmVadLock",                          Test_MmVadLock },
     { "NpfsConnect",                        Test_NpfsConnect },
     { "NpfsCreate",                         Test_NpfsCreate },
     { "NpfsFileInfo",                       Test_NpfsFileInfo },
