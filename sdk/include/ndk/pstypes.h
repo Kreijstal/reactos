@@ -1616,6 +1616,15 @@ typedef struct _ETHREAD
     //
     PVOID HeldPushLocks[8];
     UCHAR HeldPushLockCount;
+    //
+    // Number of currently-held push-locks that did NOT fit in HeldPushLocks[]
+    // because the array was already full when they were acquired. While this
+    // is non-zero the tracker cannot prove a given lock is *not* held, so
+    // ExPushLockIsOwnedByCurrentThread() answers conservatively (TRUE) rather
+    // than denying ownership of a genuinely-held lock (which would trip the
+    // OR'd VAD read-lock ASSERTs in vadnode.c during deep push-lock nesting).
+    //
+    UCHAR HeldPushLockOverflow;
 } ETHREAD;
 
 //
