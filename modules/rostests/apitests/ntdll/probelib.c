@@ -339,6 +339,20 @@ QuerySetThreadValidator(
                 }
             }
 
+            /*
+             * For classes whose required alignment is 1 (or 0), the
+             * "misaligned" probe address (PVOID)1 is in fact correctly
+             * aligned, so the kernel does not raise STATUS_DATATYPE_MISALIGNMENT.
+             * It instead proceeds to dereference the (invalid) address 1 and
+             * raises STATUS_ACCESS_VIOLATION. This is what Windows does too.
+             */
+            if (ExpectedStatus == STATUS_DATATYPE_MISALIGNMENT &&
+                PsThreadInfoClass[InfoClassIndex].AlignmentQUERY <= 1 &&
+                InfoPointer == (PVOID)(ULONG_PTR)1)
+            {
+                ExpectedStatus = STATUS_ACCESS_VIOLATION;
+            }
+
             /* Query the information */
             Status = NtQueryInformationThread(NtCurrentThread(),
                                               InfoClassIndex,
