@@ -511,7 +511,9 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
 #endif
         sizeof(BOOLEAN), /* Query value is a BOOLEAN: 1-byte alignment */
         0, /* No size for Set */
-        sizeof(ULONG),
+        sizeof(BOOLEAN), /* Set takes no buffer; align to BOOLEAN so the
+                          * length check (length != 0) fires instead of a
+                          * spurious STATUS_DATATYPE_MISALIGNMENT */
 #if (NTDDI_VERSION >= NTDDI_VISTA)
         ICIF_QUERY |
 #endif
