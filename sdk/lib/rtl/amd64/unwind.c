@@ -992,6 +992,21 @@ RtlpUnwindInternal(
                        will run any additional handlers from the previous
                        unwind. */
                     ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+
+                    /* The TARGET_UNWIND flag was cleared above for the next
+                       iteration. The collided handler may be the one installed
+                       on the target frame itself; re-evaluate the flag for the
+                       restored establisher frame so the language handler is told
+                       it is the target. The libgcc/GCC C++ personality relies on
+                       this: at the target frame it just installs the landing-pad
+                       Rdx and returns, whereas without the flag it would
+                       (re-)issue a nested RtlUnwindEx to that same frame and
+                       never converge (recursing until the stack is exhausted). */
+                    if (EstablisherFrame == (ULONG64)TargetFrame)
+                    {
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_TARGET_UNWIND;
+                    }
+
                     continue;
                 }
 
