@@ -82,8 +82,8 @@ QuerySetProcessValidator(
 
                 case ProcessForegroundInformation:
                 {
-                    if (ExpectedStatus != STATUS_DATATYPE_MISALIGNMENT)
-                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    /* SET-only class, so a query always returns STATUS_INVALID_INFO_CLASS (including the misaligned sub-test). */
+                    SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     break;
                 }
 
