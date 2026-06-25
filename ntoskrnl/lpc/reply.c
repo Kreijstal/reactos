@@ -149,8 +149,11 @@ LpcpMoveMessage(IN PPORT_MESSAGE Destination,
              Data,
              Origin->u1.Length);
 
-    /* Set the Message size */
-    Destination->u1.Length = Origin->u1.Length;
+    /* Copy DataLength but deliver the canonical unpadded TotalLength that
+     * Windows reports: sizeof(PORT_MESSAGE) + DataLength (no trailing struct
+     * alignment padding). Matches the connection-request path (reply.c ~667). */
+    Destination->u1.s1.DataLength = Origin->u1.s1.DataLength;
+    Destination->u1.s1.TotalLength = (CSHORT)(sizeof(PORT_MESSAGE) + Origin->u1.s1.DataLength);
 
     /* Set the Message Type */
     Destination->u2.s2.Type = !MessageType ?
