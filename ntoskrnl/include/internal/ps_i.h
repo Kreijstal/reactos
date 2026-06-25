@@ -509,7 +509,7 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
 #else
         0,
 #endif
-        sizeof(ULONG), // UCHAR
+        sizeof(BOOLEAN), /* Query value is a BOOLEAN: 1-byte alignment */
         0, /* No size for Set */
         sizeof(ULONG),
 #if (NTDDI_VERSION >= NTDDI_VISTA)
