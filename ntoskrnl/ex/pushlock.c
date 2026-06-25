@@ -45,11 +45,17 @@ ULONG ExPushLockSpinCount = 0;
  * already holds would be a real bug, but we don't assert here since
  * the array cannot tell exclusive from shared slots.
  *
- * Overflow policy: if the array is full we stop tracking silently.
- * Overflow loses fidelity for the helper (it may return FALSE for a
- * lock that is in fact held), but it does not affect the lock's
- * correctness and never trips a false ASSERT because the affected
- * assertions are always OR'd with another verifiable condition.
+ * Overflow policy: if the array is full we cannot record a further lock
+ * by identity, so we count it in HeldPushLockOverflow instead. While that
+ * count is non-zero the helper can no longer prove a given lock is NOT
+ * held and therefore answers conservatively (TRUE). This trades some
+ * precision (it may claim ownership of a lock that is not actually held
+ * while the thread is deeply nested) for soundness: it never DENIES a
+ * genuinely-held lock. The previous "drop silently" policy did deny held
+ * locks on overflow, which false-tripped the VAD read-lock ASSERTs in
+ * vadnode.c whose other OR'd half (MI_WS_OWNER) is legitimately FALSE for
+ * callers that hold only AddressCreationLock (e.g. MiInsertVadEx reading
+ * the VAD tree before it locks the working set).
  */
 VOID
 NTAPI
@@ -63,8 +69,15 @@ ExpTrackAcquirePushLock(PEX_PUSH_LOCK PushLock)
     Count = Thread->HeldPushLockCount;
     if (Count >= RTL_NUMBER_OF(Thread->HeldPushLocks))
     {
-        /* Tracking array overflowed; silently stop recording.
-         * Fidelity suffers but correctness is unaffected. */
+        /* Tracking array is full: we cannot record this lock by identity, but
+         * we must still remember that an extra lock is held so the query
+         * helper does not later deny ownership of a genuinely-held lock.
+         * Count the overflow instead of dropping it silently. The depth can
+         * never realistically approach MAXUCHAR (that many nested push-lock
+         * acquisitions would exhaust the kernel stack first), but clamp
+         * defensively so a wrap cannot unbalance the bookkeeping. */
+        if (Thread->HeldPushLockOverflow != MAXUCHAR)
+            Thread->HeldPushLockOverflow++;
         return;
     }
 
@@ -99,10 +112,14 @@ ExpTrackReleasePushLock(PEX_PUSH_LOCK PushLock)
         }
     }
 
-    /* No matching entry. Either we overflowed on acquire or the
-     * caller is releasing a lock they never acquired (real bug).
-     * Keep silent here; the surrounding lock machinery will catch
-     * the latter via its own invariants. */
+    /* No matching entry. Most likely this lock overflowed the array on
+     * acquire (the array was full at the time), so unwind one unit of the
+     * overflow bookkeeping to keep it balanced with the acquire side. If the
+     * overflow count is already zero the caller is releasing a lock it never
+     * acquired (a real bug) -- stay silent; the surrounding lock machinery
+     * will catch that via its own invariants. */
+    if (Thread->HeldPushLockOverflow > 0)
+        Thread->HeldPushLockOverflow--;
 }
 
 /*++
@@ -134,6 +151,13 @@ ExPushLockIsOwnedByCurrentThread(PEX_PUSH_LOCK PushLock)
     {
         if (Thread->HeldPushLocks[i] == PushLock) return TRUE;
     }
+
+    /* The lock is not in the array. If the per-thread tracker overflowed at
+     * some point it may have dropped this very lock on acquire, so we cannot
+     * prove the lock is NOT held. Answer conservatively to avoid a false
+     * negative that would trip an ownership ASSERT for a lock that is, in
+     * fact, held. */
+    if (Thread->HeldPushLockOverflow > 0) return TRUE;
 
     return FALSE;
 }
