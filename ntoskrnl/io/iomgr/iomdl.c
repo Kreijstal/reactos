@@ -42,7 +42,16 @@ IoAllocateMdl(IN PVOID VirtualAddress,
         /* This is bigger then our fixed-size MDLs. Calculate real size */
         Size *= sizeof(PFN_NUMBER);
         Size += sizeof(MDL);
-        if (Size > MAXUSHORT) return NULL;
+
+        /*
+         * Note: the 16-bit MDL.Size field cannot encode an MDL larger than
+         * MAXUSHORT bytes, but no consumer derives the PFN-array length from
+         * it (the count comes from ByteCount). Pre-Vista IoAllocateMdl still
+         * rejected such MDLs; Vista+ raised the limit to the 2GB cap already
+         * enforced above (Length & 0x80000000). Match Vista+ and allow the
+         * allocation -- MmInitializeMdl writes a truncated Size that is never
+         * used for bounds.
+         */
     }
     else
     {
