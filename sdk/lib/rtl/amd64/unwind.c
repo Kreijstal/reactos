@@ -899,7 +899,15 @@ RtlpUnwindInternal(
             DispatcherContext.FunctionEntry = FunctionEntry;
             DispatcherContext.LanguageHandler = ExceptionRoutine;
             DispatcherContext.EstablisherFrame = EstablisherFrame;
-            DispatcherContext.ContextRecord = &HandlerContext;
+            /* During an unwind, the language handler is allowed to modify the
+               context that gets restored at the target frame (e.g. to set up
+               the landing pad registers). The GCC/libgcc personality routine
+               relies on this to pass the catch "selector" to the landing pad
+               in Rdx. We therefore point the dispatcher context at the actual
+               context that will be restored. For exception handling we use the
+               pre-unwind snapshot, so the handler observes the faulting frame. */
+            DispatcherContext.ContextRecord =
+                (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &HandlerContext;
             DispatcherContext.ScopeIndex = 0;
 
             /* Store the return value in the unwind context */
