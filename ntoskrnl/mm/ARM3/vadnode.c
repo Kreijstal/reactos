@@ -353,6 +353,18 @@ MiInsertVadEx(
         StartingAddress = ALIGN_DOWN_BY(*BaseAddress, Alignment);
         EndingAddress = StartingAddress + ViewSize - 1;
 
+        /* Reject fixed allocations below the lowest user address */
+        if (StartingAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS)
+        {
+            DPRINT("Given address is below the lowest user address\n");
+            #if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
+#else
+    KeReleaseGuardedMutex(&CurrentProcess->AddressCreationLock);
+#endif
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+
         /* Make sure it doesn't conflict with an existing allocation */
         Result = MiCheckForConflictingNode(StartingAddress >> PAGE_SHIFT,
                                            EndingAddress >> PAGE_SHIFT,
