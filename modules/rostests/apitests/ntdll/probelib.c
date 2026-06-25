@@ -323,6 +323,19 @@ QuerySetThreadValidator(
                     {
                         SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     }
+                    /*
+                     * Windows-7-and-above classes that the kernel table does not
+                     * expose as queryable (no ICIF_QUERY flag: set-only classes,
+                     * classes introduced in a later build than the running one, or
+                     * classes Windows has no validation entry for at all) return
+                     * STATUS_INVALID_INFO_CLASS from the pre-switch buffer check,
+                     * since the generic misalignment/length probe never runs.
+                     */
+                    else if ((InfoClassIndex >= ThreadCSwitchPmu) &&
+                             !(PsThreadInfoClass[InfoClassIndex].Flags & ICIF_QUERY))
+                    {
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    }
                 }
             }
 
@@ -416,6 +429,19 @@ QuerySetThreadValidator(
                           (GetNTVersion() < _WIN32_WINNT_WINBLUE)) ||
                          ((InfoClassIndex >= ThreadHeterogeneousCpuPolicy) &&
                           (GetNTVersion() < _WIN32_WINNT_WIN10)) )
+                    {
+                        SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    }
+                    /*
+                     * Windows-7-and-above classes that the kernel table does not
+                     * expose as settable (no ICIF_SET flag: query-only classes,
+                     * classes introduced in a later build than the running one, or
+                     * classes Windows has no validation entry for at all) return
+                     * STATUS_INVALID_INFO_CLASS from the pre-switch buffer check,
+                     * since the generic misalignment/length probe never runs.
+                     */
+                    else if ((InfoClassIndex >= ThreadCSwitchPmu) &&
+                             !(PsThreadInfoClass[InfoClassIndex].Flags & ICIF_SET))
                     {
                         SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     }

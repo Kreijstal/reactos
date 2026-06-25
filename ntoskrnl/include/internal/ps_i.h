@@ -542,43 +542,61 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
         ICIF_QUERY
     ),
 
-    /* ThreadLastSystemCall */
+    /* ThreadLastSystemCall (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadIoPriority */
+    /* ThreadIoPriority (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadCycleTime */
+    /* ThreadCycleTime (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadPagePriority */
+    /* ThreadPagePriority (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadActualBasePriority */
+    /* ThreadActualBasePriority (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadTebInformation */
+    /* ThreadTebInformation (covered by probelib special-case) */
     IQS_NONE,
 
-    /* ThreadCSwitchMon */
+    /* ThreadCSwitchMon -- no table entry on Windows */
     IQS_NONE,
 
-// TODO: Specify the probing info when implementing these classes (see commit 60aad33ed0 PR #8487)
-// and adjust rostests/apitests/ntdll/probelib.c!QuerySetThreadValidator() as necessary.
-#if 1
     // Windows 7
-    /* ThreadCSwitchPmu */
+    /* ThreadCSwitchPmu -- no table entry on Windows */
     IQS_NONE,
-    /* ThreadWow64Context */
+    /* ThreadWow64Context -- variable handling; left unvalidated (see probelib.c) */
     IQS_NONE,
+
     /* ThreadGroupInformation */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    IQS_SAME
+    (
+        GROUP_AFFINITY,
+        ULONGLONG,
+        ICIF_QUERY | ICIF_SET
+    ),
+#else
     IQS_NONE,
+#endif
+
     /* ThreadUmsInformation */
     IQS_NONE,
     /* ThreadCounterProfiling */
     IQS_NONE,
+
     /* ThreadIdealProcessorEx */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    IQS_SAME
+    (
+        PROCESSOR_NUMBER,
+        USHORT,
+        ICIF_QUERY | ICIF_SET
+    ),
+#else
     IQS_NONE,
+#endif
 
     // Windows 8
     /* ThreadCpuAccountingInformation */
@@ -586,13 +604,41 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
 
     // Windows 8.1
     /* ThreadSuspendCount */
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
+#else
     IQS_NONE,
+#endif
 
     // Windows 10
     /* ThreadHeterogeneousCpuPolicy */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        ULONG, // KHETERO_CPU_POLICY
+        ULONG,
+        ICIF_QUERY
+    ),
+#else
     IQS_NONE,
+#endif
+
     /* ThreadContainerId */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        GUID,
+        ULONG, // GUID's natural alignment is that of its leading ULONG (Data1)
+        ICIF_QUERY
+    ),
+#else
     IQS_NONE,
+#endif
 
     /* ThreadNameInformation */
     IQS_SAME
@@ -602,31 +648,134 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
         ICIF_QUERY | ICIF_SET | ICIF_SIZE_VARIABLE
     ),
 
-    /* ThreadSelectedCpuSets */
-    IQS_NONE,
-    /* ThreadSystemThreadInformation */
-    IQS_NONE,
-    /* ThreadActualGroupAffinity */
+    /* ThreadSelectedCpuSets (variable; covered by probelib special-case) */
     IQS_NONE,
 
+    /* ThreadSystemThreadInformation (Win10+; SYSTEM_THREAD_INFORMATION, query-only) */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        SYSTEM_THREAD_INFORMATION,
+        ULONGLONG,
+        ICIF_QUERY
+    ),
+#else
+    IQS_NONE,
+#endif
+
+    /* ThreadActualGroupAffinity */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        GROUP_AFFINITY,
+        ULONGLONG,
+        ICIF_QUERY
+    ),
+#else
+    IQS_NONE,
+#endif
+
     /* ThreadDynamicCodePolicyInfo */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
+#else
     IQS_NONE,
+#endif
+
     /* ThreadExplicitCaseSensitivity */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
+#else
     IQS_NONE,
-    /* ThreadWorkOnBehalfTicket */
+#endif
+
+    /* ThreadWorkOnBehalfTicket (Win10+; ALPC_WORK_ON_BEHALF_TICKET, 8 bytes, query + set) */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        ULONGLONG, // ALPC_WORK_ON_BEHALF_TICKET (2x ULONG)
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
+#else
     IQS_NONE,
-    /* ThreadSubsystemInformation */
+#endif
+
+    /* ThreadSubsystemInformation (Win10+; SUBSYSTEM_INFORMATION_TYPE == ULONG, query-only) */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY
+    ),
+#else
     IQS_NONE,
-    /* ThreadDbgkWerReportActive */
+#endif
+
+    /* ThreadDbgkWerReportActive (Win10+; BOOLEAN, set-only) */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS
+    (
+        CHAR,
+        CHAR,
+        BOOLEAN,
+        UCHAR,
+        ICIF_SET
+    ),
+#else
     IQS_NONE,
-    /* ThreadAttachContainer */
+#endif
+
+    /* ThreadAttachContainer (Win10+; HANDLE, set-only) */
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+    IQS_SAME
+    (
+        HANDLE,
+        ULONGLONG,
+        ICIF_SET
+    ),
+#else
     IQS_NONE,
-    /* ThreadManageWritesToExecutableMemory */
+#endif
+
+    /* ThreadManageWritesToExecutableMemory (variable; covered by probelib special-case) */
     IQS_NONE,
-    /* ThreadPowerThrottlingState */
+
+    /* ThreadPowerThrottlingState (Win10 RS3+; THREAD_POWER_THROTTLING_STATE, 12 bytes, set-only) */
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS3)
+    {
+        0,
+        sizeof(ULONG),
+        3 * sizeof(ULONG), // THREAD_POWER_THROTTLING_STATE (Version, ControlMask, StateMask)
+        sizeof(ULONG),
+        ICIF_SET
+    },
+#else
     IQS_NONE,
-    /* ThreadWorkloadClass */
+#endif
+
+    /* ThreadWorkloadClass (Win10 RS5+; THREAD_WORKLOAD_CLASS == ULONG, set-only) */
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS5)
+    IQS_SAME
+    (
+        ULONG, // THREAD_WORKLOAD_CLASS
+        ULONG,
+        ICIF_SET
+    ),
+#else
     IQS_NONE,
+#endif
     /* ThreadCreateStateChange */
     IQS_NONE,
     /* ThreadApplyStateChange */
@@ -637,5 +786,4 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     IQS_NONE,
     /* ThreadEffectivePagePriority */
     IQS_NONE,
-#endif
 };
