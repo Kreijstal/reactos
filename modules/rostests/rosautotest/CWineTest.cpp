@@ -48,7 +48,7 @@ CWineTest::~CWineTest()
         FindClose(m_hFind);
 
     if(m_ListBuffer)
-        delete m_ListBuffer;
+        delete[] m_ListBuffer;
 }
 
 /**
@@ -304,6 +304,7 @@ CWineTest::GetNextTestInfo()
             StringOut("\n");
             m_CurrentFile.clear();
             delete[] m_ListBuffer;
+            m_ListBuffer = NULL;
         }
     }
 
