@@ -75,6 +75,8 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_fsrtl/FsRtlLegal.c
     ntos_fsrtl/FsRtlMcb.c
     ntos_fsrtl/FsRtlTunnel.c
+    ntos_io/FatPerf.c
+    ntos_io/CmResize.c
     ntos_io/IoCreateFile.c
     ntos_io/IoDeviceInterface.c
     ntos_io/IoEvent.c
@@ -100,6 +102,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_mm/MmMdl.c
     ntos_mm/MmReservedMapping.c
     ntos_mm/MmSection.c
+    ntos_mm/MmVadLock.c
     ntos_mm/ZwAllocateVirtualMemory.c
     ntos_mm/ZwCreateSection.c
     ntos_mm/ZwMapViewOfSection.c
