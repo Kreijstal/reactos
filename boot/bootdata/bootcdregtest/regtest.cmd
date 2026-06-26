@@ -21,4 +21,13 @@ if exist "%WINDIR%\bin\AHKAppTests.cmd" (
 
 dbgprint --process "ipconfig"
 cd "%WINDIR%\bin"
-start rosautotest /r /s /n
+:: A host control disk, if attached, names the test(s) to run; otherwise run
+:: the full regression suite. ROSTEST.CMD is written by the host rostest
+:: runner and holds a single rosautotest invocation that shuts the VM down.
+set ROSTEST_SEL=
+for %%d in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist %%d:\ROSTEST.CMD set ROSTEST_SEL=%%d:\ROSTEST.CMD
+if defined ROSTEST_SEL (
+    call "%ROSTEST_SEL%"
+) else (
+    start rosautotest /r /s /n
+)
