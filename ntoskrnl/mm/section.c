@@ -208,16 +208,22 @@ static ULONG SectionCharacteristicsToProtect[16] =
     PAGE_EXECUTE_READ,      /* 6 = READABLE, EXECUTABLE */
     PAGE_EXECUTE_READ,      /* 7 = READABLE, EXECUTABLE, SHARED */
     /*
-     * FIXME? do we really need the WriteCopy field in segments? can't we use
-     * PAGE_WRITECOPY here?
+     * A writable, non-shared image section is mapped copy-on-write, exactly
+     * like Windows: the per-page protection is reported as PAGE_WRITECOPY /
+     * PAGE_EXECUTE_WRITECOPY until the page is actually written, at which point
+     * the COW fault realizes a private PAGE_READWRITE / PAGE_EXECUTE_READWRITE
+     * copy. A writable *shared* image section (SHARED bit set, i.e. the odd
+     * indices below) is not copy-on-write and stays PAGE_READWRITE /
+     * PAGE_EXECUTE_READWRITE. This matches Segment->WriteCopy, which is set to
+     * !(IMAGE_SCN_MEM_SHARED) below.
      */
-    PAGE_READWRITE,         /* 8 = WRITABLE */
+    PAGE_WRITECOPY,         /* 8 = WRITABLE */
     PAGE_READWRITE,         /* 9 = WRITABLE, SHARED */
-    PAGE_EXECUTE_READWRITE, /* 10 = WRITABLE, EXECUTABLE */
+    PAGE_EXECUTE_WRITECOPY, /* 10 = WRITABLE, EXECUTABLE */
     PAGE_EXECUTE_READWRITE, /* 11 = WRITABLE, EXECUTABLE, SHARED */
-    PAGE_READWRITE,         /* 12 = WRITABLE, READABLE */
+    PAGE_WRITECOPY,         /* 12 = WRITABLE, READABLE */
     PAGE_READWRITE,         /* 13 = WRITABLE, READABLE, SHARED */
-    PAGE_EXECUTE_READWRITE, /* 14 = WRITABLE, READABLE, EXECUTABLE */
+    PAGE_EXECUTE_WRITECOPY, /* 14 = WRITABLE, READABLE, EXECUTABLE */
     PAGE_EXECUTE_READWRITE, /* 15 = WRITABLE, READABLE, EXECUTABLE, SHARED */
 };
 
@@ -2203,6 +2209,21 @@ MmProtectSectionView(PMMSUPPORT AddressSpace,
                           BaseAddress, NULL);
     ASSERT(Region != NULL);
 
+    /* A writable, copy-on-write image page can never become plain
+     * PAGE_READWRITE / PAGE_EXECUTE_READWRITE while it is still shared with the
+     * image segment: it must stay copy-on-write until it is actually written.
+     * Windows therefore silently maps a PAGE_READWRITE / PAGE_EXECUTE_READWRITE
+     * request on such a page back to PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY,
+     * and VirtualQuery reports the WRITECOPY protection accordingly. */
+    if ((MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap) &&
+        MemoryArea->SectionData.Segment->WriteCopy)
+    {
+        if (Protect == PAGE_READWRITE)
+            Protect = PAGE_WRITECOPY;
+        else if (Protect == PAGE_EXECUTE_READWRITE)
+            Protect = PAGE_EXECUTE_WRITECOPY;
+    }
+
     if ((MemoryArea->Flags & SEC_NO_CHANGE) &&
             Region->Protect != Protect)
     {
@@ -3522,16 +3543,21 @@ MmMapViewOfSegment(
 
     ASSERT(ViewSize != 0);
 
-    if (Segment->WriteCopy)
+    if (Segment->WriteCopy && !AsImage)
     {
-        /* We have to do this because the not present fault
-         * and access fault handlers depend on the protection
-         * that should be granted AFTER the COW fault takes
-         * place to be in Region->Protect. The not present fault
-         * handler changes this to the correct protection for COW when
-         * mapping the pages into the process's address space. If a COW
-         * fault takes place, the access fault handler sets the page protection
-         * to these values for the newly copied pages
+        /* For data sections we keep the legacy contract: the not present fault
+         * and access fault handlers expect the protection that should be
+         * granted AFTER the COW fault takes place to be in Region->Protect.
+         * The not present fault handler maps the pages read-only so the first
+         * write faults; the access fault handler then sets the page protection
+         * to these values for the newly copied pages.
+         *
+         * Image sections are handled differently below: they must report
+         * PAGE_WRITECOPY / PAGE_EXECUTE_WRITECOPY until the page is actually
+         * written, to match Windows, so we keep the WRITECOPY protection in
+         * Region->Protect. The not present fault handler maps such a page with
+         * a copy-on-write PTE (read-only at the hardware level), and the access
+         * fault handler flips Region->Protect to READWRITE on the first write.
          */
         if (Protect == PAGE_WRITECOPY)
             Protect = PAGE_READWRITE;
