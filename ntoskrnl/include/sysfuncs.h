@@ -314,4 +314,7 @@
 #if (NTDDI_VERSION >= 0x06000000)
     SVC_(CreateUserProcess, 11)
 #endif
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    SVC_(QuerySystemInformationEx, 6)
+#endif
 #endif
