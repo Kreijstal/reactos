@@ -3194,6 +3194,151 @@ NtQuerySystemInformation(
     return Status;
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+
+/*
+ * SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION lives in the user-mode
+ * winnt.h (sdk/include/xdk/winnt_old.h), which the kernel does not include, so
+ * mirror its layout locally for the SystemSupportedProcessorArchitectures query.
+ */
+typedef struct _SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION
+{
+    ULONG Machine : 16;
+    ULONG KernelMode : 1;
+    ULONG UserMode : 1;
+    ULONG Native : 1;
+    ULONG Process : 1;
+    ULONG WoW64Container : 1;
+    ULONG ReservedZero0 : 11;
+} SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION;
+
+/* Native arch entry + (on amd64) the emulated 32-bit entry + a zero terminator */
+#define MAX_SUPPORTED_ARCHITECTURES 4
+
+__kernel_entry
+NTSTATUS
+NTAPI
+NtQuerySystemInformationEx(
+    _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    _In_reads_bytes_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_to_opt_(SystemInformationLength, *ReturnLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength)
+{
+    NTSTATUS Status = STATUS_INVALID_INFO_CLASS;
+    KPROCESSOR_MODE PreviousMode;
+    ULONG ResultLength = 0;
+
+    PAGED_CODE();
+
+    PreviousMode = ExGetPreviousMode();
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForRead(InputBuffer, InputBufferLength, sizeof(ULONG));
+            ProbeForWrite(SystemInformation, SystemInformationLength, sizeof(ULONG));
+            if (ReturnLength != NULL)
+                ProbeForWriteUlong(ReturnLength);
+        }
+
+        switch (SystemInformationClass)
+        {
+            case SystemSupportedProcessorArchitectures:
+            {
+                SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION Archs[MAX_SUPPORTED_ARCHITECTURES];
+                HANDLE ProcessHandle;
+                PEPROCESS Process = NULL;
+                BOOLEAN HaveProcess = FALSE;
+                BOOLEAN TargetIs32 = FALSE;
+                ULONG Count = 0;
+
+                /* The input buffer holds the process handle to query */
+                if (InputBufferLength < sizeof(HANDLE))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+                ProcessHandle = *(PHANDLE)InputBuffer;
+
+                /* A NULL handle queries the architectures with no process selected */
+                if (ProcessHandle != NULL)
+                {
+                    Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                       PROCESS_QUERY_LIMITED_INFORMATION,
+                                                       PsProcessType,
+                                                       PreviousMode,
+                                                       (PVOID*)&Process,
+                                                       NULL);
+                    if (!NT_SUCCESS(Status))
+                        break;
+
+                    HaveProcess = TRUE;
+
+                    /*
+                     * Wow64Process is non-NULL for 32-bit processes. (PVOID)TRUE
+                     * is a transient init-time sentinel that does not yet denote a
+                     * real WoW64 process (see IoIs32bitProcess).
+                     */
+                    TargetIs32 = (Process->Wow64Process != NULL &&
+                                  Process->Wow64Process != (PVOID)TRUE);
+                    ObDereferenceObject(Process);
+                }
+
+                RtlZeroMemory(Archs, sizeof(Archs));
+#if defined(_M_AMD64)
+                /* Emulated 32-bit architecture (WoW64 container) */
+                Archs[Count].Machine = IMAGE_FILE_MACHINE_I386;
+                Archs[Count].UserMode = 1;
+                Archs[Count].WoW64Container = 1;
+                Archs[Count].Process = (HaveProcess && TargetIs32) ? 1 : 0;
+                Count++;
+#endif
+                /* Native architecture */
+                Archs[Count].Machine = IMAGE_FILE_MACHINE_NATIVE;
+                Archs[Count].KernelMode = 1;
+                Archs[Count].UserMode = 1;
+                Archs[Count].Native = 1;
+                Archs[Count].Process = (HaveProcess && !TargetIs32) ? 1 : 0;
+                Count++;
+
+                /* Trailing zero-terminator entry */
+                Count++;
+
+                ResultLength = Count * sizeof(Archs[0]);
+                if (SystemInformationLength < ResultLength)
+                {
+                    Status = STATUS_BUFFER_TOO_SMALL;
+                    break;
+                }
+
+                RtlCopyMemory(SystemInformation, Archs, ResultLength);
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
+            default:
+                /* Only the classes that genuinely require the extended input are handled here */
+                Status = STATUS_INVALID_INFO_CLASS;
+                break;
+        }
+
+        if (ReturnLength != NULL)
+            *ReturnLength = ResultLength;
+    }
+    _SEH2_EXCEPT(ExSystemExceptionFilter())
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+#endif /* (NTDDI_VERSION >= NTDDI_WIN7) */
+
 __kernel_entry
 NTSTATUS
 NTAPI
