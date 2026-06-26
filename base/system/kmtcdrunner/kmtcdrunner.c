@@ -91,6 +91,61 @@ ResolveKmtestPath(VOID)
     wcscat(g_KmtestExePath, L"\\bin\\kmtest_.exe");
 }
 
+/* Optional host control disk: a small FAT volume carrying a KMTEST.SEL file at
+ * its root whose first line is the kmtest filter (same syntax as argv[1]: a
+ * prefix, or a leading '!' to invert). When the host runner attaches such a
+ * disk it overrides the baked-in argv[1], so a test can be selected on an
+ * already-built kmtest image without editing kmtestcd_setup.inf. When no such
+ * disk is attached the scan finds nothing and behavior is unchanged. */
+static
+BOOL
+ReadFilterFromControlDisk(_Out_writes_z_(Size) PSTR Filter, _In_ DWORD Size)
+{
+    DWORD Drives = GetLogicalDrives();
+    WCHAR Path[] = L"?:\\KMTEST.SEL";
+    CHAR Letter;
+
+    for (Letter = 'C'; Letter <= 'Z'; ++Letter)
+    {
+        HANDLE File;
+        CHAR Buf[64];
+        DWORD ReadBytes = 0;
+        DWORD i;
+        BOOL Ok;
+
+        if (!(Drives & (1UL << (Letter - 'A'))))
+            continue;
+
+        Path[0] = (WCHAR)Letter;
+        File = CreateFileW(Path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                           OPEN_EXISTING, 0, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+            continue;
+
+        Ok = ReadFile(File, Buf, sizeof(Buf) - 1, &ReadBytes, NULL);
+        CloseHandle(File);
+        if (!Ok || ReadBytes == 0)
+            continue;
+
+        Buf[ReadBytes] = '\0';
+        for (i = 0; i < ReadBytes; ++i)
+        {
+            if (Buf[i] == '\r' || Buf[i] == '\n')
+            {
+                Buf[i] = '\0';
+                break;
+            }
+        }
+        if (Buf[0] == '\0')
+            continue;
+
+        strncpy(Filter, Buf, Size - 1);
+        Filter[Size - 1] = '\0';
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static
 VOID
 EmitLine(PCSTR Fmt, ...)
@@ -457,6 +512,9 @@ main(void)
     }
     if (ArgV)
         LocalFree(ArgV);
+
+    /* A host-attached control disk, if present, overrides the baked argv[1]. */
+    ReadFilterFromControlDisk(g_FilterTest, sizeof(g_FilterTest));
 
     InitializeCriticalSection(&g_SerialLock);
 
