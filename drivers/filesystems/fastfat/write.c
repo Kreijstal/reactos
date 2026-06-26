@@ -2903,6 +2903,24 @@ Return Value:
                 FcbOrDcb->Header.FileSize.LowPart = InitialFileSize;
                 FcbOrDcb->Header.ValidDataLength.LowPart = InitialValidDataLength;
 
+                //
+                //  ValidDataLength must never exceed FileSize.  When this write
+                //  began as an extend that also pushed out ValidDataLength, the
+                //  captured InitialValidDataLength can be larger than the
+                //  InitialFileSize we are restoring here (for example a zero
+                //  length / write-to-EOF request whose copy faulted after the
+                //  size was provisionally grown).  Restoring the two fields
+                //  verbatim would leave the Fcb with ValidDataLength > FileSize,
+                //  which violates the invariant FatCommonWrite (and the rest of
+                //  the driver) relies on.  Clamp it so the rolled-back state is
+                //  always self consistent.
+                //
+
+                if (FcbOrDcb->Header.ValidDataLength.LowPart > FcbOrDcb->Header.FileSize.LowPart) {
+
+                    FcbOrDcb->Header.ValidDataLength.LowPart = FcbOrDcb->Header.FileSize.LowPart;
+                }
+
                 NT_ASSERT( FcbOrDcb->Header.FileSize.LowPart <= FcbOrDcb->Header.AllocationSize.LowPart );
 
                 //
