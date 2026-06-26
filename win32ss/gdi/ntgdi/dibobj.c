@@ -910,12 +910,53 @@ GreGetDIBitsInternal(
                     memcpy(rgbQuads, DefLogPaletteQuads, 10 * sizeof(RGBQUAD));
                     memcpy(rgbQuads + 246, DefLogPaletteQuads + 10, 10 * sizeof(RGBQUAD));
 
-                    for (i = 10; i < 246; i++)
+                    /* The synthesized 8bpp default color table depends on the
+                     * native depth of the source DDB. A source shallower than
+                     * 8bpp (e.g. a monochrome bitmap) has no native 8bpp color
+                     * table, so Windows substitutes the standard halftone
+                     * palette; a native color DDB (>= 8bpp) gets the legacy
+                     * 3-3-2 RGB default. */
+                    if (BitsPerFormat(psurf->SurfObj.iBitmapFormat) < 8)
                     {
-                        rgbQuads[i].rgbRed = (i & 0x07) << 5;
-                        rgbQuads[i].rgbGreen = (i & 0x38) << 2;
-                        rgbQuads[i].rgbBlue = i & 0xc0;
-                        rgbQuads[i].rgbReserved = 0;
+                        /* Standard halftone palette: a 6x6x6 color cube
+                         * followed by a gray ramp. This must stay identical to
+                         * the table produced by NtGdiCreateHalftonePalette()
+                         * (palette.c), as comctl32's image lists seed their
+                         * color table from this default. */
+                        INT r, g, b;
+
+                        RtlZeroMemory(rgbQuads + 10, 236 * sizeof(RGBQUAD));
+                        for (r = 0; r < 6; r++)
+                        {
+                            for (g = 0; g < 6; g++)
+                            {
+                                for (b = 0; b < 6; b++)
+                                {
+                                    i = r + g*6 + b*36 + 10;
+                                    rgbQuads[i].rgbRed = r * 51;
+                                    rgbQuads[i].rgbGreen = g * 51;
+                                    rgbQuads[i].rgbBlue = b * 51;
+                                }
+                            }
+                        }
+
+                        for (i = 216; i < 246; i++)
+                        {
+                            INT v = (i - 216) << 3;
+                            rgbQuads[i].rgbRed = v;
+                            rgbQuads[i].rgbGreen = v;
+                            rgbQuads[i].rgbBlue = v;
+                        }
+                    }
+                    else
+                    {
+                        for (i = 10; i < 246; i++)
+                        {
+                            rgbQuads[i].rgbRed = (i & 0x07) << 5;
+                            rgbQuads[i].rgbGreen = (i & 0x38) << 2;
+                            rgbQuads[i].rgbBlue = i & 0xc0;
+                            rgbQuads[i].rgbReserved = 0;
+                        }
                     }
                 }
                 }
