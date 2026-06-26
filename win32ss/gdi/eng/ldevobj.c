@@ -842,7 +842,13 @@ LDEVOBJ_bProbeAndCaptureDevmode(
         }
     }
 
-    /* Now, search the exact mode to return to caller */
+    /* Now, search the exact mode to return to caller. Reset pdmSelected first:
+     * LDEVOBJ_bGetClosestMode() above leaves it pointing at the closest match,
+     * but when the caller did not request closest-mode matching we must return
+     * the EXACT requested mode or fail. Without this reset a request for an
+     * unsupported mode (e.g. a bit depth the driver doesn't provide) would
+     * silently fall back to the closest mode and be reported as successful. */
+    pdmSelected = NULL;
     for (i = 0; i < pGraphicsDevice->cDevModes; i++)
     {
         pdmCurrent = pGraphicsDevice->pDevModeList[i].pdm;
