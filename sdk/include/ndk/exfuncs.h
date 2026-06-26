@@ -437,6 +437,21 @@ NtQuerySystemInformation(
     _Out_opt_ PULONG ReturnLength
 );
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQuerySystemInformationEx(
+    _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    _In_reads_bytes_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_to_opt_(SystemInformationLength, *ReturnLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
+#endif
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
