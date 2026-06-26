@@ -531,7 +531,6 @@ NtGdiCreateHalftonePalette(HDC  hDC)
     PPALETTE ppal;
     PDC pdc;
     HPALETTE hpal = NULL;
-    BOOL UseDefaultPalette = TRUE;
 
     RtlZeroMemory(PalEntries, sizeof(PalEntries));
 
@@ -558,44 +557,38 @@ NtGdiCreateHalftonePalette(HDC  hDC)
 
         ppal = PALETTE_ShareLockPalette(pdc->dclevel.hpal);
         if (ppal)
-        {
-            if (ppal->flFlags & PAL_INDEXED)
-            {
-                UseDefaultPalette = FALSE;
-
-                /* FIXME: optimize the palette for the current palette */
-                UNIMPLEMENTED;
-            }
-
             PALETTE_ShareUnlockPalette(ppal);
-        }
 
         DC_UnlockDc(pdc);
     }
 
-    if (UseDefaultPalette)
+    /* Fill the middle entries with the standard halftone palette: a 6x6x6
+     * color cube followed by a gray ramp. Windows additionally maps these
+     * onto the currently realized system palette for a PAL_INDEXED DC; that
+     * optimization is not performed here, but the plain halftone table is the
+     * correct, Windows-compatible default and is also the table reported by
+     * GetDIBits for a default 8bpp DIB - the two must stay identical (see the
+     * 8bpp case in GetDIBits in dibobj.c). */
+    for (r = 0; r < 6; r++)
     {
-        for (r = 0; r < 6; r++)
+        for (g = 0; g < 6; g++)
         {
-            for (g = 0; g < 6; g++)
+            for (b = 0; b < 6; b++)
             {
-                for (b = 0; b < 6; b++)
-                {
-                    i = r + g*6 + b*36 + 10;
-                    PalEntries[i].peRed = r * 51;
-                    PalEntries[i].peGreen = g * 51;
-                    PalEntries[i].peBlue = b * 51;
-                }
+                i = r + g*6 + b*36 + 10;
+                PalEntries[i].peRed = r * 51;
+                PalEntries[i].peGreen = g * 51;
+                PalEntries[i].peBlue = b * 51;
             }
         }
+    }
 
-        for (i = 216; i < 246; i++)
-        {
-            int v = (i - 216) << 3;
-            PalEntries[i].peRed = v;
-            PalEntries[i].peGreen = v;
-            PalEntries[i].peBlue = v;
-        }
+    for (i = 216; i < 246; i++)
+    {
+        int v = (i - 216) << 3;
+        PalEntries[i].peRed = v;
+        PalEntries[i].peGreen = v;
+        PalEntries[i].peBlue = v;
     }
 
     ppal = PALETTE_AllocPalWithHandle(PAL_INDEXED, 256, PalEntries, 0, 0, 0);
