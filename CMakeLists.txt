@@ -432,6 +432,14 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     add_subdirectory(sdk/tools/wpp)
     add_subdirectory(win32ss)
 
+    # Optional: CTest entries that run kmtest/rostests in a VM (rostest.py).
+    # Off by default; the emulator is a runtime, not a build, dependency.
+    option(ENABLE_ROSTEST_CTEST "Register CTest entries that run kmtest/rostests in a VM" OFF)
+    if(ENABLE_ROSTEST_CTEST)
+        enable_testing()
+        add_subdirectory(sdk/tools/rostest)
+    endif()
+
     # Create the registry hives
     create_registry_hives()
 
