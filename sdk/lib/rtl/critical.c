@@ -581,6 +581,7 @@ RtlInitializeCriticalSectionEx(
     PRTL_CRITICAL_SECTION_DEBUG CritcalSectionDebugData;
     ULONG AllowedFlags;
     ULONG OsVersion;
+    ULONG SpinFlags;
 
     /* Remove lower bits from flags */
     Flags &= RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
@@ -614,7 +615,38 @@ RtlInitializeCriticalSectionEx(
     CriticalSection->LockCount = -1;
     CriticalSection->RecursionCount = 0;
     CriticalSection->OwningThread = 0;
-    CriticalSection->SpinCount = (NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0;
+
+    /*
+     * Windows persists a subset of the initialization flags inside the high
+     * bits of the SpinCount field: RTL_CRITICAL_SECTION_FLAG_RESOURCE_TYPE
+     * is kept on all versions, and on Win7+ the NO_DEBUG_INFO / DYNAMIC_SPIN
+     * flags are kept too. These bits never participate in the spin count
+     * itself (which only occupies the low 24 bits).
+     */
+    SpinFlags = Flags & RTL_CRITICAL_SECTION_FLAG_RESOURCE_TYPE;
+    if (OsVersion >= _WIN32_WINNT_WIN7)
+    {
+        SpinFlags |= Flags & (RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO |
+                              RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN);
+    }
+
+    if (NtCurrentPeb()->NumberOfProcessors > 1)
+    {
+        /*
+         * On a multiprocessor machine, Vista+ replaces an unspecified spin
+         * count with the system default (adaptive dynamic spin, 2000 spins).
+         */
+        if ((SpinCount == 0) && (OsVersion >= _WIN32_WINNT_VISTA))
+        {
+            SpinCount = RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN | 0x7D0;
+        }
+        CriticalSection->SpinCount = SpinCount | SpinFlags;
+    }
+    else
+    {
+        /* SpinCount is ignored on uniprocessor, but the flag bits persist. */
+        CriticalSection->SpinCount = SpinFlags;
+    }
     CriticalSection->LockSemaphore = 0;
 
     if (Flags & RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO)
