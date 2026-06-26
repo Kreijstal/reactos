@@ -2242,14 +2242,17 @@ MmQuerySectionView(PMEMORY_AREA MemoryArea,
         Segment = MemoryArea->SectionData.Segment;
         Info->AllocationBase = (PUCHAR)MA_GetStartingAddress(MemoryArea) - Segment->Image.VirtualAddress;
         Info->Type = MEM_IMAGE;
+        /* Windows always reports PAGE_EXECUTE_WRITECOPY as the allocation
+         * protection for image mappings, independent of the per-page protection. */
+        Info->AllocationProtect = PAGE_EXECUTE_WRITECOPY;
     }
     else
     {
         Info->AllocationBase = (PVOID)MA_GetStartingAddress(MemoryArea);
         Info->Type = MEM_MAPPED;
+        Info->AllocationProtect = MmProtectToValue[MemoryArea->VadNode.u.VadFlags.Protection];
     }
     Info->BaseAddress = RegionBaseAddress;
-    Info->AllocationProtect = MmProtectToValue[MemoryArea->VadNode.u.VadFlags.Protection];
     Info->RegionSize = Region->Length;
     Info->State = MEM_COMMIT;
     Info->Protect = Region->Protect;
