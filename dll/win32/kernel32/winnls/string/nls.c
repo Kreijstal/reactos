@@ -1010,8 +1010,16 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
 {
     INT TempLength;
     DWORD Char;
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    BOOL InvalidChar = FALSE;   /* TRUE once an unpaired surrogate is seen */
+#endif
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    /* WC_ERR_INVALID_CHARS is the only flag accepted for UTF-8 (Vista+) */
+    if (Flags & ~WC_ERR_INVALID_CHARS)
+#else
     if (Flags)
+#endif
     {
         SetLastError(ERROR_INVALID_FLAGS);
         return 0;
@@ -1023,24 +1031,41 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
         for (TempLength = 0; WideCharCount;
             WideCharCount--, WideCharString++)
         {
+            Char = *WideCharString;
             TempLength++;
-            if (*WideCharString >= 0x80)
+            if (Char >= 0x80)
             {
                 TempLength++;
-                if (*WideCharString >= 0x800)
+                if (Char >= 0x800)
                 {
                     TempLength++;
-                    if (*WideCharString >= 0xd800 && *WideCharString < 0xdc00 &&
-                        WideCharCount >= 1 &&
-                        WideCharString[1] >= 0xdc00 && WideCharString[1] <= 0xe000)
+                    if (Char >= 0xd800 && Char < 0xdc00 &&
+                        WideCharCount >= 2 &&
+                        WideCharString[1] >= 0xdc00 && WideCharString[1] < 0xe000)
                     {
+                        /* Valid surrogate pair: encodes to four bytes */
                         WideCharCount--;
                         WideCharString++;
                         TempLength++;
                     }
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+                    else if (Char >= 0xd800 && Char < 0xe000)
+                    {
+                        /* Unpaired surrogate: becomes U+FFFD (still three bytes) */
+                        InvalidChar = TRUE;
+                    }
+#endif
                 }
             }
         }
+
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+        if (InvalidChar && (Flags & WC_ERR_INVALID_CHARS))
+        {
+            SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+            return 0;
+        }
+#endif
         return TempLength;
     }
 
@@ -1075,7 +1100,7 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
 
         /* surrogate pair 0x10000-0x10ffff: 4 bytes */
         if (Char >= 0xd800 && Char < 0xdc00 &&
-            WideCharCount >= 1 &&
+            WideCharCount >= 2 &&
             WideCharString[1] >= 0xdc00 && WideCharString[1] < 0xe000)
         {
             WideCharCount--;
@@ -1102,6 +1127,17 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
             continue;
         }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+        /* Unpaired surrogate: Vista and later substitute U+FFFD. Earlier
+         * versions fall through and encode the surrogate value verbatim
+         * (legacy CESU-8-style output). */
+        if (Char >= 0xd800 && Char < 0xe000)
+        {
+            InvalidChar = TRUE;
+            Char = 0xfffd;
+        }
+#endif
+
         /* 0x800-0xffff: 3 bytes */
         if (TempLength < 3)
         {
@@ -1114,6 +1150,16 @@ IntWideCharToMultiByteUTF8(UINT CodePage,
         MultiByteString += 3;
         TempLength -= 3;
     }
+
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    /* The U+FFFD substitutions above were written to the buffer; if the
+     * caller asked us to reject invalid input, report the failure now. */
+    if (InvalidChar && (Flags & WC_ERR_INVALID_CHARS))
+    {
+        SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+        return 0;
+    }
+#endif
 
     return MultiByteCount - TempLength;
 }
