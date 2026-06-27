@@ -509,6 +509,14 @@ DWORD WINAPI FormatMessageA(
             *(LPSTR *)lpBuffer = NULL;
     }
 
+    /* The ANSI variant is limited to a 32 KB output buffer; a larger nSize is
+     * rejected outright (the wide variant has no such limit). */
+    if (nSize >= 32768)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
     if (dwFlags & FORMAT_MESSAGE_ARGUMENT_ARRAY)
     {
         format_args.args = (ULONG_PTR *)args;
