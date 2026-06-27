@@ -1504,7 +1504,7 @@ MmGetImageInformation(
     OUT PSECTION_IMAGE_INFORMATION ImageInformation
 );
 
-VOID
+NTSTATUS
 NTAPI
 MmGetImageInformationProcess(
     OUT PSECTION_IMAGE_INFORMATION ImageInformation,
