@@ -1637,23 +1637,38 @@ MiGetFileObjectForVad(
 
 VOID
 NTAPI
-MmGetImageInformation (OUT PSECTION_IMAGE_INFORMATION ImageInformation)
+MmGetImageInformationProcess(
+    OUT PSECTION_IMAGE_INFORMATION ImageInformation,
+    IN PEPROCESS Process)
 {
     PSECTION SectionObject;
 
-    /* Get the section object of this process*/
-    SectionObject = PsGetCurrentProcess()->SectionObject;
-    ASSERT(SectionObject != NULL);
-    ASSERT(MiIsRosSectionObject(SectionObject) == TRUE);
+    /* Get the image section object backing this process */
+    SectionObject = Process->SectionObject;
 
-    if (SectionObject->u.Flags.Image == 0)
+    /*
+     * A process without an image section (or a non-image section) reports
+     * zeroed image information rather than faulting; this also covers the
+     * window after the main image view has been unmapped.
+     */
+    if ((SectionObject == NULL) || (SectionObject->u.Flags.Image == 0))
     {
         RtlZeroMemory(ImageInformation, sizeof(*ImageInformation));
         return;
     }
 
+    ASSERT(MiIsRosSectionObject(SectionObject) == TRUE);
+
     /* Return the image information */
     *ImageInformation = ((PMM_IMAGE_SECTION_OBJECT)SectionObject->Segment)->ImageInformation;
+}
+
+VOID
+NTAPI
+MmGetImageInformation (OUT PSECTION_IMAGE_INFORMATION ImageInformation)
+{
+    /* Report the image information of the calling process */
+    MmGetImageInformationProcess(ImageInformation, PsGetCurrentProcess());
 }
 
 static
