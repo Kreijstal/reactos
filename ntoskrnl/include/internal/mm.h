@@ -1522,6 +1522,13 @@ MmGetImageInformation(
     OUT PSECTION_IMAGE_INFORMATION ImageInformation
 );
 
+VOID
+NTAPI
+MmGetImageInformationProcess(
+    OUT PSECTION_IMAGE_INFORMATION ImageInformation,
+    IN PEPROCESS Process
+);
+
 PFILE_OBJECT
 NTAPI
 MmGetFileObjectForSection(
