@@ -1134,8 +1134,8 @@ NtQueryInformationProcess(
             /* Enter SEH to protect write */
             _SEH2_TRY
             {
-                MmGetImageInformationProcess((PSECTION_IMAGE_INFORMATION)ProcessInformation,
-                                             Process);
+                Status = MmGetImageInformationProcess((PSECTION_IMAGE_INFORMATION)ProcessInformation,
+                                                      Process);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
