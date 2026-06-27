@@ -3532,7 +3532,9 @@ NtQueryInformationThread(
         {
             PUNICODE_STRING ThreadName;
 
-            /* Reference the thread */
+            /* Reference the thread. Querying a thread name only requires
+             * THREAD_QUERY_LIMITED_INFORMATION on Windows (reading a name is
+             * benign), so accept the limited right here. */
             Status = ObReferenceObjectByHandle(ThreadHandle,
                                                THREAD_QUERY_LIMITED_INFORMATION,
                                                PsThreadType,
@@ -3575,7 +3577,12 @@ NtQueryInformationThread(
                 }
                 else
                 {
-                    RtlInitEmptyUnicodeString(&NameInfo->ThreadName, NULL, 0);
+                    /* Even for an empty name, Windows points the string buffer
+                     * right past the returned UNICODE_STRING (it does not leave
+                     * it NULL), so mirror the non-empty branch with a zero length. */
+                    NameInfo->ThreadName.Length =
+                    NameInfo->ThreadName.MaximumLength = 0;
+                    NameInfo->ThreadName.Buffer = (PWCH)(&NameInfo->ThreadName + 1);
                 }
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
