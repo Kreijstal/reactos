@@ -57,12 +57,7 @@ VOID WINAPI FlsCallback3(PVOID lpFlsData)
     }
 }
 
-typedef struct _FLS_CALLBACK_INFO
-{
-    PFLS_CALLBACK_FUNCTION lpCallback;
-    PVOID Unknown;
-} FLS_CALLBACK_INFO, *PFLS_CALLBACK_INFO;
-
+/* FLS_CALLBACK_INFO now lives in ndk/rtltypes.h (pulled in via ndk/rtlfuncs.h) */
 
 void ok_fls_(DWORD dwIndex, PVOID pValue, PFLS_CALLBACK_FUNCTION lpCallback)
 {
