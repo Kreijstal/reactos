@@ -1010,15 +1010,15 @@ QueueUserAPC(IN PAPCFUNC pfnAPC,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
 SetThreadStackGuarantee(IN OUT PULONG StackSizeInBytes)
 {
     PTEB Teb = NtCurrentTeb();
-    ULONG GuaranteedStackBytes;
-    ULONG AllocationSize;
+    ULONG PrevStackBytes, NewStackBytes;
+    ULONG_PTR StackSize;
 
     if (!StackSizeInBytes)
     {
@@ -1026,28 +1026,32 @@ SetThreadStackGuarantee(IN OUT PULONG StackSizeInBytes)
         return FALSE;
     }
 
-    AllocationSize = *StackSizeInBytes;
+    /* The current guarantee is always reported back to the caller */
+    PrevStackBytes = Teb->GuaranteedStackBytes;
 
-    /* Retrieve the current stack size */
-    GuaranteedStackBytes = Teb->GuaranteedStackBytes;
+    /* Round the requested guarantee up to a page boundary */
+    NewStackBytes = (*StackSizeInBytes + (PAGE_SIZE - 1)) & ~(PAGE_SIZE - 1);
 
-    /* Return the size of the previous stack */
-    *StackSizeInBytes = GuaranteedStackBytes;
+    /* On 64-bit platforms the minimum non-zero guarantee is two pages */
+    if ((sizeof(PVOID) > sizeof(ULONG)) && (NewStackBytes != 0))
+        NewStackBytes = max(NewStackBytes, 2 * PAGE_SIZE);
 
-    /*
-     * If the new stack size is either zero or is less than the current size,
-     * the previous stack size is returned and we return success.
-     */
-    if ((AllocationSize == 0) || (AllocationSize < GuaranteedStackBytes))
+    /* Return the previous guarantee */
+    *StackSizeInBytes = PrevStackBytes;
+
+    /* The guarantee can never be as large as the stack itself */
+    StackSize = (ULONG_PTR)Teb->NtTib.StackBase - (ULONG_PTR)Teb->DeallocationStack;
+    if (NewStackBytes >= StackSize)
     {
-        return TRUE;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
-    // FIXME: Unimplemented!
-    UNIMPLEMENTED_ONCE;
+    /* The guarantee only ever grows, it is never shrunk */
+    if (NewStackBytes > PrevStackBytes)
+        Teb->GuaranteedStackBytes = NewStackBytes;
 
-    // Temporary HACK for supporting applications!
-    return TRUE; // FALSE;
+    return TRUE;
 }
 
 /*
