@@ -27,6 +27,7 @@ typedef struct _RTLP_WAIT
     WAITORTIMERCALLBACKFUNC Callback;
     PVOID Context;
     ULONG Milliseconds;
+    HANDLE CallbackThread;
 } RTLP_WAIT, *PRTLP_WAIT;
 
 /* PRIVATE FUNCTIONS *******************************************************/
@@ -77,6 +78,7 @@ Wait_thread_proc(LPVOID Arg)
     //                Wait->Context );
                 TimerOrWaitFired = TRUE;
             }
+            Wait->CallbackThread = NtCurrentTeb()->ClientId.UniqueThread;
             Wait->CallbackInProgress = TRUE;
             Wait->Callback( Wait->Context, TimerOrWaitFired );
             Wait->CallbackInProgress = FALSE;
@@ -153,6 +155,7 @@ RtlRegisterWait(PHANDLE NewWaitObject,
     Wait->CallbackInProgress = FALSE;
     Wait->DeleteCount = 0;
     Wait->CompletionEvent = NULL;
+    Wait->CallbackThread = NULL;
 
     Status = NtCreateEvent( &Wait->CancelEvent,
                              EVENT_ALL_ACCESS,
@@ -204,11 +207,20 @@ RtlDeregisterWaitEx(HANDLE WaitHandle,
 {
     PRTLP_WAIT Wait = (PRTLP_WAIT) WaitHandle;
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN CalledFromCallback;
 
     //TRACE( "(%p)\n", WaitHandle );
 
+    /* If we are being called from within our own wait callback, the callback
+     * can never be "still pending" from the caller's point of view: the caller
+     * is the callback. Complete synchronously instead of reporting STATUS_PENDING
+     * (and avoid deadlocking on our own completion event). This matches Windows,
+     * where UnregisterWait() issued from inside the callback succeeds. */
+    CalledFromCallback = (Wait->CallbackInProgress &&
+                          Wait->CallbackThread == NtCurrentTeb()->ClientId.UniqueThread);
+
     NtSetEvent( Wait->CancelEvent, NULL );
-    if (Wait->CallbackInProgress)
+    if (Wait->CallbackInProgress && !CalledFromCallback)
     {
         if (CompletionEvent != NULL)
         {
