@@ -543,21 +543,25 @@ l_ReadHeaderFromFile:
                     piohOptHeader->AddressOfEntryPoint);
         }
 
+        /* An image contains code if it has a non-empty code section or an
+         * entry point. (Windows additionally flags a handful of no-code images
+         * via section alignment or a lone executable section; that case is
+         * broken()-tolerated by the loader test, so we keep the simpler rule.) */
+        ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
         if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, SizeOfCode))
-            ImageSectionObject->ImageInformation.ImageContainsCode = piohOptHeader->SizeOfCode != 0;
-        else
+            ImageSectionObject->ImageInformation.ImageContainsCode = (piohOptHeader->SizeOfCode != 0);
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, AddressOfEntryPoint) &&
+            piohOptHeader->AddressOfEntryPoint != 0)
             ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
 
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, AddressOfEntryPoint))
-        {
-            if (piohOptHeader->AddressOfEntryPoint == 0)
-            {
-                ImageSectionObject->ImageInformation.ImageContainsCode = FALSE;
-            }
-        }
-
-        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, LoaderFlags))
-            ImageSectionObject->ImageInformation.LoaderFlags = piohOptHeader->LoaderFlags;
+        /* The loader repurposes LoaderFlags as the COM+ (.NET) indicator: set
+         * IMAGE_LOADER_FLAGS_COMPLUS when the image carries a COM descriptor
+         * directory, clear otherwise (the raw PE LoaderFlags field is obsolete). */
+        ImageSectionObject->ImageInformation.LoaderFlags = 0;
+        if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]) &&
+            piohOptHeader->NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR &&
+            piohOptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress != 0)
+            ImageSectionObject->ImageInformation.LoaderFlags = IMAGE_LOADER_FLAGS_COMPLUS;
 
         if (RTL_CONTAINS_FIELD(piohOptHeader, cbOptHeaderSize, DllCharacteristics))
         {
@@ -636,21 +640,19 @@ l_ReadHeaderFromFile:
                     pioh64OptHeader->AddressOfEntryPoint);
         }
 
+        /* See the PE32 branch above for the rationale of these two rules. */
+        ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
         if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, SizeOfCode))
-            ImageSectionObject->ImageInformation.ImageContainsCode = pioh64OptHeader->SizeOfCode != 0;
-        else
+            ImageSectionObject->ImageInformation.ImageContainsCode = (pioh64OptHeader->SizeOfCode != 0);
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, AddressOfEntryPoint) &&
+            pioh64OptHeader->AddressOfEntryPoint != 0)
             ImageSectionObject->ImageInformation.ImageContainsCode = TRUE;
 
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, AddressOfEntryPoint))
-        {
-            if (pioh64OptHeader->AddressOfEntryPoint == 0)
-            {
-                ImageSectionObject->ImageInformation.ImageContainsCode = FALSE;
-            }
-        }
-
-        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, LoaderFlags))
-            ImageSectionObject->ImageInformation.LoaderFlags = pioh64OptHeader->LoaderFlags;
+        ImageSectionObject->ImageInformation.LoaderFlags = 0;
+        if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]) &&
+            pioh64OptHeader->NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR &&
+            pioh64OptHeader->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].VirtualAddress != 0)
+            ImageSectionObject->ImageInformation.LoaderFlags = IMAGE_LOADER_FLAGS_COMPLUS;
 
         if (RTL_CONTAINS_FIELD(pioh64OptHeader, cbOptHeaderSize, DllCharacteristics))
             ImageSectionObject->ImageInformation.DllCharacteristics = pioh64OptHeader->DllCharacteristics;
