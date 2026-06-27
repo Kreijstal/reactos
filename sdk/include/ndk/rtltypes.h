@@ -1226,6 +1226,32 @@ typedef struct _RTL_FLS_DATA
     PVOID Data[RTL_FLS_MAXIMUM_AVAILABLE];
 } RTL_FLS_DATA, *PRTL_FLS_DATA;
 
+//
+// FLS callback table stored in PEB->FlsCallback.
+//
+// Up to Windows Server 2003 this was a flat array of callback pointers; Vista
+// turned each slot into a two-pointer record (the callback plus an extra field
+// Windows uses to track a callback that faulted). The PEB field itself stays a
+// single pointer, so only the layout of the pointed-to array changes; the
+// accessors below hide that difference so kernel32 (FlsAlloc/FlsFree/rundown)
+// and ntdll (thread-exit rundown) agree on it for a given target.
+//
+typedef struct _FLS_CALLBACK_INFO
+{
+    PVOID lpCallback;   // PFLS_CALLBACK_FUNCTION
+    PVOID Unknown;
+} FLS_CALLBACK_INFO, *PFLS_CALLBACK_INFO;
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+#define FLS_CALLBACK_ARRAY_SIZE(Count)        ((Count) * sizeof(FLS_CALLBACK_INFO))
+#define FLS_GET_CALLBACK(Peb, Index)          (((PFLS_CALLBACK_INFO)(Peb)->FlsCallback)[Index].lpCallback)
+#define FLS_SET_CALLBACK(Peb, Index, Value)   (((PFLS_CALLBACK_INFO)(Peb)->FlsCallback)[Index].lpCallback = (Value))
+#else
+#define FLS_CALLBACK_ARRAY_SIZE(Count)        ((Count) * sizeof(PVOID))
+#define FLS_GET_CALLBACK(Peb, Index)          ((Peb)->FlsCallback[Index])
+#define FLS_SET_CALLBACK(Peb, Index, Value)   ((Peb)->FlsCallback[Index] = (Value))
+#endif
+
 
 //
 // Unload Event Trace Structure for RtlGetUnloadEventTrace
