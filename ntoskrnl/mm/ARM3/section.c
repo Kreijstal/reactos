@@ -1635,7 +1635,7 @@ MiGetFileObjectForVad(
     return FileObject;
 }
 
-VOID
+NTSTATUS
 NTAPI
 MmGetImageInformationProcess(
     OUT PSECTION_IMAGE_INFORMATION ImageInformation,
@@ -1647,28 +1647,39 @@ MmGetImageInformationProcess(
     SectionObject = Process->SectionObject;
 
     /*
-     * A process without an image section (or a non-image section) reports
-     * zeroed image information rather than faulting; this also covers the
-     * window after the main image view has been unmapped.
+     * A terminating/terminated process has already released its image section
+     * (PspExitProcess nulls SectionObject). Report that without touching the
+     * caller's buffer, exactly as Windows does.
      */
-    if ((SectionObject == NULL) || (SectionObject->u.Flags.Image == 0))
+    if (SectionObject == NULL)
     {
-        RtlZeroMemory(ImageInformation, sizeof(*ImageInformation));
-        return;
+        return STATUS_PROCESS_IS_TERMINATING;
     }
 
     ASSERT(MiIsRosSectionObject(SectionObject) == TRUE);
 
+    /* A non-image section carries no image information */
+    if (SectionObject->u.Flags.Image == 0)
+    {
+        RtlZeroMemory(ImageInformation, sizeof(*ImageInformation));
+        return STATUS_SUCCESS;
+    }
+
     /* Return the image information */
     *ImageInformation = ((PMM_IMAGE_SECTION_OBJECT)SectionObject->Segment)->ImageInformation;
+    return STATUS_SUCCESS;
 }
 
 VOID
 NTAPI
 MmGetImageInformation (OUT PSECTION_IMAGE_INFORMATION ImageInformation)
 {
-    /* Report the image information of the calling process */
-    MmGetImageInformationProcess(ImageInformation, PsGetCurrentProcess());
+    NTSTATUS Status;
+
+    /* The calling process always has a live image section */
+    Status = MmGetImageInformationProcess(ImageInformation, PsGetCurrentProcess());
+    ASSERT(NT_SUCCESS(Status));
+    (VOID)Status;
 }
 
 static
