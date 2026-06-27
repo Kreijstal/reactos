@@ -242,14 +242,19 @@ NtQueryInformationProcess(
         return Status;
     }
 
-    if (((ProcessInformationClass == ProcessCookie) ||
-         (ProcessInformationClass == ProcessImageInformation)) &&
+    if (((ProcessInformationClass == ProcessCookie)
+#if (NTDDI_VERSION < NTDDI_VISTA)
+         || (ProcessInformationClass == ProcessImageInformation)
+#endif
+        ) &&
         (ProcessHandle != NtCurrentProcess()))
     {
         /*
          * Retrieving the process cookie is only allowed for the calling process
          * itself! XP only allows NtCurrentProcess() as process handles even if
-         * a real handle actually represents the current process.
+         * a real handle actually represents the current process. The same
+         * restriction applied to ProcessImageInformation before Vista, which
+         * relaxed it to accept any process handle.
          */
         return STATUS_INVALID_PARAMETER;
     }
@@ -1116,13 +1121,21 @@ NtQueryInformationProcess(
             /* Set the length required and validate it */
             Length = sizeof(SECTION_IMAGE_INFORMATION);
 
-            /* Indicate success */
-            Status = STATUS_SUCCESS;
+            /* Reference the target process (Vista+ allows any handle) */
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&Process,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
 
             /* Enter SEH to protect write */
             _SEH2_TRY
             {
-                MmGetImageInformation((PSECTION_IMAGE_INFORMATION)ProcessInformation);
+                MmGetImageInformationProcess((PSECTION_IMAGE_INFORMATION)ProcessInformation,
+                                             Process);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1130,6 +1143,9 @@ NtQueryInformationProcess(
                 Status = _SEH2_GetExceptionCode();
             }
             _SEH2_END;
+
+            /* Let go of the process */
+            ObDereferenceObject(Process);
             break;
 
         case ProcessDebugObjectHandle:
