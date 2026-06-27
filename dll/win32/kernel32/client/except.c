@@ -790,6 +790,80 @@ SetErrorMode(IN UINT uMode)
 /*
  * @implemented
  */
+DWORD
+WINAPI
+GetThreadErrorMode(VOID)
+{
+    ULONG RtlErrorMode;
+    DWORD ErrorMode = 0;
+
+    /* The per-thread error mode lives in the TEB in its RTL form */
+    RtlErrorMode = RtlGetThreadErrorMode();
+
+    /* Translate the RTL flags back to their Win32 SEM_* counterparts */
+    if (RtlErrorMode & RTL_SEM_FAILCRITICALERRORS)
+        ErrorMode |= SEM_FAILCRITICALERRORS;
+    if (RtlErrorMode & RTL_SEM_NOGPFAULTERRORBOX)
+        ErrorMode |= SEM_NOGPFAULTERRORBOX;
+    if (RtlErrorMode & RTL_SEM_NOALIGNMENTFAULTEXCEPT)
+        ErrorMode |= SEM_NOOPENFILEERRORBOX;
+
+    return ErrorMode;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetThreadErrorMode(IN DWORD dwNewMode,
+                   OUT LPDWORD lpOldMode OPTIONAL)
+{
+    NTSTATUS Status;
+    ULONG RtlNewMode = 0, RtlOldMode = 0;
+
+    /* Only these three Win32 flags are accepted (note: not SEM_NOALIGNMENTFAULTEXCEPT) */
+    if (dwNewMode & ~(SEM_FAILCRITICALERRORS |
+                      SEM_NOGPFAULTERRORBOX |
+                      SEM_NOOPENFILEERRORBOX))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* Translate the Win32 SEM_* flags to their RTL counterparts */
+    if (dwNewMode & SEM_FAILCRITICALERRORS)
+        RtlNewMode |= RTL_SEM_FAILCRITICALERRORS;
+    if (dwNewMode & SEM_NOGPFAULTERRORBOX)
+        RtlNewMode |= RTL_SEM_NOGPFAULTERRORBOX;
+    if (dwNewMode & SEM_NOOPENFILEERRORBOX)
+        RtlNewMode |= RTL_SEM_NOALIGNMENTFAULTEXCEPT;
+
+    Status = RtlSetThreadErrorMode(RtlNewMode, &RtlOldMode);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    /* Return the previous mode, translated back to the Win32 flags */
+    if (lpOldMode)
+    {
+        *lpOldMode = 0;
+        if (RtlOldMode & RTL_SEM_FAILCRITICALERRORS)
+            *lpOldMode |= SEM_FAILCRITICALERRORS;
+        if (RtlOldMode & RTL_SEM_NOGPFAULTERRORBOX)
+            *lpOldMode |= SEM_NOGPFAULTERRORBOX;
+        if (RtlOldMode & RTL_SEM_NOALIGNMENTFAULTEXCEPT)
+            *lpOldMode |= SEM_NOOPENFILEERRORBOX;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
 LPTOP_LEVEL_EXCEPTION_FILTER
 WINAPI
 DECLSPEC_HOTPATCH
