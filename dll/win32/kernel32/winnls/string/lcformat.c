@@ -2383,6 +2383,15 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
 	case CAL_SABBREVMONTHNAME12:
 	case CAL_SABBREVMONTHNAME13:
 	case CAL_SYEARMONTH:
+#if (WINVER >= 0x0600) /* ReactOS: the shortest day names are Vista+ NLS data */
+	case CAL_SSHORTESTDAYNAME1:
+	case CAL_SSHORTESTDAYNAME2:
+	case CAL_SSHORTESTDAYNAME3:
+	case CAL_SSHORTESTDAYNAME4:
+	case CAL_SSHORTESTDAYNAME5:
+	case CAL_SSHORTESTDAYNAME6:
+	case CAL_SSHORTESTDAYNAME7:
+#endif
             return GetLocaleInfoW(Locale, caltype_lctype_map[calinfo] | localeflags, lpCalData, cchData);
 	case CAL_ITWODIGITYEARMAX:
 #ifdef __REACTOS__
