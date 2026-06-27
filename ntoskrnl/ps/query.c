@@ -3281,6 +3281,11 @@ NtQueryInformationThread(
                 break;
             }
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+            /* Since Vista this class only requires the limited query right */
+            Access = THREAD_QUERY_LIMITED_INFORMATION;
+#endif
+
             /* Reference the thread */
             Status = ObReferenceObjectByHandle(ThreadHandle,
                                                Access,
