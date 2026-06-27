@@ -4770,4 +4770,162 @@ CreateProcessW(LPCWSTR lpApplicationName,
                                   NULL);
 }
 
+/* Process/thread attribute lists ********************************************/
+
+struct _proc_thread_attr
+{
+    DWORD_PTR Attribute;
+    SIZE_T Size;
+    PVOID Value;
+};
+
+/*
+ * Internal layout of an LPPROC_THREAD_ATTRIBUTE_LIST. The public type is
+ * opaque; this matches the layout used by the conformance tests (and Wine).
+ */
+struct _PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD Mask;   /* bitmask of attributes already present in the list */
+    DWORD Size;   /* maximum number of attributes the list can hold */
+    DWORD Count;  /* number of attributes currently in the list */
+    DWORD Padding;
+    DWORD_PTR Unknown;
+    struct _proc_thread_attr Attributes[1];
+};
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+InitializeProcThreadAttributeList(IN OUT LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+                                  IN DWORD dwAttributeCount,
+                                  IN DWORD dwFlags,
+                                  IN OUT PSIZE_T lpSize)
+{
+    struct _PROC_THREAD_ATTRIBUTE_LIST *List = (struct _PROC_THREAD_ATTRIBUTE_LIST *)lpAttributeList;
+    SIZE_T Needed;
+    BOOL Result = FALSE;
+
+    Needed = FIELD_OFFSET(struct _PROC_THREAD_ATTRIBUTE_LIST, Attributes[dwAttributeCount]);
+    if ((List != NULL) && (*lpSize >= Needed))
+    {
+        List->Mask = 0;
+        List->Size = dwAttributeCount;
+        List->Count = 0;
+        List->Unknown = 0;
+        Result = TRUE;
+    }
+    else
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    }
+
+    *lpSize = Needed;
+    return Result;
+}
+
+static
+DWORD
+BaseValidateProcThreadAttribute(IN DWORD_PTR Attribute,
+                                IN SIZE_T Size)
+{
+    switch (Attribute & PROC_THREAD_ATTRIBUTE_NUMBER)
+    {
+        case ProcThreadAttributeParentProcess:
+            if (Size != sizeof(HANDLE)) return ERROR_BAD_LENGTH;
+            break;
+        case ProcThreadAttributeHandleList:
+        case ProcThreadAttributeJobList:
+            if ((Size / sizeof(HANDLE)) * sizeof(HANDLE) != Size) return ERROR_BAD_LENGTH;
+            break;
+        case ProcThreadAttributeIdealProcessor:
+            if (Size != sizeof(PROCESSOR_NUMBER)) return ERROR_BAD_LENGTH;
+            break;
+        case ProcThreadAttributeChildProcessPolicy:
+            if ((Size != sizeof(DWORD)) && (Size != sizeof(DWORD64))) return ERROR_BAD_LENGTH;
+            break;
+        case ProcThreadAttributeMitigationPolicy:
+            if ((Size != sizeof(DWORD)) && (Size != sizeof(DWORD64)) &&
+                (Size != sizeof(DWORD64) * 2))
+                return ERROR_BAD_LENGTH;
+            break;
+        case ProcThreadAttributePseudoConsole:
+            /* sizeof(HPCON), which is a void pointer */
+            if (Size != sizeof(PVOID)) return ERROR_BAD_LENGTH;
+            break;
+        case ProcThreadAttributeMachineType:
+            if (Size != sizeof(USHORT)) return ERROR_BAD_LENGTH;
+            break;
+        default:
+            DPRINT1("Unhandled attribute %Iu\n", Attribute & PROC_THREAD_ATTRIBUTE_NUMBER);
+            return ERROR_NOT_SUPPORTED;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+UpdateProcThreadAttribute(IN OUT LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+                          IN DWORD dwFlags,
+                          IN DWORD_PTR Attribute,
+                          IN PVOID lpValue,
+                          IN SIZE_T cbSize,
+                          OUT PVOID lpPreviousValue,
+                          IN PSIZE_T lpReturnSize)
+{
+    struct _PROC_THREAD_ATTRIBUTE_LIST *List = (struct _PROC_THREAD_ATTRIBUTE_LIST *)lpAttributeList;
+    struct _proc_thread_attr *Entry;
+    DWORD Mask, Error;
+
+    UNREFERENCED_PARAMETER(dwFlags);
+    UNREFERENCED_PARAMETER(lpPreviousValue);
+    UNREFERENCED_PARAMETER(lpReturnSize);
+
+    if (List->Count >= List->Size)
+    {
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    Error = BaseValidateProcThreadAttribute(Attribute, cbSize);
+    if (Error != ERROR_SUCCESS)
+    {
+        SetLastError(Error);
+        return FALSE;
+    }
+
+    Mask = 1 << (Attribute & PROC_THREAD_ATTRIBUTE_NUMBER);
+    if (List->Mask & Mask)
+    {
+        SetLastError(ERROR_OBJECT_NAME_EXISTS);
+        return FALSE;
+    }
+    List->Mask |= Mask;
+
+    Entry = &List->Attributes[List->Count];
+    Entry->Attribute = Attribute;
+    Entry->Size = cbSize;
+    Entry->Value = lpValue;
+    List->Count++;
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+VOID
+WINAPI
+DeleteProcThreadAttributeList(IN OUT LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList)
+{
+    /* The attribute list is caller-allocated and references caller-owned
+     * values; there is nothing for us to free. */
+    UNREFERENCED_PARAMETER(lpAttributeList);
+}
+
 /* EOF */
