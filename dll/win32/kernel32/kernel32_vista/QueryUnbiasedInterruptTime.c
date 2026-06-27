@@ -22,7 +22,7 @@ QueryUnbiasedInterruptTime(
 
     if (UnbiasedTime == NULL)
     {
-        SetLastError(ERROR_NOACCESS);
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
