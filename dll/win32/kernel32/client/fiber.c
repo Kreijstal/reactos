@@ -64,7 +64,7 @@ BaseRundownFls(_In_ PVOID FlsData)
 
     for (n = 1; n <= FlsHighIndex; ++n)
     {
-        lpCallback = NtCurrentPeb()->FlsCallback[n];
+        lpCallback = FLS_GET_CALLBACK(NtCurrentPeb(), n);
         if (lpCallback && pFlsData->Data[n])
         {
             lpCallback(pFlsData->Data[n]);
@@ -409,7 +409,7 @@ FlsAlloc(PFLS_CALLBACK_FUNCTION lpCallback)
 
     if (!Peb->FlsCallback &&
         !(Peb->FlsCallback = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
-                                             FLS_MAXIMUM_AVAILABLE * sizeof(PVOID))))
+                                             FLS_CALLBACK_ARRAY_SIZE(FLS_MAXIMUM_AVAILABLE))))
     {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
         dwFlsIndex = FLS_OUT_OF_INDEXES;
@@ -435,7 +435,7 @@ FlsAlloc(PFLS_CALLBACK_FUNCTION lpCallback)
                 }
 
                 pFlsData->Data[dwFlsIndex] = NULL; /* clear the value */
-                Peb->FlsCallback[dwFlsIndex] = lpCallback;
+                FLS_SET_CALLBACK(Peb, dwFlsIndex, lpCallback);
 
                 if (dwFlsIndex > Peb->FlsHighIndex)
                     Peb->FlsHighIndex = dwFlsIndex;
@@ -490,7 +490,7 @@ FlsFree(DWORD dwFlsIndex)
             PFLS_CALLBACK_FUNCTION lpCallback;
 
             RtlClearBits(Peb->FlsBitmap, dwFlsIndex, 1);
-            lpCallback = Peb->FlsCallback[dwFlsIndex];
+            lpCallback = FLS_GET_CALLBACK(Peb, dwFlsIndex);
 
             for (Entry = Peb->FlsListHead.Flink; Entry != &Peb->FlsListHead; Entry = Entry->Flink)
             {
@@ -506,7 +506,7 @@ FlsFree(DWORD dwFlsIndex)
                     pFlsData->Data[dwFlsIndex] = NULL;
                 }
             }
-            Peb->FlsCallback[dwFlsIndex] = NULL;
+            FLS_SET_CALLBACK(Peb, dwFlsIndex, NULL);
         }
         else
         {
