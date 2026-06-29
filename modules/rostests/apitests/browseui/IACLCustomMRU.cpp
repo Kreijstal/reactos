@@ -60,7 +60,7 @@ static void Cleanup_Testdata()
         tmp.DeleteSubKey(szTestPath);
 }
 
-#define verify_mru(mru, ...)     verify_mru_(__FILE__, __LINE__, mru, __VA_ARGS__, NULL)
+#define verify_mru(mru, ...)     verify_mru_(__FILE__, __LINE__, mru, __VA_ARGS__, (PCWSTR)NULL)
 static void verify_mru_(const char* file, int line, IACLCustomMRU* mru, PCWSTR MRUString, ...)
 {
 
