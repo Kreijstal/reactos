@@ -2630,9 +2630,40 @@ NlsGetCacheUpdateCount(VOID)
     return 0;
 }
 
-/*
- * @unimplemented
- */
+static BOOL
+NlsIsPrivateUseAreaChar(WCHAR Ch)
+{
+    return (Ch >= 0xe000 && Ch <= 0xf8ff);
+}
+
+static VOID
+NlsGetDefaultSortGuid(LCID Locale, GUID *Guid)
+{
+    switch (PRIMARYLANGID(LANGIDFROMLCID(Locale)))
+    {
+        case LANG_FRENCH:
+            Guid->Data1 = 0x00000003;
+            break;
+        case LANG_JAPANESE:
+            Guid->Data1 = 0x00000046;
+            break;
+        default:
+            Guid->Data1 = 0x00000001;
+            break;
+    }
+
+    Guid->Data2 = 0x57ee;
+    Guid->Data3 = 0x1e5c;
+    Guid->Data4[0] = 0x00;
+    Guid->Data4[1] = 0xb4;
+    Guid->Data4[2] = 0xd0;
+    Guid->Data4[3] = 0x00;
+    Guid->Data4[4] = 0x0b;
+    Guid->Data4[5] = 0xb1;
+    Guid->Data4[6] = 0xe1;
+    Guid->Data4[7] = 0x1e;
+}
+
 BOOL
 WINAPI
 IsNLSDefinedString(IN NLS_FUNCTION Function,
@@ -2641,33 +2672,110 @@ IsNLSDefinedString(IN NLS_FUNCTION Function,
                    IN LPCWSTR lpString,
                    IN INT cchStr)
 {
-    STUB;
+    INT i;
+
+    if (Function != COMPARE_STRING)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+    if (lpVersionInformation &&
+        lpVersionInformation->dwNLSVersionInfoSize != sizeof(NLSVERSIONINFO) &&
+        lpVersionInformation->dwNLSVersionInfoSize != offsetof(NLSVERSIONINFOEX, dwEffectiveId))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    if (cchStr < 0)
+        cchStr = lstrlenW(lpString) + 1;
+
+    for (i = 0; i < cchStr; i++)
+    {
+        WORD CharType;
+        WCHAR Ch = lpString[i];
+
+        if (NlsIsPrivateUseAreaChar(Ch) || IS_LOW_SURROGATE(Ch))
+            return FALSE;
+
+        if (IS_HIGH_SURROGATE(Ch))
+        {
+            if (++i == cchStr || !IS_LOW_SURROGATE(lpString[i]))
+                return FALSE;
+            continue;
+        }
+
+        if (!GetStringTypeW(CT_CTYPE1, &Ch, 1, &CharType) ||
+            !(CharType & C1_DEFINED))
+        {
+            return FALSE;
+        }
+    }
+
     return TRUE;
 }
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 GetNLSVersion(IN NLS_FUNCTION Function,
               IN LCID Locale,
               IN OUT LPNLSVERSIONINFO lpVersionInformation)
 {
-    STUB;
-    return TRUE;
+    WCHAR LocaleName[LOCALE_NAME_MAX_LENGTH];
+
+    if (lpVersionInformation->dwNLSVersionInfoSize < offsetof(NLSVERSIONINFOEX, dwEffectiveId))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    if (!LCIDToLocaleName(Locale, LocaleName, ARRAY_SIZE(LocaleName), LOCALE_ALLOW_NEUTRAL_NAMES))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    return GetNLSVersionEx(Function, LocaleName, (LPNLSVERSIONINFOEX)lpVersionInformation);
 }
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 GetNLSVersionEx(IN NLS_FUNCTION function,
                 IN LPCWSTR lpLocaleName,
                 IN OUT LPNLSVERSIONINFOEX lpVersionInformation)
 {
-    STUB;
+    LCID Locale;
+
+    if (function != COMPARE_STRING)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return FALSE;
+    }
+
+    if (lpVersionInformation->dwNLSVersionInfoSize != sizeof(NLSVERSIONINFOEX) &&
+        lpVersionInformation->dwNLSVersionInfoSize != offsetof(NLSVERSIONINFOEX, dwEffectiveId))
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    Locale = LocaleNameToLCID(lpLocaleName, LOCALE_ALLOW_NEUTRAL_NAMES);
+    if (!Locale)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    lpVersionInformation->dwNLSVersion = 0x00060101;
+    lpVersionInformation->dwDefinedVersion = 0x00060101;
+
+    if (lpVersionInformation->dwNLSVersionInfoSize >= sizeof(NLSVERSIONINFOEX))
+    {
+        lpVersionInformation->dwEffectiveId = Locale;
+        NlsGetDefaultSortGuid(Locale, &lpVersionInformation->guidCustomVersion);
+    }
+
     return TRUE;
 }
 

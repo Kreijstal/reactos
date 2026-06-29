@@ -642,6 +642,8 @@ GetProcessPreferredUILanguages(
 static BOOL
 SynthesizeSingleLangList(
     DWORD dwFlags,
+    DWORD dwAllowedFlags,
+    BOOL bDefaultToLanguageId,
     PULONG pulNumLanguages,
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
@@ -652,13 +654,21 @@ SynthesizeSingleLangList(
     const WCHAR *src;
     ULONG srcLen;
 
+    if ((dwFlags & ~dwAllowedFlags) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     if (!pulNumLanguages || !pcchLanguagesBuffer)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
-    if (dwFlags & MUI_LANGUAGE_ID)
+    if ((dwFlags & MUI_LANGUAGE_ID) ||
+        (!(dwFlags & MUI_LANGUAGE_NAME) && bDefaultToLanguageId))
     {
         src = langId;
         srcLen = ARRAYSIZE(langId);
@@ -671,8 +681,14 @@ SynthesizeSingleLangList(
 
     *pulNumLanguages = 1;
 
-    if (pwszLanguagesBuffer == NULL || *pcchLanguagesBuffer == 0)
+    if (pwszLanguagesBuffer == NULL)
     {
+        if (*pcchLanguagesBuffer != 0)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
         /* Probe call: report required size without writing. */
         *pcchLanguagesBuffer = srcLen;
         return TRUE;
@@ -698,7 +714,12 @@ GetSystemPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    return SynthesizeSingleLangList(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
+    return SynthesizeSingleLangList(dwFlags,
+                                    MUI_LANGUAGE_NAME | MUI_LANGUAGE_ID | MUI_MACHINE_LANGUAGE_SETTINGS,
+                                    FALSE,
+                                    pulNumLanguages,
+                                    pwszLanguagesBuffer,
+                                    pcchLanguagesBuffer);
 }
 
 BOOL
@@ -709,7 +730,12 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    return SynthesizeSingleLangList(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
+    return SynthesizeSingleLangList(dwFlags,
+                                    MUI_LANGUAGE_NAME | MUI_LANGUAGE_ID | MUI_UI_FALLBACK,
+                                    TRUE,
+                                    pulNumLanguages,
+                                    pwszLanguagesBuffer,
+                                    pcchLanguagesBuffer);
 }
 
 /*
@@ -719,9 +745,7 @@ LANGID
 WINAPI
 GetThreadUILanguage(VOID)
 {
-    UNIMPLEMENTED;
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+    return LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale);
 }
 
 /*
@@ -750,7 +774,12 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    return SynthesizeSingleLangList(dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
+    return SynthesizeSingleLangList(dwFlags,
+                                    MUI_LANGUAGE_NAME | MUI_LANGUAGE_ID,
+                                    FALSE,
+                                    pulNumLanguages,
+                                    pwszLanguagesBuffer,
+                                    pcchLanguagesBuffer);
 }
 
 /*
