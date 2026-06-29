@@ -66,6 +66,45 @@ static inline void MarkAsCommonItem(LPITEMIDLIST pidl)
     ((PIDLDATA*)pidl->mkid.abID)->type |= PT_FS_COMMON_FLAG;
 }
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10)
+static LPITEMIDLIST CreateInternetUrlPidl(LPCWSTR pszUrl)
+{
+    SIZE_T cchUrl = wcslen(pszUrl) + 1;
+    SIZE_T cbPayload = FIELD_OFFSET(PIDLDATA, u.valueW.name) + cchUrl * sizeof(WCHAR);
+    SIZE_T cbPidl = sizeof(USHORT) + cbPayload + sizeof(USHORT);
+    LPITEMIDLIST pidl = (LPITEMIDLIST)SHAlloc(cbPidl);
+    if (!pidl)
+        return NULL;
+
+    ZeroMemory(pidl, cbPidl);
+    pidl->mkid.cb = sizeof(USHORT) + cbPayload;
+
+    PIDLDATA *pData = (PIDLDATA *)pidl->mkid.abID;
+    pData->type = PT_INTERNET_URL;
+    StringCchCopyW(pData->u.valueW.name, cchUrl, pszUrl);
+
+    return pidl;
+}
+
+static HRESULT CreateInternetUrlPidl(LPCWSTR pszUrl, PIDLIST_RELATIVE *ppidl)
+{
+    WCHAR szUrl[INTERNET_MAX_URL_LENGTH];
+    HRESULT hr = StringCchCopyW(szUrl, _countof(szUrl), pszUrl);
+    if (FAILED(hr))
+        return hr;
+
+    if (!_wcsnicmp(szUrl, L"ftp://", 6) && !wcschr(&szUrl[6], L'/'))
+    {
+        hr = StringCchCatW(szUrl, _countof(szUrl), L"/");
+        if (FAILED(hr))
+            return hr;
+    }
+
+    *ppidl = CreateInternetUrlPidl(szUrl);
+    return (*ppidl ? S_OK : E_OUTOFMEMORY);
+}
+#endif
+
 STDMETHODIMP
 CDesktopFolder::ShellUrlParseDisplayName(
     HWND hwndOwner,
@@ -104,6 +143,9 @@ CDesktopFolder::ShellUrlParseDisplayName(
     }
     else
     {
+        if (BindCtx_ContainsObject(pbc, STR_PARSE_TRANSLATE_ALIASES))
+            return hr;
+
         csidl = Shell_ParseSpecialFolder(ParsedURL.pszSuffix, &pch, &cch);
         if (csidl == -1)
         {
@@ -343,6 +385,12 @@ HRESULT CDesktopFolder::_ParseDisplayNameByParent(
     }
     else if (PathIsUNCW(lpszDisplayName)) // "\\\\..."
     {
+        if (lpszDisplayName[2] == L'?' && (!lpszDisplayName[3] ||
+            (lpszDisplayName[3] == L'\\' && !lpszDisplayName[4])))
+        {
+            return E_INVALIDARG;
+        }
+
         bPath = TRUE;
         pidlParent.Attach(_ILCreateNetwork());
     }
@@ -351,6 +399,21 @@ HRESULT CDesktopFolder::_ParseDisplayNameByParent(
     {
         if (!pidlParent)
             return E_OUTOFMEMORY;
+
+        if (lpszDisplayName[1] == L':' && lpszDisplayName[2] == L'\\' && !lpszDisplayName[3] &&
+            SHIsFileSysBindCtx(pbc, NULL) != S_OK)
+        {
+            WCHAR szRoot[8];
+            PathBuildRootW(szRoot, ((*lpszDisplayName - 1) & 0x1F));
+
+            UINT driveType = ::GetDriveType(szRoot);
+            if (driveType == DRIVE_NO_ROOT_DIR || driveType == DRIVE_UNKNOWN)
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+                return HRESULT_FROM_WIN32(ERROR_INVALID_DRIVE);
+#else
+                return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+#endif
+        }
 
         CComPtr<IShellFolder> pParentFolder;
         SHBindToObject(NULL, pidlParent, NULL, IID_PPV_ARG(IShellFolder, &pParentFolder));
@@ -405,6 +468,14 @@ HRESULT CDesktopFolder::_ParseDisplayNameByParent(
                                            ppidl,
                                            pdwAttributes);
         }
+        case URL_SCHEME_FTP:
+        {
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10)
+            return CreateInternetUrlPidl(lpszDisplayName, ppidl);
+#else
+            return E_INVALIDARG;
+#endif
+        }
         case URL_SCHEME_SHELL: // "shell:..."
         {
             return ShellUrlParseDisplayName(hwndOwner,
@@ -423,6 +494,9 @@ HRESULT CDesktopFolder::_ParseDisplayNameByParent(
         default:
         {
             TRACE("Scheme: %u\n", ParsedURL.nScheme);
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN10)
+            return CreateInternetUrlPidl(lpszDisplayName, ppidl);
+#endif
             break;
         }
     }
@@ -852,6 +926,11 @@ HRESULT WINAPI CDesktopFolder::GetDisplayNameOf(PCUITEMID_CHILD pidl, DWORD dwFl
             return SHSetStrRet(strRet, sPathTarget);
         else
             return m_regFolder->GetDisplayNameOf(pidl, dwFlags, strRet);
+    }
+    else if (_ILGetType(pidl) == PT_INTERNET_URL)
+    {
+        PIDLDATA *pData = (PIDLDATA *)pidl->mkid.abID;
+        return SHSetStrRet(strRet, pData->u.valueW.name);
     }
 
     /* file system folder or file rooted at the desktop */
