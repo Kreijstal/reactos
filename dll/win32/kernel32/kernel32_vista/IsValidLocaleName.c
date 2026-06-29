@@ -17,5 +17,12 @@ IsValidLocaleName(
     LPCWSTR lpLocaleName)
 {
     LCID lcid = LocaleNameToLCID(lpLocaleName, LOCALE_ALLOW_NEUTRAL_NAMES);
+
+    if (lpLocaleName == LOCALE_NAME_USER_DEFAULT ||
+        !wcscmp(lpLocaleName, LOCALE_NAME_SYSTEM_DEFAULT))
+    {
+        return FALSE;
+    }
+
     return lcid != 0;
 }
