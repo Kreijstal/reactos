@@ -1759,8 +1759,12 @@ static HRESULT SHELL_PidlGetIconLocationW(PCIDLIST_ABSOLUTE pidl,
 HRESULT STDMETHODCALLTYPE CShellLink::GetIconLocation(UINT uFlags, PWSTR pszIconFile, UINT cchMax, int *piIndex, UINT *pwFlags)
 {
     HRESULT hr;
+    WCHAR szPath[MAX_PATH];
+    SHFILEINFOW shfi;
 
     pszIconFile[0] = UNICODE_NULL;
+    *piIndex = 0;
+    *pwFlags = 0;
 
     /*
      * It is possible for a shell link to point to another shell link,
@@ -1783,18 +1787,33 @@ HRESULT STDMETHODCALLTYPE CShellLink::GetIconLocation(UINT uFlags, PWSTR pszIcon
     if (uFlags & GIL_DEFAULTICON)
         return S_FALSE;
 
-    hr = GetIconLocation(pszIconFile, cchMax, piIndex);
-    if (FAILED(hr) || pszIconFile[0] == UNICODE_NULL)
+    hr = GetPath(szPath, _countof(szPath), NULL, 0);
+    if (FAILED(hr) || !szPath[0])
     {
-        hr = SHELL_PidlGetIconLocationW(m_pPidl, uFlags, pszIconFile, cchMax, piIndex, pwFlags);
-    }
-    else
-    {
-        // TODO: If GetIconLocation succeeded, why are we setting GIL_NOTFILENAME? And are we not PERINSTANCE?
-        *pwFlags = GIL_NOTFILENAME | GIL_PERCLASS;
+        if (!m_pPidl)
+            return S_FALSE;
+
+        return SHELL_PidlGetIconLocationW(m_pPidl, uFlags, pszIconFile, cchMax, piIndex, pwFlags);
     }
 
-    return hr;
+    if (PathMatchSpecW(szPath, L"*.exe"))
+    {
+        lstrcpynW(pszIconFile, szPath, cchMax);
+        *pwFlags = GIL_NOTFILENAME | GIL_PERINSTANCE;
+        return S_OK;
+    }
+
+    ZeroMemory(&shfi, sizeof(shfi));
+    SHGetFileInfoW(szPath,
+                   PathFileExistsW(szPath) ? 0 : FILE_ATTRIBUTE_NORMAL,
+                   &shfi,
+                   sizeof(shfi),
+                   SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX);
+
+    StringCchCopyW(pszIconFile, cchMax, L"*");
+    *piIndex = shfi.iIcon;
+    *pwFlags = GIL_NOTFILENAME | GIL_PERCLASS;
+    return S_OK;
 }
 
 HRESULT STDMETHODCALLTYPE
@@ -2259,8 +2278,24 @@ HRESULT CShellLink::SetTargetFromPIDLOrPath(LPCITEMIDLIST pidl, LPCWSTR pszFile)
 
             if (PathIsFileSpecW(szPath))
             {
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+                WCHAR szDesktop[MAX_PATH];
+                if (SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, SHGFP_TYPE_CURRENT, szDesktop) != S_OK ||
+                    !PathAppendW(szDesktop, szPath))
+                {
+                    hr = E_INVALIDARG;
+                    szPath[0] = 0;
+                }
+                else
+                {
+                    hr = S_OK;
+                    pidlNew = SHSimpleIDListFromPathW(szDesktop);
+                    StringCchCopyW(szPath, _countof(szPath), szDesktop);
+                }
+#else
                 hr = E_INVALIDARG;
                 szPath[0] = 0;
+#endif
             }
             else
             {
@@ -2408,6 +2443,16 @@ HRESULT STDMETHODCALLTYPE CShellLink::SetPath(LPCWSTR pszFile)
                 m_Header.dwFlags |= SLDF_HAS_EXP_SZ;
 
             /* Now, make pszFile point to the expanded path */
+            if (wcschr(szPath, L'%'))
+            {
+                PCWSTR pchColon = wcschr(szPath, L':');
+                if (pchColon && pchColon != &szPath[1])
+                {
+                    hr = E_INVALIDARG;
+                    goto end;
+                }
+            }
+
             pszFile = szPath;
         }
         else
