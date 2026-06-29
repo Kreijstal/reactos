@@ -2955,6 +2955,17 @@ LCID WINAPI ConvertDefaultLocale( LCID lcid )
  */
 BOOL WINAPI IsValidLocale( LCID lcid, DWORD flags )
 {
+    if (flags == 0) switch (lcid)
+    {
+    case LOCALE_NEUTRAL:
+    case LOCALE_USER_DEFAULT:
+    case LOCALE_SYSTEM_DEFAULT:
+    case LOCALE_CUSTOM_DEFAULT:
+    case LOCALE_CUSTOM_UI_DEFAULT:
+    case LOCALE_CUSTOM_UNSPECIFIED:
+        return FALSE;
+    }
+
     /* check if language is registered in the kernel32 resources */
     return FindResourceExW( kernel32_handle, (LPWSTR)RT_STRING,
                             (LPCWSTR)LOCALE_ILANGUAGE, LANGIDFROMLCID(lcid)) != 0;
