@@ -687,6 +687,44 @@ CopyAsciizToUnicodeString(
     return TRUE;
 }
 
+_Must_inspect_result_
+static
+NTSTATUS
+CopyLocaleNameToUnicodeString(
+    _Inout_ PUNICODE_STRING UnicodeString,
+    _In_ PCSTR AsciiString,
+    _In_ BOOLEAN AllocateDestinationString)
+{
+    SIZE_T AsciiLength = strlen(AsciiString);
+    USHORT MaximumLength = (USHORT)((AsciiLength + 1) * sizeof(WCHAR));
+
+    if (AllocateDestinationString)
+    {
+        UnicodeString->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, MaximumLength);
+        if (UnicodeString->Buffer == NULL)
+        {
+            UnicodeString->Length = 0;
+            UnicodeString->MaximumLength = 0;
+            return STATUS_NO_MEMORY;
+        }
+
+        UnicodeString->Length = 0;
+        UnicodeString->MaximumLength = MaximumLength;
+    }
+    else if (!CopyAsciizToUnicodeString(UnicodeString, AsciiString))
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    if (AllocateDestinationString && !CopyAsciizToUnicodeString(UnicodeString, AsciiString))
+    {
+        ASSERT(FALSE);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static
 BOOLEAN
 IsNeutralLocale(
@@ -701,6 +739,29 @@ IsNeutralLocale(
     }
 
     return FALSE;
+}
+
+static
+PCSTR
+GetLocaleNameOverride(
+    _In_ LCID Lcid)
+{
+    switch (Lcid)
+    {
+        case 0x00004:
+            return "zh-CN";
+
+        case 0x00C0A:
+            return "es-ES";
+
+        case 0x0083C:
+            return "ga-IE";
+
+        case 0x07C04:
+            return "zh-HK";
+    }
+
+    return NULL;
 }
 
 NTSTATUS
@@ -721,7 +782,7 @@ RtlLcidToLocaleName(
     }
 
     /* Check if the LocaleName buffer is valid */
-    if ((LocaleName == NULL) || (LocaleName->Buffer == NULL))
+    if ((LocaleName == NULL) || (!AllocateDestinationString && (LocaleName->Buffer == NULL)))
     {
         DPRINT1("RtlLcidToLocaleName: Invalid buffer\n");
         return STATUS_INVALID_PARAMETER_2;
@@ -732,6 +793,25 @@ RtlLcidToLocaleName(
     {
         DPRINT1("RtlLcidToLocaleName: Invalid LCID: 0x%lx\n", Lcid);
         return STATUS_INVALID_PARAMETER_1;
+    }
+
+    /* Handle special LCIDs */
+    switch (Lcid)
+    {
+        case LOCALE_USER_DEFAULT:
+            Lcid = RtlpUserDefaultLcid;
+            break;
+
+        case LOCALE_SYSTEM_DEFAULT:
+            Lcid = RtlpSystemDefaultLcid;
+            break;
+
+        case LOCALE_CUSTOM_DEFAULT:
+            Lcid = RtlpUserDefaultLcid;
+            break;
+
+        case LOCALE_CUSTOM_UI_DEFAULT:
+            return STATUS_UNSUCCESSFUL;
     }
 
     /* Check if neutral locales were requested */
@@ -745,20 +825,10 @@ RtlLcidToLocaleName(
         }
     }
 
-    /* Handle special LCIDs */
-    switch (Lcid)
+    /* Some LCIDs have legacy aliases in the table; prefer the modern names. */
+    if (GetLocaleNameOverride(Lcid))
     {
-        case LOCALE_USER_DEFAULT:
-            Lcid = RtlpUserDefaultLcid;
-            break;
-
-        case LOCALE_SYSTEM_DEFAULT:
-        case LOCALE_CUSTOM_DEFAULT:
-            Lcid = RtlpSystemDefaultLcid;
-            break;
-
-        case LOCALE_CUSTOM_UI_DEFAULT:
-            return STATUS_UNSUCCESSFUL;
+        return CopyLocaleNameToUnicodeString(LocaleName, GetLocaleNameOverride(Lcid), AllocateDestinationString);
     }
 
     /* Try to find the locale by LCID */
@@ -770,13 +840,9 @@ RtlLcidToLocaleName(
     }
 
     /* Copy the locale name to the buffer */
-    if (!CopyAsciizToUnicodeString(LocaleName, RtlpLocaleTable[LocaleIndex].Locale))
-    {
-        DPRINT("RtlLcidToLocaleName: Buffer too small\n");
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    return STATUS_SUCCESS;
+    return CopyLocaleNameToUnicodeString(LocaleName,
+                                         RtlpLocaleTable[LocaleIndex].Locale,
+                                         AllocateDestinationString);
 }
 
 _Must_inspect_result_
