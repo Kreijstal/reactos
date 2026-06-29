@@ -1557,6 +1557,16 @@ HRESULT WINAPI SHParseDisplayName(LPCWSTR pszName, IBindCtx *pbc,
 
     *ppidl = NULL;
 
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+    if (!pszName)
+        return E_INVALIDARG;
+#endif
+
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN8)
+    if (pszName[0] == L' ' && !pszName[1])
+        return E_INVALIDARG;
+#endif
+
     if (psfgaoOut)
         *psfgaoOut = 0;
 
@@ -1589,6 +1599,18 @@ HRESULT WINAPI SHParseDisplayName(LPCWSTR pszName, IBindCtx *pbc,
                                                   &cchEaten,
                                                   ppidl,
                                                   (psfgaoOut ? &sfgao : NULL));
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+        if (hr == E_INVALIDARG &&
+            ((L'A' <= pszNameDup[0] && pszNameDup[0] <= L'Z') ||
+             (L'a' <= pszNameDup[0] && pszNameDup[0] <= L'z')) &&
+            pszNameDup[1] == L':' && pszNameDup[2] == L'\\' && !pszNameDup[3])
+        {
+            WCHAR root[] = { pszNameDup[0], L':', L'\\', UNICODE_NULL };
+            UINT driveType = GetDriveTypeW(root);
+            if (driveType == DRIVE_NO_ROOT_DIR || driveType == DRIVE_UNKNOWN)
+                hr = HRESULT_FROM_WIN32(ERROR_INVALID_DRIVE);
+        }
+#endif
         if (SUCCEEDED(hr) && psfgaoOut)
             *psfgaoOut = (sfgao & sfgaoIn);
     }
@@ -2315,6 +2337,12 @@ static LPWSTR _ILGetTextPointerW(LPCITEMIDLIST pidl)
         return NULL;
 
     case PT_IESPECIAL1:
+#ifdef __REACTOS__
+        return pdata->u.valueW.name;
+#else
+        return NULL;
+#endif
+
     case PT_IESPECIAL2:
         /*return (LPSTR)&(pdata->u.file.szNames);*/
         return NULL;
