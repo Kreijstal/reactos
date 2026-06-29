@@ -17,6 +17,13 @@
 
 #include <wine/unicode.h>
 
+#define RTL_MUI_LANGUAGE_ID               0x0004
+#define RTL_MUI_LANGUAGE_NAME             0x0008
+#define RTL_MUI_MERGE_SYSTEM_FALLBACK     0x0010
+#define RTL_MUI_MERGE_USER_FALLBACK       0x0020
+#define RTL_MUI_UI_FALLBACK               (RTL_MUI_MERGE_SYSTEM_FALLBACK | RTL_MUI_MERGE_USER_FALLBACK)
+#define RTL_MUI_MACHINE_LANGUAGE_SETTINGS 0x0400
+
 /* GLOBALS *******************************************************************/
 
 extern BOOLEAN NlsMbCodePageTag;
@@ -29,6 +36,646 @@ extern PWCHAR NlsOemToUnicodeTable;
 extern PCHAR NlsUnicodeToOemTable;
 extern PUSHORT NlsUnicodeToMbOemTable;
 
+static
+BOOLEAN
+NTAPI
+RtlpIsValidNormalizationForm(IN ULONG NormForm)
+{
+    return (NormForm == 1) ||
+           (NormForm == 2) ||
+           (NormForm == 5) ||
+           (NormForm == 6) ||
+           (NormForm == 13);
+}
+
+#ifndef _BLDR_
+extern UCHAR Rtlpnormidna[];
+extern UCHAR Rtlpnormnfc[];
+extern UCHAR Rtlpnormnfd[];
+extern UCHAR Rtlpnormnfkc[];
+extern UCHAR Rtlpnormnfkd[];
+
+struct norm_table
+{
+    WCHAR   name[13];
+    USHORT  checksum[3];
+    USHORT  version[4];
+    USHORT  form;
+    USHORT  len_factor;
+    USHORT  unknown1;
+    USHORT  decomp_size;
+    USHORT  comp_size;
+    USHORT  unknown2;
+    USHORT  classes;
+    USHORT  props_level1;
+    USHORT  props_level2;
+    USHORT  decomp_hash;
+    USHORT  decomp_map;
+    USHORT  decomp_seq;
+    USHORT  comp_hash;
+    USHORT  comp_seq;
+};
+
+static inline int RtlpGetUtf16(const WCHAR *Source, ULONG SourceLength, ULONG *Ch)
+{
+    if (IS_HIGH_SURROGATE(Source[0]))
+    {
+        if (SourceLength <= 1 || !IS_LOW_SURROGATE(Source[1]))
+            return 0;
+        *Ch = 0x10000 + ((Source[0] & 0x3ff) << 10) + (Source[1] & 0x3ff);
+        return 2;
+    }
+
+    if (IS_LOW_SURROGATE(Source[0]))
+        return 0;
+
+    *Ch = Source[0];
+    return 1;
+}
+
+static inline void RtlpPutUtf16(WCHAR *Destination, ULONG Ch)
+{
+    if (Ch >= 0x10000)
+    {
+        Ch -= 0x10000;
+        Destination[0] = 0xd800 | (Ch >> 10);
+        Destination[1] = 0xdc00 | (Ch & 0x3ff);
+    }
+    else
+    {
+        Destination[0] = Ch;
+    }
+}
+
+static
+BYTE
+RtlpRolByte(BYTE Value, BYTE Count)
+{
+    return (Value << Count) | (Value >> (8 - Count));
+}
+
+static
+BYTE
+RtlpGetNormCharProps(const struct norm_table *Info, ULONG Ch)
+{
+    const BYTE *Level1 = (const BYTE *)((const USHORT *)Info + Info->props_level1);
+    const BYTE *Level2 = (const BYTE *)((const USHORT *)Info + Info->props_level2);
+    BYTE Off = Level1[Ch / 128];
+
+    if (!Off || Off >= 0xfb)
+        return RtlpRolByte(Off, 5);
+    return Level2[(Off - 1) * 128 + Ch % 128];
+}
+
+static
+BYTE
+RtlpGetCombiningClass(const struct norm_table *Info, ULONG Ch)
+{
+    const BYTE *Classes = (const BYTE *)((const USHORT *)Info + Info->classes);
+    BYTE Class = RtlpGetNormCharProps(Info, Ch) & 0x3f;
+
+    if (Class == 0x3f)
+        return 0;
+    return Classes[Class];
+}
+
+#define HANGUL_SBASE  0xac00
+#define HANGUL_LBASE  0x1100
+#define HANGUL_VBASE  0x1161
+#define HANGUL_TBASE  0x11a7
+#define HANGUL_LCOUNT 19
+#define HANGUL_VCOUNT 21
+#define HANGUL_TCOUNT 28
+#define HANGUL_NCOUNT (HANGUL_VCOUNT * HANGUL_TCOUNT)
+#define HANGUL_SCOUNT (HANGUL_LCOUNT * HANGUL_NCOUNT)
+
+static
+const WCHAR *
+RtlpGetDecomposition(const struct norm_table *Info,
+                     ULONG Ch,
+                     BYTE Props,
+                     WCHAR *Buffer,
+                     ULONG *RetLength)
+{
+    const struct pair { WCHAR Source; USHORT Destination; } *Pairs;
+    const USHORT *HashTable = (const USHORT *)Info + Info->decomp_hash;
+    const WCHAR *Ret = NULL;
+    ULONG i, Pos, End, Length, Hash;
+
+    RtlpPutUtf16(Buffer, Ch);
+    *RetLength = 1 + (Ch >= 0x10000);
+    if (!Props || Props == 0x7f)
+        return Buffer;
+
+    if (Props == 0xff)
+    {
+        if (Ch >= HANGUL_SBASE && Ch < HANGUL_SBASE + HANGUL_SCOUNT)
+        {
+            USHORT SIndex = Ch - HANGUL_SBASE;
+            USHORT TIndex = SIndex % HANGUL_TCOUNT;
+
+            Buffer[0] = HANGUL_LBASE + SIndex / HANGUL_NCOUNT;
+            Buffer[1] = HANGUL_VBASE + (SIndex % HANGUL_NCOUNT) / HANGUL_TCOUNT;
+            if (TIndex)
+                Buffer[2] = HANGUL_TBASE + TIndex;
+            *RetLength = 2 + !!TIndex;
+            return Buffer;
+        }
+
+        if (Ch >= HANGUL_LBASE && Ch < HANGUL_LBASE + 0x100)
+            return Buffer;
+        if (Ch >= HANGUL_SBASE && Ch < HANGUL_SBASE + 0x2c00)
+            return Buffer;
+        return NULL;
+    }
+
+    Hash = Ch % Info->decomp_size;
+    Pos = HashTable[Hash];
+    if (Pos >> 13)
+    {
+        if (Props != 0xbf)
+            return Buffer;
+        Ret = (const USHORT *)Info + Info->decomp_seq + (Pos & 0x1fff);
+        Length = Pos >> 13;
+    }
+    else
+    {
+        Pairs = (const struct pair *)((const USHORT *)Info + Info->decomp_map);
+
+        for (i = Hash + 1; i < Info->decomp_size; i++)
+        {
+            if (!(HashTable[i] >> 13))
+                break;
+        }
+        if (i < Info->decomp_size)
+            End = HashTable[i];
+        else
+            for (End = Pos; Pairs[End].Source; End++) ;
+
+        for (; Pos < End; Pos++)
+        {
+            if (Pairs[Pos].Source != (WCHAR)Ch)
+                continue;
+            Ret = (const USHORT *)Info + Info->decomp_seq + (Pairs[Pos].Destination & 0x1fff);
+            Length = Pairs[Pos].Destination >> 13;
+            break;
+        }
+        if (Pos >= End)
+            return Buffer;
+    }
+
+    if (Length == 7)
+    {
+        while (Ret[Length])
+            Length++;
+    }
+    if (!Ret[0])
+        Length = 0;
+
+    *RetLength = Length;
+    return Ret;
+}
+
+static
+BOOLEAN
+RtlpReorderablePair(const struct norm_table *Info, ULONG Ch1, ULONG Ch2)
+{
+    BYTE Ccc1 = RtlpGetCombiningClass(Info, Ch1);
+    BYTE Ccc2;
+
+    if (Ccc1 < 2)
+        return FALSE;
+    Ccc2 = RtlpGetCombiningClass(Info, Ch2);
+    return Ccc2 && (Ccc1 > Ccc2);
+}
+
+static
+VOID
+RtlpCanonicalOrderSubstring(const struct norm_table *Info, WCHAR *String, ULONG Length)
+{
+    ULONG i, Ch1, Ch2, Len1, Len2;
+    BOOLEAN Swapped;
+
+    do
+    {
+        Swapped = FALSE;
+        for (i = 0; i < Length - 1; i += Len1)
+        {
+            if (!(Len1 = RtlpGetUtf16(String + i, Length - i, &Ch1)))
+                break;
+            if (i + Len1 >= Length)
+                break;
+            if (!(Len2 = RtlpGetUtf16(String + i + Len1, Length - i - Len1, &Ch2)))
+                break;
+
+            if (RtlpReorderablePair(Info, Ch1, Ch2))
+            {
+                WCHAR Tmp[2];
+
+                RtlCopyMemory(Tmp, String + i, Len1 * sizeof(WCHAR));
+                RtlMoveMemory(String + i, String + i + Len1, Len2 * sizeof(WCHAR));
+                RtlCopyMemory(String + i + Len2, Tmp, Len1 * sizeof(WCHAR));
+                Swapped = TRUE;
+                i += Len2 - Len1;
+            }
+        }
+    } while (Swapped);
+}
+
+static
+VOID
+RtlpCanonicalOrderString(const struct norm_table *Info, WCHAR *String, ULONG Length)
+{
+    ULONG Ch, i, R, Next = 0;
+
+    for (i = 0; i < Length; i += R)
+    {
+        if (!(R = RtlpGetUtf16(String + i, Length - i, &Ch)))
+            return;
+        if (i && !RtlpGetCombiningClass(Info, Ch))
+        {
+            if (i > Next + 1)
+                RtlpCanonicalOrderSubstring(Info, String + Next, i - Next);
+            Next = i + R;
+        }
+    }
+
+    if (i > Next + 1)
+        RtlpCanonicalOrderSubstring(Info, String + Next, i - Next);
+}
+
+static
+NTSTATUS
+RtlpDecomposeString(const struct norm_table *Info,
+                    const WCHAR *Source,
+                    LONG SourceLength,
+                    WCHAR *Destination,
+                    PLONG DestinationLength)
+{
+    BYTE Props;
+    LONG SourcePosition, DestinationPosition;
+    ULONG Ch, Length, DecompLength;
+    WCHAR Buffer[3];
+    const WCHAR *Decomp;
+
+    for (SourcePosition = DestinationPosition = 0;
+         SourcePosition < SourceLength;
+         SourcePosition += Length)
+    {
+        if (!(Length = RtlpGetUtf16(Source + SourcePosition, SourceLength - SourcePosition, &Ch)))
+        {
+            *DestinationLength = SourcePosition + IS_HIGH_SURROGATE(Source[SourcePosition]);
+            return STATUS_NO_UNICODE_TRANSLATION;
+        }
+
+        Props = RtlpGetNormCharProps(Info, Ch);
+        Decomp = RtlpGetDecomposition(Info, Ch, Props, Buffer, &DecompLength);
+        if (!Decomp)
+        {
+            if (!Ch && SourcePosition == SourceLength - 1 && DestinationPosition < *DestinationLength)
+            {
+                Destination[DestinationPosition++] = 0;
+                break;
+            }
+
+            *DestinationLength = SourcePosition;
+            return STATUS_NO_UNICODE_TRANSLATION;
+        }
+
+        if (DestinationPosition + (LONG)DecompLength > *DestinationLength)
+        {
+            *DestinationLength += (SourceLength - SourcePosition) * Info->len_factor;
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        RtlCopyMemory(Destination + DestinationPosition, Decomp, DecompLength * sizeof(WCHAR));
+        DestinationPosition += DecompLength;
+    }
+
+    RtlpCanonicalOrderString(Info, Destination, DestinationPosition);
+    *DestinationLength = DestinationPosition;
+    return STATUS_SUCCESS;
+}
+
+static
+ULONG
+RtlpComposeHangul(ULONG Ch1, ULONG Ch2)
+{
+    if (Ch1 >= HANGUL_LBASE && Ch1 < HANGUL_LBASE + HANGUL_LCOUNT)
+    {
+        LONG LIndex = Ch1 - HANGUL_LBASE;
+        LONG VIndex = Ch2 - HANGUL_VBASE;
+        if (VIndex >= 0 && VIndex < HANGUL_VCOUNT)
+            return HANGUL_SBASE + (LIndex * HANGUL_VCOUNT + VIndex) * HANGUL_TCOUNT;
+    }
+
+    if (Ch1 >= HANGUL_SBASE && Ch1 < HANGUL_SBASE + HANGUL_SCOUNT)
+    {
+        LONG SIndex = Ch1 - HANGUL_SBASE;
+        if (!(SIndex % HANGUL_TCOUNT))
+        {
+            LONG TIndex = Ch2 - HANGUL_TBASE;
+            if (TIndex > 0 && TIndex < HANGUL_TCOUNT)
+                return Ch1 + TIndex;
+        }
+    }
+
+    return 0;
+}
+
+static
+ULONG
+RtlpComposeChars(const struct norm_table *Info, ULONG Ch1, ULONG Ch2)
+{
+    const USHORT *Table = (const USHORT *)Info + Info->comp_hash;
+    const WCHAR *Chars = (const USHORT *)Info + Info->comp_seq;
+    ULONG Hash, Start, End, i, Length, Ch[3];
+
+    Hash = (Ch1 + 95 * Ch2) % Info->comp_size;
+    Start = Table[Hash];
+    End = Table[Hash + 1];
+    while (Start < End)
+    {
+        for (i = 0; i < 3; i++, Start += Length)
+            Length = RtlpGetUtf16(Chars + Start, End - Start, Ch + i);
+        if (Ch[0] == Ch1 && Ch[1] == Ch2)
+            return Ch[2];
+    }
+
+    return 0;
+}
+
+static
+ULONG
+RtlpComposeString(const struct norm_table *Info, WCHAR *String, ULONG SourceLength)
+{
+    ULONG i, Ch, Comp, Length, StartCh = 0, LastStarter = SourceLength;
+    BYTE Class, PrevClass = 0;
+
+    for (i = 0; i < SourceLength; i += Length)
+    {
+        if (!(Length = RtlpGetUtf16(String + i, SourceLength - i, &Ch)))
+            return 0;
+
+        Class = RtlpGetCombiningClass(Info, Ch);
+        if (LastStarter == SourceLength ||
+            (PrevClass && PrevClass >= Class) ||
+            (!(Comp = RtlpComposeHangul(StartCh, Ch)) &&
+             !(Comp = RtlpComposeChars(Info, StartCh, Ch))))
+        {
+            if (!Class)
+            {
+                LastStarter = i;
+                StartCh = Ch;
+            }
+            PrevClass = Class;
+        }
+        else
+        {
+            LONG CompLength = 1 + (Comp >= 0x10000);
+            LONG StartLength = 1 + (StartCh >= 0x10000);
+
+            if (CompLength != StartLength)
+                RtlMoveMemory(String + LastStarter + CompLength,
+                              String + LastStarter + StartLength,
+                              (i - (LastStarter + StartLength)) * sizeof(WCHAR));
+            RtlMoveMemory(String + i + CompLength - StartLength,
+                          String + i + Length,
+                          (SourceLength - i - Length) * sizeof(WCHAR));
+            SourceLength += CompLength - StartLength - Length;
+            StartCh = Comp;
+            i = LastStarter;
+            Length = CompLength;
+            PrevClass = 0;
+            RtlpPutUtf16(String + i, Comp);
+        }
+    }
+
+    return SourceLength;
+}
+
+static
+BOOLEAN
+NTAPI
+RtlpNormalizeInvalidNeedsMoreBuffer(IN ULONG NormForm,
+                                    IN PCWSTR SourceString,
+                                    IN LONG SourceStringLength,
+                                    IN LONG DestinationStringLength,
+                                    OUT PLONG RequiredLength)
+{
+    BOOLEAN HighSurrogate = FALSE;
+    LONG FailureIndex = -1;
+    LONG Index;
+
+    for (Index = 0; Index < SourceStringLength; Index++)
+    {
+        WCHAR Ch = SourceString[Index];
+
+        if (IS_HIGH_SURROGATE(Ch))
+        {
+            if ((Index + 1) >= SourceStringLength ||
+                SourceString[Index + 1] < 0xdc00 ||
+                SourceString[Index + 1] > 0xdfff)
+            {
+                HighSurrogate = TRUE;
+                FailureIndex = Index + 1;
+                break;
+            }
+
+            Index++;
+            continue;
+        }
+
+        if (Ch >= 0xdc00 && Ch <= 0xdfff)
+        {
+            FailureIndex = Index;
+            break;
+        }
+    }
+
+    if (FailureIndex < 0)
+        return FALSE;
+
+    if (HighSurrogate)
+    {
+        if (DestinationStringLength >= FailureIndex - 1)
+            return FALSE;
+
+        if (NormForm == NormalizationC || NormForm == NormalizationD)
+            *RequiredLength = SourceStringLength * 3 - DestinationStringLength;
+        else
+            *RequiredLength = 68 + SourceStringLength;
+    }
+    else
+    {
+        if (DestinationStringLength >= FailureIndex)
+            return FALSE;
+
+        if (NormForm == NormalizationC || NormForm == NormalizationD)
+            *RequiredLength = SourceStringLength * 3 - 3;
+        else
+            *RequiredLength = 67 + SourceStringLength;
+    }
+
+    return TRUE;
+}
+
+static
+NTSTATUS
+NTAPI
+RtlpLoadNormTable(IN ULONG NormForm,
+                  OUT const struct norm_table **Info)
+{
+    const struct norm_table *Table;
+
+    if (!RtlpIsValidNormalizationForm(NormForm))
+        return NormForm ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_INVALID_PARAMETER;
+
+    switch (NormForm)
+    {
+        case NormalizationC:
+            Table = (const struct norm_table *)Rtlpnormnfc;
+            break;
+        case NormalizationD:
+            Table = (const struct norm_table *)Rtlpnormnfd;
+            break;
+        case NormalizationKC:
+            Table = (const struct norm_table *)Rtlpnormnfkc;
+            break;
+        case NormalizationKD:
+            Table = (const struct norm_table *)Rtlpnormnfkd;
+            break;
+        case 13:
+            Table = (const struct norm_table *)Rtlpnormidna;
+            break;
+        default:
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    if (Table->form != NormForm)
+        return STATUS_INVALID_PARAMETER;
+
+    *Info = Table;
+    return STATUS_SUCCESS;
+}
+#else
+static
+LONG
+NTAPI
+RtlpNormalizeEstimate(IN ULONG NormForm,
+                      IN LONG SourceStringLength)
+{
+    LONG Length;
+
+    if (NormForm == 1 || NormForm == 2)
+        Length = SourceStringLength * 3;
+    else
+        Length = SourceStringLength * 18;
+
+    if (Length > 64)
+        Length = max(64, SourceStringLength + SourceStringLength / 8);
+
+    return Length;
+}
+
+static
+NTSTATUS
+NTAPI
+RtlpValidateUtf16String(IN PCWSTR SourceString,
+                        IN LONG SourceStringLength,
+                        OUT PLONG FailureIndex)
+{
+    LONG Index;
+
+    for (Index = 0; Index < SourceStringLength; Index++)
+    {
+        WCHAR Ch = SourceString[Index];
+
+        if (Ch >= 0xd800 && Ch <= 0xdbff)
+        {
+            if ((Index + 1) >= SourceStringLength ||
+                SourceString[Index + 1] < 0xdc00 ||
+                SourceString[Index + 1] > 0xdfff)
+            {
+                *FailureIndex = Index + 1;
+                return STATUS_NO_UNICODE_TRANSLATION;
+            }
+
+            Index++;
+            continue;
+        }
+
+        if (Ch >= 0xdc00 && Ch <= 0xdfff)
+        {
+            *FailureIndex = Index;
+            return STATUS_NO_UNICODE_TRANSLATION;
+        }
+    }
+
+    *FailureIndex = -1;
+    return STATUS_SUCCESS;
+}
+
+#endif
+
+static
+NTSTATUS
+NTAPI
+RtlpGetSinglePreferredUILanguage(IN ULONG Flags,
+                                 IN ULONG AllowedFlags,
+                                 IN BOOLEAN DefaultToLanguageId,
+                                 OUT PULONG NumberOfLanguages,
+                                 OUT PWSTR LanguagesBuffer OPTIONAL,
+                                 IN OUT PULONG LanguagesBufferLength)
+{
+    static const WCHAR LanguageName[] = { 'e','n','-','U','S',0,0 };
+    static const WCHAR LanguageId[] = { '0','4','0','9',0,0 };
+    const WCHAR *Language;
+    ULONG LanguageLength;
+
+    if ((Flags & ~AllowedFlags) ||
+        ((Flags & RTL_MUI_LANGUAGE_ID) && (Flags & RTL_MUI_LANGUAGE_NAME)))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!NumberOfLanguages || !LanguagesBufferLength)
+        return STATUS_INVALID_PARAMETER;
+
+    if ((Flags & RTL_MUI_LANGUAGE_ID) ||
+        (!(Flags & RTL_MUI_LANGUAGE_NAME) && DefaultToLanguageId))
+    {
+        Language = LanguageId;
+        LanguageLength = RTL_NUMBER_OF(LanguageId);
+    }
+    else
+    {
+        Language = LanguageName;
+        LanguageLength = RTL_NUMBER_OF(LanguageName);
+    }
+
+    *NumberOfLanguages = 1;
+
+    if (!LanguagesBuffer)
+    {
+        if (*LanguagesBufferLength != 0)
+            return STATUS_INVALID_PARAMETER;
+
+        *LanguagesBufferLength = LanguageLength;
+        return STATUS_SUCCESS;
+    }
+
+    if (*LanguagesBufferLength < LanguageLength)
+    {
+        *LanguagesBufferLength = LanguageLength;
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(LanguagesBuffer, Language, LanguageLength * sizeof(WCHAR));
+    *LanguagesBufferLength = LanguageLength;
+    return STATUS_SUCCESS;
+}
+
 
 /* FUNCTIONS *****************************************************************/
 
@@ -40,6 +687,337 @@ RtlMultiAppendUnicodeStringBuffer(OUT PRTL_UNICODE_STRING_BUFFER StringBuffer,
 {
     UNIMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+RtlNormalizeString(IN ULONG NormForm,
+                   IN PCWSTR SourceString,
+                   IN LONG SourceStringLength,
+                   OUT PWSTR DestinationString,
+                   IN OUT PLONG DestinationStringLength)
+{
+#ifdef _BLDR_
+    LONG FailureIndex, RequiredLength;
+    NTSTATUS Status;
+
+    if (NormForm == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!RtlpIsValidNormalizationForm(NormForm))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    if (!SourceString || SourceStringLength < -1 || !DestinationStringLength)
+        return STATUS_INVALID_PARAMETER;
+
+    if (SourceStringLength == -1)
+        SourceStringLength = wcslen(SourceString) + 1;
+
+    if (SourceStringLength == 0)
+    {
+        *DestinationStringLength = 0;
+        return STATUS_SUCCESS;
+    }
+
+    if (!DestinationString)
+    {
+        *DestinationStringLength = RtlpNormalizeEstimate(NormForm, SourceStringLength);
+        return STATUS_SUCCESS;
+    }
+
+    Status = RtlpValidateUtf16String(SourceString, SourceStringLength, &FailureIndex);
+    if (!NT_SUCCESS(Status))
+    {
+        if (*DestinationStringLength < FailureIndex - 1)
+        {
+            RequiredLength = RtlpNormalizeEstimate(NormForm, SourceStringLength);
+            if (NormForm == 5 || NormForm == 6)
+                RequiredLength = 69 + SourceStringLength;
+            else if (FailureIndex != 3)
+                RequiredLength--;
+
+            *DestinationStringLength = RequiredLength - *DestinationStringLength;
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        *DestinationStringLength = FailureIndex;
+        return Status;
+    }
+
+    RequiredLength = SourceStringLength;
+    if (*DestinationStringLength < RequiredLength)
+    {
+        *DestinationStringLength = RtlpNormalizeEstimate(NormForm, SourceStringLength) - *DestinationStringLength;
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(DestinationString, SourceString, RequiredLength * sizeof(WCHAR));
+    *DestinationStringLength = RequiredLength;
+    return STATUS_SUCCESS;
+#else
+	    const struct norm_table *Info;
+	    LONG BufferLength;
+	    PWSTR Buffer = NULL;
+	    NTSTATUS Status;
+
+    if (NormForm == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!SourceString || SourceStringLength < -1 || !DestinationStringLength)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = RtlpLoadNormTable(NormForm, &Info);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (SourceStringLength == -1)
+        SourceStringLength = wcslen(SourceString) + 1;
+
+    if (!*DestinationStringLength)
+    {
+        *DestinationStringLength = SourceStringLength * Info->len_factor;
+        if (*DestinationStringLength > 64)
+            *DestinationStringLength = max(64, SourceStringLength + SourceStringLength / 8);
+        return STATUS_SUCCESS;
+    }
+
+	    if (!SourceStringLength)
+	    {
+	        *DestinationStringLength = 0;
+	        return STATUS_SUCCESS;
+	    }
+
+	    if (RtlpNormalizeInvalidNeedsMoreBuffer(NormForm,
+	                                           SourceString,
+	                                           SourceStringLength,
+	                                           *DestinationStringLength,
+	                                           &BufferLength))
+	    {
+	        *DestinationStringLength = BufferLength;
+	        return STATUS_BUFFER_TOO_SMALL;
+	    }
+
+	    if (!Info->comp_size)
+	        return RtlpDecomposeString(Info, SourceString, SourceStringLength, DestinationString, DestinationStringLength);
+
+    BufferLength = SourceStringLength * 4;
+    for (;;)
+    {
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, BufferLength * sizeof(WCHAR));
+        if (!Buffer)
+            return STATUS_NO_MEMORY;
+
+        Status = RtlpDecomposeString(Info, SourceString, SourceStringLength, Buffer, &BufferLength);
+        if (Status != STATUS_BUFFER_TOO_SMALL)
+            break;
+
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        BufferLength = RtlpComposeString(Info, Buffer, BufferLength);
+        if (*DestinationStringLength >= BufferLength)
+            RtlCopyMemory(DestinationString, Buffer, BufferLength * sizeof(WCHAR));
+        else
+            Status = STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    *DestinationStringLength = BufferLength;
+    return Status;
+#endif
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+RtlIsNormalizedString(IN ULONG NormForm,
+                      IN PCWSTR SourceString,
+                      IN LONG SourceStringLength,
+                      OUT PBOOLEAN Normalized)
+{
+#ifdef _BLDR_
+    LONG FailureIndex;
+
+    if (NormForm == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!RtlpIsValidNormalizationForm(NormForm))
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    if (!SourceString || SourceStringLength < -1 || !Normalized)
+        return STATUS_INVALID_PARAMETER;
+
+    if (SourceStringLength == -1)
+        SourceStringLength = wcslen(SourceString) + 1;
+
+    *Normalized = TRUE;
+    return RtlpValidateUtf16String(SourceString, SourceStringLength, &FailureIndex);
+#else
+    const struct norm_table *Info;
+    LONG Index, Length, LastClass = 0, DestinationLength;
+    ULONG Ch;
+    BYTE Props, Class;
+    PWSTR Buffer;
+    NTSTATUS Status;
+    INT Result = TRUE;
+
+    if (NormForm == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!SourceString || SourceStringLength < -1 || !Normalized)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = RtlpLoadNormTable(NormForm, &Info);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (SourceStringLength == -1)
+        SourceStringLength = wcslen(SourceString) + 1;
+
+    for (Index = 0; Index < SourceStringLength; Index += Length)
+    {
+        if (!(Length = RtlpGetUtf16(SourceString + Index, SourceStringLength - Index, &Ch)))
+        {
+            *Normalized = FALSE;
+            return STATUS_NO_UNICODE_TRANSLATION;
+        }
+
+        if (Ch >= HANGUL_SBASE && Ch < HANGUL_SBASE + HANGUL_SCOUNT)
+        {
+            if (NormForm == NormalizationD || NormForm == NormalizationKD)
+            {
+                Result = FALSE;
+                break;
+            }
+        }
+
+        Props = RtlpGetNormCharProps(Info, Ch);
+        Class = Props & 0x3f;
+        if (Class == 0x3f)
+        {
+            LastClass = 0;
+            if (Props == 0xbf)
+            {
+                Result = FALSE;
+                break;
+            }
+            if (Props == 0xff)
+            {
+                if (Ch >= HANGUL_LBASE && Ch < HANGUL_LBASE + 0x100)
+                    continue;
+                if (Ch >= HANGUL_SBASE && Ch < HANGUL_SBASE + 0x2c00)
+                    continue;
+                if (!Ch && Index == SourceStringLength - 1)
+                    continue;
+                *Normalized = FALSE;
+                return STATUS_NO_UNICODE_TRANSLATION;
+            }
+        }
+        else if (Props & 0x80)
+        {
+            if ((Props & 0xc0) == 0xc0)
+                Result = -1;
+            if (Class && Class < LastClass)
+            {
+                Result = FALSE;
+                break;
+            }
+            LastClass = Class;
+        }
+        else
+        {
+            LastClass = 0;
+        }
+    }
+
+    if (Result == -1)
+    {
+        DestinationLength = SourceStringLength * 4;
+        Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, DestinationLength * sizeof(WCHAR));
+        if (!Buffer)
+            return STATUS_NO_MEMORY;
+
+        Status = RtlNormalizeString(NormForm, SourceString, SourceStringLength, Buffer, &DestinationLength);
+        Result = NT_SUCCESS(Status) && DestinationLength == SourceStringLength &&
+                 !wcsncmp(Buffer, SourceString, SourceStringLength);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    }
+
+    *Normalized = !!Result;
+    return STATUS_SUCCESS;
+#endif
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+RtlGetSystemPreferredUILanguages(IN ULONG Flags,
+                                 IN ULONG Reserved,
+                                 OUT PULONG NumberOfLanguages,
+                                 OUT PWSTR LanguagesBuffer OPTIONAL,
+                                 IN OUT PULONG LanguagesBufferLength)
+{
+    UNREFERENCED_PARAMETER(Reserved);
+
+    return RtlpGetSinglePreferredUILanguage(Flags,
+                                            RTL_MUI_LANGUAGE_NAME |
+                                            RTL_MUI_LANGUAGE_ID |
+                                            RTL_MUI_MACHINE_LANGUAGE_SETTINGS,
+                                            FALSE,
+                                            NumberOfLanguages,
+                                            LanguagesBuffer,
+                                            LanguagesBufferLength);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+RtlGetThreadPreferredUILanguages(IN ULONG Flags,
+                                 OUT PULONG NumberOfLanguages,
+                                 OUT PWSTR LanguagesBuffer OPTIONAL,
+                                 IN OUT PULONG LanguagesBufferLength)
+{
+    return RtlpGetSinglePreferredUILanguage(Flags,
+                                            RTL_MUI_LANGUAGE_NAME |
+                                            RTL_MUI_LANGUAGE_ID |
+                                            RTL_MUI_UI_FALLBACK,
+                                            TRUE,
+                                            NumberOfLanguages,
+                                            LanguagesBuffer,
+                                            LanguagesBufferLength);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+RtlGetUserPreferredUILanguages(IN ULONG Flags,
+                               IN ULONG Reserved,
+                               OUT PULONG NumberOfLanguages,
+                               OUT PWSTR LanguagesBuffer OPTIONAL,
+                               IN OUT PULONG LanguagesBufferLength)
+{
+    UNREFERENCED_PARAMETER(Reserved);
+
+    return RtlpGetSinglePreferredUILanguage(Flags,
+                                            RTL_MUI_LANGUAGE_NAME |
+                                            RTL_MUI_LANGUAGE_ID,
+                                            FALSE,
+                                            NumberOfLanguages,
+                                            LanguagesBuffer,
+                                            LanguagesBufferLength);
 }
 
 /*
@@ -2802,4 +3780,3 @@ RtlDnsHostNameToComputerName(PUNICODE_STRING ComputerName, PUNICODE_STRING DnsHo
 
     return Status;
 }
-

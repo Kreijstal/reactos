@@ -10,6 +10,7 @@
 
 /*lcformat.c */
 extern BOOL NLS_IsUnicodeOnlyLcid(LCID);
+extern VOID NLS_ResetFormats(VOID);
 
 /* Returns the ANSI codepage used by locale formatting when LOCALE_USE_CP_ACP is not set.
  * dwFlags should contain the LOCALE_ flags relevant to formatting (typically LOCALE_NOUSEROVERRIDE).

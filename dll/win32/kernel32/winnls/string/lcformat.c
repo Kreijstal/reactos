@@ -100,6 +100,7 @@ typedef struct _NLS_FORMAT_NODE
   DWORD dwCodePage;   /* Default code page (if LOCALE_USE_ANSI_CP not given) */
   NUMBERFMTW   fmt;   /* Default format for numbers */
   CURRENCYFMTW cyfmt; /* Default format for currencies */
+  LPWSTR lpGrouping;  /* Default number grouping string */
   LPWSTR lppszStrings[NLS_NUM_CACHED_STRINGS]; /* Default formats,day/month names */
   WCHAR szShortAM[2]; /* Short 'AM' marker */
   WCHAR szShortPM[2]; /* Short 'PM' marker */
@@ -131,6 +132,40 @@ static CRITICAL_SECTION_DEBUG NLS_FormatsCS_debug =
       0, 0, { (DWORD_PTR)(__FILE__ ": NLS_Formats") }
 };
 static CRITICAL_SECTION NLS_FormatsCS = { &NLS_FormatsCS_debug, -1, 0, 0, 0, 0 };
+static NLS_FORMAT_NODE *NLS_CachedFormats = NULL;
+
+static void NLS_FreeFormatNode(NLS_FORMAT_NODE *node)
+{
+  DWORD i;
+
+  for (i = 0; i < NLS_NUM_CACHED_STRINGS; i++)
+    HeapFree(GetProcessHeap(), 0, node->lppszStrings[i]);
+  HeapFree(GetProcessHeap(), 0, node->fmt.lpDecimalSep);
+  HeapFree(GetProcessHeap(), 0, node->fmt.lpThousandSep);
+  HeapFree(GetProcessHeap(), 0, node->lpGrouping);
+  HeapFree(GetProcessHeap(), 0, node->cyfmt.lpDecimalSep);
+  HeapFree(GetProcessHeap(), 0, node->cyfmt.lpThousandSep);
+  HeapFree(GetProcessHeap(), 0, node->cyfmt.lpCurrencySymbol);
+  HeapFree(GetProcessHeap(), 0, node);
+}
+
+VOID NLS_ResetFormats(VOID)
+{
+  NLS_FORMAT_NODE *node;
+
+  RtlEnterCriticalSection(&NLS_FormatsCS);
+  node = NLS_CachedFormats;
+  NLS_CachedFormats = NULL;
+  RtlLeaveCriticalSection(&NLS_FormatsCS);
+
+  while (node)
+  {
+    NLS_FORMAT_NODE *next = node->next;
+
+    NLS_FreeFormatNode(node);
+    node = next;
+  }
+}
 
 /**************************************************************************
  * NLS_GetLocaleNumber <internal>
@@ -222,7 +257,6 @@ static const NLS_FORMAT_NODE *NLS_GetFormats(LCID lcid, DWORD dwFlags)
     LOCALE_S1159, LOCALE_S2359,
     LOCALE_SYEARMONTH
   };
-  static NLS_FORMAT_NODE *NLS_CachedFormats = NULL;
   NLS_FORMAT_NODE *node = NLS_CachedFormats;
 
   dwFlags &= LOCALE_NOUSEROVERRIDE;
@@ -255,6 +289,7 @@ static const NLS_FORMAT_NODE *NLS_GetFormats(LCID lcid, DWORD dwFlags)
     GET_LOCALE_NUMBER(new_node->fmt.NegativeOrder, LOCALE_INEGNUMBER);
 
     GET_LOCALE_NUMBER(new_node->fmt.Grouping, LOCALE_SGROUPING);
+    GET_LOCALE_STRING(new_node->lpGrouping, LOCALE_SGROUPING);
     if (new_node->fmt.Grouping > 9 && new_node->fmt.Grouping != 32)
     {
       WARN("LOCALE_SGROUPING (%d) unhandled, please report!\n",
@@ -341,14 +376,7 @@ static const NLS_FORMAT_NODE *NLS_GetFormats(LCID lcid, DWORD dwFlags)
       /* We raced and lost: The node was already added by another thread.
        * node points to the currently cached node, so free new_node.
        */
-      for (i = 0; i < ARRAY_SIZE(NLS_LocaleIndices); i++)
-        HeapFree(GetProcessHeap(), 0, new_node->lppszStrings[i]);
-      HeapFree(GetProcessHeap(), 0, new_node->fmt.lpDecimalSep);
-      HeapFree(GetProcessHeap(), 0, new_node->fmt.lpThousandSep);
-      HeapFree(GetProcessHeap(), 0, new_node->cyfmt.lpDecimalSep);
-      HeapFree(GetProcessHeap(), 0, new_node->cyfmt.lpThousandSep);
-      HeapFree(GetProcessHeap(), 0, new_node->cyfmt.lpCurrencySymbol);
-      HeapFree(GetProcessHeap(), 0, new_node);
+      NLS_FreeFormatNode(new_node);
     }
   }
   return node;
@@ -853,6 +881,7 @@ static INT NLS_GetDateTimeFormatA(LCID lcid, DWORD dwFlags,
                                   LPCSTR lpFormat, LPSTR lpStr, INT cchOut)
 {
   DWORD cp = CP_ACP;
+  DWORD dwLastError = GetLastError();
   WCHAR szFormat[128], szOut[128];
   INT iRet;
 
@@ -880,21 +909,28 @@ static INT NLS_GetDateTimeFormatA(LCID lcid, DWORD dwFlags,
   if (lpFormat)
     MultiByteToWideChar(cp, 0, lpFormat, -1, szFormat, ARRAY_SIZE(szFormat));
 
-  if (cchOut > (int) ARRAY_SIZE(szOut))
-    cchOut = ARRAY_SIZE(szOut);
-
   szOut[0] = '\0';
 
   iRet = NLS_GetDateTimeFormatW(lcid, dwFlags, lpTime, lpFormat ? szFormat : NULL,
-                                lpStr ? szOut : NULL, cchOut);
+                                szOut, ARRAY_SIZE(szOut));
+  if (!iRet)
+    return 0;
 
-  if (lpStr)
+  iRet = WideCharToMultiByte(cp, 0, szOut, -1, NULL, 0, NULL, NULL);
+  if (!lpStr || !cchOut)
   {
-    if (szOut[0])
-      WideCharToMultiByte(cp, 0, szOut, iRet ? -1 : cchOut, lpStr, cchOut, 0, 0);
-    else if (cchOut && iRet)
-      *lpStr = '\0';
+    SetLastError(dwLastError);
+    return iRet;
   }
+
+  if (cchOut < iRet)
+  {
+    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+    return 0;
+  }
+
+  WideCharToMultiByte(cp, 0, szOut, -1, lpStr, cchOut, NULL, NULL);
+  SetLastError(dwLastError);
   return iRet;
 }
 
@@ -1122,6 +1158,126 @@ INT WINAPI GetTimeFormatW(LCID lcid, DWORD dwFlags, const SYSTEMTIME* lpTime,
 #define NLS_NEG_RIGHT       3 /* "1.1-"  */
 #define NLS_NEG_RIGHT_SPACE 4 /* "1.1 -" */
 
+static LPWSTR NLS_PrependString(LPWSTR end, LPCWSTR str)
+{
+  DWORD len = strlenW(str);
+
+  return memcpy(end - len, str, len * sizeof(WCHAR));
+}
+
+static VOID NLS_GroupingToString(DWORD grouping, LPWSTR buffer)
+{
+  DWORD last_digit = grouping % 10;
+  WCHAR tmp[10], *ptr = tmp;
+
+  if (last_digit == 0)
+  {
+    grouping /= 10;
+    if (grouping % 10 == 0)
+      last_digit = ~0u;
+  }
+
+  while (grouping)
+  {
+    *ptr++ = '0' + grouping % 10;
+    grouping /= 10;
+  }
+  while (ptr > tmp)
+  {
+    *buffer++ = *(--ptr);
+    if (ptr > tmp) *buffer++ = ';';
+  }
+  if (last_digit)
+  {
+    *buffer++ = ';';
+    *buffer++ = '0';
+    if (last_digit == ~0u)
+    {
+      *buffer++ = ';';
+      *buffer++ = '0';
+    }
+  }
+  *buffer = 0;
+}
+
+static LPWSTR NLS_WriteGroupedInteger(LPWSTR end, LPCWSTR value, DWORD len,
+                                      LPCWSTR thousand_sep, LPCWSTR grouping,
+                                      DWORD *state, BOOL leading_zero)
+{
+  BOOL repeat = FALSE;
+  DWORD prev = ~0u;
+
+  while (len && *value == '0')
+  {
+    value++;
+    len--;
+  }
+  if (len)
+    leading_zero = FALSE;
+
+  while (grouping[0] == '0' && grouping[1] == ';')
+    grouping += 2;
+
+  while (len)
+  {
+    DWORD limit = prev;
+
+    if (!repeat)
+    {
+      limit = *grouping - '0';
+      if (grouping[1] == ';')
+      {
+        grouping += 2;
+        if (limit)
+          prev = limit;
+        else
+        {
+          prev = ~0u;
+          if (grouping[0] == '0' && grouping[1] != ';')
+          {
+            repeat = TRUE;
+            limit = prev;
+          }
+        }
+      }
+      else
+      {
+        repeat = TRUE;
+        if (!limit)
+          limit = prev;
+        else
+          prev = ~0u;
+      }
+    }
+
+    while (len && limit--)
+    {
+      WCHAR ch = value[--len];
+
+      if (*state & NF_ROUND)
+      {
+        if (ch != '9')
+        {
+          ch++;
+          *state &= ~NF_ROUND;
+        }
+        else
+          ch = '0';
+      }
+      *--end = ch;
+    }
+    if (len)
+      end = NLS_PrependString(end, thousand_sep);
+  }
+
+  if (*state & NF_ROUND)
+    *--end = '1';
+  else if (leading_zero)
+    *--end = '0';
+
+  return end;
+}
+
 /**************************************************************************
  *              GetNumberFormatW	(KERNEL32.@)
  *
@@ -1133,8 +1289,10 @@ INT WINAPI GetNumberFormatW(LCID lcid, DWORD dwFlags,
 {
   WCHAR szBuff[128], *szOut = szBuff + ARRAY_SIZE(szBuff) - 1;
   WCHAR szNegBuff[8];
+  WCHAR szGrouping[32];
+  LPCWSTR lpszGrouping;
   const WCHAR *lpszNeg = NULL, *lpszNegStart, *szSrc;
-  DWORD dwState = 0, dwDecimals = 0, dwGroupCount = 0, dwCurrentGroupCount = 0;
+  DWORD dwState = 0, dwDecimals = 0;
   INT iRet;
 
   TRACE("(0x%04x,0x%08x,%s,%p,%p,%d)\n", lcid, dwFlags, debugstr_w(lpszValue),
@@ -1154,10 +1312,13 @@ INT WINAPI GetNumberFormatW(LCID lcid, DWORD dwFlags,
     if (!node)
       goto error;
     lpFormat = &node->fmt;
+    lpszGrouping = node->lpGrouping;
     lpszNegStart = lpszNeg = GetNegative(node);
   }
   else
   {
+    NLS_GroupingToString(lpFormat->Grouping, szGrouping);
+    lpszGrouping = szGrouping;
     GetLocaleInfoW(lcid, LOCALE_SNEGATIVESIGN|(dwFlags & LOCALE_NOUSEROVERRIDE),
                    szNegBuff, ARRAY_SIZE(szNegBuff));
     lpszNegStart = lpszNeg = szNegBuff;
@@ -1284,45 +1445,18 @@ INT WINAPI GetNumberFormatW(LCID lcid, DWORD dwFlags,
       *szOut-- = *lpszDec--; /* Write decimal separator */
   }
 
-  dwGroupCount = lpFormat->Grouping == 32 ? 3 : lpFormat->Grouping;
-
-  /* Write the remaining whole number digits, including grouping chars */
-  while (szSrc >= lpszValue && *szSrc >= '0' && *szSrc <= '9')
   {
-    if (dwState & NF_ROUND)
-    {
-      if (*szSrc == '9')
-        *szOut-- = '0'; /* continue rounding */
-      else
-      {
-        dwState &= ~NF_ROUND;
-        *szOut-- = (*szSrc)+1;
-      }
-      szSrc--;
-    }
-    else
-      *szOut-- = *szSrc--;
+    LPCWSTR int_start = (dwState & NF_ISNEGATIVE) ? lpszValue + 1 : lpszValue;
+    DWORD int_len = (szSrc >= int_start) ? szSrc - int_start + 1 : 0;
 
-    dwState |= NF_DIGITS_OUT;
-    dwCurrentGroupCount++;
-    if (szSrc >= lpszValue && dwCurrentGroupCount == dwGroupCount && *szSrc != '-')
-    {
-      LPWSTR lpszGrp = lpFormat->lpThousandSep + strlenW(lpFormat->lpThousandSep) - 1;
-
-      while (lpszGrp >= lpFormat->lpThousandSep)
-        *szOut-- = *lpszGrp--; /* Write grouping char */
-
-      dwCurrentGroupCount = 0;
-      if (lpFormat->Grouping == 32)
-        dwGroupCount = 2; /* Indic grouping: 3 then 2 */
-    }
+    szOut = NLS_WriteGroupedInteger(szOut + 1,
+                                    int_start,
+                                    int_len,
+                                    lpFormat->lpThousandSep,
+                                    lpszGrouping,
+                                    &dwState,
+                                    lpFormat->LeadingZero) - 1;
   }
-  if (dwState & NF_ROUND)
-  {
-    *szOut-- = '1'; /* e.g. .6 > 1.0 */
-  }
-  else if (!(dwState & NF_DIGITS_OUT) && lpFormat->LeadingZero)
-    *szOut-- = '0'; /* Add leading 0 if we have no digits before the decimal point */
 
   /* Add any leading negative sign */
   if (dwState & NF_ISNEGATIVE)
@@ -1430,8 +1564,10 @@ INT WINAPI GetCurrencyFormatW(LCID lcid, DWORD dwFlags,
   };
   WCHAR szBuff[128], *szOut = szBuff + ARRAY_SIZE(szBuff) - 1;
   WCHAR szNegBuff[8];
+  WCHAR szGrouping[32];
+  LPCWSTR lpszGrouping;
   const WCHAR *lpszNeg = NULL, *lpszNegStart, *szSrc, *lpszCy, *lpszCyStart;
-  DWORD dwState = 0, dwDecimals = 0, dwGroupCount = 0, dwCurrentGroupCount = 0, dwFmt;
+  DWORD dwState = 0, dwDecimals = 0, dwFmt;
   INT iRet;
 
   TRACE("(0x%04x,0x%08x,%s,%p,%p,%d)\n", lcid, dwFlags, debugstr_w(lpszValue),
@@ -1454,10 +1590,13 @@ INT WINAPI GetCurrencyFormatW(LCID lcid, DWORD dwFlags,
       goto error;
 
     lpFormat = &node->cyfmt;
+    lpszGrouping = node->lpGrouping;
     lpszNegStart = lpszNeg = GetNegative(node);
   }
   else
   {
+    NLS_GroupingToString(lpFormat->Grouping, szGrouping);
+    lpszGrouping = szGrouping;
     GetLocaleInfoW(lcid, LOCALE_SNEGATIVESIGN|(dwFlags & LOCALE_NOUSEROVERRIDE),
                    szNegBuff, ARRAY_SIZE(szNegBuff));
     lpszNegStart = lpszNeg = szNegBuff;
@@ -1599,43 +1738,18 @@ INT WINAPI GetCurrencyFormatW(LCID lcid, DWORD dwFlags,
       *szOut-- = *lpszDec--; /* Write decimal separator */
   }
 
-  dwGroupCount = lpFormat->Grouping == 32 ? 3 : lpFormat->Grouping;
-
-  /* Write the remaining whole number digits, including grouping chars */
-  while (szSrc >= lpszValue && *szSrc >= '0' && *szSrc <= '9')
   {
-    if (dwState & NF_ROUND)
-    {
-      if (*szSrc == '9')
-        *szOut-- = '0'; /* continue rounding */
-      else
-      {
-        dwState &= ~NF_ROUND;
-        *szOut-- = (*szSrc)+1;
-      }
-      szSrc--;
-    }
-    else
-      *szOut-- = *szSrc--;
+    LPCWSTR int_start = (dwState & NF_ISNEGATIVE) ? lpszValue + 1 : lpszValue;
+    DWORD int_len = (szSrc >= int_start) ? szSrc - int_start + 1 : 0;
 
-    dwState |= NF_DIGITS_OUT;
-    dwCurrentGroupCount++;
-    if (szSrc >= lpszValue && dwCurrentGroupCount == dwGroupCount && *szSrc != '-')
-    {
-      LPWSTR lpszGrp = lpFormat->lpThousandSep + strlenW(lpFormat->lpThousandSep) - 1;
-
-      while (lpszGrp >= lpFormat->lpThousandSep)
-        *szOut-- = *lpszGrp--; /* Write grouping char */
-
-      dwCurrentGroupCount = 0;
-      if (lpFormat->Grouping == 32)
-        dwGroupCount = 2; /* Indic grouping: 3 then 2 */
-    }
+    szOut = NLS_WriteGroupedInteger(szOut + 1,
+                                    int_start,
+                                    int_len,
+                                    lpFormat->lpThousandSep,
+                                    lpszGrouping,
+                                    &dwState,
+                                    lpFormat->LeadingZero) - 1;
   }
-  if (dwState & NF_ROUND)
-    *szOut-- = '1'; /* e.g. .6 > 1.0 */
-  else if (!(dwState & NF_DIGITS_OUT) && lpFormat->LeadingZero)
-    *szOut-- = '0'; /* Add leading 0 if we have no digits before the decimal point */
 
   /* Add any leading negative or currency sign */
   while (dwFmt & (CF_MINUS_LEFT|CF_CY_LEFT))
@@ -1837,10 +1951,15 @@ BOOL WINAPI EnumDateFormatsW(DATEFMT_ENUMPROCW proc, LCID lcid, DWORD flags)
 BOOL WINAPI EnumDateFormatsExEx(DATEFMT_ENUMPROCEXEX proc, const WCHAR *locale, DWORD flags, LPARAM lParam)
 {
     struct enumdateformats_context ctxt;
+    LCID lcid;
+
+    lcid = LocaleNameToLCID(locale, 0);
+    if (!lcid)
+        return FALSE;
 
     ctxt.type = CALLBACK_ENUMPROCEXEX;
     ctxt.u.callbackexex = proc;
-    ctxt.lcid = LocaleNameToLCID(locale, 0);
+    ctxt.lcid = lcid;
     ctxt.flags = flags;
     ctxt.lParam = lParam;
     ctxt.unicode = TRUE;
@@ -1960,6 +2079,7 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
 {
   WCHAR *buf, *opt = NULL, *iter = NULL;
   CALID calendar = ctxt->calendar;
+  CALTYPE caltype = ctxt->caltype;
   BOOL ret = FALSE;
   int bufSz = 200;		/* the size of the buffer */
 
@@ -1981,7 +2101,7 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
     int optSz = GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, NULL, 0);
     if (optSz > 1)
     {
-      opt = HeapAlloc(GetProcessHeap(), 0, optSz * sizeof(WCHAR));
+      opt = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (optSz + 1) * sizeof(WCHAR));
       if (opt == NULL)
       {
         SetLastError(ERROR_NOT_ENOUGH_MEMORY);
@@ -1998,10 +2118,30 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
     do				/* loop until there's no error */
     {
       if (ctxt->caltype & CAL_RETURN_NUMBER)
-        ret = GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, NULL, bufSz / sizeof(WCHAR), (LPDWORD)buf);
+      {
+        DWORD value;
+
+        if (ctxt->unicode)
+          ret = GetCalendarInfoW(ctxt->lcid, calendar, caltype, NULL, 0, &value);
+        else
+          ret = GetCalendarInfoA(ctxt->lcid, calendar, caltype, NULL, 0, &value);
+
+        if (ret)
+        {
+          if (ctxt->unicode)
+          {
+            static const WCHAR fmtW[] = {'%','u',0};
+            snprintfW(buf, bufSz / sizeof(WCHAR), fmtW, value);
+          }
+          else
+          {
+            snprintf((CHAR*)buf, bufSz / sizeof(CHAR), "%u", value);
+          }
+        }
+      }
       else if (ctxt->unicode)
-        ret = GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, buf, bufSz / sizeof(WCHAR), NULL);
-      else ret = GetCalendarInfoA(ctxt->lcid, calendar, ctxt->caltype, (CHAR*)buf, bufSz / sizeof(CHAR), NULL);
+        ret = GetCalendarInfoW(ctxt->lcid, calendar, caltype, buf, bufSz / sizeof(WCHAR), NULL);
+      else ret = GetCalendarInfoA(ctxt->lcid, calendar, caltype, (CHAR*)buf, bufSz / sizeof(CHAR), NULL);
 
       if (!ret)
       {
@@ -2009,8 +2149,8 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
         {				/* so resize it */
           int newSz;
           if (ctxt->unicode)
-            newSz = GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, NULL, 0, NULL) * sizeof(WCHAR);
-          else newSz = GetCalendarInfoA(ctxt->lcid, calendar, ctxt->caltype, NULL, 0, NULL) * sizeof(CHAR);
+            newSz = GetCalendarInfoW(ctxt->lcid, calendar, caltype, NULL, 0, NULL) * sizeof(WCHAR);
+          else newSz = GetCalendarInfoA(ctxt->lcid, calendar, caltype, NULL, 0, NULL) * sizeof(CHAR);
           if (bufSz >= newSz)
           {
             ERR("Buffer resizing disorder: was %d, requested %d.\n", bufSz, newSz);
@@ -2021,7 +2161,13 @@ BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
           buf = HeapReAlloc(GetProcessHeap(), 0, buf, bufSz);
           if (buf == NULL)
             goto cleanup;
-        } else goto cleanup;
+        }
+        else
+        {
+          if (GetLastError() == ERROR_BADDB)
+            SetLastError(ERROR_INVALID_FLAGS);
+          goto cleanup;
+        }
       }
     } while (!ret);
 
@@ -2208,6 +2354,8 @@ int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
     };
     DWORD localeflags = 0;
     CALTYPE calinfo;
+
+    Locale = ConvertDefaultLocale(Locale);
 
     if (CalType & CAL_NOUSEROVERRIDE)
 	FIXME("flag CAL_NOUSEROVERRIDE used, not fully implemented\n");

@@ -20,6 +20,10 @@
 INT WINAPI GetLocaleInfoEx(LPCWSTR locale, LCTYPE info, LPWSTR buffer, INT len)
 {
     LCID lcid = LocaleNameToLCID(locale, 0);
+    LCTYPE base_info = info & ~(LOCALE_NOUSEROVERRIDE |
+                                LOCALE_USE_CP_ACP |
+                                LOCALE_RETURN_NUMBER |
+                                LOCALE_RETURN_GENITIVE_NAMES);
 
     DPRINT("%s, lcid=0x%x, 0x%x\n", debugstr_w(locale), lcid, info);
 
@@ -28,7 +32,7 @@ INT WINAPI GetLocaleInfoEx(LPCWSTR locale, LCTYPE info, LPWSTR buffer, INT len)
     /* special handling for neutral locale names */
     if (locale && strlenW(locale) == 2)
     {
-        switch (info)
+        switch (base_info)
         {
         case LOCALE_SNAME:
             if (len && len < 3)
