@@ -317,6 +317,13 @@ int WINAPI GetCalendarInfoA(LCID lcid, CALID Calendar, CALTYPE CalType,
 {
     int ret, cchDataW = cchData;
     LPWSTR lpCalDataW = NULL;
+
+    if (CalType & CAL_RETURN_NUMBER)
+    {
+        ret = GetCalendarInfoW(lcid, Calendar, CalType, NULL, 0, lpValue);
+        return ret ? ret * sizeof(WCHAR) : 0;
+    }
+
 #ifdef __REACTOS__
     DWORD cp = CP_ACP;
     if (!(CalType & CAL_USE_CP_ACP))
@@ -343,7 +350,7 @@ int WINAPI GetCalendarInfoA(LCID lcid, CALID Calendar, CALTYPE CalType,
       return 0;
     }
 
-    if (!cchData && !(CalType & CAL_RETURN_NUMBER))
+    if (!cchData)
         cchDataW = GetCalendarInfoW(lcid, Calendar, CalType, NULL, 0, NULL);
     if (!(lpCalDataW = HeapAlloc(GetProcessHeap(), 0, cchDataW*sizeof(WCHAR))))
         return 0;
@@ -355,8 +362,6 @@ int WINAPI GetCalendarInfoA(LCID lcid, CALID Calendar, CALTYPE CalType,
 #else
         ret = WideCharToMultiByte(CP_ACP, 0, lpCalDataW, -1, lpCalData, cchData, NULL, NULL);
 #endif
-    else if (CalType & CAL_RETURN_NUMBER)
-        ret *= sizeof(WCHAR);
     HeapFree(GetProcessHeap(), 0, lpCalDataW);
 
     return ret;

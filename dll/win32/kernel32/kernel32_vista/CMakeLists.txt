@@ -16,6 +16,7 @@ list(APPEND SOURCE
     GetFinalPathNameByHandle.c
     GetNamedPipeClientProcessId.c
     GetProcessGroupAffinity.c
+    GetSystemDefaultLocaleName.c
     GetThreadGroupAffinity.c
     GetTickCount64.c
     GetUserDefaultLocaleName.c
