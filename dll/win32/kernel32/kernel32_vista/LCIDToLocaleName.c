@@ -32,6 +32,32 @@ LCIDToLocaleName(
         RtlFlags |= RTL_LOCALE_ALLOW_NEUTRAL_NAMES;
     }
 
+    switch (Locale)
+    {
+        case LOCALE_NEUTRAL:
+        case LOCALE_USER_DEFAULT:
+        case LOCALE_CUSTOM_DEFAULT:
+            Locale = GetUserDefaultLCID();
+            break;
+
+        case LOCALE_SYSTEM_DEFAULT:
+            Locale = GetSystemDefaultLCID();
+            break;
+
+        case LOCALE_CUSTOM_UI_DEFAULT:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+
+        case MAKELCID(MAKELANGID(LANG_CHINESE, SUBLANG_NEUTRAL), SORT_DEFAULT):
+        case 0x07804:
+            Locale = MAKELCID(MAKELANGID(LANG_CHINESE_SIMPLIFIED, SUBLANG_CHINESE_SIMPLIFIED), SORT_DEFAULT);
+            break;
+
+        case 0x07C04:
+            Locale = MAKELCID(MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_HONGKONG), SORT_DEFAULT);
+            break;
+    }
+
     if (lpName != NULL)
     {
         cchName = min(cchName, LOCALE_NAME_MAX_LENGTH);
