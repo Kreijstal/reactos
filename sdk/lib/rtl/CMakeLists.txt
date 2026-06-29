@@ -99,6 +99,28 @@ list(APPEND SOURCE
     workitem.c
     rtl.h)
 
+set(NORM_NLS_FILES
+    normidna
+    normnfc
+    normnfd
+    normnfkc
+    normnfkd)
+
+foreach(NORM_NLS ${NORM_NLS_FILES})
+    set(NORM_NLS_C ${CMAKE_CURRENT_BINARY_DIR}/${NORM_NLS}.c)
+    set(NORM_NLS_H ${CMAKE_CURRENT_BINARY_DIR}/${NORM_NLS}.h)
+    add_custom_command(
+        OUTPUT ${NORM_NLS_C} ${NORM_NLS_H}
+        COMMAND native-bin2c
+            ${REACTOS_SOURCE_DIR}/media/nls/${NORM_NLS}.nls
+            ${NORM_NLS_C}
+            ${NORM_NLS_H}
+            BIN
+            Rtlp${NORM_NLS}
+        DEPENDS native-bin2c ${REACTOS_SOURCE_DIR}/media/nls/${NORM_NLS}.nls)
+    list(APPEND SOURCE ${NORM_NLS_C})
+endforeach()
+
 if(ARCH STREQUAL "i386")
     list(APPEND ASM_SOURCE
         i386/debug_asm.S
