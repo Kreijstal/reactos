@@ -44,8 +44,9 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 
 #define REG_SZ 1
 extern int wine_fold_string(int flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen);
-extern int wine_get_sortkey(int flags, const WCHAR *src, int srclen, char *dst, int dstlen);
-extern int wine_compare_string(int flags, const WCHAR *str1, int len1, const WCHAR *str2, int len2);
+extern int wine_get_sortkey(const WCHAR *locale, int flags, const WCHAR *src, int srclen, char *dst, int dstlen);
+extern int wine_compare_string(const WCHAR *locale, int flags, const WCHAR *str1, int len1, const WCHAR *str2, int len2);
+NTSYSAPI NTSTATUS WINAPI RtlNormalizeString(ULONG, const WCHAR *, INT, WCHAR *, INT *);
 #ifdef __REACTOS__
 extern UINT GetLocalisedText(IN UINT uID, IN LPWSTR lpszDest, IN UINT cchDest, IN LANGID lang);
 #else
@@ -202,6 +203,7 @@ static const WCHAR sNativeDigitsW[] = {'s','N','a','t','i','v','e','D','i','g','
 static const WCHAR sNegativeSignW[] = {'s','N','e','g','a','t','i','v','e','S','i','g','n',0};
 static const WCHAR sPositiveSignW[] = {'s','P','o','s','i','t','i','v','e','S','i','g','n',0};
 static const WCHAR sShortDateW[] = {'s','S','h','o','r','t','D','a','t','e',0};
+static const WCHAR sShortTimeW[] = {'s','S','h','o','r','t','T','i','m','e',0};
 static const WCHAR sThousandW[] = {'s','T','h','o','u','s','a','n','d',0};
 static const WCHAR sTimeFormatW[] = {'s','T','i','m','e','F','o','r','m','a','t',0};
 static const WCHAR sTimeW[] = {'s','T','i','m','e',0};
@@ -241,6 +243,7 @@ static struct registry_value
     { LOCALE_SNEGATIVESIGN, sNegativeSignW },
     { LOCALE_SPOSITIVESIGN, sPositiveSignW },
     { LOCALE_SSHORTDATE, sShortDateW },
+    { LOCALE_SSHORTTIME, sShortTimeW },
     { LOCALE_STHOUSAND, sThousandW },
     { LOCALE_STIME, sTimeW },
     { LOCALE_STIMEFORMAT, sTimeFormatW },
@@ -248,16 +251,11 @@ static struct registry_value
     /* The following are not listed under MSDN as supported,
      * but seem to be used and also stored in the registry.
      */
-    { LOCALE_ICOUNTRY, iCountryW },
     { LOCALE_IDATE, iDateW },
     { LOCALE_ILDATE, iLDateW },
-    { LOCALE_ITLZERO, iTLZeroW },
-    { LOCALE_SCOUNTRY, sCountryW },
-    { LOCALE_SABBREVLANGNAME, sLanguageW },
     /* The following are used in XP and later */
     { LOCALE_IDIGITSUBSTITUTION, NumShapeW },
     { LOCALE_SNATIVEDIGITS, sNativeDigitsW },
-    { LOCALE_ITIMEMARKPOSN, iTimePrefixW }
 };
 
 static RTL_CRITICAL_SECTION cache_section = { NULL, -1, 0, 0, 0, 0 };
@@ -382,6 +380,16 @@ static LANGID get_default_sublang( LANGID lang )
     }
     if (SUBLANGID( lang ) == SUBLANG_NEUTRAL) lang = MAKELANGID( PRIMARYLANGID(lang), SUBLANG_DEFAULT );
     return lang;
+}
+
+static LANGID get_resource_sublang( LANGID lang )
+{
+    switch (lang)
+    {
+    case MAKELANGID( LANG_IRISH, SUBLANG_NEUTRAL ):
+        return MAKELANGID( LANG_IRISH, SUBLANG_IRISH_IRELAND );
+    }
+    return get_default_sublang( lang );
 }
 
 #if (WINVER >= 0x0600)
@@ -591,9 +599,11 @@ done:
  */
 static LCID convert_default_lcid( LCID lcid, LCTYPE lctype )
 {
-    if (lcid == LOCALE_SYSTEM_DEFAULT ||
-        lcid == LOCALE_USER_DEFAULT ||
-        lcid == LOCALE_NEUTRAL)
+    BOOL is_default_lcid = (lcid == LOCALE_SYSTEM_DEFAULT ||
+                            lcid == LOCALE_USER_DEFAULT ||
+                            lcid == LOCALE_NEUTRAL);
+
+    if (is_default_lcid)
     {
         LCID default_id = 0;
 
@@ -732,7 +742,7 @@ static LCID convert_default_lcid( LCID lcid, LCTYPE lctype )
         }
         if (default_id) lcid = default_id;
     }
-    return ConvertDefaultLocale( lcid );
+    return is_default_lcid ? ConvertDefaultLocale( lcid ) : lcid;
 }
 
 /***********************************************************************
@@ -908,6 +918,7 @@ void LOCALE_InitRegistry(void)
       LOCALE_IFIRSTDAYOFWEEK,
       LOCALE_IFIRSTWEEKOFYEAR,
       LOCALE_STIMEFORMAT,
+      LOCALE_SSHORTTIME,
       LOCALE_SYEARMONTH,
       LOCALE_IDATE };
     static const LCTYPE lc_measurement_values[] = { LOCALE_IMEASURE };
@@ -1755,7 +1766,7 @@ INT WINAPI GetLocaleInfoW( LCID lcid, LCTYPE lctype, LPWSTR buffer, INT len )
     lang_id = LANGIDFROMLCID( lcid );
 
     /* replace SUBLANG_NEUTRAL by SUBLANG_DEFAULT */
-    if (SUBLANGID(lang_id) == SUBLANG_NEUTRAL) lang_id = get_default_sublang( lang_id );
+    if (SUBLANGID(lang_id) == SUBLANG_NEUTRAL) lang_id = get_resource_sublang( lang_id );
 
     if (!(hrsrc = FindResourceExW( kernel32_handle, (LPWSTR)RT_STRING,
                                    ULongToPtr((lctype >> 4) + 1), lang_id )))
@@ -1940,9 +1951,19 @@ BOOL WINAPI SetLocaleInfoW( LCID lcid, LCTYPE lctype, LPCWSTR data )
     lctype &= 0xffff;
     value = get_locale_registry_value( lctype );
 
-    if (!data || !value)
+    if (!data)
     {
         SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (!value)
+    {
+        if (GetLocaleInfoW(lcid, lctype, NULL, 0))
+            SetLastError( ERROR_INVALID_FLAGS );
+        else
+            SetLastError( ERROR_INVALID_PARAMETER );
+
         return FALSE;
     }
 
@@ -2013,6 +2034,7 @@ BOOL WINAPI SetLocaleInfoW( LCID lcid, LCTYPE lctype, LPCWSTR data )
     NtClose( hkey );
 
     if (status) SetLastError( RtlNtStatusToDosError(status) );
+    else NLS_ResetFormats();
     return !status;
 }
 
@@ -2979,6 +3001,47 @@ static BOOL CALLBACK enum_lang_proc_w( HMODULE hModule, LPCWSTR type,
     return lpfnLocaleEnum( buf );
 }
 
+static const LCID NLS_AlternateSortLocales[] =
+{
+    MAKELCID(MAKELANGID(LANG_GERMAN, SUBLANG_GERMAN), SORT_GERMAN_PHONE_BOOK),
+    MAKELCID(MAKELANGID(LANG_JAPANESE, SUBLANG_JAPANESE_JAPAN), SORT_JAPANESE_UNICODE),
+    MAKELCID(MAKELANGID(LANG_KOREAN, SUBLANG_KOREAN), SORT_KOREAN_UNICODE),
+    MAKELCID(MAKELANGID(LANG_HUNGARIAN, SUBLANG_HUNGARIAN_HUNGARY), SORT_HUNGARIAN_TECHNICAL),
+    MAKELCID(MAKELANGID(LANG_GEORGIAN, SUBLANG_GEORGIAN_GEORGIA), SORT_GEORGIAN_MODERN),
+    MAKELCID(MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED), SORT_CHINESE_PRC),
+};
+
+static BOOL NLS_EnumAlternateSortsA(LOCALE_ENUMPROCA lpfnLocaleEnum)
+{
+    char buf[20];
+    DWORD i;
+
+    for (i = 0; i < ARRAY_SIZE(NLS_AlternateSortLocales); i++)
+    {
+        sprintf(buf, "%08x", (UINT)NLS_AlternateSortLocales[i]);
+        if (!lpfnLocaleEnum(buf))
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+static BOOL NLS_EnumAlternateSortsW(LOCALE_ENUMPROCW lpfnLocaleEnum)
+{
+    static const WCHAR formatW[] = {'%','0','8','x',0};
+    WCHAR buf[20];
+    DWORD i;
+
+    for (i = 0; i < ARRAY_SIZE(NLS_AlternateSortLocales); i++)
+    {
+        sprintfW(buf, formatW, (UINT)NLS_AlternateSortLocales[i]);
+        if (!lpfnLocaleEnum(buf))
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
 /******************************************************************************
  *           EnumSystemLocalesA  (KERNEL32.@)
  *
@@ -2994,10 +3057,25 @@ static BOOL CALLBACK enum_lang_proc_w( HMODULE hModule, LPCWSTR type,
  */
 BOOL WINAPI EnumSystemLocalesA( LOCALE_ENUMPROCA lpfnLocaleEnum, DWORD dwFlags )
 {
+    BOOL include_defaults = !(dwFlags & LCID_ALTERNATE_SORTS) ||
+                            (dwFlags & (LCID_INSTALLED | LCID_SUPPORTED));
+
     TRACE("(%p,%08x)\n", lpfnLocaleEnum, dwFlags);
-    EnumResourceLanguagesA( kernel32_handle, (LPSTR)RT_STRING,
-                            (LPCSTR)LOCALE_ILANGUAGE, enum_lang_proc_a,
-                            (LONG_PTR)lpfnLocaleEnum);
+
+    if (include_defaults &&
+        !EnumResourceLanguagesA( kernel32_handle, (LPSTR)RT_STRING,
+                                 (LPCSTR)LOCALE_ILANGUAGE, enum_lang_proc_a,
+                                 (LONG_PTR)lpfnLocaleEnum))
+    {
+        return FALSE;
+    }
+
+    if ((dwFlags & LCID_ALTERNATE_SORTS) &&
+        !NLS_EnumAlternateSortsA(lpfnLocaleEnum))
+    {
+        return FALSE;
+    }
+
     return TRUE;
 }
 
@@ -3009,10 +3087,25 @@ BOOL WINAPI EnumSystemLocalesA( LOCALE_ENUMPROCA lpfnLocaleEnum, DWORD dwFlags )
  */
 BOOL WINAPI EnumSystemLocalesW( LOCALE_ENUMPROCW lpfnLocaleEnum, DWORD dwFlags )
 {
+    BOOL include_defaults = !(dwFlags & LCID_ALTERNATE_SORTS) ||
+                            (dwFlags & (LCID_INSTALLED | LCID_SUPPORTED));
+
     TRACE("(%p,%08x)\n", lpfnLocaleEnum, dwFlags);
-    EnumResourceLanguagesW( kernel32_handle, (LPWSTR)RT_STRING,
-                            (LPCWSTR)LOCALE_ILANGUAGE, enum_lang_proc_w,
-                            (LONG_PTR)lpfnLocaleEnum);
+
+    if (include_defaults &&
+        !EnumResourceLanguagesW( kernel32_handle, (LPWSTR)RT_STRING,
+                                 (LPCWSTR)LOCALE_ILANGUAGE, enum_lang_proc_w,
+                                 (LONG_PTR)lpfnLocaleEnum))
+    {
+        return FALSE;
+    }
+
+    if ((dwFlags & LCID_ALTERNATE_SORTS) &&
+        !NLS_EnumAlternateSortsW(lpfnLocaleEnum))
+    {
+        return FALSE;
+    }
+
     return TRUE;
 }
 
@@ -3136,7 +3229,20 @@ BOOL WINAPI GetStringTypeW( DWORD type, LPCWSTR src, INT count, LPWORD chartype 
     switch(type)
     {
     case CT_CTYPE1:
-        while (count--) *chartype++ = get_char_typeW( *src++ ) & 0xfff;
+        while (count--)
+        {
+            WCHAR ch = *src++;
+            WORD type1 = get_char_typeW(ch) & 0xfff;
+
+            if (ch == 0x0e31 || (ch >= 0x0e34 && ch <= 0x0e3a) ||
+                (ch >= 0x0e47 && ch <= 0x0e4e) ||
+                ch == 0x1885 || ch == 0x1886)
+            {
+                type1 = C1_ALPHA | C1_DEFINED;
+            }
+
+            *chartype++ = type1;
+        }
         break;
     case CT_CTYPE2:
         while (count--) *chartype++ = type2_map[get_char_typeW( *src++ ) >> 12];
@@ -3400,7 +3506,7 @@ static int map_to_halfwidth(DWORD flags, const WCHAR *src, int srclen, WCHAR *ds
             }
             else
             {
-                dst[pos] = ch;
+                pos++;
             }
             break;
         }
@@ -3502,7 +3608,14 @@ static int map_to_fullwidth(const WCHAR *src, int srclen, WCHAR *dst, int dstlen
     return pos;
 }
 
-static int map_to_lowercase(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
+static BOOL is_turkish_or_azeri_latin(LPCWSTR locale)
+{
+    return locale &&
+           (!strncmpiW(locale, L"tr-", 3) ||
+            !strncmpiW(locale, L"az-Latn", 7));
+}
+
+static int map_to_lowercase(LPCWSTR locale, DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
 {
     int pos;
     for (pos = 0; srclen; src++, srclen--)
@@ -3511,13 +3624,20 @@ static int map_to_lowercase(DWORD flags, const WCHAR *src, int srclen, WCHAR *ds
         if ((flags & NORM_IGNORESYMBOLS) && (get_char_typeW(wch) & (C1_PUNCT | C1_SPACE)))
             continue;
         if (pos < dstlen)
-            dst[pos] = tolowerW(wch);
+        {
+            if (!(flags & LCMAP_LINGUISTIC_CASING) && wch == 0x0130)
+                dst[pos] = wch;
+            else if ((flags & LCMAP_LINGUISTIC_CASING) && is_turkish_or_azeri_latin(locale) && wch == 'I')
+                dst[pos] = 0x0131;
+            else
+                dst[pos] = tolowerW(wch);
+        }
         pos++;
     }
     return pos;
 }
 
-static int map_to_uppercase(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
+static int map_to_uppercase(LPCWSTR locale, DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
 {
     int pos;
     for (pos = 0; srclen; src++, srclen--)
@@ -3526,7 +3646,14 @@ static int map_to_uppercase(DWORD flags, const WCHAR *src, int srclen, WCHAR *ds
         if ((flags & NORM_IGNORESYMBOLS) && (get_char_typeW(wch) & (C1_PUNCT | C1_SPACE)))
             continue;
         if (pos < dstlen)
-            dst[pos] = toupperW(wch);
+        {
+            if (!(flags & LCMAP_LINGUISTIC_CASING) && wch == 0x0131)
+                dst[pos] = wch;
+            else if ((flags & LCMAP_LINGUISTIC_CASING) && is_turkish_or_azeri_latin(locale) && wch == 'i')
+                dst[pos] = 0x0130;
+            else
+                dst[pos] = toupperW(wch);
+        }
         pos++;
     }
     return pos;
@@ -3599,13 +3726,57 @@ static int map_to_traditional_chinese(DWORD flags, const WCHAR *src, int srclen,
     return pos;
 }
 
+static BOOL is_combining_mark(WCHAR ch)
+{
+    return (ch >= 0x0300 && ch <= 0x036f) ||
+           (ch >= 0x1ab0 && ch <= 0x1aff) ||
+           (ch >= 0x1dc0 && ch <= 0x1dff) ||
+           (ch >= 0x20d0 && ch <= 0x20ff) ||
+           (ch >= 0xfe20 && ch <= 0xfe2f);
+}
+
 static int map_remove_ignored(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
 {
     int pos;
     WORD wC1, wC2, wC3;
-    for (pos = 0; srclen; src++, srclen--)
+    WCHAR *normalized = NULL;
+    INT normalized_len = 0;
+    const WCHAR *scan = src;
+    int scanlen = srclen;
+
+    if (flags & NORM_IGNORENONSPACE)
     {
-        WCHAR wch = *src;
+        NTSTATUS status;
+
+        status = RtlNormalizeString(NormalizationD, src, srclen, NULL, &normalized_len);
+        if (!NT_SUCCESS(status))
+        {
+            SetLastError(RtlNtStatusToDosError(status));
+            return 0;
+        }
+
+        normalized = RtlAllocateHeap(RtlGetProcessHeap(), 0, normalized_len * sizeof(WCHAR));
+        if (!normalized)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+
+        status = RtlNormalizeString(NormalizationD, src, srclen, normalized, &normalized_len);
+        if (!NT_SUCCESS(status))
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, normalized);
+            SetLastError(RtlNtStatusToDosError(status));
+            return 0;
+        }
+
+        scan = normalized;
+        scanlen = normalized_len;
+    }
+
+    for (pos = 0; scanlen; scan++, scanlen--)
+    {
+        WCHAR wch = *scan;
         GetStringTypeW(CT_CTYPE1, &wch, 1, &wC1);
         GetStringTypeW(CT_CTYPE2, &wch, 1, &wC2);
         GetStringTypeW(CT_CTYPE3, &wch, 1, &wC3);
@@ -3616,17 +3787,19 @@ static int map_remove_ignored(DWORD flags, const WCHAR *src, int srclen, WCHAR *
         }
         if (flags & NORM_IGNORENONSPACE)
         {
-            if ((wC2 & C2_OTHERNEUTRAL) && (wC3 & (C3_NONSPACING | C3_DIACRITIC)))
+            if ((wC3 & (C3_NONSPACING | C3_DIACRITIC)) || is_combining_mark(wch))
                 continue;
         }
         if (pos < dstlen)
             dst[pos] = wch;
         pos++;
     }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, normalized);
     return pos;
 }
 
-static int lcmap_string(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
+static int lcmap_string(LPCWSTR locale, DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen)
 {
     int ret = 0;
 
@@ -3685,13 +3858,13 @@ static int lcmap_string(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, i
     case 0:
         if (flags & LCMAP_LOWERCASE)
         {
-            ret = map_to_lowercase(flags, src, srclen, dst, dstlen);
+            ret = map_to_lowercase(locale, flags, src, srclen, dst, dstlen);
             flags &= ~LCMAP_LOWERCASE;
             break;
         }
         if (flags & LCMAP_UPPERCASE)
         {
-            ret = map_to_uppercase(flags, src, srclen, dst, dstlen);
+            ret = map_to_uppercase(locale, flags, src, srclen, dst, dstlen);
             flags &= ~LCMAP_UPPERCASE;
             break;
         }
@@ -3715,9 +3888,9 @@ static int lcmap_string(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, i
     if (dstlen)
     {
         if (flags & LCMAP_LOWERCASE)
-            map_to_lowercase(flags, dst, ret, dst, dstlen);
+            map_to_lowercase(locale, flags, dst, ret, dst, dstlen);
         if (flags & LCMAP_UPPERCASE)
-            map_to_uppercase(flags, dst, ret, dst, dstlen);
+            map_to_uppercase(locale, flags, dst, ret, dst, dstlen);
         if (flags & LCMAP_BYTEREV)
             map_byterev(dst, min(ret, dstlen), dst);
 
@@ -3755,6 +3928,8 @@ static int lcmap_string(DWORD flags, const WCHAR *src, int srclen, WCHAR *dst, i
 INT WINAPI LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen, LPWSTR dst, INT dstlen,
                          LPNLSVERSIONINFO version, LPVOID reserved, LPARAM handle)
 {
+    LCID lcid;
+
     if (version) FIXME("unsupported version structure %p\n", version);
     if (reserved) FIXME("unsupported reserved pointer %p\n", reserved);
     if (handle)
@@ -3767,6 +3942,16 @@ INT WINAPI LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen, L
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
+    }
+
+    if (locale && (flags & (LCMAP_LOWERCASE | LCMAP_UPPERCASE | LCMAP_SORTKEY)))
+    {
+        lcid = LocaleNameToLCID(locale, 0);
+        if (!lcid || !IsValidLocale(lcid, LCID_SUPPORTED))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
     }
 
     if (srclen < 0) srclen = lstrlenW(src) + 1;
@@ -3791,11 +3976,9 @@ INT WINAPI LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen, L
         if (srclen < 0)
             srclen = strlenW(src);
 
-        ret = wine_get_sortkey(flags, src, srclen, (char *)dst, dstlen);
+        ret = wine_get_sortkey(locale, flags, src, srclen, (char *)dst, dstlen);
         if (ret == 0)
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        else
-            ret++;
         return ret;
     }
 
@@ -3806,7 +3989,7 @@ INT WINAPI LCMapStringEx(LPCWSTR locale, DWORD flags, LPCWSTR src, INT srclen, L
         return 0;
     }
 
-    return lcmap_string(flags, src, srclen, dst, dstlen);
+    return lcmap_string(locale, flags, src, srclen, dst, dstlen);
 }
 
 /*************************************************************************
@@ -3819,6 +4002,13 @@ INT WINAPI LCMapStringW(LCID lcid, DWORD flags, LPCWSTR src, INT srclen,
 {
     TRACE("(0x%04x,0x%08x,%s,%d,%p,%d)\n",
           lcid, flags, debugstr_wn(src, srclen), srclen, dst, dstlen);
+
+    lcid = ConvertDefaultLocale(lcid);
+    if (!IsValidLocale(lcid, LCID_SUPPORTED))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
 
     return LCMapStringEx(NULL, flags, src, srclen, dst, dstlen, NULL, NULL, 0);
 }
@@ -3878,11 +4068,9 @@ INT WINAPI LCMapStringA(LCID lcid, DWORD flags, LPCSTR src, INT srclen,
             SetLastError(ERROR_INVALID_FLAGS);
             goto map_string_exit;
         }
-        ret = wine_get_sortkey(flags, srcW, srclenW, dst, dstlen);
+        ret = wine_get_sortkey(NULL, flags, srcW, srclenW, dst, dstlen);
         if (ret == 0)
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        else
-            ret++;
         goto map_string_exit;
     }
 
@@ -3965,8 +4153,8 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
                            LPCWSTR str2, INT len2, LPNLSVERSIONINFO version, LPVOID reserved, LPARAM lParam)
 {
     DWORD supported_flags = NORM_IGNORECASE|NORM_IGNORENONSPACE|NORM_IGNORESYMBOLS|SORT_STRINGSORT
-                           |NORM_IGNOREKANATYPE|NORM_IGNOREWIDTH|LOCALE_USE_CP_ACP;
-    DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|0x10000000;
+                           |NORM_IGNOREKANATYPE|NORM_IGNOREWIDTH|SORT_DIGITSASNUMBERS|LOCALE_USE_CP_ACP;
+    DWORD semistub_flags = NORM_LINGUISTIC_CASING|LINGUISTIC_IGNORECASE|LINGUISTIC_IGNOREDIACRITIC|0x10000000;
     /* 0x10000000 is related to diacritics in Arabic, Japanese, and Hebrew */
     INT ret;
     static int once;
@@ -3996,7 +4184,7 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
     if (len1 < 0) len1 = strlenW(str1);
     if (len2 < 0) len2 = strlenW(str2);
 
-    ret = wine_compare_string(flags, str1, len1, str2, len2);
+    ret = wine_compare_string(locale, flags, str1, len1, str2, len2);
 
     if (ret) /* need to translate result */
         return (ret < 0) ? CSTR_LESS_THAN : CSTR_GREATER_THAN;
@@ -4035,6 +4223,13 @@ INT WINAPI CompareStringA(LCID lcid, DWORD flags,
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
+
+    if (flags & SORT_DIGITSASNUMBERS)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
+
     if (len1 < 0) len1 = strlen(str1);
     if (len2 < 0) len2 = strlen(str2);
 
@@ -4636,6 +4831,12 @@ static BOOL NLS_EnumLanguageGroupLocales(ENUMLANGUAGEGROUPLOCALE_CALLBACKS *lpPr
                  * '00000437          ;Georgian'
                  * At present we only pass the LCID string.
                  */
+
+                if (!IsValidLocale( lcid, LCID_SUPPORTED ))
+                {
+                    ulIndex++;
+                    continue;
+                }
 
                 if (lpProcs->procW)
                     bContinue = lpProcs->procW( lgrpid, lcid, szNumber, lpProcs->lParam );
@@ -5432,6 +5633,8 @@ INT WINAPI GetGeoInfoW(GEOID geoid, GEOTYPE geotype, LPWSTR data, int data_len, 
 #endif
     }
     case GEO_NATION:
+        if (ptr->kind != LOCATION_NATION)
+            return 0;
         val = geoid;
         break;
     case GEO_ISO_UN_NUMBER:

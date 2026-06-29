@@ -601,7 +601,7 @@
 @ stub -version=0x600+ GetSystemDEPPolicy
 @ stdcall GetSystemDefaultLCID()
 @ stdcall GetSystemDefaultLangID()
-@ stdcall -stub -version=0x600+ GetSystemDefaultLocaleName(ptr long)
+@ stdcall -version=0x600+ GetSystemDefaultLocaleName(ptr long)
 @ stdcall GetSystemDefaultUILanguage()
 @ stdcall GetSystemDirectoryA(ptr long)
 @ stdcall GetSystemDirectoryW(ptr long)
@@ -753,7 +753,7 @@
 @ stdcall IsDBCSLeadByteEx(long long)
 @ stdcall IsDebuggerPresent()
 @ stdcall IsNLSDefinedString(long long ptr long long)
-@ stdcall -stub -version=0x600+ IsNormalizedString(long wstr long)
+@ stdcall -version=0x600+ IsNormalizedString(long wstr long) normaliz.IsNormalizedString
 @ stdcall IsProcessInJob(long long ptr)
 @ stdcall IsProcessorFeaturePresent(long)
 @ stdcall IsSystemResumeAutomatic()
@@ -862,7 +862,7 @@
 @ stub -version=0x600+ NlsUpdateLocale
 @ stub -version=0x600+ NlsUpdateSystemLocale
 @ stub -version=0x600+ NlsWriteEtwEvent
-@ stdcall -stub -version=0x600+ NormalizeString(long wstr long ptr long)
+@ stdcall -version=0x600+ NormalizeString(long wstr long ptr long) normaliz.NormalizeString
 @ stdcall -stub -version=0x600+ NotifyUILanguageChange(long wstr wstr long ptr)
 @ stdcall OpenConsoleW(wstr long long long)
 @ stdcall -version=0x500-0x502 OpenDataFile(long long)
