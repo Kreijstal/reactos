@@ -26,10 +26,13 @@ class CExtractIcon :
 {
 private:
     UINT flags;
+    BOOL fileExtractMode;
     struct IconLocation defaultIcon;
     struct IconLocation normalIcon;
     struct IconLocation openIcon;
     struct IconLocation shortcutIcon;
+
+    static HRESULT WINAPI QueryPrivateInterface(void *pv, REFIID riid, LPVOID *ppv, DWORD_PTR dw);
 public:
     CExtractIcon();
     ~CExtractIcon();
@@ -60,12 +63,14 @@ public:
     STDMETHOD(SaveCompleted)(LPCOLESTR pszFileName) override;
     STDMETHOD(GetCurFile)(LPOLESTR *ppszFileName) override;
 
+    VOID SetFileExtractMode();
+
 BEGIN_COM_MAP(CExtractIcon)
-    COM_INTERFACE_ENTRY_IID(IID_IDefaultExtractIconInit, IDefaultExtractIconInit)
     COM_INTERFACE_ENTRY_IID(IID_IExtractIconW, IExtractIconW)
     COM_INTERFACE_ENTRY_IID(IID_IExtractIconA, IExtractIconA)
-    COM_INTERFACE_ENTRY_IID(IID_IPersist, IPersist)
-    COM_INTERFACE_ENTRY_IID(IID_IPersistFile, IPersistFile)
+    COM_INTERFACE_ENTRY_FUNC(IID_IDefaultExtractIconInit, 0, QueryPrivateInterface)
+    COM_INTERFACE_ENTRY_FUNC(IID_IPersist, 0, QueryPrivateInterface)
+    COM_INTERFACE_ENTRY_FUNC(IID_IPersistFile, 0, QueryPrivateInterface)
 END_COM_MAP()
 };
 
@@ -88,6 +93,7 @@ VOID DuplicateString(
 CExtractIcon::CExtractIcon()
 {
     flags = 0;
+    fileExtractMode = FALSE;
     memset(&defaultIcon, 0, sizeof(defaultIcon));
     memset(&normalIcon, 0, sizeof(normalIcon));
     memset(&openIcon, 0, sizeof(openIcon));
@@ -100,6 +106,31 @@ CExtractIcon::~CExtractIcon()
     if (normalIcon.file) CoTaskMemFree(normalIcon.file);
     if (openIcon.file) CoTaskMemFree(openIcon.file);
     if (shortcutIcon.file) CoTaskMemFree(shortcutIcon.file);
+}
+
+HRESULT WINAPI CExtractIcon::QueryPrivateInterface(void *pv, REFIID riid, LPVOID *ppv, DWORD_PTR dw)
+{
+    CExtractIcon *This = static_cast<CExtractIcon *>(pv);
+
+    if (This->fileExtractMode)
+        return E_NOINTERFACE;
+
+    if (IsEqualIID(riid, IID_IDefaultExtractIconInit))
+        *ppv = static_cast<IDefaultExtractIconInit *>(This);
+    else if (IsEqualIID(riid, IID_IPersistFile))
+        *ppv = static_cast<IPersistFile *>(This);
+    else if (IsEqualIID(riid, IID_IPersist))
+        *ppv = static_cast<IPersist *>(This);
+    else
+        return E_NOINTERFACE;
+
+    This->AddRef();
+    return S_OK;
+}
+
+VOID CExtractIcon::SetFileExtractMode()
+{
+    fileExtractMode = TRUE;
 }
 
 HRESULT STDMETHODCALLTYPE CExtractIcon::SetDefaultIcon(
@@ -198,6 +229,9 @@ HRESULT STDMETHODCALLTYPE CExtractIcon::GetIconLocation(
     if (!icon->file)
         return E_FAIL;
 
+    if (fileExtractMode && (uFlags & GIL_DEFAULTICON))
+        return S_FALSE;
+
     cb = wcslen(icon->file) + 1;
     if (cchMax < (UINT)cb)
         return E_FAIL;
@@ -214,7 +248,23 @@ HRESULT STDMETHODCALLTYPE CExtractIcon::Extract(
     HICON *phiconSmall,
     UINT nIconSize)
 {
+    HIMAGELIST himlLarge, himlSmall;
+
     TRACE("(%p, %s, %u, %p, %p, %u)\n", this, debugstr_w(pszFile), nIconIndex, phiconLarge, phiconSmall, nIconSize);
+
+    if (fileExtractMode && pszFile && !wcscmp(pszFile, L"*"))
+    {
+        if (!Shell_GetImageLists(&himlLarge, &himlSmall))
+            return E_FAIL;
+
+        if (phiconLarge)
+            *phiconLarge = ImageList_GetIcon(himlLarge, nIconIndex, ILD_NORMAL);
+
+        if (phiconSmall)
+            *phiconSmall = ImageList_GetIcon(himlSmall, nIconIndex, ILD_NORMAL);
+
+        return S_OK;
+    }
 
     /* Nothing to do, ExtractIconW::GetIconLocation should be enough */
     return S_FALSE;
@@ -339,12 +389,6 @@ HRESULT WINAPI SHCreateDefaultExtractIcon(REFIID riid, void **ppv)
     return ShellObjectCreator<CExtractIcon>(riid, ppv);
 }
 
-/*
- * Partially implemented
- * See apitests\shell32\SHCreateFileExtractIconW.cpp for details
- * Currently (march 2018) our shell does not handle IExtractIconW with an invalid path,
- * so this (wrong) implementation actually works better for us.
- */
 EXTERN_C
 HRESULT
 WINAPI
@@ -355,20 +399,53 @@ SHCreateFileExtractIconW(
     _Outptr_ void **ppv)
 {
     SHFILEINFOW shfi;
-    ULONG_PTR firet = SHGetFileInfoW(pszFile, dwFileAttributes, &shfi, sizeof(shfi), SHGFI_USEFILEATTRIBUTES | SHGFI_ICONLOCATION);
+    ULONG_PTR firet = SHGetFileInfoW(pszFile,
+                                     dwFileAttributes,
+                                     &shfi,
+                                     sizeof(shfi),
+                                     SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX);
     HRESULT hr = E_FAIL;
     if (firet)
     {
-        CComPtr<IDefaultExtractIconInit> iconInit;
-        hr = SHCreateDefaultExtractIcon(IID_PPV_ARG(IDefaultExtractIconInit, &iconInit));
+        CComObject<CExtractIcon> *icon;
+        hr = CComObject<CExtractIcon>::CreateInstance(&icon);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
 
-        hr = iconInit->SetNormalIcon(shfi.szDisplayName, shfi.iIcon);
-        if (FAILED_UNEXPECTEDLY(hr))
-            return hr;
+        icon->AddRef();
+        icon->SetFileExtractMode();
 
-        return iconInit->QueryInterface(riid, ppv);
+        hr = icon->SetNormalIcon(L"*", shfi.iIcon);
+        if (FAILED_UNEXPECTEDLY(hr))
+        {
+            icon->Release();
+            return hr;
+        }
+
+        hr = icon->SetShortcutIcon(L"*", shfi.iIcon);
+        if (FAILED_UNEXPECTEDLY(hr))
+        {
+            icon->Release();
+            return hr;
+        }
+
+        hr = icon->SetOpenIcon(L"*", shfi.iIcon);
+        if (FAILED_UNEXPECTEDLY(hr))
+        {
+            icon->Release();
+            return hr;
+        }
+
+        hr = icon->SetFlags(GIL_NOTFILENAME | GIL_PERCLASS);
+        if (FAILED_UNEXPECTEDLY(hr))
+        {
+            icon->Release();
+            return hr;
+        }
+
+        hr = icon->QueryInterface(riid, ppv);
+        icon->Release();
+        return hr;
     }
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
