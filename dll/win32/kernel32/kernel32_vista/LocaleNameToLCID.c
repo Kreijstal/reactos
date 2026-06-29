@@ -100,11 +100,6 @@ LocaleNameToLCID(
         return MAKELCID(MAKELANGID(LANG_INVARIANT, SUBLANG_NEUTRAL), SORT_DEFAULT);
     }
 
-    if (!wcscmp(lpName, LOCALE_NAME_SYSTEM_DEFAULT))
-    {
-        return GetSystemDefaultLCID();
-    }
-
     /* Call the RTL function (include neutral names) */
     Status = RtlLocaleNameToLcid(lpName, &Lcid, RTL_LOCALE_ALLOW_NEUTRAL_NAMES);
     if (!NT_SUCCESS(Status))
