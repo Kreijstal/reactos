@@ -741,8 +741,13 @@ HRESULT WINAPI CDrivesFolder::ParseDisplayName(HWND hwndOwner, LPBC pbc, LPOLEST
 
         if (SHIsFileSysBindCtx(pbc, NULL) != S_OK && !(BindCtx_GetMode(pbc, 0) & STGM_CREATE))
         {
-            if (::GetDriveType(szRoot) == DRIVE_NO_ROOT_DIR)
+            UINT driveType = ::GetDriveType(szRoot);
+            if (driveType == DRIVE_NO_ROOT_DIR || driveType == DRIVE_UNKNOWN)
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
+                return HRESULT_FROM_WIN32(ERROR_INVALID_DRIVE);
+#else
                 return HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
+#endif
         }
 
         CComHeapPtr<ITEMIDLIST> pidlTemp(_ILCreateDrive(szRoot));
@@ -751,6 +756,11 @@ HRESULT WINAPI CDrivesFolder::ParseDisplayName(HWND hwndOwner, LPBC pbc, LPOLEST
 
         if (lpszDisplayName[2] && lpszDisplayName[3])
         {
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN8)
+            if (lpszDisplayName[3] == L' ' && !lpszDisplayName[4])
+                return E_INVALIDARG;
+#endif
+
             CComPtr<IShellFolder> pChildFolder;
             hr = BindToObject(pidlTemp, pbc, IID_PPV_ARG(IShellFolder, &pChildFolder));
             if (FAILED_UNEXPECTEDLY(hr))
