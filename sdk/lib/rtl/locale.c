@@ -909,8 +909,38 @@ RtlIsValidLocaleName(
     _In_ LPCWSTR LocaleName,
     _In_ ULONG Flags)
 {
-    UNIMPLEMENTED;
-    return TRUE;
+    WCHAR Buffer[LOCALE_NAME_MAX_LENGTH];
+    UNICODE_STRING LocaleNameString;
+    PWCHAR Suffix;
+    LCID Lcid;
+
+    if (Flags & ~RTL_LOCALE_ALLOW_NEUTRAL_NAMES)
+        return FALSE;
+
+    if (LocaleName == NULL)
+        return FALSE;
+
+    if (wcschr(LocaleName, L'+') || wcschr(LocaleName, L'.'))
+        return FALSE;
+
+    if (wcslen(LocaleName) >= RTL_NUMBER_OF(Buffer))
+        return FALSE;
+
+    wcscpy(Buffer, LocaleName);
+
+    Suffix = wcschr(Buffer, L'_');
+    if (Suffix != NULL)
+        *Suffix = UNICODE_NULL;
+
+    Suffix = wcsstr(Buffer, L"-phoneb");
+    if (Suffix != NULL)
+        *Suffix = UNICODE_NULL;
+    Suffix = wcsstr(Buffer, L"-PHONEB");
+    if (Suffix != NULL)
+        *Suffix = UNICODE_NULL;
+
+    RtlInitUnicodeString(&LocaleNameString, Buffer);
+    return NT_SUCCESS(RtlpLocaleNameToLcidInternal(&LocaleNameString, &Lcid, Flags));
 }
 
 NTSTATUS

@@ -23,6 +23,27 @@
 
 #include <k32.h>
 
+NTSYSAPI NTSTATUS WINAPI RtlNormalizeString(ULONG, const WCHAR *, INT, WCHAR *, INT *);
+
+static void FoldStringA_MapCompositeMarks(WCHAR *String, INT Length)
+{
+    INT i;
+
+    for (i = 0; i < Length; i++)
+    {
+        switch (String[i])
+        {
+        case 0x0300: String[i] = '`'; break;
+        case 0x0301: String[i] = 0x00b4; break;
+        case 0x0302: String[i] = '^'; break;
+        case 0x0303: String[i] = '~'; break;
+        case 0x0308: String[i] = 0x00a8; break;
+        case 0x030a: String[i] = 0x00b0; break;
+        case 0x0327: String[i] = 0x00b8; break;
+        }
+    }
+}
+
 /*************************************************************************
  *           FoldStringA    (KERNEL32.@)
  *
@@ -44,6 +65,7 @@
 INT WINAPI FoldStringA(DWORD dwFlags, LPCSTR src, INT srclen,
                        LPSTR dst, INT dstlen)
 {
+    DWORD original_flags = dwFlags;
     INT ret = 0, srclenW = 0;
     WCHAR *srcW = NULL, *dstW = NULL;
 
@@ -66,6 +88,51 @@ INT WINAPI FoldStringA(DWORD dwFlags, LPCSTR src, INT srclen,
     MultiByteToWideChar(CP_ACP, dwFlags & MAP_COMPOSITE ? MB_COMPOSITE : 0,
                         src, srclen, srcW, srclenW);
 
+    if ((original_flags & (MAP_PRECOMPOSED | MAP_COMPOSITE | MAP_EXPAND_LIGATURES | MAP_FOLDDIGITS)) == MAP_COMPOSITE)
+    {
+        NTSTATUS status;
+        INT normalized_len = 0;
+
+        status = RtlNormalizeString(NormalizationD, srcW, srclenW, NULL, &normalized_len);
+        if (status < 0)
+        {
+            ret = 0;
+            goto FoldStringA_exit;
+        }
+
+        for (;;)
+        {
+            dstW = HeapAlloc(GetProcessHeap(), 0, normalized_len * sizeof(WCHAR));
+            if (!dstW)
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                goto FoldStringA_exit;
+            }
+
+            status = RtlNormalizeString(NormalizationD, srcW, srclenW, dstW, &normalized_len);
+            if (status != STATUS_BUFFER_TOO_SMALL)
+                break;
+
+            HeapFree(GetProcessHeap(), 0, dstW);
+            dstW = NULL;
+        }
+
+        if (status >= 0)
+        {
+            FoldStringA_MapCompositeMarks(dstW, normalized_len);
+            ret = WideCharToMultiByte(CP_ACP, 0, dstW, normalized_len, dst, dstlen, NULL, NULL);
+            if (!ret && dstlen)
+                SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        }
+        else
+        {
+            ret = 0;
+        }
+
+        HeapFree(GetProcessHeap(), 0, dstW);
+        goto FoldStringA_exit;
+    }
+
     dwFlags = (dwFlags & ~MAP_PRECOMPOSED) | MAP_FOLDCZONE;
 
     ret = FoldStringW(dwFlags, srcW, srclenW, NULL, 0);
@@ -80,9 +147,11 @@ INT WINAPI FoldStringA(DWORD dwFlags, LPCSTR src, INT srclen,
         }
 
         ret = FoldStringW(dwFlags, srcW, srclenW, dstW, ret);
-        if (!WideCharToMultiByte(CP_ACP, 0, dstW, ret, dst, dstlen, NULL, NULL))
+        if (original_flags & MAP_COMPOSITE)
+            FoldStringA_MapCompositeMarks(dstW, ret);
+        ret = WideCharToMultiByte(CP_ACP, 0, dstW, ret, dst, dstlen, NULL, NULL);
+        if (!ret)
         {
-            ret = 0;
             SetLastError(ERROR_INSUFFICIENT_BUFFER);
         }
     }

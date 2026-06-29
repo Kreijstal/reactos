@@ -24,8 +24,30 @@
 #define WIN32_NO_STATUS
 #include <wine/unicode.h>
 
+#undef WIN32_NO_STATUS
+#include <ntstatus.h>
+#define WIN32_NO_STATUS
+#include <ndk/rtlfuncs.h>
+
 #define NDEBUG
 #include <debug.h>
+
+NTSTATUS
+NTAPI
+RtlNormalizeString(
+    _In_ ULONG NormForm,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_writes_to_(*DestinationStringLength, *DestinationStringLength) PWSTR DestinationString,
+    _Inout_ PLONG DestinationStringLength);
+
+NTSTATUS
+NTAPI
+RtlIsNormalizedString(
+    _In_ ULONG NormForm,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_ PBOOLEAN Normalized);
 
 /* Taken from Wine kernel32/locale.c */
 
@@ -35,9 +57,35 @@
 INT WINAPI NormalizeString(NORM_FORM NormForm, LPCWSTR lpSrcString, INT cwSrcLength,
                            LPWSTR lpDstString, INT cwDstLength)
 {
-    DPRINT1("%x %p %d %p %d\n", NormForm, lpSrcString, cwSrcLength, lpDstString, cwDstLength);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+    LONG DstLength = cwDstLength;
+    NTSTATUS Status;
+
+    Status = RtlNormalizeString(NormForm, lpSrcString, cwSrcLength, lpDstString, &DstLength);
+    if (NT_SUCCESS(Status))
+    {
+        SetLastError(ERROR_SUCCESS);
+        return DstLength;
+    }
+
+    switch (Status)
+    {
+        case STATUS_OBJECT_NAME_NOT_FOUND:
+        case STATUS_INVALID_PARAMETER:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+
+        case STATUS_BUFFER_TOO_SMALL:
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return -DstLength;
+
+        case STATUS_NO_UNICODE_TRANSLATION:
+            SetLastError(ERROR_NO_UNICODE_TRANSLATION);
+            return -DstLength;
+
+        default:
+            SetLastError(RtlNtStatusToDosError(Status));
+            return 0;
+    }
 }
 
 /******************************************************************************
@@ -45,7 +93,17 @@ INT WINAPI NormalizeString(NORM_FORM NormForm, LPCWSTR lpSrcString, INT cwSrcLen
  */
 BOOL WINAPI IsNormalizedString(NORM_FORM NormForm, LPCWSTR lpString, INT cwLength)
 {
-    DPRINT1("%x %p %d\n", NormForm, lpString, cwLength);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    BOOLEAN Normalized;
+    NTSTATUS Status;
+
+    Status = RtlIsNormalizedString(NormForm, lpString, cwLength, &Normalized);
+    if (NT_SUCCESS(Status))
+    {
+        SetLastError(ERROR_SUCCESS);
+        return Normalized;
+    }
+
+    SetLastError((Status == STATUS_OBJECT_NAME_NOT_FOUND) ? ERROR_INVALID_PARAMETER :
+                 RtlNtStatusToDosError(Status));
     return FALSE;
 }
