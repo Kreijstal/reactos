@@ -5,6 +5,18 @@ add_definitions(-D_KERNEL32_)
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
 spec2def(kernel32.dll kernel32.spec ADD_IMPORTLIB)
 
+set(SORTDEFAULT_NLS_C ${CMAKE_CURRENT_BINARY_DIR}/sortdefault.c)
+set(SORTDEFAULT_NLS_H ${CMAKE_CURRENT_BINARY_DIR}/sortdefault.h)
+add_custom_command(
+    OUTPUT ${SORTDEFAULT_NLS_C} ${SORTDEFAULT_NLS_H}
+    COMMAND native-bin2c
+        ${REACTOS_SOURCE_DIR}/media/nls/sortdefault.nls
+        ${SORTDEFAULT_NLS_C}
+        ${SORTDEFAULT_NLS_H}
+        BIN
+        K32sortdefault
+    DEPENDS native-bin2c ${REACTOS_SOURCE_DIR}/media/nls/sortdefault.nls)
+
 # Shared between kernel32 and kernel32_vista
 add_library(kernel32_shared
     client/shared_utils.c
@@ -104,6 +116,7 @@ list(APPEND SOURCE
     winnls/string/lstring.c
     winnls/string/nls.c
     winnls/string/sortkey.c
+    ${SORTDEFAULT_NLS_C}
     k32.h)
 
 if(MSVC)
