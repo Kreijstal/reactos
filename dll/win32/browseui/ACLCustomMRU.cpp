@@ -148,13 +148,19 @@ HRESULT CACLCustomMRU::LoadTypedURLs(DWORD dwMax)
 // *** IACLCustomMRU methods ***
 HRESULT STDMETHODCALLTYPE CACLCustomMRU::Initialize(LPCWSTR pwszMRURegKey, DWORD dwMax)
 {
+    PersistMRU();
+
     m_ielt = 0;
+    m_MRUList.Empty();
+    m_MRUData.RemoveAll();
+    m_bDirty = false;
+    m_bTypedURLs = FALSE;
+    m_Key.Close();
 
     LSTATUS Status = m_Key.Create(HKEY_CURRENT_USER, pwszMRURegKey);
     if (Status != ERROR_SUCCESS)
         return HRESULT_FROM_WIN32(Status);
 
-    m_MRUData.RemoveAll();
     if (lstrcmpiW(pwszMRURegKey, TYPED_URLS_KEY) == 0)
     {
         m_bTypedURLs = TRUE;
@@ -256,4 +262,3 @@ HRESULT STDMETHODCALLTYPE CACLCustomMRU::AddMRUString(LPCWSTR pwszEntry)
     PersistMRU();
     return S_OK;
 }
-
