@@ -982,7 +982,14 @@ GreGradientFill(
                 pTriangle->Vertex2 >= nVertex ||
                 pTriangle->Vertex3 >= nVertex)
             {
-                EngSetLastError(ERROR_INVALID_PARAMETER);
+                return FALSE;
+            }
+            if ((pTriangle->Vertex1 == pTriangle->Vertex2 ||
+                 pTriangle->Vertex1 == pTriangle->Vertex3 ||
+                 pTriangle->Vertex2 == pTriangle->Vertex3) &&
+                !(pTriangle->Vertex1 == pTriangle->Vertex2 &&
+                  pTriangle->Vertex2 == pTriangle->Vertex3))
+            {
                 return FALSE;
             }
         }
@@ -994,7 +1001,6 @@ GreGradientFill(
         {
             if (pRect->UpperLeft >= nVertex || pRect->LowerRight >= nVertex)
             {
-                EngSetLastError(ERROR_INVALID_PARAMETER);
                 return FALSE;
             }
         }
