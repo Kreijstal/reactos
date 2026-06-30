@@ -222,6 +222,32 @@ BOOLEAN DIB_XXBPP_StretchBlt(SURFOBJ *DestSurf, SURFOBJ *SourceSurf, SURFOBJ *Ma
                 Source |= Pixel;
             }
           }
+          else if (((Mode == BLACKONWHITE) || (Mode == WHITEONBLACK)) &&
+                   ((ROP & 0xFF) == R3_OPINDEX_SRCCOPY) &&
+                   bLeftToRight && !bTopToBottom &&
+                   (DstWidth == 1) &&
+                   (SrcWidth > DstWidth))
+          {
+            LONG SrcX1, SrcX2, SrcX;
+
+            SrcX1 = sx - SrcWidth + 1;
+            SrcX2 = sx;
+
+            Source = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, sx, sy));
+            for (SrcX = SrcX1; SrcX <= SrcX2; SrcX++)
+            {
+              ULONG Pixel;
+
+              if (SrcX < 0 || SourceSurf->sizlBitmap.cx <= SrcX)
+                continue;
+
+              Pixel = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, SrcX, sy));
+              if (Mode == BLACKONWHITE)
+                Source &= Pixel;
+              else
+                Source |= Pixel;
+            }
+          }
           else
           {
             Source = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, sx, sy));
