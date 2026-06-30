@@ -1097,7 +1097,10 @@ GreGetDIBitsInternal(
     Info->bmiHeader.biSizeImage = DIB_GetDIBImageBytes(width, height, bpp);
     Info->bmiHeader.biPlanes = 1;
 
-    if (Bits)
+    if (Bits || (!Bits &&
+                 psurf->hSecure &&
+                 Usage == DIB_RGB_COLORS &&
+                 bpp <= 8))
         Info->bmiHeader.biClrUsed = 0;
 
     if(Bits && ScanLines)
