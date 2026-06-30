@@ -622,6 +622,17 @@ NtGdiSetDIBitsToDeviceInternal(
     if (bTransformCoordinates)
     {
         IntLPtoDP(pDC, (LPPOINT)&rcDest, 1);
+        if ((pDC->pdcattr->iMapMode == MM_ANISOTROPIC) &&
+            (pDC->pdcattr->szlWindowExt.cx > pDC->pdcattr->szlViewportExt.cx) &&
+            (pDC->pdcattr->szlWindowExt.cy > pDC->pdcattr->szlViewportExt.cy) &&
+            (pDC->pdcattr->szlWindowExt.cx > 0) &&
+            (pDC->pdcattr->szlWindowExt.cy > 0) &&
+            (pDC->pdcattr->szlViewportExt.cx > 0) &&
+            (pDC->pdcattr->szlViewportExt.cy > 0))
+        {
+            rcDest.left++;
+            rcDest.top++;
+        }
     }
     if ((Width != 0) && (pDC->pdcattr->dwLayout & LAYOUT_RTL))
     {
