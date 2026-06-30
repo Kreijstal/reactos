@@ -1486,6 +1486,8 @@ IntDrawRoundRect( PDC dc,
                      90, 270, pbrushPen, FALSE);
         app_draw_arc(dc, rect(Right - Wellipse, r.y, Wellipse - 1, r.height - 1),
                      270, 90, pbrushPen, FALSE);
+        app_fill_rect(dc, rect(r.x, r.y + r.height / 2, w, w), pbrushPen, TRUE);
+        app_fill_rect(dc, rect(r.x + r.width - w, r.y + r.height / 2, w, w), pbrushPen, TRUE);
     }
     else // < W < H
     {
