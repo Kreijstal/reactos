@@ -494,6 +494,10 @@ NtGdiSetDIBitsToDeviceInternal(
     POINTL ptSource;
     //INT DIBWidth;
     SIZEL SourceSize;
+    UINT cjSourceHeight;
+    UINT cjBitmapHeight;
+    BOOL bTopDown;
+    INT iSourceY;
     EXLATEOBJ exlo;
     PPALETTE ppalDIB = NULL;
     LPBITMAPINFO pbmiSafe;
@@ -528,9 +532,51 @@ NtGdiSetDIBitsToDeviceInternal(
            bmi->bmiHeader.biBitCount,
            XSrc, YSrc, XDest, YDest);
 
-    if (YDest < 0)
+    cjBitmapHeight = abs(bmi->bmiHeader.biHeight);
+    bTopDown = (bmi->bmiHeader.biHeight < 0);
+    iSourceY = YSrc;
+
+    if ((bmi->bmiHeader.biCompression == BI_RLE8) ||
+        (bmi->bmiHeader.biCompression == BI_RLE4))
     {
-        ScanLines = min(ScanLines, abs(bmi->bmiHeader.biHeight) - StartScan);
+        StartScan = 0;
+        ScanLines = cjBitmapHeight;
+        cjSourceHeight = cjBitmapHeight;
+        iSourceY = 0;
+    }
+    else
+    {
+        if (StartScan >= cjBitmapHeight)
+        {
+            ret = 0;
+            goto Exit;
+        }
+
+        if (!bTopDown && ScanLines > cjBitmapHeight - StartScan)
+            ScanLines = cjBitmapHeight - StartScan;
+
+        iSourceY = StartScan + ScanLines - (YSrc + Height);
+        if (iSourceY > 0)
+        {
+            if (!bTopDown)
+            {
+                if (iSourceY >= (INT)ScanLines)
+                {
+                    ret = 0;
+                    goto Exit;
+                }
+
+                ScanLines -= iSourceY;
+                iSourceY = 0;
+            }
+            else if (iSourceY >= (INT)ScanLines)
+            {
+                ret = ScanLines;
+                goto Exit;
+            }
+        }
+
+        cjSourceHeight = min(ScanLines, cjBitmapHeight);
     }
 
     if (ScanLines == 0)
@@ -558,13 +604,12 @@ NtGdiSetDIBitsToDeviceInternal(
     rcDest.top = YDest;
     if (bTransformCoordinates)
     {
-        IntLPtoDP(pDC, (LPPOINT)&rcDest, 2);
+        IntLPtoDP(pDC, (LPPOINT)&rcDest, 1);
     }
     rcDest.left += pDC->ptlDCOrig.x;
     rcDest.top += pDC->ptlDCOrig.y;
     rcDest.right = rcDest.left + Width;
     rcDest.bottom = rcDest.top + Height;
-    rcDest.top += StartScan;
 
     if (pDC->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
     {
@@ -572,19 +617,19 @@ NtGdiSetDIBitsToDeviceInternal(
     }
 
     ptSource.x = XSrc;
-    ptSource.y = YSrc;
+    ptSource.y = iSourceY;
 
     SourceSize.cx = bmi->bmiHeader.biWidth;
-    SourceSize.cy = ScanLines;
+    SourceSize.cy = cjSourceHeight;
 
     //DIBWidth = WIDTH_BYTES_ALIGN32(SourceSize.cx, bmi->bmiHeader.biBitCount);
 
     hSourceBitmap = GreCreateBitmapEx(bmi->bmiHeader.biWidth,
-                                      ScanLines,
+                                      cjSourceHeight,
                                       0,
                                       BitmapFormat(bmi->bmiHeader.biBitCount,
                                                    bmi->bmiHeader.biCompression),
-                                      bmi->bmiHeader.biHeight < 0 ? BMF_TOPDOWN : 0,
+                                      bTopDown ? BMF_TOPDOWN : 0,
                                       bmi->bmiHeader.biSizeImage,
                                       Bits,
                                       0);
