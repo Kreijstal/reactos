@@ -19,6 +19,7 @@ BOOLEAN DIB_XXBPP_StretchBlt(SURFOBJ *DestSurf, SURFOBJ *SourceSurf, SURFOBJ *Ma
                             RECTL *DestRect, RECTL *SourceRect,
                             POINTL *MaskOrigin, BRUSHOBJ *Brush,
                             POINTL *BrushOrigin, XLATEOBJ *ColorTranslation,
+                            ULONG Mode,
                             ROP4 ROP)
 {
   LONG sx = 0;
@@ -194,7 +195,37 @@ BOOLEAN DIB_XXBPP_StretchBlt(SURFOBJ *DestSurf, SURFOBJ *SourceSurf, SURFOBJ *Ma
         if (sx >= 0 && sy >= 0 &&
           SourceSurf->sizlBitmap.cx > sx && SourceCy > sy)
         {
-          Source = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, sx, sy));
+          if (((Mode == BLACKONWHITE) || (Mode == WHITEONBLACK)) &&
+              ((ROP & 0xFF) == R3_OPINDEX_SRCCOPY) &&
+              !bLeftToRight && !bTopToBottom &&
+              (SrcWidth > DstWidth))
+          {
+            LONG SrcX1, SrcX2, SrcX;
+
+            SrcX1 = SourceRect->left + (DesX - DestRect->left) * SrcWidth / DstWidth;
+            SrcX2 = SourceRect->left + (DesX + 1 - DestRect->left) * SrcWidth / DstWidth - 1;
+            if (DstWidth == 1)
+              SrcX2--;
+
+            Source = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, sx, sy));
+            for (SrcX = SrcX1; SrcX <= SrcX2; SrcX++)
+            {
+              ULONG Pixel;
+
+              if (SrcX < 0 || SourceSurf->sizlBitmap.cx <= SrcX)
+                continue;
+
+              Pixel = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, SrcX, sy));
+              if (Mode == BLACKONWHITE)
+                Source &= Pixel;
+              else
+                Source |= Pixel;
+            }
+          }
+          else
+          {
+            Source = XLATEOBJ_iXlate(ColorTranslation, fnSource_GetPixel(SourceSurf, sx, sy));
+          }
         }
         else
         {
