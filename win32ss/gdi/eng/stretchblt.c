@@ -725,7 +725,7 @@ IntEngStretchBlt(SURFOBJ *psoDest,
         InputClippedRect.bottom = DestRect->top;
     }
 
-    if (NULL == psoSource)
+    if (UsesSource && (NULL == psoSource))
     {
         DPRINT("Returning FALSE.\n");
         return FALSE;
