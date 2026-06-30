@@ -41,6 +41,7 @@ EngAlphaBlend(
     BOOL               EnumMore;
     ULONG              i;
     BOOLEAN            Ret;
+    SURFACE*           SourceSurf;
 
     DPRINT("EngAlphaBlend(psoDest:0x%p, psoSource:0x%p, ClipRegion:0x%p, ColorTranslation:0x%p,\n", psoDest, psoSource, ClipRegion, ColorTranslation);
     DPRINT("              DestRect:{0x%x, 0x%x, 0x%x, 0x%x}, SourceRect:{0x%x, 0x%x, 0x%x, 0x%x},\n",
@@ -71,6 +72,7 @@ EngAlphaBlend(
               OutputRect.top >= SourceRect->bottom || InputRect.top >= OutputRect.bottom))
     {
         DPRINT1("Source and destination rectangles overlap!\n");
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
     }
 
@@ -87,7 +89,24 @@ EngAlphaBlend(
     if ((BlendObj->BlendFunction.AlphaFormat & ~AC_SRC_ALPHA) != 0)
     {
         DPRINT1("Unsupported AlphaFormat (0x%x)\n", BlendObj->BlendFunction.AlphaFormat);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
+    }
+
+    SourceSurf = CONTAINING_RECORD(psoSource, SURFACE, SurfObj);
+    if (BlendObj->BlendFunction.AlphaFormat & AC_SRC_ALPHA)
+    {
+        if (BitsPerFormat(psoSource->iBitmapFormat) != 32 ||
+            (SourceSurf->biCompression != BI_RGB &&
+             (SourceSurf->biCompression != BI_BITFIELDS ||
+              !SourceSurf->ppal ||
+              SourceSurf->ppal->RedMask != 0xff0000 ||
+              SourceSurf->ppal->GreenMask != 0x00ff00 ||
+              SourceSurf->ppal->BlueMask != 0x0000ff)))
+        {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
     }
 
     /* Check if there is anything to draw */
@@ -276,4 +295,3 @@ NtGdiEngAlphaBlend(IN SURFOBJ *psoDest,
 
     return EngAlphaBlend(psoDest, psoSource, ClipRegion, ColorTranslation, &DestRect, &SourceRect, BlendObj);
 }
-
