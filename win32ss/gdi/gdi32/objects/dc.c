@@ -1547,6 +1547,12 @@ SelectObject(
     _In_ HDC hdc,
     _In_ HGDIOBJ hobj)
 {
+    if (hdc == NULL)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return NULL;
+    }
+
     /* Fix up 16 bit handles */
     hobj = GdiFixUpHandle(hobj);
     if (!GdiValidateHandle(hobj))
