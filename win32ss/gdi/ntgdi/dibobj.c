@@ -1371,6 +1371,7 @@ NtGdiStretchDIBitsInternal(
     ULONG BmpFormat = 0;
     INT LinesCopied = 0;
     BOOL NoLinesCopied = FALSE;
+    BOOL DirectCopy = FALSE;
 
     /* Check for bad iUsage */
     if (dwUsage > 2) return 0;
@@ -1522,8 +1523,12 @@ NtGdiStretchDIBitsInternal(
            left (negative biHeight) */
         if (cxSrc == cxDst && cySrc == cyDst)
         {
+            INT yBltSrc = (pbmiSafe->bmiHeader.biHeight < 0) ?
+                          ySrc : abs(pbmiSafe->bmiHeader.biHeight) - cySrc - ySrc;
+
+            DirectCopy = TRUE;
             NtGdiBitBlt(hdc, xDst, yDst, cxDst, cyDst,
-                        hdcMem, xSrc, abs(pbmiSafe->bmiHeader.biHeight) - cySrc - ySrc,
+                        hdcMem, xSrc, yBltSrc,
                         dwRop, CLR_INVALID, 0);
         }
         else
@@ -1650,7 +1655,9 @@ leave:
      * and it fixes over 100 gdi32:dib regression tests. */
     if (dwRop == SRCCOPY)
     {
-        LinesCopied = NoLinesCopied ? 0 : abs(pbmiSafe->bmiHeader.biHeight);
+        LinesCopied = NoLinesCopied ? 0 :
+                      (DirectCopy ? min(abs(cyDst), abs(pbmiSafe->bmiHeader.biHeight)) :
+                                    abs(pbmiSafe->bmiHeader.biHeight));
     }
     else
     {
