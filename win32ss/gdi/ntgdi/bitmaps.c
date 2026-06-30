@@ -142,14 +142,15 @@ GreCreateBitmapEx(
     if (pvCompressedBits)
     {
         SIZEL sizl;
-        LONG lDelta;
-
         sizl.cx = nWidth;
         sizl.cy = nHeight;
-        lDelta = WIDTH_BYTES_ALIGN32(nWidth, gajBitsPerFormat[iFormat]);
 
-        pvBits = psurf->SurfObj.pvBits;
-        DecompressBitmap(sizl, pvCompressedBits, pvBits, lDelta, iFormat, cjSizeImage);
+        DecompressBitmap(sizl,
+                         pvCompressedBits,
+                         psurf->SurfObj.pvScan0,
+                         psurf->SurfObj.lDelta,
+                         iFormat,
+                         cjSizeImage);
     }
 
     /* Get the handle for the bitmap */
@@ -812,16 +813,15 @@ BITMAP_GetObject(SURFACE *psurf, INT Count, LPVOID buffer)
                    break;
 
                 case BMF_16BPP:
-                    if (psurf->ppal->flFlags & PAL_RGB16_555)
-                        pds->dsBmih.biCompression = BI_RGB;
-                    else
-                        pds->dsBmih.biCompression = BI_BITFIELDS;
+                    pds->dsBmih.biCompression = BI_BITFIELDS;
                     break;
 
                 case BMF_24BPP:
+                    pds->dsBmih.biCompression = BI_RGB;
+                    break;
+
                 case BMF_32BPP:
-                    /* 24/32bpp BI_RGB is actually BGR format */
-                    if (psurf->ppal->flFlags & PAL_BGR)
+                    if (psurf->biCompression == BI_RGB)
                         pds->dsBmih.biCompression = BI_RGB;
                     else
                         pds->dsBmih.biCompression = BI_BITFIELDS;
@@ -848,9 +848,18 @@ BITMAP_GetObject(SURFACE *psurf, INT Count, LPVOID buffer)
             pds->dsBmih.biYPelsPerMeter = 0;
             pds->dsBmih.biClrUsed = psurf->ppal->NumColors;
             pds->dsBmih.biClrImportant = psurf->biClrImportant;
-            pds->dsBitfields[0] = psurf->ppal->RedMask;
-            pds->dsBitfields[1] = psurf->ppal->GreenMask;
-            pds->dsBitfields[2] = psurf->ppal->BlueMask;
+            if (pds->dsBmih.biCompression == BI_BITFIELDS)
+            {
+                pds->dsBitfields[0] = psurf->ppal->RedMask;
+                pds->dsBitfields[1] = psurf->ppal->GreenMask;
+                pds->dsBitfields[2] = psurf->ppal->BlueMask;
+            }
+            else
+            {
+                pds->dsBitfields[0] = 0;
+                pds->dsBitfields[1] = 0;
+                pds->dsBitfields[2] = 0;
+            }
             pds->dshSection = psurf->hDIBSection;
             pds->dsOffset = psurf->dwOffset;
 
