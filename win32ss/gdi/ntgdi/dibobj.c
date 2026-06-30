@@ -1094,6 +1094,9 @@ GreGetDIBitsInternal(
     Info->bmiHeader.biSizeImage = DIB_GetDIBImageBytes(width, height, bpp);
     Info->bmiHeader.biPlanes = 1;
 
+    if (Bits)
+        Info->bmiHeader.biClrUsed = 0;
+
     if(Bits && ScanLines)
     {
         /* Create a DIBSECTION, blt it, profit */
