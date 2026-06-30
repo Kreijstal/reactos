@@ -89,6 +89,15 @@ NtGdiAlphaBlend(
     SourceRect.bottom = YOriginSrc + HeightSrc;
     IntLPtoDP(DCSrc, (LPPOINT)&SourceRect, 2);
 
+    if (SourceRect.left > SourceRect.right ||
+        SourceRect.top > SourceRect.bottom)
+    {
+        GDIOBJ_vUnlockObject(&DCSrc->BaseObject);
+        GDIOBJ_vUnlockObject(&DCDest->BaseObject);
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     SourceRect.left   += DCSrc->ptlDCOrig.x;
     SourceRect.top    += DCSrc->ptlDCOrig.y;
     SourceRect.right  += DCSrc->ptlDCOrig.x;
