@@ -651,6 +651,14 @@ SetDIBits(
         }
     }
 
+    if ((lpbmi->bmiHeader.biCompression == BI_RLE8 ||
+         lpbmi->bmiHeader.biCompression == BI_RLE4) &&
+        lpbmi->bmiHeader.biHeight < 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
     hDCc = NtGdiGetDCforBitmap(hBitmap); // hDC can be NULL, so, get it from the bitmap.
     SavehDC = hDCc;
     if (!hDCc) // No DC associated with bitmap, Clone or Create one.
@@ -752,6 +760,14 @@ SetDIBitsToDevice(
 
     if (ColorUse && ColorUse != DIB_PAL_COLORS && ColorUse != DIB_PAL_COLORS + 1)
         return 0;
+
+    if ((lpbmi->bmiHeader.biCompression == BI_RLE8 ||
+         lpbmi->bmiHeader.biCompression == BI_RLE4) &&
+        lpbmi->bmiHeader.biHeight < 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
 
     pConvertedInfo = ConvertBitmapInfo(lpbmi, ColorUse, &ConvertedInfoSize, FALSE);
     if (!pConvertedInfo)
