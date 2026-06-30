@@ -23,7 +23,7 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
 {
     INT x = 0, y = Size.cy - 1;
     INT i, c, c2, length;
-    INT width = Size.cx, height = y;
+    INT width = Size.cx;
     BYTE *begin = CompressedBits;
     BYTE *bits = CompressedBits;
     BYTE *temp;
@@ -45,7 +45,7 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
                 for (i = 0; i < length; i++)
                 {
                     if (x >= width) break;
-                    temp = UncompressedBits + (height - y) * Delta;
+                    temp = UncompressedBits + y * Delta;
                     if (is4bpp)
                     {
                         temp += x / 2;
@@ -89,7 +89,7 @@ VOID DecompressBitmap(SIZEL Size, BYTE *CompressedBits, BYTE *UncompressedBits,
 
                         if (x < width)
                         {
-                            temp = UncompressedBits + (height - y) * Delta;
+                            temp = UncompressedBits + y * Delta;
                             if (is4bpp)
                             {
                                 temp += x / 2;

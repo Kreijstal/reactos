@@ -672,6 +672,8 @@ IntEngBitBlt(
     RECTL rclClipped;
     RECTL rclSrc;
     RECTL rclSrcClipped;
+    POINTL ptlMask;
+    POINTL *pptlAdjustedMask;
     POINTL ptlBrush;
     PFN_DrvBitBlt pfnBitBlt;
     LONG lTmp;
@@ -713,6 +715,17 @@ IntEngBitBlt(
     else
         pco = (CLIPOBJ *)&gxcoTrivial;
 
+    if (pptlMask)
+    {
+        ptlMask.x = pptlMask->x + rclClipped.left - prclTrg->left;
+        ptlMask.y = pptlMask->y + rclClipped.top - prclTrg->top;
+        pptlAdjustedMask = &ptlMask;
+    }
+    else
+    {
+        pptlAdjustedMask = NULL;
+    }
+
     if (ROP4_USES_SOURCE(Rop4))
     {
         ASSERT(psoSrc);
@@ -736,6 +749,11 @@ IntEngBitBlt(
         rclClipped.top += (rclSrcClipped.top - rclSrc.top);
         rclClipped.right -= (rclSrc.right - rclSrcClipped.right);
         rclClipped.bottom -= (rclSrc.bottom - rclSrcClipped.bottom);
+        if (pptlAdjustedMask)
+        {
+            ptlMask.x += rclSrcClipped.left - rclSrc.left;
+            ptlMask.y += rclSrcClipped.top - rclSrc.top;
+        }
 
         pptlSrc = (PPOINTL)&rclSrcClipped;
     }
@@ -803,7 +821,7 @@ IntEngBitBlt(
                         pxlo,
                         &rclClipped,
                         pptlSrc,
-                        pptlMask,
+                        pptlAdjustedMask,
                         pbo,
                         pptlBrush ? &ptlBrush : NULL,
                         Rop4);
