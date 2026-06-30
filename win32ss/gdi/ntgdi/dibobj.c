@@ -1615,6 +1615,7 @@ NtGdiStretchDIBitsInternal(
                          NULL,
                          &pdc->eboFill.BrushObject,
                          NULL,
+                         pdc->pdcattr->jStretchBltMode,
                          WIN32_ROP3_TO_ENG_ROP4(dwRop));
 
         /* Cleanup */
