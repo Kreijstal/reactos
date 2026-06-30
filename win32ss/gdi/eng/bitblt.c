@@ -732,10 +732,27 @@ IntEngBitBlt(
         psurfSrc = CONTAINING_RECORD(psoSrc, SURFACE, SurfObj);
 
         /* Calculate source rect */
-        rclSrc.left = pptlSrc->x + rclClipped.left - prclTrg->left;
-        rclSrc.top = pptlSrc->y + rclClipped.top - prclTrg->top;
-        rclSrc.right = rclSrc.left + rclClipped.right - rclClipped.left;
-        rclSrc.bottom = rclSrc.top + rclClipped.bottom - rclClipped.top;
+        if (bLeftToRight)
+        {
+            rclSrc.right = pptlSrc->x - (rclClipped.left - prclTrg->right);
+            rclSrc.left = rclSrc.right - (rclClipped.right - rclClipped.left);
+        }
+        else
+        {
+            rclSrc.left = pptlSrc->x + rclClipped.left - prclTrg->left;
+            rclSrc.right = rclSrc.left + rclClipped.right - rclClipped.left;
+        }
+
+        if (bTopToBottom)
+        {
+            rclSrc.bottom = pptlSrc->y - (rclClipped.top - prclTrg->bottom);
+            rclSrc.top = rclSrc.bottom - (rclClipped.bottom - rclClipped.top);
+        }
+        else
+        {
+            rclSrc.top = pptlSrc->y + rclClipped.top - prclTrg->top;
+            rclSrc.bottom = rclSrc.top + rclClipped.bottom - rclClipped.top;
+        }
 
         /* Clip the source rect against the size of the source surface */
         if (!RECTL_bClipRectBySize(&rclSrcClipped, &rclSrc, &psoSrc->sizlBitmap))
@@ -754,6 +771,15 @@ IntEngBitBlt(
             ptlMask.x += rclSrcClipped.left - rclSrc.left;
             ptlMask.y += rclSrcClipped.top - rclSrc.top;
         }
+
+        if ((psoSrc->fjBitmap & BMF_TOPDOWN) &&
+            bLeftToRight && (pptlSrc->x > psoSrc->sizlBitmap.cx))
+            rclClipped.right -= pptlSrc->x - psoSrc->sizlBitmap.cx;
+        if ((psoSrc->fjBitmap & BMF_TOPDOWN) &&
+            bTopToBottom && (pptlSrc->y > psoSrc->sizlBitmap.cy))
+            rclClipped.bottom -= pptlSrc->y - psoSrc->sizlBitmap.cy;
+        if (RECTL_bIsEmptyRect(&rclClipped))
+            return TRUE;
 
         pptlSrc = (PPOINTL)&rclSrcClipped;
     }
