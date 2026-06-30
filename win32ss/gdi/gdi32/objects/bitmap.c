@@ -1006,6 +1006,12 @@ StretchDIBits(
         return 0;
     }
 
+    if (pConvertedInfo->bmiHeader.biWidth <= 0 ||
+        pConvertedInfo->bmiHeader.biHeight == 0)
+    {
+        goto Exit;
+    }
+
     cjBmpScanSize = GdiGetBitmapBitsSize((BITMAPINFO *) pConvertedInfo);
 
     if (lpBits)
