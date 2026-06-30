@@ -178,6 +178,61 @@ IntArc( DC *dc,
         PUTLINE(CenterX, CenterY, RectSEpts.left, RectSEpts.top, dc->eboLine);
         PUTLINE(RectSEpts.right, RectSEpts.bottom, CenterX, CenterY, dc->eboLine);
     }
+    else if ((arctype == GdiTypeArc) &&
+             (pdcattr->iGraphicsMode == GM_ADVANCED) &&
+             !(pdcattr->mxWorldToDevice.flAccel & XFORM_UNITY))
+    {
+        RECTL CardinalBounds = RectBounds;
+        LONG LeftX, RightX, TopY, BottomY, MidX, MidY;
+
+        RECTL_vMakeWellOrdered(&CardinalBounds);
+        LeftX = CardinalBounds.left;
+        RightX = CardinalBounds.right;
+        TopY = CardinalBounds.top;
+        BottomY = CardinalBounds.bottom;
+        MidX = (LeftX + RightX) / 2;
+        MidY = (TopY + BottomY) / 2;
+
+        ret = ret && IntEngLineTo(&psurf->SurfObj,
+                                  (CLIPOBJ *)&dc->co,
+                                  &dc->eboLine.BrushObject,
+                                  MidX, TopY, MidX + 1, TopY,
+                                  &CardinalBounds,
+                                  ROP2_TO_MIX(pdcattr->jROP2));
+        ret = ret && IntEngLineTo(&psurf->SurfObj,
+                                  (CLIPOBJ *)&dc->co,
+                                  &dc->eboLine.BrushObject,
+                                  MidX, BottomY, MidX + 1, BottomY,
+                                  &CardinalBounds,
+                                  ROP2_TO_MIX(pdcattr->jROP2));
+        ret = ret && IntEngLineTo(&psurf->SurfObj,
+                                  (CLIPOBJ *)&dc->co,
+                                  &dc->eboLine.BrushObject,
+                                  LeftX, MidY, LeftX + 1, MidY,
+                                  &CardinalBounds,
+                                  ROP2_TO_MIX(pdcattr->jROP2));
+        ret = ret && IntEngLineTo(&psurf->SurfObj,
+                                  (CLIPOBJ *)&dc->co,
+                                  &dc->eboLine.BrushObject,
+                                  RightX, MidY, RightX + 1, MidY,
+                                  &CardinalBounds,
+                                  ROP2_TO_MIX(pdcattr->jROP2));
+        if ((BottomY - TopY) & 1)
+        {
+            ret = ret && IntEngLineTo(&psurf->SurfObj,
+                                      (CLIPOBJ *)&dc->co,
+                                      &dc->eboLine.BrushObject,
+                                      LeftX, MidY + 1, LeftX + 1, MidY + 1,
+                                      &CardinalBounds,
+                                      ROP2_TO_MIX(pdcattr->jROP2));
+            ret = ret && IntEngLineTo(&psurf->SurfObj,
+                                      (CLIPOBJ *)&dc->co,
+                                      &dc->eboLine.BrushObject,
+                                      RightX, MidY + 1, RightX + 1, MidY + 1,
+                                      &CardinalBounds,
+                                      ROP2_TO_MIX(pdcattr->jROP2));
+        }
+    }
     if (arctype == GdiTypeChord)
         PUTLINE(RectSEpts.right, RectSEpts.bottom, RectSEpts.left, RectSEpts.top, dc->eboLine);
 
