@@ -365,7 +365,7 @@ IntGdiCreateMaskFromRLE(
     DWORD BitsSize)
 {
     HBITMAP Mask;
-    DWORD x, y;
+    LONG x, y;
     SURFOBJ* SurfObj;
     UINT i = 0;
     BYTE Data, NumPixels, ToSkip;
@@ -385,7 +385,8 @@ IntGdiCreateMaskFromRLE(
     }
     ASSERT(SurfObj->pvBits != NULL);
 
-    x = y = 0;
+    x = 0;
+    y = Height - 1;
 
     while (i < BitsSize)
     {
@@ -412,9 +413,9 @@ IntGdiCreateMaskFromRLE(
             {
                 case 0:
                     /* End of line */
-                    y++;
-                    if (y == Height)
+                    if (y == 0)
                         goto done;
+                    y--;
                     x = 0;
                     break;
                 case 1:
@@ -427,8 +428,8 @@ IntGdiCreateMaskFromRLE(
                     x += Bits[i];
                     if (x > Width)
                         x = Width;
-                    y += Bits[i + 1];
-                    if (y >= Height)
+                    y -= Bits[i + 1];
+                    if (y < 0)
                         goto done;
                     i += 2;
                     break;
@@ -494,6 +495,7 @@ NtGdiSetDIBitsToDeviceInternal(
     POINTL ptSource;
     //INT DIBWidth;
     SIZEL SourceSize;
+    UINT cjSourceWidth;
     UINT cjSourceHeight;
     UINT cjBitmapHeight;
     BOOL bTopDown;
@@ -533,15 +535,30 @@ NtGdiSetDIBitsToDeviceInternal(
            XSrc, YSrc, XDest, YDest);
 
     cjBitmapHeight = abs(bmi->bmiHeader.biHeight);
+    cjSourceWidth = bmi->bmiHeader.biWidth;
     bTopDown = (bmi->bmiHeader.biHeight < 0);
     iSourceY = YSrc;
 
     if ((bmi->bmiHeader.biCompression == BI_RLE8) ||
         (bmi->bmiHeader.biCompression == BI_RLE4))
     {
+        if (bmi->bmiHeader.biHeight < 0)
+        {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            ret = 0;
+            goto Exit;
+        }
+
+        if ((XSrc + (INT)Width <= 0) || (YSrc + (INT)Height <= 0))
+        {
+            ret = 0;
+            goto Exit;
+        }
+
         StartScan = 0;
         ScanLines = cjBitmapHeight;
-        cjSourceHeight = cjBitmapHeight;
+        cjSourceWidth = XSrc + Width;
+        cjSourceHeight = YSrc + Height;
         iSourceY = 0;
     }
     else
@@ -606,6 +623,10 @@ NtGdiSetDIBitsToDeviceInternal(
     {
         IntLPtoDP(pDC, (LPPOINT)&rcDest, 1);
     }
+    if ((Width != 0) && (pDC->pdcattr->dwLayout & LAYOUT_RTL))
+    {
+        rcDest.left -= Width - 1;
+    }
     rcDest.left += pDC->ptlDCOrig.x;
     rcDest.top += pDC->ptlDCOrig.y;
     rcDest.right = rcDest.left + Width;
@@ -619,12 +640,12 @@ NtGdiSetDIBitsToDeviceInternal(
     ptSource.x = XSrc;
     ptSource.y = iSourceY;
 
-    SourceSize.cx = bmi->bmiHeader.biWidth;
+    SourceSize.cx = cjSourceWidth;
     SourceSize.cy = cjSourceHeight;
 
     //DIBWidth = WIDTH_BYTES_ALIGN32(SourceSize.cx, bmi->bmiHeader.biBitCount);
 
-    hSourceBitmap = GreCreateBitmapEx(bmi->bmiHeader.biWidth,
+    hSourceBitmap = GreCreateBitmapEx(cjSourceWidth,
                                       cjSourceHeight,
                                       0,
                                       BitmapFormat(bmi->bmiHeader.biBitCount,
@@ -651,8 +672,8 @@ NtGdiSetDIBitsToDeviceInternal(
     /* HACK: If this is a RLE bitmap, only the relevant pixels must be set. */
     if ((bmi->bmiHeader.biCompression == BI_RLE8) || (bmi->bmiHeader.biCompression == BI_RLE4))
     {
-        hMaskBitmap = IntGdiCreateMaskFromRLE(bmi->bmiHeader.biWidth,
-            ScanLines,
+        hMaskBitmap = IntGdiCreateMaskFromRLE(cjSourceWidth,
+            cjSourceHeight,
             bmi->bmiHeader.biCompression,
             Bits,
             cjMaxBits);
@@ -844,6 +865,15 @@ GreGetDIBitsInternal(
         }
     }
 
+    if (!psurf->hSecure &&
+        (bpp > 1) &&
+        (bpp == BitsPerFormat(psurf->SurfObj.iBitmapFormat)) &&
+        (pDC->ppdev->gdiinfo.cBitsPixel != bpp))
+    {
+        ScanLines = 0;
+        goto done;
+    }
+
     Info->bmiHeader.biClrUsed = 0;
     Info->bmiHeader.biClrImportant = 0;
 
@@ -867,6 +897,7 @@ GreGetDIBitsInternal(
 
         if (Info->bmiHeader.biBitCount <= 8 && Info->bmiHeader.biClrUsed == 0)
             Info->bmiHeader.biClrUsed = 1 << Info->bmiHeader.biBitCount;
+        Info->bmiHeader.biClrImportant = Info->bmiHeader.biClrUsed;
 
         ScanLines = 1;
         goto done;
@@ -1521,7 +1552,9 @@ NtGdiStretchDIBitsInternal(
 
         if (pdc->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
         {
-           IntUpdateBoundsRect(pdc, &rcDst);
+           RECTL rcBounds = rcDst;
+           RECTL_vMakeWellOrdered(&rcBounds);
+           IntUpdateBoundsRect(pdc, &rcBounds);
         }
 
         BmpFormat = BitmapFormat(pbmiSafe->bmiHeader.biBitCount,
@@ -2127,6 +2160,7 @@ DIB_CreateDIBSection(
     bmp->dwOffset = offset;
     bmp->flags = API_BITMAP;
     bmp->biClrImportant = bi->biClrImportant;
+    bmp->biCompression = bi->biCompression;
 
     /* Create a palette for the DIB */
     ppalDIB = CreateDIBPalette(bmi, dc, usage);
