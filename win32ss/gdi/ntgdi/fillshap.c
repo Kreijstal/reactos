@@ -871,6 +871,13 @@ IntRoundRect(
     RectBounds.right  += dc->ptlDCOrig.x;
     RectBounds.bottom += dc->ptlDCOrig.y;
 
+    if (pdcattr->iGraphicsMode == GM_ADVANCED)
+    {
+        RECTL_vMakeWellOrdered(&RectBounds);
+        RectBounds.right++;
+        RectBounds.bottom++;
+    }
+
     pbrFill = BRUSH_ShareLockBrush(pdcattr->hbrush);
     if (!pbrFill)
     {
