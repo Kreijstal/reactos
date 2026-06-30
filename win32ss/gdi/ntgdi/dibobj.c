@@ -848,18 +848,17 @@ GreGetDIBitsInternal(
 
     /* Validate input:
        - non-null Bits and negative width is an invalid combination
-       - non-null Bits and zero bpp is an invalid combination
+       - non-null Bits and zero bpp is an invalid combination, unless the
+         caller requested zero scan lines. In that case Windows treats the
+         call as an information query.
        - only check the rest of the input params if either bpp is non-zero or Bits are set */
-    if (Bits != NULL)
+    if (Bits && (width < 0 || (bpp == 0 && ScanLines != 0)))
     {
-        if ((width < 0) || (bpp == 0))
-        {
-            ScanLines = 0;
-            goto done;
-        }
+        ScanLines = 0;
+        goto done;
     }
 
-    if (Bits || bpp)
+    if ((Bits && ScanLines != 0) || bpp)
     {
         if ((height == 0 || width == 0) || (compr && compr != BI_BITFIELDS && compr != BI_RGB))
         {
@@ -1289,7 +1288,7 @@ NtGdiGetDIBitsInternal(
     }
 
     /* Check if the caller provided bitmap bits */
-    if (pjBits)
+    if (pjBits && cjMaxBits != 0)
     {
         /* Secure the user mode memory */
         hSecure = EngSecureMem(pjBits, cjMaxBits);
