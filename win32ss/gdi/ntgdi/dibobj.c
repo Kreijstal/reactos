@@ -2035,6 +2035,7 @@ DIB_CreateDIBSection(
     // Fill BITMAP32 structure with DIB data
     CONST BITMAPINFOHEADER *bi = &bmi->bmiHeader;
     INT effHeight;
+    ULONGLONG cjWidthBytes, cjTotalSize;
     ULONG totalSize;
     BITMAP bm;
     //SIZEL Size;
@@ -2051,7 +2052,36 @@ DIB_CreateDIBSection(
         return (HBITMAP)NULL;
     }
 
+    if (usage > DIB_PAL_COLORS ||
+        bi->biWidth <= 0 ||
+        bi->biHeight == 0 ||
+        bi->biPlanes == 0 ||
+        bi->biBitCount == 0)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
+
+    if (bi->biCompression == BI_BITFIELDS)
+    {
+        CONST DWORD *masks = (CONST DWORD *)bmi->bmiColors;
+
+        if (!masks[0] || !masks[1] || !masks[2])
+        {
+            EngSetLastError(ERROR_INVALID_PARAMETER);
+            return (HBITMAP)NULL;
+        }
+    }
+
     effHeight = bi->biHeight >= 0 ? bi->biHeight : -bi->biHeight;
+    cjWidthBytes = ((((ULONGLONG)bi->biWidth * bi->biPlanes * bi->biBitCount) + 31) & ~31) / 8;
+    cjTotalSize = cjWidthBytes * effHeight;
+    if (cjWidthBytes > LONG_MAX || cjTotalSize > ULONG_MAX)
+    {
+        EngSetLastError(ERROR_INVALID_PARAMETER);
+        return (HBITMAP)NULL;
+    }
+
     bm.bmType = 0;
     bm.bmWidth = bi->biWidth;
     bm.bmHeight = effHeight;
