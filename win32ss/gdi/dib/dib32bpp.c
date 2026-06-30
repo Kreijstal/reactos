@@ -821,10 +821,10 @@ DIB_32BPP_AlphaBlend(SURFOBJ* Dest, SURFOBJ* Source, RECTL* DestRect,
            SrcPixel.col.alpha : BlendFunc.SourceConstantAlpha ;
 
       DstPixel.ul = *Dst;
-      DstPixel.col.red = Clamp8((DstPixel.col.red * (255 - Alpha)) / 255 + SrcPixel.col.red) ;
-      DstPixel.col.green = Clamp8((DstPixel.col.green * (255 - Alpha)) / 255 + SrcPixel.col.green) ;
-      DstPixel.col.blue = Clamp8((DstPixel.col.blue * (255 - Alpha)) / 255 + SrcPixel.col.blue) ;
-      DstPixel.col.alpha = Clamp8((DstPixel.col.alpha * (255 - Alpha)) / 255 + SrcPixel.col.alpha) ;
+      DstPixel.col.red = Clamp8((DstPixel.col.red * (255 - Alpha) + 127) / 255 + SrcPixel.col.red) ;
+      DstPixel.col.green = Clamp8((DstPixel.col.green * (255 - Alpha) + 127) / 255 + SrcPixel.col.green) ;
+      DstPixel.col.blue = Clamp8((DstPixel.col.blue * (255 - Alpha) + 127) / 255 + SrcPixel.col.blue) ;
+      DstPixel.col.alpha = Clamp8((DstPixel.col.alpha * (255 - Alpha) + 127) / 255 + SrcPixel.col.alpha) ;
       *Dst++ = DstPixel.ul;
       SrcX = SourceRect->left + (Cols*(SourceRect->right - SourceRect->left))/(DestRect->right - DestRect->left);
     }
