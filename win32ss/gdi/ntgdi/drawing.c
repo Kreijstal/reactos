@@ -1505,11 +1505,20 @@ IntDrawRoundRect( PDC dc,
     }
     if ( Hellipse < r.height)
     {
-        app_fill_rect(dc, rect(r.x, r.y+ry+1, w, r.height-ry-ry), pbrushPen, TRUE);
+        if (ry == 0)
+        {
+            app_fill_rect(dc, rect(r.x, r.y + w, w, r.height - 2 * w), pbrushPen, TRUE);
+            app_fill_rect(dc, rect(r.x + r.width - w, r.y + w, w, r.height - 2 * w),
+                          pbrushPen, TRUE);
+        }
+        else
+        {
+            app_fill_rect(dc, rect(r.x, r.y+ry+1, w, r.height-ry-ry), pbrushPen, TRUE);
 
 
-        app_fill_rect(dc, rect(r.x+r.width-w, r.y+ry+1, w, r.height-ry-ry),
-                      pbrushPen, TRUE);
+            app_fill_rect(dc, rect(r.x+r.width-w, r.y+ry+1, w, r.height-ry-ry),
+                          pbrushPen, TRUE);
+        }
     }
     if ( Wellipse < r.width)
     {
