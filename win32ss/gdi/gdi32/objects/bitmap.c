@@ -747,8 +747,6 @@ SetDIBitsToDevice(
     BOOL Hit = FALSE;
     PVOID pvSafeBits = (PVOID) Bits;
     UINT bmiHeight, ScanLinesOrig = ScanLines, ImageSizeOrig;
-    BOOL top_down;
-    INT src_y = 0;
     ULONG iFormat, cBitsPixel, cjBits, cjWidth;
 
     // HACK: Temporay hack for Half-Life
@@ -791,7 +789,6 @@ SetDIBitsToDevice(
     ImageSizeOrig = pConvertedInfo->bmiHeader.biSizeImage;
 
     bmiHeight = abs(pConvertedInfo->bmiHeader.biHeight);
-    top_down = (pConvertedInfo->bmiHeader.biHeight < 0);
     if ((StartScan > bmiHeight) && (ScanLines > bmiHeight))
     {
         DPRINT("Returning ScanLines of '%d'\n", ScanLines);
@@ -809,64 +806,6 @@ SetDIBitsToDevice(
     {
         LinesCopied = 0;
         goto Exit;
-    }
-
-    /* Below code modeled after Wine's nulldrv_SetDIBitsToDevice */
-    if (StartScan <= YSrc + bmiHeight)
-    {
-        if ((pConvertedInfo->bmiHeader.biCompression == BI_RLE8) ||
-            (pConvertedInfo->bmiHeader.biCompression == BI_RLE4))
-        {
-            StartScan = 0;
-            ScanLines = bmiHeight;
-        }
-        else
-        {
-            if (StartScan >= bmiHeight)
-            {
-                LinesCopied = 0;
-                goto Exit;
-            }
-            if (!top_down && ScanLines > bmiHeight - StartScan)
-            {
-                ScanLines = bmiHeight - StartScan;
-            }
-            src_y = StartScan + ScanLines - (YSrc + Height);
-            if (!top_down)
-            {
-                /* get rid of unnecessary lines */
-                if ((src_y < 0 || src_y >= (INT)ScanLines) &&
-                    pConvertedInfo->bmiHeader.biCompression != BI_BITFIELDS)
-                {
-                    LinesCopied = ScanLines;
-                    goto Exit;
-                }
-                if (YDest >= 0)
-                {
-                    LinesCopied = ScanLines + StartScan;
-                    ScanLines -= src_y;
-                }
-                else
-                {
-                    LinesCopied = ScanLines - src_y;
-                }
-            }
-            else if (src_y < 0 || src_y >= (INT)ScanLines)
-            {
-                if (lpbmi->bmiHeader.biHeight < 0 &&
-                    StartScan > MaxScanLines)
-                {
-                    ScanLines = lpbmi->bmiHeader.biHeight - StartScan;
-                }
-                DPRINT("Returning ScanLines of '%d'\n", ScanLines);
-                LinesCopied = ScanLines;
-                goto Exit;
-            }
-            else
-            {
-                LinesCopied = ScanLines;
-            }
-        }
     }
 
     HANDLE_METADC(INT,
@@ -961,24 +900,6 @@ SetDIBitsToDevice(
         goto Exit;
     }
 
-    /* Calculation of ScanLines for NtGdiSetDIBitsToDeviceInternal */
-    if (YDest >= 0)
-    {
-        ScanLines = min(abs(Height), ScanLines);
-        if (YSrc > 0)
-            ScanLines += YSrc;
-    }
-    else
-    {
-         ScanLines = min(ScanLines,
-                         abs(pConvertedInfo->bmiHeader.biHeight) - StartScan);
-    }
-
-    if (YDest >= 0 && YSrc > 0 && bmiHeight <= MaxHeight)
-    {
-        ScanLines += YSrc;
-    }
-
     /* Find Format from lpbmi which is now pConvertedInfo */
     iFormat = BitmapFormat(pConvertedInfo->bmiHeader.biBitCount,
                            pConvertedInfo->bmiHeader.biCompression);
@@ -1007,17 +928,6 @@ SetDIBitsToDevice(
         }
     }
 
-    if (YDest >= 0)
-    {
-        ScanLines = min(abs(Height), ScanLines);
-        if (YSrc > 0)
-        {
-            ScanLines += YSrc;
-            if (Height + YDest + 1 < ScanLines)
-                YSrc = 0;
-        }
-    }
-
     /*
      if ( !pDc_Attr || // DC is Public
      ColorUse == DIB_PAL_COLORS ||
@@ -1032,19 +942,6 @@ SetDIBitsToDevice(
             cjBmpScanSize, ConvertedInfoSize,
             TRUE,
             NULL);
-    }
-
-    if (bmiHeight > MaxScanLines)
-    {
-        LinesCopied = ScanLines;
-    }
-
-    if (YDest < 0)
-    {
-        if (top_down)
-            LinesCopied = ScanLines;
-        else
-            LinesCopied = ScanLines - src_y;
     }
 
     if (pConvertedInfo->bmiHeader.biCompression == BI_RLE8 ||
