@@ -625,11 +625,21 @@ SetDIBits(
     INT LinesCopied = 0;
     BOOL newDC = FALSE;
 
-    if (fuColorUse != DIB_RGB_COLORS && fuColorUse != DIB_PAL_COLORS)
-        return 0;
-
     if (!lpvBits || (GDI_HANDLE_GET_TYPE(hBitmap) != GDI_OBJECT_TYPE_BITMAP))
         return 0;
+
+    if (fuColorUse != DIB_RGB_COLORS && fuColorUse != DIB_PAL_COLORS)
+    {
+        BITMAP Bitmap;
+
+        if (fuColorUse != DIB_PAL_COLORS + 1 ||
+            GetObjectW(hBitmap, sizeof(Bitmap), &Bitmap) != sizeof(Bitmap) ||
+            Bitmap.bmPlanes != 1 ||
+            Bitmap.bmBitsPixel != 1)
+        {
+            return 0;
+        }
+    }
 
     if (lpbmi->bmiHeader.biSize >= sizeof(BITMAPINFOHEADER))
     {
