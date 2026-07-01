@@ -97,6 +97,23 @@ static LOGFONTW DefaultGuiFont =
       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, /*DEFAULT_QUALITY*/ PROOF_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"MS Shell Dlg"
     };
 
+static LOGCOLORSPACEEXW DefaultColorSpace =
+{
+    {
+        LCS_SIGNATURE,
+        0x400,
+        sizeof(LOGCOLORSPACEW),
+        LCS_sRGB,
+        LCS_GM_IMAGES,
+        {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+        0,
+        0,
+        0,
+        L""
+    },
+    0
+};
+
 HGDIOBJ StockObjects[NB_STOCK_OBJECTS];
 
 static
@@ -265,7 +282,7 @@ CreateStockObjects(void)
     StockObjects[DC_PEN]    = IntCreateStockPen(BlackPen.lopnStyle, BlackPen.lopnWidth.x, BS_SOLID, BlackPen.lopnColor);
     StockObjects[NULL_PEN]  = IntCreateStockPen(NullPen.lopnStyle, NullPen.lopnWidth.x, BS_SOLID, NullPen.lopnColor);
 
-    StockObjects[20] = NULL; /* TODO: Unknown internal stock object */
+    StockObjects[20] = IntGdiCreateColorSpace(&DefaultColorSpace);
     StockObjects[DEFAULT_BITMAP] = GreCreateBitmap(1, 1, 1, 1, NULL);
 
     CreateStockFonts();
@@ -279,6 +296,8 @@ CreateStockObjects(void)
             GDIOBJ_ConvertToStockObj(&StockObjects[Object]);
         }
     }
+
+    hStockColorSpace = (HCOLORSPACE)StockObjects[20];
 
     DPRINT("Completed creation of stock objects\n");
 }

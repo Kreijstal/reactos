@@ -1335,6 +1335,7 @@ HDC WINAPI CreateMetaFileW( const WCHAR *filename )
 {
     struct metadc *metadc;
     HANDLE hdc;
+    DWORD last_error = GetLastError();
 
     TRACE( "%s\n", debugstr_w(filename) );
 
@@ -1391,6 +1392,7 @@ HDC WINAPI CreateMetaFileW( const WCHAR *filename )
     }
 
     TRACE( "returning %p\n", hdc );
+    SetLastError( last_error );
     return hdc;
 }
 

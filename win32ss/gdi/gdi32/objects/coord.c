@@ -67,6 +67,7 @@ CombineTransform(
     _In_ const XFORM *pxf2)
 {
     XFORM xformTmp;
+    FLOAT eDx, eDy;
 
     /* Check paramters */
     if (!pxfResult || !pxf1 || !pxf2) return FALSE;
@@ -89,15 +90,18 @@ CombineTransform(
     }
 
     /* Calculate the offset */
-    xformTmp.eDx = _fmul(pxf1->eDx, pxf2->eM11) + _fmul(pxf1->eDy, pxf2->eM21) + pxf2->eDx;
-    xformTmp.eDy = _fmul(pxf1->eDx, pxf2->eM12) + _fmul(pxf1->eDy, pxf2->eM22) + pxf2->eDy;
+    eDx = _fmul(pxf1->eDx, pxf2->eM11) + _fmul(pxf1->eDy, pxf2->eM21);
+    eDy = _fmul(pxf1->eDx, pxf2->eM12) + _fmul(pxf1->eDy, pxf2->eM22);
 
     /* Check for invalid offset ranges */
-    if ((xformTmp.eDx > MAX_OFFSET) || (xformTmp.eDx < -MAX_OFFSET) ||
-        (xformTmp.eDy > MAX_OFFSET) || (xformTmp.eDy < -MAX_OFFSET))
+    if ((eDx > MAX_OFFSET) || (eDx < -MAX_OFFSET) ||
+        (eDy > MAX_OFFSET) || (eDy < -MAX_OFFSET))
     {
         return FALSE;
     }
+
+    xformTmp.eDx = eDx + pxf2->eDx;
+    xformTmp.eDy = eDy + pxf2->eDy;
 
     /* All is ok, return the calculated values */
     *pxfResult = xformTmp;
@@ -956,4 +960,3 @@ OffsetWindowOrgEx(
 
 //    return NtGdiOffsetWindowOrgEx(hdc, nXOffset, nYOffset, lpPoint);
 }
-

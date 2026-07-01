@@ -27,4 +27,9 @@ typedef struct _COLORTRANSFORMOBJ
 
 extern HCOLORSPACE hStockColorSpace;
 
+HCOLORSPACE
+FASTCALL
+IntGdiCreateColorSpace(
+    PLOGCOLORSPACEEXW pLogColorSpace);
+
 UINT FASTCALL IntGdiRealizePalette (HDC);

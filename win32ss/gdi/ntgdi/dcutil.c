@@ -734,10 +734,10 @@ NtGdiGetBoundsRect(
           {
              REGION_GetRgnBox(pdc->prgnVis, &rcRgn);
           }
-          rc.left   = max( rc.left, 0 );
-          rc.top    = max( rc.top, 0 );
-          rc.right  = min( rc.right,  rcRgn.right - rcRgn.left );
-          rc.bottom = min( rc.bottom, rcRgn.bottom - rcRgn.top );
+          rc.left   = max( rc.left,   rcRgn.left );
+          rc.top    = max( rc.top,    rcRgn.top );
+          rc.right  = min( rc.right,  rcRgn.right );
+          rc.bottom = min( rc.bottom, rcRgn.bottom );
           DPRINT("Rao dc %p r %d b %d\n",pdc,rcRgn.right - rcRgn.left, rcRgn.bottom - rcRgn.top);
           DPRINT("rc  l %d t %d\n",rc.left,rc.top);
           DPRINT("    r %d b %d\n",rc.right,rc.bottom);
@@ -947,5 +947,4 @@ TranslateCOLORREF(PDC pdc, COLORREF crColor)
 
     return ulColor;
 }
-
 
