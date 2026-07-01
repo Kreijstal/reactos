@@ -1502,7 +1502,12 @@ smb2_pread_async(struct smb2_context *smb2, struct smb2fh *fh,
                         count =  (MAX_CREDITS - 16) * 65536;
                 }
                 needed_credits = (count - 1) / 65536 + 1;
-                if (needed_credits > smb2->credits) {
+                if (needed_credits > smb2->credits && smb2->credits > 0) {
+                        /* Clamp the transfer to what our credits allow - but only
+                         * when we actually hold credits.  With zero credits this
+                         * would build a useless zero-length transfer; instead let
+                         * the request keep its size and rely on the send-side
+                         * credit recovery in smb2_write_to_socket(). */
                         count = smb2->credits * 65536;
                 }
         } else {
@@ -1621,7 +1626,12 @@ smb2_pwrite_async(struct smb2_context *smb2, struct smb2fh *fh,
                         count =  (MAX_CREDITS - 16) * 65536;
                 }
                 needed_credits = (count - 1) / 65536 + 1;
-                if (needed_credits > smb2->credits) {
+                if (needed_credits > smb2->credits && smb2->credits > 0) {
+                        /* Clamp the transfer to what our credits allow - but only
+                         * when we actually hold credits.  With zero credits this
+                         * would build a useless zero-length transfer; instead let
+                         * the request keep its size and rely on the send-side
+                         * credit recovery in smb2_write_to_socket(). */
                         count = smb2->credits * 65536;
                 }
         } else {
