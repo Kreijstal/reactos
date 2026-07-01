@@ -154,6 +154,8 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     {
         FLOATOBJ_SetLong(&pmx->efM11, pszlViewPortExt->cx);
         FLOATOBJ_DivLong(&pmx->efM11, szlWindowExt.cx);
+        if (pdcattr->dwLayout & LAYOUT_RTL)
+            FLOATOBJ_Neg(&pmx->efM11);
     }
     else
         FLOATOBJ_SetLong(&pmx->efM11, 1);
@@ -170,6 +172,11 @@ DC_vGetPageToDevice(PDC pdc, MATRIX *pmx)
     FLOATOBJ_SetLong(&pmx->efDx, -pdcattr->ptlWindowOrg.x);
     FLOATOBJ_Mul(&pmx->efDx, &pmx->efM11);
     FLOATOBJ_AddLong(&pmx->efDx, pdcattr->ptlViewportOrg.x);
+    if (pdcattr->dwLayout & LAYOUT_RTL)
+    {
+        FLOATOBJ_Neg(&pmx->efDx);
+        FLOATOBJ_AddLong(&pmx->efDx, pdc->dclevel.sizl.cx - 1);
+    }
 
     /* Calculate y offset */
     FLOATOBJ_SetLong(&pmx->efDy, -pdcattr->ptlWindowOrg.y);

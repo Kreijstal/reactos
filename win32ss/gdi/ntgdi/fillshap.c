@@ -613,7 +613,9 @@ IntRectangle(PDC dc,
 
     if (dc->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
     {
-       IntUpdateBoundsRect(dc, &DestRect);
+       RECTL BoundsRect = DestRect;
+       RECTL_vMakeWellOrdered(&BoundsRect);
+       IntUpdateBoundsRect(dc, &BoundsRect);
     }
 
     /* In GM_COMPATIBLE, don't include bottom and right edges */

@@ -456,7 +456,9 @@ GetCurrentObject(
             return WOW64_CAST_TO_HANDLE(pdcattr->hbrush);
 
         case OBJ_COLORSPACE:
-            return WOW64_CAST_TO_HANDLE(pdcattr->hColorSpace);
+            if (pdcattr->hColorSpace)
+                return WOW64_CAST_TO_HANDLE(pdcattr->hColorSpace);
+            return GetStockObject(20);
 
         case OBJ_PAL:
             uObjectType = GDI_OBJECT_TYPE_PALETTE;
@@ -1555,6 +1557,9 @@ SelectObject(
 
     /* Fix up 16 bit handles */
     hobj = GdiFixUpHandle(hobj);
+    if (GDI_HANDLE_GET_TYPE(hobj) == GDILoObjType_LO_METADC16_TYPE)
+        return NULL;
+
     if (!GdiValidateHandle(hobj))
     {
         return NULL;
