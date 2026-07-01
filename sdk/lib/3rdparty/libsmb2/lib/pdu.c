@@ -1149,6 +1149,15 @@ void smb2_timeout_pdus(struct smb2_context *smb2)
                 next = pdu->next;
                 if (pdu->timeout && pdu->timeout < t) {
                         SMB2_LIST_REMOVE(&smb2->waitqueue, pdu);
+                        /* This PDU was already sent and consumed credit (see
+                         * smb2_write_to_socket()).  Its reply will never arrive,
+                         * so the credit it charged would be lost forever - return
+                         * it to the pool to prevent a permanent credit leak that
+                         * eventually starves the connection into a send deadlock. */
+                        if (!smb2_is_server(smb2)) {
+                                smb2->credits += pdu->header.credit_charge ?
+                                        pdu->header.credit_charge : 1;
+                        }
                         pdu->cb(smb2, SMB2_STATUS_IO_TIMEOUT, NULL,
                                 pdu->cb_data);
                         smb2_free_pdu(smb2, pdu);
