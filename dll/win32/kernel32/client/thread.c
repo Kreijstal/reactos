@@ -1014,7 +1014,8 @@ SetThreadUILanguage(IN LANGID LangId)
     }
 #endif
 
-    UNIMPLEMENTED;
+    if (LangId != 0)
+        NtCurrentTeb()->CurrentLocale = MAKELCID(LangId, SORT_DEFAULT);
 
     return LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale);
 }

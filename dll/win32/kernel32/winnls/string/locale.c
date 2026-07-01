@@ -5452,6 +5452,23 @@ typedef struct
   DWORD    dwFlags;
 } ENUMSYSTEMCODEPAGES_CALLBACKS;
 
+static BOOL
+NLS_IsDecimalCodePageName(LPCWSTR szValueName)
+{
+    if (!szValueName || !*szValueName)
+        return FALSE;
+
+    while (*szValueName)
+    {
+        if (*szValueName < L'0' || *szValueName > L'9')
+            return FALSE;
+
+        szValueName++;
+    }
+
+    return TRUE;
+}
+
 /* Internal implementation of EnumSystemCodePagesA/W */
 static BOOL NLS_EnumSystemCodePages(ENUMSYSTEMCODEPAGES_CALLBACKS *lpProcs)
 {
@@ -5468,9 +5485,14 @@ static BOOL NLS_EnumSystemCodePages(ENUMSYSTEMCODEPAGES_CALLBACKS *lpProcs)
 
     switch (lpProcs->dwFlags)
     {
+        case 0:
+            lpProcs->dwFlags = CP_SUPPORTED;
+            break;
+
         case CP_INSTALLED:
         case CP_SUPPORTED:
             break;
+
         default:
             SetLastError(ERROR_INVALID_FLAGS);
             return FALSE;
@@ -5488,8 +5510,9 @@ static BOOL NLS_EnumSystemCodePages(ENUMSYSTEMCODEPAGES_CALLBACKS *lpProcs)
         if (NLS_RegEnumValue(hKey, ulIndex, szNumber, sizeof(szNumber),
                              szValue, sizeof(szValue)))
         {
-            if ((lpProcs->dwFlags == CP_SUPPORTED)||
-                ((lpProcs->dwFlags == CP_INSTALLED)&&(wcslen(szValue) > 2)))
+            if (NLS_IsDecimalCodePageName(szNumber) &&
+                (lpProcs->dwFlags == CP_SUPPORTED ||
+                 (lpProcs->dwFlags == CP_INSTALLED && wcslen(szValue) > 2)))
             {
                 if (lpProcs->procW)
                 {
@@ -5497,7 +5520,7 @@ static BOOL NLS_EnumSystemCodePages(ENUMSYSTEMCODEPAGES_CALLBACKS *lpProcs)
                 }
                 else
                 {
-                    char szNumberA[sizeof(szNumber)/sizeof(WCHAR)];
+                    char szNumberA[ARRAYSIZE(szNumber)];
 
                     WideCharToMultiByte(CP_ACP, 0, szNumber, -1, szNumberA, sizeof(szNumberA), 0, 0);
                     bContinue = lpProcs->procA(szNumberA);
