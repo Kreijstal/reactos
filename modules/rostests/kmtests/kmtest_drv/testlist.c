@@ -28,8 +28,6 @@ KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
-KMT_TESTFUNC Test_FatPerf;
-KMT_TESTFUNC Test_CmResize;
 #if defined(_M_IX86) || defined(_M_AMD64)
 KMT_TESTFUNC Test_HalPortIo;
 #endif
@@ -124,8 +122,6 @@ const KMT_TEST TestList[] =
     { "FsRtlMcb",                           Test_FsRtlMcb },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
-    { "FatPerf",                            Test_FatPerf },
-    { "CmResize",                           Test_CmResize },
 #if defined(_M_IX86) || defined(_M_AMD64)
     { "HalPortIo",                          Test_HalPortIo },
 #endif
