@@ -79,17 +79,18 @@ HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x
     return HRESULT_FROM_WIN32( GetLastError() );
 }
 #else /* __REACTOS__ */
-/* user32 exports the real DPI worker; forward to it so callers (e.g. Qt's
- * High-DPI scale-factor query) get a valid 96-DPI result instead of an
- * uninitialised out-param from the auto-generated -stub, which collapsed the
- * computed device-pixel-ratio to zero and produced 0x0 top-level windows. */
-BOOL WINAPI GetDpiForMonitorInternal(HMONITOR, UINT, UINT *, UINT *);
+    HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x, UINT *y)
+    {
+    typedef BOOL (WINAPI *PGET_DPI_FOR_MONITOR_INTERNAL)(HMONITOR, UINT, UINT *, UINT *);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    PGET_DPI_FOR_MONITOR_INTERNAL proc = user32 ? (PGET_DPI_FOR_MONITOR_INTERNAL)GetProcAddress(user32, "GetDpiForMonitorInternal") : NULL;
 
-HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x, UINT *y)
-{
-    if (GetDpiForMonitorInternal( monitor, type, x, y )) return S_OK;
-    return HRESULT_FROM_WIN32( GetLastError() );
-}
+    if (proc && proc( monitor, type, x, y )) return S_OK;
+    if (x) *x = 96;
+    if (y) *y = 96;
+    if (!x || !y) return E_INVALIDARG;
+    return S_OK;
+    }
 #endif /* __REACTOS__ */
 
 HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)

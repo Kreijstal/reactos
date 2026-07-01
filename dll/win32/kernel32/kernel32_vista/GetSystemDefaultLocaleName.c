@@ -15,6 +15,7 @@ GetSystemDefaultLocaleName(
 {
     UNICODE_STRING LocaleNameString;
     NTSTATUS Status;
+    K32_RTL_LCID_TO_LOCALE_NAME pRtlLcidToLocaleName;
 
     if (lpLocaleName == NULL || cchLocaleName <= 0)
     {
@@ -27,7 +28,14 @@ GetSystemDefaultLocaleName(
     LocaleNameString.Length = 0;
     LocaleNameString.MaximumLength = (USHORT)(cchLocaleName * sizeof(WCHAR));
 
-    Status = RtlLcidToLocaleName(LOCALE_SYSTEM_DEFAULT, &LocaleNameString, 0, FALSE);
+    pRtlLcidToLocaleName = (K32_RTL_LCID_TO_LOCALE_NAME)K32VistaGetNtdllProc("RtlLcidToLocaleName");
+    if (!pRtlLcidToLocaleName)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
+
+    Status = pRtlLcidToLocaleName(LOCALE_SYSTEM_DEFAULT, &LocaleNameString, 0, FALSE);
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));

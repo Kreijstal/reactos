@@ -46,7 +46,7 @@ INT WINAPI CompareStringEx(LPCWSTR locale, DWORD flags, LPCWSTR str1, INT len1,
 extern int wine_fold_string(int flags, const WCHAR *src, int srclen, WCHAR *dst, int dstlen);
 extern int wine_get_sortkey(const WCHAR *locale, int flags, const WCHAR *src, int srclen, char *dst, int dstlen);
 extern int wine_compare_string(const WCHAR *locale, int flags, const WCHAR *str1, int len1, const WCHAR *str2, int len2);
-NTSYSAPI NTSTATUS WINAPI RtlNormalizeString(ULONG, const WCHAR *, INT, WCHAR *, INT *);
+typedef NTSTATUS (WINAPI *PRTL_NORMALIZE_STRING)(ULONG, const WCHAR *, INT, WCHAR *, INT *);
 #ifdef __REACTOS__
 extern UINT GetLocalisedText(IN UINT uID, IN LPWSTR lpszDest, IN UINT cchDest, IN LANGID lang);
 #else
@@ -55,6 +55,13 @@ extern UINT GetLocalisedText(IN UINT uID, IN LPWSTR lpszDest, IN UINT cchDest);
 #define NLSRC_OFFSET 5000 /* FIXME */
 
 extern HMODULE kernel32_handle;
+
+static PRTL_NORMALIZE_STRING get_rtl_normalize_string(void)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+
+    return ntdll ? (PRTL_NORMALIZE_STRING)GetProcAddress(ntdll, "RtlNormalizeString") : NULL;
+}
 
 #define LOCALE_LOCALEINFOFLAGSMASK (LOCALE_NOUSEROVERRIDE|LOCALE_USE_CP_ACP|\
                                     LOCALE_RETURN_NUMBER|LOCALE_RETURN_GENITIVE_NAMES)
@@ -3758,8 +3765,15 @@ static int map_remove_ignored(DWORD flags, const WCHAR *src, int srclen, WCHAR *
     if (flags & NORM_IGNORENONSPACE)
     {
         NTSTATUS status;
+        PRTL_NORMALIZE_STRING pRtlNormalizeString = get_rtl_normalize_string();
 
-        status = RtlNormalizeString(NormalizationD, src, srclen, NULL, &normalized_len);
+        if (!pRtlNormalizeString)
+        {
+            SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            return 0;
+        }
+
+        status = pRtlNormalizeString(NormalizationD, src, srclen, NULL, &normalized_len);
         if (!NT_SUCCESS(status))
         {
             SetLastError(RtlNtStatusToDosError(status));
@@ -3773,7 +3787,7 @@ static int map_remove_ignored(DWORD flags, const WCHAR *src, int srclen, WCHAR *
             return 0;
         }
 
-        status = RtlNormalizeString(NormalizationD, src, srclen, normalized, &normalized_len);
+        status = pRtlNormalizeString(NormalizationD, src, srclen, normalized, &normalized_len);
         if (!NT_SUCCESS(status))
         {
             RtlFreeHeap(RtlGetProcessHeap(), 0, normalized);
