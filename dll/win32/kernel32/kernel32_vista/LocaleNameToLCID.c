@@ -80,6 +80,7 @@ LocaleNameToLCID(
 {
     NTSTATUS Status;
     LCID Lcid;
+    K32_RTL_LOCALE_NAME_TO_LCID pRtlLocaleNameToLcid;
 
     /* Validate flags */
     if (dwFlags & ~LOCALE_ALLOW_NEUTRAL_NAMES)
@@ -100,8 +101,14 @@ LocaleNameToLCID(
         return MAKELCID(MAKELANGID(LANG_INVARIANT, SUBLANG_NEUTRAL), SORT_DEFAULT);
     }
 
-    /* Call the RTL function (include neutral names) */
-    Status = RtlLocaleNameToLcid(lpName, &Lcid, RTL_LOCALE_ALLOW_NEUTRAL_NAMES);
+    pRtlLocaleNameToLcid = (K32_RTL_LOCALE_NAME_TO_LCID)K32VistaGetNtdllProc("RtlLocaleNameToLcid");
+    if (!pRtlLocaleNameToLcid)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
+
+    Status = pRtlLocaleNameToLcid(lpName, &Lcid, RTL_LOCALE_ALLOW_NEUTRAL_NAMES);
     if (!NT_SUCCESS(Status))
     {
         SetLastError(ERROR_INVALID_PARAMETER);
