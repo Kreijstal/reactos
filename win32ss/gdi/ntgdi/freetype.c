@@ -2153,10 +2153,13 @@ IntGdiRemoveFontResourceSingle(
 {
     BOOL ret = FALSE;
     UNICODE_STRING PathName;
+    LIST_ENTRY RemovedList;
     PLIST_ENTRY CurrentEntry, NextEntry;
+    PLIST_ENTRY FontListHead;
     PFONT_ENTRY FontEntry;
     PFONTGDI FontGDI;
-    PWSTR pszBuffer, pszFileTitle;
+    PPROCESSINFO Win32Process = NULL;
+    PWSTR pszBuffer, pszFileTitle, pszFontFileTitle;
     SIZE_T Length;
     NTSTATUS Status;
 
@@ -2189,10 +2192,23 @@ IntGdiRemoveFontResourceSingle(
         return FALSE; /* Failure */
     }
 
+    InitializeListHead(&RemovedList);
+
     /* Delete font entries that matches PathName */
     IntLockFreeType();
-    for (CurrentEntry = g_FontListHead.Flink;
-         CurrentEntry != &g_FontListHead;
+    if (dwFlags & FR_PRIVATE)
+    {
+        Win32Process = PsGetCurrentProcessWin32Process();
+        IntLockProcessPrivateFonts(Win32Process);
+        FontListHead = &Win32Process->PrivateFontListHead;
+    }
+    else
+    {
+        FontListHead = &g_FontListHead;
+    }
+
+    for (CurrentEntry = FontListHead->Flink;
+         CurrentEntry != FontListHead;
          CurrentEntry = NextEntry)
     {
         FontEntry = CONTAINING_RECORD(CurrentEntry, FONT_ENTRY, ListEntry);
@@ -2200,16 +2216,29 @@ IntGdiRemoveFontResourceSingle(
 
         FontGDI = FontEntry->Font;
         ASSERT(FontGDI);
-        if (FontGDI->Filename && _wcsicmp(FontGDI->Filename, pszFileTitle) == 0)
+        pszFontFileTitle = FontGDI->Filename ? PathFindFileNameW(FontGDI->Filename) : NULL;
+        if (FontGDI->Filename &&
+            (_wcsicmp(FontGDI->Filename, PathName.Buffer) == 0 ||
+             (pszFontFileTitle && _wcsicmp(pszFontFileTitle, pszFileTitle) == 0) ||
+             _wcsicmp(FontGDI->Filename, pszFileTitle) == 0))
         {
             RemoveEntryList(&FontEntry->ListEntry);
-            CleanupFontEntry(FontEntry);
+            InsertTailList(&RemovedList, &FontEntry->ListEntry);
             if (dwFlags & AFRX_WRITE_REGISTRY)
                 IntDeleteRegFontEntries(pszFileTitle, dwFlags);
             ret = TRUE;
         }
     }
+    if (Win32Process)
+        IntUnLockProcessPrivateFonts(Win32Process);
     IntUnLockFreeType();
+
+    while (!IsListEmpty(&RemovedList))
+    {
+        CurrentEntry = RemoveHeadList(&RemovedList);
+        FontEntry = CONTAINING_RECORD(CurrentEntry, FONT_ENTRY, ListEntry);
+        CleanupFontEntry(FontEntry);
+    }
 
     RtlFreeUnicodeString(&PathName);
     return ret;
@@ -4471,8 +4500,9 @@ ftGdiGetGlyphOutline(
     DWORD width, height, pitch, needed = 0;
     FT_Bitmap ft_bitmap;
     FT_Error error;
+    FT_Glyph_Metrics metrics;
     INT left, right, top = 0, bottom = 0;
-    FT_Int load_flags = FT_LOAD_DEFAULT | FT_LOAD_IGNORE_GLOBAL_ADVANCE_WIDTH;
+    FT_Int load_flags = FT_LOAD_DEFAULT;
     FLOATOBJ eM11, widthRatio, eTemp;
     FT_Matrix mat, transMat = identityMat;
     BOOL needsTransform = FALSE;
@@ -4507,6 +4537,13 @@ ftGdiGetGlyphOutline(
     plf = &TextObj->logfont.elfEnumLogfontEx.elfLogFont;
     aveWidth = FT_IS_SCALABLE(ft_face) ? abs(plf->lfWidth) : 0;
     orientation = FT_IS_SCALABLE(ft_face) ? plf->lfOrientation : 0;
+
+    if (pmat2)
+    {
+        static const MAT2 identityMat2 = { {0, 1}, {0, 0}, {0, 0}, {0, 1} };
+        if (RtlEqualMemory(pmat2, &identityMat2, sizeof(identityMat2)))
+            pmat2 = NULL;
+    }
 
     ASSERT_FREETYPE_LOCK_NOT_HELD();
     Size = IntGetOutlineTextMetrics(FontGDI, 0, NULL, FALSE);
@@ -4552,13 +4589,38 @@ ftGdiGetGlyphOutline(
         iFormat &= ~GGO_UNHINTED;
     }
 
-    error = FT_Load_Glyph(ft_face, glyph_index, load_flags);
+    error = FT_Load_Glyph(ft_face, glyph_index,
+                          (load_flags & FT_LOAD_NO_HINTING) ? load_flags : (load_flags | FT_LOAD_PEDANTIC));
+    if (error && !(load_flags & FT_LOAD_NO_HINTING))
+    {
+        load_flags |= FT_LOAD_NO_HINTING;
+        error = FT_Load_Glyph(ft_face, glyph_index, load_flags);
+    }
     if (error)
     {
         DPRINT1("WARNING: Failed to load and render glyph! [index: %u]\n", glyph_index);
         IntUnLockFreeType();
         if (potm) ExFreePoolWithTag(potm, GDITAG_TEXT);
         return GDI_ERROR;
+    }
+
+    metrics = ft_face->glyph->metrics;
+    if (potm)
+    {
+        LONG topLimit = potm->otmTextMetrics.tmAscent << 6;
+        LONG bottomLimit = -(potm->otmTextMetrics.tmDescent << 6);
+        LONG glyphTop = min(metrics.horiBearingY, topLimit);
+        LONG glyphBottom = max(metrics.horiBearingY - metrics.height, bottomLimit);
+
+        if (glyphTop < glyphBottom)
+        {
+            LONG tmp = glyphTop;
+            glyphTop = glyphBottom;
+            glyphBottom = tmp;
+        }
+
+        metrics.horiBearingY = glyphTop;
+        metrics.height = glyphTop - glyphBottom;
     }
     IntUnLockFreeType();
 
@@ -4572,19 +4634,19 @@ ftGdiGetGlyphOutline(
     }
 
     //left = (INT)(ft_face->glyph->metrics.horiBearingX * widthRatio) & -64;
-    FLOATOBJ_SetLong(&eTemp, ft_face->glyph->metrics.horiBearingX);
+    FLOATOBJ_SetLong(&eTemp, metrics.horiBearingX);
     FLOATOBJ_Mul(&eTemp, &widthRatio);
     left = FLOATOBJ_GetLong(&eTemp) & -64;
 
     //right = (INT)((ft_face->glyph->metrics.horiBearingX +
     //               ft_face->glyph->metrics.width) * widthRatio + 63) & -64;
-    FLOATOBJ_SetLong(&eTemp, ft_face->glyph->metrics.horiBearingX * ft_face->glyph->metrics.width);
+    FLOATOBJ_SetLong(&eTemp, metrics.horiBearingX + metrics.width);
     FLOATOBJ_Mul(&eTemp, &widthRatio);
     FLOATOBJ_AddLong(&eTemp, 63);
     right = FLOATOBJ_GetLong(&eTemp) & -64;
 
     //adv = (INT)((ft_face->glyph->metrics.horiAdvance * widthRatio) + 63) >> 6;
-    FLOATOBJ_SetLong(&eTemp, ft_face->glyph->metrics.horiAdvance);
+    FLOATOBJ_SetLong(&eTemp, metrics.horiAdvance);
     FLOATOBJ_Mul(&eTemp, &widthRatio);
     FLOATOBJ_AddLong(&eTemp, 63);
     adv = FLOATOBJ_GetLong(&eTemp) >> 6;
@@ -4655,9 +4717,8 @@ ftGdiGetGlyphOutline(
     if (!needsTransform)
     {
         DPRINT("No Need to be Transformed!\n");
-        top = (ft_face->glyph->metrics.horiBearingY + 63) & -64;
-        bottom = (ft_face->glyph->metrics.horiBearingY -
-                  ft_face->glyph->metrics.height) & -64;
+        top = (metrics.horiBearingY + 63) & -64;
+        bottom = (metrics.horiBearingY - metrics.height) & -64;
         gm.gmCellIncX = adv;
         gm.gmCellIncY = 0;
     }
@@ -4669,10 +4730,8 @@ ftGdiGetGlyphOutline(
         {
             for (yc = 0; yc < 2; yc++)
             {
-                vec.x = (ft_face->glyph->metrics.horiBearingX +
-                         xc * ft_face->glyph->metrics.width);
-                vec.y = ft_face->glyph->metrics.horiBearingY -
-                        yc * ft_face->glyph->metrics.height;
+                vec.x = metrics.horiBearingX + xc * metrics.width;
+                vec.y = metrics.horiBearingY - yc * metrics.height;
                 DPRINT("Vec %ld,%ld\n", vec.x, vec.y);
                 FT_Vector_Transform(&vec, &transMat);
                 if (xc == 0 && yc == 0)
@@ -4695,7 +4754,7 @@ ftGdiGetGlyphOutline(
         top = (top + 63) & -64;
 
         DPRINT("Transformed box: (%d,%d - %d,%d)\n", left, top, right, bottom);
-        vec.x = ft_face->glyph->metrics.horiAdvance;
+        vec.x = metrics.horiAdvance;
         vec.y = 0;
         FT_Vector_Transform(&vec, &transMat);
         gm.gmCellIncX = (vec.x+63) >> 6;
@@ -4716,8 +4775,11 @@ ftGdiGetGlyphOutline(
     if (iFormat == GGO_METRICS)
     {
         DPRINT("GGO_METRICS Exit!\n");
+        width = gm.gmBlackBoxX;
+        height = gm.gmBlackBoxY;
+        pitch = ((width + 31) >> 5) << 2;
         *pgm = gm;
-        return 1; /* FIXME */
+        return pitch * height;
     }
 
     if (ft_face->glyph->format != ft_glyph_format_outline && iFormat != GGO_BITMAP)
