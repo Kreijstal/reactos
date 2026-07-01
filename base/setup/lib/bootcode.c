@@ -50,10 +50,27 @@ ReadBootCodeByHandle(
                         Length,
                         &FileOffset,
                         NULL);
-    if (!NT_SUCCESS(Status))
+    /*
+     * The source bootcode file can be shorter than the requested Length: e.g.
+     * ntfs.bin spans only ~2 sectors, while NTFS_BOOTSECTOR_SIZE covers the
+     * whole 16-sector $Boot region.  Reading past the end of such a file yields
+     * STATUS_END_OF_FILE, which is not a failure as long as some bytes were
+     * actually read -- the buffer was zero-initialized, so the unread tail is
+     * simply zeros.  Previously this caused InstallNtfsBootCode() to bail out
+     * before writing the VBR, leaving a bootstrap-less boot sector that hangs
+     * the machine (the failure depended on the on-medium layout past the file,
+     * which is why it was intermittent).  Only a read that produced no data at
+     * all is a real error.
+     */
+    if (!NT_SUCCESS(Status) && Status != STATUS_END_OF_FILE)
     {
         RtlFreeHeap(ProcessHeap, 0, BootCode);
         return Status;
+    }
+    if (IoStatusBlock.Information == 0)
+    {
+        RtlFreeHeap(ProcessHeap, 0, BootCode);
+        return STATUS_END_OF_FILE;
     }
 
     /* Update the bootcode information */
