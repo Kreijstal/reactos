@@ -109,6 +109,19 @@ static inline void dup_unicode_string( const UNICODE_STRING *src, WCHAR **dst, U
     *dst += (src->MaximumLength + 1) / sizeof(WCHAR);
 }
 
+/* Case-insensitive test that an environment entry "NAME=VALUE" has the given NAME. */
+static inline BOOLEAN wow64_env_name_is( const WCHAR *entry, const WCHAR *name )
+{
+    while (*name)
+    {
+        WCHAR a = *entry++, b = *name++;
+        if (a >= L'a' && a <= L'z') a = (WCHAR)(a - (L'a' - L'A'));
+        if (b >= L'a' && b <= L'z') b = (WCHAR)(b - (L'a' - L'A'));
+        if (a != b) return FALSE;
+    }
+    return *entry == L'=';
+}
+
 static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
 {
     RTL_USER_PROCESS_PARAMETERS32 *wow64_params = NULL;
@@ -123,8 +136,7 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
                    + params->WindowTitle.MaximumLength
                    + params->DesktopInfo.MaximumLength
                    + params->ShellInfo.MaximumLength
-                   + ((params->RuntimeData.MaximumLength + 1) & ~1))
-                   + wcslen(params->Environment) * sizeof(*params->Environment);
+                   + ((params->RuntimeData.MaximumLength + 1) & ~1));
 
     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&wow64_params, 32, &size,
                                       MEM_COMMIT, PAGE_READWRITE );
@@ -163,9 +175,79 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
             &params->ImagePathName, 
             &params->CommandLine);
 
-    wow64_params->Environment = PtrToUlong( params->Environment );
-    //DPRINT1("Original enviroment %ls\n", params->Environment);
-    //memcpy(dst, params->Environment, wcslen(params->Environment) * sizeof(*params->Environment));
+    /*
+     * Build a private, low-4GB copy of the environment block for the 32-bit
+     * process.  The native (64-bit) block may live above 4GB (PtrToUlong would
+     * truncate it) and must not be mutated for the 64-bit side.  While copying,
+     * apply the WoW64 architecture overrides so a 32-bit process sees
+     * PROCESSOR_ARCHITECTURE=x86 and PROCESSOR_ARCHITEW6432=AMD64, matching
+     * Windows.  wow64.dll only runs inside a WoW64 process, so native 64-bit
+     * processes never reach this and keep PROCESSOR_ARCHITECTURE=AMD64 with no
+     * PROCESSOR_ARCHITEW6432.
+     */
+    {
+        static const WCHAR ArchEntry[]   = L"PROCESSOR_ARCHITECTURE=x86";
+        static const WCHAR Arch64Entry[] = L"PROCESSOR_ARCHITEW6432=AMD64";
+        WCHAR *envSrc = params->Environment;
+        WCHAR *envDst = NULL;
+        WCHAR *out;
+        SIZE_T srcChars = 1, envSize;
+        BOOLEAN archDone = FALSE;
+
+        if (envSrc)
+        {
+            WCHAR *p = envSrc;
+            while (*p) p += wcslen( p ) + 1;
+            srcChars = (SIZE_T)(p - envSrc) + 1;   /* incl. final terminating NUL */
+        }
+
+        /* Room for the source plus our two (possibly added) arch entries. */
+        envSize = (srcChars
+                   + sizeof(ArchEntry) / sizeof(WCHAR)
+                   + sizeof(Arch64Entry) / sizeof(WCHAR)
+                   + 1) * sizeof(WCHAR);
+        status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&envDst, 32, &envSize,
+                                          MEM_COMMIT, PAGE_READWRITE );
+        ASSERT( !status );
+
+        out = envDst;
+        if (envSrc)
+        {
+            WCHAR *p = envSrc;
+            while (*p)
+            {
+                SIZE_T len = wcslen( p );
+                if (wow64_env_name_is( p, L"PROCESSOR_ARCHITECTURE" ))
+                {
+                    memcpy( out, ArchEntry, sizeof(ArchEntry) );        /* incl. NUL */
+                    out += sizeof(ArchEntry) / sizeof(WCHAR);
+                    archDone = TRUE;
+                }
+                else if (wow64_env_name_is( p, L"PROCESSOR_ARCHITEW6432" ))
+                {
+                    /* Drop any inherited value; re-added canonically below. */
+                }
+                else
+                {
+                    memcpy( out, p, (len + 1) * sizeof(WCHAR) );
+                    out += len + 1;
+                }
+                p += len + 1;
+            }
+        }
+        if (!archDone)
+        {
+            memcpy( out, ArchEntry, sizeof(ArchEntry) );
+            out += sizeof(ArchEntry) / sizeof(WCHAR);
+        }
+        memcpy( out, Arch64Entry, sizeof(Arch64Entry) );
+        out += sizeof(Arch64Entry) / sizeof(WCHAR);
+        *out++ = UNICODE_NULL;                     /* final block terminator */
+
+        wow64_params->Environment = PtrToUlong( envDst );
+        wow64_params->EnvironmentSize = (ULONG)((out - envDst) * sizeof(WCHAR));
+    }
+
     return wow64_params;
 }
 
