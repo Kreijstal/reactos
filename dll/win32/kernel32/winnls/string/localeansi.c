@@ -23,7 +23,14 @@
 
 #include <k32.h>
 
-NTSYSAPI NTSTATUS WINAPI RtlNormalizeString(ULONG, const WCHAR *, INT, WCHAR *, INT *);
+typedef NTSTATUS (WINAPI *PRTL_NORMALIZE_STRING)(ULONG, const WCHAR *, INT, WCHAR *, INT *);
+
+static PRTL_NORMALIZE_STRING get_rtl_normalize_string(void)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+
+    return ntdll ? (PRTL_NORMALIZE_STRING)GetProcAddress(ntdll, "RtlNormalizeString") : NULL;
+}
 
 static void FoldStringA_MapCompositeMarks(WCHAR *String, INT Length)
 {
@@ -92,8 +99,15 @@ INT WINAPI FoldStringA(DWORD dwFlags, LPCSTR src, INT srclen,
     {
         NTSTATUS status;
         INT normalized_len = 0;
+        PRTL_NORMALIZE_STRING pRtlNormalizeString = get_rtl_normalize_string();
 
-        status = RtlNormalizeString(NormalizationD, srcW, srclenW, NULL, &normalized_len);
+        if (!pRtlNormalizeString)
+        {
+            SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            goto FoldStringA_exit;
+        }
+
+        status = pRtlNormalizeString(NormalizationD, srcW, srclenW, NULL, &normalized_len);
         if (status < 0)
         {
             ret = 0;
@@ -109,7 +123,7 @@ INT WINAPI FoldStringA(DWORD dwFlags, LPCSTR src, INT srclen,
                 goto FoldStringA_exit;
             }
 
-            status = RtlNormalizeString(NormalizationD, srcW, srclenW, dstW, &normalized_len);
+            status = pRtlNormalizeString(NormalizationD, srcW, srclenW, dstW, &normalized_len);
             if (status != STATUS_BUFFER_TOO_SMALL)
                 break;
 
