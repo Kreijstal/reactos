@@ -35,6 +35,7 @@ typedef struct _SURFACE
 
   /* reactos specific */
     DWORD biClrImportant;
+    DWORD biCompression;
 } SURFACE, *PSURFACE;
 
 /* flags field */
@@ -143,4 +144,3 @@ SURFACE_vSetPalette(
         GDIOBJ_vReferenceObjectByPointer((POBJ)ppal);
     *(PVOID*)&psurf->ppal = ppal;
 }
-

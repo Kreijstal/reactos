@@ -464,6 +464,12 @@ ExtTextOutA(
     UNICODE_STRING StringU;
     BOOL ret;
 
+    if (cch > 0xFFFF)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     if (fuOptions & ETO_GLYPH_INDEX)
         return ExtTextOutW(hdc, x, y, fuOptions, lprc, (LPCWSTR)lpString, cch, lpDx);
 

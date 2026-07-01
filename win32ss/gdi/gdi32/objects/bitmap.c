@@ -483,6 +483,11 @@ CreateDIBitmap(
     /* Convert the BITMAPINFO if it is a COREINFO */
     pbmiConverted = ConvertBitmapInfo(Data, ColorUse, &cjInfoSize, FALSE);
 
+    if ((ColorUse != DIB_RGB_COLORS) && (hDC == (HDC)-1))
+    {
+        goto Exit;
+    }
+
     /* Check for CBM_CREATDIB */
     if (Init & CBM_CREATDIB)
     {
@@ -517,8 +522,24 @@ CreateDIBitmap(
             goto Exit;
         }
 
+        if ((ColorUse == DIB_PAL_COLORS) && !hDC)
+        {
+            goto Exit;
+        }
+
+        if (pbmiConverted->bmiHeader.biCompression != BI_RGB &&
+            pbmiConverted->bmiHeader.biCompression != BI_BITFIELDS)
+        {
+            goto Exit;
+        }
+
+        if ((ColorUse == DIB_RGB_COLORS) && (hDC == (HDC)-1))
+        {
+            hDC = NULL;
+        }
+
         /* Use the header from the data */
-        Header = &Data->bmiHeader;
+        Header = &pbmiConverted->bmiHeader;
     }
     else
     {
@@ -535,6 +556,10 @@ CreateDIBitmap(
             {
                 Init &= ~CBM_INIT;
             }
+        }
+        else
+        {
+            Bits = NULL;
         }
     }
 
@@ -594,6 +619,11 @@ CreateDIBitmap(
 
     DPRINT("pBMI %p, Size bpp %u, dibsize %d, Conv %u, BSS %u\n",
            Data, BitsPerPixel, DibSize, cjInfoSize, cjBmpScanSize);
+
+    if ((Init & CBM_INIT) && Bits && IsBadReadPtr(Bits, cjBmpScanSize))
+    {
+        goto Exit;
+    }
 
     if (!Width || !Height)
     {
@@ -1168,5 +1198,3 @@ ClearBitmapAttributes(HBITMAP hbm, DWORD dwFlags)
     }
     return NtGdiClearBitmapAttributes( hbm, dwFlags );;
 }
-
-
