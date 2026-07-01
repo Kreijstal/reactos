@@ -189,7 +189,12 @@ smb2_which_events(struct smb2_context *smb2)
         int events = SMB2_VALID_SOCKET(smb2->fd) ? POLLIN : POLLOUT;
 
         if (smb2->outqueue != NULL &&
-            smb2_get_credit_charge(smb2, smb2->outqueue) <= smb2->credits) {
+            (smb2_get_credit_charge(smb2, smb2->outqueue) <= smb2->credits ||
+             (!smb2_is_server(smb2) && smb2->waitqueue == NULL))) {
+                /* Arm POLLOUT either when we hold enough credits, or when we
+                 * have a request to send but nothing is in flight to ever
+                 * replenish credits (a credit-accounting under-count) - see
+                 * smb2_write_to_socket() for the matching recovery. */
                 events |= POLLOUT;
         }
 
@@ -241,7 +246,21 @@ smb2_write_to_socket(struct smb2_context *smb2)
 
                 credit_charge = smb2_get_credit_charge(smb2, pdu);
                 if (credit_charge > (uint32_t)smb2->credits) {
-                        return 0;
+                        /* We have a request to send but not enough credits.  If
+                         * anything is still in flight, wait for its reply to
+                         * grant more credits (normal back-pressure).  But if the
+                         * waitqueue is empty, nothing will ever replenish us: our
+                         * client-side credit counter has under-counted (e.g. an
+                         * abandoned/timed-out request whose charge was never
+                         * returned).  The server keeps a client at >= 1 credit
+                         * while it has outstanding work, so it is safe to restore
+                         * just enough to send one request and break what would
+                         * otherwise be a permanent credit-starvation stall. */
+                        if (!smb2_is_server(smb2) && smb2->waitqueue == NULL) {
+                                smb2->credits = (uint16_t)credit_charge;
+                        } else {
+                                return 0;
+                        }
                 }
 
                 if (pdu->seal) {
