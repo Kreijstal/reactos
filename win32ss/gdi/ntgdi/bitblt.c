@@ -9,6 +9,8 @@
 #include <win32k.h>
 DBG_DEFAULT_CHANNEL(GdiBlt);
 
+#define NTGDI_ROP4_PRESERVE_ORIENTATION 0x00008000
+
 BOOL APIENTRY
 NtGdiAlphaBlend(
     HDC hDCDest,
@@ -186,6 +188,10 @@ NtGdiBitBlt(
                               crBackColor);
     }
 
+    if (dwRop & NOMIRRORBITMAP)
+    {
+        fl |= NTGDI_ROP4_PRESERVE_ORIENTATION;
+    }
     dwRop = dwRop & ~(NOMIRRORBITMAP|CAPTUREBLT);
 
     /* Forward to NtGdiMaskBlt */
@@ -201,7 +207,7 @@ NtGdiBitBlt(
                         NULL,
                         0,
                         0,
-                        MAKEROP4(dwRop, dwRop),
+                        MAKEROP4(dwRop, dwRop) | (fl & NTGDI_ROP4_PRESERVE_ORIENTATION),
                         crBackColor);
 }
 
@@ -346,7 +352,13 @@ NtGdiMaskBlt(
     XLATEOBJ *XlateObj = NULL;
     BOOL UsesSource, UsesPattern;
     ROP4 rop4;
+    BOOL PreserveOrientation;
+    BOOL KeepDestOrientation = FALSE;
+    LONG SourcePointXAdjust = 0;
+    LONG DestWidth, DestHeight;
 
+    PreserveOrientation = !!(dwRop4 & NTGDI_ROP4_PRESERVE_ORIENTATION);
+    dwRop4 &= ~NTGDI_ROP4_PRESERVE_ORIENTATION;
     rop4 = WIN32_ROP4_TO_ENG_ROP4(dwRop4);
 
     if (!hdcDest)
@@ -441,6 +453,17 @@ NtGdiMaskBlt(
     DestRect.bottom = nYDest + nHeight;
     IntLPtoDP(DCDest, (LPPOINT)&DestRect, 2);
 
+    if ((nWidth > 0) &&
+        (DestRect.left > DestRect.right) &&
+        !PreserveOrientation &&
+        !(pdcattr->dwLayout & LAYOUT_BITMAPORIENTATIONPRESERVED))
+    {
+        DestRect.left++;
+        DestRect.right++;
+        SourcePointXAdjust = DestRect.left - DestRect.right;
+        KeepDestOrientation = TRUE;
+    }
+
     DestRect.left   += DCDest->ptlDCOrig.x;
     DestRect.top    += DCDest->ptlDCOrig.y;
     DestRect.right  += DCDest->ptlDCOrig.x;
@@ -456,15 +479,27 @@ NtGdiMaskBlt(
 
     if (UsesSource)
     {
+        POINTL SourcePointForPrepare;
+
         IntLPtoDP(DCSrc, (LPPOINT)&SourcePoint, 1);
 
         SourcePoint.x += DCSrc->ptlDCOrig.x;
         SourcePoint.y += DCSrc->ptlDCOrig.y;
+        SourcePointForPrepare = SourcePoint;
+        SourcePoint.x += SourcePointXAdjust;
+
+        DestWidth = DestRect.right - DestRect.left;
+        if (DestWidth < 0)
+            DestWidth = -DestWidth;
+        DestHeight = DestRect.bottom - DestRect.top;
+        if (DestHeight < 0)
+            DestHeight = -DestHeight;
+
         /* Calculate Source Rect */
-        SourceRect.left = SourcePoint.x;
-        SourceRect.top = SourcePoint.y;
-        SourceRect.right = SourcePoint.x + DestRect.right - DestRect.left;
-        SourceRect.bottom = SourcePoint.y + DestRect.bottom - DestRect.top ;
+        SourceRect.left = SourcePointForPrepare.x;
+        SourceRect.top = SourcePointForPrepare.y;
+        SourceRect.right = SourceRect.left + DestWidth;
+        SourceRect.bottom = SourceRect.top + DestHeight;
     }
     else
     {
@@ -517,7 +552,10 @@ NtGdiMaskBlt(
     }
 
     /* Make Well Ordered so that we don't flip either way */
-    RECTL_vMakeWellOrdered(&DestRect);
+    if (!KeepDestOrientation)
+    {
+        RECTL_vMakeWellOrdered(&DestRect);
+    }
 
     /* Perform the bitblt operation */
     Status = IntEngBitBlt(&BitmapDest->SurfObj,
@@ -826,6 +864,25 @@ NtGdiStretchBlt(
     DWORD dwRop3,
     IN DWORD dwBackColor)
 {
+    if ((WidthDest > 0) &&
+        (HeightDest > 0) &&
+        (WidthDest == WidthSrc) &&
+        (HeightDest == HeightSrc) &&
+        !(dwRop3 & CAPTUREBLT))
+    {
+        return NtGdiBitBlt(hDCDest,
+                           XOriginDest,
+                           YOriginDest,
+                           WidthDest,
+                           HeightDest,
+                           hDCSrc,
+                           XOriginSrc,
+                           YOriginSrc,
+                           dwRop3,
+                           dwBackColor,
+                           0);
+    }
+
     dwRop3 = dwRop3 & ~(NOMIRRORBITMAP|CAPTUREBLT);
 
     return GreStretchBltMask(
@@ -903,7 +960,9 @@ IntPatBlt(
 
     if (pdc->fs & (DC_ACCUM_APP|DC_ACCUM_WMGR))
     {
-       IntUpdateBoundsRect(pdc, &DestRect);
+       RECTL BoundsRect = DestRect;
+       RECTL_vMakeWellOrdered(&BoundsRect);
+       IntUpdateBoundsRect(pdc, &BoundsRect);
     }
 
 #ifdef _USE_DIBLIB_
@@ -1625,4 +1684,3 @@ leave:
     /* Return the new RGB color or -1 on failure */
     return ulRGBColor;
 }
-

@@ -674,9 +674,7 @@ NtGdiGetDCObject(HDC hDC, INT ObjectType)
         }
 
         case GDI_OBJECT_TYPE_COLORSPACE:
-            DPRINT1("FIXME: NtGdiGetCurrentObject() ObjectType OBJ_COLORSPACE not supported yet!\n");
-            // SelObject = dc->dclevel.pColorSpace.BaseObject.hHmgr; ?
-            SelObject = NULL;
+            SelObject = pdcattr->hColorSpace ? pdcattr->hColorSpace : StockObjects[20];
             break;
 
         default:
