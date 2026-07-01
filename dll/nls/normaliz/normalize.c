@@ -32,22 +32,27 @@
 #define NDEBUG
 #include <debug.h>
 
-NTSTATUS
-NTAPI
-RtlNormalizeString(
-    _In_ ULONG NormForm,
-    _In_ PCWSTR SourceString,
-    _In_ LONG SourceStringLength,
-    _Out_writes_to_(*DestinationStringLength, *DestinationStringLength) PWSTR DestinationString,
-    _Inout_ PLONG DestinationStringLength);
+typedef NTSTATUS (NTAPI *PRTL_NORMALIZE_STRING)(
+    ULONG,
+    PCWSTR,
+    LONG,
+    PWSTR,
+    PLONG);
 
-NTSTATUS
-NTAPI
-RtlIsNormalizedString(
-    _In_ ULONG NormForm,
-    _In_ PCWSTR SourceString,
-    _In_ LONG SourceStringLength,
-    _Out_ PBOOLEAN Normalized);
+typedef NTSTATUS (NTAPI *PRTL_IS_NORMALIZED_STRING)(
+    ULONG,
+    PCWSTR,
+    LONG,
+    PBOOLEAN);
+
+static PVOID
+GetNtdllProc(
+    _In_ PCSTR Name)
+{
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+
+    return Ntdll ? GetProcAddress(Ntdll, Name) : NULL;
+}
 
 /* Taken from Wine kernel32/locale.c */
 
@@ -59,8 +64,16 @@ INT WINAPI NormalizeString(NORM_FORM NormForm, LPCWSTR lpSrcString, INT cwSrcLen
 {
     LONG DstLength = cwDstLength;
     NTSTATUS Status;
+    PRTL_NORMALIZE_STRING pRtlNormalizeString;
 
-    Status = RtlNormalizeString(NormForm, lpSrcString, cwSrcLength, lpDstString, &DstLength);
+    pRtlNormalizeString = (PRTL_NORMALIZE_STRING)GetNtdllProc("RtlNormalizeString");
+    if (!pRtlNormalizeString)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
+
+    Status = pRtlNormalizeString(NormForm, lpSrcString, cwSrcLength, lpDstString, &DstLength);
     if (NT_SUCCESS(Status))
     {
         SetLastError(ERROR_SUCCESS);
@@ -95,8 +108,16 @@ BOOL WINAPI IsNormalizedString(NORM_FORM NormForm, LPCWSTR lpString, INT cwLengt
 {
     BOOLEAN Normalized;
     NTSTATUS Status;
+    PRTL_IS_NORMALIZED_STRING pRtlIsNormalizedString;
 
-    Status = RtlIsNormalizedString(NormForm, lpString, cwLength, &Normalized);
+    pRtlIsNormalizedString = (PRTL_IS_NORMALIZED_STRING)GetNtdllProc("RtlIsNormalizedString");
+    if (!pRtlIsNormalizedString)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return FALSE;
+    }
+
+    Status = pRtlIsNormalizedString(NormForm, lpString, cwLength, &Normalized);
     if (NT_SUCCESS(Status))
     {
         SetLastError(ERROR_SUCCESS);
