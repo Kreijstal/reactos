@@ -23,3 +23,23 @@
 
 /* Internal Kernel32 Header */
 #include "../include/kernel32.h"
+
+typedef NTSTATUS (NTAPI *K32_RTL_LCID_TO_LOCALE_NAME)(
+    LCID,
+    PUNICODE_STRING,
+    ULONG,
+    BOOLEAN);
+
+typedef NTSTATUS (NTAPI *K32_RTL_LOCALE_NAME_TO_LCID)(
+    PCWSTR,
+    PLCID,
+    ULONG);
+
+FORCEINLINE PVOID
+K32VistaGetNtdllProc(
+    _In_ PCSTR Name)
+{
+    HMODULE Ntdll = GetModuleHandleW(L"ntdll.dll");
+
+    return Ntdll ? GetProcAddress(Ntdll, Name) : NULL;
+}

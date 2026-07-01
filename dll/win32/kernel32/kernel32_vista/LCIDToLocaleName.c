@@ -20,6 +20,7 @@ LCIDToLocaleName(
     UNICODE_STRING LocaleNameString;
     DWORD RtlFlags = 0;
     NTSTATUS Status;
+    K32_RTL_LCID_TO_LOCALE_NAME pRtlLcidToLocaleName;
 
     if (cchName < 0)
     {
@@ -72,8 +73,14 @@ LCIDToLocaleName(
         LocaleNameString.MaximumLength = sizeof(Buffer);
     }
 
-    /* Call the RTL function */
-    Status = RtlLcidToLocaleName(Locale, &LocaleNameString, RtlFlags, FALSE);
+    pRtlLcidToLocaleName = (K32_RTL_LCID_TO_LOCALE_NAME)K32VistaGetNtdllProc("RtlLcidToLocaleName");
+    if (!pRtlLcidToLocaleName)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
+
+    Status = pRtlLcidToLocaleName(Locale, &LocaleNameString, RtlFlags, FALSE);
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));

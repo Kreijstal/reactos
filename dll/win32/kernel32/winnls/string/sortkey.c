@@ -746,7 +746,7 @@ static int append_weights(const struct sortguid *sortid, DWORD flags,
                 break;
             if (!(flags & SORT_STRINGSORT))
             {
-                short len = -((s->key_primary.len + s->primary_pos) / 2) - 1;
+                short len = (short)(-((INT)(s->key_primary.len + s->primary_pos) / 2) - 1);
 
                 if (flags & LINGUISTIC_IGNORECASE)
                     weights._case = 2;
