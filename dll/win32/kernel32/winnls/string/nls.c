@@ -41,6 +41,9 @@ static const unsigned char UTF8Mask[6] = {0x7f, 0x1f, 0x0f, 0x07, 0x03, 0x01};
 static const unsigned long UTF8LBound[] =
     {0, 0x80, 0x800, 0x10000, 0x200000, 0x2000000, 0xFFFFFFFF};
 
+#define NLS_VALID_MB_FLAGS (MB_PRECOMPOSED | MB_COMPOSITE | MB_USEGLYPHCHARS | MB_ERR_INVALID_CHARS)
+#define NLS_VALID_WC_FLAGS (WC_COMPOSITECHECK | WC_DISCARDNS | WC_SEPCHARS | WC_DEFAULTCHAR | WC_NO_BEST_FIT_CHARS)
+
 /* FIXME: Change to HASH table or linear array. */
 static LIST_ENTRY CodePageListHead;
 static CODEPAGE_ENTRY AnsiCodePage;
@@ -701,6 +704,7 @@ IntMultiByteToWideCharCP(UINT CodePage,
     LPCSTR TempString;
     INT TempLength;
     USHORT WideChar;
+    DWORD LastError = GetLastError();
 
     /* Get code page table. */
     CodePageEntry = IntGetCodePageEntry(CodePage);
@@ -710,7 +714,14 @@ IntMultiByteToWideCharCP(UINT CodePage,
         return 0;
     }
 
+    SetLastError(LastError);
     CodePageTable = &CodePageEntry->CodePageTable;
+
+    if (Flags & ~NLS_VALID_MB_FLAGS)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
 
     /* If MB_USEGLYPHCHARS flag present and glyph table present */
     if ((Flags & MB_USEGLYPHCHARS) && CodePageTable->MultiByteTable[256])
@@ -789,7 +800,7 @@ IntMultiByteToWideCharCP(UINT CodePage,
                 if (!DBCSOffset)
                     continue;
 
-                if (MultiByteString < MbsEnd)
+                if (MultiByteString < MbsEnd && *MultiByteString != 0)
                     MultiByteString++;
             }
 
@@ -1204,12 +1215,14 @@ IntIsValidDBCSMapping(PCPTABLEINFO CodePageTable, DWORD Flags, WCHAR wch, USHORT
         return FALSE;
 
     /* If the WC_NO_BEST_FIT_CHARS flag has been specified, the characters need to match exactly. */
-    if (Flags & WC_NO_BEST_FIT_CHARS)
+    if (Flags & (WC_COMPOSITECHECK | WC_NO_BEST_FIT_CHARS))
     {
         if(ch & 0xff00)
         {
             USHORT uOffset = CodePageTable->DBCSOffsets[ch >> 8];
-            /* if (!uOffset) return (CodePageTable->MultiByteTable[ch] == wch); */
+            if (!uOffset)
+                return FALSE;
+
             return (CodePageTable->DBCSOffsets[uOffset + (ch & 0xff)] == wch);
         }
 
@@ -1243,6 +1256,7 @@ IntWideCharToMultiByteCP(UINT CodePage,
     PCODEPAGE_ENTRY CodePageEntry;
     PCPTABLEINFO CodePageTable;
     INT TempLength;
+    DWORD LastError = GetLastError();
 
     /* Get code page table. */
     CodePageEntry = IntGetCodePageEntry(CodePage);
@@ -1252,7 +1266,14 @@ IntWideCharToMultiByteCP(UINT CodePage,
         return 0;
     }
 
+    SetLastError(LastError);
     CodePageTable = &CodePageEntry->CodePageTable;
+
+    if (Flags & ~NLS_VALID_WC_FLAGS)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
 
 
     /* Different handling for DBCS code pages. */
@@ -1273,7 +1294,7 @@ IntWideCharToMultiByteCP(UINT CodePage,
 
             /* Use the CodePage's TransDefaultChar if none was given. Don't modify the DefaultChar pointer here. */
             if (DefaultChar)
-                DefChar = DefaultChar[1] ? ((DefaultChar[0] << 8) | DefaultChar[1]) : DefaultChar[0];
+                DefChar = ((UCHAR)DefaultChar[1] != 0) ? (((UCHAR)DefaultChar[0] << 8) | (UCHAR)DefaultChar[1]) : (UCHAR)DefaultChar[0];
             else
                 DefChar = CodePageTable->TransDefaultChar;
 
