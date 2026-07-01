@@ -566,7 +566,7 @@ LDEVOBJ_bBuildDevmodeList(
     _Inout_ PGRAPHICS_DEVICE pGraphicsDevice)
 {
     PWSTR pwsz;
-    PDEVMODEINFO pdminfo;
+    PDEVMODEINFO pdminfo, pdminfoTail = NULL;
     PDEVMODEW pdm, pdmEnd;
     ULONG i, cModes = 0;
     ULONG cbSize, cbFull;
@@ -606,9 +606,16 @@ LDEVOBJ_bBuildDevmodeList(
         RtlCopyMemory(pdminfo->adevmode, pdm, cbSize);
         ExFreePoolWithTag(pdm, GDITAG_DEVMODE);
 
-        /* Attach the mode info to the device */
-        pdminfo->pdmiNext = pGraphicsDevice->pdevmodeInfo;
-        pGraphicsDevice->pdevmodeInfo = pdminfo;
+        /* Append the mode info so the device's mode list preserves the
+         * InstalledDisplayDrivers order (first driver = preferred). Prepending
+         * reverses it, making the LAST driver win — which would let the framebuf
+         * fallback shadow the preferred cdd driver. */
+        pdminfo->pdmiNext = NULL;
+        if (pdminfoTail)
+            pdminfoTail->pdmiNext = pdminfo;
+        else
+            pGraphicsDevice->pdevmodeInfo = pdminfo;
+        pdminfoTail = pdminfo;
 
         /* Loop all DEVMODEs */
         pdmEnd = (DEVMODEW*)((PCHAR)pdminfo->adevmode + pdminfo->cbdevmode);
