@@ -184,8 +184,12 @@ x86BiosFreeBuffer(
     _In_ USHORT Segment,
     _In_ USHORT Offset)
 {
+    USHORT ExpectedSegment;
+
+    ExpectedSegment = x86BiosBufferPhysical / 16;
+
     /* Check if the system is initialized and if the address matches */
-    if (!x86BiosIsInitialized || (Segment != 0x2000) || (Offset != 0))
+    if (!x86BiosIsInitialized || (Segment != ExpectedSegment) || (Offset != 0))
     {
         /* Something was wrong, fail */
         return STATUS_INVALID_PARAMETER;
@@ -266,7 +270,7 @@ x86MemRead(
     ULONG Size)
 {
     /* Validate the address range */
-    if (((ULONG64)Address + Size) < 0x100000)
+    if (((ULONG64)Address + Size) <= 0x100000)
     {
         RtlCopyMemory(Buffer, x86BiosMemoryMapping + Address, Size);
     }
@@ -287,7 +291,7 @@ x86MemWrite(
     ULONG Size)
 {
     /* Validate the address range */
-    if (((ULONG64)Address + Size) < 0x100000)
+    if (((ULONG64)Address + Size) <= 0x100000)
     {
         RtlCopyMemory(x86BiosMemoryMapping + Address, Buffer, Size);
     }
