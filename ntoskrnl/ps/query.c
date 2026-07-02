@@ -1396,6 +1396,19 @@ NtQueryInformationProcess(
             Status = STATUS_NOT_IMPLEMENTED;
             break;
 
+        case ProcessIoPriority:
+        case ProcessTlsInformation:
+        case ProcessCycleTime:
+        case ProcessPagePriority:
+        case ProcessInstrumentationCallback:
+        case ProcessThreadStackAllocation:
+        case ProcessWorkingSetWatchEx:
+        case ProcessImageFileMapping:
+        case ProcessAffinityUpdateMode:
+        case ProcessMemoryAllocationMode:
+            Status = STATUS_NOT_IMPLEMENTED;
+            break;
+
         case ProcessPooledUsageAndLimits:
             DPRINT1("Pool limits not implemented: %lu\n", ProcessInformationClass);
             Status = STATUS_NOT_IMPLEMENTED;
@@ -2308,6 +2321,19 @@ NtSetInformationProcess(
 
         case ProcessHandleTracing:
             DPRINT1("Handle tracing not implemented\n");
+            Status = STATUS_NOT_IMPLEMENTED;
+            break;
+
+        case ProcessIoPriority:
+        case ProcessTlsInformation:
+        case ProcessCycleTime:
+        case ProcessPagePriority:
+        case ProcessInstrumentationCallback:
+        case ProcessThreadStackAllocation:
+        case ProcessWorkingSetWatchEx:
+        case ProcessImageFileMapping:
+        case ProcessAffinityUpdateMode:
+        case ProcessMemoryAllocationMode:
             Status = STATUS_NOT_IMPLEMENTED;
             break;
         

@@ -9,6 +9,31 @@
 
 #include "icif.h"
 
+typedef struct _PS_PROCESS_CYCLE_TIME_INFORMATION
+{
+    ULONGLONG AccumulatedCycles;
+    ULONGLONG CurrentCycleCount;
+} PS_PROCESS_CYCLE_TIME_INFORMATION, *PPS_PROCESS_CYCLE_TIME_INFORMATION;
+
+typedef struct _PS_PAGE_PRIORITY_INFORMATION
+{
+    ULONG PagePriority;
+} PS_PAGE_PRIORITY_INFORMATION, *PPS_PAGE_PRIORITY_INFORMATION;
+
+typedef struct _PS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION
+{
+    ULONG Version;
+    ULONG Reserved;
+    PVOID Callback;
+} PS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION, *PPS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION;
+
+typedef struct _PS_PROCESS_STACK_ALLOCATION_INFORMATION
+{
+    SIZE_T ReserveSize;
+    SIZE_T ZeroBits;
+    PVOID StackBase;
+} PS_PROCESS_STACK_ALLOCATION_INFORMATION, *PPS_PROCESS_STACK_ALLOCATION_INFORMATION;
+
 //
 // Process Information Classes
 //
@@ -294,7 +319,12 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     ),
 
     /* ProcessIoPriority */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ProcessExecuteFlags */
     IQS_SAME
@@ -305,7 +335,12 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     ),
 
     /* ProcessTlsInformation */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG_PTR,
+        ULONG_PTR,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ProcessCookie */
     IQS_SAME
@@ -324,19 +359,48 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     ),
 
     /* ProcessCycleTime */
-    IQS_NONE,
+    IQS_SAME
+    (
+        PS_PROCESS_CYCLE_TIME_INFORMATION,
+        ULONGLONG,
+        ICIF_QUERY
+    ),
 
     /* ProcessPagePriority */
-    IQS_NONE,
+    IQS_SAME
+    (
+        PS_PAGE_PRIORITY_INFORMATION,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ProcessInstrumentationCallback */
-    IQS_NONE,
+    IQS
+    (
+        PS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION,
+        ULONG_PTR,
+        PS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION,
+        ULONG_PTR,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ProcessThreadStackAllocation */
-    IQS_NONE,
+    IQS
+    (
+        PS_PROCESS_STACK_ALLOCATION_INFORMATION,
+        ULONG_PTR,
+        PS_PROCESS_STACK_ALLOCATION_INFORMATION,
+        ULONG_PTR,
+        ICIF_QUERY | ICIF_SET | ICIF_SET_SIZE_VARIABLE
+    ),
 
     /* ProcessWorkingSetWatchEx */
-    IQS_NONE,
+    IQS_SAME
+    (
+        PROCESS_WS_WATCH_INFORMATION,
+        ULONG_PTR,
+        ICIF_QUERY | ICIF_SET | ICIF_SET_SIZE_VARIABLE
+    ),
 
     /* ProcessImageFileNameWin32 */
     IQS_SAME
@@ -347,13 +411,28 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
     ),
 
     /* ProcessImageFileMapping */
-    IQS_NONE,
+    IQS_SAME
+    (
+        HANDLE,
+        ULONG_PTR,
+        ICIF_QUERY
+    ),
 
     /* ProcessAffinityUpdateMode */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 
     /* ProcessMemoryAllocationMode */
-    IQS_NONE,
+    IQS_SAME
+    (
+        ULONG,
+        ULONG,
+        ICIF_QUERY | ICIF_SET
+    ),
 };
 
 //
