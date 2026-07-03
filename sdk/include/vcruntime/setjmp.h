@@ -191,9 +191,18 @@ typedef struct __JUMP_BUFFER {
 
 #ifdef USE_MINGW_SETJMP_TWO_ARGS
 #ifndef _INC_SETJMPEX
+#ifndef __has_builtin
+# define __has_builtin(x) 0
+#endif
 #if defined(__x86_64)
-# define mingw_getsp() \
-  ({ void* value; __asm__ __volatile__("movq %%rsp, %[value]" : [value] "=r" (value)); value; })
+# if __has_builtin(__builtin_sponentry)
+#  define mingw_getsp() __builtin_sponentry()
+# elif __has_builtin(__builtin_frame_address)
+#  define mingw_getsp() __builtin_frame_address(0)
+# else
+#  define mingw_getsp() \
+    ({ void* value; __asm__ __volatile__("movq %%rsp, %[value]" : [value] "=r" (value)); value; })
+# endif
 #elif defined(_X86_)
 # define mingw_getsp() \
   ({ void* value; __asm__ __volatile__("movl %%esp, %[value]" : [value] "=r" (value)); value; })
