@@ -37,7 +37,7 @@ xmm14_data:
 xmm15_data:
     .quad HEX(0F0F0F0F0F0F0F0F), HEX(1F1F1F1F1F1F1F1F)
 
-
+.code
 .code64
 
 PUBLIC get_sp
