@@ -643,6 +643,14 @@ Return Value:
         FatUnpinBcb( IrpContext, Bcb );
     } _SEH2_END;
 
+    if (Dcb->Specific.Dcb.FreeDirentBitmap.SizeOfBitMap >= 2) {
+
+        RtlSetBits( &Dcb->Specific.Dcb.FreeDirentBitmap, 0, 2 );
+    }
+
+    Dcb->Specific.Dcb.UnusedDirentVbo = 2 * sizeof(DIRENT);
+    Dcb->Specific.Dcb.DeletedDirentHint = Dcb->Specific.Dcb.UnusedDirentVbo;
+
     DebugTrace(-1, Dbg, "FatInitializeDirectoryDirent -> (VOID)\n", 0);
     return;
 }
