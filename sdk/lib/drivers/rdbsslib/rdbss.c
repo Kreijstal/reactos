@@ -1380,6 +1380,12 @@ RxCanonicalizeNameAndObtainNetRoot(
     else
     {
         PFCB Fcb;
+        PV_NET_ROOT VNetRoot;
+        USHORT ParentLength;
+        USHORT RelativeLength;
+        USHORT PrefixLength;
+        USHORT SeparatorLength;
+        PWCHAR Out;
 
         /* Make sure we have a valid FCB and a FOBX */
         Fcb = capFileObject->RelatedFileObject->FsContext;
@@ -1393,7 +1399,66 @@ RxCanonicalizeNameAndObtainNetRoot(
             return STATUS_INVALID_PARAMETER;
         }
 
-        UNIMPLEMENTED;
+        VNetRoot = Fcb->VNetRoot;
+        if (VNetRoot == NULL || NodeType(VNetRoot) != RDBSS_NTC_V_NETROOT)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        PrefixLength = VNetRoot->PrefixEntry.Prefix.Length;
+        ParentLength = Fcb->FcbTableEntry.Path.Length;
+        RelativeLength = FileName->Length;
+
+        SeparatorLength = 0;
+        if (RelativeLength != 0 &&
+            ParentLength != 0 &&
+            Fcb->FcbTableEntry.Path.Buffer[(ParentLength / sizeof(WCHAR)) - 1] != OBJ_NAME_PATH_SEPARATOR &&
+            FileName->Buffer[0] != OBJ_NAME_PATH_SEPARATOR)
+        {
+            SeparatorLength = sizeof(WCHAR);
+        }
+
+        if ((ULONG)PrefixLength + ParentLength + SeparatorLength + RelativeLength > MAXUSHORT)
+        {
+            return STATUS_NAME_TOO_LONG;
+        }
+
+        Status = RxAllocateCanonicalNameBuffer(RxContext,
+                                               &CanonicalName,
+                                               PrefixLength + ParentLength + SeparatorLength + RelativeLength);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+
+        Out = CanonicalName.Buffer;
+        if (PrefixLength != 0)
+        {
+            RtlCopyMemory(Out, VNetRoot->PrefixEntry.Prefix.Buffer, PrefixLength);
+            Out += PrefixLength / sizeof(WCHAR);
+            CanonicalName.Length += PrefixLength;
+        }
+
+        if (ParentLength != 0)
+        {
+            RtlCopyMemory(Out, Fcb->FcbTableEntry.Path.Buffer, ParentLength);
+            Out += ParentLength / sizeof(WCHAR);
+            CanonicalName.Length += ParentLength;
+        }
+
+        if (SeparatorLength != 0)
+        {
+            *Out++ = OBJ_NAME_PATH_SEPARATOR;
+            CanonicalName.Length += sizeof(WCHAR);
+        }
+
+        if (RelativeLength != 0)
+        {
+            RtlCopyMemory(Out, FileName->Buffer, RelativeLength);
+            CanonicalName.Length += RelativeLength;
+        }
+
+        NetRootType = Fcb->CachedNetRootType;
     }
 
     /* Get/Create the associated VNetRoot for opening */

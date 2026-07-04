@@ -37,6 +37,51 @@ VOID SetIndexEntryVCN(PINDEX_ENTRY_ATTRIBUTE IndexEntry, ULONGLONG VCN);
 ULONGLONG GetIndexEntryVCN(PINDEX_ENTRY_ATTRIBUTE IndexEntry);
 VOID DestroyBTreeKey(PB_TREE_KEY Key);
 
+static ULONG
+NtfsGetIndexBufferFirstEntryOffset(PDEVICE_EXTENSION DeviceExt,
+                                   ULONG IndexBufferSize)
+{
+    return ALIGN_UP_BY(FIELD_OFFSET(INDEX_BUFFER, Header) +
+                       sizeof(INDEX_HEADER_ATTRIBUTE) +
+                       (IndexBufferSize / DeviceExt->NtfsInfo.BytesPerSector + 1) * sizeof(USHORT),
+                       ATTR_RECORD_ALIGNMENT) -
+           FIELD_OFFSET(INDEX_BUFFER, Header);
+}
+
+static ULONG
+NtfsGetMaxIndexNodeEntryBytes(PDEVICE_EXTENSION DeviceExt,
+                              ULONG IndexBufferSize)
+{
+    return IndexBufferSize -
+           FIELD_OFFSET(INDEX_BUFFER, Header) -
+           NtfsGetIndexBufferFirstEntryOffset(DeviceExt, IndexBufferSize);
+}
+
+static ULONG
+GetSerializedSizeOfIndexEntries(PB_TREE_FILENAME_NODE Node)
+{
+    ULONG NodeSize = 0;
+    PB_TREE_KEY CurrentKey = Node->FirstKey;
+    ULONG i;
+
+    for (i = 0; i < Node->KeyCount; i++)
+    {
+        ASSERT(CurrentKey);
+        ASSERT(CurrentKey->IndexEntry->Length != 0);
+
+        NodeSize += CurrentKey->IndexEntry->Length;
+        if (CurrentKey->LesserChild &&
+            !BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        {
+            NodeSize += sizeof(ULONGLONG);
+        }
+
+        CurrentKey = CurrentKey->NextKey;
+    }
+
+    return NodeSize;
+}
+
 // TEMP FUNCTION for diagnostic purposes.
 // Prints VCN of every node in an index allocation
 VOID
@@ -1317,11 +1362,7 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
     ASSERT(Node->HasValidVCN);
     IndexBuffer->VCN = Node->VCN;
 
-    IndexBuffer->Header.FirstEntryOffset =
-        ALIGN_UP_BY(IndexBuffer->Ntfs.UsaOffset +
-                    IndexBuffer->Ntfs.UsaCount * sizeof(USHORT),
-                    ATTR_RECORD_ALIGNMENT) -
-        FIELD_OFFSET(INDEX_BUFFER, Header);
+    IndexBuffer->Header.FirstEntryOffset = NtfsGetIndexBufferFirstEntryOffset(DeviceExt, BufferSize);
     IndexBuffer->Header.AllocatedSize = BufferSize - FIELD_OFFSET(INDEX_BUFFER, Header);
 
     // Start summing the total size of this node's entries
@@ -1431,10 +1472,13 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
 * STATUS_INSUFFICIENT_RESOURCES if an allocation fails.
 */
 NTSTATUS
-DemoteBTreeRoot(PB_TREE Tree)
+DemoteBTreeRoot(PB_TREE Tree,
+                 ULONG IndexRecordSize,
+                 BOOLEAN CaseSensitive)
 {
     PB_TREE_FILENAME_NODE NewSubNode, NewIndexRoot;
     PB_TREE_KEY DummyKey;
+    ULONG MaxNodeSize;
 
     DPRINT("Collapsing Index Root into sub-node.\n");
 
@@ -1488,6 +1532,53 @@ DemoteBTreeRoot(PB_TREE Tree)
 
     // Make the new node the Tree's root node
     Tree->RootNode = NewIndexRoot;
+
+    MaxNodeSize = NtfsGetMaxIndexNodeEntryBytes(Tree->Vcb, IndexRecordSize);
+    while (TRUE)
+    {
+        PB_TREE_KEY CurrentKey = Tree->RootNode->FirstKey;
+        PB_TREE_KEY PreviousKey = NULL;
+        BOOLEAN SplitNode = FALSE;
+        ULONG i;
+
+        for (i = 0; i < Tree->RootNode->KeyCount; i++)
+        {
+            if (CurrentKey->LesserChild &&
+                GetSerializedSizeOfIndexEntries(CurrentKey->LesserChild) > MaxNodeSize)
+            {
+                PB_TREE_KEY MedianKey;
+                PB_TREE_FILENAME_NODE NewRightHandSibling;
+                NTSTATUS Status;
+
+                Status = SplitBTreeNode(Tree,
+                                        CurrentKey->LesserChild,
+                                        &MedianKey,
+                                        &NewRightHandSibling,
+                                        CaseSensitive,
+                                        IndexRecordSize);
+                if (!NT_SUCCESS(Status))
+                    return Status;
+
+                MedianKey->NextKey = CurrentKey;
+                if (PreviousKey)
+                    PreviousKey->NextKey = MedianKey;
+                else
+                    Tree->RootNode->FirstKey = MedianKey;
+
+                CurrentKey->LesserChild = NewRightHandSibling;
+                Tree->RootNode->KeyCount++;
+                Tree->RootNode->DiskNeedsUpdating = TRUE;
+                SplitNode = TRUE;
+                break;
+            }
+
+            PreviousKey = CurrentKey;
+            CurrentKey = CurrentKey->NextKey;
+        }
+
+        if (!SplitNode)
+            break;
+    }
 
 #ifndef NDEBUG
     DumpBTree(Tree);
@@ -2618,16 +2709,19 @@ NtfsInsertKey(PB_TREE Tree,
             if (Tree->CollationRule == COLLATION_FILE_NAME ||
                 Tree->CollationRule == COLLATION_UNICODE_STRING)
             {
-                DPRINT1("\t\tComparison == 0: %.*S\n", NewKey->IndexEntry->FileName.NameLength, NewKey->IndexEntry->FileName.Name);
-                DPRINT1("\t\tComparison == 0: %.*S\n", CurrentKey->IndexEntry->FileName.NameLength, CurrentKey->IndexEntry->FileName.Name);
+                DPRINT("Duplicate index key: %.*S\n",
+                       NewKey->IndexEntry->FileName.NameLength,
+                       NewKey->IndexEntry->FileName.Name);
             }
             else
             {
-                DPRINT1("\t\tComparison == 0 (collation 0x%lx, KeyLen %u)\n",
-                        Tree->CollationRule, NewKey->IndexEntry->KeyLength);
+                DPRINT("Duplicate index key (collation 0x%lx, KeyLen %u)\n",
+                       Tree->CollationRule,
+                       NewKey->IndexEntry->KeyLength);
             }
+            DestroyBTreeKey(NewKey);
+            return STATUS_OBJECT_NAME_COLLISION;
         }
-        ASSERT(Comparison != 0);
 
         // Is NewKey < CurrentKey?
         if (Comparison < 0)
@@ -2730,7 +2824,12 @@ NtfsInsertKey(PB_TREE Tree,
         {
             NTSTATUS Status;
 
-            Status = SplitBTreeNode(Tree, Node, MedianKey, NewRightHandSibling, CaseSensitive);
+            Status = SplitBTreeNode(Tree,
+                                    Node,
+                                    MedianKey,
+                                    NewRightHandSibling,
+                                    CaseSensitive,
+                                    IndexRecordSize);
             if (!NT_SUCCESS(Status))
             {
                 DPRINT1("ERROR: Failed to split B-Tree node!\n");
@@ -2785,7 +2884,8 @@ SplitBTreeNode(PB_TREE Tree,
                PB_TREE_FILENAME_NODE Node,
                PB_TREE_KEY *MedianKey,
                PB_TREE_FILENAME_NODE *NewRightHandSibling,
-               BOOLEAN CaseSensitive)
+               BOOLEAN CaseSensitive,
+               ULONG IndexRecordSize)
 {
     ULONG MedianKeyIndex;
     PB_TREE_KEY LastKeyBeforeMedian, FirstKeyAfterMedian;
@@ -2794,12 +2894,13 @@ SplitBTreeNode(PB_TREE Tree,
     ULONG SizeSum;
     ULONG i;
 
-    DPRINT("SplitBTreeNode(%p, %p, %p, %p, %s) called\n",
+    DPRINT("SplitBTreeNode(%p, %p, %p, %p, %s, %lu) called\n",
             Tree,
             Node,
             MedianKey,
             NewRightHandSibling,
-            CaseSensitive ? "TRUE" : "FALSE");
+            CaseSensitive ? "TRUE" : "FALSE",
+            IndexRecordSize);
 
 #ifndef NDEBUG
     DumpBTreeNode(Tree, Node, 0, 0);
@@ -2836,7 +2937,7 @@ SplitBTreeNode(PB_TREE Tree,
     // Use size to locate the median key / index
     LastKeyBeforeMedian = Node->FirstKey;
     MedianKeyIndex = 0;
-    HalfSize = 2016; // half the allocated size after subtracting the first index entry offset (TODO: MATH)
+    HalfSize = NtfsGetMaxIndexNodeEntryBytes(Tree->Vcb, IndexRecordSize) / 2;
     SizeSum = 0;
     for (i = 0; i < Node->KeyCount; i++)
     {
