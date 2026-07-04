@@ -84,6 +84,35 @@ _MmUnlockSectionSegment(PMM_SECTION_SEGMENT Segment, const char *file, int line)
 #endif
 
 static
+BOOLEAN
+MiIsArm3DataSectionObject(
+    _In_ PVOID DataSectionObject)
+{
+    PCONTROL_AREA ControlArea = DataSectionObject;
+    PSEGMENT Segment;
+
+    if ((ULONG_PTR)ControlArea < (ULONG_PTR)MmSystemRangeStart)
+        return FALSE;
+
+    if (!MmIsAddressValid(ControlArea))
+        return FALSE;
+
+    /*
+     * ARM3 stores a CONTROL_AREA in DataSectionObject.  The legacy section
+     * code stores an MM_SECTION_SEGMENT there, whose first field is a small
+     * reference count rather than a kernel pointer.
+     */
+    Segment = ControlArea->Segment;
+    if ((ULONG_PTR)Segment < (ULONG_PTR)MmSystemRangeStart)
+        return FALSE;
+
+    if (!MmIsAddressValid(Segment))
+        return FALSE;
+
+    return Segment->ControlArea == ControlArea;
+}
+
+static
 PMM_SECTION_SEGMENT
 MiGrabDataSection(PSECTION_OBJECT_POINTERS SectionObjectPointer)
 {
@@ -95,6 +124,12 @@ MiGrabDataSection(PSECTION_OBJECT_POINTERS SectionObjectPointer)
         Segment = SectionObjectPointer->DataSectionObject;
         if (!Segment)
             break;
+
+        if (MiIsArm3DataSectionObject(Segment))
+        {
+            Segment = NULL;
+            break;
+        }
 
         if (Segment->SegFlags & (MM_SEGMENT_INCREATE | MM_SEGMENT_INDELETE))
         {
@@ -4523,6 +4558,7 @@ MmCanFileBeTruncated(
 {
     BOOLEAN Ret;
     PMM_SECTION_SEGMENT Segment;
+    PCONTROL_AREA ControlArea;
 
     /* Check whether an ImageSectionObject exists */
     if (SectionObjectPointer->ImageSectionObject != NULL)
@@ -4534,6 +4570,15 @@ MmCanFileBeTruncated(
     Segment = MiGrabDataSection(SectionObjectPointer);
     if (!Segment)
     {
+        ControlArea = SectionObjectPointer->DataSectionObject;
+        if (ControlArea && MiIsArm3DataSectionObject(ControlArea))
+        {
+            if (NewFileSize == NULL)
+                return FALSE;
+
+            return NewFileSize->QuadPart >= (LONGLONG)ControlArea->Segment->SizeOfSegment;
+        }
+
         /* There is no data section. It's fine to do anything. */
         return TRUE;
     }
