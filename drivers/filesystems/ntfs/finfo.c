@@ -958,6 +958,37 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     return Status;
 }
 
+static
+NTSTATUS
+NtfsSetAllocationInformation(PNTFS_FCB Fcb,
+                             PFILE_OBJECT FileObject,
+                             PDEVICE_EXTENSION DeviceExt,
+                             ULONG IrpFlags,
+                             BOOLEAN CaseSensitive,
+                             PLARGE_INTEGER NewAllocationSize)
+{
+    LARGE_INTEGER CurrentFileSize = Fcb->RFCB.FileSize;
+
+    if (NewAllocationSize->QuadPart < 0)
+        return STATUS_INVALID_PARAMETER;
+
+    /*
+     * FileAllocationInformation reserves storage; it must not extend EOF.
+     * ReactOS NTFS does not yet have a separate allocation-only grow path for
+     * resident streams, so accept grow/preallocation requests and let ordinary
+     * writes allocate real clusters when data is written.
+     */
+    if (NewAllocationSize->QuadPart >= CurrentFileSize.QuadPart)
+        return STATUS_SUCCESS;
+
+    return NtfsSetEndOfFile(Fcb,
+                            FileObject,
+                            DeviceExt,
+                            IrpFlags,
+                            CaseSensitive,
+                            NewAllocationSize);
+}
+
 /**
 * @name NtfsSetBasicInformation
 * @implemented
@@ -1365,6 +1396,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     switch (FileInformationClass)
     {
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
+        PFILE_ALLOCATION_INFORMATION AllocationInfo;
         PFILE_DISPOSITION_INFORMATION DispositionInfo;
         PFILE_RENAME_INFORMATION RenameInfo;
         PFILE_POSITION_INFORMATION PositionInfo;
@@ -1386,11 +1418,27 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = STATUS_SUCCESS;
             break;
 
-        /* TODO: Allocation size is not actually the same as file end for NTFS,
-           however, few applications are likely to make the distinction. */
         case FileAllocationInformation:
-            DPRINT1("FIXME: Using hacky method of setting FileAllocationInformation.\n");
+            if (BufferLength < sizeof(FILE_ALLOCATION_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+            AllocationInfo = (PFILE_ALLOCATION_INFORMATION)SystemBuffer;
+            Status = NtfsSetAllocationInformation(Fcb,
+                                                  FileObject,
+                                                  DeviceExt,
+                                                  Irp->Flags,
+                                                  BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                                  &AllocationInfo->AllocationSize);
+            break;
+
         case FileEndOfFileInformation:
+            if (BufferLength < sizeof(FILE_END_OF_FILE_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
             EndOfFileInfo = (PFILE_END_OF_FILE_INFORMATION)SystemBuffer;
             Status = NtfsSetEndOfFile(Fcb,
                                       FileObject,

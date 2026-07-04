@@ -1230,7 +1230,9 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
                          ULONG *Length);
 
 NTSTATUS
-DemoteBTreeRoot(PB_TREE Tree);
+DemoteBTreeRoot(PB_TREE Tree,
+                 ULONG IndexRecordSize,
+                 BOOLEAN CaseSensitive);
 
 VOID
 DestroyBTree(PB_TREE Tree);
@@ -1294,7 +1296,8 @@ SplitBTreeNode(PB_TREE Tree,
                PB_TREE_FILENAME_NODE Node,
                PB_TREE_KEY *MedianKey,
                PB_TREE_FILENAME_NODE *NewRightHandSibling,
-               BOOLEAN CaseSensitive);
+               BOOLEAN CaseSensitive,
+               ULONG IndexRecordSize);
 
 NTSTATUS
 UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
