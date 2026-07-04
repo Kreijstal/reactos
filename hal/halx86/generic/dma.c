@@ -1011,18 +1011,22 @@ HalpScatterGatherAdapterControl(IN PDEVICE_OBJECT DeviceObject,
 	PSCATTER_GATHER_ELEMENT TempElements;
 	ULONG ElementCount = 0, RemainingLength = AdapterControlContext->Length;
 	PUCHAR CurrentVa = AdapterControlContext->CurrentVa;
-    // RemainingLength / PAGE_SIZE + 1 for the remainder of our division
-    // + 1 for a safety cushion gives a good safe value. Using the
-    // min function with MAX_SG_ELEMENTS keeps us from getting too large.
-    ULONG Est_SG_Elements = min(RemainingLength / PAGE_SIZE + 2, MAX_SG_ELEMENTS);
+    /* One scatter/gather element can be emitted per map register. */
+    ULONG MaxElements = min(AdapterControlContext->MapRegisterCount, MAX_SG_ELEMENTS);
 
 	/* Store the map register base for later in HalPutScatterGatherList */
 	AdapterControlContext->MapRegisterBase = MapRegisterBase;
 
+    if (RemainingLength && MaxElements == 0)
+    {
+        DPRINT1("Scatter/gather list construction failed!\n");
+        return DeallocateObject;
+    }
+
     // FIXME: HACK Allocate TempElements from pool to minimize stack usage.
     // A more efficient algorithm should be found to avoid allocations during S/G I/O operations.
     TempElements = ExAllocatePoolUninitialized(NonPagedPool,
-                                               sizeof(*TempElements) * Est_SG_Elements,
+                                               sizeof(*TempElements) * MaxElements,
                                                TAG_DMA);
     if (!TempElements)
 	{
@@ -1030,7 +1034,7 @@ HalpScatterGatherAdapterControl(IN PDEVICE_OBJECT DeviceObject,
 		return DeallocateObject;
 	}
 
-	while (RemainingLength > 0 && ElementCount < MAX_SG_ELEMENTS)
+	while (RemainingLength > 0 && ElementCount < MaxElements)
 	{
 	    TempElements[ElementCount].Length = RemainingLength;
 		TempElements[ElementCount].Reserved = 0;
@@ -1052,7 +1056,7 @@ HalpScatterGatherAdapterControl(IN PDEVICE_OBJECT DeviceObject,
 		ElementCount++;
 	}
 
-    DPRINT("Est_SG_Elements %d\n", Est_SG_Elements);
+    DPRINT("MaxElements %d\n", MaxElements);
     DPRINT("ElementCount is %d\n", ElementCount);
 
 	if (RemainingLength > 0)
@@ -1162,6 +1166,7 @@ HalPutScatterGatherList(IN PADAPTER_OBJECT AdapterObject,
 {
     PSCATTER_GATHER_CONTEXT AdapterControlContext = (PSCATTER_GATHER_CONTEXT)ScatterGather->Reserved;
     PVOID MapRegisterBase;
+    BOOLEAN FreeAdapterControlContext;
     ULONG i;
 
     for (i = 0; i < ScatterGather->NumberOfElements; i++)
@@ -1208,10 +1213,12 @@ HalPutScatterGatherList(IN PADAPTER_OBJECT AdapterObject,
                        AdapterControlContext->MapRegisterCount);
 
 
-	ExFreePoolWithTag(ScatterGather, TAG_DMA);
+    FreeAdapterControlContext = !AdapterControlContext->UsingUserBuffer;
+
+    ExFreePoolWithTag(ScatterGather, TAG_DMA);
 
     /* If this is our buffer, release it */
-    if (!AdapterControlContext->UsingUserBuffer)
+    if (FreeAdapterControlContext)
         ExFreePoolWithTag(AdapterControlContext, TAG_DMA);
 
     DPRINT("S/G DMA has finished!\n");
@@ -1232,7 +1239,7 @@ HalCalculateScatterGatherListSize(
 
     UNIMPLEMENTED_ONCE;
 
-    NumberOfMapRegisters = PAGE_ROUND_UP(Length) >> PAGE_SHIFT;
+    NumberOfMapRegisters = ADDRESS_AND_SIZE_TO_SPAN_PAGES(CurrentVa, Length);
     SgSize = sizeof(SCATTER_GATHER_CONTEXT);
 
     *ScatterGatherListSize = SgSize;
