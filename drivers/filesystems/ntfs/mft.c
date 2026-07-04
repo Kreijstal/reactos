@@ -584,57 +584,64 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
     PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Destination + Destination->Length);
     PNTFS_ATTR_RECORD FinalAttribute;
+    PNTFS_ATTR_RECORD NewContextRecord = NULL;
     ULONG OldAttributeLength = Destination->Length;
     ULONG OldValueLength = Destination->Resident.ValueLength;
+    ULONG NewAttributeLength;
     ULONG NextAttributeOffset;
+    ULONG_PTR RecordEnd;
+    ULONG_PTR RequiredEnd;
 
     DPRINT("InternalSetResidentAttributeLength( %p, %p, %p, %lu, %lu )\n", DeviceExt, AttrContext, FileRecord, AttrOffset, DataSize);
 
     ASSERT(!AttrContext->pRecord->IsNonResident);
 
-    // Update ValueLength Field
-    Destination->Resident.ValueLength = DataSize;
-
     // Calculate the record length and end marker offset
-    Destination->Length = ALIGN_UP_BY(DataSize + AttrContext->pRecord->Resident.ValueOffset, ATTR_RECORD_ALIGNMENT);
-    NextAttributeOffset = AttrOffset + Destination->Length;
+    NewAttributeLength = ALIGN_UP_BY(DataSize + AttrContext->pRecord->Resident.ValueOffset, ATTR_RECORD_ALIGNMENT);
+    NextAttributeOffset = AttrOffset + NewAttributeLength;
 
     // Ensure NextAttributeOffset is aligned to an 8-byte boundary
     ASSERT(NextAttributeOffset % ATTR_RECORD_ALIGNMENT == 0);
 
-    // Will the new attribute be larger than the old one?
-    if (Destination->Length > OldAttributeLength)
+    RecordEnd = (ULONG_PTR)FileRecord + DeviceExt->NtfsInfo.BytesPerFileRecord;
+    if (NextAttribute->Type != AttributeEnd)
     {
-        // Free the old copy of the attribute in the context, as it will be the wrong length
-        ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
+        ULONG TrailingSize = FileRecord->BytesInUse -
+                             (ULONG)((ULONG_PTR)NextAttribute - (ULONG_PTR)FileRecord);
+        RequiredEnd = (ULONG_PTR)Destination + NewAttributeLength + TrailingSize;
+    }
+    else
+    {
+        RequiredEnd = (ULONG_PTR)FileRecord + NextAttributeOffset + sizeof(ULONG) * 2;
+    }
 
+    if (RequiredEnd > RecordEnd)
+        return STATUS_BUFFER_OVERFLOW;
+
+    // Will the new attribute be larger than the old one?
+    if (NewAttributeLength > OldAttributeLength)
+    {
         // Create a new copy of the attribute record for the context
-        AttrContext->pRecord = ExAllocatePoolWithTag(NonPagedPool, Destination->Length, TAG_NTFS);
-        if (!AttrContext->pRecord)
+        NewContextRecord = ExAllocatePoolWithTag(NonPagedPool, NewAttributeLength, TAG_NTFS);
+        if (!NewContextRecord)
         {
             DPRINT1("Unable to allocate memory for attribute!\n");
             return STATUS_INSUFFICIENT_RESOURCES;
         }
-        RtlZeroMemory((PVOID)((ULONG_PTR)AttrContext->pRecord + OldAttributeLength), Destination->Length - OldAttributeLength);
-        RtlCopyMemory(AttrContext->pRecord, Destination, OldAttributeLength);
+        RtlZeroMemory((PVOID)((ULONG_PTR)NewContextRecord + OldAttributeLength),
+                      NewAttributeLength - OldAttributeLength);
+        RtlCopyMemory(NewContextRecord, Destination, OldAttributeLength);
     }
+
+    // Update ValueLength and Length fields only after all failure preflights.
+    Destination->Resident.ValueLength = DataSize;
+    Destination->Length = NewAttributeLength;
 
     NTFS_CHECK_POOL(FileRecord, "InternalSetResidentAttributeLength:pre-move");
 
     // Are there attributes after this one that need to be moved?
     if (NextAttribute->Type != AttributeEnd)
     {
-        // Bounds check: will the moved attributes fit?
-        ULONG TrailingSize = FileRecord->BytesInUse - (ULONG)((ULONG_PTR)NextAttribute - (ULONG_PTR)FileRecord);
-        ULONG_PTR MoveEnd = (ULONG_PTR)Destination + Destination->Length + TrailingSize;
-        if (MoveEnd > (ULONG_PTR)FileRecord + DeviceExt->NtfsInfo.BytesPerFileRecord)
-        {
-            DPRINT1("InternalSetResidentAttributeLength OVERFLOW: MoveEnd=0x%Ix RecordEnd=0x%Ix TrailingSize=%lu NewLen=%lu OldLen=%lu\n",
-                    MoveEnd, (ULONG_PTR)FileRecord + DeviceExt->NtfsInfo.BytesPerFileRecord,
-                    TrailingSize, Destination->Length, OldAttributeLength);
-            return STATUS_BUFFER_OVERFLOW;
-        }
-
         // Move the attributes after this one
         FinalAttribute = MoveAttributes(DeviceExt, NextAttribute, NextAttributeOffset, (ULONG_PTR)Destination + Destination->Length);
     }
@@ -648,6 +655,12 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     {
         RtlZeroMemory((PCHAR)Destination + Destination->Resident.ValueOffset + OldValueLength,
                       DataSize - OldValueLength);
+    }
+
+    if (NewContextRecord)
+    {
+        ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
+        AttrContext->pRecord = NewContextRecord;
     }
 
     // Update pRecord's length
@@ -3298,7 +3311,7 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     {
         DPRINT("Demoting index root.\nNodeSize: 0x%lx\nNewMaxIndexRootSize: 0x%lx\n", NodeSize, NewMaxIndexRootSize);
 
-        Status = DemoteBTreeRoot(NewTree);
+        Status = DemoteBTreeRoot(NewTree, I30IndexRoot->SizeOfEntry, CaseSensitive);
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("ERROR: Failed to demote index root!\n");
@@ -3663,7 +3676,7 @@ NtfsRemoveFilenameFromDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     NodeSize = GetSizeOfIndexEntries(NewTree->RootNode);
     if (NodeSize > NewMaxIndexRootSize)
     {
-        Status = DemoteBTreeRoot(NewTree);
+        Status = DemoteBTreeRoot(NewTree, I30IndexRoot->SizeOfEntry, CaseSensitive);
         if (!NT_SUCCESS(Status))
         {
             DestroyBTree(NewTree);
