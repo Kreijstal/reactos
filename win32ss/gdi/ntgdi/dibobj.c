@@ -1380,8 +1380,6 @@ NtGdiStretchDIBitsInternal(
     HPALETTE hPal = NULL;
     ULONG BmpFormat = 0;
     INT LinesCopied = 0;
-    BOOL NoLinesCopied = FALSE;
-    BOOL DirectCopy = FALSE;
 
     /* Check for bad iUsage */
     if (dwUsage > 2) return 0;
@@ -1485,12 +1483,6 @@ NtGdiStretchDIBitsInternal(
     /* Here we select between the dwRop with SRCCOPY or not. */
     if (dwRop == SRCCOPY)
     {
-        if (cxSrc < 0 || cySrc < 0)
-        {
-            NoLinesCopied = TRUE;
-            goto leave;
-        }
-
         hdcMem = NtGdiCreateCompatibleDC(hdc);
         if (hdcMem == NULL)
         {
@@ -1536,7 +1528,6 @@ NtGdiStretchDIBitsInternal(
             INT yBltSrc = (pbmiSafe->bmiHeader.biHeight < 0) ?
                           ySrc : abs(pbmiSafe->bmiHeader.biHeight) - cySrc - ySrc;
 
-            DirectCopy = TRUE;
             NtGdiBitBlt(hdc, xDst, yDst, cxDst, cyDst,
                         hdcMem, xSrc, yBltSrc,
                         dwRop, CLR_INVALID, 0);
@@ -1657,7 +1648,6 @@ NtGdiStretchDIBitsInternal(
         if (pdc) DC_UnlockDc(pdc);
     }
 
-leave:
     if (pvBits) ExFreePoolWithTag(pvBits, TAG_DIB);
 
     /* This is not what MSDN says is returned from this function, but it
@@ -1665,9 +1655,7 @@ leave:
      * and it fixes over 100 gdi32:dib regression tests. */
     if (dwRop == SRCCOPY)
     {
-        LinesCopied = NoLinesCopied ? 0 :
-                      (DirectCopy ? min(abs(cyDst), abs(pbmiSafe->bmiHeader.biHeight)) :
-                                    abs(pbmiSafe->bmiHeader.biHeight));
+        LinesCopied = abs(pbmiSafe->bmiHeader.biHeight);
     }
     else
     {
