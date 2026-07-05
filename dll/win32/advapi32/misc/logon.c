@@ -403,7 +403,7 @@ InsertProcessSecurityCommon(
 {
     /* Set new security data for the process */
     if (!SetKernelObjectSecurity(ProcessHandle,
-                                 DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                                 DACL_SECURITY_INFORMATION,
                                  ProcessSecurity))
     {
         ERR("InsertProcessSecurityCommon(): Failed to set security for process (error %lu)\n", GetLastError());
@@ -412,7 +412,7 @@ InsertProcessSecurityCommon(
 
     /* Set new security data for the thread */
     if (!SetKernelObjectSecurity(ThreadHandle,
-                                 DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION,
+                                 DACL_SECURITY_INFORMATION,
                                  ThreadSecurity))
     {
         ERR("InsertProcessSecurityCommon(): Failed to set security for thread (error %lu)\n", GetLastError());

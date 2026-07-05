@@ -1530,7 +1530,7 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
         goto done;
     }
 
-    if (LocalGroups->GroupCount > 0)
+    if ((LocalGroups != NULL) && (LocalGroups->GroupCount > 0))
     {
         /* Add local groups to the token information */
         Status = LsapAddLocalGroups(TokenInformation,
@@ -1691,7 +1691,8 @@ LsapLogonUser(PLSA_API_MSG RequestMsg,
     }
     else
     {
-        FIXME("LogonType %lu is not supported yet!\n", LogonType);
+        UserName = AccountName;
+        LogonDomainName = AuthenticatingAuthority;
     }
 
     Status = LsapSetLogonSessionData(&RequestMsg->LogonUser.Reply.LogonId,
