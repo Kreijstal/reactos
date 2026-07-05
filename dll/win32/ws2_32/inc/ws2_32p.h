@@ -270,6 +270,7 @@ typedef BOOL
 );
 
 extern HINSTANCE WsDllHandle;
+extern DWORD WsDllProcessId;
 extern HANDLE WsSockHeap;
 extern PWAH_HANDLE_TABLE WsSockHandleTable;
 extern PWSPROCESS CurrentWsProcess;

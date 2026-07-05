@@ -15,6 +15,7 @@ HANDLE GlobalHeap;
 BOOL Ws2helpInitialized = FALSE;
 CRITICAL_SECTION StartupSynchronization;
 HINSTANCE LibraryHdl;
+DWORD Ws2helpProcessId;
 
 /* FUNCTIONS *****************************************************************/
 
@@ -102,6 +103,20 @@ DWORD
 WINAPI
 Ws2helpInitialize(VOID)
 {
+    DWORD ProcessId = GetCurrentProcessId();
+
+    if (Ws2helpProcessId != ProcessId)
+    {
+        LibraryHdl = GetModuleHandleW(L"ws2_32.dll");
+        if (!LibraryHdl)
+            LibraryHdl = GetModuleHandleW(L"ws2help.dll");
+
+        GlobalHeap = GetProcessHeap();
+        InitializeCriticalSection(&StartupSynchronization);
+        Ws2helpInitialized = FALSE;
+        Ws2helpProcessId = ProcessId;
+    }
+
     /* Enter the startup CS */
     EnterCriticalSection(&StartupSynchronization);
 
@@ -131,6 +146,7 @@ Ws2HelpDllMain(
 
             /* Save our handle */
             LibraryHdl = hModule;
+            Ws2helpProcessId = GetCurrentProcessId();
 
             /* Improve Performance */
             DisableThreadLibraryCalls(hModule);
@@ -163,6 +179,7 @@ Ws2HelpDllMain(
                 /* Delete the startup CS */
                 DeleteCriticalSection(&StartupSynchronization);
                 Ws2helpInitialized = FALSE;
+                Ws2helpProcessId = 0;
             }
 			break;
     }
