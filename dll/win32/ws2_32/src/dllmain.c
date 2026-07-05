@@ -20,6 +20,7 @@
 
 HANDLE WsSockHeap;
 HINSTANCE WsDllHandle;
+DWORD WsDllProcessId;
 DWORD GlobalTlsIndex = TLS_OUT_OF_INDEXES;
 
 /* FUNCTIONS *****************************************************************/
@@ -55,8 +56,12 @@ DllMain(HANDLE hModule,
     switch (dwReason)
     {
         case DLL_PROCESS_ATTACH:
+            if ((WsDllHandle) && (WsDllProcessId == GetCurrentProcessId()))
+                break;
+
             /* Save DLL Handle */
             WsDllHandle = hModule;
+            WsDllProcessId = GetCurrentProcessId();
 
             /* Get Global Heap */
             WsSockHeap = GetProcessHeap();
@@ -116,6 +121,7 @@ DllMain(HANDLE hModule,
 
             /* Clear our handle */
             WsDllHandle = NULL;
+            WsDllProcessId = 0;
             break;
     }
 
