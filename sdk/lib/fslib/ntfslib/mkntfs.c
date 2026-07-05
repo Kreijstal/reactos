@@ -454,6 +454,18 @@ ULONGLONG ntfs_mft_ref(ULONG record, USHORT seq)
     return (ULONGLONG)record | ((ULONGLONG)seq << 48);
 }
 
+/* On a fresh Windows NTFS format every system MFT record's SequenceNumber
+ * equals its record number, except record 0 ($MFT itself) which uses 1
+ * (sequence 0 is reserved/invalid).  chkdsk normalizes any deviation with
+ * "Fixing incorrect information in file record segment N", and any reference
+ * that carries the wrong sequence (root index entries, $FILE_NAME parent
+ * refs) is then rejected -> "Correcting file name errors ...".  Use this to
+ * keep record SequenceNumbers and every reference to them consistent. */
+USHORT ntfs_seq_for_record(ULONG record)
+{
+    return record ? (USHORT)record : (USHORT)1;
+}
+
 /* Helper: add standard $SI + $FN to a record */
 static void add_si_and_fn(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
                            const WCHAR *name, UCHAR name_len,
@@ -471,7 +483,8 @@ static void add_si_and_fn(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     add_resident_attr(s, rec, AT_STANDARD_INFORMATION, NULL, 0, &si, 72, 0);
 
     memset(fn_buf, 0, sizeof(fn_buf));
-    ntfs_make_file_name(fn, ntfs_mft_ref(FILE_Root, 1), name, name_len,
+    ntfs_make_file_name(fn, ntfs_mft_ref(FILE_Root, ntfs_seq_for_record(FILE_Root)),
+                        name, name_len,
                         FILE_NAME_WIN32_AND_DOS,
                         file_attrs, alloc_size, data_size, s->now);
     add_resident_attr(s, rec, AT_FILE_NAME, NULL, 0, fn_buf,
@@ -485,7 +498,7 @@ static void build_mft(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 0 * s->mft_record_size);
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_MFT);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_MFT), FRH_IN_USE, FILE_MFT);
     rec->LinkCount = 1;
 
     WCHAR mft_name[] = { '$', 'M', 'F', 'T' };
@@ -514,7 +527,7 @@ static void build_mftmirr(MKNTFS_STATE *s)
     ULONGLONG mirr_clusters = (mirr_size + s->cluster_size - 1) / s->cluster_size;
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_MFTMirr);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_MFTMirr), FRH_IN_USE, FILE_MFTMirr);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'M', 'F', 'T', 'M', 'i', 'r', 'r' };
@@ -534,7 +547,7 @@ static void build_logfile(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 2 * s->mft_record_size);
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_LogFile);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_LogFile), FRH_IN_USE, FILE_LogFile);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'L', 'o', 'g', 'F', 'i', 'l', 'e' };
@@ -555,7 +568,7 @@ static void build_volume(MKNTFS_STATE *s)
     VOLUME_INFORMATION vi;
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Volume);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_Volume), FRH_IN_USE, FILE_Volume);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'V', 'o', 'l', 'u', 'm', 'e' };
@@ -575,6 +588,11 @@ static void build_volume(MKNTFS_STATE *s)
     vi.MinorVersion = 1;
     add_resident_attr(s, rec, AT_VOLUME_INFORMATION, NULL, 0, &vi, sizeof(vi), 0);
 
+    /* Unnamed, zero-length $DATA. Real Windows NTFS gives $Volume an empty
+     * resident $DATA attribute; without it chkdsk reports
+     * "Inserting data attribute into file 3". */
+    add_resident_attr(s, rec, AT_DATA, NULL, 0, NULL, 0, 0);
+
     finalize_record(s, rec);
 }
 
@@ -584,7 +602,7 @@ static void build_attrdef(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 4 * s->mft_record_size);
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_AttrDef);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_AttrDef), FRH_IN_USE, FILE_AttrDef);
     rec->LinkCount = 1;
 
     ULONG attrdef_count;
@@ -623,7 +641,7 @@ ULONG ntfs_make_index_entry(UCHAR *buf, ULONG mft_num, USHORT seq,
     ie->Flags = 0;
 
     fn = (FILE_NAME_ATTR *)(buf + sizeof(INDEX_ENTRY));
-    fn->ParentDirectory = ntfs_mft_ref(FILE_Root, 1);
+    fn->ParentDirectory = ntfs_mft_ref(FILE_Root, ntfs_seq_for_record(FILE_Root));
     fn->CreationTime = time_val;
     fn->ModificationTime = time_val;
     fn->MftModificationTime = time_val;
@@ -642,7 +660,8 @@ static void build_root(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 5 * s->mft_record_size);
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1,
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size,
+                     ntfs_seq_for_record(FILE_Root),
                      FRH_IN_USE | FRH_DIRECTORY, FILE_Root);
     rec->LinkCount = 1;
 
@@ -759,7 +778,8 @@ static int write_root_index(MKNTFS_STATE *s)
 
     for (i = 0; i < num_sysfiles; i++) {
         entries_size += ntfs_make_index_entry(entries_pos + entries_size,
-                                         sysfiles[i].mft_num, 1,
+                                         sysfiles[i].mft_num,
+                                         ntfs_seq_for_record(sysfiles[i].mft_num),
                                          sysfiles[i].name, sysfiles[i].len,
                                          sysfiles[i].attrs, s->now);
     }
@@ -800,7 +820,7 @@ static void build_bitmap(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 6 * s->mft_record_size);
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Bitmap);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_Bitmap), FRH_IN_USE, FILE_Bitmap);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'B', 'i', 't', 'm', 'a', 'p' };
@@ -825,7 +845,7 @@ static void build_boot(MKNTFS_STATE *s)
         boot_clusters = (s->sector_size * 16 + s->cluster_size - 1) / s->cluster_size;
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Boot);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_Boot), FRH_IN_USE, FILE_Boot);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'B', 'o', 'o', 't' };
@@ -849,7 +869,7 @@ static void build_simple_system_file(MKNTFS_STATE *s, ULONG record_num,
     ULONG file_attrs = FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM;
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, flags, record_num);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(record_num), flags, record_num);
     rec->LinkCount = 1;
 
     if (flags & FRH_DIRECTORY)
@@ -949,13 +969,14 @@ static ULONG sd_hash(const UCHAR *data, ULONG len)
 static void build_secure(MKNTFS_STATE *s)
 {
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + FILE_Secure * s->mft_record_size);
-    #define FRH_VIEW_INDEX 0x0004
+    #define FRH_VIEW_INDEX 0x0008   /* MFT_RECORD_IS_VIEW_INDEX (matches Windows) */
     UCHAR sd_buf[256];
     ULONG sd_len;
     ULONG hash_val;
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1,
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size,
+                     ntfs_seq_for_record(FILE_Secure),
                      FRH_IN_USE | FRH_VIEW_INDEX, FILE_Secure);
     rec->LinkCount = 1;
 
@@ -1149,7 +1170,7 @@ static void build_upcase(MKNTFS_STATE *s)
     ULONGLONG upcase_bytes = (ULONGLONG)s->upcase_len * sizeof(WCHAR);
 
     s->next_instance = 0;
-    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_UpCase);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, ntfs_seq_for_record(FILE_UpCase), FRH_IN_USE, FILE_UpCase);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'U', 'p', 'C', 'a', 's', 'e' };
