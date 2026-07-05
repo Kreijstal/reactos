@@ -92,6 +92,11 @@ typedef struct _MKNTFS_STATE {
     /* Root directory $I30 index allocation */
     ULONGLONG root_idx_lcn;     /* Cluster for INDX block */
 
+    /* $Secure:$SDS non-resident data stream */
+    ULONGLONG sds_lcn;          /* First cluster of the $SDS stream */
+    ULONGLONG sds_clusters;     /* Cluster count backing $SDS */
+    ULONGLONG sds_data_size;    /* Logical/initialized size of $SDS */
+
     /* Volume info */
     const WCHAR *label;
     ULONGLONG serial_number;
@@ -921,13 +926,21 @@ static ULONG build_default_sd(UCHAR *buf, ULONG buf_size)
     return sd_len;
 }
 
-/* Simple hash for security descriptor (djb2-style, matches ntfs-3g's approach) */
+/* Security-descriptor hash used by $Secure ($SDS/$SDH Hash field).
+ * Matches Windows / ntfs-3g ntfs_security_hash exactly: iterate the
+ * self-relative SD as little-endian 32-bit words (NOT byte-by-byte),
+ * hash = word + rol3(hash).  Self-relative SDs are DWORD-multiples. */
 static ULONG sd_hash(const UCHAR *data, ULONG len)
 {
     ULONG hash = 0;
+    ULONG words = len >> 2;
     ULONG i;
-    for (i = 0; i < len; i++) {
-        hash = ((hash >> 29) | (hash << 3)) + data[i];
+    for (i = 0; i < words; i++) {
+        ULONG word = (ULONG)data[i * 4]
+                   | ((ULONG)data[i * 4 + 1] << 8)
+                   | ((ULONG)data[i * 4 + 2] << 16)
+                   | ((ULONG)data[i * 4 + 3] << 24);
+        hash = word + ((hash << 3) | (hash >> 29));
     }
     return hash;
 }
@@ -951,37 +964,70 @@ static void build_secure(MKNTFS_STATE *s)
                   FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM | FILE_ATTR_DUP_VIEW_INDEX_PRESENT,
                   0, 0);
 
-    /* Build the default security descriptor */
+    /* Build the default security descriptor.  Real NTFS pre-creates two
+     * well-known descriptors and every system record references one of them:
+     *   SecurityId 0x100 (256) -- used by records 0..8,10,12..15
+     *   SecurityId 0x101 (257) -- used by $Secure (9) and $Extend (11)
+     * mkntfs uses the SAME minimal SD bytes for both; only the SecurityId /
+     * $SDS offset differ.  BOTH ids must resolve through $SII/$SDH/$SDS or
+     * chkdsk emits "Replacing invalid security id ..." for the referrer. */
     sd_len = build_default_sd(sd_buf, sizeof(sd_buf));
     hash_val = sd_hash(sd_buf, sd_len);
 
-    /* $SDS named data stream - contains SECURITY_DESCRIPTOR_HEADER + SD data */
-    {
-        ULONG sds_entry_len = sizeof(SECURITY_DESCRIPTOR_HEADER) + sd_len;
-        ULONG sds_padded = NTFS_ALIGN_UP(sds_entry_len, 16);
-        UCHAR sds_buf[512];
-        SECURITY_DESCRIPTOR_HEADER *sdh = (SECURITY_DESCRIPTOR_HEADER *)sds_buf;
+    #define NUM_SECURITY_IDS 2
+    ULONG sds_entry_len = sizeof(SECURITY_DESCRIPTOR_HEADER) + sd_len;
+    ULONG sds_entry_stride = NTFS_ALIGN_UP(sds_entry_len, 16); /* 16-byte aligned */
+    SECURITY_DESCRIPTOR_HEADER sd_head[NUM_SECURITY_IDS];
+    ULONG idx;
 
-        memset(sds_buf, 0, sizeof(sds_buf));
-        sdh->Hash = hash_val;
-        sdh->SecurityId = 256; /* First security ID */
-        sdh->Offset = 0;
-        sdh->Length = sds_entry_len;
-        memcpy(sds_buf + sizeof(SECURITY_DESCRIPTOR_HEADER), sd_buf, sd_len);
-
-        WCHAR sds_name[] = { '$', 'S', 'D', 'S' };
-        add_resident_attr(s, rec, AT_DATA, sds_name, 4, sds_buf, sds_padded, 0);
+    for (idx = 0; idx < NUM_SECURITY_IDS; idx++) {
+        memset(&sd_head[idx], 0, sizeof(sd_head[idx]));
+        sd_head[idx].Hash = hash_val;
+        sd_head[idx].SecurityId = 256 + idx;              /* 0x100, 0x101 */
+        sd_head[idx].Offset = (ULONGLONG)idx * sds_entry_stride;
+        sd_head[idx].Length = sds_entry_len;
     }
 
-    /* $SDH index root - one entry + end */
+    /* $SDS non-resident $DATA stream.  Each entry (header + SD) is written
+     * twice: once at Offset, once at Offset + 0x40000 (the "mirror").  The
+     * stream data/initialized size must extend past the mirror block or
+     * chkdsk reports "Unable to read the security descriptors data stream". */
     {
-        /* SDH index entry: key is SECURITY_DESCRIPTOR_HEADER, data is SECURITY_DESCRIPTOR_HEADER */
-        UCHAR idx_buf[sizeof(INDEX_ROOT) + 128];
+        ULONGLONG sds_size = 0x40000ULL + NUM_SECURITY_IDS * sds_entry_stride;
+        UCHAR *sds_buf = (UCHAR *)calloc(1, (size_t)(s->sds_clusters * s->cluster_size));
+        if (sds_buf) {
+            for (idx = 0; idx < NUM_SECURITY_IDS; idx++) {
+                ULONG off = idx * sds_entry_stride;
+                /* Primary copy */
+                memcpy(sds_buf + off, &sd_head[idx], sizeof(sd_head[idx]));
+                memcpy(sds_buf + off + sizeof(sd_head[idx]), sd_buf, sd_len);
+                /* Mirror copy at +0x40000 */
+                memcpy(sds_buf + 0x40000 + off, &sd_head[idx], sizeof(sd_head[idx]));
+                memcpy(sds_buf + 0x40000 + off + sizeof(sd_head[idx]), sd_buf, sd_len);
+            }
+            io_write(s, s->sds_lcn * s->cluster_size, sds_buf,
+                     (ULONG)(s->sds_clusters * s->cluster_size));
+            free(sds_buf);
+        }
+        s->sds_data_size = sds_size;
+
+        WCHAR sds_name[] = { '$', 'S', 'D', 'S' };
+        add_nonresident_attr(s, rec, AT_DATA, sds_name, 4,
+                             s->sds_lcn, s->sds_clusters,
+                             sds_size, sds_size);
+    }
+
+    /* $SDH index root.  COLLATION_NTOFS_SECURITY_HASH (0x12).
+     * Key   = { ULONG Hash; ULONG SecurityId; }        (8 bytes)
+     * Data  = 20-byte SECURITY_DESCRIPTOR_HEADER + 4-byte "II\0\0" pad
+     *         (Windows pads the $SDH entry value to 24 bytes).
+     * Both descriptors share the same Hash, so entries sort by SecurityId. */
+    {
+        UCHAR idx_buf[sizeof(INDEX_ROOT) + 256];
         INDEX_ROOT *ir = (INDEX_ROOT *)idx_buf;
         UCHAR *ie_pos;
         INDEX_ENTRY *ie;
-        SECURITY_DESCRIPTOR_HEADER sdh_key;
-        ULONG ie_data_off, ie_len;
+        ULONG key_off, data_off, ie_len;
 
         memset(idx_buf, 0, sizeof(idx_buf));
         ir->AttributeType = 0;
@@ -992,24 +1038,33 @@ static void build_secure(MKNTFS_STATE *s)
 
         ie_pos = idx_buf + sizeof(INDEX_ROOT);
 
-        /* SDH entry: key=SECURITY_DESCRIPTOR_HEADER (20 bytes), data=SDH_DATA (not used, just pad) */
-        memset(&sdh_key, 0, sizeof(sdh_key));
-        sdh_key.Hash = hash_val;
-        sdh_key.SecurityId = 256;
-        sdh_key.Offset = 0;
-        sdh_key.Length = sizeof(SECURITY_DESCRIPTOR_HEADER) + sd_len;
+        for (idx = 0; idx < NUM_SECURITY_IDS; idx++) {
+            struct { ULONG Hash; ULONG SecurityId; } sdh_key;
+            UCHAR sdh_data[sizeof(SECURITY_DESCRIPTOR_HEADER) + 4];
 
-        ie = (INDEX_ENTRY *)ie_pos;
-        ie->Data.ViewIndex.DataOffset = sizeof(INDEX_ENTRY) + sizeof(SECURITY_DESCRIPTOR_HEADER);
-        ie->Data.ViewIndex.DataLength = sizeof(SECURITY_DESCRIPTOR_HEADER);
-        ie->KeyLength = sizeof(SECURITY_DESCRIPTOR_HEADER);
-        ie_data_off = sizeof(INDEX_ENTRY) + sizeof(SECURITY_DESCRIPTOR_HEADER) + sizeof(SECURITY_DESCRIPTOR_HEADER);
-        ie_len = NTFS_ALIGN_UP(ie_data_off, 8);
-        ie->Length = (USHORT)ie_len;
-        ie->Flags = 0;
-        memcpy(ie_pos + sizeof(INDEX_ENTRY), &sdh_key, sizeof(sdh_key));
-        memcpy(ie_pos + sizeof(INDEX_ENTRY) + sizeof(SECURITY_DESCRIPTOR_HEADER), &sdh_key, sizeof(sdh_key));
-        ie_pos += ie_len;
+            sdh_key.Hash = hash_val;
+            sdh_key.SecurityId = 256 + idx;
+
+            /* Data = header, then trailing "II" alignment pad Windows writes. */
+            memcpy(sdh_data, &sd_head[idx], sizeof(sd_head[idx]));
+            sdh_data[sizeof(sd_head[idx]) + 0] = 'I';
+            sdh_data[sizeof(sd_head[idx]) + 1] = 0;
+            sdh_data[sizeof(sd_head[idx]) + 2] = 'I';
+            sdh_data[sizeof(sd_head[idx]) + 3] = 0;
+
+            ie = (INDEX_ENTRY *)ie_pos;
+            key_off = sizeof(INDEX_ENTRY);
+            data_off = key_off + NTFS_ALIGN_UP(sizeof(sdh_key), 8);
+            ie_len = NTFS_ALIGN_UP(data_off + sizeof(sdh_data), 8);
+            ie->KeyLength = (USHORT)sizeof(sdh_key);
+            ie->Data.ViewIndex.DataOffset = (USHORT)data_off;
+            ie->Data.ViewIndex.DataLength = (USHORT)sizeof(sdh_data);
+            ie->Length = (USHORT)ie_len;
+            ie->Flags = 0;
+            memcpy(ie_pos + key_off, &sdh_key, sizeof(sdh_key));
+            memcpy(ie_pos + data_off, sdh_data, sizeof(sdh_data));
+            ie_pos += ie_len;
+        }
 
         /* End entry */
         ie = (INDEX_ENTRY *)ie_pos;
@@ -1028,14 +1083,15 @@ static void build_secure(MKNTFS_STATE *s)
                           idx_buf, sizeof(INDEX_ROOT) + entries_size, 0);
     }
 
-    /* $SII index root - one entry + end */
+    /* $SII index root.  COLLATION_NTOFS_ULONG (0x10).
+     * Key  = { ULONG SecurityId; }                (4 bytes, NOT 8-aligned)
+     * Data = 20-byte SECURITY_DESCRIPTOR_HEADER (data at offset 20, entry 40). */
     {
-        UCHAR idx_buf[sizeof(INDEX_ROOT) + 128];
+        UCHAR idx_buf[sizeof(INDEX_ROOT) + 256];
         INDEX_ROOT *ir = (INDEX_ROOT *)idx_buf;
         UCHAR *ie_pos;
         INDEX_ENTRY *ie;
-        SECURITY_DESCRIPTOR_HEADER sii_data;
-        ULONG ie_len;
+        ULONG key_off, data_off, ie_len;
 
         memset(idx_buf, 0, sizeof(idx_buf));
         ir->AttributeType = 0;
@@ -1046,24 +1102,25 @@ static void build_secure(MKNTFS_STATE *s)
 
         ie_pos = idx_buf + sizeof(INDEX_ROOT);
 
-        /* SII entry: key=SecurityId (ULONG), data=SECURITY_DESCRIPTOR_HEADER */
-        ie = (INDEX_ENTRY *)ie_pos;
-        ULONG sec_id = 256;
-        ie->Data.ViewIndex.DataOffset = sizeof(INDEX_ENTRY) + sizeof(ULONG);
-        ie->Data.ViewIndex.DataLength = sizeof(SECURITY_DESCRIPTOR_HEADER);
-        ie->KeyLength = sizeof(ULONG);
-        ie_len = NTFS_ALIGN_UP(sizeof(INDEX_ENTRY) + sizeof(ULONG) + sizeof(SECURITY_DESCRIPTOR_HEADER), 8);
-        ie->Length = (USHORT)ie_len;
-        ie->Flags = 0;
-        memcpy(ie_pos + sizeof(INDEX_ENTRY), &sec_id, sizeof(ULONG));
+        for (idx = 0; idx < NUM_SECURITY_IDS; idx++) {
+            ULONG sec_id = 256 + idx;
 
-        memset(&sii_data, 0, sizeof(sii_data));
-        sii_data.Hash = hash_val;
-        sii_data.SecurityId = 256;
-        sii_data.Offset = 0;
-        sii_data.Length = sizeof(SECURITY_DESCRIPTOR_HEADER) + sd_len;
-        memcpy(ie_pos + sizeof(INDEX_ENTRY) + sizeof(ULONG), &sii_data, sizeof(sii_data));
-        ie_pos += ie_len;
+            /* Real NTFS does NOT 8-align the 4-byte $SII key: the 20-byte data
+             * follows immediately at offset 16+4 = 20, entry Length 40 (0x28).
+             * (ntfs-3g initialize_secure: data_offset=0x14, length=0x28.) */
+            ie = (INDEX_ENTRY *)ie_pos;
+            key_off = sizeof(INDEX_ENTRY);
+            data_off = key_off + sizeof(ULONG);
+            ie_len = NTFS_ALIGN_UP(data_off + sizeof(SECURITY_DESCRIPTOR_HEADER), 8);
+            ie->KeyLength = (USHORT)sizeof(ULONG);
+            ie->Data.ViewIndex.DataOffset = (USHORT)data_off;
+            ie->Data.ViewIndex.DataLength = (USHORT)sizeof(SECURITY_DESCRIPTOR_HEADER);
+            ie->Length = (USHORT)ie_len;
+            ie->Flags = 0;
+            memcpy(ie_pos + key_off, &sec_id, sizeof(ULONG));
+            memcpy(ie_pos + data_off, &sd_head[idx], sizeof(sd_head[idx]));
+            ie_pos += ie_len;
+        }
 
         /* End entry */
         ie = (INDEX_ENTRY *)ie_pos;
@@ -1463,6 +1520,18 @@ int mkntfs_format(const MKNTFS_IO *io, const MKNTFS_PARAMS *params)
     s.root_idx_lcn = next_lcn;
     bitmap_set(s.lcn_bitmap, s.root_idx_lcn, 1);
     next_lcn += 1;
+
+    /* $Secure:$SDS.  Real NTFS mirrors every security-descriptor entry at
+       Offset + 0x40000 (256 KiB), so the stream must span at least
+       0x40000 + first_entry_len.  Size it to a whole number of clusters
+       covering the mirror block; build_secure() fills sds_data_size. */
+    {
+        ULONGLONG sds_span = 0x40000ULL + 4096ULL; /* mirror block + room for the entry */
+        s.sds_clusters = (sds_span + s.cluster_size - 1) / s.cluster_size;
+        s.sds_lcn = next_lcn;
+        bitmap_set(s.lcn_bitmap, s.sds_lcn, s.sds_clusters);
+        next_lcn += s.sds_clusters;
+    }
 
     /* $MFTMirr at mid-volume */
     ULONGLONG mirr_clusters = (4 * s.mft_record_size + s.cluster_size - 1) / s.cluster_size;
