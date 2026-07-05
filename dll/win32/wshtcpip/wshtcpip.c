@@ -574,6 +574,30 @@ WSHNotify(
             Context->RequestQueue = NULL;
             break;
 
+        case WSH_NOTIFY_LISTEN:
+            DPRINT("WSHNotify: WSH_NOTIFY_LISTEN\n");
+            Context->SocketState = SocketStateListening;
+            break;
+
+        case WSH_NOTIFY_CONNECT:
+        case WSH_NOTIFY_ACCEPT:
+            DPRINT("WSHNotify: %s\n",
+                   NotifyEvent == WSH_NOTIFY_CONNECT ? "WSH_NOTIFY_CONNECT" : "WSH_NOTIFY_ACCEPT");
+            Context->SocketState = SocketStateConnected;
+            break;
+
+        case WSH_NOTIFY_CONNECT_ERROR:
+            DPRINT("WSHNotify: WSH_NOTIFY_CONNECT_ERROR\n");
+            if (Context->SocketState == SocketStateConnected)
+                Context->SocketState = SocketStateBound;
+            break;
+
+        case WSH_NOTIFY_SHUTDOWN_RECEIVE:
+        case WSH_NOTIFY_SHUTDOWN_SEND:
+        case WSH_NOTIFY_SHUTDOWN_ALL:
+            DPRINT("WSHNotify: shutdown event %lu\n", NotifyEvent);
+            break;
+
         default:
             DPRINT1("Unwanted notification received! (%ld)\n", NotifyEvent);
             break;
@@ -711,7 +735,15 @@ WSHOpenSocket2(
     Context->SocketState   = SocketStateCreated;
 
     *HelperDllSocketContext = Context;
-    *NotificationEvents = WSH_NOTIFY_CLOSE | WSH_NOTIFY_BIND;
+    *NotificationEvents = WSH_NOTIFY_CLOSE |
+                          WSH_NOTIFY_BIND |
+                          WSH_NOTIFY_LISTEN |
+                          WSH_NOTIFY_CONNECT |
+                          WSH_NOTIFY_ACCEPT |
+                          WSH_NOTIFY_CONNECT_ERROR |
+                          WSH_NOTIFY_SHUTDOWN_RECEIVE |
+                          WSH_NOTIFY_SHUTDOWN_SEND |
+                          WSH_NOTIFY_SHUTDOWN_ALL;
 
     return NO_ERROR;
 }
