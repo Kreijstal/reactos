@@ -31,6 +31,7 @@
 #endif
 
 #include "mkntfs.h"
+#include "ntfspriv.h"
 
 /* Forward declarations for embedded data */
 extern const ATTR_DEF *get_attrdef_table(ULONG *count);
@@ -196,11 +197,17 @@ static int runlen_bytes_unsigned(ULONGLONG val)
 
 /* Encode a single data run: (length, lcn_offset) relative to previous LCN.
    Returns bytes written. */
-static int encode_run(UCHAR *dst, ULONGLONG length, LONGLONG lcn_offset)
+int ntfs_encode_run(UCHAR *dst, ULONGLONG length, LONGLONG lcn_offset)
 {
     int len_bytes = runlen_bytes_unsigned(length);
+    /* A real (non-sparse) run must always emit at least one offset byte:
+     * zero offset bytes means "sparse run" to every NTFS reader.  Hit by
+     * $Boot, whose first run starts at LCN 0 (delta 0). */
     int off_bytes = runlen_bytes(lcn_offset);
     int i;
+
+    if (off_bytes == 0)
+        off_bytes = 1;
 
     dst[0] = (UCHAR)((off_bytes << 4) | len_bytes);
     for (i = 0; i < len_bytes; i++)
@@ -239,7 +246,7 @@ static void apply_fixup(void *record, ULONG record_size, ULONG sector_size)
  * ============================================================ */
 
 /* Initialize a file record header */
-static void init_file_record(FILE_RECORD_HEADER *rec, ULONG rec_size, ULONG sector_size,
+void ntfs_init_file_record(FILE_RECORD_HEADER *rec, ULONG rec_size, ULONG sector_size,
                               USHORT seq_num, USHORT flags, ULONG mft_num)
 {
     ULONG usa_offset, usa_size;
@@ -289,10 +296,10 @@ static UCHAR *get_attr_pos(FILE_RECORD_HEADER *rec)
 }
 
 /* Add a resident attribute. Returns pointer past the new attribute. */
-static UCHAR *add_resident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
-                                 ULONG type, const WCHAR *name, ULONG name_len,
-                                 const void *value, ULONG value_len,
-                                 UCHAR resident_flags)
+UCHAR *ntfs_add_resident_attr(USHORT *next_instance, FILE_RECORD_HEADER *rec,
+                              ULONG type, const WCHAR *name, ULONG name_len,
+                              const void *value, ULONG value_len,
+                              UCHAR resident_flags)
 {
     UCHAR *pos = get_attr_pos(rec);
     ATTR_RECORD *a = (ATTR_RECORD *)pos;
@@ -304,7 +311,7 @@ static UCHAR *add_resident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     a->NonResident = 0;
     a->NameLength = (UCHAR)name_len;
     a->Flags = 0;
-    a->Instance = s->next_instance++;
+    a->Instance = (*next_instance)++;
 
     /* Name goes right after the fixed header (offset 0x18 for resident) */
     name_off = 0x18;
@@ -335,11 +342,22 @@ static UCHAR *add_resident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     return pos + total_len;
 }
 
+/* Formatter-state shim */
+static UCHAR *add_resident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
+                                 ULONG type, const WCHAR *name, ULONG name_len,
+                                 const void *value, ULONG value_len,
+                                 UCHAR resident_flags)
+{
+    return ntfs_add_resident_attr(&s->next_instance, rec, type, name, name_len,
+                                  value, value_len, resident_flags);
+}
+
 /* Add a non-resident attribute with a simple single-run mapping. */
-static UCHAR *add_nonresident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
-                                    ULONG type, const WCHAR *name, ULONG name_len,
-                                    ULONGLONG start_lcn, ULONGLONG num_clusters,
-                                    ULONGLONG data_size, ULONGLONG initialized_size)
+UCHAR *ntfs_add_nonresident_attr(USHORT *next_instance, ULONG cluster_size,
+                                 FILE_RECORD_HEADER *rec,
+                                 ULONG type, const WCHAR *name, ULONG name_len,
+                                 ULONGLONG start_lcn, ULONGLONG num_clusters,
+                                 ULONGLONG data_size, ULONGLONG initialized_size)
 {
     UCHAR *pos = get_attr_pos(rec);
     ATTR_RECORD *a = (ATTR_RECORD *)pos;
@@ -352,7 +370,7 @@ static UCHAR *add_nonresident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     a->NonResident = 1;
     a->NameLength = (UCHAR)name_len;
     a->Flags = 0;
-    a->Instance = s->next_instance++;
+    a->Instance = (*next_instance)++;
 
     /* Name offset: right after the fixed non-resident header (0x40) */
     name_off = 0x40;
@@ -368,12 +386,12 @@ static UCHAR *add_nonresident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     a->NR.LowestVcn = 0;
     a->NR.HighestVcn = num_clusters - 1;
     a->NR.MappingPairsOffset = (USHORT)runs_off;
-    a->NR.AllocatedSize = (LONGLONG)(num_clusters * s->cluster_size);
+    a->NR.AllocatedSize = (LONGLONG)(num_clusters * cluster_size);
     a->NR.DataSize = (LONGLONG)data_size;
     a->NR.InitializedSize = (LONGLONG)initialized_size;
 
     /* Encode single data run */
-    run_len = encode_run(run_buf, num_clusters, (LONGLONG)start_lcn);
+    run_len = ntfs_encode_run(run_buf, num_clusters, (LONGLONG)start_lcn);
     memcpy(pos + runs_off, run_buf, run_len);
     pos[runs_off + run_len] = 0; /* Terminator */
 
@@ -388,17 +406,29 @@ static UCHAR *add_nonresident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     return pos + total_len;
 }
 
+/* Formatter-state shim */
+static UCHAR *add_nonresident_attr(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
+                                    ULONG type, const WCHAR *name, ULONG name_len,
+                                    ULONGLONG start_lcn, ULONGLONG num_clusters,
+                                    ULONGLONG data_size, ULONGLONG initialized_size)
+{
+    return ntfs_add_nonresident_attr(&s->next_instance, s->cluster_size, rec,
+                                     type, name, name_len,
+                                     start_lcn, num_clusters,
+                                     data_size, initialized_size);
+}
+
 /* ============================================================
  * System file record builders
  * ============================================================ */
 
-static void make_file_name(FILE_NAME_ATTR *fn, ULONGLONG parent_mft_ref,
-                            const WCHAR *name, UCHAR name_len,
-                            ULONG file_attrs, ULONGLONG alloc_size,
-                            ULONGLONG data_size, ULONGLONG time_val)
+void ntfs_make_file_name(FILE_NAME_ATTR *fn, ULONGLONG parent_ref,
+                         const WCHAR *name, UCHAR name_len, UCHAR name_type,
+                         ULONG file_attrs, ULONGLONG alloc_size,
+                         ULONGLONG data_size, ULONGLONG time_val)
 {
-    /* Parent ref: MFT number in low 48 bits, seq in high 16 */
-    fn->ParentDirectory = parent_mft_ref | ((ULONGLONG)1 << 48); /* seq 1 */
+    /* parent_ref: complete reference (MFT number low 48 bits, seq high 16) */
+    fn->ParentDirectory = parent_ref;
     fn->CreationTime = time_val;
     fn->ModificationTime = time_val;
     fn->MftModificationTime = time_val;
@@ -409,12 +439,12 @@ static void make_file_name(FILE_NAME_ATTR *fn, ULONGLONG parent_mft_ref,
     fn->Extended.EaInfo.PackedEaSize = 0;
     fn->Extended.EaInfo.Reserved = 0;
     fn->FileNameLength = name_len;
-    fn->FileNameType = FILE_NAME_WIN32_AND_DOS;
+    fn->FileNameType = name_type;
     memcpy(fn->FileName, name, name_len * sizeof(WCHAR));
 }
 
 /* MFT reference: record number | (seq << 48) */
-static ULONGLONG mft_ref(ULONG record, USHORT seq)
+ULONGLONG ntfs_mft_ref(ULONG record, USHORT seq)
 {
     return (ULONGLONG)record | ((ULONGLONG)seq << 48);
 }
@@ -436,8 +466,9 @@ static void add_si_and_fn(MKNTFS_STATE *s, FILE_RECORD_HEADER *rec,
     add_resident_attr(s, rec, AT_STANDARD_INFORMATION, NULL, 0, &si, 72, 0);
 
     memset(fn_buf, 0, sizeof(fn_buf));
-    make_file_name(fn, FILE_Root, name, name_len,
-                   file_attrs, alloc_size, data_size, s->now);
+    ntfs_make_file_name(fn, ntfs_mft_ref(FILE_Root, 1), name, name_len,
+                        FILE_NAME_WIN32_AND_DOS,
+                        file_attrs, alloc_size, data_size, s->now);
     add_resident_attr(s, rec, AT_FILE_NAME, NULL, 0, fn_buf,
                       sizeof(FILE_NAME_ATTR) - sizeof(WCHAR) + name_len * sizeof(WCHAR),
                       0x01); /* ResidentFlags=0x01: indexed */
@@ -449,7 +480,7 @@ static void build_mft(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 0 * s->mft_record_size);
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_MFT);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_MFT);
     rec->LinkCount = 1;
 
     WCHAR mft_name[] = { '$', 'M', 'F', 'T' };
@@ -478,7 +509,7 @@ static void build_mftmirr(MKNTFS_STATE *s)
     ULONGLONG mirr_clusters = (mirr_size + s->cluster_size - 1) / s->cluster_size;
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_MFTMirr);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_MFTMirr);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'M', 'F', 'T', 'M', 'i', 'r', 'r' };
@@ -498,7 +529,7 @@ static void build_logfile(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 2 * s->mft_record_size);
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_LogFile);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_LogFile);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'L', 'o', 'g', 'F', 'i', 'l', 'e' };
@@ -519,7 +550,7 @@ static void build_volume(MKNTFS_STATE *s)
     VOLUME_INFORMATION vi;
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Volume);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Volume);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'V', 'o', 'l', 'u', 'm', 'e' };
@@ -548,7 +579,7 @@ static void build_attrdef(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 4 * s->mft_record_size);
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_AttrDef);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_AttrDef);
     rec->LinkCount = 1;
 
     ULONG attrdef_count;
@@ -571,7 +602,7 @@ static void build_attrdef(MKNTFS_STATE *s)
 }
 
 /* Helper: create an index entry for a system file in root directory */
-static ULONG make_index_entry(UCHAR *buf, ULONG mft_num, USHORT seq,
+ULONG ntfs_make_index_entry(UCHAR *buf, ULONG mft_num, USHORT seq,
                                const WCHAR *name, UCHAR name_len,
                                ULONG file_attrs, ULONGLONG time_val)
 {
@@ -581,13 +612,13 @@ static ULONG make_index_entry(UCHAR *buf, ULONG mft_num, USHORT seq,
     ULONG entry_size = NTFS_ALIGN_UP(sizeof(INDEX_ENTRY) + fn_size, 8);
 
     memset(buf, 0, entry_size);
-    ie->Data.Directory.IndexedFile = mft_ref(mft_num, seq);
+    ie->Data.Directory.IndexedFile = ntfs_mft_ref(mft_num, seq);
     ie->Length = (USHORT)entry_size;
     ie->KeyLength = (USHORT)fn_size;
     ie->Flags = 0;
 
     fn = (FILE_NAME_ATTR *)(buf + sizeof(INDEX_ENTRY));
-    fn->ParentDirectory = mft_ref(FILE_Root, 1);
+    fn->ParentDirectory = ntfs_mft_ref(FILE_Root, 1);
     fn->CreationTime = time_val;
     fn->ModificationTime = time_val;
     fn->MftModificationTime = time_val;
@@ -606,7 +637,7 @@ static void build_root(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 5 * s->mft_record_size);
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1,
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1,
                      FRH_IN_USE | FRH_DIRECTORY, FILE_Root);
     rec->LinkCount = 1;
 
@@ -722,7 +753,7 @@ static int write_root_index(MKNTFS_STATE *s)
     int num_sysfiles = sizeof(sysfiles) / sizeof(sysfiles[0]);
 
     for (i = 0; i < num_sysfiles; i++) {
-        entries_size += make_index_entry(entries_pos + entries_size,
+        entries_size += ntfs_make_index_entry(entries_pos + entries_size,
                                          sysfiles[i].mft_num, 1,
                                          sysfiles[i].name, sysfiles[i].len,
                                          sysfiles[i].attrs, s->now);
@@ -764,7 +795,7 @@ static void build_bitmap(MKNTFS_STATE *s)
     FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + 6 * s->mft_record_size);
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Bitmap);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Bitmap);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'B', 'i', 't', 'm', 'a', 'p' };
@@ -789,7 +820,7 @@ static void build_boot(MKNTFS_STATE *s)
         boot_clusters = (s->sector_size * 16 + s->cluster_size - 1) / s->cluster_size;
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Boot);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_Boot);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'B', 'o', 'o', 't' };
@@ -813,7 +844,7 @@ static void build_simple_system_file(MKNTFS_STATE *s, ULONG record_num,
     ULONG file_attrs = FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM;
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, flags, record_num);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, flags, record_num);
     rec->LinkCount = 1;
 
     if (flags & FRH_DIRECTORY)
@@ -911,7 +942,7 @@ static void build_secure(MKNTFS_STATE *s)
     ULONG hash_val;
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1,
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1,
                      FRH_IN_USE | FRH_VIEW_INDEX, FILE_Secure);
     rec->LinkCount = 1;
 
@@ -1061,7 +1092,7 @@ static void build_upcase(MKNTFS_STATE *s)
     ULONGLONG upcase_bytes = (ULONGLONG)s->upcase_len * sizeof(WCHAR);
 
     s->next_instance = 0;
-    init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_UpCase);
+    ntfs_init_file_record(rec, s->mft_record_size, s->sector_size, 1, FRH_IN_USE, FILE_UpCase);
     rec->LinkCount = 1;
 
     WCHAR name[] = { '$', 'U', 'p', 'C', 'a', 's', 'e' };
@@ -1091,16 +1122,30 @@ static void build_remaining_system_files(MKNTFS_STATE *s)
     WCHAR n_extend[] = { '$', 'E', 'x', 't', 'e', 'n', 'd' };
     build_simple_system_file(s, FILE_Extend, n_extend, 7, FRH_IN_USE | FRH_DIRECTORY);
 
-    /* Records 12-15: unused but marked with FILE magic */
+    /* Records 12-15: reserved records.  Real NTFS (Windows and ntfs-3g)
+     * creates these IN USE with $STANDARD_INFORMATION + an empty resident
+     * $DATA, LinkCount 0 and no $FILE_NAME -- they are placeholders the
+     * driver may later convert.  They must be in use to match the $MFT
+     * bitmap, which marks records 0-15 allocated. */
     ULONG i;
     for (i = 12; i < 16; i++) {
         FILE_RECORD_HEADER *rec = (FILE_RECORD_HEADER *)(s->mft_buf + i * s->mft_record_size);
-        init_file_record(rec, s->mft_record_size, s->sector_size,
-                         (USHORT)(i + 1), 0, i); /* Not in use */
-        /* Write AT_END only */
-        ULONG *end = (ULONG *)((UCHAR *)rec + rec->AttributeOffset);
-        *end = AT_END;
-        rec->BytesInUse = rec->AttributeOffset + 8;
+        STANDARD_INFORMATION si;
+
+        s->next_instance = 0;
+        ntfs_init_file_record(rec, s->mft_record_size, s->sector_size,
+                              (USHORT)(i + 1), FRH_IN_USE, i);
+        rec->LinkCount = 0;
+
+        memset(&si, 0, sizeof(si));
+        si.CreationTime = si.ModificationTime =
+            si.MftModificationTime = si.AccessTime = s->now;
+        si.FileAttributes = FILE_ATTR_HIDDEN | FILE_ATTR_SYSTEM;
+        si.SecurityId = s->current_security_id;
+        add_resident_attr(s, rec, AT_STANDARD_INFORMATION, NULL, 0, &si, 72, 0);
+        add_resident_attr(s, rec, AT_DATA, NULL, 0, NULL, 0, 0);
+
+        finalize_record(s, rec);
     }
 }
 
@@ -1173,8 +1218,8 @@ static void apply_lfs_fixup(UCHAR *page, ULONG page_size, ULONG sector_size,
  * After the USA is stamped, every sector's last USHORT equals the USN so
  * FixupUpdateSequenceArray succeeds when the driver reads the page back.
  */
-static void build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
-                             ULONGLONG file_size)
+void ntfs_build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
+                          ULONGLONG file_size)
 {
     /* NTFS_RECORD_HEADER field offsets - match driver layout exactly. */
     NTFS_LFS_RESTART_AREA area;
@@ -1256,7 +1301,7 @@ static int write_logfile(MKNTFS_STATE *s)
     /* Build one CLEAN RSTR page; write it verbatim twice. */
     page = (UCHAR *)malloc(page_size);
     if (!page) goto done;
-    build_rstr_page(page, page_size, s->sector_size, s->logfile_size);
+    ntfs_build_rstr_page(page, page_size, s->sector_size, s->logfile_size);
 
     if (io_write(s, offset, page, page_size) < 0) goto done;
     if (io_write(s, offset + page_size, page, page_size) < 0) goto done;
