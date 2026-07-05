@@ -10,6 +10,16 @@
 
 #include <iphlpapi.h>
 
+#ifndef SIO_BSP_HANDLE
+#define SIO_BSP_HANDLE          _WSAIOR(IOC_WS2, 27)
+#define SIO_BSP_HANDLE_SELECT   _WSAIOR(IOC_WS2, 28)
+#define SIO_BSP_HANDLE_POLL     _WSAIOR(IOC_WS2, 29)
+#endif
+
+#ifndef SIO_BASE_HANDLE
+#define SIO_BASE_HANDLE         _WSAIOR(IOC_WS2, 34)
+#endif
+
 void traceaddr(char* txt, sockaddr_gen a)
 {
     trace("  %s.AddressIn.sin_family %x\n", txt, a.AddressIn.sin_family);
@@ -224,7 +234,112 @@ cleanup:
     WSACleanup();
 }
 
+static
+void
+Test_WSAIoctl_SetKeepAlive(void)
+{
+    WSADATA wdata;
+    INT iResult;
+    SOCKET sck;
+    BOOL KeepAlive;
+
+    iResult = WSAStartup(MAKEWORD(2, 2), &wdata);
+    ok(iResult == 0, "WSAStartup failed. iResult = %d\n", iResult);
+    if (iResult != 0)
+        return;
+
+    sck = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+    ok(sck != INVALID_SOCKET, "WSASocket failed. error = %d\n", WSAGetLastError());
+    if (sck == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return;
+    }
+
+    KeepAlive = TRUE;
+    iResult = setsockopt(sck,
+                         SOL_SOCKET,
+                         SO_KEEPALIVE,
+                         (const char *)&KeepAlive,
+                         sizeof(KeepAlive));
+    ok(iResult == 0, "setsockopt(SO_KEEPALIVE) failed. error = %d\n", WSAGetLastError());
+
+    KeepAlive = FALSE;
+    iResult = setsockopt(sck,
+                         SOL_SOCKET,
+                         SO_KEEPALIVE,
+                         (const char *)&KeepAlive,
+                         sizeof(KeepAlive));
+    ok(iResult == 0, "setsockopt(SO_KEEPALIVE off) failed. error = %d\n", WSAGetLastError());
+
+    closesocket(sck);
+    WSACleanup();
+}
+
+static
+void
+Test_WSAIoctl_GetSocketHandle(void)
+{
+    static const DWORD Ioctls[] =
+    {
+        SIO_BASE_HANDLE,
+        SIO_BSP_HANDLE,
+        SIO_BSP_HANDLE_SELECT,
+        SIO_BSP_HANDLE_POLL
+    };
+    WSADATA wdata;
+    INT iResult;
+    SOCKET sck;
+    SOCKET BaseSocket;
+    DWORD BytesReturned;
+    UINT i;
+
+    iResult = WSAStartup(MAKEWORD(2, 2), &wdata);
+    ok(iResult == 0, "WSAStartup failed. iResult = %d\n", iResult);
+    if (iResult != 0)
+        return;
+
+    sck = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, 0);
+    ok(sck != INVALID_SOCKET, "WSASocket failed. error = %d\n", WSAGetLastError());
+    if (sck == INVALID_SOCKET)
+    {
+        WSACleanup();
+        return;
+    }
+
+    for (i = 0; i < _countof(Ioctls); ++i)
+    {
+        BaseSocket = INVALID_SOCKET;
+        BytesReturned = 0xdeadbeef;
+        iResult = WSAIoctl(sck,
+                           Ioctls[i],
+                           NULL,
+                           0,
+                           &BaseSocket,
+                           sizeof(BaseSocket),
+                           &BytesReturned,
+                           NULL,
+                           NULL);
+        ok(iResult == 0, "WSAIoctl(%lx) failed. error = %d\n", Ioctls[i], WSAGetLastError());
+        ok(BaseSocket == sck,
+           "WSAIoctl(%lx) returned socket %Ix, expected %Ix\n",
+           Ioctls[i],
+           (ULONG_PTR)BaseSocket,
+           (ULONG_PTR)sck);
+        ok(BytesReturned == sizeof(BaseSocket),
+           "WSAIoctl(%lx) returned %lu bytes, expected %Iu\n",
+           Ioctls[i],
+           BytesReturned,
+           sizeof(BaseSocket));
+    }
+
+    closesocket(sck);
+    WSACleanup();
+}
+
 START_TEST(WSAIoctl)
 {
     Test_WSAIoctl_GetInterfaceList();
+    Test_WSAIoctl_SetKeepAlive();
+    Test_WSAIoctl_GetSocketHandle();
 }

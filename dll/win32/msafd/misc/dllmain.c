@@ -28,7 +28,15 @@ HANDLE SockAsyncHelperAfdHandle;
 HANDLE SockAsyncCompletionPort = NULL;
 BOOLEAN SockAsyncSelectCalled;
 
+#ifndef SIO_BSP_HANDLE
+#define SIO_BSP_HANDLE          _WSAIOR(IOC_WS2, 27)
+#define SIO_BSP_HANDLE_SELECT   _WSAIOR(IOC_WS2, 28)
+#define SIO_BSP_HANDLE_POLL     _WSAIOR(IOC_WS2, 29)
+#endif
 
+#ifndef SIO_BASE_HANDLE
+#define SIO_BASE_HANDLE         _WSAIOR(IOC_WS2, 34)
+#endif
 
 /*
  * FUNCTION: Creates a new socket
@@ -2723,6 +2731,27 @@ WSPIoctl(IN  SOCKET Handle,
             *(BOOL*)lpvOutBuffer = !Socket->SharedData->OobInline;
 
             cbRet = sizeof(BOOL);
+            Errno = NO_ERROR;
+            Ret = NO_ERROR;
+            break;
+        case SIO_BASE_HANDLE:
+        case SIO_BSP_HANDLE:
+        case SIO_BSP_HANDLE_SELECT:
+        case SIO_BSP_HANDLE_POLL:
+            if (IS_INTRESOURCE(lpvOutBuffer) || cbOutBuffer == 0)
+            {
+                cbRet = sizeof(SOCKET);
+                Errno = WSAEFAULT;
+                break;
+            }
+            if (cbOutBuffer < sizeof(SOCKET))
+            {
+                Errno = WSAEINVAL;
+                break;
+            }
+
+            *(SOCKET *)lpvOutBuffer = Handle;
+            cbRet = sizeof(SOCKET);
             Errno = NO_ERROR;
             Ret = NO_ERROR;
             break;
