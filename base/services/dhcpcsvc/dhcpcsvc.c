@@ -19,6 +19,7 @@ SERVICE_STATUS_HANDLE ServiceStatusHandle = 0;
 SERVICE_STATUS ServiceStatus;
 HANDLE hStopEvent = NULL;
 HANDLE hAdapterStateChangedEvent = NULL;
+HANDLE hAdapterDiscoveryEvent = NULL;
 
 extern SOCKET DhcpSocket;
 
@@ -929,11 +930,21 @@ ServiceMain(DWORD argc, LPWSTR* argv)
         return;
     }
 
+    hAdapterDiscoveryEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    if (hAdapterDiscoveryEvent == NULL)
+    {
+        CloseHandle(hAdapterStateChangedEvent);
+        CloseHandle(hStopEvent);
+        UpdateServiceStatus(SERVICE_STOPPED);
+        return;
+    }
+
     UpdateServiceStatus(SERVICE_START_PENDING);
 
     if (!init_client())
     {
         DbgPrint("DHCPCSVC: init_client() failed!\n");
+        CloseHandle(hAdapterDiscoveryEvent);
         CloseHandle(hAdapterStateChangedEvent);
         CloseHandle(hStopEvent);
         UpdateServiceStatus(SERVICE_STOPPED);
@@ -947,6 +958,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     {
         DbgPrint("DHCPCSVC: PipeInit() failed!\n");
         stop_client();
+        CloseHandle(hAdapterDiscoveryEvent);
         CloseHandle(hAdapterStateChangedEvent);
         CloseHandle(hStopEvent);
         UpdateServiceStatus(SERVICE_STOPPED);
@@ -959,6 +971,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
         DbgPrint("DHCPCSVC: StartAdapterDiscovery() failed!\n");
         ShutdownRpc();
         stop_client();
+        CloseHandle(hAdapterDiscoveryEvent);
         CloseHandle(hAdapterStateChangedEvent);
         CloseHandle(hStopEvent);
         UpdateServiceStatus(SERVICE_STOPPED);
@@ -996,6 +1009,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
     }
 
     DPRINT("Closing events!\n");
+    CloseHandle(hAdapterDiscoveryEvent);
     CloseHandle(hAdapterStateChangedEvent);
     CloseHandle(hStopEvent);
 
