@@ -7620,7 +7620,7 @@ GreGetCharWidthW(
         FT_Load_Glyph(face, glyph_index, FT_LOAD_DEFAULT);
 
         if (!fl)
-            SafeBuffF[i - FirstChar] = (FLOAT) ((face->glyph->advance.x + 32) >> 6);
+            SafeBuffF[i - FirstChar] = (FLOAT)face->glyph->advance.x / (64.0f * 16.0f);
         else
             SafeBuffI[i - FirstChar] = (face->glyph->advance.x + 32) >> 6;
     }
