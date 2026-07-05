@@ -1801,6 +1801,14 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                      BOOLEAN ReplaceIfExists,
                      BOOLEAN CaseSensitive);
 
+NTSTATUS
+NtfsLinkFileRecord(PDEVICE_EXTENSION DeviceExt,
+                   PNTFS_FCB Fcb,
+                   ULONGLONG NewParentMftIndex,
+                   PUNICODE_STRING NewFileName,
+                   BOOLEAN ReplaceIfExists,
+                   BOOLEAN CaseSensitive);
+
 VOID
 NtfsDumpFileRecord(PDEVICE_EXTENSION Vcb,
                    PFILE_RECORD_HEADER FileRecord);

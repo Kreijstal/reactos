@@ -1398,6 +1398,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
         PFILE_END_OF_FILE_INFORMATION EndOfFileInfo;
         PFILE_ALLOCATION_INFORMATION AllocationInfo;
         PFILE_DISPOSITION_INFORMATION DispositionInfo;
+        PFILE_LINK_INFORMATION LinkInfo;
         PFILE_RENAME_INFORMATION RenameInfo;
         PFILE_POSITION_INFORMATION PositionInfo;
 
@@ -1487,6 +1488,81 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             break;
         }
 #endif
+
+        case FileLinkInformation:
+        {
+            PNTFS_FCB TargetFcb = NULL;
+
+            if (BufferLength < FIELD_OFFSET(FILE_LINK_INFORMATION, FileName))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            LinkInfo = (PFILE_LINK_INFORMATION)SystemBuffer;
+            if (BufferLength < FIELD_OFFSET(FILE_LINK_INFORMATION, FileName) + LinkInfo->FileNameLength)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            if (Fcb->Stream[0] != UNICODE_NULL)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /*
+             * FILE_LINK_INFORMATION and FILE_RENAME_INFORMATION have the same
+             * leading layout used here: replace flag, root directory,
+             * filename length, and filename buffer.
+             */
+            Status = NtfsBuildRenamePath(Fcb,
+                                         (PFILE_RENAME_INFORMATION)LinkInfo,
+                                         Stack->Parameters.SetFile.FileObject,
+                                         &RenamePath,
+                                         &RenameParentPath,
+                                         &RenameLeafName);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            if (Stack->Parameters.SetFile.FileObject != NULL &&
+                Stack->Parameters.SetFile.FileObject->FsContext != NULL)
+            {
+                TargetFcb = Stack->Parameters.SetFile.FileObject->FsContext;
+                if (TargetFcb->Vcb == Fcb->Vcb)
+                {
+                    ParentMftIndex = TargetFcb->MFTIndex;
+                }
+            }
+
+            if (ParentMftIndex == NTFS_FILE_ROOT &&
+                (RenameParentPath.Length != sizeof(WCHAR) ||
+                 RenameParentPath.Buffer[0] != L'\\'))
+            {
+                Status = NtfsLookupFile(DeviceExt,
+                                        &RenameParentPath,
+                                        BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                        &ParentFileRecord,
+                                        &ParentMftIndex);
+                if (!NT_SUCCESS(Status))
+                    break;
+
+                if (!(ParentFileRecord->Flags & FRH_DIRECTORY))
+                {
+                    Status = STATUS_NOT_A_DIRECTORY;
+                    break;
+                }
+            }
+
+            Status = NtfsLinkFileRecord(DeviceExt,
+                                        Fcb,
+                                        ParentMftIndex,
+                                        &RenameLeafName,
+                                        LinkInfo->ReplaceIfExists,
+                                        BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+            break;
+        }
 
         case FileRenameInformation:
         {
