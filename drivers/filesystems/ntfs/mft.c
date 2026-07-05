@@ -3985,8 +3985,8 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     USHORT ParentSequenceNumber;
     NTFS_FCB ExistingFcb;
 
-    if (NtfsFCBIsDirectory(Fcb))
-        return STATUS_NOT_IMPLEMENTED;
+    if (NtfsFCBIsRoot(Fcb))
+        return STATUS_ACCESS_DENIED;
 
     if (NewFileName->Length == 0 || FsRtlDoesNameContainWildCards(NewFileName))
         return STATUS_OBJECT_NAME_INVALID;
@@ -4186,6 +4186,184 @@ Cleanup:
         ExFreePoolWithTag(OldFileNameBuffer, TAG_NTFS);
     if (FileNameContext)
         ReleaseAttributeContext(FileNameContext);
+    if (NewDirectoryEntry)
+        ExFreePoolWithTag(NewDirectoryEntry, TAG_NTFS);
+    if (ParentFileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+    if (ExistingRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
+    if (FileRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+NTSTATUS
+NtfsLinkFileRecord(PDEVICE_EXTENSION DeviceExt,
+                   PNTFS_FCB Fcb,
+                   ULONGLONG NewParentMftIndex,
+                   PUNICODE_STRING NewFileName,
+                   BOOLEAN ReplaceIfExists,
+                   BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+    PFILE_RECORD_HEADER ExistingRecord = NULL;
+    PFILE_RECORD_HEADER ParentFileRecord = NULL;
+    PFILENAME_ATTRIBUTE CurrentName;
+    PFILENAME_ATTRIBUTE NewDirectoryEntry = NULL;
+    ULONGLONG ExistingMftIndex;
+    ULONGLONG FileReferenceNumber;
+    ULONG NewFileNameLength;
+    USHORT ParentSequenceNumber;
+
+    if (NtfsFCBIsRoot(Fcb) || NtfsFCBIsDirectory(Fcb) || Fcb->Stream[0] != UNICODE_NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (NewFileName->Length == 0 || FsRtlDoesNameContainWildCards(NewFileName))
+        return STATUS_OBJECT_NAME_INVALID;
+
+    NtfsInvalidateCachedFileRecord(Fcb);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!FileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    if (FileRecord->LinkCount == MAXUSHORT)
+    {
+        Status = STATUS_TOO_MANY_LINKS;
+        goto Cleanup;
+    }
+
+    CurrentName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    if (CurrentName == NULL)
+    {
+        Status = STATUS_OBJECT_NAME_NOT_FOUND;
+        goto Cleanup;
+    }
+
+    Status = NtfsLookupFileAt(DeviceExt,
+                              NewFileName,
+                              CaseSensitive,
+                              &ExistingRecord,
+                              &ExistingMftIndex,
+                              NewParentMftIndex);
+    if (NT_SUCCESS(Status))
+    {
+        Status = (ExistingMftIndex == Fcb->MFTIndex) ? STATUS_SUCCESS : STATUS_OBJECT_NAME_COLLISION;
+        goto Cleanup;
+    }
+    if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
+        goto Cleanup;
+
+    ParentSequenceNumber = NTFS_FILE_ROOT;
+    if (NewParentMftIndex != NTFS_FILE_ROOT)
+    {
+        ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (!ParentFileRecord)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
+
+        Status = ReadFileRecord(DeviceExt, NewParentMftIndex, ParentFileRecord);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        if (!(ParentFileRecord->Flags & FRH_DIRECTORY))
+        {
+            Status = STATUS_NOT_A_DIRECTORY;
+            goto Cleanup;
+        }
+
+        ParentSequenceNumber = ParentFileRecord->SequenceNumber;
+    }
+
+    NewFileNameLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + NewFileName->Length;
+    NewDirectoryEntry = ExAllocatePoolWithTag(NonPagedPool, NewFileNameLength, TAG_NTFS);
+    if (!NewDirectoryEntry)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    RtlZeroMemory(NewDirectoryEntry, NewFileNameLength);
+    RtlCopyMemory(NewDirectoryEntry,
+                  CurrentName,
+                  min(GetFileNameAttributeLength(CurrentName),
+                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name)));
+    NewDirectoryEntry->DirectoryFileReferenceNumber = NewParentMftIndex;
+    if (NewParentMftIndex == NTFS_FILE_ROOT)
+        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)NTFS_FILE_ROOT << 48;
+    else
+        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)ParentSequenceNumber << 48;
+    NewDirectoryEntry->NameLength = NewFileName->Length / sizeof(WCHAR);
+    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3(NewFileName, NULL, NULL))
+        NewDirectoryEntry->NameType = NTFS_FILE_NAME_WIN32_AND_DOS;
+    else
+        NewDirectoryEntry->NameType = NTFS_FILE_NAME_POSIX;
+    RtlCopyMemory(NewDirectoryEntry->Name, NewFileName->Buffer, NewFileName->Length);
+
+    FileReferenceNumber = Fcb->MFTIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
+    Status = NtfsAddFilenameToDirectory(DeviceExt,
+                                        NewParentMftIndex,
+                                        FileReferenceNumber,
+                                        NewDirectoryEntry,
+                                        CaseSensitive);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = AddResidentAttribute(DeviceExt,
+                                  FileRecord,
+                                  AttributeFileName,
+                                  NULL,
+                                  0,
+                                  NewDirectoryEntry,
+                                  NewFileNameLength);
+    if (!NT_SUCCESS(Status))
+        goto RollbackDirectory;
+
+    {
+        PNTFS_ATTR_RECORD Attribute;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+        while (Attribute->Type != AttributeEnd)
+        {
+            if (Attribute->Type == AttributeFileName &&
+                Attribute->Resident.ValueLength == NewFileNameLength &&
+                RtlCompareMemory((PCHAR)Attribute + Attribute->Resident.ValueOffset,
+                                 NewDirectoryEntry,
+                                 NewFileNameLength) == NewFileNameLength)
+            {
+                Attribute->Resident.Flags = RA_INDEXED;
+                break;
+            }
+
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+        }
+    }
+
+    FileRecord->LinkCount++;
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto RollbackDirectory;
+
+    Fcb->LinkCount = FileRecord->LinkCount;
+    Status = STATUS_SUCCESS;
+    goto Cleanup;
+
+RollbackDirectory:
+    NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                    NewParentMftIndex,
+                                    Fcb->MFTIndex,
+                                    NewFileName,
+                                    CaseSensitive);
+
+Cleanup:
     if (NewDirectoryEntry)
         ExFreePoolWithTag(NewDirectoryEntry, TAG_NTFS);
     if (ParentFileRecord)
