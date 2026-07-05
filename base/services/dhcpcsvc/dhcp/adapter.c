@@ -4,6 +4,7 @@
 #include <reactos/debug.h>
 
 extern HANDLE hAdapterStateChangedEvent;
+extern HANDLE hAdapterDiscoveryEvent;
 
 SOCKET DhcpSocket = INVALID_SOCKET;
 static LIST_ENTRY AdapterList;
@@ -572,7 +573,10 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
         if (Error != NO_ERROR)
             break;
 #else
-        if (WaitForSingleObject(hStopEvent, 3000) == WAIT_OBJECT_0)
+        HANDLE Events[2] = { hStopEvent, hAdapterDiscoveryEvent };
+        DWORD WaitResult = WaitForMultipleObjects(ARRAYSIZE(Events), Events, FALSE, 3000);
+
+        if (WaitResult == WAIT_OBJECT_0)
         {
             DPRINT("Stopping the discovery thread!\n");
             break;
@@ -590,6 +594,14 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
 HANDLE StartAdapterDiscovery(HANDLE hStopEvent) {
     return CreateThread(NULL, 0, AdapterDiscoveryThread, (LPVOID)hStopEvent, 0, NULL);
+}
+
+BOOL AdapterRequestDiscovery(VOID)
+{
+    if (hAdapterDiscoveryEvent == NULL)
+        return FALSE;
+
+    return SetEvent(hAdapterDiscoveryEvent);
 }
 
 void AdapterStop() {

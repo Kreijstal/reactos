@@ -99,6 +99,7 @@ void stop_client(void);
 
 void AdapterInit(VOID);
 HANDLE StartAdapterDiscovery(HANDLE hStopEvent);
+BOOL AdapterRequestDiscovery(VOID);
 void AdapterStop(VOID);
 HKEY FindAdapterKey(PDHCP_ADAPTER Adapter);
 DWORD LoadAlternateConfiguration(PDHCP_ADAPTER Adapter, HKEY AdapterKey);

@@ -15,6 +15,29 @@ static CRITICAL_SECTION ApiCriticalSection;
 
 extern HANDLE hAdapterStateChangedEvent;
 
+static
+PDHCP_ADAPTER
+FindAdapterNameWithDiscovery(
+    _In_ LPWSTR AdapterName)
+{
+    PDHCP_ADAPTER Adapter;
+
+    Adapter = AdapterFindName(AdapterName);
+    if (Adapter != NULL)
+        return Adapter;
+
+    if (!AdapterRequestDiscovery())
+        return NULL;
+
+    ApiUnlock();
+    WaitForSingleObject(hAdapterStateChangedEvent, 5000);
+    ApiLock();
+
+    Adapter = AdapterFindName(AdapterName);
+
+    return Adapter;
+}
+
 VOID ApiInit() {
     InitializeCriticalSection( &ApiCriticalSection );
 }
@@ -116,7 +139,7 @@ Server_EnableDhcp(
 
     ApiLock();
 
-    Adapter = AdapterFindName(AdapterName);
+    Adapter = FindAdapterNameWithDiscovery(AdapterName);
     if (Adapter == NULL)
     {
         ret = ERROR_FILE_NOT_FOUND;
