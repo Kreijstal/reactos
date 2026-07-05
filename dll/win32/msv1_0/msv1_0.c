@@ -23,6 +23,26 @@ typedef struct _LOGON_LIST_ENTRY
     SECURITY_LOGON_TYPE LogonType;
 } LOGON_LIST_ENTRY, *PLOGON_LIST_ENTRY;
 
+typedef struct _MSV1_0_INTERACTIVE_LOGON32
+{
+    MSV1_0_LOGON_SUBMIT_TYPE MessageType;
+    UNICODE_STRING32 LogonDomainName;
+    UNICODE_STRING32 UserName;
+    UNICODE_STRING32 Password;
+} MSV1_0_INTERACTIVE_LOGON32, *PMSV1_0_INTERACTIVE_LOGON32;
+
+typedef struct _MSV1_0_LM20_LOGON32
+{
+    MSV1_0_LOGON_SUBMIT_TYPE MessageType;
+    UNICODE_STRING32 LogonDomainName;
+    UNICODE_STRING32 UserName;
+    UNICODE_STRING32 Workstation;
+    UCHAR ChallengeToClient[MSV1_0_CHALLENGE_LENGTH];
+    STRING32 CaseSensitiveChallengeResponse;
+    STRING32 CaseInsensitiveChallengeResponse;
+    ULONG ParameterControl;
+} MSV1_0_LM20_LOGON32, *PMSV1_0_LM20_LOGON32;
+
 /* GLOBALS *****************************************************************/
 
 BOOL PackageInitialized = FALSE;
@@ -1487,6 +1507,7 @@ LsaApLogonUserEx2_Network(
 {
     NTSTATUS Status;
     PMSV1_0_LM20_LOGON LogonInfo;
+    MSV1_0_LM20_LOGON LocalLogonInfo;
     ULONG_PTR PtrOffset;
 
     *LogonProfile = NULL;
@@ -1498,8 +1519,38 @@ LsaApLogonUserEx2_Network(
 
     if (SubmitBufferSize < sizeof(MSV1_0_LM20_LOGON))
     {
-        ERR("Invalid SubmitBufferSize %lu\n", SubmitBufferSize);
-        return STATUS_INVALID_PARAMETER;
+        PMSV1_0_LM20_LOGON32 LogonInfo32;
+
+        if (SubmitBufferSize < sizeof(MSV1_0_LM20_LOGON32))
+        {
+            ERR("Invalid SubmitBufferSize %lu\n", SubmitBufferSize);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        LogonInfo32 = ProtocolSubmitBuffer;
+        RtlZeroMemory(&LocalLogonInfo, sizeof(LocalLogonInfo));
+
+        LocalLogonInfo.MessageType = LogonInfo32->MessageType;
+        LocalLogonInfo.LogonDomainName.Length = LogonInfo32->LogonDomainName.Length;
+        LocalLogonInfo.LogonDomainName.MaximumLength = LogonInfo32->LogonDomainName.MaximumLength;
+        LocalLogonInfo.LogonDomainName.Buffer = (PWSTR)(ULONG_PTR)LogonInfo32->LogonDomainName.Buffer;
+        LocalLogonInfo.UserName.Length = LogonInfo32->UserName.Length;
+        LocalLogonInfo.UserName.MaximumLength = LogonInfo32->UserName.MaximumLength;
+        LocalLogonInfo.UserName.Buffer = (PWSTR)(ULONG_PTR)LogonInfo32->UserName.Buffer;
+        LocalLogonInfo.Workstation.Length = LogonInfo32->Workstation.Length;
+        LocalLogonInfo.Workstation.MaximumLength = LogonInfo32->Workstation.MaximumLength;
+        LocalLogonInfo.Workstation.Buffer = (PWSTR)(ULONG_PTR)LogonInfo32->Workstation.Buffer;
+        RtlCopyMemory(LocalLogonInfo.ChallengeToClient,
+                      LogonInfo32->ChallengeToClient,
+                      sizeof(LocalLogonInfo.ChallengeToClient));
+        LocalLogonInfo.CaseSensitiveChallengeResponse.Length = LogonInfo32->CaseSensitiveChallengeResponse.Length;
+        LocalLogonInfo.CaseSensitiveChallengeResponse.MaximumLength = LogonInfo32->CaseSensitiveChallengeResponse.MaximumLength;
+        LocalLogonInfo.CaseSensitiveChallengeResponse.Buffer = (PCHAR)(ULONG_PTR)LogonInfo32->CaseSensitiveChallengeResponse.Buffer;
+        LocalLogonInfo.CaseInsensitiveChallengeResponse.Length = LogonInfo32->CaseInsensitiveChallengeResponse.Length;
+        LocalLogonInfo.CaseInsensitiveChallengeResponse.MaximumLength = LogonInfo32->CaseInsensitiveChallengeResponse.MaximumLength;
+        LocalLogonInfo.CaseInsensitiveChallengeResponse.Buffer = (PCHAR)(ULONG_PTR)LogonInfo32->CaseInsensitiveChallengeResponse.Buffer;
+        LocalLogonInfo.ParameterControl = LogonInfo32->ParameterControl;
+        LogonInfo = &LocalLogonInfo;
     }
 
     /* Fix-up pointers in the authentication info */
@@ -1590,6 +1641,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     UCHAR LogonPassHash;
     PUNICODE_STRING ErasePassword = NULL;
     PLOGON_LIST_ENTRY LogonEntry = NULL;
+    BOOLEAN UserValidated = FALSE;
+    MSV1_0_LOGON_SUBMIT_TYPE MessageType;
 
     TRACE("LsaApLogonUserEx2()\n");
 
@@ -1612,21 +1665,55 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     }
     RtlInitUnicodeString(&ComputerName, ComputerNameData);
 
+    if (SubmitBufferSize < sizeof(MSV1_0_LOGON_SUBMIT_TYPE))
+    {
+        ERR("Invalid SubmitBufferSize %lu\n", SubmitBufferSize);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    MessageType = *((PMSV1_0_LOGON_SUBMIT_TYPE)ProtocolSubmitBuffer);
+
     /* Parameters validation */
     if (LogonType == Interactive ||
         LogonType == Batch ||
-        LogonType == Service)
+        LogonType == Service ||
+        ((LogonType == Network) &&
+         (MessageType == MsV1_0InteractiveLogon ||
+          MessageType == MsV1_0WorkstationUnlockLogon)))
     {
         PMSV1_0_INTERACTIVE_LOGON LogonInfo;
+        MSV1_0_INTERACTIVE_LOGON LocalLogonInfo;
         ULONG_PTR PtrOffset;
 
         if (SubmitBufferSize < sizeof(MSV1_0_INTERACTIVE_LOGON))
         {
-            ERR("Invalid SubmitBufferSize %lu\n", SubmitBufferSize);
-            return STATUS_INVALID_PARAMETER;
-        }
+            PMSV1_0_INTERACTIVE_LOGON32 LogonInfo32;
 
-        LogonInfo = (PMSV1_0_INTERACTIVE_LOGON)ProtocolSubmitBuffer;
+            if (SubmitBufferSize < sizeof(MSV1_0_INTERACTIVE_LOGON32))
+            {
+                ERR("Invalid SubmitBufferSize %lu\n", SubmitBufferSize);
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            LogonInfo32 = ProtocolSubmitBuffer;
+            RtlZeroMemory(&LocalLogonInfo, sizeof(LocalLogonInfo));
+
+            LocalLogonInfo.MessageType = LogonInfo32->MessageType;
+            LocalLogonInfo.LogonDomainName.Length = LogonInfo32->LogonDomainName.Length;
+            LocalLogonInfo.LogonDomainName.MaximumLength = LogonInfo32->LogonDomainName.MaximumLength;
+            LocalLogonInfo.LogonDomainName.Buffer = (PWSTR)(ULONG_PTR)LogonInfo32->LogonDomainName.Buffer;
+            LocalLogonInfo.UserName.Length = LogonInfo32->UserName.Length;
+            LocalLogonInfo.UserName.MaximumLength = LogonInfo32->UserName.MaximumLength;
+            LocalLogonInfo.UserName.Buffer = (PWSTR)(ULONG_PTR)LogonInfo32->UserName.Buffer;
+            LocalLogonInfo.Password.Length = LogonInfo32->Password.Length;
+            LocalLogonInfo.Password.MaximumLength = LogonInfo32->Password.MaximumLength;
+            LocalLogonInfo.Password.Buffer = (PWSTR)(ULONG_PTR)LogonInfo32->Password.Buffer;
+            LogonInfo = &LocalLogonInfo;
+        }
+        else
+        {
+            LogonInfo = (PMSV1_0_INTERACTIVE_LOGON)ProtocolSubmitBuffer;
+        }
 
         if (LogonInfo->MessageType != MsV1_0InteractiveLogon &&
             LogonInfo->MessageType != MsV1_0WorkstationUnlockLogon)
@@ -1744,6 +1831,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
                                            SubStatus);
         if (!NT_SUCCESS(Status))
             goto done;
+
+        UserValidated = TRUE;
     }
     else
     {
@@ -1752,18 +1841,21 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     }
     // TODO: Add other LogonType validity checks.
 
-    Status = SamValidateUser(LogonType,
-                             LogonUserName,
-                             LogonDomain,
-                             &LogonPwdData,
-                             &ComputerName,
-                             &SpecialAccount,
-                             &AccountDomainSid,
-                             &UserHandle,
-                             &UserInfo,
-                             SubStatus);
-    if (!NT_SUCCESS(Status))
-        goto done;
+    if (!UserValidated)
+    {
+        Status = SamValidateUser(LogonType,
+                                 LogonUserName,
+                                 LogonDomain,
+                                 &LogonPwdData,
+                                 &ComputerName,
+                                 &SpecialAccount,
+                                 &AccountDomainSid,
+                                 &UserHandle,
+                                 &UserInfo,
+                                 SubStatus);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
 
     /* Return logon information */
 
