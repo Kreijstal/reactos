@@ -145,6 +145,21 @@ typedef struct _FILE_RECORD_HEADER {
 #define AT_END                  0xFFFFFFFF
 
 /* ============================================================
+ * Attribute List entry (value of $ATTRIBUTE_LIST, 0x20)
+ * ============================================================ */
+
+typedef struct _ATTR_LIST_ENTRY {
+    ULONG     Type;              /* attribute type code                     */
+    USHORT    Length;            /* byte length of this list entry          */
+    UCHAR     NameLength;        /* in WCHARs                               */
+    UCHAR     NameOffset;        /* from start of this entry                */
+    ULONGLONG LowestVcn;         /* starting VCN of this attribute extent   */
+    ULONGLONG MftReference;      /* record holding the extent (incl. seq)   */
+    USHORT    Instance;          /* attribute instance in that record       */
+    /* WCHAR Name[] follows at NameOffset */
+} ATTR_LIST_ENTRY;
+
+/* ============================================================
  * Attribute Record Header
  * ============================================================ */
 
