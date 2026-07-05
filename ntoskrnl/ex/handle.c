@@ -650,7 +650,9 @@ ULONG
 NTAPI
 ExpMoveFreeHandles(IN PHANDLE_TABLE HandleTable)
 {
-    ULONG LastFree, i;
+    ULONG LastFree, i, OldValue, NewValue, NextFree;
+    PHANDLE_TABLE_ENTRY Entry;
+    EXHANDLE Handle;
 
     /* Clear the last free index */
     LastFree = InterlockedExchange((PLONG) &HandleTable->LastFree, 0);
@@ -676,9 +678,54 @@ ExpMoveFreeHandles(IN PHANDLE_TABLE HandleTable)
         }
     }
 
-    /* We are strict FIFO, we need to reverse the entries */
-    ASSERT(FALSE);
-    return LastFree;
+    /*
+     * We get here in one of two cases:
+     *  - This is a strict-FIFO table, whose captured (LIFO) free list must be
+     *    reversed so that handles are handed back out in the order they were
+     *    freed, or
+     *  - This is a non-strict table but the fast path above lost the race: a
+     *    concurrent free pushed an entry onto FirstFree (its lock index was
+     *    held) while we were capturing LastFree, so FirstFree is no longer 0
+     *    and the single compare-exchange could not install the whole list.
+     *
+     * Both cases are handled the same way: walk the captured LastFree list and
+     * push each entry onto FirstFree using the same lock-free primitive as
+     * ExpFreeHandleTableEntry.  Pushing the captured list head-to-tail both
+     * reverses it (restoring FIFO order) and correctly merges it with whatever
+     * has since appeared on FirstFree.
+     */
+    NewValue = 0;
+    while (LastFree != 0)
+    {
+        /* Look up the captured entry and remember the next one before we
+         * overwrite its link below. */
+        Handle.Value = LastFree & FREE_HANDLE_MASK;
+        Entry = ExpLookupHandleTableEntry(HandleTable, Handle);
+        NextFree = Entry->NextFreeTableEntry;
+
+        /* Push this entry onto the front of the FirstFree list */
+        for (;;)
+        {
+            OldValue = HandleTable->FirstFree;
+            Entry->NextFreeTableEntry = OldValue;
+            if (InterlockedCompareExchange((PLONG) &HandleTable->FirstFree,
+                                           LastFree,
+                                           OldValue) == OldValue)
+            {
+                break;
+            }
+        }
+
+        /* This entry is now (was, momentarily) the FirstFree head; report it
+         * to the caller and advance to the next captured entry. */
+        NewValue = LastFree;
+        LastFree = NextFree;
+    }
+
+    /* Return the resulting head for the caller to allocate from.  It always
+     * revalidates FirstFree under a lock before using this, so a value that
+     * has since been taken by another thread simply makes it retry. */
+    return NewValue;
 }
 
 PHANDLE_TABLE_ENTRY
