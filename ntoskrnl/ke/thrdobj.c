@@ -897,8 +897,11 @@ KeInitThread(IN OUT PKTHREAD Thread,
     /* Initialize the lock */
     KeInitializeSpinLock(&Thread->ThreadLock);
 
-    /* Setup the Service Descriptor Table for Native Calls. */
-#if !defined(_WIN64) || (NTDDI_VERSION < NTDDI_WIN7)
+    /* Setup the Service Descriptor Table for Native Calls.
+     * The per-thread KTHREAD ServiceTable exists on all i386 targets and on
+     * pre-Vista amd64 (NT 5.2); Vista+ amd64 dropped it in favour of the
+     * GuiThread flag, so only assign it where the field is present. */
+#if !defined(_WIN64) || (NTDDI_VERSION < NTDDI_LONGHORN)
     Thread->ServiceTable = KeServiceDescriptorTable;
 #endif
 
