@@ -116,10 +116,37 @@ WSAStartup(IN WORD wVersionRequested,
     WORD VersionReturned = 0;
     DWORD ErrorCode = ERROR_SUCCESS;
     PWSPROCESS CurrentProcess;
+    HMODULE Module;
     DPRINT("WSAStartup: %wx %d.%d\n", wVersionRequested, LOBYTE(wVersionRequested), HIBYTE(wVersionRequested));
 
     /* Make sure that we went through DLL Init */
-    if (!WsDllHandle) return WSASYSNOTREADY;
+    if ((!WsDllHandle) || (WsDllProcessId != GetCurrentProcessId()))
+    {
+        Module = GetModuleHandleW(L"ws2_32.dll");
+        if (!Module) return WSASYSNOTREADY;
+
+        WsDllHandle = Module;
+        WsDllProcessId = GetCurrentProcessId();
+        WsSockHeap = GetProcessHeap();
+        CurrentWsProcess = NULL;
+        WsSockHandleTable = NULL;
+        WsAsyncThreadInitialized = FALSE;
+        GlobalTlsIndex = TLS_OUT_OF_INDEXES;
+
+        if (GlobalTlsIndex == TLS_OUT_OF_INDEXES)
+        {
+            GlobalTlsIndex = TlsAlloc();
+            if (GlobalTlsIndex == TLS_OUT_OF_INDEXES)
+            {
+                WsDllHandle = NULL;
+                return WSASYSNOTREADY;
+            }
+        }
+
+        WsCreateStartupSynchronization();
+        WsAsyncGlobalInitialize();
+        WsRasInitializeAutodial();
+    }
 
     /* Check which version is being requested */
     switch (LOBYTE(wVersionRequested))
