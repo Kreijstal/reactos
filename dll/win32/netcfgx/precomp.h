@@ -23,6 +23,7 @@
 #include <devguid.h>
 #include <commctrl.h>
 #include <cfgmgr32.h>
+#include <dhcpcapi.h>
 
 #include <netcfgx_undoc.h>
 #include <netcfgn_undoc.h>
