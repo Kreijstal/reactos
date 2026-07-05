@@ -464,6 +464,16 @@ InstallNetDevice(
         goto cleanup;
     }
 
+    /*
+     * A NIC may be installed after the DHCP service has already enumerated
+     * adapters. Notify it through the same API used by the TCP/IP property
+     * page so it can activate DHCP for this new interface without requiring a
+     * reboot or reinstall.
+     */
+    rc = DhcpNotifyConfigChange(NULL, (LPWSTR)UuidString, FALSE, 0, 0, 0, 1);
+    if (rc != ERROR_SUCCESS)
+        WARN("DhcpNotifyConfigChange(%S) failed with error 0x%lx\n", UuidString, rc);
+
     /* Restart the device so NDIS re-reads Tcpip\Linkage\Bind and binds
      * the protocol to this adapter. We need a full disable/enable cycle
      * to trigger the miniport start path which calls
