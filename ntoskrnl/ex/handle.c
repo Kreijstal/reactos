@@ -303,9 +303,24 @@ ExpFreeHandleTableEntry(IN PHANDLE_TABLE HandleTable,
         /* Select a lock index */
         LockIndex = Handle.Index % 4;
 
-        /* Select which entry to use */
+        /*
+         * Select which free list to use.  The entry may only be published onto
+         * the live FirstFree list when no allocator is currently popping this
+         * lock index, i.e. when the lock is *not* held: a popper in
+         * ExpAllocateHandleTableEntry holds this lock shared across its
+         * read-next/compare-exchange window, and while it does so the head it
+         * is about to pop must not be able to leave and re-enter FirstFree
+         * (the classic A-B-A that would make its compare-exchange succeed with
+         * a stale next-link).  Routing to FirstFree only when the lock is free
+         * guarantees this: any entry a popper is protecting is instead freed
+         * onto LastFree (drained later, in a quiescent window, by
+         * ExpMoveFreeHandles).  When the lock is held we therefore defer to
+         * LastFree.  Windows relies on the same invariant (plus a sequence
+         * number); ReactOS has no sequence number, so this routing is the sole
+         * A-B-A guard and its polarity is load-bearing.
+         */
         Free = (HandleTable->HandleTableLock[LockIndex].Locked) ?
-                &HandleTable->FirstFree : &HandleTable->LastFree;
+                &HandleTable->LastFree : &HandleTable->FirstFree;
     }
     else
     {
