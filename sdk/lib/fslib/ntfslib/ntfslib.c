@@ -15,6 +15,7 @@
 #include <fmifs/fmifs.h>
 
 #include "mkntfs.h"
+#include "chkdsk.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -141,6 +142,29 @@ NtfsFormatFlush(void *ctx)
 
     NtFlushBuffersFile(fctx->FileHandle, &IoStatusBlock);
     return 0;
+}
+
+/* ============================================================
+ * chkdsk message sink: forward core text to the fmifs callback
+ *
+ * The checker emits chkdsk-style stage banners and a final summary through
+ * NTFS_CHK_OPTIONS.Message.  We forward each line as an OUTPUT command with a
+ * TEXTOUTPUT payload, exactly the shape autochk/chkdsk.exe's ChkdskCallback
+ * consumes (Command == OUTPUT, Argument == PTEXTOUTPUT).
+ * ============================================================ */
+
+static void
+NtfsChkMessage(void *ctx, const char *msg)
+{
+    NTFS_FORMAT_CONTEXT *cctx = (NTFS_FORMAT_CONTEXT *)ctx;
+    TEXTOUTPUT Output;
+
+    if (cctx == NULL || cctx->Callback == NULL || msg == NULL)
+        return;
+
+    Output.Lines = 1;
+    Output.Output = (PCHAR)msg;
+    cctx->Callback(OUTPUT, 0, (PVOID)&Output);
 }
 
 /* ============================================================
@@ -341,7 +365,132 @@ NtfsChkdsk(
     IN PVOID pUnknown4,
     IN PULONG ExitStatus)
 {
-    UNIMPLEMENTED;
-    *ExitStatus = (ULONG)STATUS_SUCCESS;
-    return TRUE;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK Iosb;
+    HANDLE FileHandle;
+    NTSTATUS Status, LockStatus;
+    NTFS_FORMAT_CONTEXT IoContext;
+    MKNTFS_IO Io;
+    NTFS_CHK_OPTIONS Options;
+    NTFS_CHK_RESULT *Result;
+    ACCESS_MASK Access;
+    BOOLEAN VolumeLocked = FALSE;
+    int Rc;
+
+    UNREFERENCED_PARAMETER(ScanDrive);
+    UNREFERENCED_PARAMETER(pUnknown1);
+    UNREFERENCED_PARAMETER(pUnknown2);
+    UNREFERENCED_PARAMETER(pUnknown3);
+    UNREFERENCED_PARAMETER(pUnknown4);
+
+    DPRINT("NtfsChkdsk(DriveRoot '%wZ', Fix %u, OnlyIfDirty %u)\n",
+           DriveRoot, FixErrors, CheckOnlyIfDirty);
+
+    if (Callback != NULL)
+    {
+        ULONG Percent = 0;
+        Callback(PROGRESS, 0, (PVOID)&Percent);
+    }
+
+    /* The checker result is large (bounded issue array); keep it off the stack. */
+    Result = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(NTFS_CHK_RESULT));
+    if (Result == NULL)
+    {
+        *ExitStatus = (ULONG)STATUS_INSUFFICIENT_RESOURCES;
+        return FALSE;
+    }
+
+    /* Open read-only unless we intend to repair. */
+    Access = FILE_GENERIC_READ | SYNCHRONIZE;
+    if (FixErrors)
+        Access |= FILE_GENERIC_WRITE;
+
+    InitializeObjectAttributes(&ObjectAttributes, DriveRoot, 0, NULL, NULL);
+    Status = NtOpenFile(&FileHandle,
+                        Access,
+                        &ObjectAttributes,
+                        &Iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_ALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NtfsChkdsk: NtOpenFile() failed 0x%08x\n", Status);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
+        *ExitStatus = (ULONG)Status;
+        return FALSE;
+    }
+
+    /* Lock the volume for an exclusive offline check when repairing. */
+    if (FixErrors)
+    {
+        LockStatus = NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
+                                     FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
+        if (NT_SUCCESS(LockStatus))
+            VolumeLocked = TRUE;
+        else
+            DPRINT1("NtfsChkdsk: could not lock volume (0x%x); repair may be unsafe\n",
+                    LockStatus);
+    }
+
+    IoContext.FileHandle = FileHandle;
+    IoContext.Callback = Callback;
+    IoContext.Percent = 0;
+
+    Io.context = &IoContext;
+    Io.write = NtfsFormatWrite;
+    Io.read = NtfsFormatRead;
+    Io.flush = NtfsFormatFlush;
+
+    RtlZeroMemory(&Options, sizeof(Options));
+    Options.FixErrors = (FixErrors != FALSE);
+    Options.Verbose = (Verbose != FALSE);
+    Options.CheckOnlyIfDirty = (CheckOnlyIfDirty != FALSE);
+    /* Forward the checker's stage banners + summary to autochk/chkdsk.exe via
+     * the fmifs callback (OUTPUT/TEXTOUTPUT).  IoContext already carries the
+     * PFMIFSCALLBACK, so it doubles as the message-sink context. */
+    if (Callback != NULL)
+    {
+        Options.Message = NtfsChkMessage;
+        Options.MessageCtx = &IoContext;
+    }
+
+    Rc = NtfsChkVolume(&Io, &Options, Result);
+
+    DPRINT("NtfsChkdsk: exit=%d scanned=%lu inuse=%lu issues=%lu repaired=%lu dirty=%d\n",
+           Result->ExitStatus, Result->RecordsScanned, Result->RecordsInUse,
+           Result->IssueCount, Result->RepairedCount, Result->WasDirty);
+
+    if (VolumeLocked)
+    {
+        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
+                        FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
+                        FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
+    }
+    NtClose(FileHandle);
+
+    if (Callback != NULL)
+    {
+        ULONG Percent = 100;
+        Callback(PROGRESS, 0, (PVOID)&Percent);
+    }
+
+    /*
+     * Map the checker verdict to the autochk/chkdsk exit convention:
+     *   0 = no problems, 1 = problems fixed, 2 = uncorrected problems remain,
+     *   3 = could not run the check.
+     */
+    if (Rc < 0)
+        *ExitStatus = 3;
+    else if (Result->ExitStatus == 2)
+        *ExitStatus = 1;
+    else if (Result->ExitStatus == 1)
+        *ExitStatus = 2;
+    else
+        *ExitStatus = 0;
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
+
+    /* TRUE means the check itself completed (see ExitStatus for the verdict). */
+    return (Rc >= 0);
 }
