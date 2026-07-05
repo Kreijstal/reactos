@@ -3124,6 +3124,7 @@ NtQuerySystemInformationEx(
 
         switch (SystemInformationClass)
         {
+#if (NTDDI_VERSION >= NTDDI_WIN10)
             case SystemSupportedProcessorArchitectures:
             {
                 SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION Archs[MAX_SUPPORTED_ARCHITECTURES];
@@ -3196,6 +3197,7 @@ NtQuerySystemInformationEx(
                 Status = STATUS_SUCCESS;
                 break;
             }
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10) */
 
             default:
                 /* Only the classes that genuinely require the extended input are handled here */
