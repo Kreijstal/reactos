@@ -617,6 +617,15 @@ ObGetProcessHandleCount(
     IN PEPROCESS Process
 );
 
+NTSTATUS
+NTAPI
+ObQueryProcessHandleInformation(
+    _In_ PEPROCESS Process,
+    _Out_writes_bytes_(ProcessInformationLength) PPROCESS_HANDLE_SNAPSHOT_INFORMATION ProcessInformation,
+    _In_ ULONG ProcessInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
+
 //
 // Global data inside the Object Manager
 //

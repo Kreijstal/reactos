@@ -433,6 +433,26 @@ static const INFORMATION_CLASS_INFO PsProcessInfoClass[] =
         ULONG,
         ICIF_QUERY | ICIF_SET
     ),
+
+    /* ProcessGroupInformation */
+    IQS_NONE,
+
+    /* ProcessTokenVirtualizationEnabled */
+    IQS_NONE,
+
+    /* ProcessConsoleHostProcess */
+    IQS_NONE,
+
+    /* ProcessWindowInformation */
+    IQS_NONE,
+
+    /* ProcessHandleInformation */
+    IQS_SAME
+    (
+        PROCESS_HANDLE_SNAPSHOT_INFORMATION,
+        ULONG_PTR,
+        ICIF_QUERY | ICIF_QUERY_SIZE_VARIABLE
+    ),
 };
 
 //
