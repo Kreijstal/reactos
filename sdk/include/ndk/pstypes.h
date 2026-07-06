@@ -613,8 +613,31 @@ typedef enum _PROCESSINFOCLASS
     ProcessImageFileMapping,
     ProcessAffinityUpdateMode,
     ProcessMemoryAllocationMode,
+    ProcessGroupInformation,
+    ProcessTokenVirtualizationEnabled,
+    ProcessConsoleHostProcess,
+    ProcessWindowInformation,
+    ProcessHandleInformation = 51,
     MaxProcessInfoClass
 } PROCESSINFOCLASS;
+
+typedef struct _PROCESS_HANDLE_TABLE_ENTRY_INFO
+{
+    HANDLE HandleValue;
+    ULONG_PTR HandleCount;
+    ULONG_PTR PointerCount;
+    ULONG GrantedAccess;
+    ULONG ObjectTypeIndex;
+    ULONG HandleAttributes;
+    ULONG Reserved;
+} PROCESS_HANDLE_TABLE_ENTRY_INFO, *PPROCESS_HANDLE_TABLE_ENTRY_INFO;
+
+typedef struct _PROCESS_HANDLE_SNAPSHOT_INFORMATION
+{
+    ULONG_PTR NumberOfHandles;
+    ULONG_PTR Reserved;
+    PROCESS_HANDLE_TABLE_ENTRY_INFO Handles[1];
+} PROCESS_HANDLE_SNAPSHOT_INFORMATION, *PPROCESS_HANDLE_SNAPSHOT_INFORMATION;
 
 typedef enum _THREADINFOCLASS
 {
