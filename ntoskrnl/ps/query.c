@@ -110,6 +110,7 @@ PspDumpProcessInfoClassName(
         DBG_PROCESS_INFO_CLASS(ProcessGroupInformation),
         DBG_PROCESS_INFO_CLASS(ProcessConsoleHostProcess),
         DBG_PROCESS_INFO_CLASS(ProcessWindowInformation),
+        DBG_PROCESS_INFO_CLASS(ProcessHandleInformation),
     };
 #undef DBG_PROCESS_INFO_CLASS
 
@@ -567,6 +568,33 @@ NtQueryInformationProcess(
             _SEH2_END;
 
             /* Dereference the process */
+            ObDereferenceObject(Process);
+            break;
+        }
+
+        case ProcessHandleInformation:
+        {
+            Status = ObReferenceObjectByHandle(ProcessHandle,
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+                                               PsProcessType,
+                                               PreviousMode,
+                                               (PVOID*)&Process,
+                                               NULL);
+            if (!NT_SUCCESS(Status)) break;
+
+            _SEH2_TRY
+            {
+                Status = ObQueryProcessHandleInformation(Process,
+                                                         ProcessInformation,
+                                                         ProcessInformationLength,
+                                                         ReturnLength);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
             ObDereferenceObject(Process);
             break;
         }

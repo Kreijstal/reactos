@@ -80,6 +80,106 @@ ObGetProcessHandleCount(IN PEPROCESS Process)
     return HandleCount;
 }
 
+typedef struct _OBP_PROCESS_HANDLE_SNAPSHOT_CONTEXT
+{
+    PPROCESS_HANDLE_SNAPSHOT_INFORMATION Snapshot;
+    ULONG_PTR Capacity;
+    ULONG_PTR Count;
+} OBP_PROCESS_HANDLE_SNAPSHOT_CONTEXT, *POBP_PROCESS_HANDLE_SNAPSHOT_CONTEXT;
+
+static
+BOOLEAN
+NTAPI
+ObpProcessHandleSnapshotCallback(
+    _In_ PHANDLE_TABLE_ENTRY HandleTableEntry,
+    _In_ HANDLE Handle,
+    _Inout_ PVOID Context)
+{
+    POBP_PROCESS_HANDLE_SNAPSHOT_CONTEXT SnapshotContext = Context;
+    PPROCESS_HANDLE_TABLE_ENTRY_INFO Entry;
+    POBJECT_HEADER ObjectHeader;
+
+    if (SnapshotContext->Count >= SnapshotContext->Capacity)
+    {
+        return TRUE;
+    }
+
+    ObjectHeader = ObpGetHandleObject(HandleTableEntry);
+    Entry = &SnapshotContext->Snapshot->Handles[SnapshotContext->Count++];
+
+    Entry->HandleValue = Handle;
+    Entry->HandleCount = ObjectHeader->HandleCount;
+    Entry->PointerCount = ObjectHeader->PointerCount;
+    Entry->GrantedAccess = HandleTableEntry->GrantedAccess;
+    Entry->ObjectTypeIndex = ObjectHeader->Type ? ObjectHeader->Type->Index : 0;
+    Entry->HandleAttributes = HandleTableEntry->ObAttributes & OBJ_HANDLE_ATTRIBUTES;
+    Entry->Reserved = 0;
+
+    return FALSE;
+}
+
+NTSTATUS
+NTAPI
+ObQueryProcessHandleInformation(
+    _In_ PEPROCESS Process,
+    _Out_writes_bytes_(ProcessInformationLength) PPROCESS_HANDLE_SNAPSHOT_INFORMATION ProcessInformation,
+    _In_ ULONG ProcessInformationLength,
+    _Out_opt_ PULONG ReturnLength)
+{
+    PHANDLE_TABLE HandleTable;
+    ULONG_PTR HandleCount;
+    ULONG_PTR RequiredLength;
+    OBP_PROCESS_HANDLE_SNAPSHOT_CONTEXT Context;
+
+    ASSERT(Process);
+
+    HandleTable = ObReferenceProcessHandleTable(Process);
+    if (HandleTable == NULL)
+    {
+        RequiredLength = FIELD_OFFSET(PROCESS_HANDLE_SNAPSHOT_INFORMATION, Handles);
+
+        if (ReturnLength)
+            *ReturnLength = (ULONG)RequiredLength;
+
+        if (ProcessInformationLength < RequiredLength)
+            return STATUS_INFO_LENGTH_MISMATCH;
+
+        ProcessInformation->NumberOfHandles = 0;
+        ProcessInformation->Reserved = 0;
+        return STATUS_SUCCESS;
+    }
+
+    HandleCount = HandleTable->HandleCount;
+    RequiredLength = FIELD_OFFSET(PROCESS_HANDLE_SNAPSHOT_INFORMATION, Handles) +
+                     HandleCount * sizeof(PROCESS_HANDLE_TABLE_ENTRY_INFO);
+
+    if (ReturnLength)
+        *ReturnLength = (ULONG)RequiredLength;
+
+    if (ProcessInformationLength < RequiredLength)
+    {
+        ObDereferenceProcessHandleTable(Process);
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    ProcessInformation->NumberOfHandles = 0;
+    ProcessInformation->Reserved = 0;
+
+    Context.Snapshot = ProcessInformation;
+    Context.Capacity = HandleCount;
+    Context.Count = 0;
+
+    ExEnumHandleTable(HandleTable,
+                      ObpProcessHandleSnapshotCallback,
+                      &Context,
+                      NULL);
+
+    ProcessInformation->NumberOfHandles = Context.Count;
+
+    ObDereferenceProcessHandleTable(Process);
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 NTAPI
 ObpReferenceProcessObjectByHandle(IN HANDLE Handle,
