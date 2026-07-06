@@ -176,7 +176,6 @@ static UINT SHELL_GetAutoRunInfPath(PCWSTR DrvPath, PWSTR AriPath, BOOL ForInvok
     return wsprintfW(AriPath, L"%c:\\autorun.inf", DrvPath[0]);
 }
 
-#if 0 // TODO: Call this when the shell is notified about insert disc events
 bool SHELL_CanInvokeAutoRunOnDrive(PCWSTR DrvPath)
 {
     INT8 DrvNum = GetDriveNumber(DrvPath);
@@ -184,7 +183,83 @@ bool SHELL_CanInvokeAutoRunOnDrive(PCWSTR DrvPath)
         return false;
     return !(SHRestricted(REST_NODRIVETYPEAUTORUN) & (1 << GetCachedDriveType(DrvNum)));
 }
-#endif
+
+static HRESULT SHELL_InvokeAutoRunInf(HWND hwnd, PCWSTR DrvPath, INT nShow)
+{
+    if (!SHELL_CanInvokeAutoRunOnDrive(DrvPath))
+        return S_FALSE;
+
+    UINT DriveType = GetCachedDriveType(DrvPath);
+    if (DriveType != DRIVE_REMOVABLE && DriveType != DRIVE_CDROM)
+        return S_FALSE;
+
+    WCHAR wszAutoRunInf[MAX_PATH];
+    if (!SHELL_GetAutoRunInfPath(DrvPath, wszAutoRunInf, TRUE) ||
+        GetFileAttributesW(wszAutoRunInf) == INVALID_FILE_ATTRIBUTES)
+    {
+        return S_FALSE;
+    }
+
+    WCHAR wszCommand[MAX_PATH];
+    GetPrivateProfileStringW(L"autorun", L"shellexecute", NULL,
+                             wszCommand, _countof(wszCommand), wszAutoRunInf);
+    if (!wszCommand[0])
+    {
+        GetPrivateProfileStringW(L"autorun", L"open", NULL,
+                                 wszCommand, _countof(wszCommand), wszAutoRunInf);
+    }
+    if (!wszCommand[0])
+        return S_FALSE;
+
+    WCHAR wszFile[MAX_PATH], wszParams[MAX_PATH];
+    PWSTR pszSrc = wszCommand;
+    PWSTR pszDst = wszFile;
+    SIZE_T cchRemaining = _countof(wszFile);
+
+    while (iswspace(*pszSrc))
+        ++pszSrc;
+
+    if (*pszSrc == L'"')
+    {
+        ++pszSrc;
+        while (*pszSrc && *pszSrc != L'"' && cchRemaining > 1)
+        {
+            *pszDst++ = *pszSrc++;
+            --cchRemaining;
+        }
+        if (*pszSrc == L'"')
+            ++pszSrc;
+    }
+    else
+    {
+        while (*pszSrc && !iswspace(*pszSrc) && cchRemaining > 1)
+        {
+            *pszDst++ = *pszSrc++;
+            --cchRemaining;
+        }
+    }
+    *pszDst = UNICODE_NULL;
+
+    while (iswspace(*pszSrc))
+        ++pszSrc;
+    StringCchCopyW(wszParams, _countof(wszParams), pszSrc);
+
+    if (PathIsRelativeW(wszFile))
+    {
+        WCHAR wszFullPath[MAX_PATH];
+        PathCombineW(wszFullPath, DrvPath, wszFile);
+        StringCchCopyW(wszFile, _countof(wszFile), wszFullPath);
+    }
+
+    SHELLEXECUTEINFOW ExecInfo = { sizeof(ExecInfo) };
+    ExecInfo.hwnd = hwnd;
+    ExecInfo.lpFile = wszFile;
+    ExecInfo.lpParameters = wszParams[0] ? wszParams : NULL;
+    ExecInfo.lpDirectory = DrvPath;
+    ExecInfo.nShow = nShow;
+
+    return ShellExecuteExW(&ExecInfo) ? S_OK : HResultFromWin32(GetLastError());
+}
 
 /**
  * @brief
@@ -1422,9 +1497,14 @@ STDMETHODIMP CDrivesFolder::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam
             if (lParam == SHCNE_DRIVEADD && wParam)
             {
                 g_IsFloppyCache = 0;
-                INT8 drive = GetDriveNumber(((PIDLIST_ABSOLUTE*)wParam)[0]);
+                PIDLIST_ABSOLUTE pidlDrive = ((PIDLIST_ABSOLUTE*)wParam)[0];
+                INT8 drive = GetDriveNumber(pidlDrive);
                 if (drive >= 0 && ((1UL << drive) & SHRestricted(REST_NODRIVES)))
                     return S_FALSE;
+
+                WCHAR szDrive[8];
+                if (_ILGetDrive(pidlDrive, szDrive, _countof(szDrive)))
+                    SHELL_InvokeAutoRunInf(NULL, szDrive, SW_SHOWNORMAL);
             }
             else if (lParam == SHCNE_DRIVEREMOVED)
             {
