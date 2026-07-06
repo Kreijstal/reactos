@@ -1493,6 +1493,87 @@ CDefaultContextMenu::InvokePidl(LPCMINVOKECOMMANDINFOEX lpcmi, LPCITEMIDLIST pid
 
     WCHAR wszDir[MAX_PATH];
 
+    if (bHasPath && pEntry->Verb.CompareNoCase(L"open") == 0 && PathIsRootW(wszPath))
+    {
+        INT iDrive = PathGetDriveNumberW(wszPath);
+        UINT DriveType = GetDriveTypeW(wszPath);
+
+        if (iDrive >= 0 &&
+            (DriveType == DRIVE_REMOVABLE || DriveType == DRIVE_CDROM) &&
+            !(SHRestricted(REST_NODRIVEAUTORUN) & (1 << iDrive)) &&
+            !(SHRestricted(REST_NODRIVETYPEAUTORUN) & (1 << DriveType)))
+        {
+            WCHAR wszAutoRunInf[MAX_PATH];
+            PathCombineW(wszAutoRunInf, wszPath, L"autorun.inf");
+
+            if (GetFileAttributesW(wszAutoRunInf) != INVALID_FILE_ATTRIBUTES)
+            {
+                WCHAR wszCommand[MAX_PATH];
+                GetPrivateProfileStringW(L"autorun", L"shellexecute", NULL,
+                                         wszCommand, _countof(wszCommand), wszAutoRunInf);
+                if (!wszCommand[0])
+                {
+                    GetPrivateProfileStringW(L"autorun", L"open", NULL,
+                                             wszCommand, _countof(wszCommand), wszAutoRunInf);
+                }
+
+                if (wszCommand[0])
+                {
+                    WCHAR wszFile[MAX_PATH], wszParams[MAX_PATH];
+                    PWSTR pszSrc = wszCommand;
+                    PWSTR pszDst = wszFile;
+                    SIZE_T cchRemaining = _countof(wszFile);
+
+                    while (iswspace(*pszSrc))
+                        ++pszSrc;
+
+                    if (*pszSrc == L'"')
+                    {
+                        ++pszSrc;
+                        while (*pszSrc && *pszSrc != L'"' && cchRemaining > 1)
+                        {
+                            *pszDst++ = *pszSrc++;
+                            --cchRemaining;
+                        }
+                        if (*pszSrc == L'"')
+                            ++pszSrc;
+                    }
+                    else
+                    {
+                        while (*pszSrc && !iswspace(*pszSrc) && cchRemaining > 1)
+                        {
+                            *pszDst++ = *pszSrc++;
+                            --cchRemaining;
+                        }
+                    }
+                    *pszDst = UNICODE_NULL;
+
+                    while (iswspace(*pszSrc))
+                        ++pszSrc;
+                    StringCchCopyW(wszParams, _countof(wszParams), pszSrc);
+
+                    if (PathIsRelativeW(wszFile))
+                    {
+                        WCHAR wszFullPath[MAX_PATH];
+                        PathCombineW(wszFullPath, wszPath, wszFile);
+                        StringCchCopyW(wszFile, _countof(wszFile), wszFullPath);
+                    }
+
+                    SHELLEXECUTEINFOW seiAutoRun = { sizeof(seiAutoRun) };
+                    seiAutoRun.hwnd = lpcmi->hwnd;
+                    seiAutoRun.lpFile = wszFile;
+                    seiAutoRun.lpParameters = wszParams[0] ? wszParams : NULL;
+                    seiAutoRun.lpDirectory = wszPath;
+                    seiAutoRun.nShow = lpcmi->nShow;
+
+                    HRESULT hr = ShellExecuteExW(&seiAutoRun) ? S_OK : HResultFromWin32(GetLastError());
+                    ILFree(pidlFull);
+                    return hr;
+                }
+            }
+        }
+    }
+
     SHELLEXECUTEINFOW sei = { sizeof(sei) };
     sei.fMask = SEE_MASK_CLASSKEY | SEE_MASK_IDLIST | (CmicFlagsToSeeFlags(lpcmi->fMask) & ~SEE_MASK_INVOKEIDLIST);
     sei.hwnd = lpcmi->hwnd;
