@@ -8,8 +8,22 @@ ULONG
 APIENTRY
 EngGetLastError(VOID)
 {
-    PTEB pTeb = NtCurrentTeb();
-    return (pTeb ? pTeb->LastErrorValue : ERROR_SUCCESS);
+    PTEB pTeb = PsGetCurrentThreadTeb();
+    ULONG LastError = ERROR_SUCCESS;
+
+    if (pTeb)
+    {
+        _SEH2_TRY
+        {
+            LastError = pTeb->LastErrorValue;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        _SEH2_END;
+    }
+
+    return LastError;
 }
 
 /*
@@ -20,9 +34,19 @@ VOID
 APIENTRY
 EngSetLastError(_In_ ULONG iError)
 {
-    PTEB pTeb = NtCurrentTeb();
+    PTEB pTeb = PsGetCurrentThreadTeb();
+
     if (pTeb)
-        pTeb->LastErrorValue = iError;
+    {
+        _SEH2_TRY
+        {
+            pTeb->LastErrorValue = iError;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        _SEH2_END;
+    }
 }
 
 VOID

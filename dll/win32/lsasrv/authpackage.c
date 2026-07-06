@@ -809,6 +809,7 @@ LsapAddLocalGroups(
             {
                 Groups->Groups[i].Sid = LocalGroups->Groups[i].Sid;
                 Groups->Groups[i].Attributes = LocalGroups->Groups[i].Attributes;
+                LocalGroups->Groups[i].Sid = NULL;
             }
 
             TokenInfo1->Groups = Groups;
