@@ -712,9 +712,23 @@ IoRaiseInformationalHardError(IN NTSTATUS ErrorStatus,
                               IN PKTHREAD Thread)
 {
     DPRINT1("IoRaiseInformationalHardError: %lx, '%wZ'\n", ErrorStatus, String);
-#if DBG
-    ASSERT(ErrorStatus != STATUS_FILE_CORRUPT_ERROR); /* CORE-17587 */
-#endif
+    /*
+     * CORE-17587: the DBG break/ASSERT that used to live here was an
+     * explicitly-temporary tripwire (see 42ec1388d7, "This one will
+     * eventually be reverted") to catch the corrupt-file hard-error path.
+     * That investigation is now complete: STATUS_FILE_CORRUPT_ERROR is a
+     * legitimate *informational* (non-fatal) hard-error status.  The
+     * Microsoft open-source fastfat reference reports corrupt files exactly
+     * this way -- FatPopUpFileCorrupt() calls
+     * IoRaiseInformationalHardError(STATUS_FILE_CORRUPT_ERROR, ...) by design
+     * -- and our fastfat matches it byte-for-byte; its FAT-write/mirror path
+     * was verified consistent by reproduction, so an observed corrupt chain
+     * is genuine (e.g. crash-consistency) on-disk damage, not a driver bug.
+     * Windows handles this by returning the error and marking the volume
+     * dirty for chkdsk, never by bugchecking.  Bug-checking here made ReactOS
+     * strictly less robust than Windows on corrupt media, so the tripwire is
+     * removed as originally intended.
+     */
     return FALSE;
 }
 
