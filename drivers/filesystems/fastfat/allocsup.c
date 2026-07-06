@@ -5716,11 +5716,11 @@ Arguments:
 }
 
 //
-//  Maximum directory-walk recursion depth.  16 nested directories is well
-//  beyond anything realistic; if a volume exceeds this we fall back to
-//  partial reconciliation rather than risk a kernel-stack blowout.
+//  The directory reconciliation walker is iterative.  Start small for common
+//  volumes but grow when a directory tree has many queued siblings.
 //
-#define FAT_DIRENT_RECON_MAX_DEPTH 16
+#define FAT_DIRENT_RECON_INITIAL_FRAMES 64
+#define FAT_DIRENT_RECON_MAX_FRAMES     4096
 
 //
 //  Per-frame state for the directory-walk explicit stack.
@@ -5740,6 +5740,58 @@ typedef struct _FAT_DIRENT_RECON_FRAME {
     ULONG ParentFirstCluster;
 
 } FAT_DIRENT_RECON_FRAME, *PFAT_DIRENT_RECON_FRAME;
+
+static
+BOOLEAN
+FatReconPushDirectoryFrame(
+    IN OUT PFAT_DIRENT_RECON_FRAME *StackBase,
+    IN OUT PULONG StackCapacity,
+    IN OUT PULONG StackDepth,
+    IN ULONG FirstCluster,
+    IN ULONG ParentFirstCluster
+    )
+{
+    PFAT_DIRENT_RECON_FRAME NewStack;
+    PFAT_DIRENT_RECON_FRAME NewFrame;
+    ULONG NewCapacity;
+
+    if (*StackDepth >= *StackCapacity) {
+
+        if (*StackCapacity >= FAT_DIRENT_RECON_MAX_FRAMES) {
+            return FALSE;
+        }
+
+        NewCapacity = *StackCapacity * 2;
+        if (NewCapacity > FAT_DIRENT_RECON_MAX_FRAMES) {
+            NewCapacity = FAT_DIRENT_RECON_MAX_FRAMES;
+        }
+
+        NewStack = FsRtlAllocatePoolWithTag( NonPagedPoolNx,
+                                             sizeof(FAT_DIRENT_RECON_FRAME) *
+                                                 NewCapacity,
+                                             TAG_FAT_BITMAP );
+        if (NewStack == NULL) {
+            return FALSE;
+        }
+
+        RtlCopyMemory( NewStack,
+                       *StackBase,
+                       sizeof(FAT_DIRENT_RECON_FRAME) * (*StackDepth) );
+        ExFreePoolWithTag( *StackBase, TAG_FAT_BITMAP );
+
+        *StackBase = NewStack;
+        *StackCapacity = NewCapacity;
+    }
+
+    NewFrame = &(*StackBase)[(*StackDepth)++];
+    NewFrame->FixedRoot = FALSE;
+    NewFrame->RootLbo = 0;
+    NewFrame->RootBytes = 0;
+    NewFrame->FirstCluster = FirstCluster;
+    NewFrame->ParentFirstCluster = ParentFirstCluster;
+
+    return TRUE;
+}
 
 //
 //  Look up FatIndex in FAT0 via a small lazy-loaded sector window cache, so
@@ -5963,8 +6015,8 @@ FatReconWalkDirectory(
     IN OUT PULONG Fat0CachedLen,
     IN PUCHAR DirBuffer,
     IN ULONG DirBufferSize,
-    IN OUT PFAT_DIRENT_RECON_FRAME StackBase,
-    IN ULONG StackCapacity,
+    IN OUT PFAT_DIRENT_RECON_FRAME *StackBase,
+    IN OUT PULONG StackCapacity,
     IN OUT PULONG StackDepth
     )
 {
@@ -6033,15 +6085,13 @@ FatReconWalkDirectory(
                 if ((D[11] & 0x10) /* directory */ &&
                     D[0] != '.' &&
                     First != Frame->FirstCluster &&
-                    First != Frame->ParentFirstCluster &&
-                    *StackDepth < StackCapacity) {
+                    First != Frame->ParentFirstCluster) {
 
-                    PFAT_DIRENT_RECON_FRAME New = &StackBase[(*StackDepth)++];
-                    New->FixedRoot = FALSE;
-                    New->RootLbo = 0;
-                    New->RootBytes = 0;
-                    New->FirstCluster = First;
-                    New->ParentFirstCluster = Frame->FirstCluster;
+                    (void)FatReconPushDirectoryFrame( StackBase,
+                                                      StackCapacity,
+                                                      StackDepth,
+                                                      First,
+                                                      Frame->FirstCluster );
                 }
             }
 
@@ -6107,15 +6157,13 @@ FatReconWalkDirectory(
             if ((Attr & 0x10) &&
                 D[0] != '.' &&
                 First != Frame->FirstCluster &&
-                First != Frame->ParentFirstCluster &&
-                *StackDepth < StackCapacity) {
+                First != Frame->ParentFirstCluster) {
 
-                PFAT_DIRENT_RECON_FRAME New = &StackBase[(*StackDepth)++];
-                New->FixedRoot = FALSE;
-                New->RootLbo = 0;
-                New->RootBytes = 0;
-                New->FirstCluster = First;
-                New->ParentFirstCluster = Frame->FirstCluster;
+                (void)FatReconPushDirectoryFrame( StackBase,
+                                                  StackCapacity,
+                                                  StackDepth,
+                                                  First,
+                                                  Frame->FirstCluster );
             }
         }
 
@@ -6180,6 +6228,7 @@ Arguments:
     ULONG NewlySet = 0;
     ULONG DirBufferSize;
     ULONG Fat0BufferSize;
+    ULONG StackCapacity;
 
     UNREFERENCED_PARAMETER(IrpContext);
 
@@ -6203,7 +6252,7 @@ Arguments:
 
     Stack = FsRtlAllocatePoolWithTag( NonPagedPoolNx,
                                       sizeof(FAT_DIRENT_RECON_FRAME) *
-                                          FAT_DIRENT_RECON_MAX_DEPTH,
+                                          FAT_DIRENT_RECON_INITIAL_FRAMES,
                                       TAG_FAT_BITMAP );
     DirBuffer = FsRtlAllocatePoolWithTag( NonPagedPoolNx, DirBufferSize, TAG_FAT_BITMAP );
     Fat0Buffer = FsRtlAllocatePoolWithTag( NonPagedPoolNx, Fat0BufferSize, TAG_FAT_BITMAP );
@@ -6215,6 +6264,7 @@ Arguments:
         }
 
         StackDepth = 0;
+        StackCapacity = FAT_DIRENT_RECON_INITIAL_FRAMES;
         Fat0CachedStart = 0;
         Fat0CachedLen = 0;
 
@@ -6240,11 +6290,6 @@ Arguments:
             StackDepth--;
             Frame = Stack[StackDepth];
 
-            if (StackDepth >= FAT_DIRENT_RECON_MAX_DEPTH - 1) {
-                DbgPrint("FAT: FatReconcileDirentBitmap: depth limit hit\n");
-                continue;
-            }
-
             NewlySet += FatReconWalkDirectory( Vcb, &Frame,
                                                StartIndex, EndIndex,
                                                RawBitMap, BitMapStartIndex,
@@ -6253,7 +6298,7 @@ Arguments:
                                                Fat0Buffer, Fat0BufferSize,
                                                &Fat0CachedStart, &Fat0CachedLen,
                                                DirBuffer, DirBufferSize,
-                                               Stack, FAT_DIRENT_RECON_MAX_DEPTH,
+                                               &Stack, &StackCapacity,
                                                &StackDepth );
         }
 
