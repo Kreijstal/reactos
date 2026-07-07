@@ -748,6 +748,8 @@ USBPORT_WorkerRequestDpc(IN PRKDPC Dpc,
     FdoDevice = DeferredContext;
     FdoExtension = FdoDevice->DeviceExtension;
 
+    USBPORT_FlushDoneTransfers(FdoDevice);
+
     if (!InterlockedIncrement(&FdoExtension->IsrDpcHandlerCounter))
     {
         USBPORT_DpcHandler(FdoDevice);
@@ -878,6 +880,7 @@ USBPORT_QueueDoneTransfer(IN PUSBPORT_TRANSFER Transfer,
 {
     PDEVICE_OBJECT FdoDevice;
     PUSBPORT_DEVICE_EXTENSION  FdoExtension;
+    BOOLEAN Queued;
 
     DPRINT_CORE("USBPORT_QueueDoneTransfer: Transfer - %p, USBDStatus - %p\n",
                 Transfer,
@@ -893,7 +896,20 @@ USBPORT_QueueDoneTransfer(IN PUSBPORT_TRANSFER Transfer,
                                 &Transfer->TransferLink,
                                 &FdoExtension->DoneTransferSpinLock);
 
-    return KeInsertQueueDpc(&FdoExtension->TransferFlushDpc, NULL, NULL);
+    Queued = KeInsertQueueDpc(&FdoExtension->TransferFlushDpc, NULL, NULL);
+
+    if (!Queued)
+    {
+        /*
+         * The flush DPC can be running while observing an empty list.  A
+         * transfer inserted in that small window would not queue another DPC
+         * and would otherwise remain on DoneTransferList indefinitely.  Do not
+         * flush inline here: some callers hold EndpointSpinLock.
+         */
+        KeInsertQueueDpc(&FdoExtension->WorkerRequestDpc, NULL, NULL);
+    }
+
+    return Queued;
 }
 
 VOID
@@ -2352,13 +2368,23 @@ USBPORT_CompleteTransfer(IN PURB Urb,
     if (Urb->UrbHeader.UsbdFlags & USBD_FLAG_ALLOCATED_MDL)
     {
         IoFreeMdl(Transfer->TransferBufferMDL);
-        Urb->UrbHeader.UsbdFlags |= ~USBD_FLAG_ALLOCATED_MDL;
+        Urb->UrbHeader.UsbdFlags &= ~USBD_FLAG_ALLOCATED_MDL;
     }
 
     Urb->UrbControlTransfer.hca.Reserved8[0] = NULL;
-    Urb->UrbHeader.UsbdFlags |= ~USBD_FLAG_ALLOCATED_TRANSFER;
+    Urb->UrbHeader.UsbdFlags &= ~USBD_FLAG_ALLOCATED_TRANSFER;
 
     Irp = Transfer->Irp;
+    Event = Transfer->Event;
+
+    /*
+     * Completion routines are allowed to resubmit the same IRP before
+     * IoCompleteRequest returns.  USBSTOR does this for BOT CBW -> data -> CSW.
+     * Do not keep the old transfer allocated across the callback; pool reuse
+     * can otherwise hand this same block to the resubmitted URB and the
+     * post-callback free below would release the new active transfer.
+     */
+    ExFreePoolWithTag(Transfer, USB_PORT_TAG);
 
     if (Irp)
     {
@@ -2380,14 +2406,10 @@ USBPORT_CompleteTransfer(IN PURB Urb,
         KeLowerIrql(OldIrql);
     }
 
-    Event = Transfer->Event;
-
     if (Event)
     {
         KeSetEvent(Event, EVENT_INCREMENT, FALSE);
     }
-
-    ExFreePoolWithTag(Transfer, USB_PORT_TAG);
 
     DPRINT_CORE("USBPORT_CompleteTransfer: exit\n");
 }
