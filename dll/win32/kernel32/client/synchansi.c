@@ -28,6 +28,25 @@ CreateWaitableTimerA(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
  */
 HANDLE
 WINAPI
+CreateWaitableTimerExA(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
+                       IN LPCSTR lpTimerName OPTIONAL,
+                       IN DWORD dwFlags,
+                       IN DWORD dwDesiredAccess)
+{
+    ConvertAnsiToUnicodePrologue
+    if (!lpTimerName)
+        return CreateWaitableTimerExW(lpTimerAttributes, NULL, dwFlags, dwDesiredAccess);
+    ConvertAnsiToUnicodeBody(lpTimerName)
+    if (NT_SUCCESS(Status))
+        return CreateWaitableTimerExW(lpTimerAttributes, UnicodeCache->Buffer, dwFlags, dwDesiredAccess);
+    ConvertAnsiToUnicodeEpilogue
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
 OpenWaitableTimerA(IN DWORD dwDesiredAccess,
                    IN BOOL bInheritHandle,
                    IN LPCSTR lpTimerName)

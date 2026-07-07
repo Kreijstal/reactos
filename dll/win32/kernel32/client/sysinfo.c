@@ -128,6 +128,32 @@ BaseQuerySystemFirmware(
 /*
  * @implemented
  */
+DWORD
+WINAPI
+GetActiveProcessorCount(IN WORD GroupNumber)
+{
+    SYSTEM_INFO SystemInfo;
+
+    if ((GroupNumber != 0) && (GroupNumber != ALL_PROCESSOR_GROUPS))
+        return 0;
+
+    GetNativeSystemInfo(&SystemInfo);
+    return SystemInfo.dwNumberOfProcessors ? SystemInfo.dwNumberOfProcessors : 1;
+}
+
+/*
+ * @implemented
+ */
+WORD
+WINAPI
+GetActiveProcessorGroupCount(VOID)
+{
+    return 1;
+}
+
+/*
+ * @implemented
+ */
 SIZE_T
 WINAPI
 GetLargePageMinimum(VOID)
@@ -223,6 +249,26 @@ GetNativeSystemInfo(IN LPSYSTEM_INFO lpSystemInfo)
     if (!NT_SUCCESS(Status)) return;
 
     GetSystemInfoInternal(&BasicInfo, &ProcInfo, lpSystemInfo);
+}
+
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+GetMaximumProcessorCount(IN WORD GroupNumber)
+{
+    return GetActiveProcessorCount(GroupNumber);
+}
+
+/*
+ * @implemented
+ */
+WORD
+WINAPI
+GetMaximumProcessorGroupCount(VOID)
+{
+    return GetActiveProcessorGroupCount();
 }
 
 /*

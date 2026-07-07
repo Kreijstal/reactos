@@ -475,6 +475,23 @@ GetCurrentThreadId(VOID)
 /*
  * @implemented
  */
+VOID
+WINAPI
+GetCurrentThreadStackLimits(OUT PULONG_PTR LowLimit,
+                            OUT PULONG_PTR HighLimit)
+{
+    PTEB Teb = NtCurrentTeb();
+
+    if (LowLimit)
+        *LowLimit = (ULONG_PTR)Teb->DeallocationStack;
+
+    if (HighLimit)
+        *HighLimit = (ULONG_PTR)Teb->NtTib.StackBase;
+}
+
+/*
+ * @implemented
+ */
 BOOL
 NTAPI
 GetThreadTimes(IN HANDLE hThread,

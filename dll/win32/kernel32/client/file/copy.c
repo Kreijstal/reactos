@@ -315,6 +315,43 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
 /*
  * @implemented
  */
+HRESULT
+WINAPI
+CopyFile2(IN PCWSTR pwszExistingFileName,
+          IN PCWSTR pwszNewFileName,
+          IN COPYFILE2_EXTENDED_PARAMETERS *pExtendedParameters OPTIONAL)
+{
+    DWORD Flags = 0;
+    BOOL *Cancel = NULL;
+
+    if (pExtendedParameters)
+    {
+        if (pExtendedParameters->dwSize != sizeof(*pExtendedParameters))
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
+        }
+
+        Flags = pExtendedParameters->dwCopyFlags;
+        Cancel = pExtendedParameters->pfCancel;
+    }
+
+    if (CopyFileExW(pwszExistingFileName,
+                    pwszNewFileName,
+                    NULL,
+                    NULL,
+                    Cancel,
+                    Flags))
+    {
+        return S_OK;
+    }
+
+    return HRESULT_FROM_WIN32(GetLastError());
+}
+
+/*
+ * @implemented
+ */
 BOOL
 WINAPI
 CopyFileExW(IN LPCWSTR lpExistingFileName,

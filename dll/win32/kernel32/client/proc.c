@@ -4978,4 +4978,56 @@ DeleteProcThreadAttributeList(IN OUT LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeLis
     UNREFERENCED_PARAMETER(lpAttributeList);
 }
 
+/*
+ * @unimplemented
+ */
+DWORD
+WINAPI
+PssCaptureSnapshot(IN HANDLE ProcessHandle,
+                   IN DWORD CaptureFlags,
+                   IN DWORD ThreadContextFlags,
+                   OUT PHANDLE SnapshotHandle)
+{
+    UNREFERENCED_PARAMETER(ProcessHandle);
+    UNREFERENCED_PARAMETER(CaptureFlags);
+    UNREFERENCED_PARAMETER(ThreadContextFlags);
+
+    if (SnapshotHandle)
+        *SnapshotHandle = NULL;
+
+    return ERROR_NOT_SUPPORTED;
+}
+
+/*
+ * @unimplemented
+ */
+DWORD
+WINAPI
+PssFreeSnapshot(IN HANDLE ProcessHandle,
+                IN HANDLE SnapshotHandle)
+{
+    UNREFERENCED_PARAMETER(ProcessHandle);
+    UNREFERENCED_PARAMETER(SnapshotHandle);
+
+    return ERROR_NOT_SUPPORTED;
+}
+
+/*
+ * @unimplemented
+ */
+DWORD
+WINAPI
+PssQuerySnapshot(IN HANDLE SnapshotHandle,
+                 IN DWORD InformationClass,
+                 OUT PVOID Buffer,
+                 IN DWORD BufferLength)
+{
+    UNREFERENCED_PARAMETER(SnapshotHandle);
+    UNREFERENCED_PARAMETER(InformationClass);
+    UNREFERENCED_PARAMETER(Buffer);
+    UNREFERENCED_PARAMETER(BufferLength);
+
+    return ERROR_NOT_SUPPORTED;
+}
+
 /* EOF */
