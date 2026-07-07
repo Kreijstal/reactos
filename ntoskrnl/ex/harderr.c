@@ -613,6 +613,11 @@ NtRaiseHardError(IN NTSTATUS ErrorStatus,
                 return STATUS_INVALID_PARAMETER_4;
         }
 
+        if (!Response)
+        {
+            return STATUS_ACCESS_VIOLATION;
+        }
+
         /* Check if we have parameters */
         if (Parameters)
         {

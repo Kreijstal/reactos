@@ -155,8 +155,6 @@ Return Value:
     PagingIo = FlagOn( Irp->Flags, IRP_PAGING_IO );
     NonCachedIo = FlagOn( Irp->Flags, IRP_NOCACHE );
     SynchronousIo = FlagOn( IrpSp->FileObject->Flags, FO_SYNCHRONOUS_IO );
-
-
     //
     //  Extract the range of the Io.
     //
@@ -571,6 +569,4 @@ Return Value:
 
     return Status;
 }
-
-
 

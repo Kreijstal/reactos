@@ -117,6 +117,26 @@ USBSTOR_IsCSWValid(
 }
 
 static
+BOOLEAN
+USBSTOR_IsSenseDataValid(
+    IN PSCSI_REQUEST_BLOCK Srb)
+{
+    if (Srb->DataBuffer == NULL ||
+        Srb->DataTransferLength == 0 ||
+        Srb->DataTransferLength > 0xFF)
+    {
+        return FALSE;
+    }
+
+    return ScsiGetSenseKeyAndCodes(Srb->DataBuffer,
+                                   (UCHAR)Srb->DataTransferLength,
+                                   SCSI_SENSE_OPTIONS_NONE,
+                                   NULL,
+                                   NULL,
+                                   NULL);
+}
+
+static
 NTSTATUS
 USBSTOR_IssueRequestSense(
     IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
@@ -179,10 +199,19 @@ USBSTOR_CSWCompletionRoutine(
         // should happen only when a sense request was sent
         if (Request != FDODeviceExtension->ActiveSrb)
         {
-            FDODeviceExtension->ActiveSrb->SenseInfoBufferLength = Request->DataTransferLength;
+            if (USBSTOR_IsSenseDataValid(Request))
+            {
+                FDODeviceExtension->ActiveSrb->SenseInfoBufferLength = (UCHAR)Request->DataTransferLength;
+                FDODeviceExtension->ActiveSrb->SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
+            }
+            else
+            {
+                FDODeviceExtension->ActiveSrb->SenseInfoBufferLength = 0;
+                FDODeviceExtension->ActiveSrb->SrbStatus &= ~SRB_STATUS_AUTOSENSE_VALID;
+            }
+
             Request = FDODeviceExtension->ActiveSrb;
             Context->Srb = Request;
-            Request->SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
         }
 
         Irp->IoStatus.Status = USBSTOR_SrbStatusToNtStatus(Request);
