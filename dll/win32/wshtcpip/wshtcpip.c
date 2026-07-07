@@ -238,13 +238,48 @@ WSHGetSocketInformation(
     OUT PCHAR OptionValue,
     OUT LPINT OptionLength)
 {
-    UNIMPLEMENTED;
+    PSOCKET_CONTEXT Context = HelperDllSocketContext;
+    ULONG TdiType, TdiId;
 
-    DPRINT1("Get: Unknown level/option name: %d %d\n", Level, OptionName);
+    if (!OptionLength || !OptionValue)
+        return WSAEFAULT;
 
-    *OptionLength = 0;
+    switch (Level)
+    {
+        case SOL_SOCKET:
+            switch (OptionName)
+            {
+                case SO_DONTROUTE:
+                    if (*OptionLength < sizeof(BOOL))
+                    {
+                        *OptionLength = sizeof(BOOL);
+                        return WSAEFAULT;
+                    }
 
-    return NO_ERROR;
+                    *(BOOL*)OptionValue = Context->DontRoute;
+                    *OptionLength = sizeof(BOOL);
+                    return NO_ERROR;
+
+                case SO_KEEPALIVE:
+                    if (*OptionLength < sizeof(BOOL))
+                    {
+                        *OptionLength = sizeof(BOOL);
+                        return WSAEFAULT;
+                    }
+
+                    *(BOOL*)OptionValue = Context->KeepAlive;
+                    *OptionLength = sizeof(BOOL);
+                    return NO_ERROR;
+            }
+            break;
+    }
+
+    GetTdiTypeId(Level, OptionName, &TdiType, &TdiId);
+    if (TdiType == 0 || TdiId == 0)
+        return WSAENOPROTOOPT;
+
+    /* The TCP/IP stack does not expose a generic TDI query path here yet. */
+    return WSAENOPROTOOPT;
 }
 
 
@@ -351,7 +386,11 @@ WSHIoctl(
     IN  LPWSAOVERLAPPED_COMPLETION_ROUTINE CompletionRoutine,
     OUT LPBOOL NeedsCompletion)
 {
+    PSOCKET_CONTEXT Context = HelperDllSocketContext;
     INT res;
+
+    if (NeedsCompletion)
+        *NeedsCompletion = FALSE;
 
     if (IoControlCode == SIO_GET_INTERFACE_LIST)
     {
@@ -363,9 +402,20 @@ WSHIoctl(
         return res;
     }
 
-    UNIMPLEMENTED;
+    if (IoControlCode == SIO_KEEPALIVE_VALS)
+    {
+        if (InputBufferLength < sizeof(struct tcp_keepalive) || InputBuffer == NULL)
+            return WSAEFAULT;
 
-    DPRINT1("Ioctl: Unknown IOCTL code: %x\n", IoControlCode);
+        if (Context->SocketType != SOCK_STREAM && Context->Protocol != IPPROTO_TCP)
+            return WSAENOPROTOOPT;
+
+        Context->KeepAlive = (((struct tcp_keepalive*)InputBuffer)->onoff != 0);
+        if (NumberOfBytesReturned)
+            *NumberOfBytesReturned = 0;
+
+        return NO_ERROR;
+    }
 
     return WSAEINVAL;
 }
@@ -727,6 +777,11 @@ WSHSetSocketInformation(
                      * option. Windows accepts the option here, so keep the
                      * socket API contract and silently ignore it.
                      */
+                    if (OptionLength < sizeof(BOOL))
+                    {
+                        return WSAEFAULT;
+                    }
+                    Context->KeepAlive = (*(BOOL*)OptionValue != FALSE);
                     return 0;
 
                 default:
