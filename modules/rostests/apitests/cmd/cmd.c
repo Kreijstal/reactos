@@ -516,6 +516,56 @@ START_TEST(echo)
     }
 }
 
+START_TEST(quote)
+{
+    TEST_ENTRY Entry = { __LINE__, 1234 };
+    CHAR TempPath[MAX_PATH];
+    CHAR BatchPath[MAX_PATH];
+    CHAR CommandLine[MAX_PATH * 2];
+    HANDLE File;
+    DWORD Written;
+    static const CHAR BatchBody[] = "@echo off\r\necho CMD_QUOTE_BATCH_RAN\r\nexit 1234\r\n";
+
+    if (!GetTempPathA(ARRAYSIZE(TempPath), TempPath))
+    {
+        skip("GetTempPathA failed: %lu\n", GetLastError());
+        return;
+    }
+
+    if (!GetTempFileNameA(TempPath, "cmd", 0, BatchPath))
+    {
+        skip("GetTempFileNameA failed: %lu\n", GetLastError());
+        return;
+    }
+
+    DeleteFileA(BatchPath);
+    lstrcpyA(BatchPath + lstrlenA(BatchPath) - 4, ".cmd");
+    File = CreateFileA(BatchPath,
+                       GENERIC_WRITE,
+                       0,
+                       NULL,
+                       CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL,
+                       NULL);
+    if (File == INVALID_HANDLE_VALUE)
+    {
+        skip("CreateFileA(%s) failed: %lu\n", BatchPath, GetLastError());
+        return;
+    }
+
+    ok(WriteFile(File, BatchBody, sizeof(BatchBody) - 1, &Written, NULL),
+       "WriteFile failed: %lu\n", GetLastError());
+    CloseHandle(File);
+
+    sprintf(CommandLine, "cmd /c \"\"%s\" \"", BatchPath);
+    Entry.cmdline = CommandLine;
+    Entry.bStdOutput = TRUE;
+    Entry.OutputContains = "CMD_QUOTE_BATCH_RAN";
+    DoTestEntry(&Entry);
+
+    DeleteFileA(BatchPath);
+}
+
 START_TEST(cd)
 {
     SIZE_T i;
