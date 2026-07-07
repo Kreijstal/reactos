@@ -12,6 +12,15 @@
  * thread in _RpcAsyncGetNotification which dispatches each delivered
  * WLAN_NOTIFICATION_DATA to the callback.  Setting the source to NONE or
  * closing the handle stops the worker.
+ *
+ * The getter is a *synchronous* RPC call that blocks in the service until an
+ * event is queued.  The RPC runtime serializes concurrent calls that share a
+ * [context_handle] behind a per-handle lock held for the whole call, so a
+ * getter parked on the application's handle would deadlock every later call
+ * on it (WlanScan, WlanConnect, ...).  To keep the notification channel from
+ * blocking control calls -- the isolation Windows gets from a true [async]
+ * RPC getter -- each registration opens its *own* dedicated service handle and
+ * parks the getter on that; the application handle is never used by the getter.
  */
 
 #define WIN32_NO_STATUS
@@ -31,7 +40,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(wlanapi);
 typedef struct _WLAN_NOTIF_REG
 {
     struct _WLAN_NOTIF_REG     *Next;
-    HANDLE                      hClientHandle;
+    HANDLE                      hClientHandle;  /* application handle (key only) */
+    HANDLE                      hNotifHandle;   /* dedicated handle for the getter */
     DWORD                       dwSource;
     WLAN_NOTIFICATION_CALLBACK  Callback;
     PVOID                       Context;
@@ -102,7 +112,7 @@ WlanNotifThread(LPVOID lpParameter)
 
         RpcTryExcept
         {
-            dwResult = _RpcAsyncGetNotification(reg->hClientHandle, &pData);
+            dwResult = _RpcAsyncGetNotification(reg->hNotifHandle, &pData);
         }
         RpcExcept(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -131,23 +141,24 @@ WlanNotifThread(LPVOID lpParameter)
 }
 
 /*
- * Release the parked getter, join the worker, then free reg.
- * Caller must NOT hold NotifLock; reg must already be unlinked.
+ * Release the parked getter, join the worker, close the dedicated service
+ * handle, then free reg.  Caller must NOT hold NotifLock; reg must already
+ * be unlinked.
  */
 static VOID
-WlanNotifTeardown(PWLAN_NOTIF_REG reg, HANDLE hClientHandle, BOOL handleStillValid)
+WlanNotifTeardown(PWLAN_NOTIF_REG reg)
 {
     InterlockedExchange(&reg->Running, 0);
     reg->Callback = NULL;
 
-    /* If the handle is still open, setting the source to NONE makes the
-     * service release the parked getter; otherwise the close path does. */
-    if (handleStillValid)
+    /* Setting the dedicated handle's source to NONE makes the service release
+     * the parked getter so the worker can observe the state and return. */
+    if (reg->hNotifHandle != NULL)
     {
         DWORD dwPrev = 0;
         RpcTryExcept
         {
-            (void)_RpcRegisterNotification(hClientHandle,
+            (void)_RpcRegisterNotification(reg->hNotifHandle,
                                            WLAN_NOTIFICATION_SOURCE_NONE,
                                            &dwPrev);
         }
@@ -161,6 +172,20 @@ WlanNotifTeardown(PWLAN_NOTIF_REG reg, HANDLE hClientHandle, BOOL handleStillVal
     {
         WaitForSingleObject(reg->hThread, INFINITE);
         CloseHandle(reg->hThread);
+    }
+
+    /* The getter has returned, so the dedicated handle is idle: close it. */
+    if (reg->hNotifHandle != NULL)
+    {
+        HANDLE h = reg->hNotifHandle;
+        RpcTryExcept
+        {
+            (void)_RpcCloseHandle(&h);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        RpcEndExcept;
     }
 
     HeapFree(GetProcessHeap(), 0, reg);
@@ -177,38 +202,24 @@ WlanRegisterNotificationImpl(HANDLE hClientHandle,
     PWLAN_NOTIF_REG reg;
     DWORD dwPrev = WLAN_NOTIFICATION_SOURCE_NONE;
     DWORD dwResult = ERROR_SUCCESS;
-    BOOL startThread = FALSE;
 
     UNREFERENCED_PARAMETER(bIgnoreDuplicate);
 
     WlanNotifEnsureInit();
 
-    /* Register the requested sources with the service (gates the async getter). */
-    RpcTryExcept
-    {
-        dwResult = _RpcRegisterNotification(hClientHandle, dwNotifSource, &dwPrev);
-    }
-    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
-    {
-        dwResult = RpcExceptionCode();
-    }
-    RpcEndExcept;
-
-    if (dwResult != ERROR_SUCCESS)
-        return dwResult;
-
     EnterCriticalSection(&NotifLock);
     reg = WlanNotifFind(hClientHandle);
+    if (reg != NULL)
+        dwPrev = reg->dwSource;
 
     if (dwNotifSource == WLAN_NOTIFICATION_SOURCE_NONE || funcCallback == NULL)
     {
-        /* Deregister: unlink, then drain + free the worker outside the lock. */
+        /* Deregister: unlink, then release the getter + free outside the lock. */
         if (reg != NULL)
         {
             WlanNotifUnlink(reg);
             LeaveCriticalSection(&NotifLock);
-            /* Service source already set to NONE by the RPC call above. */
-            WlanNotifTeardown(reg, hClientHandle, FALSE);
+            WlanNotifTeardown(reg);
         }
         else
         {
@@ -220,38 +231,93 @@ WlanRegisterNotificationImpl(HANDLE hClientHandle,
         return ERROR_SUCCESS;
     }
 
-    if (reg == NULL)
+    if (reg != NULL)
     {
-        reg = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*reg));
-        if (reg == NULL)
+        /* Re-registration on an existing handle: update the callback and
+         * re-subscribe the dedicated handle (which already has a getter). */
+        reg->dwSource = dwNotifSource;
+        reg->Callback = funcCallback;
+        reg->Context = pCallbackContext;
+        LeaveCriticalSection(&NotifLock);
+
+        RpcTryExcept
         {
-            LeaveCriticalSection(&NotifLock);
-            return ERROR_NOT_ENOUGH_MEMORY;
+            DWORD dwOld = 0;
+            (void)_RpcRegisterNotification(reg->hNotifHandle, dwNotifSource, &dwOld);
         }
-        reg->hClientHandle = hClientHandle;
-        reg->Next = NotifListHead;
-        NotifListHead = reg;
-        startThread = TRUE;
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        RpcEndExcept;
+
+        if (pdwPrevNotifSource != NULL)
+            *pdwPrevNotifSource = dwPrev;
+        return ERROR_SUCCESS;
     }
 
+    /* New registration: reserve the slot, then set up the dedicated handle and
+     * getter outside the lock (the RPC calls must not run under NotifLock). */
+    reg = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*reg));
+    if (reg == NULL)
+    {
+        LeaveCriticalSection(&NotifLock);
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    reg->hClientHandle = hClientHandle;
     reg->dwSource = dwNotifSource;
     reg->Callback = funcCallback;
     reg->Context = pCallbackContext;
+    reg->Next = NotifListHead;
+    NotifListHead = reg;
+    LeaveCriticalSection(&NotifLock);
 
-    if (startThread)
+    /* Open a service handle dedicated to this client's notification stream.
+     * The getter parks on it, so it never serializes with control calls made
+     * on the application handle. */
+    RpcTryExcept
+    {
+        DWORD dwVer = 0;
+        WCHAR szMachine[] = L"localhost";
+        dwResult = _RpcOpenHandle(szMachine, 2 /* client version */, &dwVer,
+                                  (WLANSVC_RPC_HANDLE)&reg->hNotifHandle);
+    }
+    RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+    {
+        dwResult = RpcExceptionCode();
+    }
+    RpcEndExcept;
+
+    if (dwResult == ERROR_SUCCESS)
+    {
+        RpcTryExcept
+        {
+            DWORD dwOld = 0;
+            dwResult = _RpcRegisterNotification(reg->hNotifHandle, dwNotifSource, &dwOld);
+        }
+        RpcExcept(EXCEPTION_EXECUTE_HANDLER)
+        {
+            dwResult = RpcExceptionCode();
+        }
+        RpcEndExcept;
+    }
+
+    if (dwResult == ERROR_SUCCESS)
     {
         InterlockedExchange(&reg->Running, 1);
         reg->hThread = CreateThread(NULL, 0, WlanNotifThread, reg, 0, NULL);
         if (reg->hThread == NULL)
-        {
-            WlanNotifUnlink(reg);
-            LeaveCriticalSection(&NotifLock);
-            HeapFree(GetProcessHeap(), 0, reg);
-            return GetLastError();
-        }
+            dwResult = GetLastError();
     }
 
-    LeaveCriticalSection(&NotifLock);
+    if (dwResult != ERROR_SUCCESS)
+    {
+        /* Roll back everything we linked/opened. */
+        EnterCriticalSection(&NotifLock);
+        WlanNotifUnlink(reg);
+        LeaveCriticalSection(&NotifLock);
+        WlanNotifTeardown(reg);
+        return dwResult;
+    }
 
     if (pdwPrevNotifSource != NULL)
         *pdwPrevNotifSource = dwPrev;
@@ -259,8 +325,8 @@ WlanRegisterNotificationImpl(HANDLE hClientHandle,
 }
 
 /*
- * Called from WlanCloseHandle before _RpcCloseHandle: the handle is still
- * valid, so teardown can set the source to NONE to release the worker.
+ * Called from WlanCloseHandle before _RpcCloseHandle: release the getter and
+ * close its dedicated service handle before the application handle goes away.
  */
 VOID
 WlanStopNotificationThread(HANDLE hClientHandle)
@@ -277,5 +343,5 @@ WlanStopNotificationThread(HANDLE hClientHandle)
     LeaveCriticalSection(&NotifLock);
 
     if (reg != NULL)
-        WlanNotifTeardown(reg, hClientHandle, TRUE);
+        WlanNotifTeardown(reg);
 }
