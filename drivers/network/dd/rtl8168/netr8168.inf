@@ -1,6 +1,9 @@
 ; NETR8168.INF -- ReactOS Realtek RTL8168/8111 GbE installer
 ;
-; PCI ID list ported from Linux drivers/net/ethernet/realtek/r8169_main.c.
+; Only PCI IDs whose silicon this driver can detect are bound (RTL8168
+; family; see NICDetectChipVersion).  RTL8169 (10EC:8167/8169, D-Link,
+; Linksys, USR), RTL810x fast-ethernet (10EC:8136) and RTL8125
+; (10EC:2502/2600) devices are intentionally not listed.
 
 [Version]
 Signature  = "$Windows NT$"
@@ -15,29 +18,11 @@ DefaultDestDir = 12
 
 [Manufacturer]
 %RealtekMfg% = RealtekMfg
-%DLinkMfg%   = DLinkMfg
-%LinksysMfg% = LinksysMfg
-%USRMfg%     = USRMfg
 
 [RealtekMfg]
 %Realtek8168.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8168
-%Realtek8136.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8136
 %Realtek8161.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8161
 %Realtek8162.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8162
-%Realtek8167.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8167
-%Realtek8169.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_8169
-%Realtek2502.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_2502
-%Realtek2600.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_10EC&DEV_2600
-
-[DLinkMfg]
-%DLink4300.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_1186&DEV_4300
-%DLink4302.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_1186&DEV_4302
-
-[LinksysMfg]
-%LinksysEG1032.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_1737&DEV_1032
-
-[USRMfg]
-%USR0116.DeviceDesc% = RTL8168_Inst.ndi,PCI\VEN_16EC&DEV_0116
 
 ;---------------------------- RTL8168 DRIVER ----------------------------
 
@@ -70,19 +55,7 @@ LoadOrderGroup = NDIS
 [Strings]
 ReactOS    = "ReactOS Project"
 RealtekMfg = "Realtek"
-DLinkMfg   = "D-Link"
-LinksysMfg = "Linksys"
-USRMfg     = "U.S. Robotics"
 
 Realtek8168.DeviceDesc = "Realtek RTL8168/8111 Family PCI-E Gigabit Ethernet"
-Realtek8136.DeviceDesc = "Realtek RTL8101/8102 Family PCI-E Fast Ethernet"
 Realtek8161.DeviceDesc = "Realtek RTL8161 Family PCI-E Gigabit Ethernet"
 Realtek8162.DeviceDesc = "Realtek RTL8162 Family PCI-E Gigabit Ethernet"
-Realtek8167.DeviceDesc = "Realtek RTL8167 Family PCI-E Gigabit Ethernet"
-Realtek8169.DeviceDesc = "Realtek RTL8169/8110 Gigabit Ethernet"
-Realtek2502.DeviceDesc = "Realtek RTL2502 Family Gigabit Ethernet"
-Realtek2600.DeviceDesc = "Realtek RTL2600 Family Gigabit Ethernet"
-DLink4300.DeviceDesc   = "D-Link DGE-528T Gigabit Ethernet (RTL8169)"
-DLink4302.DeviceDesc   = "D-Link DGE-560T Gigabit Ethernet"
-LinksysEG1032.DeviceDesc = "Linksys EG1032 Gigabit Ethernet"
-USR0116.DeviceDesc     = "U.S. Robotics USR997900 Gigabit Ethernet"
