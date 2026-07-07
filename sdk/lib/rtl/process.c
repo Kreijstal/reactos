@@ -777,14 +777,6 @@ RtlExitUserProcess(_In_ ULONG ExitStatus)
     _SEH2_END;
 }
 
-ULONG
-NTAPI
-RtlGetCurrentProcessorNumber(VOID)
-{
-    /* Forward to kernel */
-    return NtGetCurrentProcessorNumber();
-}
-
 _IRQL_requires_max_(APC_LEVEL)
 ULONG
 NTAPI
