@@ -1714,6 +1714,18 @@ HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Type",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Group",0x00000000,"NDIS"
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","DisplayName",0x00000000,"ReactOS Virtual Wi-Fi Adapter"
 
+; nwifi - Native WiFi (802.11) intermediate driver.  NDIS protocol/IM driver
+; that binds every Native-802.11 dot11 miniport (vwifi, ar9485) at its lower
+; edge and presents a virtual 802.3 miniport to TCP/IP at its upper edge.
+; Boot-started (Group NDIS) so its protocol edge is registered before the
+; dot11 miniports enumerate and NDIS drives ProtocolBindAdapterEx for each.
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Start",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","ImagePath",0x00020000,"system32\drivers\nwifi.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Group",0x00000000,"NDIS"
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","DisplayName",0x00000000,"ReactOS Native WiFi Service"
+
 ; Base Filtering Engine (BFE) - stub, dev-nt6-1 branch
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","DisplayName",0x00000000,"Base Filtering Engine"
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Description",0x00000000,"Manages WFP filters and callouts. Stub — accepts filter add/delete but never evaluates them."
