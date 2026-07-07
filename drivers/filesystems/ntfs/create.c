@@ -555,6 +555,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     UNICODE_STRING FullPath;
     UNICODE_STRING StreamName;
+    NTFS_STREAM_TYPE StreamType = NtfsStreamTypeData;
     PIRP Irp = IrpContext->Irp;
 
     DPRINT("NtfsCreateFile(%p, %p) called\n", DeviceObject, IrpContext);
@@ -625,20 +626,32 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
     }
 
-    /* Split and validate an alternate-data-stream suffix (":Stream[:$DATA]")
+    /* Split and validate an alternate-data-stream suffix (":Stream[:$TYPE]")
      * once, before any path walk.  This normalizes FileObject->FileName in
-     * place: the ":$DATA" type suffix is stripped ("file::$DATA" == "file"),
-     * so the FCB table key, the directory walk and the create path below all
-     * see at most one colon separating the file part from the stream name.
-     * Invalid stream syntax fails the create up front, like Windows. */
+     * place: the type suffix is stripped ("file::$DATA" == "file",
+     * "dir::$INDEX_ALLOCATION" == "dir"), so the FCB table key, the
+     * directory walk and the create path below all see at most one colon
+     * separating the file part from the stream name.  StreamType keeps the
+     * typed-open requirement ($INDEX_ALLOCATION demands a directory target,
+     * an explicit "::$DATA" a non-directory), enforced once the target has
+     * resolved.  Invalid stream syntax fails the create up front, like
+     * Windows. */
     RtlInitEmptyUnicodeString(&StreamName, NULL, 0);
     if (!(RequestedOptions & FILE_OPEN_BY_FILE_ID) &&
         FileObject->FileName.Length != 0)
     {
-        Status = NtfsParseStreamPath(&FileObject->FileName, &StreamName);
+        Status = NtfsParseStreamPath(&FileObject->FileName, &StreamName, &StreamType);
         if (!NT_SUCCESS(Status))
         {
             return Status;
+        }
+
+        /* A "::$INDEX_ALLOCATION" open demands a directory target, which
+         * the FILE_NON_DIRECTORY_FILE option contradicts outright. */
+        if (StreamType == NtfsStreamTypeIndexAllocation &&
+            BooleanFlagOn(RequestedOptions, FILE_NON_DIRECTORY_FILE))
+        {
+            return STATUS_NOT_A_DIRECTORY;
         }
     }
 
@@ -736,7 +749,10 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             return STATUS_ACCESS_DENIED;
         }
 
-        if (RequestedOptions & FILE_DIRECTORY_FILE)
+        /* The volume is no directory - neither for FILE_DIRECTORY_FILE nor
+         * for a typed "::$INDEX_ALLOCATION" open of it. */
+        if ((RequestedOptions & FILE_DIRECTORY_FILE) ||
+            StreamType == NtfsStreamTypeIndexAllocation)
         {
             return STATUS_NOT_A_DIRECTORY;
         }
@@ -784,6 +800,25 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             Irp->IoStatus.Information = FILE_EXISTS;
             NtfsCloseFile(DeviceExt, FileObject);
             return STATUS_OBJECT_NAME_COLLISION;
+        }
+
+        /* Typed stream opens ([MS-FSCC] 2.1.5): "::$INDEX_ALLOCATION" names
+         * the directory index stream and demands a directory target, while
+         * an explicit default-stream "::$DATA" open demands a non-directory
+         * (a directory has no unnamed $DATA attribute).  Plain opens (no
+         * stream suffix) are unaffected. */
+        if (StreamType == NtfsStreamTypeIndexAllocation &&
+            !NtfsFCBIsDirectory(Fcb))
+        {
+            NtfsCloseFile(DeviceExt, FileObject);
+            return STATUS_NOT_A_DIRECTORY;
+        }
+
+        if (StreamType == NtfsStreamTypeDefaultData &&
+            NtfsFCBIsDirectory(Fcb))
+        {
+            NtfsCloseFile(DeviceExt, FileObject);
+            return STATUS_FILE_IS_A_DIRECTORY;
         }
 
         if (RequestedOptions & FILE_NON_DIRECTORY_FILE &&
@@ -940,6 +975,25 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
                 NtfsCloseFile(DeviceExt, FileObject);
                 return STATUS_ACCESS_DENIED;
+            }
+
+            /* A typed "::$INDEX_ALLOCATION" create is meaningful only as a
+             * directory create: with FILE_DIRECTORY_FILE the (already
+             * stripped) name falls through to NtfsCreateDirectory below,
+             * exactly like Windows; without it there is nothing valid the
+             * name could create. */
+            if (StreamType == NtfsStreamTypeIndexAllocation &&
+                !(RequestedOptions & FILE_DIRECTORY_FILE))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+
+            /* An explicit default-$DATA open can create a file, never a
+             * directory. */
+            if (StreamType == NtfsStreamTypeDefaultData &&
+                RequestedOptions & FILE_DIRECTORY_FILE)
+            {
+                return STATUS_NOT_A_DIRECTORY;
             }
 
             if (StreamName.Length != 0)
