@@ -1,54 +1,72 @@
-; NETVWIFI.INF
-;
-; Installation file for the Virtual Wi-Fi NDIS 6.20 native-802.11 miniport.
-; Software-only: enumerated under Root\\vwifi so it loads without any PCI
-; hardware. Intended for upper-stack development (wlansvc / wlanapi /
-; OID_DOT11_* / WPA2-PSK testing).
+; ReactOS Virtual Native 802.11 (dot11) Miniport Installation File
+; Software-only Native 802.11 miniport; root-enumerated virtual device
+; (instantiated at boot via the Enum\Root seed in hivesys.inf).
+; Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
 
 [Version]
-Signature  = "$Windows NT$"
-LayoutFile = layout.inf
-Class      = Net
-ClassGUID  = {4D36E972-E325-11CE-BFC1-08002BE10318}
-Provider   = %ReactOS%
-DriverVer  = 05/21/2026,0.01
+Signature   = "$Windows NT$"
+Class       = Net
+ClassGUID   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %ReactOS%
+DriverVer   = 06/02/2026,1.0.0.0
 
 [DestinationDirs]
 DefaultDestDir = 12
 
 [Manufacturer]
-%ReactOSMfg% = ReactOSMfg
+%ReactOS% = Models,NTamd64,NTARM64
 
-[ReactOSMfg]
-%VWIFI.DeviceDesc% = VWIFI_Inst.ndi,Root\\vwifi
+[Models]
+%vwifi.DeviceDesc% = vwifi.ndi, ROOT\NET\VWIFI
+%vwifi.DeviceDesc% = vwifi.ndi, ROOT\VWIFI
 
-[VWIFI_Inst.ndi.NT]
-Characteristics = 0x80   ; NCF_HAS_UI
-BusType         = 15     ; INTERNAL_BUS
-AddReg          = VWIFI_AddReg.NT
-CopyFiles       = VWIFI_CopyFiles.NT
+[Models.NTamd64]
+%vwifi.DeviceDesc% = vwifi.ndi, ROOT\NET\VWIFI
+%vwifi.DeviceDesc% = vwifi.ndi, ROOT\VWIFI
 
-[VWIFI_CopyFiles.NT]
+[Models.NTARM64]
+%vwifi.DeviceDesc% = vwifi.ndi, ROOT\NET\VWIFI
+%vwifi.DeviceDesc% = vwifi.ndi, ROOT\VWIFI
+
+[vwifi.ndi]
+Characteristics = 0x21   ; NCF_VIRTUAL | NCF_HAS_UI
+AddReg          = vwifi.reg
+CopyFiles       = vwifi.CopyFiles
+
+[vwifi.ndi.Services]
+AddService = vwifi, 2, vwifi.Service, vwifi.EventLog
+
+[vwifi.reg]
+HKR, Ndi,               Service,    0, "vwifi"
+HKR, Ndi\Interfaces,    UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces,    LowerRange, 0, "nativewifi"
+
+[vwifi.CopyFiles]
 vwifi.sys
 
-[VWIFI_AddReg.NT]
-HKR, Ndi,            Service,    0, "vwifi"
-HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
-HKR, Ndi\Interfaces, LowerRange, 0, "wlan"
-
-[VWIFI_Inst.ndi.NT.Services]
-AddService = vwifi, 0x00000002, VWIFI_Service_Inst
-
-[VWIFI_Service_Inst]
-ServiceType    = 1
-StartType      = 3
-ErrorControl   = 0
-ServiceBinary  = %12%\\vwifi.sys
+[vwifi.Service]
+DisplayName    = %vwifi.ServiceDesc%
+ServiceType    = 1      ; SERVICE_KERNEL_DRIVER
+StartType      = 3      ; SERVICE_DEMAND_START
+ErrorControl   = 1      ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\vwifi.sys
 LoadOrderGroup = NDIS
 
-;----------------------------------- STRINGS -----------------------------
+[vwifi.EventLog]
+AddReg = vwifi.EventLog.Reg
+
+[vwifi.EventLog.Reg]
+HKR, , EventMessageFile, 0x00020000, "%%SystemRoot%%\System32\netevent.dll"
+HKR, , TypesSupported,   0x00010001, 7
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+vwifi.sys = 1
 
 [Strings]
-ReactOS           = "ReactOS Project"
-ReactOSMfg        = "ReactOS"
-VWIFI.DeviceDesc  = "ReactOS Virtual Wi-Fi Adapter"
+ReactOS          = "ReactOS Team"
+vwifi.DeviceDesc = "ReactOS Virtual Native 802.11 Adapter"
+vwifi.ServiceDesc = "ReactOS Virtual WiFi Driver"
+DiskName         = "ReactOS Virtual WiFi Driver Installation Disk"
