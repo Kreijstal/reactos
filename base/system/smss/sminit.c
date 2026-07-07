@@ -29,10 +29,6 @@ PWCHAR SmpDefaultEnvironment, SmpDefaultLibPathBuffer;
 UNICODE_STRING SmpKnownDllPath, SmpDefaultLibPath;
 ULONG SmpCalledConfigEnv;
 
-ULONG SmpInitProgressByLine;
-NTSTATUS SmpInitReturnStatus;
-PVOID SmpInitLastCall;
-
 SECURITY_DESCRIPTOR SmpPrimarySDBody, SmpLiberalSDBody, SmpKnownDllsSDBody;
 SECURITY_DESCRIPTOR SmpApiPortSDBody;
 PISECURITY_DESCRIPTOR SmpPrimarySecurityDescriptor, SmpLiberalSecurityDescriptor;
@@ -40,13 +36,6 @@ PISECURITY_DESCRIPTOR SmpKnownDllsSecurityDescriptor, SmpApiPortSecurityDescript
 
 ULONG SmpAllowProtectedRenames, SmpProtectionMode = 1;
 BOOLEAN MiniNTBoot = FALSE;
-
-#define SMSS_CHECKPOINT(x, y)           \
-{                                       \
-    SmpInitProgressByLine = __LINE__;   \
-    SmpInitReturnStatus = (y);          \
-    SmpInitLastCall = (x);              \
-}
 
 /* REGISTRY CONFIGURATION *****************************************************/
 
@@ -2308,7 +2297,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
         /* Fail if there was a problem */
         DPRINT1("SMSS: Unable to allocate default environment - Status == %X\n",
                 Status);
-        SMSS_CHECKPOINT(RtlCreateEnvironment, Status);
         return Status;
     }
 
@@ -2364,7 +2352,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
     {
         /* We failed somewhere in registry initialization, which is bad... */
         DPRINT1("SMSS: RtlQueryRegistryValues failed - Status == %lx\n", Status);
-        SMSS_CHECKPOINT(RtlQueryRegistryValues, Status);
         return Status;
     }
 
@@ -2375,7 +2362,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
         /* Failed */
         DPRINT1("SMSS: Unable to initialize DosDevices configuration - Status == %lx\n",
                 Status);
-        SMSS_CHECKPOINT(SmpInitializeDosDevices, Status);
         return Status;
     }
 
@@ -2394,7 +2380,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
         /* Fail */
         DPRINT1("SMSS: Unable to create %wZ object directory - Status == %lx\n",
                 &DestinationString, Status);
-        SMSS_CHECKPOINT(NtCreateDirectoryObject, Status);
         return Status;
     }
 
@@ -2425,7 +2410,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
         /* Fail if that didn't work */
         DPRINT1("SMSS: Unable to initialize KnownDll configuration - Status == %lx\n",
                 Status);
-        SMSS_CHECKPOINT(SmpInitializeKnownDlls, Status);
         return Status;
     }
 
@@ -2461,7 +2445,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
     if (!NT_SUCCESS(Status))
     {
         /* Handle failure */
-        SMSS_CHECKPOINT(SmpCreateDynamicEnvironmentVariables, Status);
         return Status;
     }
 
@@ -2470,7 +2453,6 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
                                            &SmpWindowsSubSysProcessId,
                                            InitialCommand);
     ASSERT(MuSessionId == 0);
-    if (!NT_SUCCESS(Status)) SMSS_CHECKPOINT(SmpLoadSubSystemsForMuSession, Status);
     return Status;
 }
 
@@ -2518,7 +2500,6 @@ SmpInit(IN PUNICODE_STRING InitialCommand,
     if (!NT_SUCCESS(Status))
     {
         /* Fail */
-        SMSS_CHECKPOINT(SmpCreateSecurityDescriptors, Status);
         return Status;
     }
 

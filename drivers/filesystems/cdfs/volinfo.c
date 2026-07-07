@@ -483,8 +483,6 @@ Return Value:
 
     PAGED_CODE();
 
-    UNREFERENCED_PARAMETER( Vcb );
-
     //
     //  Fill out the fixed portion of the buffer.
     //
@@ -493,7 +491,7 @@ Return Value:
                                    FILE_READ_ONLY_VOLUME |
                                    FILE_SUPPORTS_OPEN_BY_FILE_ID;
 
-    if (FlagOn( IrpContext->Vcb->VcbState, VCB_STATE_JOLIET )) {
+    if (FlagOn( Vcb->VcbState, VCB_STATE_JOLIET )) {
 
         SetFlag( Buffer->FileSystemAttributes, FILE_UNICODE_ON_DISK );
 

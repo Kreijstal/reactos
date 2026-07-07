@@ -2966,7 +2966,3 @@ Return Value:
     return OplockStatus;
 }
 
-
-
-
-

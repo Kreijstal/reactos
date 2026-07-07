@@ -293,7 +293,7 @@ PortDispatchCreate(
     IN PIRP Irp)
 {
     DPRINT("PortDispatchCreate(%p %p)\n",
-            DeviceObject, Irp);
+           DeviceObject, Irp);
 
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = FILE_OPENED;

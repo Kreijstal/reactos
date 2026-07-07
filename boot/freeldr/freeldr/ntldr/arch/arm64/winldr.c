@@ -740,6 +740,7 @@ Arm64InitializeMemory(
     if (!LoaderBlock)
         return FALSE;
 
+    Arm64PreparePageTables();
     Arm64ApplyDeferredPageTableMemoryTypes();
     return TRUE;
 }
