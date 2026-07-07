@@ -206,15 +206,20 @@ USHORT  NTAPI RtlPhyReadPaged(IN PRTL_ADAPTER A, IN USHORT Page, IN ULONG Reg);
 VOID    NTAPI RtlPhyModifyPaged(IN PRTL_ADAPTER A, IN USHORT Page,
                                 IN ULONG Reg, IN USHORT Mask, IN USHORT Set);
 
-/* phy.c */
+/* chipinit.c */
 VOID    NTAPI RtlHwStartChipSpecific(IN PRTL_ADAPTER A);
+VOID    NTAPI RtlHwAspmClkReqDisable(IN PRTL_ADAPTER A);
+VOID    NTAPI RtlEnableExitL1(IN PRTL_ADAPTER A);
+
+/* phy.c */
 VOID    NTAPI RtlHwPhyConfig(IN PRTL_ADAPTER A);
 VOID    NTAPI RtlPllPowerUp(IN PRTL_ADAPTER A);
 VOID    NTAPI RtlPllPowerDown(IN PRTL_ADAPTER A);
 
 /* hardware.c */
-NDIS_STATUS NTAPI NICPowerOn(IN PRTL_ADAPTER Adapter);
 NDIS_STATUS NTAPI NICSoftReset(IN PRTL_ADAPTER Adapter);
+VOID        NTAPI NICInitializeHw(IN PRTL_ADAPTER Adapter);
+VOID        NTAPI Rtl8168EpStopCmac(IN PRTL_ADAPTER Adapter);
 NDIS_STATUS NTAPI NICDetectChipVersion(IN PRTL_ADAPTER Adapter);
 NDIS_STATUS NTAPI NICGetPermanentMacAddress(IN PRTL_ADAPTER Adapter, OUT PUCHAR MacAddress);
 NDIS_STATUS NTAPI NICProgramRings(IN PRTL_ADAPTER Adapter);
