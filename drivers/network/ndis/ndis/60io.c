@@ -2,7 +2,7 @@
  * PROJECT:     ReactOS NDIS library
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * FILE:        drivers/network/ndis/ndis/60io.c
- * PURPOSE:     NDIS 6 hardware integration - MMIO, IO port range, DMA,
+ * PURPOSE:     NDIS 6 hardware integration — MMIO, IO port range, DMA,
  *              shared memory, interrupt registration. Wraps the WDM
  *              kernel APIs (MmMapIoSpace, IoGetDmaAdapter, etc.) into
  *              the NDIS 6 surface that miniports expect.
@@ -22,15 +22,9 @@
 #include <guiddef.h>
 #include <wdmguid.h>
 
-/* Silence the trace prints below by default; comment out the
- * "#define NDEBUG" to re-enable. */
-#define NDEBUG
-#undef UNIMPLEMENTED
-#include <reactos/debug.h>
-
 /* ============================================================================
  *  Helper: get the NDIS6_ADAPTER_EXT from any miniport handle the driver
- *  passed in. The handle is whatever NdisMSetMiniportAttributes returned -
+ *  passed in. The handle is whatever NdisMSetMiniportAttributes returned —
  *  in our world it's the LOGICAL_ADAPTER pointer.
  * ============================================================================ */
 
@@ -44,7 +38,7 @@ Ndis6IoExtFromHandle(NDIS_HANDLE Handle)
 }
 
 /* ============================================================================
- *  MMIO mapping - NDIS 6 helper
+ *  MMIO mapping — NDIS 6 helper
  *
  *  These functions are NOT exported under the NdisM* names (the legacy
  *  NDIS 5 library already exports them). Instead they're called from the
@@ -167,7 +161,7 @@ Ndis6MDeregisterIoPortRange(
 }
 
 /* ============================================================================
- *  DMA adapter - used for AllocateCommonBuffer (descriptor rings) and
+ *  DMA adapter — used for AllocateCommonBuffer (descriptor rings) and
  *  scatter-gather lists (transmit packet payloads).
  * ============================================================================ */
 
@@ -283,7 +277,7 @@ Ndis6IoGetBusInterface(
     static BOOLEAN                CachedValid = FALSE;
 
     /* Simple per-adapter cache. For multi-adapter workloads the cache
-     * would need to move onto Ext - this is a static for now because
+     * would need to move onto Ext — this is a static for now because
      * the e1000e-only test path has a single adapter. */
     if (CachedValid)
         return &CachedBusInterface;
@@ -476,7 +470,7 @@ NdisMAllocateNetBufferSGList(
 
     CurrentVa = (PUCHAR)MmGetMdlVirtualAddress(Mdl) + MdlOffset;
 
-    /* NDIS_SG_LIST_WRITE_TO_DEVICE == 0x01 - for TX direction (most sends).
+    /* NDIS_SG_LIST_WRITE_TO_DEVICE == 0x01 — for TX direction (most sends).
      * The symbol isn't in the ReactOS NDIS headers yet; use the literal. */
     WriteToDevice = (Flags & 0x00000001) ? TRUE : FALSE;
 
@@ -502,7 +496,7 @@ NdisMAllocateNetBufferSGList(
 
     if (!NT_SUCCESS(Status))
     {
-        /* On sync failure the execution routine is NOT called - free ctx. */
+        /* On sync failure the execution routine is NOT called — free ctx. */
         ExFreePoolWithTag(ctx, NDIS6_SG_CTX_TAG);
         return (NDIS_STATUS)Status;
     }
@@ -529,14 +523,14 @@ NdisMFreeNetBufferSGList(
 
     /* HalPutScatterGatherList reads WriteToDevice from the per-element
      * context stashed in SGL->Reserved, but still wants a hint. We can't
-     * reliably recover the original direction here - HalPutScatterGatherList
+     * reliably recover the original direction here — HalPutScatterGatherList
      * uses the stashed copy regardless, so the hint is cosmetic. */
     Ext->DmaAdapter->DmaOperations->PutScatterGatherList(
         Ext->DmaAdapter, pSGL, WriteToDevice);
 }
 
 /* ============================================================================
- *  Shared (DMA-coherent) memory - used for descriptor rings.
+ *  Shared (DMA-coherent) memory — used for descriptor rings.
  *
  *  Real implementation calls AllocateCommonBuffer on the DMA adapter so
  *  the buffer is bus-master-accessible.
@@ -607,11 +601,11 @@ Ndis6MFreeSharedMemory(
 }
 
 /* ============================================================================
- *  Interrupt registration - Phase 2 real wiring
+ *  Interrupt registration — Phase 2 real wiring
  *
  *  An NDIS 6 miniport calls NdisMRegisterInterruptEx from MiniportInitializeEx
  *  to register its ISR and DPC. We translate that into IoConnectInterrupt
- *  using two static wrappers - one at DIRQL (Ndis6IsrWrapper) that walks
+ *  using two static wrappers — one at DIRQL (Ndis6IsrWrapper) that walks
  *  Ext->IntChars.InterruptHandler, and one at DISPATCH_LEVEL (Ndis6DpcWrapper)
  *  that walks Ext->IntChars.InterruptDpcHandler. The miniport's per-interrupt
  *  context is stashed in Ext->MiniportInterruptContext.
@@ -633,8 +627,6 @@ Ndis6IsrWrapper(
     BOOLEAN QueueDpc       = FALSE;
     ULONG   TargetCpus     = 0;
     BOOLEAN Recognized;
-    static volatile LONG IsrCount = 0;
-    LONG MyCount;
 
     UNREFERENCED_PARAMETER(Interrupt);
 
@@ -645,12 +637,6 @@ Ndis6IsrWrapper(
         Ext->MiniportInterruptContext,
         &QueueDpc,
         &TargetCpus);
-
-    /* Log the first few ISRs (limit to avoid log flood). */
-    MyCount = InterlockedIncrement(&IsrCount);
-    if (MyCount <= 30)
-        DPRINT("NDIS6-IRQ: ISR fired #%ld Recognized=%d QueueDpc=%d\n",
-                 MyCount, Recognized, QueueDpc);
 
     if (Recognized && QueueDpc)
         KeInsertQueueDpc(&Ext->InterruptDpc, NULL, NULL);
@@ -696,7 +682,7 @@ Ndis6DpcWrapper(
  * and we call into Ext->IntChars.MessageInterruptHandler.
  *
  * Many drivers (e1000e, virtio-net) only set MsiSupported = TRUE and
- * leave MessageInterruptHandler NULL - for those, NDIS dispatches the
+ * leave MessageInterruptHandler NULL — for those, NDIS dispatches the
  * regular line-based InterruptHandler and the driver checks ICR/EIMS
  * itself to figure out which message fired. We fall back to the
  * regular handler when MessageInterruptHandler is absent. */
@@ -726,7 +712,7 @@ Ndis6MsiIsrWrapper(
     }
     else if (Ext->IntChars.InterruptHandler != NULL)
     {
-        /* Fall back to the regular ISR - the driver figures out which
+        /* Fall back to the regular ISR — the driver figures out which
          * message fired by reading hardware status registers. */
         Recognized = Ext->IntChars.InterruptHandler(
             Ext->MiniportInterruptContext,
@@ -765,8 +751,16 @@ NdisMRegisterInterruptEx(
     if (Ext == NULL)
         return NDIS_STATUS_INVALID_PARAMETER;
 
-    /* Save the driver's characteristics + per-interrupt context. */
-    Ext->IntChars                 = *MiniportInterruptCharacteristics;
+    /* Save the driver's characteristics + per-interrupt context. Copy only
+     * Header.Size bytes — a driver built against a shorter revision must
+     * not have the missing tail read as garbage. */
+    RtlZeroMemory(&Ext->IntChars, sizeof(Ext->IntChars));
+    {
+        USHORT CharSize = MiniportInterruptCharacteristics->Header.Size;
+        if (CharSize == 0 || CharSize > sizeof(Ext->IntChars))
+            CharSize = sizeof(Ext->IntChars);
+        RtlCopyMemory(&Ext->IntChars, MiniportInterruptCharacteristics, CharSize);
+    }
     Ext->MiniportInterruptContext = MiniportInterruptContext;
 
     /* Initialize the wrapper DPC bound to Ndis6DpcWrapper. The driver's DPC
@@ -797,14 +791,14 @@ NdisMRegisterInterruptEx(
         p.MessageBased.FallBackServiceRoutine  = Ndis6IsrWrapper;
 
         Status = IoConnectInterruptEx(&p);
-        DPRINT("NDIS6: IoConnectInterruptEx(MSG) -> 0x%08lx MsiTable=%p\n",
+        DbgPrint("NDIS6: IoConnectInterruptEx(MSG) -> 0x%08lx MsiTable=%p\n",
                  (ULONG)Status, Ext->MsiTable);
 
         if (NT_SUCCESS(Status))
         {
             if (Ext->MsiTable != NULL && Ext->MsiTable->MessageCount > 0)
             {
-                /* True MSI/MSI-X was connected - keep the table, mark
+                /* True MSI/MSI-X was connected — keep the table, mark
                  * the InterruptObject as the first vector's PKINTERRUPT
                  * so the legacy deregister path still works. */
                 Ext->InterruptObject = Ext->MsiTable->MessageInfo[0].InterruptObject;
@@ -820,7 +814,7 @@ NdisMRegisterInterruptEx(
                 MiniportInterruptCharacteristics->InterruptType    = NDIS_CONNECT_MESSAGE_BASED;
                 MiniportInterruptCharacteristics->MessageInfoTable = Ext->MsiTable;
 
-                DPRINT("NDIS6: connected %lu MSI vectors (wrote back InterruptType=MSG MessageInfoTable=%p)\n",
+                DbgPrint("NDIS6: connected %lu MSI vectors (wrote back InterruptType=MSG MessageInfoTable=%p)\n",
                          Ext->MsiTable->MessageCount, Ext->MsiTable);
             }
             else
@@ -839,14 +833,14 @@ NdisMRegisterInterruptEx(
                 MiniportInterruptCharacteristics->InterruptType    = NDIS_CONNECT_LINE_BASED;
                 MiniportInterruptCharacteristics->MessageInfoTable = NULL;
 
-                DPRINT("NDIS6: message-based fell back to line KINTERRUPT=%p\n",
+                DbgPrint("NDIS6: message-based fell back to line KINTERRUPT=%p\n",
                          Ext->InterruptObject);
             }
 
             *NdisInterruptHandle = (NDIS_HANDLE)Ext;
             return NDIS_STATUS_SUCCESS;
         }
-        /* EX path failed outright - fall through to the legacy line path. */
+        /* EX path failed outright — fall through to the legacy line path. */
     }
 
     /* The Phase 1 PnP dispatcher already extracted the IRQ vector / IRQL /
@@ -855,7 +849,7 @@ NdisMRegisterInterruptEx(
     if (Ext->InterruptVector == 0 || Ext->InterruptIrql == 0)
     {
         /* No IRQ resource was assigned by PnP. Some drivers (notably USB
-         * RNDIS) never call this function - but if they do, fail loudly
+         * RNDIS) never call this function — but if they do, fail loudly
          * rather than silently dropping interrupts. */
         return NDIS_STATUS_RESOURCES;
     }
@@ -864,10 +858,10 @@ NdisMRegisterInterruptEx(
                         ? Latched
                         : LevelSensitive;
 
-    /* Share the vector - we default to shared line-based. */
+    /* Share the vector — we default to shared line-based. */
     ShareVector = TRUE;
 
-    DPRINT("NDIS6: NdisMRegisterInterruptEx vec=%u irql=%u affinity=0x%lx mode=%s share=%d\n",
+    DbgPrint("NDIS6: NdisMRegisterInterruptEx vec=%u irql=%u affinity=0x%lx mode=%s share=%d\n",
              Ext->InterruptVector, Ext->InterruptIrql,
              (ULONG)Ext->InterruptAffinity,
              (InterruptMode == Latched) ? "Latched" : "Level",
@@ -877,7 +871,7 @@ NdisMRegisterInterruptEx(
         &Ext->InterruptObject,
         Ndis6IsrWrapper,
         Ext,                        /* ServiceContext */
-        NULL,                       /* SpinLock - let the kernel allocate one */
+        NULL,                       /* SpinLock — let the kernel allocate one */
         Ext->InterruptVector,
         Ext->InterruptIrql,         /* SynchronizeIrql */
         Ext->InterruptIrql,         /* Irql */
@@ -886,7 +880,7 @@ NdisMRegisterInterruptEx(
         Ext->InterruptAffinity,
         FALSE);                     /* FloatingSave */
 
-    DPRINT("NDIS6: IoConnectInterrupt -> 0x%08lx, KINTERRUPT=%p\n",
+    DbgPrint("NDIS6: IoConnectInterrupt -> 0x%08lx, KINTERRUPT=%p\n",
              (ULONG)Status, Ext->InterruptObject);
 
     if (!NT_SUCCESS(Status))

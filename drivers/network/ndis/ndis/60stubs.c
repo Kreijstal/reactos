@@ -18,7 +18,7 @@
  *   - Filter driver registration stubs (no real filter chain yet)
  *   - Protocol driver registration stubs (no NDIS 6 protocols yet)
  *   - Datapath callbacks (NdisMSendNetBufferListsComplete, etc.) that
- *     still return STATUS_SUCCESS without doing thunk work - Phase 3/4
+ *     still return STATUS_SUCCESS without doing thunk work — Phase 3/4
  *     of the dev-nt6-1 plan will move these to 60thunk.c
  *
  * Like every NDIS 6 file in this directory, this one is compiled with
@@ -101,7 +101,14 @@ NdisFRegisterFilterDriver(
     RtlZeroMemory(Block, sizeof(*Block));
     Block->DriverObject        = DriverObject;
     Block->FilterDriverContext = FilterDriverContext;
-    Block->Characteristics     = *FilterDriverCharacteristics;
+    /* Copy only Header.Size bytes — a REV_1 (NDIS 6.0) filter's struct ends
+     * at StatusHandler; the REV_2 direct-OID handlers stay NULL. */
+    {
+        USHORT CharSize = FilterDriverCharacteristics->Header.Size;
+        if (CharSize == 0 || CharSize > sizeof(Block->Characteristics))
+            CharSize = sizeof(Block->Characteristics);
+        RtlCopyMemory(&Block->Characteristics, FilterDriverCharacteristics, CharSize);
+    }
 
     KeAcquireSpinLock(&g_Ndis6FilterDriverListLock, &OldIrql);
     InsertTailList(&g_Ndis6FilterDriverList, &Block->ListEntry);
@@ -133,17 +140,17 @@ NdisFDeregisterFilterDriver(
 /* ============================================================================
  *  Phase 7B filter attach/detach helpers
  *
- *  Ndis6AttachFiltersToAdapter - called from Ndis6CreateLogicalAdapter
+ *  Ndis6AttachFiltersToAdapter — called from Ndis6CreateLogicalAdapter
  *  after MiniportInitializeEx populates GeneralAttrs. Walks the global
  *  filter driver list and calls each AttachHandler with a freshly built
  *  NDIS_FILTER_ATTACH_PARAMETERS, then stores the FilterModuleContext on
  *  the adapter's FilterModuleList.
  *
- *  Ndis6DetachFiltersFromAdapter - called from Ndis6DestroyLogicalAdapter
+ *  Ndis6DetachFiltersFromAdapter — called from Ndis6DestroyLogicalAdapter
  *  on REMOVE. Walks the per-adapter filter module list and calls each
  *  filter's DetachHandler, then frees the modules.
  *
- *  The TX/RX datapath does not yet walk the filter chain - registration
+ *  The TX/RX datapath does not yet walk the filter chain — registration
  *  is functional, but filters won't see traffic until a future phase.
  * ============================================================================ */
 
@@ -277,7 +284,7 @@ Ndis6DetachFiltersFromAdapter(
 /*  Phase 6: real registration. The driver is added to                */
 /*  g_Ndis6ProtocolDriverList. The per-adapter ProtocolBindAdapterEx  */
 /*  fan-out on adapter create / driver register is left as a future   */
-/*  exercise - current ReactOS has no NDIS 6 protocol drivers in tree */
+/*  exercise — current ReactOS has no NDIS 6 protocol drivers in tree */
 /*  to bind. The native-NBL TX path (NdisSendNetBufferLists) is still */
 /*  a no-op stub below.                                               */
 /* ------------------------------------------------------------------ */
@@ -344,7 +351,7 @@ Ndis6BuildBindParameters(
 }
 
 /* ============================================================================
- *  Ndis6BindProtocolToAllAdapters - when a protocol registers, walk the
+ *  Ndis6BindProtocolToAllAdapters — when a protocol registers, walk the
  *  global LOGICAL_ADAPTER list and call its BindAdapterHandlerEx for every
  *  NDIS 6 adapter.
  * ============================================================================ */
@@ -384,13 +391,13 @@ Ndis6BindProtocolToAllAdapters(
         Ndis6BuildBindParameters(Snapshot[i], &Params);
         Block->Characteristics.BindAdapterHandlerEx(
             Block->ProtocolDriverContext,
-            (NDIS_HANDLE)Block,        /* BindContext */
+            (NDIS_HANDLE)Snapshot[i],  /* BindContext = adapter handle (see NdisOpenAdapterEx) */
             &Params);
     }
 }
 
 /* ============================================================================
- *  Ndis6BindAllProtocolsToAdapter - when a new adapter is created, walk
+ *  Ndis6BindAllProtocolsToAdapter — when a new adapter is created, walk
  *  the registered protocol list and call each one's BindAdapterHandlerEx.
  *  Called from Ndis6CreateLogicalAdapter (60adapter.c) at the end of adapter
  *  setup, after GeneralAttrs are populated.
@@ -431,7 +438,7 @@ Ndis6BindAllProtocolsToAdapter(
     {
         Snapshot[i]->Characteristics.BindAdapterHandlerEx(
             Snapshot[i]->ProtocolDriverContext,
-            (NDIS_HANDLE)Snapshot[i],
+            (NDIS_HANDLE)Adapter,       /* BindContext = adapter handle (see NdisOpenAdapterEx) */
             &Params);
     }
 }
@@ -465,7 +472,15 @@ NdisRegisterProtocolDriver(
 
     RtlZeroMemory(Block, sizeof(*Block));
     Block->ProtocolDriverContext = ProtocolDriverContext;
-    Block->Characteristics       = *ProtocolDriverCharacteristics;
+    /* Copy only Header.Size bytes — a REV_1 (NDIS 6.0) caller's struct ends
+     * at SendNetBufferListsCompleteHandler; the REV_2 direct-OID completion
+     * handler stays NULL from the zero-fill. */
+    {
+        USHORT CharSize = ProtocolDriverCharacteristics->Header.Size;
+        if (CharSize == 0 || CharSize > sizeof(Block->Characteristics))
+            CharSize = sizeof(Block->Characteristics);
+        RtlCopyMemory(&Block->Characteristics, ProtocolDriverCharacteristics, CharSize);
+    }
 
     KeAcquireSpinLock(&g_Ndis6ProtocolDriverListLock, &OldIrql);
     InsertTailList(&g_Ndis6ProtocolDriverList, &Block->ListEntry);
@@ -476,7 +491,7 @@ NdisRegisterProtocolDriver(
     /* Phase 7A: bind this new protocol to every NDIS 6 adapter that
      * already exists. The protocol's BindAdapterHandlerEx is expected
      * to call NdisOpenAdapterEx synchronously to actually take the
-     * binding - without that API the bind is informational only. */
+     * binding — without that API the bind is informational only. */
     Ndis6BindProtocolToAllAdapters(Block);
 
     return NDIS_STATUS_SUCCESS;
@@ -515,7 +530,7 @@ NdisDeregisterProtocolDriver(
  *  medium array, frame type array, and selected medium index pointer.
  *  We pick the first NdisMedium802_3 we find and report it back.
  *
- *  Synchronous open only - the protocol's OpenAdapterCompleteHandlerEx
+ *  Synchronous open only — the protocol's OpenAdapterCompleteHandlerEx
  *  is invoked before this returns. PENDING completion would need a
  *  per-binding waiter we don't yet implement.
  * ============================================================================ */
@@ -541,24 +556,13 @@ NdisOpenAdapterEx(
 
     *NdisBindingHandle = NULL;
 
-    /* The bridge passes (NDIS_HANDLE)NDIS6_PROTOCOL_DRIVER_BLOCK as the
-     * BindContext to BindAdapterHandlerEx, but the protocol typically
-     * gets the adapter pointer via NDIS_BIND_PARAMETERS.MiniportHandle
-     * (which we set to (NDIS_HANDLE)Adapter). Native protocols are
-     * expected to remember the adapter from BindParameters and we'd
-     * need a richer protocol-API surface to pass it through OpenParameters
-     * cleanly. For now we look up the adapter via BindContext: the
-     * protocol must pass the adapter pointer it received from
-     * NDIS_BIND_PARAMETERS.MiniportHandle as BindContext. (This matches
-     * our Phase 7A bind walker which set BindContext = Block.) */
+    /* BindContext is the adapter handle: the bind walkers pass the
+     * PLOGICAL_ADAPTER (= NDIS_BIND_PARAMETERS.MiniportHandle) as BindContext
+     * and the protocol threads it through unchanged. Reject the protocol
+     * handle (Block) itself - that can never be a valid adapter. */
     Adapter = NULL;
     if (BindContext != (NDIS_HANDLE)Block)
-    {
-        /* The driver passed a different value as BindContext - interpret
-         * it as the MiniportHandle (= adapter pointer) the bridge gave
-         * via NDIS_BIND_PARAMETERS. */
         Adapter = (PLOGICAL_ADAPTER)BindContext;
-    }
     if (Adapter == NULL || !Adapter->IsNdis6)
         return NDIS_STATUS_FAILURE;
 
@@ -609,13 +613,27 @@ NdisOpenAdapterEx(
                 return NDIS_STATUS_UNSUPPORTED_MEDIA;
             }
         }
-        /* FrameTypeArray: ignored - we deliver raw Ethernet II frames
+        /* FrameTypeArray: ignored — we deliver raw Ethernet II frames
          * to the protocol and let it decode. */
+    }
+
+    /* Link this binding into the adapter's native-protocol list. Must happen
+     * before OpenAdapterCompleteHandlerEx, from which the protocol may start
+     * sending immediately. */
+    {
+        PNDIS6_ADAPTER_EXT Ext = NDIS6_EXT(Adapter);
+        if (Ext != NULL)
+        {
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&Ext->ProtocolBindingListLock, &OldIrql);
+            InsertTailList(&Ext->ProtocolBindingList, &Binding->AdapterLink);
+            KeReleaseSpinLock(&Ext->ProtocolBindingListLock, OldIrql);
+        }
     }
 
     *NdisBindingHandle = (NDIS_HANDLE)Binding;
 
-    /* Synchronous open complete - call the protocol's
+    /* Synchronous open complete — call the protocol's
      * OpenAdapterCompleteHandlerEx if it has one, then return SUCCESS. */
     if (Block->Characteristics.OpenAdapterCompleteHandlerEx != NULL)
     {
@@ -639,6 +657,26 @@ NdisCloseAdapterEx(
 
     Block = Binding->DriverBlock;
 
+    /* Unlink from the adapter's native-protocol list before freeing the
+     * binding, so the datapath never observes a dangling AdapterLink. */
+    if (Binding->Adapter != NULL)
+    {
+        PNDIS6_ADAPTER_EXT Ext = NDIS6_EXT(Binding->Adapter);
+        if (Ext != NULL)
+        {
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&Ext->ProtocolBindingListLock, &OldIrql);
+            if (Binding->AdapterLink.Flink != NULL &&
+                Binding->AdapterLink.Blink != NULL)
+            {
+                RemoveEntryList(&Binding->AdapterLink);
+                Binding->AdapterLink.Flink = NULL;
+                Binding->AdapterLink.Blink = NULL;
+            }
+            KeReleaseSpinLock(&Ext->ProtocolBindingListLock, OldIrql);
+        }
+    }
+
     /* Synchronous close complete. */
     if (Block != NULL &&
         Block->Characteristics.CloseAdapterCompleteHandlerEx != NULL)
@@ -653,7 +691,7 @@ NdisCloseAdapterEx(
 
 /* ------------------------------------------------------------------ */
 /*  Protocol-side datapath stubs                                      */
-/*  (Native NDIS 6 protocols only - currently nothing in the tree)    */
+/*  (Native NDIS 6 protocols only — currently nothing in the tree)    */
 /* ------------------------------------------------------------------ */
 
 VOID
@@ -664,10 +702,35 @@ NdisSendNetBufferLists(
     _In_ NDIS_PORT_NUMBER PortNumber,
     _In_ ULONG SendFlags)
 {
-    UNREFERENCED_PARAMETER(NdisBindingHandle);
-    UNREFERENCED_PARAMETER(NetBufferList);
+    PNDIS6_PROTOCOL_BINDING Binding = (PNDIS6_PROTOCOL_BINDING)NdisBindingHandle;
+    PLOGICAL_ADAPTER        Adapter;
+    PNET_BUFFER_LIST        CurrentNbl;
+    PNET_BUFFER_LIST        NextNbl;
+
     UNREFERENCED_PARAMETER(PortNumber);
     UNREFERENCED_PARAMETER(SendFlags);
+
+    if (Binding == NULL || NetBufferList == NULL)
+        return;
+
+    Adapter = Binding->Adapter;
+    if (Adapter == NULL || !Adapter->IsNdis6)
+        return;
+
+    /* SourceHandle = Binding marks a native send so completion routes to the
+     * protocol's SendNetBufferListsCompleteHandler, not the legacy bridge
+     * path. The protocol keeps NBL ownership; NdisReserved[1] must stay NULL
+     * (it is the legacy TX-wrapper marker). */
+    for (CurrentNbl = NetBufferList; CurrentNbl != NULL; CurrentNbl = NextNbl)
+    {
+        NextNbl = NET_BUFFER_LIST_NEXT_NBL(CurrentNbl);
+        NET_BUFFER_LIST_NEXT_NBL(CurrentNbl) = NULL;
+
+        CurrentNbl->SourceHandle      = (NDIS_HANDLE)Binding;
+        CurrentNbl->NdisReserved[1]   = NULL;
+
+        Ndis6FilterDispatchSend(Adapter, CurrentNbl);
+    }
 }
 
 VOID
@@ -677,9 +740,28 @@ NdisReturnNetBufferLists(
     _In_ PNET_BUFFER_LIST NetBufferLists,
     _In_ ULONG ReturnFlags)
 {
-    UNREFERENCED_PARAMETER(NdisBindingHandle);
-    UNREFERENCED_PARAMETER(NetBufferLists);
-    UNREFERENCED_PARAMETER(ReturnFlags);
+    PNDIS6_PROTOCOL_BINDING Binding = (PNDIS6_PROTOCOL_BINDING)NdisBindingHandle;
+    PLOGICAL_ADAPTER        Adapter;
+    PNET_BUFFER_LIST        CurrentNbl;
+    PNET_BUFFER_LIST        NextNbl;
+
+    if (Binding == NULL || NetBufferLists == NULL)
+        return;
+
+    Adapter = Binding->Adapter;
+    if (Adapter == NULL || !Adapter->IsNdis6)
+        return;
+
+    /* Hand the receive NBLs back to the miniport's ReturnNetBufferListsHandler
+     * via the filter chain; the NBLs are miniport-owned. The chain is split
+     * because the terminal return handler nulls the Next link per NBL. */
+    for (CurrentNbl = NetBufferLists; CurrentNbl != NULL; CurrentNbl = NextNbl)
+    {
+        NextNbl = NET_BUFFER_LIST_NEXT_NBL(CurrentNbl);
+        NET_BUFFER_LIST_NEXT_NBL(CurrentNbl) = NULL;
+
+        Ndis6FilterDispatchReturn(Adapter, CurrentNbl, ReturnFlags);
+    }
 }
 
 #define NDIS6_PROTOCOL_PENDING_OID_TAG  'dOPn'
@@ -765,7 +847,7 @@ NdisOidRequest(
         return NDIS_STATUS_PENDING;
     }
 
-    /* Synchronous completion - restore the original RequestId and
+    /* Synchronous completion — restore the original RequestId and
      * pop the pending entry. */
     if (Pending != NULL)
     {
@@ -776,6 +858,148 @@ NdisOidRequest(
         ExFreePoolWithTag(Pending, NDIS6_PROTOCOL_PENDING_OID_TAG);
     }
     return Status;
+}
+
+/* ============================================================================
+ *  NDIS 6.1 direct OID request path — unserialized OIDs the miniport
+ *  declared via the REV_2 characteristics' DirectOidRequestHandler.
+ *  Mirrors NdisOidRequest, but dispatches to the direct handler and
+ *  completes through NdisMDirectOidRequestComplete → the protocol's
+ *  DirectOidRequestCompleteHandler.
+ * ============================================================================ */
+
+NDIS_STATUS
+EXPORT
+NdisDirectOidRequest(
+    _In_ NDIS_HANDLE NdisBindingHandle,
+    _In_ PNDIS_OID_REQUEST OidRequest)
+{
+    PNDIS6_PROTOCOL_BINDING     Binding = NULL;
+    PLOGICAL_ADAPTER            Adapter = NULL;
+    PNDIS6_ADAPTER_EXT          Ext;
+    PNDIS6_PROTOCOL_PENDING_OID Pending = NULL;
+    NDIS_STATUS                 Status;
+    KIRQL                       OldIrql;
+
+    if (NdisBindingHandle == NULL || OidRequest == NULL)
+        return NDIS_STATUS_INVALID_PARAMETER;
+
+    Binding = (PNDIS6_PROTOCOL_BINDING)NdisBindingHandle;
+    if (Binding->Adapter != NULL && Binding->Adapter->IsNdis6 && Binding->DriverBlock != NULL)
+    {
+        Adapter = Binding->Adapter;
+    }
+    else
+    {
+        Binding = NULL;
+        Adapter = (PLOGICAL_ADAPTER)NdisBindingHandle;
+        if (!Adapter->IsNdis6)
+            return NDIS_STATUS_INVALID_PARAMETER;
+    }
+
+    Ext = NDIS6_EXT(Adapter);
+    if (Ext == NULL || Ext->DriverBlock == NULL || Ext->DriverBlock->Characteristics.DirectOidRequestHandler == NULL)
+        return NDIS_STATUS_NOT_SUPPORTED;
+
+    if (Binding != NULL && Binding->DriverBlock->Characteristics.DirectOidRequestCompleteHandler != NULL)
+    {
+        Pending = (PNDIS6_PROTOCOL_PENDING_OID)ExAllocatePoolWithTag(NonPagedPool, sizeof(NDIS6_PROTOCOL_PENDING_OID), NDIS6_PROTOCOL_PENDING_OID_TAG);
+        if (Pending == NULL)
+            return NDIS_STATUS_RESOURCES;
+
+        Pending->Binding           = Binding;
+        Pending->OriginalRequestId = OidRequest->RequestId;
+        Pending->OidRequest        = OidRequest;
+
+        KeAcquireSpinLock(&Binding->PendingOidRequestsLock, &OldIrql);
+        InsertTailList(&Binding->PendingOidRequests, &Pending->ListEntry);
+        KeReleaseSpinLock(&Binding->PendingOidRequestsLock, OldIrql);
+
+        OidRequest->RequestId = Pending;
+    }
+
+    Status = Ext->DriverBlock->Characteristics.DirectOidRequestHandler(Ext->MiniportAdapterContext, OidRequest);
+
+    if (Status == NDIS_STATUS_PENDING)
+        return NDIS_STATUS_PENDING;
+
+    if (Pending != NULL)
+    {
+        OidRequest->RequestId = Pending->OriginalRequestId;
+        KeAcquireSpinLock(&Binding->PendingOidRequestsLock, &OldIrql);
+        RemoveEntryList(&Pending->ListEntry);
+        KeReleaseSpinLock(&Binding->PendingOidRequestsLock, OldIrql);
+        ExFreePoolWithTag(Pending, NDIS6_PROTOCOL_PENDING_OID_TAG);
+    }
+    return Status;
+}
+
+VOID
+EXPORT
+NdisCancelDirectOidRequest(
+    _In_ NDIS_HANDLE NdisBindingHandle,
+    _In_ PVOID RequestId)
+{
+    PNDIS6_PROTOCOL_BINDING Binding = (PNDIS6_PROTOCOL_BINDING)NdisBindingHandle;
+    PLOGICAL_ADAPTER        Adapter;
+    PNDIS6_ADAPTER_EXT      Ext;
+
+    if (Binding == NULL)
+        return;
+
+    if (Binding->Adapter != NULL && Binding->Adapter->IsNdis6 && Binding->DriverBlock != NULL)
+    {
+        Adapter = Binding->Adapter;
+    }
+    else
+    {
+        Adapter = (PLOGICAL_ADAPTER)NdisBindingHandle;
+        if (!Adapter->IsNdis6)
+            return;
+    }
+
+    Ext = NDIS6_EXT(Adapter);
+    if (Ext == NULL || Ext->DriverBlock == NULL || Ext->DriverBlock->Characteristics.CancelDirectOidRequestHandler == NULL)
+        return;
+
+    Ext->DriverBlock->Characteristics.CancelDirectOidRequestHandler(Ext->MiniportAdapterContext, RequestId);
+}
+
+VOID
+EXPORT
+NdisMDirectOidRequestComplete(
+    _In_ NDIS_HANDLE       NdisMiniportHandle,
+    _In_ PNDIS_OID_REQUEST OidRequest,
+    _In_ NDIS_STATUS       Status)
+{
+    PLOGICAL_ADAPTER            Adapter = (PLOGICAL_ADAPTER)NdisMiniportHandle;
+    PNDIS6_PROTOCOL_PENDING_OID Pending;
+    PNDIS6_PROTOCOL_BINDING     Binding;
+    KIRQL                       OldIrql;
+
+    if (Adapter == NULL || !Adapter->IsNdis6 || OidRequest == NULL)
+        return;
+
+    /* Direct OIDs are only issued through NdisDirectOidRequest, which
+     * stashes the pending context in RequestId when the protocol has a
+     * DirectOidRequestCompleteHandler; otherwise nothing pends and this
+     * call must not happen. */
+    Pending = (PNDIS6_PROTOCOL_PENDING_OID)OidRequest->RequestId;
+    if (Pending == NULL)
+        return;
+
+    Binding = Pending->Binding;
+    if (Binding == NULL || Binding->DriverBlock == NULL)
+        return;
+
+    KeAcquireSpinLock(&Binding->PendingOidRequestsLock, &OldIrql);
+    RemoveEntryList(&Pending->ListEntry);
+    KeReleaseSpinLock(&Binding->PendingOidRequestsLock, OldIrql);
+
+    OidRequest->RequestId = Pending->OriginalRequestId;
+    if (Binding->DriverBlock->Characteristics.DirectOidRequestCompleteHandler != NULL)
+        Binding->DriverBlock->Characteristics.DirectOidRequestCompleteHandler(Binding->ProtocolBindingContext, OidRequest, Status);
+    ExFreePoolWithTag(Pending, NDIS6_PROTOCOL_PENDING_OID_TAG);
 }
 
 /* ------------------------------------------------------------------ */
@@ -808,28 +1032,120 @@ NdisOidRequest(
  *  create a symbolic link.
  * ============================================================================ */
 
-/* The NDIS_DEVICE_OBJECT_ATTRIBUTES struct isn't exposed in the ReactOS
- * NDIS 5.1 headers. Define it locally with the Windows DDK layout so we
- * can cast the opaque pointer the driver passes in. */
-typedef struct _NDIS6_DEVICE_OBJECT_ATTRIBUTES
-{
-    NDIS_OBJECT_HEADER  Header;
-    PNDIS_STRING        DeviceName;
-    PNDIS_STRING        SymbolicName;
-    PDRIVER_DISPATCH*   MajorFunctions;
-    ULONG               ExtensionSize;
-    PUNICODE_STRING     DefaultSDDLString;
-    LPGUID              DeviceClassGuid;
-} NDIS6_DEVICE_OBJECT_ATTRIBUTES, *PNDIS6_DEVICE_OBJECT_ATTRIBUTES;
-
 typedef struct _NDIS6_CONTROL_DEVICE
 {
+    LIST_ENTRY          ListEntry;
     PDEVICE_OBJECT      DeviceObject;
     UNICODE_STRING      SymbolicName;
     BOOLEAN             SymbolicLinkCreated;
+    /* The control driver's own major-function handlers. IRPs are demuxed by
+     * target device (Ndis6ControlDemuxDispatch) so one driver's handlers never
+     * run for another device sharing the driver object (e.g. the miniport FDO,
+     * or another driver's control device). */
+    PDRIVER_DISPATCH    MajorFunctions[IRP_MJ_MAXIMUM_FUNCTION + 1];
 } NDIS6_CONTROL_DEVICE, *PNDIS6_CONTROL_DEVICE;
 
+/* PNP/POWER/SYSTEM_CONTROL on a miniport driver object belong to NDIS, never to
+ * a control driver's handlers. */
+#define NDIS6_MJ_IS_NDIS_OWNED(mj) \
+    ((mj) == IRP_MJ_PNP || (mj) == IRP_MJ_POWER || (mj) == IRP_MJ_SYSTEM_CONTROL)
+
 #define NDIS6_CTL_DEV_TAG  'dCNn'
+
+/* All live control devices, so NdisGetDeviceReservedExtension can tell a
+ * NdisRegisterDeviceEx device object apart from a miniport FDO. */
+static LIST_ENTRY g_Ndis6CtlDevList = { &g_Ndis6CtlDevList, &g_Ndis6CtlDevList };
+static KSPIN_LOCK g_Ndis6CtlDevLock;
+
+/* TRUE if DeviceObject is a control device created by NdisRegisterDeviceEx.
+ * The hybrid KMDF demux (60driver.c) uses this so a control device with no
+ * handler for a major function is never misrouted into KMDF's dispatch. */
+BOOLEAN
+Ndis6DeviceIsControlDevice(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PLIST_ENTRY Entry;
+    BOOLEAN     Found = FALSE;
+    KIRQL       OldIrql;
+
+    KeAcquireSpinLock(&g_Ndis6CtlDevLock, &OldIrql);
+    for (Entry = g_Ndis6CtlDevList.Flink; Entry != &g_Ndis6CtlDevList; Entry = Entry->Flink)
+    {
+        PNDIS6_CONTROL_DEVICE CtlDev = CONTAINING_RECORD(Entry, NDIS6_CONTROL_DEVICE, ListEntry);
+        if (CtlDev->DeviceObject == DeviceObject)
+        {
+            Found = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&g_Ndis6CtlDevLock, OldIrql);
+    return Found;
+}
+
+/*
+ * Ndis6ControlDemuxDispatch
+ *
+ * Single IRP entry point installed on a miniport driver object for the major
+ * functions a control driver registered. It routes each IRP to the control
+ * device that owns it, so a control driver's handler never runs for the
+ * miniport FDO or for a different driver's control device that happens to share
+ * the driver object. Unknown targets (miniport FDO opens) complete benignly.
+ */
+static NTSTATUS
+NTAPI
+Ndis6ControlDemuxDispatch(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    PNDIS6_CONTROL_DEVICE Match = NULL;
+    PLIST_ENTRY           Entry;
+    KIRQL                 OldIrql;
+    NTSTATUS              Status;
+
+    KeAcquireSpinLock(&g_Ndis6CtlDevLock, &OldIrql);
+    for (Entry = g_Ndis6CtlDevList.Flink;
+         Entry != &g_Ndis6CtlDevList;
+         Entry = Entry->Flink)
+    {
+        PNDIS6_CONTROL_DEVICE CtlDev =
+            CONTAINING_RECORD(Entry, NDIS6_CONTROL_DEVICE, ListEntry);
+        if (CtlDev->DeviceObject == DeviceObject)
+        {
+            Match = CtlDev;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&g_Ndis6CtlDevLock, OldIrql);
+
+    if (Match != NULL && Match->MajorFunctions[IoStack->MajorFunction] != NULL)
+        return Match->MajorFunctions[IoStack->MajorFunction](DeviceObject, Irp);
+
+    /* Hybrid KMDF+NDIS driver: NdisRegisterDeviceEx overrode dispatch slots
+     * KMDF had installed, so IRPs for KMDF's own device objects land here.
+     * Hand them back to the dispatch KMDF originally registered. */
+    if (Match == NULL)
+    {
+        PDRIVER_DISPATCH Original = Ndis6HybridGetOriginalDispatch(DeviceObject, IoStack->MajorFunction);
+        if (Original != NULL)
+            return Original(DeviceObject, Irp);
+
+        /* Miniport FDO: user-mode opens + the global-stats OID IOCTL. */
+        if (Ndis6TryDispatchAdapterFdoIrp(DeviceObject, Irp, &Status))
+            return Status;
+    }
+
+    /* Not a control device (e.g. a user-mode open of the miniport FDO): a bare
+     * open/close succeeds, everything else is unsupported. */
+    Status = (IoStack->MajorFunction == IRP_MJ_CREATE ||
+              IoStack->MajorFunction == IRP_MJ_CLOSE ||
+              IoStack->MajorFunction == IRP_MJ_CLEANUP)
+                 ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+}
 
 NDIS_STATUS
 NTAPI
@@ -839,15 +1155,13 @@ NdisRegisterDeviceEx(
     _Out_ PDEVICE_OBJECT* pDeviceObject,
     _Out_ PNDIS_HANDLE  NdisDeviceHandle)
 {
-    PNDIS6_DEVICE_OBJECT_ATTRIBUTES Attrs =
-        (PNDIS6_DEVICE_OBJECT_ATTRIBUTES)DeviceObjectAttributes;
+    PNDIS_DEVICE_OBJECT_ATTRIBUTES Attrs = (PNDIS_DEVICE_OBJECT_ATTRIBUTES)DeviceObjectAttributes;
     PNDIS6_CONTROL_DEVICE   CtlDev;
     PDRIVER_OBJECT          DriverObject = NULL;
     PDEVICE_OBJECT          Device       = NULL;
     NTSTATUS                Status;
     ULONG                   i;
-
-    UNREFERENCED_PARAMETER(NdisHandle);
+    KIRQL                   OldIrql;
 
     if (Attrs == NULL || pDeviceObject == NULL || NdisDeviceHandle == NULL ||
         Attrs->DeviceName == NULL || Attrs->MajorFunctions == NULL)
@@ -855,26 +1169,26 @@ NdisRegisterDeviceEx(
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
-    /* Pick up the driver object. For a miniport, the NdisHandle is
-     * really the NDIS6_DRIVER_BLOCK from NdisMRegisterMiniportDriver;
-     * for a filter/protocol the handle points at its registration block.
-     * All three variants begin with a LIST_ENTRY + PDRIVER_OBJECT, so
-     * we can fetch it from a known offset. Fallback: walk the global
-     * miniport driver list and match. */
+    /* Resolve the caller's own driver object. For a miniport, NdisHandle is the
+     * NDIS6_DRIVER_BLOCK returned by NdisMRegisterMiniportDriver; validate it
+     * against the registered-driver list and use ITS driver object. Using the
+     * wrong driver object cross-installs a control driver's handlers over an
+     * unrelated device (e.g. another driver's \Device\Nwifi), which then faults
+     * inside that driver's handler. */
+    KeAcquireSpinLock(&g_Ndis6DriverListLock, &OldIrql);
+    for (PLIST_ENTRY Entry = g_Ndis6DriverList.Flink;
+         Entry != &g_Ndis6DriverList;
+         Entry = Entry->Flink)
     {
-        KIRQL OldIrql;
-        KeAcquireSpinLock(&g_Ndis6DriverListLock, &OldIrql);
-        if (!IsListEmpty(&g_Ndis6DriverList))
+        PNDIS6_DRIVER_BLOCK Block =
+            CONTAINING_RECORD(Entry, NDIS6_DRIVER_BLOCK, ListEntry);
+        if ((NDIS_HANDLE)Block == NdisHandle)
         {
-            /* Use the first registered driver as a fallback if the
-             * NdisHandle isn't in our table. This isn't strictly
-             * correct but works for the typical single-miniport case. */
-            PNDIS6_DRIVER_BLOCK Block = CONTAINING_RECORD(
-                g_Ndis6DriverList.Flink, NDIS6_DRIVER_BLOCK, ListEntry);
             DriverObject = Block->DriverObject;
+            break;
         }
-        KeReleaseSpinLock(&g_Ndis6DriverListLock, OldIrql);
     }
+    KeReleaseSpinLock(&g_Ndis6DriverListLock, OldIrql);
 
     if (DriverObject == NULL)
         return NDIS_STATUS_INVALID_PARAMETER;
@@ -899,13 +1213,17 @@ NdisRegisterDeviceEx(
         return (NDIS_STATUS)Status;
     }
 
-    /* Install the caller's dispatch routines on the driver. Only the
-     * major functions that are non-NULL in the array get installed;
-     * don't overwrite existing ones with NULL. */
+    /* Keep the caller's handlers on the control device, and route the driver
+     * object's matching slots through the per-device demux (never the raw
+     * handler, so the miniport FDO and other devices are not affected). NDIS
+     * keeps PNP/POWER/SYSTEM_CONTROL. */
     for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
     {
-        if (Attrs->MajorFunctions[i] != NULL)
-            DriverObject->MajorFunction[i] = Attrs->MajorFunctions[i];
+        if (Attrs->MajorFunctions[i] != NULL && !NDIS6_MJ_IS_NDIS_OWNED(i))
+        {
+            CtlDev->MajorFunctions[i]      = Attrs->MajorFunctions[i];
+            DriverObject->MajorFunction[i] = Ndis6ControlDemuxDispatch;
+        }
     }
 
     /* Symbolic link so user-mode can CreateFile on it. */
@@ -923,6 +1241,9 @@ NdisRegisterDeviceEx(
     CtlDev->DeviceObject = Device;
     Device->Flags &= ~DO_DEVICE_INITIALIZING;
 
+    ExInterlockedInsertTailList(&g_Ndis6CtlDevList, &CtlDev->ListEntry,
+                                &g_Ndis6CtlDevLock);
+
     *pDeviceObject    = Device;
     *NdisDeviceHandle = (NDIS_HANDLE)CtlDev;
     return NDIS_STATUS_SUCCESS;
@@ -934,9 +1255,14 @@ NdisDeregisterDeviceEx(
     _In_ NDIS_HANDLE NdisDeviceHandle)
 {
     PNDIS6_CONTROL_DEVICE CtlDev = (PNDIS6_CONTROL_DEVICE)NdisDeviceHandle;
+    KIRQL OldIrql;
 
     if (CtlDev == NULL)
         return NDIS_STATUS_INVALID_PARAMETER;
+
+    KeAcquireSpinLock(&g_Ndis6CtlDevLock, &OldIrql);
+    RemoveEntryList(&CtlDev->ListEntry);
+    KeReleaseSpinLock(&g_Ndis6CtlDevLock, OldIrql);
 
     if (CtlDev->SymbolicLinkCreated)
         IoDeleteSymbolicLink(&CtlDev->SymbolicName);
@@ -944,6 +1270,118 @@ NdisDeregisterDeviceEx(
         IoDeleteDevice(CtlDev->DeviceObject);
 
     ExFreePoolWithTag(CtlDev, NDIS6_CTL_DEV_TAG);
+    return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ * NdisGetDeviceReservedExtension
+ *
+ * For a device created by NdisRegisterDeviceEx the caller's reserved area is
+ * the whole device extension (we pass ExtensionSize straight to
+ * IoCreateDevice). For a miniport FDO the reserved area is the WdfReserved
+ * scratch space in LOGICAL_ADAPTER, where NDIS-WDF miniports keep their
+ * framework context.
+ */
+PVOID
+NTAPI
+NdisGetDeviceReservedExtension(
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    PLOGICAL_ADAPTER Adapter;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+    BOOLEAN IsCtlDev = FALSE;
+
+    if (DeviceObject == NULL)
+        return NULL;
+
+    KeAcquireSpinLock(&g_Ndis6CtlDevLock, &OldIrql);
+    for (Entry = g_Ndis6CtlDevList.Flink;
+         Entry != &g_Ndis6CtlDevList;
+         Entry = Entry->Flink)
+    {
+        PNDIS6_CONTROL_DEVICE CtlDev =
+            CONTAINING_RECORD(Entry, NDIS6_CONTROL_DEVICE, ListEntry);
+        if (CtlDev->DeviceObject == DeviceObject)
+        {
+            IsCtlDev = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&g_Ndis6CtlDevLock, OldIrql);
+
+    if (IsCtlDev)
+        return DeviceObject->DeviceExtension;
+
+    /* Miniport FDO check: its device extension is the LOGICAL_ADAPTER,
+     * which points back at the same device object. */
+    Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
+    if (Adapter != NULL &&
+        Adapter->NdisMiniportBlock.DeviceObject == DeviceObject)
+    {
+        return &Adapter->WdfReserved[0];
+    }
+
+    return NULL;
+}
+
+/*
+ * NdisOpenConfigurationEx
+ *
+ * NDIS 6 replacement for NdisOpenConfiguration. ConfigObject->NdisHandle is
+ * the adapter handle from MiniportInitializeEx; the returned handle feeds the
+ * existing NdisReadConfiguration/NdisCloseConfiguration implementation, so it
+ * must be a MINIPORT_CONFIGURATION_CONTEXT holding the adapter's driver key.
+ */
+NDIS_STATUS
+NTAPI
+NdisOpenConfigurationEx(
+    _In_  PVOID         ConfigObject,
+    _Out_ PNDIS_HANDLE  ConfigurationHandle)
+{
+    PNDIS_CONFIGURATION_OBJECT Obj = (PNDIS_CONFIGURATION_OBJECT)ConfigObject;
+    PMINIPORT_CONFIGURATION_CONTEXT Ctx;
+    PLOGICAL_ADAPTER Adapter;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+
+    if (Obj == NULL || ConfigurationHandle == NULL || Obj->NdisHandle == NULL)
+        return NDIS_STATUS_INVALID_PARAMETER;
+
+    *ConfigurationHandle = NULL;
+
+    Adapter = GET_LOGICAL_ADAPTER(Obj->NdisHandle);
+    if (!Adapter->IsNdis6 ||
+        Adapter->NdisMiniportBlock.DeviceObject == NULL ||
+        (PLOGICAL_ADAPTER)Adapter->NdisMiniportBlock.DeviceObject->DeviceExtension != Adapter ||
+        Adapter->NdisMiniportBlock.PhysicalDeviceObject == NULL)
+    {
+        return NDIS_STATUS_INVALID_PARAMETER;
+    }
+
+    Status = IoOpenDeviceRegistryKey(
+        Adapter->NdisMiniportBlock.PhysicalDeviceObject,
+        PLUGPLAY_REGKEY_DRIVER,
+        KEY_ALL_ACCESS,
+        &KeyHandle);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint("NDIS6: failed to open adapter driver key (0x%08X)\n", Status);
+        return NDIS_STATUS_FAILURE;
+    }
+
+    Ctx = ExAllocatePool(NonPagedPool, sizeof(MINIPORT_CONFIGURATION_CONTEXT));
+    if (Ctx == NULL)
+    {
+        ZwClose(KeyHandle);
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    KeInitializeSpinLock(&Ctx->ResourceLock);
+    InitializeListHead(&Ctx->ResourceListHead);
+    Ctx->Handle = KeyHandle;
+
+    *ConfigurationHandle = (NDIS_HANDLE)Ctx;
     return NDIS_STATUS_SUCCESS;
 }
 

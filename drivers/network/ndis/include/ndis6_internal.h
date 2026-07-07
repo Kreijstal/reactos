@@ -34,7 +34,7 @@
 #include "protocol.h"
 
 /* ============================================================================
- *  NDIS 6 driver block - one per NdisMRegisterMiniportDriver caller
+ *  NDIS 6 driver block — one per NdisMRegisterMiniportDriver caller
  * ============================================================================ */
 
 typedef struct _NDIS6_DRIVER_BLOCK
@@ -48,13 +48,19 @@ typedef struct _NDIS6_DRIVER_BLOCK
     /* Original IRP_MJ_PNP and AddDevice the driver had before we replaced them */
     PDRIVER_DISPATCH                        OriginalPnpDispatch;
     PDRIVER_ADD_DEVICE                      OriginalAddDevice;
+
+    /* WdfDriverCreate installed its own AddDevice + dispatch table before
+     * NdisMRegisterMiniportDriver ran: chain AddDevice to KMDF and demux
+     * IRPs for KMDF-owned device objects to the saved original dispatch. */
+    BOOLEAN                                 IsWdfHybrid;
+    PDRIVER_DISPATCH                        OriginalMajorFunction[IRP_MJ_MAXIMUM_FUNCTION + 1];
 } NDIS6_DRIVER_BLOCK, *PNDIS6_DRIVER_BLOCK;
 
 extern LIST_ENTRY g_Ndis6DriverList;
 extern KSPIN_LOCK g_Ndis6DriverListLock;
 
 /* ============================================================================
- *  NDIS 6 adapter extension - one per device instance the bridge owns
+ *  NDIS 6 adapter extension — one per device instance the bridge owns
  * ============================================================================ */
 
 typedef struct _NDIS6_ADAPTER_EXT
@@ -80,7 +86,7 @@ typedef struct _NDIS6_ADAPTER_EXT
     /* Set to TRUE after MiniportInitializeEx returns SUCCESS. Cleared
      * before HaltEx is called. If init fails, the driver cleans up its
      * own state internally per MS DDK contract, and HaltEx MUST NOT be
-     * invoked - this flag gates that. */
+     * invoked — this flag gates that. */
     BOOLEAN                                         Initialized;
 
     /* PnP devnode this adapter is bound to. */
@@ -134,7 +140,7 @@ typedef struct _NDIS6_ADAPTER_EXT
 
     /* B2: offload capabilities the driver reported via
      * NdisMSetMiniportAttributes(OFFLOAD). Saved as raw pointers into
-     * the driver's own memory - the miniport contract requires drivers
+     * the driver's own memory — the miniport contract requires drivers
      * to keep the offload state alive for the adapter's lifetime.
      * The legacy OID dispatcher reads fields out of these via
      * unchecked pointer arithmetic; we don't redeclare NDIS_OFFLOAD
@@ -145,10 +151,9 @@ typedef struct _NDIS6_ADAPTER_EXT
 
     /* Phase 3 TX thunk: NBL pool used to wrap legacy NDIS_PACKETs when
      * forwarding sends from a legacy NDIS 5 protocol (tcpip.sys) into an
-     * NDIS 6 miniport's SendNetBufferListsHandler. The wrapper NBL holds
-     * the original PNDIS_PACKET in MiniportReserved[0] so the bridge's
-     * NdisMSendNetBufferListsComplete callback can recover it and signal
-     * the legacy MiniSendComplete. */
+     * NDIS 6 miniport's SendNetBufferListsHandler. Bridge-owned wrapper
+     * state lives in NdisReserved[1] so miniports keep MiniportReserved and
+     * the allocator keeps its NdisReserved[0] ownership marker. */
     NDIS_HANDLE                     TxWrapperNblPool;
     LIST_ENTRY                      InFlightNblsTx;
     KSPIN_LOCK                      TxLookupLock;
@@ -160,9 +165,9 @@ typedef struct _NDIS6_ADAPTER_EXT
     LONG                            TxInFlightCount;
     KEVENT                          TxDrainEvent;
 
-    /* A4: Pause/Restart state machine. PauseState is PAUSED / RUNNING /
-     * PAUSING / RESTARTING. PauseEvent is signaled when an async pause
-     * completes (via NdisMPauseComplete). Drivers can return PENDING
+    /* A4: Pause/Restart state machine. A new NDIS 6 miniport is PAUSED
+     * after MiniportInitializeEx and becomes RUNNING only when a protocol
+     * opens/binds and RestartHandler succeeds. Drivers can return PENDING
      * from their PauseHandler / RestartHandler; we wait on the event. */
     ULONG                           PauseState;
     KEVENT                          PauseEvent;     /* pause complete */
@@ -190,16 +195,24 @@ typedef struct _NDIS6_ADAPTER_EXT
     /* Phase 7B: per-adapter filter chain. Filter modules attached to
      * this adapter via the NDIS 6 filter driver framework. Walked at
      * adapter halt time so each module's DetachHandler runs. The TX/RX
-     * datapath does NOT yet walk this chain - filters can register,
+     * datapath does NOT yet walk this chain — filters can register,
      * see the AttachHandler fire, and learn about the adapter, but
      * their SendNetBufferListsHandler / ReceiveNetBufferListsHandler
      * isn't invoked. Real chain walk is a future phase. */
     LIST_ENTRY                      FilterModuleList;
     KSPIN_LOCK                      FilterModuleListLock;
+
+    /* Native NDIS 6 protocol bindings open on this adapter, linked via
+     * NDIS6_PROTOCOL_BINDING.AdapterLink. The native datapath walks this
+     * list to indicate receives and to validate an NBL's SourceHandle
+     * before dereferencing it on send-complete; an empty list means only
+     * the legacy NDIS 5 bridge datapath runs. */
+    LIST_ENTRY                      ProtocolBindingList;
+    KSPIN_LOCK                      ProtocolBindingListLock;
 } NDIS6_ADAPTER_EXT, *PNDIS6_ADAPTER_EXT;
 
 /* ============================================================================
- *  NDIS 6 filter module - one per (filter driver × adapter) attachment.
+ *  NDIS 6 filter module — one per (filter driver × adapter) attachment.
  *  Created by Ndis6AttachFiltersToAdapter, freed by detach.
  * ============================================================================ */
 struct _NDIS6_FILTER_DRIVER_BLOCK;
@@ -218,7 +231,7 @@ typedef struct _NDIS6_FILTER_MODULE
 } NDIS6_FILTER_MODULE, *PNDIS6_FILTER_MODULE;
 
 /* ============================================================================
- *  Phase 3 OID waiter - used by Ndis6LegacyDoRequest to wait synchronously
+ *  Phase 3 OID waiter — used by Ndis6LegacyDoRequest to wait synchronously
  *  for the miniport's NdisMOidRequestComplete callback.
  * ============================================================================ */
 typedef struct _NDIS6_OID_WAITER
@@ -230,7 +243,7 @@ typedef struct _NDIS6_OID_WAITER
 } NDIS6_OID_WAITER, *PNDIS6_OID_WAITER;
 
 #define NDIS6_EXT(adapter) ((PNDIS6_ADAPTER_EXT)((adapter)->Ndis6Context))
-#define NDIS6_TAG          'rNRT'   /* "TRNn" - NDIS 6 bridge tag */
+#define NDIS6_TAG          'rNRT'   /* "TRNn" — NDIS 6 bridge tag */
 
 /* ============================================================================
  *  Bridge entry points
@@ -238,6 +251,27 @@ typedef struct _NDIS6_OID_WAITER
 
 /* 60driver.c */
 VOID Ndis6DriverInit(VOID);
+
+/* Returns KMDF's saved dispatch when DeviceObject is a KMDF-owned device
+ * object on a hybrid driver, NULL when the IRP is ours to handle. */
+PDRIVER_DISPATCH
+Ndis6HybridGetOriginalDispatch(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ UCHAR          MajorFunction);
+
+/* User-mode IRP surface (create/close + IOCTL_NDIS_QUERY_GLOBAL_STATS) of
+ * the miniport FDO. TRUE = DeviceObject is an adapter FDO and the IRP was
+ * completed with *OutStatus. */
+BOOLEAN
+Ndis6TryDispatchAdapterFdoIrp(
+    _In_  PDEVICE_OBJECT DeviceObject,
+    _In_  PIRP           Irp,
+    _Out_ NTSTATUS*      OutStatus);
+
+/* 60stubs.c — TRUE if DeviceObject was created by NdisRegisterDeviceEx. */
+BOOLEAN
+Ndis6DeviceIsControlDevice(
+    _In_ PDEVICE_OBJECT DeviceObject);
 
 /* 60adapter.c */
 NDIS_STATUS
@@ -259,6 +293,15 @@ Ndis6CallMiniportHaltEx(
     _In_ PLOGICAL_ADAPTER       Adapter,
     _In_ NDIS_HALT_ACTION       HaltAction);
 
+/* Intermediate-driver upper-miniport instantiation (NdisIMInitializeDeviceInstanceEx).
+ * Creates a virtual 802.3 miniport with no PnP PDO, runs the driver's
+ * InitializeHandlerEx, and binds protocols. */
+NDIS_STATUS
+Ndis6InitializeImDeviceInstance(
+    _In_ PNDIS6_DRIVER_BLOCK    DriverBlock,
+    _In_ PCUNICODE_STRING       DeviceName,
+    _In_ NDIS_HANDLE            DeviceContext);
+
 /* A4: Pause/Restart state-machine helpers. Called around filter
  * attach/detach, HaltEx, and power transitions. Both wait on the
  * respective event if the driver returned PENDING. */
@@ -270,7 +313,7 @@ NDIS_STATUS
 Ndis6CallMiniportRestartEx(
     _In_ PLOGICAL_ADAPTER       Adapter);
 
-/* PauseState constants - stored in NDIS6_ADAPTER_EXT.PauseState. */
+/* PauseState constants — stored in NDIS6_ADAPTER_EXT.PauseState. */
 #define NDIS6_PAUSE_STATE_RUNNING     0
 #define NDIS6_PAUSE_STATE_PAUSING     1
 #define NDIS6_PAUSE_STATE_PAUSED      2
@@ -286,7 +329,7 @@ VOID
 Ndis6IoFreeDmaAdapter(
     _In_ PNDIS6_ADAPTER_EXT     Ext);
 
-/* 60oid.c - legacy NDIS_REQUEST dispatcher for NDIS 6 adapters.
+/* 60oid.c — legacy NDIS_REQUEST dispatcher for NDIS 6 adapters.
  * Called from MiniDoRequest (miniport.c) when Adapter->IsNdis6 is TRUE,
  * before the code would otherwise dereference the NULL DriverHandle
  * that NDIS 5 miniports keep their MiniportCharacteristics inside. */
@@ -295,7 +338,7 @@ Ndis6LegacyDoRequest(
     _In_ PLOGICAL_ADAPTER       Adapter,
     _In_ PNDIS_REQUEST          Request);
 
-/* 60filter.c - datapath chain walk for the NDIS 6 filter framework.
+/* 60filter.c — datapath chain walk for the NDIS 6 filter framework.
  * Filters attach to an adapter via NdisFRegisterFilterDriver +
  * AttachHandler; on TX/RX/return, the bridge walks the per-adapter
  * filter chain calling each filter's Send/Recv/Return handler in
@@ -327,7 +370,7 @@ Ndis6FilterDispatchReturn(
     _In_ PNET_BUFFER_LIST  NetBufferList,
     _In_ ULONG             ReturnFlags);
 
-/* The bridge's terminal handlers - what runs when a filter chain walk
+/* The bridge's terminal handlers — what runs when a filter chain walk
  * reaches the end (TX → miniport, RX → indicate to legacy protocols). */
 VOID
 Ndis6FilterTerminalSend(
@@ -354,7 +397,7 @@ Ndis6FilterTerminalSendComplete(
     _In_ PNET_BUFFER_LIST  NetBufferList,
     _In_ ULONG             SendCompleteFlags);
 
-/* NdisF* helper APIs - declared here because the public ddk/ndis.h
+/* NdisF* helper APIs — declared here because the public ddk/ndis.h
  * doesn't have them. Filters call these to push NBLs through the
  * chain; the bridge resolves "next filter" via the per-adapter list. */
 VOID NTAPI
@@ -401,7 +444,7 @@ NdisFOidRequestComplete(
     _In_ PNDIS_OID_REQUEST OidRequest,
     _In_ NDIS_STATUS       Status);
 
-/* Filter chain dispatch entry for OIDs - called from Ndis6OidForward
+/* Filter chain dispatch entry for OIDs — called from Ndis6OidForward
  * (60oid.c) so OID requests pass through any installed filters before
  * reaching the miniport. */
 NDIS_STATUS
@@ -415,45 +458,14 @@ Ndis6FilterTerminalOidRequest(
     _In_ PNDIS_OID_REQUEST OidRequest);
 
 /* ============================================================================
- *  60util.c - NDIS 6 utility APIs
+ *  60util.c — NDIS 6 utility APIs
  *
  *  Timer objects, RW locks, NetBuffer helpers, NdisGetVersion overrides
  *  for the NT 6.1 target. These are general-purpose primitives every
  *  third-party NDIS 6 driver expects from ndis.sys.
  * ============================================================================ */
 
-/* NDIS 6 timer object characteristics - opaque to drivers, declared here
- * because the public DDK header doesn't carry it. */
-typedef struct _NDIS6_TIMER_CHARACTERISTICS
-{
-    NDIS_OBJECT_HEADER  Header;
-    ULONG               AllocationTag;
-    PVOID               TimerFunction;     /* NDIS_TIMER_FUNCTION* */
-    PVOID               FunctionContext;
-} NDIS6_TIMER_CHARACTERISTICS, *PNDIS6_TIMER_CHARACTERISTICS;
-
-NDIS_STATUS NTAPI
-NdisAllocateTimerObject(
-    _In_opt_ NDIS_HANDLE                  NdisHandle,
-    _In_     PNDIS6_TIMER_CHARACTERISTICS TimerCharacteristics,
-    _Out_    PNDIS_HANDLE                 pTimerObject);
-
-VOID NTAPI
-NdisFreeTimerObject(
-    _In_ NDIS_HANDLE TimerObject);
-
-BOOLEAN NTAPI
-NdisSetTimerObject(
-    _In_     NDIS_HANDLE   TimerObject,
-    _In_     LARGE_INTEGER DueTime,
-    _In_opt_ LONG          MillisecondsPeriod,
-    _In_opt_ PVOID         FunctionContext);
-
-BOOLEAN NTAPI
-NdisCancelTimerObject(
-    _In_ NDIS_HANDLE TimerObject);
-
-/* NDIS 6 RW lock - wraps an EX_PUSH_LOCK or simple shared/exclusive
+/* NDIS 6 RW lock — wraps an EX_PUSH_LOCK or simple shared/exclusive
  * primitive. Drivers use NdisAllocateRWLock + NdisAcquire/Release/Free. */
 typedef struct _NDIS_RW_LOCK_EX NDIS_RW_LOCK_EX, *PNDIS_RW_LOCK_EX;
 
@@ -487,7 +499,7 @@ NdisReleaseRWLock(
     _In_ PNDIS_RW_LOCK_EX Lock,
     _In_ PLOCK_STATE_EX   LockState);
 
-/* Combined NB+MDL+data allocation - common helper used by drivers
+/* Combined NB+MDL+data allocation — common helper used by drivers
  * building synthetic NBs from a simple buffer. */
 PNET_BUFFER NTAPI
 NdisAllocateNetBufferMdlAndData(
@@ -516,7 +528,7 @@ NdisCloseAdapterEx(
     _In_ NDIS_HANDLE NdisBindingHandle);
 
 /* ============================================================================
- *  NDIS 6 filter driver block - one per NdisFRegisterFilterDriver caller.
+ *  NDIS 6 filter driver block — one per NdisFRegisterFilterDriver caller.
  *  Phase 6 lays the groundwork: registration succeeds and the driver
  *  block is tracked, but the per-adapter filter chain walk on send/receive
  *  is not yet implemented. WFP and packet capture filters can register
@@ -535,7 +547,7 @@ extern LIST_ENTRY g_Ndis6FilterDriverList;
 extern KSPIN_LOCK g_Ndis6FilterDriverListLock;
 
 /* ============================================================================
- *  NDIS 6 protocol driver block - one per NdisRegisterProtocolDriver caller.
+ *  NDIS 6 protocol driver block — one per NdisRegisterProtocolDriver caller.
  *  Same Phase 6 scope: registration is real, the per-adapter bind walk on
  *  adapter creation is wired up so ProtocolBindAdapterEx fires; native
  *  NBL TX/RX through NdisSendNetBufferLists is still a stub.
@@ -548,7 +560,7 @@ typedef struct _NDIS6_PROTOCOL_DRIVER_BLOCK
 } NDIS6_PROTOCOL_DRIVER_BLOCK, *PNDIS6_PROTOCOL_DRIVER_BLOCK;
 
 /* ============================================================================
- *  NDIS 6 protocol binding - one per (protocol driver × adapter) open.
+ *  NDIS 6 protocol binding — one per (protocol driver × adapter) open.
  *  Created by NdisOpenAdapterEx, freed by NdisCloseAdapterEx. The driver
  *  receives the binding handle (which IS this struct cast to NDIS_HANDLE)
  *  and uses it for all subsequent operations on that binding (NdisOidRequest,
@@ -560,6 +572,9 @@ typedef struct _NDIS6_PROTOCOL_BINDING
     PNDIS6_PROTOCOL_DRIVER_BLOCK            DriverBlock;
     PLOGICAL_ADAPTER                        Adapter;
     NDIS_HANDLE                             ProtocolBindingContext;
+    /* Links this binding into the owning adapter's Ext->ProtocolBindingList
+     * (inserted by NdisOpenAdapterEx, removed by NdisCloseAdapterEx). */
+    LIST_ENTRY                              AdapterLink;
     /* D4: list of in-flight async OID requests issued by this protocol
      * binding. Each pending NdisOidRequest adds an entry; the matching
      * NdisMOidRequestComplete walks it to find the binding to notify. */
