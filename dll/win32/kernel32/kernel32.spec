@@ -8,6 +8,7 @@
 @ stdcall AddLocalAlternateComputerNameA(str ptr)
 @ stdcall AddLocalAlternateComputerNameW(wstr ptr)
 @ stdcall AddRefActCtx(ptr)
+@ stdcall -version=0x602+ AddDllDirectory(wstr)
 @ stdcall -stub -version=0x600+ AddSIDToBoundaryDescriptor(ptr ptr)
 @ stdcall -stub -version=0x600+ AddSecureMemoryCacheCallback(ptr)
 @ stdcall AddVectoredContinueHandler(long ptr) ntdll.RtlAddVectoredContinueHandler
@@ -103,6 +104,7 @@
 @ stdcall ConvertThreadToFiber(ptr)
 @ stdcall ConvertThreadToFiberEx(ptr long)
 @ stdcall CopyFileA(str str long)
+@ stdcall -version=0x602+ CopyFile2(wstr wstr ptr)
 @ stdcall CopyFileExA(str str ptr ptr ptr long)
 @ stdcall CopyFileExW(wstr wstr ptr ptr ptr long)
 @ stdcall -stub -version=0x600+ CopyFileTransactedA(str str ptr ptr ptr long ptr)
@@ -181,8 +183,8 @@
 @ stdcall CreateTimerQueueTimer(ptr long ptr ptr long long long)
 @ stdcall CreateToolhelp32Snapshot(long long)
 @ stdcall CreateWaitableTimerA(ptr long str)
-@ stub -version=0x600+ CreateWaitableTimerExA
-@ stub -version=0x600+ CreateWaitableTimerExW
+@ stdcall -version=0x600+ CreateWaitableTimerExA(ptr str long long)
+@ stdcall -version=0x600+ CreateWaitableTimerExW(ptr wstr long long)
 @ stdcall CreateWaitableTimerW(ptr long wstr)
 ;@ stdcall -arch=x86_64 CtrlRoutine()
 @ stdcall DeactivateActCtx(long ptr)
@@ -347,6 +349,8 @@
 @ stdcall FreeUserPhysicalPages(long long long)
 @ stdcall GenerateConsoleCtrlEvent(long long)
 @ stdcall GetACP()
+@ stdcall -version=0x601+ GetActiveProcessorCount(long)
+@ stdcall -version=0x601+ GetActiveProcessorGroupCount()
 @ stdcall -version=0x600+ GetApplicationRecoveryCallback(ptr ptr ptr ptr ptr)
 @ stub -version=0x600+ GetApplicationRestartSettings
 @ stdcall GetAtomNameA(long ptr long)
@@ -440,6 +444,7 @@
 @ stdcall -version=0x601+ GetCurrentProcessorNumberEx(ptr)
 @ stdcall -norelay GetCurrentThread()
 @ stdcall -norelay GetCurrentThreadId()
+@ stdcall -version=0x602+ GetCurrentThreadStackLimits(ptr ptr)
 @ stdcall GetDateFormatA(long long ptr str ptr long)
 @ stdcall -version=0x600+ GetDateFormatEx(wstr long ptr wstr wstr long wstr)
 @ stdcall GetDateFormatW(long long ptr wstr ptr long)
@@ -517,6 +522,8 @@
 @ stub -version=0x600+ GetLongPathNameTransactedW
 @ stdcall GetLongPathNameW(wstr long long)
 @ stdcall GetMailslotInfo(long ptr ptr ptr ptr)
+@ stdcall -version=0x601+ GetMaximumProcessorCount(long)
+@ stdcall -version=0x601+ GetMaximumProcessorGroupCount()
 @ stdcall GetModuleFileNameA(long ptr long)
 @ stdcall GetModuleFileNameW(long ptr long)
 @ stdcall GetModuleHandleA(str)
@@ -900,6 +907,9 @@
 @ stdcall Process32Next(ptr ptr)
 @ stdcall Process32NextW(ptr ptr)
 @ stdcall ProcessIdToSessionId(long ptr)
+@ stdcall -version=0x602+ PssCaptureSnapshot(ptr long long ptr)
+@ stdcall -version=0x602+ PssFreeSnapshot(ptr ptr)
+@ stdcall -version=0x602+ PssQuerySnapshot(ptr long ptr long)
 @ stdcall PulseEvent(long)
 @ stdcall PurgeComm(long long)
 @ stub -version=0x600+ QueryActCtxSettingsW
@@ -960,6 +970,7 @@
 @ stub -version=0x600+ RemoveDirectoryTransactedA
 @ stub -version=0x600+ RemoveDirectoryTransactedW
 @ stdcall RemoveDirectoryW(wstr)
+@ stdcall -version=0x602+ RemoveDllDirectory(ptr)
 @ stdcall RemoveLocalAlternateComputerNameA(str long)
 @ stdcall RemoveLocalAlternateComputerNameW(wstr long)
 @ stub -version=0x600+ RemoveSecureMemoryCacheCallback
@@ -1049,6 +1060,7 @@
 @ stdcall SetCurrentDirectoryW(wstr)
 @ stdcall SetDefaultCommConfigA(str ptr long)
 @ stdcall SetDefaultCommConfigW(wstr ptr long)
+@ stdcall -version=0x602+ SetDefaultDllDirectories(long)
 @ stdcall SetDllDirectoryA(str)
 @ stdcall SetDllDirectoryW(wstr)
 @ stub -version=0x600+ SetDynamicTimeZoneInformation
@@ -1144,6 +1156,7 @@
 @ stdcall SetVolumeMountPointA(str str)
 @ stdcall SetVolumeMountPointW(wstr wstr)
 @ stdcall SetWaitableTimer(long ptr long ptr ptr long)
+@ stdcall -version=0x602+ SetWaitableTimerEx(ptr ptr long ptr ptr ptr long)
 @ stdcall SetupComm(long long long)
 @ stdcall ShowConsoleCursor(long long)
 @ stdcall SignalObjectAndWait(long long long long)

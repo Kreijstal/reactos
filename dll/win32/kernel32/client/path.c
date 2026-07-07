@@ -19,6 +19,7 @@ UNICODE_STRING NoDefaultCurrentDirectoryInExePath = RTL_CONSTANT_STRING(L"NoDefa
 
 UNICODE_STRING BaseWindowsSystemDirectory, BaseWindowsDirectory;
 UNICODE_STRING BaseDefaultPathAppend, BaseDefaultPath, BaseDllDirectory;
+static ULONG BaseDefaultDllDirectories;
 
 PVOID gpTermsrvGetWindowsDirectoryA;
 PVOID gpTermsrvGetWindowsDirectoryW;
@@ -791,6 +792,86 @@ BasepIsCurDirAllowedForPlainExeNames(VOID)
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
+
+/*
+ * @implemented
+ */
+DLL_DIRECTORY_COOKIE
+WINAPI
+AddDllDirectory(IN PCWSTR NewDirectory)
+{
+    PUNICODE_STRING Cookie;
+
+    if (!NewDirectory || !*NewDirectory)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    if (RtlDetermineDosPathNameType_U(NewDirectory) == RtlPathTypeRelative)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    Cookie = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*Cookie));
+    if (!Cookie)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    if (!RtlCreateUnicodeString(Cookie, NewDirectory))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Cookie);
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return NULL;
+    }
+
+    return Cookie;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+RemoveDllDirectory(IN DLL_DIRECTORY_COOKIE Cookie)
+{
+    PUNICODE_STRING Directory = Cookie;
+
+    if (!Directory)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlFreeUnicodeString(Directory);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Directory);
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetDefaultDllDirectories(IN DWORD DirectoryFlags)
+{
+    const DWORD ValidFlags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                             LOAD_LIBRARY_SEARCH_USER_DIRS |
+                             LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+
+    if (!DirectoryFlags || (DirectoryFlags & ~ValidFlags))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    BaseDefaultDllDirectories = DirectoryFlags;
+    return TRUE;
+}
 
 /*
  * @implemented
