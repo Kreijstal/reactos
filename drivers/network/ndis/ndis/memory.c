@@ -48,6 +48,22 @@ NdisAllocateMemoryWithTag(
   return NDIS_STATUS_SUCCESS;
 }
 
+/*
+ * @implemented
+ */
+PVOID
+EXPORT
+NdisAllocateMemoryWithTagPriority(
+    IN NDIS_HANDLE      NdisHandle,
+    IN UINT             Length,
+    IN ULONG            Tag,
+    IN EX_POOL_PRIORITY Priority)
+{
+  UNREFERENCED_PARAMETER(NdisHandle);
+
+  NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
+  return ExAllocatePoolWithTagPriority(NonPagedPool, Length, Tag, Priority);
+}
 
 /*
  * @implemented
@@ -364,7 +380,7 @@ NdisMAllocateSharedMemoryAsync(
   /* dev-nt6-1: NDIS 6 adapters have a NULL legacy SystemAdapterObject
    * (the bridge owns DMA via Ext->DmaAdapter). The async work item
    * would crash dereferencing it. NDIS 6 also has no
-   * AllocateCompleteHandlerEx - drivers don't expose async shared-mem
+   * AllocateCompleteHandlerEx — drivers don't expose async shared-mem
    * alloc completion. Do a synchronous allocation via the bridge and
    * return SUCCESS; the driver doesn't expect a callback. */
   if (Adapter->IsNdis6)

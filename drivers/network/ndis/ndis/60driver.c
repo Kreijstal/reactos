@@ -26,12 +26,6 @@
 
 #include "ndis6_internal.h"
 
-/* Silence the trace prints below by default; comment out the
- * "#define NDEBUG" to re-enable. */
-#define NDEBUG
-#undef UNIMPLEMENTED
-#include <reactos/debug.h>
-
 LIST_ENTRY  g_Ndis6DriverList;
 KSPIN_LOCK  g_Ndis6DriverListLock;
 static BOOLEAN g_Ndis6DriverListReady = FALSE;
@@ -78,8 +72,13 @@ Ndis6DispatchUnknown(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp);
 
+static NTSTATUS NTAPI
+Ndis6DispatchHybridGeneric(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP           Irp);
+
 /* ============================================================================
- *  NdisMRegisterMiniportDriver - the entry point e1000e (and others) call
+ *  NdisMRegisterMiniportDriver — the entry point e1000e (and others) call
  *  from DriverEntry to register themselves as an NDIS 6 miniport.
  * ============================================================================ */
 
@@ -102,7 +101,7 @@ NdisMRegisterMiniportDriver(
         return NDIS_STATUS_INVALID_PARAMETER;
     }
 
-    /* Validate the characteristics minimally - we don't enforce every
+    /* Validate the characteristics minimally — we don't enforce every
      * required handler because the bridge can tolerate some being NULL. */
     if (MiniportDriverCharacteristics->Header.Type !=
         NDIS_OBJECT_TYPE_MINIPORT_DRIVER_CHARACTERISTICS)
@@ -126,7 +125,15 @@ NdisMRegisterMiniportDriver(
     RtlZeroMemory(Block, sizeof(*Block));
     Block->DriverObject          = DriverObject;
     Block->MiniportDriverContext = MiniportDriverContext;
-    Block->Characteristics       = *MiniportDriverCharacteristics;
+    /* Copy only the bytes the driver actually supplied (REV_1 is 16 bytes
+     * shorter than REV_2). The block was zeroed above so the REV_2 direct-OID
+     * handlers stay NULL for a REV_1 driver. */
+    {
+        ULONG CharSize = MiniportDriverCharacteristics->Header.Size;
+        if (CharSize == 0 || CharSize > sizeof(Block->Characteristics))
+            CharSize = sizeof(Block->Characteristics);
+        RtlCopyMemory(&Block->Characteristics, MiniportDriverCharacteristics, CharSize);
+    }
 
     /* Copy the registry path so the driver can free its own copy if it
      * wants. We allocate fresh PagedPool storage for the buffer. */
@@ -151,6 +158,17 @@ NdisMRegisterMiniportDriver(
      * NdisMRegisterMiniportDriver) but we save them for safety. */
     Block->OriginalAddDevice = DriverObject->DriverExtension->AddDevice;
     Block->OriginalPnpDispatch = DriverObject->MajorFunction[IRP_MJ_PNP];
+    for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
+        Block->OriginalMajorFunction[i] = DriverObject->MajorFunction[i];
+
+    /* Hybrid KMDF+NDIS driver: WdfDriverCreate already installed its own
+     * AddDevice. Only AddDevice is a reliable signal — the IO manager
+     * pre-fills every MajorFunction slot with IopInvalidDeviceRequest. */
+    Block->IsWdfHybrid = (Block->OriginalAddDevice != NULL && Block->OriginalAddDevice != Ndis6AddDevice);
+    if (Block->IsWdfHybrid)
+    {
+        DbgPrint("NDIS6: hybrid KMDF+NDIS miniport detected (AddDevice=%p Pnp=%p)\n", Block->OriginalAddDevice, Block->OriginalPnpDispatch);
+    }
 
     DriverObject->DriverExtension->AddDevice         = Ndis6AddDevice;
     DriverObject->MajorFunction[IRP_MJ_PNP]          = Ndis6DispatchPnp;
@@ -160,11 +178,15 @@ NdisMRegisterMiniportDriver(
     /* Default-handle every other major function so the IO manager
      * doesn't return STATUS_INVALID_DEVICE_REQUEST. IRP_MJ_DEVICE_CONTROL,
      * IRP_MJ_CREATE, IRP_MJ_CLOSE, etc. stay at STATUS_NOT_SUPPORTED
-     * until someone needs them - e1000e doesn't use them. */
+     * until someone needs them — e1000e doesn't use them.
+     * Hybrid path: the slots hold KMDF's FxDevice::Dispatch, which must
+     * never see our adapter FDO — interpose a per-device demux. */
     for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
     {
         if (DriverObject->MajorFunction[i] == NULL)
             DriverObject->MajorFunction[i] = Ndis6DispatchUnknown;
+        else if (Block->IsWdfHybrid && i != IRP_MJ_PNP && i != IRP_MJ_POWER && i != IRP_MJ_SYSTEM_CONTROL)
+            DriverObject->MajorFunction[i] = Ndis6DispatchHybridGeneric;
     }
 
     /* Insert into the global driver list. */
@@ -198,7 +220,7 @@ NdisMDeregisterMiniportDriver(
 }
 
 /* ============================================================================
- *  NdisMSetMiniportAttributes - driver pushes its per-adapter context and
+ *  NdisMSetMiniportAttributes — driver pushes its per-adapter context and
  *  capabilities back to the library during MiniportInitializeEx.
  *
  *  The driver may call this several times with different Header.Type
@@ -257,6 +279,7 @@ NdisMSetMiniportAttributes(
                               Gen->MacAddressLength);
                 Adapter->AddressLength = Gen->MacAddressLength;
             }
+            DbgPrint("NDIS6: adapter %p MAC %02x:%02x:%02x:%02x:%02x:%02x connect=%d\n", Adapter, Gen->CurrentMacAddress[0], Gen->CurrentMacAddress[1], Gen->CurrentMacAddress[2], Gen->CurrentMacAddress[3], Gen->CurrentMacAddress[4], Gen->CurrentMacAddress[5], Gen->MediaConnectState);
             return NDIS_STATUS_SUCCESS;
         }
 
@@ -273,20 +296,20 @@ NdisMSetMiniportAttributes(
             Ext->OffloadDefaultPtr = AttrBase[0];
             Ext->OffloadHwPtr      = AttrBase[1];
             Ext->OffloadValid      = TRUE;
-            DPRINT("NDIS6: offload attrs recorded Default=%p Hw=%p\n",
+            DbgPrint("NDIS6: offload attrs recorded Default=%p Hw=%p\n",
                      Ext->OffloadDefaultPtr, Ext->OffloadHwPtr);
             return NDIS_STATUS_SUCCESS;
         }
 
         case NDIS_OBJECT_TYPE_DEFAULT:
         default:
-            /* RSS and other attributes - accept and ignore for now. */
+            /* RSS and other attributes — accept and ignore for now. */
             return NDIS_STATUS_SUCCESS;
     }
 }
 
 /* ============================================================================
- *  PnP dispatchers - proper WDM function-driver pattern
+ *  PnP dispatchers — proper WDM function-driver pattern
  *
  *  An NDIS 6 miniport is a function driver sitting on top of the PCI bus
  *  driver's PDO. Every PnP IRP MUST pass through our FDO AND reach the
@@ -396,6 +419,143 @@ Ndis6FindDriverBlock(_In_ PDRIVER_OBJECT DriverObject)
     return block;
 }
 
+/* TRUE if DeviceObject is one of the bridge's adapter FDOs (PnP or IM
+ * instance). KMDF's device objects share the driver object on hybrid
+ * drivers, so DeviceExtension can only be trusted after this check. */
+static BOOLEAN
+Ndis6DeviceIsAdapterFdo(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    PLIST_ENTRY entry;
+    BOOLEAN     found = FALSE;
+    KIRQL       oldIrql;
+    extern LIST_ENTRY AdapterListHead;
+    extern KSPIN_LOCK AdapterListLock;
+
+    KeAcquireSpinLock(&AdapterListLock, &oldIrql);
+    for (entry = AdapterListHead.Flink; entry != &AdapterListHead; entry = entry->Flink)
+    {
+        PLOGICAL_ADAPTER adapter = CONTAINING_RECORD(entry, LOGICAL_ADAPTER, ListEntry);
+        if (adapter->NdisMiniportBlock.DeviceObject == DeviceObject)
+        {
+            found = TRUE;
+            break;
+        }
+    }
+    KeReleaseSpinLock(&AdapterListLock, oldIrql);
+    return found;
+}
+
+/* User-mode surface of the miniport FDO: open/close succeed and
+ * IOCTL_NDIS_QUERY_GLOBAL_STATS goes through MiniQueryInformation —
+ * same as the legacy NdisIDeviceIoControl surface. Returns TRUE (IRP
+ * completed, *OutStatus set) only for our own adapter FDOs. */
+BOOLEAN
+Ndis6TryDispatchAdapterFdoIrp(
+    _In_  PDEVICE_OBJECT DeviceObject,
+    _In_  PIRP           Irp,
+    _Out_ NTSTATUS*      OutStatus)
+{
+    PLOGICAL_ADAPTER   Adapter;
+    PIO_STACK_LOCATION Stack;
+    NTSTATUS           Status;
+    ULONG              Written = 0;
+
+    if (!Ndis6DeviceIsAdapterFdo(DeviceObject))
+        return FALSE;
+
+    Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
+    Stack   = IoGetCurrentIrpStackLocation(Irp);
+
+    switch (Stack->MajorFunction)
+    {
+        case IRP_MJ_CREATE:
+        case IRP_MJ_CLEANUP:
+        case IRP_MJ_CLOSE:
+            Status = STATUS_SUCCESS;
+            break;
+
+        case IRP_MJ_DEVICE_CONTROL:
+        {
+            if (Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_NDIS_QUERY_GLOBAL_STATS && Irp->AssociatedIrp.SystemBuffer != NULL && Stack->Parameters.DeviceIoControl.InputBufferLength >= sizeof(NDIS_OID))
+            {
+                /* METHOD_OUT_DIRECT: OID in SystemBuffer, result in the MDL. */
+                PVOID OutBuffer = NULL;
+                ULONG OutLength = Stack->Parameters.DeviceIoControl.OutputBufferLength;
+
+                if (Irp->MdlAddress != NULL)
+                {
+                    OutBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+                    if (OutBuffer == NULL)
+                    {
+                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                        break;
+                    }
+                }
+                else
+                {
+                    OutLength = 0;
+                }
+
+                Status = MiniQueryInformation(Adapter, *(PNDIS_OID)Irp->AssociatedIrp.SystemBuffer, OutLength, OutBuffer, &Written);
+            }
+            else
+            {
+                Status = STATUS_NOT_SUPPORTED;
+            }
+            break;
+        }
+
+        default:
+            Status = STATUS_NOT_SUPPORTED;
+            break;
+    }
+
+    /* Complete preserving the bytes-written count (Ndis6CompleteIrp
+     * zeroes Information, so it can't be used here). */
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = Written;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    *OutStatus = Status;
+    return TRUE;
+}
+
+PDRIVER_DISPATCH
+Ndis6HybridGetOriginalDispatch(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ UCHAR          MajorFunction)
+{
+    PNDIS6_DRIVER_BLOCK Block;
+
+    Block = Ndis6FindDriverBlock(DeviceObject->DriverObject);
+    if (Block == NULL || !Block->IsWdfHybrid)
+        return NULL;
+
+    if (Ndis6DeviceIsAdapterFdo(DeviceObject) || Ndis6DeviceIsControlDevice(DeviceObject))
+        return NULL;
+
+    return Block->OriginalMajorFunction[MajorFunction];
+}
+
+/* Installed on every non-PnP/Power/WMI major function of a hybrid driver
+ * object. Routes IRPs for KMDF-owned device objects to KMDF's dispatch;
+ * IRPs for our own devices keep the pure-path NOT_SUPPORTED behavior. */
+static NTSTATUS NTAPI
+Ndis6DispatchHybridGeneric(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP           Irp)
+{
+    NTSTATUS         Status;
+    PDRIVER_DISPATCH Original = Ndis6HybridGetOriginalDispatch(DeviceObject, IoGetCurrentIrpStackLocation(Irp)->MajorFunction);
+
+    if (Original != NULL)
+        return Original(DeviceObject, Irp);
+
+    if (Ndis6TryDispatchAdapterFdoIrp(DeviceObject, Irp, &Status))
+        return Status;
+
+    return Ndis6CompleteIrp(Irp, STATUS_NOT_SUPPORTED);
+}
+
 static NTSTATUS NTAPI
 Ndis6AddDevice(
     _In_ PDRIVER_OBJECT DriverObject,
@@ -408,6 +568,16 @@ Ndis6AddDevice(
     DriverBlock = Ndis6FindDriverBlock(DriverObject);
     if (DriverBlock == NULL)
         return STATUS_DEVICE_NOT_READY;
+
+    /* Hybrid driver: chain KMDF's AddDevice first so its FDO attaches to
+     * the PDO; ours then lands on top and IRPs flow NDIS → KMDF → bus. */
+    if (DriverBlock->IsWdfHybrid && DriverBlock->OriginalAddDevice != NULL)
+    {
+        NTSTATUS Status = DriverBlock->OriginalAddDevice(DriverObject, PhysicalDeviceObject);
+        DbgPrint("NDIS6: hybrid AddDevice → KMDF returned 0x%08lx\n", Status);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     NdisStatus = Ndis6CreateLogicalAdapter(DriverBlock, PhysicalDeviceObject, &Adapter);
     if (!NT_SUCCESS(NdisStatus))
@@ -428,6 +598,13 @@ Ndis6DispatchPnp(
     NDIS_STATUS        NdisStatus;
     NTSTATUS           Status;
 
+    /* Hybrid path: KMDF's own device objects keep KMDF's PnP dispatch. */
+    {
+        PDRIVER_DISPATCH Original = Ndis6HybridGetOriginalDispatch(DeviceObject, IRP_MJ_PNP);
+        if (Original != NULL)
+            return Original(DeviceObject, Irp);
+    }
+
     Stack   = IoGetCurrentIrpStackLocation(Irp);
     Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
     Ext     = (Adapter && Adapter->IsNdis6) ? NDIS6_EXT(Adapter) : NULL;
@@ -446,7 +623,7 @@ Ndis6DispatchPnp(
         {
             /* ---------------------------------------------------------
              *  Forward START down first so PCI (the PDO's driver)
-             *  finishes its own device setup - DMA adapter registration,
+             *  finishes its own device setup — DMA adapter registration,
              *  power state transition, and the per-device bus-interface
              *  context that IRP_MN_QUERY_INTERFACE later depends on.
              * --------------------------------------------------------- */
@@ -488,7 +665,7 @@ Ndis6DispatchPnp(
             /* Now call the miniport's InitializeHandlerEx. If it succeeds,
              * mark the adapter as initialized so the matching HaltEx will
              * run on REMOVE. If it fails, the driver has cleaned up
-             * internally - we must NOT call HaltEx (MS DDK contract). */
+             * internally — we must NOT call HaltEx (MS DDK contract). */
             NdisStatus = Ndis6CallMiniportInitializeEx(Adapter);
             if (NdisStatus == NDIS_STATUS_SUCCESS)
             {
@@ -551,11 +728,11 @@ Ndis6DispatchPnp(
             return Ndis6PassThroughIrp(LowerDevice, Irp);
 
         default:
-            /* Every other PnP IRP - IRP_MN_QUERY_INTERFACE (critical:
+            /* Every other PnP IRP — IRP_MN_QUERY_INTERFACE (critical:
              * BUS_INTERFACE_STANDARD), IRP_MN_QUERY_CAPABILITIES,
              * IRP_MN_QUERY_PNP_DEVICE_STATE, IRP_MN_FILTER_RESOURCE_REQUIREMENTS,
              * IRP_MN_QUERY_DEVICE_RELATIONS, IRP_MN_QUERY_ID,
-             * IRP_MN_QUERY_BUS_INFORMATION, etc. - pass through to PCI. */
+             * IRP_MN_QUERY_BUS_INFORMATION, etc. — pass through to PCI. */
             return Ndis6PassThroughIrp(LowerDevice, Irp);
     }
 }
@@ -584,7 +761,7 @@ Ndis6DoMiniportRestart(
 
     RtlZeroMemory(&RestartParams, sizeof(RestartParams));
     RestartParams.Header.Type     = NDIS_OBJECT_TYPE_DEFAULT;
-    RestartParams.Header.Revision = 1;
+    RestartParams.Header.Revision = NDIS_MINIPORT_RESTART_PARAMETERS_REVISION_1;
     RestartParams.Header.Size     = sizeof(RestartParams);
     Ext->DriverBlock->Characteristics.RestartHandler(
         Ext->MiniportAdapterContext, &RestartParams);
@@ -619,20 +796,6 @@ Ndis6PowerCompletionRoutine(
     return STATUS_CONTINUE_COMPLETION;
 }
 
-/* D3: NET_DEVICE_PNP_EVENT isn't fully defined in the ReactOS NDIS 5.1
- * headers, just forward-declared. We mirror the Windows DDK struct so
- * DevicePnPEventNotifyHandler gets a valid layout. Keep the fields in
- * the same order as the MSDN documentation. */
-typedef struct _NDIS6_NET_DEVICE_PNP_EVENT
-{
-    NDIS_OBJECT_HEADER      Header;
-    NDIS_PORT_NUMBER        PortNumber;
-    NDIS_DEVICE_PNP_EVENT   DevicePnPEvent;
-    PVOID                   InformationBuffer;
-    ULONG                   InformationBufferLength;
-    UCHAR                   NdisReserved[2 * sizeof(PVOID)];
-} NDIS6_NET_DEVICE_PNP_EVENT, *PNDIS6_NET_DEVICE_PNP_EVENT;
-
 /* D3: call the miniport's DevicePnPEventNotifyHandler for a given
  * event. The handler was installed via the driver's characteristics
  * struct; most drivers tolerate NULL data. */
@@ -641,7 +804,7 @@ Ndis6NotifyMiniportDevicePnPEvent(
     _In_ PNDIS6_ADAPTER_EXT     Ext,
     _In_ NDIS_DEVICE_PNP_EVENT  Event)
 {
-    NDIS6_NET_DEVICE_PNP_EVENT NetEvent;
+    NET_DEVICE_PNP_EVENT NetEvent;
 
     if (Ext == NULL || !Ext->Initialized || Ext->DriverBlock == NULL ||
         Ext->DriverBlock->Characteristics.DevicePnPEventNotifyHandler == NULL ||
@@ -659,13 +822,12 @@ Ndis6NotifyMiniportDevicePnPEvent(
     NetEvent.InformationBuffer       = NULL;
     NetEvent.InformationBufferLength = 0;
 
-    /* Cast to the forward-declared type the handler expects. */
     Ext->DriverBlock->Characteristics.DevicePnPEventNotifyHandler(
         Ext->MiniportAdapterContext,
-        (struct _NET_DEVICE_PNP_EVENT*)&NetEvent);
+        &NetEvent);
 }
 
-/* D3: Ndis6IndicateNetPnPEvent - fan a NET_PNP_EVENT out to every
+/* D3: Ndis6IndicateNetPnPEvent — fan a NET_PNP_EVENT out to every
  * bound legacy protocol driver. The protocol's PnPEventHandler is
  * called with the event struct. */
 VOID
@@ -706,7 +868,7 @@ Ndis6IndicateNetPnPEvent(
 
         Context = Binding->NdisOpenBlock.ProtocolBindingContext;
 
-        /* Drop lock across callback - protocols re-enter the bridge. */
+        /* Drop lock across callback — protocols re-enter the bridge. */
         KeReleaseSpinLock(&Adapter->NdisMiniportBlock.Lock, OldIrql);
         CallbackStatus = Handler(Context, &Event);
         (void)CallbackStatus;
@@ -724,11 +886,20 @@ Ndis6DispatchPower(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp)
 {
-    PLOGICAL_ADAPTER   Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
-    PNDIS6_ADAPTER_EXT Ext     = (Adapter && Adapter->IsNdis6) ? NDIS6_EXT(Adapter) : NULL;
-    PDEVICE_OBJECT     LowerDevice =
-        Adapter ? Adapter->NdisMiniportBlock.NextDeviceObject : NULL;
+    PLOGICAL_ADAPTER   Adapter;
+    PNDIS6_ADAPTER_EXT Ext;
+    PDEVICE_OBJECT     LowerDevice;
     PIO_STACK_LOCATION Stack;
+    PDRIVER_DISPATCH   Original;
+
+    /* Hybrid path: KMDF's own device objects keep KMDF's power dispatch. */
+    Original = Ndis6HybridGetOriginalDispatch(DeviceObject, IRP_MJ_POWER);
+    if (Original != NULL)
+        return Original(DeviceObject, Irp);
+
+    Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
+    Ext     = (Adapter && Adapter->IsNdis6) ? NDIS6_EXT(Adapter) : NULL;
+    LowerDevice = Adapter ? Adapter->NdisMiniportBlock.NextDeviceObject : NULL;
 
     if (LowerDevice == NULL)
         return Ndis6CompleteIrp(Irp, STATUS_INVALID_DEVICE_STATE);
@@ -756,7 +927,7 @@ Ndis6DispatchPower(
      *   - On D0 entry: forward down first so PCI restores power, then
      *     call RestartHandler so the miniport resumes.
      *
-     * The miniport's pause/restart handlers may be NULL - most NDIS 6
+     * The miniport's pause/restart handlers may be NULL — most NDIS 6
      * drivers register them but a few don't. We treat NULL as "nothing
      * to do" and just pass the IRP through. */
     if (Ext != NULL &&
@@ -768,7 +939,7 @@ Ndis6DispatchPower(
 
         if (NewState != PowerDeviceD0 && Ext->Initialized)
         {
-            /* Going to a low-power state - pause the miniport now,
+            /* Going to a low-power state — pause the miniport now,
              * then forward down. */
             if (Ext->DriverBlock != NULL &&
                 Ext->DriverBlock->Characteristics.PauseHandler != NULL)
@@ -784,7 +955,7 @@ Ndis6DispatchPower(
         }
         else if (NewState == PowerDeviceD0 && Ext->Initialized)
         {
-            /* Going to D0 - forward down first so PCI restores power,
+            /* Going to D0 — forward down first so PCI restores power,
              * then call RestartHandler from the completion routine
              * (Ndis6PowerCompletionRoutine). The completion routine
              * runs after PCI has finished its async resume work. */
@@ -802,7 +973,7 @@ Ndis6DispatchPower(
                 PoStartNextPowerIrp(Irp);
                 return PoCallDriver(LowerDevice, Irp);
             }
-            /* Allocation failed - fall through to the simple path. */
+            /* Allocation failed — fall through to the simple path. */
         }
     }
 
@@ -815,15 +986,22 @@ Ndis6DispatchPower(
     return PoCallDriver(LowerDevice, Irp);
 }
 
-/* System control (WMI) dispatch - pass through to PCI unchanged. */
+/* System control (WMI) dispatch — pass through to PCI unchanged. */
 static NTSTATUS NTAPI
 Ndis6DispatchSystemControl(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp)
 {
-    PLOGICAL_ADAPTER Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
-    PDEVICE_OBJECT   LowerDevice =
-        Adapter ? Adapter->NdisMiniportBlock.NextDeviceObject : NULL;
+    PLOGICAL_ADAPTER Adapter;
+    PDEVICE_OBJECT   LowerDevice;
+
+    /* Hybrid path: KMDF's own device objects keep KMDF's WMI dispatch. */
+    PDRIVER_DISPATCH Original = Ndis6HybridGetOriginalDispatch(DeviceObject, IRP_MJ_SYSTEM_CONTROL);
+    if (Original != NULL)
+        return Original(DeviceObject, Irp);
+
+    Adapter = (PLOGICAL_ADAPTER)DeviceObject->DeviceExtension;
+    LowerDevice = Adapter ? Adapter->NdisMiniportBlock.NextDeviceObject : NULL;
 
     if (LowerDevice == NULL)
         return Ndis6CompleteIrp(Irp, STATUS_INVALID_DEVICE_STATE);
@@ -836,7 +1014,13 @@ Ndis6DispatchUnknown(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
+    NTSTATUS Status;
+
+    /* User-mode opens + IOCTL_NDIS_QUERY_GLOBAL_STATS on the miniport
+     * FDO (ipconfig / the connection-status dialog). */
+    if (Ndis6TryDispatchAdapterFdoIrp(DeviceObject, Irp, &Status))
+        return Status;
+
     return Ndis6CompleteIrp(Irp, STATUS_NOT_SUPPORTED);
 }
 
