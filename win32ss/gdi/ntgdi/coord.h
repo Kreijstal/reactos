@@ -10,6 +10,25 @@
 static
 inline
 BOOLEAN
+INTERNAL_ROUND_FLOATOBJ_TO_LONG(PFLOATOBJ value, PLONG result)
+{
+    FLOATOBJ rounded = *value;
+
+    if (FLOATOBJ_GreaterThanLong(&rounded, 0))
+    {
+        FLOATOBJ_AddFloat(&rounded, 0.5f);
+    }
+    else if (FLOATOBJ_LessThanLong(&rounded, 0))
+    {
+        FLOATOBJ_SubFloat(&rounded, 0.5f);
+    }
+
+    return FLOATOBJ_bConvertToLong(&rounded, result);
+}
+
+static
+inline
+BOOLEAN
 INTERNAL_APPLY_MATRIX(PMATRIX matrix, LPPOINT points, UINT count)
 {
     while (count--)
@@ -33,9 +52,9 @@ INTERNAL_APPLY_MATRIX(PMATRIX matrix, LPPOINT points, UINT count)
         FLOATOBJ_Add(&y, &tmp);
         FLOATOBJ_Add(&y, &matrix->efDy);
 
-        if (!FLOATOBJ_bConvertToLong(&x, &points[count].x))
+        if (!INTERNAL_ROUND_FLOATOBJ_TO_LONG(&x, &points[count].x))
             return FALSE;
-        if (!FLOATOBJ_bConvertToLong(&y, &points[count].y))
+        if (!INTERNAL_ROUND_FLOATOBJ_TO_LONG(&y, &points[count].y))
             return FALSE;
     }
     return TRUE;
