@@ -433,18 +433,19 @@ MiniportInitialize (
                                    (PVOID*)&adapter->RxBuffers, &adapter->RxBuffersPa);
     if (status != NDIS_STATUS_SUCCESS) goto Cleanup;
 
-    /* Bring chip up. */
-    status = NICPowerOn(adapter);
+    /* Bring chip up.  Order mirrors Linux rtl_init_one/rtl_open: detect the
+     * XID first (fails like Linux on unknown silicon), take the 8168G+ MCU
+     * out of OOB mode (rtl_hw_initialize), then soft-reset. */
+    status = NICDetectChipVersion(adapter);
     if (status != NDIS_STATUS_SUCCESS) goto Cleanup;
+
+    NICInitializeHw(adapter);
 
     status = NICSoftReset(adapter);
     if (status != NDIS_STATUS_SUCCESS) goto Cleanup;
 
-    status = NICDetectChipVersion(adapter);
-    if (status != NDIS_STATUS_SUCCESS) goto Cleanup;
-
     /* Force PLL up so the PHY isn't power-gated when we touch MDIO during
-     * NICProgramRings / RtlHwPhyConfig.  Safe no-op on chips without PMCH. */
+     * RtlHwPhyConfig / NICProgramRings.  Safe no-op on chips without PMCH. */
     RtlPllPowerUp(adapter);
 
     status = NICGetPermanentMacAddress(adapter, adapter->PermanentMacAddress);
@@ -459,12 +460,14 @@ MiniportInitialize (
          adapter->PermanentMacAddress[2], adapter->PermanentMacAddress[3],
          adapter->PermanentMacAddress[4], adapter->PermanentMacAddress[5]));
 
+    /* PHY tuning passes -- Linux runs rtl8169_init_phy before rtl_hw_start. */
+    RtlHwPhyConfig(adapter);
+
     status = NICProgramRings(adapter);
     if (status != NDIS_STATUS_SUCCESS) goto Cleanup;
 
     NICUpdateLinkStatus(adapter);
 
-    /* Interrupt before we enable the engines so we don't lose the first IRQ. */
     status = NdisMRegisterInterrupt(&adapter->Interrupt,
                                     MiniportAdapterHandle,
                                     adapter->InterruptVector,
@@ -478,12 +481,15 @@ MiniportInitialize (
         goto Cleanup;
 
     adapter->InterruptRegistered = TRUE;
-    adapter->InterruptMask = DEFAULT_INTERRUPT_MASK;
-    NICApplyInterruptMask(adapter);
 
+    /* Enable the engines, then unmask interrupts last, matching the tail of
+     * Linux rtl_hw_start. */
     status = NICEnableTxRx(adapter);
     if (status != NDIS_STATUS_SUCCESS)
         goto Cleanup;
+
+    adapter->InterruptMask = DEFAULT_INTERRUPT_MASK;
+    NICApplyInterruptMask(adapter);
 
     NDIS_DbgPrint(MIN_TRACE,
         ("RTL8168: ready, link=%s, speed=%lu Mbps\n",
