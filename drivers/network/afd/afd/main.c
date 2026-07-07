@@ -920,6 +920,8 @@ AfdDispatch(PDEVICE_OBJECT DeviceObject, PIRP Irp)
     }
 
     Irp->IoStatus.Information = 0;
+    RtlZeroMemory(Irp->Tail.Overlay.DriverContext,
+                  sizeof(Irp->Tail.Overlay.DriverContext));
 
     switch(IrpSp->MajorFunction)
     {

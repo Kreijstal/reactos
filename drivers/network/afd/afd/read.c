@@ -162,8 +162,6 @@ static NTSTATUS ReceiveActivity( PAFD_FCB FCB, PIRP Irp ) {
     UINT TotalBytesCopied = 0;
     NTSTATUS Status = STATUS_SUCCESS, RetStatus = STATUS_PENDING;
 
-    AFD_DbgPrint(MID_TRACE,("%p %p\n", FCB, Irp));
-
     AFD_DbgPrint(MID_TRACE,("FCB %p Receive data waiting %u\n",
                             FCB, FCB->Recv.Content));
 
@@ -476,8 +474,11 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->SharedData.State != SOCKET_STATE_CONNECTING ) {
         AFD_DbgPrint(MIN_TRACE,("Called recv on wrong kind of socket (s%x)\n",
                                 FCB->SharedData.State));
-        return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER,
-                                       Irp, 0 );
+        SocketStateUnlock(FCB);
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+        return STATUS_INVALID_PARAMETER;
     }
 
     if( !(RecvReq = LockRequest( Irp, IrpSp, FALSE, &LockMode )) )
@@ -515,7 +516,7 @@ AfdConnectedSocketReadData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         RecvReq->BufferArray = LockBuffers(RecvReq->BufferArray,
                                            RecvReq->BufferCount,
                                            NULL, NULL,
-                                           FALSE, FALSE, LockMode,
+                                           TRUE, FALSE, LockMode,
                                            TRUE);
     }
     else
