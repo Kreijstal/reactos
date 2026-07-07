@@ -104,6 +104,8 @@ WSPGetOverlappedResult(
     PSOCKET_INFORMATION     Socket;
     PIO_STATUS_BLOCK        IoStatusBlock;
     BOOL                    Ret;
+    HANDLE                  WaitHandle;
+    ULONG                   RetryCount;
 
     TRACE("Called (%x)\n", Handle);
 
@@ -123,10 +125,17 @@ WSPGetOverlappedResult(
     }
 
     IoStatusBlock = (PIO_STATUS_BLOCK)lpOverlapped;
+
     Ret = GetOverlappedResult((HANDLE)Handle, lpOverlapped, lpdwBytes, fWait);
 
-    /* HACK: Allow APC to be processed */
-    SleepEx(0, TRUE);
+    for (RetryCount = 0;
+         !Ret && !fWait && IoStatusBlock->Status == STATUS_PENDING && RetryCount < 20;
+         RetryCount++)
+    {
+        WaitHandle = lpOverlapped->hEvent ? lpOverlapped->hEvent : (HANDLE)Handle;
+        WaitForSingleObjectEx(WaitHandle, 1, TRUE);
+        Ret = GetOverlappedResult((HANDLE)Handle, lpOverlapped, lpdwBytes, FALSE);
+    }
 
     if (!fWait && IoStatusBlock->Status == STATUS_PENDING)
     {
