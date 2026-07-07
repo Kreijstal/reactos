@@ -2807,17 +2807,18 @@ NtfsInsertKey(PB_TREE Tree,
         CurrentKey = CurrentKey->NextKey;
     }
 
-    // Determine how much space the index entries will need
-    NodeSize = GetSizeOfIndexEntries(Node);
+    // Determine how much space the index entries will need on disk.  Entries
+    // whose child node was just attached gain a trailing VCN when serialized.
+    NodeSize = GetSerializedSizeOfIndexEntries(Node);
 
     // Is Node not the root node?
     if (Node != Tree->RootNode)
     {
-        // Calculate maximum size of index entries without any headers
+        // Calculate maximum serialized entry bytes without index-buffer headers.
         AllocatedNodeSize = IndexRecordSize - FIELD_OFFSET(INDEX_BUFFER, Header);
-
-        // TODO: Replace magic with math
-        MaxNodeSizeWithoutHeader = AllocatedNodeSize - 0x28;
+        MaxNodeSizeWithoutHeader = NtfsGetMaxIndexNodeEntryBytes(Tree->Vcb,
+                                                                 IndexRecordSize);
+        ASSERT(MaxNodeSizeWithoutHeader <= AllocatedNodeSize);
 
         // Has the node grown larger than its allocated size?
         if (NodeSize > MaxNodeSizeWithoutHeader)
