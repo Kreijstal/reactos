@@ -5,7 +5,7 @@
  * PURPOSE:     NDIS 6 NET_BUFFER / NET_BUFFER_LIST allocation.
  *
  *              Real implementations of the NBL/NB pool API. Backed by
- *              ExAllocatePoolWithTag - no lookaside list yet, that's a
+ *              ExAllocatePoolWithTag — no lookaside list yet, that's a
  *              future optimization. The pool handle is just a small
  *              header struct that remembers context size and DataSize
  *              the caller asked for; alloc/free goes straight to pool.
@@ -24,7 +24,7 @@
 #define MDL_TAG       'lDMn'  /* "nMDl" */
 
 /* ============================================================================
- *  Pool descriptor - what NBL pool handles actually point at
+ *  Pool descriptor — what NBL pool handles actually point at
  * ============================================================================ */
 
 typedef struct _NDIS6_NBL_POOL
@@ -56,7 +56,7 @@ typedef struct _NDIS6_NB_POOL
     ULONG       PoolTag;
     ULONG       DataSize;
 
-    /* Same scheme as the NBL pool - fixed-size NB allocations come from
+    /* Same scheme as the NBL pool — fixed-size NB allocations come from
      * the lookaside list. */
     BOOLEAN              LookasideValid;
     NPAGED_LOOKASIDE_LIST Lookaside;
@@ -65,7 +65,7 @@ typedef struct _NDIS6_NB_POOL
 #define NDIS6_NB_POOL_MAGIC   0xB1601001
 
 /* ============================================================================
- *  NBL pool - Allocate / Free
+ *  NBL pool — Allocate / Free
  * ============================================================================ */
 
 NDIS_HANDLE
@@ -141,7 +141,7 @@ NdisFreeNetBufferListPool(
 }
 
 /* ============================================================================
- *  NB pool - Allocate / Free
+ *  NB pool — Allocate / Free
  * ============================================================================ */
 
 NDIS_HANDLE
@@ -290,7 +290,7 @@ NdisFreeNetBufferList(
     Pool = (PNDIS6_NBL_POOL)NetBufferList->NdisPoolHandle;
     if (Pool == NULL || Pool->Magic != NDIS6_NBL_POOL_MAGIC)
     {
-        /* Allocator unknown - leak rather than corrupt heap. */
+        /* Allocator unknown — leak rather than corrupt heap. */
         return;
     }
 
@@ -330,7 +330,7 @@ NdisAllocateNetBufferAndNetBufferList(
     Nb = Nbl->FirstNetBuffer;
     if (Nb == NULL)
     {
-        /* Pool wasn't created with fAllocateNetBuffer - caller error.
+        /* Pool wasn't created with fAllocateNetBuffer — caller error.
          * Free the NBL we just made and bail. */
         NdisFreeNetBufferList(Nbl);
         return NULL;
@@ -347,7 +347,7 @@ NdisAllocateNetBufferAndNetBufferList(
 }
 
 /* ============================================================================
- *  Standalone NET_BUFFER allocation (rare - most callers use the combined
+ *  Standalone NET_BUFFER allocation (rare — most callers use the combined
  *  helper above)
  * ============================================================================ */
 
@@ -389,7 +389,7 @@ NdisFreeNetBuffer(
 
     if (NetBuffer == NULL || NetBuffer->NdisPoolHandle == NULL)
     {
-        /* This NB was embedded inside an NBL allocation - its memory is
+        /* This NB was embedded inside an NBL allocation — its memory is
          * owned by the NBL. NdisFreeNetBufferList handles cleanup. */
         return;
     }
@@ -427,7 +427,7 @@ NdisRetreatNetBufferDataStart(
     if (NetBuffer == NULL)
         return NDIS_STATUS_INVALID_PARAMETER;
 
-    /* Hot path - there's enough room in the current MDL to back up the
+    /* Hot path — there's enough room in the current MDL to back up the
      * header pointer in place, no allocation needed. */
     if (NetBuffer->DataOffset >= DataOffsetDelta &&
         NetBuffer->CurrentMdlOffset >= DataOffsetDelta)
@@ -438,7 +438,7 @@ NdisRetreatNetBufferDataStart(
         return NDIS_STATUS_SUCCESS;
     }
 
-    /* Slow path - the retreat would back the data start up past the
+    /* Slow path — the retreat would back the data start up past the
      * front of the current MDL. We allocate a new MDL of size
      * DataOffsetDelta + DataBackFill, prepend it to the chain, and
      * point CurrentMdl at it. The caller's intended use is "I want
@@ -523,6 +523,94 @@ NdisAdvanceNetBufferDataStart(
         NetBuffer->CurrentMdl       = CurrentMdl->Next;
         NetBuffer->CurrentMdlOffset = 0;
     }
+}
+
+PVOID
+NTAPI
+NdisGetDataBuffer(
+    _In_ PNET_BUFFER NetBuffer,
+    _In_ ULONG BytesNeeded,
+    _Out_writes_bytes_all_opt_(BytesNeeded) PVOID Storage,
+    _In_ UINT AlignMultiple,
+    _In_ UINT AlignOffset)
+{
+    PMDL CurrentMdl;
+    ULONG CurrentMdlOffset;
+    ULONG BytesCopied;
+    ULONG MdlByteCount;
+    PUCHAR MdlVa;
+    PUCHAR DataVa;
+    PUCHAR StoragePtr;
+
+    if (NetBuffer == NULL || BytesNeeded == 0 ||
+        BytesNeeded > NET_BUFFER_DATA_LENGTH(NetBuffer))
+    {
+        return NULL;
+    }
+
+    CurrentMdl = NET_BUFFER_CURRENT_MDL(NetBuffer);
+    CurrentMdlOffset = NET_BUFFER_CURRENT_MDL_OFFSET(NetBuffer);
+    if (CurrentMdl == NULL)
+        return NULL;
+
+    MdlByteCount = MmGetMdlByteCount(CurrentMdl);
+    if (CurrentMdlOffset >= MdlByteCount)
+        return NULL;
+
+    if (BytesNeeded <= MdlByteCount - CurrentMdlOffset)
+    {
+        MdlVa = (PUCHAR)MmGetSystemAddressForMdlSafe(CurrentMdl, NormalPagePriority);
+        if (MdlVa == NULL)
+            return NULL;
+
+        DataVa = MdlVa + CurrentMdlOffset;
+        if (AlignMultiple <= 1 ||
+            (((ULONG_PTR)DataVa + AlignOffset) % AlignMultiple) == 0)
+        {
+            return DataVa;
+        }
+
+        if (Storage == NULL)
+            return NULL;
+
+        RtlCopyMemory(Storage, DataVa, BytesNeeded);
+        return Storage;
+    }
+
+    if (Storage == NULL)
+        return NULL;
+
+    StoragePtr = (PUCHAR)Storage;
+    BytesCopied = 0;
+    while (BytesCopied < BytesNeeded && CurrentMdl != NULL)
+    {
+        ULONG AvailableBytes;
+        ULONG BytesToCopy;
+
+        MdlByteCount = MmGetMdlByteCount(CurrentMdl);
+        if (CurrentMdlOffset >= MdlByteCount)
+            return NULL;
+
+        MdlVa = (PUCHAR)MmGetSystemAddressForMdlSafe(CurrentMdl, NormalPagePriority);
+        if (MdlVa == NULL)
+            return NULL;
+
+        AvailableBytes = MdlByteCount - CurrentMdlOffset;
+        BytesToCopy = (AvailableBytes < BytesNeeded - BytesCopied) ?
+                      AvailableBytes : BytesNeeded - BytesCopied;
+        RtlCopyMemory(StoragePtr + BytesCopied,
+                      MdlVa + CurrentMdlOffset,
+                      BytesToCopy);
+
+        BytesCopied += BytesToCopy;
+        CurrentMdl = CurrentMdl->Next;
+        CurrentMdlOffset = 0;
+    }
+
+    if (BytesCopied != BytesNeeded)
+        return NULL;
+
+    return Storage;
 }
 
 /* ============================================================================
