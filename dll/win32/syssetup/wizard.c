@@ -3135,21 +3135,25 @@ ProcessUnattendSection(
         }
     }
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-                      0,
-                      KEY_SET_VALUE,
-                      &hKey) != ERROR_SUCCESS)
-    {
-        DPRINT1("Error: failed to open HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\n");
-        return;
-    }
-
     if (SetupFindFirstLineW(pSetupData->hSetupInf,
                             L"GuiRunOnce",
                             NULL,
                             &InfContext))
     {
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+                            0,
+                            NULL,
+                            REG_OPTION_NON_VOLATILE,
+                            KEY_SET_VALUE,
+                            NULL,
+                            &hKey,
+                            NULL) != ERROR_SUCCESS)
+        {
+            DPRINT1("Error: failed to open HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\n");
+            return;
+        }
+
         int i = 0;
         do
         {
@@ -3178,9 +3182,9 @@ ProcessUnattendSection(
                 }
             }
         } while (SetupFindNextLine(&InfContext, &InfContext));
-    }
 
-    RegCloseKey(hKey);
+        RegCloseKey(hKey);
+    }
 
     if (SetupFindFirstLineW(pSetupData->hSetupInf,
         L"Env",
