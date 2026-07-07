@@ -2899,6 +2899,11 @@ WSPGetSockOpt(IN SOCKET Handle,
               OUT LPINT lpErrno)
 {
     PSOCKET_INFORMATION Socket = NULL;
+    SOCK_SHARED_INFO SharedData;
+    WSAPROTOCOL_INFOW ProtocolInfo;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+    HANDLE Event;
     PVOID Buffer;
     INT BufferSize;
     BOOL BoolBuffer;
@@ -2911,6 +2916,60 @@ WSPGetSockOpt(IN SOCKET Handle,
     Socket = GetSocketStructure(Handle);
     if (Socket == NULL)
     {
+        if ((Level == SOL_SOCKET) && (OptionName == SO_PROTOCOL_INFOW) &&
+            OptionLength && OptionValue)
+        {
+            if (*OptionLength < sizeof(ProtocolInfo))
+            {
+                *OptionLength = sizeof(ProtocolInfo);
+                if (lpErrno) *lpErrno = WSAEFAULT;
+                return SOCKET_ERROR;
+            }
+
+            Status = NtCreateEvent(&Event,
+                                   EVENT_ALL_ACCESS,
+                                   NULL,
+                                   SynchronizationEvent,
+                                   FALSE);
+            if (!NT_SUCCESS(Status))
+            {
+                if (lpErrno) *lpErrno = TranslateNtStatusError(Status);
+                return SOCKET_ERROR;
+            }
+
+            Status = NtDeviceIoControlFile((HANDLE)Handle,
+                                           Event,
+                                           NULL,
+                                           NULL,
+                                           &IoStatusBlock,
+                                           IOCTL_AFD_GET_CONTEXT,
+                                           NULL,
+                                           0,
+                                           &SharedData,
+                                           sizeof(SharedData));
+            if (Status == STATUS_PENDING)
+            {
+                MsafdWaitForAlert(Event);
+                Status = IoStatusBlock.Status;
+            }
+            NtClose(Event);
+
+            if (NT_SUCCESS(Status))
+            {
+                RtlZeroMemory(&ProtocolInfo, sizeof(ProtocolInfo));
+                ProtocolInfo.dwServiceFlags1 = SharedData.ServiceFlags1;
+                ProtocolInfo.dwProviderFlags = SharedData.ProviderFlags;
+                ProtocolInfo.dwCatalogEntryId = 1;
+                ProtocolInfo.iAddressFamily = SharedData.AddressFamily;
+                ProtocolInfo.iSocketType = SharedData.SocketType;
+                ProtocolInfo.iProtocol = SharedData.Protocol;
+                RtlCopyMemory(OptionValue, &ProtocolInfo, sizeof(ProtocolInfo));
+                *OptionLength = sizeof(ProtocolInfo);
+                if (lpErrno) *lpErrno = NO_ERROR;
+                return NO_ERROR;
+            }
+        }
+
         if (lpErrno) *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
     }
