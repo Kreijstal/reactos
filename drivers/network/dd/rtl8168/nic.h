@@ -59,13 +59,6 @@ typedef struct _RTL_ADAPTER {
     BOOLEAN OcpMdioRedirect;        /* TRUE on 8168G+ -- MDIO writes route through GPHY OCP */
     USHORT OcpBase;                 /* current PHY OCP base (mirrors Linux tp->ocp_base) */
 
-    /* TX checksum offload negotiated via OID_TCP_TASK_OFFLOAD */
-    ULONG TaskOffloadFlags;         /* bitmask of TASK_OFFLOAD_* below */
-#define TASK_OFFLOAD_IPCS   0x1
-#define TASK_OFFLOAD_TCPCS  0x2
-#define TASK_OFFLOAD_UDPCS  0x4
-    ULONG LastTxOpts2;              /* checksum bits for the in-flight Send */
-
     /* TX ring */
     PRTL_DESC TxRing;
     NDIS_PHYSICAL_ADDRESS TxRingPa;
@@ -91,6 +84,11 @@ typedef struct _RTL_ADAPTER {
     /* OID state */
     ULONG PacketFilter;
 
+    /* Error-recovery state (MiniportCheckForHang / MiniportReset) */
+    BOOLEAN HwHang;                 /* SYSERR seen, or VER_11 RxFIFOOver wedge */
+    BOOLEAN CheckForHangTxPending;  /* TX queue was non-empty at the last poll */
+    ULONG CheckForHangTxOk;         /* TransmitOk snapshot from the last poll */
+
     /* Stats */
     ULONG ReceiveOk;
     ULONG TransmitOk;
@@ -98,7 +96,6 @@ typedef struct _RTL_ADAPTER {
     ULONG TransmitError;
     ULONG ReceiveNoBufferSpace;
     ULONG ReceiveCrcError;
-    ULONG ReceiveAlignmentError;
     ULONG TransmitOneCollision;
     ULONG TransmitMoreCollisions;
 } RTL_ADAPTER, *PRTL_ADAPTER;
@@ -228,13 +225,12 @@ NDIS_STATUS NTAPI NICApplyPacketFilter(IN PRTL_ADAPTER Adapter);
 NDIS_STATUS NTAPI NICApplyInterruptMask(IN PRTL_ADAPTER Adapter);
 NDIS_STATUS NTAPI NICDisableInterrupts(IN PRTL_ADAPTER Adapter);
 USHORT      NTAPI NICInterruptRecognized(IN PRTL_ADAPTER Adapter, OUT PBOOLEAN Recognized);
-VOID        NTAPI NICAcknowledgeInterrupts(IN PRTL_ADAPTER Adapter);
+VOID        NTAPI NICAcknowledgeInterrupts(IN PRTL_ADAPTER Adapter, IN USHORT Status);
 VOID        NTAPI NICUpdateLinkStatus(IN PRTL_ADAPTER Adapter);
 NDIS_STATUS NTAPI NICTransmitDescriptor(IN PRTL_ADAPTER Adapter,
                                          IN ULONG Index,
                                          IN PHYSICAL_ADDRESS BufferPa,
-                                         IN ULONG Length,
-                                         IN ULONG TxOpts2);
+                                         IN ULONG Length);
 NDIS_STATUS NTAPI NICRefillRxDescriptor(IN PRTL_ADAPTER Adapter, IN ULONG Index);
 
 /* info.c */
@@ -248,5 +244,6 @@ VOID NTAPI MiniportISR(OUT PBOOLEAN InterruptRecognized,
                         OUT PBOOLEAN QueueMiniportHandleInterrupt,
                         IN NDIS_HANDLE MiniportAdapterContext);
 VOID NTAPI MiniportHandleInterrupt(IN NDIS_HANDLE MiniportAdapterContext);
+BOOLEAN NTAPI MiniportCheckForHang(IN NDIS_HANDLE MiniportAdapterContext);
 
 #endif /* _RTL8168_PCH_ */
