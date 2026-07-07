@@ -591,6 +591,11 @@ USBPORT_TransferFlushDpc(
   IN PVOID SystemArgument1,
   IN PVOID SystemArgument2);
 
+VOID
+NTAPI
+USBPORT_FlushDoneTransfers(
+  IN PDEVICE_OBJECT FdoDevice);
+
 NTSTATUS
 NTAPI
 USBPORT_CreateWorkerThread(
