@@ -234,19 +234,27 @@
 #define DESC_EOR            (1U << 30)  /* End of ring */
 #define DESC_FS             (1U << 29)  /* First segment */
 #define DESC_LS             (1U << 28)  /* Last segment */
-#define DESC_LEN_MASK       0x0000FFFFU
+#define DESC_LEN_MASK       0x0000FFFFU /* TX frame length (16 bits) */
 
-/* TX desc opts1 bits (chip-class 1; 8168c and later) */
+/* RX length field is only 14 bits (Linux rtl_rx: status & GENMASK(13, 0));
+ * bits 15/14 are UDPFail/TCPFail checksum status when RxChkSum is enabled. */
+#define RXD_LEN_MASK        0x00003FFFU
+
+/* TX desc checksum-offload bits.  NOT wired to the send path: enabling
+ * offload needs v1 (opts1, 8168B/VER_11..17) vs v2 (opts2, 8168C+) gating
+ * plus the TCPHO transport-header offset field (opts1 << 18 on v2) --
+ * see Linux rtl8169_tso_csum_v1/_v2 before re-enabling. */
 #define TXD1_LSO            (1U << 27)
 #define TXD2_IPv4_CS        (1U << 29)
 #define TXD2_TCP_CS         (1U << 30)
 #define TXD2_UDP_CS         (1U << 31)
 
-#define RXD_FAE             (1U << 27)  /* Frame alignment error */
+/* RX desc opts1 status bits (Linux RxStatusDesc).  Note bit 27 is MAR
+ * (multicast received) on the 8168 -- it is NOT an error bit. */
 #define RXD_CRC             (1U << 19)  /* CRC error */
 #define RXD_RUNT            (1U << 20)
-#define RXD_RES             (1U << 21)
-#define RXD_RWT             (1U << 22)
+#define RXD_RES             (1U << 21)  /* Receive error summary */
+#define RXD_RWT             (1U << 22)  /* Watchdog timer expired */
 
 #define MAXIMUM_FRAME_SIZE  1514
 #define MINIMUM_FRAME_SIZE  60
