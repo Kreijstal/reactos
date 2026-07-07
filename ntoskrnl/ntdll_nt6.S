@@ -6,6 +6,7 @@
 #define SVC_(name, argcount) SyscallId = SyscallId + 1
 #define SVC_WRAP_(name, argcount) SyscallId = SyscallId + 1
 #include <sysfuncs.h>
+#undef SVC_WRAP_
 #undef SVC_
 #undef SVC_WRAP_
 #undef SYSFUNCS_NT5_ONLY
@@ -18,6 +19,7 @@
     TEXTAREA
 
 #define SVC_(name, argcount) STUB_U name
+#define SVC_WRAP_(name, argcount) STUB_U name
 
 #include <sysfuncs.h>
 
