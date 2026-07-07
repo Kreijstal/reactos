@@ -93,6 +93,32 @@ typedef enum _BASE_CURRENT_DIR_PLACEMENT
     BaseCurrentDirPlacementMax
 } BASE_CURRENT_DIR_PLACEMENT;
 
+#ifndef LOAD_LIBRARY_SEARCH_APPLICATION_DIR
+#define LOAD_LIBRARY_SEARCH_APPLICATION_DIR         0x00000200
+#endif
+#ifndef LOAD_LIBRARY_SEARCH_USER_DIRS
+#define LOAD_LIBRARY_SEARCH_USER_DIRS               0x00000400
+#endif
+#ifndef LOAD_LIBRARY_SEARCH_SYSTEM32
+#define LOAD_LIBRARY_SEARCH_SYSTEM32                0x00000800
+#endif
+#ifndef LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+#define LOAD_LIBRARY_SEARCH_DEFAULT_DIRS            0x00001000
+#endif
+#ifndef CREATE_WAITABLE_TIMER_MANUAL_RESET
+#define CREATE_WAITABLE_TIMER_MANUAL_RESET          0x00000001
+#endif
+#if (_WIN32_WINNT < 0x0601)
+typedef struct COPYFILE2_EXTENDED_PARAMETERS
+{
+    DWORD dwSize;
+    DWORD dwCopyFlags;
+    BOOL *pfCancel;
+    PVOID pProgressRoutine;
+    PVOID pvCallbackContext;
+} COPYFILE2_EXTENDED_PARAMETERS;
+#endif
+
 typedef struct _BASEP_ACTCTX_BLOCK
 {
     ULONG Flags;
@@ -153,6 +179,14 @@ extern SYSTEM_BASIC_INFORMATION BaseCachedSysInfo;
 extern BOOLEAN BaseRunningInServerProcess;
 
 /* FUNCTION PROTOTYPES *******************************************************/
+
+HANDLE
+WINAPI
+CreateWaitableTimerExW(
+    _In_opt_ LPSECURITY_ATTRIBUTES lpTimerAttributes,
+    _In_opt_ LPCWSTR lpTimerName,
+    _In_ DWORD dwFlags,
+    _In_ DWORD dwDesiredAccess);
 
 VOID
 NTAPI
