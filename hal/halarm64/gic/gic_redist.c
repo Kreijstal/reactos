@@ -31,6 +31,9 @@
 
 #include "gic_internal.h"
 
+#define GICR_DPRINT(...) do { if (KeGetCurrentIrql() <= APC_LEVEL) DPRINT(__VA_ARGS__); } while (0)
+#define GICR_DPRINT1(...) do { if (KeGetCurrentIrql() <= APC_LEVEL) DPRINT1(__VA_ARGS__); } while (0)
+
 /*
  * GICR_PIDR2 register offset and architecture mask for validation
  */
@@ -300,8 +303,8 @@ HalpArm64FindGicrInRegion(
     if ((Pidr2 & GICR_PIDR2_ARCH_MASK) != GICR_PIDR2_ARCH_GICv3 &&
         (Pidr2 & GICR_PIDR2_ARCH_MASK) != GICR_PIDR2_ARCH_GICv4)
     {
-        DPRINT1("[arm64][GICR] Warning: No valid redistributor at 0x%p (PIDR2=0x%lx)\n",
-                (PVOID)Base, Pidr2);
+        GICR_DPRINT1("[arm64][GICR] Warning: No valid redistributor at 0x%p (PIDR2=0x%lx)\n",
+                     (PVOID)Base, Pidr2);
         return FALSE;
     }
 
@@ -326,8 +329,8 @@ HalpArm64FindGicrInRegion(
         /* Check if this redistributor matches our target affinity */
         if (TyperAffinity == TargetAffinity)
         {
-            DPRINT("[arm64][GICR] Found GICR for MPIDR 0x%llx at 0x%p (frame %lu)\n",
-                   Mpidr, (PVOID)Current, FrameIndex);
+            GICR_DPRINT("[arm64][GICR] Found GICR for MPIDR 0x%llx at 0x%p (frame %lu)\n",
+                        Mpidr, (PVOID)Current, FrameIndex);
 
             if (OutOffset)
             {
@@ -348,8 +351,8 @@ HalpArm64FindGicrInRegion(
         /* Check LAST bit - if set, this is the last redistributor in the region */
         if (Typer & HALP_GICR_TYPER_LAST)
         {
-            DPRINT("[arm64][GICR] Hit LAST bit at frame %lu, GICR not in this region\n",
-                   FrameIndex);
+            GICR_DPRINT("[arm64][GICR] Hit LAST bit at frame %lu, GICR not in this region\n",
+                        FrameIndex);
             break;
         }
 
@@ -410,8 +413,8 @@ HalpArm64FindGicrForMpidr(
         {
             ULONG_PTR GicrBase = Region->VirtualBase + Offset;
 
-            DPRINT("[arm64][GICR] CPU MPIDR 0x%llx (aff 0x%08lx): GICR at 0x%p (region %lu, offset 0x%lx)\n",
-                   Mpidr, TargetAffinity, (PVOID)GicrBase, RegionIndex, Offset);
+            GICR_DPRINT("[arm64][GICR] CPU MPIDR 0x%llx (aff 0x%08lx): GICR at 0x%p (region %lu, offset 0x%lx)\n",
+                        Mpidr, TargetAffinity, (PVOID)GicrBase, RegionIndex, Offset);
 
             return GicrBase;
         }
@@ -432,8 +435,8 @@ HalpArm64FindGicrForMpidr(
             if (Entry->GicrBase != 0 &&
                 HalpArm64AffinityFromMpidr(Entry->Mpidr) == TargetAffinity)
             {
-                DPRINT("[arm64][GICR] CPU MPIDR 0x%llx: GICR at 0x%llx (from GICC entry)\n",
-                       Mpidr, Entry->GicrBase);
+                GICR_DPRINT("[arm64][GICR] CPU MPIDR 0x%llx: GICR at 0x%llx (from GICC entry)\n",
+                            Mpidr, Entry->GicrBase);
                 return (ULONG_PTR)Entry->GicrBase;
             }
         }
@@ -459,8 +462,8 @@ HalpArm64FindGicrForMpidr(
 
             if (TyperAffinity == TargetAffinity)
             {
-                DPRINT("[arm64][GICR] CPU MPIDR 0x%llx: GICR at 0x%p (legacy scan, frame %lu)\n",
-                       Mpidr, (PVOID)Current, FrameIndex);
+                GICR_DPRINT("[arm64][GICR] CPU MPIDR 0x%llx: GICR at 0x%p (legacy scan, frame %lu)\n",
+                            Mpidr, (PVOID)Current, FrameIndex);
                 return Current;
             }
 
@@ -471,8 +474,8 @@ HalpArm64FindGicrForMpidr(
         }
     }
 
-    DPRINT1("[arm64][GICR] ERROR: No GICR found for MPIDR 0x%llx (affinity 0x%08lx)\n",
-            Mpidr, TargetAffinity);
+    GICR_DPRINT1("[arm64][GICR] ERROR: No GICR found for MPIDR 0x%llx (affinity 0x%08lx)\n",
+                 Mpidr, TargetAffinity);
     return 0;
 }
 

@@ -1506,7 +1506,6 @@ MmMakeSegmentResident(
             {
                 Iosb.Status = Status;
             }
-
             if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
             {
                 MmUnmapLockedPages(Mdl->MappedSystemVa, Mdl);
@@ -1906,19 +1905,28 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
         MmUnlockSectionSegment(Segment);
         MmUnlockAddressSpace(AddressSpace);
 
-        /* The data must be paged in. Lock the file, so that the VDL doesn't get updated behind us. */
-        FsRtlAcquireFileExclusive(Segment->FileObject);
-
         PFSRTL_COMMON_FCB_HEADER FcbHeader = Segment->FileObject->FsContext;
+        LARGE_INTEGER ValidDataLengthSnapshot;
+        PLARGE_INTEGER ValidDataLength = NULL;
+
+        /*
+         * The data must be paged in. Snapshot the VDL while holding the file
+         * resource, but do not hold that resource across IoPageRead: filesystem
+         * paging reads may need the same resource and would otherwise deadlock.
+         */
+        if (MemoryArea->VadNode.u.VadFlags.VadType != VadImageMap)
+        {
+            FsRtlAcquireFileExclusive(Segment->FileObject);
+            ValidDataLengthSnapshot = FcbHeader->ValidDataLength;
+            FsRtlReleaseFile(Segment->FileObject);
+            ValidDataLength = &ValidDataLengthSnapshot;
+        }
 
         Status = MmMakeSegmentResident(Segment,
                                        Offset.QuadPart,
                                        PAGE_SIZE,
-                                       MemoryArea->VadNode.u.VadFlags.VadType == VadImageMap ?
-                                           NULL : &FcbHeader->ValidDataLength,
+                                       ValidDataLength,
                                        FALSE);
-
-        FsRtlReleaseFile(Segment->FileObject);
 
         /* Lock address space again */
         MmLockAddressSpace(AddressSpace);
@@ -3732,19 +3740,23 @@ MmFreeSectionPage(PVOID Context, MEMORY_AREA* MemoryArea, PVOID Address,
         if (IS_SWAP_FROM_SSE(Entry) ||
                 Page != PFN_FROM_SSE(Entry))
         {
-            ASSERT(Process != NULL);
-
             /*
              * Just dereference private pages
              */
-            SavedSwapEntry = MmGetSavedSwapEntryPage(Page);
-            if (SavedSwapEntry != 0)
+            if (MI_IS_ROS_PFN(MiGetPfnEntry(Page)))
             {
-                MmFreeSwapPage(SavedSwapEntry);
-                MmSetSavedSwapEntryPage(Page, 0);
+                SavedSwapEntry = MmGetSavedSwapEntryPage(Page);
+                if (SavedSwapEntry != 0)
+                {
+                    MmFreeSwapPage(SavedSwapEntry);
+                    MmSetSavedSwapEntryPage(Page, 0);
+                }
+                if (Process)
+                {
+                    MmDeleteRmap(Page, Process, Address);
+                }
+                MmReleasePageMemoryConsumer(MC_USER, Page);
             }
-            MmDeleteRmap(Page, Process, Address);
-            MmReleasePageMemoryConsumer(MC_USER, Page);
         }
         else
         {

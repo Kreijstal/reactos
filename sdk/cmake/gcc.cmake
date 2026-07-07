@@ -277,6 +277,8 @@ elseif(ARCH STREQUAL "amd64")
     if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
         add_compile_options(-mpreferred-stack-boundary=4)
     endif()
+elseif(ARCH STREQUAL "arm64")
+    add_compile_options(-mstrict-align)
 endif()
 
 # Other

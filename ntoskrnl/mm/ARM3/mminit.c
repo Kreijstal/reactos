@@ -1055,6 +1055,9 @@ MiBuildPfnDatabaseFromLoaderBlock(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                 while (PageCount--)
                 {
                     /* Check if the page is really unused */
+#if defined(_M_ARM64)
+                    MiArm64MapKseg0Page(PageFrameIndex);
+#endif
                     PointerPde = MiAddressToPde(KSEG0_BASE + (PageFrameIndex << PAGE_SHIFT));
                     if (!Pfn1->u3.e2.ReferenceCount)
                     {

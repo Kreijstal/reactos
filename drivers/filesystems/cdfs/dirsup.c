@@ -271,7 +271,6 @@ Return Value:
         //
 
         CdUnpinData( IrpContext, &NextDirContext->Bcb );
-
         CcMapData( Fcb->FileObject,
                    (PLARGE_INTEGER) &CurrentBaseOffset,
                    CurrentDirContext->DataLength,
@@ -1480,7 +1479,6 @@ Return Value:
     while (TRUE) {
 
         CurrentDirent = &CurrentCompoundDirent->Dirent;
-
         //
         //  Check if this extent has XA sectors.
         //
@@ -1865,6 +1863,3 @@ Return Value:
     Dirent->ExtentType = ExtentType;
     return ExtentType;
 }
-
-
-

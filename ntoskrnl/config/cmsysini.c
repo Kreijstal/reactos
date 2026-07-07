@@ -1658,7 +1658,17 @@ CmpInitializeHiveList(VOID)
     PAGED_CODE();
 
     /* Reenable hive writes now */
-    CmpNoWrite = FALSE;
+#if defined(_M_ARM64)
+    if (CmpMiniNTBoot)
+    {
+        CmpNoWrite = TRUE;
+        CmpShareSystemHives = TRUE;
+    }
+    else
+#endif
+    {
+        CmpNoWrite = FALSE;
+    }
 
     /* Build the file name and registry name strings */
     RtlInitEmptyUnicodeString(&FileName, FileBuffer, sizeof(FileBuffer));
@@ -1835,6 +1845,10 @@ CmInitSystem1(VOID)
         CmpMiniNTBoot = TRUE;
         CmpShareSystemHives = TRUE;
     }
+#if defined(_M_ARM64)
+    CmpMiniNTBoot = TRUE;
+    CmpShareSystemHives = TRUE;
+#endif
     /* If we are in volatile boot mode, ALL hives without exception
      * (system hives and others) will be loaded in shared mode */
     if (CmpVolatileBoot)

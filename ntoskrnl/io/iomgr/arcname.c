@@ -85,6 +85,23 @@ IopCreateArcNames(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         SingleDisk = FALSE;
     }
 
+#if defined(_M_ARM64)
+    /*
+     * On UEFI ARM64 systems the loader can boot from a CD-ROM ARC path while
+     * the runtime storage stack exposes the backing device as a raw block
+     * disk. Resolve that CD path first; probing disk interfaces before the CD
+     * fallback can block during early boot on QEMU virt.
+     */
+    if (strstr(LoaderBlock->ArcBootDeviceName, "cdrom"))
+    {
+        Status = IopCreateArcNamesCd(LoaderBlock);
+        if (NT_SUCCESS(Status))
+        {
+            return Status;
+        }
+    }
+#endif
+
     /* If we are doing remote booting */
     if (IoRemoteBootClient)
     {
@@ -159,8 +176,9 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     LARGE_INTEGER StartingOffset;
     IO_STATUS_BLOCK IoStatusBlock;
     PULONG PartitionBuffer = NULL;
+    PUCHAR VolumeDescriptor;
     CHAR Buffer[128], ArcBuffer[128];
-    BOOLEAN NotEnabledPresent = FALSE;
+    BOOLEAN NotEnabledPresent = FALSE, ValidIso;
     STORAGE_DEVICE_NUMBER DeviceNumber;
     ANSI_STRING DeviceStringA, ArcNameStringA;
     PWSTR SymbolicLinkList, lSymbolicLinkList;
@@ -168,6 +186,7 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     UNICODE_STRING DeviceStringW, ArcNameStringW;
     ULONG DiskNumber, CdRomCount, CheckSum, i, EnabledDisks = 0;
     PARC_DISK_INFORMATION ArcDiskInformation = LoaderBlock->ArcDiskInformation;
+    ULONG HardDiskCount, RawDiskNumber;
 
     /* Get all the Cds present in the system */
     CdRomCount = IoGetConfigurationInformation()->CdRomCount;
@@ -244,8 +263,27 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Finally, if in spite of all that work, we still don't have Cds, leave */
     if (!CdRomCount)
     {
+#if defined(_M_ARM64)
+        if (strstr(LoaderBlock->ArcBootDeviceName, "cdrom"))
+        {
+            goto RawCdFallback;
+        }
+#endif
         goto Cleanup;
     }
+
+#if defined(_M_ARM64)
+    /*
+     * QEMU/UEFI exposes the boot ISO as a CD-ROM ARC path to the loader, but
+     * the runtime storage stack can enumerate the same device as a raw block
+     * device. Avoid blocking in early CD interface probing and let the raw
+     * fallback below match the loader-provided checksum.
+     */
+    if (strstr(LoaderBlock->ArcBootDeviceName, "cdrom"))
+    {
+        goto RawCdFallback;
+    }
+#endif
 
     /* Start browsing Cds */
     for (DiskNumber = 0, EnabledDisks = 0; DiskNumber < CdRomCount; DiskNumber++)
@@ -331,13 +369,14 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
             if (!NT_SUCCESS(Status))
             {
                 RtlFreeUnicodeString(&DeviceStringW);
-                goto Cleanup;
+                continue;
             }
         }
 
         /* Initiate data for reading cd and compute checksum */
         StartingOffset.QuadPart = 0x8000;
         CheckSum = 0;
+        KeInitializeEvent(&Event, NotificationEvent, FALSE);
         Irp = IoBuildSynchronousFsdRequest(IRP_MJ_READ,
                                            DeviceObject,
                                            PartitionBuffer,
@@ -348,7 +387,6 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         if (Irp)
         {
             /* Call the driver, and wait for it if needed */
-            KeInitializeEvent(&Event, NotificationEvent, FALSE);
             Status = IoCallDriver(DeviceObject, Irp);
             if (Status == STATUS_PENDING)
             {
@@ -392,6 +430,111 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         /* Free string before trying another disk */
         RtlFreeUnicodeString(&DeviceStringW);
     }
+
+RawCdFallback:
+    /*
+     * Some UEFI platforms expose the boot ISO through firmware as a CD-ROM ARC
+     * path, but the runtime storage stack enumerates the same QEMU device as a
+     * raw disk-style block device. Match the loader-provided CD checksum
+     * against raw harddisk devices before giving up.
+     */
+    HardDiskCount = IoGetConfigurationInformation()->DiskCount;
+    if (!HardDiskCount)
+    {
+        HardDiskCount = 20;
+    }
+
+    for (DiskNumber = 0; DiskNumber < HardDiskCount; DiskNumber++)
+    {
+        for (RawDiskNumber = 0; RawDiskNumber < 20; RawDiskNumber++)
+        {
+            if (RawDiskNumber == 0)
+            {
+                sprintf(Buffer, "\\Device\\Harddisk%lu\\Partition0", DiskNumber);
+            }
+            else
+            {
+                sprintf(Buffer, "\\Device\\Harddisk%lu\\DR%lu", DiskNumber, RawDiskNumber - 1);
+            }
+
+            RtlInitAnsiString(&DeviceStringA, Buffer);
+            Status = RtlAnsiStringToUnicodeString(&DeviceStringW, &DeviceStringA, TRUE);
+            if (!NT_SUCCESS(Status))
+            {
+                goto Cleanup;
+            }
+
+            Status = IoGetDeviceObjectPointer(&DeviceStringW,
+                                              FILE_READ_ATTRIBUTES,
+                                              &FileObject,
+                                              &DeviceObject);
+            if (!NT_SUCCESS(Status))
+            {
+                RtlFreeUnicodeString(&DeviceStringW);
+                continue;
+            }
+
+            StartingOffset.QuadPart = 0x8000;
+            CheckSum = 0;
+            ValidIso = FALSE;
+            KeInitializeEvent(&Event, NotificationEvent, FALSE);
+            Irp = IoBuildSynchronousFsdRequest(IRP_MJ_READ,
+                                               DeviceObject,
+                                               PartitionBuffer,
+                                               2048,
+                                               &StartingOffset,
+                                               &Event,
+                                               &IoStatusBlock);
+            if (Irp)
+            {
+                Status = IoCallDriver(DeviceObject, Irp);
+                if (Status == STATUS_PENDING)
+                {
+                    KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+                    Status = IoStatusBlock.Status;
+                }
+
+                if (NT_SUCCESS(Status))
+                {
+                    VolumeDescriptor = (PUCHAR)PartitionBuffer;
+                    for (i = 0; i < 2048 / sizeof(ULONG); i++)
+                    {
+                        CheckSum += PartitionBuffer[i];
+                    }
+
+                    ValidIso = (VolumeDescriptor[0] == 1 &&
+                                RtlCompareMemory(&VolumeDescriptor[1], "CD001", 5) == 5 &&
+                                VolumeDescriptor[6] == 1);
+                }
+            }
+            else
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            ObDereferenceObject(FileObject);
+
+            if (NT_SUCCESS(Status) &&
+                ((CheckSum + ArcDiskSignature->CheckSum == 0) || ValidIso))
+            {
+                sprintf(ArcBuffer, "\\ArcName\\%s", LoaderBlock->ArcBootDeviceName);
+                RtlInitAnsiString(&ArcNameStringA, ArcBuffer);
+                Status = RtlAnsiStringToUnicodeString(&ArcNameStringW, &ArcNameStringA, TRUE);
+                if (NT_SUCCESS(Status))
+                {
+                    IoAssignArcName(&ArcNameStringW, &DeviceStringW);
+                    RtlFreeUnicodeString(&ArcNameStringW);
+                }
+
+                RtlFreeUnicodeString(&DeviceStringW);
+                goto Cleanup;
+            }
+
+            RtlFreeUnicodeString(&DeviceStringW);
+        }
+    }
+
+    Status = STATUS_OBJECT_NAME_NOT_FOUND;
 
 Cleanup:
     if (PartitionBuffer)
@@ -914,7 +1057,6 @@ IopReassignSystemRoot(IN PLOADER_PARAMETER_BLOCK LoaderBlock,
 
     /* Now create the new name for it */
     sprintf(Buffer, "%s%s", ArcString.Buffer, LoaderBlock->NtBootPathName);
-
     /* Copy it into the passed parameter and null-terminate it */
     RtlCopyString(NtBootPath, &ArcString);
     Buffer[strlen(Buffer) - 1] = ANSI_NULL;

@@ -563,6 +563,9 @@ Arm64ApplyDeferredPageTableMemoryTypes(VOID)
     if (Arm64PtAllocationsApplied || !PageLookupTableAddress)
         return;
 
+    if (Arm64PtAllocationCount == 0)
+        return;
+
     /*
      * Post-EBS: MmSetMemoryType writes to the freeldr page-lookup-table whose
      * pages may have been reclaimed/torn down by the firmware on EBS, faulting
@@ -1021,6 +1024,30 @@ allocate_pt_pages(UINTN pages, const char *label)
          * mapped. Stick to the static arena that lives inside the loader image.
          */
         return allocate_static_pt_pages(pages, label);
+    }
+
+    /*
+     * Once FreeLdr owns a page lookup table, allocate handoff page tables from
+     * FreeLdr memory first. These pages become LoaderMemoryData descriptors, so
+     * ntoskrnl's PFN database covers the active TTBR roots and recursive self-map
+     * tables after handoff. EFI AllocatePages can return valid EfiLoaderData
+     * pages that are not represented in FreeLdr's descriptor list, leaving the
+     * kernel with page-table PFNs above MmHighestPhysicalPage.
+     */
+    if (PageLookupTableAddress)
+    {
+        ptr = MmAllocateMemoryWithType((SIZE_T)pages * PAGE_SIZE,
+                                       LoaderMemoryData);
+        if (ptr)
+        {
+            addr = (EFI_PHYSICAL_ADDRESS)(UINT64)(uintptr_t)ptr;
+            if ((addr != 0) && ((addr & (PAGE_SIZE - 1)) == 0))
+            {
+                RtlZeroMemory(ptr, pages * PAGE_SIZE);
+                Arm64RecordPageTableAllocation(addr, pages);
+                return ptr;
+            }
+        }
     }
 
     addr = 0xFFFFFFFFULL;
