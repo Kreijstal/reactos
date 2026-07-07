@@ -1095,8 +1095,6 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     XHCI_INTERRUPTER_MANAGEMENT Iman;
     XHCI_USB_STATUS UsbStatus;
     PXHCI_EXTENSION XhciExtension;
-    static ULONG ValidCount = 0;
-    static ULONG SharedIrqCount = 0;
 
     XhciExtension = (PXHCI_EXTENSION)xhciExtension;
     RunTimeRegisterBase = XhciExtension->RunTimeRegisterBase;
@@ -1109,8 +1107,6 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     // First check: Is this definitely an xHCI interrupt?
     if (Iman.InterruptPending == 1)
     {
-        ValidCount++;
-
         /*
          * Acknowledge the interrupter in the ISR.  The event ring entries are
          * persistent until the DPC advances ERDP, but leaving IMAN.IP asserted
@@ -1127,14 +1123,6 @@ XHCI_InterruptService(IN PVOID xhciExtension)
         UsbStatus.SaveStateStatus || UsbStatus.RestoreStateStatus || UsbStatus.SaveRestoreError ||
         UsbStatus.HCError)
     {
-        ValidCount++;
-        if ((ValidCount % 10) == 1)
-        {
-            DPRINT1("XHCI_InterruptService: Valid USB Status interrupt #%d: EventInt=%d, PortChange=%d, Errors=%d\n",
-                    ValidCount, UsbStatus.EventInterrupt, UsbStatus.PortChangeDetect, 
-                    UsbStatus.HostSystemError || UsbStatus.HCError);
-        }
-                        
         // Create a copy to clear the status bits
         XHCI_USB_STATUS UsbStatusClear;
         UsbStatusClear.AsULONG = 0; // Clear all first
@@ -1151,22 +1139,7 @@ XHCI_InterruptService(IN PVOID xhciExtension)
         WRITE_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS, UsbStatusClear.AsULONG);
         return TRUE;
     }
-    
-    // This is likely a shared IRQ from another device
-    SharedIrqCount++;
-    if ((SharedIrqCount % 100) == 1)
-    {
-        DPRINT1("XHCI_InterruptService: Shared IRQ #%d (not for xHCI), Iman=0x%08x, UsbStatus=0x%08x\n", 
-                SharedIrqCount, Iman.AsULONG, UsbStatus.AsULONG);
-    }
-    
-    // After many shared IRQ interrupts, warn about the situation
-    if (SharedIrqCount == 1000)
-    {
-        DPRINT1("XHCI_InterruptService: WARNING - 1000 shared IRQ interrupts detected. This xHCI controller appears to be sharing an IRQ line with another device that is generating frequent interrupts.\n");
-        DPRINT1("XHCI_InterruptService: This may impact USB performance. Consider checking IRQ assignments in device manager.\n");
-    }
-    
+
     // Don't disable our interrupts - just return FALSE to indicate this interrupt wasn't ours
     return FALSE;
 }
