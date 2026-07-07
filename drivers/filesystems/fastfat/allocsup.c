@@ -5296,15 +5296,13 @@ Return Value:
 
 #ifdef __REACTOS__
         //
-        //  Reconcile the just-built FAT0 bitmap against FAT1.  If a prior
-        //  crash left FAT0 marking a cluster free while FAT1 still chains
-        //  it, the conservative union prevents the allocator from handing
-        //  that cluster to a new file and aliasing it onto an existing
-        //  chain.  Skip when the volume has only one FAT, when there is no
-        //  bitmap to reconcile, or when we are merely populating a caller
-        //  bitmap for GetVolumeBitmap (BitMapBuffer != NULL means BitMap
-        //  points at a transient buffer the caller will not consult for
-        //  allocation; reconciling there is wasted work).
+        //  Reconcile the just-built FAT0 bitmap against FAT1 only when the
+        //  volume is already known dirty at mount.  If a prior crash left
+        //  FAT0 marking a cluster free while FAT1 still chains it, the
+        //  conservative union prevents the allocator from handing that
+        //  cluster to a new file and aliasing it onto an existing chain.
+        //  Skip clean volumes, single-FAT volumes, removable/hotplug media,
+        //  and transient GetVolumeBitmap caller buffers.
         //
         //  Run BEFORE the SwitchToWindow reinit of Vcb->FreeClusterBitMap so
         //  that reinit picks up the reconciled buffer state and the dbg
@@ -5314,7 +5312,11 @@ Return Value:
         if (Vcb->Bpb.Fats >= 2 &&
             BitMap != NULL &&
             BitMapBuffer == NULL &&
-            MountTime) {
+            MountTime &&
+            FlagOn( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY ) &&
+            !FlagOn( Vcb->VcbState,
+                     VCB_STATE_FLAG_REMOVABLE_MEDIA |
+                     VCB_STATE_FLAG_HOTPLUGGABLE )) {
 
             //
             //  Release the FAT0 BCB we still hold so the cache manager
@@ -5336,35 +5338,12 @@ Return Value:
         }
 
         //
-        //  Third defensive layer: union every cluster reachable from any
-        //  on-disk dirent's first_cluster chain into the bitmap.  Defends
-        //  against pre-existing dirent-aliased clusters where BOTH FAT0 and
-        //  FAT1 mark the cluster free yet a still-live dirent points at it
-        //  (e.g. when an external tool clears FAT entries without clearing
-        //  the dirent).  Skip when there is no real bitmap to update or when
-        //  populating a transient caller buffer for GetVolumeBitmap.
+        //  Do not run FatReconcileDirentBitmap from mount.  It is a recursive
+        //  whole-volume directory repair pass, and FatMountVolume still holds
+        //  the global FastFAT resource here.  Running it on first open of a
+        //  large FAT volume blocks unrelated mounts behind the global resource.
+        //  Directory/dirent recovery belongs in an explicit repair path.
         //
-        //  Gated on MountTime: the hazards both routines defend against are
-        //  static pre-existing on-disk states (a prior crash's FAT0/FAT1
-        //  divergence, or an external tool that cleared FAT entries without
-        //  clearing dirents).  Normal consistent allocation by this driver
-        //  cannot re-introduce them, so the reconcile only needs to run once,
-        //  during the mount-time bitmap build.  Running it on every runtime
-        //  FAT32 window switch made allocation O(window-switches x whole-volume
-        //  dirent tree) and crippled write throughput.
-        //
-        if (BitMap != NULL && BitMapBuffer == NULL && MountTime) {
-
-            FatReconcileDirentBitmap(
-                IrpContext,
-                Vcb,
-                StartIndex,
-                EndIndex,
-                BitMap,
-                StartIndex,
-                FreeClusterCount,
-                CurrentWindow ? &CurrentWindow->ClustersFree : NULL );
-        }
 #endif
 
         if (SwitchToWindow) {
@@ -6301,10 +6280,6 @@ Arguments:
                                                &Stack, &StackCapacity,
                                                &StackDepth );
         }
-
-        DbgPrint("FAT: FatReconcileDirentBitmap: marked %u clusters from "
-                 "dirents (window=[%u..%u], FatBits=%u)\n",
-                 NewlySet, StartIndex, EndIndex, FatIndexBitSize);
 
         if (NewlySet != 0) {
 
