@@ -1,103 +1,185 @@
 /*
- * PROJECT:     ReactOS vwifi virtual Wi-Fi miniport
- * LICENSE:     GPL-2.0+ (https://spdx.org/licenses/GPL-2.0+)
- * PURPOSE:     Internal definitions for the software-only NDIS 6.20
- *              Native-802.11 miniport.
+ * PROJECT:     ReactOS Virtual Native 802.11 (dot11) Miniport
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Driver header for a software-only virtual Native 802.11 miniport
+ * COPYRIGHT:   Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
  */
 
 #ifndef _VWIFI_H_
 #define _VWIFI_H_
 
+#include <ntddk.h>
 #include <ndis.h>
-#include <ntddndis.h>
-#include <ipifcons.h>
 #include <windot11.h>
 
-/* Pulled in from the sibling e1000e driver: backfills the NDIS 6.20/6.30
- * symbol gaps in ROS' SDK ndis.h.  TODO: promote to a real
- * sdk/include/ddk/ndis6_compat.h so each NDIS 6 miniport doesn't reach
- * into a sibling tree. */
-#include "../e1000e/ndis6_compat.h"
+#define VWIFI_TAG 'FIWV'   /* 'VWIF' */
 
-#define VWIFI_TAG               '14iV'      /* "Vi41" */
-#define VWIFI_MAX_BSS           4           /* canned BSS list size */
-#define VWIFI_DEFAULT_CHANNEL   6
-#define VWIFI_BEACON_PERIOD_TU  100         /* 102.4ms standard beacon */
+#define VWIFI_ADDRESS_LENGTH        6
+#define VWIFI_MAX_FRAME_SIZE        DOT11_MAX_PDU_SIZE  /* 2346 (802.11 MPDU)  */
+#define VWIFI_MTU_SIZE              1500
+#define VWIFI_LINK_SPEED_BPS        54000000ULL         /* ~54 Mbit/s (ERP)    */
 
-/* Stable test MAC: locally-administered (2nd-bit-of-first-byte set) */
-#define VWIFI_DEFAULT_MAC0  0x02
-#define VWIFI_DEFAULT_MAC1  0x52
-#define VWIFI_DEFAULT_MAC2  0x57
-#define VWIFI_DEFAULT_MAC3  0x49
-#define VWIFI_DEFAULT_MAC4  0x46
-#define VWIFI_DEFAULT_MAC5  0x49
+/* OID_GEN_LINK_SPEED / DOT11 link speed is in units of 100 bit/s. */
+#define VWIFI_LINK_SPEED_100BPS     (VWIFI_LINK_SPEED_BPS / 100)
 
-typedef struct _VWIFI_BSS_ENTRY
+/* Fake permanent MAC 02:52:4F:53:57:31  == "ROSW1" (locally administered). */
+#define VWIFI_PERMANENT_MAC_0       0x02
+#define VWIFI_PERMANENT_MAC_1       0x52
+#define VWIFI_PERMANENT_MAC_2       0x4F
+#define VWIFI_PERMANENT_MAC_3       0x53
+#define VWIFI_PERMANENT_MAC_4       0x57
+#define VWIFI_PERMANENT_MAC_5       0x31
+
+/* Delay between OID_DOT11_SCAN_REQUEST and the SCAN_CONFIRM indication. */
+#define VWIFI_SCAN_DELAY_MS         500
+
+/* Default beacon period of the fake APs (TUs). */
+#define VWIFI_BEACON_PERIOD         100
+
+/* Maximum number of simulated BSS entries. */
+#define VWIFI_MAX_BSS               2
+
+/* Largest beacon-IE blob per BSS (SSID + supported-rates + DS-parameter IEs). */
+#define VWIFI_MAX_BSS_IE            64
+
+/* A simulated BSS (access point) the virtual radio "sees" on a scan. */
+typedef struct _VWIFI_FAKE_BSS
 {
-    UCHAR    Bssid[6];
-    UCHAR    SsidLen;
-    UCHAR    Ssid[32];
-    DOT11_PHY_TYPE PhyType;
-    ULONG    ChCenterFreqMHz;
-    SHORT    RssiDbm;
-    ULONG    BeaconPeriodTu;
-    BOOLEAN  PrivacyOn;             /* WPA2-PSK */
-} VWIFI_BSS_ENTRY, *PVWIFI_BSS_ENTRY;
+    DOT11_MAC_ADDRESS Bssid;
+    DOT11_BSS_TYPE BssType;
+    UCHAR Ssid[DOT11_SSID_MAX_LENGTH];
+    ULONG SsidLength;
+    ULONG ChannelNumber;            /* logical channel (1..14)               */
+    ULONG ChCenterFrequency;        /* MHz (e.g. 2412 for channel 1)         */
+    LONG Rssi;                      /* dBm (e.g. -40)                        */
+    ULONG LinkQuality;              /* 0..100                                */
+    USHORT CapabilityInformation;  /* 802.11 capability bits                */
+    DOT11_AUTH_ALGORITHM AuthAlgorithm; /* what this AP requires            */
+} VWIFI_FAKE_BSS, *PVWIFI_FAKE_BSS;
+
+typedef enum _VWIFI_CONN_STATE
+{
+    VWifiDisconnected = 0,
+    VWifiScanning,
+    VWifiAssociating,
+    VWifiConnected
+} VWIFI_CONN_STATE;
+
+/* Asynchronous job to run (set by an OID, drained by the engine work item). */
+typedef enum _VWIFI_JOB
+{
+    VWifiJobNone = 0,
+    VWifiJobScan,           /* finish a scan -> SCAN_CONFIRM                  */
+    VWifiJobConnect,        /* assoc-start/assoc-complete/connect-complete   */
+    VWifiJobDisconnect      /* DISASSOCIATION + link down                    */
+} VWIFI_JOB;
+
+/* dot11 station configuration accepted/stored from OIDs. */
+typedef struct _VWIFI_DOT11_STATE
+{
+    ULONG CurrentOperationMode;     /* DOT11_OPERATION_MODE_*                 */
+    DOT11_PHY_TYPE CurrentPhyType;  /* dot11_phy_type_erp by default          */
+    ULONG PacketFilter;             /* DOT11_PACKET_TYPE_* mask               */
+    BOOLEAN RadioOn;                /* OID_DOT11_NIC_POWER_STATE              */
+    BOOLEAN AutoConfigEnabled;
+    ULONG CurrentChannel;
+    ULONG RtsThreshold;
+    ULONG FragmentationThreshold;
+    ULONG BeaconPeriod;
+
+    /* Desired-network selectors stored from the connect prologue. */
+    DOT11_SSID DesiredSsid;         /* first entry of DESIRED_SSID_LIST       */
+    BOOLEAN HaveDesiredSsid;
+    DOT11_MAC_ADDRESS DesiredBssid; /* first entry of DESIRED_BSSID_LIST      */
+    BOOLEAN HaveDesiredBssid;
+    DOT11_BSS_TYPE DesiredBssType;
+
+    DOT11_AUTH_ALGORITHM AuthAlgorithm;
+    DOT11_CIPHER_ALGORITHM UnicastCipher;
+    DOT11_CIPHER_ALGORITHM MulticastCipher;
+} VWIFI_DOT11_STATE, *PVWIFI_DOT11_STATE;
 
 typedef struct _VWIFI_ADAPTER
 {
-    NDIS_HANDLE   MiniportAdapterHandle;
-    NDIS_HANDLE   NdisMiniportDriverHandle;
-    PDEVICE_OBJECT PhysicalDeviceObject;
+    NDIS_HANDLE MiniportAdapterHandle;
 
-    NDIS_SPIN_LOCK Lock;
+    /* MAC addressing. */
+    UCHAR PermanentAddress[VWIFI_ADDRESS_LENGTH];
+    UCHAR CurrentAddress[VWIFI_ADDRESS_LENGTH];
 
-    UCHAR         PermanentMac[6];
-    UCHAR         CurrentMac[6];
+    /* Simulated radio. */
+    VWIFI_DOT11_STATE Dot11;
+    VWIFI_FAKE_BSS Bss[VWIFI_MAX_BSS];
+    ULONG BssCount;
 
-    /* Last-set radio/operation knobs from OID_DOT11_* */
-    DOT11_PHY_TYPE  CurrentPhyType;
-    BOOLEAN         RadioOn;
-    BOOLEAN         PowerSaveOn;
-    ULONG           CurrentChannel;
-    ULONG           PacketFilter;
+    /* Connection engine. */
+    VWIFI_CONN_STATE ConnState;
+    ULONG ConnectedBssIndex;        /* index into Bss[] while Connected       */
+    NDIS_SPIN_LOCK Lock;            /* guards ConnState / job queue           */
 
-    /* Static canned scan results */
-    VWIFI_BSS_ENTRY Bss[VWIFI_MAX_BSS];
-    ULONG           BssCount;
+    /* Lifecycle. */
+    BOOLEAN Halting;
+    BOOLEAN DataPathRunning;        /* between RestartEx and PauseEx          */
 
-    /* Statistics (NDIS 6 OID_GEN_STATISTICS) */
-    ULONG64       FramesXmitOk;
-    ULONG64       FramesRcvOk;
-    ULONG64       BytesXmit;
-    ULONG64       BytesRcv;
+    /* Async engine: a one-shot timer fires a DPC, which queues an I/O work
+     * item; the work item produces the dot11 status indications at
+     * PASSIVE_LEVEL.  PendingJob carries which transition to run. */
+    NDIS_HANDLE EngineTimer;
+    NDIS_HANDLE EngineWorkItem;
+    volatile LONG WorkPending;      /* 0/1: a work item is queued/running     */
+    VWIFI_JOB PendingJob;
+
+    /* Scan OID pending async completion via NdisMOidRequestComplete.
+     * Guarded by Lock; at most one scan outstanding. */
+    PNDIS_OID_REQUEST PendingScanOid;
+
+    /* Statistics. */
+    ULONG64 TxOkCount;
+    ULONG64 TxErrorCount;
+    ULONG64 TxBytes;
+    ULONG64 RxOkCount;
+    ULONG64 RxErrorCount;
+    ULONG64 RxBytes;
 } VWIFI_ADAPTER, *PVWIFI_ADAPTER;
 
-extern NDIS_HANDLE g_VwifiDriverHandle;
+/* vwifi.c */
+DRIVER_INITIALIZE DriverEntry;
 
-/* init.c */
-NDIS_STATUS NTAPI VwifiMiniportInitializeEx(NDIS_HANDLE, NDIS_HANDLE,
-                                            PNDIS_MINIPORT_INIT_PARAMETERS);
-VOID NTAPI VwifiMiniportHaltEx(NDIS_HANDLE, NDIS_HALT_ACTION);
-NDIS_STATUS NTAPI VwifiMiniportPause(NDIS_HANDLE, PNDIS_MINIPORT_PAUSE_PARAMETERS);
-NDIS_STATUS NTAPI VwifiMiniportRestart(NDIS_HANDLE, PNDIS_MINIPORT_RESTART_PARAMETERS);
-VOID NTAPI VwifiMiniportDriverUnload(PDRIVER_OBJECT);
-VOID NTAPI VwifiPnPEventNotify(NDIS_HANDLE, PNET_DEVICE_PNP_EVENT);
-VOID NTAPI VwifiShutdownEx(NDIS_HANDLE, NDIS_SHUTDOWN_ACTION);
-VOID         VwifiPopulateCannedBssList(PVWIFI_ADAPTER);
+MINIPORT_INITIALIZE              VWifiMiniportInitializeEx;
+MINIPORT_HALT                    VWifiMiniportHaltEx;
+MINIPORT_PAUSE                   VWifiMiniportPauseEx;
+MINIPORT_RESTART                 VWifiMiniportRestartEx;
+MINIPORT_SHUTDOWN                VWifiMiniportShutdownEx;
+MINIPORT_DEVICE_PNP_EVENT_NOTIFY VWifiMiniportDevicePnpEventNotify;
+MINIPORT_UNLOAD                  VWifiMiniportUnload;
+
+PVOID VWifiAllocate(IN ULONG Size);
+VOID VWifiFree(IN PVOID Buffer);
+
+/* engine.c */
+NDIS_TIMER_FUNCTION       VWifiEngineTimerDpc;
+NDIS_IO_WORKITEM_FUNCTION VWifiEngineWorker;
+VOID VWifiScheduleJob(IN PVWIFI_ADAPTER Adapter, IN VWIFI_JOB Job, IN ULONG DelayMs);
+LONG VWifiFindDesiredBss(IN PVWIFI_ADAPTER Adapter);
+VOID VWifiInitFakeBssList(IN PVWIFI_ADAPTER Adapter);
+ULONG VWifiBuildBssList(IN PVWIFI_ADAPTER Adapter, OUT PUCHAR Buffer, IN ULONG BufferLength,
+                        OUT PULONG BytesNeeded);
+
+VOID VWifiIndicateScanConfirm(IN PVWIFI_ADAPTER Adapter, IN NDIS_STATUS ScanStatus);
+VOID VWifiIndicateAssocStart(IN PVWIFI_ADAPTER Adapter, IN PVWIFI_FAKE_BSS Bss);
+VOID VWifiIndicateAssocComplete(IN PVWIFI_ADAPTER Adapter, IN PVWIFI_FAKE_BSS Bss,
+                                IN DOT11_ASSOC_STATUS Status);
+VOID VWifiIndicateConnectComplete(IN PVWIFI_ADAPTER Adapter, IN DOT11_ASSOC_STATUS Status);
+VOID VWifiIndicateDisassociation(IN PVWIFI_ADAPTER Adapter, IN DOT11_ASSOC_STATUS Reason);
+VOID VWifiIndicateLinkState(IN PVWIFI_ADAPTER Adapter, IN BOOLEAN Connected);
+
+/* rxtx.c */
+MINIPORT_SEND_NET_BUFFER_LISTS    VWifiMiniportSendNetBufferLists;
+MINIPORT_RETURN_NET_BUFFER_LISTS  VWifiMiniportReturnNetBufferLists;
+MINIPORT_CANCEL_SEND              VWifiMiniportCancelSend;
 
 /* oid.c */
-NDIS_STATUS NTAPI VwifiOidRequest(NDIS_HANDLE, PNDIS_OID_REQUEST);
-VOID NTAPI VwifiCancelOidRequest(NDIS_HANDLE, PVOID);
-
-/* send.c */
-VOID NTAPI VwifiSendNetBufferLists(NDIS_HANDLE, PNET_BUFFER_LIST, NDIS_PORT_NUMBER, ULONG);
-VOID NTAPI VwifiCancelSend(NDIS_HANDLE, PVOID);
-
-/* recv.c */
-VOID NTAPI VwifiReturnNetBufferLists(NDIS_HANDLE, PNET_BUFFER_LIST, ULONG);
-
-/* scan.c */
-NDIS_STATUS VwifiHandleScanRequest(PVWIFI_ADAPTER, PNDIS_OID_REQUEST);
+MINIPORT_OID_REQUEST              VWifiMiniportOidRequest;
+MINIPORT_CANCEL_OID_REQUEST       VWifiMiniportCancelOidRequest;
 
 #endif /* _VWIFI_H_ */
