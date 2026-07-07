@@ -192,6 +192,95 @@ DeleteOne(
     return Status;
 }
 
+static
+NTSTATUS
+DeleteDirectoryOne(
+    _In_ PCWSTR FullPath)
+{
+    NTSTATUS Status;
+    UNICODE_STRING name;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE handle;
+    FILE_DISPOSITION_INFORMATION disp;
+
+    RtlInitUnicodeString(&name, FullPath);
+    InitializeObjectAttributes(&oa, &name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    Status = ZwCreateFile(&handle,
+                          DELETE | SYNCHRONIZE,
+                          &oa, &iosb, NULL,
+                          FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_OPEN,
+                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+                          NULL, 0);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    disp.DeleteFile = TRUE;
+    Status = ZwSetInformationFile(handle, &iosb, &disp, sizeof(disp),
+                                  FileDispositionInformation);
+    ZwClose(handle);
+    return Status;
+}
+
+static
+NTSTATUS
+RenameOne(
+    _In_ PCWSTR SourcePath,
+    _In_ PCWSTR TargetPath,
+    _In_ ULONG Options)
+{
+    NTSTATUS Status;
+    UNICODE_STRING sourceName;
+    UNICODE_STRING targetName;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE handle;
+    PFILE_RENAME_INFORMATION renameInfo;
+    SIZE_T renameInfoSize;
+
+    RtlInitUnicodeString(&sourceName, SourcePath);
+    RtlInitUnicodeString(&targetName, TargetPath);
+    InitializeObjectAttributes(&oa, &sourceName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    Status = ZwCreateFile(&handle,
+                          DELETE | SYNCHRONIZE,
+                          &oa, &iosb, NULL,
+                          FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_OPEN,
+                          Options | FILE_SYNCHRONOUS_IO_NONALERT,
+                          NULL, 0);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    renameInfoSize = FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) +
+                     targetName.Length;
+    renameInfo = ExAllocatePoolWithTag(NonPagedPool, renameInfoSize, 'rftN');
+    if (renameInfo == NULL)
+    {
+        ZwClose(handle);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(renameInfo, renameInfoSize);
+    renameInfo->ReplaceIfExists = FALSE;
+    renameInfo->RootDirectory = NULL;
+    renameInfo->FileNameLength = targetName.Length;
+    RtlCopyMemory(renameInfo->FileName, targetName.Buffer, targetName.Length);
+
+    Status = ZwSetInformationFile(handle, &iosb, renameInfo,
+                                  (ULONG)renameInfoSize,
+                                  FileRenameInformation);
+    ExFreePoolWithTag(renameInfo, 'rftN');
+    ZwClose(handle);
+    return Status;
+}
+
 /* Open an existing file with FILE_DELETE_ON_CLOSE and close it: the record and
  * its $I30 entry must be gone afterwards (the alternate delete disposition,
  * relied on by cygwin/msys2 unlink and temp files). */
@@ -460,6 +549,99 @@ NtfsDirIndexTest(VOID)
         trace("Phase 6: delete-on-close fail=%lu stale=%lu\n", docFail, docStale);
         ok(docFail == 0, "delete-on-close open failed %lu times\n", docFail);
         ok(docStale == 0, "FILE_DELETE_ON_CLOSE left %lu files behind (disposition ignored)\n", docStale);
+    }
+
+    /* Phase 7: package installers commonly stage a populated .tmpUpdate
+     * directory and then atomically rename it into place. Directory rename is
+     * supported by Windows NTFS and must not fall back to copy/delete: the
+     * fallback churn is exactly what exposed the MSYS2 install-time index
+     * corruption on ReactOS. */
+    {
+        WCHAR tempDir[MAX_PATH];
+        WCHAR finalDir[MAX_PATH];
+        ULONG renameCreateFail = 0;
+        ULONG renamedMissing = 0;
+
+        RtlStringCchPrintfW(tempDir, RTL_NUMBER_OF(tempDir),
+                            L"%ls\\.tmpUpdate", dirPath);
+        RtlStringCchPrintfW(finalDir, RTL_NUMBER_OF(finalDir),
+                            L"%ls\\pkg_final", dirPath);
+
+        for (i = 0; i < 384; i++)
+        {
+            BuildName(filePath, tempDir, i);
+            DeleteOne(filePath);
+            BuildName(filePath, finalDir, i);
+            DeleteOne(filePath);
+        }
+        DeleteDirectoryOne(finalDir);
+        DeleteDirectoryOne(tempDir);
+
+        Status = CreateOne(tempDir, FILE_CREATE, FILE_DIRECTORY_FILE, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            for (i = 0; i < 384; i++)
+            {
+                BuildName(filePath, tempDir, i);
+                Status = CreateOne(filePath, FILE_CREATE,
+                                   FILE_NON_DIRECTORY_FILE, NULL);
+                if (!NT_SUCCESS(Status))
+                {
+                    renameCreateFail++;
+                    if (renameCreateFail <= 5)
+                        trace("rename staging create %05u: 0x%lx\n", i, Status);
+                }
+            }
+            ok(renameCreateFail == 0,
+               "creating staged .tmpUpdate entries failed %lu times\n",
+               renameCreateFail);
+
+            Status = RenameOne(tempDir, finalDir, FILE_DIRECTORY_FILE);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                Status = CreateOne(tempDir, FILE_OPEN, FILE_DIRECTORY_FILE, NULL);
+                ok(Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+                   Status == STATUS_OBJECT_PATH_NOT_FOUND,
+                   "old .tmpUpdate directory still opens after rename: 0x%lx\n",
+                   Status);
+
+                Status = CreateOne(finalDir, FILE_OPEN, FILE_DIRECTORY_FILE, NULL);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                for (i = 0; i < 384; i++)
+                {
+                    BuildName(filePath, finalDir, i);
+                    Status = CreateOne(filePath, FILE_OPEN,
+                                       FILE_NON_DIRECTORY_FILE, NULL);
+                    if (!NT_SUCCESS(Status))
+                    {
+                        renamedMissing++;
+                        if (renamedMissing <= 5)
+                            trace("renamed child lookup miss %05u: 0x%lx\n", i, Status);
+                    }
+                }
+                ok(renamedMissing == 0,
+                   "renamed directory lost %lu staged children\n",
+                   renamedMissing);
+
+                for (i = 0; i < 384; i++)
+                {
+                    BuildName(filePath, finalDir, i);
+                    DeleteOne(filePath);
+                }
+                DeleteDirectoryOne(finalDir);
+            }
+            else
+            {
+                for (i = 0; i < 384; i++)
+                {
+                    BuildName(filePath, tempDir, i);
+                    DeleteOne(filePath);
+                }
+                DeleteDirectoryOne(tempDir);
+            }
+        }
     }
 }
 

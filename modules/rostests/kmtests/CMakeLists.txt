@@ -83,7 +83,9 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoIrp.c
     ntos_io/IoMdl.c
     ntos_io/IoVolume.c
+    ntos_io/FatPerf.c
     ntos_io/NtfsDirIndex.c
+    ntos_io/UsbStorageRead.c
     ntos_kd/KdSystemDebugControl.c
     ntos_ke/KeApc.c
     ntos_ke/KeDevQueue.c
