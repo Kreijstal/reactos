@@ -28,6 +28,7 @@ KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
+KMT_TESTFUNC Test_FatPerf;
 #if defined(_M_IX86) || defined(_M_AMD64)
 KMT_TESTFUNC Test_HalPortIo;
 #endif
@@ -97,6 +98,7 @@ KMT_TESTFUNC Test_ZwCreateSection;
 KMT_TESTFUNC Test_ZwMapViewOfSection;
 KMT_TESTFUNC Test_ZwWaitForMultipleObjects;
 KMT_TESTFUNC Test_XhciBulkTrb;
+KMT_TESTFUNC Test_UsbStorageRead;
 
 const KMT_TEST TestList[] =
 {
@@ -122,6 +124,7 @@ const KMT_TEST TestList[] =
     { "FsRtlMcb",                           Test_FsRtlMcb },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
+    { "FatPerf",                            Test_FatPerf },
 #if defined(_M_IX86) || defined(_M_AMD64)
     { "HalPortIo",                          Test_HalPortIo },
 #endif
@@ -190,6 +193,7 @@ const KMT_TEST TestList[] =
     { "ZwMapViewOfSection",                 Test_ZwMapViewOfSection },
     { "ZwWaitForMultipleObjects",           Test_ZwWaitForMultipleObjects},
     { "XhciBulkTrb",                        Test_XhciBulkTrb },
+    { "UsbStorageRead",                     Test_UsbStorageRead },
 #ifdef _M_AMD64
     { "RtlCaptureContextKM",                Test_RtlCaptureContext },
 #endif
