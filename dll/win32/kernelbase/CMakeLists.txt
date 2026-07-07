@@ -33,7 +33,7 @@ add_cd_file(TARGET kernelbase_ros DESTINATION reactos/system32 FOR all)
 add_library(kernelbase MODULE ${SOURCE})
 set_module_type(kernelbase win32dll ENTRYPOINT DllMain 12)
 target_link_libraries(kernelbase kernelbase_static wine chkstk)
-add_importlibs(kernelbase msvcrt advapi32 kernel32 ntdll)
+add_importlibs(kernelbase msvcrt advapi32 kernel32 kernel32_vista ntdll)
 add_dependencies(kernelbase psdk)
 add_cd_file(TARGET kernelbase DESTINATION reactos/system32 FOR all)
 
