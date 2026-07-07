@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import time
+import argparse
 import shutil
 import subprocess
 
@@ -39,6 +40,22 @@ CRASH_SIGS = ("kdb:>", "Entered debugger", "*** Fatal System Error", "*** STOP:"
 # won't enumerate a bare-disk NTFS), one type-0x07 partition formatted by the
 # host mkntfs.  Created once and reused across runs.
 NTFS_DATA = "/tmp/kmtest_ntfsdata.img"
+CONTROL_DISK = "/tmp/kmtest_filter.img"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run the ReactOS kmtest image under QEMU")
+    parser.add_argument("--filter", default=None,
+                        help="kmtcdrunner filter, for example NtfsDirIndex or !ExHardError")
+    parser.add_argument("--name", default=NAME,
+                        help="prefix for /tmp logs and copied boot disk")
+    parser.add_argument("--gdb-port", default="1236",
+                        help="QEMU gdbstub TCP port")
+    parser.add_argument("--timeout", type=int, default=TIMEOUT,
+                        help="timeout in seconds")
+    parser.add_argument("--usb-image", default=None,
+                        help="optional raw USB mass-storage image to attach through qemu-xhci")
+    return parser.parse_args()
 
 
 def make_ntfs_data_disk():
@@ -56,6 +73,26 @@ def make_ntfs_data_disk():
     subprocess.run(["dd", f"if={part}", f"of={NTFS_DATA}", "bs=512", "seek=2048",
                     "conv=notrunc"], check=True, capture_output=True)
     os.unlink(part)
+
+
+def make_control_disk(filter_name):
+    if os.path.exists(CONTROL_DISK):
+        os.unlink(CONTROL_DISK)
+    if filter_name is None:
+        return None
+
+    selection = "/tmp/KMTEST.SEL"
+    subprocess.run(["truncate", "-s", "1440K", CONTROL_DISK], check=True)
+    subprocess.run(["mformat", "-i", CONTROL_DISK, "::"], check=True)
+    with open(selection, "w", encoding="ascii") as f:
+        f.write(filter_name + "\n")
+    try:
+        subprocess.run(["mcopy", "-i", CONTROL_DISK, selection, "::KMTEST.SEL"],
+                       check=True)
+    finally:
+        if os.path.exists(selection):
+            os.unlink(selection)
+    return CONTROL_DISK
 
 
 def read(path):
@@ -83,6 +120,16 @@ def markers():
 
 
 def main():
+    global DISK, NAME, COM1, COM2, MON, TIMEOUT
+
+    args = parse_args()
+    NAME = args.name
+    DISK = f"/tmp/{NAME}.img"
+    COM1 = f"/tmp/{NAME}-com1.log"
+    COM2 = f"/tmp/{NAME}-com2.log"
+    MON = f"/tmp/{NAME}-mon.sock"
+    TIMEOUT = args.timeout
+
     if not os.path.exists(SRC_IMG):
         print(f"FATAL: {SRC_IMG} not found (build kmtestimg first)", flush=True)
         sys.exit(2)
@@ -90,6 +137,16 @@ def main():
     print(f"=== copying {SRC_IMG} -> {DISK} ===", flush=True)
     shutil.copyfile(SRC_IMG, DISK)
     make_ntfs_data_disk()
+    control_disk = make_control_disk(args.filter)
+    usb_overlay = None
+    if args.usb_image is not None:
+        usb_overlay = f"/tmp/{NAME}-usb.qcow2"
+        if os.path.exists(usb_overlay):
+            os.unlink(usb_overlay)
+        subprocess.run([
+            "qemu-img", "create", "-f", "qcow2",
+            "-F", "raw", "-b", args.usb_image, usb_overlay
+        ], check=True, capture_output=True)
     for f in (COM1, COM2, MON):
         if os.path.exists(f):
             os.unlink(f)
@@ -111,8 +168,18 @@ def main():
         "-netdev", "user,id=net0",
         "-device", "rtl8139,netdev=net0",
         "-display", "gtk",
-        "-no-reboot", "-enable-kvm", "-s", "-daemonize",
+        "-no-reboot", "-enable-kvm", "-gdb", f"tcp::{args.gdb_port}", "-daemonize",
     ]
+    if args.usb_image is not None:
+        boot_arg = cmd.index("-boot")
+        cmd[boot_arg:boot_arg] = [
+            "-device", "qemu-xhci,id=xhci",
+            "-drive", f"if=none,id=msysusb,file={usb_overlay},format=qcow2",
+            "-device", "usb-storage,bus=xhci.0,drive=msysusb",
+        ]
+    if control_disk is not None:
+        boot_arg = cmd.index("-boot")
+        cmd[boot_arg:boot_arg] = ["-drive", f"file={control_disk},format=raw,if=ide"]
     print("=== launching QEMU ===\n  " + " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True, capture_output=True)
 
