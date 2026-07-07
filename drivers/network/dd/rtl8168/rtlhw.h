@@ -124,6 +124,15 @@
 #define BMCR_PDOWN          0x0800
 #define BMCR_ANRESTART      0x0200
 
+/* MII MMD indirect access (clause 22 registers 13/14, IEEE 802.3 annex 22D) */
+#define MII_MMD_CTRL        0x0D    /* MMD Access Control Register */
+#define MII_MMD_DATA        0x0E    /* MMD Access Data Register */
+#define MII_MMD_CTRL_NOINCR 0x4000  /* no post increment */
+
+/* MMD device addresses / registers */
+#define MDIO_MMD_AN         7       /* Auto-Negotiation */
+#define MDIO_AN_EEE_ADV     60      /* EEE advertisement */
+
 /* DLLPR bits (8168E+) */
 #define DLLPR_PFM_EN        0x40    /* BIT(6) */
 #define DLLPR_TX_10M_PS_EN  0x80    /* BIT(7) */
