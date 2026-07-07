@@ -780,9 +780,12 @@ NtUserSendInput(
                 break;
             case INPUT_HARDWARE:
                 FIXME("INPUT_HARDWARE not supported!\n");
-                break;
+                EngSetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                uRet = 0;
+                goto cleanup;
             default:
                 ERR("SendInput(): Invalid input type: 0x%x\n", SafeInput.type);
+                uRet++;
                 break;
         }
     }
