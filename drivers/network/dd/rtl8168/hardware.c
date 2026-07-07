@@ -339,15 +339,19 @@ NICRefillRxDescriptor (
 {
     PRTL_DESC d = &Adapter->RxRing[Index];
     ULONGLONG bufPa = Adapter->RxBuffersPa.QuadPart + (ULONGLONG)Index * RX_BUF_SIZE;
-    ULONG opts1 = DESC_OWN | (RX_BUF_SIZE & DESC_LEN_MASK);
+    ULONG opts1 = DESC_OWN | (RX_BUF_SIZE & RXD_LEN_MASK);
 
     if (Index == RX_DESC_COUNT - 1)
         opts1 |= DESC_EOR;
 
     d->opts2 = 0;
     d->addr  = bufPa;
-    /* opts1 last so the NIC only sees OWN after addr is committed */
-    d->opts1 = opts1;
+
+    /* Publish OWN last: the barrier keeps the compiler/CPU from reordering
+     * the addr/opts2 stores past the OWN store the NIC DMA-reads (Linux
+     * rtl8169_mark_to_asic uses dma_wmb here for the same reason). */
+    KeMemoryBarrier();
+    *(volatile ULONG *)&d->opts1 = opts1;
     return NDIS_STATUS_SUCCESS;
 }
 
@@ -583,10 +587,11 @@ NICInterruptRecognized (
 VOID
 NTAPI
 NICAcknowledgeInterrupts (
-    IN PRTL_ADAPTER Adapter
+    IN PRTL_ADAPTER Adapter,
+    IN USHORT Status
     )
 {
-    RtlWriteReg16(Adapter, R_IS, Adapter->InterruptPending);
+    RtlWriteReg16(Adapter, R_IS, Status);
 }
 
 VOID
@@ -657,8 +662,7 @@ NICTransmitDescriptor (
     IN PRTL_ADAPTER Adapter,
     IN ULONG Index,
     IN PHYSICAL_ADDRESS BufferPa,
-    IN ULONG Length,
-    IN ULONG TxOpts2
+    IN ULONG Length
     )
 {
     PRTL_DESC d = &Adapter->TxRing[Index];
@@ -667,13 +671,14 @@ NICTransmitDescriptor (
     if (Index == TX_DESC_COUNT - 1)
         opts1 |= DESC_EOR;
 
-    /* opts2 carries the per-packet checksum-offload request bits
-     * (TXD2_IPv4_CS / TXD2_TCP_CS / TXD2_UDP_CS).  Caller computed them from
-     * NDIS_PACKET TcpIpChecksumPacketInfo. */
-    d->opts2 = TxOpts2;
+    d->opts2 = 0;
     d->addr  = BufferPa.QuadPart;
-    /* opts1 last (publish OWN after addr/len are visible) */
-    d->opts1 = opts1;
+
+    /* Publish OWN last: the barrier keeps the compiler/CPU from reordering
+     * the addr/opts2 stores past the OWN store the NIC DMA-reads (Linux
+     * rtl8169_start_xmit uses dma_wmb before setting DescOwn). */
+    KeMemoryBarrier();
+    *(volatile ULONG *)&d->opts1 = opts1;
 
     /* Poll-bit kicks the TX engine on the normal-priority queue. */
     RtlWriteReg8(Adapter, R_TXPOLL, B_TXP_NPQ);
