@@ -20,6 +20,7 @@
 #include <tcpioctl.h>
 #include <tdilib.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <rtlfuncs.h>
 #include <mstcpip.h>
 
@@ -51,6 +52,7 @@ typedef struct _SOCKET_CONTEXT {
     SOCKET_STATE SocketState;
     PQUEUED_REQUEST RequestQueue;
     BOOL DontRoute;
+    BOOL KeepAlive;
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
 INT
