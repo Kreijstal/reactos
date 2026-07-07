@@ -1464,6 +1464,26 @@ Return Value:
 
         if (Vcb->Bpb.Sectors != 0) { Vcb->Bpb.LargeSectors = 0; }
 
+        //
+        //  FatSetupAllocationSupport may need to know whether expensive
+        //  mount-time repair scans are warranted.  FatCheckDirtyBit runs
+        //  later after the allocation/cache state is built; seed the same
+        //  state here from the boot sector we already read directly.
+        //
+
+        if (IsBpbFat32(&BootSector->PackedBpb)) {
+
+            if (FlagOn(((PPACKED_BOOT_SECTOR_EX)BootSector)->CurrentHead,
+                       FAT_BOOT_SECTOR_DIRTY)) {
+
+                SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+            }
+
+        } else if (FlagOn(BootSector->CurrentHead, FAT_BOOT_SECTOR_DIRTY)) {
+
+            SetFlag( Vcb->VcbState, VCB_STATE_FLAG_MOUNTED_DIRTY );
+        }
+
         if (IsBpbFat32(&BootSector->PackedBpb)) {
 
             CopyUchar4( &Vpb->SerialNumber, ((PPACKED_BOOT_SECTOR_EX)BootSector)->Id );
