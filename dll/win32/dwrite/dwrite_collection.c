@@ -1315,9 +1315,33 @@ static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphMetrics(
     UINT16 const *glyph_indices, UINT32 glyph_count,
     DWRITE_GLYPH_METRICS *metrics, BOOL is_sideways)
 {
-    (void)em_size; (void)pixels_per_dip; (void)transform; (void)use_gdi_natural;
-    return face_GetDesignGlyphMetrics(iface, glyph_indices, glyph_count,
-                                      metrics, is_sideways);
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    HRESULT hr;
+    FLOAT scale;
+    UINT32 i;
+    (void)transform; (void)use_gdi_natural;
+
+    hr = face_GetDesignGlyphMetrics(iface, glyph_indices, glyph_count,
+                                    metrics, is_sideways);
+    if (FAILED(hr) || !glyph_count || !metrics)
+        return hr;
+
+    if (!gdi_face_ensure(self) || !self->em_units)
+        return hr;
+
+    scale = (em_size * pixels_per_dip) / (FLOAT)self->em_units;
+    for (i = 0; i < glyph_count; ++i)
+    {
+        metrics[i].leftSideBearing = (INT32)(metrics[i].leftSideBearing * scale + (metrics[i].leftSideBearing < 0 ? -0.5f : 0.5f));
+        metrics[i].advanceWidth = (UINT32)(metrics[i].advanceWidth * scale + 0.5f);
+        metrics[i].rightSideBearing = (INT32)(metrics[i].rightSideBearing * scale + (metrics[i].rightSideBearing < 0 ? -0.5f : 0.5f));
+        metrics[i].topSideBearing = (INT32)(metrics[i].topSideBearing * scale + (metrics[i].topSideBearing < 0 ? -0.5f : 0.5f));
+        metrics[i].advanceHeight = (UINT32)(metrics[i].advanceHeight * scale + 0.5f);
+        metrics[i].bottomSideBearing = (INT32)(metrics[i].bottomSideBearing * scale + (metrics[i].bottomSideBearing < 0 ? -0.5f : 0.5f));
+        metrics[i].verticalOriginY = (INT32)(metrics[i].verticalOriginY * scale + (metrics[i].verticalOriginY < 0 ? -0.5f : 0.5f));
+    }
+
+    return hr;
 }
 
 /* HRESULT GetDesignGlyphAdvances(UINT32 glyph_count,
@@ -1364,9 +1388,25 @@ static HRESULT STDMETHODCALLTYPE face_GetGdiCompatibleGlyphAdvances(
     DWRITE_MATRIX const *transform, BOOL use_gdi_natural, BOOL is_sideways,
     UINT32 glyph_count, UINT16 const *glyph_indices, INT32 *glyph_advances)
 {
-    (void)em_size; (void)pixels_per_dip; (void)transform; (void)use_gdi_natural;
-    return face_GetDesignGlyphAdvances(iface, glyph_count, glyph_indices,
-                                       glyph_advances, is_sideways);
+    font_face_obj_t *self = (font_face_obj_t *)iface;
+    HRESULT hr;
+    FLOAT scale;
+    UINT32 i;
+    (void)transform; (void)use_gdi_natural;
+
+    hr = face_GetDesignGlyphAdvances(iface, glyph_count, glyph_indices,
+                                     glyph_advances, is_sideways);
+    if (FAILED(hr) || !glyph_count || !glyph_advances)
+        return hr;
+
+    if (!gdi_face_ensure(self) || !self->em_units)
+        return hr;
+
+    scale = (em_size * pixels_per_dip) / (FLOAT)self->em_units;
+    for (i = 0; i < glyph_count; ++i)
+        glyph_advances[i] = (INT32)(glyph_advances[i] * scale + (glyph_advances[i] < 0 ? -0.5f : 0.5f));
+
+    return hr;
 }
 
 /* IDWriteFontFace1::GetMetrics(DWRITE_FONT_METRICS1 *out) - slot 18.

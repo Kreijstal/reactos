@@ -288,8 +288,8 @@ static HRESULT rasterize_run(glyph_run_analysis_t *self,
 
         if (run->glyphOffsets)
         {
-            ox += run->glyphOffsets[i].advanceOffset;
-            oy -= run->glyphOffsets[i].ascenderOffset;
+            ox += run->glyphOffsets[i].advanceOffset * ppd;
+            oy -= run->glyphOffsets[i].ascenderOffset * ppd;
         }
 
         bsize = GetGlyphOutlineW(self->hdc, run->glyphIndices[i],
@@ -325,7 +325,7 @@ static HRESULT rasterize_run(glyph_run_analysis_t *self,
         {
             FLOAT advance;
             if (run->glyphAdvances)
-                advance = run->glyphAdvances[i];
+                advance = run->glyphAdvances[i] * ppd;
             else
                 advance = (bsize != GDI_ERROR) ? (FLOAT)gm.gmCellIncX : 0.0f;
             if (run->bidiLevel & 1) pen_x -= advance;
