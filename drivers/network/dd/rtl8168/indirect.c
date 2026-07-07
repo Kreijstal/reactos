@@ -137,6 +137,9 @@ RtlEphyWrite (
         NdisStallExecution(10);
         waited += 10;
     }
+
+    /* Linux rtl_ephy_write: udelay(10) settle after the write completes. */
+    NdisStallExecution(10);
 }
 
 USHORT
@@ -182,6 +185,19 @@ RtlEphyInit (
 
 /*--------------------------- GPHY / MAC OCP -----------------------------*/
 
+/* rtl_ocp_reg_failure (r8169_main.c:860) -- OCP registers are 16-bit and
+ * word-aligned; anything else is a driver bug (Linux WARNs and bails). */
+static BOOLEAN
+RtlOcpRegFailure(IN ULONG Reg)
+{
+    if (Reg & 0xFFFF0001)
+    {
+        NDIS_DbgPrint(MIN_TRACE, ("Invalid ocp reg %lx!\n", Reg));
+        return TRUE;
+    }
+    return FALSE;
+}
+
 VOID
 NTAPI
 RtlPhyOcpWrite (
@@ -192,8 +208,7 @@ RtlPhyOcpWrite (
 {
     ULONG waited = 0;
 
-    /* Out-of-range OCP regs silently no-op (matches Linux rtl_ocp_reg_failure). */
-    if (Reg & 1)
+    if (RtlOcpRegFailure(Reg))
         return;
 
     RtlWriteReg32(A, R_GPHY_OCP, OCPAR_FLAG | (Reg << 15) | (Data & 0xFFFF));
@@ -214,8 +229,8 @@ RtlPhyOcpRead (
 {
     ULONG waited = 0;
 
-    if (Reg & 1)
-        return 0xFFFF;
+    if (RtlOcpRegFailure(Reg))
+        return 0;
 
     RtlWriteReg32(A, R_GPHY_OCP, Reg << 15);
 
@@ -239,7 +254,7 @@ RtlMacOcpWrite (
     IN ULONG Data
     )
 {
-    if (Reg & 1)
+    if (RtlOcpRegFailure(Reg))
         return;
 
     RtlWriteReg32(A, R_OCPDR, OCPAR_FLAG | (Reg << 15) | (Data & 0xFFFF));
@@ -252,8 +267,8 @@ RtlMacOcpRead (
     IN ULONG Reg
     )
 {
-    if (Reg & 1)
-        return 0xFFFF;
+    if (RtlOcpRegFailure(Reg))
+        return 0;
 
     RtlWriteReg32(A, R_OCPDR, Reg << 15);
     return (USHORT)(RtlReadReg32(A, R_OCPDR) & 0xFFFF);
@@ -311,6 +326,24 @@ RtlMdioReadDirect(IN PRTL_ADAPTER A, IN ULONG Reg)
     return v;
 }
 
+/* rtl8168g_phy_suspend_quirk (r8169_main.c:945) -- hw issue on the 8168G
+ * PHY: disable the PHY MCU interrupts before PHY power-down. */
+static VOID
+Rtl8168GPhySuspendQuirk(IN PRTL_ADAPTER A, IN USHORT Val)
+{
+    switch (A->MacVersion)
+    {
+    case RTL_MAC_VER_40:
+        if ((Val & BMCR_RESET) || !(Val & BMCR_PDOWN))
+            RtlEriSetBits(A, 0x1A8, 0xFC000000);
+        else
+            RtlEriClearBits(A, 0x1A8, 0xFC000000);
+        break;
+    default:
+        break;
+    }
+}
+
 /* On 8168G+ MDIO writes are redirected through the GPHY OCP block.
  * Writing reg 0x1F (page select) updates an internal base; subsequent
  * accesses to reg 0x10..0x1E get offset relative to that page. */
@@ -328,6 +361,9 @@ RtlMdioWriteOcp(IN PRTL_ADAPTER A, IN ULONG Reg, IN USHORT Val)
     addr = A->OcpBase;
     if (addr != OCP_STD_PHY_BASE)
         Reg -= 0x10;
+
+    if (addr == OCP_STD_PHY_BASE && Reg == MII_BMCR)
+        Rtl8168GPhySuspendQuirk(A, Val);
 
     RtlPhyOcpWrite(A, addr + Reg * 2, Val);
 }
