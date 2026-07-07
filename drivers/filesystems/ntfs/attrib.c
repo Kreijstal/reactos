@@ -187,6 +187,141 @@ AddData(PFILE_RECORD_HEADER FileRecord,
 }
 
 /**
+* @name AddDataStream
+* @implemented
+*
+* Adds a named $DATA attribute (an alternate data stream) to a file record,
+* initially resident and empty.  Unlike the other Add* helpers this inserts
+* at the correct sorted position - NTFS keeps attributes ordered by type and,
+* within a type, by name (case-insensitive $UpCase collation, unnamed first) -
+* rather than requiring the insertion point to be the AttributeEnd marker.
+* Growth beyond the record happens later through the ordinary
+* SetAttributeDataLength machinery, which converts to non-resident and
+* preserves the attribute name.
+*
+* @param Vcb
+* Pointer to the NTFS_VCB for the destination volume.
+*
+* @param FileRecord
+* Pointer to a complete file record.  Modified in place; the caller is
+* responsible for writing it back with UpdateFileRecord.
+*
+* @param Name
+* The stream name (case-preserved on disk). Must not be empty.
+*
+* @param NameLength
+* Number of WCHARs in Name (at most 255, the on-disk NameLength is a UCHAR).
+*
+* @return
+* STATUS_SUCCESS on success.
+* STATUS_OBJECT_NAME_INVALID for an empty or over-long name.
+* STATUS_OBJECT_NAME_COLLISION if a $DATA attribute with this name exists.
+* STATUS_DISK_FULL if the file record has no room for the new attribute.
+* STATUS_NOT_IMPLEMENTED if the record carries an $ATTRIBUTE_LIST (keeping
+* the list in sync with an insertion is out of scope for this helper).
+*/
+NTSTATUS
+AddDataStream(PNTFS_VCB Vcb,
+              PFILE_RECORD_HEADER FileRecord,
+              PCWSTR Name,
+              USHORT NameLength)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    PNTFS_ATTR_RECORD Attribute;
+    PNTFS_ATTR_RECORD InsertPoint = NULL;
+    UNICODE_STRING NewName;
+    ULONG NameOffset;
+    ULONG ValueOffset;
+    ULONG AttributeLength;
+    ULONG InsertOffset;
+    ULONG TailLength;
+
+    if (NameLength == 0 || NameLength > 255)
+        return STATUS_OBJECT_NAME_INVALID;
+
+    NewName.Buffer = (PWSTR)Name;
+    NewName.Length = NewName.MaximumLength = NameLength * sizeof(WCHAR);
+
+    /* Walk the whole record: find the sorted insertion point and make sure
+     * the name isn't taken (case-insensitively, like the on-disk collation). */
+    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+    while (Attribute->Type != AttributeEnd &&
+           (ULONG_PTR)Attribute < (ULONG_PTR)FileRecord + FileRecord->BytesInUse)
+    {
+        if (Attribute->Type == AttributeAttributeList)
+        {
+            /* Every attribute must also be described by a list entry once a
+             * record has an $ATTRIBUTE_LIST; inserting here without updating
+             * the list would corrupt the chain. */
+            DPRINT1("AddDataStream: record has an $ATTRIBUTE_LIST, not supported\n");
+            return STATUS_NOT_IMPLEMENTED;
+        }
+
+        if (Attribute->Type == AttributeData && Attribute->NameLength != 0)
+        {
+            UNICODE_STRING ExistingName;
+            LONG Comparison;
+
+            ExistingName.Buffer = (PWSTR)((ULONG_PTR)Attribute + Attribute->NameOffset);
+            ExistingName.Length = ExistingName.MaximumLength = Attribute->NameLength * sizeof(WCHAR);
+
+            Comparison = RtlCompareUnicodeString(&ExistingName, &NewName, TRUE);
+            if (Comparison == 0)
+                return STATUS_OBJECT_NAME_COLLISION;
+            if (Comparison > 0 && InsertPoint == NULL)
+                InsertPoint = Attribute;
+        }
+        else if (Attribute->Type > AttributeData && InsertPoint == NULL)
+        {
+            /* Unnamed $DATA sorts before every named one, so it never
+             * becomes the insertion point. */
+            InsertPoint = Attribute;
+        }
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+    }
+
+    if (InsertPoint == NULL)
+        InsertPoint = Attribute;
+
+    NameOffset = ResidentHeaderLength;
+    ValueOffset = ALIGN_UP_BY(NameOffset + (NameLength * sizeof(WCHAR)), VALUE_OFFSET_ALIGNMENT);
+    AttributeLength = ALIGN_UP_BY(ValueOffset, ATTR_RECORD_ALIGNMENT);
+
+    if (Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < AttributeLength)
+    {
+        DPRINT1("AddDataStream: not enough room in file record (need %lu, have %lu)\n",
+                AttributeLength,
+                Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse);
+        return STATUS_DISK_FULL;
+    }
+
+    /* Slide the tail (up to and including the AttributeEnd marker and the
+     * trailing end ULONG accounted in BytesInUse) out of the way. */
+    InsertOffset = (ULONG)((ULONG_PTR)InsertPoint - (ULONG_PTR)FileRecord);
+    ASSERT(InsertOffset <= FileRecord->BytesInUse);
+    TailLength = FileRecord->BytesInUse - InsertOffset;
+    RtlMoveMemory((PUCHAR)InsertPoint + AttributeLength, InsertPoint, TailLength);
+
+    RtlZeroMemory(InsertPoint, AttributeLength);
+    InsertPoint->Type = AttributeData;
+    InsertPoint->Length = AttributeLength;
+    InsertPoint->IsNonResident = 0;
+    InsertPoint->NameLength = (UCHAR)NameLength;
+    InsertPoint->NameOffset = (USHORT)NameOffset;
+    InsertPoint->Flags = 0;
+    InsertPoint->Instance = FileRecord->NextAttributeNumber++;
+    InsertPoint->Resident.ValueLength = 0;
+    InsertPoint->Resident.ValueOffset = (USHORT)ValueOffset;
+    InsertPoint->Resident.Flags = 0;
+    RtlCopyMemory((PUCHAR)InsertPoint + NameOffset, Name, NameLength * sizeof(WCHAR));
+
+    FileRecord->BytesInUse += AttributeLength;
+
+    return STATUS_SUCCESS;
+}
+
+/**
 * @name AddResidentAttribute
 * @implemented
 *

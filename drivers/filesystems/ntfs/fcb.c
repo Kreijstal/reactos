@@ -63,6 +63,131 @@ NtfsWSubString(PWCHAR pTarget,
 }
 
 
+/**
+* @name NtfsParseStreamPath
+* @implemented
+*
+* Splits an (absolute or relative) path into its file part and an optional
+* alternate-data-stream name, validating the stream syntax like Windows:
+*
+*   "file"                 -> no stream
+*   "file:stream"          -> stream "stream"
+*   "file:stream:$DATA"    -> stream "stream" (type suffix stripped)
+*   "file::$DATA"          -> the default (unnamed) stream, same as "file"
+*   "file:"                -> STATUS_OBJECT_NAME_INVALID
+*   "file:stream:$BAD"     -> STATUS_OBJECT_NAME_INVALID (only $DATA opens
+*                             are supported in this slice; $INDEX_ALLOCATION
+*                             and other typed opens are rejected explicitly)
+*   "file:a:b:c"           -> STATUS_OBJECT_NAME_INVALID
+*   "di:r\\file"           -> STATUS_OBJECT_NAME_INVALID (a colon may only
+*                             appear in the last path component)
+*
+* Normalizes FileName in place: any ":$DATA" type suffix (and, for the
+* default stream, the entire "::$DATA" tail) is removed so every downstream
+* consumer - the FCB table key, the directory walk, the create path - sees
+* at most one colon, separating the file part from the stream name.  The
+* name only ever shrinks, and the buffer is re-NUL-terminated at the new
+* end, preserving the driver-wide "FileName.Buffer is a C string" invariant.
+*
+* @param FileName
+* The path to parse/normalize.  Buffer must be writable (both the I/O
+* manager's FileObject->FileName and the local element buffers used by the
+* directory walk are).
+*
+* @param StreamName
+* Receives the stream name (pointing into FileName->Buffer, NUL-terminated).
+* Length == 0 means "no stream / default stream".
+*
+* @return
+* STATUS_SUCCESS or STATUS_OBJECT_NAME_INVALID.
+*/
+NTSTATUS
+NtfsParseStreamPath(PUNICODE_STRING FileName,
+                    PUNICODE_STRING StreamName)
+{
+    ULONG Chars = FileName->Length / sizeof(WCHAR);
+    ULONG FirstColon = (ULONG)-1;
+    ULONG SecondColon = (ULONG)-1;
+    ULONG i;
+    UNICODE_STRING Type;
+
+    RtlInitEmptyUnicodeString(StreamName, NULL, 0);
+
+    for (i = 0; i < Chars; i++)
+    {
+        if (FileName->Buffer[i] == L'\\')
+        {
+            /* A colon may only appear in the last path component. */
+            if (FirstColon != (ULONG)-1)
+                return STATUS_OBJECT_NAME_INVALID;
+        }
+        else if (FileName->Buffer[i] == L':')
+        {
+            if (FirstColon == (ULONG)-1)
+                FirstColon = i;
+            else if (SecondColon == (ULONG)-1)
+                SecondColon = i;
+            else
+                return STATUS_OBJECT_NAME_INVALID;
+        }
+    }
+
+    /* No stream suffix at all - the common case. */
+    if (FirstColon == (ULONG)-1)
+        return STATUS_SUCCESS;
+
+    if (SecondColon != (ULONG)-1)
+    {
+        UNICODE_STRING DataTypeName = RTL_CONSTANT_STRING(L"$DATA");
+
+        Type.Buffer = &FileName->Buffer[SecondColon + 1];
+        Type.Length = (USHORT)((Chars - SecondColon - 1) * sizeof(WCHAR));
+        Type.MaximumLength = Type.Length;
+
+        /* Only $DATA opens are supported; this also rejects the empty type
+         * of "file:stream:".  A non-$DATA type on a file is invalid on
+         * Windows too ($INDEX_ALLOCATION only exists on directories, and
+         * directory typed opens are out of scope here). */
+        if (!RtlEqualUnicodeString(&Type, &DataTypeName, TRUE))
+            return STATUS_OBJECT_NAME_INVALID;
+
+        /* Strip the type suffix: "file:stream:$DATA" -> "file:stream". */
+        FileName->Length = (USHORT)(SecondColon * sizeof(WCHAR));
+        FileName->Buffer[SecondColon] = UNICODE_NULL;
+        Chars = SecondColon;
+    }
+
+    StreamName->Buffer = &FileName->Buffer[FirstColon + 1];
+    StreamName->Length = (USHORT)((Chars - FirstColon - 1) * sizeof(WCHAR));
+    StreamName->MaximumLength = StreamName->Length;
+
+    if (StreamName->Length == 0)
+    {
+        /* "file:" (no type) is bad syntax. */
+        if (SecondColon == (ULONG)-1)
+            return STATUS_OBJECT_NAME_INVALID;
+
+        /* "file::$DATA" is the default (unnamed) data stream - the very
+         * same object as a plain open of "file".  Normalize the colon away
+         * so both spellings share one FCB. */
+        FileName->Length = (USHORT)(FirstColon * sizeof(WCHAR));
+        FileName->Buffer[FirstColon] = UNICODE_NULL;
+        StreamName->Buffer = NULL;
+        return STATUS_SUCCESS;
+    }
+
+    /* NTFS attribute names are at most 255 characters, and wildcards are
+     * never valid in a stream name. */
+    if (StreamName->Length > 255 * sizeof(WCHAR) ||
+        FsRtlDoesNameContainWildCards(StreamName))
+    {
+        return STATUS_OBJECT_NAME_INVALID;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
               PCWSTR Stream,
@@ -799,11 +924,11 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     NTSTATUS Status;
     ULONGLONG CurrentDir;
     UNICODE_STRING File;
+    UNICODE_STRING BaseName;
+    UNICODE_STRING Stream;
     PFILE_RECORD_HEADER FileRecord;
     ULONGLONG MFTIndex;
-    PWSTR Colon, OldColon;
     PNTFS_ATTR_CONTEXT DataContext;
-    USHORT Length = 0;
 
     DPRINT("NtfsDirFindFile(%p, %p, %S, %s, %p)\n",
            Vcb,
@@ -816,38 +941,36 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     RtlInitUnicodeString(&File, FileToFind);
     CurrentDir = DirectoryFcb->MFTIndex;
 
-    Colon = wcsrchr(FileToFind, L':');
-    if (Colon != NULL)
+    /* Split off an alternate-data-stream suffix.  The create path already
+     * validated and normalized the user name, but internal callers (rename
+     * target lookups, etc.) come through here directly, so parse defensively.
+     * Normalization is in place: any ":$DATA" type suffix is stripped from
+     * FileToFind, which also keeps the FCB PathName canonical below. */
+    Status = NtfsParseStreamPath(&File, &Stream);
+    if (!NT_SUCCESS(Status))
     {
-        Length = File.Length;
-        File.Length = (Colon - FileToFind) * sizeof(WCHAR);
-
-        if (_wcsicmp(Colon + 1, L"$DATA") == 0)
-        {
-            OldColon = Colon;
-            Colon[0] = UNICODE_NULL;
-            Colon = wcsrchr(FileToFind, L':');
-            if (Colon != NULL)
-            {
-                Length = File.Length;
-                File.Length = (Colon - FileToFind) * sizeof(WCHAR);
-            }
-            else
-            {
-                Colon = OldColon;
-                Colon[0] = L':';
-            }
-        }
-
-        /* Skip colon */
-        ++Colon;
-        DPRINT1("Will now look for file '%wZ' with stream '%S'\n", &File, Colon);
+        return Status;
     }
 
-    Status = NtfsLookupFileAt(Vcb, &File, CaseSensitive, &FileRecord, &MFTIndex, CurrentDir);
+    BaseName = File;
+    if (Stream.Length != 0)
+    {
+        BaseName.Length = (USHORT)(File.Length - Stream.Length - sizeof(WCHAR));
+        DPRINT("Will now look for file '%wZ' with stream '%wZ'\n", &BaseName, &Stream);
+
+        /* "\dir\:stream" - a named stream on the directory itself.  NTFS
+         * allows those, but this driver's directory FCBs have no data cache
+         * plumbing, so directory ADS is explicitly unsupported. */
+        if (BaseName.Length == 0)
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+    }
+
+    Status = NtfsLookupFileAt(Vcb, &BaseName, CaseSensitive, &FileRecord, &MFTIndex, CurrentDir);
     NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: dirfind lookup returned 0x%lx file=%wZ dir=%I64u mft=%I64u\n",
                 Status,
-                &File,
+                &BaseName,
                 CurrentDir,
                 MFTIndex);
     if (!NT_SUCCESS(Status))
@@ -855,21 +978,26 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
         return Status;
     }
 
-    if (Length != 0)
+    if (Stream.Length != 0)
     {
-        File.Length = Length;
-    }
+        if (FileRecord->Flags & FRH_DIRECTORY)
+        {
+            /* Named $DATA streams on directories are legal in NTFS, but the
+             * directory FCB/cache plumbing here doesn't support them - fail
+             * the name rather than misopen the directory. */
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+            return STATUS_OBJECT_NAME_INVALID;
+        }
 
-    if ((FileRecord->Flags & FRH_DIRECTORY) && Colon != 0)
-    {
-        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
-        return STATUS_INVALID_PARAMETER;
-    }
-    else if (Colon != 0)
-    {
-        Status = FindAttribute(Vcb, FileRecord, AttributeData, Colon, wcslen(Colon), &DataContext, NULL);
+        /* The stream must exist for a plain open; the create dispositions
+         * handle STATUS_OBJECT_NAME_NOT_FOUND by creating the attribute
+         * (NtfsCreateStream in create.c). */
+        Status = FindAttribute(Vcb, FileRecord, AttributeData,
+                               Stream.Buffer, Stream.Length / sizeof(WCHAR),
+                               &DataContext, NULL);
         if (!NT_SUCCESS(Status))
         {
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
         ReleaseAttributeContext(DataContext);
@@ -879,7 +1007,9 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
                 &File,
                 MFTIndex,
                 FileRecord);
-    Status = NtfsMakeFCBFromDirEntry(Vcb, DirectoryFcb, &File, Colon, FileRecord, MFTIndex, FoundFCB);
+    Status = NtfsMakeFCBFromDirEntry(Vcb, DirectoryFcb, &File,
+                                     (Stream.Length != 0) ? Stream.Buffer : NULL,
+                                     FileRecord, MFTIndex, FoundFCB);
     NTFS_TRACE_IF(CurrentDir == 27 || MFTIndex == 144, "DRVIDX: make fcb returned 0x%lx file=%wZ mft=%I64u fcb=%p\n",
                 Status,
                 &File,

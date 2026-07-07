@@ -885,29 +885,34 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
             // now we need to update this file's size in every directory index entry that references it
             // TODO: put this code in its own function and adapt it to work with every filename / hardlink
             // stored in the file record.
-            fileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
-            ASSERT(fileNameAttribute);
+            /* Named-stream sizes are not reflected in $FILE_NAME attributes
+             * or directory index entries - those track the unnamed (default)
+             * stream only, as on Windows. */
+            if (Fcb->Stream[0] == UNICODE_NULL)
+            {
+                fileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
+                ASSERT(fileNameAttribute);
 
-            ParentMFTId = fileNameAttribute->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+                ParentMFTId = fileNameAttribute->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
 
-            filename.Buffer = fileNameAttribute->Name;
-            filename.Length = fileNameAttribute->NameLength * sizeof(WCHAR);
-            filename.MaximumLength = filename.Length;
+                filename.Buffer = fileNameAttribute->Name;
+                filename.Length = fileNameAttribute->NameLength * sizeof(WCHAR);
+                filename.MaximumLength = filename.Length;
 
-            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update filename begin parent=%I64u name=%wZ size=%I64u alloc=%I64u\n",
-                        ParentMFTId,
-                        &filename,
-                        DataSize.QuadPart,
-                        AllocationSize);
-            Status = UpdateFileNameRecord(Fcb->Vcb,
-                                          ParentMFTId,
-                                          &filename,
-                                          FALSE,
-                                          DataSize.QuadPart,
-                                          AllocationSize,
-                                          CaseSensitive);
-            NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update filename returned 0x%lx\n", Status);
-
+                NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update filename begin parent=%I64u name=%wZ size=%I64u alloc=%I64u\n",
+                            ParentMFTId,
+                            &filename,
+                            DataSize.QuadPart,
+                            AllocationSize);
+                Status = UpdateFileNameRecord(Fcb->Vcb,
+                                              ParentMFTId,
+                                              &filename,
+                                              FALSE,
+                                              DataSize.QuadPart,
+                                              AllocationSize,
+                                              CaseSensitive);
+                NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: update filename returned 0x%lx\n", Status);
+            }
         }
         else
         {

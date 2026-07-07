@@ -185,11 +185,15 @@ NtfsLfsParseRestartPage(PDEVICE_EXTENSION Vcb,
     }
 
     /* Restart area lives at the first USHORT following the USA, aligned
-     * up by the fixup.  libfsntfs documents the layout as:
+     * up by the fixup.  The in-tree writers (NtfsLfsBuildRestartPage in
+     * lfs.c and ntfslib's ntfs_build_rstr_page) stamp the header as:
      *   offset 0x00 : NTFS_RECORD_HEADER
-     *   offset 0x10 : SystemPageOffset (USHORT)
-     *   offset 0x12 : MajorVersion / MinorVersion (USHORT)
-     *   offset 0x14 : ChkDskLsn (ULONGLONG)   [only if post-chkdsk]
+     *   offset 0x10 : RestartOffset (USHORT) - the field read below
+     *   offset 0x12 : SystemPageSize (USHORT)
+     *   offset 0x14 : LogPageSize (USHORT)
+     *   offset 0x16 : RestartOffset mirror (libfsntfs view)
+     *   offset 0x18 : MajorVersion (USHORT)  [NTFS_LFS_RSTR_MAJOR_VERSION_OFFSET]
+     *   offset 0x1A : MinorVersion (USHORT)  [NTFS_LFS_RSTR_MINOR_VERSION_OFFSET]
      *   ...
      *   followed by the restart area at a page-specific offset.
      *
@@ -437,10 +441,13 @@ LfsPageSize(PDEVICE_EXTENSION Vcb)
  *      (the landmark showing the last restart record had no open TX).
  *      Anything else -> dirty.
  *
- * On every path, Vcb->LogFileDirty / LogFileLsn are populated so the
- * FSCTL_NTFS_DUMP_LOGFILE worker has state to report.  The caller
- * (NtfsMountVolume) is responsible for OR-ing VCB_VOLUME_READ_ONLY
- * into Vcb->Flags when this worker returns non-SUCCESS.
+ * On every path, Vcb->LogFileDirty / LogFileLsn plus the restart-page
+ * version capture (LogFileMajorVersion / LogFileMinorVersion /
+ * LogFileVersionUnsupported) are populated so the FSCTL_NTFS_DUMP_LOGFILE
+ * worker has state to report.  The caller (NtfsMountVolume) is
+ * responsible for OR-ing VCB_VOLUME_READ_ONLY into Vcb->Flags when this
+ * worker returns non-SUCCESS *or* sets LogFileVersionUnsupported (clean
+ * LFS 2.0 volume - see NtfsLfsEvaluateRestartPair).
  */
 NTSTATUS
 NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
@@ -449,13 +456,14 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
     ULONG PageSize;
     PUCHAR Pages = NULL;
     ULONG PagesLen = 0;
-    NTFS_LFS_RESTART_AREA Primary, Backup;
-    ULONG PrimaryOff = 0, BackupOff = 0;
 
-    /* Default: treat the log as dirty.  Overwritten only when every
-     * check below passes. */
+    /* Default: treat the log as dirty, version unknown.  Overwritten by
+     * NtfsLfsEvaluateRestartPair once the pages are in memory. */
     Vcb->LogFileDirty = TRUE;
     Vcb->LogFileLsn = 0;
+    Vcb->LogFileMajorVersion = 0;
+    Vcb->LogFileMinorVersion = 0;
+    Vcb->LogFileVersionUnsupported = FALSE;
 
     PageSize = LfsPageSize(Vcb);
 
@@ -468,6 +476,55 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
          * from catastrophic mount failure. */
         return STATUS_LOG_FILE_FULL;
     }
+
+    Status = NtfsLfsEvaluateRestartPair(Vcb, Pages, PageSize);
+
+    ExFreePoolWithTag(Pages, TAG_NTFS);
+    return Status;
+}
+
+/**
+ * @name NtfsLfsEvaluateRestartPair
+ * @implemented
+ *
+ * Evaluate an in-memory primary+backup restart-page pair (the first
+ * 2 * @p PageSize bytes of $LogFile:$DATA, USA-fixed in place here).
+ * This is the whole of the Phase-1 gate minus the disk read, split out
+ * so the userspace harness can drive it against synthetic pages; see
+ * NtfsLfsCheckCleanShutdown's banner for the check order.
+ *
+ * Besides the dirty/clean verdict this also captures the restart-page
+ * format version (header offsets 0x18/0x1A, the fields our writers
+ * NtfsLfsBuildRestartPage / ntfs_build_rstr_page stamp) into
+ * Vcb->LogFileMajorVersion / LogFileMinorVersion.  A MajorVersion above
+ * NTFS_LFS_SUPPORTED_MAJOR_VERSION (LFS 2.0, introduced by Windows 8)
+ * sets Vcb->LogFileVersionUnsupported: the log parses and may even be
+ * CLEAN, but its format is newer than this 1.x-era implementation, so
+ * the mount gate must refuse writes exactly like down-level Windows
+ * NTFS does on an LFS 2.0 volume.  The version verdict is deliberately
+ * NOT folded into the returned status - a clean 2.0 log still returns
+ * STATUS_SUCCESS so the caller can distinguish "dirty" from "clean but
+ * too new".
+ */
+NTSTATUS
+NtfsLfsEvaluateRestartPair(PDEVICE_EXTENSION Vcb,
+                           PUCHAR Pages,
+                           ULONG PageSize)
+{
+    NTSTATUS Status;
+    NTFS_LFS_RESTART_AREA Primary, Backup;
+    ULONG PrimaryOff = 0, BackupOff = 0;
+
+    if (Vcb == NULL || Pages == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Default: treat the log as dirty.  Overwritten only when every
+     * check below passes. */
+    Vcb->LogFileDirty = TRUE;
+    Vcb->LogFileLsn = 0;
+    Vcb->LogFileMajorVersion = 0;
+    Vcb->LogFileMinorVersion = 0;
+    Vcb->LogFileVersionUnsupported = FALSE;
 
     Status = NtfsLfsParseRestartPage(Vcb, Pages, PageSize, &Primary, &PrimaryOff);
     if (!NT_SUCCESS(Status))
@@ -505,6 +562,25 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
 
     /* Landmark captured for forensic dump even if backup later disagrees. */
     Vcb->LogFileLsn = Primary.CurrentLsn;
+
+    /* Restart-page format version, from the primary page's header (the
+     * backup must byte-agree on the restart AREA below; the header version
+     * of the primary copy is authoritative).  Captured for every valid
+     * page - dirty or clean - so FSCTL_NTFS_DUMP_LOGFILE and the mount
+     * gate always see it.  LFS 2.0+ (Windows 8+) is a newer log format
+     * than this implementation writes; flag it so NtfsMountVolume forces
+     * the volume read-only even when the log is CLEAN. */
+    ASSERT(PageSize >= NTFS_LFS_RSTR_MINOR_VERSION_OFFSET + sizeof(USHORT));
+    Vcb->LogFileMajorVersion = *(USHORT *)(Pages + NTFS_LFS_RSTR_MAJOR_VERSION_OFFSET);
+    Vcb->LogFileMinorVersion = *(USHORT *)(Pages + NTFS_LFS_RSTR_MINOR_VERSION_OFFSET);
+    if (Vcb->LogFileMajorVersion > NTFS_LFS_SUPPORTED_MAJOR_VERSION)
+    {
+        DPRINT1("LFS EvaluateRestartPair: restart page is LFS %u.%u - newer "
+                "than the supported %u.x format\n",
+                Vcb->LogFileMajorVersion, Vcb->LogFileMinorVersion,
+                NTFS_LFS_SUPPORTED_MAJOR_VERSION);
+        Vcb->LogFileVersionUnsupported = TRUE;
+    }
 
     Status = NtfsLfsParseRestartPage(Vcb, Pages + PageSize, PageSize,
                                      &Backup, &BackupOff);
@@ -544,8 +620,6 @@ NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb)
     Status = STATUS_SUCCESS;
 
 Out:
-    if (Pages != NULL)
-        ExFreePoolWithTag(Pages, TAG_NTFS);
     return Status;
 }
 
