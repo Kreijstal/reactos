@@ -387,6 +387,155 @@ NtfsOpenTargetDirectory(PDEVICE_EXTENSION DeviceExt,
 }
 
 
+/**
+* @name NtfsCreateStream
+* @implemented
+*
+* Creates a named $DATA attribute (alternate data stream) for the file named
+* by the plain part of FileObject->FileName.  If the base file itself does
+* not exist it is created first (Windows semantics: FILE_CREATE of
+* "newfile:stream" creates the base file AND the stream in one call).  The
+* new stream is resident and empty; growth happens through the ordinary
+* SetAttributeDataLength machinery once the caller re-opens and writes.
+*
+* FileObject->FileName must be the normalized "path\\file:stream" form
+* produced by NtfsParseStreamPath; it is temporarily trimmed to the plain
+* file part (both the base lookup and NtfsCreateFileRecord->AddFileName
+* consume it) and restored - including the colon - before returning, so the
+* caller's recursive re-open sees the full stream name again.
+*/
+static
+NTSTATUS
+NtfsCreateStream(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_OBJECT FileObject,
+                 PUNICODE_STRING StreamName,
+                 BOOLEAN CaseSensitive,
+                 ULONG FileAttributes,
+                 BOOLEAN CanWait)
+{
+    NTSTATUS Status;
+    USHORT SavedLength;
+    ULONG ColonIndex;
+    PWSTR BaseName;
+    PWSTR AbsName = NULL;
+    PNTFS_FCB BaseFcb = NULL;
+    PNTFS_FCB ParentFcb = NULL;
+    PFILE_RECORD_HEADER FileRecord = NULL;
+
+    ASSERT(StreamName->Length != 0);
+    ASSERT(FileObject->FileName.Length > StreamName->Length);
+
+    /* Trim "path\file:stream" to "path\file" for the duration. */
+    SavedLength = FileObject->FileName.Length;
+    ColonIndex = (SavedLength - StreamName->Length) / sizeof(WCHAR) - 1;
+    ASSERT(FileObject->FileName.Buffer[ColonIndex] == L':');
+    FileObject->FileName.Length = (USHORT)(ColonIndex * sizeof(WCHAR));
+    FileObject->FileName.Buffer[ColonIndex] = UNICODE_NULL;
+
+    /* Resolve the base file (handling relative opens like NtfsOpenFile). */
+    BaseName = FileObject->FileName.Buffer;
+    if (FileObject->RelatedFileObject)
+    {
+        Status = NtfsMakeAbsoluteFilename(FileObject->RelatedFileObject,
+                                          BaseName,
+                                          &AbsName);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        if (AbsName != NULL)
+            BaseName = AbsName;
+    }
+
+    BaseFcb = NtfsGrabFCBFromTable(DeviceExt, BaseName);
+    if (BaseFcb == NULL)
+    {
+        Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &BaseFcb, BaseName, CaseSensitive);
+        if (ParentFcb != NULL)
+        {
+            NtfsReleaseFCB(DeviceExt, ParentFcb);
+            ParentFcb = NULL;
+        }
+
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            /* The base file doesn't exist either - create it along with the
+             * stream, as Windows does. */
+            Status = NtfsCreateFileRecord(DeviceExt,
+                                          FileObject,
+                                          CaseSensitive,
+                                          FileAttributes,
+                                          CanWait);
+            if (!NT_SUCCESS(Status))
+                goto Cleanup;
+
+            Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &BaseFcb, BaseName, CaseSensitive);
+            if (ParentFcb != NULL)
+            {
+                NtfsReleaseFCB(DeviceExt, ParentFcb);
+                ParentFcb = NULL;
+            }
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            BaseFcb = NULL;
+            goto Cleanup;
+        }
+    }
+
+    if (NtfsFCBIsDirectory(BaseFcb))
+    {
+        /* NTFS allows named $DATA streams on directories, but this driver's
+         * directory FCBs have no data-stream cache plumbing, so directory
+         * ADS is explicitly out of scope - fail the name cleanly. */
+        Status = STATUS_OBJECT_NAME_INVALID;
+        goto Cleanup;
+    }
+
+    /* Insert the (empty, resident) named $DATA attribute. */
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    Status = ReadFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = AddDataStream(DeviceExt,
+                           FileRecord,
+                           StreamName->Buffer,
+                           (USHORT)(StreamName->Length / sizeof(WCHAR)));
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    Status = UpdateFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        /* The base FCB may cache a copy of the record without the stream. */
+        NtfsInvalidateCachedFileRecord(BaseFcb);
+    }
+
+Cleanup:
+    if (FileRecord != NULL)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (BaseFcb != NULL)
+        NtfsReleaseFCB(DeviceExt, BaseFcb);
+
+    if (AbsName != NULL)
+        ExFreePoolWithTag(AbsName, TAG_NTFS);
+
+    /* Restore the full "path\file:stream" name for the re-open. */
+    FileObject->FileName.Buffer[ColonIndex] = L':';
+    FileObject->FileName.Length = SavedLength;
+
+    return Status;
+}
+
+
 /*
  * FUNCTION: Opens a file
  */
@@ -405,6 +554,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 //    PWSTR FileName;
     NTSTATUS Status;
     UNICODE_STRING FullPath;
+    UNICODE_STRING StreamName;
     PIRP Irp = IrpContext->Irp;
 
     DPRINT("NtfsCreateFile(%p, %p) called\n", DeviceObject, IrpContext);
@@ -473,6 +623,23 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     {
         FileObject->FileName.Length -= sizeof(WCHAR);
         FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+
+    /* Split and validate an alternate-data-stream suffix (":Stream[:$DATA]")
+     * once, before any path walk.  This normalizes FileObject->FileName in
+     * place: the ":$DATA" type suffix is stripped ("file::$DATA" == "file"),
+     * so the FCB table key, the directory walk and the create path below all
+     * see at most one colon separating the file part from the stream name.
+     * Invalid stream syntax fails the create up front, like Windows. */
+    RtlInitEmptyUnicodeString(&StreamName, NULL, 0);
+    if (!(RequestedOptions & FILE_OPEN_BY_FILE_ID) &&
+        FileObject->FileName.Length != 0)
+    {
+        Status = NtfsParseStreamPath(&FileObject->FileName, &StreamName);
+        if (!NT_SUCCESS(Status))
+        {
+            return Status;
+        }
     }
 
     if (OpenTargetDir)
@@ -679,6 +846,18 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             LARGE_INTEGER Zero;
             Zero.QuadPart = 0;
 
+            /* Overwrite/supersede truncates on-disk state; refuse it on a
+             * volume the mount gate forced read-only (dirty or too-new
+             * $LogFile - see NtfsMountVolume).  IRP_MJ_CREATE is not
+             * covered by the NtfsDispatch read-only short-circuit, so the
+             * mutating dispositions are gated here. */
+            if (BooleanFlagOn(DeviceExt->Flags, VCB_VOLUME_READ_ONLY))
+            {
+                DPRINT("NTFS: refusing overwrite disposition on read-only volume\n");
+                NtfsCloseFile(DeviceExt, FileObject);
+                return STATUS_MEDIA_WRITE_PROTECTED;
+            }
+
             if (!NtfsGlobalData->EnableWriteSupport)
             {
                 DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
@@ -700,8 +879,10 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 if (!NT_SUCCESS(Status))
                     goto DoneOverwriting;
 
-                // find the data attribute and set it's length to 0 (TODO: Handle Alternate Data Streams)
-                Status = FindAttribute(Fcb->Vcb, fileRecord, AttributeData, L"", 0, &dataContext, &DataAttributeOffset);
+                // find the data attribute (the FCB's own stream - the unnamed
+                // one for a plain open, the named one for "file:stream") and
+                // set its length to 0
+                Status = FindAttribute(Fcb->Vcb, fileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &dataContext, &DataAttributeOffset);
                 if (!NT_SUCCESS(Status))
                     goto DoneOverwriting;
 
@@ -744,6 +925,16 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             RequestedDisposition == FILE_OVERWRITE_IF ||
             RequestedDisposition == FILE_SUPERSEDE)
         {
+            /* The file doesn't exist, so every disposition that reaches
+             * this branch would create it - a mutation the read-only
+             * mount gate must refuse (see the overwrite gate above). */
+            if (BooleanFlagOn(DeviceExt->Flags, VCB_VOLUME_READ_ONLY))
+            {
+                DPRINT("NTFS: refusing create disposition on read-only volume\n");
+                NtfsCloseFile(DeviceExt, FileObject);
+                return STATUS_MEDIA_WRITE_PROTECTED;
+            }
+
             if (!NtfsGlobalData->EnableWriteSupport)
             {
                 DPRINT1("NTFS write-support is EXPERIMENTAL and is disabled by default!\n");
@@ -751,8 +942,26 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 return STATUS_ACCESS_DENIED;
             }
 
+            if (StreamName.Length != 0)
+            {
+                /* A named stream can never be a directory. */
+                if (RequestedOptions & FILE_DIRECTORY_FILE)
+                {
+                    return STATUS_NOT_A_DIRECTORY;
+                }
+
+                /* Create the named $DATA attribute on the base file (creating
+                 * the base file too if it doesn't exist yet). */
+                Status = NtfsCreateStream(DeviceExt,
+                                          FileObject,
+                                          &StreamName,
+                                          BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                          Stack->Parameters.Create.FileAttributes,
+                                          BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+                DPRINT("NtfsCreateFile: NtfsCreateStream returned 0x%lx\n", Status);
+            }
             // Was the user trying to create a directory?
-            if (RequestedOptions & FILE_DIRECTORY_FILE)
+            else if (RequestedOptions & FILE_DIRECTORY_FILE)
             {
                 DPRINT("NtfsCreateFile: Creating directory...\n");
                 // Create the directory on disk
