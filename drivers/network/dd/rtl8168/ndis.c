@@ -30,16 +30,28 @@ MiniportReset (
 
     NdisAcquireSpinLock(&adapter->Lock);
     NICDisableInterrupts(adapter);
+
+    /* NICSoftReset quiesces the RX/TX DMA engines (per-family drain before
+     * CmdReset), so NICProgramRings cannot race in-flight DMA. */
     status = NICSoftReset(adapter);
     if (status == NDIS_STATUS_SUCCESS)
     {
         NICProgramRings(adapter);
+        /* NICEnableTxRx reapplies RxConfig accept bits and the multicast
+         * MARs via NICApplyPacketFilter. */
         NICEnableTxRx(adapter);
         NICApplyInterruptMask(adapter);
+
+        /* Fresh start for the hang detector. */
+        adapter->HwHang = FALSE;
+        adapter->CheckForHangTxPending = FALSE;
+        adapter->CheckForHangTxOk = adapter->TransmitOk;
     }
     NdisReleaseSpinLock(&adapter->Lock);
 
-    *AddressingReset = FALSE;
+    /* Have NDIS replay the addressing OIDs (packet filter, multicast list)
+     * on top of the reprogrammed chip. */
+    *AddressingReset = TRUE;
     return status;
 }
 
@@ -89,32 +101,6 @@ MiniportSend (
     slotVa = adapter->TxBuffers + (idx * RX_BUF_SIZE);
     slotPa.QuadPart = adapter->TxBuffersPa.QuadPart + (ULONGLONG)idx * RX_BUF_SIZE;
 
-    /* Per-packet TX checksum offload bits.  NDIS passes the request via the
-     * TcpIpChecksumPacketInfo per-packet entry; bit layout is:
-     *   V4.IpChecksum   -> TXD2_IPv4_CS
-     *   V4.TcpChecksum  -> TXD2_TCP_CS
-     *   V4.UdpChecksum  -> TXD2_UDP_CS
-     * If the protocol didn't request offload (or we negotiated it off) the
-     * field is zero and the chip emits the frame as-is. */
-    {
-        PNDIS_TCP_IP_CHECKSUM_PACKET_INFO csum =
-            (PNDIS_TCP_IP_CHECKSUM_PACKET_INFO)
-                &NDIS_PER_PACKET_INFO_FROM_PACKET(Packet, TcpIpChecksumPacketInfo);
-        adapter->LastTxOpts2 = 0;
-        if (csum->Value)
-        {
-            if ((adapter->TaskOffloadFlags & TASK_OFFLOAD_IPCS) &&
-                csum->Transmit.NdisPacketIpChecksum)
-                adapter->LastTxOpts2 |= TXD2_IPv4_CS;
-            if ((adapter->TaskOffloadFlags & TASK_OFFLOAD_TCPCS) &&
-                csum->Transmit.NdisPacketTcpChecksum)
-                adapter->LastTxOpts2 |= TXD2_TCP_CS;
-            if ((adapter->TaskOffloadFlags & TASK_OFFLOAD_UDPCS) &&
-                csum->Transmit.NdisPacketUdpChecksum)
-                adapter->LastTxOpts2 |= TXD2_UDP_CS;
-        }
-    }
-
     /* Copy each NDIS buffer fragment into our bounce slot -- avoids the SG path
      * which on NDIS5 hands us PHYSICAL_ADDRESS lists that may be 64-bit while
      * older 8168 chips only accept 32-bit DMA in non-DAC mode. */
@@ -157,8 +143,7 @@ MiniportSend (
         }
     }
 
-    NICTransmitDescriptor(adapter, idx, slotPa, totalBufferLength,
-                          adapter->LastTxOpts2);
+    NICTransmitDescriptor(adapter, idx, slotPa, totalBufferLength);
 
     adapter->TxProducer = (idx + 1) % TX_DESC_COUNT;
     if (adapter->TxProducer == adapter->TxConsumer)
@@ -178,35 +163,23 @@ MiniportHalt (
 
     ASSERT(adapter != NULL);
 
+    /* Quiesce the chip first: mask + ack interrupts, then a full soft reset
+     * (which drains the RX/TX DMA engines per family) so no in-flight DMA
+     * can touch the rings we are about to free. */
+    if (adapter->IoBase)
+    {
+        NICDisableInterrupts(adapter);
+        NICAcknowledgeInterrupts(adapter, 0xFFFF);
+        NICSoftReset(adapter);
+
+        /* Drop the PLL so D3 entry leaves the chip in its lowest-power state. */
+        RtlPllPowerDown(adapter);
+    }
+
     if (adapter->InterruptRegistered)
     {
         NdisMDeregisterInterrupt(&adapter->Interrupt);
         adapter->InterruptRegistered = FALSE;
-    }
-
-    if (adapter->IoBase)
-    {
-        NICDisableInterrupts(adapter);
-        /* Stop RX/TX. */
-        RtlWriteReg8(adapter, R_CMD, B_CMD_STOPREQ);
-
-        /* Drop the PLL so D3 entry leaves the chip in its lowest-power state. */
-        RtlPllPowerDown(adapter);
-
-        if (adapter->IoBaseIsMmio)
-        {
-            NdisMUnmapIoSpace(adapter->MiniportAdapterHandle,
-                              adapter->IoBase,
-                              adapter->MmioLength);
-        }
-        else
-        {
-            NdisMDeregisterIoPortRange(adapter->MiniportAdapterHandle,
-                                       adapter->IoPortStart,
-                                       adapter->IoPortLength,
-                                       adapter->IoBase);
-        }
-        adapter->IoBase = NULL;
     }
 
     if (adapter->TxRing)
@@ -232,6 +205,24 @@ MiniportHalt (
         NdisMFreeSharedMemory(adapter->MiniportAdapterHandle,
                               RX_POOL_BYTES, FALSE,
                               adapter->RxBuffers, adapter->RxBuffersPa);
+    }
+
+    if (adapter->IoBase)
+    {
+        if (adapter->IoBaseIsMmio)
+        {
+            NdisMUnmapIoSpace(adapter->MiniportAdapterHandle,
+                              adapter->IoBase,
+                              adapter->MmioLength);
+        }
+        else
+        {
+            NdisMDeregisterIoPortRange(adapter->MiniportAdapterHandle,
+                                       adapter->IoPortStart,
+                                       adapter->IoPortLength,
+                                       adapter->IoBase);
+        }
+        adapter->IoBase = NULL;
     }
 
     NdisFreeMemory(adapter, sizeof(*adapter), 0);
@@ -295,10 +286,14 @@ MiniportInitialize (
     adapter->MiniportAdapterHandle = MiniportAdapterHandle;
     NdisAllocateSpinLock(&adapter->Lock);
 
+    /* Serialized miniport, like rtl8139: the driver relies on serialized
+     * semantics (NdisMEthIndicateReceive, NDIS requeueing sends we fail
+     * with NDIS_STATUS_RESOURCES).  A deserialized miniport returning
+     * NDIS_STATUS_RESOURCES from MiniportSend would silently drop packets. */
     NdisMSetAttributesEx(MiniportAdapterHandle,
                          adapter,
                          0,
-                         NDIS_ATTRIBUTE_BUS_MASTER | NDIS_ATTRIBUTE_DESERIALIZE,
+                         NDIS_ATTRIBUTE_BUS_MASTER,
                          NdisInterfacePci);
 
     /* Resource list */
@@ -519,6 +514,7 @@ DriverEntry (
     NdisZeroMemory(&ch, sizeof(ch));
     ch.MajorNdisVersion        = NDIS_MINIPORT_MAJOR_VERSION;
     ch.MinorNdisVersion        = NDIS_MINIPORT_MINOR_VERSION;
+    ch.CheckForHangHandler     = MiniportCheckForHang;
     ch.HaltHandler             = MiniportHalt;
     ch.HandleInterruptHandler  = MiniportHandleInterrupt;
     ch.InitializeHandler       = MiniportInitialize;

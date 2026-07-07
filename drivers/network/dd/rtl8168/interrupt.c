@@ -19,8 +19,9 @@ MiniportISR (
     )
 {
     PRTL_ADAPTER adapter = (PRTL_ADAPTER)MiniportAdapterContext;
+    USHORT status;
 
-    adapter->InterruptPending |= NICInterruptRecognized(adapter, InterruptRecognized);
+    status = NICInterruptRecognized(adapter, InterruptRecognized);
 
     if (!(*InterruptRecognized))
     {
@@ -28,15 +29,46 @@ MiniportISR (
         return;
     }
 
-    if (adapter->InterruptPending & R_I_LINKCHG)
+    adapter->InterruptPending |= status;
+
+    /* Qualify link-change on the freshly read status bits only -- the
+     * accumulated InterruptPending would re-indicate media status on every
+     * subsequent interrupt after the first link event. */
+    if (status & R_I_LINKCHG)
     {
         adapter->LinkChange = TRUE;
         NICUpdateLinkStatus(adapter);
     }
 
     /* Ack interrupts so the line drops; actual servicing happens at DISPATCH. */
-    NICAcknowledgeInterrupts(adapter);
+    NICAcknowledgeInterrupts(adapter, status);
     *QueueMiniportHandleInterrupt = TRUE;
+}
+
+/* NdisMSynchronizeWithInterrupt callback context: the ISR does
+ * InterruptPending |= status at DIRQL, so the DPC's read-and-clear must run
+ * synchronized with the ISR or an ISR update between the read and the clear
+ * is lost (a nonatomic RMW race -- rtl8139 carries the same FIXME). */
+typedef struct _RTL_ISR_SYNC_CONTEXT {
+    PRTL_ADAPTER Adapter;
+    USHORT Pending;
+    BOOLEAN LinkChange;
+} RTL_ISR_SYNC_CONTEXT, *PRTL_ISR_SYNC_CONTEXT;
+
+static BOOLEAN
+NTAPI
+RtlConsumePendingInterrupts (
+    IN PVOID SynchronizeContext
+    )
+{
+    PRTL_ISR_SYNC_CONTEXT ctx = (PRTL_ISR_SYNC_CONTEXT)SynchronizeContext;
+    PRTL_ADAPTER adapter = ctx->Adapter;
+
+    ctx->Pending = adapter->InterruptPending;
+    ctx->LinkChange = adapter->LinkChange;
+    adapter->InterruptPending = 0;
+    adapter->LinkChange = FALSE;
+    return TRUE;
 }
 
 static VOID
@@ -49,8 +81,12 @@ RtlServiceTx (
         PRTL_DESC d = &Adapter->TxRing[Adapter->TxConsumer];
 
         /* NIC still owns this slot -- stop here, more interrupts will come. */
-        if (d->opts1 & DESC_OWN)
+        if (*(volatile ULONG *)&d->opts1 & DESC_OWN)
             break;
+
+        /* Order the OWN check before any further descriptor reads (Linux
+         * rtl_tx: rmb after reading DescOwn). */
+        KeMemoryBarrier();
 
         /* TX completion -- the chip clears OWN but does not surface per-frame
          * status the way RTL8139 did.  We treat OWN-clear as successful and
@@ -64,6 +100,13 @@ RtlServiceTx (
         Adapter->TxConsumer = (Adapter->TxConsumer + 1) % TX_DESC_COUNT;
         Adapter->TxFull = FALSE;
     }
+
+    /* 8168 erratum (Linux rtl_tx): "TxPoll requests are lost when the Tx
+     * packets are too close."  If descriptors are still owned by the chip
+     * after reclaiming, kick the doorbell again so a swallowed poll request
+     * cannot strand the queue. */
+    if (Adapter->TxFull || Adapter->TxConsumer != Adapter->TxProducer)
+        RtlWriteReg8(Adapter, R_TXPOLL, B_TXP_NPQ);
 }
 
 static VOID
@@ -76,13 +119,28 @@ RtlServiceRx (
     for (;;)
     {
         PRTL_DESC d = &Adapter->RxRing[Adapter->RxConsumer];
-        ULONG opts1 = d->opts1;
+        ULONG opts1 = *(volatile ULONG *)&d->opts1;
         ULONG length;
         PUCHAR buf;
 
         /* Still owned by NIC -> nothing more to receive. */
         if (opts1 & DESC_OWN)
             break;
+
+        /* Order the OWN check before reading the rest of the descriptor /
+         * buffer (Linux rtl_rx: dma_rmb after reading DescOwn). */
+        KeMemoryBarrier();
+
+        /* Error policy modeled on Linux rtl_rx: RxRES summarizes all receive
+         * errors (RUNT/CRC frame contents may be corrupt); drop the frame.
+         * Bit 27 is MAR (multicast received) on the 8168 -- NOT an error. */
+        if (opts1 & RXD_RES)
+        {
+            if (opts1 & RXD_CRC)
+                Adapter->ReceiveCrcError++;
+            Adapter->ReceiveError++;
+            goto next;
+        }
 
         if (!(opts1 & DESC_FS) || !(opts1 & DESC_LS))
         {
@@ -95,7 +153,8 @@ RtlServiceRx (
             goto next;
         }
 
-        length = opts1 & DESC_LEN_MASK;
+        /* RX length field is 14 bits; bits 15/14 are checksum status. */
+        length = opts1 & RXD_LEN_MASK;
         if (length < 14 || length > RX_BUF_SIZE)
         {
             NDIS_DbgPrint(MIN_TRACE,
@@ -108,16 +167,6 @@ RtlServiceRx (
         /* The chip appends a 4-byte FCS; trim it from the length we report. */
         if (length >= 4)
             length -= 4;
-
-        if (opts1 & (RXD_CRC | RXD_FAE | RXD_RUNT | RXD_RES | RXD_RWT))
-        {
-            if (opts1 & RXD_CRC)
-                Adapter->ReceiveCrcError++;
-            else if (opts1 & RXD_FAE)
-                Adapter->ReceiveAlignmentError++;
-            Adapter->ReceiveError++;
-            goto next;
-        }
 
         buf = Adapter->RxBuffers + (Adapter->RxConsumer * RX_BUF_SIZE);
 
@@ -147,10 +196,20 @@ MiniportHandleInterrupt (
     )
 {
     PRTL_ADAPTER adapter = (PRTL_ADAPTER)MiniportAdapterContext;
+    RTL_ISR_SYNC_CONTEXT sync;
 
     NdisDprAcquireSpinLock(&adapter->Lock);
 
-    if (adapter->LinkChange)
+    /* Snapshot-and-clear the ISR-accumulated state atomically wrt the ISR;
+     * every event group (TX, RX, link, error) is consumed exactly once. */
+    sync.Adapter = adapter;
+    sync.Pending = 0;
+    sync.LinkChange = FALSE;
+    NdisMSynchronizeWithInterrupt(&adapter->Interrupt,
+                                  RtlConsumePendingInterrupts,
+                                  &sync);
+
+    if (sync.LinkChange)
     {
         NdisDprReleaseSpinLock(&adapter->Lock);
         NdisMIndicateStatus(adapter->MiniportAdapterHandle,
@@ -161,28 +220,70 @@ MiniportHandleInterrupt (
                             0);
         NdisMIndicateStatusComplete(adapter->MiniportAdapterHandle);
         NdisDprAcquireSpinLock(&adapter->Lock);
-        adapter->LinkChange = FALSE;
     }
 
-    if (adapter->InterruptPending & (R_I_TXOK | R_I_TXERR | R_I_TXDESCUNAVAIL))
-    {
+    if (sync.Pending & (R_I_TXOK | R_I_TXERR | R_I_TXDESCUNAVAIL))
         RtlServiceTx(adapter);
-        adapter->InterruptPending &= ~(R_I_TXOK | R_I_TXERR | R_I_TXDESCUNAVAIL);
-    }
 
-    if (adapter->InterruptPending & (R_I_RXOK | R_I_RXERR | R_I_RXOVRFLW | R_I_RXFIFOOVR))
-    {
+    if (sync.Pending & (R_I_RXOK | R_I_RXERR | R_I_RXOVRFLW | R_I_RXFIFOOVR))
         RtlServiceRx(adapter);
-        adapter->InterruptPending &= ~(R_I_RXOK | R_I_RXERR | R_I_RXOVRFLW | R_I_RXFIFOOVR);
+
+    /* Linux rtl8169_interrupt: on VER_11 an RxFIFOOver wedges the chip --
+     * stop and schedule a reset.  Our equivalent: flag it so the next
+     * MiniportCheckForHang poll returns TRUE and NDIS calls MiniportReset. */
+    if ((sync.Pending & R_I_RXFIFOOVR) &&
+        adapter->MacVersion == RTL_MAC_VER_11)
+    {
+        adapter->HwHang = TRUE;
     }
 
-    if (adapter->InterruptPending & (R_I_SYSERR | R_I_PCSTMOUT))
+    if (sync.Pending & (R_I_SYSERR | R_I_PCSTMOUT))
     {
         NDIS_DbgPrint(MIN_TRACE,
             ("RTL8168: system error interrupt (pending=0x%04x)\n",
-             adapter->InterruptPending));
-        adapter->InterruptPending &= ~(R_I_SYSERR | R_I_PCSTMOUT);
+             sync.Pending));
+        if (sync.Pending & R_I_SYSERR)
+            adapter->HwHang = TRUE;
     }
 
     NdisDprReleaseSpinLock(&adapter->Lock);
+}
+
+/*
+ * NDIS polls this roughly every 2 seconds; returning TRUE makes NDIS call
+ * MiniportReset.  Hang conditions:
+ *   - a SYSERR interrupt was seen (PCI error; Linux resets in
+ *     rtl8169_pcierr_interrupt),
+ *   - the VER_11 RxFIFOOver wedge (see MiniportHandleInterrupt),
+ *   - TX watchdog: packets queued but no TxOK progress across two
+ *     consecutive polls.
+ */
+BOOLEAN
+NTAPI
+MiniportCheckForHang (
+    IN NDIS_HANDLE MiniportAdapterContext
+    )
+{
+    PRTL_ADAPTER adapter = (PRTL_ADAPTER)MiniportAdapterContext;
+    BOOLEAN hang;
+    BOOLEAN txPending;
+
+    NdisAcquireSpinLock(&adapter->Lock);
+
+    hang = adapter->HwHang;
+
+    txPending = adapter->TxFull ||
+                adapter->TxConsumer != adapter->TxProducer;
+    if (txPending &&
+        adapter->CheckForHangTxPending &&
+        adapter->TransmitOk == adapter->CheckForHangTxOk)
+    {
+        hang = TRUE;
+    }
+
+    adapter->CheckForHangTxPending = txPending;
+    adapter->CheckForHangTxOk = adapter->TransmitOk;
+
+    NdisReleaseSpinLock(&adapter->Lock);
+    return hang;
 }
