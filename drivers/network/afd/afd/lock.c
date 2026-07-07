@@ -119,57 +119,14 @@ PVOID LockRequest( PIRP Irp,
                 ? IrpSp->Parameters.Read.Length
                 : IrpSp->Parameters.Write.Length;
 
-            /* Allocate kernel-pool buffer + SEH-copy from user space.
-             * Same trick as the DEVICE_CONTROL path: bypass ReactOS's
-             * broken MmProbeAndLockPages. */
-            KernelBuffer = ExAllocatePoolWithTag(NonPagedPool, BufferLength,
-                                                 TAG_AFD_DATA_BUFFER);
-            if (KernelBuffer == NULL)
-            {
-                AFD_DbgPrint(MIN_TRACE,("Failed to allocate kernel buffer\n"));
-                return NULL;
-            }
-
-            /* For WRITE we need the user data; for READ we'll write
-             * back at unlock time. Either way the SEH copy initializes
-             * the kernel buffer. */
-            _SEH2_TRY {
-                if (IrpSp->MajorFunction == IRP_MJ_WRITE)
-                    RtlCopyMemory(KernelBuffer, UserBuffer, BufferLength);
-            } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-                CopyStatus = _SEH2_GetExceptionCode();
-            } _SEH2_END;
-
-            if (!NT_SUCCESS(CopyStatus))
-            {
-                AFD_DbgPrint(MIN_TRACE,("SEH-copy from user buffer failed 0x%08lx\n",
-                                        (ULONG)CopyStatus));
-                ExFreePoolWithTag(KernelBuffer, TAG_AFD_DATA_BUFFER);
-                return NULL;
-            }
-
-            /* Wrap the kernel buffer in an MDL so callers can use
-             * MmGetSystemAddressForMdl/MmGetMdlByteCount on it. */
-            Irp->MdlAddress = IoAllocateMdl(KernelBuffer, BufferLength,
-                                            FALSE, FALSE, NULL);
-            if (Irp->MdlAddress == NULL)
-            {
-                ExFreePoolWithTag(KernelBuffer, TAG_AFD_DATA_BUFFER);
-                return NULL;
-            }
-            MmBuildMdlForNonPagedPool(Irp->MdlAddress);
-
-            /* AFD expects an AFD_RECV_INFO struct describing the buffer
-             * to read/write from. Build one whose BufferArray points at
-             * the kernel buffer (via the MDL system VA). */
+            /* AFD expects an AFD_RECV_INFO struct describing the read/write
+             * buffer. LockBuffers owns the actual data staging buffers, so
+             * this descriptor must keep the original user pointer. */
             AfdInfo = ExAllocatePoolWithTag(NonPagedPool,
                                             sizeof(AFD_RECV_INFO) + sizeof(AFD_WSABUF),
                                             TAG_AFD_DATA_BUFFER);
             if (!AfdInfo)
             {
-                IoFreeMdl(Irp->MdlAddress);
-                Irp->MdlAddress = NULL;
-                ExFreePoolWithTag(KernelBuffer, TAG_AFD_DATA_BUFFER);
                 return NULL;
             }
 
@@ -177,18 +134,22 @@ PVOID LockRequest( PIRP Irp,
             AfdInfo->BufferCount = 1;
             AfdInfo->AfdFlags    = 0;
             AfdInfo->TdiFlags    = 0;
-            AfdInfo->BufferArray[0].buf = (PCHAR)KernelBuffer;
+            AfdInfo->BufferArray[0].buf = (PCHAR)UserBuffer;
             AfdInfo->BufferArray[0].len = BufferLength;
 
-            Irp->Tail.Overlay.DriverContext[0] = AfdInfo;
+            Irp->MdlAddress = IoAllocateMdl(AfdInfo,
+                                            sizeof(AFD_RECV_INFO) + sizeof(AFD_WSABUF),
+                                            FALSE, FALSE, NULL);
+            if (Irp->MdlAddress == NULL)
+            {
+                ExFreePoolWithTag(AfdInfo, TAG_AFD_DATA_BUFFER);
+                return NULL;
+            }
+            MmBuildMdlForNonPagedPool(Irp->MdlAddress);
 
-            /* For READ, save the user pointer so UnlockRequest can copy
-             * the result back. For WRITE the user data is already in the
-             * kernel buffer and there's no writeback needed. */
-            Irp->Tail.Overlay.DriverContext[1] =
-                (IrpSp->MajorFunction == IRP_MJ_READ) ? UserBuffer : NULL;
-            Irp->Tail.Overlay.DriverContext[2] =
-                (IrpSp->MajorFunction == IRP_MJ_READ) ? PsGetCurrentProcess() : NULL;
+            Irp->Tail.Overlay.DriverContext[0] = AfdInfo;
+            Irp->Tail.Overlay.DriverContext[1] = NULL;
+            Irp->Tail.Overlay.DriverContext[2] = NULL;
 
             if (LockMode != NULL)
                 *LockMode = KernelMode;
@@ -216,8 +177,8 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
     /* dev-nt6-1: this matches the kernel-pool LockRequest above. The
      * kernel buffer in DriverContext[0] is either:
      *  - For DEVICE_CONTROL: the raw kernel buffer
-     *  - For READ/WRITE:     an AFD_RECV_INFO whose BufferArray[0].buf
-     *                        points at the kernel buffer
+     *  - For READ/WRITE:     an AFD_RECV_INFO descriptor; LockBuffers owns
+     *                        and frees the actual data staging buffers
      * DriverContext[1] holds the original user pointer if a writeback
      * is needed, NULL otherwise. We SEH-copy back to user space and
      * skip MmUnlockPages because no lock was taken in the first place. */
@@ -229,10 +190,7 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
 
     if (IsRecvInfo)
     {
-        PAFD_RECV_INFO AfdInfo = (PAFD_RECV_INFO)Irp->Tail.Overlay.DriverContext[0];
-        KernelBuffer = (AfdInfo && AfdInfo->BufferCount > 0)
-            ? AfdInfo->BufferArray[0].buf
-            : NULL;
+        KernelBuffer = NULL;
     }
     else
     {
@@ -262,9 +220,7 @@ VOID UnlockRequest( PIRP Irp, PIO_STACK_LOCATION IrpSp )
 
     if (IsRecvInfo)
     {
-        /* Free the AFD_RECV_INFO struct AND the underlying kernel buffer. */
-        if (KernelBuffer != NULL)
-            ExFreePoolWithTag(KernelBuffer, TAG_AFD_DATA_BUFFER);
+        /* LockBuffers already freed the data buffers. */
         ExFreePoolWithTag(Irp->Tail.Overlay.DriverContext[0], TAG_AFD_DATA_BUFFER);
     }
     else
@@ -604,7 +560,8 @@ NTSTATUS NTAPI UnlockAndMaybeComplete
   UINT Information ) {
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = Information;
-    if ( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if (Irp->MdlAddress && Irp->Tail.Overlay.DriverContext[0])
+        UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
     (void)IoSetCancelRoutine(Irp, NULL);
     SocketStateUnlock( FCB );
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
@@ -617,7 +574,8 @@ NTSTATUS LostSocket( PIRP Irp ) {
     AFD_DbgPrint(MIN_TRACE,("Called.\n"));
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = Status;
-    if ( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
+    if (Irp->MdlAddress && Irp->Tail.Overlay.DriverContext[0])
+        UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
     IoCompleteRequest( Irp, IO_NO_INCREMENT );
     return Status;
 }
