@@ -32,6 +32,7 @@ list(APPEND SOURCE
     ndis/protocol.c
     ndis/string.c
     ndis/time.c
+    ndis/workitem.c
     include/ndissys.h)
 
 # NDIS 6 sources are compiled with NDIS620_MINIPORT / NDIS620 so they see
@@ -56,10 +57,7 @@ set(NDIS6_SOURCE
     ndis/60filter.c
     ndis/60util.c
     include/ndis6_internal.h)
-set_source_files_properties(${NDIS6_SOURCE} PROPERTIES
-    SKIP_PRECOMPILE_HEADERS ON
-    COMPILE_DEFINITIONS "NDIS620;NDIS620_MINIPORT"
-    COMPILE_OPTIONS "-U_WIN32_WINNT;-UWINVER;-UNTDDI_VERSION;-D_WIN32_WINNT=0x0601;-DWINVER=0x0601;-DNTDDI_VERSION=0x06010000")
+set_source_files_properties(${NDIS6_SOURCE} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 add_library(ndis MODULE
     ${SOURCE}
