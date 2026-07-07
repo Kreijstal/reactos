@@ -11,10 +11,13 @@ import sys
 import json
 
 # These are modules we do not have, so redirect them to ones we do have.
+REDIRECT_APISETS = {
+    'api-ms-win-core-path-l1-1-0.dll': 'kernelbase.dll',
+}
+
 REDIRECT_HOSTS = {
     'kernelbase.dll': 'kernel32.dll',
     'kernel.appcore.dll': 'kernel32.dll',
-    'ucrtbase.dll': 'msvcrt.dll',
     'winmmbase.dll': 'winmm.dll',
     'gdi32full.dll': 'gdi32.dll'
 }
@@ -73,8 +76,10 @@ class Apiset:
             # Disable forwarders that have an empty host
             prefix = '// '
         else:
-            # Check to see if there is any dll we want to swap (kernelbase -> kernel32)
-            replace = REDIRECT_HOSTS.get(host.lower(), None)
+            # Check to see if there is any API set or dll we want to swap.
+            replace = REDIRECT_APISETS.get(self.name.lower(), None)
+            if replace is None:
+                replace = REDIRECT_HOSTS.get(host.lower(), None)
             if replace:
                 postfix = ' // ' + host
                 host = replace

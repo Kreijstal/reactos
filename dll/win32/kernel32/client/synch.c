@@ -343,6 +343,29 @@ CreateWaitableTimerW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
  */
 HANDLE
 WINAPI
+CreateWaitableTimerExW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
+                       IN LPCWSTR lpTimerName OPTIONAL,
+                       IN DWORD dwFlags,
+                       IN DWORD dwDesiredAccess)
+{
+    if (dwFlags & ~CREATE_WAITABLE_TIMER_MANUAL_RESET)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    CreateNtObjectFromWin32Api(WaitableTimer, Timer, dwDesiredAccess,
+                               lpTimerAttributes,
+                               lpTimerName,
+                               (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ?
+                                   NotificationTimer : SynchronizationTimer);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
 OpenWaitableTimerW(IN DWORD dwDesiredAccess,
                    IN BOOL bInheritHandle,
                    IN LPCWSTR lpTimerName)
@@ -377,6 +400,30 @@ SetWaitableTimer(IN HANDLE hTimer,
     /* If we got here, then we failed */
     BaseSetLastNTError(Status);
     return FALSE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetWaitableTimerEx(IN HANDLE hTimer,
+                   IN const LARGE_INTEGER *pDueTime,
+                   IN LONG lPeriod,
+                   IN PTIMERAPCROUTINE pfnCompletionRoutine OPTIONAL,
+                   IN OPTIONAL LPVOID lpArgToCompletionRoutine,
+                   IN PREASON_CONTEXT WakeContext OPTIONAL,
+                   IN ULONG TolerableDelay)
+{
+    UNREFERENCED_PARAMETER(WakeContext);
+    UNREFERENCED_PARAMETER(TolerableDelay);
+
+    return SetWaitableTimer(hTimer,
+                            pDueTime,
+                            lPeriod,
+                            pfnCompletionRoutine,
+                            lpArgToCompletionRoutine,
+                            FALSE);
 }
 
 /*
