@@ -358,6 +358,20 @@ typedef struct
     BOOLEAN LogFileDirty;
     ULONGLONG LogFileLsn;
 
+    /* $LogFile restart-page format version, captured by
+     * NtfsLfsEvaluateRestartPair from the primary restart page (header
+     * offsets NTFS_LFS_RSTR_{MAJOR,MINOR}_VERSION_OFFSET) once it parses.
+     * LogFileVersionUnsupported is set when MajorVersion exceeds
+     * NTFS_LFS_SUPPORTED_MAJOR_VERSION (LFS 2.0+, Windows 8+): the log
+     * format is newer than this implementation, so NtfsMountVolume ORs
+     * VCB_VOLUME_READ_ONLY into Flags even though the log is CLEAN -
+     * mirroring how down-level Windows NTFS refuses to write LFS 2.0
+     * volumes.  All three stay zero when neither restart page parses
+     * (blank / corrupt logs keep today's dirty-gate behavior). */
+    USHORT LogFileMajorVersion;
+    USHORT LogFileMinorVersion;
+    BOOLEAN LogFileVersionUnsupported;
+
     /* $LogFile Phase 2 slice 2: live write-ahead-logging (WAL) state.
      *
      * LoggingEnabled gates the ENTIRE emission path and defaults to FALSE.
@@ -427,6 +441,25 @@ typedef struct
     NPAGED_LOOKASIDE_LIST FcbLookasideList;
     NPAGED_LOOKASIDE_LIST AttrCtxtLookasideList;
     BOOLEAN EnableWriteSupport;
+
+    /* Documented NTFS tuning knobs from
+     * \Registry\Machine\SYSTEM\CurrentControlSet\Control\FileSystem, read
+     * once at DriverEntry and sanitized through NtfsSanitizeRegistryUlong
+     * (Windows-2003 defaults: last-access updates enabled, 8.3 creation
+     * enabled, MFT zone multiplier 1).
+     *
+     * DisableLastAccessUpdate (NtfsDisableLastAccessUpdate) and
+     * Disable8dot3NameCreation (NtfsDisable8dot3NameCreation) are stored
+     * for the code paths that will consume them: this driver currently
+     * performs no implicit last-access updates on read/enumerate and never
+     * generates 8.3 alias names (see AddFileName in attrib.c - it already
+     * emulates the 8.3-generation-disabled behavior), so neither knob has
+     * a consumer yet.  MftZoneReservation (NtfsMftZoneReservation, 1..4)
+     * is copied into each volume's NtfsInfo at mount (NtfsGetVolumeData)
+     * for the future MFT-zone-aware cluster allocator. */
+    BOOLEAN DisableLastAccessUpdate;
+    BOOLEAN Disable8dot3NameCreation;
+    ULONG MftZoneReservation;
 
     /* Zombie FCB list - FCBs we tried to destroy but whose
      * SectionObjectPointers MM still references via a live data or image
@@ -961,6 +994,33 @@ NtfsMarkIrpContextForQueue(PNTFS_IRP_CONTEXT IrpContext)
     return STATUS_PENDING;
 }
 
+/* Validate one DWORD registry tuning knob.  Pure - no kernel dependencies -
+ * so the userspace harness can unit-test the clamping rules directly.
+ *
+ * @param Found    FALSE when the value was absent or not a REG_DWORD.
+ * @param Value    Raw DWORD read from the registry (ignored when !Found).
+ * @param Default  Windows-2003 default returned for absent/invalid values.
+ * @param Minimum / @param Maximum
+ *                 Inclusive valid range; out-of-range values fall back to
+ *                 Default (matching how Windows treats a bogus
+ *                 NtfsMftZoneReservation), they are NOT saturated. */
+FORCEINLINE
+ULONG
+NtfsSanitizeRegistryUlong(BOOLEAN Found,
+                          ULONG Value,
+                          ULONG Default,
+                          ULONG Minimum,
+                          ULONG Maximum)
+{
+    ASSERT(Minimum <= Maximum);
+    ASSERT(Default >= Minimum && Default <= Maximum);
+
+    if (!Found || Value < Minimum || Value > Maximum)
+        return Default;
+
+    return Value;
+}
+
 /* attrib.c */
 
 //VOID
@@ -976,6 +1036,12 @@ AddBitmap(PNTFS_VCB Vcb,
 NTSTATUS
 AddData(PFILE_RECORD_HEADER FileRecord,
         PNTFS_ATTR_RECORD AttributeAddress);
+
+NTSTATUS
+AddDataStream(PNTFS_VCB Vcb,
+              PFILE_RECORD_HEADER FileRecord,
+              PCWSTR Name,
+              USHORT NameLength);
 
 NTSTATUS
 AddRun(PNTFS_VCB Vcb,
@@ -1401,6 +1467,10 @@ FAST_IO_WRITE NtfsFastIoWrite;
 
 /* fcb.c */
 
+NTSTATUS
+NtfsParseStreamPath(PUNICODE_STRING FileName,
+                    PUNICODE_STRING StreamName);
+
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
               PCWSTR Stream,
@@ -1787,6 +1857,10 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
                      BOOLEAN CaseSensitive);
 
 NTSTATUS
+NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
+                 PNTFS_FCB Fcb);
+
+NTSTATUS
 NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
                                 ULONGLONG ParentMftIndex,
                                 ULONGLONG FileReferenceNumber,
@@ -2101,6 +2175,20 @@ typedef struct _NTFS_LFS_RESTART_AREA
 /* Restart flags bits (NTFS_LFS_RESTART_AREA.Flags). */
 #define NTFS_LFS_RESTART_FLAG_CLEAN 0x0002   /* Volume dismounted cleanly    */
 
+/* Restart-page header version fields.  The layout authority is our own
+ * writer pair (NtfsLfsBuildRestartPage in lfs.c and ntfslib's
+ * ntfs_build_rstr_page), which stamps the restart-page header as:
+ *   0x10 RestartOffset  0x12 SystemPageSize  0x14 LogPageSize
+ *   0x16 RestartOffset (libfsntfs mirror)
+ *   0x18 MajorVersion   0x1A MinorVersion
+ * A MajorVersion above NTFS_LFS_SUPPORTED_MAJOR_VERSION (LFS 2.0 was
+ * introduced by Windows 8) means the log format is newer than this 1.x-era
+ * implementation understands; the mount gate forces such volumes read-only
+ * instead of risking on-disk state a 2.0 replayer would not expect. */
+#define NTFS_LFS_RSTR_MAJOR_VERSION_OFFSET  0x18
+#define NTFS_LFS_RSTR_MINOR_VERSION_OFFSET  0x1A
+#define NTFS_LFS_SUPPORTED_MAJOR_VERSION    1
+
 /* Body of an $LogFile RCRD page record.  Immediately follows the
  * NTFS_RECORD_HEADER.  Every log record starts on a 512-byte-aligned
  * boundary and carries this header, then a variable-size payload
@@ -2302,6 +2390,19 @@ NtfsLfsParseRecordPage(PDEVICE_EXTENSION Vcb,
  * populated so FSCTL_NTFS_DUMP_LOGFILE can report state. */
 NTSTATUS
 NtfsLfsCheckCleanShutdown(PDEVICE_EXTENSION Vcb);
+
+/* Worker behind NtfsLfsCheckCleanShutdown: evaluate an already-read
+ * primary+backup restart-page pair (@p Pages, 2 * @p PageSize bytes,
+ * mutated in place by the USA fixups).  Populates Vcb->LogFileDirty,
+ * LogFileLsn and the LogFileMajorVersion / LogFileMinorVersion /
+ * LogFileVersionUnsupported capture.  Split out so the userspace harness
+ * can drive the mount-time gate against synthetic pages without a full
+ * $LogFile fixture.  Returns the same statuses as
+ * NtfsLfsCheckCleanShutdown. */
+NTSTATUS
+NtfsLfsEvaluateRestartPair(PDEVICE_EXTENSION Vcb,
+                           PUCHAR Pages,
+                           ULONG PageSize);
 
 /* Phase-0 dump FSCTL worker.  Reads the first N pages of $LogFile:$DATA
  * (starting at byte 0), parses each, and appends a human-readable line

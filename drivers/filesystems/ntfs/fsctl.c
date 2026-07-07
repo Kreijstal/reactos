@@ -169,28 +169,6 @@ ByeBye:
 
 
 static
-ULONG
-NtfsQueryMftZoneReservation(VOID)
-{
-    ULONG ZoneReservation = 1;
-    RTL_QUERY_REGISTRY_TABLE QueryTable[2];
-
-    RtlZeroMemory(QueryTable, sizeof(QueryTable));
-    QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT;
-    QueryTable[0].Name = L"NtfsMftZoneReservation";
-    QueryTable[0].EntryContext = &ZoneReservation;
-
-    RtlQueryRegistryValues(RTL_REGISTRY_CONTROL,
-                           L"FileSystem",
-                           QueryTable,
-                           NULL,
-                           NULL);
-
-    return ZoneReservation;
-}
-
-
-static
 NTSTATUS
 NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
                   PDEVICE_EXTENSION DeviceExt)
@@ -406,7 +384,9 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, VolumeRecord);
 
-    NtfsInfo->MftZoneReservation = NtfsQueryMftZoneReservation();
+    /* MFT zone multiplier: read once (and range-validated) at DriverEntry
+     * from ...\Control\FileSystem\NtfsMftZoneReservation. */
+    NtfsInfo->MftZoneReservation = NtfsGlobalData->MftZoneReservation;
 
     return Status;
 }
@@ -605,6 +585,19 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         {
             DPRINT1("NtfsMountVolume: $LogFile dirty (0x%08lx); forcing read-only mount\n",
                     LogStatus);
+            Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+        }
+        else if (Vcb->LogFileVersionUnsupported)
+        {
+            /* The log is CLEAN but its restart page carries an LFS format
+             * newer than this 1.x-era implementation (LFS 2.0, Windows 8+).
+             * Mirror the Windows interop policy: a down-level NTFS must
+             * not write such a volume, so gate it read-only instead of
+             * emitting 1.x state a 2.0 replayer would not expect. */
+            DPRINT1("NtfsMountVolume: $LogFile is LFS %u.%u (supported: %u.x); "
+                    "volume gated read-only\n",
+                    Vcb->LogFileMajorVersion, Vcb->LogFileMinorVersion,
+                    NTFS_LFS_SUPPORTED_MAJOR_VERSION);
             Vcb->Flags |= VCB_VOLUME_READ_ONLY;
         }
     }
@@ -986,7 +979,9 @@ GetRetrievalPointers(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    Status = FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0, &DataContext, NULL);
+    /* Use the handle's own stream - the unnamed $DATA for a plain open,
+     * the named one for an alternate-data-stream handle. */
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &DataContext, NULL);
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
@@ -1205,7 +1200,10 @@ MoveFile(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    Status = FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0,
+    /* Move the handle's own stream - the unnamed $DATA for a plain open,
+     * the named one for an alternate-data-stream handle. */
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeData,
+                           TargetFcb->Stream, wcslen(TargetFcb->Stream),
                            &DataContext, &AttrOffset);
     if (!NT_SUCCESS(Status))
         goto Cleanup;

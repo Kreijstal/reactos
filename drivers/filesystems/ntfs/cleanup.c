@@ -147,11 +147,18 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
             (Fcb->SectionObjectPointers == NULL ||
              Fcb->SectionObjectPointers->ImageSectionObject == NULL))
         {
-            Status = NtfsDeleteFileRecord(DeviceExt, Fcb, FALSE);
+            /* A delete on an alternate-data-stream handle removes just that
+             * named $DATA attribute; the base file and its other streams
+             * survive (Windows semantics).  Only a plain (default-stream)
+             * handle deletes the file record itself. */
+            if (Fcb->Stream[0] != UNICODE_NULL)
+                Status = NtfsDeleteStream(DeviceExt, Fcb);
+            else
+                Status = NtfsDeleteFileRecord(DeviceExt, Fcb, FALSE);
             if (NT_SUCCESS(Status))
                 ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
             else
-                DPRINT1("NtfsCleanupFile: NtfsDeleteFileRecord failed with 0x%lx\n", Status);
+                DPRINT1("NtfsCleanupFile: delete of '%S' failed with 0x%lx\n", Fcb->PathName, Status);
         }
 
         FileObject->Flags |= FO_CLEANUP_COMPLETE;

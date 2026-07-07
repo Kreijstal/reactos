@@ -167,6 +167,106 @@ NtfsReleaseFileForNtCreateSection(IN PFILE_OBJECT FileObject)
 
 
 /*
+ * Read one DWORD value from an already-open registry key.  Returns TRUE
+ * (and fills *Value) only when the value exists, is REG_DWORD and carries
+ * exactly four data bytes; every other outcome - absent value, wrong type,
+ * short data - returns FALSE so the caller falls back to its default via
+ * NtfsSanitizeRegistryUlong.
+ */
+static
+CODE_SEG("INIT")
+BOOLEAN
+NtfsReadRegistryDword(HANDLE KeyHandle,
+                      PCWSTR ValueName,
+                      PULONG Value)
+{
+    UNICODE_STRING Name;
+    UCHAR Buffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Partial = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG ResultLength;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&Name, ValueName);
+
+    Status = ZwQueryValueKey(KeyHandle,
+                             &Name,
+                             KeyValuePartialInformation,
+                             Partial,
+                             sizeof(Buffer),
+                             &ResultLength);
+    if (!NT_SUCCESS(Status) ||
+        Partial->Type != REG_DWORD ||
+        Partial->DataLength != sizeof(ULONG))
+    {
+        return FALSE;
+    }
+
+    *Value = *(PULONG)Partial->Data;
+    return TRUE;
+}
+
+/*
+ * Read the documented NTFS tuning knobs from
+ * \Registry\Machine\SYSTEM\CurrentControlSet\Control\FileSystem into
+ * NtfsGlobalData, sanitizing each through NtfsSanitizeRegistryUlong.
+ * Absent key, absent values, non-DWORD values and out-of-range DWORDs all
+ * land on the Windows-2003 defaults (last-access updates enabled, 8.3
+ * creation enabled, MFT zone multiplier 1).
+ */
+static
+CODE_SEG("INIT")
+VOID
+NtfsReadFileSystemControlKnobs(VOID)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\FileSystem");
+    OBJECT_ATTRIBUTES Attributes;
+    HANDLE KeyHandle = NULL;
+    ULONG Value = 0;
+    BOOLEAN Found;
+    NTSTATUS Status;
+
+    /* Windows-2003 defaults, kept even if the key can't be opened. */
+    NtfsGlobalData->DisableLastAccessUpdate = FALSE;
+    NtfsGlobalData->Disable8dot3NameCreation = FALSE;
+    NtfsGlobalData->MftZoneReservation = 1;
+
+    InitializeObjectAttributes(&Attributes,
+                               &KeyName,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    Status = ZwOpenKey(&KeyHandle, KEY_READ, &Attributes);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT("NTFS: no Control\\FileSystem key (0x%lx); using default knobs\n",
+               Status);
+        return;
+    }
+
+    Found = NtfsReadRegistryDword(KeyHandle, L"NtfsDisableLastAccessUpdate", &Value);
+    NtfsGlobalData->DisableLastAccessUpdate =
+        (BOOLEAN)NtfsSanitizeRegistryUlong(Found, Value, 0, 0, 1);
+
+    Found = NtfsReadRegistryDword(KeyHandle, L"NtfsDisable8dot3NameCreation", &Value);
+    NtfsGlobalData->Disable8dot3NameCreation =
+        (BOOLEAN)NtfsSanitizeRegistryUlong(Found, Value, 0, 0, 1);
+
+    Found = NtfsReadRegistryDword(KeyHandle, L"NtfsMftZoneReservation", &Value);
+    NtfsGlobalData->MftZoneReservation =
+        NtfsSanitizeRegistryUlong(Found, Value, 1, 1, 4);
+
+    ZwClose(KeyHandle);
+
+    DPRINT("NTFS: knobs: DisableLastAccessUpdate=%u Disable8dot3NameCreation=%u "
+           "MftZoneReservation=%lu\n",
+           NtfsGlobalData->DisableLastAccessUpdate,
+           NtfsGlobalData->Disable8dot3NameCreation,
+           NtfsGlobalData->MftZoneReservation);
+}
+
+/*
  * FUNCTION: Called by the system to initialize the driver
  * ARGUMENTS:
  *           DriverObject = object describing this driver
@@ -245,6 +345,10 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
 
         ZwClose(DriverKey);
     }
+
+    /* Documented Control\FileSystem tuning knobs (NtfsDisableLastAccessUpdate,
+     * NtfsDisable8dot3NameCreation, NtfsMftZoneReservation). */
+    NtfsReadFileSystemControlKnobs();
 
     /* Keep trace of Driver Object */
     NtfsGlobalData->DriverObject = DriverObject;

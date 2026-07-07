@@ -247,8 +247,9 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     *(USHORT *)(Page + 0x12) = (USHORT)PageSize;          /* SystemPageSize */
     *(USHORT *)(Page + 0x14) = (USHORT)PageSize;          /* LogPageSize    */
     *(USHORT *)(Page + 0x16) = LFS_RSTR_AREA_OFFSET;      /* RestartOffset  */
-    *(USHORT *)(Page + 0x18) = 1;                         /* MajorVersion   */
-    *(USHORT *)(Page + 0x1A) = 0;                         /* MinorVersion   */
+    *(USHORT *)(Page + NTFS_LFS_RSTR_MAJOR_VERSION_OFFSET) =
+        NTFS_LFS_SUPPORTED_MAJOR_VERSION;                 /* MajorVersion   */
+    *(USHORT *)(Page + NTFS_LFS_RSTR_MINOR_VERSION_OFFSET) = 0; /* MinorVersion */
     *(USHORT *)(Page + LFS_RSTR_USA_OFFSET) = 0;          /* USN seed       */
 
     RtlZeroMemory(&Area, sizeof(Area));

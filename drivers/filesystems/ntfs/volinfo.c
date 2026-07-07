@@ -307,8 +307,6 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
                               PFILE_FS_ATTRIBUTE_INFORMATION FsAttributeInfo,
                               PULONG BufferLength)
 {
-    UNREFERENCED_PARAMETER(DeviceExt);
-
     DPRINT("NtfsGetFsAttributeInformation()\n");
     DPRINT("FsAttributeInfo = %p\n", FsAttributeInfo);
     DPRINT("BufferLength %lu\n", *BufferLength);
@@ -327,10 +325,14 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
      * "good inode" path on this flag; without it they fall back to synthesising
      * inodes by hashing the path name, which is both slower and (on the runtime
      * side) buggy, so an unpatched MSYS2 install misbehaves on ReactOS NTFS even
-     * though it works on Windows NTFS.  FILE_READ_ONLY_VOLUME must not be set -
-     * the volume is mounted read/write. */
+     * though it works on Windows NTFS.  FILE_READ_ONLY_VOLUME is reported only
+     * when the mount gate forced the volume read-only (dirty or too-new
+     * $LogFile, VCB_VOLUME_READ_ONLY); a normal read/write mount must not
+     * set it. */
     FsAttributeInfo->FileSystemAttributes =
         FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_PERSISTENT_ACLS;
+    if (BooleanFlagOn(DeviceExt->Flags, VCB_VOLUME_READ_ONLY))
+        FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
     FsAttributeInfo->MaximumComponentNameLength = 255;
     FsAttributeInfo->FileSystemNameLength = 8;
 
@@ -424,6 +426,14 @@ NtfsGetFsDeviceInformation(PDEVICE_OBJECT DeviceObject,
 
     FsDeviceInfo->DeviceType = FILE_DEVICE_DISK;
     FsDeviceInfo->Characteristics = DeviceObject->Characteristics;
+
+    /* Surface the mount-time read-only gate (dirty or too-new $LogFile)
+     * the same way a write-protected medium would be reported. */
+    if (BooleanFlagOn(((PDEVICE_EXTENSION)DeviceObject->DeviceExtension)->Flags,
+                      VCB_VOLUME_READ_ONLY))
+    {
+        FsDeviceInfo->Characteristics |= FILE_READ_ONLY_DEVICE;
+    }
 
     DPRINT("NtfsGetFsDeviceInformation() finished.\n");
 
