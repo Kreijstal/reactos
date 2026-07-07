@@ -67,27 +67,44 @@ NtfsWSubString(PWCHAR pTarget,
 * @name NtfsParseStreamPath
 * @implemented
 *
-* Splits an (absolute or relative) path into its file part and an optional
-* alternate-data-stream name, validating the stream syntax like Windows:
+* Splits an (absolute or relative) path into its file part, an optional
+* alternate-data-stream name and the typed-stream class of the open,
+* validating the stream syntax like Windows.  Per [MS-FSCC] 2.1.5 only the
+* $DATA and $INDEX_ALLOCATION stream types are openable:
 *
-*   "file"                 -> no stream
-*   "file:stream"          -> stream "stream"
-*   "file:stream:$DATA"    -> stream "stream" (type suffix stripped)
-*   "file::$DATA"          -> the default (unnamed) stream, same as "file"
-*   "file:"                -> STATUS_OBJECT_NAME_INVALID
-*   "file:stream:$BAD"     -> STATUS_OBJECT_NAME_INVALID (only $DATA opens
-*                             are supported in this slice; $INDEX_ALLOCATION
-*                             and other typed opens are rejected explicitly)
-*   "file:a:b:c"           -> STATUS_OBJECT_NAME_INVALID
-*   "di:r\\file"           -> STATUS_OBJECT_NAME_INVALID (a colon may only
-*                             appear in the last path component)
+*   "file"                       -> Data, no stream
+*   "file:stream"                -> Data, stream "stream"
+*   "file:stream:$DATA"          -> Data, stream "stream" (suffix stripped)
+*   "file::$DATA"                -> DefaultData - the default (unnamed)
+*                                   stream; the "::$DATA" tail is stripped so
+*                                   the name matches a plain open, but the
+*                                   class lets the create path fail directory
+*                                   targets (STATUS_FILE_IS_A_DIRECTORY)
+*   "dir::$INDEX_ALLOCATION",
+*   "dir:$I30:$INDEX_ALLOCATION" -> IndexAllocation - the directory stream
+*                                   ($I30 is the one directory index NTFS
+*                                   has); the whole tail is stripped, making
+*                                   the open equivalent to a plain "dir"
+*                                   open, and the class lets the create path
+*                                   fail non-directory targets
+*                                   (STATUS_NOT_A_DIRECTORY)
+*   "dir:x:$INDEX_ALLOCATION"    -> STATUS_OBJECT_NAME_INVALID (only the
+*                                   empty name and $I30 name the index)
+*   "file:"                      -> STATUS_OBJECT_NAME_INVALID
+*   "file:stream:$BAD"           -> STATUS_OBJECT_NAME_INVALID (any other
+*                                   type - $BITMAP, $EA, $ATTRIBUTE_LIST,
+*                                   $REPARSE_POINT, ... - is not openable)
+*   "file:a:b:c"                 -> STATUS_OBJECT_NAME_INVALID
+*   "di:r\\file"                 -> STATUS_OBJECT_NAME_INVALID (a colon may
+*                                   only appear in the last path component)
 *
-* Normalizes FileName in place: any ":$DATA" type suffix (and, for the
-* default stream, the entire "::$DATA" tail) is removed so every downstream
-* consumer - the FCB table key, the directory walk, the create path - sees
-* at most one colon, separating the file part from the stream name.  The
-* name only ever shrinks, and the buffer is re-NUL-terminated at the new
-* end, preserving the driver-wide "FileName.Buffer is a C string" invariant.
+* Normalizes FileName in place: any type suffix (and, for the default data
+* stream and the directory stream, the entire ":...:$TYPE" tail) is removed
+* so every downstream consumer - the FCB table key, the directory walk, the
+* create path - sees at most one colon, separating the file part from the
+* stream name.  The name only ever shrinks, and the buffer is
+* re-NUL-terminated at the new end, preserving the driver-wide
+* "FileName.Buffer is a C string" invariant.
 *
 * @param FileName
 * The path to parse/normalize.  Buffer must be writable (both the I/O
@@ -96,14 +113,18 @@ NtfsWSubString(PWCHAR pTarget,
 *
 * @param StreamName
 * Receives the stream name (pointing into FileName->Buffer, NUL-terminated).
-* Length == 0 means "no stream / default stream".
+* Length == 0 means "no stream / default stream / directory stream".
+*
+* @param StreamType
+* Receives the typed-stream class (see NTFS_STREAM_TYPE in ntfs.h).
 *
 * @return
 * STATUS_SUCCESS or STATUS_OBJECT_NAME_INVALID.
 */
 NTSTATUS
 NtfsParseStreamPath(PUNICODE_STRING FileName,
-                    PUNICODE_STRING StreamName)
+                    PUNICODE_STRING StreamName,
+                    PNTFS_STREAM_TYPE StreamType)
 {
     ULONG Chars = FileName->Length / sizeof(WCHAR);
     ULONG FirstColon = (ULONG)-1;
@@ -112,6 +133,7 @@ NtfsParseStreamPath(PUNICODE_STRING FileName,
     UNICODE_STRING Type;
 
     RtlInitEmptyUnicodeString(StreamName, NULL, 0);
+    *StreamType = NtfsStreamTypeData;
 
     for (i = 0; i < Chars; i++)
     {
@@ -139,15 +161,42 @@ NtfsParseStreamPath(PUNICODE_STRING FileName,
     if (SecondColon != (ULONG)-1)
     {
         UNICODE_STRING DataTypeName = RTL_CONSTANT_STRING(L"$DATA");
+        UNICODE_STRING IndexTypeName = RTL_CONSTANT_STRING(L"$INDEX_ALLOCATION");
 
         Type.Buffer = &FileName->Buffer[SecondColon + 1];
         Type.Length = (USHORT)((Chars - SecondColon - 1) * sizeof(WCHAR));
         Type.MaximumLength = Type.Length;
 
-        /* Only $DATA opens are supported; this also rejects the empty type
-         * of "file:stream:".  A non-$DATA type on a file is invalid on
-         * Windows too ($INDEX_ALLOCATION only exists on directories, and
-         * directory typed opens are out of scope here). */
+        if (RtlEqualUnicodeString(&Type, &IndexTypeName, TRUE))
+        {
+            UNICODE_STRING IndexName = RTL_CONSTANT_STRING(L"$I30");
+            UNICODE_STRING Name;
+
+            /* "$INDEX_ALLOCATION" opens the directory index stream; only
+             * the empty name and "$I30" (the one index a directory has)
+             * may name it - anything else is invalid. */
+            Name.Buffer = &FileName->Buffer[FirstColon + 1];
+            Name.Length = (USHORT)((SecondColon - FirstColon - 1) * sizeof(WCHAR));
+            Name.MaximumLength = Name.Length;
+
+            if (Name.Length != 0 &&
+                !RtlEqualUnicodeString(&Name, &IndexName, TRUE))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+
+            /* Strip the whole tail: the open is equivalent to a plain open
+             * of the directory (same FCB); the class tells the create path
+             * to demand a directory target. */
+            FileName->Length = (USHORT)(FirstColon * sizeof(WCHAR));
+            FileName->Buffer[FirstColon] = UNICODE_NULL;
+            *StreamType = NtfsStreamTypeIndexAllocation;
+            return STATUS_SUCCESS;
+        }
+
+        /* Anything else must be $DATA; this also rejects the empty type of
+         * "file:stream:" and the stream types that are never openable
+         * ($BITMAP, $EA, $ATTRIBUTE_LIST, $REPARSE_POINT, ...). */
         if (!RtlEqualUnicodeString(&Type, &DataTypeName, TRUE))
             return STATUS_OBJECT_NAME_INVALID;
 
@@ -169,10 +218,13 @@ NtfsParseStreamPath(PUNICODE_STRING FileName,
 
         /* "file::$DATA" is the default (unnamed) data stream - the very
          * same object as a plain open of "file".  Normalize the colon away
-         * so both spellings share one FCB. */
+         * so both spellings share one FCB, but report the explicit class:
+         * unlike a plain open, "dir::$DATA" must fail on a directory
+         * (STATUS_FILE_IS_A_DIRECTORY - a directory has no unnamed $DATA). */
         FileName->Length = (USHORT)(FirstColon * sizeof(WCHAR));
         FileName->Buffer[FirstColon] = UNICODE_NULL;
         StreamName->Buffer = NULL;
+        *StreamType = NtfsStreamTypeDefaultData;
         return STATUS_SUCCESS;
     }
 
@@ -926,6 +978,7 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     UNICODE_STRING File;
     UNICODE_STRING BaseName;
     UNICODE_STRING Stream;
+    NTFS_STREAM_TYPE StreamType;
     PFILE_RECORD_HEADER FileRecord;
     ULONGLONG MFTIndex;
     PNTFS_ATTR_CONTEXT DataContext;
@@ -944,9 +997,9 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     /* Split off an alternate-data-stream suffix.  The create path already
      * validated and normalized the user name, but internal callers (rename
      * target lookups, etc.) come through here directly, so parse defensively.
-     * Normalization is in place: any ":$DATA" type suffix is stripped from
+     * Normalization is in place: any type suffix is stripped from
      * FileToFind, which also keeps the FCB PathName canonical below. */
-    Status = NtfsParseStreamPath(&File, &Stream);
+    Status = NtfsParseStreamPath(&File, &Stream, &StreamType);
     if (!NT_SUCCESS(Status))
     {
         return Status;
@@ -976,6 +1029,25 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
     if (!NT_SUCCESS(Status))
     {
         return Status;
+    }
+
+    /* Typed opens ([MS-FSCC] 2.1.5): "::$INDEX_ALLOCATION" names the
+     * directory index stream and requires a directory target, an explicit
+     * default-stream "::$DATA" open requires a non-directory (a directory
+     * has no unnamed $DATA attribute).  NtfsCreateFile enforces the same
+     * on the user path; internal callers land here with the raw name. */
+    if (StreamType == NtfsStreamTypeIndexAllocation &&
+        !(FileRecord->Flags & FRH_DIRECTORY))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+        return STATUS_NOT_A_DIRECTORY;
+    }
+
+    if (StreamType == NtfsStreamTypeDefaultData &&
+        (FileRecord->Flags & FRH_DIRECTORY))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+        return STATUS_FILE_IS_A_DIRECTORY;
     }
 
     if (Stream.Length != 0)
