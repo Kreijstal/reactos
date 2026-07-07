@@ -208,24 +208,6 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
     
     InitializeTransferTracking();
     
-    // First, try to clean up any completed transfers to free up slots
-    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
-    {
-        if (g_PendingTransfers[i].InUse && g_PendingTransfers[i].XhciTransfer)
-        {
-            // Check if this transfer has already been completed (simplified check)
-            // This is a basic cleanup - a more sophisticated system would track completion status
-            PUSBPORT_TRANSFER_PARAMETERS Params = g_PendingTransfers[i].XhciTransfer->TransferParameters;
-            if (Params && g_PendingTransfers[i].XhciTransfer->USBDStatus != USBD_STATUS_PENDING)
-            {
-                DPRINT1("RegisterPendingTransfer: Cleaning up completed transfer at index %d (status=0x%x)\n", 
-                        i, g_PendingTransfers[i].XhciTransfer->USBDStatus);
-                UnregisterPendingTransfer(&g_PendingTransfers[i]);
-            }
-        }
-    }
-    
-    // Now try to find a free slot
     for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
         if (!g_PendingTransfers[i].InUse)
@@ -243,34 +225,8 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
             return MP_STATUS_SUCCESS;
         }
     }
-    
-    // If we still can't find a slot, force cleanup by removing the oldest entries
-    DPRINT1("RegisterPendingTransfer: All slots full, forcing cleanup of first 4 entries\n");
-    for (i = 0; i < 4; i++)
-    {
-        if (g_PendingTransfers[i].InUse)
-        {
-            DPRINT1("RegisterPendingTransfer: Force cleaning slot %d\n", i);
-            UnregisterPendingTransfer(&g_PendingTransfers[i]);
-        }
-    }
-    
-    // Try again with the first cleaned slot
-    if (!g_PendingTransfers[0].InUse)
-    {
-        g_PendingTransfers[0].XhciTransfer = XhciTransfer;
-        g_PendingTransfers[0].XhciEndpoint = XhciEndpoint;
-        g_PendingTransfers[0].XhciExtension = XhciExtension;
-        g_PendingTransfers[0].TrbCount = TrbCount;
-        g_PendingTransfers[0].CompletionTrb = TrbPointers[TrbCount - 1];
-        g_PendingTransfers[0].RequestedLength = RequestedLength;
-        g_PendingTransfers[0].InUse = TRUE;
-        
-        DPRINT("RegisterPendingTransfer: Registered transfer at cleaned slot 0\n");
-        return MP_STATUS_SUCCESS;
-    }
-    
-    DPRINT1("RegisterPendingTransfer: Failed to find or create free slot for transfer tracking\n");
+
+    DPRINT1("RegisterPendingTransfer: no free transfer tracking slot\n");
     return MP_STATUS_FAILURE;
 }
 
@@ -1994,22 +1950,6 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
                     TransferRing->enqueue_pointer, TransferRing->dequeue_pointer, 
                     TransferRing->UsedTrbs,
                     TransferRing->ProducerCycleState, TransferRing->ConsumerCycleState);
-        }
-        
-        // Update endpoint frame number after successful transfer to prevent re-queuing
-        if (USBD_SUCCESS(USBDStatus))
-        {
-            // Get current frame number from XHCI controller
-            ULONG CurrentFrameNumber = XHCI_GetCurrentFrameNumber(XhciExtension);
-            
-            // The XhciEndpoint should be a USBPORT_ENDPOINT structure
-            PUSBPORT_ENDPOINT UsbPortEndpoint = (PUSBPORT_ENDPOINT)PendingTransfer->XhciEndpoint;
-            
-            DPRINT("XHCI_CompleteTransfer: Updating endpoint frame number from %d to %d\n", 
-                    UsbPortEndpoint->FrameNumber, CurrentFrameNumber);
-                    
-            // Update the endpoint's frame number to signal that it has advanced
-            UsbPortEndpoint->FrameNumber = CurrentFrameNumber;
         }
         
         // Notify USB port driver about transfer completion
