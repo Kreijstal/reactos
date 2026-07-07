@@ -13,6 +13,77 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(user32);
 
+#define MAX_RAWINPUT_REGISTRATIONS 32
+
+static RAWINPUTDEVICE RegisteredRawInputDevices[MAX_RAWINPUT_REGISTRATIONS];
+static UINT RegisteredRawInputDeviceCount;
+
+static INT
+CompareRawInputDevices(const RAWINPUTDEVICE *Left, const RAWINPUTDEVICE *Right)
+{
+    if (Left->usUsagePage != Right->usUsagePage)
+        return (INT)Left->usUsagePage - (INT)Right->usUsagePage;
+
+    return (INT)Left->usUsage - (INT)Right->usUsage;
+}
+
+static UINT
+FindRegisteredRawInputDevice(USHORT UsagePage, USHORT Usage)
+{
+    UINT i;
+
+    for (i = 0; i < RegisteredRawInputDeviceCount; ++i)
+    {
+        if (RegisteredRawInputDevices[i].usUsagePage == UsagePage &&
+            RegisteredRawInputDevices[i].usUsage == Usage)
+        {
+            return i;
+        }
+    }
+
+    return MAX_RAWINPUT_REGISTRATIONS;
+}
+
+static VOID
+RemoveRegisteredRawInputDevice(UINT Index)
+{
+    if (Index + 1 < RegisteredRawInputDeviceCount)
+    {
+        MoveMemory(&RegisteredRawInputDevices[Index],
+                   &RegisteredRawInputDevices[Index + 1],
+                   (RegisteredRawInputDeviceCount - Index - 1) * sizeof(RAWINPUTDEVICE));
+    }
+
+    --RegisteredRawInputDeviceCount;
+}
+
+static VOID
+CopyRegisteredRawInputDevices(PRAWINPUTDEVICE Devices)
+{
+    BOOL Used[MAX_RAWINPUT_REGISTRATIONS] = { FALSE };
+    UINT i, j, Best;
+
+    for (i = 0; i < RegisteredRawInputDeviceCount; ++i)
+    {
+        Best = MAX_RAWINPUT_REGISTRATIONS;
+        for (j = 0; j < RegisteredRawInputDeviceCount; ++j)
+        {
+            if (Used[j])
+                continue;
+
+            if (Best == MAX_RAWINPUT_REGISTRATIONS ||
+                CompareRawInputDevices(&RegisteredRawInputDevices[j],
+                                       &RegisteredRawInputDevices[Best]) < 0)
+            {
+                Best = j;
+            }
+        }
+
+        Devices[i] = RegisteredRawInputDevices[Best];
+        Used[Best] = TRUE;
+    }
+}
+
 /*
  * @unimplemented
  */
@@ -291,7 +362,7 @@ DefRawInputProc(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 UINT
 WINAPI
@@ -301,12 +372,22 @@ GetRawInputBuffer(
     PUINT pcbSize,
     UINT cbSizeHeader)
 {
-  UNIMPLEMENTED;
-  return 0;
+    if (!pcbSize || cbSizeHeader != sizeof(RAWINPUTHEADER))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (UINT)-1;
+    }
+
+    /*
+     * ReactOS does not queue raw input packets yet. Preserve the observable
+     * no-packet behavior instead of reporting a successful read of stale data.
+     */
+    *pcbSize = 0;
+    return 0;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 UINT
 WINAPI
@@ -317,8 +398,21 @@ GetRawInputData(
     PUINT pcbSize,
     UINT cbSizeHeader)
 {
-  UNIMPLEMENTED;
-  return 0;
+    if (!hRawInput)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return (UINT)-1;
+    }
+
+    if (!pcbSize || cbSizeHeader != sizeof(RAWINPUTHEADER) ||
+        (uiCommand != RID_HEADER && uiCommand != RID_INPUT))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (UINT)-1;
+    }
+
+    SetLastError(ERROR_INVALID_HANDLE);
+    return (UINT)-1;
 }
 
 /*
@@ -341,7 +435,7 @@ GetRawInputDeviceList(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 UINT
 WINAPI
@@ -351,12 +445,38 @@ GetRegisteredRawInputDevices(
     PUINT puiNumDevices,
     UINT cbSize)
 {
-  UNIMPLEMENTED;
-  return 0;
+    if (cbSize != sizeof(RAWINPUTDEVICE) || !puiNumDevices)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (UINT)-1;
+    }
+
+    if (!pRawInputDevices)
+    {
+        *puiNumDevices = RegisteredRawInputDeviceCount;
+        return 0;
+    }
+
+    if (!*puiNumDevices)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return (UINT)-1;
+    }
+
+    if (*puiNumDevices < RegisteredRawInputDeviceCount)
+    {
+        *puiNumDevices = RegisteredRawInputDeviceCount;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return (UINT)-1;
+    }
+
+    CopyRegisteredRawInputDevices(pRawInputDevices);
+    *puiNumDevices = RegisteredRawInputDeviceCount;
+    return RegisteredRawInputDeviceCount;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -366,8 +486,68 @@ RegisterRawInputDevices(
     UINT uiNumDevices,
     UINT cbSize)
 {
-  UNIMPLEMENTED;
-  return FALSE;
+    UINT i, Index;
+
+    if (cbSize != sizeof(RAWINPUTDEVICE) || !pRawInputDevices || !uiNumDevices)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (i = 0; i < uiNumDevices; ++i)
+    {
+        if ((pRawInputDevices[i].dwFlags & RIDEV_INPUTSINK) &&
+            !pRawInputDevices[i].hwndTarget)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        if ((pRawInputDevices[i].dwFlags & RIDEV_REMOVE) &&
+            pRawInputDevices[i].hwndTarget)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+    }
+
+    for (i = 0; i < uiNumDevices; ++i)
+    {
+        Index = FindRegisteredRawInputDevice(pRawInputDevices[i].usUsagePage,
+                                             pRawInputDevices[i].usUsage);
+
+        if (pRawInputDevices[i].dwFlags & RIDEV_REMOVE)
+        {
+            if (Index != MAX_RAWINPUT_REGISTRATIONS)
+                RemoveRegisteredRawInputDevice(Index);
+
+            continue;
+        }
+
+        if (Index == MAX_RAWINPUT_REGISTRATIONS)
+        {
+            if (RegisteredRawInputDeviceCount == MAX_RAWINPUT_REGISTRATIONS)
+            {
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return FALSE;
+            }
+
+            Index = RegisteredRawInputDeviceCount++;
+        }
+
+        RegisteredRawInputDevices[Index] = pRawInputDevices[i];
+
+        if ((pRawInputDevices[i].dwFlags & RIDEV_DEVNOTIFY) &&
+            pRawInputDevices[i].hwndTarget)
+        {
+            PostMessageW(pRawInputDevices[i].hwndTarget,
+                         WM_INPUT_DEVICE_CHANGE,
+                         GIDC_ARRIVAL,
+                         0);
+        }
+    }
+
+    return TRUE;
 }
 
 /*
