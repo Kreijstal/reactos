@@ -48,65 +48,8 @@ static ULONG SupportedOidList[] =
     OID_802_3_RCV_ERROR_ALIGNMENT,
     OID_802_3_XMIT_ONE_COLLISION,
     OID_802_3_XMIT_MORE_COLLISIONS,
-    OID_GEN_PHYSICAL_MEDIUM,
-    OID_TCP_TASK_OFFLOAD
+    OID_GEN_PHYSICAL_MEDIUM
 };
-
-/*
- * OID_TCP_TASK_OFFLOAD response layout for our chip:
- *
- *   NDIS_TASK_OFFLOAD_HEADER (presence-of/version, EncapFmt, OffsetFirstTask)
- *     -> NDIS_TASK_OFFLOAD ("TcpIpChecksumNdisTask")
- *          -> NDIS_TASK_TCP_IP_CHECKSUM
- *               V4 Transmit:  IpChecksum + TcpChecksum + UdpChecksum
- *               V4 Receive:   (off -- hw RX checksum requires CpCmd RXCHKSUM
- *                              which we set, but the RTL8168 RX descriptor
- *                              status bits aren't wired through Indicate yet)
- *
- * The RX path leaves the RxConfig RxChksumOffload bit set so the chip
- * computes RX checksums internally; we simply don't claim them to the
- * stack until the indicate path forwards the RX desc status bits.
- */
-
-#define RTL_TASK_RESPONSE_SIZE                                    \
-    (sizeof(NDIS_TASK_OFFLOAD_HEADER) +                           \
-     FIELD_OFFSET(NDIS_TASK_OFFLOAD, TaskBuffer) +                \
-     sizeof(NDIS_TASK_TCP_IP_CHECKSUM))
-
-static VOID
-RtlBuildTaskOffloadResponse(IN PRTL_ADAPTER Adapter,
-                            OUT PUCHAR Buf)
-{
-    PNDIS_TASK_OFFLOAD_HEADER hdr = (PNDIS_TASK_OFFLOAD_HEADER)Buf;
-    PNDIS_TASK_OFFLOAD task;
-    PNDIS_TASK_TCP_IP_CHECKSUM csum;
-
-    UNREFERENCED_PARAMETER(Adapter);
-
-    NdisZeroMemory(Buf, RTL_TASK_RESPONSE_SIZE);
-
-    hdr->Version           = NDIS_TASK_OFFLOAD_VERSION;
-    hdr->Size              = sizeof(NDIS_TASK_OFFLOAD_HEADER);
-    hdr->EncapsulationFormat.Encapsulation        = IEEE_802_3_Encapsulation;
-    hdr->EncapsulationFormat.Flags.FixedHeaderSize = 1;
-    hdr->EncapsulationFormat.EncapsulationHeaderSize = sizeof(ETH_HEADER);
-    hdr->OffsetFirstTask   = sizeof(NDIS_TASK_OFFLOAD_HEADER);
-
-    task = (PNDIS_TASK_OFFLOAD)(Buf + sizeof(NDIS_TASK_OFFLOAD_HEADER));
-    task->Version          = NDIS_TASK_OFFLOAD_VERSION;
-    task->Size             = sizeof(NDIS_TASK_OFFLOAD);
-    task->Task             = TcpIpChecksumNdisTask;
-    task->OffsetNextTask   = 0;             /* last task */
-    task->TaskBufferLength = sizeof(NDIS_TASK_TCP_IP_CHECKSUM);
-
-    csum = (PNDIS_TASK_TCP_IP_CHECKSUM)task->TaskBuffer;
-    csum->V4Transmit.IpChecksum  = 1;
-    csum->V4Transmit.TcpChecksum = 1;
-    csum->V4Transmit.UdpChecksum = 1;
-    csum->V4Transmit.IpOptionsSupported  = 1;
-    csum->V4Transmit.TcpOptionsSupported = 1;
-    /* RX side intentionally left off until we plumb opts1 status bits. */
-}
 
 NDIS_STATUS
 NTAPI
@@ -219,21 +162,15 @@ MiniportQueryInformation (
             genericUlong = NdisPhysicalMedium802_3;
             break;
 
-        case OID_TCP_TASK_OFFLOAD:
-        {
-            static UCHAR taskBuf[RTL_TASK_RESPONSE_SIZE];
-            RtlBuildTaskOffloadResponse(adapter, taskBuf);
-            copySource = taskBuf;
-            copyLength = sizeof(taskBuf);
-            break;
-        }
         case OID_GEN_XMIT_OK:                   genericUlong = adapter->TransmitOk; break;
         case OID_GEN_RCV_OK:                    genericUlong = adapter->ReceiveOk; break;
         case OID_GEN_XMIT_ERROR:                genericUlong = adapter->TransmitError; break;
         case OID_GEN_RCV_ERROR:                 genericUlong = adapter->ReceiveError; break;
         case OID_GEN_RCV_NO_BUFFER:             genericUlong = adapter->ReceiveNoBufferSpace; break;
         case OID_GEN_RCV_CRC_ERROR:             genericUlong = adapter->ReceiveCrcError; break;
-        case OID_802_3_RCV_ERROR_ALIGNMENT:     genericUlong = adapter->ReceiveAlignmentError; break;
+        /* The 8168 RX descriptor has no alignment-error status bit
+         * (bit 27 is MAR, multicast received), so this is always 0. */
+        case OID_802_3_RCV_ERROR_ALIGNMENT:     genericUlong = 0; break;
         case OID_802_3_XMIT_ONE_COLLISION:      genericUlong = adapter->TransmitOneCollision; break;
         case OID_802_3_XMIT_MORE_COLLISIONS:    genericUlong = adapter->TransmitMoreCollisions; break;
         default:
@@ -323,57 +260,6 @@ MiniportSetInformation (
             if (genericUlong > MAXIMUM_FRAME_SIZE - sizeof(ETH_HEADER))
                 status = NDIS_STATUS_INVALID_DATA;
             break;
-
-        case OID_TCP_TASK_OFFLOAD:
-        {
-            /* Protocol sends back the NDIS_TASK_OFFLOAD_HEADER + selected
-             * tasks; for each task we honour we update TaskOffloadFlags.
-             * A header with OffsetFirstTask=0 means "disable all offload". */
-            PNDIS_TASK_OFFLOAD_HEADER hdr;
-            ULONG newFlags = 0;
-
-            if (InformationBufferLength < sizeof(NDIS_TASK_OFFLOAD_HEADER))
-            {
-                *BytesRead = 0;
-                *BytesNeeded = sizeof(NDIS_TASK_OFFLOAD_HEADER);
-                status = NDIS_STATUS_INVALID_LENGTH;
-                break;
-            }
-
-            hdr = (PNDIS_TASK_OFFLOAD_HEADER)InformationBuffer;
-            if (hdr->OffsetFirstTask != 0)
-            {
-                PNDIS_TASK_OFFLOAD task =
-                    (PNDIS_TASK_OFFLOAD)((PUCHAR)hdr + hdr->OffsetFirstTask);
-
-                for (;;)
-                {
-                    if ((PUCHAR)task + sizeof(NDIS_TASK_OFFLOAD) >
-                        (PUCHAR)InformationBuffer + InformationBufferLength)
-                        break;
-
-                    if (task->Task == TcpIpChecksumNdisTask &&
-                        task->TaskBufferLength >= sizeof(NDIS_TASK_TCP_IP_CHECKSUM))
-                    {
-                        PNDIS_TASK_TCP_IP_CHECKSUM cs =
-                            (PNDIS_TASK_TCP_IP_CHECKSUM)task->TaskBuffer;
-                        if (cs->V4Transmit.IpChecksum)
-                            newFlags |= TASK_OFFLOAD_IPCS;
-                        if (cs->V4Transmit.TcpChecksum)
-                            newFlags |= TASK_OFFLOAD_TCPCS;
-                        if (cs->V4Transmit.UdpChecksum)
-                            newFlags |= TASK_OFFLOAD_UDPCS;
-                    }
-
-                    if (task->OffsetNextTask == 0)
-                        break;
-                    task = (PNDIS_TASK_OFFLOAD)((PUCHAR)task + task->OffsetNextTask);
-                }
-            }
-
-            adapter->TaskOffloadFlags = newFlags;
-            break;
-        }
 
         case OID_802_3_MULTICAST_LIST:
             if (InformationBufferLength % IEEE_802_ADDR_LENGTH)
