@@ -12,22 +12,50 @@
 #define NDEBUG
 #include <debug.h>
 
-NDIS_STATUS
-NTAPI
-NICPowerOn (
-    IN PRTL_ADAPTER Adapter
-    )
+/* rtl_wait_txrx_fifo_empty -- r8169_main.c:2471.  8168G+ only: wait for
+ * TxConfig.TXCFG_EMPTY and MCU RX/TX FIFO-empty flags.  Linux polls each
+ * condition every 100us, 42 times. */
+static VOID
+RtlWaitTxRxFifoEmpty(IN PRTL_ADAPTER Adapter)
 {
-    /* Clear PMEnable in Config1 -- the chip otherwise stays in a PM state where
-     * registers respond but the MAC engine is gated.  Cfg9346 must be unlocked
-     * to touch Config1..Config5. */
-    RtlWriteReg8(Adapter, R_CFG9346, CFG9346_UNLOCK);
-    RtlWriteReg8(Adapter, R_CFG1, RtlReadReg8(Adapter, R_CFG1) & ~0x01);
-    RtlWriteReg8(Adapter, R_CFG9346, CFG9346_LOCK);
+    UINT i;
 
-    return NDIS_STATUS_SUCCESS;
+    for (i = 0; i < 42; i++)
+    {
+        if (RtlReadReg32(Adapter, R_TC) & TXCFG_EMPTY)
+            break;
+        NdisStallExecution(100);
+    }
+    for (i = 0; i < 42; i++)
+    {
+        if ((RtlReadReg8(Adapter, R_MCU) & MCU_RXTX_EMPTY) == MCU_RXTX_EMPTY)
+            break;
+        NdisStallExecution(100);
+    }
 }
 
+/* rtl_enable_rxdvgate -- r8169_main.c:2496: gate RX-data-valid, give the
+ * chip 2ms, then wait for the FIFOs to drain. */
+static VOID
+RtlEnableRxdvGate(IN PRTL_ADAPTER Adapter)
+{
+    UINT i;
+
+    RtlWriteReg32(Adapter, R_MISC,
+                  RtlReadReg32(Adapter, R_MISC) | MISC_RXDV_GATED_EN);
+    for (i = 0; i < 20; i++)
+        NdisStallExecution(100);    /* fsleep(2000) */
+    RtlWaitTxRxFifoEmpty(Adapter);
+}
+
+/*
+ * Soft reset with the pre-reset quiesce from Linux rtl8169_cleanup
+ * (r8169_main.c:3917): stop RX acceptance, then drain the TX/RX engines in
+ * the chip-family-specific way before hitting CmdReset.
+ *
+ * Called at PASSIVE from MiniportInitialize and at DISPATCH from
+ * MiniportReset, so all waits are bounded NdisStallExecution loops.
+ */
 NDIS_STATUS
 NTAPI
 NICSoftReset (
@@ -35,7 +63,51 @@ NICSoftReset (
     )
 {
     UINT attempts;
+    UINT i;
 
+    /* rtl_rx_close */
+    RtlWriteReg32(Adapter, R_RC,
+                  RtlReadReg32(Adapter, R_RC) & ~RX_ACCEPT_MASK);
+
+    if (Adapter->MacVersion == RTL_MAC_VER_28 ||
+        Adapter->MacVersion == RTL_MAC_VER_31)
+    {
+        /* DP parts: wait for the normal-priority-queue poll bit to clear.
+         * Linux polls every 20us, 2000 times. */
+        for (i = 0; i < 2000; i++)
+        {
+            if (!(RtlReadReg8(Adapter, R_TXPOLL) & B_TXP_NPQ))
+                break;
+            NdisStallExecution(20);
+        }
+    }
+    else if (Adapter->MacVersion >= RTL_MAC_VER_34 &&
+             Adapter->MacVersion <= RTL_MAC_VER_38)
+    {
+        /* StopReq, then wait for TxConfig.TXCFG_EMPTY (100us x 666). */
+        RtlWriteReg8(Adapter, R_CMD,
+                     RtlReadReg8(Adapter, R_CMD) | B_CMD_STOPREQ);
+        for (i = 0; i < 666; i++)
+        {
+            if (RtlReadReg32(Adapter, R_TC) & TXCFG_EMPTY)
+                break;
+            NdisStallExecution(100);
+        }
+    }
+    else if (Adapter->MacVersion >= RTL_MAC_VER_40)
+    {
+        RtlEnableRxdvGate(Adapter);
+        for (i = 0; i < 20; i++)
+            NdisStallExecution(100);    /* fsleep(2000) */
+    }
+    else
+    {
+        RtlWriteReg8(Adapter, R_CMD,
+                     RtlReadReg8(Adapter, R_CMD) | B_CMD_STOPREQ);
+        NdisStallExecution(100);
+    }
+
+    /* rtl_hw_reset: CmdReset, poll clear every 100us, 100 times. */
     RtlWriteReg8(Adapter, R_CMD, B_CMD_RESET);
 
     for (attempts = 0; attempts < MAX_RESET_ATTEMPTS; attempts++)
@@ -43,20 +115,96 @@ NICSoftReset (
         if (!(RtlReadReg8(Adapter, R_CMD) & B_CMD_RESET))
             return NDIS_STATUS_SUCCESS;
 
-        NdisStallExecution(1000);   /* 1 ms */
+        NdisStallExecution(100);
     }
 
     NDIS_DbgPrint(MIN_TRACE, ("RTL8168: soft reset timed out\n"));
     return NDIS_STATUS_FAILURE;
 }
 
+/* r8168g_wait_ll_share_fifo_ready -- r8169_main.c:4990: poll MCU
+ * LINK_LIST_RDY every 100us, 42 times. */
+static VOID
+Rtl8168gWaitLlShareFifoReady(IN PRTL_ADAPTER Adapter)
+{
+    UINT i;
+
+    for (i = 0; i < 42; i++)
+    {
+        if (RtlReadReg8(Adapter, R_MCU) & MCU_LINK_LIST_RDY)
+            return;
+        NdisStallExecution(100);
+    }
+    NDIS_DbgPrint(MIN_TRACE, ("RTL8168: link-list FIFO not ready\n"));
+}
+
+/* rtl8168ep_stop_cmac -- r8169_main.c:1193.  Linux allows up to 100s for the
+ * CMAC TX path to drain (50ms x 2000); it completes in microseconds in
+ * practice, so we bound the poll at 50ms to stay DISPATCH-safe. */
+VOID
+NTAPI
+Rtl8168EpStopCmac (
+    IN PRTL_ADAPTER Adapter
+    )
+{
+    UINT i;
+
+    RtlWriteReg8(Adapter, R_IBCR2, RtlReadReg8(Adapter, R_IBCR2) & ~0x01);
+    for (i = 0; i < 500; i++)
+    {
+        if (RtlReadReg8(Adapter, R_IBISR0) & 0x20)
+            break;
+        NdisStallExecution(100);
+    }
+    RtlWriteReg8(Adapter, R_IBISR0, RtlReadReg8(Adapter, R_IBISR0) | 0x20);
+    RtlWriteReg8(Adapter, R_IBCR0, RtlReadReg8(Adapter, R_IBCR0) & ~0x01);
+}
+
+/*
+ * rtl_hw_initialize -- r8169_main.c:5096.  Takes the 8168G-and-later MCU out
+ * of OOB (management) mode before the first soft reset.  Without this the
+ * MAC engine stays owned by the management firmware and RX never starts.
+ * Runs at PASSIVE from MiniportInitialize only.
+ */
+VOID
+NTAPI
+NICInitializeHw (
+    IN PRTL_ADAPTER Adapter
+    )
+{
+    if (Adapter->MacVersion < RTL_MAC_VER_40)
+        return;
+
+    /* rtl_hw_init_8168ep = stop_cmac + rtl_hw_init_8168g */
+    if (Adapter->MacVersion >= RTL_MAC_VER_51)
+        Rtl8168EpStopCmac(Adapter);
+
+    /* rtl_hw_init_8168g -- r8169_main.c:5064 */
+    RtlEnableRxdvGate(Adapter);
+
+    RtlWriteReg8(Adapter, R_CMD,
+                 RtlReadReg8(Adapter, R_CMD) & ~(B_CMD_TXENB | B_CMD_RXENB));
+    NdisMSleep(1000);   /* msleep(1) */
+    RtlWriteReg8(Adapter, R_MCU,
+                 RtlReadReg8(Adapter, R_MCU) & ~MCU_NOW_IS_OOB);
+
+    RtlMacOcpModify(Adapter, 0xE8DE, 0x4000, 0);        /* clear BIT(14) */
+    Rtl8168gWaitLlShareFifoReady(Adapter);
+
+    RtlMacOcpModify(Adapter, 0xE8DE, 0, 0x8000);        /* set BIT(15) */
+    Rtl8168gWaitLlShareFifoReady(Adapter);
+}
+
 /*
  * Decode the chip version from TxConfig (R_TC) bits 30..23.
- * The mapping is intentionally permissive: unknown silicon decodes to
- * RTL_MAC_VER_UNKNOWN which the driver still tries to drive (assuming the
- * BIOS brought up the PHY).
+ * Unknown silicon fails detection -- MiniportInitialize then fails with
+ * NDIS_STATUS_ADAPTER_NOT_FOUND, exactly like Linux fails the probe on an
+ * unknown XID.
  *
- * Table mirrors rtl_chip_infos[] / rtl_mac_version selection in r8169_main.c.
+ * Table transcribed from mac_info[] in rtl8169_get_mac_version()
+ * (r8169_main.c:2024), restricted to the 8168/8411 families this driver
+ * drives (Linux XID values shifted left by 20 to match raw TxConfig).
+ * Order matters: first hit wins, exactly as in Linux.
  */
 NDIS_STATUS
 NTAPI
@@ -70,30 +218,47 @@ NICDetectChipVersion (
         RTL_MAC_VER ver;
         const char *name;
     } table[] = {
-        { 0x7CF00000, 0x30000000, RTL_MAC_VER_11, "RTL8168B/8111B" },
-        { 0x7CF00000, 0x38000000, RTL_MAC_VER_17, "RTL8168B/8111B" },
-        { 0x7C800000, 0x38000000, RTL_MAC_VER_18, "RTL8168CP" },
+        /* 8168EP family. */
+        { 0x7CF00000, 0x50200000, RTL_MAC_VER_51, "RTL8168EP/8111EP" },
+
+        /* 8168H family. */
+        { 0x7CF00000, 0x54100000, RTL_MAC_VER_46, "RTL8168H/8111H" },
+
+        /* 8168G family. */
+        { 0x7CF00000, 0x5C800000, RTL_MAC_VER_44, "RTL8411B" },
+        { 0x7CF00000, 0x50900000, RTL_MAC_VER_42, "RTL8168GU/8111GU" },
+        { 0x7CF00000, 0x4C000000, RTL_MAC_VER_40, "RTL8168G/8111G" },
+
+        /* 8168F family. */
+        { 0x7C800000, 0x48800000, RTL_MAC_VER_38, "RTL8411" },
+        { 0x7CF00000, 0x48100000, RTL_MAC_VER_36, "RTL8168F/8111F" },
+        { 0x7CF00000, 0x48000000, RTL_MAC_VER_35, "RTL8168F/8111F" },
+
+        /* 8168E family. */
+        { 0x7C800000, 0x2C800000, RTL_MAC_VER_34, "RTL8168E-VL/8111E-VL" },
+        { 0x7CF00000, 0x2C100000, RTL_MAC_VER_32, "RTL8168E/8111E" },
+        { 0x7C800000, 0x2C000000, RTL_MAC_VER_33, "RTL8168E/8111E" },
+
+        /* 8168D family. */
+        { 0x7CF00000, 0x28100000, RTL_MAC_VER_25, "RTL8168D/8111D" },
+        { 0x7C800000, 0x28000000, RTL_MAC_VER_26, "RTL8168D/8111D" },
+
+        /* 8168DP family. */
+        { 0x7CF00000, 0x28A00000, RTL_MAC_VER_28, "RTL8168DP/8111DP" },
+        { 0x7CF00000, 0x28B00000, RTL_MAC_VER_31, "RTL8168DP/8111DP" },
+
+        /* 8168C family. */
+        { 0x7CF00000, 0x3C900000, RTL_MAC_VER_23, "RTL8168CP/8111CP" },
+        { 0x7CF00000, 0x3C800000, RTL_MAC_VER_18, "RTL8168CP/8111CP" },
+        { 0x7C800000, 0x3C800000, RTL_MAC_VER_24, "RTL8168CP/8111CP" },
         { 0x7CF00000, 0x3C000000, RTL_MAC_VER_19, "RTL8168C/8111C" },
         { 0x7CF00000, 0x3C200000, RTL_MAC_VER_20, "RTL8168C/8111C" },
-        { 0x7CF00000, 0x3C400000, RTL_MAC_VER_21, "RTL8168C/8111C" },
-        { 0x7CF00000, 0x3C800000, RTL_MAC_VER_22, "RTL8168C/8111C" },
-        { 0x7C800000, 0x3C000000, RTL_MAC_VER_23, "RTL8168CP" },
-        { 0x7C800000, 0x3C800000, RTL_MAC_VER_24, "RTL8168CP" },
-        { 0x7CF00000, 0x28000000, RTL_MAC_VER_25, "RTL8168D/8111D" },
-        { 0x7CF00000, 0x28100000, RTL_MAC_VER_26, "RTL8168D/8111D" },
-        { 0x7C800000, 0x28800000, RTL_MAC_VER_28, "RTL8168DP" },
-        { 0x7CF00000, 0x28A00000, RTL_MAC_VER_31, "RTL8168DP" },
-        { 0x7CF00000, 0x2C000000, RTL_MAC_VER_32, "RTL8168E/8111E" },
-        { 0x7CF00000, 0x2C200000, RTL_MAC_VER_33, "RTL8168E/8111E" },
-        { 0x7CF00000, 0x2C800000, RTL_MAC_VER_34, "RTL8168EVL/8111EVL" },
-        { 0x7CF00000, 0x2C900000, RTL_MAC_VER_38, "RTL8411" },
-        { 0x7CF00000, 0x48000000, RTL_MAC_VER_35, "RTL8168F/8111F" },
-        { 0x7CF00000, 0x48100000, RTL_MAC_VER_36, "RTL8168F/8111F" },
-        { 0x7CF00000, 0x48800000, RTL_MAC_VER_44, "RTL8411B" },
-        { 0x7CF00000, 0x4C000000, RTL_MAC_VER_40, "RTL8168G/8111G" },
-        { 0x7CF00000, 0x4C100000, RTL_MAC_VER_42, "RTL8168GU/8111GU" },
-        { 0x7CF00000, 0x50000000, RTL_MAC_VER_46, "RTL8168H/8111H" },
-        { 0x7CF00000, 0x54000000, RTL_MAC_VER_51, "RTL8168EP/8111EP" },
+        { 0x7CF00000, 0x3C300000, RTL_MAC_VER_21, "RTL8168C/8111C" },
+        { 0x7C800000, 0x3C000000, RTL_MAC_VER_22, "RTL8168C/8111C" },
+
+        /* 8168B family. */
+        { 0x7C800000, 0x38000000, RTL_MAC_VER_17, "RTL8168B/8111B" },
+        { 0x7C800000, 0x30000000, RTL_MAC_VER_11, "RTL8168B/8111B" },
     };
     ULONG i;
     ULONG raw = RtlReadReg32(Adapter, R_TC);
@@ -107,6 +272,16 @@ NICDetectChipVersion (
         if ((raw & table[i].mask) == table[i].val)
         {
             Adapter->MacVersion = table[i].ver;
+
+            /* On 8168G and later MDIO is redirected through GPHY OCP.
+             * Latch this now: RtlPllPowerUp touches MDIO before
+             * RtlHwStartChipSpecific ever runs. */
+            if (Adapter->MacVersion >= RTL_MAC_VER_40)
+            {
+                Adapter->OcpMdioRedirect = TRUE;
+                Adapter->OcpBase = OCP_STD_PHY_BASE;
+            }
+
             NDIS_DbgPrint(MIN_TRACE,
                 ("RTL8168: detected %s (TxConfig=0x%08lx)\n",
                  table[i].name, raw));
@@ -115,9 +290,8 @@ NICDetectChipVersion (
     }
 
     NDIS_DbgPrint(MIN_TRACE,
-        ("RTL8168: unknown chip version (TxConfig=0x%08lx); driving as generic 8168\n",
-         raw));
-    return NDIS_STATUS_SUCCESS;
+        ("RTL8168: ERROR: unknown chip version (TxConfig=0x%08lx)\n", raw));
+    return NDIS_STATUS_ADAPTER_NOT_FOUND;
 }
 
 NDIS_STATUS
@@ -177,6 +351,82 @@ NICRefillRxDescriptor (
     return NDIS_STATUS_SUCCESS;
 }
 
+/* rtl_jumbo_config -- r8169_main.c:2355, non-jumbo branch only (this driver
+ * never negotiates an MTU above 1500).  Explicitly clears the jumbo enable
+ * bits the BIOS/a previous OS may have left set.  Does its own Cfg9346
+ * unlock/lock, as Linux does. */
+static VOID
+RtlJumboDisable(IN PRTL_ADAPTER Adapter)
+{
+    RtlWriteReg8(Adapter, R_CFG9346, CFG9346_UNLOCK);
+
+    if (Adapter->MacVersion == RTL_MAC_VER_17)
+    {
+        /* r8168b_1_hw_jumbo_disable */
+        RtlWriteReg8(Adapter, R_CFG4, RtlReadReg8(Adapter, R_CFG4) & ~0x01);
+    }
+    else if (Adapter->MacVersion >= RTL_MAC_VER_18 &&
+             Adapter->MacVersion <= RTL_MAC_VER_26)
+    {
+        /* r8168c_hw_jumbo_disable */
+        RtlWriteReg8(Adapter, R_CFG3,
+                     RtlReadReg8(Adapter, R_CFG3) & ~CFG3_JUMBO_EN0);
+        RtlWriteReg8(Adapter, R_CFG4,
+                     RtlReadReg8(Adapter, R_CFG4) & ~CFG4_JUMBO_EN1);
+    }
+    else if (Adapter->MacVersion == RTL_MAC_VER_28)
+    {
+        /* r8168dp_hw_jumbo_disable */
+        RtlWriteReg8(Adapter, R_CFG3,
+                     RtlReadReg8(Adapter, R_CFG3) & ~CFG3_JUMBO_EN0);
+    }
+    else if (Adapter->MacVersion >= RTL_MAC_VER_31 &&
+             Adapter->MacVersion <= RTL_MAC_VER_33)
+    {
+        /* r8168e_hw_jumbo_disable */
+        RtlWriteReg8(Adapter, R_MAXTXPKTSIZE, 0x3F);
+        RtlWriteReg8(Adapter, R_CFG3,
+                     RtlReadReg8(Adapter, R_CFG3) & ~CFG3_JUMBO_EN0);
+        RtlWriteReg8(Adapter, R_CFG4,
+                     RtlReadReg8(Adapter, R_CFG4) & ~0x01);
+    }
+
+    RtlWriteReg8(Adapter, R_CFG9346, CFG9346_LOCK);
+}
+
+/* rtl_init_rxcfg -- r8169_main.c:2280.  Programs the non-accept RxConfig
+ * bits per chip family; the accept bits are applied afterwards by
+ * NICApplyPacketFilter. */
+static VOID
+RtlInitRxConfig(IN PRTL_ADAPTER Adapter)
+{
+    ULONG rc;
+
+    if (Adapter->MacVersion >= RTL_MAC_VER_11 &&
+        Adapter->MacVersion <= RTL_MAC_VER_17)
+    {
+        rc = RX_FIFO_THRESH | RX_DMA_BURST;
+    }
+    else if ((Adapter->MacVersion >= RTL_MAC_VER_18 &&
+              Adapter->MacVersion <= RTL_MAC_VER_24) ||
+             (Adapter->MacVersion >= RTL_MAC_VER_34 &&
+              Adapter->MacVersion <= RTL_MAC_VER_36) ||
+             Adapter->MacVersion == RTL_MAC_VER_38)
+    {
+        rc = RX_RX128_INT_EN | RX_MULTI_EN | RX_DMA_BURST;
+    }
+    else if (Adapter->MacVersion >= RTL_MAC_VER_40)
+    {
+        rc = RX_RX128_INT_EN | RX_MULTI_EN | RX_DMA_BURST | RX_EARLY_OFF;
+    }
+    else
+    {
+        rc = RX_RX128_INT_EN | RX_DMA_BURST;
+    }
+
+    RtlWriteReg32(Adapter, R_RC, rc);
+}
+
 NDIS_STATUS
 NTAPI
 NICProgramRings (
@@ -200,6 +450,43 @@ NICProgramRings (
     Adapter->TxFull = FALSE;
     Adapter->RxConsumer = 0;
 
+    /* From here on, mirror Linux rtl_hw_start (r8169_main.c:3746). */
+
+    /* Configuration writes need Cfg9346 unlocked. */
+    RtlWriteReg8(Adapter, R_CFG9346, CFG9346_UNLOCK);
+
+    /* Disable ASPM and clock request before any EPHY access. */
+    RtlHwAspmClkReqDisable(Adapter);
+
+    /* CPlusCmd: Linux keeps only the CPCMD_MASK bits it read at probe.  We
+     * additionally drop RxVlan (no VLAN offload), RxChkSum (the RX path does
+     * not consume hardware checksum results) and the INTT bits (IntrMitigate
+     * is written as 0 below), leaving just the Normal_mode bit. */
+    RtlWriteReg16(Adapter, R_CPLUSCMD,
+                  RtlReadReg16(Adapter, R_CPLUSCMD) & CPCMD_NORMAL);
+
+    /* rtl_hw_start_8168: early-TX threshold, in units of 128 bytes. */
+    RtlWriteReg8(Adapter, R_MAXTXPKTSIZE,
+                 (Adapter->MacVersion >= RTL_MAC_VER_34) ? TXPKT_EARLY_SIZE
+                                                         : TXPKT_MAX);
+
+    /* Per-chip-variant FIFO sizing, EPHY init, ERI/EEE tuning
+     * (rtl_hw_config). */
+    RtlHwStartChipSpecific(Adapter);
+
+    /* IntrMitigate = 0: disable interrupt coalescing. */
+    RtlWriteReg16(Adapter, R_IMITIGATE, 0);
+
+    /* rtl_enable_exit_l1 */
+    RtlEnableExitL1(Adapter);
+
+    /* Linux re-enables ASPM here (rtl_hw_aspm_clkreq_enable(tp, true));
+     * we deliberately leave it disabled. */
+
+    /* RxMaxSize: Linux rtl_set_rx_max_size sets RX_BUF_SIZE + 1 -- comment
+     * says "Low hurts. Let's disable the filtering." */
+    RtlWriteReg16(Adapter, R_RXMAXSIZE, (USHORT)(RX_BUF_SIZE + 1));
+
     /* Hand descriptor ring base addresses to the chip.
      * Linux r8169_main.c rtl_set_rx_tx_desc_registers comments:
      *   "Magic spell: some iop3xx ARM board needs the TxDescAddrHigh
@@ -210,88 +497,46 @@ NICProgramRings (
     RtlWriteReg32(Adapter, R_RXDESC_HI, Adapter->RxRingPa.HighPart);
     RtlWriteReg32(Adapter, R_RXDESC_LO, Adapter->RxRingPa.LowPart);
 
-    /* Configuration writes need Cfg9346 unlocked. */
-    RtlWriteReg8(Adapter, R_CFG9346, CFG9346_UNLOCK);
-
-    /* RxMaxSize: Linux rtl_set_rx_max_size sets RX_BUF_SIZE + 1 -- comment
-     * says "Low hurts. Let's disable the filtering." */
-    RtlWriteReg16(Adapter, R_RXMAXSIZE, (USHORT)(RX_BUF_SIZE + 1));
-
-    /* MaxTxPacketSize in units of 128 bytes (8168/8101) */
-    RtlWriteReg8(Adapter, R_MAXTXPKTSIZE, 0x3F);
-
-    /* CPlusCmd: keep manufacturer defaults + RxChksum.  Per Linux this is
-     * also where RxVlan gets set; we leave VLAN off. */
-    RtlWriteReg16(Adapter, R_CPLUSCMD,
-                  CPCMD_NORMAL | CPCMD_RXCHKSUM | CPCMD_PCI_MRW);
-
-    /* IntrMitigate = 0: deliver every interrupt immediately. */
-    RtlWriteReg16(Adapter, R_IMITIGATE, 0);
-
-    /* RxConfig: accept broadcast/multicast/myphys, FIFO + DMA unlimited. */
-    RtlWriteReg32(Adapter, R_RC,
-                  RX_FIFO_THRESH | RX_DMA_BURST |
-                  RX_ACCEPT_BCAST | RX_ACCEPT_MCAST | RX_ACCEPT_MYPHYS);
-
-    /* TxConfig: keep chip-version bits; set DMA unlimited + normal IFG.
-     * For 8168E-VL and later (MAC_VER >= 34) the spec requires TXCFG_AUTO_FIFO. */
-    {
-        ULONG tx = (Adapter->TxConfigRaw & TXCFG_VER_MASK) |
-                   TXCFG_DMA_UNLIMITED | TXCFG_IFG_NORMAL;
-        if (Adapter->MacVersion >= RTL_MAC_VER_34)
-            tx |= TXCFG_AUTO_FIFO;
-        RtlWriteReg32(Adapter, R_TC, tx);
-    }
-
-    /* Per-chip-class init bits ported from rtl_hw_start_8168e_2 / _f / _g.
-     * Without these, MCU stays in OOB mode and RX is gated off on the
-     * 8168E-and-newer parts -- packets reach the chip but never the descriptor
-     * ring, so the driver looks "alive" but receives nothing.
-     *
-     * 8168D and earlier predate the MCU/MISC layout, so guard the writes. */
-    if (Adapter->MacVersion >= RTL_MAC_VER_25)   /* 8168D+ has the MCU register */
-    {
-        UCHAR mcu = RtlReadReg8(Adapter, R_MCU);
-        RtlWriteReg8(Adapter, R_MCU, mcu & ~MCU_NOW_IS_OOB);
-    }
-
-    if (Adapter->MacVersion >= RTL_MAC_VER_32)   /* 8168E and later */
-    {
-        UCHAR dllpr = RtlReadReg8(Adapter, R_DLLPR);
-        ULONG misc = RtlReadReg32(Adapter, R_MISC);
-
-        /* Clear RX-data-valid gate -- failure to clear leaves RX dead on
-         * 8168G/H even though every other path looks healthy. */
-        misc &= ~MISC_RXDV_GATED_EN;
-        /* PWM/PFM enable -- Linux always sets these on 8168E+ for power
-         * management quirks; safe on AC-powered desktops/laptops. */
-        misc |= MISC_PWM_EN;
-        dllpr |= DLLPR_PFM_EN;
-
-        RtlWriteReg32(Adapter, R_MISC, misc);
-        RtlWriteReg8(Adapter, R_DLLPR, dllpr);
-    }
-
-    /* Per-chip-variant FIFO sizing, EPHY init, ASPM/EEE tuning. */
-    RtlHwStartChipSpecific(Adapter);
-
     RtlWriteReg8(Adapter, R_CFG9346, CFG9346_LOCK);
 
-    /* PHY tuning passes -- safe to do after Cfg9346 is re-locked. */
-    RtlHwPhyConfig(Adapter);
+    /* Make sure the jumbo-frame enables are off (rtl_jumbo_config). */
+    RtlJumboDisable(Adapter);
 
+    /* The engine enable tail (ChipCmd, RxConfig, TxConfig, filter) runs in
+     * NICEnableTxRx; the caller unmasks interrupts last. */
     return NDIS_STATUS_SUCCESS;
 }
 
+/*
+ * Engine enable tail of Linux rtl_hw_start (r8169_main.c:3769):
+ * PCI commit, CmdTxEnb|CmdRxEnb, rtl_init_rxcfg, TxConfig, RX filter.
+ * The caller unmasks interrupts after this returns.
+ */
 NDIS_STATUS
 NTAPI
 NICEnableTxRx (
     IN PRTL_ADAPTER Adapter
     )
 {
-    UCHAR cmd = RtlReadReg8(Adapter, R_CMD);
-    cmd |= B_CMD_RXENB | B_CMD_TXENB;
-    RtlWriteReg8(Adapter, R_CMD, cmd);
+    ULONG tx;
+
+    /* "Initially a 10 us delay. Turned it into a PCI commit. - FR" */
+    (VOID)RtlReadReg8(Adapter, R_CMD);
+
+    RtlWriteReg8(Adapter, R_CMD, B_CMD_TXENB | B_CMD_RXENB);
+
+    RtlInitRxConfig(Adapter);
+
+    /* rtl_set_tx_config_registers: DMA unlimited + normal IFG; 8168E-VL and
+     * later want TXCFG_AUTO_FIFO. */
+    tx = TXCFG_DMA_UNLIMITED | TXCFG_IFG_NORMAL;
+    if (Adapter->MacVersion >= RTL_MAC_VER_34)
+        tx |= TXCFG_AUTO_FIFO;
+    RtlWriteReg32(Adapter, R_TC, tx);
+
+    /* rtl_set_rx_mode: apply the accept bits on top of rtl_init_rxcfg. */
+    NICApplyPacketFilter(Adapter);
+
     return NDIS_STATUS_SUCCESS;
 }
 
@@ -367,35 +612,41 @@ NICUpdateLinkStatus (
         Adapter->LinkSpeedMbps = 0;
 }
 
+/* rtl_set_rx_mode -- r8169_main.c:2575: modify only the accept bits
+ * (RX_CONFIG_ACCEPT_OK_MASK); the rest of RxConfig stays as programmed by
+ * RtlInitRxConfig. */
 NDIS_STATUS
 NTAPI
 NICApplyPacketFilter (
     IN PRTL_ADAPTER Adapter
     )
 {
-    ULONG rc = RX_FIFO_THRESH | RX_DMA_BURST;
+    ULONG rxMode = 0;
+    ULONG tmp;
 
     if (Adapter->PacketFilter & NDIS_PACKET_TYPE_DIRECTED)
-        rc |= RX_ACCEPT_MYPHYS;
+        rxMode |= RX_ACCEPT_MYPHYS;
 
     if (Adapter->PacketFilter & NDIS_PACKET_TYPE_MULTICAST)
-        rc |= RX_ACCEPT_MCAST;
+        rxMode |= RX_ACCEPT_MCAST;
 
     if (Adapter->PacketFilter & NDIS_PACKET_TYPE_BROADCAST)
-        rc |= RX_ACCEPT_BCAST;
+        rxMode |= RX_ACCEPT_BCAST;
 
     if (Adapter->PacketFilter & NDIS_PACKET_TYPE_PROMISCUOUS)
-        rc |= RX_ACCEPT_ALLPHYS | RX_ACCEPT_MYPHYS |
-              RX_ACCEPT_BCAST | RX_ACCEPT_MCAST;
+        rxMode |= RX_ACCEPT_ALLPHYS | RX_ACCEPT_MYPHYS |
+                  RX_ACCEPT_BCAST | RX_ACCEPT_MCAST;
 
     if (Adapter->PacketFilter & NDIS_PACKET_TYPE_ALL_MULTICAST)
-        rc |= RX_ACCEPT_MCAST;
+        rxMode |= RX_ACCEPT_MCAST;
 
-    RtlWriteReg32(Adapter, R_RC, rc);
-
-    /* Multicast filter -- accept-all bitmask for now (no per-MAC hash). */
-    RtlWriteReg32(Adapter, R_MAR0,     0xFFFFFFFF);
+    /* Multicast filter -- accept-all bitmask for now (no per-MAC hash).
+     * Linux writes MAR0+4 before MAR0. */
     RtlWriteReg32(Adapter, R_MAR0 + 4, 0xFFFFFFFF);
+    RtlWriteReg32(Adapter, R_MAR0,     0xFFFFFFFF);
+
+    tmp = RtlReadReg32(Adapter, R_RC);
+    RtlWriteReg32(Adapter, R_RC, (tmp & ~RX_ACCEPT_OK_MASK) | rxMode);
 
     return NDIS_STATUS_SUCCESS;
 }
