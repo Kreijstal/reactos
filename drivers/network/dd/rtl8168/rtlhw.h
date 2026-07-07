@@ -55,6 +55,19 @@
 #define R_RXDESC_HI         0xE8
 #define R_MAXTXPKTSIZE      0xEC    /* 8101/8168 unit of 128 bytes */
 #define R_MISC              0xF0    /* 8168E and later */
+#define R_MISC1             0xF2    /* MISC_1, 8168H and later */
+#define R_DBGREG            0xD1    /* DBG_REG */
+#define R_IBCR0             0xF8    /* 8168EP CMAC */
+#define R_IBCR2             0xF9    /* 8168EP CMAC */
+#define R_IBISR0            0xFB    /* 8168EP CMAC */
+
+/* MaxTxPacketSize values (unit of 128 bytes) -- Linux TxPacketMax/EarlySize */
+#define TXPKT_MAX           (8064 >> 7)     /* pre-8168E-VL */
+#define TXPKT_EARLY_SIZE    0x27            /* 8168E-VL and later */
+
+/* DBG_REG bits */
+#define DBGREG_FIX_NAK_1    0x10    /* BIT(4) */
+#define DBGREG_FIX_NAK_2    0x08    /* BIT(3) */
 
 /* ERI (Extended Register Indirect) -- indirect access to chip-internal regs
  * 0x00..0x2FF.  Used for FIFO sizing, pause thresholds, ASPM, EEE. */
@@ -83,6 +96,9 @@
 #define OCPAR_FLAG          0x80000000UL
 #define OCP_STD_PHY_BASE    0xA400
 
+/* CONFIG1 bits */
+#define CFG1_SPEED_DOWN     0x10    /* BIT(4) */
+
 /* CONFIG2 bits */
 #define CFG2_PMSTS_EN       0x20
 #define CFG2_CLKREQEN       0x80    /* Clock Request Enable */
@@ -90,6 +106,10 @@
 /* CONFIG3 bits */
 #define CFG3_BEACON_EN      0x01    /* 8168 only. Reserved in the 8168b */
 #define CFG3_RDY_TO_L23     0x02    /* L23 Enable */
+#define CFG3_JUMBO_EN0      0x04    /* 8168 only. Reserved in the 8168b */
+
+/* CONFIG4 bits */
+#define CFG4_JUMBO_EN1      0x02    /* 8168 only. Reserved in the 8168b */
 
 /* CONFIG5 bits */
 #define CFG5_ASPM_EN        0x01    /* ASPM enable */
@@ -105,13 +125,18 @@
 #define BMCR_ANRESTART      0x0200
 
 /* DLLPR bits (8168E+) */
-#define DLLPR_PFM_EN        0x40
+#define DLLPR_PFM_EN        0x40    /* BIT(6) */
+#define DLLPR_TX_10M_PS_EN  0x80    /* BIT(7) */
+
+/* MISC_1 bits */
+#define MISC1_PFM_D3COLD_EN 0x40    /* BIT(6) */
 
 /* MCU bits */
 #define MCU_NOW_IS_OOB      0x80    /* Out-of-band (management) mode */
 #define MCU_TX_EMPTY        0x20
 #define MCU_RX_EMPTY        0x10
 #define MCU_RXTX_EMPTY      (MCU_TX_EMPTY | MCU_RX_EMPTY)
+#define MCU_LINK_LIST_RDY   0x02    /* BIT(1) */
 
 /* MISC bits (8168E+, 32-bit) */
 #define MISC_RXDV_GATED_EN  0x00080000  /* Gates RX-data-valid -- chip drops all RX while set */
@@ -154,6 +179,7 @@
 
 /* RxConfig bits */
 #define RX_RX128_INT_EN     (1 <<15)    /* 8111c and later */
+#define RX_MULTI_EN         (1 << 14)   /* 8111c only */
 #define RX_FIFO_THRESH      (7 << 13)   /* no FIFO threshold before first PCI xfer */
 #define RX_EARLY_OFF        (1 << 11)
 #define RX_DMA_BURST        (7 <<  8)   /* unlimited burst */
@@ -171,6 +197,7 @@
 #define TXCFG_DMA_UNLIMITED (7 <<  8)
 #define TXCFG_IFG_NORMAL    (3 << 24)
 #define TXCFG_AUTO_FIFO     (1 <<  7)   /* 8111e-vl */
+#define TXCFG_EMPTY         (1 << 11)   /* 8111e-vl */
 
 /* CPlusCmd bits */
 #define CPCMD_RXCHKSUM      (1 << 5)
@@ -236,8 +263,8 @@ typedef struct _ETH_HEADER {
 } ETH_HEADER, *PETH_HEADER;
 
 /* Chip versions we accept and report (subset of Linux RTL_GIGA_MAC_VER_*).
- * Most RTL8168 silicon ships from BIOS already brought up, so we tolerate
- * any value whose TXCFG-coded version decodes to a known modern part. */
+ * Unknown silicon fails MiniportInitialize, matching Linux which refuses
+ * to probe an unrecognized XID. */
 typedef enum _RTL_MAC_VER {
     RTL_MAC_VER_UNKNOWN = 0,
     RTL_MAC_VER_11,     /* RTL8168B / RTL8111B */
