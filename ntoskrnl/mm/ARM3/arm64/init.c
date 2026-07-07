@@ -488,6 +488,8 @@ MiArm64MapKseg0Page(
 {
     MiArm64MapKseg0IdentityRange((PVOID)(ULONG_PTR)(((UINT64)PageFrameNumber) << PAGE_SHIFT),
                                  PAGE_SIZE);
+    MiArm64MapEarlyAliasRange((PVOID)(KSEG0_BASE + (((UINT64)PageFrameNumber) << PAGE_SHIFT)),
+                              PAGE_SIZE);
 }
 
 static
@@ -1835,6 +1837,15 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
                     RootL0[Index] = 0;
                 }
 
+                /*
+                 * ARM3 can touch the recursive PTE page for low user VAs
+                 * during phase-0 setup, before the PFN database can service
+                 * faults on page-table addresses. Keep the user mappings
+                 * empty, but instantiate the VA-0 table path so PTE_BASE is
+                 * readable as a zeroed PTE page.
+                 */
+                MiMapPDEs(NULL, (PVOID)(PAGE_SIZE - 1));
+
                 CurrentProcess->Pcb.DirectoryTableBase[0] = (ULONG_PTR)RootPa;
                 CurrentProcess->Pcb.DirectoryTableBase[1] = (ULONG_PTR)RootPa;
 
@@ -1883,23 +1894,11 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
         MiMapPfnDatabase(LoaderBlock);
 
         MiInitializeColorTables();
-        MiBuildNonPagedPool();
-
-        ExpArm64PoolBootstrapMode = TRUE;
-        KeInitializeSpinLock(&MmNonPagedPoolLock);
-        InitializePool(NonPagedPool, 0);
-        KeInitializeSpinLock(&NonPagedPoolLock);
-        ExpArm64PoolBootstrapMode = FALSE;
 
         MiBuildSystemPteSpace();
 
         MiMapPPEs((PVOID)MI_MAPPING_RANGE_START, (PVOID)MI_MAPPING_RANGE_END);
         MiMapPDEs((PVOID)MI_MAPPING_RANGE_START, (PVOID)MI_MAPPING_RANGE_END);
-
-        /* Set up the PDE and PTEs for the VAD bitmap and working set list */
-        MiMapPPEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
-        MiMapPDEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
-        MiMapPTEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
 
         MmFirstReservedMappingPte = MiAddressToPte((PVOID)MI_MAPPING_RANGE_START);
         MmLastReservedMappingPte = MiAddressToPte((PVOID)MI_MAPPING_RANGE_END);
@@ -1960,11 +1959,27 @@ MiInitMachineDependent(_Inout_ PLOADER_PARAMETER_BLOCK LoaderBlock)
          */
         *MxFreeDescriptor = MxOldFreeDescriptor;
 
+        MiBuildNonPagedPool();
+
+        ExpArm64PoolBootstrapMode = TRUE;
+        KeInitializeSpinLock(&MmNonPagedPoolLock);
+        InitializePool(NonPagedPool, 0);
+        KeInitializeSpinLock(&NonPagedPoolLock);
+        ExpArm64PoolBootstrapMode = FALSE;
+
+        /* Set up the PDE and PTEs for the VAD bitmap and working set list */
+        MiMapPPEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
+        MiMapPDEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
+        MiMapPTEs((PVOID)MI_VAD_BITMAP, (PVOID)(MI_WORKING_SET_LIST + PAGE_SIZE - 1));
+
         {
             PVOID PagedPoolEnd = (PVOID)(((ULONG_PTR)MmPagedPoolStart +
                                           MmSizeOfPagedPoolInBytes) - 1);
 
             MiMapPPEs(MmPagedPoolStart, PagedPoolEnd);
+            MiMapPDEs(MiAddressToPpe(MmPagedPoolStart), MiAddressToPpe(PagedPoolEnd));
+            MiMapPDEs(MiAddressToPde(MmPagedPoolStart), MiAddressToPde(PagedPoolEnd));
+            MiMapPDEs(MiAddressToPte(MmPagedPoolStart), MiAddressToPte(PagedPoolEnd));
         }
 
         {

@@ -471,47 +471,51 @@ FdoStartDevice(
 
     DeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
 
-    AllocatedResources = IoGetCurrentIrpStackLocation(Irp)->Parameters.StartDevice.AllocatedResources;
-    if (!AllocatedResources)
-    {
-        DPRINT("No allocated resources sent to driver\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    if (AllocatedResources->Count < 1)
-    {
-        DPRINT("Not enough allocated resources sent to driver\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    if (AllocatedResources->List[0].PartialResourceList.Version != 1 ||
-        AllocatedResources->List[0].PartialResourceList.Revision != 1)
-        return STATUS_REVISION_MISMATCH;
-
     ASSERT(DeviceExtension->State == dsStopped);
 
-    /* By default, use the bus number in the resource list header */
-    DeviceExtension->BusNumber = AllocatedResources->List[0].BusNumber;
-
-    for (i = 0; i < AllocatedResources->List[0].PartialResourceList.Count; i++)
+    /*
+     * Some ACPI-only platforms, including QEMU virt on ARM64, expose the
+     * host bridge but do not provide a translated bus-number resource during
+     * early boot. The root PCI bus is still usable and HAL config-space access
+     * already defaults to segment/bus 0, so keep the bus driver alive.
+     */
+    DeviceExtension->BusNumber = 0;
+    AllocatedResources = IoGetCurrentIrpStackLocation(Irp)->Parameters.StartDevice.AllocatedResources;
+    if (AllocatedResources && AllocatedResources->Count >= 1)
     {
-        ResourceDescriptor = &AllocatedResources->List[0].PartialResourceList.PartialDescriptors[i];
-        switch (ResourceDescriptor->Type)
+        if (AllocatedResources->List[0].PartialResourceList.Version != 1 ||
+            AllocatedResources->List[0].PartialResourceList.Revision != 1)
         {
-            case CmResourceTypeBusNumber:
-                if (FoundBusNumber || ResourceDescriptor->u.BusNumber.Length < 1)
-                    return STATUS_INVALID_PARAMETER;
-
-                /* Use this one instead */
-                ASSERT(AllocatedResources->List[0].BusNumber == ResourceDescriptor->u.BusNumber.Start);
-                DeviceExtension->BusNumber = ResourceDescriptor->u.BusNumber.Start;
-                DPRINT("Found bus number resource: %lu\n", DeviceExtension->BusNumber);
-                FoundBusNumber = TRUE;
-                break;
-
-            default:
-                DPRINT("Unknown resource descriptor type 0x%x\n", ResourceDescriptor->Type);
+            return STATUS_REVISION_MISMATCH;
         }
+
+        /* By default, use the bus number in the resource list header */
+        DeviceExtension->BusNumber = AllocatedResources->List[0].BusNumber;
+
+        for (i = 0; i < AllocatedResources->List[0].PartialResourceList.Count; i++)
+        {
+            ResourceDescriptor = &AllocatedResources->List[0].PartialResourceList.PartialDescriptors[i];
+            switch (ResourceDescriptor->Type)
+            {
+                case CmResourceTypeBusNumber:
+                    if (FoundBusNumber || ResourceDescriptor->u.BusNumber.Length < 1)
+                        return STATUS_INVALID_PARAMETER;
+
+                    /* Use this one instead */
+                    ASSERT(AllocatedResources->List[0].BusNumber == ResourceDescriptor->u.BusNumber.Start);
+                    DeviceExtension->BusNumber = ResourceDescriptor->u.BusNumber.Start;
+                    DPRINT("Found bus number resource: %lu\n", DeviceExtension->BusNumber);
+                    FoundBusNumber = TRUE;
+                    break;
+
+                default:
+                    DPRINT("Unknown resource descriptor type 0x%x\n", ResourceDescriptor->Type);
+            }
+        }
+    }
+    else
+    {
+        DPRINT1("PCI: No bus resources, defaulting root bus to 0\n");
     }
 
     InitializeListHead(&DeviceExtension->DeviceListHead);

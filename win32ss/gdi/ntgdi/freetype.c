@@ -435,7 +435,7 @@ SharedFace_Create(FT_Face Face, PSHARED_MEM Memory)
 }
 
 static PSHARED_MEM
-SharedMem_Create(PBYTE Buffer, ULONG BufferSize, BOOL IsMapping)
+SharedMem_Create(PBYTE Buffer, ULONG BufferSize, SHARED_MEM_TYPE Type)
 {
     PSHARED_MEM Ptr;
     Ptr = ExAllocatePoolWithTag(PagedPool, sizeof(SHARED_MEM), TAG_FONT);
@@ -444,8 +444,8 @@ SharedMem_Create(PBYTE Buffer, ULONG BufferSize, BOOL IsMapping)
         Ptr->Buffer = Buffer;
         Ptr->BufferSize = BufferSize;
         Ptr->RefCount = 1;
-        Ptr->IsMapping = IsMapping;
-        DPRINT("Creating SharedMem for %p (%i, %p)\n", Buffer, IsMapping, Ptr);
+        Ptr->Type = Type;
+        DPRINT("Creating SharedMem for %p (%i, %p)\n", Buffer, Type, Ptr);
     }
     return Ptr;
 }
@@ -503,11 +503,15 @@ static void SharedMem_Release(PSHARED_MEM Ptr)
     --Ptr->RefCount;
     if (Ptr->RefCount == 0)
     {
-        DPRINT("Releasing SharedMem for %p (%i, %p)\n", Ptr->Buffer, Ptr->IsMapping, Ptr);
-        if (Ptr->IsMapping)
+        DPRINT("Releasing SharedMem for %p (%i, %p)\n", Ptr->Buffer, Ptr->Type, Ptr);
+        if (Ptr->Type == SharedMemMapping)
+        {
             MmUnmapViewInSystemSpace(Ptr->Buffer);
+        }
         else
+        {
             ExFreePoolWithTag(Ptr->Buffer, TAG_FONT);
+        }
         ExFreePoolWithTag(Ptr, TAG_FONT);
     }
 }
@@ -1374,27 +1378,56 @@ FontLink_Chain_Populate(
  *
  * Search the system font directory and adds each font found.
  */
+static BOOLEAN
+IntIsFontFileName(_In_ PCUNICODE_STRING FileName)
+{
+    ULONG i;
+    UNICODE_STRING Extension;
+    static const UNICODE_STRING FontExtensions[] =
+    {
+        RTL_CONSTANT_STRING(L".ttf"),
+        RTL_CONSTANT_STRING(L".ttc"),
+        RTL_CONSTANT_STRING(L".otf"),
+        RTL_CONSTANT_STRING(L".otc"),
+        RTL_CONSTANT_STRING(L".fon"),
+        RTL_CONSTANT_STRING(L".fnt")
+    };
+
+    for (i = 0; i < _countof(FontExtensions); ++i)
+    {
+        if (FileName->Length < FontExtensions[i].Length)
+            continue;
+
+        Extension.Buffer = (PWSTR)((ULONG_PTR)FileName->Buffer +
+                                   FileName->Length -
+                                   FontExtensions[i].Length);
+        Extension.Length = Extension.MaximumLength = FontExtensions[i].Length;
+        if (RtlEqualUnicodeString(&Extension, &FontExtensions[i], TRUE))
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 VOID FASTCALL
 IntLoadSystemFonts(VOID)
 {
+    typedef struct _FONT_LOAD_ENTRY
+    {
+        LIST_ENTRY ListEntry;
+        UNICODE_STRING FileName;
+    } FONT_LOAD_ENTRY, *PFONT_LOAD_ENTRY;
+
     OBJECT_ATTRIBUTES ObjectAttributes;
-    UNICODE_STRING Directory, FileName, TempString;
+    UNICODE_STRING Directory, TempString;
     IO_STATUS_BLOCK Iosb;
     HANDLE hDirectory;
     BYTE *DirInfoBuffer;
     PFILE_DIRECTORY_INFORMATION DirInfo;
+    LIST_ENTRY FontFileList;
+    PFONT_LOAD_ENTRY FontEntry;
     BOOLEAN bRestartScan = TRUE;
     NTSTATUS Status;
-    INT i;
-    static UNICODE_STRING SearchPatterns[] =
-    {
-        RTL_CONSTANT_STRING(L"*.ttf"),
-        RTL_CONSTANT_STRING(L"*.ttc"),
-        RTL_CONSTANT_STRING(L"*.otf"),
-        RTL_CONSTANT_STRING(L"*.otc"),
-        RTL_CONSTANT_STRING(L"*.fon"),
-        RTL_CONSTANT_STRING(L"*.fnt")
-    };
     static UNICODE_STRING IgnoreFiles[] =
     {
         RTL_CONSTANT_STRING(L"."),
@@ -1402,6 +1435,7 @@ IntLoadSystemFonts(VOID)
     };
 
     RtlInitUnicodeString(&Directory, L"\\SystemRoot\\Fonts\\");
+    InitializeListHead(&FontFileList);
 
     InitializeObjectAttributes(
         &ObjectAttributes,
@@ -1420,83 +1454,86 @@ IntLoadSystemFonts(VOID)
 
     if (NT_SUCCESS(Status))
     {
-        for (i = 0; i < _countof(SearchPatterns); ++i)
+        DirInfoBuffer = ExAllocatePoolWithTag(PagedPool, 0x4000, TAG_FONT);
+        if (DirInfoBuffer == NULL)
         {
-            DirInfoBuffer = ExAllocatePoolWithTag(PagedPool, 0x4000, TAG_FONT);
-            if (DirInfoBuffer == NULL)
-            {
-                ZwClose(hDirectory);
-                return;
-            }
+            ZwClose(hDirectory);
+            return;
+        }
 
-            FileName.Buffer = ExAllocatePoolWithTag(PagedPool, MAX_PATH * sizeof(WCHAR), TAG_FONT);
-            if (FileName.Buffer == NULL)
-            {
-                ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
-                ZwClose(hDirectory);
-                return;
-            }
-            FileName.Length = 0;
-            FileName.MaximumLength = MAX_PATH * sizeof(WCHAR);
+        while (1)
+        {
+            Status = ZwQueryDirectoryFile(
+                         hDirectory,
+                         NULL,
+                         NULL,
+                         NULL,
+                         &Iosb,
+                         DirInfoBuffer,
+                         0x4000,
+                         FileDirectoryInformation,
+                         FALSE,
+                         NULL,
+                         bRestartScan);
 
+            if (!NT_SUCCESS(Status) || Status == STATUS_NO_MORE_FILES)
+                break;
+
+            DirInfo = (PFILE_DIRECTORY_INFORMATION)DirInfoBuffer;
             while (1)
             {
-                Status = ZwQueryDirectoryFile(
-                             hDirectory,
-                             NULL,
-                             NULL,
-                             NULL,
-                             &Iosb,
-                             DirInfoBuffer,
-                             0x4000,
-                             FileDirectoryInformation,
-                             FALSE,
-                             &SearchPatterns[i],
-                             bRestartScan);
+                SIZE_T ign;
 
-                if (!NT_SUCCESS(Status) || Status == STATUS_NO_MORE_FILES)
+                TempString.Buffer = DirInfo->FileName;
+                TempString.Length = TempString.MaximumLength = DirInfo->FileNameLength;
+
+                /* Should we ignore this file? */
+                for (ign = 0; ign < _countof(IgnoreFiles); ++ign)
                 {
-                    break;
-                }
-
-                DirInfo = (PFILE_DIRECTORY_INFORMATION)DirInfoBuffer;
-                while (1)
-                {
-                    SIZE_T ign;
-
-                    TempString.Buffer = DirInfo->FileName;
-                    TempString.Length = TempString.MaximumLength = DirInfo->FileNameLength;
-
-                    /* Should we ignore this file? */
-                    for (ign = 0; ign < _countof(IgnoreFiles); ++ign)
-                    {
-                        /* Yes.. */
-                        if (RtlEqualUnicodeString(IgnoreFiles + ign, &TempString, FALSE))
-                            break;
-                    }
-
-                    /* If we tried all Ignore patterns and there was no match, try to create a font */
-                    if (ign == _countof(IgnoreFiles))
-                    {
-                        RtlCopyUnicodeString(&FileName, &Directory);
-                        RtlAppendUnicodeStringToString(&FileName, &TempString);
-                        if (!IntGdiAddFontResourceEx(&FileName, 1, 0, AFRX_WRITE_REGISTRY))
-                            DPRINT1("ERR: Failed to load %wZ\n", &FileName);
-                    }
-
-                    if (DirInfo->NextEntryOffset == 0)
+                    /* Yes.. */
+                    if (RtlEqualUnicodeString(IgnoreFiles + ign, &TempString, FALSE))
                         break;
-
-                    DirInfo = (PFILE_DIRECTORY_INFORMATION)((ULONG_PTR)DirInfo + DirInfo->NextEntryOffset);
                 }
 
-                bRestartScan = FALSE;
+                /* If we tried all Ignore patterns and there was no match, queue the font path */
+                if (ign == _countof(IgnoreFiles) && IntIsFontFileName(&TempString))
+                {
+                    SIZE_T Length = Directory.Length + TempString.Length + sizeof(UNICODE_NULL);
+
+                    FontEntry = ExAllocatePoolWithTag(PagedPool, sizeof(*FontEntry) + Length, TAG_FONT);
+                    if (FontEntry)
+                    {
+                        RtlInitEmptyUnicodeString(&FontEntry->FileName,
+                                                  (PWSTR)(FontEntry + 1),
+                                                  Length);
+                        RtlAppendUnicodeStringToString(&FontEntry->FileName, &Directory);
+                        RtlAppendUnicodeStringToString(&FontEntry->FileName, &TempString);
+                        InsertTailList(&FontFileList, &FontEntry->ListEntry);
+                    }
+                }
+
+                if (DirInfo->NextEntryOffset == 0)
+                    break;
+
+                DirInfo = (PFILE_DIRECTORY_INFORMATION)((ULONG_PTR)DirInfo + DirInfo->NextEntryOffset);
             }
 
-            ExFreePoolWithTag(FileName.Buffer, TAG_FONT);
-            ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
+            bRestartScan = FALSE;
         }
+
+        ExFreePoolWithTag(DirInfoBuffer, TAG_FONT);
         ZwClose(hDirectory);
+    }
+
+    while (!IsListEmpty(&FontFileList))
+    {
+        INT FontCount;
+
+        FontEntry = CONTAINING_RECORD(RemoveHeadList(&FontFileList), FONT_LOAD_ENTRY, ListEntry);
+        FontCount = IntGdiAddFontResourceEx(&FontEntry->FileName, 1, 0, AFRX_WRITE_REGISTRY);
+        if (!FontCount)
+            DPRINT1("ERR: Failed to load %wZ\n", &FontEntry->FileName);
+        ExFreePoolWithTag(FontEntry, TAG_FONT);
     }
 }
 
@@ -2005,16 +2042,16 @@ IntGdiAddFontResourceSingle(
     HANDLE FileHandle;
     PVOID Buffer = NULL;
     IO_STATUS_BLOCK Iosb;
-    PVOID SectionObject;
-    SIZE_T ViewSize = 0, Length;
-    LARGE_INTEGER SectionSize;
+    SIZE_T Length;
+    ULONG FileSize;
+    ULONG BytesRead = 0;
     OBJECT_ATTRIBUTES ObjectAttributes;
+    FILE_STANDARD_INFORMATION FileInfo;
     GDI_LOAD_FONT LoadFont;
     INT FontCount;
     HANDLE KeyHandle;
     UNICODE_STRING PathName;
     LPWSTR pszBuffer;
-    PFILE_OBJECT FileObject;
     static const UNICODE_STRING TrueTypePostfix = RTL_CONSTANT_STRING(L" (TrueType)");
 
     /* Build PathName */
@@ -2045,7 +2082,7 @@ IntGdiAddFontResourceSingle(
                  &ObjectAttributes,
                  &Iosb,
                  FILE_SHARE_READ,
-                 FILE_SYNCHRONOUS_IO_NONALERT);
+                 FILE_SYNCHRONOUS_IO_NONALERT | FILE_NO_INTERMEDIATE_BUFFERING);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Could not load font file: %wZ\n", &PathName);
@@ -2053,57 +2090,90 @@ IntGdiAddFontResourceSingle(
         return 0;
     }
 
-    Status = ObReferenceObjectByHandle(FileHandle, FILE_READ_DATA, NULL,
-                                       KernelMode, (PVOID*)&FileObject, NULL);
+    RtlZeroMemory(&FileInfo, sizeof(FileInfo));
+    Status = ZwQueryInformationFile(FileHandle,
+                                    &Iosb,
+                                    &FileInfo,
+                                    sizeof(FileInfo),
+                                    FileStandardInformation);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ObReferenceObjectByHandle failed.\n");
+        DPRINT1("Could not query font file: %wZ\n", &PathName);
         ZwClose(FileHandle);
         RtlFreeUnicodeString(&PathName);
         return 0;
     }
 
-    SectionSize.QuadPart = 0LL;
-    Status = MmCreateSection(&SectionObject,
-                             STANDARD_RIGHTS_REQUIRED | SECTION_QUERY | SECTION_MAP_READ,
-                             NULL, &SectionSize, PAGE_READONLY,
-                             SEC_COMMIT, FileHandle, FileObject);
-    if (!NT_SUCCESS(Status))
+    if (FileInfo.EndOfFile.QuadPart <= 0 || FileInfo.EndOfFile.HighPart != 0)
     {
-        DPRINT1("Could not map file: %wZ\n", &PathName);
+        DPRINT1("Invalid font file size: %wZ\n", &PathName);
         ZwClose(FileHandle);
-        ObDereferenceObject(FileObject);
         RtlFreeUnicodeString(&PathName);
         return 0;
     }
+
+    FileSize = FileInfo.EndOfFile.LowPart;
+    Buffer = ExAllocatePoolWithTag(PagedPool, FileSize, TAG_FONT);
+    if (!Buffer)
+    {
+        ZwClose(FileHandle);
+        RtlFreeUnicodeString(&PathName);
+        return 0;
+    }
+
+    while (BytesRead < FileSize)
+    {
+        ULONG ChunkSize = min(FileSize - BytesRead, 0x10000);
+        LARGE_INTEGER ByteOffset;
+
+        ByteOffset.QuadPart = BytesRead;
+        Status = ZwReadFile(FileHandle,
+                            NULL,
+                            NULL,
+                            NULL,
+                            &Iosb,
+                            (PBYTE)Buffer + BytesRead,
+                            ChunkSize,
+                            &ByteOffset,
+                            NULL);
+        if (!NT_SUCCESS(Status) || !NT_SUCCESS(Iosb.Status) || Iosb.Information != ChunkSize)
+        {
+            DPRINT1("Could not read font file: %wZ (status 0x%lx, iosb 0x%lx, read %Iu/%lu)\n",
+                    &PathName,
+                    Status,
+                    Iosb.Status,
+                    Iosb.Information,
+                    ChunkSize);
+            ExFreePoolWithTag(Buffer, TAG_FONT);
+            ZwClose(FileHandle);
+            RtlFreeUnicodeString(&PathName);
+            return 0;
+        }
+
+        BytesRead += ChunkSize;
+    }
+
     ZwClose(FileHandle);
-
-    Status = MmMapViewInSystemSpace(SectionObject, &Buffer, &ViewSize);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not map file: %wZ\n", &PathName);
-        ObDereferenceObject(SectionObject);
-        ObDereferenceObject(FileObject);
-        RtlFreeUnicodeString(&PathName);
-        return 0;
-    }
 
     RtlZeroMemory(&LoadFont, sizeof(LoadFont));
     LoadFont.pFileName          = &PathName;
-    LoadFont.Memory             = SharedMem_Create(Buffer, ViewSize, TRUE);
+    LoadFont.Memory             = SharedMem_Create(Buffer, FileSize, SharedMemBuffer);
     LoadFont.Characteristics    = Characteristics;
     RtlInitUnicodeString(&LoadFont.RegValueName, NULL);
     LoadFont.CharSet            = DEFAULT_CHARSET;
+    if (!LoadFont.Memory)
+    {
+        ExFreePoolWithTag(Buffer, TAG_FONT);
+        RtlFreeUnicodeString(&PathName);
+        return 0;
+    }
+
     FontCount = IntGdiLoadFontByIndexFromMemory(&LoadFont, -1);
 
     /* Release our copy */
     IntLockFreeType();
     SharedMem_Release(LoadFont.Memory);
     IntUnLockFreeType();
-
-    ObDereferenceObject(SectionObject);
-
-    ObDereferenceObject(FileObject);
 
     /* Save the loaded font name into the registry */
     if (FontCount > 0 && (dwFlags & AFRX_WRITE_REGISTRY))
@@ -2571,7 +2641,7 @@ IntGdiAddFontMemResource(PVOID Buffer, DWORD dwSize, PDWORD pNumAdded)
     RtlCopyMemory(BufferCopy, Buffer, dwSize);
 
     RtlZeroMemory(&LoadFont, sizeof(LoadFont));
-    LoadFont.Memory             = SharedMem_Create(BufferCopy, dwSize, FALSE);
+    LoadFont.Memory             = SharedMem_Create(BufferCopy, dwSize, SharedMemBuffer);
     LoadFont.Characteristics    = FR_PRIVATE | FR_NOT_ENUM;
     RtlInitUnicodeString(&LoadFont.RegValueName, NULL);
     FaceCount = IntGdiLoadFontByIndexFromMemory(&LoadFont, -1);

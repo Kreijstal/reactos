@@ -142,7 +142,7 @@ KiThreadStartup:
 	    ldr     x0, [x16, #ThTrapFrame]     /* x0 = TrapFrame */
 	    cbz     x0, .Lthreadstart_bad_return
 
-	    mov     x1, sp                      /* x1 = ExceptionFrame (user threads) */
+	    sub     x1, x0, #KEXCEPTION_FRAME_LENGTH /* x1 = ExceptionFrame (user threads) */
 
 	    b       KiTrapReturn                /* Never returns (ERET) */
 

@@ -60,7 +60,6 @@ PspUserThreadStartup(IN PKSTART_ROUTINE StartRoutine,
     /* Go to Passive Level */
     KeLowerIrql(PASSIVE_LEVEL);
     Thread = PsGetCurrentThread();
-
     /* Check if the thread is dead */
     if (Thread->DeadThread)
     {
@@ -256,7 +255,6 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
 
     /* Check for success */
     if (!NT_SUCCESS(Status)) return Status;
-
     /* Also make sure that User-Mode isn't trying to create a system thread */
     if ((PreviousMode != KernelMode) && (Process == PsInitialSystemProcess))
     {

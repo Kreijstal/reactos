@@ -902,7 +902,6 @@ KiArm64InitializeTrapFrame(
     Context->ExceptionFramePointer = ExceptionFrame;
 }
 
-static LONG KiArm64SyncExceptionLogBudget = 128;
 static LONG KiArm64SessionFaultLogBudget = 16;
 extern volatile ULONG_PTR MiArm64SessionWsStage;
 extern volatile ULONG_PTR MiArm64SessionWsFp;
@@ -1063,7 +1062,6 @@ KiArm64BuildFaultCode(
     /* Prevent unused warnings for bring-up-only debug guards on GCC/MinGW. */
     if (0)
     {
-        (void)KiArm64SyncExceptionLogBudget;
         KiArm64ReleaseWorkingSetsForBugCheck();
     }
 
