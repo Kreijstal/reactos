@@ -625,6 +625,42 @@ IoInitSystem(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                          (PUCHAR)RootString.Buffer,
                          &RootString);
 
+    if (strstr(LoaderBlock->ArcBootDeviceName, "cdrom"))
+    {
+        UNICODE_STRING BootDeviceName, DriveLetter;
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        HANDLE LinkHandle;
+
+        RtlInitUnicodeString(&DriveLetter, L"\\DosDevices\\C:");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &DriveLetter,
+                                   OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   NULL);
+
+        Status = NtOpenSymbolicLinkObject(&LinkHandle,
+                                          SYMBOLIC_LINK_QUERY,
+                                          &ObjectAttributes);
+        if (NT_SUCCESS(Status))
+        {
+            ObCloseHandle(LinkHandle, KernelMode);
+        }
+        else if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        {
+            Status = RtlAnsiStringToUnicodeString(&BootDeviceName, &NtBootPath, TRUE);
+            if (NT_SUCCESS(Status))
+            {
+                Status = IoCreateSymbolicLink(&DriveLetter, &BootDeviceName);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("IoCreateSymbolicLink(C:) failed: %lx\n", Status);
+                }
+
+                RtlFreeUnicodeString(&BootDeviceName);
+            }
+        }
+    }
+
     /* Update system root */
     Status = RtlAnsiStringToUnicodeString(&NtSystemRoot, &RootString, FALSE);
     if (!NT_SUCCESS(Status))

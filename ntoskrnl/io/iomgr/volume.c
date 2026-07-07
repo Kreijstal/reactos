@@ -524,6 +524,17 @@ IopMountVolume(IN PDEVICE_OBJECT DeviceObject,
     /* Make sure we weren't already mounted */
     if (!(DeviceObject->Vpb->Flags & (VPB_MOUNTED | VPB_REMOVE_PENDING)))
     {
+#if defined(_M_ARM64)
+        if (!AllowRawMount &&
+            (DeviceObject->Vpb->Flags & VPB_RAW_MOUNT) &&
+            ((DeviceObject->DeviceType == FILE_DEVICE_DISK) ||
+             (DeviceObject->DeviceType == FILE_DEVICE_VIRTUAL_DISK)))
+        {
+            DeviceObject->Vpb->Flags &= ~VPB_RAW_MOUNT;
+            DeviceObject->Vpb->DeviceObject = NULL;
+        }
+
+#endif
         /* Initialize the event to wait on */
         KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
@@ -590,7 +601,6 @@ IopMountVolume(IN PDEVICE_OBJECT DeviceObject,
                                                        DEVICE_OBJECT,
                                                        Queue.ListEntry);
             ParentFsDeviceObject = FileSystemDeviceObject;
-
             /*
              * If this file system device is attached to some other device,
              * then we must make sure to increase the stack size for the IRP.
@@ -658,7 +668,6 @@ IopMountVolume(IN PDEVICE_OBJECT DeviceObject,
                                       NULL);
                 Status = IoStatusBlock.Status;
             }
-
             ExAcquireResourceSharedLite(&IopDatabaseResource, TRUE);
             IopInterlockedDecrementUlong(LockQueueIoDatabaseLock, (PULONG)&DeviceObject->ReferenceCount);
 

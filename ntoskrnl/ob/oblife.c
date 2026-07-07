@@ -1386,6 +1386,14 @@ ObCreateObjectType(IN PUNICODE_STRING TypeName,
     /* Set the index and the entry into the object type array */
     LocalObjectType->Index = ObpTypeObjectType->TotalNumberOfObjects;
 
+#if defined(_M_ARM64)
+    if (LocalObjectType->Index == 0)
+    {
+        LocalObjectType->Index = 1;
+        ObpTypeObjectType->TotalNumberOfObjects = 1;
+    }
+#endif
+
     ASSERT(LocalObjectType->Index != 0);
 
     if (LocalObjectType->Index < RTL_NUMBER_OF(ObpObjectTypes))

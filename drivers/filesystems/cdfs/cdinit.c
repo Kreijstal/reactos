@@ -229,9 +229,6 @@ Return Value:
     //
 
     CdfsFileSystemDeviceObject->Flags |= DO_LOW_PRIORITY_FILESYSTEM;
-#ifdef __REACTOS__
-    HddFileSystemDeviceObject->Flags |= DO_LOW_PRIORITY_FILESYSTEM;
-#endif
 
     IoRegisterFileSystem( CdfsFileSystemDeviceObject );
     ObReferenceObject (CdfsFileSystemDeviceObject);
@@ -450,4 +447,3 @@ Return Value:
     }
     return STATUS_SUCCESS;
 }
-
