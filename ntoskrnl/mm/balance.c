@@ -341,6 +341,7 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
     /* Delay some requests for the Memory Manager to recover pages (CORE-17624).
      * FIXME: This is suboptimal.
      */
+#ifndef _M_ARM64
     static INT i = 0;
     static LARGE_INTEGER TinyTime = {{-1L, -1L}};
     if (i++ >= 100)
@@ -348,6 +349,7 @@ MmRequestPageMemoryConsumer(ULONG Consumer, BOOLEAN CanWait,
         KeDelayExecutionThread(KernelMode, FALSE, &TinyTime);
         i = 0;
     }
+#endif
 
     /*
      * Actually allocate the page.
