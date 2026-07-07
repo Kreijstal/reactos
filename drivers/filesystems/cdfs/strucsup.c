@@ -2845,5 +2845,3 @@ Return Value:
 
     return SerialNumber;
 }
-
-

@@ -163,6 +163,15 @@ CdLookupAllocation (
     );
 
 VOID
+CdDiskOffsetFromMcbEntry (
+    _In_ PIRP_CONTEXT IrpContext,
+    _In_ PCD_MCB_ENTRY McbEntry,
+    _In_ LONGLONG FileOffset,
+    _Out_ PLONGLONG DiskOffset,
+    _Out_ PULONG ByteCount
+    );
+
+VOID
 CdAddAllocationFromDirent (
     _In_ PIRP_CONTEXT IrpContext,
     _Inout_ PFCB Fcb,
@@ -2314,5 +2323,3 @@ Arguments:
 #endif  // CDFS_TELEMETRY_DATA
 
 #endif // _CDPROCS_
-
-

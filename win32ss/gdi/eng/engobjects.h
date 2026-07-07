@@ -115,10 +115,15 @@ typedef struct _FLOATGDI {
   ULONG Dummy;
 } FLOATGDI;
 
+typedef enum _SHARED_MEM_TYPE {
+  SharedMemBuffer,
+  SharedMemMapping
+} SHARED_MEM_TYPE;
+
 typedef struct _SHARED_MEM {
   PVOID         Buffer;
   ULONG         BufferSize;
-  BOOL          IsMapping;
+  SHARED_MEM_TYPE Type;
   LONG          RefCount;
 } SHARED_MEM, *PSHARED_MEM;
 

@@ -5568,6 +5568,7 @@ static ULONG NTAPI init_implicit_actctx_once( PRTL_RUN_ONCE once, PVOID paramete
     ctx.lpSource = buffer;
     RtlStringCchCopyW(buffer, RTL_NUMBER_OF(buffer), SharedUserData->NtSystemRoot);
     RtlStringCchCatW(buffer, RTL_NUMBER_OF(buffer), L"\\winsxs\\manifests\\systemcompatible.manifest");
+    DPRINT1("actctx implicit source '%S'\n", buffer);
 
     status = RtlCreateActivationContext(0, (PVOID)&ctx, 0, NULL, NULL, &handle);
     if (NT_SUCCESS(status))
@@ -5683,19 +5684,23 @@ RtlCreateActivationContext(IN ULONG Flags,
             memcpy(source+dir_len+1, pActCtx->lpSource, (source_len+1)*sizeof(WCHAR));
         }
 
+        DPRINT1("actctx source '%S'\n", source ? source : pActCtx->lpSource);
         ret = RtlDosPathNameToNtPathName_U(source ? source : pActCtx->lpSource, &nameW, NULL, NULL);
         RtlFreeHeap( GetProcessHeap(), 0, source );
         if (!ret)
         {
+            DPRINT1("actctx source conversion failed\n");
             status = STATUS_NO_SUCH_FILE;
             goto error;
         }
         status = open_nt_file( &file, &nameW );
         if (!NT_SUCCESS(status))
         {
+            DPRINT1("actctx open '%wZ' failed 0x%08lx\n", &nameW, status);
             RtlFreeUnicodeString( &nameW );
             goto error;
         }
+        DPRINT1("actctx open '%wZ' succeeded\n", &nameW);
     }
 
     acl.actctx = actctx;

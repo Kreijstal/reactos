@@ -311,14 +311,22 @@ WinLdrSetupMemoryLayout(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Now we need to add high descriptors from the bios memory map */
     for (i = 0; i < BiosMemoryMapEntryCount; i++)
     {
-        /* Check if its higher than the lookup table */
-        if (BiosMemoryMap->BasePage > MmGetHighestPhysicalPage())
+        PFREELDR_MEMORY_DESCRIPTOR Descriptor = &BiosMemoryMap[i];
+        PFN_NUMBER HighestMappedPage = MmGetHighestPhysicalPage();
+        PFN_NUMBER EndPage = Descriptor->BasePage + Descriptor->PageCount;
+        PFN_NUMBER BasePage;
+
+        if ((Descriptor->PageCount == 0) || (EndPage <= Descriptor->BasePage))
+            continue;
+
+        /* Copy the part of the descriptor above the lookup table, if any. */
+        if (EndPage > HighestMappedPage + 1)
         {
-            /* Copy this descriptor */
+            BasePage = max(Descriptor->BasePage, HighestMappedPage + 1);
             MempAddMemoryBlock(LoaderBlock,
-                               BiosMemoryMap->BasePage,
-                               BiosMemoryMap->PageCount,
-                               BiosMemoryMap->MemoryType);
+                               BasePage,
+                               EndPage - BasePage,
+                               Descriptor->MemoryType);
         }
     }
 

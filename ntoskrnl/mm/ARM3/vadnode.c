@@ -356,6 +356,15 @@ MiInsertVadEx(
         /* Reject fixed allocations below the lowest user address */
         if (StartingAddress < (ULONG_PTR)MM_LOWEST_USER_ADDRESS)
         {
+#ifdef _M_ARM64
+            if ((*BaseAddress == 4) &&
+                ((AllocationType & MEM_RESERVE) != 0) &&
+                (EndingAddress < _1MB))
+            {
+                goto AllowLowReserve;
+            }
+#endif
+
             DPRINT("Given address is below the lowest user address\n");
             #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ExReleasePushLockExclusive(&CurrentProcess->AddressCreationLock);
@@ -364,6 +373,10 @@ MiInsertVadEx(
 #endif
             return STATUS_CONFLICTING_ADDRESSES;
         }
+
+#ifdef _M_ARM64
+AllowLowReserve:
+#endif
 
         /* Make sure it doesn't conflict with an existing allocation */
         Result = MiCheckForConflictingNode(StartingAddress >> PAGE_SHIFT,
@@ -932,4 +945,3 @@ MiCheckSecuredVad(IN PMMVAD Vad,
 }
 
 /* EOF */
-

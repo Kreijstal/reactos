@@ -27,6 +27,10 @@
 #undef __MSVCRT__
 #include <psdk/ntverp.h>
 
+#ifdef __cplusplus
+#include <vcruntime_string.h>
+#endif
+
 /* DDK/IFS/NDK Headers */
 #define _REALLY_GET_CALLERS_CALLER
 #include <excpt.h>

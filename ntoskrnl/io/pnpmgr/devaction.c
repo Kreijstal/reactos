@@ -468,7 +468,7 @@ PiAttachFilterDriversCallback(
     // the driver was not probably loaded, try to load
     if (!NT_SUCCESS(Status))
     {
-        if (loadDrivers)
+        if (loadDrivers || (PnPBootDriversLoaded && startType == BootLoad))
         {
             Status = IopLoadDriver(serviceHandle, &DriverObject);
         }
@@ -742,7 +742,8 @@ PiCallDriverAddDevice(
         {
             PiSetDevNodeProblem(DeviceNode, CM_PROB_REGISTRY);
         }
-        DPRINT("No service for \"%wZ\" (loadDrv: %u)\n", &DeviceNode->InstancePath, LoadDrivers);
+        DPRINT1("PNP: No service for \"%wZ\" (loadDrv: %u, status: 0x%lx)\n",
+                &DeviceNode->InstancePath, LoadDrivers, Status);
         goto Cleanup;
     }
 
@@ -768,8 +769,14 @@ PiCallDriverAddDevice(
 
         if (driverObject && driverObject->DriverExtension->AddDevice)
         {
+            DPRINT1("PNP: AddDevice \"%wZ\" -> \"%wZ\"\n",
+                    &DeviceNode->InstancePath,
+                    &driverObject->DriverName);
             Status = driverObject->DriverExtension->AddDevice(driverEntry->DriverObject,
                                                               DeviceNode->PhysicalDeviceObject);
+            DPRINT1("PNP: AddDevice status 0x%lx for \"%wZ\"\n",
+                    Status,
+                    &DeviceNode->InstancePath);
         }
         else if (driverObject == NULL)
         {

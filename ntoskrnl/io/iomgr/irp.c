@@ -15,6 +15,12 @@
 #define NDEBUG
 #include <debug.h>
 
+NTSTATUS
+NTAPI
+IopInvalidDeviceRequest(
+    PDEVICE_OBJECT DeviceObject,
+    PIRP Irp);
+
 PIRP IopDeadIrp;
 RESERVE_IRP_ALLOCATOR IopReserveIrpAllocator;
 
@@ -1313,6 +1319,20 @@ IofCallDriver(IN PDEVICE_OBJECT DeviceObject,
 
     /* Get the Device Object */
     StackPtr->DeviceObject = DeviceObject;
+
+#if defined(_M_ARM64)
+    if ((StackPtr->MajorFunction == IRP_MJ_DEVICE_CONTROL) &&
+        ((ULONG_PTR)DriverObject->MajorFunction[StackPtr->MajorFunction] >= 0xFFFFF80044020000ULL) &&
+        ((ULONG_PTR)DriverObject->MajorFunction[StackPtr->MajorFunction] < 0xFFFFF80044040000ULL))
+    {
+        DPRINT1("IOCALL: rejecting ARM64 HAL data dispatch dev %p drv %p major 0x%x fn %p\n",
+                DeviceObject,
+                DriverObject,
+                StackPtr->MajorFunction,
+                DriverObject->MajorFunction[StackPtr->MajorFunction]);
+        return IopInvalidDeviceRequest(DeviceObject, Irp);
+    }
+#endif
 
     /* Call it */
     return DriverObject->MajorFunction[StackPtr->MajorFunction](DeviceObject,

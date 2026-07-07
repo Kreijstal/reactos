@@ -1035,13 +1035,15 @@ SmpCreateVolumeDescriptors(VOID)
         DPRINT("SMSS:PFILE: Created volume descriptor for`%wZ'\n", &VolumePath);
     }
 
-    /* We must've found at least the boot volume */
-    ASSERT(BootVolumeFound == TRUE);
-    ASSERT(!IsListEmpty(&SmpVolumeDescriptorList));
-    if (!IsListEmpty(&SmpVolumeDescriptorList)) return STATUS_SUCCESS;
+    if (!IsListEmpty(&SmpVolumeDescriptorList))
+    {
+        /* We must've found at least the boot volume */
+        ASSERT(BootVolumeFound == TRUE);
+        return STATUS_SUCCESS;
+    }
 
-    /* Something is really messed up if we found no disks at all */
-    return STATUS_UNEXPECTED_IO_ERROR;
+    DPRINT1("SMSS:PFILE: No writable fixed volumes found; skipping pagefile creation\n");
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -1071,6 +1073,12 @@ SmpCreatePagingFiles(VOID)
         DPRINT1("SMSS:PFILE: Failed to create volume descriptors (status %X)\n",
                 Status);
         return Status;
+    }
+
+    if (IsListEmpty(&SmpVolumeDescriptorList))
+    {
+        DPRINT1("SMSS:PFILE: No writable volumes available; pagefile creation skipped\n");
+        return STATUS_SUCCESS;
     }
 
     /* If we fail creating pagefiles, try to reduce by this much each time */

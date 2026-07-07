@@ -6,6 +6,27 @@
 
 [AddReg]
 
+; ARM64 setup currently boots directly from the read-only CD image.
+; Use MiniNT semantics so SMSS and CM avoid pagefile and hive writes.
+HKLM,"SYSTEM\CurrentControlSet\Control\MiniNT",,0x00000012
+
+; QEMU virt / ACPI HAL root devices expose these IDs without the legacy '*'
+; prefix used by the generic x86-oriented critical device entries.
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ACPI_HAL#PNP0C08","Service",0x00000000,"acpi"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ACPI_HAL#PNP0C08","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ACPI#PNP0A03","Service",0x00000000,"pci"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ACPI#PNP0A03","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ACPI#PNP0A08","Service",0x00000000,"pci"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ACPI#PNP0A08","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
+
+; CD boot reaches IopMarkBootPartition before system-start file systems load.
+HKLM,"SYSTEM\CurrentControlSet\Services\Fs_Rec","Start",0x00010001,0x00000000
+
+; The generic boot hive enables the legacy floppy driver as a boot driver.
+; ARM64 platforms do not expose an ISA floppy controller, and a failed
+; floppy.sys boot-start initialization can leave stale executable callbacks.
+HKLM,"SYSTEM\CurrentControlSet\Services\Floppy","Start",0x00010001,0x00000004
+
 ; Raspberry Pi 5 RP1 southbridge bus driver
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1DE4&DEV_0001","Service",0x00000000,"rp1"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1DE4&DEV_0001","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
