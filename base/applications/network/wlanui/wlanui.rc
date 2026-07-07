@@ -1,0 +1,64 @@
+/*
+ * PROJECT:     ReactOS Wireless Network Selector
+ * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
+ * PURPOSE:     Dialogs, strings and version block for wlanui.
+ */
+
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+IDD_MAIN DIALOGEX 0, 0, 320, 220
+STYLE DS_SHELLFONT | DS_CENTER | WS_MINIMIZEBOX | WS_CAPTION | WS_SYSMENU
+CAPTION "ReactOS Wireless Networks"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "Wireless adapter:", -1, 7, 7, 60, 9
+    LTEXT           "", IDC_IFACE, 70, 7, 243, 9
+    CONTROL         "", IDC_NETLIST, "SysListView32",
+                    LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+                    7, 20, 306, 158
+    LTEXT           "", IDC_STATUS, 7, 182, 306, 9
+    PUSHBUTTON      "&Refresh", IDC_REFRESH, 7, 196, 55, 16
+    PUSHBUTTON      "&Connect", IDC_CONNECT, 128, 196, 55, 16
+    PUSHBUTTON      "&Disconnect", IDC_DISCONNECT, 186, 196, 60, 16
+    DEFPUSHBUTTON   "Close", IDCANCEL, 258, 196, 55, 16
+END
+
+IDD_KEY DIALOGEX 0, 0, 230, 90
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Connect to a Network"
+FONT 8, "MS Shell Dlg"
+BEGIN
+    LTEXT           "", IDC_KEYPROMPT, 7, 7, 216, 18
+    LTEXT           "Security key:", -1, 7, 32, 60, 9
+    EDITTEXT        IDC_KEY, 7, 43, 216, 13, ES_PASSWORD | ES_AUTOHSCROLL | WS_TABSTOP
+    AUTOCHECKBOX    "&Show characters", IDC_SHOWKEY, 7, 60, 100, 10
+    DEFPUSHBUTTON   "OK", IDOK, 118, 70, 50, 14
+    PUSHBUTTON      "Cancel", IDCANCEL, 173, 70, 50, 14
+END
+
+STRINGTABLE
+BEGIN
+    IDS_APPTITLE     "ReactOS Wireless Networks"
+    IDS_COL_SSID     "Network (SSID)"
+    IDS_COL_SIGNAL   "Signal"
+    IDS_COL_SECURITY "Security"
+    IDS_COL_AUTH     "Authentication"
+    IDS_COL_STATUS   "Status"
+    IDS_NOSERVICE    "The WLAN AutoConfig service is not running."
+    IDS_NOIFACE      "No wireless network adapter was found."
+    IDS_SCANNING     "Scanning for networks..."
+    IDS_CONNECTING   "Connecting to %s..."
+    IDS_CONNECTED    "Connected to %s."
+    IDS_DISCONNECTED "Disconnected."
+    IDS_CONNECTFAIL  "Could not connect to %s (error %lu)."
+    IDS_SECURED      "Secured"
+    IDS_OPEN         "Open"
+    IDS_KEYPROMPTFMT "The network ""%s"" requires a security key."
+    IDS_SELECTNET    "Select a network from the list first."
+END
+
+1 24 "wlanui.manifest"
