@@ -394,7 +394,6 @@ SmpTerminate(IN PULONG_PTR Parameters,
                               Parameters,
                               OptionShutdownSystem,
                               &Response);
-
     /* Terminate the process if the hard error didn't already */
     return NtTerminateProcess(NtCurrentProcess(), Status);
 }
