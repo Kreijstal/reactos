@@ -23,16 +23,10 @@
 #include "ndis6_internal.h"
 #include <ntstrsafe.h>
 
-/* Silence the trace prints below by default; comment out the
- * "#define NDEBUG" to re-enable. */
-#define NDEBUG
-#undef UNIMPLEMENTED
-#include <reactos/debug.h>
-
 #define NDIS6_ADAPTER_TAG  'aDNn'  /* "nNDa" */
 
 /* ============================================================================
- *  Ndis6ReadExportName - read "\Device\{NetCfgInstanceId}" from the
+ *  Ndis6ReadExportName — read "\Device\{NetCfgInstanceId}" from the
  *  device's Class\<GUID>\<Instance>\Linkage key in the registry.
  *
  *  Ported from the legacy NDIS 5 NdisIAddDevice (miniport.c:2500-2588).
@@ -112,12 +106,152 @@ Ndis6FreeAdapterName(_Inout_ PUNICODE_STRING Name)
     }
 }
 
+static HANDLE
+Ndis6ImOpenKey(_In_ PCWSTR Path)
+{
+    UNICODE_STRING KeyPath;
+    OBJECT_ATTRIBUTES Oa;
+    HANDLE Key = NULL;
+    ULONG Disp;
+
+    RtlInitUnicodeString(&KeyPath, Path);
+    InitializeObjectAttributes(&Oa, &KeyPath,
+        OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+    if (!NT_SUCCESS(ZwCreateKey(&Key, KEY_ALL_ACCESS, &Oa, 0, NULL,
+                                REG_OPTION_NON_VOLATILE, &Disp)))
+        return NULL;
+    return Key;
+}
+
+static VOID
+Ndis6ImSetSz(_In_ HANDLE Key, _In_ PCWSTR Name, _In_ ULONG Type, _In_ PCWSTR Value)
+{
+    UNICODE_STRING ValName;
+    SIZE_T Chars = wcslen(Value) + 1;
+    RtlInitUnicodeString(&ValName, Name);
+    if (Type == REG_MULTI_SZ)
+        Chars += 1;
+    ZwSetValueKey(Key, &ValName, 0, Type, (PVOID)Value,
+                  (ULONG)(Chars * sizeof(WCHAR)));
+}
+
+static VOID
+Ndis6ImAppendBind(_In_ PCWSTR Device)
+{
+    HANDLE Key;
+    UNICODE_STRING ValName;
+    NTSTATUS Status;
+    PKEY_VALUE_PARTIAL_INFORMATION Info;
+    ULONG Len = 0, NewLen, DevBytes = (ULONG)((wcslen(Device) + 1) * sizeof(WCHAR));
+    PWCHAR Buf, p;
+
+    Key = Ndis6ImOpenKey(L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Linkage");
+    if (Key == NULL)
+        return;
+
+    RtlInitUnicodeString(&ValName, L"Bind");
+    ZwQueryValueKey(Key, &ValName, KeyValuePartialInformation, NULL, 0, &Len);
+
+    NewLen = (Len ? Len : FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data)) + DevBytes + sizeof(WCHAR);
+    Info = (PKEY_VALUE_PARTIAL_INFORMATION)ExAllocatePoolWithTag(PagedPool, NewLen, NDIS6_ADAPTER_TAG);
+    if (Info == NULL) { ZwClose(Key); return; }
+
+    Buf = (PWCHAR)Info->Data;
+    if (Len)
+    {
+        Status = ZwQueryValueKey(Key, &ValName, KeyValuePartialInformation, Info, Len, &Len);
+        if (!NT_SUCCESS(Status)) { ExFreePoolWithTag(Info, NDIS6_ADAPTER_TAG); ZwClose(Key); return; }
+        for (p = Buf; *p; p += wcslen(p) + 1)
+        {
+            if (_wcsicmp(p, Device) == 0)
+            {
+                ExFreePoolWithTag(Info, NDIS6_ADAPTER_TAG);
+                ZwClose(Key);
+                return;
+            }
+        }
+        RtlCopyMemory(p, Device, DevBytes);
+        p[wcslen(Device) + 1] = L'\0';
+        NewLen = (ULONG)(((PUCHAR)(p + wcslen(Device) + 2)) - (PUCHAR)Buf);
+    }
+    else
+    {
+        RtlCopyMemory(Buf, Device, DevBytes);
+        Buf[wcslen(Device) + 1] = L'\0';
+        NewLen = DevBytes + sizeof(WCHAR);
+    }
+
+    ZwSetValueKey(Key, &ValName, 0, REG_MULTI_SZ, Buf, NewLen);
+    ExFreePoolWithTag(Info, NDIS6_ADAPTER_TAG);
+    ZwClose(Key);
+}
+
+VOID
+Ndis6ImSeedTcpipRegistry(_In_ PCUNICODE_STRING DeviceName)
+{
+    static const WCHAR ClassBase[] =
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}\\";
+    static const WCHAR IfBase[] =
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
+    static LONG InstanceSeq = 0x4000;
+    WCHAR Guid[64];
+    WCHAR Path[300];
+    HANDLE Key;
+    USHORT i, gstart = 0;
+    ULONG One = 1, glen;
+
+    for (i = (USHORT)(DeviceName->Length / sizeof(WCHAR)); i > 0; i--)
+    {
+        if (DeviceName->Buffer[i - 1] == L'\\') { gstart = i; break; }
+    }
+    glen = (DeviceName->Length / sizeof(WCHAR)) - gstart;
+    if (glen == 0 || glen >= RTL_NUMBER_OF(Guid))
+        return;
+    RtlCopyMemory(Guid, &DeviceName->Buffer[gstart], glen * sizeof(WCHAR));
+    Guid[glen] = L'\0';
+
+    RtlStringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"%ls%04X", ClassBase,
+                        InterlockedIncrement(&InstanceSeq));
+    Key = Ndis6ImOpenKey(Path);
+    if (Key != NULL)
+    {
+        Ndis6ImSetSz(Key, L"DriverDesc", REG_SZ, L"ReactOS NDIS Virtual Miniport");
+        Ndis6ImSetSz(Key, L"NetCfgInstanceId", REG_SZ, Guid);
+        ZwClose(Key);
+    }
+    RtlStringCchCatW(Path, RTL_NUMBER_OF(Path), L"\\Linkage");
+    Key = Ndis6ImOpenKey(Path);
+    if (Key != NULL)
+    {
+        Ndis6ImSetSz(Key, L"RootDevice", REG_SZ, Guid);
+        Ndis6ImSetSz(Key, L"Export", REG_SZ, DeviceName->Buffer);
+        Ndis6ImSetSz(Key, L"UpperBind", REG_SZ, L"Tcpip");
+        ZwClose(Key);
+    }
+
+    RtlStringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"%ls%ls", IfBase, Guid);
+    Key = Ndis6ImOpenKey(Path);
+    if (Key != NULL)
+    {
+        UNICODE_STRING ValName;
+        RtlInitUnicodeString(&ValName, L"EnableDHCP");
+        ZwSetValueKey(Key, &ValName, 0, REG_DWORD, &One, sizeof(One));
+        Ndis6ImSetSz(Key, L"IPAddress", REG_MULTI_SZ, L"0.0.0.0");
+        Ndis6ImSetSz(Key, L"SubnetMask", REG_MULTI_SZ, L"0.0.0.0");
+        Ndis6ImSetSz(Key, L"DefaultGateway", REG_MULTI_SZ, L"");
+        ZwClose(Key);
+    }
+
+    Ndis6ImAppendBind(DeviceName->Buffer);
+    DbgPrint("NDIS6: seeded TCPIP registry for %wZ\n", DeviceName);
+}
+
 /* ============================================================================
  *  Ndis6CreateLogicalAdapter
  *
  *  Called from Ndis6AddDevice (60driver.c) when PnP enumerates a device
  *  the driver claims. Builds the LOGICAL_ADAPTER + extension and inserts
- *  on AdapterListHead. Does NOT call the driver's InitializeHandlerEx -
+ *  on AdapterListHead. Does NOT call the driver's InitializeHandlerEx —
  *  that happens at IRP_MN_START_DEVICE time after PnP has assigned
  *  resources.
  * ============================================================================ */
@@ -150,7 +284,7 @@ Ndis6CreateLogicalAdapter(
         return Status;
 
     /* Create an FDO whose DeviceExtension is our LOGICAL_ADAPTER.
-     * The device object IS named - it's \Device\{GUID} - so that
+     * The device object IS named — it's \Device\{GUID} — so that
      * ObReferenceObjectByName in the legacy NdisOpenAdapter path
      * can open it in addition to MiniLocateDevice finding it. */
     Status = IoCreateDevice(
@@ -192,16 +326,15 @@ Ndis6CreateLogicalAdapter(
     /* Phase 3 TX thunk: in-flight wrapper NBL list. */
     KeInitializeSpinLock(&Ext->TxLookupLock);
     InitializeListHead(&Ext->InFlightNblsTx);
-    /* A1: drain event - notification, manually reset when a send lands on
+    /* A1: drain event — notification, manually reset when a send lands on
      * the in-flight list, set when the count decrements. HaltEx waits
      * for count == 0 with a timeout. */
     Ext->TxInFlightCount = 0;
     KeInitializeEvent(&Ext->TxDrainEvent, NotificationEvent, TRUE);
 
-    /* A4: Pause/Restart state machine - starts in RUNNING after init.
-     * The Pause/Restart events are synchronization events (auto-reset)
-     * signaled when the driver calls the respective Complete routine. */
-    Ext->PauseState    = NDIS6_PAUSE_STATE_RUNNING;
+    /* A4: Pause/Restart state machine — starts paused after InitializeEx
+     * and transitions to running when a protocol opens the adapter. */
+    Ext->PauseState    = NDIS6_PAUSE_STATE_PAUSED;
     Ext->PauseStatus   = NDIS_STATUS_SUCCESS;
     Ext->RestartStatus = NDIS_STATUS_SUCCESS;
     KeInitializeEvent(&Ext->PauseEvent, SynchronizationEvent, FALSE);
@@ -215,7 +348,12 @@ Ndis6CreateLogicalAdapter(
     KeInitializeSpinLock(&Ext->FilterModuleListLock);
     InitializeListHead(&Ext->FilterModuleList);
 
-    /* Phase 3 TX wrapper NBL pool - allocate using the bridge's own
+    /* Per-adapter native NDIS 6 protocol binding list. Populated by
+     * NdisOpenAdapterEx, walked by the native send/receive datapath. */
+    KeInitializeSpinLock(&Ext->ProtocolBindingListLock);
+    InitializeListHead(&Ext->ProtocolBindingList);
+
+    /* Phase 3 TX wrapper NBL pool — allocate using the bridge's own
      * NdisAllocateNetBufferListPool. fAllocateNetBuffer=TRUE so each NBL
      * comes with an embedded NB; we wrap the caller's MDL chain into the
      * embedded NB instead of allocating a backing data buffer. */
@@ -233,20 +371,20 @@ Ndis6CreateLogicalAdapter(
         Ext->TxWrapperNblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
     }
 
-    /* Phase 3 RX legacy packet/buffer pools - used to wrap incoming NBs
+    /* Phase 3 RX legacy packet/buffer pools — used to wrap incoming NBs
      * as legacy NDIS_PACKETs for tcpip's ProtocolReceivePacketHandler.
      * Sized to e1000e's typical RX batch (64 NBs per DPC budget). */
     {
         NDIS_STATUS PoolStatus;
         NdisAllocateBufferPool(&PoolStatus, &Ext->RxLegacyBufferPool, 64);
-        DPRINT("NDIS6-INIT: NdisAllocateBufferPool -> 0x%08lx, handle=%p\n",
+        DbgPrint("NDIS6-INIT: NdisAllocateBufferPool -> 0x%08lx, handle=%p\n",
                  (ULONG)PoolStatus, Ext->RxLegacyBufferPool);
         if (PoolStatus != NDIS_STATUS_SUCCESS)
             Ext->RxLegacyBufferPool = NULL;
 
         NdisAllocatePacketPool(&PoolStatus, &Ext->RxLegacyPacketPool, 64,
                                sizeof(PVOID) * 4);
-        DPRINT("NDIS6-INIT: NdisAllocatePacketPool -> 0x%08lx, handle=%p\n",
+        DbgPrint("NDIS6-INIT: NdisAllocatePacketPool -> 0x%08lx, handle=%p\n",
                  (ULONG)PoolStatus, Ext->RxLegacyPacketPool);
         if (PoolStatus != NDIS_STATUS_SUCCESS)
             Ext->RxLegacyPacketPool = NULL;
@@ -273,7 +411,7 @@ Ndis6CreateLogicalAdapter(
      * on \Driver\PCI; USB miniports (usbrndis) sit on \Driver\USBHUB.
      * Anything else falls through to PCIBus which is the safest default
      * for the legacy NdisMMapIoSpace fallback path. */
-    Adapter->NdisMiniportBlock.BusType    = (NDIS_INTERFACE_TYPE)PCIBus;
+    Adapter->NdisMiniportBlock.BusType    = PCIBus;
     Adapter->NdisMiniportBlock.BusNumber  = 0;
     if (Pdo != NULL && Pdo->DriverObject != NULL)
     {
@@ -349,43 +487,40 @@ Ndis6CallMiniportInitializeEx(
     Params.Header.Revision = NDIS_MINIPORT_INIT_PARAMETERS_REVISION_1;
     Params.Header.Size     = sizeof(Params);
 
-    Params.AdapterName            = Ext->Adapter->NdisMiniportBlock.MiniportName;
-    Params.MiniportAdapterContext = NULL;  /* driver fills in via NdisMSetMiniportAttributes */
-    Params.MediaType              = NdisMedium802_3;
-    Params.PhysicalDeviceObject   = Ext->PhysicalDeviceObject;
+    Params.Flags                     = 0;
     /* AllocatedResources is a PNDIS_RESOURCE_LIST which is really
-     * PCM_PARTIAL_RESOURCE_LIST - the inner partial list, NOT the outer
+     * PCM_PARTIAL_RESOURCE_LIST — the inner partial list, NOT the outer
      * CM_RESOURCE_LIST. Skip one level of indirection from what PnP
      * handed us. e1000e walks ResourceList->PartialDescriptors[] and
      * expects the real CmResourceTypeMemory/Port/Interrupt descriptors. */
     if (Ext->AllocatedResourcesTranslated &&
         Ext->AllocatedResourcesTranslated->Count > 0)
     {
-        Params.AllocatedResources = (PVOID)
+        Params.AllocatedResources = (PNDIS_RESOURCE_LIST)
             &Ext->AllocatedResourcesTranslated->List[0].PartialResourceList;
     }
-    if (Ext->AllocatedResources && Ext->AllocatedResources->Count > 0)
-    {
-        Params.ResourceList = (PVOID)
-            &Ext->AllocatedResources->List[0].PartialResourceList;
-    }
-    Params.NdisMaximumDriverVersion =
-        ((ULONG)Ext->DriverBlock->Characteristics.MajorNdisVersion << 8)
-      | (ULONG)Ext->DriverBlock->Characteristics.MinorNdisVersion;
+    Params.IMDeviceInstanceContext   = NULL;
+    Params.MiniportAddDeviceContext  = NULL;
+    Params.IfIndex                   = 0;
+    Params.NetLuid.Value             = 0;
+    Params.DefaultPortAuthStates     = NULL;
+    Params.PciDeviceCustomProperties = NULL;
 
     /* Call the driver. The handle we hand it is the LOGICAL_ADAPTER
      * pointer, which the driver round-trips back to us via every
      * subsequent NdisM* call. */
+    DbgPrint("NDIS6: InitializeEx → driver (adapter=%p pdo=%p fdo=%p next=%p)\n", Adapter, Adapter->NdisMiniportBlock.PhysicalDeviceObject, Adapter->NdisMiniportBlock.DeviceObject, Adapter->NdisMiniportBlock.NextDeviceObject);
     Status = Ext->DriverBlock->Characteristics.InitializeHandlerEx(
         (NDIS_HANDLE)Adapter,
         Ext->DriverBlock->MiniportDriverContext,
         &Params);
+    DbgPrint("NDIS6: InitializeEx returned 0x%08lx (ctx=%p)\n", (ULONG)Status, Ext->MiniportAdapterContext);
 
     return Status;
 }
 
 /* ============================================================================
- *  Ndis6CallMiniportHaltEx - symmetric tear-down
+ *  Ndis6CallMiniportHaltEx — symmetric tear-down
  * ============================================================================ */
 
 VOID
@@ -415,7 +550,7 @@ Ndis6CallMiniportHaltEx(
      * NdisMSendNetBufferListsComplete (60thunk_tx.c) decrements
      * TxInFlightCount and signals TxDrainEvent when it hits zero. We
      * wait up to 5 seconds for the count to drain, then push through
-     * regardless - an NBL leak is preferable to hanging REMOVE_DEVICE.
+     * regardless — an NBL leak is preferable to hanging REMOVE_DEVICE.
      *
      * The common case is count == 0 because the stack has already
      * stopped sending by the time PnP sends REMOVE; we just sample
@@ -424,11 +559,11 @@ Ndis6CallMiniportHaltEx(
     StartingCount = Ext->TxInFlightCount;
     if (StartingCount > 0)
     {
-        DPRINT("NDIS6: HaltEx draining %ld in-flight TX NBLs\n", StartingCount);
+        DbgPrint("NDIS6: HaltEx draining %ld in-flight TX NBLs\n", StartingCount);
 
         /* Clear the event so we wait for the NEXT decrement. We own
          * the event setter side (TerminalSendComplete), so clearing
-         * here can't race the setter in a problematic way - if the
+         * here can't race the setter in a problematic way — if the
          * count is about to hit zero we'll see it in the re-sample
          * after the wait. */
         KeClearEvent(&Ext->TxDrainEvent);
@@ -449,7 +584,7 @@ Ndis6CallMiniportHaltEx(
             RemainingCount = Ext->TxInFlightCount;
             if (WaitStatus == STATUS_TIMEOUT && RemainingCount > 0)
             {
-                DPRINT("NDIS6: HaltEx drain timed out with %ld NBLs still in flight; leaking them\n",
+                DbgPrint("NDIS6: HaltEx drain TIMEOUT, %ld NBLs still in flight — leaking\n",
                          RemainingCount);
                 /* Fall through. The send-completion path will still
                  * try to call MiniSendComplete on an adapter whose
@@ -498,7 +633,7 @@ Ndis6CallMiniportPauseEx(
         Ext->DriverBlock->Characteristics.PauseHandler == NULL ||
         Ext->MiniportAdapterContext == NULL)
     {
-        /* Driver has no pause handler - treat as already paused. Many
+        /* Driver has no pause handler — treat as already paused. Many
          * simple miniports don't need pause semantics and fall through. */
         Ext->PauseState = NDIS6_PAUSE_STATE_PAUSED;
         return NDIS_STATUS_SUCCESS;
@@ -512,18 +647,19 @@ Ndis6CallMiniportPauseEx(
 
     RtlZeroMemory(&PauseParams, sizeof(PauseParams));
     PauseParams.Header.Type     = NDIS_OBJECT_TYPE_DEFAULT;
-    PauseParams.Header.Revision = 1;    /* NDIS_MINIPORT_PAUSE_PARAMETERS_REVISION_1 */
+    PauseParams.Header.Revision = NDIS_MINIPORT_PAUSE_PARAMETERS_REVISION_1;
     PauseParams.Header.Size     = sizeof(PauseParams);
+    PauseParams.Flags           = 0;
     PauseParams.PauseReason     = 0;
 
     Ext->PauseState  = NDIS6_PAUSE_STATE_PAUSING;
     Ext->PauseStatus = NDIS_STATUS_PENDING;
     KeClearEvent(&Ext->PauseEvent);
 
-    DPRINT("NDIS6: Pause → driver\n");
+    DbgPrint("NDIS6: Pause → driver\n");
     Status = Ext->DriverBlock->Characteristics.PauseHandler(
         Ext->MiniportAdapterContext, &PauseParams);
-    DPRINT("NDIS6: PauseHandler returned 0x%08lx\n", (ULONG)Status);
+    DbgPrint("NDIS6: PauseHandler returned 0x%08lx\n", (ULONG)Status);
 
     if (Status == NDIS_STATUS_PENDING)
     {
@@ -570,19 +706,19 @@ Ndis6CallMiniportRestartEx(
 
     RtlZeroMemory(&RestartParams, sizeof(RestartParams));
     RestartParams.Header.Type     = NDIS_OBJECT_TYPE_DEFAULT;
-    RestartParams.Header.Revision = 1;    /* NDIS_MINIPORT_RESTART_PARAMETERS_REVISION_1 */
+    RestartParams.Header.Revision = NDIS_MINIPORT_RESTART_PARAMETERS_REVISION_1;
     RestartParams.Header.Size     = sizeof(RestartParams);
-    RestartParams.AllocatedResources = NULL;
-    RestartParams.RestartAttributes  = 0;
+    RestartParams.RestartAttributes = NULL;
+    RestartParams.Flags             = 0;
 
     Ext->PauseState    = NDIS6_PAUSE_STATE_RESTARTING;
     Ext->RestartStatus = NDIS_STATUS_PENDING;
     KeClearEvent(&Ext->RestartEvent);
 
-    DPRINT("NDIS6: Restart → driver\n");
+    DbgPrint("NDIS6: Restart → driver\n");
     Status = Ext->DriverBlock->Characteristics.RestartHandler(
         Ext->MiniportAdapterContext, &RestartParams);
-    DPRINT("NDIS6: RestartHandler returned 0x%08lx\n", (ULONG)Status);
+    DbgPrint("NDIS6: RestartHandler returned 0x%08lx\n", (ULONG)Status);
 
     if (Status == NDIS_STATUS_PENDING)
     {
@@ -602,7 +738,7 @@ Ndis6CallMiniportRestartEx(
 }
 
 /* ============================================================================
- *  NdisMPauseComplete / NdisMRestartComplete - driver-side callbacks
+ *  NdisMPauseComplete / NdisMRestartComplete — driver-side callbacks
  *
  *  A driver returning PENDING from its PauseHandler or RestartHandler must
  *  call these when the transition finishes. We record the status and set
@@ -649,7 +785,7 @@ NdisMRestartComplete(
 }
 
 /* ============================================================================
- *  Ndis6DestroyLogicalAdapter - full tear-down (called from REMOVE_DEVICE)
+ *  Ndis6DestroyLogicalAdapter — full tear-down (called from REMOVE_DEVICE)
  * ============================================================================ */
 
 VOID
@@ -669,7 +805,7 @@ Ndis6DestroyLogicalAdapter(
     Fdo = Ext ? Ext->FunctionalDeviceObject : NULL;
 
     /* Phase 7B: detach any NDIS 6 filter modules attached to this adapter
-     * BEFORE we tear anything else down - filters may try to issue OID
+     * BEFORE we tear anything else down — filters may try to issue OID
      * requests during DetachHandler and need the adapter still wired. */
     {
         extern VOID Ndis6DetachFiltersFromAdapter(PLOGICAL_ADAPTER);
@@ -736,9 +872,186 @@ Ndis6DestroyLogicalAdapter(
         ExFreePoolWithTag(Ext, NDIS6_ADAPTER_TAG);
 
     /* Finally delete the FDO. After this Adapter (which lives inside
-     * Fdo->DeviceExtension) is gone - do NOT touch it again. */
+     * Fdo->DeviceExtension) is gone — do NOT touch it again. */
     if (Fdo)
         IoDeleteDevice(Fdo);
+}
+
+/* ============================================================================
+ *  Ndis6CreateImInstance
+ *
+ *  Like Ndis6CreateLogicalAdapter, but for an intermediate driver's upper
+ *  (virtual) miniport: there is no PnP PDO and no lower device stack. The
+ *  FDO doubles as its own "PDO" so NdisAllocateIoWorkItem and
+ *  NdisMGetDeviceProperty keep working.
+ * ============================================================================ */
+NDIS_STATUS
+Ndis6CreateImInstance(
+    _In_  PNDIS6_DRIVER_BLOCK DriverBlock,
+    _In_  PCUNICODE_STRING    DeviceName,
+    _In_  NDIS_HANDLE         DeviceContext,
+    _Out_ PLOGICAL_ADAPTER*   AdapterOut)
+{
+    PLOGICAL_ADAPTER    Adapter;
+    PNDIS6_ADAPTER_EXT  Ext;
+    PDEVICE_OBJECT      Fdo;
+    NTSTATUS            Status;
+    UNICODE_STRING      AdapterName;
+    KIRQL               OldIrql;
+    extern LIST_ENTRY   AdapterListHead;
+    extern KSPIN_LOCK   AdapterListLock;
+
+    if (DriverBlock == NULL || DeviceName == NULL || DeviceName->Buffer == NULL ||
+        AdapterOut == NULL)
+        return NDIS_STATUS_INVALID_PARAMETER;
+
+    *AdapterOut = NULL;
+
+    /* Duplicate the supplied (NUL-terminated) device name for the FDO. */
+    if (!RtlCreateUnicodeString(&AdapterName, DeviceName->Buffer))
+        return NDIS_STATUS_RESOURCES;
+
+    Status = IoCreateDevice(DriverBlock->DriverObject, sizeof(LOGICAL_ADAPTER),
+                            &AdapterName, FILE_DEVICE_PHYSICAL_NETCARD, 0, FALSE,
+                            &Fdo);
+    if (!NT_SUCCESS(Status))
+    {
+        Ndis6FreeAdapterName(&AdapterName);
+        return Status;
+    }
+
+    Adapter = (PLOGICAL_ADAPTER)Fdo->DeviceExtension;
+    RtlZeroMemory(Adapter, sizeof(*Adapter));
+    Adapter->IsNdis6 = TRUE;
+
+    Ext = (PNDIS6_ADAPTER_EXT)ExAllocatePoolWithTag(
+        NonPagedPool, sizeof(NDIS6_ADAPTER_EXT), NDIS6_ADAPTER_TAG);
+    if (Ext == NULL)
+    {
+        IoDeleteDevice(Fdo);
+        Ndis6FreeAdapterName(&AdapterName);
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    RtlZeroMemory(Ext, sizeof(*Ext));
+    Ext->Adapter                = Adapter;
+    Ext->DriverBlock            = DriverBlock;
+    Ext->PhysicalDeviceObject   = Fdo;   /* self-PDO: no bus underneath */
+    Ext->FunctionalDeviceObject = Fdo;
+    KeInitializeSpinLock(&Ext->IsrLock);
+    KeInitializeSpinLock(&Ext->TxLookupLock);
+    InitializeListHead(&Ext->InFlightNblsTx);
+    Ext->TxInFlightCount = 0;
+    KeInitializeEvent(&Ext->TxDrainEvent, NotificationEvent, TRUE);
+    Ext->PauseState    = NDIS6_PAUSE_STATE_PAUSED;
+    Ext->PauseStatus   = NDIS_STATUS_SUCCESS;
+    Ext->RestartStatus = NDIS_STATUS_SUCCESS;
+    KeInitializeEvent(&Ext->PauseEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&Ext->RestartEvent, SynchronizationEvent, FALSE);
+    KeInitializeSpinLock(&Ext->OidWaiterLock);
+    InitializeListHead(&Ext->OidWaiters);
+    KeInitializeSpinLock(&Ext->FilterModuleListLock);
+    InitializeListHead(&Ext->FilterModuleList);
+    KeInitializeSpinLock(&Ext->ProtocolBindingListLock);
+    InitializeListHead(&Ext->ProtocolBindingList);
+
+    {
+        NET_BUFFER_LIST_POOL_PARAMETERS PoolParams;
+        NdisZeroMemory(&PoolParams, sizeof(PoolParams));
+        PoolParams.Header.Type        = NDIS_OBJECT_TYPE_DEFAULT;
+        PoolParams.Header.Revision    = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+        PoolParams.Header.Size        = sizeof(NET_BUFFER_LIST_POOL_PARAMETERS);
+        PoolParams.ProtocolId         = NDIS_PROTOCOL_ID_DEFAULT;
+        PoolParams.fAllocateNetBuffer = TRUE;
+        PoolParams.ContextSize        = 0;
+        PoolParams.PoolTag            = 'TxNb';
+        PoolParams.DataSize           = 0;
+        Ext->TxWrapperNblPool = NdisAllocateNetBufferListPool(NULL, &PoolParams);
+    }
+    {
+        NDIS_STATUS PoolStatus;
+        NdisAllocateBufferPool(&PoolStatus, &Ext->RxLegacyBufferPool, 64);
+        if (PoolStatus != NDIS_STATUS_SUCCESS)
+            Ext->RxLegacyBufferPool = NULL;
+        NdisAllocatePacketPool(&PoolStatus, &Ext->RxLegacyPacketPool, 64,
+                               sizeof(PVOID) * 4);
+        if (PoolStatus != NDIS_STATUS_SUCCESS)
+            Ext->RxLegacyPacketPool = NULL;
+    }
+
+    Adapter->Ndis6Context = Ext;
+    InitializeListHead(&Adapter->ProtocolListHead);
+    KeInitializeSpinLock(&Adapter->NdisMiniportBlock.Lock);
+    Adapter->NdisMiniportBlock.MiniportName          = AdapterName;
+    Adapter->NdisMiniportBlock.PhysicalDeviceObject  = Fdo;
+    Adapter->NdisMiniportBlock.DeviceObject          = Fdo;
+    Adapter->NdisMiniportBlock.BusType               = NdisInterfaceInternal;
+    Adapter->NdisMiniportBlock.BusNumber             = 0;
+    /* The driver-private context recovered via NdisIMGetDeviceContext inside
+     * the miniport's InitializeHandlerEx. */
+    Adapter->NdisMiniportBlock.DeviceContext         = DeviceContext;
+    /* No lower device stack to forward PnP/Power IRPs to. */
+    Adapter->NdisMiniportBlock.NextDeviceObject      = NULL;
+
+    Fdo->Flags |= DO_DIRECT_IO | DO_POWER_PAGABLE;
+    Fdo->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    KeAcquireSpinLock(&AdapterListLock, &OldIrql);
+    InsertTailList(&AdapterListHead, &Adapter->ListEntry);
+    KeReleaseSpinLock(&AdapterListLock, OldIrql);
+
+    *AdapterOut = Adapter;
+    return NDIS_STATUS_SUCCESS;
+}
+
+/* ============================================================================
+ *  Ndis6InitializeImDeviceInstance
+ *
+ *  The worker behind NdisIMInitializeDeviceInstanceEx: create the IM upper
+ *  miniport instance, run the driver's InitializeHandlerEx, and (on success)
+ *  fan out a bind notification to the registered protocols — the same sequence
+ *  the PnP START path performs for a normal miniport.
+ * ============================================================================ */
+NDIS_STATUS
+Ndis6InitializeImDeviceInstance(
+    _In_ PNDIS6_DRIVER_BLOCK DriverBlock,
+    _In_ PCUNICODE_STRING    DeviceName,
+    _In_ NDIS_HANDLE         DeviceContext)
+{
+    PLOGICAL_ADAPTER   Adapter = NULL;
+    PNDIS6_ADAPTER_EXT Ext;
+    NDIS_STATUS        Status;
+    extern VOID Ndis6BindAllProtocolsToAdapter(PLOGICAL_ADAPTER);
+
+    Status = Ndis6CreateImInstance(DriverBlock, DeviceName, DeviceContext, &Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+        return Status;
+
+    Ndis6ImSeedTcpipRegistry(DeviceName);
+
+    Status = Ndis6CallMiniportInitializeEx(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        Ndis6DestroyLogicalAdapter(Adapter);
+        return Status;
+    }
+
+    Ext = NDIS6_EXT(Adapter);
+    if (Ext != NULL)
+        Ext->Initialized = TRUE;
+
+    Ndis6CallMiniportRestartEx(Adapter);
+
+    /* Bind every registered native NDIS 6 protocol; legacy NDIS 5 protocols
+     * bind separately via their own Linkage\Bind list. */
+    Ndis6BindAllProtocolsToAdapter(Adapter);
+
+    {
+        extern VOID ndisRebindAllProtocols(VOID);
+        ndisRebindAllProtocols();
+    }
+
+    return NDIS_STATUS_SUCCESS;
 }
 
 /* EOF */
