@@ -94,7 +94,7 @@ DC_vFixIsotropicMapping(PDC pdc)
 {
     PDC_ATTR pdcattr;
     LONG64 fx, fy;
-    LONG s;
+    LONG s, l;
     SIZEL szlWindowExt, szlViewportExt;
     ASSERT(pdc->pdcattr->iMapMode == MM_ISOTROPIC);
 
@@ -119,12 +119,18 @@ DC_vFixIsotropicMapping(PDC pdc)
     if (fx < fy)
     {
         s = (szlWindowExt.cy ^ szlViewportExt.cx) > 0 ? 1 : -1;
-        pdcattr->szlViewportExt.cx = (LONG)(fx * s / szlWindowExt.cy);
+        l = (LONG)(fx / labs(szlWindowExt.cy));
+        if (l != 0 && (fx % labs(szlWindowExt.cy)) != 0)
+            l++;
+        pdcattr->szlViewportExt.cx = l * s;
     }
     else if (fx > fy)
     {
         s = (szlWindowExt.cx ^ szlViewportExt.cy) > 0 ? 1 : -1;
-        pdcattr->szlViewportExt.cy = (LONG)(fy * s / szlWindowExt.cx);
+        l = (LONG)(fy / labs(szlWindowExt.cx));
+        if (l != 0 && (fy % labs(szlWindowExt.cx)) != 0)
+            l++;
+        pdcattr->szlViewportExt.cy = l * s;
     }
 
     /* Reset the flag */
@@ -428,6 +434,16 @@ NtGdiTransformPoints(
 
         case GdiLpToDp:
             ret = INTERNAL_APPLY_MATRIX(DC_pmxWorldToDevice(pdc), Points, Count);
+            if (ret &&
+                pdc->pdcattr->iMapMode == MM_ISOTROPIC &&
+                pdc->pdcattr->szlViewportExt.cx == 0 &&
+                pdc->pdcattr->szlWindowExt.cx != 0)
+            {
+                UINT i;
+
+                for (i = 0; i < Count; i++)
+                    Points[i].y = pdc->pdcattr->ptlViewportOrg.y;
+            }
             break;
 
         case 2: // Not supported yet. Need testing.
