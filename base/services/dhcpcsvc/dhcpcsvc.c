@@ -547,7 +547,7 @@ DhcpNotifyConfigChangeEx(
 
         RpcTryExcept
         {
-            ret = Server_EnableDhcp(ServerName, AdapterName, TRUE);
+            ret = Client_EnableDhcp(ServerName, AdapterName, TRUE);
         }
         RpcExcept(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -559,7 +559,7 @@ DhcpNotifyConfigChangeEx(
     {
         RpcTryExcept
         {
-            ret = Server_EnableDhcp(ServerName, AdapterName, FALSE);
+            ret = Client_EnableDhcp(ServerName, AdapterName, FALSE);
         }
         RpcExcept(EXCEPTION_EXECUTE_HANDLER)
         {
