@@ -1467,9 +1467,30 @@ FAST_IO_WRITE NtfsFastIoWrite;
 
 /* fcb.c */
 
+/* Typed-stream class of a parsed open path (see NtfsParseStreamPath).
+ * Only the $DATA and $INDEX_ALLOCATION stream types are openable
+ * ([MS-FSCC] 2.1.5); the class records which one the name spelled out so
+ * the create path can enforce the directory/non-directory requirement
+ * once the target has resolved. */
+typedef enum _NTFS_STREAM_TYPE
+{
+    /* "file", "file:name" or "file:name:$DATA" - a $DATA open with no
+     * extra target requirement (StreamName distinguishes default vs
+     * named stream). */
+    NtfsStreamTypeData,
+    /* Explicit "file::$DATA" - the default (unnamed) data stream; the
+     * target must not be a directory (STATUS_FILE_IS_A_DIRECTORY). */
+    NtfsStreamTypeDefaultData,
+    /* "dir::$INDEX_ALLOCATION" / "dir:$I30:$INDEX_ALLOCATION" - the
+     * directory index stream; the target must be a directory
+     * (STATUS_NOT_A_DIRECTORY). */
+    NtfsStreamTypeIndexAllocation
+} NTFS_STREAM_TYPE, *PNTFS_STREAM_TYPE;
+
 NTSTATUS
 NtfsParseStreamPath(PUNICODE_STRING FileName,
-                    PUNICODE_STRING StreamName);
+                    PUNICODE_STRING StreamName,
+                    PNTFS_STREAM_TYPE StreamType);
 
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
