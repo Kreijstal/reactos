@@ -128,6 +128,27 @@ ReleaseAttributeContext(PNTFS_ATTR_CONTEXT Context)
 }
 
 
+/* NTFS attribute names collate case-insensitively (on-disk ordering and
+ * lookups both go through the $UpCase table), so a lookup for "stream" must
+ * match a stored "Stream" - creation stays case-preserving.  System names
+ * ($I30, $J, ...) are stored upper-case, so they are unaffected. */
+static
+BOOLEAN
+CompareAttributeNames(PCWSTR AttrName,
+                      UCHAR AttrNameLength,
+                      PCWSTR Name,
+                      ULONG NameLength)
+{
+    UNICODE_STRING Existing, Wanted;
+
+    Existing.Buffer = (PWSTR)AttrName;
+    Existing.Length = Existing.MaximumLength = (USHORT)(AttrNameLength * sizeof(WCHAR));
+    Wanted.Buffer = (PWSTR)Name;
+    Wanted.Length = Wanted.MaximumLength = (USHORT)(NameLength * sizeof(WCHAR));
+
+    return RtlEqualUnicodeString(&Existing, &Wanted, TRUE);
+}
+
 /**
 * @name FindAttribute
 * @implemented
@@ -167,7 +188,7 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
 
                 AttrName = (PWCHAR)((PCHAR)Attribute + Attribute->NameOffset);
                 DPRINT("%.*S, %.*S\n", Attribute->NameLength, AttrName, NameLength, Name);
-                if (RtlCompareMemory(AttrName, Name, NameLength * sizeof(WCHAR)) == (NameLength  * sizeof(WCHAR)))
+                if (CompareAttributeNames(AttrName, Attribute->NameLength, Name, NameLength))
                 {
                     Found = TRUE;
                 }
@@ -208,7 +229,7 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
 
                 AttrName = (PWCHAR)((PCHAR)AttrListItem + AttrListItem->NameOffset);
                 DPRINT("%.*S, %.*S\n", AttrListItem->NameLength, AttrName, NameLength, Name);
-                if (RtlCompareMemory(AttrName, Name, NameLength * sizeof(WCHAR)) == (NameLength  * sizeof(WCHAR)))
+                if (CompareAttributeNames(AttrName, AttrListItem->NameLength, Name, NameLength))
                 {
                     Found = TRUE;
                 }
@@ -1188,6 +1209,8 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                 LARGE_INTEGER AttribDataSize;
                 PVOID AttribData;
                 ULONG NewRecordLength;
+                ULONG OldRecordLength;
+                ULONG TailLength;
                 ULONG EndAttributeOffset;
                 ULONG LengthWritten;
 
@@ -1235,9 +1258,16 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                     // copy the name
                     // An attribute name will be located at offset 0x18 for a resident attribute, 0x40 for non-resident
                     RtlCopyMemory((PCHAR)((ULONG_PTR)NewRecord + 0x40),
-                                  (PCHAR)((ULONG_PTR)AttrContext->pRecord + 0x18),
+                                  (PCHAR)((ULONG_PTR)AttrContext->pRecord
+                                          + AttrContext->pRecord->NameOffset),
                                   AttrContext->pRecord->NameLength * sizeof(WCHAR));
                 }
+
+                /* The header copy above brought the resident NameOffset (0x18)
+                 * along; the name now lives after the non-resident header.
+                 * Without this a converted named stream can no longer be
+                 * found by name (its NameOffset points into LowestVCN). */
+                NewRecord->NameOffset = 0x40;
 
                 // update the mapping pairs offset, which will be 0x40 (size of a non-resident header) + length in bytes of the name
                 NewRecord->NonResident.MappingPairsOffset = 0x40 + (AttrContext->pRecord->NameLength * sizeof(WCHAR));
@@ -1252,13 +1282,37 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
                 ASSERT(NewRecord->Length == NewRecordLength);
 
+                /* The converted attribute need not be the last one in the
+                 * record - a named data stream sorts wherever its name falls,
+                 * and the unnamed $DATA of a file that also has named streams
+                 * always has attributes behind it.  Preserve the tail
+                 * (everything from the end of the old resident attribute up
+                 * to and including the AttributeEnd marker) by sliding it to
+                 * the end of the new attribute; the previous code ended the
+                 * record right here, silently destroying the trailing
+                 * attributes. */
+                OldRecordLength = Destination->Length;
+                ASSERT(AttrOffset + OldRecordLength <= FileRecord->BytesInUse);
+                TailLength = FileRecord->BytesInUse - (AttrOffset + OldRecordLength);
+
+                if (NewRecordLength > OldRecordLength &&
+                    FileRecord->BytesInUse + (NewRecordLength - OldRecordLength) >
+                        Vcb->NtfsInfo.BytesPerFileRecord)
+                {
+                    DPRINT1("ERROR: No room to convert attribute to non-resident!\n");
+                    if (AttribDataSize.QuadPart > 0)
+                        ExFreePoolWithTag(AttribData, TAG_NTFS);
+                    ExFreePoolWithTag(NewRecord, TAG_NTFS);
+                    return STATUS_DISK_FULL;
+                }
+
+                RtlMoveMemory((PUCHAR)FileRecord + AttrOffset + NewRecordLength,
+                              (PUCHAR)FileRecord + AttrOffset + OldRecordLength,
+                              TailLength);
+                FileRecord->BytesInUse = FileRecord->BytesInUse - OldRecordLength + NewRecordLength;
+
                 // Copy the new attribute record into the file record
                 RtlCopyMemory(Destination, NewRecord, NewRecord->Length);
-
-                // Update the file record end
-                SetFileRecordEnd(FileRecord,
-                                 (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + EndAttributeOffset),
-                                 FILE_RECORD_END);
 
                 // Initialize the MCB, potentially catch an exception
                 _SEH2_TRY
@@ -3954,6 +4008,145 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     }
     if (NT_SUCCESS(Status))
         Fcb->LinkCount = 0;
+
+    return Status;
+}
+
+/**
+* @name NtfsDeleteStream
+* @implemented
+*
+* Deletes the named $DATA attribute an alternate-data-stream FCB refers to,
+* leaving the base file (and every other stream) intact.  Counterpart of
+* NtfsDeleteFileRecord for stream handles: NtfsCleanupFile routes a
+* delete-pending FCB here when Fcb->Stream names an alternate stream.
+*
+* @param DeviceExt
+* Points to the target disk's DEVICE_EXTENSION.
+*
+* @param Fcb
+* The stream FCB (Fcb->Stream[0] != UNICODE_NULL) to delete.
+*
+* @return
+* STATUS_SUCCESS on success.
+* STATUS_CANNOT_DELETE if the attribute was migrated to a child record via
+* $ATTRIBUTE_LIST (removing it would also require rewriting the list entry,
+* which is out of scope here - refuse cleanly rather than corrupt the chain).
+* Lookup/IO errors otherwise.
+*/
+NTSTATUS
+NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
+                 PNTFS_FCB Fcb)
+{
+    NTSTATUS Status;
+    PFILE_RECORD_HEADER FileRecord;
+    PNTFS_ATTR_CONTEXT DataContext;
+    PNTFS_ATTR_RECORD Attribute;
+    ULONG AttrOffset;
+    ULONG AttrLength;
+    ULONG TailLength;
+
+    ASSERT(Fcb->Stream[0] != UNICODE_NULL);
+
+    /* The on-disk record is about to change. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!FileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeData,
+                           Fcb->Stream, wcslen(Fcb->Stream),
+                           &DataContext, &AttrOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Stream already gone - treat as deleted. */
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_SUCCESS;
+    }
+
+    if (DataContext->MigratedToMFTIndex != 0)
+    {
+        DPRINT1("NtfsDeleteStream: '%S' lives in an $ATTRIBUTE_LIST child record, refusing\n",
+                Fcb->Stream);
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_CANNOT_DELETE;
+    }
+
+    /* Release any allocated clusters before dropping the attribute record. */
+    if (DataContext->pRecord->IsNonResident)
+    {
+        LARGE_INTEGER Zero;
+
+        Zero.QuadPart = 0;
+        Status = SetNonResidentAttributeDataLength(DeviceExt, DataContext,
+                                                   AttrOffset, FileRecord, &Zero);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtfsDeleteStream: failed to free '%S' clusters: 0x%lx\n",
+                    Fcb->Stream, Status);
+            ReleaseAttributeContext(DataContext);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            return Status;
+        }
+    }
+
+    /* Cut the attribute out of the record: slide everything behind it
+     * (including the AttributeEnd marker and the trailing end ULONG that
+     * BytesInUse accounts for) over the freed slot. */
+    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ASSERT(Attribute->Type == AttributeData);
+    AttrLength = Attribute->Length;
+    ASSERT(AttrOffset + AttrLength <= FileRecord->BytesInUse);
+
+    TailLength = FileRecord->BytesInUse - (AttrOffset + AttrLength);
+    RtlMoveMemory(Attribute,
+                  (PUCHAR)FileRecord + AttrOffset + AttrLength,
+                  TailLength);
+    FileRecord->BytesInUse -= AttrLength;
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+
+    ReleaseAttributeContext(DataContext);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (NT_SUCCESS(Status))
+    {
+        /* The base file's FCB (if cached) may hold a stale copy of the
+         * record that still lists this stream. */
+        SIZE_T PathLen = wcslen(Fcb->PathName);
+        SIZE_T StreamLen = wcslen(Fcb->Stream);
+
+        if (PathLen > StreamLen &&
+            Fcb->PathName[PathLen - StreamLen - 1] == L':')
+        {
+            WCHAR BasePath[MAX_PATH];
+            PNTFS_FCB BaseFcb;
+
+            RtlCopyMemory(BasePath, Fcb->PathName, (PathLen - StreamLen - 1) * sizeof(WCHAR));
+            BasePath[PathLen - StreamLen - 1] = UNICODE_NULL;
+
+            BaseFcb = NtfsGrabFCBFromTable(DeviceExt, BasePath);
+            if (BaseFcb != NULL)
+            {
+                NtfsInvalidateCachedFileRecord(BaseFcb);
+                NtfsReleaseFCB(DeviceExt, BaseFcb);
+            }
+        }
+
+        /* Make sure this FCB no longer satisfies name lookups (mirrors
+         * NtfsDeleteFileRecord): a later open of the same stream name must
+         * create a fresh attribute instead of reusing this dead FCB. */
+        Fcb->LinkCount = 0;
+    }
 
     return Status;
 }

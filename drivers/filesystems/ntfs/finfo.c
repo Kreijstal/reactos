@@ -320,7 +320,12 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
             CurrentInfo->StreamSize.QuadPart = AttributeDataLength(Attribute);
             CurrentInfo->StreamAllocationSize.QuadPart = AttributeAllocatedLength(Attribute);
             CurrentInfo->StreamName[0] = L':';
-            RtlMoveMemory(&CurrentInfo->StreamName[1], (PWCHAR)((ULONG_PTR)Attribute + Attribute->NameOffset), CurrentInfo->StreamNameLength);
+            /* Copy only the attribute name itself - copying StreamNameLength
+             * bytes here (as this used to) read past the on-record name and
+             * wrote one WCHAR beyond this entry's allocation. */
+            RtlMoveMemory(&CurrentInfo->StreamName[1],
+                          (PWCHAR)((ULONG_PTR)Attribute + Attribute->NameOffset),
+                          Attribute->NameLength * sizeof(WCHAR));
             RtlMoveMemory(&CurrentInfo->StreamName[Attribute->NameLength + 1], L":$DATA", sizeof(L":$DATA") - sizeof(UNICODE_NULL));
 
             if (Previous != NULL)
@@ -848,7 +853,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     DPRINT("Found record for %wS\n", Fcb->ObjectName);
 
-    CurrentFileSize.QuadPart = NtfsGetFileSize(DeviceExt, FileRecord, L"", 0, NULL);
+    CurrentFileSize.QuadPart = NtfsGetFileSize(DeviceExt, FileRecord, Fcb->Stream, wcslen(Fcb->Stream), NULL);
 
     // Are we trying to decrease the file size?
     if (NewFileSize->QuadPart < CurrentFileSize.QuadPart)
@@ -908,6 +913,16 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
         ReleaseAttributeContext(DataContext);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
+    }
+
+    /* Named-stream sizes are not reflected in $FILE_NAME attributes or
+     * directory index entries - those track the unnamed (default) stream
+     * only, as on Windows - so a stream FCB is done here. */
+    if (Fcb->Stream[0] != UNICODE_NULL)
+    {
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_SUCCESS;
     }
 
     // now we need to update this file's size in every directory index entry that references it
