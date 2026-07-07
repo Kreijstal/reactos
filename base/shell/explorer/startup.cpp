@@ -492,7 +492,7 @@ INT ProcessStartupItems(BOOL bRunOnce)
     if (res && bNormalBoot && (SHRestricted(REST_NOLOCALMACHINERUN) == 0))
         res = ProcessRunKeys(HKEY_LOCAL_MACHINE, L"Run", FALSE, FALSE);
 
-    if (res && bNormalBoot && (SHRestricted(REST_NOCURRENTUSERRUNONCE) == 0))
+    if (res && bNormalBoot && (SHRestricted(REST_NOCURRENTUSERRUN) == 0))
         res = ProcessRunKeys(HKEY_CURRENT_USER, L"Run", FALSE, FALSE);
 
     /* All users Startup folder */
