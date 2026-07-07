@@ -34,7 +34,7 @@
 
 #include "ndis6_internal.h"
 
-/* MiniIndicateReceivePacket forward decl - same as 60thunk_rx.c. */
+/* MiniIndicateReceivePacket forward decl — same as 60thunk_rx.c. */
 extern VOID NTAPI
 MiniIndicateReceivePacket(
     IN NDIS_HANDLE   MiniportAdapterHandle,
@@ -156,7 +156,7 @@ Ndis6FilterChainNextUp(
 }
 
 /* ============================================================================
- *  Bridge dispatch entry points - called by the bridge's TX/RX glue
+ *  Bridge dispatch entry points — called by the bridge's TX/RX glue
  *  (60thunk_tx.c, 60thunk_rx.c) to inject NBLs into the filter chain.
  *  If no filters are attached the bridge calls the terminal handler
  *  directly; the chain walk only happens when at least one filter is
@@ -177,7 +177,7 @@ Ndis6FilterDispatchSend(
     Ext = NDIS6_EXT(Adapter);
     if (Ext == NULL || !Ndis6FilterChainHasEntries(Ext))
     {
-        /* No filters - go straight to the miniport. */
+        /* No filters — go straight to the miniport. */
         Ndis6FilterTerminalSend(Adapter, NetBufferList);
         return;
     }
@@ -186,7 +186,7 @@ Ndis6FilterDispatchSend(
     if (Top == NULL || Top->DriverBlock == NULL ||
         Top->DriverBlock->Characteristics.SendNetBufferListsHandler == NULL)
     {
-        /* Filter doesn't implement send - skip it. The chain walk inside
+        /* Filter doesn't implement send — skip it. The chain walk inside
          * NdisFSendNetBufferLists handles further filters; for the
          * topmost being inert we just skip directly to the miniport. */
         Ndis6FilterTerminalSend(Adapter, NetBufferList);
@@ -306,7 +306,7 @@ Ndis6FilterDispatchReturn(
 }
 
 /* ============================================================================
- *  NdisF* helper API - what filters call to push NBLs through the chain
+ *  NdisF* helper API — what filters call to push NBLs through the chain
  *
  *  In each helper, NdisFilterHandle is the (NDIS_HANDLE)Module pointer the
  *  bridge gave the filter at AttachHandler time. The filter rounds-trips
@@ -343,7 +343,7 @@ NdisFSendNetBufferLists(
         return;
     }
 
-    /* End of chain - hand off to the bridge's terminal send (which calls
+    /* End of chain — hand off to the bridge's terminal send (which calls
      * the miniport's SendNetBufferListsHandler). */
     Ndis6FilterTerminalSend(Module->Adapter, NetBufferList);
 }
@@ -372,7 +372,7 @@ NdisFSendNetBufferListsComplete(
         return;
     }
 
-    /* Top of chain - terminal send-complete: routes to MiniSendComplete
+    /* Top of chain — terminal send-complete: routes to MiniSendComplete
      * which wakes the legacy NDIS 5 protocol's SendCompleteHandler. */
     Ndis6FilterTerminalSendComplete(Module->Adapter, NetBufferList, SendCompleteFlags);
 }
@@ -405,7 +405,7 @@ NdisFIndicateReceiveNetBufferLists(
         return;
     }
 
-    /* Top of chain - indicate to legacy protocols via the RX terminal. */
+    /* Top of chain — indicate to legacy protocols via the RX terminal. */
     Ndis6FilterTerminalReceive(Module->Adapter, NetBufferList, PortNumber,
                                NumberOfNetBufferLists, ReceiveFlags);
 }
@@ -434,7 +434,7 @@ NdisFReturnNetBufferLists(
         return;
     }
 
-    /* Bottom of chain - return NBL to the miniport. */
+    /* Bottom of chain — return NBL to the miniport. */
     Ndis6FilterTerminalReturn(Module->Adapter, NetBufferList, ReturnFlags);
 }
 
@@ -472,13 +472,13 @@ NdisFSetAttributes(
 /* ============================================================================
  *  Filter OID forward
  *
- *  Ndis6FilterDispatchOidRequest - entry point from 60oid.c when an OID
+ *  Ndis6FilterDispatchOidRequest — entry point from 60oid.c when an OID
  *  request needs to walk the filter chain on the way to the miniport.
  *  Calls the topmost filter's OidRequestHandler; the filter does its
  *  inspect/modify work and calls NdisFOidRequest to push the OID down
  *  to the next filter (or to the miniport at the bottom).
  *
- *  Synchronous only - if any filter returns PENDING the bridge currently
+ *  Synchronous only — if any filter returns PENDING the bridge currently
  *  demotes to NOT_SUPPORTED. Async filter OID completion needs per-OID
  *  context tracking that we'd add when a real consumer demands it.
  * ============================================================================ */
@@ -497,7 +497,7 @@ Ndis6FilterDispatchOidRequest(
     Ext = NDIS6_EXT(Adapter);
     if (Ext == NULL || !Ndis6FilterChainHasEntries(Ext))
     {
-        /* No filters - straight to the miniport. */
+        /* No filters — straight to the miniport. */
         return Ndis6FilterTerminalOidRequest(Adapter, OidRequest);
     }
 
@@ -578,7 +578,7 @@ NdisFOidRequestComplete(
         return;
     }
 
-    /* Top of chain - completion needs to reach the original waiter or
+    /* Top of chain — completion needs to reach the original waiter or
      * the legacy NdisRequest caller. The bridge's NdisMOidRequestComplete
      * already handles the legacy case via OidRequest->RequestId pointing
      * at NDIS6_OID_WAITER. Forward there. */

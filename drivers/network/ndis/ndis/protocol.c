@@ -612,6 +612,11 @@ ProSendPackets(
     if (Adapter->IsNdis6)
     {
         extern ULONG Ndis6TxSendPackets(PLOGICAL_ADAPTER, PPNDIS_PACKET, UINT);
+        for (i = 0; i < NumberOfPackets; i++)
+        {
+            if (PacketArray[i] != NULL)
+                PacketArray[i]->Reserved[1] = (ULONG_PTR)NdisBindingHandle;
+        }
         Ndis6TxSendPackets(Adapter, PacketArray, NumberOfPackets);
         return;
     }
@@ -692,7 +697,7 @@ ProTransferData(
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
-    /* dev-nt6-1: NDIS 6 miniports never get TransferDataHandler calls -
+    /* dev-nt6-1: NDIS 6 miniports never get TransferDataHandler calls —
      * the NDIS 6 receive path always delivers the full payload in the
      * NB chain, so the lookahead-mismatch path that legacy protocols
      * would take is unused. Return NOT_SUPPORTED defensively. */
@@ -786,7 +791,12 @@ NdisDeregisterProtocol(
 
     NDIS_DbgPrint(MAX_TRACE, ("Called.\n"));
 
-    /* FIXME: Make sure no adapter bindings exist */
+    if (!IsListEmpty(&Protocol->AdapterListHead))
+    {
+        NDIS_DbgPrint(MIN_TRACE, ("Protocol still has adapter bindings; not freeing\n"));
+        *Status = NDIS_STATUS_SUCCESS;
+        return;
+    }
 
     /* Remove protocol from global list */
     ExInterlockedRemoveEntryList(&Protocol->ListEntry, &ProtocolListLock);
@@ -908,6 +918,22 @@ NdisOpenAdapter(
   /* Put protocol on adapter's bound protocols list */
   NDIS_DbgPrint(MAX_TRACE, ("acquiring miniport block lock\n"));
   ExInterlockedInsertTailList(&Adapter->ProtocolListHead, &AdapterBinding->AdapterListEntry, &Adapter->NdisMiniportBlock.Lock);
+
+  if (Adapter->IsNdis6)
+    {
+      extern NDIS_STATUS Ndis6CallMiniportRestartEx(PLOGICAL_ADAPTER Adapter);
+      NDIS_STATUS RestartStatus;
+
+      RestartStatus = Ndis6CallMiniportRestartEx(Adapter);
+      if (!NT_SUCCESS(RestartStatus))
+        {
+          ExInterlockedRemoveEntryList(&AdapterBinding->AdapterListEntry, &Adapter->NdisMiniportBlock.Lock);
+          ExInterlockedRemoveEntryList(&AdapterBinding->ProtocolListEntry, &Protocol->Lock);
+          ExFreePool(AdapterBinding);
+          *Status = RestartStatus;
+          return;
+        }
+    }
 
   *NdisBindingHandle = (NDIS_HANDLE)AdapterBinding;
 
@@ -1119,17 +1145,14 @@ ndisBindMiniportsToProtocol(OUT PNDIS_STATUS Status, IN PPROTOCOL_BINDING Protoc
 
         {
             BIND_HANDLER BindHandler = ProtocolCharacteristics->BindAdapterHandler;
-            NDIS_STATUS BindStatus = NDIS_STATUS_SUCCESS;
             if(BindHandler)
             {
-                BindHandler(&BindStatus, BindContext, &DeviceName, &RegistryPath, 0);
-                NDIS_DbgPrint(MID_TRACE, ("%wZ's BindAdapter handler returned 0x%x for %wZ\n", &ProtocolCharacteristics->Name, BindStatus, &DeviceName));
+                BindHandler(Status, BindContext, &DeviceName, &RegistryPath, 0);
+                NDIS_DbgPrint(MID_TRACE, ("%wZ's BindAdapter handler returned 0x%x for %wZ\n", &ProtocolCharacteristics->Name, *Status, &DeviceName));
             }
             else
                 NDIS_DbgPrint(MID_TRACE, ("No protocol bind handler specified\n"));
         }
-
-        ExFreePool(RegistryPathStr);
 
     next:
         if (KeyInformation)
@@ -1266,6 +1289,11 @@ NdisRegisterProtocol(
       ExFreePool(PnPEvent);
   }
 
+  if (*Status != NDIS_STATUS_SUCCESS && !IsListEmpty(&Protocol->AdapterListHead))
+  {
+      *Status = NDIS_STATUS_SUCCESS;
+  }
+
   if (*Status == NDIS_STATUS_SUCCESS) {
       ExInterlockedInsertTailList(&ProtocolListHead, &Protocol->ListEntry, &ProtocolListLock);
   } else {
@@ -1386,6 +1414,22 @@ NdisReEnumerateProtocolBindings(IN NDIS_HANDLE NdisProtocolHandle)
     NDIS_STATUS NdisStatus;
 
     ndisBindMiniportsToProtocol(&NdisStatus, NdisProtocolHandle);
+}
+
+VOID
+ndisRebindAllProtocols(VOID)
+{
+    PLIST_ENTRY CurrentEntry;
+    PPROTOCOL_BINDING ProtocolBinding;
+    NDIS_STATUS NdisStatus;
+
+    CurrentEntry = ProtocolListHead.Flink;
+    while (CurrentEntry != &ProtocolListHead)
+    {
+        ProtocolBinding = CONTAINING_RECORD(CurrentEntry, PROTOCOL_BINDING, ListEntry);
+        ndisBindMiniportsToProtocol(&NdisStatus, ProtocolBinding);
+        CurrentEntry = CurrentEntry->Flink;
+    }
 }
 
 
