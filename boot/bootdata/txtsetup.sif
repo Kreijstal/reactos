@@ -329,6 +329,7 @@ ntoskrnl.exe = 1,,,,,,,2,,,,1,2
 hal.dll      = 1,,,,,,,2,,,,1,2
 
 [Files.x64_mp]
+ntoskrnl.exe = 1,,,,,,,2,,,,1,2
 ntkrnlmp.exe = 1,,,,,,,2,,,,1,2
 halmp.dll    = 1,,,,,,,2,,,,1,2
 
