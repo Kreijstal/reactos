@@ -2819,11 +2819,28 @@ static BOOL CNG_PrepareSignatureECC(BYTE *encoded_sig, DWORD encoded_size, BYTE 
     return TRUE;
 }
 
+static BOOL CNG_PrepareSignatureRSA(BYTE *encoded_sig, DWORD encoded_size, BYTE **sig_value, DWORD *sig_len)
+{
+    /* Unlike ECDSA, an RSA (PKCS#1) signature is not ASN.1-encoded: the
+     * (already byte-reversed) signature value is the big-endian octet string
+     * that BCryptVerifySignature expects, so it is passed through as-is. */
+    *sig_len = encoded_size;
+    if (!(*sig_value = CryptMemAlloc(encoded_size)))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    memcpy(*sig_value, encoded_sig, encoded_size);
+    return TRUE;
+}
+
 BOOL cng_prepare_signature(const char *alg_oid, BYTE *encoded_sig, DWORD encoded_sig_len,
     BYTE **sig_value, DWORD *sig_len)
 {
     if (!strcmp(alg_oid, szOID_ECC_PUBLIC_KEY))
         return CNG_PrepareSignatureECC(encoded_sig, encoded_sig_len, sig_value, sig_len);
+    if (!strcmp(alg_oid, szOID_RSA_RSA))
+        return CNG_PrepareSignatureRSA(encoded_sig, encoded_sig_len, sig_value, sig_len);
 
     FIXME("Unsupported public key type: %s\n", debugstr_a(alg_oid));
     SetLastError(NTE_BAD_ALGID);
