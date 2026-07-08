@@ -210,6 +210,15 @@ ButtonWaitThread(PVOID Context)
            ButtonEvent = SYS_BUTTON_POWER;
        else if (strstr(event.bus_id, "SLPF"))
            ButtonEvent = SYS_BUTTON_SLEEP;
+       else if (strstr(event.device_class, "button/power"))
+           ButtonEvent = SYS_BUTTON_POWER;
+       else if (strstr(event.device_class, "button/sleep"))
+           ButtonEvent = SYS_BUTTON_SLEEP;
+       else if (strstr(event.device_class, "button/lid"))
+       {
+           DPRINT1("Lid switch state change notification\n");
+           ButtonEvent = SYS_BUTTON_LID;
+       }
        else
            ButtonEvent = 0;
 

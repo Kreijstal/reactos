@@ -75,6 +75,8 @@ acpi_button_notify (
 
 	switch (event) {
 	case ACPI_BUTTON_NOTIFY_STATUS:
+		DPRINT("Button [%s] status notification\n",
+			acpi_device_bid(button->device));
 		acpi_bus_generate_event(button->device, event, ++button->pushed);
 		break;
 	default:
@@ -217,13 +219,10 @@ acpi_button_add (
 			acpi_button_notify_fixed,
 			button);
 		break;
-	case ACPI_BUTTON_TYPE_LID:
-		status = AcpiInstallFixedEventHandler (
-			ACPI_BUTTON_TYPE_LID,
-			acpi_button_notify_fixed,
-			button);
-		break;
 	default:
+		/* Control-method buttons and the lid switch are notified
+		 * via Notify(dev, 0x80) on their namespace node; the lid
+		 * is not an ACPI fixed event. */
 		status = AcpiInstallNotifyHandler (
 			button->handle,
 			ACPI_DEVICE_NOTIFY,
@@ -273,10 +272,6 @@ acpi_button_remove (struct acpi_device *device, int type)
 	case ACPI_BUTTON_TYPE_SLEEPF:
 		status = AcpiRemoveFixedEventHandler(
 			ACPI_EVENT_SLEEP_BUTTON, acpi_button_notify_fixed);
-		break;
-	case ACPI_BUTTON_TYPE_LID:
-		status = AcpiRemoveFixedEventHandler(
-			ACPI_BUTTON_TYPE_LID, acpi_button_notify_fixed);
 		break;
 	default:
 		status = AcpiRemoveNotifyHandler(button->handle,
