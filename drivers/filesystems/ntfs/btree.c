@@ -58,6 +58,25 @@ NtfsGetMaxIndexNodeEntryBytes(PDEVICE_EXTENSION DeviceExt,
 }
 
 static ULONG
+GetSerializedSizeOfIndexEntry(PB_TREE_KEY Key)
+{
+    ULONG EntrySize;
+
+    ASSERT(Key);
+    ASSERT(Key->IndexEntry);
+    ASSERT(Key->IndexEntry->Length != 0);
+
+    EntrySize = Key->IndexEntry->Length;
+    if (Key->LesserChild &&
+        !BooleanFlagOn(Key->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+    {
+        EntrySize += sizeof(ULONGLONG);
+    }
+
+    return EntrySize;
+}
+
+static ULONG
 GetSerializedSizeOfIndexEntries(PB_TREE_FILENAME_NODE Node)
 {
     ULONG NodeSize = 0;
@@ -66,15 +85,7 @@ GetSerializedSizeOfIndexEntries(PB_TREE_FILENAME_NODE Node)
 
     for (i = 0; i < Node->KeyCount; i++)
     {
-        ASSERT(CurrentKey);
-        ASSERT(CurrentKey->IndexEntry->Length != 0);
-
-        NodeSize += CurrentKey->IndexEntry->Length;
-        if (CurrentKey->LesserChild &&
-            !BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
-        {
-            NodeSize += sizeof(ULONGLONG);
-        }
+        NodeSize += GetSerializedSizeOfIndexEntry(CurrentKey);
 
         CurrentKey = CurrentKey->NextKey;
     }
@@ -2942,7 +2953,7 @@ SplitBTreeNode(PB_TREE Tree,
     SizeSum = 0;
     for (i = 0; i < Node->KeyCount; i++)
     {
-        SizeSum += LastKeyBeforeMedian->IndexEntry->Length;
+        SizeSum += GetSerializedSizeOfIndexEntry(LastKeyBeforeMedian);
 
         if (SizeSum > HalfSize)
             break;

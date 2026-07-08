@@ -713,6 +713,7 @@ AccRewriteGetHandleRights(HANDLE handle,
             case SE_FILE_OBJECT:
                 /* FIXME - handle console handles? */
             case SE_KERNEL_OBJECT:
+            case SE_WMIGUID_OBJECT:
             {
                 Status = NtQuerySecurityObject(handle,
                                                SecurityInfo,
@@ -754,8 +755,7 @@ AccRewriteGetHandleRights(HANDLE handle,
 
             default:
             {
-                UNIMPLEMENTED;
-                Ret = ERROR_CALL_NOT_IMPLEMENTED;
+                Ret = ERROR_INVALID_PARAMETER;
                 break;
             }
         }
@@ -866,6 +866,7 @@ AccRewriteSetHandleRights(HANDLE handle,
         case SE_FILE_OBJECT:
             /* FIXME - handle console handles? */
         case SE_KERNEL_OBJECT:
+        case SE_WMIGUID_OBJECT:
         {
             Status = NtSetSecurityObject(handle,
                                          SecurityInfo,
@@ -901,8 +902,7 @@ AccRewriteSetHandleRights(HANDLE handle,
 
         default:
         {
-            UNIMPLEMENTED;
-            Ret = ERROR_CALL_NOT_IMPLEMENTED;
+            Ret = ERROR_INVALID_PARAMETER;
             break;
         }
     }
@@ -1358,6 +1358,9 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
 
     *NewAcl = NULL;
 
+    if (cCountOfExplicitEntries == 0 && OldAcl == NULL)
+        goto Cleanup;
+
     /* Get information about previous ACL */
     if (OldAcl)
     {
@@ -1794,4 +1797,3 @@ DllMain(IN HINSTANCE hinstDLL,
     }
     return TRUE;
 }
-
