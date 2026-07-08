@@ -221,6 +221,7 @@ typedef struct _ADAPTER_EXTENSION {
     ULONG                 msix_vectors;
     BOOLEAN               msix_enabled;
     BOOLEAN               msix_one_vector;
+    BOOLEAN               mmio;
     ULONGLONG             features;
     CHAR                  sn[BLOCK_SERIAL_STRLEN];
     BOOLEAN               sn_ok;

@@ -36,6 +36,14 @@
 
 #define VIRTIO_MMIO_MAGIC              0x74726976 /* "virt" */
 
+#define VIRTIO_MMIO_BLOCK_DEVICE_ID    2
+
+typedef enum _VIRTIO_MMIO_DEVICE_TYPE
+{
+    VirtioMmioFdo,
+    VirtioMmioPdo
+} VIRTIO_MMIO_DEVICE_TYPE;
+
 typedef enum _VIRTIO_MMIO_STATE
 {
     VirtioMmioNotStarted,
@@ -43,16 +51,45 @@ typedef enum _VIRTIO_MMIO_STATE
     VirtioMmioRemoved
 } VIRTIO_MMIO_STATE;
 
+typedef struct _VIRTIO_MMIO_COMMON_EXTENSION
+{
+    VIRTIO_MMIO_DEVICE_TYPE Type;
+    PDEVICE_OBJECT Self;
+} VIRTIO_MMIO_COMMON_EXTENSION, *PVIRTIO_MMIO_COMMON_EXTENSION;
+
+typedef struct _VIRTIO_MMIO_PDO_EXTENSION
+{
+    VIRTIO_MMIO_COMMON_EXTENSION Common;
+    PDEVICE_OBJECT ParentFdo;
+    BOOLEAN Present;
+    BOOLEAN Reported;
+    ULONG DeviceId;
+    ULONG VendorId;
+    ULONG Version;
+    PHYSICAL_ADDRESS RegistersPa;
+    ULONG RegistersLength;
+    ULONG RawInterruptVector;
+    ULONG RawInterruptLevel;
+    KAFFINITY RawInterruptAffinity;
+    ULONG InterruptVector;
+    KIRQL InterruptLevel;
+    KAFFINITY InterruptAffinity;
+} VIRTIO_MMIO_PDO_EXTENSION, *PVIRTIO_MMIO_PDO_EXTENSION;
+
 typedef struct _VIRTIO_MMIO_EXTENSION
 {
-    PDEVICE_OBJECT Self;
+    VIRTIO_MMIO_COMMON_EXTENSION Common;
     PDEVICE_OBJECT Pdo;
     PDEVICE_OBJECT LowerDevice;
     IO_REMOVE_LOCK RemoveLock;
     VIRTIO_MMIO_STATE State;
+    PDEVICE_OBJECT ChildPdo;
     PUCHAR Registers;
     PHYSICAL_ADDRESS RegistersPa;
     ULONG RegistersLength;
+    ULONG RawInterruptVector;
+    ULONG RawInterruptLevel;
+    KAFFINITY RawInterruptAffinity;
     ULONG InterruptVector;
     KIRQL InterruptLevel;
     KAFFINITY InterruptAffinity;
