@@ -1,6 +1,7 @@
 
 list(APPEND SOURCE
     createclose.c
+    elantech.c
     hwhacks.c
     i8042prt.c
     keyboard.c
