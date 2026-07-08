@@ -1,0 +1,122 @@
+; hdaudio.inf
+;
+; Installation file for the generic High Definition Audio codec driver.
+; Binds the HDAUDIO function group PDOs exposed by the HD Audio bus
+; driver (hdaudbus) via the generic FUNC_01 compatible ID, like the
+; Windows in-box hdaudio.sys does as last-resort match.
+
+[Version]
+Signature="$CHICAGO$"
+Class=MEDIA
+ClassGUID={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ReactOS%
+DriverVer=07/08/2026,1.00.0000.1
+CatalogFile=hdaudio.cat
+
+[SourceDisksNames]
+222=%DiskDescription%,,,
+
+[SourceDisksFiles]
+hdaudio.sys=222
+
+[Manufacturer]
+%MfgName%=Generic,NTAMD64,NTARM64
+
+[ControlFlags]
+ExcludeFromSelect = *
+
+[Generic]
+%hdaudio.DeviceDesc%=hdaudio, HDAUDIO\FUNC_01
+
+[Generic.NTAMD64]
+%hdaudio.DeviceDesc%=hdaudio, HDAUDIO\FUNC_01
+
+[Generic.NTARM64]
+%hdaudio.DeviceDesc%=hdaudio, HDAUDIO\FUNC_01
+
+[DestinationDirs]
+hdaudio.CopyList=10,system32\drivers
+
+[hdaudio]
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
+CopyFiles=hdaudio.CopyList
+AddReg=hdaudio.AddReg
+
+[hdaudio.NTX86]
+Include=ks.inf,wdmaudio.inf
+Needs=KS.Registration,WDMAUDIO.Registration
+CopyFiles=hdaudio.CopyList
+AddReg=hdaudio.AddReg
+
+[hdaudio.CopyList]
+hdaudio.sys
+
+[hdaudio.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Wave%,hdaudio.Interface.Wave
+AddInterface=%KSCATEGORY_RENDER%,%KSNAME_Wave%,hdaudio.Interface.Wave
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Topology%,hdaudio.Interface.Topology
+
+[hdaudio.NTX86.Interfaces]
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Wave%,hdaudio.Interface.Wave
+AddInterface=%KSCATEGORY_RENDER%,%KSNAME_Wave%,hdaudio.Interface.Wave
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_Topology%,hdaudio.Interface.Topology
+
+[hdaudio.Interface.Wave]
+AddReg=hdaudio.I.Wave.AddReg
+
+[hdaudio.I.Wave.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%hdaudio.Wave.szPname%
+
+[hdaudio.Interface.Topology]
+AddReg=hdaudio.I.Topo.AddReg
+
+[hdaudio.I.Topo.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%hdaudio.Topology.szPname%
+
+[hdaudio.AddReg]
+HKR,,AssociatedFilters,,"wdmaud,swmidi,redbook"
+HKR,,Driver,,hdaudio.sys
+HKR,,NTMPDriver,,"hdaudio.sys"
+
+HKR,Drivers,SubClasses,,"wave,mixer"
+
+HKR,Drivers\wave\wdmaud.drv,Driver,,wdmaud.drv
+HKR,Drivers\mixer\wdmaud.drv,Driver,,wdmaud.drv
+
+HKR,Drivers\wave\wdmaud.drv,Description,,%hdaudio.DeviceDesc%
+HKR,Drivers\mixer\wdmaud.drv,Description,,%hdaudio.DeviceDesc%
+
+[hdaudio.Services]
+AddService = hdaudio, 0x00000002, hdaudio_Service_Inst
+
+[hdaudio.NTX86.Services]
+AddService = hdaudio, 0x00000002, hdaudio_Service_Inst
+
+[hdaudio_Service_Inst]
+DisplayName   = %hdaudio.SvcDesc%
+ServiceType   = 1                  ; SERVICE_KERNEL_DRIVER
+StartType     = 3                  ; SERVICE_DEMAND_START
+ErrorControl  = 1                  ; SERVICE_ERROR_NORMAL
+ServiceBinary = %10%\system32\drivers\hdaudio.sys
+
+[Strings]
+; Non-localizable
+ReactOS="ReactOS Project"
+MfgName="Generic"
+
+; Localizable
+DiskDescription="HD Audio Driver Disk"
+hdaudio.DeviceDesc="High Definition Audio Device"
+hdaudio.Wave.szPname="HD Audio Output"
+hdaudio.Topology.szPname="HD Audio Mixer"
+hdaudio.SvcDesc="Service for High Definition Audio Codec Driver (WDM)"
+
+;; Registry (non-localizeable)
+Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSNAME_Wave="Wave"
+KSNAME_Topology="Topology"

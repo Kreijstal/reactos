@@ -1,0 +1,11 @@
+#include <windows.h>
+
+#include <ntverp.h>
+
+#define VER_FILETYPE                    VFT_DRV
+#define VER_FILESUBTYPE                 VFT2_DRV_SOUND
+#define VER_FILEDESCRIPTION_STR         "High Definition Audio Codec Driver (WDM)"
+#define VER_INTERNALNAME_STR            "hdaudio"
+#define VER_ORIGINALFILENAME_STR        "hdaudio.sys"
+
+#include "common.ver"
