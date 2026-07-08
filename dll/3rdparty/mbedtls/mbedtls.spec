@@ -74,6 +74,7 @@
 @ cdecl mbedtls_rsa_free(ptr)
 @ cdecl mbedtls_rsa_import_raw(ptr ptr long ptr long ptr long ptr long ptr long)
 @ cdecl mbedtls_rsa_complete(ptr)
+@ cdecl mbedtls_rsa_get_len(ptr)
 @ cdecl mbedtls_rsa_set_padding(ptr long long)
 @ cdecl mbedtls_rsa_pkcs1_verify(ptr ptr ptr long long long ptr ptr)
 @ cdecl mbedtls_rsa_rsassa_pss_verify(ptr ptr ptr long long long ptr ptr)
