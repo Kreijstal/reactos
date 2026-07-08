@@ -247,6 +247,9 @@ struct virtio_device
     // true if the VIRTIO_F_RING_PACKED feature flag has been negotiated
     bool packed_ring;
 
+    // true if this device is backed by the VirtIO MMIO transport
+    bool mmio_used;
+
     // internal device operations, implemented separately for legacy and modern
     const struct virtio_device_ops *device;
 
@@ -258,6 +261,7 @@ struct virtio_device
 
     // the ISR status field, reading causes the device to de-assert an interrupt
     volatile u8 *isr;
+    volatile u32 *mmio_interrupt_ack;
 
     // modern virtio device capabilities and related state
     volatile struct virtio_pci_common_cfg *common;
@@ -288,6 +292,9 @@ NTSTATUS virtio_device_initialize(VirtIODevice *vdev,
                                   const VirtIOSystemOps *pSystemOps,
                                   void *DeviceContext,
                                   bool msix_used);
+NTSTATUS virtio_mmio_device_initialize(VirtIODevice *vdev,
+                                       const VirtIOSystemOps *pSystemOps,
+                                       void *DeviceContext);
 void virtio_device_shutdown(VirtIODevice *vdev);
 
 /* Driver API: device status manipulation
