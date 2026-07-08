@@ -5,6 +5,8 @@
 #include <kbdmou.h>
 #include <ntdd8042.h>
 
+#include "elantech.h"
+
 /*-----------------------------------------------------
  * Structures
  * --------------------------------------------------*/
@@ -169,7 +171,8 @@ typedef enum _I8042_MOUSE_TYPE
 	GenericPS2,
 	Intellimouse,
 	IntellimouseExplorer,
-	Ps2pp
+	Ps2pp,
+	Elantech
 } I8042_MOUSE_TYPE, *PI8042_MOUSE_TYPE;
 
 typedef struct _I8042_MOUSE_EXTENSION
@@ -196,6 +199,8 @@ typedef struct _I8042_MOUSE_EXTENSION
 
 	UCHAR MouseLogiBuffer[3];
 	I8042_MOUSE_TYPE MouseType;
+
+	ELANTECH_EXTENSION ElantechData;
 } I8042_MOUSE_EXTENSION;
 
 typedef struct _I8042_HOOK_WORKITEM
@@ -376,6 +381,26 @@ i8042ChangeMode(
 
 _Dispatch_type_(IRP_MJ_PNP)
 DRIVER_DISPATCH i8042Pnp;
+
+/* elantech.c */
+
+BOOLEAN
+ElantechIsKnockResponse(
+	IN CONST UCHAR Buffer[3]);
+
+VOID
+ElantechStartDetection(
+	IN PI8042_MOUSE_EXTENSION DeviceExtension);
+
+BOOLEAN
+ElantechInitIsr(
+	IN PI8042_MOUSE_EXTENSION DeviceExtension,
+	IN UCHAR Value);
+
+VOID
+ElantechMouHandle(
+	IN PI8042_MOUSE_EXTENSION DeviceExtension,
+	IN UCHAR Output);
 
 /* ps2pp.c */
 VOID
