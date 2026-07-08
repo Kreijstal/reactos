@@ -1,0 +1,195 @@
+; AMD Radeon ATOM-BIOS Framebuffer Miniport
+;
+; Binds the radeonfb videoport miniport (AtomBIOS modesetting, generic
+; framebuf.dll display driver) to DCE6-class Radeons: Trinity/Richland
+; APUs (Aruba, DCE 6.1) and Oland discrete cards (DCE 6.4), plus the
+; display-less Hainan render companions found next to them in PowerXpress
+; laptops (ASUS X550DP: 1002:990D + 1002:6660).
+
+[Version]
+Signature="$Windows NT$"
+LayoutFile=layout.inf
+Class=Display
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider=%ReactOS%
+DriverVer=07/08/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir=12
+RadeonFb.Miniport_CopyFiles=12
+RadeonFb.Display_CopyFiles=11
+
+[Manufacturer]
+%AMD%=AMD,NTx86,NTamd64
+
+[AMD.NTx86]
+; ASUS X550DP devices first
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990D
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6660
+; Oland (DCE 6.4)
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6600
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6601
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6602
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6603
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6604
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6605
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6606
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6607
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6608
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6610
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6611
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6613
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6617
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6620
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6621
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6623
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6631
+; Hainan (no display block; off-screen surface only)
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6663
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6664
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6665
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6667
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_666F
+; Aruba (Trinity/Richland APUs, DCE 6.1)
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9900
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9901
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9903
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9904
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9905
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9906
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9907
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9908
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9909
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990A
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990B
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990C
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990E
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990F
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9910
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9913
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9917
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9918
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9919
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9990
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9991
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9992
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9993
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9994
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9995
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9996
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9997
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9998
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9999
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999A
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999B
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999C
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999D
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_99A0
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_99A2
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_99A4
+
+[AMD.NTamd64]
+; ASUS X550DP devices first
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990D
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6660
+; Oland (DCE 6.4)
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6600
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6601
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6602
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6603
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6604
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6605
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6606
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6607
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6608
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6610
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6611
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6613
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6617
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6620
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6621
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6623
+%RadeonFb.OlandDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6631
+; Hainan (no display block; off-screen surface only)
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6663
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6664
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6665
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_6667
+%RadeonFb.HainanDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_666F
+; Aruba (Trinity/Richland APUs, DCE 6.1)
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9900
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9901
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9903
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9904
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9905
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9906
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9907
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9908
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9909
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990A
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990B
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990C
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990E
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_990F
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9910
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9913
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9917
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9918
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9919
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9990
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9991
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9992
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9993
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9994
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9995
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9996
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9997
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9998
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_9999
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999A
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999B
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999C
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_999D
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_99A0
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_99A2
+%RadeonFb.TrinityDesc%=RadeonFb_Install,PCI\VEN_1002&DEV_99A4
+
+[RadeonFb_Install]
+CopyFiles=RadeonFb.Miniport_CopyFiles,RadeonFb.Display_CopyFiles
+AddReg=RadeonFb_SoftwareSettings
+
+[RadeonFb.Miniport_CopyFiles]
+radeonfb.sys
+
+[RadeonFb.Display_CopyFiles]
+framebuf.dll
+
+[RadeonFb_SoftwareSettings]
+HKR,,InstalledDisplayDrivers,%REG_MULTI_SZ%,framebuf
+HKR,,VgaCompatible,%REG_DWORD%,0
+HKR,,DefaultSettings.VRefresh,%REG_DWORD%,1
+HKR,,DefaultSettings.BitsPerPel,%REG_DWORD%,32
+HKR,,DefaultSettings.XResolution,%REG_DWORD%,1024
+HKR,,DefaultSettings.YResolution,%REG_DWORD%,768
+
+[RadeonFb_Install.Services]
+AddService=radeonfb,0x00000002,RadeonFb_Service
+
+[RadeonFb_Service]
+DisplayName=%RadeonFb.ServiceDesc%
+ServiceType=1
+StartType=1
+ErrorControl=0
+ServiceBinary=%12%\radeonfb.sys
+LoadOrderGroup=Video
+
+[Strings]
+ReactOS="ReactOS"
+AMD="Advanced Micro Devices"
+RadeonFb.TrinityDesc="AMD Radeon HD 7000/8000 Series (Trinity/Richland APU)"
+RadeonFb.OlandDesc="AMD Radeon HD 8500/8600/R7 240/250 Series (Oland)"
+RadeonFb.HainanDesc="AMD Radeon HD 8500M/8600M Series (Hainan, render-only)"
+RadeonFb.ServiceDesc="ReactOS AMD Radeon ATOM-BIOS Framebuffer Miniport"
+REG_MULTI_SZ=0x00010000
+REG_DWORD=0x00010001
+REG_SZ=0x00000000
