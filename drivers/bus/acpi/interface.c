@@ -3,18 +3,56 @@
 #define NDEBUG
 #include <debug.h>
 
+/*
+ * A GPE vector connection handed out by AcpiInterfaceConnectVector.  The
+ * pointer to this record is the "ObjectContext" the client passes back to
+ * the enable/disable/clear/disconnect entrypoints, mirroring the NT
+ * ACPI_INTERFACE_STANDARD contract.
+ */
+typedef struct _ACPI_GPE_CONNECTION
+{
+    ULONG GpeNumber;
+    PGPE_SERVICE_ROUTINE ServiceRoutine;
+    PVOID ServiceContext;
+} ACPI_GPE_CONNECTION, *PACPI_GPE_CONNECTION;
+
+#define ACPI_GPE_CONNECTION_TAG 'GpcA'
+
 VOID
 NTAPI
 AcpiInterfaceReference(PVOID Context)
 {
-  UNIMPLEMENTED;
+  /* acpi.sys is never unloaded; interface lifetime tracking is a no-op */
+  UNREFERENCED_PARAMETER(Context);
 }
 
 VOID
 NTAPI
 AcpiInterfaceDereference(PVOID Context)
 {
-  UNIMPLEMENTED;
+  UNREFERENCED_PARAMETER(Context);
+}
+
+/*
+ * ACPICA-side trampoline for a connected GPE vector; runs from the
+ * deferred SCI dispatcher at DISPATCH_LEVEL like the NT GPE service
+ * routines do.
+ */
+static
+UINT32
+AcpiInterfaceGpeTrampoline(ACPI_HANDLE GpeDevice,
+                           UINT32 GpeNumber,
+                           void *Context)
+{
+    PACPI_GPE_CONNECTION Connection = Context;
+
+    UNREFERENCED_PARAMETER(GpeDevice);
+    UNREFERENCED_PARAMETER(GpeNumber);
+
+    /* NT GPE service routines take (ObjectContext, ServiceContext) */
+    Connection->ServiceRoutine(Connection, Connection->ServiceContext);
+
+    return ACPI_INTERRUPT_HANDLED | ACPI_REENABLE_GPE;
 }
 
 NTSTATUS
@@ -27,18 +65,77 @@ AcpiInterfaceConnectVector(PDEVICE_OBJECT Context,
                            PVOID ServiceContext,
                            PVOID ObjectContext)
 {
-  UNIMPLEMENTED;
+    PVOID *OutConnection = (PVOID *)ObjectContext;
+    PACPI_GPE_CONNECTION Connection;
+    ACPI_STATUS AcpiStatus;
 
-  return STATUS_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(Shareable);
+
+    if (ServiceRoutine == NULL || OutConnection == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Connection = ExAllocatePoolWithTag(NonPagedPool,
+                                       sizeof(ACPI_GPE_CONNECTION),
+                                       ACPI_GPE_CONNECTION_TAG);
+    if (Connection == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Connection->GpeNumber = GpeNumber;
+    Connection->ServiceRoutine = ServiceRoutine;
+    Connection->ServiceContext = ServiceContext;
+
+    AcpiStatus = AcpiInstallGpeHandler(NULL,
+                                       GpeNumber,
+                                       (Mode == Latched) ? ACPI_GPE_EDGE_TRIGGERED
+                                                         : ACPI_GPE_LEVEL_TRIGGERED,
+                                       AcpiInterfaceGpeTrampoline,
+                                       Connection);
+    if (ACPI_FAILURE(AcpiStatus))
+    {
+        DPRINT1("AcpiInstallGpeHandler(0x%lx) failed: 0x%x\n", GpeNumber, AcpiStatus);
+        ExFreePoolWithTag(Connection, ACPI_GPE_CONNECTION_TAG);
+        return (AcpiStatus == AE_ALREADY_EXISTS) ? STATUS_SHARING_VIOLATION
+                                                 : STATUS_UNSUCCESSFUL;
+    }
+
+    AcpiStatus = AcpiEnableGpe(NULL, GpeNumber);
+    if (ACPI_FAILURE(AcpiStatus))
+    {
+        DPRINT1("AcpiEnableGpe(0x%lx) failed: 0x%x\n", GpeNumber, AcpiStatus);
+        AcpiRemoveGpeHandler(NULL, GpeNumber, AcpiInterfaceGpeTrampoline);
+        ExFreePoolWithTag(Connection, ACPI_GPE_CONNECTION_TAG);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    *OutConnection = Connection;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
 NTAPI
 AcpiInterfaceDisconnectVector(PVOID ObjectContext)
 {
-  UNIMPLEMENTED;
+    PACPI_GPE_CONNECTION Connection = ObjectContext;
+    ACPI_STATUS AcpiStatus;
 
-  return STATUS_NOT_IMPLEMENTED;
+    if (Connection == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    AcpiDisableGpe(NULL, Connection->GpeNumber);
+
+    AcpiStatus = AcpiRemoveGpeHandler(NULL,
+                                      Connection->GpeNumber,
+                                      AcpiInterfaceGpeTrampoline);
+    if (ACPI_FAILURE(AcpiStatus))
+    {
+        DPRINT1("AcpiRemoveGpeHandler(0x%lx) failed: 0x%x\n",
+                Connection->GpeNumber, AcpiStatus);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    ExFreePoolWithTag(Connection, ACPI_GPE_CONNECTION_TAG);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -46,9 +143,16 @@ NTAPI
 AcpiInterfaceEnableEvent(PDEVICE_OBJECT Context,
                          PVOID ObjectContext)
 {
-  UNIMPLEMENTED;
+    PACPI_GPE_CONNECTION Connection = ObjectContext;
+    ACPI_STATUS AcpiStatus;
 
-  return STATUS_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(Context);
+
+    if (Connection == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    AcpiStatus = AcpiEnableGpe(NULL, Connection->GpeNumber);
+    return ACPI_SUCCESS(AcpiStatus) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
 NTSTATUS
@@ -56,9 +160,16 @@ NTAPI
 AcpiInterfaceDisableEvent(PDEVICE_OBJECT Context,
                           PVOID ObjectContext)
 {
-  UNIMPLEMENTED;
+    PACPI_GPE_CONNECTION Connection = ObjectContext;
+    ACPI_STATUS AcpiStatus;
 
-  return STATUS_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(Context);
+
+    if (Connection == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    AcpiStatus = AcpiDisableGpe(NULL, Connection->GpeNumber);
+    return ACPI_SUCCESS(AcpiStatus) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
 NTSTATUS
@@ -66,9 +177,36 @@ NTAPI
 AcpiInterfaceClearStatus(PDEVICE_OBJECT Context,
                          PVOID ObjectContext)
 {
-  UNIMPLEMENTED;
+    PACPI_GPE_CONNECTION Connection = ObjectContext;
+    ACPI_STATUS AcpiStatus;
 
-  return STATUS_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(Context);
+
+    if (Connection == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    AcpiStatus = AcpiClearGpe(NULL, Connection->GpeNumber);
+    return ACPI_SUCCESS(AcpiStatus) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+/*
+ * ACPICA-side trampoline for device notifications (Notify(dev, 0x80+));
+ * ACPICA defers these to PASSIVE_LEVEL via AcpiOsExecute.
+ */
+static
+void
+AcpiInterfaceNotifyTrampoline(ACPI_HANDLE Device,
+                              UINT32 Value,
+                              void *Context)
+{
+    PPDO_DEVICE_DATA DeviceData = Context;
+    PDEVICE_NOTIFY_CALLBACK Handler;
+
+    UNREFERENCED_PARAMETER(Device);
+
+    Handler = DeviceData->NotifyHandler;
+    if (Handler != NULL)
+        Handler(DeviceData->NotifyContext, Value);
 }
 
 NTSTATUS
@@ -77,9 +215,40 @@ AcpiInterfaceNotificationsRegister(PDEVICE_OBJECT Context,
                                    PDEVICE_NOTIFY_CALLBACK NotificationHandler,
                                    PVOID NotificationContext)
 {
-  UNIMPLEMENTED;
+    PPDO_DEVICE_DATA DeviceData = (PPDO_DEVICE_DATA)Context;
+    ACPI_STATUS AcpiStatus;
 
-  return STATUS_SUCCESS;
+    if (DeviceData == NULL || NotificationHandler == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Fixed-feature devices have no namespace node to get notified on */
+    if (DeviceData->AcpiHandle == NULL)
+        return STATUS_NO_SUCH_DEVICE;
+
+    if (DeviceData->NotifyHandler != NULL)
+    {
+        DPRINT1("Device notification handler already registered\n");
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    DeviceData->NotifyHandler = NotificationHandler;
+    DeviceData->NotifyContext = NotificationContext;
+
+    AcpiStatus = AcpiInstallNotifyHandler(DeviceData->AcpiHandle,
+                                          ACPI_DEVICE_NOTIFY,
+                                          AcpiInterfaceNotifyTrampoline,
+                                          DeviceData);
+    if (ACPI_FAILURE(AcpiStatus))
+    {
+        DPRINT1("AcpiInstallNotifyHandler failed: 0x%x\n", AcpiStatus);
+        DeviceData->NotifyHandler = NULL;
+        DeviceData->NotifyContext = NULL;
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    DPRINT("Registered device notification handler on [%p]\n",
+           DeviceData->AcpiHandle);
+    return STATUS_SUCCESS;
 }
 
 VOID
@@ -87,7 +256,21 @@ NTAPI
 AcpiInterfaceNotificationsUnregister(PDEVICE_OBJECT Context,
                                      PDEVICE_NOTIFY_CALLBACK NotificationHandler)
 {
-  UNIMPLEMENTED;
+    PPDO_DEVICE_DATA DeviceData = (PPDO_DEVICE_DATA)Context;
+
+    UNREFERENCED_PARAMETER(NotificationHandler);
+
+    if (DeviceData == NULL || DeviceData->AcpiHandle == NULL ||
+        DeviceData->NotifyHandler == NULL)
+    {
+        return;
+    }
+
+    AcpiRemoveNotifyHandler(DeviceData->AcpiHandle,
+                            ACPI_DEVICE_NOTIFY,
+                            AcpiInterfaceNotifyTrampoline);
+    DeviceData->NotifyHandler = NULL;
+    DeviceData->NotifyContext = NULL;
 }
 
 /*
@@ -319,6 +502,9 @@ Bus_PDO_QueryInterface(PPDO_DEVICE_DATA DeviceData,
 
      AcpiInterface = (PACPI_INTERFACE_STANDARD)IrpSp->Parameters.QueryInterface.Interface;
 
+     AcpiInterface->Size = sizeof(ACPI_INTERFACE_STANDARD);
+     AcpiInterface->Version = 1;
+     AcpiInterface->Context = DeviceData;
      AcpiInterface->InterfaceReference = AcpiInterfaceReference;
      AcpiInterface->InterfaceDereference = AcpiInterfaceDereference;
      AcpiInterface->GpeConnectVector = AcpiInterfaceConnectVector;
