@@ -35,14 +35,17 @@ QueryBinding(PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     PNDISUIO_ADAPTER_CONTEXT AdapterContext = NULL;
     PNDISUIO_QUERY_BINDING QueryBinding = Irp->AssociatedIrp.SystemBuffer;
-    ULONG BindingLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG InputLength = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG OutputLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
     NTSTATUS Status;
     PLIST_ENTRY CurrentEntry;
     KIRQL OldIrql;
     ULONG i;
     ULONG BytesCopied = 0;
 
-    if (QueryBinding && BindingLength >= sizeof(NDISUIO_QUERY_BINDING))
+    if (QueryBinding &&
+        InputLength >= sizeof(NDISUIO_QUERY_BINDING) &&
+        OutputLength >= sizeof(NDISUIO_QUERY_BINDING))
     {
         KeAcquireSpinLock(&GlobalAdapterListLock, &OldIrql);
         i = 0;
@@ -60,20 +63,41 @@ QueryBinding(PIRP Irp, PIO_STACK_LOCATION IrpSp)
         KeReleaseSpinLock(&GlobalAdapterListLock, OldIrql);
         if (AdapterContext)
         {
-            DPRINT("Query binding for index %d is adapter %wZ\n", i, &AdapterContext->DeviceName);
-            BytesCopied = sizeof(NDISUIO_QUERY_BINDING);
-            if (AdapterContext->DeviceName.Length <= BindingLength - BytesCopied)
-            {
-                QueryBinding->DeviceNameOffset = BytesCopied;
-                QueryBinding->DeviceNameLength = AdapterContext->DeviceName.Length;
-                RtlCopyMemory((PUCHAR)QueryBinding + QueryBinding->DeviceNameOffset,
-                              AdapterContext->DeviceName.Buffer,
-                              QueryBinding->DeviceNameLength);
-                BytesCopied += AdapterContext->DeviceName.Length;
+            ULONG NameLength = AdapterContext->DeviceName.Length;
+            ULONG DescrLength = AdapterContext->DeviceDesc.Length;
+            ULONG Available = OutputLength - sizeof(NDISUIO_QUERY_BINDING);
 
-                /* FIXME: Copy description too */
-                QueryBinding->DeviceDescrOffset = BytesCopied;
-                QueryBinding->DeviceDescrLength = 0;
+            DPRINT("Query binding for index %d is adapter %wZ\n", i, &AdapterContext->DeviceName);
+
+            /* Both strings are NUL-terminated in the output buffer so that
+             * callers can treat them as C strings; the reported lengths do
+             * not include the terminators. */
+            if (NameLength + sizeof(WCHAR) + DescrLength + sizeof(WCHAR) <= Available)
+            {
+                PUCHAR StringArea = (PUCHAR)QueryBinding + sizeof(NDISUIO_QUERY_BINDING);
+
+                /* Zero the string area so the terminators are already in place */
+                RtlZeroMemory(StringArea,
+                              NameLength + sizeof(WCHAR) + DescrLength + sizeof(WCHAR));
+
+                QueryBinding->DeviceNameOffset = sizeof(NDISUIO_QUERY_BINDING);
+                QueryBinding->DeviceNameLength = NameLength;
+                RtlCopyMemory(StringArea,
+                              AdapterContext->DeviceName.Buffer,
+                              NameLength);
+
+                QueryBinding->DeviceDescrOffset = QueryBinding->DeviceNameOffset +
+                                                  NameLength + sizeof(WCHAR);
+                QueryBinding->DeviceDescrLength = DescrLength;
+                if (DescrLength != 0)
+                {
+                    RtlCopyMemory((PUCHAR)QueryBinding + QueryBinding->DeviceDescrOffset,
+                                  AdapterContext->DeviceDesc.Buffer,
+                                  DescrLength);
+                }
+
+                BytesCopied = sizeof(NDISUIO_QUERY_BINDING) +
+                              NameLength + sizeof(WCHAR) + DescrLength + sizeof(WCHAR);
 
                 /* Successful */
                 Status = STATUS_SUCCESS;
@@ -529,7 +553,8 @@ NduDispatchDeviceControl(PDEVICE_OBJECT DeviceObject,
                             return QueryAdapterOid(Irp, IrpSp);
 
                         default:
-                            DPRINT1("Unimplemented\n");
+                            DPRINT1("Unimplemented control code 0x%X\n",
+                                    IrpSp->Parameters.DeviceIoControl.IoControlCode);
                             Irp->IoStatus.Status = STATUS_NOT_IMPLEMENTED;
                             Irp->IoStatus.Information = 0;
                             IoCompleteRequest(Irp, IO_NO_INCREMENT);
