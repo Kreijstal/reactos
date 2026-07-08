@@ -1164,6 +1164,26 @@ NTSTATUS WINAPI BCryptGetProperty( BCRYPT_HANDLE handle, LPCWSTR prop, UCHAR *bu
         const struct hash *hash = (const struct hash *)object;
         return get_hash_property( hash->alg_id, prop, buffer, count, res );
     }
+#ifdef SONAME_LIBMBEDTLS
+    case MAGIC_KEY:
+    {
+        const struct key *key = (const struct key *)object;
+        if (!strcmpW( prop, BCRYPT_KEY_LENGTH ))
+        {
+            ULONG bits;
+            if (key->type == KEY_TYPE_ECDSA)
+                bits = key->u.ecc.grp.nbits;
+            else
+                bits = (ULONG)mbedtls_rsa_get_len( &key->u.rsa ) * 8;
+            *res = sizeof(ULONG);
+            if (count < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+            if (buffer) *(ULONG *)buffer = bits;
+            return STATUS_SUCCESS;
+        }
+        FIXME( "unsupported key property %s\n", debugstr_w(prop) );
+        return STATUS_NOT_IMPLEMENTED;
+    }
+#endif
     default:
         WARN( "unknown magic %08x\n", object->magic );
         return STATUS_INVALID_HANDLE;
