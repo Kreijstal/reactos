@@ -316,6 +316,9 @@ UnbindAdapterByContext(PNDISUIO_ADAPTER_CONTEXT AdapterContext)
     /* Free the device name string */
     RtlFreeUnicodeString(&AdapterContext->DeviceName);
 
+    /* Free the device description string */
+    RtlFreeUnicodeString(&AdapterContext->DeviceDesc);
+
     /* Invalidate all handles to this adapter */
     CurrentEntry = AdapterContext->OpenEntryList.Flink;
     while (CurrentEntry != &AdapterContext->OpenEntryList)
@@ -523,6 +526,15 @@ BindAdapterByName(PNDIS_STRING DeviceName)
         RtlFreeUnicodeString(&AdapterContext->DeviceName);
         ExFreePool(AdapterContext);
         return Status;
+    }
+
+    /* Cache the adapter description for binding enumeration (non-fatal) */
+    Status = NdisQueryAdapterInstanceName(&AdapterContext->DeviceDesc,
+                                          AdapterContext->BindingHandle);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        /* Leave the description empty; it is only used for display purposes */
+        RtlInitUnicodeString(&AdapterContext->DeviceDesc, NULL);
     }
 
     /* Add the adapter context to the global list */
