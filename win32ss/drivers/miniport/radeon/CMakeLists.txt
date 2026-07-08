@@ -2,7 +2,9 @@
 list(APPEND SOURCE
     atom.c
     radeon.c
-    radeon_stubs.c
+    radeon_atombios.c
+    radeon_bios.c
+    radeon_modeset.c
     radeon.h)
 
 add_library(radeonfb MODULE ${SOURCE} radeonfb.rc)
