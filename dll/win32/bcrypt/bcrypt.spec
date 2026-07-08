@@ -10,7 +10,7 @@
 @ stub BCryptDeriveKey
 @ stub BCryptDeriveKeyPBKDF2
 @ stdcall BCryptDestroyHash(ptr)
-@ stdcall -stub BCryptDestroyKey(ptr)
+@ stdcall BCryptDestroyKey(ptr)
 @ stub BCryptDestroySecret
 @ stub BCryptDuplicateHash
 @ stub BCryptDuplicateKey
@@ -33,7 +33,7 @@
 @ stdcall BCryptHash(ptr ptr long ptr long ptr long)
 @ stdcall BCryptHashData(ptr ptr long long)
 @ stub BCryptImportKey
-@ stdcall -stub BCryptImportKeyPair(ptr ptr wstr ptr ptr long long)
+@ stdcall BCryptImportKeyPair(ptr ptr wstr ptr ptr long long)
 @ stdcall BCryptOpenAlgorithmProvider(ptr wstr wstr long)
 @ stub BCryptQueryContextConfiguration
 @ stub BCryptQueryContextFunctionConfiguration
@@ -51,7 +51,7 @@
 @ stub BCryptSignHash
 @ stub BCryptUnregisterConfigChangeNotify
 @ stub BCryptUnregisterProvider
-@ stdcall -stub BCryptVerifySignature(ptr ptr ptr long ptr long long)
+@ stdcall BCryptVerifySignature(ptr ptr ptr long ptr long long)
 @ stub GetAsymmetricEncryptionInterface
 @ stub GetCipherInterface
 @ stub GetHashInterface
