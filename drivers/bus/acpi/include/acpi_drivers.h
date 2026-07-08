@@ -121,13 +121,9 @@ void acpi_button_exit (void);
 #define ACPI_EC_DEVICE_NAME		"Embedded Controller"
 #define ACPI_EC_FILE_INFO		"info"
 
-#ifdef CONFIG_ACPI_EC
-
 int acpi_ec_ecdt_probe (void);
 int acpi_ec_init (void);
 void acpi_ec_exit (void);
-
-#endif
 
 
 /* --------------------------------------------------------------------------
