@@ -586,6 +586,12 @@ RadeonFindAdapter(
                 "radeonfb: ATOM bring-up failed for 0x%04x, "
                 "leaving the device to the VGA/VBE fallback\n",
                 DeviceExtension->DeviceId);
+            if (DeviceExtension->AtomContext != NULL)
+            {
+                atom_free(DeviceExtension->AtomContext->scratch);
+                atom_destroy(DeviceExtension->AtomContext);
+                DeviceExtension->AtomContext = NULL;
+            }
             VideoPortUnmapMemory(DeviceExtension, DeviceExtension->Rmmio, NULL);
             DeviceExtension->Rmmio = NULL;
             if (DeviceExtension->Bios != NULL)
