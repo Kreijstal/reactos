@@ -187,6 +187,7 @@ add_dependencies(acpica bugcodes xdk)
 list(APPEND ACPI_SOURCE
     busmgr/bus.c
     busmgr/button.c
+    busmgr/ec.c
     busmgr/power.c
     busmgr/utils.c
     busmgr/system.c
