@@ -131,10 +131,13 @@ NduDispatchRead(PDEVICE_OBJECT DeviceObject,
         if (BytesCopied > IrpSp->Parameters.Read.Length)
             BytesCopied = IrpSp->Parameters.Read.Length;
 
-        /* Copy the packet */
-        RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,
-                      &PacketEntry->PacketData[0],
-                      BytesCopied);
+        /* Copy the packet (a caller may issue a zero-length read with no buffer) */
+        if (Irp->AssociatedIrp.SystemBuffer != NULL)
+        {
+            RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer,
+                          &PacketEntry->PacketData[0],
+                          BytesCopied);
+        }
 
         /* Free the packet entry */
         ExFreePool(PacketEntry);
