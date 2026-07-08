@@ -1,0 +1,43 @@
+; VirtIO MMIO transport driver
+
+[Version]
+Signature  = "$Windows NT$"
+Class      = System
+ClassGUID  = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 07/08/2026,0.0.1.0
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%ReactOS% = ReactOS,NTarm64
+
+[ReactOS.NTarm64]
+%VirtioMmio.DeviceDesc% = VirtioMmio_Inst, ACPI\LNRO0005
+
+[VirtioMmio_Inst.NTarm64]
+CopyFiles = VirtioMmio_CopyFiles
+
+[VirtioMmio_CopyFiles]
+virtiommio.sys,,,1
+
+[VirtioMmio_Inst.NTarm64.Services]
+AddService = virtiommio,0x00000002,VirtioMmio_Service_Inst
+
+[VirtioMmio_Service_Inst]
+ServiceType     = 1
+StartType       = 3
+ErrorControl    = 1
+ServiceBinary   = %12%\virtiommio.sys
+LoadOrderGroup  = System Bus Extender
+
+[SourceDisksNames]
+1 = %ReactOS%,,,
+
+[SourceDisksFiles]
+virtiommio.sys = 1
+
+[Strings]
+ReactOS = "ReactOS Project"
+VirtioMmio.DeviceDesc = "VirtIO MMIO transport"
