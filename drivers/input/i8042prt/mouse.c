@@ -640,8 +640,12 @@ i8042MouResetIsr(
 
 	if (MouseIdle == DeviceExtension->MouseState)
 	{
-		/* Magic packet value that indicates a reset */
-		if (0xAA == Value)
+		/* Magic packet value that indicates a reset.
+		 * Elantech absolute mode packets can legitimately start with
+		 * 0xAA, and an internal touchpad cannot be hot plugged, so
+		 * don't apply the hot plug heuristic to those.
+		 */
+		if (0xAA == Value && Elantech != DeviceExtension->MouseType)
 		{
 			WARN_(I8042PRT, "Hot plugged mouse!\n");
 			DeviceExtension->MouseState = MouseResetting;
@@ -759,6 +763,27 @@ i8042MouResetIsr(
 			return TRUE;
 		case ExpectingReadMouseStatusByte3:
 			DeviceExtension->MouseLogiBuffer[2] = Value;
+			/* The E8 00 E6 E6 E6 E9 sequence sent above contains the
+			 * Elantech "magic knock" (three Set Scaling 1:1 followed
+			 * by a status request): an Elantech touchpad answers it
+			 * with its signature. Without this check it would be
+			 * misdetected as a 3-button Logitech PS2++ mouse below.
+			 */
+			if (ElantechIsKnockResponse(DeviceExtension->MouseLogiBuffer))
+			{
+				if (!DeviceExtension->ElantechData.Failed)
+				{
+					ElantechStartDetection(DeviceExtension);
+					return TRUE;
+				}
+				/* A previous Elantech init attempt failed: the
+				 * device is not a Logitech, so run the plain
+				 * wheel mouse detection instead.
+				 */
+				DeviceExtension->MouseResetState = EnableWheel;
+				i8042MouResetIsr(DeviceExtension, Status, Value);
+				return TRUE;
+			}
 			/* Now MouseLogiBuffer is a set of info. If the second
 			 * byte is 0, the mouse didn't understand the magic
 			 * code. Otherwise, it it a Logitech and the second byte
@@ -893,6 +918,8 @@ i8042MouResetIsr(
 			DeviceExtension->MouseTimeoutState = TimeoutCancel;
 			INFO_(I8042PRT, "Mouse type = %u\n", DeviceExtension->MouseType);
 			return TRUE;
+		case ELANTECH_INIT_SUBSTATE:
+			return ElantechInitIsr(DeviceExtension, Value);
 		default:
 			if (DeviceExtension->MouseResetState < 100 || DeviceExtension->MouseResetState > 999)
 				ERR_(I8042PRT, "MouseResetState went out of range: %lu\n", DeviceExtension->MouseResetState);
@@ -966,6 +993,8 @@ i8042MouInterruptService(
 
 	if (DeviceExtension->MouseType == Ps2pp)
 		i8042MouHandlePs2pp(DeviceExtension, Output);
+	else if (DeviceExtension->MouseType == Elantech)
+		ElantechMouHandle(DeviceExtension, Output);
 	else
 		i8042MouHandle(DeviceExtension, Output);
 
