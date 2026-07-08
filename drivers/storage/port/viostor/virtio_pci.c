@@ -149,6 +149,8 @@ static void mem_free_nonpaged_block(void *context, void *addr)
 static int pci_read_config_byte(void *context, int where, u8 *bVal)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)context;
+    if (adaptExt->mmio)
+        return -1;
     *bVal = adaptExt->pci_config_buf[where];
     return 0;
 }
@@ -156,6 +158,8 @@ static int pci_read_config_byte(void *context, int where, u8 *bVal)
 static int pci_read_config_word(void *context, int where, u16 *wVal)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)context;
+    if (adaptExt->mmio)
+        return -1;
     *wVal = *(u16 *)&adaptExt->pci_config_buf[where];
     return 0;
 }
@@ -163,6 +167,8 @@ static int pci_read_config_word(void *context, int where, u16 *wVal)
 static int pci_read_config_dword(void *context, int where, u32 *dwVal)
 {
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)context;
+    if (adaptExt->mmio)
+        return -1;
     *dwVal = *(u32 *)&adaptExt->pci_config_buf[where];
     return 0;
 }
@@ -184,7 +190,7 @@ static void *pci_map_address_range(void *context, int bar, size_t offset, size_t
         if (pBar->pBase == NULL) {
             pBar->pBase = StorPortGetDeviceBase(
                 adaptExt,
-                PCIBus,
+                adaptExt->mmio ? Internal : PCIBus,
                 adaptExt->system_io_bus_number,
                 pBar->BasePA,
                 pBar->uLength,

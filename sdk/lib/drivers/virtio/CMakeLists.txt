@@ -1,5 +1,6 @@
 
 list(APPEND SOURCE
+    VirtIOMMIO.c
     VirtIOPCICommon.c
     VirtIOPCILegacy.c
     VirtIOPCIModern.c

@@ -275,6 +275,15 @@ DriverEntry(
                                     &hwInitData,
                                     NULL);
 
+    if (initResult == STATUS_SUCCESS)
+    {
+        hwInitData.AdapterInterfaceType = Internal;
+        initResult = StorPortInitialize(DriverObject,
+                                        RegistryPath,
+                                        &hwInitData,
+                                        NULL);
+    }
+
 #ifdef EVENT_TRACING
     TraceContext = NULL;
 
@@ -302,11 +311,18 @@ static ULONG InitVirtIODevice(PVOID DeviceExtension)
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     NTSTATUS status;
 
-    status = virtio_device_initialize(
-        &adaptExt->vdev,
-        &VioStorSystemOps,
-        adaptExt,
-        adaptExt->msix_enabled);
+    if (adaptExt->mmio) {
+        status = virtio_mmio_device_initialize(
+            &adaptExt->vdev,
+            &VioStorSystemOps,
+            adaptExt);
+    } else {
+        status = virtio_device_initialize(
+            &adaptExt->vdev,
+            &VioStorSystemOps,
+            adaptExt,
+            adaptExt->msix_enabled);
+    }
 
     if (!NT_SUCCESS(status)) {
         LogError(adaptExt,
@@ -371,74 +387,93 @@ VirtIoFindAdapter(
     ConfigInfo->HwMSInterruptRoutine   = VirtIoMSInterruptRoutine;
     ConfigInfo->InterruptSynchronizationMode=InterruptSynchronizePerMessage;
 
-    pci_cfg_len = StorPortGetBusData(
-        DeviceExtension,
-        PCIConfiguration,
-        ConfigInfo->SystemIoBusNumber,
-        (ULONG)ConfigInfo->SlotNumber,
-        (PVOID)&adaptExt->pci_config_buf,
-        sizeof(adaptExt->pci_config_buf));
-
-    if (pci_cfg_len != sizeof(adaptExt->pci_config_buf)) {
-        RhelDbgPrint(TRACE_LEVEL_FATAL, " CANNOT READ PCI CONFIGURATION SPACE %d\n", pci_cfg_len);
-        return SP_RETURN_ERROR;
-    }
-
-    /* initialize the pci_bars array */
-    for (i = 0; i < ConfigInfo->NumberOfAccessRanges; i++) {
-        accessRange = *ConfigInfo->AccessRanges + i;
-        if (accessRange->RangeLength != 0) {
-            int iBar = virtio_get_bar_index(&adaptExt->pci_config, accessRange->RangeStart);
-            if (iBar == -1) {
-                RhelDbgPrint(TRACE_LEVEL_FATAL, " Cannot get index for BAR %I64d\n", accessRange->RangeStart.QuadPart);
-                return FALSE;
-            }
-            adaptExt->pci_bars[iBar].BasePA = accessRange->RangeStart;
-            adaptExt->pci_bars[iBar].uLength = accessRange->RangeLength;
-            adaptExt->pci_bars[iBar].bPortSpace = !accessRange->RangeInMemory;
-        }
-    }
-
+    adaptExt->mmio = (ConfigInfo->AdapterInterfaceType == Internal);
     adaptExt->msix_enabled = FALSE;
-    {
-        UCHAR CapOffset;
-        PPCI_MSIX_CAPABILITY pMsixCapOffset;
-        PPCI_COMMON_HEADER   pPciComHeader;
-        pPciComHeader = &adaptExt->pci_config;
-        if ( (pPciComHeader->Status & PCI_STATUS_CAPABILITIES_LIST) == 0)
-        {
-           RhelDbgPrint(TRACE_LEVEL_FATAL, " NO CAPABILITIES_LIST\n");
-        }
-        else
-        {
-           if ( (pPciComHeader->HeaderType & (~PCI_MULTIFUNCTION)) == PCI_DEVICE_TYPE )
-           {
-              CapOffset = pPciComHeader->u.type0.CapabilitiesPtr;
-              while (CapOffset != 0)
-              {
-                 pMsixCapOffset = (PPCI_MSIX_CAPABILITY)&adaptExt->pci_config_buf[CapOffset];
-                 if ( pMsixCapOffset->Header.CapabilityID == PCI_CAPABILITY_ID_MSIX )
-                 {
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageControl.TableSize = %d\n", pMsixCapOffset->MessageControl.TableSize);
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageControl.FunctionMask = %d\n", pMsixCapOffset->MessageControl.FunctionMask);
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageControl.MSIXEnable = %d\n", pMsixCapOffset->MessageControl.MSIXEnable);
 
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageTable = %lu\n", pMsixCapOffset->MessageTable.TableOffset);
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " PBATable = %lu\n", pMsixCapOffset->PBATable.TableOffset);
-                    adaptExt->msix_enabled = (pMsixCapOffset->MessageControl.MSIXEnable == 1);
-                    break;
-                 }
-                 else
-                 {
-                    CapOffset = pMsixCapOffset->Header.Next;
-                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " CapabilityID = %x, Next CapOffset = %x\n", pMsixCapOffset->Header.CapabilityID, CapOffset);
-                 }
-              }
-           }
-           else
-           {
-              RhelDbgPrint(TRACE_LEVEL_FATAL, " NOT A PCI_DEVICE_TYPE\n");
-           }
+    if (adaptExt->mmio) {
+        if (ConfigInfo->NumberOfAccessRanges == 0 || ConfigInfo->AccessRanges == NULL) {
+            RhelDbgPrint(TRACE_LEVEL_FATAL, " VIRTIO MMIO has no access ranges\n");
+            return SP_RETURN_ERROR;
+        }
+
+        accessRange = *ConfigInfo->AccessRanges;
+        if (accessRange->RangeLength == 0 || !accessRange->RangeInMemory) {
+            RhelDbgPrint(TRACE_LEVEL_FATAL, " VIRTIO MMIO invalid access range\n");
+            return SP_RETURN_ERROR;
+        }
+
+        adaptExt->pci_bars[0].BasePA = accessRange->RangeStart;
+        adaptExt->pci_bars[0].uLength = accessRange->RangeLength;
+        adaptExt->pci_bars[0].bPortSpace = FALSE;
+    } else {
+        pci_cfg_len = StorPortGetBusData(
+            DeviceExtension,
+            PCIConfiguration,
+            ConfigInfo->SystemIoBusNumber,
+            (ULONG)ConfigInfo->SlotNumber,
+            (PVOID)&adaptExt->pci_config_buf,
+            sizeof(adaptExt->pci_config_buf));
+
+        if (pci_cfg_len != sizeof(adaptExt->pci_config_buf)) {
+            RhelDbgPrint(TRACE_LEVEL_FATAL, " CANNOT READ PCI CONFIGURATION SPACE %d\n", pci_cfg_len);
+            return SP_RETURN_ERROR;
+        }
+
+        /* initialize the pci_bars array */
+        for (i = 0; i < ConfigInfo->NumberOfAccessRanges; i++) {
+            accessRange = *ConfigInfo->AccessRanges + i;
+            if (accessRange->RangeLength != 0) {
+                int iBar = virtio_get_bar_index(&adaptExt->pci_config, accessRange->RangeStart);
+                if (iBar == -1) {
+                    RhelDbgPrint(TRACE_LEVEL_FATAL, " Cannot get index for BAR %I64d\n", accessRange->RangeStart.QuadPart);
+                    return FALSE;
+                }
+                adaptExt->pci_bars[iBar].BasePA = accessRange->RangeStart;
+                adaptExt->pci_bars[iBar].uLength = accessRange->RangeLength;
+                adaptExt->pci_bars[iBar].bPortSpace = !accessRange->RangeInMemory;
+            }
+        }
+
+        {
+            UCHAR CapOffset;
+            PPCI_MSIX_CAPABILITY pMsixCapOffset;
+            PPCI_COMMON_HEADER   pPciComHeader;
+            pPciComHeader = &adaptExt->pci_config;
+            if ( (pPciComHeader->Status & PCI_STATUS_CAPABILITIES_LIST) == 0)
+            {
+               RhelDbgPrint(TRACE_LEVEL_FATAL, " NO CAPABILITIES_LIST\n");
+            }
+            else
+            {
+               if ( (pPciComHeader->HeaderType & (~PCI_MULTIFUNCTION)) == PCI_DEVICE_TYPE )
+               {
+                  CapOffset = pPciComHeader->u.type0.CapabilitiesPtr;
+                  while (CapOffset != 0)
+                  {
+                     pMsixCapOffset = (PPCI_MSIX_CAPABILITY)&adaptExt->pci_config_buf[CapOffset];
+                     if ( pMsixCapOffset->Header.CapabilityID == PCI_CAPABILITY_ID_MSIX )
+                     {
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageControl.TableSize = %d\n", pMsixCapOffset->MessageControl.TableSize);
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageControl.FunctionMask = %d\n", pMsixCapOffset->MessageControl.FunctionMask);
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageControl.MSIXEnable = %d\n", pMsixCapOffset->MessageControl.MSIXEnable);
+
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " MessageTable = %lu\n", pMsixCapOffset->MessageTable.TableOffset);
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " PBATable = %lu\n", pMsixCapOffset->PBATable.TableOffset);
+                        adaptExt->msix_enabled = (pMsixCapOffset->MessageControl.MSIXEnable == 1);
+                        break;
+                     }
+                     else
+                     {
+                        CapOffset = pMsixCapOffset->Header.Next;
+                        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " CapabilityID = %x, Next CapOffset = %x\n", pMsixCapOffset->Header.CapabilityID, CapOffset);
+                     }
+                  }
+               }
+               else
+               {
+                  RhelDbgPrint(TRACE_LEVEL_FATAL, " NOT A PCI_DEVICE_TYPE\n");
+               }
+            }
         }
     }
 
