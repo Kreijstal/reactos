@@ -4176,16 +4176,62 @@ BOOL WINAPI GetWindowsAccountDomainSid( PSID sid, PSID domain_sid, DWORD *size )
     return TRUE;
 }
 
-/*
- * @unimplemented
- */
 BOOL
 WINAPI
 EqualDomainSid(IN PSID pSid1,
                IN PSID pSid2,
                OUT BOOL* pfEqual)
 {
-    UNIMPLEMENTED;
+    MAX_SID BuiltinSid, DomainSid1, DomainSid2;
+    DWORD Size;
+
+    if (!pSid1 || !pSid2 || !IsValidSid(pSid1) || !IsValidSid(pSid2))
+    {
+        SetLastError(ERROR_INVALID_SID);
+        return FALSE;
+    }
+
+    if (!pfEqual)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Size = sizeof(DomainSid1);
+    if (GetWindowsAccountDomainSid(pSid1, &DomainSid1, &Size))
+    {
+        Size = sizeof(DomainSid2);
+        if (GetWindowsAccountDomainSid(pSid2, &DomainSid2, &Size))
+        {
+            *pfEqual = EqualSid(&DomainSid1, &DomainSid2);
+            SetLastError(ERROR_SUCCESS);
+            return TRUE;
+        }
+    }
+
+    Size = sizeof(BuiltinSid);
+    if (!CreateWellKnownSid(WinBuiltinDomainSid, NULL, &BuiltinSid, &Size))
+        return FALSE;
+
+    if (RtlCompareMemory(GetSidIdentifierAuthority(pSid1)->Value,
+                         BuiltinSid.IdentifierAuthority.Value,
+                         sizeof(BuiltinSid.IdentifierAuthority.Value)) == sizeof(BuiltinSid.IdentifierAuthority.Value) &&
+        RtlCompareMemory(GetSidIdentifierAuthority(pSid2)->Value,
+                         BuiltinSid.IdentifierAuthority.Value,
+                         sizeof(BuiltinSid.IdentifierAuthority.Value)) == sizeof(BuiltinSid.IdentifierAuthority.Value))
+    {
+        if (*GetSidSubAuthorityCount(pSid1) != 0 &&
+            *GetSidSubAuthorityCount(pSid2) != 0 &&
+            (*GetSidSubAuthority(pSid1, 0) == SECURITY_BUILTIN_DOMAIN_RID ||
+             *GetSidSubAuthority(pSid2, 0) == SECURITY_BUILTIN_DOMAIN_RID))
+        {
+            *pfEqual = EqualSid(pSid1, pSid2);
+            SetLastError(ERROR_SUCCESS);
+            return TRUE;
+        }
+    }
+
+    SetLastError(ERROR_NON_DOMAIN_SID);
     return FALSE;
 }
 
