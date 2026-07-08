@@ -1413,19 +1413,38 @@ NTSTATUS WINAPI BCryptVerifySignature( BCRYPT_KEY_HANDLE handle, void *padding, 
             return ret ? STATUS_INVALID_SIGNATURE : STATUS_SUCCESS;
         }
 
-        if (flags & BCRYPT_PAD_PKCS1)
+        if (flags & BCRYPT_PAD_OAEP)
         {
-            md_type = pad ? md_type_from_algid( pad->pszAlgId ) : MBEDTLS_MD_NONE;
-            /* For PKCS#1 v1.5 an unspecified/NONE md still verifies against the
-             * raw DigestInfo; mbedTLS supports MBEDTLS_MD_NONE in that case. */
-            mbedtls_rsa_set_padding( &key->u.rsa, MBEDTLS_RSA_PKCS_V15, md_type );
-            ret = mbedtls_rsa_pkcs1_verify( &key->u.rsa, NULL, NULL, MBEDTLS_RSA_PUBLIC,
-                                            md_type, hash_len, hash, signature );
-            return ret ? STATUS_INVALID_SIGNATURE : STATUS_SUCCESS;
+            FIXME( "OAEP padding not supported for verify\n" );
+            return STATUS_NOT_SUPPORTED;
         }
 
-        FIXME( "unsupported RSA padding flags %08x\n", flags );
-        return STATUS_NOT_SUPPORTED;
+        /* Default to PKCS#1 v1.5 for BCRYPT_PAD_PKCS1 and for the no-flag case:
+         * crypt32's CryptVerifyCertificateSignatureEx invokes us with padding
+         * NULL and flags 0 for RSA certificate signatures, which are PKCS#1
+         * v1.5.  mbedtls_rsa_pkcs1_verify needs the digest algorithm to rebuild
+         * the DigestInfo (it does not accept a bare hash with MBEDTLS_MD_NONE),
+         * so if no padding info is supplied infer the hash type from the digest
+         * length. */
+        md_type = pad ? md_type_from_algid( pad->pszAlgId ) : MBEDTLS_MD_NONE;
+        if (md_type == MBEDTLS_MD_NONE)
+        {
+            switch (hash_len)
+            {
+            case 20: md_type = MBEDTLS_MD_SHA1;   break;
+            case 32: md_type = MBEDTLS_MD_SHA256; break;
+            case 48: md_type = MBEDTLS_MD_SHA384; break;
+            case 64: md_type = MBEDTLS_MD_SHA512; break;
+            case 16: md_type = MBEDTLS_MD_MD5;    break;
+            default:
+                WARN( "cannot infer RSA hash algorithm from length %u\n", hash_len );
+                return STATUS_NOT_SUPPORTED;
+            }
+        }
+        mbedtls_rsa_set_padding( &key->u.rsa, MBEDTLS_RSA_PKCS_V15, md_type );
+        ret = mbedtls_rsa_pkcs1_verify( &key->u.rsa, NULL, NULL, MBEDTLS_RSA_PUBLIC,
+                                        md_type, hash_len, hash, signature );
+        return ret ? STATUS_INVALID_SIGNATURE : STATUS_SUCCESS;
     }
 
     return STATUS_INVALID_HANDLE;
