@@ -93,6 +93,7 @@ KiInsertQueueApc(IN PKAPC Apc,
     PKGATE Gate;
     NTSTATUS Status;
     BOOLEAN RequestInterrupt = FALSE;
+    UCHAR RequestProcessor = Thread->NextProcessor;
 
     /*
      * Check if the caller wanted this APC to use the thread's environment at
@@ -204,6 +205,18 @@ KiInsertQueueApc(IN PKAPC Apc,
                 /* Are we currently running? */
                 if (Thread->State == Running)
                 {
+#ifdef CONFIG_SMP
+                    for (CCHAR Cpu = 0; Cpu < KeNumberProcessors; Cpu++)
+                    {
+                        PKPRCB Prcb = KiProcessorBlock[Cpu];
+                        if ((Prcb != NULL) && (Prcb->CurrentThread == Thread))
+                        {
+                            RequestProcessor = Cpu;
+                            break;
+                        }
+                    }
+#endif
+
                     /* The thread is running, so remember to send a request */
                     RequestInterrupt = TRUE;
                 }
@@ -292,7 +305,7 @@ KiInsertQueueApc(IN PKAPC Apc,
             KiReleaseDispatcherLockFromSynchLevel();
 
             /* Check if an interrupt was requested */
-            KiRequestApcInterrupt(RequestInterrupt, Thread->NextProcessor);
+            KiRequestApcInterrupt(RequestInterrupt, RequestProcessor);
         }
     }
 }

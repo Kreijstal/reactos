@@ -208,8 +208,16 @@ SmbRdrUpcallIoctl(
             KeClearEvent(&gUpcallEvent);
             KeReleaseSpinLock(&gUpcallLock, irql);
 
+            /*
+             * RDBSS dispatch enters the filesystem critical region before it
+             * calls the mini-redirector.  This daemon poll can block forever,
+             * so wait with normal kernel APCs enabled; otherwise service
+             * shutdown cannot terminate the waiting smb2d thread.
+             */
+            FsRtlExitFileSystem();
             status = KeWaitForSingleObject(&gUpcallEvent, Executive,
                                            UserMode, TRUE, NULL);
+            FsRtlEnterFileSystem();
             if (status == STATUS_USER_APC || status == STATUS_ALERTED) {
                 /* Daemon got interrupted; let it retry. */
                 return status;
