@@ -55,7 +55,6 @@ HKR, , Icon,           0, "-27"
 %ACPI\ACPI0013.DeviceDesc% = NO_DRV,ACPI\ACPI0013
 %ACPI\ARMH0011.DeviceDesc% = NO_DRV,ACPI\ARMH0011
 %ACPI\FixedButton.DeviceDesc% = NO_DRV,ACPI\FixedButton
-%ACPI\LNRO0005.DeviceDesc% = NO_DRV,ACPI\LNRO0005
 %ACPI\QEMU0002.DeviceDesc% = NO_DRV,ACPI\QEMU0002
 %ISAPNP\ReadDataPort.DeviceDesc% = NO_DRV,ISAPNP\ReadDataPort
 %PCI\CC_0500.DeviceDesc% = NO_DRV,PCI\CC_0500
@@ -206,7 +205,6 @@ ACPI\ACPI0007.DeviceDesc = "ACPI processor device"
 ACPI\ACPI0013.DeviceDesc = "ACPI generic event device"
 ACPI\ARMH0011.DeviceDesc = "ARM generic timer"
 ACPI\FixedButton.DeviceDesc = "ACPI fixed feature button"
-ACPI\LNRO0005.DeviceDesc = "VirtIO MMIO transport"
 ACPI\QEMU0002.DeviceDesc = "QEMU firmware configuration device"
 ISAPNP\ReadDataPort.DeviceDesc = "ISAPNP read data port"
 PCI\CC_0500.DeviceDesc = "Standard PCI RAM controller"
