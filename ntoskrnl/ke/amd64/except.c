@@ -256,6 +256,16 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
     /* Increase number of Exception Dispatches */
     KeGetCurrentPrcb()->KeExceptionDispatchCount++;
 
+    /*
+     * A user trap frame may legitimately carry TF for user-mode single-step
+     * delivery. Do not let that live processor flag single-step kernel helper
+     * code while preparing and dispatching the user exception.
+     */
+    if ((PreviousMode == UserMode) && (TrapFrame->EFlags & EFLAGS_TF_MASK))
+    {
+        __writeeflags(__readeflags() & ~EFLAGS_TF_MASK);
+    }
+
     /* Zero out the context to avoid leaking kernel stack memor to user mode */
     RtlZeroMemory(&Context, sizeof(Context));
 
