@@ -57,6 +57,11 @@ typedef struct _PDO_DEVICE_DATA
     PVOID       PciRoutingTable;
     ULONG       PciRoutingTableSize;
 
+    /* ACPI_INTERFACE_STANDARD device notification client (e.g. cmbatt),
+     * registered via RegisterForDeviceNotifications. */
+    PDEVICE_NOTIFY_CALLBACK NotifyHandler;
+    PVOID       NotifyContext;
+
 } PDO_DEVICE_DATA, *PPDO_DEVICE_DATA;
 
 //
