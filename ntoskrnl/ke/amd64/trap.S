@@ -187,9 +187,20 @@ FUNC KiDebugTrapOrFault
     sti
 
 KiDebugTrapOrFaultKMode:
+    /* Mask out trap flag before dispatching the exception */
+    pushfq
+    and dword ptr [rsp], NOT EFLAGS_TF_MASK
+    popfq
+    and dword ptr [rbp + KTRAP_FRAME_EFlags], NOT EFLAGS_TF_MASK
+
+    /* A leaked user TF can single-step kernel code. Consume that trap. */
+    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
+    jz KiDebugTrapOrFaultExit
+
     /* Dispatch the exception */
     DispatchException STATUS_SINGLE_STEP, 0, 0, 0, 0
 
+KiDebugTrapOrFaultExit:
     /* Return */
     ExitTrap TF_SAVE_ALL
 ENDFUNC
@@ -911,11 +922,16 @@ GLOBAL_LABEL KiSystemServiceExit
 
     ASSERT_TRAP_FRAME_INTS_ENABLED rsp + MAX_SYSCALL_PARAM_SIZE
 
-    /* Check for pending user APCs */
+    /* Check for pending APCs that must be delivered before returning to user mode */
     mov rcx, gs:[PcCurrentThread]
     cmp byte ptr [rcx + ThApcState + AsUserApcPending], 0
-    jz NoUserApcPending
+    jnz DeliverUserModeApc
+    cmp byte ptr [rcx + ThApcState + AsKernelApcPending], 0
+    jz NoUserModeApcPending
+    cmp word ptr [rcx + ThSpecialApcDisable], 0
+    jne NoUserModeApcPending
 
+DeliverUserModeApc:
     /* Save missing regs in the trap frame */
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax], rax
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rbp], rbp
@@ -940,7 +956,7 @@ GLOBAL_LABEL KiSystemServiceExit
     lea rcx, [rsp + MAX_SYSCALL_PARAM_SIZE]
     call KiInitiateUserApc
 
-NoUserApcPending:
+NoUserModeApcPending:
     /* Disable interrupts for return */
     cli
 
