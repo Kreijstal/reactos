@@ -351,6 +351,14 @@ u16 virtio_set_queue_vector(struct virtqueue *vq, u16 vector)
 
 u8 virtio_read_isr_status(VirtIODevice *vdev)
 {
+    if (vdev->mmio_used) {
+        u32 status = ioread32(vdev, vdev->isr);
+        if (status) {
+            iowrite32(vdev, status, vdev->mmio_interrupt_ack);
+        }
+        return (u8)status;
+    }
+
     return ioread8(vdev, vdev->isr);
 }
 
