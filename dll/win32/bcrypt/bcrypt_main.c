@@ -37,6 +37,10 @@
 #include <mbedtls/sha1.h>
 #include <mbedtls/sha256.h>
 #include <mbedtls/sha512.h>
+#include <mbedtls/bignum.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/ecdsa.h>
+#include <mbedtls/rsa.h>
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(bcrypt);
@@ -857,6 +861,170 @@ static NTSTATUS hmac_finish( struct hash *hash, UCHAR *output, ULONG size )
 }
 #endif
 
+#ifdef SONAME_LIBMBEDTLS
+/*
+ * Asymmetric (ECDSA / RSA) public-key support, backed by mbedTLS.
+ *
+ * This wires up the CNG asymmetric-verify primitives used by crypt32's
+ * CryptVerifyCertificateSignatureEx (and hence HTTPS certificate-chain
+ * validation) to the mbedTLS library already vendored and linked into
+ * bcrypt.  Only the public-key import + signature-verify path is
+ * implemented, which is all cert-signature validation needs.
+ */
+
+#define MAGIC_KEY  (('K' << 24) | ('E' << 16) | ('Y' << 8) | '0')
+
+enum key_type
+{
+    KEY_TYPE_ECDSA,
+    KEY_TYPE_RSA,
+};
+
+struct key
+{
+    struct object hdr;
+    enum key_type type;
+    union
+    {
+        mbedtls_ecp_keypair ecc;   /* grp + public point Q */
+        mbedtls_rsa_context rsa;
+    } u;
+};
+
+/* Map a BCRYPT alg pseudo-handle or an opened struct algorithm* to an
+ * mbedTLS ECP group id.  Returns FALSE if the handle is not a recognised
+ * ECDSA algorithm. */
+static BOOL alg_handle_to_ecp_group( BCRYPT_ALG_HANDLE handle, mbedtls_ecp_group_id *grp_id )
+{
+    if (handle == BCRYPT_ECDSA_P256_ALG_HANDLE)
+    {
+        *grp_id = MBEDTLS_ECP_DP_SECP256R1;
+        return TRUE;
+    }
+    if (handle == BCRYPT_ECDSA_P384_ALG_HANDLE)
+    {
+        *grp_id = MBEDTLS_ECP_DP_SECP384R1;
+        return TRUE;
+    }
+
+    /* A real opened provider handle. */
+    if (handle && !((ULONG_PTR)handle & ~(ULONG_PTR)0xffff))
+        return FALSE;
+
+    {
+        const struct algorithm *alg = handle;
+        if (!alg || alg->hdr.magic != MAGIC_ALG) return FALSE;
+        if (alg->id == ALG_ID_ECDSA_P256) { *grp_id = MBEDTLS_ECP_DP_SECP256R1; return TRUE; }
+        if (alg->id == ALG_ID_ECDSA_P384) { *grp_id = MBEDTLS_ECP_DP_SECP384R1; return TRUE; }
+    }
+    return FALSE;
+}
+
+static NTSTATUS key_import_ecc( BCRYPT_ALG_HANDLE alg_handle, struct key *key,
+                                UCHAR *input, ULONG input_len )
+{
+    BCRYPT_ECCKEY_BLOB *blob = (BCRYPT_ECCKEY_BLOB *)input;
+    mbedtls_ecp_group_id grp_id;
+    ULONG magic_p256_ok, magic_p384_ok;
+    ULONG cbKey;
+    int ret;
+
+    if (input_len < sizeof(*blob)) return STATUS_INVALID_PARAMETER;
+
+    if (!alg_handle_to_ecp_group( alg_handle, &grp_id ))
+    {
+        WARN( "unrecognised ECDSA algorithm handle %p\n", alg_handle );
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    /* Validate the blob magic matches the requested curve. */
+    magic_p256_ok = (blob->dwMagic == BCRYPT_ECDSA_PUBLIC_P256_MAGIC &&
+                     grp_id == MBEDTLS_ECP_DP_SECP256R1);
+    magic_p384_ok = (blob->dwMagic == BCRYPT_ECDSA_PUBLIC_P384_MAGIC &&
+                     grp_id == MBEDTLS_ECP_DP_SECP384R1);
+    if (!magic_p256_ok && !magic_p384_ok)
+    {
+        WARN( "ECC blob magic %08x does not match curve\n", blob->dwMagic );
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    cbKey = blob->cbKey;
+    if (!cbKey || input_len < sizeof(*blob) + cbKey * 2)
+        return STATUS_INVALID_PARAMETER;
+
+    mbedtls_ecp_keypair_init( &key->u.ecc );
+
+    if ((ret = mbedtls_ecp_group_load( &key->u.ecc.grp, grp_id )) != 0)
+        goto error;
+
+    /* X || Y, each cbKey bytes big-endian, follow the blob header. */
+    if ((ret = mbedtls_mpi_read_binary( &key->u.ecc.Q.X, input + sizeof(*blob), cbKey )) != 0)
+        goto error;
+    if ((ret = mbedtls_mpi_read_binary( &key->u.ecc.Q.Y, input + sizeof(*blob) + cbKey, cbKey )) != 0)
+        goto error;
+    if ((ret = mbedtls_mpi_lset( &key->u.ecc.Q.Z, 1 )) != 0)
+        goto error;
+
+    if ((ret = mbedtls_ecp_check_pubkey( &key->u.ecc.grp, &key->u.ecc.Q )) != 0)
+        goto error;
+
+    key->type = KEY_TYPE_ECDSA;
+    return STATUS_SUCCESS;
+
+error:
+    WARN( "mbedtls ECC import failed: -%#x\n", -ret );
+    mbedtls_ecp_keypair_free( &key->u.ecc );
+    return STATUS_INVALID_PARAMETER;
+}
+
+static NTSTATUS key_import_rsa( struct key *key, UCHAR *input, ULONG input_len )
+{
+    BCRYPT_RSAKEY_BLOB *blob = (BCRYPT_RSAKEY_BLOB *)input;
+    const UCHAR *exp, *modulus;
+    int ret;
+
+    if (input_len < sizeof(*blob)) return STATUS_INVALID_PARAMETER;
+    if (blob->Magic != BCRYPT_RSAPUBLIC_MAGIC) return STATUS_INVALID_PARAMETER;
+    if (input_len < sizeof(*blob) + blob->cbPublicExp + blob->cbModulus)
+        return STATUS_INVALID_PARAMETER;
+
+    /* BCRYPT_RSAKEY_BLOB stores PublicExponent then Modulus, both big-endian. */
+    exp = input + sizeof(*blob);
+    modulus = exp + blob->cbPublicExp;
+
+    mbedtls_rsa_init( &key->u.rsa, MBEDTLS_RSA_PKCS_V15, 0 );
+
+    if ((ret = mbedtls_rsa_import_raw( &key->u.rsa,
+                                       modulus, blob->cbModulus,
+                                       NULL, 0, NULL, 0, NULL, 0,
+                                       exp, blob->cbPublicExp )) != 0)
+        goto error;
+
+    if ((ret = mbedtls_rsa_complete( &key->u.rsa )) != 0)
+        goto error;
+
+    key->type = KEY_TYPE_RSA;
+    return STATUS_SUCCESS;
+
+error:
+    WARN( "mbedtls RSA import failed: -%#x\n", -ret );
+    mbedtls_rsa_free( &key->u.rsa );
+    return STATUS_INVALID_PARAMETER;
+}
+
+/* Map a BCRYPT hash algorithm id string to an mbedTLS md type. */
+static mbedtls_md_type_t md_type_from_algid( const WCHAR *alg_id )
+{
+    if (!alg_id) return MBEDTLS_MD_NONE;
+    if (!strcmpW( alg_id, BCRYPT_SHA1_ALGORITHM ))   return MBEDTLS_MD_SHA1;
+    if (!strcmpW( alg_id, BCRYPT_SHA256_ALGORITHM )) return MBEDTLS_MD_SHA256;
+    if (!strcmpW( alg_id, BCRYPT_SHA384_ALGORITHM )) return MBEDTLS_MD_SHA384;
+    if (!strcmpW( alg_id, BCRYPT_SHA512_ALGORITHM )) return MBEDTLS_MD_SHA512;
+    if (!strcmpW( alg_id, BCRYPT_MD5_ALGORITHM ))    return MBEDTLS_MD_MD5;
+    return MBEDTLS_MD_NONE;
+}
+#endif /* SONAME_LIBMBEDTLS */
+
 #define OBJECT_LENGTH_MD5       274
 #define OBJECT_LENGTH_SHA1      278
 #define OBJECT_LENGTH_SHA256    286
@@ -1123,6 +1291,151 @@ NTSTATUS WINAPI BCryptHash( BCRYPT_ALG_HANDLE algorithm, UCHAR *secret, ULONG se
     }
 
     return BCryptDestroyHash( handle );
+}
+
+NTSTATUS WINAPI BCryptImportKeyPair( BCRYPT_ALG_HANDLE algorithm, BCRYPT_KEY_HANDLE decrypt_key, LPCWSTR type,
+                                     BCRYPT_KEY_HANDLE *ret_key, UCHAR *input, ULONG input_len, ULONG flags )
+{
+#ifdef SONAME_LIBMBEDTLS
+    struct key *key;
+    NTSTATUS status;
+
+    TRACE( "%p, %p, %s, %p, %p, %u, %08x\n", algorithm, decrypt_key, wine_dbgstr_w(type),
+           ret_key, input, input_len, flags );
+
+    if (!ret_key || !type || !input) return STATUS_INVALID_PARAMETER;
+    if (decrypt_key)
+    {
+        FIXME( "decryption of key blob not supported\n" );
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    if (!(key = HeapAlloc( GetProcessHeap(), 0, sizeof(*key) ))) return STATUS_NO_MEMORY;
+    key->hdr.magic = MAGIC_KEY;
+
+    if (!strcmpW( type, BCRYPT_ECCPUBLIC_BLOB ))
+        status = key_import_ecc( algorithm, key, input, input_len );
+    else if (!strcmpW( type, BCRYPT_RSAPUBLIC_BLOB ))
+        status = key_import_rsa( key, input, input_len );
+    else
+    {
+        FIXME( "unsupported key blob type %s\n", debugstr_w(type) );
+        status = STATUS_NOT_SUPPORTED;
+    }
+
+    if (status != STATUS_SUCCESS)
+    {
+        HeapFree( GetProcessHeap(), 0, key );
+        return status;
+    }
+
+    *ret_key = key;
+    return STATUS_SUCCESS;
+#else
+    FIXME( "%p, %p, %s, %p, %p, %u, %08x - no crypto backend\n", algorithm, decrypt_key,
+           wine_dbgstr_w(type), ret_key, input, input_len, flags );
+    return STATUS_NOT_IMPLEMENTED;
+#endif
+}
+
+NTSTATUS WINAPI BCryptVerifySignature( BCRYPT_KEY_HANDLE handle, void *padding, UCHAR *hash, ULONG hash_len,
+                                       UCHAR *signature, ULONG sig_len, ULONG flags )
+{
+#ifdef SONAME_LIBMBEDTLS
+    struct key *key = handle;
+    int ret;
+
+    TRACE( "%p, %p, %p, %u, %p, %u, %08x\n", handle, padding, hash, hash_len,
+           signature, sig_len, flags );
+
+    if (!key || key->hdr.magic != MAGIC_KEY) return STATUS_INVALID_HANDLE;
+    if (!hash || !signature) return STATUS_INVALID_PARAMETER;
+
+    if (key->type == KEY_TYPE_ECDSA)
+    {
+        mbedtls_mpi r, s;
+        ULONG half = sig_len / 2;
+        NTSTATUS status = STATUS_INVALID_SIGNATURE;
+
+        /* CNG passes a raw fixed-width r || s pair (not DER). */
+        if (!sig_len || (sig_len & 1))
+            return STATUS_INVALID_SIGNATURE;
+
+        mbedtls_mpi_init( &r );
+        mbedtls_mpi_init( &s );
+
+        if (mbedtls_mpi_read_binary( &r, signature, half ) == 0 &&
+            mbedtls_mpi_read_binary( &s, signature + half, half ) == 0)
+        {
+            ret = mbedtls_ecdsa_verify( &key->u.ecc.grp, hash, hash_len, &key->u.ecc.Q, &r, &s );
+            status = ret ? STATUS_INVALID_SIGNATURE : STATUS_SUCCESS;
+        }
+
+        mbedtls_mpi_free( &r );
+        mbedtls_mpi_free( &s );
+        return status;
+    }
+
+    if (key->type == KEY_TYPE_RSA)
+    {
+        BCRYPT_PKCS1_PADDING_INFO *pad = padding;
+        mbedtls_md_type_t md_type;
+
+        if (flags & BCRYPT_PAD_PSS)
+        {
+            BCRYPT_PSS_PADDING_INFO *pss = padding;
+            if (!pss) return STATUS_INVALID_PARAMETER;
+            md_type = md_type_from_algid( pss->pszAlgId );
+            if (md_type == MBEDTLS_MD_NONE) return STATUS_NOT_SUPPORTED;
+            mbedtls_rsa_set_padding( &key->u.rsa, MBEDTLS_RSA_PKCS_V21, md_type );
+            ret = mbedtls_rsa_rsassa_pss_verify( &key->u.rsa, NULL, NULL, MBEDTLS_RSA_PUBLIC,
+                                                 md_type, hash_len, hash, signature );
+            return ret ? STATUS_INVALID_SIGNATURE : STATUS_SUCCESS;
+        }
+
+        if (flags & BCRYPT_PAD_PKCS1)
+        {
+            md_type = pad ? md_type_from_algid( pad->pszAlgId ) : MBEDTLS_MD_NONE;
+            /* For PKCS#1 v1.5 an unspecified/NONE md still verifies against the
+             * raw DigestInfo; mbedTLS supports MBEDTLS_MD_NONE in that case. */
+            mbedtls_rsa_set_padding( &key->u.rsa, MBEDTLS_RSA_PKCS_V15, md_type );
+            ret = mbedtls_rsa_pkcs1_verify( &key->u.rsa, NULL, NULL, MBEDTLS_RSA_PUBLIC,
+                                            md_type, hash_len, hash, signature );
+            return ret ? STATUS_INVALID_SIGNATURE : STATUS_SUCCESS;
+        }
+
+        FIXME( "unsupported RSA padding flags %08x\n", flags );
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    return STATUS_INVALID_HANDLE;
+#else
+    FIXME( "%p, %p, %p, %u, %p, %u, %08x - no crypto backend\n", handle, padding, hash,
+           hash_len, signature, sig_len, flags );
+    return STATUS_NOT_IMPLEMENTED;
+#endif
+}
+
+NTSTATUS WINAPI BCryptDestroyKey( BCRYPT_KEY_HANDLE handle )
+{
+#ifdef SONAME_LIBMBEDTLS
+    struct key *key = handle;
+
+    TRACE( "%p\n", handle );
+
+    if (!key || key->hdr.magic != MAGIC_KEY) return STATUS_INVALID_HANDLE;
+
+    if (key->type == KEY_TYPE_ECDSA)
+        mbedtls_ecp_keypair_free( &key->u.ecc );
+    else if (key->type == KEY_TYPE_RSA)
+        mbedtls_rsa_free( &key->u.rsa );
+
+    HeapFree( GetProcessHeap(), 0, key );
+    return STATUS_SUCCESS;
+#else
+    FIXME( "%p - no crypto backend\n", handle );
+    return STATUS_NOT_IMPLEMENTED;
+#endif
 }
 
 BOOL WINAPI DllMain( HINSTANCE hinst, DWORD reason, LPVOID reserved )
