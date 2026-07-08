@@ -1274,7 +1274,11 @@ IopInitializeSystemDrivers(VOID)
 
     DbgPrint("SYSDRV: enum begin\n");
     PiPerformSyncDeviceAction(IopRootDeviceNode->PhysicalDeviceObject, PiActionEnumDeviceTree);
+#if (NTDDI_VERSION < NTDDI_WIN7)
     DbgPrint("SYSDRV: enum complete setup %p\n", KeLoaderBlock->SetupLdrBlock);
+#else
+    DbgPrint("SYSDRV: enum complete\n");
+#endif
 
     /* Get the driver list */
     SavedList = DriverList = CmGetSystemDriverList();
