@@ -31,9 +31,15 @@
 #ifdef __i386__
 #define ARCH_STRING "x86"
 #define GECKO_SHA "8a3adedf3707973d1ed4ac3b2e791486abf814bd"
+#define GECKO_URL L"http://dl.winehq.org/wine/wine-gecko/2.40/wine_gecko-2.40-x86.msi"
+#elif defined(__x86_64__)
+#define ARCH_STRING "x86_64"
+#define GECKO_SHA "356c414527b08b015b6dc53dbbf78d752320ae90"
+#define GECKO_URL L"http://dl.winehq.org/wine/wine-gecko/2.40/wine_gecko-2.40-x86_64.msi"
 #else
 #define ARCH_STRING ""
 #define GECKO_SHA "???"
+#define GECKO_URL L""
 #endif
 
 typedef struct {
@@ -62,7 +68,7 @@ static HWND install_dialog = NULL;
 static CRITICAL_SECTION csLock;
 static IBinding *download_binding = NULL;
 
-static WCHAR GeckoUrl[] = L"https://svn.reactos.org/amine/wine_gecko-2.40-x86.msi";
+static WCHAR GeckoUrl[] = GECKO_URL;
 
 /* SHA definitions are copied from advapi32. They aren't available in headers. */
 
