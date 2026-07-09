@@ -1437,7 +1437,24 @@ UhciBulkOrInterruptTransfer(IN PUHCI_EXTENSION UhciExtension,
 
     if ((UhciEndpoint->MaxTDs - UhciEndpoint->AllocatedTDs) < TDs)
     {
-        DPRINT1("UhciBulkOrInterruptTransfer: Not enough TDs \n");
+        /*
+         * The endpoint's TD pool is momentarily full. This is normal back
+         * pressure: usbport keeps the transfer queued and resubmits it once
+         * in-flight TDs are retired. It is not an error, so do not flood the
+         * debug log (a DPRINT1 here costs a synchronous serial flush and, on a
+         * large split transfer, fires hundreds of times, distorting bus timing).
+         */
+        DPRINT("UhciBulkOrInterruptTransfer: Not enough TDs \n");
+
+        /*
+         * Undo the EndpointLock reference taken in UhciSubmitTransfer: this
+         * transfer is being rejected (not queued), so on completion nothing
+         * will drop that reference. usbport will resubmit later, taking a fresh
+         * reference. Without this the counter leaks on every back-pressure hit.
+         * This mirrors the control-transfer re-entrancy failure path above.
+         */
+        InterlockedDecrement(&UhciEndpoint->EndpointLock);
+
         return MP_STATUS_FAILURE;
     }
 
