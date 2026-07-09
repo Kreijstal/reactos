@@ -555,6 +555,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     ULONG RequestedDisposition;
     ULONG RequestedOptions;
     BOOLEAN OpenTargetDir;
+    BOOLEAN TrailingBackslash = FALSE;
     PNTFS_FCB Fcb = NULL;
 //    PWSTR FileName;
     NTSTATUS Status;
@@ -622,13 +623,18 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
      * stored name matches a plain open of that directory (a later
      * FileNameInformation query or name compare must not see the separator).
      * fastfat does the same in FatCommonCreate. Never touch the lone
-     * backslash of the volume root, and leave open-by-id names alone. */
+     * backslash of the volume root, and leave open-by-id names alone.
+     * Remember the strip: the separator promises a directory, so once the
+     * target resolves to anything else the open must fail with
+     * STATUS_OBJECT_NAME_INVALID (checked below, like fastfat's
+     * TrailingBackslash). */
     if (!(RequestedOptions & FILE_OPEN_BY_FILE_ID) &&
         FileObject->FileName.Length > sizeof(WCHAR) &&
         FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR) - 1] == L'\\')
     {
         FileObject->FileName.Length -= sizeof(WCHAR);
         FileObject->FileName.Buffer[FileObject->FileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+        TrailingBackslash = TRUE;
     }
 
     /* Split and validate an alternate-data-stream suffix (":Stream[:$TYPE]")
@@ -802,6 +808,15 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
     if (NT_SUCCESS(Status))
     {
+        /* The name carried a trailing backslash, which can only denote a
+         * directory; it resolved to something else, so the NAME is invalid
+         * (checked before any disposition handling, like Windows). */
+        if (TrailingBackslash && !NtfsFCBIsDirectory(Fcb))
+        {
+            NtfsCloseFile(DeviceExt, FileObject);
+            return STATUS_OBJECT_NAME_INVALID;
+        }
+
         if (RequestedDisposition == FILE_CREATE)
         {
             Irp->IoStatus.Information = FILE_EXISTS;
@@ -967,6 +982,13 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             RequestedDisposition == FILE_OVERWRITE_IF ||
             RequestedDisposition == FILE_SUPERSEDE)
         {
+            /* A name with a trailing backslash can only create a
+             * directory. */
+            if (TrailingBackslash && !(RequestedOptions & FILE_DIRECTORY_FILE))
+            {
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+
             /* The file doesn't exist, so every disposition that reaches
              * this branch would create it - a mutation the read-only
              * mount gate must refuse (see the overwrite gate above). */
