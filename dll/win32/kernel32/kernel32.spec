@@ -299,7 +299,7 @@
 @ stdcall FindFirstFileExA(str long ptr long ptr long)
 @ stdcall FindFirstFileExW(wstr long ptr long ptr long)
 @ stub -version=0x600+ FindFirstFileNameTransactedW
-@ stub -version=0x600+ FindFirstFileNameW
+@ stdcall -version=0x600+ FindFirstFileNameW(wstr long ptr ptr)
 @ stub -version=0x600+ FindFirstFileTransactedA
 @ stub -version=0x600+ FindFirstFileTransactedW
 @ stdcall FindFirstFileW(wstr ptr)
@@ -313,7 +313,7 @@
 @ stub -version=0x600+ FindNLSStringEx
 @ stdcall FindNextChangeNotification(long)
 @ stdcall FindNextFileA(long ptr)
-@ stub -version=0x600+ FindNextFileNameW
+@ stdcall -version=0x600+ FindNextFileNameW(ptr ptr ptr)
 @ stdcall FindNextFileW(long ptr)
 @ stdcall FindNextStreamW(ptr ptr)
 @ stdcall FindNextVolumeA(long ptr long)
