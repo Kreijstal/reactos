@@ -527,7 +527,17 @@ TermSrvSessionManagerInit(
 const TERMSRV_SESSION_BACKEND *
 TermSrvSessionManagerGetDefaultBackend(VOID)
 {
-    return &SessmanSessionBackend;
+    /*
+     * ReactOS currently supports a single interactive session only. The
+     * sessman backend asks SMSS to spin up a brand-new Terminal Services
+     * session (SmStartCsr), which drives the kernel into MiSessionCreateInternal
+     * and trips ASSERT(MmIsAddressValid(MmSessionSpace) == FALSE) in
+     * ntoskrnl/mm/ARM3/session.c, because per-connection session spaces are not
+     * yet implemented. Until multi-session support lands, mirror and drive the
+     * existing console session, which is the correct model for a single-session
+     * host. The sessman backend stays reachable via REACTOS_TERMSRV_BACKEND=sessman.
+     */
+    return &ConsoleSessionBackend;
 }
 
 const TERMSRV_SESSION_BACKEND *
@@ -576,6 +586,8 @@ TermSrvSessionManagerSelectBackendByName(
     }
 
     TermSrvSessionManagerSetBackend(Manager, NULL, NULL);
+    if (TermSrvSessionManagerGetBackend(Manager) == &ConsoleSessionBackend)
+        PrepareConsoleSessionRecord(Manager);
     return TRUE;
 }
 
