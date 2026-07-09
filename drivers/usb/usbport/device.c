@@ -417,6 +417,22 @@ USBPORT_OpenInterface(IN PURB Urb,
                 break;
 
             PipeInfo->PipeHandle = PipeHandle;
+
+            /*
+             * Report the maximum length of a single transfer this pipe can
+             * accept to the client driver. The miniport bounds this to the
+             * amount its host-controller resources (e.g. the TD pool) can
+             * queue for one endpoint; larger requests are split by usbport.
+             * Class drivers (e.g. usbstor) rely on this value to size their
+             * requests so they never overrun the controller. This matches
+             * the Windows usbport behaviour of filling in
+             * USBD_PIPE_INFORMATION::MaximumTransferSize.
+             */
+            if (PipeHandle->Endpoint)
+            {
+                PipeInfo->MaximumTransferSize =
+                    PipeHandle->Endpoint->EndpointProperties.MaxTransferSize;
+            }
         }
 
         if (NumEndpoints)
