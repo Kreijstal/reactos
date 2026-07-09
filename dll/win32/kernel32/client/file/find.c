@@ -26,7 +26,8 @@ DEBUG_CHANNEL(kernel32file);
 typedef enum _FIND_DATA_TYPE
 {
     FindFile   = 1,
-    FindStream = 2
+    FindStream = 2,
+    FindLink   = 3
 } FIND_DATA_TYPE;
 
 /*
@@ -93,6 +94,19 @@ typedef struct _FIND_STREAM_DATA
     PFILE_STREAM_INFORMATION CurrentInfo;
 } FIND_STREAM_DATA, *PFIND_STREAM_DATA;
 
+typedef struct _FIND_LINK_DATA
+{
+    /* Volume root handle, kept open for resolving each link's parent
+     * directory via FILE_OPEN_BY_FILE_ID relative opens. */
+    HANDLE VolumeHandle;
+
+    /* Snapshot of all the file's names, taken at FindFirstFileNameW time. */
+    PFILE_LINKS_INFORMATION LinksInfo;
+
+    /* Entry most recently handed out to the caller. */
+    PFILE_LINK_ENTRY_INFORMATION CurrentInfo;
+} FIND_LINK_DATA, *PFIND_LINK_DATA;
+
 typedef struct _FIND_DATA_HANDLE
 {
     FIND_DATA_TYPE Type;
@@ -106,6 +120,7 @@ typedef struct _FIND_DATA_HANDLE
     {
         PFIND_FILE_DATA FindFileData;
         PFIND_STREAM_DATA FindStreamData;
+        PFIND_LINK_DATA FindLinkData;
     } u;
 
 } FIND_DATA_HANDLE, *PFIND_DATA_HANDLE;
@@ -535,6 +550,23 @@ FindClose(HANDLE hFindFile)
                 {
                     RtlFreeHeap(RtlGetProcessHeap(), 0,
                                 FindDataHandle->u.FindStreamData->FileStreamInfo);
+                }
+                RtlLeaveCriticalSection(&FindDataHandle->Lock);
+                RtlDeleteCriticalSection(&FindDataHandle->Lock);
+                break;
+            }
+
+            case FindLink:
+            {
+                RtlEnterCriticalSection(&FindDataHandle->Lock);
+                if (FindDataHandle->u.FindLinkData->VolumeHandle != NULL)
+                {
+                    NtClose(FindDataHandle->u.FindLinkData->VolumeHandle);
+                }
+                if (FindDataHandle->u.FindLinkData->LinksInfo != NULL)
+                {
+                    RtlFreeHeap(RtlGetProcessHeap(), 0,
+                                FindDataHandle->u.FindLinkData->LinksInfo);
                 }
                 RtlLeaveCriticalSection(&FindDataHandle->Lock);
                 RtlDeleteCriticalSection(&FindDataHandle->Lock);
@@ -1148,6 +1180,318 @@ FindNextStreamW(IN HANDLE hFindStream,
         SetLastError(ERROR_HANDLE_EOF);
         return FALSE;
     }
+}
+
+
+/*
+ * Build the volume-relative Win32 path ("\dir\name") of one hard link
+ * entry: open the entry's parent directory by file ID relative to the
+ * volume, query its path, and append the link's own name.  Returns
+ * STATUS_BUFFER_OVERFLOW (-> ERROR_MORE_DATA) with *StringLength set to
+ * the required size, in characters including the terminating null, when
+ * the caller's buffer is too small.
+ */
+static NTSTATUS
+CopyLinkName(IN PFIND_LINK_DATA FindLinkData,
+             IN PFILE_LINK_ENTRY_INFORMATION LinkEntry,
+             IN OUT LPDWORD StringLength,
+             OUT PWSTR LinkName)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING FileId;
+    PFILE_NAME_INFORMATION NameInfo;
+    HANDLE DirHandle = NULL;
+    NTSTATUS Status;
+    ULONG BufferSize;
+    ULONG DirChars, NeededChars;
+    BOOLEAN NeedSeparator;
+    PWSTR Dest;
+
+    /* The object name of a FILE_OPEN_BY_FILE_ID open is the raw 8-byte ID */
+    FileId.Buffer = (PWSTR)&LinkEntry->ParentFileId;
+    FileId.Length = FileId.MaximumLength = sizeof(LinkEntry->ParentFileId);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &FileId,
+                               0,
+                               FindLinkData->VolumeHandle,
+                               NULL);
+
+    Status = NtOpenFile(&DirHandle,
+                        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_OPEN_BY_FILE_ID);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Grab the parent directory's volume-relative path */
+    BufferSize = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName) +
+                     MAX_PATH * sizeof(WCHAR);
+    for (;;)
+    {
+        NameInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, BufferSize);
+        if (NameInfo == NULL)
+        {
+            Status = STATUS_NO_MEMORY;
+            break;
+        }
+
+        Status = NtQueryInformationFile(DirHandle,
+                                        &IoStatusBlock,
+                                        NameInfo,
+                                        BufferSize,
+                                        FileNameInformation);
+        if (Status != STATUS_BUFFER_OVERFLOW) break;
+
+        BufferSize = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName) +
+                         NameInfo->FileNameLength;
+        RtlFreeHeap(RtlGetProcessHeap(), 0, NameInfo);
+    }
+
+    NtClose(DirHandle);
+
+    if (!NT_SUCCESS(Status))
+    {
+        if (NameInfo) RtlFreeHeap(RtlGetProcessHeap(), 0, NameInfo);
+        return Status;
+    }
+
+    DirChars = NameInfo->FileNameLength / sizeof(WCHAR);
+    NeedSeparator = (DirChars == 0) ||
+                    (NameInfo->FileName[DirChars - 1] != L'\\');
+    NeededChars = DirChars + (NeedSeparator ? 1 : 0) +
+                  LinkEntry->FileNameLength + 1;
+
+    if (*StringLength < NeededChars)
+    {
+        *StringLength = NeededChars;
+        RtlFreeHeap(RtlGetProcessHeap(), 0, NameInfo);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+
+    Dest = LinkName;
+    RtlCopyMemory(Dest, NameInfo->FileName, DirChars * sizeof(WCHAR));
+    Dest += DirChars;
+    if (NeedSeparator) *Dest++ = L'\\';
+    /* FILE_LINK_ENTRY_INFORMATION::FileNameLength is in characters */
+    RtlCopyMemory(Dest, LinkEntry->FileName,
+                  LinkEntry->FileNameLength * sizeof(WCHAR));
+    Dest += LinkEntry->FileNameLength;
+    *Dest = UNICODE_NULL;
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NameInfo);
+    return STATUS_SUCCESS;
+}
+
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+FindFirstFileNameW(IN LPCWSTR lpFileName,
+                   IN DWORD dwFlags,
+                   IN OUT LPDWORD StringLength,
+                   OUT PWSTR LinkName)
+{
+    PFIND_DATA_HANDLE FindDataHandle = NULL;
+    PFIND_LINK_DATA FindLinkData = NULL;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING NtFilePath;
+    HANDLE FileHandle = NULL;
+    NTSTATUS Status;
+    ULONG BufferSize;
+
+    if (dwFlags != 0 || lpFileName == NULL || StringLength == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* Validate and translate the filename */
+    if (!RtlDosPathNameToNtPathName_U(lpFileName,
+                                      &NtFilePath,
+                                      NULL, NULL))
+    {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    /* Open the file */
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &NtFilePath,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    Status = NtCreateFile(&FileHandle,
+                          0,
+                          &ObjectAttributes,
+                          &IoStatusBlock,
+                          NULL, 0,
+                          FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          FILE_OPEN,
+                          0, NULL, 0);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+
+    /*
+     * Initialization of the search handle.
+     */
+    FindDataHandle = RtlAllocateHeap(RtlGetProcessHeap(),
+                                     HEAP_ZERO_MEMORY,
+                                     sizeof(FIND_DATA_HANDLE) +
+                                         sizeof(FIND_LINK_DATA));
+    if (!FindDataHandle)
+    {
+        Status = STATUS_NO_MEMORY;
+        goto Cleanup;
+    }
+
+    FindDataHandle->Type = FindLink;
+    FindDataHandle->u.FindLinkData = (PFIND_LINK_DATA)(FindDataHandle + 1);
+    FindLinkData = FindDataHandle->u.FindLinkData;
+
+    /* The critical section must always be initialized */
+    Status = RtlInitializeCriticalSection(&FindDataHandle->Lock);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FindDataHandle);
+        FindDataHandle = NULL;
+        goto Cleanup;
+    }
+
+    /* Capture all the names of the file */
+    BufferSize = 0x1000;
+    for (;;)
+    {
+        FindLinkData->LinksInfo = RtlAllocateHeap(RtlGetProcessHeap(),
+                                                  HEAP_ZERO_MEMORY,
+                                                  BufferSize);
+        if (FindLinkData->LinksInfo == NULL)
+        {
+            Status = STATUS_NO_MEMORY;
+            break;
+        }
+
+        Status = NtQueryInformationFile(FileHandle,
+                                        &IoStatusBlock,
+                                        FindLinkData->LinksInfo,
+                                        BufferSize,
+                                        FileHardLinkInformation);
+        if (Status != STATUS_BUFFER_OVERFLOW) break;
+
+        /* Always grow, even if a racing unlink shrank BytesNeeded */
+        BufferSize = max(FindLinkData->LinksInfo->BytesNeeded, BufferSize * 2);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FindLinkData->LinksInfo);
+        FindLinkData->LinksInfo = NULL;
+    }
+    if (!NT_SUCCESS(Status)) goto CleanupHandle;
+
+    if (FindLinkData->LinksInfo->EntriesReturned == 0)
+    {
+        Status = STATUS_NOT_FOUND;
+        goto CleanupHandle;
+    }
+
+    /*
+     * Each returned name is rebuilt from its parent directory ID, and
+     * FILE_OPEN_BY_FILE_ID resolves an ID relative to any handle on the
+     * volume - the queried file's own handle serves as that anchor.
+     */
+    FindLinkData->VolumeHandle = FileHandle;
+    FileHandle = NULL;
+
+    /* Hand out the first name */
+    FindLinkData->CurrentInfo = &FindLinkData->LinksInfo->Entry;
+    Status = CopyLinkName(FindLinkData,
+                          FindLinkData->CurrentInfo,
+                          StringLength,
+                          LinkName);
+
+CleanupHandle:
+    if (!NT_SUCCESS(Status) && FindDataHandle != NULL)
+    {
+        if (FindLinkData->VolumeHandle != NULL)
+            NtClose(FindLinkData->VolumeHandle);
+        if (FindLinkData->LinksInfo != NULL)
+            RtlFreeHeap(RtlGetProcessHeap(), 0, FindLinkData->LinksInfo);
+        RtlDeleteCriticalSection(&FindDataHandle->Lock);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FindDataHandle);
+        FindDataHandle = NULL;
+    }
+
+Cleanup:
+    if (FileHandle) NtClose(FileHandle);
+    if (NtFilePath.Buffer) RtlFreeHeap(RtlGetProcessHeap(), 0, NtFilePath.Buffer);
+
+    if (NT_SUCCESS(Status))
+    {
+        return (HANDLE)FindDataHandle;
+    }
+    else
+    {
+        BaseSetLastNTError(Status);
+        return INVALID_HANDLE_VALUE;
+    }
+}
+
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+FindNextFileNameW(IN HANDLE hFindStream,
+                  IN OUT LPDWORD StringLength,
+                  OUT PWSTR LinkName)
+{
+    PFIND_DATA_HANDLE FindDataHandle = (PFIND_DATA_HANDLE)hFindStream;
+    PFIND_LINK_DATA FindLinkData;
+    PFILE_LINK_ENTRY_INFORMATION NextEntry;
+    NTSTATUS Status;
+
+    if (hFindStream == NULL || hFindStream == INVALID_HANDLE_VALUE ||
+        FindDataHandle->Type != FindLink)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    if (StringLength == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlEnterCriticalSection(&FindDataHandle->Lock);
+
+    FindLinkData = FindDataHandle->u.FindLinkData;
+
+    if (FindLinkData->CurrentInfo->NextEntryOffset == 0)
+    {
+        RtlLeaveCriticalSection(&FindDataHandle->Lock);
+        SetLastError(ERROR_HANDLE_EOF);
+        return FALSE;
+    }
+
+    NextEntry = (PFILE_LINK_ENTRY_INFORMATION)((ULONG_PTR)FindLinkData->CurrentInfo +
+                                               FindLinkData->CurrentInfo->NextEntryOffset);
+
+    Status = CopyLinkName(FindLinkData, NextEntry, StringLength, LinkName);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Do not advance: an ERROR_MORE_DATA retry must get this entry */
+        RtlLeaveCriticalSection(&FindDataHandle->Lock);
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    FindLinkData->CurrentInfo = NextEntry;
+
+    RtlLeaveCriticalSection(&FindDataHandle->Lock);
+    return TRUE;
 }
 
 /* EOF */
