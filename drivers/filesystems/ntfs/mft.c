@@ -3593,7 +3593,6 @@ NtfsRemoveFilenameFromDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD NextAttribute;
     PB_TREE NewTree;
     ULONG BtreeIndexLength;
-    ULONG MaxIndexRootSize;
     LARGE_INTEGER MinIndexRootSize;
     ULONG NewMaxIndexRootSize;
     ULONG NodeSize;
@@ -3620,25 +3619,6 @@ NtfsRemoveFilenameFromDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
-    }
-
-    MaxIndexRootSize = DeviceExt->NtfsInfo.BytesPerFileRecord
-                       - IndexRootOffset
-                       - IndexRootContext->pRecord->Resident.ValueOffset
-                       - sizeof(INDEX_ROOT_ATTRIBUTE)
-                       - (sizeof(ULONG) * 2);
-
-    NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)ParentFileRecord + IndexRootOffset + IndexRootContext->pRecord->Length);
-    if (NextAttribute->Type != AttributeEnd)
-    {
-        ULONG LengthOfAttributes = 0;
-        PNTFS_ATTR_RECORD CurrentAttribute = NextAttribute;
-        while (CurrentAttribute->Type != AttributeEnd)
-        {
-            LengthOfAttributes += CurrentAttribute->Length;
-            CurrentAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)CurrentAttribute + CurrentAttribute->Length);
-        }
-        MaxIndexRootSize -= LengthOfAttributes;
     }
 
     I30IndexRootLength = AttributeDataLength(IndexRootContext->pRecord);
@@ -3903,9 +3883,139 @@ NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* Unlink one hard link of a multi-link file: remove the matching $FILE_NAME
+ * attribute(s) from the base record, drop the parent directory's $I30
+ * entries, and decrement the link count.  The record itself stays in use -
+ * the other links keep the file alive, matching Windows delete semantics.
+ * A split WIN32/DOS 8.3 name pair in the same directory is one link (NTFS
+ * allows a single DOS alias per record) and falls together. */
+static
+NTSTATUS
+NtfsUnlinkSingleName(PDEVICE_EXTENSION DeviceExt,
+                     PNTFS_FCB Fcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     PCUNICODE_STRING LeafName,
+                     ULONGLONG LinkParentMftIndex,
+                     BOOLEAN CaseSensitive)
+{
+    PNTFS_ATTR_RECORD Attribute;
+    PNTFS_ATTR_RECORD Target = NULL, Partner = NULL;
+    PFILENAME_ATTRIBUTE Name, TargetName = NULL, PartnerName = NULL;
+    UNICODE_STRING EntryName;
+    NTSTATUS Status;
+    USHORT Removed;
+
+    /* Find the link's $FILE_NAME in the base record.  (A $FILE_NAME pushed
+     * out to an extension record by an attribute list cannot be edited
+     * through RemoveResidentAttribute; no ReactOS-created record does that.) */
+    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+    while ((ULONG_PTR)Attribute < (ULONG_PTR)FileRecord + FileRecord->BytesInUse &&
+           Attribute->Type != AttributeEnd)
+    {
+        if (Attribute->Type == AttributeFileName)
+        {
+            Name = (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
+            if ((Name->DirectoryFileReferenceNumber & NTFS_MFT_MASK) == LinkParentMftIndex)
+            {
+                EntryName.Buffer = Name->Name;
+                EntryName.Length = EntryName.MaximumLength = Name->NameLength * sizeof(WCHAR);
+                if (Target == NULL &&
+                    RtlCompareUnicodeString(&EntryName, LeafName, !CaseSensitive) == 0)
+                {
+                    Target = Attribute;
+                    TargetName = Name;
+                }
+            }
+        }
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+    }
+
+    if (Target == NULL)
+    {
+        DPRINT1("NtfsUnlinkSingleName: no base-record $FILE_NAME matches %wZ (parent %I64x)\n",
+                LeafName, LinkParentMftIndex);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    /* A split-pair name drags its partner in the same directory along:
+     * deleting the WIN32 long name removes the DOS alias and vice versa. */
+    if (TargetName->NameType == NTFS_FILE_NAME_WIN32 ||
+        TargetName->NameType == NTFS_FILE_NAME_DOS)
+    {
+        UCHAR WantedType = (TargetName->NameType == NTFS_FILE_NAME_WIN32)
+                               ? NTFS_FILE_NAME_DOS : NTFS_FILE_NAME_WIN32;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+        while ((ULONG_PTR)Attribute < (ULONG_PTR)FileRecord + FileRecord->BytesInUse &&
+               Attribute->Type != AttributeEnd)
+        {
+            if (Attribute->Type == AttributeFileName && Attribute != Target)
+            {
+                Name = (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
+                if ((Name->DirectoryFileReferenceNumber & NTFS_MFT_MASK) == LinkParentMftIndex &&
+                    Name->NameType == WantedType)
+                {
+                    Partner = Attribute;
+                    PartnerName = Name;
+                    break;
+                }
+            }
+
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+        }
+    }
+
+    /* Directory index entries first, then the record - same commit order as
+     * the full-delete path below. */
+    EntryName.Buffer = TargetName->Name;
+    EntryName.Length = EntryName.MaximumLength = TargetName->NameLength * sizeof(WCHAR);
+    Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                             LinkParentMftIndex,
+                                             Fcb->MFTIndex,
+                                             &EntryName,
+                                             CaseSensitive);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Partner != NULL)
+    {
+        EntryName.Buffer = PartnerName->Name;
+        EntryName.Length = EntryName.MaximumLength = PartnerName->NameLength * sizeof(WCHAR);
+        Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                                 LinkParentMftIndex,
+                                                 Fcb->MFTIndex,
+                                                 &EntryName,
+                                                 CaseSensitive);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* Remove the higher-offset attribute first so the other slot's address
+     * stays valid. */
+    Removed = (Partner != NULL) ? 2 : 1;
+    if (Partner != NULL && (ULONG_PTR)Partner > (ULONG_PTR)Target)
+    {
+        RemoveResidentAttribute(DeviceExt, FileRecord, Partner);
+        Partner = NULL;
+    }
+    RemoveResidentAttribute(DeviceExt, FileRecord, Target);
+    if (Partner != NULL)
+        RemoveResidentAttribute(DeviceExt, FileRecord, Partner);
+
+    FileRecord->LinkCount -= Removed;
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Fcb->LinkCount = FileRecord->LinkCount;
+
+    return Status;
+}
+
 NTSTATUS
 NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
+                     PCUNICODE_STRING LinkName,
+                     ULONGLONG LinkParentMftIndex,
                      BOOLEAN CaseSensitive)
 {
     NTSTATUS Status;
@@ -3946,6 +4056,98 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
+    }
+
+    /* Hard-linked file?  Deleting one name must only unlink that name; the
+     * record and its remaining links survive (Windows semantics).  Count the
+     * distinct links first - pure-DOS 8.3 attributes are aliases of a WIN32
+     * name, not links of their own. */
+    {
+        FIND_ATTR_CONTXT FindContext;
+        PNTFS_ATTR_RECORD Attribute;
+        NTSTATUS FindStatus;
+        ULONG NonDosLinks = 0;
+
+        FindStatus = FindFirstAttribute(&FindContext, DeviceExt, FileRecord, FALSE, &Attribute);
+        while (NT_SUCCESS(FindStatus))
+        {
+            if (Attribute->Type == AttributeFileName)
+            {
+                FileNameAttribute = (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
+                if (FileNameAttribute->NameType != NTFS_FILE_NAME_DOS)
+                    NonDosLinks++;
+            }
+
+            FindStatus = FindNextAttribute(&FindContext, &Attribute);
+        }
+        FindCloseAttribute(&FindContext);
+
+        if (NonDosLinks > 1)
+        {
+            UNICODE_STRING LeafName;
+
+            /* The rename-over-existing path names the link it replaces
+             * explicitly; the cleanup path deletes the FCB's own name. */
+            if (LinkName != NULL)
+            {
+                LeafName = *LinkName;
+            }
+            else if (Fcb->ObjectName != NULL && Fcb->ObjectName[0] != UNICODE_NULL)
+            {
+                PWSTR Leaf = Fcb->ObjectName;
+
+                if (Leaf[0] == L'\\')
+                    Leaf++;
+                RtlInitUnicodeString(&LeafName, Leaf);
+            }
+            else
+            {
+                RtlInitUnicodeString(&LeafName, NULL);
+            }
+
+            /* Resolve the opened name's parent directory when the caller
+             * didn't pass it.  Fcb->Entry describes the record's "best"
+             * name, which for a multi-link file can be a different link,
+             * so walk the FCB's own parent path instead. */
+            if (LinkParentMftIndex == 0)
+            {
+                UNICODE_STRING ParentPath;
+                PFILE_RECORD_HEADER ParentRecord = NULL;
+
+                ParentPath.Buffer = Fcb->PathName;
+                if (Fcb->ObjectName != NULL && Fcb->ObjectName > Fcb->PathName)
+                    ParentPath.Length = (USHORT)((ULONG_PTR)Fcb->ObjectName - (ULONG_PTR)Fcb->PathName);
+                else
+                    ParentPath.Length = 0;
+                if (ParentPath.Length == 0)
+                {
+                    ParentPath.Buffer = L"\\";
+                    ParentPath.Length = sizeof(WCHAR);
+                }
+                ParentPath.MaximumLength = ParentPath.Length;
+
+                Status = NtfsLookupFile(DeviceExt,
+                                        &ParentPath,
+                                        CaseSensitive,
+                                        &ParentRecord,
+                                        &LinkParentMftIndex);
+                if (!NT_SUCCESS(Status))
+                {
+                    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                    return Status;
+                }
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentRecord);
+            }
+
+            Status = NtfsUnlinkSingleName(DeviceExt,
+                                          Fcb,
+                                          FileRecord,
+                                          &LeafName,
+                                          LinkParentMftIndex,
+                                          CaseSensitive);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            return Status;
+        }
     }
 
     /* A file record can carry more than one $FILE_NAME attribute - typically a
@@ -4259,7 +4461,11 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
             ExistingFcb.MFTIndex = ExistingMftIndex;
             ExistingFcb.LinkCount = ExistingRecord->LinkCount;
 
-            Status = NtfsDeleteFileRecord(DeviceExt, &ExistingFcb, CaseSensitive);
+            Status = NtfsDeleteFileRecord(DeviceExt,
+                                          &ExistingFcb,
+                                          NewFileName,
+                                          NewParentMftIndex,
+                                          CaseSensitive);
             if (!NT_SUCCESS(Status))
                 goto Cleanup;
 
