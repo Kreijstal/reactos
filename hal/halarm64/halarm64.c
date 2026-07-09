@@ -5255,6 +5255,21 @@ HalSetGicPriorityMask(
                      HalpArm64IrqlToPmr[Irql] :
                      HalpArm64IrqlToPmr[HIGH_LEVEL];
 
+#if DBG
+    /* PMR-DIAG: unmasking the GIC while the logical IRQL is still elevated */
+    if ((Priority == 0xFF) && (KeGetCurrentIrql() > DISPATCH_LEVEL))
+    {
+        static LONG PmrDiagCount = 0;
+        if (PmrDiagCount < 8)
+        {
+            PmrDiagCount++;
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                       "PMR-DIAG: PMR=FF for irql %u while current irql %u, caller %p\n",
+                       Irql, KeGetCurrentIrql(), _ReturnAddress());
+        }
+    }
+#endif
+
     /*
      * Write the priority mask to the GIC.
      * For GICv3, we use ICC_PMR_EL1 system register.

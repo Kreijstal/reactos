@@ -595,6 +595,24 @@ KiArm64DispatchChain(_In_ ULONG IntId,
 
     if (IsListEmpty(ListHead))
     {
+#if DBG
+        /* SPIN-DIAG: capture state before the already-owned bugcheck fires */
+        if (*(volatile ULONG_PTR *)Head->ActualLock != 0)
+        {
+            ULONG64 DiagDaif;
+            extern ULONG FASTCALL HalGetGicPriorityMask(VOID);
+            __asm__ __volatile__("mrs %0, daif" : "=r"(DiagDaif));
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                       "SPIN-DIAG: INTID %lu lock %p owner %lx irql %u oldirql %u pmr %02lx daif %llx thread %p\n",
+                       IntId, Head->ActualLock, *(volatile ULONG_PTR *)Head->ActualLock,
+                       KeGetCurrentIrql(), OldIrql, HalGetGicPriorityMask(), DiagDaif,
+                       KeGetCurrentThread());
+            {
+                extern VOID KiPmrTraceDump(VOID);
+                KiPmrTraceDump();
+            }
+        }
+#endif
         /* Single ISR */
         KxAcquireSpinLock(Head->ActualLock);
         (VOID)Head->ServiceRoutine(Head, Head->ServiceContext);
