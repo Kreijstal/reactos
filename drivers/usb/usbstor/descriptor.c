@@ -353,5 +353,31 @@ USBSTOR_GetPipeHandles(
         return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
+    //
+    // Determine the largest data phase we may hand to the USB stack in a single
+    // Bulk-Only Transport transfer. The host controller cannot move more than
+    // MaximumTransferSize bytes for a pipe in one request; anything larger is
+    // split by usbport and, on controllers with a small per-endpoint descriptor
+    // pool (e.g. UHCI), overruns that pool, stalling the endpoint and corrupting
+    // the transfer under sustained load. Honour the smaller of the two bulk
+    // pipes' limits, falling back to the historical default when the port driver
+    // does not report a value (0).
+    //
+    {
+        ULONG BulkInMax = DeviceExtension->InterfaceInformation->Pipes[DeviceExtension->BulkInPipeIndex].MaximumTransferSize;
+        ULONG BulkOutMax = DeviceExtension->InterfaceInformation->Pipes[DeviceExtension->BulkOutPipeIndex].MaximumTransferSize;
+        ULONG PipeMax = min(BulkInMax, BulkOutMax);
+
+        if (PipeMax == 0)
+        {
+            PipeMax = USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH;
+        }
+
+        DeviceExtension->MaxTransferLength = min(PipeMax, USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH);
+
+        DPRINT("USBSTOR_GetPipeHandles: BulkInMax %lx BulkOutMax %lx -> MaxTransferLength %lx\n",
+               BulkInMax, BulkOutMax, DeviceExtension->MaxTransferLength);
+    }
+
     return STATUS_SUCCESS;
 }

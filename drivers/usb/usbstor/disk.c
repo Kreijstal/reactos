@@ -391,13 +391,16 @@ USBSTOR_HandleQueryProperty(
         // get adapter descriptor, information is returned in the same buffer
         AdapterDescriptor = Irp->AssociatedIrp.SystemBuffer;
 
+        PDODeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+        FDODeviceExtension = (PFDO_DEVICE_EXTENSION)PDODeviceExtension->LowerDeviceObject->DeviceExtension;
+
         // fill out descriptor
         // NOTE: STORAGE_ADAPTER_DESCRIPTOR_WIN8 may vary in size, so it's important to zero out
         // all unused fields
         *AdapterDescriptor = (STORAGE_ADAPTER_DESCRIPTOR_WIN8) {
             .Version = sizeof(STORAGE_ADAPTER_DESCRIPTOR_WIN8),
             .Size = sizeof(STORAGE_ADAPTER_DESCRIPTOR_WIN8),
-            .MaximumTransferLength = USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH,
+            .MaximumTransferLength = FDODeviceExtension->MaxTransferLength,
             .MaximumPhysicalPages = USBSTOR_DEFAULT_MAX_PHYS_PAGES,
             .BusType = BusTypeUsb,
             .BusMajorVersion = 2, //FIXME verify
@@ -421,11 +424,15 @@ USBSTOR_HandleDeviceControl(
     PIO_STACK_LOCATION IoStack;
     NTSTATUS Status;
     PPDO_DEVICE_EXTENSION PDODeviceExtension;
+    PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PSCSI_ADAPTER_BUS_INFO BusInfo;
     PSCSI_INQUIRY_DATA ScsiInquiryData;
     PINQUIRYDATA InquiryData;
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
+
+    PDODeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)PDODeviceExtension->LowerDeviceObject->DeviceExtension;
 
     switch (IoStack->Parameters.DeviceIoControl.IoControlCode)
     {
@@ -450,7 +457,7 @@ USBSTOR_HandleDeviceControl(
 
             Status = SptiHandleScsiPassthru(DeviceObject,
                                             Irp,
-                                            USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH,
+                                            FDODeviceExtension->MaxTransferLength,
                                             USBSTOR_DEFAULT_MAX_PHYS_PAGES);
             break;
         }
@@ -478,7 +485,7 @@ USBSTOR_HandleDeviceControl(
 
             if (Capabilities)
             {
-                Capabilities->MaximumTransferLength = USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH;
+                Capabilities->MaximumTransferLength = FDODeviceExtension->MaxTransferLength;
                 Capabilities->MaximumPhysicalPages = USBSTOR_DEFAULT_MAX_PHYS_PAGES;
                 Capabilities->SupportedAsynchronousEvents = 0;
                 Capabilities->AlignmentMask = 0;
