@@ -154,7 +154,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
             if (Fcb->Stream[0] != UNICODE_NULL)
                 Status = NtfsDeleteStream(DeviceExt, Fcb);
             else
-                Status = NtfsDeleteFileRecord(DeviceExt, Fcb, FALSE);
+                Status = NtfsDeleteFileRecord(DeviceExt, Fcb, NULL, 0, FALSE);
             if (NT_SUCCESS(Status))
                 ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
             else
