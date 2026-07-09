@@ -59,7 +59,7 @@ LocaleID = 409
 ; 3 - ReactOS Nano Server (Reserved)
 InstallationType = 0
 
-; Enable this section to automatically launch programs after 3rd boot.
+; Enable this section to automatically launch programs once after 3rd boot.
 ;[GuiRunOnce]
 ;%SystemRoot%\system32\cmd.exe
 

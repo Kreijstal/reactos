@@ -633,7 +633,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
                                                  &Process->
                                                  SeAuditProcessCreationInfo.
                                                  ImageFileName);
-        if (!NT_SUCCESS(Status)) goto CleanupWithRef;
+        if (!NT_SUCCESS(Status)) { DPRINT1("PSDIAG: MmInitializeProcessAddressSpace failed 0x%lx\n", Status); goto CleanupWithRef; } // PSDIAG
 
         //
         // We need a PEB
@@ -735,7 +735,7 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
             // Create it
             //
             Status = MmCreatePeb(Process, &InitialPeb, &Process->Peb);
-            if (!NT_SUCCESS(Status)) goto CleanupWithRef;
+            if (!NT_SUCCESS(Status)) { DPRINT1("PSDIAG: MmCreatePeb failed 0x%lx\n", Status); goto CleanupWithRef; } // PSDIAG
         }
         else
         {

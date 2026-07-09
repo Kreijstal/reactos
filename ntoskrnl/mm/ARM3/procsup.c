@@ -55,12 +55,16 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
 
     Status = PsChargeProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
     if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("PSDIAG: PebTeb quota charge failed 0x%lx\n", Status); // PSDIAG
         return Status;
+    }
 
     /* Allocate a VAD */
     Vad = ExAllocatePoolWithTag(NonPagedPool, sizeof(MMVAD_LONG), 'ldaV');
     if (!Vad)
     {
+        DPRINT1("PSDIAG: PebTeb VAD pool alloc failed\n"); // PSDIAG
         Status = STATUS_NO_MEMORY;
         goto FailPath;
     }
@@ -155,6 +159,7 @@ MiCreatePebOrTeb(IN PEPROCESS Process,
                            MEM_TOP_DOWN);
     if (!NT_SUCCESS(Status))
     {
+        DPRINT1("PSDIAG: PebTeb MiInsertVadEx failed 0x%lx (Size %lx Highest %p IsPeb %d)\n", Status, Size, (PVOID)HighestAddress, IsPeb); // PSDIAG
         ExFreePoolWithTag(Vad, 'ldaV');
         Status = STATUS_NO_MEMORY;
         goto FailPath;
@@ -639,6 +644,7 @@ MmCreatePeb(IN PEPROCESS Process,
     DPRINT("NLS Tables at: %p\n", TableBase);
     if (!NT_SUCCESS(Status))
     {
+        DPRINT1("PSDIAG: NLS MmMapViewOfSection failed 0x%lx\n", Status); // PSDIAG
         /* Cleanup and exit */
         KeDetachProcess();
         return Status;
@@ -651,6 +657,7 @@ MmCreatePeb(IN PEPROCESS Process,
     DPRINT("PEB at: %p\n", Peb);
     if (!NT_SUCCESS(Status))
     {
+        DPRINT1("PSDIAG: MiCreatePebOrTeb failed 0x%lx\n", Status); // PSDIAG
         /* Cleanup and exit */
         KeDetachProcess();
         return Status;
@@ -1201,6 +1208,8 @@ MmInitializeProcessAddressSpace(IN PEPROCESS Process,
                                     ViewUnmap,
                                     MEM_COMMIT,
                                     PAGE_READWRITE);
+
+        if (!NT_SUCCESS(Status)) DPRINT1("PSDIAG: MmMapViewOfSection(image) failed 0x%lx\n", Status); // PSDIAG
 
         /* Save the pointer */
         Process->SectionBaseAddress = ImageBase;

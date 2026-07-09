@@ -835,7 +835,10 @@ MiAllocatePoolPages(IN POOL_TYPE PoolType,
         //
         // Ran out of memory
         //
-        DPRINT("Out of NP Expansion Pool\n");
+        DPRINT1("PSDIAG: Out of NP Expansion Pool: req %lu pages, FreeNP %lu, NPsize %Iu, NPmax %Iu, ExpCharge %lu\n", // PSDIAG
+                SizeInPages, MmNumberOfFreeNonPagedPool,
+                MmSizeOfNonPagedPoolInBytes, MmMaximumNonPagedPoolInBytes,
+                MiExpansionPoolPagesInitialCharge);
         return NULL;
     }
 
