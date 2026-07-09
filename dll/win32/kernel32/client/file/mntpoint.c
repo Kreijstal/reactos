@@ -49,6 +49,42 @@ GetVolumeNameForRoot(IN LPCWSTR lpszRootPath,
         return FALSE;
     }
 
+    /* The device-name query below succeeds on a handle to ANY object on the
+     * volume, because the FSD forwards IOCTL_MOUNTDEV_QUERY_DEVICE_NAME down
+     * to the storage stack.  So first make sure the path really names a
+     * volume root and not some file or directory inside it - otherwise
+     * GetVolumePathNameW would take every existing path for a mount point
+     * and return the deepest existing prefix instead of the mount root.
+     * Opening without FILE_OPEN_REPARSE_POINT resolves a mounted-folder
+     * reparse point to the root of the target volume, which is exactly the
+     * volume whose name is being asked for. */
+    {
+        HANDLE RootHandle;
+        BOOL IsRoot;
+
+        InitializeObjectAttributes(&ObjectAttributes, &NtPathName,
+                                   OBJ_CASE_INSENSITIVE, NULL, NULL);
+        Status = NtOpenFile(&RootHandle, SYNCHRONIZE,
+                            &ObjectAttributes, &IoStatusBlock,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+        if (!NT_SUCCESS(Status))
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathName.Buffer);
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+
+        IsRoot = IsThisARootDirectory(RootHandle, NULL);
+        NtClose(RootHandle);
+        if (!IsRoot)
+        {
+            RtlFreeHeap(RtlGetProcessHeap(), 0, NtPathName.Buffer);
+            SetLastError(ERROR_DIR_NOT_ROOT);
+            return FALSE;
+        }
+    }
+
     /* If it's a root path - likely - drop backslash to open volume */
     if (NtPathName.Buffer[(NtPathName.Length / sizeof(WCHAR)) - 1] == L'\\')
     {
