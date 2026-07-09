@@ -755,6 +755,28 @@ NtfsFCBInitializeCache(PNTFS_VCB Vcb,
     }
     _SEH2_END;
 
+    /* Pin the FCB for the lifetime of this stream FileObject.  The stream FO
+     * carries the cache map, and once the memory manager creates a data
+     * section for it, MM holds a reference on it via Segment->FileObject and
+     * reaches this FCB's separately-allocated SectionObjectPointers through
+     * FileObject->SectionObjectPointer.  Without a matching FCB reference the
+     * FCB (with its PagingIoResource) and its SectionObjectPointers get freed
+     * when the last *external* handle closes - while MM still references the
+     * stream FO - producing a use-after-free (MiGrabDataSection dereferences a
+     * recycled DataSectionObject; the freed SectionObjectPointers block gets a
+     * stale write, corrupting the NonPagedPool free list).  The reference is
+     * dropped in NtfsCloseFile when the stream FO is finally closed, which the
+     * I/O manager defers until MM drops its ObReference (ntoskrnl/mm/section.c).
+     * This mirrors how external FILE_OBJECTs pin the FCB via
+     * NTFS_CCB_FLAG_COUNTED.  Directories keep their FCBs cached explicitly and
+     * never carry a data section, so they are excluded to preserve deleted-
+     * directory eviction in NtfsReleaseFCB. */
+    if (!NtfsFCBIsDirectory(Fcb))
+    {
+        NtfsGrabFCB(Vcb, Fcb);
+        newCCB->Flags |= NTFS_CCB_FLAG_COUNTED;
+    }
+
     ObDereferenceObject(FileObject);
     Fcb->Flags |= FCB_CACHE_INITIALIZED;
 
@@ -903,8 +925,11 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
         rcFCB->Entry.FileAttributes |= StdInfo->FileAttribute;
     }
 
-    NtfsFCBInitializeCache(Vcb, rcFCB);
+    /* Initialise RefCount before priming the cache: NtfsFCBInitializeCache
+     * takes a reference on behalf of the stream FileObject (see there), which
+     * must not be clobbered by this assignment. */
     rcFCB->RefCount = 1;
+    NtfsFCBInitializeCache(Vcb, rcFCB);
     rcFCB->MFTIndex = MFTIndex;
     rcFCB->LinkCount = Record->LinkCount;
     NtfsAddFCBToTable(Vcb, rcFCB);
