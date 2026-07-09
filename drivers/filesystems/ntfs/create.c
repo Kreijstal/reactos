@@ -243,6 +243,7 @@ NtfsOpenFile(PDEVICE_EXTENSION DeviceExt,
              PFILE_OBJECT FileObject,
              PWSTR FileName,
              BOOLEAN CaseSensitive,
+             BOOLEAN VolumeAbsolute,
              PNTFS_FCB * FoundFCB)
 {
     PNTFS_FCB ParentFcb;
@@ -259,7 +260,10 @@ NtfsOpenFile(PDEVICE_EXTENSION DeviceExt,
 
     *FoundFCB = NULL;
 
-    if (FileObject->RelatedFileObject)
+    /* An open-by-file-ID name has already been resolved to a volume-absolute
+     * path; its RelatedFileObject only located the volume (Windows accepts
+     * any handle on it, directory or not) and takes no part in the walk. */
+    if (FileObject->RelatedFileObject && !VolumeAbsolute)
     {
         DPRINT("Converting relative filename to absolute filename\n");
 
@@ -325,6 +329,7 @@ NtfsOpenTargetDirectory(PDEVICE_EXTENSION DeviceExt,
                         PFILE_OBJECT FileObject,
                         PWSTR FileName,
                         BOOLEAN CaseSensitive,
+                        BOOLEAN VolumeAbsolute,
                         PNTFS_FCB *ParentFcb,
                         PULONG IoInformation)
 {
@@ -335,7 +340,7 @@ NtfsOpenTargetDirectory(PDEVICE_EXTENSION DeviceExt,
     *ParentFcb = NULL;
     *IoInformation = 0;
 
-    if (FileObject->RelatedFileObject)
+    if (FileObject->RelatedFileObject && !VolumeAbsolute)
     {
         Status = NtfsMakeAbsoluteFilename(FileObject->RelatedFileObject,
                                           FileName,
@@ -663,6 +668,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                                          FileObject,
                                          ((RequestedOptions & FILE_OPEN_BY_FILE_ID) ? FullPath.Buffer : FileObject->FileName.Buffer),
                                          BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                         BooleanFlagOn(RequestedOptions, FILE_OPEN_BY_FILE_ID),
                                          &Fcb,
                                          &IoInformation);
 
@@ -783,6 +789,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                               FileObject,
                               ((RequestedOptions & FILE_OPEN_BY_FILE_ID) ? FullPath.Buffer : FileObject->FileName.Buffer),
                               BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                              BooleanFlagOn(RequestedOptions, FILE_OPEN_BY_FILE_ID),
                               &Fcb);
 
         if (RequestedOptions & FILE_OPEN_BY_FILE_ID)
