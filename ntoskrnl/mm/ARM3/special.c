@@ -162,9 +162,11 @@ MiInitializeSpecialPool(VOID)
     ULONG SpecialPoolPtes, i;
     PMMPTE PointerPte;
 
+    DPRINT1("MiInitializeSpecialPool: MmSpecialPoolTag=0x%x\n", MmSpecialPoolTag);
     /* Check if there is a special pool tag */
     if ((MmSpecialPoolTag == 0) ||
         (MmSpecialPoolTag == -1)) return;
+    DPRINT1("MiInitializeSpecialPool: tag OK, reserving PTEs\n");
 
     /* Calculate number of system PTEs for the special pool */
     if (MmNumberOfSystemPtes >= 0x3000)
@@ -180,6 +182,7 @@ MiInitializeSpecialPool(VOID)
 
     ASSERT((SpecialPoolPtes & (PTE_PER_PAGE - 1)) == 0);
 
+    DPRINT1("MiInitializeSpecialPool: requesting %lu PTEs\n", SpecialPoolPtes);
     /* Reserve those PTEs */
     do
     {
@@ -193,6 +196,7 @@ MiInitializeSpecialPool(VOID)
         SpecialPoolPtes -= PTE_PER_PAGE;
     } while (SpecialPoolPtes);
 
+    DPRINT1("MiInitializeSpecialPool: reserved %lu PTEs, PointerPte=%p\n", SpecialPoolPtes, PointerPte);
     /* Fail if we couldn't reserve them at all */
     if (!SpecialPoolPtes) return;
 

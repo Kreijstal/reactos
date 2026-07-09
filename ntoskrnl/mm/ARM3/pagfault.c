@@ -1863,6 +1863,26 @@ MmArmAccessFault(IN ULONG FaultCode,
             /* Always check if the PDE is valid */
             (PointerPde->u.Hard.Valid == 0))
         {
+            /* Diagnostic: dump trap-frame return chain for OOB-write hunting. */
+#if defined(_M_AMD64)
+            if (TrapInformation)
+            {
+                PKTRAP_FRAME Tf = (PKTRAP_FRAME)TrapInformation;
+                DPRINT1("OOB-fault@pde: Address=%p Rip=%p Rsp=%p Rbp=%p\n",
+                        Address, (PVOID)Tf->Rip, (PVOID)Tf->Rsp, (PVOID)Tf->Rbp);
+                _SEH2_TRY
+                {
+                    PULONG_PTR Stk = (PULONG_PTR)Tf->Rsp;
+                    DPRINT1("OOB-fault@pde: [Rsp+0]=%p [+8]=%p [+16]=%p [+24]=%p\n",
+                            (PVOID)Stk[0], (PVOID)Stk[1], (PVOID)Stk[2], (PVOID)Stk[3]);
+                    DPRINT1("OOB-fault@pde: [+32]=%p [+40]=%p [+48]=%p [+56]=%p\n",
+                            (PVOID)Stk[4], (PVOID)Stk[5], (PVOID)Stk[6], (PVOID)Stk[7]);
+                    DPRINT1("OOB-fault@pde: [+64]=%p [+72]=%p [+80]=%p [+88]=%p\n",
+                            (PVOID)Stk[8], (PVOID)Stk[9], (PVOID)Stk[10], (PVOID)Stk[11]);
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { } _SEH2_END;
+            }
+#endif /* _M_AMD64 */
             /* PXE/PPE/PDE (still) not valid, kill the system */
             KeBugCheckEx(PAGE_FAULT_IN_NONPAGED_AREA,
                          (ULONG_PTR)Address,
@@ -2102,6 +2122,22 @@ RetryKernel:
             /* Check for no-access PTE */
             if (TempPte.u.Soft.Protection == MM_NOACCESS)
             {
+#if defined(_M_AMD64)
+                if (TrapInformation)
+                {
+                    PKTRAP_FRAME Tf = (PKTRAP_FRAME)TrapInformation;
+                    DPRINT1("OOB-fault@noaccess: Address=%p Rip=%p Rsp=%p Rbp=%p\n",
+                            Address, (PVOID)Tf->Rip, (PVOID)Tf->Rsp, (PVOID)Tf->Rbp);
+                    _SEH2_TRY
+                    {
+                        PULONG_PTR Stk = (PULONG_PTR)Tf->Rsp;
+                        DPRINT1("OOB-fault@noaccess: [+0]=%p [+8]=%p [+16]=%p [+24]=%p [+32]=%p [+40]=%p [+48]=%p [+56]=%p\n",
+                                (PVOID)Stk[0], (PVOID)Stk[1], (PVOID)Stk[2], (PVOID)Stk[3],
+                                (PVOID)Stk[4], (PVOID)Stk[5], (PVOID)Stk[6], (PVOID)Stk[7]);
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { } _SEH2_END;
+                }
+#endif /* _M_AMD64 */
                 /* Bugcheck the system! */
                 KeBugCheckEx(PAGE_FAULT_IN_NONPAGED_AREA,
                              (ULONG_PTR)Address,
@@ -2113,6 +2149,41 @@ RetryKernel:
             /* Check for no protecton at all */
             if (TempPte.u.Soft.Protection == MM_ZERO_ACCESS)
             {
+#if defined(_M_AMD64)
+                if (TrapInformation)
+                {
+                    PKTRAP_FRAME Tf = (PKTRAP_FRAME)TrapInformation;
+                    DPRINT1("OOB-fault@zero: Address=%p Rip=%p Rsp=%p Rbp=%p\n",
+                            Address, (PVOID)Tf->Rip, (PVOID)Tf->Rsp, (PVOID)Tf->Rbp);
+                    _SEH2_TRY
+                    {
+                        PULONG_PTR Stk = (PULONG_PTR)Tf->Rsp;
+                        ULONG_PTR RetAddr = Stk[0];
+                        DPRINT1("OOB-fault@zero: ret=%p [+8]=%p [+16]=%p [+24]=%p [+32]=%p [+40]=%p [+48]=%p [+56]=%p\n",
+                                (PVOID)Stk[0], (PVOID)Stk[1], (PVOID)Stk[2], (PVOID)Stk[3],
+                                (PVOID)Stk[4], (PVOID)Stk[5], (PVOID)Stk[6], (PVOID)Stk[7]);
+                        /* Walk PsLoadedModuleList to identify the module containing RetAddr */
+                        {
+                            extern LIST_ENTRY PsLoadedModuleList;
+                            PLIST_ENTRY Entry = PsLoadedModuleList.Flink;
+                            while (Entry && Entry != &PsLoadedModuleList)
+                            {
+                                PLDR_DATA_TABLE_ENTRY Ldr = CONTAINING_RECORD(Entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+                                ULONG_PTR Base = (ULONG_PTR)Ldr->DllBase;
+                                ULONG_PTR End = Base + Ldr->SizeOfImage;
+                                if (RetAddr >= Base && RetAddr < End)
+                                {
+                                    DPRINT1("OOB-fault@zero: ret in %wZ base=%p off=0x%lx\n",
+                                            &Ldr->BaseDllName, (PVOID)Base, (ULONG)(RetAddr - Base));
+                                    break;
+                                }
+                                Entry = Entry->Flink;
+                            }
+                        }
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) { } _SEH2_END;
+                }
+#endif /* _M_AMD64 */
                 /* Bugcheck the system! */
                 KeBugCheckEx(PAGE_FAULT_IN_NONPAGED_AREA,
                              (ULONG_PTR)Address,
@@ -2491,7 +2562,7 @@ UserFault:
              * FLG_DISABLE_DEBUG_PROMPTS the assertion raises and unwinds
              * the working-set lock, which then bugchecks the next time
              * something locks the address space. Fail the fault cleanly
-             * instead — drop the WS lock and return an error status, the
+             * instead - drop the WS lock and return an error status, the
              * same path the supported case takes. */
             if (ProtectionCode == MM_DECOMMIT || ProtoPte != NULL)
             {
@@ -2713,6 +2784,19 @@ ExitUser:
 
     if (Status == STATUS_NO_MEMORY)
     {
+        /* NOMEM-DIAG (uncommitted): identify the primary fault that ran the
+         * free lists dry during early boot. */
+#if defined(_M_ARM64)
+        DPRINT1("NOMEM-FAULT: Address=%p Pc=%p AvailablePages=%Ix\n",
+                Address,
+                TrapInformation ? (PVOID)((PKTRAP_FRAME)TrapInformation)->Pc : NULL,
+                (ULONG_PTR)MmAvailablePages);
+#elif defined(_M_AMD64)
+        DPRINT1("NOMEM-FAULT: Address=%p Pc=%p AvailablePages=%Ix\n",
+                Address,
+                TrapInformation ? (PVOID)((PKTRAP_FRAME)TrapInformation)->Rip : NULL,
+                (ULONG_PTR)MmAvailablePages);
+#endif
         MmRebalanceMemoryConsumersAndWait();
         goto UserFault;
     }

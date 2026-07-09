@@ -153,6 +153,21 @@ ProcessLoop:
         /* Make sure nobody is trying to play smart with us */
         ASSERT((ULONG_PTR)WorkItem->WorkerRoutine > MmUserProbeAddress);
 
+#if defined(_M_ARM64)
+        {
+            static LONG WorkDiagCount = 0;
+            ULONG64 WorkDaif;
+            __asm__ __volatile__("mrs %0, daif" : "=r"(WorkDaif));
+            if ((WorkDaif & (1ULL << 7)) && (WorkDiagCount < 4))
+            {
+                WorkDiagCount++;
+                DPRINT1("WORK-DIAG: masked after KeRemoveQueue! Daif=%llx Irql=%u thread=%p routine=%p\n",
+                        WorkDaif, KeGetCurrentIrql(), KeGetCurrentThread(),
+                        WorkItem->WorkerRoutine);
+            }
+        }
+#endif
+
         /* Call the Worker Routine */
         WorkItem->WorkerRoutine(WorkItem->Parameter);
 

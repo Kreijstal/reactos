@@ -2386,6 +2386,16 @@ NtQueryInformationFile(IN HANDLE FileHandle,
         DeviceObject = IoGetRelatedDeviceObject(FileObject);
     }
 
+#if DBG
+    if ((FileInformationClass == FileAllInformation) &&
+        (Length < IopQueryOperationLength[FileInformationClass]) &&
+        (DeviceObject->DeviceType != FILE_DEVICE_NAMED_PIPE))
+    {
+        ObDereferenceObject(FileObject);
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+#endif
+
     /* Check if this is a file that was opened for Synch I/O */
     if (FileObject->Flags & FO_SYNCHRONOUS_IO)
     {

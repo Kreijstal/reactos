@@ -2705,6 +2705,18 @@ Arm64MappingPlanApply(
         if (Request->TableOnly)
             continue;
 
+        /* PHYSALIAS-DIAG (uncommitted): trace each phys-alias mapping */
+        if (Target == Arm64MappingPhysicalAlias)
+        {
+            char diag[128];
+            RtlStringCbPrintfA(diag, sizeof(diag),
+                "[PA-DIAG] map va=%llx pa=%llx size=%llx\n",
+                (unsigned long long)Request->VirtualBase,
+                (unsigned long long)Request->PhysicalBase,
+                (unsigned long long)Request->Size);
+            UartPuts(diag);
+        }
+
         if (!map_region_hierarchical(Request->VirtualBase,
                                      Request->PhysicalBase,
                                      Request->Size,
@@ -2713,6 +2725,17 @@ Arm64MappingPlanApply(
             UartPuts("[PLAN] map_region_hierarchical FAILED\n");
             return FALSE;
         }
+    }
+
+    /* PHYSALIAS-DIAG (uncommitted): dump the L0 slot after the pass */
+    if (Target == Arm64MappingPhysicalAlias)
+    {
+        char diag[128];
+        RtlStringCbPrintfA(diag, sizeof(diag),
+            "[PA-DIAG] done; kernel L0[0x%llx]=%llx\n",
+            (unsigned long long)ARM64_PHYS_MAP_L0_INDEX,
+            (unsigned long long)arm64_kernel_l0_table[ARM64_PHYS_MAP_L0_INDEX]);
+        UartPuts(diag);
     }
 
     /* Process table-only requests after descriptor-driven mappings */
@@ -2905,6 +2928,10 @@ static VOID setup_pgtables(VOID)
     ULONG MemoryMapSize;
     FREELDR_MEMORY_DESCRIPTOR* MemoryMap;
     ULONG i;
+
+    /* PT-DIAG (uncommitted) */
+    UartPuts(BootServicesExitedFlag ? "[PT-DIAG] setup_pgtables post-EBS\n"
+                                    : "[PT-DIAG] setup_pgtables pre-EBS\n");
 
     if (!arm64_l0_page_table || !arm64_kernel_l0_table || !arm64_kuser_l1_table ||
         !arm64_kuser_l2_table || !arm64_kuser_l3_table || !arm64_l1_page_tables ||

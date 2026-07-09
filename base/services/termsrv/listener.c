@@ -14,6 +14,7 @@
 #include "cliprdr.h"
 #include "listener.h"
 #include "rdpbcgr.h"
+#include "rdpcrypt.h"
 #include "termsrv.h"
 
 #define TERMSRV_LISTEN_ENV_NAME L"REACTOS_TERMSRV_LISTEN"
@@ -69,47 +70,24 @@
 #define TERMSRV_CLIPRDR_TEMP_ROOT L"TermSrvClip"
 #define TERMSRV_CLIPRDR_MAX_WIRE_FILE_DESCRIPTORS 20
 
-static const UCHAR TermSrvMcsConnectResponsePayload[] =
-{
-    /*
-     * BER MCS Connect-Response with a minimal T.124 ConferenceCreateResponse.
-     * The GCC user data advertises RDP 5.x core data, four static virtual
-     * channels, and no standard RDP encryption.
-     */
-    0x7f, 0x66, 0x72,
-    0x0a, 0x01, 0x00,
-    0x02, 0x01, 0x00,
-    0x30, 0x20,
-    0x02, 0x02, 0x00, 0x22,
-    0x02, 0x02, 0x00, 0x03,
-    0x02, 0x02, 0x00, 0x00,
-    0x02, 0x02, 0x00, 0x01,
-    0x02, 0x02, 0x00, 0x00,
-    0x02, 0x02, 0x00, 0x01,
-    0x02, 0x02, 0xff, 0xff,
-    0x02, 0x02, 0x00, 0x02,
-    0x04, 0x40,
-    0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01,
-    0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00,
-    0x01, 0xc0, 0x00, 'M', 'c', 'D', 'n', 0x32,
-    0x01, 0x0c, 0x10, 0x00,
-    0x04, 0x00, 0x08, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    0x03, 0x0c, 0x10, 0x00,
-    0xeb, 0x03, 0x04, 0x00,
-    0xec, 0x03, 0xed, 0x03,
-    0xee, 0x03, 0xef, 0x03,
-    0x04, 0x0c, 0x06, 0x00,
-    0xf0, 0x03,
-    0x02, 0x0c, 0x0c, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00
-};
-
 static VOID
 TermSrvLogFailure(
     _In_z_ const CHAR *Message);
+
+/* Points at the active connection's crypto state while a client is being
+ * serviced (connections are handled one at a time). NULL when idle or before
+ * the key exchange completes. Used by the server PDU writers to prepend the
+ * basic security header that RDP standard security requires on server output. */
+static TERMSRV_RDP_CRYPT *g_TermSrvActiveCrypt = NULL;
+
+/* TRUE once the client random has been exchanged and server output must carry
+ * a basic security header (empty, since ENCRYPTION_LEVEL_LOW leaves the
+ * server-to-client direction unencrypted). */
+static BOOL
+TermSrvServerSecurityHeaderActive(VOID)
+{
+    return g_TermSrvActiveCrypt != NULL && g_TermSrvActiveCrypt->Enabled;
+}
 
 typedef enum _TERMSRV_PACKET_PLACEHOLDER
 {
@@ -121,6 +99,7 @@ typedef enum _TERMSRV_PACKET_PLACEHOLDER
 typedef struct _TERMSRV_CLIENT_CONTEXT
 {
     TERMSRV_RDP_PEER Peer;
+    TERMSRV_RDP_CRYPT Crypt;
     TERMSRV_CLIPRDR_CHANNEL CliprdrChannel;
     TERMSRV_CLIPRDR_WIN32_BACKEND CliprdrWin32;
     TERMSRV_CLIPRDR_BACKEND CliprdrBackend;
@@ -682,7 +661,8 @@ TermSrvReceiveTpkt(
     _In_ HANDLE StopEvent,
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
     _In_ INT BufferLength,
-    _Out_ INT *Received)
+    _Out_ INT *Received,
+    _Inout_opt_ TERMSRV_RDP_CRYPT *Crypt)
 {
     USHORT PacketLength;
 
@@ -725,6 +705,15 @@ TermSrvReceiveTpkt(
     {
         TermSrvLogFailure("expected TPKT packet");
         return FALSE;
+    }
+
+    /* Decrypt the client-to-server stream once RDP standard security is active.
+     * A no-op before the key exchange completes or for unencrypted PDUs. */
+    if (Crypt != NULL)
+    {
+        SIZE_T DecryptedLength = (SIZE_T)*Received;
+        TermSrvCryptUnwrapInbound(Crypt, Buffer, &DecryptedLength);
+        *Received = (INT)DecryptedLength;
     }
 
     return TRUE;
@@ -885,32 +874,176 @@ TermSrvTryAssignCliprdrFromStaticChannelList(
     return FALSE;
 }
 
+/* BER definite length: 1 byte (<=0x7f), 2 bytes (0x81 xx) or 3 bytes (0x82 xx xx). */
+static SIZE_T
+TermSrvBerLengthSize(SIZE_T Length)
+{
+    if (Length <= 0x7f)
+        return 1;
+    if (Length <= 0xff)
+        return 2;
+    return 3;
+}
+
+static SIZE_T
+TermSrvWriteBerLength(UCHAR *Buffer, SIZE_T Length)
+{
+    if (Length <= 0x7f)
+    {
+        Buffer[0] = (UCHAR)Length;
+        return 1;
+    }
+    if (Length <= 0xff)
+    {
+        Buffer[0] = 0x81;
+        Buffer[1] = (UCHAR)Length;
+        return 2;
+    }
+    Buffer[0] = 0x82;
+    Buffer[1] = (UCHAR)(Length >> 8);
+    Buffer[2] = (UCHAR)Length;
+    return 3;
+}
+
+/* PER length determinant: 1 byte (<0x80) or 2 bytes (0x8000 | value). */
+static SIZE_T
+TermSrvPerLengthSize(SIZE_T Length)
+{
+    return (Length < 0x80) ? 1 : 2;
+}
+
+static SIZE_T
+TermSrvWritePerLength(UCHAR *Buffer, SIZE_T Length)
+{
+    if (Length < 0x80)
+    {
+        Buffer[0] = (UCHAR)Length;
+        return 1;
+    }
+    Buffer[0] = (UCHAR)(0x80 | (Length >> 8));
+    Buffer[1] = (UCHAR)Length;
+    return 2;
+}
+
 static SIZE_T
 TermSrvBuildMcsConnectResponsePayload(
     _Out_writes_bytes_(BufferLength) UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
-    _In_opt_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList)
+    _In_opt_ const TERMSRV_RDPBCGR_STATIC_CHANNEL_LIST *ChannelList,
+    _In_ const TERMSRV_RDP_CRYPT *Crypt)
 {
-    SIZE_T PayloadLength;
-    USHORT ChannelCount;
+    /*
+     * BER MCS Connect-Response wrapping a T.124 ConferenceCreateResponse. All
+     * of the enclosing length fields (GCC user-data length, the userData OCTET
+     * STRING length and the outer MCS length) are recomputed here because the
+     * SC_SECURITY block is now variable-length: it carries the server random
+     * and Server Proprietary Certificate, pushing the totals past the 0x7f
+     * single-byte BER/PER boundary, so multi-byte length encodings are used.
+     */
+    static const UCHAR DomainParams[] =
+    {
+        0x0a, 0x01, 0x00,               /* result = rt-successful */
+        0x02, 0x01, 0x00,               /* calledConnectId = 0 */
+        0x30, 0x20,                     /* domainParameters SEQUENCE, length 32 */
+        0x02, 0x02, 0x00, 0x22,
+        0x02, 0x02, 0x00, 0x03,
+        0x02, 0x02, 0x00, 0x00,
+        0x02, 0x02, 0x00, 0x01,
+        0x02, 0x02, 0x00, 0x00,
+        0x02, 0x02, 0x00, 0x01,
+        0x02, 0x02, 0xff, 0xff,
+        0x02, 0x02, 0x00, 0x02
+    };
+    static const UCHAR GccHeader[] =
+    {
+        0x00, 0x05, 0x00, 0x14, 0x7c, 0x00, 0x01,
+        0x2a, 0x14, 0x76, 0x0a, 0x01, 0x01, 0x00,
+        0x01, 0xc0, 0x00, 'M', 'c', 'D', 'n'
+    };
+    static const UCHAR ScCore[] =
+    {
+        0x01, 0x0c, 0x10, 0x00,
+        0x04, 0x00, 0x08, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00
+    };
+    static const UCHAR ScMsgChannel[] =
+    {
+        0x04, 0x0c, 0x06, 0x00, 0xf0, 0x03
+    };
+    UCHAR ScSecurity[256];
+    SIZE_T ScSecurityLen;
 
-    PayloadLength = sizeof(TermSrvMcsConnectResponsePayload);
-    if (Buffer == NULL || BufferLength < PayloadLength)
+    USHORT ChannelCount = 4;
+    SIZE_T i;
+    SIZE_T Pos;
+    SIZE_T PadBytes;
+    SIZE_T ScNetLen;
+    SIZE_T ScBlocksLen;
+    SIZE_T OctetStringLen;
+    SIZE_T McsLen;
+    SIZE_T Total;
+
+    ScSecurityLen = TermSrvCryptBuildServerSecurityBlock(ScSecurity,
+                                                         sizeof(ScSecurity),
+                                                         Crypt);
+    if (ScSecurityLen == 0)
         return 0;
 
-    CopyMemory(Buffer, TermSrvMcsConnectResponsePayload, PayloadLength);
-
-    ChannelCount = 4;
     if (ChannelList != NULL && ChannelList->Count < ChannelCount)
         ChannelCount = (USHORT)ChannelList->Count;
 
-    /*
-     * Patch SC_NET.channelCount in the fixed GCC response. FreeRDP rejects
-     * servers that advertise more static channels than the client requested.
-     */
-    Buffer[89] = (UCHAR)ChannelCount;
-    Buffer[90] = (UCHAR)(ChannelCount >> 8);
-    return PayloadLength;
+    PadBytes = (ChannelCount & 1) ? 2 : 0;
+    ScNetLen = 8 + (SIZE_T)ChannelCount * 2 + PadBytes;           /* includes 4-byte header */
+    ScBlocksLen = sizeof(ScCore) + ScNetLen + sizeof(ScMsgChannel) + ScSecurityLen;
+    OctetStringLen = sizeof(GccHeader) + TermSrvPerLengthSize(ScBlocksLen) + ScBlocksLen;
+    McsLen = sizeof(DomainParams) + 1 + TermSrvBerLengthSize(OctetStringLen) + OctetStringLen;
+    Total = 2 + TermSrvBerLengthSize(McsLen) + McsLen;           /* + 0x7f 0x66 <len> */
+
+    if (Buffer == NULL || BufferLength < Total)
+        return 0;
+
+    Pos = 0;
+    Buffer[Pos++] = 0x7f;
+    Buffer[Pos++] = 0x66;
+    Pos += TermSrvWriteBerLength(&Buffer[Pos], McsLen);
+    CopyMemory(&Buffer[Pos], DomainParams, sizeof(DomainParams));
+    Pos += sizeof(DomainParams);
+    Buffer[Pos++] = 0x04;                                        /* userData OCTET STRING */
+    Pos += TermSrvWriteBerLength(&Buffer[Pos], OctetStringLen);
+    CopyMemory(&Buffer[Pos], GccHeader, sizeof(GccHeader));
+    Pos += sizeof(GccHeader);
+    Pos += TermSrvWritePerLength(&Buffer[Pos], ScBlocksLen);     /* GCC user-data length */
+    CopyMemory(&Buffer[Pos], ScCore, sizeof(ScCore));
+    Pos += sizeof(ScCore);
+
+    /* SC_NET with exactly ChannelCount advertised static channels. */
+    Buffer[Pos++] = 0x03;
+    Buffer[Pos++] = 0x0c;
+    Buffer[Pos++] = (UCHAR)ScNetLen;
+    Buffer[Pos++] = (UCHAR)(ScNetLen >> 8);
+    Buffer[Pos++] = 0xeb;                                        /* MCSChannelId (I/O channel) */
+    Buffer[Pos++] = 0x03;
+    Buffer[Pos++] = (UCHAR)ChannelCount;
+    Buffer[Pos++] = (UCHAR)(ChannelCount >> 8);
+    for (i = 0; i < ChannelCount; i++)
+    {
+        USHORT ChannelId = (USHORT)(0x03ec + i);
+        Buffer[Pos++] = (UCHAR)ChannelId;
+        Buffer[Pos++] = (UCHAR)(ChannelId >> 8);
+    }
+    if (PadBytes != 0)
+    {
+        Buffer[Pos++] = 0x00;
+        Buffer[Pos++] = 0x00;
+    }
+
+    CopyMemory(&Buffer[Pos], ScMsgChannel, sizeof(ScMsgChannel));
+    Pos += sizeof(ScMsgChannel);
+    CopyMemory(&Buffer[Pos], ScSecurity, ScSecurityLen);
+    Pos += ScSecurityLen;
+
+    return Pos;
 }
 
 static ULONG
@@ -959,6 +1092,8 @@ TermSrvWriteServerChannelPayload(
     SIZE_T PacketLength;
     SIZE_T PayloadOffset;
     SIZE_T LengthBytes;
+    SIZE_T EffectiveLength;
+    BOOL AddSecurityHeader;
 
     if (BytesWritten == NULL)
         return FALSE;
@@ -967,7 +1102,14 @@ TermSrvWriteServerChannelPayload(
     if (Buffer == NULL || Payload == NULL || PayloadLength > 0x7fff)
         return FALSE;
 
-    PacketLength = 7 + ((PayloadLength > 0x7f) ? 8 : 7) + PayloadLength;
+    /* Virtual-channel PDUs never carry their own security header, so prepend the
+     * empty basic security header once RDP standard security is negotiated. */
+    AddSecurityHeader = TermSrvServerSecurityHeaderActive();
+    EffectiveLength = PayloadLength + (AddSecurityHeader ? 4 : 0);
+    if (EffectiveLength > 0x7fff)
+        return FALSE;
+
+    PacketLength = 7 + ((EffectiveLength > 0x7f) ? 8 : 7) + EffectiveLength;
     if (BufferLength < PacketLength || PacketLength > 0xffff)
         return FALSE;
 
@@ -985,10 +1127,18 @@ TermSrvWriteServerChannelPayload(
     Buffer[10] = (UCHAR)(ChannelId >> 8);
     Buffer[11] = (UCHAR)ChannelId;
     Buffer[12] = 0x70;
-    if (!TermSrvWriteMcsPayloadLength(&Buffer[13], PayloadLength, &LengthBytes))
+    if (!TermSrvWriteMcsPayloadLength(&Buffer[13], EffectiveLength, &LengthBytes))
         return FALSE;
 
     PayloadOffset = 13 + LengthBytes;
+    if (AddSecurityHeader)
+    {
+        Buffer[PayloadOffset] = 0x00;
+        Buffer[PayloadOffset + 1] = 0x00;
+        Buffer[PayloadOffset + 2] = 0x00;
+        Buffer[PayloadOffset + 3] = 0x00;
+        PayloadOffset += 4;
+    }
     CopyMemory(&Buffer[PayloadOffset], Payload, PayloadLength);
     *BytesWritten = PacketLength;
     return TRUE;
@@ -2380,17 +2530,20 @@ TermSrvIsCliprdrMcsPacket(
 }
 
 static BOOL
-TermSrvWriteServerGlobalPayload(
+TermSrvWriteServerGlobalPayloadEx(
     _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
     _In_ SIZE_T BufferLength,
     _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
     _In_ SIZE_T PayloadLength,
+    _In_ BOOL PayloadHasSecurityHeader,
     _Out_ SIZE_T *BytesWritten)
 {
     SIZE_T PacketLength;
     SIZE_T BodyLength;
     SIZE_T PayloadOffset;
     SIZE_T LengthBytes;
+    SIZE_T EffectiveLength;
+    BOOL AddSecurityHeader;
 
     if (BytesWritten == NULL)
         return FALSE;
@@ -2399,7 +2552,16 @@ TermSrvWriteServerGlobalPayload(
     if (Buffer == NULL || Payload == NULL || PayloadLength > 0x7fff)
         return FALSE;
 
-    BodyLength = ((PayloadLength > 0x7f) ? 8 : 7) + PayloadLength;
+    /* Under RDP standard security every server-to-client PDU carries a basic
+     * security header. Most PDUs supply the RDP payload without one, so prepend
+     * an empty (flags = 0) 4-byte header. The license PDU already includes its
+     * own SEC_LICENSE_PKT header, so it is passed through unchanged. */
+    AddSecurityHeader = (!PayloadHasSecurityHeader && TermSrvServerSecurityHeaderActive());
+    EffectiveLength = PayloadLength + (AddSecurityHeader ? 4 : 0);
+    if (EffectiveLength > 0x7fff)
+        return FALSE;
+
+    BodyLength = ((EffectiveLength > 0x7f) ? 8 : 7) + EffectiveLength;
     PacketLength = 7 + BodyLength;
     if (BufferLength < PacketLength || PacketLength > 0xffff)
         return FALSE;
@@ -2418,14 +2580,34 @@ TermSrvWriteServerGlobalPayload(
     Buffer[10] = 0x03;
     Buffer[11] = 0xeb;
     Buffer[12] = 0x70;
-    if (!TermSrvWriteMcsPayloadLength(&Buffer[13], PayloadLength, &LengthBytes))
+    if (!TermSrvWriteMcsPayloadLength(&Buffer[13], EffectiveLength, &LengthBytes))
         return FALSE;
 
     PayloadOffset = 13 + LengthBytes;
+    if (AddSecurityHeader)
+    {
+        Buffer[PayloadOffset] = 0x00;
+        Buffer[PayloadOffset + 1] = 0x00;
+        Buffer[PayloadOffset + 2] = 0x00;
+        Buffer[PayloadOffset + 3] = 0x00;
+        PayloadOffset += 4;
+    }
     CopyMemory(&Buffer[PayloadOffset], Payload, PayloadLength);
 
     *BytesWritten = PacketLength;
     return TRUE;
+}
+
+static BOOL
+TermSrvWriteServerGlobalPayload(
+    _Out_writes_bytes_to_(BufferLength, *BytesWritten) UCHAR *Buffer,
+    _In_ SIZE_T BufferLength,
+    _In_reads_bytes_(PayloadLength) const UCHAR *Payload,
+    _In_ SIZE_T PayloadLength,
+    _Out_ SIZE_T *BytesWritten)
+{
+    return TermSrvWriteServerGlobalPayloadEx(Buffer, BufferLength, Payload,
+                                             PayloadLength, FALSE, BytesWritten);
 }
 
 static BOOL
@@ -2447,11 +2629,14 @@ TermSrvWriteLicenseValidClientPacket(
         0x04, 0x00, 0x00, 0x00
     };
 
-    return TermSrvWriteServerGlobalPayload(Buffer,
-                                           BufferLength,
-                                           Payload,
-                                           sizeof(Payload),
-                                           BytesWritten);
+    /* The payload already opens with a TS_SECURITY_HEADER (SEC_LICENSE_PKT), so
+     * do not prepend the empty security header. */
+    return TermSrvWriteServerGlobalPayloadEx(Buffer,
+                                             BufferLength,
+                                             Payload,
+                                             sizeof(Payload),
+                                             TRUE,
+                                             BytesWritten);
 }
 
 static BOOL
@@ -3074,7 +3259,7 @@ TermSrvHandleClientFinalization(
         USHORT ControlAction;
 
         if (Received <= 0 &&
-            !TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+            !TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received, &Context->Crypt))
         {
             return TRUE;
         }
@@ -3208,9 +3393,14 @@ TermSrvHandleActivePacket(
 
             if (TermSrvRdpBcgrParseFastPathInputEvents(Buffer,
                                                        (SIZE_T)Received,
-                                                       &InputEvents) == TermSrvRdpBcgrSuccess &&
-                (InputEvents.FirstEventCode == 0x01 ||
-                 InputEvents.FirstEventCode == 0x05))
+                                                       &InputEvents) != TermSrvRdpBcgrSuccess)
+            {
+                TermSrvAdvancePeer(Context,
+                                   "FAST_INPUT wire=fastpath",
+                                   "fast-path input delivery");
+            }
+            else if (InputEvents.FirstEventCode == 0x01 ||
+                     InputEvents.FirstEventCode == 0x05)
             {
                 CHAR PeerPacket[64];
 
@@ -3231,6 +3421,26 @@ TermSrvHandleActivePacket(
                 {
                     TermSrvSendPacket(Client, Reply, BytesWritten);
                 }
+            }
+            else if (InputEvents.FirstEventCode == 0x00)
+            {
+                CHAR PeerPacket[64];
+
+                /*
+                 * Fast-path scancode event: FirstEventFlags carries the
+                 * fast-path keyboard flags (bit 0 = release, bit 1 = extended)
+                 * which the peer state machine maps onto the RDP keyboard flags
+                 * before calling the backend InjectKeyboard entry point.
+                 */
+                _snprintf(PeerPacket,
+                          sizeof(PeerPacket),
+                          "FAST_INPUT scancode=%u flags=%u",
+                          InputEvents.FirstKeyboardCode,
+                          InputEvents.FirstEventFlags);
+                PeerPacket[sizeof(PeerPacket) - 1] = '\0';
+                TermSrvAdvancePeer(Context,
+                                   PeerPacket,
+                                   "fast-path input delivery");
             }
             else
             {
@@ -3416,13 +3626,22 @@ TermSrvRunActiveLoop(
             if (PendingLength < PacketLength)
                 break;
 
-            if (!TermSrvHandleActivePacket(Context,
-                                           Client,
-                                           Buffer,
-                                           PacketLength,
-                                           Channel))
             {
-                return FALSE;
+                /* Decrypt in place when RDP standard security is active. The
+                 * decrypted PDU is shorter (MAC stripped), but the original
+                 * on-wire length still governs how far to advance the buffer. */
+                SIZE_T DecryptedLength = (SIZE_T)PacketLength;
+
+                TermSrvCryptUnwrapInbound(&Context->Crypt, Buffer, &DecryptedLength);
+
+                if (!TermSrvHandleActivePacket(Context,
+                                               Client,
+                                               Buffer,
+                                               (INT)DecryptedLength,
+                                               Channel))
+                {
+                    return FALSE;
+                }
             }
 
             PendingLength -= PacketLength;
@@ -3465,6 +3684,16 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
         return FALSE;
     }
 
+    /* The Client Info PDU is the first encrypted client-to-server packet under
+     * RDP standard security. Decrypt it here so the RC4 stream stays in sync
+     * for every later PDU. This is idempotent if it was already unwrapped on
+     * receipt (the SEC_ENCRYPT flag is cleared after the first pass). */
+    {
+        SIZE_T DecryptedLength = (SIZE_T)Received;
+        TermSrvCryptUnwrapInbound(&Context->Crypt, Buffer, &DecryptedLength);
+        Received = (INT)DecryptedLength;
+    }
+
     Result = TermSrvRdpBcgrParseClientInfoPayload(Buffer,
                                                  (SIZE_T)Received,
                                                  &ClientInfo);
@@ -3500,7 +3729,7 @@ TermSrvConsumeOptionalClientInfoAndCliprdrPacket(
         return FALSE;
     }
 
-    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received, &Context->Crypt))
         return TRUE;
 
     return TermSrvHandleClientFinalization(Context,
@@ -3550,7 +3779,7 @@ TermSrvRunEarlyMcsPhase(
     TermSrvTryAssignCliprdrFromStaticChannelList(&Context->CliprdrChannel,
                                                  StaticChannelList);
 
-    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received, &Context->Crypt))
         return FALSE;
 
     Result = TermSrvRdpBcgrParseMcsErectDomainRequest(Buffer, (SIZE_T)Received);
@@ -3561,7 +3790,7 @@ TermSrvRunEarlyMcsPhase(
     }
     TermSrvAdvancePeer(Context, "ERECT", "MCS erect domain session transition");
 
-    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+    if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received, &Context->Crypt))
         return FALSE;
 
     Result = TermSrvRdpBcgrParseMcsAttachUserRequest(Buffer, (SIZE_T)Received);
@@ -3596,7 +3825,7 @@ TermSrvRunEarlyMcsPhase(
         TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_REQUEST ChannelJoinRequest;
         TERMSRV_RDPBCGR_MCS_CHANNEL_JOIN_CONFIRM ChannelJoinConfirm;
 
-        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received, &Context->Crypt))
             break;
 
         Result = TermSrvRdpBcgrParseMcsChannelJoinRequest(Buffer,
@@ -3610,6 +3839,9 @@ TermSrvRunEarlyMcsPhase(
             if (Result == TermSrvRdpBcgrSuccess)
             {
                 HaveSecurityExchange = TRUE;
+                TermSrvCryptCompleteKeyExchange(&Context->Crypt,
+                                                SecurityExchange.Payload,
+                                                SecurityExchange.PayloadLength);
                 TermSrvAdvancePeer(Context,
                                    "SECURITY client_random=wire",
                                    "security exchange session transition");
@@ -3684,7 +3916,7 @@ TermSrvRunEarlyMcsPhase(
 
     if (!HaveSecurityExchange && InitialClientInfoReceived <= 0)
     {
-        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received))
+        if (!TermSrvReceiveTpkt(Client, StopEvent, Buffer, BufferLength, &Received, &Context->Crypt))
             return TRUE;
 
         Result = TermSrvRdpBcgrParseSecurityExchangePayload(Buffer,
@@ -3697,6 +3929,9 @@ TermSrvRunEarlyMcsPhase(
         }
         else
         {
+            TermSrvCryptCompleteKeyExchange(&Context->Crypt,
+                                            SecurityExchange.Payload,
+                                            SecurityExchange.PayloadLength);
             TermSrvAdvancePeer(Context,
                                "SECURITY client_random=wire",
                                "security exchange session transition");
@@ -3732,6 +3967,12 @@ TermSrvHandleClient(
 
     ZeroMemory(&Context, sizeof(Context));
     TermSrvRdpPeerInit(&Context.Peer, SessionManager);
+    TermSrvCryptInit(&Context.Crypt);
+    /* Connections are handled serially (see TermSrvListenerLoop), so a single
+     * pointer to the active connection's crypto state lets the low-level server
+     * PDU writers add the basic security header once encryption is negotiated,
+     * without threading the state through every builder. */
+    g_TermSrvActiveCrypt = &Context.Crypt;
 
     TermSrvSetNonBlocking(Client);
 
@@ -3742,7 +3983,7 @@ TermSrvHandleClient(
         TERMSRV_RDPBCGR_CONNECTION_REQUEST Request;
         TERMSRV_RDPBCGR_CONNECTION_CONFIRM Confirm;
         UCHAR Reply[12288];
-        UCHAR ConnectResponsePayload[sizeof(TermSrvMcsConnectResponsePayload)];
+        UCHAR ConnectResponsePayload[512];
         SIZE_T ConnectResponsePayloadLength;
         SIZE_T ReplyLength;
         TERMSRV_RDPBCGR_RESULT Result;
@@ -3805,7 +4046,8 @@ TermSrvHandleClient(
                 ConnectResponsePayloadLength = TermSrvBuildMcsConnectResponsePayload(
                     ConnectResponsePayload,
                     sizeof(ConnectResponsePayload),
-                    HaveStaticChannelList ? &StaticChannelList : NULL);
+                    HaveStaticChannelList ? &StaticChannelList : NULL,
+                    &Context.Crypt);
                 if (ConnectResponsePayloadLength == 0)
                     goto Cleanup;
 
@@ -3843,6 +4085,7 @@ TermSrvHandleClient(
     }
 
 Cleanup:
+    g_TermSrvActiveCrypt = NULL;
     TermSrvCloseRdpCaptureApi(&Context);
     closesocket(Client);
 }

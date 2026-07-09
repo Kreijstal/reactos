@@ -1405,8 +1405,37 @@ Phase1InitializationDiscard(IN PVOID Context)
     /* Set to phase 1 */
     ExpInitializationPhase = 1;
 
+#if defined(_M_ARM64)
+    {
+        extern BOOLEAN NTAPI KdEnterDebugger(PKTRAP_FRAME, PKEXCEPTION_FRAME);
+        extern VOID NTAPI KdExitDebugger(BOOLEAN);
+        ULONG64 D0, D1, D2, D3;
+        BOOLEAN DiagEnable;
+        KIRQL DiagOldIrql;
+        LONG HltBefore, HltAfter;
+        (void)DiagEnable; (void)KdEnterDebugger; (void)KdExitDebugger;
+        HltBefore = KeGetCurrentPrcb()->InHighLevelTransition;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(D0));
+        KeRaiseIrql(HIGH_LEVEL, &DiagOldIrql);
+        __asm__ __volatile__("mrs %0, daif" : "=r"(D1));
+        KeLowerIrql(DiagOldIrql);
+        __asm__ __volatile__("mrs %0, daif" : "=r"(D2));
+        HltAfter = KeGetCurrentPrcb()->InHighLevelTransition;
+        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                   "DAIF-CKPT high-roundtrip: before=%llx at-high=%llx after=%llx HLT=%ld/%ld\n",
+                   D0, D1, D2, HltBefore, HltAfter);
+        __asm__ __volatile__("mrs %0, daif" : "=r"(D3));
+        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                   "DAIF-CKPT after-full-print: %llx\n", D3);
+    }
+#endif
+
     /* Set us at maximum priority */
     KeSetPriorityThread(KeGetCurrentThread(), HIGH_PRIORITY);
+
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT after-setprio: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
 
     /* Do Phase 1 HAL Initialization */
     if (!HalInitSystem(1, LoaderBlock)) KeBugCheck(HAL1_INITIALIZATION_FAILED);
@@ -1420,6 +1449,10 @@ Phase1InitializationDiscard(IN PVOID Context)
      */
     ExArchPostHalInitSystemPhase1();
 #endif
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT after-hal1: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
+
 
     /* Get the command line and upcase it */
     CommandLine = (LoaderBlock->LoadOptions ? _strupr(LoaderBlock->LoadOptions) : NULL);
@@ -1549,6 +1582,10 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Initialize Power Subsystem in Phase 0 */
     if (!PoInitSystem(0)) KeBugCheck(INTERNAL_POWER_ERROR);
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT after-po0: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
+
 
     /* Check for Y2K hack */
     Y2KHackRequired = CommandLine ? strstr(CommandLine, "YEAR") : NULL;
@@ -1687,6 +1724,10 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Call OB initialization again */
     if (!ObInitSystem()) KeBugCheck(OBJECT1_INITIALIZATION_FAILED);
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT after-ob1: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
+
 
     /* Initialize Basic System Objects and Worker Threads */
     if (!ExInitSystem()) KeBugCheckEx(PHASE1_INITIALIZATION_FAILED, 0, 0, 1, 0);
@@ -1717,6 +1758,10 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Set up Region Maps, Sections and the Paging File */
     if (!MmInitSystem(1, LoaderBlock)) KeBugCheck(MEMORY1_INITIALIZATION_FAILED);
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT after-mm1: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
+
 
     /* Create NLS section */
     ExpInitNls(LoaderBlock);
@@ -1766,6 +1811,10 @@ Phase1InitializationDiscard(IN PVOID Context)
 
     /* Call the debugger DLL */
     KdDebuggerInitialize1(LoaderBlock);
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT after-kd1: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
+
 
     /* Setup PnP Manager in phase 1 */
     if (!PpInitSystem()) KeBugCheck(PP1_INITIALIZATION_FAILED);
@@ -1877,6 +1926,9 @@ Phase1InitializationDiscard(IN PVOID Context)
     InbvSetProgressBarSubset(25, 75);
 
     /* Initialize the I/O Subsystem */
+#if defined(_M_ARM64)
+    { ULONG64 D__; __asm__ __volatile__("mrs %0, daif" : "=r"(D__)); DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "DAIF-CKPT before-io1: %llx irql=%u\n", D__, KeGetCurrentIrql()); }
+#endif
     if (!IoInitSystem(LoaderBlock)) KeBugCheck(IO1_INITIALIZATION_FAILED);
 
     /* Set maximum update to 100% */

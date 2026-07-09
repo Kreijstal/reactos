@@ -4,6 +4,8 @@ list(APPEND TERMSRV_CORE_SOURCE
     rdpbitmap.c
     rdpbcgr.c
     rdpbcgr.h
+    rdpcrypt.c
+    rdpcrypt.h
     rdppeer.c
     termsrv.h)
 

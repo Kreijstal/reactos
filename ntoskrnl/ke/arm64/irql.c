@@ -79,6 +79,72 @@ BOOLEAN KiHalInitialized = FALSE;
  */
 static BOOLEAN KiEarlyHighLevelIrqsWereEnabled = FALSE;
 
+#if DBG
+/*
+ * PMR-TRACE diagnostic: ring of the most recent IRQL transitions that
+ * programmed the GIC priority mask, with a PMR read-back after each write.
+ * Dumped from the interrupt dispatcher when a spinlock-already-owned state
+ * is detected, to identify who left PMR unmasked at elevated IRQL.
+ */
+typedef struct _KI_PMR_TRACE_ENTRY
+{
+    PVOID Inner;     /* caller of KiApplyIrqMaskForIrqlTransition */
+    PVOID Outer;     /* caller of KfRaiseIrql/KfLowerIrql, if any */
+    UCHAR OldIrql;
+    UCHAR NewIrql;
+    UCHAR PmrAfter;  /* PMR read back right after the transition */
+    UCHAR Path;      /* which branch programmed the PMR */
+} KI_PMR_TRACE_ENTRY;
+
+#define KI_PMR_TRACE_DEPTH 16
+static KI_PMR_TRACE_ENTRY KiPmrTrace[KI_PMR_TRACE_DEPTH];
+static volatile LONG KiPmrTraceIndex = 0;
+static PVOID KiPmrTraceOuterCaller = NULL;
+
+VOID
+KiPmrTraceLog(
+    _In_ PVOID Inner,
+    _In_ KIRQL OldIrql,
+    _In_ KIRQL NewIrql,
+    _In_ UCHAR Path)
+{
+    ULONG Slot = (ULONG)(InterlockedIncrement(&KiPmrTraceIndex) - 1) %
+                 KI_PMR_TRACE_DEPTH;
+    KiPmrTrace[Slot].Inner = Inner;
+    KiPmrTrace[Slot].Outer = KiPmrTraceOuterCaller;
+    KiPmrTrace[Slot].OldIrql = OldIrql;
+    KiPmrTrace[Slot].NewIrql = NewIrql;
+    KiPmrTrace[Slot].PmrAfter = (UCHAR)HalGetGicPriorityMask();
+    KiPmrTrace[Slot].Path = Path;
+}
+
+VOID
+KiPmrTraceDump(VOID)
+{
+    LONG Total = KiPmrTraceIndex;
+    LONG First = (Total > KI_PMR_TRACE_DEPTH) ? (Total - KI_PMR_TRACE_DEPTH) : 0;
+    LONG i;
+
+    DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+               "PMR-TRACE: %ld transitions total, dumping %ld..%ld\n",
+               Total, First, Total - 1);
+    for (i = First; i < Total; i++)
+    {
+        KI_PMR_TRACE_ENTRY *E = &KiPmrTrace[i % KI_PMR_TRACE_DEPTH];
+        DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                   "PMR-TRACE[%ld]: %u->%u pmr=%02x path=%u inner=%p outer=%p\n",
+                   i, E->OldIrql, E->NewIrql, E->PmrAfter, E->Path,
+                   E->Inner, E->Outer);
+    }
+}
+#define KI_PMR_TRACE_SET_OUTER() (KiPmrTraceOuterCaller = _ReturnAddress())
+#define KI_PMR_TRACE(Old, New, Path) \
+    KiPmrTraceLog(_ReturnAddress(), (Old), (New), (Path))
+#else
+#define KI_PMR_TRACE_SET_OUTER()
+#define KI_PMR_TRACE(Old, New, Path)
+#endif
+
 #undef KeLowerIrql
 #undef KeRaiseIrql
 #undef KeGetCurrentIrql
@@ -380,6 +446,7 @@ KiApplyIrqMaskForIrqlTransition(
         ARM64_SYNC_BARRIER();
         /* Also set GIC PMR to most restrictive for defense in depth */
         HalSetGicPriorityMask(HIGH_LEVEL);
+        KI_PMR_TRACE(OldIrql, NewIrql, 1);
         KiTraceSerrorPolicy("high-raise", OldIrql, NewIrql);
         return;
     }
@@ -391,25 +458,22 @@ KiApplyIrqMaskForIrqlTransition(
         /*
          * Lowering from HIGH_LEVEL: Unmask interrupts via DAIF and set GIC PMR.
          *
-         * Re-entrancy guard: the per-CPU InHighLevelTransition flag tracks which
-         * transition owns the flag so that only its winner clears it. Re-entrant
-         * callers must NOT touch the flag.
+         * Re-entrancy guard: the per-CPU flag tracks which transition owns the
+         * InHighLevelTransition state so that only its winner clears the flag.
+         * Re-entrant callers must NOT touch the flag.
          *
          * They MUST, however, still drop the CPU interrupt mask for the level we
          * are lowering to. DAIF.I is only meant to be set at HIGH_LEVEL; once we
          * lower below it the GIC PMR alone gates interrupts by priority and the
          * CPU mask has to be cleared. Skipping the DAIF unmask on the re-entrant
-         * path (trusting "the outer transition" to do it) can leave the CPU
-         * stranded with interrupts masked at a sub-HIGH IRQL such as PASSIVE: if
+         * path (and trusting "the outer transition" to do it) can leave the CPU
+         * stranded with interrupts masked at a sub-HIGH IRQL such as PASSIVE - if
          * the owning transition is descheduled, or the flag is observed set by an
-         * unrelated lowering on this CPU, DAIF.I is never cleared. That strands
-         * timer/SGI delivery and blocks special-kernel-APC completion (seen as
-         * DAIF=0x3c0 at IRQL 0, which corrupts synchronous-IRP UserEvent
-         * signaling). The unmask is idempotent, so doing it here as well as in
-         * the owning transition is safe.
-         *
-         * CRITICAL: Only the thread that successfully sets the flag (wins the
-         * CompareExchange) is responsible for clearing it.
+         * unrelated lowering on this CPU, DAIF.I never gets cleared. That strands
+         * timer/SGI delivery and blocks special-kernel-APC completion (observed as
+         * DAIF=0x3c0 at IRQL 0, which corrupts synchronous-IRP UserEvent signaling).
+         * The unmask is idempotent, so performing it here as well as in the owning
+         * transition is safe.
          */
         if (Prcb)
         {
@@ -419,6 +483,7 @@ KiApplyIrqMaskForIrqlTransition(
                 /* Re-entrancy: update the GIC PMR and unmask DAIF for the target
                  * IRQL, but leave the flag to its owning transition. */
                 HalSetGicPriorityMask(NewIrql);
+                KI_PMR_TRACE(OldIrql, NewIrql, 2);
                 ARM64_SYNC_BARRIER();
                 KiUpdateDaifForIrql(NewIrql, FALSE);
                 ARM64_SYNC_BARRIER();
@@ -427,6 +492,7 @@ KiApplyIrqMaskForIrqlTransition(
 
             /* We won the race - perform full unmask sequence and clear flag */
             HalSetGicPriorityMask(NewIrql);
+            KI_PMR_TRACE(OldIrql, NewIrql, 3);
             ARM64_SYNC_BARRIER();
             /* Apply SError policy based on new IRQL */
             KiUpdateDaifForIrql(NewIrql, FALSE);
@@ -448,6 +514,7 @@ KiApplyIrqMaskForIrqlTransition(
              * single-threaded at this stage.
              */
             HalSetGicPriorityMask(NewIrql);
+            KI_PMR_TRACE(OldIrql, NewIrql, 4);
             ARM64_SYNC_BARRIER();
             /* Apply SError policy based on new IRQL */
             KiUpdateDaifForIrql(NewIrql, FALSE);
@@ -475,6 +542,7 @@ KiApplyIrqMaskForIrqlTransition(
     if (NeedsPmrUpdate)
     {
         HalSetGicPriorityMask(NewIrql);
+        KI_PMR_TRACE(OldIrql, NewIrql, 5);
         ARM64_SYNC_BARRIER();
     }
 
@@ -553,6 +621,7 @@ KfRaiseIrql(
      */
     __asm__ __volatile__("dmb ish" ::: "memory");
 
+    KI_PMR_TRACE_SET_OUTER();
     KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
     KiSetCurrentIrql(NewIrql);
 
@@ -589,6 +658,23 @@ KfLowerIrql(
     if (NewIrql > OldIrql)
     {
         KeBugCheckEx(IRQL_NOT_GREATER_OR_EQUAL, NewIrql, OldIrql, 0, 0);
+    }
+
+    {
+        static LONG MaskTraceCount = 0;
+        ULONG64 DiagDaif;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(DiagDaif));
+        if ((DiagDaif & (1ULL << 7)) && KiHalInitialized &&
+            (NewIrql == PASSIVE_LEVEL) &&
+            (MaskTraceCount < 8))
+        {
+            PKPRCB DiagPrcb = KeGetCurrentPrcb();
+            MaskTraceCount++;
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL,
+                       "MASK-TRACE: lower %u->0 with DAIF=%llx caller=%p thread=%p HLT=%ld\n",
+                       OldIrql, DiagDaif, _ReturnAddress(), KeGetCurrentThread(),
+                       DiagPrcb ? DiagPrcb->InHighLevelTransition : -1);
+        }
     }
 
     /*
@@ -633,6 +719,7 @@ KfLowerIrql(
     __asm__ __volatile__("dmb ish" ::: "memory");
 
     /* Now unmask interrupts - any pending hardware interrupts may fire here */
+    KI_PMR_TRACE_SET_OUTER();
     KiApplyIrqMaskForIrqlTransition(OldIrql, NewIrql);
 
     /*
@@ -784,6 +871,16 @@ KfLowerIrql(
                 KiSetCurrentIrql(APC_LEVEL);
                 KiDeliverApc(KernelMode, NULL, NULL);
                 KiSetCurrentIrql(PASSIVE_LEVEL);
+            }
+            else
+            {
+                static LONG DiagSkips = 0;
+                if (DiagSkips < 5)
+                {
+                    DiagSkips++;
+                    DPRINT1("IRQL-DIAG: APC delivery skipped, DAIF=%llx Old=%u New=%u\n",
+                            Daif, OldIrql, NewIrql);
+                }
             }
         }
     }
