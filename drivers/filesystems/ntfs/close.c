@@ -64,11 +64,16 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
      * FsContext2 (CCB) is safe to clear since paging I/O doesn't use it. */
     FileObject->FsContext2 = NULL;
 
-    if (FileObject->FileName.Buffer)
+    // External FO's (created outside the FSD) carry a FileName.  Some FO's are
+    // created with IoCreateStreamFileObject() inside the FSD and have no
+    // FileName; the internal cache stream FO is one of those but is flagged
+    // NTFS_CCB_FLAG_COUNTED by NtfsFCBInitializeCache, which took an FCB
+    // reference to pin the FCB (and its SectionObjectPointers) for as long as
+    // MM references the stream FO.  Drop exactly the one reference this FO
+    // holds in either case.
+    if (FileObject->FileName.Buffer ||
+        BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_COUNTED))
     {
-        // This a FO, that was created outside from FSD.
-        // Some FO's are created with IoCreateStreamFileObject() insid from FSD.
-        // This FO's don't have a FileName.
         NtfsReleaseFCB(DeviceExt, Fcb);
     }
 
