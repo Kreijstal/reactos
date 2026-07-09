@@ -342,7 +342,15 @@ TermSrvRdpBcgrParseMcsErectDomainRequest(
     _In_reads_bytes_(BufferLength) const UCHAR *Buffer,
     _In_ SIZE_T BufferLength)
 {
-    static const UCHAR ExpectedBody[] = { 0x04, 0x01, 0x00, 0x01, 0x00 };
+    /*
+     * MCS ErectDomainRequest (domain-MCSPDU CHOICE index 1). The first octet
+     * (0x04) identifies the PDU; the subHeight and subInterval integers that
+     * follow are MCS domain parameters the server does not use. Different
+     * clients PER-encode those two zero integers slightly differently
+     * (mstsc/FreeRDP send 0x04 0x01 0x00 0x01 0x00, aardwolf sends
+     * 0x04 0x00 0x01 0x00 0x01), so match on the PDU type and overall length
+     * only rather than on the exact body bytes.
+     */
     TERMSRV_RDPBCGR_RESULT Result;
     SIZE_T BodyLength;
     const UCHAR *Body;
@@ -351,10 +359,10 @@ TermSrvRdpBcgrParseMcsErectDomainRequest(
     if (Result != TermSrvRdpBcgrSuccess)
         return Result;
 
-    if (BodyLength != sizeof(ExpectedBody))
+    if (BodyLength != 5)
         return TermSrvRdpBcgrInvalidLength;
 
-    if (memcmp(Body, ExpectedBody, sizeof(ExpectedBody)) != 0)
+    if (Body[0] != 0x04)
         return TermSrvRdpBcgrUnsupportedPdu;
 
     return TermSrvRdpBcgrSuccess;
@@ -421,6 +429,7 @@ TermSrvRdpBcgrParseMcsSendDataPayload(
     TERMSRV_RDPBCGR_RESULT Result;
     SIZE_T BodyLength;
     SIZE_T PayloadLength;
+    SIZE_T HeaderLength;
     const UCHAR *Body;
 
     if (SendData == NULL || Buffer == NULL)
@@ -432,22 +441,38 @@ TermSrvRdpBcgrParseMcsSendDataPayload(
     if (Result != TermSrvRdpBcgrSuccess)
         return Result;
 
-    if (BodyLength < 8)
+    /* MCS header: 0x64, initiator(2), channelId(2), priority(1), then the
+     * userData length as a PER length determinant (1 byte if < 0x80, otherwise
+     * a 2-byte form with the high bit set on the first byte). Earlier code
+     * always consumed two length bytes, which rejected the short form emitted
+     * by clients whose payload is under 128 bytes (e.g. aardwolf's security
+     * exchange) with a spurious InvalidLength. */
+    if (BodyLength < 7)
         return TermSrvRdpBcgrInvalidLength;
 
     if (Body[0] != MCS_SEND_DATA_REQUEST)
         return TermSrvRdpBcgrUnsupportedPdu;
 
-    PayloadLength = ReadBe16(&Body[6]);
-    if (PayloadLength & 0x8000)
-        PayloadLength &= 0x7fff;
-    if (PayloadLength != BodyLength - 8)
+    if (Body[6] & 0x80)
+    {
+        if (BodyLength < 8)
+            return TermSrvRdpBcgrInvalidLength;
+        PayloadLength = ((SIZE_T)(Body[6] & 0x7f) << 8) | Body[7];
+        HeaderLength = 8;
+    }
+    else
+    {
+        PayloadLength = Body[6];
+        HeaderLength = 7;
+    }
+
+    if (PayloadLength != BodyLength - HeaderLength)
         return TermSrvRdpBcgrInvalidLength;
 
     SendData->Initiator = ReadBe16(&Body[1]);
     SendData->ChannelId = ReadBe16(&Body[3]);
     SendData->Priority = Body[5];
-    SendData->Payload = &Body[8];
+    SendData->Payload = &Body[HeaderLength];
     SendData->PayloadLength = PayloadLength;
     return TermSrvRdpBcgrSuccess;
 }

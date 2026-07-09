@@ -429,7 +429,7 @@ ConvertToAutoInheritPrivateObjectSecurity(IN PSECURITY_DESCRIPTOR ParentDescript
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 DWORD
 WINAPI
@@ -443,8 +443,63 @@ BuildSecurityDescriptorW(IN PTRUSTEE_W pOwner  OPTIONAL,
                          OUT PULONG pSizeNewSD,
                          OUT PSECURITY_DESCRIPTOR* pNewSD)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    SECURITY_DESCRIPTOR_CONTROL Control;
+    SECURITY_DESCRIPTOR AbsoluteSD;
+    PSECURITY_DESCRIPTOR SourceSD;
+    NTSTATUS Status;
+    ULONG Revision;
+
+    UNREFERENCED_PARAMETER(pOwner);
+    UNREFERENCED_PARAMETER(pGroup);
+    UNREFERENCED_PARAMETER(cCountOfAccessEntries);
+    UNREFERENCED_PARAMETER(pListOfAccessEntries);
+    UNREFERENCED_PARAMETER(cCountOfAuditEntries);
+    UNREFERENCED_PARAMETER(pListOfAuditEntries);
+
+    if (!pSizeNewSD || !pNewSD)
+        return ERROR_INVALID_PARAMETER;
+
+    if (pOldSD)
+    {
+        Status = RtlGetControlSecurityDescriptor(pOldSD, &Control, &Revision);
+        if (!NT_SUCCESS(Status))
+            return RtlNtStatusToDosError(Status);
+
+        if (!(Control & SE_SELF_RELATIVE))
+            return ERROR_INVALID_SECURITY_DESCR;
+
+        SourceSD = pOldSD;
+    }
+    else
+    {
+        Status = RtlCreateSecurityDescriptor(&AbsoluteSD,
+                                             SECURITY_DESCRIPTOR_REVISION);
+        if (!NT_SUCCESS(Status))
+            return RtlNtStatusToDosError(Status);
+
+        SourceSD = &AbsoluteSD;
+    }
+
+    *pSizeNewSD = RtlLengthSecurityDescriptor(SourceSD);
+    *pNewSD = LocalAlloc(LMEM_FIXED, *pSizeNewSD);
+    if (!*pNewSD)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    if (pOldSD)
+    {
+        RtlCopyMemory(*pNewSD, SourceSD, *pSizeNewSD);
+        return ERROR_SUCCESS;
+    }
+
+    Status = RtlMakeSelfRelativeSD(SourceSD, *pNewSD, pSizeNewSD);
+    if (!NT_SUCCESS(Status))
+    {
+        LocalFree(*pNewSD);
+        *pNewSD = NULL;
+        return RtlNtStatusToDosError(Status);
+    }
+
+    return ERROR_SUCCESS;
 }
 
 

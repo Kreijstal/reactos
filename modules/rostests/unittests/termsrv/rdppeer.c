@@ -359,10 +359,10 @@ TestBackendSelectionAndBehavior(VOID)
     memset(&Context, 0, sizeof(Context));
     TermSrvSessionManagerInit(&Manager);
 
-    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetSessmanBackend(),
-       "Sessman backend was not selected by default\n");
-    ok(TermSrvSessionManagerGetDefaultBackend() == TermSrvSessionManagerGetSessmanBackend(),
-       "Default backend is not sessman\n");
+    ok(TermSrvSessionManagerGetBackend(&Manager) == TermSrvSessionManagerGetConsoleBackend(),
+       "Console backend was not selected by default\n");
+    ok(TermSrvSessionManagerGetDefaultBackend() == TermSrvSessionManagerGetConsoleBackend(),
+       "Default backend is not console\n");
 
     TermSrvSessionManagerSetBackend(&Manager, &TestSessionBackend, &Context);
     ok(TermSrvSessionManagerGetBackend(&Manager) == &TestSessionBackend,

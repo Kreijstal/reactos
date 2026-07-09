@@ -14,11 +14,6 @@
 #include <asm.inc>
 #include <freeldr/include/arch/pc/x86common.h>
 
-#ifndef ROS_REGTEST
-#define WAIT_FOR_KEY
-#endif
-
-
 .code16
 ASSUME CS:.text, DS:.text, ES:.text
 
@@ -113,6 +108,12 @@ relocated:
 
     // Make sure the keyboard buffer is empty
     call pollchar_and_empty
+
+    /*
+     * Local test-only override: keep bootcd on the CD path even if the first
+     * hard disk already contains a bootable install.
+     */
+    jmp .boot_freeldr
 
     // If we're booting in hybrid mode and our boot drive is the first HDD (drive 80h),
     // we have no other option than booting into FREELDR.
