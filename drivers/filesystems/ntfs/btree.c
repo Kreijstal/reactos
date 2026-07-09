@@ -100,7 +100,6 @@ PrintAllVCNs(PDEVICE_EXTENSION Vcb,
              PNTFS_ATTR_CONTEXT IndexAllocationContext,
              ULONG NodeSize)
 {
-    ULONGLONG CurrentOffset = 0;
     PINDEX_BUFFER CurrentNode, Buffer;
     ULONGLONG BufferSize = AttributeDataLength(IndexAllocationContext->pRecord);
     ULONG BytesRead;
@@ -134,7 +133,6 @@ PrintAllVCNs(PDEVICE_EXTENSION Vcb,
         DPRINT1("Node #%d, VCN: %I64u\n", Count, CurrentNode->VCN);
 
         CurrentNode = (PINDEX_BUFFER)((ULONG_PTR)CurrentNode + NodeSize);
-        CurrentOffset += NodeSize;
         Count++;
     }
 
