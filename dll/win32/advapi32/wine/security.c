@@ -2031,7 +2031,7 @@ LookupAccountNameA(LPCSTR SystemName,
                                             *hReferencedDomainNameLength * sizeof(WCHAR));
 
     ret = LookupAccountNameW(lpSystemW.Buffer,
-                             lpAccountW.Buffer,
+                             AccountName ? lpAccountW.Buffer : NULL,
                              Sid,
                              SidLength,
                              lpReferencedDomainNameW,
@@ -2834,11 +2834,38 @@ static BOOL ParseStringAclToAcl(LPCWSTR StringAcl, LPDWORD lpdwFlags,
         StringAcl++;
 
         /* Parse ACE account sid */
-        if (ParseStringSidToSid(StringAcl, pAce ? &pAce->SidStart : NULL, &sidlen))
-	{
+        {
+            LPCWSTR sid_start = StringAcl;
+            LPCWSTR sid_end;
+            WCHAR *sid_token;
+            DWORD sid_token_len;
+
             while (*StringAcl && *StringAcl != ')')
                 StringAcl++;
-	}
+
+            sid_end = StringAcl;
+            while (sid_end > sid_start && sid_end[-1] == ' ')
+                sid_end--;
+
+            sid_token_len = sid_end - sid_start;
+            sid_token = heap_alloc((sid_token_len + 1) * sizeof(WCHAR));
+            if (!sid_token)
+            {
+                error = ERROR_NOT_ENOUGH_MEMORY;
+                goto lerr;
+            }
+
+            memcpy(sid_token, sid_start, sid_token_len * sizeof(WCHAR));
+            sid_token[sid_token_len] = 0;
+
+            if (!ParseStringSidToSid(sid_token, pAce ? &pAce->SidStart : NULL, &sidlen))
+            {
+                heap_free(sid_token);
+                goto lerr;
+            }
+
+            heap_free(sid_token);
+        }
 
         if (*StringAcl != ')')
             goto lerr;
@@ -3951,11 +3978,11 @@ static DWORD ComputeStringSidSize(LPCWSTR StringSid)
         unsigned int i;
 
         for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++)
-            if (!strncmpW(WellKnownSids[i].wstr, StringSid, 2))
+            if (!StringSid[2] && !_wcsnicmp(WellKnownSids[i].wstr, StringSid, 2))
                 return GetSidLengthRequired(WellKnownSids[i].Sid.SubAuthorityCount);
 
         for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
-            if (!strncmpW(WellKnownRids[i].wstr, StringSid, 2))
+            if (!StringSid[2] && !_wcsnicmp(WellKnownRids[i].wstr, StringSid, 2))
             {
                 MAX_SID local;
                 ADVAPI_GetComputerSid(&local);
@@ -4061,7 +4088,7 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
         pisid->Revision = SDDL_REVISION;
 
         for (i = 0; i < sizeof(WellKnownSids)/sizeof(WellKnownSids[0]); i++)
-            if (!strncmpW(WellKnownSids[i].wstr, StringSid, 2))
+            if (!StringSid[2] && !_wcsnicmp(WellKnownSids[i].wstr, StringSid, 2))
             {
                 DWORD j;
                 pisid->SubAuthorityCount = WellKnownSids[i].Sid.SubAuthorityCount;
@@ -4072,7 +4099,7 @@ static BOOL ParseStringSidToSid(LPCWSTR StringSid, PSID pSid, LPDWORD cBytes)
             }
 
         for (i = 0; i < sizeof(WellKnownRids)/sizeof(WellKnownRids[0]); i++)
-            if (!strncmpW(WellKnownRids[i].wstr, StringSid, 2))
+            if (!StringSid[2] && !_wcsnicmp(WellKnownRids[i].wstr, StringSid, 2))
             {
                 ADVAPI_GetComputerSid(pisid);
                 pisid->SubAuthority[pisid->SubAuthorityCount] = WellKnownRids[i].Rid;

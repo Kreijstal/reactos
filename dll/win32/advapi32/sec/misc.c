@@ -248,9 +248,11 @@ GetUserNameA(LPSTR lpszName,
 {
     UNICODE_STRING NameW;
     ANSI_STRING NameA;
+    DWORD LastError;
     BOOL Ret;
 
     /* apparently Win doesn't check whether lpSize is valid at all! */
+    LastError = GetLastError();
 
     NameW.MaximumLength = (*lpSize) * sizeof(WCHAR);
     NameW.Buffer = LocalAlloc(LMEM_FIXED, NameW.MaximumLength);
@@ -272,6 +274,7 @@ GetUserNameA(LPSTR lpszName,
         RtlUnicodeStringToAnsiString(&NameA, &NameW, FALSE);
 
         *lpSize = NameA.Length + 1;
+        SetLastError(LastError);
     }
 
     LocalFree(NameW.Buffer);
@@ -299,6 +302,9 @@ GetUserNameW(LPWSTR lpszName,
     SID_NAME_USE snu = SidTypeUser;
     WCHAR* domain_name = NULL;
     DWORD dn_len = 0;
+    DWORD LastError;
+
+    LastError = GetLastError();
 
     if (!OpenThreadToken (GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken))
     {
@@ -391,6 +397,7 @@ GetUserNameW(LPWSTR lpszName,
     LocalFree(domain_name);
     LocalFree(tu_buf);
     *lpSize = an_len + 1;
+    SetLastError(LastError);
     return TRUE;
 }
 
@@ -647,17 +654,65 @@ LookupAccountNameW(LPCWSTR lpSystemName,
     TRACE("%s %s %p %p %p %p %p\n", lpSystemName, lpAccountName,
           Sid, cbSid, ReferencedDomainName, cchReferencedDomainName, peUse);
 
+    if (!cbSid || !cchReferencedDomainName || !peUse)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     RtlInitUnicodeString(&SystemName,
                          lpSystemName);
 
     Status = LsaOpenPolicy(lpSystemName ? &SystemName : NULL,
                            &ObjectAttributes,
-                           POLICY_LOOKUP_NAMES,
+                           POLICY_LOOKUP_NAMES | POLICY_VIEW_LOCAL_INFORMATION,
                            &PolicyHandle);
     if (!NT_SUCCESS(Status))
     {
         SetLastError(LsaNtStatusToWinError(Status));
         return FALSE;
+    }
+
+    if (!lpAccountName)
+    {
+        PPOLICY_ACCOUNT_DOMAIN_INFO AccountDomainInfo = NULL;
+
+        Status = LsaQueryInformationPolicy(PolicyHandle,
+                                           PolicyAccountDomainInformation,
+                                           (PVOID *)&AccountDomainInfo);
+        LsaClose(PolicyHandle);
+
+        if (!NT_SUCCESS(Status))
+        {
+            SetLastError(LsaNtStatusToWinError(Status));
+            return FALSE;
+        }
+
+        dwSidLength = GetLengthSid(AccountDomainInfo->DomainSid);
+        dwDomainNameLength = AccountDomainInfo->DomainName.Length / sizeof(WCHAR);
+
+        if (!Sid || *cbSid < dwSidLength ||
+            !ReferencedDomainName || *cchReferencedDomainName < dwDomainNameLength + 1)
+        {
+            *cbSid = dwSidLength;
+            *cchReferencedDomainName = dwDomainNameLength + 1;
+            LsaFreeMemory(AccountDomainInfo);
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            return FALSE;
+        }
+
+        CopySid(*cbSid, Sid, AccountDomainInfo->DomainSid);
+        RtlCopyMemory(ReferencedDomainName,
+                      AccountDomainInfo->DomainName.Buffer,
+                      dwDomainNameLength * sizeof(WCHAR));
+        ReferencedDomainName[dwDomainNameLength] = L'\0';
+
+        *cbSid = dwSidLength;
+        *cchReferencedDomainName = dwDomainNameLength;
+        *peUse = SidTypeDomain;
+
+        LsaFreeMemory(AccountDomainInfo);
+        return TRUE;
     }
 
     RtlInitUnicodeString(&AccountName,

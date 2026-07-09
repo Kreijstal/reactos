@@ -585,6 +585,13 @@ AccpGetTrusteeSid(IN PTRUSTEE_W Trustee,
     switch (Trustee->TrusteeForm)
     {
         case TRUSTEE_IS_OBJECTS_AND_NAME:
+            if (Trustee->pMultipleTrustee ||
+                Trustee->MultipleTrusteeOperation != NO_MULTIPLE_TRUSTEE)
+            {
+                Ret = ERROR_INVALID_PARAMETER;
+                break;
+            }
+
             if (((POBJECTS_AND_NAME_W)Trustee->ptstrName)->ObjectsPresent != 0)
             {
                 /* This is not supported as there is no way to interpret the
@@ -595,6 +602,13 @@ AccpGetTrusteeSid(IN PTRUSTEE_W Trustee,
             /* fall through */
 
         case TRUSTEE_IS_NAME:
+            if (Trustee->pMultipleTrustee ||
+                Trustee->MultipleTrusteeOperation != NO_MULTIPLE_TRUSTEE)
+            {
+                Ret = ERROR_INVALID_PARAMETER;
+                break;
+            }
+
             TrusteeName = AccpGetTrusteeName(Trustee);
             if (!wcscmp(TrusteeName, L"CURRENT_USER"))
             {
@@ -1411,12 +1425,21 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
                 /* Discard all accesses for the trustee... */
                 for (j = 0; j < SizeInformation.AceCount; j++)
                 {
+                    ACCESS_MODE AceMode;
+
                     if (!pKeepAce[j])
                         continue;
                     if (!GetAce(OldAcl, j, (PVOID*)&pAce))
                     {
                         Ret = GetLastError();
                         goto Cleanup;
+                    }
+
+                    AceMode = AccpGetAceAccessMode(pAce);
+                    if (pListOfExplicitEntries[i].grfAccessMode == REVOKE_ACCESS &&
+                        AceMode != GRANT_ACCESS)
+                    {
+                        continue;
                     }
 
                     pSid2 = AccpGetAceSid(pAce);
@@ -1492,8 +1515,11 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
 
             if (ObjectsPresent == 0)
             {
-                /* FIXME: Call AddAccessDeniedAceEx instead! */
-                bRet = AddAccessDeniedAce(pNew, ACL_REVISION, pListOfExplicitEntries[i].grfAccessPermissions, pSid1);
+                bRet = AddAccessDeniedAceEx(pNew,
+                                            ACL_REVISION,
+                                            pListOfExplicitEntries[i].grfInheritance,
+                                            pListOfExplicitEntries[i].grfAccessPermissions,
+                                            pSid1);
             }
             else
             {
@@ -1511,9 +1537,6 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
             }
         }
     }
-
-    /* 2b) Existing denied entries */
-    /* FIXME */
 
     /* 3a) New allow entries (GRANT_ACCESS, SET_ACCESS) */
     for (i = 0; i < cCountOfExplicitEntries; i++)
@@ -1535,8 +1558,11 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
 
             if (ObjectsPresent == 0)
             {
-                /* FIXME: Call AddAccessAllowedAceEx instead! */
-                bRet = AddAccessAllowedAce(pNew, ACL_REVISION, pListOfExplicitEntries[i].grfAccessPermissions, pSid1);
+                bRet = AddAccessAllowedAceEx(pNew,
+                                             ACL_REVISION,
+                                             pListOfExplicitEntries[i].grfInheritance,
+                                             pListOfExplicitEntries[i].grfAccessPermissions,
+                                             pSid1);
             }
             else
             {
@@ -1555,8 +1581,22 @@ AccRewriteSetEntriesInAcl(ULONG cCountOfExplicitEntries,
         }
     }
 
-    /* 3b) Existing allow entries */
-    /* FIXME */
+    /* 3b) Existing entries that survived the rewrite */
+    for (j = 0; j < SizeInformation.AceCount; j++)
+    {
+        if (!pKeepAce[j])
+            continue;
+        if (!GetAce(OldAcl, j, (PVOID*)&pAce))
+        {
+            Ret = GetLastError();
+            goto Cleanup;
+        }
+        if (!AddAce(pNew, ACL_REVISION, MAXDWORD, pAce, pAce->AceSize))
+        {
+            Ret = GetLastError();
+            goto Cleanup;
+        }
+    }
 
     *NewAcl = pNew;
 
