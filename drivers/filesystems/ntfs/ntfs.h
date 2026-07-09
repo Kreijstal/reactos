@@ -1875,6 +1875,8 @@ NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
 NTSTATUS
 NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
+                     PCUNICODE_STRING LinkName,
+                     ULONGLONG LinkParentMftIndex,
                      BOOLEAN CaseSensitive);
 
 NTSTATUS
