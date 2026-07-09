@@ -131,6 +131,7 @@ typedef struct
     USBD_CONFIGURATION_HANDLE ConfigurationHandle;                                       // usb configuration handle
     UCHAR BulkInPipeIndex;                                                               // bulk in pipe index
     UCHAR BulkOutPipeIndex;                                                              // bulk out pipe index
+    ULONG MaxTransferLength;                                                             // max bytes for one bulk data phase (bounded by the pipe)
     UCHAR MaxLUN;                                                                        // max lun for device
     PDEVICE_OBJECT ChildPDO[USB_MAXCHILDREN];                                            // max 16 child pdo devices
     KSPIN_LOCK IrpListLock;                                                              // irp list lock
