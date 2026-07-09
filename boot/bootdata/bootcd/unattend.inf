@@ -33,6 +33,13 @@ TimeZoneIndex=85
 ; 0 - format disabled
 FormatPartition=1
 
+; Update an existing ReactOS installation instead of a fresh install.
+; When yes, setup finds the installation on the destination disk/partition
+; and updates it in place WITHOUT reformatting (data is preserved).
+; yes - upgrade existing installation
+; no  - fresh installation (honors FormatPartition)
+Upgrade = no
+
 ; Enable this setting to automatically create a partition during installation.
 ; 1 - enabled
 ; 0 - disabled
