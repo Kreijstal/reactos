@@ -9,327 +9,146 @@
 //
 // File Information Classes
 //
-UCHAR IopQueryOperationLength[] =
+// Every table is sized by the compile-time FileMaximumInformation so that
+// any class value admitted by the "Class >= FileMaximumInformation" range
+// check in NtQuery/SetInformationFile indexes inside the array.  (The old
+// positional tables ended below FileMaximumInformation on NT6+ builds, so
+// validating a high class read past the end of the array.)
+//
+// A zero length means the class is rejected with STATUS_INVALID_INFO_CLASS;
+// classes the kernel does not implement yet deliberately stay zero.
+//
+UCHAR IopQueryOperationLength[FileMaximumInformation] =
 {
-    0,
-    0,
-    0,
-    0,
-    sizeof(FILE_BASIC_INFORMATION),
-    sizeof(FILE_STANDARD_INFORMATION),
-    sizeof(FILE_INTERNAL_INFORMATION),
-    sizeof(FILE_EA_INFORMATION),
-    sizeof(FILE_ACCESS_INFORMATION),
-    sizeof(FILE_NAME_INFORMATION),
-    0,
-    0,
-    0,
-    0,
-    sizeof(FILE_POSITION_INFORMATION),
-    0,
-    sizeof(FILE_MODE_INFORMATION),
-    sizeof(FILE_ALIGNMENT_INFORMATION),
-    sizeof(FILE_ALL_INFORMATION),
-    0,
-    0,
-    sizeof(FILE_NAME_INFORMATION),
-    sizeof(FILE_STREAM_INFORMATION),
-    sizeof(FILE_PIPE_INFORMATION),
-    sizeof(FILE_PIPE_LOCAL_INFORMATION),
-    sizeof(FILE_PIPE_REMOTE_INFORMATION),
-    sizeof(FILE_MAILSLOT_QUERY_INFORMATION),
-    0,
-    sizeof(FILE_COMPRESSION_INFORMATION),
-    sizeof(FILE_OBJECTID_INFORMATION),
-    0,
-    0,
-    sizeof(FILE_QUOTA_INFORMATION),
-    sizeof(FILE_REPARSE_POINT_INFORMATION),
-    sizeof(FILE_NETWORK_OPEN_INFORMATION),
-    sizeof(FILE_ATTRIBUTE_TAG_INFORMATION),
-    0,
-    0,
-    0,
-    0,
-    0,
-#if 0 // VISTA
-    sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
-    sizeof(FILE_IOSTATUSBLOCK_RANGE_INFORMATION),
-    sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),
-    sizeof(FILE_SFIO_RESERVE_INFORMATION),
-    sizeof(FILE_SFIO_VOLUME_INFORMATION),
-    0,
-    sizeof(FILE_PROCESS_IDS_USING_FILE_INFORMATION),
-    0,
-    sizeof(FILE_NETWORK_PHYSICAL_NAME_INFORMATION),
+    [FileBasicInformation] = sizeof(FILE_BASIC_INFORMATION),
+    [FileStandardInformation] = sizeof(FILE_STANDARD_INFORMATION),
+    [FileInternalInformation] = sizeof(FILE_INTERNAL_INFORMATION),
+    [FileEaInformation] = sizeof(FILE_EA_INFORMATION),
+    [FileAccessInformation] = sizeof(FILE_ACCESS_INFORMATION),
+    [FileNameInformation] = sizeof(FILE_NAME_INFORMATION),
+    [FilePositionInformation] = sizeof(FILE_POSITION_INFORMATION),
+    [FileModeInformation] = sizeof(FILE_MODE_INFORMATION),
+    [FileAlignmentInformation] = sizeof(FILE_ALIGNMENT_INFORMATION),
+    [FileAllInformation] = sizeof(FILE_ALL_INFORMATION),
+    [FileAlternateNameInformation] = sizeof(FILE_NAME_INFORMATION),
+    [FileStreamInformation] = sizeof(FILE_STREAM_INFORMATION),
+    [FilePipeInformation] = sizeof(FILE_PIPE_INFORMATION),
+    [FilePipeLocalInformation] = sizeof(FILE_PIPE_LOCAL_INFORMATION),
+    [FilePipeRemoteInformation] = sizeof(FILE_PIPE_REMOTE_INFORMATION),
+    [FileMailslotQueryInformation] = sizeof(FILE_MAILSLOT_QUERY_INFORMATION),
+    [FileCompressionInformation] = sizeof(FILE_COMPRESSION_INFORMATION),
+    [FileObjectIdInformation] = sizeof(FILE_OBJECTID_INFORMATION),
+    [FileQuotaInformation] = sizeof(FILE_QUOTA_INFORMATION),
+    [FileReparsePointInformation] = sizeof(FILE_REPARSE_POINT_INFORMATION),
+    [FileNetworkOpenInformation] = sizeof(FILE_NETWORK_OPEN_INFORMATION),
+    [FileAttributeTagInformation] = sizeof(FILE_ATTRIBUTE_TAG_INFORMATION),
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    /* Vista+ query classes.  Only FileHardLinkInformation is implemented
+     * (forwarded to the FSD); the hint/optimisation classes 41-45 and
+     * 47-49 stay zero until they grow kernel-side handlers. */
+    [FileHardLinkInformation] = sizeof(FILE_LINKS_INFORMATION),
 #endif
-    0xFF
 };
 
-UCHAR IopSetOperationLength[] =
+UCHAR IopSetOperationLength[FileMaximumInformation] =
 {
-    0,
-    0,
-    0,
-    0,
-    sizeof(FILE_BASIC_INFORMATION),
-    0,
-    0,
-    0,
-    0,
-    0,
-    sizeof(FILE_RENAME_INFORMATION),
-    sizeof(FILE_LINK_INFORMATION),
-    0,
-    sizeof(FILE_DISPOSITION_INFORMATION),
-    sizeof(FILE_POSITION_INFORMATION),
-    0,
-    sizeof(FILE_MODE_INFORMATION),
-    0,
-    0,
-    sizeof(FILE_ALLOCATION_INFORMATION),
-    sizeof(FILE_END_OF_FILE_INFORMATION),
-    0,
-    0,
-    sizeof(FILE_PIPE_INFORMATION),
-    0,
-    0,
-    0,
-    sizeof(FILE_MAILSLOT_SET_INFORMATION),
-    0,
-    sizeof(FILE_OBJECTID_INFORMATION),
-    sizeof(FILE_COMPLETION_INFORMATION),
-    sizeof(FILE_MOVE_CLUSTER_INFORMATION),
-    sizeof(FILE_QUOTA_INFORMATION),
-    0,
-    0,
-    0,
-    sizeof(FILE_TRACKING_INFORMATION),
-    0,
-    0,
-    sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
-    sizeof(UNICODE_STRING),
+    [FileBasicInformation] = sizeof(FILE_BASIC_INFORMATION),
+    [FileRenameInformation] = sizeof(FILE_RENAME_INFORMATION),
+    [FileLinkInformation] = sizeof(FILE_LINK_INFORMATION),
+    [FileDispositionInformation] = sizeof(FILE_DISPOSITION_INFORMATION),
+    [FilePositionInformation] = sizeof(FILE_POSITION_INFORMATION),
+    [FileModeInformation] = sizeof(FILE_MODE_INFORMATION),
+    [FileAllocationInformation] = sizeof(FILE_ALLOCATION_INFORMATION),
+    [FileEndOfFileInformation] = sizeof(FILE_END_OF_FILE_INFORMATION),
+    [FilePipeInformation] = sizeof(FILE_PIPE_INFORMATION),
+    [FileMailslotSetInformation] = sizeof(FILE_MAILSLOT_SET_INFORMATION),
+    [FileObjectIdInformation] = sizeof(FILE_OBJECTID_INFORMATION),
+    [FileCompletionInformation] = sizeof(FILE_COMPLETION_INFORMATION),
+    [FileMoveClusterInformation] = sizeof(FILE_MOVE_CLUSTER_INFORMATION),
+    [FileQuotaInformation] = sizeof(FILE_QUOTA_INFORMATION),
+    [FileTrackingInformation] = sizeof(FILE_TRACKING_INFORMATION),
+    [FileValidDataLengthInformation] = sizeof(FILE_VALID_DATA_LENGTH_INFORMATION),
+    [FileShortNameInformation] = sizeof(UNICODE_STRING),
 #if (NTDDI_VERSION >= NTDDI_VISTA)
-    /* Vista+ file info classes (Set-side). NT 5.2 retains the historical
-     * sentinel-at-index-41 layout so its behaviour is byte-identical. */
-    sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION), /* 41 */
-    sizeof(FILE_IOSTATUSBLOCK_RANGE_INFORMATION),        /* 42 */
-    sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),           /* 43 */
-    sizeof(FILE_SFIO_RESERVE_INFORMATION),               /* 44 */
-    sizeof(FILE_SFIO_VOLUME_INFORMATION),                /* 45 */
-    0,                                                   /* 46 FileHardLinkInformation */
-    0,                                                   /* 47 FileProcessIdsUsingFileInformation */
-    0,                                                   /* 48 FileNormalizedNameInformation */
-    0,                                                   /* 49 FileNetworkPhysicalNameInformation */
+    /* Vista+ set classes. */
+    [FileIoCompletionNotificationInformation] = sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
+    [FileIoStatusBlockRangeInformation] = sizeof(FILE_IOSTATUSBLOCK_RANGE_INFORMATION),
+    [FileIoPriorityHintInformation] = sizeof(FILE_IO_PRIORITY_HINT_INFORMATION),
+    [FileSfioReserveInformation] = sizeof(FILE_SFIO_RESERVE_INFORMATION),
+    [FileSfioVolumeInformation] = sizeof(FILE_SFIO_VOLUME_INFORMATION),
 #endif
 #if (NTDDI_VERSION >= NTDDI_WIN10)
-    /* Win7/Win8/8.1 set-side classes (50-63) are not handled here; keep them
-     * at 0 so they report STATUS_INVALID_INFO_CLASS rather than reading past
-     * the end of the table.  Index 64 enables FileDispositionInformationEx,
-     * the Win10 (RS1) POSIX/extended delete-disposition class. */
-    0, /* 50 FileIdGlobalTxDirectoryInformation */
-    0, /* 51 FileIsRemoteDeviceInformation */
-    0, /* 52 FileUnusedInformation */
-    0, /* 53 FileNumaNodeInformation */
-    0, /* 54 FileStandardLinkInformation */
-    0, /* 55 FileRemoteProtocolInformation */
-    0, /* 56 FileRenameInformationBypassAccessCheck */
-    0, /* 57 FileLinkInformationBypassAccessCheck */
-    0, /* 58 FileVolumeNameInformation */
-    0, /* 59 FileIdInformation */
-    0, /* 60 FileIdExtdDirectoryInformation */
-    0, /* 61 FileReplaceCompletionInformation */
-    0, /* 62 FileHardLinkFullIdInformation */
-    0, /* 63 FileIdExtdBothDirectoryInformation */
-    sizeof(FILE_DISPOSITION_INFORMATION_EX),             /* 64 FileDispositionInformationEx */
+    /* FileDispositionInformationEx is the Win10 (RS1) POSIX/extended
+     * delete-disposition class.  The Win7/Win8/8.1 set classes are not
+     * handled and stay zero. */
+    [FileDispositionInformationEx] = sizeof(FILE_DISPOSITION_INFORMATION_EX),
 #endif
-    0xFF
 };
 
-ACCESS_MASK IopQueryOperationAccess[] =
+ACCESS_MASK IopQueryOperationAccess[FileMaximumInformation] =
 {
-    0,
-    0,
-    0,
-    0,
-    FILE_READ_ATTRIBUTES,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    FILE_READ_EA,
-    0,
-    0,
-    FILE_READ_ATTRIBUTES,
-    0,
-    0,
-    0,
-    0,
-    FILE_READ_ATTRIBUTES,
-    FILE_READ_ATTRIBUTES,
-    FILE_READ_ATTRIBUTES,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    FILE_READ_ATTRIBUTES,
-    FILE_READ_ATTRIBUTES,
-    0,
-    0,
-    0,
-    0,
-    0,
-    0xFFFFFFFF
+    [FileBasicInformation] = FILE_READ_ATTRIBUTES,
+    [FileFullEaInformation] = FILE_READ_EA,
+    [FileAllInformation] = FILE_READ_ATTRIBUTES,
+    [FilePipeInformation] = FILE_READ_ATTRIBUTES,
+    [FilePipeLocalInformation] = FILE_READ_ATTRIBUTES,
+    [FilePipeRemoteInformation] = FILE_READ_ATTRIBUTES,
+    [FileNetworkOpenInformation] = FILE_READ_ATTRIBUTES,
+    [FileAttributeTagInformation] = FILE_READ_ATTRIBUTES,
+    /* FileHardLinkInformation requires no particular access, like on
+     * Windows: any handle to the file can enumerate its names. */
 };
 
-ACCESS_MASK IopSetOperationAccess[] =
+ACCESS_MASK IopSetOperationAccess[FileMaximumInformation] =
 {
-    0,
-    0,
-    0,
-    0,
-    FILE_WRITE_ATTRIBUTES,
-    0,
-    0,
-    0,
-    0,
-    0,
-    DELETE,
-    0,
-    0,
-    DELETE,
-    0,
-    FILE_WRITE_EA,
-    0,
-    0,
-    0,
-    FILE_WRITE_DATA,
-    FILE_WRITE_DATA,
-    0,
-    0,
-    FILE_WRITE_ATTRIBUTES,
-    0,
-    FILE_WRITE_ATTRIBUTES,
-    0,
-    0,
-    0,
-    0,
-    0,
-    FILE_WRITE_DATA,
-    0,
-    0,
-    0,
-    0,
-    FILE_WRITE_DATA,
-    0,
-    0,
-    FILE_WRITE_DATA,
-    DELETE,
-#if (NTDDI_VERSION >= NTDDI_VISTA)
-    /* Vista+ file info classes (Set-side access). All hint/optimisation
-     * classes - no specific access mask required. */
-    0, /* 41 FileIoCompletionNotificationInformation */
-    0, /* 42 FileIoStatusBlockRangeInformation */
-    0, /* 43 FileIoPriorityHintInformation */
-    0, /* 44 FileSfioReserveInformation */
-    0, /* 45 FileSfioVolumeInformation */
-    0, /* 46 FileHardLinkInformation */
-    0, /* 47 FileProcessIdsUsingFileInformation */
-    0, /* 48 FileNormalizedNameInformation */
-    0, /* 49 FileNetworkPhysicalNameInformation */
-#endif
+    [FileBasicInformation] = FILE_WRITE_ATTRIBUTES,
+    [FileRenameInformation] = DELETE,
+    [FileDispositionInformation] = DELETE,
+    [FileFullEaInformation] = FILE_WRITE_EA,
+    [FileAllocationInformation] = FILE_WRITE_DATA,
+    [FileEndOfFileInformation] = FILE_WRITE_DATA,
+    [FilePipeInformation] = FILE_WRITE_ATTRIBUTES,
+    [FilePipeRemoteInformation] = FILE_WRITE_ATTRIBUTES,
+    [FileMoveClusterInformation] = FILE_WRITE_DATA,
+    [FileTrackingInformation] = FILE_WRITE_DATA,
+    [FileValidDataLengthInformation] = FILE_WRITE_DATA,
+    [FileShortNameInformation] = DELETE,
 #if (NTDDI_VERSION >= NTDDI_WIN10)
-    /* Indices 50-63 unused here (see IopSetOperationLength). Index 64,
-     * FileDispositionInformationEx, deletes the file - requires DELETE. */
-    0, /* 50 */ 0, /* 51 */ 0, /* 52 */ 0, /* 53 */ 0, /* 54 */ 0, /* 55 */
-    0, /* 56 */ 0, /* 57 */ 0, /* 58 */ 0, /* 59 */ 0, /* 60 */ 0, /* 61 */
-    0, /* 62 */ 0, /* 63 */
-    DELETE, /* 64 FileDispositionInformationEx */
+    /* FileDispositionInformationEx deletes the file - requires DELETE. */
+    [FileDispositionInformationEx] = DELETE,
 #endif
-    0xFFFFFFFF
 };
 
 //
 // Volume Information Classes
 //
-UCHAR IopQueryFsOperationLength[] =
+UCHAR IopQueryFsOperationLength[FileFsMaximumInformation] =
 {
-    0,
-    sizeof(FILE_FS_VOLUME_INFORMATION),
-    0,
-    sizeof(FILE_FS_SIZE_INFORMATION),
-    sizeof(FILE_FS_DEVICE_INFORMATION),
-    sizeof(FILE_FS_ATTRIBUTE_INFORMATION),
-    sizeof(FILE_FS_CONTROL_INFORMATION),
-    sizeof(FILE_FS_FULL_SIZE_INFORMATION),
-    sizeof(FILE_FS_OBJECTID_INFORMATION),
-    sizeof(FILE_FS_DRIVER_PATH_INFORMATION),
-#if 0 // VISTA
-    sizeof(FILE_FS_VOLUME_FLAGS_INFORMATION),
-#endif
-    0xFF
+    [FileFsVolumeInformation] = sizeof(FILE_FS_VOLUME_INFORMATION),
+    [FileFsSizeInformation] = sizeof(FILE_FS_SIZE_INFORMATION),
+    [FileFsDeviceInformation] = sizeof(FILE_FS_DEVICE_INFORMATION),
+    [FileFsAttributeInformation] = sizeof(FILE_FS_ATTRIBUTE_INFORMATION),
+    [FileFsControlInformation] = sizeof(FILE_FS_CONTROL_INFORMATION),
+    [FileFsFullSizeInformation] = sizeof(FILE_FS_FULL_SIZE_INFORMATION),
+    [FileFsObjectIdInformation] = sizeof(FILE_FS_OBJECTID_INFORMATION),
+    [FileFsDriverPathInformation] = sizeof(FILE_FS_DRIVER_PATH_INFORMATION),
 };
 
-UCHAR IopSetFsOperationLength[] =
+UCHAR IopSetFsOperationLength[FileFsMaximumInformation] =
 {
-    0,
-    0,
-    sizeof(FILE_FS_LABEL_INFORMATION),
-    0,
-    0,
-    0,
-    sizeof(FILE_FS_CONTROL_INFORMATION),
-    0,
-    sizeof(FILE_FS_OBJECTID_INFORMATION),
-    0,
-#if 0 // VISTA
-    sizeof(FILE_FS_VOLUME_FLAGS_INFORMATION),
-#endif
-    0xFF
+    [FileFsLabelInformation] = sizeof(FILE_FS_LABEL_INFORMATION),
+    [FileFsControlInformation] = sizeof(FILE_FS_CONTROL_INFORMATION),
+    [FileFsObjectIdInformation] = sizeof(FILE_FS_OBJECTID_INFORMATION),
 };
 
-ULONG IopQueryFsOperationAccess[] =
+ULONG IopQueryFsOperationAccess[FileFsMaximumInformation] =
 {
-    0,
-    0,
-    0,
-    0,
-    0,
-    0,
-    FILE_READ_DATA,
-    0,
-    0,
-    0,
-#if 0 // VISTA
-    0,
-#endif
-    0xFFFFFFFF
+    [FileFsControlInformation] = FILE_READ_DATA,
 };
 
-ULONG IopSetFsOperationAccess[] =
+ULONG IopSetFsOperationAccess[FileFsMaximumInformation] =
 {
-    0,
-    0,
-    FILE_WRITE_DATA,
-    0,
-    0,
-    0,
-    FILE_WRITE_DATA,
-    0,
-    FILE_WRITE_DATA,
-    0,
-#if 0 // VISTA
-    0,
-#endif
-    0xFFFFFFFF
+    [FileFsLabelInformation] = FILE_WRITE_DATA,
+    [FileFsControlInformation] = FILE_WRITE_DATA,
+    [FileFsObjectIdInformation] = FILE_WRITE_DATA,
 };
