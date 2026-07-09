@@ -409,6 +409,116 @@ NtfsGetAlternateNameInformation(PNTFS_FCB Fcb,
     return STATUS_SUCCESS;
 }
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+/*
+ * FileHardLinkInformation: enumerate every name of the file as a
+ * FILE_LINK_ENTRY_INFORMATION chain, one entry per hard link.  A DOS-only
+ * 8.3 $FILE_NAME is the short-name alias of the WIN32 entry beside it, not
+ * a distinct link, so it is skipped - matching what Windows returns to
+ * FindFirstFileNameW.  ParentFileId carries the on-disk parent directory
+ * reference; the sequence bits are left in place since our open-by-file-id
+ * path masks them off itself.  FileNameLength is in characters for this
+ * information class, unlike most others.  Returns STATUS_BUFFER_OVERFLOW
+ * with BytesNeeded/EntriesReturned filled and as many whole entries as fit
+ * when the buffer is too small for all of them.
+ */
+static
+NTSTATUS
+NtfsGetHardLinkInformation(PNTFS_FCB Fcb,
+                           PDEVICE_EXTENSION DeviceExt,
+                           PFILE_LINKS_INFORMATION LinksInfo,
+                           PULONG BufferLength)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    FIND_ATTR_CONTXT Context;
+    PNTFS_ATTR_RECORD Attribute;
+    PFILE_LINK_ENTRY_INFORMATION LastEntry = NULL;
+    NTSTATUS Status;
+    ULONG Offset;
+    ULONG LastEntryOffset = 0;
+    ULONG BytesNeeded;
+    ULONG BytesWritten;
+    ULONG EntriesReturned = 0;
+    BOOLEAN Truncated = FALSE;
+
+    ASSERT(Fcb != NULL);
+    ASSERT(LinksInfo != NULL);
+
+    if (*BufferLength < (ULONG)FIELD_OFFSET(FILE_LINKS_INFORMATION, Entry))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    Offset = FIELD_OFFSET(FILE_LINKS_INFORMATION, Entry);
+    BytesNeeded = Offset;
+    BytesWritten = Offset;
+
+    Status = FindFirstAttribute(&Context, DeviceExt, FileRecord, FALSE, &Attribute);
+    while (NT_SUCCESS(Status))
+    {
+        if (Attribute->Type == AttributeFileName)
+        {
+            PFILENAME_ATTRIBUTE Name;
+
+            Name = (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
+            if (Name->NameType != NTFS_FILE_NAME_DOS)
+            {
+                ULONG NameBytes = (ULONG)Name->NameLength * sizeof(WCHAR);
+                ULONG EntryBytes = FIELD_OFFSET(FILE_LINK_ENTRY_INFORMATION, FileName) + NameBytes;
+
+                BytesNeeded = Offset + EntryBytes;
+
+                if (!Truncated && Offset + EntryBytes <= *BufferLength)
+                {
+                    PFILE_LINK_ENTRY_INFORMATION Entry;
+
+                    Entry = (PFILE_LINK_ENTRY_INFORMATION)((ULONG_PTR)LinksInfo + Offset);
+                    Entry->NextEntryOffset = 0;
+                    Entry->ParentFileId = (LONGLONG)Name->DirectoryFileReferenceNumber;
+                    Entry->FileNameLength = Name->NameLength;
+                    RtlCopyMemory(Entry->FileName, Name->Name, NameBytes);
+
+                    if (LastEntry != NULL)
+                        LastEntry->NextEntryOffset = Offset - LastEntryOffset;
+
+                    LastEntry = Entry;
+                    LastEntryOffset = Offset;
+                    BytesWritten = Offset + EntryBytes;
+                    EntriesReturned++;
+                }
+                else
+                {
+                    Truncated = TRUE;
+                }
+
+                /* Chained entries embed a LONGLONG; keep each start 8-aligned */
+                Offset = ROUND_UP(Offset + EntryBytes, sizeof(LONGLONG));
+            }
+        }
+
+        Status = FindNextAttribute(&Context, &Attribute);
+    }
+    FindCloseAttribute(&Context);
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    LinksInfo->BytesNeeded = BytesNeeded;
+    LinksInfo->EntriesReturned = EntriesReturned;
+
+    *BufferLength -= BytesWritten;
+    return Truncated ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+}
+#endif /* NTDDI_VERSION >= NTDDI_VISTA */
+
 /*
  * Retrieve FILE_ALL_INFORMATION by calling the per-class handlers in
  * order and stitching the output into the caller's buffer.  The layout
@@ -748,6 +858,15 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
                 Status = STATUS_SUCCESS;
             }
             break;
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+        case FileHardLinkInformation:
+            Status = NtfsGetHardLinkInformation(Fcb,
+                                                DeviceObject->DeviceExtension,
+                                                SystemBuffer,
+                                                &BufferLength);
+            break;
+#endif
 
         default:
             DPRINT1("Unimplemented information class: %s\n", GetInfoClassName(FileInformationClass));
