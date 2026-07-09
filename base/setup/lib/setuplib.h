@@ -131,6 +131,7 @@ typedef struct _USETUP_DATA
 
     LONG BootLoaderLocation;
     LONG FormatPartition;
+    BOOLEAN RepairUpdate; //< Unattended request to update an existing installation in place
     LONG AutoPartition;
     LONG FsType;
 

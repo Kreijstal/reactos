@@ -1111,7 +1111,65 @@ InstallIntroPage(PINPUT_RECORD Ir)
     }
 
     if (IsUnattendedSetup)
+    {
+        /*
+         * If the unattended setup requests to upgrade an existing installation,
+         * find it non-interactively and select it for an in-place update
+         * (mirrors the interactive UpgradeRepairPage selection). Otherwise,
+         * or if no suitable installation is found, fall through to a regular
+         * fresh installation.
+         */
+        if (USetupData.RepairUpdate)
+        {
+/*** HACK!! (see UpgradeRepairPage) ***/
+            if (PartitionList == NULL)
+            {
+                PartitionList = CreatePartitionList();
+                if (PartitionList == NULL || IsListEmpty(&PartitionList->DiskListHead))
+                {
+                    DPRINT1("Unattended upgrade: no partition list available; falling back to fresh install\n");
+                    return SELECT_PARTITION_PAGE;
+                }
+            }
+/**************/
+
+            NtOsInstallsList = CreateNTOSInstallationsList(PartitionList);
+            if (NtOsInstallsList && GetNumberOfListEntries(NtOsInstallsList) >= 1)
+            {
+                PGENERIC_LIST_ENTRY Entry;
+                PNTOS_INSTALLATION Installation;
+
+                for (Entry = GetFirstListEntry(NtOsInstallsList);
+                     Entry != NULL;
+                     Entry = GetNextListEntry(Entry))
+                {
+                    Installation = (PNTOS_INSTALLATION)GetListEntryData(Entry);
+
+                    /* A destination value of -1 means "any" (first installation) */
+                    if ((USetupData.DestinationDiskNumber == -1 ||
+                         (LONG)Installation->DiskNumber == USetupData.DestinationDiskNumber) &&
+                        (USetupData.DestinationPartitionNumber == -1 ||
+                         (LONG)Installation->PartitionNumber == USetupData.DestinationPartitionNumber))
+                    {
+                        SetCurrentListEntry(NtOsInstallsList, Entry);
+                        CurrentInstallation = Installation;
+                        RepairUpdateFlag = TRUE;
+
+                        DPRINT1("Unattended upgrade: selected installation \"%S\" ; DiskNumber = %d , PartitionNumber = %d\n",
+                                CurrentInstallation->InstallationName,
+                                CurrentInstallation->DiskNumber,
+                                CurrentInstallation->PartitionNumber);
+
+                        return DEVICE_SETTINGS_PAGE;
+                    }
+                }
+            }
+
+            DPRINT1("Unattended upgrade requested but no matching installation found; falling back to fresh install\n");
+        }
+
         return SELECT_PARTITION_PAGE;
+    }
 
     MUIDisplayPage(INSTALL_INTRO_PAGE);
 

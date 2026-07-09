@@ -198,6 +198,21 @@ CheckUnattendedSetup(
             pSetupData->FsType = IntValue;
     }
 
+    /*
+     * Search for 'Upgrade' (optional): when set to "yes", request an in-place
+     * update of an existing installation instead of a fresh install (mirrors
+     * the interactive upgrade/repair path). Defaults to FALSE (fresh install).
+     */
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"Upgrade", &Context))
+    {
+        if (INF_GetData(&Context, NULL, &Value))
+        {
+            if (_wcsicmp(Value, L"yes") == 0)
+                pSetupData->RepairUpdate = TRUE;
+            INF_FreeData(Value);
+        }
+    }
+
 Quit:
     SpInfCloseInfFile(UnattendInf);
     return IsUnattendedSetup;
