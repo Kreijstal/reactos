@@ -2129,9 +2129,19 @@ USBPORT_MiniportCompleteTransfer(IN PVOID MiniPortExtension,
     }
 
     SplitHead = &ParentTransfer->SplitTransfersList;
-    Entry = SplitHead->Flink;
 
-    while (Entry && !IsListEmpty(SplitHead))
+    /*
+     * Walk the circular list of split transfers. The terminator must be the
+     * list head itself: the previous condition (Entry && !IsListEmpty(SplitHead))
+     * never became false for a non-empty list -- this loop unlinks no entries,
+     * so IsListEmpty() stays FALSE and Entry (a Flink) is never NULL. Once Entry
+     * wrapped back to the head sentinel the walk spun forever, flooding the
+     * debug log from USBPORT_MiniportCompleteTransfer and pinning the CPU
+     * whenever a device issued split transfers (e.g. large USB mass-storage I/O).
+     */
+    for (Entry = SplitHead->Flink;
+         Entry != SplitHead;
+         Entry = Entry->Flink)
     {
         SplitTransfer = CONTAINING_RECORD(Entry,
                                           USBPORT_TRANSFER,
@@ -2139,12 +2149,10 @@ USBPORT_MiniportCompleteTransfer(IN PVOID MiniPortExtension,
 
         if (!(SplitTransfer->Flags & TRANSFER_FLAG_SUBMITED))
         {
-            DPRINT1("USBPORT_MiniportCompleteTransfer: SplitTransfer->Flags - %X\n",
-                    SplitTransfer->Flags);
+            DPRINT("USBPORT_MiniportCompleteTransfer: SplitTransfer->Flags - %X\n",
+                   SplitTransfer->Flags);
             //Add TRANSFER_FLAG_xxx
         }
-
-        Entry = Entry->Flink;
     }
 
     KeReleaseSpinLock(&ParentTransfer->TransferSpinLock, OldIrql);
