@@ -698,7 +698,24 @@ CcRosMarkDirtyVacb (
     oldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
     KeAcquireSpinLockAtDpcLevel(&SharedCacheMap->CacheMapLock);
 
-    ASSERT(!Vacb->Dirty);
+    /*
+     * Test-and-set the dirty state atomically under the cache-map lock.
+     * Callers (CcRosReleaseVacb, CcRosWriteVacb via pin.c, ...) test
+     * !Vacb->Dirty *without* holding this lock, so they race both with each
+     * other and with CcRosFlushVacb(): the latter transiently unmarks a VACB
+     * and drops the lock to run MmFlushSegment(), then re-marks it if the flush
+     * fails. If a writer re-dirties the VACB inside that unlocked window, the
+     * following mark is a legitimate no-op -- the VACB is already accounted for
+     * and on DirtyVacbListHead. Asserting !Dirty here (or blindly re-inserting)
+     * corrupted the dirty list and tripped KDB under concurrent write + flush
+     * (e.g. a failed MmFlushSegment during heavy I/O). Just bail out.
+     */
+    if (Vacb->Dirty)
+    {
+        KeReleaseSpinLockFromDpcLevel(&SharedCacheMap->CacheMapLock);
+        KeReleaseQueuedSpinLock(LockQueueMasterLock, oldIrql);
+        return;
+    }
 
     InsertTailList(&DirtyVacbListHead, &Vacb->DirtyVacbListEntry);
     /* FIXME: There is no reason to account for the whole VACB. */
