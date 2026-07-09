@@ -2784,11 +2784,25 @@ static BOOL CNG_PrepareSignatureECC(BYTE *encoded_sig, DWORD encoded_size, BYTE 
 {
     CERT_ECC_SIGNATURE *ecc_sig;
     DWORD size, r_size, s_size, r_offset, s_offset;
+    BYTE *reversed_sig;
     int i;
 
-    if (!CryptDecodeObjectEx(X509_ASN_ENCODING, X509_ECC_SIGNATURE, encoded_sig, encoded_size,
-            CRYPT_DECODE_ALLOC_FLAG, NULL, &ecc_sig, &size))
+    /* The ECC signature is decoded from the byte-reversed signature value. */
+    if (!(reversed_sig = CryptMemAlloc(encoded_size)))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
         return FALSE;
+    }
+    for (i = 0; i < (int)encoded_size; i++)
+        reversed_sig[i] = encoded_sig[encoded_size - i - 1];
+
+    if (!CryptDecodeObjectEx(X509_ASN_ENCODING, X509_ECC_SIGNATURE, reversed_sig, encoded_size,
+            CRYPT_DECODE_ALLOC_FLAG, NULL, &ecc_sig, &size))
+    {
+        CryptMemFree(reversed_sig);
+        return FALSE;
+    }
+    CryptMemFree(reversed_sig);
 
     if (!(r_size = ecc_sig->r.cbData) || !(s_size = ecc_sig->s.cbData))
     {
@@ -2821,9 +2835,10 @@ static BOOL CNG_PrepareSignatureECC(BYTE *encoded_sig, DWORD encoded_size, BYTE 
 
 static BOOL CNG_PrepareSignatureRSA(BYTE *encoded_sig, DWORD encoded_size, BYTE **sig_value, DWORD *sig_len)
 {
-    /* Unlike ECDSA, an RSA (PKCS#1) signature is not ASN.1-encoded: the
-     * (already byte-reversed) signature value is the big-endian octet string
-     * that BCryptVerifySignature expects, so it is passed through as-is. */
+    /* Unlike ECDSA, an RSA (PKCS#1 v1.5) signature is not ASN.1-encoded: the
+     * signature value stored in the certificate is already the big-endian
+     * octet string that BCryptVerifySignature/mbedTLS expects, so it is passed
+     * through as-is without the byte reversal ECDSA requires. */
     *sig_len = encoded_size;
     if (!(*sig_value = CryptMemAlloc(encoded_size)))
     {
@@ -2850,29 +2865,19 @@ BOOL cng_prepare_signature(const char *alg_oid, BYTE *encoded_sig, DWORD encoded
 static BOOL CNG_PrepareCertSignature(CERT_PUBLIC_KEY_INFO *pubKeyInfo, const CERT_SIGNED_CONTENT_INFO *signedCert,
     BYTE **sig_value, DWORD *sig_len)
 {
-    BYTE *encoded_sig;
-    BOOL ret = FALSE;
-    int i;
-
     if (!signedCert->Signature.cbData)
     {
         SetLastError(ERROR_INVALID_DATA);
         return FALSE;
     }
 
-    if (!(encoded_sig = CryptMemAlloc(signedCert->Signature.cbData)))
-    {
-        SetLastError(ERROR_OUTOFMEMORY);
-        return FALSE;
-    }
-
-    for (i = 0; i < signedCert->Signature.cbData; i++)
-        encoded_sig[i] = signedCert->Signature.pbData[signedCert->Signature.cbData - i - 1];
-
-    ret = cng_prepare_signature(pubKeyInfo->Algorithm.pszObjId, encoded_sig, signedCert->Signature.cbData,
+    /* Pass the signature value through in its original (certificate) byte
+     * order.  The ECDSA path reverses it internally to ASN.1-decode the
+     * X509_ECC_SIGNATURE, whereas the RSA PKCS#1 path needs the unmodified
+     * big-endian octet string. */
+    return cng_prepare_signature(pubKeyInfo->Algorithm.pszObjId,
+            signedCert->Signature.pbData, signedCert->Signature.cbData,
             sig_value, sig_len);
-    CryptMemFree(encoded_sig);
-    return ret;
 }
 
 static BOOL CNG_VerifySignature(HCRYPTPROV_LEGACY hCryptProv, DWORD dwCertEncodingType,
