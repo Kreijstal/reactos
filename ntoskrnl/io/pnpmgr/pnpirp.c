@@ -24,6 +24,20 @@ IopSynchronousCall(
     PDEVICE_OBJECT TopDeviceObject;
     PAGED_CODE();
 
+#if defined(_M_ARM64)
+    {
+        static LONG EntryDiagCount = 0;
+        ULONG64 EntryDaif;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(EntryDaif));
+        if ((EntryDaif & (1ULL << 7)) && (EntryDiagCount < 4))
+        {
+            EntryDiagCount++;
+            DPRINT1("SYNC-ENTRY-DIAG: masked at entry! Daif=%llx Irql=%u thread=%p\n",
+                    EntryDaif, KeGetCurrentIrql(), KeGetCurrentThread());
+        }
+    }
+#endif
+
     /* Call the top of the device stack */
     TopDeviceObject = IoGetAttachedDeviceReference(DeviceObject);
 
@@ -67,6 +81,19 @@ IopSynchronousCall(
     Status = IoCallDriver(TopDeviceObject, Irp);
     /* Otherwise we may get stuck here or have IoStatusBlock not populated */
     ASSERT(!KeAreAllApcsDisabled());
+#if defined(_M_ARM64)
+    if ((Status != STATUS_PENDING) &&
+        (KeGetCurrentThread()->ApcState.KernelApcPending))
+    {
+        ULONG64 DiagDaif;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(DiagDaif));
+        DPRINT1("SYNC-DIAG: APC still pending after IoCallDriver! Irql=%u Daif=%llx SpecialApcDisable=%d KernelApcDisable=%d Signal=%ld\n",
+                KeGetCurrentIrql(), DiagDaif,
+                KeGetCurrentThread()->SpecialApcDisable,
+                KeGetCurrentThread()->KernelApcDisable,
+                Event.Header.SignalState);
+    }
+#endif
     if (Status == STATUS_PENDING)
     {
         /* Wait for it */

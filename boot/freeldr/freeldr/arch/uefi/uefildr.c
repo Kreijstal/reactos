@@ -42,6 +42,8 @@ EfiEntry(
      * loader-block hand-off to the kernel) keys off this detection; without
      * it EarlyUartBaseAddress stays 0 and all of it silently no-ops. */
     EarlyUartInitialize(0);
+    /* EUART-DIAG (uncommitted): prove the detection outcome on the wire */
+    EarlyUartPuts("[EFI] uefildr entry, early UART detected\n");
 #endif
 
     /* Load the default settings from the command-line */

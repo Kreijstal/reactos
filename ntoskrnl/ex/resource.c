@@ -18,6 +18,175 @@
 #define IsOwnedExclusive(r)     (r->Flag & ResourceOwnedExclusive)
 #define IsBoostAllowed(r)       (!(r->Flag & ResourceHasDisabledPriorityBoost))
 
+#if defined(_M_AMD64)
+/* ==================== RESWATCH (uncommitted diagnostic) ====================
+ * Locate the EXTERNAL producer of the resource.c:844 ActiveCount=1 corruption.
+ * Proven facts: a stray write of 1 lands on a freed-but-live cdfs FcbResource's
+ * ActiveCount (FCB_NONPAGED+0x38) without passing through any resource.c path;
+ * the FCB pool address is non-deterministic per boot, so a fixed gdb watchpoint
+ * cannot work.  Instead, when a cdfs FcbResource goes IDLE (AC==0, AE==0) we arm
+ * a hardware data-write breakpoint (DR0-3, ring of 4) on its &ActiveCount.  The
+ * resulting #DB is consumed in KiDispatchException via KiResWatchHandleTrap:
+ *   - faulting RIP inside the resource.c code range  -> legit re-acquire/release
+ *                                                        (disarm that slot)
+ *   - RIP anywhere else                              -> THE PRODUCER (logged)
+ * amd64, single CPU (kmtestcd boots -smp 1); SwapContext does not touch DRs so
+ * the breakpoint is global across threads, which is required because the
+ * producer may run in a different thread than the cdfs releaser.
+ * cdfs FCB filter: NodeTypeCode/NodeByteSize at (Resource-0x20) == 0x00F80306. */
+#define RESWATCH_SLOTS 4
+/* Master switch: FALSE => no arming at all (control build to measure the
+ * un-perturbed bug rate); TRUE => arm the HW data breakpoints. */
+volatile BOOLEAN  KiResWatchEnable = FALSE;
+volatile PVOID    KiResWatchAddr[RESWATCH_SLOTS] = { 0 };
+volatile ULONG    KiResWatchNext = 0;
+volatile ULONG_PTR KiResCodeLo = 0;
+volatile ULONG_PTR KiResCodeHi = 0;
+
+static VOID
+KiResWatchInitRange(VOID)
+{
+    /* Bound the resource.c acquire/release code (all legit ActiveCount writers)
+     * by the min/max entry of the Ex*Resource* functions, generously padded to
+     * cover the function bodies. They share one translation unit so the linker
+     * keeps them contiguous; no other code writes ERESOURCE->ActiveCount. */
+    ULONG_PTR a[] = {
+        (ULONG_PTR)&ExAcquireResourceExclusiveLite,
+        (ULONG_PTR)&ExAcquireResourceSharedLite,
+        (ULONG_PTR)&ExAcquireSharedStarveExclusive,
+        (ULONG_PTR)&ExAcquireSharedWaitForExclusive,
+        (ULONG_PTR)&ExReleaseResourceForThreadLite,
+        (ULONG_PTR)&ExConvertExclusiveToSharedLite,
+    };
+    ULONG_PTR lo = a[0], hi = a[0];
+    ULONG i;
+    for (i = 1; i < RTL_NUMBER_OF(a); i++)
+    {
+        if (a[i] < lo) lo = a[i];
+        if (a[i] > hi) hi = a[i];
+    }
+    KiResCodeLo = lo - 0x100;
+    KiResCodeHi = hi + 0x1000;
+}
+
+VOID
+KiResWatchArm(IN PVOID AcAddr)
+{
+    ULONG slot, i;
+    ULONG64 dr7;
+    ULONG le, rwlen;
+
+    if (KiResCodeLo == 0) KiResWatchInitRange();
+
+    /* Already watching this address? Nothing to do. */
+    for (i = 0; i < RESWATCH_SLOTS; i++)
+        if (KiResWatchAddr[i] == AcAddr) return;
+
+    /* Prefer a free slot so a long-idle victim (the one the late stray write
+     * lands on) keeps its slot instead of being evicted by every subsequent
+     * unrelated cdfs release. Slots free up on legit re-acquire (handler) and
+     * on ExDeleteResourceLite. Only when all four are occupied do we FIFO-evict
+     * the oldest, which trades coverage breadth for cross-boot randomness. */
+    slot = RESWATCH_SLOTS;
+    for (i = 0; i < RESWATCH_SLOTS; i++)
+        if (KiResWatchAddr[i] == NULL) { slot = i; break; }
+    if (slot == RESWATCH_SLOTS)
+    {
+        slot = KiResWatchNext;
+        KiResWatchNext = (slot + 1) & (RESWATCH_SLOTS - 1);
+    }
+    KiResWatchAddr[slot] = AcAddr;
+
+    /* __writedr needs a constant register index */
+    switch (slot)
+    {
+        case 0: __writedr(0, (ULONG64)(ULONG_PTR)AcAddr); break;
+        case 1: __writedr(1, (ULONG64)(ULONG_PTR)AcAddr); break;
+        case 2: __writedr(2, (ULONG64)(ULONG_PTR)AcAddr); break;
+        default: __writedr(3, (ULONG64)(ULONG_PTR)AcAddr); break;
+    }
+    le = 2 * slot;          /* Ln local-enable bit */
+    rwlen = 16 + 4 * slot;  /* R/Wn (2 bits) then LENn (2 bits) */
+    dr7 = __readdr(7);
+    dr7 &= ~(((ULONG64)0x3) << le);
+    dr7 &= ~(((ULONG64)0xF) << rwlen);
+    dr7 |= ((ULONG64)0x1) << le;            /* enable local slot */
+    dr7 |= ((ULONG64)0x1) << rwlen;         /* R/W = 01 -> data writes */
+    dr7 |= ((ULONG64)0x1) << (rwlen + 2);   /* LEN = 01 -> 2 bytes */
+    dr7 |= ((ULONG64)0x1) << 8;             /* LE */
+    __writedr(7, dr7);
+}
+
+static VOID
+KiResWatchDisarm(IN ULONG Slot)
+{
+    ULONG64 dr7 = __readdr(7);
+    dr7 &= ~(((ULONG64)0x3) << (2 * Slot));  /* clear Ln/Gn for this slot */
+    __writedr(7, dr7);
+    KiResWatchAddr[Slot] = NULL;
+}
+
+/* Drop any watch on a resource that is being deleted, before its pool is freed
+ * and recycled — otherwise the stale DR would fire on the next owner of that
+ * address and be mis-reported as the producer. */
+VOID
+KiResWatchForget(IN PERESOURCE Resource)
+{
+    PVOID acAddr = (PVOID)&Resource->ActiveCount;
+    ULONG i;
+    for (i = 0; i < RESWATCH_SLOTS; i++)
+        if (KiResWatchAddr[i] == acAddr) KiResWatchDisarm(i);
+}
+
+/* Called at the very top of KiDispatchException for kernel STATUS_SINGLE_STEP.
+ * Returns TRUE if the #DB was one of our data breakpoints and fully consumed. */
+BOOLEAN
+KiResWatchHandleTrap(IN PKTRAP_FRAME TrapFrame)
+{
+    ULONG64 dr6 = __readdr(6);
+    ULONG hit = (ULONG)(dr6 & 0xF);
+    ULONG64 cleared = 0;
+    BOOLEAN ours = FALSE, foreign = FALSE;
+    ULONG i;
+
+    if (hit == 0) return FALSE;   /* not a data breakpoint (e.g. single-step) */
+
+    for (i = 0; i < RESWATCH_SLOTS; i++)
+    {
+        if (!(hit & (1u << i))) continue;
+        if (KiResWatchAddr[i] == NULL) { foreign = TRUE; continue; }
+
+        {
+            ULONG_PTR rip = (ULONG_PTR)TrapFrame->Rip;
+            PVOID ac = (PVOID)KiResWatchAddr[i];
+            if (rip >= KiResCodeLo && rip < KiResCodeHi)
+            {
+                /* Legit re-acquire/release writing ActiveCount; idle window
+                 * over. Just disarm — it re-arms on the next idle release. */
+            }
+            else
+            {
+                DPRINT1("RESWATCH-PRODUCER: rip=%p ac@%p=%u slot=%u "
+                        "[%02x %02x %02x %02x %02x %02x %02x %02x | %02x %02x %02x %02x]\n",
+                        (PVOID)rip, ac, *(volatile USHORT *)ac, i,
+                        ((PUCHAR)rip)[-8], ((PUCHAR)rip)[-7], ((PUCHAR)rip)[-6],
+                        ((PUCHAR)rip)[-5], ((PUCHAR)rip)[-4], ((PUCHAR)rip)[-3],
+                        ((PUCHAR)rip)[-2], ((PUCHAR)rip)[-1],
+                        ((PUCHAR)rip)[0], ((PUCHAR)rip)[1], ((PUCHAR)rip)[2],
+                        ((PUCHAR)rip)[3]);
+            }
+            KiResWatchDisarm(i);
+            cleared |= (1u << i);
+            ours = TRUE;
+        }
+    }
+
+    __writedr(6, dr6 & ~cleared);   /* clear only the status bits we handled */
+    if (foreign) return FALSE;      /* let KDBG handle any non-ours bit */
+    return ours;
+}
+#endif /* _M_AMD64 */
+
 #if !defined(CONFIG_SMP) && !DBG
 
 FORCEINLINE
@@ -53,6 +222,12 @@ ExAcquireResourceLock(IN PERESOURCE Resource,
 {
     /* Acquire the lock */
     KeAcquireInStackQueuedSpinLock(&Resource->SpinLock, LockHandle);
+#if defined(_M_AMD64)
+    /* RESWATCH: any lock op means the resource is no longer idle, so drop its
+     * watch before the legit ActiveCount write — only the external producer's
+     * write (which happens while idle/armed) should ever fault. */
+    if (KiResWatchEnable) KiResWatchForget(Resource);
+#endif
 }
 
 FORCEINLINE
@@ -840,6 +1015,58 @@ TryAcquire:
     else
     {
         /* Nobody owns it, so let's! */
+#if defined(_M_AMD64)
+        if (Resource->ActiveCount != 0)
+        {
+            ULONG_PTR Rsp;
+            PVOID Caller2 = NULL;
+            __asm__ volatile("movq %%rsp, %0" : "=r"(Rsp));
+            /* CdAcquireResource prologue is 3 pushes + sub 0x20 = 0x38 bytes;
+             * its CALL of ExAcquireResourceExclusiveLite pushes 8 more; this
+             * function's own prologue is 4 pushes + sub 0x98 = 0xB8. So our
+             * direct caller's RA is at rsp+0xB8 (=_ReturnAddress) and the
+             * caller-of-caller's RA is at rsp+0xB8+0x38+8 = rsp+0xF8. */
+            Caller2 = *(PVOID*)(Rsp + 0xF8);
+            ULONG *Hdr = (ULONG *)((PCHAR)Resource - 0x20);
+            DPRINT1("RES-INV-EX: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                    "SW=%lu ExW=%lu T=%p Caller=%p Caller2=%p\n",
+                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                    Resource->OwnerEntry.OwnerCount,
+                    Resource->NumberOfSharedWaiters,
+                    Resource->NumberOfExclusiveWaiters,
+                    (PVOID)Thread, _ReturnAddress(), Caller2);
+            /* Dump 0x20 bytes before Resource (NodeTypeCode + SegmentObject
+             * area if this is a FCB_NONPAGED) and the spinlock area inside the
+             * ERESOURCE — helps distinguish live vs freed/UAF memory. */
+            DPRINT1("RES-INV-EX-MEM: -20:[%08x %08x %08x %08x %08x %08x %08x %08x] "
+                    "SpinLock=%p\n",
+                    Hdr[0], Hdr[1], Hdr[2], Hdr[3],
+                    Hdr[4], Hdr[5], Hdr[6], Hdr[7],
+                    (PVOID)Resource->SpinLock);
+
+            /* At-fault-only forensics (no hot-path cost). The AC-write history
+             * already proved R was legitimately released to free and then
+             * stray-written by a non-resource.c actor. Now characterise the
+             * corruption: (1) the pool header of the FCB allocation (FCB starts
+             * at R-0x20; amd64 POOL_HEADER is 0x10 bytes, so it sits at R-0x30)
+             * to detect realloc/alias/overrun; (2) whether R is still correctly
+             * linked in ExpSystemResourcesList (= a valid init'd resource);
+             * (3) OwnerTable + ContentionCount. */
+            {
+                ULONG *Ph = (ULONG *)((PCHAR)Resource - 0x30);
+                PLIST_ENTRY Le = &Resource->SystemResourcesList;
+                BOOLEAN Linked = (Le->Flink->Blink == Le) && (Le->Blink->Flink == Le);
+                DPRINT1("RES-INV-EX-POOL: hdr@-30:[%08x %08x %08x %08x] "
+                        "(PrevSize/BlockSize/PoolType in first ULONG, tag in 2nd)\n",
+                        Ph[0], Ph[1], Ph[2], Ph[3]);
+                DPRINT1("RES-INV-EX-LIST: linked=%d Flink=%p Blink=%p "
+                        "OwnerTable=%p ContentionCount=%lu\n",
+                        Linked, Le->Flink, Le->Blink,
+                        Resource->OwnerTable, Resource->ContentionCount);
+            }
+        }
+#endif /* _M_AMD64 */
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->Flag |= ResourceOwnedExclusive;
@@ -960,6 +1187,17 @@ ExAcquireResourceSharedLite(IN PERESOURCE Resource,
                 if (Resource->ActiveEntries == 0)
                 {
                     /* Set initial counts */
+                    if (Resource->ActiveCount != 0)
+                    {
+                        DPRINT1("RES-INV-SH2: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                                "SW=%lu ExW=%lu T=%p Caller=%p\n",
+                                Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                                Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                                Resource->OwnerEntry.OwnerCount,
+                                Resource->NumberOfSharedWaiters,
+                                Resource->NumberOfExclusiveWaiters,
+                                (PVOID)Thread, _ReturnAddress());
+                    }
                     ASSERT(Resource->ActiveCount == 0);
                     Resource->ActiveEntries = 1;
                     Resource->ActiveCount = 1;
@@ -1002,6 +1240,17 @@ ExAcquireResourceSharedLite(IN PERESOURCE Resource,
     if (Resource->ActiveEntries == 0)
     {
         /* Acquire it */
+        if (Resource->ActiveCount != 0)
+        {
+            DPRINT1("RES-INV-SH: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                    "SW=%lu ExW=%lu T=%p Caller=%p\n",
+                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                    Resource->OwnerEntry.OwnerCount,
+                    Resource->NumberOfSharedWaiters,
+                    Resource->NumberOfExclusiveWaiters,
+                    (PVOID)Thread, _ReturnAddress());
+        }
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->ActiveEntries = 1;
@@ -1087,6 +1336,17 @@ TryAcquire:
     if (Resource->ActiveEntries == 0)
     {
         /* Nobody owns it, so let's take control */
+        if (Resource->ActiveCount != 0)
+        {
+            DPRINT1("RES-INV-SS: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                    "SW=%lu ExW=%lu T=%p Caller=%p\n",
+                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                    Resource->OwnerEntry.OwnerCount,
+                    Resource->NumberOfSharedWaiters,
+                    Resource->NumberOfExclusiveWaiters,
+                    (PVOID)Thread, _ReturnAddress());
+        }
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->ActiveCount = 1;
@@ -1241,6 +1501,17 @@ TryAcquire:
     if (!Resource->ActiveEntries)
     {
         /* Nobody owns it, so let's take control */
+        if (Resource->ActiveCount != 0)
+        {
+            DPRINT1("RES-INV-SW: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                    "SW=%lu ExW=%lu T=%p Caller=%p\n",
+                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                    Resource->OwnerEntry.OwnerCount,
+                    Resource->NumberOfSharedWaiters,
+                    Resource->NumberOfExclusiveWaiters,
+                    (PVOID)Thread, _ReturnAddress());
+        }
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->ActiveCount = 1;
@@ -1476,6 +1747,11 @@ ExDeleteResourceLite(IN PERESOURCE Resource)
 
     /* Release the lock */
     KeReleaseInStackQueuedSpinLock(&LockHandle);
+
+#if defined(_M_AMD64)
+    /* RESWATCH: stop watching this resource before its pool is recycled. */
+    KiResWatchForget(Resource);
+#endif
 
     /* Free every  structure */
     if (Resource->OwnerTable) ExFreePoolWithTag(Resource->OwnerTable, TAG_RESOURCE_TABLE);
@@ -1862,6 +2138,20 @@ ExReleaseResourceForThreadLite(IN PERESOURCE Resource,
     ExpVerifyResource(Resource);
     ExpCheckForApcsDisabled(LockHandle.OldIrql, Resource, KeGetCurrentThread());
 
+    /* Entry-state invariant: someone called release on an AC/AE-inconsistent
+     * resource. Capture state to localise the prior offending actor. */
+    if ((Resource->ActiveEntries == 0) != (Resource->ActiveCount == 0))
+    {
+        DPRINT1("RES-REL-ENTRY-INV: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                "SW=%lu ExW=%lu T=%p Caller=%p\n",
+                Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                Resource->OwnerEntry.OwnerCount,
+                Resource->NumberOfSharedWaiters,
+                Resource->NumberOfExclusiveWaiters,
+                (PVOID)Thread, _ReturnAddress());
+    }
+
     /* Check if it's exclusively owned */
     if (IsOwnedExclusive(Resource))
     {
@@ -2011,6 +2301,33 @@ ExReleaseResourceForThreadLite(IN PERESOURCE Resource,
             Resource->ActiveCount = 0;
         }
     }
+
+    /* Invariant tripwire on the only release exit that passes through here */
+    if ((Resource->ActiveEntries == 0) != (Resource->ActiveCount == 0))
+    {
+        DPRINT1("RES-REL-INV: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
+                "SW=%lu ExW=%lu T=%p Caller=%p\n",
+                Resource, Resource->ActiveCount, Resource->ActiveEntries,
+                Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
+                Resource->OwnerEntry.OwnerCount,
+                Resource->NumberOfSharedWaiters,
+                Resource->NumberOfExclusiveWaiters,
+                (PVOID)Thread, _ReturnAddress());
+    }
+
+#if defined(_M_AMD64)
+    /* RESWATCH: if this release left a cdfs FcbResource idle, arm a HW data
+     * breakpoint on its ActiveCount to trap the external stray writer. Filter
+     * by the FCB_NONPAGED header (NodeTypeCode 0x0306 | NodeByteSize 0x00F8)
+     * sitting at Resource-0x20; the page guard keeps the probe in-page. */
+    if (KiResWatchEnable &&
+        Resource->ActiveCount == 0 && Resource->ActiveEntries == 0 &&
+        (((ULONG_PTR)Resource & 0xFFF) >= 0x20) &&
+        *(volatile ULONG *)((PCHAR)Resource - 0x20) == 0x00F80306)
+    {
+        KiResWatchArm((PVOID)&Resource->ActiveCount);
+    }
+#endif
 
     /* Release lock */
     ExReleaseResourceLock(Resource, &LockHandle);

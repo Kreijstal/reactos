@@ -54,6 +54,10 @@ add_registry_inf(${CMAKE_CURRENT_BINARY_DIR}/csdversion.inf)
 # Regtest
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/regtest.cmd DESTINATION reactos/bin FOR all)
 
+# bootcdntfs (LOCAL test harness, not for upstream): MSYS2 unattended launcher,
+# installed into %SystemRoot%\bin so the unattend.inf [GuiRunOnce] can find it.
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdntfs/instmsys.cmd DESTINATION reactos/bin FOR all)
+
 # autorun.inf
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/autorun.inf DESTINATION root NO_CAB FOR bootcd)
 

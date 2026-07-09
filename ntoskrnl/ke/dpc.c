@@ -28,6 +28,12 @@ ULONG KiMinimumDpcRate = 3;
 ULONG KiAdjustDpcThreshold = 20;
 ULONG KiIdealDpcRate = 20;
 BOOLEAN KeThreadDpcEnable;
+
+/* Diagnostic - last DPC routine fed to KiRetireDpcList / KiTimerExpiration */
+PVOID KiLastDpcDeferredRoutine = NULL;
+PVOID KiLastDpcDeferredContext = NULL;
+PVOID KiLastDpcSysArg1 = NULL;
+PVOID KiLastDpcSysArg2 = NULL;
 FAST_MUTEX KiGenericCallDpcMutex;
 KDPC KiTimerExpireDpc;
 ULONG KiTimeLimitIsrMicroseconds;
@@ -239,6 +245,12 @@ KiTimerExpiration(IN PKDPC Dpc,
                         KiResetDebugDpcTime(Prcb);
 #endif
 
+                        /* Diagnostic: track which TimerDpc is being invoked */
+                        KiLastDpcDeferredRoutine = (PVOID)DpcEntry[i].Routine;
+                        KiLastDpcDeferredContext = DpcEntry[i].Context;
+                        KiLastDpcSysArg1 = UlongToPtr(SystemTime.LowPart);
+                        KiLastDpcSysArg2 = UlongToPtr(SystemTime.HighPart);
+
                         /* Call the DPC */
                         DpcEntry[i].Routine(DpcEntry[i].Dpc,
                                             DpcEntry[i].Context,
@@ -259,6 +271,20 @@ KiTimerExpiration(IN PKDPC Dpc,
                 /* Check if the timer list is empty */
                 if (NextEntry != ListHead)
                 {
+                    /* Diagnostic: capture state when assertion would fire */
+                    if (KiTimerTableListHead[Index].Time.QuadPart >
+                        Timer->DueTime.QuadPart)
+                    {
+                        DPRINT1("TIMER-ASSERT Index=%lu head.Time=%llx Timer=%p "
+                                "Timer->DueTime=%llx Flink=%p Blink=%p "
+                                "InterruptTime=%llx\n",
+                                Index,
+                                (ULONGLONG)KiTimerTableListHead[Index].Time.QuadPart,
+                                Timer,
+                                (ULONGLONG)Timer->DueTime.QuadPart,
+                                ListHead->Flink, ListHead->Blink,
+                                (ULONGLONG)InterruptTime.QuadPart);
+                    }
                     /* Sanity check */
                     ASSERT(KiTimerTableListHead[Index].Time.QuadPart <=
                            Timer->DueTime.QuadPart);
@@ -286,6 +312,12 @@ KiTimerExpiration(IN PKDPC Dpc,
                         /* Clear DPC Time */
                         KiResetDebugDpcTime(Prcb);
 #endif
+
+                        /* Diagnostic: track which TimerDpc is being invoked */
+                        KiLastDpcDeferredRoutine = (PVOID)DpcEntry[i].Routine;
+                        KiLastDpcDeferredContext = DpcEntry[i].Context;
+                        KiLastDpcSysArg1 = UlongToPtr(SystemTime.LowPart);
+                        KiLastDpcSysArg2 = UlongToPtr(SystemTime.HighPart);
 
                         /* Call the DPC */
                         DpcEntry[i].Routine(DpcEntry[i].Dpc,
@@ -670,6 +702,12 @@ KiRetireDpcList(IN PKPRCB Prcb)
                 /* Re-enable interrupts */
                 _enable();
 
+                /* Diagnostic: stash routine identity before invoking */
+                KiLastDpcDeferredRoutine = (PVOID)DeferredRoutine;
+                KiLastDpcDeferredContext = DeferredContext;
+                KiLastDpcSysArg1 = SystemArgument1;
+                KiLastDpcSysArg2 = SystemArgument2;
+
                 /* Call the DPC */
                 DeferredRoutine(Dpc,
                                 DeferredContext,
@@ -955,7 +993,7 @@ KeRemoveQueueDpc(IN PKDPC Dpc)
             DpcData->DpcQueueDepth--;
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
             {
-                /* Vista+: singly-linked list removal — find previous entry */
+                /* Vista+: singly-linked list removal - find previous entry */
                 PSINGLE_LIST_ENTRY Prev = &DpcData->DpcList.ListHead;
                 PSINGLE_LIST_ENTRY Cur = (PSINGLE_LIST_ENTRY)&Dpc->DpcListEntry;
                 while (Prev->Next && Prev->Next != Cur) Prev = Prev->Next;
