@@ -21,6 +21,10 @@ typedef struct _LSA_SAM_PWD_DATA
     BOOL IsNetwork;
     PUNICODE_STRING PlainPwd;
 
+    /* TRUE: This is an S4U (service-for-user) logon: the user is validated
+       by presence only and no password/credential check is performed. */
+    BOOL IsS4U;
+
     /* Input (IsNetwork = TRUE) */
     PMSV1_0_LM20_LOGON LogonInfo;
     PUNICODE_STRING ComputerName;
