@@ -25,6 +25,45 @@
 /* FUNCTIONS ****************************************************************/
 
 /*
+ * Push the whole volume-stream cache (cached $MFT / $Bitmap / index metadata)
+ * to disk, retrying until it drains cleanly.
+ *
+ * CcFlushCache walks the volume-stream VACBs from offset 0 to the cached
+ * volume size and STOPS at the first VACB whose flush fails, returning that
+ * status and leaving every later dirty page un-written.  A single transient
+ * paging-write failure would therefore leave the tail of $MFT / $Bitmap dirty
+ * in the cache; if the mount is then torn down (or the box powers off), those
+ * updates are lost and the on-disk $MFT and $Bitmap are persisted at
+ * inconsistent versions - the classic cross-linked / leaked-cluster corruption
+ * that a later mount trips over.  Retry the flush until it reports success so
+ * the whole stream reaches disk.
+ */
+static
+VOID
+NtfsFlushVolumeStream(PNTFS_VCB Vcb)
+{
+    IO_STATUS_BLOCK IoStatus;
+    ULONG Retry = 0;
+
+    if (Vcb->StreamFileObject == NULL ||
+        Vcb->StreamFileObject->SectionObjectPointer == NULL)
+        return;
+
+    do
+    {
+        IoStatus.Status = STATUS_SUCCESS;
+        CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer,
+                     NULL, 0, &IoStatus);
+        if (NT_SUCCESS(IoStatus.Status))
+            return;
+
+        DPRINT1("NtfsFlushVolumeStream: volume-stream flush failed (0x%08lx), retry %lu\n",
+                IoStatus.Status, Retry + 1);
+    }
+    while (++Retry < 100);
+}
+
+/*
  * Flush every cached page on a single mounted volume to disk.
  *
  * Snapshots the VCB's FcbListHead under FcbListLock (a spinlock) into
@@ -54,19 +93,6 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
     ULONG i;
     IO_STATUS_BLOCK IoStatus;
 
-    /* The volume stream file holds the cache map that NtfsReadDiskCached
-     * uses for the raw-disk MFT/index reads. Flushing it pushes any dirty
-     * pages in that cache (e.g. MFT record updates that came in via
-     * CcCopyWrite) down to the underlying storage device. */
-    if (Vcb->StreamFileObject != NULL &&
-        Vcb->StreamFileObject->SectionObjectPointer != NULL)
-    {
-        CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer,
-                     NULL,
-                     0,
-                     &IoStatus);
-    }
-
     /* First pass: count the open FCBs so we can allocate a buffer of
      * the right size in one shot. */
     KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
@@ -79,7 +105,12 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
     KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
 
     if (SnapshotCapacity == 0)
+    {
+        /* No open FCBs, but the volume-stream cache may still hold dirty
+         * metadata (e.g. the formatter wrote $MFT/$Bitmap through it). */
+        NtfsFlushVolumeStream(Vcb);
         return;
+    }
 
     Snapshot = ExAllocatePoolWithTag(NonPagedPool,
                                      SnapshotCapacity * sizeof(PNTFS_FCB),
@@ -88,6 +119,7 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
     {
         DPRINT1("NtfsFlushVolume: out of memory snapshotting %lu FCBs\n",
                 SnapshotCapacity);
+        NtfsFlushVolumeStream(Vcb);
         return;
     }
 
@@ -137,6 +169,14 @@ NtfsFlushVolume(PNTFS_VCB Vcb)
                          &IoStatus);
         }
     }
+
+    /* Flush the volume-stream metadata AFTER all FCB data has been pushed:
+     * completing the file-data writes can advance each file's ValidDataLength
+     * and rewrite its $MFT record / $Bitmap runs, which dirties the volume
+     * stream again.  Flushing metadata last (and retrying until it drains)
+     * guarantees the on-disk $MFT and $Bitmap match the final in-memory state,
+     * so no cross-links or leaked clusters survive a clean stop. */
+    NtfsFlushVolumeStream(Vcb);
 
     /* Drop the snapshot references with a raw decrement that exactly mirrors
      * the raw increment taken in pass 2, under the same lock.  This is a true

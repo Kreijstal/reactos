@@ -1353,10 +1353,59 @@ NtfsDismountVolume(PDEVICE_OBJECT DeviceObject,
         DeviceExt->StreamFileObject->SectionObjectPointer != NULL)
     {
         IO_STATUS_BLOCK FlushIosb;
-        CcFlushCache(DeviceExt->StreamFileObject->SectionObjectPointer,
-                     NULL, 0, &FlushIosb);
-        CcPurgeCacheSection(DeviceExt->StreamFileObject->SectionObjectPointer,
-                            NULL, 0, FALSE);
+        ULONG FlushRetry;
+
+        /* CcFlushCache walks the volume-stream VACBs from offset 0 to the
+         * cached volume size and STOPS at the first VACB whose flush fails
+         * (ntoskrnl/cc/view.c: it breaks out of the loop and returns the
+         * failing status), leaving every later dirty $MFT / $Bitmap page
+         * un-written.  CcPurgeCacheSection then discards ALL remaining dirty
+         * VACBs (ntoskrnl/cc/fs.c unmarks-and-frees dirty views without
+         * writing them).  Purging after a partial flush therefore drops the
+         * still-dirty tail of the metadata stream: the on-disk $MFT and
+         * $Bitmap are persisted at inconsistent versions, which the next
+         * mount sees as cross-linked / leaked clusters (a runlist references
+         * a cluster the stale bitmap thinks is free -> a later FreeClusters
+         * double-frees it).  This is the producer of the corruption seen after
+         * an in-place upgrade, whose reboot dismounts the target volume.
+         *
+         * A transient CcRosFlushVacb failure (e.g. a momentary paging-write
+         * error under the upgrade's memory / IO pressure) must NOT translate
+         * into permanent metadata loss.  The volume is held exclusively locked
+         * here (VCB_VOLUME_LOCKED), so nothing is dirtying the stream while we
+         * flush - retry the flush until it drains cleanly, then purge.  Only
+         * purge once the flush actually succeeded; a purge over dirty pages is
+         * data loss, not a clean stop. */
+        FlushRetry = 0;
+        do
+        {
+            FlushIosb.Status = STATUS_SUCCESS;
+            CcFlushCache(DeviceExt->StreamFileObject->SectionObjectPointer,
+                         NULL, 0, &FlushIosb);
+            if (NT_SUCCESS(FlushIosb.Status))
+                break;
+
+            DPRINT1("NtfsDismountVolume: volume-stream flush failed (0x%08lx), retry %lu\n",
+                    FlushIosb.Status, FlushRetry + 1);
+        }
+        while (++FlushRetry < 100);
+
+        if (NT_SUCCESS(FlushIosb.Status))
+        {
+            /* Metadata is durably on disk: safe to drop the cached views. */
+            CcPurgeCacheSection(DeviceExt->StreamFileObject->SectionObjectPointer,
+                                NULL, 0, FALSE);
+        }
+        else
+        {
+            /* The flush could not be completed after many retries (a genuine
+             * device error).  Purging now would silently discard the dirty
+             * metadata and corrupt the volume, so leave the dirty pages in the
+             * cache and let volume teardown / the underlying storage error
+             * surface instead. */
+            DPRINT1("NtfsDismountVolume: giving up on volume-stream flush (0x%08lx); NOT purging dirty metadata\n",
+                    FlushIosb.Status);
+        }
     }
 
     ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);

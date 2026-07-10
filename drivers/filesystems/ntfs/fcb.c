@@ -576,12 +576,47 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
          * under controlled conditions (proper IRQL, no re-entrancy risk). */
         if (tmpFileObject->SectionObjectPointer)
         {
+            BOOLEAN FlushedClean = TRUE;
+
             if (tmpFileObject->SectionObjectPointer->SharedCacheMap)
             {
                 IO_STATUS_BLOCK Iosb;
-                CcFlushCache(tmpFileObject->SectionObjectPointer, NULL, 0, &Iosb);
+                ULONG FlushRetry = 0;
+
+                /* CcFlushCache stops at the first VACB whose flush fails and
+                 * CcPurgeCacheSection then DISCARDS every remaining dirty VACB
+                 * without writing it (ntoskrnl/cc/fs.c).  Purging after a failed
+                 * flush therefore drops this file's still-dirty data pages,
+                 * leaving the on-disk file at its old/garbage content while its
+                 * $MFT record (size / VDL / runlist) already describes the new
+                 * data - exactly the "metadata perfect, content garbage" file
+                 * corruption seen after an upgrade.  A transient flush failure
+                 * must not become permanent data loss: retry the flush, and only
+                 * purge once it has actually drained. */
+                do
+                {
+                    Iosb.Status = STATUS_SUCCESS;
+                    CcFlushCache(tmpFileObject->SectionObjectPointer, NULL, 0, &Iosb);
+                    if (NT_SUCCESS(Iosb.Status))
+                        break;
+
+                    DPRINT1("NtfsReleaseFCB: teardown flush failed (0x%08lx) mft=%I64u, retry %lu\n",
+                            Iosb.Status, Fcb->MFTIndex, FlushRetry + 1);
+                }
+                while (++FlushRetry < 100);
+
+                FlushedClean = NT_SUCCESS(Iosb.Status);
             }
-            CcPurgeCacheSection(tmpFileObject->SectionObjectPointer, NULL, 0, FALSE);
+
+            /* Only purge when the data is durably on disk.  If the flush could
+             * not be completed (a genuine device error), leave the dirty pages
+             * in the cache rather than discarding them: dropping them here is
+             * data loss / corruption, not a clean teardown. */
+            if (FlushedClean)
+                CcPurgeCacheSection(tmpFileObject->SectionObjectPointer, NULL, 0, FALSE);
+            else
+                DPRINT1("NtfsReleaseFCB: NOT purging dirty data for mft=%I64u after flush failure\n",
+                        Fcb->MFTIndex);
         }
 
         CcUninitializeCacheMap(tmpFileObject, NULL, NULL);
