@@ -339,6 +339,7 @@ CcRosFlushDirtyPages (
     NTSTATUS Status;
     KIRQL OldIrql;
     BOOLEAN FlushAll = (Target == MAXULONG);
+    BOOLEAN ProgressMade = FALSE;
 
     DPRINT("CcRosFlushDirtyPages(Target %lu)\n", Target);
 
@@ -364,6 +365,26 @@ CcRosFlushDirtyPages (
             ASSERT(FlushAll);
             if (IsListEmpty(&DirtyVacbListHead))
                 break;
+
+            /*
+             * We wrapped around the dirty list. If a full pass made no
+             * progress -- i.e. every remaining dirty VACB was skipped because
+             * its shared cache map is already being flushed by another thread
+             * (SHARED_CACHE_MAP_IN_LAZYWRITE) -- we must NOT keep re-scanning
+             * while holding LockQueueMasterLock. The thread that owns the flag
+             * needs this very lock to finish its flush and clear it, so
+             * busy-spinning here holding the lock deadlocks it (observed as a
+             * hard hang when the shutdown power flush -- FlushAll, Wait -- races
+             * the lazy writer over the same file). Drop the master lock and
+             * yield so the owner can make progress, then retry the scan.
+             */
+            if (!ProgressMade)
+            {
+                KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+                YieldProcessor();
+                OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+            }
+            ProgressMade = FALSE;
             current_entry = DirtyVacbListHead.Flink;
         }
 
@@ -405,6 +426,14 @@ CcRosFlushDirtyPages (
         SharedCacheMap->OpenCount++;
 
         KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
+
+        /*
+         * We released the master lock to service a VACB, so the current pass
+         * over the dirty list is making forward progress. This prevents the
+         * wrap-around handling above from treating a productive pass as a
+         * spin-and-deadlock.
+         */
+        ProgressMade = TRUE;
 
         Locked = SharedCacheMap->Callbacks->AcquireForLazyWrite(SharedCacheMap->LazyWriteContext, Wait);
         if (!Locked)
