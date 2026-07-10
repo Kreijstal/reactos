@@ -1296,14 +1296,17 @@ NtSetInformationToken(
 
                                 /*
                                  * Move the default DACL if it's not at the
-                                 * head of the dynamic part.
+                                 * head of the dynamic part. The new primary
+                                 * group will be placed right after it (see
+                                 * below), so the whole DACL must be relocated,
+                                 * not just its first SID-length bytes.
                                  */
                                 if ((Token->DefaultDacl) &&
                                     ((PULONG)(Token->DefaultDacl) != Token->DynamicPart))
                                 {
                                     RtlMoveMemory(Token->DynamicPart,
                                                   Token->DefaultDacl,
-                                                  RtlLengthSid(Token->PrimaryGroup));
+                                                  Token->DefaultDacl->AclSize);
                                     Token->DefaultDacl = (PACL)(Token->DynamicPart);
                                 }
 
