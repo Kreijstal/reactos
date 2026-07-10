@@ -330,8 +330,12 @@ SamValidateNormalUser(
 
     TRACE("UserName: %wZ\n", &UserInfo->All.UserName);
 
-    /* Check the password */
-    if ((UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0)
+    /* Check the password.
+     * An S4U (service-for-user) logon validates the user by presence only:
+     * the caller (holding SeTcbPrivilege) requests a token for the account
+     * without supplying its credentials, so no password check is done. */
+    if (!PwdData->IsS4U &&
+        (UserInfo->All.UserAccountControl & USER_PASSWORD_NOT_REQUIRED) == 0)
     {
         Status = MsvpCheckPassword(PwdData, UserInfo);
         if (!NT_SUCCESS(Status))
