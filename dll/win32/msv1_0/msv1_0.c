@@ -1643,6 +1643,10 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     PLOGON_LIST_ENTRY LogonEntry = NULL;
     BOOLEAN UserValidated = FALSE;
     MSV1_0_LOGON_SUBMIT_TYPE MessageType;
+#if (_WIN32_WINNT >= 0x0600)
+    UNICODE_STRING S4UUserName = { 0, 0, NULL };
+    UNICODE_STRING S4UDomainName = { 0, 0, NULL };
+#endif
 
     TRACE("LsaApLogonUserEx2()\n");
 
@@ -1812,6 +1816,95 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
 
         // TODO: If LogonType == Service, do some extra work using LogonInfo->Password.
     }
+#if (_WIN32_WINNT >= 0x0600)
+    else if (MessageType == MsV1_0S4ULogon)
+    {
+        /* S4U (Service-for-User) logon: a caller holding SeTcbPrivilege
+         * requests a logon token for an arbitrary local account without
+         * supplying its credentials. This is what the POSIX seteuid()
+         * contract (e.g. Cygwin/MSYS2, OpenSSH privilege separation) relies
+         * on to switch to the target user. */
+        PMSV1_0_S4U_LOGON S4ULogon;
+        ULONG_PTR PtrOffset;
+        PWSTR pStr;
+        USHORT i, CharCount;
+
+        // FIXME: A non-TCB caller should only get an identification-level
+        // token here; that downgrade belongs in the lsasrv token assembly.
+
+        if (SubmitBufferSize < sizeof(MSV1_0_S4U_LOGON))
+        {
+            ERR("Invalid SubmitBufferSize %lu for S4U logon\n", SubmitBufferSize);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        S4ULogon = (PMSV1_0_S4U_LOGON)ProtocolSubmitBuffer;
+
+        /* Fix-up the client-relative string pointers */
+        PtrOffset = (ULONG_PTR)ProtocolSubmitBuffer - (ULONG_PTR)ClientBufferBase;
+
+        /* UserPrincipalName is mandatory */
+        // TODO: Check for Buffer limits wrt. ClientBufferBase and alignment.
+        S4ULogon->UserPrincipalName.Buffer = FIXUP_POINTER(S4ULogon->UserPrincipalName.Buffer, PtrOffset);
+        S4ULogon->UserPrincipalName.MaximumLength = S4ULogon->UserPrincipalName.Length;
+        Status = RtlValidateUnicodeString(0, &S4ULogon->UserPrincipalName);
+        if (!NT_SUCCESS(Status) || S4ULogon->UserPrincipalName.Length == 0)
+            return STATUS_INVALID_PARAMETER;
+
+        /* DomainName is optional */
+        if (S4ULogon->DomainName.Length != 0)
+        {
+            // TODO: Check for Buffer limits wrt. ClientBufferBase and alignment.
+            S4ULogon->DomainName.Buffer = FIXUP_POINTER(S4ULogon->DomainName.Buffer, PtrOffset);
+            S4ULogon->DomainName.MaximumLength = S4ULogon->DomainName.Length;
+            Status = RtlValidateUnicodeString(0, &S4ULogon->DomainName);
+            if (!NT_SUCCESS(Status))
+                return STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            S4ULogon->DomainName.Buffer = NULL;
+            S4ULogon->DomainName.MaximumLength = 0;
+        }
+
+        /* The principal name is either a bare SAM account name or a UPN of
+         * the form "user@domain". If it is a UPN, split off the domain. */
+        S4UUserName = S4ULogon->UserPrincipalName;
+        S4UDomainName = S4ULogon->DomainName;
+
+        pStr = S4ULogon->UserPrincipalName.Buffer;
+        CharCount = S4ULogon->UserPrincipalName.Length / sizeof(WCHAR);
+        for (i = 0; i < CharCount; i++)
+        {
+            if (pStr[i] == L'@')
+            {
+                S4UUserName.Buffer = pStr;
+                S4UUserName.Length = i * sizeof(WCHAR);
+                S4UUserName.MaximumLength = S4UUserName.Length;
+                S4UDomainName.Buffer = &pStr[i + 1];
+                S4UDomainName.Length = (CharCount - i - 1) * sizeof(WCHAR);
+                S4UDomainName.MaximumLength = S4UDomainName.Length;
+                break;
+            }
+        }
+
+        if (S4UUserName.Length == 0)
+        {
+            ERR("Empty S4U user name\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        LogonUserName = &S4UUserName;
+        LogonDomain = &S4UDomainName;
+        LogonPwdData.IsNetwork = FALSE;
+        LogonPwdData.IsS4U = TRUE;
+        LogonPwdData.PlainPwd = NULL;
+        LogonPwdData.ComputerName = &ComputerName;
+
+        TRACE("S4U Domain: %wZ\n", &S4UDomainName);
+        TRACE("S4U User: %wZ\n", &S4UUserName);
+    }
+#endif /* _WIN32_WINNT >= 0x0600 */
     else if (LogonType == Network)
     {
         Status = LsaApLogonUserEx2_Network(ClientRequest,
