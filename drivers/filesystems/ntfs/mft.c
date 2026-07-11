@@ -3887,23 +3887,30 @@ NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
 /* A file with more hard links than fit in its base MFT record stores the
  * overflow $FILE_NAME attributes one-per-child in extension records referenced
  * by a resident $ATTRIBUTE_LIST (see NtfsSpillFileNameToChild).  A resident
- * $ATTRIBUTE_LIST in a 1KB record tops out around 29 entries, so a fixed cap
- * enumerates them all. */
-#define NTFS_MAX_FN_CHILDREN 64
+ * $ATTRIBUTE_LIST in a 1KB record tops out around 29 entries; a non-resident
+ * list is unbounded, so the index array is sized from the list value. */
 
 /* Collect the MFT indices of the child records that hold this file's spilled
  * $FILE_NAME attributes.  Returns the count (0 if the file has no attribute
- * list, i.e. all names live in the base record). */
+ * list, i.e. all names live in the base record) and, when the count is
+ * non-zero, a pool-allocated index array in *IndicesOut (TAG_NTFS; caller
+ * frees). */
 static
 ULONG
-NtfsCollectFileNameChildren(PFILE_RECORD_HEADER BaseFileRecord,
-                            PULONGLONG Indices,
-                            ULONG MaxCount)
+NtfsCollectFileNameChildren(PDEVICE_EXTENSION Vcb,
+                            PFILE_RECORD_HEADER BaseFileRecord,
+                            PULONGLONG *IndicesOut)
 {
     PNTFS_ATTR_RECORD Attr;
     PNTFS_ATTR_RECORD List = NULL;
+    PUCHAR Value = NULL;
+    ULONG ValueLength = 0;
     PUCHAR ItemPtr, ListEnd;
+    PULONGLONG Indices;
+    ULONG MaxCount;
     ULONG Count = 0;
+
+    *IndicesOut = NULL;
 
     Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
     while (Attr->Type != AttributeEnd &&
@@ -3919,11 +3926,29 @@ NtfsCollectFileNameChildren(PFILE_RECORD_HEADER BaseFileRecord,
         Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
     }
 
-    if (List == NULL || List->IsNonResident)
+    if (List == NULL)
         return 0;
 
-    ItemPtr = (PUCHAR)List + List->Resident.ValueOffset;
-    ListEnd = ItemPtr + List->Resident.ValueLength;
+    /* Works for both a resident and a non-resident list. */
+    if (!NT_SUCCESS(NtfsReadAttributeListValue(Vcb, List, &Value, &ValueLength)) ||
+        ValueLength == 0)
+    {
+        if (Value)
+            ExFreePoolWithTag(Value, TAG_NTFS);
+        return 0;
+    }
+
+    /* Every list item is at least 0x20 bytes (0x1A header, 8-aligned). */
+    MaxCount = ValueLength / 0x20 + 1;
+    Indices = ExAllocatePoolWithTag(NonPagedPool, MaxCount * sizeof(ULONGLONG), TAG_NTFS);
+    if (!Indices)
+    {
+        ExFreePoolWithTag(Value, TAG_NTFS);
+        return 0;
+    }
+
+    ItemPtr = Value;
+    ListEnd = Value + ValueLength;
     while (ItemPtr + 0x1A <= ListEnd)   /* 0x1A = $ATTRIBUTE_LIST item header before the name */
     {
         PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)ItemPtr;
@@ -3932,19 +3957,21 @@ NtfsCollectFileNameChildren(PFILE_RECORD_HEADER BaseFileRecord,
         if (Item->Type == AttributeFileName)
         {
             ULONGLONG ChildIdx = Item->MFTIndex & NTFS_MFT_MASK;
-            if (ChildIdx != BaseFileRecord->MFTRecordNumber)
-            {
-                if (Count >= MaxCount)
-                {
-                    DPRINT1("NtfsCollectFileNameChildren: more than %u children; truncating\n", MaxCount);
-                    break;
-                }
+            if (ChildIdx != BaseFileRecord->MFTRecordNumber && Count < MaxCount)
                 Indices[Count++] = ChildIdx;
-            }
         }
         ItemPtr += Item->Length;
     }
 
+    ExFreePoolWithTag(Value, TAG_NTFS);
+
+    if (Count == 0)
+    {
+        ExFreePoolWithTag(Indices, TAG_NTFS);
+        return 0;
+    }
+
+    *IndicesOut = Indices;
     return Count;
 }
 
@@ -3959,18 +3986,21 @@ NtfsRemoveSpilledNames(PDEVICE_EXTENSION DeviceExt,
                        ULONGLONG BaseMftIndex,
                        BOOLEAN CaseSensitive)
 {
-    ULONGLONG Children[NTFS_MAX_FN_CHILDREN];
+    PULONGLONG Children = NULL;
     ULONG ChildCount, i;
     PFILE_RECORD_HEADER ChildRecord;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    ChildCount = NtfsCollectFileNameChildren(BaseFileRecord, Children, NTFS_MAX_FN_CHILDREN);
+    ChildCount = NtfsCollectFileNameChildren(DeviceExt, BaseFileRecord, &Children);
     if (ChildCount == 0)
         return STATUS_SUCCESS;
 
     ChildRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (!ChildRecord)
+    {
+        ExFreePoolWithTag(Children, TAG_NTFS);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     for (i = 0; i < ChildCount; i++)
     {
@@ -4019,13 +4049,15 @@ NtfsRemoveSpilledNames(PDEVICE_EXTENSION DeviceExt,
 
 Done:
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ChildRecord);
+    ExFreePoolWithTag(Children, TAG_NTFS);
     return Status;
 }
 
-/* Remove the resident $ATTRIBUTE_LIST entry that points at ChildMftIndex from
- * the base record, shrinking the list (or removing the whole $ATTRIBUTE_LIST
- * attribute when its last entry goes).  Mirrors the list-shrink half of
- * CoalesceAttributeFromList without moving an attribute back into the base. */
+/* Remove the $ATTRIBUTE_LIST entry that points at ChildMftIndex from the base
+ * record, shrinking the list (or removing the whole $ATTRIBUTE_LIST attribute
+ * when its last entry goes).  Handles both a resident and a non-resident
+ * list.  Mirrors the list-shrink half of CoalesceAttributeFromList without
+ * moving an attribute back into the base. */
 static
 NTSTATUS
 NtfsRemoveFileNameListEntry(PDEVICE_EXTENSION Vcb,
@@ -4052,8 +4084,55 @@ NtfsRemoveFileNameListEntry(PDEVICE_EXTENSION Vcb,
         Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
     }
 
-    if (List == NULL || List->IsNonResident)
+    if (List == NULL)
         return STATUS_SUCCESS;
+
+    if (List->IsNonResident)
+    {
+        PUCHAR Value = NULL;
+        ULONG ValueLen = 0;
+        ULONG Pos = 0;
+        ULONG MatchOff = MAXULONG;
+        ULONG MatchLen2 = 0;
+        NTSTATUS Status;
+
+        Status = NtfsReadAttributeListValue(Vcb, List, &Value, &ValueLen);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        while (Pos + 0x1A <= ValueLen)
+        {
+            PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)(Value + Pos);
+            if (Item->Length == 0)
+                break;
+            if (Item->Type == AttributeFileName &&
+                (Item->MFTIndex & NTFS_MFT_MASK) == ChildMftIndex)
+            {
+                MatchOff = Pos;
+                MatchLen2 = Item->Length;
+                break;
+            }
+            Pos += Item->Length;
+        }
+
+        if (MatchOff == MAXULONG)
+        {
+            ExFreePoolWithTag(Value, TAG_NTFS);
+            return STATUS_SUCCESS;
+        }
+
+        RtlMoveMemory(Value + MatchOff,
+                      Value + MatchOff + MatchLen2,
+                      ValueLen - MatchOff - MatchLen2);
+
+        /* Shrinks the list data (freeing tail clusters), or - when this was
+         * the last entry - frees the whole allocation and drops the
+         * attribute from the base record. */
+        Status = NtfsNonResidentListWriteValue(Vcb, BaseFileRecord, List,
+                                               Value, ValueLen - MatchLen2);
+        ExFreePoolWithTag(Value, TAG_NTFS);
+        return Status;
+    }
 
     ListContent = (PUCHAR)List + List->Resident.ValueOffset;
     ValueLen = List->Resident.ValueLength;
@@ -4131,19 +4210,22 @@ NtfsUnlinkSpilledName(PDEVICE_EXTENSION DeviceExt,
                       ULONGLONG LinkParentMftIndex,
                       BOOLEAN CaseSensitive)
 {
-    ULONGLONG Children[NTFS_MAX_FN_CHILDREN];
+    PULONGLONG Children = NULL;
     ULONG ChildCount, i;
     PFILE_RECORD_HEADER ChildRecord;
     NTSTATUS Status = STATUS_OBJECT_NAME_NOT_FOUND;
     BOOLEAN Found = FALSE;
 
-    ChildCount = NtfsCollectFileNameChildren(FileRecord, Children, NTFS_MAX_FN_CHILDREN);
+    ChildCount = NtfsCollectFileNameChildren(DeviceExt, FileRecord, &Children);
     if (ChildCount == 0)
         return STATUS_OBJECT_NAME_NOT_FOUND;
 
     ChildRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (!ChildRecord)
+    {
+        ExFreePoolWithTag(Children, TAG_NTFS);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     for (i = 0; i < ChildCount && !Found; i++)
     {
@@ -4211,6 +4293,7 @@ NtfsUnlinkSpilledName(PDEVICE_EXTENSION DeviceExt,
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ChildRecord);
+    ExFreePoolWithTag(Children, TAG_NTFS);
     return Found ? Status : STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
@@ -4323,17 +4406,37 @@ NtfsUnlinkSingleName(PDEVICE_EXTENSION DeviceExt,
             return Status;
     }
 
-    /* Remove the higher-offset attribute first so the other slot's address
-     * stays valid. */
+    /* Remove by (type, instance), re-finding each slot: the first removal
+     * slides the record contents (and, when the record carries an
+     * $ATTRIBUTE_LIST, shrinking the list moves even lower-offset slots), so
+     * raw attribute pointers cannot be held across a removal. */
     Removed = (Partner != NULL) ? 2 : 1;
-    if (Partner != NULL && (ULONG_PTR)Partner > (ULONG_PTR)Target)
     {
-        RemoveResidentAttribute(DeviceExt, FileRecord, Partner);
-        Partner = NULL;
+        USHORT Instances[2];
+        ULONG InstanceCount = 0;
+        ULONG i;
+
+        Instances[InstanceCount++] = Target->Instance;
+        if (Partner != NULL)
+            Instances[InstanceCount++] = Partner->Instance;
+
+        for (i = 0; i < InstanceCount; i++)
+        {
+            PNTFS_ATTR_RECORD Attr =
+                (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+
+            while (Attr->Type != AttributeEnd && Attr->Length > 0 &&
+                   (ULONG_PTR)Attr < (ULONG_PTR)FileRecord + FileRecord->BytesInUse)
+            {
+                if (Attr->Type == AttributeFileName && Attr->Instance == Instances[i])
+                {
+                    RemoveResidentAttribute(DeviceExt, FileRecord, Attr);
+                    break;
+                }
+                Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
+            }
+        }
     }
-    RemoveResidentAttribute(DeviceExt, FileRecord, Target);
-    if (Partner != NULL)
-        RemoveResidentAttribute(DeviceExt, FileRecord, Partner);
 
     FileRecord->LinkCount -= Removed;
     Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
@@ -4420,9 +4523,11 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
          * heavily hard-linked file looks single-linked and gets fully deleted,
          * orphaning its child records and their directory index entries. */
         {
-            ULONGLONG SpillChildren[NTFS_MAX_FN_CHILDREN];
+            PULONGLONG SpillChildren = NULL;
 
-            NonDosLinks += NtfsCollectFileNameChildren(FileRecord, SpillChildren, NTFS_MAX_FN_CHILDREN);
+            NonDosLinks += NtfsCollectFileNameChildren(DeviceExt, FileRecord, &SpillChildren);
+            if (SpillChildren)
+                ExFreePoolWithTag(SpillChildren, TAG_NTFS);
         }
 
         if (NonDosLinks > 1)
@@ -4536,16 +4641,39 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         }
         FindCloseAttribute(&FindContext);
 
+        /* No $FILE_NAME in the base record is still a legitimate last-link
+         * delete when the sole remaining name was spilled to an
+         * $ATTRIBUTE_LIST child record (heavy hard-linking can evict every
+         * base name; the unlink-single-name path above only runs while MORE
+         * than one link remains).  NtfsRemoveSpilledNames below drops the
+         * child's directory index entry and frees the child record.  Only a
+         * record with no name anywhere is an error. */
         if (!FoundName)
         {
-            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-            return STATUS_OBJECT_NAME_NOT_FOUND;
+            PULONGLONG SpillChildren = NULL;
+
+            if (NtfsCollectFileNameChildren(DeviceExt, FileRecord, &SpillChildren) == 0)
+            {
+                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                return STATUS_OBJECT_NAME_NOT_FOUND;
+            }
+            ExFreePoolWithTag(SpillChildren, TAG_NTFS);
         }
     }
 
     /* Drop the parent-directory index entries for any spilled names and free
      * their child extension records before the base record is freed below. */
     Status = NtfsRemoveSpilledNames(DeviceExt, FileRecord, Fcb->MFTIndex, CaseSensitive);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    /* If the $ATTRIBUTE_LIST outgrew the record and went non-resident, its
+     * cluster allocation dies with the record - free it here or the clusters
+     * leak (offline chkdsk reports code 25). */
+    Status = NtfsFreeAttributeListClusters(DeviceExt, FileRecord);
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -4597,8 +4725,6 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_CONTEXT DataContext;
     PNTFS_ATTR_RECORD Attribute;
     ULONG AttrOffset;
-    ULONG AttrLength;
-    ULONG TailLength;
 
     ASSERT(Fcb->Stream[0] != UNICODE_NULL);
 
@@ -4653,19 +4779,15 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
         }
     }
 
-    /* Cut the attribute out of the record: slide everything behind it
-     * (including the AttributeEnd marker and the trailing end ULONG that
-     * BytesInUse accounts for) over the freed slot. */
+    /* Cut the attribute out of the record.  RemoveResidentAttribute (which,
+     * despite the name, just slides record memory and so works for any slot
+     * type) also drops the stream's $ATTRIBUTE_LIST entry when the record
+     * carries a list - e.g. a hard-link-spilled file with an ADS. */
     Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
     ASSERT(Attribute->Type == AttributeData);
-    AttrLength = Attribute->Length;
-    ASSERT(AttrOffset + AttrLength <= FileRecord->BytesInUse);
+    ASSERT(AttrOffset + Attribute->Length <= FileRecord->BytesInUse);
 
-    TailLength = FileRecord->BytesInUse - (AttrOffset + AttrLength);
-    RtlMoveMemory(Attribute,
-                  (PUCHAR)FileRecord + AttrOffset + AttrLength,
-                  TailLength);
-    FileRecord->BytesInUse -= AttrLength;
+    RemoveResidentAttribute(DeviceExt, FileRecord, Attribute);
 
     Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
 
@@ -4721,6 +4843,8 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD FileNameRecord;
     PFILENAME_ATTRIBUTE ExistingName;
     PFILENAME_ATTRIBUTE CurrentName;
+    UCHAR CurNameBuf[NTFS_FOUND_NAME_SIZE];
+    UCHAR ExistNameBuf[NTFS_FOUND_NAME_SIZE];
     PFILENAME_ATTRIBUTE NewDirectoryEntry = NULL;
     UNICODE_STRING OldFileName;
     PWCHAR OldFileNameBuffer = NULL;
@@ -4750,7 +4874,8 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    CurrentName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    CurrentName = GetBestFileNameFromRecord(DeviceExt, FileRecord,
+                                            (PFILENAME_ATTRIBUTE)CurNameBuf);
     if (CurrentName == NULL)
     {
         Status = STATUS_OBJECT_NAME_NOT_FOUND;
@@ -4784,7 +4909,8 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                               NewParentMftIndex);
     if (NT_SUCCESS(Status))
     {
-        ExistingName = GetBestFileNameFromRecord(DeviceExt, ExistingRecord);
+        ExistingName = GetBestFileNameFromRecord(DeviceExt, ExistingRecord,
+                                                 (PFILENAME_ATTRIBUTE)ExistNameBuf);
         if (ExistingMftIndex == Fcb->MFTIndex)
         {
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
@@ -4962,6 +5088,7 @@ NtfsLinkFileRecord(PDEVICE_EXTENSION DeviceExt,
     PFILE_RECORD_HEADER ExistingRecord = NULL;
     PFILE_RECORD_HEADER ParentFileRecord = NULL;
     PFILENAME_ATTRIBUTE CurrentName;
+    UCHAR CurNameBuf[NTFS_FOUND_NAME_SIZE];
     PFILENAME_ATTRIBUTE NewDirectoryEntry = NULL;
     ULONGLONG ExistingMftIndex;
     ULONGLONG FileReferenceNumber;
@@ -4990,7 +5117,8 @@ NtfsLinkFileRecord(PDEVICE_EXTENSION DeviceExt,
         goto Cleanup;
     }
 
-    CurrentName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    CurrentName = GetBestFileNameFromRecord(DeviceExt, FileRecord,
+                                            (PFILENAME_ATTRIBUTE)CurNameBuf);
     if (CurrentName == NULL)
     {
         Status = STATUS_OBJECT_NAME_NOT_FOUND;

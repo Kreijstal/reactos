@@ -1073,6 +1073,23 @@ NtfsAddHardLinkSpill(PNTFS_VCB Vcb,
                      ULONG NewFileNameLength);
 
 NTSTATUS
+NtfsReadAttributeListValue(PNTFS_VCB Vcb,
+                           PNTFS_ATTR_RECORD ListAttr,
+                           PUCHAR *Value,
+                           PULONG ValueLength);
+
+NTSTATUS
+NtfsNonResidentListWriteValue(PNTFS_VCB Vcb,
+                              PFILE_RECORD_HEADER BaseFileRecord,
+                              PNTFS_ATTR_RECORD ListAttr,
+                              PUCHAR Value,
+                              ULONG ValueLength);
+
+NTSTATUS
+NtfsFreeAttributeListClusters(PNTFS_VCB Vcb,
+                              PFILE_RECORD_HEADER BaseFileRecord);
+
+NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
                    PFILE_RECORD_HEADER FileRecord,
                    PNTFS_ATTR_RECORD AttributeAddress,
@@ -1135,7 +1152,8 @@ GetStandardInformationFromRecord(PDEVICE_EXTENSION Vcb,
 PFILENAME_ATTRIBUTE
 GetFileNameFromRecord(PDEVICE_EXTENSION Vcb,
                       PFILE_RECORD_HEADER FileRecord,
-                      UCHAR NameType);
+                      UCHAR NameType,
+                      PFILENAME_ATTRIBUTE SpillBuffer);
 
 UCHAR
 GetPackedByteCount(LONGLONG NumberToPack,
@@ -1148,7 +1166,8 @@ GetLastClusterInDataRun(PDEVICE_EXTENSION Vcb,
 
 PFILENAME_ATTRIBUTE
 GetBestFileNameFromRecord(PDEVICE_EXTENSION Vcb,
-                          PFILE_RECORD_HEADER FileRecord);
+                          PFILE_RECORD_HEADER FileRecord,
+                          PFILENAME_ATTRIBUTE SpillBuffer);
 
 NTSTATUS
 FindFirstAttributeListItem(PFIND_ATTR_CONTXT Context,
