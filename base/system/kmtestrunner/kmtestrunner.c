@@ -397,17 +397,6 @@ _main(
                 continue;
             }
 
-            /* DIAGNOSTIC SKIP: ExPools allocates 100000+ NonPaged blocks and
-             * triggers OOM-fail paths in ARM3. Testing hypothesis that pool
-             * corruption from ExPools causes the resource.c:844 AC=1/AE=0
-             * assertion that fires at IoFilesystem entry. */
-            if (strcmp(TestName, "ExPools") == 0)
-            {
-                EmitLine("KMT-SKIP %s (diagnostic pool-stress skip)", TestName);
-                ++TestsSkipped;
-                continue;
-            }
-
             /* Reset per-test counters and log buffer. The kernel kmtest
              * framework writes into the user-pinned KMT_RESULTBUFFER for the
              * lifetime of the file handle, so we just clear what it reads

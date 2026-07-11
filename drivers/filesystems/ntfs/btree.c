@@ -93,6 +93,21 @@ GetSerializedSizeOfIndexEntries(PB_TREE_FILENAME_NODE Node)
     return NodeSize;
 }
 
+static BOOLEAN
+NtfsIndexEntryIsEnd(PB_TREE_KEY Key)
+{
+    return BooleanFlagOn(Key->IndexEntry->Flags, NTFS_INDEX_ENTRY_END);
+}
+
+static BOOLEAN
+NtfsBTreeNodeFitsIndexBuffer(PB_TREE Tree,
+                             PB_TREE_FILENAME_NODE Node,
+                             ULONG IndexRecordSize)
+{
+    return GetSerializedSizeOfIndexEntries(Node) <=
+           NtfsGetMaxIndexNodeEntryBytes(Tree->Vcb, IndexRecordSize);
+}
+
 // TEMP FUNCTION for diagnostic purposes.
 // Prints VCN of every node in an index allocation
 VOID
@@ -1405,8 +1420,8 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
             + SerializedLength;
         if (IndexSize > BufferSize)
         {
-            DPRINT1("TODO: Adding file would require creating a new node!\n");
-            return STATUS_NOT_IMPLEMENTED;
+            DPRINT1("Index node is too large for its index buffer.\n");
+            return STATUS_BUFFER_OVERFLOW;
         }
 
         // Copy the index entry
@@ -1490,7 +1505,6 @@ DemoteBTreeRoot(PB_TREE Tree,
 {
     PB_TREE_FILENAME_NODE NewSubNode, NewIndexRoot;
     PB_TREE_KEY DummyKey;
-    ULONG MaxNodeSize;
 
     DPRINT("Collapsing Index Root into sub-node.\n");
 
@@ -1545,7 +1559,6 @@ DemoteBTreeRoot(PB_TREE Tree,
     // Make the new node the Tree's root node
     Tree->RootNode = NewIndexRoot;
 
-    MaxNodeSize = NtfsGetMaxIndexNodeEntryBytes(Tree->Vcb, IndexRecordSize);
     while (TRUE)
     {
         PB_TREE_KEY CurrentKey = Tree->RootNode->FirstKey;
@@ -1555,11 +1568,14 @@ DemoteBTreeRoot(PB_TREE Tree,
 
         for (i = 0; i < Tree->RootNode->KeyCount; i++)
         {
+            if (!CurrentKey)
+                return STATUS_FILE_CORRUPT_ERROR;
+
             if (CurrentKey->LesserChild &&
-                GetSerializedSizeOfIndexEntries(CurrentKey->LesserChild) > MaxNodeSize)
+                !NtfsBTreeNodeFitsIndexBuffer(Tree, CurrentKey->LesserChild, IndexRecordSize))
             {
-                PB_TREE_KEY MedianKey;
-                PB_TREE_FILENAME_NODE NewRightHandSibling;
+                PB_TREE_KEY MedianKey = NULL;
+                PB_TREE_FILENAME_NODE NewRightHandSibling = NULL;
                 NTSTATUS Status;
 
                 Status = SplitBTreeNode(Tree,
@@ -1570,6 +1586,9 @@ DemoteBTreeRoot(PB_TREE Tree,
                                         IndexRecordSize);
                 if (!NT_SUCCESS(Status))
                     return Status;
+
+                if (!MedianKey || !NewRightHandSibling)
+                    return STATUS_FILE_CORRUPT_ERROR;
 
                 MedianKey->NextKey = CurrentKey;
                 if (PreviousKey)
@@ -1590,6 +1609,25 @@ DemoteBTreeRoot(PB_TREE Tree,
 
         if (!SplitNode)
             break;
+    }
+
+    {
+        PB_TREE_KEY CurrentKey = Tree->RootNode->FirstKey;
+        ULONG i;
+
+        for (i = 0; i < Tree->RootNode->KeyCount; i++)
+        {
+            if (!CurrentKey)
+                return STATUS_FILE_CORRUPT_ERROR;
+
+            if (CurrentKey->LesserChild &&
+                !NtfsBTreeNodeFitsIndexBuffer(Tree, CurrentKey->LesserChild, IndexRecordSize))
+            {
+                return STATUS_BUFFER_OVERFLOW;
+            }
+
+            CurrentKey = CurrentKey->NextKey;
+        }
     }
 
 #ifndef NDEBUG
@@ -2954,18 +2992,40 @@ SplitBTreeNode(PB_TREE Tree,
     SizeSum = 0;
     for (i = 0; i < Node->KeyCount; i++)
     {
+        PB_TREE_KEY CandidateMedian;
+
+        if (!LastKeyBeforeMedian)
+        {
+            ExFreePoolWithTag(*NewRightHandSibling, TAG_NTFS);
+            return STATUS_FILE_CORRUPT_ERROR;
+        }
+
+        CandidateMedian = LastKeyBeforeMedian->NextKey;
+        if (!CandidateMedian || NtfsIndexEntryIsEnd(CandidateMedian))
+        {
+            ExFreePoolWithTag(*NewRightHandSibling, TAG_NTFS);
+            return STATUS_BUFFER_OVERFLOW;
+        }
+
         SizeSum += GetSerializedSizeOfIndexEntry(LastKeyBeforeMedian);
 
-        if (SizeSum > HalfSize)
+        if (SizeSum > HalfSize ||
+            !CandidateMedian->NextKey ||
+            NtfsIndexEntryIsEnd(CandidateMedian->NextKey))
             break;
 
         MedianKeyIndex++;
-        LastKeyBeforeMedian = LastKeyBeforeMedian->NextKey;
+        LastKeyBeforeMedian = CandidateMedian;
     }
 
     // Now we can get the median key and the key that follows it
     *MedianKey = LastKeyBeforeMedian->NextKey;
     FirstKeyAfterMedian = (*MedianKey)->NextKey;
+    if (!FirstKeyAfterMedian)
+    {
+        ExFreePoolWithTag(*NewRightHandSibling, TAG_NTFS);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
     DPRINT("%lu keys, %lu median\n", Node->KeyCount, MedianKeyIndex);
     if (Tree->CollationRule == COLLATION_FILE_NAME ||
@@ -3034,6 +3094,7 @@ SplitBTreeNode(PB_TREE Tree,
 
     // Update Node's KeyCount (remember to add 1 for the new dummy key)
     Node->KeyCount = MedianKeyIndex + 2;
+    Node->DiskNeedsUpdating = TRUE;
 
     KeyCount = CountBTreeKeys(Node->FirstKey);
     ASSERT(Node->KeyCount == KeyCount);
@@ -3041,6 +3102,13 @@ SplitBTreeNode(PB_TREE Tree,
     // everything to the right of MedianKey becomes the right hand sibling of Node
     (*NewRightHandSibling)->FirstKey = FirstKeyAfterMedian;
     (*NewRightHandSibling)->KeyCount = CountBTreeKeys(FirstKeyAfterMedian);
+
+    if (!NtfsBTreeNodeFitsIndexBuffer(Tree, Node, IndexRecordSize) ||
+        !NtfsBTreeNodeFitsIndexBuffer(Tree, *NewRightHandSibling, IndexRecordSize))
+    {
+        DPRINT1("Failed to split index node into records that fit the index allocation.\n");
+        return STATUS_BUFFER_OVERFLOW;
+    }
 
 #ifndef NDEBUG
     DPRINT1("Left-hand node after split:\n");
