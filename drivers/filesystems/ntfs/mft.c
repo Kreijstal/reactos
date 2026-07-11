@@ -5393,6 +5393,27 @@ NtfsCopyIndexEntryName(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
     }
 }
 
+/* Collation comparison used to NAVIGATE the $I30 B-tree during exact (non-
+ * wildcard) lookups.  The on-disk order is always upcase-primary (see
+ * NtfsCompareFilenameKey in btree.c); a case-sensitive lookup only refines
+ * upcase-equal runs with the exact binary tiebreak so it lands on the exact-
+ * cased entry among coexisting POSIX case-variants.  Descending with a plain
+ * case-sensitive comparison instead (as this code used to) diverges from the
+ * on-disk order at the first case difference and misses existing entries. */
+static
+LONG
+NtfsCollateFileName(PUNICODE_STRING FileName,
+                    PUNICODE_STRING EntryName,
+                    BOOLEAN CaseSensitive)
+{
+    LONG Cmp = RtlCompareUnicodeString(FileName, EntryName, TRUE);
+
+    if (Cmp == 0 && CaseSensitive)
+        Cmp = RtlCompareUnicodeString(FileName, EntryName, FALSE);
+
+    return Cmp;
+}
+
 NTSTATUS
 BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER MftRecord,
@@ -5499,7 +5520,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
             EntryName.Buffer = IndexEntry->FileName.Name;
             EntryName.Length = EntryName.MaximumLength =
                 IndexEntry->FileName.NameLength * sizeof(WCHAR);
-            Cmp = RtlCompareUnicodeString(FileName, &EntryName, !CaseSensitive);
+            Cmp = NtfsCollateFileName(FileName, &EntryName, CaseSensitive);
 
             if (Cmp < 0)
             {
@@ -5702,7 +5723,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
             EntryName.Buffer = IndexEntry->FileName.Name;
             EntryName.Length = EntryName.MaximumLength =
                 IndexEntry->FileName.NameLength * sizeof(WCHAR);
-            Cmp = RtlCompareUnicodeString(FileName, &EntryName, !CaseSensitive);
+            Cmp = NtfsCollateFileName(FileName, &EntryName, CaseSensitive);
 
             if (Cmp < 0)
             {
