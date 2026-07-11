@@ -839,7 +839,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
         return NULL;
     }
 
-    FileName = GetFileNameFromRecord(Vcb, MftRecord, NTFS_FILE_NAME_WIN32);
+    FileName = GetFileNameFromRecord(Vcb, MftRecord, NTFS_FILE_NAME_WIN32, NULL);
     if (!FileName)
     {
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
@@ -907,13 +907,14 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
 {
     WCHAR pathName[MAX_PATH];
     PFILENAME_ATTRIBUTE FileName;
+    UCHAR SpillNameBuf[NTFS_FOUND_NAME_SIZE];
     PSTANDARD_INFORMATION StdInfo;
     PNTFS_FCB rcFCB;
     ULONGLONG Size, AllocatedSize;
 
     DPRINT("NtfsMakeFCBFromDirEntry(%p, %p, %wZ, %p, %p, %p)\n", Vcb, DirectoryFCB, Name, Stream, Record, fileFCB);
 
-    FileName = GetBestFileNameFromRecord(Vcb, Record);
+    FileName = GetBestFileNameFromRecord(Vcb, Record, (PFILENAME_ATTRIBUTE)SpillNameBuf);
     if (!FileName)
     {
         return STATUS_OBJECT_NAME_NOT_FOUND; // Not sure that's the best here
