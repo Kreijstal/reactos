@@ -978,7 +978,6 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     }
     else
     {
-        /* HUGLY HACK: Can't create new files yet... */
         if (RequestedDisposition == FILE_CREATE ||
             RequestedDisposition == FILE_OPEN_IF ||
             RequestedDisposition == FILE_OVERWRITE_IF ||
