@@ -1128,9 +1128,9 @@ IopInitializeBootDrivers(VOID)
         BootEntry = CONTAINING_RECORD(NextEntry,
                                       BOOT_DRIVER_LIST_ENTRY,
                                       Link);
-        DPRINT1("BOOTDRV: registry path %wZ, file %wZ\n",
-                &BootEntry->RegistryPath,
-                &BootEntry->FilePath);
+        DPRINT("BOOTDRV: registry path %wZ, file %wZ\n",
+               &BootEntry->RegistryPath,
+               &BootEntry->FilePath);
 
         // FIXME: TODO: This LdrEntry is to be used in a special handling
         // for SETUPLDR (a similar procedure is done on Windows), where
@@ -1157,12 +1157,13 @@ IopInitializeBootDrivers(VOID)
                                           NULL,
                                           &BootEntry->RegistryPath,
                                           KEY_READ);
-            DPRINT1("BOOTDRV: open %wZ returned 0x%08lx\n",
-                    &BootEntry->RegistryPath,
-                    Status);
+            DPRINT("BOOTDRV: open %wZ returned 0x%08lx\n",
+                   &BootEntry->RegistryPath,
+                   Status);
 #if (NTDDI_VERSION >= NTDDI_WIN7)
-            /* TODO: Win7+ removed SetupLdrBlock; the SETUPLDR hack needs porting */
-            if (NT_SUCCESS(Status))
+            /* Win7+ removed SetupLdrBlock; setup is detected via a load option */
+            if ((NT_SUCCESS(Status)) || /* ReactOS HACK for SETUPLDR */
+                (ExpInTextModeSetup && ((KeyHandle = (PVOID)1)))) // yes, it's an assignment!
 #elif 0
             if (NT_SUCCESS(Status))
 #else // Hack still needed...
@@ -1224,10 +1225,10 @@ IopInitializeBootDrivers(VOID)
             LdrEntry = DriverInfo->DataTableEntry->LdrEntry;
 
             /* Initialize it */
-            DPRINT1("BOOTDRV: initializing %wZ\n", &LdrEntry->BaseDllName);
+            DPRINT("BOOTDRV: initializing %wZ\n", &LdrEntry->BaseDllName);
             if (IopInitializeBuiltinDriver(LdrEntry))
             {
-                DPRINT1("BOOTDRV: initialized %wZ\n", &LdrEntry->BaseDllName);
+                DPRINT("BOOTDRV: initialized %wZ\n", &LdrEntry->BaseDllName);
                 // it does not make sense to enumerate the tree if there are no new devices added
                 PiQueueDeviceAction(IopRootDeviceNode->PhysicalDeviceObject,
                                     PiActionEnumRootDevices,
@@ -1264,21 +1265,15 @@ IopInitializeSystemDrivers(VOID)
 #if (NTDDI_VERSION < NTDDI_WIN7)
     /* HACK: No system drivers on the BootCD */
     if (KeLoaderBlock->SetupLdrBlock)
-    {
-        DbgPrint("SYSDRV: setup boot return\n");
         return;
-    }
 #else
-    /* TODO: Win7+ removed SetupLdrBlock; BootCD detection needs porting */
+    /* Win7+ removed SetupLdrBlock; setup is detected via a load option.
+     * HACK: No system drivers on the BootCD */
+    if (ExpInTextModeSetup)
+        return;
 #endif
 
-    DbgPrint("SYSDRV: enum begin\n");
     PiPerformSyncDeviceAction(IopRootDeviceNode->PhysicalDeviceObject, PiActionEnumDeviceTree);
-#if (NTDDI_VERSION < NTDDI_WIN7)
-    DbgPrint("SYSDRV: enum complete setup %p\n", KeLoaderBlock->SetupLdrBlock);
-#else
-    DbgPrint("SYSDRV: enum complete\n");
-#endif
 
     /* Get the driver list */
     SavedList = DriverList = CmGetSystemDriverList();
