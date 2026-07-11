@@ -253,6 +253,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Dhcp","ImagePath",0x00020000,"%SystemRoo
 HKLM,"SYSTEM\CurrentControlSet\Services\Dhcp","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\Dhcp","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\Dhcp","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\Dhcp","DependOnService",0x00010000,"Tcpip"
 HKLM,"SYSTEM\CurrentControlSet\Services\Dhcp\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\dhcpcsvc.dll"
 
 ; Reset BootExecute to an empty value: AutoChk should not start in MiniNT mode

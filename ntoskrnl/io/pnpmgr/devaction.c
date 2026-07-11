@@ -26,7 +26,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <ntoskrnl.h>
-//#define NDEBUG /* PNP-DIAG: temporarily enabled for ARM64 bring-up */
+#define NDEBUG
 #include <debug.h>
 
 /* GLOBALS *******************************************************************/

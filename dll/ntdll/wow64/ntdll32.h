@@ -62,9 +62,7 @@ Wow64ReadNativeWord(UINT64 Address)
 
     if (!NT_SUCCESS(Status) || BytesRead != sizeof(Result))
     {
-        /* TODO: Throw an access violation exception or something */
-        __debugbreak();
-        ASSERT(FALSE);
+        RtlRaiseStatus(NT_SUCCESS(Status) ? STATUS_ACCESS_VIOLATION : Status);
     }
     
     return Result;
@@ -87,8 +85,7 @@ Wow64ReadNativeULong(UINT64 Address)
 
     if (!NT_SUCCESS(Status) || BytesRead != sizeof(Result))
     {
-        __debugbreak();
-        ASSERT(FALSE);
+        RtlRaiseStatus(NT_SUCCESS(Status) ? STATUS_ACCESS_VIOLATION : Status);
     }
     
     return Result;
@@ -111,8 +108,7 @@ Wow64ReadNativePtr(UINT64 Address)
 
     if (!NT_SUCCESS(Status) || BytesRead != sizeof(Result))
     {
-        __debugbreak();
-        ASSERT(FALSE);
+        RtlRaiseStatus(NT_SUCCESS(Status) ? STATUS_ACCESS_VIOLATION : Status);
     }
     
     return Result;
@@ -134,8 +130,7 @@ Wow64WriteNativeULong(UINT64 Address, ULONG Value)
 
     if (!NT_SUCCESS(Status) || BytesWritten != sizeof(Value))
     {
-        __debugbreak();
-        ASSERT(FALSE);
+        RtlRaiseStatus(NT_SUCCESS(Status) ? STATUS_ACCESS_VIOLATION : Status);
     }
 }
 
@@ -155,8 +150,7 @@ Wow64WriteNativePtr(UINT64 Address, UINT64 Value)
 
     if (!NT_SUCCESS(Status) || BytesWritten != sizeof(Value))
     {
-        __debugbreak();
-        ASSERT(FALSE);
+        RtlRaiseStatus(NT_SUCCESS(Status) ? STATUS_ACCESS_VIOLATION : Status);
     }
 }
 
