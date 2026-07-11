@@ -565,7 +565,8 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
                                    &FirstEntry,
                                    FALSE,
                                    CaseSensitive,
-                                   &CurrentMFTIndex);
+                                   &CurrentMFTIndex,
+                                   NULL);
         if (!NT_SUCCESS(Status))
         {
             /*
@@ -1618,6 +1619,326 @@ CoalesceAttributeFromList(PNTFS_VCB Vcb,
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
     return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsSpillFileNameToChild
+*
+* Places a single resident $FILE_NAME attribute (value = FnValue[FnValueLen])
+* into a freshly-allocated child file record and appends a resident
+* $ATTRIBUTE_LIST entry to BaseFileRecord that points at it.  This is how a file
+* with more hard links than fit in one 1KB MFT record stores the overflow names:
+* one $FILE_NAME per child (which keeps FindAttribute(AttributeFileName, "")
+* unambiguous when it follows the list into a child), enumerated through the
+* $ATTRIBUTE_LIST.
+*
+* The base record is modified in place (the list attribute is created or grown);
+* the caller is responsible for writing BaseFileRecord back to disk.  The child
+* record is allocated an MFT index and persisted here (by AddNewMftEntry).
+*
+* @return
+* STATUS_SUCCESS on success.
+* STATUS_DISK_FULL if the base record has no room for the new list entry - the
+*   caller is expected to free room (e.g. by evicting an existing base $FILE_NAME
+*   with NtfsEvictOneBaseFileName) and retry.
+* STATUS_NOT_IMPLEMENTED if the base already carries a non-resident $ATTRIBUTE_LIST
+*   (deferred; not produced for realistic hard-link counts).
+* STATUS_INSUFFICIENT_RESOURCES / errors propagated from AddNewMftEntry.
+*/
+static
+NTSTATUS
+NtfsSpillFileNameToChild(PNTFS_VCB Vcb,
+                         PFILE_RECORD_HEADER BaseFileRecord,
+                         PFILENAME_ATTRIBUTE FnValue,
+                         ULONG FnValueLen,
+                         USHORT Instance,
+                         BOOLEAN Indexed)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    ULONG ChildValueOffset = ALIGN_UP_BY(ResidentHeaderLength, VALUE_OFFSET_ALIGNMENT);
+    ULONG ChildAttrLen = ALIGN_UP_BY(ChildValueOffset + FnValueLen, ATTR_RECORD_ALIGNMENT);
+    ULONG ListEntryFixedSize = 0x1A;    /* NTFS_ATTRIBUTE_LIST_ITEM without trailing name */
+    ULONG NewListItemSize = ALIGN_UP_BY(ListEntryFixedSize, 8);  /* $FILE_NAME attr name len 0 */
+    PFILE_RECORD_HEADER ChildRecord;
+    PNTFS_ATTR_RECORD AttrInChild;
+    PNTFS_ATTR_RECORD AttrAfter;
+    PNTFS_ATTR_RECORD ExistingList;
+    ULONGLONG ChildMftIndex;
+    NTSTATUS Status;
+    PUCHAR ListContent;
+    PNTFS_ATTRIBUTE_LIST_ITEM NewItem;
+
+    /* Step 1: verify the base record can hold the new list entry BEFORE we
+     * allocate a child MFT record (so a "no room" answer leaves no orphan). */
+    ExistingList = NULL;
+    {
+        PNTFS_ATTR_RECORD Walker = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
+        while (Walker->Type != AttributeEnd &&
+               (ULONG_PTR)Walker < (ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse)
+        {
+            if (Walker->Type == AttributeAttributeList)
+            {
+                ExistingList = Walker;
+                break;
+            }
+            if (Walker->Length == 0)
+                break;
+            Walker = (PNTFS_ATTR_RECORD)((ULONG_PTR)Walker + Walker->Length);
+        }
+    }
+
+    if (ExistingList != NULL)
+    {
+        ULONG NewAttrLen;
+        ULONG GrowBy;
+
+        if (ExistingList->IsNonResident)
+        {
+            DPRINT1("NtfsSpillFileNameToChild: non-resident $ATTRIBUTE_LIST not supported yet\n");
+            return STATUS_NOT_IMPLEMENTED;
+        }
+
+        NewAttrLen = ALIGN_UP_BY(ExistingList->Resident.ValueOffset +
+                                 ExistingList->Resident.ValueLength + NewListItemSize,
+                                 ATTR_RECORD_ALIGNMENT);
+        GrowBy = NewAttrLen - ExistingList->Length;
+        if (BaseFileRecord->BytesInUse + GrowBy > Vcb->NtfsInfo.BytesPerFileRecord)
+            return STATUS_DISK_FULL;
+    }
+    else
+    {
+        ULONG ListValueOff = ALIGN_UP_BY(ResidentHeaderLength, VALUE_OFFSET_ALIGNMENT);
+        ULONG NewListAttrSize = ALIGN_UP_BY(ListValueOff + NewListItemSize, ATTR_RECORD_ALIGNMENT);
+        if (BaseFileRecord->BytesInUse + NewListAttrSize > Vcb->NtfsInfo.BytesPerFileRecord)
+            return STATUS_DISK_FULL;
+    }
+
+    /* Step 2: build a child record carrying just this $FILE_NAME. */
+    ChildRecord = NtfsCreateEmptyFileRecord(Vcb);
+    if (!ChildRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    ChildRecord->BaseFileRecord =
+        ((ULONGLONG)BaseFileRecord->SequenceNumber << 48) | BaseFileRecord->MFTRecordNumber;
+
+    AttrInChild = (PNTFS_ATTR_RECORD)((ULONG_PTR)ChildRecord + ChildRecord->AttributeOffset);
+    RtlZeroMemory(AttrInChild, ChildAttrLen);
+    AttrInChild->Type = AttributeFileName;
+    AttrInChild->Length = ChildAttrLen;
+    AttrInChild->IsNonResident = 0;
+    AttrInChild->NameLength = 0;
+    AttrInChild->NameOffset = (USHORT)ResidentHeaderLength;
+    AttrInChild->Flags = 0;
+    AttrInChild->Instance = Instance;
+    AttrInChild->Resident.ValueLength = FnValueLen;
+    AttrInChild->Resident.ValueOffset = (USHORT)ChildValueOffset;
+    AttrInChild->Resident.Flags = Indexed ? RA_INDEXED : 0;
+    RtlCopyMemory((PUCHAR)AttrInChild + ChildValueOffset, FnValue, FnValueLen);
+
+    if (ChildRecord->NextAttributeNumber <= Instance)
+        ChildRecord->NextAttributeNumber = Instance + 1;
+
+    AttrAfter = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttrInChild + ChildAttrLen);
+    SetFileRecordEnd(ChildRecord, AttrAfter, FILE_RECORD_END);
+
+    Status = AddNewMftEntry(ChildRecord, Vcb, &ChildMftIndex, TRUE);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NtfsSpillFileNameToChild: AddNewMftEntry failed 0x%x\n", (unsigned)Status);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+        return Status;
+    }
+
+    /* Step 3: create or extend the resident $ATTRIBUTE_LIST in the base record
+     * (room already verified above), adding an entry for the migrated name. */
+    if (ExistingList != NULL)
+    {
+        ULONG OldAttrLen = ExistingList->Length;
+        ULONG OldValueLen = ExistingList->Resident.ValueLength;
+        ULONG OldValueOff = ExistingList->Resident.ValueOffset;
+        ULONG NewValueLen = OldValueLen + NewListItemSize;
+        ULONG NewAttrLen = ALIGN_UP_BY(OldValueOff + NewValueLen, ATTR_RECORD_ALIGNMENT);
+        ULONG GrowBy = NewAttrLen - OldAttrLen;
+        ULONG ExistingListOffset = (ULONG)((ULONG_PTR)ExistingList - (ULONG_PTR)BaseFileRecord);
+        PNTFS_ATTR_RECORD AfterList = (PNTFS_ATTR_RECORD)((ULONG_PTR)ExistingList + OldAttrLen);
+
+        if (AfterList->Type != AttributeEnd)
+        {
+            PNTFS_ATTR_RECORD MovedFinal;
+            MovedFinal = MoveAttributes(Vcb, AfterList, ExistingListOffset + OldAttrLen,
+                                        (ULONG_PTR)AfterList + GrowBy);
+            SetFileRecordEnd(BaseFileRecord, MovedFinal, FILE_RECORD_END);
+        }
+        else
+        {
+            PNTFS_ATTR_RECORD NewEnd = (PNTFS_ATTR_RECORD)((ULONG_PTR)AfterList + GrowBy);
+            SetFileRecordEnd(BaseFileRecord, NewEnd, FILE_RECORD_END);
+        }
+
+        ExistingList->Length = NewAttrLen;
+        ExistingList->Resident.ValueLength = NewValueLen;
+
+        ListContent = (PUCHAR)ExistingList + OldValueOff;
+        NewItem = (PNTFS_ATTRIBUTE_LIST_ITEM)(ListContent + OldValueLen);
+    }
+    else
+    {
+        ULONG ListValueOff = ALIGN_UP_BY(ResidentHeaderLength, VALUE_OFFSET_ALIGNMENT);
+        ULONG NewListAttrSize = ALIGN_UP_BY(ListValueOff + NewListItemSize, ATTR_RECORD_ALIGNMENT);
+        PNTFS_ATTR_RECORD NewList;
+        PNTFS_ATTR_RECORD NewEnd;
+
+        NewList = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse - 2 * sizeof(ULONG));
+        ASSERT(NewList->Type == AttributeEnd);
+        RtlZeroMemory(NewList, NewListAttrSize);
+        NewList->Type = AttributeAttributeList;
+        NewList->Length = NewListAttrSize;
+        NewList->IsNonResident = 0;
+        NewList->NameLength = 0;
+        NewList->NameOffset = (USHORT)ResidentHeaderLength;
+        NewList->Flags = 0;
+        NewList->Instance = BaseFileRecord->NextAttributeNumber++;
+        NewList->Resident.ValueLength = NewListItemSize;
+        NewList->Resident.ValueOffset = (USHORT)ListValueOff;
+        NewList->Resident.Flags = 0;
+
+        ListContent = (PUCHAR)NewList + ListValueOff;
+        NewItem = (PNTFS_ATTRIBUTE_LIST_ITEM)ListContent;
+
+        NewEnd = (PNTFS_ATTR_RECORD)((ULONG_PTR)NewList + NewListAttrSize);
+        SetFileRecordEnd(BaseFileRecord, NewEnd, FILE_RECORD_END);
+    }
+
+    RtlZeroMemory(NewItem, NewListItemSize);
+    NewItem->Type = AttributeFileName;
+    NewItem->Length = (USHORT)NewListItemSize;
+    NewItem->NameLength = 0;
+    NewItem->NameOffset = (UCHAR)ListEntryFixedSize;
+    NewItem->StartingVCN = 0;
+    NewItem->MFTIndex = ((ULONGLONG)ChildRecord->SequenceNumber << 48) | ChildMftIndex;
+    NewItem->Instance = Instance;
+
+    DPRINT("NtfsSpillFileNameToChild: name spilled to child MFT %I64u (base MFT %I64u)\n",
+           ChildMftIndex, BaseFileRecord->MFTRecordNumber);
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, ChildRecord);
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsEvictOneBaseFileName
+*
+* Moves one resident $FILE_NAME out of the base record into a child (via
+* NtfsSpillFileNameToChild) to free room in the base.  The FIRST $FILE_NAME in
+* the base is preserved as the file's primary name (so base-only name lookups
+* such as GetBestFileNameFromRecord keep working); the second one found is the
+* eviction victim.  Called on the hard-link spill path when the base has no room
+* even for a new $ATTRIBUTE_LIST entry.
+*
+* @return
+* STATUS_SUCCESS on success.
+* STATUS_DISK_FULL if only the primary $FILE_NAME remains in the base (nothing
+*   left to evict).
+*/
+static
+NTSTATUS
+NtfsEvictOneBaseFileName(PNTFS_VCB Vcb,
+                         PFILE_RECORD_HEADER BaseFileRecord)
+{
+    PNTFS_ATTR_RECORD Attr;
+    PNTFS_ATTR_RECORD Victim = NULL;
+    PFILENAME_ATTRIBUTE Snapshot;
+    ULONG FnValueLen;
+    USHORT Instance;
+    BOOLEAN Indexed;
+    ULONG FnSeen = 0;
+    NTSTATUS Status;
+
+    Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
+    while (Attr->Type != AttributeEnd &&
+           (ULONG_PTR)Attr < (ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse)
+    {
+        if (Attr->Length == 0)
+            break;
+        if (Attr->Type == AttributeFileName && !Attr->IsNonResident)
+        {
+            FnSeen++;
+            if (FnSeen >= 2)
+            {
+                Victim = Attr;
+                break;
+            }
+        }
+        Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
+    }
+
+    if (Victim == NULL)
+        return STATUS_DISK_FULL;
+
+    FnValueLen = Victim->Resident.ValueLength;
+    Instance = Victim->Instance;
+    Indexed = (Victim->Resident.Flags & RA_INDEXED) != 0;
+
+    Snapshot = ExAllocatePoolWithTag(NonPagedPool, FnValueLen, TAG_NTFS);
+    if (!Snapshot)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlCopyMemory(Snapshot, (PUCHAR)Victim + Victim->Resident.ValueOffset, FnValueLen);
+
+    /* Remove from the base first: this frees the victim's slot so the (much
+     * smaller) list entry is guaranteed to fit. */
+    RemoveResidentAttribute(Vcb, BaseFileRecord, Victim);
+
+    Status = NtfsSpillFileNameToChild(Vcb, BaseFileRecord, Snapshot, FnValueLen, Instance, Indexed);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Best-effort rollback: put the name back in the base (room was just
+         * freed).  This only runs on the spill error path, which does not occur
+         * for realistic hard-link counts. */
+        AddResidentAttribute(Vcb, BaseFileRecord, AttributeFileName, NULL, 0, Snapshot, FnValueLen);
+    }
+
+    ExFreePoolWithTag(Snapshot, TAG_NTFS);
+    return Status;
+}
+
+/**
+* @name NtfsAddHardLinkSpill
+*
+* Adds a new hard-link $FILE_NAME to a file whose base MFT record is already
+* full (AddResidentAttribute returned STATUS_DISK_FULL).  The new name is stored
+* in a child record referenced by a resident $ATTRIBUTE_LIST; base records are
+* evicted as needed to keep room for the list.  Sets RA_INDEXED on the spilled
+* attribute (every hard link is indexed in its parent directory).
+*
+* @return STATUS_SUCCESS, or an error (STATUS_DISK_FULL only if the record can no
+* longer be extended - i.e. every remaining name is already the sole primary).
+*/
+NTSTATUS
+NtfsAddHardLinkSpill(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     PFILENAME_ATTRIBUTE NewFileName,
+                     ULONG NewFileNameLength)
+{
+    NTSTATUS Status;
+    USHORT NewInstance;
+
+    for (;;)
+    {
+        NewInstance = FileRecord->NextAttributeNumber;
+        Status = NtfsSpillFileNameToChild(Vcb, FileRecord, NewFileName, NewFileNameLength,
+                                          NewInstance, TRUE);
+        if (Status != STATUS_DISK_FULL)
+        {
+            if (NT_SUCCESS(Status))
+                FileRecord->NextAttributeNumber = NewInstance + 1;
+            return Status;
+        }
+
+        /* No room for even a list entry: evict an existing base name and retry. */
+        Status = NtfsEvictOneBaseFileName(Vcb, FileRecord);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 }
 
 /**
