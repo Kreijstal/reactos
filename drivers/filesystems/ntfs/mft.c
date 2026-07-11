@@ -5999,6 +5999,18 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
     {
         DPRINT("Current: %wZ\n", &Current);
 
+        /* FirstEntry is NtfsFindMftRecord's enumeration resume-cursor: a
+         * match is only accepted at an index ordinal >= *FirstEntry, and the
+         * matched ordinal is written back.  It must restart at 0 for every
+         * path component (as AddFileName's walk does) - carrying the previous
+         * component's ordinal forward silently misses any entry that sorts
+         * earlier in the next directory: looking up "\a\b\c" failed with
+         * STATUS_OBJECT_NAME_NOT_FOUND whenever "b"'s ordinal inside "a"
+         * exceeded "c"'s ordinal inside "b", which made every hard-link
+         * unlink in such a directory fail with 0xC0000034 because
+         * NtfsDeleteFileRecord resolves the opened link's parent path through
+         * this function. */
+        FirstEntry = 0;
         Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex, NULL);
         NTFS_TRACE_IF(CurrentMFTIndex == 144, "DRVIDX: lookup find returned 0x%lx current=%wZ mft=%I64u remaining=%wZ\n",
                     Status,
