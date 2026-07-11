@@ -67,6 +67,7 @@ static NTSTATUS
 NtfsGetNamesInformation(PDEVICE_EXTENSION DeviceExt,
                         PFILE_RECORD_HEADER FileRecord,
                         ULONGLONG MFTIndex,
+                        PFILENAME_ATTRIBUTE MatchedName,
                         PFILE_NAMES_INFORMATION Info,
                         ULONG BufferLength,
                         PULONG Written,
@@ -86,7 +87,11 @@ NtfsGetNamesInformation(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    /* Report the name of the directory index entry that matched the search.
+     * The record's own "best" name can be a different hard link. */
+    FileName = MatchedName;
+    if (FileName == NULL)
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -124,6 +129,7 @@ static NTSTATUS
 NtfsGetDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
                             PFILE_RECORD_HEADER FileRecord,
                             ULONGLONG MFTIndex,
+                            PFILENAME_ATTRIBUTE MatchedName,
                             PFILE_DIRECTORY_INFORMATION Info,
                             ULONG BufferLength,
                             PULONG Written,
@@ -144,7 +150,11 @@ NtfsGetDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    /* Report the name of the directory index entry that matched the search.
+     * The record's own "best" name can be a different hard link. */
+    FileName = MatchedName;
+    if (FileName == NULL)
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -197,6 +207,7 @@ static NTSTATUS
 NtfsGetFullDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
                                 PFILE_RECORD_HEADER FileRecord,
                                 ULONGLONG MFTIndex,
+                                PFILENAME_ATTRIBUTE MatchedName,
                                 PFILE_FULL_DIRECTORY_INFORMATION Info,
                                 ULONG BufferLength,
                                 PULONG Written,
@@ -217,7 +228,11 @@ NtfsGetFullDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    /* Report the name of the directory index entry that matched the search.
+     * The record's own "best" name can be a different hard link. */
+    FileName = MatchedName;
+    if (FileName == NULL)
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -271,6 +286,7 @@ static NTSTATUS
 NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
                                 PFILE_RECORD_HEADER FileRecord,
                                 ULONGLONG MFTIndex,
+                                PFILENAME_ATTRIBUTE MatchedName,
                                 PFILE_BOTH_DIR_INFORMATION Info,
                                 ULONG BufferLength,
                                 PULONG Written,
@@ -291,7 +307,11 @@ NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+    /* Report the name of the directory index entry that matched the search.
+     * The record's own "best" name can be a different hard link. */
+    FileName = MatchedName;
+    if (FileName == NULL)
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -299,6 +319,15 @@ NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
     ShortFileName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
+
+    /* A DOS 8.3 alias pairs with the WIN32 name in its own directory only:
+     * for a hard-linked record, don't attach another link's short name. */
+    if (ShortFileName != NULL &&
+        (ShortFileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK) !=
+            (FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK))
+    {
+        ShortFileName = NULL;
+    }
 
     StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
     ASSERT(StdInfo != NULL);
@@ -374,9 +403,10 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     PFILE_OBJECT FileObject;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_RECORD_HEADER FileRecord;
-    ULONGLONG MFTRecord, OldMFTRecord = 0;
+    ULONGLONG MFTRecord;
     UNICODE_STRING Pattern;
     ULONG Written;
+    PFILENAME_ATTRIBUTE FoundName;
 
     DPRINT("NtfsQueryDirectory() called\n");
 
@@ -431,6 +461,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
             if (!Ccb->DirectorySearchPattern)
             {
                 ExReleaseResourceLite(&Fcb->MainResource);
+                ExReleaseResourceLite(&DeviceExtension->DirResource);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
@@ -445,6 +476,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         if (!Ccb->DirectorySearchPattern)
         {
             ExReleaseResourceLite(&Fcb->MainResource);
+            ExReleaseResourceLite(&DeviceExtension->DirResource);
             return STATUS_INSUFFICIENT_RESOURCES;
         }
 
@@ -700,6 +732,18 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
             break;
     }
 
+    /* Buffer receiving a copy of the matched index entry's $FILE_NAME key.
+     * The enumeration must report the entry's own name: for hard-linked
+     * files the record's names differ from (and cannot identify) the index
+     * entry that matched. */
+    FoundName = ExAllocatePoolWithTag(NonPagedPool, NTFS_FOUND_NAME_SIZE, TAG_NTFS);
+    if (FoundName == NULL)
+    {
+        ExReleaseResourceLite(&Fcb->MainResource);
+        ExReleaseResourceLite(&DeviceExtension->DirResource);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     /* Ccb->Entry now includes the 2 synthetic dot entries.
      * NtfsFindFileAt uses a 0-based index into the B-tree,
      * so subtract 2 to get the real B-tree offset. */
@@ -716,34 +760,18 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                                 &FileRecord,
                                 &MFTRecord,
                                 Fcb->MFTIndex,
-                                BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+                                BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                FoundName);
 
         if (NT_SUCCESS(Status))
         {
-            /* HACK: files with both a short name and a long name are present twice in the index.
-             * Ignore the second entry, if it is immediately following the first one.
-             */
-            if (MFTRecord == OldMFTRecord)
-            {
-                DPRINT("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
-                /* Advance the B-tree cursor, not Ccb->Entry: the loop below
-                 * re-queries NtfsFindFileAt() with BTreeEntry, and Ccb->Entry
-                 * is only synced back from BTreeEntry after the loop.  Bumping
-                 * Ccb->Entry here leaves BTreeEntry unchanged, so the next
-                 * NtfsFindFileAt() returns the very same duplicate entry and we
-                 * spin forever. */
-                BTreeEntry++;
-                ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
-                continue;
-            }
-            OldMFTRecord = MFTRecord;
-
             switch (FileInformationClass)
             {
                 case FileNamesInformation:
                     Status = NtfsGetNamesInformation(DeviceExtension,
                                                      FileRecord,
                                                      MFTRecord,
+                                                     FoundName,
                                                      (PFILE_NAMES_INFORMATION)Buffer,
                                                      BufferLength,
                                                      &Written,
@@ -754,6 +782,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                     Status = NtfsGetDirectoryInformation(DeviceExtension,
                                                          FileRecord,
                                                          MFTRecord,
+                                                         FoundName,
                                                          (PFILE_DIRECTORY_INFORMATION)Buffer,
                                                          BufferLength,
                                                          &Written,
@@ -764,6 +793,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                     Status = NtfsGetFullDirectoryInformation(DeviceExtension,
                                                              FileRecord,
                                                              MFTRecord,
+                                                             FoundName,
                                                              (PFILE_FULL_DIRECTORY_INFORMATION)Buffer,
                                                              BufferLength,
                                                              &Written,
@@ -774,6 +804,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                     Status = NtfsGetBothDirectoryInformation(DeviceExtension,
                                                              FileRecord,
                                                              MFTRecord,
+                                                             FoundName,
                                                              (PFILE_BOTH_DIR_INFORMATION)Buffer,
                                                              BufferLength,
                                                              &Written,
@@ -814,6 +845,8 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     /* Sync Ccb->Entry back: 2 dots + however many B-tree entries we consumed */
     Ccb->Entry = BTreeEntry + 2;
     }
+
+    ExFreePoolWithTag(FoundName, TAG_NTFS);
 
     if (Buffer0)
     {
