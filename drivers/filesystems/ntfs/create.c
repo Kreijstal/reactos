@@ -108,6 +108,7 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status;
     PFILE_RECORD_HEADER MftRecord;
     PFILENAME_ATTRIBUTE FileName;
+    UCHAR SpillNameBuf[NTFS_FOUND_NAME_SIZE];
     WCHAR FullPath[MAX_PATH];
     ULONG WritePosition = MAX_PATH - 1;
 
@@ -133,7 +134,8 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
             break;
         }
 
-        FileName = GetBestFileNameFromRecord(DeviceExt, MftRecord);
+        FileName = GetBestFileNameFromRecord(DeviceExt, MftRecord,
+                                             (PFILENAME_ATTRIBUTE)SpillNameBuf);
         if (FileName == NULL)
         {
             DPRINT1("$FILE_NAME attribute not found for %I64x\n", Id);

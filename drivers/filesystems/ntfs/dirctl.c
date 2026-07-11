@@ -91,7 +91,7 @@ NtfsGetNamesInformation(PDEVICE_EXTENSION DeviceExt,
      * The record's own "best" name can be a different hard link. */
     FileName = MatchedName;
     if (FileName == NULL)
-        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord, NULL);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -154,7 +154,7 @@ NtfsGetDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
      * The record's own "best" name can be a different hard link. */
     FileName = MatchedName;
     if (FileName == NULL)
-        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord, NULL);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -232,7 +232,7 @@ NtfsGetFullDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
      * The record's own "best" name can be a different hard link. */
     FileName = MatchedName;
     if (FileName == NULL)
-        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord, NULL);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
@@ -297,6 +297,7 @@ NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
     ULONG BytesToCopy = 0;
     PFILENAME_ATTRIBUTE FileName, ShortFileName;
     PSTANDARD_INFORMATION StdInfo;
+    UCHAR ShortNameBuf[NTFS_FOUND_NAME_SIZE];
 
     DPRINT("NtfsGetBothDirectoryInformation() called\n");
 
@@ -311,14 +312,15 @@ NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
      * The record's own "best" name can be a different hard link. */
     FileName = MatchedName;
     if (FileName == NULL)
-        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
+        FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord, NULL);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
         NtfsDumpFileAttributes(DeviceExt, FileRecord);
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    ShortFileName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
+    ShortFileName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS,
+                                           (PFILENAME_ATTRIBUTE)ShortNameBuf);
 
     /* A DOS 8.3 alias pairs with the WIN32 name in its own directory only:
      * for a hard-linked record, don't attach another link's short name. */
@@ -536,7 +538,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                 DirRec = ExAllocateFromNPagedLookasideList(&DeviceExtension->FileRecLookasideList);
                 if (DirRec && NT_SUCCESS(ReadFileRecord(DeviceExtension, Fcb->MFTIndex, DirRec)))
                 {
-                    DirFn = GetBestFileNameFromRecord(DeviceExtension, DirRec);
+                    DirFn = GetBestFileNameFromRecord(DeviceExtension, DirRec, NULL);
                     if (DirFn)
                         DotMft = DirFn->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
                 }
@@ -569,7 +571,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                 Status = ReadFileRecord(DeviceExtension, DotMft, FileRecord);
                 if (NT_SUCCESS(Status))
                 {
-                    PFILENAME_ATTRIBUTE OrigFn = GetBestFileNameFromRecord(DeviceExtension, FileRecord);
+                    PFILENAME_ATTRIBUTE OrigFn = GetBestFileNameFromRecord(DeviceExtension, FileRecord, NULL);
                     PSTANDARD_INFORMATION StdInfo = GetStandardInformationFromRecord(DeviceExtension, FileRecord);
 
                     /* Build a synthetic $FILE_NAME for '.' or '..' so we can
