@@ -864,6 +864,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
             LARGE_INTEGER DataSize;
             ULONGLONG AllocationSize;
             PFILENAME_ATTRIBUTE fileNameAttribute;
+            UCHAR SpillNameBuf[NTFS_FOUND_NAME_SIZE];
             ULONGLONG ParentMFTId;
             UNICODE_STRING filename;
 
@@ -890,7 +891,8 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
              * stream only, as on Windows. */
             if (Fcb->Stream[0] == UNICODE_NULL)
             {
-                fileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
+                fileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord,
+                                                               (PFILENAME_ATTRIBUTE)SpillNameBuf);
                 ASSERT(fileNameAttribute);
 
                 ParentMFTId = fileNameAttribute->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
