@@ -376,6 +376,91 @@ static UCHAR *chk_walk_get_record(CHK_WALK *w, ULONG recno)
     return w->mruBuf[i];
 }
 
+/* Does file-record buffer 'rec' hold a resident $FILE_NAME whose parent is
+ * dirRec and whose name equals key? */
+static int
+chk_rec_has_name(CHK_CTX *c, UCHAR *rec, ULONG dirRec, FILE_NAME_ATTR *key)
+{
+    ULONG off = ((FILE_RECORD_HEADER *)rec)->AttributeOffset;
+    while (off + 8 <= c->MftRecordSize)
+    {
+        ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
+        if (a->Type == AT_END || a->Length == 0 || off + a->Length > c->MftRecordSize)
+            break;
+        if (a->Type == AT_FILE_NAME && !a->NonResident &&
+            a->Resident.ValueOffset + 0x42 <= a->Length)
+        {
+            FILE_NAME_ATTR *fn = (FILE_NAME_ATTR *)(rec + off + a->Resident.ValueOffset);
+            if (CHK_REF_REC(fn->ParentDirectory) == dirRec &&
+                fn->FileNameLength == key->FileNameLength)
+            {
+                ULONG i;
+                for (i = 0; i < fn->FileNameLength &&
+                            fn->FileName[i] == key->FileName[i]; i++)
+                    ;
+                if (i == fn->FileNameLength)
+                    return 1;
+            }
+        }
+        off += a->Length;
+    }
+    return 0;
+}
+
+/* Search a target record plus any $FILE_NAME attributes it spilled to
+ * $ATTRIBUTE_LIST extension records for a name matching 'key' in dirRec.  Hard
+ * links beyond what fits in one MFT record live in child records, so a
+ * back-reference check that only scanned the base would falsely flag them. */
+static int
+chk_target_has_name(CHK_CTX *c, ULONG refRec, UCHAR *target,
+                    ULONG dirRec, FILE_NAME_ATTR *key)
+{
+    ULONG alOff;
+    ULONGLONG size = 0, pos = 0;
+    UCHAR *val;
+
+    if (chk_rec_has_name(c, target, dirRec, key))
+        return 1;
+
+    alOff = chk_find_attr(c, target, AT_ATTRIBUTE_LIST, NULL, 0);
+    if (!alOff)
+        return 0;
+    val = chk_read_attr_value(c, target, alOff, 1024 * 1024, &size);
+    if (!val)
+        return 0;
+
+    while (pos + sizeof(ATTR_LIST_ENTRY) <= size)
+    {
+        ATTR_LIST_ENTRY *le = (ATTR_LIST_ENTRY *)(val + pos);
+        ULONG extRec;
+
+        if (le->Length < sizeof(ATTR_LIST_ENTRY) || pos + le->Length > size)
+            break;
+        extRec = CHK_REF_REC(le->MftReference);
+        if (le->Type == AT_FILE_NAME && extRec != refRec && extRec < c->RecordCount)
+        {
+            UCHAR *ext = (UCHAR *)malloc(c->MftRecordSize);
+            if (ext)
+            {
+                if (chk_read_record(c, extRec, ext) == 0 &&
+                    *(ULONG *)ext == NRH_FILE_TYPE &&
+                    chk_apply_fixups(ext, c->MftRecordSize, c->BytesPerSector) == 0 &&
+                    chk_rec_has_name(c, ext, dirRec, key))
+                {
+                    free(ext);
+                    free(val);
+                    return 1;
+                }
+                free(ext);
+            }
+        }
+        pos += le->Length;
+    }
+
+    free(val);
+    return 0;
+}
+
 /* Verify one leaf entry: collation order + back-reference. */
 static void chk_walk_visit_entry(CHK_WALK *w, INDEX_ENTRY *e)
 {
@@ -384,7 +469,6 @@ static void chk_walk_visit_entry(CHK_WALK *w, INDEX_ENTRY *e)
     ULONGLONG ref = e->Data.Directory.IndexedFile;
     ULONG refRec = CHK_REF_REC(ref);
     UCHAR *target;
-    ULONG off;
     int backed = 0;
 
     /* key must fit in the entry, and the name must fit in the key:
@@ -435,35 +519,8 @@ static void chk_walk_visit_entry(CHK_WALK *w, INDEX_ENTRY *e)
     }
 
     target = chk_walk_get_record(w, refRec);
-    if (target)
-    {
-        FILE_RECORD_HEADER *th = (FILE_RECORD_HEADER *)target;
-        off = th->AttributeOffset;
-        while (off + 8 <= c->MftRecordSize)
-        {
-            ATTR_RECORD *a = (ATTR_RECORD *)(target + off);
-            if (a->Type == AT_END || a->Length == 0 ||
-                off + a->Length > c->MftRecordSize)
-                break;
-            if (a->Type == AT_FILE_NAME && !a->NonResident &&
-                a->Resident.ValueOffset + 0x42 <= a->Length)
-            {
-                FILE_NAME_ATTR *fn =
-                    (FILE_NAME_ATTR *)(target + off + a->Resident.ValueOffset);
-                if (CHK_REF_REC(fn->ParentDirectory) == w->dirRec &&
-                    fn->FileNameLength == key->FileNameLength)
-                {
-                    ULONG i;
-                    for (i = 0; i < fn->FileNameLength &&
-                                fn->FileName[i] == key->FileName[i]; i++)
-                        ;
-                    if (i == fn->FileNameLength)
-                        { backed = 1; break; }
-                }
-            }
-            off += a->Length;
-        }
-    }
+    if (target && chk_target_has_name(c, refRec, target, w->dirRec, key))
+        backed = 1;
 
     if (!backed)
     {
