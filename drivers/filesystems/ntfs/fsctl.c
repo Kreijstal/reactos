@@ -2031,28 +2031,6 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
             Status = GetVolumeBitmap(DeviceExt, Irp);
             break;
 
-        /* $LogFile Phase-0 forensic dump (Kreijstal/reactos#34).
-         *
-         * Returns a short human-readable report of the current state of
-         * $LogFile: both restart pages plus the first RCRD record.  No
-         * replay, no emission, no mutation -- this is a read-only
-         * diagnostic hook so the userspace test harness (and chkdsk-lite
-         * workflows) can inspect the log without re-implementing RSTR
-         * parsing in a separate tool.  See lfsparse.c banner. */
-        case FSCTL_NTFS_DUMP_LOGFILE:
-        {
-            PCHAR OutBuf = (PCHAR)Irp->AssociatedIrp.SystemBuffer;
-            ULONG OutLen = Stack->Parameters.FileSystemControl.OutputBufferLength;
-            ULONG BytesOut = 0;
-
-            Status = NtfsLfsDumpLogfile(DeviceExt, OutBuf, OutLen, &BytesOut);
-            if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
-                Irp->IoStatus.Information = BytesOut;
-            else
-                Irp->IoStatus.Information = 0;
-            break;
-        }
-
         default:
             DPRINT("Invalid user request: %x\n", Stack->Parameters.FileSystemControl.FsControlCode);
             Status = STATUS_INVALID_DEVICE_REQUEST;

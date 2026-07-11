@@ -419,8 +419,13 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
        if( Error != NO_ERROR )
        {
-           /* HACK: We are waiting until TCP/IP starts */
-           Sleep(2000);
+           HANDLE Events[2] = { hStopEvent, hAdapterDiscoveryEvent };
+           DWORD WaitResult = WaitForMultipleObjects(ARRAYSIZE(Events), Events, FALSE, INFINITE);
+           if (WaitResult == WAIT_OBJECT_0)
+           {
+               DPRINT("Stopping the discovery thread!\n");
+               break;
+           }
            continue;
        }
 
