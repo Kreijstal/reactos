@@ -1008,8 +1008,13 @@ ExpInitializeExecutive(IN ULONG Cpu,
         }
     }
 #else
-    /* TODO: Win7+ removed SetupLdrBlock from LOADER_PARAMETER_BLOCK;
-     * setup boot detection needs porting to the new mechanism. */
+    /* Win7+ removed SETUP_LOADER_BLOCK from LOADER_PARAMETER_BLOCK;
+     * the loader flags text-mode setup via a dedicated load option */
+    if (LoaderBlock->LoadOptions &&
+        strstr(LoaderBlock->LoadOptions, "TEXTSETUP"))
+    {
+        ExpInTextModeSetup = TRUE;
+    }
 #endif
 
     /* Set phase to 0 */
