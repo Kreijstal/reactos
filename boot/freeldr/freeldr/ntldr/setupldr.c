@@ -685,6 +685,11 @@ LoadReactOSSetup(
     /* Append boot-time options */
     AppendBootTimeOptions(UserBootOptions, sizeof(UserBootOptions));
 
+    /* Flag this boot as text-mode setup for the kernel. Win7+ removed
+     * SETUP_LOADER_BLOCK from the loader block, so kernels targeting
+     * those versions detect setup through this load option instead. */
+    RtlStringCbCatA(UserBootOptions, sizeof(UserBootOptions), " TEXTSETUP");
+
     /* Post-process the boot options */
     NtLdrNormalizeOptions(UserBootOptions);
     BootOptions = UserBootOptions;
