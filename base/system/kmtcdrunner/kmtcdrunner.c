@@ -2,8 +2,8 @@
  * PROJECT:     ReactOS kernel-mode test orchestrator (Phase 3)
  * LICENSE:     LGPL-2.1+ (https://spdx.org/licenses/LGPL-2.1+)
  * PURPOSE:     Win32 console binary launched by winlogon (as the Shell) on a
- *              kmtestcd boot. Drives kmtest_.exe across every non-hidden test
- *              name reported by `kmtest_.exe --list`, including the standalone
+ *              kmtestcd boot. Drives kmtest.exe across every non-hidden test
+ *              name reported by `kmtest.exe --list`, including the standalone
  *              driver targets (ntcreatesection_drv, mmmaplockedpagesspecify-
  *              cache_drv, cccopyread_drv, etc.) which require a userland half
  *              that the native-mode kmtestrunner.exe can't run.
@@ -28,14 +28,14 @@
 #include "../../../modules/rostests/kmtests/kmt_exit_drv/kmt_exit_ioctl.h"
 
 /* When non-empty, run only the test whose name matches this string and skip
- * the rest of the kmtest_.exe --list output. Set from argv[1] so the launch
+ * the rest of the kmtest.exe --list output. Set from argv[1] so the launch
  * line in kmtestcd_setup.inf can name a single test; that lets the smoke
  * boot of kmtestcd target one known-clean test instead of churning through
  * every test in the suite and tripping latent kernel ASSERTs that hijack
  * COM1 via KDB and hang the runner. Empty == "run everything" (legacy). */
 static CHAR g_FilterTest[64] = "";
 
-/* kmtest_.exe and its standalone *_drv.sys all live in %SystemRoot%\bin
+/* kmtest.exe and its standalone *_drv.sys all live in %SystemRoot%\bin
  * (where add_rostests_file installs FOR all). We invoke it by absolute path
  * because there's no guarantee bin\ is in PATH for winlogon's shell, and we
  * want KmtCreateService inside the child to resolve drivers relative to its
@@ -49,7 +49,7 @@ static WCHAR g_KmtestExePath[MAX_PATH];
  * exclusively by the kernel debugger (/DEBUGPORT=COM1 in freeldr.ini), so we
  * use COM2 — the second qemu -serial backend collects our marker stream while
  * COM1 stays dedicated to the kernel debug log + DbgPrint output. Each child
- * kmtest_.exe is run with its stdout/stderr on a pipe we drain (see
+ * kmtest.exe is run with its stdout/stderr on a pipe we drain (see
  * RunOneTest): we forward every byte here so its ok()/trace() lines reach the
  * marker log, and tally the failure markers as they stream past. */
 static HANDLE g_SerialHandle = INVALID_HANDLE_VALUE;
@@ -59,7 +59,7 @@ static HANDLE g_SerialHandle = INVALID_HANDLE_VALUE;
  * lines are never interleaved mid-line. */
 static CRITICAL_SECTION g_SerialLock;
 
-/* Upper bound for one kmtest_.exe child. Individual tests normally finish
+/* Upper bound for one kmtest.exe child. Individual tests normally finish
  * in seconds even from CD; a child that exceeds this is wedged (e.g. a
  * hard-error prompt or a kernel deadlock) and must not stall the rest of
  * the suite. */
@@ -88,7 +88,7 @@ ResolveKmtestPath(VOID)
     {
         wcscpy(g_KmtestExePath, L"C:\\ReactOS");
     }
-    wcscat(g_KmtestExePath, L"\\bin\\kmtest_.exe");
+    wcscat(g_KmtestExePath, L"\\bin\\kmtest.exe");
 }
 
 /* Optional host control disk: a small FAT volume carrying a KMTEST.SEL file at
@@ -173,7 +173,7 @@ EmitLine(PCSTR Fmt, ...)
     LeaveCriticalSection(&g_SerialLock);
 }
 
-/* Pipe-and-read the output of "kmtest_.exe --list" into Buffer. Returns the
+/* Pipe-and-read the output of "kmtest.exe --list" into Buffer. Returns the
  * number of bytes read, or 0 on failure. The output is a header line
  * ("Valid test names:") plus indented test names. */
 static
@@ -241,7 +241,7 @@ CaptureList(_Out_writes_(BufferSize) PCHAR Buffer,
 
 /* The kmtest framework prints exactly one ": Test failed: " line per failing
  * ok()/ok_*() check (kmt_test.h). Counting these is the only reliable failure
- * signal: kmtest_.exe's *exit code* is a Win32 error reflecting whether the
+ * signal: kmtest.exe's *exit code* is a Win32 error reflecting whether the
  * test could be *run* (service start, device open) — not whether its assertions
  * passed. A test can fail dozens of ok()s and still exit 0, or exit non-zero
  * (e.g. 128) without running a single check. So we report both, distinctly. */
@@ -334,7 +334,7 @@ DrainPipeThread(_In_ LPVOID Parameter)
     return 0;
 }
 
-/* Spawn kmtest_.exe with a single test name. Child stdout/stderr is piped
+/* Spawn kmtest.exe with a single test name. Child stdout/stderr is piped
  * through us so we can both forward every byte to the serial log AND count the
  * failure markers. Returns the child Win32 exit code; the number of failed
  * assertions is written to *OutFailures. */
@@ -540,7 +540,7 @@ main(void)
         return 1;
     }
 
-    /* kmtest_.exe --list prints a header line followed by indented test names
+    /* kmtest.exe --list prints a header line followed by indented test names
      * (4-space indent). Any line not starting with whitespace is a heading or
      * blank and is skipped. */
     Cursor = ListBuffer;
@@ -602,7 +602,7 @@ main(void)
     }
 
     /* tests_failed counts tests with >=1 failed ok() assertion (the real
-     * pass/fail signal); errored counts tests kmtest_.exe could not run at all
+     * pass/fail signal); errored counts tests kmtest.exe could not run at all
      * (non-zero Win32 exit, no assertions executed); assert_failures is the
      * grand total of failed checks across the suite. */
     EmitLine("KMTCD-SUMMARY tests_run=%ld tests_failed=%ld errored=%ld assert_failures=%ld",
