@@ -362,6 +362,7 @@ NtfsGetAlternateNameInformation(PNTFS_FCB Fcb,
 {
     PFILE_RECORD_HEADER FileRecord;
     PFILENAME_ATTRIBUTE ShortName;
+    UCHAR ShortNameBuf[NTFS_FOUND_NAME_SIZE];
     NTSTATUS Status;
     ULONG NameBytes;
     ULONG BytesToCopy;
@@ -383,7 +384,8 @@ NtfsGetAlternateNameInformation(PNTFS_FCB Fcb,
         return Status;
     }
 
-    ShortName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
+    ShortName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS,
+                                      (PFILENAME_ATTRIBUTE)ShortNameBuf);
     if (ShortName == NULL)
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -943,6 +945,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     NTSTATUS Status = STATUS_SUCCESS;
     ULONGLONG AllocationSize;
     PFILENAME_ATTRIBUTE FileNameAttribute;
+    UCHAR SpillNameBuf[NTFS_FOUND_NAME_SIZE];
     ULONGLONG ParentMFTId;
     UNICODE_STRING FileName;
 
@@ -1048,7 +1051,8 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     // TODO: expand to work with every filename / hardlink stored in the file record.
     DPRINT("NtfsSetEndOfFile: calling GetBestFileNameFromRecord\n");
     NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof get filename begin\n");
-    FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
+    FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord,
+                                                   (PFILENAME_ATTRIBUTE)SpillNameBuf);
     NTFS_TRACE_IF(Fcb->MFTIndex == 160, "REGSTALL: eof get filename returned %p\n", FileNameAttribute);
     if (FileNameAttribute == NULL)
     {
