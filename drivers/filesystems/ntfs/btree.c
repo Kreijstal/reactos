@@ -554,8 +554,19 @@ NtfsCompareBytes(const VOID *A, const VOID *B, ULONG Len)
 /* FILENAME-collation compare of two raw filename-attribute key blobs.  The
  * blobs are parsed as FILENAME_ATTRIBUTE: NameLength is at
  * FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength), WCHAR name starts at
- * FIELD_OFFSET(FILENAME_ATTRIBUTE, Name).  Handles both the FILE_NAME
- * (case-insensitive) and UNICODE_STRING (case-sensitive) variants. */
+ * FIELD_OFFSET(FILENAME_ATTRIBUTE, Name).
+ *
+ * NTFS's COLLATION_FILE_NAME on-disk order is fixed by the volume's upcase
+ * table and does NOT depend on how a name was created or is being looked up:
+ * the PRIMARY comparison is always case-insensitive (upcased).  CaseSensitive
+ * only refines WITHIN an upcase-equal run: TRUE applies an exact binary
+ * tiebreak (matching ntfs-3g's ntfs_names_full_collate, where 'A' sorts
+ * before 'a'), giving the total order under which POSIX-namespace names that
+ * differ only in case coexist; FALSE reports upcase-equal names as equal
+ * (callers treat 0 as a collision).  Letting a case-sensitive create flip the
+ * PRIMARY order (as this function previously did) interleaves binary-ordered
+ * entries into upcase-ordered nodes and corrupts the index: entries become
+ * unreachable by collation descent (files un-openable/un-deletable). */
 static LONG
 NtfsCompareFilenameKey(const VOID *Key1, ULONG Key1Len,
                        const VOID *Key2, ULONG Key2Len,
@@ -585,25 +596,17 @@ NtfsCompareFilenameKey(const VOID *Key1, ULONG Key1Len,
     Name2.Buffer = (PWCHAR)Fn2->Name;
     Name2.Length = Name2.MaximumLength = (USHORT)(Fn2->NameLength * sizeof(WCHAR));
 
-    if (Name1.Length == Name2.Length)
-        return RtlCompareUnicodeString(&Name1, &Name2, !CaseSensitive);
+    /* Primary: upcase collation (RtlCompareUnicodeString handles differing
+     * lengths: common prefix first, then the shorter name sorts first). */
+    Comparison = RtlCompareUnicodeString(&Name1, &Name2, TRUE);
+    if (Comparison != 0)
+        return Comparison;
 
-    if (Name1.Length < Name2.Length)
-    {
-        Name2.Length = Name1.Length;
-        Comparison = RtlCompareUnicodeString(&Name1, &Name2, !CaseSensitive);
-        if (Comparison == 0)
-            return -1;
-    }
-    else
-    {
-        Name1.Length = Name2.Length;
-        Comparison = RtlCompareUnicodeString(&Name1, &Name2, !CaseSensitive);
-        if (Comparison == 0)
-            return 1;
-    }
+    /* Secondary (case-sensitive callers only): exact binary tiebreak. */
+    if (CaseSensitive)
+        return RtlCompareUnicodeString(&Name1, &Name2, FALSE);
 
-    return Comparison;
+    return 0;
 }
 
 static LONG
