@@ -1067,6 +1067,12 @@ CoalesceAttributeFromList(PNTFS_VCB Vcb,
                           USHORT NameLength);
 
 NTSTATUS
+NtfsAddHardLinkSpill(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     PFILENAME_ATTRIBUTE NewFileName,
+                     ULONG NewFileNameLength);
+
+NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
                    PFILE_RECORD_HEADER FileRecord,
                    PNTFS_ATTR_RECORD AttributeAddress,
@@ -1910,6 +1916,11 @@ VOID
 NtfsDumpFileRecord(PDEVICE_EXTENSION Vcb,
                    PFILE_RECORD_HEADER FileRecord);
 
+/* Size of a caller-provided buffer that can hold a copy of any matched
+ * index entry's $FILE_NAME key (fixed part + longest possible name). */
+#define NTFS_FOUND_NAME_SIZE \
+    (FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + 255 * sizeof(WCHAR))
+
 NTSTATUS
 NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                PUNICODE_STRING SearchPattern,
@@ -1917,7 +1928,8 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                PFILE_RECORD_HEADER *FileRecord,
                PULONGLONG MFTIndex,
                ULONGLONG CurrentMFTIndex,
-               BOOLEAN CaseSensitive);
+               BOOLEAN CaseSensitive,
+               PFILENAME_ATTRIBUTE OutFoundName);
 
 NTSTATUS
 NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
@@ -1926,7 +1938,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                   PULONG FirstEntry,
                   BOOLEAN DirSearch,
                   BOOLEAN CaseSensitive,
-                  ULONGLONG *OutMFTIndex);
+                  ULONGLONG *OutMFTIndex,
+                  PFILENAME_ATTRIBUTE OutFoundName);
 
 /* misc.c */
 
