@@ -691,13 +691,14 @@ UsnEmitEnumRecord(PDEVICE_EXTENSION Vcb,
                   ULONG DstCap)
 {
     PFILENAME_ATTRIBUTE Fn;
+    UCHAR SpillNameBuf[NTFS_FOUND_NAME_SIZE];
     PSTANDARD_INFORMATION Si;
     ULONG FileAttrs = 0;
     ULONGLONG ParentRef = 0;
     USHORT NameBytes = 0;
     PCWSTR NamePtr = NULL;
 
-    Fn = GetBestFileNameFromRecord(Vcb, FileRecord);
+    Fn = GetBestFileNameFromRecord(Vcb, FileRecord, (PFILENAME_ATTRIBUTE)SpillNameBuf);
     if (Fn != NULL)
     {
         ParentRef = Fn->DirectoryFileReferenceNumber;
