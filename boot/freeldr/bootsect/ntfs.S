@@ -840,11 +840,12 @@ ApplyFixups:
 #else
         jnz   PrintFileSystemError     // Fixup is corrupted, so print error
 #endif
-        inc   cx
         add   si, cx
+        add   si, cx                   // Replacement word for sector CX is at USA + 2*CX
         mov   ax, word ptr es:[si]     // Apply fixup
         mov   word ptr es:[di], ax
 
+        inc   cx
         jmp   FixupLoop
     EndFixupLoop:
 
