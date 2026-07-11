@@ -3863,7 +3863,8 @@ NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
                                &FirstEntry,
                                TRUE,
                                CaseSensitive,
-                               &OutMFTIndex);
+                               &OutMFTIndex,
+                               NULL);
     if (NT_SUCCESS(Status))
     {
         *Empty = FALSE;
@@ -3883,12 +3884,343 @@ NtfsIsDirectoryEmpty(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* A file with more hard links than fit in its base MFT record stores the
+ * overflow $FILE_NAME attributes one-per-child in extension records referenced
+ * by a resident $ATTRIBUTE_LIST (see NtfsSpillFileNameToChild).  A resident
+ * $ATTRIBUTE_LIST in a 1KB record tops out around 29 entries, so a fixed cap
+ * enumerates them all. */
+#define NTFS_MAX_FN_CHILDREN 64
+
+/* Collect the MFT indices of the child records that hold this file's spilled
+ * $FILE_NAME attributes.  Returns the count (0 if the file has no attribute
+ * list, i.e. all names live in the base record). */
+static
+ULONG
+NtfsCollectFileNameChildren(PFILE_RECORD_HEADER BaseFileRecord,
+                            PULONGLONG Indices,
+                            ULONG MaxCount)
+{
+    PNTFS_ATTR_RECORD Attr;
+    PNTFS_ATTR_RECORD List = NULL;
+    PUCHAR ItemPtr, ListEnd;
+    ULONG Count = 0;
+
+    Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
+    while (Attr->Type != AttributeEnd &&
+           (ULONG_PTR)Attr < (ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse)
+    {
+        if (Attr->Length == 0)
+            break;
+        if (Attr->Type == AttributeAttributeList)
+        {
+            List = Attr;
+            break;
+        }
+        Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
+    }
+
+    if (List == NULL || List->IsNonResident)
+        return 0;
+
+    ItemPtr = (PUCHAR)List + List->Resident.ValueOffset;
+    ListEnd = ItemPtr + List->Resident.ValueLength;
+    while (ItemPtr + 0x1A <= ListEnd)   /* 0x1A = $ATTRIBUTE_LIST item header before the name */
+    {
+        PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)ItemPtr;
+        if (Item->Length == 0)
+            break;
+        if (Item->Type == AttributeFileName)
+        {
+            ULONGLONG ChildIdx = Item->MFTIndex & NTFS_MFT_MASK;
+            if (ChildIdx != BaseFileRecord->MFTRecordNumber)
+            {
+                if (Count >= MaxCount)
+                {
+                    DPRINT1("NtfsCollectFileNameChildren: more than %u children; truncating\n", MaxCount);
+                    break;
+                }
+                Indices[Count++] = ChildIdx;
+            }
+        }
+        ItemPtr += Item->Length;
+    }
+
+    return Count;
+}
+
+/* Full-delete helper: for every spilled $FILE_NAME child record, drop its
+ * parent-directory $I30 entry and free the child MFT record.  Called when the
+ * last link of a file is being removed so no dangling index entry or orphaned
+ * extension record survives. */
+static
+NTSTATUS
+NtfsRemoveSpilledNames(PDEVICE_EXTENSION DeviceExt,
+                       PFILE_RECORD_HEADER BaseFileRecord,
+                       ULONGLONG BaseMftIndex,
+                       BOOLEAN CaseSensitive)
+{
+    ULONGLONG Children[NTFS_MAX_FN_CHILDREN];
+    ULONG ChildCount, i;
+    PFILE_RECORD_HEADER ChildRecord;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ChildCount = NtfsCollectFileNameChildren(BaseFileRecord, Children, NTFS_MAX_FN_CHILDREN);
+    if (ChildCount == 0)
+        return STATUS_SUCCESS;
+
+    ChildRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!ChildRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (i = 0; i < ChildCount; i++)
+    {
+        PNTFS_ATTR_RECORD ChildAttr;
+
+        Status = ReadFileRecord(DeviceExt, Children[i], ChildRecord);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        ChildAttr = (PNTFS_ATTR_RECORD)((ULONG_PTR)ChildRecord + ChildRecord->AttributeOffset);
+        while (ChildAttr->Type != AttributeEnd &&
+               (ULONG_PTR)ChildAttr < (ULONG_PTR)ChildRecord + ChildRecord->BytesInUse)
+        {
+            if (ChildAttr->Length == 0)
+                break;
+            if (ChildAttr->Type == AttributeFileName)
+            {
+                PFILENAME_ATTRIBUTE Fn =
+                    (PFILENAME_ATTRIBUTE)((ULONG_PTR)ChildAttr + ChildAttr->Resident.ValueOffset);
+                UNICODE_STRING FileName;
+                ULONGLONG ParentMftIndex = Fn->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
+
+                FileName.Length = FileName.MaximumLength = Fn->NameLength * sizeof(WCHAR);
+                FileName.Buffer = Fn->Name;
+                Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                                         ParentMftIndex,
+                                                         BaseMftIndex,
+                                                         &FileName,
+                                                         CaseSensitive);
+                if (!NT_SUCCESS(Status))
+                    goto Done;
+            }
+            ChildAttr = (PNTFS_ATTR_RECORD)((ULONG_PTR)ChildAttr + ChildAttr->Length);
+        }
+
+        /* Free the child extension record. */
+        ClearFlag(ChildRecord->Flags, FRH_IN_USE);
+        ChildRecord->LinkCount = 0;
+        Status = UpdateFileRecord(DeviceExt, Children[i], ChildRecord);
+        if (!NT_SUCCESS(Status))
+            break;
+        Status = NtfsSetMftBitmapInUse(DeviceExt, Children[i], FALSE, TRUE);
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+
+Done:
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ChildRecord);
+    return Status;
+}
+
+/* Remove the resident $ATTRIBUTE_LIST entry that points at ChildMftIndex from
+ * the base record, shrinking the list (or removing the whole $ATTRIBUTE_LIST
+ * attribute when its last entry goes).  Mirrors the list-shrink half of
+ * CoalesceAttributeFromList without moving an attribute back into the base. */
+static
+NTSTATUS
+NtfsRemoveFileNameListEntry(PDEVICE_EXTENSION Vcb,
+                            PFILE_RECORD_HEADER BaseFileRecord,
+                            ULONGLONG ChildMftIndex)
+{
+    PNTFS_ATTR_RECORD Attr;
+    PNTFS_ATTR_RECORD List = NULL;
+    PUCHAR ListContent, ItemPtr, ListEnd;
+    PNTFS_ATTRIBUTE_LIST_ITEM Match = NULL;
+    ULONG ValueLen, MatchLen = 0;
+
+    Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
+    while (Attr->Type != AttributeEnd &&
+           (ULONG_PTR)Attr < (ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse)
+    {
+        if (Attr->Length == 0)
+            break;
+        if (Attr->Type == AttributeAttributeList)
+        {
+            List = Attr;
+            break;
+        }
+        Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
+    }
+
+    if (List == NULL || List->IsNonResident)
+        return STATUS_SUCCESS;
+
+    ListContent = (PUCHAR)List + List->Resident.ValueOffset;
+    ValueLen = List->Resident.ValueLength;
+    ItemPtr = ListContent;
+    ListEnd = ListContent + ValueLen;
+    while (ItemPtr + 0x1A <= ListEnd)   /* 0x1A = $ATTRIBUTE_LIST item header before the name */
+    {
+        PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)ItemPtr;
+        if (Item->Length == 0)
+            break;
+        if (Item->Type == AttributeFileName &&
+            (Item->MFTIndex & NTFS_MFT_MASK) == ChildMftIndex)
+        {
+            Match = Item;
+            MatchLen = Item->Length;
+            break;
+        }
+        ItemPtr += Item->Length;
+    }
+
+    if (Match == NULL)
+        return STATUS_SUCCESS;
+
+    if (ValueLen == MatchLen)
+    {
+        /* Last entry - drop the whole $ATTRIBUTE_LIST attribute. */
+        RemoveResidentAttribute(Vcb, BaseFileRecord, List);
+    }
+    else
+    {
+        PUCHAR MatchEnd = (PUCHAR)Match + MatchLen;
+        SIZE_T TailLen = ListEnd - MatchEnd;
+        ULONG NewValueLen = ValueLen - MatchLen;
+        ULONG OldAttrLen = List->Length;
+        ULONG NewAttrLen = ALIGN_UP_BY(List->Resident.ValueOffset + NewValueLen, ATTR_RECORD_ALIGNMENT);
+
+        if (TailLen > 0)
+            RtlMoveMemory(Match, MatchEnd, TailLen);
+        RtlZeroMemory(ListContent + NewValueLen, MatchLen);
+        List->Resident.ValueLength = NewValueLen;
+
+        if (NewAttrLen != OldAttrLen)
+        {
+            ULONG ListOffset = (ULONG)((ULONG_PTR)List - (ULONG_PTR)BaseFileRecord);
+            PNTFS_ATTR_RECORD AfterList = (PNTFS_ATTR_RECORD)((ULONG_PTR)List + OldAttrLen);
+            List->Length = NewAttrLen;
+            if (AfterList->Type != AttributeEnd)
+            {
+                PNTFS_ATTR_RECORD MovedFinal;
+                MovedFinal = MoveAttributes(Vcb, AfterList, ListOffset + OldAttrLen,
+                                            (ULONG_PTR)List + NewAttrLen);
+                SetFileRecordEnd(BaseFileRecord, MovedFinal, FILE_RECORD_END);
+            }
+            else
+            {
+                PNTFS_ATTR_RECORD NewEnd = (PNTFS_ATTR_RECORD)((ULONG_PTR)List + NewAttrLen);
+                SetFileRecordEnd(BaseFileRecord, NewEnd, FILE_RECORD_END);
+            }
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Unlink a single hard link whose $FILE_NAME was spilled to a child extension
+ * record (not found by the base-record walk in NtfsUnlinkSingleName): find the
+ * matching child, drop its $I30 entry, free the child, remove its list entry,
+ * and decrement the link count. */
+static
+NTSTATUS
+NtfsUnlinkSpilledName(PDEVICE_EXTENSION DeviceExt,
+                      PNTFS_FCB Fcb,
+                      PFILE_RECORD_HEADER FileRecord,
+                      PCUNICODE_STRING LeafName,
+                      ULONGLONG LinkParentMftIndex,
+                      BOOLEAN CaseSensitive)
+{
+    ULONGLONG Children[NTFS_MAX_FN_CHILDREN];
+    ULONG ChildCount, i;
+    PFILE_RECORD_HEADER ChildRecord;
+    NTSTATUS Status = STATUS_OBJECT_NAME_NOT_FOUND;
+    BOOLEAN Found = FALSE;
+
+    ChildCount = NtfsCollectFileNameChildren(FileRecord, Children, NTFS_MAX_FN_CHILDREN);
+    if (ChildCount == 0)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    ChildRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!ChildRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (i = 0; i < ChildCount && !Found; i++)
+    {
+        PNTFS_ATTR_RECORD ChildAttr;
+
+        Status = ReadFileRecord(DeviceExt, Children[i], ChildRecord);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        ChildAttr = (PNTFS_ATTR_RECORD)((ULONG_PTR)ChildRecord + ChildRecord->AttributeOffset);
+        while (ChildAttr->Type != AttributeEnd &&
+               (ULONG_PTR)ChildAttr < (ULONG_PTR)ChildRecord + ChildRecord->BytesInUse)
+        {
+            if (ChildAttr->Length == 0)
+                break;
+            if (ChildAttr->Type == AttributeFileName)
+            {
+                PFILENAME_ATTRIBUTE Fn =
+                    (PFILENAME_ATTRIBUTE)((ULONG_PTR)ChildAttr + ChildAttr->Resident.ValueOffset);
+                UNICODE_STRING EntryName;
+
+                EntryName.Buffer = Fn->Name;
+                EntryName.Length = EntryName.MaximumLength = Fn->NameLength * sizeof(WCHAR);
+                if ((Fn->DirectoryFileReferenceNumber & NTFS_MFT_MASK) == LinkParentMftIndex &&
+                    RtlCompareUnicodeString(&EntryName, LeafName, !CaseSensitive) == 0)
+                {
+                    Found = TRUE;
+                    break;
+                }
+            }
+            ChildAttr = (PNTFS_ATTR_RECORD)((ULONG_PTR)ChildAttr + ChildAttr->Length);
+        }
+
+        if (!Found)
+            continue;
+
+        /* Drop the directory index entry first (same commit order as the base
+         * path), then free the child record and remove its list entry. */
+        {
+            UNICODE_STRING EntryName;
+            EntryName.Buffer = ((PFILENAME_ATTRIBUTE)((ULONG_PTR)ChildAttr + ChildAttr->Resident.ValueOffset))->Name;
+            EntryName.Length = EntryName.MaximumLength =
+                ((PFILENAME_ATTRIBUTE)((ULONG_PTR)ChildAttr + ChildAttr->Resident.ValueOffset))->NameLength * sizeof(WCHAR);
+            Status = NtfsRemoveFilenameFromDirectory(DeviceExt, LinkParentMftIndex,
+                                                     Fcb->MFTIndex, &EntryName, CaseSensitive);
+            if (!NT_SUCCESS(Status))
+                break;
+        }
+
+        ClearFlag(ChildRecord->Flags, FRH_IN_USE);
+        ChildRecord->LinkCount = 0;
+        Status = UpdateFileRecord(DeviceExt, Children[i], ChildRecord);
+        if (!NT_SUCCESS(Status))
+            break;
+        Status = NtfsSetMftBitmapInUse(DeviceExt, Children[i], FALSE, TRUE);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        NtfsRemoveFileNameListEntry(DeviceExt, FileRecord, Children[i]);
+
+        FileRecord->LinkCount--;
+        Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+        if (NT_SUCCESS(Status))
+            Fcb->LinkCount = FileRecord->LinkCount;
+    }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ChildRecord);
+    return Found ? Status : STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
 /* Unlink one hard link of a multi-link file: remove the matching $FILE_NAME
  * attribute(s) from the base record, drop the parent directory's $I30
  * entries, and decrement the link count.  The record itself stays in use -
  * the other links keep the file alive, matching Windows delete semantics.
  * A split WIN32/DOS 8.3 name pair in the same directory is one link (NTFS
- * allows a single DOS alias per record) and falls together. */
+ * allows a single DOS alias per record) and falls together.  A name spilled to
+ * a child extension record is handled by NtfsUnlinkSpilledName. */
 static
 NTSTATUS
 NtfsUnlinkSingleName(PDEVICE_EXTENSION DeviceExt,
@@ -3933,9 +4265,9 @@ NtfsUnlinkSingleName(PDEVICE_EXTENSION DeviceExt,
 
     if (Target == NULL)
     {
-        DPRINT1("NtfsUnlinkSingleName: no base-record $FILE_NAME matches %wZ (parent %I64x)\n",
-                LeafName, LinkParentMftIndex);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
+        /* The name may have been spilled to an $ATTRIBUTE_LIST child record. */
+        return NtfsUnlinkSpilledName(DeviceExt, Fcb, FileRecord, LeafName,
+                                     LinkParentMftIndex, CaseSensitive);
     }
 
     /* A split-pair name drags its partner in the same directory along:
@@ -4082,6 +4414,17 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
         }
         FindCloseAttribute(&FindContext);
 
+        /* $FILE_NAME attributes spilled to $ATTRIBUTE_LIST child records are not
+         * visited by the base-only FindFirst/NextAttribute walk above; count
+         * them too (every spilled name is a non-DOS hard link).  Without this a
+         * heavily hard-linked file looks single-linked and gets fully deleted,
+         * orphaning its child records and their directory index entries. */
+        {
+            ULONGLONG SpillChildren[NTFS_MAX_FN_CHILDREN];
+
+            NonDosLinks += NtfsCollectFileNameChildren(FileRecord, SpillChildren, NTFS_MAX_FN_CHILDREN);
+        }
+
         if (NonDosLinks > 1)
         {
             UNICODE_STRING LeafName;
@@ -4198,6 +4541,15 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
+    }
+
+    /* Drop the parent-directory index entries for any spilled names and free
+     * their child extension records before the base record is freed below. */
+    Status = NtfsRemoveSpilledNames(DeviceExt, FileRecord, Fcb->MFTIndex, CaseSensitive);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
     }
 
     ClearFlag(FileRecord->Flags, FRH_IN_USE);
@@ -4723,9 +5075,21 @@ NtfsLinkFileRecord(PDEVICE_EXTENSION DeviceExt,
                                   0,
                                   NewDirectoryEntry,
                                   NewFileNameLength);
-    if (!NT_SUCCESS(Status))
+    if (Status == STATUS_DISK_FULL)
+    {
+        /* The base MFT record is already full of $FILE_NAME attributes (this file
+         * has more hard links than fit in one record).  Spill the new name into a
+         * child record referenced by an $ATTRIBUTE_LIST.  The spill path sets
+         * RA_INDEXED on the child attribute itself. */
+        Status = NtfsAddHardLinkSpill(DeviceExt, FileRecord, NewDirectoryEntry, NewFileNameLength);
+        if (!NT_SUCCESS(Status))
+            goto RollbackDirectory;
+    }
+    else if (!NT_SUCCESS(Status))
+    {
         goto RollbackDirectory;
-
+    }
+    else
     {
         PNTFS_ATTR_RECORD Attribute;
 
@@ -5011,6 +5375,24 @@ DumpIndexEntry(PINDEX_ENTRY_ATTRIBUTE IndexEntry)
 }
 #endif
 
+/* Copy the matched index entry's $FILE_NAME key (fixed part + name) into the
+ * caller's buffer, if one was provided.  The key carries the exact name the
+ * lookup matched - for hard-linked files this can differ from any name found
+ * on the target's file record, so directory enumeration must report it. */
+static
+VOID
+NtfsCopyIndexEntryName(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
+                       PFILENAME_ATTRIBUTE OutFoundName)
+{
+    if (OutFoundName != NULL)
+    {
+        RtlCopyMemory(OutFoundName,
+                      &IndexEntry->FileName,
+                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) +
+                          IndexEntry->FileName.NameLength * sizeof(WCHAR));
+    }
+}
+
 NTSTATUS
 BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER MftRecord,
@@ -5023,7 +5405,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PULONG CurrentEntry,
                           BOOLEAN DirSearch,
                           BOOLEAN CaseSensitive,
-                          ULONGLONG *OutMFTIndex)
+                          ULONGLONG *OutMFTIndex,
+                          PFILENAME_ATTRIBUTE OutFoundName)
 {
     PINDEX_BUFFER IndexRecord;
     ULONGLONG Offset;
@@ -5129,7 +5512,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                        FileName, IndexAllocationContext,
                                                        Bitmap, GetIndexEntryVCN(IndexEntry),
                                                        StartEntry, CurrentEntry,
-                                                       DirSearch, CaseSensitive, OutMFTIndex);
+                                                       DirSearch, CaseSensitive, OutMFTIndex,
+                                                       OutFoundName);
                     if (NT_SUCCESS(Status))
                     {
                         ExFreePoolWithTag(IndexRecord, TAG_NTFS);
@@ -5149,6 +5533,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                 {
                     *StartEntry = *CurrentEntry;
                     *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+                    NtfsCopyIndexEntryName(IndexEntry, OutFoundName);
                     DPRINT("BrowseSubNode VCN=%I64d FOUND MFT=%I64u\n", VCN, *OutMFTIndex);
                     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
                     return STATUS_SUCCESS;
@@ -5183,7 +5568,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                    CurrentEntry,
                                                    DirSearch,
                                                    CaseSensitive,
-                                                   OutMFTIndex);
+                                                   OutMFTIndex,
+                                                   OutFoundName);
                 if (NT_SUCCESS(Status))
                 {
                     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
@@ -5204,6 +5590,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         {
             *StartEntry = *CurrentEntry;
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            NtfsCopyIndexEntryName(IndexEntry, OutFoundName);
             DPRINT("BrowseSubNode VCN=%I64d FOUND MFT=%I64u\n", VCN, *OutMFTIndex);
             ExFreePoolWithTag(IndexRecord, TAG_NTFS);
             return STATUS_SUCCESS;
@@ -5233,7 +5620,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                    PULONG CurrentEntry,
                    BOOLEAN DirSearch,
                    BOOLEAN CaseSensitive,
-                   ULONGLONG *OutMFTIndex)
+                   ULONGLONG *OutMFTIndex,
+                   PFILENAME_ATTRIBUTE OutFoundName)
 {
     NTSTATUS Status;
     PINDEX_ENTRY_ATTRIBUTE IndexEntry;
@@ -5327,7 +5715,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                        FileName, IndexAllocationContext,
                                                        &Bitmap, GetIndexEntryVCN(IndexEntry),
                                                        StartEntry, CurrentEntry,
-                                                       DirSearch, CaseSensitive, OutMFTIndex);
+                                                       DirSearch, CaseSensitive, OutMFTIndex,
+                                                       OutFoundName);
                     if (NT_SUCCESS(Status))
                     {
                         ExFreePoolWithTag(BitmapMem, TAG_NTFS);
@@ -5354,6 +5743,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                 {
                     *StartEntry = *CurrentEntry;
                     *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+                    NtfsCopyIndexEntryName(IndexEntry, OutFoundName);
                     if (IndexAllocationContext)
                     {
                         ExFreePoolWithTag(BitmapMem, TAG_NTFS);
@@ -5392,7 +5782,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                    CurrentEntry,
                                                    DirSearch,
                                                    CaseSensitive,
-                                                   OutMFTIndex);
+                                                   OutMFTIndex,
+                                                   OutFoundName);
                 if (NT_SUCCESS(Status))
                 {
                     ExFreePoolWithTag(BitmapMem, TAG_NTFS);
@@ -5415,6 +5806,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         {
             *StartEntry = *CurrentEntry;
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            NtfsCopyIndexEntryName(IndexEntry, OutFoundName);
             if (IndexAllocationContext)
             {
                 ExFreePoolWithTag(BitmapMem, TAG_NTFS);
@@ -5447,7 +5839,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                   PULONG FirstEntry,
                   BOOLEAN DirSearch,
                   BOOLEAN CaseSensitive,
-                  ULONGLONG *OutMFTIndex)
+                  ULONGLONG *OutMFTIndex,
+                  PFILENAME_ATTRIBUTE OutFoundName)
 {
     PFILE_RECORD_HEADER MftRecord;
     PNTFS_ATTR_CONTEXT IndexRootCtx;
@@ -5539,7 +5932,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                                 &CurrentEntry,
                                 DirSearch,
                                 CaseSensitive,
-                                OutMFTIndex);
+                                OutMFTIndex,
+                                OutFoundName);
     NTFS_TRACE_IF(MFTIndex == 27, "DRVIDX: browse index status=0x%lx out=%I64u\n",
                 Status,
                 OutMFTIndex ? *OutMFTIndex : 0);
@@ -5584,7 +5978,7 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
     {
         DPRINT("Current: %wZ\n", &Current);
 
-        Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex);
+        Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex, NULL);
         NTFS_TRACE_IF(CurrentMFTIndex == 144, "DRVIDX: lookup find returned 0x%lx current=%wZ mft=%I64u remaining=%wZ\n",
                     Status,
                     &Current,
@@ -5711,7 +6105,8 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                PFILE_RECORD_HEADER *FileRecord,
                PULONGLONG MFTIndex,
                ULONGLONG CurrentMFTIndex,
-               BOOLEAN CaseSensitive)
+               BOOLEAN CaseSensitive,
+               PFILENAME_ATTRIBUTE OutFoundName)
 {
     NTSTATUS Status;
 
@@ -5724,7 +6119,7 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
            CurrentMFTIndex,
            (CaseSensitive ? "TRUE" : "FALSE"));
 
-    Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &CurrentMFTIndex);
+    Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &CurrentMFTIndex, OutFoundName);
     if (!NT_SUCCESS(Status))
     {
         DPRINT("NtfsFindFileAt: NtfsFindMftRecord() failed with status 0x%08lx\n", Status);
