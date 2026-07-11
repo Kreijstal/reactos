@@ -296,8 +296,6 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
             /* Then, update symbolic links list */
             lSymbolicLinkList += wcslen(lSymbolicLinkList) + (sizeof(UNICODE_NULL) / sizeof(WCHAR));
 
-            DPRINT1("ARC-CD-DIAG: opening CD interface '%wZ'\n", &DeviceStringW);
-
             /* Get its associated device object and file object */
             Status = IoGetDeviceObjectPointer(&DeviceStringW,
                                               FILE_READ_ATTRIBUTES,
@@ -306,13 +304,8 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
             /* Failure? Good bye! */
             if (!NT_SUCCESS(Status))
             {
-                DPRINT1("ARC-CD-DIAG: open failed %lx\n", Status);
                 goto Cleanup;
             }
-
-            DPRINT1("ARC-CD-DIAG: opened CD interface, DeviceObject %p (type %x) driver '%wZ'\n",
-                    DeviceObject, DeviceObject->DeviceType,
-                    &DeviceObject->DriverObject->DriverName);
 
             /* Now, we'll ask the device its device number */
             Irp = IoBuildDeviceIoControlRequest(IOCTL_STORAGE_GET_DEVICE_NUMBER,
@@ -341,7 +334,6 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                 KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
                 Status = IoStatusBlock.Status;
             }
-            DPRINT1("ARC-CD-DIAG: GET_DEVICE_NUMBER status %lx\n", Status);
             if (!NT_SUCCESS(Status))
             {
                 ObDereferenceObject(FileObject);
