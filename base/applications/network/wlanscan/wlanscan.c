@@ -30,6 +30,32 @@ WlanEmit(PCWSTR Format, ...)
 }
 #define wprintf WlanEmit
 
+typedef struct _SCAN_WAIT_CONTEXT
+{
+    HANDLE Event;
+    const GUID *InterfaceGuid;
+} SCAN_WAIT_CONTEXT, *PSCAN_WAIT_CONTEXT;
+
+static VOID WINAPI
+ScanNotificationCallback(PWLAN_NOTIFICATION_DATA Data, PVOID Context)
+{
+    PSCAN_WAIT_CONTEXT WaitContext = Context;
+
+    if (Data->NotificationSource != WLAN_NOTIFICATION_SOURCE_ACM)
+        return;
+
+    if (Data->NotificationCode != wlan_notification_acm_scan_complete &&
+        Data->NotificationCode != wlan_notification_acm_scan_fail)
+    {
+        return;
+    }
+
+    if (!IsEqualGUID(&Data->InterfaceGuid, WaitContext->InterfaceGuid))
+        return;
+
+    SetEvent(WaitContext->Event);
+}
+
 static PCWSTR
 AuthName(DOT11_AUTH_ALGORITHM Auth)
 {
@@ -69,16 +95,40 @@ ScanInterface(HANDLE hClient, const GUID *pGuid)
 {
     DWORD dwResult, i;
     PWLAN_AVAILABLE_NETWORK_LIST pNetList = NULL;
+    SCAN_WAIT_CONTEXT WaitContext;
+    DWORD dwPrevNotifSource;
 
     wprintf(L"  Scanning...\n");
+
+    WaitContext.Event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    WaitContext.InterfaceGuid = pGuid;
+    if (WaitContext.Event != NULL)
+    {
+        WlanRegisterNotification(hClient,
+                                 WLAN_NOTIFICATION_SOURCE_ACM,
+                                 TRUE,
+                                 ScanNotificationCallback,
+                                 &WaitContext,
+                                 NULL,
+                                 &dwPrevNotifSource);
+    }
 
     dwResult = WlanScan(hClient, pGuid, NULL, NULL, NULL);
     if (dwResult != ERROR_SUCCESS)
         wprintf(L"  (WlanScan returned %lu; reading cached results anyway)\n", dwResult);
 
-    /* Give the radio a few seconds to collect beacons.
-     * TODO: wait for the wlan_notification_acm_scan_complete notification. */
-    Sleep(4000);
+    if (WaitContext.Event != NULL)
+    {
+        WaitForSingleObject(WaitContext.Event, 15000);
+        WlanRegisterNotification(hClient,
+                                 WLAN_NOTIFICATION_SOURCE_NONE,
+                                 TRUE,
+                                 NULL,
+                                 NULL,
+                                 NULL,
+                                 NULL);
+        CloseHandle(WaitContext.Event);
+    }
 
     dwResult = WlanGetAvailableNetworkList(hClient, pGuid,
                    WLAN_AVAILABLE_NETWORK_INCLUDE_ALL_MANUAL_HIDDEN_PROFILES,
