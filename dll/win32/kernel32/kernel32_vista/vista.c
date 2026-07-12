@@ -500,6 +500,10 @@ GetFinalPathNameByHandleA(IN HANDLE hFile,
         /* no error, restore the last error code and convert the string */
         SetLastError(PrevLastError);
 
+        /* On success Ret is the number of characters written, without the
+           terminating null. FilenameU2A_FitOrFail converts Length bytes. */
+        FilePathU.Length = (USHORT)(Ret * sizeof(WCHAR));
+
         Ret = FilenameU2A_FitOrFail(lpszFilePath,
                                     cchFilePath,
                                     &FilePathU);
