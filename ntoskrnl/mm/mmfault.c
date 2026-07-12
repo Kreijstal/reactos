@@ -40,7 +40,7 @@ VOID
 MiUnlockWorkingSetForFault(
     _Out_ PMI_FAULT_WS_STATE State)
 {
-#if defined(_M_ARM64)
+#if defined(_M_ARM64) || defined(_M_AMD64)
     PETHREAD Thread = PsGetCurrentThread();
 #endif
 
@@ -50,7 +50,7 @@ MiUnlockWorkingSetForFault(
     State->Safe = FALSE;
     State->Shared = FALSE;
 
-#if defined(_M_ARM64)
+#if defined(_M_ARM64) || defined(_M_AMD64)
     if (!MM_ANY_WS_LOCK_HELD(Thread))
         return;
 
@@ -98,7 +98,7 @@ VOID
 MiRelockWorkingSetForFault(
     _In_ PMI_FAULT_WS_STATE State)
 {
-#if defined(_M_ARM64)
+#if defined(_M_ARM64) || defined(_M_AMD64)
     PETHREAD Thread = PsGetCurrentThread();
 
     switch (State->Type)
