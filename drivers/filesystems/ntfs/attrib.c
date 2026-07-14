@@ -1073,7 +1073,6 @@ NtfsCarveAttributeListSlot(PNTFS_VCB Vcb,
 /* Clear a run of clusters in the volume $Bitmap (reverse of
  * NtfsAllocateClusters; unlike FreeClusters this takes a raw LCN range and
  * doesn't need an attribute context). */
-static
 NTSTATUS
 NtfsFreeClusterRange(PNTFS_VCB Vcb,
                      ULONGLONG FirstCluster,
