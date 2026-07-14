@@ -1996,6 +1996,7 @@ PrepareAndDoCopyThread(
 
     /* Find or set the active system partition before starting formatting */
     Success = InitSystemPartition(pSetupData->USetupData.ArchType,
+                                  pSetupData->RepairUpdateFlag,
                                   pSetupData->PartitionList,
                                   InstallPartition,
                                   &SystemPartition,
