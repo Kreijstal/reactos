@@ -313,6 +313,218 @@ InternalErrorEventHandler(void *arg, const err_t err)
     TCPFinEventHandler(Connection, err);
 }
 
+/* Handlers installed on a fully established PCB held on the listener's
+ * PendingAcceptPcbs queue because no TDI listen request was pending when
+ * lwIP completed the handshake (see TCPAcceptEventHandler). They all run
+ * in the tcpip-thread context, with arg pointing to the queue entry. */
+
+static
+err_t
+PendingAcceptRecvHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t err)
+{
+    PPENDING_ACCEPT_PCB PendingEntry = arg;
+    PCONNECTION_ENDPOINT Listener;
+
+    if (!arg)
+    {
+        if (p)
+            pbuf_free(p);
+
+        return ERR_OK;
+    }
+
+    if (p != NULL)
+    {
+        /* Refuse the data without freeing it: lwIP keeps it in
+         * pcb->refused_data and re-delivers it once the real handlers are
+         * installed by LibTCPAccept. The receive window provides the flow
+         * control while the connection waits in the queue. */
+        return ERR_MEM;
+    }
+
+    /* p == NULL: the peer closed the connection while it was queued */
+    Listener = PendingEntry->Listener;
+
+    LockObject(Listener);
+    PendingEntry->Dead = TRUE;
+    RemoveEntryList(&PendingEntry->Entry);
+    Listener->PendingAcceptCount--;
+    UnlockObject(Listener);
+
+    /* Detach from the PCB and hand it back to lwIP */
+    tcp_arg(pcb, NULL);
+    tcp_recv(pcb, NULL);
+    tcp_sent(pcb, NULL);
+    tcp_err(pcb, NULL);
+    tcp_backlog_accepted(pcb);
+    if (tcp_close(pcb) != ERR_OK)
+        tcp_abort(pcb);
+
+    ExFreePoolWithTag(PendingEntry, PENDING_ACCEPT_PCB_TAG);
+    DereferenceObject(Listener);
+
+    return ERR_OK;
+}
+
+static
+err_t
+PendingAcceptSentHandler(void *arg, PTCP_PCB pcb, const u16_t space)
+{
+    /* Nothing was queued for sending yet: nothing to do */
+    return ERR_OK;
+}
+
+static
+void
+PendingAcceptErrHandler(void *arg, const err_t err)
+{
+    PPENDING_ACCEPT_PCB PendingEntry = arg;
+    PCONNECTION_ENDPOINT Listener;
+
+    /* The PCB is already gone (lwIP frees it before calling us) */
+    if (!arg)
+        return;
+
+    Listener = PendingEntry->Listener;
+
+    LockObject(Listener);
+    PendingEntry->Dead = TRUE;
+    RemoveEntryList(&PendingEntry->Entry);
+    Listener->PendingAcceptCount--;
+    UnlockObject(Listener);
+
+    ExFreePoolWithTag(PendingEntry, PENDING_ACCEPT_PCB_TAG);
+    DereferenceObject(Listener);
+}
+
+void
+LibTCPHoldPendingAccept(PTCP_PCB pcb, PPENDING_ACCEPT_PCB PendingEntry)
+{
+    /* Called from TCPAcceptEventHandler, i.e. in the tcpip-thread context,
+     * so the raw API can be used directly (same as LibTCPAccept) */
+    ASSERT(PendingEntry);
+
+    tcp_arg(pcb, PendingEntry);
+    tcp_recv(pcb, PendingAcceptRecvHandler);
+    tcp_sent(pcb, PendingAcceptSentHandler);
+    tcp_err(pcb, PendingAcceptErrHandler);
+
+    /* Keep the connection counted against the lwIP listen backlog until a
+     * TDI listen request claims it */
+    tcp_backlog_delayed(pcb);
+}
+
+static
+void
+LibTCPDispatchPendingAcceptCallback(void *arg)
+{
+    struct lwip_callback_msg *msg = arg;
+    PCONNECTION_ENDPOINT Connection = msg->Input.DispatchAccept.Connection;
+    PPENDING_ACCEPT_PCB PendingEntry = NULL;
+    PLIST_ENTRY Entry;
+    struct tcp_pcb *pcb;
+
+    ASSERT(msg);
+
+    LockObject(Connection);
+    if (!IsListEmpty(&Connection->PendingAcceptPcbs))
+    {
+        Entry = RemoveHeadList(&Connection->PendingAcceptPcbs);
+        PendingEntry = CONTAINING_RECORD(Entry, PENDING_ACCEPT_PCB, Entry);
+
+        /* Entries are unlinked in the same critical section that marks
+         * them dead, so a queued entry is always live */
+        ASSERT(!PendingEntry->Dead);
+
+        Connection->PendingAcceptCount--;
+    }
+    UnlockObject(Connection);
+
+    if (PendingEntry)
+    {
+        pcb = PendingEntry->NewPcb;
+
+        /* Detach the holding handlers; TCPAcceptEventHandler either installs
+         * the real ones via LibTCPAccept, re-queues the PCB, or leaves
+         * callback_arg NULL on failure */
+        tcp_arg(pcb, NULL);
+        tcp_backlog_accepted(pcb);
+
+        DereferenceObject(PendingEntry->Listener);
+        ExFreePoolWithTag(PendingEntry, PENDING_ACCEPT_PCB_TAG);
+
+        TCPAcceptEventHandler(Connection, pcb);
+
+        /* Same contract as InternalAcceptEventHandler: an unclaimed PCB must
+         * not leak (this can only happen on allocation failure). lwIP
+         * re-delivers pcb->refused_data by itself once the new recv handler
+         * is in place. */
+        if (pcb->callback_arg == NULL)
+            tcp_abort(pcb);
+    }
+
+    DereferenceObject(Connection);
+
+    ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+}
+
+void
+LibTCPDispatchPendingAccept(PCONNECTION_ENDPOINT Connection)
+{
+    struct lwip_callback_msg *msg;
+
+    msg = ExAllocateFromNPagedLookasideList(&MessageLookasideList);
+    if (!msg)
+        return;
+
+    ReferenceObject(Connection);
+    msg->Input.DispatchAccept.Connection = Connection;
+
+    /* Fire-and-forget: the caller (TCPAccept) runs in TDI dispatch context
+     * with the accepting endpoint already locked, and the callback locks
+     * that endpoint again (TCPAcceptEventHandler locks the bucket's
+     * AssociatedEndpoint), so waiting on a completion event here would
+     * deadlock. The callback frees the message. */
+    if (tcpip_callback_with_block(LibTCPDispatchPendingAcceptCallback, msg, 1) != ERR_OK)
+    {
+        DereferenceObject(Connection);
+        ExFreeToNPagedLookasideList(&MessageLookasideList, msg);
+    }
+}
+
+static
+void
+LibTCPDrainPendingAcceptQueue(PCONNECTION_ENDPOINT Connection)
+{
+    PPENDING_ACCEPT_PCB PendingEntry;
+    PLIST_ENTRY Entry;
+
+    /* We're in the tcpip thread here so aborting the PCBs is safe */
+    for (;;)
+    {
+        LockObject(Connection);
+        if (IsListEmpty(&Connection->PendingAcceptPcbs))
+        {
+            UnlockObject(Connection);
+            break;
+        }
+
+        Entry = RemoveHeadList(&Connection->PendingAcceptPcbs);
+        PendingEntry = CONTAINING_RECORD(Entry, PENDING_ACCEPT_PCB, Entry);
+        ASSERT(!PendingEntry->Dead);
+        Connection->PendingAcceptCount--;
+        UnlockObject(Connection);
+
+        /* Silence our handlers before aborting so PendingAcceptErrHandler
+         * doesn't run on the entry we already own */
+        tcp_arg(PendingEntry->NewPcb, NULL);
+        tcp_abort(PendingEntry->NewPcb);
+
+        ExFreePoolWithTag(PendingEntry, PENDING_ACCEPT_PCB_TAG);
+        DereferenceObject(Connection);
+    }
+}
+
 static
 void
 LibTCPSocketCallback(void *arg)
@@ -758,6 +970,10 @@ LibTCPCloseCallback(void *arg)
 
     /* Empty the queue even if we're already "closed" */
     LibTCPEmptyQueue(msg->Input.Close.Connection);
+
+    /* Abort any established connections still waiting for a TDI listen
+     * request (only listeners ever have these queued) */
+    LibTCPDrainPendingAcceptQueue(msg->Input.Close.Connection);
 
     /* Check if we've already been closed */
     if (msg->Input.Close.Connection->Closing)
