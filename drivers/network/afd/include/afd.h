@@ -180,6 +180,11 @@ typedef struct _AFD_STORED_DATAGRAM {
     CHAR Buffer[1];
 } AFD_STORED_DATAGRAM, *PAFD_STORED_DATAGRAM;
 
+/* Give up re-arming the TDI listen request after this many consecutive
+ * failed completions (reset by any successful completion) to avoid a hot
+ * synchronous-failure loop */
+#define AFD_LISTEN_REARM_MAX_FAILURES 8
+
 typedef struct _AFD_FCB {
     SOCK_SHARED_INFO SharedData;
     BOOLEAN Locked, Critical, NonBlocking, OobInline, TdiReceiveClosed, SendClosed;
@@ -190,6 +195,7 @@ typedef struct _AFD_FCB {
     PAFD_DEVICE_EXTENSION DeviceExt;
     BOOLEAN DelayedAccept;
     UINT ConnSeq;
+    UINT ListenRearmFailures;
     USHORT DisconnectFlags;
     BOOLEAN DisconnectPending;
     LARGE_INTEGER DisconnectTimeout;
