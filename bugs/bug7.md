@@ -1,8 +1,190 @@
-# Bug 7 — gcc/ld "could not read symbols: invalid operation" (ld-private-memory corruption)
+# Bug 7 — gcc/ld "could not read symbols: invalid operation" (NTFS unaligned-read bounce-window bug)
 
-**Status:** root cause not fixed (round 55, 2026-07-14). The exact MSYS2-only
-`gcc -> cc1 -> as -> collect2 -> ld` chain with `TEMP` on `C:` (NTFS) is the only
-positive reproducer; the dependency-free process-chain rostest is a negative control.
+**Status:** FIXED + VERIFIED (2026-07-14, 58 rounds).  Root cause: `NtfsReadFile`'s
+sector-aligned bounce window did not cover the requested range (see Round 57).
+Fix committed as `4885d738b10` ([NTFS] Cover the whole request in NtfsReadFile's
+aligned bounce window); instrumentation removed in `fa3c2aedd9f`.  Verified twice
+on target: instrumented fix build `OK=25 FAIL=0`, then the exact committed clean
+driver (md5 `94383d489034ea9c584af70345ffb8e6`) again `OK=25 FAIL=0` — previously
+`OK=0 FAIL=25` in every round.  Leftover (separate, NOT bug7): the
+`Fcb->CachedFileRecord` lifetime hole from round 53/56 remains unfixed.
+
+The remainder of this file is a chronological investigation record.  Any
+"current plan", "next step", or tentative conclusion inside an older round is
+historical unless the status above explicitly carries it forward.
+
+## Round 57 — ROOT CAUSE: NtfsReadFile's sector-aligned bounce window doesn't cover the request
+
+**The bug (drivers/filesystems/ntfs/rw.c, unaligned-read path in `NtfsReadFile`):**
+
+```c
+RealReadOffset = ROUND_DOWN(ReadOffset, BytesPerSector);   /* 0x194 -> 0x000 */
+RealLength     = ROUND_UP(ToRead, BytesPerSector);         /* 0x14c -> 0x200  <-- ignores the
+                                                              intra-sector offset misalignment */
+if (RealLength + RealReadOffset < ReadOffset + Length)     /* shortfall detected, but... */
+    if (RealReadOffset + RealLength + BytesPerSector <= AttributeAllocatedLength(pRecord))
+        RealLength += BytesPerSector;                      /* ...the one-sector patch-up is DENIED
+                                                              for resident attributes: allocated
+                                                              length = ValueLength aligned to 8
+                                                              (0x2e0) < window end 0x400 */
+```
+
+The copy-out then slices `ReadBuffer[ReadOffset-RealReadOffset ..][ToRead]` =
+`bounce[0x194..0x2e0)` out of a pool buffer only *filled* to `0x200`: the tail
+(here 0xE0 bytes) is **never-written NonPagedPool garbage**.  Trigger condition:
+`(ReadOffset % 512) + ToRead > ROUND_UP(ToRead, 512)` **and** the one-sector
+extension denied — i.e. resident attributes (small fresh files), or reads whose
+window would exceed the allocated length.  For non-resident files the +1-sector
+hack always sufficed (shortfall is provably ≤ 1 sector), which is why only tiny
+resident `cc*.o` files died.
+
+**How round 57 caught it** (file-keyed staged tracing, gcc/binutils 16.1.0, 25×,
+`OK=0 FAIL=25`): the new toolchain's `cc*.o` is 0x2e0 bytes → resident; ld reads
+it 13× per link, all `irp=900` non-paging reads by `ld.exe`.  Every staged hash
+(`R1REC` file record, `R2CTX` context, `R3RES` resident copy, `R4EXIT` slice,
+`R5COPY` post-bounce) was **identical across all 25 files at every offset except
+`off=0x194 len=0x14c`** — the symtab+strtab read — where `R4EXIT` had 25 distinct
+hashes.  Its chain shows the smoking gun directly: `R3RES roff=0 len=200` (bounce
+filled to 0x200 only) but `R4EXIT off=194 len=14c got=200` (slice reaches 0x2e0).
+The 17 `BUG7_NTFSREAD_TAG` hits (`RMAP`/`NtfC`/`MMSS` pool tags at `hit=0x70` of
+that read) are recycled pool contents in the unwritten tail.  ld's own behavior
+confirms delivered-correct earlier reads: it read `(0x2c6,4)` then `(0x2c6,0x1a)`
+— it can only know the string-table size 0x1a by parsing those 4 bytes correctly
+(that read's window `[0x200,0x2e0)` was computed right); the *final* one-shot
+symtab+strtab read at `0x194` is the only one that crosses a sector boundary with
+`ROUND_UP(len) < off%512 + len`, and bfd parses the strtab size from *that*
+buffer → "bad string table size <pool garbage>".
+
+**Why every discriminator fits:** disk bytes always correct (in-memory window
+math, nothing wrong on disk); fresh-file-only (must be resident = small); NTFS-only
+(fastfat/Cc path has correct math); toolchain-confined (bfd's unaligned
+seek-to-symtab read shape); 100% deterministic single-CPU (no race at all — the
+53-round "UAF/race" framing was wrong); garbage varies per run = whatever pool
+block gets recycled (RMAP/MmSt/Ntf tags, zeros, `MARE`, `0x230A00FF`); round 51's
+"garbage already present in the aligned destination before the bounce copy" was
+exactly this (unwritten bounce tail), misread as a stale-source clue.
+
+**Also exonerated on the way:** round-56 A/B rejected `CachedFileRecord` UAF
+(still a real locking hole, separate fix); round-57 alias probes showed 0
+MDL-vs-PTE mismatches and stable `R1REC` record hashes (no MM page theft in this
+path); writes never traverse `NtfsWriteFile` for these files at all (they go
+`CcCopyWrite` + flush — why `BUG7_WR` stayed silent).
+
+## Round 58 — the fix
+
+`NtfsReadFile`: `RealLength = ROUND_UP(ReadOffset + ToRead, BytesPerSector) -
+RealReadOffset` (window covers the full request; safe: `ToRead` is already
+clipped to `StreamSize`, so the window end ≤ `ROUND_UP(StreamSize)` ≤ allocated
+for both resident and non-resident); the one-sector patch-up hack is deleted; an
+`ASSERT(RealLengthRead >= (ReadOffset - RealReadOffset) + ToRead)` guards the
+copy-out choke point.  Deployed as md5 `7bd843db13c54f36008997ed24d40c23`;
+the instrumented build passed the same 25× repro (`OK=25 FAIL=0`).  After
+committing the fix and removing all BUG7 instrumentation, the exact clean
+driver (md5 `94383d489034ea9c584af70345ffb8e6`) passed another independent
+25× run (`OK=25 FAIL=0`).
+
+## Round 56 — CachedFileRecord A/B REJECTED; probes are blind to the new toolchain's reads
+
+**A/B (step 1 of the round-56 plan): NEGATIVE.**  `NTFS_BUG7_DISABLE_RECORD_CACHE`
+made every `NtfsReadFile` fetch a private MFT record copy (never consuming or
+installing `Fcb->CachedFileRecord`), so no reader could dereference a record freed
+by `NtfsInvalidateCachedFileRecord` mid-request.  Built, deployed guest-side
+(rename-swap, md5-verified pre- and post-reboot), and run: **`RESULT OK=0 FAIL=25`**
+with the genuine symptom set (`bad string table size 0/65535/4261281277`,
+`(NULL)`/garbage symbols incl. a `!\xMRGN` storage-class error, `could not read
+symbols: invalid operation`).  The FCB cached-file-record lifetime hole is a real
+locking bug (readers use it under `MainResource` shared; `NtfsWriteFile` frees it at
+entry; paging writes never take `MainResource`) but it is **not bug7's producer**.
+
+**Second finding — the committed BUG7 probes never fired (vacuousness alert):**
+across all 25 failing links, serial had **zero** `BUG7_NTFSREAD_LIVE`, `BUG7_RDH`,
+or `BUG7_STAGE` lines, although all are compiled in (verified via `strings` on the
+deployed ntfs.sys).  The repaired guest now runs a **new MSYS2 with gcc/binutils
+16.1.0** (temp dir `C:\Documents and Settings\Administrator.001\Local Settings\
+Temp`), and the probes filter on non-paging reads by `ld*` processes: this
+toolchain's linker evidently does not traverse that path (likely maps the object →
+paging I/O, or reads under a different process shape).  Consequences:
+- The bug reproduces **identically under a different gcc/binutils version** and
+  (probably) a different read mechanism — further evidence the producer is in the
+  kernel/NTFS side, not toolchain-version-specific behavior.
+- All old offset-keyed (`off=0x194 len=0x14c`) and process-keyed probe results do
+  not transfer to the current environment; round-57 instrumentation must key on the
+  FILE (`cc*.o`), include paging I/O, and log Irp flags + requestor.
+
+**Round-56 harness gotchas (cost ~1h):** luagent argv reconstruction breaks nested
+quotes AND `2>nul` redirects (agent-side parse: "Can't redirect to file /dev/null");
+direct luagent spawn of msys binaries EOFs the session (wrap in `cmd /c`); ReactOS
+`cmd` `ren` mishandles full paths (garbled source, MoveFile error 2) — `cd /d` +
+in-dir `ren` works; `start /min bash.exe script.sh` works for detaching; a repro
+script must keep `/c/msys64/usr/bin` in PATH (else `seq`/`nohup` vanish and the
+loop silently runs 0 iterations — always log per-iteration progress).
+
+## Completed round-57 plan: file-keyed staged tracing
+
+This plan found the short bounce window described above.  It is retained to
+show how the first divergent stage was isolated; it is not pending work.
+
+1. Restore the record cache (A/B off).  Add `Bug7WatchedFcb()` matching any
+   `cc*.o` file, regardless of process, paging and non-paging alike.
+2. Read side: log Irp flags + process + (off,len) for every watched read;
+   staged hashes — file record at fetch, attribute context after `FindAttribute`
+   (resident flag, resident value hash / decoded runs), every disk transfer
+   inside `ReadAttribute` (VCN→LCN, length, post-read hash), request slice at
+   `NtfsReadFile` exit, post-bounce-copy slice.
+3. Write side: same staging for `WriteAttribute` on watched files (VCN→LCN +
+   payload hash) so a read from a *different* LCN than the write (stale
+   mapping/MCB) or a hash divergence between stages is directly visible.
+4. Deploy, run the 25× repro, and classify the first divergent stage.  Only
+   then design the fix experiment.
+
+## Superseded round-56 plan (steps 2-3 assumed an A/B-positive; kept for rationale)
+
+Rationale: round 51 pinned the boundary — the garbage is already in NTFS's
+aligned `ReadAttribute` destination before the bounce copy, while disk and
+small reads of the same offset are correct; round 42 saw no store of garbage
+into the watched destination frames, so the read's *source* is stale.  The
+round-53 `CachedFileRecord` hole (readers use it under `MainResource`; paging
+writes free it via `NtfsInvalidateCachedFileRecord()` under only
+`PagingIoResource`) matches every §2 discriminator: NTFS-only (FAT has no such
+cache); single-CPU deterministic (the reader *blocks* on synchronous disk I/O
+mid-request, the lazy writer runs, invalidates and frees the record, the
+reader resumes on freed pool — scheduling, not SMP); freshly-written-file
+discriminator (only a just-written `cc*.o` has lazy-writer paging writes
+racing ld's first reads); confined to the toolchain (only its temp files are
+dirty).  One producer also explains every garbage variant: resident $DATA →
+copied bytes are reallocated pool (RMAP/Ntf/MmSt tags, zeros); non-resident →
+mapping pairs decoded from freed pool yield a garbage LCN → wrong cluster read
+(the `.s` text / `0x230A00FF`).  A garbage length decoded from freed pool can
+drive an oversized fill into adjacent pool — a candidate for §4's push-lock
+victim (bidirectionality).
+
+1. **Step 1 — one-run A/B: neuter the cache.** Make `NtfsReadFile` (and the
+   prefetch consumer) always miss: fresh `ReadFileRecord` per read, freed
+   locally, never installed.  Build `ntfs.sys`, deploy guest-side to the
+   repaired `reactos.qcow2` (no host mount), run 25× repro on `C:`.
+   OK=25 → region proven, go to step 2.  OK=0 → cache exonerated, go to step 4.
+2. **Step 2 — prove the interleaving.** Restore the cache; the generation
+   probe (`CacheGenerationBefore/AfterFind/AfterRead` + `BUG7_STAGE`) is
+   already committed in `rw.c`.  Add logging of every
+   `NtfsInvalidateCachedFileRecord` caller (path + resources held) and assert
+   decoded `LCN < volume clusters` at the `ReadAttribute` choke point.  A
+   generation bump between lookup and the attribute copy on the failing
+   `off=0x194,len=0x14c` request is the smoking gun.
+3. **Step 3 — proper fix (root, matching Windows).** The cached record must
+   not be freed while any I/O may dereference it: reference-count it (readers
+   take a ref under a spinlock; invalidate drops the cache's ref; free on
+   last release) or copy-out under a spinlock the invalidator also takes.
+   Verify: 25× repro on `C:`, FAT `D:` control, `bug7_process_chain`, and the
+   §5e guest binutils build as independent confirmation.
+4. **Step 4 — fallback if step 1 doesn't fix:** staged hashes through
+   `NtfsReadFile` (raw record at lookup → attr context after `FindAttribute` →
+   decoded LCN/len to `NtfsReadDisk` → aligned buffer post-read → post-bounce
+   copy), all with liveness markers; the first divergent stage names the
+   producer.  Only then escalate to a frame-armed TCG watch on the CRT
+   buffer's frames (§5aj), not the read destination.
+
+Push-lock crash stays classified as a downstream victim unless step 2's logs
+show an oversized fill / wild write.
 
 **Round 55 -- ReactOS in-place update really repairs the original qcow2's
 registry; the repro environment is restored:** The updater's normal kernel
@@ -27,7 +209,8 @@ guestfs, partition extraction, or offline injection.  The temporary fresh
 qcow2 used while diagnosing the updater has been deleted and must not be used
 for bug 7.  The repaired original image is now the sole repro target.
 
-**Round 54 -- guest-only ReactOS update can repair the boot path, but this test
+**Round 54 -- historical intermediate: guest-only ReactOS update repaired the boot path,
+but the test
 image's registry remains structurally damaged:** No host mount, loop device,
 NBD, guestfs access, partition extraction, or offline file injection was used.
 The rebuilt `bootcdntfs` was attached only as QEMU's secondary CD and its normal
@@ -41,7 +224,7 @@ The native boot subsequently asserts in `sdk/lib/cmlib/cmvalue.c:254`
 (`ChildList->List == HCELL_NIL`) while loading the existing registry.  Setup's
 `VerifyRegistryHive` reported that hive valid and therefore did not rebuild it;
 this is a separate registry-checker limitation, not evidence for bug 7.  The
-current qcow2 is consequently not yet a usable MSYS2 repro target.  Continue
+qcow2 was consequently not yet a usable MSYS2 repro target.  Continue
 all deployment/recovery through the guest's ReactOS setup/update mechanism;
 do not work around it by mounting or extracting the image on the host.
 
@@ -1261,7 +1444,7 @@ whereas its separate small direct reads at `off=0x2c6` were correct.  A retained
 object is not assumed byte-identical across compiler invocations; that whole-read
 hash is therefore a correlation marker, not an expected-data comparison.
 
-**Updated conclusion:** MSVCRT is conclusively a consumer of already-bad buffer
+**Historical round-49 conclusion (superseded by rounds 57-58):** MSVCRT is conclusively a consumer of already-bad buffer
 contents, so this is not an MSYS2 runtime, GCC/BFD, or ABI problem.  It is not
 yet proven that NTFS produced the bad contents: a kernel or userspace writer
 could still change the pinned destination after `NtfsReadFile` returns.  A staged
@@ -1269,7 +1452,11 @@ hash probe has been added immediately after `ReadAttribute` and after NTFS's
 aligned bounce-buffer copy; its first successful deployment/run will identify
 the first bad stage and determine whether MM remains in the producer path.
 
-## 6. Next steps
+## 6. Historical next steps (completed by rounds 57-58)
+
+The staged hashes below ultimately proved that the aligned bounce buffer was
+only filled through `0x200` while copy-out consumed through `0x2e0`.  No MM
+mapping corruption was involved.
 
 1. Add staged hashes inside `NtfsReadFile` for the `off=0x194 len=0x14c`
    buffered fill, specifically before and after each lower filesystem/cache
@@ -1299,20 +1486,25 @@ Unattended upgrade: selected installation "ReactOS" ; DiskNumber = 0 , Partition
 ```
 
 It then failed its first destination-file extension with `STATUS_DISK_FULL`.
-This is not a routing or formatting fallback: offline read-only inspection of
+This is not a routing or formatting fallback: a historical offline read-only inspection of
 the NTFS `$Bitmap` found 13,106,772 allocated clusters out of 13,106,944, i.e.
 only 172 free 4-KiB clusters (688 KiB), while the update CD is about 1.2 GiB.
 No guest data was deleted, no partition was reformatted, and no external
 file-copy deployment was used.  A successful non-destructive update test needs
-a source installation with sufficient free space; this disk cannot hold the
-new system image.
+a source installation with sufficient free space.  Do not repeat that host-side
+inspection; all current image access is guest-only as specified below.  Later
+guest-side cleanup/update work made the original image usable and rounds 55-58
+completed on it.
 
 ---
 
 ## 7. Reproduction / harness notes (how to iterate)
 
-- **In-guest linking is broken**, so build test probes on the **host** with
-  `x86_64-w64-mingw32-gcc -O1 -o probe.exe probe.c`.
+- **In-guest linking is fixed.**  The final regression command is the real
+  MSYS2 gcc/link chain on NTFS; it passed two independent 25× runs.  Small
+  dependency-free diagnostic probes may still be built on the host with
+  `x86_64-w64-mingw32-gcc -O1 -o probe.exe probe.c` and transferred over the
+  guest network.
 - **Deploy** by serving `/tmp` over `python3 -m http.server 8099` and, in the guest,
   `curl -s -o probe.exe http://10.0.2.2:8099/probe.exe`. Beware a stale http.server on
   8099 serving the wrong dir (curl silently fetches a 404 HTML page).
@@ -1337,7 +1529,8 @@ new system image.
 - Probe sources: `/tmp/{zerocheck,filecheck,memcheck,bystander,fcow,forkcheck}.c`
 - Host-built exes staged in `/tmp/httproot/`
 - Harnesses (boot + deploy + poll): `/tmp/run_*.py`, guest scripts `/tmp/*_test.sh`
-- Offline kernel deploy: `/tmp/offline_install.py`
+- Obsolete `/tmp/offline_install.py`: prohibited by the guest-only deployment
+  rule; do not run it.
 - Round-11 kernel scanner diff: `git stash@{0}` ("gcc-corruption round11 user-alias pool
   scanner (throwaway)"); round 5–8 diagnostics in `stash@{1}`.
 
