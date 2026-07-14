@@ -407,14 +407,13 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     if ((ReadOffset % DeviceExt->NtfsInfo.BytesPerSector) != 0 || (ToRead % DeviceExt->NtfsInfo.BytesPerSector) != 0)
     {
         RealReadOffset = ROUND_DOWN(ReadOffset, DeviceExt->NtfsInfo.BytesPerSector);
-        RealLength = ROUND_UP(ToRead, DeviceExt->NtfsInfo.BytesPerSector);
-        /* do we need to extend RealLength by one sector? */
-        if (RealLength + RealReadOffset < ReadOffset + Length)
-        {
-            if (RealReadOffset + RealLength + DeviceExt->NtfsInfo.BytesPerSector <= AttributeAllocatedLength(DataContext->pRecord))
-                RealLength += DeviceExt->NtfsInfo.BytesPerSector;
-        }
-
+        /* The aligned window must cover the whole requested range
+         * [ReadOffset, ReadOffset + ToRead): rounding the length alone loses
+         * the sectors consumed by the offset misalignment, and the copy-out
+         * below would then slice unwritten bounce-buffer bytes.  ToRead is
+         * already clipped to the stream size, so the window end stays within
+         * the attribute's readable data for resident and non-resident alike. */
+        RealLength = (ULONG)(ROUND_UP(ReadOffset + ToRead, DeviceExt->NtfsInfo.BytesPerSector) - RealReadOffset);
 
         ReadBuffer = ExAllocatePoolWithTag(NonPagedPool, RealLength, TAG_NTFS);
         if (ReadBuffer == NULL)
@@ -482,6 +481,10 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     if (AllocatedBuffer)
     {
+        /* The bounce buffer must have been filled through the end of the
+         * requested range - a short ReadAttribute here would hand back
+         * uninitialized pool as file data. */
+        ASSERT(RealLengthRead >= (ReadOffset - RealReadOffset) + ToRead);
         RtlCopyMemory(Buffer, ReadBuffer + (ReadOffset - RealReadOffset), ToRead);
 
 #if DBG
