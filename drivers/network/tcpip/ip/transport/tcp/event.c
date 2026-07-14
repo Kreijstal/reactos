@@ -235,6 +235,8 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
     PLIST_ENTRY Entry;
     PIRP Irp;
     NTSTATUS Status;
+    BOOLEAN Satisfied = FALSE;
+    PPENDING_ACCEPT_PCB PendingEntry;
 
     LockObject(Connection);
 
@@ -283,8 +285,40 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
 
         if (Status == STATUS_SUCCESS)
         {
+            Satisfied = TRUE;
             break;
         }
+    }
+
+    if (!Satisfied && Connection->PendingAcceptCount < Connection->ListenBacklog)
+    {
+        /* AFD keeps a single TDI_LISTEN in flight and re-arms it only after
+         * the previous completion has been processed, so a burst of inbound
+         * connections can complete their handshakes while no listen bucket
+         * is queued. Windows queues such connections up to the listen
+         * backlog instead of resetting them: hold the new PCB until the
+         * next TDI listen request arrives (see TCPAccept). */
+        PendingEntry = ExAllocatePoolWithTag(NonPagedPool,
+                                             sizeof(*PendingEntry),
+                                             PENDING_ACCEPT_PCB_TAG);
+        if (PendingEntry)
+        {
+            PendingEntry->NewPcb = newpcb;
+            PendingEntry->Listener = Connection;
+            PendingEntry->Dead = FALSE;
+
+            ReferenceObject(Connection);
+            InsertTailList(&Connection->PendingAcceptPcbs, &PendingEntry->Entry);
+            Connection->PendingAcceptCount++;
+
+            /* We're in the tcpip-thread context (lwIP accept event or
+             * LibTCPDispatchPendingAccept callback), so the holding
+             * callbacks can be installed directly */
+            LibTCPHoldPendingAccept(newpcb, PendingEntry);
+        }
+        /* On allocation failure newpcb->callback_arg stays NULL and the
+         * caller resets the connection, same as when the backlog bound is
+         * reached */
     }
 
     UnlockObject(Connection);
