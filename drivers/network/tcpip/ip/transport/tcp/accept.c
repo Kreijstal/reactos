@@ -48,7 +48,7 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
 
 /* This listen is on a socket we keep as internal.  That socket has the same
  * lifetime as the address file */
-NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
+NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, ULONG Backlog)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     ip_addr_t AddressToBind;
