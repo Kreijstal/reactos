@@ -154,10 +154,46 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
     if (Irp->IoStatus.Status != STATUS_SUCCESS)
     {
+        /* A failed listen completion must not kill the listening socket:
+         * Windows keeps listening. Re-arm the TDI listen request, guarding
+         * against a hot loop of synchronous failures. */
+        if (FCB->SharedData.State == SOCKET_STATE_LISTENING &&
+            FCB->ListenRearmFailures < AFD_LISTEN_REARM_MAX_FAILURES)
+        {
+            FCB->ListenRearmFailures++;
+
+            /* The failed listen did not consume the warm connection, so
+             * only open a new one if it is actually missing */
+            if (FCB->Connection.Object == NULL)
+                Status = WarmSocketForConnection(FCB);
+            else
+                Status = STATUS_SUCCESS;
+
+            if (NT_SUCCESS(Status))
+            {
+                Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionCallInfo,
+                                                           FCB->LocalAddress->Address[0].AddressType);
+                ASSERT(Status == STATUS_SUCCESS);
+
+                Status = TdiBuildNullConnectionInfoInPlace(FCB->ListenIrp.ConnectionReturnInfo,
+                                                           FCB->LocalAddress->Address[0].AddressType);
+                ASSERT(Status == STATUS_SUCCESS);
+
+                TdiListen( &FCB->ListenIrp.InFlightRequest,
+                           FCB->Connection.Object,
+                           &FCB->ListenIrp.ConnectionCallInfo,
+                           &FCB->ListenIrp.ConnectionReturnInfo,
+                           ListenComplete,
+                           FCB );
+            }
+        }
+
         SocketStateUnlock(FCB);
         IoFreeIrp(Irp);
         return STATUS_MORE_PROCESSING_REQUIRED;
     }
+
+    FCB->ListenRearmFailures = 0;
 
     Qelt = ExAllocatePoolWithTag(NonPagedPool,
                                  sizeof(*Qelt),
