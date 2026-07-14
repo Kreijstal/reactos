@@ -1090,6 +1090,11 @@ NtfsFreeAttributeListClusters(PNTFS_VCB Vcb,
                               PFILE_RECORD_HEADER BaseFileRecord);
 
 NTSTATUS
+NtfsFreeClusterRange(PNTFS_VCB Vcb,
+                     ULONGLONG FirstCluster,
+                     ULONGLONG ClusterCount);
+
+NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
                    PFILE_RECORD_HEADER FileRecord,
                    PNTFS_ATTR_RECORD AttributeAddress,
