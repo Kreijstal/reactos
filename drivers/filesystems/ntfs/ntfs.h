@@ -946,6 +946,11 @@ typedef struct _FCB
      * NtfsInvalidateCachedFileRecord before they commit changes through
      * UpdateFileRecord, so the next reader re-reads the fresh state. */
     PFILE_RECORD_HEADER CachedFileRecord;
+    /* Incremented before the cached record is invalidated.  This is also a
+     * diagnostic generation: a reader can prove that its cache lookup raced
+     * an invalidation even though paging and normal I/O use different FCB
+     * resources. */
+    volatile LONG CachedFileRecordGeneration;
 
     /* Sequential-read prefetch state.  NextPrefetchOffset is the file
      * offset (bytes) where the last paging read ended -- used to detect
