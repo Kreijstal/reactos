@@ -2342,6 +2342,7 @@ StartPartitionOperationsPage(PINPUT_RECORD Ir)
 
     /* Find or set the active system partition before starting formatting */
     Success = InitSystemPartition(USetupData.ArchType,
+                                  RepairUpdateFlag,
                                   PartitionList,
                                   InstallPartition,
                                   &SystemPartition,
