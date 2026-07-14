@@ -56,25 +56,45 @@ MiMapPageInHyperSpace(IN PEPROCESS Process,
     ASSERT(Process == PsGetCurrentProcess());
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     //
-    // Vista+: lock-free hyperspace. Raise IRQL to prevent preemption,
-    // then use interlocked operations on the FIFO counter.
+    // Vista+: EPROCESS no longer contains HyperSpaceLock, so reserve a
+    // hyperspace slot atomically.  Raising IRQL only prevents migration of
+    // this thread; another processor can still run a thread in the same
+    // process and reserve a slot concurrently.
     //
+    MMPTE OldPte, NewPte;
+    BOOLEAN FlushEntireHyperSpace;
+
     KeRaiseIrql(DISPATCH_LEVEL, OldIrql);
 
     //
-    // Atomically read and decrement the FIFO counter.
-    // PageFrameNumber is a bit-field so we operate on the full PTE value.
-    // At DISPATCH_LEVEL on UP, no contention is possible, so simple
-    // read-modify-write is safe. On SMP, DISPATCH prevents preemption
-    // on this CPU, and per-process hyperspace means no cross-CPU contention.
+    // The first PTE stores the FIFO counter.  Updating its PageFrameNumber
+    // bit-field with a normal assignment is a non-atomic read/modify/write
+    // and lets two CPUs select the same mapping PTE.  If that happens, one
+    // page copy can silently change the physical page below another copy.
     //
-    Offset = PFN_FROM_PTE(PointerPte);
-    if (!Offset)
+    do
     {
-        Offset = MI_HYPERSPACE_PTES;
-        KeFlushProcessTb();
+        OldPte = *PointerPte;
+        NewPte = OldPte;
+        Offset = PFN_FROM_PTE(&OldPte);
+        FlushEntireHyperSpace = (Offset == 0);
+        if (!Offset)
+            Offset = MI_HYPERSPACE_PTES;
+        NewPte.u.Hard.PageFrameNumber = Offset - 1;
     }
-    PointerPte->u.Hard.PageFrameNumber = Offset - 1;
+    while ((ULONG_PTR)InterlockedCompareExchangePte(PointerPte,
+                                                     NewPte.u.Long,
+                                                     OldPte.u.Long) != OldPte.u.Long);
+
+    /*
+     * Reusing the FIFO after its complete cycle requires invalidating all
+     * stale hyperspace translations, not merely the one slot selected below.
+     * Do this only after the successful reservation; flushing inside the CAS
+     * retry loop would leave a race window and needlessly flush on failure.
+     */
+    if (FlushEntireHyperSpace)
+        KeFlushProcessTb();
+
 #else
     KeAcquireSpinLock(&Process->HyperSpaceLock, OldIrql);
 
@@ -101,6 +121,15 @@ MiMapPageInHyperSpace(IN PEPROCESS Process,
     // Write the current PTE
     //
     PointerPte += Offset;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    //
+    // A slot can have a stale translation on the processor that reserved it
+    // during an earlier FIFO pass.  Invalidate locally before publishing the
+    // new mapping; the returned address is only used on this processor while
+    // IRQL remains raised.
+    //
+    KeInvalidateTlbEntry(MiPteToAddress(PointerPte));
+#endif
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
 
     //
@@ -121,6 +150,9 @@ MiUnmapPageInHyperSpace(IN PEPROCESS Process,
     // Blow away the mapping
     //
     MiAddressToPte(Address)->u.Long = 0;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    KeInvalidateTlbEntry(Address);
+#endif
 
     //
     // Release the hyperlock
@@ -233,4 +265,3 @@ MiUnmapPagesInZeroSpace(IN PVOID VirtualAddress,
     //
     RtlZeroMemory(PointerPte, NumberOfPages * sizeof(MMPTE));
 }
-
