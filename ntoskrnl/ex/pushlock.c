@@ -1211,6 +1211,14 @@ ExfReleasePushLockShared(PEX_PUSH_LOCK PushLock)
                                                              NewValue.Ptr,
                                                              OldValue.Ptr);
             if (NewValue.Value == OldValue.Value) return;
+
+            /*
+             * The compare-exchange failed; NewValue holds the lock word the
+             * interlocked operation observed.  Retry from that value —
+             * looping with the stale one can never succeed and spins this
+             * releaser forever while every waiter stays parked.
+             */
+            OldValue = NewValue;
         }
         else
         {
