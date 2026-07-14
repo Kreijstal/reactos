@@ -99,7 +99,7 @@ extern CLIENT_DATA ClientInfo;
 /* accept.c */
 NTSTATUS TCPCheckPeerForAccept(PVOID Context,
                                PTDI_REQUEST_KERNEL Request);
-NTSTATUS TCPListen( PCONNECTION_ENDPOINT Connection, UINT Backlog );
+NTSTATUS TCPListen( PCONNECTION_ENDPOINT Connection, ULONG Backlog );
 BOOLEAN TCPAbortListenForSocket( PCONNECTION_ENDPOINT Listener,
 			         PCONNECTION_ENDPOINT Connection );
 NTSTATUS TCPAccept
