@@ -41,7 +41,7 @@ struct lwip_callback_msg
         } Bind;
         struct {
             PCONNECTION_ENDPOINT Connection;
-            u8_t Backlog;
+            ULONG Backlog;
         } Listen;
         struct {
             PCONNECTION_ENDPOINT Connection;
@@ -104,7 +104,7 @@ extern void TCPRecvEventHandler(void *arg);
 PTCP_PCB    LibTCPSocket(void *arg);
 VOID        LibTCPFreeSocket(PTCP_PCB pcb);
 err_t       LibTCPBind(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
-PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog);
+PTCP_PCB    LibTCPListen(PCONNECTION_ENDPOINT Connection, const ULONG backlog);
 err_t       LibTCPSend(PCONNECTION_ENDPOINT Connection, void *const dataptr, const u16_t len, ULONG *sent, const int safe);
 err_t       LibTCPConnect(PCONNECTION_ENDPOINT Connection, ip4_addr_t *const ipaddr, const u16_t port);
 err_t       LibTCPShutdown(PCONNECTION_ENDPOINT Connection, const int shut_rx, const int shut_tx);
