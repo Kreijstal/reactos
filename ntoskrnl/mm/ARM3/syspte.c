@@ -37,6 +37,74 @@ LONG MmSysPteListBySizeCount[5];
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+#ifdef CONFIG_SMP
+typedef struct _MI_TB_FLUSH_RANGE
+{
+    ULONG_PTR BaseAddress;
+    ULONG PageCount;
+} MI_TB_FLUSH_RANGE, *PMI_TB_FLUSH_RANGE;
+
+static
+ULONG_PTR
+NTAPI
+MiFlushRangeTbWorker(
+    _In_ ULONG_PTR Argument)
+{
+    PMI_TB_FLUSH_RANGE FlushRange = (PMI_TB_FLUSH_RANGE)Argument;
+    ULONG_PTR Address = FlushRange->BaseAddress;
+    ULONG i;
+
+    /* Runs on every processor via KeIpiGenericCall */
+    for (i = 0; i < FlushRange->PageCount; i++)
+    {
+        KeInvalidateTlbEntry((PVOID)Address);
+        Address += PAGE_SIZE;
+    }
+    return 0;
+}
+#endif
+
+static
+VOID
+MiFlushReleasedSystemPtes(
+    _In_ PMMPTE StartingPte,
+    _In_ ULONG NumberOfPtes)
+{
+    /*
+     * A system PTE mapping (an MDL system VA, driver mapping, ...) may have
+     * been dereferenced on any processor.  The PTEs are zeroed on release,
+     * but a stale TLB entry on another processor keeps translating the
+     * recycled VA to the old physical page: reads through a later mapping
+     * at the same VA see stale data and writes corrupt whoever owns that
+     * page now.  KeFlushProcessTb() at reserve time only flushes the local
+     * core, so the shootdown must happen here, before the PTEs become
+     * reusable.
+     */
+#ifdef CONFIG_SMP
+    if (NumberOfPtes > 32)
+    {
+        KeFlushEntireTb(TRUE, TRUE);
+    }
+    else
+    {
+        MI_TB_FLUSH_RANGE FlushRange;
+
+        FlushRange.BaseAddress = (ULONG_PTR)MiPteToAddress(StartingPte);
+        FlushRange.PageCount = NumberOfPtes;
+        KeIpiGenericCall(MiFlushRangeTbWorker, (ULONG_PTR)&FlushRange);
+    }
+#else
+    ULONG i;
+    PVOID Address = MiPteToAddress(StartingPte);
+
+    for (i = 0; i < NumberOfPtes; i++)
+    {
+        KeInvalidateTlbEntry(Address);
+        Address = (PVOID)((ULONG_PTR)Address + PAGE_SIZE);
+    }
+#endif
+}
+
 //
 // The free System Page Table Entries are stored in a bunch of clusters,
 // each consisting of one or more PTEs.  These PTE clusters are connected
@@ -280,6 +348,12 @@ MiReleaseSystemPtes(IN PMMPTE StartingPte,
     // Zero PTEs
     //
     RtlZeroMemory(StartingPte, NumberOfPtes * sizeof(MMPTE));
+
+    //
+    // Invalidate the released range on every processor before the PTEs
+    // become reusable
+    //
+    MiFlushReleasedSystemPtes(StartingPte, NumberOfPtes);
 
     //
     // Acquire the System PTE lock
