@@ -96,6 +96,10 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, ULONG Backlog)
 
     if (NT_SUCCESS(Status))
     {
+        /* Full TDI-side backlog, bounding the pending-accept queue.
+         * The lwIP-side listen backlog is clamped to 255 in LibTCPListen. */
+        Connection->ListenBacklog = Backlog;
+
         Connection->SocketContext = LibTCPListen(Connection, Backlog);
         if (!Connection->SocketContext)
             Status = STATUS_UNSUCCESSFUL;
@@ -148,6 +152,7 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
 {
     NTSTATUS Status;
     PTDI_BUCKET Bucket;
+    BOOLEAN DispatchPendingAccept = FALSE;
 
     LockObject(Listener);
 
@@ -162,11 +167,22 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
         Bucket->Request.RequestContext = Context;
         InsertTailList( &Listener->ListenRequest, &Bucket->Entry );
         Status = STATUS_PENDING;
+
+        DispatchPendingAccept = !IsListEmpty(&Listener->PendingAcceptPcbs);
     }
     else
         Status = STATUS_NO_MEMORY;
 
     UnlockObject(Listener);
+
+    if (DispatchPendingAccept)
+    {
+        /* A connection that completed its handshake while no listen bucket
+         * was queued is waiting: hand it to the new bucket. The PCB may only
+         * be touched from the tcpip-thread context, so post a callback
+         * instead of dispatching it here. */
+        LibTCPDispatchPendingAccept(Listener);
+    }
 
     return Status;
 }

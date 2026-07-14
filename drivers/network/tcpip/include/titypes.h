@@ -234,6 +234,23 @@ typedef struct _TDI_BUCKET {
     ULONG Information;
 } TDI_BUCKET, *PTDI_BUCKET;
 
+struct tcp_pcb;
+
+#define PENDING_ACCEPT_PCB_TAG 'aPCT'
+
+/* A connection whose handshake lwIP completed while no TDI listen request
+ * was queued on the listener. It is held on the listener's PendingAcceptPcbs
+ * queue (bounded by ListenBacklog) until the next TDI_LISTEN arrives, instead
+ * of being reset. Allocated from NonPagedPool; the PCB may only be touched
+ * from the lwIP tcpip-thread context. Each entry holds a reference on the
+ * listener. */
+typedef struct _PENDING_ACCEPT_PCB {
+    LIST_ENTRY Entry;
+    struct tcp_pcb *NewPcb;
+    struct _CONNECTION_ENDPOINT *Listener;
+    BOOLEAN Dead;
+} PENDING_ACCEPT_PCB, *PPENDING_ACCEPT_PCB;
+
 /* Transport connection context structure A.K.A. Transmission Control Block
    (TCB) in TCP terminology. The FileObject->FsContext2 field holds a pointer
    to this structure */
@@ -252,6 +269,12 @@ typedef struct _CONNECTION_ENDPOINT {
     LIST_ENTRY ReceiveRequest; /* Queued receive requests */
     LIST_ENTRY SendRequest;    /* Queued send requests */
     LIST_ENTRY ShutdownRequest;/* Queued shutdown requests */
+
+    /* Listener state: established connections waiting for a TDI listen
+     * request (see PENDING_ACCEPT_PCB), bounded by ListenBacklog */
+    LIST_ENTRY PendingAcceptPcbs;
+    ULONG PendingAcceptCount;
+    ULONG ListenBacklog;
 
     LIST_ENTRY PacketQueue;    /* Queued received packets waiting to be processed */
 
