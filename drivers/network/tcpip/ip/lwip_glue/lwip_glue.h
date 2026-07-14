@@ -62,6 +62,9 @@ struct lwip_callback_msg
             PCONNECTION_ENDPOINT Connection;
             int Callback;
         } Close;
+        struct {
+            PCONNECTION_ENDPOINT Connection;
+        } DispatchAccept;
     } Input;
 
     /* Output */
@@ -113,6 +116,8 @@ err_t       LibTCPClose(PCONNECTION_ENDPOINT Connection, const int safe, const i
 err_t       LibTCPGetPeerName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port);
 err_t       LibTCPGetHostName(PTCP_PCB pcb, ip4_addr_t *const ipaddr, u16_t *const port);
 void        LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg);
+void        LibTCPHoldPendingAccept(PTCP_PCB pcb, PPENDING_ACCEPT_PCB PendingEntry);
+void        LibTCPDispatchPendingAccept(PCONNECTION_ENDPOINT Connection);
 void        LibTCPSetNoDelay(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTCPSetKeepAlive(PTCP_PCB pcb, BOOLEAN Set);
 void        LibTcpSetKeepAliveValues(PTCP_PCB pcb, u32_t KeepAliveTime, u32_t KeepAliveInterval);
