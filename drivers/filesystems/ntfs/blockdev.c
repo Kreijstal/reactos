@@ -205,9 +205,7 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
     LARGE_INTEGER Offset;
     KEVENT Event;
     PIRP Irp;
-    PMDL Mdl;
     NTSTATUS Status;
-    BOOLEAN PagingCompletion = FALSE;
     ULONGLONG RealReadOffset;
     ULONG RealLength;
     BOOLEAN AllocatedBuffer = FALSE;
@@ -269,7 +267,6 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
         RemoveEntryList(&Irp->ThreadListEntry);
         InitializeListHead(&Irp->ThreadListEntry);
         Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
-        PagingCompletion = TRUE;
     }
 
     if (Override)
@@ -278,31 +275,11 @@ NtfsReadDisk(IN PDEVICE_OBJECT DeviceObject,
         Stack->Flags |= SL_OVERRIDE_VERIFY_VOLUME;
     }
 
-    /*
-     * Save the MDL pointer - the paging IO completion path frees the IRP
-     * via IoFreeIrp but does NOT unlock or free the MDL. The storage
-     * driver may have called MmProbeAndLockPages on it, so we must call
-     * MmUnlockPages + IoFreeMdl ourselves after the IRP completes.
-     */
-    Mdl = Irp->MdlAddress;
-
     Status = IoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Suspended, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
-    }
-
-    /* In the paging-IO completion path, IofCompleteRequest frees the IRP but
-     * does not unlock/free the MDL that IoBuildSynchronousFsdRequest allocated.
-     * The normal APC completion path owns both the IRP and MDL. */
-    if (PagingCompletion && Mdl)
-    {
-        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
-        {
-            MmUnlockPages(Mdl);
-        }
-        IoFreeMdl(Mdl);
     }
 
     if (AllocatedBuffer)
@@ -360,9 +337,7 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
     LARGE_INTEGER Offset;
     KEVENT Event;
     PIRP Irp;
-    PMDL Mdl;
     NTSTATUS Status;
-    BOOLEAN PagingCompletion = FALSE;
     ULONGLONG RealWriteOffset;
     ULONG RealLength;
     BOOLEAN AllocatedBuffer = FALSE;
@@ -474,25 +449,13 @@ NtfsWriteDisk(IN PDEVICE_OBJECT DeviceObject,
         RemoveEntryList(&Irp->ThreadListEntry);
         InitializeListHead(&Irp->ThreadListEntry);
         Irp->Flags |= IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO;
-        PagingCompletion = TRUE;
     }
-
-    Mdl = Irp->MdlAddress;
 
     Status = IoCallDriver(DeviceObject, Irp);
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Suspended, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
-    }
-
-    if (PagingCompletion && Mdl)
-    {
-        if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
-        {
-            MmUnlockPages(Mdl);
-        }
-        IoFreeMdl(Mdl);
     }
 
     if (AllocatedBuffer)
