@@ -4053,6 +4053,231 @@ Done:
     return Status;
 }
 
+/* Release every cluster owned by one record's non-resident attributes.  The
+ * $ATTRIBUTE_LIST is excluded: its content is the only map of the child
+ * records a file owns, so the delete path must keep it readable until the
+ * children have been visited (NtfsFreeAttributeListClusters releases it
+ * last).  Every attribute extent carries a self-contained mapping-pairs
+ * stream whose first delta is absolute, so any record - base or child - can
+ * be decoded independently starting from LCN 0.  Freed runlists are
+ * neutralized in place so a repeat walk over the same buffer cannot
+ * double-free; *Modified tells the caller whether the record needs to be
+ * persisted for that neutralization to stick.  *HasFileName (optional)
+ * reports a $FILE_NAME sighting - the delete path uses it to tell name-spill
+ * children (still needed by NtfsRemoveSpilledNames, which frees them) from
+ * data-spill children (freed by NtfsFreeFileClusters below). */
+static
+NTSTATUS
+NtfsFreeRecordAttributeClusters(PDEVICE_EXTENSION DeviceExt,
+                                PFILE_RECORD_HEADER FileRecord,
+                                PBOOLEAN Modified,
+                                PBOOLEAN HasFileName)
+{
+    PNTFS_ATTR_RECORD Attr;
+    PUCHAR Run;
+    LONGLONG RunDelta;
+    ULONGLONG RunLength;
+    LONGLONG Lcn;
+    NTSTATUS Status;
+
+    Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+    while (Attr->Type != AttributeEnd && Attr->Length > 0 &&
+           (ULONG_PTR)Attr < (ULONG_PTR)FileRecord + FileRecord->BytesInUse)
+    {
+        if (Attr->Type == AttributeFileName && HasFileName != NULL)
+            *HasFileName = TRUE;
+
+        if (Attr->IsNonResident && Attr->Type != AttributeAttributeList)
+        {
+            Run = (PUCHAR)Attr + Attr->NonResident.MappingPairsOffset;
+            Lcn = 0;
+            while (*Run != 0)
+            {
+                Run = DecodeRun(Run, &RunDelta, &RunLength);
+                if (RunDelta == -1)
+                    continue;   /* sparse run - nothing allocated */
+                Lcn += RunDelta;
+                Status = NtfsFreeClusterRange(DeviceExt, (ULONGLONG)Lcn, RunLength);
+                if (!NT_SUCCESS(Status))
+                    return Status;
+            }
+
+            *((PUCHAR)Attr + Attr->NonResident.MappingPairsOffset) = 0;
+            Attr->NonResident.AllocatedSize = 0;
+            Attr->NonResident.DataSize = 0;
+            Attr->NonResident.InitializedSize = 0;
+            Attr->NonResident.HighestVCN = 0;
+            *Modified = TRUE;
+        }
+
+        Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/* Last-link delete helper: free the cluster allocation of every non-resident
+ * attribute of the file, wherever its extents live.  Attributes that
+ * outgrew the base record were migrated to child records referenced by the
+ * $ATTRIBUTE_LIST (MigrateAttributeToList); those extents - and the child
+ * records themselves - die with the file too.  Name-spill children are the
+ * exception: NtfsRemoveSpilledNames still needs their $FILE_NAME content to
+ * resolve the parent-directory entries it drops, and frees their records
+ * itself, so they are only scanned here (their attributes are resident).
+ * The caller persists the base record when it clears FRH_IN_USE. */
+static
+NTSTATUS
+NtfsFreeFileClusters(PDEVICE_EXTENSION DeviceExt,
+                     PFILE_RECORD_HEADER BaseFileRecord)
+{
+    PNTFS_ATTR_RECORD Attr;
+    PNTFS_ATTR_RECORD List = NULL;
+    PUCHAR Value = NULL;
+    ULONG ValueLength = 0;
+    PUCHAR ItemPtr, ListEnd;
+    PULONGLONG Children;
+    PFILE_RECORD_HEADER ChildRecord;
+    ULONG MaxCount;
+    ULONG Count = 0;
+    ULONG i;
+    BOOLEAN Modified = FALSE;
+    NTSTATUS Status;
+
+    Status = NtfsFreeRecordAttributeClusters(DeviceExt, BaseFileRecord, &Modified, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* Without an $ATTRIBUTE_LIST every attribute lives in the base record
+     * and the walk above already covered them all. */
+    Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseFileRecord + BaseFileRecord->AttributeOffset);
+    while (Attr->Type != AttributeEnd && Attr->Length > 0 &&
+           (ULONG_PTR)Attr < (ULONG_PTR)BaseFileRecord + BaseFileRecord->BytesInUse)
+    {
+        if (Attr->Type == AttributeAttributeList)
+        {
+            List = Attr;
+            break;
+        }
+        Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attr + Attr->Length);
+    }
+
+    if (List == NULL)
+        return STATUS_SUCCESS;
+
+    /* Works for both a resident and a non-resident list. */
+    Status = NtfsReadAttributeListValue(DeviceExt, List, &Value, &ValueLength);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Value)
+            ExFreePoolWithTag(Value, TAG_NTFS);
+        return Status;
+    }
+    if (ValueLength == 0)
+    {
+        if (Value)
+            ExFreePoolWithTag(Value, TAG_NTFS);
+        return STATUS_SUCCESS;
+    }
+
+    /* Every list item is at least 0x20 bytes (0x1A header, 8-aligned), so
+     * the item count bounds the number of distinct child records. */
+    MaxCount = ValueLength / 0x20 + 1;
+    Children = ExAllocatePoolWithTag(NonPagedPool, MaxCount * sizeof(ULONGLONG), TAG_NTFS);
+    if (!Children)
+    {
+        ExFreePoolWithTag(Value, TAG_NTFS);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* Collect the distinct child indices of EVERY attribute type - a
+     * multi-extent attribute lists one item per extent, so de-duplicate. */
+    ItemPtr = Value;
+    ListEnd = Value + ValueLength;
+    while (ItemPtr + 0x1A <= ListEnd)
+    {
+        PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)ItemPtr;
+        ULONGLONG ChildIdx;
+
+        if (Item->Length == 0)
+            break;
+        ChildIdx = Item->MFTIndex & NTFS_MFT_MASK;
+        if (ChildIdx != BaseFileRecord->MFTRecordNumber)
+        {
+            for (i = 0; i < Count; i++)
+            {
+                if (Children[i] == ChildIdx)
+                    break;
+            }
+            if (i == Count && Count < MaxCount)
+                Children[Count++] = ChildIdx;
+        }
+        ItemPtr += Item->Length;
+    }
+    ExFreePoolWithTag(Value, TAG_NTFS);
+
+    if (Count == 0)
+    {
+        ExFreePoolWithTag(Children, TAG_NTFS);
+        return STATUS_SUCCESS;
+    }
+
+    ChildRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!ChildRecord)
+    {
+        ExFreePoolWithTag(Children, TAG_NTFS);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = STATUS_SUCCESS;
+    for (i = 0; i < Count; i++)
+    {
+        BOOLEAN ChildModified = FALSE;
+        BOOLEAN HasFileName = FALSE;
+
+        Status = ReadFileRecord(DeviceExt, Children[i], ChildRecord);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        /* This runs before any child record is released, so a listed child
+         * must still be live - a free one means the list or the MFT bitmap
+         * is corrupt. */
+        ASSERT(ChildRecord->Flags & FRH_IN_USE);
+
+        Status = NtfsFreeRecordAttributeClusters(DeviceExt, ChildRecord, &ChildModified, &HasFileName);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        if (HasFileName)
+        {
+            /* Name-spill child: left for NtfsRemoveSpilledNames.  Persist
+             * only if a non-resident attribute shared the record (canonical
+             * spill children carry a single resident $FILE_NAME). */
+            if (ChildModified)
+            {
+                Status = UpdateFileRecord(DeviceExt, Children[i], ChildRecord);
+                if (!NT_SUCCESS(Status))
+                    break;
+            }
+            continue;
+        }
+
+        /* Data-spill child: nothing references it once the base record goes
+         * away - free the extension record itself. */
+        ClearFlag(ChildRecord->Flags, FRH_IN_USE);
+        ChildRecord->LinkCount = 0;
+        Status = UpdateFileRecord(DeviceExt, Children[i], ChildRecord);
+        if (!NT_SUCCESS(Status))
+            break;
+        Status = NtfsSetMftBitmapInUse(DeviceExt, Children[i], FALSE, TRUE);
+        if (!NT_SUCCESS(Status))
+            break;
+    }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ChildRecord);
+    ExFreePoolWithTag(Children, TAG_NTFS);
+    return Status;
+}
+
 /* Remove the $ATTRIBUTE_LIST entry that points at ChildMftIndex from the base
  * record, shrinking the list (or removing the whole $ATTRIBUTE_LIST attribute
  * when its last entry goes).  Handles both a resident and a non-resident
@@ -4659,6 +4884,23 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
             }
             ExFreePoolWithTag(SpillChildren, TAG_NTFS);
         }
+    }
+
+    /* The record is going away with its last name: release the cluster
+     * allocation of every non-resident attribute ($DATA, $INDEX_ALLOCATION,
+     * a directory's non-resident $BITMAP, ...) and the data-spill child
+     * records that hold migrated extents.  Must run before
+     * NtfsRemoveSpilledNames (name-spill children must not be released yet -
+     * a freed record could be reallocated to a live file whose clusters this
+     * walk would then free) and before NtfsFreeAttributeListClusters (which
+     * zeroes the list runlist this walk reads the child map from).  Without
+     * this walk every delete leaked the file's entire data allocation in
+     * $Bitmap (offline chkdsk code 25). */
+    Status = NtfsFreeFileClusters(DeviceExt, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
     }
 
     /* Drop the parent-directory index entries for any spilled names and free
