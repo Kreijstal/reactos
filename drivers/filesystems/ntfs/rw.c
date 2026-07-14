@@ -264,6 +264,9 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     BOOLEAN AllocatedBuffer = FALSE;
     PCHAR ReadBuffer = (PCHAR)Buffer;
     ULONGLONG StreamSize;
+    LONG CacheGenerationBefore;
+    LONG CacheGenerationAfterFind;
+    LONG CacheGenerationAfterRead;
 
     DPRINT("NtfsReadFile(%p, %p, %p, %lu, %I64u, %lx, %p)\n", DeviceExt, FileObject, Buffer, Length, ReadOffset, IrpFlags, LengthRead);
 
@@ -317,6 +320,8 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
      * already taken the FCB resource shared, so the cached pointer is
      * stable for the duration of this call - writers take it exclusive
      * and call NtfsInvalidateCachedFileRecord before mutating disk. */
+    CacheGenerationBefore = InterlockedCompareExchange(
+        &Fcb->CachedFileRecordGeneration, 0, 0);
     FileRecord = Fcb->CachedFileRecord;
 
     if (FileRecord == NULL)
@@ -351,6 +356,8 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     }
 
     Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &DataContext, NULL);
+    CacheGenerationAfterFind = InterlockedCompareExchange(
+        &Fcb->CachedFileRecordGeneration, 0, 0);
     if (!NT_SUCCESS(Status))
     {
         NTSTATUS BrowseStatus;
@@ -422,6 +429,8 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     DPRINT("NtfsReadFile: calling ReadAttribute offset=%I64u len=%lu\n", RealReadOffset, RealLength);
     RealLengthRead = ReadAttribute(DeviceExt, DataContext, RealReadOffset, (PCHAR)ReadBuffer, RealLength);
+    CacheGenerationAfterRead = InterlockedCompareExchange(
+        &Fcb->CachedFileRecordGeneration, 0, 0);
     DPRINT("NtfsReadFile: ReadAttribute returned %lu\n", RealLengthRead);
     if (RealLengthRead == 0)
     {
@@ -440,11 +449,59 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     *LengthRead = ToRead;
 
+#if DBG
+    /* Bug7 staging probe.  The failing MinGW ld buffered fill asks for the
+     * final 0x14c bytes of a 0x2e0-byte cc*.o at offset 0x194.  NtfsReadFile
+     * must use an aligned pool bounce buffer for this unaligned request.
+     * Hash the source slice immediately after ReadAttribute, before the
+     * bounce copy can make a wrong-data producer look like a CRT problem. */
+    if (ReadOffset == 0x194 && ToRead == 0x14c)
+    {
+        PUCHAR Bug7Stage = (PUCHAR)ReadBuffer + (ReadOffset - RealReadOffset);
+        ULONGLONG Bug7Hash = 0xcbf29ce484222325ULL;
+        ULONG Bug7I;
+
+        for (Bug7I = 0; Bug7I < ToRead; Bug7I++)
+        {
+            Bug7Hash ^= Bug7Stage[Bug7I];
+            Bug7Hash *= 0x100000001b3ULL;
+        }
+        DPRINT1("BUG7_STAGE stage=readattr off=%I64x len=%lx allocated=%u "
+                "src=%p h=%I64x b=%02x%02x%02x%02x rec=%p attr=%p resident=%u "
+                "cachegen=%ld/%ld/%ld\n",
+                ReadOffset, ToRead, AllocatedBuffer, Bug7Stage, Bug7Hash,
+                Bug7Stage[0x132], Bug7Stage[0x133],
+                Bug7Stage[0x134], Bug7Stage[0x135], FileRecord,
+                DataContext->pRecord, !DataContext->pRecord->IsNonResident,
+                CacheGenerationBefore, CacheGenerationAfterFind,
+                CacheGenerationAfterRead);
+    }
+#endif
+
     DPRINT("%lu got read\n", *LengthRead);
 
     if (AllocatedBuffer)
     {
         RtlCopyMemory(Buffer, ReadBuffer + (ReadOffset - RealReadOffset), ToRead);
+
+#if DBG
+        if (ReadOffset == 0x194 && ToRead == 0x14c)
+        {
+            ULONGLONG Bug7Hash = 0xcbf29ce484222325ULL;
+            ULONG Bug7I;
+
+            for (Bug7I = 0; Bug7I < ToRead; Bug7I++)
+            {
+                Bug7Hash ^= Buffer[Bug7I];
+                Bug7Hash *= 0x100000001b3ULL;
+            }
+            DPRINT1("BUG7_STAGE stage=copyout off=%I64x len=%lx dst=%p "
+                    "h=%I64x b=%02x%02x%02x%02x\n",
+                    ReadOffset, ToRead, Buffer, Bug7Hash,
+                    Buffer[0x132], Buffer[0x133],
+                    Buffer[0x134], Buffer[0x135]);
+        }
+#endif
     }
 
     if (ToRead != Length)
@@ -609,6 +666,181 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
                           &ReturnedReadLength);
     if (NT_SUCCESS(Status))
     {
+#if DBG
+        /* Bug7 probe: every read (cached path is disabled above) flows
+         * through kernel intermediate buffers here; scan what we are about
+         * to hand back for nonpaged-pool tag bytes and log short reads. */
+        {
+            static const UCHAR Bug7Tags[][4] =
+                { {'R','M','A','P'}, {'N','t','f','C'}, {'M','m','S','t'}, {'M','M','S','S'} };
+            static LONG Bug7Live = 0;
+            NTKERNELAPI PCHAR NTAPI PsGetProcessImageFileName(PEPROCESS Process);
+            const CHAR *Bug7Name = PsGetProcessImageFileName(PsGetCurrentProcess());
+
+            if ((Bug7Name[0] == 'l' || Bug7Name[0] == 'L') &&
+                (Bug7Name[1] == 'd' || Bug7Name[1] == 'D') &&
+                !PagingIo && Buffer != NULL)
+            {
+                SIZE_T Bug7Off;
+                ULONG Bug7Sig;
+
+                if (Bug7Live < 12)
+                {
+                    InterlockedIncrement(&Bug7Live);
+                    DPRINT1("BUG7_NTFSREAD_LIVE file=%wZ off=%I64x want=%lx got=%lx\n",
+                            &FileObject->FileName, ReadOffset.QuadPart,
+                            ReadLength, ReturnedReadLength);
+                }
+
+                /* Advertise the guest-physical pages of Temp\cc*.o read
+                 * destinations for the host-side TCG store-watch plugin,
+                 * then stall so the host can arm before ld parses.  The
+                 * user VA comes from the MDL (Irp->UserBuffer is NULL on
+                 * this direct-I/O path); the pinned frames come from the
+                 * MDL PFN array, and each is cross-checked against the
+                 * requestor's current PTE resolution of the same VA. */
+                if (Irp->MdlAddress != NULL &&
+                    ReturnedReadLength != 0 &&
+                    FileObject->FileName.Length >= 2 * sizeof(WCHAR))
+                {
+                    PWCHAR Bug7Nm = FileObject->FileName.Buffer;
+                    ULONG Bug7NmLen = FileObject->FileName.Length / sizeof(WCHAR);
+                    BOOLEAN Bug7IsTmpObj = FALSE;
+                    ULONG Bug7I;
+
+                    if (Bug7Nm[Bug7NmLen - 2] == L'.' &&
+                        (Bug7Nm[Bug7NmLen - 1] == L'o' || Bug7Nm[Bug7NmLen - 1] == L'O'))
+                    {
+                        for (Bug7I = 0; Bug7I + 3 < Bug7NmLen; Bug7I++)
+                        {
+                            if (Bug7Nm[Bug7I] == L'\\' &&
+                                Bug7Nm[Bug7I + 1] == L'c' &&
+                                Bug7Nm[Bug7I + 2] == L'c')
+                            {
+                                Bug7IsTmpObj = TRUE;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (Bug7IsTmpObj)
+                    {
+                        PUCHAR Bug7UserVa = MmGetMdlVirtualAddress(Irp->MdlAddress);
+                        PPFN_NUMBER Bug7Pfns = MmGetMdlPfnArray(Irp->MdlAddress);
+                        ULONG Bug7Pages = ADDRESS_AND_SIZE_TO_SPAN_PAGES(Bug7UserVa,
+                                                                         ReturnedReadLength);
+                        LARGE_INTEGER Bug7Delay;
+                        ULONGLONG Bug7Hash = 0xcbf29ce484222325ULL;
+                        ULONG Bug7HI;
+
+                        /* content hash: identical (off,len) re-reads of the
+                         * same live temp object must hash identically */
+                        for (Bug7HI = 0; Bug7HI < ReturnedReadLength; Bug7HI++)
+                        {
+                            Bug7Hash ^= ((PUCHAR)Buffer)[Bug7HI];
+                            Bug7Hash *= 0x100000001b3ULL;
+                        }
+                        {
+                            PHYSICAL_ADDRESS Bug7BufPa =
+                                MmGetPhysicalAddress(Bug7UserVa);
+                            DPRINT1("BUG7_RDH file=%wZ off=%I64x got=%lx fsz=%I64x "
+                                    "cbo=%I64x h=%I64x bva=%p bpa=%I64x\n",
+                                    &FileObject->FileName,
+                                    ReadOffset.QuadPart,
+                                    ReturnedReadLength,
+                                    Fcb->RFCB.FileSize.QuadPart,
+                                    FileObject->CurrentByteOffset.QuadPart,
+                                    Bug7Hash,
+                                    Bug7UserVa,
+                                    Bug7BufPa.QuadPart);
+                        }
+
+                        if (Bug7Pages > 8) Bug7Pages = 8;
+                        for (Bug7I = 0; Bug7I < Bug7Pages; Bug7I++)
+                        {
+                            PUCHAR Bug7PgVa = (PUCHAR)PAGE_ALIGN(Bug7UserVa) +
+                                              (SIZE_T)Bug7I * PAGE_SIZE;
+                            PHYSICAL_ADDRESS Bug7CurPa = MmGetPhysicalAddress(Bug7PgVa);
+
+                            DPRINT1("BUG7_ARM pa=%I64x curpa=%I64x uva=%p file=%wZ off=%I64x\n",
+                                    (ULONGLONG)Bug7Pfns[Bug7I] << PAGE_SHIFT,
+                                    Bug7CurPa.QuadPart,
+                                    Bug7PgVa,
+                                    &FileObject->FileName,
+                                    ReadOffset.QuadPart);
+                        }
+
+                        /* ~200ms guest delay = seconds of wall time under TCG */
+                        Bug7Delay.QuadPart = -2000000LL;
+                        KeDelayExecutionThread(KernelMode, FALSE, &Bug7Delay);
+                    }
+                }
+                if (ReturnedReadLength < ReadLength)
+                {
+                    DPRINT1("BUG7_NTFSREAD_SHORT file=%wZ off=%I64x want=%lx got=%lx\n",
+                            &FileObject->FileName, ReadOffset.QuadPart,
+                            ReadLength, ReturnedReadLength);
+                }
+                /* Alias check: the data was written through the MDL system
+                 * mapping; verify the requestor's own user VA reads back the
+                 * same bytes.  A divergence means ld's user PTE no longer
+                 * points at the frames the MDL pinned. */
+                if (Irp->MdlAddress != NULL &&
+                    Irp->UserBuffer != NULL &&
+                    Buffer != Irp->UserBuffer &&
+                    Irp->RequestorMode == UserMode &&
+                    ReturnedReadLength != 0)
+                {
+                    _SEH2_TRY
+                    {
+                        if (RtlCompareMemory(Buffer,
+                                             Irp->UserBuffer,
+                                             ReturnedReadLength) != ReturnedReadLength)
+                        {
+                            PPFN_NUMBER Bug7Pfns = MmGetMdlPfnArray(Irp->MdlAddress);
+                            PHYSICAL_ADDRESS Bug7UserPa =
+                                MmGetPhysicalAddress(Irp->UserBuffer);
+
+                            DPRINT1("BUG7_NTFSREAD_ALIAS file=%wZ off=%I64x len=%lx "
+                                    "mdlpfn0=%Ix userpa=%I64x uva=%p\n",
+                                    &FileObject->FileName,
+                                    ReadOffset.QuadPart,
+                                    ReturnedReadLength,
+                                    Bug7Pfns[0],
+                                    Bug7UserPa.QuadPart,
+                                    Irp->UserBuffer);
+                        }
+                    }
+                    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        DPRINT1("BUG7_NTFSREAD_ALIAS_EXC uva=%p\n", Irp->UserBuffer);
+                    }
+                    _SEH2_END;
+                }
+
+                for (Bug7Off = 0;
+                     ReturnedReadLength >= 4 && Bug7Off <= (SIZE_T)ReturnedReadLength - 4;
+                     ++Bug7Off)
+                {
+                    for (Bug7Sig = 0; Bug7Sig < RTL_NUMBER_OF(Bug7Tags); ++Bug7Sig)
+                    {
+                        if (RtlCompareMemory((PUCHAR)Buffer + Bug7Off,
+                                             Bug7Tags[Bug7Sig], 4) == 4)
+                        {
+                            DPRINT1("BUG7_NTFSREAD_TAG file=%wZ off=%I64x len=%lx "
+                                    "hit=%Ix tag=%c%c%c%c\n",
+                                    &FileObject->FileName, ReadOffset.QuadPart,
+                                    ReturnedReadLength, Bug7Off,
+                                    Bug7Tags[Bug7Sig][0], Bug7Tags[Bug7Sig][1],
+                                    Bug7Tags[Bug7Sig][2], Bug7Tags[Bug7Sig][3]);
+                            Bug7Off = (SIZE_T)ReturnedReadLength;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+#endif
         if (FileObject->Flags & FO_SYNCHRONOUS_IO)
         {
             FileObject->CurrentByteOffset.QuadPart =
@@ -636,6 +868,19 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     }
     else
     {
+#if DBG
+        {
+            NTKERNELAPI PCHAR NTAPI PsGetProcessImageFileName(PEPROCESS Process);
+            const CHAR *Bug7Name = PsGetProcessImageFileName(PsGetCurrentProcess());
+            if ((Bug7Name[0] == 'l' || Bug7Name[0] == 'L') &&
+                (Bug7Name[1] == 'd' || Bug7Name[1] == 'D'))
+            {
+                DPRINT1("BUG7_RDFAIL file=%wZ off=%I64x want=%lx status=%lx\n",
+                        &FileObject->FileName, ReadOffset.QuadPart,
+                        ReadLength, Status);
+            }
+        }
+#endif
         Irp->IoStatus.Information = 0;
     }
 

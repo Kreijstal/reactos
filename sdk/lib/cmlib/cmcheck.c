@@ -579,6 +579,20 @@ CmpValidateValueList(
             DPRINT1("%u values removed in the list\n", ValuesRemoved);
         }
     }
+    else if (ValueListCell != HCELL_NIL)
+    {
+        /*
+         * An empty value list must not retain a list cell.  Accepting this
+         * inconsistent state leaves CmAddValueToList() believing that it is
+         * adding the first value while a stale list is still attached, which
+         * triggers its ChildList->List == HCELL_NIL assertion.
+         *
+         * Report the list as corrupt so the caller can either reject the hive
+         * or let CmpRepairValueList() detach the stale list in self-heal mode.
+         */
+        DPRINT1("An empty value list retains cell 0x%lx\n", ValueListCell);
+        return CM_CHECK_REGISTRY_VALUE_LIST_SIZE_NOT_SANE;
+    }
 
     return CM_CHECK_REGISTRY_GOOD;
 }

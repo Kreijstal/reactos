@@ -353,6 +353,7 @@ IsValidNTOSInstallationByHandle(
     OUT PUNICODE_STRING VendorName OPTIONAL)
 {
     BOOLEAN Success = FALSE;
+    BOOLEAN KernelSuccess = FALSE;
     PCWSTR PathName;
     USHORT i;
     USHORT LocalMachine;
@@ -458,6 +459,10 @@ IsValidNTOSInstallationByHandle(
             RtlCopyUnicodeString(VendorName, &LocalVendorName);
             VendorName = NULL;
         }
+
+        /* Success was refined above to mean a recognized vendor, rather
+         * than merely a PE that happens to carry version metadata. */
+        KernelSuccess = Success;
     }
 
     /* OPTIONAL: Check for the existence of \SystemRoot\System32\ntkrnlpa.exe */
@@ -497,7 +502,12 @@ IsValidNTOSInstallationByHandle(
         }
     }
 
-    return Success;
+    /* Either anchor identifies the installation.  Do not reject an otherwise
+     * recognized installation merely because one file that an in-place
+     * upgrade is meant to repair is corrupt.  The kernel remains preferred
+     * for the architecture/vendor outputs above; ntdll is the fallback for a
+     * system booting a differently named kernel. */
+    return KernelSuccess || Success;
 }
 
 static BOOLEAN
@@ -695,6 +705,15 @@ FindNTOSInstallations(
     ENUM_INSTALLS_DATA Data;
     ULONG Version;
     WCHAR PathBuffer[RTL_NUMBER_OF_FIELD(VOLINFO, DeviceName) + 1];
+    WCHAR SystemRootBuffer[MAX_PATH];
+    WCHAR SystemRootArcPath[MAX_PATH];
+    UNICODE_STRING SystemRootPath;
+    UNICODE_STRING VendorName;
+    WCHAR VendorNameBuffer[MAX_PATH];
+    USHORT Machine;
+    PCWSTR PathComponent;
+    ULONG DiskNumber;
+    ULONG PartitionNumber;
 
     /* Set VolumeRootPath */
     RtlStringCchPrintfW(PathBuffer, _countof(PathBuffer),
@@ -751,6 +770,47 @@ FindNTOSInstallations(
         }
         EnumerateBootStoreEntries(BootStoreHandle, EnumerateInstallations, &Data);
         CloseBootStore(BootStoreHandle);
+    }
+
+    /* A repair/update must still find an installed system when its boot store
+     * is missing or damaged.  That is not an exceptional case: repairing the
+     * files which make the boot store usable is one purpose of setup.  Probe
+     * the conventional ReactOS root on the volume directly after normal boot
+     * store enumeration.  The duplicate check preserves the boot entry's
+     * friendly name when enumeration already found this installation. */
+    RtlStringCchPrintfW(SystemRootBuffer, ARRAYSIZE(SystemRootBuffer),
+                        L"%s\\ReactOS", Volume->Info.DeviceName);
+    RtlInitUnicodeString(&SystemRootPath, SystemRootBuffer);
+    if (!FindExistingNTOSInstall(List, NULL, &SystemRootPath))
+    {
+        RtlInitEmptyUnicodeString(&VendorName,
+                                  VendorNameBuffer,
+                                  sizeof(VendorNameBuffer));
+        if (IsValidNTOSInstallation(&SystemRootPath, &Machine, &VendorName))
+        {
+            DiskNumber = Volume->PartEntry->DiskEntry->DiskNumber;
+            PartitionNumber = Volume->PartEntry->PartitionNumber;
+            PathComponent = SystemRootPath.Buffer + wcslen(Volume->Info.DeviceName);
+            RtlStringCchPrintfW(SystemRootArcPath,
+                                ARRAYSIZE(SystemRootArcPath),
+                                L"multi(0)disk(0)rdisk(%lu)partition(%lu)%s",
+                                DiskNumber,
+                                PartitionNumber,
+                                PathComponent);
+
+            DPRINT1("Found a valid NTOS installation without a usable boot store "
+                    "on disk #%lu, partition #%lu: '%wZ'\n",
+                    DiskNumber, PartitionNumber, &SystemRootPath);
+            AddNTOSInstallation(List,
+                                L"ReactOS (boot configuration recovery)",
+                                Machine,
+                                VendorName.Buffer,
+                                SystemRootArcPath,
+                                &SystemRootPath,
+                                PathComponent,
+                                DiskNumber,
+                                PartitionNumber);
+        }
     }
 
     /* Close the volume */
