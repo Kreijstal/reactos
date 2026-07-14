@@ -445,6 +445,7 @@ void
 LibTCPListenCallback(void *arg)
 {
     struct lwip_callback_msg *msg = arg;
+    u8_t backlog;
 
     ASSERT(msg);
 
@@ -454,7 +455,12 @@ LibTCPListenCallback(void *arg)
         goto done;
     }
 
-    msg->Output.Listen.NewPcb = tcp_listen_with_backlog((PTCP_PCB)msg->Input.Listen.Connection->SocketContext, msg->Input.Listen.Backlog);
+    /* lwIP stores the listen backlog in a u8_t (tcp_pcb_listen.backlog), so
+     * clamp it here instead of letting the parameter silently truncate
+     * (e.g. 1024 -> 0, which tcp_backlog_set turns into a backlog of 1) */
+    backlog = (msg->Input.Listen.Backlog > 0xFF) ? 0xFF : (u8_t)msg->Input.Listen.Backlog;
+
+    msg->Output.Listen.NewPcb = tcp_listen_with_backlog((PTCP_PCB)msg->Input.Listen.Connection->SocketContext, backlog);
 
     if (msg->Output.Listen.NewPcb)
     {
@@ -466,7 +472,7 @@ done:
 }
 
 PTCP_PCB
-LibTCPListen(PCONNECTION_ENDPOINT Connection, const u8_t backlog)
+LibTCPListen(PCONNECTION_ENDPOINT Connection, const ULONG backlog)
 {
     struct lwip_callback_msg *msg;
     PTCP_PCB ret;
