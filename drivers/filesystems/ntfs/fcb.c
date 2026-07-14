@@ -333,6 +333,7 @@ NtfsInvalidateCachedFileRecord(PNTFS_FCB Fcb)
 {
     PFILE_RECORD_HEADER Old;
 
+    InterlockedIncrement(&Fcb->CachedFileRecordGeneration);
     Old = InterlockedExchangePointer((PVOID *)&Fcb->CachedFileRecord, NULL);
     if (Old != NULL)
     {

@@ -695,6 +695,7 @@ BOOLEAN
 NTAPI
 InitSystemPartition(
     _In_ ARCHITECTURE_TYPE ArchType,
+    _In_ BOOLEAN RepairUpdate,
     /**/_In_ PPARTLIST PartitionList,       /* HACK HACK! */
     /**/_In_ PPARTENTRY InstallPartition,   /* HACK HACK! */
     /**/_Out_ PPARTENTRY* pSystemPartition, /* HACK HACK! */
@@ -704,6 +705,16 @@ InitSystemPartition(
     FSVOL_OP Result;
     PPARTENTRY SystemPartition;
     PPARTENTRY OldActivePart;
+
+    /* An update already selected and validated InstallPartition.  It does not
+     * create or alter a system partition (bootloader installation is skipped
+     * later), so do not let setup-media ordering make recovery fail while
+     * trying to rediscover one here. */
+    if (RepairUpdate)
+    {
+        *pSystemPartition = InstallPartition;
+        return TRUE;
+    }
 
     /*
      * If we install on a fixed disk, try to find a supported system
