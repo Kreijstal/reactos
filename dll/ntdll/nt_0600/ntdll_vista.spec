@@ -1,6 +1,7 @@
 @ stdcall LdrRegisterDllNotification(long ptr ptr ptr)
 @ stdcall LdrUnregisterDllNotification(ptr)
 
+@ stdcall NtCancelIoFileEx(long ptr ptr)
 @ stdcall NtGetCurrentProcessorNumberEx(ptr)
 
 @ stdcall RtlGetProductInfo(long long long long ptr)
