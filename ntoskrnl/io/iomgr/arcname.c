@@ -431,7 +431,9 @@ IopCreateArcNamesCd(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
         RtlFreeUnicodeString(&DeviceStringW);
     }
 
+#if defined(_M_ARM64)
 RawCdFallback:
+#endif
     /*
      * Some UEFI platforms expose the boot ISO through firmware as a CD-ROM ARC
      * path, but the runtime storage stack enumerates the same QEMU device as a
