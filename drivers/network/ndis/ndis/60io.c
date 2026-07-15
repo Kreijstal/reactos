@@ -22,6 +22,17 @@
 #include <guiddef.h>
 #include <wdmguid.h>
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+/* The WDK headers gate this declaration at Vista, but the export exists on
+ * every ReactOS kernel and ndis is built at the target NTDDI (WS03 on the
+ * default configuration). The parameter types are not gated. */
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoConnectInterruptEx(
+    _Inout_ PIO_CONNECT_INTERRUPT_PARAMETERS Parameters);
+#endif
+
 /* ============================================================================
  *  Helper: get the NDIS6_ADAPTER_EXT from any miniport handle the driver
  *  passed in. The handle is whatever NdisMSetMiniportAttributes returned —
