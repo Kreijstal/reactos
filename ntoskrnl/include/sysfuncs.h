@@ -26,7 +26,6 @@
     SVC_(CallbackReturn, 3)
     SVC_(CancelDeviceWakeupRequest, 1)
     SVC_(CancelIoFile, 2)
-    SVC_(CancelIoFileEx, 3)
     SVC_(CancelTimer, 2)
     SVC_(ClearEvent, 1)
     SVC_(Close, 1)
@@ -306,6 +305,7 @@
 #endif // SYSFUNCS_NT6_ONLY
 
 #ifndef SYSFUNCS_NT5_ONLY
+    SVC_(CancelIoFileEx, 3)
     SVC_(GetCurrentProcessorNumberEx, 1)
 #if (NTDDI_VERSION >= NTDDI_VISTA)
     SVC_(CreateUserProcess, 11)
