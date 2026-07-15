@@ -2561,59 +2561,6 @@ QSI_DEF(SystemEmulationBasicInformation)
 /* Class 63 - Emulation Processor Information */
 QSI_DEF(SystemEmulationProcessorInformation)
 {
-    NTSTATUS Status;
-
-    /* Query native information */
-    Status = QSISystemProcessorInformation(Buffer, Size, ReqSize);
-#if defined(_M_AMD64) || defined(_M_ARM64)
-    if (NT_SUCCESS(Status))
-    {
-        PSYSTEM_PROCESSOR_INFORMATION Spi = (PSYSTEM_PROCESSOR_INFORMATION)Buffer;
-#if defined(_M_AMD64)
-        Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
-#elif defined(_M_ARM64)
-        Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM;
-#endif /* _M_AMD64 | _M_ARM64 */
-    }
-#endif /* defined(_M_AMD64) || defined(_M_ARM64) */
-
-    return Status;
-}
-
-/* Class 63 - Emulation Processor Information */
-QSI_DEF(SystemEmulationProcessorInformation)
-{
-    PSYSTEM_PROCESSOR_INFORMATION Spi
-        = (PSYSTEM_PROCESSOR_INFORMATION) Buffer;
-
-    *ReqSize = sizeof(SYSTEM_PROCESSOR_INFORMATION);
-
-    /* Check user buffer's size */
-    if (Size < sizeof(SYSTEM_PROCESSOR_INFORMATION))
-    {
-        return STATUS_INFO_LENGTH_MISMATCH;
-    }
-
-    /* Report the 32-bit x86 processor that WoW64 emulates. The host CPU model,
-       level and revision are unchanged (the same silicon executes the emulated
-       code); only the reported architecture differs from the native one. On a
-       native x86 build this is identical to SystemProcessorInformation. */
-    Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
-    Spi->ProcessorLevel = KeProcessorLevel;
-    Spi->ProcessorRevision = KeProcessorRevision;
-#if (NTDDI_VERSION < NTDDI_WIN8)
-    Spi->Reserved = 0;
-#else
-    Spi->MaximumProcessors = 0;
-#endif
-    Spi->ProcessorFeatureBits = (ULONG)KeFeatureBits;
-
-    return STATUS_SUCCESS;
-}
-
-/* Class 63 - Emulation Processor Information */
-QSI_DEF(SystemEmulationProcessorInformation)
-{
     PSYSTEM_PROCESSOR_INFORMATION Spi
         = (PSYSTEM_PROCESSOR_INFORMATION) Buffer;
 
