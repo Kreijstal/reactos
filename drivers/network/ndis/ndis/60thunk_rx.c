@@ -70,7 +70,6 @@ Ndis6RxBuildLegacyPacket(
     ULONG        Remaining;
     ULONG        MdlSegmentSize;
     ULONG        MdlSegmentOffset;
-    ULONG        ChainedMdls = 0;
     /* Note: RxLegacyBufferPool is always NULL because NdisAllocateBufferPool
      * is a no-op stub in the legacy library — NdisAllocateBuffer ignores
      * the handle and just calls IoAllocateMdl. Only the packet pool needs
@@ -149,7 +148,6 @@ Ndis6RxBuildLegacyPacket(
             NDIS_BUFFER_LINKAGE(PrevBuffer) = NdisBuffer;
         }
         PrevBuffer = NdisBuffer;
-        ChainedMdls++;
 
         Remaining       -= MdlSegmentSize;
         MdlSegmentOffset = 0;              /* second and later MDLs start at 0 */
