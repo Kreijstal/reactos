@@ -755,8 +755,10 @@ ElantechDebounceCheckV2(
 	static const UCHAR DebouncePacket[] =
 		{ 0x84, 0xFF, 0xFF, 0x02, 0xFF, 0xFF };
 
-	return RtlEqualMemory(Etd->Packet, DebouncePacket,
-	                      sizeof(DebouncePacket));
+	/* RtlEqualMemory is a memcmp macro, which i386 GCC emits as a libcall
+	 * kernel drivers cannot link; RtlCompareMemory is a real export */
+	return RtlCompareMemory(Etd->Packet, DebouncePacket,
+	                        sizeof(DebouncePacket)) == sizeof(DebouncePacket);
 }
 
 /* elantech_packet_check_v2() */
@@ -793,7 +795,8 @@ ElantechPacketCheckV3(
 	 * Check debounce first, it has the same signature in byte 0
 	 * and byte 3 as PACKET_V3_HEAD.
 	 */
-	if (RtlEqualMemory(Packet, DebouncePacket, sizeof(DebouncePacket)))
+	if (RtlCompareMemory(Packet, DebouncePacket,
+	                     sizeof(DebouncePacket)) == sizeof(DebouncePacket))
 		return ELANTECH_PACKET_DEBOUNCE;
 
 	if (Etd->CrcEnabled)
