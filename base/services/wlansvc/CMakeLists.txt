@@ -1,4 +1,10 @@
 
+
+# wlansvc is a Vista-era service: it consumes Vista+ APIs (CancelIoEx via
+# kernel32_vista on downlevel export configurations)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
+add_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x600)
+
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/idl)
 add_rpc_files(server ${REACTOS_SOURCE_DIR}/sdk/include/reactos/idl/wlansvc.idl)
 
@@ -26,6 +32,6 @@ if(NOT MSVC)
 endif()
 
 set_module_type(wlansvc win32cui UNICODE)
-add_importlibs(wlansvc advapi32 rpcrt4 iphlpapi msvcrt kernel32 ntdll)
+add_importlibs(wlansvc advapi32 rpcrt4 iphlpapi kernel32_vista msvcrt kernel32 ntdll)
 add_pch(wlansvc precomp.h SOURCE)
 add_cd_file(TARGET wlansvc DESTINATION reactos/system32 FOR all)
