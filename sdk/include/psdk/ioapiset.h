@@ -37,6 +37,15 @@ WINAPI
 CancelIo(
     _In_ HANDLE hFile);
 
+#if (_WIN32_WINNT >= 0x0600)
+WINBASEAPI
+BOOL
+WINAPI
+CancelIoEx(
+    _In_ HANDLE hFile,
+    _In_opt_ LPOVERLAPPED lpOverlapped);
+#endif
+
 WINBASEAPI
 _Ret_maybenull_
 HANDLE
