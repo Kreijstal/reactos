@@ -1,6 +1,13 @@
 
 #pragma once
 
+#ifdef __GNUC__
+/* The _CONST_RETURN C++ declarations intentionally differ from GCC's
+ * builtin prototypes (const-qualified returns); treat this header like
+ * the system header it replaces so GCC does not flag the mismatch. */
+#pragma GCC system_header
+#endif
+
 #include <vcruntime.h>
 
 _CRT_BEGIN_C_HEADER
