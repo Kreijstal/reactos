@@ -1,0 +1,10 @@
+add_executable(process_chain process_chain.c)
+set_module_type(process_chain win32cui)
+add_importlibs(process_chain msvcrt kernel32)
+add_rostests_file(TARGET process_chain)
+
+add_executable(process_chain_small process_chain.c)
+target_compile_definitions(process_chain_small PRIVATE PROCESS_CHAIN_SMALL_OBJECT)
+set_module_type(process_chain_small win32cui)
+add_importlibs(process_chain_small msvcrt kernel32)
+add_rostests_file(TARGET process_chain_small)
