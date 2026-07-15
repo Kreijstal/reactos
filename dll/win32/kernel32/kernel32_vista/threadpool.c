@@ -124,104 +124,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH TrySubmitThreadpoolCallback(PTP_SIMPLE_CALLBACK ca
     return TRUE;
 }
 
-/***********************************************************************
- *           CreateThreadpool   (kernelbase.@)
- */
-PTP_POOL WINAPI DECLSPEC_HOTPATCH CreateThreadpool(PVOID reserved)
-{
-    PTP_POOL pool = NULL;
-    NTSTATUS status = TpAllocPool(&pool, reserved);
-    if (!NT_SUCCESS(status))
-    {
-        SetLastError(RtlNtStatusToDosError(status));
-        return NULL;
-    }
-    return pool;
-}
-
-/***********************************************************************
- *           CreateThreadpoolCleanupGroup   (kernelbase.@)
- */
-PTP_CLEANUP_GROUP WINAPI DECLSPEC_HOTPATCH CreateThreadpoolCleanupGroup(VOID)
-{
-    PTP_CLEANUP_GROUP group = NULL;
-    NTSTATUS status = TpAllocCleanupGroup(&group);
-    if (!NT_SUCCESS(status))
-    {
-        SetLastError(RtlNtStatusToDosError(status));
-        return NULL;
-    }
-    return group;
-}
-
-/***********************************************************************
- *           CreateThreadpoolIo   (kernelbase.@)
- */
-PTP_IO WINAPI DECLSPEC_HOTPATCH CreateThreadpoolIo(HANDLE handle,
-                                                   PTP_WIN32_IO_CALLBACK callback,
-                                                   PVOID userdata,
-                                                   TP_CALLBACK_ENVIRON *environment)
-{
-    PTP_IO io = NULL;
-    NTSTATUS status = TpAllocIoCompletion(&io, handle, (PVOID)callback, userdata, environment);
-    if (!NT_SUCCESS(status))
-    {
-        SetLastError(RtlNtStatusToDosError(status));
-        return NULL;
-    }
-    return io;
-}
-
-/***********************************************************************
- *           CreateThreadpoolTimer   (kernelbase.@)
- */
-PTP_TIMER WINAPI DECLSPEC_HOTPATCH CreateThreadpoolTimer(PTP_TIMER_CALLBACK callback,
-                                                         PVOID userdata,
-                                                         TP_CALLBACK_ENVIRON *environment)
-{
-    PTP_TIMER timer = NULL;
-    NTSTATUS status = TpAllocTimer(&timer, callback, userdata, environment);
-    if (!NT_SUCCESS(status))
-    {
-        SetLastError(RtlNtStatusToDosError(status));
-        return NULL;
-    }
-    return timer;
-}
-
-/***********************************************************************
- *           CreateThreadpoolWait   (kernelbase.@)
- */
-PTP_WAIT WINAPI DECLSPEC_HOTPATCH CreateThreadpoolWait(PTP_WAIT_CALLBACK callback,
-                                                       PVOID userdata,
-                                                       TP_CALLBACK_ENVIRON *environment)
-{
-    PTP_WAIT wait = NULL;
-    NTSTATUS status = TpAllocWait(&wait, callback, userdata, environment);
-    if (!NT_SUCCESS(status))
-    {
-        SetLastError(RtlNtStatusToDosError(status));
-        return NULL;
-    }
-    return wait;
-}
-
-/***********************************************************************
- *           CreateThreadpoolWork   (kernelbase.@)
- */
-PTP_WORK WINAPI DECLSPEC_HOTPATCH CreateThreadpoolWork(PTP_WORK_CALLBACK callback,
-                                                       PVOID userdata,
-                                                       TP_CALLBACK_ENVIRON *environment)
-{
-    PTP_WORK work = NULL;
-    NTSTATUS status = TpAllocWork(&work, callback, userdata, environment);
-    if (!NT_SUCCESS(status))
-    {
-        SetLastError(RtlNtStatusToDosError(status));
-        return NULL;
-    }
-    return work;
-}
+#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN7)
+/* The Tp{Set,Query}PoolStackInformation ntdll exports these wrap are Win7+ */
 
 /***********************************************************************
  *           SetThreadpoolStackInformation   (kernelbase.@)
@@ -252,6 +156,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH QueryThreadpoolStackInformation(PTP_POOL pool,
     }
     return TRUE;
 }
+#endif /* DLL_EXPORT_VERSION >= _WIN32_WINNT_WIN7 */
 
 /***********************************************************************
  *           CreateThreadpoolCleanupGroup   (kernelbase.@)
