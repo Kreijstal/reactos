@@ -729,7 +729,7 @@ VOID
 NTAPI
 MiMapPfnDatabase(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
-    PFN_NUMBER FreePage, FreePageCount, PagesLeft, BasePage, PageCount;
+    PFN_NUMBER FreePage, FreePageCount, BasePage, PageCount;
     PLIST_ENTRY NextEntry;
     PMEMORY_ALLOCATION_DESCRIPTOR MdBlock;
     PMMPTE PointerPte, LastPte;
@@ -738,7 +738,6 @@ MiMapPfnDatabase(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Get current page data, since we won't be using MxGetNextPage as it would corrupt our state */
     FreePage = MxFreeDescriptor->BasePage;
     FreePageCount = MxFreeDescriptor->PageCount;
-    PagesLeft = 0;
 
     /* Loop the memory descriptors */
     NextEntry = LoaderBlock->MemoryDescriptorListHead.Flink;
@@ -800,7 +799,6 @@ MiMapPfnDatabase(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                 }
 
                 /* Write out this PTE */
-                PagesLeft++;
                 MI_WRITE_VALID_PTE(PointerPte, TempPte);
 
                 /* Zero this page */
