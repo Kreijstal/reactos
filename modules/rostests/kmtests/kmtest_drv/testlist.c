@@ -16,6 +16,7 @@ KMT_TESTFUNC Test_ExHardErrorInteractive;
 KMT_TESTFUNC Test_ExInterlocked;
 KMT_TESTFUNC Test_ExPools;
 KMT_TESTFUNC Test_ExPushLock;
+KMT_TESTFUNC Test_ExPushLockStress;
 KMT_TESTFUNC Test_ExResource;
 #if !defined(_M_ARM64)
 KMT_TESTFUNC Test_ExSequencedList;
@@ -57,6 +58,7 @@ KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmForceSectionClosed;
+KMT_TESTFUNC Test_MmCygwinSectionStress;
 KMT_TESTFUNC Test_MmMdl;
 KMT_TESTFUNC Test_MmSection;
 KMT_TESTFUNC Test_MmReservedMapping;
@@ -112,6 +114,7 @@ const KMT_TEST TestList[] =
     { "ExInterlocked",                      Test_ExInterlocked },
     { "ExPools",                            Test_ExPools },
     { "ExPushLock",                         Test_ExPushLock },
+    { "ExPushLockStress",                   Test_ExPushLockStress },
     { "ExResource",                         Test_ExResource },
 #if !defined(_M_ARM64)
     { "ExSequencedList",                    Test_ExSequencedList },
@@ -154,6 +157,7 @@ const KMT_TEST TestList[] =
     { "KeTimer",                            Test_KeTimer },
     { "-KernelType",                        Test_KernelType },
     { "MmForceSectionClosed",               Test_MmForceSectionClosed },
+    { "MmCygwinSectionStress",              Test_MmCygwinSectionStress },
     { "MmMdl",                              Test_MmMdl },
     { "MmSection",                          Test_MmSection },
     { "MmReservedMapping",                  Test_MmReservedMapping },
