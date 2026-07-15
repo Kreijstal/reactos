@@ -951,23 +951,34 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
         (ULONGLONG)DataSize->QuadPart >= AttrContext->pRecord->NonResident.DataSize)
     {
         /* Growing (or rewriting in place) a regular file's data stream.
-         * Reserve clusters ahead, and never drop AllocationSize below what is
-         * already reserved - otherwise the truncate branch below would free
-         * the preallocated tail on the very next append, thrashing the
-         * allocator and re-fragmenting the file.  Only an explicit shrink
-         * (DataSize below the current data size, which skips this branch) or a
-         * close-time trim reclaims preallocation. */
-        ULONGLONG Headroom = (ULONGLONG)DataSize->QuadPart / 4;
-        ULONGLONG Reserved;
+         * While the new data still fits inside the clusters already reserved,
+         * keep AllocationSize at the current reservation so the allocator is
+         * not called at all - the whole point of the headroom is that a run
+         * of small appends consumes it without any cluster allocation.
+         * Recomputing the target as DataSize+Headroom on every append would
+         * keep the target creeping ahead of the reservation by exactly the
+         * append delta, degenerating into a ~1-cluster allocation per write
+         * again (and under concurrent writers those single-cluster grabs
+         * interleave across files and shatter each file into hundreds of
+         * runs).  Only when DataSize outgrows the reservation do we jump
+         * ahead by a fresh chunk.  An explicit shrink (DataSize below the
+         * current data size, which skips this branch) or a close-time trim
+         * reclaims the preallocated tail. */
+        ULONGLONG CurrentAllocation = AttrContext->pRecord->NonResident.AllocatedSize;
 
-        if (Headroom > NTFS_DATA_PREALLOC_MAX_BYTES)
-            Headroom = NTFS_DATA_PREALLOC_MAX_BYTES;
+        if (ROUND_UP((ULONGLONG)DataSize->QuadPart, BytesPerCluster) <= CurrentAllocation)
+        {
+            AllocationSize = CurrentAllocation;
+        }
+        else
+        {
+            ULONGLONG Headroom = (ULONGLONG)DataSize->QuadPart / 4;
 
-        Reserved = ROUND_UP((ULONGLONG)DataSize->QuadPart + Headroom, BytesPerCluster);
-        if (Reserved < AttrContext->pRecord->NonResident.AllocatedSize)
-            Reserved = AttrContext->pRecord->NonResident.AllocatedSize;
+            if (Headroom > NTFS_DATA_PREALLOC_MAX_BYTES)
+                Headroom = NTFS_DATA_PREALLOC_MAX_BYTES;
 
-        AllocationSize = Reserved;
+            AllocationSize = ROUND_UP((ULONGLONG)DataSize->QuadPart + Headroom, BytesPerCluster);
+        }
     }
 
     ActualClusters = 0;
