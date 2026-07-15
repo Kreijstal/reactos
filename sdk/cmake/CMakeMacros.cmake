@@ -501,38 +501,6 @@ endif()
          OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.$<CONFIG>.lst
          INPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst)
 
-    # Write the BootCDNtfs file list. bootcdntfs is a LOCAL test-harness ISO
-    # (NOT meant for upstreaming) that boots fully unattended and installs onto
-    # an NTFS volume, then auto-launches a bundled MSYS2 installer. It inherits
-    # the entire BootCDRegTest install file set and merely overrides the
-    # ${ARCH}/unattend.inf entry with the NTFS/GuiRunOnce variant.
-    file(READ ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst _regtest_list)
-    string(REPLACE "\n" ";" _regtest_lines "${_regtest_list}")
-    set(_bootcdntfs_inherited "")
-    foreach(_line ${_regtest_lines})
-        if(_line STREQUAL "")
-            # skip blank lines
-        elseif(_line MATCHES "^${ARCH}/unattend\\.inf=")
-            # drop the regtest unattend.inf; the NTFS variant overrides it below
-        else()
-            string(APPEND _bootcdntfs_inherited "${_line}\n")
-        endif()
-    endforeach()
-    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst "${_bootcdntfs_inherited}")
-    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst
-         "${ARCH}/unattend.inf=${CMAKE_SOURCE_DIR}/boot/bootdata/bootcdntfs/unattend.inf\n")
-    # The regtest payload only ships isobtrt.bin; bootcdntfs boots via the
-    # non-chaining isoboot.bin (see boot_images.cmake) so it always runs Setup
-    # even over an existing HDD install, so ship isoboot.bin too.
-    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst
-         "loader/isoboot.bin=${REACTOS_BINARY_DIR}/boot/freeldr/bootsect/isoboot.bin\n")
-    unset(_regtest_list)
-    unset(_regtest_lines)
-    unset(_bootcdntfs_inherited)
-    file(GENERATE
-         OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdntfs.$<CONFIG>.lst
-         INPUT ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst)
-
     # Write the KmtestCD file list. kmtestcd is a standalone bootable ISO that
     # inherits BOTH bootcd's bootloader files (loader/*, ${ARCH}/system32/*) AND
     # livecd's userland file set (reactos/system32/*, hives), then overrides
