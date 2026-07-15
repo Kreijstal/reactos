@@ -106,8 +106,6 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcd.iso)
     set(ISOHYBRID_BOOTCDREGTEST_COMMAND
         COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcdregtest.iso)
-    set(ISOHYBRID_BOOTCDNTFS_COMMAND
-        COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcdntfs.iso)
     set(ISOHYBRID_KMTESTCD_COMMAND
         COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/kmtestcd.iso)
     set(ISOHYBRID_DEPENDS isombr native-isohybrid)
@@ -184,25 +182,6 @@ add_custom_target(bootcdregtest
         -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcdregtest.$<CONFIG>.lst
     ${ISOHYBRID_BOOTCDREGTEST_COMMAND}
     DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs
-    VERBATIM)
-
-## BootCDNtfs -- LOCAL test-harness ISO (NOT for upstreaming). Its unattend.inf
-## installs onto NTFS and then auto-launches the bundled MSYS2 installer via
-## [GuiRunOnce]. Inherits the entire BootCDRegTest install payload (reactos.cab,
-## loader, setup, hives) via bootcdntfs.$<CONFIG>.lst, so it must build after
-## bootcdregtest's payload.  Unlike BootCDRegTest it uses the regular isoboot.bin
-## (ISO_BOOT_OPTIONS) rather than isobtrt.bin: isobtrt chains to an existing HDD
-## ReactOS install if one is present, which prevents re-installing over an
-## existing install; isoboot always runs Setup.
-# Create the file list
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bootcdntfs.cmake.lst "${CMAKE_CURRENT_BINARY_DIR}/empty\n")
-
-add_custom_target(bootcdntfs
-    COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/bootcdntfs.iso
-        ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
-        -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcdntfs.$<CONFIG>.lst
-    ${ISOHYBRID_BOOTCDNTFS_COMMAND}
-    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs bootcdregtest
     VERBATIM)
 
 ## LiveImage -- Constitutes a small RAMDISK ISO, and is also merged with the BootCD
