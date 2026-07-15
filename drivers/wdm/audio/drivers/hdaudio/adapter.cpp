@@ -34,7 +34,7 @@ NTSTATUS
 InstallSubdevice(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
-    _In_ PWSTR Name,
+    _In_ PCWSTR Name,
     _In_ REFGUID PortClassId,
     _In_ REFGUID MiniportClassId,
     _In_opt_ PFNCREATEMINIPORT MiniportCreate,
@@ -71,7 +71,8 @@ InstallSubdevice(
     Status = Port->Init(DeviceObject, Irp, Miniport, UnknownAdapter, ResourceList);
     if (NT_SUCCESS(Status))
     {
-        Status = PcRegisterSubdevice(DeviceObject, Name, Port);
+        /* PcRegisterSubdevice takes a non-const PWCHAR but does not modify it */
+        Status = PcRegisterSubdevice(DeviceObject, (PWCHAR)Name, Port);
 
         if (OutPortUnknown && NT_SUCCESS(Status))
         {
