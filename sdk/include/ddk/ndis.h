@@ -305,10 +305,10 @@ typedef struct _NET_PNP_EVENT {
 #endif
 
 #if defined(NDIS_WRAPPER)
-#define NDISAPI NTAPI
+#define NDISAPI
 #define NDISAPIV
 #else
-#define NDISAPI DECLSPEC_IMPORT NTAPI
+#define NDISAPI DECLSPEC_IMPORT
 #define NDISAPIV DECLSPEC_IMPORT
 #endif
 
@@ -6494,42 +6494,49 @@ typedef struct _NET_BUFFER_POOL_PARAMETERS {
 #define NDIS_NBL_FLAGS_IS_DIRECTED                   0x00010000
 
 /* Pool allocation / free entrypoints (resolved at link time against ndis.sys) */
-NDIS_HANDLE
 NDISAPI
+NDIS_HANDLE
+NTAPI
 NdisAllocateNetBufferListPool(
   _In_opt_ NDIS_HANDLE NdisHandle,
   _In_     PNET_BUFFER_LIST_POOL_PARAMETERS Parameters);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeNetBufferListPool(
   _In_ NDIS_HANDLE PoolHandle);
 
-NDIS_HANDLE
 NDISAPI
+NDIS_HANDLE
+NTAPI
 NdisAllocateNetBufferPool(
   _In_opt_ NDIS_HANDLE NdisHandle,
   _In_     PNET_BUFFER_POOL_PARAMETERS Parameters);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeNetBufferPool(
   _In_ NDIS_HANDLE PoolHandle);
 
-PNET_BUFFER_LIST
 NDISAPI
+PNET_BUFFER_LIST
+NTAPI
 NdisAllocateNetBufferList(
   _In_ NDIS_HANDLE PoolHandle,
   _In_ USHORT      ContextSize,
   _In_ USHORT      ContextBackFill);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeNetBufferList(
   _In_ PNET_BUFFER_LIST NetBufferList);
 
-PNET_BUFFER_LIST
 NDISAPI
+PNET_BUFFER_LIST
+NTAPI
 NdisAllocateNetBufferAndNetBufferList(
   _In_     NDIS_HANDLE PoolHandle,
   _In_     USHORT      ContextSize,
@@ -6538,37 +6545,42 @@ NdisAllocateNetBufferAndNetBufferList(
   _In_     ULONG       DataOffset,
   _In_     SIZE_T      DataLength);
 
-PNET_BUFFER
 NDISAPI
+PNET_BUFFER
+NTAPI
 NdisAllocateNetBuffer(
   _In_     NDIS_HANDLE PoolHandle,
   _In_opt_ PMDL        MdlChain,
   _In_     ULONG       DataOffset,
   _In_     SIZE_T      DataLength);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeNetBuffer(
   _In_ PNET_BUFFER NetBuffer);
 
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisRetreatNetBufferDataStart(
   _In_     PNET_BUFFER NetBuffer,
   _In_     ULONG       DataOffsetDelta,
   _In_     ULONG       DataBackFill,
   _In_opt_ PVOID       AllocateMdlHandler);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisAdvanceNetBufferDataStart(
   _In_     PNET_BUFFER NetBuffer,
   _In_     ULONG       DataOffsetDelta,
   _In_     BOOLEAN     FreeMdl,
   _In_opt_ PVOID       FreeMdlHandler);
 
-PVOID
 NDISAPI
+PVOID
+NTAPI
 NdisGetDataBuffer(
   _In_      PNET_BUFFER NetBuffer,
   _In_      ULONG       BytesNeeded,
@@ -6576,15 +6588,17 @@ NdisGetDataBuffer(
   _In_      UINT        AlignMultiple,
   _In_      UINT        AlignOffset);
 
-PMDL
 NDISAPI
+PMDL
+NTAPI
 NdisAllocateMdl(
   _In_ NDIS_HANDLE NdisHandle,
   _In_reads_bytes_(Length) PVOID VirtualAddress,
   _In_ UINT Length);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeMdl(
   _In_ PMDL Mdl);
 
@@ -6688,28 +6702,32 @@ typedef struct _NDIS_TIMER_CHARACTERISTICS {
   RTL_SIZEOF_THROUGH_FIELD(NDIS_TIMER_CHARACTERISTICS, FunctionContext)
 #define NDIS_TIMER_CHARACTERISTICS_DEFINED 1
 
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisAllocateTimerObject(
   _In_  NDIS_HANDLE NdisHandle,
   _In_  PNDIS_TIMER_CHARACTERISTICS TimerCharacteristics,
   _Out_ PNDIS_HANDLE pTimerObject);
 
-BOOLEAN
 NDISAPI
+BOOLEAN
+NTAPI
 NdisSetTimerObject(
   _In_     NDIS_HANDLE TimerObject,
   _In_     LARGE_INTEGER DueTime,
   _In_opt_ LONG MillisecondsPeriod,
   _In_opt_ PVOID FunctionContext);
 
-BOOLEAN
 NDISAPI
+BOOLEAN
+NTAPI
 NdisCancelTimerObject(
   _In_ NDIS_HANDLE TimerObject);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeTimerObject(
   _In_ NDIS_HANDLE TimerObject);
 
@@ -7110,8 +7128,9 @@ typedef VOID
   _In_ PDRIVER_OBJECT DriverObject);
 typedef MINIPORT_UNLOAD (*MINIPORT_UNLOAD_HANDLER);
 
-NDIS_HANDLE
 NDISAPI
+NDIS_HANDLE
+NTAPI
 NdisAllocateIoWorkItem(
   _In_ NDIS_HANDLE NdisObjectHandle);
 
@@ -7121,15 +7140,17 @@ typedef VOID
   _In_     NDIS_HANDLE NdisIoWorkItemHandle);
 typedef NDIS_IO_WORKITEM_FUNCTION *NDIS_IO_WORKITEM_ROUTINE;
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisQueueIoWorkItem(
   _In_ NDIS_HANDLE NdisIoWorkItemHandle,
   _In_ NDIS_IO_WORKITEM_ROUTINE Routine,
   _In_ PVOID WorkItemContext);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFreeIoWorkItem(
   _In_ NDIS_HANDLE NdisIoWorkItemHandle);
 
@@ -7265,29 +7286,33 @@ typedef struct _NDIS_MINIPORT_INTERRUPT_CHARACTERISTICS {
   RTL_SIZEOF_THROUGH_FIELD(NDIS_MINIPORT_INTERRUPT_CHARACTERISTICS, MessageInfoTable)
 
 /* NDIS 6 interrupt registration entry points */
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisMRegisterInterruptEx(
   _In_     NDIS_HANDLE NdisMiniportHandle,
   _In_     NDIS_HANDLE MiniportInterruptContext,
   _In_     PNDIS_MINIPORT_INTERRUPT_CHARACTERISTICS MiniportInterruptCharacteristics,
   _Out_    PNDIS_HANDLE NdisInterruptHandle);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMDeregisterInterruptEx(
   _In_ NDIS_HANDLE NdisInterruptHandle);
 
 /* NDIS 6 scatter-gather DMA registration */
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisMRegisterScatterGatherDma(
   _In_  NDIS_HANDLE NdisMiniportHandle,
   _In_  PNDIS_SG_DMA_DESCRIPTION DmaDescription,
   _Out_ PNDIS_HANDLE NdisMiniportDmaHandle);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMDeregisterScatterGatherDma(
   _In_ NDIS_HANDLE NdisMiniportDmaHandle);
 
@@ -7414,8 +7439,9 @@ typedef union _NDIS_MINIPORT_ADAPTER_ATTRIBUTES {
 } NDIS_MINIPORT_ADAPTER_ATTRIBUTES, *PNDIS_MINIPORT_ADAPTER_ATTRIBUTES;
 
 /* Registration / deregistration entry points */
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisMRegisterMiniportDriver(
   _In_     PDRIVER_OBJECT DriverObject,
   _In_     PUNICODE_STRING RegistryPath,
@@ -7423,26 +7449,30 @@ NdisMRegisterMiniportDriver(
   _In_     PNDIS_MINIPORT_DRIVER_CHARACTERISTICS MiniportDriverCharacteristics,
   _Out_    PNDIS_HANDLE NdisMiniportDriverHandle);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMDeregisterMiniportDriver(
   _In_ NDIS_HANDLE NdisMiniportDriverHandle);
 
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisMSetMiniportAttributes(
   _In_ NDIS_HANDLE NdisMiniportAdapterHandle,
   _In_ PNDIS_MINIPORT_ADAPTER_ATTRIBUTES MiniportAttributes);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMSendNetBufferListsComplete(
   _In_ NDIS_HANDLE NdisMiniportHandle,
   _In_ PNET_BUFFER_LIST NetBufferList,
   _In_ ULONG SendCompleteFlags);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMIndicateReceiveNetBufferLists(
   _In_ NDIS_HANDLE NdisMiniportHandle,
   _In_ PNET_BUFFER_LIST NetBufferLists,
@@ -7450,14 +7480,16 @@ NdisMIndicateReceiveNetBufferLists(
   _In_ ULONG NumberOfNetBufferLists,
   _In_ ULONG ReceiveFlags);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMIndicateStatusEx(
   _In_ NDIS_HANDLE NdisMiniportHandle,
   _In_ PNDIS_STATUS_INDICATION StatusIndication);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMOidRequestComplete(
   _In_ NDIS_HANDLE NdisMiniportHandle,
   _In_ PNDIS_OID_REQUEST OidRequest,
@@ -7649,16 +7681,18 @@ typedef struct _NDIS_FILTER_DRIVER_CHARACTERISTICS {
 #define NDIS_SIZEOF_FILTER_DRIVER_CHARACTERISTICS_REVISION_2 \
   RTL_SIZEOF_THROUGH_FIELD(NDIS_FILTER_DRIVER_CHARACTERISTICS, CancelDirectOidRequestHandler)
 
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisFRegisterFilterDriver(
   _In_     PDRIVER_OBJECT DriverObject,
   _In_     NDIS_HANDLE FilterDriverContext,
   _In_     PNDIS_FILTER_DRIVER_CHARACTERISTICS FilterDriverCharacteristics,
   _Out_    PNDIS_HANDLE NdisFilterDriverHandle);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisFDeregisterFilterDriver(
   _In_ NDIS_HANDLE NdisFilterDriverHandle);
 
@@ -7817,54 +7851,62 @@ typedef struct _NDIS_PROTOCOL_DRIVER_CHARACTERISTICS {
 #define NDIS_SIZEOF_PROTOCOL_DRIVER_CHARACTERISTICS_REVISION_2 \
   RTL_SIZEOF_THROUGH_FIELD(NDIS_PROTOCOL_DRIVER_CHARACTERISTICS, DirectOidRequestCompleteHandler)
 
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisRegisterProtocolDriver(
   _In_     NDIS_HANDLE ProtocolDriverContext,
   _In_     PNDIS_PROTOCOL_DRIVER_CHARACTERISTICS ProtocolDriverCharacteristics,
   _Out_    PNDIS_HANDLE NdisProtocolHandle);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisDeregisterProtocolDriver(
   _In_ NDIS_HANDLE NdisProtocolHandle);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisSendNetBufferLists(
   _In_ NDIS_HANDLE NdisBindingHandle,
   _In_ PNET_BUFFER_LIST NetBufferList,
   _In_ NDIS_PORT_NUMBER PortNumber,
   _In_ ULONG SendFlags);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisReturnNetBufferLists(
   _In_ NDIS_HANDLE NdisBindingHandle,
   _In_ PNET_BUFFER_LIST NetBufferLists,
   _In_ ULONG ReturnFlags);
 
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisOidRequest(
   _In_ NDIS_HANDLE NdisBindingHandle,
   _In_ PNDIS_OID_REQUEST OidRequest);
 
 /* NDIS 6.1+ direct (unserialized) OID request path. */
-NDIS_STATUS
 NDISAPI
+NDIS_STATUS
+NTAPI
 NdisDirectOidRequest(
   _In_ NDIS_HANDLE NdisBindingHandle,
   _In_ PNDIS_OID_REQUEST OidRequest);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisCancelDirectOidRequest(
   _In_ NDIS_HANDLE NdisBindingHandle,
   _In_ PVOID RequestId);
 
-VOID
 NDISAPI
+VOID
+NTAPI
 NdisMDirectOidRequestComplete(
   _In_ NDIS_HANDLE NdisMiniportHandle,
   _In_ PNDIS_OID_REQUEST OidRequest,
