@@ -539,43 +539,46 @@ int chk_collate_filename(const CHK_CTX *c,
 int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
                   NTFS_CHK_RESULT *res)
 {
-    CHK_CTX c;
+    CHK_CTX *c;   /* ~197 KiB: too large for the stack */
     UCHAR *computed = NULL;
     ULONGLONG bmpBytes;
     int rc = 0;
     ULONG unfixed;
 
-    memset(&c, 0, sizeof(c));
     memset(res, 0, sizeof(*res));
-    c.Io = io;
+    c = (CHK_CTX *)malloc(sizeof(*c));
+    if (!c)
+        { res->ExitStatus = 1; return -1; }
+    memset(c, 0, sizeof(*c));
+    c->Io = io;
 
 #if !defined(NTOS_MODE_USER)
     chk_verbose = opt->Verbose;
 #endif
 
-    if (chk_read_boot(&c, res) != 0)
-        { res->ExitStatus = 1; return -1; }
-    if (chk_load_mft(&c, res) != 0)
-        { res->ExitStatus = 1; return -1; }
+    if (chk_read_boot(c, res) != 0)
+        { res->ExitStatus = 1; free(c); return -1; }
+    if (chk_load_mft(c, res) != 0)
+        { res->ExitStatus = 1; free(c); return -1; }
 
     /* Pass 3 seeds WasDirty; honor CheckOnlyIfDirty by peeking record 3 first. */
     if (opt->CheckOnlyIfDirty)
     {
-        UCHAR *rec = (UCHAR *)malloc(c.MftRecordSize);
+        UCHAR *rec = (UCHAR *)malloc(c->MftRecordSize);
         int dirty = 0;
         if (rec)
         {
-            if (chk_read_record(&c, FILE_Volume, rec) == 0 &&
+            if (chk_read_record(c, FILE_Volume, rec) == 0 &&
                 *(ULONG *)rec == NRH_FILE_TYPE &&
-                chk_apply_fixups(rec, c.MftRecordSize, c.BytesPerSector) == 0)
+                chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) == 0)
             {
                 FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
                 ULONG off = h->AttributeOffset;
-                while (off + 8 <= c.MftRecordSize)
+                while (off + 8 <= c->MftRecordSize)
                 {
                     ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
                     if (a->Type == AT_END || a->Length == 0 ||
-                        off + a->Length > c.MftRecordSize)
+                        off + a->Length > c->MftRecordSize)
                         break;
                     if (a->Type == AT_VOLUME_INFORMATION && !a->NonResident)
                     {
@@ -592,46 +595,47 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
         if (!dirty)
         {
             res->ExitStatus = 0;
+            free(c);
             return 0;
         }
     }
 
-    bmpBytes = (c.TotalClusters + 7) / 8;
+    bmpBytes = (c->TotalClusters + 7) / 8;
     computed = (UCHAR *)calloc(1, (size_t)bmpBytes + 8);
     if (!computed)
-        { res->ExitStatus = 1; return -1; }
-    c.ClusterMap = computed;
+        { res->ExitStatus = 1; free(c); return -1; }
+    c->ClusterMap = computed;
 
     /* Model allocations.  On failure: degrade to the substrate-only checks
      * (report CHK_ERR_NOMEM) rather than fail or crash. */
-    c.Rec = (CHK_REC *)calloc(c.RecordCount, sizeof(CHK_REC));
-    c.MftMap = (UCHAR *)calloc(1, (size_t)(c.RecordCount + 7) / 8 + 8);
-    if (!c.Rec || !c.MftMap)
-        chk_add_issue(res, CHK_ERR_NOMEM, c.RecordCount, 0, 0);
+    c->Rec = (CHK_REC *)calloc(c->RecordCount, sizeof(CHK_REC));
+    c->MftMap = (UCHAR *)calloc(1, (size_t)(c->RecordCount + 7) / 8 + 8);
+    if (!c->Rec || !c->MftMap)
+        chk_add_issue(res, CHK_ERR_NOMEM, c->RecordCount, 0, 0);
 
-    if (chk_load_upcase(&c, res) != 0)
+    if (chk_load_upcase(c, res) != 0)
         chk_add_issue(res, CHK_ERR_NOMEM, 0, 1, 0);
 
     /* Stage 1: basic file system structure -- record scan + attr/bitmap. */
     chk_emit(opt, "\r\nCHKDSK is verifying files (stage 1 of 3)...\r\n");
 
     /* Pass 1: record scan (fills model + cluster accounting) */
-    if (chk_scan_records(&c, computed, res, opt) != 0)
+    if (chk_scan_records(c, computed, res, opt) != 0)
         rc = -1;
 
-    if (c.Rec && c.MftMap)
+    if (c->Rec && c->MftMap)
     {
         /* Stage 2: file name linkage -- $I30 walk + connectivity. */
         chk_emit(opt, "CHKDSK is verifying indexes (stage 2 of 3)...\r\n");
 
         /* Pass 2: $I30 walk (back-refs, ordering, cycles; fills LinksSeen) */
-        chk_walk_indexes(&c, res, opt);
+        chk_walk_indexes(c, res, opt);
 
         /* Pass 3: connectivity (orphans, dir cycles, link counts) */
-        chk_connectivity(&c, res, opt);
+        chk_connectivity(c, res, opt);
 
         /* Pass 4: $MFT:$BITMAP cross-check */
-        chk_check_mft_bitmap(&c, res, opt);
+        chk_check_mft_bitmap(c, res, opt);
     }
 
     /* R0: arm the volume dirty flag before the first mutating repair, so an
@@ -640,31 +644,31 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
      * volume was not originally dirty.  R8 (dirty-clear) is the last write. */
     if (opt->FixErrors && res->IssueCount > 0)
     {
-        if (chk_set_volume_flag(&c, 1, 0) == 0 && c.Io->flush)
-            c.Io->flush(c.Io->context);
+        if (chk_set_volume_flag(c, 1, 0) == 0 && c->Io->flush)
+            c->Io->flush(c->Io->context);
     }
 
     /* S4 record/attribute repairs (need the model; run before it is freed).
      * Order: R1 attr truncation, R1 crosslink, R4 link counts, R5 mft-bitmap. */
     if (opt->FixErrors)
     {
-        chk_repair_attributes(&c, res);
-        chk_repair_crosslinks(&c, res);
+        chk_repair_attributes(c, res);
+        chk_repair_crosslinks(c, res);
 
         /* R2: $I30 directory-index rebuild.  Runs after R1 record surgery and
          * before R4/R5/R6 so the corrected index feeds link-count and bitmap
          * reconciliation.  Only directories whose index is bad and whose $I30
          * is wholly within the base record (not attr-list spread) qualify. */
-        if (c.Rec)
+        if (c->Rec)
         {
             ULONG d;
-            for (d = 0; d < c.RecordCount; d++)
+            for (d = 0; d < c->RecordCount; d++)
             {
-                USHORT f = c.Rec[d].Flags;
+                USHORT f = c->Rec[d].Flags;
                 if ((f & (CRF_IN_USE | CRF_DIRECTORY | CRF_INDEX_BAD)) ==
                         (CRF_IN_USE | CRF_DIRECTORY | CRF_INDEX_BAD) &&
                     !(f & (CRF_ATTRLIST_UNSUPPORTED | CRF_CORRUPT | CRF_EXTENSION)))
-                    chk_rebuild_index(&c, d, res);
+                    chk_rebuild_index(c, d, res);
             }
         }
 
@@ -672,40 +676,40 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
          * rebuilt have already re-homed their own children and cleared their
          * CRF_ORPHAN) and before R4 (so the re-homed records' link counts are
          * computed against the found.NNN + refreshed root indexes). */
-        if (c.Rec && c.MftMap)
-            chk_recover_orphans(&c, res);
+        if (c->Rec && c->MftMap)
+            chk_recover_orphans(c, res);
 
-        if (c.Rec)
-            chk_repair_linkcounts(&c, res);
-        if (c.MftMap)
-            chk_repair_mft_bitmap(&c, res);
+        if (c->Rec)
+            chk_repair_linkcounts(c, res);
+        if (c->MftMap)
+            chk_repair_mft_bitmap(c, res);
     }
 
     /* Stage 3: free-space / security -- $Bitmap + $MFTMirr cross-checks. */
     chk_emit(opt, "CHKDSK is verifying free space (stage 3 of 3)...\r\n");
 
     /* Pass 5 / R6: $Bitmap cross-check + repair (both directions) */
-    if (chk_crosscheck_bitmap(&c, computed, res, opt) != 0)
+    if (chk_crosscheck_bitmap(c, computed, res, opt) != 0)
         CHK_TRACE("bitmap cross-check failed to complete\n");
 
     /* Pass 6: $MFTMirr compare */
-    chk_check_mftmirr(&c, res, opt);
+    chk_check_mftmirr(c, res, opt);
 
     free(computed);
-    c.ClusterMap = NULL;
-    free(c.Rec);
-    c.Rec = NULL;
-    free(c.MftMap);
-    c.MftMap = NULL;
-    free(c.UpCase);
-    c.UpCase = NULL;
+    c->ClusterMap = NULL;
+    free(c->Rec);
+    c->Rec = NULL;
+    free(c->MftMap);
+    c->MftMap = NULL;
+    free(c->UpCase);
+    c->UpCase = NULL;
 
     /* R8 clean-stamp (H8): before clearing the dirty flag, reset $LogFile to
      * the empty/clean state so a stale journal is not replayed over the just-
      * repaired metadata on the next mount.  Only when we repaired something. */
     if (opt->FixErrors && (res->RepairedCount > 0 || res->WasDirty))
     {
-        if (chk_stamp_logfile_clean(&c, res) != 0)
+        if (chk_stamp_logfile_clean(c, res) != 0)
             CHK_TRACE("R8: $LogFile clean-stamp did not complete\n");
     }
 
@@ -715,17 +719,19 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     if (res->WasDirty)
     {
         int fixed = 0;
-        if (opt->FixErrors && chk_set_volume_flag(&c, 0, 1) == 0)
+        if (opt->FixErrors && chk_set_volume_flag(c, 0, 1) == 0)
             fixed = 1;
         chk_add_issue(res, CHK_ERR_VOLUME_DIRTY, 0, 0, fixed);
     }
     else if (opt->FixErrors && res->RepairedCount > 0)
     {
         /* R0 armed it above; disarm now (no VOLUME_DIRTY issue was recorded). */
-        chk_set_volume_flag(&c, 0, 1);
-        if (c.Io->flush)
-            c.Io->flush(c.Io->context);
+        chk_set_volume_flag(c, 0, 1);
+        if (c->Io->flush)
+            c->Io->flush(c->Io->context);
     }
+
+    free(c);
 
     unfixed = res->IssueCount - res->RepairedCount;
     if (res->IssueCount == 0)
