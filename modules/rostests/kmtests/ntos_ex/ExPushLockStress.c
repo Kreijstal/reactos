@@ -20,11 +20,8 @@
 #define NDEBUG
 #include <debug.h>
 
-/* Executive push lock primitives (not in the public DDK) */
-NTKERNELAPI VOID FASTCALL ExfAcquirePushLockExclusive(_Inout_ PEX_PUSH_LOCK PushLock);
-NTKERNELAPI VOID FASTCALL ExfReleasePushLockExclusive(_Inout_ PEX_PUSH_LOCK PushLock);
-NTKERNELAPI VOID FASTCALL ExfAcquirePushLockShared(_Inout_ PEX_PUSH_LOCK PushLock);
-NTKERNELAPI VOID FASTCALL ExfReleasePushLockShared(_Inout_ PEX_PUSH_LOCK PushLock);
+/* The executive push lock primitives are declared in <ndk/exfuncs.h>,
+ * which kmt_platform.h already includes. */
 
 static EX_PUSH_LOCK g_Lock;
 static volatile LONG g_Stop;
