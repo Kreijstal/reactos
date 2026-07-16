@@ -2331,21 +2331,27 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
 /* Force the volume dirty (used by the harness to seed the dirty repair). */
 int NtfsChkSetVolumeDirty(const MKNTFS_IO *io)
 {
-    CHK_CTX *c;   /* ~197 KiB: too large for the stack */
-    NTFS_CHK_RESULT tmp;
+    CHK_CTX *c;           /* ~197 KiB: too large for the stack */
+    NTFS_CHK_RESULT *tmp; /* ~8 KiB: too large for the stack */
     int rc;
 
     c = (CHK_CTX *)malloc(sizeof(*c));
-    if (!c)
+    tmp = (NTFS_CHK_RESULT *)malloc(sizeof(*tmp));
+    if (!c || !tmp)
+    {
+        free(c);
+        free(tmp);
         return -1;
+    }
     memset(c, 0, sizeof(*c));
-    memset(&tmp, 0, sizeof(tmp));
+    memset(tmp, 0, sizeof(*tmp));
     c->Io = io;
-    if (chk_read_boot(c, &tmp) != 0)
-        { free(c); return -1; }
-    if (chk_load_mft(c, &tmp) != 0)
-        { free(c); return -1; }
+    if (chk_read_boot(c, tmp) != 0)
+        { free(tmp); free(c); return -1; }
+    if (chk_load_mft(c, tmp) != 0)
+        { free(tmp); free(c); return -1; }
     rc = chk_set_volume_flag(c, 1, 0);
+    free(tmp);
     free(c);
     return rc;
 }
@@ -2355,8 +2361,8 @@ int NtfsChkSetVolumeDirty(const MKNTFS_IO *io)
  * in *clearedLcn.  Used by the harness to exercise repair. */
 int NtfsChkTestClearMftBit(const MKNTFS_IO *io, ULONGLONG *clearedLcn)
 {
-    CHK_CTX *c;   /* ~197 KiB: too large for the stack */
-    NTFS_CHK_RESULT tmp;
+    CHK_CTX *c;           /* ~197 KiB: too large for the stack */
+    NTFS_CHK_RESULT *tmp; /* ~8 KiB: too large for the stack */
     UCHAR *rec6;
     CHK_RUN *bmpRuns;
     ULONGLONG lcn, byteOff;
@@ -2364,18 +2370,22 @@ int NtfsChkTestClearMftBit(const MKNTFS_IO *io, ULONGLONG *clearedLcn)
     int nruns;
 
     c = (CHK_CTX *)malloc(sizeof(*c));
+    tmp = (NTFS_CHK_RESULT *)malloc(sizeof(*tmp));
     bmpRuns = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
-    if (!c || !bmpRuns)
+    if (!c || !tmp || !bmpRuns)
     {
         free(c);
+        free(tmp);
         free(bmpRuns);
         return -1;
     }
     memset(c, 0, sizeof(*c));
-    memset(&tmp, 0, sizeof(tmp));
+    memset(tmp, 0, sizeof(*tmp));
     c->Io = io;
-    if (chk_read_boot(c, &tmp) != 0 || chk_load_mft(c, &tmp) != 0)
-        { free(bmpRuns); free(c); return -1; }
+    if (chk_read_boot(c, tmp) != 0 || chk_load_mft(c, tmp) != 0)
+        { free(bmpRuns); free(tmp); free(c); return -1; }
+    free(tmp);
+    tmp = NULL;
 
     rec6 = (UCHAR *)malloc(c->MftRecordSize);
     if (!rec6)
