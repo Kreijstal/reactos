@@ -139,7 +139,7 @@ static __inline ULONG chk_lfs_page_size(const CHK_CTX *c)
 int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
 {
     UCHAR *rec = NULL, *page = NULL;
-    CHK_RUN runs[CHK_MAX_RUNS];
+    CHK_RUN *runs;   /* 192 KiB: too large for the stack */
     ULONGLONG dataSize = 0;
     ULONG pageSize;
     int n, rc = -1;
@@ -147,8 +147,13 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
     (void)res;
 
     rec = (UCHAR *)malloc(c->MftRecordSize);
-    if (!rec)
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!rec || !runs)
+    {
+        free(rec);
+        free(runs);
         return -1;
+    }
 
     /* Read + verify the $LogFile base record. */
     if (chk_read_record(c, FILE_LogFile, rec) != 0 ||
@@ -157,6 +162,7 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
     {
         CHK_TRACE("R8: $LogFile record unreadable; skipping clean-stamp\n");
         free(rec);
+        free(runs);
         return -1;
     }
 
@@ -166,6 +172,7 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
     {
         CHK_TRACE("R8: $LogFile:$DATA not found/empty; skipping clean-stamp\n");
         free(rec);
+        free(runs);
         return -1;
     }
 
@@ -174,6 +181,7 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
     {
         CHK_TRACE("R8: $LogFile too small for two restart pages; skipping\n");
         free(rec);
+        free(runs);
         return -1;
     }
 
@@ -181,6 +189,7 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
     if (!page)
     {
         free(rec);
+        free(runs);
         return -1;
     }
 
@@ -200,6 +209,7 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
 
     free(page);
     free(rec);
+    free(runs);
     return rc;
 }
 
@@ -285,7 +295,7 @@ static int chk_truncate_attr_runs(CHK_CTX *c, UCHAR *rec, ULONG attrOff,
                                   ULONGLONG truncVcn)
 {
     ATTR_RECORD *a = (ATTR_RECORD *)(rec + attrOff);
-    CHK_RUN runs[CHK_MAX_RUNS];
+    CHK_RUN *runs;   /* 192 KiB: too large for the stack */
     const UCHAR *mp = rec + attrOff + a->NR.MappingPairsOffset;
     const UCHAR *end = rec + attrOff + a->Length;
     ULONG mpCap = a->Length - a->NR.MappingPairsOffset;
@@ -296,9 +306,13 @@ static int chk_truncate_attr_runs(CHK_CTX *c, UCHAR *rec, ULONG attrOff,
     if (!a->NonResident)
         return -1;
 
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!runs)
+        return -1;
+
     n = chk_decode_runs(mp, end, runs, CHK_MAX_RUNS);
     if (n < 0)
-        return -1;
+        { free(runs); return -1; }
 
     /* Walk runs, keeping those wholly below truncVcn; clip a straddling run. */
     keep = 0;
@@ -316,17 +330,18 @@ static int chk_truncate_attr_runs(CHK_CTX *c, UCHAR *rec, ULONG attrOff,
     }
 
     if (keep == 0)
-        return 1;   /* nothing salvageable */
+        { free(runs); return 1; }   /* nothing salvageable */
 
     /* Rewrite mapping pairs into the existing region (zero-pad the tail). */
     {
         UCHAR *dst = rec + attrOff + a->NR.MappingPairsOffset;
         rl = chk_encode_runlist(dst, mpCap, runs, (ULONG)keep);
         if (rl < 0)
-            return -1;
+            { free(runs); return -1; }
         if ((ULONG)rl < mpCap)
             memset(dst + rl, 0, mpCap - rl);
     }
+    free(runs);
 
     /* Fix sizes.  Highest VCN in the attribute is (LowestVcn + kept - 1).
      * The streams S4 truncates are single-extent (LowestVcn==0); only then can
@@ -375,13 +390,19 @@ static void chk_delete_attr(CHK_CTX *c, UCHAR *rec, ULONG attrOff)
 int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
 {
     UCHAR *rec;
+    CHK_RUN *runs;   /* 192 KiB: too large for the stack */
     ULONG i;
 
     if (!c->Rec)
         return -1;
     rec = (UCHAR *)malloc(c->MftRecordSize);
-    if (!rec)
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!rec || !runs)
+    {
+        free(rec);
+        free(runs);
         return -1;
+    }
 
     for (i = 0; i < res->IssueCount && i < CHK_MAX_ISSUES; i++)
     {
@@ -417,7 +438,6 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
                     a->Type != AT_STANDARD_INFORMATION &&
                     a->Type != AT_FILE_NAME)
                 {
-                    CHK_RUN runs[CHK_MAX_RUNS];
                     const UCHAR *mp = rec + off + a->NR.MappingPairsOffset;
                     const UCHAR *end = rec + off + a->Length;
                     int n = chk_decode_runs(mp, end, runs, CHK_MAX_RUNS);
@@ -479,6 +499,7 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
         }
     }
 
+    free(runs);
     free(rec);
     return 0;
 }
@@ -495,11 +516,16 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
 static int chk_lcn_claimed_below(CHK_CTX *c, ULONGLONG lcn, ULONG notThis)
 {
     UCHAR *rec = (UCHAR *)malloc(c->MftRecordSize);
+    CHK_RUN *runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
     ULONG recno;
     int found = 0;
 
-    if (!rec)
+    if (!rec || !runs)
+    {
+        free(rec);
+        free(runs);
         return 0;
+    }
     for (recno = 0; recno < notThis && recno < c->RecordCount && !found; recno++)
     {
         FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
@@ -519,7 +545,6 @@ static int chk_lcn_claimed_below(CHK_CTX *c, ULONGLONG lcn, ULONG notThis)
                 break;
             if (a->NonResident)
             {
-                CHK_RUN runs[CHK_MAX_RUNS];
                 int n = chk_decode_runs(rec + off + a->NR.MappingPairsOffset,
                                         rec + off + a->Length, runs,
                                         CHK_MAX_RUNS);
@@ -534,6 +559,7 @@ static int chk_lcn_claimed_below(CHK_CTX *c, ULONGLONG lcn, ULONG notThis)
             off += a->Length;
         }
     }
+    free(runs);
     free(rec);
     return found;
 }
@@ -548,12 +574,18 @@ static int chk_lcn_claimed_below(CHK_CTX *c, ULONGLONG lcn, ULONG notThis)
 int chk_repair_crosslinks(CHK_CTX *c, NTFS_CHK_RESULT *res)
 {
     UCHAR *rec;
+    CHK_RUN *runs;   /* 192 KiB: too large for the stack */
     ULONG li;
     ULONG ledgerCount = CHK_MIN(c->XLinkCount, (ULONG)CHK_MAX_XLINKS);
 
     rec = (UCHAR *)malloc(c->MftRecordSize);
-    if (!rec)
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!rec || !runs)
+    {
+        free(rec);
+        free(runs);
         return -1;
+    }
 
     for (li = 0; li < ledgerCount; li++)
     {
@@ -587,7 +619,6 @@ int chk_repair_crosslinks(CHK_CTX *c, NTFS_CHK_RESULT *res)
                     a->Type != AT_STANDARD_INFORMATION &&
                     a->Type != AT_FILE_NAME)
                 {
-                    CHK_RUN runs[CHK_MAX_RUNS];
                     const UCHAR *mp = rec + off + a->NR.MappingPairsOffset;
                     const UCHAR *end = rec + off + a->Length;
                     int n = chk_decode_runs(mp, end, runs, CHK_MAX_RUNS);
@@ -646,6 +677,7 @@ int chk_repair_crosslinks(CHK_CTX *c, NTFS_CHK_RESULT *res)
         }
     }
 
+    free(runs);
     free(rec);
     return 0;
 }
@@ -777,24 +809,29 @@ int chk_repair_mft_bitmap(CHK_CTX *c, NTFS_CHK_RESULT *res)
         {
             /* Non-resident: write MftMap over $MFT:$BITMAP's runlist, but
              * never beyond the on-disk DataSize (do not grow/shrink attr). */
-            CHK_RUN runs[CHK_MAX_RUNS];
+            CHK_RUN *runs;   /* 192 KiB: too large for the stack */
             const UCHAR *mp = rec + off + a->NR.MappingPairsOffset;
             const UCHAR *end = rec + off + a->Length;
-            int n = chk_decode_runs(mp, end, runs, CHK_MAX_RUNS);
+            int n;
             UCHAR *buf;
             onDiskSize = (ULONGLONG)a->NR.DataSize;
-            if (n <= 0)
+            runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+            if (!runs)
                 { free(rec); return -1; }
+            n = chk_decode_runs(mp, end, runs, CHK_MAX_RUNS);
+            if (n <= 0)
+                { free(runs); free(rec); return -1; }
             writeBytes = CHK_MIN(onDiskSize, modelBytes);
             buf = (UCHAR *)calloc(1, (size_t)onDiskSize + 8);
             if (!buf)
-                { free(rec); return -1; }
+                { free(runs); free(rec); return -1; }
             memcpy(buf, c->MftMap, (size_t)writeBytes);
             /* bytes past the model span stay 0 (records >= RecordCount) */
             if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
                               0, buf, onDiskSize, 1) != 0)
-                { free(buf); free(rec); return -1; }
+                { free(buf); free(runs); free(rec); return -1; }
             free(buf);
+            free(runs);
         }
     }
     free(rec);
@@ -1010,13 +1047,16 @@ static void chk_rb_free_old_ia(CHK_CTX *c, UCHAR *rec)
 {
     ULONG iaOff = chk_find_attr(c, rec, AT_INDEX_ALLOCATION, chk_i30_name, 4);
     ATTR_RECORD *a;
-    CHK_RUN runs[CHK_MAX_RUNS];
+    CHK_RUN *runs;   /* 192 KiB: too large for the stack */
     int n, i;
 
     if (!iaOff || !c->ClusterMap)
         return;
     a = (ATTR_RECORD *)(rec + iaOff);
     if (!a->NonResident)
+        return;
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!runs)
         return;
     n = chk_decode_runs(rec + iaOff + a->NR.MappingPairsOffset,
                         rec + iaOff + a->Length, runs, CHK_MAX_RUNS);
@@ -1032,6 +1072,7 @@ static void chk_rb_free_old_ia(CHK_CTX *c, UCHAR *rec)
                 chk_bmp_clear(c->ClusterMap, lcn);
         }
     }
+    free(runs);
 }
 
 /* Remove the three old $I30 attributes from a record (INDEX_ROOT,
@@ -2044,20 +2085,24 @@ static int chk_orphan_set_mft_bit(CHK_CTX *c, ULONG recno)
         }
         else
         {
-            CHK_RUN runs[CHK_MAX_RUNS];
-            int n = chk_decode_runs(rec + off + a->NR.MappingPairsOffset,
-                                    rec + off + a->Length, runs, CHK_MAX_RUNS);
-            if (n > 0 && byteOff < (ULONGLONG)a->NR.DataSize)
+            CHK_RUN *runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+            if (runs)
             {
-                UCHAR b = 0;
-                if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
-                                  byteOff, &b, 1, 0) == 0)
+                int n = chk_decode_runs(rec + off + a->NR.MappingPairsOffset,
+                                        rec + off + a->Length, runs, CHK_MAX_RUNS);
+                if (n > 0 && byteOff < (ULONGLONG)a->NR.DataSize)
                 {
-                    b |= mask;
+                    UCHAR b = 0;
                     if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
-                                      byteOff, &b, 1, 1) == 0)
-                        rc = 0;
+                                      byteOff, &b, 1, 0) == 0)
+                    {
+                        b |= mask;
+                        if (chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
+                                          byteOff, &b, 1, 1) == 0)
+                            rc = 0;
+                    }
                 }
+                free(runs);
             }
         }
     }
@@ -2286,16 +2331,23 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
 /* Force the volume dirty (used by the harness to seed the dirty repair). */
 int NtfsChkSetVolumeDirty(const MKNTFS_IO *io)
 {
-    CHK_CTX c;
+    CHK_CTX *c;   /* ~197 KiB: too large for the stack */
     NTFS_CHK_RESULT tmp;
-    memset(&c, 0, sizeof(c));
+    int rc;
+
+    c = (CHK_CTX *)malloc(sizeof(*c));
+    if (!c)
+        return -1;
+    memset(c, 0, sizeof(*c));
     memset(&tmp, 0, sizeof(tmp));
-    c.Io = io;
-    if (chk_read_boot(&c, &tmp) != 0)
-        return -1;
-    if (chk_load_mft(&c, &tmp) != 0)
-        return -1;
-    return chk_set_volume_flag(&c, 1, 0);
+    c->Io = io;
+    if (chk_read_boot(c, &tmp) != 0)
+        { free(c); return -1; }
+    if (chk_load_mft(c, &tmp) != 0)
+        { free(c); return -1; }
+    rc = chk_set_volume_flag(c, 1, 0);
+    free(c);
+    return rc;
 }
 
 /* Clear the $Bitmap bit for the MFT's own first cluster, fabricating a
@@ -2303,42 +2355,52 @@ int NtfsChkSetVolumeDirty(const MKNTFS_IO *io)
  * in *clearedLcn.  Used by the harness to exercise repair. */
 int NtfsChkTestClearMftBit(const MKNTFS_IO *io, ULONGLONG *clearedLcn)
 {
-    CHK_CTX c;
+    CHK_CTX *c;   /* ~197 KiB: too large for the stack */
     NTFS_CHK_RESULT tmp;
     UCHAR *rec6;
-    CHK_RUN bmpRuns[CHK_MAX_RUNS];
+    CHK_RUN *bmpRuns;
     ULONGLONG lcn, byteOff;
     UCHAR b;
     int nruns;
 
-    memset(&c, 0, sizeof(c));
+    c = (CHK_CTX *)malloc(sizeof(*c));
+    bmpRuns = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!c || !bmpRuns)
+    {
+        free(c);
+        free(bmpRuns);
+        return -1;
+    }
+    memset(c, 0, sizeof(*c));
     memset(&tmp, 0, sizeof(tmp));
-    c.Io = io;
-    if (chk_read_boot(&c, &tmp) != 0 || chk_load_mft(&c, &tmp) != 0)
-        return -1;
+    c->Io = io;
+    if (chk_read_boot(c, &tmp) != 0 || chk_load_mft(c, &tmp) != 0)
+        { free(bmpRuns); free(c); return -1; }
 
-    rec6 = (UCHAR *)malloc(c.MftRecordSize);
+    rec6 = (UCHAR *)malloc(c->MftRecordSize);
     if (!rec6)
-        return -1;
-    if (chk_read_record(&c, FILE_Bitmap, rec6) != 0 ||
+        { free(bmpRuns); free(c); return -1; }
+    if (chk_read_record(c, FILE_Bitmap, rec6) != 0 ||
         *(ULONG *)rec6 != NRH_FILE_TYPE ||
-        chk_apply_fixups(rec6, c.MftRecordSize, c.BytesPerSector) != 0)
-        { free(rec6); return -1; }
-    nruns = chk_find_data_runs(&c, rec6, bmpRuns, CHK_MAX_RUNS, NULL);
+        chk_apply_fixups(rec6, c->MftRecordSize, c->BytesPerSector) != 0)
+        { free(rec6); free(bmpRuns); free(c); return -1; }
+    nruns = chk_find_data_runs(c, rec6, bmpRuns, CHK_MAX_RUNS, NULL);
     free(rec6);
     if (nruns <= 0)
-        return -1;
+        { free(bmpRuns); free(c); return -1; }
 
-    lcn = c.MftLcn;
+    lcn = c->MftLcn;
     byteOff = lcn / 8;
-    if (chk_stream_io(io, bmpRuns, (ULONG)nruns, c.BytesPerCluster,
+    if (chk_stream_io(io, bmpRuns, (ULONG)nruns, c->BytesPerCluster,
                       byteOff, &b, 1, 0) != 0)
-        return -1;
+        { free(bmpRuns); free(c); return -1; }
     b &= (UCHAR)~(1u << (lcn & 7));
-    if (chk_stream_io(io, bmpRuns, (ULONG)nruns, c.BytesPerCluster,
+    if (chk_stream_io(io, bmpRuns, (ULONG)nruns, c->BytesPerCluster,
                       byteOff, &b, 1, 1) != 0)
-        return -1;
+        { free(bmpRuns); free(c); return -1; }
     if (clearedLcn)
         *clearedLcn = lcn;
+    free(bmpRuns);
+    free(c);
     return 0;
 }
