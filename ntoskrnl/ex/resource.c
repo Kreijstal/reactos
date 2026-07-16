@@ -840,58 +840,6 @@ TryAcquire:
     else
     {
         /* Nobody owns it, so let's! */
-#if defined(_M_AMD64)
-        if (Resource->ActiveCount != 0)
-        {
-            ULONG_PTR Rsp;
-            PVOID Caller2 = NULL;
-            __asm__ volatile("movq %%rsp, %0" : "=r"(Rsp));
-            /* CdAcquireResource prologue is 3 pushes + sub 0x20 = 0x38 bytes;
-             * its CALL of ExAcquireResourceExclusiveLite pushes 8 more; this
-             * function's own prologue is 4 pushes + sub 0x98 = 0xB8. So our
-             * direct caller's RA is at rsp+0xB8 (=_ReturnAddress) and the
-             * caller-of-caller's RA is at rsp+0xB8+0x38+8 = rsp+0xF8. */
-            Caller2 = *(PVOID*)(Rsp + 0xF8);
-            ULONG *Hdr = (ULONG *)((PCHAR)Resource - 0x20);
-            DPRINT1("RES-INV-EX: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
-                    "SW=%lu ExW=%lu T=%p Caller=%p Caller2=%p\n",
-                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
-                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
-                    Resource->OwnerEntry.OwnerCount,
-                    Resource->NumberOfSharedWaiters,
-                    Resource->NumberOfExclusiveWaiters,
-                    (PVOID)Thread, _ReturnAddress(), Caller2);
-            /* Dump 0x20 bytes before Resource (NodeTypeCode + SegmentObject
-             * area if this is a FCB_NONPAGED) and the spinlock area inside the
-             * ERESOURCE — helps distinguish live vs freed/UAF memory. */
-            DPRINT1("RES-INV-EX-MEM: -20:[%08x %08x %08x %08x %08x %08x %08x %08x] "
-                    "SpinLock=%p\n",
-                    Hdr[0], Hdr[1], Hdr[2], Hdr[3],
-                    Hdr[4], Hdr[5], Hdr[6], Hdr[7],
-                    (PVOID)Resource->SpinLock);
-
-            /* At-fault-only forensics (no hot-path cost). The AC-write history
-             * already proved R was legitimately released to free and then
-             * stray-written by a non-resource.c actor. Now characterise the
-             * corruption: (1) the pool header of the FCB allocation (FCB starts
-             * at R-0x20; amd64 POOL_HEADER is 0x10 bytes, so it sits at R-0x30)
-             * to detect realloc/alias/overrun; (2) whether R is still correctly
-             * linked in ExpSystemResourcesList (= a valid init'd resource);
-             * (3) OwnerTable + ContentionCount. */
-            {
-                ULONG *Ph = (ULONG *)((PCHAR)Resource - 0x30);
-                PLIST_ENTRY Le = &Resource->SystemResourcesList;
-                BOOLEAN Linked = (Le->Flink->Blink == Le) && (Le->Blink->Flink == Le);
-                DPRINT1("RES-INV-EX-POOL: hdr@-30:[%08x %08x %08x %08x] "
-                        "(PrevSize/BlockSize/PoolType in first ULONG, tag in 2nd)\n",
-                        Ph[0], Ph[1], Ph[2], Ph[3]);
-                DPRINT1("RES-INV-EX-LIST: linked=%d Flink=%p Blink=%p "
-                        "OwnerTable=%p ContentionCount=%lu\n",
-                        Linked, Le->Flink, Le->Blink,
-                        Resource->OwnerTable, Resource->ContentionCount);
-            }
-        }
-#endif /* _M_AMD64 */
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->Flag |= ResourceOwnedExclusive;
@@ -1012,17 +960,6 @@ ExAcquireResourceSharedLite(IN PERESOURCE Resource,
                 if (Resource->ActiveEntries == 0)
                 {
                     /* Set initial counts */
-                    if (Resource->ActiveCount != 0)
-                    {
-                        DPRINT1("RES-INV-SH2: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
-                                "SW=%lu ExW=%lu T=%p Caller=%p\n",
-                                Resource, Resource->ActiveCount, Resource->ActiveEntries,
-                                Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
-                                Resource->OwnerEntry.OwnerCount,
-                                Resource->NumberOfSharedWaiters,
-                                Resource->NumberOfExclusiveWaiters,
-                                (PVOID)Thread, _ReturnAddress());
-                    }
                     ASSERT(Resource->ActiveCount == 0);
                     Resource->ActiveEntries = 1;
                     Resource->ActiveCount = 1;
@@ -1065,17 +1002,6 @@ ExAcquireResourceSharedLite(IN PERESOURCE Resource,
     if (Resource->ActiveEntries == 0)
     {
         /* Acquire it */
-        if (Resource->ActiveCount != 0)
-        {
-            DPRINT1("RES-INV-SH: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
-                    "SW=%lu ExW=%lu T=%p Caller=%p\n",
-                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
-                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
-                    Resource->OwnerEntry.OwnerCount,
-                    Resource->NumberOfSharedWaiters,
-                    Resource->NumberOfExclusiveWaiters,
-                    (PVOID)Thread, _ReturnAddress());
-        }
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->ActiveEntries = 1;
@@ -1161,17 +1087,6 @@ TryAcquire:
     if (Resource->ActiveEntries == 0)
     {
         /* Nobody owns it, so let's take control */
-        if (Resource->ActiveCount != 0)
-        {
-            DPRINT1("RES-INV-SS: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
-                    "SW=%lu ExW=%lu T=%p Caller=%p\n",
-                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
-                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
-                    Resource->OwnerEntry.OwnerCount,
-                    Resource->NumberOfSharedWaiters,
-                    Resource->NumberOfExclusiveWaiters,
-                    (PVOID)Thread, _ReturnAddress());
-        }
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->ActiveCount = 1;
@@ -1326,17 +1241,6 @@ TryAcquire:
     if (!Resource->ActiveEntries)
     {
         /* Nobody owns it, so let's take control */
-        if (Resource->ActiveCount != 0)
-        {
-            DPRINT1("RES-INV-SW: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
-                    "SW=%lu ExW=%lu T=%p Caller=%p\n",
-                    Resource, Resource->ActiveCount, Resource->ActiveEntries,
-                    Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
-                    Resource->OwnerEntry.OwnerCount,
-                    Resource->NumberOfSharedWaiters,
-                    Resource->NumberOfExclusiveWaiters,
-                    (PVOID)Thread, _ReturnAddress());
-        }
         ASSERT(Resource->ActiveEntries == 0);
         ASSERT(Resource->ActiveCount == 0);
         Resource->ActiveCount = 1;
@@ -1957,20 +1861,6 @@ ExReleaseResourceForThreadLite(IN PERESOURCE Resource,
     /* Sanity checks */
     ExpVerifyResource(Resource);
     ExpCheckForApcsDisabled(LockHandle.OldIrql, Resource, KeGetCurrentThread());
-
-    /* Entry-state invariant: someone called release on an AC/AE-inconsistent
-     * resource. Capture state to localise the prior offending actor. */
-    if ((Resource->ActiveEntries == 0) != (Resource->ActiveCount == 0))
-    {
-        DPRINT1("RES-REL-ENTRY-INV: R=%p AC=%d AE=%lu Flag=0x%x OT=%p OC=%d "
-                "SW=%lu ExW=%lu T=%p Caller=%p\n",
-                Resource, Resource->ActiveCount, Resource->ActiveEntries,
-                Resource->Flag, (PVOID)Resource->OwnerEntry.OwnerThread,
-                Resource->OwnerEntry.OwnerCount,
-                Resource->NumberOfSharedWaiters,
-                Resource->NumberOfExclusiveWaiters,
-                (PVOID)Thread, _ReturnAddress());
-    }
 
     /* Check if it's exclusively owned */
     if (IsOwnedExclusive(Resource))
