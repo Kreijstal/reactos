@@ -409,9 +409,9 @@ Ndis6CreateLogicalAdapter(
     /* BusType / BusNumber: sniff the PDO's owning driver name to pick a
      * sensible default. PCI miniports (e1000e, virtio-net 6.x, etc.) sit
      * on \Driver\PCI; USB miniports (usbrndis) sit on \Driver\USBHUB.
-     * Anything else falls through to PCIBus which is the safest default
-     * for the legacy NdisMMapIoSpace fallback path. */
-    Adapter->NdisMiniportBlock.BusType    = PCIBus;
+     * Anything else falls through to NdisInterfacePci which is the safest
+     * default for the legacy NdisMMapIoSpace fallback path. */
+    Adapter->NdisMiniportBlock.BusType    = NdisInterfacePci;
     Adapter->NdisMiniportBlock.BusNumber  = 0;
     if (Pdo != NULL && Pdo->DriverObject != NULL)
     {
