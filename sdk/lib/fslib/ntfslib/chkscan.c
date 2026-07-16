@@ -31,15 +31,21 @@ static void chk_account_attr(CHK_CTX *c, UCHAR *rec, ULONG attrOff,
                              UCHAR *computed, NTFS_CHK_RESULT *res, ULONG recno)
 {
     ATTR_RECORD *a = (ATTR_RECORD *)(rec + attrOff);
-    CHK_RUN runs[CHK_MAX_RUNS];
+    CHK_RUN *runs;   /* 192 KiB: too large for the stack */
     const UCHAR *mp = rec + attrOff + a->NR.MappingPairsOffset;
     const UCHAR *end = rec + attrOff + a->Length;
     int n, i;
     int reportedOob = 0, reportedXlink = 0;
 
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!runs)
+        return;
     n = chk_decode_runs(mp, end, runs, CHK_MAX_RUNS);
     if (n < 0)
+    {
+        free(runs);
         return;
+    }
     for (i = 0; i < n; i++)
     {
         ULONGLONG cl;
@@ -74,6 +80,7 @@ static void chk_account_attr(CHK_CTX *c, UCHAR *rec, ULONG attrOff,
         }
         res->ClustersUsed += runs[i].Len;
     }
+    free(runs);
 }
 
 /* Validate one base record's $ATTRIBUTE_LIST (pass 1.5 helper). */
@@ -973,11 +980,15 @@ int chk_check_mft_bitmap(CHK_CTX *c, NTFS_CHK_RESULT *res,
 static void chk_mark_system_runs(CHK_CTX *c, ULONG recno, UCHAR *protectedMap)
 {
     UCHAR *rec = (UCHAR *)malloc(c->MftRecordSize);
-    CHK_RUN runs[CHK_MAX_RUNS];
+    CHK_RUN *runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
     int n, i;
 
-    if (!rec)
+    if (!rec || !runs)
+    {
+        free(rec);
+        free(runs);
         return;
+    }
     if (chk_read_record(c, recno, rec) == 0 &&
         *(ULONG *)rec == NRH_FILE_TYPE &&
         chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) == 0)
@@ -996,6 +1007,7 @@ static void chk_mark_system_runs(CHK_CTX *c, ULONG recno, UCHAR *protectedMap)
             }
         }
     }
+    free(runs);
     free(rec);
 }
 
@@ -1003,35 +1015,38 @@ int chk_crosscheck_bitmap(CHK_CTX *c, UCHAR *computed,
                           NTFS_CHK_RESULT *res, const NTFS_CHK_OPTIONS *opt)
 {
     UCHAR *rec6, *diskBmp, *protectedMap;
-    CHK_RUN bmpRuns[CHK_MAX_RUNS];
+    CHK_RUN *bmpRuns;   /* 192 KiB: too large for the stack */
     ULONGLONG bmpBytesNeeded = (c->TotalClusters + 7) / 8;
     ULONGLONG bmpDataSize = 0;
     ULONGLONG cl;
     ULONGLONG underStart = (ULONGLONG)-1, overStart = (ULONGLONG)-1;
     int nruns, dirty = 0, rc = 0;
 
+    bmpRuns = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
+    if (!bmpRuns)
+        return -1;
     rec6 = (UCHAR *)malloc(c->MftRecordSize);
     if (!rec6)
-        return -1;
+        { free(bmpRuns); return -1; }
     if (chk_read_record(c, FILE_Bitmap, rec6) != 0 ||
         *(ULONG *)rec6 != NRH_FILE_TYPE ||
         chk_apply_fixups(rec6, c->MftRecordSize, c->BytesPerSector) != 0)
-        { free(rec6); return -1; }
+        { free(rec6); free(bmpRuns); return -1; }
 
     nruns = chk_find_data_runs(c, rec6, bmpRuns, CHK_MAX_RUNS, &bmpDataSize);
     free(rec6);
     if (nruns <= 0)
-        return -1;
+        { free(bmpRuns); return -1; }
 
     diskBmp = (UCHAR *)calloc(1, (size_t)bmpBytesNeeded + 8);
     if (!diskBmp)
-        return -1;
+        { free(bmpRuns); return -1; }
 
     {
         ULONGLONG toRead = CHK_MIN(bmpBytesNeeded, bmpDataSize);
         if (chk_stream_io(c->Io, bmpRuns, (ULONG)nruns, c->BytesPerCluster,
                           0, diskBmp, toRead, 0) != 0)
-            { free(diskBmp); return -1; }
+            { free(diskBmp); free(bmpRuns); return -1; }
     }
 
     /* R6 carve-outs (H7): clusters we must never free even when the computed
@@ -1119,6 +1134,7 @@ int chk_crosscheck_bitmap(CHK_CTX *c, UCHAR *computed,
 
     free(protectedMap);
     free(diskBmp);
+    free(bmpRuns);
     return rc;
 }
 
