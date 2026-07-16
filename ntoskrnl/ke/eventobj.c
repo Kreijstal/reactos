@@ -164,12 +164,6 @@ KeSetEvent(IN PKEVENT Event,
     KIRQL OldIrql;
     LONG PreviousState;
     PKTHREAD Thread;
-    if (((Event)->Header.Type != EventNotificationObject) &&
-        ((Event)->Header.Type != EventSynchronizationObject))
-    {
-        DPRINT1("EVENT-DIAG: Event=%p Type=%02x caller=%p\n",
-                Event, Event->Header.Type, __builtin_return_address(0));
-    }
     ASSERT_EVENT(Event);
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
 
