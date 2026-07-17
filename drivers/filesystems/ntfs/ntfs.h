@@ -905,6 +905,16 @@ typedef struct _FCB
     WCHAR *ObjectName;		/* point on filename (250 chars max) in PathName */
     WCHAR PathName[MAX_PATH];	/* path+filename 260 max */
 
+    /* Case-folded hash of PathName, kept in sync by every PathName
+     * writer (NtfsCreateFCB, NtfsUpdateFcbPathName).  Folding must
+     * match _wcsicmp exactly (ASCII A-Z only) so that
+     * _wcsicmp(a, b) == 0 implies equal hashes: NtfsGrabFCBFromTable
+     * compares hashes first and only falls back to _wcsicmp on a hit,
+     * turning the per-open linear scan of the volume FCB list from
+     * O(entries * pathlen) string compares into O(entries) word
+     * compares. */
+    ULONG PathNameHash;
+
     ERESOURCE PagingIoResource;
     ERESOURCE MainResource;
 
@@ -1521,6 +1531,9 @@ NTSTATUS
 NtfsParseStreamPath(PUNICODE_STRING FileName,
                     PUNICODE_STRING StreamName,
                     PNTFS_STREAM_TYPE StreamType);
+
+ULONG
+NtfsComputePathNameHash(PCWSTR Path);
 
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,

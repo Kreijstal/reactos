@@ -1232,6 +1232,7 @@ NtfsUpdateFcbPathName(PNTFS_FCB Fcb,
 
     RtlCopyMemory(Fcb->PathName, PathName->Buffer, PathName->Length);
     Fcb->PathName[PathName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    Fcb->PathNameHash = NtfsComputePathNameHash(Fcb->PathName);
 
     ObjectName = wcsrchr(Fcb->PathName, L'\\');
     if (ObjectName != NULL && ObjectName[1] != UNICODE_NULL)
