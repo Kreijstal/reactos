@@ -947,8 +947,13 @@ ExpQuerySystemProcessInformation(
                 !(Process->ActiveThreads) &&
                 (IsListEmpty(&Process->Pcb.ThreadListHead)))
             {
-                DPRINT1("Process %p (%s:%p) is a zombie\n",
-                        Process, Process->ImageFileName, Process->UniqueProcessId);
+                /* NOTE: This is a hot path: callers poll SystemProcessInformation
+                 * (e.g. Cygwin/MSYS2 pipe select()), and zombie processes are
+                 * long-lived whenever a parent holds the process handle without
+                 * reaping. An unconditional DbgPrint here multiplies into a
+                 * serial-output storm that can starve the whole system. */
+                DPRINT("Process %p (%s:%p) is a zombie\n",
+                       Process, Process->ImageFileName, Process->UniqueProcessId);
                 CurrentSize = 0;
                 ImageNameMaximumLength = 0;
 
