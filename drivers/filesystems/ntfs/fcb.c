@@ -292,6 +292,7 @@ NtfsCreateFCB(PCWSTR FileName,
             Fcb->ObjectName = Fcb->PathName;
         }
     }
+    Fcb->PathNameHash = NtfsComputePathNameHash(Fcb->PathName);
 
     if (Stream)
     {
@@ -672,11 +673,37 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
 }
 
 
+/* FNV-1a over PathName with the same case folding as the kernel's
+ * _wcsicmp (ASCII A-Z only, see sdk/lib/crt/wstring/_wcsicmp_nt.c).
+ * Any wider folding (e.g. RtlUpcaseUnicodeChar) would let two strings
+ * hash differently although _wcsicmp calls them equal, and
+ * NtfsGrabFCBFromTable would then miss an existing FCB and create a
+ * duplicate. */
+ULONG
+NtfsComputePathNameHash(PCWSTR Path)
+{
+    ULONG Hash = 2166136261u;
+    WCHAR c;
+
+    while ((c = *Path++) != UNICODE_NULL)
+    {
+        if (c >= L'A' && c <= L'Z')
+            c += (L'a' - L'A');
+        Hash = (Hash ^ c) * 16777619u;
+    }
+
+    return Hash;
+}
+
+
 VOID
 NtfsAddFCBToTable(PNTFS_VCB Vcb,
                   PNTFS_FCB Fcb)
 {
     KIRQL oldIrql;
+
+    /* Catch any PathName writer that forgot to refresh the hash */
+    ASSERT(Fcb->PathNameHash == NtfsComputePathNameHash(Fcb->PathName));
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->Vcb = Vcb;
@@ -692,25 +719,29 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
     KIRQL oldIrql;
     PNTFS_FCB Fcb;
     PLIST_ENTRY current_entry;
-
-    KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+    ULONG NameHash;
 
     if (FileName == NULL || *FileName == 0)
     {
         DPRINT("Return FCB for stream file object\n");
+        KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
         Fcb = Vcb->StreamFileObject->FsContext;
         Fcb->RefCount++;
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
         return Fcb;
     }
 
+    NameHash = NtfsComputePathNameHash(FileName);
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+
     current_entry = Vcb->FcbListHead.Flink;
     while (current_entry != &Vcb->FcbListHead)
     {
         Fcb = CONTAINING_RECORD(current_entry, NTFS_FCB, FcbListEntry);
 
-        DPRINT("Comparing '%S' and '%S'\n", FileName, Fcb->PathName);
-        if (_wcsicmp(FileName, Fcb->PathName) == 0)
+        if (Fcb->PathNameHash == NameHash &&
+            _wcsicmp(FileName, Fcb->PathName) == 0)
         {
             /* A fully deleted file (its last name removed and MFT record freed
              * by NtfsDeleteFileRecord, which zeroes LinkCount) may still linger
