@@ -21,6 +21,40 @@ PHANDLE_TABLE ObpKernelHandleTable = NULL;
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+/*
+ * Starting with Windows Vista, process and thread handles implicitly carry
+ * the "limited" rights whenever the corresponding full right was granted:
+ * PROCESS_QUERY_INFORMATION implies PROCESS_QUERY_LIMITED_INFORMATION, and
+ * THREAD_QUERY_INFORMATION / THREAD_SET_INFORMATION imply
+ * THREAD_QUERY_LIMITED_INFORMATION / THREAD_SET_LIMITED_INFORMATION.
+ * See "Process Security and Access Rights" in the PSDK. Windows applies this
+ * whenever a handle table entry is created (open, duplicate, inheritance).
+ */
+FORCEINLINE
+ACCESS_MASK
+ObpAddImpliedAccessRights(
+    _In_ POBJECT_TYPE ObjectType,
+    _In_ ACCESS_MASK GrantedAccess)
+{
+    if (ObjectType == PsProcessType)
+    {
+        if (GrantedAccess & PROCESS_QUERY_INFORMATION)
+            GrantedAccess |= PROCESS_QUERY_LIMITED_INFORMATION;
+    }
+    else if (ObjectType == PsThreadType)
+    {
+        if (GrantedAccess & THREAD_QUERY_INFORMATION)
+            GrantedAccess |= THREAD_QUERY_LIMITED_INFORMATION;
+        if (GrantedAccess & THREAD_SET_INFORMATION)
+            GrantedAccess |= THREAD_SET_LIMITED_INFORMATION;
+    }
+    return GrantedAccess;
+}
+#else
+#define ObpAddImpliedAccessRights(ObjectType, GrantedAccess) (GrantedAccess)
+#endif
+
 PHANDLE_TABLE
 NTAPI
 ObReferenceProcessHandleTable(IN PEPROCESS Process)
@@ -1512,6 +1546,9 @@ ObpCreateUnnamedHandle(IN PVOID Object,
     GrantedAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
                                      ACCESS_SYSTEM_SECURITY);
 
+    /* Add the implied process/thread rights */
+    GrantedAccess = ObpAddImpliedAccessRights(ObjectType, GrantedAccess);
+
     /* Handle extra references */
     if (AdditionalReferences)
     {
@@ -1722,6 +1759,9 @@ ObpCreateHandle(IN OB_OPEN_REASON OpenReason,
     /* Remove what's not in the valid access mask */
     GrantedAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
                                      ACCESS_SYSTEM_SECURITY);
+
+    /* Add the implied process/thread rights */
+    GrantedAccess = ObpAddImpliedAccessRights(ObjectType, GrantedAccess);
 
     /* Update the value in the access state */
     AccessState->PreviouslyGrantedAccess = GrantedAccess;
@@ -2520,6 +2560,10 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     /* Set the target access, always propagate ACCESS_SYSTEM_SECURITY */
     TargetAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
                                     ACCESS_SYSTEM_SECURITY);
+
+    /* Add the implied process/thread rights */
+    TargetAccess = ObpAddImpliedAccessRights(ObjectType, TargetAccess);
+
     NewHandleEntry.GrantedAccess = TargetAccess;
 
     /* Check if we're asking for new access */
