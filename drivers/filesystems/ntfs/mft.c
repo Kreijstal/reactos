@@ -3107,6 +3107,40 @@ CleanupLock:
 * file which contains one FILENAME_ATTRIBUTE for a long name and another for the 8.3 name, will
 * get both attributes added to its parent directory.
 */
+/* UpdateIndexAllocation() can re-lay-out the parent's base file record in
+ * place: when the record overflows it inserts an $ATTRIBUTE_LIST and moves
+ * attributes (shifting $INDEX_ROOT).  Any cached IndexRootOffset and
+ * attribute context are invalid afterwards; walking the record with them
+ * reads garbage lengths and runs off the buffer.  Re-find $I30 in the
+ * caller's in-memory record before it touches either again.  Deliberately
+ * NO ReadFileRecord here: the in-memory record carries intentional
+ * not-yet-persisted changes (the temporary index-root shrink) that a disk
+ * re-read would revert, starving AddIndexAllocation of record space. */
+static
+NTSTATUS
+NtfsRefreshIndexRootContext(PDEVICE_EXTENSION DeviceExt,
+                            PFILE_RECORD_HEADER ParentFileRecord,
+                            PNTFS_ATTR_CONTEXT *IndexRootContext,
+                            PULONG IndexRootOffset)
+{
+    NTSTATUS Status;
+
+    ReleaseAttributeContext(*IndexRootContext);
+    *IndexRootContext = NULL;
+    Status = FindAttribute(DeviceExt,
+                           ParentFileRecord,
+                           AttributeIndexRoot,
+                           L"$I30",
+                           4,
+                           IndexRootContext,
+                           IndexRootOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Couldn't re-find $I30 $INDEX_ROOT after index update!\n");
+    }
+    return Status;
+}
+
 /* Internal worker for NtfsAddFilenameToDirectory.  The public entry point is
  * the wrapper below, which takes Vcb->IndexResource exclusive across this
  * call so concurrent BrowseSubNodeIndexEntries readers can't observe a
@@ -3343,6 +3377,21 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     DumpBTree(NewTree);
 #endif
 
+    // UpdateIndexAllocation may have re-laid-out the base record (e.g. an
+    // $ATTRIBUTE_LIST insertion moves $INDEX_ROOT); refresh our view of it
+    Status = NtfsRefreshIndexRootContext(DeviceExt,
+                                         ParentFileRecord,
+                                         &IndexRootContext,
+                                         &IndexRootOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
     // Find the maximum index root size given what the file record can hold
     // First, find the max index size assuming index root is the last attribute
     NewMaxIndexRootSize =
@@ -3400,6 +3449,20 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
             return Status;
         }
         NTFS_TRACE_IF(TraceIndex, "DRVIDX: update index allocation 2 done\n");
+
+        // The second UpdateIndexAllocation can move $INDEX_ROOT again
+        Status = NtfsRefreshIndexRootContext(DeviceExt,
+                                             ParentFileRecord,
+                                             &IndexRootContext,
+                                             &IndexRootOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            DestroyBTree(NewTree);
+            ReleaseAttributeContext(IndexRootContext);
+            ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+            return Status;
+        }
 
         // re-recalculate max size of index root
         NewMaxIndexRootSize =
@@ -3690,6 +3753,21 @@ NtfsRemoveFilenameFromDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     }
 
     Status = UpdateIndexAllocation(DeviceExt, NewTree, I30IndexRoot->SizeOfEntry, ParentFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return Status;
+    }
+
+    // UpdateIndexAllocation may have re-laid-out the base record (e.g. an
+    // $ATTRIBUTE_LIST insertion moves $INDEX_ROOT); refresh our view of it
+    Status = NtfsRefreshIndexRootContext(DeviceExt,
+                                         ParentFileRecord,
+                                         &IndexRootContext,
+                                         &IndexRootOffset);
     if (!NT_SUCCESS(Status))
     {
         DestroyBTree(NewTree);
