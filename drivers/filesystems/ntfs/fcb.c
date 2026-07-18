@@ -900,6 +900,12 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     if (StdInfo != NULL)
     {
         Fcb->Entry.FileAttributes |= StdInfo->FileAttribute;
+        /* $STANDARD_INFORMATION carries the authoritative timestamps; the
+         * $FILE_NAME duplicates are only lazily maintained (as on Windows) */
+        Fcb->Entry.CreationTime = StdInfo->CreationTime;
+        Fcb->Entry.ChangeTime = StdInfo->ChangeTime;
+        Fcb->Entry.LastWriteTime = StdInfo->LastWriteTime;
+        Fcb->Entry.LastAccessTime = StdInfo->LastAccessTime;
     }
 
     NtfsFCBInitializeCache(Vcb, Fcb);
@@ -990,6 +996,12 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     if (StdInfo != NULL)
     {
         rcFCB->Entry.FileAttributes |= StdInfo->FileAttribute;
+        /* $STANDARD_INFORMATION carries the authoritative timestamps; the
+         * $FILE_NAME duplicates are only lazily maintained (as on Windows) */
+        rcFCB->Entry.CreationTime = StdInfo->CreationTime;
+        rcFCB->Entry.ChangeTime = StdInfo->ChangeTime;
+        rcFCB->Entry.LastWriteTime = StdInfo->LastWriteTime;
+        rcFCB->Entry.LastAccessTime = StdInfo->LastAccessTime;
     }
 
     /* Initialise RefCount before priming the cache: NtfsFCBInitializeCache

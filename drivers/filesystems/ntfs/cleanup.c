@@ -108,6 +108,23 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         Fcb->OpenHandleCount--;
 
+        /* Commit the implicit timestamp update for a handle that wrote to the
+         * file: Windows stamps LastWriteTime/ChangeTime once at cleanup,
+         * unless the user pinned the times via FileBasicInformation.  Skip a
+         * file that is about to be deleted anyway. */
+        if (BooleanFlagOn(FileObject->Flags, FO_FILE_MODIFIED) &&
+            !BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING))
+        {
+            LARGE_INTEGER Now;
+            KeQuerySystemTime(&Now);
+            if (!BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_LAST_WRITE))
+                Fcb->Entry.LastWriteTime = Now.QuadPart;
+            if (!BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_CHANGE))
+                Fcb->Entry.ChangeTime = Now.QuadPart;
+            ClearFlag(FileObject->Flags, FO_FILE_MODIFIED);
+            NtfsStampFileTimes(DeviceExt, Fcb);
+        }
+
         /* Flush any dirty data from the cache to disk before uninitializing.
          * This is critical because FsRtlCopyWrite may have put data into the
          * cache (even for FILE_NO_INTERMEDIATE_BUFFERING opens, due to the

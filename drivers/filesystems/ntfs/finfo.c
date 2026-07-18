@@ -1128,6 +1128,51 @@ NtfsSetAllocationInformation(PNTFS_FCB Fcb,
 }
 
 /**
+* @name NtfsStampFileTimes
+* @implemented
+*
+* Persists the FCB's current timestamps into the on-disk
+* $STANDARD_INFORMATION. Used by cleanup to commit the implicit
+* LastWriteTime/ChangeTime update after a modifying handle closes.
+*/
+NTSTATUS
+NtfsStampFileTimes(PDEVICE_EXTENSION DeviceExt,
+                   PNTFS_FCB Fcb)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PSTANDARD_INFORMATION StdInfo;
+    NTSTATUS Status;
+
+    NtfsInvalidateCachedFileRecord(Fcb);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
+    if (StdInfo == NULL)
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
+
+    StdInfo->LastWriteTime = Fcb->Entry.LastWriteTime;
+    StdInfo->ChangeTime = Fcb->Entry.ChangeTime;
+    StdInfo->LastAccessTime = Fcb->Entry.LastAccessTime;
+
+    Status = UpdateFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+/**
 * @name NtfsSetBasicInformation
 * @implemented
 *
@@ -1136,6 +1181,7 @@ NtfsSetAllocationInformation(PNTFS_FCB Fcb,
 static
 NTSTATUS
 NtfsSetBasicInformation(PNTFS_FCB Fcb,
+                        PNTFS_CCB Ccb,
                         PDEVICE_EXTENSION DeviceExt,
                         PFILE_BASIC_INFORMATION BasicInfo)
 {
@@ -1167,26 +1213,49 @@ NtfsSetBasicInformation(PNTFS_FCB Fcb,
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
-    /* Only update fields that the caller provided (non-zero means set) */
+    /* Only update fields the caller provided (non-zero means set).  Any
+     * user-provided timestamp also pins that field for this handle: the
+     * implicit cleanup-time stamping must not overwrite it (tar-style
+     * mtime restoration depends on this).  -1 pins without writing. */
     if (BasicInfo->CreationTime.QuadPart != 0)
     {
-        StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
-        Fcb->Entry.CreationTime = BasicInfo->CreationTime.QuadPart;
+        if (Ccb != NULL)
+            SetFlag(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_CREATION);
+        if (BasicInfo->CreationTime.QuadPart != -1)
+        {
+            StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
+            Fcb->Entry.CreationTime = BasicInfo->CreationTime.QuadPart;
+        }
     }
     if (BasicInfo->LastAccessTime.QuadPart != 0)
     {
-        StdInfo->LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
-        Fcb->Entry.LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+        if (Ccb != NULL)
+            SetFlag(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_LAST_ACCESS);
+        if (BasicInfo->LastAccessTime.QuadPart != -1)
+        {
+            StdInfo->LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+            Fcb->Entry.LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+        }
     }
     if (BasicInfo->LastWriteTime.QuadPart != 0)
     {
-        StdInfo->LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
-        Fcb->Entry.LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+        if (Ccb != NULL)
+            SetFlag(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_LAST_WRITE);
+        if (BasicInfo->LastWriteTime.QuadPart != -1)
+        {
+            StdInfo->LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+            Fcb->Entry.LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
+        }
     }
     if (BasicInfo->ChangeTime.QuadPart != 0)
     {
-        StdInfo->ChangeTime = BasicInfo->ChangeTime.QuadPart;
-        Fcb->Entry.ChangeTime = BasicInfo->ChangeTime.QuadPart;
+        if (Ccb != NULL)
+            SetFlag(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_CHANGE);
+        if (BasicInfo->ChangeTime.QuadPart != -1)
+        {
+            StdInfo->ChangeTime = BasicInfo->ChangeTime.QuadPart;
+            Fcb->Entry.ChangeTime = BasicInfo->ChangeTime.QuadPart;
+        }
     }
     if (BasicInfo->FileAttributes != 0)
     {
@@ -1543,6 +1612,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
 
         case FileBasicInformation:
             Status = NtfsSetBasicInformation(Fcb,
+                                             (PNTFS_CCB)FileObject->FsContext2,
                                              DeviceExt,
                                              (PFILE_BASIC_INFORMATION)SystemBuffer);
             break;
