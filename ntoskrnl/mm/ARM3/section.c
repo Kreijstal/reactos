@@ -2097,8 +2097,10 @@ MiRemoveMappedPtes(IN PVOID BaseAddress,
         NumberOfPtes--;
     }
 
-    /* Flush the TLB */
-    KeFlushCurrentTb();
+    /* Flush the TLB on every processor: a system-space view is reachable
+     * from any core, and the pages referenced by the zeroed PTEs are
+     * released to the free list right below */
+    KeFlushEntireTb(TRUE, TRUE);
 
     /* Acquire the PFN lock */
     OldIrql = MiAcquirePfnLock();

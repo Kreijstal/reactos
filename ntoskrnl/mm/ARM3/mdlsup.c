@@ -361,7 +361,11 @@ MiUnmapLockedPagesInUserSpace(
         MdlPages++;
     }
 
-    KeFlushProcessTb();
+    /* Flush on every processor before the freed page-table pages become
+     * reusable at PFN-lock release: KeFlushProcessTb only flushes the local
+     * core, leaving other cores of this process with stale TLB and
+     * paging-structure entries into the freed page tables */
+    KeFlushEntireTb(TRUE, TRUE);
     MiReleasePfnLock(OldIrql);
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
     MmUnlockAddressSpace(&Process->Vm);
