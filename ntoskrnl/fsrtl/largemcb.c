@@ -138,12 +138,10 @@ FsRtlAddBaseMcbEntry(IN PBASE_MCB OpaqueMcb,
                      IN LONGLONG SectorCount)
 {
     BOOLEAN Result = TRUE;
-    BOOLEAN IntResult;
     PBASE_MCB_INTERNAL Mcb = (PBASE_MCB_INTERNAL)OpaqueMcb;
     LARGE_MCB_MAPPING_ENTRY Node, NeedleRun;
-    PLARGE_MCB_MAPPING_ENTRY LowerRun, HigherRun;
+    PLARGE_MCB_MAPPING_ENTRY LowerRun, HigherRun, ExistingRun;
     BOOLEAN NewElement;
-    LONGLONG IntLbn, IntSectorCount;
 
     DPRINT("FsRtlAddBaseMcbEntry(%p, %I64d, %I64d, %I64d)\n", OpaqueMcb, Vbn, Lbn, SectorCount);
 
@@ -159,18 +157,40 @@ FsRtlAddBaseMcbEntry(IN PBASE_MCB OpaqueMcb,
         goto quit;
     }
 
-    IntResult = FsRtlLookupBaseMcbEntry(OpaqueMcb, Vbn, &IntLbn, &IntSectorCount, NULL, NULL, NULL);
-    if (IntResult)
+    /*
+     * Check for an existing real mapping at Vbn with a direct O(log n) tree
+     * lookup, using the same intersect comparator as the merge lookups below.
+     * The previous code called FsRtlLookupBaseMcbEntry() here, which scans the
+     * runs by index (FsRtlGetNextBaseMcbEntry restarts a full in-order tree
+     * walk for every index), making a single lookup O(n^2) and building an
+     * N-run map O(n^3). On a fragmented file (e.g. a memory-mapped DLL) that
+     * stalled the caller for tens of seconds -- most visibly cygwin/msys
+     * fork(), which rebuilds these maps on every spawn.
+     *
+     * Only a real run (never a hole) is stored in the table, so a NULL result
+     * means Vbn is in a hole or past the end -- both of which are "no conflict"
+     * and fall through to the merge/insert below, exactly as before.
+     */
+    NeedleRun.RunStartVbn.QuadPart = Vbn;
+    NeedleRun.RunEndVbn.QuadPart = Vbn + 1;
+    NeedleRun.StartingLbn.QuadPart = ~0ULL;
+    Mcb->Mapping->Table.CompareRoutine = McbMappingIntersectCompare;
+    ExistingRun = RtlLookupElementGenericTable(&Mcb->Mapping->Table, &NeedleRun);
+    Mcb->Mapping->Table.CompareRoutine = McbMappingCompare;
+    if (ExistingRun != NULL)
     {
-        if (IntLbn != -1 && IntLbn != Lbn)
+        LONGLONG ExistingLbn = ExistingRun->StartingLbn.QuadPart + (Vbn - ExistingRun->RunStartVbn.QuadPart);
+
+        if (ExistingLbn != Lbn)
         {
+            /* A different LBN is already mapped here: overwriting is not allowed. */
             Result = FALSE;
             goto quit;
         }
 
-        if ((IntLbn != -1) && (IntSectorCount >= SectorCount))
+        if ((ExistingRun->RunEndVbn.QuadPart - Vbn) >= SectorCount)
         {
-            /* This is a no-op */
+            /* The requested range is already fully mapped: no-op. */
             goto quit;
         }
     }
@@ -511,10 +531,46 @@ FsRtlLookupBaseMcbEntry(IN PBASE_MCB OpaqueMcb,
     OUT PULONG Index OPTIONAL)
 {
     BOOLEAN Result = FALSE;
+    PBASE_MCB_INTERNAL Mcb = (PBASE_MCB_INTERNAL)OpaqueMcb;
+    LARGE_MCB_MAPPING_ENTRY NeedleRun;
+    PLARGE_MCB_MAPPING_ENTRY Run;
     ULONG i;
     LONGLONG LastVbn = 0, LastLbn = 0, Count = 0;   // the last values we've found during traversal
 
     DPRINT("FsRtlLookupBaseMcbEntry(%p, %I64d, %p, %p, %p, %p, %p)\n", OpaqueMcb, Vbn, Lbn, SectorCountFromLbn, StartingLbn, SectorCountFromStartingLbn, Index);
+
+    /*
+     * Fast path: when the caller does not need the run Index, resolve Vbn with
+     * a direct O(log n) tree lookup instead of the index scan below (which is
+     * O(n^2) because FsRtlGetNextBaseMcbEntry restarts a full traversal per
+     * index). Only real runs are stored, so a hit means Vbn maps to real
+     * storage; a miss (hole or past-the-end) falls through to the exact scan
+     * that synthesises hole information. Outputs are identical to that scan's
+     * real-run branch.
+     */
+    if (Index == NULL && Vbn >= 0)
+    {
+        NeedleRun.RunStartVbn.QuadPart = Vbn;
+        NeedleRun.RunEndVbn.QuadPart = Vbn + 1;
+        NeedleRun.StartingLbn.QuadPart = ~0ULL;
+        Mcb->Mapping->Table.CompareRoutine = McbMappingIntersectCompare;
+        Run = RtlLookupElementGenericTable(&Mcb->Mapping->Table, &NeedleRun);
+        Mcb->Mapping->Table.CompareRoutine = McbMappingCompare;
+        if (Run != NULL)
+        {
+            if (Lbn)
+                *Lbn = Run->StartingLbn.QuadPart + (Vbn - Run->RunStartVbn.QuadPart);
+            if (SectorCountFromLbn)
+                *SectorCountFromLbn = Run->RunEndVbn.QuadPart - Vbn;
+            if (StartingLbn)
+                *StartingLbn = Run->StartingLbn.QuadPart;
+            if (SectorCountFromStartingLbn)
+                *SectorCountFromStartingLbn = Run->RunEndVbn.QuadPart - Run->RunStartVbn.QuadPart;
+
+            Result = TRUE;
+            goto quit;
+        }
+    }
 
     for (i = 0; FsRtlGetNextBaseMcbEntry(OpaqueMcb, i, &LastVbn, &LastLbn, &Count); i++)
     {
