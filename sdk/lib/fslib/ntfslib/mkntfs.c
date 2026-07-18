@@ -300,7 +300,8 @@ static UCHAR *get_attr_pos(FILE_RECORD_HEADER *rec)
     return pos;
 }
 
-/* Add a resident attribute. Returns pointer past the new attribute. */
+/* Add a resident attribute. Returns pointer past the new attribute, or NULL
+ * (record untouched) when the attribute does not fit inside BytesAllocated. */
 UCHAR *ntfs_add_resident_attr(USHORT *next_instance, FILE_RECORD_HEADER *rec,
                               ULONG type, const WCHAR *name, ULONG name_len,
                               const void *value, ULONG value_len,
@@ -310,6 +311,16 @@ UCHAR *ntfs_add_resident_attr(USHORT *next_instance, FILE_RECORD_HEADER *rec,
     ATTR_RECORD *a = (ATTR_RECORD *)pos;
     ULONG name_off, value_off, total_len;
 
+    /* Size it before writing anything: header+name+value plus the 8-byte
+     * AT_END tail must stay inside the record */
+    name_off = 0x18;
+    value_off = name_len > 0
+        ? NTFS_ALIGN_UP(name_off + name_len * sizeof(WCHAR), 4)
+        : name_off;
+    total_len = NTFS_ALIGN_UP(value_off + value_len, 8);
+    if (pos + total_len + 8 > (UCHAR *)rec + rec->BytesAllocated)
+        return NULL;
+
     /* Zero only the header, not the AT_END marker that follows */
     memset(a, 0, sizeof(ATTR_RECORD));
     a->Type = type;
@@ -318,16 +329,9 @@ UCHAR *ntfs_add_resident_attr(USHORT *next_instance, FILE_RECORD_HEADER *rec,
     a->Flags = 0;
     a->Instance = (*next_instance)++;
 
-    /* Name goes right after the fixed header (offset 0x18 for resident) */
-    name_off = 0x18;
-    if (name_len > 0) {
-        a->NameOffset = (USHORT)name_off;
+    a->NameOffset = (USHORT)name_off;
+    if (name_len > 0)
         memcpy(pos + name_off, name, name_len * sizeof(WCHAR));
-        value_off = NTFS_ALIGN_UP(name_off + name_len * sizeof(WCHAR), 4);
-    } else {
-        a->NameOffset = (USHORT)name_off;
-        value_off = name_off;
-    }
 
     a->Resident.ValueOffset = (USHORT)value_off;
     a->Resident.ValueLength = value_len;
@@ -370,6 +374,16 @@ UCHAR *ntfs_add_nonresident_attr(USHORT *next_instance, ULONG cluster_size,
     UCHAR run_buf[16];
     int run_len;
 
+    /* Size it before writing anything (run encoded into run_buf first) */
+    name_off = 0x40;
+    runs_off = name_len > 0
+        ? NTFS_ALIGN_UP(name_off + name_len * sizeof(WCHAR), 4)
+        : name_off;
+    run_len = ntfs_encode_run(run_buf, num_clusters, (LONGLONG)start_lcn);
+    total_len = NTFS_ALIGN_UP(runs_off + run_len + 1, 8);
+    if (pos + total_len + 8 > (UCHAR *)rec + rec->BytesAllocated)
+        return NULL;
+
     memset(a, 0, 0x48); /* Non-resident header is 0x40, pad to 0x48 */
     a->Type = type;
     a->NonResident = 1;
@@ -377,16 +391,9 @@ UCHAR *ntfs_add_nonresident_attr(USHORT *next_instance, ULONG cluster_size,
     a->Flags = 0;
     a->Instance = (*next_instance)++;
 
-    /* Name offset: right after the fixed non-resident header (0x40) */
-    name_off = 0x40;
-    if (name_len > 0) {
-        a->NameOffset = (USHORT)name_off;
+    a->NameOffset = (USHORT)name_off;
+    if (name_len > 0)
         memcpy(pos + name_off, name, name_len * sizeof(WCHAR));
-        runs_off = NTFS_ALIGN_UP(name_off + name_len * sizeof(WCHAR), 4);
-    } else {
-        a->NameOffset = (USHORT)name_off;
-        runs_off = name_off;
-    }
 
     a->NR.LowestVcn = 0;
     a->NR.HighestVcn = num_clusters - 1;
@@ -395,12 +402,10 @@ UCHAR *ntfs_add_nonresident_attr(USHORT *next_instance, ULONG cluster_size,
     a->NR.DataSize = (LONGLONG)data_size;
     a->NR.InitializedSize = (LONGLONG)initialized_size;
 
-    /* Encode single data run */
-    run_len = ntfs_encode_run(run_buf, num_clusters, (LONGLONG)start_lcn);
+    /* Single data run, encoded above */
     memcpy(pos + runs_off, run_buf, run_len);
     pos[runs_off + run_len] = 0; /* Terminator */
 
-    total_len = NTFS_ALIGN_UP(runs_off + run_len + 1, 8);
     a->Length = total_len;
 
     /* AT_END marker */
