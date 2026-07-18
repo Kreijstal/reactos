@@ -1217,6 +1217,10 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
             FileObject->CurrentByteOffset.QuadPart = ByteOffset.QuadPart + Length;
         }
 
+        /* Remember that this handle modified the file so cleanup stamps
+         * LastWriteTime/ChangeTime (see NtfsCleanupFile) */
+        SetFlag(FileObject->Flags, FO_FILE_MODIFIED);
+
         IrpContext->PriorityBoost = IO_DISK_INCREMENT;
         ExReleaseResourceLite(Resource);
 
@@ -1255,6 +1259,11 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         {
             FileObject->CurrentByteOffset.QuadPart = ByteOffset.QuadPart + ReturnedWriteLength;
         }
+
+        /* Paging I/O is writeback of earlier cached writes, not a user
+         * modification through this handle */
+        if (!PagingIo && !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+            SetFlag(FileObject->Flags, FO_FILE_MODIFIED);
 
         IrpContext->PriorityBoost = IO_DISK_INCREMENT;
     }

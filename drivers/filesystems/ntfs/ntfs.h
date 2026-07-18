@@ -427,6 +427,12 @@ typedef struct
 } NTFS_CCB, *PNTFS_CCB;
 
 #define NTFS_CCB_FLAG_COUNTED 0x00000001
+/* User explicitly set the corresponding timestamp through this handle
+ * (FileBasicInformation): suppress the implicit update at cleanup */
+#define NTFS_CCB_FLAG_USER_SET_CREATION    0x00000002
+#define NTFS_CCB_FLAG_USER_SET_LAST_ACCESS 0x00000004
+#define NTFS_CCB_FLAG_USER_SET_LAST_WRITE  0x00000008
+#define NTFS_CCB_FLAG_USER_SET_CHANGE      0x00000010
 
 typedef struct
 {
@@ -1857,6 +1863,10 @@ NTSTATUS
 UpdateFileRecord(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
                  PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsStampFileTimes(PDEVICE_EXTENSION DeviceExt,
+                   PNTFS_FCB Fcb);
 
 NTSTATUS
 FindAttribute(PDEVICE_EXTENSION Vcb,
