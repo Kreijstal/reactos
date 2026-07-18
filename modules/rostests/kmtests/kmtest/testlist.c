@@ -24,6 +24,7 @@ KMT_TESTFUNC Test_IoDeviceObject;
 KMT_TESTFUNC Test_IoReadWrite;
 KMT_TESTFUNC Test_MmMapLockedPagesSpecifyCache;
 KMT_TESTFUNC Test_MmPageoutSysView;
+KMT_TESTFUNC Test_MmProcessChurnStress;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtfsDirIndex;
 KMT_TESTFUNC Test_NtSystemDebugControl;
@@ -63,6 +64,7 @@ const KMT_TEST TestList[] =
     { "IoReadWrite",                  Test_IoReadWrite },
     { "MmMapLockedPagesSpecifyCache", Test_MmMapLockedPagesSpecifyCache },
     { "MmPageoutSysView",             Test_MmPageoutSysView },
+    { "MmProcessChurnStress",         Test_MmProcessChurnStress },
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtfsDirIndex",                 Test_NtfsDirIndex },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
