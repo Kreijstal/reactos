@@ -548,6 +548,7 @@ MiDeleteVirtualAddresses(
     PEPROCESS CurrentProcess;
     KIRQL OldIrql;
     BOOLEAN AddressGap = FALSE;
+    BOOLEAN FlushNeeded = FALSE;
     PSUBSECTION Subsection;
 
     /* We should never get RosMm memory areas here */
@@ -708,6 +709,7 @@ MiDeleteVirtualAddresses(
                                     (PVOID)Va,
                                     CurrentProcess,
                                     PrototypePte);
+                        FlushNeeded = TRUE;
                     }
                 }
                 else
@@ -739,6 +741,21 @@ MiDeleteVirtualAddresses(
             PointerPte++;
             PrototypePte++;
         } while ((Va & (PDE_MAPPED_VA - 1)) && (Va <= EndingAddress));
+
+        /*
+         * Invalidate the deleted translations on every processor BEFORE the
+         * freed pages become reusable (they are up for grabs as soon as the
+         * PFN lock is released). MiDeletePte only flushes the local core;
+         * other processors running threads of this process keep stale TLB
+         * and paging-structure entries -- fatally so when a page-table page
+         * was freed by MiDeletePde: a stale PDE cache entry makes another
+         * core read AND write PTEs through the old, freed page-table page.
+         */
+        if (FlushNeeded)
+        {
+            KeFlushEntireTb(TRUE, TRUE);
+            FlushNeeded = FALSE;
+        }
 
         /* Release the lock */
         MiReleasePfnLock(OldIrql);
@@ -2725,9 +2742,12 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
 
     //
     // All the PTEs have been dereferenced and made invalid, flush the TLB now
-    // and then release the PFN lock
+    // and then release the PFN lock. The flush must reach every processor
+    // before the freed pages become reusable at lock release: other cores
+    // running threads of this process may hold stale TLB entries for the
+    // decommitted VAs.
     //
-    KeFlushCurrentTb();
+    KeFlushEntireTb(TRUE, TRUE);
     MiReleasePfnLock(OldIrql);
 }
 
