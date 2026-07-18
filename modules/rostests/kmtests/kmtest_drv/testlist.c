@@ -56,6 +56,7 @@ KMT_TESTFUNC Test_KeMutex;
 KMT_TESTFUNC Test_KeProcessor;
 KMT_TESTFUNC Test_KeSpinLock;
 KMT_TESTFUNC Test_KeTimer;
+KMT_TESTFUNC Test_KeTimerTableStress;
 KMT_TESTFUNC Test_KernelType;
 KMT_TESTFUNC Test_MmForceSectionClosed;
 KMT_TESTFUNC Test_MmCygwinSectionStress;
@@ -155,6 +156,7 @@ const KMT_TEST TestList[] =
     { "-KeProcessor",                       Test_KeProcessor },
     { "KeSpinLock",                         Test_KeSpinLock },
     { "KeTimer",                            Test_KeTimer },
+    { "KeTimerTableStress",                 Test_KeTimerTableStress },
     { "-KernelType",                        Test_KernelType },
     { "MmForceSectionClosed",               Test_MmForceSectionClosed },
     { "MmCygwinSectionStress",              Test_MmCygwinSectionStress },

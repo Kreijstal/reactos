@@ -100,6 +100,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_ke/KeProcessor.c
     ntos_ke/KeSpinLock.c
     ntos_ke/KeTimer.c
+    ntos_ke/KeTimerTableStress.c
     ntos_mm/MmForceSectionClosed.c
     ntos_mm/MmCygwinSectionStress.c
     ntos_mm/MmMdl.c
@@ -197,6 +198,7 @@ list(APPEND KMTEST_SOURCE
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmPageoutSysView_user.c
+    ntos_mm/MmProcessChurnStress_user.c
     ntos_mm/NtCreateSection_user.c
     ntos_po/PoIrp_user.c
     tcpip/TcpIp_user.c
