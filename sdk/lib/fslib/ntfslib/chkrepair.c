@@ -413,7 +413,7 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
 
         if (iss->Fixed)
             continue;
-        if (iss->Code != CHK_ERR_RUN_OOB)
+        if (iss->Code != CHK_ERR_RUN_OOB && iss->Code != CHK_ERR_ATTR_OVERRUN)
             continue;
         if (recno < FILE_FIRST_USER || recno >= c->RecordCount)
             continue;   /* never touch system records */
@@ -423,6 +423,38 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
             chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
             continue;
 
+        if (iss->Code == CHK_ERR_ATTR_OVERRUN)
+        {
+            /* Truncate the record at the first malformed attribute (chkdsk
+             * parity): everything before it is well-formed; the overrunning
+             * tail (e.g. an attribute appended past the record end) is cut
+             * off with a fresh AT_END.  Only fires when at least one
+             * well-formed attribute survives. */
+            FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
+            ULONG kept = 0;
+            int cleanEnd = 0;
+            off = h->AttributeOffset;
+            while (off + 8 <= c->MftRecordSize)
+            {
+                ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
+                if (a->Type == AT_END)
+                    { cleanEnd = 1; break; }
+                if (a->Length < sizeof(ATTR_RECORD) - sizeof(((ATTR_RECORD *)0)->NR) ||
+                    off + a->Length > h->BytesInUse ||
+                    off + a->Length > c->MftRecordSize)
+                    break;
+                kept++;
+                off += a->Length;
+            }
+            if (!cleanEnd && kept > 0 && off + 8 <= c->MftRecordSize)
+            {
+                *(ULONG *)(rec + off) = AT_END;
+                *(ULONG *)(rec + off + 4) = 0;
+                h->BytesInUse = off + 8;
+                didFix = 1;
+            }
+        }
+        else
         /* Walk attributes; for each non-resident one, find the first VCN whose
          * cluster is out of bounds and truncate there. */
         {
@@ -1148,8 +1180,9 @@ static int chk_rb_emit_small(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
     end->Length = sizeof(INDEX_ENTRY);
     end->Flags = INDEX_ENTRY_END;
 
-    ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
-                           AT_INDEX_ROOT, chk_i30_name, 4, val, valLen, 0);
+    if (!ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
+                                AT_INDEX_ROOT, chk_i30_name, 4, val, valLen, 0))
+        { free(val); return -1; }
     free(val);
     return 0;
 }
@@ -1474,18 +1507,20 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
         ir->Header.AllocatedSize = sizeof(INDEX_HEADER) + rootLen;
         ir->Header.Flags = 1;   /* large: has sub-nodes */
         memcpy(val + sizeof(INDEX_ROOT), rootBody, rootLen);
-        ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
-                               AT_INDEX_ROOT, chk_i30_name, 4, val, valLen, 0);
+        if (!ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
+                                    AT_INDEX_ROOT, chk_i30_name, 4, val, valLen, 0))
+            { free(val); goto done; }
         free(val);
     }
 
     /* $INDEX_ALLOCATION (single run) covering every block. */
-    ntfs_add_nonresident_attr(nextInstance, c->BytesPerCluster,
-                              (FILE_RECORD_HEADER *)rec,
-                              AT_INDEX_ALLOCATION, chk_i30_name, 4,
-                              iaLcn, iaClusters,
-                              (ULONGLONG)blockCount * blockSize,
-                              (ULONGLONG)blockCount * blockSize);
+    if (!ntfs_add_nonresident_attr(nextInstance, c->BytesPerCluster,
+                                   (FILE_RECORD_HEADER *)rec,
+                                   AT_INDEX_ALLOCATION, chk_i30_name, 4,
+                                   iaLcn, iaClusters,
+                                   (ULONGLONG)blockCount * blockSize,
+                                   (ULONGLONG)blockCount * blockSize))
+        goto done;
 
     /* $BITMAP:$I30 with the low `blockCount` bits set. */
     bmpBytes = (ULONG)NTFS_ALIGN_UP((blockCount + 7) / 8, 8);
@@ -1497,8 +1532,9 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
         for (b = 0; b < blockCount; b++)
             chk_bmp_set(bmp, b);
     }
-    ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
-                           AT_BITMAP, chk_i30_name, 4, bmp, bmpBytes, 0);
+    if (!ntfs_add_resident_attr(nextInstance, (FILE_RECORD_HEADER *)rec,
+                                AT_BITMAP, chk_i30_name, 4, bmp, bmpBytes, 0))
+        goto done;
 
     (void)res;
     (void)rootInterior;
@@ -2033,8 +2069,15 @@ static int chk_orphan_rehome(CHK_CTX *c, ULONG recno, ULONGLONG foundRef,
             { free(rec); return -1; }
         ntfs_make_file_name(fnbuf, foundRef, nm, (UCHAR)nlen,
                             FILE_NAME_POSIX, fileAttrs, 0, 0, timeVal);
-        ntfs_add_resident_attr(&nextInstance, h, AT_FILE_NAME, NULL, 0,
-                               fnbuf, fnBytes, 0);
+        if (!ntfs_add_resident_attr(&nextInstance, h, AT_FILE_NAME, NULL, 0,
+                                    fnbuf, fnBytes, 0))
+        {
+            /* Record is too full for the fabricated name: leave the orphan
+             * reported-but-unfixed instead of overrunning the record. */
+            free(fnbuf);
+            free(rec);
+            return -1;
+        }
         h->NextAttributeId = nextInstance;
         free(fnbuf);
         (void)secId;
@@ -2194,8 +2237,9 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
         si.AccessTime = rootTime;
         si.FileAttributes = FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT;
         si.SecurityId = rootSecId;
-        ntfs_add_resident_attr(&nextInstance, h, AT_STANDARD_INFORMATION,
-                               NULL, 0, &si, sizeof(si), 0);
+        if (!ntfs_add_resident_attr(&nextInstance, h, AT_STANDARD_INFORMATION,
+                                    NULL, 0, &si, sizeof(si), 0))
+            { free(rec); return -1; }
 
         /* $FILE_NAME (found.NNN, POSIX) parented to root. */
         fnBytes = (ULONG)(sizeof(FILE_NAME_ATTR) - sizeof(WCHAR) +
@@ -2207,8 +2251,9 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
                             FILE_NAME_POSIX,
                             FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT, 0, 0,
                             rootTime);
-        ntfs_add_resident_attr(&nextInstance, h, AT_FILE_NAME, NULL, 0,
-                               fn, fnBytes, 0);
+        if (!ntfs_add_resident_attr(&nextInstance, h, AT_FILE_NAME, NULL, 0,
+                                    fn, fnBytes, 0))
+            { free(fn); free(rec); return -1; }
         free(fn);
 
         /* Empty $INDEX_ROOT ($I30): chk_rebuild_index reads its IndexBlockSize
@@ -2230,8 +2275,9 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
             ie = (INDEX_ENTRY *)(idx + sizeof(INDEX_ROOT));
             ie->Length = sizeof(INDEX_ENTRY);
             ie->Flags = INDEX_ENTRY_END;
-            ntfs_add_resident_attr(&nextInstance, h, AT_INDEX_ROOT,
-                                   chk_i30_name, 4, idx, sizeof(idx), 0);
+            if (!ntfs_add_resident_attr(&nextInstance, h, AT_INDEX_ROOT,
+                                        chk_i30_name, 4, idx, sizeof(idx), 0))
+                { free(rec); return -1; }
         }
 
         h->NextAttributeId = nextInstance;
