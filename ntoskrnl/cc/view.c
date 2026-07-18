@@ -65,6 +65,12 @@ ULONG CcRosVacbIncRefCount_(PROS_VACB vacb, PCSTR file, INT line)
     ULONG Refs;
 
     Refs = InterlockedIncrement((PLONG)&vacb->ReferenceCount);
+    /* Every referenced VACB must belong to a SharedCacheMap; a NULL one means
+     * somebody referenced a VACB that was never associated (or was already
+     * dissociated).  Observed live while setup wrote MBR bootcode to
+     * \Device\Harddisk0\Partition0.  Trap the broken invariant here rather
+     * than NULL-guarding the trace and letting the bad VACB travel further. */
+    ASSERT(vacb->SharedCacheMap != NULL);
     if (vacb->SharedCacheMap->Trace)
     {
         DbgPrint("(%s:%i) VACB %p ++RefCount=%lu, Dirty %u, PageOut %lu\n",
@@ -77,8 +83,11 @@ ULONG CcRosVacbDecRefCount_(PROS_VACB vacb, PCSTR file, INT line)
 {
     ULONG Refs;
     BOOLEAN VacbDirty = vacb->Dirty;
-    BOOLEAN VacbTrace = vacb->SharedCacheMap->Trace;
+    BOOLEAN VacbTrace;
     BOOLEAN VacbPageOut = vacb->PageOut;
+
+    ASSERT(vacb->SharedCacheMap != NULL);
+    VacbTrace = vacb->SharedCacheMap->Trace;
 
     Refs = InterlockedDecrement((PLONG)&vacb->ReferenceCount);
     ASSERT(!(Refs == 0 && VacbDirty));
@@ -100,6 +109,7 @@ ULONG CcRosVacbGetRefCount_(PROS_VACB vacb, PCSTR file, INT line)
     ULONG Refs;
 
     Refs = InterlockedCompareExchange((PLONG)&vacb->ReferenceCount, 0, 0);
+    ASSERT(vacb->SharedCacheMap != NULL);
     if (vacb->SharedCacheMap->Trace)
     {
         DbgPrint("(%s:%i) VACB %p ==RefCount=%lu, Dirty %u, PageOut %lu\n",
@@ -398,6 +408,16 @@ CcRosFlushDirtyPages (
                 KeReleaseQueuedSpinLock(LockQueueMasterLock, OldIrql);
                 YieldProcessor();
                 OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+
+                /* The IsListEmpty() test above happened BEFORE we dropped the
+                 * master lock; while it was released another thread may have
+                 * drained the list.  Re-test, or DirtyVacbListHead.Flink below
+                 * is the head itself and CONTAINING_RECORD() synthesises a
+                 * bogus VACB out of the list head (observed live: VACB
+                 * &DirtyVacbListHead - 0x20, with a NULL SharedCacheMap, then
+                 * a page fault once it was dereferenced). */
+                if (IsListEmpty(&DirtyVacbListHead))
+                    break;
             }
             ProgressMade = FALSE;
             current_entry = DirtyVacbListHead.Flink;
