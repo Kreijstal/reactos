@@ -915,8 +915,16 @@ KiRemoveEntryTimer(IN PKTIMER Timer)
     ULONG Hand;
     PKTIMER_TABLE_ENTRY TableEntry;
 
-    /* Remove the timer from the timer list and check if it's empty */
-    Hand = Timer->Header.Hand;
+    /* Remove the timer from the timer list and check if it's empty.
+     * Header.Hand is a UCHAR and truncates hands >= 256 (the wheel has
+     * TIMER_TABLE_SIZE == 512 buckets), so recompute the full-width hand
+     * from the due time: it is immutable while the timer is linked and
+     * KiInsertTimerTable asserts Hand == KiComputeTimerTableIndex(DueTime),
+     * so this is exactly the bucket the timer lives in. Trusting the
+     * truncated byte updated the WRONG bucket's Time marker for hands
+     * 256..511, leaving emptied buckets with stale-low times (spurious
+     * expiration DPC requests every wheel pass). */
+    Hand = KiComputeTimerTableIndex(Timer->DueTime.QuadPart);
     if (RemoveEntryList(&Timer->TimerListEntry))
     {
         /* Get the respective timer table entry */
@@ -1024,7 +1032,9 @@ FORCEINLINE
 VOID
 KxRemoveTreeTimer(IN PKTIMER Timer)
 {
-    ULONG Hand = Timer->Header.Hand;
+    /* Full-width hand recomputed from the due time: Header.Hand is a UCHAR
+     * and truncates hands >= 256, see KiRemoveEntryTimer */
+    ULONG Hand = KiComputeTimerTableIndex(Timer->DueTime.QuadPart);
     PKSPIN_LOCK_QUEUE LockQueue;
     PKTIMER_TABLE_ENTRY TimerEntry;
 
