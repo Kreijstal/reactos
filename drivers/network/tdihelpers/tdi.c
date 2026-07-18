@@ -698,6 +698,24 @@ NTSTATUS TdiQueryDeviceControl(
 }
 
 
+static
+VOID
+TdiConsumeMdl(PMDL Mdl)
+/*!
+ * @brief Unlock (if needed) and free an MDL that could not be handed off
+ *        to an IRP
+ */
+{
+    if (!Mdl)
+        return;
+
+    if (Mdl->MdlFlags & MDL_PAGES_LOCKED)
+        MmUnlockPages(Mdl);
+
+    IoFreeMdl(Mdl);
+}
+
+
 NTSTATUS TdiQueryInformation(
     PFILE_OBJECT FileObject,
     LONG QueryType,
@@ -710,6 +728,11 @@ NTSTATUS TdiQueryInformation(
  * @param    MdlBuffer    = Pointer to MDL buffer specific for query type
  *
  * @return   Status of operation
+ *
+ * @remarks  The MDL is always consumed: on success or query failure it is
+ *           attached to the query IRP and the I/O manager unlocks and frees
+ *           it on IRP completion; on early failure it is unlocked and freed
+ *           here. The caller must not touch it afterwards.
  */
 {
     PDEVICE_OBJECT DeviceObject;
@@ -719,12 +742,14 @@ NTSTATUS TdiQueryInformation(
 
     if (!FileObject) {
         DPRINT("Bad file object.\n");
+        TdiConsumeMdl(MdlBuffer);
         return STATUS_INVALID_PARAMETER;
     }
 
     DeviceObject = IoGetRelatedDeviceObject(FileObject);
     if (!DeviceObject) {
         DPRINT("Bad device object.\n");
+        TdiConsumeMdl(MdlBuffer);
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -736,6 +761,7 @@ NTSTATUS TdiQueryInformation(
                                            &Event,
                                            &Iosb);
     if (!Irp) {
+        TdiConsumeMdl(MdlBuffer);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
