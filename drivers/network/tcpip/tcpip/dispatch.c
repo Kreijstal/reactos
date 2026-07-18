@@ -729,10 +729,21 @@ NTSTATUS DispTdiQueryInformation(
           case TDI_CONNECTION_FILE:
             Endpoint =
 				(PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
-            if (Endpoint == NULL || Endpoint->AddressFile == NULL)
+            if (Endpoint == NULL)
             {
-                TI_DbgPrint(MIN_TRACE, ("FIXME: No connection endpoint file object.\n"));
-                ASSERT(Endpoint != NULL && Endpoint->AddressFile != NULL);
+                TI_DbgPrint(MIN_TRACE, ("No connection endpoint file object.\n"));
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            /* The connection may not (yet or anymore) be associated with an
+             * address file (e.g. getsockname() on an unbound or already
+             * closed socket). This is a valid caller-reachable state, so
+             * fail the query instead of asserting. */
+            LockObject(Endpoint);
+            if (Endpoint->AddressFile == NULL)
+            {
+                UnlockObject(Endpoint);
+                TI_DbgPrint(MIN_TRACE, ("No associated address file.\n"));
                 return STATUS_INVALID_PARAMETER;
             }
 
@@ -744,6 +755,7 @@ NTSTATUS DispTdiQueryInformation(
 			RtlZeroMemory(
 				&Address->Address[0].Address[0].sin_zero,
 				sizeof(Address->Address[0].Address[0].sin_zero));
+            UnlockObject(Endpoint);
             return STATUS_SUCCESS;
 
           default:
