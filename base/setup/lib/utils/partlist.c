@@ -963,6 +963,13 @@ InitVolumeDeviceName(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("pOpenDevice() failed, Status 0x%08lx\n", Status);
+        /* Drop the temporary name again. It is only a guess at the partition
+         * device, and leaving it behind makes the "already has a device name"
+         * early-out at the top of this function succeed on every later call,
+         * so the volume would keep its unverified name and never be
+         * identified. Seen when a just-created partition has not been
+         * enumerated yet and this open fails with STATUS_OBJECT_NAME_NOT_FOUND. */
+        Volume->Info.DeviceName[0] = UNICODE_NULL;
         return Status;
     }
 
