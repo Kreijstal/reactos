@@ -123,6 +123,20 @@ int chk_apply_fixups(UCHAR *buf, ULONG size, ULONG sectorSize)
             return -1;         /* torn write / corruption */
         *tail = usa[i + 1];    /* restore original */
     }
+
+    /* Normalize untrusted size fields on FILE records: BytesAllocated must
+     * equal the true record size (a corrupt larger value would defeat every
+     * later capacity check against the record buffer), and BytesInUse can
+     * never exceed it.  In-memory only; the corrected values reach disk
+     * whenever a repair rewrites the record. */
+    if (*(ULONG *)buf == NRH_FILE_TYPE)
+    {
+        FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)buf;
+        if (h->BytesAllocated != size)
+            h->BytesAllocated = size;
+        if (h->BytesInUse > size)
+            h->BytesInUse = size;
+    }
     return 0;
 }
 
