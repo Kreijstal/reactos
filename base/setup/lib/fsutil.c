@@ -1145,8 +1145,16 @@ FsVolCommitOpsQueue(
      * we must perform a file system check of both the system and the
      * installation volumes.
      */
-    SystemVolume->NeedsCheck = TRUE;
-    InstallVolume->NeedsCheck = TRUE;
+    /* Only volumes that are actually formatted can be checked. An unformatted
+     * one is about to go through the format queue; DoFormatting() schedules the
+     * check itself once the format has succeeded. Scheduling it here regardless
+     * meant that a volume whose format was skipped or failed still entered the
+     * check queue, which then tripped ASSERT(Volume->FormatState == Formatted)
+     * (observed on a fresh install onto a newly created partition). */
+    if (SystemVolume->FormatState == Formatted)
+        SystemVolume->NeedsCheck = TRUE;
+    if (InstallVolume->FormatState == Formatted)
+        InstallVolume->NeedsCheck = TRUE;
 
     Result = FsVolCallback(Context,
                            FSVOLNOTIFY_STARTQUEUE,
@@ -1249,8 +1257,12 @@ NextFormat:
         Success = FALSE;
         goto Quit;
     }
-    /* Schedule a check for this volume */
-    Volume->NeedsCheck = TRUE;
+    /* Schedule a check for this volume, but only if it really did get
+     * formatted: DoFormatting() also returns here when the format was skipped
+     * (callback != FSVOL_DOIT) or failed and the error was skipped, and an
+     * unformatted volume cannot be checked. */
+    if (Volume->FormatState == Formatted)
+        Volume->NeedsCheck = TRUE;
     /* Go to the next volume to be formatted */
     goto NextFormat;
 
