@@ -3411,6 +3411,20 @@ AddRun(PNTFS_VCB Vcb,
         AttrOffset = ChildBuf->AttributeOffset;
         DestinationAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
         NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
+
+        /* The child was just re-read from disk, so its size fields are
+         * whatever the last write-back persisted.  The caller maintains
+         * AllocatedSize/DataSize/InitializedSize on pRecord only - its own
+         * FileRecord/AttrOffset point at the BASE record where the slot is
+         * gone, so its in-buffer mirror update skips them.  Mirror them
+         * here, or every post-migration extension persists new runs and
+         * HighestVCN with the migration-time sizes frozen (observed live:
+         * a $I30 $INDEX_ALLOCATION with HighestVCN 194 but AllocatedSize
+         * covering 192 clusters, making every index node past VCN 191 be
+         * rejected as corrupt and every insert fail with a collision). */
+        DestinationAttribute->NonResident.AllocatedSize = AttrContext->pRecord->NonResident.AllocatedSize;
+        DestinationAttribute->NonResident.DataSize = AttrContext->pRecord->NonResident.DataSize;
+        DestinationAttribute->NonResident.InitializedSize = AttrContext->pRecord->NonResident.InitializedSize;
     }
 
     if (FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB) != 0)
@@ -3448,6 +3462,8 @@ AddRun(PNTFS_VCB Vcb,
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         DPRINT1("Failed to add LargeMcb Entry!\n");
+        if (MigratedChildRecord)
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MigratedChildRecord);
         _SEH2_YIELD(return _SEH2_GetExceptionCode());
     }
     _SEH2_END;
@@ -3456,11 +3472,26 @@ AddRun(PNTFS_VCB Vcb,
     if (!RunBuffer)
     {
         DPRINT1("ERROR: Couldn't allocate memory for data runs!\n");
+        if (MigratedChildRecord)
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MigratedChildRecord);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     // Convert the map control block back to encoded data runs
-    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
+    /* On STATUS_BUFFER_TOO_SMALL the conversion still terminates the buffer and
+     * reports the SHORT length, so ignoring the status here would persist a
+     * runlist with every remaining run silently dropped - the attribute's tail
+     * clusters become unreachable while HighestVCN still claims them.  That is
+     * on-disk corruption, so fail the extension instead. */
+    Status = ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to convert MCB to data runs (0x%x)!\n", (unsigned)Status);
+        ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+        if (MigratedChildRecord)
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MigratedChildRecord);
+        return Status;
+    }
 
     // Get the amount of free space between the start of the of the first data run and the attribute end
     DataRunMaxLength = AttrContext->pRecord->Length - AttrContext->pRecord->NonResident.MappingPairsOffset;
@@ -3614,6 +3645,33 @@ AddRun(PNTFS_VCB Vcb,
     DestinationAttribute->NonResident.HighestVCN =
     AttrContext->pRecord->NonResident.HighestVCN = max(NextVBN - 1 + RunLength,
                                                      AttrContext->pRecord->NonResident.HighestVCN);
+
+    /* Both copies below write RunBufferSize bytes into a pool allocation: the
+     * file record buffer (BytesPerFileRecord, from FileRecLookasideList) and the
+     * standalone pRecord copy (pRecord->Length).  The resize/migrate logic above
+     * is supposed to have guaranteed the room, but if it ever does not, these
+     * memcpys run off the end of NonPagedPool and scribble encoded mapping pairs
+     * over whatever follows - observed live as an ExpCheckPoolBlocks assert with
+     * a 179-run runlist sitting in an unrelated pool page, and (because NTFS
+     * caches the $MFT $BITMAP in that same pool) as the allocator then handing
+     * out file records that were still in use.  Verify the invariant at the
+     * choke point instead of corrupting the volume. */
+    if (DestinationAttribute->NonResident.MappingPairsOffset + RunBufferSize > DestinationAttribute->Length ||
+        AttrContext->pRecord->NonResident.MappingPairsOffset + RunBufferSize > AttrContext->pRecord->Length)
+    {
+        DPRINT1("ERROR: encoded runs (%u bytes) overflow the attribute record "
+                "(dest %u/%u, pRecord %u/%u)!\n",
+                RunBufferSize,
+                DestinationAttribute->NonResident.MappingPairsOffset, DestinationAttribute->Length,
+                AttrContext->pRecord->NonResident.MappingPairsOffset, AttrContext->pRecord->Length);
+        ASSERT(FALSE);
+        ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+        if (MftCtxLockHeld)
+            ExReleaseResourceLite(&Vcb->MftContextResource);
+        if (MigratedChildRecord)
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MigratedChildRecord);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
     // Write data runs to destination attribute
     RtlCopyMemory((PVOID)((ULONG_PTR)DestinationAttribute + DestinationAttribute->NonResident.MappingPairsOffset),
@@ -4938,7 +4996,17 @@ FreeClusters(PNTFS_VCB Vcb,
     }
 
     // Convert the map control block back to encoded data runs
-    ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
+    /* A truncated runlist here would strand the clusters we just freed from the
+     * MCB but did not re-encode; see the matching check in AddRun. */
+    Status = ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, RunBuffer, Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to convert MCB to data runs (0x%x)!\n", (unsigned)Status);
+        ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+        if (BitmapLockHeld)
+            ExReleaseResourceLite(&Vcb->BitmapResource);
+        return Status;
+    }
 
     // Update HighestVCN
     DestinationAttribute->NonResident.HighestVCN = AttrContext->pRecord->NonResident.HighestVCN;
