@@ -92,7 +92,14 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         // Convert the data runs to a map control block
         if (!NT_SUCCESS(ConvertDataRunsToLargeMCB(DataRun, &Context->DataRunsMCB, &NextVBN)))
         {
-            DPRINT1("Unable to convert data runs to MCB!\n");
+            DPRINT1("Unable to convert data runs to MCB! (attribute 0x%lx, %s, "
+                    "length %lu, MappingPairsOffset %u, VCNs %I64u-%I64u)\n",
+                    AttrRecord->Type,
+                    AttrRecord->NameLength ? "named" : "unnamed",
+                    AttrRecord->Length,
+                    AttrRecord->NonResident.MappingPairsOffset,
+                    AttrRecord->NonResident.LowestVCN,
+                    AttrRecord->NonResident.HighestVCN);
             ExFreePoolWithTag(Context->pRecord, TAG_NTFS);
             ExFreeToNPagedLookasideList(&NtfsGlobalData->AttrCtxtLookasideList, Context);
             return NULL;
@@ -203,6 +210,15 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
                 /* Found it, fill up the context and return. */
                 DPRINT("Found context\n");
                 *AttrCtx = PrepareAttributeContext(Attribute);
+                if (*AttrCtx == NULL)
+                {
+                    /* Out of memory, or the attribute's data runs wouldn't
+                     * decode - either way there is no context to hand back. */
+                    DPRINT1("Couldn't prepare context for attribute 0x%lx of MFT record %I64u\n",
+                            Type, MftRecord->MFTRecordNumber);
+                    FindCloseAttribute(&Context);
+                    return STATUS_FILE_CORRUPT_ERROR;
+                }
 
                 (*AttrCtx)->FileMFTIndex = MftRecord->MFTRecordNumber;
 
