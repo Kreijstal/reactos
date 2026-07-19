@@ -219,36 +219,52 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     }
     else
     {
-        ULONG ForwardStart = 0;
-        ULONG ForwardLength;
-        ULONG LongestStart = 0;
-        ULONG LongestLength;
+        ULONG SearchIndex = FirstDesiredCluster;
+        ULONG BestStart = 0;
+        ULONG BestLength = 0;
 
         /* No single free extent is large enough, so the allocation has to be
-         * split across several runs.  Pick the extent that covers as much of
-         * the request as possible rather than the first one we stumble upon:
-         * taking the nearest hole regardless of its size strip-mines the
-         * volume's smallest gaps, so a caller that loops until ClustersNeeded
-         * reaches zero can come back with hundreds of one-cluster runs.  Every
-         * run costs a mapping pair in the attribute, and once those no longer
-         * fit in an MFT record AddRun fails outright - which is how a directory
-         * index that only needs a few clusters ends up unable to grow at all. */
-        ForwardLength = RtlFindNextForwardRunClear(&Bitmap, FirstDesiredCluster, &ForwardStart);
-        LongestLength = RtlFindLongestRunClear(&Bitmap, &LongestStart);
+         * split across several runs.  Pick the largest extent at or after the
+         * caller's hint rather than the first one we stumble upon: taking the
+         * nearest hole regardless of its size strip-mines the volume's
+         * smallest gaps, so a caller that loops until ClustersNeeded reaches
+         * zero can come back with hundreds of one-cluster runs.  Every run
+         * costs a mapping pair in the attribute, and once those no longer fit
+         * in an MFT record AddRun fails outright - which is how a directory
+         * index that only needs a few clusters ends up unable to grow at all.
+         *
+         * Searching forward from the hint rather than across the whole volume
+         * also keeps each new run's LCN above the previous one, which matters
+         * for more than locality: a run placed below its predecessor encodes a
+         * negative mapping-pair offset, and an offset of exactly -1 cannot be
+         * told apart from the sparse-run marker (see DecodeRun). */
+        while (SearchIndex < Bitmap.SizeOfBitMap)
+        {
+            ULONG RunStart = 0;
+            ULONG RunLength = RtlFindNextForwardRunClear(&Bitmap, SearchIndex, &RunStart);
 
-        /* Prefer the run at the caller's hint when it is no worse than the
-         * best one available, since keeping the allocation close to the
-         * previous run is what lets the MCB coalesce the two into one. */
-        if (ForwardLength != 0 && ForwardLength >= LongestLength)
-        {
-            *FirstAssignedCluster = ForwardStart;
-            *AssignedClusters = ForwardLength;
+            if (RunLength == 0)
+                break;
+
+            if (RunLength > BestLength)
+            {
+                BestLength = RunLength;
+                BestStart = RunStart;
+            }
+
+            /* Nothing can beat covering the whole request. */
+            if (RunLength >= DesiredClusters)
+                break;
+
+            SearchIndex = RunStart + RunLength + 1;
         }
-        else
-        {
-            *FirstAssignedCluster = LongestStart;
-            *AssignedClusters = LongestLength;
-        }
+
+        /* Nothing free above the hint at all - take the volume's best run. */
+        if (BestLength == 0)
+            BestLength = RtlFindLongestRunClear(&Bitmap, &BestStart);
+
+        *FirstAssignedCluster = BestStart;
+        *AssignedClusters = BestLength;
 
         if (*AssignedClusters > DesiredClusters)
             *AssignedClusters = DesiredClusters;

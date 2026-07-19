@@ -3831,6 +3831,11 @@ ConvertDataRunsToLargeMCB(PUCHAR DataRun,
                                            DataRunStartLCN,
                                            DataRunLength))
                 {
+                    /* Either the range collides with one already mapped or the
+                     * MCB couldn't grow; say which run so the two can be told
+                     * apart from the log alone. */
+                    DPRINT1("FsRtlAddLargeMcbEntry failed for VBN %I64u, LCN %I64d, count %I64u\n",
+                            *pNextVBN, DataRunStartLCN, DataRunLength);
                     ExRaiseStatus(STATUS_UNSUCCESSFUL);
                 }
             } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
