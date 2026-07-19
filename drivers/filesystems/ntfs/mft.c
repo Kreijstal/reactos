@@ -924,6 +924,14 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     LONGLONG LastRunLcn = 0;
     LONGLONG LastRunCount = 0;
     LONG RunCount;
+    /* The sizes the attribute ends up describing.  Normally the ones the
+     * caller asked for; on a failure part-way through they revert to what the
+     * attribute held on entry, so an attribute is never left claiming bytes
+     * that no data run covers. */
+    ULONGLONG OriginalDataSize = AttrContext->pRecord->NonResident.DataSize;
+    ULONGLONG OriginalInitializedSize = AttrContext->pRecord->NonResident.InitializedSize;
+    ULONGLONG FinalDataSize = DataSize->QuadPart;
+    ULONGLONG FinalInitializedSize = DataSize->QuadPart;
 
     ASSERT(AttrContext->pRecord->IsNonResident);
 
@@ -944,10 +952,22 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
      * unchanged - only AllocatedSize (reserved, cluster-aligned) is larger.
      * System metadata files (MFT, $Bitmap, ...) are sized precisely by their
      * own callers and must not be preallocated, so gate on a regular file's
-     * unnamed data stream. */
-    if (AttrContext->pRecord->Type == AttributeData &&
-        AttrContext->pRecord->NameLength == 0 &&
-        FileRecord->MFTRecordNumber >= NTFS_FILE_FIRST_USER_FILE &&
+     * unnamed data stream.
+     *
+     * $INDEX_ALLOCATION needs the same treatment even though it is a named
+     * attribute: B-Tree node splits grow it by exactly one index buffer at a
+     * time (btree.c:AllocateIndexNode), which is the worst possible pattern
+     * for the allocator.  A directory that gains entries while other files are
+     * being written interleaves its single-cluster grabs with theirs and ends
+     * up with one run per index record; the mapping pairs then outgrow the MFT
+     * record and the directory can no longer be extended at all.  Reserving
+     * ahead keeps the index contiguous.  Only AllocatedSize grows - DataSize
+     * still delimits the valid index buffers, so VCN-to-offset arithmetic and
+     * the $I30 bitmap are unaffected. */
+    if (((AttrContext->pRecord->Type == AttributeData &&
+          AttrContext->pRecord->NameLength == 0 &&
+          FileRecord->MFTRecordNumber >= NTFS_FILE_FIRST_USER_FILE) ||
+         AttrContext->pRecord->Type == AttributeIndexAllocation) &&
         (ULONGLONG)DataSize->QuadPart >= AttrContext->pRecord->NonResident.DataSize)
     {
         /* Growing (or rewriting in place) a regular file's data stream.
@@ -1041,7 +1061,8 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
                 // Most likely, HighestVCN went above the largest mapping
                 DPRINT1("Highest VCN of record: %I64u\n", AttrContext->pRecord->NonResident.HighestVCN);
-                return STATUS_INVALID_PARAMETER;
+                Status = STATUS_INVALID_PARAMETER;
+                goto RollbackAllocation;
             }
 
             LastClusterInDataRun.QuadPart = LastRunLcn + LastRunCount - 1;
@@ -1061,7 +1082,7 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
             if (!NT_SUCCESS(Status))
             {
                 DPRINT1("Error: Unable to allocate requested clusters!\n");
-                return Status;
+                goto RollbackAllocation;
             }
 
             // now we need to add the clusters we allocated to the data run
@@ -1069,7 +1090,12 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
             if (!NT_SUCCESS(Status))
             {
                 DPRINT1("Error: Unable to add data run!\n");
-                return Status;
+
+                /* These clusters are marked in-use in the volume bitmap but
+                 * never made it into the runs, so nothing else will ever free
+                 * them; hand them back before unwinding. */
+                NtfsFreeClusterRange(Vcb, NextAssignedCluster, AssignedClusters);
+                goto RollbackAllocation;
             }
 
             ClustersNeeded -= AssignedClusters;
@@ -1088,7 +1114,7 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
             {
                 DPRINT1("ERROR: FreeClusters failed 0x%lx (MFT %p, asked=%lu)\n",
                         Status, FileRecord, ClustersToFree);
-                return Status;
+                goto RollbackAllocation;
             }
         }
     }
@@ -1103,6 +1129,24 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
      * persisted, but the caller (SetAttributeDataLength) already rejects
      * writes to compressed attributes upstream.  Encrypted / pure sparse
      * pre-existing behaviour is unchanged. */
+
+    /* Both the success path and the failure paths above converge here, so that
+     * the attribute is always left describing exactly the clusters its data
+     * runs cover.  Growing the allocation is not atomic - it can fail after
+     * some runs have already been added - and the sizes were optimistically
+     * written to the record before the runs existed (see above).  Leaving them
+     * that way would produce an attribute whose DataSize points past its last
+     * mapped cluster, which for an $INDEX_ALLOCATION means the directory's
+     * B-Tree references index buffers that were never allocated: reads of that
+     * directory then fail permanently ("index node VCN %u is outside the
+     * $INDEX_ALLOCATION"). A failed resize has to be a no-op, not damage. */
+RollbackAllocation:
+    if (!NT_SUCCESS(Status))
+    {
+        AllocationSize = 0; /* raised to the mapped extent by the max() below */
+        FinalDataSize = OriginalDataSize;
+        FinalInitializedSize = OriginalInitializedSize;
+    }
 
     RunCount = FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB);
     if (RunCount != 0)
@@ -1124,8 +1168,8 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     AllocationSize = max(AllocationSize, (ULONGLONG)ActualClusters * BytesPerCluster);
 
     AttrContext->pRecord->NonResident.AllocatedSize = AllocationSize;
-    AttrContext->pRecord->NonResident.DataSize = DataSize->QuadPart;
-    AttrContext->pRecord->NonResident.InitializedSize = DataSize->QuadPart;
+    AttrContext->pRecord->NonResident.DataSize = FinalDataSize;
+    AttrContext->pRecord->NonResident.InitializedSize = FinalInitializedSize;
 
     /* The in-buffer attribute slot at FileRecord+AttrOffset may have become
      * stale if AddRun() above migrated the attribute to a child file record
@@ -1138,8 +1182,8 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     if (DestinationAttribute->Type == AttrContext->pRecord->Type)
     {
         DestinationAttribute->NonResident.AllocatedSize = AllocationSize;
-        DestinationAttribute->NonResident.DataSize = DataSize->QuadPart;
-        DestinationAttribute->NonResident.InitializedSize = DataSize->QuadPart;
+        DestinationAttribute->NonResident.DataSize = FinalDataSize;
+        DestinationAttribute->NonResident.InitializedSize = FinalInitializedSize;
     }
 
     AttrContext->pRecord->NonResident.HighestVCN = ActualClusters ? ActualClusters - 1 : 0;
@@ -3141,6 +3185,42 @@ NtfsRefreshIndexRootContext(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* Put a directory's file record back the way it was found.
+ *
+ * Adding a filename shrinks $INDEX_ROOT to a stub before growing the index,
+ * and the record reaches disk while it is in that state: AddRun() commits the
+ * base record whenever it migrates an attribute to a child record
+ * (MigrateAttributeToList), and AllocateIndexNode() commits it per allocated
+ * node.  If the operation then fails, the on-disk root is left as an 88-byte
+ * stub whose header still describes the full entry list, so anything that
+ * walks it reads neighbouring attribute bytes as index entries and follows a
+ * garbage subnode VCN ("index node VCN %u is outside the $INDEX_ALLOCATION").
+ * The directory is unreadable from then on - a failed create must not cost
+ * the caller the whole directory.
+ *
+ * Rewriting the pristine record undoes that.  Clusters and any child MFT
+ * record allocated along the way are left behind, but they are unreferenced
+ * rather than corrupting, which chkdsk can reclaim. */
+static
+VOID
+NtfsRestoreDirectoryRecord(PDEVICE_EXTENSION DeviceExt,
+                           ULONGLONG DirectoryMftIndex,
+                           PFILE_RECORD_HEADER PristineRecord)
+{
+    NTSTATUS RestoreStatus;
+
+    if (PristineRecord == NULL)
+        return;
+
+    RestoreStatus = UpdateFileRecord(DeviceExt, DirectoryMftIndex, PristineRecord);
+    if (!NT_SUCCESS(RestoreStatus))
+    {
+        DPRINT1("ERROR: Failed to restore directory record %I64u after a failed "
+                "index update (0x%lx); the directory index may be inconsistent\n",
+                DirectoryMftIndex, RestoreStatus);
+    }
+}
+
 /* Internal worker for NtfsAddFilenameToDirectory.  The public entry point is
  * the wrapper below, which takes Vcb->IndexResource exclusive across this
  * call so concurrent BrowseSubNodeIndexEntries readers can't observe a
@@ -3155,6 +3235,9 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
 {
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_RECORD_HEADER ParentFileRecord;
+    /* The directory's record exactly as it was read, kept until the update is
+     * known to have succeeded; see NtfsRestoreDirectoryRecord(). */
+    PFILE_RECORD_HEADER PristineParentRecord = NULL;
     PNTFS_ATTR_CONTEXT IndexRootContext;
     PINDEX_ROOT_ATTRIBUTE I30IndexRoot;
     ULONG IndexRootOffset;
@@ -3338,8 +3421,20 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     AttributeLength += sizeof(INDEX_ROOT_ATTRIBUTE);
 
 
-    // FIXME: IndexRoot will probably be invalid until we're finished. If we fail before we finish, the directory will probably be toast.
-    // The potential for catastrophic data-loss exists!!! :)
+    // $INDEX_ROOT is invalid from here until the final write below, and the
+    // record does reach disk in that state (see NtfsRestoreDirectoryRecord).
+    // Keep a pristine copy so every failure path can put the directory back.
+    PristineParentRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!PristineParentRecord)
+    {
+        DPRINT1("ERROR: Couldn't allocate memory to save the directory record!\n");
+        DestroyBTree(NewTree);
+        ReleaseAttributeContext(IndexRootContext);
+        ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(PristineParentRecord, ParentFileRecord, DeviceExt->NtfsInfo.BytesPerFileRecord);
 
     // Update the length of the attribute in the file record of the parent directory
     Status = InternalSetResidentAttributeLength(DeviceExt,
@@ -3353,6 +3448,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         DestroyBTree(NewTree);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3367,6 +3464,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         DestroyBTree(NewTree);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3388,6 +3487,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         DestroyBTree(NewTree);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3432,6 +3533,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
             DestroyBTree(NewTree);
             ReleaseAttributeContext(IndexRootContext);
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
             return Status;
         }
@@ -3445,6 +3548,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
             DestroyBTree(NewTree);
             ReleaseAttributeContext(IndexRootContext);
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
             return Status;
         }
@@ -3460,6 +3565,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
             DestroyBTree(NewTree);
             ReleaseAttributeContext(IndexRootContext);
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
             return Status;
         }
@@ -3502,6 +3609,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         DestroyBTree(NewTree);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3528,6 +3637,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3541,6 +3652,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         DPRINT1("ERROR: Failed to re-find $INDEX_ROOT after re-read!\n");
         ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3565,6 +3678,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
             ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
             ReleaseAttributeContext(IndexRootContext);
             ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+            NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
             DPRINT1("ERROR: Unable to set resident attribute length!\n");
             return Status;
@@ -3590,6 +3705,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
         ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
         ReleaseAttributeContext(IndexRootContext);
         ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+        NtfsRestoreDirectoryRecord(DeviceExt, DirectoryMftIndex, PristineParentRecord);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3616,6 +3733,8 @@ NtfsAddFilenameToDirectoryNoLock(PDEVICE_EXTENSION DeviceExt,
     ExFreePoolWithTag(NewIndexRoot, TAG_NTFS);
     ReleaseAttributeContext(IndexRootContext);
     ExFreePoolWithTag(I30IndexRoot, TAG_NTFS);
+    /* The update completed, so the saved copy is stale - discard it. */
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PristineParentRecord);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
     NTFS_TRACE_IF(TraceIndex, "DRVIDX: return status=0x%lx\n", Status);
 
