@@ -69,13 +69,14 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         LONGLONG DataRunOffset;
         ULONGLONG DataRunLength;
         ULONGLONG NextVBN = 0;
+        BOOLEAN IsSparse;
         PUCHAR DataRun = (PUCHAR)((ULONG_PTR)Context->pRecord + Context->pRecord->NonResident.MappingPairsOffset);
 
         Context->CacheRun = DataRun;
         Context->CacheRunOffset = 0;
-        Context->CacheRun = DecodeRun(Context->CacheRun, &DataRunOffset, &DataRunLength);
+        Context->CacheRun = DecodeRun(Context->CacheRun, &DataRunOffset, &DataRunLength, &IsSparse);
         Context->CacheRunLength = DataRunLength;
-        if (DataRunOffset != -1)
+        if (!IsSparse)
         {
             /* Normal run. */
             Context->CacheRunStartLCN =
@@ -1483,6 +1484,7 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
     ULONG AlreadyRead;
     NTSTATUS Status;
     BOOLEAN DirectDiskRead;
+    BOOLEAN IsSparse;
 
     if (!Context->pRecord->IsNonResident)
     {
@@ -1576,8 +1578,8 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
 
     while (1)
     {
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-        if (DataRunOffset != -1)
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+        if (!IsSparse)
         {
             /* Normal data run. */
             DataRunStartLCN = LastLCN + DataRunOffset;
@@ -1774,8 +1776,8 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
             if (*DataRun == 0)
                 break;
 
-            DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-            if (DataRunOffset != -1)
+            DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+            if (!IsSparse)
             {
                 DataRunStartLCN = LastLCN + DataRunOffset;
                 LastLCN = DataRunStartLCN;
@@ -1882,6 +1884,7 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
     ULONGLONG CurrentOffset;
     ULONG WriteLength;
     NTSTATUS Status;
+    BOOLEAN IsSparse;
     PUCHAR SourceBuffer = Buffer;
     LONGLONG StartingOffset;
     BOOLEAN FileRecordAllocated = FALSE;
@@ -2025,8 +2028,8 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
 
         while (1)
         {
-            DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-            if (DataRunOffset != -1)
+            DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+            if (!IsSparse)
             {
                 // Normal data run.
                 // DPRINT1("Writing to normal data run, LastLCN %I64u DataRunOffset %I64d\n", LastLCN, DataRunOffset);
@@ -2273,9 +2276,9 @@ RepairTailMapping:
     {
         // Advance to the next data run
         CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
 
-        if (DataRunOffset != (ULONGLONG)-1)
+        if (!IsSparse)
         {
             DataRunStartLCN = LastLCN + DataRunOffset;
             LastLCN = DataRunStartLCN;
@@ -2336,8 +2339,8 @@ RepairTailMapping:
 
         // Advance to the next data run
         CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-        if (DataRunOffset != -1)
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+        if (!IsSparse)
         {
             // Normal data run.
             DataRunStartLCN = LastLCN + DataRunOffset;
@@ -4337,6 +4340,7 @@ NtfsFreeRecordAttributeClusters(PDEVICE_EXTENSION DeviceExt,
     LONGLONG RunDelta;
     ULONGLONG RunLength;
     LONGLONG Lcn;
+    BOOLEAN IsSparse;
     NTSTATUS Status;
 
     Attr = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
@@ -4352,8 +4356,8 @@ NtfsFreeRecordAttributeClusters(PDEVICE_EXTENSION DeviceExt,
             Lcn = 0;
             while (*Run != 0)
             {
-                Run = DecodeRun(Run, &RunDelta, &RunLength);
-                if (RunDelta == -1)
+                Run = DecodeRun(Run, &RunDelta, &RunLength, &IsSparse);
+                if (IsSparse)
                     continue;   /* sparse run - nothing allocated */
                 Lcn += RunDelta;
                 Status = NtfsFreeClusterRange(DeviceExt, (ULONGLONG)Lcn, RunLength);
