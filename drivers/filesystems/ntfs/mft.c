@@ -3143,20 +3143,66 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     FileRecord->MFTRecordNumber = MftIndex;
     BitmapData[2] = SystemReservedBits;
 
-    // Write the file record to disk
-    Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
-    if (!NT_SUCCESS(Status))
+    /* A file reference carries the record's sequence number in its top 16 bits
+     * so that a reference left behind by a deleted file fails to resolve once
+     * the record is handed to somebody else.  That only works if reuse bumps
+     * the sequence: starting every record at 1 makes a stale reference match
+     * the new occupant exactly, so a dangling index entry silently resolves to
+     * an unrelated file instead of being rejected.  Carry the previous
+     * occupant's sequence forward.  A record that was never used (or can't be
+     * read back) has no sequence to inherit, hence the 1 default. */
+    FileRecord->SequenceNumber = 1;
     {
-        DPRINT1("ERROR: Unable to write file record!\n");
-        ReleaseAttributeContext(BitmapContext);
-        goto CleanupLock;
+        PFILE_RECORD_HEADER OldRecord;
+
+        OldRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (OldRecord != NULL)
+        {
+            if (NT_SUCCESS(ReadFileRecord(DeviceExt, MftIndex, OldRecord)))
+            {
+                USHORT NextSequence = OldRecord->SequenceNumber + 1;
+
+                /* Sequence 0 is reserved: it is what an unused reference looks
+                 * like, so wrap to 1 rather than through it. */
+                if (NextSequence == 0)
+                    NextSequence = 1;
+                FileRecord->SequenceNumber = NextSequence;
+            }
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, OldRecord);
+        }
     }
 
-    // Write bitmap to disk only after the record body is valid on disk.
+    /* Persist the bitmap bit BEFORE the record body.  The two writes cannot be
+     * made atomic without $LogFile, so the surviving failure has to be the
+     * harmless one: a bit set for a record nobody references is a leak that
+     * chkdsk reclaims, whereas a record marked in use whose bit stayed clear is
+     * handed straight back out by the next allocation and overwrites live
+     * metadata.  Directories lost their contents that way - the parent's index
+     * entry survived while the record beneath it became somebody else's file. */
     Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, DeviceExt->MasterFileTable);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
+        RtlClearBits(&Bitmap, (ULONG)MftIndex, 1);
+        ReleaseAttributeContext(BitmapContext);
+        goto CleanupLock;
+    }
+
+    // Write the file record to disk
+    Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        ULONG RollbackWritten;
+
+        DPRINT1("ERROR: Unable to write file record!\n");
+
+        /* The bit is already on disk and the record never became valid, so give
+         * it back instead of leaking it.  Best effort: if this write fails too
+         * the bit stays set, which is still the safe direction. */
+        RtlClearBits(&Bitmap, (ULONG)MftIndex, 1);
+        WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize,
+                       &RollbackWritten, DeviceExt->MasterFileTable);
+
         ReleaseAttributeContext(BitmapContext);
         goto CleanupLock;
     }
