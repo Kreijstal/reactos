@@ -53,13 +53,22 @@ NtfsGetNextPathElement(PCWSTR FileName)
 
 
 static
-VOID
+BOOLEAN
 NtfsWSubString(PWCHAR pTarget,
+               size_t pTargetCount,
                PCWSTR pSource,
                size_t pLength)
 {
+    /* pLength is derived from the caller-supplied path, which is not bounded
+     * by the size of the target buffer.  Refuse to copy rather than run off
+     * the end of it: the targets are on-stack WCHAR[MAX_PATH] arrays, so an
+     * overrun smashes the caller's spilled arguments. */
+    if (pLength >= pTargetCount)
+        return FALSE;
+
     wcsncpy(pTarget, pSource, pLength);
     pTarget[pLength] = L'\0';
+    return TRUE;
 }
 
 
@@ -1280,17 +1289,37 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
         parentFCB = FCB;
 
         /* Extract next directory level into dirName */
-        NtfsWSubString(pathName,
-                       pFileName,
-                       NtfsGetNextPathElement(currentElement) - pFileName);
+        if (!NtfsWSubString(pathName,
+                            RTL_NUMBER_OF(pathName),
+                            pFileName,
+                            NtfsGetNextPathElement(currentElement) - pFileName))
+        {
+            DPRINT1("Path element exceeds MAX_PATH\n");
+
+            NtfsReleaseFCB(Vcb, parentFCB);
+            *pParentFCB = NULL;
+            *pFCB = NULL;
+
+            return STATUS_OBJECT_NAME_INVALID;
+        }
         DPRINT("  pathName:%S\n", pathName);
 
         FCB = NtfsGrabFCBFromTable(Vcb, pathName);
         if (FCB == NULL)
         {
-            NtfsWSubString(elementName,
-                           currentElement,
-                           NtfsGetNextPathElement(currentElement) - currentElement);
+            if (!NtfsWSubString(elementName,
+                                RTL_NUMBER_OF(elementName),
+                                currentElement,
+                                NtfsGetNextPathElement(currentElement) - currentElement))
+            {
+                DPRINT1("Path element exceeds MAX_PATH\n");
+
+                NtfsReleaseFCB(Vcb, parentFCB);
+                *pParentFCB = NULL;
+                *pFCB = NULL;
+
+                return STATUS_OBJECT_NAME_INVALID;
+            }
             DPRINT("  elementName:%S\n", elementName);
 
             Status = NtfsDirFindFile(Vcb, parentFCB, elementName, CaseSensitive, &FCB);
