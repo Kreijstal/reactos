@@ -278,8 +278,23 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
                     FindCloseAttribute(&Context);
                     return STATUS_OBJECT_NAME_NOT_FOUND;
                 }
-                /* Read the new file record */
-                ReadFileRecord(Vcb, MftIndex, RemoteHdr);
+                /* Read the new file record.  The status matters: on failure
+                 * RemoteHdr holds whatever the recycled pool block happened to
+                 * contain, and walking that as attributes yields plausible but
+                 * fictional records - observed as a $BITMAP whose mapping pairs
+                 * were file path text and whose MFTRecordNumber was a kernel
+                 * pointer. */
+                Status = ReadFileRecord(Vcb, MftIndex, RemoteHdr);
+                if (!NT_SUCCESS(Status))
+                {
+                    DPRINT1("Attribute list of MFT record %I64u references record %I64u, "
+                            "which couldn't be read (0x%lx)\n",
+                            MftRecord->MFTRecordNumber, MftIndex, Status);
+                    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, RemoteHdr);
+                    FindCloseAttribute(&Context);
+                    return Status;
+                }
+
                 Status = FindAttribute(Vcb, RemoteHdr, Type, Name, NameLength, AttrCtx, Offset);
 
                 /* The recursive FindAttribute on the child record set
@@ -1911,7 +1926,14 @@ WriteAttribute(PDEVICE_EXTENSION Vcb,
             FileRecordAllocated = TRUE;
 
             // read the file record
-            ReadFileRecord(Vcb, Context->FileMFTIndex, FileRecord);
+            Status = ReadFileRecord(Vcb, Context->FileMFTIndex, FileRecord);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("Couldn't read file record %I64u (0x%lx)\n",
+                        Context->FileMFTIndex, Status);
+                ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+                return Status;
+            }
         }
 
         // find where to write the attribute data to
@@ -2384,6 +2406,19 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
     }
 
     NTFS_CHECK_POOL(file, "ReadFileRecord:post");
+
+    /* This function hands back a *file* record specifically, and callers walk
+     * the result as a list of attributes.  Anything else in the buffer means
+     * the read landed somewhere that isn't an MFT record - a $MFT runlist
+     * pointing at a data cluster, say - and the caller must not parse it.
+     * FixupUpdateSequenceArray() below rejects foreign record types too, but
+     * it accepts INDX/RSTR/RCRD/CHKD, none of which are file records. */
+    if (file->Ntfs.Type != NRH_FILE_TYPE)
+    {
+        DPRINT1("MFT record %I64u is not a FILE record (type 0x%lx)\n",
+                index, file->Ntfs.Type);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
     /* Apply update sequence array fixups. */
     DPRINT("Sequence number: %u\n", file->SequenceNumber);
