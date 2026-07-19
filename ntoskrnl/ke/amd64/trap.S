@@ -193,14 +193,9 @@ KiDebugTrapOrFaultKMode:
     popfq
     and dword ptr [rbp + KTRAP_FRAME_EFlags], NOT EFLAGS_TF_MASK
 
-    /* A leaked user TF can single-step kernel code. Consume that trap. */
-    test word ptr [rbp + KTRAP_FRAME_SegCs], 3
-    jz KiDebugTrapOrFaultExit
-
     /* Dispatch the exception */
     DispatchException STATUS_SINGLE_STEP, 0, 0, 0, 0
 
-KiDebugTrapOrFaultExit:
     /* Return */
     ExitTrap TF_SAVE_ALL
 ENDFUNC
