@@ -1162,6 +1162,7 @@ NtfsAttrListDataIo(PNTFS_VCB Vcb,
     ULONGLONG RunLength;
     LONGLONG Lcn = 0;
     ULONG Remaining = Length;
+    BOOLEAN IsSparse;
     NTSTATUS Status;
 
     ASSERT(ListAttr->IsNonResident);
@@ -1180,8 +1181,8 @@ NtfsAttrListDataIo(PNTFS_VCB Vcb,
             return STATUS_FILE_CORRUPT_ERROR;
         }
 
-        Run = DecodeRun(Run, &RunDelta, &RunLength);
-        if (RunDelta == -1 || RunLength == 0)
+        Run = DecodeRun(Run, &RunDelta, &RunLength, &IsSparse);
+        if (IsSparse || RunLength == 0)
         {
             /* We never create sparse $ATTRIBUTE_LIST runs. */
             DPRINT1("NtfsAttrListDataIo: unexpected sparse/empty run\n");
@@ -2213,6 +2214,7 @@ NtfsFreeAttributeListClusters(PNTFS_VCB Vcb,
     LONGLONG RunDelta;
     ULONGLONG RunLength;
     LONGLONG Lcn = 0;
+    BOOLEAN IsSparse;
     NTSTATUS Status;
 
     ListAttr = NtfsFindAttributeListSlot(BaseFileRecord);
@@ -2222,8 +2224,8 @@ NtfsFreeAttributeListClusters(PNTFS_VCB Vcb,
     Run = (PUCHAR)ListAttr + ListAttr->NonResident.MappingPairsOffset;
     while (*Run != 0)
     {
-        Run = DecodeRun(Run, &RunDelta, &RunLength);
-        if (RunDelta == -1)
+        Run = DecodeRun(Run, &RunDelta, &RunLength, &IsSparse);
+        if (IsSparse)
             continue;   /* sparse run - nothing allocated (we never create these) */
         Lcn += RunDelta;
         Status = NtfsFreeClusterRange(Vcb, (ULONGLONG)Lcn, RunLength);
@@ -3807,6 +3809,7 @@ ConvertDataRunsToLargeMCB(PUCHAR DataRun,
     ULONGLONG DataRunLength;
     LONGLONG  DataRunStartLCN;
     ULONGLONG LastLCN = 0;
+    BOOLEAN   IsSparse;
 
     // Initialize the MCB, potentially catch an exception
     _SEH2_TRY{
@@ -3817,9 +3820,9 @@ ConvertDataRunsToLargeMCB(PUCHAR DataRun,
 
     while (*DataRun != 0)
     {
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
 
-        if (DataRunOffset != -1)
+        if (!IsSparse)
         {
             // Normal data run.
             DataRunStartLCN = LastLCN + DataRunOffset;
@@ -4759,10 +4762,28 @@ Cleanup:
     return Status;
 }
 
+/**
+* @name DecodeRun
+*
+* Decodes one mapping pair into its LCN delta and cluster count.
+*
+* @param IsSparse
+* Receives TRUE when the pair carries no offset field at all, which is how
+* NTFS 3+ encodes a sparse run.  This has to be reported out of band: the
+* offset is a signed delta, so a real run that happens to sit exactly one
+* cluster below its predecessor encodes as a single 0xFF byte and yields
+* -1 just like a sparse run would.  Volumes written by Windows contain
+* negative deltas routinely, so treating -1 as "sparse" silently dropped
+* real runs, left LastLCN stale, and made every subsequent LCN wrong.
+*
+* @return
+* A pointer to the byte after the decoded pair.
+*/
 PUCHAR
 DecodeRun(PUCHAR DataRun,
           LONGLONG *DataRunOffset,
-          ULONGLONG *DataRunLength)
+          ULONGLONG *DataRunLength,
+          PBOOLEAN IsSparse)
 {
     UCHAR DataRunOffsetSize;
     UCHAR DataRunLengthSize;
@@ -4772,6 +4793,7 @@ DecodeRun(PUCHAR DataRun,
     DataRunLengthSize = *DataRun & 0xF;
     *DataRunOffset = 0;
     *DataRunLength = 0;
+    *IsSparse = (DataRunOffsetSize == 0);
     DataRun++;
     for (i = 0; i < DataRunLengthSize; i++)
     {
@@ -4779,12 +4801,9 @@ DecodeRun(PUCHAR DataRun,
         DataRun++;
     }
 
-    /* NTFS 3+ sparse files */
-    if (DataRunOffsetSize == 0)
-    {
-        *DataRunOffset = -1;
-    }
-    else
+    /* A sparse run has no offset field; leave the delta at zero so a caller
+     * that accumulates it unconditionally doesn't drift. */
+    if (!*IsSparse)
     {
         for (i = 0; i < DataRunOffsetSize - 1; i++)
         {
@@ -4809,10 +4828,13 @@ FindRun(PNTFS_ATTR_RECORD NresAttr,
         PULONGLONG lcn,
         PULONGLONG count)
 {
+    BOOLEAN IsSparse;
+
     if (vcn < NresAttr->NonResident.LowestVCN || vcn > NresAttr->NonResident.HighestVCN)
         return FALSE;
 
-    DecodeRun((PUCHAR)((ULONG_PTR)NresAttr + NresAttr->NonResident.MappingPairsOffset), (PLONGLONG)lcn, count);
+    DecodeRun((PUCHAR)((ULONG_PTR)NresAttr + NresAttr->NonResident.MappingPairsOffset),
+              (PLONGLONG)lcn, count, &IsSparse);
 
     return TRUE;
 }
@@ -5626,6 +5648,7 @@ NtfsDumpDataRuns(PVOID StartOfRun,
     PUCHAR DataRun = StartOfRun;
     LONGLONG DataRunOffset;
     ULONGLONG DataRunLength;
+    BOOLEAN IsSparse;
 
     if (!NTFS_TRACE_ENABLED)
         return;
@@ -5637,9 +5660,9 @@ NtfsDumpDataRuns(PVOID StartOfRun,
         DbgPrint("\n\tRuns:\n\t\tOff\t\tLCN\t\tLength\n");
     }
 
-    DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
+    DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
 
-    if (DataRunOffset != -1)
+    if (!IsSparse)
         CurrentLCN += DataRunOffset;
 
     DbgPrint("\t\t%I64d\t", DataRunOffset);
@@ -5877,6 +5900,7 @@ GetLastClusterInDataRun(PDEVICE_EXTENSION Vcb, PNTFS_ATTR_RECORD Attribute, PULO
     LONGLONG DataRunOffset;
     ULONGLONG DataRunLength;
     LONGLONG DataRunStartLCN;
+    BOOLEAN IsSparse;
 
     ULONGLONG LastLCN = 0;
     PUCHAR DataRun = (PUCHAR)Attribute + Attribute->NonResident.MappingPairsOffset;
@@ -5886,9 +5910,9 @@ GetLastClusterInDataRun(PDEVICE_EXTENSION Vcb, PNTFS_ATTR_RECORD Attribute, PULO
 
     while (1)
     {
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
 
-        if (DataRunOffset != -1)
+        if (!IsSparse)
         {
             // Normal data run.
             DataRunStartLCN = LastLCN + DataRunOffset;
