@@ -219,23 +219,56 @@ NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
     }
     else
     {
-        // we can't get one contiguous run
-        *AssignedClusters = RtlFindNextForwardRunClear(&Bitmap, FirstDesiredCluster, FirstAssignedCluster);
+        ULONG ForwardStart = 0;
+        ULONG ForwardLength;
+        ULONG LongestStart = 0;
+        ULONG LongestLength;
 
-        if (*AssignedClusters == 0)
+        /* No single free extent is large enough, so the allocation has to be
+         * split across several runs.  Pick the extent that covers as much of
+         * the request as possible rather than the first one we stumble upon:
+         * taking the nearest hole regardless of its size strip-mines the
+         * volume's smallest gaps, so a caller that loops until ClustersNeeded
+         * reaches zero can come back with hundreds of one-cluster runs.  Every
+         * run costs a mapping pair in the attribute, and once those no longer
+         * fit in an MFT record AddRun fails outright - which is how a directory
+         * index that only needs a few clusters ends up unable to grow at all. */
+        ForwardLength = RtlFindNextForwardRunClear(&Bitmap, FirstDesiredCluster, &ForwardStart);
+        LongestLength = RtlFindLongestRunClear(&Bitmap, &LongestStart);
+
+        /* Prefer the run at the caller's hint when it is no worse than the
+         * best one available, since keeping the allocation close to the
+         * previous run is what lets the MCB coalesce the two into one. */
+        if (ForwardLength != 0 && ForwardLength >= LongestLength)
         {
-            // we couldn't find any runs starting at DesiredFirstCluster
-            *AssignedClusters = RtlFindLongestRunClear(&Bitmap, FirstAssignedCluster);
+            *FirstAssignedCluster = ForwardStart;
+            *AssignedClusters = ForwardLength;
+        }
+        else
+        {
+            *FirstAssignedCluster = LongestStart;
+            *AssignedClusters = LongestLength;
         }
 
         if (*AssignedClusters > DesiredClusters)
             *AssignedClusters = DesiredClusters;
 
-        if (*AssignedClusters != 0)
+        /* FreeClusters >= DesiredClusters was checked above, so at least one
+         * free extent has to exist; handing back zero clusters would spin the
+         * caller's "allocate until ClustersNeeded is satisfied" loop forever. */
+        if (*AssignedClusters == 0)
         {
-            // Mark the allocated clusters as in-use in the bitmap
-            RtlSetBits(&Bitmap, *FirstAssignedCluster, *AssignedClusters);
+            DPRINT1("Bitmap reports %I64u free clusters but no free run found!\n", FreeClusters);
+            ReleaseAttributeContext(DataContext);
+            ExFreePoolWithTag(BitmapData, TAG_NTFS);
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, BitmapRecord);
+            if (BitmapLockHeld)
+                ExReleaseResourceLite(&DeviceExt->BitmapResource);
+            return STATUS_DISK_FULL;
         }
+
+        // Mark the allocated clusters as in-use in the bitmap
+        RtlSetBits(&Bitmap, *FirstAssignedCluster, *AssignedClusters);
     }
 
     Status = WriteAttribute(DeviceExt, DataContext, 0, BitmapData, (ULONG)BitmapDataSize, &LengthWritten, BitmapRecord);
