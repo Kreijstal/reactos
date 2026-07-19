@@ -17,6 +17,7 @@
 static ULONG KdbgNextApiNumber = DbgKdContinueApi;
 static CONTEXT KdbgContext;
 static EXCEPTION_RECORD64 KdbgExceptionRecord;
+static USHORT KdbgProcessorNumber = 0;
 static BOOLEAN KdbgFirstChanceException;
 static NTSTATUS KdbgContinueStatus = STATUS_SUCCESS;
 
@@ -98,6 +99,14 @@ KdSendPacket(
         else if (WaitStateChange->NewState == DbgKdExceptionStateChange)
         {
             KdbgNextApiNumber = DbgKdGetContextApi;
+            /* Remember which processor reported the exception. KdpGetContext()
+             * and KdpSetContext() address KiProcessorBlock[State->Processor],
+             * so leaving it at zero makes them read and write processor 0's
+             * frozen ProcessorState instead of the faulting processor's
+             * context: KDBG would display an innocent frozen CPU's registers,
+             * and any context change (clearing the trap flag, stepping) would
+             * be injected into that CPU instead of the one that trapped. */
+            KdbgProcessorNumber = WaitStateChange->Processor;
             KdbgExceptionRecord = WaitStateChange->u.Exception.ExceptionRecord;
             KdbgFirstChanceException = WaitStateChange->u.Exception.FirstChance;
             return;
@@ -188,6 +197,7 @@ KdReceivePacket(
         if (KdbgNextApiNumber == DbgKdGetContextApi)
         {
             ManipulateState->ApiNumber = DbgKdGetContextApi;
+            ManipulateState->Processor = KdbgProcessorNumber;
             MessageData->Length = 0;
             MessageData->Buffer = (PCHAR)&KdbgContext;
             return KdPacketReceived;
@@ -195,6 +205,7 @@ KdReceivePacket(
         else if (KdbgNextApiNumber == DbgKdSetContextApi)
         {
             ManipulateState->ApiNumber = DbgKdSetContextApi;
+            ManipulateState->Processor = KdbgProcessorNumber;
             MessageData->Length = sizeof(KdbgContext);
             MessageData->Buffer = (PCHAR)&KdbgContext;
             return KdPacketReceived;
