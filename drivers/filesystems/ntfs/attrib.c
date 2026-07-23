@@ -1651,6 +1651,7 @@ NtfsNonResidentListEnsureSpace(PNTFS_VCB Vcb,
         return STATUS_SUCCESS;
 
     Status = ConvertDataRunsToLargeMCB((PUCHAR)ListAttr + ListAttr->NonResident.MappingPairsOffset,
+                                       (PUCHAR)ListAttr + ListAttr->Length,
                                        &Mcb, &NextVbn);
     if (!NT_SUCCESS(Status))
         return Status;
@@ -2312,6 +2313,7 @@ NtfsNonResidentListWriteValue(PNTFS_VCB Vcb,
         int RunIdx = 0;
 
         Status = ConvertDataRunsToLargeMCB((PUCHAR)ListAttr + ListAttr->NonResident.MappingPairsOffset,
+                                           (PUCHAR)ListAttr + ListAttr->Length,
                                            &Mcb, &NextVbn);
         if (!NT_SUCCESS(Status))
             return Status;
@@ -3802,6 +3804,7 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
 */
 NTSTATUS
 ConvertDataRunsToLargeMCB(PUCHAR DataRun,
+                          PUCHAR DataRunEnd,
                           PLARGE_MCB DataRunsMCB,
                           PULONGLONG pNextVBN)
 {
@@ -3818,8 +3821,27 @@ ConvertDataRunsToLargeMCB(PUCHAR DataRun,
         _SEH2_YIELD(return _SEH2_GetExceptionCode());
     } _SEH2_END;
 
-    while (*DataRun != 0)
+    /* The mapping pairs live in [DataRun, DataRunEnd) - the attribute record's
+     * declared Length.  A malformed or truncated runlist may omit the 0
+     * terminator or declare a run whose size bytes reach past the buffer; a
+     * bare `while (*DataRun != 0)` then reads DecodeRun's length/offset bytes off
+     * the end of the allocation.  In normal pool that yields garbage runs (a
+     * bogus VBN/LCN into FsRtlAddLargeMcbEntry); special pool caught it as a
+     * guard-page fault in DecodeRun.  Bound every read by DataRunEnd and reject
+     * a runlist that would overrun it. */
+    while (DataRun < DataRunEnd && *DataRun != 0)
     {
+        /* DecodeRun reads 1 header byte + LengthSize + OffsetSize bytes; make
+         * sure all of them are inside the buffer before it dereferences them. */
+        ULONG RunBytes = 1 + (*DataRun & 0x0F) + ((*DataRun >> 4) & 0x0F);
+        if (DataRun + RunBytes > DataRunEnd)
+        {
+            DPRINT1("ConvertDataRunsToLargeMCB: run header 0x%02x at %p needs %lu bytes past end %p - truncated runlist\n",
+                    *DataRun, DataRun, RunBytes, DataRunEnd);
+            FsRtlUninitializeLargeMcb(DataRunsMCB);
+            return STATUS_FILE_CORRUPT_ERROR;
+        }
+
         DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
 
         if (!IsSparse)
