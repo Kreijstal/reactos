@@ -1142,6 +1142,7 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
 
 NTSTATUS
 ConvertDataRunsToLargeMCB(PUCHAR DataRun,
+                          PUCHAR DataRunEnd,
                           PLARGE_MCB DataRunsMCB,
                           PULONGLONG pNextVBN);
 
