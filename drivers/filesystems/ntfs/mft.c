@@ -91,7 +91,9 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         Context->CacheRunCurrentOffset = 0;
 
         // Convert the data runs to a map control block
-        if (!NT_SUCCESS(ConvertDataRunsToLargeMCB(DataRun, &Context->DataRunsMCB, &NextVBN)))
+        if (!NT_SUCCESS(ConvertDataRunsToLargeMCB(DataRun,
+                                                  (PUCHAR)Context->pRecord + Context->pRecord->Length,
+                                                  &Context->DataRunsMCB, &NextVBN)))
         {
             DPRINT1("Unable to convert data runs to MCB! (attribute 0x%lx, %s, "
                     "length %lu, MappingPairsOffset %u, VCNs %I64u-%I64u)\n",
