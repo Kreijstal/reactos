@@ -639,6 +639,7 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
          * segment still holds a pointer to it. */
     }
     else if (Fcb->RefCount <= 0 &&
+             !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM) &&
              (!NtfsFCBIsDirectory(Fcb) || Fcb->LinkCount == 0))
     {
         /* Non-directory FCBs are evicted as soon as the last reference goes
@@ -646,7 +647,16 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
          * table, but a *deleted* directory (LinkCount == 0, set by
          * NtfsDeleteFileRecord) must be evicted too - otherwise its stale FCB
          * shadows the name and a later create at the same path wrongly sees
-         * STATUS_OBJECT_NAME_COLLISION even though the on-disk entry is gone. */
+         * STATUS_OBJECT_NAME_COLLISION even though the on-disk entry is gone.
+         *
+         * The volume FCB and the internal volume-stream FCB are persistent
+         * singletons (DeviceExt->VolumeFcb / Vcb->StreamFileObject's FCB) that
+         * live for the whole mount and are never inserted into FcbListHead, so
+         * they must never take this path: RemoveEntryList below would walk a
+         * NULL Flink, and NtfsDestroyFCB would leave DeviceExt->VolumeFcb
+         * dangling.  Their lifetime is owned by mount/dismount, not RefCount -
+         * a bare volume open/close cycle legitimately drives RefCount 0->1->0.
+         * NtfsCleanupFile already special-cases the same two flags. */
         PFILE_OBJECT tmpFileObject = NULL;
 
         /* If cache is still initialized, tear it down before freeing the FCB.
