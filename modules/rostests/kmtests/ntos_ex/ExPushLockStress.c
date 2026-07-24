@@ -28,6 +28,12 @@ static volatile LONG g_Stop;
 static volatile LONG g_ContendIters;
 static volatile LONG g_ChurnThreads;
 static volatile LONG g_PoolOps;
+static volatile LONG g_OneShotLive;
+
+/* Cap on concurrently live one-shot waiter threads: unbounded creation
+ * outruns the thread reaper (each carries a kernel stack) and exhausts
+ * memory within seconds on an MP box. */
+#define ONESHOT_MAX     64
 
 #define N_CONTENDERS    6       /* persistent exclusive contenders */
 #define N_SHARERS       4       /* persistent shared contenders */
@@ -79,6 +85,7 @@ static VOID NTAPI OneShotWaiter(PVOID Ctx)
     UNREFERENCED_PARAMETER(Ctx);
     ExfAcquirePushLockExclusive(&g_Lock);
     ExfReleasePushLockExclusive(&g_Lock);
+    InterlockedDecrement((PLONG)&g_OneShotLive);
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -91,7 +98,14 @@ static VOID NTAPI Churner(PVOID Ctx)
         HANDLE h;
         OBJECT_ATTRIBUTES oa;
         NTSTATUS st;
+        if (InterlockedCompareExchange((PLONG)&g_OneShotLive, 0, 0) >= ONESHOT_MAX)
+        {
+            LARGE_INTEGER d; d.QuadPart = -1 * 10 * 1000; /* 1ms back-off */
+            KeDelayExecutionThread(KernelMode, FALSE, &d);
+            continue;
+        }
         InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+        InterlockedIncrement((PLONG)&g_OneShotLive);
         st = PsCreateSystemThread(&h, SYNCHRONIZE, &oa, NULL, NULL, OneShotWaiter, NULL);
         if (NT_SUCCESS(st))
         {
@@ -100,7 +114,9 @@ static VOID NTAPI Churner(PVOID Ctx)
         }
         else
         {
-            LARGE_INTEGER d; d.QuadPart = -1 * 10 * 1000; /* 1ms back-off */
+            LARGE_INTEGER d;
+            InterlockedDecrement((PLONG)&g_OneShotLive);
+            d.QuadPart = -1 * 10 * 1000; /* 1ms back-off */
             KeDelayExecutionThread(KernelMode, FALSE, &d);
         }
     }
