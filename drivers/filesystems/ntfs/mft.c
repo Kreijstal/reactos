@@ -2740,6 +2740,7 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
 {
     ULONG BytesWritten;
     NTSTATUS Status = STATUS_SUCCESS;
+    PFILE_RECORD_HEADER WriteImage;
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
 
@@ -2786,16 +2787,38 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
         FileRecord->Ntfs.Lsn = PageLsn;
     }
 
-    // Add the fixup array to prepare the data for writing to disk
-    AddFixupArray(Vcb, &FileRecord->Ntfs);
+    /* Apply the update-sequence fixup on a throwaway copy, never on the
+     * caller's live buffer.  AddFixupArray stamps the incrementing USN into
+     * every sector tail (offsets 510/1022/...).  For the $MFT's own record
+     * those tails land *inside* the mapping pairs of a heavily fragmented
+     * $BITMAP/$DATA attribute, and writing that record re-enters this function
+     * through WriteAttribute's $MFT-$DATA hole-fill and resident-update paths
+     * with FileRecord == Vcb->MasterFileTable.  A nested AddFixupArray on an
+     * already-stamped buffer folds the outer USN sentinel into the USA, so the
+     * outer FixupUpdateSequenceArray then fails its per-sector USN check and
+     * returns without restoring - leaving a stale USN byte lodged in the cached
+     * $Bitmap runlist (byte 510 reads as a small USN like 0x29).  The next
+     * decode of that runlist over-reads.  Stamping a private image keeps the
+     * live (and cached) record pristine and also closes the momentary
+     * read-during-stamp window for any concurrent reader. */
+    WriteImage = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (WriteImage == NULL)
+    {
+        DPRINT1("UpdateFileRecord: couldn't allocate fixup scratch record\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(WriteImage, FileRecord, Vcb->NtfsInfo.BytesPerFileRecord);
 
-    NTFS_CHECK_POOL(FileRecord, "UpdateFileRecord:post-fixup");
+    // Add the fixup array to prepare the (private) image for writing to disk
+    AddFixupArray(Vcb, &WriteImage->Ntfs);
+
+    NTFS_CHECK_POOL(WriteImage, "UpdateFileRecord:post-fixup");
 
     // write the file record to the master file table
     Status = WriteAttribute(Vcb,
                             Vcb->MFTContext,
                             MftIndex * Vcb->NtfsInfo.BytesPerFileRecord,
-                            (const PUCHAR)FileRecord,
+                            (const PUCHAR)WriteImage,
                             Vcb->NtfsInfo.BytesPerFileRecord,
                             &BytesWritten,
                             Vcb->MasterFileTable);
@@ -2805,8 +2828,7 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
         DPRINT1("UpdateFileRecord failed: %lu written, %lu expected\n", BytesWritten, Vcb->NtfsInfo.BytesPerFileRecord);
     }
 
-    // remove the fixup array (so the file record pointer can still be used)
-    FixupUpdateSequenceArray(Vcb, &FileRecord->Ntfs);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
 
     return Status;
 }
