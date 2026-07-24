@@ -277,6 +277,28 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
         return Status;
     }
 
+    /* This raw sector read bypasses ReadFileRecord (MFTContext does not exist
+     * yet - it is derived from this very record below), so the update sequence
+     * array fixup that ReadFileRecord normally applies has to be done by hand.
+     * DeviceExt->MasterFileTable is the *persistent* cached $MFT record 0 that
+     * every later FindAttribute() walks, so leaving it in raw on-disk form
+     * lodges the USN sentinel (the on-disk value at each sector tail, offsets
+     * 510/1022/...) permanently inside the record.  That is invisible while an
+     * attribute's data stops short of a sector tail, but a heavily fragmented
+     * volume grows $MFT's own $BITMAP/$DATA mapping pairs across offset 510 -
+     * the un-restored USN then reads as a bogus run header and the $Bitmap
+     * runlist fails to decode ("Couldn't find $Bitmap attribute of master file
+     * table"), which is workload-dependent exactly because it depends on the
+     * mapping pairs reaching the tail. */
+    Status = FixupUpdateSequenceArray(DeviceExt, &DeviceExt->MasterFileTable->Ntfs);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Invalid update sequence array in MFT record 0.\n");
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, DeviceExt->MasterFileTable);
+        ExDeleteNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        return Status;
+    }
+
     Status = FindAttribute(DeviceExt,
                            DeviceExt->MasterFileTable,
                            AttributeData,
