@@ -4000,10 +4000,21 @@ NtWriteFile(IN HANDLE FileHandle,
             return Status;
         }
 
-        /* Check if we don't have a byte offset available */
-        if (!(ByteOffset) ||
-            ((CapturedByteOffset.u.LowPart == FILE_USE_FILE_POINTER_POSITION) &&
-             (CapturedByteOffset.u.HighPart == -1)))
+        /* Check if we don't have a byte offset available.
+         *
+         * Never clobber the append sentinel that the granted-access check
+         * above may have written into CapturedByteOffset: a handle opened for
+         * append (FILE_APPEND_DATA without FILE_WRITE_DATA) and synchronous I/O
+         * reaches here with a NULL ByteOffset, so the plain !ByteOffset test
+         * would replace FILE_WRITE_TO_END_OF_FILE with the current file pointer
+         * and turn every append into an overwrite at that position.  Matches
+         * the WRK, where the CurrentByteOffset fallback is an else-if of the
+         * append translation. */
+        if (!((CapturedByteOffset.u.LowPart == FILE_WRITE_TO_END_OF_FILE) &&
+              (CapturedByteOffset.u.HighPart == -1)) &&
+            (!(ByteOffset) ||
+             ((CapturedByteOffset.u.LowPart == FILE_USE_FILE_POINTER_POSITION) &&
+              (CapturedByteOffset.u.HighPart == -1))))
         {
             /* Use the Current Byte Offset instead */
             CapturedByteOffset = FileObject->CurrentByteOffset;
