@@ -336,8 +336,15 @@ KiInitializePcr(IN ULONG ProcessorNumber,
     Pcr->TssCopy = Tss;
     Pcr->PrcbData.DpcStack = DpcStack;
 
-    /* Setup the processor set */
+    /* Setup the processor set. Each logical processor forms its own
+     * single-member multithread set and is therefore its own set master.
+     * This has to happen for every processor, not just the boot one:
+     * SystemLogicalProcessorInformation only reports a processor whose PRCB
+     * is its own MultiThreadSetMaster, so leaving the field NULL on the APs
+     * hides them from GetLogicalProcessorInformation(Ex) and from everything
+     * that derives the processor count from it. */
     Pcr->PrcbData.MultiThreadProcessorSet = Pcr->PrcbData.SetMember;
+    Pcr->PrcbData.MultiThreadSetMaster = &Pcr->PrcbData;
 }
 
 static
@@ -508,8 +515,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
         KeI386FxsrPresent = (KeFeatureBits & KF_FXSR) ? TRUE : FALSE;
         KeI386XMMIPresent = (KeFeatureBits & KF_XMMI) ? TRUE : FALSE;
 
-        /* Set the current MP Master KPRCB to the Boot PRCB */
-        Prcb->MultiThreadSetMaster = Prcb;
+        /* MultiThreadSetMaster is set for every processor in KiInitializePcr */
 
         /* Lower to APC_LEVEL */
         KeLowerIrql(APC_LEVEL);
