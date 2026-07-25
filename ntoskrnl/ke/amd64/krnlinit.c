@@ -239,8 +239,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     /* Initialize 8/16 bit SList support */
     RtlpUse16ByteSLists = (KeFeatureBits & KF_CMPXCHG16B) ? TRUE : FALSE;
 
-    /* Set the current MP Master KPRCB to the Boot PRCB */
-    Prcb->MultiThreadSetMaster = Prcb;
+    /* MultiThreadSetMaster is set for every processor in KiInitializePcr */
 
     /* Initialize Bugcheck Callback data */
     InitializeListHead(&KeBugcheckCallbackListHead);
