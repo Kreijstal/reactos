@@ -753,6 +753,10 @@
     SVC_(GdiDdDDISharedPrimaryUnLockNotification, 1)
     SVC_(GdiDdDDISignalSynchronizationObject, 1)
     SVC_(GdiDdDDIWaitForSynchronizationObject, 1)
+// NT6
+    SVC_(GdiGetFontFileData, 5)
+    SVC_(GdiGetFontFileInfo, 5)
+    SVC_(GdiGetFontRealizationInfo, 2)
     SVC_(UserRdpInjectMouse, 2)
     SVC_(UserRdpInjectKeyboard, 2)
     SVC_(UserAddClipboardFormatListener, 1)
