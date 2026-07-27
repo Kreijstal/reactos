@@ -2384,15 +2384,72 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     if ((NewAccessProtection & PAGE_NOACCESS) ||
                         (NewAccessProtection & PAGE_GUARD))
                     {
-                        KIRQL OldIrql = MiAcquirePfnLock();
+                        MMPTE NewPte;
+                        PMMPDE PagePde;
+                        KIRQL OldIrql;
 
-                        /* Mark the PTE as transition and change its protection */
-                        PteContents.u.Hard.Valid = 0;
-                        PteContents.u.Soft.Transition = 1;
-                        PteContents.u.Trans.Protection = ProtectionMask;
+                        /*
+                         * A valid PTE cannot express "no access", so the page
+                         * has to leave this view. Which invalid form to write
+                         * depends on where the PFN's back pointer points.
+                         */
+                        if (Pfn1->u3.e1.PrototypePte)
+                        {
+                            /*
+                             * Shared through a prototype PTE: Pfn1->PteAddress
+                             * points at that prototype PTE, not at this view's
+                             * PTE, so the view PTE goes back to being a
+                             * prototype PTE. Writing a transition PTE here
+                             * would leave this process PTE aliasing a page
+                             * whose PFN points somewhere else, and on unmap
+                             * MiDeletePte would take its transition path and
+                             * free the shared page as if it were private while
+                             * the prototype PTE and every other view still
+                             * reference it.
+                             */
+                            NewPte = PrototypePte;
+                            NewPte.u.Soft.Protection = ProtectionMask;
+                        }
+                        else
+                        {
+                            /*
+                             * A private page inside the view (a copy-on-write
+                             * copy). Here Pfn1->PteAddress really is this PTE,
+                             * so the transition form is the correct one.
+                             */
+                            NewPte = PteContents;
+                            NewPte.u.Hard.Valid = 0;
+                            NewPte.u.Soft.Transition = 1;
+                            NewPte.u.Trans.Protection = ProtectionMask;
+                        }
+
+                        OldIrql = MiAcquirePfnLock();
+
+                        if (NewPte.u.Soft.Prototype)
+                        {
+                            /*
+                             * A prototype PTE is not charged to the page table
+                             * that holds it, so the page table loses a share
+                             * count here, exactly as MiDeletePte does when it
+                             * retires a valid prototype-backed PTE. Without
+                             * this the count stays high forever: at teardown
+                             * MiDeleteVirtualAddresses erases a prototype PTE
+                             * with a bare MI_ERASE_PTE, so nothing ever gives
+                             * the page table its count back, and MiDeletePde
+                             * then trips on a page table that still looks
+                             * busy. The transition form below keeps its charge
+                             * on purpose -- MiDeletePte's transition path
+                             * releases it via Pfn1->u4.PteFrame at unmap time.
+                             */
+                            PagePde = MiPteToPde(PointerPte);
+                            ASSERT(PagePde->u.Hard.Valid == 1);
+                            MiDecrementShareCount(MiGetPfnEntry(PagePde->u.Hard.PageFrameNumber),
+                                                  PagePde->u.Hard.PageFrameNumber);
+                        }
+
                         /* Decrease PFN share count and write the PTE */
                         MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
-                        MI_WRITE_INVALID_PTE(PointerPte, PteContents);
+                        MI_WRITE_INVALID_PTE(PointerPte, NewPte);
 
                         /* The page is no longer mapped: defer an all-CPU TLB
                          * flush to after the loop rather than a local-only
