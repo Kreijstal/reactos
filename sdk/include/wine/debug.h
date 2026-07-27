@@ -21,6 +21,7 @@
 #ifndef __WINE_DEBUG_H
 #define __WINE_DEBUG_H
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <windef.h>
@@ -143,6 +144,7 @@ extern const char *wine_dbgstr_wn( const WCHAR *s, int n );
 extern const char *wine_dbg_sprintf( const char *format, ... ) __WINE_PRINTF_ATTR(1,2);
 
 extern int wine_dbg_printf( const char *format, ... ) __WINE_PRINTF_ATTR(1,2);
+extern int __cdecl __wine_dbg_output( const char *str );
 extern int wine_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *ch, const char *func,
                          const char *format, ... ) __WINE_PRINTF_ATTR(4,5);
 /* ReactOS compliant debug format */
