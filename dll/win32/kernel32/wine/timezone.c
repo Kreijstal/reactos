@@ -308,6 +308,103 @@ GetTimeZoneInformation(LPTIME_ZONE_INFORMATION lpTimeZoneInformation)
 }
 
 
+#if (_WIN32_WINNT >= _WIN32_WINNT_VISTA)
+/*
+ * @implemented
+ */
+DWORD
+WINAPI
+GetDynamicTimeZoneInformation(PDYNAMIC_TIME_ZONE_INFORMATION pTimeZoneInformation)
+{
+    static const WCHAR TzInfoKeyName[] =
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation";
+    TIME_ZONE_INFORMATION TimeZoneInformation;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING KeyName, ValueName;
+    KEY_VALUE_PARTIAL_INFORMATION *ValueInfo;
+    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) +
+                 sizeof(pTimeZoneInformation->TimeZoneKeyName)];
+    HANDLE KeyHandle;
+    ULONG ResultLength;
+    DWORD TimeZoneId;
+    NTSTATUS Status;
+
+    TimeZoneId = GetTimeZoneInformation(&TimeZoneInformation);
+    if (TimeZoneId == TIME_ZONE_ID_INVALID)
+        return TIME_ZONE_ID_INVALID;
+
+    pTimeZoneInformation->Bias = TimeZoneInformation.Bias;
+    wcsncpy(pTimeZoneInformation->StandardName,
+            TimeZoneInformation.StandardName,
+            ARRAYSIZE(pTimeZoneInformation->StandardName));
+    pTimeZoneInformation->StandardDate = TimeZoneInformation.StandardDate;
+    pTimeZoneInformation->StandardBias = TimeZoneInformation.StandardBias;
+    wcsncpy(pTimeZoneInformation->DaylightName,
+            TimeZoneInformation.DaylightName,
+            ARRAYSIZE(pTimeZoneInformation->DaylightName));
+    pTimeZoneInformation->DaylightDate = TimeZoneInformation.DaylightDate;
+    pTimeZoneInformation->DaylightBias = TimeZoneInformation.DaylightBias;
+    pTimeZoneInformation->DynamicDaylightTimeDisabled = FALSE;
+
+    /* The time zone registry key name is stored by SetDynamicTimeZoneInformation;
+       fall back to the standard name, which matches the key name for the zones
+       in our time zone database */
+    wcsncpy(pTimeZoneInformation->TimeZoneKeyName,
+            TimeZoneInformation.StandardName,
+            ARRAYSIZE(TimeZoneInformation.StandardName));
+    pTimeZoneInformation->TimeZoneKeyName[ARRAYSIZE(TimeZoneInformation.StandardName)] = UNICODE_NULL;
+
+    RtlInitUnicodeString(&KeyName, TzInfoKeyName);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &KeyName,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+    Status = NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (NT_SUCCESS(Status))
+    {
+        ValueInfo = (KEY_VALUE_PARTIAL_INFORMATION *)Buffer;
+
+        RtlInitUnicodeString(&ValueName, L"TimeZoneKeyName");
+        Status = NtQueryValueKey(KeyHandle,
+                                 &ValueName,
+                                 KeyValuePartialInformation,
+                                 ValueInfo,
+                                 sizeof(Buffer),
+                                 &ResultLength);
+        if (NT_SUCCESS(Status) && (ValueInfo->Type == REG_SZ))
+        {
+            ULONG Length = min(ValueInfo->DataLength / sizeof(WCHAR),
+                               ARRAYSIZE(pTimeZoneInformation->TimeZoneKeyName) - 1);
+            wcsncpy(pTimeZoneInformation->TimeZoneKeyName,
+                    (PCWSTR)ValueInfo->Data,
+                    Length);
+            pTimeZoneInformation->TimeZoneKeyName[Length] = UNICODE_NULL;
+        }
+
+        RtlInitUnicodeString(&ValueName, L"DynamicDaylightTimeDisabled");
+        Status = NtQueryValueKey(KeyHandle,
+                                 &ValueName,
+                                 KeyValuePartialInformation,
+                                 ValueInfo,
+                                 sizeof(Buffer),
+                                 &ResultLength);
+        if (NT_SUCCESS(Status) &&
+            (ValueInfo->Type == REG_DWORD) &&
+            (ValueInfo->DataLength == sizeof(DWORD)))
+        {
+            pTimeZoneInformation->DynamicDaylightTimeDisabled =
+                (*(PDWORD)ValueInfo->Data != 0);
+        }
+
+        NtClose(KeyHandle);
+    }
+
+    return TimeZoneId;
+}
+#endif /* _WIN32_WINNT >= _WIN32_WINNT_VISTA */
+
+
 /*
  * @implemented
  */
