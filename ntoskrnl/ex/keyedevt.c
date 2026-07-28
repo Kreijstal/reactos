@@ -224,11 +224,30 @@ ExpReleaseOrWaitForKeyedEvent(
             /* Remove the thread from the list */
             RemoveEntryList(&CurrentThread->KeyedWaitChain);
             InitializeListHead(&CurrentThread->KeyedWaitChain);
-        }
 
-        /* Unlock the list */
-        ExReleasePushLockExclusive(&KeyedEvent->HashTable[HashIndex].Lock);
-        KeLeaveCriticalRegion();
+            /* Unlock the list */
+            ExReleasePushLockExclusive(&KeyedEvent->HashTable[HashIndex].Lock);
+            KeLeaveCriticalRegion();
+        }
+        else
+        {
+            /* A counterpart thread already removed us from the list and
+               released the semaphore, both under the list lock, i.e. the
+               rendezvous has committed and the counterpart reported success
+               to its caller. We must report success as well, or the release
+               would be lost: the counterpart will not signal again and a
+               subsequent wait would reinitialize the semaphore. Consume the
+               signaled semaphore state before returning. */
+            ExReleasePushLockExclusive(&KeyedEvent->HashTable[HashIndex].Lock);
+            KeLeaveCriticalRegion();
+
+            KeWaitForSingleObject(&CurrentThread->KeyedWaitSemaphore,
+                                  WrKeyedEvent,
+                                  KernelMode,
+                                  FALSE,
+                                  NULL);
+            Status = STATUS_SUCCESS;
+        }
     }
 
     /* Restore the previous KeyedWaitValue, since this is a union member */
