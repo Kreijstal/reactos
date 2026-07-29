@@ -44,6 +44,7 @@ list(APPEND SOURCE
     SetCurrentDirectory.c
     SetSearchPathMode.c
     SetUnhandledExceptionFilter.c
+    SuspendThread.c
     SystemFirmware.c
     TerminateProcess.c
     TunnelCache.c
