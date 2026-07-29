@@ -28,6 +28,25 @@ BOOLEAN UserPdeFault = FALSE;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
+#ifdef CONFIG_SMP
+//
+// Invalidate a single VA in the TLB of every processor.  Runs on each core via
+// KeIpiGenericCall.  Used by the copy-on-write handler: after a private copy
+// replaces the shared page, other processors that ran a thread of this process
+// may still cache the old read-only translation and read the stale (or, once
+// the old page is recycled, a foreign) page.
+//
+static
+ULONG_PTR
+NTAPI
+MiFlushSingleTbWorker(
+    _In_ ULONG_PTR Argument)
+{
+    KeInvalidateTlbEntry((PVOID)Argument);
+    return 0;
+}
+#endif
+
 /*
  * Minimum amount of committed stack the kernel keeps available below the
  * point where it raises STATUS_STACK_OVERFLOW, reserved for the user-mode
@@ -1322,6 +1341,23 @@ MiResolveProtoPteFault(IN BOOLEAN StoreInstruction,
         /* And finally, write the valid PTE */
         MI_WRITE_VALID_PTE(PointerPte, PteContents);
 
+#ifdef CONFIG_SMP
+        /*
+         * The PTE now maps the freshly copied private page, but the read
+         * resolution above made the SHARED prototype page's translation
+         * visible to every processor: another thread of this process (or a
+         * speculative walk) on a different core may have cached the old
+         * read-only entry and would keep reading the shared page -- never
+         * seeing this process's writes to the private copy, or reading a
+         * foreign page once the prototype page is recycled.  Shoot the
+         * entry down on every processor BEFORE releasing the PFN lock: the
+         * MiDeletePte above may have sent the old page to the standby list,
+         * where it becomes repurposable the instant the lock drops.
+         */
+        KeIpiGenericCall(MiFlushSingleTbWorker,
+                         (ULONG_PTR)PAGE_ALIGN(Address));
+#endif
+
         /* The caller expects us to release the PFN lock */
         MiReleasePfnLock(OldIrql);
         return Status;
@@ -2446,6 +2482,23 @@ UserFault:
                 TempPte.u.Hard.CopyOnWrite = 0;
 
                 MI_WRITE_VALID_PTE(PointerPte, TempPte);
+
+#ifdef CONFIG_SMP
+                /*
+                 * The PTE now maps the freshly copied private page.  The
+                 * faulting processor re-walks on retry, but any OTHER processor
+                 * that ran a thread of this process may still hold the old
+                 * read-only translation for this VA in its TLB and keep reading
+                 * the previous (shared/prototype) page -- stale data, or a
+                 * foreign page once the old one is recycled -- corrupting the
+                 * process's memory.  Shoot the entry down on every processor
+                 * BEFORE releasing the PFN lock: the MiDeletePte above may
+                 * have sent the old page to the standby list, where it becomes
+                 * repurposable the instant the lock drops.
+                 */
+                KeIpiGenericCall(MiFlushSingleTbWorker,
+                                 (ULONG_PTR)PAGE_ALIGN(Address));
+#endif
 
                 MiReleasePfnLock(LockIrql);
 

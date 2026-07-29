@@ -244,11 +244,34 @@ MmTrimUserMemory(ULONG Target, ULONG Priority, PULONG NrFreedPages)
                 if (MmIsAddressValid(Address))
                 {
                     PMMPTE Pte = MiAddressToPte(Address);
-                    Accessed = Accessed || Pte->u.Hard.Accessed;
-                    Pte->u.Hard.Accessed = 0;
+                    MMPTE OldPte, NewPte;
 
-                    /* There is no need to invalidate, the balancer thread is never on a user process */
-                    //KeInvalidateTlbEntry(Address);
+                    /* Clear the accessed bit with a compare-exchange: a plain
+                     * read-modify-write of the whole PTE races the hardware's
+                     * atomic Dirty-bit set from another processor and can
+                     * erase it -- MmPageOutPhysicalAddress then discards a
+                     * dirty page as clean and the next touch faults in zeros. */
+                    do
+                    {
+                        OldPte.u.Long = Pte->u.Long;
+                        NewPte = OldPte;
+                        NewPte.u.Hard.Accessed = 0;
+                    } while (OldPte.u.Hard.Valid &&
+                             InterlockedCompareExchangePte(Pte, NewPte.u.Long, OldPte.u.Long) != (LONG_PTR)OldPte.u.Long);
+
+                    if (OldPte.u.Hard.Valid)
+                    {
+                        Accessed = Accessed || OldPte.u.Hard.Accessed;
+
+                        if (OldPte.u.Hard.Accessed)
+                        {
+                            /* Other processors may keep a TLB entry for this VA;
+                             * they never re-walk through it, so they would never
+                             * re-set the accessed bit and an actively used page
+                             * ages as cold.  Drop the entry everywhere. */
+                            MiInvalidateTlbEntryAllProcessors(Address);
+                        }
+                    }
                 }
 
                 MiUnlockProcessWorkingSet(Process, PsGetCurrentThread());
