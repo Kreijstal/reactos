@@ -692,6 +692,27 @@ KiGeneralProtectionFaultHandler(
 
 NTSTATUS
 NTAPI
+KiStackFaultHandler(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    /* A #SS raised in user mode is nothing more than a bad stack reference:
+     * the effective address of an SS-relative operand was non-canonical or
+     * outside the segment limit, which is what a corrupt RSP/RBP produces.
+     * That is an ordinary programming error in the faulting thread, not a
+     * kernel problem, so report it to the thread as an access violation the
+     * way Windows does instead of taking the whole system down with it. */
+    if (TrapFrame->SegCs & 3)
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+
+    /* A kernel-mode stack fault means our own stack pointer is unusable, so
+     * there is nothing left to unwind onto. This one really is fatal. */
+    KiSystemFatalException(EXCEPTION_STACK_FAULT, TrapFrame);
+}
+
+NTSTATUS
+NTAPI
 KiXmmExceptionHandler(
     IN PKTRAP_FRAME TrapFrame)
 {

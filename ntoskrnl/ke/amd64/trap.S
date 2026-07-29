@@ -17,6 +17,7 @@ EXTERN MmAccessFault:PROC
 EXTERN KiSystemFatalException:PROC
 EXTERN KiNpxNotAvailableFaultHandler:PROC
 EXTERN KiGeneralProtectionFaultHandler:PROC
+EXTERN KiStackFaultHandler:PROC
 EXTERN KiXmmExceptionHandler:PROC
 EXTERN KiDeliverApc:PROC
 EXTERN KiDpcInterruptHandler:PROC
@@ -394,9 +395,18 @@ FUNC KiStackFault
     /* We have an error code */
     EnterTrap (TF_HAS_ERROR_CODE OR TF_SAVE_ALL)
 
-    /* Bugcheck */
-    Fatal EXCEPTION_STACK_FAULT
-    jmp $
+    /* Call the C handler. It only returns for a user-mode stack fault; a
+       kernel-mode one is fatal and bugchecks in there. */
+    mov rcx, rbp
+    call KiStackFaultHandler
+
+    /* Dispatch the access violation to the faulting thread. There is no
+       faulting address for #SS (CR2 is not set), so report it as unknown,
+       exactly as the #GP path does. */
+    DispatchException eax, 2, 0, -1, 0
+
+    /* Return */
+    ExitTrap TF_SAVE_ALL
 ENDFUNC
 
 
