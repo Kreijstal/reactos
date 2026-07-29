@@ -1255,15 +1255,17 @@ MmUnsharePageEntrySectionSegment(PMEMORY_AREA MemoryArea,
         return FALSE;
     }
 
-    /* No more processes are referencing this shared dirty page. Ditch it. */
-    if (SwapEntry)
-    {
-        MmSetSavedSwapEntryPage(Page, 0);
-        MmFreeSwapPage(SwapEntry);
-    }
-    MmSetPageEntrySectionSegment(Segment, Offset, 0);
-    MmReleasePageMemoryConsumer(MC_USER, Page);
-    return TRUE;
+    /*
+     * No process maps this modified shared page anymore, but the segment is
+     * still alive: its content must survive until the segment itself dies.
+     * Ditching it here would hand a fresh zero page to the next process that
+     * faults on this offset while others still have the DLL mapped. Keep it
+     * resident; under memory pressure the balancer pages it out properly
+     * (MmCheckDirtySegment writes it to swap and re-arms the entry), and
+     * segment teardown reclaims both the page and any saved swap entry.
+     */
+    MmSetPageEntrySectionSegment(Segment, Offset, Entry);
+    return FALSE;
 }
 
 static
