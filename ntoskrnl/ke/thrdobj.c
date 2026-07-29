@@ -398,6 +398,14 @@ KeFreezeAllThreads(VOID)
 #else
                 if (!Current->SchedulerApc.Inserted)
                 {
+                    /* Same stale-signal hazard as KeSuspendThread: the
+                     * NotificationEvent survives the previous cycle
+                     * signaled, so clear it before queueing the park
+                     * APC. */
+                    KiAcquireDispatcherLockAtSynchLevel();
+                    Current->SuspendEvent.Header.SignalState = 0;
+                    KiReleaseDispatcherLockFromSynchLevel();
+
                     Current->SchedulerApc.Inserted = TRUE;
                     KiInsertQueueApc(&Current->SchedulerApc, IO_NO_INCREMENT);
                 }
@@ -723,6 +731,17 @@ KeSuspendThread(PKTHREAD Thread)
 #else
             if (!Thread->SchedulerApc.Inserted)
             {
+                /* A previous suspend/resume cycle leaves the
+                 * NotificationEvent signaled - a satisfied wait does not
+                 * consume the signal the way the old semaphore count
+                 * decrement did. Clear it before queueing the park APC,
+                 * or the fresh suspend wait is satisfied instantly by
+                 * the stale signal and the thread keeps running while
+                 * its caller believes it is suspended. */
+                KiAcquireDispatcherLockAtSynchLevel();
+                Thread->SuspendEvent.Header.SignalState = 0;
+                KiReleaseDispatcherLockFromSynchLevel();
+
                 Thread->SchedulerApc.Inserted = TRUE;
                 KiInsertQueueApc(&Thread->SchedulerApc, IO_NO_INCREMENT);
             }
