@@ -43,6 +43,7 @@ list(APPEND SOURCE
     SetConsoleWindowInfo.c
     SetCurrentDirectory.c
     SetUnhandledExceptionFilter.c
+    SuspendThread.c
     SystemFirmware.c
     TerminateProcess.c
     TunnelCache.c
