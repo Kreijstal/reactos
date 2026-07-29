@@ -493,8 +493,15 @@ PageFaultError:
     shr r9d, 1
     and r9d, 9
 
-    /* Set parameter 2 to faulting address */
-    mov r10, cr2  // Param2 = faulting address
+    /* Set parameter 2 to faulting address.
+       Use the CR2 value captured in the trap frame on entry, not the live
+       register: MmAccessFault runs above with interrupts enabled and may take
+       page faults of its own (hyperspace mappings, working set and PFN
+       structures), each of which overwrites CR2.  Re-reading it here can hand
+       user mode - and the SEH/vectored handlers that inspect
+       ExceptionInformation[1] - an address that has nothing to do with the
+       fault being reported. */
+    mov r10, [rbp + KTRAP_FRAME_FaultAddress]  // Param2 = faulting address
 
     cmp eax, STATUS_ACCESS_VIOLATION
     je AccessViolation
