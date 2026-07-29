@@ -169,6 +169,16 @@ KiDispatchExceptionToUser(
     /* Set RIP to the User-mode Dispatcher */
     TrapFrame->Rip = (ULONG64)KeUserExceptionDispatcher;
 
+    /*
+     * The dispatcher must not inherit a live trap flag: TF can be armed on
+     * this thread at any time via SetThreadContext (debuggers, cygwin signal
+     * delivery), including while this dispatch is being prepared. Single-
+     * stepping KiUserExceptionDispatcher itself would raise nested traps on
+     * its first instruction. The interrupted EFlags are preserved in the
+     * user-stack context and restored by NtContinue.
+     */
+    TrapFrame->EFlags &= ~EFLAGS_TF_MASK;
+
     _disable();
 
     /* Exit to usermode */
