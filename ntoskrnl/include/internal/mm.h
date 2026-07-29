@@ -1373,6 +1373,9 @@ MmDeleteVirtualMappingNoBroadcast(
     _Out_opt_ PPFN_NUMBER Page
 );
 
+VOID
+MiInvalidateTlbEntryAllProcessors(IN PVOID Address);
+
 /* arch/procsup.c ************************************************************/
 
 BOOLEAN

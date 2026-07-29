@@ -142,7 +142,6 @@ MiInvalidateSingleTbWorker(IN ULONG_PTR Address)
  * instead unmap with MmDeleteVirtualMappingNoBroadcast and issue a single
  * KeFlushEntireTb shootdown for the whole batch.
  */
-static
 VOID
 MiInvalidateTlbEntryAllProcessors(IN PVOID Address)
 {
@@ -382,6 +381,20 @@ MmDeleteVirtualMappingEx(
             {
                 KIRQL OldIrql = MiAcquirePfnLock();
                 MiDeletePde(MiAddressToPde(Address), Process);
+
+                /*
+                 * The page-table page(s) just freed become reusable the
+                 * moment the PFN lock is released, but other processors may
+                 * have re-populated their paging-structure caches for this
+                 * region since the per-PTE invalidation above (any access to
+                 * a neighboring page in the region re-caches the PDE).  A
+                 * stale PDE-cache entry would make their hardware walker
+                 * read "PTEs" from the freed, reused frame.  INVLPG
+                 * invalidates the paging-structure-cache entries for this
+                 * address at every level, so broadcast it while the PFN
+                 * lock still prevents the frame from being handed out.
+                 */
+                MiInvalidateTlbEntryAllProcessors(Address);
                 MiReleasePfnLock(OldIrql);
             }
         }
@@ -509,6 +522,11 @@ MmDeletePageFileMapping(
         /* We can let it go */
         KIRQL OldIrql = MiAcquirePfnLock();
         MiDeletePde(MiPteToPde(PointerPte), Process);
+
+        /* Same as in MmDeleteVirtualMappingEx: drop stale paging-structure
+         * cache entries on all processors before the freed page-table
+         * page(s) become reusable at PFN-lock release. */
+        MiInvalidateTlbEntryAllProcessors(Address);
         MiReleasePfnLock(OldIrql);
     }
 
