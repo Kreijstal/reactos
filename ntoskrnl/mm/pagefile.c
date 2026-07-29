@@ -195,6 +195,16 @@ MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
         Status = Iosb.Status;
     }
 
+    /* A short transfer would leave stale data in the slot; the file offset is
+     * always fully inside the paging file, so this must never happen. */
+    if (NT_SUCCESS(Status) && Iosb.Information != PAGE_SIZE)
+    {
+        DPRINT1("Short paging-file write: 0x%Ix bytes at slot 0x%Ix\n",
+                Iosb.Information, offset);
+        ASSERT(Iosb.Information == PAGE_SIZE);
+        Status = STATUS_UNSUCCESSFUL;
+    }
+
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
     {
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
@@ -263,6 +273,18 @@ MiReadPageFile(
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = Iosb.Status;
     }
+
+    /* A short-but-successful read would publish a partially-zeroed page as
+     * valid content; the file offset is always fully inside the paging file,
+     * so this must never happen. */
+    if (NT_SUCCESS(Status) && Iosb.Information != PAGE_SIZE)
+    {
+        DPRINT1("Short paging-file read: 0x%Ix bytes at slot 0x%Ix\n",
+                Iosb.Information, PageFileOffset);
+        ASSERT(Iosb.Information == PAGE_SIZE);
+        Status = STATUS_UNSUCCESSFUL;
+    }
+
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
     {
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
@@ -309,7 +331,12 @@ MmFreeSwapPage(SWAPENTRY Entry)
         KeBugCheck(MEMORY_MANAGEMENT);
     }
 
-    RtlClearBit(PagingFile->Bitmap, off >> 5);
+    /* The allocator hands out bit "off" (RtlFindClearBitsAndSet), so that is
+     * the bit to clear -- clearing off >> 5 leaks the real slot and releases
+     * a LOW slot that usually still backs a live long-lived page, whose saved
+     * content is then silently overwritten by the next allocation. */
+    ASSERT(RtlCheckBit(PagingFile->Bitmap, off));
+    RtlClearBit(PagingFile->Bitmap, off);
 
     PagingFile->FreeSpace++;
     PagingFile->CurrentUsage--;
@@ -349,6 +376,12 @@ MmAllocSwapPage(VOID)
                 KeReleaseGuardedMutex(&MmPageFileCreationLock);
                 return(STATUS_UNSUCCESSFUL);
             }
+            /* Keep the per-file counters in sync with the bitmap; the free
+             * path adjusts them, so failing to do so here makes FreeSpace
+             * drift upwards by one for every allocate/free cycle. */
+            MmPagingFile[i]->FreeSpace--;
+            MmPagingFile[i]->CurrentUsage++;
+
             MiUsedSwapPages++;
             MiFreeSwapPages--;
             UpdateTotalCommittedPages(1);
