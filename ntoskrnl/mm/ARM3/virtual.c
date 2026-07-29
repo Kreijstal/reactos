@@ -36,7 +36,6 @@ MiFlushTbAndCapture(IN PMMVAD FoundVad,
 
 
 /* PRIVATE FUNCTIONS **********************************************************/
-
 ULONG
 NTAPI
 MiCalculatePageCommitment(IN ULONG_PTR StartingAddress,
@@ -724,6 +723,17 @@ MiDeleteVirtualAddresses(
 
                     /* Delete the PDE proper */
                     MiDeletePde(PointerPde, CurrentProcess);
+
+                    /*
+                     * A page-table page was just freed, so the flush below
+                     * must run even if every PTE in this chunk was erased
+                     * without MiDeletePte: another processor may have cached
+                     * the PDE from a walk since the previous chunk's flush,
+                     * and a stale PDE-cache entry into the freed (soon
+                     * reused) page table lets its hardware walker fabricate
+                     * translations from garbage.
+                     */
+                    FlushNeeded = TRUE;
 
                     /* Continue with the next PDE */
                     Va = (ULONG_PTR)MiPdeToAddress(PointerPde + 1);
@@ -2209,7 +2219,6 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
     PMMPFN Pfn1;
     ULONG ProtectionMask, OldProtect;
     BOOLEAN Committed;
-    BOOLEAN FlushTlb = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PETHREAD Thread = PsGetCurrentThread();
     TABLE_SEARCH_RESULT Result;
@@ -2451,10 +2460,12 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                         MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
                         MI_WRITE_INVALID_PTE(PointerPte, NewPte);
 
-                        /* The page is no longer mapped: defer an all-CPU TLB
-                         * flush to after the loop rather than a local-only
-                         * invalidate that leaves stale entries on other CPUs. */
-                        FlushTlb = TRUE;
+                        /* If that was the last mapping the page is now on the
+                         * standby list and repurposable the instant the PFN
+                         * lock drops, so the stale translation must leave
+                         * every processor's TLB before then -- not in a flush
+                         * deferred to after the loop. */
+                        MiInvalidateTlbEntryAllProcessors(MiPteToAddress(PointerPte));
 
                         MiReleasePfnLock(OldIrql);
                     }
@@ -2492,9 +2503,6 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
 
             /* Unlock the working set */
             MiUnlockProcessWorkingSetUnsafe(Process, Thread);
-
-            /* If we invalidated any mapping above, flush the TLB on all CPUs */
-            if (FlushTlb) KeFlushEntireTb(TRUE, TRUE);
 
             /*
              * If the request covers the whole view, update the VAD protection
@@ -2600,12 +2608,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
 
-                    /* The page is no longer mapped: its TLB entry must be
-                     * invalidated on every processor.  Defer that to a single
-                     * all-CPU flush after the loop (as MiDeleteSystemPagableVm
-                     * does) instead of a local-only invalidate that would leave
-                     * stale entries on other CPUs. */
-                    FlushTlb = TRUE;
+                    /* The share count drop above may have put the page on the
+                     * standby list, where any allocator can repurpose (and
+                     * zero) it the instant the PFN lock is released.  Every
+                     * processor's TLB entry for this VA must therefore be gone
+                     * BEFORE the lock drops -- a flush deferred to after the
+                     * loop leaves a window where a sibling thread on another
+                     * CPU reads the repurposed frame through its stale entry
+                     * without faulting. */
+                    MiInvalidateTlbEntryAllProcessors(MiPteToAddress(PointerPte));
 
                     /* We are done for this PTE */
                     MiReleasePfnLock(OldIrql);
@@ -2639,9 +2650,6 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
 
         /* Unlock the working set */
         MiUnlockProcessWorkingSetUnsafe(Process, Thread);
-
-        /* If we invalidated any mapping above, flush the TLB on all processors */
-        if (FlushTlb) KeFlushEntireTb(TRUE, TRUE);
     }
 
     /* Unlock the address space */
