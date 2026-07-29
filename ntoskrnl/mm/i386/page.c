@@ -984,11 +984,17 @@ MmSetPageProtect(PEPROCESS Process, PVOID Address, ULONG flProtect)
     if ((ProtectionMask != MM_NOACCESS) && !FlagOn(ProtectionMask, MM_GUARDPAGE))
         TempPte.u.Hard.Valid = 1;
 
-    /* Keep dirty & accessed bits */
-    TempPte.u.Hard.Accessed = PointerPte->u.Hard.Accessed;
-    TempPte.u.Hard.Dirty = PointerPte->u.Hard.Dirty;
-
-    OldPte.u.Long = InterlockedExchangePte(PointerPte, TempPte.u.Long);
+    /* Keep dirty & accessed bits.  They must be captured and installed in
+     * one atomic step: the other processor's page walker sets Dirty with a
+     * locked RMW at any time, and a plain exchange built from a stale
+     * snapshot would erase that set -- pageout then discards a dirty page
+     * as clean and its modifications are lost. */
+    do
+    {
+        OldPte.u.Long = PointerPte->u.Long;
+        TempPte.u.Hard.Accessed = OldPte.u.Hard.Accessed;
+        TempPte.u.Hard.Dirty = OldPte.u.Hard.Dirty;
+    } while (InterlockedCompareExchangePte(PointerPte, TempPte.u.Long, OldPte.u.Long) != (LONG_PTR)OldPte.u.Long);
 
     // We should be able to bring a page back from PAGE_NOACCESS
     if (!OldPte.u.Hard.Valid && (FlagOn(OldPte.u.Long, 0x800) || (OldPte.u.Hard.PageFrameNumber == 0)))
@@ -1029,7 +1035,17 @@ MmSetDirtyBit(PEPROCESS Process, PVOID Address, BOOLEAN Bit)
         KeBugCheck(MEMORY_MANAGEMENT);
     }
 
-    PointerPte->u.Hard.Dirty = !!Bit;
+    /* Interlocked: a plain bitfield RMW on a live PTE races the hardware's
+     * locked Accessed/Dirty updates from the other processor. */
+    {
+        MMPTE OldPte, NewPte;
+        do
+        {
+            OldPte.u.Long = PointerPte->u.Long;
+            NewPte = OldPte;
+            NewPte.u.Hard.Dirty = !!Bit;
+        } while (InterlockedCompareExchangePte(PointerPte, NewPte.u.Long, OldPte.u.Long) != (LONG_PTR)OldPte.u.Long);
+    }
 
     if (!Bit)
         KeInvalidateTlbEntry(Address);
