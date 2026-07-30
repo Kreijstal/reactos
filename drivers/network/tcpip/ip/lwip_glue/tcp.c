@@ -83,6 +83,85 @@ void LibTCPEnqueuePacket(PCONNECTION_ENDPOINT Connection, struct pbuf *p)
     UnlockObject(Connection);
 }
 
+/* Apply the receive window credit owed for data the client already consumed.
+ * MUST run in the tcpip-thread context. */
+static
+void
+LibTCPFlushRecvCredit(PCONNECTION_ENDPOINT Connection, PTCP_PCB pcb)
+{
+    LONG Credit;
+
+    Credit = InterlockedExchange(&Connection->PendingRecvCredit, 0);
+    if (Credit <= 0)
+        return;
+
+    /* The client cannot consume more than the window we advertised */
+    ASSERT(Credit <= TCP_WND);
+    if (Credit > TCP_WND)
+        Credit = TCP_WND;
+
+    tcp_recved(pcb, (u16_t)Credit);
+}
+
+static
+void
+LibTCPRecvCreditCallback(void *arg)
+{
+    PCONNECTION_ENDPOINT Connection = arg;
+    PTCP_PCB pcb = Connection->SocketContext;
+
+    if (pcb != NULL)
+        LibTCPFlushRecvCredit(Connection, pcb);
+
+    /* Matches the reference taken in LibTCPAccountRecvCredit */
+    DereferenceObject(Connection);
+}
+
+/* Record that the client consumed Bytes and ask the tcpip thread to reopen the
+ * window by that much. Callable from any context, and in particular from the
+ * tcpip thread itself (InternalRecvEventHandler -> TCPRecvEventHandler ->
+ * LibTCPGetDataFromConnectionQueue), so this must never block. */
+static
+void
+LibTCPAccountRecvCredit(PCONNECTION_ENDPOINT Connection, UINT Bytes)
+{
+    if (Bytes == 0)
+        return;
+
+    InterlockedExchangeAdd(&Connection->PendingRecvCredit, (LONG)Bytes);
+
+    if (Connection->RecvCreditMsg == NULL)
+        return;
+
+    ReferenceObject(Connection);
+    if (tcpip_callbackmsg_trycallback(Connection->RecvCreditMsg) != ERR_OK)
+    {
+        /* The mailbox is full. The credit stays pending and is applied by the
+         * next successful post or by InternalPollEventHandler. */
+        DereferenceObject(Connection);
+    }
+}
+
+BOOLEAN
+LibTCPAllocateRecvCredit(PCONNECTION_ENDPOINT Connection)
+{
+    Connection->RecvCreditMsg = tcpip_callbackmsg_new(LibTCPRecvCreditCallback, Connection);
+
+    return (Connection->RecvCreditMsg != NULL);
+}
+
+VOID
+LibTCPFreeRecvCredit(PCONNECTION_ENDPOINT Connection)
+{
+    if (Connection->RecvCreditMsg == NULL)
+        return;
+
+    /* Safe: a queued message holds a reference on the connection, so this
+     * cannot run while a post is still outstanding. */
+    tcpip_callbackmsg_delete(Connection->RecvCreditMsg);
+    Connection->RecvCreditMsg = NULL;
+}
+
 PQUEUE_ENTRY LibTCPDequeuePacket(PCONNECTION_ENDPOINT Connection)
 {
     PLIST_ENTRY Entry;
@@ -168,6 +247,10 @@ NTSTATUS LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHA
 
     UnlockObject(Connection);
 
+    /* Now that the data is out of the queue, give the window back to lwIP.
+     * This is what throttles the sender when the client reads slowly. */
+    LibTCPAccountRecvCredit(Connection, *Received);
+
     return Status;
 }
 
@@ -208,6 +291,23 @@ InternalSendEventHandler(void *arg, PTCP_PCB pcb, const u16_t space)
     return ERR_OK;
 }
 
+/* Periodic safety net: applies any receive credit that could not be posted to
+ * the tcpip thread. Without this a dropped post could leave the window closed
+ * with no further receive to trigger a retry. */
+static
+err_t
+InternalPollEventHandler(void *arg, PTCP_PCB pcb)
+{
+    PCONNECTION_ENDPOINT Connection = arg;
+
+    /* Make sure the socket didn't get closed */
+    if (!arg) return ERR_OK;
+
+    LibTCPFlushRecvCredit(Connection, pcb);
+
+    return ERR_OK;
+}
+
 static
 err_t
 InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t err)
@@ -227,8 +327,10 @@ InternalRecvEventHandler(void *arg, PTCP_PCB pcb, struct pbuf *p, const err_t er
     {
         LibTCPEnqueuePacket(Connection, p);
 
-        tcp_recved(pcb, p->tot_len);
-
+        /* Deliberately no tcp_recved() here: the window is reopened only once
+         * the client has actually consumed the data, in
+         * LibTCPGetDataFromConnectionQueue. Crediting on arrival would keep the
+         * window permanently open and let a slow reader queue without bound. */
         TCPRecvEventHandler(arg);
     }
     else if (err == ERR_OK)
@@ -825,6 +927,7 @@ LibTCPConnectCallback(void *arg)
 
     tcp_recv((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalRecvEventHandler);
     tcp_sent((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalSendEventHandler);
+    tcp_poll((PTCP_PCB)msg->Input.Connect.Connection->SocketContext, InternalPollEventHandler, 2);
 
     Error = tcp_connect((PTCP_PCB)msg->Input.Connect.Connection->SocketContext,
                         msg->Input.Connect.IpAddress, lwip_ntohs(msg->Input.Connect.Port),
@@ -1057,6 +1160,7 @@ LibTCPAccept(PTCP_PCB pcb, struct tcp_pcb *listen_pcb, void *arg)
     tcp_recv(pcb, InternalRecvEventHandler);
     tcp_sent(pcb, InternalSendEventHandler);
     tcp_err(pcb, InternalErrorEventHandler);
+    tcp_poll(pcb, InternalPollEventHandler, 2);
     tcp_arg(pcb, arg);
 
     tcp_accepted(listen_pcb);

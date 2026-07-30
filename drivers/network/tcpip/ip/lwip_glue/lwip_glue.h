@@ -96,6 +96,10 @@ struct lwip_callback_msg
 
 NTSTATUS    LibTCPGetDataFromConnectionQueue(PCONNECTION_ENDPOINT Connection, PUCHAR RecvBuffer, UINT RecvLen, UINT *Received);
 
+/* Receive window accounting (see CONNECTION_ENDPOINT::PendingRecvCredit) */
+BOOLEAN     LibTCPAllocateRecvCredit(PCONNECTION_ENDPOINT Connection);
+VOID        LibTCPFreeRecvCredit(PCONNECTION_ENDPOINT Connection);
+
 /* External TCP event handlers */
 extern void TCPConnectEventHandler(void *arg, const err_t err);
 extern void TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb);
