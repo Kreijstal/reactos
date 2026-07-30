@@ -1634,7 +1634,14 @@ SASWindowProc(
                 {
                     UINT Flags = (UINT)lParam;
                     UINT Action = Flags & EWX_ACTION_MASK;
+                    BOOL bForce = (Action & EWX_FORCE);
                     DWORD wlxAction;
+
+                    /*
+                     * EWX_FORCE modifies any of the actions below, so consume
+                     * it here instead of in each of the individual branches.
+                     */
+                    Action &= ~EWX_FORCE;
 
                     TRACE("\tFlags : 0x%lx\n", lParam);
 
@@ -1669,11 +1676,11 @@ SASWindowProc(
                     }
                     else // EWX_LOGOFF
                     {
-                        if (Action & EWX_FORCE)
+                        if (bForce)
                             wlxAction = WLX_SAS_ACTION_FORCE_LOGOFF;
                         else
                             wlxAction = WLX_SAS_ACTION_LOGOFF;
-                        Action &= ~(EWX_LOGOFF | EWX_FORCE);
+                        Action &= ~EWX_LOGOFF;
                     }
                     if (Action)
                         ERR("Unhandled EWX_* action flags: 0x%x\n", Action);
