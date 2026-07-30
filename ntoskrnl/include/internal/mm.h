@@ -44,7 +44,7 @@ extern SIZE_T MmDriverCommit;
 extern SIZE_T MmProcessCommit;
 extern SIZE_T MmPagedPoolCommit;
 extern SIZE_T MmPeakCommitment;
-extern SIZE_T MmtotalCommitLimitMaximum;
+extern SIZE_T MmTotalCommitLimitMaximum;
 
 extern PVOID MiDebugMapping; // internal
 extern PMMPTE MmDebugPte; // internal
@@ -894,32 +894,30 @@ NTAPI
 MmDeleteKernelStack(PVOID Stack,
                     BOOLEAN GuiStack);
 
-/* balance.c / pagefile.c******************************************************/
+/* freelist.c ****************************************************************/
 
-FORCEINLINE VOID UpdateTotalCommittedPages(LONG Delta)
-{
-    /*
-     * Add up all the used "Committed" memory + pagefile.
-     * Not sure this is right. 8^\
-     * MmTotalCommittedPages should be adjusted consistently with
-     * other counters at different places.
-     *
-       MmTotalCommittedPages = MiMemoryConsumers[MC_SYSTEM].PagesUsed +
-                               MiMemoryConsumers[MC_USER].PagesUsed +
-                               MiUsedSwapPages;
-     */
+//
+// Commitment accounting. MmTotalCommittedPages counts memory that has been
+// *promised* to somebody (private committed VADs, pagefile-backed sections),
+// not memory that is currently resident: that is what makes it usable as an
+// admission control against MmTotalCommitLimit, which covers RAM plus the
+// paging files. Charging only once a page is actually consumed - which is what
+// this used to do - can never refuse an allocation up front, so the system
+// happily promises more memory than exists and only discovers the shortfall in
+// the fault path, where there is nothing left to do but thrash.
+//
+BOOLEAN
+NTAPI
+MiChargeCommitment(
+    _In_ SIZE_T QuotaCharge,
+    _In_ BOOLEAN Force
+);
 
-    /* Update Commitment */
-    SIZE_T TotalCommittedPages = InterlockedExchangeAddSizeT(&MmTotalCommittedPages, Delta) + Delta;
-
-    /* Update Peak = max(Peak, Total) in a lockless way */
-    SIZE_T PeakCommitment = MmPeakCommitment;
-    while (TotalCommittedPages > PeakCommitment &&
-           InterlockedCompareExchangeSizeT(&MmPeakCommitment, TotalCommittedPages, PeakCommitment) != PeakCommitment)
-    {
-        PeakCommitment = MmPeakCommitment;
-    }
-}
+VOID
+NTAPI
+MiReleaseCommitment(
+    _In_ SIZE_T QuotaCharge
+);
 
 /* balance.c *****************************************************************/
 
