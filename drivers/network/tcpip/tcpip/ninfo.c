@@ -187,6 +187,11 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
     SIZE_T Size;
     MIB_TCPROW_OWNER_MODULE TcpRow;
     TDI_STATUS Status = TDI_INVALID_REQUEST;
+    PCONNECTION_ENDPOINT Connection;
+    PCONNECTION_ENDPOINT *Connections = NULL;
+    ULONG ConnCount = 0, RowCount = 0, MaxRows, i;
+    BOOLEAN HasListener;
+    PCHAR Rows;
 
     TI_DbgPrint(DEBUG_INFO, ("Called.\n"));
 
@@ -203,61 +208,126 @@ TDI_STATUS InfoTdiQueryGetConnectionTcpTable(PADDRESS_FILE AddrFile,
         Size = sizeof(MIB_TCPROW);
     }
 
+    /* Snapshot the connection chain under the address file lock, taking a
+     * reference on every endpoint. The endpoints are queried only after the
+     * address file is unlocked again: querying locks the connection, and the
+     * associate/listen paths lock the connection first and the address file
+     * second, so nesting the two the other way around risks a deadlock. */
+    LockObject(AddrFile);
+
+    HasListener = (AddrFile->Listener != NULL);
+
+    for (Connection = AddrFile->Connection;
+         Connection != NULL;
+         Connection = Connection->Next)
+    {
+        ConnCount++;
+    }
+
+    if (ConnCount != 0)
+    {
+        Connections = ExAllocatePoolWithTag(NonPagedPool,
+                                            ConnCount * sizeof(PCONNECTION_ENDPOINT),
+                                            QUERY_CONTEXT_TAG);
+        if (!Connections)
+        {
+            UnlockObject(AddrFile);
+            return TDI_NO_RESOURCES;
+        }
+
+        i = 0;
+        for (Connection = AddrFile->Connection;
+             Connection != NULL;
+             Connection = Connection->Next)
+        {
+            ReferenceObject(Connection);
+            Connections[i++] = Connection;
+        }
+    }
+
+    UnlockObject(AddrFile);
+
+    MaxRows = ConnCount + (HasListener ? 1 : 0);
+    if (MaxRows == 0)
+        return TDI_INVALID_REQUEST;
+
+    Rows = ExAllocatePoolWithTag(NonPagedPool, MaxRows * Size, QUERY_CONTEXT_TAG);
+    if (!Rows)
+    {
+        for (i = 0; i < ConnCount; i++)
+            DereferenceObject(Connections[i]);
+        if (Connections)
+            ExFreePoolWithTag(Connections, QUERY_CONTEXT_TAG);
+        return TDI_NO_RESOURCES;
+    }
+
+    RtlZeroMemory(&TcpRow, sizeof(TcpRow));
     TcpRow.dwOwningPid = HandleToUlong(AddrFile->ProcessId);
     TcpRow.liCreateTimestamp = AddrFile->CreationTime;
+    if (Class == TcpUdpClassOwner)
+        TcpRow.OwningModuleInfo[0] = (ULONG_PTR)AddrFile->SubProcessTag;
 
-    if (AddrFile->Listener != NULL)
+    if (HasListener)
     {
-        PADDRESS_FILE EndPoint;
-
-        EndPoint = AddrFile->Listener->AddressFile;
-
         TcpRow.dwState = MIB_TCP_STATE_LISTEN;
         TcpRow.dwLocalAddr = AddrFile->Address.Address.IPv4Address;
         TcpRow.dwLocalPort = AddrFile->Port;
-        TcpRow.dwRemoteAddr = EndPoint->Address.Address.IPv4Address;
-        TcpRow.dwRemotePort = EndPoint->Port;
+        TcpRow.dwRemoteAddr = 0;
+        TcpRow.dwRemotePort = 0;
 
-        Status = TDI_SUCCESS;
+        RtlCopyMemory(Rows + RowCount * Size, &TcpRow, Size);
+        RowCount++;
     }
-    else if (AddrFile->Connection != NULL &&
-             AddrFile->Connection->SocketContext != NULL)
+
+    for (i = 0; i < ConnCount; i++)
     {
         TA_IP_ADDRESS EndPoint;
+        NTSTATUS QueryStatus;
 
-        Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, FALSE);
-        if (NT_SUCCESS(Status))
+        Connection = Connections[i];
+
+        if (Connection->SocketContext == NULL)
+            continue;
+
+        QueryStatus = TCPGetSocketStatus(Connection, &TcpRow.dwState);
+        if (!NT_SUCCESS(QueryStatus) || TcpRow.dwState == MIB_TCP_STATE_CLOSED)
         {
-            ASSERT(EndPoint.TAAddressCount >= 1);
-            ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
-            TcpRow.dwLocalAddr = EndPoint.Address[0].Address[0].in_addr;
-            TcpRow.dwLocalPort = ntohs(EndPoint.Address[0].Address[0].sin_port);
-
-            Status = TCPGetSockAddress(AddrFile->Connection, (PTRANSPORT_ADDRESS)&EndPoint, TRUE);
-            if (NT_SUCCESS(Status))
-            {
-                ASSERT(EndPoint.TAAddressCount >= 1);
-                ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
-                TcpRow.dwRemoteAddr = EndPoint.Address[0].Address[0].in_addr;
-                TcpRow.dwRemotePort = ntohs(EndPoint.Address[0].Address[0].sin_port);
-
-                Status = TCPGetSocketStatus(AddrFile->Connection, &TcpRow.dwState);
-                ASSERT(NT_SUCCESS(Status));
-            }
+            /* An endpoint parked on a listener for a future accept */
+            continue;
         }
+
+        QueryStatus = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&EndPoint, FALSE);
+        if (!NT_SUCCESS(QueryStatus))
+            continue;
+        ASSERT(EndPoint.TAAddressCount >= 1);
+        ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
+        TcpRow.dwLocalAddr = EndPoint.Address[0].Address[0].in_addr;
+        TcpRow.dwLocalPort = ntohs(EndPoint.Address[0].Address[0].sin_port);
+
+        QueryStatus = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&EndPoint, TRUE);
+        if (!NT_SUCCESS(QueryStatus))
+            continue;
+        ASSERT(EndPoint.TAAddressCount >= 1);
+        ASSERT(EndPoint.Address[0].AddressLength == TDI_ADDRESS_LENGTH_IP);
+        TcpRow.dwRemoteAddr = EndPoint.Address[0].Address[0].in_addr;
+        TcpRow.dwRemotePort = ntohs(EndPoint.Address[0].Address[0].sin_port);
+
+        RtlCopyMemory(Rows + RowCount * Size, &TcpRow, Size);
+        RowCount++;
     }
 
-    if (NT_SUCCESS(Status))
+    for (i = 0; i < ConnCount; i++)
+        DereferenceObject(Connections[i]);
+    if (Connections)
+        ExFreePoolWithTag(Connections, QUERY_CONTEXT_TAG);
+
+    if (RowCount != 0)
     {
-        if (Class == TcpUdpClassOwner)
-        {
-            RtlZeroMemory(&TcpRow.OwningModuleInfo[0], sizeof(TcpRow.OwningModuleInfo));
-            TcpRow.OwningModuleInfo[0] = (ULONG_PTR)AddrFile->SubProcessTag;
-        }
-
-        Status = InfoCopyOut( (PCHAR)&TcpRow, Size,
-                              Buffer, BufferSize );
+        Status = InfoCopyOut(Rows, RowCount * Size,
+                             Buffer, BufferSize);
     }
+
+    ExFreePoolWithTag(Rows, QUERY_CONTEXT_TAG);
 
     TI_DbgPrint(DEBUG_INFO, ("Returning %08x\n", Status));
 
