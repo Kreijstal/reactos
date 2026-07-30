@@ -243,6 +243,19 @@ WarmSocketForConnection(PAFD_FCB FCB) {
         return STATUS_NO_SUCH_DEVICE;
     }
 
+    /* A connect retry after a failed attempt arrives here with the dead
+     * endpoint still in place; release it or it stays associated with the
+     * address file forever */
+    if( FCB->Connection.Object ) {
+        TdiDisassociateAddressFile(FCB->Connection.Object);
+        ObDereferenceObject(FCB->Connection.Object);
+        FCB->Connection.Object = NULL;
+    }
+    if( FCB->Connection.Handle != INVALID_HANDLE_VALUE ) {
+        ZwClose(FCB->Connection.Handle);
+        FCB->Connection.Handle = INVALID_HANDLE_VALUE;
+    }
+
     Status = TdiOpenConnectionEndpointFile(&FCB->TdiDeviceName,
                                            &FCB->Connection.Handle,
                                            &FCB->Connection.Object );
@@ -632,6 +645,13 @@ AfdStreamSocketConnect(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             FCB->ConnectCallInfo->Options = FCB->ConnectOptions;
             FCB->ConnectCallInfo->OptionsLength = FCB->ConnectOptionsSize;
 
+            /* Issuing a connect is the re-enabling function for FD_CONNECT:
+             * forget the previous attempt's outcome so this attempt's
+             * completion is reported again */
+            FCB->PollState &= ~(AFD_EVENT_CONNECT | AFD_EVENT_CONNECT_FAIL);
+            FCB->PollStatus[FD_CONNECT_BIT] = STATUS_SUCCESS;
+            FCB->EventSelectDisabled &= ~(AFD_EVENT_CONNECT | AFD_EVENT_CONNECT_FAIL);
+
             FCB->SharedData.State = SOCKET_STATE_CONNECTING;
 
             AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
@@ -788,6 +808,14 @@ AfdStreamSocketSuperConnect(
         FCB->ConnectCallInfo->UserDataLength = FCB->ConnectData ?  FCB->ConnectDataSize : FCB->OnConnectSendBufferSize;
         FCB->ConnectCallInfo->Options = FCB->ConnectOptions;
         FCB->ConnectCallInfo->OptionsLength = FCB->ConnectOptionsSize;
+
+        /* Issuing a connect is the re-enabling function for FD_CONNECT:
+         * forget the previous attempt's outcome so this attempt's
+         * completion is reported again */
+        FCB->PollState &= ~(AFD_EVENT_CONNECT | AFD_EVENT_CONNECT_FAIL);
+        FCB->PollStatus[FD_CONNECT_BIT] = STATUS_SUCCESS;
+        FCB->EventSelectDisabled &= ~(AFD_EVENT_CONNECT | AFD_EVENT_CONNECT_FAIL);
+
         FCB->SharedData.State = SOCKET_STATE_CONNECTING;
 
         AFD_DbgPrint(MID_TRACE,("Queueing IRP %p\n", Irp));
