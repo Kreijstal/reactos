@@ -140,6 +140,19 @@ NtfsReturnSecurityDescriptor(const VOID *Sd,
  * without $SII an id lookup would have to linearly scan $SDS, and without
  * $SDS there is nothing to point at.
  *
+ * \$Secure is read at its architectural MFT index rather than by resolving
+ * the path "\\$Secure", because NtfsFindMftRecord - which every path lookup
+ * goes through - only ever returns index entries whose target is >=
+ * NTFS_FILE_FIRST_USER_FILE.  Metadata files are deliberately invisible to
+ * it, so a path lookup for \$Secure (record 9) can only ever fail, leaving
+ * SecurePresent permanently FALSE.  Records 0..11 are fixed by the format -
+ * this driver already reads the root directory, $MFT and $Bitmap that way -
+ * so the index is not something that needs discovering.
+ *
+ * Record 9 held \$Quota on NTFS 1.2 and holds \$Secure from NTFS 3.0 on.
+ * Demanding both $SDS and $SII tells the two apart without version sniffing:
+ * a \$Quota record carries $Q and $O and no $SDS.
+ *
  * A volume with no \$Secure is not an error - that's every NTFS 1.2 volume
  * and every volume ReactOS's own mkntfs produces.  Such volumes simply keep
  * using the per-record $SECURITY_DESCRIPTOR attribute.  Returns
@@ -148,10 +161,8 @@ NtfsReturnSecurityDescriptor(const VOID *Sd,
 NTSTATUS
 NtfsSecureProbe(PDEVICE_EXTENSION Vcb)
 {
-    UNICODE_STRING Path;
     PFILE_RECORD_HEADER FileRecord = NULL;
     PNTFS_ATTR_CONTEXT AttrCtx = NULL;
-    ULONGLONG MftIndex = 0;
     NTSTATUS Status;
 
     if (Vcb == NULL)
@@ -160,10 +171,13 @@ NtfsSecureProbe(PDEVICE_EXTENSION Vcb)
     Vcb->SecurePresent = FALSE;
     Vcb->SecureFileMft = 0;
 
-    RtlInitUnicodeString(&Path, L"\\$Secure");
-    Status = NtfsLookupFile(Vcb, &Path, FALSE, &FileRecord, &MftIndex);
-    if (!NT_SUCCESS(Status))
+    FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (FileRecord == NULL)
         return STATUS_SUCCESS;
+
+    Status = ReadFileRecord(Vcb, NTFS_FILE_SECURE, FileRecord);
+    if (!NT_SUCCESS(Status) || !(FileRecord->Flags & FRH_IN_USE))
+        goto Cleanup;
 
     Status = FindAttribute(Vcb, FileRecord, AttributeData, L"$SDS", 4,
                            &AttrCtx, NULL);
@@ -178,12 +192,12 @@ NtfsSecureProbe(PDEVICE_EXTENSION Vcb)
         {
             ReleaseAttributeContext(AttrCtx);
             Vcb->SecurePresent = TRUE;
-            Vcb->SecureFileMft = MftIndex;
+            Vcb->SecureFileMft = NTFS_FILE_SECURE;
         }
     }
 
-    if (FileRecord != NULL)
-        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+Cleanup:
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
 
     return STATUS_SUCCESS;
 }
