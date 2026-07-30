@@ -653,7 +653,6 @@ MiCopyPfn(
     MiReleaseSystemPtes(SysPtes, 2, SystemPteSpace);
 }
 
-static
 NTSTATUS
 NTAPI
 MiResolveDemandZeroFault(IN PVOID Address,
