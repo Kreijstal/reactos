@@ -4707,6 +4707,7 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     PMMPTE PointerPte, LastPte;
     PMMPDE PointerPde;
     TABLE_SEARCH_RESULT Result;
+    SIZE_T CommitCharge = 0;
     PAGED_CODE();
 
     /* Check for valid Zero bits */
@@ -5000,6 +5001,26 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         Vad->ControlArea = NULL; // For Memory-Area hack
 
         //
+        // A VAD created with MEM_COMMIT is committed in full, so charge the
+        // whole range against the system commit limit before it is inserted:
+        // this is the point at which the promise is made, and the only point at
+        // which it can still be refused cheaply.
+        //
+        if (Vad->u.VadFlags.MemCommit)
+        {
+            CommitCharge = PRegionSize >> PAGE_SHIFT;
+            if (!MiChargeCommitment(CommitCharge, FALSE))
+            {
+                DPRINT1("Committing %Iu pages would exceed the commit limit "
+                        "(%Iu of %Iu charged)\n",
+                        CommitCharge, MmTotalCommittedPages, MmTotalCommitLimit);
+                ExFreePoolWithTag(Vad, 'SdaV');
+                Status = STATUS_COMMITMENT_LIMIT;
+                goto FailPathNoLock;
+            }
+        }
+
+        //
         // Insert the VAD
         //
         Status = MiInsertVadEx(Vad,
@@ -5011,8 +5032,23 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Failed to insert the VAD!\n");
+            if (CommitCharge) MiReleaseCommitment(CommitCharge);
             ExFreePoolWithTag(Vad, 'SdaV');
             goto FailPathNoLock;
+        }
+
+        //
+        // The commitment is now owned by the process, so account for it there
+        // too. This used to be missed entirely on this path, which left the
+        // matching subtraction in the free path taking the counter negative.
+        //
+        if (CommitCharge)
+        {
+            Process->CommitCharge += CommitCharge;
+            if (Process->CommitCharge > Process->CommitChargePeak)
+            {
+                Process->CommitChargePeak = Process->CommitCharge;
+            }
         }
 
         //
@@ -5268,6 +5304,20 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     PointerPde = MiAddressToPde(StartingAddress);
     PointerPte = MiAddressToPte(StartingAddress);
     LastPte = MiAddressToPte(EndingAddress);
+
+    //
+    // Charge the newly committed pages against the system-wide commit limit
+    // before promising them to the caller.
+    //
+    CommitCharge = 1 + LastPte - PointerPte;
+    if (!MiChargeCommitment(CommitCharge, FALSE))
+    {
+        DPRINT1("Committing %Iu pages would exceed the commit limit "
+                "(%Iu of %Iu charged)\n",
+                CommitCharge, MmTotalCommittedPages, MmTotalCommitLimit);
+        Status = STATUS_COMMITMENT_LIMIT;
+        goto FailPath;
+    }
 
     //
     // Update the commit charge in the VAD as well as in the process, and check
@@ -5818,6 +5868,11 @@ FinalPath:
         //
         PRegionSize = EndingAddress - StartingAddress + 1;
         Process->CommitCharge -= CommitReduction;
+
+        /* Give the commitment back to the system: whatever this range was
+         * promised is now available for somebody else to be promised. */
+        if (CommitReduction) MiReleaseCommitment(CommitReduction);
+
         if (FreeType & MEM_RELEASE) Process->VirtualSize -= PRegionSize;
 
         //
