@@ -207,6 +207,10 @@ static NTSTATUS NTAPI ListenComplete( PDEVICE_OBJECT DeviceObject,
 
         Qelt->Object = FCB->Connection;
         Qelt->Seq = FCB->ConnSeq++;
+        /* Ownership moved to the accept queue; clear the FCB slot so the
+         * next WarmSocketForConnection doesn't release the queued object */
+        FCB->Connection.Object = NULL;
+        FCB->Connection.Handle = INVALID_HANDLE_VALUE;
         AFD_DbgPrint(MID_TRACE,("Address Type: %u (RA %p)\n",
                                 AddressType,
                                 FCB->ListenIrp.
