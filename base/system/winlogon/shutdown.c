@@ -342,6 +342,7 @@ StartSystemShutdown(
     IN ULONG dwReason)
 {
     HANDLE hThread;
+    DWORD dwError;
 
     /* Fail if the timeout is 10 years or more */
     if (dwTimeout >= SECONDS_PER_DECADE)
@@ -393,6 +394,11 @@ StartSystemShutdown(
         }
     }
 
+    /* Retrieve the failure code before the cleanup below can overwrite it */
+    dwError = GetLastError();
+    if (dwError == ERROR_SUCCESS)
+        dwError = ERROR_GEN_FAILURE;
+
     if (g_ShutdownParams.pszMessage)
     {
         HeapFree(GetProcessHeap(), 0, g_ShutdownParams.pszMessage);
@@ -400,7 +406,7 @@ StartSystemShutdown(
     }
 
     g_ShutdownParams.bShuttingDown = FALSE;
-    return GetLastError();
+    return dwError;
 }
 
 /* EOF */
