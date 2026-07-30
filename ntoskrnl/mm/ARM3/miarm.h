@@ -2672,6 +2672,16 @@ MiMakePdeExistAndMakeValid(
     IN KIRQL OldIrql
 );
 
+NTSTATUS
+NTAPI
+MiResolveDemandZeroFault(
+    IN PVOID Address,
+    IN PMMPTE PointerPte,
+    IN ULONG Protection,
+    IN PEPROCESS Process,
+    IN KIRQL OldIrql
+);
+
 VOID
 NTAPI
 MiWriteProtectSystemImage(
