@@ -12,6 +12,12 @@
 #include <powrprof.h>
 
 /*
+ * Returned by ParseArguments() when the usage has been displayed and
+ * there is nothing else to do. Not an error: the caller exits quietly.
+ */
+#define ERROR_USAGE_DISPLAYED  ERROR_CANCELLED
+
+/*
  * Takes the commandline arguments, and creates a
  * struct which matches the arguments supplied.
  */
@@ -49,7 +55,7 @@ ParseArguments(struct CommandLineOptions* pOpts, int argc, WCHAR *argv[])
             {
                 case L'?': /* Help */
                     ConResPuts(StdOut, IDS_USAGE);
-                    return ERROR_SUCCESS;
+                    return ERROR_USAGE_DISPLAYED;
 
                 case L'a': /* Cancel delayed shutdown */
                     pOpts->abort = TRUE;
@@ -130,9 +136,26 @@ ParseArguments(struct CommandLineOptions* pOpts, int argc, WCHAR *argv[])
                 default:
                     /* Unknown arguments will exit the program. */
                     ConResPuts(StdOut, IDS_USAGE);
-                    return ERROR_SUCCESS;
+                    return ERROR_INVALID_PARAMETER;
             }
         }
+        else
+        {
+            /* Anything that is not an option is not understood either */
+            ConResPuts(StdOut, IDS_USAGE);
+            return ERROR_INVALID_PARAMETER;
+        }
+    }
+
+    /*
+     * An action must have been requested, otherwise there is nothing to do
+     * and reporting success would wrongly suggest the system is going down.
+     */
+    if (!pOpts->abort && !pOpts->hibernate && !pOpts->logoff &&
+        !pOpts->restart && !pOpts->shutdown && !pOpts->show_gui)
+    {
+        ConResPuts(StdOut, IDS_USAGE);
+        return ERROR_INVALID_PARAMETER;
     }
 
     return ERROR_SUCCESS;
@@ -201,9 +224,13 @@ int wmain(int argc, WCHAR *argv[])
     }
 
     error = ParseArguments(&opts, argc, argv);
+    if (error == ERROR_USAGE_DISPLAYED)
+        return EXIT_SUCCESS;
     if (error != ERROR_SUCCESS)
     {
-        DisplayError(error);
+        /* The usage has already been displayed for a malformed command line */
+        if (error != ERROR_INVALID_PARAMETER)
+            DisplayError(error);
         return EXIT_FAILURE;
     }
 
