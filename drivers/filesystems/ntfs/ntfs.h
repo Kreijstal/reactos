@@ -338,6 +338,17 @@ typedef struct
     BOOLEAN QuotaPresent;
     ULONGLONG QuotaFileMft;
 
+    /* Shared security-descriptor store (\$Secure, NTFS 3.0+).
+     *
+     * SecurePresent is TRUE when the volume carries \$Secure with both the
+     * $SDS data stream and the $SII index; SecureFileMft caches its MFT index
+     * so NtfsGetSecurityFromRecord doesn't re-walk the root directory on
+     * every IRP_MJ_QUERY_SECURITY.  When FALSE the driver falls back to the
+     * per-record $SECURITY_DESCRIPTOR attribute (NT4 layout) and then to the
+     * synthesised default descriptor. */
+    BOOLEAN SecurePresent;
+    ULONGLONG SecureFileMft;
+
     /* $LogFile Phase 0 + Phase 1 state (Kreijstal/reactos#34).
      *
      * LogFileDirty is set TRUE after NtfsMountVolume runs NtfsLfsParseRestart
@@ -515,6 +526,10 @@ typedef enum
 #define NTFS_FILE_BOOT                7
 #define NTFS_FILE_BADCLUS            8
 #define NTFS_FILE_QUOTA                9
+/* MFT record 9 held \$Quota on NTFS 1.2 (NT4).  From NTFS 3.0 on it holds
+ * \$Secure and the quota file moved to \$Extend\$Quota; both spellings of
+ * record 9 are kept so each consumer says which layout it means. */
+#define NTFS_FILE_SECURE               9
 #define NTFS_FILE_UPCASE            10
 #define NTFS_FILE_EXTEND            11
 #define NTFS_FILE_FIRST_USER_FILE   16
@@ -682,6 +697,20 @@ typedef struct
     USN Usn;
 #endif
 } STANDARD_INFORMATION, *PSTANDARD_INFORMATION;
+
+/* NTFS 3.0 grew $STANDARD_INFORMATION from 0x30 to 0x48 bytes by appending
+ * OwnerId (0x30), SecurityId (0x34), QuotaCharge (0x38) and Usn (0x40).
+ * ReactOS still writes the 0x30-byte NT4 form - which is why the fields above
+ * stay #if 0'd and sizeof(STANDARD_INFORMATION) must not change - but it has
+ * to read the longer form written by Windows.  Reach those fields through the
+ * byte offsets below after checking the attribute is actually long enough,
+ * instead of widening the struct and silently changing every sizeof() user.
+ *
+ * SecurityId is the key into \$Secure:$SII, whose value locates the shared
+ * self-relative descriptor inside \$Secure:$SDS.  Zero means "no shared
+ * descriptor"; Windows allocates real ids from 0x100 upwards. */
+#define STANDARD_INFORMATION_SECURITY_ID_OFFSET  0x34
+#define STANDARD_INFORMATION_V3_LENGTH           0x48
 
 
 typedef struct
@@ -2079,6 +2108,41 @@ NtfsSetVolumeInformation(PNTFS_IRP_CONTEXT IrpContext);
 
 
 /* security.c */
+
+/* \$Secure:$SDS stream layout.
+ *
+ * Every stored descriptor is preceded by a 20-byte header:
+ *   0x00 ULONG     Hash        (hash of the descriptor bytes)
+ *   0x04 ULONG     SecurityId  (the id $STANDARD_INFORMATION references)
+ *   0x08 ULONGLONG Offset      (this entry's own offset within $SDS)
+ *   0x10 ULONG     Length      (header + descriptor, before alignment)
+ * followed by Length - 20 bytes of self-relative descriptor.  Entries start
+ * on 16-byte boundaries and the whole stream is mirrored one 0x40000-byte
+ * block later, so a healthy $SDS is twice the size of its live contents.
+ * $SII values are a verbatim copy of this header, which is what makes an
+ * id -> descriptor lookup a single index probe plus one read.
+ *
+ * Kept as offsets rather than a struct because natural alignment would pad
+ * an equivalent C struct to 24 bytes and silently desynchronise it from the
+ * on-disk form. */
+#define NTFS_SDS_ENTRY_HEADER_SIZE          0x14
+#define NTFS_SDS_ENTRY_SECURITY_ID_OFFSET   0x04
+#define NTFS_SDS_ENTRY_STREAM_OFFSET_OFFSET 0x08
+#define NTFS_SDS_ENTRY_LENGTH_OFFSET        0x10
+
+/* Sanity cap on a single stored descriptor.  Windows keeps security
+ * descriptors far below this; anything larger means a corrupt $SII value and
+ * must not become a pool allocation size. */
+#define NTFS_SDS_ENTRY_MAX_LENGTH           0x10000
+
+NTSTATUS
+NtfsSecureProbe(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsLookupSecurityDescriptorById(PNTFS_VCB Vcb,
+                                 ULONG SecurityId,
+                                 PVOID *SdOut,
+                                 PULONG SdLenOut);
 
 NTSTATUS
 NtfsSetSecurityOnRecord(PNTFS_VCB Vcb,

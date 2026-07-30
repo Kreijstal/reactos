@@ -587,6 +587,14 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
      * IRP_MJ_{QUERY,SET}_QUOTA returns STATUS_NOT_SUPPORTED when absent. */
     (void)NtfsQuotaProbe(Vcb);
 
+    /* Shared security-descriptor store: probe \$Secure and cache presence +
+     * MFT index.  NTFS 3.0+ volumes keep every ACL there and reference it by
+     * SecurityId, so without this the driver would fall back to a synthetic
+     * descriptor for every file Windows ever secured.  Absent \$Secure is the
+     * NTFS 1.2 / ReactOS-formatted case and simply leaves the per-record
+     * $SECURITY_DESCRIPTOR attribute in charge. */
+    (void)NtfsSecureProbe(Vcb);
+
     /* $LogFile Phase-1 clean-shutdown gate (Kreijstal/reactos#34).
      *
      * Parse both restart pages; on any irregularity (I/O failure, torn
