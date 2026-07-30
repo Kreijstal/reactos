@@ -730,7 +730,7 @@ static VOID
 InstallBootDevices(
     _In_ PWSTR DeviceList)
 {
-    if (g_IsLiveMedium)
+    if (g_IsMiniNT)
         InstallBootDevicesParallel(DeviceList);
     else
         InstallBootDevicesSerial(DeviceList);
