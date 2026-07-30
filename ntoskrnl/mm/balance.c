@@ -25,6 +25,12 @@ typedef struct _MM_ALLOCATION_REQUEST
 MM_ALLOCATION_REQUEST, *PMM_ALLOCATION_REQUEST;
 /* GLOBALS ******************************************************************/
 
+/* How many consecutive trim passes may free nothing at all before the balancer
+ * concludes that the system really has no reclaimable page left. Each barren
+ * pass is followed by a 10ms pause, so this is roughly a third of a second of
+ * grace for in-flight page write-outs to complete. */
+#define MI_BALANCER_BARREN_PASSES 32
+
 MM_MEMORY_CONSUMER MiMemoryConsumers[MC_MAXIMUM];
 static ULONG MiMinimumAvailablePages;
 static ULONG MiMinimumPagesPerRun;
@@ -137,8 +143,15 @@ MiTrimMemoryConsumer(ULONG Consumer, ULONG InitialTarget)
         }
     }
 
-    /* Return the page count needed to be freed to meet the initial target */
-    return (InitialTarget > NrFreedPages) ? (InitialTarget - NrFreedPages) : 0;
+    /* Report what is still outstanding against the target we actually trimmed
+     * for, not just against the caller's initial one. A shortage found through
+     * the global limit raises Target above InitialTarget, and reporting only
+     * InitialTarget - NrFreedPages hides that shortage from the balancer: with
+     * the balancer entering its loop at InitialTarget == 0, the loop then sees
+     * 0 outstanding, runs a single pass however deep the shortage is, and can
+     * never satisfy its own no-progress test - so an unrecoverable shortage
+     * neither recovers nor bugchecks, it spins. */
+    return (Target > NrFreedPages) ? (Target - NrFreedPages) : 0;
 }
 
 NTSTATUS
@@ -422,6 +435,7 @@ MiBalancerThread(PVOID Unused)
             ULONG InitialTarget = 0;
             ULONG Target;
             ULONG NrFreedPages;
+            ULONG BarrenPasses = 0;
 
             do
             {
@@ -445,9 +459,24 @@ MiBalancerThread(PVOID Unused)
                 if (InitialTarget != 0 &&
                     InitialTarget == OldTarget)
                 {
+                    /* A single barren pass does not mean the system is out of
+                     * pages: every candidate may just have been locked, or had
+                     * its write-out still in flight, at the instant we looked.
+                     * Let that drain and look again before giving the verdict. */
+                    if (++BarrenPasses < MI_BALANCER_BARREN_PASSES)
+                    {
+                        LARGE_INTEGER Delay;
+
+                        Delay.QuadPart = -10 * 1000 * 10; /* 10ms */
+                        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+                        continue;
+                    }
+
                     /* Game over */
                     KeBugCheck(NO_PAGES_AVAILABLE);
                 }
+
+                BarrenPasses = 0;
             }
             while (InitialTarget != 0);
 
