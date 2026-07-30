@@ -343,7 +343,6 @@ MmFreeSwapPage(SWAPENTRY Entry)
 
     MiFreeSwapPages++;
     MiUsedSwapPages--;
-    UpdateTotalCommittedPages(-1);
 
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
 }
@@ -384,7 +383,6 @@ MmAllocSwapPage(VOID)
 
             MiUsedSwapPages++;
             MiFreeSwapPages--;
-            UpdateTotalCommittedPages(1);
 
             KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
@@ -836,6 +834,13 @@ EarlyQuit:
     MmPagingFile[MmNumberOfPagingFiles] = PagingFile;
     MmNumberOfPagingFiles++;
     MiFreeSwapPages = MiFreeSwapPages + PagingFile->FreeSpace;
+
+    /* A paging file backs commitment just as RAM does, so it raises the limit
+     * of what the system may promise. Without this the commit limit would stay
+     * at the size of physical memory and refuse allocations that the machine
+     * can in fact honour. */
+    MmTotalCommitLimit += PagingFile->FreeSpace;
+    MmTotalCommitLimitMaximum += PagingFile->MaximumSize;
     KeReleaseGuardedMutex(&MmPageFileCreationLock);
 
     MmSwapSpaceMessage = FALSE;
