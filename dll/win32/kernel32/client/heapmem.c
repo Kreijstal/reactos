@@ -1311,12 +1311,12 @@ GlobalMemoryStatusEx(LPMEMORYSTATUSEX lpBuffer)
                                       NumberOfPhysicalPages;
 
     /* Save physical memory */
-    PhysicalMemory = NumberOfPhysicalPages *
+    PhysicalMemory = (ULONGLONG)NumberOfPhysicalPages *
                      PageSize;
     lpBuffer->ullTotalPhys = PhysicalMemory;
 
     /* Now save available physical memory */
-    PhysicalMemory = PerformanceInfo.AvailablePages *
+    PhysicalMemory = (ULONGLONG)PerformanceInfo.AvailablePages *
                      PageSize;
     lpBuffer->ullAvailPhys = PhysicalMemory;
 
