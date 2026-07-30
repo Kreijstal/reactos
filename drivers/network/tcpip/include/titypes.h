@@ -278,6 +278,13 @@ typedef struct _CONNECTION_ENDPOINT {
 
     LIST_ENTRY PacketQueue;    /* Queued received packets waiting to be processed */
 
+    /* Receive window credit owed to lwIP for data the client has already
+     * consumed. tcp_recved() may only be called in the tcpip-thread context,
+     * while the data is consumed in the caller's context, so the byte count is
+     * accumulated here and applied later (see LibTCPAccountRecvCredit). */
+    LONG PendingRecvCredit;
+    PVOID RecvCreditMsg;       /* Pre-allocated tcpip callback message */
+
     /* Disconnect Timer */
     KTIMER DisconnectTimer;
     KDPC DisconnectDpc;

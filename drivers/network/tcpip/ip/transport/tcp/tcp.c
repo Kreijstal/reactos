@@ -98,6 +98,8 @@ VOID ConnectionFree(PVOID Object)
     RemoveEntryList(&Connection->ListEntry);
     TcpipReleaseSpinLock(&ConnectionEndpointListLock, OldIrql);
 
+    LibTCPFreeRecvCredit(Connection);
+
     ExDeleteResourceLite(&Connection->Resource);
     IoFreeWorkItem(Connection->DisconnectWorkItem);
 
@@ -132,6 +134,16 @@ PCONNECTION_ENDPOINT TCPAllocateConnectionEndpoint( PVOID ClientContext )
     Connection->DisconnectWorkItem = IoAllocateWorkItem(TCPDeviceObject);
     if (!Connection->DisconnectWorkItem)
     {
+        ExDeleteResourceLite(&Connection->Resource);
+        ExFreePoolWithTag( Connection, CONN_ENDPT_TAG );
+        return NULL;
+    }
+
+    /* Pre-allocate the receive credit message so that reopening the window
+     * never has to allocate on the receive path */
+    if (!LibTCPAllocateRecvCredit(Connection))
+    {
+        IoFreeWorkItem(Connection->DisconnectWorkItem);
         ExDeleteResourceLite(&Connection->Resource);
         ExFreePoolWithTag( Connection, CONN_ENDPT_TAG );
         return NULL;
