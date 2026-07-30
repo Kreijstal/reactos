@@ -732,7 +732,7 @@ SmpMakeSystemManagedPagingFileDescriptor(IN PSMP_PAGEFILE_DESCRIPTOR Descriptor)
     }
 
     /* Check how much RAM we have and set three times this amount as maximum */
-    Ram = BasicInfo.NumberOfPhysicalPages * BasicInfo.PageSize;
+    Ram = (ULONGLONG)BasicInfo.NumberOfPhysicalPages * BasicInfo.PageSize;
     MaximumSize = 3 * Ram;
 
     /* If we have more than 1GB, use that as minimum, otherwise, use 1.5X RAM */
