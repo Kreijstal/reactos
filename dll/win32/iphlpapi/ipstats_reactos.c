@@ -62,6 +62,31 @@ BOOL isIpEntity( HANDLE tcpFile, TDIEntityID *ent ) {
             ent->tei_entity == CO_NL_ENTITY);
 }
 
+/* Whether the entity itself reports the given ENTITY_TYPE_ID type (e.g.
+ * CO_TL_TCP for a TCP transport entity). Unlike hasArp, this queries the
+ * entity that was passed in, not the AT_ENTITY sharing its instance number. */
+static BOOL hasEntityType( HANDLE tcpFile, TDIEntityID *ent, ULONG type ) {
+    TCP_REQUEST_QUERY_INFORMATION_EX req = TCP_REQUEST_QUERY_INFORMATION_INIT;
+    DWORD returnSize, entityType;
+
+    req.ID.toi_class                = INFO_CLASS_GENERIC;
+    req.ID.toi_type                 = INFO_TYPE_PROVIDER;
+    req.ID.toi_id                   = ENTITY_TYPE_ID;
+    req.ID.toi_entity               = *ent;
+
+    if (!DeviceIoControl( tcpFile,
+                          IOCTL_TCP_QUERY_INFORMATION_EX,
+                          &req,
+                          sizeof(req),
+                          &entityType,
+                          sizeof(entityType),
+                          &returnSize,
+                          NULL ))
+        return FALSE;
+
+    return returnSize == sizeof(entityType) && entityType == type;
+}
+
 NTSTATUS getNthIpEntity( HANDLE tcpFile, DWORD index, TDIEntityID *ent ) {
     DWORD numEntities = 0;
     DWORD numRoutes = 0;
@@ -742,7 +767,7 @@ DWORD getNumUdpEntries(void)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CL_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CL_TL_ENTITY && hasEntityType(tcpFile, &entitySet[i], CL_TL_UDP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -799,7 +824,7 @@ PVOID getUdpTable(CLASS_TABLE Class)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CL_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CL_TL_ENTITY && hasEntityType(tcpFile, &entitySet[i], CL_TL_UDP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -813,7 +838,9 @@ PVOID getUdpTable(CLASS_TABLE Class)
                 &returnSize);
 
             if (status == STATUS_SUCCESS) {
-                for (TmpIdx = 0; TmpIdx < returnSize; TmpIdx++, CurrIdx++)
+                /* A socket may have appeared since the sizing pass; never
+                 * copy more rows than were allocated */
+                for (TmpIdx = 0; TmpIdx < returnSize && CurrIdx < totalNumber; TmpIdx++, CurrIdx++)
                     CopyMemory(Add2Ptr(IpUdpTable, UdpTcpTableCall[Class].UdpOffset + UdpTcpTableCall[Class].UdpSize * CurrIdx),
                                Add2Ptr(AdapterUdpTable, UdpTcpTableCall[Class].UdpSize * TmpIdx),
                                UdpTcpTableCall[Class].UdpSize);
@@ -850,7 +877,7 @@ DWORD getNumTcpEntries(void)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CO_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CO_TL_ENTITY && hasEntityType(tcpFile, &entitySet[i], CO_TL_TCP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -907,7 +934,7 @@ PVOID getTcpTable(CLASS_TABLE Class)
     status = tdiGetEntityIDSet(tcpFile, &entitySet, &numEntities);
 
     for (i = 0; i < numEntities; i++) {
-        if (entitySet[i].tei_entity == CO_TL_ENTITY && hasArp(tcpFile, &entitySet[i]))
+        if (entitySet[i].tei_entity == CO_TL_ENTITY && hasEntityType(tcpFile, &entitySet[i], CO_TL_TCP))
         {
             status = tdiGetSetOfThings(tcpFile,
                 INFO_CLASS_PROTOCOL,
@@ -921,7 +948,9 @@ PVOID getTcpTable(CLASS_TABLE Class)
                 &returnSize);
 
             if (status == STATUS_SUCCESS) {
-                for (TmpIdx = 0; TmpIdx < returnSize; TmpIdx++, CurrIdx++)
+                /* A connection may have appeared since the sizing pass; never
+                 * copy more rows than were allocated */
+                for (TmpIdx = 0; TmpIdx < returnSize && CurrIdx < totalNumber; TmpIdx++, CurrIdx++)
                     CopyMemory(Add2Ptr(IpTcpTable, UdpTcpTableCall[Class].TcpOffset + UdpTcpTableCall[Class].TcpSize * CurrIdx),
                                Add2Ptr(AdapterTcpTable, UdpTcpTableCall[Class].TcpSize * TmpIdx),
                                UdpTcpTableCall[Class].TcpSize);
