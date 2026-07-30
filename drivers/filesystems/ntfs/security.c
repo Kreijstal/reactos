@@ -32,21 +32,59 @@
 
 /* FUNCTIONS ****************************************************************/
 
-/* World-readable default SD surfaced when a file has no $SECURITY_DESCRIPTOR
- * attribute yet and a caller asks for one via IRP_MJ_QUERY_SECURITY.  This is
- * a minimal self-relative SECURITY_DESCRIPTOR_RELATIVE with no Owner / Group /
- * DACL / SACL - Windows clients treat that as "no access control information
- * present, inherit or use defaults".  SECURITY_DESCRIPTOR_RELATIVE::Control
- * has SE_SELF_RELATIVE set (0x8000, low-endian 00 80). */
+/* Default SD surfaced when a file has no $SECURITY_DESCRIPTOR attribute yet
+ * and a caller asks for one via IRP_MJ_QUERY_SECURITY.
+ *
+ * This MUST be a descriptor AccessCheck() can evaluate.  An SD with all four
+ * offsets zero is not: AccessCheck() rejects an ownerless descriptor with
+ * STATUS_INVALID_SECURITY_DESCR (win32 error 1338), so every caller that asks
+ * "may I read/execute this file?" through the documented
+ * GetFileSecurity + AccessCheck sequence gets a hard failure rather than a
+ * grant.  GNAT does exactly that in __gnat_check_OWNER_ACL (gcc/ada/adaint.c),
+ * which made gnatmake report "unable to locate gcc" for a gcc.exe sitting in
+ * plain sight on PATH.
+ *
+ * A volume whose files carry no security information behaves like one with no
+ * access control, so hand back the equivalent: owner and group BUILTIN\
+ * Administrators (S-1-5-32-544) plus a DACL granting FILE_ALL_ACCESS to
+ * Everyone (S-1-1-0).  Built as a byte blob rather than with the Rtl and Se
+ * security helpers so this TU keeps compiling against the userspace test
+ * harness's mock ntfs.h.
+ *
+ * Layout (self-relative, 80 bytes):
+ *   0x00 header (20)   0x14 DACL (28)   0x30 owner SID (16)   0x40 group SID (16)
+ */
 static const UCHAR NtfsDefaultSelfRelativeSd[] =
 {
+    /* --- SECURITY_DESCRIPTOR_RELATIVE header --- */
     0x01,                   /* Revision = SECURITY_DESCRIPTOR_REVISION */
     0x00,                   /* Sbz1 */
-    0x00, 0x80,             /* Control = SE_SELF_RELATIVE */
-    0x00, 0x00, 0x00, 0x00, /* Owner offset (0 = not present) */
-    0x00, 0x00, 0x00, 0x00, /* Group offset */
-    0x00, 0x00, 0x00, 0x00, /* Sacl offset  */
-    0x00, 0x00, 0x00, 0x00, /* Dacl offset  */
+    0x04, 0x80,             /* Control = SE_DACL_PRESENT | SE_SELF_RELATIVE */
+    0x30, 0x00, 0x00, 0x00, /* Owner offset = 0x30 */
+    0x40, 0x00, 0x00, 0x00, /* Group offset = 0x40 */
+    0x00, 0x00, 0x00, 0x00, /* Sacl offset  = 0 (not present) */
+    0x14, 0x00, 0x00, 0x00, /* Dacl offset  = 0x14 */
+
+    /* --- ACL header @0x14: revision 2, size 28, one ACE --- */
+    0x02, 0x00, 0x1C, 0x00,
+    0x01, 0x00, 0x00, 0x00,
+
+    /* --- ACCESS_ALLOWED_ACE @0x1C: size 20, inheritable --- */
+    0x00,                   /* AceType = ACCESS_ALLOWED_ACE_TYPE */
+    0x03,                   /* AceFlags = OBJECT_INHERIT | CONTAINER_INHERIT */
+    0x14, 0x00,             /* AceSize = 20 */
+    0xFF, 0x01, 0x1F, 0x00, /* AccessMask = FILE_ALL_ACCESS (0x001F01FF) */
+    /* SID S-1-1-0 (Everyone), 12 bytes */
+    0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00,
+
+    /* --- Owner SID @0x30: S-1-5-32-544 (BUILTIN\Administrators) --- */
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+    0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
+
+    /* --- Group SID @0x40: S-1-5-32-544 --- */
+    0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+    0x20, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00,
 };
 
 /* Fixed size of the self-relative SD header (revision + sbz1 + control +
