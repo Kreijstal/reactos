@@ -742,6 +742,88 @@ MmCreatePageFileMapping(PEPROCESS Process,
 }
 
 
+#if _MI_PAGING_LEVELS >= 3
+/*
+ * Materialize the page table hierarchy that maps a system address.
+ *
+ * Legacy Mm hands out kernel virtual addresses from any free gap of the
+ * kernel address space, but only the ARM3 ranges get their page directories
+ * built at boot time (MiMapPPEs). Storing a PTE for an address outside of
+ * those ranges goes through the self-mapping and faults, and the ARM3 fault
+ * handler has no way to repair a missing *system* PPE/PDE: it bugchecks with
+ * PAGE_FAULT_IN_NONPAGED_AREA. So create whatever is missing beforehand.
+ *
+ * This is the 3/4-level counterpart of the MiFillSystemPageDirectory() call
+ * the two-level code makes for the very same reason.
+ */
+static
+NTSTATUS
+MiMakeSystemPageTablesValid(
+    _In_ PVOID Address)
+{
+    PMMPDE Levels[_MI_PAGING_LEVELS - 2];
+    ULONG Level, Count = 0;
+    KIRQL OldIrql;
+    NTSTATUS Status;
+
+    ASSERT(Address >= MmSystemRangeStart);
+
+#if _MI_PAGING_LEVELS == 4
+    /*
+     * Every system PXE is created once and for all at boot time, in
+     * MiInitializePageTable(). It has to be: the top level is per-process, so
+     * one created now would only ever be seen by the current address space.
+     */
+    ASSERT(MiAddressToPxe(Address)->u.Hard.Valid == 1);
+    Levels[Count++] = MiAddressToPpe(Address);
+#else
+    /* PAE has a fixed, boot-time page directory pointer table */
+    ASSERT(MiAddressToPpe(Address)->u.Hard.Valid == 1);
+#endif
+    Levels[Count++] = MiAddressToPde(Address);
+    ASSERT(Count == RTL_NUMBER_OF(Levels));
+
+    for (Level = 0; Level < Count; Level++)
+    {
+        /*
+         * Each level is itself addressed through the level above it, so they
+         * have to be validated strictly top-down.
+         */
+        if (Levels[Level]->u.Hard.Valid == 1)
+            continue;
+
+        OldIrql = MiAcquirePfnLock();
+
+        /* Re-check now that we are serialized against any other creator */
+        if (Levels[Level]->u.Hard.Valid == 0)
+        {
+            /* System page tables are never paged out, so nothing else fits here */
+            ASSERT(Levels[Level]->u.Long == 0);
+
+            /* Page table pages must stay executable: they are never the
+             * target of a NoExecute mapping, and MI_WRITE_VALID_PTE asserts
+             * on it. */
+            Status = MiResolveDemandZeroFault(MiPteToAddress(Levels[Level]),
+                                              Levels[Level],
+                                              MM_EXECUTE_READWRITE,
+                                              NULL,
+                                              OldIrql);
+            if (!NT_SUCCESS(Status))
+            {
+                /* The PFN lock was already released for us */
+                return Status;
+            }
+
+            ASSERT(Levels[Level]->u.Hard.Valid == 1);
+        }
+
+        MiReleasePfnLock(OldIrql);
+    }
+
+    return STATUS_SUCCESS;
+}
+#endif /* _MI_PAGING_LEVELS >= 3 */
+
 NTSTATUS
 NTAPI
 MmCreateVirtualMappingUnsafeEx(
@@ -782,6 +864,10 @@ MmCreateVirtualMappingUnsafeEx(
 #if _MI_PAGING_LEVELS == 2
         if (!MiSynchronizeSystemPde(MiAddressToPde(Address)))
             MiFillSystemPageDirectory(Address, PAGE_SIZE);
+#else
+        NTSTATUS Status = MiMakeSystemPageTablesValid(Address);
+        if (!NT_SUCCESS(Status))
+            return Status;
 #endif
     }
     else
