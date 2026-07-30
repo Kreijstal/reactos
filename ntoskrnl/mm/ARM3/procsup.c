@@ -1480,7 +1480,15 @@ MmDeleteProcessAddressSpace(IN PEPROCESS Process)
     MiReleaseExpansionLock(OldIrql);
 #endif
 
-    //ASSERT(Process->CommitCharge == 0);
+    /* Process teardown tears the VADs down directly rather than going through
+     * NtFreeVirtualMemory, so whatever this process still had committed has to
+     * be handed back to the system here. Miss this and every process that ever
+     * exits leaks its commitment, and the commit limit ratchets shut. */
+    if (Process->CommitCharge != 0)
+    {
+        MiReleaseCommitment(Process->CommitCharge);
+        Process->CommitCharge = 0;
+    }
 
     /* Remove us from the list */
     OldIrql = MiAcquireExpansionLock();
