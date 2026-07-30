@@ -33,12 +33,59 @@ SIZE_T MmDriverCommit;
 SIZE_T MmProcessCommit;
 SIZE_T MmPagedPoolCommit;
 SIZE_T MmPeakCommitment;
-SIZE_T MmtotalCommitLimitMaximum;
 
 PMMPFN FirstUserLRUPfn;
 PMMPFN LastUserLRUPfn;
 
 /* FUNCTIONS *************************************************************/
+
+BOOLEAN
+NTAPI
+MiChargeCommitment(_In_ SIZE_T QuotaCharge,
+                   _In_ BOOLEAN Force)
+{
+    SIZE_T OldCommit, NewCommit;
+
+    do
+    {
+        OldCommit = MmTotalCommittedPages;
+        NewCommit = OldCommit + QuotaCharge;
+
+        /* Refuse a charge that the system could not honour: committed memory
+         * must stay backable by RAM plus the paging files, otherwise the fault
+         * path is left trying to satisfy pages that do not exist anywhere.
+         * Before the limit has been computed there is nothing to check against,
+         * and refusing everything would simply prevent the system from booting. */
+        if (!Force && (MmTotalCommitLimit != 0) && (NewCommit > MmTotalCommitLimit))
+        {
+            return FALSE;
+        }
+    }
+    while (InterlockedCompareExchangeSizeT(&MmTotalCommittedPages,
+                                           NewCommit,
+                                           OldCommit) != OldCommit);
+
+    /* Racy by design, as it is on Windows: this is a high-water mark reported
+     * through NtQuerySystemInformation, not an accounting invariant. */
+    if (NewCommit > MmPeakCommitment)
+    {
+        MmPeakCommitment = NewCommit;
+    }
+
+    return TRUE;
+}
+
+VOID
+NTAPI
+MiReleaseCommitment(_In_ SIZE_T QuotaCharge)
+{
+    /* Releasing more than was ever charged means a charge/release pair is
+     * mismatched somewhere. Catch it here rather than let the counter wrap and
+     * silently disable the commit limit for the rest of the boot. */
+    ASSERT(MmTotalCommittedPages >= QuotaCharge);
+
+    InterlockedExchangeAddSizeT(&MmTotalCommittedPages, -(SSIZE_T)QuotaCharge);
+}
 
 PFN_NUMBER
 NTAPI
