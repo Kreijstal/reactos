@@ -114,7 +114,7 @@ SVC_(AdjustGroupsToken, 6)
 SVC_(AlertResumeThread, 2)
 SVC_(AlertThread, 1)
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-SVC_(AlertThreadByThreadId, 0) // FIXME
+SVC_(AlertThreadByThreadId, 1)
 #endif
 SVC_(AllocateLocallyUniqueId, 1)
 #if (NTDDI_VERSION >= NTDDI_WIN7)
@@ -625,7 +625,7 @@ SVC_(UnlockVirtualMemory, 4)
 SVC_(UnmapViewOfSectionEx, 0) // FIXME
 SVC_(UnsubscribeWnfStateChange, 0) // FIXME
 SVC_(UpdateWnfStateData, 0) // FIXME
-SVC_(WaitForAlertByThreadId, 0) // FIXME
+SVC_(WaitForAlertByThreadId, 2)
 #endif
 SVC_(VdmControl, 2)
 SVC_(WaitForDebugEvent, 4)

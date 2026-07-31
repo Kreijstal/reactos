@@ -221,6 +221,97 @@ NtAlertThread(IN HANDLE ThreadHandle)
     return Status;
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+/*
+ * @implemented
+ *
+ * Win8+ address-less thread rendezvous, the primitive behind WaitOnAddress,
+ * SRW locks and condition variables. Unlike the keyed-event emulation it
+ * replaces, the wake targets a specific thread and latches: no key matching,
+ * no 1:1 release obligation, and no way to lose or strand a wakeup.
+ */
+NTSTATUS
+NTAPI
+NtAlertThreadByThreadId(IN HANDLE ThreadId)
+{
+    PETHREAD Thread;
+    NTSTATUS Status;
+
+    Status = PsLookupThreadByThreadId(ThreadId, &Thread);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Windows reports a bad or stale TID as an invalid CID rather than
+           passing the lookup failure through verbatim. */
+        return STATUS_INVALID_CID;
+    }
+
+    /* This syscall takes a bare TID with no handle and therefore no access
+       check, so it must not reach outside the caller's process. */
+    if (Thread->ThreadsProcess != PsGetCurrentProcess())
+    {
+        ObDereferenceObject(Thread);
+        return STATUS_ACCESS_DENIED;
+    }
+
+    /* Auto-reset event: if the target is not waiting yet, this stays signaled
+       and its next wait consumes it immediately. */
+    KeSetEvent(&Thread->AlertByIdEvent, IO_NO_INCREMENT, FALSE);
+
+    ObDereferenceObject(Thread);
+    return STATUS_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+NtWaitForAlertByThreadId(IN PVOID Address,
+                         IN PLARGE_INTEGER Timeout OPTIONAL)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PETHREAD Thread = PsGetCurrentThread();
+    LARGE_INTEGER SafeTimeout;
+    NTSTATUS Status;
+
+    /* Address is a diagnostic tag only - the wake is matched by thread id, so
+       it is deliberately neither validated nor compared. */
+    UNREFERENCED_PARAMETER(Address);
+
+    if (Timeout != NULL)
+    {
+        if (PreviousMode != KernelMode)
+        {
+            _SEH2_TRY
+            {
+                ProbeForRead(Timeout, sizeof(*Timeout), sizeof(ULONG));
+                SafeTimeout = *Timeout;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                _SEH2_YIELD(return _SEH2_GetExceptionCode());
+            }
+            _SEH2_END;
+        }
+        else
+        {
+            SafeTimeout = *Timeout;
+        }
+
+        Timeout = &SafeTimeout;
+    }
+
+    Status = KeWaitForSingleObject(&Thread->AlertByIdEvent,
+                                   UserRequest,
+                                   PreviousMode,
+                                   FALSE,
+                                   Timeout);
+
+    /* A consumed alert is reported as STATUS_ALERTED, not STATUS_SUCCESS. */
+    return (Status == STATUS_SUCCESS) ? STATUS_ALERTED : Status;
+}
+#endif /* NTDDI_VERSION >= NTDDI_WIN8 */
+
 NTSTATUS
 NTAPI
 NtAlertResumeThread(IN HANDLE ThreadHandle,
