@@ -86,17 +86,26 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
                                   IN PRTLP_SRWLOCK_WAITBLOCK FirstWaitBlock)
 {
     PRTLP_SRWLOCK_WAITBLOCK Next;
+    PRTLP_SRWLOCK_SHARED_WAKE WakeChain, NextWake;
     LONG_PTR NewValue;
+    BOOLEAN Exclusive;
 
     /* NOTE: We're currently in an exclusive lock in contended mode. */
 
+    /* Wait blocks and their wake nodes live on the waiting threads' stacks and
+       die as soon as those threads are released. Snapshot everything we still
+       need out of the first wait block up front, so that nothing is read from
+       it after it has been woken below. */
+    Exclusive = FirstWaitBlock->Exclusive;
     Next = FirstWaitBlock->Next;
+    WakeChain = Exclusive ? NULL : FirstWaitBlock->SharedWakeChain;
+
     if (Next != NULL)
     {
         /* There's more blocks chained, we need to update the pointers
            in the next wait block and update the wait block pointer. */
         NewValue = (LONG_PTR)Next | RTL_SRWLOCK_OWNED | RTL_SRWLOCK_CONTENDED;
-        if (!FirstWaitBlock->Exclusive)
+        if (!Exclusive)
         {
             /* The next wait block has to be an exclusive lock! */
             ASSERT(Next->Exclusive);
@@ -112,7 +121,7 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
     else
     {
         /* Convert the lock to a simple lock. */
-        if (FirstWaitBlock->Exclusive)
+        if (Exclusive)
             NewValue = RTL_SRWLOCK_OWNED;
         else
         {
@@ -123,22 +132,24 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
         }
     }
 
-    (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
-
-    if (FirstWaitBlock->Exclusive)
+    /* Wake the released acquirers *before* publishing the new lock value.
+       Until it is published the lock still reads as contended, so no waiter
+       can leave its spin loop on its own and no wait block can go away behind
+       our back. Publishing first would let a waiter return and reuse its stack
+       while we are still walking these structures. */
+    if (Exclusive)
     {
         (void)InterlockedOr(&FirstWaitBlock->Wake,
                             TRUE);
     }
     else
     {
-        PRTLP_SRWLOCK_SHARED_WAKE WakeChain, NextWake;
-
         /* If we were the first one to acquire the shared
            lock, we now need to wake all others... */
-        WakeChain = FirstWaitBlock->SharedWakeChain;
         do
         {
+            /* Read the link before waking this node: waking it hands the
+               owning thread its lock, after which the node is gone. */
             NextWake = WakeChain->Next;
 
             (void)InterlockedOr((PLONG)&WakeChain->Wake,
@@ -147,6 +158,8 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
             WakeChain = NextWake;
         } while (WakeChain != NULL);
     }
+
+    (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
 }
 
 
@@ -178,10 +191,12 @@ RtlpReleaseWaitBlockLockLastShared(IN OUT PRTL_SRWLOCK SRWLock,
         NewValue = RTL_SRWLOCK_OWNED;
     }
 
-    (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
-
+    /* Wake before publishing the new lock value, so that the wait block cannot
+       be released -- and its stack storage reused -- while we still use it. */
     (void)InterlockedOr(&FirstWaitBlock->Wake,
                         TRUE);
+
+    (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
 }
 
 
