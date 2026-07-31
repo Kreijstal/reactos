@@ -5018,6 +5018,14 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
                 Status = STATUS_COMMITMENT_LIMIT;
                 goto FailPathNoLock;
             }
+
+            //
+            // Record the charge on the VAD itself. Everything that later gives
+            // commitment back -- the whole-VAD release, the partial-release
+            // cases and the case-B split -- works from this field, so leaving it
+            // at zero here leaks the entire charge until the process exits.
+            //
+            Vad->u.VadFlags.CommitCharge = CommitCharge;
         }
 
         //
@@ -5689,6 +5697,13 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
             ASSERT(Process->VadRoot.NumberGenericTableElements >= 1);
             MiRemoveNode((PMMADDRESS_NODE)Vad, &Process->VadRoot);
             PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+
+            //
+            // The whole VAD is going away, so everything it was promised comes
+            // back to the system. The partial cases below have to work out how
+            // much of the range was committed; here it is the VAD's own charge.
+            //
+            CommitReduction = Vad->u.VadFlags.CommitCharge;
         }
         else
         {
@@ -5722,6 +5737,12 @@ NtFreeVirtualMemory(IN HANDLE ProcessHandle,
                     ASSERT(Process->VadRoot.NumberGenericTableElements >= 1);
                     MiRemoveNode((PMMADDRESS_NODE)Vad, &Process->VadRoot);
                     PsReturnProcessNonPagedPoolQuota(Process, sizeof(MMVAD_LONG));
+
+                    //
+                    // As above: the entire VAD is destroyed, so give back
+                    // everything it was charged.
+                    //
+                    CommitReduction = Vad->u.VadFlags.CommitCharge;
                 }
                 else
                 {
