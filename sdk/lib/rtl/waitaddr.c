@@ -8,11 +8,23 @@
  * Implements RtlWaitOnAddress / RtlWakeAddressSingle / RtlWakeAddressAll[NoFence].
  *
  * Each waiter places a small entry on a hash bucket list keyed by the
- * user-supplied address.  Blocking is done via the process-wide keyed event
- * (NULL handle = system-default keyed event), with the per-waiter entry
- * pointer used as the keyed-event "key".  This guarantees that a wake-side
- * NtReleaseKeyedEvent rendezvous matches the precise waiter that the wake
- * side already removed from the bucket list.
+ * user-supplied address and then blocks in NtWaitForAlertByThreadId; a waker
+ * removes entries under the bucket lock and alerts each one's thread by id.
+ *
+ * The alert is per-thread and latching, which is what makes this correct: an
+ * alert delivered to a thread that has not blocked yet is not lost, it is
+ * consumed by that thread's next wait. That removes the two structural
+ * hazards of the keyed-event rendezvous this used to be built on - a waker
+ * had to pair 1:1 with its waiter, so it blocked until the waiter arrived
+ * (stranding it forever if the waiter died in between), and a waiter that
+ * timed out concurrently with a wake had to drain the pending release with a
+ * second, unbounded wait.
+ *
+ * The alert is a thread-wide token rather than an address-specific one, so a
+ * stale alert from an already-satisfied wake can make a later wait return
+ * early. That is a spurious wakeup, which WaitOnAddress explicitly permits
+ * (callers must re-check their predicate), and it is why the wait is wrapped
+ * in a loop that re-checks the deadline rather than trusting a single return.
  */
 
 /* INCLUDES ******************************************************************/
@@ -21,6 +33,8 @@
 
 #define NDEBUG
 #include <debug.h>
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
 
 /* INTERNAL TYPES ************************************************************/
 
@@ -37,8 +51,8 @@ typedef struct _ADDR_WAIT_ENTRY
 {
     LIST_ENTRY ListEntry;
     PVOID Address;
-    /* TRUE when a waker has removed us from the list and is about to
-       (or has already) signaled the keyed event. */
+    HANDLE ThreadId;
+    /* TRUE once a waker has taken us off the list and is going to alert us. */
     BOOLEAN Removed;
 } ADDR_WAIT_ENTRY, *PADDR_WAIT_ENTRY;
 
@@ -131,6 +145,26 @@ AddrCompareEqual(IN volatile VOID *Address,
     }
 }
 
+/* Take ourselves back off the bucket list, reporting whether a waker had
+   already claimed us.  A claimed entry means an alert is inbound (or has
+   already landed), so the caller must treat the wait as satisfied rather
+   than as a timeout. */
+static
+BOOLEAN
+AddrRemoveSelf(IN PADDR_WAIT_BUCKET Bucket,
+               IN PADDR_WAIT_ENTRY Entry)
+{
+    BOOLEAN Claimed;
+
+    RtlEnterCriticalSection(&Bucket->Lock);
+    Claimed = Entry->Removed;
+    if (!Claimed)
+        RemoveEntryList(&Entry->ListEntry);
+    RtlLeaveCriticalSection(&Bucket->Lock);
+
+    return Claimed;
+}
+
 /* EXPORTED FUNCTIONS ********************************************************/
 
 NTSTATUS
@@ -143,6 +177,8 @@ RtlWaitOnAddress(
 {
     ADDR_WAIT_ENTRY Entry;
     PADDR_WAIT_BUCKET Bucket;
+    LARGE_INTEGER Deadline;
+    LARGE_INTEGER Remaining;
     NTSTATUS Status;
 
     if (AddressSize != 1 && AddressSize != 2 && AddressSize != 4 && AddressSize != 8)
@@ -152,7 +188,21 @@ RtlWaitOnAddress(
     Bucket = &AddrWaitBuckets[AddrHash((PVOID)Address)];
 
     Entry.Address = (PVOID)Address;
+    Entry.ThreadId = NtCurrentTeb()->ClientId.UniqueThread;
     Entry.Removed = FALSE;
+
+    /* A relative timeout has to be turned into an absolute deadline up front:
+       the wait below can be retried after a spurious alert, and re-passing the
+       original relative value would restart the clock each time. */
+    if ((Timeout != NULL) && (Timeout->QuadPart < 0))
+    {
+        NtQuerySystemTime(&Deadline);
+        Deadline.QuadPart -= Timeout->QuadPart;
+    }
+    else if (Timeout != NULL)
+    {
+        Deadline = *Timeout;
+    }
 
     RtlEnterCriticalSection(&Bucket->Lock);
 
@@ -167,42 +217,54 @@ RtlWaitOnAddress(
     InsertTailList(&Bucket->WaiterList, &Entry.ListEntry);
     RtlLeaveCriticalSection(&Bucket->Lock);
 
-    /* Block.  The keyed event "key" is &Entry - the same pointer the
-       wake side will pass to NtReleaseKeyedEvent. */
-    Status = NtWaitForKeyedEvent(NULL, &Entry, FALSE, Timeout);
-
-    if (Status == STATUS_SUCCESS)
+    for (;;)
     {
-        /* A waker rendezvoused with us - they already removed us
-           from the list. */
-        return STATUS_SUCCESS;
-    }
+        PLARGE_INTEGER WaitTimeout = NULL;
 
-    /* Timeout / failure path.  We need to either:
-       (a) remove ourselves from the list, OR
-       (b) drain the keyed event if a waker raced us and is about to /
-           already issued NtReleaseKeyedEvent.  The waker holds the
-           bucket lock to flip Entry.Removed atomically with the
-           list-removal, so checking Removed under the lock is the
-           authoritative answer. */
-    RtlEnterCriticalSection(&Bucket->Lock);
-    if (!Entry.Removed)
-    {
-        /* No waker reached us - pull ourselves out and return the
-           original timeout/error status. */
-        RemoveEntryList(&Entry.ListEntry);
+        if (Timeout != NULL)
+        {
+            NtQuerySystemTime(&Remaining);
+            Remaining.QuadPart -= Deadline.QuadPart;
+            if (Remaining.QuadPart >= 0)
+            {
+                /* Deadline already passed. */
+                if (AddrRemoveSelf(Bucket, &Entry))
+                    return STATUS_SUCCESS;
+                return STATUS_TIMEOUT;
+            }
+            WaitTimeout = &Remaining;
+        }
+
+        Status = NtWaitForAlertByThreadId(&Entry, WaitTimeout);
+
+        if (Status == STATUS_TIMEOUT)
+        {
+            /* A waker may have claimed us in the window between the wait
+               expiring and us reclaiming the bucket lock; if so its alert is
+               already in flight and this is a wake, not a timeout. */
+            if (AddrRemoveSelf(Bucket, &Entry))
+                return STATUS_SUCCESS;
+            return STATUS_TIMEOUT;
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            if (AddrRemoveSelf(Bucket, &Entry))
+                return STATUS_SUCCESS;
+            return Status;
+        }
+
+        /* Alerted. Ours only if a waker actually took us off the list -
+           otherwise it was a stale alert left over by an earlier wake and we
+           have to keep waiting. */
+        RtlEnterCriticalSection(&Bucket->Lock);
+        if (Entry.Removed)
+        {
+            RtlLeaveCriticalSection(&Bucket->Lock);
+            return STATUS_SUCCESS;
+        }
         RtlLeaveCriticalSection(&Bucket->Lock);
-        return Status;
     }
-    RtlLeaveCriticalSection(&Bucket->Lock);
-
-    /* A waker has us flagged Removed - it has either already called
-       NtReleaseKeyedEvent (in which case our wait would have succeeded
-       and we wouldn't be here) or it is about to.  Drain the matching
-       release with an unbounded wait — keyed events guarantee a 1:1
-       rendezvous so this completes promptly. */
-    (VOID)NtWaitForKeyedEvent(NULL, &Entry, FALSE, NULL);
-    return STATUS_SUCCESS;
 }
 
 VOID
@@ -211,7 +273,7 @@ RtlWakeAddressSingle(_In_ PVOID Address)
 {
     PADDR_WAIT_BUCKET Bucket;
     PLIST_ENTRY ListEntry;
-    PADDR_WAIT_ENTRY Found = NULL;
+    HANDLE ThreadId = NULL;
 
     if (Address == NULL)
         return;
@@ -229,21 +291,17 @@ RtlWakeAddressSingle(_In_ PVOID Address)
         {
             RemoveEntryList(&Entry->ListEntry);
             Entry->Removed = TRUE;
-            Found = Entry;
+            ThreadId = Entry->ThreadId;
             break;
         }
     }
     RtlLeaveCriticalSection(&Bucket->Lock);
 
-    if (Found != NULL)
-    {
-        /* Rendezvous with the waiter.  Use NULL timeout (infinite) -
-           keyed events guarantee 1:1 matching, so the waiter is
-           obligated to either be in the wait already (rendezvous
-           succeeds immediately) or to drain it from its timeout-cleanup
-           path (also a guaranteed match). */
-        (VOID)NtReleaseKeyedEvent(NULL, Found, FALSE, NULL);
-    }
+    /* Outside the lock: the alert cannot block, but there is no reason to
+       hold up other wakers while it runs.  Once Removed is set the waiter
+       will not exit without seeing it, so the entry stays alive until then. */
+    if (ThreadId != NULL)
+        NtAlertThreadByThreadId(ThreadId);
 }
 
 VOID
@@ -277,16 +335,17 @@ RtlWakeAddressAll(_In_ PVOID Address)
         }
         ListEntry = Next;
     }
-    RtlLeaveCriticalSection(&Bucket->Lock);
 
-    /* Now signal all the matching waiters outside the bucket lock so
-       a fresh waker can make progress while we drain rendezvous. */
+    /* Alert while still holding the bucket lock.  Each woken waiter needs the
+       lock to confirm its Removed flag before it can return and reuse its
+       stack entry, so nobody can vanish out from under this walk. */
     while (!IsListEmpty(&ToWake))
     {
         PLIST_ENTRY Le = RemoveHeadList(&ToWake);
         PADDR_WAIT_ENTRY Entry = CONTAINING_RECORD(Le, ADDR_WAIT_ENTRY, ListEntry);
-        (VOID)NtReleaseKeyedEvent(NULL, Entry, FALSE, NULL);
+        NtAlertThreadByThreadId(Entry->ThreadId);
     }
+    RtlLeaveCriticalSection(&Bucket->Lock);
 }
 
 VOID
@@ -299,5 +358,7 @@ RtlWakeAddressAllNoFence(_In_ PVOID Address)
        behaviorally we are equivalent to RtlWakeAddressAll. */
     RtlWakeAddressAll(Address);
 }
+
+#endif /* NTDDI_VERSION >= NTDDI_WIN8 */
 
 /* EOF */

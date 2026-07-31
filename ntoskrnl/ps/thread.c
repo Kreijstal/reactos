@@ -292,6 +292,12 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
     /* Initialize the LPC Reply Semaphore */
     KeInitializeSemaphore(&Thread->LpcReplySemaphore, 0, 1);
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* Initialize the alert-by-thread-id rendezvous. Synchronization event, so
+       an alert that arrives before the wait stays latched for it. */
+    KeInitializeEvent(&Thread->AlertByIdEvent, SynchronizationEvent, FALSE);
+#endif
+
     /* Initialize the list heads and locks */
     InitializeListHead(&Thread->LpcReplyChain);
     InitializeListHead(&Thread->IrpList);

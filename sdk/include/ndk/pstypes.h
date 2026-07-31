@@ -1648,6 +1648,18 @@ typedef struct _ETHREAD
     // OR'd VAD read-lock ASSERTs in vadnode.c during deep push-lock nesting).
     //
     UCHAR HeldPushLockOverflow;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    //
+    // Win8+ NtWaitForAlertByThreadId / NtAlertThreadByThreadId rendezvous.
+    //
+    // A synchronization (auto-reset) event gives exactly the documented
+    // semantics: an alert delivered while the target is not waiting stays
+    // latched until its next wait consumes it, so there is no lost wakeup,
+    // and repeated alerts collapse into a single one. Kept at the tail so no
+    // existing offset moves.
+    //
+    KEVENT AlertByIdEvent;
+#endif
 } ETHREAD;
 
 //
