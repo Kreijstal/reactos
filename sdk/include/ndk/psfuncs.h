@@ -370,6 +370,38 @@ NtAlertThread(
     _In_ HANDLE ThreadHandle
 );
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtAlertThreadByThreadId(
+    _In_ HANDLE ThreadId
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+ZwAlertThreadByThreadId(
+    _In_ HANDLE ThreadId
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtWaitForAlertByThreadId(
+    _In_opt_ PVOID Address,
+    _In_opt_ PLARGE_INTEGER Timeout
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+ZwWaitForAlertByThreadId(
+    _In_opt_ PVOID Address,
+    _In_opt_ PLARGE_INTEGER Timeout
+);
+#endif
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
