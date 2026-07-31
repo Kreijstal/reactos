@@ -313,4 +313,8 @@
 #if (NTDDI_VERSION >= NTDDI_WIN7)
     SVC_(QuerySystemInformationEx, 6)
 #endif
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    SVC_(AlertThreadByThreadId, 1)
+    SVC_(WaitForAlertByThreadId, 2)
+#endif
 #endif
