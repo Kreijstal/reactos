@@ -31,7 +31,6 @@ typedef struct _ADDR_WAIT_BUCKET
 {
     RTL_CRITICAL_SECTION Lock;
     LIST_ENTRY WaiterList;
-    BOOLEAN Initialized;
 } ADDR_WAIT_BUCKET, *PADDR_WAIT_BUCKET;
 
 typedef struct _ADDR_WAIT_ENTRY
@@ -46,7 +45,12 @@ typedef struct _ADDR_WAIT_ENTRY
 /* GLOBALS *******************************************************************/
 
 static ADDR_WAIT_BUCKET AddrWaitBuckets[ADDR_HASH_BUCKETS];
-static LONG AddrWaitInitOnce = 0;
+
+#define ADDR_INIT_IDLE    0
+#define ADDR_INIT_RUNNING 1
+#define ADDR_INIT_READY   2
+
+static volatile LONG AddrWaitInitState = ADDR_INIT_IDLE;
 
 /* INTERNAL HELPERS **********************************************************/
 
@@ -71,24 +75,36 @@ AddrEnsureInit(VOID)
 {
     ULONG i;
 
-    /* Cheap check first - the buckets are zero-initialized BSS, so once
-       Initialized is set on bucket 0 everything else is set too. */
-    if (AddrWaitBuckets[0].Initialized)
+    /* Readiness is published by a single flag, set only once EVERY bucket is
+       usable.  A per-bucket flag - or gating on bucket 0, which the winner
+       initializes first - lets a thread that hashes to a later bucket run
+       ahead of the initializer and enter a still-zeroed RTL_CRITICAL_SECTION.
+       That is not merely racy but fatal: a zeroed lock has LockCount 0 rather
+       than the -1 RtlInitializeCriticalSection writes, so the very first
+       acquirer's InterlockedIncrement yields 1, it takes the contended path,
+       and it blocks forever on a lock whose OwningThread is 0 and which
+       nobody will ever leave. */
+    if (AddrWaitInitState == ADDR_INIT_READY)
         return;
 
     /* Slow path - winning thread initializes everyone, losers spin briefly. */
-    if (InterlockedCompareExchange(&AddrWaitInitOnce, 1, 0) == 0)
+    if (InterlockedCompareExchange(&AddrWaitInitState,
+                                   ADDR_INIT_RUNNING,
+                                   ADDR_INIT_IDLE) == ADDR_INIT_IDLE)
     {
         for (i = 0; i < ADDR_HASH_BUCKETS; i++)
         {
             RtlInitializeCriticalSection(&AddrWaitBuckets[i].Lock);
             InitializeListHead(&AddrWaitBuckets[i].WaiterList);
-            AddrWaitBuckets[i].Initialized = TRUE;
         }
+
+        /* Interlocked, so every bucket write above is published before the
+           flag that advertises them. */
+        InterlockedExchange(&AddrWaitInitState, ADDR_INIT_READY);
         return;
     }
 
-    while (!AddrWaitBuckets[0].Initialized)
+    while (AddrWaitInitState != ADDR_INIT_READY)
         YieldProcessor();
 }
 
