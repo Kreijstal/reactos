@@ -55,8 +55,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     if (!Fcb || Ccb == NULL || !BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_COUNTED))
         return STATUS_SUCCESS;
 
-    ASSERT(DeviceExt->OpenHandleCount > 0);
-    DeviceExt->OpenHandleCount--;
+    /* DeviceExt->OpenHandleCount is decremented at the end of this function,
+     * not here -- see the comment there. */
 
     /* Complete and remove any directory-change-notification watches that
      * were registered through this handle (see NtfsDirectoryControl).  The
@@ -182,6 +182,18 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         ExReleaseResourceLite(&Fcb->MainResource);
     }
+
+    /* Drop the device-wide handle count only once the cleanup has actually
+     * committed.  The MainResource acquire above is the single step that can
+     * fail and requeue this IRP (STATUS_PENDING -> NtfsMarkIrpContextForQueue),
+     * and NTFS_CCB_FLAG_COUNTED is what gates re-entry, so a decrement placed
+     * before it ran twice for one handle: once on the attempt that bailed out
+     * and again on the retry.  That drove the counter below the true number of
+     * open handles, tripping the ASSERT below or wrapping the unsigned value.
+     * Clearing the flag as the counters drop keeps the accounting idempotent. */
+    ASSERT(DeviceExt->OpenHandleCount > 0);
+    DeviceExt->OpenHandleCount--;
+    ClearFlag(Ccb->Flags, NTFS_CCB_FLAG_COUNTED);
 
     return Status;
 }
