@@ -19,6 +19,10 @@ else()
 endif()
 add_subdirectory(kdstub)
 
+if(ARCH STREQUAL "amd64" AND _WINKD_)
+    add_subdirectory(kdnet)
+endif()
+
 if(NOT ARCH STREQUAL "arm")
 add_subdirectory(nmidebug)
 endif()
