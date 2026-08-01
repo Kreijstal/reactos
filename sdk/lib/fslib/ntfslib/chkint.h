@@ -37,6 +37,12 @@ extern int chk_verbose;
 
 #define CHK_MIN(a, b)   ((a) < (b) ? (a) : (b))
 #define CHK_MAX_RUNS    8192
+
+/* Extra scan+repair rounds NtfsChkVolume() will run after the first one while
+ * the remaining-issue count keeps dropping.  Each round is a full volume scan,
+ * so this is a ceiling on the work, not a target: convergence normally ends
+ * the loop first. */
+#define CHK_MAX_REPAIR_PASSES 3
 #define CHK_MAX_XLINKS  64
 
 typedef struct _CHK_RUN {
@@ -116,6 +122,13 @@ typedef struct _CHK_CTX {
     ULONG     *ChildStart;     /* RecordCount + 1 offsets into ChildList  */
     ULONG     *ChildList;      /* child record numbers, grouped by parent */
     ULONG      ChildCount;     /* entries in ChildList                    */
+
+    /* Set while a repair re-walks a directory it has just rewritten, to check
+     * its own work.  The walk then reports into a scratch result and must not
+     * touch the model: crediting LinksSeen a second time, or re-raising
+     * CRF_INDEX_BAD on a directory that verified clean, would corrupt the
+     * state the remaining repair stages run on. */
+    int        WalkVerifyOnly;
 } CHK_CTX;
 
 /* ---- bitmap bit accessors on a byte buffer ---- */
@@ -191,6 +204,11 @@ int  chk_scan_records(CHK_CTX *c, UCHAR *computed, NTFS_CHK_RESULT *res,
                       const NTFS_CHK_OPTIONS *opt);
 int  chk_walk_indexes(CHK_CTX *c, NTFS_CHK_RESULT *res,
                       const NTFS_CHK_OPTIONS *opt);
+/* Walk one directory's $I30 exactly as pass 2 does.  Exposed so a repair can
+ * re-walk the index it just wrote and find out whether it is really clean
+ * (see CHK_CTX::WalkVerifyOnly). */
+void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
+                      NTFS_CHK_RESULT *res, const NTFS_CHK_OPTIONS *opt);
 int  chk_connectivity(CHK_CTX *c, NTFS_CHK_RESULT *res,
                       const NTFS_CHK_OPTIONS *opt);
 int  chk_check_mft_bitmap(CHK_CTX *c, NTFS_CHK_RESULT *res,

@@ -1760,6 +1760,27 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
             if (i == start)          /* one entry can't fit even alone */
                 goto done_level;
 
+            /* A separator must be followed by a block.
+             *
+             * When this block ends one entry short of the level, level[i] is
+             * the level's last entry: promoting it leaves nothing behind it,
+             * so no further block is packed, the level never sets `rightmost`,
+             * and the node built above it ends up pointing its END NODE at VCN
+             * 0 - the very block its first separator already points at.  The
+             * walker calls that a b-tree cycle, and it is exactly what a
+             * rebuilt 40-entry directory came back with: a repair writing an
+             * index that fails its own check.
+             *
+             * Hand one entry back to the next block instead.  The separator
+             * then has a real block after it, and the tree comes out as the
+             * two blocks plus one separator it should always have been. */
+            if (i + 1 == levelN && i > start + 1)
+            {
+                i--;
+                bodyLen -= isInterior ? chk_rb_interior_len(level[i].keyLen)
+                                      : level[i].keyLen;
+            }
+
             blkVcn = (ULONGLONG)nextBlockVcnUnit;
             nextBlockVcnUnit += vcnPerBlock;
 
@@ -1824,12 +1845,14 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
                 parentN++;
                 i++;   /* consume the separator */
             }
-            else
+            else if (i >= levelN)
             {
                 /* Last block of this level: its VCN is the parent's rightmost. */
                 rightmost = blkVcn;
                 haveRightmost = 1;
             }
+            /* else: exactly one entry is left over.  The next turn packs it as
+             * this level's final block, and that block sets `rightmost`. */
             continue;
 
         done_level:
@@ -2196,6 +2219,51 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
     if (dirRec < FILE_FIRST_USER)
         chk_sync_mftmirr_record(c, dirRec, dir);
 
+    /* Verify the index we just wrote instead of assuming it is good.
+     *
+     * Writing the record is not evidence that the damage is gone: the rebuild
+     * can emit a tree the walker still rejects, and marking the directory's
+     * issues Fixed on the strength of a successful write is how a repair run
+     * came to report "repaired 220" over damage that the very next scan found
+     * again, unchanged.  Re-walk the directory exactly as pass 2 does, against
+     * what is now on disk, and only claim the issues if the walk comes back
+     * clean.  (This depends on reads observing our own writes; the raw volume
+     * handle only became coherent with itself once DASD reads were routed
+     * through the same cache the DASD writes use.)
+     *
+     * A rebuild that does not verify leaves the issues reported and
+     * CRF_INDEX_BAD set, so the directory stays untrusted for the link-count
+     * pass and the volume stays dirty - which is the honest outcome. */
+    {
+        NTFS_CHK_RESULT probe;
+        UCHAR *back;
+        ULONG probeIssues = 1;
+
+        memset(&probe, 0, sizeof(probe));
+        back = (UCHAR *)malloc(c->MftRecordSize);
+        if (back != NULL)
+        {
+            if (chk_read_record(c, dirRec, back) == 0 &&
+                *(ULONG *)back == NRH_FILE_TYPE &&
+                chk_apply_fixups(back, c->MftRecordSize, c->BytesPerSector) == 0)
+            {
+                c->WalkVerifyOnly = 1;
+                chk_walk_one_dir(c, dirRec, back, &probe, NULL);
+                c->WalkVerifyOnly = 0;
+                probeIssues = probe.IssueCount;
+            }
+            free(back);
+        }
+        NtfsChkFreeResult(&probe);
+
+        if (probeIssues != 0)
+        {
+            CHK_TRACE("R2: rec %lu rebuilt but did not verify (%lu left)\n",
+                      (unsigned long)dirRec, (unsigned long)probeIssues);
+            goto out;
+        }
+    }
+
     /* Mark the directory's index issues fixed + clear CRF_INDEX_BAD. */
     for (k = 0; k < res->IssueRecorded; k++)
     {
@@ -2229,9 +2297,21 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
             for (k = 0; k < res->IssueRecorded; k++)
             {
                 NTFS_CHK_ISSUE *iss = &res->Issues[k];
-                if (!iss->Fixed && (ULONG)iss->Param0 == tr &&
-                    (iss->Code == CHK_ERR_ORPHAN ||
-                     iss->Code == CHK_ERR_LINKCOUNT))
+                if (iss->Fixed || (ULONG)iss->Param0 != tr)
+                    continue;
+                /* Being named by the rebuilt index really does un-orphan the
+                 * record - that is what ORPHAN means.
+                 *
+                 * A wrong link count is a different matter: nothing here
+                 * writes the child's record, so its on-disk LinkCount is
+                 * whatever it was.  Claiming CHK_ERR_LINKCOUNT at this point
+                 * marked every child of every rebuilt directory repaired
+                 * while leaving all of them wrong on disk - the rebuild of
+                 * the root alone accounted for hundreds of them.  R4
+                 * (chk_repair_linkcounts) runs after this, writes the header,
+                 * and marks the issue itself; clearing CRF_INDEX_BAD above is
+                 * what lets it trust this directory and do so. */
+                if (iss->Code == CHK_ERR_ORPHAN)
                 {
                     iss->Fixed = 1;
                     res->RepairedCount++;
