@@ -104,6 +104,7 @@ cdrom.sys    = 1,,,,,,x,4,,,,1,4
 classpnp.sys = 1,,,,,,,4,,,,1,4
 isapnp.sys   = 1,,,,,,x,4,,,,1,4
 kdcom.dll    = 1,,,,,,,2,,,,1,2
+@KDNET_SETUP_LINE@
 kdvbox.dll   = 1,,,,,,,2,,,,1,2
 disk.sys     = 1,,,,,,x,4,,,,1,4
 @FLOPPY_BOOT_DRIVER_LINE@
