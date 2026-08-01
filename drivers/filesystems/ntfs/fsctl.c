@@ -558,6 +558,10 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     ExInitializeResourceLite(&Vcb->IndexResource);
     ExInitializeResourceLite(&Vcb->BitmapResource);
     ExInitializeResourceLite(&Vcb->MftContextResource);
+    ExInitializeResourceLite(&Vcb->MftMirrorResource);
+
+    /* $MFTMirr refreshes may run from here on (see UpdateFileRecord). */
+    Vcb->MftMirrorReady = TRUE;
 
     /* MftContextResource now exists: from here on ReadFileRecord serializes its
      * MFTContext walk against MFT growth (see MftReadLockReady in ntfs.h). */
