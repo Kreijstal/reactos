@@ -38,11 +38,14 @@ extern int chk_verbose;
 #define CHK_MIN(a, b)   ((a) < (b) ? (a) : (b))
 #define CHK_MAX_RUNS    8192
 
-/* Extra scan+repair rounds NtfsChkVolume() will run after the first one while
- * the remaining-issue count keeps dropping.  Each round is a full volume scan,
- * so this is a ceiling on the work, not a target: convergence normally ends
- * the loop first. */
-#define CHK_MAX_REPAIR_PASSES 3
+/* Extra scan+repair rounds NtfsChkVolume() will run after the first one, for
+ * as long as each round still repairs something.  Each round is a full volume
+ * scan, so this is a ceiling on the work, not a target: convergence normally
+ * ends the loop first.  It has to be generous enough to unwind a cascade -- a
+ * chain of records colliding on the same name yields one repair per round --
+ * and small enough that a repair which keeps trading one defect for another
+ * gives up rather than scanning forever. */
+#define CHK_MAX_REPAIR_PASSES 32
 #define CHK_MAX_XLINKS  64
 
 typedef struct _CHK_RUN {
