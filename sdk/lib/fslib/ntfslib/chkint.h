@@ -205,7 +205,7 @@ int  chk_check_mftmirr(CHK_CTX *c, NTFS_CHK_RESULT *res,
  * ============================================================ */
 
 int  chk_set_volume_flag(CHK_CTX *c, int setDirty, int markChkdsk);
-int  chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno);
+int  chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno, const UCHAR *image);
 
 /* R7: resync $MFTMirr from $MFT for every record pass 6 flagged as differing.
  * Returns the number of mismatches repaired, or -1 if it could not run. */
