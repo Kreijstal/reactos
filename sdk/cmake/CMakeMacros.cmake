@@ -340,12 +340,16 @@ function(add_cd_file)
     # do we add it to livecd?
     list(FIND _CD_FOR livecd __cd)
     if(NOT __cd EQUAL -1)
-        # manage dependency.  kmtestcd inherits this file set at iso-assembly
-        # time, so it needs the same target-level dependency: bootcd no longer
-        # drags livecd in, and kmtestcd would otherwise assemble ahead of the
-        # files it inherits.
+        # manage dependency.  create_iso_lists() appends this whole file set to
+        # both the BootCD and kmtestcd lists, so those images must depend on the
+        # same targets.  They used to inherit that transitively by depending on
+        # the livecd target itself; now that they no longer do (building
+        # liveimg.iso is pure waste - it is not bootable and nothing embeds it),
+        # the dependency has to be stated directly, or either image can assemble
+        # ahead of the files it packages.
         if(_CD_TARGET)
             add_dependencies(livecd ${_CD_TARGET} registry_inf)
+            add_dependencies(bootcd ${_CD_TARGET} registry_inf)
             add_dependencies(kmtestcd ${_CD_TARGET} registry_inf)
         endif()
         foreach(item ${_CD_FILE})
