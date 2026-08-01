@@ -877,6 +877,32 @@ NtfsIsVolumeDirty(PDEVICE_EXTENSION DeviceExt,
 }
 
 
+/*
+ * @name NtfsMarkVolumeDirty
+ * @implemented
+ *
+ * FSCTL_MARK_VOLUME_DIRTY: set the on-disk $Volume DIRTY flag so a check is
+ * scheduled for the next boot.  This is the counterpart of
+ * FSCTL_IS_VOLUME_DIRTY above and what `fsutil dirty set` drives on Windows;
+ * without it there was no supported way to ask for a check, only the driver's
+ * internal NtfsMarkVolumeCorrupt on encountering damage.
+ *
+ * Takes no input and returns no output, matching the Windows FSCTL.
+ */
+static
+NTSTATUS
+NtfsMarkVolumeDirty(PDEVICE_EXTENSION DeviceExt,
+                    PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(Irp);
+
+    if (DeviceExt->Flags & VCB_VOLUME_READ_ONLY)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    return NtfsLfsSetVolumeDirty(DeviceExt, TRUE);
+}
+
+
 static
 NTSTATUS
 GetVolumeBitmap(PDEVICE_EXTENSION DeviceExt,
@@ -2108,6 +2134,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_IS_VOLUME_DIRTY:
             Status = NtfsIsVolumeDirty(DeviceExt, Irp);
+            break;
+
+        case FSCTL_MARK_VOLUME_DIRTY:
+            Status = NtfsMarkVolumeDirty(DeviceExt, Irp);
             break;
 
         default:
