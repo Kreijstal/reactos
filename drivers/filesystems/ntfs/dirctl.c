@@ -1112,10 +1112,24 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                 continue;
             }
         }
-        else
+        else if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_NO_MORE_FILES)
         {
+            /* Genuinely out of entries. */
             BOOLEAN ReallyFirst = First && (Buffer0 == NULL);
             Status = (ReallyFirst ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
+            break;
+        }
+        else
+        {
+            /* The walk failed for a reason other than running out of entries -
+             * a damaged $I30, an unreadable index block.  Reporting that as
+             * end-of-directory is what let a corrupt index masquerade as a
+             * complete-but-shorter directory: callers cannot tell the two
+             * apart, so pacman read a truncated /var/lib/pacman/local and
+             * concluded that installed packages were missing.  Surface the
+             * real status instead. */
+            DPRINT1("Directory enumeration of MFT index %I64u failed with 0x%lx after %lu entries; reporting it rather than truncating.\n",
+                    Fcb->MFTIndex, Status, BTreeEntry);
             break;
         }
 

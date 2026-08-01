@@ -6096,6 +6096,73 @@ NtfsCopyIndexEntryName(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
     }
 }
 
+/* Validate an index entry before it is dereferenced, or used to advance the
+ * walk to the next entry.
+ *
+ * A directory whose $I30 was left half-written - an unclean shutdown while a
+ * name was being inserted is enough - can carry an entry whose Length is zero,
+ * is not a multiple of 8, or is large enough to step the cursor straight past
+ * the end of the node.  With no check, the walk does not fail: the loop
+ * condition simply stops being true, and BrowseIndexEntries reports "no more
+ * entries" with a success status.  NtQueryDirectoryFile then hands user mode a
+ * SILENTLY TRUNCATED directory - every name that collates after the damaged
+ * entry disappears from enumeration while remaining perfectly openable by
+ * name, because an exact lookup navigates by key and never walks through the
+ * damaged entry.
+ *
+ * That divergence is far more damaging than a failed request: a truncated
+ * /var/lib/pacman/local made pacman report installed packages as missing, with
+ * no error logged anywhere in the system.  Windows fails the request with
+ * STATUS_FILE_CORRUPT_ERROR, which is what marks the volume for repair, so do
+ * the same rather than returning a directory listing known to be incomplete.
+ */
+static
+BOOLEAN
+NtfsIsValidIndexEntry(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
+                      PINDEX_ENTRY_ATTRIBUTE LastEntry)
+{
+    ULONG_PTR Available;
+
+    /* The fixed part of the entry has to fit before the end of the entry area. */
+    if ((ULONG_PTR)IndexEntry + FIELD_OFFSET(INDEX_ENTRY_ATTRIBUTE, FileName) >
+        (ULONG_PTR)LastEntry)
+    {
+        return FALSE;
+    }
+
+    Available = (ULONG_PTR)LastEntry - (ULONG_PTR)IndexEntry;
+
+    /* A zero length never advances the cursor (the walk would spin forever);
+     * an unaligned one desynchronises every entry after it. */
+    if (IndexEntry->Length == 0 || (IndexEntry->Length & 7) != 0)
+        return FALSE;
+
+    if (IndexEntry->Length > Available)
+        return FALSE;
+
+    /* The name the entry claims to carry has to lie inside the entry.  The end
+     * marker carries no name, so it is exempt. */
+    if (!(IndexEntry->Flags & NTFS_INDEX_ENTRY_END) &&
+        FIELD_OFFSET(INDEX_ENTRY_ATTRIBUTE, FileName.Name) +
+            IndexEntry->FileName.NameLength * sizeof(WCHAR) > IndexEntry->Length)
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/* A sub-node walk that came back with anything other than "the key is not in
+ * this subtree" could not read the subtree at all.  Continuing past it drops
+ * every entry it contained from the enumeration without telling anyone, so
+ * propagate it and let the caller fail the request. */
+static
+BOOLEAN
+NtfsIsSubNodeWalkFailure(NTSTATUS Status)
+{
+    return !NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
 /* Collation comparison used to NAVIGATE the $I30 B-tree during exact (non-
  * wildcard) lookups.  The on-disk order is always upcase-primary (see
  * NtfsCompareFilenameKey in btree.c); a case-sensitive lookup only refines
@@ -6208,8 +6275,18 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
 
     // Loop through all Index Entries of index, starting with FirstEntry
     IndexEntry = FirstEntry;
-    while (IndexEntry <= LastEntry)
+    while ((ULONG_PTR)IndexEntry < (ULONG_PTR)LastEntry)
     {
+        // Never walk through an entry that isn't wholly inside the node: doing
+        // so would end the walk quietly and truncate the caller's enumeration.
+        if (!NtfsIsValidIndexEntry(IndexEntry, LastEntry))
+        {
+            DPRINT1("File system corruption detected, malformed index entry at offset %Iu of node VCN %I64u.\n",
+                    (ULONG_PTR)IndexEntry - (ULONG_PTR)FirstEntry, VCN);
+            ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+            return STATUS_FILE_CORRUPT_ERROR;
+        }
+
         // For exact lookups (non-wildcard), use B-tree key ordering to
         // navigate directly to the right sub-node instead of scanning all.
         // NTFS B-tree invariant: the sub-node VCN attached to entry[i]
@@ -6238,7 +6315,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                        StartEntry, CurrentEntry,
                                                        DirSearch, CaseSensitive, OutMFTIndex,
                                                        OutFoundName);
-                    if (NT_SUCCESS(Status))
+                    if (NT_SUCCESS(Status) || NtfsIsSubNodeWalkFailure(Status))
                     {
                         ExFreePoolWithTag(IndexRecord, TAG_NTFS);
                         return Status;
@@ -6277,7 +6354,13 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         {
             if (!(IndexRecord->Header.Flags & INDEX_NODE_LARGE) || !IndexAllocationContext)
             {
-                DPRINT1("Filesystem corruption detected!\n");
+                // The entry points at a sub-node the node says it does not
+                // have.  Skipping it would drop that whole subtree from the
+                // enumeration without reporting anything.
+                DPRINT1("File system corruption detected, index entry in node VCN %I64u claims a sub-node but the node is not large.\n",
+                        VCN);
+                ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+                return STATUS_FILE_CORRUPT_ERROR;
             }
             else
             {
@@ -6294,7 +6377,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                    CaseSensitive,
                                                    OutMFTIndex,
                                                    OutFoundName);
-                if (NT_SUCCESS(Status))
+                if (NT_SUCCESS(Status) || NtfsIsSubNodeWalkFailure(Status))
                 {
                     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
                     return Status;
@@ -6414,8 +6497,23 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
 
     // Loop through all Index Entries of index, starting with FirstEntry
     IndexEntry = FirstEntry;
-    while (IndexEntry <= LastEntry)
+    while ((ULONG_PTR)IndexEntry < (ULONG_PTR)LastEntry)
     {
+        // Never walk through an entry that isn't wholly inside the index root:
+        // doing so would end the walk quietly and truncate the enumeration.
+        if (!NtfsIsValidIndexEntry(IndexEntry, LastEntry))
+        {
+            DPRINT1("File system corruption detected, malformed index entry at offset %Iu of the index root.\n",
+                    (ULONG_PTR)IndexEntry - (ULONG_PTR)FirstEntry);
+            if (IndexAllocationContext)
+            {
+                ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+                ReleaseAttributeContext(BitmapContext);
+                ReleaseAttributeContext(IndexAllocationContext);
+            }
+            return STATUS_FILE_CORRUPT_ERROR;
+        }
+
         // For exact lookups (non-wildcard), use B-tree key ordering to
         // navigate directly instead of scanning all sub-nodes.
         if (!DirSearch && !(IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
@@ -6441,7 +6539,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                        StartEntry, CurrentEntry,
                                                        DirSearch, CaseSensitive, OutMFTIndex,
                                                        OutFoundName);
-                    if (NT_SUCCESS(Status))
+                    if (NT_SUCCESS(Status) || NtfsIsSubNodeWalkFailure(Status))
                     {
                         ExFreePoolWithTag(BitmapMem, TAG_NTFS);
                         ReleaseAttributeContext(BitmapContext);
@@ -6491,7 +6589,17 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         {
             if (!(IndexRecord->Header.Flags & INDEX_ROOT_LARGE) || !IndexAllocationContext)
             {
-                DPRINT1("Filesystem corruption detected!\n");
+                // The entry points at a sub-node the index root says it does
+                // not have.  Skipping it would drop that whole subtree from
+                // the enumeration without reporting anything.
+                DPRINT1("File system corruption detected, index root entry claims a sub-node but the root is not large.\n");
+                if (IndexAllocationContext)
+                {
+                    ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+                    ReleaseAttributeContext(BitmapContext);
+                    ReleaseAttributeContext(IndexAllocationContext);
+                }
+                return STATUS_FILE_CORRUPT_ERROR;
             }
             else
             {
@@ -6508,7 +6616,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                    CaseSensitive,
                                                    OutMFTIndex,
                                                    OutFoundName);
-                if (NT_SUCCESS(Status))
+                if (NT_SUCCESS(Status) || NtfsIsSubNodeWalkFailure(Status))
                 {
                     ExFreePoolWithTag(BitmapMem, TAG_NTFS);
                     ReleaseAttributeContext(BitmapContext);
@@ -6844,6 +6952,8 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                BOOLEAN CaseSensitive,
                PFILENAME_ATTRIBUTE OutFoundName)
 {
+    ULONGLONG DirectoryMFTIndex = CurrentMFTIndex;
+    ULONGLONG FoundMFTIndex;
     NTSTATUS Status;
 
     DPRINT("NtfsFindFileAt(%p, %wZ, %lu, %p, %p, %I64x, %s)\n",
@@ -6855,29 +6965,48 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
            CurrentMFTIndex,
            (CaseSensitive ? "TRUE" : "FALSE"));
 
-    Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &CurrentMFTIndex, OutFoundName);
-    if (!NT_SUCCESS(Status))
+    for (;;)
     {
-        DPRINT("NtfsFindFileAt: NtfsFindMftRecord() failed with status 0x%08lx\n", Status);
-        return Status;
-    }
+        FoundMFTIndex = DirectoryMFTIndex;
+        Status = NtfsFindMftRecord(Vcb, DirectoryMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &FoundMFTIndex, OutFoundName);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT("NtfsFindFileAt: NtfsFindMftRecord() failed with status 0x%08lx\n", Status);
+            return Status;
+        }
 
-    *FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
-    if (*FileRecord == NULL)
-    {
-        DPRINT("NtfsFindFileAt: Can't allocate MFT record\n");
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
+        *FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+        if (*FileRecord == NULL)
+        {
+            DPRINT("NtfsFindFileAt: Can't allocate MFT record\n");
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
 
-    Status = ReadFileRecord(Vcb, CurrentMFTIndex, *FileRecord);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT("NtfsFindFileAt: Can't read MFT record\n");
+        Status = ReadFileRecord(Vcb, FoundMFTIndex, *FileRecord);
+        if (NT_SUCCESS(Status))
+            break;
+
+        /* The index entry exists but the file record it names is unreadable -
+         * a dangling entry, which an unclean shutdown produces easily: the
+         * $I30 insert reached the disk and the MFT record behind it did not,
+         * leaving a zeroed record where a FILE record should be.
+         *
+         * The damage belongs to this one entry, so skip it and carry on with
+         * the next ordinal.  Failing the whole request here is what made a
+         * handful of half-written records hide EVERY name that collates after
+         * them: 200+ files vanished from /usr/lib and pacman read a truncated
+         * /var/lib/pacman/local and reported installed packages as missing.
+         * dirctl.c already skips dangling entries that fail later, when the
+         * record converts to an information class; this is the same class of
+         * damage caught one step earlier. */
+        DPRINT1("Skipping dangling index entry %lu of directory %I64u: MFT record %I64u is unreadable (0x%lx).\n",
+                *FirstEntry, DirectoryMFTIndex, FoundMFTIndex, Status);
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, *FileRecord);
-        return Status;
+        *FileRecord = NULL;
+        (*FirstEntry)++;
     }
 
-    *MFTIndex = CurrentMFTIndex;
+    *MFTIndex = FoundMFTIndex;
 
     return STATUS_SUCCESS;
 }
