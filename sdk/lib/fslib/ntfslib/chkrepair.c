@@ -265,6 +265,152 @@ void chk_free_repair_index(CHK_CTX *c)
     c->ChildCount = 0;
 }
 
+/*
+ * Enumerate every $FILE_NAME of a file, following $ATTRIBUTE_LIST into its
+ * extension records.
+ *
+ * A file whose names do not fit its base record spills them into extension
+ * records, and the base then holds only an $ATTRIBUTE_LIST pointing at them.
+ * The detection side already knows this -- chk_target_has_name() does the same
+ * walk when validating index back-references -- but the repair side did not:
+ * chk_build_repair_index() and chk_rebuild_index()'s child pass both read only
+ * the base record.  A file with a spilled name therefore looked parentless, so
+ * a rebuilt directory index silently dropped it and connectivity then reported
+ * it as an orphan.
+ *
+ * `fn` is called once per $FILE_NAME with the record it physically lives in.
+ * Returning 1 marks that record dirty; extension records are written back here,
+ * while the base record is left to the caller, which may have other edits
+ * pending.  Returns the number of names visited.
+ */
+typedef int (*CHK_FN_VISIT)(CHK_CTX *c, void *ctx, ULONG recno,
+                            UCHAR *rec, ULONG attrOff);
+
+static int chk_visit_names_in(CHK_CTX *c, void *ctx, ULONG recno, UCHAR *rec,
+                              CHK_FN_VISIT fn, int *dirty)
+{
+    ULONG off = ((FILE_RECORD_HEADER *)rec)->AttributeOffset;
+    int seen = 0;
+
+    while (off + 8 <= c->MftRecordSize)
+    {
+        ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
+        if (a->Type == AT_END || a->Length == 0 ||
+            off + a->Length > c->MftRecordSize)
+            break;
+        if (a->Type == AT_FILE_NAME && !a->NonResident &&
+            a->Resident.ValueOffset + CHK_FN_FIXED <= a->Length)
+        {
+            seen++;
+            if (fn(c, ctx, recno, rec, off))
+                *dirty = 1;
+        }
+        off += a->Length;
+    }
+    return seen;
+}
+
+static int chk_for_each_file_name(CHK_CTX *c, ULONG baseRecno, UCHAR *baseRec,
+                                  CHK_FN_VISIT fn, void *ctx, int *baseDirty)
+{
+    ULONGLONG size = 0, pos = 0;
+    UCHAR *val;
+    ULONG alOff;
+    int seen;
+
+    seen = chk_visit_names_in(c, ctx, baseRecno, baseRec, fn, baseDirty);
+
+    alOff = chk_find_attr(c, baseRec, AT_ATTRIBUTE_LIST, NULL, 0);
+    if (!alOff)
+        return seen;
+    val = chk_read_attr_value(c, baseRec, alOff, 1024 * 1024, &size);
+    if (!val)
+        return seen;
+
+    while (pos + sizeof(ATTR_LIST_ENTRY) <= size)
+    {
+        ATTR_LIST_ENTRY *le = (ATTR_LIST_ENTRY *)(val + pos);
+        ULONG extRec;
+
+        if (le->Length < sizeof(ATTR_LIST_ENTRY) || pos + le->Length > size)
+            break;
+        extRec = CHK_REF_REC(le->MftReference);
+        if (le->Type == AT_FILE_NAME && extRec != baseRecno &&
+            extRec < c->RecordCount)
+        {
+            UCHAR *ext = (UCHAR *)malloc(c->MftRecordSize);
+            if (ext)
+            {
+                if (chk_read_record(c, extRec, ext) == 0 &&
+                    *(ULONG *)ext == NRH_FILE_TYPE &&
+                    chk_apply_fixups(ext, c->MftRecordSize,
+                                     c->BytesPerSector) == 0)
+                {
+                    int extDirty = 0;
+                    seen += chk_visit_names_in(c, ctx, extRec, ext, fn,
+                                               &extDirty);
+                    if (extDirty)
+                    {
+                        chk_stamp_fixups(ext, c->MftRecordSize,
+                                         c->BytesPerSector);
+                        chk_write_record(c, extRec, ext);
+                    }
+                }
+                free(ext);
+            }
+        }
+        pos += le->Length;
+    }
+
+    free(val);
+    return seen;
+}
+
+/* Collect (parent, child) pairs for chk_build_repair_index(). */
+typedef struct _CHK_PAIR_CTX {
+    ULONG **Par;
+    ULONG **Child;
+    ULONG  *Count;
+    ULONG  *Cap;
+    ULONG   BaseRec;
+    int     Failed;
+} CHK_PAIR_CTX;
+
+static int chk_collect_pair(CHK_CTX *c, void *ctx, ULONG recno,
+                            UCHAR *rec, ULONG attrOff)
+{
+    CHK_PAIR_CTX *p = (CHK_PAIR_CTX *)ctx;
+    ATTR_RECORD *a = (ATTR_RECORD *)(rec + attrOff);
+    FILE_NAME_ATTR *fn =
+        (FILE_NAME_ATTR *)(rec + attrOff + a->Resident.ValueOffset);
+    ULONG par = CHK_REF_REC(fn->ParentDirectory);
+
+    (void)recno;
+    if (p->Failed || par >= c->RecordCount)
+        return 0;
+
+    if (*p->Count == *p->Cap)
+    {
+        ULONG nc = *p->Cap ? *p->Cap * 2 : 1024;
+        ULONG *np;
+
+        np = (ULONG *)chk_grow_alloc(*p->Par, *p->Cap * sizeof(ULONG),
+                                     nc * sizeof(ULONG));
+        if (!np) { p->Failed = 1; return 0; }
+        *p->Par = np;
+        np = (ULONG *)chk_grow_alloc(*p->Child, *p->Cap * sizeof(ULONG),
+                                     nc * sizeof(ULONG));
+        if (!np) { p->Failed = 1; return 0; }
+        *p->Child = np;
+        *p->Cap = nc;
+    }
+    (*p->Par)[*p->Count] = par;
+    (*p->Child)[*p->Count] = p->BaseRec;
+    (*p->Count)++;
+    c->ChildStart[par + 1]++;
+    return 0;   /* never modifies the record */
+}
+
 int chk_build_repair_index(CHK_CTX *c)
 {
     UCHAR *rec = NULL;
@@ -286,7 +432,6 @@ int chk_build_repair_index(CHK_CTX *c)
     for (recno = 0; recno < c->RecordCount; recno++)
     {
         FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
-        ULONG off;
 
         if ((c->Rec[recno].Flags & (CRF_IN_USE | CRF_EXTENSION)) != CRF_IN_USE)
             continue;
@@ -297,48 +442,17 @@ int chk_build_repair_index(CHK_CTX *c)
         if (!(h->Flags & FRH_IN_USE) || h->BaseFileRecord != 0)
             continue;
 
-        off = h->AttributeOffset;
-        while (off + 8 <= c->MftRecordSize)
         {
-            ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
-            if (a->Type == AT_END || a->Length == 0 ||
-                off + a->Length > c->MftRecordSize)
-                break;
-            if (a->Type == AT_FILE_NAME && !a->NonResident &&
-                a->Resident.ValueOffset + CHK_FN_FIXED <= a->Length)
-            {
-                FILE_NAME_ATTR *fn =
-                    (FILE_NAME_ATTR *)(rec + off + a->Resident.ValueOffset);
-                ULONG par = CHK_REF_REC(fn->ParentDirectory);
+            CHK_PAIR_CTX pc;
+            int baseDirty = 0;
 
-                if (par < c->RecordCount)
-                {
-                    if (pairCount == pairCap)
-                    {
-                        ULONG nc = pairCap ? pairCap * 2 : 1024;
-                        ULONG *np;
-
-                        np = (ULONG *)chk_grow_alloc(pairPar,
-                                                     pairCap * sizeof(ULONG),
-                                                     nc * sizeof(ULONG));
-                        if (!np)
-                            goto out;
-                        pairPar = np;
-                        np = (ULONG *)chk_grow_alloc(pairChild,
-                                                     pairCap * sizeof(ULONG),
-                                                     nc * sizeof(ULONG));
-                        if (!np)
-                            goto out;
-                        pairChild = np;
-                        pairCap = nc;
-                    }
-                    pairPar[pairCount] = par;
-                    pairChild[pairCount] = recno;
-                    pairCount++;
-                    c->ChildStart[par + 1]++;
-                }
-            }
-            off += a->Length;
+            pc.Par = &pairPar; pc.Child = &pairChild;
+            pc.Count = &pairCount; pc.Cap = &pairCap;
+            pc.BaseRec = recno; pc.Failed = 0;
+            chk_for_each_file_name(c, recno, rec, chk_collect_pair, &pc,
+                                   &baseDirty);
+            if (pc.Failed)
+                goto out;
         }
     }
 
@@ -1784,6 +1898,60 @@ static void chk_uncredit_dir_links(CHK_CTX *c, ULONG dirRec)
     }
 }
 
+/* Collect one index entry for chk_rebuild_index()'s Pass A.  The sequence
+ * number and directory flag come from the base record even when the name
+ * itself lives in an $ATTRIBUTE_LIST extension. */
+typedef struct _CHK_PASSA_CTX {
+    CHK_RB_ENT **Ents;
+    ULONG       *Count;
+    ULONG       *Cap;
+    ULONG        DirRec;
+    ULONG        BaseRec;
+    USHORT       BaseSeq;
+    int          IsDir;
+    int          Failed;
+} CHK_PASSA_CTX;
+
+static int chk_passa_collect(CHK_CTX *c, void *ctx, ULONG recno,
+                             UCHAR *rec, ULONG attrOff)
+{
+    CHK_PASSA_CTX *p = (CHK_PASSA_CTX *)ctx;
+    ATTR_RECORD *a = (ATTR_RECORD *)(rec + attrOff);
+    FILE_NAME_ATTR *fn =
+        (FILE_NAME_ATTR *)(rec + attrOff + a->Resident.ValueOffset);
+    ULONG keyBytes = CHK_FN_FIXED + (ULONG)fn->FileNameLength * sizeof(WCHAR);
+    UCHAR *blob;
+    ULONG blen, klen;
+
+    (void)recno;
+    if (p->Failed)
+        return 0;
+    if ((ULONG)((ULONGLONG)fn->ParentDirectory & 0xFFFFFFFFFFFFULL) != p->DirRec ||
+        a->Resident.ValueOffset + keyBytes > a->Length)
+        return 0;
+
+    blob = chk_rb_make_entry(c, p->BaseRec, p->BaseSeq, fn, p->IsDir,
+                             &blen, &klen);
+    if (!blob)
+        return 0;
+
+    if (*p->Count == *p->Cap)
+    {
+        ULONG nc = *p->Cap ? *p->Cap * 2 : 64;
+        CHK_RB_ENT *ne = (CHK_RB_ENT *)chk_grow_alloc(*p->Ents,
+                                                      *p->Cap * sizeof(**p->Ents),
+                                                      nc * sizeof(**p->Ents));
+        if (!ne) { free(blob); p->Failed = 1; return 0; }
+        *p->Ents = ne; *p->Cap = nc;
+    }
+    (*p->Ents)[*p->Count].blob = blob;
+    (*p->Ents)[*p->Count].len = blen;
+    (*p->Ents)[*p->Count].keyLen = klen;
+    (*p->Ents)[*p->Count].targetRec = p->BaseRec;
+    (*p->Count)++;
+    return 0;   /* never modifies the record */
+}
+
 int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
 {
     UCHAR *dir = NULL, *scan = NULL;
@@ -1840,7 +2008,6 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
     for (ci = c->ChildStart[dirRec]; ci < c->ChildStart[dirRec + 1]; ci++)
     {
         FILE_RECORD_HEADER *sh;
-        ULONG off;
 
         recno = c->ChildList[ci];
         if (recno >= c->RecordCount)
@@ -1859,50 +2026,19 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
         if (!(sh->Flags & FRH_IN_USE) || sh->BaseFileRecord != 0)
             continue;
 
-        off = sh->AttributeOffset;
-        while (off + 8 <= c->MftRecordSize)
         {
-            ATTR_RECORD *a = (ATTR_RECORD *)(scan + off);
-            if (a->Type == AT_END || a->Length == 0 ||
-                off + a->Length > c->MftRecordSize)
-                break;
-            if (a->Type == AT_FILE_NAME && !a->NonResident &&
-                a->Resident.ValueOffset + CHK_FN_FIXED <= a->Length)
-            {
-                FILE_NAME_ATTR *fn =
-                    (FILE_NAME_ATTR *)(scan + off + a->Resident.ValueOffset);
-                ULONG keyBytes = CHK_FN_FIXED +
-                                 (ULONG)fn->FileNameLength * sizeof(WCHAR);
-                if ((ULONG)((ULONGLONG)fn->ParentDirectory & 0xFFFFFFFFFFFFULL) == dirRec &&
-                    a->Resident.ValueOffset + keyBytes <= a->Length)
-                {
-                    int isDir = (sh->Flags & FRH_DIRECTORY) != 0;
-                    UCHAR *blob;
-                    ULONG blen, klen;
+            CHK_PASSA_CTX pa;
+            int baseDirty = 0;
 
-                    blob = chk_rb_make_entry(c, recno, sh->SequenceNumber,
-                                             fn, isDir, &blen, &klen);
-                    if (blob)
-                    {
-                        if (entCount == entCap)
-                        {
-                            ULONG nc = entCap ? entCap * 2 : 64;
-                            CHK_RB_ENT *ne =
-                                (CHK_RB_ENT *)chk_grow_alloc(ents,
-                                                             entCap * sizeof(*ents),
-                                                             nc * sizeof(*ents));
-                            if (!ne) { free(blob); goto out; }
-                            ents = ne; entCap = nc;
-                        }
-                        ents[entCount].blob = blob;
-                        ents[entCount].len = blen;
-                        ents[entCount].keyLen = klen;
-                        ents[entCount].targetRec = recno;
-                        entCount++;
-                    }
-                }
-            }
-            off += a->Length;
+            pa.Ents = &ents; pa.Count = &entCount; pa.Cap = &entCap;
+            pa.DirRec = dirRec; pa.BaseRec = recno;
+            pa.BaseSeq = sh->SequenceNumber;
+            pa.IsDir = (sh->Flags & FRH_DIRECTORY) != 0;
+            pa.Failed = 0;
+            chk_for_each_file_name(c, recno, scan, chk_passa_collect, &pa,
+                                   &baseDirty);
+            if (pa.Failed)
+                goto out;
         }
     }
 
@@ -2226,12 +2362,25 @@ static ULONG chk_orphan_free_record(CHK_CTX *c, USHORT *staleSeq)
  * $FILE_NAME.ParentDirectory to `foundRef`; if it has NO $FILE_NAME at all,
  * fabricate FILEnnnn.CHK parented to found.NNN.  Writes the record back.
  * Returns 0 on success, -1 on failure. */
+/* Point one $FILE_NAME at found.NNN.  Used for every name of an orphan,
+ * including ones that live in $ATTRIBUTE_LIST extension records. */
+static int chk_rehome_name(CHK_CTX *c, void *ctx, ULONG recno,
+                           UCHAR *rec, ULONG attrOff)
+{
+    ATTR_RECORD *a = (ATTR_RECORD *)(rec + attrOff);
+    FILE_NAME_ATTR *fn =
+        (FILE_NAME_ATTR *)(rec + attrOff + a->Resident.ValueOffset);
+
+    (void)c; (void)recno;
+    fn->ParentDirectory = *(ULONGLONG *)ctx;
+    return 1;   /* record modified: write it back */
+}
+
 static int chk_orphan_rehome(CHK_CTX *c, ULONG recno, ULONGLONG foundRef,
                              ULONG secId, ULONGLONG timeVal)
 {
     UCHAR *rec;
     FILE_RECORD_HEADER *h;
-    ULONG off;
     int rehomed = 0, rc = -1;
 
     rec = (UCHAR *)malloc(c->MftRecordSize);
@@ -2244,24 +2393,18 @@ static int chk_orphan_rehome(CHK_CTX *c, ULONG recno, ULONGLONG foundRef,
 
     h = (FILE_RECORD_HEADER *)rec;
 
-    /* Retarget the first non-DOS (or, failing that, the first) $FILE_NAME. */
-    off = h->AttributeOffset;
-    while (off + 8 <= c->MftRecordSize)
+    /* Point every $FILE_NAME at found.NNN so no key back-refs the old (dead)
+     * parent -- multiple names of one file all move together.  Names that
+     * spilled into $ATTRIBUTE_LIST extension records count too: a file whose
+     * base record is full keeps its names out there, and re-homing only the
+     * base would find nothing to retarget and fall through to fabricating a
+     * name the full record has no room for. */
     {
-        ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
-        if (a->Type == AT_END || a->Length == 0 ||
-            off + a->Length > c->MftRecordSize)
-            break;
-        if (a->Type == AT_FILE_NAME && !a->NonResident)
-        {
-            FILE_NAME_ATTR *fn =
-                (FILE_NAME_ATTR *)(rec + off + a->Resident.ValueOffset);
-            /* Point every $FILE_NAME at found.NNN so no key back-refs the old
-             * (dead) parent -- multiple names of one file all move together. */
-            fn->ParentDirectory = foundRef;
+        ULONGLONG target = foundRef;
+        int baseDirty = 0;
+        if (chk_for_each_file_name(c, recno, rec, chk_rehome_name, &target,
+                                   &baseDirty) > 0)
             rehomed = 1;
-        }
-        off += a->Length;
     }
 
     if (!rehomed)
