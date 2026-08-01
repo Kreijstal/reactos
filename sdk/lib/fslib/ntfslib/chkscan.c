@@ -83,6 +83,52 @@ static void chk_account_attr(CHK_CTX *c, UCHAR *rec, ULONG attrOff,
     free(runs);
 }
 
+/* Credit the base record for one $FILE_NAME that lives in an extension
+ * record, identified by its attribute instance.
+ *
+ * Pass 1 only ever looks at the base record, so a file whose names all spilled
+ * into $ATTRIBUTE_LIST child records comes out of it with FnCount == 0 and no
+ * ParentRef -- indistinguishable from a genuinely nameless record.  Pass 3
+ * then calls it an orphan however many healthy directories index it, and the
+ * repair "recovers" it by pointing those very names at found.NNN.  That is a
+ * move, not a recovery: the file leaves the directory it belonged to, the
+ * entries that directory still holds stop back-referencing it, and the next
+ * run repeats the whole thing into a fresh found.NNN.  Volumes checked this
+ * way accumulate a chain of found.NNN directories full of unbacked entries,
+ * one per run, and never converge.
+ *
+ * The names are right there in the child records the attribute list already
+ * points at, so count them where pass 1.5 is walking that list anyway. */
+static void chk_credit_ext_name(CHK_CTX *c, ULONG baseRec, UCHAR *ext,
+                                USHORT instance)
+{
+    CHK_REC *m = &c->Rec[baseRec];
+    ULONG off = ((FILE_RECORD_HEADER *)ext)->AttributeOffset;
+
+    while (off + 8 <= c->MftRecordSize)
+    {
+        ATTR_RECORD *a = (ATTR_RECORD *)(ext + off);
+
+        if (a->Type == AT_END || a->Length == 0 ||
+            off + a->Length > c->MftRecordSize)
+            break;
+
+        if (a->Type == AT_FILE_NAME && !a->NonResident &&
+            a->Instance == instance &&
+            a->Resident.ValueOffset + 0x42 <= a->Length)
+        {
+            FILE_NAME_ATTR *fn =
+                (FILE_NAME_ATTR *)(ext + off + a->Resident.ValueOffset);
+
+            m->FnCount++;
+            if (m->ParentRef == 0)
+                m->ParentRef = fn->ParentDirectory;
+            return;
+        }
+        off += a->Length;
+    }
+}
+
 /* Validate one base record's $ATTRIBUTE_LIST (pass 1.5 helper). */
 static void chk_check_attrlist(CHK_CTX *c, UCHAR *rec, ULONG recno,
                                NTFS_CHK_RESULT *res)
@@ -144,7 +190,11 @@ static void chk_check_attrlist(CHK_CTX *c, UCHAR *rec, ULONG recno,
                             chk_add_issue(res, CHK_ERR_ATTRLIST_BROKEN,
                                           recno, extRec, 0);
                         else
+                        {
                             c->Rec[extRec].Flags |= CRF_CLAIMED;
+                            if (e->Type == AT_FILE_NAME)
+                                chk_credit_ext_name(c, recno, ext, e->Instance);
+                        }
                     }
                     free(ext);
                 }
@@ -889,7 +939,13 @@ int chk_connectivity(CHK_CTX *c, NTFS_CHK_RESULT *res,
         if (!(f & CRF_SYSTEM))
         {
             int parentTrusted = chk_parent_trusted(c, parent);
-            if (m->FnCount == 0 ||
+            /* "No $FILE_NAME" is only evidence of an orphan when every place a
+             * name can live was readable.  A record whose $ATTRIBUTE_LIST we
+             * could not parse may well be named out in a child record, and
+             * re-homing it would move a healthy file out of its directory. */
+            int nameless = (m->FnCount == 0) &&
+                           !(f & CRF_ATTRLIST_UNSUPPORTED);
+            if (nameless ||
                 (parentTrusted && m->LinksSeen == 0) ||
                 (!parentTrusted && parent < c->RecordCount &&
                  !(c->Rec[parent].Flags & CRF_IN_USE)) ||
