@@ -462,8 +462,19 @@ CheckVolume(
                                             NULL,
                                             (PULONG)&Status);
 
-    /* Perform the check either when the volume is dirty or a check is forced */
-    if (Success && ((Status == STATUS_DISK_CORRUPT_ERROR) || !CheckOnlyIfDirty))
+    DPRINT1("AUTOCHK: dirty probe on %wZ: Success %u, Status 0x%08lx\n",
+            &VolumePathU, Success, Status);
+
+    /*
+     * Perform the check either when the volume is dirty or a check is forced.
+     *
+     * STATUS_DISK_CORRUPT_ERROR is the providers' way of saying "this volume
+     * is dirty", and it must gate the repair on its own: VfatChkdsk pairs it
+     * with a FALSE return, because from its point of view the read-only pass
+     * could not finish the job.  That is a verdict, not a failure to run, so
+     * requiring Success here vetoed every repair autochk was ever asked to do.
+     */
+    if ((Status == STATUS_DISK_CORRUPT_ERROR) || (Success && !CheckOnlyIfDirty))
     {
         /* Let the user decide whether to repair */
         if (Status == STATUS_DISK_CORRUPT_ERROR)
