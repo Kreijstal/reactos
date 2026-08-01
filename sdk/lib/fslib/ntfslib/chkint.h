@@ -207,6 +207,10 @@ int  chk_check_mftmirr(CHK_CTX *c, NTFS_CHK_RESULT *res,
 int  chk_set_volume_flag(CHK_CTX *c, int setDirty, int markChkdsk);
 int  chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno);
 
+/* R7: resync $MFTMirr from $MFT for every record pass 6 flagged as differing.
+ * Returns the number of mismatches repaired, or -1 if it could not run. */
+int  chk_repair_mftmirr(CHK_CTX *c, NTFS_CHK_RESULT *res);
+
 /* Build (or rebuild) c->ChildStart/ChildList from one MFT pass.  Every repair
  * stage that asks "which records are named in directory D" must go through it:
  * answering that question by re-reading the MFT costs O(RecordCount) uncached
