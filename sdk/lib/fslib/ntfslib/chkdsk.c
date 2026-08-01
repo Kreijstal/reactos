@@ -669,11 +669,19 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
         chk_repair_attributes(c, res);
         chk_repair_crosslinks(c, res);
 
+        /* Snapshot "which record is named in which directory" from a single
+         * MFT pass, now that R1's record surgery has settled.  R2 and R3 read
+         * it instead of re-scanning the volume per directory / per orphan; on
+         * OOM they are skipped rather than allowed to rescan, because that
+         * shape does not terminate on a real volume. */
+        if (chk_build_repair_index(c) != 0)
+            chk_add_issue(res, CHK_ERR_NOMEM, c->RecordCount, 2, 0);
+
         /* R2: $I30 directory-index rebuild.  Runs after R1 record surgery and
          * before R4/R5/R6 so the corrected index feeds link-count and bitmap
          * reconciliation.  Only directories whose index is bad and whose $I30
          * is wholly within the base record (not attr-list spread) qualify. */
-        if (c->Rec)
+        if (c->Rec && c->ChildStart)
         {
             ULONG d;
             for (d = 0; d < c->RecordCount; d++)
@@ -690,7 +698,7 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
          * rebuilt have already re-homed their own children and cleared their
          * CRF_ORPHAN) and before R4 (so the re-homed records' link counts are
          * computed against the found.NNN + refreshed root indexes). */
-        if (c->Rec && c->MftMap)
+        if (c->Rec && c->MftMap && c->ChildStart)
             chk_recover_orphans(c, res);
 
         if (c->Rec)
@@ -709,6 +717,7 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     /* Pass 6: $MFTMirr compare */
     chk_check_mftmirr(c, res, opt);
 
+    chk_free_repair_index(c);
     free(computed);
     c->ClusterMap = NULL;
     free(c->Rec);
