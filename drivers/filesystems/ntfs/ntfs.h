@@ -411,6 +411,22 @@ typedef struct
     ULONG LfsImageLength;
     ULONG LfsPageSize;
 
+    /* $MFTMirr maintenance.  NTFS keeps a byte-identical copy of the first few
+     * $MFT records in $MFTMirr, and chkdsk byte-compares the two, so the mirror
+     * has to be refreshed by every write to a mirrored record -- not only when
+     * the MFT grows.  MftMirrorRecordCount caches how many records the mirror
+     * actually holds (learned from its $DATA length on the first refresh; 0
+     * means "not learned yet", and NTFS_MFTMIRR_MIN_RECORDS is assumed until
+     * then).  MftMirrorOwnerThread is the recursion guard: mirroring goes
+     * through WriteAttribute, which can re-enter UpdateFileRecord, and record 1
+     * is itself mirrored -- so a thread already inside a refresh must not start
+     * another one, while a second thread must not have its refresh dropped.
+     * MftMirrorReady says the resource has been initialised (mount reads the
+     * MFT before that point, but never writes it). */
+    ULONG MftMirrorRecordCount;
+    BOOLEAN MftMirrorReady;
+    ERESOURCE MftMirrorResource;
+
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
 #define VCB_VOLUME_LOCKED       0x0001
@@ -535,6 +551,11 @@ typedef enum
 #define NTFS_FILE_FIRST_USER_FILE   16
 
 #define NTFS_MFT_MASK 0x0000FFFFFFFFFFFFULL
+
+/* Smallest number of $MFT records $MFTMirr is guaranteed to hold.  Used only
+ * until the real count is read out of the mirror's $DATA length (see
+ * DEVICE_EXTENSION::MftMirrorRecordCount). */
+#define NTFS_MFTMIRR_MIN_RECORDS 4
 
 /* Upper bound on how far a regular file's unnamed $DATA allocation is
  * reserved ahead of its data size while it grows (see preallocation in
