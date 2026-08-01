@@ -601,10 +601,14 @@ int chk_collate_filename(const CHK_CTX *c,
  * Public entry point
  * ============================================================ */
 
+static void chk_emit_summary(const NTFS_CHK_OPTIONS *opt,
+                             const NTFS_CHK_RESULT *res);
+
 /* One complete scan + (optionally) repair pass over the volume.  Wrapped by
- * NtfsChkVolume(), which repeats it until the damage stops going down. */
+ * NtfsChkVolume(), which repeats it while it is still repairing something.
+ * Only the pass whose numbers describe the final state emits the summary. */
 static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
-                           NTFS_CHK_RESULT *res)
+                           NTFS_CHK_RESULT *res, int emitSummary)
 {
     CHK_CTX *c;   /* ~197 KiB: too large for the stack */
     UCHAR *computed = NULL;
@@ -837,8 +841,25 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     else
         res->ExitStatus = 1;
 
-    /* Final chkdsk-style summary.  Always emitted (independent of Verbose).
-     * Composed without printf so it links identically in-tree and standalone. */
+    if (emitSummary)
+        chk_emit_summary(opt, res);
+
+    (void)rc;
+    return res->ExitStatus;
+}
+
+/* Final chkdsk-style summary.  Always emitted (independent of Verbose).
+ * Composed without printf so it links identically in-tree and standalone.
+ *
+ * NtfsChkVolume() emits this itself once its repair loop has finished, from
+ * the numbers a read-only scan came back with.  A summary printed by the first
+ * pass would be describing a volume that later passes went on to change, and
+ * would be quoting that pass's own claims rather than anything measured. */
+static void chk_emit_summary(const NTFS_CHK_OPTIONS *opt,
+                             const NTFS_CHK_RESULT *res)
+{
+    ULONG unfixed = res->IssueCount - res->RepairedCount;
+
     if (opt->Message)
     {
         char line[160];
@@ -890,9 +911,6 @@ static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
             chk_emit(opt, line);
         }
     }
-
-    (void)rc;
-    return res->ExitStatus;
 }
 
 /*
@@ -918,9 +936,15 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     ULONG initial, before, remaining;
     int rc, pass;
 
-    rc = chk_volume_pass(io, opt, res);
+    /* A read-only check makes no further passes, so its own numbers already
+     * describe the volume as it stands: let it print them itself. */
+    rc = chk_volume_pass(io, opt, res, !opt->FixErrors);
     if (rc < 0 || !opt->FixErrors || res->IssueCount == 0)
+    {
+        if (rc >= 0 && opt->FixErrors)
+            chk_emit_summary(opt, res);
         return rc;
+    }
 
     /* Later passes are silent: one set of stage banners is enough, and the
      * dirty-only gate has already been decided by the first pass. */
@@ -935,33 +959,60 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     for (pass = 0; pass < CHK_MAX_REPAIR_PASSES; pass++)
     {
         NTFS_CHK_RESULT probe;
+        ULONG progress;
         int prc;
 
         /* Measure: what is actually left on the volume right now? */
         memset(&probe, 0, sizeof(probe));
         again.FixErrors = 0;
-        prc = chk_volume_pass(io, &again, &probe);
+        prc = chk_volume_pass(io, &again, &probe, 0);
         remaining = probe.IssueCount;
+        /* The summary should describe the volume the run is leaving behind,
+         * not the one the first pass walked into. */
+        if (prc >= 0)
+        {
+            res->RecordsScanned   = probe.RecordsScanned;
+            res->RecordsInUse     = probe.RecordsInUse;
+            res->ClustersUsed     = probe.ClustersUsed;
+            res->ClustersReserved = probe.ClustersReserved;
+        }
         NtfsChkFreeResult(&probe);
 
         if (prc < 0)
             break;                  /* cannot measure: keep the last number */
         if (remaining == 0)
             break;                  /* converged */
-        if (remaining >= before)
-            break;                  /* the previous pass achieved nothing */
+        if (remaining > before)
+            break;                  /* the volume got worse: stop churning */
         before = remaining;
 
-        /* Still damaged, and still getting better: go round again. */
+        /* Still damaged: go round again. */
         memset(&probe, 0, sizeof(probe));
         again.FixErrors = 1;
-        prc = chk_volume_pass(io, &again, &probe);
+        prc = chk_volume_pass(io, &again, &probe, 0);
+        progress = probe.OrphansRecovered + probe.IndexesRebuilt +
+                   probe.LinksFixed + probe.AttrsTruncated;
         res->OrphansRecovered += probe.OrphansRecovered;
         res->IndexesRebuilt   += probe.IndexesRebuilt;
         res->LinksFixed       += probe.LinksFixed;
         res->AttrsTruncated   += probe.AttrsTruncated;
         NtfsChkFreeResult(&probe);
         if (prc < 0)
+            break;
+
+        /* Stop when a pass repairs nothing, not when the count stops falling.
+         *
+         * Damage cascades: rebuilding a directory whose entries collide on a
+         * name settles which record keeps the name, and the record that loses
+         * it is only then left unreferenced.  Repairing that one exposes the
+         * next.  Each pass therefore fixes something real while the total
+         * sits still, and a loop that gave up as soon as the count stopped
+         * falling needed one whole chkdsk run per link of the chain -- twelve
+         * of them, on the volume this was measured against, to reach clean.
+         * Fixing nothing is the honest signal that a pass has run out of
+         * work; the pass cap is only there so a repair that keeps trading one
+         * defect for another cannot spin forever. */
+        if (progress == 0)
             break;
     }
 
@@ -986,6 +1037,8 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     res->IssueCount = initial;
     res->RepairedCount = (initial > remaining) ? initial - remaining : 0;
     res->ExitStatus = (remaining == 0) ? 2 : 1;
+
+    chk_emit_summary(opt, res);
     return res->ExitStatus;
 }
 
