@@ -40,6 +40,7 @@ if(STACK_PROTECTOR)
 endif()
 
 add_subdirectory(ioevent)
+add_subdirectory(kdnet)
 add_subdirectory(lsalib)
 add_subdirectory(nt)
 add_subdirectory(pathcch)
