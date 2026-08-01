@@ -11,6 +11,12 @@
 #ifndef _RTL8168_PCH_
 #define _RTL8168_PCH_
 
+#ifdef RTL8168_EARLY
+
+#include "nic_early.h"
+
+#else
+
 #include <ndis.h>
 
 #include "rtlhw.h"
@@ -245,5 +251,7 @@ VOID NTAPI MiniportISR(OUT PBOOLEAN InterruptRecognized,
                         IN NDIS_HANDLE MiniportAdapterContext);
 VOID NTAPI MiniportHandleInterrupt(IN NDIS_HANDLE MiniportAdapterContext);
 BOOLEAN NTAPI MiniportCheckForHang(IN NDIS_HANDLE MiniportAdapterContext);
+
+#endif /* RTL8168_EARLY */
 
 #endif /* _RTL8168_PCH_ */
