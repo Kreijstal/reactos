@@ -29,7 +29,9 @@ Chkdsk(
 {
     PIFS_PROVIDER Provider;
     UNICODE_STRING usDriveRoot;
-    NTSTATUS Status;
+    /* Every failure path below reports through the DONE callback, so this
+     * must hold a valid status before the first 'goto Quit' */
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     BOOLEAN Success = FALSE;
     WCHAR DriveName[MAX_PATH];
     WCHAR VolumeName[MAX_PATH];
@@ -38,6 +40,7 @@ Chkdsk(
     if (!Provider)
     {
         /* Unknown file system */
+        Status = STATUS_NOT_SUPPORTED;
         goto Quit;
     }
 
