@@ -1719,8 +1719,14 @@ HKLM,"SYSTEM\CurrentControlSet\Control\GroupOrderList","SCSI Miniport", 0x000000
   0x20, 0x00, 0x00, 0x00
 
 ; Session Manager stuff
+; The "*" (check every volume) is not optional: smss strips the "autocheck"
+; keyword and passes the rest to autochk as its command line, so without it
+; autochk starts with argc == 1, takes its "no volume given" exit at the top of
+; _main and returns immediately - silently, on every boot.  Volumes flagged
+; dirty were therefore never checked.  Matches smss's own built-in default
+; (SmpRegistryConfigurationTable: "autocheck AutoChk.exe *") and Windows.
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","BootExecute", 0x00010000, \
- "autocheck autochk"
+ "autocheck autochk *"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","GlobalFlag", 0x00010003, 0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","ObjectDirectories",0x00010000, \
  "\Windows", \
