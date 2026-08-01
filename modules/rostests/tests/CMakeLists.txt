@@ -1,4 +1,5 @@
 add_subdirectory(mmixer_test)
 add_subdirectory(process_chain)
 add_subdirectory(dllexport)
+add_subdirectory(kdnetsim)
 add_subdirectory(spec2def)
