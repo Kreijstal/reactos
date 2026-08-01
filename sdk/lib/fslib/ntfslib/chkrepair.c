@@ -220,6 +220,11 @@ int chk_stamp_logfile_clean(CHK_CTX *c, NTFS_CHK_RESULT *res)
 #define CHK_REF_REC(ref)  ((ULONG)((ref) & 0xFFFFFFFFFFFFULL))
 #define CHK_REF_SEQ(ref)  ((USHORT)((ref) >> 48))
 
+/* Offset of FILE_NAME_ATTR::FileName[0] -- the fixed part before the name.
+ * A $FILE_NAME key with N name WCHARs is CHK_FN_FIXED + N*sizeof(WCHAR) bytes
+ * (matches ntfs_make_index_entry's sizeof(FILE_NAME_ATTR)-sizeof(WCHAR)+N*2). */
+#define CHK_FN_FIXED  0x42
+
 static void *
 chk_grow_alloc(void *old, size_t oldSize, size_t newSize)
 {
@@ -234,6 +239,133 @@ chk_grow_alloc(void *old, size_t oldSize, size_t newSize)
 
     free(old);
     return newPtr;
+}
+
+/* ============================================================
+ * Repair-time parent -> children index
+ *
+ * Three repair stages need the same answer: "which in-use base records own a
+ * $FILE_NAME whose ParentDirectory is D?".  Each used to compute it by reading
+ * the entire MFT off the volume again -- once per damaged directory (R2), once
+ * per candidate found.NNN name (R3), and once more to uncredit a directory's
+ * link contributions.  Those reads are uncached 1 KiB records straight through
+ * the IDE port, so a volume with a few hundred issues turns into tens of
+ * millions of reads and the repair never terminates.
+ *
+ * One pass builds the answer for every D at once; the stages then read only
+ * the records they actually rewrite.
+ * ============================================================ */
+
+void chk_free_repair_index(CHK_CTX *c)
+{
+    free(c->ChildStart);
+    free(c->ChildList);
+    c->ChildStart = NULL;
+    c->ChildList = NULL;
+    c->ChildCount = 0;
+}
+
+int chk_build_repair_index(CHK_CTX *c)
+{
+    UCHAR *rec = NULL;
+    ULONG *pairPar = NULL, *pairChild = NULL, *cursor = NULL;
+    ULONG pairCount = 0, pairCap = 0;
+    ULONG recno, i;
+    int rc = -1;
+
+    chk_free_repair_index(c);
+    if (!c->Rec || c->RecordCount == 0)
+        return -1;
+
+    rec = (UCHAR *)malloc(c->MftRecordSize);
+    /* +2: the prefix sum writes ChildStart[RecordCount]. */
+    c->ChildStart = (ULONG *)calloc((size_t)c->RecordCount + 2, sizeof(ULONG));
+    if (!rec || !c->ChildStart)
+        goto out;
+
+    for (recno = 0; recno < c->RecordCount; recno++)
+    {
+        FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
+        ULONG off;
+
+        if ((c->Rec[recno].Flags & (CRF_IN_USE | CRF_EXTENSION)) != CRF_IN_USE)
+            continue;
+        if (chk_read_record(c, recno, rec) != 0 ||
+            *(ULONG *)rec != NRH_FILE_TYPE ||
+            chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
+            continue;
+        if (!(h->Flags & FRH_IN_USE) || h->BaseFileRecord != 0)
+            continue;
+
+        off = h->AttributeOffset;
+        while (off + 8 <= c->MftRecordSize)
+        {
+            ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
+            if (a->Type == AT_END || a->Length == 0 ||
+                off + a->Length > c->MftRecordSize)
+                break;
+            if (a->Type == AT_FILE_NAME && !a->NonResident &&
+                a->Resident.ValueOffset + CHK_FN_FIXED <= a->Length)
+            {
+                FILE_NAME_ATTR *fn =
+                    (FILE_NAME_ATTR *)(rec + off + a->Resident.ValueOffset);
+                ULONG par = CHK_REF_REC(fn->ParentDirectory);
+
+                if (par < c->RecordCount)
+                {
+                    if (pairCount == pairCap)
+                    {
+                        ULONG nc = pairCap ? pairCap * 2 : 1024;
+                        ULONG *np;
+
+                        np = (ULONG *)chk_grow_alloc(pairPar,
+                                                     pairCap * sizeof(ULONG),
+                                                     nc * sizeof(ULONG));
+                        if (!np)
+                            goto out;
+                        pairPar = np;
+                        np = (ULONG *)chk_grow_alloc(pairChild,
+                                                     pairCap * sizeof(ULONG),
+                                                     nc * sizeof(ULONG));
+                        if (!np)
+                            goto out;
+                        pairChild = np;
+                        pairCap = nc;
+                    }
+                    pairPar[pairCount] = par;
+                    pairChild[pairCount] = recno;
+                    pairCount++;
+                    c->ChildStart[par + 1]++;
+                }
+            }
+            off += a->Length;
+        }
+    }
+
+    /* Counting sort by parent: prefix-sum the per-parent tallies, then scatter
+     * the pairs into their buckets. */
+    for (i = 0; i < c->RecordCount; i++)
+        c->ChildStart[i + 1] += c->ChildStart[i];
+
+    c->ChildList = (ULONG *)malloc((pairCount ? pairCount : 1) * sizeof(ULONG));
+    cursor = (ULONG *)malloc((size_t)(c->RecordCount + 1) * sizeof(ULONG));
+    if (!c->ChildList || !cursor)
+        goto out;
+    memcpy(cursor, c->ChildStart, (size_t)(c->RecordCount + 1) * sizeof(ULONG));
+    for (i = 0; i < pairCount; i++)
+        c->ChildList[cursor[pairPar[i]]++] = pairChild[i];
+
+    c->ChildCount = pairCount;
+    rc = 0;
+
+out:
+    free(cursor);
+    free(pairPar);
+    free(pairChild);
+    free(rec);
+    if (rc != 0)
+        chk_free_repair_index(c);
+    return rc;
 }
 
 /* Re-encode a (possibly truncated) runlist into mapping pairs starting at
@@ -540,34 +672,63 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
  * R1: cross-link truncation
  * ============================================================ */
 
-/* Does any record with a number strictly lower than `notThis` claim `lcn` in
- * one of its non-resident, non-$SI/$FN attributes?  Used to confirm there is a
- * true "winner" (the lowest-numbered claimant keeps the cluster) before we
- * truncate the higher-numbered loser.  Guarantees system files 0-11 (and any
- * lower record) always win. */
-static int chk_lcn_claimed_below(CHK_CTX *c, ULONGLONG lcn, ULONG notThis)
+/* Fill in every ledger entry's FirstRec: the lowest-numbered record that also
+ * claims that cross-linked cluster.  Detection cannot record it -- when the
+ * duplicate claim is seen, the computed bitmap only remembers that the cluster
+ * was already taken, not by whom -- so the winner has to be re-derived here.
+ *
+ * Deriving it one entry at a time meant re-reading the MFT from disk per
+ * entry, O(XLinkCount * RecordCount) uncached 1 KiB reads.  A single ascending
+ * pass answers all of them at once: going up from record 0, the first claimant
+ * met is by definition the lowest-numbered one, which is why system files 0-11
+ * (and any lower record) still always win.  The pass stops as soon as every
+ * entry is resolved or we pass the highest loser. */
+static void chk_resolve_xlink_owners(CHK_CTX *c)
 {
-    UCHAR *rec = (UCHAR *)malloc(c->MftRecordSize);
-    CHK_RUN *runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
-    ULONG recno;
-    int found = 0;
+    UCHAR *rec;
+    CHK_RUN *runs;
+    ULONG ledgerCount = CHK_MIN(c->XLinkCount, (ULONG)CHK_MAX_XLINKS);
+    ULONG recno, li, stopAt = 0;
 
+    for (li = 0; li < ledgerCount; li++)
+    {
+        c->XLinks[li].FirstRec = (ULONG)-1;
+        if (c->XLinks[li].SecondRec > stopAt)
+            stopAt = c->XLinks[li].SecondRec;
+    }
+    if (ledgerCount == 0)
+        return;
+    if (stopAt > c->RecordCount)
+        stopAt = c->RecordCount;
+
+    rec = (UCHAR *)malloc(c->MftRecordSize);
+    runs = (CHK_RUN *)malloc(CHK_MAX_RUNS * sizeof(CHK_RUN));
     if (!rec || !runs)
     {
         free(rec);
         free(runs);
-        return 0;
+        return;
     }
-    for (recno = 0; recno < notThis && recno < c->RecordCount && !found; recno++)
+
+    for (recno = 0; recno < stopAt; recno++)
     {
         FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
-        ULONG off;
+        ULONG off, pending = 0;
+
+        for (li = 0; li < ledgerCount; li++)
+            if (c->XLinks[li].FirstRec == (ULONG)-1 &&
+                recno < c->XLinks[li].SecondRec)
+                pending++;
+        if (pending == 0)
+            break;
+
         if (chk_read_record(c, recno, rec) != 0 ||
             *(ULONG *)rec != NRH_FILE_TYPE ||
             chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
             continue;
         if (!(h->Flags & FRH_IN_USE))
             continue;
+
         off = h->AttributeOffset;
         while (off + 8 <= c->MftRecordSize)
         {
@@ -582,18 +743,26 @@ static int chk_lcn_claimed_below(CHK_CTX *c, ULONGLONG lcn, ULONG notThis)
                                         CHK_MAX_RUNS);
                 int r;
                 for (r = 0; r < n; r++)
-                    if (!runs[r].Sparse &&
-                        lcn >= runs[r].Lcn && lcn < runs[r].Lcn + runs[r].Len)
-                        { found = 1; break; }
+                {
+                    if (runs[r].Sparse)
+                        continue;
+                    for (li = 0; li < ledgerCount; li++)
+                    {
+                        ULONGLONG lcn = c->XLinks[li].Lcn;
+                        if (c->XLinks[li].FirstRec == (ULONG)-1 &&
+                            recno < c->XLinks[li].SecondRec &&
+                            lcn >= runs[r].Lcn &&
+                            lcn < runs[r].Lcn + runs[r].Len)
+                            c->XLinks[li].FirstRec = recno;
+                    }
+                }
             }
-            if (found)
-                break;
             off += a->Length;
         }
     }
+
     free(runs);
     free(rec);
-    return found;
 }
 
 /* Truncate the loser of each cross-linked cluster at the first VCN that maps
@@ -619,6 +788,8 @@ int chk_repair_crosslinks(CHK_CTX *c, NTFS_CHK_RESULT *res)
         return -1;
     }
 
+    chk_resolve_xlink_owners(c);
+
     for (li = 0; li < ledgerCount; li++)
     {
         ULONGLONG lcn = c->XLinks[li].Lcn;
@@ -628,9 +799,9 @@ int chk_repair_crosslinks(CHK_CTX *c, NTFS_CHK_RESULT *res)
 
         if (recno >= c->RecordCount)
             continue;
-        /* Confirm a lower-numbered owner exists; if not, we cannot safely
-         * pick a loser -- leave the xlink reported. */
-        if (!chk_lcn_claimed_below(c, lcn, recno))
+        /* A lower-numbered owner must exist; if not, we cannot safely pick a
+         * loser -- leave the xlink reported. */
+        if (c->XLinks[li].FirstRec == (ULONG)-1)
             continue;
 
         if (chk_read_record(c, recno, rec) != 0 ||
@@ -897,11 +1068,6 @@ int chk_repair_mft_bitmap(CHK_CTX *c, NTFS_CHK_RESULT *res)
  * ============================================================ */
 
 static const WCHAR chk_i30_name[4] = { '$', 'I', '3', '0' };
-
-/* Offset of FILE_NAME_ATTR::FileName[0] -- the fixed part before the name.
- * A $FILE_NAME key with N name WCHARs is CHK_FN_FIXED + N*sizeof(WCHAR) bytes
- * (matches ntfs_make_index_entry's sizeof(FILE_NAME_ATTR)-sizeof(WCHAR)+N*2). */
-#define CHK_FN_FIXED  0x42
 
 /* One collected leaf entry: a self-contained INDEX_ENTRY (0x10 header + key). */
 typedef struct _CHK_RB_ENT {
@@ -1563,47 +1729,18 @@ done:
  * LinksSeen reflecting exactly the rebuilt index (no double count). */
 static void chk_uncredit_dir_links(CHK_CTX *c, ULONG dirRec)
 {
-    UCHAR *scan;
-    ULONG recno;
+    ULONG i;
 
-    scan = (UCHAR *)malloc(c->MftRecordSize);
-    if (!scan)
+    if (!c->ChildStart || !c->ChildList || dirRec >= c->RecordCount)
         return;
-    for (recno = 0; recno < c->RecordCount; recno++)
+    /* One decrement per $FILE_NAME naming the child in this directory, which
+     * is exactly what the index holds. */
+    for (i = c->ChildStart[dirRec]; i < c->ChildStart[dirRec + 1]; i++)
     {
-        FILE_RECORD_HEADER *sh = (FILE_RECORD_HEADER *)scan;
-        ULONG off;
-        USHORT f = c->Rec[recno].Flags;
-
-        if ((f & (CRF_IN_USE | CRF_EXTENSION)) != CRF_IN_USE)
-            continue;
-        if (chk_read_record(c, recno, scan) != 0 ||
-            *(ULONG *)scan != NRH_FILE_TYPE ||
-            chk_apply_fixups(scan, c->MftRecordSize, c->BytesPerSector) != 0)
-            continue;
-        if (!(sh->Flags & FRH_IN_USE) || sh->BaseFileRecord != 0)
-            continue;
-
-        off = sh->AttributeOffset;
-        while (off + 8 <= c->MftRecordSize)
-        {
-            ATTR_RECORD *a = (ATTR_RECORD *)(scan + off);
-            if (a->Type == AT_END || a->Length == 0 ||
-                off + a->Length > c->MftRecordSize)
-                break;
-            if (a->Type == AT_FILE_NAME && !a->NonResident &&
-                a->Resident.ValueOffset + CHK_FN_FIXED <= a->Length)
-            {
-                FILE_NAME_ATTR *fn =
-                    (FILE_NAME_ATTR *)(scan + off + a->Resident.ValueOffset);
-                if ((ULONG)(fn->ParentDirectory & 0xFFFFFFFFFFFFULL) == dirRec &&
-                    c->Rec[recno].LinksSeen > 0)
-                    c->Rec[recno].LinksSeen--;
-            }
-            off += a->Length;
-        }
+        ULONG child = c->ChildList[i];
+        if (child < c->RecordCount && c->Rec[child].LinksSeen > 0)
+            c->Rec[child].LinksSeen--;
     }
-    free(scan);
 }
 
 int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
@@ -1611,7 +1748,7 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
     UCHAR *dir = NULL, *scan = NULL;
     CHK_RB_ENT *ents = NULL;
     ULONG entCount = 0, entCap = 0;
-    ULONG recno, k;
+    ULONG recno, k, ci;
     ULONG blockSize, clustersPerBlock;
     USHORT nextInstance;
     ULONG smallBytes, i;
@@ -1619,6 +1756,8 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
     int isLarge;
 
     if (!c->Rec || dirRec >= c->RecordCount)
+        return -1;
+    if (!c->ChildStart || !c->ChildList)
         return -1;
     if (!(c->Rec[dirRec].Flags & CRF_DIRECTORY))
         return -1;
@@ -1653,19 +1792,24 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
     if (clustersPerBlock == 0)
         clustersPerBlock = 1;
 
-    /* -------- Pass A: count-then-emit collection of child entries. -------- */
-    for (recno = 0; recno < c->RecordCount; recno++)
+    /* -------- Pass A: collect this directory's child entries. --------
+     * Driven by the prebuilt parent index, so only the actual children are
+     * read; walking the whole MFT here meant one full volume re-read per
+     * damaged directory. */
+    for (ci = c->ChildStart[dirRec]; ci < c->ChildStart[dirRec + 1]; ci++)
     {
         FILE_RECORD_HEADER *sh;
         ULONG off;
-        USHORT f;
 
-        if (c->Rec)
-        {
-            f = c->Rec[recno].Flags;
-            if ((f & (CRF_IN_USE | CRF_EXTENSION)) != CRF_IN_USE)
-                continue;
-        }
+        recno = c->ChildList[ci];
+        if (recno >= c->RecordCount)
+            continue;
+        /* The bucket holds one entry per $FILE_NAME, and the attribute walk
+         * below already emits every matching name of the record -- so visit
+         * each child once.  Buckets are grouped by ascending record number,
+         * so repeats are adjacent. */
+        if (ci > c->ChildStart[dirRec] && c->ChildList[ci - 1] == recno)
+            continue;
         if (chk_read_record(c, recno, scan) != 0 ||
             *(ULONG *)scan != NRH_FILE_TYPE ||
             chk_apply_fixups(scan, c->MftRecordSize, c->BytesPerSector) != 0)
@@ -1901,58 +2045,6 @@ static void chk_orphan_root_si(CHK_CTX *c, ULONG *secId, ULONGLONG *timeVal)
     free(root);
 }
 
-/* Does any in-use record own a Win32/POSIX $FILE_NAME whose ParentDirectory is
- * FILE_Root and whose name equals `name` (case-sensitively, since found.NNN is
- * ASCII)?  Used to skip a found.NNN slot that already exists. */
-static int chk_orphan_name_taken(CHK_CTX *c, const WCHAR *name, ULONG nameLen)
-{
-    UCHAR *rec;
-    ULONG recno;
-    int taken = 0;
-
-    rec = (UCHAR *)malloc(c->MftRecordSize);
-    if (!rec)
-        return 0;
-    for (recno = FILE_FIRST_USER; recno < c->RecordCount && !taken; recno++)
-    {
-        FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
-        ULONG off;
-        if (!c->Rec || !(c->Rec[recno].Flags & CRF_IN_USE))
-            continue;
-        if (chk_read_record(c, recno, rec) != 0 ||
-            *(ULONG *)rec != NRH_FILE_TYPE ||
-            chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
-            continue;
-        if (!(h->Flags & FRH_IN_USE) || h->BaseFileRecord != 0)
-            continue;
-        off = h->AttributeOffset;
-        while (off + 8 <= c->MftRecordSize)
-        {
-            ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
-            if (a->Type == AT_END || a->Length == 0 ||
-                off + a->Length > c->MftRecordSize)
-                break;
-            if (a->Type == AT_FILE_NAME && !a->NonResident)
-            {
-                FILE_NAME_ATTR *fn =
-                    (FILE_NAME_ATTR *)(rec + off + a->Resident.ValueOffset);
-                if ((ULONG)(fn->ParentDirectory & 0xFFFFFFFFFFFFULL) == FILE_Root &&
-                    fn->FileNameLength == nameLen)
-                {
-                    ULONG k = 0;
-                    while (k < nameLen && fn->FileName[k] == name[k])
-                        k++;
-                    if (k == nameLen)
-                        taken = 1;
-                }
-            }
-            off += a->Length;
-        }
-    }
-    free(rec);
-    return taken;
-}
-
 /* Build the found.NNN name (POSIX ASCII WCHARs) into name[], returns length. */
 static ULONG chk_orphan_found_name(WCHAR *name, ULONG nnn)
 {
@@ -1962,6 +2054,94 @@ static ULONG chk_orphan_found_name(WCHAR *name, ULONG nnn)
     name[7] = (WCHAR)('0' + (nnn / 10) % 10);
     name[8] = (WCHAR)('0' + nnn % 10);
     return 9;
+}
+
+/* Pick the lowest NNN whose found.NNN is not already a child of the root, and
+ * write that name into name[].  Returns its length, or 0 if all 1000 are taken
+ * (absurd -- the caller gives up quietly).
+ *
+ * Only the root's own children can collide, so only they are read, once: the
+ * old shape asked "is this one name taken?" and answered it with a full MFT
+ * scan, then repeated that up to 1000 times. */
+static ULONG chk_orphan_pick_name(CHK_CTX *c, WCHAR *name)
+{
+    UCHAR *rec;
+    UCHAR taken[1000];
+    ULONG ci, nnn, len = 0;
+
+    memset(taken, 0, sizeof(taken));
+    if (!c->ChildStart || !c->ChildList)
+        return 0;
+
+    rec = (UCHAR *)malloc(c->MftRecordSize);
+    if (!rec)
+        return 0;
+
+    for (ci = c->ChildStart[FILE_Root]; ci < c->ChildStart[FILE_Root + 1]; ci++)
+    {
+        FILE_RECORD_HEADER *h = (FILE_RECORD_HEADER *)rec;
+        ULONG recno = c->ChildList[ci];
+        ULONG off;
+
+        if (recno >= c->RecordCount)
+            continue;
+        if (ci > c->ChildStart[FILE_Root] && c->ChildList[ci - 1] == recno)
+            continue;
+        if (chk_read_record(c, recno, rec) != 0 ||
+            *(ULONG *)rec != NRH_FILE_TYPE ||
+            chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
+            continue;
+        if (!(h->Flags & FRH_IN_USE) || h->BaseFileRecord != 0)
+            continue;
+
+        off = h->AttributeOffset;
+        while (off + 8 <= c->MftRecordSize)
+        {
+            ATTR_RECORD *a = (ATTR_RECORD *)(rec + off);
+            if (a->Type == AT_END || a->Length == 0 ||
+                off + a->Length > c->MftRecordSize)
+                break;
+            if (a->Type == AT_FILE_NAME && !a->NonResident &&
+                a->Resident.ValueOffset + CHK_FN_FIXED <= a->Length)
+            {
+                FILE_NAME_ATTR *fn =
+                    (FILE_NAME_ATTR *)(rec + off + a->Resident.ValueOffset);
+                if (CHK_REF_REC(fn->ParentDirectory) == FILE_Root &&
+                    fn->FileNameLength == 9 &&
+                    a->Resident.ValueOffset + CHK_FN_FIXED +
+                        9 * sizeof(WCHAR) <= a->Length)
+                {
+                    static const WCHAR pfx[6] =
+                        { 'f', 'o', 'u', 'n', 'd', '.' };
+                    const WCHAR *nm = fn->FileName;
+                    ULONG k;
+
+                    for (k = 0; k < 6 && nm[k] == pfx[k]; k++)
+                        ;
+                    if (k == 6 &&
+                        nm[6] >= '0' && nm[6] <= '9' &&
+                        nm[7] >= '0' && nm[7] <= '9' &&
+                        nm[8] >= '0' && nm[8] <= '9')
+                    {
+                        nnn = (ULONG)(nm[6] - '0') * 100 +
+                              (ULONG)(nm[7] - '0') * 10 +
+                              (ULONG)(nm[8] - '0');
+                        taken[nnn] = 1;
+                    }
+                }
+            }
+            off += a->Length;
+        }
+    }
+    free(rec);
+
+    for (nnn = 0; nnn < 1000; nnn++)
+        if (!taken[nnn])
+        {
+            len = chk_orphan_found_name(name, nnn);
+            break;
+        }
+    return len;
 }
 
 /* Find a free MFT record index >= FILE_FIRST_USER (MftMap bit clear), returns
@@ -2182,14 +2362,13 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
         return 0;
 
     /* 2a. Pick the first free found.NNN name that is not already a root child. */
-    for (nnn = 0; nnn < 1000; nnn++)
-    {
-        foundNameLen = chk_orphan_found_name(foundName, nnn);
-        if (!chk_orphan_name_taken(c, foundName, foundNameLen))
-            break;
-    }
-    if (nnn >= 1000)
+    foundNameLen = chk_orphan_pick_name(c, foundName);
+    if (foundNameLen == 0)
         return 0;   /* absurd: 1000 found.NNN already exist -- give up quietly */
+    nnn = (ULONG)(foundName[6] - '0') * 100 +
+          (ULONG)(foundName[7] - '0') * 10 +
+          (ULONG)(foundName[8] - '0');
+    (void)nnn;   /* only read by CHK_TRACE, which is a no-op in-tree */
 
     /* 2b. Find a free MFT record; MFT extension is deferred (do not fabricate). */
     foundRec = chk_orphan_free_record(c, &staleSeq);
@@ -2352,6 +2531,17 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
          * model change so we do not leave a phantom directory. */
         c->Rec[foundRec].Flags = 0;
         chk_bmp_clear(c->MftMap, foundRec);
+        return 0;
+    }
+
+    /* The re-home writes changed ParentDirectory on disk, and found.NNN itself
+     * is new: refresh the parent index so both rebuilds below see the children
+     * they are supposed to index. */
+    if (chk_build_repair_index(c) != 0)
+    {
+        /* found.NNN exists and the orphans point at it, but neither index can
+         * be rebuilt: report it so the run does not look complete. */
+        chk_add_issue(res, CHK_ERR_NOMEM, foundRec, 3, 0);
         return 0;
     }
 
