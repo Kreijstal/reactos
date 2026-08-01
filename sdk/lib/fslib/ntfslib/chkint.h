@@ -106,6 +106,16 @@ typedef struct _CHK_CTX {
     WCHAR     *UpCase;         /* 65536-entry upcase table ($UpCase or builtin) */
     CHK_XLINK  XLinks[CHK_MAX_XLINKS];
     ULONG      XLinkCount;     /* total cross-linked clusters (may exceed array) */
+
+    /* ---- repair-time parent -> children index (chk_build_repair_index) ----
+     * Children of directory D are ChildList[ChildStart[D] .. ChildStart[D+1]),
+     * one entry per $FILE_NAME (so a record hard-linked twice into the same
+     * directory appears twice, and DOS+Win32 name pairs appear twice).
+     * NULL until built; a snapshot of on-disk state, so any stage that
+     * rewrites ParentDirectory rebuilds it before relying on it again. */
+    ULONG     *ChildStart;     /* RecordCount + 1 offsets into ChildList  */
+    ULONG     *ChildList;      /* child record numbers, grouped by parent */
+    ULONG      ChildCount;     /* entries in ChildList                    */
 } CHK_CTX;
 
 /* ---- bitmap bit accessors on a byte buffer ---- */
@@ -188,6 +198,17 @@ int  chk_check_mftmirr(CHK_CTX *c, NTFS_CHK_RESULT *res,
 
 int  chk_set_volume_flag(CHK_CTX *c, int setDirty, int markChkdsk);
 int  chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno);
+
+/* Build (or rebuild) c->ChildStart/ChildList from one MFT pass.  Every repair
+ * stage that asks "which records are named in directory D" must go through it:
+ * answering that question by re-reading the MFT costs O(RecordCount) uncached
+ * 1 KiB reads *each time*, and the stages ask it once per damaged directory
+ * and once per candidate orphan name, which on a real volume never finishes.
+ * Returns 0 on success, -1 on OOM (callers then
+ * skip the stages that need it rather than fall back to rescanning).  Safe to
+ * call repeatedly; frees any previous index first. */
+int  chk_build_repair_index(CHK_CTX *c);
+void chk_free_repair_index(CHK_CTX *c);
 
 /* R8 (H8): reset $LogFile to the empty, dismounted-cleanly state so a stale
  * journal is not replayed over just-repaired metadata.  Writes only the two
