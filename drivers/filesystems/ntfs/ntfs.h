@@ -2657,7 +2657,13 @@ NtfsLfsWriteRestart(PLFS_WRITE_CONTEXT Ctx,
 
 /* On-disk $VOLUME_INFORMATION attribute body (AttributeVolumeInformation,
  * 0x70).  The DIRTY bit lives in Flags.  This is the resident value of the
- * $Volume (MFT #3) file's $VOLUME_INFORMATION attribute. */
+ * $Volume (MFT #3) file's $VOLUME_INFORMATION attribute.
+ *
+ * MUST be byte-packed: the on-disk value is exactly 12 bytes, but the natural
+ * alignment of the leading ULONGLONG pads the struct to 16, and code that
+ * length-checks a real $Volume against sizeof() then rejects every volume in
+ * existence. */
+#include <pshpack1.h>
 typedef struct _NTFS_VOLUME_INFORMATION
 {
     ULONGLONG Reserved;     /* 0x00 - always zero                            */
@@ -2665,6 +2671,9 @@ typedef struct _NTFS_VOLUME_INFORMATION
     UCHAR     MinorVersion; /* 0x09                                          */
     USHORT    Flags;        /* 0x0A - volume flags (DIRTY = 0x0001)          */
 } NTFS_VOLUME_INFORMATION, *PNTFS_VOLUME_INFORMATION;
+#include <poppack.h>
+
+C_ASSERT(sizeof(NTFS_VOLUME_INFORMATION) == 12);
 
 /* $VOLUME_INFORMATION.Flags: the on-disk "volume is dirty" bit chkdsk acts
  * on.  Same numeric value as the public VOLUME_IS_DIRTY FSCTL constant. */
@@ -2722,10 +2731,23 @@ NtfsLfsLogMetadataPage(PDEVICE_EXTENSION Vcb,
                        USHORT UndoLength,
                        PULONGLONG PageLsn);
 
+/* Seed Vcb->VolumeDirtyOnDisk from the on-disk $Volume DIRTY bit.  Called once
+ * at mount, before anything can want to set it. */
+NTSTATUS
+NtfsLfsQueryVolumeDirty(PDEVICE_EXTENSION Vcb);
+
 /* Set or clear the on-disk $Volume DIRTY bit.  Idempotent (tracks
- * Vcb->VolumeDirtyOnDisk).  No-op when LoggingEnabled is FALSE. */
+ * Vcb->VolumeDirtyOnDisk).  Runs regardless of LoggingEnabled: the DIRTY bit
+ * is a $VOLUME_INFORMATION flag, not a journal construct. */
 NTSTATUS
 NtfsLfsSetVolumeDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
+
+/* Flag the volume for chkdsk after detecting damage that cannot be repaired in
+ * place.  Sticky, at most one $Volume write per mount, silent on a read-only
+ * mount, and never fails the caller's request.  See the lfslog.c header for why
+ * this carries more weight here than it does on Windows. */
+VOID
+NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb);
 
 /* Clean-dismount flush: write the CLEAN restart landmark and clear the
  * on-disk DIRTY bit.  No-op when LoggingEnabled is FALSE. */
