@@ -15,15 +15,23 @@
  *
  * RUNTIME GATE (the most important property of this file):
  *
- *   EVERY public entry point here is a pass-through NO-OP when
+ *   Every LOGGING entry point here is a pass-through NO-OP when
  *   Vcb->LoggingEnabled is FALSE, which is the DEFAULT for every mounted
  *   volume.  With logging off, NtfsLfsLogMetadataPage returns STATUS_SUCCESS
- *   without touching $LogFile, stamps no LSN, and runs no $Volume handshake,
- *   so the metadata write path is byte-for-byte identical to a build without
- *   this slice.  This is deliberate: emission without recovery (slice 3) buys
- *   zero durability and only adds latency, and a wrong on-disk format/ordering
- *   would corrupt a real volume.  Logging is therefore flipped on only by the
- *   userspace harness (and, later, by an explicit opt-in once replay lands).
+ *   without touching $LogFile and stamps no LSN, so the metadata write path is
+ *   byte-for-byte identical to a build without this slice.  This is
+ *   deliberate: emission without recovery (slice 3) buys zero durability and
+ *   only adds latency, and a wrong on-disk format/ordering would corrupt a
+ *   real volume.  Logging is therefore flipped on only by the userspace
+ *   harness (and, later, by an explicit opt-in once replay lands).
+ *
+ *   The $Volume DIRTY bit is the ONE exception, and deliberately so: it is a
+ *   plain $VOLUME_INFORMATION flag, not a journal construct.  Windows sets it
+ *   whenever NTFS detects damage it cannot resolve, so that the next boot's
+ *   autochk runs chkdsk; that is orthogonal to whether a journal exists, and
+ *   it is the only self-healing path we have while replay is unimplemented.
+ *   NtfsLfsQueryVolumeDirty / NtfsLfsSetVolumeDirty / NtfsMarkVolumeCorrupt
+ *   therefore run regardless of LoggingEnabled.
  *
  * WAL INVARIANT:
  *
@@ -280,6 +288,87 @@ Cleanup:
 }
 
 /**
+ * @internal
+ * @brief  Point @p InfoOut at the $VOLUME_INFORMATION value INSIDE @p Record.
+ *
+ * Deliberately does not go through FindAttribute: PrepareAttributeContext
+ * hands back a private COPY of the attribute (mft.c), so a caller that flips a
+ * bit in Context->pRecord and then writes the file record back persists the
+ * unmodified record and gets STATUS_SUCCESS for it.  FindFirstAttribute walks
+ * the record buffer itself and yields pointers into it, which is what an
+ * in-place edit needs.
+ */
+static NTSTATUS
+LfsFindVolumeInformation(PDEVICE_EXTENSION Vcb,
+                         PFILE_RECORD_HEADER Record,
+                         PNTFS_VOLUME_INFORMATION *InfoOut)
+{
+    FIND_ATTR_CONTXT Context;
+    PNTFS_ATTR_RECORD Attribute;
+    NTSTATUS Status;
+
+    Status = FindFirstAttribute(&Context, Vcb, Record, FALSE, &Attribute);
+    while (NT_SUCCESS(Status))
+    {
+        if (Attribute->Type == AttributeVolumeInformation)
+        {
+            if (Attribute->IsNonResident ||
+                Attribute->Resident.ValueLength < sizeof(NTFS_VOLUME_INFORMATION))
+            {
+                FindCloseAttribute(&Context);
+                return STATUS_FILE_CORRUPT_ERROR;
+            }
+
+            *InfoOut = (PNTFS_VOLUME_INFORMATION)((PUCHAR)Attribute +
+                                                  Attribute->Resident.ValueOffset);
+            FindCloseAttribute(&Context);
+            return STATUS_SUCCESS;
+        }
+
+        Status = FindNextAttribute(&Context, &Attribute);
+    }
+
+    FindCloseAttribute(&Context);
+    return STATUS_OBJECT_NAME_NOT_FOUND;
+}
+
+/**
+ * @name NtfsLfsQueryVolumeDirty
+ * @implemented
+ *
+ * Read the on-disk $VOLUME_INFORMATION DIRTY bit into Vcb->VolumeDirtyOnDisk.
+ * Called once at mount so the set/clear handshake below starts from the truth
+ * on the platter rather than from an assumed-clean default: a volume that was
+ * left dirty by a previous boot must not be quietly re-marked (a wasted
+ * metadata write) nor believed clean.
+ */
+NTSTATUS
+NtfsLfsQueryVolumeDirty(PDEVICE_EXTENSION Vcb)
+{
+    PFILE_RECORD_HEADER VolumeRecord;
+    PNTFS_VOLUME_INFORMATION Info;
+    NTSTATUS Status;
+
+    VolumeRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (VolumeRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(Vcb, NTFS_FILE_VOLUME, VolumeRecord);
+    if (NT_SUCCESS(Status))
+    {
+        Status = LfsFindVolumeInformation(Vcb, VolumeRecord, &Info);
+        if (NT_SUCCESS(Status))
+        {
+            Vcb->VolumeDirtyOnDisk =
+                (Info->Flags & NTFS_VOLUME_FLAG_DIRTY) ? TRUE : FALSE;
+        }
+    }
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, VolumeRecord);
+    return Status;
+}
+
+/**
  * @name NtfsLfsSetVolumeDirty
  * @implemented
  *
@@ -289,13 +378,8 @@ NTSTATUS
 NtfsLfsSetVolumeDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty)
 {
     PFILE_RECORD_HEADER VolumeRecord;
-    PNTFS_ATTR_CONTEXT InfoCtx = NULL;
     PNTFS_VOLUME_INFORMATION Info;
-    PNTFS_ATTR_RECORD AttrRecord;
     NTSTATUS Status;
-
-    if (!Vcb->LoggingEnabled)
-        return STATUS_SUCCESS;
 
     /* Already in the requested state: nothing to do. */
     if ((BOOLEAN)Vcb->VolumeDirtyOnDisk == Dirty)
@@ -309,21 +393,11 @@ NtfsLfsSetVolumeDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty)
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    Status = FindAttribute(Vcb, VolumeRecord, AttributeVolumeInformation,
-                           L"", 0, &InfoCtx, NULL);
+    /* Must resolve to a pointer INSIDE VolumeRecord - see the helper. */
+    Status = LfsFindVolumeInformation(Vcb, VolumeRecord, &Info);
     if (!NT_SUCCESS(Status))
         goto Cleanup;
 
-    AttrRecord = InfoCtx->pRecord;
-    if (AttrRecord->IsNonResident ||
-        AttrRecord->Resident.ValueLength < sizeof(NTFS_VOLUME_INFORMATION))
-    {
-        Status = STATUS_FILE_CORRUPT_ERROR;
-        goto Cleanup;
-    }
-
-    Info = (PNTFS_VOLUME_INFORMATION)((PUCHAR)AttrRecord +
-                                      AttrRecord->Resident.ValueOffset);
     if (Dirty)
         Info->Flags |= NTFS_VOLUME_FLAG_DIRTY;
     else
@@ -335,10 +409,57 @@ NtfsLfsSetVolumeDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty)
         Vcb->VolumeDirtyOnDisk = Dirty;
 
 Cleanup:
-    if (InfoCtx != NULL)
-        ReleaseAttributeContext(InfoCtx);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, VolumeRecord);
     return Status;
+}
+
+/**
+ * @name NtfsMarkVolumeCorrupt
+ * @implemented
+ *
+ * Record on disk that the driver found damage it could not repair in place, so
+ * that the next boot's autochk runs chkdsk over the volume.  This mirrors what
+ * Windows NTFS does when it detects an inconsistency: it does not attempt an
+ * online rebuild of arbitrary structures, it flags the volume and lets the
+ * checker fix it while nothing else holds the disk.
+ *
+ * It matters more here than it does on Windows.  Windows reaches this state
+ * rarely because $LogFile replay repairs a torn update at mount; we have no
+ * replay (see the file header), so damage from an unclean shutdown is durable
+ * and this is the ONLY path by which it ever gets cleaned up.  Without it the
+ * driver skips the broken structure on every boot, forever, and the volume
+ * silently decays.
+ *
+ * Called from the detection sites, which run deep inside the index walk with
+ * directory resources held; it must therefore stay cheap and must not fail the
+ * caller's request.  It writes at most one $Volume record per mount (the bit is
+ * sticky until chkdsk clears it), and does nothing at all on a read-only mount.
+ */
+VOID
+NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb)
+{
+    NTSTATUS Status;
+
+    /* Sticky: the bit stays set until chkdsk's clean stamp clears it, so one
+     * write per mount is enough no matter how many broken entries we meet. */
+    if (Vcb->VolumeDirtyOnDisk)
+        return;
+
+    /* A read-only mount must not write, and a volume already gated read-only
+     * for a dirty log is heading for the checker anyway. */
+    if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
+        return;
+
+    Status = NtfsLfsSetVolumeDirty(Vcb, TRUE);
+    if (NT_SUCCESS(Status))
+    {
+        DPRINT1("Volume marked dirty: chkdsk will run on the next boot.\n");
+    }
+    else
+    {
+        DPRINT1("Could not mark the volume dirty (0x%08lx); the damage will "
+                "persist unrepaired.\n", Status);
+    }
 }
 
 /**
