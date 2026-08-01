@@ -55,6 +55,67 @@ int chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno)
     return rc;
 }
 
+/*
+ * R7: $MFTMirr resync.
+ *
+ * Pass 6 byte-compares the mirror against the first records of $MFT, but there
+ * was no repair behind that check: CHK_ERR_MFTMIRR_MISMATCH was detected and
+ * then left unfixed forever.  Since `unfixed = IssueCount - RepairedCount`
+ * gates the dirty-flag clear, a single stale mirror record pinned the volume
+ * dirty and ExitStatus at 1 no matter how many times it was checked -- and a
+ * stale mirror is the normal state here, because the driver only refreshes it
+ * when the MFT grows, not on every write to a mirrored record.
+ *
+ * $MFT is the authority: the whole check ran against it and every repair this
+ * run has already been applied to it, so the mirror is brought up to date from
+ * it and not the other way round.  The one exception is the case the mirror
+ * exists for -- an MFT record that does not parse.  Copying that over the
+ * backup would destroy the only good copy, so such a record is left alone and
+ * its mismatch stays unfixed, which keeps the volume dirty for the next check
+ * rather than stamping it clean over a lost backup.
+ */
+int chk_repair_mftmirr(CHK_CTX *c, NTFS_CHK_RESULT *res)
+{
+    UCHAR *rec;
+    ULONG k, fixed = 0;
+
+    rec = (UCHAR *)malloc(c->MftRecordSize);
+    if (!rec)
+        return -1;
+
+    for (k = 0; k < res->IssueRecorded; k++)
+    {
+        NTFS_CHK_ISSUE *iss = &res->Issues[k];
+        ULONG recno;
+
+        if (iss->Fixed || iss->Code != CHK_ERR_MFTMIRR_MISMATCH)
+            continue;
+
+        recno = (ULONG)iss->Param0;
+        if (recno >= c->RecordCount)
+            continue;
+
+        if (chk_read_record(c, recno, rec) != 0 ||
+            *(ULONG *)rec != NRH_FILE_TYPE ||
+            chk_apply_fixups(rec, c->MftRecordSize, c->BytesPerSector) != 0)
+        {
+            CHK_TRACE("R7: MFT record %lu does not parse; leaving the mirror\n",
+                      (unsigned long)recno);
+            continue;
+        }
+
+        if (chk_sync_mftmirr_record(c, recno) != 0)
+            continue;
+
+        iss->Fixed = 1;
+        res->RepairedCount++;
+        fixed++;
+    }
+
+    free(rec);
+    return (int)fixed;
+}
+
 /* ============================================================
  * $Volume dirty-flag repair
  * ============================================================ */

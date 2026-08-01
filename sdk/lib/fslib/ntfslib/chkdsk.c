@@ -768,6 +768,14 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     /* Pass 6: $MFTMirr compare */
     chk_check_mftmirr(c, res, opt);
 
+    /* R7: bring the mirror back in step with $MFT.  Deliberately the last
+     * record-level repair: every earlier stage may have rewritten a mirrored
+     * record, so the mirror can only be made correct once they have settled.
+     * The one write that still follows -- R8's dirty-flag clear on $Volume --
+     * syncs its own record through chk_set_volume_flag(). */
+    if (opt->FixErrors)
+        chk_repair_mftmirr(c, res);
+
     chk_free_repair_index(c);
     free(computed);
     c->ClusterMap = NULL;
