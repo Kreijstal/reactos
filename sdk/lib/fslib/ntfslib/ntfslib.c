@@ -375,6 +375,7 @@ NtfsChkdsk(
     NTFS_CHK_RESULT *Result;
     ACCESS_MASK Access;
     BOOLEAN VolumeLocked = FALSE;
+    BOOLEAN RepairDeclined = FALSE;
     int Rc;
 
     UNREFERENCED_PARAMETER(ScanDrive);
@@ -426,10 +427,35 @@ NtfsChkdsk(
         LockStatus = NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb,
                                      FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
         if (NT_SUCCESS(LockStatus))
+        {
             VolumeLocked = TRUE;
+        }
         else
-            DPRINT1("NtfsChkdsk: could not lock volume (0x%x); repair may be unsafe\n",
-                    LockStatus);
+        {
+            /*
+             * Downgrade to a read-only check.  Repairing without the lock is
+             * not merely "unsafe", it is actively destructive: every write
+             * below goes through NtWriteFile on the volume handle, i.e. raw
+             * sectors, while the mounted driver holds its own cached copies of
+             * the very structures being rewritten ($MFT records, $Bitmap,
+             * index blocks).  The two write back on independent schedules and
+             * overwrite each other, so a repair pass can both undo itself and
+             * corrupt structures that were intact -- which is why repeated
+             * passes on a live volume never converge, each one reporting a
+             * different issue count and repairing hundreds of entries forever.
+             *
+             * A volume that cannot be locked simply cannot be repaired online;
+             * this is why Windows' chkdsk answers "Cannot lock current drive"
+             * and offers to run at next boot instead of proceeding.  Report the
+             * damage and leave the dirty flag set (NtfsChkVolume only clears it
+             * for a converged repair run) so the volume is checked offline
+             * rather than silently forgotten.
+             */
+            DPRINT1("NtfsChkdsk: could not lock volume (0x%x); checking read-only, "
+                    "repairs need an offline run\n", LockStatus);
+            FixErrors = FALSE;
+            RepairDeclined = TRUE;
+        }
     }
 
     IoContext.FileHandle = FileHandle;
@@ -492,9 +518,10 @@ NtfsChkdsk(
         *ExitStatus = (ULONG)STATUS_SUCCESS;
 
     DPRINT1("NtfsChkdsk: %wZ Fix %u OnlyIfDirty %u -> rc %d, issues %lu, "
-            "repaired %lu, dirty %u, ExitStatus 0x%08lx\n",
+            "repaired %lu, dirty %u, ExitStatus 0x%08lx%s\n",
             DriveRoot, FixErrors, CheckOnlyIfDirty, Rc, Result->IssueCount,
-            Result->RepairedCount, Result->WasDirty, *ExitStatus);
+            Result->RepairedCount, Result->WasDirty, *ExitStatus,
+            RepairDeclined ? " [read-only: volume in use, repairs need an offline run]" : "");
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
 
