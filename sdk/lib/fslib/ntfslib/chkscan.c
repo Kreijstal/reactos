@@ -536,7 +536,8 @@ static void chk_walk_visit_entry(CHK_WALK *w, INDEX_ENTRY *e)
         return;
     }
 
-    c->Rec[refRec].LinksSeen++;
+    if (!c->WalkVerifyOnly)
+        c->Rec[refRec].LinksSeen++;
 }
 
 /* In-order recursive walk over one node's entry list. */
@@ -639,8 +640,8 @@ static void chk_walk_node(CHK_WALK *w, UCHAR *entries, ULONG length, int depth)
     }
 }
 
-static void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
-                             NTFS_CHK_RESULT *res, const NTFS_CHK_OPTIONS *opt)
+void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
+                      NTFS_CHK_RESULT *res, const NTFS_CHK_OPTIONS *opt)
 {
     CHK_WALK w;
     ULONG irOff, iaOff, bmOff;
@@ -739,7 +740,7 @@ static void chk_walk_one_dir(CHK_CTX *c, ULONG recno, UCHAR *rec,
     chk_walk_node(&w, base + root->Header.EntriesOffset,
                   root->Header.IndexLength - root->Header.EntriesOffset, 0);
 
-    if (w.bad)
+    if (w.bad && !c->WalkVerifyOnly)
         c->Rec[recno].Flags |= CRF_INDEX_BAD;
 
     free(w.iaRuns);
@@ -896,6 +897,28 @@ int chk_connectivity(CHK_CTX *c, NTFS_CHK_RESULT *res,
             {
                 m->Flags |= CRF_ORPHAN;
                 chk_add_issue(res, CHK_ERR_ORPHAN, recno, parent, 0);
+
+                /* The record names a live, structurally sound directory that
+                 * simply has no entry for it: the damage is the parent's
+                 * missing index entry, not the child.  Mark that index
+                 * incomplete so R2 rebuilds it from the records that claim it
+                 * -- which puts the file back where it belongs.
+                 *
+                 * Without this the file is only ever seen as an orphan, and
+                 * R3 "recovers" it by rewriting its $FILE_NAME to point at
+                 * found.NNN.  That does not just misfile it: every other name
+                 * still indexed by the real parent stops back-referencing it,
+                 * so a directory that was intact becomes a directory full of
+                 * unbacked entries, its children become orphans in turn, and
+                 * the next pass re-homes those too.  Repair runs converged on
+                 * hundreds of "recovered orphans" while the volume got worse. */
+                if (m->FnCount != 0 && parentTrusted &&
+                    parent < c->RecordCount &&
+                    (c->Rec[parent].Flags & (CRF_IN_USE | CRF_DIRECTORY)) ==
+                        (CRF_IN_USE | CRF_DIRECTORY))
+                {
+                    c->Rec[parent].Flags |= CRF_INDEX_BAD;
+                }
                 continue;
             }
         }
