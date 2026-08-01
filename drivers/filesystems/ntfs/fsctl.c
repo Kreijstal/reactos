@@ -643,6 +643,12 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
      * inert) journal context. */
     (void)NtfsLfsMountInitWriteContext(Vcb);
 
+    /* Seed the DIRTY-bit shadow from the platter.  This has to happen AFTER
+     * NtfsLfsMountInitWriteContext, which resets it to a clean baseline.  A
+     * volume that a previous boot flagged for chkdsk must not look clean to
+     * NtfsMarkVolumeCorrupt, or we would rewrite $Volume on every mount. */
+    (void)NtfsLfsQueryVolumeDirty(Vcb);
+
     /* Precompute and cache the free-cluster count so the first
      * IRP_MJ_QUERY_VOLUME_INFORMATION returns immediately.  On slow media
      * (USB-MSC) reading $Bitmap sector-by-sector takes tens of seconds;
@@ -827,6 +833,45 @@ GetNtfsFileRecord(PDEVICE_EXTENSION DeviceExt,
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     Irp->IoStatus.Information = FIELD_OFFSET(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer) + DeviceExt->NtfsInfo.BytesPerFileRecord;
+
+    return STATUS_SUCCESS;
+}
+
+
+/**
+ * @name NtfsIsVolumeDirty
+ * @implemented
+ *
+ * FSCTL_IS_VOLUME_DIRTY: report whether the volume is flagged for chkdsk.
+ * Returns a ULONG whose VOLUME_IS_DIRTY bit mirrors the on-disk $Volume
+ * DIRTY flag, which is what `fsutil dirty query` prints.
+ *
+ * The flag is re-read from $Volume rather than answered from the Vcb shadow,
+ * so the answer is what a checker running against the platter would see; the
+ * shadow is only a cache to keep the set/clear handshake idempotent.
+ */
+static
+NTSTATUS
+NtfsIsVolumeDirty(PDEVICE_EXTENSION DeviceExt,
+                  PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PULONG VolumeState;
+    NTSTATUS Status;
+
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONG))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    if (Irp->AssociatedIrp.SystemBuffer == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = NtfsLfsQueryVolumeDirty(DeviceExt);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    VolumeState = (PULONG)Irp->AssociatedIrp.SystemBuffer;
+    *VolumeState = DeviceExt->VolumeDirtyOnDisk ? VOLUME_IS_DIRTY : 0;
+    Irp->IoStatus.Information = sizeof(ULONG);
 
     return STATUS_SUCCESS;
 }
@@ -2059,6 +2104,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_GET_VOLUME_BITMAP:
             Status = GetVolumeBitmap(DeviceExt, Irp);
+            break;
+
+        case FSCTL_IS_VOLUME_DIRTY:
+            Status = NtfsIsVolumeDirty(DeviceExt, Irp);
             break;
 
         default:

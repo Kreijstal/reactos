@@ -6283,6 +6283,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         {
             DPRINT1("File system corruption detected, malformed index entry at offset %Iu of node VCN %I64u.\n",
                     (ULONG_PTR)IndexEntry - (ULONG_PTR)FirstEntry, VCN);
+            NtfsMarkVolumeCorrupt(Vcb);
             ExFreePoolWithTag(IndexRecord, TAG_NTFS);
             return STATUS_FILE_CORRUPT_ERROR;
         }
@@ -6505,6 +6506,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         {
             DPRINT1("File system corruption detected, malformed index entry at offset %Iu of the index root.\n",
                     (ULONG_PTR)IndexEntry - (ULONG_PTR)FirstEntry);
+            NtfsMarkVolumeCorrupt(Vcb);
             if (IndexAllocationContext)
             {
                 ExFreePoolWithTag(BitmapMem, TAG_NTFS);
@@ -7001,6 +7003,13 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
          * damage caught one step earlier. */
         DPRINT1("Skipping dangling index entry %lu of directory %I64u: MFT record %I64u is unreadable (0x%lx).\n",
                 *FirstEntry, DirectoryMFTIndex, FoundMFTIndex, Status);
+
+        /* Skipping keeps the directory usable, but the entry is still wrong on
+         * disk and only chkdsk can remove it.  Flag the volume so the next boot
+         * repairs it instead of us papering over it on every enumeration until
+         * the end of time. */
+        NtfsMarkVolumeCorrupt(Vcb);
+
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, *FileRecord);
         *FileRecord = NULL;
         (*FirstEntry)++;
