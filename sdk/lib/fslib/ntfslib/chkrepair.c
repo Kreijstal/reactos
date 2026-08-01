@@ -18,9 +18,27 @@
  * DataSize/RecordSize records, normally 0-3 -- must hit the mirror too)
  * ============================================================ */
 
-int chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno)
+/*
+ * `image` is the exact on-disk bytes of record `recno`, update sequence array
+ * already stamped.  Every caller that has just written the record passes its
+ * own write buffer, and that is not an optimisation: re-reading the record
+ * here returned the *pre-write* image, so the mirror was written one update
+ * behind the MFT and "$MFTMirr differs from $MFT" came back on every check.
+ *
+ * The reads and writes here go to a raw volume handle through NtReadFile /
+ * NtWriteFile, and a read issued straight after a write on that handle is not
+ * guaranteed to observe it -- the write reaches the disk (it is there after the
+ * volume is released) but the following read still answers from the older
+ * image.  Since the caller already holds the exact bytes it wrote, the fix is
+ * to mirror those rather than to ask the disk what it thinks they were.
+ *
+ * Pass NULL to mirror whatever the MFT currently holds (used when syncing a
+ * record this run has not just rewritten).
+ */
+int chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno, const UCHAR *image)
 {
     UCHAR *rec = NULL, *raw = NULL;
+    const UCHAR *src = image;
     CHK_RUN runs[64];
     ULONGLONG size = 0;
     int n = 0, rc = -1;
@@ -37,12 +55,16 @@ int chk_sync_mftmirr_record(CHK_CTX *c, ULONG recno)
 
     if (n > 0 && (ULONGLONG)(recno + 1) * c->MftRecordSize <= size)
     {
-        raw = (UCHAR *)malloc(c->MftRecordSize);
-        if (raw &&
-            chk_read_record(c, recno, raw) == 0 &&
+        if (src == NULL)
+        {
+            raw = (UCHAR *)malloc(c->MftRecordSize);
+            if (raw && chk_read_record(c, recno, raw) == 0)
+                src = raw;
+        }
+        if (src != NULL &&
             chk_stream_io(c->Io, runs, (ULONG)n, c->BytesPerCluster,
                           (ULONGLONG)recno * c->MftRecordSize,
-                          raw, c->MftRecordSize, 1) == 0)
+                          (UCHAR *)src, c->MftRecordSize, 1) == 0)
             rc = 0;
         free(raw);
     }
@@ -104,7 +126,7 @@ int chk_repair_mftmirr(CHK_CTX *c, NTFS_CHK_RESULT *res)
             continue;
         }
 
-        if (chk_sync_mftmirr_record(c, recno) != 0)
+        if (chk_sync_mftmirr_record(c, recno, NULL) != 0)
             continue;
 
         iss->Fixed = 1;
@@ -162,7 +184,7 @@ int chk_set_volume_flag(CHK_CTX *c, int setDirty, int markChkdsk)
         chk_stamp_fixups(rec, c->MftRecordSize, c->BytesPerSector);
         if (chk_write_record(c, FILE_Volume, rec) != 0)
             done = -1;
-        else if (chk_sync_mftmirr_record(c, FILE_Volume) != 0)
+        else if (chk_sync_mftmirr_record(c, FILE_Volume, rec) != 0)
             done = -1;
     }
     free(rec);
@@ -827,7 +849,7 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
             if (chk_write_record(c, recno, rec) == 0)
             {
                 if (recno < FILE_FIRST_USER)
-                    chk_sync_mftmirr_record(c, recno);
+                    chk_sync_mftmirr_record(c, recno, rec);
                 iss->Fixed = 1;
                 res->RepairedCount++;
                 res->AttrsTruncated++;
@@ -1105,7 +1127,7 @@ int chk_repair_linkcounts(CHK_CTX *c, NTFS_CHK_RESULT *res)
         if (chk_write_record(c, recno, rec) != 0)
             continue;
         if (recno < FILE_FIRST_USER)
-            chk_sync_mftmirr_record(c, recno);
+            chk_sync_mftmirr_record(c, recno, rec);
 
         m->LinkCountHdr = m->LinksSeen;
         res->LinksFixed++;
@@ -2172,7 +2194,7 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
     if (chk_write_record(c, dirRec, dir) != 0)
         goto out;
     if (dirRec < FILE_FIRST_USER)
-        chk_sync_mftmirr_record(c, dirRec);
+        chk_sync_mftmirr_record(c, dirRec, dir);
 
     /* Mark the directory's index issues fixed + clear CRF_INDEX_BAD. */
     for (k = 0; k < res->IssueRecorded; k++)
