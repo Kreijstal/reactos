@@ -476,18 +476,25 @@ NtfsChkdsk(
     }
 
     /*
-     * Map the checker verdict to the autochk/chkdsk exit convention:
-     *   0 = no problems, 1 = problems fixed, 2 = uncorrected problems remain,
-     *   3 = could not run the check.
+     * ExitStatus is an NTSTATUS, not a chkdsk.exe process exit code: that is
+     * what VfatChkdsk writes and what every consumer reads back
+     * (autochk's dirty test, chkdsk.exe's "run chkdsk again" hint, and the
+     * Status that fmifs!Chkdsk hands to the DONE callback).  Writing the 0..3
+     * exit convention here made the dirty verdict indistinguishable from
+     * STATUS_SUCCESS, so autochk checked the volume and then never repaired it.
+     *
+     *   Result->ExitStatus: 0 = nothing wrong, 2 = everything found was fixed,
+     *                       1 = uncorrected damage remains.
      */
-    if (Rc < 0)
-        *ExitStatus = 3;
-    else if (Result->ExitStatus == 2)
-        *ExitStatus = 1;
-    else if (Result->ExitStatus == 1)
-        *ExitStatus = 2;
+    if (Rc < 0 || Result->ExitStatus == 1)
+        *ExitStatus = (ULONG)STATUS_DISK_CORRUPT_ERROR;
     else
-        *ExitStatus = 0;
+        *ExitStatus = (ULONG)STATUS_SUCCESS;
+
+    DPRINT1("NtfsChkdsk: %wZ Fix %u OnlyIfDirty %u -> rc %d, issues %lu, "
+            "repaired %lu, dirty %u, ExitStatus 0x%08lx\n",
+            DriveRoot, FixErrors, CheckOnlyIfDirty, Rc, Result->IssueCount,
+            Result->RepairedCount, Result->WasDirty, *ExitStatus);
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
 
