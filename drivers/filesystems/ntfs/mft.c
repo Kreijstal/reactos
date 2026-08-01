@@ -2747,6 +2747,96 @@ UpdateIndexEntryFileNameSize(PDEVICE_EXTENSION Vcb,
 }
 
 /**
+* @name NtfsMirrorFileRecord
+* @implemented
+*
+* Copies one already-fixup-stamped MFT record image into $MFTMirr.
+*
+* $MFTMirr holds a byte-identical copy of the first few $MFT records, and
+* chkdsk byte-compares the two.  The mirror therefore has to track every write
+* to a mirrored record; refreshing it only when the MFT grows (which is all
+* UpdateMftMirror() was ever called for) leaves it permanently stale after the
+* first write to $MFT, $MFTMirr, $LogFile or $Volume -- so chkdsk reports
+* "$MFTMirr differs from $MFT" on every run and the volume never comes clean.
+*
+* The image written here is the same fixup-stamped buffer that went to the MFT,
+* so the two copies are identical by construction rather than by a read-back.
+*
+* @param Vcb
+* Pointer to the DEVICE_EXTENSION of the target drive.
+*
+* @param MftIndex
+* Index of the record that was just written to the MFT.
+*
+* @param WriteImage
+* The exact bytes written to the MFT, update sequence array already applied.
+*
+* @return
+* STATUS_SUCCESS if the record is not mirrored or was mirrored successfully.
+*/
+static
+NTSTATUS
+NtfsMirrorFileRecord(PDEVICE_EXTENSION Vcb,
+                     ULONGLONG MftIndex,
+                     PFILE_RECORD_HEADER WriteImage)
+{
+    PFILE_RECORD_HEADER MirrorFileRecord;
+    PNTFS_ATTR_CONTEXT MirrDataContext;
+    ULONGLONG DataLength;
+    ULONG LengthWritten;
+    NTSTATUS Status;
+
+    MirrorFileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (!MirrorFileRecord)
+    {
+        DPRINT1("Error: Failed to allocate memory for $MFTMirr!\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = ReadFileRecord(Vcb, NTFS_FILE_MFTMIRR, MirrorFileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Failed to read $MFTMirr!\n");
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MirrorFileRecord);
+        return Status;
+    }
+
+    Status = FindAttribute(Vcb, MirrorFileRecord, AttributeData, L"", 0, &MirrDataContext, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Couldn't find $DATA attribute of $MFTMirr!\n");
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MirrorFileRecord);
+        return Status;
+    }
+
+    /* Learn how many records the mirror really holds, so later writes can tell
+     * mirrored records from the rest without reading it again. */
+    DataLength = AttributeDataLength(MirrDataContext->pRecord);
+    Vcb->MftMirrorRecordCount = (ULONG)(DataLength / Vcb->NtfsInfo.BytesPerFileRecord);
+
+    if ((MftIndex + 1) * Vcb->NtfsInfo.BytesPerFileRecord <= DataLength)
+    {
+        Status = WriteAttribute(Vcb,
+                                MirrDataContext,
+                                MftIndex * Vcb->NtfsInfo.BytesPerFileRecord,
+                                (const PUCHAR)WriteImage,
+                                Vcb->NtfsInfo.BytesPerFileRecord,
+                                &LengthWritten,
+                                MirrorFileRecord);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("ERROR: Failed to mirror MFT record %I64u: 0x%lx\n",
+                    MftIndex, Status);
+        }
+    }
+
+    ReleaseAttributeContext(MirrDataContext);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MirrorFileRecord);
+
+    return Status;
+}
+
+/**
 * @name UpdateFileRecord
 * @implemented
 *
@@ -2858,6 +2948,22 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("UpdateFileRecord failed: %lu written, %lu expected\n", BytesWritten, Vcb->NtfsInfo.BytesPerFileRecord);
+    }
+    else if (Vcb->MftMirrorReady &&
+             MftIndex < (Vcb->MftMirrorRecordCount ? Vcb->MftMirrorRecordCount
+                                                   : NTFS_MFTMIRR_MIN_RECORDS) &&
+             !ExIsResourceAcquiredExclusiveLite(&Vcb->MftMirrorResource))
+    {
+        /* Keep $MFTMirr in step with this record.  Mirroring writes through
+         * WriteAttribute, which can re-enter UpdateFileRecord (resident-value
+         * update, hole fill) -- and record 1 is $MFTMirr itself, so it is
+         * mirrored too.  Holding the resource already means this thread is
+         * inside a refresh: skip, that is the recursion.  Otherwise take it,
+         * which serializes against another thread's refresh rather than
+         * dropping ours. */
+        ExAcquireResourceExclusiveLite(&Vcb->MftMirrorResource, TRUE);
+        NtfsMirrorFileRecord(Vcb, MftIndex, WriteImage);
+        ExReleaseResourceLite(&Vcb->MftMirrorResource);
     }
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
