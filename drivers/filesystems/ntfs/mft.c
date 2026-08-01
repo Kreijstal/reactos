@@ -2654,7 +2654,16 @@ UpdateIndexEntryFileNameSize(PDEVICE_EXTENSION Vcb,
     Status = STATUS_OBJECT_PATH_NOT_FOUND;
     for (RecordOffset = 0; RecordOffset < IndexAllocationSize; RecordOffset += IndexBlockSize)
     {
-        ReadAttribute(Vcb, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize);
+        // A short read leaves the tail of the buffer holding whatever the
+        // previous iteration read, so the checks below would be validating
+        // stale data rather than this node.
+        if (ReadAttribute(Vcb, IndexAllocationCtx, RecordOffset, IndexRecord, IndexBlockSize) != IndexBlockSize)
+        {
+            DPRINT1("Unable to read index record at offset %lu!\n", RecordOffset);
+            Status = STATUS_FILE_CORRUPT_ERROR;
+            break;
+        }
+
         Status = FixupUpdateSequenceArray(Vcb, &((PFILE_RECORD_HEADER)IndexRecord)->Ntfs);
         if (!NT_SUCCESS(Status))
         {
@@ -2662,11 +2671,34 @@ UpdateIndexEntryFileNameSize(PDEVICE_EXTENSION Vcb,
         }
 
         IndexBuffer = (PINDEX_BUFFER)IndexRecord;
-        ASSERT(IndexBuffer->Ntfs.Type == NRH_INDX_TYPE);
-        ASSERT(IndexBuffer->Header.AllocatedSize + FIELD_OFFSET(INDEX_BUFFER, Header) == IndexBlockSize);
+
+        // As in BrowseSubNodeIndexEntries, these are on-disk values and not
+        // internal invariants: a corrupt node must fail the operation, not
+        // halt the machine. This path is reached while renaming or resizing a
+        // file, so a single bad node in an unrelated directory would otherwise
+        // bugcheck the system during ordinary file I/O.
+        if (IndexBuffer->Ntfs.Type != NRH_INDX_TYPE ||
+            IndexBuffer->Header.AllocatedSize + FIELD_OFFSET(INDEX_BUFFER, Header) != IndexBlockSize)
+        {
+            DPRINT1("File system corruption detected, index node at offset %lu is malformed (Type=0x%08lx AllocatedSize=%lu).\n",
+                    RecordOffset, IndexBuffer->Ntfs.Type, IndexBuffer->Header.AllocatedSize);
+            NtfsMarkVolumeCorrupt(Vcb);
+            Status = STATUS_FILE_CORRUPT_ERROR;
+            break;
+        }
+
         FirstEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&IndexBuffer->Header + IndexBuffer->Header.FirstEntryOffset);
         LastEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&IndexBuffer->Header + IndexBuffer->Header.TotalSizeOfEntries);
-        ASSERT(LastEntry <= (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)IndexBuffer + IndexBlockSize));
+        if (FirstEntry < (PINDEX_ENTRY_ATTRIBUTE)&IndexBuffer->Header ||
+            FirstEntry > LastEntry ||
+            LastEntry > (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)IndexBuffer + IndexBlockSize))
+        {
+            DPRINT1("File system corruption detected, index node at offset %lu has bad entry bounds (First=%lu Total=%lu).\n",
+                    RecordOffset, IndexBuffer->Header.FirstEntryOffset, IndexBuffer->Header.TotalSizeOfEntries);
+            NtfsMarkVolumeCorrupt(Vcb);
+            Status = STATUS_FILE_CORRUPT_ERROR;
+            break;
+        }
 
         Status = UpdateIndexEntryFileNameSize(NULL,
                                               NULL,
@@ -6256,8 +6288,23 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         return STATUS_UNSUCCESSFUL;
     }
 
-    // Assert that we're dealing with an index record here
-    ASSERT(IndexRecord->Ntfs.Type == NRH_INDX_TYPE);
+    // The INDX magic, the node size and the entry-list bounds are all read
+    // straight off the disk, so they are untrusted input rather than internal
+    // invariants, and a corrupt node has to fail this one enumeration exactly
+    // like the VCN check above and the index-entry check below already do.
+    // Asserting on them instead halts the entire machine in KDB over a single
+    // bad directory node - and when the debug port is a file rather than a
+    // console there is no way to answer the prompt, so the volume takes the OS
+    // down with it. Windows returns STATUS_FILE_CORRUPT_ERROR here and leaves
+    // the volume flagged for chkdsk.
+    if (IndexRecord->Ntfs.Type != NRH_INDX_TYPE)
+    {
+        DPRINT1("File system corruption detected, node with VCN %I64u is not an INDX record (Type=0x%08lx).\n",
+                VCN, IndexRecord->Ntfs.Type);
+        NtfsMarkVolumeCorrupt(Vcb);
+        ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
     // Apply the fixup array to the index record
     Status = FixupUpdateSequenceArray(Vcb, &((PFILE_RECORD_HEADER)IndexRecord)->Ntfs);
@@ -6268,10 +6315,33 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         return Status;
     }
 
-    ASSERT(IndexRecord->Header.AllocatedSize + FIELD_OFFSET(INDEX_BUFFER, Header) == IndexBlockSize);
+    if (IndexRecord->Header.AllocatedSize + FIELD_OFFSET(INDEX_BUFFER, Header) != IndexBlockSize)
+    {
+        DPRINT1("File system corruption detected, node with VCN %I64u has AllocatedSize %lu, expected %lu.\n",
+                VCN, IndexRecord->Header.AllocatedSize,
+                IndexBlockSize - FIELD_OFFSET(INDEX_BUFFER, Header));
+        NtfsMarkVolumeCorrupt(Vcb);
+        ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+
     FirstEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&IndexRecord->Header + IndexRecord->Header.FirstEntryOffset);
     LastEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&IndexRecord->Header + IndexRecord->Header.TotalSizeOfEntries);
-    ASSERT(LastEntry <= (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)IndexRecord + IndexBlockSize));
+
+    // Both offsets are on-disk values, so bound them against the node before
+    // they are used as loop limits: FirstEntry past LastEntry would silently
+    // enumerate nothing, and LastEntry past the node would walk off the end of
+    // the allocation.
+    if (FirstEntry < (PINDEX_ENTRY_ATTRIBUTE)&IndexRecord->Header ||
+        FirstEntry > LastEntry ||
+        LastEntry > (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)IndexRecord + IndexBlockSize))
+    {
+        DPRINT1("File system corruption detected, node with VCN %I64u has bad entry bounds (First=%lu Total=%lu).\n",
+                VCN, IndexRecord->Header.FirstEntryOffset, IndexRecord->Header.TotalSizeOfEntries);
+        NtfsMarkVolumeCorrupt(Vcb);
+        ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
 
     // Loop through all Index Entries of index, starting with FirstEntry
     IndexEntry = FirstEntry;
