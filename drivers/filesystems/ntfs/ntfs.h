@@ -2324,6 +2324,44 @@ typedef struct _NTFS_LFS_RESTART_AREA
 /* Restart flags bits (NTFS_LFS_RESTART_AREA.Flags). */
 #define NTFS_LFS_RESTART_FLAG_CLEAN 0x0002   /* Volume dismounted cleanly    */
 
+/* One entry of the LOG_CLIENT_RECORD array that follows the restart area at
+ * restart-area-relative offset ClientArrayOffset.  NTFS is the only client
+ * that ever registers, at index 0.
+ *
+ * This is where recovery STARTS.  ClientRestartLsn is the LSN of the last
+ * checkpoint record the client wrote; the analysis pass begins by reading it
+ * and walking forward.  OldestLsn is the earliest LSN recovery may still need
+ * (everything before it is known-applied and its log space is reclaimable).
+ * A restart area whose client array is blank - which is what both of our
+ * writers produced until now - therefore has no recovery entry point at all,
+ * regardless of how well-formed the records in the log are. */
+typedef struct _NTFS_LFS_CLIENT_RECORD
+{
+    ULONGLONG OldestLsn;                /* 0x00 - earliest LSN recovery needs */
+    ULONGLONG ClientRestartLsn;         /* 0x08 - LSN of the last checkpoint  */
+    USHORT    PrevClient;               /* 0x10 - previous client in the chain*/
+    USHORT    NextClient;               /* 0x12 - next client in the chain    */
+    USHORT    SeqNumber;                /* 0x14 - bumped on each client open  */
+    UCHAR     Reserved[6];              /* 0x16                               */
+    ULONG     ClientNameLength;         /* 0x1C - name length in BYTES        */
+    WCHAR     ClientName[64];           /* 0x20 - "NTFS", not NUL-terminated  */
+} NTFS_LFS_CLIENT_RECORD, *PNTFS_LFS_CLIENT_RECORD;
+
+/* The array stride is fixed at 0xA0: the name field is a fixed 64 WCHARs, not
+ * sized to the name.  Getting this wrong still writes byte-identical output
+ * for the single-client case (the page is zeroed), so it would only surface
+ * later, as client[i] landing in the middle of client[i-1]. */
+C_ASSERT(sizeof(NTFS_LFS_CLIENT_RECORD) == 0xA0);
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_CLIENT_RECORD, ClientNameLength) == 0x1C);
+C_ASSERT(FIELD_OFFSET(NTFS_LFS_CLIENT_RECORD, ClientName) == 0x20);
+
+/* End-of-chain sentinel for ClientFreeList / ClientInUseList / Prev / Next. */
+#define NTFS_LFS_CLIENT_NONE        0xFFFF
+
+/* The one client NTFS registers, and its index in the array. */
+#define NTFS_LFS_CLIENT_INDEX_NTFS  0
+#define NTFS_LFS_CLIENT_NAME_NTFS   L"NTFS"
+
 /* Restart-page header version fields.  The layout authority is our own
  * writer pair (NtfsLfsBuildRestartPage in lfs.c and ntfslib's
  * ntfs_build_rstr_page), which stamps the restart-page header as:
