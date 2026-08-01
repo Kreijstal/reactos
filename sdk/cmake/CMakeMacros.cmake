@@ -340,9 +340,13 @@ function(add_cd_file)
     # do we add it to livecd?
     list(FIND _CD_FOR livecd __cd)
     if(NOT __cd EQUAL -1)
-        # manage dependency
+        # manage dependency.  kmtestcd inherits this file set at iso-assembly
+        # time, so it needs the same target-level dependency: bootcd no longer
+        # drags livecd in, and kmtestcd would otherwise assemble ahead of the
+        # files it inherits.
         if(_CD_TARGET)
             add_dependencies(livecd ${_CD_TARGET} registry_inf)
+            add_dependencies(kmtestcd ${_CD_TARGET} registry_inf)
         endif()
         foreach(item ${_CD_FILE})
             if(_CD_NAME_ON_CD)
