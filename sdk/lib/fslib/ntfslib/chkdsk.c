@@ -33,19 +33,70 @@ int chk_write(const MKNTFS_IO *io, ULONGLONG off, const void *buf, ULONG len)
     return io->write(io->context, off, buf, len) == 0 ? 0 : -1;
 }
 
+/* Grow the issue list by doubling.  Returns 0 when there is room to record. */
+static int chk_grow_issues(NTFS_CHK_RESULT *res)
+{
+    ULONG newCap;
+    NTFS_CHK_ISSUE *grown;
+
+    if (res->IssueRecorded < res->IssueCapacity)
+        return 0;
+
+    if (res->IssueCapacity >= CHK_ISSUES_MAX)
+        return -1;
+
+    newCap = res->IssueCapacity ? res->IssueCapacity * 2 : CHK_ISSUES_INITIAL;
+    if (newCap > CHK_ISSUES_MAX)
+        newCap = CHK_ISSUES_MAX;
+
+    /* No realloc in this environment (see the malloc shim in chkint.h). */
+    grown = (NTFS_CHK_ISSUE *)malloc(newCap * sizeof(*grown));
+    if (!grown)
+        return -1;
+
+    if (res->Issues)
+    {
+        memcpy(grown, res->Issues, res->IssueRecorded * sizeof(*grown));
+        free(res->Issues);
+    }
+    res->Issues = grown;
+    res->IssueCapacity = newCap;
+    return 0;
+}
+
 void chk_add_issue(NTFS_CHK_RESULT *res, NTFS_CHK_CODE code,
                    ULONGLONG p0, ULONGLONG p1, int fixed)
 {
-    if (res->IssueCount < CHK_MAX_ISSUES)
+    /*
+     * IssueCount counts everything detected; IssueRecorded counts what is
+     * actually in Issues[].  They only diverge when the list cannot grow (the
+     * CHK_ISSUES_MAX ceiling or an allocation failure), and the repair stages
+     * iterate over IssueRecorded so they never read past the allocation.
+     * A divergence keeps `unfixed` non-zero, which is what we want: the volume
+     * stays dirty and gets checked again instead of being stamped clean while
+     * defects we never recorded are still there.
+     */
+    if (chk_grow_issues(res) == 0)
     {
-        res->Issues[res->IssueCount].Code   = code;
-        res->Issues[res->IssueCount].Param0 = p0;
-        res->Issues[res->IssueCount].Param1 = p1;
-        res->Issues[res->IssueCount].Fixed  = fixed;
+        NTFS_CHK_ISSUE *slot = &res->Issues[res->IssueRecorded++];
+        slot->Code   = code;
+        slot->Param0 = p0;
+        slot->Param1 = p1;
+        slot->Fixed  = fixed;
     }
     res->IssueCount++;
     if (fixed)
         res->RepairedCount++;
+}
+
+void NtfsChkFreeResult(NTFS_CHK_RESULT *res)
+{
+    if (res == NULL)
+        return;
+    free(res->Issues);
+    res->Issues = NULL;
+    res->IssueCapacity = 0;
+    res->IssueRecorded = 0;
 }
 
 /* ============================================================

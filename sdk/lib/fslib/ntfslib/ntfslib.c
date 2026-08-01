@@ -393,13 +393,16 @@ NtfsChkdsk(
         Callback(PROGRESS, 0, (PVOID)&Percent);
     }
 
-    /* The checker result is large (bounded issue array); keep it off the stack. */
+    /* Keep the checker result off the stack; it owns a heap-grown issue list,
+     * so zero it here and release it through NtfsChkFreeResult() on every exit
+     * path -- including the ones taken before NtfsChkVolume() zeroes it. */
     Result = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(NTFS_CHK_RESULT));
     if (Result == NULL)
     {
         *ExitStatus = (ULONG)STATUS_INSUFFICIENT_RESOURCES;
         return FALSE;
     }
+    RtlZeroMemory(Result, sizeof(NTFS_CHK_RESULT));
 
     /* Open read-only unless we intend to repair. */
     Access = FILE_GENERIC_READ | SYNCHRONIZE;
@@ -416,6 +419,7 @@ NtfsChkdsk(
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtfsChkdsk: NtOpenFile() failed 0x%08x\n", Status);
+        NtfsChkFreeResult(Result);
         RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
         *ExitStatus = (ULONG)Status;
         return FALSE;
@@ -517,12 +521,18 @@ NtfsChkdsk(
     else
         *ExitStatus = (ULONG)STATUS_SUCCESS;
 
+    /* `recorded` is the number of issues the repair stages could actually see.
+     * It equals `issues` unless the issue list hit CHK_ISSUES_MAX or failed to
+     * grow, which is the one case where a repair run cannot converge no matter
+     * how often it is repeated -- worth spotting straight from the log. */
     DPRINT1("NtfsChkdsk: %wZ Fix %u OnlyIfDirty %u -> rc %d, issues %lu, "
-            "repaired %lu, dirty %u, ExitStatus 0x%08lx%s\n",
+            "recorded %lu, repaired %lu, dirty %u, ExitStatus 0x%08lx%s\n",
             DriveRoot, FixErrors, CheckOnlyIfDirty, Rc, Result->IssueCount,
+            Result->IssueRecorded,
             Result->RepairedCount, Result->WasDirty, *ExitStatus,
             RepairDeclined ? " [read-only: volume in use, repairs need an offline run]" : "");
 
+    NtfsChkFreeResult(Result);
     RtlFreeHeap(RtlGetProcessHeap(), 0, Result);
 
     /* TRUE means the check itself completed (see ExitStatus for the verdict). */

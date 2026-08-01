@@ -138,6 +138,14 @@ static __inline void chk_bmp_clear(UCHAR *b, ULONGLONG bit)
 
 int  chk_read(const MKNTFS_IO *io, ULONGLONG off, void *buf, ULONG len);
 int  chk_write(const MKNTFS_IO *io, ULONGLONG off, const void *buf, ULONG len);
+/*
+ * Record one issue.  The issue list grows on demand, so this can move
+ * res->Issues: a caller must not hold an NTFS_CHK_ISSUE* across a call to it.
+ * The repair stages walk the list with res->IssueRecorded (entries actually
+ * stored), never res->IssueCount (entries detected) -- the two differ only
+ * when the list could not grow, and indexing by the latter would read past
+ * the allocation.
+ */
 void chk_add_issue(NTFS_CHK_RESULT *res, NTFS_CHK_CODE code,
                    ULONGLONG p0, ULONGLONG p1, int fixed);
 
