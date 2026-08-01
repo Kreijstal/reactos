@@ -48,7 +48,22 @@ typedef enum _NTFS_CHK_CODE {
     CHK_CODE_MAX
 } NTFS_CHK_CODE;
 
-#define CHK_MAX_ISSUES 256
+/*
+ * The issue list grows on demand.  It used to be a fixed 256-entry array, and
+ * that was a correctness bug rather than a reporting limit: the repair stages
+ * find their work by scanning this list, so every issue detected past the cap
+ * was counted in IssueCount but never recorded, and therefore could never be
+ * repaired.  `unfixed = IssueCount - RepairedCount` then never reached 0, so
+ * the $Volume dirty flag was never cleared and ExitStatus stayed pinned at 1 --
+ * a volume with more than 256 defects reported "problems not all corrected"
+ * however many times it was checked.
+ *
+ * Growth is bounded: past CHK_ISSUES_MAX we deliberately stop recording and
+ * keep counting, which leaves the volume dirty so it is checked again rather
+ * than stamped clean on incomplete information.
+ */
+#define CHK_ISSUES_INITIAL 256
+#define CHK_ISSUES_MAX     65536
 
 typedef struct _NTFS_CHK_ISSUE {
     NTFS_CHK_CODE Code;
@@ -80,7 +95,9 @@ typedef struct _NTFS_CHK_RESULT {
     ULONG RecordsInUse;
     ULONGLONG ClustersUsed;      /* clusters attributed to some attribute    */
     ULONGLONG ClustersReserved;  /* $Bitmap marks used but nothing refs them */
-    ULONG IssueCount;            /* total issues detected (may exceed array) */
+    ULONG IssueCount;            /* total issues detected                    */
+    ULONG IssueRecorded;         /* entries valid in Issues[] (<= IssueCount) */
+    ULONG IssueCapacity;         /* entries allocated in Issues[]            */
     ULONG RepairedCount;         /* issues successfully repaired             */
     int   WasDirty;
     int   ExitStatus;            /* 0 = clean, 1 = errors, 2 = errors fixed  */
@@ -89,7 +106,7 @@ typedef struct _NTFS_CHK_RESULT {
     ULONG IndexesRebuilt;
     ULONG AttrsTruncated;
     ULONG LinksFixed;
-    NTFS_CHK_ISSUE Issues[CHK_MAX_ISSUES];
+    NTFS_CHK_ISSUE *Issues;      /* heap list; release with NtfsChkFreeResult */
 } NTFS_CHK_RESULT;
 
 /*
@@ -100,6 +117,18 @@ typedef struct _NTFS_CHK_RESULT {
 int NtfsChkVolume(const MKNTFS_IO *io,
                   const NTFS_CHK_OPTIONS *opt,
                   NTFS_CHK_RESULT *res);
+
+/*
+ * Release the issue list attached to a result.  Every caller that hands a
+ * NTFS_CHK_RESULT to NtfsChkVolume() (or to any chk_* helper that can record
+ * an issue) owns the list afterwards and must call this.  Safe on a zeroed
+ * result and safe to call more than once.
+ *
+ * The result must be zeroed before its first use, and released through this
+ * function before being reused: NtfsChkVolume() zeroes the struct on entry, so
+ * running a second check over a result that still holds a list would leak it.
+ */
+void NtfsChkFreeResult(NTFS_CHK_RESULT *res);
 
 /* Human-readable text for an issue code (for callers that print results). */
 const char *NtfsChkCodeString(NTFS_CHK_CODE code);
