@@ -536,7 +536,7 @@ int chk_repair_attributes(CHK_CTX *c, NTFS_CHK_RESULT *res)
         return -1;
     }
 
-    for (i = 0; i < res->IssueCount && i < CHK_MAX_ISSUES; i++)
+    for (i = 0; i < res->IssueRecorded; i++)
     {
         NTFS_CHK_ISSUE *iss = &res->Issues[i];
         ULONG recno = (ULONG)iss->Param0;
@@ -866,7 +866,7 @@ int chk_repair_crosslinks(CHK_CTX *c, NTFS_CHK_RESULT *res)
                 ULONG k;
                 res->AttrsTruncated++;
                 /* mark every recorded XLINK issue for this SecondRec fixed */
-                for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+                for (k = 0; k < res->IssueRecorded; k++)
                     if (res->Issues[k].Code == CHK_ERR_XLINK &&
                         !res->Issues[k].Fixed &&
                         (ULONG)res->Issues[k].Param0 == recno)
@@ -937,7 +937,7 @@ int chk_repair_linkcounts(CHK_CTX *c, NTFS_CHK_RESULT *res)
 
         {
             ULONG k;
-            for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+            for (k = 0; k < res->IssueRecorded; k++)
                 if (res->Issues[k].Code == CHK_ERR_LINKCOUNT &&
                     !res->Issues[k].Fixed &&
                     (ULONG)res->Issues[k].Param0 == recno)
@@ -971,7 +971,7 @@ int chk_repair_mft_bitmap(CHK_CTX *c, NTFS_CHK_RESULT *res)
         return -1;
 
     /* Only run when a mismatch was actually reported. */
-    for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+    for (k = 0; k < res->IssueRecorded; k++)
         if (res->Issues[k].Code == CHK_ERR_MFTBMP_MISMATCH &&
             !res->Issues[k].Fixed)
             { anyMismatch = 1; break; }
@@ -1040,7 +1040,7 @@ int chk_repair_mft_bitmap(CHK_CTX *c, NTFS_CHK_RESULT *res)
     free(rec);
 
     /* Mark all MFT-bitmap mismatch issues fixed. */
-    for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+    for (k = 0; k < res->IssueRecorded; k++)
         if (res->Issues[k].Code == CHK_ERR_MFTBMP_MISMATCH &&
             !res->Issues[k].Fixed)
         {
@@ -1937,7 +1937,7 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
         chk_sync_mftmirr_record(c, dirRec);
 
     /* Mark the directory's index issues fixed + clear CRF_INDEX_BAD. */
-    for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+    for (k = 0; k < res->IssueRecorded; k++)
     {
         NTFS_CHK_ISSUE *iss = &res->Issues[k];
         if (iss->Fixed || (ULONG)iss->Param0 != dirRec)
@@ -1966,7 +1966,7 @@ int chk_rebuild_index(CHK_CTX *c, ULONG dirRec, NTFS_CHK_RESULT *res)
         {
             c->Rec[tr].LinksSeen++;
             c->Rec[tr].Flags &= (USHORT)~CRF_ORPHAN;
-            for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+            for (k = 0; k < res->IssueRecorded; k++)
             {
                 NTFS_CHK_ISSUE *iss = &res->Issues[k];
                 if (!iss->Fixed && (ULONG)iss->Param0 == tr &&
@@ -2511,7 +2511,7 @@ int chk_recover_orphans(CHK_CTX *c, NTFS_CHK_RESULT *res)
         rehomed = 1;
 
         /* Clear the reported ORPHAN issue for this record. */
-        for (k = 0; k < res->IssueCount && k < CHK_MAX_ISSUES; k++)
+        for (k = 0; k < res->IssueRecorded; k++)
         {
             NTFS_CHK_ISSUE *iss = &res->Issues[k];
             if (!iss->Fixed && iss->Code == CHK_ERR_ORPHAN &&
@@ -2583,11 +2583,11 @@ int NtfsChkSetVolumeDirty(const MKNTFS_IO *io)
     memset(tmp, 0, sizeof(*tmp));
     c->Io = io;
     if (chk_read_boot(c, tmp) != 0)
-        { free(tmp); free(c); return -1; }
+        { NtfsChkFreeResult(tmp); free(tmp); free(c); return -1; }
     if (chk_load_mft(c, tmp) != 0)
-        { free(tmp); free(c); return -1; }
+        { NtfsChkFreeResult(tmp); free(tmp); free(c); return -1; }
     rc = chk_set_volume_flag(c, 1, 0);
-    free(tmp);
+    NtfsChkFreeResult(tmp); free(tmp);
     free(c);
     return rc;
 }
@@ -2619,8 +2619,8 @@ int NtfsChkTestClearMftBit(const MKNTFS_IO *io, ULONGLONG *clearedLcn)
     memset(tmp, 0, sizeof(*tmp));
     c->Io = io;
     if (chk_read_boot(c, tmp) != 0 || chk_load_mft(c, tmp) != 0)
-        { free(bmpRuns); free(tmp); free(c); return -1; }
-    free(tmp);
+        { free(bmpRuns); NtfsChkFreeResult(tmp); free(tmp); free(c); return -1; }
+    NtfsChkFreeResult(tmp); free(tmp);
     tmp = NULL;
 
     rec6 = (UCHAR *)malloc(c->MftRecordSize);
