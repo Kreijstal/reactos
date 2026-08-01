@@ -169,7 +169,7 @@ add_custom_target(bootcd
         ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
         -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcd.$<CONFIG>.lst
     ${ISOHYBRID_BOOTCD_COMMAND}
-    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs livecd
+    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs
     VERBATIM)
 
 ## BootCDRegTest
