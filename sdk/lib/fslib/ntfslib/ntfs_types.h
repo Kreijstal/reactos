@@ -108,6 +108,29 @@ typedef struct _NTFS_LFS_RESTART_AREA {
 
 #define NTFS_LFS_RESTART_FLAG_CLEAN 0x0002  /* Dismounted cleanly           */
 
+/* Mirrors drivers/filesystems/ntfs/ntfs.h:NTFS_LFS_CLIENT_RECORD.  The array
+ * of these follows the restart area at ClientArrayOffset; recovery starts by
+ * reading ClientRestartLsn out of the in-use client, so a formatter that omits
+ * it leaves the log with no recovery entry point. */
+typedef struct _NTFS_LFS_CLIENT_RECORD {
+    ULONGLONG OldestLsn;                /* 0x00 - earliest LSN recovery needs */
+    ULONGLONG ClientRestartLsn;         /* 0x08 - LSN of the last checkpoint  */
+    USHORT    PrevClient;               /* 0x10                               */
+    USHORT    NextClient;               /* 0x12                               */
+    USHORT    SeqNumber;                /* 0x14                               */
+    UCHAR     Reserved[6];              /* 0x16                               */
+    ULONG     ClientNameLength;         /* 0x1C - name length in BYTES        */
+    WCHAR     ClientName[64];           /* 0x20 - "NTFS", not NUL-terminated  */
+} NTFS_LFS_CLIENT_RECORD;
+
+/* This header has no pack pragmas (see VOLUME_INFORMATION_SIZE), but every
+ * field here is naturally aligned at its on-disk offset and the total is a
+ * multiple of 8, so packed and unpacked agree.  Length-check against this. */
+#define NTFS_LFS_CLIENT_RECORD_SIZE 0xA0
+
+#define NTFS_LFS_CLIENT_NONE        0xFFFF
+#define NTFS_LFS_CLIENT_INDEX_NTFS  0
+
 typedef struct _FILE_RECORD_HEADER {
     ULONG     Magic;                 /* 'FILE' */
     USHORT    UpdateSeqOffset;       /* Offset to update sequence array */

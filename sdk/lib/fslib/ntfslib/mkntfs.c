@@ -1335,16 +1335,15 @@ void ntfs_build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
     *(USHORT *)(page + usa_offset) = usn;
 
     /* Restart area: CLEAN landmark.  CurrentLsn=0, LastLsnDataLength=0,
-     * CLEAN flag set.  RestartAreaLength / ClientArrayOffset let a
-     * future replayer locate the LOG_CLIENT_RECORD array that starts
-     * immediately after.  LogClients=1, ClientFreeList=0 (client 0 is
-     * on the free list - no active clients on a fresh volume),
-     * ClientInUseList = 0xFFFF (no in-use chain). */
+     * CLEAN flag set.  RestartAreaLength / ClientArrayOffset locate the
+     * LOG_CLIENT_RECORD array that starts immediately after, which is written
+     * out below: NTFS holds client slot 0, so that slot is the in-use chain
+     * and the free chain is empty. */
     memset(&area, 0, sizeof(area));
     area.CurrentLsn          = 0;
     area.LogClients          = 1;
-    area.ClientFreeList      = 0;
-    area.ClientInUseList     = 0xFFFF;
+    area.ClientFreeList      = NTFS_LFS_CLIENT_NONE;
+    area.ClientInUseList     = NTFS_LFS_CLIENT_INDEX_NTFS;
     area.Flags               = NTFS_LFS_RESTART_FLAG_CLEAN;
     area.SeqNumberBits       = 0x2D;
     area.RestartAreaLength   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
@@ -1356,6 +1355,28 @@ void ntfs_build_rstr_page(UCHAR *page, ULONG page_size, ULONG sector_size,
     area.RestartOpenLogCount = 1;
     area.Reserved            = 0;
     memcpy(page + restart_offset, &area, sizeof(area));
+
+    /* The LOG_CLIENT_RECORD itself, at restart_offset + ClientArrayOffset.
+     * A fresh log has no checkpoint to resume from, so both LSNs are zero;
+     * what matters is that the slot exists and is named, because recovery
+     * starts by finding the in-use client and reading its restart LSN. */
+    if ((ULONG)restart_offset + area.ClientArrayOffset +
+            NTFS_LFS_CLIENT_RECORD_SIZE <= page_size)
+    {
+        NTFS_LFS_CLIENT_RECORD client;
+        static const WCHAR ntfs_name[4] = { 'N', 'T', 'F', 'S' };
+
+        memset(&client, 0, sizeof(client));
+        client.OldestLsn        = 0;
+        client.ClientRestartLsn = 0;
+        client.PrevClient       = NTFS_LFS_CLIENT_NONE;
+        client.NextClient       = NTFS_LFS_CLIENT_NONE;
+        client.SeqNumber        = 0;
+        client.ClientNameLength = (ULONG)sizeof(ntfs_name);
+        memcpy(client.ClientName, ntfs_name, sizeof(ntfs_name));
+        memcpy(page + restart_offset + area.ClientArrayOffset,
+               &client, sizeof(client));
+    }
 
     /* Apply the USA sentinel pass: stamps every sector's trailing
      * USHORT with the USN so the driver's FixupUpdateSequenceArray
