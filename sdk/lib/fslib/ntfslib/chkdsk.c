@@ -601,8 +601,10 @@ int chk_collate_filename(const CHK_CTX *c,
  * Public entry point
  * ============================================================ */
 
-int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
-                  NTFS_CHK_RESULT *res)
+/* One complete scan + (optionally) repair pass over the volume.  Wrapped by
+ * NtfsChkVolume(), which repeats it until the damage stops going down. */
+static int chk_volume_pass(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
+                           NTFS_CHK_RESULT *res)
 {
     CHK_CTX *c;   /* ~197 KiB: too large for the stack */
     UCHAR *computed = NULL;
@@ -701,6 +703,7 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
 
         /* Pass 4: $MFT:$BITMAP cross-check */
         chk_check_mft_bitmap(c, res, opt);
+
     }
 
     /* R0: arm the volume dirty flag before the first mutating repair, so an
@@ -889,6 +892,100 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
     }
 
     (void)rc;
+    return res->ExitStatus;
+}
+
+/*
+ * Repair until the volume stops improving, and report what was measured.
+ *
+ * A single pass cannot finish the job even when every stage behaves: R2's
+ * index rebuild changes what R3 sees, R3's re-homing changes the link counts
+ * R4 computes, and a repair that had to decline because the structure it
+ * depends on was still broken can succeed once that structure is fixed.  Real
+ * chkdsk re-runs for the same reason.
+ *
+ * It also fixes what the repair stages cannot: they mark issues Fixed as a
+ * claim, and a claim is not a measurement.  Runs on a damaged volume reported
+ * "220 problems found, 220 repaired" and then found 154 of them again on the
+ * very next scan.  Here the numbers come from a read-only scan of the volume
+ * as it now stands, so `repaired` is the difference the run actually made and
+ * nothing else.
+ */
+int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
+                  NTFS_CHK_RESULT *res)
+{
+    NTFS_CHK_OPTIONS again;
+    ULONG initial, before, remaining;
+    int rc, pass;
+
+    rc = chk_volume_pass(io, opt, res);
+    if (rc < 0 || !opt->FixErrors || res->IssueCount == 0)
+        return rc;
+
+    /* Later passes are silent: one set of stage banners is enough, and the
+     * dirty-only gate has already been decided by the first pass. */
+    again = *opt;
+    again.CheckOnlyIfDirty = 0;
+    again.Message = NULL;
+
+    initial = res->IssueCount;
+    before = initial;
+    remaining = initial;
+
+    for (pass = 0; pass < CHK_MAX_REPAIR_PASSES; pass++)
+    {
+        NTFS_CHK_RESULT probe;
+        int prc;
+
+        /* Measure: what is actually left on the volume right now? */
+        memset(&probe, 0, sizeof(probe));
+        again.FixErrors = 0;
+        prc = chk_volume_pass(io, &again, &probe);
+        remaining = probe.IssueCount;
+        NtfsChkFreeResult(&probe);
+
+        if (prc < 0)
+            break;                  /* cannot measure: keep the last number */
+        if (remaining == 0)
+            break;                  /* converged */
+        if (remaining >= before)
+            break;                  /* the previous pass achieved nothing */
+        before = remaining;
+
+        /* Still damaged, and still getting better: go round again. */
+        memset(&probe, 0, sizeof(probe));
+        again.FixErrors = 1;
+        prc = chk_volume_pass(io, &again, &probe);
+        res->OrphansRecovered += probe.OrphansRecovered;
+        res->IndexesRebuilt   += probe.IndexesRebuilt;
+        res->LinksFixed       += probe.LinksFixed;
+        res->AttrsTruncated   += probe.AttrsTruncated;
+        NtfsChkFreeResult(&probe);
+        if (prc < 0)
+            break;
+    }
+
+    /* The dirty flag must follow the measurement too.
+     *
+     * Each pass decides on its own whether to stamp the volume clean, and it
+     * decides from its stages' claims.  A pass whose claims all came out
+     * "fixed" therefore clears the flag even when a rescan can still find the
+     * damage - and a damaged volume marked clean is the worst outcome there
+     * is: CheckOnlyIfDirty skips it at the next boot, so autochk never comes
+     * back and the volume stays broken while reporting healthy.  If anything
+     * is still there after the last pass, put the flag back. */
+    if (remaining != 0)
+    {
+        NtfsChkSetVolumeDirty(io);
+        if (io->flush)
+            io->flush(io->context);
+    }
+
+    /* `IssueCount` stays what the volume came in with; `RepairedCount` becomes
+     * the measured difference rather than the sum of the stages' claims. */
+    res->IssueCount = initial;
+    res->RepairedCount = (initial > remaining) ? initial - remaining : 0;
+    res->ExitStatus = (remaining == 0) ? 2 : 1;
     return res->ExitStatus;
 }
 
