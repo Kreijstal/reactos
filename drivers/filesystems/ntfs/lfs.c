@@ -255,8 +255,14 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     RtlZeroMemory(&Area, sizeof(Area));
     Area.CurrentLsn          = CurrentLsn;
     Area.LogClients          = 1;
-    Area.ClientFreeList      = 0;
-    Area.ClientInUseList     = 0xFFFF;
+    /* NTFS occupies client slot 0 and is the only client that ever registers,
+     * so the in-use chain is that one slot and the free chain is empty.  This
+     * used to be stated the other way round (slot 0 free, nothing in use),
+     * which reads as "no client has ever opened this log" - a state recovery
+     * cannot start from, since the restart LSN it needs lives in the client
+     * record of an IN-USE client. */
+    Area.ClientFreeList      = NTFS_LFS_CLIENT_NONE;
+    Area.ClientInUseList     = NTFS_LFS_CLIENT_INDEX_NTFS;
     Area.Flags               = Clean ? NTFS_LFS_RESTART_FLAG_CLEAN : 0;
     Area.SeqNumberBits       = NtfsLfsSeqNumberBits(FileSize);
     Area.RestartAreaLength   = (USHORT)sizeof(NTFS_LFS_RESTART_AREA);
@@ -268,6 +274,29 @@ NtfsLfsBuildRestartPage(PDEVICE_EXTENSION Vcb,
     Area.RestartOpenLogCount = 1;
     Area.Reserved            = 0;
     RtlCopyMemory(Page + LFS_RSTR_AREA_OFFSET, &Area, sizeof(Area));
+
+    /* The LOG_CLIENT_RECORD for that slot.  Both restart LSNs are zero here:
+     * this builds either a fresh log or a CLEAN dismount landmark, and in both
+     * cases there is no checkpoint to resume from and nothing recovery still
+     * needs.  A checkpoint writer will fill them in. */
+    ASSERT(LFS_RSTR_AREA_OFFSET + sizeof(NTFS_LFS_RESTART_AREA) == LFS_RSTR_CLIENT_OFFSET);
+    if (LFS_RSTR_CLIENT_OFFSET + sizeof(NTFS_LFS_CLIENT_RECORD) > PageSize)
+        return STATUS_INVALID_PARAMETER;
+
+    {
+        NTFS_LFS_CLIENT_RECORD Client;
+
+        RtlZeroMemory(&Client, sizeof(Client));
+        Client.OldestLsn        = 0;
+        Client.ClientRestartLsn = 0;
+        Client.PrevClient       = NTFS_LFS_CLIENT_NONE;
+        Client.NextClient       = NTFS_LFS_CLIENT_NONE;
+        Client.SeqNumber        = 0;
+        Client.ClientNameLength = (ULONG)(sizeof(NTFS_LFS_CLIENT_NAME_NTFS) - sizeof(WCHAR));
+        RtlCopyMemory(Client.ClientName, NTFS_LFS_CLIENT_NAME_NTFS,
+                      Client.ClientNameLength);
+        RtlCopyMemory(Page + LFS_RSTR_CLIENT_OFFSET, &Client, sizeof(Client));
+    }
 
     /* Stamp the per-sector USA sentinels.  AddFixupArray increments the USN
      * (0 -> 1) and writes each sector's trailing USHORT, saving the
