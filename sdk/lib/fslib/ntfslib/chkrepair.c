@@ -1413,6 +1413,47 @@ typedef struct _CHK_RB_BLK {
 } CHK_RB_BLK;
 
 /* Emit the large layout: build INDX levels bottom-up, then the record attrs. */
+/*
+ * Will a root node of `bodyLen` bytes still leave room for the rest of a large
+ * $I30?  A large index is three attributes in the base record, not one:
+ * $INDEX_ROOT, then $INDEX_ALLOCATION (non-resident) and $BITMAP:$I30.  The
+ * bulk-load below stops promoting levels as soon as the current one fits the
+ * root, so if that test budgets only for $INDEX_ROOT it will happily pick a
+ * root that fills the record -- and the two later inserts then fail, aborting
+ * the whole rebuild and leaving the directory with no index at all.
+ *
+ * The sizes mirror ntfs_add_resident_attr() / ntfs_add_nonresident_attr()
+ * exactly: header (0x18 resident, 0x40 non-resident), then the "$I30" name
+ * 4-aligned, then the value, the whole attribute 8-aligned.  Sequential adds
+ * fit iff their total is <= chk_rb_record_free(), which already accounts for
+ * the AT_END terminator that trails the last one.
+ */
+#define CHK_RB_I30_NAMELEN 4
+
+static int chk_rb_large_root_fits(CHK_CTX *c, UCHAR *rec,
+                                  ULONG bodyLen, ULONG blockCount)
+{
+    const ULONG nameBytes = CHK_RB_I30_NAMELEN * sizeof(WCHAR);
+
+    /* $INDEX_ROOT: resident, value = INDEX_ROOT header + the node body. */
+    ULONG irVal = (ULONG)NTFS_ALIGN_UP(0x18 + nameBytes, 4);
+    ULONG irLen = (ULONG)NTFS_ALIGN_UP(irVal + sizeof(INDEX_ROOT) + bodyLen, 8);
+
+    /* $INDEX_ALLOCATION: non-resident, value = one mapping pair + terminator.
+     * ntfs_encode_run() writes into a 16-byte buffer, so bound it by that
+     * rather than by the run we have not allocated yet. */
+    ULONG iaRuns = (ULONG)NTFS_ALIGN_UP(0x40 + nameBytes, 4);
+    ULONG iaLen  = (ULONG)NTFS_ALIGN_UP(iaRuns + 16 + 1, 8);
+
+    /* $BITMAP:$I30: resident, one bit per INDX block, 8-byte aligned value. */
+    ULONG bmpVal = (ULONG)NTFS_ALIGN_UP(0x18 + nameBytes, 4);
+    ULONG bmpBits = (blockCount ? blockCount : 1);
+    ULONG bmpLen = (ULONG)NTFS_ALIGN_UP(bmpVal +
+                       (ULONG)NTFS_ALIGN_UP((bmpBits + 7) / 8, 8), 8);
+
+    return irLen + iaLen + bmpLen <= chk_rb_record_free(c, rec);
+}
+
 static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
                              ULONG blockSize, ULONG clustersPerBlock,
                              USHORT *nextInstance, NTFS_CHK_RESULT *res)
@@ -1472,7 +1513,7 @@ static int chk_rb_emit_large(CHK_CTX *c, UCHAR *rec, CHK_RB_ENT *ents, ULONG n,
             for (i = 0; i < levelN; i++)
                 total += chk_rb_interior_len(level[i].keyLen);
             total += (ULONG)NTFS_ALIGN_UP(sizeof(INDEX_ENTRY) + 8, 8); /* END NODE */
-            if (sizeof(INDEX_ROOT) + total + 0x18 + 8 <= chk_rb_record_free(c, rec) &&
+            if (chk_rb_large_root_fits(c, rec, total, blockCount) &&
                 total <= usableBody /* sanity: also representable as a node */)
             {
                 /* Serialize the root body: all entries (interior form) + END NODE. */
