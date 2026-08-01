@@ -275,7 +275,7 @@ int chk_scan_records(CHK_CTX *c, UCHAR *computed, NTFS_CHK_RESULT *res,
             {
                 VOLUME_INFORMATION *vi =
                     (VOLUME_INFORMATION *)(rec + off + a->Resident.ValueOffset);
-                if (a->Resident.ValueOffset + sizeof(VOLUME_INFORMATION) <= a->Length &&
+                if (a->Resident.ValueOffset + VOLUME_INFORMATION_SIZE <= a->Length &&
                     (vi->Flags & VOLUME_IS_DIRTY))
                     res->WasDirty = 1;
             }

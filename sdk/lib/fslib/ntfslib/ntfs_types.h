@@ -253,6 +253,11 @@ typedef struct _VOLUME_INFORMATION {
     USHORT    Flags;
 } VOLUME_INFORMATION;
 
+/* The field offsets above are right, but this header is not byte-packed, so
+ * the trailing padding after the leading ULONGLONG makes sizeof() 16 while the
+ * on-disk value is 12.  Length-check against this, never against sizeof(). */
+#define VOLUME_INFORMATION_SIZE 12
+
 /* Volume flags */
 #ifndef VOLUME_IS_DIRTY
 #define VOLUME_IS_DIRTY         0x0001
