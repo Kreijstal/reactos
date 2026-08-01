@@ -387,7 +387,29 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             /* Flush cached data for the file */
             if (IrpContext->FileObject)
             {
-                CcFlushCache(IrpContext->FileObject->SectionObjectPointer, NULL, 0, &IrpContext->Irp->IoStatus);
+                PNTFS_FCB FlushFcb = (PNTFS_FCB)IrpContext->FileObject->FsContext;
+                PFILE_OBJECT FlushObject = IrpContext->FileObject;
+
+                /* A flush on a user-mode DASD handle (\??\C: opened as a
+                 * volume) has to flush the volume-stream cache, not the volume
+                 * FCB's own section.  Writes on that handle go through
+                 * NtfsWriteDiskCached(), i.e. into Vcb->StreamFileObject's
+                 * cache map; the volume FCB itself never gets a cache map, so
+                 * flushing its section is a silent no-op.  That made
+                 * NtFlushBuffersFile() on the raw volume report success while
+                 * committing nothing - chkdsk arms the dirty flag and flushes
+                 * precisely so an interrupted repair is re-detected, and that
+                 * flush had never once reached the disk. */
+                if (FlushFcb != NULL &&
+                    BooleanFlagOn(FlushFcb->Flags, FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+                {
+                    PDEVICE_EXTENSION FlushVcb = IrpContext->DeviceObject->DeviceExtension;
+
+                    if (FlushVcb->StreamFileObject != NULL)
+                        FlushObject = FlushVcb->StreamFileObject;
+                }
+
+                CcFlushCache(FlushObject->SectionObjectPointer, NULL, 0, &IrpContext->Irp->IoStatus);
                 Status = IrpContext->Irp->IoStatus.Status;
             }
             else
