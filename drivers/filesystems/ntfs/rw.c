@@ -277,10 +277,30 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     Fcb = (PNTFS_FCB)FileObject->FsContext;
 
-    // Volume and volume stream reads go directly to the storage device -
-    // don't route through MFT attributes (MFTIndex 0 is $MFT, and the
-    // volume stream represents the raw volume for the cache manager).
-    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+    // Volume and volume stream reads never route through MFT attributes
+    // (MFTIndex 0 is $MFT, so ReadAttribute would read the MFT's own data),
+    // but the two go to different places.
+    //
+    // FCB_IS_VOLUME_STREAM is the cache manager's own view of the raw volume:
+    // this is the path Cc takes to fault a page in, so it must talk to the
+    // storage stack directly.  It is the recursion terminator described in
+    // NtfsReadDiskCached().
+    //
+    // FCB_IS_VOLUME is a user-mode DASD handle (\??\C: opened as a volume).
+    // Writes on it already go through NtfsWriteDiskCached(), i.e. into the
+    // volume-stream cache, so reading straight from the device here made the
+    // handle incoherent with itself: a read issued after a write to the same
+    // offset answered with the pre-write image, because the write was still a
+    // dirty page in the volume-stream cache.  That silently breaks any raw
+    // read-modify-write user of the volume, chkdsk above all - ntfslib holds
+    // no cache of its own, so a repair stage that re-read a record an earlier
+    // stage had already fixed got the stale image back, modified that, and
+    // wrote it out again, erasing the earlier repair.  The run still reported
+    // those issues as fixed, and the next boot found them all over again.
+    //
+    // Route the DASD reads through the same cache the DASD writes use, which
+    // also makes them coherent with the driver's own metadata I/O.
+    if (Fcb->Flags & FCB_IS_VOLUME_STREAM)
     {
         NTSTATUS VStatus;
         VStatus = NtfsReadDisk(DeviceExt->StorageDevice,
@@ -289,6 +309,15 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
                                DeviceExt->NtfsInfo.BytesPerSector,
                                Buffer,
                                FALSE);
+        if (NT_SUCCESS(VStatus))
+            *LengthRead = Length;
+        return VStatus;
+    }
+
+    if (Fcb->Flags & FCB_IS_VOLUME)
+    {
+        NTSTATUS VStatus;
+        VStatus = NtfsReadDiskCached(DeviceExt, ReadOffset, Length, Buffer);
         if (NT_SUCCESS(VStatus))
             *LengthRead = Length;
         return VStatus;
