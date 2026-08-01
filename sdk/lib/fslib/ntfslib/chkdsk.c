@@ -738,15 +738,26 @@ int NtfsChkVolume(const MKNTFS_IO *io, const NTFS_CHK_OPTIONS *opt,
 
     /* $Volume dirty flag (R8 disarm).  Clear + mark MODIFIED_BY_CHKDSK when the
      * volume was originally dirty OR any repair happened this run (R0 armed it).
-     * This is deliberately the last write. */
+     * This is deliberately the last write.
+     *
+     * Only stamp the volume clean when the run actually converged.  Clearing
+     * the flag after a partial repair is worse than not repairing at all: the
+     * next boot's CheckOnlyIfDirty probe sees a clean volume, skips the check,
+     * and the damage this run could not fix is never revisited -- the volume
+     * stays broken while reporting healthy.  Windows' chkdsk leaves the flag
+     * set when uncorrected damage remains, so autochk comes back for it. */
+    unfixed = res->IssueCount - res->RepairedCount;
+
     if (res->WasDirty)
     {
         int fixed = 0;
-        if (opt->FixErrors && chk_set_volume_flag(c, 0, 1) == 0)
+        if (opt->FixErrors && unfixed == 0 && chk_set_volume_flag(c, 0, 1) == 0)
             fixed = 1;
+        /* When the flag is deliberately left set, this records itself as an
+         * unfixed issue, which is what drives ExitStatus to 1 below. */
         chk_add_issue(res, CHK_ERR_VOLUME_DIRTY, 0, 0, fixed);
     }
-    else if (opt->FixErrors && res->RepairedCount > 0)
+    else if (opt->FixErrors && res->RepairedCount > 0 && unfixed == 0)
     {
         /* R0 armed it above; disarm now (no VOLUME_DIRTY issue was recorded). */
         chk_set_volume_flag(c, 0, 1);
