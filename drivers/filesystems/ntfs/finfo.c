@@ -1834,10 +1834,14 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                 }
             }
 
+            /* RenamePath is the full target path and NtfsBuildRenamePath always
+             * NUL-terminates it, so it can be used directly as the FCB-table
+             * key for retiring the FCB of a file this rename replaces. */
             Status = NtfsRenameFileRecord(DeviceExt,
                                           Fcb,
                                           ParentMftIndex,
                                           &RenameLeafName,
+                                          RenamePath.Buffer,
                                           RenameInfo->ReplaceIfExists,
                                           BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
             if (NT_SUCCESS(Status))
