@@ -793,6 +793,67 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
 }
 
 
+/* Drop the cached FCB that used to own a name which has just been unlinked by
+ * a rename with ReplaceIfExists.
+ *
+ * NtfsRenameFileRecord deletes the replaced file through a *stack-local*
+ * NTFS_FCB, so NtfsDeleteFileRecord zeroes the LinkCount of a throwaway copy.
+ * The FCB that is actually cached for that path keeps LinkCount != 0 and still
+ * describes the file that is now gone - its MFT index, its FileSize and its
+ * timestamps.  Nothing evicts it either, because a non-directory FCB only
+ * leaves the table once its RefCount reaches 0 and the cache-teardown branch
+ * of NtfsReleaseFCB leaves it there at RefCount 1.  The next open of that path
+ * therefore matches the zombie in NtfsGrabFCBFromTable and the caller sees the
+ * REPLACED file's length: every read stops short of the new content, and once
+ * the freed clusters get reused the tail of the old file shows up spliced onto
+ * the new one.  That is how `patch` could rewrite a 4377-byte configure.ac to
+ * 4453 bytes, report success, and leave every reader seeing 4377 bytes.
+ *
+ * Mark it unnamed instead.  LinkCount == 0 is the convention that
+ * NtfsGrabFCBFromTable already skips for deleted files, so lookups fall
+ * through to the on-disk entry while any handle still open on the old file
+ * keeps working; the FCB is freed by the normal refcount teardown.
+ *
+ * MftIndex is matched as well as the path so that an FCB legitimately holding
+ * this name - the source of the rename itself, once it has been repointed -
+ * is left alone. */
+VOID
+NtfsInvalidateFCBForPath(PNTFS_VCB Vcb,
+                         PCWSTR PathName,
+                         ULONGLONG MftIndex)
+{
+    KIRQL oldIrql;
+    PNTFS_FCB Fcb;
+    PLIST_ENTRY current_entry;
+    ULONG NameHash;
+
+    if (PathName == NULL || *PathName == UNICODE_NULL)
+        return;
+
+    NameHash = NtfsComputePathNameHash(PathName);
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+
+    for (current_entry = Vcb->FcbListHead.Flink;
+         current_entry != &Vcb->FcbListHead;
+         current_entry = current_entry->Flink)
+    {
+        Fcb = CONTAINING_RECORD(current_entry, NTFS_FCB, FcbListEntry);
+
+        if (Fcb->MFTIndex == MftIndex &&
+            Fcb->PathNameHash == NameHash &&
+            _wcsicmp(PathName, Fcb->PathName) == 0)
+        {
+            DPRINT("Invalidating replaced FCB %p (%S, mft=%I64u)\n",
+                   Fcb, Fcb->PathName, Fcb->MFTIndex);
+            Fcb->LinkCount = 0;
+        }
+    }
+
+    KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+}
+
+
 NTSTATUS
 NtfsFCBInitializeCache(PNTFS_VCB Vcb,
                        PNTFS_FCB Fcb)
