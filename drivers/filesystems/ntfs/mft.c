@@ -5545,6 +5545,7 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
                      ULONGLONG NewParentMftIndex,
                      PUNICODE_STRING NewFileName,
+                     PCWSTR NewFullPath,
                      BOOLEAN ReplaceIfExists,
                      BOOLEAN CaseSensitive)
 {
@@ -5659,6 +5660,14 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                                           CaseSensitive);
             if (!NT_SUCCESS(Status))
                 goto Cleanup;
+
+            /* ExistingFcb above is a stack temporary, so the LinkCount that
+             * NtfsDeleteFileRecord just zeroed belongs to a copy.  The FCB that
+             * is really cached for this path still looks live and still carries
+             * the replaced file's MFT index, size and timestamps - retire it
+             * here, or the next open of the name gets the old file's metadata
+             * and reads the new content at the old length. */
+            NtfsInvalidateFCBForPath(DeviceExt, NewFullPath, ExistingMftIndex);
 
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
             ExistingRecord = NULL;
