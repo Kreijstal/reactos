@@ -5350,10 +5350,23 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
 
             if (NtfsCollectFileNameChildren(DeviceExt, FileRecord, &SpillChildren) == 0)
             {
-                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-                return STATUS_OBJECT_NAME_NOT_FOUND;
+                /* A record with no name anywhere and no links left is not an
+                 * error either: a rename with ReplaceIfExists unlinks the file
+                 * it replaces straight away but leaves the record for the last
+                 * close to reclaim (see NtfsRenameFileRecord), so by the time
+                 * NtfsCleanupFile routes it here the name is legitimately gone.
+                 * LinkCount is what tells the two apart - a still-linked record
+                 * whose $FILE_NAME vanished really is corruption. */
+                if (FileRecord->LinkCount != 0)
+                {
+                    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                    return STATUS_OBJECT_NAME_NOT_FOUND;
+                }
             }
-            ExFreePoolWithTag(SpillChildren, TAG_NTFS);
+            else
+            {
+                ExFreePoolWithTag(SpillChildren, TAG_NTFS);
+            }
         }
     }
 
@@ -5540,6 +5553,50 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* Unlink the name a rename is about to take over, without touching the file
+ * record behind it.  Used when the file being replaced still has open handles:
+ * the name has to disappear now (the rename puts its own there), but the
+ * record, its clusters and its data must stay alive until the last of those
+ * handles closes.  NtfsCleanupFile finishes the job through FCB_DELETE_PENDING.
+ */
+static
+NTSTATUS
+NtfsUnlinkReplacedName(PDEVICE_EXTENSION DeviceExt,
+                       PNTFS_FCB Fcb,
+                       PCUNICODE_STRING LeafName,
+                       ULONGLONG ParentMftIndex,
+                       BOOLEAN CaseSensitive)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    NTSTATUS Status;
+
+    /* The on-disk record is about to lose a $FILE_NAME. */
+    NtfsInvalidateCachedFileRecord(Fcb);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!FileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        /* Drops the parent's $I30 entry and the $FILE_NAME attribute (plus its
+         * DOS 8.3 partner), then writes back the decremented link count.  When
+         * this was the file's only name that leaves LinkCount == 0, which also
+         * takes the FCB out of NtfsGrabFCBFromTable's lookups - exactly what a
+         * replaced name needs. */
+        Status = NtfsUnlinkSingleName(DeviceExt,
+                                      Fcb,
+                                      FileRecord,
+                                      LeafName,
+                                      ParentMftIndex,
+                                      CaseSensitive);
+    }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
 NTSTATUS
 NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
@@ -5569,6 +5626,7 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     ULONG NewFileNameLength;
     USHORT ParentSequenceNumber;
     NTFS_FCB ExistingFcb;
+    PNTFS_FCB TargetFcb = NULL;
 
     if (NtfsFCBIsRoot(Fcb))
         return STATUS_ACCESS_DENIED;
@@ -5637,37 +5695,94 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
         }
         else
         {
-            RtlZeroMemory(&ExistingFcb, sizeof(ExistingFcb));
-            /* Copy only the fixed FILENAME_ATTRIBUTE header (up to but not
-             * including the Name array).  FCB::Entry embeds a FILENAME_ATTRIBUTE
-             * whose Name is declared Name[1], so appending the variable-length
-             * name here would overrun Entry straight into the adjacent
-             * CachedFileRecord pointer - which NtfsInvalidateCachedFileRecord
-             * then frees, faulting in ExFreePoolWithTag.  NtfsDeleteFileRecord
-             * re-reads every $FILE_NAME from the on-disk record via MFTIndex and
-             * never consults Entry.Name, so the header (which carries
-             * FileAttributes for the directory check) is all it needs. */
-            RtlCopyMemory(&ExistingFcb.Entry,
-                          ExistingName,
-                          FIELD_OFFSET(FILENAME_ATTRIBUTE, Name));
-            ExistingFcb.MFTIndex = ExistingMftIndex;
-            ExistingFcb.LinkCount = ExistingRecord->LinkCount;
+            /* Somebody may still have the file we are about to unlink open.
+             * Windows refuses the rename outright unless every one of those
+             * openers granted FILE_SHARE_DELETE, and even when they did it only
+             * unlinks the name - the record and its clusters live on until the
+             * last handle closes.  Freeing them here, which is what an
+             * unconditional NtfsDeleteFileRecord does, returns the clusters to
+             * $Bitmap while readers still hold the file: the next allocation
+             * hands those clusters to an unrelated file and both of them are
+             * corrupt.  POSIX emulation makes this the normal case rather than
+             * a corner one - Cygwin/MSYS2 open with FILE_SHARE_DELETE exactly
+             * so that renaming over an open file keeps working. */
+            TargetFcb = NtfsGrabFCBFromTable(DeviceExt, NewFullPath);
+            if (TargetFcb != NULL && TargetFcb->MFTIndex != ExistingMftIndex)
+            {
+                /* Cached under this path, but not the file we looked up on
+                 * disk - not ours to reason about. */
+                NtfsReleaseFCB(DeviceExt, TargetFcb);
+                TargetFcb = NULL;
+            }
 
-            Status = NtfsDeleteFileRecord(DeviceExt,
-                                          &ExistingFcb,
-                                          NewFileName,
-                                          NewParentMftIndex,
-                                          CaseSensitive);
-            if (!NT_SUCCESS(Status))
-                goto Cleanup;
+            if (TargetFcb != NULL && TargetFcb->OpenHandleCount > 0)
+            {
+                if (TargetFcb->ShareAccess.SharedDelete < TargetFcb->ShareAccess.OpenCount)
+                {
+                    DPRINT1("Rename over '%S': %lu handle(s) open, only %lu share delete\n",
+                            NewFullPath,
+                            TargetFcb->ShareAccess.OpenCount,
+                            TargetFcb->ShareAccess.SharedDelete);
+                    Status = STATUS_ACCESS_DENIED;
+                    goto Cleanup;
+                }
 
-            /* ExistingFcb above is a stack temporary, so the LinkCount that
-             * NtfsDeleteFileRecord just zeroed belongs to a copy.  The FCB that
-             * is really cached for this path still looks live and still carries
-             * the replaced file's MFT index, size and timestamps - retire it
-             * here, or the next open of the name gets the old file's metadata
-             * and reads the new content at the old length. */
-            NtfsInvalidateFCBForPath(DeviceExt, NewFullPath, ExistingMftIndex);
+                /* Every opener allows it: take the name away now and let the
+                 * last close reclaim the record through the delete-pending
+                 * path in NtfsCleanupFile. */
+                Status = NtfsUnlinkReplacedName(DeviceExt,
+                                                TargetFcb,
+                                                NewFileName,
+                                                NewParentMftIndex,
+                                                CaseSensitive);
+                if (!NT_SUCCESS(Status))
+                    goto Cleanup;
+
+                SetFlag(TargetFcb->Flags, FCB_DELETE_PENDING);
+
+                NtfsReleaseFCB(DeviceExt, TargetFcb);
+                TargetFcb = NULL;
+            }
+            else
+            {
+                if (TargetFcb != NULL)
+                {
+                    NtfsReleaseFCB(DeviceExt, TargetFcb);
+                    TargetFcb = NULL;
+                }
+
+                RtlZeroMemory(&ExistingFcb, sizeof(ExistingFcb));
+                /* Copy only the fixed FILENAME_ATTRIBUTE header (up to but not
+                 * including the Name array).  FCB::Entry embeds a FILENAME_ATTRIBUTE
+                 * whose Name is declared Name[1], so appending the variable-length
+                 * name here would overrun Entry straight into the adjacent
+                 * CachedFileRecord pointer - which NtfsInvalidateCachedFileRecord
+                 * then frees, faulting in ExFreePoolWithTag.  NtfsDeleteFileRecord
+                 * re-reads every $FILE_NAME from the on-disk record via MFTIndex and
+                 * never consults Entry.Name, so the header (which carries
+                 * FileAttributes for the directory check) is all it needs. */
+                RtlCopyMemory(&ExistingFcb.Entry,
+                              ExistingName,
+                              FIELD_OFFSET(FILENAME_ATTRIBUTE, Name));
+                ExistingFcb.MFTIndex = ExistingMftIndex;
+                ExistingFcb.LinkCount = ExistingRecord->LinkCount;
+
+                Status = NtfsDeleteFileRecord(DeviceExt,
+                                              &ExistingFcb,
+                                              NewFileName,
+                                              NewParentMftIndex,
+                                              CaseSensitive);
+                if (!NT_SUCCESS(Status))
+                    goto Cleanup;
+
+                /* ExistingFcb above is a stack temporary, so the LinkCount that
+                 * NtfsDeleteFileRecord just zeroed belongs to a copy.  The FCB that
+                 * is really cached for this path still looks live and still carries
+                 * the replaced file's MFT index, size and timestamps - retire it
+                 * here, or the next open of the name gets the old file's metadata
+                 * and reads the new content at the old length. */
+                NtfsInvalidateFCBForPath(DeviceExt, NewFullPath, ExistingMftIndex);
+            }
 
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ExistingRecord);
             ExistingRecord = NULL;
@@ -5781,6 +5896,8 @@ RollbackNewName:
                                     CaseSensitive);
 
 Cleanup:
+    if (TargetFcb)
+        NtfsReleaseFCB(DeviceExt, TargetFcb);
     if (OldFileNameBuffer)
         ExFreePoolWithTag(OldFileNameBuffer, TAG_NTFS);
     if (FileNameContext)
