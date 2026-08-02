@@ -1638,6 +1638,11 @@ PNTFS_FCB
 NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
                      PCWSTR FileName);
 
+VOID
+NtfsInvalidateFCBForPath(PNTFS_VCB Vcb,
+                         PCWSTR PathName,
+                         ULONGLONG MftIndex);
+
 NTSTATUS
 NtfsFCBInitializeCache(PNTFS_VCB Vcb,
                        PNTFS_FCB Fcb);
@@ -2000,6 +2005,7 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PNTFS_FCB Fcb,
                      ULONGLONG NewParentMftIndex,
                      PUNICODE_STRING NewFileName,
+                     PCWSTR NewFullPath,
                      BOOLEAN ReplaceIfExists,
                      BOOLEAN CaseSensitive);
 
