@@ -2651,9 +2651,23 @@ ExAllocatePoolWithTag(IN POOL_TYPE PoolType,
                          OriginalType);
 
     //
-    // And return the pool allocation
+    // And return the pool allocation.
     //
-    ExpCheckPoolBlocks(Entry);
+    // Note that we deliberately do NOT walk the page here. Both branches above
+    // already validated it: the first one under the pool lock, and the second
+    // one on a page whose free fragment was never published. By this point the
+    // lock has been dropped and the fragment is on PoolDesc->ListHeads[], so
+    // another processor may already be splitting it. ExpCheckPoolBlocks() is
+    // not atomic with respect to that split -- it would observe the window in
+    //
+    //     Entry->BlockSize -= i;
+    //     Entry = POOL_NEXT_BLOCK(Entry);
+    //     Entry->PreviousSize = FragmentEntry->BlockSize;
+    //
+    // between the two stores, read the shrunk BlockSize together with a
+    // PreviousSize that has not been updated yet, and report a bogus
+    // BAD_POOL_HEADER for a page that is perfectly consistent.
+    //
     Entry->PoolTag = Tag;
     return POOL_FREE_BLOCK(Entry);
 }
