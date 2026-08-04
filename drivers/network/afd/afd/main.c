@@ -1214,11 +1214,13 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
     KIRQL OldIrql;
     PAFD_ACTIVE_POLL Poll;
 
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
-
-    if (!SocketAcquireStateLock(FCB))
-        return;
-
+    /* Work out what we are cancelling while the cancel spin lock still
+     * protects the IRP. Once it is dropped we have no claim on the IRP at
+     * all: whoever owns the socket lock may complete it -- and the I/O
+     * manager may then free it -- before SocketAcquireStateLock() below
+     * returns. Reading IrpSp after that point is a use-after-free, and the
+     * recycled memory reads back as an unrecognised IoControlCode, which
+     * lands in the default case of the switch below. */
     switch (IrpSp->MajorFunction)
     {
         case IRP_MJ_DEVICE_CONTROL:
@@ -1235,9 +1237,14 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         default:
             ASSERT(FALSE);
-            SocketStateUnlock(FCB);
+            IoReleaseCancelSpinLock(Irp->CancelIrql);
             return;
     }
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    if (!SocketAcquireStateLock(FCB))
+        return;
 
     switch (IoctlCode)
     {
@@ -1300,8 +1307,17 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
             break;
 
         default:
+            /* We do not know which list this IRP is queued on, so we cannot
+             * establish that it is still ours. Completing it unconditionally
+             * is what every other case here is careful not to do: if the
+             * owner of the socket lock already completed it while we waited
+             * for that lock, this is a second completion and bugchecks with
+             * MULTIPLE_IRP_COMPLETE_REQUESTS. Leave it alone and warn, as the
+             * not-found paths below and in the IOCTL_AFD_SELECT case do. */
             ASSERT(FALSE);
-            UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, 0);
+            SocketStateUnlock(FCB);
+            DbgPrint("WARNING!!! IRP cancellation race could lead to a process hang! (IoctlCode: 0x%x)\n",
+                     IoctlCode);
             return;
     }
 
