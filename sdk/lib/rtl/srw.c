@@ -46,10 +46,40 @@
                              RTL_SRWLOCK_SHARED | RTL_SRWLOCK_CONTENTION_LOCK)
 #define RTL_SRWLOCK_BITS    4
 
+/* States of the handshake that decides whether a waiter parks in the kernel
+   and, correspondingly, whether a releaser has to signal a keyed event. A
+   waiter only ever blocks after publishing RTLP_SRWLOCK_WAIT_BLOCKING, and a
+   releaser only ever signals a waiter it observed in that state, so exactly
+   one of "the waiter parks" and "the releaser signals" happens. Getting this
+   wrong in either direction is fatal: an unmatched NtReleaseKeyedEvent blocks
+   the releaser forever, and a missed signal leaves the waiter asleep. */
+#define RTLP_SRWLOCK_WAIT_SPINNING  0
+#define RTLP_SRWLOCK_WAIT_BLOCKING  1
+#define RTLP_SRWLOCK_WAIT_WOKEN     2
+
+/* How long to spin before parking. Spinning wins when the owner is about to
+   release, which is the common case for the short critical sections SRW locks
+   are meant for. Parking wins when it is not, and it is what keeps a heavily
+   contended lock from burning every processor the owner needs in order to make
+   progress -- without it, N waiting threads starve the one thread that could
+   actually release the lock, and the lock stops making progress at all. */
+#define RTLP_SRWLOCK_SPIN_COUNT     1024
+
+/* Relative (negative) 100ns units: 100ms. */
+#define RTLP_SRWLOCK_WAIT_TIMEOUT   (-100 * 10000LL)
+
 typedef struct _RTLP_SRWLOCK_SHARED_WAKE
 {
     LONG Wake;
     volatile struct _RTLP_SRWLOCK_SHARED_WAKE *Next;
+
+    /* One of the RTLP_SRWLOCK_WAIT_* states above. */
+    LONG WaitState;
+
+    /* Scratch link, used by a releaser to collect the nodes it still owes a
+       keyed event to. Only ever touched for nodes whose owner is parked, and
+       therefore cannot return and reclaim this storage. */
+    volatile struct _RTLP_SRWLOCK_SHARED_WAKE *WakeNext;
 } volatile RTLP_SRWLOCK_SHARED_WAKE, *PRTLP_SRWLOCK_SHARED_WAKE;
 
 typedef struct _RTLP_SRWLOCK_WAITBLOCK
@@ -77,7 +107,122 @@ typedef struct _RTLP_SRWLOCK_WAITBLOCK
     };
 
     BOOLEAN Exclusive;
+
+    /* One of the RTLP_SRWLOCK_WAIT_* states above. Only meaningful for
+       exclusive wait blocks -- shared acquirers wait on their own wake node,
+       and so use the WaitState in RTLP_SRWLOCK_SHARED_WAKE instead. */
+    LONG WaitState;
 } volatile RTLP_SRWLOCK_WAITBLOCK, *PRTLP_SRWLOCK_WAITBLOCK;
+
+/* Tests whether the condition a waiter is waiting for has come true. */
+typedef BOOLEAN (NTAPI *PRTLP_SRWLOCK_SATISFIED)(IN PVOID Context1,
+                                                 IN PVOID Context2);
+
+
+/* Park the calling thread until it is woken by RtlpSRWLockBeginWake() below,
+   re-testing Satisfied() across the publication of the parked state so that a
+   wake landing in that window cannot be lost. Returns when the caller should
+   test its wait condition again -- it does not guarantee the condition holds. */
+static VOID
+NTAPI
+RtlpSRWLockPark(IN OUT volatile LONG *WaitState,
+                IN PVOID Key,
+                IN PRTLP_SRWLOCK_SATISFIED Satisfied,
+                IN PVOID Context1,
+                IN PVOID Context2)
+{
+    LARGE_INTEGER Timeout;
+    NTSTATUS Status;
+
+    /* Announce that we are about to park before re-testing the condition. A
+       releaser only signals waiters it sees as BLOCKING, so a wake that lands
+       between the caller's test and this exchange would be missed entirely if
+       we did not test once more below. */
+    if (InterlockedCompareExchange((PLONG)WaitState,
+                                   RTLP_SRWLOCK_WAIT_BLOCKING,
+                                   RTLP_SRWLOCK_WAIT_SPINNING) !=
+        RTLP_SRWLOCK_WAIT_SPINNING)
+    {
+        /* Somebody already woke us; the caller's next test will see why. */
+        YieldProcessor();
+        return;
+    }
+
+    if (Satisfied(Context1, Context2))
+    {
+        /* It came true while we were publishing. Back out of parking -- but
+           only if the releaser has not already committed to signalling us. If
+           it has, we have to consume that signal, or it would be left dangling
+           on this key for whichever thread parks on it next. */
+        if (InterlockedCompareExchange((PLONG)WaitState,
+                                       RTLP_SRWLOCK_WAIT_SPINNING,
+                                       RTLP_SRWLOCK_WAIT_BLOCKING) ==
+            RTLP_SRWLOCK_WAIT_BLOCKING)
+        {
+            return;
+        }
+    }
+
+    /* Wait with a timeout rather than indefinitely. Every wake in this file
+       goes through RtlpSRWLockBeginWake(), so a signal should always arrive;
+       the timeout exists to bound the cost of ever being wrong about that. A
+       missed wake then degrades to polling instead of losing the thread. */
+    Timeout.QuadPart = RTLP_SRWLOCK_WAIT_TIMEOUT;
+    for (;;)
+    {
+        Status = NtWaitForKeyedEvent(NULL, Key, FALSE, &Timeout);
+        ASSERT(STATUS_INVALID_HANDLE != Status);
+        if (Status != STATUS_TIMEOUT)
+            break;
+
+        /* Nothing signalled us. If the releaser has not committed we may stop
+           waiting; if it has, we must stay, or its release would dangle. */
+        if (InterlockedCompareExchange((PLONG)WaitState,
+                                       RTLP_SRWLOCK_WAIT_SPINNING,
+                                       RTLP_SRWLOCK_WAIT_BLOCKING) ==
+            RTLP_SRWLOCK_WAIT_BLOCKING)
+        {
+            break;
+        }
+    }
+}
+
+
+/* Claim the parking handshake for a waiter that is about to be released.
+   This must be called *before* that waiter's Wake flag is set: the moment the
+   flag becomes visible a spinning waiter may return, and its wait block --
+   which lives on its stack -- ceases to exist. Returns TRUE if the waiter
+   parked in the kernel, in which case it cannot return, and so stays alive,
+   until the caller signals its key with NtReleaseKeyedEvent(). */
+static BOOLEAN
+NTAPI
+RtlpSRWLockBeginWake(IN OUT volatile LONG *WaitState)
+{
+    return (InterlockedExchange((PLONG)WaitState, RTLP_SRWLOCK_WAIT_WOKEN) ==
+            RTLP_SRWLOCK_WAIT_BLOCKING);
+}
+
+
+/* Hand over every parked waiter collected on a WakeNext list. */
+static VOID
+NTAPI
+RtlpSRWLockWakeParked(IN PRTLP_SRWLOCK_SHARED_WAKE ParkedList)
+{
+    PRTLP_SRWLOCK_SHARED_WAKE Parked;
+
+    while (ParkedList != NULL)
+    {
+        /* Read the link before signalling: the moment this node's owner is
+           released it returns, and the node goes with its stack frame. */
+        Parked = ParkedList;
+        ParkedList = Parked->WakeNext;
+
+        (void)NtReleaseKeyedEvent(NULL,
+                                  (PVOID)(ULONG_PTR)Parked,
+                                  FALSE,
+                                  NULL);
+    }
+}
 
 
 static VOID
@@ -87,6 +232,8 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
 {
     PRTLP_SRWLOCK_WAITBLOCK Next;
     PRTLP_SRWLOCK_SHARED_WAKE WakeChain, NextWake;
+    PRTLP_SRWLOCK_SHARED_WAKE ParkedList = NULL;
+    PVOID ExclusiveKey = NULL;
     LONG_PTR NewValue;
     BOOLEAN Exclusive;
 
@@ -132,13 +279,20 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
         }
     }
 
-    /* Wake the released acquirers *before* publishing the new lock value.
-       Until it is published the lock still reads as contended, so no waiter
-       can leave its spin loop on its own and no wait block can go away behind
-       our back. Publishing first would let a waiter return and reuse its stack
-       while we are still walking these structures. */
+    /* Wake the released acquirers now that everything we need has been read
+       out of their wait blocks. Setting a waiter's Wake flag is what hands it
+       the lock, so from that point on it may return at any moment and its wait
+       block -- stack storage of the waiting thread -- ceases to exist. Nothing
+       below may read from a block after waking it. */
     if (Exclusive)
     {
+        /* Claim the parking handshake first: once Wake is set, a spinning
+           waiter may return and take its wait block -- and its WaitState --
+           away with its stack frame. A parked waiter cannot, so it stays
+           alive until we signal its key further down. */
+        if (RtlpSRWLockBeginWake(&FirstWaitBlock->WaitState))
+            ExclusiveKey = (PVOID)(ULONG_PTR)FirstWaitBlock;
+
         (void)InterlockedOr(&FirstWaitBlock->Wake,
                             TRUE);
     }
@@ -152,6 +306,15 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
                owning thread its lock, after which the node is gone. */
             NextWake = WakeChain->Next;
 
+            if (RtlpSRWLockBeginWake(&WakeChain->WaitState))
+            {
+                /* A parked waiter cannot return until it is signalled, so its
+                   node stays alive and can be threaded onto a private list to
+                   be signalled once we are out of the wait block lock. */
+                WakeChain->WakeNext = ParkedList;
+                ParkedList = WakeChain;
+            }
+
             (void)InterlockedOr((PLONG)&WakeChain->Wake,
                                 TRUE);
 
@@ -160,6 +323,16 @@ RtlpReleaseWaitBlockLockExclusive(IN OUT PRTL_SRWLOCK SRWLock,
     }
 
     (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
+
+    /* Only now, with the wait block lock dropped, hand the parked threads
+       over. NtReleaseKeyedEvent() blocks until its target actually reaches
+       NtWaitForKeyedEvent(), and doing that while still holding the wait
+       block lock would leave every other thread spinning for it -- trading
+       one convoy for another. */
+    if (ExclusiveKey != NULL)
+        (void)NtReleaseKeyedEvent(NULL, ExclusiveKey, FALSE, NULL);
+
+    RtlpSRWLockWakeParked(ParkedList);
 }
 
 
@@ -170,6 +343,7 @@ RtlpReleaseWaitBlockLockLastShared(IN OUT PRTL_SRWLOCK SRWLock,
 {
     PRTLP_SRWLOCK_WAITBLOCK Next;
     LONG_PTR NewValue;
+    BOOLEAN Parked;
 
     /* NOTE: We're currently in a shared lock in contended mode. */
 
@@ -192,11 +366,25 @@ RtlpReleaseWaitBlockLockLastShared(IN OUT PRTL_SRWLOCK SRWLock,
     }
 
     /* Wake before publishing the new lock value, so that the wait block cannot
-       be released -- and its stack storage reused -- while we still use it. */
+       be released -- and its stack storage reused -- while we still use it.
+       The handshake has to be claimed before Wake is set, for the same
+       reason: afterwards the block may already be gone. */
+    Parked = RtlpSRWLockBeginWake(&FirstWaitBlock->WaitState);
+
     (void)InterlockedOr(&FirstWaitBlock->Wake,
                         TRUE);
 
     (void)InterlockedExchangePointer(&SRWLock->Ptr, (PVOID)NewValue);
+
+    /* Signal only after the wait block lock is dropped -- see the comment in
+       RtlpReleaseWaitBlockLockExclusive(). */
+    if (Parked)
+    {
+        (void)NtReleaseKeyedEvent(NULL,
+                                  (PVOID)(ULONG_PTR)FirstWaitBlock,
+                                  FALSE,
+                                  NULL);
+    }
 }
 
 
@@ -242,38 +430,99 @@ RtlpAcquireWaitBlockLock(IN OUT PRTL_SRWLOCK SRWLock)
 }
 
 
+static BOOLEAN
+NTAPI
+RtlpSRWLockExclusiveSatisfied(IN PVOID Context1,
+                              IN PVOID Context2)
+{
+    PRTL_SRWLOCK SRWLock = (PRTL_SRWLOCK)Context1;
+    PRTLP_SRWLOCK_WAITBLOCK WaitBlock = (PRTLP_SRWLOCK_WAITBLOCK)Context2;
+    LONG_PTR CurrentValue;
+
+    CurrentValue = *(volatile LONG_PTR *)&SRWLock->Ptr;
+    if (CurrentValue & RTL_SRWLOCK_SHARED)
+        return FALSE;
+
+    if (!(CurrentValue & RTL_SRWLOCK_CONTENDED))
+    {
+        /* The last wait block was removed and/or we're finally a simple
+           exclusive lock. This means we don't need to wait anymore, we
+           acquired the lock! */
+        return TRUE;
+    }
+
+    /* Our wait block became the first one in the chain, we own the lock now! */
+    return (WaitBlock->Wake != 0);
+}
+
+
 static VOID
 NTAPI
 RtlpAcquireSRWLockExclusiveWait(IN OUT PRTL_SRWLOCK SRWLock,
                                 IN PRTLP_SRWLOCK_WAITBLOCK WaitBlock)
 {
-    LONG_PTR CurrentValue;
+    ULONG SpinCount = RTLP_SRWLOCK_SPIN_COUNT;
 
-    while (1)
+    while (!RtlpSRWLockExclusiveSatisfied(SRWLock, (PVOID)(ULONG_PTR)WaitBlock))
     {
-        CurrentValue = *(volatile LONG_PTR *)&SRWLock->Ptr;
-        if (!(CurrentValue & RTL_SRWLOCK_SHARED))
+        if (SpinCount != 0)
         {
-            if (CurrentValue & RTL_SRWLOCK_CONTENDED)
-            {
-                if (WaitBlock->Wake != 0)
-                {
-                    /* Our wait block became the first one
-                       in the chain, we own the lock now! */
-                    break;
-                }
-            }
-            else
-            {
-                /* The last wait block was removed and/or we're
-                   finally a simple exclusive lock. This means we
-                   don't need to wait anymore, we acquired the lock! */
-                break;
-            }
+            SpinCount--;
+            YieldProcessor();
+            continue;
         }
 
-        YieldProcessor();
+        /* Spinning did not get us the lock, so stop competing for the
+           processor that the current owner needs in order to release it. */
+        RtlpSRWLockPark(&WaitBlock->WaitState,
+                        (PVOID)(ULONG_PTR)WaitBlock,
+                        RtlpSRWLockExclusiveSatisfied,
+                        SRWLock,
+                        (PVOID)(ULONG_PTR)WaitBlock);
     }
+}
+
+
+static BOOLEAN
+NTAPI
+RtlpSRWLockSharedWakeSatisfied(IN PVOID Context1,
+                               IN PVOID Context2)
+{
+    PRTLP_SRWLOCK_SHARED_WAKE WakeChain = (PRTLP_SRWLOCK_SHARED_WAKE)Context2;
+
+    UNREFERENCED_PARAMETER(Context1);
+
+    return (WakeChain->Wake != 0);
+}
+
+
+static BOOLEAN
+NTAPI
+RtlpSRWLockSharedSatisfied(IN PVOID Context1,
+                           IN PVOID Context2)
+{
+    PRTL_SRWLOCK SRWLock = (PRTL_SRWLOCK)Context1;
+    PRTLP_SRWLOCK_SHARED_WAKE WakeChain = (PRTLP_SRWLOCK_SHARED_WAKE)Context2;
+    LONG_PTR CurrentValue;
+
+    CurrentValue = *(volatile LONG_PTR *)&SRWLock->Ptr;
+    if (!(CurrentValue & RTL_SRWLOCK_SHARED))
+        return FALSE;
+
+    /* The RTL_SRWLOCK_OWNED bit always needs to be set when
+       RTL_SRWLOCK_SHARED is set! */
+    ASSERT(CurrentValue & RTL_SRWLOCK_OWNED);
+
+    if (!(CurrentValue & RTL_SRWLOCK_CONTENDED))
+    {
+        /* The last wait block was removed and/or we're finally a simple
+           shared lock. This means we don't need to wait anymore, we
+           acquired the lock! */
+        return TRUE;
+    }
+
+    /* Our wait block became the first one in the chain, we own the lock now! */
+    return (WakeChain->Wake != 0);
 }
 
 
@@ -283,46 +532,30 @@ RtlpAcquireSRWLockSharedWait(IN OUT PRTL_SRWLOCK SRWLock,
                              IN OUT PRTLP_SRWLOCK_WAITBLOCK FirstWait  OPTIONAL,
                              IN OUT PRTLP_SRWLOCK_SHARED_WAKE WakeChain)
 {
-    if (FirstWait != NULL)
+    PRTLP_SRWLOCK_SATISFIED Satisfied;
+    ULONG SpinCount = RTLP_SRWLOCK_SPIN_COUNT;
+
+    /* When we queued a wait block of our own the lock value tells us nothing
+       about our own turn, so the wake node is the only thing to watch. */
+    Satisfied = (FirstWait != NULL) ? RtlpSRWLockSharedWakeSatisfied
+                                    : RtlpSRWLockSharedSatisfied;
+
+    while (!Satisfied(SRWLock, (PVOID)(ULONG_PTR)WakeChain))
     {
-        while (WakeChain->Wake == 0)
+        if (SpinCount != 0)
         {
+            SpinCount--;
             YieldProcessor();
+            continue;
         }
-    }
-    else
-    {
-        LONG_PTR CurrentValue;
 
-        while (1)
-        {
-            CurrentValue = *(volatile LONG_PTR *)&SRWLock->Ptr;
-            if (CurrentValue & RTL_SRWLOCK_SHARED)
-            {
-                /* The RTL_SRWLOCK_OWNED bit always needs to be set when
-                   RTL_SRWLOCK_SHARED is set! */
-                ASSERT(CurrentValue & RTL_SRWLOCK_OWNED);
-
-                if (CurrentValue & RTL_SRWLOCK_CONTENDED)
-                {
-                    if (WakeChain->Wake != 0)
-                    {
-                        /* Our wait block became the first one
-                           in the chain, we own the lock now! */
-                        break;
-                    }
-                }
-                else
-                {
-                    /* The last wait block was removed and/or we're
-                       finally a simple shared lock. This means we
-                       don't need to wait anymore, we acquired the lock! */
-                    break;
-                }
-            }
-
-            YieldProcessor();
-        }
+        /* Spinning did not get us the lock, so stop competing for the
+           processor that the current owner needs in order to release it. */
+        RtlpSRWLockPark(&WakeChain->WaitState,
+                        (PVOID)(ULONG_PTR)WakeChain,
+                        Satisfied,
+                        SRWLock,
+                        (PVOID)(ULONG_PTR)WakeChain);
     }
 }
 
@@ -398,6 +631,7 @@ RtlAcquireSRWLockShared(IN OUT PRTL_SRWLOCK SRWLock)
 
                     SharedWake.Next = NULL;
                     SharedWake.Wake = 0;
+                    SharedWake.WaitState = RTLP_SRWLOCK_WAIT_SPINNING;
 
                     Shared->LastSharedWake = &SharedWake;
 
@@ -442,6 +676,7 @@ RtlAcquireSRWLockShared(IN OUT PRTL_SRWLOCK SRWLock)
                 {
                     SharedWake.Next = NULL;
                     SharedWake.Wake = 0;
+                    SharedWake.WaitState = RTLP_SRWLOCK_WAIT_SPINNING;
 
                     /* There's other waiters already, lock the wait blocks and
                        increment the shared count. If the last block in the chain
@@ -488,6 +723,7 @@ RtlAcquireSRWLockShared(IN OUT PRTL_SRWLOCK SRWLock)
                 {
                     SharedWake.Next = NULL;
                     SharedWake.Wake = 0;
+                    SharedWake.WaitState = RTLP_SRWLOCK_WAIT_SPINNING;
 
                     /* We need to setup the first wait block. Currently an exclusive lock is
                        held, change the lock to contended mode. */
@@ -634,6 +870,7 @@ RtlAcquireSRWLockExclusive(IN OUT PRTL_SRWLOCK SRWLock)
                     StackWaitBlock.Next = NULL;
                     StackWaitBlock.Last = &StackWaitBlock;
                     StackWaitBlock.Wake = 0;
+                    StackWaitBlock.WaitState = RTLP_SRWLOCK_WAIT_SPINNING;
 
                     NewValue = (ULONG_PTR)&StackWaitBlock | RTL_SRWLOCK_SHARED | RTL_SRWLOCK_CONTENDED | RTL_SRWLOCK_OWNED;
 
@@ -663,6 +900,7 @@ AddWaitBlock:
                         StackWaitBlock.Next = NULL;
                         StackWaitBlock.Last = &StackWaitBlock;
                         StackWaitBlock.Wake = 0;
+                        StackWaitBlock.WaitState = RTLP_SRWLOCK_WAIT_SPINNING;
 
                         First = RtlpAcquireWaitBlockLock(SRWLock);
                         if (First != NULL)
@@ -689,6 +927,7 @@ AddWaitBlock:
                         StackWaitBlock.Next = NULL;
                         StackWaitBlock.Last = &StackWaitBlock;
                         StackWaitBlock.Wake = 0;
+                        StackWaitBlock.WaitState = RTLP_SRWLOCK_WAIT_SPINNING;
 
                         NewValue = (ULONG_PTR)&StackWaitBlock | RTL_SRWLOCK_OWNED | RTL_SRWLOCK_CONTENDED;
                         if ((LONG_PTR)InterlockedCompareExchangePointer(&SRWLock->Ptr,
