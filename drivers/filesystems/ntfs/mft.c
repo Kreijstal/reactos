@@ -1230,78 +1230,65 @@ RollbackAllocation:
 }
 
 /**
-* @name SetResidentAttributeDataLength
+* @name ConvertResidentAttributeToNonResident
 * @implemented
 *
-* Called by SetAttributeDataLength() to set the size of a non-resident attribute. Doesn't update the file record.
+* Moves the value of a resident attribute out of its file record: the value is
+* copied aside, the attribute record is rewritten as a 0-length non-resident
+* one, clusters are allocated to hold DataSize bytes, and the saved value is
+* written back into them.
 *
 * @param Vcb
 * Pointer to a DEVICE_EXTENSION describing the target disk.
 *
 * @param AttrContext
-* PNTFS_ATTR_CONTEXT describing the location of the attribute whose size is being set.
+* PNTFS_ATTR_CONTEXT describing the resident attribute to convert. On success
+* its pRecord has been replaced with the non-resident attribute record and its
+* DataRunsMCB is live, so the caller keeps releasing it the usual way.
 *
 * @param AttrOffset
-* Offset, from the beginning of the record, of the attribute being sized.
+* Offset, from the beginning of the record, of the attribute being converted.
 *
 * @param FileRecord
-* Pointer to a file record containing the attribute to be resized. Must be a complete file record,
-* not just the header.
+* Pointer to the file record holding the attribute. Must be a complete file
+* record. Updated in place and written back to disk.
 *
 * @param DataSize
-* Pointer to a LARGE_INTEGER describing the new size of the attribute's data.
+* Size the attribute's data will have once converted. Must be at least the
+* attribute's current value length - the existing value is preserved.
 *
 * @return
 * STATUS_SUCCESS on success;
-* STATUS_INSUFFICIENT_RESOURCES if an allocation fails.
-* STATUS_INVALID_PARAMETER if AttrContext describes a non-resident attribute.
-* STATUS_NOT_IMPLEMENTED if requested to decrease the size of an attribute that isn't the
-* last attribute listed in the file record.
+* STATUS_INSUFFICIENT_RESOURCES if an allocation fails;
+* STATUS_DISK_FULL if the non-resident attribute header doesn't fit in the record;
+* any status propagated from the read / resize / write-back steps.
 *
 * @remarks
-* Called by SetAttributeDataLength() and IncreaseMftSize(). Use SetAttributeDataLength() unless you have a good
-* reason to use this. Doesn't update the file record on disk. Doesn't inform the cache controller of changes with
-* any associated files. Synchronization is the callers responsibility.
+* Shared by SetResidentAttributeDataLength(), which converts an attribute whose
+* data has outgrown the file record, and NtfsMakeRoomInFileRecord(), which
+* converts one to free space for a *different* attribute. Doesn't inform the
+* cache manager of anything. Synchronization is the caller's responsibility.
 */
 NTSTATUS
-SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
+ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
                                PNTFS_ATTR_CONTEXT AttrContext,
                                ULONG AttrOffset,
                                PFILE_RECORD_HEADER FileRecord,
                                PLARGE_INTEGER DataSize)
 {
-    NTSTATUS Status;
-
-    // find the next attribute
-    ULONG NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
-    PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((PCHAR)FileRecord + NextAttributeOffset);
-
-    ASSERT(!AttrContext->pRecord->IsNonResident);
-
-    //NtfsDumpFileAttributes(Vcb, FileRecord);
-
-    // Do we need to increase the data length?
-    if (DataSize->QuadPart > AttrContext->pRecord->Resident.ValueLength)
-    {
-        // There's usually padding at the end of a record. Do we need to extend past it?
-        ULONG MaxValueLength = AttrContext->pRecord->Length - AttrContext->pRecord->Resident.ValueOffset;
-        if (MaxValueLength < DataSize->LowPart)
-        {
-            // If this is the last attribute, we could move the end marker to the very end of the file record
-            MaxValueLength += Vcb->NtfsInfo.BytesPerFileRecord - NextAttributeOffset - (sizeof(ULONG) * 2);
-
-            if (MaxValueLength < DataSize->LowPart || NextAttribute->Type != AttributeEnd)
-            {
-                // convert attribute to non-resident
                 PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
                 PNTFS_ATTR_RECORD NewRecord;
                 LARGE_INTEGER AttribDataSize;
-                PVOID AttribData;
+    PVOID AttribData = NULL;
+    NTSTATUS Status;
                 ULONG NewRecordLength;
                 ULONG OldRecordLength;
                 ULONG TailLength;
                 ULONG EndAttributeOffset;
                 ULONG LengthWritten;
+
+    ASSERT(!AttrContext->pRecord->IsNonResident);
+    ASSERT((ULONGLONG)DataSize->QuadPart >= AttrContext->pRecord->Resident.ValueLength);
 
                 DPRINT("Converting attribute to non-resident.\n");
 
@@ -1334,6 +1321,13 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
                 // Create a new attribute record that will store the 0-length, non-resident attribute
                 NewRecord = ExAllocatePoolWithTag(NonPagedPool, NewRecordLength, TAG_NTFS);
+    if (NewRecord == NULL)
+    {
+        DPRINT1("ERROR: Couldn't allocate memory for the non-resident attribute record!\n");
+        if (AttribDataSize.QuadPart > 0)
+            ExFreePoolWithTag(AttribData, TAG_NTFS);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
                 // Zero out the NonResident structure
                 RtlZeroMemory(NewRecord, NewRecordLength);
@@ -1459,6 +1453,81 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
                     ExFreePoolWithTag(AttribData, TAG_NTFS);
                 }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name SetResidentAttributeDataLength
+* @implemented
+*
+* Called by SetAttributeDataLength() to set the size of a non-resident attribute. Doesn't update the file record.
+*
+* @param Vcb
+* Pointer to a DEVICE_EXTENSION describing the target disk.
+*
+* @param AttrContext
+* PNTFS_ATTR_CONTEXT describing the location of the attribute whose size is being set.
+*
+* @param AttrOffset
+* Offset, from the beginning of the record, of the attribute being sized.
+*
+* @param FileRecord
+* Pointer to a file record containing the attribute to be resized. Must be a complete file record,
+* not just the header.
+*
+* @param DataSize
+* Pointer to a LARGE_INTEGER describing the new size of the attribute's data.
+*
+* @return
+* STATUS_SUCCESS on success;
+* STATUS_INSUFFICIENT_RESOURCES if an allocation fails.
+* STATUS_INVALID_PARAMETER if AttrContext describes a non-resident attribute.
+* STATUS_NOT_IMPLEMENTED if requested to decrease the size of an attribute that isn't the
+* last attribute listed in the file record.
+*
+* @remarks
+* Called by SetAttributeDataLength() and IncreaseMftSize(). Use SetAttributeDataLength() unless you have a good
+* reason to use this. Doesn't update the file record on disk. Doesn't inform the cache controller of changes with
+* any associated files. Synchronization is the callers responsibility.
+*/
+NTSTATUS
+SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
+                               PNTFS_ATTR_CONTEXT AttrContext,
+                               ULONG AttrOffset,
+                               PFILE_RECORD_HEADER FileRecord,
+                               PLARGE_INTEGER DataSize)
+{
+    NTSTATUS Status;
+
+    // find the next attribute
+    ULONG NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
+    PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((PCHAR)FileRecord + NextAttributeOffset);
+
+    ASSERT(!AttrContext->pRecord->IsNonResident);
+
+    //NtfsDumpFileAttributes(Vcb, FileRecord);
+
+    // Do we need to increase the data length?
+    if (DataSize->QuadPart > AttrContext->pRecord->Resident.ValueLength)
+    {
+        // There's usually padding at the end of a record. Do we need to extend past it?
+        ULONG MaxValueLength = AttrContext->pRecord->Length - AttrContext->pRecord->Resident.ValueOffset;
+        if (MaxValueLength < DataSize->LowPart)
+        {
+            // If this is the last attribute, we could move the end marker to the very end of the file record
+            MaxValueLength += Vcb->NtfsInfo.BytesPerFileRecord - NextAttributeOffset - (sizeof(ULONG) * 2);
+
+            if (MaxValueLength < DataSize->LowPart || NextAttribute->Type != AttributeEnd)
+            {
+                // The data no longer fits in the file record: push the attribute out of it
+                Status = ConvertResidentAttributeToNonResident(Vcb,
+                                                               AttrContext,
+                                                               AttrOffset,
+                                                               FileRecord,
+                                                               DataSize);
+                if (!NT_SUCCESS(Status))
+                    return Status;
             }
         }
     }
@@ -1466,6 +1535,226 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     // set the new length of the resident attribute (if we didn't migrate it)
     if (!AttrContext->pRecord->IsNonResident)
         return InternalSetResidentAttributeLength(Vcb, AttrContext, FileRecord, AttrOffset, DataSize->LowPart);
+
+    return STATUS_SUCCESS;
+}
+
+/*
+ * NTFS keeps $STANDARD_INFORMATION, $FILE_NAME, $OBJECT_ID, $INDEX_ROOT,
+ * $VOLUME_NAME, $VOLUME_INFORMATION and $EA_INFORMATION resident in the file
+ * record at all times - the on-disk format has nowhere to put a data run for
+ * them, and $INDEX_ROOT grows by demoting into $INDEX_ALLOCATION instead.
+ * Everything else may have its value moved into clusters of its own.
+ */
+static
+BOOLEAN
+NtfsAttributeCanBeNonResident(ULONG Type)
+{
+    switch (Type)
+    {
+        case AttributeSecurityDescriptor:
+        case AttributeData:
+        case AttributeBitmap:
+        case AttributeReparsePoint:
+        case AttributeEA:
+        case AttributeLoggedUtilityStream:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+/**
+* @name NtfsMakeRoomInFileRecord
+* @implemented
+*
+* Frees space in a file record so that one of its attributes can grow.
+*
+* A file record is a fixed 1 KB (usually) and every attribute of the file
+* competes for it. Growing an attribute that has to stay resident - notably
+* $FILE_NAME when a file is renamed to a longer name - therefore fails outright
+* once the record is full, even though the record is only full because some
+* other attribute's value is sitting in it. This makes room the way NTFS does:
+* first by pushing resident values out into clusters of their own, then, if the
+* record is still too tight, by moving whole attributes into child file records
+* through the $ATTRIBUTE_LIST.
+*
+* @param DeviceExt
+* Pointer to a DEVICE_EXTENSION describing the target disk.
+*
+* @param FileRecord
+* Pointer to the complete file record to make room in. Updated in place; any
+* attribute offset the caller was holding is stale once this returns, so the
+* attribute must be located again.
+*
+* @param BytesNeeded
+* Number of free bytes the record needs to end up with.
+*
+* @return
+* STATUS_SUCCESS if the record now has at least BytesNeeded bytes free;
+* STATUS_DISK_FULL if nothing can be moved out of it;
+* any status propagated from the conversion or the $ATTRIBUTE_LIST migration.
+*
+* @remarks
+* Synchronization is the caller's responsibility.
+*/
+NTSTATUS
+NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
+                         PFILE_RECORD_HEADER FileRecord,
+                         ULONG BytesNeeded)
+{
+    PNTFS_ATTR_CONTEXT AttrContext;
+    PNTFS_ATTR_RECORD Attribute;
+    LARGE_INTEGER AttributeSize;
+    ULONG Offset;
+    ULONG BestOffset;
+    ULONG BestGain;
+    ULONG NonResidentLength;
+    ULONG AttributeType;
+    ULONG Gain;
+    NTSTATUS Status;
+
+    /* Step 1: convert resident attributes to non-resident, biggest win first.
+     * A resident value of any size collapses to a 0x48-byte header plus its
+     * mapping pairs, so this is where nearly all the room comes from. */
+    while (DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < BytesNeeded)
+    {
+        BestOffset = 0;
+        BestGain = 0;
+
+        Offset = FileRecord->AttributeOffset;
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        while (Attribute->Type != AttributeEnd &&
+               Attribute->Length > 0 &&
+               Offset < FileRecord->BytesInUse)
+        {
+            /* Compressed, encrypted and sparse attributes are converted by a
+             * path of their own, which we don't have - leave them alone. */
+            if (!Attribute->IsNonResident &&
+                Attribute->Flags == 0 &&
+                NtfsAttributeCanBeNonResident(Attribute->Type))
+            {
+                NonResidentLength = ALIGN_UP_BY(0x41 + (Attribute->NameLength * sizeof(WCHAR)),
+                                                ATTR_RECORD_ALIGNMENT);
+                if (Attribute->Length > NonResidentLength)
+                {
+                    Gain = Attribute->Length - NonResidentLength;
+                    if (Gain > BestGain)
+                    {
+                        BestGain = Gain;
+                        BestOffset = Offset;
+                    }
+                }
+            }
+
+            Offset += Attribute->Length;
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        }
+
+        if (BestGain == 0)
+            break;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + BestOffset);
+        AttrContext = PrepareAttributeContext(Attribute);
+        if (AttrContext == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        AttrContext->FileMFTIndex = FileRecord->MFTRecordNumber;
+        AttributeSize.QuadPart = Attribute->Resident.ValueLength;
+        AttributeType = Attribute->Type;
+
+        DPRINT("Making room in MFT record %I64u: attribute 0x%lx (%lu bytes) goes non-resident\n",
+               FileRecord->MFTRecordNumber, AttributeType, Attribute->Length);
+
+        Status = ConvertResidentAttributeToNonResident(DeviceExt,
+                                                       AttrContext,
+                                                       BestOffset,
+                                                       FileRecord,
+                                                       &AttributeSize);
+        ReleaseAttributeContext(AttrContext);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Couldn't move attribute 0x%lx of MFT record %I64u out of the record: 0x%lx\n",
+                    AttributeType, FileRecord->MFTRecordNumber, Status);
+            return Status;
+        }
+    }
+
+    /* Step 2: the record still doesn't have the room, so the headers alone are
+     * filling it. Move whole attributes into child records via the
+     * $ATTRIBUTE_LIST, largest first. */
+    while (DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < BytesNeeded)
+    {
+        PFILE_RECORD_HEADER ChildRecord = NULL;
+        ULONG ChildAttrOffset = 0;
+
+        BestOffset = 0;
+        BestGain = 0;
+
+        Offset = FileRecord->AttributeOffset;
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        while (Attribute->Type != AttributeEnd &&
+               Attribute->Length > 0 &&
+               Offset < FileRecord->BytesInUse)
+        {
+            /* MigrateAttributeToList only handles non-resident attributes, and
+             * refuses the three types that never leave the base record. */
+            if (Attribute->IsNonResident &&
+                Attribute->Type != AttributeStandardInformation &&
+                Attribute->Type != AttributeFileName &&
+                Attribute->Type != AttributeAttributeList &&
+                Attribute->Length > BestGain)
+            {
+                BestGain = Attribute->Length;
+                BestOffset = Offset;
+            }
+
+            Offset += Attribute->Length;
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        }
+
+        if (BestGain == 0)
+            break;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + BestOffset);
+        AttrContext = PrepareAttributeContext(Attribute);
+        if (AttrContext == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        AttrContext->FileMFTIndex = FileRecord->MFTRecordNumber;
+        AttributeType = Attribute->Type;
+
+        DPRINT("Making room in MFT record %I64u: attribute 0x%lx (%lu bytes) goes to a child record\n",
+               FileRecord->MFTRecordNumber, AttributeType, Attribute->Length);
+
+        Status = MigrateAttributeToList(DeviceExt,
+                                        FileRecord,
+                                        AttrContext,
+                                        BestOffset,
+                                        &ChildRecord,
+                                        &ChildAttrOffset);
+        ReleaseAttributeContext(AttrContext);
+        if (ChildRecord != NULL)
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ChildRecord);
+
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Couldn't migrate attribute 0x%lx of MFT record %I64u to a child record: 0x%lx\n",
+                    AttributeType, FileRecord->MFTRecordNumber, Status);
+            return Status;
+        }
+    }
+
+    if (DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < BytesNeeded)
+    {
+        DPRINT1("Unable to free %lu bytes in MFT record %I64u (%lu of %lu bytes in use)\n",
+                BytesNeeded,
+                FileRecord->MFTRecordNumber,
+                FileRecord->BytesInUse,
+                DeviceExt->NtfsInfo.BytesPerFileRecord);
+        return STATUS_DISK_FULL;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -5624,7 +5913,9 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     ULONGLONG FileReferenceNumber;
     ULONG FileNameOffset;
     ULONG NewFileNameLength;
+    ULONG BytesNeeded;
     USHORT ParentSequenceNumber;
+    BOOLEAN MadeRoom = FALSE;
     NTFS_FCB ExistingFcb;
     PNTFS_FCB TargetFcb = NULL;
 
@@ -5789,9 +6080,7 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
         }
     }
     else if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
-    {
         goto Cleanup;
-    }
 
     ParentSequenceNumber = NTFS_FILE_ROOT;
     if (NewParentMftIndex != NTFS_FILE_ROOT)
@@ -5811,6 +6100,69 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     }
 
     NewFileNameLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + NewFileName->Length;
+
+    /* A longer name needs a bigger $FILE_NAME attribute, and $FILE_NAME is one
+     * of the attributes that can never leave the file record.  If the record
+     * has no slack for that growth - the usual reason being a small file whose
+     * $DATA is still resident and fills it - free some by moving another
+     * attribute out, while nothing has been committed to the directory yet.
+     * Windows renames such a file happily; failing here escapes
+     * NtSetInformationFile() as STATUS_BUFFER_OVERFLOW, which POSIX emulation
+     * layers report as a nonsensical ERROR_MORE_DATA. */
+    Status = FindAttribute(DeviceExt,
+                           FileRecord,
+                           AttributeFileName,
+                           NULL,
+                           0,
+                           &FileNameContext,
+                           &FileNameOffset);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    FileNameRecord = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileNameOffset);
+    BytesNeeded = ALIGN_UP_BY(NewFileNameLength + FileNameRecord->Resident.ValueOffset,
+                              ATTR_RECORD_ALIGNMENT);
+    if (BytesNeeded > FileNameRecord->Length &&
+        DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse <
+            BytesNeeded - FileNameRecord->Length)
+    {
+        Status = NtfsMakeRoomInFileRecord(DeviceExt,
+                                          FileRecord,
+                                          BytesNeeded - FileNameRecord->Length);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Rename to '%wZ': can't fit the name in MFT record %I64u: 0x%lx\n",
+                    NewFileName, Fcb->MFTIndex, Status);
+            goto Cleanup;
+        }
+
+        /* The attributes moved: both the context and the name we captured from
+         * the record describe the old layout. */
+        ReleaseAttributeContext(FileNameContext);
+        FileNameContext = NULL;
+
+        CurrentName = GetBestFileNameFromRecord(DeviceExt,
+                                                FileRecord,
+                                                (PFILENAME_ATTRIBUTE)CurNameBuf);
+        if (CurrentName == NULL)
+        {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto Cleanup;
+        }
+
+        Status = FindAttribute(DeviceExt,
+                               FileRecord,
+                               AttributeFileName,
+                               NULL,
+                               0,
+                               &FileNameContext,
+                               &FileNameOffset);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        MadeRoom = TRUE;
+    }
+
     NewDirectoryEntry = ExAllocatePoolWithTag(NonPagedPool, NewFileNameLength, TAG_NTFS);
     if (!NewDirectoryEntry)
     {
@@ -5835,6 +6187,21 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
         NewDirectoryEntry->NameType = NTFS_FILE_NAME_POSIX;
     RtlCopyMemory(NewDirectoryEntry->Name, NewFileName->Buffer, NewFileName->Length);
 
+    if (MadeRoom)
+    {
+        PNTFS_ATTR_CONTEXT DataContext;
+
+        /* Moving a value out of the record changed what the file has allocated,
+         * and the directory entry caches those sizes - it is where
+         * NtfsMakeFCBFromDirEntry() takes the FCB's allocation size from. */
+        if (NT_SUCCESS(FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0, &DataContext, NULL)))
+        {
+            NewDirectoryEntry->AllocatedSize = AttributeAllocatedLength(DataContext->pRecord);
+            NewDirectoryEntry->DataSize = AttributeDataLength(DataContext->pRecord);
+            ReleaseAttributeContext(DataContext);
+        }
+    }
+
     FileReferenceNumber = Fcb->MFTIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
     Status = NtfsAddFilenameToDirectory(DeviceExt,
                                         NewParentMftIndex,
@@ -5843,16 +6210,6 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                                         CaseSensitive);
     if (!NT_SUCCESS(Status))
         goto Cleanup;
-
-    Status = FindAttribute(DeviceExt,
-                           FileRecord,
-                           AttributeFileName,
-                           NULL,
-                           0,
-                           &FileNameContext,
-                           &FileNameOffset);
-    if (!NT_SUCCESS(Status))
-        goto RollbackNewName;
 
     Status = InternalSetResidentAttributeLength(DeviceExt,
                                                 FileNameContext,
