@@ -483,6 +483,14 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     InitializeListHead(&Vcb->FcbListHead);
 
+    /* Hash index over that list; without it every path lookup scans the whole
+     * volume's FCBs under a spinlock.  A mount without the index still works
+     * (the lookups fall back to the linear scan), so a failure here is fatal
+     * only because there is no reason to run a volume that slowly. */
+    Status = NtfsInitializeFcbHash(Vcb);
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
+
     /* Initialise the directory-change-notification package (matches
      * FastFat/CDFS).  FsRtlNotifyInitializeSync can raise on allocation
      * failure, so guard it; the matching teardown is in the dismount /
@@ -672,6 +680,9 @@ ByeBye:
     if (!NT_SUCCESS(Status))
     {
         /* Cleanup */
+        if (Vcb)
+            NtfsUninitializeFcbHash(Vcb);
+
         if (Vcb && Vcb->NotifySync)
             FsRtlNotifyUninitializeSync(&Vcb->NotifySync);
 
