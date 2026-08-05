@@ -1896,6 +1896,18 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
                                    ULONG AttrOffset,
                                    ULONG DataSize);
 
+NTSTATUS
+ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
+                                      PNTFS_ATTR_CONTEXT AttrContext,
+                                      ULONG AttrOffset,
+                                      PFILE_RECORD_HEADER FileRecord,
+                                      PLARGE_INTEGER DataSize);
+
+NTSTATUS
+NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
+                         PFILE_RECORD_HEADER FileRecord,
+                         ULONG BytesNeeded);
+
 PNTFS_ATTR_RECORD
 MoveAttributes(PDEVICE_EXTENSION DeviceExt,
                PNTFS_ATTR_RECORD FirstAttributeToMove,
