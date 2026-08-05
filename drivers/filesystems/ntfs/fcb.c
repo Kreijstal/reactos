@@ -34,6 +34,9 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/* Defined next to the rest of the FCB hash index, below NtfsReleaseFCB. */
+static VOID NtfsRemoveFCBFromHash(PNTFS_FCB Fcb);
+
 static
 PCWSTR
 NtfsGetNextPathElement(PCWSTR FileName)
@@ -288,6 +291,10 @@ NtfsCreateFCB(PCWSTR FileName,
     Fcb->Identifier.Size = sizeof(NTFS_TYPE_FCB);
 
     Fcb->Vcb = Vcb;
+
+    /* "Not in any hash bucket" - RtlZeroMemory above left the entry NULL, and
+     * an FCB may be destroyed without ever being added to the table. */
+    InitializeListHead(&Fcb->FcbHashEntry);
 
     if (FileName)
     {
@@ -672,6 +679,7 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
         }
 
         RemoveEntryList(&Fcb->FcbListEntry);
+        NtfsRemoveFCBFromHash(Fcb);
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
 
         if (tmpFileObject)
@@ -715,11 +723,80 @@ NtfsComputePathNameHash(PCWSTR Path)
 }
 
 
+/* Allocate and initialise the per-volume FCB hash index.  Called from
+ * NtfsMountVolume next to InitializeListHead(&Vcb->FcbListHead). */
+NTSTATUS
+NtfsInitializeFcbHash(PNTFS_VCB Vcb)
+{
+    ULONG i;
+
+    Vcb->FcbHashBuckets = ExAllocatePoolWithTag(NonPagedPool,
+                                                NTFS_FCB_HASH_BUCKETS * sizeof(LIST_ENTRY),
+                                                TAG_NTFS);
+    if (Vcb->FcbHashBuckets == NULL)
+    {
+        Vcb->FcbHashBucketCount = 0;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Vcb->FcbHashBucketCount = NTFS_FCB_HASH_BUCKETS;
+    for (i = 0; i < NTFS_FCB_HASH_BUCKETS; i++)
+        InitializeListHead(&Vcb->FcbHashBuckets[i]);
+
+    return STATUS_SUCCESS;
+}
+
+
+VOID
+NtfsUninitializeFcbHash(PNTFS_VCB Vcb)
+{
+    if (Vcb->FcbHashBuckets != NULL)
+    {
+        ExFreePoolWithTag(Vcb->FcbHashBuckets, TAG_NTFS);
+        Vcb->FcbHashBuckets = NULL;
+    }
+    Vcb->FcbHashBucketCount = 0;
+}
+
+
+/* The bucket an FCB with this path hash belongs in, or NULL when the volume has
+ * no hash index (a mount that predates initialisation).  Callers fall back to
+ * the full FcbListHead scan in that case, which is always correct - just slow. */
+static
+PLIST_ENTRY
+NtfsFcbHashBucket(PNTFS_VCB Vcb,
+                  ULONG NameHash)
+{
+    if (Vcb->FcbHashBuckets == NULL || Vcb->FcbHashBucketCount == 0)
+        return NULL;
+
+    return &Vcb->FcbHashBuckets[NameHash & (Vcb->FcbHashBucketCount - 1)];
+}
+
+
+/* Unlink an FCB from its hash bucket.  Safe to call on an FCB that was never
+ * inserted, and safe to call twice - see the FcbHashEntry comment in ntfs.h.
+ * Caller holds FcbListLock. */
+static
+VOID
+NtfsRemoveFCBFromHash(PNTFS_FCB Fcb)
+{
+    if (Fcb->FcbHashEntry.Flink == NULL)
+        return;
+
+    if (!IsListEmpty(&Fcb->FcbHashEntry))
+        RemoveEntryList(&Fcb->FcbHashEntry);
+
+    InitializeListHead(&Fcb->FcbHashEntry);
+}
+
+
 VOID
 NtfsAddFCBToTable(PNTFS_VCB Vcb,
                   PNTFS_FCB Fcb)
 {
     KIRQL oldIrql;
+    PLIST_ENTRY Bucket;
 
     /* Catch any PathName writer that forgot to refresh the hash */
     ASSERT(Fcb->PathNameHash == NtfsComputePathNameHash(Fcb->PathName));
@@ -727,6 +804,41 @@ NtfsAddFCBToTable(PNTFS_VCB Vcb,
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->Vcb = Vcb;
     InsertTailList(&Vcb->FcbListHead, &Fcb->FcbListEntry);
+
+    Bucket = NtfsFcbHashBucket(Vcb, Fcb->PathNameHash);
+    if (Bucket != NULL)
+    {
+        NtfsRemoveFCBFromHash(Fcb);
+        InsertHeadList(Bucket, &Fcb->FcbHashEntry);
+    }
+    KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+}
+
+
+VOID
+NtfsRehashFCB(PNTFS_VCB Vcb,
+              PNTFS_FCB Fcb)
+{
+    KIRQL oldIrql;
+    PLIST_ENTRY Bucket;
+
+    /* The caller must have refreshed the hash along with the name. */
+    ASSERT(Fcb->PathNameHash == NtfsComputePathNameHash(Fcb->PathName));
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+
+    /* Only FCBs that are actually in the table get re-bucketed; a stack-local
+     * FCB has no hash entry and must stay out of the index. */
+    if (Fcb->FcbHashEntry.Flink != NULL && !IsListEmpty(&Fcb->FcbHashEntry))
+    {
+        RemoveEntryList(&Fcb->FcbHashEntry);
+        InitializeListHead(&Fcb->FcbHashEntry);
+
+        Bucket = NtfsFcbHashBucket(Vcb, Fcb->PathNameHash);
+        if (Bucket != NULL)
+            InsertHeadList(Bucket, &Fcb->FcbHashEntry);
+    }
+
     KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
 }
 
@@ -738,6 +850,7 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
     KIRQL oldIrql;
     PNTFS_FCB Fcb;
     PLIST_ENTRY current_entry;
+    PLIST_ENTRY Head;
     ULONG NameHash;
 
     if (FileName == NULL || *FileName == 0)
@@ -753,6 +866,40 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
     NameHash = NtfsComputePathNameHash(FileName);
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+
+    /* Walk only the FCBs that share this path's hash bucket.  Without the
+     * index this is the whole volume's FCB list, which is unbounded - see the
+     * FcbHashBuckets comment in ntfs.h. */
+    Head = NtfsFcbHashBucket(Vcb, NameHash);
+    if (Head != NULL)
+    {
+        for (current_entry = Head->Flink;
+             current_entry != Head;
+             current_entry = current_entry->Flink)
+        {
+            Fcb = CONTAINING_RECORD(current_entry, NTFS_FCB, FcbHashEntry);
+
+            /* Same bucket does not mean same hash: check it before the string
+             * compare, exactly as the linear scan did. */
+            if (Fcb->PathNameHash != NameHash ||
+                _wcsicmp(FileName, Fcb->PathName) != 0)
+            {
+                continue;
+            }
+
+            /* A fully deleted file (LinkCount == 0) must not satisfy a lookup
+             * by path - see the detailed note on the fallback path below. */
+            if (Fcb->LinkCount == 0)
+                continue;
+
+            Fcb->RefCount++;
+            KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+            return Fcb;
+        }
+
+        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+        return NULL;
+    }
 
     current_entry = Vcb->FcbListHead.Flink;
     while (current_entry != &Vcb->FcbListHead)
@@ -825,6 +972,7 @@ NtfsInvalidateFCBForPath(PNTFS_VCB Vcb,
     KIRQL oldIrql;
     PNTFS_FCB Fcb;
     PLIST_ENTRY current_entry;
+    PLIST_ENTRY Head;
     ULONG NameHash;
 
     if (PathName == NULL || *PathName == UNICODE_NULL)
@@ -833,6 +981,31 @@ NtfsInvalidateFCBForPath(PNTFS_VCB Vcb,
     NameHash = NtfsComputePathNameHash(PathName);
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+
+    /* Every FCB matching this path shares its hash, so the bucket holds all of
+     * them - no need to sweep the whole volume list. */
+    Head = NtfsFcbHashBucket(Vcb, NameHash);
+    if (Head != NULL)
+    {
+        for (current_entry = Head->Flink;
+             current_entry != Head;
+             current_entry = current_entry->Flink)
+        {
+            Fcb = CONTAINING_RECORD(current_entry, NTFS_FCB, FcbHashEntry);
+
+            if (Fcb->MFTIndex == MftIndex &&
+                Fcb->PathNameHash == NameHash &&
+                _wcsicmp(PathName, Fcb->PathName) == 0)
+            {
+                DPRINT("Invalidating replaced FCB %p (%S, mft=%I64u)\n",
+                       Fcb, Fcb->PathName, Fcb->MFTIndex);
+                Fcb->LinkCount = 0;
+            }
+        }
+
+        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+        return;
+    }
 
     for (current_entry = Vcb->FcbListHead.Flink;
          current_entry != &Vcb->FcbListHead;

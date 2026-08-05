@@ -244,6 +244,26 @@ typedef struct
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
 
+    /* Hash index over FcbListHead, keyed on NTFS_FCB::PathNameHash.
+     *
+     * FcbListHead alone is a single volume-wide list, so NtfsGrabFCBFromTable
+     * had to scan every cached FCB on every path lookup - under FcbListLock, a
+     * spinlock, hence at DISPATCH_LEVEL.  Nothing bounds that list: an FCB is
+     * only evicted once its RefCount drops to zero, and directory FCBs are
+     * deliberately kept cached, so a build that touches tens of thousands of
+     * files grows it without limit (measured: 39380 entries, 89% of them with
+     * no open handle, during a Wine build).  Each miss then pointer-chased
+     * 39380 nodes scattered across non-paged pool - a cache miss per hop,
+     * milliseconds at DISPATCH_LEVEL - which pegged a CPU, starved the clock
+     * interrupt and slowed the whole system to a crawl.
+     *
+     * The buckets index the same FCBs through NTFS_FCB::FcbHashEntry, so
+     * lookups touch only the handful of FCBs sharing a hash bucket while
+     * FcbListHead stays intact for the code that must enumerate everything
+     * (shutdown.c).  Both are protected by FcbListLock. */
+    PLIST_ENTRY FcbHashBuckets;
+    ULONG FcbHashBucketCount;
+
     /* Directory change notification (IRP_MN_NOTIFY_CHANGE_DIRECTORY).
      * Ported from FastFat/CDFS: the FsRtlNotify* package state.  NotifySync is
      * created at mount and destroyed at dismount; NotifyList holds the pending
@@ -975,6 +995,16 @@ typedef struct _FCB
     ERESOURCE MainResource;
 
     LIST_ENTRY FcbListEntry;
+    /* Links this FCB into Vcb->FcbHashBuckets[PathNameHash % count], the hash
+     * index that keeps NtfsGrabFCBFromTable off the volume-wide list scan.
+     *
+     * Self-linked (InitializeListHead) means "not in any bucket": FCBs that
+     * never enter the table at all (the volume FCB, the internal volume-stream
+     * FCB, the stack-local FCBs the rename path builds) must be safe to hand to
+     * the removal helper, and RemoveEntryList on a zeroed entry would write
+     * through NULL.  NtfsRemoveFCBFromHash therefore checks IsListEmpty first
+     * and re-arms the self-link afterwards, so double removal is harmless. */
+    LIST_ENTRY FcbHashEntry;
     /* When this FCB has been "destroyed" but is still kept alive as a
      * zombie because MM has live references via SectionObjectPointers,
      * it lives on NtfsGlobalData->ZombieFcbList linked through this
@@ -1592,6 +1622,30 @@ NtfsParseStreamPath(PUNICODE_STRING FileName,
 
 ULONG
 NtfsComputePathNameHash(PCWSTR Path);
+
+/* Number of buckets in Vcb->FcbHashBuckets.  Power of two so the modulo is a
+ * mask.  At the 39380-FCB working set measured during a Wine build this leaves
+ * ~19 FCBs per bucket, versus 39380 for the old volume-wide scan. */
+#define NTFS_FCB_HASH_BUCKETS 2048
+
+NTSTATUS
+NtfsInitializeFcbHash(PNTFS_VCB Vcb);
+
+/* Only safe on the mount-failure path, where no FCB has entered the table yet.
+ * Do NOT call this at dismount: FCBs outlive NtfsDismountVolume (which is why
+ * it keeps FileRecLookasideList alive too), and freeing the buckets under a
+ * still-linked FcbHashEntry would make the next NtfsReleaseFCB write through
+ * freed pool. */
+VOID
+NtfsUninitializeFcbHash(PNTFS_VCB Vcb);
+
+/* Move an FCB to the bucket its current PathNameHash selects.  Must be called
+ * after any update to PathName/PathNameHash of a table-resident FCB (rename),
+ * or lookups of the new name would miss it and lookups of the old name would
+ * find it. */
+VOID
+NtfsRehashFCB(PNTFS_VCB Vcb,
+              PNTFS_FCB Fcb);
 
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
