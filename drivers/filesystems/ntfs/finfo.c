@@ -1845,7 +1845,13 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
                                           RenameInfo->ReplaceIfExists,
                                           BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
             if (NT_SUCCESS(Status))
+            {
                 NtfsUpdateFcbPathName(Fcb, &RenamePath);
+                /* The path hash just changed, so the FCB is now sitting in the
+                 * bucket of its OLD name: lookups of the new name would miss it
+                 * and create a duplicate FCB for the same file. */
+                NtfsRehashFCB(DeviceExt, Fcb);
+            }
             break;
         }
 
