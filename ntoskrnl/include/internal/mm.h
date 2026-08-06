@@ -730,9 +730,27 @@ MmInitSystem(IN ULONG Phase,
 
 /* pagefile.c ****************************************************************/
 
+/* A swap entry names a slot as (paging file index, slot number + 1). The +1
+ * bias is load-bearing: zero is what "no slot" looks like both here and in the
+ * PageFileHigh field of a software PTE. */
+#define FILE_FROM_ENTRY(i) ((i) & 0x0f)
+#define OFFSET_FROM_ENTRY(i) ((i) >> 11)
+#define ENTRY_FROM_FILE_OFFSET(i, j) ((i) | ((j) << 11) | 0x400)
+
+/* How many pages one page-file write may carry. 128 KB per IRP, which is what
+ * turns paging out from a per-page seek into a streaming write. */
+#define MI_PAGEFILE_WRITE_CLUSTER 32
+
 SWAPENTRY
 NTAPI
 MmAllocSwapPage(VOID);
+
+/* Reserves up to Count consecutive slots and returns how many it got */
+ULONG
+NTAPI
+MiAllocSwapPageRun(
+    _In_ ULONG Count,
+    _Out_ SWAPENTRY *FirstEntry);
 
 VOID
 NTAPI
@@ -759,6 +777,15 @@ NTAPI
 MmWriteToSwapPage(
     SWAPENTRY SwapEntry,
     PFN_NUMBER Page
+);
+
+/* Same, for a whole cluster of pages into consecutive slots */
+NTSTATUS
+NTAPI
+MmWriteToSwapPages(
+    SWAPENTRY FirstEntry,
+    PPFN_NUMBER Pages,
+    ULONG Count
 );
 
 VOID
@@ -1953,10 +1980,74 @@ MmCopyVirtualMemory(IN PEPROCESS SourceProcess,
                     OUT PSIZE_T ReturnSize);
 
 /* wslist.cpp ****************************************************************/
+extern KEVENT MmWorkingSetManagerEvent;
+extern SIZE_T MmMinimumWorkingSetSize;
+extern SIZE_T MmMaximumWorkingSetSize;
+
 _Requires_exclusive_lock_held_(WorkingSet->WorkingSetMutex)
 VOID
 NTAPI
 MiInitializeWorkingSetList(_Inout_ PMMSUPPORT WorkingSet);
+
+/* Gives back the pages the WSLE array grew into. The working set must be
+ * empty, and the caller must hold its lock exclusively. */
+_Requires_exclusive_lock_held_(Vm->WorkingSetMutex)
+VOID
+NTAPI
+MiDestroyWorkingSetList(_Inout_ PMMSUPPORT Vm);
+
+_Requires_exclusive_lock_held_(Vm->WorkingSetMutex)
+VOID
+NTAPI
+MiInsertInWorkingSetList(
+    _Inout_ PMMSUPPORT Vm,
+    _In_ PVOID Address,
+    _In_ ULONG Protection);
+
+_Requires_exclusive_lock_held_(Vm->WorkingSetMutex)
+VOID
+NTAPI
+MiRemoveFromWorkingSetList(
+    _Inout_ PMMSUPPORT Vm,
+    _In_ PVOID Address);
+
+/* Same, for callers that already hold the PFN lock */
+_Requires_exclusive_lock_held_(Vm->WorkingSetMutex)
+VOID
+NTAPI
+MiRemoveFromWorkingSetListPfnHeld(
+    _Inout_ PMMSUPPORT Vm,
+    _In_ PVOID Address);
+
+/* Returns the number of pages actually written out to the page file */
+ULONG
+NTAPI
+MmWorkingSetManager(VOID);
+
+/* How many available pages the pager works towards, and the level at which an
+ * allocation wakes it. Set once by MmInitializeBalancer. */
+extern PFN_NUMBER MmPagerReserve;
+
+/* Scaling for the above: a fraction of RAM, clamped at both ends. */
+#define MI_PAGER_RESERVE_RATIO      8
+#define MI_PAGER_RESERVE_MIN_PAGES  4096      /*  16 MB */
+#define MI_PAGER_RESERVE_MAX_PAGES  262144    /*   1 GB */
+
+/* The pages nobody but the pager may take. See MmThrottleForPager. */
+extern PFN_NUMBER MmPagerHardReserve;
+
+#define MI_PAGER_HARD_RESERVE_RATIO     64
+#define MI_PAGER_HARD_RESERVE_MIN_PAGES 1024  /*   4 MB */
+#define MI_PAGER_HARD_RESERVE_MAX_PAGES 8192  /*  32 MB */
+
+/* How many 10ms rounds a throttled thread waits before giving up */
+#define MI_THROTTLE_MAX_ROUNDS 500            /*   5 s  */
+
+/* Waits, if need be, until the pager's reserve is back. Must be called with no
+ * memory management lock held, below DISPATCH_LEVEL. */
+VOID
+NTAPI
+MmThrottleForPager(VOID);
 
 #ifdef __cplusplus
 } // extern "C"

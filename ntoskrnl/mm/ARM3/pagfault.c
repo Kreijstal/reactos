@@ -971,6 +971,7 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     NTSTATUS Status;
     MMPTE TempPte = *PointerPte;
     PMMPFN Pfn1;
+    PETHREAD CurrentThread = PsGetCurrentThread();
     ULONG PageFileIndex = TempPte.u.Soft.PageFileLow;
     ULONG_PTR PageFileOffset = TempPte.u.Soft.PageFileHigh;
     ULONG Protection = TempPte.u.Soft.Protection;
@@ -1016,8 +1017,29 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     /* Release the PFN lock while we proceed */
     MiReleasePfnLock(*OldIrql);
 
+    /*
+     * Drop the working set lock too, for the whole duration of the read.
+     *
+     * The page file lives on a file system, so the read runs the FSD, which
+     * calls the cache manager, which maps a view in system space and takes the
+     * kernel address space lock. MmLockAddressSpace refuses to run underneath a
+     * working set lock -- and rightly so: a system thread that already holds
+     * the address space lock and then faults would wait on us while we wait on
+     * it. Windows drops the working set lock around the in-page I/O for this
+     * exact reason.
+     *
+     * What keeps the page ours meanwhile is the transition PTE just written: it
+     * names this PFN with ReadInProgress set, so a concurrent fault on the same
+     * address lands in MiResolveTransitionFault and queues on Pfn1->u1.Event
+     * instead of allocating a second page for the same data.
+     */
+    ASSERT(CurrentThread->OwnsProcessWorkingSetExclusive);
+    MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
+
     /* Do the paging IO */
     Status = MiReadPageFile(Page, PageFileIndex, PageFileOffset);
+
+    MiLockProcessWorkingSet(CurrentProcess, CurrentThread);
 
     /* Lock the PFN database again */
     *OldIrql = MiAcquirePfnLock();
@@ -1034,6 +1056,40 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
         Pfn1->u1.ReadStatus = Status;
     }
 
+    /* The page is back in memory and writeable again, so the copy in the page
+     * file is stale from here on. Nothing else remembers this slot -- the PTE
+     * that named it is about to be overwritten -- so it has to be released
+     * now or every page-in permanently consumes one. */
+    MmFreeSwapPage(ENTRY_FROM_FILE_OFFSET(PageFileIndex, PageFileOffset));
+
+    /* MiInitializePfn saved the page file PTE as this page's original
+     * contents; leaving it there would have the PFN naming a slot it no
+     * longer owns. It is an ordinary private page again. */
+    MI_MAKE_SOFTWARE_PTE(&Pfn1->OriginalPte, Protection);
+
+    if (MI_IS_PFN_DELETED(Pfn1))
+    {
+        /* Another thread freed this address range while the read was in
+         * flight -- it found our transition PTE, erased it, dropped the page
+         * table reference and marked the PFN deleted, leaving the page alive
+         * only for the reference we hold. PointerPte no longer describes this
+         * page, so writing a valid PTE over it would resurrect a mapping the
+         * process has already torn down. Release the page instead and report
+         * success: the faulting instruction re-executes and faults again
+         * against whatever now lives at that address. */
+        Pfn1->u3.e1.ReadInProgress = 0;
+        if (Pfn1->u1.Event)
+        {
+            KeSetEvent(Pfn1->u1.Event, IO_NO_INCREMENT, FALSE);
+            Pfn1->u1.Event = NULL;
+        }
+
+        /* Takes the share count to zero, which frees the page because the PFN
+         * is marked deleted and ours is the last reference. */
+        MiDecrementShareCount(Pfn1, Page);
+        return STATUS_SUCCESS;
+    }
+
     /* And the PTE can finally be valid */
     MI_MAKE_HARDWARE_PTE(&TempPte, PointerPte, Protection, Page);
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
@@ -1044,6 +1100,11 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     {
         /* Tell them we're done */
         KeSetEvent(Pfn1->u1.Event, IO_NO_INCREMENT, FALSE);
+
+        /* And forget the event: it lives on the waiter's stack, and u1 is a
+         * union whose other members (the working set index, the list links)
+         * are read as soon as this page is active. */
+        Pfn1->u1.Event = NULL;
     }
 
     return Status;
@@ -1069,6 +1130,8 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     /* Windowss does this check */
     ASSERT(*InPageBlock == NULL);
 
+    UNREFERENCED_PARAMETER(StoreInstruction);
+
     /* ARM3 doesn't support this path */
     ASSERT(OldIrql != MM_NOIRQL);
 
@@ -1089,15 +1152,21 @@ MiResolveTransitionFault(IN BOOLEAN StoreInstruction,
     /* This is from ARM3 -- Windows normally handles this here */
     ASSERT(Pfn1->u4.InPageError == 0);
 
-    /* See if we should wait before terminating the fault */
+    /* See if we should wait before terminating the fault.
+     *
+     * A write that is still in flight has to be waited out whatever the fault
+     * was: the working set trimmer owns the page for the duration, it is on
+     * no page list, and when it finishes it replaces this transition PTE with
+     * a page file PTE and frees the page. Resolving the fault against it now
+     * would resurrect a page that is about to disappear. */
     if ((Pfn1->u3.e1.ReadInProgress == 1)
-            || ((Pfn1->u3.e1.WriteInProgress == 1) && StoreInstruction))
+            || (Pfn1->u3.e1.WriteInProgress == 1))
     {
-        DPRINT1("The page is currently in a page transition !\n");
+        DPRINT("The page is currently in a page transition !\n");
         *InPageBlock = &Pfn1->u1.Event;
         if (PointerPte == Pfn1->PteAddress)
         {
-            DPRINT1("And this if for this particular PTE.\n");
+            DPRINT("And this if for this particular PTE.\n");
             /* The PTE will be made valid by the thread serving the fault */
             return STATUS_SUCCESS; // FIXME: Maybe something more descriptive
         }
@@ -1677,6 +1746,26 @@ MiDispatchFault(IN ULONG FaultCode,
         /* Lock the PFN database */
         LockIrql = MiAcquirePfnLock();
 
+        /* The PTE was captured before this lock was taken, and it can have
+         * changed underneath us since. The working set trimmer replaces a
+         * transition PTE with a page file PTE the moment the write it stands
+         * for lands, and another thread faulting on the same address makes it
+         * valid outright. Both are answered by simply faulting again against
+         * whatever it says now -- carrying on here would hand
+         * MiResolveTransitionFault a PTE that is no longer in transition
+         * format. */
+        TempPte = *PointerPte;
+        if ((TempPte.u.Hard.Valid == 1) ||
+            (TempPte.u.Soft.Prototype == 1) ||
+            (TempPte.u.Soft.Transition == 0))
+        {
+            MiReleasePfnLock(LockIrql);
+
+            ASSERT(OldIrql == KeGetCurrentIrql());
+            ASSERT(OldIrql <= APC_LEVEL);
+            return STATUS_SUCCESS;
+        }
+
         /* Resolve */
         Status = MiResolveTransitionFault(!MI_IS_NOT_PRESENT_FAULT(FaultCode), Address, PointerPte, Process, LockIrql, &InPageBlock);
 
@@ -1695,7 +1784,21 @@ MiDispatchFault(IN ULONG FaultCode,
 
         if (InPageBlock != NULL)
         {
+            PETHREAD CurrentThread = PsGetCurrentThread();
+            BOOLEAN DropWorkingSet = (Process > HYDRA_PROCESS) &&
+                                     (CurrentThread->OwnsProcessWorkingSetExclusive);
+
+            /* Wait outside the working set lock. The thread we are queued
+             * behind released that lock to issue its page file read and has to
+             * take it again before it can signal us, so sleeping on the event
+             * while holding it would deadlock the pair of us. */
+            if (DropWorkingSet)
+                MiUnlockProcessWorkingSet(Process, CurrentThread);
+
             KeWaitForSingleObject(&CurrentPageEvent, WrPageIn, KernelMode, FALSE, NULL);
+
+            if (DropWorkingSet)
+                MiLockProcessWorkingSet(Process, CurrentThread);
 
             /* Let's the chain go on */
             if (PreviousPageEvent)
@@ -1771,6 +1874,48 @@ MiDispatchFault(IN ULONG FaultCode,
     // Return status
     //
     return Status;
+}
+
+/*
+ * Records a freshly resolved private page in the faulting process' working
+ * set, so that the working set manager can find it again and trim it.
+ *
+ * Only private (non-prototype) user pages take part: shared pages and the
+ * legacy ReactOS PFNs are reclaimed by the section pager instead, and the
+ * working set list has no representation for them yet.
+ *
+ * The caller must hold the process working set lock exclusively, which the
+ * user fault path does for its whole duration.
+ */
+static
+VOID
+MiAddPrivatePageToWorkingSet(
+    _In_ PVOID Address,
+    _In_ PEPROCESS Process)
+{
+    PMMPTE PointerPte;
+    PMMPFN Pfn1;
+
+    if (Address > MM_HIGHEST_USER_ADDRESS) return;
+
+    PointerPte = MiAddressToPte(Address);
+    if (PointerPte->u.Hard.Valid == 0) return;
+
+    if (Process->Vm.VmWorkingSetList == NULL) return;
+
+    Pfn1 = MI_PFN_ELEMENT(PFN_FROM_PTE(PointerPte));
+    if (Pfn1->u3.e1.PrototypePte != 0) return;
+    if (MI_IS_ROS_PFN(Pfn1)) return;
+
+    /* Already accounted for -- a page maps at exactly one private PTE, so a
+     * non-zero index can only be this address' own. */
+    if (Pfn1->u1.WsIndex != 0) return;
+
+    /* The trimmer rebuilds the invalid PTE from what we store here, so it has
+     * to be the protection the page really has, not the one asked for. */
+    MiInsertInWorkingSetList(&Process->Vm,
+                             PAGE_ALIGN(Address),
+                             Pfn1->OriginalPte.u.Soft.Protection);
 }
 
 NTSTATUS
@@ -2278,6 +2423,14 @@ UserFault:
     CurrentThread = PsGetCurrentThread();
     CurrentProcess = (PEPROCESS)CurrentThread->Tcb.ApcState.Process;
 
+    /* About to consume a page. If the free list is down to what the pager
+     * needs to do its own work, wait here until it has caught up -- before
+     * taking any lock, because the pager will want them. A process that
+     * dirties memory faster than it can be written out has to be made to
+     * wait somewhere, and this is the only place where waiting is free of
+     * consequence. */
+    MmThrottleForPager();
+
     /* Lock the working set */
     MiLockProcessWorkingSet(CurrentProcess, CurrentThread);
 
@@ -2565,6 +2718,7 @@ UserFault:
 #endif
 
         /* Return the status */
+        MiAddPrivatePageToWorkingSet(Address, CurrentProcess);
         MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
         return STATUS_PAGE_FAULT_DEMAND_ZERO;
     }
@@ -2731,6 +2885,7 @@ UserFault:
 
             /* Demand zero */
             ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+            MiAddPrivatePageToWorkingSet(Address, CurrentProcess);
             MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
             return STATUS_PAGE_FAULT_DEMAND_ZERO;
         }
@@ -2832,23 +2987,11 @@ ExitUser:
 
     /* Return the status */
     ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    if (NT_SUCCESS(Status)) MiAddPrivatePageToWorkingSet(Address, CurrentProcess);
     MiUnlockProcessWorkingSet(CurrentProcess, CurrentThread);
 
     if (Status == STATUS_NO_MEMORY)
     {
-        /* NOMEM-DIAG (uncommitted): identify the primary fault that ran the
-         * free lists dry during early boot. */
-#if defined(_M_ARM64)
-        DPRINT1("NOMEM-FAULT: Address=%p Pc=%p AvailablePages=%Ix\n",
-                Address,
-                TrapInformation ? (PVOID)((PKTRAP_FRAME)TrapInformation)->Pc : NULL,
-                (ULONG_PTR)MmAvailablePages);
-#elif defined(_M_AMD64)
-        DPRINT1("NOMEM-FAULT: Address=%p Pc=%p AvailablePages=%Ix\n",
-                Address,
-                TrapInformation ? (PVOID)((PKTRAP_FRAME)TrapInformation)->Rip : NULL,
-                (ULONG_PTR)MmAvailablePages);
-#endif
         MmRebalanceMemoryConsumersAndWait();
         goto UserFault;
     }
