@@ -390,9 +390,21 @@ MiDeletePte(IN PMMPTE PointerPte,
     /* See if the PTE is valid */
     if (TempPte.u.Hard.Valid == 0)
     {
-        /* Prototype and paged out PTEs not supported yet */
+        /* Prototype PTEs not supported yet */
         ASSERT(TempPte.u.Soft.Prototype == 0);
-        ASSERT((TempPte.u.Soft.PageFileHigh == 0) || (TempPte.u.Soft.Transition == 1));
+
+        if ((TempPte.u.Soft.Transition == 0) && (TempPte.u.Soft.PageFileHigh != 0))
+        {
+            /* The page lives in the page file. Nothing holds the slot but
+             * this PTE, so releasing it here is what keeps the page file from
+             * filling up with the leavings of dead processes. */
+            SWAPENTRY SwapEntry = ENTRY_FROM_FILE_OFFSET(TempPte.u.Soft.PageFileLow,
+                                                         TempPte.u.Soft.PageFileHigh);
+
+            MI_ERASE_PTE(PointerPte);
+            MmFreeSwapPage(SwapEntry);
+            return;
+        }
 
         if (TempPte.u.Soft.Transition)
         {
@@ -505,6 +517,14 @@ MiDeletePte(IN PMMPTE PointerPte,
                          (ULONG_PTR)PointerPte,
                          PointerPte->u.Long,
                          (ULONG_PTR)Pfn1->PteAddress);
+        }
+
+        /* Take the page out of the working set before the mapping goes away:
+         * a leftover entry would send the working set manager to a PTE that
+         * no longer describes this page. */
+        if ((Pfn1->u1.WsIndex != 0) && (PointerPte <= MiHighestUserPte))
+        {
+            MiRemoveFromWorkingSetListPfnHeld(&CurrentProcess->Vm, VirtualAddress);
         }
 
         /* Erase the PTE */
@@ -2434,6 +2454,15 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
 
                         OldIrql = MiAcquirePfnLock();
 
+                        /* A copy-on-write copy inside the view is a private
+                         * page and may be in the working set; it stops being
+                         * mapped here. */
+                        if (Pfn1->u1.WsIndex != 0)
+                        {
+                            MiRemoveFromWorkingSetListPfnHeld(&Process->Vm,
+                                                              MiPteToAddress(PointerPte));
+                        }
+
                         if (NewPte.u.Soft.Prototype)
                         {
                             /*
@@ -2603,9 +2632,18 @@ MiProtectVirtualMemory(IN PEPROCESS Process,
                     PteContents.u.Hard.Valid = 0;
                     PteContents.u.Soft.Transition = 1;
                     PteContents.u.Trans.Protection = ProtectionMask;
+
+                    /* The page stops being mapped here, so it stops being in
+                     * the working set. This must happen while the PTE still
+                     * reads as valid, which is what the removal path checks. */
+                    if (Pfn1->u1.WsIndex != 0)
+                    {
+                        MiRemoveFromWorkingSetListPfnHeld(&Process->Vm,
+                                                          MiPteToAddress(PointerPte));
+                    }
+
                     /* Decrease PFN share count and write the PTE */
                     MiDecrementShareCount(Pfn1, PFN_FROM_PTE(&PteContents));
-                    // FIXME: remove the page from the WS
                     MI_WRITE_INVALID_PTE(PointerPte, PteContents);
 
                     /* The share count drop above may have put the page on the
@@ -2792,6 +2830,17 @@ MiProcessValidPteList(IN PMMPTE *ValidPteList,
         Pfn2 = MiGetPfnEntry(Pfn1->u4.PteFrame);
 
         //
+        // The page is about to stop being mapped, so it also stops being in
+        // the working set. This has to happen while the PTE still reads as
+        // valid, which is what the removal path verifies.
+        //
+        if ((Pfn1->u1.WsIndex != 0) && (ValidPteList[i] <= MiHighestUserPte))
+        {
+            MiRemoveFromWorkingSetListPfnHeld(&PsGetCurrentProcess()->Vm,
+                                              MiPteToAddress(ValidPteList[i]));
+        }
+
+        //
         // Decrement the share count on the page table, and then on the page
         // itself
         //
@@ -2924,15 +2973,33 @@ MiDecommitPages(IN PVOID StartingAddress,
                     //
                     ASSERT(PteContents.u.Soft.Prototype == 0);
                     ASSERT(PteContents.u.Soft.Transition == 0);
-                    ASSERT(PteContents.u.Soft.PageFileHigh == 0);
 
-                    //
-                    // So the only other possibility is that it is still a demand
-                    // zero PTE, in which case we undo the accounting we did
-                    // earlier and simply make the page decommitted.
-                    //
-                    //Process->NumberOfPrivatePages++;
-                    MI_WRITE_INVALID_PTE(PointerPte, MmDecommittedPte);
+                    if (PteContents.u.Soft.PageFileHigh != 0)
+                    {
+                        //
+                        // The page was trimmed out to the page file. Nothing
+                        // but this PTE holds the slot, so decommitting has to
+                        // release it -- otherwise the page file fills up with
+                        // the leavings of memory the process explicitly gave
+                        // back. MiDeletePte releases it the same way.
+                        //
+                        SWAPENTRY SwapEntry =
+                            ENTRY_FROM_FILE_OFFSET(PteContents.u.Soft.PageFileLow,
+                                                   PteContents.u.Soft.PageFileHigh);
+
+                        MI_WRITE_INVALID_PTE(PointerPte, MmDecommittedPte);
+                        MmFreeSwapPage(SwapEntry);
+                    }
+                    else
+                    {
+                        //
+                        // So the only other possibility is that it is still a demand
+                        // zero PTE, in which case we undo the accounting we did
+                        // earlier and simply make the page decommitted.
+                        //
+                        //Process->NumberOfPrivatePages++;
+                        MI_WRITE_INVALID_PTE(PointerPte, MmDecommittedPte);
+                    }
                 }
             }
         }
@@ -5958,6 +6025,8 @@ FinalPath:
     // Decommit the PTEs for the range plus the actual backing pages for the
     // range, then reduce that amount from the commit charge in the VAD
     //
+    // NB: MiDecommitPages takes the working set lock itself, which is what
+    // lets it drop the unmapped pages out of the working set as it goes.
     AlreadyDecommitted = MiDecommitPages((PVOID)StartingAddress,
                                          MiAddressToPte(EndingAddress),
                                          Process,

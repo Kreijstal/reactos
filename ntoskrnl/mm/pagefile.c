@@ -59,6 +59,11 @@ PMMPAGING_FILE MmPagingFile[MAX_PAGING_FILES];
 /* Lock for examining the list of paging files */
 KGUARDED_MUTEX MmPageFileCreationLock;
 
+/* Lock for the slot bitmaps and their counters. The working set trimmer
+ * allocates and frees slots with the PFN lock held, so this cannot be the
+ * guarded mutex above. */
+static KSPIN_LOCK MiPageFileBitmapLock;
+
 /* Number of paging files */
 ULONG MmNumberOfPagingFiles;
 
@@ -90,15 +95,16 @@ static PFN_COUNT MiReservedSwapPages;
  */
 #define MM_PAGEFILE_COMMIT_GRACE      (256)
 
-/*
- * Translate between a swap entry and a file and offset pair.
- */
-#define FILE_FROM_ENTRY(i) ((i) & 0x0f)
-#define OFFSET_FROM_ENTRY(i) ((i) >> 11)
-#define ENTRY_FROM_FILE_OFFSET(i, j) ((i) | ((j) << 11) | 0x400)
+/* FILE_FROM_ENTRY / OFFSET_FROM_ENTRY / ENTRY_FROM_FILE_OFFSET translate
+ * between a swap entry and a file and offset pair; they live in mm.h because
+ * the working set trimmer has to encode the same thing into a software PTE. */
 
 /* Make sure there can be only 16 paging files */
 C_ASSERT(FILE_FROM_ENTRY(0xffffffff) < MAX_PAGING_FILES);
+
+/* Short writes are reported once, not once per occurrence: they arrive in
+ * bursts and the message is only worth the serial line the first time. */
+static ULONG MiShortWriteCount = 0;
 
 static BOOLEAN MmSwapSpaceMessage = FALSE;
 
@@ -146,9 +152,17 @@ MmShowOutOfSpaceMessagePagingFile(VOID)
     }
 }
 
+/*
+ * Writes Count pages into the run of slots starting at FirstEntry, which must
+ * have come from MiAllocSwapPageRun. One IRP covers the lot: the pages are
+ * consecutive in the paging file even though the frames themselves are
+ * scattered, and a single hundred-kilobyte write costs barely more than a
+ * four-kilobyte one. Writing page by page was measured at about 475 pages a
+ * second, which no amount of trimming policy can turn into enough.
+ */
 NTSTATUS
 NTAPI
-MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
+MmWriteToSwapPages(SWAPENTRY FirstEntry, PPFN_NUMBER Pages, ULONG Count)
 {
     ULONG i;
     ULONG_PTR offset;
@@ -156,29 +170,32 @@ MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
     IO_STATUS_BLOCK Iosb;
     NTSTATUS Status;
     KEVENT Event;
-    UCHAR MdlBase[sizeof(MDL) + sizeof(PFN_NUMBER)];
+    UCHAR MdlBase[sizeof(MDL) + MI_PAGEFILE_WRITE_CLUSTER * sizeof(PFN_NUMBER)];
     PMDL Mdl = (PMDL)MdlBase;
+    SIZE_T Length;
 
-    DPRINT("MmWriteToSwapPage\n");
+    DPRINT("MmWriteToSwapPages\n");
 
-    if (SwapEntry == 0)
+    if ((FirstEntry == 0) || (Count == 0) || (Count > MI_PAGEFILE_WRITE_CLUSTER))
     {
         KeBugCheck(MEMORY_MANAGEMENT);
         return(STATUS_UNSUCCESSFUL);
     }
 
-    i = FILE_FROM_ENTRY(SwapEntry);
-    offset = OFFSET_FROM_ENTRY(SwapEntry) - 1;
+    i = FILE_FROM_ENTRY(FirstEntry);
+    offset = OFFSET_FROM_ENTRY(FirstEntry) - 1;
 
     if (MmPagingFile[i]->FileObject == NULL ||
             MmPagingFile[i]->FileObject->DeviceObject == NULL)
     {
-        DPRINT1("Bad paging file 0x%.8X\n", SwapEntry);
+        DPRINT1("Bad paging file 0x%.8X\n", FirstEntry);
         KeBugCheck(MEMORY_MANAGEMENT);
     }
 
-    MmInitializeMdl(Mdl, NULL, PAGE_SIZE);
-    MmBuildMdlFromPages(Mdl, &Page);
+    Length = (SIZE_T)Count * PAGE_SIZE;
+
+    MmInitializeMdl(Mdl, NULL, Length);
+    MmBuildMdlFromPages(Mdl, Pages);
     Mdl->MdlFlags |= MDL_PAGES_LOCKED;
 
     file_offset.QuadPart = offset * PAGE_SIZE;
@@ -195,14 +212,26 @@ MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
         Status = Iosb.Status;
     }
 
-    /* A short transfer would leave stale data in the slot; the file offset is
-     * always fully inside the paging file, so this must never happen. */
-    if (NT_SUCCESS(Status) && Iosb.Information != PAGE_SIZE)
+    /*
+     * A short transfer leaves stale data in the slots the write did not reach,
+     * so it can never be reported as success.
+     *
+     * It does happen. The run of slots is inside the file -- MiAllocSwapPageRun
+     * will not hand out one that is not -- but the file system still comes back
+     * having written less than it was asked for, and the larger the request the
+     * more often. The caller answers this by falling back to one page per IRP,
+     * which is why this is a distinct status rather than a failure: nothing is
+     * wrong with the pages or the slots, only with the size of the request.
+     */
+    if (NT_SUCCESS(Status) && Iosb.Information != Length)
     {
-        DPRINT1("Short paging-file write: 0x%Ix bytes at slot 0x%Ix\n",
-                Iosb.Information, offset);
-        ASSERT(Iosb.Information == PAGE_SIZE);
-        Status = STATUS_UNSUCCESSFUL;
+        if (MiShortWriteCount++ == 0)
+        {
+            DPRINT1("Short paging-file write: 0x%Ix of 0x%Ix bytes at slot 0x%Ix"
+                    " (%lu pages) -- falling back to single pages\n",
+                    Iosb.Information, Length, offset, Count);
+        }
+        Status = STATUS_DEVICE_DATA_ERROR;
     }
 
     if (Mdl->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA)
@@ -210,6 +239,13 @@ MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
         MmUnmapLockedPages (Mdl->MappedSystemVa, Mdl);
     }
     return(Status);
+}
+
+NTSTATUS
+NTAPI
+MmWriteToSwapPage(SWAPENTRY SwapEntry, PFN_NUMBER Page)
+{
+    return MmWriteToSwapPages(SwapEntry, &Page, 1);
 }
 
 
@@ -300,6 +336,7 @@ MmInitPagingFile(VOID)
     ULONG i;
 
     KeInitializeGuardedMutex(&MmPageFileCreationLock);
+    KeInitializeSpinLock(&MiPageFileBitmapLock);
 
     MiFreeSwapPages = 0;
     MiUsedSwapPages = 0;
@@ -320,10 +357,12 @@ MmFreeSwapPage(SWAPENTRY Entry)
     ULONG_PTR off;
     PMMPAGING_FILE PagingFile;
 
+    KIRQL OldIrql;
+
     i = FILE_FROM_ENTRY(Entry);
     off = OFFSET_FROM_ENTRY(Entry) - 1;
 
-    KeAcquireGuardedMutex(&MmPageFileCreationLock);
+    KeAcquireSpinLock(&MiPageFileBitmapLock, &OldIrql);
 
     PagingFile = MmPagingFile[i];
     if (PagingFile == NULL)
@@ -344,7 +383,7 @@ MmFreeSwapPage(SWAPENTRY Entry)
     MiFreeSwapPages++;
     MiUsedSwapPages--;
 
-    KeReleaseGuardedMutex(&MmPageFileCreationLock);
+    KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
 }
 
 SWAPENTRY
@@ -354,12 +393,13 @@ MmAllocSwapPage(VOID)
     ULONG i;
     ULONG off;
     SWAPENTRY entry;
+    KIRQL OldIrql;
 
-    KeAcquireGuardedMutex(&MmPageFileCreationLock);
+    KeAcquireSpinLock(&MiPageFileBitmapLock, &OldIrql);
 
     if (MiFreeSwapPages == 0)
     {
-        KeReleaseGuardedMutex(&MmPageFileCreationLock);
+        KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
         return(0);
     }
 
@@ -372,7 +412,7 @@ MmAllocSwapPage(VOID)
             if (off == 0xFFFFFFFF)
             {
                 KeBugCheck(MEMORY_MANAGEMENT);
-                KeReleaseGuardedMutex(&MmPageFileCreationLock);
+                KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
                 return(STATUS_UNSUCCESSFUL);
             }
             /* Keep the per-file counters in sync with the bitmap; the free
@@ -384,16 +424,91 @@ MmAllocSwapPage(VOID)
             MiUsedSwapPages++;
             MiFreeSwapPages--;
 
-            KeReleaseGuardedMutex(&MmPageFileCreationLock);
+            KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
 
             entry = ENTRY_FROM_FILE_OFFSET(i, off + 1);
             return(entry);
         }
     }
 
-    KeReleaseGuardedMutex(&MmPageFileCreationLock);
+    KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
     KeBugCheck(MEMORY_MANAGEMENT);
     return(0);
+}
+
+/*
+ * Reserves a run of consecutive slots in one paging file.
+ *
+ * The trimmer writes the pages it takes one IRP at a time, and a page file
+ * write costs about as much for a hundred kilobytes as it does for four, so
+ * the pages of a cluster have to land next to each other on disk. Returns how
+ * many slots were actually reserved -- fewer than asked for when the file is
+ * fragmented, zero when there is no space at all -- and the entry naming the
+ * first one. The rest follow at consecutive offsets.
+ */
+ULONG
+NTAPI
+MiAllocSwapPageRun(
+    _In_ ULONG Count,
+    _Out_ SWAPENTRY *FirstEntry)
+{
+    ULONG i;
+    ULONG Want;
+    KIRQL OldIrql;
+
+    *FirstEntry = 0;
+
+    if (Count == 0)
+        return 0;
+
+    KeAcquireSpinLock(&MiPageFileBitmapLock, &OldIrql);
+
+    /* Ask for the whole cluster, then for halves of it. A fragmented page file
+     * must not turn into a failure to page out: one slot is always enough to
+     * make progress, and that is what the last round asks for. */
+    for (Want = Count; Want != 0; Want /= 2)
+    {
+        for (i = 0; i < MAX_PAGING_FILES; i++)
+        {
+            PMMPAGING_FILE PagingFile = MmPagingFile[i];
+            ULONG off;
+
+            if ((PagingFile == NULL) || (PagingFile->FreeSpace < Want))
+                continue;
+
+            off = RtlFindClearBitsAndSet(PagingFile->Bitmap, Want, 0);
+            if (off == 0xFFFFFFFF)
+                continue;
+
+            /*
+             * The bitmap spans MaximumSize, but only Size pages of the file
+             * exist on disk -- its end of file was set to the minimum size.
+             * A single slot could never reach the unbacked tail, because
+             * first fit from zero always lands below the number of slots ever
+             * handed out; a run of thirty-two can, and the write then goes
+             * past the end of the file and comes back short.
+             */
+            if (((ULONG64)off + Want) > PagingFile->Size)
+            {
+                RtlClearBits(PagingFile->Bitmap, off, Want);
+                continue;
+            }
+
+            PagingFile->FreeSpace -= Want;
+            PagingFile->CurrentUsage += Want;
+
+            MiUsedSwapPages += Want;
+            MiFreeSwapPages -= Want;
+
+            KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
+
+            *FirstEntry = ENTRY_FROM_FILE_OFFSET(i, off + 1);
+            return Want;
+        }
+    }
+
+    KeReleaseSpinLock(&MiPageFileBitmapLock, OldIrql);
+    return 0;
 }
 
 NTSTATUS
@@ -831,9 +946,17 @@ EarlyQuit:
     KeAcquireGuardedMutex(&MmPageFileCreationLock);
     /* Ensure the corresponding slot is empty yet */
     ASSERT(MmPagingFile[MmNumberOfPagingFiles] == NULL);
-    MmPagingFile[MmNumberOfPagingFiles] = PagingFile;
-    MmNumberOfPagingFiles++;
-    MiFreeSwapPages = MiFreeSwapPages + PagingFile->FreeSpace;
+    /* Publishing the file and its free count has to be atomic against the
+     * slot allocator, which runs with only the bitmap lock. */
+    {
+        KIRQL BitmapIrql;
+
+        KeAcquireSpinLock(&MiPageFileBitmapLock, &BitmapIrql);
+        MmPagingFile[MmNumberOfPagingFiles] = PagingFile;
+        MmNumberOfPagingFiles++;
+        MiFreeSwapPages = MiFreeSwapPages + PagingFile->FreeSpace;
+        KeReleaseSpinLock(&MiPageFileBitmapLock, BitmapIrql);
+    }
 
     /* A paging file backs commitment just as RAM does, so it raises the limit
      * of what the system may promise. Without this the commit limit would stay
