@@ -368,7 +368,13 @@ MiAllocatePagesForMdl(IN PHYSICAL_ADDRESS LowAddress,
                 // Get the PFN entry for this page
                 //
                 Pfn1 = MiGetPfnEntry(Page);
-                if (!Pfn1) continue;
+                if (!Pfn1 ||
+                    !MmIsAddressValid(Pfn1) ||
+                    !MmIsAddressValid((PUCHAR)Pfn1 + sizeof(*Pfn1) - 1))
+                {
+                    /* The sparse PFN database leaves physical holes unmapped. */
+                    continue;
+                }
 
                 //
                 // Make sure it's free and if this is our first pass, zeroed
