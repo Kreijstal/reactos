@@ -32,8 +32,13 @@ MiShutdownSystem(VOID)
         ExFreePoolWithTag(MmPagingFile[i]->PageFileName.Buffer, TAG_MM);
         MmPagingFile[i]->PageFileName.Buffer = NULL;
 
-        /* And close them */
-        ZwClose(MmPagingFile[i]->FileHandle);
+        /* The handles are NOT closed here. This runs while user processes are
+         * still alive -- PopGracefulShutdown has just finished listing the
+         * ones that are -- and everything after it, the cache manager flush
+         * and both I/O manager passes included, can still fault. Closing the
+         * paging file first makes every one of those faults unresolvable for
+         * any page that happens to be paged out. Phase 1 closes them, which is
+         * after the last of that work. */
     }
 
     /* Loop through all the pages owned by the legacy Mm and page them out, if needed. */
@@ -87,7 +92,9 @@ MmShutdownSystem(IN ULONG Phase)
         /* Loop through all the paging files */
         for (i = 0; i < MmNumberOfPagingFiles; i++)
         {
-            /* And dereference them */
+            /* Close them -- see MiShutdownSystem for why not before now --
+             * and then let go of the file object */
+            ZwClose(MmPagingFile[i]->FileHandle);
             ObDereferenceObject(MmPagingFile[i]->FileObject);
         }
     }
