@@ -363,6 +363,71 @@ MiDeleteSystemPageableVm(IN PMMPTE PointerPte,
     return ActualPages;
 }
 
+/*
+ * Releases a private page whose PTE is in transition -- the page is on the
+ * standby or modified list, or the trimmer still has a write to the page file
+ * in flight against it -- and replaces the PTE with NewPte.
+ *
+ * The caller must hold the PFN lock and the working set exclusively, and must
+ * have re-read the PTE under the PFN lock: the trimmer turns a transition PTE
+ * into a page file PTE holding that lock alone.
+ */
+static
+VOID
+MiDeleteTransitionPte(
+    _In_ PMMPTE PointerPte,
+    _In_ MMPTE TempPte,
+    _In_ MMPTE NewPte)
+{
+    PFN_NUMBER PageFrameIndex;
+    PMMPFN Pfn1;
+
+    MI_ASSERT_PFN_LOCK_HELD();
+    ASSERT(TempPte.u.Hard.Valid == 0);
+    ASSERT(TempPte.u.Soft.Prototype == 0);
+    ASSERT(TempPte.u.Soft.Transition == 1);
+
+    /* Get the PFN entry */
+    PageFrameIndex = PFN_FROM_PTE(&TempPte);
+    Pfn1 = MiGetPfnEntry(PageFrameIndex);
+
+    /* Make sure the saved PTE address is valid */
+    ASSERT((PMMPTE)((ULONG_PTR)Pfn1->PteAddress & ~0x1) == PointerPte);
+
+    /* Destroy the PTE */
+    MI_WRITE_INVALID_PTE(PointerPte, NewPte);
+
+    /* Drop the reference on the page table. */
+    MiDecrementShareCount(MiGetPfnEntry(Pfn1->u4.PteFrame), Pfn1->u4.PteFrame);
+
+    /* In case of shared page, the prototype PTE must be in transition, not the process one */
+    ASSERT(Pfn1->u3.e1.PrototypePte == 0);
+
+    /* Delete the PFN */
+    MI_SET_PFN_DELETED(Pfn1);
+
+    /* If it has any reference (writeback OR an MmProbeAndLockPages-style
+     * I/O hold), the eventual MiDecrementReferenceCount will see
+     * MI_IS_PFN_DELETED and route the page to the free list. We only
+     * need to do the freeing ourselves when no references remain. */
+    ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
+
+    /* See if we must free it ourselves, or if it will be freed once
+     * the outstanding reference (writeback or I/O lock) is released. */
+    if (Pfn1->u3.e2.ReferenceCount == 0)
+    {
+        /* And it should be in standby or modified list */
+        ASSERT((Pfn1->u3.e1.PageLocation == ModifiedPageList) || (Pfn1->u3.e1.PageLocation == StandbyPageList));
+
+        /* Unlink it and set its reference count to one */
+        MiUnlinkPageFromList(Pfn1);
+        Pfn1->u3.e2.ReferenceCount++;
+
+        /* This will put it back in free list and clean properly up */
+        MiDecrementReferenceCount(Pfn1, PageFrameIndex);
+    }
+}
+
 VOID
 NTAPI
 MiDeletePte(IN PMMPTE PointerPte,
@@ -408,47 +473,13 @@ MiDeletePte(IN PMMPTE PointerPte,
 
         if (TempPte.u.Soft.Transition)
         {
-            /* Get the PFN entry */
-            PageFrameIndex = PFN_FROM_PTE(&TempPte);
-            Pfn1 = MiGetPfnEntry(PageFrameIndex);
+            MMPTE ZeroPte;
 
             DPRINT("Pte %p is transitional!\n", PointerPte);
 
-            /* Make sure the saved PTE address is valid */
-            ASSERT((PMMPTE)((ULONG_PTR)Pfn1->PteAddress & ~0x1) == PointerPte);
-
-            /* Destroy the PTE */
-            MI_ERASE_PTE(PointerPte);
-
-            /* Drop the reference on the page table. */
-            MiDecrementShareCount(MiGetPfnEntry(Pfn1->u4.PteFrame), Pfn1->u4.PteFrame);
-
-            /* In case of shared page, the prototype PTE must be in transition, not the process one */
-            ASSERT(Pfn1->u3.e1.PrototypePte == 0);
-
-            /* Delete the PFN */
-            MI_SET_PFN_DELETED(Pfn1);
-
-            /* If it has any reference (writeback OR an MmProbeAndLockPages-style
-             * I/O hold), the eventual MiDecrementReferenceCount will see
-             * MI_IS_PFN_DELETED and route the page to the free list. We only
-             * need to do the freeing ourselves when no references remain. */
-            ASSERT(Pfn1->u3.e2.ReferenceCount >= Pfn1->u3.e1.WriteInProgress);
-
-            /* See if we must free it ourselves, or if it will be freed once
-             * the outstanding reference (writeback or I/O lock) is released. */
-            if (Pfn1->u3.e2.ReferenceCount == 0)
-            {
-                /* And it should be in standby or modified list */
-                ASSERT((Pfn1->u3.e1.PageLocation == ModifiedPageList) || (Pfn1->u3.e1.PageLocation == StandbyPageList));
-
-                /* Unlink it and set its reference count to one */
-                MiUnlinkPageFromList(Pfn1);
-                Pfn1->u3.e2.ReferenceCount++;
-
-                /* This will put it back in free list and clean properly up */
-                MiDecrementReferenceCount(Pfn1, PageFrameIndex);
-            }
+            /* Erase the PTE completely, which is what deleting it means here */
+            ZeroPte.u.Long = 0;
+            MiDeleteTransitionPte(PointerPte, TempPte, ZeroPte);
             return;
         }
     }
@@ -2969,12 +3000,46 @@ MiDecommitPages(IN PVOID StartingAddress,
                 else
                 {
                     //
-                    // We do not support any of these other scenarios at the moment
+                    // We do not support prototype PTEs in this path
                     //
                     ASSERT(PteContents.u.Soft.Prototype == 0);
-                    ASSERT(PteContents.u.Soft.Transition == 0);
 
-                    if (PteContents.u.Soft.PageFileHigh != 0)
+                    if (PteContents.u.Soft.Transition == 1)
+                    {
+                        //
+                        // The trimmer took this page and the process is
+                        // decommitting it before it came back: it sits on the
+                        // standby or modified list, or its write to the page
+                        // file is still in flight, and this PTE is the only
+                        // thing that names it. Releasing it needs the PFN
+                        // lock, and the PTE has to be read again once that
+                        // lock is held -- the trimmer replaces a transition
+                        // PTE with a page file PTE holding the PFN lock alone,
+                        // so what we captured above may already be stale.
+                        //
+                        KIRQL OldIrql = MiAcquirePfnLock();
+
+                        PteContents = *PointerPte;
+                        if ((PteContents.u.Hard.Valid == 0) &&
+                            (PteContents.u.Soft.Prototype == 0) &&
+                            (PteContents.u.Soft.Transition == 1))
+                        {
+                            MiDeleteTransitionPte(PointerPte, PteContents, MmDecommittedPte);
+                            PteContents = MmDecommittedPte;
+                        }
+
+                        MiReleasePfnLock(OldIrql);
+                    }
+
+                    if (PteContents.u.Long == MmDecommittedPte.u.Long)
+                    {
+                        //
+                        // Dealt with just above -- the page is gone and the
+                        // PTE already reads as decommitted.
+                        //
+                        NOTHING;
+                    }
+                    else if (PteContents.u.Soft.PageFileHigh != 0)
                     {
                         //
                         // The page was trimmed out to the page file. Nothing
