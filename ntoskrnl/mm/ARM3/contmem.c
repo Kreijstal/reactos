@@ -73,6 +73,20 @@ MiFindContiguousPages(IN PFN_NUMBER LowestPfn,
         Length = 0;
         for (Pfn1 = MI_PFN_ELEMENT(Page); Page < LastPage; Page++, Pfn1++)
         {
+            /*
+             * The PFN database is sparse.  A physical-memory run can include
+             * pages whose MMPFN storage was deliberately left unmapped, and
+             * an entry can also straddle the end of a mapped PFN-database
+             * page.  Do not inspect either kind of hole while looking for a
+             * contiguous DMA allocation.
+             */
+            if (!MmIsAddressValid(Pfn1) ||
+                !MmIsAddressValid((PUCHAR)Pfn1 + sizeof(*Pfn1) - 1))
+            {
+                Length = 0;
+                continue;
+            }
+
             //
             // If this PFN is in use, ignore it
             //
@@ -113,9 +127,15 @@ MiFindContiguousPages(IN PFN_NUMBER LowestPfn,
                 do
                 {
                     //
-                    // Things might've changed for us. Is the page still free?
+                    // Things might've changed for us. Is the PFN entry still
+                    // mapped and is the page still free?
                     //
-                    if (MiIsPfnInUse(Pfn1)) break;
+                    if (!MmIsAddressValid(Pfn1) ||
+                        !MmIsAddressValid((PUCHAR)Pfn1 + sizeof(*Pfn1) - 1) ||
+                        MiIsPfnInUse(Pfn1))
+                    {
+                        break;
+                    }
 
                     //
                     // So far so good. Is this the last confirmed valid page?
