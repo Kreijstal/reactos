@@ -33,6 +33,12 @@ MM_ALLOCATION_REQUEST, *PMM_ALLOCATION_REQUEST;
 
 MM_MEMORY_CONSUMER MiMemoryConsumers[MC_MAXIMUM];
 static ULONG MiMinimumAvailablePages;
+
+/* The reserve of available pages the pager keeps. See MmInitializeBalancer. */
+PFN_NUMBER MmPagerReserve;
+
+/* The floor below which only the pager may allocate. See MmThrottleForPager. */
+PFN_NUMBER MmPagerHardReserve;
 static ULONG MiMinimumPagesPerRun;
 static CLIENT_ID MiBalancerThreadId;
 static HANDLE MiBalancerThreadHandle = NULL;
@@ -41,6 +47,10 @@ static KEVENT MiBalancerDoneEvent;
 static KTIMER MiBalancerTimer;
 
 static LONG PageOutThreadActive;
+
+/* Set once the balancer is running, so that a page request failing inside the
+ * balancer's own page-out path can tell that it must not wait for itself. */
+static PKTHREAD MiBalancerThreadObject;
 
 /* FUNCTIONS ****************************************************************/
 
@@ -55,6 +65,41 @@ MmInitializeBalancer(ULONG NrAvailablePages, ULONG NrSystemPages)
     MiMinimumAvailablePages = 256;
     MiMinimumPagesPerRun = 256;
     MiMemoryConsumers[MC_USER].PagesTarget = NrAvailablePages / 2;
+
+    /*
+     * How many available pages the pager works towards, and the level at which
+     * a page allocation wakes it.
+     *
+     * This used to be MmMinimumFreePages -- 81 pages, a third of a megabyte.
+     * Between the pager only being woken there and the balancer's own two
+     * second timer, nothing reclaimed anything until the machine was already
+     * out of memory: a process can dirty hundreds of megabytes inside one
+     * timer period. The reserve has to be big enough to cover that, so scale
+     * it with RAM and clamp it at both ends.
+     */
+    MmPagerReserve = MmNumberOfPhysicalPages / MI_PAGER_RESERVE_RATIO;
+    if (MmPagerReserve < MI_PAGER_RESERVE_MIN_PAGES)
+        MmPagerReserve = MI_PAGER_RESERVE_MIN_PAGES;
+    if (MmPagerReserve > MI_PAGER_RESERVE_MAX_PAGES)
+        MmPagerReserve = MI_PAGER_RESERVE_MAX_PAGES;
+    if (MmPagerReserve < MmPlentyFreePages)
+        MmPagerReserve = MmPlentyFreePages;
+
+    /*
+     * And the floor the pager keeps to itself: enough for the file system,
+     * the cache manager and the storage stack to resolve the faults that
+     * writing a page out takes, and no more, because every page here is one
+     * the rest of the system may not have.
+     */
+    MmPagerHardReserve = MmNumberOfPhysicalPages / MI_PAGER_HARD_RESERVE_RATIO;
+    if (MmPagerHardReserve < MI_PAGER_HARD_RESERVE_MIN_PAGES)
+        MmPagerHardReserve = MI_PAGER_HARD_RESERVE_MIN_PAGES;
+    if (MmPagerHardReserve > MI_PAGER_HARD_RESERVE_MAX_PAGES)
+        MmPagerHardReserve = MI_PAGER_HARD_RESERVE_MAX_PAGES;
+
+    /* It only makes sense below the level the pager works towards */
+    if (MmPagerHardReserve > MmPagerReserve / 2)
+        MmPagerHardReserve = MmPagerReserve / 2;
 
     /* Initialize the dispatcher objects now: MmRebalanceMemoryConsumers can
      * signal MiBalancerEvent as soon as a page request fails, which may be
@@ -361,9 +406,88 @@ MmRebalanceMemoryConsumersAndWait(VOID)
     ASSERT(!MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()));
     ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
 
+    /* The balancer must never wait for itself. Writing a trimmed page out runs
+     * the file system on this very thread, and any allocation it makes can come
+     * back here -- at which point resetting the done event and waiting would
+     * block the only thread that will ever set it.
+     *
+     * Returning immediately is not right either: every caller of this function
+     * is looping "retry until memory appears", so an instant return turns that
+     * loop into a spin which never yields and never lets the writes already in
+     * flight complete. That was observed as a hard livelock -- one CPU pegged
+     * in MmNotPresentFault, the other idle, and not a single page written.
+     * Pause instead, so the I/O this thread is here to issue can land. */
+    if (KeGetCurrentThread() == MiBalancerThreadObject)
+    {
+        LARGE_INTEGER Delay;
+
+        Delay.QuadPart = -10 * 1000 * 10; /* 10ms */
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+        return;
+    }
+
     KeResetEvent(&MiBalancerDoneEvent);
     MmRebalanceMemoryConsumers();
     KeWaitForSingleObject(&MiBalancerDoneEvent, Executive, KernelMode, FALSE, NULL);
+}
+
+VOID
+NTAPI
+MmThrottleForPager(VOID)
+{
+    ULONG Rounds;
+
+    /*
+     * Keeps a floor of free pages that only the pager may go below.
+     *
+     * Paging a private page out is not a pure operation: the write goes
+     * through the file system and the cache manager, and those fault. If the
+     * free list is already empty by the time the pager runs, its own fault
+     * cannot be resolved, and since it is the only thread that could have
+     * freed a page, nothing ever will be -- the machine stops with both
+     * processors idle and a page file that is barely touched.
+     *
+     * The way out is not to let it get that far. A thread that is about to
+     * consume yet another page waits here while the free list is below the
+     * floor, so what is left stays available to the pager. This is the
+     * throttle that Windows applies in MiEnsureAvailablePageOrWait, and it is
+     * why an out-of-memory Windows box crawls rather than stops.
+     */
+    if (MmAvailablePages >= MmPagerHardReserve)
+        return;
+
+    /* The pager itself is exempt -- it is the thread the reserve is for.
+     * So is anyone who cannot block. */
+    if (KeGetCurrentThread() == MiBalancerThreadObject)
+        return;
+    if (KeGetCurrentIrql() >= DISPATCH_LEVEL)
+        return;
+
+    /* Nor may we wait while holding something the pager will ask for. The
+     * fault on a page table address arrives here with the working set lock
+     * already held. */
+    if (MM_ANY_WS_LOCK_HELD(PsGetCurrentThread()))
+        return;
+
+    for (Rounds = 0; Rounds < MI_THROTTLE_MAX_ROUNDS; Rounds++)
+    {
+        LARGE_INTEGER Delay;
+
+        if (MmAvailablePages >= MmPagerHardReserve)
+            return;
+
+        MmRebalanceMemoryConsumers();
+
+        Delay.QuadPart = -10 * 1000 * 10; /* 10ms */
+        KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+    }
+
+    /* Waited long enough. Either the pager cannot free anything at all -- in
+     * which case blocking here forever only hides the real failure -- or this
+     * thread is itself in the way of it. Let the allocation try and fail on
+     * its own terms. */
+    DPRINT1("Throttle gave up: available=%Iu reserve=%Iu\n",
+            (ULONG_PTR)MmAvailablePages, (ULONG_PTR)MmPagerHardReserve);
 }
 
 NTSTATUS
@@ -415,6 +539,8 @@ MiBalancerThread(PVOID Unused)
     PVOID WaitObjects[2];
     NTSTATUS Status;
 
+    MiBalancerThreadObject = KeGetCurrentThread();
+
     WaitObjects[0] = &MiBalancerEvent;
     WaitObjects[1] = &MiBalancerTimer;
 
@@ -447,6 +573,12 @@ MiBalancerThread(PVOID Unused)
                     InitialTarget = MiTrimMemoryConsumer(i, InitialTarget);
                 }
 
+                /* Trim ARM3 working sets. The consumers above only ever see
+                 * legacy section-view pages; every private page -- which is
+                 * to say every process heap -- is reachable only from here. */
+                NrFreedPages = MmWorkingSetManager();
+                InitialTarget -= min(NrFreedPages, InitialTarget);
+
                 /* Trim cache */
                 Target = max(InitialTarget, abs(MiMinimumAvailablePages - MmAvailablePages));
                 if (Target)
@@ -472,7 +604,27 @@ MiBalancerThread(PVOID Unused)
                         continue;
                     }
 
-                    /* Game over */
+                    /* Game over. Say why: the three ways to get here are very
+                     * different bugs, and the bugcheck alone cannot tell them
+                     * apart. No free swap slot means the system committed more
+                     * than RAM plus pagefile could ever hold, i.e. something
+                     * allocated pages without charging them. Free slots with a
+                     * still-outstanding target means the page-out path itself
+                     * refused every candidate. */
+                    DPRINT1("NO_PAGES_AVAILABLE: outstanding=%lu available=%Iu "
+                            "swap free=%lu used=%lu commit=%Iu/%Iu shared=%Iu "
+                            "MC_USER used=%lu target=%lu MC_SYSTEM used=%lu\n",
+                            InitialTarget,
+                            (ULONG_PTR)MmAvailablePages,
+                            MiFreeSwapPages,
+                            MiUsedSwapPages,
+                            MmTotalCommittedPages,
+                            MmTotalCommitLimit,
+                            MmSharedCommit,
+                            MiMemoryConsumers[MC_USER].PagesUsed,
+                            MiMemoryConsumers[MC_USER].PagesTarget,
+                            MiMemoryConsumers[MC_SYSTEM].PagesUsed);
+
                     KeBugCheck(NO_PAGES_AVAILABLE);
                 }
 

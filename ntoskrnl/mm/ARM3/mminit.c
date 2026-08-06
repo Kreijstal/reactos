@@ -1284,6 +1284,13 @@ MiAdjustWorkingSetManagerParameters(IN BOOLEAN Client)
         /* Double the minimum amount of pages we consider for a "plenty free" scenario */
         MmPlentyFreePages *= 2;
     }
+
+    /* Default working set limits, in pages. Without these the limits are all
+     * zero, and every process looks to the working set manager as if it were
+     * over its maximum. */
+    MmMinimumWorkingSetSize = 20;
+    MmMaximumWorkingSetSize = (MmNumberOfPhysicalPages > 512) ?
+                              (MmNumberOfPhysicalPages - 512) : MmNumberOfPhysicalPages;
 }
 
 CODE_SEG("INIT")
@@ -1543,7 +1550,7 @@ MiAddHalIoMappings(VOID)
                     if (!MiGetPfnEntry(PageFrameIndex))
                     {
                         /* FIXME: For PAT, we need to track I/O cache attributes for coherency */
-                        DPRINT1("HAL I/O Mapping at %p is unsafe\n", BaseAddress);
+                        DPRINT("HAL I/O Mapping at %p is unsafe\n", BaseAddress);
                     }
                 }
 
@@ -2188,6 +2195,7 @@ MmArmInitSystem(IN ULONG Phase,
     IncludeType[LoaderBad] = FALSE;
     IncludeType[LoaderFirmwarePermanent] = FALSE;
     IncludeType[LoaderSpecialMemory] = FALSE;
+    IncludeType[LoaderHALCachedMemory] = FALSE;
     IncludeType[LoaderBBTMemory] = FALSE;
     if (Phase == 0)
     {
@@ -2273,6 +2281,9 @@ MmArmInitSystem(IN ULONG Phase,
 
         /* Set up the zero page event */
         KeInitializeEvent(&MmZeroingPageEvent, NotificationEvent, FALSE);
+
+        /* Set up the event the balance set manager waits on to trim working sets */
+        KeInitializeEvent(&MmWorkingSetManagerEvent, SynchronizationEvent, FALSE);
 
         /* Initialize the dead stack S-LIST */
         InitializeSListHead(&MmDeadStackSListHead);

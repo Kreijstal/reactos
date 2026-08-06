@@ -1457,6 +1457,13 @@ MmCleanProcessAddressSpace(IN PEPROCESS Process)
     /* Delete the shared user data section */
     MiDeleteVirtualAddresses(USER_SHARED_DATA, USER_SHARED_DATA, NULL);
 
+    /* Nothing is left in the working set, so give back the pages its entry
+     * array grew into. Only the first one is accounted for elsewhere (as
+     * Process->WorkingSetPage); the rest would otherwise be leaked, which
+     * matters now that the array is allowed to grow to cover a large
+     * process rather than stopping at half a gigabyte. */
+    MiDestroyWorkingSetList(&Process->Vm);
+
     /* Release the working set */
     MiUnlockProcessWorkingSetUnsafe(Process, Thread);
 

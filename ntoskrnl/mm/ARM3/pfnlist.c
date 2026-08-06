@@ -106,11 +106,13 @@ MiDecrementAvailablePages(
 
     /* One less page */
     MmAvailablePages--;
-    if (MmAvailablePages < MmMinimumFreePages)
+    if (MmAvailablePages < MmPagerReserve)
     {
-        /* FIXME: Should wake up the MPW and working set manager, if we had one */
-
-        /* Call RosMm and see if it can release any pages for us */
+        /* Wake the pager while there is still a reserve for it to work with.
+         * Waiting for MmMinimumFreePages -- 81 pages, a third of a megabyte --
+         * started it only once the machine was already out, and the balancer's
+         * own timer is two seconds, which is far longer than a running process
+         * needs to consume whatever is left. */
         MmRebalanceMemoryConsumers();
     }
 }
