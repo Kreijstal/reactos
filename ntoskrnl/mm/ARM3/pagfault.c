@@ -26,6 +26,11 @@ MmRebalanceMemoryConsumersAndWait(VOID);
 BOOLEAN UserPdeFault = FALSE;
 #endif
 
+/* Failed page file reads are reported once: at shutdown they arrive in a
+ * burst, one per surviving paged-out page, and the message is only worth the
+ * serial line the first time. */
+static ULONG MiInPageErrorCount = 0;
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 #ifdef CONFIG_SMP
@@ -1048,12 +1053,74 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
     ASSERT(Pfn1->u3.e1.ReadInProgress == 1);
     ASSERT(Pfn1->u3.e1.WriteInProgress == 0);
 
+    /* The read is over, successfully or not. Anyone who queued behind it has
+     * to be released before we go anywhere: from here every path either
+     * publishes this page or destroys it, and a waiter must be left on
+     * neither. */
+    Pfn1->u3.e1.ReadInProgress = 0;
+    if (Pfn1->u1.Event != NULL)
+    {
+        KeSetEvent(Pfn1->u1.Event, IO_NO_INCREMENT, FALSE);
+        Pfn1->u1.Event = NULL;
+    }
+
+    if (MI_IS_PFN_DELETED(Pfn1))
+    {
+        /* Another thread freed this address range while the read was in
+         * flight -- it found our transition PTE, erased it, dropped the page
+         * table reference and marked the PFN deleted, leaving the page alive
+         * only for the reference we hold. PointerPte no longer describes this
+         * page, so writing a valid PTE over it would resurrect a mapping the
+         * process has already torn down. Release the page instead and report
+         * success: the faulting instruction re-executes and faults again
+         * against whatever now lives at that address.
+         *
+         * Nothing will ever read the slot again either, so it goes back
+         * whether the read worked or not. */
+        MmFreeSwapPage(ENTRY_FROM_FILE_OFFSET(PageFileIndex, PageFileOffset));
+
+        /* Takes the share count to zero, which frees the page because the PFN
+         * is marked deleted and ours is the last reference. */
+        MiDecrementShareCount(Pfn1, Page);
+        return STATUS_SUCCESS;
+    }
+
     if (!NT_SUCCESS(Status))
     {
-        /* Malheur! */
-        ASSERT(FALSE);
-        Pfn1->u4.InPageError = 1;
-        Pfn1->u1.ReadStatus = Status;
+        /*
+         * The read failed, so this page holds nothing. Mapping it would hand
+         * the process a page of garbage, and releasing the slot would throw
+         * away the only copy of the data that still exists. Put the page file
+         * PTE back exactly as MiInitializePfn saved it, keep the slot, and give
+         * the page up: the address is paged out again, precisely as it was
+         * before the fault, and a later fault can read the same slot.
+         *
+         * This is reachable at shutdown, where MiShutdownSystem closes the
+         * paging files while processes are still running, so every later fault
+         * on a paged-out page fails. It used to be an ASSERT(FALSE) that could
+         * never fire, because before private pages were trimmable nothing was
+         * ever read back from the page file.
+         */
+        if (MiInPageErrorCount++ == 0)
+        {
+            DPRINT1("Page file read failed with %lx for %p (file %lu slot 0x%Ix)"
+                    " -- leaving the page paged out\n",
+                    Status, FaultingAddress, PageFileIndex, PageFileOffset);
+        }
+
+        /* Restore the page file PTE before MI_SET_PFN_DELETED touches the PFN:
+         * OriginalPte is where MiInitializePfn saved it. */
+        MI_WRITE_INVALID_PTE(PointerPte, Pfn1->OriginalPte);
+
+        /* MiInitializePfn took a share on the page table for a mapping that is
+         * not going to happen. */
+        MiDecrementShareCount(MiGetPfnEntry(Pfn1->u4.PteFrame), Pfn1->u4.PteFrame);
+
+        /* And now the page itself, which goes straight back to the free list */
+        MI_SET_PFN_DELETED(Pfn1);
+        MiDecrementShareCount(Pfn1, Page);
+
+        return Status;
     }
 
     /* The page is back in memory and writeable again, so the copy in the page
@@ -1067,45 +1134,11 @@ MiResolvePageFileFault(_In_ BOOLEAN StoreInstruction,
      * longer owns. It is an ordinary private page again. */
     MI_MAKE_SOFTWARE_PTE(&Pfn1->OriginalPte, Protection);
 
-    if (MI_IS_PFN_DELETED(Pfn1))
-    {
-        /* Another thread freed this address range while the read was in
-         * flight -- it found our transition PTE, erased it, dropped the page
-         * table reference and marked the PFN deleted, leaving the page alive
-         * only for the reference we hold. PointerPte no longer describes this
-         * page, so writing a valid PTE over it would resurrect a mapping the
-         * process has already torn down. Release the page instead and report
-         * success: the faulting instruction re-executes and faults again
-         * against whatever now lives at that address. */
-        Pfn1->u3.e1.ReadInProgress = 0;
-        if (Pfn1->u1.Event)
-        {
-            KeSetEvent(Pfn1->u1.Event, IO_NO_INCREMENT, FALSE);
-            Pfn1->u1.Event = NULL;
-        }
-
-        /* Takes the share count to zero, which frees the page because the PFN
-         * is marked deleted and ours is the last reference. */
-        MiDecrementShareCount(Pfn1, Page);
-        return STATUS_SUCCESS;
-    }
-
-    /* And the PTE can finally be valid */
+    /* And the PTE can finally be valid. Anyone who was waiting on this read
+     * has already been signalled, and cannot look at the PTE before we drop
+     * the PFN and working set locks on the way out. */
     MI_MAKE_HARDWARE_PTE(&TempPte, PointerPte, Protection, Page);
     MI_WRITE_VALID_PTE(PointerPte, TempPte);
-
-    Pfn1->u3.e1.ReadInProgress = 0;
-    /* Did someone start to wait on us while we proceeded ? */
-    if (Pfn1->u1.Event)
-    {
-        /* Tell them we're done */
-        KeSetEvent(Pfn1->u1.Event, IO_NO_INCREMENT, FALSE);
-
-        /* And forget the event: it lives on the waiter's stack, and u1 is a
-         * union whose other members (the working set index, the list links)
-         * are read as soon as this page is active. */
-        Pfn1->u1.Event = NULL;
-    }
 
     return Status;
 }
