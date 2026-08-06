@@ -426,9 +426,10 @@ MiSetupPfnForPageTable(
     /* Get the pfn entry for this page */
     Pfn = MiGetPfnEntry(PageFrameIndex);
 
-    /* Check if it's valid memory */
+    /* Sparse PFN database holes can split an entry across two pages. */
     if ((PageFrameIndex <= MmHighestPhysicalPage) &&
         (MmIsAddressValid(Pfn)) &&
+        (MmIsAddressValid((PUCHAR)Pfn + sizeof(*Pfn) - 1)) &&
         (Pfn->u3.e1.PageLocation == ActiveAndValid))
     {
         /* Setup the PFN entry */
