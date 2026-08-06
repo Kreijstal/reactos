@@ -2012,8 +2012,16 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
                                         Page);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("Unable to create virtual mapping\n");
-            KeBugCheck(MEMORY_MANAGEMENT);
+            /* Out of pages for the page table. Put the offset back the way we
+             * found it -- it still reads MM_WAIT_ENTRY from our read-in -- and
+             * let the caller retry once the pager has freed something. The
+             * saved swap entry has to go first, or releasing the page would
+             * free the very slot we are handing back to the segment. */
+            MmSetSavedSwapEntryPage(Page, 0);
+            MmSetPageEntrySectionSegment(Segment, &Offset, MAKE_SWAP_SSE(SwapEntry));
+            MmUnlockSectionSegment(Segment);
+            MmReleasePageMemoryConsumer(MC_USER, Page);
+            return STATUS_NO_MEMORY;
         }
         if (Process)
             MmInsertRmap(Page, Process, Address);
@@ -2040,8 +2048,14 @@ MmNotPresentFaultSectionView(PMMSUPPORT AddressSpace,
                                         Page);
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("Unable to create virtual mapping\n");
-            KeBugCheck(MEMORY_MANAGEMENT);
+            /* Making the mapping needs a page table page, and there was none
+             * left. That is a shortage, not a broken state -- and nothing has
+             * been changed yet, so the caller can simply retry once the pager
+             * has freed something. This function already reports a failed
+             * page allocation that way; bugchecking here instead would turn a
+             * transient shortage into a dead machine. */
+            MmUnlockSectionSegment(Segment);
+            return STATUS_NO_MEMORY;
         }
 
         if (Process)
