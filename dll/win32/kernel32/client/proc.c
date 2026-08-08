@@ -2431,13 +2431,13 @@ CreateProcessInternalW(IN HANDLE hUserToken,
     PPEB RemotePeb;
     PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
     PVOID TibValue;
+    PTEB Teb;
 #else
     UINT64 ProcessParameters;
     UINT64 RemotePeb;
     UINT64 TibValue;
 #endif
     PPEB Peb;
-    PTEB Teb;
     INITIAL_TEB InitialTeb;
     PIMAGE_NT_HEADERS NtHeaders;
     STARTUPINFOW StartupInfo;
