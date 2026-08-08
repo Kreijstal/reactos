@@ -47,105 +47,41 @@ The code of ReactOS is licensed under [GNU GPL 2.0](https://github.com/reactos/r
 
 ![Build](https://github.com/reactos/reactos/workflows/Build/badge.svg) [![rosbewin.badge]][rosbewin.link] [![rosbeunix.badge]][rosbeunix.link] [![coverity.badge]][coverity.link]
 
-### Recommended build entry points
+To build the system it is strongly advised to use the _ReactOS Build Environment (RosBE)._
+Up-to-date versions for Windows and for Unix/GNU-Linux are available from our download page at: ["Build Environment"](https://reactos.org/wiki/Build_Environment).
 
-1. RosBE (Windows, recommended)
-2. MSYS2 (Windows, MinGW64 shell)
-3. GNU/Linux with CMake + Ninja
-4. MSVC 2019+ (official docs: ["Visual Studio or Microsoft Visual C++"](https://reactos.org/wiki/CMake#Visual_Studio_or_Microsoft_Visual_C.2B.2B))
+Alternatively one can use Microsoft Visual C++ (MSVC) version 2019+. Building with MSVC is covered here: ["Visual Studio or Microsoft Visual C++"](https://reactos.org/wiki/CMake#Visual_Studio_or_Microsoft_Visual_C.2B.2B).
 
-RosBE package details are in ["Build Environment"](https://reactos.org/wiki/Build_Environment). For complete build and target details, use ["Building ReactOS"](https://reactos.org/wiki/Building_ReactOS).
+See ["Building ReactOS"](https://reactos.org/wiki/Building_ReactOS) article for more details.
 
-### CMake + Ninja (all platforms)
+### Binaries
 
-From the repository root:
+To build ReactOS you must run the `configure` script in the directory you want to have your build files. Choose `configure.cmd` or `configure.sh` depending on your system. Then run `ninja <modulename>` to build a module you want or just `ninja` to build all modules.
 
-```bash
-cmake -S . -B build -G Ninja \
-  -DARCH=amd64 \
-  -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-```
+### Bootable images
 
-Build only a specific target:
+To build a bootable CD image run `ninja bootcd` from the build directory. This will create a CD image with a filename `bootcd.iso`.
 
-```bash
-cmake --build build --target bootcd
-```
+You can always download fresh binary builds of bootable images from the ["Daily builds"](https://reactos.org/getbuilds/) page.
 
-This produces `build/bootcd.iso`.
+### NT10 with WoW64 (amd64)
 
-### MSYS2 (Windows)
-
-In the **MSYS2 MinGW 64-bit** shell:
+Requires the mingw-w64 cross toolchains (`i686-w64-mingw32-gcc` and `x86_64-w64-mingw32-gcc`). Build the 32-bit WoW64 guest first, then the 64-bit system pointing at it:
 
 ```bash
-pacman -S --needed --noconfirm \
-  git base-devel python3 make ninja \
-  mingw-w64-x86_64-toolchain mingw-w64-x86_64-flex \
-  mingw-w64-x86_64-bison
+# 32-bit guest (becomes SysWOW64)
+cmake -S . -B build-wow64 -G Ninja -DCMAKE_TOOLCHAIN_FILE=toolchain-gcc.cmake \
+      -DARCH=i386 -DSARCH=wow64
+cmake --build build-wow64
 
-cmake -S . -B build -G Ninja \
-  -DARCH=amd64 \
-  -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-```
-
-If you are on MSYS2/ucrt64 and want to force the dedicated toolchain, use the integrated toolchain file:
-
-```bash
-cmake -S . -B build-msys64 -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=toolchain-msys64.cmake \
-  -DARCH=amd64 \
-  -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-msys64
-```
-
-`toolchain-msys64.cmake` exists and is intended for this MSYS2 flow (it sets cross-compiling mode and uses the MSYS2-hosted GCC toolchain).
-
-### MSVC (Windows)
-
-Use Microsoft Visual C++ 2019+ and the guidance linked above.
-
-### WoW64 (amd64 with 32-bit guest)
-
-Use two builds:
-
-```bash
-cmake -S . -B build-i386 -G Ninja \
-  -DARCH=i386 \
-  -DSARCH=wow64 \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build build-i386
-
-cmake -S . -B build-amd64 -G Ninja \
-  -DARCH=amd64 \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DREACTOS_WOW64_GUEST_DIR=$PWD/build-i386
+# 64-bit NT10 system, bundling the guest
+cmake -S . -B build-amd64 -G Ninja -DCMAKE_TOOLCHAIN_FILE=toolchain-gcc.cmake \
+      -DARCH=amd64 -DREACTOS_TARGET_NT=0x0A00 \
+      -DREACTOS_WOW64_GUEST_DIR=$PWD/build-wow64
 cmake --build build-amd64 --target bootcd
 ```
 
-Legacy helpers (`configure.cmd` / `configure.sh`) are still present, but current instructions use direct CMake calls as shown above.
-
-### CMake integrado (RosBE / entorno ReactOS)
-
-RosBE includes a preconfigured CMake flow through `configure.sh` (MSYS2/Unix shell) and `configure.cmd` (Windows cmd). It wires `toolchain-gcc.cmake` automatically and sets the build architecture from `ROS_ARCH`.
-
-```bash
-./configure.sh -DREACTOS_TARGET_NT=0x0A00 -DCMAKE_BUILD_TYPE=Debug
-ninja -C output-MiniGW-amd64
-```
-
-Equivalent Windows flow:
-
-```bat
-configure.cmd
-ninja -C output-MiniGW-amd64
-```
-
-You can pass any `-D...` CMake options to the configure scripts (for example `-DREACTOS_TARGET_NT=0x0A00`), and they forward directly to the CMake invocation they generate.
-
-You can always download fresh binary builds from the ["Daily builds"](https://reactos.org/getbuilds/) page.
+The resulting `build-amd64/bootcd.iso` installs a system whose SysWOW64 is populated from the guest build, so 32-bit programs run on the 64-bit system.
 
 ## Installing
 
