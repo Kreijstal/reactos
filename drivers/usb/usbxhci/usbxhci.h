@@ -12,6 +12,12 @@
 #include <usbdlib.h>
 #include "hardware.h"
 
+#if (NTDDI_VERSION < NTDDI_WIN8)
+/* The UsbSuperSpeed enumerator only exists in Win8+ headers, but this driver
+ * backports USB3 device support to the older NT personas. */
+#define UsbSuperSpeed ((USB_DEVICE_SPEED)3)
+#endif
+
 /* XHCI Transfer follows USBPORT Transfer */
 typedef struct _XHCI_TRANSFER {
   ULONG Reserved;
