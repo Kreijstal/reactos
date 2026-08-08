@@ -25,7 +25,8 @@ add_dependencies(stdc++compat xdk)
 target_link_libraries(stdc++compat PRIVATE cxx_system_includes)
 target_compile_definitions(stdc++compat PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:PAL_STDCPP_COMPAT>" _CRT_DECLARE_NONSTDC_NAMES=1)
 
-# Stack protector / fortify compat for MSYS2/ucrt64 toolchains.
-# Only built when gcc.cmake detects that libsupc++ needs these symbols.
-add_library(gcc_ssp_compat gcc_ssp_compat.c)
+# Stack protector / fortify / msvcrt-snprintf compat for MSYS2 toolchains.
+# Only linked when gcc.cmake detects that libsupc++ needs these symbols;
+# MSYS2's libwinpthread additionally references __ms_snprintf.
+add_library(gcc_ssp_compat gcc_ssp_compat.c ms_snprintf_compat.c)
 add_dependencies(gcc_ssp_compat xdk)
