@@ -25,6 +25,12 @@
 #define PCI_INTERFACE_USB_ID_EHCI 0x20
 #define PCI_INTERFACE_USB_ID_XHCI 0x30
 
+#if (NTDDI_VERSION < NTDDI_WIN8)
+/* The UsbSuperSpeed enumerator only exists in Win8+ headers, but this stack
+ * backports USB3 device support to the older NT personas. */
+#define UsbSuperSpeed ((USB_DEVICE_SPEED)3)
+#endif
+
 #ifdef USBD_TRANSFER_DIRECTION // due hubbusif.h included usbdi.h (Which overwrites...)
 #undef USBD_TRANSFER_DIRECTION
 #define USBD_TRANSFER_DIRECTION 0x00000001
@@ -68,6 +74,7 @@
 #define USBPORT_FLAG_HC_POLLING        0x00000004
 #define USBPORT_FLAG_WORKER_THREAD_ON  0x00000008
 #define USBPORT_FLAG_WORKER_THREAD_EXIT 0x00000010
+#define USBPORT_FLAG_RH_INVALIDATE_PENDING 0x00000020
 #define USBPORT_FLAG_HC_SUSPEND        0x00000100
 #define USBPORT_FLAG_INTERRUPT_ENABLED 0x00000400
 #define USBPORT_FLAG_SELECTIVE_SUSPEND 0x00000800
@@ -655,6 +662,11 @@ USBPORT_InterruptService(
 VOID
 NTAPI
 USBPORT_SignalWorkerThread(
+  IN PDEVICE_OBJECT FdoDevice);
+
+VOID
+NTAPI
+USBPORT_SynchronizeControllersStart(
   IN PDEVICE_OBJECT FdoDevice);
 
 VOID
