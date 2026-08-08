@@ -449,12 +449,17 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         if(NOT REACTOS_WOW64_GUEST_DIR)
             set(REACTOS_WOW64_GUEST_DIR "${REACTOS_BINARY_DIR}/wow64-guest")
         endif()
+        # CMake exports CC/CXX/ASM into its own environment once the languages
+        # are enabled, so a bare execute_process here would poison the guest's
+        # native host-tools compiler detection with the cross compiler. Scrub
+        # them for everything that runs the guest build.
+        set(_wow64_env ${CMAKE_COMMAND} -E env --unset=CC --unset=CXX --unset=ASM)
         if(NOT EXISTS "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt")
             message(STATUS "WoW64: configuring guest tree in ${REACTOS_WOW64_GUEST_DIR}")
             # The guest keeps its own default REACTOS_TARGET_NT: the 32-bit
             # user image does not have to match the host kernel's NT persona.
             execute_process(
-                COMMAND ${CMAKE_COMMAND}
+                COMMAND ${_wow64_env} ${CMAKE_COMMAND}
                         -S ${REACTOS_SOURCE_DIR} -B ${REACTOS_WOW64_GUEST_DIR}
                         -G ${CMAKE_GENERATOR}
                         -DCMAKE_TOOLCHAIN_FILE=${REACTOS_SOURCE_DIR}/toolchain-gcc.cmake
@@ -467,13 +472,13 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         endif()
         message(STATUS "WoW64: building guest tree (the first build takes a while)")
         execute_process(
-            COMMAND ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
+            COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
             RESULT_VARIABLE _wow64_guest_status)
         if(NOT _wow64_guest_status EQUAL 0)
             message(FATAL_ERROR "WoW64 guest build failed")
         endif()
         add_custom_target(wow64_guest
-            COMMAND ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
+            COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
             COMMENT "Refreshing WoW64 guest tree"
             USES_TERMINAL)
     endif()
