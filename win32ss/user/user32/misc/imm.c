@@ -154,7 +154,7 @@ BOOL WINAPI User32InitializeImmEntryTable(DWORD magic)
 static BOOL User32CanSetImeWindowToImc(HIMC hIMC, HWND hImeWnd)
 {
     PIMC pIMC = ValidateHandle(hIMC, TYPE_INPUTCONTEXT);
-    return pIMC && (!pIMC->hImeWnd || pIMC->hImeWnd == hImeWnd || !ValidateHwnd(pIMC->hImeWnd));
+    return pIMC && (!pIMC->hImeWnd || WOW64_CAST_TO_HANDLE(pIMC->hImeWnd) == hImeWnd || !ValidateHwnd(pIMC->hImeWnd));
 }
 
 static BOOL User32GetImeShowStatus(VOID)
@@ -209,7 +209,7 @@ static VOID User32NotifyOpenStatus(PIMEUI pimeui, HWND hwndIMC, BOOL bOpen)
 static VOID User32SetImeWindowOfImc(HIMC hIMC, HWND hImeWnd)
 {
     PIMC pIMC = ValidateHandle(hIMC, TYPE_INPUTCONTEXT);
-    if (!pIMC || pIMC->hImeWnd == hImeWnd)
+    if (!pIMC || WOW64_CAST_TO_HANDLE(pIMC->hImeWnd) == hImeWnd)
         return;
 
     NtUserUpdateInputContext(hIMC, UIC_IMEWINDOW, (ULONG_PTR)hImeWnd);

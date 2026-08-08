@@ -805,7 +805,7 @@ ExitThreadCallback(PETHREAD Thread)
             /* Notify logon application to restart shell if needed */
             if (ptiCurrent->pDeskInfo)
             {
-                if (ptiCurrent->pDeskInfo->ppiShellProcess == ppiCurrent)
+                if ((PPROCESSINFO)ptiCurrent->pDeskInfo->ppiShellProcess == ppiCurrent)
                 {
                     DWORD ExitCode = PsGetProcessExitStatus(Process);
 
