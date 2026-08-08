@@ -192,7 +192,7 @@ static PVOID FASTCALL DesktopPtrToUser(PVOID ptr)
 
     ASSERT(ptr != NULL);
     ASSERT(pdi != NULL);
-    if (pdi->pvDesktopBase <= ptr && ptr < pdi->pvDesktopLimit)
+    if (WOW64_CAST_TO_PTR(pdi->pvDesktopBase) <= ptr && ptr < WOW64_CAST_TO_PTR(pdi->pvDesktopLimit))
         return (PVOID)((ULONG_PTR)ptr - pci->ulClientDelta);
     else
         return (PVOID)NtUserCallOneParam((DWORD_PTR)ptr, ONEPARAM_ROUTINE_GETDESKTOPMAPPING);
@@ -257,7 +257,7 @@ BOOL Imm32CheckImcProcess(PIMC pIMC)
     if (IS_NULL_UNEXPECTEDLY(pIMC))
         return FALSE;
 
-    if (pIMC->head.pti == Imm32CurrentPti())
+    if (WOW64_CAST_TO_PTR(pIMC->head.pti) == Imm32CurrentPti())
         return TRUE;
 
     hIMC = pIMC->head.h;
