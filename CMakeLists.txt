@@ -454,20 +454,29 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         # native host-tools compiler detection with the cross compiler. Scrub
         # them for everything that runs the guest build.
         set(_wow64_env ${CMAKE_COMMAND} -E env --unset=CC --unset=CXX --unset=ASM)
+        get_filename_component(_wow64_toolchain "${CMAKE_TOOLCHAIN_FILE}"
+                               ABSOLUTE BASE_DIR "${REACTOS_SOURCE_DIR}")
+        if(CMAKE_HOST_WIN32 AND _wow64_toolchain MATCHES "msys64")
+            # On MSYS2 the i686 compilers and binutils live in the mingw32
+            # environment (<msys root>/mingw32/bin, unprefixed), which is not
+            # in the ucrt64/mingw64 shell's PATH. Derive it from the host
+            # compiler location and put it in front of the guest's PATH so
+            # the unprefixed lookups in toolchain-msys64.cmake resolve to the
+            # 32-bit tools.
+            get_filename_component(_wow64_host_bin "${CMAKE_C_COMPILER}" DIRECTORY)
+            get_filename_component(_wow64_msys_root "${_wow64_host_bin}/.." ABSOLUTE)
+            set(_wow64_mingw32_bin "${_wow64_msys_root}/../mingw32/bin")
+            get_filename_component(_wow64_mingw32_bin "${_wow64_mingw32_bin}" ABSOLUTE)
+            if(NOT EXISTS "${_wow64_mingw32_bin}/gcc.exe")
+                message(FATAL_ERROR "The 32-bit WoW64 guest needs the i686 "
+                    "toolchain, but ${_wow64_mingw32_bin}/gcc.exe does not "
+                    "exist. Install it with: pacman -S mingw-w64-i686-toolchain")
+            endif()
+            list(APPEND _wow64_env --modify "PATH=path_list_prepend:${_wow64_mingw32_bin}")
+        endif()
         if(NOT EXISTS "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt")
             message(STATUS "WoW64: configuring guest tree in ${REACTOS_WOW64_GUEST_DIR}")
             # Configure the guest with the same toolchain file as this build.
-            get_filename_component(_wow64_toolchain "${CMAKE_TOOLCHAIN_FILE}"
-                                   ABSOLUTE BASE_DIR "${REACTOS_SOURCE_DIR}")
-            set(_wow64_configure_args "")
-            if(CMAKE_HOST_WIN32)
-                # On Windows (MSYS2) the unprefixed default compiler targets
-                # the host arch; the 32-bit guest needs the i686 cross tools
-                # (pacman -S mingw-w64-i686-toolchain, or run where
-                # i686-w64-mingw32-gcc is in PATH).
-                list(APPEND _wow64_configure_args
-                     -DMINGW_TOOLCHAIN_PREFIX=i686-w64-mingw32-)
-            endif()
             # The guest keeps its own default REACTOS_TARGET_NT: the 32-bit
             # user image does not have to match the host kernel's NT persona.
             execute_process(
@@ -477,9 +486,11 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
                         -DCMAKE_TOOLCHAIN_FILE=${_wow64_toolchain}
                         -DARCH=i386 -DSARCH=wow64
                         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-                        ${_wow64_configure_args}
                 RESULT_VARIABLE _wow64_guest_status)
             if(NOT _wow64_guest_status EQUAL 0)
+                # Don't leave a half-written cache behind: it would make the
+                # next run skip this configure step and fail more confusingly.
+                file(REMOVE "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt")
                 message(FATAL_ERROR "WoW64 guest configure failed")
             endif()
         endif()
