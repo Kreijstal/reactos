@@ -15,7 +15,7 @@
 
 /* WoW64 cast macros: identity on native builds, pointer-width conversion on WoW64 */
 #ifndef WOW64_CAST_TO_PTR
-#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#if !((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
 #define WOW64_CAST_TO_PTR(x) (x)
 #define WOW64_CAST_FROM_PTR(x) (x)
 #define WOW64_CAST_TO_HANDLE(x) (x)
@@ -217,7 +217,7 @@
 
 typedef struct _GDI_TABLE_ENTRY
 {
-#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#if !((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
     PVOID KernelData; /* Points to the kernel mode structure */
 #else
     UINT64 KernelData;
@@ -230,7 +230,7 @@ typedef struct _GDI_TABLE_ENTRY
     UCHAR  ObjectType; /* objt */
     UCHAR  Flags;      /* Flags */
     };};
-#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#if !((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
     PVOID UserData;   /* pUser Points to the user mode structure, usually NULL though */
 #else
     UINT64 UserData;
@@ -269,7 +269,7 @@ typedef struct __GDI_SHARED_HANDLE_TABLE /* Must match win32k/include/gdiobj.h *
     GDI_TABLE_ENTRY Entries[GDI_HANDLE_COUNT]; /* Handle table. */
     DEVCAPS         DevCaps;                   /* Shared device capabilities. */
     FLONG           flDeviceUniq;              /* Device settings uniqueness. */
-#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#if !((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
     PVOID           pvLangPack;                /* Lanuage Pack. */
 #else
     UINT64          pvLangPack;
@@ -278,7 +278,7 @@ typedef struct __GDI_SHARED_HANDLE_TABLE /* Must match win32k/include/gdiobj.h *
     DWORD           dwCFCount;
 } GDI_SHARED_HANDLE_TABLE, *PGDI_SHARED_HANDLE_TABLE;
 
-#if (defined(BUILD_WOW6432) && defined(_M_IX86))
+#if ((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
     
 typedef struct _MATRIX64
 {
@@ -334,7 +334,7 @@ typedef struct _LDC
  */
 typedef struct _DC_ATTR
 {
-#if !(defined(BUILD_WOW6432) && defined(_M_IX86))
+#if !((defined(BUILD_WOW6432) && !defined(_WIN32K_)) && defined(_M_IX86))
     PVOID pvLDC;
     ULONG ulDirty_;
     HANDLE hbrush;
