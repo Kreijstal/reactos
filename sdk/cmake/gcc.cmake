@@ -214,6 +214,10 @@ add_compile_options(
     -Wno-format
     -Wno-maybe-uninitialized
     -Wno-nonnull-compare
+    # GCC 16 diagnoses many more set-but-unused variables; Release already
+    # suppressed this globally, extend it to all build types so a fresh
+    # -Werror Debug build survives current toolchains.
+    -Wno-unused-but-set-variable
 )
 
 if(ARCH STREQUAL "arm")
