@@ -146,7 +146,7 @@ co_IntTranslateAccelerator(
             !(hMenu && hMenu == (HMENU)Window->IDMenu && (Window->style & WS_MINIMIZED)))
     {
         /* If this is system menu item, send WM_SYSCOMMAND, otherwise send WM_COMMAND */
-        if (hMenu && hMenu == Window->SystemMenu)
+        if (hMenu && hMenu == (HMENU)Window->SystemMenu)
         {
             TRACE("Sending WM_SYSCOMMAND, wParam=%0x\n", pAccel->cmd);
             co_IntSendMessage(hWnd, WM_SYSCOMMAND, pAccel->cmd, 0x00010000L);
