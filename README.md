@@ -74,7 +74,7 @@ cmake -S . -B build-amd64 -G Ninja -DCMAKE_TOOLCHAIN_FILE=toolchain-gcc.cmake \
 cmake --build build-amd64 --target bootcd
 ```
 
-`REACTOS_WOW64_GUEST=ON` configures and builds an `ARCH=i386 SARCH=wow64` guest tree under `build-amd64/wow64-guest` during configure (so the first configure takes as long as a 32-bit build). To reuse an existing guest tree instead, pass `-DREACTOS_WOW64_GUEST_DIR=<path>`.
+`REACTOS_WOW64_GUEST=ON` configures an `ARCH=i386 SARCH=wow64` guest tree under `build-amd64/wow64-guest`; its user-mode payload is built by the `wow64_guest` target, which the CD targets depend on. To reuse an existing guest tree instead, pass `-DREACTOS_WOW64_GUEST_DIR=<path>`.
 
 The resulting `build-amd64/bootcd.iso` installs a system whose SysWOW64 is populated from the guest build, so 32-bit programs run on the 64-bit system.
 

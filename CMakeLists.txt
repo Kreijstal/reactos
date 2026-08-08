@@ -322,8 +322,10 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             add_definitions(-DSARCH_PC98)
         elseif(SARCH STREQUAL "wow64")
             add_definitions(-DBUILD_WOW6432)
-            # WoW64 build intentionally stores 32-bit pointers in 64-bit LPC fields
-            add_compile_options(-Wno-int-to-pointer-cast -Wno-pointer-to-int-cast)
+            # WoW64 build intentionally stores 32-bit pointers in 64-bit LPC
+            # fields. -Wpointer-to-int-cast only exists for C; passing its
+            # -Wno- form to cc1plus makes every C++ compile warn about it.
+            add_compile_options(-Wno-int-to-pointer-cast "$<$<COMPILE_LANGUAGE:C>:-Wno-pointer-to-int-cast>")
         endif()
     elseif(ARCH STREQUAL "amd64")
         # clang-cl defines this one for itself
@@ -433,11 +435,11 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     # provisions the 32-bit guest world itself. The guest inherently needs a
     # second ARCH=i386 SARCH=wow64 build tree; instead of requiring the user to
     # configure and build it by hand and pass REACTOS_WOW64_GUEST_DIR, this
-    # configures and builds it under <build>/wow64-guest right here, at
-    # configure time, because the wow64 file lists below (boot/CMakeLists.txt)
-    # are derived at configure time from the guest's generated LiveCD list and
-    # the packed guest binaries must exist by then. The wow64_guest target
-    # re-runs the guest build so later host builds pick up guest changes.
+    # configures it under <build>/wow64-guest right here, at configure time,
+    # because the wow64 file lists below (boot/CMakeLists.txt) are derived at
+    # configure time from the guest's generated LiveCD list. The guest
+    # *binaries* are only needed at build time and are built then, by the
+    # wow64_guest target the ISO/cab targets depend on.
     option(REACTOS_WOW64_GUEST "Configure and build the 32-bit WoW64 guest tree automatically" OFF)
     if(REACTOS_WOW64_GUEST)
         if(NOT ARCH STREQUAL "amd64")
@@ -544,26 +546,28 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         if(_wow64_count EQUAL 0)
             message(FATAL_ERROR "WoW64 guest LiveCD list contains no payload outputs")
         endif()
-        message(STATUS "WoW64: building the ${_wow64_count}-file guest payload (the first build takes a while)")
+        message(STATUS "WoW64: guest tree ready, ${_wow64_count} payload files build with the wow64_guest target")
         # Batched to keep each command line comfortably under the Windows 32k
-        # limit; Ninja accepts output paths as build goals.
+        # limit; Ninja accepts output paths as build goals. Declaring the
+        # payload as BYPRODUCTS gives the host Ninja a producing rule for
+        # them, so wow64.cab can list them as file-level dependencies before
+        # the first guest build has run.
         set(_wow64_refresh_cmds "")
+        set(_wow64_byproducts "")
         set(_wow64_ofs 0)
         while(_wow64_ofs LESS _wow64_count)
             list(SUBLIST _wow64_payload ${_wow64_ofs} 100 _wow64_batch)
-            execute_process(
-                COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR} --target ${_wow64_batch}
-                RESULT_VARIABLE _wow64_guest_status)
-            if(NOT _wow64_guest_status EQUAL 0)
-                message(FATAL_ERROR "WoW64 guest build failed")
-            endif()
             list(APPEND _wow64_refresh_cmds
                  COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR} --target ${_wow64_batch})
             math(EXPR _wow64_ofs "${_wow64_ofs} + 100")
         endwhile()
+        foreach(_wow64_rel ${_wow64_payload})
+            list(APPEND _wow64_byproducts "${REACTOS_WOW64_GUEST_DIR}/${_wow64_rel}")
+        endforeach()
         add_custom_target(wow64_guest
             ${_wow64_refresh_cmds}
-            COMMENT "Refreshing WoW64 guest payload"
+            BYPRODUCTS ${_wow64_byproducts}
+            COMMENT "Building WoW64 guest payload (the first build takes a while)"
             USES_TERMINAL)
     endif()
 
