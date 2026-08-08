@@ -262,8 +262,13 @@ C_ASSERT(sizeof(CONTEXT64) == sizeof(CONTEXT));
     Wow64ReadNativePtr((UINT64)(Ptr) + (ULONG_PTR)&((StructType*)0)->Field)
 #define WOW64_WRITE_PTR_FIELD(Ptr, StructType, Field, Value) \
     Wow64WriteNativePtr((UINT64)(Ptr) + (ULONG_PTR)&((StructType*)0)->Field, Value)
+/* ntuser.h defines a direct-read WOW64_READ_ULONG_FIELD for the win32k
+ * shared sections, which are mapped 32-bit-addressable; keep that one in
+ * TUs that saw it first and use the cross-address-space helper elsewhere. */
+#ifndef WOW64_READ_ULONG_FIELD
 #define WOW64_READ_ULONG_FIELD(Ptr, StructType, Field) \
     Wow64ReadNativeULong((UINT64)(Ptr) + (ULONG_PTR)&((StructType*)0)->Field)
+#endif
 #define WOW64_WRITE_ULONG_FIELD(Ptr, StructType, Field, Value) \
     Wow64WriteNativeULong((UINT64)(Ptr) + (ULONG_PTR)&((StructType*)0)->Field, Value)
 #define WOW64_READ_WORD_FIELD(Ptr, StructType, Field) \
@@ -276,8 +281,14 @@ C_ASSERT(sizeof(CONTEXT64) == sizeof(CONTEXT));
 #define WOW64_CONTAINING_RECORD(Ptr, StructType, Field) ((Ptr) - (ULONG_PTR)&((StructType*)NULL)->Field)
 #define WOW64_FIELD_PTR(Ptr, Type, Field) ((Ptr) + (ULONG_PTR)&((Type*)NULL)->Field)
 
+/* Same-semantics duplicates of the ntuser.h casts (only the parameter
+ * name differs); yield to whichever definition arrived first. */
+#ifndef WOW64_CAST_TO_PTR
 #define WOW64_CAST_TO_PTR(Ptr) ((PVOID)(ULONG_PTR)(Ptr))
+#endif
+#ifndef WOW64_CAST_TO_HANDLE
 #define WOW64_CAST_TO_HANDLE(H) ((HANDLE)(ULONG_PTR)(H))
+#endif
 #define WOW64_CAST_FROM_PTR(Ptr) ((UINT64)((ULONG_PTR)(Ptr)))
 #define WOW64_CAST_FROM_HANDLE(H) ((UINT64)((ULONG_PTR)(H)))
 
