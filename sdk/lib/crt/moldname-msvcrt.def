@@ -130,6 +130,15 @@ lseek64==_lseeki64
 fstat64==_fstati64
 fseeko64==_fseeki64
 ftello64==_ftelli64
+; Same story, other time_t flavour: mingw-w64's <sys/stat.h> redirects the
+; POSIX stat/fstat/wstat to a fixed-size variant chosen from _FILE_OFFSET_BITS
+; and _USE_32BIT_TIME_T, and a toolchain built with 32-bit time_t asks for the
+; *32i64 names instead of the *64 ones above.  struct _stat32i64 (32-bit
+; time_t, 64-bit st_size) is exactly msvcrt's struct _stati64, so these too are
+; pure name aliases.
+fstat32i64==_fstati64
+stat32i64==_stati64
+wstat32i64==_wstati64
 ; New-in-mingw-w64 16.x: libmingwex's _assert.o references an msvcrt entry
 ; point with the __msvcrt_ prefix.  Same signature as _assert().
 __msvcrt_assert==_assert
