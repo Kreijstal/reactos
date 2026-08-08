@@ -13,7 +13,31 @@ function(setup_host_tools)
         execute_process(
             COMMAND ${CMAKE_C_COMPILER} --print-file-name=plugin
             OUTPUT_VARIABLE GCC_PLUGIN_DIR)
-        string(STRIP ${GCC_PLUGIN_DIR} GCC_PLUGIN_DIR)
+        string(STRIP "${GCC_PLUGIN_DIR}" GCC_PLUGIN_DIR)
+        # --print-file-name echoes its argument back unchanged when it finds
+        # nothing, so a GCC built without plugin support answers the bare word
+        # "plugin". Left alone that becomes a bogus relative include dir and
+        # the build dies much later with "gcc-plugin.h: No such file or
+        # directory". Check it here instead: GCC amd64 has no PSEH fallback,
+        # the plugin is what implements SEH, so this cannot be skipped.
+        set(_gcc_plugin_missing "")
+        if(NOT IS_ABSOLUTE "${GCC_PLUGIN_DIR}")
+            set(_gcc_plugin_missing "it reports no plugin directory at all")
+        elseif(NOT EXISTS "${GCC_PLUGIN_DIR}/include/gcc-plugin.h")
+            set(_gcc_plugin_missing "${GCC_PLUGIN_DIR}/include/gcc-plugin.h is missing")
+        elseif(CMAKE_HOST_WIN32 AND NOT EXISTS "${GCC_PLUGIN_DIR}/cc1.exe.a")
+            # Windows plugins link against the compiler executable itself
+            set(_gcc_plugin_missing "${GCC_PLUGIN_DIR}/cc1.exe.a is missing")
+        endif()
+        if(_gcc_plugin_missing)
+            message(FATAL_ERROR
+                "${CMAKE_C_COMPILER} has no GCC plugin support: ${_gcc_plugin_missing}.\n"
+                "Building ReactOS for amd64 with GCC needs it: SEH is implemented by our "
+                "gcc_plugin_seh plugin, and there is no fallback.\n"
+                "Install a GCC package that ships the plugin headers (on MSYS2 the "
+                "mingw-w64 gcc packages had plugin support disabled, see "
+                "https://github.com/msys2/MINGW-packages/pull/30736), or build with Clang instead.")
+        endif()
         list(APPEND CMAKE_HOST_TOOLS_EXTRA_ARGS -DGCC_PLUGIN_DIR=${GCC_PLUGIN_DIR})
         list(APPEND HOST_MODULES gcc_plugin_seh)
         if (CMAKE_HOST_WIN32)
