@@ -34,9 +34,10 @@ function(setup_host_tools)
                 "${CMAKE_C_COMPILER} has no GCC plugin support: ${_gcc_plugin_missing}.\n"
                 "Building ReactOS for amd64 with GCC needs it: SEH is implemented by our "
                 "gcc_plugin_seh plugin, and there is no fallback.\n"
-                "Install a GCC package that ships the plugin headers (on MSYS2 the "
-                "mingw-w64 gcc packages had plugin support disabled, see "
-                "https://github.com/msys2/MINGW-packages/pull/30736), or build with Clang instead.")
+                "Install a GCC package that ships the plugin headers, or build with Clang "
+                "instead. On MSYS2 they are a separate package that -Syu does not pull in: "
+                "pacman -S $MINGW_PACKAGE_PREFIX-gcc-plugin (in the UCRT64 shell that is "
+                "mingw-w64-ucrt-x86_64-gcc-plugin).")
         endif()
         list(APPEND CMAKE_HOST_TOOLS_EXTRA_ARGS -DGCC_PLUGIN_DIR=${GCC_PLUGIN_DIR})
         list(APPEND HOST_MODULES gcc_plugin_seh)
