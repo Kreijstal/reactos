@@ -35,6 +35,20 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/remaster.sh DESTINATION loader NO_C
 # winsxs destinations map to cab directory IDs in sdk/cmake/CMakeMacros.cmake
 # (dir_to_num) and boot/bootdata/packages/reactos.dff.in ([Directories]).
 if(ARCH STREQUAL "amd64" AND REACTOS_WOW64_GUEST_DIR)
+    # When the guest tree is managed by this build (REACTOS_WOW64_GUEST=ON in
+    # the top-level CMakeLists.txt), refresh it before anything that packs its
+    # files. The ISO targets read loose guest files with no file-level deps,
+    # so they need the target-level ordering; wow64_cab gets it in DEPENDS.
+    set(_wow64_guest_target "")
+    if(TARGET wow64_guest)
+        set(_wow64_guest_target wow64_guest)
+        foreach(_wow64_iso bootcd bootcdregtest bootcdntfs livecd)
+            if(TARGET ${_wow64_iso})
+                add_dependencies(${_wow64_iso} wow64_guest)
+            endif()
+        endforeach()
+    endif()
+
     file(GLOB _wow64_lst "${REACTOS_WOW64_GUEST_DIR}/boot/livecd.*.lst")
     if(_wow64_lst)
         # A guest build directory: derive the 32-bit user image from its LiveCD
@@ -151,7 +165,7 @@ if(ARCH STREQUAL "amd64" AND REACTOS_WOW64_GUEST_DIR)
                 OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/wow64.cab
                        ${CMAKE_CURRENT_BINARY_DIR}/wow64.inf
                 COMMAND native-cabman -C ${_wow64_dff} -P ${REACTOS_SOURCE_DIR}
-                DEPENDS native-cabman ${_wow64_dff} ${_wow64_dep_files})
+                DEPENDS native-cabman ${_wow64_dff} ${_wow64_dep_files} ${_wow64_guest_target})
             add_custom_target(wow64_cab
                 DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/wow64.cab
                         ${CMAKE_CURRENT_BINARY_DIR}/wow64.inf)

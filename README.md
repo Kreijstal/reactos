@@ -66,20 +66,15 @@ You can always download fresh binary builds of bootable images from the ["Daily 
 
 ### NT10 with WoW64 (amd64)
 
-Requires the mingw-w64 cross toolchains (`i686-w64-mingw32-gcc` and `x86_64-w64-mingw32-gcc`). Build the 32-bit WoW64 guest first, then the 64-bit system pointing at it:
+Requires the mingw-w64 cross toolchains (`i686-w64-mingw32-gcc` and `x86_64-w64-mingw32-gcc`). One configure command sets up everything, including the 32-bit guest world:
 
 ```bash
-# 32-bit guest (becomes SysWOW64)
-cmake -S . -B build-wow64 -G Ninja -DCMAKE_TOOLCHAIN_FILE=toolchain-gcc.cmake \
-      -DARCH=i386 -DSARCH=wow64
-cmake --build build-wow64
-
-# 64-bit NT10 system, bundling the guest
 cmake -S . -B build-amd64 -G Ninja -DCMAKE_TOOLCHAIN_FILE=toolchain-gcc.cmake \
-      -DARCH=amd64 -DREACTOS_TARGET_NT=0x0A00 \
-      -DREACTOS_WOW64_GUEST_DIR=$PWD/build-wow64
+      -DARCH=amd64 -DREACTOS_TARGET_NT=0x0A00 -DREACTOS_WOW64_GUEST=ON
 cmake --build build-amd64 --target bootcd
 ```
+
+`REACTOS_WOW64_GUEST=ON` configures and builds an `ARCH=i386 SARCH=wow64` guest tree under `build-amd64/wow64-guest` during configure (so the first configure takes as long as a 32-bit build). To reuse an existing guest tree instead, pass `-DREACTOS_WOW64_GUEST_DIR=<path>`.
 
 The resulting `build-amd64/bootcd.iso` installs a system whose SysWOW64 is populated from the guest build, so 32-bit programs run on the 64-bit system.
 
