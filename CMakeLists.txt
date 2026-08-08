@@ -494,16 +494,76 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
                 message(FATAL_ERROR "WoW64 guest configure failed")
             endif()
         endif()
-        message(STATUS "WoW64: building guest tree (the first build takes a while)")
-        execute_process(
-            COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
-            RESULT_VARIABLE _wow64_guest_status)
-        if(NOT _wow64_guest_status EQUAL 0)
-            message(FATAL_ERROR "WoW64 guest build failed")
+        # Build only the user-mode payload that the packing in
+        # boot/CMakeLists.txt consumes (SysWOW64 + x86 winsxs). The guest's
+        # kernel-side modules are filtered out of the payload anyway and do
+        # not have to build under the WoW64-widened user-mode layouts.
+        file(GLOB _wow64_guest_lsts "${REACTOS_WOW64_GUEST_DIR}/boot/livecd.*.lst")
+        list(FILTER _wow64_guest_lsts EXCLUDE REGEX "\\.cmake\\.lst$")
+        if(NOT _wow64_guest_lsts)
+            message(FATAL_ERROR "WoW64 guest configure produced no resolved LiveCD file list")
         endif()
+        list(GET _wow64_guest_lsts 0 _wow64_guest_lst)
+        file(STRINGS "${_wow64_guest_lst}" _wow64_guest_lines)
+        set(_wow64_payload "")
+        foreach(_wow64_line ${_wow64_guest_lines})
+            string(FIND "${_wow64_line}" "=" _wow64_eq)
+            if(_wow64_eq LESS 1)
+                continue()
+            endif()
+            string(SUBSTRING "${_wow64_line}" 0 ${_wow64_eq} _wow64_dest)
+            math(EXPR _wow64_srcpos "${_wow64_eq} + 1")
+            string(SUBSTRING "${_wow64_line}" ${_wow64_srcpos} -1 _wow64_src)
+            # Same payload selection as the packing: direct system32 children
+            # minus kernel/boot modules, plus the x86 winsxs assemblies.
+            if(_wow64_dest MATCHES "^reactos/system32/([^/]+)$")
+                string(TOLOWER "${CMAKE_MATCH_1}" _wow64_name)
+                if(_wow64_name MATCHES "\\.sys$" OR
+                   _wow64_name MATCHES "^ntoskrnl\\.exe$" OR
+                   _wow64_name MATCHES "^ntkrnl.*\\.exe$" OR
+                   _wow64_name MATCHES "^hal.*\\.dll$" OR
+                   _wow64_name MATCHES "^kd.*\\.dll$" OR
+                   _wow64_name STREQUAL "bootvid.dll" OR
+                   _wow64_name STREQUAL "drvmain.sdb")
+                    continue()
+                endif()
+            elseif(NOT _wow64_dest MATCHES "^reactos/winsxs/")
+                continue()
+            endif()
+            # Only outputs of the guest build need (and can) be built; files
+            # taken straight from the source tree are used as-is.
+            string(FIND "${_wow64_src}" "${REACTOS_WOW64_GUEST_DIR}/" _wow64_inbuild)
+            if(NOT _wow64_inbuild EQUAL 0)
+                continue()
+            endif()
+            file(RELATIVE_PATH _wow64_rel "${REACTOS_WOW64_GUEST_DIR}" "${_wow64_src}")
+            list(APPEND _wow64_payload "${_wow64_rel}")
+        endforeach()
+        list(REMOVE_DUPLICATES _wow64_payload)
+        list(LENGTH _wow64_payload _wow64_count)
+        if(_wow64_count EQUAL 0)
+            message(FATAL_ERROR "WoW64 guest LiveCD list contains no payload outputs")
+        endif()
+        message(STATUS "WoW64: building the ${_wow64_count}-file guest payload (the first build takes a while)")
+        # Batched to keep each command line comfortably under the Windows 32k
+        # limit; Ninja accepts output paths as build goals.
+        set(_wow64_refresh_cmds "")
+        set(_wow64_ofs 0)
+        while(_wow64_ofs LESS _wow64_count)
+            list(SUBLIST _wow64_payload ${_wow64_ofs} 100 _wow64_batch)
+            execute_process(
+                COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR} --target ${_wow64_batch}
+                RESULT_VARIABLE _wow64_guest_status)
+            if(NOT _wow64_guest_status EQUAL 0)
+                message(FATAL_ERROR "WoW64 guest build failed")
+            endif()
+            list(APPEND _wow64_refresh_cmds
+                 COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR} --target ${_wow64_batch})
+            math(EXPR _wow64_ofs "${_wow64_ofs} + 100")
+        endwhile()
         add_custom_target(wow64_guest
-            COMMAND ${_wow64_env} ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
-            COMMENT "Refreshing WoW64 guest tree"
+            ${_wow64_refresh_cmds}
+            COMMENT "Refreshing WoW64 guest payload"
             USES_TERMINAL)
     endif()
 
