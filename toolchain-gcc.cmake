@@ -1,8 +1,8 @@
 
-macro(require_program varname execname)
-    find_program(${varname} ${execname})
+macro(require_program varname)
+    find_program(${varname} NAMES ${ARGN})
     if(NOT ${varname})
-        message(FATAL_ERROR "${execname} not found")
+        message(FATAL_ERROR "${ARGN} not found")
     endif()
 endmacro()
 
@@ -39,11 +39,14 @@ require_program(CMAKE_C_COMPILER ${MINGW_TOOLCHAIN_PREFIX}gcc${MINGW_TOOLCHAIN_S
 require_program(CMAKE_CXX_COMPILER ${MINGW_TOOLCHAIN_PREFIX}g++${MINGW_TOOLCHAIN_SUFFIX})
 require_program(CMAKE_ASM_COMPILER ${MINGW_TOOLCHAIN_PREFIX}gcc${MINGW_TOOLCHAIN_SUFFIX})
 set(CMAKE_ASM_COMPILER_ID "GNU")
-require_program(CMAKE_MC_COMPILER ${MINGW_TOOLCHAIN_PREFIX}windmc)
-require_program(CMAKE_RC_COMPILER ${MINGW_TOOLCHAIN_PREFIX}windres)
-require_program(CMAKE_DLLTOOL ${MINGW_TOOLCHAIN_PREFIX}dlltool)
+# MSYS2 ships the compilers under their triplet names but the binutils extras
+# only unprefixed, so fall back to the bare tool name (never reached on Linux
+# cross setups, whose binutils-mingw-w64 packages are fully prefixed).
+require_program(CMAKE_MC_COMPILER ${MINGW_TOOLCHAIN_PREFIX}windmc windmc)
+require_program(CMAKE_RC_COMPILER ${MINGW_TOOLCHAIN_PREFIX}windres windres)
+require_program(CMAKE_DLLTOOL ${MINGW_TOOLCHAIN_PREFIX}dlltool dlltool)
 #set(CMAKE_AR ${MINGW_TOOLCHAIN_PREFIX}gcc-ar${MINGW_TOOLCHAIN_SUFFIX})
-require_program(CMAKE_OBJCOPY ${MINGW_TOOLCHAIN_PREFIX}objcopy)
+require_program(CMAKE_OBJCOPY ${MINGW_TOOLCHAIN_PREFIX}objcopy objcopy)
 
 set(CMAKE_C_CREATE_STATIC_LIBRARY "<CMAKE_AR> crT <TARGET> <LINK_FLAGS> <OBJECTS>")
 set(CMAKE_CXX_CREATE_STATIC_LIBRARY ${CMAKE_C_CREATE_STATIC_LIBRARY})
