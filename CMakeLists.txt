@@ -429,6 +429,55 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         set(CMAKE_PDB_OUTPUT_DIRECTORY "${REACTOS_BINARY_DIR}/symbols")
     endif()
 
+    # WoW64 in one command: -DREACTOS_WOW64_GUEST=ON on an amd64 configure
+    # provisions the 32-bit guest world itself. The guest inherently needs a
+    # second ARCH=i386 SARCH=wow64 build tree; instead of requiring the user to
+    # configure and build it by hand and pass REACTOS_WOW64_GUEST_DIR, this
+    # configures and builds it under <build>/wow64-guest right here, at
+    # configure time, because the wow64 file lists below (boot/CMakeLists.txt)
+    # are derived at configure time from the guest's generated LiveCD list and
+    # the packed guest binaries must exist by then. The wow64_guest target
+    # re-runs the guest build so later host builds pick up guest changes.
+    option(REACTOS_WOW64_GUEST "Configure and build the 32-bit WoW64 guest tree automatically" OFF)
+    if(REACTOS_WOW64_GUEST)
+        if(NOT ARCH STREQUAL "amd64")
+            message(FATAL_ERROR "REACTOS_WOW64_GUEST requires ARCH=amd64")
+        endif()
+        if(MSVC)
+            message(FATAL_ERROR "REACTOS_WOW64_GUEST is only wired for the GCC toolchain (toolchain-gcc.cmake)")
+        endif()
+        if(NOT REACTOS_WOW64_GUEST_DIR)
+            set(REACTOS_WOW64_GUEST_DIR "${REACTOS_BINARY_DIR}/wow64-guest")
+        endif()
+        if(NOT EXISTS "${REACTOS_WOW64_GUEST_DIR}/CMakeCache.txt")
+            message(STATUS "WoW64: configuring guest tree in ${REACTOS_WOW64_GUEST_DIR}")
+            # The guest keeps its own default REACTOS_TARGET_NT: the 32-bit
+            # user image does not have to match the host kernel's NT persona.
+            execute_process(
+                COMMAND ${CMAKE_COMMAND}
+                        -S ${REACTOS_SOURCE_DIR} -B ${REACTOS_WOW64_GUEST_DIR}
+                        -G ${CMAKE_GENERATOR}
+                        -DCMAKE_TOOLCHAIN_FILE=${REACTOS_SOURCE_DIR}/toolchain-gcc.cmake
+                        -DARCH=i386 -DSARCH=wow64
+                        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                RESULT_VARIABLE _wow64_guest_status)
+            if(NOT _wow64_guest_status EQUAL 0)
+                message(FATAL_ERROR "WoW64 guest configure failed")
+            endif()
+        endif()
+        message(STATUS "WoW64: building guest tree (the first build takes a while)")
+        execute_process(
+            COMMAND ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
+            RESULT_VARIABLE _wow64_guest_status)
+        if(NOT _wow64_guest_status EQUAL 0)
+            message(FATAL_ERROR "WoW64 guest build failed")
+        endif()
+        add_custom_target(wow64_guest
+            COMMAND ${CMAKE_COMMAND} --build ${REACTOS_WOW64_GUEST_DIR}
+            COMMENT "Refreshing WoW64 guest tree"
+            USES_TERMINAL)
+    endif()
+
     #begin with boot so reactos_cab target is defined before all other modules
     add_subdirectory(boot)
     add_subdirectory(base)
