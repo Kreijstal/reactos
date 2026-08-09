@@ -401,6 +401,19 @@ typedef struct _XHCI_EXTENSION
     ULONG FrameHighPart;
     UCHAR PortConnectStatus[XHCI_MAX_PORTS + 1];
     UCHAR PortConnectChange[XHCI_MAX_PORTS + 1];
+    /* USBPORT logical addresses are independent from xHCI slot IDs. */
+    UCHAR DeviceAddressToSlot[128];
+    UCHAR SlotToDeviceAddress[XHCI_MAX_SLOTS + 1];
+    /* Keep default-address devices identifiable while USBPORT destroys and
+     * recreates their endpoint extension during SET_ADDRESS. */
+    UCHAR RootPortToSlot[XHCI_MAX_PORTS + 1];
+    UCHAR SlotToRootPort[XHCI_MAX_SLOTS + 1];
+    /* The controller's output context is not a safe source for rebuilding an
+     * input context on every implementation.  Retain the known-good software
+     * input state across USBPORT's close/reopen during SET_ADDRESS. */
+    UCHAR SlotContextValid[XHCI_MAX_SLOTS + 1];
+    XHCI_SLOT_CONTEXT SlotInputContext[XHCI_MAX_SLOTS + 1];
+    XHCI_ENDPOINT_CONTEXT Endpoint0InputContext[XHCI_MAX_SLOTS + 1];
 } XHCI_EXTENSION, *PXHCI_EXTENSION;
 
 typedef union _XHCI_LINK_ADDR

@@ -1527,10 +1527,33 @@ LoadAndBootWindowsCommon(
             DebugPort = "COM"; DebugPortLength = 3;
         }
 
-        /* It is booting in debug mode, show the banner */
-        TuiPrintf("You need to connect a debugger on port %.*s\n"
-                  "For more information, visit https://reactos.org/wiki/Debugging.\n",
-                  DebugPortLength, DebugPort);
+        /* It is booting in debug mode, show the appropriate banner. */
+        if ((DebugPortLength == 4 ||
+             (DebugPortLength > 4 && DebugPort[4] == ':')) &&
+            _strnicmp(DebugPort, "FILE", 4) == 0)
+        {
+            if (DebugPortLength > 5)
+            {
+                TuiPrintf("Kernel debug output will be written to %.*s\n",
+                          DebugPortLength - 5, DebugPort + 5);
+            }
+            else
+            {
+                TuiPrintf("Kernel debug output will be written to "
+                          "\\SystemRoot\\debug.log\n");
+            }
+        }
+        else if (DebugPortLength == 6 &&
+                 _strnicmp(DebugPort, "SCREEN", 6) == 0)
+        {
+            TuiPrintf("Kernel debug output will be displayed on screen.\n");
+        }
+        else
+        {
+            TuiPrintf("You need to connect a debugger on port %.*s\n"
+                      "For more information, visit https://reactos.org/wiki/Debugging.\n",
+                      DebugPortLength, DebugPort);
+        }
     }
 
     /* Debugging... */

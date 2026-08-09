@@ -509,6 +509,21 @@ endif()
          OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.$<CONFIG>.lst
          INPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst)
 
+    # BootCDNtfs inherits the regtest install payload, but uses its own
+    # unattended upgrade configuration and the regular Setup boot sector.
+    get_property(_filelist GLOBAL PROPERTY BOOTCDREGTEST_FILE_LIST)
+    list(FILTER _filelist EXCLUDE REGEX "unattend\\.inf=")
+    string(REPLACE ";" "\n" _filelist "${_filelist}")
+    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst "${_filelist}\n")
+    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst
+         "${ARCH}/unattend.inf=${REACTOS_SOURCE_DIR}/boot/bootdata/bootcdntfs/unattend.inf\n")
+    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst
+         "loader/isoboot.bin=${REACTOS_BINARY_DIR}/boot/freeldr/bootsect/isoboot.bin\n")
+    unset(_filelist)
+    file(GENERATE
+         OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdntfs.$<CONFIG>.lst
+         INPUT ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst)
+
     # Write the KmtestCD file list. kmtestcd is a standalone bootable ISO that
     # inherits BOTH bootcd's bootloader files (loader/*, ${ARCH}/system32/*) AND
     # livecd's userland file set (reactos/system32/*, hives), then overrides
@@ -1064,7 +1079,7 @@ function(add_driver_inf _module)
     add_cd_file(FILE ${_converted_inf_files} TARGET ${_module}_inf_files DESTINATION reactos/inf FOR all)
 endfunction()
 
-if(KDBG)
+if(KDBG AND NOT _WINKD_)
     set(ROSSYM_LIB "rossym")
 else()
     set(ROSSYM_LIB "")

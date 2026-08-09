@@ -21,6 +21,7 @@ typedef enum {
     COMMAND_DISABLE_SLOT,
     COMMAND_CONFIGURE_ENDPOINT,
     COMMAND_DROP_ENDPOINT,
+    COMMAND_RESET_ENDPOINT,
     COMMAND_SET_TR_DEQUEUE_POINTER,
     COMMAND_UNKNOWN
 } XHCI_COMMAND_TYPE;
@@ -218,6 +219,17 @@ NTAPI
 XHCI_GetDeviceAddressFromOutputContext(IN PXHCI_EXTENSION XhciExtension,
                                       IN ULONG SlotId);
 
+VOID
+NTAPI
+XHCI_RecordDeviceSlot(IN PXHCI_EXTENSION XhciExtension,
+                      IN ULONG DeviceAddress,
+                      IN ULONG SlotId);
+
+ULONG
+NTAPI
+XHCI_GetSlotForDeviceAddress(IN PXHCI_EXTENSION XhciExtension,
+                             IN ULONG DeviceAddress);
+
 /* xHCI command functions *********************************************************************/
 
 MPSTATUS
@@ -264,6 +276,12 @@ XHCI_SetTransferRingDequeuePointer(IN PXHCI_EXTENSION XhciExtension,
                                    IN ULONG EndpointIndex,
                                    IN PHYSICAL_ADDRESS DequeuePointer,
                                    IN ULONG CycleState);
+
+MPSTATUS
+NTAPI
+XHCI_ResetEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                   IN ULONG SlotId,
+                   IN ULONG EndpointIndex);
 
 MPSTATUS
 NTAPI

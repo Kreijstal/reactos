@@ -742,8 +742,8 @@ PiCallDriverAddDevice(
         {
             PiSetDevNodeProblem(DeviceNode, CM_PROB_REGISTRY);
         }
-        DPRINT1("PNP: No service for \"%wZ\" (loadDrv: %u, status: 0x%lx)\n",
-                &DeviceNode->InstancePath, LoadDrivers, Status);
+        DPRINT("PNP: No service for \"%wZ\" (loadDrv: %u, status: 0x%lx)\n",
+               &DeviceNode->InstancePath, LoadDrivers, Status);
         goto Cleanup;
     }
 
@@ -798,7 +798,13 @@ PiCallDriverAddDevice(
         {
             if (NT_SUCCESS(Status))
             {
+                DPRINT("PNPTRACE: AddDevice succeeded; examining stack for \"%wZ\"\n",
+                        &DeviceNode->InstancePath);
                 PDEVICE_OBJECT fdo = IoGetAttachedDeviceReference(DeviceNode->PhysicalDeviceObject);
+                DPRINT("PNPTRACE: top device %p type 0x%lx for \"%wZ\"\n",
+                        fdo,
+                        fdo->DeviceType,
+                        &DeviceNode->InstancePath);
 
                 // HACK: Check if we have a ACPI device (needed for power management)
                 if (fdo->DeviceType == FILE_DEVICE_ACPI)
@@ -816,6 +822,8 @@ PiCallDriverAddDevice(
 
                 ObDereferenceObject(fdo);
                 PiSetDevNodeState(DeviceNode, DeviceNodeDriversAdded);
+                DPRINT("PNPTRACE: state is DriversAdded for \"%wZ\"\n",
+                        &DeviceNode->InstancePath);
             }
             else
             {
@@ -2384,12 +2392,17 @@ PiDevNodeStateMachine(
                 doProcessAgain = NT_SUCCESS(status);
                 break;
             case DeviceNodeDriversAdded:
-                DPRINT("DeviceNodeDriversAdded %wZ\n", &currentNode->InstancePath);
+                DPRINT("PNPTRACE: assigning resources for \"%wZ\"\n",
+                        &currentNode->InstancePath);
                 status = IopAssignDeviceResources(currentNode);
+                DPRINT("PNPTRACE: resource assignment completed 0x%08lx for \"%wZ\"\n",
+                        status,
+                        &currentNode->InstancePath);
                 doProcessAgain = NT_SUCCESS(status);
                 break;
             case DeviceNodeResourcesAssigned:
-                DPRINT("DeviceNodeResourcesAssigned %wZ\n", &currentNode->InstancePath);
+                DPRINT("PNPTRACE: resources assigned; starting \"%wZ\"\n",
+                        &currentNode->InstancePath);
                 // send IRP_MN_START_DEVICE
                 PiIrpStartDevice(currentNode);
 

@@ -810,6 +810,7 @@ USBPORT_OpenPipe(IN PDEVICE_OBJECT FdoDevice,
     USHORT MaxPacketSize;
     USHORT AdditionalTransaction;
     BOOLEAN IsAllocatedBandwidth;
+    BOOLEAN IsRootHubInterruptEndpoint = FALSE;
     ULONG RetryCount;
 
     DPRINT1("USBPORT_OpenPipe: DeviceHandle - %p, FdoDevice - %p, PipeHandle - %p\n",
@@ -1037,7 +1038,8 @@ USBPORT_OpenPipe(IN PDEVICE_OBJECT FdoDevice,
 
         if (EndpointProperties->TransferType == USBPORT_TRANSFER_TYPE_INTERRUPT)
         {
-            PdoExtension->Endpoint = Endpoint;
+            /* Publish the endpoint only after it is completely initialized. */
+            IsRootHubInterruptEndpoint = TRUE;
         }
 
         USBDStatus = USBD_STATUS_SUCCESS;
@@ -1155,6 +1157,11 @@ USBPORT_OpenPipe(IN PDEVICE_OBJECT FdoDevice,
 
         PipeHandle->Endpoint = Endpoint;
         PipeHandle->Flags &= ~PIPE_HANDLE_FLAG_CLOSED;
+
+        if (IsRootHubInterruptEndpoint)
+        {
+            PdoExtension->Endpoint = Endpoint;
+        }
 
         return Status;
     }
