@@ -26,6 +26,7 @@
 
 ULONG ApicVersion;
 UCHAR HalpVectorToIndex[256];
+volatile LONG HalpIoApicLock;
 
 #ifndef _M_AMD64
 const UCHAR
@@ -96,20 +97,47 @@ FORCEINLINE
 ULONG
 IOApicRead(UCHAR Register)
 {
+    ULONG_PTR Flags;
+    ULONG Value;
+
+    /* IOREGSEL/IOWIN is one shared indexed register pair for all CPUs. */
+    Flags = __readeflags();
+    _disable();
+    while (InterlockedCompareExchange(&HalpIoApicLock, 1, 0) != 0)
+        YieldProcessor();
+
     /* Select the register, then do the read */
     ASSERT(Register <= 0x10 + 2 * ApicMaxIrq);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
-    return READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+    Value = READ_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN));
+
+    InterlockedExchange(&HalpIoApicLock, 0);
+    if (Flags & EFLAGS_INTERRUPT_MASK)
+        _enable();
+
+    return Value;
 }
 
 FORCEINLINE
 VOID
 IOApicWrite(UCHAR Register, ULONG Value)
 {
+    ULONG_PTR Flags;
+
+    /* Keep the selector stable until its data write has completed. */
+    Flags = __readeflags();
+    _disable();
+    while (InterlockedCompareExchange(&HalpIoApicLock, 1, 0) != 0)
+        YieldProcessor();
+
     /* Select the register, then do the write */
     ASSERT(Register <= 0x10 + 2 * ApicMaxIrq);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(IOAPIC_BASE + IOAPIC_IOWIN), Value);
+
+    InterlockedExchange(&HalpIoApicLock, 0);
+    if (Flags & EFLAGS_INTERRUPT_MASK)
+        _enable();
 }
 
 FORCEINLINE
@@ -898,4 +926,3 @@ KeRaiseIrqlToSynchLevel(VOID)
 }
 
 #endif /* !_M_AMD64 */
-

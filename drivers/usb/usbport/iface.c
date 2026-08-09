@@ -608,6 +608,13 @@ USBHI_RootHubInitNotification(IN PVOID BusContext,
     PdoExtension->RootHubInitCallback = CallbackFunction;
     KeReleaseSpinLock(&FdoExtension->RootHubCallbackSpinLock, OldIrql);
 
+    /*
+     * A device may already have connected before the hub driver registers
+     * this callback.  Start root-hub enumeration now instead of relying on
+     * the controller timer to eventually notice the new callback.
+     */
+    USBPORT_SynchronizeControllersStart(FdoDevice);
+
     return STATUS_SUCCESS;
 }
 

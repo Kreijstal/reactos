@@ -1464,13 +1464,31 @@ EHCI_InterruptService(IN PVOID ehciExtension)
 
     if (iStatus.HostSystemError)
     {
-        EhciExtension->HcSystemErrors++;
+        if (EhciExtension->HcSystemErrors < EHCI_MAX_HC_SYSTEM_ERRORS)
+            EhciExtension->HcSystemErrors++;
 
         if (EhciExtension->HcSystemErrors < EHCI_MAX_HC_SYSTEM_ERRORS)
         {
             Command.AsULONG = READ_REGISTER_ULONG(&OperationalRegs->HcCommand.AsULONG);
             Command.Run = 1;
             WRITE_REGISTER_ULONG(&OperationalRegs->HcCommand.AsULONG, Command.AsULONG);
+        }
+        else
+        {
+            /*
+             * A host-system error halts the controller.  Until controller
+             * reset recovery is implemented, repeatedly acknowledging the
+             * error while leaving it enabled creates a permanent interrupt
+             * storm.  Quiesce this failed controller so the rest of the
+             * system (and companion/xHCI controllers) can continue booting.
+             */
+            EhciExtension->InterruptMask.AsULONG = 0;
+            EhciExtension->IsStarted = FALSE;
+            WRITE_REGISTER_ULONG(&OperationalRegs->HcInterruptEnable.AsULONG, 0);
+
+            DPRINT1("EHCI_InterruptService: disabling controller after %u host-system errors (status 0x%08lx)\n",
+                    EhciExtension->HcSystemErrors,
+                    IntrSts.AsULONG);
         }
     }
 

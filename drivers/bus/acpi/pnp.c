@@ -274,12 +274,15 @@ Bus_StartFdo (
 
     PAGED_CODE ();
 
+    DPRINT("ACPITRACE: Bus_StartFdo entered\n");
+
     FdoData->Common.DevicePowerState = PowerDeviceD0;
     powerState.DeviceState = PowerDeviceD0;
     PoSetPowerState ( FdoData->Common.Self, DevicePowerState, powerState );
 
     SET_NEW_PNP_STATE(FdoData->Common, Started);
 
+    DPRINT("ACPITRACE: AcpiInitializeSubsystem begin\n");
     AcpiStatus = AcpiInitializeSubsystem();
     if(ACPI_FAILURE(AcpiStatus)){
         DPRINT1("Unable to AcpiInitializeSubsystem: %s (0x%08X)\n",
@@ -287,7 +290,9 @@ Bus_StartFdo (
                 AcpiStatus);
         return STATUS_UNSUCCESSFUL;
     }
+    DPRINT("ACPITRACE: AcpiInitializeSubsystem complete\n");
 
+    DPRINT("ACPITRACE: AcpiInitializeTables begin\n");
     AcpiStatus = AcpiInitializeTables(NULL, 16, 0);
     if (ACPI_FAILURE(AcpiStatus)){
         DPRINT1("Unable to AcpiInitializeTables: %s (0x%08X)\n",
@@ -295,7 +300,9 @@ Bus_StartFdo (
                 AcpiStatus);
         return STATUS_UNSUCCESSFUL;
     }
+    DPRINT("ACPITRACE: AcpiInitializeTables complete\n");
 
+    DPRINT("ACPITRACE: AcpiLoadTables begin\n");
     AcpiStatus = AcpiLoadTables();
     if(ACPI_FAILURE(AcpiStatus)){
         DPRINT1("Unable to AcpiLoadTables: %s (0x%08X)\n",
@@ -304,15 +311,19 @@ Bus_StartFdo (
         AcpiTerminate();
         return STATUS_UNSUCCESSFUL;
     }
+    DPRINT("ACPITRACE: AcpiLoadTables complete\n");
 
+    DPRINT("ACPITRACE: registry table export begin\n");
     status = acpi_create_volatile_registry_tables();
     if (!NT_SUCCESS(status))
     {
         DPRINT1("Unable to create ACPI tables in registry\n");
     }
+    DPRINT("ACPITRACE: registry table export complete 0x%08lx\n", status);
 
 	DPRINT("Acpi subsystem init\n");
     /* Initialize ACPI bus manager */
+    DPRINT("ACPITRACE: acpi_init begin\n");
     AcpiStatus = acpi_init();
     if (!ACPI_SUCCESS(AcpiStatus)) {
         DPRINT1("acpi_init() failed: %s (0x%08X)\n",
@@ -321,7 +332,10 @@ Bus_StartFdo (
         AcpiTerminate();
         return STATUS_UNSUCCESSFUL;
     }
+	DPRINT("ACPITRACE: acpi_init complete\n");
+	DPRINT("ACPITRACE: ACPIEnumerateDevices begin\n");
 	status = ACPIEnumerateDevices(FdoData);
+	DPRINT("ACPITRACE: ACPIEnumerateDevices complete 0x%08lx\n", status);
 
     return status;
 }

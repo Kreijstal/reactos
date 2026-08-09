@@ -162,6 +162,11 @@ XHCI_ReopenEndpoint(IN PVOID xhciExtension,
     ULONG SlotId = *(PULONG)&XhciEndpoint->FirstTD;
     ULONG EndpointIndex = ((endpointParameters->EndpointAddress & 0x0F) * 2) + 
                           ((endpointParameters->EndpointAddress & 0x80) ? 1 : 0);  // Convert to endpoint index
+
+    if (endpointParameters->DeviceAddress != 0)
+        XHCI_RecordDeviceSlot(XhciExtension,
+                              endpointParameters->DeviceAddress,
+                              SlotId);
     
     // Calculate physical address of the new transfer ring start
     PHYSICAL_ADDRESS RingDequeuePA = MmGetPhysicalAddress(XhciEndpoint->TransferRing.dequeue_pointer);
@@ -802,8 +807,7 @@ XHCI_InitializeHardware(IN PXHCI_EXTENSION XhciExtension)
     PULONG OperationalRegs;
     XHCI_USB_COMMAND Command;
     XHCI_USB_STATUS Status;
-    LARGE_INTEGER CurrentTime = {{0, 0}};
-    LARGE_INTEGER LastTime = {{0, 0}};
+    ULONG Waited;
     XHCI_HC_STRUCTURAL_PARAMS_1 StructuralParams_1;
     XHCI_CONFIGURE Config;
 
@@ -813,38 +817,94 @@ XHCI_InitializeHardware(IN PXHCI_EXTENSION XhciExtension)
     OperationalRegs = XhciExtension->OperationalRegs;
     BaseIoAdress = XhciExtension->BaseIoAdress;
 
-    KeQuerySystemTime(&CurrentTime);
-    CurrentTime.QuadPart += 100 * 10000;
-
+    Command.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBCMD);
     Status.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
-    ASSERT(Status.ControllerNotReady != 1); // this is needed before writing anything to the operaational or doorbell registers
+    DPRINT1("XHCI_InitializeHardware: initial USBCMD=0x%08lx USBSTS=0x%08lx\n",
+            Command.AsULONG, Status.AsULONG);
 
+    /* The xHCI specification forbids operational-register writes while CNR is
+     * set. Some firmware leaves the controller in this transition briefly. */
+    for (Waited = 0;
+         Status.ControllerNotReady && Waited < 1000000;
+         Waited += 10)
+    {
+        KeStallExecutionProcessor(10);
+        Status.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
+    }
+    if (Status.ControllerNotReady)
+    {
+        DPRINT1("XHCI_InitializeHardware: controller stayed not-ready for %lu us (USBSTS=0x%08lx)\n",
+                Waited, Status.AsULONG);
+        return MP_STATUS_FAILURE;
+    }
+
+    /* Stop a controller inherited from firmware and wait until it is really
+     * halted before asserting HCRST. */
+    Command.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBCMD);
+    if (Command.RunStop)
+    {
+        Command.RunStop = 0;
+        WRITE_REGISTER_ULONG(OperationalRegs + XHCI_USBCMD, Command.AsULONG);
+    }
+    Status.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
+    for (Waited = 0;
+         !Status.HCHalted && Waited < 1000000;
+         Waited += 10)
+    {
+        KeStallExecutionProcessor(10);
+        Status.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
+    }
+    if (!Status.HCHalted)
+    {
+        DPRINT1("XHCI_InitializeHardware: controller failed to halt in %lu us (USBCMD=0x%08lx USBSTS=0x%08lx)\n",
+                Waited,
+                READ_REGISTER_ULONG(OperationalRegs + XHCI_USBCMD),
+                Status.AsULONG);
+        return MP_STATUS_FAILURE;
+    }
+
+    /* Do not write an uninitialized command union here: that can randomly set
+     * Run/Stop and reserved bits and leave HCRST stuck on real hardware. */
+    Command.AsULONG = 0;
     Command.HCReset = 1;
     WRITE_REGISTER_ULONG(OperationalRegs + XHCI_USBCMD, Command.AsULONG);
-    while (TRUE)
+    for (Waited = 0; Waited < 1000000; Waited += 10)
     {
-        KeQuerySystemTime(&LastTime);
-
+        KeStallExecutionProcessor(10);
         Command.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBCMD);
+        Status.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
 
-        if (Command.HCReset != 1)
-        {
+        if (!Command.HCReset && !Status.ControllerNotReady)
             break;
-        }
-
-        if (LastTime.QuadPart >= CurrentTime.QuadPart)
-        {
-            DPRINT1("XHCI_InitializeHardware: Software Reset failed!\n");
-            return MP_STATUS_FAILURE;
-        }
     }
-    DPRINT1("XHCI_InitializeHardware: Reset - OK\n");
+    if (Command.HCReset || Status.ControllerNotReady)
+    {
+        DPRINT1("XHCI_InitializeHardware: reset timed out after %lu us (USBCMD=0x%08lx USBSTS=0x%08lx)\n",
+                Waited, Command.AsULONG, Status.AsULONG);
+        return MP_STATUS_FAILURE;
+    }
+    DPRINT1("XHCI_InitializeHardware: Reset - OK after %lu us (USBCMD=0x%08lx USBSTS=0x%08lx)\n",
+            Waited, Command.AsULONG, Status.AsULONG);
 
     StructuralParams_1.AsULONG = READ_REGISTER_ULONG(BaseIoAdress + XHCI_HCSP1); // HCSPARAMS1 register
 
     XhciExtension->NumberOfPorts = StructuralParams_1.NumberOfPorts;
     RtlZeroMemory(XhciExtension->PortConnectStatus, sizeof(XhciExtension->PortConnectStatus));
     RtlZeroMemory(XhciExtension->PortConnectChange, sizeof(XhciExtension->PortConnectChange));
+    RtlZeroMemory(XhciExtension->DeviceAddressToSlot,
+                  sizeof(XhciExtension->DeviceAddressToSlot));
+    RtlZeroMemory(XhciExtension->SlotToDeviceAddress,
+                  sizeof(XhciExtension->SlotToDeviceAddress));
+    RtlZeroMemory(XhciExtension->RootPortToSlot,
+                  sizeof(XhciExtension->RootPortToSlot));
+    RtlZeroMemory(XhciExtension->SlotToRootPort,
+                  sizeof(XhciExtension->SlotToRootPort));
+    RtlZeroMemory(XhciExtension->SlotContextValid,
+                  sizeof(XhciExtension->SlotContextValid));
+    RtlZeroMemory(XhciExtension->SlotInputContext,
+                  sizeof(XhciExtension->SlotInputContext));
+    RtlZeroMemory(XhciExtension->Endpoint0InputContext,
+                  sizeof(XhciExtension->Endpoint0InputContext));
     {
         ULONG Port;
 
@@ -1368,7 +1428,9 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
 
                 SlotId = *(PULONG)&XhciEndpoint->FirstTD;
                 if (SlotId == 0)
-                    SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
+                    SlotId = XHCI_GetSlotForDeviceAddress(
+                        XhciExtension,
+                        XhciEndpoint->EndpointProperties.DeviceAddress);
 
                 if (XhciEndpoint->EndpointStatus != 0)
                 {
@@ -1412,9 +1474,14 @@ XHCI_SetEndpointState(IN PVOID xhciExtension,
         }
         else
         {
-            ULONG SlotId = XhciEndpoint->EndpointProperties.DeviceAddress;
+            ULONG SlotId = *(PULONG)&XhciEndpoint->FirstTD;
             ULONG EndpointIndex = XhciEndpoint->ContextIndex;
             MPSTATUS DropStatus;
+
+            if (SlotId == 0)
+                SlotId = XHCI_GetSlotForDeviceAddress(
+                    XhciExtension,
+                    XhciEndpoint->EndpointProperties.DeviceAddress);
 
             DropStatus = XHCI_DropEndpoint(XhciExtension, SlotId, EndpointIndex);
             if (DropStatus != MP_STATUS_SUCCESS)
@@ -1616,7 +1683,56 @@ XHCI_SetEndpointDataToggle(IN PVOID xhciExtension,
                            IN PVOID xhciEndpoint,
                            IN ULONG DataToggle)
 {
-    DPRINT1("XHCI_SetEndpointDataToggle: function initiated\n");
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
+    PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+    PHYSICAL_ADDRESS DequeuePA;
+    ULONG SlotId;
+    ULONG DCI;
+    MPSTATUS Status;
+
+    if (XhciExtension == NULL || XhciEndpoint == NULL)
+        return;
+
+    /* xHCI manages sequence numbers in the endpoint context rather than
+     * exposing the USB 2 data toggle.  USBPORT calls this with DATA0 while
+     * clearing a stalled pipe; recover the Halted endpoint as required by
+     * xHCI 1.1 section 4.8.3 instead. */
+    if (DataToggle != 0 ||
+        XhciEndpoint->EndpointStatus != USBPORT_ENDPOINT_HALT)
+    {
+        return;
+    }
+
+    SlotId = *(PULONG)&XhciEndpoint->FirstTD;
+    if (SlotId == 0)
+        SlotId = XHCI_GetSlotForDeviceAddress(
+            XhciExtension,
+            XhciEndpoint->EndpointProperties.DeviceAddress);
+    DCI = XhciEndpoint->ContextIndex;
+
+    DPRINT1("XHCI_SetEndpointDataToggle: recovering halted slot=%lu DCI=%lu\n",
+            SlotId, DCI);
+
+    Status = XHCI_ResetEndpoint(XhciExtension, SlotId, DCI);
+    if (Status != MP_STATUS_SUCCESS)
+        return;
+
+    /* XHCI_CompleteTransfer has already advanced the software dequeue past
+     * the stalled TD.  Synchronize the hardware dequeue before the retry is
+     * queued; XHCI_SubmitBulkTransfer will ring the doorbell afterwards. */
+    DequeuePA = MmGetPhysicalAddress(XhciEndpoint->TransferRing.dequeue_pointer);
+    Status = XHCI_SetTransferRingDequeuePointer(
+        XhciExtension,
+        SlotId,
+        DCI,
+        DequeuePA,
+        XhciEndpoint->TransferRing.ConsumerCycleState);
+    if (Status == MP_STATUS_SUCCESS)
+    {
+        XhciEndpoint->EndpointStatus = USBPORT_ENDPOINT_RUN;
+        DPRINT1("XHCI_SetEndpointDataToggle: recovered slot=%lu DCI=%lu dequeue=0x%I64x\n",
+                SlotId, DCI, DequeuePA.QuadPart);
+    }
 }
 
 ULONG
@@ -1624,8 +1740,12 @@ NTAPI
 XHCI_GetEndpointStatus(IN PVOID xhciExtension,
                        IN PVOID xhciEndpoint)
 {
-    DPRINT1("XHCI_GetEndpointStatus: function initiated\n");
-    return 0;
+    PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+
+    if (XhciEndpoint == NULL)
+        return USBPORT_ENDPOINT_HALT;
+
+    return XhciEndpoint->EndpointStatus;
 }
 
 VOID
@@ -1639,6 +1759,13 @@ XHCI_SetEndpointStatus(IN PVOID xhciExtension,
     DPRINT1("XHCI_SetEndpointStatus: setting status=0x%x\n", EndpointStatus);
     if (XhciEndpoint != NULL)
     {
+        if (EndpointStatus == USBPORT_ENDPOINT_RUN &&
+            XhciEndpoint->EndpointStatus == USBPORT_ENDPOINT_HALT)
+        {
+            DPRINT1("XHCI_SetEndpointStatus: refusing RUN before halted endpoint recovery\n");
+            return;
+        }
+
         /* Tracked so SetEndpointState(ACTIVE) can decide whether the EP
          * Context needs Set TR Dequeue Pointer (on real Halted/Stopped
          * state) or just a doorbell ring (normal idle->active). */

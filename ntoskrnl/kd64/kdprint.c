@@ -619,6 +619,18 @@ KdpPrint(
     /* Log the print */
     KdLogDbgPrint(&OutputString);
 
+    /*
+     * Buffered KD keeps the complete DbgPrint history locally and avoids
+     * the stop-and-wait KD_DEBUG_IO packet for every call.  Do not apply
+     * this to prompts or state changes: they use their own paths and must
+     * remain interactive so assertions and exceptions still stop normally.
+     */
+    if (KdBufferPrintsOnly)
+    {
+        *Handled = TRUE;
+        return STATUS_SUCCESS;
+    }
+
     /* Check for a debugger */
     if (KdDebuggerNotPresent)
     {
