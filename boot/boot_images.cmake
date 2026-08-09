@@ -104,6 +104,8 @@ if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
         -eltorito-platform x86 -eltorito-boot loader/isobtrt.bin -no-emul-boot -boot-load-size 4)
     set(ISOHYBRID_BOOTCD_COMMAND
         COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcd.iso)
+    set(ISOHYBRID_BOOTCDNTFS_COMMAND
+        COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcdntfs.iso)
     set(ISOHYBRID_BOOTCDREGTEST_COMMAND
         COMMAND native-isohybrid -b ${_isombr_file} -t 0x96 ${REACTOS_BINARY_DIR}/bootcdregtest.iso)
     set(ISOHYBRID_KMTESTCD_COMMAND
@@ -170,6 +172,18 @@ add_custom_target(bootcd
         -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcd.$<CONFIG>.lst
     ${ISOHYBRID_BOOTCD_COMMAND}
     DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs
+    VERBATIM)
+
+## BootCDNtfs
+# Bootable unattended NTFS update image based on the regular setup payload.
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bootcdntfs.cmake.lst "${CMAKE_CURRENT_BINARY_DIR}/empty\n")
+
+add_custom_target(bootcdntfs
+    COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/bootcdntfs.iso
+        ${ISO_COMMON_OPTIONS} ${ISO_BOOT_OPTIONS} ${ISO_BOOT_FILES_OPTIONS} ${ISO_LAYOUT_OPTIONS}
+        -path-list ${CMAKE_CURRENT_BINARY_DIR}/bootcdntfs.$<CONFIG>.lst
+    ${ISOHYBRID_BOOTCDNTFS_COMMAND}
+    DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs bootcd
     VERBATIM)
 
 ## BootCDRegTest

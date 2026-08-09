@@ -509,9 +509,17 @@ endif()
          OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.$<CONFIG>.lst
          INPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst)
 
-    # BootCDNtfs inherits the regtest install payload, but uses its own
-    # unattended upgrade configuration and the regular Setup boot sector.
-    get_property(_filelist GLOBAL PROPERTY BOOTCDREGTEST_FILE_LIST)
+    # BootCDNtfs inherits the regular install payload, but uses its own
+    # unattended upgrade configuration.
+    get_property(_filelist GLOBAL PROPERTY BOOTCD_FILE_LIST)
+    get_property(_live_filelist GLOBAL PROPERTY LIVECD_FILE_LIST)
+    foreach(_entry IN LISTS _filelist _live_filelist)
+        if(_entry MATCHES "^reactos/winsxs/")
+            string(REGEX REPLACE "^reactos/winsxs/" "${ARCH}/winsxs/" _setup_entry "${_entry}")
+            list(APPEND _filelist "${_setup_entry}")
+        endif()
+    endforeach()
+    unset(_live_filelist)
     list(FILTER _filelist EXCLUDE REGEX "unattend\\.inf=")
     string(REPLACE ";" "\n" _filelist "${_filelist}")
     file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdntfs.cmake.lst "${_filelist}\n")
