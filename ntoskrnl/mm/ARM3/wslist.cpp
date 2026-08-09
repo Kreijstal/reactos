@@ -594,8 +594,12 @@ MiReleaseTrimmedPage(PFN_NUMBER Page, SWAPENTRY SwapEntry, BOOLEAN WrittenOut)
     MI_WRITE_INVALID_PTE(PointerPte, TempPte);
 
     /* The transition PTE held a share on the page table; the page-file PTE
-     * does not reference the page anymore. */
-    MiDecrementShareCount(MiGetPfnEntry(Pfn->u4.PteFrame), Pfn->u4.PteFrame);
+     * does not reference the page anymore. The PTE update dirtied the page
+     * table itself. Keep an empty private page table on the modified path,
+     * since the standby path only supports prototype-backed PFNs. */
+    PMMPFN PtePfn = MiGetPfnEntry(Pfn->u4.PteFrame);
+    PtePfn->u3.e1.Modified = 1;
+    MiDecrementShareCount(PtePfn, Pfn->u4.PteFrame);
 
     /* And now the page itself is free */
     MI_SET_PFN_DELETED(Pfn);
