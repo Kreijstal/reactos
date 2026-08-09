@@ -243,6 +243,17 @@ KdInitSystem(
             /* Upcase it */
             _strupr(CommandLine);
 
+            /*
+             * Keep DbgPrint history in the standard KD circular buffer but
+             * avoid a synchronous debugger packet for every line.  State
+             * changes, exceptions, prompts and debugger requests remain
+             * live, so a consumer can retrieve the ring when the target
+             * stops.  The option is intentionally independent of the
+             * selected transport.
+             */
+            KdBufferPrintsOnly =
+                (strstr(CommandLine, "KDBUFFERED") != NULL);
+
             /* Assume we'll disable KD */
             EnableKd = FALSE;
 

@@ -1,0 +1,5 @@
+[autorun]
+open=start-sshd.cmd
+shellexecute=start-sshd.cmd
+label=ReactOS SSHD Autorun
+action=Start MSYS sshd

@@ -1701,11 +1701,13 @@ acpi_bus_init (void)
 	int			result = 0;
 	ACPI_STATUS		status = AE_OK;
 
-	DPRINT("acpi_bus_init\n");
+	DPRINT("ACPITRACE: acpi_bus_init entered\n");
 
         KeInitializeDpc(&event_dpc, acpi_bus_generate_event_dpc, NULL);
 
+	DPRINT("ACPITRACE: AcpiEnableSubsystem begin\n");
 	status = AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION);
+	DPRINT("ACPITRACE: AcpiEnableSubsystem complete 0x%08X\n", status);
 	if (ACPI_FAILURE(status)) {
 		DPRINT1("Unable to start the ACPI Interpreter\n");
 		goto error1;
@@ -1717,10 +1719,14 @@ acpi_bus_init (void)
 	 * by looking for the ECDT table, and getting the EC parameters out
 	 * of that.
 	 */
+	DPRINT("ACPITRACE: acpi_ec_ecdt_probe begin\n");
 	acpi_ec_ecdt_probe();
+	DPRINT("ACPITRACE: acpi_ec_ecdt_probe complete\n");
 	/* Ignore result. Not having an ECDT is not fatal. */
 
+	DPRINT("ACPITRACE: AcpiInitializeObjects begin\n");
 	status = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION);
+	DPRINT("ACPITRACE: AcpiInitializeObjects complete 0x%08X\n", status);
 	if (ACPI_FAILURE(status)) {
 		DPRINT1("Unable to initialize ACPI objects\n");
 		goto error1;
@@ -1732,11 +1738,15 @@ acpi_bus_init (void)
 	 * this the SCI fires but the dispatcher has nothing to invoke, so
 	 * hot-plug Notify(...) requests from QEMU/firmware are dropped.
 	 */
+	DPRINT("ACPITRACE: AcpiUpdateAllGpes begin\n");
 	status = AcpiUpdateAllGpes();
+	DPRINT("ACPITRACE: AcpiUpdateAllGpes complete 0x%08X\n", status);
 	if (ACPI_FAILURE(status))
 		DPRINT1("AcpiUpdateAllGpes failed: %s\n", AcpiFormatException(status));
 
+	DPRINT("ACPITRACE: AcpiEnableAllRuntimeGpes begin\n");
 	status = AcpiEnableAllRuntimeGpes();
+	DPRINT("ACPITRACE: AcpiEnableAllRuntimeGpes complete 0x%08X\n", status);
 	if (ACPI_FAILURE(status))
 		DPRINT1("AcpiEnableAllRuntimeGpes failed: %s\n", AcpiFormatException(status));
 
@@ -1752,7 +1762,9 @@ acpi_bus_init (void)
 	/*
 	 * Register the for all standard device notifications.
 	 */
+	DPRINT("ACPITRACE: AcpiInstallNotifyHandler begin\n");
 	status = AcpiInstallNotifyHandler(ACPI_ROOT_OBJECT, ACPI_SYSTEM_NOTIFY, acpi_bus_notify, NULL);
+	DPRINT("ACPITRACE: AcpiInstallNotifyHandler complete 0x%08X\n", status);
 	if (ACPI_FAILURE(status)) {
 		DPRINT1("Unable to register for device notifications\n");
 		result = AE_NOT_FOUND;
@@ -1762,8 +1774,10 @@ acpi_bus_init (void)
 	/*
 	 * Create the root device in the bus's device tree
 	 */
+	DPRINT("ACPITRACE: add ACPI root begin\n");
 	result = acpi_bus_add(&acpi_root, NULL, ACPI_ROOT_OBJECT,
 		ACPI_BUS_TYPE_SYSTEM);
+	DPRINT("ACPITRACE: add ACPI root complete %d\n", result);
 	if (result)
 		goto error2;
 
@@ -1771,10 +1785,14 @@ acpi_bus_init (void)
 	/*
 	 * Enumerate devices in the ACPI namespace.
 	 */
+	DPRINT("ACPITRACE: acpi_bus_scan_fixed begin\n");
 	result = acpi_bus_scan_fixed(acpi_root);
+	DPRINT("ACPITRACE: acpi_bus_scan_fixed complete %d\n", result);
 	if (result)
 		DPRINT1("acpi_bus_scan_fixed failed\n");
+	DPRINT("ACPITRACE: acpi_bus_scan begin\n");
 	result = acpi_bus_scan(acpi_root);
+	DPRINT("ACPITRACE: acpi_bus_scan complete %d\n", result);
 	if (result)
 		DPRINT1("acpi_bus_scan failed\n");
 
@@ -1826,7 +1844,7 @@ acpi_init (void)
 {
 	int			result = 0;
 
-	DPRINT("acpi_init\n");
+	DPRINT("ACPITRACE: acpi_init entered\n");
 
 	DPRINT("Subsystem revision %08x\n",ACPI_CA_VERSION);
 
@@ -1834,7 +1852,9 @@ acpi_init (void)
 	KeInitializeEvent(&AcpiEventQueue, NotificationEvent, FALSE);
 	ExInitializeFastMutex(&acpi_bus_drivers_lock);
 
+	DPRINT("ACPITRACE: acpi_bus_init begin\n");
 	result = acpi_bus_init();
+	DPRINT("ACPITRACE: acpi_bus_init complete %d\n", result);
 
 	//if (!result) {
 		//pci_mmcfg_late_init();
@@ -1858,14 +1878,26 @@ acpi_init (void)
 	 * Install drivers required for proper enumeration of the
 	 * ACPI namespace.
 	 */
+	DPRINT("ACPITRACE: acpi_system_init begin\n");
 	acpi_system_init();	/* ACPI System */
+	DPRINT("ACPITRACE: acpi_system_init complete\n");
+	DPRINT("ACPITRACE: acpi_power_init begin\n");
 	acpi_power_init();	/* ACPI Bus Power Management */
+	DPRINT("ACPITRACE: acpi_power_init complete\n");
+	DPRINT("ACPITRACE: acpi_button_init begin\n");
 	acpi_button_init();
+	DPRINT("ACPITRACE: acpi_button_init complete\n");
+	DPRINT("ACPITRACE: acpi_ec_init begin\n");
 	acpi_ec_init();		/* ACPI Embedded Controller */
+	DPRINT("ACPITRACE: acpi_ec_init complete\n");
 #ifdef CONFIG_ACPI_PCI
 	if (!acpi_pci_disabled) {
+		DPRINT("ACPITRACE: acpi_pci_link_init begin\n");
 		acpi_pci_link_init();	/* ACPI PCI Interrupt Link */
+		DPRINT("ACPITRACE: acpi_pci_link_init complete\n");
+		DPRINT("ACPITRACE: acpi_pci_root_init begin\n");
 		acpi_pci_root_init();	/* ACPI PCI Root Bridge */
+		DPRINT("ACPITRACE: acpi_pci_root_init complete\n");
 	}
 #endif
 
@@ -1894,4 +1926,3 @@ acpi_exit (void)
 
 	return_VOID;
 }
-

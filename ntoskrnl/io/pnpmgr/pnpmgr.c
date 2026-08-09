@@ -69,7 +69,7 @@ IopInstallCriticalDevice(PDEVICE_NODE DeviceNode)
                              &HidLength);
     if (Status != STATUS_BUFFER_OVERFLOW && Status != STATUS_BUFFER_TOO_SMALL)
     {
-        DPRINT1("CDDB-DIAG: %wZ has no HardwareID value (status %x)\n", &DeviceNode->InstancePath, Status);
+        DPRINT("CDDB-DIAG: %wZ has no HardwareID value (status %x)\n", &DeviceNode->InstancePath, Status);
         ZwClose(InstanceKey);
         return;
     }
@@ -164,7 +164,7 @@ IopInstallCriticalDevice(PDEVICE_NODE DeviceNode)
     {
         /* The critical device database doesn't exist because
          * we're probably in 1st stage setup, but it's ok */
-        DPRINT1("CDDB-DIAG: cannot open CDDB (status %x)\n", Status);
+        DPRINT("CDDB-DIAG: cannot open CDDB (status %x)\n", Status);
         ExFreePool(OriginalIdBuffer);
         ZwClose(InstanceKey);
         return;
@@ -175,7 +175,7 @@ IopInstallCriticalDevice(PDEVICE_NODE DeviceNode)
         USHORT StringLength = (USHORT)wcslen(IdBuffer) + 1, Index;
 
         IopFixupDeviceId(IdBuffer);
-        DPRINT1("CDDB-DIAG: %wZ trying id '%S'\n", &DeviceNode->InstancePath, IdBuffer);
+        DPRINT("CDDB-DIAG: %wZ trying id '%S'\n", &DeviceNode->InstancePath, IdBuffer);
 
         /* Look through all subkeys for a match */
         for (Index = 0; TRUE; Index++)
@@ -251,7 +251,7 @@ IopInstallCriticalDevice(PDEVICE_NODE DeviceNode)
                                              &NeededLength);
                     if (Status == STATUS_BUFFER_OVERFLOW || Status == STATUS_BUFFER_TOO_SMALL)
                     {
-                        DPRINT1("CDDB-DIAG: '%wZ' matched but instance already has ClassGUID, skipping\n", &ChildIdNameU);
+                        DPRINT("CDDB-DIAG: '%wZ' matched but instance already has ClassGUID, skipping\n", &ChildIdNameU);
                         ExFreePool(BasicInfo);
                         continue;
                     }
@@ -357,7 +357,7 @@ IopInstallCriticalDevice(PDEVICE_NODE DeviceNode)
                             continue;
                         }
 
-                        DPRINT1("CDDB-DIAG: installed service '%S' for critical device '%wZ'\n", PartialInfo->Data, &ChildIdNameU);
+                        DPRINT("CDDB-DIAG: installed service '%S' for critical device '%wZ'\n", PartialInfo->Data, &ChildIdNameU);
                     }
                     else
                     {
