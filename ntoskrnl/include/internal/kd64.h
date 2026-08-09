@@ -548,6 +548,7 @@ extern PCHAR KdPrintWritePointer;
 extern ULONG KdPrintRolloverCount;
 extern PCHAR KdPrintCircularBuffer;
 extern ULONG KdPrintBufferSize;
+extern BOOLEAN KdBufferPrintsOnly;
 extern ULONG KdPrintBufferChanges;
 extern KSPIN_LOCK KdpPrintSpinLock;
 

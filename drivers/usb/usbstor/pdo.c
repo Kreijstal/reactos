@@ -438,6 +438,7 @@ USBSTOR_PdoHandleQueryInstanceId(
     PPDO_DEVICE_EXTENSION PDODeviceExtension;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PUSB_STRING_DESCRIPTOR Descriptor;
+    ULONG SerialCharCount = 0;
     ULONG CharCount;
     LPWSTR InstanceId;
     NTSTATUS Status;
@@ -448,8 +449,9 @@ USBSTOR_PdoHandleQueryInstanceId(
     Descriptor = FDODeviceExtension->SerialNumber;
     if (Descriptor && (Descriptor->bLength >= sizeof(USB_COMMON_DESCRIPTOR) + sizeof(WCHAR)))
     {
-        /* Format the serial number descriptor only if supported by the device */
-        CharCount = (Descriptor->bLength - sizeof(USB_COMMON_DESCRIPTOR)) / sizeof(WCHAR) +
+        /* USB string descriptors are counted strings and need not be NULL-terminated. */
+        SerialCharCount = (Descriptor->bLength - sizeof(USB_COMMON_DESCRIPTOR)) / sizeof(WCHAR);
+        CharCount = SerialCharCount +
                     (sizeof("&") - 1) +
                     (sizeof("F") - 1) + // LUN: 1 char (MAX_LUN)
                     sizeof(ANSI_NULL);
@@ -470,12 +472,15 @@ USBSTOR_PdoHandleQueryInstanceId(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    if (Descriptor && (Descriptor->bLength >= sizeof(USB_COMMON_DESCRIPTOR) + sizeof(WCHAR)))
-    {	
-        Status = RtlStringCchPrintfW(InstanceId,
-                                     CharCount,
-                                     L"%s&%x",
-                                     Descriptor->bString,
+    if (SerialCharCount != 0)
+    {
+        RtlCopyMemory(InstanceId,
+                      Descriptor->bString,
+                      SerialCharCount * sizeof(WCHAR));
+
+        Status = RtlStringCchPrintfW(InstanceId + SerialCharCount,
+                                     CharCount - SerialCharCount,
+                                     L"&%x",
                                      PDODeviceExtension->LUN);
     }
     else
@@ -487,8 +492,12 @@ USBSTOR_PdoHandleQueryInstanceId(
                                      PDODeviceExtension->LUN);
     }
 
-    /* This should not happen */
-    ASSERT(NT_SUCCESS(Status));
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(InstanceId, USB_STOR_TAG);
+        Irp->IoStatus.Information = 0;
+        return Status;
+    }
 
     DPRINT("USBSTOR_PdoHandleQueryInstanceId '%S'\n", InstanceId);
 

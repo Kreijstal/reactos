@@ -1,0 +1,60 @@
+[Unattend]
+Signature = "$ReactOS$"
+
+; Fully unattended install onto an NTFS volume, then auto-launch the bundled
+; MSYS2 installer on first interactive boot.  Local test harness only.
+UnattendSetupEnabled = yes
+
+; The recovery ISO is attached as the secondary CD-ROM. Update the existing
+; ReactOS installation on qcow2 Harddisk0 without changing its partition.
+DestinationDiskNumber = 0
+DestinationPartitionNumber = 1
+InstallationDirectory=ReactOS
+
+; Repair only the target partition's VBR.
+BootLoaderLocation=2
+
+FullName="ReactOS"
+ComputerName="REACTOS-NTFS"
+
+; TimeZone is set to GMT as default.
+TimeZoneIndex=85
+
+; In-place UPGRADE: keep the existing NTFS volume and its data (C:\msys64, the
+; xstack tree, the wine clone) and only rewrite the ReactOS system files.
+; With Upgrade=yes, setuplib.c sets RepairUpdate, usetup.c:1122 selects the
+; existing installation non-interactively, and InstallIntroPage skips
+; SELECT_PARTITION_PAGE entirely -- so no format happens on that path.
+; FormatPartition/AutoPartition are belt-and-braces: if installation detection
+; ever fails, usetup falls back to a FRESH install, and with these at 0 it will
+; stop rather than silently reformat the volume and destroy the data.
+Upgrade = yes
+FormatPartition=0
+AutoPartition = 0
+
+; Choose default file system type.
+; 0 - FAT
+; 1 - BtrFS
+; 2 - NTFS
+FsType = 2
+
+; Disable Gecko install to speed up the unattended run.
+DisableGeckoInst = yes
+
+; Locale (see hivesys.inf): 409 == en-US.
+LocaleID = 409
+
+; Server install type.
+InstallationType = 0
+
+; LOCAL test harness (never committed): install a persistent luagent autostart
+; Run key and launch it now, so the fresh install exposes the TCP 7000 command
+; transport for driver testing without an offline NTFS edit.
+[GuiRunOnce]
+%SystemRoot%\system32\cmd.exe /c reg add HKLM\Software\Microsoft\Windows\CurrentVersion\Run /v luagent /d %SystemRoot%\system32\luagent.exe /f & start %SystemRoot%\system32\luagent.exe
+
+[Display]
+BitsPerPel = 32
+XResolution = 1024
+YResolution = 768
+VRefresh = 0
