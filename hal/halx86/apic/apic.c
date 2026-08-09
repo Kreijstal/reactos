@@ -55,6 +55,9 @@ ULONG HalpMaxGsi;
  */
 IOAPIC_REDIRECTION_REGISTER HalpIoApicShadow[HALP_MAX_INPUTS];
 
+/* Serializes the IOREGSEL/IOWIN pairs of all I/O APICs */
+volatile LONG HalpIoApicLock;
+
 #ifndef _M_AMD64
 const UCHAR
 HalpIRQLtoTPR[32] =
@@ -123,9 +126,24 @@ IOApicRead(
     _In_ ULONG_PTR Base,
     _In_ UCHAR Register)
 {
+    ULONG_PTR Flags;
+    ULONG Value;
+
+    /* IOREGSEL/IOWIN is one shared indexed register pair for all CPUs. */
+    Flags = __readeflags();
+    _disable();
+    while (InterlockedCompareExchange(&HalpIoApicLock, 1, 0) != 0)
+        YieldProcessor();
+
     /* Select the register, then do the read */
     WRITE_REGISTER_ULONG((PULONG)(Base + IOAPIC_IOREGSEL), Register);
-    return READ_REGISTER_ULONG((PULONG)(Base + IOAPIC_IOWIN));
+    Value = READ_REGISTER_ULONG((PULONG)(Base + IOAPIC_IOWIN));
+
+    InterlockedExchange(&HalpIoApicLock, 0);
+    if (Flags & EFLAGS_INTERRUPT_MASK)
+        _enable();
+
+    return Value;
 }
 
 FORCEINLINE
@@ -135,9 +153,21 @@ IOApicWrite(
     _In_ UCHAR Register,
     _In_ ULONG Value)
 {
+    ULONG_PTR Flags;
+
+    /* Keep the selector stable until its data write has completed. */
+    Flags = __readeflags();
+    _disable();
+    while (InterlockedCompareExchange(&HalpIoApicLock, 1, 0) != 0)
+        YieldProcessor();
+
     /* Select the register, then do the write */
     WRITE_REGISTER_ULONG((PULONG)(Base + IOAPIC_IOREGSEL), Register);
     WRITE_REGISTER_ULONG((PULONG)(Base + IOAPIC_IOWIN), Value);
+
+    InterlockedExchange(&HalpIoApicLock, 0);
+    if (Flags & EFLAGS_INTERRUPT_MASK)
+        _enable();
 }
 
 /**
@@ -1199,4 +1229,3 @@ KeRaiseIrqlToSynchLevel(VOID)
 }
 
 #endif /* !_M_AMD64 */
-
