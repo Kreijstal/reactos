@@ -294,10 +294,10 @@ acpi_ec_query_worker (
 	void			*context)
 {
 	struct acpi_ec		*ec = context;
+	ACPI_STATUS		status;
 	ULONG			i;
 
 	for (i = 0; i < ACPI_EC_MAX_QUERIES; i++) {
-		ACPI_STATUS	status;
 		UCHAR		query = 0;
 		char		method[8];
 
@@ -330,6 +330,17 @@ acpi_ec_query_worker (
 	}
 
 	InterlockedExchange(&ec->query_pending, 0);
+
+	/*
+	 * AcpiEvGpeDispatch disabled this GPE before calling our handler.  Keep
+	 * it disabled until the EC query queue has been drained: re-enabling it
+	 * in the handler while EC-SCI is still asserted creates an interrupt
+	 * storm that can starve the PnP worker on real hardware.
+	 */
+	status = AcpiFinishGpe(NULL, ec->gpe);
+	if (ACPI_FAILURE(status))
+		DPRINT1("EC: failed to finish GPE 0x%lx: %s\n",
+			ec->gpe, AcpiFormatException(status));
 }
 
 /*
@@ -345,14 +356,22 @@ acpi_ec_gpe_handler (
 {
 	struct acpi_ec		*ec = context;
 
-	if ((acpi_ec_read_status(ec) & ACPI_EC_FLAG_SCI) &&
-	    InterlockedCompareExchange(&ec->query_pending, 1, 0) == 0) {
-		if (ACPI_FAILURE(AcpiOsExecute(OSL_GPE_HANDLER,
-				acpi_ec_query_worker, ec))) {
-			InterlockedExchange(&ec->query_pending, 0);
-		}
+	if (!(acpi_ec_read_status(ec) & ACPI_EC_FLAG_SCI))
+		return ACPI_INTERRUPT_HANDLED | ACPI_REENABLE_GPE;
+
+	/* A queued worker owns the disabled GPE until it calls AcpiFinishGpe. */
+	if (InterlockedCompareExchange(&ec->query_pending, 1, 0) != 0)
+		return ACPI_INTERRUPT_HANDLED;
+
+	if (ACPI_SUCCESS(AcpiOsExecute(OSL_GPE_HANDLER,
+			acpi_ec_query_worker, ec))) {
+		/* The worker calls AcpiFinishGpe after draining EC-SCI. */
+		return ACPI_INTERRUPT_HANDLED;
 	}
 
+	InterlockedExchange(&ec->query_pending, 0);
+
+	/* Queuing failed, so complete and re-enable the GPE now. */
 	return ACPI_INTERRUPT_HANDLED | ACPI_REENABLE_GPE;
 }
 

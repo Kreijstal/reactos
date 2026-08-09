@@ -549,6 +549,7 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
     RHSTATUS RHStatus = RH_STATUS_NO_CHANGES;
     PUSB_HUB_DESCRIPTOR HubDescriptor;
     UCHAR NumberOfPorts;
+    BOOLEAN ForceConnectedPorts;
 
     DPRINT("USBPORT_RootHubSCE: Transfer - %p\n", Transfer);
 
@@ -599,6 +600,17 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
 
     AddressBitMap = Buffer;
 
+    /*
+     * An interrupt can precede creation of the root-hub status endpoint.
+     * Claim that notification here, when a status-change transfer really is
+     * available to consume it.  Reporting currently connected ports makes
+     * the notification survive a hub-startup clear of the hardware CSC bit.
+     */
+    ForceConnectedPorts =
+        !!(InterlockedAnd((PLONG)&FdoExtension->Flags,
+                          ~USBPORT_FLAG_RH_INVALIDATE_PENDING) &
+           USBPORT_FLAG_RH_INVALIDATE_PENDING);
+
     /* Scan all the ports for changes */
     for (Port = 1; Port <= NumberOfPorts; Port++)
     {
@@ -610,11 +622,19 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
                                      &PortStatus))
         {
             /* Miniport returned an error */
+            if (ForceConnectedPorts)
+            {
+                InterlockedOr((PLONG)&FdoExtension->Flags,
+                              USBPORT_FLAG_RH_INVALIDATE_PENDING);
+            }
+
             DPRINT1("USBPORT_RootHubSCE: RH_GetPortStatus failed\n");
             return RH_STATUS_UNSUCCESSFUL;
         }
 
-        if (PortStatus.PortChange.Usb20PortChange.ConnectStatusChange ||
+        if ((ForceConnectedPorts &&
+             PortStatus.PortStatus.Usb20PortStatus.CurrentConnectStatus) ||
+            PortStatus.PortChange.Usb20PortChange.ConnectStatusChange ||
             PortStatus.PortChange.Usb20PortChange.PortEnableDisableChange ||
             PortStatus.PortChange.Usb20PortChange.SuspendChange ||
             PortStatus.PortChange.Usb20PortChange.OverCurrentIndicatorChange ||
@@ -654,6 +674,12 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
     }
 
     /* Miniport returned an error */
+    if (ForceConnectedPorts)
+    {
+        InterlockedOr((PLONG)&FdoExtension->Flags,
+                      USBPORT_FLAG_RH_INVALIDATE_PENDING);
+    }
+
     DPRINT1("USBPORT_RootHubSCE: RH_GetHubStatus failed\n");
     return RH_STATUS_UNSUCCESSFUL;
 }
@@ -920,6 +946,8 @@ USBPORT_InvalidateRootHub(PVOID MiniPortExtension)
     PDEVICE_OBJECT PdoDevice;
     PUSBPORT_RHDEVICE_EXTENSION PdoExtension;
     PUSBPORT_ENDPOINT Endpoint = NULL;
+    BOOLEAN HasStatusTransfer = FALSE;
+    KIRQL OldIrql;
 
     DPRINT("USBPORT_InvalidateRootHub ... \n");
 
@@ -937,10 +965,11 @@ USBPORT_InvalidateRootHub(PVOID MiniPortExtension)
         return 0;
     }
 
-    FdoExtension->MiniPortInterface->Packet.RH_DisableIrq(FdoExtension->MiniPortExt);
+    /* Coalesce notifications until a root-hub status transfer consumes one. */
+    InterlockedOr((PLONG)&FdoExtension->Flags,
+                  USBPORT_FLAG_RH_INVALIDATE_PENDING);
 
     PdoDevice = FdoExtension->RootHubPdo;
-
     if (PdoDevice)
     {
         PdoExtension = PdoDevice->DeviceExtension;
@@ -948,12 +977,24 @@ USBPORT_InvalidateRootHub(PVOID MiniPortExtension)
 
         if (Endpoint)
         {
-            USBPORT_InvalidateEndpointHandler(FdoDevice,
-                                              PdoExtension->Endpoint,
-                                              INVALIDATE_ENDPOINT_WORKER_THREAD);
+            KeAcquireSpinLock(&Endpoint->EndpointSpinLock, &OldIrql);
+            HasStatusTransfer = !IsListEmpty(&Endpoint->TransferList);
+            KeReleaseSpinLock(&Endpoint->EndpointSpinLock, OldIrql);
         }
     }
 
+    if (HasStatusTransfer)
+    {
+        /*
+         * Only mask root-hub interrupts when a status transfer can consume the
+         * notification and eventually re-enable them.  If it is not ready,
+         * submission of that transfer will run the endpoint worker itself.
+         */
+        FdoExtension->MiniPortInterface->Packet.RH_DisableIrq(FdoExtension->MiniPortExt);
+        USBPORT_InvalidateEndpointHandler(FdoDevice,
+                                          Endpoint,
+                                          INVALIDATE_ENDPOINT_WORKER_THREAD);
+    }
     return 0;
 }
 

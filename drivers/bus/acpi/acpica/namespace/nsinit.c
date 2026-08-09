@@ -600,7 +600,7 @@ AcpiNsInitOneDevice (
 {
     ACPI_DEVICE_WALK_INFO   *WalkInfo = ACPI_CAST_PTR (ACPI_DEVICE_WALK_INFO, Context);
     ACPI_EVALUATE_INFO      *Info = WalkInfo->EvaluateInfo;
-    UINT32                  Flags;
+    UINT32                  Flags = 0;
     ACPI_STATUS             Status;
     ACPI_NAMESPACE_NODE     *DeviceNode;
 

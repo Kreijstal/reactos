@@ -858,6 +858,10 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
         DPRINT1("USBPORT_StartDevice: Failed to Start MiniPort. MiniPortStatus - %x\n",
                 MiniPortStatus);
 
+        /* Do not report a successfully-started FDO after the miniport failed.
+         * PnP would otherwise enumerate a root hub with zero ports. */
+        Status = STATUS_DEVICE_HARDWARE_ERROR;
+
         if (FdoExtension->Flags & USBPORT_FLAG_INT_CONNECTED)
         {
             IoDisconnectInterrupt(FdoExtension->InterruptObject);

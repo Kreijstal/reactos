@@ -20,13 +20,58 @@ static BOOLEAN AcpiInterruptHandlerRegistered = FALSE;
 static ACPI_OSD_HANDLER AcpiIrqHandler = NULL;
 static PVOID AcpiIrqContext = NULL;
 static ULONG AcpiIrqNumber = 0;
+static ULONG AcpiSciVector = 0;
+static KIRQL AcpiSciIrql = PASSIVE_LEVEL;
+static volatile LONG AcpiSciMasked = 0;
 /* SCI delivery: ISR (DIRQL) just queues the DPC; the DPC (DISPATCH_LEVEL)
  * runs the ACPICA service routine, where AcpiOsExecute() may safely
- * allocate non-paged pool and queue a worker. */
+ * allocate non-paged pool and queue a worker. The ISR masks the
+ * level-triggered SCI until the DPC clears its status bits; otherwise a
+ * firmware-pending SCI can immediately retrigger forever and starve the DPC. */
 static KDPC AcpiSciDpc;
-/* TODO: Replace these local declarations with <ndk/kefuncs.h> once the
+/* The SCI is a shareable level line: on this hardware other devices (the
+ * ASUS X550DP routes OHCI to the same link) can assert it while ACPI owns
+ * nothing. Claiming unconditionally starves the sharing device's ISR and
+ * turns its pending interrupt into an endless ghost-SCI storm. Cache the
+ * PM1/GPE register ports from the FADT so the ISR can test the
+ * architectural SCI condition (STS & EN) at DIRQL and decline interrupts
+ * that are not ours. */
+static struct
+{
+    USHORT Pm1aSts;
+    USHORT Pm1aEn;
+    USHORT Pm1bSts;
+    USHORT Pm1bEn;
+    USHORT Gpe0Sts;
+    USHORT Gpe0En;
+    USHORT Gpe1Sts;
+    USHORT Gpe1En;
+    UCHAR Gpe0Half;
+    UCHAR Gpe1Half;
+    BOOLEAN Ready;
+} AcpiSciHw;
+static volatile ULONG AcpiSciTotalCount = 0;
+static volatile ULONG AcpiSciOwnedCount = 0;
+static volatile ULONG AcpiSciGhostCount = 0;
+static ULONG AcpiSciConsecutiveGhosts = 0;
+/* TODO: Replace these local declarations with the NDK headers once the
  * acpi.sys build context can consume the required NDK dependencies cleanly.
  */
+NTHALAPI
+VOID
+NTAPI
+HalDisableSystemInterrupt(
+    _In_ ULONG Vector,
+    _In_ KIRQL Irql);
+
+NTHALAPI
+BOOLEAN
+NTAPI
+HalEnableSystemInterrupt(
+    _In_ ULONG Vector,
+    _In_ KIRQL Irql,
+    _In_ KINTERRUPT_MODE InterruptMode);
+
 extern NTSYSAPI PLOADER_PARAMETER_BLOCK KeLoaderBlock;
 extern NTSYSAPI
 PCONFIGURATION_COMPONENT_DATA
@@ -812,6 +857,149 @@ OslSciDpcRoutine(
 
     if (AcpiIrqHandler)
         (*AcpiIrqHandler)(AcpiIrqContext);
+
+    /* Make the ISR eligible to queue us before unmasking the level line. */
+    if (InterlockedExchange(&AcpiSciMasked, 0))
+    {
+        if (!HalEnableSystemInterrupt(AcpiSciVector,
+                                      AcpiSciIrql,
+                                      LevelSensitive))
+        {
+            /* IoConnectInterrupt may still be finishing the first connection.
+             * Leave the state armed so the install path can retry once the
+             * interrupt object is fully connected. */
+            InterlockedExchange(&AcpiSciMasked, 1);
+            DPRINT1("ACPITRACE: failed to re-enable SCI vector %lu\n",
+                    AcpiSciVector);
+        }
+    }
+}
+
+/* Extract an I/O port from the preferred extended GAS, falling back to the
+ * legacy 32-bit block address (which is I/O space by definition). Returns 0
+ * when the block is absent or not in system I/O space. */
+static
+USHORT
+OslSciBlockPort(
+    const ACPI_GENERIC_ADDRESS *ExtendedBlock,
+    UINT32 LegacyBlock)
+{
+    if ((ExtendedBlock != NULL) && (ExtendedBlock->Address != 0))
+    {
+        if ((ExtendedBlock->SpaceId != ACPI_ADR_SPACE_SYSTEM_IO) ||
+            (ExtendedBlock->Address > 0xFFFF))
+        {
+            return 0;
+        }
+        return (USHORT)ExtendedBlock->Address;
+    }
+    if (LegacyBlock > 0xFFFF)
+    {
+        return 0;
+    }
+    return (USHORT)LegacyBlock;
+}
+
+static
+VOID
+OslSciHwInit(VOID)
+{
+    /* AcpiGbl_FADT is ACPICA's canonicalized copy: the extended GAS fields
+     * are synthesized from the legacy ones for pre-revision-2 tables, so it
+     * is safe to consume regardless of the firmware's FADT revision (the
+     * raw table from AcpiGetTable is not: QEMU ships revision 1 without any
+     * X fields at all). */
+    const ACPI_TABLE_FADT *Fadt = &AcpiGbl_FADT;
+    USHORT Port;
+    UCHAR Half;
+
+    RtlZeroMemory(&AcpiSciHw, sizeof(AcpiSciHw));
+
+    /* PM1a is mandatory: without it we cannot evaluate the SCI condition
+     * and keep the historical claim-everything behavior. */
+    Port = OslSciBlockPort(&Fadt->XPm1aEventBlock, Fadt->Pm1aEventBlock);
+    if ((Port == 0) || (Fadt->Pm1EventLength < 4))
+    {
+        DPRINT1("ACPITRACE: PM1a event block unusable; "
+                "SCI ownership check disabled\n");
+        return;
+    }
+    AcpiSciHw.Pm1aSts = Port;
+    AcpiSciHw.Pm1aEn = Port + (Fadt->Pm1EventLength / 2);
+
+    Port = OslSciBlockPort(&Fadt->XPm1bEventBlock, Fadt->Pm1bEventBlock);
+    if (Port != 0)
+    {
+        AcpiSciHw.Pm1bSts = Port;
+        AcpiSciHw.Pm1bEn = Port + (Fadt->Pm1EventLength / 2);
+    }
+
+    Port = OslSciBlockPort(&Fadt->XGpe0Block, Fadt->Gpe0Block);
+    Half = Fadt->Gpe0BlockLength / 2;
+    if ((Port != 0) && (Half != 0) && (Half <= 32))
+    {
+        AcpiSciHw.Gpe0Sts = Port;
+        AcpiSciHw.Gpe0En = Port + Half;
+        AcpiSciHw.Gpe0Half = Half;
+    }
+
+    Port = OslSciBlockPort(&Fadt->XGpe1Block, Fadt->Gpe1Block);
+    Half = Fadt->Gpe1BlockLength / 2;
+    if ((Port != 0) && (Half != 0) && (Half <= 32))
+    {
+        AcpiSciHw.Gpe1Sts = Port;
+        AcpiSciHw.Gpe1En = Port + Half;
+        AcpiSciHw.Gpe1Half = Half;
+    }
+
+    AcpiSciHw.Ready = TRUE;
+    DPRINT1("ACPITRACE: SCI ownership check armed: PM1a %x/%x PM1b %x/%x "
+            "GPE0 %x/%x+%u GPE1 %x/%x+%u\n",
+            AcpiSciHw.Pm1aSts, AcpiSciHw.Pm1aEn,
+            AcpiSciHw.Pm1bSts, AcpiSciHw.Pm1bEn,
+            AcpiSciHw.Gpe0Sts, AcpiSciHw.Gpe0En, AcpiSciHw.Gpe0Half,
+            AcpiSciHw.Gpe1Sts, AcpiSciHw.Gpe1En, AcpiSciHw.Gpe1Half);
+}
+
+/* The architectural SCI assert condition: any PM1 fixed-event or GPE with
+ * both its status and enable bits set. Raw port reads only; this runs at
+ * DIRQL where no ACPICA lock may be taken. */
+static
+BOOLEAN
+OslSciIsAsserted(VOID)
+{
+    USHORT Pending;
+    UCHAR i;
+
+    Pending = READ_PORT_USHORT((PUSHORT)(ULONG_PTR)AcpiSciHw.Pm1aSts) &
+              READ_PORT_USHORT((PUSHORT)(ULONG_PTR)AcpiSciHw.Pm1aEn);
+    if (AcpiSciHw.Pm1bSts != 0)
+    {
+        Pending |= READ_PORT_USHORT((PUSHORT)(ULONG_PTR)AcpiSciHw.Pm1bSts) &
+                   READ_PORT_USHORT((PUSHORT)(ULONG_PTR)AcpiSciHw.Pm1bEn);
+    }
+    if (Pending != 0)
+    {
+        return TRUE;
+    }
+
+    for (i = 0; i < AcpiSciHw.Gpe0Half; i++)
+    {
+        if (READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)(AcpiSciHw.Gpe0Sts + i)) &
+            READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)(AcpiSciHw.Gpe0En + i)))
+        {
+            return TRUE;
+        }
+    }
+    for (i = 0; i < AcpiSciHw.Gpe1Half; i++)
+    {
+        if (READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)(AcpiSciHw.Gpe1Sts + i)) &
+            READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)(AcpiSciHw.Gpe1En + i)))
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 BOOLEAN NTAPI
@@ -819,12 +1007,47 @@ OslIsrStub(
   PKINTERRUPT Interrupt,
   PVOID ServiceContext)
 {
+  UNREFERENCED_PARAMETER(Interrupt);
+  UNREFERENCED_PARAMETER(ServiceContext);
+
+  AcpiSciTotalCount++;
+
+  /* Decline interrupts that are not ours so the ISR of a device sharing
+   * the level line gets its turn; claiming them would leave that device
+   * asserted forever. Every 256th consecutive ghost is claimed anyway as a
+   * pressure valve: if nobody on the line owns the assert (firmware bug),
+   * this degrades to the historical mask-and-scan behavior at 1/256 duty
+   * instead of an unthrottled DIRQL storm. */
+  if ((AcpiSciHw.Ready) && (!OslSciIsAsserted()))
+  {
+      AcpiSciGhostCount++;
+      if ((AcpiSciGhostCount & 0x3FFF) == 1)
+      {
+          DPRINT1("ACPITRACE: ghost SCI %lu (total %lu owned %lu)\n",
+                  AcpiSciGhostCount, AcpiSciTotalCount, AcpiSciOwnedCount);
+      }
+      if ((++AcpiSciConsecutiveGhosts & 0xFF) != 0)
+      {
+          return FALSE;
+      }
+  }
+  else
+  {
+      AcpiSciConsecutiveGhosts = 0;
+      AcpiSciOwnedCount++;
+  }
+
   /* SCI is level-triggered shared with the ACPI dispatcher. The ACPICA
    * handler may dispatch GPE Notify() callbacks via AcpiOsExecute, which
    * needs to allocate from non-paged pool and is therefore not legal at
-   * DIRQL. Defer the actual handler to a DPC; the SCI line will be
-   * unmasked by ACPICA once the DPC clears the GPE status bits. */
-  KeInsertQueueDpc(&AcpiSciDpc, NULL, NULL);
+   * DIRQL. Mask the asserted level line before deferring the handler; the
+   * DPC clears the SCI source and then unmasks the line. */
+  if (InterlockedCompareExchange(&AcpiSciMasked, 1, 0) == 0)
+  {
+      HalDisableSystemInterrupt(AcpiSciVector, AcpiSciIrql);
+      KeInsertQueueDpc(&AcpiSciDpc, NULL, NULL);
+  }
+
   return TRUE;
 }
 
@@ -837,6 +1060,7 @@ AcpiOsInstallInterruptHandler (
     ULONG Vector;
     KIRQL DIrql;
     KAFFINITY Affinity;
+    KAFFINITY InterruptAffinity;
     NTSTATUS Status;
 
     if (AcpiInterruptHandlerRegistered)
@@ -860,7 +1084,35 @@ AcpiOsInstallInterruptHandler (
         &DIrql,
         &Affinity);
 
+    DPRINT("ACPITRACE: SCI IRQ %lu mapped to vector %lu IRQL %u affinity %p\n",
+            InterruptNumber,
+            Vector,
+            DIrql,
+            (PVOID)(ULONG_PTR)Affinity);
+
+    /* The SCI is one physical, level-triggered line. IoConnectInterrupt
+     * creates one interrupt object per processor in its affinity mask, all
+     * sharing a spin lock, while the APIC HAL retargets the same I/O APIC
+     * entry as each object is connected. An already-asserted SCI can then be
+     * delivered on the old and new destination CPUs concurrently, leaving a
+     * CPU spinning in KiInterruptDispatch before our ISR gets a chance to
+     * mask the line. Route the SCI to one processor; the DPC can still run on
+     * any processor selected by the scheduler. */
+    InterruptAffinity = Affinity & (0 - Affinity);
+    if (InterruptAffinity == 0)
+    {
+        DPRINT1("ACPITRACE: SCI has no usable processor affinity\n");
+        return AE_ERROR;
+    }
+    DPRINT("ACPITRACE: SCI connection affinity restricted to %p\n",
+            (PVOID)(ULONG_PTR)InterruptAffinity);
+
+    OslSciHwInit();
+
     AcpiIrqNumber = InterruptNumber;
+    AcpiSciVector = Vector;
+    AcpiSciIrql = DIrql;
+    InterlockedExchange(&AcpiSciMasked, 0);
     AcpiIrqHandler = ServiceRoutine;
     AcpiIrqContext = Context;
     AcpiInterruptHandlerRegistered = TRUE;
@@ -877,13 +1129,41 @@ AcpiOsInstallInterruptHandler (
         DIrql,
         LevelSensitive,
         TRUE,
-        Affinity,
+        InterruptAffinity,
         FALSE);
+
+    DPRINT("ACPITRACE: SCI IoConnectInterrupt returned 0x%08lx object %p\n",
+            Status,
+            AcpiInterrupt);
 
     if (!NT_SUCCESS(Status))
     {
+        AcpiInterruptHandlerRegistered = FALSE;
+        AcpiIrqHandler = NULL;
+        AcpiIrqContext = NULL;
         DPRINT("Could not connect to interrupt %d\n", Vector);
         return AE_ERROR;
+    }
+
+    /* An asserted SCI can run the DPC before IoConnectInterrupt returns. If
+     * HAL rejected that early unmask, retry now that the connection and its
+     * vector mapping are stable. */
+    if (InterlockedExchange(&AcpiSciMasked, 0))
+    {
+        if (!HalEnableSystemInterrupt(AcpiSciVector,
+                                      AcpiSciIrql,
+                                      LevelSensitive))
+        {
+            DPRINT1("ACPITRACE: failed final SCI enable for vector %lu\n",
+                    AcpiSciVector);
+            IoDisconnectInterrupt(AcpiInterrupt);
+            AcpiInterrupt = NULL;
+            AcpiInterruptHandlerRegistered = FALSE;
+            AcpiIrqHandler = NULL;
+            AcpiIrqContext = NULL;
+            return AE_ERROR;
+        }
+        DPRINT("ACPITRACE: final SCI enable retry succeeded\n");
     }
     return AE_OK;
 }
@@ -1152,9 +1432,8 @@ AcpiOsVprintf (
     const char              *Fmt,
     va_list                 Args)
 {
-#ifndef NDEBUG
+    /* Keep ACPICA bring-up diagnostics observable on the boot debugger. */
     vDbgPrintEx (-1, DPFLTR_ERROR_LEVEL, Fmt, Args);
-#endif
     return;
 }
 

@@ -93,6 +93,23 @@ else()
     set(_WINKD_ FALSE CACHE BOOL "Whether to compile with the KD protocol.")
 endif()
 
+if(KDBG AND _WINKD_)
+    if(NOT ARCH STREQUAL "amd64")
+        message(FATAL_ERROR "Combined KDBG and WinKD builds currently require ARCH=amd64")
+    endif()
+
+    set(KDNET_BOOT_HOST_IP "192.168.250.1" CACHE STRING
+        "Debugger host IPv4 address used by the hardware KDNET boot entry.")
+    set(KDNET_BOOT_HOST_MAC "" CACHE STRING
+        "Optional debugger host MAC address used by the hardware KDNET boot entry.")
+    set(KDNET_BOOT_TARGET_IP "192.168.250.2" CACHE STRING
+        "ReactOS target IPv4 address used by the hardware KDNET boot entry.")
+    set(KDNET_BOOT_PORT "50000" CACHE STRING
+        "UDP port used by the hardware and QEMU KDNET boot entries.")
+    set(KDNET_BOOT_KEY "1.2.3.4" CACHE STRING
+        "KDNET pre-shared key used by the hardware and QEMU boot entries.")
+endif()
+
 cmake_dependent_option(ISAPNP_ENABLE "Whether to enable the ISA PnP support." ON
                        "ARCH STREQUAL i386 AND NOT SARCH STREQUAL xbox" OFF)
 
