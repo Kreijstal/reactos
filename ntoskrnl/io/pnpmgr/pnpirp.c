@@ -10,6 +10,165 @@
 #define NDEBUG
 #include <debug.h>
 
+static BOOLEAN
+PiKdHarvestEnabled(VOID)
+{
+    return KeLoaderBlock != NULL &&
+           KeLoaderBlock->LoadOptions != NULL &&
+           strstr(KeLoaderBlock->LoadOptions, "PNP-HARVEST") != NULL;
+}
+
+static VOID
+PiKdHarvestDeviceStack(_In_ PDEVICE_OBJECT PhysicalDeviceObject)
+{
+    PDEVICE_OBJECT DeviceObject;
+    PDRIVER_OBJECT DriverObject;
+    ULONG Depth;
+
+    if (!PiKdHarvestEnabled())
+        return;
+
+    for (DeviceObject = PhysicalDeviceObject, Depth = 0;
+         DeviceObject != NULL && Depth < 16;
+         DeviceObject = DeviceObject->AttachedDevice, ++Depth)
+    {
+        DriverObject = DeviceObject->DriverObject;
+        if (DriverObject != NULL)
+        {
+            DPRINT1("PNPHARVEST: stack[%lu] device=%p extension=%p driver=%p name=\"%wZ\" type=0x%lx flags=0x%08lx characteristics=0x%08lx stack=%u attached=%p\n",
+                    Depth,
+                    DeviceObject,
+                    DeviceObject->DeviceExtension,
+                    DriverObject,
+                    &DriverObject->DriverName,
+                    DeviceObject->DeviceType,
+                    DeviceObject->Flags,
+                    DeviceObject->Characteristics,
+                    DeviceObject->StackSize,
+                    DeviceObject->AttachedDevice);
+        }
+        else
+        {
+            DPRINT1("PNPHARVEST: stack[%lu] device=%p extension=%p driver=<null> type=0x%lx flags=0x%08lx characteristics=0x%08lx stack=%u attached=%p\n",
+                    Depth,
+                    DeviceObject,
+                    DeviceObject->DeviceExtension,
+                    DeviceObject->DeviceType,
+                    DeviceObject->Flags,
+                    DeviceObject->Characteristics,
+                    DeviceObject->StackSize,
+                    DeviceObject->AttachedDevice);
+        }
+    }
+    if (DeviceObject != NULL)
+        DPRINT1("PNPHARVEST: device stack truncated after %lu entries\n", Depth);
+}
+
+static VOID
+PiKdHarvestResourceList(_In_ PCSTR Label,
+                        _In_opt_ PCM_RESOURCE_LIST ResourceList)
+{
+    PCM_FULL_RESOURCE_DESCRIPTOR Full;
+    PCM_PARTIAL_RESOURCE_LIST Partial;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Descriptor;
+    ULONG FullIndex, PartialIndex;
+
+    if (!PiKdHarvestEnabled())
+        return;
+    if (ResourceList == NULL)
+    {
+        DPRINT1("PNPHARVEST: %s resources=<null>\n", Label);
+        return;
+    }
+
+    DPRINT1("PNPHARVEST: %s list=%p full_count=%lu\n",
+            Label,
+            ResourceList,
+            ResourceList->Count);
+    Full = &ResourceList->List[0];
+    for (FullIndex = 0;
+         FullIndex < ResourceList->Count && FullIndex < 16;
+         ++FullIndex)
+    {
+        Partial = &Full->PartialResourceList;
+        DPRINT1("PNPHARVEST: %s full[%lu] interface=%u bus=%lu version=%u revision=%u partial_count=%lu\n",
+                Label,
+                FullIndex,
+                Full->InterfaceType,
+                Full->BusNumber,
+                Partial->Version,
+                Partial->Revision,
+                Partial->Count);
+        Descriptor = &Partial->PartialDescriptors[0];
+        for (PartialIndex = 0; PartialIndex < Partial->Count; ++PartialIndex)
+        {
+            if (PartialIndex < 64)
+            {
+                DPRINT1("PNPHARVEST: %s full[%lu] partial[%lu] type=%u share=%u flags=0x%04x\n",
+                        Label,
+                        FullIndex,
+                        PartialIndex,
+                        Descriptor->Type,
+                        Descriptor->ShareDisposition,
+                        Descriptor->Flags);
+                switch (Descriptor->Type)
+                {
+                    case CmResourceTypePort:
+                        DPRINT1("PNPHARVEST: %s port start=%I64x length=0x%lx\n",
+                                Label,
+                                Descriptor->u.Port.Start.QuadPart,
+                                Descriptor->u.Port.Length);
+                        break;
+                    case CmResourceTypeInterrupt:
+                        DPRINT1("PNPHARVEST: %s interrupt level=%lu vector=%lu affinity=%p\n",
+                                Label,
+                                Descriptor->u.Interrupt.Level,
+                                Descriptor->u.Interrupt.Vector,
+                                (PVOID)Descriptor->u.Interrupt.Affinity);
+                        break;
+                    case CmResourceTypeMemory:
+                        DPRINT1("PNPHARVEST: %s memory start=%I64x length=0x%lx\n",
+                                Label,
+                                Descriptor->u.Memory.Start.QuadPart,
+                                Descriptor->u.Memory.Length);
+                        break;
+                    case CmResourceTypeDma:
+                        DPRINT1("PNPHARVEST: %s dma channel=%lu port=%lu\n",
+                                Label,
+                                Descriptor->u.Dma.Channel,
+                                Descriptor->u.Dma.Port);
+                        break;
+                    case CmResourceTypeBusNumber:
+                        DPRINT1("PNPHARVEST: %s bus start=%lu length=%lu\n",
+                                Label,
+                                Descriptor->u.BusNumber.Start,
+                                Descriptor->u.BusNumber.Length);
+                        break;
+                    case CmResourceTypeDeviceSpecific:
+                        DPRINT1("PNPHARVEST: %s device_specific bytes=%lu\n",
+                                Label,
+                                Descriptor->u.DeviceSpecificData.DataSize);
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            if (Descriptor->Type == CmResourceTypeDeviceSpecific)
+            {
+                Descriptor = (PCM_PARTIAL_RESOURCE_DESCRIPTOR)
+                    ((PUCHAR)(Descriptor + 1) +
+                     Descriptor->u.DeviceSpecificData.DataSize);
+            }
+            else
+            {
+                ++Descriptor;
+            }
+        }
+        Full = (PCM_FULL_RESOURCE_DESCRIPTOR)Descriptor;
+    }
+}
+
 NTSTATUS
 IopSynchronousCall(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -78,7 +237,27 @@ IopSynchronousCall(
     *IrpStack = *IoStackLocation;
 
     /* Call the driver */
+    if (PiKdHarvestEnabled())
+    {
+        DPRINT1("PNPHARVEST: dispatch irp=%p major=0x%02x minor=0x%02x device=%p top=%p driver=%p name=\"%wZ\"\n",
+                Irp,
+                IrpStack->MajorFunction,
+                IrpStack->MinorFunction,
+                DeviceObject,
+                TopDeviceObject,
+                TopDeviceObject->DriverObject,
+                &TopDeviceObject->DriverObject->DriverName);
+    }
     Status = IoCallDriver(TopDeviceObject, Irp);
+    if (PiKdHarvestEnabled())
+    {
+        DPRINT1("PNPHARVEST: IoCallDriver returned 0x%08lx irp=%p pending=%u iosb=0x%08lx information=%p\n",
+                Status,
+                Irp,
+                Status == STATUS_PENDING,
+                IoStatusBlock.Status,
+                (PVOID)IoStatusBlock.Information);
+    }
     /* Otherwise we may get stuck here or have IoStatusBlock not populated */
     ASSERT(!KeAreAllApcsDisabled());
 #if defined(_M_ARM64)
@@ -96,9 +275,18 @@ IopSynchronousCall(
 #endif
     if (Status == STATUS_PENDING)
     {
+        if (PiKdHarvestEnabled())
+            DPRINT1("PNPHARVEST: waiting for irp=%p completion event=%p\n", Irp, &Event);
         /* Wait for it */
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = IoStatusBlock.Status;
+        if (PiKdHarvestEnabled())
+        {
+            DPRINT1("PNPHARVEST: wait completed irp=%p status=0x%08lx information=%p\n",
+                    Irp,
+                    Status,
+                    (PVOID)IoStatusBlock.Information);
+        }
     }
 
     /* Remove the reference */
@@ -127,8 +315,31 @@ PiIrpStartDevice(
         .Parameters.StartDevice.AllocatedResourcesTranslated = DeviceNode->ResourceListTranslated
     };
 
+    DPRINT("PNPTRACE: sending IRP_MN_START_DEVICE to \"%wZ\"\n",
+            &DeviceNode->InstancePath);
+
+    if (PiKdHarvestEnabled())
+    {
+        DPRINT1("PNPHARVEST: start devnode=%p instance=\"%wZ\" service=\"%wZ\" state=%u previous=%u flags=0x%08lx problem=%lu completion=0x%08lx pdo=%p\n",
+                DeviceNode,
+                &DeviceNode->InstancePath,
+                &DeviceNode->ServiceName,
+                DeviceNode->State,
+                DeviceNode->PreviousState,
+                DeviceNode->Flags,
+                DeviceNode->Problem,
+                DeviceNode->CompletionStatus,
+                DeviceNode->PhysicalDeviceObject);
+        PiKdHarvestDeviceStack(DeviceNode->PhysicalDeviceObject);
+        PiKdHarvestResourceList("raw", DeviceNode->ResourceList);
+        PiKdHarvestResourceList("translated", DeviceNode->ResourceListTranslated);
+    }
+
     // Vista+ does an asynchronous call
     NTSTATUS status = IopSynchronousCall(DeviceNode->PhysicalDeviceObject, &stack, &info);
+    DPRINT("PNPTRACE: IRP_MN_START_DEVICE completed 0x%08lx for \"%wZ\"\n",
+            status,
+            &DeviceNode->InstancePath);
     DeviceNode->CompletionStatus = status;
     return status;
 }

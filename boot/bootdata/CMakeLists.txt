@@ -89,7 +89,17 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/welcome_config/)
 endif()
 
 # freeldr.ini
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR bootcd)
+if(KDBG AND _WINKD_)
+    set(KDNET_BOOT_HOST_MAC_OPTION "")
+    if(NOT KDNET_BOOT_HOST_MAC STREQUAL "")
+        set(KDNET_BOOT_HOST_MAC_OPTION "/HOSTMAC=${KDNET_BOOT_HOST_MAC}")
+    endif()
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/dualdebug.ini.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/dualdebug.ini @ONLY)
+    add_cd_file(FILE ${CMAKE_CURRENT_BINARY_DIR}/dualdebug.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR bootcd)
+else()
+    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR bootcd)
+endif()
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_regtest.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR regtest)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/kmtestcd/kmtestcd.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR kmtestcd)
 

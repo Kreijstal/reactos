@@ -935,7 +935,7 @@ IopInitializeBuiltinDriver(IN PLDR_DATA_TABLE_ENTRY BootLdrEntry)
     /*
      * Initialize the driver
      */
-    NTSTATUS driverEntryStatus;
+    NTSTATUS driverEntryStatus = STATUS_NOT_SUPPORTED;
     Status = IopInitializeDriverModule(LdrEntry,
                                        serviceHandle,
                                        &DriverObject,
@@ -943,7 +943,13 @@ IopInitializeBuiltinDriver(IN PLDR_DATA_TABLE_ENTRY BootLdrEntry)
 
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Driver '%wZ' load failed, status (%x)\n", ModuleName, Status);
+        DPRINT1("DRIVERHARVEST: boot driver '%wZ' load failed status=0x%08lx DriverEntry=0x%08lx image=%p entry=%p size=0x%lx\n",
+                ModuleName,
+                Status,
+                driverEntryStatus,
+                LdrEntry->DllBase,
+                LdrEntry->EntryPoint,
+                LdrEntry->SizeOfImage);
         return FALSE;
     }
 
