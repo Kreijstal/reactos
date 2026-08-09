@@ -119,7 +119,7 @@ KiInitializeContextThread(IN PKTHREAD Thread,
         TrapFrame->Rax = Context->Rax;
         TrapFrame->Rcx = Context->Rcx;
         TrapFrame->Rdx = Context->Rdx;
-        TrapFrame->Rbp = 0; // Context->Rbp; // 0 on Vista, copied on Win 10
+        TrapFrame->Rbp = Context->Rbp;
         TrapFrame->R8 = Context->R8;
         TrapFrame->R9 = Context->R9;
         TrapFrame->R10 = Context->R10;
@@ -167,8 +167,10 @@ KiInitializeContextThread(IN PKTHREAD Thread,
         /* KiUserThreadStartupExit returns to KiServiceExit3 */
         ExceptionFrame->Return = (ULONG64)KiServiceExit3;
 
-        /* Allocate home space on the stack */
-        TrapFrame->Rsp -= 5 * sizeof(PVOID);
+        /* Reserve home space and preserve the x64 function-entry alignment. */
+        TrapFrame->Rsp -= 4 * sizeof(PVOID);
+        if ((TrapFrame->Rsp & 0xF) == 0)
+            TrapFrame->Rsp -= sizeof(PVOID);
     }
     else
     {
@@ -326,5 +328,3 @@ KiSwapContextResume(
 }
 
 /* EOF */
-
-
