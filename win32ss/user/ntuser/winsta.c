@@ -53,30 +53,48 @@ UserCreateWinstaDirectory(VOID)
 {
     NTSTATUS Status;
     ULONG SessionId;
+    HANDLE hWindowsDir;
+    UNICODE_STRING WindowsDir;
     OBJECT_ATTRIBUTES ObjectAttributes;
     WCHAR wstrWindowStationsDir[MAX_PATH];
 
     /* Create the WindowStations directory and cache its path for later use */
     SessionId = PsGetCurrentProcessSessionId(); // gSessionId
-    if (SessionId == 0)
-    {
-        if (!RtlCreateUnicodeString(&gustrWindowStationsDir, WINSTA_OBJ_DIR))
-            return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    else
-    {
-        Status = RtlStringCbPrintfW(wstrWindowStationsDir,
-                                    sizeof(wstrWindowStationsDir),
-                                    L"%ws\\%lu%ws",
-                                    SESSION_DIR,
-                                    SessionId,
-                                    WINSTA_OBJ_DIR);
-        if (!NT_SUCCESS(Status))
-            return Status;
+    Status = RtlStringCbPrintfW(wstrWindowStationsDir,
+                                sizeof(wstrWindowStationsDir),
+                                L"%ws\\%lu\\Windows",
+                                SESSION_DIR,
+                                SessionId);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
-        if (!RtlCreateUnicodeString(&gustrWindowStationsDir, wstrWindowStationsDir))
-            return STATUS_INSUFFICIENT_RESOURCES;
+    RtlInitUnicodeString(&WindowsDir, wstrWindowStationsDir);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &WindowsDir,
+                               OBJ_KERNEL_HANDLE | OBJ_OPENIF | OBJ_PERMANENT,
+                               NULL,
+                               NULL);
+    Status = ZwCreateDirectoryObject(&hWindowsDir,
+                                     DIRECTORY_CREATE_SUBDIRECTORY,
+                                     &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("Could not create %wZ directory (Status 0x%X)\n", &WindowsDir, Status);
+        return Status;
     }
+    ZwClose(hWindowsDir);
+
+    Status = RtlStringCbPrintfW(wstrWindowStationsDir,
+                                sizeof(wstrWindowStationsDir),
+                                L"%ws\\%lu%ws",
+                                SESSION_DIR,
+                                SessionId,
+                                WINSTA_OBJ_DIR);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (!RtlCreateUnicodeString(&gustrWindowStationsDir, wstrWindowStationsDir))
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     InitializeObjectAttributes(&ObjectAttributes,
                                &gustrWindowStationsDir,

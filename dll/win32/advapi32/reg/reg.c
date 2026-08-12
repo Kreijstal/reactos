@@ -758,7 +758,7 @@ RegCopyTreeW(IN HKEY hKeySrc,
         goto Cleanup2;
     }
 
-    if (lpSubKey != NULL)
+    if (lpSubKey != NULL && *lpSubKey != UNICODE_NULL)
     {
         OBJECT_ATTRIBUTES ObjectAttributes;
         UNICODE_STRING SubKeyName;
@@ -2167,9 +2167,13 @@ RegSetKeyValueW(IN HKEY hKey,
                                    KeyHandle,
                                    NULL);
 
-        Status = NtOpenKey(&SubKeyHandle,
-                           KEY_SET_VALUE,
-                           &ObjectAttributes);
+        Status = NtCreateKey(&SubKeyHandle,
+                             KEY_SET_VALUE,
+                             &ObjectAttributes,
+                             0,
+                             NULL,
+                             REG_OPTION_NON_VOLATILE,
+                             NULL);
         if (!NT_SUCCESS(Status))
         {
             Ret = RtlNtStatusToDosError(Status);
@@ -2225,7 +2229,7 @@ RegSetKeyValueA(IN HKEY hKey,
         return RtlNtStatusToDosError(Status);
     }
 
-    if (lpSubKey != NULL)
+    if (lpSubKey != NULL && *lpSubKey != ANSI_NULL)
     {
         OBJECT_ATTRIBUTES ObjectAttributes;
         UNICODE_STRING SubKeyName;
@@ -2242,9 +2246,13 @@ RegSetKeyValueA(IN HKEY hKey,
                                    KeyHandle,
                                    NULL);
 
-        Status = NtOpenKey(&SubKeyHandle,
-                           KEY_SET_VALUE,
-                           &ObjectAttributes);
+        Status = NtCreateKey(&SubKeyHandle,
+                             KEY_SET_VALUE,
+                             &ObjectAttributes,
+                             0,
+                             NULL,
+                             REG_OPTION_NON_VOLATILE,
+                             NULL);
 
         RtlFreeUnicodeString(&SubKeyName);
 

@@ -570,7 +570,7 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     /* ThreadIdealProcessor */
     IQS_SAME
     (
-        ULONG_PTR,
+        ULONG,
         ULONG,
         ICIF_SET
     ),
@@ -667,8 +667,14 @@ static const INFORMATION_CLASS_INFO PsThreadInfoClass[] =
     // Windows 7
     /* ThreadCSwitchPmu -- no table entry on Windows */
     IQS_NONE,
-    /* ThreadWow64Context -- variable handling; left unvalidated (see probelib.c) */
-    IQS_NONE,
+    /* ThreadWow64Context (sizeof(WOW64_CONTEXT), ULONG alignment) */
+    {
+        716,
+        sizeof(ULONG),
+        716,
+        sizeof(ULONG),
+        ICIF_QUERY | ICIF_SET
+    },
 
     /* ThreadGroupInformation */
 #if (NTDDI_VERSION >= NTDDI_WIN7)

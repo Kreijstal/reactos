@@ -331,7 +331,7 @@ SVC_(ListenPort, 2)
 SVC_(LoadDriver, 1)
 SVC_(LoadKey, 2)
 SVC_(LoadKey2, 3)
-SVC_(LoadKeyEx, 4)
+SVC_(LoadKeyEx, 8)
 SVC_(LockFile, 10)
 SVC_(LockProductActivationKeys, 2)
 SVC_(LockRegistryKey, 1)
@@ -641,5 +641,4 @@ SVC_(WaitLowEventPair, 1)
 #if (NTDDI_VERSION >= NTDDI_VISTA)
 SVC_(WorkerFactoryWorkerReady, 1)
 #endif
-
 

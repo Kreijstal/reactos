@@ -4716,14 +4716,20 @@ static void test_query_volume_information_file(void)
 {
     NTSTATUS status;
     HANDLE dir;
-    WCHAR path[MAX_PATH];
+    WCHAR path[MAX_PATH], volume_path[MAX_PATH], fs_name[MAX_PATH];
     OBJECT_ATTRIBUTES attr;
     IO_STATUS_BLOCK io;
     UNICODE_STRING nameW;
     FILE_FS_VOLUME_INFORMATION *ffvi;
     BYTE buf[sizeof(FILE_FS_VOLUME_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
+    BOOL fat_volume = FALSE;
 
     GetWindowsDirectoryW( path, MAX_PATH );
+    if (GetVolumePathNameW( path, volume_path, MAX_PATH ) &&
+        GetVolumeInformationW( volume_path, NULL, 0, NULL, NULL, NULL,
+                               fs_name, ARRAY_SIZE(fs_name) ))
+        fat_volume = !wcsncmp( fs_name, L"FAT", 3 );
+
     pRtlDosPathNameToNtPathName_U( path, &nameW, NULL, NULL );
     attr.Length = sizeof(attr);
     attr.RootDirectory = 0;
@@ -4752,9 +4758,14 @@ static void test_query_volume_information_file(void)
     "expected %ld, got %Iu\n", (FIELD_OFFSET(FILE_FS_VOLUME_INFORMATION, VolumeLabel) + ffvi->VolumeLabelLength),
      io.Information);
 
-    todo_wine ok(ffvi->VolumeCreationTime.QuadPart != 0, "Missing VolumeCreationTime\n");
     ok(ffvi->VolumeSerialNumber != 0, "Missing VolumeSerialNumber\n");
-    ok(ffvi->SupportsObjects == 1,"expected 1, got %d\n", ffvi->SupportsObjects);
+    if (fat_volume)
+        win_skip("FAT has no volume creation time or object IDs\n");
+    else
+    {
+        todo_wine ok(ffvi->VolumeCreationTime.QuadPart != 0, "Missing VolumeCreationTime\n");
+        ok(ffvi->SupportsObjects == 1,"expected 1, got %d\n", ffvi->SupportsObjects);
+    }
     ok(ffvi->VolumeLabelLength == lstrlenW(ffvi->VolumeLabel) * sizeof(WCHAR), "got %ld\n", ffvi->VolumeLabelLength);
 
     trace("VolumeSerialNumber: %lx VolumeLabelName: %s\n", ffvi->VolumeSerialNumber, wine_dbgstr_w(ffvi->VolumeLabel));

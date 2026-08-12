@@ -2612,6 +2612,10 @@ IopCreateFile(OUT PHANDLE FileHandle,
         AccessMode = ExGetPreviousMode();
     }
 
+    /* User-mode file handles must request at least one access right. */
+    if ((AccessMode != KernelMode) && (DesiredAccess == 0))
+        return STATUS_ACCESS_DENIED;
+
     /* Check if we need to do parameter checking */
     if ((AccessMode != KernelMode) || (Options & IO_CHECK_CREATE_PARAMETERS))
     {

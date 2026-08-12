@@ -27,6 +27,24 @@ PspQueueApcSpecialApc(IN PKAPC Apc,
     ExFreePool(Apc);
 }
 
+VOID
+NTAPI
+PspQueueReservedApcSpecialApc(IN PKAPC Apc,
+                              IN OUT PKNORMAL_ROUTINE* NormalRoutine,
+                              IN OUT PVOID* NormalContext,
+                              IN OUT PVOID* SystemArgument1,
+                              IN OUT PVOID* SystemArgument2)
+{
+    ExpReleaseUserApcReserve(Apc);
+}
+
+VOID
+NTAPI
+PspQueueReservedApcRundown(IN PKAPC Apc)
+{
+    ExpReleaseUserApcReserve(Apc);
+}
+
 NTSTATUS
 NTAPI
 PsResumeThread(IN PETHREAD Thread,
@@ -601,6 +619,7 @@ NtQueueApcThreadEx(IN HANDLE ThreadHandle,
 {
     PKAPC Apc;
     PETHREAD Thread;
+    BOOLEAN ReservedApc = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
     PAGED_CODE();
 
@@ -621,24 +640,35 @@ NtQueueApcThreadEx(IN HANDLE ThreadHandle,
         goto Quit;
     }
 
-    /* Allocate an APC */
-    Apc = ExAllocatePoolWithQuotaTag(NonPagedPool |
-                                     POOL_QUOTA_FAIL_INSTEAD_OF_RAISE,
-                                     sizeof(KAPC),
-                                     TAG_PS_APC);
-    if (!Apc)
+    if (UserApcReserveHandle)
     {
-        /* Fail */
-        Status = STATUS_NO_MEMORY;
-        goto Quit;
+        Status = ExpAcquireUserApcReserve(UserApcReserveHandle,
+                                          ExGetPreviousMode(),
+                                          &Apc);
+        if (!NT_SUCCESS(Status))
+            goto Quit;
+        ReservedApc = TRUE;
+    }
+    else
+    {
+        /* Allocate an APC */
+        Apc = ExAllocatePoolWithQuotaTag(NonPagedPool |
+                                         POOL_QUOTA_FAIL_INSTEAD_OF_RAISE,
+                                         sizeof(KAPC),
+                                         TAG_PS_APC);
+        if (!Apc)
+        {
+            Status = STATUS_NO_MEMORY;
+            goto Quit;
+        }
     }
 
     /* Initialize the APC */
     KeInitializeApc(Apc,
                     &Thread->Tcb,
                     OriginalApcEnvironment,
-                    PspQueueApcSpecialApc,
-                    NULL,
+                    ReservedApc ? PspQueueReservedApcSpecialApc : PspQueueApcSpecialApc,
+                    ReservedApc ? PspQueueReservedApcRundown : NULL,
                     ApcRoutine,
                     UserMode,
                     NormalContext);
@@ -649,8 +679,11 @@ NtQueueApcThreadEx(IN HANDLE ThreadHandle,
                           SystemArgument2,
                           IO_NO_INCREMENT))
     {
-        /* We failed, free it */
-        ExFreePool(Apc);
+        /* We failed, release the reserved or dynamically allocated APC. */
+        if (ReservedApc)
+            ExpReleaseUserApcReserve(Apc);
+        else
+            ExFreePool(Apc);
         Status = STATUS_UNSUCCESSFUL;
     }
 

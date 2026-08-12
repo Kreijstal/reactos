@@ -15,6 +15,54 @@
 
 /* FUNCTIONS ******************************************************************/
 
+static
+VOID
+PspGetThreadFloatingPointContext(
+    _Inout_ PCONTEXT Context)
+{
+    DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 FloatState;
+
+    if ((Context->ContextFlags & CONTEXT_FLOATING_POINT) !=
+        CONTEXT_FLOATING_POINT)
+    {
+        return;
+    }
+
+    _fxsave64(&FloatState);
+
+    RtlCopyMemory(&Context->FltSave,
+                  &FloatState,
+                  FIELD_OFFSET(XMM_SAVE_AREA32, MxCsr));
+    Context->FltSave.MxCsr = Context->MxCsr;
+    Context->FltSave.MxCsr_Mask = FloatState.MxCsr_Mask;
+    RtlCopyMemory(Context->FltSave.FloatRegisters,
+                  FloatState.FloatRegisters,
+                  sizeof(Context->FltSave.FloatRegisters));
+}
+
+static
+VOID
+PspSetThreadFloatingPointContext(
+    _In_ PCONTEXT Context)
+{
+    DECLSPEC_ALIGN(16) XMM_SAVE_AREA32 FloatState;
+
+    if ((Context->ContextFlags & CONTEXT_FLOATING_POINT) !=
+        CONTEXT_FLOATING_POINT)
+    {
+        return;
+    }
+
+    _fxsave64(&FloatState);
+    RtlCopyMemory(&FloatState,
+                  &Context->FltSave,
+                  FIELD_OFFSET(XMM_SAVE_AREA32, MxCsr));
+    RtlCopyMemory(FloatState.FloatRegisters,
+                  Context->FltSave.FloatRegisters,
+                  sizeof(FloatState.FloatRegisters));
+    _fxrstor64(&FloatState);
+}
+
 
 _IRQL_requires_(APC_LEVEL)
 VOID
@@ -55,11 +103,25 @@ PspGetOrSetContextKernelRoutine(
     {
         /* Set the nonvolatiles on the stack, target frame is the trap frame */
         KiSetTrapContext(TrapFrame, &GetSetContext->Context, GetSetContext->Mode);
+        PspSetThreadFloatingPointContext(&GetSetContext->Context);
     }
     else
     {
         /* Get the nonvolatiles from the stack */
         KiGetTrapContext(TrapFrame, &GetSetContext->Context);
+        PspGetThreadFloatingPointContext(&GetSetContext->Context);
+
+        /* Report the original user stack top for a thread that has not
+           entered its start routine yet. */
+        if ((GetSetContext->Mode == UserMode) &&
+            ((GetSetContext->Context.ContextFlags & CONTEXT_CONTROL) ==
+             CONTEXT_CONTROL) &&
+            (GetSetContext->Context.Rip ==
+             (ULONG64)CONTAINING_RECORD(Thread, ETHREAD, Tcb)->StartAddress))
+        {
+            GetSetContext->Context.Rsp =
+                ALIGN_UP_BY(GetSetContext->Context.Rsp, PAGE_SIZE);
+        }
     }
 
     /* Notify the Native API that we are done */

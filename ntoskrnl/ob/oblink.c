@@ -685,6 +685,9 @@ NtCreateSymbolicLinkObject(OUT PHANDLE LinkHandle,
     NTSTATUS Status;
     PAGED_CODE();
 
+    if ((PreviousMode != KernelMode) && !ObjectAttributes)
+        return STATUS_ACCESS_VIOLATION;
+
     /* Check if we need to probe parameters */
     if (PreviousMode != KernelMode)
     {
@@ -698,6 +701,7 @@ NtCreateSymbolicLinkObject(OUT PHANDLE LinkHandle,
 
             /* Probe the return handle */
             ProbeForWriteHandle(LinkHandle);
+            *LinkHandle = NULL;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -844,6 +848,7 @@ NtOpenSymbolicLinkObject(OUT PHANDLE LinkHandle,
         {
             /* Probe the return handle */
             ProbeForWriteHandle(LinkHandle);
+            *LinkHandle = NULL;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -862,7 +867,7 @@ NtOpenSymbolicLinkObject(OUT PHANDLE LinkHandle,
                                 NULL,
                                 &hLink);
 
-    _SEH2_TRY
+    if (NT_SUCCESS(Status)) _SEH2_TRY
     {
         /* Return the handle to caller */
         *LinkHandle = hLink;

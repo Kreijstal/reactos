@@ -169,6 +169,15 @@ NtAddAtom(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtAllocateReserveObject(
+    _Out_ PHANDLE MemoryReserveHandle,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ MEMORY_RESERVE_OBJECT_TYPE Type
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtCancelTimer(
     _In_ HANDLE TimerHandle,
     _Out_opt_ PBOOLEAN CurrentState

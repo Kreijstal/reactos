@@ -1778,10 +1778,68 @@ NtQueryObject(IN HANDLE ObjectHandle,
 
             /* Information about all types */
             case ObjectTypesInformation:
-                DPRINT1("NOT IMPLEMENTED!\n");
-                InfoLength = Length;
-                Status = STATUS_NOT_IMPLEMENTED;
+            {
+                POBJECT_ALL_TYPES_INFORMATION AllTypesInfo;
+                POBJECT_HEADER_CREATOR_INFO CreatorInfo;
+                POBJECT_HEADER TypeHeader;
+                POBJECT_TYPE CurrentType;
+                PLIST_ENTRY ListHead, NextEntry;
+                ULONG NumberOfTypes = 0;
+                ULONG CurrentLength;
+
+                AllTypesInfo = (POBJECT_ALL_TYPES_INFORMATION)ObjectInformation;
+                InfoLength = ALIGN_UP(sizeof(*AllTypesInfo), ULONG_PTR);
+
+                ObpEnterObjectTypeMutex(ObpTypeObjectType);
+                ListHead = &ObpTypeObjectType->TypeList;
+                for (NextEntry = ListHead->Flink;
+                     NextEntry != ListHead;
+                     NextEntry = NextEntry->Flink)
+                {
+                    CreatorInfo = CONTAINING_RECORD(NextEntry,
+                                                    OBJECT_HEADER_CREATOR_INFO,
+                                                    TypeList);
+                    TypeHeader = (POBJECT_HEADER)(CreatorInfo + 1);
+                    CurrentType = (POBJECT_TYPE)&TypeHeader->Body;
+                    NumberOfTypes++;
+                    InfoLength += sizeof(OBJECT_TYPE_INFORMATION) +
+                                  ALIGN_UP(CurrentType->Name.Length +
+                                           sizeof(UNICODE_NULL),
+                                           ULONG_PTR);
+                }
+
+                if (Length >= sizeof(*AllTypesInfo))
+                    AllTypesInfo->NumberOfTypes = NumberOfTypes;
+
+                if (Length < InfoLength)
+                {
+                    ObpLeaveObjectTypeMutex(ObpTypeObjectType);
+                    Status = STATUS_INFO_LENGTH_MISMATCH;
+                    break;
+                }
+
+                CurrentLength = ALIGN_UP(sizeof(*AllTypesInfo), ULONG_PTR);
+                for (NextEntry = ListHead->Flink;
+                     NextEntry != ListHead;
+                     NextEntry = NextEntry->Flink)
+                {
+                    CreatorInfo = CONTAINING_RECORD(NextEntry,
+                                                    OBJECT_HEADER_CREATOR_INFO,
+                                                    TypeList);
+                    TypeHeader = (POBJECT_HEADER)(CreatorInfo + 1);
+                    CurrentType = (POBJECT_TYPE)&TypeHeader->Body;
+                    Status = ObQueryTypeInfo(CurrentType,
+                                             (POBJECT_TYPE_INFORMATION)
+                                             ((PUCHAR)ObjectInformation + CurrentLength),
+                                             Length,
+                                             &CurrentLength);
+                    if (!NT_SUCCESS(Status)) break;
+                }
+
+                ObpLeaveObjectTypeMutex(ObpTypeObjectType);
+                InfoLength = CurrentLength;
                 break;
+            }
 
             /* Information about the handle flags */
             case ObjectHandleFlagInformation:

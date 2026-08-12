@@ -773,6 +773,7 @@ PspExitThread(IN NTSTATUS ExitStatus)
         }
     }
 
+
     /* Rundown Win32 Thread if there is one */
     if (Thread->Tcb.Win32Thread) PspW32ThreadCallout(Thread,
                                                      PsW32ThreadCalloutExit);

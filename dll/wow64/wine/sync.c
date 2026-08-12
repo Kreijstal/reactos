@@ -155,7 +155,6 @@ void put_section_image_info( SECTION_IMAGE_INFORMATION32 *info32, const SECTION_
 }
 
 
-#ifndef __REACTOS__
 /**********************************************************************
  *           wow64_NtAcceptConnectPort
  */
@@ -171,7 +170,6 @@ NTSTATUS WINAPI wow64_NtAcceptConnectPort( UINT *args )
     FIXME( "%p %lu %p %u %p %p: stub\n", handle_ptr, id, msg, accept, write, read );
     return STATUS_NOT_IMPLEMENTED;
 }
-#endif
 
 
 /**********************************************************************

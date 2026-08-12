@@ -46,6 +46,7 @@ enum
     FLAG_LONG =          0x200,
     FLAG_WIDECHAR =      FLAG_LONG,
     FLAG_INT64 =         0x400,
+    FLAG_EXPLICIT_W =    0x1000,
 #ifdef _WIN64
     FLAG_INTPTR =        FLAG_INT64,
 #else
@@ -429,7 +430,7 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
         do
         {
                  if (chr == _T('h')) flags |= FLAG_SHORT;
-            else if (chr == _T('w')) flags |= FLAG_WIDECHAR;
+            else if (chr == _T('w')) flags |= FLAG_WIDECHAR | FLAG_EXPLICIT_W;
             else if (chr == _T('L')) flags |= 0; // FIXME: long double
             else if (chr == _T('F')) flags |= 0; // FIXME: what is that?
             else if (chr == _T('z') && *format && strchr("udxXion", *format))
@@ -440,7 +441,7 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
             {
                 /* Check if this is the 2nd 'l' in a row */
                 if (format[-2] == 'l') flags |= FLAG_INT64;
-                else flags |= FLAG_LONG;
+                flags ^= FLAG_LONG;
             }
             else if (chr == _T('I'))
             {
@@ -473,6 +474,13 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
         prefix = 0;
         switch (chr)
         {
+            case _T('%'):
+                string = buffer;
+                buffer[0] = _T('%');
+                buffer[1] = _T('\0');
+                len = 1;
+                break;
+
             case _T('n'):
                 if (flags & FLAG_INT64)
                     *va_arg(argptr, __int64*) = written_all;
@@ -493,6 +501,15 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
                 if (!(flags & FLAG_SHORT)) flags |= FLAG_WIDECHAR;
 #endif
             case_char:
+                if ((flags & (FLAG_SHORT | FLAG_EXPLICIT_W)) ==
+                    (FLAG_SHORT | FLAG_EXPLICIT_W))
+                {
+#ifdef _UNICODE
+                    flags &= ~FLAG_WIDECHAR;
+#else
+                    flags |= FLAG_WIDECHAR;
+#endif
+                }
                 string = buffer;
                 len = 1;
                 if (flags & FLAG_WIDECHAR)
@@ -532,6 +549,15 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
 #endif
 
             case_string:
+                if ((flags & (FLAG_SHORT | FLAG_EXPLICIT_W)) ==
+                    (FLAG_SHORT | FLAG_EXPLICIT_W))
+                {
+#ifdef _UNICODE
+                    flags &= ~FLAG_WIDECHAR;
+#else
+                    flags |= FLAG_WIDECHAR;
+#endif
+                }
                 if (!string)
                 {
                     string = (_TCHAR*)_nullstring;
@@ -613,6 +639,8 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
             case _T('u'):
             case_unsigned:
                 val64 = va_arg_fu(argptr, flags);
+                if (!val64 && (chr == _T('x') || chr == _T('X')))
+                    prefix = 0;
 
             case_number:
 #ifdef _UNICODE
@@ -705,4 +733,3 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
 
     return written_all;
 }
-

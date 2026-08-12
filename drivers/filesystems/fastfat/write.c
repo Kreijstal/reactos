@@ -387,6 +387,16 @@ Return Value:
 
     NT_ASSERT( Vcb != NULL );
 
+    if ((TypeOfOpen == UserFileOpen) &&
+        !PagingIo &&
+        !SynchronousIo &&
+        (StartingByte.QuadPart == (LONGLONG)-2)) {
+
+        Irp->IoStatus.Information = 0;
+        FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_PARAMETER );
+        return STATUS_INVALID_PARAMETER;
+    }
+
     //
     //  Save callers who try to do cached IO to the raw volume from themselves.
     //
@@ -2699,9 +2709,9 @@ Return Value:
 
         if ( TypeOfOpen == UserDirectoryOpen ) {
 
-            DebugTrace( 0, Dbg, "FatCommonWrite -> STATUS_INVALID_PARAMETER\n", 0);
+            DebugTrace( 0, Dbg, "FatCommonWrite -> STATUS_INVALID_DEVICE_REQUEST\n", 0);
 
-            try_return( Status = STATUS_INVALID_PARAMETER );
+            try_return( Status = STATUS_INVALID_DEVICE_REQUEST );
         }
 
         //
@@ -3095,4 +3105,3 @@ Return Value:
     ExFreePool( Parameter );
 
 }
-

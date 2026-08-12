@@ -128,6 +128,10 @@ IopDeleteIoCompletion(PVOID ObjectBody)
                 Irp = CONTAINING_RECORD(Packet, IRP, Tail.Overlay.ListEntry);
                 IoFreeIrp(Irp);
             }
+            else if (Packet->PacketType == IopCompletionPacketQuota)
+            {
+                ExpReleaseIoCompletionReserve(Packet);
+            }
             else
             {
                 /* Use common routine */
@@ -536,8 +540,11 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
                 IoStatus.Status = Packet->IoStatus;
                 IoStatus.Information = Packet->IoStatusInformation;
 
-                /* Free the packet */
-                IopFreeMiniPacket(Packet);
+                /* Release a reserve object or free a normal mini packet. */
+                if (Packet->PacketType == IopCompletionPacketQuota)
+                    ExpReleaseIoCompletionReserve(Packet);
+                else
+                    IopFreeMiniPacket(Packet);
             }
 
             /* Enter SEH to write back the values */
@@ -566,11 +573,161 @@ NtRemoveIoCompletion(IN HANDLE IoCompletionHandle,
 
 NTSTATUS
 NTAPI
+NtRemoveIoCompletionEx(IN HANDLE IoCompletionHandle,
+                       OUT PVOID IoCompletionInformationBuffer,
+                       IN ULONG Count,
+                       OUT PULONG NumEntriesRemoved,
+                       IN PLARGE_INTEGER Timeout OPTIONAL,
+                       IN BOOLEAN Alertable)
+{
+    typedef struct _IOP_FILE_IO_COMPLETION_INFORMATION
+    {
+        PVOID KeyContext;
+        PVOID ApcContext;
+        IO_STATUS_BLOCK IoStatusBlock;
+    } IOP_FILE_IO_COMPLETION_INFORMATION, *PIOP_FILE_IO_COMPLETION_INFORMATION;
+    LARGE_INTEGER SafeTimeout, ZeroTimeout = {{0}};
+    PKQUEUE Queue;
+    PIOP_MINI_COMPLETION_PACKET Packet;
+    PLIST_ENTRY ListEntry;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    KPROCESSOR_MODE WaitMode;
+    NTSTATUS Status;
+    PIRP Irp;
+    IOP_FILE_IO_COMPLETION_INFORMATION Completion;
+    PIOP_FILE_IO_COMPLETION_INFORMATION IoCompletionInformation = IoCompletionInformationBuffer;
+    ULONG Index = 0;
+    PAGED_CODE();
+
+    if (!Count) return STATUS_INVALID_PARAMETER;
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForWrite(IoCompletionInformation,
+                          Count * sizeof(*IoCompletionInformation),
+                          TYPE_ALIGNMENT(IOP_FILE_IO_COMPLETION_INFORMATION));
+            ProbeForWriteUlong(NumEntriesRemoved);
+            if (Timeout)
+            {
+                SafeTimeout = ProbeForReadLargeInteger(Timeout);
+                Timeout = &SafeTimeout;
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Status = ObReferenceObjectByHandle(IoCompletionHandle,
+                                       IO_COMPLETION_MODIFY_STATE,
+                                       IoCompletionType,
+                                       PreviousMode,
+                                       (PVOID*)&Queue,
+                                       NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    if (Alertable &&
+        PreviousMode != KernelMode &&
+        ((KeGetCurrentThread()->Queue != Queue) ||
+         (KeReadStateQueue(Queue) == 0)))
+    {
+        BOOLEAN WasAlerted = KeTestAlertThread(UserMode);
+
+        if (KeGetCurrentThread()->Queue != Queue && WasAlerted)
+        {
+            Status = STATUS_ALERTED;
+            goto Complete;
+        }
+
+        if (KeGetCurrentThread()->Queue != Queue &&
+            KeGetCurrentThread()->ApcState.UserApcPending)
+        {
+            Status = STATUS_USER_APC;
+            goto Complete;
+        }
+    }
+
+    WaitMode = Alertable ? PreviousMode : KernelMode;
+    for (;;)
+    {
+        ListEntry = KeRemoveQueue(Queue, WaitMode, Timeout);
+        if (((NTSTATUS)(ULONG_PTR)ListEntry == STATUS_TIMEOUT) ||
+            ((NTSTATUS)(ULONG_PTR)ListEntry == STATUS_USER_APC))
+        {
+            Status = Index ? STATUS_SUCCESS : (NTSTATUS)(ULONG_PTR)ListEntry;
+            break;
+        }
+
+        Packet = CONTAINING_RECORD(ListEntry,
+                                   IOP_MINI_COMPLETION_PACKET,
+                                   ListEntry);
+        if (Packet->PacketType == IopCompletionPacketIrp)
+        {
+            Irp = CONTAINING_RECORD(ListEntry, IRP, Tail.Overlay.ListEntry);
+            Completion.KeyContext = Irp->Tail.CompletionKey;
+            Completion.ApcContext = Irp->Overlay.AsynchronousParameters.UserApcContext;
+            Completion.IoStatusBlock = Irp->IoStatus;
+            IoFreeIrp(Irp);
+        }
+        else
+        {
+            Completion.KeyContext = Packet->KeyContext;
+            Completion.ApcContext = Packet->ApcContext;
+            Completion.IoStatusBlock.Status = Packet->IoStatus;
+            Completion.IoStatusBlock.Information = Packet->IoStatusInformation;
+
+            if (Packet->PacketType == IopCompletionPacketQuota)
+                ExpReleaseIoCompletionReserve(Packet);
+            else
+                IopFreeMiniPacket(Packet);
+        }
+
+        _SEH2_TRY
+        {
+            IoCompletionInformation[Index] = Completion;
+        }
+        _SEH2_EXCEPT(ExSystemExceptionFilter())
+        {
+            Status = _SEH2_GetExceptionCode();
+            goto Complete;
+        }
+        _SEH2_END;
+
+        if (++Index == Count)
+        {
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
+        Timeout = &ZeroTimeout;
+    }
+
+Complete:
+    _SEH2_TRY
+    {
+        *NumEntriesRemoved = Index;
+    }
+    _SEH2_EXCEPT(ExSystemExceptionFilter())
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    ObDereferenceObject(Queue);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
 NtSetIoCompletion(IN HANDLE IoCompletionPortHandle,
                   IN PVOID CompletionKey,
                   IN PVOID CompletionContext,
                   IN NTSTATUS CompletionStatus,
-                  IN ULONG CompletionInformation)
+                  IN ULONG_PTR CompletionInformation)
 {
     NTSTATUS Status;
     PKQUEUE Queue;
@@ -598,5 +755,46 @@ NtSetIoCompletion(IN HANDLE IoCompletionPortHandle,
     }
 
     /* Return status */
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+NtSetIoCompletionEx(IN HANDLE IoCompletionPortHandle,
+                    IN HANDLE IoCompletionReserveHandle,
+                    IN ULONG_PTR CompletionKey,
+                    IN ULONG_PTR CompletionContext,
+                    IN NTSTATUS CompletionStatus,
+                    IN ULONG_PTR CompletionInformation)
+{
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PIOP_MINI_COMPLETION_PACKET Packet;
+    PKQUEUE Queue;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    Status = ObReferenceObjectByHandle(IoCompletionPortHandle,
+                                       IO_COMPLETION_MODIFY_STATE,
+                                       IoCompletionType,
+                                       PreviousMode,
+                                       (PVOID *)&Queue,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = ExpAcquireIoCompletionReserve(IoCompletionReserveHandle,
+                                           PreviousMode,
+                                           (PVOID *)&Packet);
+    if (NT_SUCCESS(Status))
+    {
+        Packet->PacketType = IopCompletionPacketQuota;
+        Packet->KeyContext = (PVOID)CompletionKey;
+        Packet->ApcContext = (PVOID)CompletionContext;
+        Packet->IoStatus = CompletionStatus;
+        Packet->IoStatusInformation = CompletionInformation;
+        KeInsertQueue(Queue, &Packet->ListEntry);
+    }
+
+    ObDereferenceObject(Queue);
     return Status;
 }

@@ -43,10 +43,9 @@ UCHAR IopQueryOperationLength[FileMaximumInformation] =
     [FileNetworkOpenInformation] = sizeof(FILE_NETWORK_OPEN_INFORMATION),
     [FileAttributeTagInformation] = sizeof(FILE_ATTRIBUTE_TAG_INFORMATION),
 #if (NTDDI_VERSION >= NTDDI_VISTA)
-    /* Vista+ query classes.  Only FileHardLinkInformation is implemented
-     * (forwarded to the FSD); the hint/optimisation classes 41-45 and
-     * 47-49 stay zero until they grow kernel-side handlers. */
+    /* Vista+ query classes. */
     [FileHardLinkInformation] = sizeof(FILE_LINKS_INFORMATION),
+    [FileIoCompletionNotificationInformation] = sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION),
 #endif
 };
 

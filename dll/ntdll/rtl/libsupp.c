@@ -1205,6 +1205,41 @@ RtlWow64EnableFsRedirectionEx(IN PVOID Wow64FsEnableRedirection,
 #endif
 }
 
+#ifdef _M_AMD64
+/*
+ * @implemented
+ */
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWow64GetThreadContext(
+    _In_ HANDLE ThreadHandle,
+    _Inout_ PWOW64_CONTEXT ThreadContext)
+{
+    return NtQueryInformationThread(ThreadHandle,
+                                    ThreadWow64Context,
+                                    ThreadContext,
+                                    sizeof(*ThreadContext),
+                                    NULL);
+}
+
+/*
+ * @implemented
+ */
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWow64SetThreadContext(
+    _In_ HANDLE ThreadHandle,
+    _In_ PWOW64_CONTEXT ThreadContext)
+{
+    return NtSetInformationThread(ThreadHandle,
+                                  ThreadWow64Context,
+                                  ThreadContext,
+                                  sizeof(*ThreadContext));
+}
+#endif /* _M_AMD64 */
+
 /*
  * @unimplemented
  */

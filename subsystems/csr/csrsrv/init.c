@@ -507,6 +507,47 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
         return Status;
     }
 
+    /* Create the real per-session BaseNamedObjects directory. */
+    RtlInitUnicodeString(&SessionString, L"BaseNamedObjects");
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SessionString,
+                               OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                               SessionObjectDirectory,
+                               &DosDevicesSd);
+    Status = NtCreateDirectoryObject(&BnoHandle,
+                                     DIRECTORY_ALL_ACCESS,
+                                     &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CSRSS: Failed to create the session BNO directory - status = %lx\n",
+                Status);
+        FreeDosDevicesProtection(&DosDevicesSd);
+        return Status;
+    }
+    NtClose(BnoHandle);
+
+    /* Session zero also exposes the distinct legacy global namespace. */
+    if (Session == 0)
+    {
+        RtlInitUnicodeString(&SessionString, L"\\BaseNamedObjects");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &SessionString,
+                                   OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   &DosDevicesSd);
+        Status = NtCreateDirectoryObject(&BnoHandle,
+                                         DIRECTORY_ALL_ACCESS,
+                                         &ObjectAttributes);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("CSRSS: Failed to create the legacy BNO directory - status = %lx\n",
+                    Status);
+            FreeDosDevicesProtection(&DosDevicesSd);
+            return Status;
+        }
+        NtClose(BnoHandle);
+    }
+
     /* Next, create a directory for this session's DOS Devices */
     RtlInitUnicodeString(&SessionString, L"DosDevices");
     InitializeObjectAttributes(&ObjectAttributes,

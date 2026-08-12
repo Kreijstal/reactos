@@ -178,6 +178,12 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
         Length = QueryTable->DefaultLength;
         if (!Length)
         {
+            if (!Data &&
+                ((Type == REG_SZ) ||
+                 (Type == REG_EXPAND_SZ) ||
+                 (Type == REG_MULTI_SZ)))
+                return STATUS_DATA_OVERRUN;
+
             /* No default length given, try to calculate it */
             p = Data;
             if ((Type == REG_SZ) || (Type == REG_EXPAND_SZ))
