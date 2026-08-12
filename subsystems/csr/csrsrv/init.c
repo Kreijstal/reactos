@@ -454,18 +454,8 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
     _swprintf(SessionBuffer, L"%ld", Session);
     RtlInitUnicodeString(&SessionString, SessionBuffer);
 
-    /* Check if this is the first Session */
-    if (Session)
-    {
-        /* Not the first, so the name will be slighly more complex */
-        _swprintf(BnoBuffer, L"%ws\\%ld\\BaseNamedObjects", SESSION_ROOT, Session);
-        RtlInitUnicodeString(&BnoString, BnoBuffer);
-    }
-    else
-    {
-        /* Use the direct name */
-        RtlInitUnicodeString(&BnoString, L"\\BaseNamedObjects");
-    }
+    _swprintf(BnoBuffer, L"%ws\\%ld\\BaseNamedObjects", SESSION_ROOT, Session);
+    RtlInitUnicodeString(&BnoString, BnoBuffer);
 
     /* Create the symlink */
     InitializeObjectAttributes(&ObjectAttributes,
@@ -507,6 +497,47 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
                 "CsrCreateSessionObjectDirectory - status = %lx\n", Status);
         FreeDosDevicesProtection(&DosDevicesSd);
         return Status;
+    }
+
+    /* Create the real per-session BaseNamedObjects directory. */
+    RtlInitUnicodeString(&SessionString, L"BaseNamedObjects");
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SessionString,
+                               OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                               SessionObjectDirectory,
+                               &DosDevicesSd);
+    Status = NtCreateDirectoryObject(&BnoHandle,
+                                     DIRECTORY_ALL_ACCESS,
+                                     &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("CSRSS: Failed to create the session BNO directory - status = %lx\n",
+                Status);
+        FreeDosDevicesProtection(&DosDevicesSd);
+        return Status;
+    }
+    NtClose(BnoHandle);
+
+    /* Session zero also exposes the distinct legacy global namespace. */
+    if (Session == 0)
+    {
+        RtlInitUnicodeString(&SessionString, L"\\BaseNamedObjects");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &SessionString,
+                                   OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   &DosDevicesSd);
+        Status = NtCreateDirectoryObject(&BnoHandle,
+                                         DIRECTORY_ALL_ACCESS,
+                                         &ObjectAttributes);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("CSRSS: Failed to create the legacy BNO directory - status = %lx\n",
+                    Status);
+            FreeDosDevicesProtection(&DosDevicesSd);
+            return Status;
+        }
+        NtClose(BnoHandle);
     }
 
     /* Next, create a directory for this session's DOS Devices */

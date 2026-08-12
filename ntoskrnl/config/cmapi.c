@@ -1836,6 +1836,174 @@ Quickie:
     return Status;
 }
 
+static BOOLEAN
+CmpIsProtectedRegistryKey(IN PCM_KEY_CONTROL_BLOCK Kcb)
+{
+    static const UNICODE_STRING ClassesInterface =
+        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\Classes\\Interface");
+    PUNICODE_STRING KeyName;
+    BOOLEAN Protected = FALSE;
+
+    KeyName = CmpConstructName(Kcb);
+    if (KeyName)
+    {
+        Protected = RtlEqualUnicodeString(KeyName, &ClassesInterface, TRUE);
+        CmpFree(KeyName, 0);
+    }
+
+    return Protected;
+}
+
+NTSTATUS
+NTAPI
+CmRenameKey(IN PCM_KEY_BODY KeyBody,
+            IN PUNICODE_STRING NewName)
+{
+    PCM_KEY_CONTROL_BLOCK Kcb, ParentKcb;
+    PCM_NAME_CONTROL_BLOCK NewNameBlock, OldNameBlock;
+    PCM_KEY_NODE Node, NewNode, ParentNode, ChildNode;
+    PHHIVE Hive;
+    HCELL_INDEX Cell, NewCell, ParentCell, ChildCell;
+    HSTORAGE_TYPE StorageType;
+    ULONG CellSize, SubKeyCount, Index, ConvKey, OldConvKey;
+    LARGE_INTEGER WriteTime;
+    PWCHAR Character;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    Kcb = KeyBody->KeyControlBlock;
+    ParentKcb = Kcb->ParentKcb;
+    if (!ParentKcb)
+        return STATUS_CANNOT_DELETE;
+
+    NewNameBlock = CmpGetNameControlBlock(NewName);
+    if (!NewNameBlock)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    CmpLockRegistryExclusive();
+    OldConvKey = Kcb->ConvKey;
+    CmpAcquireTwoKcbLocksExclusiveByKey(OldConvKey, ParentKcb->ConvKey);
+
+    if (Kcb->Delete)
+    {
+        Status = STATUS_KEY_DELETED;
+        goto Cleanup;
+    }
+
+    Hive = Kcb->KeyHive;
+    Cell = Kcb->KeyCell;
+    ParentCell = ParentKcb->KeyCell;
+    Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
+    ParentNode = (PCM_KEY_NODE)HvGetCell(Hive, ParentCell);
+    if (!Node || !ParentNode)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        if (ParentNode) HvReleaseCell(Hive, ParentCell);
+        if (Node) HvReleaseCell(Hive, Cell);
+        goto Cleanup;
+    }
+
+    if (CmpFindSubKeyByName(Hive, ParentNode, NewName) != HCELL_NIL)
+    {
+        Status = STATUS_CANNOT_DELETE;
+        HvReleaseCell(Hive, ParentCell);
+        HvReleaseCell(Hive, Cell);
+        goto Cleanup;
+    }
+
+    StorageType = HvGetCellType(Cell);
+    CellSize = FIELD_OFFSET(CM_KEY_NODE, Name) + CmpNameSize(Hive, NewName);
+    NewCell = HvAllocateCell(Hive, CellSize, StorageType, Cell);
+    if (NewCell == HCELL_NIL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        HvReleaseCell(Hive, ParentCell);
+        HvReleaseCell(Hive, Cell);
+        goto Cleanup;
+    }
+
+    NewNode = (PCM_KEY_NODE)HvGetCell(Hive, NewCell);
+    if (!NewNode)
+    {
+        HvFreeCell(Hive, NewCell);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        HvReleaseCell(Hive, ParentCell);
+        HvReleaseCell(Hive, Cell);
+        goto Cleanup;
+    }
+
+    RtlCopyMemory(NewNode, Node, FIELD_OFFSET(CM_KEY_NODE, Name));
+    NewNode->Flags &= ~KEY_COMP_NAME;
+    NewNode->NameLength = CmpCopyName(Hive, NewNode->Name, NewName);
+    if (NewNode->NameLength < NewName->Length)
+        NewNode->Flags |= KEY_COMP_NAME;
+    KeQuerySystemTime(&WriteTime);
+    NewNode->LastWriteTime = WriteTime;
+
+    HvReleaseCell(Hive, NewCell);
+    HvReleaseCell(Hive, ParentCell);
+    HvReleaseCell(Hive, Cell);
+
+    if (!CmpAddSubKey(Hive, ParentCell, NewCell))
+    {
+        HvFreeCell(Hive, NewCell);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    if (!CmpRemoveSubKey(Hive, ParentCell, Cell))
+    {
+        CmpRemoveSubKey(Hive, ParentCell, NewCell);
+        HvFreeCell(Hive, NewCell);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    NewNode = (PCM_KEY_NODE)HvGetCell(Hive, NewCell);
+    ASSERT(NewNode);
+    SubKeyCount = NewNode->SubKeyCounts[Stable] + NewNode->SubKeyCounts[Volatile];
+    for (Index = 0; Index < SubKeyCount; Index++)
+    {
+        ChildCell = CmpFindSubKeyByNumber(Hive, NewNode, Index);
+        if (ChildCell == HCELL_NIL)
+            continue;
+
+        HvMarkCellDirty(Hive, ChildCell, FALSE);
+        ChildNode = (PCM_KEY_NODE)HvGetCell(Hive, ChildCell);
+        if (ChildNode)
+        {
+            ChildNode->Parent = NewCell;
+            HvReleaseCell(Hive, ChildCell);
+        }
+    }
+    HvReleaseCell(Hive, NewCell);
+
+    CmpRemoveKeyControlBlock(Kcb);
+    OldNameBlock = Kcb->NameBlock;
+    ConvKey = ParentKcb->ConvKey;
+    Character = NewName->Buffer;
+    for (Index = 0; Index < NewName->Length; Index += sizeof(WCHAR), Character++)
+        ConvKey = COMPUTE_HASH_CHAR(ConvKey, *Character);
+
+    Kcb->ConvKey = ConvKey;
+    Kcb->KeyCell = NewCell;
+    Kcb->NameBlock = NewNameBlock;
+    NewNameBlock = NULL;
+    ASSERT(CmpInsertKeyHash(&Kcb->KeyHash, FALSE) == NULL);
+    CmpDereferenceNameControlBlockWithLock(OldNameBlock);
+
+    HvFreeCell(Hive, Cell);
+    CmpCleanUpSubKeyInfo(ParentKcb);
+    ParentKcb->KcbLastWriteTime = Kcb->KcbLastWriteTime = WriteTime;
+    CmpReportNotify(ParentKcb, Hive, ParentCell, REG_NOTIFY_CHANGE_NAME);
+
+Cleanup:
+    CmpReleaseTwoKcbLockByKey(OldConvKey, ParentKcb->ConvKey);
+    CmpUnlockRegistry();
+    if (NewNameBlock)
+        CmpDereferenceNameControlBlockWithLock(NewNameBlock);
+    return Status;
+}
+
 NTSTATUS
 NTAPI
 CmDeleteKey(IN PCM_KEY_BODY KeyBody)
@@ -1890,8 +2058,8 @@ CmDeleteKey(IN PCM_KEY_BODY KeyBody)
     ASSERT(Node->Flags == Kcb->Flags);
 
     /* Check if we don't have any children */
-    if (!(Node->SubKeyCounts[Stable] + Node->SubKeyCounts[Volatile]) &&
-        !(Node->Flags & KEY_NO_DELETE))
+    if (!(Node->Flags & KEY_NO_DELETE) &&
+        !CmpIsProtectedRegistryKey(Kcb))
     {
         /* Send notification to registered callbacks */
         CmpReportNotify(Kcb, Hive, Cell, REG_NOTIFY_CHANGE_NAME);
@@ -2034,7 +2202,8 @@ NTAPI
 CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
           IN POBJECT_ATTRIBUTES SourceFile,
           IN ULONG Flags,
-          IN PCM_KEY_BODY KeyBody)
+          IN PCM_KEY_BODY KeyBody,
+          OUT PCM_KEY_BODY *LoadedKeyBody OPTIONAL)
 {
     SECURITY_QUALITY_OF_SERVICE ServiceQos;
     SECURITY_CLIENT_CONTEXT ClientSecurityContext;
@@ -2043,6 +2212,8 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
     PCMHIVE CmHive, LoadedHive;
     NTSTATUS Status;
     CM_PARSE_CONTEXT ParseContext;
+
+    if (LoadedKeyBody) *LoadedKeyBody = NULL;
 
     /* Check if we have a trust key */
     if (KeyBody)
@@ -2085,6 +2256,8 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
                             &Allocate,
                             &CmHive,
                             CM_CHECK_REGISTRY_PURGE_VOLATILES);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("CmpCmdHiveOpen failed, Status %lx\n", Status);
 
     /* Get rid of the security context */
     SeDeleteClientSecurity(&ClientSecurityContext);
@@ -2145,7 +2318,8 @@ CmLoadKey(IN POBJECT_ATTRIBUTES TargetKey,
                                  TargetKey->RootDirectory,
                                  CmHive,
                                  Allocate,
-                                 TargetKey->SecurityDescriptor);
+                                 TargetKey->SecurityDescriptor,
+                                 LoadedKeyBody);
     if (NT_SUCCESS(Status))
     {
         /* Add to HiveList key */

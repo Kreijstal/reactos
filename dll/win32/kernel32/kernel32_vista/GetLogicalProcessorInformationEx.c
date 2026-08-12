@@ -10,6 +10,17 @@
 #define NDEBUG
 #include <debug.h>
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+NtQuerySystemInformationEx(
+    _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    _In_reads_bytes_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_to_opt_(SystemInformationLength, *ReturnLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength);
+
 /*
  * Windows 7+ exposes SystemLogicalProcessorAndGroupInformation via
  * NtQuerySystemInformationEx, but ReactOS's ntdll only stubs that. We degrade
@@ -83,6 +94,23 @@ GetLogicalProcessorInformationEx(
     if (ReturnedLength == NULL)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    AvailableLength = *ReturnedLength;
+    Status = NtQuerySystemInformationEx((SYSTEM_INFORMATION_CLASS)107,
+                                         &RelationshipType,
+                                         sizeof(RelationshipType),
+                                         Buffer,
+                                         AvailableLength,
+                                         ReturnedLength);
+    if (Status != STATUS_INVALID_INFO_CLASS && Status != STATUS_NOT_IMPLEMENTED)
+    {
+        if (Status == STATUS_INFO_LENGTH_MISMATCH)
+            Status = STATUS_BUFFER_TOO_SMALL;
+        if (NT_SUCCESS(Status))
+            return TRUE;
+        BaseSetLastNTError(Status);
         return FALSE;
     }
 

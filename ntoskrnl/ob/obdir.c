@@ -406,6 +406,7 @@ NtOpenDirectoryObject(OUT PHANDLE DirectoryHandle,
         {
             /* Probe the return handle */
             ProbeForWriteHandle(DirectoryHandle);
+            *DirectoryHandle = NULL;
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -814,7 +815,7 @@ NtCreateDirectoryObject(OUT PHANDLE DirectoryHandle,
                             &NewHandle);
 
     /* Enter SEH to protect write */
-    _SEH2_TRY
+    if (NT_SUCCESS(Status)) _SEH2_TRY
     {
         /* Return the handle back to the caller */
         *DirectoryHandle = NewHandle;

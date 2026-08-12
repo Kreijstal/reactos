@@ -310,6 +310,39 @@ NTAPI
 ExpInitializeProfileImplementation(VOID);
 
 CODE_SEG("INIT")
+BOOLEAN
+NTAPI
+ExpInitializeReserveObjectImplementation(VOID);
+
+NTSTATUS
+NTAPI
+ExpAcquireUserApcReserve(
+    _In_ HANDLE ReserveHandle,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Out_ PKAPC *Apc
+);
+
+VOID
+NTAPI
+ExpReleaseUserApcReserve(
+    _In_ PKAPC Apc
+);
+
+NTSTATUS
+NTAPI
+ExpAcquireIoCompletionReserve(
+    _In_ HANDLE ReserveHandle,
+    _In_ KPROCESSOR_MODE AccessMode,
+    _Out_ PVOID *Packet
+);
+
+VOID
+NTAPI
+ExpReleaseIoCompletionReserve(
+    _In_ PVOID Packet
+);
+
+CODE_SEG("INIT")
 VOID
 NTAPI
 ExpResourceInitialization(VOID);

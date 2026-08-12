@@ -270,6 +270,10 @@ Return Value:
 --*/
 
 {
+    PIO_STACK_LOCATION IrpSp;
+    PVOID Buffer;
+    ULONG Length;
+
 #if 0
     PIO_STACK_LOCATION IrpSp;
 
@@ -304,8 +308,15 @@ Return Value:
 
     PAGED_CODE();
 
-    FatCompleteRequest( IrpContext, Irp, STATUS_INVALID_DEVICE_REQUEST);
-    return STATUS_INVALID_DEVICE_REQUEST;
+    IrpSp = IoGetCurrentIrpStackLocation( Irp );
+    Length = IrpSp->Parameters.QueryEa.Length;
+    Buffer = FatMapUserBuffer( IrpContext, Irp );
+
+    if (Length) RtlZeroMemory( Buffer, Length );
+
+    Irp->IoStatus.Information = 0;
+    FatCompleteRequest( IrpContext, Irp, STATUS_NO_EAS_ON_FILE );
+    return STATUS_NO_EAS_ON_FILE;
 
 #if 0
     //
@@ -2039,5 +2050,4 @@ Return Value:
     return DuplicateFound;
 }
 #endif
-
 

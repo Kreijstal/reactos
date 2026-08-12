@@ -451,6 +451,8 @@ ObCheckObjectAccess(IN PVOID Object,
     NTSTATUS Status;
     BOOLEAN Result;
     ACCESS_MASK GrantedAccess;
+    ACCESS_MASK DesiredAccess;
+    ACCESS_MASK FullAccess;
     PPRIVILEGE_SET Privileges = NULL;
     PAGED_CODE();
 
@@ -476,17 +478,76 @@ ObCheckObjectAccess(IN PVOID Object,
     /* Lock the security context */
     SeLockSubjectContext(&AccessState->SubjectSecurityContext);
 
+    DesiredAccess = AccessState->RemainingDesiredAccess;
+
     /* Now do the entire access check */
     Result = SeAccessCheck(SecurityDescriptor,
                            &AccessState->SubjectSecurityContext,
                            TRUE,
-                           AccessState->RemainingDesiredAccess,
+                           DesiredAccess,
                            AccessState->PreviouslyGrantedAccess,
                            &Privileges,
                            &ObjectType->TypeInfo.GenericMapping,
                            AccessMode,
                            &GrantedAccess,
                            ReturnedStatus);
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    /* Full process/thread rights also authorize their limited counterparts. */
+    if (!Result && !(DesiredAccess & MAXIMUM_ALLOWED))
+    {
+        FullAccess = DesiredAccess;
+        if (ObjectType == PsProcessType)
+        {
+            if (FullAccess & PROCESS_QUERY_LIMITED_INFORMATION)
+            {
+                FullAccess &= ~PROCESS_QUERY_LIMITED_INFORMATION;
+                FullAccess |= PROCESS_QUERY_INFORMATION;
+            }
+        }
+        else if (ObjectType == PsThreadType)
+        {
+            if (FullAccess & THREAD_QUERY_LIMITED_INFORMATION)
+            {
+                FullAccess &= ~THREAD_QUERY_LIMITED_INFORMATION;
+                FullAccess |= THREAD_QUERY_INFORMATION;
+            }
+            if (FullAccess & THREAD_SET_LIMITED_INFORMATION)
+            {
+                FullAccess &= ~THREAD_SET_LIMITED_INFORMATION;
+                FullAccess |= THREAD_SET_INFORMATION;
+            }
+            if (FullAccess & THREAD_RESUME)
+            {
+                FullAccess &= ~THREAD_RESUME;
+                FullAccess |= THREAD_SUSPEND_RESUME;
+            }
+        }
+
+        if (FullAccess != DesiredAccess)
+        {
+            if (Privileges)
+            {
+                SeFreePrivileges(Privileges);
+                Privileges = NULL;
+            }
+
+            Result = SeAccessCheck(SecurityDescriptor,
+                                   &AccessState->SubjectSecurityContext,
+                                   TRUE,
+                                   FullAccess,
+                                   AccessState->PreviouslyGrantedAccess,
+                                   &Privileges,
+                                   &ObjectType->TypeInfo.GenericMapping,
+                                   AccessMode,
+                                   &GrantedAccess,
+                                   ReturnedStatus);
+            if (Result)
+                GrantedAccess = DesiredAccess;
+        }
+    }
+#endif
+
     if (Privileges)
     {
         /* We got privileges, append them to the access state and free them */

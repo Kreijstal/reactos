@@ -364,6 +364,7 @@ static NTSTATUS set_disposition_information(device_extension* Vcb, PIRP Irp, PFI
     file_ref* fileref = ccb ? ccb->fileref : NULL;
     ULONG atts, flags;
     NTSTATUS Status;
+    LARGE_INTEGER zero = {{0}};
 
     if (!fileref)
         return STATUS_INVALID_PARAMETER;
@@ -395,7 +396,8 @@ static NTSTATUS set_disposition_information(device_extension* Vcb, PIRP Irp, PFI
 
     TRACE("atts = %lx\n", atts);
 
-    if (atts & FILE_ATTRIBUTE_READONLY) {
+    if ((atts & FILE_ATTRIBUTE_READONLY) &&
+        (!ex || !(flags & FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE))) {
         TRACE("not allowing readonly file to be deleted\n");
         Status = STATUS_CANNOT_DELETE;
         goto end;
@@ -422,12 +424,30 @@ static NTSTATUS set_disposition_information(device_extension* Vcb, PIRP Irp, PFI
         }
     }
 
-    ccb->fileref->delete_on_close = flags & FILE_DISPOSITION_DELETE;
+    if ((flags & FILE_DISPOSITION_DELETE) &&
+        fcb->type != BTRFS_TYPE_DIRECTORY &&
+        !MmCanFileBeTruncated(&fcb->nonpaged->segment_object, &zero)) {
+        TRACE("trying to delete file which has an active mapping\n");
+        Status = STATUS_CANNOT_DELETE;
+        goto end;
+    }
+
+    if (ex && (flags & FILE_DISPOSITION_POSIX_SEMANTICS)) {
+        ccb->delete_on_close = !!(flags & FILE_DISPOSITION_DELETE);
+        ccb->posix_delete = ccb->delete_on_close;
+    } else {
+        ccb->fileref->delete_on_close = !!(flags & FILE_DISPOSITION_DELETE);
+        ccb->fileref->posix_delete = false;
+    }
+
+    if (ex && (flags & FILE_DISPOSITION_ON_CLOSE)) {
+        if (flags & FILE_DISPOSITION_DELETE)
+            ccb->options |= FILE_DELETE_ON_CLOSE;
+        else
+            ccb->options &= ~FILE_DELETE_ON_CLOSE;
+    }
 
     FileObject->DeletePending = flags & FILE_DISPOSITION_DELETE;
-
-    if (flags & FILE_DISPOSITION_DELETE && flags & FILE_DISPOSITION_POSIX_SEMANTICS)
-        ccb->fileref->posix_delete = true;
 
     Status = STATUS_SUCCESS;
 
@@ -3425,6 +3445,7 @@ static NTSTATUS set_link_information(device_extension* Vcb, PIRP Irp, PFILE_OBJE
     SECURITY_SUBJECT_CONTEXT subjcont;
     dir_child* dc = NULL;
     ULONG flags;
+    bool rename_same_file = false;
 
     InitializeListHead(&rollback);
 
@@ -3537,7 +3558,10 @@ static NTSTATUS set_link_information(device_extension* Vcb, PIRP Irp, PFILE_OBJE
                 Status = STATUS_OBJECT_NAME_COLLISION;
                 goto end;
             } else if (fileref == oldfileref) {
-                Status = STATUS_ACCESS_DENIED;
+                ExFreePool(utf8.Buffer);
+                utf8.Buffer = NULL;
+                rename_same_file = true;
+                Status = STATUS_SUCCESS;
                 goto end;
             } else if (!(flags & FILE_LINK_POSIX_SEMANTICS) && (oldfileref->open_count > 0 || has_open_children(oldfileref)) && !oldfileref->deleted) {
                 WARN("trying to overwrite open file\n");
@@ -3757,6 +3781,9 @@ end:
     ExReleaseResourceLite(fcb->Header.Resource);
     ExReleaseResourceLite(&Vcb->fileref_lock);
     ExReleaseResourceLite(&Vcb->tree_lock);
+
+    if (rename_same_file)
+        return set_rename_information(Vcb, Irp, FileObject, tfo, ex);
 
     return Status;
 }
@@ -3997,6 +4024,21 @@ NTSTATUS __stdcall drv_set_information(IN PDEVICE_OBJECT DeviceObject, IN PIRP I
             break;
         }
 
+        case FileDispositionInformationEx:
+        {
+            TRACE("FileDispositionInformationEx\n");
+
+            if (Irp->RequestorMode == UserMode && !(ccb->access & DELETE)) {
+                WARN("insufficient privileges\n");
+                Status = STATUS_ACCESS_DENIED;
+                break;
+            }
+
+            Status = set_disposition_information(Vcb, Irp, IrpSp->FileObject, true);
+
+            break;
+        }
+
         case FileEndOfFileInformation:
         {
             TRACE("FileEndOfFileInformation\n");
@@ -4047,21 +4089,6 @@ NTSTATUS __stdcall drv_set_information(IN PDEVICE_OBJECT DeviceObject, IN PIRP I
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wswitch"
 #endif
-        case FileDispositionInformationEx:
-        {
-            TRACE("FileDispositionInformationEx\n");
-
-            if (Irp->RequestorMode == UserMode && !(ccb->access & DELETE)) {
-                WARN("insufficient privileges\n");
-                Status = STATUS_ACCESS_DENIED;
-                break;
-            }
-
-            Status = set_disposition_information(Vcb, Irp, IrpSp->FileObject, true);
-
-            break;
-        }
-
         case FileRenameInformationEx:
             TRACE("FileRenameInformationEx\n");
             Status = set_rename_information(Vcb, Irp, IrpSp->FileObject, IrpSp->Parameters.SetFile.FileObject, true);
@@ -5489,13 +5516,6 @@ NTSTATUS __stdcall drv_query_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
         goto end;
     }
 
-    ffei = map_user_buffer(Irp, NormalPagePriority);
-    if (!ffei) {
-        ERR("could not get output buffer\n");
-        Status = STATUS_INVALID_PARAMETER;
-        goto end;
-    }
-
     if (!FileObject) {
         ERR("no file object\n");
         Status = STATUS_INVALID_PARAMETER;
@@ -5535,7 +5555,24 @@ NTSTATUS __stdcall drv_query_ea(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
     ExAcquireResourceSharedLite(fcb->Header.Resource, true);
 
     if (fcb->ea_xattr.Length == 0) {
+        if (IrpSp->Parameters.QueryEa.Length != 0) {
+            ffei = map_user_buffer(Irp, NormalPagePriority);
+            if (!ffei) {
+                Status = STATUS_INVALID_USER_BUFFER;
+                goto end2;
+            }
+
+            RtlZeroMemory(ffei, IrpSp->Parameters.QueryEa.Length);
+        }
+
         Status = STATUS_NO_EAS_ON_FILE;
+        goto end2;
+    }
+
+    ffei = map_user_buffer(Irp, NormalPagePriority);
+    if (!ffei) {
+        ERR("could not get output buffer\n");
+        Status = STATUS_INVALID_PARAMETER;
         goto end2;
     }
 

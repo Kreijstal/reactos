@@ -1630,6 +1630,7 @@ typedef struct _ETHREAD
     //
     KEVENT AlertByIdEvent;
 #endif
+    PVOID InstrumentationCallback;
 } ETHREAD;
 
 //
@@ -1834,6 +1835,7 @@ typedef struct _EPROCESS
     // Temp HACK until we switch to NTDDI_VISTA, when this moves to KPROCESS
     ULONGLONG CycleTime;
 #endif // ]
+    PVOID InstrumentationCallback;
 } EPROCESS;
 
 //

@@ -305,6 +305,7 @@ typedef struct _CM_KEY_CONTROL_BLOCK
         LIST_ENTRY FreeListEntry;
     };
     PCM_KEY_BODY KeyBodyArray[4];
+    PCM_KEY_BODY NotifyOwner;
     PVOID DelayCloseEntry;
     LARGE_INTEGER KcbLastWriteTime;
     USHORT KcbMaxNameLen;
@@ -323,6 +324,15 @@ typedef struct _CM_KEY_CONTROL_BLOCK
 //
 // Notify Block
 //
+typedef struct _CM_POST_BLOCK
+{
+    LIST_ENTRY PostList;
+    PKEVENT Event;
+    PIO_STATUS_BLOCK IoStatusBlock;
+    ULONG Filter;
+    BOOLEAN WatchTree;
+} CM_POST_BLOCK, *PCM_POST_BLOCK;
+
 typedef struct _CM_NOTIFY_BLOCK
 {
     LIST_ENTRY HiveList;
@@ -792,7 +802,8 @@ CmpLinkHiveToMaster(
     IN HANDLE RootDirectory,
     IN PCMHIVE CmHive,
     IN BOOLEAN Allocate,
-    IN PSECURITY_DESCRIPTOR SecurityDescriptor
+    IN PSECURITY_DESCRIPTOR SecurityDescriptor,
+    OUT PCM_KEY_BODY *LinkKeyBody OPTIONAL
 );
 
 NTSTATUS
@@ -970,6 +981,32 @@ VOID
 NTAPI
 CmpRemoveKeyControlBlock(
     IN PCM_KEY_CONTROL_BLOCK Kcb
+);
+
+PCM_KEY_CONTROL_BLOCK
+NTAPI
+CmpInsertKeyHash(
+    IN PCM_KEY_HASH KeyHash,
+    IN BOOLEAN IsFake
+);
+
+PCM_NAME_CONTROL_BLOCK
+NTAPI
+CmpGetNameControlBlock(
+    IN PUNICODE_STRING NodeName
+);
+
+VOID
+NTAPI
+CmpDereferenceNameControlBlockWithLock(
+    IN PCM_NAME_CONTROL_BLOCK Ncb
+);
+
+NTSTATUS
+NTAPI
+CmRenameKey(
+    IN PCM_KEY_BODY KeyBody,
+    IN PUNICODE_STRING NewName
 );
 
 VOID
@@ -1333,7 +1370,8 @@ CmLoadKey(
     IN POBJECT_ATTRIBUTES TargetKey,
     IN POBJECT_ATTRIBUTES SourceFile,
     IN ULONG Flags,
-    IN PCM_KEY_BODY KeyBody
+    IN PCM_KEY_BODY KeyBody,
+    OUT PCM_KEY_BODY *LoadedKeyBody OPTIONAL
 );
 
 NTSTATUS

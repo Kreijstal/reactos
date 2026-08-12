@@ -348,6 +348,32 @@ NtAlertThread(
     _In_ HANDLE ThreadHandle
 );
 
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtGetNextThread(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ HANDLE ThreadHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ULONG HandleAttributes,
+    _In_ ULONG Flags,
+    _Out_ PHANDLE NewThreadHandle
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+ZwGetNextThread(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ HANDLE ThreadHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ULONG HandleAttributes,
+    _In_ ULONG Flags,
+    _Out_ PHANDLE NewThreadHandle
+);
+#endif
+
 #if (NTDDI_VERSION >= NTDDI_WIN8)
 NTSYSCALLAPI
 NTSTATUS

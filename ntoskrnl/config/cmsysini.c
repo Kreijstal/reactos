@@ -327,8 +327,7 @@ CmpCloseKeyObject(IN PEPROCESS Process OPTIONAL,
         /* Don't do anything if we don't have a notify block */
         if (!KeyBody->NotifyBlock) return;
 
-        /* This shouldn't happen yet */
-        ASSERT(FALSE);
+        CmpFlushNotify(KeyBody, FALSE);
     }
 }
 
@@ -974,7 +973,8 @@ CmpLinkHiveToMaster(IN PUNICODE_STRING LinkName,
                     IN HANDLE RootDirectory,
                     IN PCMHIVE RegistryHive,
                     IN BOOLEAN Allocate,
-                    IN PSECURITY_DESCRIPTOR SecurityDescriptor)
+                    IN PSECURITY_DESCRIPTOR SecurityDescriptor,
+                    OUT PCM_KEY_BODY *LinkKeyBody OPTIONAL)
 {
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
@@ -982,6 +982,8 @@ CmpLinkHiveToMaster(IN PUNICODE_STRING LinkName,
     HANDLE KeyHandle;
     PCM_KEY_BODY KeyBody;
     PAGED_CODE();
+
+    if (LinkKeyBody) *LinkKeyBody = NULL;
 
     /* Setup the object attributes */
     InitializeObjectAttributes(&ObjectAttributes,
@@ -1028,6 +1030,8 @@ CmpLinkHiveToMaster(IN PUNICODE_STRING LinkName,
                                        (PVOID*)&KeyBody,
                                        NULL);
     ASSERT(NT_SUCCESS(Status));
+
+    if (LinkKeyBody) *LinkKeyBody = KeyBody;
 
     /* Close the extra handle */
     ZwClose(KeyHandle);
@@ -1132,7 +1136,8 @@ CmpInitializeSystemHive(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
                                  NULL,
                                  SystemHive,
                                  !HiveBase,
-                                 SecurityDescriptor);
+                                 SecurityDescriptor,
+                                 NULL);
 
     /* Free the security descriptor */
     ExFreePoolWithTag(SecurityDescriptor, TAG_CMSD);
@@ -1768,7 +1773,8 @@ CmpInitializeHiveList(VOID)
                                          NULL,
                                          CmpMachineHiveList[i].CmHive2,
                                          CmpMachineHiveList[i].Allocate,
-                                         SecurityDescriptor);
+                                         SecurityDescriptor,
+                                         NULL);
             if (Status != STATUS_SUCCESS)
             {
                 /* Linking needs to work */
@@ -2007,7 +2013,8 @@ CmInitSystem1(VOID)
                                  NULL,
                                  HardwareHive,
                                  TRUE,
-                                 SecurityDescriptor);
+                                 SecurityDescriptor,
+                                 NULL);
     if (!NT_SUCCESS(Status))
     {
         /* Bugcheck */

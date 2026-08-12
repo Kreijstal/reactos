@@ -208,14 +208,8 @@ KiInitializeCpu(PKIPCR Pcr)
     /* Enable XMMI exceptions */
     __writecr4(__readcr4() | CR4_XMMEXCPT);
 
-    /* Enable Write-Protection */
-    __writecr0(__readcr0() | CR0_WP);
-
-    /* Disable fpu monitoring */
-    __writecr0(__readcr0() & ~CR0_MP);
-
-    /* Disable x87 fpu exceptions */
-    __writecr0(__readcr0() & ~CR0_NE);
+    /* Enable write protection and native FPU exception reporting. */
+    __writecr0((__readcr0() & ~(CR0_EM | CR0_MP)) | CR0_WP | CR0_NE);
 
     /* Check if XSAVE is supported */
     if (FeatureBits & KF_XSTATE)
@@ -266,7 +260,7 @@ KiInitializeTss(
     TssEntry = KiGetGdtEntry(Pcr->GdtBase, KGDT64_SYS_TSS);
 
     /* Initialize the GDT entry */
-    KiInitGdtEntry(TssEntry, (ULONG64)Tss, sizeof(KTSS64), AMD64_TSS, 0);
+    KiInitGdtEntry(TssEntry, (ULONG64)Tss, sizeof(KTSS64) - 1, AMD64_TSS, 0);
 
     /* Zero out the TSS */
     RtlZeroMemory(Tss, sizeof(KTSS64));
@@ -591,4 +585,3 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Switch to new kernel stack and start kernel bootstrapping */
     KiSwitchToBootStack(InitialStack);
 }
-

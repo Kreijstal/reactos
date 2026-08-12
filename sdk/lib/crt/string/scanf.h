@@ -309,7 +309,11 @@ _FUNCTION_ {
             case 'E':
             case 'f':
             case 'g':
-            case 'G': { /* read a float */
+            case 'G':
+#ifdef _LIBCNT_
+                break;
+#else
+            { /* read a float */
                     //long double cur = 1, expcnt = 10;
                     ULONGLONG d, hlp;
                     int exp = 0, negative = 0;
@@ -446,7 +450,8 @@ _FUNCTION_ {
 		 * call to fwscanf. The 'h', 'w' and 'l' prefixes override
 		 * this behaviour. 'h' forces reading char * but 'l' and 'w'
 		 * force reading WCHAR. */
-	    case 's':
+#endif
+            case 's':
 		    if (w_prefix || l_prefix) goto widecharstring;
 		    else if (h_prefix) goto charstring;
 #ifdef WIDE_SCANF

@@ -1542,7 +1542,27 @@ MiGetPageProtection(IN PMMPTE PointerPte)
     {
         /* Return protection of the original pte */
         ASSERT(Pfn->u4.AweAllocation == 0);
-        return MmProtectToValue[Pfn->OriginalPte.u.Soft.Protection];
+        Protect = MmProtectToValue[Pfn->OriginalPte.u.Soft.Protection];
+
+        /* A valid private PTE cannot represent PAGE_NOACCESS. If stale PFN
+         * metadata says otherwise, derive the effective access from the
+         * hardware PTE so queries and old-protection results remain valid. */
+        if (Protect == PAGE_NOACCESS)
+        {
+            if (MI_IS_PAGE_COPY_ON_WRITE(&TempPte))
+                Protect = PAGE_WRITECOPY;
+            else if (MI_IS_PAGE_WRITEABLE(&TempPte))
+                Protect = PAGE_READWRITE;
+            else
+                Protect = PAGE_READONLY;
+
+#if _MI_HAS_NO_EXECUTE
+            if (MI_IS_PAGE_EXECUTABLE(&TempPte))
+                Protect <<= 4;
+#endif
+        }
+
+        return Protect;
     }
 
     /* This is software PTE */
@@ -3565,6 +3585,36 @@ NtProtectVirtualMemory(IN HANDLE ProcessHandle,
                                     NewAccessProtection,
                                     &OldAccessProtection);
 
+    if (NT_SUCCESS(Status) && (PreviousMode != KernelMode) &&
+        (Process == CurrentProcess) && (NewAccessProtection & PAGE_GUARD))
+    {
+        PETHREAD CurrentThread = PsGetCurrentThread();
+        PTEB Teb = CurrentThread->Tcb.Teb;
+        ULONG_PTR StartingAddress = (ULONG_PTR)BaseAddress;
+        ULONG_PTR EndingAddress = StartingAddress + NumberOfBytesToProtect - 1;
+
+        _SEH2_TRY
+        {
+            if (Teb &&
+                (StartingAddress >= (ULONG_PTR)Teb->DeallocationStack) &&
+                (EndingAddress < (ULONG_PTR)Teb->NtTib.StackBase))
+            {
+                Teb->NtTib.StackLimit = (PVOID)(EndingAddress + 1);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                if (THREAD_TO_PROCESS(CurrentThread)->Wow64Process != NULL)
+                {
+                    PS_GET_TEB32_FROM_TEB(Teb)->NtTib.StackLimit =
+                        PtrToUlong(Teb->NtTib.StackLimit);
+                }
+#endif
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        _SEH2_END;
+    }
+
     //
     // Detach if needed
     //
@@ -4732,6 +4782,175 @@ NtResetWriteWatch(IN HANDLE ProcessHandle,
 
 NTSTATUS
 NTAPI
+MiQueryMemoryRegionInformation(IN HANDLE ProcessHandle,
+                               IN PVOID BaseAddress,
+                               OUT PVOID MemoryInformation,
+                               IN SIZE_T MemoryInformationLength,
+                               OUT PSIZE_T ReturnLength)
+{
+    MEMORY_REGION_INFORMATION RegionInfo;
+    PEPROCESS Process;
+    PMMVAD Vad;
+    KAPC_STATE ApcState;
+    BOOLEAN Attached = FALSE, Referenced = FALSE;
+    NTSTATUS Status = STATUS_SUCCESS;
+    SIZE_T CopyLength;
+
+    if (MemoryInformationLength < FIELD_OFFSET(MEMORY_REGION_INFORMATION, CommitSize))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    if (ProcessHandle == NtCurrentProcess())
+    {
+        Process = PsGetCurrentProcess();
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_INFORMATION,
+                                           PsProcessType,
+                                           ExGetPreviousMode(),
+                                           (PVOID *)&Process,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        Referenced = TRUE;
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
+    RtlZeroMemory(&RegionInfo, sizeof(RegionInfo));
+    MmLockAddressSpace(&Process->Vm);
+    Vad = MiLocateAddress(BaseAddress);
+    if (!Vad)
+    {
+        Status = STATUS_INVALID_ADDRESS;
+    }
+    else
+    {
+        RegionInfo.AllocationBase = (PVOID)(Vad->StartingVpn << PAGE_SHIFT);
+        RegionInfo.AllocationProtect = MmProtectToValue[Vad->u.VadFlags.Protection];
+        RegionInfo.RegionSize = (Vad->EndingVpn - Vad->StartingVpn + 1) << PAGE_SHIFT;
+        RegionInfo.CommitSize = Vad->u.VadFlags.MemCommit ? RegionInfo.RegionSize :
+                                (Vad->u.VadFlags.CommitCharge << PAGE_SHIFT);
+    }
+    MmUnlockAddressSpace(&Process->Vm);
+
+    if (Attached) KeUnstackDetachProcess(&ApcState);
+    if (Referenced) ObDereferenceObject(Process);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    CopyLength = min(MemoryInformationLength, sizeof(RegionInfo));
+    _SEH2_TRY
+    {
+        RtlCopyMemory(MemoryInformation, &RegionInfo, CopyLength);
+        if (ReturnLength) *ReturnLength = sizeof(RegionInfo);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+MiQueryMemoryImageInformation(IN HANDLE ProcessHandle,
+                              IN PVOID BaseAddress,
+                              OUT PVOID MemoryInformation,
+                              IN SIZE_T MemoryInformationLength,
+                              OUT PSIZE_T ReturnLength)
+{
+    MEMORY_IMAGE_INFORMATION ImageInfo;
+    PEPROCESS Process;
+    PMMVAD Vad, EndVad;
+    PMEMORY_AREA MemoryArea;
+    PMM_SECTION_SEGMENT RosSegment;
+    PMM_IMAGE_SECTION_OBJECT ImageSection;
+    PSEGMENT ArmSegment;
+    KAPC_STATE ApcState;
+    BOOLEAN Attached = FALSE, Referenced = FALSE;
+    NTSTATUS Status = STATUS_SUCCESS;
+    PVOID ImageBase;
+
+    if (MemoryInformationLength < sizeof(ImageInfo))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    if (ProcessHandle == NtCurrentProcess())
+    {
+        Process = PsGetCurrentProcess();
+    }
+    else
+    {
+        Status = ObReferenceObjectByHandle(ProcessHandle,
+                                           PROCESS_QUERY_INFORMATION,
+                                           PsProcessType,
+                                           ExGetPreviousMode(),
+                                           (PVOID *)&Process,
+                                           NULL);
+        if (!NT_SUCCESS(Status)) return Status;
+        Referenced = TRUE;
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
+    RtlZeroMemory(&ImageInfo, sizeof(ImageInfo));
+    MmLockAddressSpace(&Process->Vm);
+    Vad = MiLocateAddress(BaseAddress);
+    if (!Vad)
+    {
+        Status = STATUS_INVALID_ADDRESS;
+    }
+    else if (Vad->u.VadFlags.VadType == VadImageMap)
+    {
+        if (MI_IS_ROSMM_VAD(Vad))
+        {
+            MemoryArea = (PMEMORY_AREA)Vad;
+            RosSegment = MemoryArea->SectionData.Segment;
+            ImageSection = ImageSectionObjectFromSegment(RosSegment);
+            ImageBase = (PVOID)((Vad->StartingVpn << PAGE_SHIFT) -
+                                RosSegment->Image.VirtualAddress);
+            ImageInfo.SizeOfImage = ImageSection->ImageInformation.ImageFileSize;
+        }
+        else
+        {
+            ImageBase = (PVOID)(Vad->StartingVpn << PAGE_SHIFT);
+            ArmSegment = Vad->ControlArea ? Vad->ControlArea->Segment : NULL;
+            if (ArmSegment)
+                ImageInfo.SizeOfImage = (SIZE_T)ArmSegment->SizeOfSegment;
+        }
+
+        ImageInfo.ImageBase = ImageBase;
+        if (ImageInfo.SizeOfImage)
+        {
+            EndVad = MiLocateAddress((PVOID)((ULONG_PTR)ImageBase +
+                                     ImageInfo.SizeOfImage - 1));
+            if (!EndVad || EndVad->u.VadFlags.VadType != VadImageMap)
+                ImageInfo.ImagePartialMap = TRUE;
+        }
+    }
+    MmUnlockAddressSpace(&Process->Vm);
+
+    if (Attached) KeUnstackDetachProcess(&ApcState);
+    if (Referenced) ObDereferenceObject(Process);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    _SEH2_TRY
+    {
+        *(PMEMORY_IMAGE_INFORMATION)MemoryInformation = ImageInfo;
+        if (ReturnLength) *ReturnLength = sizeof(ImageInfo);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+NTSTATUS
+NTAPI
 NtQueryVirtualMemory(IN HANDLE ProcessHandle,
                      IN PVOID BaseAddress,
                      IN MEMORY_INFORMATION_CLASS MemoryInformationClass,
@@ -4788,20 +5007,27 @@ NtQueryVirtualMemory(IN HANDLE ProcessHandle,
             break;
 
         case MemorySectionName:
-            /* Validate the size information of the class */
-            if (MemoryInformationLength < sizeof(MEMORY_SECTION_NAME))
-            {
-                /* The size is invalid */
-                return STATUS_INFO_LENGTH_MISMATCH;
-            }
             Status = MiQueryMemorySectionName(ProcessHandle,
                                               BaseAddress,
                                               MemoryInformation,
                                               MemoryInformationLength,
                                               ReturnLength);
             break;
+        case MemoryRegionInformation:
+            Status = MiQueryMemoryRegionInformation(ProcessHandle,
+                                                    BaseAddress,
+                                                    MemoryInformation,
+                                                    MemoryInformationLength,
+                                                    ReturnLength);
+            break;
+        case MemoryImageInformation:
+            Status = MiQueryMemoryImageInformation(ProcessHandle,
+                                                   BaseAddress,
+                                                   MemoryInformation,
+                                                   MemoryInformationLength,
+                                                   ReturnLength);
+            break;
         case MemoryWorkingSetList:
-        case MemoryBasicVlmInformation:
         default:
             DPRINT1("Unhandled memory information class %d\n", MemoryInformationClass);
             break;
@@ -4843,7 +5069,7 @@ NtAllocateVirtualMemory(IN HANDLE ProcessHandle,
     PAGED_CODE();
 
     /* Check for valid Zero bits */
-    if (ZeroBits > MI_MAX_ZERO_BITS)
+    if (!MiZeroBitsToHighestAddress(ZeroBits, &HighestAddress))
     {
         DPRINT1("Too many zero bits\n");
         return STATUS_INVALID_PARAMETER_3;
@@ -5577,6 +5803,34 @@ FailPath:
                                &ProtectSize,
                                Protect,
                                &OldProtection);
+    }
+
+    if (NT_SUCCESS(Status) && (PreviousMode != KernelMode) &&
+        (Protect & PAGE_GUARD) &&
+        (Process == PsGetCurrentProcess()))
+    {
+        PTEB Teb = CurrentThread->Tcb.Teb;
+
+        _SEH2_TRY
+        {
+            if (Teb &&
+                (StartingAddress >= (ULONG_PTR)Teb->DeallocationStack) &&
+                (EndingAddress < (ULONG_PTR)Teb->NtTib.StackBase))
+            {
+                Teb->NtTib.StackLimit = (PVOID)(EndingAddress + 1);
+#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
+                if (THREAD_TO_PROCESS(CurrentThread)->Wow64Process != NULL)
+                {
+                    PS_GET_TEB32_FROM_TEB(Teb)->NtTib.StackLimit =
+                        PtrToUlong(Teb->NtTib.StackLimit);
+                }
+#endif
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        _SEH2_END;
     }
 
 FailPathNoLock:

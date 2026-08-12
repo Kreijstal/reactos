@@ -915,6 +915,12 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
            InputBuffer, InputBufferLength,
            OutputBuffer, OutputBufferLength);
 
+    if ((PowerInformationLevel == ProcessorInformation) &&
+        !OutputBuffer && OutputBufferLength)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     if (PreviousMode != KernelMode)
     {
         _SEH2_TRY
@@ -1001,23 +1007,29 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
         case ProcessorInformation:
         {
             PPROCESSOR_POWER_INFORMATION PowerInformation = (PPROCESSOR_POWER_INFORMATION)OutputBuffer;
+            ULONG ProcessorCount, i;
+            PKPRCB Prcb;
 
             if (InputBuffer != NULL)
                 return STATUS_INVALID_PARAMETER;
-            if (OutputBufferLength < sizeof(PROCESSOR_POWER_INFORMATION))
+            ProcessorCount = KeNumberProcessors;
+            if (OutputBufferLength < ProcessorCount * sizeof(PROCESSOR_POWER_INFORMATION))
                 return STATUS_BUFFER_TOO_SMALL;
-
-            /* FIXME: return structures for all processors */
+            if (OutputBuffer == NULL)
+                return STATUS_INVALID_PARAMETER;
 
             _SEH2_TRY
             {
-                /* FIXME: some values are hardcoded */
-                PowerInformation->Number = 0;
-                PowerInformation->MaxMhz = 1000;
-                PowerInformation->CurrentMhz = KeGetCurrentPrcb()->MHz;
-                PowerInformation->MhzLimit = 1000;
-                PowerInformation->MaxIdleState = 0;
-                PowerInformation->CurrentIdleState = 0;
+                for (i = 0; i < ProcessorCount; i++)
+                {
+                    Prcb = KiProcessorBlock[i];
+                    PowerInformation[i].Number = i;
+                    PowerInformation[i].MaxMhz = Prcb->MHz;
+                    PowerInformation[i].CurrentMhz = Prcb->MHz;
+                    PowerInformation[i].MhzLimit = Prcb->MHz;
+                    PowerInformation[i].MaxIdleState = 0;
+                    PowerInformation[i].CurrentIdleState = 0;
+                }
 
                 Status = STATUS_SUCCESS;
             }

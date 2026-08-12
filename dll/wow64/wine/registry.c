@@ -186,9 +186,6 @@ NTSTATUS WINAPI wow64_NtLoadKey2( UINT *args )
     return NtLoadKey2( objattr_32to64( &attr, attr32 ), objattr_32to64( &file, file32 ), flags );
 }
 
-#ifndef __REACTOS__
-/* FIXME: ReactOS doesn't have as many args as this, is this from some future NT version? */
-
 /**********************************************************************
  *           wow64_NtLoadKeyEx
  */
@@ -212,7 +209,6 @@ NTSTATUS WINAPI wow64_NtLoadKeyEx( UINT *args )
     put_iosb( io32, &io );
     return status;
 }
-#endif
 
 /**********************************************************************
  *           wow64_NtNotifyChangeKey
@@ -289,7 +285,6 @@ NTSTATUS WINAPI wow64_NtOpenKey( UINT *args )
     return status;
 }
 
-#ifndef __REACTOS__
 /**********************************************************************
  *           wow64_NtOpenKeyEx
  */
@@ -311,6 +306,7 @@ NTSTATUS WINAPI wow64_NtOpenKeyEx( UINT *args )
 }
 
 
+#ifndef __REACTOS__
 /**********************************************************************
  *           wow64_NtOpenKeyTransacted
  */

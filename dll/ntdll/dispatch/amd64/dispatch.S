@@ -183,6 +183,7 @@ EXTERN RtlRaiseException:PROC
 
     This function is called with the following stack layout:
         CONTEXT ContextRecord  <- RSP, RCX
+        CONTEXT_EX ContextEx
         EXCEPTION_RECORD ExceptionRecord <- RDX
         ULONG64 Alignment
         MACHINE_FRAME MachineFrame
@@ -194,8 +195,8 @@ PUBLIC KiUserExceptionDispatcher
     /* The frame ends with a MACHINE_FRAME. */
     .PUSHFRAME
 
-    /* This is for the alignment, EXCEPTION_RECORD and CONTEXT */
-    .ALLOCSTACK 8 + EXCEPTION_RECORD_LENGTH + CONTEXT_FRAME_LENGTH
+    /* This is for the alignment, EXCEPTION_RECORD, CONTEXT_EX and CONTEXT */
+    .ALLOCSTACK 8 + EXCEPTION_RECORD_LENGTH + CONTEXT_EX_LENGTH + CONTEXT_FRAME_LENGTH
     .ENDPROLOG
 
     /* Clear direction flag */
@@ -207,7 +208,7 @@ PUBLIC KiUserExceptionDispatcher
     jz .NoWow64
 
     /* Prepare for WOW64 exception dispatching */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + CONTEXT_FRAME_LENGTH + CONTEXT_EX_LENGTH] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     call rax
 
@@ -220,7 +221,7 @@ PUBLIC KiUserExceptionDispatcher
        matching unwind information, so unwinding back through this dispatcher
        frame would read the trailing MACHINE_FRAME from the wrong offset and
        recover a bogus faulting context (breaking RtlUnwindEx through here). */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + CONTEXT_FRAME_LENGTH + CONTEXT_EX_LENGTH] /* ExceptionRecord */
     lea rdx, [rsp]                        /* ContextRecord */
     call RtlDispatchException
 
@@ -288,4 +289,3 @@ Exit:
 .ENDP
 
 END
-

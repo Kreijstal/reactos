@@ -10,7 +10,15 @@ __readfsdword:
 PUBLIC EnterApc32
 EnterApc32:
     push r12
-    mov r12, rsp
+    push r13
+    push r14
+    push r15
+
+    /* Match the Windows WoW64 transition register contract. */
+    mov r15, rsp
+    mov r12, r8
+    mov r13, r9
+    mov r14, rsp
 
     sub rsp, rdx
 
@@ -40,7 +48,10 @@ l:
     push rax
     retf
 return64:
-    mov rsp, r12
+    mov rsp, r15
+    pop r15
+    pop r14
+    pop r13
     pop r12
     ret
 
