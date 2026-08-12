@@ -228,13 +228,20 @@ RtlExpandEnvironmentStrings(
         TotalLength += CopyLength;
         if (DestMax)
         {
-            if (DestMax < CopyLength)
+            if (DestMax <= CopyLength)
             {
-                CopyLength = DestMax;
+                /* Windows always leaves room for a terminator when copying
+                 * literal text. An expanded variable, on the other hand, is
+                 * copied in full or not at all by the query path above. */
+                CopyLength = DestMax - 1;
+                DestMax = 0;
                 ReturnStatus = STATUS_BUFFER_TOO_SMALL;
             }
+            else
+            {
+                DestMax -= CopyLength;
+            }
             RtlCopyMemory(DestBuffer, CopyBuffer, CopyLength * sizeof(WCHAR));
-            DestMax -= CopyLength;
             DestBuffer += CopyLength;
         }
     }
