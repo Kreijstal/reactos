@@ -3116,6 +3116,13 @@ Return Value:
         Status = FatMarkHandle( IrpContext, Irp );
         break;
 
+    case FSCTL_GET_REPARSE_POINT:
+        Irp->IoStatus.Information = 0;
+        Status = IrpSp->Parameters.FileSystemControl.OutputBufferLength ?
+                 STATUS_NOT_A_REPARSE_POINT : STATUS_INVALID_USER_BUFFER;
+        FatCompleteRequest( IrpContext, Irp, Status );
+        break;
+
 #if (NTDDI_VERSION >= NTDDI_WIN8)
 
     case FSCTL_SET_PURGE_FAILURE_MODE:

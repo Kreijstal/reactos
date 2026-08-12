@@ -3694,6 +3694,8 @@ MmMapViewOfSegment(
      * leave this segment's pages resident while a system-space view maps it. */
     if (AddressSpace == MmGetKernelAddressSpace())
         InterlockedIncrement(&Segment->SystemMapCount);
+    else
+        InterlockedIncrement(&Segment->UserMapCount);
 
     return STATUS_SUCCESS;
 }
@@ -3850,6 +3852,8 @@ MmUnmapViewOfSegment(PMMSUPPORT AddressSpace,
      * system-space views (see comment there). */
     if (AddressSpace == MmGetKernelAddressSpace())
         InterlockedDecrement(&Segment->SystemMapCount);
+    else
+        InterlockedDecrement(&Segment->UserMapCount);
 
     MmDereferenceSegment(Segment);
     return Status;
@@ -3926,6 +3930,15 @@ MiRosUnmapViewOfSection(
         {
             PVOID SBaseAddress = (PVOID)
                                  ((char*)ImageBaseAddress + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress);
+            PMEMORY_AREA SegmentArea;
+
+            SegmentArea = MmLocateMemoryAreaByAddress(AddressSpace, SBaseAddress);
+            if (!SegmentArea ||
+                SegmentArea->VadNode.u.VadFlags.VadType != VadImageMap ||
+                ImageSectionObjectFromSegment(SegmentArea->SectionData.Segment) != ImageSectionObject)
+            {
+                continue;
+            }
 
             Status = MmUnmapViewOfSegment(AddressSpace, SBaseAddress);
             if (!NT_SUCCESS(Status))
@@ -4336,7 +4349,7 @@ MmMapViewOfSection(
         ULONG i;
         ULONG NrSegments;
         ULONG_PTR ImageBase;
-        SIZE_T ImageSize;
+        SIZE_T ImageSize, MappedImageSize;
         PMM_IMAGE_SECTION_OBJECT ImageSectionObject;
         PMM_SECTION_SEGMENT SectionSegments;
 
@@ -4363,12 +4376,23 @@ MmMapViewOfSection(
 
         ImageSectionObject->ImageInformation.ImageFileSize = (ULONG)ImageSize;
 
+        if (*ViewSize)
+        {
+            MappedImageSize = min(PAGE_ROUND_UP(*ViewSize),
+                                  PAGE_ROUND_UP(ImageSize));
+        }
+        else
+        {
+            MappedImageSize = min(PAGE_ROUND_UP((SIZE_T)Section->SizeOfSection.QuadPart),
+                                  PAGE_ROUND_UP(ImageSize));
+        }
+
         /* Check for an illegal base address */
-        if (((ImageBase + ImageSize) > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS) ||
-                ((ImageBase + ImageSize) < ImageSize))
+        if (((ImageBase + MappedImageSize) > (ULONG_PTR)MM_HIGHEST_VAD_ADDRESS) ||
+                ((ImageBase + MappedImageSize) < MappedImageSize))
         {
             ASSERT(*BaseAddress == NULL);
-            ImageBase = ALIGN_DOWN_BY((ULONG_PTR)MM_HIGHEST_VAD_ADDRESS - ImageSize,
+            ImageBase = ALIGN_DOWN_BY((ULONG_PTR)MM_HIGHEST_VAD_ADDRESS - MappedImageSize,
                                       MM_VIRTMEM_GRANULARITY);
             NotAtBase = TRUE;
         }
@@ -4380,7 +4404,9 @@ MmMapViewOfSection(
         }
 
         /* Check there is enough space to map the section at that point. */
-        if (!MmIsAddressRangeFree(AddressSpace, (PVOID)ImageBase, PAGE_ROUND_UP(ImageSize)))
+        if ((HighestAddress &&
+             (ImageBase + MappedImageSize - 1 > HighestAddress)) ||
+            !MmIsAddressRangeFree(AddressSpace, (PVOID)ImageBase, MappedImageSize))
         {
             /* Fail if the user requested a fixed base address. */
             if ((*BaseAddress) != NULL)
@@ -4389,7 +4415,9 @@ MmMapViewOfSection(
                 goto Exit;
             }
             /* Otherwise find a gap to map the image. */
-            ImageBase = (ULONG_PTR)MmFindGap(AddressSpace, PAGE_ROUND_UP(ImageSize), MM_VIRTMEM_GRANULARITY, FALSE, HighestAddress);
+            ImageBase = (ULONG_PTR)MmFindGap(AddressSpace, MappedImageSize,
+                                             MM_VIRTMEM_GRANULARITY,
+                                             FALSE, HighestAddress);
             if (ImageBase == 0)
             {
                 Status = STATUS_CONFLICTING_ADDRESSES;
@@ -4401,14 +4429,21 @@ MmMapViewOfSection(
 
         for (i = 0; i < NrSegments; i++)
         {
+            SIZE_T SegmentSize;
             PVOID SBaseAddress = (PVOID)
                                  ((char*)ImageBase + (ULONG_PTR)SectionSegments[i].Image.VirtualAddress);
+
+            if (SectionSegments[i].Image.VirtualAddress >= MappedImageSize)
+                break;
+
+            SegmentSize = min((SIZE_T)SectionSegments[i].Length.QuadPart,
+                              MappedImageSize - SectionSegments[i].Image.VirtualAddress);
             MmLockSectionSegment(&SectionSegments[i]);
             Status = MmMapViewOfSegment(AddressSpace,
                                         TRUE,
                                         &SectionSegments[i],
                                         &SBaseAddress,
-                                        SectionSegments[i].Length.QuadPart,
+                                        SegmentSize,
                                         SectionSegments[i].Protection,
                                         0,
                                         0,
@@ -4430,7 +4465,7 @@ MmMapViewOfSection(
         }
 
         *BaseAddress = (PVOID)ImageBase;
-        *ViewSize = ImageSize;
+        *ViewSize = MappedImageSize;
 
         DPRINT("Mapped %p for section pointer %p\n", ImageSectionObject, ImageSectionObject->FileObject->SectionObjectPointer);
 
@@ -4612,7 +4647,11 @@ MmCanFileBeTruncated(
     }
 
     MmLockSectionSegment(Segment);
-    if ((Segment->SectionCount == 0) ||
+    if (Segment->UserMapCount != 0)
+    {
+        Ret = FALSE;
+    }
+    else if ((Segment->SectionCount == 0) ||
         ((Segment->SectionCount == 1) && (SectionObjectPointer->SharedCacheMap != NULL)))
     {
         /* If the cache is the only one holding a reference to the segment, then it's fine to resize */

@@ -22,6 +22,7 @@ include_directories(
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
 
 add_library(rtl_um OBJECT
+    rtl/license.c
     rtl/libsupp.c
     rtl/uilist.c
     rtl/version.c)
@@ -39,6 +40,7 @@ list(APPEND SOURCE
     ldr/ldrinit.c
     ldr/ldrpe.c
     ldr/ldrutils.c
+    rtl/thread.c
     ldr/verifier.c)
 
 if(ARCH STREQUAL "i386")

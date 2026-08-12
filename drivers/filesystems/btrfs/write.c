@@ -4619,6 +4619,11 @@ NTSTATUS write_file(device_extension* Vcb, PIRP Irp, bool wait, bool deferred_wr
 
     TRACE("buf = %p\n", buf);
 
+    if (!buf && IrpSp->Parameters.Write.Length != 0) {
+        Status = STATUS_INVALID_USER_BUFFER;
+        goto exit;
+    }
+
     if (fcb && !(Irp->Flags & IRP_PAGING_IO) && !FsRtlCheckLockForWriteAccess(&fcb->lock, Irp)) {
         WARN("tried to write to locked region\n");
         Status = STATUS_FILE_LOCK_CONFLICT;
@@ -4671,7 +4676,8 @@ NTSTATUS __stdcall drv_write(IN PDEVICE_OBJECT DeviceObject, IN PIRP Irp) {
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     fcb* fcb = FileObject ? FileObject->FsContext : NULL;
     ccb* ccb = FileObject ? FileObject->FsContext2 : NULL;
-    bool wait = FileObject ? IoIsOperationSynchronous(Irp) : true;
+    bool wait = FileObject ? (IoIsOperationSynchronous(Irp) ||
+                              (Irp->Flags & IRP_NOCACHE)) : true;
 
     FsRtlEnterFileSystem();
 

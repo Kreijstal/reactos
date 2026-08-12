@@ -207,6 +207,13 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
             /* DbgPrompt */
             case BREAKPOINT_PROMPT:
 
+                /* Without a debugger, forward the service to user mode. */
+                if (KdDebuggerNotPresent)
+                {
+                    Handled = FALSE;
+                    break;
+                }
+
                 /* Call the worker routine */
                 ReturnLength = KdpPrompt((PCHAR)ExceptionRecord->ExceptionInformation[1],
                                          (USHORT)ExceptionRecord->ExceptionInformation[2],
@@ -215,10 +222,13 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
                                          PreviousMode,
                                          TrapFrame,
                                          ExceptionFrame);
-                Handled = TRUE;
+                Handled = (ReturnLength != 0);
 
-                /* Update the return value for the caller */
-                KeSetContextReturnRegister(ContextRecord, ReturnLength);
+                /* Update the return value only when KD handled the prompt. */
+                if (Handled)
+                {
+                    KeSetContextReturnRegister(ContextRecord, ReturnLength);
+                }
                 break;
 
             /* DbgUnLoadImageSymbols */
@@ -266,23 +276,46 @@ KdpTrap(IN PKTRAP_FRAME TrapFrame,
          * If the PC was not updated, we'll increment it ourselves so execution
          * continues past the breakpoint.
          */
-        if (ProgramCounter == KeGetContextPc(ContextRecord))
+        if (Handled && (ProgramCounter == KeGetContextPc(ContextRecord)))
         {
             /* Update it */
             KeSetContextPc(ContextRecord,
                            ProgramCounter + KD_BREAKPOINT_SIZE);
         }
+
     }
     else
     {
-        /* Call the worker routine */
-        Handled = KdpReport(TrapFrame,
-                            ExceptionFrame,
-                            ExceptionRecord,
-                            ContextRecord,
-                            PreviousMode,
-                            SecondChanceException);
+        /* Forward first-chance user assertions to the process. */
+        if ((PreviousMode == UserMode) &&
+            !SecondChanceException &&
+            ((ExceptionRecord->ExceptionCode == STATUS_ASSERTION_FAILURE) ||
+             KdDebuggerNotPresent))
+        {
+            Handled = FALSE;
+        }
+        else
+        {
+            /* Call the worker routine */
+            Handled = KdpReport(TrapFrame,
+                                ExceptionFrame,
+                                ExceptionRecord,
+                                ContextRecord,
+                                PreviousMode,
+                                SecondChanceException);
+        }
     }
+
+#if defined(_AMD64_)
+    /* AMD64 exposes only the service number for unhandled INT 2Dh calls. */
+    if (!Handled &&
+        (PreviousMode == UserMode) &&
+        (ExceptionRecord->ExceptionCode == STATUS_BREAKPOINT) &&
+        (ExceptionRecord->NumberParameters == 3))
+    {
+        ExceptionRecord->NumberParameters = 1;
+    }
+#endif
 
     /* Return TRUE or FALSE to caller */
     return Handled;

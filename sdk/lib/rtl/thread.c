@@ -24,6 +24,8 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
                     IN SIZE_T StackReserve OPTIONAL,
                     IN SIZE_T StackCommit OPTIONAL,
                     IN ULONG StackZeroBits OPTIONAL,
+                    IN SIZE_T StackCommitAlign,
+                    IN SIZE_T StackReserveAlign,
                     OUT PINITIAL_TEB InitialTeb)
 {
     NTSTATUS Status;
@@ -40,6 +42,18 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
                                       sizeof(SYSTEM_BASIC_INFORMATION),
                                       NULL);
     if (!NT_SUCCESS(Status)) return Status;
+
+    if (!StackCommitAlign || !StackReserveAlign ||
+        (StackCommitAlign & (StackCommitAlign - 1)) ||
+        (StackReserveAlign & (StackReserveAlign - 1)))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (StackCommitAlign < SystemBasicInfo.PageSize)
+        StackCommitAlign = SystemBasicInfo.PageSize;
+    if (StackReserveAlign < SystemBasicInfo.AllocationGranularity)
+        StackReserveAlign = SystemBasicInfo.AllocationGranularity;
 
     /* Use the Image Settings if we are dealing with the current Process */
     if (ProcessHandle == NtCurrentProcess())
@@ -76,20 +90,9 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
         StackReserve = ROUND_UP(StackCommit, 1024 * 1024);
     }
 
-    /* Align everything to Page Size */
-    StackCommit = ROUND_UP(StackCommit, SystemBasicInfo.PageSize);
-    StackReserve = ROUND_UP(StackReserve, SystemBasicInfo.AllocationGranularity);
-
-#ifdef _M_AMD64
-    /*
-     * Keep the top-of-stack runtime area committed on AMD64.  Some Windows
-     * runtimes, including Cygwin/MSYS newlib, place per-thread data below
-     * StackBase before they have probed enough stack pages to trip the guard
-     * page growth path.
-     */
-    if (StackCommit < 0x10000)
-        StackCommit = 0x10000;
-#endif
+    /* Apply the caller's requested alignments, bounded by system granularity. */
+    StackCommit = ROUND_UP(StackCommit, StackCommitAlign);
+    StackReserve = ROUND_UP(StackReserve, StackReserveAlign);
 
     /* Reserve memory for the stack */
     Stack = 0;
@@ -176,7 +179,48 @@ RtlpFreeUserStack(IN HANDLE ProcessHandle,
     RtlZeroMemory(InitialTeb, sizeof(*InitialTeb));
 }
 
+NTSTATUS
+NTAPI
+RtlCreateUserStack(IN SIZE_T StackCommit OPTIONAL,
+                   IN SIZE_T StackReserve OPTIONAL,
+                   IN ULONG StackZeroBits OPTIONAL,
+                   IN SIZE_T StackCommitAlign,
+                   IN SIZE_T StackReserveAlign,
+                   OUT PINITIAL_TEB InitialTeb)
+{
+    return RtlpCreateUserStack(NtCurrentProcess(),
+                               StackReserve,
+                               StackCommit,
+                               StackZeroBits,
+                               StackCommitAlign,
+                               StackReserveAlign,
+                               InitialTeb);
+}
+
+VOID
+NTAPI
+RtlFreeUserStack(IN PVOID AllocationBase)
+{
+    SIZE_T RegionSize = 0;
+
+    ZwFreeVirtualMemory(NtCurrentProcess(),
+                        &AllocationBase,
+                        &RegionSize,
+                        MEM_RELEASE);
+}
+
 /* FUNCTIONS ***************************************************************/
+
+#if !defined(_M_ARM64)
+DECLSPEC_NORETURN
+VOID
+NTAPI
+RtlUserThreadStart(IN PTHREAD_START_ROUTINE StartAddress,
+                   IN PVOID Parameter)
+{
+    RtlExitUserThread(StartAddress(Parameter));
+}
+#endif
 
 
 /*
@@ -248,15 +292,26 @@ RtlCreateUserThread(IN HANDLE ProcessHandle,
                                  StackReserve,
                                  StackCommit,
                                  StackZeroBits,
+                                 1,
+                                 1,
                                  &InitialTeb);
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Next, we'll set up the Initial Context */
+#ifdef _M_AMD64
+    RtlInitializeContext(ProcessHandle,
+                         &Context,
+                         StartAddress,
+                         RtlUserThreadStart,
+                         InitialTeb.StackBase);
+    Context.Rdx = (ULONG_PTR)Parameter;
+#else
     RtlInitializeContext(ProcessHandle,
                          &Context,
                          Parameter,
                          StartAddress,
                          InitialTeb.StackBase);
+#endif
 
     /* We are now ready to create the Kernel Thread Object */
     InitializeObjectAttributes(&ObjectAttributes,

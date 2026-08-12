@@ -698,7 +698,9 @@ CmpDoOpen(IN PHHIVE Hive,
         IsLockShared = TRUE;
 
         /* Check if this is a symlink */
-        if (((*CachedKcb)->Flags & KEY_SYM_LINK) && !(Attributes & OBJ_OPENLINK))
+        if (((*CachedKcb)->Flags & KEY_SYM_LINK) &&
+            !(Attributes & OBJ_OPENLINK) &&
+            !(Context && (Context->CreateOptions & REG_OPTION_OPEN_LINK)))
         {
             /* Is this symlink found? */
             if ((*CachedKcb)->ExtFlags & CM_KCB_SYM_LINK_FOUND)
@@ -773,7 +775,9 @@ CmpDoOpen(IN PHHIVE Hive,
         ASSERT(CmpIsKcbLockedExclusive(*CachedKcb));
 
         /* Check if this is a symlink */
-        if ((Node->Flags & KEY_SYM_LINK) && !(Attributes & OBJ_OPENLINK))
+        if ((Node->Flags & KEY_SYM_LINK) &&
+            !(Attributes & OBJ_OPENLINK) &&
+            !(Context && (Context->CreateOptions & REG_OPTION_OPEN_LINK)))
         {
             /* Create the KCB for the symlink */
             Kcb = CmpCreateKeyControlBlock(Hive,

@@ -295,7 +295,6 @@ CreateBaseAcls(OUT PACL* Dacl,
         /* Otherwise, open wide */
         WorldAccess = READ_CONTROL | DIRECTORY_QUERY | DIRECTORY_TRAVERSE | DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY;
     }
-
     /* Give the appropriate rights to each SID */
     if (NT_SUCCESS(RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, WorldAccess, WorldSid)) &&
         NT_SUCCESS(RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, DIRECTORY_ALL_ACCESS, SystemSid)))
@@ -371,6 +370,7 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
     UNICODE_STRING BnoString;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE BaseSrvNamedObjectDirectory;
+    HANDLE LegacyNamedObjectDirectory;
     HANDLE BaseSrvRestrictedObjectDirectory;
     PACL BnoDacl, BnoRestrictedDacl;
     PSECURITY_DESCRIPTOR BnoSd;
@@ -626,6 +626,61 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                             &ObjectAttributes,
                                             &SymlinkName);
         if ((NT_SUCCESS(Status)) && SessionId == 0) NtClose(SymHandle);
+
+        /* Session zero also exposes these routes in the legacy root BNO. */
+        if (SessionId == 0)
+        {
+            RtlInitUnicodeString(&DirectoryName, L"\\BaseNamedObjects");
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &DirectoryName,
+                                       OBJ_CASE_INSENSITIVE,
+                                       NULL,
+                                       NULL);
+            Status = NtOpenDirectoryObject(&LegacyNamedObjectDirectory,
+                                           DIRECTORY_ALL_ACCESS,
+                                           &ObjectAttributes);
+            ASSERT(NT_SUCCESS(Status));
+
+            RtlInitUnicodeString(&DirectoryName, L"Global");
+            RtlInitUnicodeString(&SymlinkName, L"\\BaseNamedObjects");
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &DirectoryName,
+                                       OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                       LegacyNamedObjectDirectory,
+                                       BnoSd);
+            Status = NtCreateSymbolicLinkObject(&SymHandle,
+                                                SYMBOLIC_LINK_ALL_ACCESS,
+                                                &ObjectAttributes,
+                                                &SymlinkName);
+            if (NT_SUCCESS(Status)) NtClose(SymHandle);
+
+            RtlInitUnicodeString(&DirectoryName, L"Local");
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &DirectoryName,
+                                       OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                       LegacyNamedObjectDirectory,
+                                       BnoSd);
+            Status = NtCreateSymbolicLinkObject(&SymHandle,
+                                                SYMBOLIC_LINK_ALL_ACCESS,
+                                                &ObjectAttributes,
+                                                &SymlinkName);
+            if (NT_SUCCESS(Status)) NtClose(SymHandle);
+
+            RtlInitUnicodeString(&DirectoryName, L"Session");
+            RtlInitUnicodeString(&SymlinkName, L"\\Sessions\\BNOLINKS");
+            InitializeObjectAttributes(&ObjectAttributes,
+                                       &DirectoryName,
+                                       OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
+                                       LegacyNamedObjectDirectory,
+                                       BnoSd);
+            Status = NtCreateSymbolicLinkObject(&SymHandle,
+                                                SYMBOLIC_LINK_ALL_ACCESS,
+                                                &ObjectAttributes,
+                                                &SymlinkName);
+            if (NT_SUCCESS(Status)) NtClose(SymHandle);
+
+            NtClose(LegacyNamedObjectDirectory);
+        }
 
         /* Create the BNO\Restricted directory and set the restricted DACL */
         RtlInitUnicodeString(&DirectoryName, L"Restricted");

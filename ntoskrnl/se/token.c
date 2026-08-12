@@ -21,9 +21,9 @@ LUID SeSystemAuthenticationId = SYSTEM_LUID;
 LUID SeAnonymousAuthenticationId = ANONYMOUS_LOGON_LUID;
 
 static GENERIC_MAPPING SepTokenMapping = {
-    TOKEN_READ,
-    TOKEN_WRITE,
-    TOKEN_EXECUTE,
+    TOKEN_READ | TOKEN_QUERY_SOURCE | TOKEN_DUPLICATE,
+    TOKEN_WRITE | TOKEN_ADJUST_SESSIONID,
+    TOKEN_EXECUTE | TOKEN_IMPERSONATE | TOKEN_ASSIGN_PRIMARY,
     TOKEN_ALL_ACCESS
 };
 
@@ -854,40 +854,16 @@ SeExchangePrimaryToken(
     PAGED_CODE();
 
     if (NewToken->TokenType != TokenPrimary)
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        return STATUS_BAD_IMPERSONATION_LEVEL;
+#else
         return STATUS_BAD_TOKEN_TYPE;
+#endif
 
     if (NewToken->TokenInUse)
     {
-        BOOLEAN IsEqual;
-        NTSTATUS Status;
-
-        /* Maybe we're trying to set the same token */
-        OldToken = PsReferencePrimaryToken(Process);
-        if (OldToken == NewToken)
-        {
-            /* So it's a nop. */
-            *OldAccessToken = OldToken;
-            return STATUS_SUCCESS;
-        }
-
-        Status = SepCompareTokens(OldToken, NewToken, &IsEqual);
-        if (!NT_SUCCESS(Status))
-        {
-            PsDereferencePrimaryToken(OldToken);
-            *OldAccessToken = NULL;
-            return Status;
-        }
-
-        if (!IsEqual)
-        {
-            PsDereferencePrimaryToken(OldToken);
-            *OldAccessToken = NULL;
-            return STATUS_TOKEN_ALREADY_IN_USE;
-        }
-        /* Silently return STATUS_SUCCESS but do not set the new token,
-         * as it's already in use elsewhere. */
-        *OldAccessToken = OldToken;
-        return STATUS_SUCCESS;
+        *OldAccessToken = NULL;
+        return STATUS_TOKEN_ALREADY_IN_USE;
     }
 
     /* Lock the new token */

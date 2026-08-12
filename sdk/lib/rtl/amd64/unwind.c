@@ -439,8 +439,7 @@ RtlpTryToUnwindEpilog(
     /* Check if we are at the ret instruction */
     if ((DWORD64)InstrPtr != EndAddress)
     {
-        /* If we went past the end of the function, something is broken! */
-        ASSERT((DWORD64)InstrPtr <= EndAddress);
+        /* The bytes did not describe an epilog ending at this function. */
         return FALSE;
     }
 
@@ -615,16 +614,20 @@ RepeatChainedInfo:
             case UWOP_SAVE_NONVOL:
                 Reg = UnwindCode.OpInfo;
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
-                /* The slot stores offset / 8; adding it to a DWORD64* scales it back to bytes.
-                 * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L831 */
-                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)Context->Rsp + Offset);
+                SetRegFromStackValue(Context,
+                                     ContextPointers,
+                                     Reg,
+                                     (PDWORD64)(*EstablisherFrame + Offset * 8));
                 i += 2;
                 break;
 
             case UWOP_SAVE_NONVOL_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(Context->Rsp + Offset));
+                SetRegFromStackValue(Context,
+                                     ContextPointers,
+                                     Reg,
+                                     (PDWORD64)(*EstablisherFrame + Offset));
                 i += 3;
                 break;
 
@@ -648,16 +651,20 @@ RepeatChainedInfo:
             case UWOP_SAVE_XMM128:
                 Reg = UnwindCode.OpInfo;
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
-                /* The slot stores offset / 16; adding it to an M128A* scales it back to bytes.
-                 * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L890 */
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)Context->Rsp + Offset);
+                SetXmmRegFromStackValue(Context,
+                                        ContextPointers,
+                                        Reg,
+                                        (M128A*)(*EstablisherFrame + Offset * 16));
                 i += 2;
                 break;
 
             case UWOP_SAVE_XMM128_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(Context->Rsp + Offset));
+                SetXmmRegFromStackValue(Context,
+                                        ContextPointers,
+                                        Reg,
+                                        (M128A*)(*EstablisherFrame + Offset));
                 i += 3;
                 break;
 
@@ -707,7 +714,8 @@ RepeatChainedInfo:
 Exit:
 
     /* Check if we have a handler and return it */
-    if (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER)))
+    if ((CodeOffset >= UnwindInfo->SizeOfProlog) &&
+        (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER))))
     {
         *HandlerData = (LanguageHandler + 1);
         return RVA(ImageBase, *LanguageHandler);
@@ -744,27 +752,25 @@ RtlpExecuteHandlerForUnwindHandler(
     /* Get the DispatcherContext, which was saved in the home space */
     PDISPATCHER_CONTEXT PreviousDispatcherContext = (PDISPATCHER_CONTEXT)HomeSpace[3];
 
-    /* Check if the original call to RtlpExecuteHandlerForUnwind was an unwind */
+    /* An unwind through an active termination handler is a collided unwind. */
     if (IS_UNWINDING(ExceptionFlags))
     {
-        /* Check if the current call to this function is due to unwinding */
-        if (IS_UNWINDING(ExceptionRecord->ExceptionFlags))
-        {
-            /* We are unwinding over the call to a termination handler. This
-               could be due to an exception or longjmp. We need to make sure
-               to not run this termination handler again. To achieve that,
-               we copy the contents of the original dispatcher context back
-               over the current dispatcher context and return
-               ExceptionCollidedUnwind. RtlUnwindInternal will take the
-               original context, and continue unwing there. */
-            *DispatcherContext = *PreviousDispatcherContext;
-            return ExceptionCollidedUnwind;
-        }
+        /* We are leaving a termination handler, either due to an exception
+           or another unwind. Restore the original dispatcher so the caller
+           can continue after this handler without invoking it again. */
+        *DispatcherContext = *PreviousDispatcherContext;
+        return ExceptionCollidedUnwind;
     }
 
-    // TODO: properly handle nested exceptions
+    /* Do not report an unwind through an active exception handler as nested. */
+    if (IS_UNWINDING(ExceptionRecord->ExceptionFlags))
+    {
+        return ExceptionContinueSearch;
+    }
 
-    return ExceptionContinueSearch;
+    /* Tell the outer dispatch where the active exception handler lives. */
+    DispatcherContext->EstablisherFrame = PreviousDispatcherContext->EstablisherFrame;
+    return ExceptionNestedException;
 }
 
 
@@ -795,8 +801,9 @@ RtlpUnwindInternal(
     EXCEPTION_DISPOSITION Disposition;
     PRUNTIME_FUNCTION FunctionEntry;
     ULONG_PTR StackLow, StackHigh;
-    ULONG64 ImageBase, EstablisherFrame;
+    ULONG64 ImageBase, EstablisherFrame, NestedFrame = 0;
     CONTEXT UnwindContext, HandlerContext;
+    BOOLEAN RepeatHandler;
 
     /* Get the current stack limits */
     RtlpGetStackLimits(&StackLow, &StackHigh);
@@ -924,11 +931,20 @@ RtlpUnwindInternal(
              /* Loop all nested handlers */
             do
             {
+                RepeatHandler = FALSE;
+
                 /* Call the language specific handler */
                 Disposition = RtlpExecuteHandlerForUnwind(ExceptionRecord,
                                                           (PVOID)EstablisherFrame,
                                                           ContextRecord,
                                                           &DispatcherContext);
+
+                /* Keep the nested flag set through the nested handler itself. */
+                if (DispatcherContext.EstablisherFrame == NestedFrame)
+                {
+                    ExceptionRecord->ExceptionFlags &= ~EXCEPTION_NESTED_CALL;
+                    NestedFrame = 0;
+                }
 
                 /* Clear exception flags for the next iteration */
                 ExceptionRecord->ExceptionFlags &= ~(EXCEPTION_TARGET_UNWIND |
@@ -951,8 +967,10 @@ RtlpUnwindInternal(
                     }
                     else if (Disposition == ExceptionNestedException)
                     {
-                        /// TODO
-                        __debugbreak();
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_NESTED_CALL;
+
+                        NestedFrame = DispatcherContext.EstablisherFrame;
+                        Disposition = ExceptionContinueSearch;
                     }
                 }
 
@@ -999,7 +1017,11 @@ RtlpUnwindInternal(
                        with an unwind and continue the handler loop, which
                        will run any additional handlers from the previous
                        unwind. */
-                    ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+                    if (HandlerType == UNW_FLAG_UHANDLER)
+                    {
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+                    }
+                    RepeatHandler = TRUE;
 
                     /* The TARGET_UNWIND flag was cleared above for the next
                        iteration. The collided handler may be the one installed
@@ -1024,7 +1046,7 @@ RtlpUnwindInternal(
                     __debugbreak();
                     RtlRaiseStatus(STATUS_INVALID_DISPOSITION);
                 }
-            } while (ExceptionRecord->ExceptionFlags & EXCEPTION_COLLIDED_UNWIND);
+            } while (RepeatHandler);
         }
 
         /* Check, if we have left our stack (8.) */

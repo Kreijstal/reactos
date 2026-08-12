@@ -1132,6 +1132,8 @@ typedef struct _UAPC_FRAME
 typedef struct _KUSER_EXCEPTION_STACK
 {
     CONTEXT Context;
+    CONTEXT_EX ContextEx;
+    ULONG64 ContextExAlignment;
     EXCEPTION_RECORD ExceptionRecord;
     ULONG64 Alignment;
     MACHINE_FRAME MachineFrame;

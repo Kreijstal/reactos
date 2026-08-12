@@ -1516,6 +1516,30 @@ VfatQueryInformation(
                                                    &BufferLength);
             break;
 
+        case FileAttributeTagInformation:
+            if (BufferLength < sizeof(FILE_ATTRIBUTE_TAG_INFORMATION))
+            {
+                Status = STATUS_BUFFER_OVERFLOW;
+            }
+            else
+            {
+                PFILE_ATTRIBUTE_TAG_INFORMATION Info = SystemBuffer;
+
+                Info->FileAttributes = *FCB->Attributes & 0x3f;
+                if (!(Info->FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                              FILE_ATTRIBUTE_ARCHIVE |
+                                              FILE_ATTRIBUTE_SYSTEM |
+                                              FILE_ATTRIBUTE_HIDDEN |
+                                              FILE_ATTRIBUTE_READONLY)))
+                {
+                    Info->FileAttributes |= FILE_ATTRIBUTE_NORMAL;
+                }
+                Info->ReparseTag = 0;
+                BufferLength -= sizeof(*Info);
+                Status = STATUS_SUCCESS;
+            }
+            break;
+
         case FileAllInformation:
             Status = VfatGetAllInformation(IrpContext->FileObject,
                                            FCB,
@@ -1649,6 +1673,10 @@ VfatSetInformation(
                                                    FCB,
                                                    IrpContext->DeviceExt,
                                                    SystemBuffer);
+            break;
+
+        case FileDispositionInformationEx:
+            Status = STATUS_INVALID_INFO_CLASS;
             break;
 
         case FileAllocationInformation:

@@ -592,7 +592,8 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     /* We now have an address space */
     InterlockedOr((PLONG)&Process->Flags, PSF_HAS_ADDRESS_SPACE_BIT);
 
-    /* Set the maximum WS */
+    /* Set the default working set limits */
+    Process->Vm.MinimumWorkingSetSize = MinWs;
     Process->Vm.MaximumWorkingSetSize = MaxWs;
 
     /* Now initialize the Kernel Process */
@@ -1539,6 +1540,12 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
     RtlInitUnicodeString(&ImageName, NULL);
     RtlInitUnicodeString(&CapturedImageName, NULL);
 
+    /* NtCreateUserProcess only accepts the initial-thread suspend flag. */
+    if (ThreadFlags & ~THREAD_CREATE_FLAGS_CREATE_SUSPENDED)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* Validate user-mode parameters */
     if (PreviousMode != KernelMode)
     {
@@ -2119,18 +2126,6 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
         if (StackReserve == 0) StackReserve = 0x100000;  /* 1MB default */
         if (StackCommit == 0) StackCommit = PAGE_SIZE;
 
-#ifdef _M_AMD64
-        /*
-         * Keep the initial top-of-stack runtime area committed on AMD64.
-         * This matches the user-mode stack creation helpers and avoids
-         * runtimes faulting before the guard page growth path can run.
-         */
-        if (StackCommit < 0x10000)
-        {
-            StackCommit = 0x10000;
-        }
-#endif
-
         /* Ensure commit does not exceed reserve */
         if (StackCommit >= StackReserve)
         {
@@ -2402,6 +2397,7 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
         {
             /* Probe the thread handle */
             ProbeForWriteHandle(ProcessHandle);
+            *ProcessHandle = NULL;
 
             /* Check for a CID structure */
             if (ClientId)
@@ -2442,6 +2438,9 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
 
     /* Can't pass both, fail */
     if ((HasObjectName) && (ClientId)) return STATUS_INVALID_PARAMETER_MIX;
+
+    if (ClientId && !ClientId->UniqueProcess && !ClientId->UniqueThread)
+        return STATUS_INVALID_CID;
 
     /* Create an access state */
     Status = SeCreateAccessState(&AccessState,
@@ -2505,7 +2504,7 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
         {
             /* Get rid of the access state and return */
             SeDeleteAccessState(&AccessState);
-            return Status;
+            return STATUS_INVALID_CID;
         }
 
         /* Open the Process Object */

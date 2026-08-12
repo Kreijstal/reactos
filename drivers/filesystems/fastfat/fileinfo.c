@@ -600,6 +600,25 @@ Return Value:
                 FatQueryNetworkInfo( IrpContext, Fcb, FileObject, Buffer, &Length );
                 break;
 
+            case FileAttributeTagInformation:
+
+                ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->FileAttributes = Fcb->DirentFatFlags;
+
+                if (FlagOn( Fcb->FcbState, FCB_STATE_TEMPORARY )) {
+
+                    SetFlag( ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->FileAttributes,
+                             FILE_ATTRIBUTE_TEMPORARY );
+                }
+
+                if (((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->FileAttributes == 0) {
+
+                    ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+                }
+
+                ((PFILE_ATTRIBUTE_TAG_INFORMATION)Buffer)->ReparseTag = 0;
+                Length -= sizeof(FILE_ATTRIBUTE_TAG_INFORMATION);
+                break;
+
             default:
 
                 Status = STATUS_INVALID_PARAMETER;
@@ -987,6 +1006,11 @@ Return Value:
         case FileLinkInformation:
 
             Status = STATUS_INVALID_DEVICE_REQUEST;
+            break;
+
+        case FileDispositionInformationEx:
+
+            Status = STATUS_INVALID_INFO_CLASS;
             break;
 
         case FileAllocationInformation:
@@ -2485,6 +2509,15 @@ Return Value:
         if (FlagOn(Fcb->DirentFatFlags, FAT_DIRENT_ATTR_READ_ONLY)) {
 
             DebugTrace(-1, Dbg, "Cannot delete readonly file\n", 0);
+
+            return STATUS_CANNOT_DELETE;
+        }
+
+        if ((NodeType(Fcb) == FAT_NTC_FCB) &&
+            !MmCanFileBeTruncated( &Fcb->NonPaged->SectionObjectPointers,
+                                   &FatLargeZero )) {
+
+            DebugTrace(-1, Dbg, "Cannot delete user mapped data\n", 0);
 
             return STATUS_CANNOT_DELETE;
         }
@@ -5182,5 +5215,3 @@ FatDeleteFile (
         FatDeleteFcb( IrpContext, &Fcb );
     } _SEH2_END;
 }
-
-
