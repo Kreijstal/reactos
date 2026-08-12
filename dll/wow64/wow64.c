@@ -43,7 +43,10 @@ PVOID NtDll32LdrpRoutine = NULL;
 PVOID NtDll32KiUserExceptionDispatcher = NULL;
 
 void SetupFs(ULONG_PTR segSelector);
-void EnterApc32(PVOID pEnterCtx, SIZE_T cbCtxSize);
+void EnterApc32(PVOID pEnterCtx,
+                SIZE_T cbCtxSize,
+                PTEB NativeTeb,
+                PVOID CpuArea);
 void KiWow64SystemCall32(void);
 __declspec(dllexport) void WINAPI Wow64LdrpInitialize(PCONTEXT pContext);
 
@@ -73,6 +76,17 @@ Wow64CopyContext32To64(PCONTEXT pContext,
     pContext->SegGs = pContext32->SegGs;
     pContext->SegSs = 0x2B;
     pContext->MxCsr = INITIAL_MXCSR;
+
+    if (pContext32->ContextFlags & WOW64_CONTEXT_DEBUG_REGISTERS)
+    {
+        pContext->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        pContext->Dr0 = pContext32->Dr0;
+        pContext->Dr1 = pContext32->Dr1;
+        pContext->Dr2 = pContext32->Dr2;
+        pContext->Dr3 = pContext32->Dr3;
+        pContext->Dr6 = pContext32->Dr6;
+        pContext->Dr7 = pContext32->Dr7;
+    }
 }
 
 VOID
@@ -95,7 +109,17 @@ Wow64CopyContext64To32(PI386_CONTEXT pContext32,
     pContext32->SegGs = pContext->SegGs;
     pContext32->SegSs = pContext->SegSs;
     pContext32->EFlags = pContext->EFlags;
-    pContext32->ContextFlags = pContext->ContextFlags;
+    pContext32->ContextFlags = 0x10000 | (pContext->ContextFlags & 0xffff);
+
+    if (pContext->ContextFlags & CONTEXT_DEBUG_REGISTERS)
+    {
+        pContext32->Dr0 = pContext->Dr0;
+        pContext32->Dr1 = pContext->Dr1;
+        pContext32->Dr2 = pContext->Dr2;
+        pContext32->Dr3 = pContext->Dr3;
+        pContext32->Dr6 = pContext->Dr6;
+        pContext32->Dr7 = pContext->Dr7;
+    }
 }
 
 /* From wine/dlls/ntdll/unix/env.c */
@@ -1430,7 +1454,10 @@ Wow64Trampoline(PCONTEXT pContext)
     EnterApc32Stack.SystemArgument1 = PtrToUlong(NtDll32);
     EnterApc32Stack.SystemArgument2 = 0;
 
-    EnterApc32(&EnterApc32Stack, sizeof(EnterApc32Stack));
+    EnterApc32(&EnterApc32Stack,
+               sizeof(EnterApc32Stack),
+               NtCurrentTeb(),
+               NtCurrentTeb()->TlsSlots[WOW64_TLS_CPURESERVED]);
 
     /* Retrieve the saved context pointer from TLS -- local variables
        are not reliable after the 32-bit code ran. */
@@ -1455,7 +1482,8 @@ Wow64InitThread(PCONTEXT pContext)
     PPEB32 WowPeb = NULL;
     PTEB Teb = NtCurrentTeb();
 
-    WowTeb = (PTEB32)ROUND_TO_PAGES((ULONG_PTR)(Teb + 1));
+    /* The kernel reserves one native TEB page followed by one TEB32 page. */
+    WowTeb = (PTEB32)((ULONG_PTR)Teb + PAGE_SIZE);
 
     DPRINT1("WOW64 TEB %p, TEB %p\n", WowTeb, Teb);
 

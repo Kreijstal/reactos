@@ -1335,6 +1335,7 @@ static void test_RtlCreateUserStack(void)
         ULONG mask = ~0u >> i;
         NTSTATUS expect_ret = STATUS_SUCCESS;
 
+
         if (i == 12) expect_ret = STATUS_CONFLICTING_ADDRESSES;
         else if (i >= 13) expect_ret = STATUS_INVALID_PARAMETER;
         ret = pRtlCreateUserStack( args.expect_committed, args.expect_reserved, i, 0x1000, 0x1000, &stack );

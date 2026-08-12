@@ -162,8 +162,33 @@ CmpFreeKeyByCell(IN PHHIVE Hive,
 {
     PCM_KEY_NODE CellData, ParentData;
     PCELL_DATA ListData;
+    HCELL_INDEX SubKeyCell;
+    NTSTATUS Status;
     ULONG i;
     BOOLEAN Result;
+
+    while (TRUE)
+    {
+        CellData = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
+        if (!CellData)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        if (!(CellData->SubKeyCounts[Stable] +
+              CellData->SubKeyCounts[Volatile]))
+        {
+            HvReleaseCell(Hive, Cell);
+            break;
+        }
+
+        SubKeyCell = CmpFindSubKeyByNumber(Hive, CellData, 0);
+        HvReleaseCell(Hive, Cell);
+        if (SubKeyCell == HCELL_NIL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Status = CmpFreeKeyByCell(Hive, SubKeyCell, TRUE);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     /* Mark the entire key dirty */
     CmpMarkKeyDirty(Hive, Cell, TRUE);

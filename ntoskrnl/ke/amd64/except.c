@@ -131,6 +131,11 @@ KiDispatchExceptionToUser(
 
         /* Copy Context and ExceptionFrame */
         UserStack->Context = *Context;
+        UserStack->ContextEx.All.Offset = -(LONG)sizeof(CONTEXT);
+        UserStack->ContextEx.All.Length =
+            FIELD_OFFSET(KUSER_EXCEPTION_STACK, ExceptionRecord);
+        UserStack->ContextEx.Legacy.Offset = -(LONG)sizeof(CONTEXT);
+        UserStack->ContextEx.Legacy.Length = sizeof(CONTEXT);
         UserStack->ExceptionRecord = *ExceptionRecord;
 
         /* Setup the machine frame */
@@ -509,6 +514,18 @@ KiIsPrivilegedInstruction(PUCHAR Ip, BOOLEAN Wow64)
 
     switch (Ip[0])
     {
+        case 0x6C: // INSB
+        case 0x6D: // INSW / INSD
+        case 0x6E: // OUTSB
+        case 0x6F: // OUTSW / OUTSD
+        case 0xE4: // IN AL, imm8
+        case 0xE5: // IN AX / EAX, imm8
+        case 0xE6: // OUT imm8, AL
+        case 0xE7: // OUT imm8, AX / EAX
+        case 0xEC: // IN AL, DX
+        case 0xED: // IN AX / EAX, DX
+        case 0xEE: // OUT DX, AL
+        case 0xEF: // OUT DX, AX / EAX
         case 0xF4: // HLT
         case 0xFA: // CLI
         case 0xFB: // STI
@@ -609,7 +626,7 @@ NTSTATUS
 KiGeneralProtectionFaultUserMode(
     _In_ PKTRAP_FRAME TrapFrame)
 {
-    BOOLEAN Wow64 = TrapFrame->SegCs == KGDT64_R3_CMCODE;
+    BOOLEAN Wow64 = TrapFrame->SegCs == (KGDT64_R3_CMCODE | RPL_MASK);
     PUCHAR InstructionPointer;
     NTSTATUS Status;
 

@@ -254,6 +254,48 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
  */
 NTSTATUS
 NTAPI
+RtlCreateProcessParametersEx(
+    PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
+    PUNICODE_STRING ImagePathName,
+    PUNICODE_STRING DllPath,
+    PUNICODE_STRING CurrentDirectory,
+    PUNICODE_STRING CommandLine,
+    PWSTR Environment,
+    PUNICODE_STRING WindowTitle,
+    PUNICODE_STRING DesktopInfo,
+    PUNICODE_STRING ShellInfo,
+    PUNICODE_STRING RuntimeData,
+    ULONG Flags)
+{
+   NTSTATUS Status;
+
+   if (Flags & ~RTL_USER_PROCESS_PARAMETERS_NORMALIZED)
+      return STATUS_INVALID_PARAMETER;
+
+   Status = RtlCreateProcessParameters(ProcessParameters,
+                                       ImagePathName,
+                                       DllPath,
+                                       CurrentDirectory,
+                                       CommandLine,
+                                       Environment,
+                                       WindowTitle,
+                                       DesktopInfo,
+                                       ShellInfo,
+                                       RuntimeData);
+   if (NT_SUCCESS(Status) &&
+       (Flags & RTL_USER_PROCESS_PARAMETERS_NORMALIZED))
+   {
+      RtlNormalizeProcessParams(*ProcessParameters);
+   }
+
+   return Status;
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
 RtlDestroyProcessParameters(IN PRTL_USER_PROCESS_PARAMETERS ProcessParameters)
 {
    RtlFreeHeap(RtlGetProcessHeap(), 0, ProcessParameters);

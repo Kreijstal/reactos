@@ -48,6 +48,8 @@ ObpAddImpliedAccessRights(
             GrantedAccess |= THREAD_QUERY_LIMITED_INFORMATION;
         if (GrantedAccess & THREAD_SET_INFORMATION)
             GrantedAccess |= THREAD_SET_LIMITED_INFORMATION;
+        if (GrantedAccess & THREAD_SUSPEND_RESUME)
+            GrantedAccess |= THREAD_RESUME;
     }
     return GrantedAccess;
 }
@@ -1157,6 +1159,9 @@ ObpIncrementHandleCount(IN PVOID Object,
                                                     &GrantedAccess,
                                                     ProcessHandleCount);
         ObpCalloutEnd(CalloutIrql, "Open", ObjectType, Object);
+
+        if (NT_SUCCESS(Status) && AccessState)
+            AccessState->PreviouslyGrantedAccess = GrantedAccess;
 
         /* Check if the open procedure failed */
         if (!NT_SUCCESS(Status))
@@ -2537,9 +2542,6 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
                             OBJ_AUDIT_OBJECT_CLOSE;
     }
 
-    /* Check if we're duplicating the access */
-    if (Options & DUPLICATE_SAME_ACCESS) DesiredAccess = SourceAccess;
-
     /* Get object data */
     ObjectHeader = OBJECT_TO_OBJECT_HEADER(SourceObject);
     ObjectType = ObjectHeader->Type;
@@ -2549,47 +2551,55 @@ ObDuplicateObject(IN PEPROCESS SourceProcess,
     NewHandleEntry.Object = ObjectHeader;
     NewHandleEntry.ObAttributes |= (HandleAttributes & OBJ_HANDLE_ATTRIBUTES);
 
-    /* Check if we're using a generic mask */
-    if (DesiredAccess & GENERIC_ACCESS)
+    /* Same-access duplication preserves the already validated handle mask. */
+    if (Options & DUPLICATE_SAME_ACCESS)
     {
-        /* Map it */
-        RtlMapGenericMask(&DesiredAccess,
-                          &ObjectType->TypeInfo.GenericMapping);
-    }
-
-    /* Set the target access, always propagate ACCESS_SYSTEM_SECURITY */
-    TargetAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
-                                    ACCESS_SYSTEM_SECURITY);
-
-    /* Add the implied process/thread rights */
-    TargetAccess = ObpAddImpliedAccessRights(ObjectType, TargetAccess);
-
-    NewHandleEntry.GrantedAccess = TargetAccess;
-
-    /* Check if we're asking for new access */
-    if (TargetAccess & ~SourceAccess)
-    {
-        /* We are. We need the security procedure to validate this */
-        if (ObjectType->TypeInfo.SecurityProcedure == SeDefaultObjectMethod)
-        {
-            /* Use our built-in access state */
-            PassedAccessState = &AccessState;
-            Status = SeCreateAccessState(&AccessState,
-                                         &AuxData,
-                                         TargetAccess,
-                                         &ObjectType->TypeInfo.GenericMapping);
-        }
-        else
-        {
-            /* Otherwise we can't allow this privilege elevation */
-            Status = STATUS_ACCESS_DENIED;
-        }
+        TargetAccess = SourceAccess;
+        Status = STATUS_SUCCESS;
     }
     else
     {
-        /* We don't need an access state */
-        Status = STATUS_SUCCESS;
+        /* Map generic access before validating the caller's new request. */
+        if (DesiredAccess & GENERIC_ACCESS)
+        {
+            RtlMapGenericMask(&DesiredAccess,
+                              &ObjectType->TypeInfo.GenericMapping);
+        }
+
+        /* Set the target access, always propagate ACCESS_SYSTEM_SECURITY. */
+        TargetAccess = DesiredAccess & (ObjectType->TypeInfo.ValidAccessMask |
+                                        ACCESS_SYSTEM_SECURITY);
+        TargetAccess = ObpAddImpliedAccessRights(ObjectType, TargetAccess);
+
+        /* Reject invalid access bits instead of silently dropping them. */
+        if (DesiredAccess & ~(ObjectType->TypeInfo.ValidAccessMask |
+                              ACCESS_SYSTEM_SECURITY))
+        {
+            Status = STATUS_ACCESS_DENIED;
+        }
+        /* Check if we're asking for new access. */
+        else if (TargetAccess & ~SourceAccess)
+        {
+            if (ObjectType->TypeInfo.SecurityProcedure == SeDefaultObjectMethod)
+            {
+                PassedAccessState = &AccessState;
+                Status = SeCreateAccessState(&AccessState,
+                                             &AuxData,
+                                             TargetAccess,
+                                             &ObjectType->TypeInfo.GenericMapping);
+            }
+            else
+            {
+                Status = STATUS_ACCESS_DENIED;
+            }
+        }
+        else
+        {
+            Status = STATUS_SUCCESS;
+        }
     }
+
+    NewHandleEntry.GrantedAccess = TargetAccess;
 
     /* Make sure the access state was created OK */
     if (NT_SUCCESS(Status))

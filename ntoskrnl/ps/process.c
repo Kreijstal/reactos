@@ -577,7 +577,8 @@ PspCreateProcess(OUT PHANDLE ProcessHandle,
     /* We now have an address space */
     InterlockedOr((PLONG)&Process->Flags, PSF_HAS_ADDRESS_SPACE_BIT);
 
-    /* Set the maximum WS */
+    /* Set the default working set limits */
+    Process->Vm.MinimumWorkingSetSize = MinWs;
     Process->Vm.MaximumWorkingSetSize = MaxWs;
 
     /* Now initialize the Kernel Process */
@@ -1499,6 +1500,12 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
     RtlInitUnicodeString(&ImageName, NULL);
     RtlInitUnicodeString(&CapturedImageName, NULL);
 
+    /* NtCreateUserProcess only accepts the initial-thread suspend flag. */
+    if (ThreadFlags & ~THREAD_CREATE_FLAGS_CREATE_SUSPENDED)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* Validate user-mode parameters */
     if (PreviousMode != KernelMode)
     {
@@ -2079,18 +2086,6 @@ NtCreateUserProcess(OUT PHANDLE ProcessHandle,
         if (StackReserve == 0) StackReserve = 0x100000;  /* 1MB default */
         if (StackCommit == 0) StackCommit = PAGE_SIZE;
 
-#ifdef _M_AMD64
-        /*
-         * Keep the initial top-of-stack runtime area committed on AMD64.
-         * This matches the user-mode stack creation helpers and avoids
-         * runtimes faulting before the guard page growth path can run.
-         */
-        if (StackCommit < 0x10000)
-        {
-            StackCommit = 0x10000;
-        }
-#endif
-
         /* Ensure commit does not exceed reserve */
         if (StackCommit >= StackReserve)
         {
@@ -2362,6 +2357,7 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
         {
             /* Probe the thread handle */
             ProbeForWriteHandle(ProcessHandle);
+            *ProcessHandle = NULL;
 
             /* Check for a CID structure */
             if (ClientId)
@@ -2402,6 +2398,9 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
 
     /* Can't pass both, fail */
     if ((HasObjectName) && (ClientId)) return STATUS_INVALID_PARAMETER_MIX;
+
+    if (ClientId && !ClientId->UniqueProcess && !ClientId->UniqueThread)
+        return STATUS_INVALID_CID;
 
     /* Create an access state */
     Status = SeCreateAccessState(&AccessState,
@@ -2465,7 +2464,7 @@ NtOpenProcess(OUT PHANDLE ProcessHandle,
         {
             /* Get rid of the access state and return */
             SeDeleteAccessState(&AccessState);
-            return Status;
+            return STATUS_INVALID_CID;
         }
 
         /* Open the Process Object */
@@ -2555,5 +2554,119 @@ PsQueryTotalCycleTimeProcess(
     /* Return the total cycle time */
     return TotalCycleTime;
 }
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+NTSTATUS
+NTAPI
+NtGetNextThread(IN HANDLE ProcessHandle,
+                IN HANDLE ThreadHandle OPTIONAL,
+                IN ACCESS_MASK DesiredAccess,
+                IN ULONG HandleAttributes,
+                IN ULONG Flags,
+                OUT PHANDLE NewThreadHandle)
+{
+    KPROCESSOR_MODE PreviousMode = KeGetPreviousMode();
+    PEPROCESS Process;
+    PETHREAD Thread = NULL, NextThread;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    if (Flags)
+        return STATUS_INVALID_PARAMETER;
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForWriteHandle(NewThreadHandle);
+            *NewThreadHandle = NULL;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Status = ObReferenceObjectByHandle(ProcessHandle,
+                                       PROCESS_QUERY_INFORMATION,
+                                       PsProcessType,
+                                       PreviousMode,
+                                       (PVOID*)&Process,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (ThreadHandle)
+    {
+        Status = ObReferenceObjectByHandle(ThreadHandle,
+                                           0,
+                                           PsThreadType,
+                                           PreviousMode,
+                                           (PVOID*)&Thread,
+                                           NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(Process);
+            return Status;
+        }
+
+        if (Thread->ThreadsProcess != Process)
+        {
+            ObDereferenceObject(Thread);
+            ObDereferenceObject(Process);
+            return STATUS_INVALID_HANDLE;
+        }
+    }
+
+    for (;;)
+    {
+        NextThread = PsGetNextProcessThread(Process, Thread);
+        Thread = NULL; /* PsGetNextProcessThread consumed the cursor reference. */
+        if (!NextThread)
+        {
+            ObDereferenceObject(Process);
+            return STATUS_NO_MORE_ENTRIES;
+        }
+
+        Status = ObOpenObjectByPointer(NextThread,
+                                       HandleAttributes,
+                                       NULL,
+                                       DesiredAccess,
+                                       PsThreadType,
+                                       PreviousMode,
+                                       &Handle);
+        if (NT_SUCCESS(Status))
+            break;
+
+        if (Status != STATUS_ACCESS_DENIED)
+        {
+            ObDereferenceObject(NextThread);
+            ObDereferenceObject(Process);
+            return Status;
+        }
+
+        Thread = NextThread;
+    }
+
+    ObDereferenceObject(Process);
+    ObDereferenceObject(NextThread);
+
+    _SEH2_TRY
+    {
+        *NewThreadHandle = Handle;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        ObCloseHandle(Handle, PreviousMode);
+    }
+    _SEH2_END;
+
+    return Status;
+}
+#endif
 
 /* EOF */

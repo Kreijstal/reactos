@@ -729,6 +729,13 @@ ExpInitSystemPhase1(VOID)
         return FALSE;
     }
 
+    /* Initialize preallocated APC and I/O completion reserve objects */
+    if (ExpInitializeReserveObjectImplementation() == FALSE)
+    {
+        DPRINT1("Executive: Reserve object initialization failed\n");
+        return FALSE;
+    }
+
     /* Initialize Win32K */
     if (ExpWin32kInit() == FALSE)
     {

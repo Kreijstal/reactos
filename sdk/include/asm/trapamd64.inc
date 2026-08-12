@@ -78,6 +78,8 @@ TF_CHECKUSERAPC         = HEX(100)
  */
 MACRO(EnterTrap, Flags)
     LOCAL kernel_mode_entry
+    LOCAL user_debug_state_saved
+    LOCAL debug_state_saved
 
     /* Save the trap flags for this trap */
     CurrentTrapFlags = VAL(Flags)
@@ -152,6 +154,27 @@ MACRO(EnterTrap, Flags)
     mov es, ax
     swapgs
 
+    /* Save active user debug state and disable it before executing kernel
+       code. The trap frame remains the authoritative per-thread copy. */
+    mov rax, gs:[PcCurrentThread]
+    test byte ptr [rax + ThDebugActive], HEX(FF)
+    jz user_debug_state_saved
+    mov rax, dr0
+    mov [rbp + KTRAP_FRAME_Dr0], rax
+    mov rax, dr1
+    mov [rbp + KTRAP_FRAME_Dr1], rax
+    mov rax, dr2
+    mov [rbp + KTRAP_FRAME_Dr2], rax
+    mov rax, dr3
+    mov [rbp + KTRAP_FRAME_Dr3], rax
+    mov rax, dr6
+    mov [rbp + KTRAP_FRAME_Dr6], rax
+    mov rax, dr7
+    mov [rbp + KTRAP_FRAME_Dr7], rax
+    xor eax, eax
+    mov dr7, rax
+user_debug_state_saved:
+
     /* Load kernel MXCSR */
     ldmxcsr gs:[PcMxCsr]
 
@@ -166,7 +189,11 @@ kernel_mode_entry:
 //    endif
 
     if (Flags AND TF_DEBUG)
-        /* Save debug registers */
+        /* User debug state was saved before it was disabled above. */
+        test byte ptr [rbp + KTRAP_FRAME_PreviousMode], 1
+        jnz debug_state_saved
+
+        /* Save kernel debug registers. */
         mov rax, dr0
         mov [rbp + KTRAP_FRAME_Dr0], rax
         mov rax, dr1
@@ -179,6 +206,7 @@ kernel_mode_entry:
         mov [rbp + KTRAP_FRAME_Dr6], rax
         mov rax, dr7
         mov [rbp + KTRAP_FRAME_Dr7], rax
+debug_state_saved:
     endif
 
     /* Make sure the direction flag is cleared */
@@ -190,6 +218,11 @@ ENDM
  */
 MACRO(ExitTrap, Flags)
     LOCAL kernel_mode_return
+    LOCAL have_instrumentation_snapshot
+    LOCAL check_instrumentation_callback
+    LOCAL no_instrumentation_callback
+    LOCAL no_user_debug_restore
+    LOCAL user_debug_restore_done
 
     ASSERT_TRAP_FRAME_IRQL_VALID rbp
 
@@ -218,7 +251,61 @@ MACRO(ExitTrap, Flags)
     ASSERT_TRAP_FRAME_INTS_ENABLED rbp
     ASSERT_IRQL_PASSIVE
 
+    /* Redirect the final user-mode return through the process callback. */
+    mov rax, gs:[PcCurrentThread]
+    mov r10, [rax + EtInstrumentationCallback]
+    mov qword ptr [rax + EtInstrumentationCallback], 0
+    test r10, r10
+    jnz have_instrumentation_snapshot
+    mov rax, [rax + ThApcState + AsProcess]
+    mov r10, [rax + PrInstrumentationCallback]
+    jmp check_instrumentation_callback
+
+have_instrumentation_snapshot:
+    cmp r10, 1
+    je no_instrumentation_callback
+    mov rax, [rax + ThApcState + AsProcess]
+    cmp r10, [rax + PrInstrumentationCallback]
+    jne no_instrumentation_callback
+
+check_instrumentation_callback:
+    test r10, r10
+    jz no_instrumentation_callback
+    cmp [rbp + KTRAP_FRAME_Rip], r10
+    je no_instrumentation_callback
+    mov rcx, [rbp + KTRAP_FRAME_Rsp]
+    mov rax, [rbp + KTRAP_FRAME_Rip]
+    mov [rbp + KTRAP_FRAME_Rcx], rcx
+    mov [rbp + KTRAP_FRAME_R10], rax
+    mov [rbp + KTRAP_FRAME_Rip], r10
+no_instrumentation_callback:
+
     cli
+
+    /* Restore active user debug state at the last possible point. */
+    mov rax, gs:[PcCurrentThread]
+    test byte ptr [rax + ThDebugActive], HEX(FF)
+    jz no_user_debug_restore
+    xor eax, eax
+    mov dr7, rax
+    mov rax, [rbp + KTRAP_FRAME_Dr0]
+    mov dr0, rax
+    mov rax, [rbp + KTRAP_FRAME_Dr1]
+    mov dr1, rax
+    mov rax, [rbp + KTRAP_FRAME_Dr2]
+    mov dr2, rax
+    mov rax, [rbp + KTRAP_FRAME_Dr3]
+    mov dr3, rax
+    mov rax, [rbp + KTRAP_FRAME_Dr6]
+    mov dr6, rax
+    mov rax, [rbp + KTRAP_FRAME_Dr7]
+    mov dr7, rax
+    jmp user_debug_restore_done
+
+no_user_debug_restore:
+    xor eax, eax
+    mov dr7, rax
+user_debug_restore_done:
 
     /* Swap gs to user mode */
     swapgs
@@ -276,4 +363,3 @@ MACRO(TRAP_ENTRY, Trap, Flags)
         ExitTrap Flags
     ENDFUNC
 ENDM
-

@@ -14,6 +14,7 @@ NtAdjustPrivilegesToken 6
 NtAlertResumeThread 2
 NtAlertThread 1
 NtAllocateLocallyUniqueId 1
+NtAllocateReserveObject 3
 NtAllocateUserPhysicalPages 3
 NtAllocateUuids 4
 NtAllocateVirtualMemory 6
@@ -103,7 +104,7 @@ NtListenPort 2
 NtLoadDriver 1
 NtLoadKey 2
 NtLoadKey2 3
-NtLoadKeyEx 4
+NtLoadKeyEx 8
 NtLockFile 10
 NtLockProductActivationKeys 2
 NtLockRegistryKey 1
@@ -125,6 +126,7 @@ NtOpenFile 6
 NtOpenIoCompletion 3
 NtOpenJobObject 3
 NtOpenKey 3
+NtOpenKeyEx 4
 NtOpenMutant 3
 NtOpenObjectAuditAlarm 12
 NtOpenProcess 4
@@ -198,6 +200,7 @@ NtRegisterThreadTerminatePort 1
 NtReleaseMutant 2
 NtReleaseSemaphore 3
 NtRemoveIoCompletion 5
+NtRemoveIoCompletionEx 6
 NtRemoveProcessDebug 2
 NtRenameKey 2
 NtReplaceKey 3
@@ -241,6 +244,7 @@ NtSetInformationThread 4
 NtSetInformationToken 4
 NtSetIntervalProfile 2
 NtSetIoCompletion 5
+NtSetIoCompletionEx 6
 NtSetLdtEntries 6
 NtSetLowEventPair 1
 NtSetLowWaitHighEventPair 1

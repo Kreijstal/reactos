@@ -330,7 +330,15 @@ PspCreateThread(OUT PHANDLE ThreadHandle,
         _SEH2_TRY
         {
             Thread->StartAddress = (PVOID)KeGetContextPc(ThreadContext);
+#if defined(_M_AMD64)
+            Thread->Win32StartAddress = (PVOID)ThreadContext->Rcx;
+#elif defined(_M_ARM64)
+            Thread->Win32StartAddress = (PVOID)ThreadContext->X0;
+#elif defined(_M_ARM)
+            Thread->Win32StartAddress = (PVOID)ThreadContext->R0;
+#else
             Thread->Win32StartAddress = (PVOID)KeGetContextReturnRegister(ThreadContext);
+#endif
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
