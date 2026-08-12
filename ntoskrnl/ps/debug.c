@@ -116,9 +116,10 @@ PspDumpThreads(BOOLEAN IncludeSystem)
  */
 NTSTATUS
 NTAPI
-PsGetContextThread(IN PETHREAD Thread,
-                   IN OUT PCONTEXT ThreadContext,
-                   IN KPROCESSOR_MODE PreviousMode)
+PspGetContextThreadInternal(IN PETHREAD Thread,
+                            IN OUT PCONTEXT ThreadContext,
+                            IN KPROCESSOR_MODE PreviousMode,
+                            IN KPROCESSOR_MODE ContextMode)
 {
     GET_SET_CTX_CONTEXT GetSetContext;
     ULONG Size = 0, Flags = 0;
@@ -131,7 +132,10 @@ PsGetContextThread(IN PETHREAD Thread,
         Size = sizeof(CONTEXT);
 
         /* Read the flags */
-        Flags = ProbeForReadUlong(&ThreadContext->ContextFlags);
+        if (PreviousMode != KernelMode)
+            Flags = ProbeForReadUlong(&ThreadContext->ContextFlags);
+        else
+            Flags = ThreadContext->ContextFlags;
 
 #ifdef _M_IX86
         /* Check if the caller wanted extended registers */
@@ -163,7 +167,7 @@ PsGetContextThread(IN PETHREAD Thread,
     /* Set the flags and previous mode */
     RtlZeroMemory(&GetSetContext.Context, Size);
     GetSetContext.Context.ContextFlags = Flags;
-    GetSetContext.Mode = PreviousMode;
+    GetSetContext.Mode = ContextMode;
 
     /* Check if we're running in the same thread */
     if (Thread == PsGetCurrentThread())
@@ -233,14 +237,27 @@ PsGetContextThread(IN PETHREAD Thread,
     return Status;
 }
 
+NTSTATUS
+NTAPI
+PsGetContextThread(IN PETHREAD Thread,
+                   IN OUT PCONTEXT ThreadContext,
+                   IN KPROCESSOR_MODE PreviousMode)
+{
+    return PspGetContextThreadInternal(Thread,
+                                       ThreadContext,
+                                       PreviousMode,
+                                       PreviousMode);
+}
+
 /*
  * @implemented
  */
 NTSTATUS
 NTAPI
-PsSetContextThread(IN PETHREAD Thread,
-                   IN OUT PCONTEXT ThreadContext,
-                   IN KPROCESSOR_MODE PreviousMode)
+PspSetContextThreadInternal(IN PETHREAD Thread,
+                            IN OUT PCONTEXT ThreadContext,
+                            IN KPROCESSOR_MODE PreviousMode,
+                            IN KPROCESSOR_MODE ContextMode)
 {
     GET_SET_CTX_CONTEXT GetSetContext;
     ULONG Size = 0, Flags = 0;
@@ -253,7 +270,10 @@ PsSetContextThread(IN PETHREAD Thread,
         Size = sizeof(CONTEXT);
 
         /* Read the flags */
-        Flags = ProbeForReadUlong(&ThreadContext->ContextFlags);
+        if (PreviousMode != KernelMode)
+            Flags = ProbeForReadUlong(&ThreadContext->ContextFlags);
+        else
+            Flags = ThreadContext->ContextFlags;
 
 #ifdef _M_IX86
         /* Check if the caller wanted extended registers */
@@ -287,7 +307,7 @@ PsSetContextThread(IN PETHREAD Thread,
 
     /* Set the flags and previous mode */
     GetSetContext.Context.ContextFlags = Flags;
-    GetSetContext.Mode = PreviousMode;
+    GetSetContext.Mode = ContextMode;
 
     /* Check if we're running in the same thread */
     if (Thread == PsGetCurrentThread())
@@ -343,6 +363,18 @@ PsSetContextThread(IN PETHREAD Thread,
 
     /* Return status */
     return Status;
+}
+
+NTSTATUS
+NTAPI
+PsSetContextThread(IN PETHREAD Thread,
+                   IN OUT PCONTEXT ThreadContext,
+                   IN KPROCESSOR_MODE PreviousMode)
+{
+    return PspSetContextThreadInternal(Thread,
+                                       ThreadContext,
+                                       PreviousMode,
+                                       PreviousMode);
 }
 
 NTSTATUS

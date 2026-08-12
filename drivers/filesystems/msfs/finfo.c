@@ -53,6 +53,34 @@ MsfsQueryMailslotInformation(PMSFS_FCB Fcb,
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+MsfsQueryNameInformation(PMSFS_FCB Fcb,
+                         PFILE_NAME_INFORMATION Buffer,
+                         PULONG BufferLength)
+{
+    ULONG HeaderLength = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    ULONG NameLength = Fcb ? Fcb->Name.Length : 0;
+    ULONG CopyLength;
+
+    if (*BufferLength < HeaderLength)
+        return STATUS_BUFFER_OVERFLOW;
+
+    Buffer->FileNameLength = NameLength;
+    CopyLength = min(NameLength, *BufferLength - HeaderLength);
+    if (CopyLength)
+    {
+        RtlCopyMemory(Buffer->FileName, Fcb->Name.Buffer, CopyLength);
+    }
+    else if (*BufferLength >= HeaderLength + sizeof(WCHAR))
+    {
+        /* I/O manager expects an absolute file name even for the root. */
+        Buffer->FileName[0] = L'\\';
+    }
+
+    *BufferLength -= HeaderLength + CopyLength;
+    return (CopyLength == NameLength) ? STATUS_SUCCESS : STATUS_BUFFER_OVERFLOW;
+}
+
 
 static NTSTATUS
 MsfsSetMailslotInformation(PMSFS_FCB Fcb,
@@ -90,23 +118,33 @@ MsfsQueryInformation(PDEVICE_OBJECT DeviceObject,
     Fcb = (PMSFS_FCB)FileObject->FsContext;
     Ccb = (PMSFS_CCB)FileObject->FsContext2;
 
-    DPRINT("Mailslot name: %wZ\n", &Fcb->Name);
-
-    /* querying information is not permitted on client side */
-    if (Fcb->ServerCcb != Ccb)
-    {
-        Status = STATUS_ACCESS_DENIED;
-
-        Irp->IoStatus.Status = Status;
-        Irp->IoStatus.Information = 0;
-
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-        return Status;
-    }
+    if (Fcb) DPRINT("Mailslot name: %wZ\n", &Fcb->Name);
 
     SystemBuffer = Irp->AssociatedIrp.SystemBuffer;
     BufferLength = IoStack->Parameters.QueryFile.Length;
+
+    /* Names are available for the server, clients, and the filesystem root. */
+    if (FileInformationClass == FileNameInformation)
+    {
+        if (Fcb)
+        {
+            Status = MsfsQueryNameInformation(Fcb,
+                                              SystemBuffer,
+                                              &BufferLength);
+        }
+        else
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        goto Complete;
+    }
+
+    /* querying information is not permitted on client side */
+    if (!Fcb || Fcb->ServerCcb != Ccb)
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto Complete;
+    }
 
     switch (FileInformationClass)
     {
@@ -120,8 +158,9 @@ MsfsQueryInformation(PDEVICE_OBJECT DeviceObject,
         Status = STATUS_NOT_IMPLEMENTED;
     }
 
+Complete:
     Irp->IoStatus.Status = Status;
-    if (NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status) || (Status == STATUS_BUFFER_OVERFLOW))
         Irp->IoStatus.Information =
              IoStack->Parameters.QueryFile.Length - BufferLength;
     else

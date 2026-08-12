@@ -101,6 +101,7 @@ SptiCreateIrpContext(
     if (!Irp)
         goto Cleanup;
 
+    IrpContext->OriginalIrp = OriginalIrp;
     Irp->Tail.Overlay.Thread = PsGetCurrentThread();
 
     if (DataBuffer)
@@ -174,7 +175,7 @@ SptiCallDriver(
 
     PAGED_CODE();
 
-    SptiInitializeOutputBuffer(Irp);
+    SptiInitializeOutputBuffer(IrpContext->OriginalIrp);
 
     // TODO: Send the IRP in an asynchronous way (do not block the user app thread)
     KeInitializeEvent(&Event, NotificationEvent, FALSE);

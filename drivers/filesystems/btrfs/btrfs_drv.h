@@ -388,6 +388,8 @@ typedef struct _ccb {
     bool user_set_access_time;
     bool user_set_write_time;
     bool user_set_change_time;
+    bool delete_on_close;
+    bool posix_delete;
     bool lxss;
     send_info* send;
     NTSTATUS send_status;

@@ -229,16 +229,22 @@ ExpDesktopOpen(IN OB_OPEN_REASON Reason,
                IN ULONG HandleCount)
 {
     WIN32_OPENMETHOD_PARAMETERS Parameters;
+    NTSTATUS Status;
 
     Parameters.OpenReason = Reason;
     Parameters.Process = Process;
     Parameters.Object = ObjectBody;
-    Parameters.GrantedAccess = *GrantedAccess;
+    /* Desktop handles always receive READOBJECTS and WRITEOBJECTS. */
+    Parameters.GrantedAccess = *GrantedAccess | 0x0001 | 0x0080;
     Parameters.HandleCount = HandleCount;
 
-    return ExpWin32SessionCallout(ObjectBody,
-                                  ExpDesktopObjectOpen,
-                                  &Parameters);
+    Status = ExpWin32SessionCallout(ObjectBody,
+                                    ExpDesktopObjectOpen,
+                                    &Parameters);
+    if (NT_SUCCESS(Status))
+        *GrantedAccess = Parameters.GrantedAccess;
+
+    return Status;
 }
 
 static
