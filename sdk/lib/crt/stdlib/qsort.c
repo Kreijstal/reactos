@@ -80,6 +80,23 @@ med3(char *a, char *b, char *c, int (__cdecl *cmp)(const void*, const void*))
               :(CMP(b, c) > 0 ? b : (CMP(a, c) < 0 ? a : c ));
 }
 
+static void
+rotate_equal_runs(char *a, size_t n, size_t es,
+                  int (__cdecl *cmp)(const void*, const void*), int swaptype)
+{
+	size_t first, last, i;
+	if (!es) return;
+
+	for (first = 0; first < n; first = last) {
+		for (last = first + 1; last < n &&
+		     CMP(a + first * es, a + last * es) == 0; last++)
+			;
+
+		for (i = first; i + 1 < last; i++)
+			swapfunc(a + i * es, a + (i + 1) * es, es, swaptype);
+	}
+}
+
 /*
  * qsort:
  * First, set up some global parameters for qst to share.  Then, quicksort
@@ -103,6 +120,7 @@ loop:	SWAPINIT(a, es);
 			for (pl = pm; pl > (char *)a && CMP(pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
+		rotate_equal_runs(a, n, es, cmp, swaptype);
 		return;
 	}
 	pm = (char *)a + (n / 2) * es;
@@ -150,6 +168,7 @@ loop:	SWAPINIT(a, es);
 			for (pl = pm; pl > (char *)a && CMP(pl - es, pl) > 0;
 			     pl -= es)
 				swap(pl, pl - es);
+		rotate_equal_runs(a, n, es, cmp, swaptype);
 		return;
 	}
 

@@ -229,6 +229,7 @@ typedef struct _MM_SECTION_SEGMENT
 	 * cannot find such a view and would free a frame it still maps. Both honor
 	 * this count and leave the segment's pages resident while it is nonzero. */
 	LONG SystemMapCount;
+	LONG UserMapCount;
 
     ULONGLONG LastPage;
 
@@ -248,6 +249,10 @@ typedef struct _MM_IMAGE_SECTION_OBJECT
     ULONG NrSegments;
     PMM_SECTION_SEGMENT Segments;
 } MM_IMAGE_SECTION_OBJECT, *PMM_IMAGE_SECTION_OBJECT;
+
+PMM_IMAGE_SECTION_OBJECT
+ImageSectionObjectFromSegment(
+    _In_ PMM_SECTION_SEGMENT Segment);
 
 #define MM_PHYSICALMEMORY_SEGMENT           (0x1)
 #define MM_DATAFILE_SEGMENT                 (0x2)

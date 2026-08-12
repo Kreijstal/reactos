@@ -251,6 +251,26 @@ NtCreateKey(OUT PHANDLE KeyHandle,
     HANDLE Handle;
     PAGED_CODE();
 
+    if ((PreviousMode != KernelMode) && (!KeyHandle || !ObjectAttributes))
+        return STATUS_ACCESS_VIOLATION;
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForRead(ObjectAttributes,
+                         sizeof(OBJECT_ATTRIBUTES),
+                         sizeof(ULONG));
+            if (!ObjectAttributes->ObjectName)
+                _SEH2_YIELD(return STATUS_ACCESS_VIOLATION);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
     DPRINT("NtCreateKey(Path: %wZ, Root %x, Access: %x, CreateOptions %x)\n",
             ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory,
             DesiredAccess, CreateOptions);
@@ -337,11 +357,47 @@ NtOpenKey(OUT PHANDLE KeyHandle,
           IN ACCESS_MASK DesiredAccess,
           IN POBJECT_ATTRIBUTES ObjectAttributes)
 {
+    return NtOpenKeyEx(KeyHandle, DesiredAccess, ObjectAttributes, 0);
+}
+
+NTSTATUS
+NTAPI
+NtOpenKeyEx(OUT PHANDLE KeyHandle,
+            IN ACCESS_MASK DesiredAccess,
+            IN POBJECT_ATTRIBUTES ObjectAttributes,
+            IN ULONG OpenOptions)
+{
     CM_PARSE_CONTEXT ParseContext = {0};
     HANDLE Handle;
     NTSTATUS Status;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     PAGED_CODE();
+
+    if (OpenOptions & ~REG_OPEN_LEGAL_OPTION)
+        return STATUS_INVALID_PARAMETER;
+
+    ParseContext.CreateOptions = OpenOptions;
+
+    if ((PreviousMode != KernelMode) && (!KeyHandle || !ObjectAttributes))
+        return STATUS_ACCESS_VIOLATION;
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForRead(ObjectAttributes,
+                         sizeof(OBJECT_ATTRIBUTES),
+                         sizeof(ULONG));
+            if (!ObjectAttributes->ObjectName)
+                _SEH2_YIELD(return STATUS_ACCESS_VIOLATION);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
     DPRINT("NtOpenKey(Path: %wZ, Root %x, Access: %x)\n",
             ObjectAttributes->ObjectName, ObjectAttributes->RootDirectory, DesiredAccess);
 
@@ -1130,7 +1186,14 @@ NtLoadKey(IN POBJECT_ATTRIBUTES KeyObjectAttributes,
           IN POBJECT_ATTRIBUTES FileObjectAttributes)
 {
     /* Call the newer API */
-    return NtLoadKeyEx(KeyObjectAttributes, FileObjectAttributes, 0, NULL);
+    return NtLoadKeyEx(KeyObjectAttributes,
+                       FileObjectAttributes,
+                       0,
+                       NULL,
+                       NULL,
+                       0,
+                       NULL,
+                       NULL);
 }
 
 NTSTATUS
@@ -1140,7 +1203,14 @@ NtLoadKey2(IN POBJECT_ATTRIBUTES KeyObjectAttributes,
            IN ULONG Flags)
 {
     /* Call the newer API */
-    return NtLoadKeyEx(KeyObjectAttributes, FileObjectAttributes, Flags, NULL);
+    return NtLoadKeyEx(KeyObjectAttributes,
+                       FileObjectAttributes,
+                       Flags,
+                       NULL,
+                       NULL,
+                       0,
+                       NULL,
+                       NULL);
 }
 
 NTSTATUS
@@ -1148,21 +1218,38 @@ NTAPI
 NtLoadKeyEx(IN POBJECT_ATTRIBUTES TargetKey,
             IN POBJECT_ATTRIBUTES SourceFile,
             IN ULONG Flags,
-            IN HANDLE TrustClassKey)
+            IN HANDLE TrustClassKey,
+            IN HANDLE Event,
+            IN ACCESS_MASK DesiredAccess,
+            OUT PHANDLE RootHandle,
+            OUT PIO_STATUS_BLOCK IoStatusBlock)
 {
     NTSTATUS Status;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
     OBJECT_ATTRIBUTES CapturedTargetKey;
     OBJECT_ATTRIBUTES CapturedSourceFile;
+    OBJECT_ATTRIBUTES AppHiveTarget;
     UNICODE_STRING TargetKeyName, SourceFileName;
+    UNICODE_STRING AppHiveName;
+    WCHAR AppHiveNameBuffer[64];
     HANDLE KmTargetKeyRootDir = NULL, KmSourceFileRootDir = NULL;
+    HANDLE AppHiveHandle = NULL;
     PCM_KEY_BODY KeyBody = NULL;
+    PCM_KEY_BODY LoadedKeyBody = NULL;
+    POBJECT_ATTRIBUTES LoadTarget = &CapturedTargetKey;
+    BOOLEAN AppHive = BooleanFlagOn(Flags, REG_APP_HIVE);
 
     PAGED_CODE();
 
     /* Validate flags */
-    if (Flags & ~REG_NO_LAZY_FLUSH)
+    if (Flags & ~(REG_NO_LAZY_FLUSH | REG_APP_HIVE))
         return STATUS_INVALID_PARAMETER;
+
+    if ((!AppHive && RootHandle) || (AppHive && !RootHandle))
+        return STATUS_INVALID_PARAMETER_7;
+
+    if (Event)
+        return STATUS_INVALID_PARAMETER_5;
 
     /* Validate privilege */
     if (!SeSinglePrivilegeCheck(SeRestorePrivilege, PreviousMode))
@@ -1189,6 +1276,15 @@ NtLoadKeyEx(IN POBJECT_ATTRIBUTES TargetKey,
             ProbeForRead(SourceFile,
                          sizeof(OBJECT_ATTRIBUTES),
                          sizeof(ULONG));
+
+            if (AppHive)
+            {
+                ProbeForWriteHandle(RootHandle);
+                *RootHandle = NULL;
+            }
+
+            if (IoStatusBlock)
+                ProbeForWriteIoStatusBlock(IoStatusBlock);
         }
         _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -1244,7 +1340,6 @@ NtLoadKeyEx(IN POBJECT_ATTRIBUTES TargetKey,
         goto Cleanup;
     CapturedSourceFile.RootDirectory = KmSourceFileRootDir;
     CapturedSourceFile.Attributes |= OBJ_KERNEL_HANDLE;
-
     /* Check if we have a trust class */
     if (TrustClassKey)
     {
@@ -1257,11 +1352,61 @@ NtLoadKeyEx(IN POBJECT_ATTRIBUTES TargetKey,
                                            NULL);
     }
 
+    if (AppHive)
+    {
+        Status = RtlStringCbPrintfW(AppHiveNameBuffer,
+                                   sizeof(AppHiveNameBuffer),
+                                   L"\\Registry\\User\\AppHive_%p_%p",
+                                   PsGetCurrentProcessId(),
+                                   PsGetCurrentThreadId());
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        RtlInitUnicodeString(&AppHiveName, AppHiveNameBuffer);
+        AppHiveTarget = CapturedTargetKey;
+        AppHiveTarget.RootDirectory = NULL;
+        AppHiveTarget.ObjectName = &AppHiveName;
+        AppHiveTarget.Attributes |= OBJ_KERNEL_HANDLE;
+        LoadTarget = &AppHiveTarget;
+    }
+
     /* Call the internal API */
-    Status = CmLoadKey(&CapturedTargetKey,
+    Status = CmLoadKey(LoadTarget,
                        &CapturedSourceFile,
-                       Flags,
-                       KeyBody);
+                       Flags & ~REG_APP_HIVE,
+                       KeyBody,
+                       AppHive ? &LoadedKeyBody : NULL);
+
+    if (NT_SUCCESS(Status) && AppHive)
+    {
+        ASSERT(LoadedKeyBody != NULL);
+        Status = ObOpenObjectByPointer(LoadedKeyBody,
+                                       0,
+                                       NULL,
+                                       DesiredAccess,
+                                       CmpKeyObjectType,
+                                       PreviousMode,
+                                       &AppHiveHandle);
+        if (NT_SUCCESS(Status))
+        {
+            _SEH2_TRY
+            {
+                *RootHandle = AppHiveHandle;
+                if (IoStatusBlock)
+                {
+                    IoStatusBlock->Status = STATUS_SUCCESS;
+                    IoStatusBlock->Information = 0;
+                }
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                ObCloseHandle(AppHiveHandle, PreviousMode);
+                AppHiveHandle = NULL;
+            }
+            _SEH2_END;
+        }
+    }
 
     /* Dereference the trust key, if any */
     if (KeyBody) ObDereferenceObject(KeyBody);
@@ -1467,8 +1612,123 @@ NtNotifyChangeMultipleKeys(IN HANDLE MasterKeyHandle,
                            IN ULONG Length,
                            IN BOOLEAN Asynchronous)
 {
-    UNIMPLEMENTED_ONCE;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode;
+    PCM_KEY_BODY KeyBody;
+    PCM_NOTIFY_BLOCK NotifyBlock;
+    PCM_NOTIFY_BLOCK NewNotifyBlock;
+    PCM_POST_BLOCK PostBlock;
+    PKEVENT EventObject = NULL;
+    PCMHIVE CmHive;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    PreviousMode = ExGetPreviousMode();
+
+    if (Count || SlaveObjects || ApcRoutine || !Asynchronous)
+        return STATUS_NOT_IMPLEMENTED;
+
+    if (!IoStatusBlock || !Event ||
+        (CompletionFilter & ~REG_LEGAL_CHANGE_FILTER))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForWrite(IoStatusBlock,
+                          sizeof(*IoStatusBlock),
+                          sizeof(ULONG_PTR));
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
+    Status = ObReferenceObjectByHandle(MasterKeyHandle,
+                                       KEY_NOTIFY,
+                                       CmpKeyObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&KeyBody,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = ObReferenceObjectByHandle(Event,
+                                       EVENT_MODIFY_STATE,
+                                       ExEventObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&EventObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        ObDereferenceObject(KeyBody);
+        return Status;
+    }
+
+    NewNotifyBlock = ExAllocatePoolWithTag(PagedPool,
+                                           sizeof(*NewNotifyBlock),
+                                           TAG_CM);
+    PostBlock = ExAllocatePoolWithTag(PagedPool,
+                                      sizeof(*PostBlock),
+                                      TAG_CM);
+    if (!NewNotifyBlock || !PostBlock)
+    {
+        if (NewNotifyBlock)
+            ExFreePoolWithTag(NewNotifyBlock, TAG_CM);
+        if (PostBlock)
+            ExFreePoolWithTag(PostBlock, TAG_CM);
+        ObDereferenceObject(EventObject);
+        ObDereferenceObject(KeyBody);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(NewNotifyBlock, sizeof(*NewNotifyBlock));
+    NewNotifyBlock->KeyControlBlock = KeyBody->KeyControlBlock;
+    NewNotifyBlock->KeyBody = KeyBody;
+    InitializeListHead(&NewNotifyBlock->PostList);
+
+    RtlZeroMemory(PostBlock, sizeof(*PostBlock));
+    PostBlock->Event = EventObject;
+    PostBlock->IoStatusBlock = IoStatusBlock;
+    PostBlock->Filter = CompletionFilter;
+    PostBlock->WatchTree = WatchTree;
+    KeClearEvent(EventObject);
+
+    CmpLockRegistryExclusive();
+    NotifyBlock = KeyBody->NotifyBlock;
+    if (!NotifyBlock)
+    {
+        NotifyBlock = NewNotifyBlock;
+        NewNotifyBlock = NULL;
+        CmHive = CONTAINING_RECORD(KeyBody->KeyControlBlock->KeyHive, CMHIVE, Hive);
+        InsertTailList(&CmHive->NotifyList, &NotifyBlock->HiveList);
+        KeyBody->NotifyBlock = NotifyBlock;
+    }
+    if (!KeyBody->KeyControlBlock->NotifyOwner)
+        KeyBody->KeyControlBlock->NotifyOwner = KeyBody;
+    InsertTailList(&NotifyBlock->PostList, &PostBlock->PostList);
+    CmpUnlockRegistry();
+
+    if (NewNotifyBlock)
+        ExFreePoolWithTag(NewNotifyBlock, TAG_CM);
+
+    _SEH2_TRY
+    {
+        IoStatusBlock->Status = STATUS_PENDING;
+        IoStatusBlock->Information = 0;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+
+    ObDereferenceObject(KeyBody);
+    return STATUS_PENDING;
 }
 
 NTSTATUS
@@ -1605,8 +1865,77 @@ NTAPI
 NtRenameKey(IN HANDLE KeyHandle,
             IN PUNICODE_STRING ReplacementName)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    UNICODE_STRING CapturedName;
+    PCM_KEY_BODY KeyObject;
+    PWCHAR NameBuffer = NULL;
+    NTSTATUS Status;
+    USHORT Index;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForRead(ReplacementName,
+                         sizeof(*ReplacementName),
+                         sizeof(USHORT));
+        }
+
+        CapturedName = *ReplacementName;
+        if (!CapturedName.Length ||
+            (CapturedName.Length & (sizeof(WCHAR) - 1)) ||
+            (CapturedName.MaximumLength < CapturedName.Length))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            _SEH2_YIELD(return Status);
+        }
+
+        if (PreviousMode != KernelMode)
+            ProbeForRead(CapturedName.Buffer, CapturedName.Length, sizeof(WCHAR));
+
+        NameBuffer = ExAllocatePoolWithTag(PagedPool,
+                                           CapturedName.Length,
+                                           TAG_CM);
+        if (!NameBuffer)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            _SEH2_YIELD(return Status);
+        }
+
+        RtlCopyMemory(NameBuffer, CapturedName.Buffer, CapturedName.Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        _SEH2_YIELD(return Status);
+    }
+    _SEH2_END;
+
+    CapturedName.Buffer = NameBuffer;
+    CapturedName.MaximumLength = CapturedName.Length;
+    for (Index = 0; Index < CapturedName.Length / sizeof(WCHAR); Index++)
+    {
+        if (NameBuffer[Index] == OBJ_NAME_PATH_SEPARATOR)
+        {
+            ExFreePoolWithTag(NameBuffer, TAG_CM);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    Status = ObReferenceObjectByHandle(KeyHandle,
+                                       KEY_WRITE,
+                                       CmpKeyObjectType,
+                                       PreviousMode,
+                                       (PVOID*)&KeyObject,
+                                       NULL);
+    if (NT_SUCCESS(Status))
+    {
+        Status = CmRenameKey(KeyObject, &CapturedName);
+        ObDereferenceObject(KeyObject);
+    }
+
+    ExFreePoolWithTag(NameBuffer, TAG_CM);
+    return Status;
 }
 
 NTSTATUS

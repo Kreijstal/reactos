@@ -183,9 +183,61 @@ typedef enum _MEMORY_INFORMATION_CLASS
     MemoryBasicInformation,
     MemoryWorkingSetList,
     MemorySectionName,
-    MemoryBasicVlmInformation,
-    MemoryWorkingSetExList
+    MemoryRegionInformation,
+    MemoryBasicVlmInformation = MemoryRegionInformation,
+    MemoryWorkingSetExInformation,
+    MemoryWorkingSetExList = MemoryWorkingSetExInformation,
+    MemorySharedCommitInformation,
+    MemoryImageInformation,
+    MemoryRegionInformationEx,
+    MemoryPrivilegedBasicInformation,
+    MemoryEnclaveImageInformation,
+    MemoryBasicInformationCapped,
+    MemoryPhysicalContiguityInformation,
+    MemoryBadInformation,
+    MemoryBadInformationAllProcesses
 } MEMORY_INFORMATION_CLASS;
+
+typedef struct _MEMORY_REGION_INFORMATION
+{
+    PVOID AllocationBase;
+    ULONG AllocationProtect;
+    union
+    {
+        ULONG RegionType;
+        struct
+        {
+            ULONG Private:1;
+            ULONG MappedDataFile:1;
+            ULONG MappedImage:1;
+            ULONG MappedPageFile:1;
+            ULONG MappedPhysical:1;
+            ULONG DirectMapped:1;
+            ULONG Reserved:26;
+        };
+    };
+    SIZE_T RegionSize;
+    SIZE_T CommitSize;
+    ULONG_PTR PartitionId;
+    ULONG_PTR NodePreference;
+} MEMORY_REGION_INFORMATION, *PMEMORY_REGION_INFORMATION;
+
+typedef struct _MEMORY_IMAGE_INFORMATION
+{
+    PVOID ImageBase;
+    SIZE_T SizeOfImage;
+    union
+    {
+        ULONG ImageFlags;
+        struct
+        {
+            ULONG ImagePartialMap:1;
+            ULONG ImageNotExecutable:1;
+            ULONG ImageSigningLevel:4;
+            ULONG Reserved:26;
+        };
+    };
+} MEMORY_IMAGE_INFORMATION, *PMEMORY_IMAGE_INFORMATION;
 
 //
 // Section Information Clasess for NtQuerySection

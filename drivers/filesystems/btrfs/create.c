@@ -4540,6 +4540,14 @@ static NTSTATUS open_file(PDEVICE_OBJECT DeviceObject, _Requires_lock_held_(_Cur
     TRACE("(%.*S)\n", (int)(fn.Length / sizeof(WCHAR)), fn.Buffer);
     TRACE("FileObject = %p\n", FileObject);
 
+    if (RequestedDisposition == FILE_CREATE &&
+        !(options & FILE_DIRECTORY_FILE) &&
+        fn.Length >= sizeof(WCHAR) &&
+        fn.Buffer[(fn.Length / sizeof(WCHAR)) - 1] == '\\') {
+        Status = STATUS_OBJECT_NAME_INVALID;
+        goto exit;
+    }
+
     if (Vcb->readonly && (RequestedDisposition == FILE_SUPERSEDE || RequestedDisposition == FILE_CREATE || RequestedDisposition == FILE_OVERWRITE)) {
         Status = STATUS_MEDIA_WRITE_PROTECTED;
         goto exit;

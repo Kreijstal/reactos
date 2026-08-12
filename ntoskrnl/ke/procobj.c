@@ -136,6 +136,12 @@ KeInitializeProcess(IN OUT PKPROCESS Process,
     Process->Affinity = Affinity;
     Process->BasePriority = (CHAR)Priority;
     Process->QuantumReset = 6;
+#if defined(_AMD64_)
+    /* DEP is permanently enabled for native AMD64 processes. */
+    Process->Flags.ExecuteDisable = TRUE;
+    Process->Flags.DisableThunkEmulation = TRUE;
+    Process->Flags.Permanent = TRUE;
+#endif
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     Process->DirectoryTableBase = DirectoryTableBase[0];
     Process->Unused0 = DirectoryTableBase[1];
@@ -146,6 +152,8 @@ KeInitializeProcess(IN OUT PKPROCESS Process,
     Process->AutoAlignment = Enable;
 #if defined(_M_IX86)
     Process->IopmOffset = KiComputeIopmOffset(IO_ACCESS_MAP_NONE);
+#elif defined(_M_AMD64)
+    Process->IopmOffset = sizeof(KTSS);
 #endif
 
     /* Initialize the lists */

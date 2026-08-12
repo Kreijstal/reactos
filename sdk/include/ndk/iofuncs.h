@@ -497,6 +497,18 @@ NtRemoveIoCompletion(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtRemoveIoCompletionEx(
+    _In_ HANDLE IoCompletionHandle,
+    _Out_writes_to_(Count, *NumEntriesRemoved) PVOID IoCompletionInformation,
+    _In_ ULONG Count,
+    _Out_ PULONG NumEntriesRemoved,
+    _In_opt_ PLARGE_INTEGER Timeout,
+    _In_ BOOLEAN Alertable
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtSetBootEntryOrder(
     _In_ PULONG Ids,
     _In_ PULONG Count
@@ -547,7 +559,19 @@ NtSetIoCompletion(
     _In_ PVOID CompletionKey,
     _In_ PVOID CompletionContext,
     _In_ NTSTATUS CompletionStatus,
-    _In_ ULONG CompletionInformation
+    _In_ ULONG_PTR CompletionInformation
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtSetIoCompletionEx(
+    _In_ HANDLE IoCompletionPortHandle,
+    _In_ HANDLE IoCompletionReserveHandle,
+    _In_ ULONG_PTR CompletionKey,
+    _In_ ULONG_PTR CompletionContext,
+    _In_ NTSTATUS CompletionStatus,
+    _In_ ULONG_PTR CompletionInformation
 );
 
 NTSYSCALLAPI
@@ -1097,5 +1121,3 @@ ZwWriteFileGather(
 #endif
 
 #endif
-
-

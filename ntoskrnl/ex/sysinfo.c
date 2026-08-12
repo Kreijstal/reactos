@@ -45,7 +45,7 @@ ExpConvertLdrModuleToRtlModule(IN ULONG ModuleCount,
     ModuleInfo->ImageBase = LdrEntry->DllBase;
     ModuleInfo->ImageSize = LdrEntry->SizeOfImage;
     ModuleInfo->Flags = LdrEntry->Flags;
-    ModuleInfo->LoadCount = LdrEntry->LoadCount;
+    ModuleInfo->LoadCount = LdrEntry->LoadCount ? LdrEntry->LoadCount : 1;
     ModuleInfo->LoadOrderIndex = (USHORT)ModuleCount;
     ModuleInfo->InitOrderIndex = 0;
 
@@ -646,24 +646,27 @@ QSI_DEF(SystemBasicInformation)
 /* Class 1 - Processor Information */
 QSI_DEF(SystemProcessorInformation)
 {
-    PSYSTEM_PROCESSOR_INFORMATION Spi
-        = (PSYSTEM_PROCESSOR_INFORMATION) Buffer;
+    typedef struct _SYSTEM_CPU_INFORMATION_COMPAT
+    {
+        USHORT ProcessorArchitecture;
+        USHORT ProcessorLevel;
+        USHORT ProcessorRevision;
+        USHORT MaximumProcessors;
+        ULONG ProcessorFeatureBits;
+    } SYSTEM_CPU_INFORMATION_COMPAT, *PSYSTEM_CPU_INFORMATION_COMPAT;
+    PSYSTEM_CPU_INFORMATION_COMPAT Spi = Buffer;
 
-    *ReqSize = sizeof(SYSTEM_PROCESSOR_INFORMATION);
+    *ReqSize = sizeof(*Spi);
 
     /* Check user buffer's size */
-    if (Size < sizeof(SYSTEM_PROCESSOR_INFORMATION))
+    if (Size < sizeof(*Spi))
     {
         return STATUS_INFO_LENGTH_MISMATCH;
     }
     Spi->ProcessorArchitecture = KeProcessorArchitecture;
     Spi->ProcessorLevel = KeProcessorLevel;
     Spi->ProcessorRevision = KeProcessorRevision;
-#if (NTDDI_VERSION < NTDDI_WIN8)
-    Spi->Reserved = 0;
-#else
-    Spi->MaximumProcessors = 0;
-#endif
+    Spi->MaximumProcessors = KeNumberProcessors;
 
     /* According to Geoff Chappell, on Win 8.1 x64 / Win 10 x86, where this
        field is extended to 64 bits, it continues to produce only the low 32
@@ -678,21 +681,51 @@ QSI_DEF(SystemProcessorInformation)
     return STATUS_SUCCESS;
 }
 
+/* Class 154 - Processor Features Information */
+QSI_DEF(SystemProcessorFeaturesInformation)
+{
+    typedef struct _SYSTEM_PROCESSOR_FEATURES_INFORMATION_COMPAT
+    {
+        ULONGLONG ProcessorFeatureBits;
+        ULONGLONG Reserved[3];
+    } SYSTEM_PROCESSOR_FEATURES_INFORMATION_COMPAT,
+      *PSYSTEM_PROCESSOR_FEATURES_INFORMATION_COMPAT;
+    PSYSTEM_PROCESSOR_FEATURES_INFORMATION_COMPAT Features = Buffer;
+
+    *ReqSize = sizeof(*Features);
+    if (Size < sizeof(*Features))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    RtlZeroMemory(Features, sizeof(*Features));
+    Features->ProcessorFeatureBits = (ULONG)KeFeatureBits;
+    return STATUS_SUCCESS;
+}
+
 /* Class 2 - Performance Information */
 QSI_DEF(SystemPerformanceInformation)
 {
     LONG i;
     ULONG IdleUser, IdleKernel;
+    ULONG MinimumSize;
     PKPRCB Prcb;
     PSYSTEM_PERFORMANCE_INFORMATION Spi
         = (PSYSTEM_PERFORMANCE_INFORMATION) Buffer;
 
     PEPROCESS TheIdleProcess;
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    MinimumSize = FIELD_OFFSET(SYSTEM_PERFORMANCE_INFORMATION,
+                               CcTotalDirtyPages);
+#else
+    MinimumSize = sizeof(SYSTEM_PERFORMANCE_INFORMATION);
+#endif
+
     *ReqSize = sizeof(SYSTEM_PERFORMANCE_INFORMATION);
 
     /* Check user buffer's size */
-    if (Size < sizeof(SYSTEM_PERFORMANCE_INFORMATION))
+    if (Size < MinimumSize)
     {
         return STATUS_INFO_LENGTH_MISMATCH;
     }
@@ -826,6 +859,8 @@ QSI_DEF(SystemPerformanceInformation)
         }
     }
 
+    /* Newer versions accept and report any buffer containing the stable prefix. */
+    *ReqSize = Size;
     return STATUS_SUCCESS;
 }
 
@@ -1206,18 +1241,25 @@ QSI_DEF(SystemProcessorPerformanceInformation)
         = (PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION) Buffer;
 
     LONG i;
+    ULONG ProcessorCount;
     ULONG TotalTime;
     PKPRCB Prcb;
 
     *ReqSize = KeNumberProcessors * sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION);
 
-    /* Check user buffer's size */
-    if (Size < *ReqSize)
+    /* At least one complete processor record is required. */
+    if (Size < sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION))
     {
         return STATUS_INFO_LENGTH_MISMATCH;
     }
 
-    for (i = 0; i < KeNumberProcessors; i++)
+    ProcessorCount = Size / sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION);
+    if (ProcessorCount > KeNumberProcessors)
+        ProcessorCount = KeNumberProcessors;
+
+    *ReqSize = ProcessorCount * sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION);
+
+    for (i = 0; i < ProcessorCount; i++)
     {
         /* Get the PRCB on this processor */
         Prcb = KiProcessorBlock[i];
@@ -1433,6 +1475,11 @@ QSI_DEF(SystemHandleInformation)
 
                         HandleInformation->Handles[Index].HandleAttributes =
                             HandleTableEntry->ObAttributes & OBJ_HANDLE_ATTRIBUTES;
+                        if (HandleTableEntry->GrantedAccess & ObpAccessProtectCloseBit)
+                        {
+                            HandleInformation->Handles[Index].HandleAttributes |=
+                                OBJ_PROTECT_CLOSE;
+                        }
 
                         HandleInformation->Handles[Index].HandleValue =
                             (USHORT)(ULONG_PTR) Handle.GenericHandleOverlay;
@@ -1440,7 +1487,8 @@ QSI_DEF(SystemHandleInformation)
                         HandleInformation->Handles[Index].Object = &ObjectHeader->Body;
 
                         HandleInformation->Handles[Index].GrantedAccess =
-                            HandleTableEntry->GrantedAccess;
+                            HandleTableEntry->GrantedAccess &
+                            ~ObpAccessProtectCloseBit;
 
                         ++Index;
                     }
@@ -1451,7 +1499,7 @@ QSI_DEF(SystemHandleInformation)
             }
 
             /* Go to the next entry */
-            Handle.Value += sizeof(HANDLE);
+            Handle.Value += (1UL << HANDLE_TAG_BITS);
         }
     }
 
@@ -1878,6 +1926,30 @@ QSI_DEF(SystemKernelDebuggerInformation)
     *ReqSize = sizeof(SYSTEM_KERNEL_DEBUGGER_INFORMATION);
 #endif
 
+    return STATUS_SUCCESS;
+}
+
+/* Class 149 - Kernel Debugger Information Ex */
+QSI_DEF(SystemKernelDebuggerInformationEx)
+{
+    typedef struct _SYSTEM_KERNEL_DEBUGGER_INFORMATION_EX_COMPAT
+    {
+        BOOLEAN DebuggerAllowed;
+        BOOLEAN DebuggerEnabled;
+        BOOLEAN DebuggerPresent;
+    } SYSTEM_KERNEL_DEBUGGER_INFORMATION_EX_COMPAT,
+      *PSYSTEM_KERNEL_DEBUGGER_INFORMATION_EX_COMPAT;
+    PSYSTEM_KERNEL_DEBUGGER_INFORMATION_EX_COMPAT DebuggerInfo = Buffer;
+
+    *ReqSize = sizeof(*DebuggerInfo);
+    if (Size < sizeof(*DebuggerInfo))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    DebuggerInfo->DebuggerAllowed = TRUE;
+    DebuggerInfo->DebuggerEnabled = KD_DEBUGGER_ENABLED;
+    DebuggerInfo->DebuggerPresent = !KD_DEBUGGER_NOT_PRESENT;
     return STATUS_SUCCESS;
 }
 
@@ -2533,46 +2605,26 @@ QSI_DEF(SystemNumaAvailableMemory)
 /* Class 62 - Emulation Basic Information */
 QSI_DEF(SystemEmulationBasicInformation)
 {
-#if defined(_WIN64) && defined(BUILD_WOW64_ENABLED)
-    PSYSTEM_BASIC_INFORMATION Sbi = (PSYSTEM_BASIC_INFORMATION)Buffer;
-
-    *ReqSize = sizeof(SYSTEM_BASIC_INFORMATION);
-
-    /* Check user buffer's size */
-    if (Size != sizeof(SYSTEM_BASIC_INFORMATION))
-    {
-        return STATUS_INFO_LENGTH_MISMATCH;
-    }
-
-    RtlZeroMemory(Sbi, Size);
-    Sbi->Reserved = 0;
-    Sbi->TimerResolution = KeMaximumIncrement;
-    Sbi->PageSize = PAGE_SIZE;
-    Sbi->NumberOfPhysicalPages = MmNumberOfPhysicalPages;
-    Sbi->LowestPhysicalPageNumber = (ULONG)MmLowestPhysicalPage;
-    Sbi->HighestPhysicalPageNumber = (ULONG)MmHighestPhysicalPage;
-    Sbi->AllocationGranularity = MM_VIRTMEM_GRANULARITY; /* hard coded on Intel? */
-    Sbi->MinimumUserModeAddress = 0x10000; /* Top of 64k */
-    Sbi->MaximumUserModeAddress = (ULONG_PTR)0xFFFFFFFF; /* FIXME */
-    Sbi->ActiveProcessorsAffinityMask = KeActiveProcessors;
-    Sbi->NumberOfProcessors = KeNumberProcessors;
-
-    return STATUS_SUCCESS;
-#else
     return QSISystemBasicInformation(Buffer, Size, ReqSize);
-#endif
 }
 
 /* Class 63 - Emulation Processor Information */
 QSI_DEF(SystemEmulationProcessorInformation)
 {
-    PSYSTEM_PROCESSOR_INFORMATION Spi
-        = (PSYSTEM_PROCESSOR_INFORMATION) Buffer;
+    typedef struct _SYSTEM_CPU_INFORMATION_COMPAT
+    {
+        USHORT ProcessorArchitecture;
+        USHORT ProcessorLevel;
+        USHORT ProcessorRevision;
+        USHORT MaximumProcessors;
+        ULONG ProcessorFeatureBits;
+    } SYSTEM_CPU_INFORMATION_COMPAT, *PSYSTEM_CPU_INFORMATION_COMPAT;
+    PSYSTEM_CPU_INFORMATION_COMPAT Spi = Buffer;
 
-    *ReqSize = sizeof(SYSTEM_PROCESSOR_INFORMATION);
+    *ReqSize = sizeof(*Spi);
 
     /* Check user buffer's size */
-    if (Size < sizeof(SYSTEM_PROCESSOR_INFORMATION))
+    if (Size < sizeof(*Spi))
     {
         return STATUS_INFO_LENGTH_MISMATCH;
     }
@@ -2584,12 +2636,30 @@ QSI_DEF(SystemEmulationProcessorInformation)
     Spi->ProcessorArchitecture = PROCESSOR_ARCHITECTURE_INTEL;
     Spi->ProcessorLevel = KeProcessorLevel;
     Spi->ProcessorRevision = KeProcessorRevision;
-#if (NTDDI_VERSION < NTDDI_WIN8)
-    Spi->Reserved = 0;
-#else
-    Spi->MaximumProcessors = 0;
-#endif
+    Spi->MaximumProcessors = KeNumberProcessors;
     Spi->ProcessorFeatureBits = (ULONG)KeFeatureBits;
+
+    return STATUS_SUCCESS;
+}
+
+/* Class 83 - Processor Idle Cycle Time Information */
+QSI_DEF(SystemProcessorIdleCycleTimeInformation)
+{
+    PULONGLONG IdleCycles = Buffer;
+    ULONG i;
+
+    *ReqSize = KeNumberProcessors * sizeof(*IdleCycles);
+    if (Size < *ReqSize)
+    {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    for (i = 0; i < KeNumberProcessors; ++i)
+    {
+        PKPRCB Prcb = KiProcessorBlock[i];
+        IdleCycles[i] = (Prcb != NULL && Prcb->IdleThread != NULL) ?
+                        Prcb->IdleThread->CycleTime : 0;
+    }
 
     return STATUS_SUCCESS;
 }
@@ -2676,7 +2746,7 @@ QSI_DEF(SystemExtendedHandleInformation)
 
                         /* Filling handle information */
                         HandleInformation->Handles[Index].UniqueProcessId =
-                            (USHORT)(ULONG_PTR) HandleTable->UniqueProcessId;
+                            (ULONG_PTR)HandleTable->UniqueProcessId;
 
                         HandleInformation->Handles[Index].CreatorBackTraceIndex = 0;
 
@@ -2689,14 +2759,20 @@ QSI_DEF(SystemExtendedHandleInformation)
 
                         HandleInformation->Handles[Index].HandleAttributes =
                             HandleTableEntry->ObAttributes & OBJ_HANDLE_ATTRIBUTES;
+                        if (HandleTableEntry->GrantedAccess & ObpAccessProtectCloseBit)
+                        {
+                            HandleInformation->Handles[Index].HandleAttributes |=
+                                OBJ_PROTECT_CLOSE;
+                        }
 
                         HandleInformation->Handles[Index].HandleValue =
-                            (USHORT)(ULONG_PTR) Handle.GenericHandleOverlay;
+                            (ULONG_PTR)Handle.GenericHandleOverlay;
 
                         HandleInformation->Handles[Index].Object = &ObjectHeader->Body;
 
                         HandleInformation->Handles[Index].GrantedAccess =
-                            HandleTableEntry->GrantedAccess;
+                            HandleTableEntry->GrantedAccess &
+                            ~ObpAccessProtectCloseBit;
 
                         HandleInformation->Handles[Index].Reserved = 0;
 
@@ -2709,7 +2785,7 @@ QSI_DEF(SystemExtendedHandleInformation)
             }
 
             /* Go to the next entry */
-            Handle.Value += sizeof(HANDLE);
+            Handle.Value += (1UL << HANDLE_TAG_BITS);
         }
     }
 
@@ -2930,8 +3006,197 @@ QSI_DEF(SystemFirmwareTableInformation)
 /* Class 77 - Extended module information */
 QSI_DEF(SystemModuleInformationEx)
 {
-    /* For now return STATUS_INVALID_INFO_CLASS to avoid crashing in wine tests */
-    return STATUS_INVALID_INFO_CLASS;
+    PRTL_PROCESS_MODULES Modules;
+    PRTL_PROCESS_MODULE_INFORMATION_EX ModuleEx;
+    PIMAGE_NT_HEADERS NtHeaders;
+    ULONG LegacySize = 0;
+    ULONG RequiredSize;
+    ULONG i;
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&PsLoadedModuleResource, TRUE);
+
+    Status = ExpQueryModuleInformation(&PsLoadedModuleList,
+                                       &MmLoadedUserImageList,
+                                       NULL,
+                                       0,
+                                       &LegacySize);
+    Modules = ExAllocatePoolWithTag(PagedPool, LegacySize, 'xMoS');
+    if (!Modules)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+
+    Status = ExpQueryModuleInformation(&PsLoadedModuleList,
+                                       &MmLoadedUserImageList,
+                                       Modules,
+                                       LegacySize,
+                                       &LegacySize);
+    if (!NT_SUCCESS(Status))
+        goto FreeModules;
+
+    RequiredSize = Modules->NumberOfModules * sizeof(*ModuleEx) + sizeof(USHORT);
+    *ReqSize = RequiredSize;
+    if (Size < RequiredSize)
+    {
+        Status = STATUS_INFO_LENGTH_MISMATCH;
+        goto FreeModules;
+    }
+
+    RtlZeroMemory(Buffer, RequiredSize);
+    ModuleEx = Buffer;
+    for (i = 0; i < Modules->NumberOfModules; i++, ModuleEx++)
+    {
+        ModuleEx->NextOffset = sizeof(*ModuleEx);
+        ModuleEx->BaseInfo = Modules->Modules[i];
+
+        NtHeaders = RtlImageNtHeader(Modules->Modules[i].ImageBase);
+        if (NtHeaders)
+        {
+            ModuleEx->ImageCheckSum = NtHeaders->OptionalHeader.CheckSum;
+            ModuleEx->TimeDateStamp = NtHeaders->FileHeader.TimeDateStamp;
+            ModuleEx->DefaultBase = (PVOID)(ULONG_PTR)NtHeaders->OptionalHeader.ImageBase;
+        }
+    }
+
+    *(PUSHORT)ModuleEx = 0;
+    Status = STATUS_SUCCESS;
+
+FreeModules:
+    ExFreePoolWithTag(Modules, 'xMoS');
+Exit:
+    ExReleaseResourceLite(&PsLoadedModuleResource);
+    KeLeaveCriticalRegion();
+    return Status;
+}
+
+typedef struct _SYSTEM_PROCESS_ID_INFORMATION_LOCAL
+{
+    HANDLE ProcessId;
+    UNICODE_STRING ImageName;
+} SYSTEM_PROCESS_ID_INFORMATION_LOCAL, *PSYSTEM_PROCESS_ID_INFORMATION_LOCAL;
+
+/* Class 88 - Process Id Information */
+QSI_DEF(SystemProcessIdInformation)
+{
+    PSYSTEM_PROCESS_ID_INFORMATION_LOCAL ProcessIdInfo = Buffer;
+    PUNICODE_STRING ProcessImageName = NULL;
+    UNICODE_STRING SystemProcessImageName;
+    PEPROCESS Process;
+    HANDLE ProcessId;
+    USHORT InputLength, InputMaximumLength, OutputLength, RequiredMaximumLength;
+    PWSTR OutputBuffer;
+    NTSTATUS Status;
+    BOOLEAN AllocatedImageName = FALSE;
+
+    *ReqSize = sizeof(*ProcessIdInfo);
+    if (Size != sizeof(*ProcessIdInfo))
+    {
+        return STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    _SEH2_TRY
+    {
+        ProcessId = ProcessIdInfo->ProcessId;
+        InputLength = ProcessIdInfo->ImageName.Length;
+        InputMaximumLength = ProcessIdInfo->ImageName.MaximumLength;
+        OutputBuffer = ProcessIdInfo->ImageName.Buffer;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    if (InputLength != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (ProcessId == NULL)
+    {
+        return STATUS_INVALID_CID;
+    }
+
+    Status = PsLookupProcessByProcessId(ProcessId, &Process);
+    if (!NT_SUCCESS(Status))
+    {
+        return STATUS_INVALID_CID;
+    }
+
+    Status = SeLocateProcessImageName(Process, &ProcessImageName);
+    if (NT_SUCCESS(Status))
+    {
+        AllocatedImageName = TRUE;
+    }
+    else if (Process == PsInitialSystemProcess)
+    {
+        RtlInitUnicodeString(&SystemProcessImageName,
+                             L"\\SystemRoot\\System32\\ntoskrnl.exe");
+        ProcessImageName = &SystemProcessImageName;
+        Status = STATUS_SUCCESS;
+    }
+
+    ObDereferenceObject(Process);
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
+    OutputLength = ProcessImageName->Length;
+    if (OutputLength > MAXUSHORT - sizeof(UNICODE_NULL))
+    {
+        Status = STATUS_NAME_TOO_LONG;
+        goto Cleanup;
+    }
+
+    RequiredMaximumLength = OutputLength + sizeof(WCHAR);
+    _SEH2_TRY
+    {
+        ProcessIdInfo->ImageName.MaximumLength = RequiredMaximumLength;
+        if (InputMaximumLength != 0)
+        {
+            ProcessIdInfo->ImageName.Length = OutputLength;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+        _SEH2_YIELD(goto Cleanup);
+    }
+    _SEH2_END;
+
+    if (RequiredMaximumLength > InputMaximumLength)
+    {
+        Status = STATUS_INFO_LENGTH_MISMATCH;
+        goto Cleanup;
+    }
+
+    if (OutputBuffer == NULL)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+        goto Cleanup;
+    }
+
+    _SEH2_TRY
+    {
+        RtlCopyMemory(OutputBuffer, ProcessImageName->Buffer, OutputLength);
+        OutputBuffer[OutputLength / sizeof(WCHAR)] = UNICODE_NULL;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+Cleanup:
+    if (AllocatedImageName)
+    {
+        ExFreePoolWithTag(ProcessImageName, TAG_SEPA);
+    }
+    return Status;
 }
 
 /* Class 83 - Processor Idle Cycles */
@@ -3021,6 +3286,7 @@ CallQS[] =
     SI_QS(SystemFlagsInformation),
     SI_QX(SystemCallTimeInformation), /* should be SI_XX */
     SI_QX(SystemModuleInformation),
+    SI_QX(SystemModuleInformationEx),
     SI_QX(SystemLocksInformation),
     SI_QX(SystemStackTraceInformation), /* should be SI_XX */
     SI_QX(SystemPagedPoolInformation), /* should be SI_XX */
@@ -3045,6 +3311,8 @@ CallQS[] =
     SI_QX(SystemExceptionInformation),
     SI_QX(SystemCrashDumpStateInformation),
     SI_QX(SystemKernelDebuggerInformation),
+    SI_QX(SystemKernelDebuggerInformationEx),
+    SI_QX(SystemProcessorFeaturesInformation),
     SI_QX(SystemContextSwitchInformation),
     SI_QS(SystemRegistryQuotaInformation),
     SI_XS(SystemExtendServiceTableInformation),
@@ -3074,6 +3342,7 @@ CallQS[] =
     SI_QX(SystemEmulationBasicInformation),
     SI_QX(SystemEmulationProcessorInformation),
     SI_QX(SystemExtendedHandleInformation),
+    SI_QX(SystemProcessorIdleCycleTimeInformation),
     SI_XX(SystemLostDelayedWriteInformation), /* FIXME: not implemented */
     SI_XX(SystemBigPoolInformation), /* FIXME: not implemented */
     SI_XX(SystemSessionPoolTagInformation), /* FIXME: not implemented */
@@ -3090,6 +3359,7 @@ CallQS[] =
     // Vista and later
     SI_QX(SystemModuleInformationEx),
     SI_QX(SystemProcessorIdleCycleTimeInformation),
+    SI_QX(SystemProcessIdInformation),
     SI_QX(SystemProcessorBrandString),
 };
 
@@ -3109,7 +3379,7 @@ NtQuerySystemInformation(
     _In_ ULONG SystemInformationLength,
     _Out_opt_ PULONG ReturnLength)
 {
-    NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
+    NTSTATUS Status = STATUS_INVALID_INFO_CLASS;
     ULONG CapturedResultLength = 0;
     ULONG Alignment = TYPE_ALIGNMENT(ULONG);
     KPROCESSOR_MODE PreviousMode;
@@ -3212,16 +3482,26 @@ NtQuerySystemInformationEx(
     NTSTATUS Status = STATUS_INVALID_INFO_CLASS;
     KPROCESSOR_MODE PreviousMode;
     ULONG ResultLength = 0;
+    ULONG InputAlignment = sizeof(ULONG);
 
     PAGED_CODE();
 
     PreviousMode = ExGetPreviousMode();
 
+    if ((SystemInformationClass == SystemCpuSetInformation) &&
+        (!InputBuffer || InputBufferLength != sizeof(HANDLE)))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     _SEH2_TRY
     {
         if (PreviousMode != KernelMode)
         {
-            ProbeForRead(InputBuffer, InputBufferLength, sizeof(ULONG));
+            if (SystemInformationClass == SystemProcessorIdleCycleTimeInformation)
+                InputAlignment = sizeof(USHORT);
+
+            ProbeForRead(InputBuffer, InputBufferLength, InputAlignment);
             ProbeForWrite(SystemInformation, SystemInformationLength, sizeof(ULONG));
             if (ReturnLength != NULL)
                 ProbeForWriteUlong(ReturnLength);
@@ -3229,7 +3509,252 @@ NtQuerySystemInformationEx(
 
         switch (SystemInformationClass)
         {
+            case SystemProcessorIdleCycleTimeInformation:
+            {
+                USHORT Group;
+
+                if (InputBufferLength != sizeof(Group))
+                {
+                    _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
+                }
+
+                Group = *(PUSHORT)InputBuffer;
+                if (Group != 0)
+                {
+                    _SEH2_YIELD(return STATUS_INVALID_PARAMETER);
+                }
+
+                Status = QSISystemProcessorIdleCycleTimeInformation(
+                    SystemInformation,
+                    SystemInformationLength,
+                    &ResultLength);
+                break;
+            }
+
+            case (SYSTEM_INFORMATION_CLASS)107:
+            {
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Legacy = NULL;
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Current;
+                LOGICAL_PROCESSOR_RELATIONSHIP Relationship;
+                ULONG LegacyLength = 0, LegacyCount, Required = 0;
+                ULONG ProcessorSize, NumaSize, CacheSize, GroupSize;
+                ULONG i, ActiveProcessorCount = 0;
+                KAFFINITY ActiveMask = KeActiveProcessors, Mask;
+                PUCHAR Output;
+
+                if (InputBufferLength != sizeof(Relationship))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
+                Relationship = *(LOGICAL_PROCESSOR_RELATIONSHIP *)InputBuffer;
+                if (Relationship == RelationProcessorDie ||
+                    Relationship == RelationNumaNodeEx ||
+                    Relationship == RelationProcessorModule)
+                {
+                    Status = STATUS_UNSUCCESSFUL;
+                    break;
+                }
+                if (Relationship != RelationAll &&
+                    Relationship != RelationProcessorCore &&
+                    Relationship != RelationNumaNode &&
+                    Relationship != RelationCache &&
+                    Relationship != RelationProcessorPackage &&
+                    Relationship != RelationGroup)
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
+                Status = QSISystemLogicalProcessorInformation(NULL, 0, &LegacyLength);
+                if (Status != STATUS_INFO_LENGTH_MISMATCH || LegacyLength == 0)
+                {
+                    break;
+                }
+
+                Legacy = ExAllocatePoolWithTag(PagedPool, LegacyLength, 'IxSE');
+                if (Legacy == NULL)
+                {
+                    Status = STATUS_NO_MEMORY;
+                    break;
+                }
+
+                Status = QSISystemLogicalProcessorInformation(Legacy,
+                                                               LegacyLength,
+                                                               &LegacyLength);
+                if (!NT_SUCCESS(Status))
+                {
+                    ExFreePoolWithTag(Legacy, 'IxSE');
+                    break;
+                }
+
+                ProcessorSize = FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+                                             Processor.GroupMask) + sizeof(GROUP_AFFINITY);
+                NumaSize = FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+                                        NumaNode) + sizeof(NUMA_NODE_RELATIONSHIP);
+                CacheSize = FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+                                         Cache) + sizeof(CACHE_RELATIONSHIP);
+                GroupSize = FIELD_OFFSET(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX,
+                                         Group) + FIELD_OFFSET(GROUP_RELATIONSHIP, GroupInfo) +
+                            sizeof(PROCESSOR_GROUP_INFO);
+
+                LegacyCount = LegacyLength / sizeof(*Legacy);
+                for (i = 0; i < LegacyCount; ++i)
+                {
+                    if (Legacy[i].Relationship == RelationProcessorCore &&
+                        (Relationship == RelationAll || Relationship == RelationProcessorCore))
+                    {
+                        Required += ProcessorSize;
+                    }
+                    else if (Legacy[i].Relationship == RelationNumaNode &&
+                             (Relationship == RelationAll || Relationship == RelationNumaNode))
+                    {
+                        Required += NumaSize;
+                    }
+                }
+
+                if (Relationship == RelationAll || Relationship == RelationCache)
+                    Required += CacheSize;
+                if (Relationship == RelationAll || Relationship == RelationProcessorPackage)
+                    Required += ProcessorSize;
+                if (Relationship == RelationAll || Relationship == RelationGroup)
+                    Required += GroupSize;
+
+                ResultLength = Required;
+                if (SystemInformationLength < Required)
+                {
+                    Status = STATUS_INFO_LENGTH_MISMATCH;
+                    ExFreePoolWithTag(Legacy, 'IxSE');
+                    break;
+                }
+
+                Output = SystemInformation;
+                for (i = 0; i < LegacyCount; ++i)
+                {
+                    if (Legacy[i].Relationship == RelationProcessorCore &&
+                        (Relationship == RelationAll || Relationship == RelationProcessorCore))
+                    {
+                        Current = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+                        RtlZeroMemory(Current, ProcessorSize);
+                        Current->Relationship = RelationProcessorCore;
+                        Current->Size = ProcessorSize;
+                        Current->Processor.Flags = Legacy[i].ProcessorCore.Flags;
+                        Current->Processor.GroupCount = 1;
+                        Current->Processor.GroupMask[0].Mask = Legacy[i].ProcessorMask;
+                        Current->Processor.GroupMask[0].Group = 0;
+                        Output += ProcessorSize;
+                    }
+                    else if (Legacy[i].Relationship == RelationNumaNode &&
+                             (Relationship == RelationAll || Relationship == RelationNumaNode))
+                    {
+                        Current = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+                        RtlZeroMemory(Current, NumaSize);
+                        Current->Relationship = RelationNumaNode;
+                        Current->Size = NumaSize;
+                        Current->NumaNode.NodeNumber = Legacy[i].NumaNode.NodeNumber;
+                        Current->NumaNode.GroupMask.Mask = Legacy[i].ProcessorMask;
+                        Current->NumaNode.GroupMask.Group = 0;
+                        Output += NumaSize;
+                    }
+                }
+
+                if (Relationship == RelationAll || Relationship == RelationCache)
+                {
+                    Current = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+                    RtlZeroMemory(Current, CacheSize);
+                    Current->Relationship = RelationCache;
+                    Current->Size = CacheSize;
+                    Current->Cache.Level = 1;
+                    Current->Cache.Associativity = 0xff;
+                    Current->Cache.LineSize = 64;
+                    Current->Cache.CacheSize = 32 * 1024;
+                    Current->Cache.Type = CacheUnified;
+                    Current->Cache.GroupMask.Mask = ActiveMask;
+                    Current->Cache.GroupMask.Group = 0;
+                    Output += CacheSize;
+                }
+
+                if (Relationship == RelationAll || Relationship == RelationProcessorPackage)
+                {
+                    Current = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+                    RtlZeroMemory(Current, ProcessorSize);
+                    Current->Relationship = RelationProcessorPackage;
+                    Current->Size = ProcessorSize;
+                    Current->Processor.GroupCount = 1;
+                    Current->Processor.GroupMask[0].Mask = ActiveMask;
+                    Current->Processor.GroupMask[0].Group = 0;
+                    Output += ProcessorSize;
+                }
+
+                if (Relationship == RelationAll || Relationship == RelationGroup)
+                {
+                    for (Mask = ActiveMask; Mask != 0; Mask >>= 1)
+                    {
+                        if (Mask & 1) ++ActiveProcessorCount;
+                    }
+
+                    Current = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)Output;
+                    RtlZeroMemory(Current, GroupSize);
+                    Current->Relationship = RelationGroup;
+                    Current->Size = GroupSize;
+                    Current->Group.MaximumGroupCount = 1;
+                    Current->Group.ActiveGroupCount = 1;
+                    Current->Group.GroupInfo[0].MaximumProcessorCount =
+                        (UCHAR)ActiveProcessorCount;
+                    Current->Group.GroupInfo[0].ActiveProcessorCount =
+                        (UCHAR)ActiveProcessorCount;
+                    Current->Group.GroupInfo[0].ActiveProcessorMask = ActiveMask;
+                }
+
+                ExFreePoolWithTag(Legacy, 'IxSE');
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
 #if (NTDDI_VERSION >= NTDDI_WIN10)
+            case SystemCpuSetInformation:
+            {
+                PSYSTEM_CPU_SET_INFORMATION CpuSetInfo = SystemInformation;
+                HANDLE ProcessHandle = *(PHANDLE)InputBuffer;
+                PEPROCESS Process = NULL;
+                ULONG i;
+
+                if (ProcessHandle != NULL)
+                {
+                    Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                       PROCESS_QUERY_LIMITED_INFORMATION,
+                                                       PsProcessType,
+                                                       PreviousMode,
+                                                       (PVOID*)&Process,
+                                                       NULL);
+                    if (!NT_SUCCESS(Status))
+                        break;
+
+                    ObDereferenceObject(Process);
+                }
+
+                ResultLength = KeNumberProcessors * sizeof(*CpuSetInfo);
+                if (SystemInformationLength < ResultLength)
+                {
+                    Status = STATUS_BUFFER_TOO_SMALL;
+                    break;
+                }
+
+                RtlZeroMemory(CpuSetInfo, ResultLength);
+                for (i = 0; i < KeNumberProcessors; i++)
+                {
+                    CpuSetInfo[i].Size = sizeof(*CpuSetInfo);
+                    CpuSetInfo[i].Type = CpuSetInformation;
+                    CpuSetInfo[i].CpuSet.Id = 0x100 + i;
+                    CpuSetInfo[i].CpuSet.Group = 0;
+                    CpuSetInfo[i].CpuSet.LogicalProcessorIndex = (UCHAR)i;
+                }
+
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
             case SystemSupportedProcessorArchitectures:
             {
                 SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION Archs[MAX_SUPPORTED_ARCHITECTURES];
@@ -3310,7 +3835,7 @@ NtQuerySystemInformationEx(
                 break;
         }
 
-        if (ReturnLength != NULL)
+        if (ReturnLength != NULL && ResultLength != 0)
             *ReturnLength = ResultLength;
     }
     _SEH2_EXCEPT(ExSystemExceptionFilter())
@@ -3377,7 +3902,7 @@ NTAPI
 NtGetCurrentProcessorNumber(VOID)
 {
     /* Just use Ke */
-    return KiGetCurrentProcessorNumber();
+    return KeGetCurrentProcessorNumber();
 }
 
 #undef ExGetPreviousMode

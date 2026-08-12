@@ -441,7 +441,6 @@ NTSTATUS WINAPI wow64_NtAllocateLocallyUniqueId( UINT *args )
     return NtAllocateLocallyUniqueId( luid );
 }
 
-#ifndef __REACTOS__
 /**********************************************************************
  *           wow64_NtAllocateReserveObject
  */
@@ -459,7 +458,6 @@ NTSTATUS WINAPI wow64_NtAllocateReserveObject( UINT *args )
     put_handle( handle_ptr, handle );
     return status;
 }
-#endif
 
 /**********************************************************************
  *           wow64_NtAllocateUuids

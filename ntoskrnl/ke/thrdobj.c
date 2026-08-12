@@ -1624,6 +1624,7 @@ KeTerminateThread(IN KPRIORITY Increment)
 
     /* Swap to a new thread */
     KiReleaseDispatcherLockFromSynchLevel();
+    KiCheckDeferredReadyList(KeGetCurrentPrcb());
     KiSwapThread(Thread, KeGetCurrentPrcb());
 }
 

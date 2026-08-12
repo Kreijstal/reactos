@@ -60,10 +60,15 @@ CreateWindowStationW(
     NTSTATUS Status;
     HWINSTA hWinSta;
     UNICODE_STRING WindowStationName;
-    // FIXME: We should cache a per-session directory (see ntuser\winsta.c!UserCreateWinstaDirectory).
-    UNICODE_STRING WindowStationsDir = RTL_CONSTANT_STRING(L"\\Windows\\WindowStations");
+    UNICODE_STRING WindowStationsDir;
+    WCHAR WindowStationsDirBuffer[MAX_PATH];
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE hWindowStationsDir;
+
+    _swprintf(WindowStationsDirBuffer,
+              L"\\Sessions\\%lu\\Windows\\WindowStations",
+              NtCurrentPeb()->SessionId);
+    RtlInitUnicodeString(&WindowStationsDir, WindowStationsDirBuffer);
 
     /*
      * If provided, the window station name is always relative to the
@@ -367,10 +372,15 @@ OpenWindowStationW(
     NTSTATUS Status;
     HWINSTA hWinSta;
     UNICODE_STRING WindowStationName;
-    // FIXME: We should cache a per-session directory (see ntuser\winsta.c!UserCreateWinstaDirectory).
-    UNICODE_STRING WindowStationsDir = RTL_CONSTANT_STRING(L"\\Windows\\WindowStations");
+    UNICODE_STRING WindowStationsDir;
+    WCHAR WindowStationsDirBuffer[MAX_PATH];
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE hWindowStationsDir;
+
+    _swprintf(WindowStationsDirBuffer,
+              L"\\Sessions\\%lu\\Windows\\WindowStations",
+              NtCurrentPeb()->SessionId);
+    RtlInitUnicodeString(&WindowStationsDir, WindowStationsDirBuffer);
 
     /* Open WindowStations directory */
     InitializeObjectAttributes(&ObjectAttributes,

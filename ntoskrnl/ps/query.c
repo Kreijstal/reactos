@@ -279,7 +279,11 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
@@ -499,9 +503,6 @@ NtQueryInformationProcess(
                 break;
             }
 
-            /* Set the return length */
-            Length = sizeof(HANDLE);
-
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
                                                PROCESS_QUERY_INFORMATION,
@@ -524,6 +525,9 @@ NtQueryInformationProcess(
                 Status = _SEH2_GetExceptionCode();
             }
             _SEH2_END;
+
+            if (NT_SUCCESS(Status))
+                Length = sizeof(HANDLE);
 
             /* Dereference the process */
             ObDereferenceObject(Process);
@@ -655,11 +659,26 @@ NtQueryInformationProcess(
 
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               PROCESS_QUERY_LIMITED_INFORMATION,
+#else
                                                PROCESS_QUERY_INFORMATION,
+#endif
                                                PsProcessType,
                                                PreviousMode,
                                                (PVOID*)&Process,
                                                NULL);
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+            if (Status == STATUS_ACCESS_DENIED)
+            {
+                Status = ObReferenceObjectByHandle(ProcessHandle,
+                                                   PROCESS_QUERY_INFORMATION,
+                                                   PsProcessType,
+                                                   PreviousMode,
+                                                   (PVOID*)&Process,
+                                                   NULL);
+            }
+#endif
             if (!NT_SUCCESS(Status)) break;
 
             /* Enter SEH for write safety */
@@ -675,10 +694,13 @@ NtQueryInformationProcess(
                 VmCounters->QuotaPagedPoolUsage = Process->QuotaUsage[PsPagedPool];
                 VmCounters->QuotaPeakNonPagedPoolUsage = Process->QuotaPeak[PsNonPagedPool];
                 VmCounters->QuotaNonPagedPoolUsage = Process->QuotaUsage[PsNonPagedPool];
-                VmCounters->PagefileUsage = Process->QuotaUsage[PsPageFile] << PAGE_SHIFT;
-                VmCounters->PeakPagefileUsage = Process->QuotaPeak[PsPageFile] << PAGE_SHIFT;
-                //VmCounters->PrivateUsage = Process->CommitCharge << PAGE_SHIFT;
-                //
+                VmCounters->PagefileUsage = Process->CommitCharge << PAGE_SHIFT;
+                VmCounters->PeakPagefileUsage = Process->CommitChargePeak << PAGE_SHIFT;
+                if (ProcessInformationLength == sizeof(VM_COUNTERS_EX))
+                {
+                    ((PVM_COUNTERS_EX)VmCounters)->PrivateUsage =
+                        VmCounters->PagefileUsage;
+                }
 
                 /* Set the return length */
                 Length = ProcessInformationLength;
@@ -1186,9 +1208,6 @@ NtQueryInformationProcess(
                 break;
             }
 
-            /* Set the return length */
-            Length = sizeof(HANDLE);
-
             /* Reference the process */
             Status = ObReferenceObjectByHandle(ProcessHandle,
                                                PROCESS_QUERY_INFORMATION,
@@ -1209,6 +1228,7 @@ NtQueryInformationProcess(
             {
                 /* Return debug port's handle */
                 *(PHANDLE)ProcessInformation = DebugPort;
+                Length = sizeof(HANDLE);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1220,6 +1240,7 @@ NtQueryInformationProcess(
                 Status = _SEH2_GetExceptionCode();
             }
             _SEH2_END;
+
             break;
         }
 
@@ -1429,13 +1450,16 @@ NtQueryInformationProcess(
         case ProcessTlsInformation:
         case ProcessCycleTime:
         case ProcessPagePriority:
-        case ProcessInstrumentationCallback:
         case ProcessThreadStackAllocation:
         case ProcessWorkingSetWatchEx:
         case ProcessImageFileMapping:
         case ProcessAffinityUpdateMode:
         case ProcessMemoryAllocationMode:
             Status = STATUS_NOT_IMPLEMENTED;
+            break;
+
+        case ProcessInstrumentationCallback:
+            Status = STATUS_INVALID_INFO_CLASS;
             break;
 
         case ProcessPooledUsageAndLimits:
@@ -2357,14 +2381,117 @@ NtSetInformationProcess(
         case ProcessTlsInformation:
         case ProcessCycleTime:
         case ProcessPagePriority:
-        case ProcessInstrumentationCallback:
-        case ProcessThreadStackAllocation:
         case ProcessWorkingSetWatchEx:
         case ProcessImageFileMapping:
         case ProcessAffinityUpdateMode:
         case ProcessMemoryAllocationMode:
             Status = STATUS_NOT_IMPLEMENTED;
             break;
+
+        case ProcessThreadStackAllocation:
+        {
+            PPS_PROCESS_STACK_ALLOCATION_INFORMATION UserStackInfo;
+            PS_PROCESS_STACK_ALLOCATION_INFORMATION StackInfo;
+            PVOID StackBase = NULL;
+            SIZE_T RegionSize, FreeSize;
+
+            if (ProcessInformationLength == sizeof(StackInfo))
+            {
+                UserStackInfo = ProcessInformation;
+            }
+            else if (ProcessInformationLength ==
+                     sizeof(StackInfo) + 4 * sizeof(ULONG))
+            {
+                UserStackInfo = (PVOID)((PUCHAR)ProcessInformation +
+                                        4 * sizeof(ULONG));
+            }
+            else
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            _SEH2_TRY
+            {
+                if (PreviousMode != KernelMode)
+                {
+                    ProbeForWrite(UserStackInfo,
+                                  sizeof(*UserStackInfo),
+                                  sizeof(ULONG_PTR));
+                }
+                StackInfo = *UserStackInfo;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                _SEH2_YIELD(break);
+            }
+            _SEH2_END;
+
+            RegionSize = StackInfo.ReserveSize;
+            Status = ZwAllocateVirtualMemory(ProcessHandle,
+                                             &StackBase,
+                                             StackInfo.ZeroBits,
+                                             &RegionSize,
+                                             MEM_RESERVE,
+                                             PAGE_READWRITE);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            _SEH2_TRY
+            {
+                UserStackInfo->StackBase = StackBase;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
+            if (!NT_SUCCESS(Status))
+            {
+                FreeSize = 0;
+                ZwFreeVirtualMemory(ProcessHandle,
+                                    &StackBase,
+                                    &FreeSize,
+                                    MEM_RELEASE);
+            }
+            break;
+        }
+
+        case ProcessInstrumentationCallback:
+        {
+#if defined(_M_AMD64)
+            PS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION CallbackInfo;
+
+            _SEH2_TRY
+            {
+                CallbackInfo = *(PPS_PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION)ProcessInformation;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                _SEH2_YIELD(break);
+            }
+            _SEH2_END;
+
+            if ((CallbackInfo.Version != 0) ||
+                (CallbackInfo.Reserved != 0) ||
+                ((CallbackInfo.Callback != NULL) &&
+                 ((ULONG_PTR)CallbackInfo.Callback > (ULONG_PTR)MmHighestUserAddress)))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            InterlockedExchangePointer((PVOID volatile *)&Process->InstrumentationCallback,
+                                       CallbackInfo.Callback);
+            Status = STATUS_SUCCESS;
+#else
+            Status = STATUS_NOT_SUPPORTED;
+#endif
+            break;
+        }
         
         /* Anything else is invalid */
         default:
@@ -2382,6 +2509,285 @@ NtSetInformationProcess(
 /*
  * @implemented
  */
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+#ifndef WOW64_CONTEXT_i386
+#define WOW64_CONTEXT_i386                 0x00010000
+#define WOW64_CONTEXT_CONTROL              (WOW64_CONTEXT_i386 | 0x00000001)
+#define WOW64_CONTEXT_INTEGER              (WOW64_CONTEXT_i386 | 0x00000002)
+#define WOW64_CONTEXT_SEGMENTS             (WOW64_CONTEXT_i386 | 0x00000004)
+#define WOW64_CONTEXT_FLOATING_POINT       (WOW64_CONTEXT_i386 | 0x00000008)
+#define WOW64_CONTEXT_DEBUG_REGISTERS      (WOW64_CONTEXT_i386 | 0x00000010)
+#define WOW64_CONTEXT_EXTENDED_REGISTERS   (WOW64_CONTEXT_i386 | 0x00000020)
+
+typedef struct _WOW64_FLOATING_SAVE_AREA
+{
+    ULONG ControlWord;
+    ULONG StatusWord;
+    ULONG TagWord;
+    ULONG ErrorOffset;
+    ULONG ErrorSelector;
+    ULONG DataOffset;
+    ULONG DataSelector;
+    UCHAR RegisterArea[80];
+    ULONG Cr0NpxState;
+} WOW64_FLOATING_SAVE_AREA, *PWOW64_FLOATING_SAVE_AREA;
+
+typedef struct _WOW64_CONTEXT
+{
+    ULONG ContextFlags;
+    ULONG Dr0;
+    ULONG Dr1;
+    ULONG Dr2;
+    ULONG Dr3;
+    ULONG Dr6;
+    ULONG Dr7;
+    WOW64_FLOATING_SAVE_AREA FloatSave;
+    ULONG SegGs;
+    ULONG SegFs;
+    ULONG SegEs;
+    ULONG SegDs;
+    ULONG Edi;
+    ULONG Esi;
+    ULONG Ebx;
+    ULONG Edx;
+    ULONG Ecx;
+    ULONG Eax;
+    ULONG Ebp;
+    ULONG Eip;
+    ULONG SegCs;
+    ULONG EFlags;
+    ULONG Esp;
+    ULONG SegSs;
+    UCHAR ExtendedRegisters[512];
+} WOW64_CONTEXT;
+#endif
+
+NTSTATUS
+NTAPI
+PsGetContextThread(
+    _In_ PETHREAD Thread,
+    _Inout_ PCONTEXT ThreadContext,
+    _In_ KPROCESSOR_MODE PreviousMode);
+
+NTSTATUS
+NTAPI
+PsSetContextThread(
+    _In_ PETHREAD Thread,
+    _Inout_ PCONTEXT ThreadContext,
+    _In_ KPROCESSOR_MODE PreviousMode);
+
+NTSTATUS
+NTAPI
+PspGetContextThreadInternal(
+    _In_ PETHREAD Thread,
+    _Inout_ PCONTEXT ThreadContext,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _In_ KPROCESSOR_MODE ContextMode);
+
+NTSTATUS
+NTAPI
+PspSetContextThreadInternal(
+    _In_ PETHREAD Thread,
+    _Inout_ PCONTEXT ThreadContext,
+    _In_ KPROCESSOR_MODE PreviousMode,
+    _In_ KPROCESSOR_MODE ContextMode);
+
+static VOID
+PspWow64FpuToFxSave(
+    _Out_ PXMM_SAVE_AREA32 FxSave,
+    _In_ const WOW64_FLOATING_SAVE_AREA *FloatSave)
+{
+    ULONG Index;
+
+    FxSave->ControlWord = (USHORT)FloatSave->ControlWord;
+    FxSave->StatusWord = (USHORT)FloatSave->StatusWord;
+    FxSave->ErrorOffset = FloatSave->ErrorOffset;
+    FxSave->ErrorSelector = (USHORT)FloatSave->ErrorSelector;
+    FxSave->ErrorOpcode = (USHORT)(FloatSave->ErrorSelector >> 16);
+    FxSave->DataOffset = FloatSave->DataOffset;
+    FxSave->DataSelector = (USHORT)FloatSave->DataSelector;
+    FxSave->TagWord = 0;
+
+    for (Index = 0; Index < 8; Index++)
+    {
+        if (((FloatSave->TagWord >> (Index * 2)) & 3) != 3)
+            FxSave->TagWord |= 1 << Index;
+
+        RtlCopyMemory(&FxSave->FloatRegisters[Index],
+                      &FloatSave->RegisterArea[10 * Index],
+                      10);
+    }
+}
+
+static VOID
+PspFxSaveToWow64Fpu(
+    _Out_ PWOW64_FLOATING_SAVE_AREA FloatSave,
+    _In_ const XMM_SAVE_AREA32 *FxSave)
+{
+    ULONG Index, Tag, StackTop;
+    const M128A *Register;
+
+    FloatSave->ControlWord = FxSave->ControlWord;
+    FloatSave->StatusWord = FxSave->StatusWord;
+    FloatSave->ErrorOffset = FxSave->ErrorOffset;
+    FloatSave->ErrorSelector = FxSave->ErrorSelector |
+                               (FxSave->ErrorOpcode << 16);
+    FloatSave->DataOffset = FxSave->DataOffset;
+    FloatSave->DataSelector = FxSave->DataSelector;
+    FloatSave->Cr0NpxState = FxSave->StatusWord | 0xffff0000;
+    FloatSave->TagWord = 0xffff0000;
+    StackTop = (FxSave->StatusWord >> 11) & 7;
+
+    for (Index = 0; Index < 8; Index++)
+    {
+        RtlCopyMemory(&FloatSave->RegisterArea[10 * Index],
+                      &FxSave->FloatRegisters[Index],
+                      10);
+
+        if (!(FxSave->TagWord & (1 << Index)))
+        {
+            Tag = 3;
+        }
+        else
+        {
+            Register = &FxSave->FloatRegisters[(Index - StackTop) & 7];
+            if ((Register->High & 0x7fff) == 0x7fff)
+                Tag = 2;
+            else if (!(Register->High & 0x7fff))
+                Tag = Register->Low ? 2 : 1;
+            else
+                Tag = (Register->Low >> 63) ? 0 : 2;
+        }
+
+        FloatSave->TagWord |= Tag << (2 * Index);
+    }
+}
+
+static VOID
+PspWow64ContextToContext(
+    _Out_ PCONTEXT Context,
+    _In_ const WOW64_CONTEXT *Wow64Context)
+{
+    ULONG Flags = Wow64Context->ContextFlags & 0xffff;
+
+    RtlZeroMemory(Context, sizeof(*Context));
+    Context->ContextFlags = CONTEXT_AMD64;
+
+    if (Flags & WOW64_CONTEXT_CONTROL)
+    {
+        Context->ContextFlags |= CONTEXT_CONTROL;
+        Context->Rip = Wow64Context->Eip;
+        Context->Rsp = Wow64Context->Esp;
+        Context->SegCs = Wow64Context->SegCs;
+        Context->SegSs = Wow64Context->SegSs;
+        Context->EFlags = Wow64Context->EFlags;
+    }
+
+    if (Flags & WOW64_CONTEXT_INTEGER)
+    {
+        Context->ContextFlags |= CONTEXT_INTEGER;
+        Context->Rax = Wow64Context->Eax;
+        Context->Rbx = Wow64Context->Ebx;
+        Context->Rcx = Wow64Context->Ecx;
+        Context->Rdx = Wow64Context->Edx;
+        Context->Rsi = Wow64Context->Esi;
+        Context->Rdi = Wow64Context->Edi;
+        Context->Rbp = Wow64Context->Ebp;
+    }
+
+    if (Flags & WOW64_CONTEXT_SEGMENTS)
+    {
+        Context->ContextFlags |= CONTEXT_SEGMENTS;
+        Context->SegDs = Wow64Context->SegDs;
+        Context->SegEs = Wow64Context->SegEs;
+        Context->SegFs = Wow64Context->SegFs;
+        Context->SegGs = Wow64Context->SegGs;
+    }
+
+    if (Flags & WOW64_CONTEXT_DEBUG_REGISTERS)
+    {
+        Context->ContextFlags |= CONTEXT_DEBUG_REGISTERS;
+        Context->Dr0 = Wow64Context->Dr0;
+        Context->Dr1 = Wow64Context->Dr1;
+        Context->Dr2 = Wow64Context->Dr2;
+        Context->Dr3 = Wow64Context->Dr3;
+        Context->Dr6 = Wow64Context->Dr6;
+        Context->Dr7 = Wow64Context->Dr7;
+    }
+
+    if (Flags & WOW64_CONTEXT_EXTENDED_REGISTERS)
+    {
+        Context->ContextFlags |= CONTEXT_FLOATING_POINT;
+        RtlCopyMemory(&Context->FltSave,
+                      Wow64Context->ExtendedRegisters,
+                      sizeof(Context->FltSave));
+    }
+    else if (Flags & WOW64_CONTEXT_FLOATING_POINT)
+    {
+        Context->ContextFlags |= CONTEXT_FLOATING_POINT;
+        PspWow64FpuToFxSave(&Context->FltSave, &Wow64Context->FloatSave);
+    }
+}
+
+static VOID
+PspContextToWow64Context(
+    _Out_ PWOW64_CONTEXT Wow64Context,
+    _In_ const CONTEXT *Context,
+    _In_ ULONG Wow64Flags)
+{
+    ULONG Flags = Wow64Flags & 0xffff;
+
+    RtlZeroMemory(Wow64Context, sizeof(*Wow64Context));
+    Wow64Context->ContextFlags = WOW64_CONTEXT_i386 | Flags;
+
+    if (Flags & WOW64_CONTEXT_CONTROL)
+    {
+        Wow64Context->Eip = (ULONG)Context->Rip;
+        Wow64Context->Esp = (ULONG)Context->Rsp;
+        Wow64Context->SegCs = Context->SegCs;
+        Wow64Context->SegSs = Context->SegSs;
+        Wow64Context->EFlags = Context->EFlags;
+    }
+
+    if (Flags & WOW64_CONTEXT_INTEGER)
+    {
+        Wow64Context->Eax = (ULONG)Context->Rax;
+        Wow64Context->Ebx = (ULONG)Context->Rbx;
+        Wow64Context->Ecx = (ULONG)Context->Rcx;
+        Wow64Context->Edx = (ULONG)Context->Rdx;
+        Wow64Context->Esi = (ULONG)Context->Rsi;
+        Wow64Context->Edi = (ULONG)Context->Rdi;
+        Wow64Context->Ebp = (ULONG)Context->Rbp;
+    }
+
+    if (Flags & WOW64_CONTEXT_SEGMENTS)
+    {
+        Wow64Context->SegDs = Context->SegDs;
+        Wow64Context->SegEs = Context->SegEs;
+        Wow64Context->SegFs = Context->SegFs;
+        Wow64Context->SegGs = Context->SegGs;
+    }
+
+    if (Flags & WOW64_CONTEXT_DEBUG_REGISTERS)
+    {
+        Wow64Context->Dr0 = (ULONG)Context->Dr0;
+        Wow64Context->Dr1 = (ULONG)Context->Dr1;
+        Wow64Context->Dr2 = (ULONG)Context->Dr2;
+        Wow64Context->Dr3 = (ULONG)Context->Dr3;
+        Wow64Context->Dr6 = (ULONG)Context->Dr6;
+        Wow64Context->Dr7 = (ULONG)Context->Dr7;
+    }
+
+    if (Flags & WOW64_CONTEXT_FLOATING_POINT)
+        PspFxSaveToWow64Fpu(&Wow64Context->FloatSave, &Context->FltSave);
+
+    if (Flags & WOW64_CONTEXT_EXTENDED_REGISTERS)
+        RtlCopyMemory(Wow64Context->ExtendedRegisters,
+                      &Context->FltSave,
+                      sizeof(Context->FltSave));
+}
+#endif
+
 NTSTATUS
 NTAPI
 NtSetInformationThread(
@@ -2418,6 +2824,76 @@ NtSetInformationThread(
     /* Check what kind of information class this is */
     switch (ThreadInformationClass)
     {
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+        case ThreadWow64Context:
+        {
+            WOW64_CONTEXT Wow64Context;
+            CONTEXT Context;
+            CONTEXT NativeContext;
+
+            if (ThreadInformationLength != sizeof(Wow64Context))
+                return STATUS_INFO_LENGTH_MISMATCH;
+
+            _SEH2_TRY
+            {
+                if (PreviousMode != KernelMode)
+                    ProbeForRead(ThreadInformation, sizeof(Wow64Context), sizeof(ULONG));
+                RtlCopyMemory(&Wow64Context, ThreadInformation, sizeof(Wow64Context));
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                _SEH2_YIELD(return _SEH2_GetExceptionCode());
+            }
+            _SEH2_END;
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_SET_CONTEXT,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            if (Thread->SystemThread)
+            {
+                Status = STATUS_INVALID_HANDLE;
+            }
+            else if (!THREAD_TO_PROCESS(Thread)->Wow64Process)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+            }
+            else
+            {
+                RtlZeroMemory(&NativeContext, sizeof(NativeContext));
+                NativeContext.ContextFlags = CONTEXT_CONTROL;
+                Status = PspGetContextThreadInternal(Thread,
+                                                     &NativeContext,
+                                                     KernelMode,
+                                                     UserMode);
+                if (NT_SUCCESS(Status))
+                {
+                    PspWow64ContextToContext(&Context, &Wow64Context);
+                    if (NativeContext.SegCs == (KGDT64_R3_CODE | RPL_MASK))
+                    {
+                        Context.ContextFlags &= CONTEXT_AMD64 |
+                                                CONTEXT_DEBUG_REGISTERS;
+                    }
+
+                    if ((Context.ContextFlags & CONTEXT_DEBUG_REGISTERS) ==
+                        CONTEXT_DEBUG_REGISTERS)
+                        Status = PspSetContextThreadInternal(Thread,
+                                                            &Context,
+                                                            KernelMode,
+                                                            UserMode);
+                }
+            }
+
+            ObDereferenceObject(Thread);
+            return Status;
+        }
+#endif
+
         /* Thread priority */
         case ThreadPriority:
         {
@@ -2597,6 +3073,9 @@ NtSetInformationThread(
                 KeEnterCriticalRegion();
                 ExAcquirePushLockShared(&Process->ProcessLock);
 
+                if (Affinity == ~(KAFFINITY)0)
+                    Affinity = Process->Pcb.Affinity;
+
                 /* Combine masks */
                 CombinedAffinity = Affinity & Process->Pcb.Affinity;
                 if (CombinedAffinity != Affinity)
@@ -2712,12 +3191,42 @@ NtSetInformationThread(
             break;
         }
 
+        case ThreadEnableAlignmentFaultFixup:
+        {
+            BOOLEAN EnableFixup;
+
+            _SEH2_TRY
+            {
+                EnableFixup = *(PUCHAR)ThreadInformation != 0;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                _SEH2_YIELD(break);
+            }
+            _SEH2_END;
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_SET_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            Thread->Tcb.AutoAlignment = EnableFixup;
+            ObDereferenceObject(Thread);
+            Status = STATUS_SUCCESS;
+            break;
+        }
+
         case ThreadIdealProcessor:
         {
-            ULONG_PTR IdealProcessor;
+            ULONG IdealProcessor;
 
             /* Check buffer length */
-            if (ThreadInformationLength != sizeof(ULONG_PTR))
+            if (ThreadInformationLength != sizeof(ULONG))
             {
                 Status = STATUS_INFO_LENGTH_MISMATCH;
                 break;
@@ -2727,7 +3236,7 @@ NtSetInformationThread(
             _SEH2_TRY
             {
                 /* Get the priority */
-                IdealProcessor = *(PULONG_PTR)ThreadInformation;
+                IdealProcessor = *(PULONG)ThreadInformation;
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -2738,7 +3247,7 @@ NtSetInformationThread(
             _SEH2_END;
 
             /* Validate it */
-            if (IdealProcessor > MAXIMUM_PROCESSORS)
+            if (IdealProcessor >= MAXIMUM_PROCESSORS)
             {
                 /* Fail */
                 Status = STATUS_INVALID_PARAMETER;
@@ -2756,8 +3265,8 @@ NtSetInformationThread(
                 break;
 
             /* Set the ideal */
-            Status = KeSetIdealProcessorThread(&Thread->Tcb,
-                                               (CCHAR)IdealProcessor);
+            KeSetIdealProcessorThread(&Thread->Tcb, (CCHAR)IdealProcessor);
+            Status = STATUS_SUCCESS;
 
             /* Get the TEB and protect the thread */
             Teb = Thread->Tcb.Teb;
@@ -2772,6 +3281,45 @@ NtSetInformationThread(
 
             /* Dereference the thread */
             ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadIdealProcessorEx:
+        {
+            PROCESSOR_NUMBER ProcessorNumber;
+
+            _SEH2_TRY
+            {
+                ProcessorNumber = *(PPROCESSOR_NUMBER)ThreadInformation;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+                _SEH2_YIELD(break);
+            }
+            _SEH2_END;
+
+            if (ProcessorNumber.Group != 0 ||
+                ProcessorNumber.Reserved != 0 ||
+                ProcessorNumber.Number >= MAXIMUM_PROCESSORS)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_SET_INFORMATION,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            KeSetIdealProcessorThread(&Thread->Tcb,
+                                      (CCHAR)ProcessorNumber.Number);
+            ObDereferenceObject(Thread);
+            Status = STATUS_SUCCESS;
             break;
         }
 
@@ -3141,6 +3689,139 @@ NtQueryInformationThread(
     /* Check what kind of information class this is */
     switch (ThreadInformationClass)
     {
+#if defined(_M_AMD64) && defined(BUILD_WOW64_ENABLED)
+        case ThreadWow64Context:
+        {
+            WOW64_CONTEXT Wow64Context;
+            CONTEXT Context;
+            ULONG Wow64Flags;
+
+            Length = sizeof(Wow64Context);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            _SEH2_TRY
+            {
+                if (PreviousMode != KernelMode)
+                {
+                    ProbeForRead(ThreadInformation, sizeof(ULONG), sizeof(ULONG));
+                    ProbeForWrite(ThreadInformation, Length, sizeof(ULONG));
+                }
+                Wow64Flags = ((PWOW64_CONTEXT)ThreadInformation)->ContextFlags;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                _SEH2_YIELD(return _SEH2_GetExceptionCode());
+            }
+            _SEH2_END;
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               THREAD_GET_CONTEXT,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            if (Thread->SystemThread)
+            {
+                Status = STATUS_INVALID_HANDLE;
+            }
+            else if (!THREAD_TO_PROCESS(Thread)->Wow64Process)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+            }
+            else
+            {
+                RtlZeroMemory(&Context, sizeof(Context));
+                Context.ContextFlags = CONTEXT_AMD64 |
+                    (Wow64Flags & (CONTEXT_CONTROL |
+                                   CONTEXT_INTEGER |
+                                   CONTEXT_SEGMENTS |
+                                   CONTEXT_DEBUG_REGISTERS));
+                if (Wow64Flags & (WOW64_CONTEXT_FLOATING_POINT |
+                                  WOW64_CONTEXT_EXTENDED_REGISTERS))
+                {
+                    Context.ContextFlags |= CONTEXT_FLOATING_POINT;
+                }
+
+                Status = PspGetContextThreadInternal(Thread,
+                                                     &Context,
+                                                     KernelMode,
+                                                     UserMode);
+                if (NT_SUCCESS(Status))
+                {
+                    PspContextToWow64Context(&Wow64Context, &Context, Wow64Flags);
+                    if (Context.SegCs == (KGDT64_R3_CODE | RPL_MASK))
+                    {
+                        if (Wow64Flags & WOW64_CONTEXT_CONTROL)
+                        {
+                            Wow64Context.SegCs = KGDT64_R3_CMCODE | RPL_MASK;
+                            Wow64Context.SegSs = KGDT64_R3_DATA | RPL_MASK;
+                            Wow64Context.EFlags = 0x202;
+                        }
+
+                        if (Wow64Flags & WOW64_CONTEXT_INTEGER)
+                        {
+                            Wow64Context.Ebp = 0;
+                            Wow64Context.Ecx = 0;
+                            Wow64Context.Edx = 0;
+                            Wow64Context.Esi = 0;
+                            Wow64Context.Edi = 0;
+                        }
+
+                        if (Wow64Flags & WOW64_CONTEXT_SEGMENTS)
+                        {
+                            Wow64Context.SegDs = KGDT64_R3_DATA | RPL_MASK;
+                            Wow64Context.SegEs = KGDT64_R3_DATA | RPL_MASK;
+                            Wow64Context.SegFs = KGDT64_R3_CMTEB | RPL_MASK;
+                            Wow64Context.SegGs = KGDT64_R3_DATA | RPL_MASK;
+                        }
+
+                        if (Wow64Flags & WOW64_CONTEXT_FLOATING_POINT)
+                        {
+                            RtlZeroMemory(&Wow64Context.FloatSave,
+                                          sizeof(Wow64Context.FloatSave));
+                            Wow64Context.FloatSave.ControlWord = 0x27f;
+                            Wow64Context.FloatSave.TagWord = 0xffff;
+                        }
+
+                        if (Wow64Flags & WOW64_CONTEXT_EXTENDED_REGISTERS)
+                        {
+                            PXMM_SAVE_AREA32 FxSave;
+
+                            RtlZeroMemory(Wow64Context.ExtendedRegisters,
+                                          sizeof(Wow64Context.ExtendedRegisters));
+                            FxSave = (PXMM_SAVE_AREA32)Wow64Context.ExtendedRegisters;
+                            FxSave->ControlWord = 0x27f;
+                            FxSave->TagWord = 0xff;
+                            FxSave->MxCsr = 0x1f80;
+                        }
+                    }
+                }
+            }
+
+            ObDereferenceObject(Thread);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            _SEH2_TRY
+            {
+                RtlCopyMemory(ThreadInformation, &Wow64Context, Length);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+            break;
+        }
+#endif
+
         /* Basic thread information */
         case ThreadBasicInformation:
         {
@@ -3158,7 +3839,11 @@ NtQueryInformationThread(
 
             /* Reference the thread */
             Status = ObReferenceObjectByHandle(ThreadHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               THREAD_QUERY_LIMITED_INFORMATION,
+#else
                                                Access,
+#endif
                                                PsThreadType,
                                                PreviousMode,
                                                (PVOID*)&Thread,
@@ -3282,6 +3967,42 @@ NtQueryInformationThread(
             _SEH2_END;
 
             /* Dereference the thread */
+            ObDereferenceObject(Thread);
+            break;
+        }
+
+        case ThreadIdealProcessorEx:
+        {
+            PPROCESSOR_NUMBER ProcessorNumber = ThreadInformation;
+
+            Length = sizeof(*ProcessorNumber);
+            if (ThreadInformationLength != Length)
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = ObReferenceObjectByHandle(ThreadHandle,
+                                               Access,
+                                               PsThreadType,
+                                               PreviousMode,
+                                               (PVOID*)&Thread,
+                                               NULL);
+            if (!NT_SUCCESS(Status))
+                break;
+
+            _SEH2_TRY
+            {
+                ProcessorNumber->Group = 0;
+                ProcessorNumber->Number = Thread->Tcb.IdealProcessor;
+                ProcessorNumber->Reserved = 0;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+
             ObDereferenceObject(Thread);
             break;
         }

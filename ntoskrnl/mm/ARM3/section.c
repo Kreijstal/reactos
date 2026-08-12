@@ -1809,8 +1809,11 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
     PEPROCESS Process;
     NTSTATUS Status;
     UNICODE_STRING ModuleFileName;
-    PMEMORY_SECTION_NAME SectionName = NULL;
+    PMEMORY_SECTION_NAME SectionName = MemoryInformation;
     KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    KAPC_STATE ApcState;
+    SIZE_T RequiredLength;
+    BOOLEAN Attached = FALSE;
 
     /* Vista+ Windows accepts either PROCESS_QUERY_INFORMATION or
      * PROCESS_QUERY_LIMITED_INFORMATION for NtQueryVirtualMemory; fall
@@ -1818,7 +1821,7 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
      * emulation. */
     Status = ObReferenceObjectByHandle(ProcessHandle,
                                        PROCESS_QUERY_INFORMATION,
-                                       NULL,
+                                       PsProcessType,
                                        PreviousMode,
                                        (PVOID*)(&Process),
                                        NULL);
@@ -1826,7 +1829,7 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
     {
         Status = ObReferenceObjectByHandle(ProcessHandle,
                                            PROCESS_QUERY_LIMITED_INFORMATION,
-                                           NULL,
+                                           PsProcessType,
                                            PreviousMode,
                                            (PVOID*)(&Process),
                                            NULL);
@@ -1838,22 +1841,48 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         return Status;
     }
 
+    if (Process != PsGetCurrentProcess())
+    {
+        KeStackAttachProcess(&Process->Pcb, &ApcState);
+        Attached = TRUE;
+    }
+
     Status = MmGetFileNameForAddress(BaseAddress, &ModuleFileName);
+    if (Attached)
+        KeUnstackDetachProcess(&ApcState);
+
+    if (Status == STATUS_SECTION_NOT_IMAGE)
+        Status = STATUS_INVALID_ADDRESS;
 
     if (NT_SUCCESS(Status))
     {
-        SectionName = MemoryInformation;
+        RequiredLength = sizeof(*SectionName) +
+                         ModuleFileName.Length + sizeof(WCHAR);
+
+        if (MemoryInformationLength < sizeof(*SectionName))
+            Status = STATUS_INFO_LENGTH_MISMATCH;
+        else if (MemoryInformationLength < RequiredLength)
+            Status = STATUS_BUFFER_OVERFLOW;
+
         if (PreviousMode != KernelMode)
         {
             _SEH2_TRY
             {
-                RtlInitEmptyUnicodeString(&SectionName->SectionFileName,
-                                          (PWSTR)(SectionName + 1),
-                                          MemoryInformationLength - sizeof(MEMORY_SECTION_NAME));
-                RtlCopyUnicodeString(&SectionName->SectionFileName, &ModuleFileName);
+                if (ReturnLength)
+                    *ReturnLength = RequiredLength;
 
-                if (ReturnLength) *ReturnLength = ModuleFileName.Length + sizeof(MEMORY_SECTION_NAME);
-
+                if (NT_SUCCESS(Status))
+                {
+                    SectionName->SectionFileName.Buffer = (PWSTR)(SectionName + 1);
+                    SectionName->SectionFileName.Length = ModuleFileName.Length;
+                    SectionName->SectionFileName.MaximumLength =
+                        ModuleFileName.Length + sizeof(WCHAR);
+                    RtlCopyMemory(SectionName->SectionFileName.Buffer,
+                                  ModuleFileName.Buffer,
+                                  ModuleFileName.Length);
+                    SectionName->SectionFileName.Buffer[
+                        ModuleFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+                }
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1863,13 +1892,21 @@ MiQueryMemorySectionName(IN HANDLE ProcessHandle,
         }
         else
         {
-            RtlInitEmptyUnicodeString(&SectionName->SectionFileName,
-                                      (PWSTR)(SectionName + 1),
-                                      MemoryInformationLength - sizeof(MEMORY_SECTION_NAME));
-            RtlCopyUnicodeString(&SectionName->SectionFileName, &ModuleFileName);
+            if (ReturnLength)
+                *ReturnLength = RequiredLength;
 
-            if (ReturnLength) *ReturnLength = ModuleFileName.Length + sizeof(MEMORY_SECTION_NAME);
-
+            if (NT_SUCCESS(Status))
+            {
+                SectionName->SectionFileName.Buffer = (PWSTR)(SectionName + 1);
+                SectionName->SectionFileName.Length = ModuleFileName.Length;
+                SectionName->SectionFileName.MaximumLength =
+                    ModuleFileName.Length + sizeof(WCHAR);
+                RtlCopyMemory(SectionName->SectionFileName.Buffer,
+                              ModuleFileName.Buffer,
+                              ModuleFileName.Length);
+                SectionName->SectionFileName.Buffer[
+                    ModuleFileName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+            }
         }
 
         RtlFreeUnicodeString(&ModuleFileName);
@@ -3593,6 +3630,13 @@ NtMapViewOfSection(
                                        (PVOID*)&Process,
                                        NULL);
     if (!NT_SUCCESS(Status)) return Status;
+
+    if ((AllocationType & MEM_DOS_LIM) &&
+        (Process != PsGetCurrentProcess()))
+    {
+        ObDereferenceObject(Process);
+        return MI_MAPVIEW_INVALID_PARAMETER(9);
+    }
 
     /* Reference the section */
     Status = ObReferenceObjectByHandle(SectionHandle,

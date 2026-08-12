@@ -25,6 +25,9 @@
 #define KxSetThreadCallbackStack(_Thread, _Stack) ((_Thread)->CallbackStack = (_Stack))
 #endif
 
+/* Offset of the instruction following KiUserApcDispatcher's normal-routine call. */
+#define KI_USER_APC_DISPATCHER_RETURN_OFFSET 0x16
+
 /*!
  *  \name KiInitializeUserApc
  *
@@ -94,6 +97,15 @@ KiInitializeUserApc(
         Context->P3Home = (ULONG64)SystemArgument2;
         Context->P4Home = (ULONG64)NormalRoutine;
 
+        if ((PVOID)NormalRoutine == PspSystemDllEntryPoint)
+        {
+            PULONG64 ReturnAddress = (PULONG64)Context - 1;
+
+            ProbeForWrite(ReturnAddress, sizeof(*ReturnAddress), sizeof(*ReturnAddress));
+            *ReturnAddress = (ULONG64)KeUserApcDispatcher +
+                             KI_USER_APC_DISPATCHER_RETURN_OFFSET;
+        }
+
         /* Set up the machine frame for unwinding */
         ApcFrame->MachineFrame.Rip = TrapFrame->Rip;
         ApcFrame->MachineFrame.Rsp = TrapFrame->Rsp;
@@ -113,8 +125,21 @@ KiInitializeUserApc(
     /* Set the stack pointer to the context record */
     TrapFrame->Rsp = (ULONG64)Context;
 
-    /* We jump to KiUserApcDispatcher in ntdll */
-    TrapFrame->Rip = (ULONG64)KeUserApcDispatcher;
+    if ((PVOID)NormalRoutine == PspSystemDllEntryPoint)
+    {
+        /* Enter LdrInitializeThunk as if KiUserApcDispatcher had called it. */
+        TrapFrame->Rcx = (ULONG64)NormalContext;
+        TrapFrame->Rdx = (ULONG64)SystemArgument1;
+        TrapFrame->R8 = (ULONG64)SystemArgument2;
+        TrapFrame->R9 = (ULONG64)Context;
+        TrapFrame->Rsp = (ULONG64)((PULONG64)Context - 1);
+        TrapFrame->Rip = (ULONG64)NormalRoutine;
+    }
+    else
+    {
+        /* Ordinary APCs enter through KiUserApcDispatcher in ntdll. */
+        TrapFrame->Rip = (ULONG64)KeUserApcDispatcher;
+    }
 
     /* Setup Ring 3 segments */
     TrapFrame->SegCs = KGDT64_R3_CODE | RPL_MASK;
@@ -276,14 +301,15 @@ KeUserModeCallback(
            UCALLOUT_FRAME compensates for that and on entry we already have a full stack
            frame with home space for the next call, i.e. we are already inside the function
            body and the stack needs to be 16 byte aligned. */
-        UserArguments = (PUCHAR)ALIGN_DOWN_POINTER_BY(OldStack - ArgumentLength, 16) - 8;
+        UserArguments =
+            (PUCHAR)ALIGN_DOWN_POINTER_BY(OldStack - ArgumentLength + 8, 16) - 8;
 
         /* The callout frame is below the arguments */
         CalloutFrame = ((PUCALLOUT_FRAME)UserArguments) - 1;
 
         /* Make sure it's all writable */
         ProbeForWrite(CalloutFrame,
-                      sizeof(PUCALLOUT_FRAME) + ArgumentLength,
+                      sizeof(*CalloutFrame) + ArgumentLength,
                       sizeof(PVOID));
 
         /* Copy the buffer into the stack */

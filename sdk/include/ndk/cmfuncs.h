@@ -144,7 +144,11 @@ NtLoadKeyEx(
     _In_ POBJECT_ATTRIBUTES TargetKey,
     _In_ POBJECT_ATTRIBUTES SourceFile,
     _In_ ULONG Flags,
-    _In_ HANDLE TrustClassKey
+    _In_opt_ HANDLE TrustClassKey,
+    _In_opt_ HANDLE Event,
+    _In_ ACCESS_MASK DesiredAccess,
+    _Out_opt_ PHANDLE RootHandle,
+    _Out_opt_ PIO_STATUS_BLOCK IoStatusBlock
 );
 
 NTSTATUS
@@ -202,6 +206,16 @@ NtOpenKey(
     _Out_ PHANDLE KeyHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_ POBJECT_ATTRIBUTES ObjectAttributes
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtOpenKeyEx(
+    _Out_ PHANDLE KeyHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ULONG OpenOptions
 );
 
 NTSYSCALLAPI

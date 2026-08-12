@@ -3080,7 +3080,7 @@ MmSetExecuteOptions(IN ULONG ExecuteOptions)
 {
     PKPROCESS CurrentProcess = &PsGetCurrentProcess()->Pcb;
     KLOCK_QUEUE_HANDLE ProcessLock;
-    NTSTATUS Status = STATUS_ACCESS_DENIED;
+    NTSTATUS Status = STATUS_INVALID_PARAMETER;
     ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
 
     /* Only accept valid flags */

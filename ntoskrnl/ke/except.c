@@ -246,6 +246,11 @@ NtContinue(
         KeTestAlertThread(Thread->PreviousMode);
     }
 
+#ifdef _M_AMD64
+    /* NtContinue restores an existing user context, so do not instrument it. */
+    PsGetCurrentThread()->InstrumentationCallback = (PVOID)1;
+#endif
+
     /* Exit to new context */
     KiExceptionExit(TrapFrame, ExceptionFrame);
 }

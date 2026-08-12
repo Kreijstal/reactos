@@ -363,7 +363,8 @@ CreateApplicationDesktopSecurity(
     BOOL Success = FALSE;
     SECURITY_DESCRIPTOR AbsoluteSd;
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
-    PSID WinlogonSid = NULL, AdminsSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment in CreateWinstaSecurity for information */
+    PSID WinlogonSid = NULL, AdminsSid = NULL, InteractiveSid = NULL;
+    PSID NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment in CreateWinstaSecurity for information */
     DWORD DaclSize;
     PACL Dacl;
 
@@ -390,6 +391,17 @@ CreateApplicationDesktopSecurity(
         goto Quit;
     }
 
+    /* Grant the logged-on interactive user access through its token SID. */
+    if (!AllocateAndInitializeSid(&NtAuthority,
+                                  1,
+                                  SECURITY_INTERACTIVE_RID,
+                                  0, 0, 0, 0, 0, 0, 0,
+                                  &InteractiveSid))
+    {
+        ERR("CreateApplicationDesktopSecurity(): Failed to create the interactive SID (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
     /* HACK: Create the network service SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
                                   1,
@@ -410,6 +422,7 @@ CreateApplicationDesktopSecurity(
     DaclSize = sizeof(ACL) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid) +
+               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(InteractiveSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid); /* HACK */
 
     /* Allocate the DACL now */
@@ -451,6 +464,17 @@ CreateApplicationDesktopSecurity(
         goto Quit;
     }
 
+    /* Give full desktop access to processes in an interactive logon. */
+    if (!AddAccessAllowedAceEx(Dacl,
+                               ACL_REVISION,
+                               0,
+                               DESKTOP_ALL,
+                               InteractiveSid))
+    {
+        ERR("CreateApplicationDesktopSecurity(): Failed to set ACE for interactive users (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
     /* HACK: Third ACE -- Give full desktop power to network services */
     if (!AddAccessAllowedAceEx(Dacl,
                                ACL_REVISION,
@@ -489,6 +513,11 @@ CreateApplicationDesktopSecurity(
     Success = TRUE;
 
 Quit:
+    if (InteractiveSid != NULL)
+    {
+        FreeSid(InteractiveSid);
+    }
+
     if (WinlogonSid != NULL)
     {
         FreeSid(WinlogonSid);

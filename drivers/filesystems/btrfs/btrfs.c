@@ -2488,6 +2488,7 @@ static NTSTATUS __stdcall drv_cleanup(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
         ccb* ccb;
         file_ref* fileref;
         bool locked = true;
+        bool posix_delete = false;
 
         ccb = FileObject->FsContext2;
         fileref = ccb ? ccb->fileref : NULL;
@@ -2508,6 +2509,13 @@ static NTSTATUS __stdcall drv_cleanup(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
 
         if (ccb && ccb->options & FILE_DELETE_ON_CLOSE && fileref)
             fileref->delete_on_close = true;
+
+        if (ccb && ccb->delete_on_close && fileref) {
+            if (ccb->posix_delete)
+                posix_delete = true;
+            else
+                fileref->delete_on_close = true;
+        }
 
         if (fileref && fileref->delete_on_close && fcb->type == BTRFS_TYPE_DIRECTORY && fcb->inode_item.st_size > 0 && fcb != fcb->Vcb->dummy_fcb)
             fileref->delete_on_close = false;
@@ -2530,7 +2538,7 @@ static NTSTATUS __stdcall drv_cleanup(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
             ERR("fileref %p: open_count now %i\n", fileref, oc);
 #endif
 
-            if (oc == 0 || (fileref->delete_on_close && fileref->posix_delete)) {
+            if (oc == 0 || posix_delete) {
                 if (!fcb->Vcb->removing) {
                     if (oc == 0 && fileref->fcb->inode_item.st_nlink == 0 && fileref != fcb->Vcb->root_fileref &&
                         fcb != fcb->Vcb->volume_fcb && !fcb->ads) { // last handle closed on POSIX-deleted file
@@ -2550,7 +2558,9 @@ static NTSTATUS __stdcall drv_cleanup(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
                         clear_rollback(&rollback);
 
                         mark_fcb_dirty(fileref->fcb);
-                    } else if (fileref->delete_on_close && fileref != fcb->Vcb->root_fileref && fcb != fcb->Vcb->volume_fcb) {
+                    } else if ((fileref->delete_on_close || posix_delete) &&
+                               fileref != fcb->Vcb->root_fileref &&
+                               fcb != fcb->Vcb->volume_fcb) {
                         LIST_ENTRY rollback;
 
                         InitializeListHead(&rollback);
@@ -2569,7 +2579,7 @@ static NTSTATUS __stdcall drv_cleanup(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIR
                         // fileref_lock needs to be acquired before fcb->Header.Resource
                         ExAcquireResourceExclusiveLite(&fcb->Vcb->fileref_lock, true);
 
-                        Status = delete_fileref(fileref, FileObject, oc > 0 && fileref->posix_delete, Irp, &rollback);
+                        Status = delete_fileref(fileref, FileObject, oc > 0 && posix_delete, Irp, &rollback);
                         if (!NT_SUCCESS(Status)) {
                             ERR("delete_fileref returned %08lx\n", Status);
                             do_rollback(fcb->Vcb, &rollback);

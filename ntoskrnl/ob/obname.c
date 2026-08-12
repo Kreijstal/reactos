@@ -182,18 +182,8 @@ ObpCreateDosDevicesDirectory(VOID)
     SECURITY_DESCRIPTOR DosDevicesSD;
     NTSTATUS Status;
 
-    /*
-     * LUID device maps require per-logon DosDevices directories - a private
-     * \?? for each logon session, carrying a restrictive DACL - which ReactOS
-     * does not implement yet: \?? always resolves to the global \GLOBAL??
-     * directory. Advertising the feature as enabled while \?? still exposes the
-     * global directory is inconsistent (a process queries
-     * ProcessLUIDDeviceMapsEnabled, sees TRUE, then finds the unrestricted
-     * global DACL on \??), so report it as disabled regardless of
-     * ProtectionMode. Symbolic-link reparsing then uses the per-process device
-     * map, which ReactOS does support. Revisit once per-LUID device maps exist.
-     */
-    ObpLUIDDeviceMapsEnabled = 0;
+    /* Enable per-logon DOS device maps unless explicitly disabled. */
+    ObpLUIDDeviceMapsEnabled = (ObpLUIDDeviceMapsDisabled == 0);
 
     /* Create a custom security descriptor for the global DosDevices directory */
     Status = ObpGetDosDevicesProtection(&DosDevicesSD);
@@ -525,6 +515,15 @@ ObpLookupObjectName(IN HANDLE RootHandle OPTIONAL,
             /* The syntax is bad, so fail this request */
             ObDereferenceObject(RootDirectory);
             return STATUS_OBJECT_PATH_SYNTAX_BAD;
+        }
+
+        /* A non-directory root cannot be opened through an empty relative name. */
+        if ((!(ObjectName->Length) || !(ObjectName->Buffer)) &&
+            (ObjectHeader->Type != ObpDirectoryObjectType) &&
+            !ObjectHeader->Type->TypeInfo.ParseProcedure)
+        {
+            ObDereferenceObject(RootDirectory);
+            return STATUS_OBJECT_TYPE_MISMATCH;
         }
 
         /* Don't parse a Directory */
@@ -1150,8 +1149,12 @@ ReparseObject:
                     }
                     else
                     {
-                        /* We still have a name, but no parse routine for it */
-                        Status = STATUS_OBJECT_TYPE_MISMATCH;
+                        /* Insertions do not call non-symbolic-link parsers. If
+                         * this object has one, the unconsumed path is missing;
+                         * otherwise the intermediary has the wrong type. */
+                        Status = ObjectHeader->Type->TypeInfo.ParseProcedure ?
+                                 STATUS_OBJECT_PATH_NOT_FOUND :
+                                 STATUS_OBJECT_TYPE_MISMATCH;
                         Object = NULL;
                         break;
                     }

@@ -2723,6 +2723,9 @@ NtUserOpenDesktop(
     NTSTATUS Status;
     HDESK Desktop;
 
+    /* Every desktop handle implicitly grants access to its user objects. */
+    dwDesiredAccess |= DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
+
     Status = ObOpenObjectByName(
                  ObjectAttributes,
                  ExDesktopObjectType,
@@ -2766,6 +2769,9 @@ HDESK UserOpenInputDesktop(DWORD dwFlags,
     }
 
     if (fInherit) HandleAttributes = OBJ_INHERIT;
+
+    /* Every desktop handle implicitly grants access to its user objects. */
+    dwDesiredAccess |= DESKTOP_READOBJECTS | DESKTOP_WRITEOBJECTS;
 
     /* Create a new handle to the object */
     Status = ObOpenObjectByPointer(
