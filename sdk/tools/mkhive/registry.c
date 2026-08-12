@@ -673,26 +673,6 @@ RegSetValueExW(
     ULONG DataCellSize;
     NTSTATUS Status;
 
-    if (dwType == REG_LINK)
-    {
-        PMEMKEY DestKey;
-
-        /* Special handling of registry links */
-        if (cbData != sizeof(PVOID))
-            return ERROR_INVALID_PARAMETER; // STATUS_INVALID_PARAMETER;
-
-        DestKey = HKEY_TO_MEMKEY(*(PHKEY)lpData);
-
-        // FIXME: Add additional checks for the validity of DestKey
-
-        /* Create the link in registry hive (if applicable) */
-        if (Key->RegistryHive != DestKey->RegistryHive)
-            return ERROR_SUCCESS;
-
-        DPRINT1("Save link to registry\n");
-        return ERROR_INVALID_FUNCTION; // STATUS_NOT_IMPLEMENTED;
-    }
-
     if ((cbData & ~CM_KEY_VALUE_SPECIAL_SIZE) != cbData)
         return ERROR_GEN_FAILURE; // STATUS_UNSUCCESSFUL;
 
@@ -703,6 +683,10 @@ RegSetValueExW(
         return ERROR_GEN_FAILURE; // STATUS_UNSUCCESSFUL;
 
     ASSERT(KeyNode->Signature == CM_KEY_NODE_SIGNATURE);
+
+    /* A persisted REG_LINK value turns its containing key into a link key. */
+    if (dwType == REG_LINK)
+        KeyNode->Flags |= KEY_SYM_LINK;
 
     /* Mark the parent as dirty since we are going to create a new value in it */
     HvMarkCellDirty(Hive, Key->KeyCellOffset, FALSE);

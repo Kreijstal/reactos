@@ -100,6 +100,10 @@ FUNC InternalDispatchException
     mov [rcx + EXCEPTION_RECORD_ExceptionFlags], eax
     mov [rcx + EXCEPTION_RECORD_ExceptionRecord], rax
     mov rax, [rbp + KTRAP_FRAME_Rip]
+    cmp dword ptr [rcx + EXCEPTION_RECORD_ExceptionCode], STATUS_BREAKPOINT
+    jne ExceptionAddressReady
+    dec rax
+ExceptionAddressReady:
     mov [rcx + EXCEPTION_RECORD_ExceptionAddress], rax
     mov [rcx + EXCEPTION_RECORD_NumberParameters], edx
     mov [rcx + EXCEPTION_RECORD_ExceptionInformation + HEX(00)], r9
@@ -178,7 +182,7 @@ ENDFUNC
 PUBLIC KiDebugTrapOrFault
 FUNC KiDebugTrapOrFault
     /* Push pseudo error code */
-    EnterTrap TF_SAVE_ALL
+    EnterTrap (TF_SAVE_ALL or TF_DEBUG)
 
     /* Check if the frame was from kernelmode */
     test word ptr [rbp + KTRAP_FRAME_SegCs], 3
@@ -198,7 +202,7 @@ KiDebugTrapOrFaultKMode:
     DispatchException STATUS_SINGLE_STEP, 0, 0, 0, 0
 
     /* Return */
-    ExitTrap TF_SAVE_ALL
+    ExitTrap (TF_SAVE_ALL or TF_DEBUG)
 ENDFUNC
 
 EXTERN KiNmiInterruptHandler:PROC
@@ -596,7 +600,8 @@ FUNC KiXmmException
     jge KiXmmExit
 
     /* Dispatch the exception */
-    DispatchException eax, 2, 0, [rbp+KTRAP_FRAME_MxCsr], 0
+    mov r8d, [rbp + KTRAP_FRAME_MxCsr]
+    DispatchException eax, 2, 0, r8, 0
 
     // FIXME: STATUS_FLOAT_MULTIPLE_TRAPS / STATUS_FLOAT_MULTIPLE_FAULTS
 
@@ -910,6 +915,35 @@ PUBLIC KiSystemCallEntry64
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_TrapFrame], rcx
     mov [rax + ThTrapFrame], rdx
 
+    /* Snapshot callback state before the service can register or clear it. */
+    mov rdx, [rax + ThApcState + AsProcess]
+    mov rdx, [rdx + PrInstrumentationCallback]
+    test rdx, rdx
+    jnz .InstrumentationCallbackCaptured
+    mov edx, 1
+.InstrumentationCallbackCaptured:
+    mov [rax + EtInstrumentationCallback], rdx
+
+    /* Save and disable active user debug registers before kernel code can
+       access a watched user address. */
+    test byte ptr [rax + ThDebugActive], HEX(FF)
+    jz .UserDebugStateSaved
+    mov rdx, dr0
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr0], rdx
+    mov rdx, dr1
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr1], rdx
+    mov rdx, dr2
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr2], rdx
+    mov rdx, dr3
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr3], rdx
+    mov rdx, dr6
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr6], rdx
+    mov rdx, dr7
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr7], rdx
+    xor edx, edx
+    mov dr7, rdx
+.UserDebugStateSaved:
+
 #if DBG
     /* Check IRQL */
     mov rax, cr8
@@ -931,6 +965,10 @@ GLOBAL_LABEL KiSystemCall64Again
     call rax
 
 GLOBAL_LABEL KiSystemServiceExit
+
+    /* Preserve values needed if this return has to use an iret frame. */
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax], rax
+    mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rbp], rbp
 
     ASSERT_TRAP_FRAME_INTS_ENABLED rsp + MAX_SYSCALL_PARAM_SIZE
 
@@ -969,14 +1007,55 @@ DeliverUserModeApc:
     call KiInitiateUserApc
 
 NoUserModeApcPending:
+    /* SYSRET consumes RCX as RIP, so instrumentation callbacks need IRET. */
+    mov rcx, gs:[PcCurrentThread]
+    mov rdx, [rcx + EtInstrumentationCallback]
+    test rdx, rdx
+    jz .NoInstrumentationCallback
+    cmp rdx, 1
+    je .NoInstrumentationCallback
+    mov rcx, [rcx + ThApcState + AsProcess]
+    cmp rdx, [rcx + PrInstrumentationCallback]
+    je .InstrumentationCallbackReturn
+
+.NoInstrumentationCallback:
+    mov rcx, gs:[PcCurrentThread]
+    mov qword ptr [rcx + EtInstrumentationCallback], 0
+
+    /* Restore the system call result, which an APC delivery may have used. */
+    mov rax, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax]
+
     /* Disable interrupts for return */
     cli
+
+    /* Restore user debug registers only after all kernel work is complete. */
+    mov rcx, gs:[PcCurrentThread]
+    test byte ptr [rcx + ThDebugActive], HEX(FF)
+    jz .NoUserDebugRestore
+    xor edx, edx
+    mov dr7, rdx
+    mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr0]
+    mov dr0, rdx
+    mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr1]
+    mov dr1, rdx
+    mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr2]
+    mov dr2, rdx
+    mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr3]
+    mov dr3, rdx
+    mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr6]
+    mov dr6, rdx
+    mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Dr7]
+    mov dr7, rdx
+    jmp .UserDebugRestoreDone
+.NoUserDebugRestore:
+    xor edx, edx
+    mov dr7, rdx
+.UserDebugRestoreDone:
 
     /* Restore MCXSR */
     ldmxcsr [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_MxCsr]
 
     /* Restore old trap frame */
-    mov rcx, gs:[PcCurrentThread]
     mov rdx, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_TrapFrame]
     mov [rcx + KTHREAD_TrapFrame], rdx
 
@@ -1008,6 +1087,10 @@ NoUserModeApcPending:
 
     /* return to user mode */
     sysretq
+
+.InstrumentationCallbackReturn:
+    lea rsp, [rsp + MAX_SYSCALL_PARAM_SIZE]
+    jmp KiServiceExit3
 
 .ENDP
 

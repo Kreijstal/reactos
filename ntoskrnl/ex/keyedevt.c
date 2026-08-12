@@ -379,6 +379,20 @@ NtOpenKeyedEvent(
     HANDLE KeyedEventHandle;
     NTSTATUS Status;
 
+    if (PreviousMode != KernelMode)
+    {
+        _SEH2_TRY
+        {
+            ProbeForWrite(OutHandle, sizeof(HANDLE), sizeof(HANDLE));
+            *OutHandle = NULL;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            _SEH2_YIELD(return _SEH2_GetExceptionCode());
+        }
+        _SEH2_END;
+    }
+
     /* Open the object */
     Status = ObOpenObjectByName(ObjectAttributes,
                                 ExKeyedEventObjectType,
@@ -397,7 +411,6 @@ NtOpenKeyedEvent(
         _SEH2_TRY
         {
             /* Return the handle to the caller */
-            ProbeForWrite(OutHandle, sizeof(HANDLE), sizeof(HANDLE));
             *OutHandle = KeyedEventHandle;
         }
         _SEH2_EXCEPT(ExSystemExceptionFilter())

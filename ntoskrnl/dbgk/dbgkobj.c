@@ -1938,6 +1938,11 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
     PDEBUG_OBJECT_KILL_PROCESS_ON_EXIT_INFORMATION DebugInfo = DebugInformation;
     PAGED_CODE();
 
+    if (DebugObjectInformationClass != DebugObjectKillProcessOnExitInformation)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     /* Check buffers and parameters */
     Status = DefaultSetInfoBufferCheck(DebugObjectInformationClass,
                                        DbgkpDebugObjectInfoClass,
@@ -1946,7 +1951,6 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
                                        DebugInformation,
                                        DebugInformationLength,
                                        PreviousMode);
-    if (!NT_SUCCESS(Status)) return Status;
 
     /* Check if the caller wanted the return length */
     if (ReturnLength)
@@ -1955,8 +1959,12 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
         _SEH2_TRY
         {
             /* Return required length to user-mode */
-            ProbeForWriteUlong(ReturnLength);
-            *ReturnLength = sizeof(*DebugInfo);
+            if (PreviousMode != KernelMode)
+            {
+                ProbeForWriteUlong(ReturnLength);
+            }
+            *ReturnLength = (Status == STATUS_INFO_LENGTH_MISMATCH) ?
+                            sizeof(*DebugInfo) : 0;
         }
         _SEH2_EXCEPT(ExSystemExceptionFilter())
         {
@@ -1964,6 +1972,13 @@ NtSetInformationDebugObject(IN HANDLE DebugHandle,
             _SEH2_YIELD(return _SEH2_GetExceptionCode());
         }
         _SEH2_END;
+    }
+
+    if (!NT_SUCCESS(Status)) return Status;
+
+    if (DebugInfo->KillProcessOnExit > TRUE)
+    {
+        return STATUS_INVALID_PARAMETER;
     }
 
     /* Open the Object */
