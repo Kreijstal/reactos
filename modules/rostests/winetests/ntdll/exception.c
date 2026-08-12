@@ -8540,7 +8540,11 @@ static void test_debug_registers(void)
 
 static void test_debug_registers_wow64(void)
 {
+#ifdef __REACTOS__
+    char cmdline[] = "C:\\windows\\syswow64\\cmd.exe";
+#else
     char cmdline[] = "C:\\windows\\syswow64\\msinfo32.exe";
+#endif
     PROCESS_INFORMATION pi;
     STARTUPINFOA si = {0};
     WOW64_CONTEXT wow64_ctx;
@@ -8559,13 +8563,24 @@ static void test_debug_registers_wow64(void)
 #endif
 
     si.cb = sizeof(si);
+#ifdef __REACTOS__
+    bret = CreateProcessA(cmdline, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi);
+#else
     bret = CreateProcessA(cmdline, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+#endif
     ok(bret, "CreateProcessA failed\n");
+    if (!bret)
+    {
+        skip("Unable to start a Wow64 helper process\n");
+        return;
+    }
 
     bret = pIsWow64Process(pi.hProcess, &is_wow64);
     ok(bret && is_wow64, "expected Wow64 process\n");
 
+#ifndef __REACTOS__
     SuspendThread(pi.hThread);
+#endif
 
     ZeroMemory(&ctx, sizeof(ctx));
     ctx.ContextFlags = CONTEXT_ALL;

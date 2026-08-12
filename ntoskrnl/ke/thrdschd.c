@@ -806,6 +806,7 @@ KiUpdateEffectiveAffinityThread(
     _In_ PKTHREAD Thread)
 {
     PKPRCB Prcb;
+    BOOLEAN RequestInterrupt = FALSE;
 
     /* Acquire the thread lock */
     KiAcquireThreadLock(Thread);
@@ -853,6 +854,11 @@ KiUpdateEffectiveAffinityThread(
                 /* It is, send an IPI */
                 KiIpiSend(AFFINITY_MASK(Thread->NextProcessor), IPI_DPC);
             }
+            else
+            {
+                /* Force the current thread off a now-disallowed processor. */
+                RequestInterrupt = TRUE;
+            }
         }
         else if (Thread->State == Standby)
         {
@@ -879,6 +885,9 @@ KiUpdateEffectiveAffinityThread(
 
     KiReleasePrcbLock(Prcb);
     KiReleaseThreadLock(Thread);
+
+    if (RequestInterrupt)
+        HalRequestSoftwareInterrupt(DISPATCH_LEVEL);
 }
 #endif // CONFIG_SMP
 

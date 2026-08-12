@@ -145,7 +145,7 @@ KeContextToTrapFrame(IN PCONTEXT Context,
         TrapFrame->Dr2 = Context->Dr2;
         TrapFrame->Dr3 = Context->Dr3;
         TrapFrame->Dr6 = Context->Dr6;
-        TrapFrame->Dr7 = Context->Dr7;
+        TrapFrame->Dr7 = Context->Dr7 & DR7_LEGAL;
 
         if (PreviousMode != KernelMode)
         {
@@ -157,6 +157,12 @@ KeContextToTrapFrame(IN PCONTEXT Context,
                 TrapFrame->Dr2 = 0;
             if (TrapFrame->Dr3 > (ULONG64)MmHighestUserAddress)
                 TrapFrame->Dr3 = 0;
+
+            /* Trap and system-call exits load this state immediately before
+               returning to user mode. Never arm user breakpoints in kernel
+               mode, where accesses to a watched user address could trigger. */
+            KeGetCurrentThread()->Header.DebugActive =
+                (TrapFrame->Dr7 & 0xff) != 0;
         }
     }
 
@@ -269,8 +275,10 @@ KeTrapFrameToContext(IN PKTRAP_FRAME TrapFrame,
         else
         {
             /* Copy selectors */
-            Context->SegDs = TrapFrame->SegDs;
-            Context->SegEs = TrapFrame->SegEs;
+        Context->SegDs = TrapFrame->SegDs ?
+            TrapFrame->SegDs : (KGDT64_R3_DATA | RPL_MASK);
+        Context->SegEs = TrapFrame->SegEs ?
+            TrapFrame->SegEs : (KGDT64_R3_DATA | RPL_MASK);
             Context->SegFs = TrapFrame->SegFs;
             Context->SegGs = TrapFrame->SegGs;
         }

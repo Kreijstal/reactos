@@ -40,6 +40,20 @@ MsfsCreate(PDEVICE_OBJECT DeviceObject,
 
     DPRINT("Mailslot name: %wZ\n", &FileObject->FileName);
 
+    /* Opening the filesystem root does not create a mailslot endpoint. */
+    if ((FileObject->FileName.Length == 0) ||
+        ((FileObject->FileName.Length == sizeof(WCHAR)) &&
+         (FileObject->FileName.Buffer[0] == L'\\')))
+    {
+        FileObject->FsContext = NULL;
+        FileObject->FsContext2 = NULL;
+        FileObject->Flags |= FO_MAILSLOT;
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = FILE_OPENED;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
+    }
+
     Ccb = ExAllocatePoolWithTag(NonPagedPool, sizeof(MSFS_CCB), 'cFsM');
     if (Ccb == NULL)
     {
@@ -69,12 +83,12 @@ MsfsCreate(PDEVICE_OBJECT DeviceObject,
         ExFreePoolWithTag(Ccb, 'cFsM');
         KeUnlockMutex(&DeviceExtension->FcbListLock);
 
-        Irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+        Irp->IoStatus.Status = STATUS_OBJECT_NAME_NOT_FOUND;
         Irp->IoStatus.Information = 0;
 
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-        return STATUS_UNSUCCESSFUL;
+        return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
     Fcb = current;
@@ -213,12 +227,12 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
 
         KeUnlockMutex(&DeviceExtension->FcbListLock);
 
-        Irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+        Irp->IoStatus.Status = STATUS_OBJECT_NAME_COLLISION;
         Irp->IoStatus.Information = 0;
 
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-        return STATUS_UNSUCCESSFUL;
+        return STATUS_OBJECT_NAME_COLLISION;
     }
     else
     {
@@ -266,6 +280,15 @@ MsfsClose(PDEVICE_OBJECT DeviceObject,
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     DeviceExtension = DeviceObject->DeviceExtension;
     FileObject = IoStack->FileObject;
+
+    /* Root handles do not own an FCB or CCB. */
+    if (FileObject->FsContext == NULL)
+    {
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
+    }
 
     KeLockMutex(&DeviceExtension->FcbListLock);
 

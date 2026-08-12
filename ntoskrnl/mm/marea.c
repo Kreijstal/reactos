@@ -273,9 +273,25 @@ MiZeroBitsToHighestAddress(
         return TRUE;
     }
 
-    if (ZeroBits >= 32 && ZeroBits <= MI_MAX_ZERO_BITS)
+    if (ZeroBits == 32)
     {
-        *HighestAddress = MAXULONG_PTR >> ZeroBits;
+        *HighestAddress = MAXULONG_PTR >> 32;
+        return TRUE;
+    }
+
+    if (ZeroBits > 32)
+    {
+        ULONG_PTR Highest = ZeroBits;
+
+        Highest |= Highest >> 1;
+        Highest |= Highest >> 2;
+        Highest |= Highest >> 4;
+        Highest |= Highest >> 8;
+        Highest |= Highest >> 16;
+#ifdef _WIN64
+        Highest |= Highest >> 32;
+#endif
+        *HighestAddress = Highest;
         return TRUE;
     }
 
