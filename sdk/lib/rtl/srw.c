@@ -991,6 +991,18 @@ RtlReleaseSRWLockExclusive(IN OUT PRTL_SRWLOCK SRWLock)
                     break;
                 }
             }
+            else if (CurrentValue & RTL_SRWLOCK_CONTENTION_LOCK)
+            {
+                /* Somebody else is holding the wait block lock. It is only ever
+                   held for a few instructions, so spin rather than act on this
+                   value: RtlpAcquireWaitBlockLock() sets the bit with an
+                   unconditional InterlockedOr *before* it can know whether there
+                   is a wait block at all, so a lock with no waiter is briefly
+                   observable as OWNED | CONTENTION_LOCK. Taking the fast path
+                   on that would write a value with the bit cleared, i.e. steal a
+                   lock this thread does not own -- and would trip the assert
+                   below on a perfectly healthy lock. */
+            }
             else
             {
                 /* This is a fast path, we can simply clear the RTL_SRWLOCK_OWNED
