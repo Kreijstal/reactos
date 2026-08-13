@@ -121,10 +121,43 @@ RtlpIpv4StringToAddressParserW(
     _Out_ INT *Parts)
 {
     NTSTATUS Status;
+    PCWSTR PartStart, Current;
+    ULONG Result, Digit;
     *Parts = 0;
     do
     {
+        PartStart = String;
         Status = RtlpStringToUlong(String, Strict, &String, &Values[*Parts]);
+
+        /* Legacy Windows accepts overflow for a non-strict, one-part
+         * hexadecimal address and wraps it modulo ULONG. Do not extend that
+         * behavior to dotted components. */
+        if (!NT_SUCCESS(Status) &&
+            !Strict &&
+            *Parts == 0 &&
+            PartStart[0] == L'0' &&
+            (PartStart[1] == L'x' || PartStart[1] == L'X') &&
+            String > PartStart + 2 &&
+            !wcschr(String, L'.'))
+        {
+            Current = PartStart + 2;
+            Result = 0;
+            while (1)
+            {
+                Digit = towlower(*Current);
+                if (isdigit(Digit))
+                    Digit -= L'0';
+                else if (Digit >= L'a' && Digit <= L'f')
+                    Digit -= L'a' - 10;
+                else
+                    break;
+                Result = Result * 16 + Digit;
+                ++Current;
+            }
+            Values[0] = Result;
+            String = Current;
+            Status = STATUS_SUCCESS;
+        }
         (*Parts)++;
 
         if (*String != L'.')

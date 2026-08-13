@@ -230,6 +230,14 @@ NpQueryNameInfo(IN PNP_CCB Ccb,
     }
     else
     {
+        if (Ccb->Fcb->FullName.Length >= sizeof(L"\\$Anonymous") - sizeof(WCHAR) &&
+            !_wcsnicmp(Ccb->Fcb->FullName.Buffer,
+                       L"\\$Anonymous",
+                       (sizeof(L"\\$Anonymous") / sizeof(WCHAR)) - 1))
+        {
+            return STATUS_OBJECT_PATH_INVALID;
+        }
+
         NameLength = Ccb->Fcb->FullName.Length;
         Name = Ccb->Fcb->FullName.Buffer;
     }
@@ -347,7 +355,7 @@ NpQueryPipeLocalInfo(IN PNP_FCB Fcb,
         {
             InfoBuffer->ReadDataAvailable = OutQueue->BytesInQueue - OutQueue->ByteOffset;
         }
-        InfoBuffer->WriteQuotaAvailable = OutQueue->Quota - InQueue->QuotaUsed;
+        InfoBuffer->WriteQuotaAvailable = InQueue->Quota - InQueue->QuotaUsed;
     }
 
     return STATUS_SUCCESS;
