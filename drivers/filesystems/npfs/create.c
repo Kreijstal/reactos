@@ -13,6 +13,8 @@
 // File ID number for NPFS bugchecking support
 #define NPFS_BUGCHECK_FILE_ID   (NPFS_BUGCHECK_CREATE)
 
+static LONG NpAnonymousPipeId;
+
 /* FUNCTIONS ******************************************************************/
 
 VOID
@@ -219,6 +221,8 @@ NTAPI
 NpTranslateAlias(
     PUNICODE_STRING PipeName)
 {
+    static const UNICODE_STRING DoubleSlashName =
+        RTL_CONSTANT_STRING(L"\\$DoubleSlash");
     WCHAR UpcaseBuffer[MAX_INDEXED_LENGTH + 1];
     UNICODE_STRING UpcaseString;
     ULONG Length;
@@ -232,6 +236,14 @@ NpTranslateAlias(
     Length = PipeName->Length;
     if (Length == 0)
     {
+        return STATUS_SUCCESS;
+    }
+
+    if ((Length == 2 * sizeof(WCHAR)) &&
+        (PipeName->Buffer[0] == OBJ_NAME_PATH_SEPARATOR) &&
+        (PipeName->Buffer[1] == OBJ_NAME_PATH_SEPARATOR))
+    {
+        *PipeName = DoubleSlashName;
         return STATUS_SUCCESS;
     }
 
@@ -385,6 +397,9 @@ NpFsdCreate(IN PDEVICE_OBJECT DeviceObject,
 
     FsRtlEnterFileSystem();
     NpAcquireExclusiveVcb();
+
+    IoStatus.Status = NpTranslateAlias(&FileName);
+    if (!NT_SUCCESS(IoStatus.Status)) goto Quickie;
 
     if (RelatedFileObject)
     {
@@ -832,6 +847,10 @@ NpFsdCreateNamedPipe(IN PDEVICE_OBJECT DeviceObject,
     UNICODE_STRING Prefix;
     PNAMED_PIPE_CREATE_PARAMETERS Parameters;
     IO_STATUS_BLOCK IoStatus;
+    WCHAR AnonymousNameBuffer[] = L"\\$Anonymous00000000";
+    UNICODE_STRING AnonymousName;
+    ULONG AnonymousId, Index;
+    static const WCHAR HexDigits[] = L"0123456789abcdef";
     TRACE("Entered\n");
 
     InitializeListHead(&DeferredList);
@@ -852,9 +871,38 @@ NpFsdCreateNamedPipe(IN PDEVICE_OBJECT DeviceObject,
     FsRtlEnterFileSystem();
     NpAcquireExclusiveVcb();
 
+    IoStatus.Status = NpTranslateAlias(&FileName);
+    if (!NT_SUCCESS(IoStatus.Status)) goto Quickie;
+
     if (RelatedFileObject)
     {
         Fcb = (PNP_FCB)((ULONG_PTR)RelatedFileObject->FsContext & ~1);
+        if (Fcb &&
+            Fcb->NodeType == NPFS_NTC_ROOT_DCB &&
+            FileName.Length == 0)
+        {
+            AnonymousId = InterlockedIncrement(&NpAnonymousPipeId);
+            for (Index = 0; Index != 8; ++Index)
+            {
+                AnonymousNameBuffer[18 - Index] = HexDigits[AnonymousId & 0xf];
+                AnonymousId >>= 4;
+            }
+            RtlInitUnicodeString(&AnonymousName, AnonymousNameBuffer);
+            IoStatus.Status = NpCreateNewNamedPipe((PNP_DCB)Fcb,
+                                                   FileObject,
+                                                   AnonymousName,
+                                                   IoStack->Parameters.CreatePipe.
+                                                   SecurityContext->DesiredAccess,
+                                                   IoStack->Parameters.CreatePipe.
+                                                   SecurityContext->AccessState,
+                                                   Disposition,
+                                                   ShareAccess,
+                                                   Parameters,
+                                                   Process,
+                                                   &DeferredList,
+                                                   &IoStatus);
+            goto Quickie;
+        }
         if (!(Fcb) ||
             (Fcb->NodeType != NPFS_NTC_ROOT_DCB) ||
             (FileName.Length < sizeof(WCHAR)) ||

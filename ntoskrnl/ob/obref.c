@@ -574,7 +574,7 @@ ObReferenceObjectByHandle(IN HANDLE Handle,
                 /* Get the current process and granted access */
                 CurrentThread = PsGetCurrentThread();
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
-                GrantedAccess = CurrentThread->SpareUlong0;
+                GrantedAccess = THREAD_ALL_ACCESS;
 #else
                 GrantedAccess = CurrentThread->GrantedAccess;
 #endif

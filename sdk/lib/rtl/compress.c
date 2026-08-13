@@ -98,6 +98,7 @@ static NTSTATUS lznt1_decompress(UCHAR *dst, ULONG dst_size, UCHAR *src, ULONG s
     UCHAR *src_cur = src, *src_end = src + src_size;
     UCHAR *dst_cur = dst, *dst_end = dst + dst_size;
     ULONG chunk_size, block_size;
+    ULONG decompressed_size;
     WORD chunk_header;
     UCHAR *ptr;
 
@@ -121,13 +122,25 @@ static NTSTATUS lznt1_decompress(UCHAR *dst, ULONG dst_size, UCHAR *src, ULONG s
         offset  -= 0x1000;
     }
 
-    /* this chunk is can be included partially */
+    if (workspace && src_cur + sizeof(WORD) <= src_end &&
+        *(WORD *)src_cur && !(*(WORD *)src_cur & 0x8000))
+    {
+        return STATUS_BAD_COMPRESSION_BUFFER;
+    }
+
+    /* this chunk can be included partially */
     if (offset && src_cur + sizeof(WORD) <= src_end)
     {
         /* read chunk header and extract size */
         chunk_header = *(WORD *)src_cur;
         src_cur += sizeof(WORD);
-        if (!chunk_header) goto out;
+        if (!chunk_header)
+        {
+            block_size = min(0x1000 - offset, dst_end - dst_cur);
+            memset(dst_cur, 0, block_size);
+            dst_cur += block_size;
+            goto out;
+        }
         chunk_size = (chunk_header & 0xFFF) + 1;
 
         /* ensure we have enough buffer to process chunk */
@@ -143,10 +156,17 @@ static NTSTATUS lznt1_decompress(UCHAR *dst, ULONG dst_size, UCHAR *src, ULONG s
             if (!workspace) return STATUS_ACCESS_VIOLATION;
             ptr = lznt1_decompress_chunk(workspace, 0x1000, src_cur, chunk_size);
             if (!ptr) return STATUS_BAD_COMPRESSION_BUFFER;
-            if (ptr - workspace > offset)
+            decompressed_size = ptr - workspace;
+            if (decompressed_size > offset)
             {
-                block_size = min((ptr - workspace) - offset, dst_end - dst_cur);
+                block_size = min(decompressed_size - offset, dst_end - dst_cur);
                 memcpy(dst_cur, workspace + offset, block_size);
+                dst_cur += block_size;
+            }
+            else if (!decompressed_size || offset == 0xFFF)
+            {
+                block_size = min(0x1000 - offset, dst_end - dst_cur);
+                memset(dst_cur, 0, block_size);
                 dst_cur += block_size;
             }
         }
@@ -157,6 +177,12 @@ static NTSTATUS lznt1_decompress(UCHAR *dst, ULONG dst_size, UCHAR *src, ULONG s
             {
                 block_size = min(chunk_size - offset, dst_end - dst_cur);
                 memcpy(dst_cur, src_cur + offset, block_size);
+                dst_cur += block_size;
+            }
+            else if (offset == 0xFFF)
+            {
+                block_size = min(0x1000 - offset, dst_end - dst_cur);
+                memset(dst_cur, 0, block_size);
                 dst_cur += block_size;
             }
         }
