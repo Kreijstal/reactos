@@ -759,10 +759,18 @@ NpCommonFileSystemControl(IN PDEVICE_OBJECT DeviceObject,
     BOOLEAN Overflow = FALSE;
     LIST_ENTRY DeferredList;
     NTSTATUS Status;
+    NODE_TYPE_CODE FileType;
+    PNP_FCB DecodedFcb;
+    PNP_CCB DecodedCcb;
+    ULONG NamedPipeEnd;
     PAGED_CODE();
 
     InitializeListHead(&DeferredList);
     Fsctl = IoGetCurrentIrpStackLocation(Irp)->Parameters.FileSystemControl.FsControlCode;
+    FileType = NpDecodeFileObject(IoGetCurrentIrpStackLocation(Irp)->FileObject,
+                                  (PVOID *)&DecodedFcb,
+                                  &DecodedCcb,
+                                  &NamedPipeEnd);
 
     switch (Fsctl)
     {
@@ -804,7 +812,10 @@ NpCommonFileSystemControl(IN PDEVICE_OBJECT DeviceObject,
         case FSCTL_PIPE_ASSIGN_EVENT:
 
             NpAcquireExclusiveVcb();
-            Status = NpAssignEvent(DeviceObject, Irp);
+            if (FileType == NPFS_NTC_VCB || FileType == NPFS_NTC_ROOT_DCB)
+                Status = STATUS_NOT_SUPPORTED;
+            else
+                Status = NpAssignEvent(DeviceObject, Irp);
             break;
 
         case FSCTL_PIPE_DISCONNECT:
@@ -822,7 +833,10 @@ NpCommonFileSystemControl(IN PDEVICE_OBJECT DeviceObject,
         case FSCTL_PIPE_QUERY_EVENT:
 
             NpAcquireExclusiveVcb();
-            Status = NpQueryEvent(DeviceObject, Irp);
+            if (FileType == NPFS_NTC_VCB || FileType == NPFS_NTC_ROOT_DCB)
+                Status = STATUS_NOT_SUPPORTED;
+            else
+                Status = NpQueryEvent(DeviceObject, Irp);
             break;
 
         case FSCTL_PIPE_WAIT:
@@ -839,7 +853,18 @@ NpCommonFileSystemControl(IN PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_PIPE_SET_CLIENT_PROCESS:
             NpAcquireExclusiveVcb();
-            Status = NpSetClientProcess(DeviceObject, Irp);
+            if (FileType == NPFS_NTC_VCB || FileType == NPFS_NTC_ROOT_DCB)
+                Status = STATUS_NOT_SUPPORTED;
+            else
+                Status = NpSetClientProcess(DeviceObject, Irp);
+            break;
+
+        case FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE:
+            NpAcquireSharedVcb();
+            if (FileType == NPFS_NTC_VCB || FileType == NPFS_NTC_ROOT_DCB)
+                Status = STATUS_INVALID_PARAMETER;
+            else
+                Status = STATUS_NOT_SUPPORTED;
             break;
 
         default:
