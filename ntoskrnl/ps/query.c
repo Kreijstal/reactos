@@ -3835,12 +3835,26 @@ NtQueryInformationThread(
             }
 
             /* Reference the thread */
-            Status = ObReferenceObjectByHandle(ThreadHandle,
-                                               THREAD_QUERY_LIMITED_INFORMATION,
-                                               PsThreadType,
-                                               PreviousMode,
-                                               (PVOID*)&Thread,
-                                               NULL);
+            if ((ThreadHandle == NtCurrentThread()) ||
+                ((ULONG_PTR)ThreadHandle == (ULONG_PTR)(ULONG)-2))
+            {
+                Thread = PsGetCurrentThread();
+                ObReferenceObject(Thread);
+                Status = STATUS_SUCCESS;
+            }
+            else
+            {
+                Status = ObReferenceObjectByHandle(ThreadHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                                   THREAD_QUERY_LIMITED_INFORMATION,
+#else
+                                                   Access,
+#endif
+                                                   PsThreadType,
+                                                   PreviousMode,
+                                                   (PVOID*)&Thread,
+                                                   NULL);
+            }
             if (!NT_SUCCESS(Status))
                 break;
 
