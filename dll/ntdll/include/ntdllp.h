@@ -8,6 +8,9 @@
 
 #pragma once
 
+/* For the LdrResolveDelayLoadedAPI prototype below */
+#include <delayloadhandler.h>
+
 #define LDR_HASH_TABLE_ENTRIES 32
 #define LDR_GET_HASH_ENTRY(x) (RtlUpcaseUnicodeChar((x)) & (LDR_HASH_TABLE_ENTRIES - 1))
 
@@ -107,6 +110,17 @@ LdrpApplyFileNameRedirection(
     _Inout_opt_ PUNICODE_STRING DynamicString,
     _Inout_ PUNICODE_STRING *NewName,
     _Inout_ PBOOLEAN RedirectedDll);
+
+/* ldrapi.c */
+PVOID
+NTAPI
+LdrResolveDelayLoadedAPI(
+    _In_ PVOID ParentModuleBase,
+    _In_ PCIMAGE_DELAYLOAD_DESCRIPTOR DelayloadDescriptor,
+    _In_opt_ PDELAYLOAD_FAILURE_DLL_CALLBACK FailureDllHook,
+    _In_opt_ PDELAYLOAD_FAILURE_SYSTEM_ROUTINE FailureSystemHook,
+    _In_ PIMAGE_THUNK_DATA ThunkAddress,
+    _Reserved_ ULONG Flags);
 
 /* ldrutils.c */
 NTSTATUS
