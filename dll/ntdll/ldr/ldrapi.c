@@ -812,6 +812,145 @@ LdrGetProcedureAddressEx(
 
 /*
  * @implemented
+ *
+ * Snaps a single delay-load import. The C runtime's delay-load helper calls
+ * this (through kernel32!ResolveDelayLoadedAPI) the first time a delay-loaded
+ * function is used: it loads the target DLL if it is not resident yet, looks
+ * the procedure up, and writes it back into the delay-load IAT so that later
+ * calls go straight through.
+ *
+ * Note that only the RVA-based descriptor (IMAGE_DELAYLOAD_DESCRIPTOR) is
+ * supported, which is the only form the linker emits for this helper; the
+ * legacy ImgDelayDescr with absolute addresses is handled entirely inside the
+ * old __delayLoadHelper and never reaches us.
+ */
+PVOID
+NTAPI
+LdrResolveDelayLoadedAPI(
+    _In_ PVOID ParentModuleBase,
+    _In_ PCIMAGE_DELAYLOAD_DESCRIPTOR DelayloadDescriptor,
+    _In_opt_ PDELAYLOAD_FAILURE_DLL_CALLBACK FailureDllHook,
+    _In_opt_ PDELAYLOAD_FAILURE_SYSTEM_ROUTINE FailureSystemHook,
+    _In_ PIMAGE_THUNK_DATA ThunkAddress,
+    _Reserved_ ULONG Flags)
+{
+    PIMAGE_THUNK_DATA ImportAddressTable, ImportNameTable;
+    PIMAGE_IMPORT_BY_NAME ImportByName;
+    PVOID *ModuleHandle;
+    DELAYLOAD_INFO DelayloadInfo;
+    ANSI_STRING ProcedureName;
+    UNICODE_STRING DllName;
+    PVOID ProcedureAddress;
+    PCSTR TargetDllName;
+    ULONG_PTR OrdinalValue;
+    NTSTATUS Status;
+    ULONG Index;
+    BOOLEAN SnapByOrdinal;
+
+    UNREFERENCED_PARAMETER(Flags);
+
+    ModuleHandle = (PVOID *)((ULONG_PTR)ParentModuleBase + DelayloadDescriptor->ModuleHandleRVA);
+    ImportAddressTable = (PIMAGE_THUNK_DATA)((ULONG_PTR)ParentModuleBase +
+                                             DelayloadDescriptor->ImportAddressTableRVA);
+    ImportNameTable = (PIMAGE_THUNK_DATA)((ULONG_PTR)ParentModuleBase +
+                                          DelayloadDescriptor->ImportNameTableRVA);
+    TargetDllName = (PCSTR)((ULONG_PTR)ParentModuleBase + DelayloadDescriptor->DllNameRVA);
+
+    /* The thunk being resolved tells us which import of this descriptor it is */
+    Index = (ULONG)(ThunkAddress - ImportAddressTable);
+
+    OrdinalValue = (ULONG_PTR)ImportNameTable[Index].u1.Ordinal;
+    SnapByOrdinal = IMAGE_SNAP_BY_ORDINAL(OrdinalValue) ? TRUE : FALSE;
+    ImportByName = NULL;
+    if (!SnapByOrdinal)
+    {
+        ImportByName = (PIMAGE_IMPORT_BY_NAME)((ULONG_PTR)ParentModuleBase +
+                                               ImportNameTable[Index].u1.AddressOfData);
+    }
+
+    DPRINT("LdrResolveDelayLoadedAPI(%p, %p, %p, %p, %p, %lu) for %s\n",
+           ParentModuleBase, DelayloadDescriptor, FailureDllHook,
+           FailureSystemHook, ThunkAddress, Flags, TargetDllName);
+
+    /* Load the target DLL, unless a previous resolution already did */
+    if (*ModuleHandle == NULL)
+    {
+        if (!RtlCreateUnicodeStringFromAsciiz(&DllName, TargetDllName))
+        {
+            Status = STATUS_NO_MEMORY;
+            goto Failure;
+        }
+
+        Status = LdrLoadDll(NULL, NULL, &DllName, ModuleHandle);
+        RtlFreeUnicodeString(&DllName);
+        if (!NT_SUCCESS(Status)) goto Failure;
+    }
+
+    /* Now snap the procedure itself */
+    if (SnapByOrdinal)
+    {
+        Status = LdrGetProcedureAddress(*ModuleHandle,
+                                        NULL,
+                                        (ULONG)IMAGE_ORDINAL(OrdinalValue),
+                                        &ProcedureAddress);
+    }
+    else
+    {
+        RtlInitAnsiString(&ProcedureName, (PCSZ)ImportByName->Name);
+        Status = LdrGetProcedureAddress(*ModuleHandle, &ProcedureName, 0, &ProcedureAddress);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        /* Patch the IAT so that we are only called once per import */
+        ThunkAddress->u1.Function = (ULONG_PTR)ProcedureAddress;
+        return ProcedureAddress;
+    }
+
+Failure:
+    /* Let the image, then the system, have a say before we give up */
+    RtlZeroMemory(&DelayloadInfo, sizeof(DelayloadInfo));
+    DelayloadInfo.Size = sizeof(DelayloadInfo);
+    DelayloadInfo.DelayloadDescriptor = DelayloadDescriptor;
+    DelayloadInfo.ThunkAddress = ThunkAddress;
+    DelayloadInfo.TargetDllName = TargetDllName;
+    DelayloadInfo.TargetApiDescriptor.ImportDescribedByName = !SnapByOrdinal;
+    if (SnapByOrdinal)
+    {
+        DelayloadInfo.TargetApiDescriptor.Description.Ordinal = (ULONG)IMAGE_ORDINAL(OrdinalValue);
+    }
+    else
+    {
+        DelayloadInfo.TargetApiDescriptor.Description.Name = (LPCSTR)ImportByName->Name;
+    }
+    DelayloadInfo.TargetModuleBase = *ModuleHandle;
+    DelayloadInfo.Unused = NULL;
+    DelayloadInfo.LastError = Status;
+
+    if (FailureDllHook != NULL)
+    {
+        return FailureDllHook(DELAYLOAD_GPA_FAILURE, &DelayloadInfo);
+    }
+
+    if (FailureSystemHook != NULL)
+    {
+        if (SnapByOrdinal)
+        {
+            /* The legacy hook takes the ordinal in place of the name pointer */
+            return FailureSystemHook(TargetDllName, (LPCSTR)IMAGE_ORDINAL(OrdinalValue));
+        }
+
+        return FailureSystemHook(TargetDllName, (LPCSTR)ImportByName->Name);
+    }
+
+    DPRINT1("Failed to resolve delay-loaded import from %s, Status 0x%08lx\n",
+            TargetDllName, Status);
+    RtlRaiseStatus(Status);
+    return NULL;
+}
+
+/*
+ * @implemented
  */
 NTSTATUS
 NTAPI
