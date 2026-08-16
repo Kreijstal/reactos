@@ -211,7 +211,22 @@ USBSTOR_TimerRoutine(
     PERRORHANDLER_WORKITEM_DATA WorkItemData;
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Context;
-    DPRINT1("[USBSTOR] TimerRoutine entered\n");
+    DPRINT("[USBSTOR] TimerRoutine entered\n");
+
+    /*
+     * Stand down while the driver's own error recovery owns the device.
+     * USBSTOR_QueueResetPipe and USBSTOR_QueueResetDevice both hand work to the
+     * single ResetDeviceWorkItem, so a watchdog reset raised on top of an
+     * in-flight stall recovery would re-queue a live IO_WORKITEM and issue a
+     * second, concurrent reset to the same device.  A stalled transfer does
+     * complete its URB, so the stall path recovers on its own; this watchdog is
+     * only here for transfers the controller never completes at all.
+     */
+    if (FDODeviceExtension->Flags & USBSTOR_FDO_FLAGS_DEVICE_RESETTING)
+    {
+        FDODeviceExtension->LastTimerActiveSrb = NULL;
+        return;
+    }
     // DPRINT1("[USBSTOR] ActiveSrb %p ResetInProgress %x LastTimerActiveSrb %p\n", FDODeviceExtension->ActiveSrb, FDODeviceExtension->ResetInProgress, FDODeviceExtension->LastTimerActiveSrb);
 
     KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
@@ -221,20 +236,40 @@ USBSTOR_TimerRoutine(
     {
         if (FDODeviceExtension->LastTimerActiveSrb != NULL && FDODeviceExtension->LastTimerActiveSrb == FDODeviceExtension->ActiveSrb)
         {
-            // check if empty
-            DPRINT1("[USBSTOR] ActiveSrb %p hang detected\n", FDODeviceExtension->ActiveSrb);
-            ResetDevice = TRUE;
+            /*
+             * Time the request out against the SRB's own TimeOutValue rather
+             * than declaring a hang after two ticks.  A legitimately slow
+             * command -- a boot-time READ_10 against a cold device -- easily
+             * exceeds two seconds, and resetting the device underneath it
+             * aborts the command at the device while this driver goes on
+             * waiting for its data and status phases.  The bus is then wedged
+             * for good: the device wants a new CBW, the driver keeps reading
+             * the old transfer, and every retry stalls.
+             */
+            ULONG Timeout = FDODeviceExtension->ActiveSrb->TimeOutValue;
+
+            if (Timeout == 0)
+                Timeout = 10;
+
+            if (++FDODeviceExtension->TimerTicksOnActiveSrb >= Timeout)
+            {
+                DPRINT1("[USBSTOR] ActiveSrb %p timed out after %lu seconds\n",
+                        FDODeviceExtension->ActiveSrb, Timeout);
+                ResetDevice = TRUE;
+            }
         }
         else
         {
             // update pointer
             FDODeviceExtension->LastTimerActiveSrb = FDODeviceExtension->ActiveSrb;
+            FDODeviceExtension->TimerTicksOnActiveSrb = 0;
         }
     }
     else
     {
         // reset srb
         FDODeviceExtension->LastTimerActiveSrb = NULL;
+        FDODeviceExtension->TimerTicksOnActiveSrb = 0;
     }
 
     KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
