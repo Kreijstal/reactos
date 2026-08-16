@@ -70,6 +70,32 @@ USBSTOR_ResetPipeWithHandle(
     return Status;
 }
 
+NTSTATUS
+USBSTOR_AbortPipeWithHandle(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN USBD_PIPE_HANDLE PipeHandle)
+{
+    PURB Urb;
+    NTSTATUS Status;
+
+    Urb = (PURB)AllocateItem(NonPagedPool, sizeof(struct _URB_PIPE_REQUEST));
+    if (!Urb)
+    {
+        DPRINT1("OutofMemory!\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Urb->UrbPipeRequest.Hdr.Length = sizeof(struct _URB_PIPE_REQUEST);
+    Urb->UrbPipeRequest.Hdr.Function = URB_FUNCTION_ABORT_PIPE;
+    Urb->UrbPipeRequest.PipeHandle = PipeHandle;
+
+    Status = USBSTOR_SyncUrbRequest(DeviceObject, Urb);
+    DPRINT1("USBSTOR_AbortPipeWithHandle Status %x\n", Status);
+
+    FreeItem(Urb);
+    return Status;
+}
+
 VOID
 NTAPI
 USBSTOR_ResetPipeWorkItemRoutine(
@@ -174,28 +200,33 @@ USBSTOR_TimerWorkerRoutine(
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)WorkItemData->DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
 
-    // first perform a mass storage reset step 1 in 5.3.4 USB Mass Storage Bulk Only Specification
-    Status = USBSTOR_ResetDevice(FDODeviceExtension->LowerDeviceObject, FDODeviceExtension);
+    /*
+     * Abort the bulk pipes and stop there.
+     *
+     * The only thing this watchdog can do that the driver's own error handling
+     * cannot is unstick a transfer that never completes: no completion routine
+     * runs for it, so nothing else ever notices.  While it is outstanding the
+     * pipe belongs to it and every other request is refused with
+     * USBD_STATUS_ERROR_BUSY -- which is why resetting the device from here used
+     * to fail at its first step and accomplish nothing.
+     *
+     * Aborting completes the dead transfer back through its own completion
+     * routine with USBD_STATUS_CANCELED.  That reaches the existing reset
+     * recovery path, which fails the SRB, resets the device and restarts the
+     * queue.  Doing the reset here as well would race that path -- two resets
+     * against one device, both driving the shared ResetDeviceWorkItem.
+     */
+    Status = USBSTOR_AbortPipeWithHandle(FDODeviceExtension->LowerDeviceObject,
+                                         FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkInPipeIndex].PipeHandle);
     if (NT_SUCCESS(Status))
     {
-        // step 2 reset bulk in pipe section 5.3.4
-        Status = USBSTOR_ResetPipeWithHandle(FDODeviceExtension->LowerDeviceObject, FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkInPipeIndex].PipeHandle);
-        if (NT_SUCCESS(Status))
-        {
-            // finally reset bulk out pipe
-            Status = USBSTOR_ResetPipeWithHandle(FDODeviceExtension->LowerDeviceObject, FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkOutPipeIndex].PipeHandle);
-        }
+        USBSTOR_AbortPipeWithHandle(FDODeviceExtension->LowerDeviceObject,
+                                    FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkOutPipeIndex].PipeHandle);
     }
-    DPRINT1("Status %x\n", Status);
 
     // clear timer srb
     FDODeviceExtension->LastTimerActiveSrb = NULL;
-
-    // re-schedule request
-    //USBSTOR_HandleExecuteSCSI(WorkItemData->Context->PDODeviceExtension->Self, WorkItemData->Context->Irp, Context->RetryCount + 1);
-
-    // do not retry for the same packet again
-    FDODeviceExtension->TimerWorkQueueEnabled = FALSE;
+    FDODeviceExtension->TimerTicksOnActiveSrb = 0;
 
     ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
 }
