@@ -1639,6 +1639,221 @@ USBPORT_SynchronizeControllersStart(IN PDEVICE_OBJECT FdoDevice)
     DPRINT_TIMER("USBPORT_SynchronizeControllersStart: exit\n");
 }
 
+/*
+ * Report endpoints whose queue has stopped moving.
+ *
+ * A transfer that is never handed to the miniport produces no log line
+ * anywhere: the miniport cannot report what it was never given, the abort
+ * path walks an empty list, and the endpoint simply stops being serviced.
+ * That is the ASUS X550DP failure -- usbstor's watchdog fires every 11 s for
+ * the rest of the boot while usbport says nothing at all.
+ *
+ * Three separate latches can produce it and they are indistinguishable from
+ * the outside, so print all of them: Endpoint->LockCounter (leaked, so
+ * USBPORT_DpcHandler skips the endpoint forever), Endpoint->FlushPendingLock
+ * (leaked, so USBPORT_FlushPendingTransfers returns immediately forever), and
+ * StateLast/StateNext (parked in a state for which USBPORT_DmaEndpointWorker
+ * does nothing).  The transfer's own flags say which queue it is sitting in
+ * and whether it was ever submitted.
+ *
+ * An endpoint is reported only once its queue head has been unchanged for
+ * five seconds, which healthy traffic never manages, so a working boot stays
+ * silent without needing a cap tuned to it.
+ */
+#define USBPORT_STALL_WATCH_SLOTS    8
+#define USBPORT_STALL_WATCH_AGE      (5 * 10000000ULL)  /* 5 s */
+#define USBPORT_STALL_WATCH_REPEAT   (15 * 10000000ULL) /* re-report every 15 s */
+#define USBPORT_STALL_WATCH_MAX      24
+
+typedef struct _USBPORT_STALL_WATCH
+{
+    PUSBPORT_ENDPOINT Endpoint;
+    PVOID Head;
+    ULONGLONG FirstSeen;
+    ULONGLONG LastReported;
+} USBPORT_STALL_WATCH;
+
+static USBPORT_STALL_WATCH UsbPortStallWatch[USBPORT_STALL_WATCH_SLOTS];
+static ULONG UsbPortStallDumpsLeft = USBPORT_STALL_WATCH_MAX;
+
+static VOID
+NTAPI
+USBPORT_ReportStalledEndpoint(IN PUSBPORT_ENDPOINT Endpoint,
+                              IN ULONGLONG AgeMs)
+{
+    PUSBPORT_TRANSFER Transfer = NULL;
+    PLIST_ENTRY Entry;
+    ULONG TransferCount = 0;
+    ULONG PendingCount = 0;
+    ULONG Submitted = 0;
+
+    /* Never wait: this runs from the timer DPC purely to observe, and blocking
+     * behind the very lock a wedged endpoint may be holding would turn a
+     * diagnostic into a second bug. */
+    if (!KeTryToAcquireSpinLockAtDpcLevel(&Endpoint->EndpointSpinLock))
+    {
+        DPRINT1("USBPORT_EP[stalled]: ep=%p dev=%u addr=0x%02x EndpointSpinLock held; "
+                "state=%lu/%lu flags=0x%08lx lock=%ld flush=%ld age=%I64ums\n",
+                Endpoint,
+                Endpoint->EndpointProperties.DeviceAddress,
+                Endpoint->EndpointProperties.EndpointAddress,
+                Endpoint->StateLast, Endpoint->StateNext,
+                Endpoint->Flags, Endpoint->LockCounter,
+                Endpoint->FlushPendingLock, AgeMs);
+        return;
+    }
+
+    for (Entry = Endpoint->TransferList.Flink;
+         Entry != NULL && Entry != &Endpoint->TransferList && TransferCount < 64;
+         Entry = Entry->Flink)
+    {
+        PUSBPORT_TRANSFER Current = CONTAINING_RECORD(Entry,
+                                                      USBPORT_TRANSFER,
+                                                      TransferLink);
+        if (Transfer == NULL)
+            Transfer = Current;
+        if (Current->Flags & TRANSFER_FLAG_SUBMITED)
+            Submitted++;
+        TransferCount++;
+    }
+
+    for (Entry = Endpoint->PendingTransferList.Flink;
+         Entry != NULL && Entry != &Endpoint->PendingTransferList && PendingCount < 64;
+         Entry = Entry->Flink)
+    {
+        if (Transfer == NULL)
+            Transfer = CONTAINING_RECORD(Entry, USBPORT_TRANSFER, TransferLink);
+        PendingCount++;
+    }
+
+    DPRINT1("USBPORT_EP[stalled]: ep=%p dev=%u addr=0x%02x type=%lu state=%lu/%lu "
+            "flags=0x%08lx lock=%ld flush=%ld active=%lu(%lu submited) pending=%lu age=%I64ums\n",
+            Endpoint,
+            Endpoint->EndpointProperties.DeviceAddress,
+            Endpoint->EndpointProperties.EndpointAddress,
+            Endpoint->EndpointProperties.TransferType,
+            Endpoint->StateLast, Endpoint->StateNext,
+            Endpoint->Flags, Endpoint->LockCounter, Endpoint->FlushPendingLock,
+            TransferCount, Submitted, PendingCount, AgeMs);
+
+    if (Transfer != NULL)
+    {
+        DPRINT1("USBPORT_EP[stalled]: transfer=%p flags=0x%08lx usbdstatus=0x%08lx "
+                "urb=%p irp=%p mp=%p timeout=%lu\n",
+                Transfer, Transfer->Flags, Transfer->USBDStatus,
+                Transfer->Urb, Transfer->Irp, Transfer->MiniportTransfer,
+                Transfer->TimeOut);
+    }
+
+    KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);
+}
+
+VOID
+NTAPI
+USBPORT_StalledEndpointWatchdog(IN PDEVICE_OBJECT FdoDevice)
+{
+    PUSBPORT_DEVICE_EXTENSION FdoExtension;
+    PUSBPORT_ENDPOINT Endpoint;
+    PLIST_ENTRY Entry;
+    ULONGLONG Now;
+    ULONG i;
+
+    if (UsbPortStallDumpsLeft == 0)
+        return;
+
+    FdoExtension = FdoDevice->DeviceExtension;
+    Now = KeQueryInterruptTime();
+
+    KeAcquireSpinLockAtDpcLevel(&FdoExtension->EndpointListSpinLock);
+
+    for (Entry = FdoExtension->EndpointList.Flink;
+         Entry != NULL && Entry != &FdoExtension->EndpointList;
+         Entry = Endpoint->EndpointLink.Flink)
+    {
+        PVOID Head;
+        USBPORT_STALL_WATCH *Slot = NULL;
+        ULONGLONG Age;
+
+        Endpoint = CONTAINING_RECORD(Entry, USBPORT_ENDPOINT, EndpointLink);
+
+        if (Endpoint->Flags & ENDPOINT_FLAG_ROOTHUB_EP0)
+            continue;
+
+        /* Reading a list head under EndpointListSpinLock is safe; the queue
+         * itself is only walked once we own the endpoint lock. */
+        Head = IsListEmpty(&Endpoint->TransferList)
+             ? (IsListEmpty(&Endpoint->PendingTransferList)
+                ? NULL : Endpoint->PendingTransferList.Flink)
+             : Endpoint->TransferList.Flink;
+
+        for (i = 0; i < USBPORT_STALL_WATCH_SLOTS; i++)
+        {
+            if (UsbPortStallWatch[i].Endpoint == Endpoint)
+            {
+                Slot = &UsbPortStallWatch[i];
+                break;
+            }
+        }
+
+        if (Head == NULL)
+        {
+            if (Slot != NULL)
+                Slot->Endpoint = NULL;
+            continue;
+        }
+
+        if (Slot == NULL)
+        {
+            for (i = 0; i < USBPORT_STALL_WATCH_SLOTS; i++)
+            {
+                if (UsbPortStallWatch[i].Endpoint == NULL)
+                {
+                    Slot = &UsbPortStallWatch[i];
+                    break;
+                }
+            }
+            if (Slot == NULL)
+                continue;
+
+            Slot->Endpoint = Endpoint;
+            Slot->Head = Head;
+            Slot->FirstSeen = Now;
+            Slot->LastReported = 0;
+            continue;
+        }
+
+        if (Slot->Head != Head)
+        {
+            Slot->Head = Head;
+            Slot->FirstSeen = Now;
+            Slot->LastReported = 0;
+            continue;
+        }
+
+        Age = Now - Slot->FirstSeen;
+        if (Age < USBPORT_STALL_WATCH_AGE)
+            continue;
+
+        /* Keep reporting while the wedge lasts, but at a bounded rate.  The
+         * age must stay a true age, so the repeat interval is tracked
+         * separately rather than by moving FirstSeen forward. */
+        if (Slot->LastReported != 0 &&
+            (Now - Slot->LastReported) < USBPORT_STALL_WATCH_REPEAT)
+        {
+            continue;
+        }
+
+        Slot->LastReported = Now;
+        UsbPortStallDumpsLeft--;
+        USBPORT_ReportStalledEndpoint(Endpoint, Age / 10000);
+
+        if (UsbPortStallDumpsLeft == 0)
+            break;
+    }
+
+    KeReleaseSpinLockFromDpcLevel(&FdoExtension->EndpointListSpinLock);
+}
+
 VOID
 NTAPI
 USBPORT_TimerDpc(IN PRKDPC Dpc,
@@ -1705,6 +1920,10 @@ USBPORT_TimerDpc(IN PRKDPC Dpc,
     }
 
     USBPORT_IsrDpcHandler(FdoDevice, FALSE);
+
+    /* After the DPC handler, so an endpoint that was just serviced is not
+     * mistaken for a stalled one. */
+    USBPORT_StalledEndpointWatchdog(FdoDevice);
 
     DPRINT_TIMER("USBPORT_TimerDpc: USBPORT_TimeoutAllEndpoints UNIMPLEMENTED.\n");
     //USBPORT_TimeoutAllEndpoints(FdoDevice);
