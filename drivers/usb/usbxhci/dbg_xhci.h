@@ -95,6 +95,16 @@ typedef struct _XHCI_DBG_STATS
     volatile LONG Doorbells;
     volatile LONG TransferEventNoMatch;
 
+    /*
+     * Transfer events counted by completion code.  The last-event snapshot
+     * below only survives until the next event, which is useless for deciding
+     * whether an endpoint stalled once and recovered or is stalling on every
+     * retry -- the two look identical in a single sample.  Index by xHCI
+     * completion code; codes at or above the array bound land in the last slot.
+     */
+    volatile LONG EventsByCode[16];
+    volatile LONG StallEvents;
+
     /* Last bulk transfer handed to the controller. */
     ULONGLONG LastBulkTrbPA;
     ULONGLONG LastBulkTime;

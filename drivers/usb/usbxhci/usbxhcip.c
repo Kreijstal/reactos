@@ -1857,6 +1857,12 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     DPRINT("XHCI_ProcessTransferEvent: TRB=0x%I64x, Slot=%d, EP=%d, Code=%d, Length=%d\n",
             TrbPointer.QuadPart, SlotId, EndpointId, CompletionCode, TransferLength);
 
+    InterlockedIncrement(&XhciDbgStats.EventsByCode[
+        CompletionCode < RTL_NUMBER_OF(XhciDbgStats.EventsByCode) ?
+            CompletionCode : RTL_NUMBER_OF(XhciDbgStats.EventsByCode) - 1]);
+    if (CompletionCode == STALL_ERROR)
+        InterlockedIncrement(&XhciDbgStats.StallEvents);
+
     XhciDbgStats.LastEventTrbPA = (ULONGLONG)TrbPointer.QuadPart;
     XhciDbgStats.LastEventCode = CompletionCode;
     XhciDbgStats.LastEventSlot = SlotId;
