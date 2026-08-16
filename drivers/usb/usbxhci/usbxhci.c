@@ -1430,6 +1430,8 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
     if (XhciExtension == NULL || XhciEndpoint == NULL || XhciTransfer == NULL)
         return;
 
+    XHCI_DumpEndpointState(XhciExtension, XhciEndpoint, "abort");
+
     /* Forget the transfer before touching the controller.  USBPORT completes
      * and frees the USBPORT_TRANSFER as soon as we return, so the Stopped
      * event the controller posts for this TD must no longer match anything. */
@@ -1445,8 +1447,11 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
 
     if (SlotId == 0 || DCI == 0 || TrbCount == 0)
     {
-        DPRINT("XHCI_AbortTransfer: nothing to retire (slot %lu, DCI %lu, TRBs %lu)\n",
-               SlotId, DCI, TrbCount);
+        /* Not DPRINT: an abort that retires nothing leaves the controller
+         * owning TRBs USBPORT believes are gone, and the caller gets no other
+         * indication.  This file defines NDEBUG, so DPRINT would vanish. */
+        DPRINT1("XHCI_AbortTransfer: nothing to retire (slot %lu, DCI %lu, TRBs %lu)\n",
+                SlotId, DCI, TrbCount);
         return;
     }
 
@@ -1672,7 +1677,10 @@ XHCI_CheckController(IN PVOID xhciExtension)
     DPRINT("XHCI_CheckController: function initiated\n");
 
     if (XhciExtension)
+    {
         XHCI_ProcessEvent(XhciExtension);
+        XHCI_StalledTransferWatchdog(XhciExtension);
+    }
 }
 
 ULONG
@@ -1845,6 +1853,7 @@ XHCI_SetEndpointDataToggle(IN PVOID xhciExtension,
 
     DPRINT1("XHCI_SetEndpointDataToggle: recovering halted slot=%lu DCI=%lu\n",
             SlotId, DCI);
+    XHCI_DumpEndpointState(XhciExtension, XhciEndpoint, "halt");
 
     Status = XHCI_ResetEndpoint(XhciExtension, SlotId, DCI);
     if (Status != MP_STATUS_SUCCESS)
@@ -1865,6 +1874,7 @@ XHCI_SetEndpointDataToggle(IN PVOID xhciExtension,
         XhciEndpoint->EndpointStatus = USBPORT_ENDPOINT_RUN;
         DPRINT1("XHCI_SetEndpointDataToggle: recovered slot=%lu DCI=%lu dequeue=0x%I64x\n",
                 SlotId, DCI, DequeuePA.QuadPart);
+        XHCI_DumpEndpointState(XhciExtension, XhciEndpoint, "recovered");
     }
 }
 

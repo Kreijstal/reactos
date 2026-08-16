@@ -53,6 +53,7 @@ typedef struct _XHCI_PENDING_TRANSFER {
     PHYSICAL_ADDRESS CompletionTrb;    // TRB expected to generate the completion event
     ULONG TrbCount;                   // Number of TRBs that belong to the transfer TD
     ULONG RequestedLength;            // Original request length for proper transfer length calculation
+    ULONGLONG SubmitTime;             // KeQueryInterruptTime() when the TD was handed to the controller
     BOOLEAN InUse;
 } XHCI_PENDING_TRANSFER, *PXHCI_PENDING_TRANSFER;
 
@@ -226,6 +227,7 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
             g_PendingTransfers[i].TrbCount = TrbCount;
             g_PendingTransfers[i].CompletionTrb = TrbPointers[TrbCount - 1];
             g_PendingTransfers[i].RequestedLength = RequestedLength;
+            g_PendingTransfers[i].SubmitTime = KeQueryInterruptTime();
             g_PendingTransfers[i].InUse = TRUE;
             
             DPRINT("RegisterPendingTransfer: Registered transfer at index %d with %d TRBs, requested length %d\n", 
@@ -298,6 +300,172 @@ XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer)
     }
 
     return 0;
+}
+
+/*
+ * Endpoint state dump for transfers that never complete.
+ *
+ * A lost bulk IN produces silence, and the decisive question -- did the
+ * controller consume the TD and drop the event, or is it still parked in front
+ * of it? -- is answered by exactly one comparison: the hardware TR Dequeue
+ * Pointer in the endpoint context against the driver's own enqueue/dequeue
+ * pointers, taken together with the endpoint's EP State.  Everything printed
+ * here exists to make that comparison from a single log line, without an
+ * interactive debugger session on the failing machine.
+ *
+ * Uses DPRINT1 deliberately: this file defines NDEBUG, so DPRINT is compiled
+ * out and absence of a DPRINT line proves nothing about whether code ran.
+ * Callers rate-limit; nothing here is on a hot path.
+ */
+VOID
+NTAPI
+XHCI_DumpEndpointState(IN PXHCI_EXTENSION XhciExtension,
+                       IN PXHCI_ENDPOINT XhciEndpoint,
+                       IN PCSTR Tag)
+{
+    PXHCI_HC_RESOURCES HcResourcesVA;
+    PXHCI_ENDPOINT_CONTEXT EpContext;
+    PHYSICAL_ADDRESS EnqueuePA;
+    PHYSICAL_ADDRESS DequeuePA;
+    ULONGLONG HwDequeue;
+    ULONGLONG Erdp;
+    ULONGLONG Now;
+    ULONGLONG OldestSubmit;
+    ULONG PendingCount;
+    ULONG PendingTrbs;
+    ULONG AgeMs;
+    ULONG SlotId;
+    ULONG DCI;
+    ULONG UsbSts;
+    ULONG Iman;
+    ULONG i;
+
+    if (XhciExtension == NULL || XhciEndpoint == NULL)
+        return;
+
+    HcResourcesVA = (PXHCI_HC_RESOURCES)XhciExtension->HcResourcesVA;
+    if (HcResourcesVA == NULL)
+        return;
+
+    SlotId = *(PULONG)&XhciEndpoint->FirstTD;
+    if (SlotId == 0)
+        SlotId = XHCI_GetSlotForDeviceAddress(
+            XhciExtension,
+            XhciEndpoint->EndpointProperties.DeviceAddress);
+    DCI = XhciEndpoint->ContextIndex;
+
+    Now = KeQueryInterruptTime();
+    OldestSubmit = Now;
+    PendingCount = 0;
+    PendingTrbs = 0;
+    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
+    {
+        if (!g_PendingTransfers[i].InUse ||
+            g_PendingTransfers[i].XhciEndpoint != XhciEndpoint)
+        {
+            continue;
+        }
+        PendingCount++;
+        PendingTrbs += g_PendingTransfers[i].TrbCount;
+        if (g_PendingTransfers[i].SubmitTime < OldestSubmit)
+            OldestSubmit = g_PendingTransfers[i].SubmitTime;
+    }
+    AgeMs = (ULONG)((Now - OldestSubmit) / 10000);
+
+    EnqueuePA.QuadPart = 0;
+    DequeuePA.QuadPart = 0;
+    if (XhciEndpoint->TransferRing.enqueue_pointer)
+        EnqueuePA = MmGetPhysicalAddress(XhciEndpoint->TransferRing.enqueue_pointer);
+    if (XhciEndpoint->TransferRing.dequeue_pointer)
+        DequeuePA = MmGetPhysicalAddress(XhciEndpoint->TransferRing.dequeue_pointer);
+
+    DPRINT1("XHCI_EP[%s]: slot=%lu dci=%lu epstatus=%lu epstate=%lu "
+            "enq=0x%I64x deq=0x%I64x pcs=%u ccs=%u used=%lu pend=%lu(%lu trb) age=%lums\n",
+            Tag, SlotId, DCI,
+            XhciEndpoint->EndpointStatus, XhciEndpoint->EndpointState,
+            EnqueuePA.QuadPart, DequeuePA.QuadPart,
+            XhciEndpoint->TransferRing.ProducerCycleState,
+            XhciEndpoint->TransferRing.ConsumerCycleState,
+            XhciEndpoint->TransferRing.UsedTrbs,
+            PendingCount, PendingTrbs, AgeMs);
+
+    if (SlotId == 0 || SlotId > XHCI_MAX_SLOTS || DCI == 0 || DCI > 31)
+        return;
+
+    /* The controller writes the output device context in place, so the
+     * hardware's own view of the endpoint is readable without a physical
+     * memory read -- which ReactOS's KD does not implement. */
+    EpContext = &HcResourcesVA->OutputContexts[SlotId - 1].EndpointContextList[DCI - 1];
+    HwDequeue = EpContext->TRDeqPtr;
+
+    UsbSts = 0;
+    Iman = 0;
+    Erdp = 0;
+    if (XhciExtension->OperationalRegs)
+        UsbSts = READ_REGISTER_ULONG(XhciExtension->OperationalRegs + XHCI_USBSTS);
+    if (XhciExtension->RunTimeRegisterBase)
+    {
+        Iman = READ_REGISTER_ULONG(XhciExtension->RunTimeRegisterBase + XHCI_IMAN);
+        Erdp = (ULONGLONG)READ_REGISTER_ULONG(XhciExtension->RunTimeRegisterBase + XHCI_ERSTDP) |
+               ((ULONGLONG)READ_REGISTER_ULONG(XhciExtension->RunTimeRegisterBase + XHCI_ERSTDP + 1) << 32);
+    }
+
+    DPRINT1("XHCI_EP[%s]: hwdeq=0x%I64x dcs=%u hwstate=%lu cerr=%lu eptype=%lu mps=%lu "
+            "usbsts=0x%08lx iman=0x%08lx erdp=0x%I64x isr=%ld txev=%ld nomatch=%ld db=%ld sub=%ld\n",
+            Tag,
+            HwDequeue & ~((ULONGLONG)0xFULL), (ULONG)(HwDequeue & 1ULL),
+            EpContext->EPState, EpContext->CErr, EpContext->EPType,
+            EpContext->MaxPacketSize,
+            UsbSts, Iman, Erdp,
+            XhciDbgStats.IsrEntries, XhciDbgStats.TransferEvents,
+            XhciDbgStats.TransferEventNoMatch, XhciDbgStats.Doorbells,
+            XhciDbgStats.BulkSubmits);
+}
+
+/*
+ * Called from XHCI_CheckController, which USBPORT polls from its timer DPC and
+ * its worker thread.  Reports any transfer the controller has owned for too
+ * long -- the exact condition the ASUS X550DP hang produces, where the endpoint
+ * goes quiet after a run of stall recoveries and nothing further is ever
+ * reported.  Rate-limited and capped: DPRINT1 costs milliseconds per line.
+ */
+#define XHCI_STALL_WATCHDOG_AGE      (5 * 10000000ULL)   /* 5 s */
+#define XHCI_STALL_WATCHDOG_INTERVAL (5 * 10000000ULL)   /* 5 s between dumps */
+#define XHCI_STALL_WATCHDOG_MAX      24
+
+VOID
+NTAPI
+XHCI_StalledTransferWatchdog(IN PXHCI_EXTENSION XhciExtension)
+{
+    static ULONGLONG LastDumpTime = 0;
+    static ULONG DumpsRemaining = XHCI_STALL_WATCHDOG_MAX;
+    ULONGLONG Now;
+    ULONG i;
+
+    if (XhciExtension == NULL || DumpsRemaining == 0)
+        return;
+
+    Now = KeQueryInterruptTime();
+    if (LastDumpTime != 0 && (Now - LastDumpTime) < XHCI_STALL_WATCHDOG_INTERVAL)
+        return;
+
+    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
+    {
+        if (!g_PendingTransfers[i].InUse ||
+            g_PendingTransfers[i].XhciExtension != XhciExtension ||
+            (Now - g_PendingTransfers[i].SubmitTime) < XHCI_STALL_WATCHDOG_AGE)
+        {
+            continue;
+        }
+
+        LastDumpTime = Now;
+        DumpsRemaining--;
+        /* One endpoint per pass; a wedge repeats, so nothing is lost. */
+        XHCI_DumpEndpointState(XhciExtension,
+                               g_PendingTransfers[i].XhciEndpoint,
+                               "stalled");
+        return;
+    }
 }
 
 VOID

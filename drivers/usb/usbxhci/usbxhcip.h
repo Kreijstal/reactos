@@ -209,6 +209,16 @@ XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer);
 
 VOID
 NTAPI
+XHCI_DumpEndpointState(IN PXHCI_EXTENSION XhciExtension,
+                       IN PXHCI_ENDPOINT XhciEndpoint,
+                       IN PCSTR Tag);
+
+VOID
+NTAPI
+XHCI_StalledTransferWatchdog(IN PXHCI_EXTENSION XhciExtension);
+
+VOID
+NTAPI
 InitializeCommandTracking(VOID);
 
 VOID
