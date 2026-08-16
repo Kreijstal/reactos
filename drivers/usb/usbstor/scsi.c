@@ -261,6 +261,17 @@ ResetRecovery:
     USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
     USBSTOR_QueueResetDevice(FDODeviceExtension);
 
+    /*
+     * Release the started packet before the IRP is completed up the stack.
+     * Leaving that to USBSTOR_ResetDeviceWorkItemRoutine loses the race with
+     * the class driver's retry: the retry arrives while the reset is still
+     * running, takes ActiveSrb in USBSTOR_QueueAddIrp and is then swallowed by
+     * IoStartPacket, because the packet this routine just finished never
+     * released the device queue.  The work item's own USBSTOR_QueueNextRequest
+     * then sees ActiveSrb set and returns, and the retry never starts at all.
+     */
+    USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
+
     return STATUS_CONTINUE_COMPLETION;
 }
 
@@ -339,6 +350,9 @@ USBSTOR_DataCompletionRoutine(
 
         USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
         USBSTOR_QueueResetDevice(FDODeviceExtension);
+
+        /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
+        USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
 
         return STATUS_CONTINUE_COMPLETION;
     }
@@ -460,6 +474,9 @@ ResetRecovery:
 
     USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
     USBSTOR_QueueResetDevice(FDODeviceExtension);
+
+    /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
+    USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
 
     return STATUS_CONTINUE_COMPLETION;
 }
