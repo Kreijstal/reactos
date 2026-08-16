@@ -28,6 +28,12 @@
 
 /* Globals ****************************************************************************************/
 
+/*
+ * Read by the kernel debugger while the machine is wedged; see dbg_xhci.h.
+ * XHCI_InitializeHardware prints its address so it can be found without symbols.
+ */
+XHCI_DBG_STATS XhciDbgStats = { XHCI_DBG_STATS_SIGNATURE, XHCI_DBG_STATS_VERSION };
+
 typedef struct _XHCI_PENDING_COMMAND {
     XHCI_COMMAND_TYPE CommandType;
     PHYSICAL_ADDRESS TrbPointer;
@@ -376,11 +382,13 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
         DPRINT("XHCI_ProcessEvent: Processing TRB Type %d (0x%x)\n",
                TRBType, TRBType);
         EventsProcessed++;
-        
+        InterlockedIncrement(&XhciDbgStats.EventsProcessed);
+
         switch (TRBType)
         {
             case TRANSFER_EVENT:
                 DPRINT("XHCI_ProcessEvent: TRANSFER_EVENT\n");
+                InterlockedIncrement(&XhciDbgStats.TransferEvents);
                 XHCI_ProcessTransferEvent(XhciExtension, &eventTRB);
                 break;
             case COMMAND_COMPLETION_EVENT: 
@@ -389,10 +397,12 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
                 // The ProcessCommandCompletion function will handle the status appropriately
                 DPRINT("XHCI_ProcessEvent: COMMAND_COMPLETION_EVENT, completion code %i\n",
                        eventTRB.CommandCompletionTRB.CompletionCode);
+                InterlockedIncrement(&XhciDbgStats.CommandEvents);
                 XHCI_ProcessCommandCompletion(XhciExtension, &eventTRB);
                 break;
-            case PORT_STATUS_CHANGE_EVENT: 
+            case PORT_STATUS_CHANGE_EVENT:
                 DPRINT("XHCI_ProcessEvent: Port Status change event\n");
+                InterlockedIncrement(&XhciDbgStats.PortEvents);
                 /* Call a private function to handle port status events */
                 PXHCI_PortStatusChange(XhciExtension, eventTRB.PortStatusChangeTRB.PortID);
                 break;
@@ -989,6 +999,19 @@ XHCI_StartController(IN PVOID xhciExtension,
     RunTimeRegisterBase = (PULONG)((PBYTE)BaseIoAdress + RTSOffsetRegister.AsULONG);
     XhciExtension->RunTimeRegisterBase = RunTimeRegisterBase;
 
+    /*
+     * Publish the mapped register windows and the address of the statistics
+     * block.  The banner is the only way to locate XhciDbgStats from a debugger
+     * that has no symbols for this driver, so it is printed unconditionally.
+     */
+    XhciDbgStats.BaseIoAdress = BaseIoAdress;
+    XhciDbgStats.OperationalRegs = OperationalRegs;
+    XhciDbgStats.DoorBellRegisterBase = DoorBellRegisterBase;
+    XhciDbgStats.RunTimeRegisterBase = RunTimeRegisterBase;
+    DPRINT1("XHCI_DBG: stats %p cap %p op %p rt %p db %p\n",
+            &XhciDbgStats, BaseIoAdress, OperationalRegs,
+            RunTimeRegisterBase, DoorBellRegisterBase);
+
     PageSizeReg.AsULONG =  READ_REGISTER_ULONG(OperationalRegs + XHCI_PGSZ);
     XhciExtension->PageSize = PageSizeReg.PageSize;
     HCSPARAMS2.AsULONG = READ_REGISTER_ULONG(BaseIoAdress + XHCI_HCSP2);
@@ -1163,10 +1186,16 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     // Read interrupt status and USB status
     Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
     UsbStatus.AsULONG = READ_REGISTER_ULONG(OperationalRegs + XHCI_USBSTS);
-    
+
+    InterlockedIncrement(&XhciDbgStats.IsrEntries);
+    XhciDbgStats.LastIsrIman = Iman.AsULONG;
+    XhciDbgStats.LastIsrUsbSts = UsbStatus.AsULONG;
+    XhciDbgStats.LastIsrTime = KeQueryInterruptTime();
+
     // First check: Is this definitely an xHCI interrupt?
     if (Iman.InterruptPending == 1)
     {
+        InterlockedIncrement(&XhciDbgStats.IsrClaimedIman);
         /*
          * Acknowledge the interrupter in the ISR.  The event ring entries are
          * persistent until the DPC advances ERDP, but leaving IMAN.IP asserted
@@ -1185,6 +1214,8 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     {
         // Create a copy to clear the status bits
         XHCI_USB_STATUS UsbStatusClear;
+
+        InterlockedIncrement(&XhciDbgStats.IsrClaimedUsbSts);
         UsbStatusClear.AsULONG = 0; // Clear all first
         
         // Set bits to 1 for the ones we want to clear (write-1-to-clear)
@@ -1201,6 +1232,7 @@ XHCI_InterruptService(IN PVOID xhciExtension)
     }
 
     // Don't disable our interrupts - just return FALSE to indicate this interrupt wasn't ours
+    InterlockedIncrement(&XhciDbgStats.IsrDeclined);
     return FALSE;
 }
 
@@ -1220,7 +1252,8 @@ XHCI_InterruptDpc(IN PVOID xhciExtension,
     OperationalRegs = XhciExtension->OperationalRegs;
     
     DPRINT("XHCI_InterruptDpc: Called with IsDoEnableInterrupts=%d\n", IsDoEnableInterrupts);
-    
+    InterlockedIncrement(&XhciDbgStats.DpcEntries);
+
     // Read current interrupt status
     Iman.AsULONG = READ_REGISTER_ULONG(RunTimeRegisterBase + XHCI_IMAN);
     DPRINT("XHCI_InterruptDpc: Current IMAN=0x%08x, InterruptPending=%d\n", 
