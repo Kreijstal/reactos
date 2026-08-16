@@ -1572,7 +1572,12 @@ XHCI_RingDoorbell(IN PXHCI_EXTENSION XhciExtension,
     
     // Ring the doorbell
     WRITE_REGISTER_ULONG(DoorBellRegisterBase, DoorbellValue.AsULONG);
-    
+
+    InterlockedIncrement(&XhciDbgStats.Doorbells);
+    XhciDbgStats.LastDoorbellSlot = SlotId;
+    XhciDbgStats.LastDoorbellTarget = EndpointIndex;
+    XhciDbgStats.LastDoorbellTime = KeQueryInterruptTime();
+
     DPRINT("XHCI_RingDoorbell: Doorbell rung successfully\n");
     return MP_STATUS_SUCCESS;
 }
@@ -1682,6 +1687,13 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
     }
 
     KeMemoryBarrier();
+
+    InterlockedIncrement(&XhciDbgStats.BulkSubmits);
+    XhciDbgStats.LastBulkTrbPA = (TrbCount > 0) ? (ULONGLONG)TrbPointers[0].QuadPart : 0ULL;
+    XhciDbgStats.LastBulkLength = TransferLength;
+    XhciDbgStats.LastBulkSlot = SlotId;
+    XhciDbgStats.LastBulkDci = ContextIndex;
+    XhciDbgStats.LastBulkTime = KeQueryInterruptTime();
 
     // Ring doorbell to notify the controller (using the endpoint's context index)
     DPRINT("XHCI_SubmitBulkTransfer: About to ring doorbell for slot %d, endpoint %d\n", SlotId, ContextIndex);
@@ -1844,7 +1856,14 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     
     DPRINT("XHCI_ProcessTransferEvent: TRB=0x%I64x, Slot=%d, EP=%d, Code=%d, Length=%d\n",
             TrbPointer.QuadPart, SlotId, EndpointId, CompletionCode, TransferLength);
-    
+
+    XhciDbgStats.LastEventTrbPA = (ULONGLONG)TrbPointer.QuadPart;
+    XhciDbgStats.LastEventCode = CompletionCode;
+    XhciDbgStats.LastEventSlot = SlotId;
+    XhciDbgStats.LastEventEp = EndpointId;
+    XhciDbgStats.LastEventLength = TransferLength;
+    XhciDbgStats.LastEventTime = KeQueryInterruptTime();
+
     // Check for slot ID mismatches - this may indicate a problem with device context setup
     if (SlotId == 0) {
         DPRINT("XHCI_ProcessTransferEvent: WARNING - Transfer event reports slot ID 0, this may indicate a controller issue\n");
@@ -1936,6 +1955,7 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     }
     else
     {
+        InterlockedIncrement(&XhciDbgStats.TransferEventNoMatch);
         DPRINT("XHCI_ProcessTransferEvent: No pending transfer found for TRB 0x%I64x\n", TrbPointer.QuadPart);
     }
 }
