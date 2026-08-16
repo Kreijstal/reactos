@@ -363,6 +363,10 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     RunTimeRegisterBase = XhciExtension-> RunTimeRegisterBase;
     dequeue_pointer = HcResourcesVA-> EventRing.dequeue_pointer;
 
+    /* Replay anything an abort had to hold back.  No-op unless an abort is
+     * actually in flight, and never runs while one is on the stack. */
+    XHCI_DrainDeferredTransferEvents(XhciExtension);
+
     while (TRUE)
     {
         if (EventsProcessed >= 256)
@@ -1400,7 +1404,103 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
                    IN PVOID xhciTransfer,
                    IN PULONG CompletedLength)
 {
-    DPRINT1("XHCI_AbortTransfer: function initiated\n");
+    PXHCI_EXTENSION XhciExtension = (PXHCI_EXTENSION)xhciExtension;
+    PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)xhciEndpoint;
+    PXHCI_TRANSFER XhciTransfer = (PXHCI_TRANSFER)xhciTransfer;
+    PXHCI_RING TransferRing;
+    PHYSICAL_ADDRESS DequeuePA;
+    ULONG SlotId;
+    ULONG DCI;
+    ULONG TrbCount;
+    ULONG ix;
+
+    /*
+     * This used to do nothing at all, which made aborting a pipe useless: the
+     * URB was completed as cancelled in software while the controller still
+     * owned the transfer's TRBs.  Anything queued afterwards sat behind a TD
+     * that could never retire, so a device that lost one transfer stayed dead
+     * even though the driver believed it had recovered.
+     */
+
+    /* USBPORT reports the cancelled URB with this length; nothing of the
+     * aborted TD is known to have reached the buffer. */
+    if (CompletedLength != NULL)
+        *CompletedLength = 0;
+
+    if (XhciExtension == NULL || XhciEndpoint == NULL || XhciTransfer == NULL)
+        return;
+
+    /* Forget the transfer before touching the controller.  USBPORT completes
+     * and frees the USBPORT_TRANSFER as soon as we return, so the Stopped
+     * event the controller posts for this TD must no longer match anything. */
+    TrbCount = XHCI_ForgetPendingTransfer(XhciTransfer);
+
+    SlotId = *(PULONG)&XhciEndpoint->FirstTD;
+    if (SlotId == 0)
+        SlotId = XHCI_GetSlotForDeviceAddress(
+            XhciExtension,
+            XhciEndpoint->EndpointProperties.DeviceAddress);
+
+    DCI = XhciEndpoint->ContextIndex;
+
+    if (SlotId == 0 || DCI == 0 || TrbCount == 0)
+    {
+        DPRINT("XHCI_AbortTransfer: nothing to retire (slot %lu, DCI %lu, TRBs %lu)\n",
+               SlotId, DCI, TrbCount);
+        return;
+    }
+
+    /*
+     * USBPORT calls us from USBPORT_DmaEndpointPaused, which is walking
+     * Endpoint->TransferList with EndpointSpinLock and MiniportSpinLock held.
+     * Stopping the endpoint makes the controller post a transfer event for the
+     * TD being retired, and completing that event inline would unlink and free
+     * the very list entry USBPORT is about to unlink itself.  Hold transfer
+     * events back for the duration of the abort.
+     */
+    XHCI_BeginTransferEventDeferral();
+
+    XHCI_StopEndpoint(XhciExtension, SlotId, DCI);
+
+    /* Retire the TD by moving the dequeue pointer past exactly its TRBs, the
+     * same way a normal completion advances the ring.  TDs queued behind it
+     * are preserved. */
+    TransferRing = &XhciEndpoint->TransferRing;
+
+    for (ix = 0; ix < TrbCount; ix++)
+    {
+        PXHCI_TRB NewDequeue = TransferRing->dequeue_pointer + 1;
+
+        if (NewDequeue >= &TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX])
+        {
+            NewDequeue = &TransferRing->firstSeg.XhciTrb[0];
+            TransferRing->ConsumerCycleState =
+                TransferRing->ConsumerCycleState ? 0 : 1;
+        }
+
+        TransferRing->dequeue_pointer = NewDequeue;
+
+        if (TransferRing->UsedTrbs != 0)
+            TransferRing->UsedTrbs--;
+    }
+
+    DequeuePA = MmGetPhysicalAddress(TransferRing->dequeue_pointer);
+
+    if (XHCI_SetTransferRingDequeuePointer(XhciExtension,
+                                           SlotId,
+                                           DCI,
+                                           DequeuePA,
+                                           TransferRing->ConsumerCycleState) != MP_STATUS_SUCCESS)
+    {
+        /* Leave the endpoint marked so XHCI_SetEndpointState retries the
+         * restart when USBPORT takes it out of the paused state. */
+        XhciEndpoint->EndpointStatus = USBPORT_ENDPOINT_HALT;
+    }
+
+    XHCI_EndTransferEventDeferral();
+
+    DPRINT("XHCI_AbortTransfer: retired %lu TRBs on slot %lu DCI %lu, dequeue 0x%I64x\n",
+           TrbCount, SlotId, DCI, DequeuePA.QuadPart);
 }
 
 ULONG
