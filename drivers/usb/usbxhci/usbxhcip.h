@@ -23,6 +23,7 @@ typedef enum {
     COMMAND_DROP_ENDPOINT,
     COMMAND_RESET_ENDPOINT,
     COMMAND_SET_TR_DEQUEUE_POINTER,
+    COMMAND_STOP_ENDPOINT,
     COMMAND_UNKNOWN
 } XHCI_COMMAND_TYPE;
 
@@ -181,7 +182,30 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
                      IN ULONG TransferLength,
                      IN ULONG USBDStatus);
 
+/*
+ * Transfer events must not be handed back to USBPORT while a miniport entry
+ * point that USBPORT called from the middle of its own transfer-list walk is
+ * still on the stack.  These bracket such a window; events seen inside it are
+ * queued and replayed by XHCI_DrainDeferredTransferEvents on the next pass
+ * over the event ring made from a re-entrant-safe context.
+ */
+VOID
+NTAPI
+XHCI_BeginTransferEventDeferral(VOID);
+
+VOID
+NTAPI
+XHCI_EndTransferEventDeferral(VOID);
+
+VOID
+NTAPI
+XHCI_DrainDeferredTransferEvents(IN PXHCI_EXTENSION XhciExtension);
+
 /* Command and transfer tracking functions *************************************************************/
+
+ULONG
+NTAPI
+XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer);
 
 VOID
 NTAPI
@@ -276,6 +300,12 @@ XHCI_SetTransferRingDequeuePointer(IN PXHCI_EXTENSION XhciExtension,
                                    IN ULONG EndpointIndex,
                                    IN PHYSICAL_ADDRESS DequeuePointer,
                                    IN ULONG CycleState);
+
+MPSTATUS
+NTAPI
+XHCI_StopEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                  IN ULONG SlotId,
+                  IN ULONG EndpointIndex);
 
 MPSTATUS
 NTAPI

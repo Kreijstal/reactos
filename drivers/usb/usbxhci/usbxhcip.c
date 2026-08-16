@@ -59,6 +59,14 @@ typedef struct _XHCI_PENDING_TRANSFER {
 static XHCI_PENDING_TRANSFER g_PendingTransfers[MAX_PENDING_TRANSFERS];
 static BOOLEAN g_TransferTrackingInitialized = FALSE;
 
+/* Transfer events held back while an abort drives the controller from inside
+ * a USBPORT callback.  See XHCI_BeginTransferEventDeferral. */
+#define MAX_DEFERRED_TRANSFER_EVENTS 32
+
+static XHCI_EVENT_TRB g_DeferredTransferEvents[MAX_DEFERRED_TRANSFER_EVENTS];
+static ULONG g_DeferredTransferEventCount = 0;
+static BOOLEAN g_DeferTransferEvents = FALSE;
+
 static VOID
 XHCI_BuildControlTransferTrbs(
     IN PUSB_DEFAULT_PIPE_SETUP_PACKET SetupPacket,
@@ -262,6 +270,67 @@ UnregisterPendingTransfer(IN PXHCI_PENDING_TRANSFER PendingTransfer)
         RtlZeroMemory(PendingTransfer, sizeof(XHCI_PENDING_TRANSFER));
         PendingTransfer->InUse = FALSE;
     }
+}
+
+/*
+ * Drop the miniport's record of a transfer without completing it, returning
+ * the number of transfer ring TRBs its TD occupies (0 if it was not tracked).
+ * Used by XHCI_AbortTransfer: USBPORT completes the URB itself, so a late
+ * transfer event for the retired TD must not find a match and be routed into
+ * a USBPORT_TRANSFER that has already been freed.
+ */
+ULONG
+NTAPI
+XHCI_ForgetPendingTransfer(IN PXHCI_TRANSFER XhciTransfer)
+{
+    ULONG i;
+    ULONG TrbCount;
+
+    for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
+    {
+        if (g_PendingTransfers[i].InUse &&
+            g_PendingTransfers[i].XhciTransfer == XhciTransfer)
+        {
+            TrbCount = g_PendingTransfers[i].TrbCount;
+            UnregisterPendingTransfer(&g_PendingTransfers[i]);
+            return TrbCount;
+        }
+    }
+
+    return 0;
+}
+
+VOID
+NTAPI
+XHCI_BeginTransferEventDeferral(VOID)
+{
+    g_DeferTransferEvents = TRUE;
+}
+
+VOID
+NTAPI
+XHCI_EndTransferEventDeferral(VOID)
+{
+    g_DeferTransferEvents = FALSE;
+}
+
+VOID
+NTAPI
+XHCI_DrainDeferredTransferEvents(IN PXHCI_EXTENSION XhciExtension)
+{
+    XHCI_EVENT_TRB Events[MAX_DEFERRED_TRANSFER_EVENTS];
+    ULONG Count;
+    ULONG i;
+
+    if (g_DeferTransferEvents || g_DeferredTransferEventCount == 0)
+        return;
+
+    Count = g_DeferredTransferEventCount;
+    RtlCopyMemory(Events, g_DeferredTransferEvents, Count * sizeof(XHCI_EVENT_TRB));
+    g_DeferredTransferEventCount = 0;
+
+    for (i = 0; i < Count; i++)
+        XHCI_ProcessTransferEvent(XhciExtension, &Events[i]);
 }
 
 // Command tracking helper functions
@@ -1845,7 +1914,20 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     ULONG CompletionCode, TransferLength, SlotId, EndpointId;
     
     DPRINT("XHCI_ProcessTransferEvent: Processing transfer completion event\n");
-    
+
+    if (g_DeferTransferEvents)
+    {
+        if (g_DeferredTransferEventCount < MAX_DEFERRED_TRANSFER_EVENTS)
+        {
+            g_DeferredTransferEvents[g_DeferredTransferEventCount++] = *EventTrb;
+        }
+        else
+        {
+            DPRINT1("XHCI_ProcessTransferEvent: deferred event queue full, event lost\n");
+        }
+        return;
+    }
+
     // Extract event data
     TrbPointer.LowPart = EventTrb->TransferEventTRB.TRBPtrLo;
     TrbPointer.HighPart = EventTrb->TransferEventTRB.TRBPtrHi;
@@ -2176,6 +2258,72 @@ WaitForCommandCompletion(IN PXHCI_EXTENSION XhciExtension,
     
     DPRINT1("WaitForCommandCompletion: Command timed out after %dms\n", TimeoutMs);
     return MP_STATUS_FAILURE;
+}
+
+MPSTATUS
+NTAPI
+XHCI_StopEndpoint(IN PXHCI_EXTENSION XhciExtension,
+                  IN ULONG SlotId,
+                  IN ULONG EndpointIndex)
+{
+    PXHCI_HC_RESOURCES HcResourcesVA;
+    PHYSICAL_ADDRESS HcResourcesPA;
+    PHYSICAL_ADDRESS TrbPA;
+    PXHCI_PENDING_COMMAND PendingCommand;
+    PXHCI_TRB EnqueuePointer;
+    XHCI_TRB StopEndpointTrb;
+    ULONG TrbIndex;
+    MPSTATUS Status;
+
+    if (XhciExtension == NULL || SlotId == 0 || SlotId > XHCI_MAX_SLOTS ||
+        EndpointIndex == 0 || EndpointIndex > 31)
+    {
+        DPRINT1("XHCI_StopEndpoint: invalid slot %lu or DCI %lu\n",
+                SlotId, EndpointIndex);
+        return MP_STATUS_FAILURE;
+    }
+
+    HcResourcesVA = XhciExtension->HcResourcesVA;
+    HcResourcesPA = XhciExtension->HcResourcesPA;
+    if (HcResourcesVA == NULL)
+        return MP_STATUS_FAILURE;
+
+    RtlZeroMemory(&StopEndpointTrb, sizeof(StopEndpointTrb));
+    StopEndpointTrb.GenericTRB.Word3 =
+        (STOP_ENDPOINT_COMMAND << 10) |
+        (EndpointIndex << 16) |
+        (SlotId << 24) |
+        1;
+
+    EnqueuePointer = HcResourcesVA->CommandRing.enqueue_pointer;
+    TrbIndex = (ULONG)(EnqueuePointer -
+                       &HcResourcesVA->CommandRing.firstSeg.XhciTrb[0]);
+    TrbPA.QuadPart =
+        HcResourcesPA.QuadPart +
+        FIELD_OFFSET(XHCI_HC_RESOURCES, CommandRing.firstSeg.XhciTrb[0]) +
+        TrbIndex * sizeof(XHCI_TRB);
+
+    PendingCommand = AddPendingCommand(COMMAND_STOP_ENDPOINT, TrbPA, SlotId);
+    if (PendingCommand == NULL)
+        return MP_STATUS_FAILURE;
+
+    Status = XHCI_SendCommand(StopEndpointTrb, XhciExtension);
+    if (Status == MP_STATUS_SUCCESS)
+    {
+        /* Callers run at DISPATCH_LEVEL holding USBPORT's miniport lock, so
+         * the wait busy-stalls.  A Stop Endpoint retires in microseconds;
+         * keep the ceiling short rather than spinning for a full second. */
+        Status = WaitForCommandCompletion(XhciExtension, PendingCommand, 100);
+    }
+
+    RemovePendingCommand(PendingCommand);
+    if (Status != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("XHCI_StopEndpoint: command failed for slot=%lu DCI=%lu status=0x%x\n",
+                SlotId, EndpointIndex, Status);
+    }
+
+    return Status;
 }
 
 MPSTATUS
