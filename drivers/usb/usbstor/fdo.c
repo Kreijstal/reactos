@@ -281,7 +281,16 @@ USBSTOR_FdoHandleStartDevice(
     }
 #endif
 
-    //IoStartTimer(DeviceObject);
+    /*
+     * Arm the hung-SRB watchdog.  USBSTOR_TimerRoutine has existed since 2012
+     * but was never activated, and TimerWorkQueueEnabled was never set anywhere,
+     * so both guarded recovery paths in error.c were dead code.  Without this a
+     * bulk transfer that the host controller never completes hangs the SRB
+     * forever: the 10 second SRB TimeOutValue is never examined, no pipe reset
+     * is attempted, and a boot-time volume mount waits on it indefinitely.
+     */
+    DeviceExtension->TimerWorkQueueEnabled = TRUE;
+    IoStartTimer(DeviceObject);
 
     DPRINT("USBSTOR_FdoHandleStartDevice FDO is initialized\n");
     return STATUS_SUCCESS;
