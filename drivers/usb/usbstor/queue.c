@@ -348,14 +348,29 @@ USBSTOR_StartIo(
 
     if (ResetInProgress)
     {
-        // hard reset is in progress
-        Request->SrbStatus = SRB_STATUS_NO_DEVICE;
-        Request->DataTransferLength = 0;
-        Irp->IoStatus.Information = 0;
-        Irp->IoStatus.Status = STATUS_DEVICE_DOES_NOT_EXIST;
-        USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        USBSTOR_QueueNextRequest(DeviceObject);
+        /*
+         * A reset is in flight.  Reporting SRB_STATUS_NO_DEVICE here fails the
+         * request for a device that is merely being recovered -- and the
+         * retry that follows a reset-recovery completion regularly lands in
+         * exactly this window.  Park the request on the driver's own queue
+         * instead; the reset work item restarts it through
+         * USBSTOR_QueueNextRequest once the device is usable again.
+         */
+        KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
+
+        if (FDODeviceExtension->ActiveSrb == Request)
+            FDODeviceExtension->ActiveSrb = NULL;
+
+        InsertHeadList(&FDODeviceExtension->IrpListHead, &Irp->Tail.Overlay.ListEntry);
+
+        KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
+
+        IoAcquireCancelSpinLock(&OldLevel);
+        IoSetCancelRoutine(Irp, USBSTOR_Cancel);
+        IoReleaseCancelSpinLock(OldLevel);
+
+        /* Keep the device queue busy: USBSTOR_QueueNextRequest owns it until
+         * the driver has no work left, and releases it there. */
         return;
     }
 
