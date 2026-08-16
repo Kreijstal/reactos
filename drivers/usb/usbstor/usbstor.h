@@ -140,6 +140,7 @@ typedef struct
     PSCSI_REQUEST_BLOCK ActiveSrb;                                                       // stores the current active SRB
     KEVENT NoPendingRequests;                                                            // set if no pending or in progress requests
     PSCSI_REQUEST_BLOCK LastTimerActiveSrb;                                              // last timer tick active srb
+    ULONG TimerTicksOnActiveSrb;                                                         // 1 second ticks the active srb has been outstanding
     ULONG SrbErrorHandlingActive;                                                        // error handling of srb is activated
     ULONG TimerWorkQueueEnabled;                                                         // timer work queue enabled
     ULONG InstanceCount;                                                                 // pdo instance count
