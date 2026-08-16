@@ -32,6 +32,34 @@
 
 #include <debug.h>
 
+/*
+ * Wine's sync.c refers to the legacy LPC type names.  ReactOS's NDK exposes the
+ * modern PORT_MESSAGE name instead and has no PORT_SECTION_READ/WRITE at all,
+ * and <wine/winternl.h> (which does declare them) is not part of this module's
+ * include set.  Provide the legacy aliases here rather than diverging the Wine
+ * source.  They appear only in wow64_NtAcceptConnectPort, which is an
+ * unimplemented stub that merely prints the pointers, so these names exist to
+ * satisfy the declarations.  Layouts match <wine/winternl.h>.
+ */
+typedef PORT_MESSAGE LPC_MESSAGE, *PLPC_MESSAGE;
+
+typedef struct _LPC_SECTION_WRITE
+{
+    ULONG Length;
+    HANDLE SectionHandle;
+    ULONG SectionOffset;
+    ULONG ViewSize;
+    PVOID ViewBase;
+    PVOID TargetViewBase;
+} LPC_SECTION_WRITE, *PLPC_SECTION_WRITE;
+
+typedef struct _LPC_SECTION_READ
+{
+    ULONG Length;
+    ULONG ViewSize;
+    PVOID ViewBase;
+} LPC_SECTION_READ, *PLPC_SECTION_READ;
+
 #define WOW64_TLS_CPURESERVED      1
 #define WOW64_TLS_TEMPLIST         3
 #define WOW64_TLS_USERCALLBACKDATA 5
