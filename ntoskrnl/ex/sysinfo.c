@@ -2642,28 +2642,6 @@ QSI_DEF(SystemEmulationProcessorInformation)
     return STATUS_SUCCESS;
 }
 
-/* Class 83 - Processor Idle Cycle Time Information */
-QSI_DEF(SystemProcessorIdleCycleTimeInformation)
-{
-    PULONGLONG IdleCycles = Buffer;
-    ULONG i;
-
-    *ReqSize = KeNumberProcessors * sizeof(*IdleCycles);
-    if (Size < *ReqSize)
-    {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    for (i = 0; i < KeNumberProcessors; ++i)
-    {
-        PKPRCB Prcb = KiProcessorBlock[i];
-        IdleCycles[i] = (Prcb != NULL && Prcb->IdleThread != NULL) ?
-                        Prcb->IdleThread->CycleTime : 0;
-    }
-
-    return STATUS_SUCCESS;
-}
-
 /* Class 64 - Extended handle information */
 QSI_DEF(SystemExtendedHandleInformation)
 {
@@ -3217,7 +3195,9 @@ QSI_DEF(SystemProcessorIdleCycleTimeInformation)
     for (ProcessorIndex = 0; ProcessorIndex < KeNumberProcessors; ++ProcessorIndex)
     {
         Prcb = KiProcessorBlock[ProcessorIndex];
-        Info[ProcessorIndex].CycleTime = KeQueryTotalCycleTimeThread(Prcb->IdleThread, NULL);
+        Info[ProcessorIndex].CycleTime =
+            (Prcb != NULL && Prcb->IdleThread != NULL) ?
+            KeQueryTotalCycleTimeThread(Prcb->IdleThread, NULL) : 0;
     }
 
     return STATUS_SUCCESS;
