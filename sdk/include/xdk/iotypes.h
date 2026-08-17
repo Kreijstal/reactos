@@ -2740,6 +2740,14 @@ typedef struct _IO_RESOURCE_DESCRIPTOR {
       ULONG MinimumChannel;
       ULONG MaximumChannel;
     } Dma;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    struct {
+      ULONG RequestLine;
+      ULONG Reserved;
+      ULONG Channel;
+      ULONG TransferWidth;
+    } DmaV3;
+#endif
     struct {
       ULONG Length;
       ULONG Alignment;
