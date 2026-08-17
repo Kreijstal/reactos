@@ -14,6 +14,12 @@
 #include "inbv/logo.h"
 #include "inbv/inbvgop.h"
 
+#define NDEBUG
+#include <debug.h>
+
+/* Boot-time (POST) display discovery helpers, shared with bootvid */
+#include <drivers/bootvid/framebuf.c>
+
 /* GLOBALS *******************************************************************/
 
 /*
@@ -194,6 +200,67 @@ InbvQueryBgrtInfo(
     return TRUE;
 }
 
+/**
+ * @brief
+ * Derives the GOP framebuffer description from the loader ARC hardware tree.
+ *
+ * The loader does not fill LOADER_PARAMETER_EXTENSION::GopFramebuffer: freeldr
+ * publishes the firmware framebuffer as a DisplayController component carrying
+ * CM_FRAMEBUF_DEVICE_DATA (see uefihw.c!DetectDisplayController), which is the
+ * same description bootvid itself consumes. Without this, InbvGopInfoValid is
+ * never set on any UEFI machine, so InbvGetGopFrameBufferInfo() always reports
+ * "no framebuffer" even while bootvid is happily drawing on it - which silently
+ * disables the GOP boot logo and makes uefifb synthesise an off-screen RAM
+ * surface, i.e. a black screen from the moment win32k takes over the display.
+ */
+CODE_SEG("INIT")
+static
+VOID
+InbvInitGopInfoFromArcTree(VOID)
+{
+    PHYSICAL_ADDRESS VramAddress;
+    ULONG VramSize;
+    CM_FRAMEBUF_DEVICE_DATA VideoData;
+
+    RtlZeroMemory(&VideoData, sizeof(VideoData));
+    if (!NT_SUCCESS(FindBootDisplay(&VramAddress,
+                                    &VramSize,
+                                    &VideoData,
+                                    NULL,  // MonitorConfigData
+                                    NULL,  // Interface
+                                    NULL))) // BusNumber
+    {
+        return;
+    }
+
+    /* Consumers divide by these, and treat a zero as "no framebuffer" */
+    if ((VideoData.ScreenWidth == 0) || (VideoData.ScreenHeight == 0) ||
+        (VideoData.PixelsPerScanLine == 0) || (VideoData.BitsPerPixel == 0) ||
+        (VideoData.FrameBufferOffset >= VramSize))
+    {
+        return;
+    }
+
+    RtlZeroMemory(&InbvGopFramebuffer, sizeof(InbvGopFramebuffer));
+    InbvGopFramebuffer.FrameBufferBase.QuadPart =
+        VramAddress.QuadPart + VideoData.FrameBufferOffset;
+    InbvGopFramebuffer.FrameBufferSize = VramSize - VideoData.FrameBufferOffset;
+    InbvGopFramebuffer.HorizontalResolution = VideoData.ScreenWidth;
+    InbvGopFramebuffer.VerticalResolution = VideoData.ScreenHeight;
+    InbvGopFramebuffer.PixelsPerScanLine = VideoData.PixelsPerScanLine;
+    /*
+     * PixelFormat carries a bit depth, not a UEFI EFI_GRAPHICS_PIXEL_FORMAT:
+     * that is what the loader computes for the handoff (uefivid.c) and what
+     * every consumer divides by 8 to get its bytes-per-pixel.
+     */
+    InbvGopFramebuffer.PixelFormat = VideoData.BitsPerPixel;
+    InbvGopFramebuffer.RedMask = VideoData.PixelMasks.RedMask;
+    InbvGopFramebuffer.GreenMask = VideoData.PixelMasks.GreenMask;
+    InbvGopFramebuffer.BlueMask = VideoData.PixelMasks.BlueMask;
+    InbvGopFramebuffer.Reserved = VideoData.PixelMasks.ReservedMask;
+    InbvGopInfoValid = TRUE;
+}
+
 CODE_SEG("INIT")
 BOOLEAN
 NTAPI
@@ -211,32 +278,10 @@ InbvDriverInitialize(
 
     Extension = LoaderBlock->Extension;
 
-    /* Initialize the lock and check the current display state */
-    KeInitializeSpinLock(&BootDriverLock);
-    if (InbvDisplayState == INBV_DISPLAY_STATE_OWNED)
-    {
-        /* Reset the video mode in case we do not have a custom boot logo */
-        CommandLine = (LoaderBlock->LoadOptions ? _strupr(LoaderBlock->LoadOptions) : NULL);
-        ResetMode   = (CommandLine == NULL) || (strstr(CommandLine, "BOOTLOGO") == NULL);
-
-        /*
-         * On UEFI, the firmware BGRT image is already present in the GOP
-         * framebuffer at kernel handoff. Resetting the boot display here
-         * clears that framebuffer before the UEFI logo path can draw.
-         */
-#if (NTDDI_VERSION < NTDDI_WIN8)
-        if (Extension && Extension->BootViaEFI)
-#else
-        if (Extension &&
-            Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer) &&
-            Extension->GopFramebuffer.FrameBufferBase.QuadPart != 0 &&
-            Extension->GopFramebuffer.FrameBufferSize != 0)
-#endif
-        {
-            ResetMode = FALSE;
-        }
-    }
-
+    /*
+     * Establish the framebuffer description first: the display-state decision
+     * below and every later InbvGetGopFrameBufferInfo() caller depend on it.
+     */
     if (Extension &&
         Extension->Size >= RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer))
     {
@@ -257,6 +302,34 @@ InbvDriverInitialize(
                           &Extension->BgrtInfo,
                           sizeof(InbvBgrtInfo));
             InbvBgrtInfoValid = TRUE;
+        }
+    }
+
+    /* The loader hands the framebuffer over through the ARC tree rather than
+     * the extension, so that is where the description really comes from */
+    if (!InbvGopInfoValid)
+        InbvInitGopInfoFromArcTree();
+
+    /* Initialize the lock and check the current display state */
+    KeInitializeSpinLock(&BootDriverLock);
+    if (InbvDisplayState == INBV_DISPLAY_STATE_OWNED)
+    {
+        /* Reset the video mode in case we do not have a custom boot logo */
+        CommandLine = (LoaderBlock->LoadOptions ? _strupr(LoaderBlock->LoadOptions) : NULL);
+        ResetMode   = (CommandLine == NULL) || (strstr(CommandLine, "BOOTLOGO") == NULL);
+
+        /*
+         * On UEFI, the firmware BGRT image is already present in the GOP
+         * framebuffer at kernel handoff. Resetting the boot display here
+         * clears that framebuffer before the UEFI logo path can draw.
+         */
+#if (NTDDI_VERSION < NTDDI_WIN8)
+        if (Extension && Extension->BootViaEFI)
+#else
+        if (InbvGopInfoValid)
+#endif
+        {
+            ResetMode = FALSE;
         }
     }
 
