@@ -741,9 +741,12 @@ ReadInode:
     //             = inode * SectsPerMFT / SectsPerCluster
     mov   cx, word ptr [SectsPerMFT]
     movzx ecx, cx
-    mul   ecx                              // EAX = inode * SectsPerMFT (sector offset in MFT)
-    movzx eax, ax                          // Truncate to 16 bits
-    xor   edx, edx
+    mul   ecx                              // EDX:EAX = inode * SectsPerMFT (sector offset in MFT)
+    // NOTE: Do NOT truncate the product. Truncating it to 16 bits limited this
+    // routine to inodes below 65536 / SectsPerMFT (32768 with the usual
+    // 1 KB records and 512-byte sectors): any file whose MFT record number was
+    // above that read a *wrong* record, so a boot file that got reallocated to
+    // a high record could no longer be loaded.
     mov   cl, byte ptr [SectsPerCluster]
     movzx ecx, cx
     div   ecx                              // EAX = VCN, EDX = sector offset within cluster
