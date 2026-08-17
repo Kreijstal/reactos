@@ -1779,7 +1779,7 @@ NtQueryObject(IN HANDLE ObjectHandle,
             /* Information about all types */
             case ObjectTypesInformation:
             {
-                POBJECT_ALL_TYPES_INFORMATION AllTypesInfo;
+                POBJECT_TYPES_INFORMATION AllTypesInfo;
                 POBJECT_HEADER_CREATOR_INFO CreatorInfo;
                 POBJECT_HEADER TypeHeader;
                 POBJECT_TYPE CurrentType;
@@ -1787,7 +1787,7 @@ NtQueryObject(IN HANDLE ObjectHandle,
                 ULONG NumberOfTypes = 0;
                 ULONG CurrentLength;
 
-                AllTypesInfo = (POBJECT_ALL_TYPES_INFORMATION)ObjectInformation;
+                AllTypesInfo = (POBJECT_TYPES_INFORMATION)ObjectInformation;
                 InfoLength = ALIGN_UP(sizeof(*AllTypesInfo), ULONG_PTR);
 
                 ObpEnterObjectTypeMutex(ObpTypeObjectType);
