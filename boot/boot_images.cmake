@@ -198,7 +198,12 @@ add_custom_target(bootcdregtest
     DEPENDS ${ISOHYBRID_DEPENDS} native-mkisofs
     VERBATIM)
 
-## LiveImage -- Constitutes a small RAMDISK ISO, and is also merged with the BootCD
+## LiveImage -- the LiveCD file set.  No ISO is produced from it: liveimg.iso
+## was built with no El Torito entry at all, so it was never bootable, and its
+## only consumer (the RAMDISK graft into the BootCD) is disabled.  The file set
+## itself is still very much live -- create_iso_lists() appends it to both the
+## BootCD and kmtestcd lists -- and the 'livecd' target remains as the
+## dependency aggregator those images and add_cd_file() hang their deps on.
 # Create the file list
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "${CMAKE_CURRENT_BINARY_DIR}/empty\n")
 # Create TEMP directory
@@ -214,12 +219,7 @@ add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "Profiles" "D
 # ISO9660 lookup can no longer find config\system (hive load failure).
 add_user_profile_dirs(${CMAKE_CURRENT_BINARY_DIR}/livecd.cmake.lst "reactos/system32/config" "SystemProfile")
 
-add_custom_target(livecd
-    COMMAND native-mkisofs -quiet -o ${REACTOS_BINARY_DIR}/liveimg.iso
-        ${ISO_COMMON_OPTIONS} ${ISO_LAYOUT_OPTIONS}
-        -path-list ${CMAKE_CURRENT_BINARY_DIR}/livecd.$<CONFIG>.lst
-    DEPENDS native-mkisofs
-    VERBATIM)
+add_custom_target(livecd)
 
 ## KmtestCD -- Headless kernel-test bootable. Boots into kmtestrunner.exe via
 ## BootExecute, runs kmtest drivers, writes results to COM1, and terminates
