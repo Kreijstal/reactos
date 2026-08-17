@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-import secrets
+import hashlib
 import json
+import os
+import secrets
 import socket
 import struct
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, TextIO
+from typing import Callable, Iterable, Iterator, TextIO
 
 from .protocol import (
     KD_INITIAL_ID,
@@ -51,6 +54,8 @@ DBGKD_SET_CONTEXT_API = 0x3133
 DBGKD_WRITE_BREAKPOINT_API = 0x3134
 DBGKD_RESTORE_BREAKPOINT_API = 0x3135
 DBGKD_CONTINUE_API = 0x3136
+DBGKD_READ_IO_SPACE_API = 0x3139
+DBGKD_WRITE_IO_SPACE_API = 0x313A
 DBGKD_READ_PHYSICAL_MEMORY_API = 0x313D
 DBGKD_WRITE_PHYSICAL_MEMORY_API = 0x313E
 DBGKD_GET_VERSION_API = 0x3146
@@ -68,6 +73,10 @@ CONTEXT_AMD64_ALL = 0x0010003F
 
 class KdTimeout(TimeoutError):
     """The target did not produce the expected KD packet in time."""
+
+
+class KdSessionChanged(Exception):
+    """A new KDNET target session replaced the active one."""
 
 
 class KdRequestError(RuntimeError):
@@ -246,12 +255,16 @@ class KdNetClient:
         *,
         log: Path | str | TextIO | None = None,
         event_callback: EventCallback | None = None,
+        session_state: Path | str | None = None,
     ):
         self.host = host
         self.target = target
         self.port = port
         self.crypto = KdNetCrypto(key)
         self.event_callback = event_callback
+        self._session_state_path = (
+            Path(session_state) if session_state is not None else None
+        )
         self.socket: socket.socket | None = None
         self.version_number = 1
         self.outer_send_sequence = 1
@@ -266,6 +279,9 @@ class KdNetClient:
         self.version: KdVersion | None = None
         self.stopped = False
         self._manual_break_stop = False
+        self._operation_deadline: float | None = None
+        self._request_in_flight = False
+        self.last_harvest_complete: bool | None = None
         self._owns_log = False
         self._log: TextIO | None = None
         if isinstance(log, (str, Path)):
@@ -273,6 +289,7 @@ class KdNetClient:
             self._owns_log = True
         elif log is not None:
             self._log = log
+        self._load_session_state()
 
     def __enter__(self) -> "KdNetClient":
         return self
@@ -313,6 +330,76 @@ class KdNetClient:
             self._log.write(f"[{self._timestamp()}] {kind}: {value}\n")
         self._log.flush()
 
+    def _load_session_state(self) -> None:
+        path = self._session_state_path
+        if path is None or not path.exists():
+            return
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if saved.get("format") != 1:
+                raise ValueError("unsupported format")
+            client_key = bytes.fromhex(saved["client_key"])
+            host_key = bytes.fromhex(saved["host_key"])
+            version = saved["version"]
+            if len(client_key) != 32 or len(host_key) != 32:
+                raise ValueError("keys must be 32 bytes")
+            if isinstance(version, bool) or not isinstance(version, int):
+                raise ValueError("version must be an integer")
+            if not 0 <= version <= 0xFF:
+                raise ValueError("version is outside the byte range")
+            self.crypto.build_response(client_key, host_key)
+        except (KeyError, OSError, TypeError, ValueError, ProtocolError) as error:
+            self._emit("warning", f"ignored KDNET session state {path}: {error}")
+            return
+
+        self.client_key = client_key
+        self.host_key = host_key
+        self.version_number = version
+        fingerprint = hashlib.sha256(client_key).hexdigest()
+        self._emit(
+            "session-state",
+            f"restored client_key_sha256={fingerprint}",
+        )
+
+    def _persist_session_state(self) -> None:
+        path = getattr(self, "_session_state_path", None)
+        if path is None or self.client_key is None or self.host_key is None:
+            return
+
+        saved = {
+            "format": 1,
+            "version": self.version_number,
+            "client_key": self.client_key.hex(),
+            "host_key": self.host_key.hex(),
+        }
+        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary, flags, 0o600)
+            try:
+                os.fchmod(descriptor, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    descriptor = -1
+                    stream.write(json.dumps(saved, sort_keys=True) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        except OSError as error:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            self._emit("warning", f"could not save KDNET session state {path}: {error}")
+
     def _open_socket(self) -> None:
         if self.socket is not None:
             return
@@ -348,6 +435,8 @@ class KdNetClient:
         if len(payload) != 34 or payload[:2] != b"\x01\x01":
             raise ProtocolError("invalid KDNET control poke")
         client_key = payload[2:]
+        client_key_sha256 = hashlib.sha256(client_key).hexdigest()
+        had_session = self.client_key is not None
         new_session = client_key != self.client_key
         if new_session:
             self.client_key = client_key
@@ -362,11 +451,20 @@ class KdNetClient:
             self.version = None
             self.stopped = False
             self._manual_break_stop = False
+            self._request_in_flight = False
+            self.last_harvest_complete = None
         assert self.host_key is not None
         self.version_number = version
         response = self.crypto.build_response(client_key, self.host_key)
+        self._persist_session_state()
         self._send_outer(response, KDNET_TYPE_CONTROL, sequence=sequence)
-        self._emit("handshake", "new target session" if new_session else "poke retry")
+        handshake = "new target session" if new_session else "poke retry"
+        handshake += f" client_key_sha256={client_key_sha256}"
+        if new_session and had_session:
+            self._emit("session-change", "new target replaced active KDNET session")
+            self._emit("handshake", handshake)
+            raise KdSessionChanged("new target replaced active KDNET session")
+        self._emit("handshake", handshake)
 
     def _receive_inner(self, timeout: float) -> KdPacket:
         if self.socket is None:
@@ -453,6 +551,18 @@ class KdNetClient:
         response = struct.pack("<II", 0x3430, STATUS_NO_SUCH_FILE) + bytes(56)
         self._send_inner_data(KD_TYPE_FILE_IO, response)
 
+    @contextmanager
+    def operation_deadline(self, deadline: float | None) -> Iterator[None]:
+        previous = getattr(self, "_operation_deadline", None)
+        if deadline is None or previous is None:
+            self._operation_deadline = deadline if deadline is not None else previous
+        else:
+            self._operation_deadline = min(previous, deadline)
+        try:
+            yield
+        finally:
+            self._operation_deadline = previous
+
     def _wait_for(
         self,
         expected_types: Iterable[int],
@@ -460,6 +570,9 @@ class KdNetClient:
     ) -> KdPacket:
         expected = set(expected_types)
         deadline = time.monotonic() + timeout
+        operation_deadline = getattr(self, "_operation_deadline", None)
+        if operation_deadline is not None:
+            deadline = min(deadline, operation_deadline)
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -498,21 +611,51 @@ class KdNetClient:
     def connect(self, timeout: float = 300.0) -> KdStateChange:
         self._open_socket()
         deadline = time.monotonic() + timeout
-        initial: KdPacket | None = None
-        while initial is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise KdTimeout("target did not initiate KDNET")
-            packet = self._receive_inner(remaining)
-            if packet.packet_type == KD_TYPE_UNUSED:
-                initial = packet
-        self._send_outer(b"b", KDNET_TYPE_DATA)
-        state_packet = self._wait_for(
-            (KD_TYPE_STATE_CHANGE64,), max(1.0, deadline - time.monotonic())
+        resuming = (
+            self.client_key is not None
+            and self.host_key is not None
+            and self.crypto.data_key is not None
         )
+        if resuming:
+            fingerprint = hashlib.sha256(self.client_key).hexdigest()
+            self._emit(
+                "handshake",
+                f"resuming target session client_key_sha256={fingerprint}",
+            )
+            self._send_outer(b"b", KDNET_TYPE_DATA)
+            first = self._wait_for(
+                (KD_TYPE_UNUSED, KD_TYPE_STATE_CHANGE64),
+                max(1.0, deadline - time.monotonic()),
+            )
+            if first.packet_type == KD_TYPE_STATE_CHANGE64:
+                state_packet = first
+            else:
+                self._send_outer(b"b", KDNET_TYPE_DATA)
+                state_packet = self._wait_for(
+                    (KD_TYPE_STATE_CHANGE64,),
+                    max(1.0, deadline - time.monotonic()),
+                )
+        else:
+            initial: KdPacket | None = None
+            while initial is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise KdTimeout("target did not initiate KDNET")
+                packet = self._receive_inner(remaining)
+                if packet.packet_type == KD_TYPE_UNUSED:
+                    initial = packet
+            self._send_outer(b"b", KDNET_TYPE_DATA)
+            state_packet = self._wait_for(
+                (KD_TYPE_STATE_CHANGE64,),
+                max(1.0, deadline - time.monotonic()),
+            )
         self.inner_send_id = KD_INITIAL_ID ^ 1
         state = self._record_state(state_packet)
         self.stopped = True
+        # Both fresh and persisted connects stop the target with a raw KD break
+        # byte. AMD64 reports RIP on the synthetic int3 and must advance it once
+        # before the first Continue, just like break_in().
+        self._manual_break_stop = True
         self.version = self.get_version()
         self._emit("version", self.version)
         return state
@@ -568,20 +711,58 @@ class KdNetClient:
     ) -> bytes:
         if not self.stopped:
             raise RuntimeError("KD manipulate requests require a stopped target")
+        if self._request_in_flight:
+            raise RuntimeError("a previous KD manipulate response is still pending")
         payload = self._build_manipulate(api, union, processor=processor) + data
-        self._send_inner_data(KD_TYPE_STATE_MANIPULATE, payload)
-        self._wait_for((KD_TYPE_ACKNOWLEDGE,), timeout)
-        response = self._wait_for((KD_TYPE_STATE_MANIPULATE,), timeout)
-        if len(response.payload) < KD_MANIPULATE_SIZE:
-            raise ProtocolError("truncated KD manipulate response")
-        response_api, status = struct.unpack_from("<IxxxxI", response.payload)
-        if response_api != api:
-            raise ProtocolError(
-                f"KD response API 0x{response_api:x} does not match 0x{api:x}"
-            )
-        if status != STATUS_SUCCESS:
-            raise KdRequestError(api, status)
+        self._request_in_flight = True
+        try:
+            self._send_inner_data(KD_TYPE_STATE_MANIPULATE, payload)
+            self._wait_for((KD_TYPE_ACKNOWLEDGE,), timeout)
+            response = self._wait_for((KD_TYPE_STATE_MANIPULATE,), timeout)
+            if len(response.payload) < KD_MANIPULATE_SIZE:
+                raise ProtocolError("truncated KD manipulate response")
+            response_api, status = struct.unpack_from("<IxxxxI", response.payload)
+            if response_api != api:
+                raise ProtocolError(
+                    f"KD response API 0x{response_api:x} does not match 0x{api:x}"
+                )
+            if status != STATUS_SUCCESS:
+                raise KdRequestError(api, status)
+        except KdTimeout:
+            # A late response may still arrive.  The caller must drain it before
+            # issuing an unrelated manipulate request such as Continue.
+            raise
+        except Exception:
+            self._request_in_flight = False
+            raise
+        self._request_in_flight = False
         return response.payload
+
+    def drain_pending_request(self, timeout: float = 5.0) -> None:
+        if not getattr(self, "_request_in_flight", False):
+            return
+        self._wait_for((KD_TYPE_STATE_MANIPULATE,), timeout)
+        self._request_in_flight = False
+
+    def poll_idle(self, timeout: float = 0.5) -> None:
+        """Service the KDNET socket while no request is outstanding.
+
+        A target announces a reboot with a KDNET poke, and KdSessionChanged is
+        raised from handling that poke -- which only happens inside a receive.
+        So any caller that waits on something *other* than the socket, such as
+        a REPL waiting for its next command, must call this while it waits.
+        Otherwise a target that reboots during the wait is invisible: nothing
+        reads the socket, the reconnect never runs, and the handshake packets
+        simply accumulate in the receive buffer.
+
+        Waits for a packet type that can never arrive, so every packet is
+        dispatched the usual way -- pokes raise, debug and file I/O are logged
+        -- and nothing is treated as a reply.
+        """
+        try:
+            self._wait_for((), timeout)
+        except KdTimeout:
+            pass
 
     def get_version(self) -> KdVersion:
         payload = self._request(DBGKD_GET_VERSION_API)
@@ -650,12 +831,15 @@ class KdNetClient:
         self._manual_break_stop = False
 
     def continue_execution(self) -> None:
+        self.drain_pending_request()
         self._prepare_manual_break_resume()
         union = struct.pack("<II", DBG_CONTINUE, 0x400)
         payload = self._build_manipulate(DBGKD_CONTINUE_API, union)
         self._send_inner_data(KD_TYPE_STATE_MANIPULATE, payload)
-        self._wait_for((KD_TYPE_ACKNOWLEDGE,))
+        # Once Continue is on the wire, a missing ACK is ambiguous: the target
+        # may already be running.  Never issue a duplicate Continue on retry.
         self.stopped = False
+        self._wait_for((KD_TYPE_ACKNOWLEDGE,))
 
     def wait_for_stop(
         self,
@@ -710,6 +894,36 @@ class KdNetClient:
 
     def write_physical(self, address: int, data: bytes) -> int:
         return self._write_memory(DBGKD_WRITE_PHYSICAL_MEMORY_API, address, data)
+
+    @staticmethod
+    def _validate_io_size(size: int) -> None:
+        if size not in (1, 2, 4):
+            raise ValueError("I/O size must be 1, 2, or 4 bytes")
+
+    def read_io(self, address: int, size: int) -> int:
+        self._validate_io_size(size)
+        response = self._request(
+            DBGKD_READ_IO_SPACE_API,
+            struct.pack("<QII", address, size, 0),
+        )
+        _, actual_size, value = struct.unpack_from("<QII", response, 16)
+        if actual_size != size:
+            raise ProtocolError(
+                f"short I/O read at 0x{address:x}: requested {size}, "
+                f"received {actual_size}"
+            )
+        return value & ((1 << (size * 8)) - 1)
+
+    def write_io(self, address: int, size: int, value: int) -> int:
+        self._validate_io_size(size)
+        if value < 0 or value >= 1 << (size * 8):
+            raise ValueError(f"I/O value does not fit in {size} byte(s)")
+        response = self._request(
+            DBGKD_WRITE_IO_SPACE_API,
+            struct.pack("<QII", address, size, value),
+        )
+        _, actual_size, _ = struct.unpack_from("<QII", response, 16)
+        return actual_size
 
     def _write_memory(self, api: int, address: int, data: bytes) -> int:
         written = 0
@@ -915,6 +1129,23 @@ class KdNetClient:
         stack_size: int = 0x4000,
         object_size: int = 0x1000,
         walk_modules: bool = False,
+        deadline: float | None = None,
+    ) -> Path:
+        with self.operation_deadline(deadline):
+            return self._harvest_impl(
+                directory,
+                stack_size=stack_size,
+                object_size=object_size,
+                walk_modules=walk_modules,
+            )
+
+    def _harvest_impl(
+        self,
+        directory: Path | str,
+        *,
+        stack_size: int,
+        object_size: int,
+        walk_modules: bool,
     ) -> Path:
         """Save a self-describing crash-style snapshot while the target is stopped."""
         if not self.stopped or self.current_state is None or self.version is None:
@@ -933,6 +1164,8 @@ class KdNetClient:
         regions = manifest["regions"]
         errors = manifest["errors"]
         assert isinstance(regions, list) and isinstance(errors, list)
+        timed_out = False
+        self.last_harvest_complete = None
 
         def save_manifest() -> None:
             temporary = destination / "manifest.json.tmp"
@@ -941,7 +1174,17 @@ class KdNetClient:
             )
             temporary.replace(destination / "manifest.json")
 
+        def finish() -> Path:
+            self.last_harvest_complete = not timed_out
+            manifest["complete"] = self.last_harvest_complete
+            if timed_out:
+                manifest["incomplete_reason"] = "capture deadline expired"
+            save_manifest()
+            self._emit("harvest-partial" if timed_out else "harvest", str(destination))
+            return destination
+
         def capture(name: str, address: int, size: int) -> bytes | None:
+            nonlocal timed_out
             try:
                 data = self.read_virtual(address, size)
                 if len(data) != size:
@@ -956,6 +1199,8 @@ class KdNetClient:
                 save_manifest()
                 return data
             except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
+                if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                    timed_out = True
                 errors.append(
                     {"name": name, "address": address, "size": size, "error": str(error)}
                 )
@@ -966,6 +1211,7 @@ class KdNetClient:
             name: str, address: int, size: int, chunk_size: int = 0x800
         ) -> bytes | None:
             """Persist each readable chunk and stop cleanly at an unmapped page."""
+            nonlocal timed_out
             filename = f"{name}.bin"
             data = bytearray()
             with (destination / filename).open("wb") as output:
@@ -980,6 +1226,11 @@ class KdNetClient:
                                 f"short read: requested {count}, received {len(chunk)}"
                             )
                     except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
+                        if (
+                            isinstance(error, KdTimeout)
+                            and self._operation_deadline is not None
+                        ):
+                            timed_out = True
                         errors.append(
                             {
                                 "name": name,
@@ -1026,8 +1277,12 @@ class KdNetClient:
             save_manifest()
         except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
             registers = {}
+            if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                timed_out = True
             errors.append({"name": "context-amd64", "error": str(error)})
             save_manifest()
+        if timed_out:
+            return finish()
 
         if self.last_state_payload is not None:
             (destination / "state-change.bin").write_bytes(self.last_state_payload)
@@ -1036,12 +1291,16 @@ class KdNetClient:
         rip = registers.get("rip", self.current_state.program_counter)
         rsp = registers.get("rsp")
         capture("code", max(0, rip - 0x100), 0x300)
+        if timed_out:
+            return finish()
         stack_data = None
         processor_stacks: dict[int, tuple[int, bytes]] = {}
         if rsp is not None:
             stack_data = capture_progressive("stack-from-rsp", rsp, stack_size)
             if stack_data is not None:
                 processor_stacks[current_cpu] = (rsp, stack_data)
+            if timed_out:
+                return finish()
 
         for processor in range(self.current_state.cpu_count):
             if processor == current_cpu:
@@ -1070,14 +1329,23 @@ class KdNetClient:
                             processor_stack,
                         )
             except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
+                if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                    timed_out = True
                 errors.append(
                     {"name": name, "processor": processor, "error": str(error)}
                 )
                 save_manifest()
-        capture("current-thread", self.current_state.thread, object_size)
-        capture("kernel-header", self.version.kernel_base, 0x1000)
-        capture("loaded-module-list-head", self.version.loaded_module_list, 16)
-        capture("debugger-data-list-head", self.version.debugger_data_list, 16)
+            if timed_out:
+                return finish()
+        for name, address, size in (
+            ("current-thread", self.current_state.thread, object_size),
+            ("kernel-header", self.version.kernel_base, 0x1000),
+            ("loaded-module-list-head", self.version.loaded_module_list, 16),
+            ("debugger-data-list-head", self.version.debugger_data_list, 16),
+        ):
+            capture(name, address, size)
+            if timed_out:
+                return finish()
         manifest["modules"] = [
             asdict(module)
             for module in sorted(
@@ -1116,8 +1384,12 @@ class KdNetClient:
                 ]
                 manifest["module_source"] = "live PsLoadedModuleList walk"
             except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
+                if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                    timed_out = True
                 errors.append({"name": "loaded-modules", "error": str(error)})
             save_manifest()
+            if timed_out:
+                return finish()
 
         debugger_blocks: list[KdDebuggerDataBlock] = []
         try:
@@ -1140,7 +1412,11 @@ class KdNetClient:
                 )
             manifest["debugger_data_blocks"] = block_metadata
         except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
+            if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                timed_out = True
             errors.append({"name": "debugger-data", "error": str(error)})
+        if timed_out:
+            return finish()
 
         try:
             ordered_log, raw_ring, debug_print = self.get_debug_print_log(
@@ -1152,11 +1428,11 @@ class KdNetClient:
             debug_print["raw_file"] = "dbgprint-ring.bin"
             manifest["debug_print"] = debug_print
         except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
+            if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                timed_out = True
             errors.append({"name": "debug-print-ring", "error": str(error)})
 
-        save_manifest()
-        self._emit("harvest", str(destination))
-        return destination
+        return finish()
 
     def status(self) -> dict[str, object]:
         return {
