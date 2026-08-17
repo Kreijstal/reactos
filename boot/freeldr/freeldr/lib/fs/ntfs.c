@@ -1155,6 +1155,24 @@ const DEVVTBL* NtfsMount(ULONG DeviceId)
         return NULL;
     }
 
+    /*
+     * Apply the update sequence array fixups, as NtfsReadMftRecord() does for
+     * every other MFT record. This record is read directly from its location
+     * given by the boot sector, so nothing has done it for us yet: without
+     * this, the last two bytes of each of its sectors still contain the update
+     * sequence number instead of the real data. When the $MFT is fragmented
+     * enough that the mapping pairs of its $DATA attribute extend past the
+     * first sector boundary, the run list decodes into garbage from that point
+     * on and every MFT record living in a later run becomes unreadable.
+     */
+    if (!NtfsFixupRecord(Volume, (PNTFS_RECORD)Volume->MasterFileTable))
+    {
+        FileSystemError("Invalid Master File Table record.");
+        FrLdrTempFree(Volume->MasterFileTable, TAG_NTFS_MFT);
+        FrLdrTempFree(Volume, TAG_NTFS_VOLUME);
+        return NULL;
+    }
+
     //
     // Keep room to read partial sectors
     //
