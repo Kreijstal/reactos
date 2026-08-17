@@ -11,7 +11,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .client import KdNetClient, KdRequestError, KdTimeout, console_event
+from .client import (
+    KdNetClient,
+    KdRequestError,
+    KdSessionChanged,
+    KdTimeout,
+    console_event,
+)
 from .protocol import ProtocolError
 
 
@@ -52,6 +58,7 @@ def _print_registers(registers: dict[str, int]) -> None:
 HELP = """Commands:
   c | continue                 continue and wait for the next real stop
   break                        send a KD break-in and wait for a stop
+  peek ADDRESS SIZE [PATH]     bounded break/read/resume; print or save bytes
   watch ADDRESS SIZE [LABEL]   register a memory region for `sample` dumps
   unwatch                      clear all watched regions
   sample [COUNT [INTERVAL]]    break, dump per-CPU RIP/RSP and watched
@@ -64,6 +71,8 @@ HELP = """Commands:
   read ADDRESS SIZE            read and hex-dump virtual memory
   readphys ADDRESS SIZE        read and hex-dump physical memory
   write ADDRESS HEXBYTES       write virtual memory (example: write ADDR 90cc)
+  readio ADDRESS SIZE          read a 1-, 2-, or 4-byte I/O port value
+  writeio ADDRESS SIZE VALUE   write a 1-, 2-, or 4-byte I/O port value
   bp ADDRESS                   set a software breakpoint
   bc HANDLE                    clear a software breakpoint
   query ADDRESS                query the target virtual address
@@ -79,7 +88,15 @@ scripted driver on a FIFO breaks in without signals.
 """
 
 
-def _continue(client: KdNetClient, auto_modules: bool) -> None:
+def _continue(
+    client: KdNetClient,
+    auto_modules: bool,
+    harvest_root: Path | None,
+    stack_size: int,
+    break_timeout: float,
+    capture_timeout: float,
+    resume_timeout: float,
+) -> None:
     if client.stopped:
         client.continue_execution()
     try:
@@ -98,13 +115,45 @@ def _continue(client: KdNetClient, auto_modules: bool) -> None:
                 line = sys.stdin.readline()
                 if not line:
                     continue
-                if line.strip() in ("break", ""):
+                command = line.strip()
+                words = command.split()
+                if len(words) == 2 and words[0] == "stall-capture":
+                    _stall_capture(
+                        client,
+                        words[1],
+                        harvest_root,
+                        stack_size,
+                        break_timeout,
+                        capture_timeout,
+                        resume_timeout,
+                    )
+                    continue
+                if 3 <= len(words) <= 4 and words[0] == "peek":
+                    try:
+                        address = _integer(words[1])
+                        size = _integer(words[2])
+                    except argparse.ArgumentTypeError as error:
+                        print(f"roskd: {error}", file=sys.stderr)
+                        continue
+                    destination = Path(words[3]) if len(words) == 4 else None
+                    _bounded_peek(
+                        client,
+                        address,
+                        size,
+                        destination,
+                        break_timeout,
+                        capture_timeout,
+                        resume_timeout,
+                    )
+                    continue
+                if command in ("break", ""):
                     print("[KD] break-in requested via stdin", file=sys.stderr)
                     client.break_in()
                     return
                 print(
-                    f"[KD] target running; ignored {line.strip()!r} "
-                    "(write 'break' first)",
+                    f"[KD] target running; ignored {command!r} "
+                    "(write 'break', 'peek ADDRESS SIZE [PATH]', or "
+                    "'stall-capture ID')",
                     file=sys.stderr,
                 )
     except KeyboardInterrupt:
@@ -118,15 +167,186 @@ def _harvest_path(root: Path) -> Path:
 
 
 def _auto_harvest(
-    client: KdNetClient, root: Path | None, stack_size: int
-) -> None:
-    if root is None or not client.stopped:
-        return
+    client: KdNetClient,
+    root: Path | None,
+    stack_size: int,
+    *,
+    deadline: float | None = None,
+) -> tuple[Path, bool] | None:
+    if root is None:
+        client._emit("harvest-failed", "automatic harvesting is disabled")
+        return None
+    if not client.stopped:
+        client._emit("harvest-failed", "target is not stopped")
+        return None
     try:
-        destination = client.harvest(_harvest_path(root), stack_size=stack_size)
+        destination = client.harvest(
+            _harvest_path(root), stack_size=stack_size, deadline=deadline
+        )
         print(f"[KD] harvested {destination}", file=sys.stderr)
-    except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
+        return destination, bool(getattr(client, "last_harvest_complete", True))
+    except (
+        KdRequestError,
+        KdTimeout,
+        OSError,
+        ProtocolError,
+        RuntimeError,
+        ValueError,
+    ) as error:
+        client._emit("harvest-failed", str(error))
         print(f"[KD] harvest failed: {error}", file=sys.stderr)
+        return None
+
+
+def _transaction_event(
+    client: KdNetClient, transaction_id: str, phase: str, detail: str = ""
+) -> None:
+    suffix = f" {detail}" if detail else ""
+    client._emit("transaction", f"id={transaction_id} phase={phase}{suffix}")
+
+
+def _stall_capture(
+    client: KdNetClient,
+    transaction_id: str,
+    harvest_root: Path | None,
+    stack_size: int,
+    break_timeout: float,
+    capture_timeout: float,
+    resume_timeout: float,
+) -> None:
+    stopped_by_transaction = False
+    _transaction_event(client, transaction_id, "break-requested")
+    try:
+        try:
+            with client.operation_deadline(time.monotonic() + break_timeout):
+                client.break_in(timeout=break_timeout)
+        except KdTimeout as error:
+            # The outer break packet was sent, so a lost or delayed state-change
+            # may already have stopped the target.  Give that stop one bounded
+            # recovery window before declaring the session unusable.
+            _transaction_event(
+                client, transaction_id, "break-uncertain", f"error={error}"
+            )
+            with client.operation_deadline(time.monotonic() + resume_timeout):
+                client.wait_for_stop(
+                    auto_continue_modules=True, timeout=resume_timeout
+                )
+            client._manual_break_stop = True
+            _transaction_event(client, transaction_id, "stopped-late")
+        stopped_by_transaction = True
+        _transaction_event(client, transaction_id, "stopped")
+        harvest = _auto_harvest(
+            client,
+            harvest_root,
+            stack_size,
+            deadline=time.monotonic() + capture_timeout,
+        )
+        if harvest is None:
+            _transaction_event(client, transaction_id, "harvest-failed")
+        else:
+            destination, complete = harvest
+            phase = "harvest-finished" if complete else "harvest-partial"
+            _transaction_event(client, transaction_id, phase, f"path={destination}")
+    except Exception as error:
+        phase = "harvest-failed" if stopped_by_transaction else "break-failed"
+        _transaction_event(client, transaction_id, phase, f"error={error}")
+        raise
+    finally:
+        if stopped_by_transaction and client.stopped:
+            try:
+                with client.operation_deadline(time.monotonic() + resume_timeout):
+                    client.drain_pending_request(timeout=resume_timeout)
+                    client.continue_execution()
+            except Exception as error:
+                phase = "resume-uncertain" if not client.stopped else "resume-failed"
+                _transaction_event(
+                    client, transaction_id, phase, f"error={error}"
+                )
+                raise
+            else:
+                _transaction_event(client, transaction_id, "resume-sent")
+        elif stopped_by_transaction:
+            _transaction_event(
+                client,
+                transaction_id,
+                "resume-uncertain",
+                "error=target no longer marked stopped",
+            )
+
+
+def _bounded_peek(
+    client: KdNetClient,
+    address: int,
+    size: int,
+    destination: Path | None,
+    break_timeout: float,
+    capture_timeout: float,
+    resume_timeout: float,
+) -> bytes:
+    """Read one virtual-memory range while bounding the target stop time."""
+    if size < 1 or size > 0x10000:
+        raise ValueError("peek size must be between 1 and 65536 bytes")
+
+    transaction_id = f"peek-{time.monotonic_ns():x}"
+    stopped_by_transaction = False
+    data: bytes
+    started = time.monotonic()
+    _transaction_event(client, transaction_id, "break-requested")
+    try:
+        try:
+            with client.operation_deadline(time.monotonic() + break_timeout):
+                client.break_in(timeout=break_timeout)
+        except KdTimeout as error:
+            _transaction_event(
+                client, transaction_id, "break-uncertain", f"error={error}"
+            )
+            with client.operation_deadline(time.monotonic() + resume_timeout):
+                client.wait_for_stop(
+                    auto_continue_modules=True, timeout=resume_timeout
+                )
+            client._manual_break_stop = True
+            _transaction_event(client, transaction_id, "stopped-late")
+        stopped_by_transaction = True
+        _transaction_event(client, transaction_id, "stopped")
+        with client.operation_deadline(time.monotonic() + capture_timeout):
+            data = client.read_virtual(address, size)
+        if len(data) != size:
+            raise RuntimeError(
+                f"short peek at 0x{address:x}: requested {size}, received {len(data)}"
+            )
+        _transaction_event(
+            client,
+            transaction_id,
+            "capture-finished",
+            f"address=0x{address:x} size={size}",
+        )
+    except Exception as error:
+        phase = "capture-failed" if stopped_by_transaction else "break-failed"
+        _transaction_event(client, transaction_id, phase, f"error={error}")
+        raise
+    finally:
+        if stopped_by_transaction and client.stopped:
+            try:
+                with client.operation_deadline(time.monotonic() + resume_timeout):
+                    client.drain_pending_request(timeout=resume_timeout)
+                    client.continue_execution()
+            except Exception as error:
+                phase = "resume-uncertain" if not client.stopped else "resume-failed"
+                _transaction_event(
+                    client, transaction_id, phase, f"error={error}"
+                )
+                raise
+            else:
+                _transaction_event(client, transaction_id, "resume-sent")
+
+    stopped_ms = (time.monotonic() - started) * 1000.0
+    if destination is None:
+        print(_hexdump(data, address))
+    else:
+        destination.write_bytes(data)
+        print(f"peek: saved {len(data)} bytes to {destination}")
+    print(f"peek: target resumed after {stopped_ms:.0f} ms")
+    return data
 
 
 def _sample_once(
@@ -198,19 +418,57 @@ def _sample_loop(
             continue
 
 
+def _read_command(client: KdNetClient, prompt: str) -> str:
+    """Read one REPL command, servicing the KDNET socket while waiting.
+
+    input() blocks, and nothing else in this process reads the socket, so a
+    target that reboots while the REPL waits for its next command used to be
+    invisible: the reconnect loop in main() only ever sees KdSessionChanged
+    raised from inside a receive.  A backgrounded listener driven through a
+    FIFO spends nearly all of its life in this wait, which is exactly when an
+    unattended machine gets powered on.
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    interactive = sys.stdin.isatty()
+    while True:
+        if select.select([sys.stdin], [], [], 0)[0]:
+            line = sys.stdin.readline()
+            if not line:
+                # On a terminal an empty read is Ctrl-D: end the session.  On a
+                # FIFO it only means "no writer is attached right now", which
+                # happens after *every* command when the driver opens, writes
+                # and closes the pipe.  Treating that as EOF used to end the
+                # REPL after a single scripted command and strand the target
+                # halted at its break, with nothing left reading stdin to
+                # resume it.  The stdin watcher has always ignored it; so does
+                # this now.
+                if interactive:
+                    raise EOFError
+                client.poll_idle(0.5)
+                continue
+            return line
+        client.poll_idle(0.5)
+
+
 def repl(
     client: KdNetClient,
     auto_modules: bool,
     harvest_root: Path | None,
     stack_size: int,
+    break_timeout: float,
+    capture_timeout: float,
+    resume_timeout: float,
 ) -> int:
     watches: list[tuple[int, int, str]] = []
     print(HELP)
     while True:
         try:
-            line = input("roskd> ")
+            line = _read_command(client, "roskd> ")
         except EOFError:
             print()
+            if client.stopped:
+                client.continue_execution()
             return 0
         except KeyboardInterrupt:
             print()
@@ -225,11 +483,29 @@ def repl(
         command, *args = words
         try:
             if command in ("c", "continue"):
-                _continue(client, auto_modules)
-                _auto_harvest(client, harvest_root, stack_size)
+                _continue(
+                    client,
+                    auto_modules,
+                    harvest_root,
+                    stack_size,
+                    break_timeout,
+                    capture_timeout,
+                    resume_timeout,
+                )
+                _auto_harvest(
+                    client,
+                    harvest_root,
+                    stack_size,
+                    deadline=time.monotonic() + capture_timeout,
+                )
             elif command == "break":
-                client.break_in()
-                _auto_harvest(client, harvest_root, stack_size)
+                client.break_in(timeout=break_timeout)
+                _auto_harvest(
+                    client,
+                    harvest_root,
+                    stack_size,
+                    deadline=time.monotonic() + capture_timeout,
+                )
             elif command == "watch" and 2 <= len(args) <= 3:
                 address, size = _integer(args[0]), _integer(args[1])
                 label = args[2] if len(args) == 3 else f"0x{address:x}"
@@ -286,6 +562,14 @@ def repl(
                 address = _integer(args[0])
                 data = bytes.fromhex(args[1])
                 print(f"wrote {client.write_virtual(address, data)} byte(s)")
+            elif command == "readio" and len(args) == 2:
+                address, size = (_integer(value) for value in args)
+                value = client.read_io(address, size)
+                print(f"0x{address:x}: 0x{value:0{size * 2}x}")
+            elif command == "writeio" and len(args) == 3:
+                address, size, value = (_integer(value) for value in args)
+                written = client.write_io(address, size, value)
+                print(f"wrote {written} byte(s) to I/O port 0x{address:x}")
             elif command == "bp" and len(args) == 1:
                 handle = client.set_breakpoint(_integer(args[0]))
                 print(f"breakpoint handle {handle}")
@@ -305,9 +589,16 @@ def repl(
                     client.continue_execution()
                 return 0
             elif command in ("quit", "q", "exit"):
+                # Never walk away from a halted target: without this the
+                # machine stays frozen at its break with nobody left to
+                # resume it.
+                if client.stopped:
+                    client.continue_execution()
                 return 0
             else:
                 print("unknown command or wrong arguments; enter `help`", file=sys.stderr)
+        except KdSessionChanged:
+            raise
         except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
             print(f"roskd: {error}", file=sys.stderr)
 
@@ -321,12 +612,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", default=50000, type=int, help="KDNET UDP port")
     parser.add_argument("--key", default="1.2.3.4", help="four-part KDNET key")
     parser.add_argument(
+        "--session-state", type=Path,
+        help="securely persist KDNET session keys across debugger restarts",
+    )
+    parser.add_argument(
         "--log", type=Path, default=Path("roskd.log"),
         help="append decoded output and stop events to this file",
     )
     parser.add_argument(
         "--timeout", type=float, default=3600.0,
         help="seconds to wait for the target's initial handshake",
+    )
+    parser.add_argument(
+        "--break-timeout", type=float, default=5.0,
+        help="seconds allowed for an automated break-in",
+    )
+    parser.add_argument(
+        "--capture-timeout", type=float, default=10.0,
+        help="overall seconds allowed for an automatic harvest",
+    )
+    parser.add_argument(
+        "--resume-timeout", type=float, default=5.0,
+        help="seconds allowed for an automated resume",
     )
     parser.add_argument(
         "--no-auto-modules", action="store_true",
@@ -353,8 +660,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if not 1 <= args.port <= 65535 or args.timeout <= 0 or args.stack_bytes <= 0:
-        print("roskd: port, timeout, and stack size must be positive", file=sys.stderr)
+    if (
+        not 1 <= args.port <= 65535
+        or args.timeout <= 0
+        or args.break_timeout <= 0
+        or args.capture_timeout <= 0
+        or args.resume_timeout <= 0
+        or args.stack_bytes <= 0
+    ):
+        print("roskd: port, timeouts, and stack size must be positive", file=sys.stderr)
         return 2
     harvest_root = None if args.no_harvest else args.harvest_dir
     try:
@@ -365,6 +679,7 @@ def main(argv: list[str] | None = None) -> int:
             args.key,
             log=args.log,
             event_callback=console_event,
+            session_state=args.session_state,
         ) as client:
             print(
                 f"[KDNET] listening on {args.host}:{args.port}; "
@@ -372,21 +687,48 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-            client.connect(args.timeout)
-            print(f"[KDNET] connected: {client.version}", file=sys.stderr)
-            if not args.no_auto_continue:
-                _continue(client, not args.no_auto_modules)
-            _auto_harvest(client, harvest_root, args.stack_bytes)
-            return repl(
-                client,
-                not args.no_auto_modules,
-                harvest_root,
-                args.stack_bytes,
-            )
+            while True:
+                try:
+                    client.connect(args.timeout)
+                    print(f"[KDNET] connected: {client.version}", file=sys.stderr)
+                    if not args.no_auto_continue:
+                        _continue(
+                            client,
+                            not args.no_auto_modules,
+                            harvest_root,
+                            args.stack_bytes,
+                            args.break_timeout,
+                            args.capture_timeout,
+                            args.resume_timeout,
+                        )
+                    _auto_harvest(
+                        client,
+                        harvest_root,
+                        args.stack_bytes,
+                        deadline=time.monotonic() + args.capture_timeout,
+                    )
+                    return repl(
+                        client,
+                        not args.no_auto_modules,
+                        harvest_root,
+                        args.stack_bytes,
+                        args.break_timeout,
+                        args.capture_timeout,
+                        args.resume_timeout,
+                    )
+                except KdSessionChanged as error:
+                    print(f"[KDNET] reconnecting: {error}", file=sys.stderr)
     except KeyboardInterrupt:
         print("\nroskd: interrupted", file=sys.stderr)
         return 130
-    except (ImportError, OSError, KdTimeout, ProtocolError, KdRequestError) as error:
+    except (
+        ImportError,
+        OSError,
+        KdTimeout,
+        KdSessionChanged,
+        ProtocolError,
+        KdRequestError,
+    ) as error:
         print(f"roskd: {error}", file=sys.stderr)
         return 1
 
