@@ -4,11 +4,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import socket
 import struct
 import sys
 import tempfile
+import time
 import unittest
+from contextlib import contextmanager
+from unittest import mock
 from pathlib import Path
 
 
@@ -22,12 +27,15 @@ from roskd.client import (  # noqa: E402
     KdModule,
     KdNetClient,
     KdRequestError,
+    KdSessionChanged,
     KdStateChange,
+    KdTimeout,
     KdVersion,
     parse_amd64_context,
     parse_amd64_loader_entry,
     parse_state_change,
 )
+from roskd import cli as roskd_cli  # noqa: E402
 from roskd.protocol import (  # noqa: E402
     KD_INITIAL_ID,
     KD_LEADER_CONTROL,
@@ -35,6 +43,7 @@ from roskd.protocol import (  # noqa: E402
     KD_SYNC_ID,
     KD_TYPE_ACKNOWLEDGE,
     KD_TYPE_DEBUG_IO,
+    KD_TYPE_STATE_CHANGE64,
     KD_TYPE_STATE_MANIPULATE,
     KDNET_DIRECTION_TARGET,
     KDNET_TYPE_CONTROL,
@@ -71,6 +80,16 @@ KD_DATA_PACKET_VECTOR = bytes.fromhex(
 KD_ACK_PACKET_VECTOR = bytes.fromhex(
     "69696969040000000000808000000000"
 )
+
+
+def _free_udp_port() -> int:
+    """A port free on both loopback addresses the KDNET client pairs up."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.2", port))
+    return port
 
 
 class KdNetCryptoTests(unittest.TestCase):
@@ -185,6 +204,53 @@ class StructureTests(unittest.TestCase):
         )
         self.assertEqual(events[0][0], "resume-fixup")
 
+    def test_continue_ack_loss_does_not_leave_client_marked_stopped(self) -> None:
+        client = object.__new__(KdNetClient)
+        client._manual_break_stop = False
+        client.current_state = None
+        client.stopped = True
+        sent = []
+        client._send_inner_data = lambda packet_type, payload: sent.append(
+            (packet_type, payload)
+        )
+
+        def lose_ack(_expected: tuple[int, ...]) -> None:
+            raise KdTimeout("continue ACK lost")
+
+        client._wait_for = lose_ack
+        with self.assertRaisesRegex(KdTimeout, "ACK lost"):
+            client.continue_execution()
+
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(client.stopped)
+
+    def test_io_space_requests_validate_and_decode_width(self) -> None:
+        client = object.__new__(KdNetClient)
+        requests = []
+
+        def request(api: int, union: bytes) -> bytes:
+            address, size, value = struct.unpack("<QII", union)
+            requests.append((api, address, size, value))
+            result = 0xA5A51234 if api == 0x3139 else value
+            return bytes(16) + struct.pack("<QII", address, size, result)
+
+        client._request = request
+
+        self.assertEqual(client.read_io(0xCFC, 2), 0x1234)
+        self.assertEqual(client.write_io(0xCF8, 4, 0x80009AA0), 4)
+        self.assertEqual(
+            requests,
+            [
+                (0x3139, 0xCFC, 2, 0),
+                (0x313A, 0xCF8, 4, 0x80009AA0),
+            ],
+        )
+        for size in (0, 3, 8):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                client.read_io(0xCFC, size)
+        with self.assertRaises(ValueError):
+            client.write_io(0xCFC, 1, 0x100)
+
     def test_regular_breakpoint_resume_does_not_change_context(self) -> None:
         client = object.__new__(KdNetClient)
         client._manual_break_stop = True
@@ -230,6 +296,137 @@ class StructureTests(unittest.TestCase):
             (DBGKD_GET_STRING_API, 6, 2, 0, 1),
         )
         self.assertEqual(response[16:], b"o")
+
+    def test_changed_client_key_aborts_active_session(self) -> None:
+        client = object.__new__(KdNetClient)
+        client.client_key = b"a" * 32
+        client.host_key = b"h" * 32
+        client.outer_send_sequence = 9
+        client.inner_send_id = KD_INITIAL_ID
+        client.last_inner_sent = b"request"
+        client.last_received_signature = (1, 2, 3)
+        client.current_state = object()
+        client.last_state_payload = b"state"
+        client.observed_modules = {1: object()}
+        client.version = object()
+        client.stopped = True
+        client._manual_break_stop = True
+        client._request_in_flight = True
+        client.last_harvest_complete = True
+        client.crypto = type(
+            "CryptoStub",
+            (),
+            {"build_response": staticmethod(lambda _client, _host: b"response")},
+        )()
+        sent = []
+        events = []
+        client._send_outer = lambda payload, packet_type, sequence: sent.append(
+            (payload, packet_type, sequence)
+        )
+        client._emit = lambda kind, value: events.append((kind, value))
+
+        with self.assertRaises(KdSessionChanged):
+            client._handle_poke(b"\x01\x01" + b"b" * 32, 1, 7)
+
+        self.assertEqual(sent, [(b"response", KDNET_TYPE_CONTROL, 7)])
+        self.assertEqual(events[-2][0], "session-change")
+        self.assertEqual(
+            events[-1],
+            (
+                "handshake",
+                "new target session client_key_sha256="
+                + hashlib.sha256(b"b" * 32).hexdigest(),
+            ),
+        )
+        self.assertFalse(client._request_in_flight)
+
+    def test_session_state_round_trip_preserves_data_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            client = KdNetClient(
+                "127.0.0.1",
+                "127.0.0.2",
+                50000,
+                "1.2.3.4",
+                session_state=path,
+            )
+            sent = []
+            client._send_outer = (
+                lambda payload, packet_type, *, sequence=None: sent.append(
+                    (payload, packet_type, sequence)
+                )
+            )
+            client._handle_poke(b"\x01\x01" + bytes(range(32)), 7, 9)
+
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(len(sent), 1)
+            saved_data_key = client.crypto.data_key
+            saved_host_key = client.host_key
+
+            restored = KdNetClient(
+                "127.0.0.1",
+                "127.0.0.2",
+                50000,
+                "1.2.3.4",
+                session_state=path,
+            )
+            self.assertEqual(restored.client_key, bytes(range(32)))
+            self.assertEqual(restored.host_key, saved_host_key)
+            self.assertEqual(restored.crypto.data_key, saved_data_key)
+            self.assertEqual(restored.version_number, 7)
+
+    def test_connect_resumes_persisted_session_before_waiting_for_poke(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            original = KdNetClient(
+                "127.0.0.1",
+                "127.0.0.2",
+                50000,
+                "1.2.3.4",
+                session_state=path,
+            )
+            original._send_outer = lambda *_args, **_kwargs: None
+            original._handle_poke(b"\x01\x01" + bytes(range(32)), 1, 4)
+
+            client = KdNetClient(
+                "127.0.0.1",
+                "127.0.0.2",
+                50000,
+                "1.2.3.4",
+                session_state=path,
+            )
+            client._open_socket = lambda: None
+            sent = []
+            client._send_outer = lambda payload, packet_type: sent.append(
+                (payload, packet_type)
+            )
+            packet = type(
+                "StatePacket",
+                (),
+                {"packet_type": KD_TYPE_STATE_CHANGE64},
+            )()
+            client._wait_for = lambda expected, timeout: packet
+            state = object()
+            version = object()
+            client._record_state = lambda _packet: state
+            client.get_version = lambda: version
+
+            self.assertIs(client.connect(1.0), state)
+            self.assertEqual(sent, [(b"b", KDNET_TYPE_DATA)])
+            self.assertIs(client.version, version)
+            self.assertTrue(client.stopped)
+            self.assertTrue(client._manual_break_stop)
+
+    def test_pending_manipulate_response_is_drained(self) -> None:
+        client = object.__new__(KdNetClient)
+        client._request_in_flight = True
+        waits = []
+        client._wait_for = lambda expected, timeout: waits.append((expected, timeout))
+
+        client.drain_pending_request(timeout=2.5)
+
+        self.assertEqual(waits, [((KD_TYPE_STATE_MANIPULATE,), 2.5)])
+        self.assertFalse(client._request_in_flight)
 
     def test_manipulate_request_can_target_another_processor(self) -> None:
         client = object.__new__(KdNetClient)
@@ -342,6 +539,395 @@ class HarvestTests(unittest.TestCase):
             if error["name"] == "stack-from-rsp"
         )
         self.assertEqual(stack_error["captured_size"], 0x300)
+
+
+class AutomationTests(unittest.TestCase):
+    class FakeClient:
+        def __init__(
+            self,
+            harvest_error: Exception | None = None,
+            break_error: Exception | None = None,
+            harvest_complete: bool = True,
+            read_error: Exception | None = None,
+            poll_error: Exception | None = None,
+        ) -> None:
+            self.harvest_error = harvest_error
+            self.break_error = break_error
+            self.read_error = read_error
+            self.poll_error = poll_error
+            self.last_harvest_complete = harvest_complete
+            self.stopped = False
+            self.calls: list[str] = []
+            self.events: list[tuple[str, str]] = []
+
+        def _emit(self, kind: str, value: object) -> None:
+            self.events.append((kind, str(value)))
+
+        def break_in(self, timeout: float) -> None:
+            self.calls.append(f"break:{timeout}")
+            if self.break_error is not None:
+                raise self.break_error
+            self.stopped = True
+
+        def wait_for_stop(self, *, auto_continue_modules: bool, timeout: float) -> None:
+            self.calls.append(f"recover-stop:{auto_continue_modules}:{timeout}")
+            self.stopped = True
+
+        def harvest(
+            self,
+            directory: Path,
+            *,
+            stack_size: int,
+            deadline: float | None,
+        ) -> Path:
+            self.calls.append(f"harvest:{stack_size}")
+            if self.harvest_error is not None:
+                raise self.harvest_error
+            directory.mkdir(parents=True)
+            return directory
+
+        def read_virtual(self, address: int, size: int) -> bytes:
+            self.calls.append(f"read:0x{address:x}:{size}")
+            if self.read_error is not None:
+                raise self.read_error
+            return bytes((index & 0xFF) for index in range(size))
+
+        @contextmanager
+        def operation_deadline(self, _deadline: float):
+            yield
+
+        def drain_pending_request(self, timeout: float) -> None:
+            self.calls.append(f"drain:{timeout}")
+
+        def continue_execution(self) -> None:
+            self.calls.append("continue")
+            self.stopped = False
+
+        def poll_idle(self, timeout: float) -> None:
+            self.calls.append(f"poll-idle:{timeout}")
+            if self.poll_error is not None:
+                raise self.poll_error
+
+    def test_read_command_services_the_socket_while_waiting(self) -> None:
+        # The REPL waits for its driver far longer than it runs commands.  If
+        # that wait does not read the socket, a reboot during it is invisible.
+        client = self.FakeClient()
+        ready = [False, False, True]
+
+        def fake_select(rlist, _wlist, _xlist, _timeout):
+            return (list(rlist) if ready.pop(0) else [], [], [])
+
+        with mock.patch.object(roskd_cli.select, "select", fake_select), mock.patch.object(
+            roskd_cli.sys, "stdin", io.StringIO("continue\n")
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()):
+            line = roskd_cli._read_command(client, "roskd> ")
+
+        self.assertEqual(line, "continue\n")
+        self.assertEqual(client.calls, ["poll-idle:0.5", "poll-idle:0.5"])
+        self.assertEqual(ready, [])
+
+    def test_read_command_propagates_a_target_reboot(self) -> None:
+        # KdSessionChanged has to escape the REPL for main() to reconnect.
+        client = self.FakeClient(poll_error=KdSessionChanged("new target session"))
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda *_args: ([], [], [])
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()):
+            with self.assertRaises(KdSessionChanged):
+                roskd_cli._read_command(client, "roskd> ")
+
+    def test_repl_lets_a_reboot_reach_the_reconnect_loop(self) -> None:
+        # The regression: the REPL used to block in input(), so a target that
+        # rebooted while it waited was never noticed and main() never
+        # reconnected.  Waiting must surface KdSessionChanged instead.
+        client = self.FakeClient(poll_error=KdSessionChanged("new target session"))
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda *_args: ([], [], [])
+        ), mock.patch.object(roskd_cli.sys, "stdin", io.StringIO("")), mock.patch.object(
+            roskd_cli.sys, "stdout", io.StringIO()
+        ):
+            with self.assertRaises(KdSessionChanged):
+                roskd_cli.repl(client, False, None, 0x1000, 5.0, 10.0, 5.0)
+
+    def test_idle_repl_wait_detects_a_reboot_over_a_real_socket(self) -> None:
+        """End-to-end over loopback UDP: a target reboot during an idle REPL
+        wait must be seen, answered, and surfaced as KdSessionChanged.
+
+        This is the failure that stranded a real machine: the listener sat in
+        the REPL, the target was power-cycled, and its pokes accumulated unread
+        in the socket buffer because nothing in the wait touched the socket.
+        """
+        port = _free_udp_port()
+        target = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(target.close)
+        target.bind(("127.0.0.2", port))
+        target.connect(("127.0.0.1", port))
+        target.settimeout(5.0)
+
+        client = KdNetClient("127.0.0.1", "127.0.0.2", port, "1.2.3.4")
+        self.addCleanup(client.close)
+        # An established session, as after a successful connect().
+        client.client_key = b"a" * 32
+        client.host_key = b"h" * 32
+        client.crypto.build_response(client.client_key, client.host_key)
+        client.stopped = True
+        client._open_socket()
+
+        # The rebooted target pokes with a brand new client key.
+        reboot_key = b"r" * 32
+        target.send(
+            KdNetCrypto("1.2.3.4").encode(
+                b"\x01\x01" + reboot_key,
+                version=1,
+                packet_type=KDNET_TYPE_CONTROL,
+                sequence=7,
+                direction=KDNET_DIRECTION_TARGET,
+            )
+        )
+
+        # stdin is never ready, so the only way out is through the socket.
+        # Fail loudly rather than hang if the wait stops servicing it again.
+        polls = []
+
+        def never_ready(*_args):
+            polls.append(1)
+            if len(polls) > 3:
+                raise AssertionError("idle wait never serviced the socket")
+            return ([], [], [])
+
+        with mock.patch.object(
+            roskd_cli.select, "select", never_ready
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()):
+            with self.assertRaises(KdSessionChanged):
+                roskd_cli._read_command(client, "roskd> ")
+
+        # The poke was consumed and answered, so the socket is drained and the
+        # client has adopted the new session rather than the stale one.
+        reply = KdNetCrypto("1.2.3.4").decode(target.recv(65535))
+        self.assertEqual(reply.packet_type, KDNET_TYPE_CONTROL)
+        self.assertEqual(reply.payload[:2], b"\x01\x02")
+        self.assertEqual(reply.payload[2:34], reboot_key)
+        self.assertEqual(client.client_key, reboot_key)
+
+    def test_read_command_reports_closed_stdin_as_eof(self) -> None:
+        client = self.FakeClient()
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda rlist, *_args: (list(rlist), [], [])
+        ), mock.patch.object(roskd_cli.sys, "stdin", io.StringIO("")), mock.patch.object(
+            roskd_cli.sys, "stdout", io.StringIO()
+        ):
+            with self.assertRaises(EOFError):
+                roskd_cli._read_command(client, "roskd> ")
+
+    def test_stall_capture_owns_break_harvest_and_resume(self) -> None:
+        client = self.FakeClient()
+        with tempfile.TemporaryDirectory() as temporary:
+            roskd_cli._stall_capture(
+                client,
+                "boot1-token",
+                Path(temporary),
+                0x4000,
+                5.0,
+                10.0,
+                5.0,
+            )
+
+        self.assertEqual(client.calls, ["break:5.0", "harvest:16384", "drain:5.0", "continue"])
+        phases = [
+            value for kind, value in client.events
+            if kind == "transaction"
+        ]
+        self.assertTrue(any("phase=harvest-finished" in value for value in phases))
+        self.assertTrue(any("phase=resume-sent" in value for value in phases))
+        self.assertFalse(client.stopped)
+
+    def test_stall_capture_reports_partial_harvest(self) -> None:
+        client = self.FakeClient(harvest_complete=False)
+        with tempfile.TemporaryDirectory() as temporary:
+            roskd_cli._stall_capture(
+                client,
+                "boot-partial-token",
+                Path(temporary),
+                0x4000,
+                5.0,
+                10.0,
+                5.0,
+            )
+
+        self.assertTrue(
+            any(
+                kind == "transaction" and "phase=harvest-partial" in value
+                for kind, value in client.events
+            )
+        )
+        self.assertFalse(client.stopped)
+
+    def test_stall_capture_recovers_a_late_break_stop(self) -> None:
+        client = self.FakeClient(break_error=KdTimeout("break state delayed"))
+        with tempfile.TemporaryDirectory() as temporary:
+            roskd_cli._stall_capture(
+                client,
+                "boot-late-token",
+                Path(temporary),
+                0x4000,
+                5.0,
+                10.0,
+                5.0,
+            )
+
+        self.assertEqual(
+            client.calls,
+            [
+                "break:5.0",
+                "recover-stop:True:5.0",
+                "harvest:16384",
+                "drain:5.0",
+                "continue",
+            ],
+        )
+        self.assertTrue(
+            any(
+                kind == "transaction" and "phase=stopped-late" in value
+                for kind, value in client.events
+            )
+        )
+        self.assertFalse(client.stopped)
+
+    def test_stall_capture_resumes_after_harvest_failure(self) -> None:
+        client = self.FakeClient(KdTimeout("target disappeared"))
+        with tempfile.TemporaryDirectory() as temporary:
+            roskd_cli._stall_capture(
+                client,
+                "boot2-token",
+                Path(temporary),
+                0x4000,
+                5.0,
+                10.0,
+                5.0,
+            )
+
+        self.assertEqual(client.calls, ["break:5.0", "harvest:16384", "drain:5.0", "continue"])
+        self.assertIn(("harvest-failed", "target disappeared"), client.events)
+        self.assertTrue(
+            any(
+                kind == "transaction" and "phase=resume-sent" in value
+                for kind, value in client.events
+            )
+        )
+        self.assertFalse(client.stopped)
+
+    def test_bounded_peek_reads_and_resumes_before_writing(self) -> None:
+        client = self.FakeClient()
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = Path(temporary) / "peek.bin"
+            data = roskd_cli._bounded_peek(
+                client,
+                0xFFFFF80000674128,
+                16,
+                destination,
+                5.0,
+                10.0,
+                5.0,
+            )
+            self.assertEqual(destination.read_bytes(), bytes(range(16)))
+
+        self.assertEqual(data, bytes(range(16)))
+        self.assertEqual(
+            client.calls,
+            [
+                "break:5.0",
+                "read:0xfffff80000674128:16",
+                "drain:5.0",
+                "continue",
+            ],
+        )
+        self.assertTrue(
+            any(
+                kind == "transaction" and "phase=resume-sent" in value
+                for kind, value in client.events
+            )
+        )
+        self.assertFalse(client.stopped)
+
+    def test_bounded_peek_resumes_after_read_failure(self) -> None:
+        client = self.FakeClient(read_error=KdTimeout("read disappeared"))
+        with self.assertRaisesRegex(KdTimeout, "read disappeared"):
+            roskd_cli._bounded_peek(
+                client,
+                0xFFFFF80000674128,
+                16,
+                None,
+                5.0,
+                10.0,
+                5.0,
+            )
+
+        self.assertEqual(
+            client.calls,
+            [
+                "break:5.0",
+                "read:0xfffff80000674128:16",
+                "drain:5.0",
+                "continue",
+            ],
+        )
+        self.assertTrue(
+            any(
+                kind == "transaction" and "phase=capture-failed" in value
+                for kind, value in client.events
+            )
+        )
+        self.assertFalse(client.stopped)
+
+    def test_bounded_peek_rejects_unbounded_size(self) -> None:
+        client = self.FakeClient()
+        for size in (0, 0x10001):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                roskd_cli._bounded_peek(
+                    client,
+                    0xFFFFF80000674128,
+                    size,
+                    None,
+                    5.0,
+                    10.0,
+                    5.0,
+                )
+        self.assertEqual(client.calls, [])
+
+    def test_harvest_deadline_writes_partial_manifest(self) -> None:
+        client = object.__new__(KdNetClient)
+        client.stopped = True
+        client.current_state = KdStateChange(
+            state=DBGKD_EXCEPTION_STATE_CHANGE,
+            cpu_level=6,
+            cpu=0,
+            cpu_count=1,
+            thread=0x3000,
+            program_counter=0x1100,
+        )
+        client.version = KdVersion(12, 3790, 6, 2, 7, 0x8664, 0x1000, 0x4000, 0x5000)
+        client.last_state_payload = b"state"
+        client.observed_modules = {}
+        client._operation_deadline = None
+        client._log = None
+        events: list[tuple[str, object]] = []
+        client.event_callback = lambda kind, value: events.append((kind, value))
+
+        def get_context(_processor: int | None = None) -> bytes:
+            raise KdTimeout("capture deadline expired")
+
+        client.get_context = get_context
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = client.harvest(
+                Path(temporary), deadline=time.monotonic() + 1.0
+            )
+            manifest = json.loads((destination / "manifest.json").read_text())
+
+        self.assertFalse(manifest["complete"])
+        self.assertEqual(manifest["incomplete_reason"], "capture deadline expired")
+        self.assertEqual(events[-1][0], "harvest-partial")
 
 
 if __name__ == "__main__":
