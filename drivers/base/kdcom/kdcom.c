@@ -14,6 +14,7 @@
 
 #include <cportlib/cportlib.h>
 #include <cportlib/uartinfo.h>
+#include <reactos/kdnetshare.h>
 
 /* GLOBALS ********************************************************************/
 
@@ -304,6 +305,60 @@ KdpPollBreakIn(VOID)
         return KDP_PACKET_RECEIVED;
     }
     return KDP_PACKET_TIMEOUT;
+}
+
+/* ADAPTER SHARING ************************************************************/
+
+/*
+ * The boot loader loads whichever transport was selected under the single
+ * hardcoded name "kdcom.dll" (see winldr.c), so every driver that wants to talk
+ * to the running transport imports it by that name and binds to whatever is
+ * actually there.  Sharing is therefore part of the transport contract rather
+ * than something one transport exports privately, and a transport that has no
+ * adapter to share still has to answer the question.
+ *
+ * A serial port is not shareable in this sense - there is no network adapter
+ * behind it for an NDIS miniport to use - so these decline.
+ */
+
+NTSTATUS
+NTAPI
+KdNetShareRegister(_In_ PKDNET_SHARE_REGISTRATION Registration)
+{
+    UNREFERENCED_PARAMETER(Registration);
+    return STATUS_NOT_SUPPORTED;
+}
+
+VOID
+NTAPI
+KdNetShareDeregister(VOID)
+{
+}
+
+NTSTATUS
+NTAPI
+KdNetShareQuery(_Out_ PKDNET_SHARE_INFO Info)
+{
+    UNREFERENCED_PARAMETER(Info);
+    return STATUS_NOT_SUPPORTED;
+}
+
+NTSTATUS
+NTAPI
+KdNetShareTransmit(_In_reads_bytes_(Length) const UCHAR *Frame,
+                   _In_ ULONG Length)
+{
+    UNREFERENCED_PARAMETER(Frame);
+    UNREFERENCED_PARAMETER(Length);
+    return STATUS_NOT_SUPPORTED;
+}
+
+ULONG
+NTAPI
+KdNetSharePoll(_In_ ULONG MaxFrames)
+{
+    UNREFERENCED_PARAMETER(MaxFrames);
+    return 0;
 }
 
 /* EOF */
