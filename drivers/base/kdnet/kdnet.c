@@ -1732,6 +1732,10 @@ typedef struct _KDNET_SHARE_STATE
     ULONGLONG OsFramesReceived;
     ULONGLONG OsFramesDropped;
     ULONGLONG DebuggerFramesYielded;
+
+    /* Frames handed over from the debugger's own poll rather than the OS poll.
+     * Interlocked, because that path holds no lock (see below). */
+    LONG OsFramesFromDebuggerPoll;
 } KDNET_SHARE_STATE, *PKDNET_SHARE_STATE;
 
 /*
@@ -1770,6 +1774,64 @@ KdNetShareLeave(_In_ KIRQL OldIrql)
 }
 
 static BOOLEAN
+KdNetShareIsDebuggerFrame(_In_reads_bytes_(Length) const UCHAR *Frame,
+                          _In_ ULONG Length);
+
+/*
+ * Hand the OS a frame the debugger does not want, from the debugger's own poll.
+ *
+ * This poll used to drop such frames, on the stated reasoning that it "only
+ * ever runs with the machine frozen, where there is no one to deliver them to".
+ * That reasoning is wrong, and the sharing feature does not work without this
+ * function.  The break-in poll - KdNetReceiveExpected with
+ * PACKET_TYPE_KD_POLL_BREAKIN - runs on a live, unfrozen machine and runs
+ * constantly, so both polls compete for the same ring and the debugger's wins
+ * nearly every time.  Measured before this fix: ten broadcast ARP requests for
+ * the target's address produced ten releases here and not one indication to the
+ * OS, so the guest answered nothing and inbound traffic was dead.
+ *
+ * No lock is taken and none may be.  This can run with every other processor
+ * frozen, and one of them could be holding the share lock; that is the same
+ * asymmetry the lock comment above describes.  The callback is safe under that
+ * rule because it claims a receive slot with a single interlocked compare-
+ * exchange and copies into non-paged memory - no allocation, no blocking, no
+ * re-entry into the transport, and no printing.
+ */
+static volatile LONG KdNetShareCallbackDepth;
+
+static VOID
+KdNetShareDeliverFromDebuggerPoll(_In_reads_bytes_(Length) const UCHAR *Frame,
+                                  _In_ ULONG Length)
+{
+    PKDNET_SHARE_STATE Share = KdNet.Share;
+    PKDNET_SHARE_RECEIVE_CALLBACK Receive;
+    PVOID Context;
+
+    if (Share == NULL)
+        return;
+    if (Length < KDNET_ETH_HEADER_SIZE)
+        return;
+
+    /* Raised before the callback pointer is read, so that a deregistration
+     * which clears it can tell whether this path is still inside the callback.
+     * See KdNetShareDeregister for the other half. */
+    InterlockedIncrement(&KdNetShareCallbackDepth);
+
+    Receive = Share->Receive;
+    if (Receive != NULL)
+    {
+        /* A deregistration racing us can clear Context between these two
+         * reads, so the callback may be handed a NULL context.  That is
+         * defined: the miniport's callback returns immediately on one. */
+        Context = Share->Context;
+        Receive(Context, Frame, Length);
+        InterlockedIncrement(&Share->OsFramesFromDebuggerPoll);
+    }
+
+    InterlockedDecrement(&KdNetShareCallbackDepth);
+}
+
+static BOOLEAN
 KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload,
                   _In_ ULONG Capacity,
                   _Out_ PULONG PayloadLength,
@@ -1800,6 +1862,14 @@ KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload
             else if (EtherType == ETHERTYPE_IPV4 && Payload != NULL)
                 Received = KdNetHandleIpv4(Frame, Length, Payload,
                                            Capacity, PayloadLength);
+
+            /* Not the debugger's, and about to be released: this is the OS's
+             * last chance to see it.  Classified rather than inferred from
+             * !Received, so that a debugger frame this poll could not use -
+             * a malformed datagram, or any frame at all when Payload is NULL -
+             * is still never duplicated into the OS. */
+            if (!Received && !KdNetShareIsDebuggerFrame(Frame, Length))
+                KdNetShareDeliverFromDebuggerPoll(Frame, Length);
         }
         KdNetHardwareReleaseReceive();
         if (Received)
@@ -1937,6 +2007,16 @@ KdNetShareDeregister(VOID)
     KdNet.Share->Receive = NULL;
     KdNet.Share->Context = NULL;
     KdNetShareLeave(OldIrql);
+
+    /* The lock alone is no longer proof of quiescence.  The debugger's poll
+     * also invokes the callback and deliberately takes no lock, so wait for
+     * that path to drain as well before the caller frees its context.
+     *
+     * This terminates: the callback is a slot claim and a copy, and the only
+     * way to be inside it is to be running, which a processor frozen in the
+     * debugger is not - and while any processor is frozen, this one is too. */
+    while (InterlockedCompareExchange(&KdNetShareCallbackDepth, 0, 0) != 0)
+        YieldProcessor();
 }
 
 NTSTATUS
