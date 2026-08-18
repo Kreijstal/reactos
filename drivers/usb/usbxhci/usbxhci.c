@@ -1531,7 +1531,7 @@ XHCI_AbortTransfer(IN PVOID xhciExtension,
         XhciEndpoint->EndpointStatus = USBPORT_ENDPOINT_HALT;
     }
 
-    XHCI_EndTransferEventDeferral();
+    XHCI_EndTransferEventDeferral(XhciExtension);
 
     DPRINT("XHCI_AbortTransfer: retired %lu TRBs on slot %lu DCI %lu, dequeue 0x%I64x\n",
            TrbCount, SlotId, DCI, DequeuePA.QuadPart);
