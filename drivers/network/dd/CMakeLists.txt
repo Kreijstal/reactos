@@ -34,3 +34,9 @@ endif()
 if(_E1000E_NT_NUM GREATER_EQUAL 1536)
     add_subdirectory(vwifi)
 endif()
+# kdnetshare lets the OS use the NIC the kernel debugger owns, so a machine
+# with a single adapter no longer has to choose between KDNET and a network.
+# NDIS 6.20, same NT 6.0+ gate; inert unless /KDNETSHARE is passed at boot.
+if(_E1000E_NT_NUM GREATER_EQUAL 1536)
+    add_subdirectory(kdnetshare)
+endif()
