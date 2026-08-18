@@ -1,0 +1,73 @@
+; ReactOS KDNET Shared Adapter Miniport Installation File
+;
+; Binds to the placeholder identity pci.sys gives the kernel debugger's network
+; adapter (drivers/bus/pci/fdo.c rewrites the real VendorID/DeviceID to
+; DEAD/BEEF so that no ordinary miniport can claim hardware kdnet.dll is
+; already driving).  Because that device node exists only on a KDNET boot, this
+; driver can only ever load where sharing makes sense.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Net
+ClassGUID   = {4d36e972-e325-11ce-bfc1-08002be10318}
+Provider    = %ReactOS%
+DriverVer   = 08/18/2026,1.0.0.0
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%ReactOS% = Models,NTamd64,NTARM64
+
+[Models]
+%kdnetshare.DeviceDesc% = kdnetshare.ndi, PCI\VEN_DEAD&DEV_BEEF
+
+[Models.NTamd64]
+%kdnetshare.DeviceDesc% = kdnetshare.ndi, PCI\VEN_DEAD&DEV_BEEF
+
+[Models.NTARM64]
+%kdnetshare.DeviceDesc% = kdnetshare.ndi, PCI\VEN_DEAD&DEV_BEEF
+
+[kdnetshare.ndi]
+Characteristics = 0x84    ; NCF_PHYSICAL | NCF_HAS_UI
+BusType         = 5       ; PCIBus
+AddReg          = kdnetshare.reg
+CopyFiles       = kdnetshare.CopyFiles
+
+[kdnetshare.ndi.Services]
+AddService = kdnetshare, 2, kdnetshare.Service, kdnetshare.EventLog
+
+[kdnetshare.reg]
+HKR, Ndi,            Service,    0, "kdnetshare"
+HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+HKR, Ndi\Interfaces, LowerRange, 0, "ethernet"
+
+[kdnetshare.CopyFiles]
+kdnetshare.sys
+
+[kdnetshare.Service]
+DisplayName    = %kdnetshare.ServiceDesc%
+ServiceType    = 1      ; SERVICE_KERNEL_DRIVER
+StartType      = 3      ; SERVICE_DEMAND_START
+ErrorControl   = 1      ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %12%\kdnetshare.sys
+LoadOrderGroup = NDIS
+
+[kdnetshare.EventLog]
+AddReg = kdnetshare.EventLog.Reg
+
+[kdnetshare.EventLog.Reg]
+HKR, , EventMessageFile, 0x00020000, "%%SystemRoot%%\System32\netevent.dll"
+HKR, , TypesSupported,   0x00010001, 7
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+kdnetshare.sys = 1
+
+[Strings]
+ReactOS                 = "ReactOS Team"
+kdnetshare.DeviceDesc   = "ReactOS KDNET Shared Adapter"
+kdnetshare.ServiceDesc  = "ReactOS KDNET Shared Adapter Driver"
+DiskName                = "ReactOS KDNET Shared Adapter Driver Installation Disk"

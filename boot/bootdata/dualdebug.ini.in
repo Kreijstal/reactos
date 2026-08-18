@@ -14,6 +14,7 @@ ASUS_KDNET_ONECPU="ReactOS NT10 - hardware Ethernet KDNET (buffered, one CPU)"
 ASUS_KDNET_HARVEST="ReactOS NT10 - hardware Ethernet KDNET (verbose harvest)"
 QEMU_KDNET="ReactOS NT10 - QEMU e1000 KDNET"
 NORMAL="ReactOS NT10 - no debugger"
+QEMU_KDNET_SHARE="ReactOS NT10 - QEMU e1000 KDNET + shared NIC"
 
 [LOCAL_KDBG]
 BootType=Windows2003
@@ -49,3 +50,11 @@ Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=10.0.2.2 /HOSTMAC=52-
 BootType=Windows2003
 SystemPath=\reactos
 Options=/KERNEL=ntkrnlk.exe /NODEBUG /FASTDETECT /MININT
+
+; Same as QEMU_KDNET plus /KDNETSHARE, which lets kdnetshare.sys give the OS a
+; network interface on the very adapter the debugger is using.  Listed last so
+; the position of every existing entry - and DefaultOS - is unchanged.
+[QEMU_KDNET_SHARE]
+BootType=Windows2003
+SystemPath=\reactos
+Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=10.0.2.2 /HOSTMAC=52-55-0A-00-02-02 /TARGETIP=10.0.2.15 /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDNETSHARE /SOS /FASTDETECT /MININT
