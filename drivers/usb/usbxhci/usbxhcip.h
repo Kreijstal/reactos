@@ -173,6 +173,22 @@ NTAPI
 XHCI_ProcessCommandCompletion(IN PXHCI_EXTENSION XhciExtension,
                              IN PXHCI_EVENT_TRB EventTrb);
 
+typedef struct _XHCI_PENDING_TRANSFER {
+    PXHCI_TRANSFER XhciTransfer;
+    PXHCI_ENDPOINT XhciEndpoint;
+    PXHCI_EXTENSION XhciExtension;
+    PHYSICAL_ADDRESS CompletionTrb;    // TRB expected to generate the completion event
+    ULONG TrbCount;                   // Number of TRBs that belong to the transfer TD
+    ULONG RequestedLength;            // Original request length for proper transfer length calculation
+    ULONGLONG SubmitTime;             // KeQueryInterruptTime() when the TD was handed to the controller
+    BOOLEAN InUse;
+} XHCI_PENDING_TRANSFER, *PXHCI_PENDING_TRANSFER;
+
+/* PendingTransfer is the caller's private snapshot of the tracking slot, not a
+ * pointer into g_PendingTransfers -- see FindPendingTransferSnapshot.  Passing
+ * it in keeps the whole completion on one consistent copy; looking the slot up
+ * a second time here would miss an abort that landed in between and silently
+ * skip the transfer ring dequeue advance. */
 VOID
 NTAPI
 XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
@@ -180,7 +196,8 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
                      IN ULONG EndpointId,
                      IN PHYSICAL_ADDRESS TrbPointer,
                      IN ULONG TransferLength,
-                     IN ULONG USBDStatus);
+                     IN ULONG USBDStatus,
+                     IN PXHCI_PENDING_TRANSFER PendingTransfer);
 
 /*
  * Transfer events must not be handed back to USBPORT while a miniport entry
@@ -195,7 +212,7 @@ XHCI_BeginTransferEventDeferral(VOID);
 
 VOID
 NTAPI
-XHCI_EndTransferEventDeferral(VOID);
+XHCI_EndTransferEventDeferral(IN PXHCI_EXTENSION XhciExtension);
 
 VOID
 NTAPI
