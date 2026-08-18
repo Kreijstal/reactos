@@ -394,6 +394,15 @@ typedef struct _XHCI_EXTENSION
     PXHCI_HC_RESOURCES HcResourcesVA;
     PHYSICAL_ADDRESS HcResourcesPA;
     PHYSICAL_ADDRESS LastCommandTrbPA; // Track the actual physical address of the last sent command TRB
+    /* Serializes XHCI_ProcessEvent.  The event ring is drained from the
+     * interrupt DPC (DISPATCH_LEVEL) and, concurrently on SMP, from the
+     * synchronous poll paths (WaitForCommandCompletion, the miniport poll/
+     * check/query callbacks) that run at PASSIVE in a USBPORT worker.  Two CPUs
+     * advancing one shared dequeue pointer and consumer cycle state with no
+     * lock corrupts the cycle state, after which every event appears stale and
+     * the ring wedges permanently.  All drainers are <= DISPATCH, so a spin
+     * lock is sufficient. */
+    KSPIN_LOCK EventRingLock;
     /* Software-maintained high part for XHCI_Get32BitFrameNumber.
      * The hardware MFINDEX register is only 14 bits wide and wraps every ~2s.
      * Callers in usbport expect a monotonically increasing 32-bit frame number,

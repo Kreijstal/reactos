@@ -46,6 +46,7 @@ typedef struct _XHCI_PENDING_COMMAND {
 
 USBPORT_REGISTRATION_PACKET RegPacket;
 VOID RemovePendingCommand(PXHCI_PENDING_COMMAND PendingCommand);
+VOID RetargetPendingCommand(PHYSICAL_ADDRESS OldTrbPointer, PHYSICAL_ADDRESS NewTrbPointer);
 PXHCI_PENDING_COMMAND
 AddPendingCommand(XHCI_COMMAND_TYPE CommandType, PHYSICAL_ADDRESS TrbPointer, ULONG SlotId);
 /* Public Functions *******************************************************************************/
@@ -348,6 +349,7 @@ MPSTATUS
 NTAPI
 XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
 {
+
     PXHCI_HC_RESOURCES HcResourcesVA;
     PHYSICAL_ADDRESS HcResourcesPA;
     XHCI_EVENT_RING_DEQUEUE_POINTER erstdp;
@@ -356,6 +358,12 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     ULONG TRBType;
     XHCI_EVENT_TRB eventTRB;
     ULONG EventsProcessed = 0;
+    KIRQL OldIrql;
+
+    /* One drainer at a time: the DPC and the synchronous poll paths both call
+     * this on SMP and would otherwise race the shared dequeue pointer and
+     * consumer cycle state.  Acquire before touching any ring state. */
+    KeAcquireSpinLock(&XhciExtension->EventRingLock, &OldIrql);
 
     HcResourcesVA = XhciExtension -> HcResourcesVA;
     HcResourcesPA = XhciExtension -> HcResourcesPA;
@@ -468,7 +476,9 @@ XHCI_ProcessEvent (IN PXHCI_EXTENSION XhciExtension)
     erstdp.EventHandlerBusy = 1;
 
     XHCI_Write64bitReg(RunTimeRegisterBase + XHCI_ERSTDP, erstdp.AsULONGLONG);
-    
+
+    KeReleaseSpinLock(&XhciExtension->EventRingLock, OldIrql);
+
     return MP_STATUS_SUCCESS;
 }
 
@@ -492,8 +502,19 @@ XHCI_SendCommand (IN XHCI_TRB CommandTRB,
     HcResourcesPA = XhciExtension->HcResourcesPA;
     enqueue_pointer = HcResourcesVA->CommandRing.enqueue_pointer;
     dequeue_pointer = HcResourcesVA->CommandRing.dequeue_pointer;
-    
-    // Enhanced ring full check - consider wrap-around scenarios  
+
+    /* The address the caller pre-computed for its pending command == the PA of
+     * this initial enqueue pointer.  Capture it now: if the Link-TRB follow
+     * below relocates placement, we re-key the pending command from this
+     * guessed address to the real one before ringing the doorbell. */
+    ULONG GuessedTrbIndex = (ULONG)((ULONG_PTR)enqueue_pointer -
+                            (ULONG_PTR)&HcResourcesVA->CommandRing.firstSeg.XhciTrb[0]) / sizeof(XHCI_TRB);
+    PHYSICAL_ADDRESS GuessedTrbPA;
+    GuessedTrbPA.QuadPart = HcResourcesPA.QuadPart +
+                     FIELD_OFFSET(XHCI_HC_RESOURCES, CommandRing.firstSeg.XhciTrb[0]) +
+                     (GuessedTrbIndex * sizeof(XHCI_TRB));
+
+    // Enhanced ring full check - consider wrap-around scenarios
     PXHCI_TRB NextEnqueuePtr = enqueue_pointer + 1;
     
     // Check if next position would be a link TRB or past end of ring
@@ -575,15 +596,20 @@ XHCI_SendCommand (IN XHCI_TRB CommandTRB,
     // Store the actual TRB physical address for accurate command tracking
     // This ensures the caller gets the EXACT address where the TRB was placed
     XhciExtension->LastCommandTrbPA = TrbPA;
-    
-    // TODO: Add check for potential address reuse by scanning pending commands
-    // This would help detect command ring wrap-around or tracking issues
-    
+
+    /* If a Link-TRB follow relocated the placement, the caller's pending
+     * command is keyed on the pre-follow (guessed) address.  Re-key it to the
+     * address the controller will report, before the doorbell makes the
+     * command eligible for a completion event on another CPU.  Without this,
+     * every command that lands on a ring wrap times out despite completing. */
+    if (GuessedTrbPA.QuadPart != TrbPA.QuadPart)
+        RetargetPendingCommand(GuessedTrbPA, TrbPA);
+
     *enqueue_pointer = CommandTRB;
     enqueue_pointer = enqueue_pointer + 1;
     HcResourcesVA->CommandRing.enqueue_pointer = enqueue_pointer;
-    
-    // ring doorbell 
+
+    // ring doorbell
     DoorBellRegisterBase = XhciExtension->DoorBellRegisterBase;
     Doorbell_0.DoorBellTarget = 0;
     Doorbell_0.RsvdZ = 0;
@@ -1042,6 +1068,9 @@ XHCI_StartController(IN PVOID xhciExtension,
     
     // Initialize command tracking fields
     XhciExtension->LastCommandTrbPA.QuadPart = 0;
+
+    /* Serializes every XHCI_ProcessEvent drainer (DPC vs. synchronous poll). */
+    KeInitializeSpinLock(&XhciExtension->EventRingLock);
 
     MPStatus = XHCI_InitializeHardware(XhciExtension);
 
