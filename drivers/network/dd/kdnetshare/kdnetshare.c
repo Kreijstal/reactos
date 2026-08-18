@@ -105,6 +105,8 @@ KdnsShareReceive(
         NdisMoveMemory(Adapter->Rx[Slot].Data, Frame, Length);
         Adapter->Rx[Slot].Length = Length;
         Adapter->RxNext = (Slot + 1) % KDNS_RX_BUFFERS;
+        Adapter->RxCallbacks++;
+        InterlockedIncrement(&Adapter->RxPending);
         return;
     }
 
@@ -131,6 +133,8 @@ KdnsIndicateReadySlots(
         {
             continue;
         }
+
+        InterlockedDecrement(&Adapter->RxPending);
 
         Mdl = NdisAllocateMdl(Adapter->MiniportAdapterHandle,
                               Adapter->Rx[Slot].Data,
@@ -238,8 +242,28 @@ KdnsPollTimerDpc(
 
     if (Adapter->DataPathRunning && !Adapter->Halting)
     {
-        if (KdNetSharePoll(KDNS_RX_DRAIN) != 0)
+        ULONG Delivered = KdNetSharePoll(KDNS_RX_DRAIN);
+
+        Adapter->PollDelivered += Delivered;
+
+        /* RxPending, not just Delivered: the debugger's own poll also fills
+         * slots, and those would otherwise sit here until the OS poll happened
+         * to return a frame of its own. */
+        if (Delivered != 0 || Adapter->RxPending != 0)
             KdnsIndicateReadySlots(Adapter);
+
+        /* Once every five seconds, not a hot path.  Localises a receive
+         * failure to a stage: no callbacks means kdnet never handed anything
+         * over, callbacks without RxOk means indication is failing, and RxOk
+         * without a reply from the guest means the fault is above NDIS. */
+        if (++Adapter->PollTicks % (5000 / KDNS_POLL_INTERVAL_MS) == 0)
+        {
+            DPRINT1("KDNETSHARE: ticks=%lu osPoll=%I64u cb=%I64u rxOk=%I64u "
+                    "noBuf=%I64u pending=%ld tx=%I64u\n",
+                    Adapter->PollTicks, Adapter->PollDelivered,
+                    Adapter->RxCallbacks, Adapter->RxOk,
+                    Adapter->RxNoBuffer, Adapter->RxPending, Adapter->TxOk);
+        }
     }
 
     InterlockedDecrement(&Adapter->PollActive);
