@@ -629,6 +629,44 @@ AddPendingCommand(XHCI_COMMAND_TYPE CommandType, PHYSICAL_ADDRESS TrbPointer, UL
     return NewCommand;
 }
 
+/*
+ * Re-key a pending command from the address the caller guessed to the address
+ * the TRB was actually placed at.  Callers pre-compute the command TRB PA from
+ * CommandRing.enqueue_pointer BEFORE calling XHCI_SendCommand and register the
+ * pending command with it, so the entry exists before the doorbell rings.  But
+ * XHCI_SendCommand follows the Link TRB before placing, so a command enqueued
+ * while the pointer sits on the Link TRB (index 255) lands at index 0 instead.
+ * The completion event then reports the index-0 address, FindPendingCommand
+ * fails to match the index-255 guess, and WaitForCommandCompletion times out
+ * even though the controller completed the command -- wedging endpoint
+ * recovery permanently.  Fixing the key here, before the doorbell, keeps it
+ * race-free against the completion arriving on another CPU's DPC.
+ */
+VOID
+RetargetPendingCommand(PHYSICAL_ADDRESS OldTrbPointer, PHYSICAL_ADDRESS NewTrbPointer)
+{
+    ULONG i;
+    KIRQL OldIrql;
+    ULONGLONG OldKey = OldTrbPointer.QuadPart & ~0xFULL;
+
+    KeAcquireSpinLock(&g_PendingCommandsLock, &OldIrql);
+
+    for (i = 0; i < MAX_PENDING_COMMANDS; i++)
+    {
+        if (g_PendingCommands[i].InUse && !g_PendingCommands[i].Completed &&
+            (g_PendingCommands[i].TrbPointer.QuadPart & ~0xFULL) == OldKey)
+        {
+            DPRINT1("RetargetPendingCommand: command type %d re-keyed 0x%I64x -> 0x%I64x (command ring wrap)\n",
+                    g_PendingCommands[i].CommandType,
+                    g_PendingCommands[i].TrbPointer.QuadPart, NewTrbPointer.QuadPart);
+            g_PendingCommands[i].TrbPointer = NewTrbPointer;
+            break;
+        }
+    }
+
+    KeReleaseSpinLock(&g_PendingCommandsLock, OldIrql);
+}
+
 VOID
 CompletePendingCommand(PHYSICAL_ADDRESS TrbPointer, ULONG CompletionCode, ULONG SlotIdFromEvent)
 {
