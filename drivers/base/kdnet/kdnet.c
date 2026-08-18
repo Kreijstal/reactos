@@ -17,6 +17,7 @@
 #include <reactos/kddll.h>
 #include <reactos/kdprotocol.h>
 #include <reactos/kdnetprotocol.h>
+#include <reactos/kdnetshare.h>
 
 #include "nic.h"
 
@@ -202,6 +203,13 @@ typedef struct _KDNET_TRANSPORT
     BOOLEAN HostMacValid;
     BOOLEAN Initialized;
     BOOLEAN BreakInPending;
+
+    /* Adapter sharing.  ShareEnabled reflects /KDNETSHARE and is decided once,
+     * during option parsing; Share is allocated only when a miniport actually
+     * registers, so a boot without the option carries no share state at all
+     * and the only cost on the debugger's paths is one NULL pointer test. */
+    BOOLEAN ShareEnabled;
+    struct _KDNET_SHARE_STATE *Share;
 
     ULONG HarvestFlags;
     ULONG HarvestRequestId;
@@ -436,6 +444,35 @@ KdNetFindOption(_In_opt_ const CHAR *Options, _In_ const CHAR *Name)
             return Current + Index + 1;
     }
     return NULL;
+}
+
+/* KdNetFindOption only matches "NAME=value" forms.  Valueless switches such as
+ * /KDNETSHARE need their own lookup: the name must be followed by a separator
+ * (KdNetIsSpace counts the terminating NUL and the next option's '/'), so
+ * /KDNETSHARE does not match a hypothetical /KDNETSHAREFOO. */
+static BOOLEAN
+KdNetHasFlag(_In_opt_ const CHAR *Options, _In_ const CHAR *Name)
+{
+    const CHAR *Current;
+    ULONG Index;
+
+    if (Options == NULL)
+        return FALSE;
+
+    for (Current = Options; *Current != 0; ++Current)
+    {
+        if (Current != Options && !KdNetIsSpace(Current[-1]))
+            continue;
+
+        for (Index = 0; Name[Index] != 0; ++Index)
+        {
+            if (KdNetUpper(Current[Index]) != KdNetUpper(Name[Index]))
+                break;
+        }
+        if (Name[Index] == 0 && KdNetIsSpace(Current[Index]))
+            return TRUE;
+    }
+    return FALSE;
 }
 
 static BOOLEAN
@@ -831,6 +868,36 @@ KdNetHardwareSend(_In_reads_bytes_(Length) const UCHAR *Frame, _In_ ULONG Length
     else
         ++KdNet.FramesDropped;
     return Sent;
+}
+
+/*
+ * Is the producer transmit descriptor already reclaimed by the adapter?
+ *
+ * Both backends open their send with a KDNET_SHORT_WAIT_POLLS spin on exactly
+ * this bit - a quarter of a second at KDNET_POLL_DELAY_US.  That is the right
+ * trade for the debugger, which has the machine to itself and would rather wait
+ * than lose a packet.  It is the wrong trade entirely for the OS data path,
+ * which runs at HIGH_LEVEL under the share lock, where a 250 ms spin would
+ * stall every processor and hold off a debugger break-in for the same time.
+ * So the shared path tests first and gives up early, and by the time it calls
+ * the send the spin inside it is guaranteed to exit on its first iteration.
+ */
+static BOOLEAN
+KdNetHardwareTxSlotFree(VOID)
+{
+    if (KdNet.Backend == KdNetBackendE1000)
+    {
+        volatile KDNET_E1000_TX_DESCRIPTOR *Descriptor =
+            &KdNet.E1000.TxRing[KdNet.E1000.TxProducer];
+
+        return (BOOLEAN)((Descriptor->Status & KDNET_E1000_TX_DD) != 0);
+    }
+    else
+    {
+        PRTL_DESC Descriptor = &KdNet.Rtl8168.TxRing[KdNet.Rtl8168.TxProducer];
+
+        return (BOOLEAN)((*(volatile ULONG *)&Descriptor->opts1 & DESC_OWN) == 0);
+    }
 }
 
 static BOOLEAN
@@ -1632,6 +1699,76 @@ KdNetHandleIpv4(_In_reads_bytes_(Length) const UCHAR *Frame,
                            Payload, Capacity, PayloadLength);
 }
 
+/*
+ * Adapter sharing, part 1.
+ *
+ * The one rule that matters here: the OS-side poll never takes a frame that
+ * belongs to the debugger.  An earlier version buffered such frames and replayed
+ * them into KdNetPollDatagram, which looked like the careful thing to do and was
+ * not - the debugger's protocol is a synchronous request/response over the wire,
+ * so a side buffer feeds it stale packets ahead of live ones and desynchronises
+ * the session.  Observed: the miniport registered and the debug link went dead
+ * three hundred milliseconds later, while the machine itself carried on booting.
+ *
+ * Instead the OS poll peeks at each frame and, on finding one the debugger might
+ * want, stops draining and leaves it in the ring with its descriptor unreleased.
+ * The debugger's own poll then reads it straight from the hardware, in order,
+ * exactly as if no one else had been looking.  The cost is head-of-line blocking
+ * of OS traffic behind a debugger frame until the debugger next polls, which it
+ * does constantly.  That is the correct way round: this whole feature is only
+ * worth having if the debug channel stays trustworthy.
+ */
+
+/* Ceiling on how long a shared transmit may hold the machine at HIGH_LEVEL
+ * waiting for a descriptor: 8 * KDNET_POLL_DELAY_US = 400 us. */
+#define KDNET_SHARE_TX_POLLS 8
+
+typedef struct _KDNET_SHARE_STATE
+{
+    PKDNET_SHARE_RECEIVE_CALLBACK Receive;
+    PVOID Context;
+
+    ULONGLONG OsFramesSent;
+    ULONGLONG OsFramesReceived;
+    ULONGLONG OsFramesDropped;
+    ULONGLONG DebuggerFramesYielded;
+} KDNET_SHARE_STATE, *PKDNET_SHARE_STATE;
+
+/*
+ * The share lock.  It is deliberately hand-rolled rather than a KSPIN_LOCK,
+ * because of an asymmetry that a normal lock cannot express:
+ *
+ *   - The OS side takes it at HIGH_LEVEL.  Raising to HIGH_LEVEL masks the
+ *     freeze IPI, so KeFreezeExecution cannot complete while a processor is
+ *     inside the critical section; a debugger break-in therefore always finds
+ *     the descriptor rings in a consistent state, at the cost of waiting the
+ *     few microseconds the section lasts.
+ *
+ *   - The debugger side does NOT take it, and must not: it runs with every
+ *     other processor frozen, and one of those frozen processors could be the
+ *     holder.  Exclusion comes from the freeze itself, which the rule above
+ *     guarantees cannot land mid-section.
+ *
+ * Nothing inside the critical section may print.  DbgPrint reaches KdSendPacket
+ * and would re-enter the transport whose ring is being manipulated.
+ */
+static volatile LONG KdNetShareBusy;
+
+static VOID
+KdNetShareEnter(_Out_ PKIRQL OldIrql)
+{
+    KeRaiseIrql(HIGH_LEVEL, OldIrql);
+    while (InterlockedCompareExchange(&KdNetShareBusy, 1, 0) != 0)
+        YieldProcessor();
+}
+
+static VOID
+KdNetShareLeave(_In_ KIRQL OldIrql)
+{
+    InterlockedExchange(&KdNetShareBusy, 0);
+    KeLowerIrql(OldIrql);
+}
+
 static BOOLEAN
 KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload,
                   _In_ ULONG Capacity,
@@ -1643,6 +1780,9 @@ KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload
     USHORT EtherType;
     BOOLEAN Received;
 
+    /* No special case for adapter sharing: the OS-side poll leaves anything
+     * that might be ours in the ring, so the hardware is still the one and only
+     * source of debugger frames, and they arrive here in wire order. */
     for (Poll = 0; Poll < PollCount; ++Poll)
     {
         if (!KdNetHardwareReceive(&Frame, &Length))
@@ -1666,6 +1806,247 @@ KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload
             return TRUE;
     }
     return FALSE;
+}
+
+/*
+ * Adapter sharing, part 2: frame ownership and the exported interface.
+ *
+ * Note the asymmetry in what the two sides do with a frame that is not theirs.
+ * The OS-side poll leaves debugger frames untouched in the ring, because the
+ * debugger is free to be idle and must not lose a break-in - and because only
+ * the hardware can preserve their order.  The debugger's own poll simply drops
+ * OS frames, because it only ever runs with the machine frozen, where there is
+ * no one to deliver them to and the sender will retransmit anyway.
+ *
+ * "Might be the debugger's" is deliberately generous.  Guessing wrong towards
+ * the debugger costs one deferred OS frame; guessing wrong the other way costs
+ * a lost debugger packet, which is the failure this whole design exists to
+ * avoid.
+ */
+static BOOLEAN
+KdNetShareIsDebuggerFrame(_In_reads_bytes_(Length) const UCHAR *Frame,
+                          _In_ ULONG Length)
+{
+    const UCHAR *Ip, *Arp;
+    USHORT EtherType;
+
+    if (Length < KDNET_ETH_HEADER_SIZE)
+        return FALSE;
+    EtherType = KdNetReadBe16(Frame + 12);
+
+    if (EtherType == ETHERTYPE_ARP)
+    {
+        /* ARP about either end of the debug conversation is the debugger's:
+         * it is how the host MAC gets resolved when /HOSTMAC is not given, and
+         * how the host finds us.  Any other ARP is the OS's business. */
+        if (Length < KDNET_ETH_HEADER_SIZE + 28)
+            return FALSE;
+        Arp = Frame + KDNET_ETH_HEADER_SIZE;
+        if (KdNetReadBe16(Arp) != ARP_HARDWARE_ETHERNET ||
+            KdNetReadBe16(Arp + 2) != ETHERTYPE_IPV4 ||
+            Arp[4] != IEEE_802_ADDR_LENGTH || Arp[5] != 4)
+        {
+            return FALSE;
+        }
+        return (BOOLEAN)(KdNetReadBe32(Arp + 14) == KdNet.HostIp ||
+                         KdNetReadBe32(Arp + 24) == KdNet.TargetIp);
+    }
+
+    if (EtherType != ETHERTYPE_IPV4 ||
+        Length < KDNET_ETH_HEADER_SIZE + KDNET_IPV4_HEADER_SIZE)
+    {
+        return FALSE;
+    }
+
+    Ip = Frame + KDNET_ETH_HEADER_SIZE;
+    if ((Ip[0] >> 4) != 4 || Ip[9] != IP_PROTOCOL_UDP)
+        return FALSE;
+    if ((ULONG)((Ip[0] & 0xf) * 4) < KDNET_IPV4_HEADER_SIZE)
+        return FALSE;
+
+    /* Exactly the address pair KdNetHandleIpv4 accepts, and deliberately not a
+     * port test: a non-initial IP fragment carries no UDP header, and those
+     * fragments still belong to the debugger's reassembly. */
+    return (BOOLEAN)(KdNetReadBe32(Ip + 12) == KdNet.HostIp &&
+                     KdNetReadBe32(Ip + 16) == KdNet.TargetIp);
+}
+
+NTSTATUS
+NTAPI
+KdNetShareRegister(_In_ PKDNET_SHARE_REGISTRATION Registration)
+{
+    PKDNET_SHARE_STATE Share;
+    KIRQL OldIrql;
+
+    if (Registration == NULL ||
+        Registration->Version != KDNET_SHARE_INTERFACE_VERSION ||
+        Registration->Receive == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!KdNet.ShareEnabled)
+        return STATUS_NOT_SUPPORTED;
+    if (!KdNet.Initialized || KdNet.Backend == KdNetBackendNone)
+        return STATUS_DEVICE_NOT_READY;
+
+    if (KdNet.Share == NULL)
+    {
+        Share = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Share), 'ShdK');
+        if (Share == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlZeroMemory(Share, sizeof(*Share));
+
+        if (InterlockedCompareExchangePointer((PVOID volatile *)&KdNet.Share,
+                                              Share, NULL) != NULL)
+        {
+            /* Another registration published first; ours is surplus. */
+            ExFreePoolWithTag(Share, 'ShdK');
+        }
+    }
+
+    /* The state block itself is never freed, for the whole life of the boot.
+     * KdNetPollDatagram reads it from a bugcheck path with no lock and no way
+     * to be told the memory went away, and a few kilobytes retained is a far
+     * better trade than a use-after-free inside the debugger. */
+    KdNetShareEnter(&OldIrql);
+    if (KdNet.Share->Receive != NULL)
+    {
+        KdNetShareLeave(OldIrql);
+        return STATUS_DEVICE_BUSY;
+    }
+    KdNet.Share->Context = Registration->Context;
+    KdNet.Share->Receive = Registration->Receive;
+    KdNetShareLeave(OldIrql);
+
+    return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+KdNetShareDeregister(VOID)
+{
+    KIRQL OldIrql;
+
+    if (KdNet.Share == NULL)
+        return;
+
+    /* The callback is only ever invoked with this lock held, so once we have
+     * held it and cleared the pointer, no invocation is in progress and none
+     * can begin.  That is the guarantee the caller frees its context on. */
+    KdNetShareEnter(&OldIrql);
+    KdNet.Share->Receive = NULL;
+    KdNet.Share->Context = NULL;
+    KdNetShareLeave(OldIrql);
+}
+
+NTSTATUS
+NTAPI
+KdNetShareQuery(_Out_ PKDNET_SHARE_INFO Info)
+{
+    if (Info == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (!KdNet.ShareEnabled)
+        return STATUS_NOT_SUPPORTED;
+    if (!KdNet.Initialized || KdNet.Backend == KdNetBackendNone)
+        return STATUS_DEVICE_NOT_READY;
+
+    RtlZeroMemory(Info, sizeof(*Info));
+    Info->Version = KDNET_SHARE_INTERFACE_VERSION;
+    RtlCopyMemory(Info->MacAddress, KdNet.TargetMac, IEEE_802_ADDR_LENGTH);
+    Info->DebuggerHostIp = KdNet.HostIp;
+    Info->DebuggerTargetIp = KdNet.TargetIp;
+    Info->DebuggerPort = KdNet.Port;
+    Info->LinkSpeedMbps = 1000;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+KdNetShareTransmit(_In_reads_bytes_(Length) const UCHAR *Frame,
+                   _In_ ULONG Length)
+{
+    KIRQL OldIrql;
+    BOOLEAN Sent;
+    ULONG Poll;
+
+    if (KdNet.Share == NULL || !KdNet.Initialized)
+        return STATUS_DEVICE_NOT_READY;
+    if (Frame == NULL || Length < KDNET_ETH_HEADER_SIZE ||
+        Length > KDNET_FRAME_CAPACITY)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KdNetShareEnter(&OldIrql);
+
+    /* See KdNetHardwareTxSlotFree: bound the wait to something an OS data path
+     * can afford at HIGH_LEVEL, and report a full ring as a drop rather than
+     * spinning on it.  The sender above us retransmits; the debugger cannot
+     * afford for us to hold the machine while we wait. */
+    for (Poll = 0; Poll < KDNET_SHARE_TX_POLLS; ++Poll)
+    {
+        if (KdNetHardwareTxSlotFree())
+            break;
+        KeStallExecutionProcessor(KDNET_POLL_DELAY_US);
+    }
+    if (Poll == KDNET_SHARE_TX_POLLS)
+    {
+        ++KdNet.Share->OsFramesDropped;
+        KdNetShareLeave(OldIrql);
+        return STATUS_DEVICE_BUSY;
+    }
+
+    Sent = KdNetHardwareSend(Frame, Length);
+    if (Sent)
+        ++KdNet.Share->OsFramesSent;
+    else
+        ++KdNet.Share->OsFramesDropped;
+    KdNetShareLeave(OldIrql);
+
+    return Sent ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
+}
+
+ULONG
+NTAPI
+KdNetSharePoll(_In_ ULONG MaxFrames)
+{
+    PKDNET_SHARE_STATE Share = KdNet.Share;
+    const UCHAR *Frame;
+    ULONG Length, Polled = 0, Delivered = 0;
+    KIRQL OldIrql;
+
+    if (Share == NULL || !KdNet.Initialized || Share->Receive == NULL)
+        return 0;
+
+    KdNetShareEnter(&OldIrql);
+    while (Polled < MaxFrames && Share->Receive != NULL)
+    {
+        if (!KdNetHardwareReceive(&Frame, &Length))
+            break;
+        ++Polled;
+
+        /* The debugger's.  Stop here and leave the descriptor unreleased, so
+         * the frame is still sitting at the head of the ring when the debugger
+         * next polls - in wire order, untouched, and not decoded by anyone
+         * else.  Everything behind it waits, which is the intended priority. */
+        if (KdNetShareIsDebuggerFrame(Frame, Length))
+        {
+            ++Share->DebuggerFramesYielded;
+            break;
+        }
+
+        if (Length >= KDNET_ETH_HEADER_SIZE)
+        {
+            Share->Receive(Share->Context, Frame, Length);
+            ++Delivered;
+        }
+
+        KdNetHardwareReleaseReceive();
+    }
+    Share->OsFramesReceived += Delivered;
+    KdNetShareLeave(OldIrql);
+
+    return Delivered;
 }
 
 static BOOLEAN
@@ -1770,6 +2151,7 @@ KdNetConfigureOptions(_In_opt_ const CHAR *Options)
             return STATUS_INVALID_PARAMETER;
         KdNet.HostMacValid = TRUE;
     }
+    KdNet.ShareEnabled = KdNetHasFlag(Options, "KDNETSHARE");
     Value = KdNetFindOption(Options, "KDNET-HARVEST");
     if (Value != NULL && !KdNetParseHarvestFlags(Value, &KdNet.HarvestFlags))
         return STATUS_INVALID_PARAMETER;

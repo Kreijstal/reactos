@@ -679,10 +679,29 @@ Ndis6DispatchPnp(
                 {
                     extern VOID Ndis6BindAllProtocolsToAdapter(PLOGICAL_ADAPTER);
                     extern VOID Ndis6AttachFiltersToAdapter(PLOGICAL_ADAPTER);
+                    extern VOID Ndis6ImSeedTcpipRegistry(PCUNICODE_STRING);
+                    extern NDIS_STATUS Ndis6CallMiniportRestartEx(PLOGICAL_ADAPTER);
+                    extern VOID ndisRebindAllProtocols(VOID);
+
+                    /* The same three steps NdisIMInitializeDeviceInstanceEx
+                     * performs (see Ndis6InitializeImDeviceInstance).  Without
+                     * them a PnP-started NDIS 6 miniport is bound only by
+                     * native NDIS 6 protocols: Tcpip is a legacy protocol and
+                     * binds from its Linkage\Bind list, which nothing had
+                     * seeded, so no protocol ever bound, nothing ever called
+                     * RestartHandler, and the adapter stayed paused with its
+                     * data path shut for the life of the boot. */
+                    Ndis6ImSeedTcpipRegistry(
+                        &Adapter->NdisMiniportBlock.MiniportName);
+
+                    Ndis6CallMiniportRestartEx(Adapter);
+
                     Ndis6BindAllProtocolsToAdapter(Adapter);
                     /* Phase 7B: attach any registered NDIS 6 filter
                      * drivers to this adapter. */
                     Ndis6AttachFiltersToAdapter(Adapter);
+
+                    ndisRebindAllProtocols();
                 }
             }
             else

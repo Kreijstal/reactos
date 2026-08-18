@@ -6,3 +6,11 @@
 @ stdcall KdRestore(long)
 @ stdcall KdSave(long)
 @ stdcall KdSendPacket(long ptr ptr ptr)
+# Adapter sharing (see sdk/include/reactos/kdnetshare.h).  Consumed by
+# kdnetshare.sys, the NDIS miniport that gives the OS a network on the NIC the
+# debugger owns.  Inert unless /KDNETSHARE is in the boot options.
+@ stdcall KdNetShareRegister(ptr)
+@ stdcall KdNetShareDeregister()
+@ stdcall KdNetShareQuery(ptr)
+@ stdcall KdNetShareTransmit(ptr long)
+@ stdcall KdNetSharePoll(long)
