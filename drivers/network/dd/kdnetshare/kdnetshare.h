@@ -72,6 +72,15 @@ typedef struct _KDNS_ADAPTER
     ULONG64 RxOk;
     ULONG64 RxBytes;
     ULONG64 RxNoBuffer;
+
+    /* Slots filled by the callback but not yet indicated.  The poll timer used
+     * to indicate only when its own KdNetSharePoll call returned frames, which
+     * silently stranded everything the DEBUGGER's poll handed over. */
+    volatile LONG RxPending;
+
+    ULONG64 RxCallbacks;
+    ULONG64 PollDelivered;
+    ULONG PollTicks;
 } KDNS_ADAPTER, *PKDNS_ADAPTER;
 
 #endif /* _KDNETSHARE_H_PRIVATE_ */
