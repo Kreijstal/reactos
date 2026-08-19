@@ -2779,6 +2779,24 @@ LdrpLoadShimEngine(IN PWSTR ImageName, IN PUNICODE_STRING ProcessImage, IN PVOID
     Status = LdrpLoadDll(FALSE, NULL, NULL, &ShimLibraryName, &ShimLibrary, TRUE);
     if (NT_SUCCESS(Status))
     {
+        /* LdrpLoadDll only honours CallInit once LdrpLdrDatabaseIsSetup is TRUE,
+           and LdrpInitializeProcess now loads the shim engine *before* it sets
+           that flag. Without this, the CallInit=TRUE above is a no-op during
+           process initialization and the shim engine's dependency chain stays
+           mapped-but-uninitialized -- which is exactly what SE_InstallBeforeInit
+           below must not walk into (msvcrt!_lock self-recurses until the thread
+           runs out of stack when lock_table has never been initialized). */
+        if (!LdrpLdrDatabaseIsSetup)
+        {
+            NTSTATUS InitStatus = LdrpRunInitializeRoutines(NULL);
+            if (!NT_SUCCESS(InitStatus))
+            {
+                DPRINT1("LDR: Shim engine dependency init failed; status 0x%08lx\n", InitStatus);
+                LdrUnloadDll(ShimLibrary);
+                return;
+            }
+        }
+
         g_pShimEngineModule = ShimLibrary;
         LdrpRunShimEngineInitRoutine(DLL_PROCESS_ATTACH);
         LdrpGetShimEngineInterface();
