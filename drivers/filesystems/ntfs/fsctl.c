@@ -44,7 +44,7 @@ static
 NTSTATUS
 NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 {
-    PARTITION_INFORMATION PartitionInfo;
+    PARTITION_INFORMATION_EX PartitionInfo;
     DISK_GEOMETRY DiskGeometry;
     ULONG ClusterSize, Size, k;
     PBOOT_SECTOR BootSector;
@@ -68,24 +68,44 @@ NtfsHasFileSystem(PDEVICE_OBJECT DeviceToMount)
 
     if (DiskGeometry.MediaType == FixedMedia)
     {
-        /* We have found a hard disk */
-        Size = sizeof(PARTITION_INFORMATION);
+        /* We have found a hard disk.  Ping it for its partition entry and use
+         * the legacy MBR partition type - when there actually is one - as a
+         * cheap pre-filter, the same way FastFat does in FatMountVolume.
+         *
+         * This query must be ADVISORY, and it must use the partition-style
+         * aware _EX variant:
+         *
+         *  - IOCTL_DISK_GET_PARTITION_INFO is an MBR-only interface.  partmgr
+         *    fails it outright with STATUS_INVALID_DEVICE_REQUEST on a GPT
+         *    disk ("not supported on anything other than MBR",
+         *    drivers/storage/partmgr/partition.c).  Propagating that failure
+         *    out of the recognizer made NTFS unable to mount *any* volume on a
+         *    GPT-partitioned disk - i.e. every volume on a UEFI machine - so
+         *    the volumes stayed unmounted forever and mountmgr retried the
+         *    remote-database reconcile against them in an endless loop.
+         *
+         *  - PARTITION_IFS is likewise an MBR concept.  A GPT basic-data
+         *    partition carries a type GUID, not an 0x07 byte, so there is
+         *    nothing here to compare against.
+         *
+         * Windows' own NTFS recognizer never fails a mount on the strength of
+         * this query either; the boot-sector checks below are what actually
+         * decide whether the volume is NTFS.  So only reject when the query
+         * succeeds AND positively reports an MBR partition of a non-IFS type. */
+        Size = sizeof(PARTITION_INFORMATION_EX);
         Status = NtfsDeviceIoControl(DeviceToMount,
-                                     IOCTL_DISK_GET_PARTITION_INFO,
+                                     IOCTL_DISK_GET_PARTITION_INFO_EX,
                                      NULL,
                                      0,
                                      &PartitionInfo,
                                      &Size,
                                      TRUE);
-        if (!NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status) &&
+            PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR &&
+            PartitionInfo.Mbr.PartitionType != PARTITION_IFS)
         {
-            DPRINT("NtfsDeviceIoControl() failed (Status %lx)\n", Status);
-            return Status;
-        }
-
-        if (PartitionInfo.PartitionType != PARTITION_IFS)
-        {
-            DPRINT("Invalid partition type\n");
+            DPRINT("Invalid MBR partition type 0x%02x\n",
+                   PartitionInfo.Mbr.PartitionType);
             return STATUS_UNRECOGNIZED_VOLUME;
         }
     }
