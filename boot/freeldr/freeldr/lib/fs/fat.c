@@ -987,7 +987,7 @@ PUCHAR FatGetFatSector(PFAT_VOLUME_INFO Volume, UINT32 FatSectorNumber)
     // cache miss
     if (Volume->FatCacheIndex[CacheIndex] != SectorNumAbsolute)
     {
-        UINT32 SectorsToRead = min(Volume->FatCacheSize - CacheIndex, min(Volume->SectorsPerFat - SectorNumAbsolute, 4));
+        UINT32 SectorsToRead = min(Volume->FatCacheSize - CacheIndex, min(Volume->SectorsPerFat - FatSectorNumber, 4));
         UINT8 i;
 
         if (!FatReadVolumeSectors(Volume, SectorNumAbsolute, SectorsToRead, &Volume->FatCache[CacheIndex * Volume->BytesPerSector]))
