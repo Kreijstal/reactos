@@ -553,6 +553,10 @@ Quit:
 }
 
 
+/* Maximum number of times the LiveCD main menu is re-shown after a failure
+ * to start the shell or the installer, before userinit gives up. */
+#define LIVECD_MAX_RESTARTS 3
+
 int WINAPI
 wWinMain(IN HINSTANCE hInst,
          IN HINSTANCE hPrevInstance,
@@ -561,6 +565,7 @@ wWinMain(IN HINSTANCE hInst,
 {
     BOOL bIsLiveCD, Success = TRUE;
     STATE State;
+    UINT RestartCount = 0;
 
     hInstance = hInst;
 
@@ -627,9 +632,21 @@ Restart:
     /*
      * In LiveCD mode, go back to the main menu if we failed
      * to either start the shell or the installer.
+     *
+     * This must be bounded.  The menu only gives the user another chance when
+     * the pages can actually be shown; if RunLiveCD() cannot create its
+     * dialogs it sets NextPage to DONE and returns immediately, so a failing
+     * StartShell() would send us straight back here with nothing in between.
+     * That spins forever, and each pass re-runs SetUserSettings() and
+     * RunLiveCD() -- including InitLogo(), which is over 100,000 GetPixel()
+     * round trips into win32k.  Give up after a few attempts instead.
      */
-    if (bIsLiveCD && !Success)
+    if (bIsLiveCD && !Success && ++RestartCount <= LIVECD_MAX_RESTARTS)
         goto Restart;
+
+    if (!Success)
+        ERR("Giving up after %u attempt(s) to start the shell or installer\n",
+            RestartCount);
 
     return 0;
 }
