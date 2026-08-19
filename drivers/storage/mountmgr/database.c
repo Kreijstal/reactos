@@ -624,10 +624,19 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
         goto ReleaseRDS;
     }
 
-    /* Mark mounted only if not unloading */
+    /* Mark mounted only if not unloading.
+     *
+     * MountState is a boolean, not a counter: its only reader,
+     * MountMgrTargetDeviceNotification() in notify.c, tests it for exactly
+     * TRUE.  Incrementing it wedged it at >= 1 permanently whenever a volume
+     * was reconciled twice before its first GUID_IO_VOLUME_MOUNT arrived (a
+     * volume that fails to mount, a multi-volume disk, hot-plug), after which
+     * every mount notification took the "not mounted yet" branch and queued
+     * yet another reconcile.  Set it instead, so it always matches its
+     * reader. */
     if (!(DeviceObject->Flags & DO_UNLOAD_PENDING))
     {
-        InterlockedExchangeAdd(&ListDeviceInfo->MountState, 1);
+        InterlockedExchange(&ListDeviceInfo->MountState, 1);
     }
 
     ObDereferenceObject(FileObject);
