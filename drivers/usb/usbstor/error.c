@@ -14,6 +14,171 @@
 #include <debug.h>
 
 
+//
+// Bulk-Only-Transport breadcrumb trace.  See usbstor.h for why this exists.
+//
+static USBSTOR_TRACE_ENTRY UsbStorTraceRing[USBSTOR_TRACE_ENTRIES];
+static LONG UsbStorTraceSeq = 0;
+static LONG UsbStorTraceDumpsLeft = 8;
+
+//
+// Queued-versus-ran counters for every deferred recovery path.  A queued count
+// that runs ahead of its ran count is a recovery that never executed.
+//
+static LONG UsbStorResetPipeQueued = 0;
+static LONG UsbStorResetPipeRan = 0;
+static LONG UsbStorResetDevQueued = 0;
+static LONG UsbStorResetDevRan = 0;
+static LONG UsbStorAbortQueued = 0;
+static LONG UsbStorAbortRan = 0;
+static ULONG UsbStorResettingTicks = 0;
+
+static PCSTR UsbStorTraceNames[UsbStorTraceMax] =
+{
+    "none",
+    "startio",
+    "cbw>",
+    "cbw<",
+    "data>",
+    "data<",
+    "csw>",
+    "csw<",
+    "issue",
+    "issue!",
+    "sense",
+    "q:rstpipe",
+    "rstpipe{",
+    "rstpipe}",
+    "q:rstdev",
+    "rstdev{",
+    "rstdev}",
+    "q:abort",
+    "abort{",
+    "abort}",
+    "term",
+    "next",
+    "next-busy"
+};
+
+VOID
+USBSTOR_Trace(
+    IN ULONG Code,
+    IN ULONG_PTR A,
+    IN ULONG_PTR B)
+{
+    PUSBSTOR_TRACE_ENTRY Entry;
+    LARGE_INTEGER Now;
+    LONG Index;
+
+    Index = InterlockedIncrement(&UsbStorTraceSeq) - 1;
+    Entry = &UsbStorTraceRing[(ULONG)Index % USBSTOR_TRACE_ENTRIES];
+
+    KeQuerySystemTime(&Now);
+
+    Entry->Time = (ULONGLONG)Now.QuadPart;
+    Entry->A = A;
+    Entry->B = B;
+    Entry->Code = Code;
+}
+
+static
+VOID
+USBSTOR_TraceFetch(
+    IN LONG Index,
+    IN LONG Seq,
+    IN ULONGLONG Now,
+    OUT PCSTR *Name,
+    OUT PVOID *A,
+    OUT PVOID *B,
+    OUT PULONG AgeMs)
+{
+    PUSBSTOR_TRACE_ENTRY Entry;
+    ULONG Code;
+
+    if (Index >= Seq)
+    {
+        *Name = "-";
+        *A = NULL;
+        *B = NULL;
+        *AgeMs = 0;
+        return;
+    }
+
+    Entry = &UsbStorTraceRing[(ULONG)Index % USBSTOR_TRACE_ENTRIES];
+    Code = Entry->Code < UsbStorTraceMax ? Entry->Code : 0;
+
+    *Name = UsbStorTraceNames[Code];
+    *A = (PVOID)Entry->A;
+    *B = (PVOID)Entry->B;
+    *AgeMs = (ULONG)((Now - Entry->Time) / 10000);
+}
+
+VOID
+USBSTOR_DumpTrace(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PCSTR Reason)
+{
+    PIRP_CONTEXT Context;
+    LARGE_INTEGER Now;
+    LONG Seq, First, ix;
+
+    if (InterlockedDecrement(&UsbStorTraceDumpsLeft) < 0)
+    {
+        InterlockedIncrement(&UsbStorTraceDumpsLeft);
+        return;
+    }
+
+    Context = &FDODeviceExtension->CurrentIrpContext;
+    KeQuerySystemTime(&Now);
+
+    DPRINT1("[USBSTOR-TRACE] %s: fdo %p active %p ctxsrb %p irp %p flags %lx "
+            "pending %lu stallretry %lu errhandling %lu ticks %lu\n",
+            Reason,
+            FDODeviceExtension,
+            FDODeviceExtension->ActiveSrb,
+            Context->Srb,
+            Context->Irp,
+            FDODeviceExtension->Flags,
+            FDODeviceExtension->IrpPendingCount,
+            Context->StallRetryCount,
+            FDODeviceExtension->SrbErrorHandlingActive,
+            FDODeviceExtension->TimerTicksOnActiveSrb);
+
+    DPRINT1("[USBSTOR-TRACE] recovery: rstpipe q=%ld r=%ld | rstdev q=%ld r=%ld | "
+            "abort q=%ld r=%ld | urb.func %x urb.status %x urb.len %lx\n",
+            UsbStorResetPipeQueued, UsbStorResetPipeRan,
+            UsbStorResetDevQueued, UsbStorResetDevRan,
+            UsbStorAbortQueued, UsbStorAbortRan,
+            Context->Urb.UrbHeader.Function,
+            Context->Urb.UrbHeader.Status,
+            Context->Urb.UrbBulkOrInterruptTransfer.TransferBufferLength);
+
+    Seq = UsbStorTraceSeq;
+    First = Seq > USBSTOR_TRACE_ENTRIES ? Seq - USBSTOR_TRACE_ENTRIES : 0;
+
+    /*
+     * Three events per line.  Every DPRINT1 costs milliseconds on a serial
+     * port and this runs in the timer DPC at DISPATCH_LEVEL, so the line count
+     * -- not the byte count -- is what has to stay small.
+     */
+    for (ix = First; ix < Seq; ix += 3)
+    {
+        PCSTR N0, N1, N2;
+        PVOID A0, B0, A1, B1, A2, B2;
+        ULONG G0, G1, G2;
+
+        USBSTOR_TraceFetch(ix,     Seq, (ULONGLONG)Now.QuadPart, &N0, &A0, &B0, &G0);
+        USBSTOR_TraceFetch(ix + 1, Seq, (ULONGLONG)Now.QuadPart, &N1, &A1, &B1, &G1);
+        USBSTOR_TraceFetch(ix + 2, Seq, (ULONGLONG)Now.QuadPart, &N2, &A2, &B2, &G2);
+
+        DPRINT1("[USBSTOR-TRACE] %3ld %s %p %p -%lu | %s %p %p -%lu | %s %p %p -%lu\n",
+                ix,
+                N0, A0, B0, G0,
+                N1, A1, B1, G1,
+                N2, A2, B2, G2);
+    }
+}
+
 NTSTATUS
 USBSTOR_GetEndpointStatus(
     IN PDEVICE_OBJECT DeviceObject,
@@ -106,9 +271,16 @@ USBSTOR_ResetPipeWorkItemRoutine(
     PFDO_DEVICE_EXTENSION FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Ctx;
     PIRP_CONTEXT Context = &FDODeviceExtension->CurrentIrpContext;
 
+    InterlockedIncrement(&UsbStorResetPipeRan);
+    USBSTOR_Trace(UsbStorTraceResetPipeRun,
+                  (ULONG_PTR)Context->Urb.UrbBulkOrInterruptTransfer.PipeHandle,
+                  (ULONG_PTR)Context->Irp);
+
     // clear stall on the corresponding pipe
     Status = USBSTOR_ResetPipeWithHandle(FDODeviceExtension->LowerDeviceObject, Context->Urb.UrbBulkOrInterruptTransfer.PipeHandle);
     DPRINT1("USBSTOR_ResetPipeWithHandle Status %x\n", Status);
+
+    USBSTOR_Trace(UsbStorTraceResetPipeEnd, (ULONG_PTR)Status, (ULONG_PTR)Context->Irp);
 
     // now resend the csw as the stall got cleared
     USBSTOR_SendCSWRequest(FDODeviceExtension, Context->Irp);
@@ -128,6 +300,11 @@ USBSTOR_ResetDeviceWorkItemRoutine(
     DPRINT("USBSTOR_ResetDeviceWorkItemRoutine\n");
 
     FDODeviceExtension = FdoDevice->DeviceExtension;
+
+    InterlockedIncrement(&UsbStorResetDevRan);
+    USBSTOR_Trace(UsbStorTraceResetDevRun,
+                  (ULONG_PTR)FDODeviceExtension->ActiveSrb,
+                  (ULONG_PTR)FDODeviceExtension->Flags);
 
     for (ix = 0; ix < 3; ++ix)
     {
@@ -153,6 +330,10 @@ USBSTOR_ResetDeviceWorkItemRoutine(
     FDODeviceExtension->Flags &= ~USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
     KeReleaseSpinLock(&FDODeviceExtension->CommonLock, OldIrql);
 
+    USBSTOR_Trace(UsbStorTraceResetDevEnd,
+                  (ULONG_PTR)Status,
+                  (ULONG_PTR)FDODeviceExtension->ActiveSrb);
+
     USBSTOR_QueueNextRequest(FdoDevice);
 }
 
@@ -162,6 +343,11 @@ USBSTOR_QueueResetPipe(
     IN PFDO_DEVICE_EXTENSION FDODeviceExtension)
 {
     DPRINT("USBSTOR_QueueResetPipe\n");
+
+    InterlockedIncrement(&UsbStorResetPipeQueued);
+    USBSTOR_Trace(UsbStorTraceQueueResetPipe,
+                  (ULONG_PTR)FDODeviceExtension->ActiveSrb,
+                  (ULONG_PTR)FDODeviceExtension->Flags);
 
     IoQueueWorkItem(FDODeviceExtension->ResetDeviceWorkItem,
                     USBSTOR_ResetPipeWorkItemRoutine,
@@ -182,6 +368,11 @@ USBSTOR_QueueResetDevice(
     FDODeviceExtension->Flags |= USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
     KeReleaseSpinLock(&FDODeviceExtension->CommonLock, OldIrql);
 
+    InterlockedIncrement(&UsbStorResetDevQueued);
+    USBSTOR_Trace(UsbStorTraceQueueResetDev,
+                  (ULONG_PTR)FDODeviceExtension->ActiveSrb,
+                  (ULONG_PTR)FDODeviceExtension->Flags);
+
     IoQueueWorkItem(FDODeviceExtension->ResetDeviceWorkItem,
                     USBSTOR_ResetDeviceWorkItemRoutine,
                     CriticalWorkQueue,
@@ -199,6 +390,11 @@ USBSTOR_TimerWorkerRoutine(
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)WorkItemData->DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
+
+    InterlockedIncrement(&UsbStorAbortRan);
+    USBSTOR_Trace(UsbStorTraceTimerAbortRun,
+                  (ULONG_PTR)FDODeviceExtension->ActiveSrb,
+                  (ULONG_PTR)FDODeviceExtension->Flags);
 
     /*
      * Abort the bulk pipes and stop there.
@@ -224,6 +420,10 @@ USBSTOR_TimerWorkerRoutine(
                                     FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkOutPipeIndex].PipeHandle);
     }
 
+    USBSTOR_Trace(UsbStorTraceTimerAbortEnd,
+                  (ULONG_PTR)Status,
+                  (ULONG_PTR)FDODeviceExtension->ActiveSrb);
+
     // clear timer srb
     FDODeviceExtension->LastTimerActiveSrb = NULL;
     FDODeviceExtension->TimerTicksOnActiveSrb = 0;
@@ -239,6 +439,7 @@ USBSTOR_TimerRoutine(
 {
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     BOOLEAN ResetDevice = FALSE;
+    BOOLEAN DumpTrace = FALSE;
     PERRORHANDLER_WORKITEM_DATA WorkItemData;
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Context;
@@ -255,9 +456,23 @@ USBSTOR_TimerRoutine(
      */
     if (FDODeviceExtension->Flags & USBSTOR_FDO_FLAGS_DEVICE_RESETTING)
     {
+        /*
+         * A device reset owns the device, and this routine stands down for as
+         * long as that lasts -- so a reset work item that is queued and never
+         * runs silences the only watchdog that could notice.  Report it.
+         * The tick counter is file-static: this is a diagnostic and there is
+         * one bulk storage FDO on the machine being investigated.
+         */
+        if (++UsbStorResettingTicks == 5)
+        {
+            USBSTOR_DumpTrace(FDODeviceExtension, "stuck in DEVICE_RESETTING");
+        }
+
         FDODeviceExtension->LastTimerActiveSrb = NULL;
         return;
     }
+
+    UsbStorResettingTicks = 0;
     // DPRINT1("[USBSTOR] ActiveSrb %p ResetInProgress %x LastTimerActiveSrb %p\n", FDODeviceExtension->ActiveSrb, FDODeviceExtension->ResetInProgress, FDODeviceExtension->LastTimerActiveSrb);
 
     KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
@@ -287,6 +502,7 @@ USBSTOR_TimerRoutine(
                 DPRINT1("[USBSTOR] ActiveSrb %p timed out after %lu seconds\n",
                         FDODeviceExtension->ActiveSrb, Timeout);
                 ResetDevice = TRUE;
+                DumpTrace = TRUE;
             }
         }
         else
@@ -305,6 +521,10 @@ USBSTOR_TimerRoutine(
 
     KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
 
+    if (DumpTrace)
+    {
+        USBSTOR_DumpTrace(FDODeviceExtension, "ActiveSrb timed out");
+    }
 
     if (ResetDevice && FDODeviceExtension->TimerWorkQueueEnabled && FDODeviceExtension->SrbErrorHandlingActive == FALSE)
     {
@@ -321,6 +541,10 @@ USBSTOR_TimerRoutine(
            WorkItemData->DeviceObject = FDODeviceExtension->FunctionalDeviceObject;
 
            DPRINT1("[USBSTOR] Queing Timer WorkItem\n");
+           InterlockedIncrement(&UsbStorAbortQueued);
+           USBSTOR_Trace(UsbStorTraceTimerAbortQueue,
+                         (ULONG_PTR)FDODeviceExtension->ActiveSrb,
+                         (ULONG_PTR)FDODeviceExtension->Flags);
            ExQueueWorkItem(&WorkItemData->WorkQueueItem, DelayedWorkQueue);
         }
      }
