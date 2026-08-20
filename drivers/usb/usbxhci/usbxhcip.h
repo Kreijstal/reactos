@@ -134,6 +134,8 @@ MPSTATUS
 NTAPI
 XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
                          IN ULONG TransferLength,
+                         IN ULONG MaxPacketSize,
+                         IN BOOLEAN IsInTransfer,
                          OUT PXHCI_TRB Trbs,
                          IN ULONG MaxTrbs,
                          OUT PULONG TrbCount);
@@ -177,12 +179,26 @@ typedef struct _XHCI_PENDING_TRANSFER {
     PXHCI_TRANSFER XhciTransfer;
     PXHCI_ENDPOINT XhciEndpoint;
     PXHCI_EXTENSION XhciExtension;
+    PXHCI_RING Ring;                  // Transfer ring the TD was enqueued on
+    PHYSICAL_ADDRESS RingBasePA;      // PA of TRB index 0 of that ring
+    PHYSICAL_ADDRESS FirstTrb;        // PA of the first TRB of the TD
     PHYSICAL_ADDRESS CompletionTrb;    // TRB expected to generate the completion event
     ULONG TrbCount;                   // Number of TRBs that belong to the transfer TD
     ULONG RequestedLength;            // Original request length for proper transfer length calculation
     ULONGLONG SubmitTime;             // KeQueryInterruptTime() when the TD was handed to the controller
     BOOLEAN InUse;
 } XHCI_PENDING_TRANSFER, *PXHCI_PENDING_TRANSFER;
+
+/*
+ * Offset in TRBs of TrbPA inside the TD tracked by Entry, or FALSE if TrbPA is
+ * not one of that TD's TRBs.  A transfer event names the TRB the controller
+ * stopped on, which for a short packet or a mid-TD error is not the last one.
+ */
+BOOLEAN
+NTAPI
+XHCI_TdTrbOffset(IN PXHCI_PENDING_TRANSFER Entry,
+                 IN PHYSICAL_ADDRESS TrbPA,
+                 OUT PULONG Offset);
 
 /* PendingTransfer is the caller's private snapshot of the tracking slot, not a
  * pointer into g_PendingTransfers -- see FindPendingTransferSnapshot.  Passing
