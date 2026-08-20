@@ -1305,14 +1305,31 @@ RtlpCaptureNonVolatileContextPointers(
     /* Zero out the nonvolatile context pointers */
     RtlZeroMemory(NonvolatileContextPointers, sizeof(*NonvolatileContextPointers));
 
+    /* Nothing has been unwound yet */
+    EstablisherFrame = 0;
+
     /* Capture the current context */
     RtlCaptureContext(&Context);
 
     do
     {
-        /* Make sure nothing fishy is going on. Currently this is for kernel mode only. */
+        /* Make sure nothing fishy is going on. Currently this is for kernel mode only.
+           Note that only Rsp is a trustworthy mode indicator while walking a kernel
+           stack: Rip is loaded from the machine frame of a trap frame once the
+           kernel entry stub is unwound, and for a user mode trap frame that value is
+           the *faulting* user mode Rip, which is fully user controlled and can very
+           well have bit 63 set (e.g. a wild jump/return into the kernel address
+           range). This is why the loop below must never key off Rip. */
         ASSERT((LONG64)Context.Rip < 0);
         ASSERT((LONG64)Context.Rsp < 0);
+
+        /* Bail out instead of walking off the current kernel stack. Neither
+           RtlLookupFunctionEntry nor the leaf-frame fallback below may be fed a
+           stack pointer that does not belong to this stack. */
+        if (!RtlpIsUnwindStackAccessValid(Context.Rsp, sizeof(ULONG64)))
+        {
+            break;
+        }
 
         /* Look up the function entry */
         FunctionEntry = RtlLookupFunctionEntry(Context.Rip, &ImageBase, NULL);
@@ -1332,12 +1349,19 @@ RtlpCaptureNonVolatileContextPointers(
         }
         else
         {
+            /* Leaf function: its establisher frame is the current stack pointer */
+            EstablisherFrame = Context.Rsp;
             Context.Rip = *(PULONG64)Context.Rsp;
-            Context.Rsp += 8;
+            Context.Rsp += sizeof(ULONG64);
         }
 
-        /* Continue until we reach user mode */
-    } while ((LONG64)Context.Rip < 0);
+        /* Continue until we have unwound the frame the caller is interested in.
+           The callers (KiGetTrapContextInternal / KiSetTrapContextInternal) pass
+           the trap frame minus MAX_SYSCALL_PARAM_SIZE, which is exactly the
+           establisher frame of the kernel entry stub, so the stub itself is still
+           unwound (and its saved non-volatiles captured) before we stop. This
+           termination condition depends only on kernel controlled data. */
+    } while (EstablisherFrame < TargetFrame);
 
     /* If the caller did the right thing, we should get past the target frame */
     ASSERT(EstablisherFrame >= TargetFrame);
