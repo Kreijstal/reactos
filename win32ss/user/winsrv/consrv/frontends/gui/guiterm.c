@@ -43,6 +43,19 @@ typedef struct _GUI_INIT_INFO
 } GUI_INIT_INFO, *PGUI_INIT_INFO;
 
 static BOOL ConsInitialized = FALSE;
+/*
+ * Guards the one-time GUI front-end initialization above.
+ * CSRSS dispatches client connections (and therefore console allocations)
+ * on several API worker threads in parallel, so without this lock two
+ * processes creating their very first console at the same time both see
+ * ConsInitialized == FALSE and both run the one-time block: the loser of
+ * the race gets ERROR_CLASS_ALREADY_EXISTS out of RegisterClassExW and
+ * fails its console creation, which surfaces in the client as
+ * STATUS_DLL_INIT_FAILED (0xC0000142) from kernel32's DllMain.
+ * It also serialises InitTTFontCache(), whose own "already done" test is
+ * equally unsynchronised and would otherwise build its list twice.
+ */
+static RTL_CRITICAL_SECTION ConsInitLock;
 
 extern HICON   ghDefaultIcon;
 extern HICON   ghDefaultIconSm;
@@ -298,13 +311,22 @@ GuiInit(IN PCONSOLE_INIT_INFO ConsoleInitInfo,
     /* Perform one-time initialization */
     if (!ConsInitialized)
     {
-        /* Initialize and register the console window class */
-        if (!RegisterConWndClass(ConSrvDllInstance)) return FALSE;
+        RtlEnterCriticalSection(&ConsInitLock);
+        if (!ConsInitialized)
+        {
+            /* Initialize and register the console window class */
+            if (!RegisterConWndClass(ConSrvDllInstance))
+            {
+                RtlLeaveCriticalSection(&ConsInitLock);
+                return FALSE;
+            }
 
-        /* Initialize the font support -- additional TrueType font cache */
-        InitTTFontCache();
+            /* Initialize the font support -- additional TrueType font cache */
+            InitTTFontCache();
 
-        ConsInitialized = TRUE;
+            ConsInitialized = TRUE;
+        }
+        RtlLeaveCriticalSection(&ConsInitLock);
     }
 
     /*
@@ -1203,6 +1225,17 @@ static FRONTEND_VTBL GuiVtbl =
     GuiSetMenuClose,
 };
 
+
+/*
+ * Initializes the data the GUI front-end needs before any console can be
+ * created. Called once from ConServerDllInitialization(), i.e. while the
+ * server DLL is still single-threaded and before any client can connect.
+ */
+VOID NTAPI
+GuiInitFrontEndSupport(VOID)
+{
+    RtlInitializeCriticalSection(&ConsInitLock);
+}
 
 NTSTATUS NTAPI
 GuiLoadFrontEnd(IN OUT PFRONTEND FrontEnd,
