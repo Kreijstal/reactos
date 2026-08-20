@@ -145,6 +145,27 @@ HalpRecordPciMaxGsi(
     _In_ const HAL_ACPI_PCI_ROUTE_ENTRY *Entry
     );
 
+#if defined(_M_AMD64)
+NTHALAPI
+BOOLEAN
+NTAPI
+HalpSetIoApicInterruptAttributes(
+    _In_ ULONG Gsi,
+    _In_ BOOLEAN PolarityValid,
+    _In_ BOOLEAN ActiveLow,
+    _In_ BOOLEAN TriggerValid,
+    _In_ BOOLEAN LevelTriggered
+    );
+
+NTHALAPI
+BOOLEAN
+NTAPI
+HalpTranslateIsaInterrupt(
+    _In_ ULONG SourceIrq,
+    _Out_ PULONG Gsi
+    );
+#endif
+
 NTHALAPI
 BOOLEAN
 NTAPI

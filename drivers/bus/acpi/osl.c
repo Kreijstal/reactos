@@ -1058,6 +1058,7 @@ AcpiOsInstallInterruptHandler (
     void                    *Context)
 {
     ULONG Vector;
+    ULONG SystemInterrupt;
     KIRQL DIrql;
     KAFFINITY Affinity;
     KAFFINITY InterruptAffinity;
@@ -1076,16 +1077,28 @@ AcpiOsInstallInterruptHandler (
     }
 
     DPRINT("AcpiOsInstallInterruptHandler()\n");
+    SystemInterrupt = InterruptNumber;
+#ifdef _M_AMD64
+    if ((SystemInterrupt < 16) &&
+        !HalpTranslateIsaInterrupt(SystemInterrupt, &SystemInterrupt))
+    {
+        DPRINT1("ACPITRACE: SCI IRQ %lu has no supported IOAPIC route\n",
+                InterruptNumber);
+        return AE_ERROR;
+    }
+#endif
+
     Vector = HalGetInterruptVector(
         Internal,
         0,
-        InterruptNumber,
-        InterruptNumber,
+        SystemInterrupt,
+        SystemInterrupt,
         &DIrql,
         &Affinity);
 
-    DPRINT("ACPITRACE: SCI IRQ %lu mapped to vector %lu IRQL %u affinity %p\n",
+    DPRINT("ACPITRACE: SCI IRQ %lu/GSI %lu mapped to vector %lu IRQL %u affinity %p\n",
             InterruptNumber,
+            SystemInterrupt,
             Vector,
             DIrql,
             (PVOID)(ULONG_PTR)Affinity);
@@ -1109,7 +1122,7 @@ AcpiOsInstallInterruptHandler (
 
     OslSciHwInit();
 
-    AcpiIrqNumber = InterruptNumber;
+    AcpiIrqNumber = SystemInterrupt;
     AcpiSciVector = Vector;
     AcpiSciIrql = DIrql;
     InterlockedExchange(&AcpiSciMasked, 0);

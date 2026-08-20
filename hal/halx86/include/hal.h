@@ -45,6 +45,7 @@
 /* Internal shared PCI and ACPI header */
 #include <drivers/pci/pci.h>
 #include <drivers/acpi/acpi.h>
+#include <reactos/hal/acpi_pci.h>
 
 /* Internal kernel headers */
 #ifdef _M_AMD64

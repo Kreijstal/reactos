@@ -5,6 +5,7 @@
 #include <cmreslist.h>
 #include <ntstrsafe.h>
 #include <reactos/drivers/acpi/pci_routing.h>
+#include <reactos/hal/acpi_pci.h>
 
 #define TAG_PCI '0ICP'
 
