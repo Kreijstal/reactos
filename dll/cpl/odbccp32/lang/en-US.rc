@@ -1,0 +1,7 @@
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+STRINGTABLE
+BEGIN
+    IDS_CPLNAME "Data Sources (ODBC)"
+    IDS_CPLDESCRIPTION "Add, remove and configure ODBC data sources and drivers."
+END
