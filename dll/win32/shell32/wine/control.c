@@ -51,6 +51,10 @@ void Control_UnloadApplet(CPlApplet* applet)
 
     if (applet->proc) applet->proc(applet->hWnd, CPL_EXIT, 0L, 0L);
     FreeLibrary(applet->hModule);
+#ifdef __REACTOS__
+    if (applet->hActCtx && applet->hActCtx != INVALID_HANDLE_VALUE)
+        ReleaseActCtx(applet->hActCtx);
+#endif
 #ifndef __REACTOS__
     list_remove( &applet->entry );
 #endif
@@ -63,7 +67,8 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
 #ifdef __REACTOS__
     ACTCTXW ActCtx = {sizeof(ACTCTX), ACTCTX_FLAG_RESOURCE_NAME_VALID};
     ULONG_PTR cookie;
-    BOOL bActivated;
+    BOOL bActivated = FALSE;
+    UINT oldErrorMode;
     WCHAR fileBuffer[MAX_PATH];
 #endif
     CPlApplet*	applet;
@@ -103,7 +108,21 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
     bActivated = (applet->hActCtx != INVALID_HANDLE_VALUE ? ActivateActCtx(applet->hActCtx, &cookie) : FALSE);
 #endif
 
-    if (!(applet->hModule = LoadLibraryW(applet->cmd))) {
+#ifdef __REACTOS__
+    /* A .cpl that cannot be loaded must not be allowed to stop the enumeration
+     * of the Control Panel.  Without this guard the loader raises a hard error
+     * and CSRSS puts up a modal "Unable To Locate Component" message box, which
+     * blocks this thread -- and because CDefView::FillList() enumerates on the
+     * view window's own thread, the Control Panel window is created but stays
+     * completely empty until somebody finds and dismisses that box. */
+    oldErrorMode = SetErrorMode(SEM_FAILCRITICALERRORS);
+    applet->hModule = LoadLibraryW(applet->cmd);
+    SetErrorMode(oldErrorMode);
+    if (!applet->hModule)
+#else
+    if (!(applet->hModule = LoadLibraryW(applet->cmd)))
+#endif
+    {
         WARN("Cannot load control panel applet %s\n", debugstr_w(applet->cmd));
 	goto theError;
     }
@@ -206,6 +225,16 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
     return applet;
 
  theError:
+#ifdef __REACTOS__
+    /* The success path deactivates and Control_UnloadApplet() releases; the
+     * failure path used to do neither, leaving the failed applet's activation
+     * context ACTIVE on this thread for every later LoadLibraryW() -- i.e. for
+     * every remaining .cpl of the same enumeration -- and leaking the handle. */
+    if (bActivated)
+        DeactivateActCtx(0, cookie);
+    if (applet->hActCtx && applet->hActCtx != INVALID_HANDLE_VALUE)
+        ReleaseActCtx(applet->hActCtx);
+#endif
     FreeLibrary(applet->hModule);
     HeapFree(GetProcessHeap(), 0, applet->cmd);
     HeapFree(GetProcessHeap(), 0, applet);
