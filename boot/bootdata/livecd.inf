@@ -7,9 +7,6 @@ HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
 
 [AddReg]
 
-; LOCAL-ONLY TEST SHIM -- not for commit
-HKLM,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","chkfix",0x00020000,"%SystemRoot%\system32\cmd.exe /c chkdsk.exe C: /f & chkdsk.exe C:"
-
 ; Input Methods
 HKCU,"Control Panel\Input Method","EnableHexNumpad",0x00000000,"1"
 
