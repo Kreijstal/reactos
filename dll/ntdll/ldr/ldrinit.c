@@ -111,6 +111,43 @@ PVOID LdrpWow64BaseAddress = NULL;
 #define DEFAULT_SECURITY_COOKIE 0xBB40E64E
 #endif
 
+/* Dumps the exception record when a DLL init routine faults, so roaming
+ * process-startup AVs (kernel32/shell32 DLL_PROCESS_ATTACH deaths seen on
+ * SMP hardware) identify the faulting address and access type instead of
+ * being swallowed by the handler. */
+static
+LONG
+LdrpInitRoutineExceptionFilter(
+    _In_ PEXCEPTION_POINTERS ExceptionPointers,
+    _In_ PLDR_DATA_TABLE_ENTRY LdrEntry)
+{
+    PEXCEPTION_RECORD Record = ExceptionPointers->ExceptionRecord;
+    ULONG i;
+
+    DbgPrint("LDR: init-routine exception 0x%lX in %wZ (base %p) at %p, %lu params\n",
+             Record->ExceptionCode,
+             &LdrEntry->BaseDllName,
+             LdrEntry->DllBase,
+             Record->ExceptionAddress,
+             Record->NumberParameters);
+    for (i = 0; i < Record->NumberParameters && i < EXCEPTION_MAXIMUM_PARAMETERS; i++)
+    {
+        DbgPrint("LDR:   ExceptionInformation[%lu] = %p\n",
+                 i, (PVOID)Record->ExceptionInformation[i]);
+    }
+#ifdef _M_AMD64
+    DbgPrint("LDR:   rip=%p rsp=%p rax=%p rcx=%p rdx=%p r8=%p r9=%p\n",
+             (PVOID)ExceptionPointers->ContextRecord->Rip,
+             (PVOID)ExceptionPointers->ContextRecord->Rsp,
+             (PVOID)ExceptionPointers->ContextRecord->Rax,
+             (PVOID)ExceptionPointers->ContextRecord->Rcx,
+             (PVOID)ExceptionPointers->ContextRecord->Rdx,
+             (PVOID)ExceptionPointers->ContextRecord->R8,
+             (PVOID)ExceptionPointers->ContextRecord->R9);
+#endif
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 /* FUNCTIONS *****************************************************************/
 
 #ifdef _M_AMD64
@@ -949,7 +986,7 @@ LdrpRunInitializeRoutines(IN PCONTEXT Context OPTIONAL)
                                                 DLL_PROCESS_ATTACH,
                                                 Context);
             }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            _SEH2_EXCEPT(LdrpInitRoutineExceptionFilter(_SEH2_GetExceptionInformation(), LdrEntry))
             {
                 DllStatus = FALSE;
                 DPRINT1("WARNING: Exception 0x%x during LdrpCallInitRoutine(DLL_PROCESS_ATTACH) for %wZ\n",
