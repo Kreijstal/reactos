@@ -699,6 +699,82 @@ PdoQueryResourceRequirements(
 
 
 static NTSTATUS
+PdoGetInterruptRoute(
+    IN PPDO_DEVICE_EXTENSION DeviceExtension,
+    OUT PULONG SystemIrq,
+    OUT PBOOLEAN IsLevelTriggered,
+    OUT PBOOLEAN IsActiveLow)
+{
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    PPCI_COMMON_CONFIG PciConfig;
+    NTSTATUS Status;
+
+    PciConfig = &DeviceExtension->PciDevice->PciConfig;
+    if (PCI_CONFIGURATION_TYPE(PciConfig) != PCI_DEVICE_TYPE ||
+        PciConfig->u.type0.InterruptPin == 0)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    FdoExtension = (PFDO_DEVICE_EXTENSION)DeviceExtension->Fdo->DeviceExtension;
+    Status = PciFdoAcquireRoutingInterface(FdoExtension);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (!FdoExtension->RoutingValid)
+        return STATUS_NOT_SUPPORTED;
+
+    Status = FdoExtension->Routing.RouteInterrupt(
+        FdoExtension->Routing.Context,
+        DeviceExtension->PciDevice->BusNumber,
+        DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
+        DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
+        PciConfig->u.type0.InterruptPin,
+        SystemIrq,
+        IsLevelTriggered,
+        IsActiveLow);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("PCI: _PRT lookup for %02lx:%02lx.%lx pin %u failed (0x%lx)\n",
+                DeviceExtension->PciDevice->BusNumber,
+                DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
+                DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
+                PciConfig->u.type0.InterruptPin,
+                Status);
+        return Status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+static NTSTATUS
+PdoSetInterruptPolicy(
+    IN ULONG SystemIrq,
+    IN BOOLEAN IsLevelTriggered,
+    IN BOOLEAN IsActiveLow)
+{
+#ifdef _M_AMD64
+    if (!HalpSetIoApicInterruptAttributes(SystemIrq,
+                                           TRUE,
+                                           IsActiveLow,
+                                           TRUE,
+                                           IsLevelTriggered))
+    {
+        DPRINT1("PCI: conflicting IOAPIC attributes for system IRQ %lu\n",
+                SystemIrq);
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+#else
+    UNREFERENCED_PARAMETER(SystemIrq);
+    UNREFERENCED_PARAMETER(IsLevelTriggered);
+    UNREFERENCED_PARAMETER(IsActiveLow);
+#endif
+
+    return STATUS_SUCCESS;
+}
+
+
+static NTSTATUS
 PdoQueryResources(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp,
@@ -712,10 +788,17 @@ PdoQueryResources(
     ULONG Size;
     ULONG ResCount = 0;
     ULONG ListSize;
+    ULONG SystemIrq = 0;
     UCHAR Bar;
     ULONGLONG Base;
     ULONGLONG Length;
     ULONG Flags;
+#ifdef _M_AMD64
+    NTSTATUS Status;
+    BOOLEAN IsActiveLow = FALSE;
+#endif
+    BOOLEAN HasInterrupt = FALSE;
+    BOOLEAN IsLevelTriggered = TRUE;
 
     DPRINT("PdoQueryResources() called\n");
 
@@ -737,6 +820,53 @@ PdoQueryResources(
 
     DPRINT("Command register: 0x%04hx\n", PciConfig.Command);
 
+    if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE &&
+        PciConfig.u.type0.InterruptPin != 0)
+    {
+#ifdef _M_AMD64
+        Status = PdoGetInterruptRoute(DeviceExtension,
+                                      &SystemIrq,
+                                      &IsLevelTriggered,
+                                      &IsActiveLow);
+        if (NT_SUCCESS(Status))
+        {
+            Status = PdoSetInterruptPolicy(SystemIrq,
+                                           IsLevelTriggered,
+                                           IsActiveLow);
+            if (!NT_SUCCESS(Status))
+            {
+                Irp->IoStatus.Information = 0;
+                return Status;
+            }
+
+            HasInterrupt = TRUE;
+            DPRINT1("PCI: current resource %02lx:%02lx.%lx pin %u uses system IRQ "
+                    "%lu (0x%lx) instead of InterruptLine %u (level=%u low=%u)\n",
+                    DeviceExtension->PciDevice->BusNumber,
+                    DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
+                    DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
+                    PciConfig.u.type0.InterruptPin,
+                    SystemIrq,
+                    SystemIrq,
+                    PciConfig.u.type0.InterruptLine,
+                    IsLevelTriggered,
+                    IsActiveLow);
+        }
+        else if (Status != STATUS_NOT_SUPPORTED && Status != STATUS_NOT_FOUND)
+        {
+            Irp->IoStatus.Information = 0;
+            return Status;
+        }
+#endif
+        if (!HasInterrupt &&
+            PciConfig.u.type0.InterruptLine != 0 &&
+            PciConfig.u.type0.InterruptLine != 0xFF)
+        {
+            SystemIrq = PciConfig.u.type0.InterruptLine;
+            HasInterrupt = TRUE;
+        }
+    }
+
     /* Count required resource descriptors */
     ResCount = 0;
     if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_DEVICE_TYPE)
@@ -756,9 +886,7 @@ PdoQueryResources(
                 ResCount++;
         }
 
-        if ((PciConfig.u.type0.InterruptPin != 0) &&
-            (PciConfig.u.type0.InterruptLine != 0) &&
-            (PciConfig.u.type0.InterruptLine != 0xFF))
+        if (HasInterrupt)
             ResCount++;
     }
     else if (PCI_CONFIGURATION_TYPE(&PciConfig) == PCI_BRIDGE_TYPE)
@@ -867,15 +995,14 @@ PdoQueryResources(
         }
 
         /* Add interrupt resource */
-        if ((PciConfig.u.type0.InterruptPin != 0) &&
-            (PciConfig.u.type0.InterruptLine != 0) &&
-            (PciConfig.u.type0.InterruptLine != 0xFF))
+        if (HasInterrupt)
         {
             Descriptor->Type = CmResourceTypeInterrupt;
             Descriptor->ShareDisposition = CmResourceShareShared;
-            Descriptor->Flags = CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE;
-            Descriptor->u.Interrupt.Level = PciConfig.u.type0.InterruptLine;
-            Descriptor->u.Interrupt.Vector = PciConfig.u.type0.InterruptLine;
+            Descriptor->Flags = IsLevelTriggered ? CM_RESOURCE_INTERRUPT_LEVEL_SENSITIVE
+                                                 : CM_RESOURCE_INTERRUPT_LATCHED;
+            Descriptor->u.Interrupt.Level = SystemIrq;
+            Descriptor->u.Interrupt.Vector = SystemIrq;
             Descriptor->u.Interrupt.Affinity = 0xFFFFFFFF;
         }
 
@@ -1353,7 +1480,17 @@ PdoStartDevice(
                         DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
                         DeviceExtension->PciDevice->BusNumber);
 
-                Irq = (UCHAR)RawPartialDesc->u.Interrupt.Vector;
+                if (RawPartialDesc->u.Interrupt.Vector <= 0xFF)
+                {
+                    Irq = (UCHAR)RawPartialDesc->u.Interrupt.Vector;
+                }
+                else
+                {
+                    DPRINT1("PCI: system IRQ %lu cannot fit in InterruptLine; writing 0xFF\n",
+                            RawPartialDesc->u.Interrupt.Vector);
+                    Irq = 0xFF;
+                }
+
                 HalSetBusDataByOffset(PCIConfiguration,
                                       DeviceExtension->PciDevice->BusNumber,
                                       DeviceExtension->PciDevice->SlotNumber.u.AsULONG,
@@ -1513,17 +1650,16 @@ PdoFilterResourceRequirements(
     PIO_STACK_LOCATION IrpSp)
 {
     PPDO_DEVICE_EXTENSION DeviceExtension;
-    PFDO_DEVICE_EXTENSION FdoExtension;
     PIO_RESOURCE_REQUIREMENTS_LIST OldList, NewList;
     PIO_RESOURCE_LIST AltList;
     PIO_RESOURCE_DESCRIPTOR Descriptor;
     NTSTATUS Status;
     ULONG SystemIrq;
     BOOLEAN IsLevelTriggered, IsActiveLow;
+    BOOLEAN HasInterruptDescriptor = FALSE;
     ULONG i, j;
 
     DeviceExtension = (PPDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-    FdoExtension = (PFDO_DEVICE_EXTENSION)DeviceExtension->Fdo->DeviceExtension;
 
     /* Reject bridges (no INTx routing of their own to apply). */
     if (PCI_CONFIGURATION_TYPE(&DeviceExtension->PciDevice->PciConfig) != PCI_DEVICE_TYPE)
@@ -1541,33 +1677,46 @@ PdoFilterResourceRequirements(
     if (OldList == NULL || OldList->ListSize == 0)
         return Irp->IoStatus.Status;
 
-    /* Lazy-fetch the ACPI _PRT routing service from the parent host bridge. */
-    Status = PciFdoAcquireRoutingInterface(FdoExtension);
-    if (!NT_SUCCESS(Status) || !FdoExtension->RoutingValid)
+    AltList = &OldList->List[0];
+    for (i = 0; i < OldList->AlternativeLists; i++)
+    {
+        for (j = 0; j < AltList->Count; j++)
+        {
+            if (AltList->Descriptors[j].Type == CmResourceTypeInterrupt)
+            {
+                HasInterruptDescriptor = TRUE;
+                break;
+            }
+        }
+
+        if (HasInterruptDescriptor)
+            break;
+
+        AltList = (PIO_RESOURCE_LIST)((PUCHAR)AltList +
+                                      FIELD_OFFSET(IO_RESOURCE_LIST, Descriptors) +
+                                      AltList->Count * sizeof(IO_RESOURCE_DESCRIPTOR));
+    }
+
+    if (!HasInterruptDescriptor)
         return Irp->IoStatus.Status;
 
-    Status = FdoExtension->Routing.RouteInterrupt(FdoExtension->Routing.Context,
-                                                  DeviceExtension->PciDevice->BusNumber,
-                                                  DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
-                                                  DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
-                                                  DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin,
-                                                  &SystemIrq,
-                                                  &IsLevelTriggered,
-                                                  &IsActiveLow);
+    Status = PdoGetInterruptRoute(DeviceExtension,
+                                  &SystemIrq,
+                                  &IsLevelTriggered,
+                                  &IsActiveLow);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("PCI: _PRT lookup for %02lx:%02lx.%lx pin %u failed (0x%lx)\n",
-                DeviceExtension->PciDevice->BusNumber,
-                DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
-                DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
-                DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin,
-                Status);
+        if (Status != STATUS_NOT_SUPPORTED && Status != STATUS_NOT_FOUND)
+            Irp->IoStatus.Status = Status;
         return Irp->IoStatus.Status;
     }
 
     NewList = ExAllocatePoolWithTag(PagedPool, OldList->ListSize, TAG_PCI);
     if (NewList == NULL)
-        return Irp->IoStatus.Status;
+    {
+        Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     RtlCopyMemory(NewList, OldList, OldList->ListSize);
 
@@ -1592,12 +1741,23 @@ PdoFilterResourceRequirements(
                                       AltList->Count * sizeof(IO_RESOURCE_DESCRIPTOR));
     }
 
-    DPRINT1("PCI: %02lx:%02lx.%lx pin %u routed to system IRQ %lu (level=%u low=%u)\n",
+    Status = PdoSetInterruptPolicy(SystemIrq,
+                                   IsLevelTriggered,
+                                   IsActiveLow);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(NewList, TAG_PCI);
+        Irp->IoStatus.Status = Status;
+        return Status;
+    }
+
+    DPRINT1("PCI: %02lx:%02lx.%lx pin %u routed to system IRQ %lu (0x%lx) "
+            "(level=%u low=%u)\n",
             DeviceExtension->PciDevice->BusNumber,
             DeviceExtension->PciDevice->SlotNumber.u.bits.DeviceNumber,
             DeviceExtension->PciDevice->SlotNumber.u.bits.FunctionNumber,
             DeviceExtension->PciDevice->PciConfig.u.type0.InterruptPin,
-            SystemIrq, IsLevelTriggered, IsActiveLow);
+            SystemIrq, SystemIrq, IsLevelTriggered, IsActiveLow);
 
     /* The PnP manager owns OldList and frees the list it gets back via
      * Irp->IoStatus.Information; do not free OldList here. */

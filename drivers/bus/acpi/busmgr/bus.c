@@ -1732,6 +1732,41 @@ acpi_bus_init (void)
 		goto error1;
 	}
 
+#ifdef _M_AMD64
+	/*
+	 * Tell the firmware that the OS uses the APIC interrupt model before
+	 * any PCI routing table can be evaluated and cached. Some firmware
+	 * returns legacy link-device IRQs from _PRT until _PIC(1) is called,
+	 * even though the chipset already routes PCI INTx to IOAPIC inputs.
+	 */
+	{
+		ACPI_OBJECT_LIST ArgList;
+		ACPI_OBJECT Arg;
+
+		Arg.Type = ACPI_TYPE_INTEGER;
+		Arg.Integer.Value = 1;
+		ArgList.Count = 1;
+		ArgList.Pointer = &Arg;
+
+		status = AcpiEvaluateObject(NULL, "\\_PIC", &ArgList, NULL);
+		if (status == AE_NOT_FOUND)
+		{
+			DPRINT1("ACPI: _PIC method not present; firmware assumed APIC-ready\n");
+			status = AE_OK;
+		}
+		else if (ACPI_FAILURE(status))
+		{
+			DPRINT1("ACPI: _PIC(1) evaluation failed: %s\n",
+			        AcpiFormatException(status));
+			goto error1;
+		}
+		else
+		{
+			DPRINT1("ACPI: _PIC(1) selected APIC interrupt routing\n");
+		}
+	}
+#endif
+
 	/*
 	 * Walk the namespace once now that objects exist so every _Lxx/_Exx
 	 * GPE handler is registered, then unmask all runtime GPEs. Without

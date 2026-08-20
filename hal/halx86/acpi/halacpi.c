@@ -39,6 +39,42 @@ ULONG HalpInvalidAcpiTable;
 
 ULONG HalpPicVectorRedirect[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 
+BOOLEAN
+NTAPI
+HalpTranslateIsaInterrupt(
+    _In_ ULONG SourceIrq,
+    _Out_ PULONG Gsi)
+{
+    BOOLEAN PolarityValid;
+    BOOLEAN ActiveLow;
+    BOOLEAN TriggerValid;
+    BOOLEAN LevelTriggered;
+
+    if (!HalpGetIsaInterruptOverride(SourceIrq,
+                                     Gsi,
+                                     &PolarityValid,
+                                     &ActiveLow,
+                                     &TriggerValid,
+                                     &LevelTriggered))
+    {
+        return FALSE;
+    }
+
+#ifdef _M_AMD64
+    if ((PolarityValid || TriggerValid) &&
+        !HalpSetIoApicInterruptAttributes(*Gsi,
+                                          PolarityValid,
+                                          ActiveLow,
+                                          TriggerValid,
+                                          LevelTriggered))
+    {
+        return FALSE;
+    }
+#endif
+
+    return TRUE;
+}
+
 /* This determines the HAL type */
 BOOLEAN HalDisableFirmwareMapper = TRUE;
 PWCHAR HalHardwareIdString = L"acpipic_up";
@@ -1049,8 +1085,17 @@ HalpBuildAcpiResourceList(IN PIO_RESOURCE_REQUIREMENTS_LIST ResourceList)
         ResourceList->List[0].Descriptors[0].Type = CmResourceTypeInterrupt;
         ResourceList->List[0].Descriptors[0].ShareDisposition = CmResourceShareShared;
 
-        /* Get the interrupt number */
-        Interrupt = HalpPicVectorRedirect[HalpFixedAcpiDescTable.sci_int_vector];
+        Interrupt = HalpFixedAcpiDescTable.sci_int_vector;
+#ifdef _M_AMD64
+        if ((Interrupt < RTL_NUMBER_OF(HalpPicVectorRedirect)) &&
+            !HalpTranslateIsaInterrupt(Interrupt, &Interrupt))
+        {
+            DPRINT1("HAL: unsupported SCI source IRQ %u\n",
+                    HalpFixedAcpiDescTable.sci_int_vector);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+#endif
+
         ResourceList->List[0].Descriptors[0].u.Interrupt.MinimumVector = Interrupt;
         ResourceList->List[0].Descriptors[0].u.Interrupt.MaximumVector = Interrupt;
 

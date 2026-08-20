@@ -58,6 +58,18 @@ IOAPIC_REDIRECTION_REGISTER HalpIoApicShadow[HALP_MAX_INPUTS];
 /* Serializes the IOREGSEL/IOWIN pairs of all I/O APICs */
 volatile LONG HalpIoApicLock;
 
+#define HALP_IOAPIC_POLICY_POLARITY_VALID  0x01
+#define HALP_IOAPIC_POLICY_ACTIVE_LOW      0x02
+#define HALP_IOAPIC_POLICY_TRIGGER_VALID   0x04
+#define HALP_IOAPIC_POLICY_LEVEL_TRIGGERED 0x08
+#define HALP_IOAPIC_POLICY_LOGGED          0x10
+
+/* Polarity and trigger mode each input must be programmed with */
+static volatile LONG
+HalpIoApicInputPolicy[HALP_MAX_INPUTS];
+volatile LONG HalpIoApicPolicyLock;
+static BOOLEAN HalpIoApicInitialized;
+
 #ifndef _M_AMD64
 const UCHAR
 HalpIRQLtoTPR[32] =
@@ -119,6 +131,30 @@ HalVectorToIRQL[16] =
 #endif
 
 /* PRIVATE FUNCTIONS **********************************************************/
+
+FORCEINLINE
+ULONG_PTR
+HalpAcquireIoApicPolicyLock(VOID)
+{
+    ULONG_PTR Flags;
+
+    Flags = __readeflags();
+    _disable();
+    while (InterlockedCompareExchange(&HalpIoApicPolicyLock, 1, 0) != 0)
+        YieldProcessor();
+
+    return Flags;
+}
+
+FORCEINLINE
+VOID
+HalpReleaseIoApicPolicyLock(
+    _In_ ULONG_PTR Flags)
+{
+    InterlockedExchange(&HalpIoApicPolicyLock, 0);
+    if (Flags & EFLAGS_INTERRUPT_MASK)
+        _enable();
+}
 
 FORCEINLINE
 ULONG
@@ -499,6 +535,152 @@ ApicInitializeLocalApic(
 #endif
 }
 
+BOOLEAN
+NTAPI
+HalpSetIoApicInterruptAttributes(
+    _In_ ULONG Gsi,
+    _In_ BOOLEAN PolarityValid,
+    _In_ BOOLEAN ActiveLow,
+    _In_ BOOLEAN TriggerValid,
+    _In_ BOOLEAN LevelTriggered)
+{
+    IOAPIC_REDIRECTION_REGISTER ReDirReg;
+    ULONG_PTR Flags;
+    LONG OldPolicy;
+    LONG NewPolicy;
+    PHALP_IOAPIC_UNIT Unit;
+
+    /* Attributes can be recorded before the I/O APICs are mapped,
+       afterwards the input has to be served by one of them */
+    if ((Gsi >= HALP_MAX_INPUTS) ||
+        (HalpIoApicInitialized && !HalpFindIoApicInput(Gsi, &Unit)))
+    {
+        DPRINT1("IOAPIC: no I/O APIC serves GSI %lu\n", Gsi);
+        return FALSE;
+    }
+
+    Flags = HalpAcquireIoApicPolicyLock();
+    OldPolicy = HalpIoApicInputPolicy[Gsi];
+
+    if ((PolarityValid &&
+         (OldPolicy & HALP_IOAPIC_POLICY_POLARITY_VALID) &&
+         (!!(OldPolicy & HALP_IOAPIC_POLICY_ACTIVE_LOW) != !!ActiveLow)) ||
+        (TriggerValid &&
+         (OldPolicy & HALP_IOAPIC_POLICY_TRIGGER_VALID) &&
+         (!!(OldPolicy & HALP_IOAPIC_POLICY_LEVEL_TRIGGERED) !=
+          !!LevelTriggered)))
+    {
+        HalpReleaseIoApicPolicyLock(Flags);
+        DPRINT1("IOAPIC: conflicting attributes for GSI %lu\n", Gsi);
+        return FALSE;
+    }
+
+    NewPolicy = OldPolicy & ~HALP_IOAPIC_POLICY_LOGGED;
+    if (PolarityValid)
+    {
+        NewPolicy |= HALP_IOAPIC_POLICY_POLARITY_VALID;
+        if (ActiveLow)
+            NewPolicy |= HALP_IOAPIC_POLICY_ACTIVE_LOW;
+        else
+            NewPolicy &= ~HALP_IOAPIC_POLICY_ACTIVE_LOW;
+    }
+
+    if (TriggerValid)
+    {
+        NewPolicy |= HALP_IOAPIC_POLICY_TRIGGER_VALID;
+        if (LevelTriggered)
+            NewPolicy |= HALP_IOAPIC_POLICY_LEVEL_TRIGGERED;
+        else
+            NewPolicy &= ~HALP_IOAPIC_POLICY_LEVEL_TRIGGERED;
+    }
+
+    if (HalpIoApicInitialized)
+    {
+        ReDirReg = ApicReadIORedirectionEntry(Gsi);
+        if (!ReDirReg.Mask &&
+            (((NewPolicy & HALP_IOAPIC_POLICY_POLARITY_VALID) &&
+              (ReDirReg.Polarity !=
+               !!(NewPolicy & HALP_IOAPIC_POLICY_ACTIVE_LOW))) ||
+             ((NewPolicy & HALP_IOAPIC_POLICY_TRIGGER_VALID) &&
+              (ReDirReg.TriggerMode !=
+               !!(NewPolicy & HALP_IOAPIC_POLICY_LEVEL_TRIGGERED)))))
+        {
+            HalpReleaseIoApicPolicyLock(Flags);
+            DPRINT1("IOAPIC: GSI %lu is already enabled with different attributes\n",
+                    Gsi);
+            return FALSE;
+        }
+    }
+
+    InterlockedExchange(&HalpIoApicInputPolicy[Gsi], NewPolicy);
+    HalpReleaseIoApicPolicyLock(Flags);
+    return TRUE;
+}
+
+static
+LONG
+HalpGetIoApicInterruptPolicy(
+    _In_ ULONG Gsi)
+{
+    /* Aligned LONG loads are atomic and acquire-ordered on x86/x64. */
+    ASSERT(Gsi < HALP_MAX_INPUTS);
+    return HalpIoApicInputPolicy[Gsi];
+}
+
+static
+VOID
+HalpApplyIoApicInterruptAttributes(
+    _In_ ULONG Gsi,
+    _Inout_ IOAPIC_REDIRECTION_REGISTER *ReDirReg)
+{
+    LONG Policy = HalpGetIoApicInterruptPolicy(Gsi);
+
+    if (Policy & HALP_IOAPIC_POLICY_POLARITY_VALID)
+    {
+        ReDirReg->Polarity = !!(Policy & HALP_IOAPIC_POLICY_ACTIVE_LOW);
+    }
+
+    if (Policy & HALP_IOAPIC_POLICY_TRIGGER_VALID)
+    {
+        ReDirReg->TriggerMode =
+            (Policy & HALP_IOAPIC_POLICY_LEVEL_TRIGGERED) ?
+            APIC_TGM_Level : APIC_TGM_Edge;
+    }
+}
+
+#if DBG
+static
+VOID
+HalpLogIoApicInterruptAttributes(
+    _In_ ULONG Gsi,
+    _In_ IOAPIC_REDIRECTION_REGISTER ReDirReg)
+{
+    LONG Policy;
+
+    Policy = HalpGetIoApicInterruptPolicy(Gsi);
+    if (Policy & HALP_IOAPIC_POLICY_LOGGED)
+        return;
+
+    Policy = InterlockedOr(&HalpIoApicInputPolicy[Gsi],
+                           HALP_IOAPIC_POLICY_LOGGED);
+    if (Policy & HALP_IOAPIC_POLICY_LOGGED)
+        return;
+
+    DPRINT1("IOAPIC: GSI %lu vector 0x%02x RTE %08lx:%08lx "
+            "polarity=%s trigger=%s policy=%u/%u\n",
+            Gsi,
+            (ULONG)ReDirReg.Vector,
+            ReDirReg.Long1,
+            ReDirReg.Long0,
+            ReDirReg.Polarity ? "low" : "high",
+            ReDirReg.TriggerMode ? "level" : "edge",
+            !!(Policy & HALP_IOAPIC_POLICY_POLARITY_VALID),
+            !!(Policy & HALP_IOAPIC_POLICY_TRIGGER_VALID));
+}
+#else
+#define HalpLogIoApicInterruptAttributes(Gsi, ReDirReg) do { } while (0)
+#endif
+
 UCHAR
 NTAPI
 HalpAllocateSystemInterrupt(
@@ -521,6 +703,8 @@ HalpAllocateSystemInterrupt(
     ReDirReg.Mask = 1;
     ReDirReg.Reserved = 0;
     ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
+
+    HalpApplyIoApicInterruptAttributes(Irq, &ReDirReg);
 
     /* Initialize entry */
     ApicWriteIORedirectionEntry(Irq, ReDirReg);
@@ -554,7 +738,7 @@ HalpGetRootInterruptVector(
     }
 
     /* Get the vector currently registered */
-    Vector = HalpIrqToVector(BusInterruptLevel);
+    Vector = HalpIrqToVector((UCHAR)BusInterruptLevel);
 
     /* Check if it's used */
     if (Vector != APIC_FREE_VECTOR)
@@ -580,7 +764,7 @@ HalpGetRootInterruptVector(
                 if (HalpVectorToIrq(Vector) == APIC_FREE_VECTOR)
                 {
                     /* Found one, allocate the interrupt */
-                    Vector = HalpAllocateSystemInterrupt(BusInterruptLevel, Vector);
+                    Vector = HalpAllocateSystemInterrupt((UCHAR)BusInterruptLevel, Vector);
                     *OutIrql = Irql;
                     goto Exit;
                 }
@@ -723,6 +907,8 @@ ApicInitializeIOApic(VOID)
     ReDirReg.Mask = 1;
     ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
     ApicWriteIORedirectionEntry(APIC_CLOCK_INDEX, ReDirReg);
+
+    HalpIoApicInitialized = TRUE;
 }
 
 VOID
@@ -918,6 +1104,10 @@ HalpQueryVectorInput(
 {
     PHALP_IOAPIC_UNIT Unit;
     NTSTATUS Status;
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    GROUP_AFFINITY Affinity;
+    INTERRUPT_REMAPPING_INFO RemapInfo;
+#endif
 
     *Input = 0;
     *Polarity = InterruptPolarityUnknown;
@@ -925,7 +1115,14 @@ HalpQueryVectorInput(
     if (HalGetVectorInputOverride == NULL)
         return STATUS_NOT_FOUND;
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    RtlZeroMemory(&Affinity, sizeof(Affinity));
+    Affinity.Mask = HalpDefaultInterruptAffinity;
+    RtlZeroMemory(&RemapInfo, sizeof(RemapInfo));
+    Status = HalGetVectorInputOverride(Vector, &Affinity, Input, Polarity, &RemapInfo);
+#else
     Status = HalGetVectorInputOverride(Vector, HalpDefaultInterruptAffinity, Input, Polarity);
+#endif
     if (NT_SUCCESS(Status) && !HalpFindIoApicInput(*Input, &Unit))
     {
         DPRINT1("No I/O APIC serves input %lu of vector 0x%lx\n", *Input, Vector);
@@ -989,6 +1186,9 @@ HalEnableSystemInterrupt(
     KINTERRUPT_POLARITY Polarity;
     NTSTATUS Status;
     ULONG Input;
+    ULONG_PTR Flags;
+    LONG Policy;
+    BOOLEAN RequestedLevel;
     UCHAR Index;
     ASSERT(Irql <= HIGH_LEVEL);
     ASSERT((IrqlToTpr(Irql) & 0xF0) == (Vector & 0xF0));
@@ -1031,15 +1231,57 @@ HalEnableSystemInterrupt(
         return FALSE;
     }
 
+    Flags = HalpAcquireIoApicPolicyLock();
+    Policy = HalpIoApicInputPolicy[Index];
+    RequestedLevel = (InterruptMode == LevelSensitive);
+
+    if ((Policy & HALP_IOAPIC_POLICY_TRIGGER_VALID) &&
+        (!!(Policy & HALP_IOAPIC_POLICY_LEVEL_TRIGGERED) != RequestedLevel))
+    {
+        HalpReleaseIoApicPolicyLock(Flags);
+        DPRINT1("IOAPIC: GSI %u trigger policy conflicts with mode %u\n",
+                Index, InterruptMode);
+        return FALSE;
+    }
+
+    /* The polarity the ACPI driver arbitrated has to agree as well */
+    if ((Polarity != InterruptPolarityUnknown) &&
+        (Policy & HALP_IOAPIC_POLICY_POLARITY_VALID) &&
+        (!!(Policy & HALP_IOAPIC_POLICY_ACTIVE_LOW) != (Polarity == InterruptActiveLow)))
+    {
+        HalpReleaseIoApicPolicyLock(Flags);
+        DPRINT1("IOAPIC: GSI %u polarity policy conflicts with polarity %u\n",
+                Index, Polarity);
+        return FALSE;
+    }
+
     /* Read the redirection entry */
     ReDirReg = ApicReadIORedirectionEntry(Index);
 
     /* Check if the interrupt is already enabled */
     if (ReDirReg.Mask == FALSE)
     {
-        /* If the vector matches, there is nothing more to do,
-           otherwise something is wrong. */
-        return (ReDirReg.Vector == Vector);
+        if (ReDirReg.Vector != Vector)
+        {
+            HalpReleaseIoApicPolicyLock(Flags);
+            return FALSE;
+        }
+
+        if (((Policy & HALP_IOAPIC_POLICY_POLARITY_VALID) &&
+             (ReDirReg.Polarity !=
+              !!(Policy & HALP_IOAPIC_POLICY_ACTIVE_LOW))) ||
+            ((Policy & HALP_IOAPIC_POLICY_TRIGGER_VALID) &&
+             (ReDirReg.TriggerMode !=
+              !!(Policy & HALP_IOAPIC_POLICY_LEVEL_TRIGGERED))))
+        {
+            HalpReleaseIoApicPolicyLock(Flags);
+            DPRINT1("IOAPIC: refusing to repolarize enabled GSI %u\n", Index);
+            return FALSE;
+        }
+
+        HalpReleaseIoApicPolicyLock(Flags);
+        HalpLogIoApicInterruptAttributes(Index, ReDirReg);
+        return TRUE;
     }
 
     /* Set up the redirection entry */
@@ -1047,14 +1289,18 @@ HalEnableSystemInterrupt(
     ReDirReg.MessageType = APIC_MT_Fixed;
     ReDirReg.DestinationMode = APIC_DM_Physical;
     ReDirReg.Destination = ApicRead(APIC_ID) >> 24;
-    ReDirReg.TriggerMode = (InterruptMode == LevelSensitive) ?
-        APIC_TGM_Level : APIC_TGM_Edge;
+    ReDirReg.TriggerMode = RequestedLevel ? APIC_TGM_Level : APIC_TGM_Edge;
     ReDirReg.Polarity =
         (HalpGetInputPolarity(Index, InterruptMode, Polarity) == InterruptActiveLow);
+
+    /* Recorded attributes take precedence over the defaults */
+    HalpApplyIoApicInterruptAttributes(Index, &ReDirReg);
     ReDirReg.Mask = FALSE;
 
     /* Write back the entry */
     ApicWriteIORedirectionEntry(Index, ReDirReg);
+    HalpReleaseIoApicPolicyLock(Flags);
+    HalpLogIoApicInterruptAttributes(Index, ReDirReg);
 
     return TRUE;
 }
