@@ -550,6 +550,10 @@ ConSrvDisconnect(IN PCSR_PROCESS CsrProcess)
     RtlDeleteCriticalSection(&ProcessData->HandleTableLock);
 }
 
+/* Defined in frontends/gui/guiterm.c */
+VOID NTAPI
+GuiInitFrontEndSupport(VOID);
+
 CSR_SERVER_DLL_INIT(ConServerDllInitialization)
 {
     /* Initialize the memory */
@@ -566,6 +570,7 @@ CSR_SERVER_DLL_INIT(ConServerDllInitialization)
 */
 
     ConSrvInitConsoleSupport();
+    GuiInitFrontEndSupport();
 
     /* Setup the DLL Object */
     LoadedServerDll->ApiBase = CONSRV_FIRST_API_NUMBER;
