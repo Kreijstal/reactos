@@ -252,6 +252,7 @@ ProcessorStartDevice(
     DPRINT("ProcessorStartDevice()\n");
 
     ProcessorSetFriendlyName(DeviceObject);
+    ProcessorPerfInitialize(DeviceObject);
 
     return STATUS_SUCCESS;
 }
@@ -299,6 +300,7 @@ ProcessorPnp(
 
         case IRP_MN_REMOVE_DEVICE:
             DPRINT("  IRP_MN_REMOVE_DEVICE received\n");
+            ProcessorPerfStop(DeviceObject);
             return ForwardIrpAndForget(DeviceObject, Irp);
 
         case IRP_MN_CANCEL_REMOVE_DEVICE:
