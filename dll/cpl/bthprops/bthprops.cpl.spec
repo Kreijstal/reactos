@@ -60,6 +60,6 @@
 @ stub BthpEnableAllServices
 @ stub BthpFindPnpInfo
 @ stub BthpMapStatusToErr
-#@ stub CPlApplet
+@ stdcall CPlApplet(ptr long ptr ptr)
 @ stdcall -private DllCanUnloadNow()
 @ stub DllGetClassObject
