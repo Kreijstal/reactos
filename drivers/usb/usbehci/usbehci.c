@@ -1050,102 +1050,268 @@ EHCI_InitializeHardware(IN PEHCI_EXTENSION EhciExtension)
     return MP_STATUS_SUCCESS;
 }
 
-UCHAR
+MPSTATUS
 NTAPI
 EHCI_GetOffsetEECP(IN PEHCI_EXTENSION EhciExtension,
-                   IN UCHAR CapabilityID)
+                   IN UCHAR CapabilityID,
+                   OUT PUCHAR CapabilityOffset)
 {
     EHCI_LEGACY_EXTENDED_CAPABILITY LegacyCapability;
     EHCI_HC_CAPABILITY_PARAMS CapParameters;
+    ULONG CapabilityCount = 0;
+    MPSTATUS MPStatus;
     UCHAR OffsetEECP;
 
     DPRINT("EHCI_GetOffsetEECP: CapabilityID - %x\n", CapabilityID);
 
+    *CapabilityOffset = 0;
     CapParameters = EhciExtension->CapabilityRegisters->CapParameters;
-
     OffsetEECP = CapParameters.ExtCapabilitiesPointer;
 
-    if (!OffsetEECP)
-        return 0;
-
-    while (TRUE)
+    while (OffsetEECP)
     {
-        RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
-                                              TRUE,
-                                              &LegacyCapability.AsULONG,
-                                              OffsetEECP,
-                                              sizeof(LegacyCapability));
+        if ((OffsetEECP & (sizeof(ULONG) - 1)) ||
+            OffsetEECP < EHCI_EXT_CAPABILITY_MIN_OFFSET ||
+            OffsetEECP > EHCI_EXT_CAPABILITY_MAX_OFFSET ||
+            CapabilityCount++ >= EHCI_MAX_EXT_CAPABILITIES)
+        {
+            DPRINT1("EHCI_GetOffsetEECP: invalid capability chain at 0x%02x\n",
+                    OffsetEECP);
+            return MP_STATUS_HW_ERROR;
+        }
+
+        LegacyCapability.AsULONG = 0;
+        MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                         TRUE,
+                                                         &LegacyCapability.AsULONG,
+                                                         OffsetEECP,
+                                                         sizeof(LegacyCapability));
+        if (MPStatus != MP_STATUS_SUCCESS)
+        {
+            DPRINT1("EHCI_GetOffsetEECP: failed to read capability at 0x%02x\n",
+                    OffsetEECP);
+            return MPStatus;
+        }
 
         DPRINT("EHCI_GetOffsetEECP: OffsetEECP - %x\n", OffsetEECP);
 
+        if (LegacyCapability.CapabilityID == 0)
+        {
+            if (LegacyCapability.NextCapabilityPointer != 0)
+            {
+                DPRINT1("EHCI_GetOffsetEECP: invalid reserved capability at "
+                        "0x%02x\n",
+                        OffsetEECP);
+                return MP_STATUS_HW_ERROR;
+            }
+
+            return MP_STATUS_SUCCESS;
+        }
+
         if (LegacyCapability.CapabilityID == CapabilityID)
-            break;
+        {
+            *CapabilityOffset = OffsetEECP;
+            return MP_STATUS_SUCCESS;
+        }
 
         OffsetEECP = LegacyCapability.NextCapabilityPointer;
-
-        if (!OffsetEECP)
-            return 0;
     }
 
-    return OffsetEECP;
+    return MP_STATUS_SUCCESS;
+}
+
+static
+VOID
+EHCI_ClearOsOwnedSemaphore(IN PEHCI_EXTENSION EhciExtension,
+                           IN UCHAR OffsetEECP)
+{
+    UCHAR OsOwnedSemaphore = 0;
+    MPSTATUS MPStatus;
+
+    MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                     FALSE,
+                                                     &OsOwnedSemaphore,
+                                                     OffsetEECP +
+                                                         EHCI_OS_OWNED_SEMAPHORE_OFFSET,
+                                                     sizeof(OsOwnedSemaphore));
+    if (MPStatus != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("EHCI_ClearOsOwnedSemaphore: failed to release OS ownership\n");
+    }
 }
 
 MPSTATUS
 NTAPI
 EHCI_TakeControlHC(IN PEHCI_EXTENSION EhciExtension)
 {
-    LARGE_INTEGER EndTime;
-    LARGE_INTEGER CurrentTime;
     EHCI_LEGACY_EXTENDED_CAPABILITY LegacyCapability;
+    ULONG LegacyControlStatus;
+    ULONG ElapsedMs = 0;
+    ULONG WaitMs;
+    ULONGLONG StartTime;
+    ULONGLONG CurrentTime;
+    ULONGLONG Deadline;
+    BOOLEAN RestoreOsOwned = FALSE;
+    MPSTATUS MPStatus;
+    NTSTATUS Status;
+    UCHAR OsOwnedSemaphore = 1;
     UCHAR OffsetEECP;
 
     DPRINT("EHCI_TakeControlHC: EhciExtension - %p\n", EhciExtension);
 
-    OffsetEECP = EHCI_GetOffsetEECP(EhciExtension, 1);
+    MPStatus = EHCI_GetOffsetEECP(EhciExtension,
+                                  EHCI_LEGACY_CAPABILITY_ID,
+                                  &OffsetEECP);
+    if (MPStatus != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("EHCI_TakeControlHC: failed to locate legacy capability\n");
+        return MPStatus;
+    }
 
     if (OffsetEECP == 0)
         return MP_STATUS_SUCCESS;
 
-    DPRINT("EHCI_TakeControlHC: OffsetEECP - %X\n", OffsetEECP);
-
-    RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
-                                          TRUE,
-                                          &LegacyCapability.AsULONG,
-                                          OffsetEECP,
-                                          sizeof(LegacyCapability));
-
-    if (LegacyCapability.BiosOwnedSemaphore == 0)
-        return MP_STATUS_SUCCESS;
-
-    LegacyCapability.OsOwnedSemaphore = 1;
-
-    RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
-                                          FALSE,
-                                          &LegacyCapability.AsULONG,
-                                          OffsetEECP,
-                                          sizeof(LegacyCapability));
-
-    KeQuerySystemTime(&EndTime);
-    EndTime.QuadPart += 100 * 10000;
-
-    do
+    if (OffsetEECP > EHCI_LEGACY_CAPABILITY_MAX_OFFSET)
     {
-        RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
-                                              TRUE,
-                                              &LegacyCapability.AsULONG,
-                                              OffsetEECP,
-                                              sizeof(LegacyCapability));
-        KeQuerySystemTime(&CurrentTime);
+        DPRINT1("EHCI_TakeControlHC: legacy capability at invalid offset "
+                "0x%02x\n",
+                OffsetEECP);
+        return MP_STATUS_HW_ERROR;
+    }
+
+    MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                     TRUE,
+                                                     &LegacyCapability.AsULONG,
+                                                     OffsetEECP,
+                                                     sizeof(LegacyCapability));
+    if (MPStatus != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("EHCI_TakeControlHC: failed to read EECP 0x%02x\n",
+                OffsetEECP);
+        return MPStatus;
+    }
+
+    DPRINT1("EHCI_TakeControlHC: EECP 0x%02x legacy 0x%08lx "
+            "(BIOS=%u OS=%u)\n",
+            OffsetEECP,
+            LegacyCapability.AsULONG,
+            LegacyCapability.BiosOwnedSemaphore,
+            LegacyCapability.OsOwnedSemaphore);
+
+    if (LegacyCapability.BiosOwnedSemaphore)
+    {
+        RestoreOsOwned = !LegacyCapability.OsOwnedSemaphore;
+        StartTime = KeQueryInterruptTime();
+        Deadline = StartTime +
+                   EHCI_BIOS_HANDOFF_TIMEOUT_MS * 10000ULL;
+
+        if (RestoreOsOwned)
+        {
+            MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                             FALSE,
+                                                             &OsOwnedSemaphore,
+                                                             OffsetEECP +
+                                                                 EHCI_OS_OWNED_SEMAPHORE_OFFSET,
+                                                             sizeof(OsOwnedSemaphore));
+            if (MPStatus != MP_STATUS_SUCCESS)
+            {
+                DPRINT1("EHCI_TakeControlHC: failed to request OS ownership\n");
+                return MPStatus;
+            }
+        }
+
+        do
+        {
+            MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                             TRUE,
+                                                             &LegacyCapability.AsULONG,
+                                                             OffsetEECP,
+                                                             sizeof(LegacyCapability));
+            if (MPStatus != MP_STATUS_SUCCESS)
+            {
+                DPRINT1("EHCI_TakeControlHC: failed to read ownership state\n");
+                goto Failure;
+            }
+
+            if (!LegacyCapability.BiosOwnedSemaphore)
+                break;
+
+            CurrentTime = KeQueryInterruptTime();
+            if (CurrentTime >= Deadline)
+                break;
+
+            WaitMs = (ULONG)((Deadline - CurrentTime) / 10000ULL);
+            if (WaitMs > EHCI_BIOS_HANDOFF_POLL_MS)
+                WaitMs = EHCI_BIOS_HANDOFF_POLL_MS;
+            else if (WaitMs == 0)
+                WaitMs = 1;
+
+            Status = RegPacket.UsbPortWait(EhciExtension, WaitMs);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("EHCI_TakeControlHC: ownership wait failed with "
+                        "0x%08lx\n",
+                        Status);
+                MPStatus = MP_STATUS_HW_ERROR;
+                goto Failure;
+            }
+        }
+        while (TRUE);
+
+        CurrentTime = KeQueryInterruptTime();
+        ElapsedMs = (ULONG)((CurrentTime - StartTime) / 10000ULL);
 
         if (LegacyCapability.BiosOwnedSemaphore)
         {
-            DPRINT("EHCI_TakeControlHC: Ownership is ok\n");
-            break;
+            DPRINT1("EHCI_TakeControlHC: BIOS ownership timeout after %lu ms "
+                    "(legacy 0x%08lx)\n",
+                    ElapsedMs,
+                    LegacyCapability.AsULONG);
+            MPStatus = MP_STATUS_HW_ERROR;
+            goto Failure;
         }
     }
-    while (CurrentTime.QuadPart <= EndTime.QuadPart);
+
+    MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                     TRUE,
+                                                     &LegacyControlStatus,
+                                                     OffsetEECP +
+                                                         EHCI_LEGACY_CONTROL_STATUS_OFFSET,
+                                                     sizeof(LegacyControlStatus));
+    if (MPStatus != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("EHCI_TakeControlHC: failed to read legacy SMI routing\n");
+        goto Failure;
+    }
+
+    DPRINT1("EHCI_TakeControlHC: legacy control/status 0x%08lx\n",
+            LegacyControlStatus);
+
+    LegacyControlStatus = 0;
+    MPStatus = RegPacket.UsbPortReadWriteConfigSpace(EhciExtension,
+                                                     FALSE,
+                                                     &LegacyControlStatus,
+                                                     OffsetEECP +
+                                                         EHCI_LEGACY_CONTROL_STATUS_OFFSET,
+                                                     sizeof(LegacyControlStatus));
+    if (MPStatus != MP_STATUS_SUCCESS)
+    {
+        DPRINT1("EHCI_TakeControlHC: failed to disable legacy SMI routing\n");
+        goto Failure;
+    }
+
+    DPRINT1("EHCI_TakeControlHC: handoff complete after %lu ms; "
+            "legacy SMI routing disabled (legacy 0x%08lx)\n",
+            ElapsedMs,
+            LegacyCapability.AsULONG);
 
     return MP_STATUS_SUCCESS;
+
+Failure:
+    if (RestoreOsOwned)
+        EHCI_ClearOsOwnedSemaphore(EhciExtension, OffsetEECP);
+
+    return MPStatus;
 }
 
 VOID
