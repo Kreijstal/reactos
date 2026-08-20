@@ -212,15 +212,21 @@ MPSTATUS
 RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
                        IN PXHCI_ENDPOINT XhciEndpoint,
                        IN PXHCI_TRANSFER XhciTransfer,
+                       IN PXHCI_RING Ring,
                        IN PHYSICAL_ADDRESS TrbPointers[],
                        IN ULONG TrbCount,
                        IN ULONG RequestedLength)
 {
     ULONG i;
     KIRQL OldIrql;
+    PHYSICAL_ADDRESS RingBasePA;
     MPSTATUS Status = MP_STATUS_FAILURE;
 
     InitializeTransferTracking();
+
+    RingBasePA.QuadPart = 0;
+    if (Ring != NULL)
+        RingBasePA = MmGetPhysicalAddress(&Ring->firstSeg.XhciTrb[0]);
 
     KeAcquireSpinLock(&g_PendingTransfersLock, &OldIrql);
 
@@ -231,6 +237,9 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
             g_PendingTransfers[i].XhciTransfer = XhciTransfer;
             g_PendingTransfers[i].XhciEndpoint = XhciEndpoint;
             g_PendingTransfers[i].XhciExtension = XhciExtension;
+            g_PendingTransfers[i].Ring = Ring;
+            g_PendingTransfers[i].RingBasePA = RingBasePA;
+            g_PendingTransfers[i].FirstTrb = TrbPointers[0];
             g_PendingTransfers[i].TrbCount = TrbCount;
             g_PendingTransfers[i].CompletionTrb = TrbPointers[TrbCount - 1];
             g_PendingTransfers[i].RequestedLength = RequestedLength;
@@ -254,6 +263,110 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
     return Status;
 }
 
+BOOLEAN
+NTAPI
+XHCI_TdTrbOffset(IN PXHCI_PENDING_TRANSFER Entry,
+                 IN PHYSICAL_ADDRESS TrbPA,
+                 OUT PULONG Offset)
+{
+    ULONGLONG RingBase;
+    ULONGLONG Trb;
+    ULONGLONG First;
+    ULONG TrbIndex;
+    ULONG FirstIndex;
+    ULONG Delta;
+
+    RingBase = (ULONGLONG)Entry->RingBasePA.QuadPart;
+    Trb = (ULONGLONG)TrbPA.QuadPart;
+    First = (ULONGLONG)Entry->FirstTrb.QuadPart;
+
+    if (RingBase == 0 || Entry->TrbCount == 0 ||
+        Trb < RingBase || First < RingBase)
+    {
+        return FALSE;
+    }
+
+    Trb -= RingBase;
+    First -= RingBase;
+
+    if ((Trb % sizeof(XHCI_TRB)) != 0 || (First % sizeof(XHCI_TRB)) != 0)
+        return FALSE;
+
+    TrbIndex = (ULONG)(Trb / sizeof(XHCI_TRB));
+    FirstIndex = (ULONG)(First / sizeof(XHCI_TRB));
+
+    /* The Link TRB is never part of a TD -- XHCI_EnqueueTRBOnTransferRing steps
+     * over it -- so a TD occupies consecutive slots modulo the ring's data
+     * area, and a TD may straddle the wrap. */
+    if (TrbIndex >= XHCI_TRANSFER_RING_LINK_INDEX ||
+        FirstIndex >= XHCI_TRANSFER_RING_LINK_INDEX)
+    {
+        return FALSE;
+    }
+
+    Delta = (TrbIndex + XHCI_TRANSFER_RING_LINK_INDEX - FirstIndex) %
+            XHCI_TRANSFER_RING_LINK_INDEX;
+
+    if (Delta >= Entry->TrbCount)
+        return FALSE;
+
+    *Offset = Delta;
+    return TRUE;
+}
+
+/*
+ * Data carried by the TRBs of a TD that lie strictly before TrbOffset, and (out)
+ * the data length programmed into the TRB at TrbOffset itself.
+ *
+ * The lengths are read back from the transfer ring.  The controller only ever
+ * reads that memory, and the TD is still tracked, so its TRBs are exactly as
+ * they were enqueued.  Only Normal and Data Stage TRBs carry payload; a control
+ * TD's Setup and Status stages contribute nothing to the URB's length.
+ */
+static
+ULONG
+XHCI_TdBytesBeforeTrb(IN PXHCI_PENDING_TRANSFER Entry,
+                      IN ULONG TrbOffset,
+                      OUT PULONG EventTrbLength)
+{
+    ULONG Bytes = 0;
+    ULONG FirstIndex;
+    ULONG ix;
+
+    *EventTrbLength = 0;
+
+    if (Entry->Ring == NULL || Entry->RingBasePA.QuadPart == 0)
+    {
+        /* No ring recorded: fall back to the whole request, which is what the
+         * single-TRB TDs this can only happen for actually carry. */
+        *EventTrbLength = Entry->RequestedLength;
+        return 0;
+    }
+
+    FirstIndex = (ULONG)(((ULONGLONG)Entry->FirstTrb.QuadPart -
+                          (ULONGLONG)Entry->RingBasePA.QuadPart) / sizeof(XHCI_TRB));
+
+    for (ix = 0; ix <= TrbOffset && ix < Entry->TrbCount; ix++)
+    {
+        ULONG Index = (FirstIndex + ix) % XHCI_TRANSFER_RING_LINK_INDEX;
+        PXHCI_TRB Trb = &Entry->Ring->firstSeg.XhciTrb[Index];
+        ULONG Type = (Trb->GenericTRB.Word3 >> 10) & 0x3F;
+        ULONG Length;
+
+        if (Type != NORMAL_TRB && Type != DATA_STAGE)
+            Length = 0;
+        else
+            Length = Trb->GenericTRB.Word2 & 0x1FFFF;
+
+        if (ix == TrbOffset)
+            *EventTrbLength = Length;
+        else
+            Bytes += Length;
+    }
+
+    return Bytes;
+}
+
 /*
  * Copy a matching slot out under the lock instead of handing back a pointer
  * into the table.
@@ -267,22 +380,45 @@ RegisterPendingTransfer(IN PXHCI_EXTENSION XhciExtension,
  */
 BOOLEAN
 FindPendingTransferSnapshot(IN PHYSICAL_ADDRESS TrbPointer,
-                            OUT PXHCI_PENDING_TRANSFER Snapshot)
+                            OUT PXHCI_PENDING_TRANSFER Snapshot,
+                            OUT PULONG TrbOffset)
 {
     ULONG i;
+    ULONG Offset;
     KIRQL OldIrql;
     BOOLEAN Found = FALSE;
 
     InitializeTransferTracking();
 
+    *TrbOffset = 0;
+
     KeAcquireSpinLock(&g_PendingTransfersLock, &OldIrql);
 
     for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
-        if (g_PendingTransfers[i].InUse &&
-            g_PendingTransfers[i].CompletionTrb.QuadPart == TrbPointer.QuadPart)
+        if (!g_PendingTransfers[i].InUse)
+            continue;
+
+        /*
+         * Match any TRB of the TD, not just its last one.  The controller
+         * names the TRB it stopped on, so a short packet or an error partway
+         * through a multi-TRB TD reports an intermediate TRB; matching only
+         * the last one dropped that event, left the tracking slot occupied
+         * for ever and left the software dequeue pointer standing in front of
+         * a TD the hardware had already abandoned.
+         */
+        if (XHCI_TdTrbOffset(&g_PendingTransfers[i], TrbPointer, &Offset))
         {
             *Snapshot = g_PendingTransfers[i];
+            *TrbOffset = Offset;
+            Found = TRUE;
+            break;
+        }
+
+        if (g_PendingTransfers[i].CompletionTrb.QuadPart == TrbPointer.QuadPart)
+        {
+            *Snapshot = g_PendingTransfers[i];
+            *TrbOffset = g_PendingTransfers[i].TrbCount - 1;
             Found = TRUE;
             break;
         }
@@ -313,7 +449,12 @@ UnregisterPendingTransferByTrb(IN PHYSICAL_ADDRESS TrbPointer)
 
     for (i = 0; i < MAX_PENDING_TRANSFERS; i++)
     {
-        if (g_PendingTransfers[i].InUse &&
+        ULONG Offset;
+
+        if (!g_PendingTransfers[i].InUse)
+            continue;
+
+        if (XHCI_TdTrbOffset(&g_PendingTransfers[i], TrbPointer, &Offset) ||
             g_PendingTransfers[i].CompletionTrb.QuadPart == TrbPointer.QuadPart)
         {
             g_PendingTransfers[i].InUse = FALSE;
@@ -1936,7 +2077,7 @@ XHCI_SubmitControlTransfer(IN PXHCI_EXTENSION XhciExtension,
     }
     TrbPointers[TrbCount++] = StatusTrbPA;
     
-    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, TrbCount, TransferLength);
+    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, SlotTransferRing, TrbPointers, TrbCount, TransferLength);
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitControlTransfer: Failed to register transfer for tracking\n");
@@ -2072,6 +2213,9 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
 
     Status = XHCI_BuildBulkNormalTrbs(SgList,
                                       TransferLength,
+                                      XhciEndpoint->EndpointProperties.MaxPacketSize,
+                                      (BOOLEAN)((TransferParameters->TransferFlags &
+                                                 USBD_TRANSFER_DIRECTION_IN) != 0),
                                       NormalTrbs,
                                       XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
@@ -2102,7 +2246,7 @@ XHCI_SubmitBulkTransfer(IN PXHCI_EXTENSION XhciExtension,
         TrbPointers[TrbIdx] = NormalTrbPA;
     }
 
-    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, TrbCount, TransferLength);
+    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, EndpointTransferRing, TrbPointers, TrbCount, TransferLength);
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitBulkTransfer: Failed to register transfer for tracking\n");
@@ -2222,7 +2366,7 @@ XHCI_SubmitInterruptTransfer(IN PXHCI_EXTENSION XhciExtension,
     PHYSICAL_ADDRESS TrbPointers[1];
     TrbPointers[0] = NormalTrbPA;
     
-    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, TrbPointers, 1, TransferLength);
+    Status = RegisterPendingTransfer(XhciExtension, XhciEndpoint, XhciTransfer, EndpointTransferRing, TrbPointers, 1, TransferLength);
     if (Status != MP_STATUS_SUCCESS)
     {
         DPRINT1("XHCI_SubmitInterruptTransfer: Failed to register transfer for tracking\n");
@@ -2274,6 +2418,7 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
     XHCI_PENDING_TRANSFER Snapshot;
     PXHCI_PENDING_TRANSFER PendingTransfer = &Snapshot;
     ULONG CompletionCode, TransferLength, SlotId, EndpointId;
+    ULONG TrbOffset = 0;
     
     DPRINT("XHCI_ProcessTransferEvent: Processing transfer completion event\n");
 
@@ -2352,7 +2497,7 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
      * processor can retire the slot at any moment, and treating that as "no
      * match" completes nothing, which is correct because the aborting side
      * completes the URB itself. */
-    if (FindPendingTransferSnapshot(TrbPointer, &Snapshot) &&
+    if (FindPendingTransferSnapshot(TrbPointer, &Snapshot, &TrbOffset) &&
         PendingTransfer->XhciTransfer && PendingTransfer->XhciEndpoint)
     {
         // Complete the transfer
@@ -2389,37 +2534,39 @@ XHCI_ProcessTransferEvent(IN PXHCI_EXTENSION XhciExtension,
                 break;
         }
         
-        // Calculate actual transferred length based on completion code and transfer type
+        /*
+         * Bytes the TD actually moved.
+         *
+         * A transfer event names the TRB the controller stopped on and reports
+         * the residual of *that TRB* (xHCI 4.11.5.2), so the only correct total
+         * is the data carried by the TRBs ahead of it plus what that TRB itself
+         * carried.  Crediting the TD with its whole requested length whenever
+         * the completion code was Success -- which is what this did -- reports
+         * bytes that never came off the wire, and the caller's buffer keeps
+         * whatever it held before.  For a demand-paged image read that is a
+         * page of stale bytes and an access violation in whatever runs next.
+         */
         ULONG ActualTransferred;
-        
-        if (CompletionCode == SUCCESS)
+        ULONG EventTrbLength = 0;
+
+        ActualTransferred = XHCI_TdBytesBeforeTrb(PendingTransfer,
+                                                  TrbOffset,
+                                                  &EventTrbLength);
+
+        if (CompletionCode == SUCCESS || CompletionCode == SHORT_PACKET)
         {
-            // For successful transfers, actual transferred = requested
+            /* The residual can exceed the TRB's length only if the event does
+             * not belong to this TD; credit nothing in that case. */
+            if (EventTrbLength > TransferLength)
+                ActualTransferred += EventTrbLength - TransferLength;
+        }
+        /* Any other completion code stopped the TD on this TRB.  Whether that
+         * TRB moved anything is not reliably reported, so credit only the TRBs
+         * that completed ahead of it: never report more than arrived. */
+
+        if (ActualTransferred > PendingTransfer->RequestedLength)
             ActualTransferred = PendingTransfer->RequestedLength;
-            DPRINT("XHCI_ProcessTransferEvent: SUCCESS - using requested length %d\n", ActualTransferred);
-        }
-        else if (CompletionCode == SHORT_PACKET)
-        {
-            // For short packet transfers, calculate from event data
-            ActualTransferred = PendingTransfer->RequestedLength - TransferLength;
-            DPRINT("XHCI_ProcessTransferEvent: SHORT_PACKET - calculated %d (req=%d, not_xfer=%d)\n", 
-                    ActualTransferred, PendingTransfer->RequestedLength, TransferLength);
-        }
-        else
-        {
-            // For error conditions, no data was transferred
-            ActualTransferred = 0;
-            DPRINT("XHCI_ProcessTransferEvent: ERROR (code=%d) - setting transferred to 0\n", CompletionCode);
-        }
-        
-        // Ensure we don't report negative transfer lengths
-        if ((LONG)ActualTransferred < 0)
-        {
-            DPRINT("XHCI_ProcessTransferEvent: WARNING - ActualTransferred was negative (%d), setting to 0\n", 
-                    (LONG)ActualTransferred);
-            ActualTransferred = 0;
-        }
-        
+
         PendingTransfer->XhciTransfer->TransferLen = ActualTransferred;
         
         DPRINT("XHCI_ProcessTransferEvent: Final - Requested=%d, NotTransferred=%d, ActualTransferred=%d, Status=0x%x\n",
@@ -2545,43 +2692,83 @@ XHCI_CompleteTransfer(IN PXHCI_EXTENSION XhciExtension,
     {
         DPRINT("XHCI_CompleteTransfer: Notifying USB port driver about transfer completion\n");
         
-        // CRITICAL FIX: Update transfer ring dequeue pointer
-        // This is essential to prevent the ring from appearing "full" to the controller
+        /*
+         * Retire this TD's TRBs from the transfer ring.
+         *
+         * The dequeue pointer is placed *absolutely*, one TRB past the end of
+         * the TD that just completed, rather than nudged forward from wherever
+         * it happened to be.  Nudging accumulates: any TD whose event was not
+         * matched -- which used to happen for every short packet or error on a
+         * TRB other than a TD's last -- left the software dequeue standing
+         * behind the hardware for good.  The stall recovery in
+         * XHCI_SetEndpointDataToggle then programmed Set TR Dequeue Pointer
+         * with that stale position, and the controller re-ran TRBs it had
+         * already executed, DMA'ing into map-register buffers that had since
+         * been freed and handed to a different transfer.
+         *
+         * The ring the TD was enqueued on is the one recorded at registration:
+         * control transfers on an unconfigured endpoint use the slot's ring,
+         * not XhciEndpoint->TransferRing.
+         */
         PXHCI_ENDPOINT XhciEndpoint = (PXHCI_ENDPOINT)PendingTransfer->XhciEndpoint;
-        if (XhciEndpoint)
+        PXHCI_RING TransferRing = PendingTransfer->Ring;
+
+        if (TransferRing == NULL && XhciEndpoint != NULL)
+            TransferRing = &XhciEndpoint->TransferRing;
+
+        if (TransferRing)
         {
-            PXHCI_RING TransferRing = &XhciEndpoint->TransferRing;
-            
-            // Since MmGetVirtualForPhysical is unimplemented in ReactOS, we'll advance the 
-            // dequeue pointer based on the number of TRBs that were part of this transfer
             ULONG TrbsToAdvance = PendingTransfer->TrbCount;
-            
-            DPRINT("XHCI_CompleteTransfer: Advancing dequeue pointer by %d TRBs (current dequeue=%p)\n",
-                    TrbsToAdvance, TransferRing->dequeue_pointer);
-            
-            // Advance dequeue pointer by the number of TRBs in this transfer
-            for (ULONG i = 0; i < TrbsToAdvance; i++)
+            ULONG FirstIndex = XHCI_TRANSFER_RING_LINK_INDEX;
+
+            if (PendingTransfer->RingBasePA.QuadPart != 0 &&
+                (ULONGLONG)PendingTransfer->FirstTrb.QuadPart >=
+                (ULONGLONG)PendingTransfer->RingBasePA.QuadPart)
             {
-                PXHCI_TRB CurrentDequeue = TransferRing->dequeue_pointer;
-                PXHCI_TRB NewDequeue = CurrentDequeue + 1;
-                
-                // Handle ring wrap-around if we reach the Link TRB
-                if (NewDequeue >= &(TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX]))
+                FirstIndex = (ULONG)(((ULONGLONG)PendingTransfer->FirstTrb.QuadPart -
+                                      (ULONGLONG)PendingTransfer->RingBasePA.QuadPart) /
+                                     sizeof(XHCI_TRB));
+            }
+
+            if (FirstIndex < XHCI_TRANSFER_RING_LINK_INDEX && TrbsToAdvance != 0)
+            {
+                ULONG EndIndex = FirstIndex + TrbsToAdvance;
+
+                /* Each pass over the ring's Link TRB toggles the consumer cycle
+                 * state.  A TD cannot be longer than the ring, so this runs at
+                 * most once, but keep the accounting general. */
+                while (EndIndex >= XHCI_TRANSFER_RING_LINK_INDEX)
                 {
-                    // Skip over Link TRB and wrap to beginning
-                    NewDequeue = &(TransferRing->firstSeg.XhciTrb[0]);
-                    // Update consumer cycle state when wrapping
-                    TransferRing->ConsumerCycleState = TransferRing->ConsumerCycleState ? 0 : 1;
-                    DPRINT("XHCI_CompleteTransfer: Transfer ring wrapped at TRB %d, new consumer cycle state %d\n", 
-                            i, TransferRing->ConsumerCycleState);
+                    EndIndex -= XHCI_TRANSFER_RING_LINK_INDEX;
+                    TransferRing->ConsumerCycleState =
+                        TransferRing->ConsumerCycleState ? 0 : 1;
                 }
-                
-                TransferRing->dequeue_pointer = NewDequeue;
-                if (TransferRing->UsedTrbs != 0)
-                    TransferRing->UsedTrbs--;
-                
-                DPRINT("XHCI_CompleteTransfer: Advanced dequeue pointer %d/%d from %p to %p\n",
-                        i + 1, TrbsToAdvance, CurrentDequeue, NewDequeue);
+
+                TransferRing->dequeue_pointer =
+                    &TransferRing->firstSeg.XhciTrb[EndIndex];
+
+                if (TransferRing->UsedTrbs >= TrbsToAdvance)
+                    TransferRing->UsedTrbs -= TrbsToAdvance;
+                else
+                    TransferRing->UsedTrbs = 0;
+            }
+            else
+            {
+                for (ULONG i = 0; i < TrbsToAdvance; i++)
+                {
+                    PXHCI_TRB NewDequeue = TransferRing->dequeue_pointer + 1;
+
+                    if (NewDequeue >= &(TransferRing->firstSeg.XhciTrb[XHCI_TRANSFER_RING_LINK_INDEX]))
+                    {
+                        NewDequeue = &(TransferRing->firstSeg.XhciTrb[0]);
+                        TransferRing->ConsumerCycleState =
+                            TransferRing->ConsumerCycleState ? 0 : 1;
+                    }
+
+                    TransferRing->dequeue_pointer = NewDequeue;
+                    if (TransferRing->UsedTrbs != 0)
+                        TransferRing->UsedTrbs--;
+                }
             }
             
             // Log final ring state after update for debugging
