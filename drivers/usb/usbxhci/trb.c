@@ -13,6 +13,8 @@ MPSTATUS
 NTAPI
 XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
                          IN ULONG TransferLength,
+                         IN ULONG MaxPacketSize,
+                         IN BOOLEAN IsInTransfer,
                          OUT PXHCI_TRB Trbs,
                          IN ULONG MaxTrbs,
                          OUT PULONG TrbCount)
@@ -26,6 +28,8 @@ XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
     ULONG BoundaryLength;
     ULONG LastLength;
     PHYSICAL_ADDRESS LastEndPA;
+    ULONG SentLength;
+    ULONG TdSize;
 
     if (TrbCount == NULL)
         return MP_STATUS_FAILURE;
@@ -40,6 +44,7 @@ XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
         RtlZeroMemory(&Trbs[0], sizeof(Trbs[0]));
         Trbs[0].GenericTRB.Word2 = 0;
         Trbs[0].GenericTRB.Word3 = (NORMAL_TRB << 10) |
+                                   (IsInTransfer ? (1 << 2) : 0) | /* ISP */
                                    (1 << 5) | /* IOC */
                                    1;         /* cycle bit is fixed by enqueue */
         *TrbCount = 1;
@@ -111,9 +116,44 @@ XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
     if (TrbIdx == 0 || SubmittedLength != TransferLength)
         return MP_STATUS_FAILURE;
 
+    /*
+     * Flags and TD Size for every TRB of the TD.
+     *
+     * ISP (Interrupt on Short Packet) must be set on an IN TD or the controller
+     * reports nothing when the device ends the TD early on any TRB but the
+     * last: the event that does arrive - if one arrives at all - cannot be
+     * attributed to the TRB the transfer actually stopped on, and the TD is
+     * credited with bytes that never came off the wire.  xHCI 4.10.1.1.
+     *
+     * TD Size is the number of *packets* left in the TD after this TRB, capped
+     * at 31, and zero on the last TRB (xHCI 4.11.2.4).  It is not optional:
+     * the controller uses it to size its prefetch, and leaving it zero on a
+     * non-final TRB tells the hardware the TD ends there.
+     */
+    SentLength = 0;
+
     for (SgIdx = 0; SgIdx < TrbIdx; SgIdx++)
     {
+        SentLength += Trbs[SgIdx].GenericTRB.Word2 & 0x1FFFF;
+
+        if (SgIdx + 1 == TrbIdx || MaxPacketSize == 0)
+        {
+            TdSize = 0;
+        }
+        else
+        {
+            TdSize = (TransferLength - SentLength + MaxPacketSize - 1) /
+                     MaxPacketSize;
+
+            if (TdSize > 31)
+                TdSize = 31;
+        }
+
+        Trbs[SgIdx].GenericTRB.Word2 =
+            (Trbs[SgIdx].GenericTRB.Word2 & 0x1FFFF) | (TdSize << 17);
+
         Trbs[SgIdx].GenericTRB.Word3 = (NORMAL_TRB << 10) |
+                                        (IsInTransfer ? (1 << 2) : 0) | /* ISP */
                                         ((SgIdx + 1 < TrbIdx) ? (1 << 4) : 0) | /* CH */
                                         ((SgIdx + 1 == TrbIdx) ? (1 << 5) : 0) | /* IOC */
                                         1; /* cycle bit is fixed by enqueue */
