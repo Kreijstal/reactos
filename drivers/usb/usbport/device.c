@@ -427,8 +427,17 @@ USBPORT_OpenInterface(IN PURB Urb,
              * requests so they never overrun the controller. This matches
              * the Windows usbport behaviour of filling in
              * USBD_PIPE_INFORMATION::MaximumTransferSize.
+             *
+             * A pipe whose descriptor carries wMaxPacketSize == 0 has no
+             * endpoint at all. USBPORT_OpenPipe marks it
+             * PIPE_HANDLE_FLAG_NULL_PACKET_SIZE and parks the sentinel
+             * (PUSBPORT_ENDPOINT)-1 in Endpoint before returning success, so
+             * the flag - not a NULL test - is what tells the two apart. There
+             * is no transfer size to report for such a pipe; leave the
+             * caller's value alone.
              */
-            if (PipeHandle->Endpoint)
+            if (!(PipeHandle->Flags & PIPE_HANDLE_FLAG_NULL_PACKET_SIZE) &&
+                PipeHandle->Endpoint)
             {
                 PipeInfo->MaximumTransferSize =
                     PipeHandle->Endpoint->EndpointProperties.MaxTransferSize;

@@ -1676,6 +1676,139 @@ typedef struct _USBPORT_STALL_WATCH
 static USBPORT_STALL_WATCH UsbPortStallWatch[USBPORT_STALL_WATCH_SLOTS];
 static ULONG UsbPortStallDumpsLeft = USBPORT_STALL_WATCH_MAX;
 
+/*
+ * Map-transfer watch.
+ *
+ * USBPORT_FlushMapTransfers takes a transfer off MapTransferList and hands it
+ * to AllocateAdapterChannel, which returns STATUS_SUCCESS both when it maps
+ * immediately and when it defers until map registers are free.  If the deferred
+ * call never arrives, the transfer is on no list anywhere: off usbport's queue,
+ * never given to the miniport, with nothing logged.  The endpoint watchdog
+ * cannot see it, because it is no longer on an endpoint queue.
+ *
+ * The ASUS X550DP loses exactly one transfer that way -- the first 64 KB bulk
+ * IN, which needs ~17 map registers where every transfer before it needed one
+ * or two.  This records each hand-off and reports any that is never mapped.
+ */
+#define USBPORT_MAP_WATCH_SLOTS 16
+#define USBPORT_MAP_WATCH_AGE   (5 * 10000000ULL)   /* 5 s */
+#define USBPORT_MAP_WATCH_MAX   16
+
+typedef struct _USBPORT_MAP_WATCH
+{
+    PUSBPORT_TRANSFER Transfer;
+    ULONGLONG Queued;
+    ULONG Length;
+    ULONG MapRegisters;
+    NTSTATUS Status;
+    BOOLEAN Reported;
+} USBPORT_MAP_WATCH;
+
+static USBPORT_MAP_WATCH UsbPortMapWatch[USBPORT_MAP_WATCH_SLOTS];
+static ULONG UsbPortMapDumpsLeft = USBPORT_MAP_WATCH_MAX;
+static ULONG UsbPortMapOverflow = 0;
+
+static VOID
+USBPORT_MapWatchQueued(IN PUSBPORT_TRANSFER Transfer,
+                       IN ULONG Length,
+                       IN ULONG MapRegisters)
+{
+    LARGE_INTEGER Now;
+    ULONG i;
+
+    KeQuerySystemTime(&Now);
+
+    for (i = 0; i < USBPORT_MAP_WATCH_SLOTS; i++)
+    {
+        if (UsbPortMapWatch[i].Transfer == NULL)
+        {
+            UsbPortMapWatch[i].Transfer = Transfer;
+            UsbPortMapWatch[i].Queued = (ULONGLONG)Now.QuadPart;
+            UsbPortMapWatch[i].Length = Length;
+            UsbPortMapWatch[i].MapRegisters = MapRegisters;
+            UsbPortMapWatch[i].Status = STATUS_PENDING;
+            UsbPortMapWatch[i].Reported = FALSE;
+            return;
+        }
+    }
+
+    /* Every slot busy is itself a finding: that many transfers awaiting map
+     * registers at once is not normal traffic. */
+    ++UsbPortMapOverflow;
+}
+
+static VOID
+USBPORT_MapWatchStatus(IN PUSBPORT_TRANSFER Transfer, IN NTSTATUS Status)
+{
+    ULONG i;
+
+    for (i = 0; i < USBPORT_MAP_WATCH_SLOTS; i++)
+    {
+        if (UsbPortMapWatch[i].Transfer == Transfer)
+        {
+            UsbPortMapWatch[i].Status = Status;
+            return;
+        }
+    }
+}
+
+static VOID
+USBPORT_MapWatchMapped(IN PUSBPORT_TRANSFER Transfer)
+{
+    ULONG i;
+
+    for (i = 0; i < USBPORT_MAP_WATCH_SLOTS; i++)
+    {
+        if (UsbPortMapWatch[i].Transfer == Transfer)
+        {
+            UsbPortMapWatch[i].Transfer = NULL;
+            return;
+        }
+    }
+}
+
+static VOID
+USBPORT_MapWatchdog(VOID)
+{
+    LARGE_INTEGER Now;
+    ULONGLONG Age;
+    ULONG i;
+
+    if (UsbPortMapDumpsLeft == 0)
+        return;
+
+    KeQuerySystemTime(&Now);
+
+    for (i = 0; i < USBPORT_MAP_WATCH_SLOTS; i++)
+    {
+        if (UsbPortMapWatch[i].Transfer == NULL || UsbPortMapWatch[i].Reported)
+            continue;
+
+        Age = (ULONGLONG)Now.QuadPart - UsbPortMapWatch[i].Queued;
+
+        if (Age < USBPORT_MAP_WATCH_AGE)
+            continue;
+
+        UsbPortMapWatch[i].Reported = TRUE;
+
+        DPRINT1("USBPORT_MAP[lost]: transfer %p len %lx mapregs %lu "
+                "allocstatus %lx age %I64ums overflow %lu -- "
+                "AllocateAdapterChannel never called back\n",
+                UsbPortMapWatch[i].Transfer,
+                UsbPortMapWatch[i].Length,
+                UsbPortMapWatch[i].MapRegisters,
+                UsbPortMapWatch[i].Status,
+                Age / 10000,
+                UsbPortMapOverflow);
+
+        if (--UsbPortMapDumpsLeft == 0)
+        {
+            DPRINT1("USBPORT_MAP[lost]: report limit reached\n");
+            return;
+        }
+    }
+}
+
 static VOID
 NTAPI
 USBPORT_ReportStalledEndpoint(IN PUSBPORT_ENDPOINT Endpoint,
@@ -1924,6 +2057,7 @@ USBPORT_TimerDpc(IN PRKDPC Dpc,
     /* After the DPC handler, so an endpoint that was just serviced is not
      * mistaken for a stalled one. */
     USBPORT_StalledEndpointWatchdog(FdoDevice);
+    USBPORT_MapWatchdog();
 
     DPRINT_TIMER("USBPORT_TimerDpc: USBPORT_TimeoutAllEndpoints UNIMPLEMENTED.\n");
     //USBPORT_TimeoutAllEndpoints(FdoDevice);
@@ -2659,7 +2793,8 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
     SIZE_T CurrentLength;
     ULONG ix;
     BOOLEAN WriteToDevice;
-    PHYSICAL_ADDRESS PhAddr = {{0, 0}};
+    ULONG SgElementLimit;
+    BOOLEAN MapFailed = FALSE;
     PHYSICAL_ADDRESS PhAddress = {{0, 0}};
     ULONG TransferLength;
     SIZE_T SgCurrentLength;
@@ -2677,6 +2812,8 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
     DmaOperations = DmaAdapter->DmaOperations;
 
     Transfer = Context;
+
+    USBPORT_MapWatchMapped(Transfer);
 
     Urb = Transfer->Urb;
     Endpoint = Transfer->Endpoint;
@@ -2696,6 +2833,14 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
     ix = 0;
     CurrentLength = 0;
 
+    /*
+     * USBPORT_AllocateTransfer sized SgElement[] from the pages this buffer
+     * spans, so that is the hard limit on how many elements may be written:
+     * the array is the last field of the pool block holding the transfer, and
+     * anything beyond it lands in the next nonpaged pool allocation.
+     */
+    SgElementLimit = Transfer->NumberOfMapRegisters + 1;
+
     do
     {
         WriteToDevice = Transfer->Direction == USBPORT_DMA_DIRECTION_TO_DEVICE;
@@ -2713,11 +2858,40 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
                PhAddress.HighPart,
                TransferLength);
 
+        /*
+         * A round that maps nothing makes no progress, so the loop below
+         * would spin forever appending elements.  That, and not the address
+         * comparison this used to do, is the condition worth guarding: two
+         * consecutive rounds may legitimately return the same physical
+         * address, because an MDL is allowed to name the same page more than
+         * once, and because the bounce buffer a run is mapped through does
+         * not have to differ from the address the previous run ended at.
+         */
+        if (TransferLength == 0)
+        {
+            DPRINT1("USBPORT_MapTransfer: MapTransfer mapped nothing at offset %lx of %lx\n",
+                    CurrentLength,
+                    (ULONG)Transfer->TransferParameters.TransferBufferLength);
+            MapFailed = TRUE;
+            break;
+        }
+
         PhAddress.HighPart = 0;
         SgCurrentLength = TransferLength;
 
         do
         {
+            if (ix >= SgElementLimit)
+            {
+                DPRINT1("USBPORT_MapTransfer: scatter/gather list full (%lu element(s)) "
+                        "at offset %lx of %lx\n",
+                        SgElementLimit,
+                        CurrentLength,
+                        (ULONG)Transfer->TransferParameters.TransferBufferLength);
+                MapFailed = TRUE;
+                break;
+            }
+
             ElementLength = PAGE_SIZE - (PhAddress.LowPart & (PAGE_SIZE - 1));
 
             if (ElementLength > SgCurrentLength)
@@ -2740,13 +2914,8 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
         }
         while (SgCurrentLength);
 
-        if (PhAddr.QuadPart == PhAddress.QuadPart)
-        {
-            DPRINT1("USBPORT_MapTransfer: PhAddr == PhAddress\n");
-            ASSERT(FALSE);
-        }
-
-        PhAddr = PhAddress;
+        if (MapFailed)
+            break;
 
         CurrentLength += TransferLength;
         CurrentVa += TransferLength;
@@ -2757,6 +2926,40 @@ USBPORT_MapTransfer(IN PDEVICE_OBJECT FdoDevice,
     while (CurrentLength != Transfer->TransferParameters.TransferBufferLength);
 
     sgList->SgElementCount = ix;
+
+    if (MapFailed)
+    {
+        /*
+         * The buffer is only partially described, so it must not be handed to
+         * the miniport.  Keep TRANSFER_FLAG_DMA_MAPPED set so that
+         * USBPORT_CompleteTransfer still flushes and releases the map
+         * registers, and complete the URB with an error.
+         */
+        Transfer->Flags |= TRANSFER_FLAG_DMA_MAPPED;
+
+        InitializeListHead(&Transfer->TransferLink);
+
+        DeviceHandle = Urb->UrbHeader.UsbdDeviceHandle;
+
+        KeAcquireSpinLock(&Endpoint->EndpointSpinLock,
+                          &Endpoint->EndpointOldIrql);
+
+        USBPORT_QueueDoneTransfer(Transfer, USBD_STATUS_INSUFFICIENT_RESOURCES);
+
+        KeReleaseSpinLock(&Endpoint->EndpointSpinLock,
+                          Endpoint->EndpointOldIrql);
+
+        InterlockedDecrement(&DeviceHandle->DeviceHandleLock);
+
+        if (USBPORT_EndpointWorker(Endpoint, 0))
+        {
+            USBPORT_InvalidateEndpointHandler(FdoDevice,
+                                              Endpoint,
+                                              INVALIDATE_ENDPOINT_WORKER_THREAD);
+        }
+
+        return DeallocateObjectKeepRegisters;
+    }
 
 #if DBG
     USBPORT_ValidateScatterGatherList(Transfer);
@@ -2867,14 +3070,45 @@ USBPORT_FlushMapTransfers(IN PDEVICE_OBJECT FdoDevice)
 
         Transfer->NumberOfMapRegisters = NumMapRegisters;
 
+        USBPORT_MapWatchQueued(Transfer,
+                               (ULONG)TransferBufferLength,
+                               NumMapRegisters);
+
         Status = DmaOperations->AllocateAdapterChannel(FdoExtension->DmaAdapter,
                                                        FdoDevice,
                                                        NumMapRegisters,
                                                        USBPORT_MapTransfer,
                                                        Transfer);
 
+        USBPORT_MapWatchStatus(Transfer, Status);
+
         if (!NT_SUCCESS(Status))
-            ASSERT(FALSE);
+        {
+            /*
+             * RemoveHeadList above already took the transfer off
+             * MapTransferList, so it is on no queue at all.  A bare
+             * ASSERT(FALSE) here is a no-op in a release build and the
+             * transfer is then never completed: the URB stays pending
+             * forever, the endpoint watchdog cannot see it, and the class
+             * driver retries against a request that no longer exists.
+             * Complete it with an error instead.
+             */
+            DPRINT1("USBPORT_FlushMapTransfers: AllocateAdapterChannel failed "
+                    "%lx for transfer %p len %Ix mapregs %lu\n",
+                    Status, Transfer, TransferBufferLength, NumMapRegisters);
+
+            /*
+             * USBPORT_QueueDoneTransfer unlinks the transfer itself, and
+             * RemoveHeadList left TransferLink pointing back into
+             * MapTransferList.  Make it point at itself so that unlink is a
+             * no-op rather than a write through stale pointers into the list
+             * we just took it from.
+             */
+            InitializeListHead(&Transfer->TransferLink);
+
+            USBPORT_QueueDoneTransfer(Transfer,
+                                      USBD_STATUS_INSUFFICIENT_RESOURCES);
+        }
     }
 
     KeLowerIrql(OldIrql);
