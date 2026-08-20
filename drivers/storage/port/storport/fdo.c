@@ -903,6 +903,40 @@ PortDispatchSrb(
  * PortDispatchSrb when HwStartIo refuses the request, or from
  * StorPortNotification(RequestComplete, ...) once the miniport finishes.
  */
+/*
+ * Do the actual completion: hand status back to the IRP and free the context.
+ * The caller must already have claimed the context via PortCompleteSrb's
+ * interlocked Magic exchange, so this runs exactly once per SRB and never
+ * races another completer.
+ */
+static
+VOID
+PortCompleteSrbWorker(
+    _In_ PSRB_PORT_CONTEXT Context)
+{
+    PIRP Irp;
+    PSCSI_REQUEST_BLOCK Srb;
+    PVOID RawAlloc;
+    NTSTATUS Status;
+
+    Irp = Context->Irp;
+    Srb = Context->Srb;
+    RawAlloc = Context->RawAlloc;
+
+    Status = SrbStatusToNtStatus(Srb->SrbStatus);
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = NT_SUCCESS(Status) ? Srb->DataTransferLength : 0;
+
+    /* Detach the SRB extension so a stale pointer can't reach our pool. */
+    Srb->SrbExtension = NULL;
+
+    /* Context points at an aligned offset inside RawAlloc; free RawAlloc. */
+    ExFreePoolWithTag(RawAlloc, TAG_SRB_CONTEXT);
+
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
 static
 VOID
 NTAPI
@@ -916,25 +950,47 @@ PortCompleteSrbDpc(
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
-    /* Replay the completion at DISPATCH_LEVEL where ExFreePool and
+    /* Ownership was already claimed by the PortCompleteSrb that queued this
+     * DPC. Replay the completion at DISPATCH_LEVEL where ExFreePool and
      * IoCompleteRequest are both legal. */
-    PortCompleteSrb((PSRB_PORT_CONTEXT)DeferredContext);
+    PortCompleteSrbWorker((PSRB_PORT_CONTEXT)DeferredContext);
 }
 
 VOID
 PortCompleteSrb(
     _In_ PSRB_PORT_CONTEXT Context)
 {
-    PIRP Irp;
-    PSCSI_REQUEST_BLOCK Srb;
-    PVOID RawAlloc;
-    NTSTATUS Status;
-
-    ASSERT(Context->Magic == SRB_CONTEXT_MAGIC);
+    /*
+     * A single SRB must complete exactly once. A miniport can hand the same
+     * SRB to StorPortNotification(RequestComplete, ...) more than once -- from
+     * its ISR error sweep and its completion DPC, on different processors, or
+     * straddling the DISPATCH_LEVEL deferral below -- and the caller-side
+     * SrbExtension/Magic check in StorPortNotification is a plain read that
+     * two racing completers both pass before either clears it. If both then
+     * reach here the context is freed twice: the second Magic-zeroing store
+     * lands in a pool block that has already gone back to the nonpaged free
+     * list, zeroing a free entry's Blink, and the next allocation off that
+     * list bugchecks (0x7E) walking the corrupted list.
+     *
+     * Claim the context with a single interlocked exchange of Magic. Exactly
+     * one caller flips SRB_CONTEXT_MAGIC to 0 and owns the completion; every
+     * other caller sees the cleared value and returns without touching it.
+     * The claim also closes the StorPortNotification race: once Magic is 0 a
+     * concurrent completer's Magic check fails and it drops the request.
+     */
+    if (InterlockedCompareExchange((volatile LONG *)&Context->Magic,
+                                   0,
+                                   SRB_CONTEXT_MAGIC) != (LONG)SRB_CONTEXT_MAGIC)
+    {
+        /* Already claimed by another completion -- not ours to touch. */
+        return;
+    }
 
     /* If we're above DISPATCH_LEVEL the miniport called RequestComplete from
      * an interrupt-locked path. Free + IoCompleteRequest must run at <=
-     * DISPATCH, so defer via a per-SRB DPC and bounce back here. */
+     * DISPATCH, so defer via a per-SRB DPC and bounce back here. Ownership is
+     * already claimed, so no second completion can slip in while the DPC is
+     * pending. */
     if (KeGetCurrentIrql() > DISPATCH_LEVEL)
     {
         KeInitializeDpc(&Context->CompleteDpc, PortCompleteSrbDpc, Context);
@@ -942,23 +998,7 @@ PortCompleteSrb(
         return;
     }
 
-    Irp = Context->Irp;
-    Srb = Context->Srb;
-    RawAlloc = Context->RawAlloc;
-
-    Status = SrbStatusToNtStatus(Srb->SrbStatus);
-
-    Irp->IoStatus.Status = Status;
-    Irp->IoStatus.Information = NT_SUCCESS(Status) ? Srb->DataTransferLength : 0;
-
-    /* Detach the SRB extension so a stale pointer can't reach our pool. */
-    Srb->SrbExtension = NULL;
-    Context->Magic = 0;
-
-    /* Context points at an aligned offset inside RawAlloc; free RawAlloc. */
-    ExFreePoolWithTag(RawAlloc, TAG_SRB_CONTEXT);
-
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    PortCompleteSrbWorker(Context);
 }
 
 
