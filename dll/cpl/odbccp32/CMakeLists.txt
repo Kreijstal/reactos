@@ -1,6 +1,8 @@
 
 spec2def(odbccp32i.cpl odbccp32.spec)
 
+add_rc_deps(odbccp32.rc ${CMAKE_CURRENT_SOURCE_DIR}/resources/odbccp32.ico)
+
 add_library(odbccp32i MODULE
     odbccp32.c
     odbccp32.rc
