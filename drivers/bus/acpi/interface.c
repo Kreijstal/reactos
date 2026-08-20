@@ -360,6 +360,13 @@ AcpiPciRoutingResolveLinkIrq(
             Resource->Data.Irq.InterruptCount > 0)
         {
             *SystemIrq = Resource->Data.Irq.Interrupts[0];
+#ifdef _M_AMD64
+            if (!HalpTranslateIsaInterrupt(*SystemIrq, SystemIrq))
+            {
+                Status = STATUS_CONFLICTING_ADDRESSES;
+                break;
+            }
+#endif
             *IsLevelTriggered = (Resource->Data.Irq.Triggering == ACPI_LEVEL_SENSITIVE);
             *IsActiveLow = (Resource->Data.Irq.Polarity == ACPI_ACTIVE_LOW);
             Status = STATUS_SUCCESS;
@@ -461,10 +468,19 @@ AcpiInterfaceRoutePciInterrupt(
                     return STATUS_NOT_FOUND;
                 }
 
-                return AcpiPciRoutingResolveLinkIrq(LinkHandle,
-                                                   SystemIrq,
-                                                   IsLevelTriggered,
-                                                   IsActiveLow);
+                Status = AcpiPciRoutingResolveLinkIrq(LinkHandle,
+                                                       SystemIrq,
+                                                       IsLevelTriggered,
+                                                       IsActiveLow);
+                if (NT_SUCCESS(Status))
+                {
+                    /* Link _CRS templates often use IRQNoFlags(), but this
+                     * resource is consumed by PCI INTx and therefore remains
+                     * shared, level-triggered, and active-low. */
+                    *IsLevelTriggered = TRUE;
+                    *IsActiveLow = TRUE;
+                }
+                return Status;
             }
         }
 
