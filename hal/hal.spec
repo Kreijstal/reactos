@@ -172,3 +172,7 @@
 @ stdcall -arch=arm64 IopReserveIrqVectors(long long ptr)
 
 @ stdcall -arch=arm64 VideoPortQuerySystemTime(ptr)
+
+; ReactOS-private x64 exports appended to preserve existing ordinals.
+@ stdcall -arch=x86_64 HalpSetIoApicInterruptAttributes(long long long long long)
+@ stdcall -arch=x86_64 HalpTranslateIsaInterrupt(long ptr)

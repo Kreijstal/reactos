@@ -16,8 +16,9 @@
 
 /*
  * Send a synchronous IRP_MN_QUERY_INTERFACE down the device stack to ask
- * the parent ACPI host-bridge PDO for its _PRT routing service.  Cached on
- * first use; never retried after a NOT_SUPPORTED reply.
+ * the parent ACPI host-bridge PDO for its _PRT routing service.  Successful
+ * queries and definitive NOT_SUPPORTED replies are cached; transient failures
+ * remain retryable.
  */
 NTSTATUS
 PciFdoAcquireRoutingInterface(PFDO_DEVICE_EXTENSION FdoExtension)
@@ -31,10 +32,8 @@ PciFdoAcquireRoutingInterface(PFDO_DEVICE_EXTENSION FdoExtension)
     if (FdoExtension->RoutingQueried)
         return FdoExtension->RoutingValid ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
 
-    FdoExtension->RoutingQueried = TRUE;
-
     if (FdoExtension->Ldo == NULL)
-        return STATUS_NOT_SUPPORTED;
+        return STATUS_DEVICE_NOT_READY;
 
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
     RtlZeroMemory(&FdoExtension->Routing, sizeof(FdoExtension->Routing));
@@ -73,12 +72,22 @@ PciFdoAcquireRoutingInterface(PFDO_DEVICE_EXTENSION FdoExtension)
     if (NT_SUCCESS(Status) && FdoExtension->Routing.RouteInterrupt != NULL)
     {
         FdoExtension->RoutingValid = TRUE;
+        FdoExtension->RoutingQueried = TRUE;
         return STATUS_SUCCESS;
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = STATUS_NOT_SUPPORTED;
+    if (Status == STATUS_NOT_SUPPORTED ||
+        Status == STATUS_INVALID_DEVICE_REQUEST)
+    {
+        FdoExtension->RoutingQueried = TRUE;
+        Status = STATUS_NOT_SUPPORTED;
     }
 
     DPRINT("PCI: ACPI _PRT routing interface unavailable (0x%lx)\n", Status);
     RtlZeroMemory(&FdoExtension->Routing, sizeof(FdoExtension->Routing));
-    return STATUS_NOT_SUPPORTED;
+    return Status;
 }
 
 static NTSTATUS
