@@ -69,6 +69,7 @@ USBSTOR_IssueBulkOrInterruptRequest(
 {
     PIO_STACK_LOCATION NextStack;
     PIRP_CONTEXT Context = &FDODeviceExtension->CurrentIrpContext;
+    NTSTATUS Status;
 
     RtlZeroMemory(&Context->Urb, sizeof(struct _URB_BULK_OR_INTERRUPT_TRANSFER));
 
@@ -93,7 +94,14 @@ USBSTOR_IssueBulkOrInterruptRequest(
                            TRUE,
                            TRUE);
 
-    return IoCallDriver(FDODeviceExtension->LowerDeviceObject, Irp);
+    Status = IoCallDriver(FDODeviceExtension->LowerDeviceObject, Irp);
+
+    USBSTOR_Trace(Status == STATUS_PENDING || NT_SUCCESS(Status)
+                      ? UsbStorTraceIssue : UsbStorTraceIssueFail,
+                  (ULONG_PTR)Status,
+                  (ULONG_PTR)PipeHandle);
+
+    return Status;
 }
 
 static
@@ -164,6 +172,10 @@ USBSTOR_CSWCompletionRoutine(
     PDODeviceExtension = (PPDO_DEVICE_EXTENSION)Context->PDODeviceObject->DeviceExtension;
     ASSERT(Request);
 
+    USBSTOR_Trace(UsbStorTraceCswDone,
+                  (ULONG_PTR)Irp->IoStatus.Status,
+                  (ULONG_PTR)Context->Urb.UrbHeader.Status);
+
     // first check for Irp errors
     if (!NT_SUCCESS(Irp->IoStatus.Status))
     {
@@ -196,21 +208,67 @@ USBSTOR_CSWCompletionRoutine(
     // finally check for CSW errors
     if (Context->csw.Status == CSW_STATUS_COMMAND_PASSED)
     {
+        /*
+         * dCSWDataResidue is the device's own statement of how much of the data
+         * phase it did not transfer (BOT 1.0 section 5.2), and it is the only
+         * end-to-end check this driver has on the host controller's byte
+         * accounting.  Ignoring it -- which is what happened here -- lets a
+         * host controller that over-reports a short IN transfer complete a read
+         * as fully successful while the tail of the buffer still holds whatever
+         * it held before.  For a demand-paged image that is a page of stale
+         * bytes and an access violation in the process that faulted it in.
+         *
+         * A residue larger than the data phase is meaningless; leave the length
+         * alone in that case rather than underflowing it.
+         */
+        if (Context->csw.DataResidue != 0 &&
+            Context->csw.DataResidue <= Context->cbw.DataTransferLength)
+        {
+            ULONG Transferred = Context->cbw.DataTransferLength -
+                                Context->csw.DataResidue;
+
+            if (Transferred < Request->DataTransferLength)
+            {
+                DPRINT1("[USBSTOR] CSW residue %lu: device sent %lu of %lu bytes\n",
+                        Context->csw.DataResidue,
+                        Transferred,
+                        Request->DataTransferLength);
+
+                Request->DataTransferLength = Transferred;
+                Request->SrbStatus = SRB_STATUS_DATA_OVERRUN;
+            }
+        }
+
+        /*
+         * Read ActiveSrb once.  It is written under IrpListLock by
+         * USBSTOR_QueueTerminateRequest and by USBSTOR_StartIo's reset-parking
+         * path, either of which can run while this completion is in flight, so
+         * re-reading it per statement can observe a different value each time.
+         *
+         * A NULL here means the original request was terminated or parked
+         * underneath us.  That is NOT the "a sense request was sent" case the
+         * test below is looking for -- it merely also satisfies
+         * "Request != ActiveSrb", and the branch then dereferenced the NULL.
+         * Observed on the ASUS X550DP as a 0xc0000005 write to
+         * ActiveSrb->SenseInfoBufferLength during repeated pipe-reset recovery.
+         */
+        PSCSI_REQUEST_BLOCK ActiveSrb = FDODeviceExtension->ActiveSrb;
+
         // should happen only when a sense request was sent
-        if (Request != FDODeviceExtension->ActiveSrb)
+        if (ActiveSrb != NULL && Request != ActiveSrb)
         {
             if (USBSTOR_IsSenseDataValid(Request))
             {
-                FDODeviceExtension->ActiveSrb->SenseInfoBufferLength = (UCHAR)Request->DataTransferLength;
-                FDODeviceExtension->ActiveSrb->SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
+                ActiveSrb->SenseInfoBufferLength = (UCHAR)Request->DataTransferLength;
+                ActiveSrb->SrbStatus |= SRB_STATUS_AUTOSENSE_VALID;
             }
             else
             {
-                FDODeviceExtension->ActiveSrb->SenseInfoBufferLength = 0;
-                FDODeviceExtension->ActiveSrb->SrbStatus &= ~SRB_STATUS_AUTOSENSE_VALID;
+                ActiveSrb->SenseInfoBufferLength = 0;
+                ActiveSrb->SrbStatus &= ~SRB_STATUS_AUTOSENSE_VALID;
             }
 
-            Request = FDODeviceExtension->ActiveSrb;
+            Request = ActiveSrb;
             Context->Srb = Request;
         }
 
@@ -252,7 +310,14 @@ USBSTOR_CSWCompletionRoutine(
 
 ResetRecovery:
 
-    Request = FDODeviceExtension->ActiveSrb;
+    /*
+     * Same race as above: ActiveSrb can have been cleared underneath us.  Fall
+     * back to the SRB this IRP is actually completing rather than storing a
+     * NULL into Context->Srb and dereferencing it two lines later.
+     */
+    if (FDODeviceExtension->ActiveSrb != NULL)
+        Request = FDODeviceExtension->ActiveSrb;
+
     Context->Srb = Request;
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
@@ -280,6 +345,10 @@ USBSTOR_SendCSWRequest(
     PFDO_DEVICE_EXTENSION FDODeviceExtension,
     PIRP Irp)
 {
+    USBSTOR_Trace(UsbStorTraceCswSend,
+                  (ULONG_PTR)Irp,
+                  (ULONG_PTR)FDODeviceExtension->CurrentIrpContext.StallRetryCount);
+
     return USBSTOR_IssueBulkOrInterruptRequest(FDODeviceExtension,
                                                Irp,
                                                FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkInPipeIndex].PipeHandle,
@@ -310,6 +379,10 @@ USBSTOR_DataCompletionRoutine(
     Context = &FDODeviceExtension->CurrentIrpContext;
     Request = Context->Srb;
     PDODeviceExtension = (PPDO_DEVICE_EXTENSION)Context->PDODeviceObject->DeviceExtension;
+
+    USBSTOR_Trace(UsbStorTraceDataDone,
+                  (ULONG_PTR)Irp->IoStatus.Status,
+                  (ULONG_PTR)Context->Urb.UrbHeader.Status);
 
     // for Sense Request a partial MDL was already freed (if existed)
     if (Request == FDODeviceExtension->ActiveSrb &&
@@ -385,6 +458,10 @@ USBSTOR_CBWCompletionRoutine(
     Request = Context->Srb;
     PDODeviceExtension = (PPDO_DEVICE_EXTENSION)Context->PDODeviceObject->DeviceExtension;
 
+    USBSTOR_Trace(UsbStorTraceCbwDone,
+                  (ULONG_PTR)Irp->IoStatus.Status,
+                  (ULONG_PTR)Context->Urb.UrbHeader.Status);
+
     if (!NT_SUCCESS(Irp->IoStatus.Status))
     {
         goto ResetRecovery;
@@ -447,12 +524,17 @@ USBSTOR_CBWCompletionRoutine(
             DPRINT1("USBSTOR_CBWCompletionRoutine: Mdl - %p\n", Mdl);
             goto ResetRecovery;
         }
+
     }
     else
     {
         ASSERT(Request->DataBuffer);
         TransferBuffer = Request->DataBuffer;
     }
+
+    USBSTOR_Trace(UsbStorTraceDataSend,
+                  (ULONG_PTR)Irp,
+                  (ULONG_PTR)Request->DataTransferLength);
 
     USBSTOR_IssueBulkOrInterruptRequest(FDODeviceExtension,
                                         Irp,
@@ -466,7 +548,10 @@ USBSTOR_CBWCompletionRoutine(
     return STATUS_MORE_PROCESSING_REQUIRED;
 
 ResetRecovery:
-    Request = FDODeviceExtension->ActiveSrb;
+    /* ActiveSrb can be cleared underneath us; see USBSTOR_CSWCompletionRoutine. */
+    if (FDODeviceExtension->ActiveSrb != NULL)
+        Request = FDODeviceExtension->ActiveSrb;
+
     Context->Srb = Request;
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
@@ -531,6 +616,10 @@ USBSTOR_SendCBWRequest(
     Context->Srb = Request;
     Context->StallRetryCount = 0;
 
+    USBSTOR_Trace(UsbStorTraceCbwSend,
+                  (ULONG_PTR)Irp,
+                  (ULONG_PTR)Context->cbw.CommandBlock[0]);
+
     return USBSTOR_IssueBulkOrInterruptRequest(
         FDODeviceExtension,
         Irp,
@@ -554,7 +643,13 @@ USBSTOR_IssueRequestSense(
 
     DPRINT("USBSTOR_IssueRequestSense: \n");
 
-    CurrentSrb = FDODeviceExtension->ActiveSrb;
+    /*
+     * Use the SRB the caller just validated (SenseInfoBufferLength and
+     * SenseInfoBuffer are both checked non-zero there) rather than re-reading
+     * ActiveSrb, which is written under IrpListLock by other paths and can go
+     * NULL between the caller's check and this dereference.
+     */
+    CurrentSrb = FDODeviceExtension->CurrentIrpContext.Srb;
     SenseSrb = &FDODeviceExtension->CurrentIrpContext.SenseSrb;
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     IoStack->Parameters.Scsi.Srb = SenseSrb;
@@ -577,6 +672,8 @@ USBSTOR_IssueRequestSense(
 
     SrbGetCdb(SenseSrb)->CDB6GENERIC.OperationCode = SCSIOP_REQUEST_SENSE;
     SrbGetCdb(SenseSrb)->AsByte[4] = CurrentSrb->SenseInfoBufferLength;
+
+    USBSTOR_Trace(UsbStorTraceSense, (ULONG_PTR)Irp, (ULONG_PTR)CurrentSrb);
 
     return USBSTOR_SendCBWRequest(FDODeviceExtension, Irp);
 }

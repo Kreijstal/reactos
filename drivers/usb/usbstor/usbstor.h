@@ -368,4 +368,64 @@ NTAPI
 USBSTOR_QueueResetDevice(
     IN PFDO_DEVICE_EXTENSION FDODeviceExtension);
 
+//---------------------------------------------------------------------
+//
+// Bulk-Only-Transport breadcrumb trace (diagnostic).
+//
+// The ASUS X550DP wedges with ActiveSrb set while nothing is outstanding in
+// usbport or the miniport -- so the request was lost inside this driver's own
+// state machine, above the point every existing watchdog looks at.  The ring
+// records every phase transition and every piece of error recovery, queued and
+// run separately, so a work item that is queued but never executes is visible
+// as a queued/ran mismatch rather than as silence.
+//
+typedef enum _USBSTOR_TRACE_CODE
+{
+    UsbStorTraceNone = 0,
+    UsbStorTraceStartIo,
+    UsbStorTraceCbwSend,
+    UsbStorTraceCbwDone,
+    UsbStorTraceDataSend,
+    UsbStorTraceDataDone,
+    UsbStorTraceCswSend,
+    UsbStorTraceCswDone,
+    UsbStorTraceIssue,
+    UsbStorTraceIssueFail,
+    UsbStorTraceSense,
+    UsbStorTraceQueueResetPipe,
+    UsbStorTraceResetPipeRun,
+    UsbStorTraceResetPipeEnd,
+    UsbStorTraceQueueResetDev,
+    UsbStorTraceResetDevRun,
+    UsbStorTraceResetDevEnd,
+    UsbStorTraceTimerAbortQueue,
+    UsbStorTraceTimerAbortRun,
+    UsbStorTraceTimerAbortEnd,
+    UsbStorTraceTerminate,
+    UsbStorTraceNextReq,
+    UsbStorTraceNextReqBusy,
+    UsbStorTraceMax
+} USBSTOR_TRACE_CODE;
+
+#define USBSTOR_TRACE_ENTRIES 96
+
+typedef struct _USBSTOR_TRACE_ENTRY
+{
+    ULONGLONG Time;
+    ULONG_PTR A;
+    ULONG_PTR B;
+    ULONG Code;
+} USBSTOR_TRACE_ENTRY, *PUSBSTOR_TRACE_ENTRY;
+
+VOID
+USBSTOR_Trace(
+    IN ULONG Code,
+    IN ULONG_PTR A,
+    IN ULONG_PTR B);
+
+VOID
+USBSTOR_DumpTrace(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PCSTR Reason);
+
 #endif // _USBSTOR_H_
