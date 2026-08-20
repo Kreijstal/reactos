@@ -421,6 +421,22 @@ HalpGetRootInterruptVector(
     _Out_ PKIRQL Irql,
     _Out_ PKAFFINITY Affinity);
 
+BOOLEAN
+NTAPI
+HalpGetIsaInterruptOverride(
+    _In_ ULONG SourceIrq,
+    _Out_ PULONG Gsi,
+    _Out_ PBOOLEAN PolarityValid,
+    _Out_ PBOOLEAN ActiveLow,
+    _Out_ PBOOLEAN TriggerValid,
+    _Out_ PBOOLEAN LevelTriggered);
+
+BOOLEAN
+NTAPI
+HalpTranslateIsaInterrupt(
+    _In_ ULONG SourceIrq,
+    _Out_ PULONG Gsi);
+
 ULONG
 NTAPI
 HalpGetCmosData(

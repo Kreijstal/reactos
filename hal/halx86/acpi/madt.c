@@ -44,9 +44,22 @@ HALP_APIC_INFO_TABLE HalpApicInfoTable;
 static PROCESSOR_IDENTITY HalpStaticProcessorIdentity[MAXIMUM_PROCESSORS];
 const PPROCESSOR_IDENTITY HalpProcessorIdentity = HalpStaticProcessorIdentity;
 
-#if 0
 extern ULONG HalpPicVectorRedirect[16];
-#endif
+
+typedef struct _HALP_ISA_INTERRUPT_OVERRIDE
+{
+    BOOLEAN Present;
+    BOOLEAN Applied;
+    BOOLEAN PolarityValid;
+    BOOLEAN ActiveLow;
+    BOOLEAN TriggerValid;
+    BOOLEAN LevelTriggered;
+    ULONG Gsi;
+    USHORT IntiFlags;
+} HALP_ISA_INTERRUPT_OVERRIDE, *PHALP_ISA_INTERRUPT_OVERRIDE;
+
+static HALP_ISA_INTERRUPT_OVERRIDE
+HalpIsaInterruptOverrides[RTL_NUMBER_OF(HalpPicVectorRedirect)];
 
 /* FUNCTIONS ******************************************************************/
 
@@ -189,6 +202,10 @@ HalpParseApicTables(
             {
                 ACPI_MADT_INTERRUPT_OVERRIDE *InterruptOverride =
                     (ACPI_MADT_INTERRUPT_OVERRIDE *)AcpiHeader;
+                PHALP_ISA_INTERRUPT_OVERRIDE Override;
+                HALP_ISA_INTERRUPT_OVERRIDE NewOverride;
+                USHORT Polarity;
+                USHORT Trigger;
 
                 if (AcpiHeader->Length != sizeof(*InterruptOverride))
                 {
@@ -196,30 +213,103 @@ HalpParseApicTables(
                     return;
                 }
 
-                DPRINT00(" Interrupt Override: Bus %u, SourceIrq %u, GlobalIrq %08X, IntiFlags %04X / UNIMPLEMENTED\n",
+                DPRINT00(" Interrupt Override: Bus %u, SourceIrq %u, GlobalIrq %08X, IntiFlags %04X\n",
                          InterruptOverride->Bus, InterruptOverride->SourceIrq,
                          InterruptOverride->GlobalIrq, InterruptOverride->IntiFlags);
 
                 if (InterruptOverride->Bus != 0) // 0 = ISA
                 {
                     DPRINT01("Invalid Bus: %p, %u\n", InterruptOverride, InterruptOverride->Bus);
-                    return;
+                    break;
                 }
 
-#if 1
-                // TODO: Implement it.
-#else // TODO: Is that correct?
-                if (InterruptOverride->SourceIrq > _countof(HalpPicVectorRedirect))
+                if (InterruptOverride->SourceIrq >= RTL_NUMBER_OF(HalpPicVectorRedirect))
                 {
                     DPRINT01("Invalid SourceIrq: %p, %u\n",
                              InterruptOverride, InterruptOverride->SourceIrq);
-                    return;
+                    break;
                 }
 
-                // Note: GlobalIrq is not validated in any way (yet).
-                HalpPicVectorRedirect[InterruptOverride->SourceIrq] = InterruptOverride->GlobalIrq;
-                // TODO: What about 'InterruptOverride->IntiFlags'?
-#endif
+                Override = &HalpIsaInterruptOverrides[InterruptOverride->SourceIrq];
+                if (Override->Present)
+                {
+                    DPRINT01("Duplicate interrupt override for source IRQ %u\n",
+                             InterruptOverride->SourceIrq);
+                    break;
+                }
+
+                RtlZeroMemory(&NewOverride, sizeof(NewOverride));
+                NewOverride.Gsi = InterruptOverride->GlobalIrq;
+                NewOverride.IntiFlags = InterruptOverride->IntiFlags;
+
+                Polarity = InterruptOverride->IntiFlags & ACPI_MADT_POLARITY_MASK;
+                switch (Polarity)
+                {
+                    case ACPI_MADT_POLARITY_CONFORMS:
+                        break;
+
+                    case ACPI_MADT_POLARITY_ACTIVE_HIGH:
+                        NewOverride.PolarityValid = TRUE;
+                        NewOverride.ActiveLow = FALSE;
+                        break;
+
+                    case ACPI_MADT_POLARITY_ACTIVE_LOW:
+                        NewOverride.PolarityValid = TRUE;
+                        NewOverride.ActiveLow = TRUE;
+                        break;
+
+                    default:
+                        DPRINT01("Reserved polarity in interrupt override: %p, %04x\n",
+                                 InterruptOverride, InterruptOverride->IntiFlags);
+                        break;
+                }
+
+                Trigger = InterruptOverride->IntiFlags & ACPI_MADT_TRIGGER_MASK;
+                switch (Trigger)
+                {
+                    case ACPI_MADT_TRIGGER_CONFORMS:
+                        break;
+
+                    case ACPI_MADT_TRIGGER_EDGE:
+                        NewOverride.TriggerValid = TRUE;
+                        NewOverride.LevelTriggered = FALSE;
+                        break;
+
+                    case ACPI_MADT_TRIGGER_LEVEL:
+                        NewOverride.TriggerValid = TRUE;
+                        NewOverride.LevelTriggered = TRUE;
+                        break;
+
+                    default:
+                        DPRINT01("Reserved trigger mode in interrupt override: %p, %04x\n",
+                                 InterruptOverride, InterruptOverride->IntiFlags);
+                        break;
+                }
+
+                if ((Polarity == ACPI_MADT_POLARITY_RESERVED) ||
+                    (Trigger == ACPI_MADT_TRIGGER_RESERVED))
+                {
+                    break;
+                }
+
+                NewOverride.Present = TRUE;
+
+                /* The APIC HAL still wires its RTC clock vector to input 8.
+                 * Keep the pre-existing identity route until that clock path
+                 * can consume a non-identity IRQ 8 override end to end. */
+                if ((InterruptOverride->SourceIrq == 8) &&
+                    (NewOverride.Gsi != 8))
+                {
+                    DPRINT01("Unsupported RTC override: IRQ 8 -> GSI %lu\n",
+                             NewOverride.Gsi);
+                    *Override = NewOverride;
+                    break;
+                }
+
+                NewOverride.Applied = TRUE;
+                *Override = NewOverride;
+                HalpPicVectorRedirect[InterruptOverride->SourceIrq] =
+                    NewOverride.Gsi;
 
                 break;
             }
@@ -241,6 +331,41 @@ HalpParseApicTables(
     }
 }
 
+BOOLEAN
+NTAPI
+HalpGetIsaInterruptOverride(
+    _In_ ULONG SourceIrq,
+    _Out_ PULONG Gsi,
+    _Out_ PBOOLEAN PolarityValid,
+    _Out_ PBOOLEAN ActiveLow,
+    _Out_ PBOOLEAN TriggerValid,
+    _Out_ PBOOLEAN LevelTriggered)
+{
+    PHALP_ISA_INTERRUPT_OVERRIDE Override;
+
+    if (SourceIrq >= RTL_NUMBER_OF(HalpIsaInterruptOverrides))
+        return FALSE;
+
+    *Gsi = HalpPicVectorRedirect[SourceIrq];
+    *PolarityValid = FALSE;
+    *ActiveLow = FALSE;
+    *TriggerValid = FALSE;
+    *LevelTriggered = FALSE;
+
+    Override = &HalpIsaInterruptOverrides[SourceIrq];
+    if (!Override->Present)
+        return TRUE;
+
+    if (!Override->Applied)
+        return FALSE;
+
+    *PolarityValid = Override->PolarityValid;
+    *ActiveLow = Override->ActiveLow;
+    *TriggerValid = Override->TriggerValid;
+    *LevelTriggered = Override->LevelTriggered;
+    return TRUE;
+}
+
 VOID
 HalpPrintApicTables(VOID)
 {
@@ -257,6 +382,36 @@ HalpPrintApicTables(VOID)
                 HalpProcessorIdentity[i].ProcessorStarted,
                 HalpProcessorIdentity[i].BSPCheck,
                 HalpProcessorIdentity[i].ProcessorPrcb);
+    }
+
+    for (i = 0; i < HALP_APIC_INFO_TABLE_IOAPIC_NUMBER; i++)
+    {
+        if (HalpApicInfoTable.IoApicPA[i] != 0)
+        {
+            DPRINT1(" IOAPIC %lu: address %08lx GSI base %lu\n",
+                    i,
+                    HalpApicInfoTable.IoApicPA[i],
+                    HalpApicInfoTable.IoApicIrqBase[i]);
+        }
+    }
+
+    for (i = 0; i < RTL_NUMBER_OF(HalpIsaInterruptOverrides); i++)
+    {
+        PHALP_ISA_INTERRUPT_OVERRIDE Override = &HalpIsaInterruptOverrides[i];
+
+        if (!Override->Present)
+            continue;
+
+        DPRINT1(" MADT ISO: IRQ %lu -> GSI %lu flags %04x "
+                "polarity=%s trigger=%s applied=%u\n",
+                i,
+                Override->Gsi,
+                Override->IntiFlags,
+                Override->PolarityValid ?
+                    (Override->ActiveLow ? "low" : "high") : "conforms",
+                Override->TriggerValid ?
+                    (Override->LevelTriggered ? "level" : "edge") : "conforms",
+                Override->Applied);
     }
 #endif
 }
