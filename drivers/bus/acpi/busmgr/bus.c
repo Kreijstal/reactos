@@ -1858,6 +1858,7 @@ acpi_bus_exit (void)
 	acpi_pci_root_exit();
 	acpi_pci_link_exit();
 #endif
+	acpi_thermal_exit();
 	acpi_ec_exit();
 	//acpi_power_exit();
 	acpi_system_exit();
@@ -1925,6 +1926,9 @@ acpi_init (void)
 	DPRINT("ACPITRACE: acpi_ec_init begin\n");
 	acpi_ec_init();		/* ACPI Embedded Controller */
 	DPRINT("ACPITRACE: acpi_ec_init complete\n");
+	DPRINT("ACPITRACE: acpi_thermal_init begin\n");
+	acpi_thermal_init();	/* ACPI Thermal Zones (active cooling) */
+	DPRINT("ACPITRACE: acpi_thermal_init complete\n");
 #ifdef CONFIG_ACPI_PCI
 	if (!acpi_pci_disabled) {
 		DPRINT("ACPITRACE: acpi_pci_link_init begin\n");
