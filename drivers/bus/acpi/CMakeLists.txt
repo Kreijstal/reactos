@@ -191,6 +191,7 @@ list(APPEND ACPI_SOURCE
     busmgr/power.c
     busmgr/utils.c
     busmgr/system.c
+    busmgr/thermal.c
     osl.c
     acpienum.c
     eval.c
