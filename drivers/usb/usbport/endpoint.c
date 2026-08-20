@@ -1060,6 +1060,30 @@ USBPORT_OpenPipe(IN PDEVICE_OBJECT FdoDevice,
             (EndpointProperties->TransferType == USBPORT_TRANSFER_TYPE_INTERRUPT))
         {
             EndpointProperties->MaxTransferSize = EndpointRequirements.MaxTransferSize;
+
+            /*
+             * The miniport reports what its hardware can describe (megabytes
+             * for xHCI), but a transfer is mapped in a single
+             * AllocateAdapterChannel call, so it can never span more pages
+             * than the HAL granted us map registers.  Asking for more is a
+             * hard STATUS_INSUFFICIENT_RESOURCES reject, and the transfer is
+             * then lost, so honour the grant here and let the transfer be
+             * split instead.
+             *
+             * The buffer need not be page aligned, so a length of N pages can
+             * span N + 1 pages; keep one register in hand for that.
+             */
+            if (FdoExtension->NumberMapRegs > 1)
+            {
+                ULONG MaxMapTransferSize;
+
+                MaxMapTransferSize = (FdoExtension->NumberMapRegs - 1) * PAGE_SIZE;
+
+                if (EndpointProperties->MaxTransferSize > MaxMapTransferSize)
+                {
+                    EndpointProperties->MaxTransferSize = MaxMapTransferSize;
+                }
+            }
         }
 
         if (EndpointRequirements.HeaderBufferSize)
