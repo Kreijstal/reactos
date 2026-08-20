@@ -139,6 +139,31 @@ MiCheckForUserStackOverflow(IN PVOID Address,
          * above the final hard guard page, so the handler has room to run. */
         DPRINT1("Stack overflow for %.16s at %p (DeallocationStack %p)\n",
                 PsGetCurrentProcess()->ImageFileName, Address, DeallocationStack);
+#if defined(_M_AMD64)
+        /* Diagnostic: name the runaway recursion. The faulting user Rip plus
+         * the first return addresses on the user stack identify the repeating
+         * frame directly; without them the message above says only that the
+         * stack was consumed, not by what. */
+        if (TrapInformation)
+        {
+            PKTRAP_FRAME Tf = (PKTRAP_FRAME)TrapInformation;
+            DPRINT1("Stack overflow: Rip=%p Rsp=%p Rbp=%p StackBase=%p\n",
+                    (PVOID)Tf->Rip, (PVOID)Tf->Rsp, (PVOID)Tf->Rbp, StackBase);
+            _SEH2_TRY
+            {
+                PULONG_PTR Stk = (PULONG_PTR)Tf->Rsp;
+                DPRINT1("Stack overflow: [Rsp+0]=%p [+8]=%p [+16]=%p [+24]=%p\n",
+                        (PVOID)Stk[0], (PVOID)Stk[1], (PVOID)Stk[2], (PVOID)Stk[3]);
+                DPRINT1("Stack overflow: [+32]=%p [+40]=%p [+48]=%p [+56]=%p\n",
+                        (PVOID)Stk[4], (PVOID)Stk[5], (PVOID)Stk[6], (PVOID)Stk[7]);
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                DPRINT1("Stack overflow: user stack unreadable\n");
+            }
+            _SEH2_END;
+        }
+#endif
         NextStackAddress = (PVOID)((ULONG_PTR)PAGE_ALIGN(DeallocationStack) + PAGE_SIZE);
         RegionSize = GuaranteedSize;
 
