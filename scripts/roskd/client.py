@@ -63,12 +63,103 @@ DBGKD_QUERY_MEMORY_API = 0x315C
 
 DBG_CONTINUE = 0x00010002
 STATUS_BREAKPOINT = 0x80000003
+# The i386/AMD64 software breakpoint opcode (KD_BREAKPOINT_VALUE in the
+# kernel).  A stop whose PC still sits on this byte has already executed it.
+KD_BREAKPOINT_OPCODE = b"\xcc"
+# Offsets of AMD64_DBGKD_CONTROL_REPORT fields inside a
+# DBGKD_ANY_WAIT_STATE_CHANGE payload (verified against captured packets).
+DBGKD_MAXSTREAM = 16
+AMD64_INSTRUCTION_COUNT_OFFSET = 0xD4
+AMD64_INSTRUCTION_STREAM_OFFSET = 0xD8
 STATUS_SUCCESS = 0
 STATUS_NO_SUCH_FILE = 0xC000000F
 KD_MANIPULATE_SIZE = 56
 KD_FILE_IO_SIZE = 64
 KD_TRANSFER_MAX = 0x800
 CONTEXT_AMD64_ALL = 0x0010003F
+
+# AMD64 kernel/user structure offsets for THIS build (NTDDI 0xa000000, NT 10 dual).
+# Derived with an offsetof() probe compiled against build_nt10_dual_cmake's NDK
+# headers with the same defines as the genincdata target. The probe's anchor
+# fields reproduced ksamd64.inc exactly (EpDebugPort=0x170, EpWow64Process=0x298,
+# KTHREAD.ApcState=0x98, KAPC_STATE.Process=0x20, KTHREAD.Process=0x220), and the
+# +0xB8 (ApcState.Process) path was cross-checked against a live ETHREAD page.
+KTHREAD_APCSTATE = 0x98            # KTHREAD.ApcState (ThApcState)
+KAPC_STATE_PROCESS = 0x20          # KAPC_STATE.Process (AsProcess)
+KTHREAD_APCSTATE_PROCESS = KTHREAD_APCSTATE + KAPC_STATE_PROCESS  # 0xB8 -> EPROCESS*
+EPROCESS_UNIQUE_PROCESS_ID = 0xF0
+EPROCESS_IMAGE_FILE_NAME = 0x258   # CHAR ImageFileName[16]
+EPROCESS_IMAGE_FILE_NAME_LEN = 16
+EPROCESS_PEB = 0x2B0               # struct _PEB *Peb
+PEB_LDR = 0x18                     # PEB.Ldr (PPEB_LDR_DATA)
+PEB_LDR_DATA_INLOADORDER = 0x10    # PEB_LDR_DATA.InLoadOrderModuleList (LIST_ENTRY)
+LDTE_INLOADORDER_LINKS = 0x00      # LDR_DATA_TABLE_ENTRY.InLoadOrderLinks (list head)
+LDTE_DLL_BASE = 0x30
+LDTE_ENTRY_POINT = 0x38
+LDTE_SIZE_OF_IMAGE = 0x40
+LDTE_FULL_DLL_NAME = 0x48          # UNICODE_STRING
+LDTE_BASE_DLL_NAME = 0x58          # UNICODE_STRING
+PAGE_SIZE = 0x1000
+
+# --- KDDEBUGGER_DATA64 field offsets ---------------------------------------
+# Fixed by the on-the-wire KDBG layout (sdk/include/psdk/wdbgexts.h), not by
+# the build: every field up to RetpolineStubSize is a naturally aligned
+# ULONG64/ULPTR64/USHORT.  Anchored against live captures -- KernBase (+0x18)
+# and PsLoadedModuleList (+0x48) reproduce KdVersion.kernel_base and
+# .loaded_module_list exactly in every harvest under the ASUS capture set.
+KDBG_KERN_BASE = 0x18
+KDBG_PS_LOADED_MODULE_LIST = 0x48
+KDBG_KI_PROCESSOR_BLOCK = 0x218    # PKPRCB KiProcessorBlock[MAXIMUM_PROCESSORS]
+KDBG_SIZE_PRCB = 0x2B0             # USHORT sizeof(KPRCB)
+KDBG_OFFSET_PRCB_CURRENT_THREAD = 0x2B4
+KDBG_OFFSET_PRCB_NUMBER = 0x2BE
+# Reading Number needs everything up to and including that field.
+KDBG_PRCB_METRICS_MINIMUM = KDBG_OFFSET_PRCB_NUMBER + 2
+
+# --- KPRCB (AMD64, NTDDI 0xA000000) ----------------------------------------
+# ReactOS' KPRCB is *not* the Windows 10 KPRCB: it is the WS03/Vista-shaped
+# struct in sdk/include/ndk/amd64/ketypes.h with NTDDI_VERSION >= NTDDI_LONGHORN
+# branches taken.  IpiFrozen therefore sits at 0x2218, nowhere near where a
+# Windows 10 symbol file would put it, so it cannot be looked up from a PDB and
+# must come from this tree.  Value taken from the generated
+# build_nt10_dual_cmake/sdk/include/asm/ksamd64.inc (PbIpiFrozen = 0x2218,
+# PbTargetSet = 0x2210, ProcessorBlockLength = 0x42a0), which is emitted by the
+# genincdata target compiled with the exact defines of the target kernel.
+# Cross-checked at run time: the KDBG the target publishes carries SizePrcb,
+# OffsetPrcbNumber and OffsetPrcbCurrentThread, and a mismatch against these
+# constants is recorded in the manifest instead of silently trusted.
+PRCB_NUMBER = 0x04                 # USHORT Number   (NT6+ layout; UCHAR on WS03)
+PRCB_CURRENT_THREAD = 0x08         # PKTHREAD CurrentThread
+PRCB_TARGET_SET = 0x2210           # UINT64 TargetSet
+PRCB_IPI_FROZEN = 0x2218           # ULONG IpiFrozen
+PRCB_SIZE = 0x42A0                 # sizeof(KPRCB)
+# The two slices the freeze-state capture reads out of each PRCB.  Kept small
+# on purpose: a KD virtual read is 0x800 bytes per round trip, and a stalled
+# target is exactly when we cannot afford 0x42A0 bytes times every core.
+PRCB_HEAD_SIZE = 0x10              # MxCsr, Number, InterruptRequest, IdleHalt,
+                                   # CurrentThread
+PRCB_IPI_SLICE_SIZE = 0x10         # TargetSet + IpiFrozen (+ PrcbPad3 head)
+
+# KPRCB::IpiFrozen states, from sdk/include/ndk/amd64/ketypes.h.  The low
+# nibble is the state; 0x20 is the "active in the debugger" flag.
+IPI_FROZEN_FLAG_ACTIVE = 0x20
+IPI_FROZEN_STATE_RUNNING = 0x0
+IPI_FROZEN_STATE_FROZEN = 0x2
+IPI_FROZEN_STATE_THAW = 0x3
+IPI_FROZEN_STATE_OWNER = 0x4
+IPI_FROZEN_STATE_TARGET_FREEZE = 0x5
+IPI_FROZEN_STATE_NAMES = {
+    IPI_FROZEN_STATE_RUNNING: "running",
+    IPI_FROZEN_STATE_FROZEN: "frozen",
+    IPI_FROZEN_STATE_THAW: "thaw",
+    IPI_FROZEN_STATE_OWNER: "freeze-owner",
+    IPI_FROZEN_STATE_TARGET_FREEZE: "target-freeze",
+}
+# Highest 4-level canonical kernel address space start on AMD64.  A PRCB
+# pointer below this is not a kernel pointer and must not be dereferenced.
+AMD64_KERNEL_SPACE_START = 0xFFFF800000000000
+# MAXIMUM_PROCESSORS on this build; also the KiProcessorBlock array bound.
+KI_PROCESSOR_BLOCK_MAXIMUM = 64
 
 
 class KdTimeout(TimeoutError):
@@ -102,6 +193,9 @@ class KdStateChange:
     module_base: int | None = None
     module_size: int | None = None
     unloading: bool = False
+    # Hex of the bytes at ProgramCounter reported by an AMD64 target, kept as a
+    # string so a state change stays JSON-serialisable into harvest manifests.
+    amd64_instruction_stream: str = ""
 
     @property
     def kind(self) -> str:
@@ -159,6 +253,20 @@ def parse_state_change(payload: bytes) -> KdStateChange:
     if state == DBGKD_EXCEPTION_STATE_CHANGE and len(payload) >= 56:
         values["exception_code"] = struct.unpack_from("<I", payload, 32)[0]
         values["exception_address"] = struct.unpack_from("<Q", payload, 48)[0]
+        # AMD64_DBGKD_CONTROL_REPORT follows the fixed-size exception union at
+        # 0xC0: Dr6, Dr7, EFlags, InstructionCount, ReportFlags,
+        # InstructionStream[16].  It carries the bytes at ProgramCounter, so the
+        # resume path can recognise an executed int3 without a memory read.
+        # Only meaningful for an AMD64 target; callers must check that first.
+        if len(payload) >= AMD64_INSTRUCTION_STREAM_OFFSET:
+            count = struct.unpack_from(
+                "<H", payload, AMD64_INSTRUCTION_COUNT_OFFSET
+            )[0]
+            count = min(count, DBGKD_MAXSTREAM)
+            values["amd64_instruction_stream"] = payload[
+                AMD64_INSTRUCTION_STREAM_OFFSET:
+                AMD64_INSTRUCTION_STREAM_OFFSET + count
+            ].hex()
     elif state == DBGKD_LOAD_SYMBOLS_STATE_CHANGE and len(payload) >= 65:
         path_length = struct.unpack_from("<I", payload, 32)[0]
         values["module_base"] = struct.unpack_from("<Q", payload, 40)[0]
@@ -238,6 +346,27 @@ def parse_amd64_loader_entry(entry: int, data: bytes) -> dict[str, int]:
     }
 
 
+def _summarise_freeze_state(prcbs: dict[str, object]) -> str:
+    """One-line, human-readable digest of a get_processor_control_blocks() result."""
+    processors = prcbs.get("processors") or []
+    parts = []
+    for entry in processors:
+        index = entry.get("processor")
+        if "state" in entry:
+            flag = "+active" if entry.get("active") else ""
+            parts.append(f"cpu{index}={entry['state']}{flag}")
+        else:
+            parts.append(f"cpu{index}=?({entry.get('error', 'no data')})")
+    owner = prcbs.get("freeze_owner_processor")
+    summary = " ".join(parts) if parts else "no processors read"
+    summary += f" owner={'cpu%d' % owner if owner is not None else 'unknown'}"
+    if prcbs.get("layout_warnings"):
+        summary += " LAYOUT-MISMATCH:" + ";".join(prcbs["layout_warnings"])
+    if prcbs.get("error"):
+        summary += f" error={prcbs['error']}"
+    return summary
+
+
 class KdNetClient:
     """A synchronous, scriptable KDNET debugger.
 
@@ -279,6 +408,7 @@ class KdNetClient:
         self.version: KdVersion | None = None
         self.stopped = False
         self._manual_break_stop = False
+        self._planted_breakpoints: dict[int, int] = {}
         self._operation_deadline: float | None = None
         self._request_in_flight = False
         self.last_harvest_complete: bool | None = None
@@ -451,6 +581,7 @@ class KdNetClient:
             self.version = None
             self.stopped = False
             self._manual_break_stop = False
+            self._planted_breakpoints.clear()
             self._request_in_flight = False
             self.last_harvest_complete = None
         assert self.host_key is not None
@@ -786,16 +917,33 @@ class KdNetClient:
         )
 
     def _prepare_manual_break_resume(self) -> None:
-        """Advance RIP past an AMD64 break-in instruction when necessary.
+        """Step over an already-executed ``int3`` before resuming the target.
 
-        ReactOS reports a debugger-requested ``int3`` with ProgramCounter and
-        CONTEXT.Rip pointing at the opcode, while ExceptionAddress points one
-        byte past it.  Sending Continue without correcting the context executes
-        the same ``int3`` again and returns to the debugger forever.  Restrict
-        the correction to stops produced by :meth:`break_in`; ordinary target
-        exceptions and debugger-planted breakpoints must retain their RIP.
+        The kernel reports a software breakpoint with CONTEXT.Rip pointing *at*
+        the ``0xCC`` opcode: ``KiDispatchException`` rewinds Rip by one
+        (ntoskrnl/ke/amd64/except.c) and KD64 never puts it back for a
+        BREAKPOINT_BREAK (ntoskrnl/kd64/kdtrap.c only bumps the PC for the
+        int-2Dh debug services).  That is Windows behaviour -- the
+        ntdll:exception ``int3_handler`` asserts that both ExceptionAddress and
+        Rip equal the address of the int3 and does ``context->Rip++`` itself --
+        so stepping over the opcode is the *debugger's* job.  Omit it and the
+        very same int3 re-executes immediately after every Continue, which on
+        the wire looks exactly like a target that refuses to resume.
+
+        Decide on the opcode actually present at the reported PC, not on any
+        ExceptionAddress/ProgramCounter relationship.  Kernels built before
+        ntoskrnl/ke/amd64/trap.S grew its BREAKPOINT_BREAK adjustment reported
+        ExceptionAddress one byte past the PC; current ones report the two
+        equal.  Both need the identical correction, and only the opcode
+        distinguishes a breakpoint that ran from a STATUS_BREAKPOINT raised by
+        software.  Breakpoints this client planted are left alone: their
+        ``0xCC`` hides a real instruction byte and has to be removed, never
+        stepped over.
         """
-        if not self._manual_break_stop:
+        manual = self._manual_break_stop
+        self._manual_break_stop = False
+
+        if not self.stopped:
             return
 
         state = self.current_state
@@ -803,32 +951,58 @@ class KdNetClient:
             state is None
             or state.state != DBGKD_EXCEPTION_STATE_CHANGE
             or state.exception_code != STATUS_BREAKPOINT
-            or state.exception_address != state.program_counter + 1
         ):
-            self._manual_break_stop = False
             return
+
         if self.version is not None and not self.version.is_64bit:
-            self._manual_break_stop = False
-            self._emit(
-                "warning",
-                "cannot adjust a rewound manual break on a non-AMD64 target",
-            )
+            if manual:
+                self._emit(
+                    "warning",
+                    "cannot adjust a rewound manual break on a non-AMD64 target",
+                )
             return
+
+        pc = state.program_counter
+        if pc in self._planted_breakpoints.values():
+            return
+
+        opcode = bytes.fromhex(state.amd64_instruction_stream[:2])
+        if not opcode:
+            try:
+                opcode = self.read_virtual(pc, 1)
+            except (KdRequestError, KdTimeout, ProtocolError):
+                opcode = b""
+        if opcode[:1] != KD_BREAKPOINT_OPCODE:
+            if opcode:
+                # A real instruction byte: the breakpoint status was raised by
+                # software (RtlRaiseException) and the PC must not move.
+                return
+            # The opcode could not be read back.  Fall back to the signature of
+            # the older kernels, which reported ExceptionAddress == PC + 1 for
+            # an executed int3.
+            if state.exception_address != pc + 1:
+                self._emit(
+                    "warning",
+                    f"cannot read the opcode at 0x{pc:016x}; resuming without "
+                    "stepping over a possible breakpoint",
+                )
+                return
 
         context = bytearray(self.get_context())
         rip_offset = 0xF8
         if len(context) < rip_offset + 8:
             raise ProtocolError("truncated AMD64 CONTEXT while resuming break-in")
         rip = struct.unpack_from("<Q", context, rip_offset)[0]
-        if rip == state.program_counter:
-            struct.pack_into("<Q", context, rip_offset, state.exception_address)
-            self.set_context(bytes(context))
-            self._emit(
-                "resume-fixup",
-                f"advanced manual break RIP from 0x{rip:016x} "
-                f"to 0x{state.exception_address:016x}",
-            )
-        self._manual_break_stop = False
+        if rip != pc:
+            # Somebody already moved the PC off the breakpoint.
+            return
+        struct.pack_into("<Q", context, rip_offset, pc + 1)
+        self.set_context(bytes(context))
+        self._emit(
+            "resume-fixup",
+            f"stepped over int3 at 0x{pc:016x}: "
+            f"RIP 0x{rip:016x} -> 0x{pc + 1:016x}",
+        )
 
     def continue_execution(self) -> None:
         self.drain_pending_request()
@@ -958,10 +1132,15 @@ class KdNetClient:
         response = self._request(
             DBGKD_WRITE_BREAKPOINT_API, struct.pack("<QI", address, 0)
         )
-        return struct.unpack_from("<I", response, 16 + 8)[0]
+        handle = struct.unpack_from("<I", response, 16 + 8)[0]
+        # Remember where we planted it: the 0xCC there hides a real instruction
+        # byte, so the resume path must not step over it like an executed one.
+        self._planted_breakpoints[handle] = address
+        return handle
 
     def clear_breakpoint(self, handle: int) -> None:
         self._request(DBGKD_RESTORE_BREAKPOINT_API, struct.pack("<I", handle))
+        self._planted_breakpoints.pop(handle, None)
 
     def query_memory(self, address: int) -> tuple[int, int]:
         union = struct.pack("<QQII", address, 0, 0, 0)
@@ -1021,6 +1200,98 @@ class KdNetClient:
             )
         return modules
 
+    def read_pointer(self, address: int) -> int:
+        """Read a single little-endian 64-bit pointer from the target."""
+        data = self.read_virtual(address, 8)
+        if len(data) != 8:
+            raise ProtocolError(f"short pointer read at 0x{address:016x}")
+        return struct.unpack_from("<Q", data)[0]
+
+    def _read_unicode_string(self, address: int) -> str:
+        """Read a UNICODE_STRING {Length, MaximumLength, Buffer} and its buffer."""
+        header = self.read_virtual(address, 0x10)
+        if len(header) != 0x10:
+            raise ProtocolError(f"short UNICODE_STRING read at 0x{address:016x}")
+        length = struct.unpack_from("<H", header, 0)[0]
+        buffer = struct.unpack_from("<Q", header, 8)[0]
+        return self._read_unicode(buffer, length)
+
+    def get_current_process(self) -> dict[str, object]:
+        """Resolve the current thread's EPROCESS and its identifying fields.
+
+        Uses KTHREAD.ApcState.Process (ETHREAD+0xB8) which holds the KPROCESS /
+        EPROCESS base of the process the current thread is attached to.
+        """
+        if self.current_state is None:
+            raise RuntimeError("no current state")
+        thread = self.current_state.thread
+        eprocess = self.read_pointer(thread + KTHREAD_APCSTATE_PROCESS)
+        info: dict[str, object] = {"eprocess": eprocess}
+        name = self.read_virtual(
+            eprocess + EPROCESS_IMAGE_FILE_NAME, EPROCESS_IMAGE_FILE_NAME_LEN
+        )
+        info["image_file_name"] = name.split(b"\0", 1)[0].decode(
+            "latin-1", errors="replace"
+        )
+        info["image_file_name_raw"] = name.hex()
+        try:
+            info["unique_process_id"] = self.read_pointer(
+                eprocess + EPROCESS_UNIQUE_PROCESS_ID
+            )
+        except (KdRequestError, KdTimeout, ProtocolError) as error:
+            info["unique_process_id_error"] = str(error)
+        try:
+            info["peb"] = self.read_pointer(eprocess + EPROCESS_PEB)
+        except (KdRequestError, KdTimeout, ProtocolError) as error:
+            info["peb_error"] = str(error)
+        return info
+
+    def get_user_modules(
+        self, peb: int, max_modules: int = 1024
+    ) -> list[dict[str, object]]:
+        """Walk the user PEB->Ldr->InLoadOrderModuleList while in-process.
+
+        All user VAs are readable while the target is stopped in this process's
+        context, so the LDR_DATA_TABLE_ENTRY chain and its UNICODE_STRING buffers
+        can be read directly.
+        """
+        if not peb:
+            raise ProtocolError("process has no PEB (kernel/system thread?)")
+        ldr = self.read_pointer(peb + PEB_LDR)
+        if not ldr:
+            raise ProtocolError("PEB.Ldr is NULL (loader not yet initialized?)")
+        head = ldr + PEB_LDR_DATA_INLOADORDER
+        cursor = self.read_pointer(head)
+        visited: set[int] = set()
+        modules: list[dict[str, object]] = []
+        while cursor != head and len(modules) < max_modules:
+            if not cursor or cursor in visited:
+                break
+            visited.add(cursor)
+            entry = cursor - LDTE_INLOADORDER_LINKS
+            try:
+                base = self.read_pointer(entry + LDTE_DLL_BASE)
+                size = struct.unpack_from(
+                    "<I", self.read_virtual(entry + LDTE_SIZE_OF_IMAGE, 4)
+                )[0]
+                entry_point = self.read_pointer(entry + LDTE_ENTRY_POINT)
+                full_name = self._read_unicode_string(entry + LDTE_FULL_DLL_NAME)
+                base_name = self._read_unicode_string(entry + LDTE_BASE_DLL_NAME)
+                modules.append(
+                    {
+                        "entry": entry,
+                        "dll_base": base,
+                        "entry_point": entry_point,
+                        "size": size,
+                        "full_name": full_name,
+                        "base_name": base_name,
+                    }
+                )
+            except (KdRequestError, KdTimeout, ProtocolError) as error:
+                modules.append({"entry": entry, "error": str(error)})
+            cursor = self.read_pointer(cursor + LDTE_INLOADORDER_LINKS)
+        return modules
+
     def get_debugger_data_blocks(
         self, max_blocks: int = 32, max_block_size: int = 0x100000
     ) -> list[KdDebuggerDataBlock]:
@@ -1063,6 +1334,157 @@ class KdNetClient:
                 f"DebuggerDataList exceeded the {max_blocks}-entry limit"
             )
         return blocks
+
+    @staticmethod
+    def describe_ipi_frozen(value: int) -> dict[str, object]:
+        """Decode a KPRCB::IpiFrozen word into the !ipi-style freeze state."""
+        state = value & ~IPI_FROZEN_FLAG_ACTIVE
+        return {
+            "ipi_frozen": value,
+            "state": IPI_FROZEN_STATE_NAMES.get(state, f"unknown-0x{state:x}"),
+            "active": bool(value & IPI_FROZEN_FLAG_ACTIVE),
+            # Actually parked in KiProcessorFreezeHandler.  TARGET_FREEZE means
+            # the freeze was *requested* and the NMI has not landed yet, which
+            # is the interesting failure: an AP stuck at target-freeze never
+            # froze at all.
+            "is_frozen": state in (IPI_FROZEN_STATE_FROZEN, IPI_FROZEN_STATE_THAW),
+            "is_freeze_owner": state == IPI_FROZEN_STATE_OWNER,
+            "freeze_requested": state == IPI_FROZEN_STATE_TARGET_FREEZE,
+        }
+
+    def get_processor_control_blocks(
+        self,
+        blocks: list[KdDebuggerDataBlock] | None = None,
+        processor_count: int | None = None,
+    ) -> dict[str, object]:
+        """Read each CPU's KPRCB freeze state through KDBG's KiProcessorBlock.
+
+        Answers the two questions a stalled SMP target raises and that a
+        context dump cannot: is this core actually frozen, and which core owns
+        the freeze.  KxFreezeExecution stamps IPI_FROZEN_STATE_OWNER into the
+        winning CPU's PRCB immediately after it takes KiFreezeOwner, so the
+        owner is recoverable from the PRCBs alone -- KiFreezeOwner itself is a
+        plain kernel global that KDBG does not publish.
+
+        Never raises for a single unreadable or implausible PRCB: those are
+        recorded per processor and the walk continues.  KdTimeout is allowed
+        out so the caller's capture deadline still applies.
+        """
+        if self.version is None or not self.version.is_64bit:
+            raise NotImplementedError("PRCB harvesting currently requires AMD64")
+        if blocks is None:
+            blocks = self.get_debugger_data_blocks()
+        kdbg = next((block for block in blocks if block.owner_tag == "KDBG"), None)
+        if kdbg is None:
+            raise ProtocolError("target did not publish a KDBG debugger-data block")
+        if len(kdbg.data) < KDBG_PRCB_METRICS_MINIMUM:
+            raise ProtocolError(
+                f"KDBG block is only 0x{len(kdbg.data):x} bytes, too old to "
+                "describe KiProcessorBlock"
+            )
+
+        array = struct.unpack_from("<Q", kdbg.data, KDBG_KI_PROCESSOR_BLOCK)[0]
+        size_prcb = struct.unpack_from("<H", kdbg.data, KDBG_SIZE_PRCB)[0]
+        offset_number = struct.unpack_from("<H", kdbg.data, KDBG_OFFSET_PRCB_NUMBER)[0]
+        offset_thread = struct.unpack_from(
+            "<H", kdbg.data, KDBG_OFFSET_PRCB_CURRENT_THREAD
+        )[0]
+
+        # The target tells us three KPRCB offsets.  If any disagrees with the
+        # constants above then this kernel is not the one they were generated
+        # from and PRCB_IPI_FROZEN is a guess -- say so in the manifest rather
+        # than publish a freeze state nobody can trust.
+        layout_warnings: list[str] = []
+        for name, reported, expected in (
+            ("SizePrcb", size_prcb, PRCB_SIZE),
+            ("OffsetPrcbNumber", offset_number, PRCB_NUMBER),
+            ("OffsetPrcbCurrentThread", offset_thread, PRCB_CURRENT_THREAD),
+        ):
+            if reported != expected:
+                layout_warnings.append(
+                    f"{name}=0x{reported:x} but this build expects 0x{expected:x}"
+                )
+
+        if processor_count is None:
+            processor_count = (
+                self.current_state.cpu_count if self.current_state else 1
+            )
+        processor_count = max(0, min(processor_count, KI_PROCESSOR_BLOCK_MAXIMUM))
+
+        result: dict[str, object] = {
+            "processor_block_array": array,
+            "size_prcb": size_prcb,
+            "offset_prcb_number": offset_number,
+            "offset_prcb_current_thread": offset_thread,
+            "offset_prcb_ipi_frozen": PRCB_IPI_FROZEN,
+            "ipi_frozen_offset_source": (
+                "build_nt10_dual_cmake/sdk/include/asm/ksamd64.inc PbIpiFrozen"
+            ),
+            "layout_warnings": layout_warnings,
+            "processors": [],
+            "freeze_owner_processor": None,
+        }
+        processors: list[dict[str, object]] = result["processors"]
+        if array < AMD64_KERNEL_SPACE_START or array % 8:
+            result["error"] = (
+                f"KiProcessorBlock 0x{array:016x} is not a kernel pointer"
+            )
+            return result
+
+        pointer_bytes = self.read_virtual(array, processor_count * 8)
+        available = len(pointer_bytes) // 8
+        if available < processor_count:
+            result["error"] = (
+                f"short KiProcessorBlock read: wanted {processor_count} entries, "
+                f"received {available}"
+            )
+        pointers = list(
+            struct.unpack_from(f"<{available}Q", pointer_bytes)
+        ) if available else []
+
+        for index, prcb in enumerate(pointers):
+            entry: dict[str, object] = {"processor": index, "prcb": prcb}
+            processors.append(entry)
+            if prcb == 0:
+                entry["error"] = "KiProcessorBlock entry is NULL"
+                continue
+            if prcb < AMD64_KERNEL_SPACE_START or prcb % 16:
+                entry["error"] = f"implausible PRCB pointer 0x{prcb:016x}"
+                continue
+            try:
+                head = self.read_virtual(prcb, PRCB_HEAD_SIZE)
+                if len(head) < PRCB_HEAD_SIZE:
+                    raise ProtocolError(
+                        f"short PRCB read at 0x{prcb:016x}: {len(head)} bytes"
+                    )
+                slice_address = prcb + PRCB_TARGET_SET
+                ipi = self.read_virtual(slice_address, PRCB_IPI_SLICE_SIZE)
+                if len(ipi) < PRCB_IPI_FROZEN - PRCB_TARGET_SET + 4:
+                    raise ProtocolError(
+                        f"short PRCB freeze-state read at 0x{slice_address:016x}: "
+                        f"{len(ipi)} bytes"
+                    )
+            # KdTimeout derives from TimeoutError, not from any of these, so it
+            # deliberately escapes: a target that stopped answering must end the
+            # walk and let the caller's deadline handling take over.
+            except (KdRequestError, ProtocolError, RuntimeError, ValueError) as error:
+                entry["error"] = str(error)
+                continue
+            entry["number"] = struct.unpack_from("<H", head, PRCB_NUMBER)[0]
+            entry["current_thread"] = struct.unpack_from(
+                "<Q", head, PRCB_CURRENT_THREAD
+            )[0]
+            entry["target_set"] = struct.unpack_from("<Q", ipi, 0)[0]
+            frozen_value = struct.unpack_from(
+                "<I", ipi, PRCB_IPI_FROZEN - PRCB_TARGET_SET
+            )[0]
+            entry.update(self.describe_ipi_frozen(frozen_value))
+            if entry["number"] != index:
+                entry["number_mismatch"] = True
+            if entry["is_freeze_owner"] and result["freeze_owner_processor"] is None:
+                result["freeze_owner_processor"] = index
+                result["freeze_owner_prcb"] = prcb
+        return result
 
     def get_debug_print_log(
         self,
@@ -1346,6 +1768,113 @@ class KdNetClient:
             capture(name, address, size)
             if timed_out:
                 return finish()
+
+        # --- Faulting process / user-mode module resolution (additive) -------
+        # Every read below is guarded so a failed walk degrades gracefully and
+        # never aborts the rest of the harvest.
+        process_info: dict[str, object] = {}
+        user_modules: list[dict[str, object]] = []
+        peb = 0
+        eprocess = 0
+        try:
+            process_info = self.get_current_process()
+            eprocess = int(process_info.get("eprocess", 0) or 0)
+            peb = int(process_info.get("peb", 0) or 0)
+            manifest["process"] = process_info
+            save_manifest()
+        except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
+            errors.append({"name": "current-process", "error": str(error)})
+            save_manifest()
+
+        if eprocess:
+            capture("current-process", eprocess & ~(PAGE_SIZE - 1), PAGE_SIZE)
+            if timed_out:
+                return finish()
+
+        if peb:
+            try:
+                user_modules = self.get_user_modules(peb)
+                manifest["user_modules"] = user_modules
+                save_manifest()
+            except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
+                errors.append({"name": "user-modules", "error": str(error)})
+                save_manifest()
+
+        def owning_user_module(address: int) -> dict[str, object] | None:
+            for module in user_modules:
+                base = module.get("dll_base")
+                size = module.get("size")
+                if isinstance(base, int) and isinstance(size, int) and size:
+                    if base <= address < base + size:
+                        return module
+            return None
+
+        def map_fault_page(page_name: str, fault_va: int) -> None:
+            """Capture the page containing fault_va and, if it lands inside a
+            resolved user module, record module/RVA/file-offset in the manifest.
+            The RVA->file-offset mapping uses the in-memory PE headers (which
+            retain PointerToRawData), so it needs no on-disk copy at capture
+            time."""
+            page_base = fault_va & ~(PAGE_SIZE - 1)
+            data = capture(page_name, page_base, PAGE_SIZE)
+            record: dict[str, object] = {
+                "name": page_name,
+                "fault_va": fault_va,
+                "page_base": page_base,
+                "captured": data is not None,
+            }
+            module = owning_user_module(fault_va)
+            if module is not None:
+                module_base = int(module["dll_base"])
+                rva = fault_va - module_base
+                page_rva = page_base - module_base
+                record["module"] = module.get("base_name") or module.get("full_name")
+                record["module_full_name"] = module.get("full_name")
+                record["module_base"] = module_base
+                record["rva"] = rva
+                record["page_rva"] = page_rva
+                try:
+                    header = self.read_virtual(module_base, PAGE_SIZE)
+                    sections = parse_pe_sections(header)
+                    section = section_for_rva(sections["sections"], rva)
+                    if section is not None:
+                        record["section"] = section["name"]
+                        record["section_writable"] = section["writable"]
+                        record["section_executable"] = section["executable"]
+                        record["file_offset"] = rva_to_file_offset(
+                            sections["sections"], rva
+                        )
+                        record["page_file_offset"] = rva_to_file_offset(
+                            sections["sections"], page_rva
+                        )
+                    record["pe_image_base"] = sections["image_base"]
+                except (KdRequestError, KdTimeout, ProtocolError, RuntimeError, ValueError) as error:
+                    record["pe_error"] = str(error)
+            fault_pages.append(record)
+            manifest["fault_pages"] = fault_pages
+            save_manifest()
+
+        fault_pages: list[dict[str, object]] = []
+        fault_rip = registers.get("rip", self.current_state.program_counter)
+        try:
+            map_fault_page("fault-code-page", fault_rip)
+        except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
+            errors.append({"name": "fault-code-page", "error": str(error)})
+            save_manifest()
+        if timed_out:
+            return finish()
+        fault_data_va = self.current_state.exception_address
+        if fault_data_va is not None and (
+            fault_data_va & ~(PAGE_SIZE - 1)
+        ) != (fault_rip & ~(PAGE_SIZE - 1)):
+            try:
+                map_fault_page("fault-data-page", fault_data_va)
+            except (KdRequestError, KdTimeout, ProtocolError, RuntimeError) as error:
+                errors.append({"name": "fault-data-page", "error": str(error)})
+                save_manifest()
+            if timed_out:
+                return finish()
+
         manifest["modules"] = [
             asdict(module)
             for module in sorted(
@@ -1418,6 +1947,39 @@ class KdNetClient:
         if timed_out:
             return finish()
 
+        # Per-CPU freeze state.  Without this a harvest cannot say whether the
+        # APs actually froze or merely had a freeze requested, which is the
+        # difference between "the debugger owns the box" and "one core is
+        # wedged with interrupts off".  Additive and non-fatal by construction.
+        try:
+            prcbs = self.get_processor_control_blocks(
+                debugger_blocks or None,
+                processor_count=self.current_state.cpu_count,
+            )
+            manifest["processor_control_blocks"] = prcbs
+            self._emit("prcb-freeze-state", _summarise_freeze_state(prcbs))
+        # Deliberately wide, but never bare: KdSessionChanged means the target
+        # rebooted and has to keep escaping the harvest.
+        except (
+            KdRequestError,
+            KdTimeout,
+            ProtocolError,
+            NotImplementedError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+            KeyError,
+            IndexError,
+            AttributeError,
+            struct.error,
+        ) as error:
+            if isinstance(error, KdTimeout) and self._operation_deadline is not None:
+                timed_out = True
+            errors.append({"name": "processor-control-blocks", "error": str(error)})
+        save_manifest()
+        if timed_out:
+            return finish()
+
         try:
             ordered_log, raw_ring, debug_print = self.get_debug_print_log(
                 debugger_blocks or None
@@ -1444,6 +2006,270 @@ class KdNetClient:
         }
 
 
+def parse_pe_sections(image: bytes) -> dict[str, object]:
+    """Parse the PE headers (from a file image or an in-memory header page).
+
+    Returns image_base plus a list of sections with virtual and raw geometry
+    and their characteristics.  Works on both on-disk files and image-mapped
+    memory because section headers keep PointerToRawData in both.
+    """
+    if len(image) < 0x40 or image[0:2] != b"MZ":
+        raise ValueError("not an MZ image")
+    pe = struct.unpack_from("<I", image, 0x3C)[0]
+    if pe + 0x18 > len(image) or image[pe:pe + 4] != b"PE\0\0":
+        raise ValueError("missing PE signature")
+    number_of_sections = struct.unpack_from("<H", image, pe + 6)[0]
+    size_of_optional = struct.unpack_from("<H", image, pe + 20)[0]
+    opt = pe + 24
+    magic = struct.unpack_from("<H", image, opt)[0]
+    if magic == 0x20B:
+        image_base = struct.unpack_from("<Q", image, opt + 24)[0]
+    else:
+        image_base = struct.unpack_from("<I", image, opt + 28)[0]
+    section_table = opt + size_of_optional
+    sections: list[dict[str, object]] = []
+    for index in range(number_of_sections):
+        offset = section_table + index * 40
+        if offset + 40 > len(image):
+            break
+        raw_name = image[offset:offset + 8]
+        name = raw_name.rstrip(b"\0").decode("latin-1", errors="replace")
+        virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from(
+            "<IIII", image, offset + 8
+        )
+        characteristics = struct.unpack_from("<I", image, offset + 36)[0]
+        sections.append(
+            {
+                "name": name,
+                "virtual_address": virtual_address,
+                "virtual_size": virtual_size,
+                "raw_pointer": raw_pointer,
+                "raw_size": raw_size,
+                "characteristics": characteristics,
+                "writable": bool(characteristics & 0x80000000),
+                "executable": bool(characteristics & 0x20000000),
+            }
+        )
+    return {
+        "image_base": image_base,
+        "pe_offset": pe,
+        "sections": sections,
+    }
+
+
+def section_for_rva(sections: list[dict[str, object]], rva: int) -> dict[str, object] | None:
+    for section in sections:
+        start = int(section["virtual_address"])
+        size = max(int(section["virtual_size"]), int(section["raw_size"]))
+        if start <= rva < start + size:
+            return section
+    return None
+
+
+def rva_to_file_offset(sections: list[dict[str, object]], rva: int) -> int | None:
+    for section in sections:
+        start = int(section["virtual_address"])
+        size = max(int(section["virtual_size"]), int(section["raw_size"]))
+        if start <= rva < start + size:
+            delta = rva - start
+            if delta < int(section["raw_size"]):
+                return int(section["raw_pointer"]) + delta
+            return None  # falls in uninitialized (.bss-style) tail
+    return None
+
+
+def _pe_base_relocations(image: bytes, parsed: dict[str, object]) -> list[tuple[int, int]]:
+    """Return (rva, type) for every base relocation in the on-disk image."""
+    pe = int(parsed["pe_offset"])
+    opt = pe + 24
+    magic = struct.unpack_from("<H", image, opt)[0]
+    # IMAGE_DIRECTORY_ENTRY_BASERELOC = 5
+    data_dir = opt + (0x70 if magic == 0x20B else 0x60)
+    reloc_rva, reloc_size = struct.unpack_from("<II", image, data_dir + 5 * 8)
+    if not reloc_rva or not reloc_size:
+        return []
+    sections = parsed["sections"]
+    assert isinstance(sections, list)
+    file_off = rva_to_file_offset(sections, reloc_rva)
+    if file_off is None:
+        return []
+    relocations: list[tuple[int, int]] = []
+    end = file_off + reloc_size
+    cursor = file_off
+    while cursor + 8 <= end and cursor + 8 <= len(image):
+        page_rva, block_size = struct.unpack_from("<II", image, cursor)
+        if block_size < 8:
+            break
+        entries = (block_size - 8) // 2
+        for i in range(entries):
+            raw = struct.unpack_from("<H", image, cursor + 8 + i * 2)[0]
+            reloc_type = raw >> 12
+            offset = raw & 0x0FFF
+            if reloc_type != 0:  # skip IMAGE_REL_BASED_ABSOLUTE padding
+                relocations.append((page_rva + offset, reloc_type))
+        cursor += block_size
+    return relocations
+
+
+def reconstruct_image_window(
+    image: bytes,
+    parsed: dict[str, object],
+    rva_start: int,
+    length: int,
+    actual_base: int,
+) -> tuple[bytearray, list[bool]]:
+    """Build the bytes the loader WOULD have mapped for [rva_start, rva_start+length).
+
+    Starts from the on-disk section raw bytes, then applies base relocations for
+    the actual in-memory load base (delta = actual_base - preferred_base).  The
+    returned ``mapped`` mask marks which bytes are backed by file data (False for
+    uninitialized / .bss tail bytes that legitimately read as zero in memory).
+    """
+    sections = parsed["sections"]
+    assert isinstance(sections, list)
+    expected = bytearray(length)
+    mapped = [False] * length
+    for i in range(length):
+        rva = rva_start + i
+        section = section_for_rva(sections, rva)
+        if section is None:
+            continue
+        delta = rva - int(section["virtual_address"])
+        if delta < int(section["raw_size"]):
+            file_index = int(section["raw_pointer"]) + delta
+            if file_index < len(image):
+                expected[i] = image[file_index]
+                mapped[i] = True
+    preferred_base = int(parsed["image_base"])
+    reloc_delta = (actual_base - preferred_base) & ((1 << 64) - 1)
+    if reloc_delta:
+        window_end = rva_start + length
+        for reloc_rva, reloc_type in _pe_base_relocations(image, parsed):
+            if reloc_type != 10:  # only IMAGE_REL_BASED_DIR64 on amd64
+                continue
+            if reloc_rva + 8 <= rva_start or reloc_rva >= window_end:
+                continue
+            file_off = rva_to_file_offset(sections, reloc_rva)
+            if file_off is None or file_off + 8 > len(image):
+                continue
+            original = struct.unpack_from("<Q", image, file_off)[0]
+            fixed = (original + reloc_delta) & ((1 << 64) - 1)
+            patch = struct.pack("<Q", fixed)
+            for byte_index in range(8):
+                target = reloc_rva + byte_index - rva_start
+                if 0 <= target < length:
+                    expected[target] = patch[byte_index]
+                    mapped[target] = True
+    return expected, mapped
+
+
+def diff_image_page(
+    captured: bytes,
+    disk_image: bytes,
+    module_base: int,
+    page_rva: int,
+) -> dict[str, object]:
+    """Compare an in-memory page against the on-disk PE, relocation-aware.
+
+    ``captured`` is the raw in-memory page (page-aligned), ``module_base`` the
+    actual in-memory load base, ``page_rva`` the page's RVA (page_base -
+    module_base).  Mismatches inside NON-writable sections after relocation
+    adjustment are real corruption; mismatches in writable sections (.data/.tls/
+    .bss) or unmapped tail bytes are reported separately as benign.
+    """
+    parsed = parse_pe_sections(disk_image)
+    sections = parsed["sections"]
+    assert isinstance(sections, list)
+    length = len(captured)
+    expected, mapped = reconstruct_image_window(
+        disk_image, parsed, page_rva, length, module_base
+    )
+    real: list[dict[str, object]] = []
+    benign: list[dict[str, object]] = []
+    for i in range(length):
+        if not mapped[i]:
+            if captured[i] != 0:
+                benign.append(
+                    {
+                        "rva": page_rva + i,
+                        "reason": "unmapped-tail",
+                        "memory": captured[i],
+                    }
+                )
+            continue
+        if captured[i] == expected[i]:
+            continue
+        rva = page_rva + i
+        section = section_for_rva(sections, rva)
+        record = {
+            "rva": rva,
+            "va": module_base + rva,
+            "file_offset": rva_to_file_offset(sections, rva),
+            "section": section["name"] if section else None,
+            "disk": expected[i],
+            "memory": captured[i],
+        }
+        if section is not None and not section["writable"]:
+            real.append(record)
+        else:
+            benign.append(record)
+    return {
+        "module_base": module_base,
+        "preferred_image_base": parsed["image_base"],
+        "page_rva": page_rva,
+        "page_va": module_base + page_rva,
+        "length": length,
+        "real_corruption_count": len(real),
+        "benign_difference_count": len(benign),
+        "real_corruption": real,
+        "benign_differences": benign,
+        "verdict": (
+            "CORRUPT: read-only bytes differ from disk (USB-read corruption proven)"
+            if real
+            else "clean: read-only sections match disk after relocation"
+        ),
+    }
+
+
+def diff_harvest(
+    harvest_dir: Path | str,
+    disk_image_path: Path | str,
+    region_name: str = "fault-code-page",
+) -> dict[str, object]:
+    """Offline driver: diff a captured fault page in a harvest against a PE file.
+
+    Reads the harvest manifest to find the region's captured .bin plus its
+    recorded module_base/page_rva, then runs :func:`diff_image_page`.
+    """
+    harvest = Path(harvest_dir)
+    manifest = json.loads((harvest / "manifest.json").read_text(encoding="utf-8"))
+    fault_pages = manifest.get("fault_pages", [])
+    entry = next((p for p in fault_pages if p.get("name") == region_name), None)
+    if entry is None:
+        raise ValueError(
+            f"harvest has no fault page {region_name!r}; "
+            f"available: {[p.get('name') for p in fault_pages]}"
+        )
+    if "module_base" not in entry or "page_rva" not in entry:
+        raise ValueError(
+            f"fault page {region_name!r} was not resolved to a user module "
+            "(no module_base/page_rva recorded)"
+        )
+    captured = (harvest / f"{region_name}.bin").read_bytes()
+    disk_image = Path(disk_image_path).read_bytes()
+    result = diff_image_page(
+        captured,
+        disk_image,
+        int(entry["module_base"]),
+        int(entry["page_rva"]),
+    )
+    result["region"] = region_name
+    result["harvest"] = str(harvest)
+    result["disk_image"] = str(disk_image_path)
+    result["module"] = entry.get("module")
+    return result
+
+
 def console_event(kind: str, value: object) -> None:
     if kind == "debug-output":
         print(str(value), end="", flush=True)
@@ -1464,3 +2290,5 @@ def console_event(kind: str, value: object) -> None:
         print(f"[KDNET] {value}", file=sys.stderr, flush=True)
     elif kind == "debug-input":
         print(f"[KD] {value}", file=sys.stderr, flush=True)
+    elif kind == "prcb-freeze-state":
+        print(f"[KD] freeze state: {value}", file=sys.stderr, flush=True)
