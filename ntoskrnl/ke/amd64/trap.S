@@ -100,8 +100,15 @@ FUNC InternalDispatchException
     mov [rcx + EXCEPTION_RECORD_ExceptionFlags], eax
     mov [rcx + EXCEPTION_RECORD_ExceptionRecord], rax
     mov rax, [rbp + KTRAP_FRAME_Rip]
+    /* Point ExceptionAddress at the INT3 opcode, but only for a real
+       BREAKPOINT_BREAK. The int 2Dh debug services also raise
+       STATUS_BREAKPOINT, and they pass their service number in P1 (r9) and
+       have already adjusted Rip themselves. This mirrors i386's
+       KiDebugHandler(): TrapFrame->Eip - (Parameter1 == BREAKPOINT_BREAK). */
     cmp dword ptr [rcx + EXCEPTION_RECORD_ExceptionCode], STATUS_BREAKPOINT
     jne ExceptionAddressReady
+    test r9, r9 /* BREAKPOINT_BREAK == 0 */
+    jnz ExceptionAddressReady
     dec rax
 ExceptionAddressReady:
     mov [rcx + EXCEPTION_RECORD_ExceptionAddress], rax
