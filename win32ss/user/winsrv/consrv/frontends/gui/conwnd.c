@@ -168,14 +168,25 @@ RegisterConWndClass(IN HINSTANCE hInstance)
     WndClassAtom = RegisterClassExW(&WndClass);
     if (WndClassAtom == 0)
     {
-        DPRINT1("Failed to register GUI console class\n");
-    }
-    else
-    {
-        NtUserConsoleControl(GuiConsoleWndClassAtom, &WndClassAtom, sizeof(ATOM));
+        DWORD dwError = GetLastError();
+
+        /*
+         * The class being already registered is not a failure: the class is
+         * present and usable, and whoever registered it has already handed
+         * its atom over to Win32k. Reporting this as an error would make the
+         * caller's console creation fail, which the client process in turn
+         * reports as STATUS_DLL_INIT_FAILED (0xC0000142) out of kernel32's
+         * DllMain.
+         */
+        if (dwError == ERROR_CLASS_ALREADY_EXISTS)
+            return TRUE;
+
+        DPRINT1("Failed to register GUI console class, error %lu\n", dwError);
+        return FALSE;
     }
 
-    return (WndClassAtom != 0);
+    NtUserConsoleControl(GuiConsoleWndClassAtom, &WndClassAtom, sizeof(ATOM));
+    return TRUE;
 }
 
 BOOLEAN
