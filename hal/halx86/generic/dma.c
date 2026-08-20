@@ -276,10 +276,25 @@ HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
     PHYSICAL_ADDRESS BoundryAddressMultiple;
     KIRQL OldIrql;
     ULONG MapRegisterCount;
+    ULONG PlaceHolderCount;
 
-    /* Check if enough map register slots are available. */
+    /*
+     * Check if enough map register slots are available.
+     *
+     * The loop below burns an extra slot as a placeholder whenever the new
+     * block does not continue the previous one, and (for non-EISA DMA) on
+     * every 64Kb break inside it.  Those slots used to be left out of this
+     * check, so a growth that exactly filled the table walked one entry past
+     * MapRegisterBase[MAX_MAP_REGISTERS] and cleared one bit past the end of
+     * the bitmap - a write into whatever nonpaged pool block follows them.
+     * Reserve room for the placeholders instead.
+     */
     MapRegisterCount = BYTES_TO_PAGES(SizeOfMapBuffers);
-    if (MapRegisterCount + AdapterObject->NumberOfMapRegisters > MAX_MAP_REGISTERS)
+    PlaceHolderCount = (AdapterObject->NumberOfMapRegisters != 0) ? 1 : 0;
+    if (!HalpEisaDma) PlaceHolderCount += MapRegisterCount >> 4;
+
+    if (MapRegisterCount + PlaceHolderCount +
+        AdapterObject->NumberOfMapRegisters > MAX_MAP_REGISTERS)
     {
         DPRINT("No more map register slots available! (Current: %d | Requested: %d | Limit: %d)\n",
                AdapterObject->NumberOfMapRegisters,
@@ -295,7 +310,27 @@ HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
     HighestAcceptableAddress = HalpGetAdapterMaximumPhysicalAddress(AdapterObject);
     LowestAcceptableAddress.HighPart = 0;
     LowestAcceptableAddress.LowPart = HighestAcceptableAddress.LowPart == 0xFFFFFFFF ? 0x1000000 : 0;
-    BoundryAddressMultiple.QuadPart = 0;
+
+    /*
+     * Keep each allocation within a single 64Kb region.  The loop below burns
+     * a map register as a placeholder whenever a run of pages crosses a 64Kb
+     * boundary, because the legacy DMA controller cannot cross one.  When that
+     * happens *inside* an allocation it permanently fragments the shared map
+     * register bitmap: with MAX_MAP_REGISTERS pages chopped every 64Kb, a
+     * contiguous run of the full 16 registers that HalGetAdapter hands out to
+     * a busmaster becomes unobtainable, and such a request then waits on the
+     * master adapter queue forever.  Asking for a non-straddling block yields
+     * an aligned region instead, so the placeholder is only ever needed
+     * between separate allocations.
+     */
+    if (SizeOfMapBuffers <= 0x10000)
+    {
+        BoundryAddressMultiple.QuadPart = 0x10000;
+    }
+    else
+    {
+        BoundryAddressMultiple.QuadPart = 0;
+    }
 
     VirtualAddress = MmAllocateContiguousMemorySpecifyCache(MapRegisterCount << PAGE_SHIFT,
                                                             LowestAcceptableAddress,
@@ -362,6 +397,17 @@ HalpGrowMapBuffers(IN PADAPTER_OBJECT AdapterObject,
                     CurrentEntry++;
                     AdapterObject->NumberOfMapRegisters++;
                 }
+            }
+
+            /*
+             * Belt and braces: whatever the placeholder arithmetic above
+             * worked out to, never touch an entry outside the table.
+             */
+            if ((ULONG)(CurrentEntry - AdapterObject->MapRegisterBase) >= MAX_MAP_REGISTERS)
+            {
+                DPRINT1("HalpGrowMapBuffers: map register table full, %lu page(s) dropped\n",
+                        MapRegisterCount);
+                break;
             }
 
             RtlClearBit(AdapterObject->MapRegisters,
@@ -743,6 +789,16 @@ HalGetAdapter(IN PDEVICE_DESCRIPTION DeviceDescription,
          */
         MapRegisters = BYTES_TO_PAGES(MaximumLength) + 1;
         if (MapRegisters > 16) MapRegisters = 16;
+
+        /* INSTRUMENTATION: report the map-register clamp for busmaster adapters */
+        DPRINT1("HALDMA-ADP: MaxLen=0x%lx Master=%u SG=%u Dma64=%u Iface=%u -> MapRegisters=%lu%s\n",
+                MaximumLength,
+                DeviceDescription->Master,
+                DeviceDescription->ScatterGather,
+                DeviceDescription->Dma64BitAddresses,
+                DeviceDescription->InterfaceType,
+                MapRegisters,
+                ((BYTES_TO_PAGES(MaximumLength) + 1) > 16) ? " (CLAMPED@16)" : "");
     }
 
     /*
@@ -1488,17 +1544,54 @@ HalpGrowMapBufferWorker(IN PVOID DeferredContext)
                                    WorkItem->NumberOfMapRegisters << PAGE_SHIFT);
     KeSetEvent(&HalpDmaLock, 0, 0);
 
-    if (Succeeded)
+    /*
+     * Flush the adapter queue no matter how the growth went: map registers
+     * freed by other adapters since this work item was queued may already
+     * satisfy the queue head, and this routine and IoFreeMapRegisters are
+     * the only places that ever re-examine the queue. The easiest way to
+     * flush is to call IoFreeMapRegisters to not free any registers. Note
+     * that we use the magic (PVOID)2 map register base to bypass the
+     * parameter checking.
+     */
+    OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
+    IoFreeMapRegisters(WorkItem->AdapterObject, (PVOID)2, 0);
+    KfLowerIrql(OldIrql);
+
+    if (!Succeeded)
     {
-        /*
-         * Flush the adapter queue now that new map registers are ready. The
-         * easiest way to do that is to call IoFreeMapRegisters to not free
-         * any registers. Note that we use the magic (PVOID)2 map register
-         * base to bypass the parameter checking.
-         */
-        OldIrql = KfRaiseIrql(DISPATCH_LEVEL);
-        IoFreeMapRegisters(WorkItem->AdapterObject, (PVOID)2, 0);
-        KfLowerIrql(OldIrql);
+        PADAPTER_OBJECT MasterAdapter = WorkItem->AdapterObject->MasterAdapter;
+        BOOLEAN QueueStuck;
+
+        KeAcquireSpinLock(&MasterAdapter->SpinLock, &OldIrql);
+        QueueStuck = !IsListEmpty(&MasterAdapter->AdapterQueue);
+        KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+        if (QueueStuck)
+        {
+            /*
+             * Growth failed with adapters still queued. Giving up here
+             * strands them forever: their execution routines only run from
+             * the queue walk above, so a request the current bitmap cannot
+             * satisfy would never be delivered to its driver and the IRP
+             * behind it would stay pending for good. Retry the growth
+             * instead, with a delay so a persistent failure does not
+             * busy-loop a worker thread on contiguous-memory allocation.
+             */
+            static LONG HalpGrowRetries = 0;
+            LONG Retries = InterlockedIncrement(&HalpGrowRetries);
+            LARGE_INTEGER Delay;
+
+            if (Retries == 1 || (Retries % 40) == 0)
+            {
+                DPRINT1("HalpGrowMapBufferWorker: growth failed with adapters still queued (%ld retries)\n",
+                        Retries);
+            }
+
+            Delay.QuadPart = -250 * 10000;    /* 250 ms */
+            KeDelayExecutionThread(KernelMode, FALSE, &Delay);
+            ExQueueWorkItem(&WorkItem->WorkQueueItem, DelayedWorkQueue);
+            return;
+        }
     }
 
     ExFreePool(WorkItem);
@@ -1636,10 +1729,20 @@ HalAllocateAdapterChannel(IN PADAPTER_OBJECT AdapterObject,
 
     AdapterObject->CurrentWcb = WaitContextBlock;
 
-    if ((AdapterObject->MapRegisterBase != NULL) &&
-        !((ULONG_PTR)AdapterObject->MapRegisterBase & MAP_BASE_SW_SG))
+    if (AdapterObject->MapRegisterBase != NULL)
     {
-        AdapterObject->MapRegisterBase->Counter = 0;
+        /*
+         * Software scatter/gather grants carry MAP_BASE_SW_SG in the low
+         * bits of the pointer, so the entry has to be reached through the
+         * masked pointer.  Skipping them let such a grant start with
+         * whatever the previous owner of that entry had left in Counter,
+         * and a left-over MAXULONG (the "whole buffer was bounced" marker)
+         * is then taken by IoMapTransfer as a map register *index*: it
+         * reads a physical address from far outside the table and programs
+         * the device with it.
+         */
+        ((PROS_MAP_REGISTER_ENTRY)((ULONG_PTR)AdapterObject->MapRegisterBase &
+                                   ~MAP_BASE_SW_SG))->Counter = 0;
     }
 
     Result = ExecutionRoutine(WaitContextBlock->DeviceObject,
@@ -1768,6 +1871,30 @@ IoFreeAdapterChannel(IN PADAPTER_OBJECT AdapterObject)
             AdapterObject->NumberOfMapRegisters = 0;
         }
 
+        /*
+         * Reset the progress counter, the way HalAllocateAdapterChannel and
+         * IoFreeMapRegisters do on the grants they hand out.  Leaving it
+         * alone here let a transfer dispatched off the channel queue start
+         * with whatever the previous owner of that entry had left behind, so
+         * its first IoMapTransfer round would index the map registers from
+         * that stale offset - outside the range it was actually given.
+         */
+        if (AdapterObject->MapRegisterBase != NULL)
+        {
+            /*
+             * Software scatter/gather grants carry MAP_BASE_SW_SG in the low
+             * bits of the pointer, so the entry has to be reached through the
+             * masked pointer.  Skipping them let such a grant start with
+             * whatever the previous owner of that entry had left in Counter,
+             * and a left-over MAXULONG (the "whole buffer was bounced" marker)
+             * is then taken by IoMapTransfer as a map register *index*: it
+             * reads a physical address from far outside the table and programs
+             * the device with it.
+             */
+            ((PROS_MAP_REGISTER_ENTRY)((ULONG_PTR)AdapterObject->MapRegisterBase &
+                                       ~MAP_BASE_SW_SG))->Counter = 0;
+        }
+
         /* Call the adapter control routine. */
         Result = ((PDRIVER_CONTROL)WaitContextBlock->DeviceRoutine)(WaitContextBlock->DeviceObject,
                                                                     WaitContextBlock->CurrentIrp,
@@ -1847,26 +1974,45 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
         ListEntry = RemoveHeadList(&MasterAdapter->AdapterQueue);
         AdapterObject = CONTAINING_RECORD(ListEntry, struct _ADAPTER_OBJECT, AdapterQueue);
 
-        Index = RtlFindClearBitsAndSet(MasterAdapter->MapRegisters,
-                                       AdapterObject->NumberOfMapRegisters,
-                                       0);
-        if (Index == MAXULONG)
+        if (AdapterObject->NumberOfMapRegisters == 0)
         {
-            InsertHeadList(&MasterAdapter->AdapterQueue, ListEntry);
-            break;
-        }
-
-        KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
-
-        AdapterObject->MapRegisterBase = MasterAdapter->MapRegisterBase + Index;
-        if (!AdapterObject->ScatterGather)
-        {
-            AdapterObject->MapRegisterBase =
-                (PROS_MAP_REGISTER_ENTRY)((ULONG_PTR)AdapterObject->MapRegisterBase | MAP_BASE_SW_SG);
+            /*
+             * Nothing to reserve.  RtlFindClearBitsAndSet() answers a request
+             * for zero bits with index 0 without setting anything, so going
+             * through the code below would hand this adapter a base pointing
+             * at map register 0 - which belongs to whichever transfer holds
+             * it right now - and then zero that transfer's progress counter,
+             * making its next IoMapTransfer round hand the device a bounce
+             * page that is already in use by someone else.
+             */
+            KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+            AdapterObject->MapRegisterBase = NULL;
         }
         else
         {
-            AdapterObject->MapRegisterBase->Counter = 0;
+            Index = RtlFindClearBitsAndSet(MasterAdapter->MapRegisters,
+                                           AdapterObject->NumberOfMapRegisters,
+                                           0);
+            if (Index == MAXULONG)
+            {
+                InsertHeadList(&MasterAdapter->AdapterQueue, ListEntry);
+                break;
+            }
+
+            KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+
+            AdapterObject->MapRegisterBase = MasterAdapter->MapRegisterBase + Index;
+
+            /* A fresh grant starts with no transfer progress on record, for
+             * software scatter/gather just as much as for the hardware kind
+             * (see HalAllocateAdapterChannel). */
+            MasterAdapter->MapRegisterBase[Index].Counter = 0;
+
+            if (!AdapterObject->ScatterGather)
+            {
+                AdapterObject->MapRegisterBase =
+                    (PROS_MAP_REGISTER_ENTRY)((ULONG_PTR)AdapterObject->MapRegisterBase | MAP_BASE_SW_SG);
+            }
         }
 
         Result = ((PDRIVER_CONTROL)AdapterObject->CurrentWcb->DeviceRoutine)(AdapterObject->CurrentWcb->DeviceObject,
@@ -1901,6 +2047,126 @@ IoFreeMapRegisters(IN PADAPTER_OBJECT AdapterObject,
     }
 
     KeReleaseSpinLock(&MasterAdapter->SpinLock, OldIrql);
+}
+
+/* --- INSTRUMENTATION: ASUS USB-read DMA corruption hunt (temporary) --- */
+static LONG HalpDbgHiReadEvents = 0;   /* device-reads bouncing a >4GB run */
+static LONG HalpDbgReadFlushes = 0;    /* per-run read flushes seen */
+static LONG HalpDbgOverrunEvents = 0;  /* map-register array overruns caught */
+/* --- end instrumentation --- */
+
+/**
+ * @name HalpMapTransferChunkLength
+ *
+ * Length of the run starting at CurrentVa that IoMapTransfer maps in one call.
+ *
+ * @remarks
+ *    IoMapTransfer walks a buffer in physically contiguous runs and decides
+ *    per run whether that run has to be bounced through the map registers.
+ *    IoFlushAdapterBuffers has to copy the bounced runs back and therefore has
+ *    to split the buffer exactly the same way, so both use this helper.
+ */
+static
+ULONG
+NTAPI
+HalpMapTransferChunkLength(IN PMDL Mdl,
+                           IN PVOID CurrentVa,
+                           IN ULONG Length)
+{
+    PPFN_NUMBER MdlPagesPtr;
+    PFN_NUMBER MdlPage1, MdlPage2;
+    ULONG TransferLength;
+
+    MdlPagesPtr = MmGetMdlPfnArray(Mdl);
+    MdlPagesPtr += ((ULONG_PTR)CurrentVa - (ULONG_PTR)Mdl->StartVa) >> PAGE_SHIFT;
+
+    TransferLength = PAGE_SIZE - BYTE_OFFSET(CurrentVa);
+
+    /*
+     * We can only transfer pages that are physically contiguous and that don't
+     * cross the 64Kb boundary (this limitation applies only for ISA
+     * controllers).
+     */
+    while (TransferLength < Length)
+    {
+        MdlPage1 = *MdlPagesPtr;
+        MdlPage2 = *(MdlPagesPtr + 1);
+        if (MdlPage1 + 1 != MdlPage2) break;
+        if (!HalpEisaDma && ((MdlPage1 ^ MdlPage2) & ~0xF)) break;
+        TransferLength += PAGE_SIZE;
+        MdlPagesPtr++;
+    }
+
+    if (TransferLength > Length) TransferLength = Length;
+
+    return TransferLength;
+}
+
+/**
+ * @name HalpRemainingMapRegisters
+ *
+ * Map registers still usable from MapRegister onwards.
+ *
+ * @remarks
+ *    A transfer may only use the registers it was granted by
+ *    HalAllocateAdapterChannel, and no code path may ever touch an entry
+ *    outside the master adapter's table.  Both limits are enforced here so
+ *    IoMapTransfer and IoFlushAdapterBuffers agree on them.
+ */
+static
+ULONG
+NTAPI
+HalpRemainingMapRegisters(IN PADAPTER_OBJECT AdapterObject,
+                          IN PROS_MAP_REGISTER_ENTRY RealMapRegisterBase,
+                          IN ULONG MapRegister)
+{
+    PADAPTER_OBJECT MasterAdapter = AdapterObject->MasterAdapter;
+    ULONG Limit = MAXULONG;
+    ULONG Offset;
+
+    /* Bound by the grant, when one is on record. */
+    if (AdapterObject->NumberOfMapRegisters != 0)
+    {
+        if (MapRegister >= AdapterObject->NumberOfMapRegisters) return 0;
+        Limit = AdapterObject->NumberOfMapRegisters - MapRegister;
+    }
+
+    /* Bound by the master adapter's table in any case. */
+    if ((MasterAdapter) && (MasterAdapter->MapRegisterBase))
+    {
+        Offset = (ULONG)(RealMapRegisterBase - MasterAdapter->MapRegisterBase);
+        if (Offset >= MAX_MAP_REGISTERS) return 0;
+        if (MapRegister >= (MAX_MAP_REGISTERS - Offset)) return 0;
+        if (Limit > (MAX_MAP_REGISTERS - Offset - MapRegister))
+        {
+            Limit = MAX_MAP_REGISTERS - Offset - MapRegister;
+        }
+    }
+
+    return Limit;
+}
+
+/**
+ * @name HalpMdlPhysicalAddress
+ *
+ * Physical address that CurrentVa maps to inside Mdl.
+ */
+static
+PHYSICAL_ADDRESS
+NTAPI
+HalpMdlPhysicalAddress(IN PMDL Mdl,
+                       IN PVOID CurrentVa)
+{
+    PPFN_NUMBER MdlPagesPtr;
+    PHYSICAL_ADDRESS PhysicalAddress;
+
+    MdlPagesPtr = MmGetMdlPfnArray(Mdl);
+    MdlPagesPtr += ((ULONG_PTR)CurrentVa - (ULONG_PTR)Mdl->StartVa) >> PAGE_SHIFT;
+
+    PhysicalAddress.QuadPart = (ULONGLONG)*MdlPagesPtr << PAGE_SHIFT;
+    PhysicalAddress.QuadPart += BYTE_OFFSET(CurrentVa);
+
+    return PhysicalAddress;
 }
 
 /**
@@ -2006,7 +2272,6 @@ IoFlushAdapterBuffers(IN PADAPTER_OBJECT AdapterObject,
     PROS_MAP_REGISTER_ENTRY RealMapRegisterBase;
     PHYSICAL_ADDRESS HighestAcceptableAddress;
     PHYSICAL_ADDRESS PhysicalAddress;
-    PPFN_NUMBER MdlPagesPtr;
 
     /* Sanity checks */
     ASSERT_IRQL_LESS_OR_EQUAL(DISPATCH_LEVEL);
@@ -2051,23 +2316,109 @@ IoFlushAdapterBuffers(IN PADAPTER_OBJECT AdapterObject,
                               CurrentVa,
                               Length,
                               FALSE);
+
+            /* INSTRUMENTATION: does the SW_SG (whole-buffer) path handle reads? */
+            {
+                static LONG DbgSgReads = 0;
+                LONG n = InterlockedIncrement(&DbgSgReads);
+                if (n <= 8 || (n % 512) == 0)
+                    DPRINT1("HALDMA-RDSG[%d]: SW_SG whole-buffer read VA=%p len=0x%lx\n",
+                            n, CurrentVa, Length);
+            }
         }
         else
         {
-            MdlPagesPtr = MmGetMdlPfnArray(Mdl);
-            MdlPagesPtr += ((ULONG_PTR)CurrentVa - (ULONG_PTR)Mdl->StartVa) >> PAGE_SHIFT;
+            ULONG_PTR ChunkVa = (ULONG_PTR)CurrentVa;
+            ULONG Remaining = Length;
+            ULONG MapRegister = 0;
+            /* INSTRUMENTATION tallies for this transfer */
+            ULONG DbgRuns = 0, DbgBounced = 0, DbgHi = 0;
+            ULONGLONG DbgMaxPA = 0;
 
-            PhysicalAddress.QuadPart = *MdlPagesPtr << PAGE_SHIFT;
-            PhysicalAddress.QuadPart += BYTE_OFFSET(CurrentVa);
-
+            /*
+             * IoMapTransfer decides for every physically contiguous run of the
+             * buffer, on its own, whether that run had to be bounced through
+             * the map registers, so the copy back has to be split the same way.
+             *
+             * Deciding once from the physical address of the *first* page --
+             * as this used to do -- silently loses every bounced run of a
+             * buffer whose first page happens to sit below the device's
+             * addressing limit: the device's data stays in the map buffers and
+             * the caller's pages keep whatever they held before, which is
+             * zeroes for a fresh page and the previous owner's bytes for a
+             * recycled one.  A 32-bit busmaster on a machine with memory above
+             * 4 GB hits that on any buffer that straddles the limit.
+             */
             HighestAcceptableAddress = HalpGetAdapterMaximumPhysicalAddress(AdapterObject);
-            if ((PhysicalAddress.QuadPart + Length) > HighestAcceptableAddress.QuadPart)
+
+            while (Remaining > 0)
             {
-                HalpCopyBufferMap(Mdl,
-                                  RealMapRegisterBase,
-                                  CurrentVa,
-                                  Length,
-                                  FALSE);
+                ULONG ChunkLength;
+                ULONG MapRegistersLeft;
+
+                ChunkLength = HalpMapTransferChunkLength(Mdl,
+                                                         (PVOID)ChunkVa,
+                                                         Remaining);
+
+                /*
+                 * Split exactly the way IoMapTransfer did, and never let
+                 * HalpCopyBufferMap walk out of the master table: it
+                 * dereferences MapRegisterBase[i].VirtualAddress for every
+                 * page it copies, so an index past the end would write
+                 * through a pointer read out of unrelated nonpaged pool.
+                 */
+                MapRegistersLeft = HalpRemainingMapRegisters(AdapterObject,
+                                                             RealMapRegisterBase,
+                                                             MapRegister);
+                if (MapRegistersLeft == 0)
+                {
+                    DPRINT1("IoFlushAdapterBuffers: ran out of map registers after %lu register(s), "
+                            "0x%lx byte(s) not copied back\n", MapRegister, Remaining);
+                    ASSERT(FALSE);
+                    break;
+                }
+
+                if (BYTES_TO_PAGES(BYTE_OFFSET(ChunkVa) + ChunkLength) > MapRegistersLeft)
+                {
+                    ChunkLength = (MapRegistersLeft << PAGE_SHIFT) - BYTE_OFFSET(ChunkVa);
+                }
+
+                PhysicalAddress = HalpMdlPhysicalAddress(Mdl, (PVOID)ChunkVa);
+
+                DbgRuns++;
+                if ((PhysicalAddress.QuadPart + ChunkLength) >
+                    HighestAcceptableAddress.QuadPart)
+                {
+                    DbgBounced++;
+                    if (PhysicalAddress.QuadPart >= 0x100000000ULL)
+                    {
+                        DbgHi++;
+                        if (PhysicalAddress.QuadPart > DbgMaxPA) DbgMaxPA = PhysicalAddress.QuadPart;
+                    }
+
+                    HalpCopyBufferMap(Mdl,
+                                      RealMapRegisterBase + MapRegister,
+                                      (PVOID)ChunkVa,
+                                      ChunkLength,
+                                      FALSE);
+                }
+
+                /* Mirrors the map register accounting IoMapTransfer keeps in
+                 * RealMapRegisterBase->Counter. */
+                MapRegister += BYTES_TO_PAGES(BYTE_OFFSET(ChunkVa) + ChunkLength);
+                ChunkVa += ChunkLength;
+                Remaining -= ChunkLength;
+            }
+
+            /* INSTRUMENTATION: high-PA bounces, rate-limited */
+            InterlockedIncrement(&HalpDbgReadFlushes);
+            if (DbgHi > 0)
+            {
+                LONG nh = InterlockedIncrement(&HalpDbgHiReadEvents);
+                if (nh <= 16 || (nh % 256) == 0)
+                    DPRINT1("HALDMA-RDHI[%d]: VA=%p len=0x%lx runs=%lu bounced=%lu hi(>4G)=%lu maxPA=0x%I64x limit=0x%I64x\n",
+                            nh, CurrentVa, Length, DbgRuns, DbgBounced, DbgHi,
+                            DbgMaxPA, HighestAcceptableAddress.QuadPart);
             }
         }
     }
@@ -2185,22 +2536,8 @@ IoMapTransfer(IN PADAPTER_OBJECT AdapterObject,
      */
     RealMapRegisterBase = (PROS_MAP_REGISTER_ENTRY)((ULONG_PTR)MapRegisterBase & ~MAP_BASE_SW_SG);
 
-    /*
-     * Try to calculate the size of the transfer. We can only transfer
-     * pages that are physically contiguous and that don't cross the
-     * 64Kb boundary (this limitation applies only for ISA controllers).
-     */
-    while (TransferLength < *Length)
-    {
-        MdlPage1 = *MdlPagesPtr;
-        MdlPage2 = *(MdlPagesPtr + 1);
-        if (MdlPage1 + 1 != MdlPage2) break;
-        if (!HalpEisaDma && ((MdlPage1 ^ MdlPage2) & ~0xF)) break;
-        TransferLength += PAGE_SIZE;
-        MdlPagesPtr++;
-    }
-
-    if (TransferLength > *Length) TransferLength = *Length;
+    /* Size of the run we can map in one go (see the helper). */
+    TransferLength = HalpMapTransferChunkLength(Mdl, CurrentVa, *Length);
 
     /*
      * If we're about to simulate software S/G and not all the pages are
@@ -2223,8 +2560,48 @@ IoMapTransfer(IN PADAPTER_OBJECT AdapterObject,
          * counters. These are used by IoFlushAdapterBuffers to track
          * the transfer progress.
          */
+        ULONG MapRegistersLeft;
+
         UseMapRegisters = FALSE;
         Counter = RealMapRegisterBase->Counter;
+
+        /*
+         * This run may only be described by map registers this transfer owns.
+         * Without this clamp a caller that asks to map more than it reserved
+         * makes the code below index RealMapRegisterBase[] past the end of
+         * its grant - and, for a grant near the end of the master table, past
+         * the end of the table itself, so HalpCopyBufferMap would then write
+         * through a VirtualAddress read out of unrelated nonpaged pool.
+         *
+         * IoMapTransfer is allowed to map less than it was asked for and
+         * reports what it mapped in *Length, so simply shorten the run and
+         * let the caller come back for the rest.
+         *
+         * Software S/G keeps a MAXULONG marker in Counter instead of a
+         * register index and always uses register 0, so it is left alone.
+         */
+        if (!((ULONG_PTR)MapRegisterBase & MAP_BASE_SW_SG))
+        {
+            MapRegistersLeft = HalpRemainingMapRegisters(AdapterObject,
+                                                         RealMapRegisterBase,
+                                                         Counter);
+            if (MapRegistersLeft == 0)
+            {
+                DPRINT1("IoMapTransfer: no map register left (Counter %lu, granted %lu) - "
+                        "the caller asked to map more than it reserved\n",
+                        Counter, AdapterObject->NumberOfMapRegisters);
+                ASSERT(FALSE);
+                *Length = 0;
+                PhysicalAddress.QuadPart = 0;
+                return PhysicalAddress;
+            }
+
+            if (BYTES_TO_PAGES(ByteOffset + TransferLength) > MapRegistersLeft)
+            {
+                TransferLength = (MapRegistersLeft << PAGE_SHIFT) - ByteOffset;
+            }
+        }
+
         RealMapRegisterBase->Counter += BYTES_TO_PAGES(ByteOffset + TransferLength);
 
         /*
@@ -2236,13 +2613,45 @@ IoMapTransfer(IN PADAPTER_OBJECT AdapterObject,
         if ((PhysicalAddress.QuadPart + TransferLength) > HighestAcceptableAddress.QuadPart)
         {
             UseMapRegisters = TRUE;
-            PhysicalAddress = RealMapRegisterBase[Counter].PhysicalAddress;
-            PhysicalAddress.QuadPart += ByteOffset;
+
+            /*
+             * The clamp above guarantees this entry, and every entry
+             * HalpCopyBufferMap walks from it, is inside both the grant and
+             * the master table.  An uninitialised entry would mean the
+             * bitmap handed out a slot that was never backed by a buffer.
+             */
+            if (!((ULONG_PTR)MapRegisterBase & MAP_BASE_SW_SG) &&
+                (RealMapRegisterBase[Counter].VirtualAddress == NULL))
+            {
+                InterlockedIncrement(&HalpDbgOverrunEvents);
+                DPRINT1("HALDMA-OVR(map): Counter=%lu grant=%lu Base=%p has no buffer  <== unbacked map register\n",
+                        Counter, AdapterObject->NumberOfMapRegisters, RealMapRegisterBase);
+                ASSERT(FALSE);
+                *Length = 0;
+                PhysicalAddress.QuadPart = 0;
+                return PhysicalAddress;
+            }
+
+            /*
+             * Software scatter/gather always bounces through the first
+             * register of the grant: that is the one HalpCopyBufferMap below
+             * is handed (RealMapRegisterBase + Counter, with Counter zeroed
+             * here), and the one the non-contiguous case above uses.  Select
+             * it *before* the device address is taken, so the address handed
+             * to the device names the buffer the data is actually copied into.
+             * Taking it from RealMapRegisterBase[Counter] first, while Counter
+             * still holds the accumulated page offset, points the device at a
+             * different register - or, if Counter carried a stale MAXULONG,
+             * at memory outside the map register table altogether.
+             */
             if ((ULONG_PTR)MapRegisterBase & MAP_BASE_SW_SG)
             {
                 RealMapRegisterBase->Counter = MAXULONG;
                 Counter = 0;
             }
+
+            PhysicalAddress = RealMapRegisterBase[Counter].PhysicalAddress;
+            PhysicalAddress.QuadPart += ByteOffset;
         }
     }
 
