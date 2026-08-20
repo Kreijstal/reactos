@@ -17,6 +17,7 @@ from .client import (
     KdSessionChanged,
     KdTimeout,
     console_event,
+    diff_harvest,
 )
 from .protocol import ProtocolError
 
@@ -118,15 +119,25 @@ def _continue(
                 command = line.strip()
                 words = command.split()
                 if len(words) == 2 and words[0] == "stall-capture":
-                    _stall_capture(
-                        client,
-                        words[1],
-                        harvest_root,
-                        stack_size,
-                        break_timeout,
-                        capture_timeout,
-                        resume_timeout,
-                    )
+                    # A FIFO command that times out must not take the listener
+                    # down with it -- same per-command containment as repl().
+                    # KdSessionChanged still propagates for the reconnect loop.
+                    try:
+                        _stall_capture(
+                            client,
+                            words[1],
+                            harvest_root,
+                            stack_size,
+                            break_timeout,
+                            capture_timeout,
+                            resume_timeout,
+                        )
+                    except KdSessionChanged:
+                        raise
+                    except (KdRequestError, KdTimeout, ProtocolError,
+                            RuntimeError, ValueError) as error:
+                        print(f"roskd: stall-capture failed: {error}",
+                              file=sys.stderr)
                     continue
                 if 3 <= len(words) <= 4 and words[0] == "peek":
                     try:
@@ -136,19 +147,32 @@ def _continue(
                         print(f"roskd: {error}", file=sys.stderr)
                         continue
                     destination = Path(words[3]) if len(words) == 4 else None
-                    _bounded_peek(
-                        client,
-                        address,
-                        size,
-                        destination,
-                        break_timeout,
-                        capture_timeout,
-                        resume_timeout,
-                    )
+                    try:
+                        _bounded_peek(
+                            client,
+                            address,
+                            size,
+                            destination,
+                            break_timeout,
+                            capture_timeout,
+                            resume_timeout,
+                        )
+                    except KdSessionChanged:
+                        raise
+                    except (KdRequestError, KdTimeout, ProtocolError,
+                            RuntimeError, ValueError) as error:
+                        print(f"roskd: peek failed: {error}", file=sys.stderr)
                     continue
                 if command in ("break", ""):
                     print("[KD] break-in requested via stdin", file=sys.stderr)
-                    client.break_in()
+                    try:
+                        client.break_in()
+                    except KdSessionChanged:
+                        raise
+                    except (KdRequestError, KdTimeout, ProtocolError) as error:
+                        print(f"roskd: break-in failed: {error}",
+                              file=sys.stderr)
+                        continue
                     return
                 print(
                     f"[KD] target running; ignored {command!r} "
@@ -655,11 +679,41 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stack-bytes", type=_integer, default=0x4000,
         help="stack bytes saved by each harvest (default: 0x4000)",
     )
+    parser.add_argument(
+        "--diff-harvest", type=Path, default=None,
+        help="OFFLINE: diff a captured fault page in this harvest dir against an "
+             "on-disk PE (with --diff-module); does not touch the network",
+    )
+    parser.add_argument(
+        "--diff-module", type=Path, default=None,
+        help="on-disk PE image (e.g. build .../setup.exe) to diff against",
+    )
+    parser.add_argument(
+        "--diff-region", default="fault-code-page",
+        help="captured fault page region name to diff (default: fault-code-page)",
+    )
     return parser.parse_args(argv)
+
+
+def _run_diff(args: argparse.Namespace) -> int:
+    """Offline fault-page vs on-disk-image diff. Never opens the KDNET socket."""
+    if args.diff_module is None:
+        print("roskd: --diff-harvest requires --diff-module", file=sys.stderr)
+        return 2
+    try:
+        result = diff_harvest(args.diff_harvest, args.diff_module, args.diff_region)
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+        print(f"roskd: diff failed: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2))
+    print(f"\n{result['verdict']}", file=sys.stderr)
+    return 1 if result["real_corruption_count"] else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.diff_harvest is not None:
+        return _run_diff(args)
     if (
         not 1 <= args.port <= 65535
         or args.timeout <= 0

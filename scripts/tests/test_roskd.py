@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from unittest import mock
 from pathlib import Path
 
@@ -20,10 +21,12 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 
+from roskd import client as client_module  # noqa: E402
 from roskd.client import (  # noqa: E402
     DBGKD_EXCEPTION_STATE_CHANGE,
     DBGKD_GET_STRING_API,
     DBGKD_LOAD_SYMBOLS_STATE_CHANGE,
+    KdDebuggerDataBlock,
     KdModule,
     KdNetClient,
     KdRequestError,
@@ -172,41 +175,109 @@ class InnerKdTests(unittest.TestCase):
 
 
 class StructureTests(unittest.TestCase):
-    def test_manual_break_resume_advances_rewound_amd64_rip(self) -> None:
+    @staticmethod
+    def _breakpoint_stop_client(
+        program_counter: int,
+        exception_address: int,
+        opcode: bytes = b"\xcc",
+    ) -> tuple[KdNetClient, list, list]:
         client = object.__new__(KdNetClient)
-        client._manual_break_stop = True
+        client._manual_break_stop = False
+        client._planted_breakpoints = {}
+        client.stopped = True
         client.current_state = KdStateChange(
             state=DBGKD_EXCEPTION_STATE_CHANGE,
             cpu_level=6,
             cpu=0,
             cpu_count=4,
             thread=0x1234,
-            program_counter=0xFFFFF80000102030,
+            program_counter=program_counter,
             exception_code=0x80000003,
-            exception_address=0xFFFFF80000102031,
+            exception_address=exception_address,
         )
         client.version = KdVersion(12, 3790, 6, 2, 7, 0x8664, 0, 0, 0)
         context = bytearray(0x4D0)
-        struct.pack_into("<Q", context, 0xF8, client.current_state.program_counter)
-        written = []
-        events = []
+        struct.pack_into("<Q", context, 0xF8, program_counter)
+        written: list = []
+        events: list = []
+        client.read_virtual = lambda address, size: opcode[:size]
         client.get_context = lambda: bytes(context)
         client.set_context = written.append
         client._emit = lambda kind, value: events.append((kind, value))
+        return client, written, events
+
+    def test_break_resume_steps_over_int3_when_pc_equals_exception_address(
+        self,
+    ) -> None:
+        """The Windows-accurate kernel reports ExceptionAddress == PC.
+
+        ntoskrnl/ke/amd64/trap.S points ExceptionAddress at the int3 opcode for
+        BREAKPOINT_BREAK, matching i386 and the ntdll:exception int3_handler, so
+        the resume fix-up may not key off ExceptionAddress == PC + 1.
+        """
+        pc = 0xFFFFF80000592AA2
+        client, written, events = self._breakpoint_stop_client(pc, pc)
+
+        client._prepare_manual_break_resume()
+
+        self.assertEqual(len(written), 1)
+        self.assertEqual(struct.unpack_from("<Q", written[0], 0xF8)[0], pc + 1)
+        self.assertEqual(events[0][0], "resume-fixup")
+
+    def test_manual_break_resume_advances_rewound_amd64_rip(self) -> None:
+        pc = 0xFFFFF80000102030
+        client, written, events = self._breakpoint_stop_client(pc, pc + 1)
+        client._manual_break_stop = True
 
         client._prepare_manual_break_resume()
 
         self.assertFalse(client._manual_break_stop)
         self.assertEqual(len(written), 1)
-        self.assertEqual(
-            struct.unpack_from("<Q", written[0], 0xF8)[0],
-            client.current_state.exception_address,
-        )
+        self.assertEqual(struct.unpack_from("<Q", written[0], 0xF8)[0], pc + 1)
         self.assertEqual(events[0][0], "resume-fixup")
+
+    def test_break_resume_uses_legacy_signature_when_opcode_unreadable(
+        self,
+    ) -> None:
+        pc = 0xFFFFF80000102030
+        client, written, _ = self._breakpoint_stop_client(pc, pc + 1, opcode=b"")
+
+        client._prepare_manual_break_resume()
+
+        self.assertEqual(len(written), 1)
+        self.assertEqual(struct.unpack_from("<Q", written[0], 0xF8)[0], pc + 1)
+
+    def test_break_resume_leaves_a_planted_breakpoint_alone(self) -> None:
+        pc = 0xFFFFF80000102030
+        client, written, _ = self._breakpoint_stop_client(pc, pc)
+        client._planted_breakpoints = {1: pc}
+
+        client._prepare_manual_break_resume()
+
+        self.assertEqual(written, [])
+
+    def test_break_resume_leaves_a_software_raised_status_alone(self) -> None:
+        """A STATUS_BREAKPOINT whose PC is not on a 0xCC never executed one."""
+        pc = 0xFFFFF80000102030
+        client, written, _ = self._breakpoint_stop_client(pc, pc + 1, opcode=b"\x90")
+
+        client._prepare_manual_break_resume()
+
+        self.assertEqual(written, [])
+
+    def test_break_resume_does_nothing_while_the_target_runs(self) -> None:
+        pc = 0xFFFFF80000102030
+        client, written, _ = self._breakpoint_stop_client(pc, pc)
+        client.stopped = False
+
+        client._prepare_manual_break_resume()
+
+        self.assertEqual(written, [])
 
     def test_continue_ack_loss_does_not_leave_client_marked_stopped(self) -> None:
         client = object.__new__(KdNetClient)
         client._manual_break_stop = False
+        client._planted_breakpoints = {}
         client.current_state = None
         client.stopped = True
         sent = []
@@ -251,21 +322,22 @@ class StructureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.write_io(0xCFC, 1, 0x100)
 
-    def test_regular_breakpoint_resume_does_not_change_context(self) -> None:
+    def test_module_load_resume_does_not_change_context(self) -> None:
         client = object.__new__(KdNetClient)
         client._manual_break_stop = True
+        client._planted_breakpoints = {}
+        client.stopped = True
         client.current_state = KdStateChange(
-            state=DBGKD_EXCEPTION_STATE_CHANGE,
+            state=DBGKD_LOAD_SYMBOLS_STATE_CHANGE,
             cpu_level=6,
             cpu=0,
             cpu_count=4,
             thread=0x1234,
             program_counter=0xFFFFF80000102030,
-            exception_code=0x80000003,
-            exception_address=0xFFFFF80000102030,
         )
         client.version = KdVersion(12, 3790, 6, 2, 7, 0x8664, 0, 0, 0)
-        client.get_context = lambda: self.fail("regular breakpoint context read")
+        client.read_virtual = lambda address, size: self.fail("module load probe")
+        client.get_context = lambda: self.fail("module load context read")
 
         client._prepare_manual_break_resume()
 
@@ -311,6 +383,7 @@ class StructureTests(unittest.TestCase):
         client.version = object()
         client.stopped = True
         client._manual_break_stop = True
+        client._planted_breakpoints = {1: 0xFFFFF80000102030}
         client._request_in_flight = True
         client.last_harvest_complete = True
         client.crypto = type(
@@ -449,6 +522,38 @@ class StructureTests(unittest.TestCase):
         self.assertEqual(state.exception_code, 0x80000003)
         self.assertEqual(state.exception_address, state.program_counter)
 
+    def test_exception_state_carries_the_amd64_instruction_stream(self) -> None:
+        """A full AMD64 state change reports the bytes at ProgramCounter.
+
+        Layout of a real 244-byte packet: the fixed-size exception union ends at
+        0xC0, AMD64_DBGKD_CONTROL_REPORT puts InstructionCount at 0xD4 and
+        InstructionStream at 0xD8.
+        """
+        payload = bytearray(244)
+        struct.pack_into("<IHHI", payload, 0, DBGKD_EXCEPTION_STATE_CHANGE, 6, 0, 4)
+        struct.pack_into("<QQ", payload, 16, 0x1234, 0xFFFFF80000592AA2)
+        struct.pack_into("<I", payload, 32, 0x80000003)
+        struct.pack_into("<Q", payload, 48, 0xFFFFF80000592AA2)
+        struct.pack_into("<H", payload, 0xD4, 16)
+        payload[0xD8:0xD8 + 16] = bytes.fromhex("ccc34c89c0cd2dccc389c84889d14489")
+        state = parse_state_change(bytes(payload))
+        self.assertEqual(
+            state.amd64_instruction_stream, "ccc34c89c0cd2dccc389c84889d14489"
+        )
+
+    def test_break_resume_prefers_the_reported_instruction_stream(self) -> None:
+        pc = 0xFFFFF80000592AA2
+        client, written, _ = self._breakpoint_stop_client(pc, pc)
+        client.current_state = replace(
+            client.current_state, amd64_instruction_stream="ccc3"
+        )
+        client.read_virtual = lambda address, size: self.fail("needless memory read")
+
+        client._prepare_manual_break_resume()
+
+        self.assertEqual(len(written), 1)
+        self.assertEqual(struct.unpack_from("<Q", written[0], 0xF8)[0], pc + 1)
+
     def test_module_state(self) -> None:
         path = b"acpi.sys"
         payload = bytearray(65 + len(path))
@@ -539,6 +644,417 @@ class HarvestTests(unittest.TestCase):
             if error["name"] == "stack-from-rsp"
         )
         self.assertEqual(stack_error["captured_size"], 0x300)
+
+
+
+# Real harvests captured from the ASUS target.  Used read-only, as replay
+# fixtures for the KDBG field offsets; absent on a fresh checkout, where the
+# synthetic fixtures below still cover every code path.
+HARVEST_CORPUS = Path("/tmp/asus-roskd-harvest-current")
+
+
+def _captured_kdbg_blocks() -> list[tuple[Path, bytes, dict]]:
+    if not HARVEST_CORPUS.is_dir():
+        return []
+    captured = []
+    for directory in sorted(HARVEST_CORPUS.iterdir()):
+        block = directory / "debugger-data-00-KDBG.bin"
+        manifest = directory / "manifest.json"
+        if not block.is_file() or not manifest.is_file():
+            continue
+        try:
+            captured.append(
+                (
+                    directory,
+                    block.read_bytes(),
+                    json.loads(manifest.read_text(encoding="utf-8")),
+                )
+            )
+        except (OSError, ValueError):
+            continue
+    return captured
+
+
+CAPTURED_KDBG = _captured_kdbg_blocks()
+
+
+class PrcbCaptureTests(unittest.TestCase):
+    """Per-CPU freeze state read through KDBG's KiProcessorBlock."""
+
+    ARRAY = 0xFFFFF80000680000
+    PRCBS = (
+        0xFFFFF78000001000,
+        0xFFFFF78000005000,
+        0xFFFFF78000009000,
+        0xFFFFF7800000D000,
+    )
+
+    @classmethod
+    def _kdbg(
+        cls,
+        *,
+        array: int | None = None,
+        size_prcb: int = client_module.PRCB_SIZE,
+        offset_number: int = client_module.PRCB_NUMBER,
+        offset_thread: int = client_module.PRCB_CURRENT_THREAD,
+        length: int = 0x360,
+    ) -> KdDebuggerDataBlock:
+        data = bytearray(length)
+        if length >= client_module.KDBG_KI_PROCESSOR_BLOCK + 8:
+            struct.pack_into(
+                "<Q",
+                data,
+                client_module.KDBG_KI_PROCESSOR_BLOCK,
+                cls.ARRAY if array is None else array,
+            )
+        if length >= client_module.KDBG_PRCB_METRICS_MINIMUM:
+            struct.pack_into("<H", data, client_module.KDBG_SIZE_PRCB, size_prcb)
+            struct.pack_into(
+                "<H",
+                data,
+                client_module.KDBG_OFFSET_PRCB_CURRENT_THREAD,
+                offset_thread,
+            )
+            struct.pack_into(
+                "<H", data, client_module.KDBG_OFFSET_PRCB_NUMBER, offset_number
+            )
+        return KdDebuggerDataBlock(
+            address=0xFFFFF80000690000,
+            owner_tag="KDBG",
+            size=len(data),
+            data=bytes(data),
+        )
+
+    @classmethod
+    def _client(
+        cls,
+        *,
+        pointers: tuple[int, ...] | None = None,
+        frozen: tuple[int, ...] = (
+            client_module.IPI_FROZEN_STATE_OWNER
+            | client_module.IPI_FROZEN_FLAG_ACTIVE,
+            client_module.IPI_FROZEN_STATE_FROZEN,
+            client_module.IPI_FROZEN_STATE_FROZEN,
+            client_module.IPI_FROZEN_STATE_TARGET_FREEZE,
+        ),
+        numbers: tuple[int, ...] | None = None,
+        unreadable: frozenset[int] = frozenset(),
+        short_array: bool = False,
+    ) -> KdNetClient:
+        pointers = cls.PRCBS if pointers is None else pointers
+        numbers = tuple(range(len(pointers))) if numbers is None else numbers
+        array_blob = struct.pack(f"<{len(pointers)}Q", *pointers)
+        if short_array:
+            array_blob = array_blob[:8]
+
+        client = object.__new__(KdNetClient)
+        client.version = KdVersion(12, 3790, 6, 2, 7, 0x8664, 0x1000, 0x4000, 0x5000)
+        client.current_state = KdStateChange(
+            state=DBGKD_EXCEPTION_STATE_CHANGE,
+            cpu_level=6,
+            cpu=0,
+            cpu_count=len(pointers),
+            thread=0x3000,
+            program_counter=0x1100,
+        )
+
+        def read_virtual(address: int, size: int) -> bytes:
+            if address in unreadable:
+                raise KdRequestError(0x3130, 0xC0000001)
+            if address == cls.ARRAY:
+                return array_blob[:size]
+            for index, prcb in enumerate(pointers):
+                if address == prcb:
+                    head = bytearray(client_module.PRCB_HEAD_SIZE)
+                    struct.pack_into(
+                        "<H", head, client_module.PRCB_NUMBER, numbers[index]
+                    )
+                    struct.pack_into(
+                        "<Q",
+                        head,
+                        client_module.PRCB_CURRENT_THREAD,
+                        0xFFFFFA8000000000 + index,
+                    )
+                    return bytes(head[:size])
+                if address == prcb + client_module.PRCB_TARGET_SET:
+                    blob = bytearray(client_module.PRCB_IPI_SLICE_SIZE)
+                    struct.pack_into("<Q", blob, 0, 0xF)
+                    struct.pack_into(
+                        "<I",
+                        blob,
+                        client_module.PRCB_IPI_FROZEN
+                        - client_module.PRCB_TARGET_SET,
+                        frozen[index],
+                    )
+                    return bytes(blob[:size])
+            return bytes(size)
+
+        client.read_virtual = read_virtual
+        return client
+
+    def test_freeze_state_is_decoded_per_processor(self) -> None:
+        result = self._client().get_processor_control_blocks([self._kdbg()])
+
+        self.assertEqual(result["processor_block_array"], self.ARRAY)
+        self.assertEqual(result["layout_warnings"], [])
+        self.assertEqual(result["freeze_owner_processor"], 0)
+        self.assertEqual(result["freeze_owner_prcb"], self.PRCBS[0])
+        states = [entry["state"] for entry in result["processors"]]
+        self.assertEqual(states, ["freeze-owner", "frozen", "frozen", "target-freeze"])
+        # The owner is the one that entered the debugger; cpu3 only ever had a
+        # freeze *requested*, which is the distinction the capture exists for.
+        self.assertTrue(result["processors"][0]["active"])
+        self.assertTrue(result["processors"][1]["is_frozen"])
+        self.assertFalse(result["processors"][3]["is_frozen"])
+        self.assertTrue(result["processors"][3]["freeze_requested"])
+        self.assertEqual(
+            result["processors"][2]["current_thread"], 0xFFFFFA8000000002
+        )
+        self.assertEqual([entry["number"] for entry in result["processors"]],
+                         [0, 1, 2, 3])
+        self.assertNotIn("error", result)
+
+    def test_a_bogus_prcb_pointer_is_reported_not_dereferenced(self) -> None:
+        reads: list[int] = []
+        client = self._client(
+            pointers=(self.PRCBS[0], 0, 0x1234, self.PRCBS[3] + 1)
+        )
+        inner = client.read_virtual
+
+        def tracking(address: int, size: int) -> bytes:
+            reads.append(address)
+            return inner(address, size)
+
+        client.read_virtual = tracking
+
+        result = client.get_processor_control_blocks([self._kdbg()])
+
+        self.assertEqual(result["processors"][0]["state"], "freeze-owner")
+        self.assertIn("NULL", result["processors"][1]["error"])
+        self.assertIn("implausible", result["processors"][2]["error"])
+        self.assertIn("implausible", result["processors"][3]["error"])
+        # A user-mode-looking or misaligned pointer must never be read.
+        self.assertNotIn(0x1234, reads)
+        self.assertNotIn(self.PRCBS[3] + 1, reads)
+        # cpu0 was still readable, so the owner is still recoverable.
+        self.assertEqual(result["freeze_owner_processor"], 0)
+
+    def test_an_unreadable_prcb_does_not_stop_the_walk(self) -> None:
+        client = self._client(unreadable=frozenset({self.PRCBS[1]}))
+
+        result = client.get_processor_control_blocks([self._kdbg()])
+
+        self.assertEqual(len(result["processors"]), 4)
+        self.assertIn("0xc0000001", result["processors"][1]["error"])
+        self.assertEqual(result["processors"][2]["state"], "frozen")
+        self.assertEqual(result["freeze_owner_processor"], 0)
+
+    def test_an_unreadable_freeze_word_does_not_stop_the_walk(self) -> None:
+        client = self._client(
+            unreadable=frozenset(
+                {self.PRCBS[2] + client_module.PRCB_TARGET_SET}
+            )
+        )
+
+        result = client.get_processor_control_blocks([self._kdbg()])
+
+        self.assertIn("0xc0000001", result["processors"][2]["error"])
+        self.assertNotIn("state", result["processors"][2])
+        self.assertEqual(result["processors"][3]["state"], "target-freeze")
+
+    def test_a_short_processor_block_read_is_reported(self) -> None:
+        result = self._client(short_array=True).get_processor_control_blocks(
+            [self._kdbg()]
+        )
+
+        self.assertIn("short KiProcessorBlock read", result["error"])
+        self.assertEqual(len(result["processors"]), 1)
+        self.assertEqual(result["processors"][0]["state"], "freeze-owner")
+
+    def test_a_bogus_processor_block_array_is_never_dereferenced(self) -> None:
+        client = self._client()
+        client.read_virtual = lambda address, size: self.fail(
+            f"read 0x{address:x} despite a bogus KiProcessorBlock"
+        )
+
+        result = client.get_processor_control_blocks(
+            [self._kdbg(array=0x0000000000401000)]
+        )
+
+        self.assertIn("not a kernel pointer", result["error"])
+        self.assertEqual(result["processors"], [])
+
+    def test_a_divergent_kprcb_layout_is_flagged(self) -> None:
+        """ReactOS' KPRCB is not Windows 10's, so IpiFrozen cannot be assumed.
+
+        The target publishes SizePrcb/OffsetPrcbNumber/OffsetPrcbCurrentThread;
+        if those disagree with the offsets this client was built against then
+        PRCB_IPI_FROZEN is a guess and the manifest has to say so.
+        """
+        result = self._client().get_processor_control_blocks(
+            [self._kdbg(size_prcb=0x9000, offset_number=0x18)]
+        )
+
+        self.assertEqual(len(result["layout_warnings"]), 2)
+        self.assertTrue(
+            any("SizePrcb" in warning for warning in result["layout_warnings"])
+        )
+        self.assertTrue(
+            any(
+                "OffsetPrcbNumber" in warning
+                for warning in result["layout_warnings"]
+            )
+        )
+        # The read still happens: a flagged reading beats no reading at all.
+        self.assertEqual(result["processors"][0]["state"], "freeze-owner")
+
+    def test_a_prcb_number_mismatch_is_flagged(self) -> None:
+        result = self._client(numbers=(0, 1, 7, 3)).get_processor_control_blocks(
+            [self._kdbg()]
+        )
+
+        self.assertNotIn("number_mismatch", result["processors"][1])
+        self.assertTrue(result["processors"][2]["number_mismatch"])
+
+    def test_a_truncated_kdbg_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ProtocolError, "too old"):
+            self._client().get_processor_control_blocks([self._kdbg(length=0x220)])
+
+    def test_a_missing_kdbg_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ProtocolError, "KDBG"):
+            self._client().get_processor_control_blocks([])
+
+    def test_harvest_records_the_freeze_state(self) -> None:
+        client = self._client()
+        client.stopped = True
+        client.last_state_payload = b"state"
+        client.observed_modules = {}
+        client.event_callback = None
+        client._log = None
+        context = bytearray(0x4D0)
+        struct.pack_into("<Q", context, 0x98, 0x1D00)
+        struct.pack_into("<Q", context, 0xF8, 0x1100)
+        client.get_context = lambda processor=None: bytes(context)
+        block = self._kdbg()
+        client.get_debugger_data_blocks = lambda: [block]
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = client.harvest(Path(temporary), stack_size=0x100)
+            manifest = json.loads((destination / "manifest.json").read_text())
+
+        prcbs = manifest["processor_control_blocks"]
+        self.assertEqual(prcbs["freeze_owner_processor"], 0)
+        self.assertEqual(
+            [entry["state"] for entry in prcbs["processors"]],
+            ["freeze-owner", "frozen", "frozen", "target-freeze"],
+        )
+        self.assertEqual(
+            prcbs["offset_prcb_ipi_frozen"], client_module.PRCB_IPI_FROZEN
+        )
+        self.assertNotIn(
+            "processor-control-blocks",
+            [error["name"] for error in manifest["errors"]],
+        )
+
+    def test_harvest_survives_a_target_without_a_kdbg(self) -> None:
+        """A harvest must never abort because the freeze state is unavailable."""
+        client = self._client()
+        client.stopped = True
+        client.last_state_payload = b"state"
+        client.observed_modules = {}
+        client.event_callback = None
+        client._log = None
+        context = bytearray(0x4D0)
+        struct.pack_into("<Q", context, 0x98, 0x1D00)
+        struct.pack_into("<Q", context, 0xF8, 0x1100)
+        client.get_context = lambda processor=None: bytes(context)
+        client.get_debugger_data_blocks = lambda: []
+
+        with tempfile.TemporaryDirectory() as temporary:
+            destination = client.harvest(Path(temporary), stack_size=0x100)
+            manifest = json.loads((destination / "manifest.json").read_text())
+
+        self.assertNotIn("processor_control_blocks", manifest)
+        error = next(
+            entry for entry in manifest["errors"]
+            if entry["name"] == "processor-control-blocks"
+        )
+        self.assertIn("KDBG", error["error"])
+        self.assertTrue(manifest["complete"])
+
+    def test_summary_line_survives_a_hole_in_the_reading(self) -> None:
+        summary = client_module._summarise_freeze_state(
+            {
+                "processors": [
+                    {"processor": 0, "state": "freeze-owner", "active": True},
+                    {"processor": 1, "error": "unmapped"},
+                ],
+                "freeze_owner_processor": 0,
+                "layout_warnings": ["SizePrcb=0x1 but this build expects 0x42a0"],
+            }
+        )
+
+        self.assertIn("cpu0=freeze-owner+active", summary)
+        self.assertIn("cpu1=?(unmapped)", summary)
+        self.assertIn("owner=cpu0", summary)
+        self.assertIn("LAYOUT-MISMATCH", summary)
+
+    @unittest.skipUnless(
+        CAPTURED_KDBG,
+        f"no captured harvests under {HARVEST_CORPUS} to replay",
+    )
+    def test_captured_kdbg_blocks_confirm_the_field_offsets(self) -> None:
+        """Replay every real KDBG capture to anchor the KDDEBUGGER_DATA64 map.
+
+        KernBase and PsLoadedModuleList are reachable two independent ways --
+        through KdVersion, which the client parses from the version packet, and
+        through these offsets -- so agreement across every capture pins the
+        struct.  SizePrcb/OffsetPrcbNumber/OffsetPrcbCurrentThread are then the
+        target's own statement of its KPRCB layout, and they must match the
+        constants PRCB_IPI_FROZEN was generated alongside.
+        """
+        for directory, block, manifest in CAPTURED_KDBG:
+            with self.subTest(harvest=directory.name):
+                version = manifest["version"]
+                self.assertEqual(
+                    struct.unpack_from(
+                        "<Q", block, client_module.KDBG_KERN_BASE
+                    )[0],
+                    version["kernel_base"],
+                )
+                self.assertEqual(
+                    struct.unpack_from(
+                        "<Q", block, client_module.KDBG_PS_LOADED_MODULE_LIST
+                    )[0],
+                    version["loaded_module_list"],
+                )
+                self.assertEqual(
+                    struct.unpack_from(
+                        "<H", block, client_module.KDBG_SIZE_PRCB
+                    )[0],
+                    client_module.PRCB_SIZE,
+                )
+                self.assertEqual(
+                    struct.unpack_from(
+                        "<H", block, client_module.KDBG_OFFSET_PRCB_NUMBER
+                    )[0],
+                    client_module.PRCB_NUMBER,
+                )
+                self.assertEqual(
+                    struct.unpack_from(
+                        "<H",
+                        block,
+                        client_module.KDBG_OFFSET_PRCB_CURRENT_THREAD,
+                    )[0],
+                    client_module.PRCB_CURRENT_THREAD,
+                )
+                array = struct.unpack_from(
+                    "<Q", block, client_module.KDBG_KI_PROCESSOR_BLOCK
+                )[0]
+                self.assertGreaterEqual(
+                    array, client_module.AMD64_KERNEL_SPACE_START
+                )
+                self.assertGreaterEqual(array, version["kernel_base"])
 
 
 class AutomationTests(unittest.TestCase):
@@ -710,15 +1226,75 @@ class AutomationTests(unittest.TestCase):
         self.assertEqual(reply.payload[2:34], reboot_key)
         self.assertEqual(client.client_key, reboot_key)
 
-    def test_read_command_reports_closed_stdin_as_eof(self) -> None:
+    @staticmethod
+    def _stdin(text: str, *, tty: bool) -> io.StringIO:
+        """A stdin stand-in whose isatty() answer is under the test's control.
+
+        _read_command branches on it: an empty read is Ctrl-D on a terminal but
+        only "no writer attached" on the FIFO the listener is usually driven
+        through, and the two paths must be exercised separately.  io.StringIO
+        always reports False, so asking for the terminal path needs this.
+        """
+        stream = io.StringIO(text)
+        stream.isatty = lambda: tty
+        return stream
+
+    def test_read_command_reports_ctrl_d_on_a_terminal_as_eof(self) -> None:
         client = self.FakeClient()
 
         with mock.patch.object(
             roskd_cli.select, "select", lambda rlist, *_args: (list(rlist), [], [])
-        ), mock.patch.object(roskd_cli.sys, "stdin", io.StringIO("")), mock.patch.object(
-            roskd_cli.sys, "stdout", io.StringIO()
-        ):
+        ), mock.patch.object(
+            roskd_cli.sys, "stdin", self._stdin("", tty=True)
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()):
             with self.assertRaises(EOFError):
+                roskd_cli._read_command(client, "roskd> ")
+
+        self.assertEqual(client.calls, [])
+
+    def test_read_command_keeps_polling_when_a_fifo_writer_detaches(self) -> None:
+        """700c51fe9fd: an empty read on a FIFO is not EOF.
+
+        Every scripted command closes the pipe, so treating that as EOF ended
+        the REPL after one command and stranded the target at its breakpoint.
+        The wait must go back to polling the socket instead -- and then pick up
+        the next command once a writer reattaches.
+        """
+        client = self.FakeClient()
+        stdin = self._stdin("", tty=False)
+        # Two empty reads, as two writers opening and closing the FIFO, then a
+        # real command.  Bounded on purpose: if the poll path ever stops
+        # advancing, the test fails instead of spinning forever.
+        replies = ["", "", "continue\n"]
+
+        def readline() -> str:
+            self.assertTrue(replies, "_read_command never returned a command")
+            return replies.pop(0)
+
+        stdin.readline = readline
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda rlist, *_args: (list(rlist), [], [])
+        ), mock.patch.object(
+            roskd_cli.sys, "stdin", stdin
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()):
+            line = roskd_cli._read_command(client, "roskd> ")
+
+        self.assertEqual(line, "continue\n")
+        # Both detached-writer reads went back to servicing the socket rather
+        # than ending the session.
+        self.assertEqual(client.calls, ["poll-idle:0.5", "poll-idle:0.5"])
+
+    def test_detached_fifo_writer_still_surfaces_a_target_reboot(self) -> None:
+        """The non-interactive empty-read path must not swallow a reboot."""
+        client = self.FakeClient(poll_error=KdSessionChanged("new target session"))
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda rlist, *_args: (list(rlist), [], [])
+        ), mock.patch.object(
+            roskd_cli.sys, "stdin", self._stdin("", tty=False)
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()):
+            with self.assertRaises(KdSessionChanged):
                 roskd_cli._read_command(client, "roskd> ")
 
     def test_stall_capture_owns_break_harvest_and_resume(self) -> None:
