@@ -909,6 +909,23 @@ USBPORT_FlushPendingTransfers(IN PUSBPORT_ENDPOINT Endpoint)
         if (Irp)
         {
             Irp = USBPORT_RemovePendingTransferIrp(FdoDevice, Irp);
+
+            if (!Irp)
+            {
+                /* The IRP was no longer in the pending table, so a cancel or
+                 * abort path has already claimed it and owns completing this
+                 * transfer.  That path clears the URB's back-pointer to
+                 * Transfer, so neither the transfer nor the URB may be touched
+                 * again here -- queueing the URB would dereference NULL. */
+                KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);
+                KeReleaseSpinLock(&FdoExtension->FlushPendingTransferSpinLock,
+                                  OldIrql);
+
+                DPRINT1("USBPORT_FlushPendingTransfers: Transfer %p already "
+                        "claimed elsewhere, not requeueing\n", Transfer);
+
+                goto Worker;
+            }
         }
 
         KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);
@@ -916,6 +933,24 @@ USBPORT_FlushPendingTransfers(IN PUSBPORT_ENDPOINT Endpoint)
                           OldIrql);
 
         KeAcquireSpinLock(&FdoExtension->FlushTransferSpinLock, &OldIrql);
+
+        /* Both the endpoint and pending-transfer spinlocks were dropped above,
+         * and this transfer is already off the pending list and out of the
+         * pending IRP table.  In that window a cancel, abort or completion path
+         * can claim it and finish it; completion clears the URB's back-pointer
+         * to the transfer.  If that happened the URB no longer belongs to us:
+         * re-queueing it would dereference a NULL Transfer, and re-inserting
+         * its IRP into the active table would hand out an IRP the other path
+         * has already completed. */
+        if (Urb->UrbControlTransfer.hca.Reserved8[0] != Transfer)
+        {
+            KeReleaseSpinLock(&FdoExtension->FlushTransferSpinLock, OldIrql);
+
+            DPRINT1("USBPORT_FlushPendingTransfers: Transfer %p claimed while "
+                    "unlocked, not requeueing\n", Transfer);
+
+            goto Worker;
+        }
 
         if (Irp)
         {
@@ -999,6 +1034,19 @@ USBPORT_QueueActiveUrbToEndpoint(IN PUSBPORT_ENDPOINT Endpoint,
                 Urb);
 
     Transfer = Urb->UrbControlTransfer.hca.Reserved8[0];
+
+    if (!Transfer)
+    {
+        /* The URB's back-pointer is cleared by USBPORT_CompleteTransfer, so a
+         * NULL here means another path already completed this transfer and the
+         * URB must not be queued.  Callers treat FALSE as "nothing to map",
+         * which is the correct outcome: there is no transfer to map. */
+        DPRINT1("USBPORT_QueueActiveUrbToEndpoint: Urb %p has no transfer, "
+                "already completed elsewhere\n", Urb);
+
+        return FALSE;
+    }
+
     FdoDevice = Endpoint->FdoDevice;
     FdoExtension = FdoDevice->DeviceExtension;
 
