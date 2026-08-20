@@ -21,15 +21,20 @@ HKR, , ,               0, %ProcessorClassName%
 HKR, , Icon,           0, "-28"
 
 [Manufacturer]
-%Standard%=Standard
+%Standard%=Standard,NTamd64
 %CyrixMfg%=Cyrix
-%IntelMfg%=Intel
-%AMDMfg%=AMD
+%IntelMfg%=Intel,NTamd64
+%AMDMfg%=AMD,NTamd64
 %TransmetaMfg%=Transmeta
-%VIAMfg%=VIA
+%VIAMfg%=VIA,NTamd64
 
 [Standard]
 %Processor.DeviceDesc% = Processr_Inst,ACPI\Processor
+%Processor.DeviceDesc% = Processr_Inst,ACPI\ACPI0007
+
+[Standard.NTamd64]
+%Processor.DeviceDesc% = Processr_Inst,ACPI\Processor
+%Processor.DeviceDesc% = Processr_Inst,ACPI\ACPI0007
 
 [Cyrix]
 %CyrixProcessor.DeviceDesc% = Processr_Inst,ACPI\CyrixInstead_-_x86

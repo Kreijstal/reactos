@@ -23,6 +23,8 @@ ProcessorUnload(
     IN PDRIVER_OBJECT DriverObject)
 {
     DPRINT("ProcessorUnload()\n");
+
+    ProcessorPerfStop(NULL);
 }
 
 
