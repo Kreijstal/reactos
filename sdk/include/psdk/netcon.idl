@@ -96,6 +96,16 @@ interface INetConnection : IUnknown
         NCM_SHAREDACCESSHOST_RAS
     } NETCON_MEDIATYPE;
 
+    typedef enum tagNETCON_SUBMEDIATYPE
+    {
+        NCSM_NONE,
+        NCSM_LAN,
+        NCSM_WIRELESS,
+        NCSM_ATM,
+        NCSM_ELAN,
+        NCSM_1394
+    } NETCON_SUBMEDIATYPE;
+
     typedef struct tagNETCON_PROPERTIES
     {
         GUID              guidId;
