@@ -2835,17 +2835,23 @@ static BOOL CNG_PrepareSignatureECC(BYTE *encoded_sig, DWORD encoded_size, BYTE 
 
 static BOOL CNG_PrepareSignatureRSA(BYTE *encoded_sig, DWORD encoded_size, BYTE **sig_value, DWORD *sig_len)
 {
-    /* Unlike ECDSA, an RSA (PKCS#1 v1.5) signature is not ASN.1-encoded: the
-     * signature value stored in the certificate is already the big-endian
-     * octet string that BCryptVerifySignature/mbedTLS expects, so it is passed
-     * through as-is without the byte reversal ECDSA requires. */
+    DWORD i;
+
+    /* The signature value decoded from a certificate is stored byte-reversed,
+     * which is why the ECDSA path above has to reverse it before it can
+     * ASN.1-decode the X509_ECC_SIGNATURE. An RSA PKCS#1 v1.5 signature is not
+     * ASN.1-encoded, but it is stored in that same reversed order, so it must
+     * be reversed as well to obtain the big-endian octet string that
+     * BCryptVerifySignature expects. Passing it through unreversed makes every
+     * RSA-signed certificate fail with STATUS_INVALID_SIGNATURE. */
     *sig_len = encoded_size;
     if (!(*sig_value = CryptMemAlloc(encoded_size)))
     {
         SetLastError(ERROR_OUTOFMEMORY);
         return FALSE;
     }
-    memcpy(*sig_value, encoded_sig, encoded_size);
+    for (i = 0; i < encoded_size; i++)
+        (*sig_value)[i] = encoded_sig[encoded_size - i - 1];
     return TRUE;
 }
 
@@ -2872,9 +2878,7 @@ static BOOL CNG_PrepareCertSignature(CERT_PUBLIC_KEY_INFO *pubKeyInfo, const CER
     }
 
     /* Pass the signature value through in its original (certificate) byte
-     * order.  The ECDSA path reverses it internally to ASN.1-decode the
-     * X509_ECC_SIGNATURE, whereas the RSA PKCS#1 path needs the unmodified
-     * big-endian octet string. */
+     * order; both the ECDSA and the RSA path reverse it internally. */
     return cng_prepare_signature(pubKeyInfo->Algorithm.pszObjId,
             signedCert->Signature.pbData, signedCert->Signature.cbData,
             sig_value, sig_len);
