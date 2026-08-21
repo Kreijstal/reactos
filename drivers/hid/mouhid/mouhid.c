@@ -191,6 +191,18 @@ MouHid_GetButtonFlags(
     *ButtonFlags = 0;
     *Flags = 0;
 
+    /* HidP_UsageListDifference treats the usage lists as zero-terminated, but
+     * HidP_GetUsages only writes the usages that are actually set in the report
+     * and leaves the remaining entries untouched. When a button is released the
+     * list shrinks, so without clearing it first the slot keeps the stale usage
+     * from the previous report and the difference finds no change - the button
+     * up is then lost. Dragging makes this permanent: the move reports sent
+     * while the button is held leave the stale usage in both lists, so every
+     * later press and release cancels out and the mouse buttons stop working
+     * entirely. Clear the list so released buttons leave a zero terminator. */
+    RtlZeroMemory(DeviceExtension->CurrentUsageList,
+                  sizeof(USAGE) * DeviceExtension->UsageListLength);
+
     /* get usages */
     CurrentUsageListLength = DeviceExtension->UsageListLength;
     Status = HidP_GetUsages(HidP_Input,
