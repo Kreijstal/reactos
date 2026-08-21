@@ -68,6 +68,10 @@ typedef struct tagNETCONIDSTRUCT
     NETCON_STATUS    Status;
     ULONG            uNameOffset;
     ULONG            uDeviceNameOffset;
+    /* ReactOS extension, appended so the offsets above stay put: which
+     * physical medium the adapter really uses.  Windows carries the same
+     * information in NETCON_PROPERTIES_EX, which our netcon.idl predates. */
+    NETCON_SUBMEDIATYPE SubMediaType;
 } NETCONIDSTRUCT, *PNETCONIDSTRUCT;
 #include <poppack.h>
 
@@ -82,6 +86,10 @@ PWCHAR ILGetDeviceName(PCITEMID_CHILD pidl);
 PITEMID_CHILD ILCreateNetConnectItem(INetConnection * pItem);
 HRESULT ILGetConnection(PCITEMID_CHILD pidl, INetConnection ** pItem);
 HRESULT CEnumIDList_CreateInstance(HWND hwndOwner, DWORD dwFlags, REFIID riid, LPVOID * ppv);
+
+/* connectmanager.cpp: is this adapter an 802.11 radio? */
+BOOL NcIsWirelessAdapter(LPCWSTR pszNetCfgInstanceId);
+BOOL NcIsWirelessAdapter(REFGUID guidId);
 
 #define NCCF_NOTIFY_DISCONNECTED 0x100000
 
