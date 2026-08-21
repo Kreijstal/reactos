@@ -451,9 +451,6 @@ LANStatusUiDetailsDlg(
                         pCurAdapter = pAdapterInfo;
                         while (pCurAdapter && pCurAdapter->Index != pContext->dwAdapterIndex)
                             pCurAdapter = pCurAdapter->Next;
-
-                        if (pCurAdapter->Index != pContext->dwAdapterIndex)
-                            pCurAdapter = NULL;
                     }
                 }
             }
@@ -1183,8 +1180,19 @@ CLanStatus::InitializeNetTaskbarNotifications()
             if (nid.hIcon)
                 nid.uFlags |= NIF_ICON;
 
-            wcscpy(nid.szTip, pProps->pszwName);
-            nid.uFlags |= NIF_TIP;
+            if (pProps->pszwName)
+            {
+                if (wcslen(pProps->pszwName) * sizeof(WCHAR) < sizeof(nid.szTip))
+                {
+                    wcscpy(nid.szTip, pProps->pszwName);
+                }
+                else
+                {
+                    CopyMemory(nid.szTip, pProps->pszwName, sizeof(nid.szTip) - sizeof(WCHAR));
+                    nid.szTip[(sizeof(nid.szTip)/sizeof(WCHAR))-1] = L'\0';
+                }
+                nid.uFlags |= NIF_TIP;
+            }
         }
         pContext->hwndStatusDlg = hwndDlg;
         pItem->hwndDlg = hwndDlg;

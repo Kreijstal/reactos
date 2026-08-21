@@ -354,7 +354,11 @@ HRESULT WINAPI CNetworkConnections::GetDetailsOf(
         case COLUMN_NAME:
             return SHSetStrRet(&psd->str, ILGetConnName(pidl));
         case COLUMN_TYPE:
-            if (pdata->MediaType  == NCM_LAN || pdata->MediaType == NCM_SHAREDACCESSHOST_RAS)
+            if (pdata->SubMediaType == NCSM_WIRELESS)
+            {
+                return SHSetStrRet(&psd->str, netshell_hInstance, IDS_TYPE_WIRELESS);
+            }
+            else if (pdata->MediaType  == NCM_LAN || pdata->MediaType == NCM_SHAREDACCESSHOST_RAS)
             {
                 return SHSetStrRet(&psd->str, netshell_hInstance, IDS_TYPE_ETHERNET);
             }
@@ -480,15 +484,29 @@ HRESULT WINAPI CNetConUiObject::QueryContextMenu(
         return E_FAIL;
     }
 
+    /* On a wireless connection the network list is the first entry and the
+     * default (double-click) action, exactly like Windows' "View Available
+     * Wireless Networks"; the wired verbs then lose their MFS_DEFAULT. */
+    BOOL bWireless = (pdata->SubMediaType == NCSM_WIRELESS);
+    UINT uWiredDefault = bWireless ? MFS_ENABLED : MFS_DEFAULT;
+
+    if (bWireless)
+    {
+        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 9, MFT_STRING,
+                         MAKEINTRESOURCEW(IDS_NET_VIEWWIRELESS),
+                         (pdata->Status == NCS_HARDWARE_DISABLED) ? MFS_GRAYED : MFS_DEFAULT);
+        _InsertMenuItemW(hMenu, indexMenu++, TRUE, -1, MFT_SEPARATOR, NULL, MFS_ENABLED);
+    }
+
     if (pdata->Status == NCS_HARDWARE_DISABLED || pdata->Status == NCS_MEDIA_DISCONNECTED || pdata->Status == NCS_DISCONNECTED)
-        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_ACTIVATE), MFS_DEFAULT);
+        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_ACTIVATE), uWiredDefault);
     else
         _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 1, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_DEACTIVATE), MFS_ENABLED);
 
     if (pdata->Status == NCS_HARDWARE_DISABLED || pdata->Status == NCS_MEDIA_DISCONNECTED || pdata->Status == NCS_DISCONNECTED)
         _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 2, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_STATUS), MFS_GRAYED);
     else if (pdata->Status == NCS_CONNECTED)
-        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 2, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_STATUS), MFS_DEFAULT);
+        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 2, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_STATUS), uWiredDefault);
     else
         _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 2, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_STATUS), MFS_ENABLED);
 
@@ -514,9 +532,9 @@ HRESULT WINAPI CNetConUiObject::QueryContextMenu(
     if (pdata->Status == NCS_CONNECTED)
         _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 7, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_PROPERTIES), MFS_ENABLED);
     else
-        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 7, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_PROPERTIES), MFS_DEFAULT);
+        _InsertMenuItemW(hMenu, indexMenu++, TRUE, idCmdFirst + 7, MFT_STRING, MAKEINTRESOURCEW(IDS_NET_PROPERTIES), uWiredDefault);
 
-    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 9);
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 10);
 }
 
 BOOL
@@ -625,6 +643,38 @@ ShowNetConnectionProperties(
 }
 
 
+/*
+ * Bring up the wireless-network selector.  It is a separate process
+ * (wlanui.exe) rather than an in-process dialog: it is already a complete
+ * front-end over wlanapi, and keeping it out of process means the shell
+ * folder does not have to load wlanapi - and therefore does not drag an RPC
+ * round trip to wlansvc - into every explorer.exe that opens this folder.
+ */
+static HRESULT
+ShowAvailableWirelessNetworks(HWND hwnd)
+{
+    SHELLEXECUTEINFOW sei;
+    WCHAR szPath[MAX_PATH];
+
+    if (!GetSystemDirectoryW(szPath, ARRAYSIZE(szPath)))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    if (FAILED(StringCchCatW(szPath, ARRAYSIZE(szPath), L"\\wlanui.exe")))
+        return E_FAIL;
+
+    ZeroMemory(&sei, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = 0;
+    sei.hwnd = hwnd;
+    sei.lpFile = szPath;
+    sei.nShow = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&sei))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    return S_OK;
+}
+
 /**************************************************************************
 * ISF_NetConnect_IContextMenu_InvokeCommand()
 */
@@ -641,7 +691,7 @@ HRESULT WINAPI CNetConUiObject::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
     {
         CmdId = IDS_NET_PROPERTIES;
     }
-    else if (!IS_INTRESOURCE(lpcmi->lpVerb) || LOWORD(lpcmi->lpVerb) > 7)
+    else if (!IS_INTRESOURCE(lpcmi->lpVerb) || LOWORD(lpcmi->lpVerb) > 9)
     {
         FIXME("Got invalid command\n");
         return E_NOTIMPL;
@@ -667,6 +717,8 @@ HRESULT WINAPI CNetConUiObject::InvokeCommand(LPCMINVOKECOMMANDINFO lpcmi)
             // TODO: Windows does not display this with an owner window
             return ShowNetConnectionStatus(m_lpOleCmd, m_pidl, lpcmi->hwnd);
         }
+        case IDS_NET_VIEWWIRELESS:
+            return ShowAvailableWirelessNetworks(lpcmi->hwnd);
         case IDS_NET_REPAIR:
         case IDS_NET_CREATELINK:
         case IDS_NET_DELETE:
