@@ -1826,6 +1826,13 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Ndi","Service",0x00000000,"vwifi"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Ndi\Interfaces","UpperRange",0x00000000,"ndis5"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}\0042\Ndi\Interfaces","LowerRange",0x00000000,"wlan"
+; The Network subkey is what netcfgx's class installer writes for a normally
+; installed adapter.  Seed it too: netshell enumerates every present Net-class
+; device and reads the connection Name from here, so a device that is seeded
+; without it shows up as a nameless connection.
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\{4F8B7E32-7E32-4F8B-AAAA-000000000042}\Connection","Name",0x00000000,"Wireless Network Connection"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\{4F8B7E32-7E32-4F8B-AAAA-000000000042}\Connection","PnpInstanceID",0x00000000,"Root\vwifi\0000"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}\{4F8B7E32-7E32-4F8B-AAAA-000000000042}\Connection","ShowIcon",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","ErrorControl",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","ImagePath",0x00020000,"system32\drivers\vwifi.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\vwifi","Start",0x00010001,0x00000003

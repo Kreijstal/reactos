@@ -208,6 +208,9 @@ add_livecd_shortcut("Remote Desktop Connection"
     "shell:system\\mstsc.exe" ICON_INDEX 0
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
     DESTINATION "${dir_startmenu_comms}")
+add_livecd_shortcut("Wireless Networks"
+    "shell:system\\wlanui.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_comms}")
 add_livecd_shortcut("Multimedia Player"
     "shell:system\\mplay32.exe" ICON_INDEX 0
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
