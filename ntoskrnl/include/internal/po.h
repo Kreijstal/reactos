@@ -371,6 +371,30 @@ PopFlushVolumes(
 );
 
 //
+// Processor idle (C-state) support
+//
+VOID
+FASTCALL
+PopProcessorIdle(
+    _Inout_ PPROCESSOR_POWER_STATE PState
+);
+
+NTSTATUS
+NTAPI
+PopRegisterProcessorIdleHandlers(
+    _In_reads_(Count) PPROCESSOR_IDLE_HANDLER_INFO Handlers,
+    _In_ ULONG Count
+);
+
+VOID
+NTAPI
+PopQueryProcessorIdleState(
+    _In_ PKPRCB Prcb,
+    _Out_ PULONG MaxIdleState,
+    _Out_ PULONG CurrentIdleState
+);
+
+//
 // Global data inside the Power Manager
 //
 extern PDEVICE_NODE PopSystemPowerDeviceNode;
