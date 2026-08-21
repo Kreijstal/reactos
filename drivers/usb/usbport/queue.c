@@ -746,7 +746,20 @@ USBPORT_FlushCancelList(IN PUSBPORT_ENDPOINT Endpoint)
             IoSetCancelRoutine(Irp, NULL);
             IoReleaseCancelSpinLock(PrevIrql);
 
-            USBPORT_RemoveActiveTransferIrp(FdoDevice, Irp);
+            if (USBPORT_RemoveActiveTransferIrp(FdoDevice, Irp) == NULL)
+            {
+                /* Not in the active table: USBPORT_DoneTransfer - the only
+                 * other remover - has already claimed this IRP and will
+                 * complete it.  Detaching it here keeps the teardown below
+                 * (map registers, transfer pool, event) while leaving the
+                 * completion to its owner; completing it twice trips
+                 * ASSERT(!Irp->CancelRoutine) in IoCompleteRequest and clears
+                 * the URB's transfer back-pointer under the owner's feet. */
+                DPRINT1("USBPORT_FlushCancelList: Irp %p not in active table; "
+                        "owned elsewhere, not completing\n", Irp);
+
+                Transfer->Irp = NULL;
+            }
         }
 
         KeReleaseSpinLockFromDpcLevel(&Endpoint->EndpointSpinLock);

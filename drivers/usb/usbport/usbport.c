@@ -787,7 +787,31 @@ USBPORT_DoneTransfer(IN PUSBPORT_TRANSFER Transfer)
         IoSetCancelRoutine(Irp, NULL);
         IoReleaseCancelSpinLock(CancelIrql);
 
-        USBPORT_RemoveActiveTransferIrp(FdoDevice, Irp);
+        if (USBPORT_RemoveActiveTransferIrp(FdoDevice, Irp) == NULL)
+        {
+            /* The IRP was not in the active table, so this transfer does not
+             * own it any more.  An IRP is inserted there in exactly one place
+             * (USBPORT_FlushPendingTransfers) and removed in exactly two -
+             * here and USBPORT_FlushCancelList - and the other remover always
+             * completes what it took.  So a NULL means the other path has
+             * claimed the IRP and is completing it; it has also re-armed the
+             * cancel routine we just cleared.
+             *
+             * Completing it here anyway is a double completion: IoCompleteRequest
+             * trips ASSERT(!Irp->CancelRoutine) on the re-armed routine, and the
+             * URB's back-pointer to its transfer gets cleared underneath the
+             * owner, which later faults in USBPORT_QueueActiveUrbToEndpoint.
+             *
+             * Detach the IRP and let the owner finish it.  The transfer itself
+             * is still torn down below - USBPORT_CompleteTransfer flushes and
+             * frees the map registers, frees the transfer and signals the
+             * event, and skips the completion because Transfer->Irp is NULL. */
+            DPRINT1("USBPORT_DoneTransfer: Irp %p not in active table; "
+                    "owned elsewhere, not completing\n", Irp);
+
+            Transfer->Irp = NULL;
+            Irp = NULL;
+        }
     }
 
     KeReleaseSpinLock(&FdoExtension->FlushTransferSpinLock, OldIrql);
