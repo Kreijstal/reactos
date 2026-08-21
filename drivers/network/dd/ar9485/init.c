@@ -2,8 +2,9 @@
  * PROJECT:     ReactOS Atheros AR9485 Wi-Fi Driver
  * LICENSE:     GPL-2.0-or-later
  * PURPOSE:     MiniportInitializeEx / HaltEx.  Maps BAR0, reads AR_SREV
- *              for chip-revision identification, and reports general
- *              attributes to NDIS.
+ *              for chip-revision identification, brings the RTC domain
+ *              out of reset, recovers the permanent MAC address from the
+ *              card's EEPROM/OTP, and reports general attributes to NDIS.
  */
 
 #include "ar9485.h"
@@ -22,6 +23,8 @@ AR9485MapHardwareResources(
     _In_ PNDIS_RESOURCE_LIST ResourceList);
 static VOID
 AR9485DetectChip(_In_ PAR9485_ADAPTER Adapter);
+static NDIS_STATUS
+AR9485ReadMacAddress(_In_ PAR9485_ADAPTER Adapter);
 
 NDIS_STATUS NTAPI
 AR9485MiniportInitializeEx(
@@ -83,16 +86,24 @@ AR9485MiniportInitializeEx(
 
     if (Adapter->MacVersion != AR_SREV_VERSION_9485)
     {
+        /* Phase 1a stayed bound on a mismatch so the readback could be
+         * logged from bare metal.  From Phase 2a on we drive the chip -
+         * power-on reset, OTP state machine - so a part we cannot
+         * identify must not be touched at all. */
         DPRINT1("AR9485: unexpected chip-version 0x%03x (want 0x%03x); "
-                "binding anyway for diagnostics\n",
+                "refusing to drive an unidentified part\n",
                 Adapter->MacVersion, AR_SREV_VERSION_9485);
-        /* Stay attached for Phase 1a so we can log the value on bare-metal
-         * variants where the version readback may differ.  Phase 2a tightens
-         * this to NDIS_STATUS_ADAPTER_NOT_FOUND on a mismatch. */
+        Status = NDIS_STATUS_ADAPTER_NOT_FOUND;
+        goto Fail;
     }
-    else
+
+    Adapter->Flags |= AR9485_FLAG_HW_RECOGNIZED;
+
+    Status = AR9485ReadMacAddress(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
     {
-        Adapter->Flags |= AR9485_FLAG_HW_RECOGNIZED;
+        DPRINT1("AR9485: ReadMacAddress failed 0x%08x\n", Status);
+        goto Fail;
     }
 
     Status = AR9485RegisterInterrupt(Adapter);
@@ -109,8 +120,12 @@ AR9485MiniportInitializeEx(
         goto Fail;
     }
 
-    DPRINT1("AR9485: initialized: SREV=0x%08x version=0x%03x rev=%u\n",
-            Adapter->SregRaw, Adapter->MacVersion, Adapter->MacRevision);
+    DPRINT1("AR9485: initialized: SREV=0x%08x version=0x%03x rev=%u "
+            "MAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
+            Adapter->SregRaw, Adapter->MacVersion, Adapter->MacRevision,
+            Adapter->PermanentMacAddress[0], Adapter->PermanentMacAddress[1],
+            Adapter->PermanentMacAddress[2], Adapter->PermanentMacAddress[3],
+            Adapter->PermanentMacAddress[4], Adapter->PermanentMacAddress[5]);
     return NDIS_STATUS_SUCCESS;
 
 Fail:
@@ -266,10 +281,20 @@ AR9485SetGeneralAttributes(_In_ PAR9485_ADAPTER Adapter)
                                         NDIS_PACKET_TYPE_BROADCAST |
                                         NDIS_PACKET_TYPE_MULTICAST;
     GenAttrs.MaxMulticastListSize     = 32;
-    GenAttrs.MacAddressLength         = 6;
-    /* No MAC available until EEPROM parse (Phase 2a).  Report all-zero. */
-    NdisZeroMemory(GenAttrs.PermanentMacAddress, 6);
-    NdisZeroMemory(GenAttrs.CurrentMacAddress, 6);
+    GenAttrs.MacAddressLength         = AR9485_MAC_ADDRESS_LENGTH;
+
+    /* Phase 2a: the permanent address comes out of the card's EEPROM/OTP.
+     * MiniportInitializeEx fails before it reaches this point if the
+     * restore did not produce a usable one, so the assertion below records
+     * the invariant rather than defending against it - there is no path
+     * on which an all-zero or invented address is reported to NDIS. */
+    NT_ASSERT(Adapter->MacAddressValid);
+    NdisMoveMemory(GenAttrs.PermanentMacAddress,
+                   Adapter->PermanentMacAddress,
+                   AR9485_MAC_ADDRESS_LENGTH);
+    NdisMoveMemory(GenAttrs.CurrentMacAddress,
+                   Adapter->CurrentMacAddress,
+                   AR9485_MAC_ADDRESS_LENGTH);
 
     GenAttrs.RecvScaleCapabilities    = NULL;
     GenAttrs.AccessType               = NET_IF_ACCESS_BROADCAST;
@@ -307,7 +332,11 @@ AR9485MapHardwareResources(
         switch (Resource->Type)
         {
             case CmResourceTypeMemory:
-                /* AR9485's only BAR is a 64 KiB memory window. */
+                /* AR9485 exposes a single memory BAR.  Measured on real
+                 * hardware (ASUS X550DP): PA 0xff900000, len 524288 = 512 KiB
+                 * -- NOT the 64 KiB this comment used to claim.  The size
+                 * matters: the OTP block the EEPROM path reads lives at
+                 * 0x14000-0x15f1f, which a 64 KiB window would not cover. */
                 if (FoundMemory)
                     break;
                 Adapter->IoAddress = Resource->u.Memory.Start;
@@ -386,6 +415,7 @@ AR9485DetectChip(_In_ PAR9485_ADAPTER Adapter)
      * looks up the AR_SREV register offset, reads it via REG_READ, and
      * decodes the version / revision fields per the AR9300+ encoding. */
     ok = ar9485_read_revisions(Adapter->IoBase,
+                               Adapter->IoLength,
                                AR9300_DEVID_AR9485_PCIE,
                                &macVersion, &macRev, &isPciExpress);
     if (!ok)
@@ -404,4 +434,75 @@ AR9485DetectChip(_In_ PAR9485_ADAPTER Adapter)
     DPRINT1("AR9485: AR_SREV raw=0x%08x version=0x%03x revision=%u pcie=%d\n",
             Adapter->SregRaw, Adapter->MacVersion,
             Adapter->MacRevision, isPciExpress ? 1 : 0);
+}
+
+/*
+ * Phase 2a: bring the RTC domain out of reset and restore the EEPROM
+ * image from the card's serial EEPROM or its on-die OTP, so the miniport
+ * can report the card's real permanent MAC address.
+ *
+ * The AR9485 register file places the OTP controller at 0x14000-0x15f1f
+ * (ath9k ar9003_eeprom.h:85-94), well above everything slices 1-2 touch,
+ * so the mapped BAR has to be large enough to reach it.  On Windows the
+ * mapping is exactly IoLength bytes long and a read past its end faults,
+ * hence the explicit check here rather than a fault at OTP-probe time.
+ */
+static NDIS_STATUS
+AR9485ReadMacAddress(_In_ PAR9485_ADAPTER Adapter)
+{
+    /* Highest register the OTP path touches: AR9300_OTP_READ_DATA at
+     * 0x15f1c, plus its own four bytes.  A shorter window is not fatal -
+     * the serial-EEPROM aperture at 0x2000 and the RTC block at 0x7000
+     * still fit in 64 KiB, so a card with a real EEPROM would still be
+     * readable - but it does mean the OTP probe can only fail, and that
+     * is worth naming up front on the one boot we get to observe. */
+    const ULONG OtpWindowEnd = 0x15f1c + sizeof(ULONG);
+
+    if (Adapter->IoLength < OtpWindowEnd)
+    {
+        DPRINT1("AR9485: BAR0 window is 0x%x bytes, short of the 0x%x needed "
+                "to reach the OTP controller; only the serial-EEPROM path can "
+                "succeed\n",
+                Adapter->IoLength, OtpWindowEnd);
+    }
+
+    if (!ar9485_hw_power_on(Adapter->IoBase,
+                            Adapter->IoLength,
+                            AR9300_DEVID_AR9485_PCIE,
+                            Adapter->MacVersion,
+                            (u16)Adapter->MacRevision))
+    {
+        DPRINT1("AR9485: power-on reset failed; the OTP state machine will "
+                "not answer, so no MAC address can be read\n");
+        return NDIS_STATUS_FAILURE;
+    }
+
+    if (!ar9485_hw_eeprom_get_macaddr(Adapter->IoBase,
+                                      Adapter->IoLength,
+                                      AR9300_DEVID_AR9485_PCIE,
+                                      Adapter->MacVersion,
+                                      (u16)Adapter->MacRevision,
+                                      Adapter->PermanentMacAddress,
+                                      &Adapter->EepromVersion,
+                                      &Adapter->TemplateVersion))
+    {
+        /* ar9485_hw_eeprom_get_macaddr() has already named the failing
+         * step on the debug port.  Deliberately no fallback: a plausible
+         * but wrong MAC is worse than a miniport that does not start. */
+        DPRINT1("AR9485: EEPROM/OTP MAC address recovery failed\n");
+        return NDIS_STATUS_FAILURE;
+    }
+
+    NdisMoveMemory(Adapter->CurrentMacAddress,
+                   Adapter->PermanentMacAddress,
+                   AR9485_MAC_ADDRESS_LENGTH);
+    Adapter->MacAddressValid = TRUE;
+
+    DPRINT1("AR9485: permanent MAC %02x:%02x:%02x:%02x:%02x:%02x "
+            "(eepromVersion=%u templateVersion=%u)\n",
+            Adapter->PermanentMacAddress[0], Adapter->PermanentMacAddress[1],
+            Adapter->PermanentMacAddress[2], Adapter->PermanentMacAddress[3],
+            Adapter->PermanentMacAddress[4], Adapter->PermanentMacAddress[5],
+            Adapter->EepromVersion, Adapter->TemplateVersion);
+    return NDIS_STATUS_SUCCESS;
 }

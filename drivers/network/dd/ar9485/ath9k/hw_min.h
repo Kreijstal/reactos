@@ -22,6 +22,7 @@
 #include "../linux-compat.h"
 #include "ath_reg.h"
 #include "reg.h"
+#include "ar9003_eeprom_min.h"
 
 /* Verbatim copy of include/ath9k/hw.h:524 - struct ath9k_hw_version. */
 typedef enum { ATH_USB_UNUSED = 0 } ath_usb_dev;
@@ -45,20 +46,56 @@ struct ath_ops {
 };
 
 /* Minimal stand-in for struct ath_hw.  Field names match upstream so the
- * verbatim function bodies compile.  Carries only what slice 2 needs. */
+ * verbatim function bodies compile.  Carries only what slices 2-3 need. */
 struct ath_hw {
     struct ath_ops reg_ops;
     void          *reg_ctx;          /* opaque cookie passed to read/write */
+    u32            reg_len;          /* mapped BAR0 length, see note below */
+    bool           reg_range_warned; /* one-shot latch for the guard below */
     struct ath9k_hw_version hw_version;
     bool           is_pciexpress;
     u16          (*get_mac_revision)(void);
+
+    /* Upstream hw.h:820 - stashed AR_WA value.  ath9k reads AR_WA once in
+     * __ath9k_hw_init() and replays it from this copy on every reset,
+     * because the register cannot be read while the chip is asleep. */
+    u32            WARegVal;
+
+    /* Upstream hw.h:947 - `union ath9k_eeprom' narrowed to the one member
+     * an AR9300-family part uses.  Restored by slice 3 (hw_eeprom.c). */
+    union {
+        struct ar9300_eeprom ar9300_eep;
+    } eeprom;
 };
 
-/* REG_READ / REG_WRITE - copy of hw.h:80,82 macros. */
+/* Bounds guard on register access - a shim-layer addition with no
+ * upstream counterpart.
+ *
+ * Linux maps the whole BAR with pci_iomap() and never range-checks, but
+ * on Windows the mapping is exactly MmMapIoSpace(IoAddress, IoLength) and
+ * a read past its end faults the kernel.  That matters here because the
+ * OTP window this phase touches lives at 0x14000-0x15f1f, far above the
+ * 0x0000-0x8xxx range slice 2 used, and the AR9485 BAR0 size is a PnP
+ * property we have not yet observed on the target machine.  reg_len lets
+ * ar9485_reg_read()/ar9485_reg_write() refuse an out-of-window access and
+ * log it instead of bugchecking.  The log is latched to one line per
+ * ath_hw: ath9k_hw_wait() polls a register up to 10000 times, and a
+ * DPRINT1 per poll would add minutes to a boot on the serial port. */
+#define AR9485_REG_OUT_OF_RANGE     0xFFFFFFFFu
+
+/* REG_READ / REG_WRITE - copy of hw.h:80,82 macros.  Upstream hands the
+ * struct ath_hw itself to the accessors as the opaque cookie; slice 3
+ * restored that so ar9485_reg_read() can reach reg_len for its bounds
+ * check.  The mapped BAR base lives in ah->reg_ctx. */
 #define REG_READ(_ah, _reg) \
-    (_ah)->reg_ops.read((_ah)->reg_ctx, (_reg))
+    (_ah)->reg_ops.read((_ah), (_reg))
 #define REG_WRITE(_ah, _reg, _val) \
-    (_ah)->reg_ops.write((_ah)->reg_ctx, (_val), (_reg))
+    (_ah)->reg_ops.write((_ah), (_val), (_reg))
+
+/* Verbatim upstream hw.h:177,179 - ath9k_hw_wait()'s poll granularity and
+ * the generic register-settle timeout, both in microseconds. */
+#define AH_WAIT_TIMEOUT             100000 /* (us) */
+#define AH_TIME_QUANTUM             10
 
 /* MS / SM - copy of hw.h:122,121 macros (mask-shift / shift-mask). */
 #define MS(_v, _f) (((_v) & (_f)) >> _f##_S)
@@ -93,14 +130,50 @@ struct _ath_common_dummy { int unused; };
 #define ath_err(_common, _fmt, ...) \
     DbgPrint("ath9k_hw: " _fmt "\n", ##__VA_ARGS__)
 
+/* Wire a caller-supplied struct ath_hw to a mapped BAR0.  Shared by every
+ * slice so the reg_ops bridge lives in exactly one place. */
+void ar9485_hw_attach(_Out_ struct ath_hw *ah,
+                      _In_ void *bar0_base,
+                      _In_ u32 bar0_len,
+                      _In_ u16 devid,
+                      _In_ u32 macVersion,
+                      _In_ u16 macRev);
+
+/* Verbatim upstream hw.c:60 - poll a register field with a us timeout. */
+bool ath9k_hw_wait(struct ath_hw *ah, u32 reg, u32 mask, u32 val, u32 timeout);
+
 /* Slice 2 entry point exposed to the miniport side.  Builds a tiny ath_hw
  * on the caller's stack, runs the verbatim revision-read, and returns the
  * decoded macVersion / macRev for the AR9485 chip the miniport bound to.
  */
 bool ar9485_read_revisions(_In_ void *bar0_base,
+                           _In_ u32 bar0_len,
                            _In_ u16 devid,
                            _Out_ u32 *out_macVersion,
                            _Out_ u16 *out_macRev,
                            _Out_ bool *out_is_pciexpress);
+
+/* Slice 3a: bring the RTC domain out of reset so the OTP/EEPROM state
+ * machine answers.  Derived from upstream ath9k_hw_set_reset_power_on();
+ * see hw_chip.c for exactly what was left out and why. */
+bool ar9485_hw_power_on(_In_ void *bar0_base,
+                        _In_ u32 bar0_len,
+                        _In_ u16 devid,
+                        _In_ u32 macVersion,
+                        _In_ u16 macRev);
+
+/* Slice 3b: restore the EEPROM image out of the card's EEPROM or OTP and
+ * hand back the permanent MAC address.  Returns false - having already
+ * DPRINT1'd the reason - if the media cannot be read, no block passes its
+ * checksum, or the recovered address is not a usable unicast MAC.  There
+ * is deliberately no fallback address. */
+bool ar9485_hw_eeprom_get_macaddr(_In_ void *bar0_base,
+                                  _In_ u32 bar0_len,
+                                  _In_ u16 devid,
+                                  _In_ u32 macVersion,
+                                  _In_ u16 macRev,
+                                  _Out_writes_bytes_(6) u8 *out_macaddr,
+                                  _Out_ u8 *out_eepromVersion,
+                                  _Out_ u8 *out_templateVersion);
 
 #endif /* _AR9485_ATH9K_HW_MIN_H_ */
