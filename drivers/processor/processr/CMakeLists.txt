@@ -4,6 +4,7 @@ list(APPEND SOURCE
     misc.c
     pnp.c
     pstate.c
+    cstate.c
     processr.h)
 
 add_library(processr MODULE ${SOURCE} processr.rc)
