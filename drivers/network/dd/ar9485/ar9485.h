@@ -50,6 +50,10 @@
 #define AR9485_FLAG_HW_RECOGNIZED   0x00000001
 #define AR9485_FLAG_HALTING         0x00000002
 
+/* Length of an 802.3-format MAC address, which is what NDIS' general
+ * attributes carry even for a native-802.11 miniport. */
+#define AR9485_MAC_ADDRESS_LENGTH   6
+
 typedef struct _AR9485_ADAPTER
 {
     NDIS_HANDLE             MiniportAdapterHandle;
@@ -70,6 +74,18 @@ typedef struct _AR9485_ADAPTER
     ULONG                   SregRaw;
     ULONG                   MacVersion;
     ULONG                   MacRevision;
+
+    /* Permanent MAC address recovered from the card's EEPROM/OTP in
+     * Phase 2a.  MacAddressValid is FALSE until the restore has both
+     * succeeded and produced a usable unicast address; the miniport
+     * refuses to initialize in that case rather than report a made-up
+     * one.  CurrentMacAddress tracks PermanentMacAddress until Phase 3
+     * lets an upper layer override it. */
+    UCHAR                   PermanentMacAddress[6];
+    UCHAR                   CurrentMacAddress[6];
+    BOOLEAN                 MacAddressValid;
+    UCHAR                   EepromVersion;
+    UCHAR                   TemplateVersion;
 
     /* Interrupt resource */
     ULONG                   InterruptVector;
