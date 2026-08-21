@@ -224,6 +224,7 @@ static bool g_Verbose = false;
 /* For a complete list, see: https://smallvoid.com/article/winnt-shell-keyword.html */
 #define CSIDL_WINDOWS   0x24
 #define CSIDL_SYSTEM    0x25
+#define CSIDL_PROGRAM_FILES 0x26
 static const struct SPECIALFOLDER
 {
     unsigned char csidl;
@@ -233,6 +234,7 @@ static const struct SPECIALFOLDER
 } g_specialfolders[] = {
     { CSIDL_WINDOWS, "windows", "X:\\reactos", "%SystemRoot%" },
     { CSIDL_SYSTEM,  "system",  "X:\\reactos\\system32", "%SystemRoot%\\system32" },
+    { CSIDL_PROGRAM_FILES, "programfiles", "X:\\Program Files", "%ProgramFiles%" },
     { 0, NULL, NULL, NULL }
 };
 

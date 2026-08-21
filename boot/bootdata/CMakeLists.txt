@@ -179,6 +179,13 @@ add_livecd_shortcut("ReactOS Explorer"
     "shell:windows\\explorer.exe" ICON_INDEX 1
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
     DESTINATION "${dir_startmenu_programs}" "${dir_quicklaunch}")
+# Mirrors shortcuts.inf,[ProgramShortcuts].  On a LiveCD the syssetup
+# [Finalize] section that would normally place iexplore.exe never runs, so the
+# file is shipped straight to "Program Files\Internet Explorer" by
+# base/applications/iexplore/CMakeLists.txt and this shortcut points there.
+add_livecd_shortcut("Wine Internet Explorer"
+    "shell:programfiles\\Internet Explorer\\iexplore.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_programs}")
 add_livecd_shortcut("Command Prompt"
     "shell:system\\cmd.exe" ICON_INDEX 0
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
