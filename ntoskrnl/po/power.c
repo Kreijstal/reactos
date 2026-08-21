@@ -1027,8 +1027,9 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
                     PowerInformation[i].MaxMhz = Prcb->MHz;
                     PowerInformation[i].CurrentMhz = Prcb->MHz;
                     PowerInformation[i].MhzLimit = Prcb->MHz;
-                    PowerInformation[i].MaxIdleState = 0;
-                    PowerInformation[i].CurrentIdleState = 0;
+                    PopQueryProcessorIdleState(Prcb,
+                                               &PowerInformation[i].MaxIdleState,
+                                               &PowerInformation[i].CurrentIdleState);
                 }
 
                 Status = STATUS_SUCCESS;
@@ -1039,6 +1040,67 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
             }
             _SEH2_END;
 
+            break;
+        }
+
+        case ProcessorStateHandler:
+        case ProcessorStateHandler2:
+        {
+            PROCESSOR_IDLE_HANDLER_INFO Handlers[MAX_IDLE_HANDLERS];
+            ULONG NumIdleHandlers;
+
+            /*
+             * These two levels hand the kernel FUNCTION POINTERS to call on the
+             * idle path.  A user-mode caller supplying them would be handing us
+             * an arbitrary kernel control transfer, so this is a driver-only
+             * interface no matter what the caller's privileges are -- the probe
+             * above makes the buffer safe to read, not safe to believe.
+             */
+            if (PreviousMode != KernelMode)
+                return STATUS_ACCESS_DENIED;
+
+            if (InputBuffer == NULL)
+                return STATUS_INVALID_PARAMETER;
+
+            /*
+             * Only the idle handlers are consumed here.  Both structures also
+             * describe a throttle/perf-level interface, which is the ACPI clock
+             * throttling that predates real P-states; processr.sys drives the
+             * _PSS/_PCT states directly instead, so honouring it here would give
+             * the machine two independent things fighting over its frequency.
+             */
+            if (PowerInformationLevel == ProcessorStateHandler)
+            {
+                PPROCESSOR_STATE_HANDLER Handler = (PPROCESSOR_STATE_HANDLER)InputBuffer;
+
+                if (InputBufferLength < sizeof(PROCESSOR_STATE_HANDLER))
+                    return STATUS_BUFFER_TOO_SMALL;
+
+                NumIdleHandlers = Handler->NumIdleHandlers;
+                if (NumIdleHandlers == 0 || NumIdleHandlers > MAX_IDLE_HANDLERS)
+                    return STATUS_INVALID_PARAMETER;
+
+                RtlCopyMemory(Handlers,
+                              Handler->IdleHandler,
+                              NumIdleHandlers * sizeof(PROCESSOR_IDLE_HANDLER_INFO));
+            }
+            else
+            {
+                PPROCESSOR_STATE_HANDLER2 Handler = (PPROCESSOR_STATE_HANDLER2)InputBuffer;
+
+                if (InputBufferLength < sizeof(PROCESSOR_STATE_HANDLER2))
+                    return STATUS_BUFFER_TOO_SMALL;
+
+                NumIdleHandlers = Handler->NumIdleHandlers;
+                if (NumIdleHandlers == 0 || NumIdleHandlers > MAX_IDLE_HANDLERS)
+                    return STATUS_INVALID_PARAMETER;
+
+                RtlCopyMemory(Handlers,
+                              Handler->IdleHandler,
+                              NumIdleHandlers * sizeof(PROCESSOR_IDLE_HANDLER_INFO));
+            }
+
+            Status = PopRegisterProcessorIdleHandlers(Handlers, NumIdleHandlers);
             break;
         }
 
