@@ -10,6 +10,31 @@
 #define _PROCESSR_PCH_
 
 #include <ntddk.h>
+#include <acpiioct.h>
+
+#define PROCESSOR_TAG 'PcrP'
+
+/* ACPI address space identifiers used by the Register() descriptors in
+ * _PCT (P-state control) and _CST (C-state entry) */
+#define ACPI_ADDRESS_SPACE_SYSTEM_MEMORY 0x00
+#define ACPI_ADDRESS_SPACE_SYSTEM_IO     0x01
+#define ACPI_ADDRESS_SPACE_FIXED_HW      0x7F
+
+/* Large resource descriptor tag of Register() */
+#define ACPI_GENERIC_REGISTER_TAG 0x82
+
+#include <pshpack1.h>
+typedef struct _ACPI_GENERIC_REGISTER
+{
+    UCHAR Tag;
+    USHORT Length;
+    UCHAR AddressSpaceId;
+    UCHAR BitWidth;
+    UCHAR BitOffset;
+    UCHAR AccessSize;
+    ULONGLONG Address;
+} ACPI_GENERIC_REGISTER, *PACPI_GENERIC_REGISTER;
+#include <poppack.h>
 
 typedef struct _DEVICE_EXTENSION
 {
@@ -41,6 +66,33 @@ NTAPI
 ProcessorAddDevice(
     IN PDRIVER_OBJECT DriverObject,
     IN PDEVICE_OBJECT Pdo);
+
+/* pstate.c -- generic ACPI plumbing, shared with cstate.c */
+
+/*
+ * Evaluates a control method on the ACPI stack below us and returns the
+ * (pool allocated) output buffer on success. The caller frees it.
+ */
+NTSTATUS
+ProcessorAcpiEvaluateMethod(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PCSTR MethodName,
+    _Outptr_result_nullonfailure_ PACPI_EVAL_OUTPUT_BUFFER *ReturnBuffer);
+
+/*
+ * TRUE when an argument, and the data it claims to carry, lie entirely inside
+ * the buffer ACPI actually filled.
+ */
+BOOLEAN
+ProcessorAcpiArgumentFits(
+    _In_ PACPI_EVAL_OUTPUT_BUFFER Buffer,
+    _In_ PACPI_METHOD_ARGUMENT Argument);
+
+/* cstate.c */
+
+VOID
+ProcessorIdleInitialize(
+    _In_ PDEVICE_OBJECT DeviceObject);
 
 /* pstate.c */
 
