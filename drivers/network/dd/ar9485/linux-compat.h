@@ -12,6 +12,23 @@
 #define _AR9485_LINUX_COMPAT_H_
 
 #include <ntddk.h>
+/* The vendored ath9k EEPROM layout (ath9k/ar9003_eeprom_min.h) uses the
+ * C99 exact-width signed types for its calibration fields.  ROS' kernel
+ * headers stop short of pulling <stdint.h> in, so do it here - it is
+ * header-only and idempotent. */
+#include <stdint.h>
+
+/* ---------- Kconfig knobs the vendored source tests ------------------
+ *
+ * Upstream gates the AR9485/AR9462/AR9565 SREV predicates in reg.h behind
+ * CONFIG_ATH9K_PCOEM; with the knob off, AR_SREV_9485(_ah) expands to a
+ * literal 0.  This driver exists exclusively for a PC-OEM AR9485, and the
+ * EEPROM/OTP probe order in ar9300_eeprom_restore_internal() branches on
+ * AR_SREV_9485(), so the knob must be on.  Defined here rather than in
+ * CMakeLists.txt so no translation unit can include reg.h without it. */
+#ifndef CONFIG_ATH9K_PCOEM
+#define CONFIG_ATH9K_PCOEM 1
+#endif
 
 /* ---------- Linux fixed-width integer types ------------------------- */
 
@@ -64,6 +81,37 @@ typedef int     bool;
 
 #define container_of(ptr, type, member) \
     ((type *)((char *)(ptr) - FIELD_OFFSET(type, member)))
+
+/* Structure packing.  ath9k tags its on-media EEPROM structures __packed;
+ * GCC honours the attribute directly, MSVC needs the surrounding
+ * pshpack1/poppack pair (which the vendored header supplies) instead. */
+#ifndef __packed
+#if defined(_MSC_VER)
+#define __packed
+#else
+#define __packed         __attribute__((packed))
+#endif
+#endif
+
+/* ---------- Unaligned accessors ------------------------------------
+ *
+ * ath9k pulls these from <asm/unaligned.h>.  Both x86 and ARM under
+ * ReactOS tolerate unaligned loads, but spelling them out byte-wise keeps
+ * the vendored code honest on any future strict-alignment target. */
+
+static __inline u16
+get_unaligned_le16(const void *p)
+{
+    const u8 *b = (const u8 *)p;
+    return (u16)(b[0] | ((u16)b[1] << 8));
+}
+
+static __inline u16
+get_unaligned_be16(const void *p)
+{
+    const u8 *b = (const u8 *)p;
+    return (u16)(((u16)b[0] << 8) | b[1]);
+}
 
 /* ---------- Linux error codes --------------------------------------
  *
@@ -164,6 +212,12 @@ typedef struct { int _unused; } spinlock_t;
 #define spin_unlock_irqrestore(x, f) do { (void)(f); (void)(x); } while (0)
 
 /* ---------- Misc --------------------------------------------------- */
+
+/* ath9k asserts a handful of caller-supplied invariants with BUG_ON.  The
+ * only one we import (ath9k_hw_wait's timeout floor) is a compile-time
+ * constant at every call site, so NT_ASSERT is the faithful mapping: it
+ * fires on a checked build and vanishes on free. */
+#define BUG_ON(cond)     NT_ASSERT(!(cond))
 
 #define EXPORT_SYMBOL(x)
 #define EXPORT_SYMBOL_GPL(x)

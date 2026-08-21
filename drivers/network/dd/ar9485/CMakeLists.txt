@@ -6,6 +6,10 @@
 # of identification OIDs.  Subsequent phases drop the verbatim Linux
 # ath9k_hw layer into an ath9k/ subdirectory and wire it from init.c.
 #
+# Phase 2a adds slice 3: the AR9300-family EEPROM/OTP restore
+# (ath9k/hw_eeprom.c + ath9k/ar9003_eeprom_min.h) and the RTC power-on
+# it needs, so the miniport reports the card's real permanent MAC.
+#
 
 add_definitions(
     -DNDIS620_MINIPORT
@@ -22,11 +26,13 @@ list(APPEND SOURCE
     send.c
     receive.c
     ath9k/hw_chip.c
+    ath9k/hw_eeprom.c
     ar9485.h
     linux-compat.h
     ath9k/ath_reg.h
     ath9k/reg.h
-    ath9k/hw_min.h)
+    ath9k/hw_min.h
+    ath9k/ar9003_eeprom_min.h)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
