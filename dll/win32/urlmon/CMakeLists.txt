@@ -1,10 +1,14 @@
 
+# urlmon is Wine code and uses the conforming swprintf(buf, count, fmt, ...).
+# _CRT_NON_CONFORMING_SWPRINTFS would bind those calls to msvcrt's two-argument
+# _swprintf, making the count argument land in the format-string slot.
+remove_definitions(-D_CRT_NON_CONFORMING_SWPRINTFS)
+
 add_definitions(
     -D_URLMON_
     -DENTRY_PREFIX=URLMON_
     -DPROXY_DELEGATION
-    -DWINE_REGISTER_DLL
-    -D_CRT_NON_CONFORMING_SWPRINTFS)
+    -DWINE_REGISTER_DLL)
 
 spec2def(urlmon.dll urlmon.spec ADD_IMPORTLIB)
 add_rpcproxy_files(urlmon_urlmon.idl)
