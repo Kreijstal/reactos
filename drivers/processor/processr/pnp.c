@@ -253,6 +253,7 @@ ProcessorStartDevice(
 
     ProcessorSetFriendlyName(DeviceObject);
     ProcessorPerfInitialize(DeviceObject);
+    ProcessorIdleInitialize(DeviceObject);
 
     return STATUS_SUCCESS;
 }

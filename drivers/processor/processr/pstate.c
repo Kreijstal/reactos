@@ -18,8 +18,6 @@
 
 /* GLOBALS ********************************************************************/
 
-#define PROCESSOR_TAG 'PcrP'
-
 /* Governor tuning. All thresholds are percentages of a single sample period. */
 #define PROCESSOR_SAMPLE_INTERVAL_MS 1000
 #define PROCESSOR_BUSY_UP_PERCENT    75
@@ -28,14 +26,6 @@
 
 /* One line per this many 100ns units (10 seconds) at most, see ProcessorPerfLogTransition */
 #define PROCESSOR_LOG_INTERVAL (10 * 1000 * 1000 * 10LL)
-
-/* ACPI address space identifiers used by _PCT */
-#define ACPI_ADDRESS_SPACE_SYSTEM_MEMORY 0x00
-#define ACPI_ADDRESS_SPACE_SYSTEM_IO     0x01
-#define ACPI_ADDRESS_SPACE_FIXED_HW      0x7F
-
-/* Large resource descriptor tag of Register() */
-#define ACPI_GENERIC_REGISTER_TAG 0x82
 
 /* AMD family 10h and later software P-state registers (BKDG, "P-state Control") */
 #define MSR_AMD_PSTATE_CURRENT_LIMIT 0xC0010061
@@ -109,19 +99,6 @@ typedef struct _PROCESSOR_PERF_DOMAIN
  */
 static PROCESSOR_PERF_DOMAIN ProcessorPerfDomain;
 static LONG ProcessorPerfClaimed = 0;
-
-#include <pshpack1.h>
-typedef struct _ACPI_GENERIC_REGISTER
-{
-    UCHAR Tag;
-    USHORT Length;
-    UCHAR AddressSpaceId;
-    UCHAR BitWidth;
-    UCHAR BitOffset;
-    UCHAR AccessSize;
-    ULONGLONG Address;
-} ACPI_GENERIC_REGISTER, *PACPI_GENERIC_REGISTER;
-#include <poppack.h>
 
 /* CPU IDENTIFICATION *********************************************************/
 
@@ -233,9 +210,8 @@ ProcessorPerfSendIoctl(
  * Evaluates a control method on the ACPI stack below us and returns the
  * (pool allocated) output buffer on success. The caller frees it.
  */
-static
 NTSTATUS
-ProcessorPerfEvaluateMethod(
+ProcessorAcpiEvaluateMethod(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PCSTR MethodName,
     _Outptr_result_nullonfailure_ PACPI_EVAL_OUTPUT_BUFFER *ReturnBuffer)
@@ -304,9 +280,8 @@ ProcessorPerfEvaluateMethod(
  * The ACPI method arguments are variable length and self describing, so every
  * step through them has to be bounded by the output buffer ACPI actually filled.
  */
-static
 BOOLEAN
-ProcessorPerfArgumentFits(
+ProcessorAcpiArgumentFits(
     _In_ PACPI_EVAL_OUTPUT_BUFFER Buffer,
     _In_ PACPI_METHOD_ARGUMENT Argument)
 {
@@ -389,7 +364,7 @@ ProcessorPerfParseControlRegisters(
     Argument = Buffer->Argument;
     for (i = 0; i < 2; i++)
     {
-        if (!ProcessorPerfArgumentFits(Buffer, Argument))
+        if (!ProcessorAcpiArgumentFits(Buffer, Argument))
             return STATUS_ACPI_INVALID_DATA;
 
         if (Argument->Type != ACPI_METHOD_ARGUMENT_BUFFER ||
@@ -456,7 +431,7 @@ ProcessorPerfDiscoverAcpi(
 
     PAGED_CODE();
 
-    Status = ProcessorPerfEvaluateMethod(DeviceObject, "_PSS", &Buffer);
+    Status = ProcessorAcpiEvaluateMethod(DeviceObject, "_PSS", &Buffer);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Processr: _PSS not available (Status 0x%08lx)\n", Status);
@@ -470,7 +445,7 @@ ProcessorPerfDiscoverAcpi(
     {
         ULONG Values[6];
 
-        if (!ProcessorPerfArgumentFits(Buffer, Argument))
+        if (!ProcessorAcpiArgumentFits(Buffer, Argument))
         {
             DPRINT1("Processr: _PSS entry %lu runs past the evaluation buffer\n", i);
             Status = STATUS_ACPI_INVALID_DATA;
@@ -521,7 +496,7 @@ ProcessorPerfDiscoverAcpi(
             Count - 1,
             Domain->States[Count - 1].CoreFrequency);
 
-    Status = ProcessorPerfEvaluateMethod(DeviceObject, "_PCT", &Buffer);
+    Status = ProcessorAcpiEvaluateMethod(DeviceObject, "_PCT", &Buffer);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Processr: _PCT not available (Status 0x%08lx)\n", Status);
@@ -630,11 +605,11 @@ ProcessorPerfApplyPlatformLimit(
 
     PAGED_CODE();
 
-    Status = ProcessorPerfEvaluateMethod(DeviceObject, "_PPC", &Buffer);
+    Status = ProcessorAcpiEvaluateMethod(DeviceObject, "_PPC", &Buffer);
     if (!NT_SUCCESS(Status))
         return;
 
-    if (ProcessorPerfArgumentFits(Buffer, Buffer->Argument) &&
+    if (ProcessorAcpiArgumentFits(Buffer, Buffer->Argument) &&
         Buffer->Argument->Type == ACPI_METHOD_ARGUMENT_INTEGER &&
         Buffer->Argument->Argument < Domain->StateCount)
     {
