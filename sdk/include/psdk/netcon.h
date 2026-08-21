@@ -78,6 +78,17 @@ typedef enum
 }NETCON_MEDIATYPE;
 
 
+typedef enum
+{
+    NCSM_NONE                   = 0,
+    NCSM_LAN                    = NCSM_NONE + 1,
+    NCSM_WIRELESS               = NCSM_LAN + 1,
+    NCSM_ATM                    = NCSM_WIRELESS + 1,
+    NCSM_ELAN                   = NCSM_ATM + 1,
+    NCSM_1394                   = NCSM_ELAN + 1
+}NETCON_SUBMEDIATYPE;
+
+
 typedef struct tagNETCON_PROPERTIES
 {
     GUID guidId;
