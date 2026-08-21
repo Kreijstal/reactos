@@ -73,7 +73,9 @@ typedef struct CPlItem {
 typedef int CPanel;
 #endif
 
-CPlApplet* Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel) DECLSPEC_HIDDEN;
+/* pbNotAnApplet is optional; on a NULL return it distinguishes "this file is
+ * not a control panel applet" from "loading it failed this time". */
+CPlApplet* Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel, BOOL* pbNotAnApplet) DECLSPEC_HIDDEN;
 void Control_UnloadApplet(CPlApplet* applet) DECLSPEC_HIDDEN;
 
 #ifdef __cplusplus
