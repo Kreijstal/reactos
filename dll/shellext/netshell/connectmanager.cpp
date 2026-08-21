@@ -7,7 +7,164 @@
 
 #include "precomp.h"
 
+#include <winioctl.h>
+#include <ntddndis.h>
+
 VOID NormalizeOperStatus(MIB_IFROW *IfEntry, NETCON_PROPERTIES * Props);
+
+/*
+ * Fallback for when the miniport device cannot be opened - a legacy miniport
+ * with no user-mode surface, or a caller without access to it: use what the
+ * adapter's INF declared.  A Native 802.11 miniport is installed with
+ * Ndi\Interfaces\LowerRange "wlan", and netcfg records the standardized
+ * *PhysicalMediaType keyword for adapters whose INF sets it.  Both describe
+ * the medium, not the device's name or its id.
+ */
+static BOOL
+NcIsWirelessAdapterFromRegistry(LPCWSTR pszNetCfgInstanceId)
+{
+    static const WCHAR szClassKey[] =
+        L"SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}";
+    HKEY hClass, hInstance, hNdi;
+    WCHAR szSubKey[64], szValue[64];
+    DWORD dwIndex, dwSize, dwType, dwMedium;
+    BOOL bWireless = FALSE;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szClassKey, 0, KEY_READ, &hClass) != ERROR_SUCCESS)
+        return FALSE;
+
+    for (dwIndex = 0; ; dwIndex++)
+    {
+        dwSize = ARRAYSIZE(szSubKey);
+        if (RegEnumKeyExW(hClass, dwIndex, szSubKey, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+
+        if (RegOpenKeyExW(hClass, szSubKey, 0, KEY_READ, &hInstance) != ERROR_SUCCESS)
+            continue;
+
+        dwSize = sizeof(szValue);
+        if (RegQueryValueExW(hInstance, L"NetCfgInstanceId", NULL, &dwType,
+                             (LPBYTE)szValue, &dwSize) != ERROR_SUCCESS ||
+            dwSize < sizeof(WCHAR))
+        {
+            RegCloseKey(hInstance);
+            continue;
+        }
+        szValue[ARRAYSIZE(szValue) - 1] = L'\0';
+        if (_wcsicmp(szValue, pszNetCfgInstanceId) != 0)
+        {
+            RegCloseKey(hInstance);
+            continue;
+        }
+
+        /* The standardized *PhysicalMediaType keyword, when the INF set it. */
+        dwSize = sizeof(dwMedium);
+        if (RegQueryValueExW(hInstance, L"*PhysicalMediaType", NULL, &dwType,
+                             (LPBYTE)&dwMedium, &dwSize) == ERROR_SUCCESS &&
+            dwType == REG_DWORD &&
+            (dwMedium == NdisPhysicalMediumWirelessLan ||
+             dwMedium == NdisPhysicalMediumNative802_11))
+        {
+            bWireless = TRUE;
+        }
+
+        /* Otherwise the lower binding interface the INF declared. */
+        if (!bWireless &&
+            RegOpenKeyExW(hInstance, L"Ndi\\Interfaces", 0, KEY_READ, &hNdi) == ERROR_SUCCESS)
+        {
+            dwSize = sizeof(szValue);
+            if (RegQueryValueExW(hNdi, L"LowerRange", NULL, &dwType,
+                                 (LPBYTE)szValue, &dwSize) == ERROR_SUCCESS &&
+                dwSize >= sizeof(WCHAR))
+            {
+                szValue[ARRAYSIZE(szValue) - 1] = L'\0';
+                bWireless = (StrStrIW(szValue, L"wlan") != NULL ||
+                             StrStrIW(szValue, L"nativewifi") != NULL);
+            }
+            RegCloseKey(hNdi);
+        }
+
+        RegCloseKey(hInstance);
+        break;
+    }
+
+    RegCloseKey(hClass);
+    return bWireless;
+}
+
+/*
+ * Is this adapter an 802.11 radio?
+ *
+ * The authoritative answer is the adapter's NDIS physical medium, and the
+ * only way to get it for *every* kind of adapter is to ask the miniport
+ * itself.  GetIfEntry()'s dwType is not enough: tcpip.sys only translates
+ * NdisPhysicalMediumNative802_11 into IF_TYPE_IEEE80211 when it is compiled
+ * for Vista+, and a Native 802.11 (dot11) miniport is not bound to tcpip at
+ * all - the nwifi intermediate driver presents a separate virtual 802.3
+ * miniport upwards.  NDISUIO is no help either, it binds NdisMedium802_3
+ * only.  Every NDIS miniport FDO on the other hand is named
+ * \Device\{NetCfgInstanceId} and answers IOCTL_NDIS_QUERY_GLOBAL_STATS, so
+ * query OID_GEN_PHYSICAL_MEDIUM there.  That is the same bit the dot11 OID
+ * surface is keyed off, and it involves neither the adapter's name nor a
+ * hardcoded device id.
+ */
+BOOL
+NcIsWirelessAdapter(LPCWSTR pszNetCfgInstanceId)
+{
+    WCHAR szDevice[MAX_PATH];
+    HANDLE hAdapter;
+    NDIS_OID Oid = OID_GEN_PHYSICAL_MEDIUM;
+    ULONG Medium = 0;
+    DWORD dwReturned = 0;
+    BOOL bWireless = FALSE;
+    BOOL bAnswered = FALSE;
+
+    if (!pszNetCfgInstanceId || !*pszNetCfgInstanceId)
+        return FALSE;
+
+    /* The miniport FDO lives in the object namespace, not below \??, so it
+     * has to be reached through GLOBALROOT. */
+    if (FAILED(StringCchPrintfW(szDevice, ARRAYSIZE(szDevice),
+                                L"\\\\?\\GLOBALROOT\\Device\\%s",
+                                pszNetCfgInstanceId)))
+    {
+        return FALSE;
+    }
+
+    hAdapter = CreateFileW(szDevice, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, 0, NULL);
+    if (hAdapter != INVALID_HANDLE_VALUE)
+    {
+        if (DeviceIoControl(hAdapter, IOCTL_NDIS_QUERY_GLOBAL_STATS,
+                            &Oid, sizeof(Oid), &Medium, sizeof(Medium),
+                            &dwReturned, NULL) && dwReturned >= sizeof(ULONG))
+        {
+            /* NdisPhysicalMediumWirelessLan is the NDIS 5 "802.11 looks like
+             * ethernet" model, NdisPhysicalMediumNative802_11 the NDIS 6 one. */
+            bWireless = (Medium == NdisPhysicalMediumWirelessLan ||
+                         Medium == NdisPhysicalMediumNative802_11);
+            bAnswered = TRUE;
+        }
+        CloseHandle(hAdapter);
+    }
+
+    if (!bAnswered)
+        bWireless = NcIsWirelessAdapterFromRegistry(pszNetCfgInstanceId);
+
+    return bWireless;
+}
+
+BOOL
+NcIsWirelessAdapter(REFGUID guidId)
+{
+    WCHAR szGuid[40];
+
+    if (!StringFromGUID2(guidId, szGuid, ARRAYSIZE(szGuid)))
+        return FALSE;
+
+    return NcIsWirelessAdapter(szGuid);
+}
 
 /***************************************************************
  * INetConnection Interface
@@ -225,6 +382,16 @@ CNetConnection::GetProperties(NETCON_PROPERTIES **ppProps)
     CopyMemory(pProperties, &m_Props, sizeof(NETCON_PROPERTIES));
     pProperties->pszwName = NULL;
 
+    /* Hand out our own copy of the cached name. Every exit path below - and
+     * there are several that leave the registry lookup untouched - must return
+     * a complete NETCON_PROPERTIES, because callers dereference pszwName. */
+    if (m_Props.pszwName)
+    {
+        pProperties->pszwName = static_cast<LPWSTR>(CoTaskMemAlloc((wcslen(m_Props.pszwName)+1)*sizeof(WCHAR)));
+        if (pProperties->pszwName)
+            wcscpy(pProperties->pszwName, m_Props.pszwName);
+    }
+
     if (m_Props.pszwDeviceName)
     {
         pProperties->pszwDeviceName = static_cast<LPWSTR>(CoTaskMemAlloc((wcslen(m_Props.pszwDeviceName)+1)*sizeof(WCHAR)));
@@ -273,20 +440,16 @@ CNetConnection::GetProperties(NETCON_PROPERTIES **ppProps)
             dwSize = sizeof(szName);
             if (RegQueryValueExW(hKey, L"Name", NULL, &dwType, (LPBYTE)szName, &dwSize) == ERROR_SUCCESS)
             {
-                /* use updated name */
+                /* use updated name, keep the cached one if we cannot store it */
+                PWSTR pszUpdatedName;
+
                 dwSize = wcslen(szName) + 1;
-                pProperties->pszwName = static_cast<PWSTR>(CoTaskMemAlloc(dwSize * sizeof(WCHAR)));
-                if (pProperties->pszwName)
-                    CopyMemory(pProperties->pszwName, szName, dwSize * sizeof(WCHAR));
-            }
-            else
-            {
-                /* use cached name */
-                if (m_Props.pszwName)
+                pszUpdatedName = static_cast<PWSTR>(CoTaskMemAlloc(dwSize * sizeof(WCHAR)));
+                if (pszUpdatedName)
                 {
-                    pProperties->pszwName = static_cast<PWSTR>(CoTaskMemAlloc((wcslen(m_Props.pszwName)+1)*sizeof(WCHAR)));
-                    if (pProperties->pszwName)
-                        wcscpy(pProperties->pszwName, m_Props.pszwName);
+                    CopyMemory(pszUpdatedName, szName, dwSize * sizeof(WCHAR));
+                    CoTaskMemFree(pProperties->pszwName);
+                    pProperties->pszwName = pszUpdatedName;
                 }
             }
             RegCloseKey(hKey);
@@ -631,7 +794,9 @@ CNetConnectionManager::EnumerateINetConnections()
                 pNew->Props.MediaType = NCM_LAN;
                 break;
             case IF_TYPE_IEEE80211:
-                pNew->Props.MediaType = NCM_SHAREDACCESSHOST_RAS;
+                /* Windows reports a wireless connection as NCM_LAN and
+                 * distinguishes it by its sub media type. */
+                pNew->Props.MediaType = NCM_LAN;
                 break;
             default:
                 break;
