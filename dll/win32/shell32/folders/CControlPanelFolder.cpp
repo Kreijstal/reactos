@@ -33,6 +33,197 @@ static const REGFOLDERINFO g_RegFolderInfo =
 };
 
 /***********************************************************************
+*   Control Panel applet metadata cache
+*
+* Listing the Control Panel means asking every .cpl in system32 for its display
+* name, comment and icon, and the only way to ask is to load the module and
+* call its CPlApplet() export.  A plain enumeration therefore costs one
+* LoadLibrary()/FreeLibrary() pair per applet plus everything each one drags in
+* by way of imports - and some of those imports do real work as they
+* initialise.  mmsys.cpl statically imports winmm, whose DllMain loads the
+* installed MME drivers, which for wdmaud.drv means enumerating the audio
+* device interfaces and walking the KS topology of the sound hardware.  That
+* made opening the folder cost time proportional to the machine rather than to
+* the number of icons in it, and it was paid again on every single open.
+*
+* Windows does not re-ask on every open either: it keeps the per-applet display
+* data in a cache and reloads an applet only once its file has changed.  Do the
+* same.  The registry location below is a ReactOS choice - Windows' own key
+* name is not part of any contract - but the semantics follow Windows.
+*
+* Everything read back is treated as untrusted: a blob that does not validate
+* in full is simply not a cache hit, and the applet gets loaded exactly as
+* before.  That keeps a damaged or hand-edited cache from ever being able to
+* break, shorten or corrupt the Control Panel.
+*/
+
+#define CPLCACHE_KEY \
+    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ControlPanel\\Cache"
+
+#define CPLCACHE_MAGIC       0x314C5043  /* 'CPL1'; bump when the layout changes */
+#define CPLCACHE_MAX_APPLETS 64
+#define CPLCACHE_MAX_STRING  255         /* applet_info::name and ::info hold 256 WCHARs */
+#define CPLCACHE_MAX_BLOB    0x20000     /* refuse to even allocate for more than this */
+
+/* Both structures are all-ULONG so they carry no padding of their own, and
+ * every item is placed on a ULONG boundary, so the blob has one single layout
+ * on every architecture we build for. */
+typedef struct _CPLCACHE_STAMP
+{
+    ULONG    Magic;
+    ULONG    cbTotal;           /* size of the whole blob, cross-checked on read */
+    ULONG    nFileSizeLow;
+    ULONG    nFileSizeHigh;
+    FILETIME ftLastWriteTime;
+    FILETIME ftCreationTime;
+    ULONG    LangId;            /* see CPanelCache_Stamp() */
+    ULONG    cApplets;          /* may legitimately be zero */
+} CPLCACHE_STAMP;
+
+typedef struct _CPLCACHE_ITEM
+{
+    LONG  iIconIdx;
+    ULONG cchDisplayName;       /* not counting the terminator */
+    ULONG cchComment;           /* not counting the terminator */
+    /* Followed by cchDisplayName + 1 and then cchComment + 1 WCHARs, then
+     * padding up to the next ULONG boundary so the item after stays aligned. */
+} CPLCACHE_ITEM;
+
+static ULONG CPanelCache_ItemSize(ULONG cchDisplayName, ULONG cchComment)
+{
+    ULONG cb = sizeof(CPLCACHE_ITEM) + (cchDisplayName + cchComment + 2) * sizeof(WCHAR);
+    return (cb + 3) & ~3UL;
+}
+
+/* Applets report an icon resource id, the pidl wants a resource index, and a
+ * negative index is how a pidl asks for an id.  Kept in one place so the
+ * cached value and the freshly inquired one cannot drift apart. */
+static int CPanelCache_IconIndex(const struct applet_info *pInfo)
+{
+    return (pInfo->idIcon > 0) ? -pInfo->idIcon : 0;
+}
+
+static HKEY CPanelCache_OpenKey(BOOL bWrite)
+{
+    HKEY hKey;
+    LONG lResult;
+
+    if (bWrite)
+    {
+        lResult = RegCreateKeyExW(HKEY_CURRENT_USER, CPLCACHE_KEY, 0, NULL, 0,
+                                  KEY_SET_VALUE, NULL, &hKey, NULL);
+    }
+    else
+    {
+        lResult = RegOpenKeyExW(HKEY_CURRENT_USER, CPLCACHE_KEY, 0, KEY_QUERY_VALUE, &hKey);
+    }
+
+    return (lResult == ERROR_SUCCESS) ? hKey : NULL;
+}
+
+/* Fills in everything that identifies "this exact file, read this exact way".
+ * Fails when the file cannot be stat'ed, which simply means no caching. */
+static BOOL CPanelCache_Stamp(LPCWSTR pszPath, const WIN32_FIND_DATAW *pFindData,
+                              CPLCACHE_STAMP *pStamp)
+{
+    ZeroMemory(pStamp, sizeof(*pStamp));
+
+    if (pFindData)
+    {
+        pStamp->nFileSizeLow = pFindData->nFileSizeLow;
+        pStamp->nFileSizeHigh = pFindData->nFileSizeHigh;
+        pStamp->ftLastWriteTime = pFindData->ftLastWriteTime;
+        pStamp->ftCreationTime = pFindData->ftCreationTime;
+    }
+    else
+    {
+        WIN32_FILE_ATTRIBUTE_DATA FileData;
+
+        if (!GetFileAttributesExW(pszPath, GetFileExInfoStandard, &FileData))
+            return FALSE;
+
+        pStamp->nFileSizeLow = FileData.nFileSizeLow;
+        pStamp->nFileSizeHigh = FileData.nFileSizeHigh;
+        pStamp->ftLastWriteTime = FileData.ftLastWriteTime;
+        pStamp->ftCreationTime = FileData.ftCreationTime;
+    }
+
+    pStamp->Magic = CPLCACHE_MAGIC;
+
+    /* The cached name and comment are localized resource strings, so the
+     * language that selected them belongs in the key just as much as the file
+     * does: change the UI language and the cache has to miss, or the folder
+     * would keep showing the previous language.  Both languages that steer
+     * resource lookup are folded in, because either one changing can change
+     * which string LoadString() hands back. */
+    pStamp->LangId = MAKELONG(GetUserDefaultUILanguage(), LANGIDFROMLCID(GetThreadLocale()));
+    return TRUE;
+}
+
+/* Validates a blob completely - stamp and every item - before the caller adds
+ * anything from it, so a rejected blob can never leave a half-filled list
+ * behind for the fallback path to duplicate. */
+static BOOL CPanelCache_IsUsable(const BYTE *pbData, ULONG cbData, const CPLCACHE_STAMP *pStamp)
+{
+    const CPLCACHE_STAMP *pCached = (const CPLCACHE_STAMP *)pbData;
+    ULONG cbOffset;
+    ULONG i;
+
+    if (cbData < sizeof(CPLCACHE_STAMP))
+        return FALSE;
+
+    if (pCached->Magic != pStamp->Magic ||
+        pCached->cbTotal != cbData ||
+        pCached->nFileSizeLow != pStamp->nFileSizeLow ||
+        pCached->nFileSizeHigh != pStamp->nFileSizeHigh ||
+        pCached->LangId != pStamp->LangId ||
+        CompareFileTime(&pCached->ftLastWriteTime, &pStamp->ftLastWriteTime) != 0 ||
+        CompareFileTime(&pCached->ftCreationTime, &pStamp->ftCreationTime) != 0)
+    {
+        return FALSE;
+    }
+
+    if (pCached->cApplets > CPLCACHE_MAX_APPLETS)
+        return FALSE;
+
+    /* cbOffset never runs past cbData: it starts inside the blob and only
+     * advances by an amount the blob has already been shown to hold. */
+    cbOffset = sizeof(CPLCACHE_STAMP);
+    for (i = 0; i < pCached->cApplets; ++i)
+    {
+        const CPLCACHE_ITEM *pItem;
+        const WCHAR *pszStrings;
+        ULONG cbItem;
+
+        if (cbData - cbOffset < sizeof(CPLCACHE_ITEM))
+            return FALSE;
+
+        pItem = (const CPLCACHE_ITEM *)(pbData + cbOffset);
+        if (pItem->cchDisplayName > CPLCACHE_MAX_STRING ||
+            pItem->cchComment > CPLCACHE_MAX_STRING)
+        {
+            return FALSE;
+        }
+
+        cbItem = CPanelCache_ItemSize(pItem->cchDisplayName, pItem->cchComment);
+        if (cbData - cbOffset < cbItem)
+            return FALSE;
+
+        /* Both strings have to end exactly where the lengths claim they do. */
+        pszStrings = (const WCHAR *)(pItem + 1);
+        if (pszStrings[pItem->cchDisplayName] != UNICODE_NULL ||
+            pszStrings[pItem->cchDisplayName + 1 + pItem->cchComment] != UNICODE_NULL)
+        {
+            return FALSE;
+        }
+
+        cbOffset += cbItem;
+    }
+
+    return (cbOffset == cbData);
+}
+
+/***********************************************************************
 *   control panel implementation in shell namespace
 */
 
@@ -43,8 +234,12 @@ class CControlPanelEnum :
         CControlPanelEnum();
         ~CControlPanelEnum();
         HRESULT WINAPI Initialize(DWORD dwFlags, IEnumIDList* pRegEnumerator);
-        BOOL RegisterCPanelApp(LPCWSTR path);
-        int RegisterRegistryCPanelApps(HKEY hkey_root, LPCWSTR szRepPath);
+        BOOL AddAppletsFromCache(LPCWSTR pszPath, const CPLCACHE_STAMP *pStamp);
+        VOID SaveAppletsToCache(LPCWSTR pszPath, const CPLCACHE_STAMP *pStamp, const CPlApplet *applet);
+        BOOL RegisterCPanelApp(LPCWSTR path, const WIN32_FIND_DATAW *pFindData,
+                               CSimpleArray<CPlApplet *> &LoadedApplets);
+        int RegisterRegistryCPanelApps(HKEY hkey_root, LPCWSTR szRepPath,
+                                       CSimpleArray<CPlApplet *> &LoadedApplets);
         BOOL CreateCPanelEnumList(DWORD dwFlags);
 
         BEGIN_COM_MAP(CControlPanelEnum)
@@ -163,34 +358,184 @@ HRESULT CCPLExtractIcon_CreateInstance(IShellFolder * psf, LPCITEMIDLIST pidl, R
     return initIcon->QueryInterface(riid, ppvOut);
 }
 
-BOOL CControlPanelEnum::RegisterCPanelApp(LPCWSTR wpath)
+BOOL CControlPanelEnum::AddAppletsFromCache(LPCWSTR pszPath, const CPLCACHE_STAMP *pStamp)
 {
-    CPlApplet* applet = Control_LoadApplet(0, wpath, NULL);
-    int iconIdx;
+    const CPLCACHE_STAMP *pCached;
+    HKEY hKey;
+    BYTE *pbData;
+    DWORD dwType = 0, cbData = 0;
+    ULONG cbOffset, i;
+
+    hKey = CPanelCache_OpenKey(FALSE);
+    if (!hKey)
+        return FALSE;
+
+    if (RegQueryValueExW(hKey, pszPath, NULL, &dwType, NULL, &cbData) != ERROR_SUCCESS ||
+        dwType != REG_BINARY || cbData < sizeof(CPLCACHE_STAMP) || cbData > CPLCACHE_MAX_BLOB)
+    {
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+
+    pbData = (BYTE *)SHAlloc(cbData);
+    if (!pbData)
+    {
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+
+    if (RegQueryValueExW(hKey, pszPath, NULL, &dwType, pbData, &cbData) != ERROR_SUCCESS ||
+        dwType != REG_BINARY ||
+        !CPanelCache_IsUsable(pbData, cbData, pStamp))
+    {
+        SHFree(pbData);
+        RegCloseKey(hKey);
+        return FALSE;
+    }
+
+    pCached = (const CPLCACHE_STAMP *)pbData;
+    cbOffset = sizeof(CPLCACHE_STAMP);
+    for (i = 0; i < pCached->cApplets; ++i)
+    {
+        const CPLCACHE_ITEM *pItem = (const CPLCACHE_ITEM *)(pbData + cbOffset);
+        const WCHAR *pszName = (const WCHAR *)(pItem + 1);
+        const WCHAR *pszComment = pszName + pItem->cchDisplayName + 1;
+        LPITEMIDLIST pidl = _ILCreateCPanelApplet(pszPath, pszName, pszComment, pItem->iIconIdx);
+
+        if (pidl)
+            AddToEnumList(pidl);
+
+        cbOffset += CPanelCache_ItemSize(pItem->cchDisplayName, pItem->cchComment);
+    }
+
+    SHFree(pbData);
+    RegCloseKey(hKey);
+
+    /* A hit even when the applet contributed no items: "this file yields
+     * nothing" is just as much a result worth not recomputing, and it is the
+     * expensive answer for an applet like bthprops.cpl that has to go and look
+     * for hardware before it can say so. */
+    return TRUE;
+}
+
+VOID CControlPanelEnum::SaveAppletsToCache(LPCWSTR pszPath, const CPLCACHE_STAMP *pStamp,
+                                           const CPlApplet *applet)
+{
+    size_t cchName[CPLCACHE_MAX_APPLETS];
+    size_t cchComment[CPLCACHE_MAX_APPLETS];
+    CPLCACHE_STAMP *pStored;
+    HKEY hKey;
+    BYTE *pbData;
+    ULONG cApplets = applet ? applet->count : 0;
+    ULONG cbTotal = sizeof(CPLCACHE_STAMP);
+    ULONG cbOffset, i;
+
+    if (cApplets > CPLCACHE_MAX_APPLETS)
+        return;
+
+    for (i = 0; i < cApplets; ++i)
+    {
+        /* StringCchLengthW also proves the buffers are terminated, which the
+         * CPL_NEWINQUIRE path does not guarantee on its own. */
+        if (FAILED(StringCchLengthW(applet->info[i].name, _countof(applet->info[i].name), &cchName[i])) ||
+            FAILED(StringCchLengthW(applet->info[i].info, _countof(applet->info[i].info), &cchComment[i])))
+        {
+            return;
+        }
+
+        cbTotal += CPanelCache_ItemSize((ULONG)cchName[i], (ULONG)cchComment[i]);
+    }
+
+    hKey = CPanelCache_OpenKey(TRUE);
+    if (!hKey)
+        return;
+
+    pbData = (BYTE *)SHAlloc(cbTotal);
+    if (!pbData)
+    {
+        RegCloseKey(hKey);
+        return;
+    }
+
+    /* Zero first so the alignment padding is deterministic rather than heap
+     * leftovers being written into the user's registry. */
+    ZeroMemory(pbData, cbTotal);
+
+    pStored = (CPLCACHE_STAMP *)pbData;
+    *pStored = *pStamp;
+    pStored->cbTotal = cbTotal;
+    pStored->cApplets = cApplets;
+
+    cbOffset = sizeof(CPLCACHE_STAMP);
+    for (i = 0; i < cApplets; ++i)
+    {
+        CPLCACHE_ITEM *pItem = (CPLCACHE_ITEM *)(pbData + cbOffset);
+        WCHAR *pszStrings = (WCHAR *)(pItem + 1);
+
+        pItem->iIconIdx = CPanelCache_IconIndex(&applet->info[i]);
+        pItem->cchDisplayName = (ULONG)cchName[i];
+        pItem->cchComment = (ULONG)cchComment[i];
+        wcscpy(pszStrings, applet->info[i].name);
+        wcscpy(pszStrings + cchName[i] + 1, applet->info[i].info);
+
+        cbOffset += CPanelCache_ItemSize((ULONG)cchName[i], (ULONG)cchComment[i]);
+    }
+
+    RegSetValueExW(hKey, pszPath, 0, REG_BINARY, pbData, cbTotal);
+
+    SHFree(pbData);
+    RegCloseKey(hKey);
+}
+
+BOOL CControlPanelEnum::RegisterCPanelApp(LPCWSTR wpath, const WIN32_FIND_DATAW *pFindData,
+                                          CSimpleArray<CPlApplet *> &LoadedApplets)
+{
+    CPLCACHE_STAMP Stamp;
+    CPlApplet *applet;
+    BOOL bNotAnApplet = FALSE;
+    BOOL bHaveStamp = CPanelCache_Stamp(wpath, pFindData, &Stamp);
+
+    /* Without a stamp there is nothing that could tell a fresh cache entry from
+     * a stale one, so such an applet is neither read from nor written to the
+     * cache and behaves exactly as it did before. */
+    if (bHaveStamp && AddAppletsFromCache(wpath, &Stamp))
+        return TRUE;
+
+    applet = Control_LoadApplet(0, wpath, NULL, &bNotAnApplet);
 
     if (applet)
     {
         for (UINT i = 0; i < applet->count; ++i)
         {
-            if (applet->info[i].idIcon > 0)
-                iconIdx = -applet->info[i].idIcon; /* negative icon index instead of icon number */
-            else
-                iconIdx = 0;
-
             LPITEMIDLIST pidl = _ILCreateCPanelApplet(wpath,
                                                       applet->info[i].name,
                                                       applet->info[i].info,
-                                                      iconIdx);
+                                                      CPanelCache_IconIndex(&applet->info[i]));
 
             if (pidl)
                 AddToEnumList(pidl);
         }
-        Control_UnloadApplet(applet);
     }
+
+    /* Only an answer that is a property of the file itself gets remembered.  A
+     * load that merely failed this time round (out of memory, say) must not be
+     * turned into a permanently missing applet. */
+    if (bHaveStamp && (applet || bNotAnApplet))
+        SaveAppletsToCache(wpath, &Stamp, applet);
+
+    /* The module stays loaded until the whole enumeration is over.  Several
+     * applets share dependencies - devmgr.dll, newdev.dll and powrprof.dll are
+     * each pulled in by two or three of them - and ReactOS releases an image
+     * section's pages as soon as its last reference goes, so unloading between
+     * applets means reading those modules off the disk again for the next one. */
+    if (applet && !LoadedApplets.Add(applet))
+        Control_UnloadApplet(applet);
+
     return TRUE;
 }
 
-int CControlPanelEnum::RegisterRegistryCPanelApps(HKEY hkey_root, LPCWSTR szRepPath)
+int CControlPanelEnum::RegisterRegistryCPanelApps(HKEY hkey_root, LPCWSTR szRepPath,
+                                                 CSimpleArray<CPlApplet *> &LoadedApplets)
 {
     WCHAR name[MAX_PATH];
     WCHAR value[MAX_PATH];
@@ -216,7 +561,11 @@ int CControlPanelEnum::RegisterRegistryCPanelApps(HKEY hkey_root, LPCWSTR szRepP
                 wcscpy(value, buffer);
             }
 
-            if (RegisterCPanelApp(value))
+            /* No WIN32_FIND_DATAW to hand here, so the stamp is taken from the
+             * file itself; that is one metadata query against a saving of a
+             * whole DLL load, and it keeps registry-listed applets such as
+             * console.dll cached on exactly the same terms as the globbed ones. */
+            if (RegisterCPanelApp(value, NULL, LoadedApplets))
                 ++cnt;
         }
         RegCloseKey(hkey);
@@ -233,6 +582,7 @@ BOOL CControlPanelEnum::CreateCPanelEnumList(DWORD dwFlags)
     WCHAR szPath[MAX_PATH];
     WIN32_FIND_DATAW wfd;
     HANDLE hFile;
+    CSimpleArray<CPlApplet *> LoadedApplets;
 
     TRACE("(%p)->(flags=0x%08x)\n", this, dwFlags);
 
@@ -257,14 +607,18 @@ BOOL CControlPanelEnum::CreateCPanelEnumList(DWORD dwFlags)
                 if (!(wfd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
                     wcscpy(p, wfd.cFileName);
                     if (wcscmp(wfd.cFileName, L"ncpa.cpl"))
-                        RegisterCPanelApp(szPath);
+                        RegisterCPanelApp(szPath, &wfd, LoadedApplets);
                 }
             } while(FindNextFileW(hFile, &wfd));
             FindClose(hFile);
         }
 
-        RegisterRegistryCPanelApps(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Cpls");
-        RegisterRegistryCPanelApps(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Cpls");
+        RegisterRegistryCPanelApps(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Cpls", LoadedApplets);
+        RegisterRegistryCPanelApps(HKEY_CURRENT_USER, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Cpls", LoadedApplets);
+
+        /* Now that nothing else is going to be inquired, let the modules go. */
+        for (int i = 0; i < LoadedApplets.GetSize(); ++i)
+            Control_UnloadApplet(LoadedApplets[i]);
     }
     return TRUE;
 }
