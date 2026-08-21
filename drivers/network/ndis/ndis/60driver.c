@@ -68,11 +68,6 @@ Ndis6DispatchSystemControl(
     _In_ PIRP           Irp);
 
 static NTSTATUS NTAPI
-Ndis6DispatchUnknown(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP           Irp);
-
-static NTSTATUS NTAPI
 Ndis6DispatchHybridGeneric(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP           Irp);
@@ -175,17 +170,20 @@ NdisMRegisterMiniportDriver(
     DriverObject->MajorFunction[IRP_MJ_POWER]        = Ndis6DispatchPower;
     DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = Ndis6DispatchSystemControl;
 
-    /* Default-handle every other major function so the IO manager
-     * doesn't return STATUS_INVALID_DEVICE_REQUEST. IRP_MJ_DEVICE_CONTROL,
-     * IRP_MJ_CREATE, IRP_MJ_CLOSE, etc. stay at STATUS_NOT_SUPPORTED
-     * until someone needs them — e1000e doesn't use them.
-     * Hybrid path: the slots hold KMDF's FxDevice::Dispatch, which must
-     * never see our adapter FDO — interpose a per-device demux. */
+    /* Default-handle every other major function so the IO manager doesn't
+     * return STATUS_INVALID_DEVICE_REQUEST: IoCreateDriver pre-fills every
+     * slot with IopInvalidDeviceRequest, so testing for NULL here never
+     * matched and IRP_MJ_CREATE / IRP_MJ_DEVICE_CONTROL on a miniport FDO
+     * was rejected before Ndis6TryDispatchAdapterFdoIrp ever saw it - which
+     * is what user mode needs for IOCTL_NDIS_QUERY_GLOBAL_STATS.
+     * Ndis6DispatchHybridGeneric is the right handler in both cases: it
+     * hands a hybrid driver's KMDF-owned device objects back to KMDF's own
+     * dispatch and only services our adapter FDOs itself.  A driver that
+     * later calls NdisRegisterDeviceEx overrides these slots with its own
+     * per-device demux, which handles the FDO case identically. */
     for (i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++)
     {
-        if (DriverObject->MajorFunction[i] == NULL)
-            DriverObject->MajorFunction[i] = Ndis6DispatchUnknown;
-        else if (Block->IsWdfHybrid && i != IRP_MJ_PNP && i != IRP_MJ_POWER && i != IRP_MJ_SYSTEM_CONTROL)
+        if (i != IRP_MJ_PNP && i != IRP_MJ_POWER && i != IRP_MJ_SYSTEM_CONTROL)
             DriverObject->MajorFunction[i] = Ndis6DispatchHybridGeneric;
     }
 
@@ -1026,21 +1024,6 @@ Ndis6DispatchSystemControl(
         return Ndis6CompleteIrp(Irp, STATUS_INVALID_DEVICE_STATE);
 
     return Ndis6PassThroughIrp(LowerDevice, Irp);
-}
-
-static NTSTATUS NTAPI
-Ndis6DispatchUnknown(
-    _In_ PDEVICE_OBJECT DeviceObject,
-    _In_ PIRP           Irp)
-{
-    NTSTATUS Status;
-
-    /* User-mode opens + IOCTL_NDIS_QUERY_GLOBAL_STATS on the miniport
-     * FDO (ipconfig / the connection-status dialog). */
-    if (Ndis6TryDispatchAdapterFdoIrp(DeviceObject, Irp, &Status))
-        return Status;
-
-    return Ndis6CompleteIrp(Irp, STATUS_NOT_SUPPORTED);
 }
 
 /* EOF */
