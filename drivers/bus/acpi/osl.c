@@ -579,11 +579,31 @@ AcpiOsStall (UINT32 microseconds)
     KeStallExecutionProcessor(microseconds);
 }
 
+/*
+ * ACPICA does not release mutexes in the reverse order it acquires them.
+ * AcpiExReleaseAllMutexes() force-releases every mutex a control method still
+ * owns when the method is aborted, walking Thread->AcquiredMutexList, and
+ * AcpiExLinkMutex() keeps that list ordered by SyncLevel - not by acquisition
+ * order.  AML is free to nest Acquire()/Release() in any order as well.
+ *
+ * That rules out FAST_MUTEX, which stores the caller's IRQL *inside the lock*
+ * and restores it on release: releasing lock A hands IRQL back to whatever A
+ * saw, regardless of any lock acquired after it.  One out-of-order release
+ * therefore drops IRQL below APC_LEVEL while another mutex is still held, and
+ * the next ExReleaseFastMutex() trips its ASSERT(KeGetCurrentIrql() ==
+ * APC_LEVEL).  A guarded mutex is no better: it asserts the saved
+ * SpecialApcDisable matches on release, which is the same LIFO requirement.
+ *
+ * Use a synchronization event instead - a binary semaphore, which is exactly
+ * what ACPICA models a mutex as (see ACPI_BINARY_SEMAPHORE in acenv.h).  It
+ * touches neither IRQL nor the APC state, so release order does not matter,
+ * and it can honour the Timeout that the old code silently ignored.
+ */
 ACPI_STATUS
 AcpiOsCreateMutex(
     ACPI_MUTEX *OutHandle)
 {
-    PFAST_MUTEX Mutex;
+    PKEVENT Event;
 
     if (!OutHandle)
     {
@@ -591,12 +611,13 @@ AcpiOsCreateMutex(
         return AE_BAD_PARAMETER;
     }
 
-    Mutex = ExAllocatePoolWithTag(NonPagedPool, sizeof(FAST_MUTEX), 'LpcA');
-    if (!Mutex) return AE_NO_MEMORY;
+    Event = ExAllocatePoolWithTag(NonPagedPool, sizeof(KEVENT), 'LpcA');
+    if (!Event) return AE_NO_MEMORY;
 
-    ExInitializeFastMutex(Mutex);
+    /* Signalled means "available" */
+    KeInitializeEvent(Event, SynchronizationEvent, TRUE);
 
-    *OutHandle = (ACPI_MUTEX)Mutex;
+    *OutHandle = (ACPI_MUTEX)Event;
 
     return AE_OK;
 }
@@ -619,24 +640,41 @@ AcpiOsAcquireMutex(
     ACPI_MUTEX Handle,
     UINT16 Timeout)
 {
+    LARGE_INTEGER Timeout100Ns;
+    PLARGE_INTEGER Interval;
+    NTSTATUS Status;
+
     if (!Handle)
     {
         DPRINT1("Bad parameter\n");
         return AE_BAD_PARAMETER;
     }
 
-    /* Check what the caller wants us to do */
-    if (Timeout == ACPI_DO_NOT_WAIT)
+    /*
+     * ACPI_DO_NOT_WAIT is 0, which is already the "poll, do not block"
+     * encoding for a relative wait, so it needs no special case.  Any other
+     * value is a millisecond count and must actually time out: AML can pass
+     * one straight through from an Acquire() opcode, and firmware relies on
+     * getting control back.
+     */
+    if (Timeout == ACPI_WAIT_FOREVER)
     {
-        /* Try to acquire without waiting */
-        if (!ExTryToAcquireFastMutex((PFAST_MUTEX)Handle))
-            return AE_TIME;
+        Interval = NULL;
     }
     else
     {
-        /* Block until we get it */
-        ExAcquireFastMutex((PFAST_MUTEX)Handle);
+        /* Relative timeouts are negative 100-ns units */
+        Timeout100Ns.QuadPart = (LONGLONG)Timeout * -10000;
+        Interval = &Timeout100Ns;
     }
+
+    Status = KeWaitForSingleObject(Handle,
+                                   Executive,
+                                   KernelMode,
+                                   FALSE,
+                                   Interval);
+    if (Status == STATUS_TIMEOUT) return AE_TIME;
+    if (!NT_SUCCESS(Status)) return AE_ERROR;
 
     return AE_OK;
 }
@@ -651,7 +689,7 @@ AcpiOsReleaseMutex(
         return;
     }
 
-    ExReleaseFastMutex((PFAST_MUTEX)Handle);
+    KeSetEvent((PKEVENT)Handle, IO_NO_INCREMENT, FALSE);
 }
 
 typedef struct _ACPI_SEM {
