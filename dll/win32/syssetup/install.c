@@ -1182,9 +1182,6 @@ InstallLiveCD(VOID)
     if (!CommonInstall(FALSE))
         goto error;
 
-    if (!StartUserinit())
-        goto error;
-
     /* Install the TCP/IP protocol driver */
     bRes = InstallNetworkComponent(L"MS_TCPIP");
     if (!bRes && GetLastError() != ERROR_FILE_NOT_FOUND)
@@ -1219,6 +1216,10 @@ InstallLiveCD(VOID)
     _SEH2_END;
 
     SetupCloseInfFile(hSysSetupInf);
+
+    /* Run the shell only once the shell classes are registered */
+    if (!StartUserinit())
+        goto error;
 
     return 0;
 
