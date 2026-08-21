@@ -33,6 +33,7 @@ typedef struct _GDIPOINTER /* should stay private to ENG? No, part of PDEVOBJ ak
   SURFACE  *psurfColor;
   SURFACE  *psurfMask;
   SURFACE  *psurfSave;
+  SURFACE  *psurfTemp; /* Scratch surface used to compose the pointer off-screen */
   FLONG    flags;
 
   /* Public pointer information */

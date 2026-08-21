@@ -191,6 +191,108 @@ IntHideMousePointer(
                  ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
 }
 
+/*
+ * FUNCTION: Compose the AND/XOR pointer over the saved background on an
+ * off-screen surface and publish the result with a single blit.
+ *
+ * Applying the AND mask straight to the visible surface leaves the cursor
+ * pixels black until the XOR pass lands. A real display scans out at its own
+ * pace and latches that intermediate state, which shows up as a cursor that
+ * flashes black while it is being moved.
+ *
+ * prclPointer is the (already clipped) rect inside the pointer bitmaps and
+ * prclSurf its counterpart on the destination surface. Both have the same
+ * extents, and the save surface uses the pointer bitmap coordinate space, so
+ * the whole composition runs in pointer coordinates and only the final blit
+ * translates to surface coordinates.
+ */
+static
+VOID
+IntComposeMousePointer(
+    _In_ GDIPOINTER *pgp,
+    _Inout_ SURFOBJ *psoDest,
+    _In_ RECTL *prclSurf,
+    _In_ RECTL *prclPointer)
+{
+    POINTL ptlSrc;
+
+    ptlSrc.x = prclPointer->left;
+    ptlSrc.y = prclPointer->top;
+
+    /* Start from the background we just saved, instead of reading the
+       (potentially uncached) destination surface a second time. */
+    IntEngBitBlt(&pgp->psurfTemp->SurfObj,
+                 &pgp->psurfSave->SurfObj,
+                 NULL,
+                 NULL,
+                 NULL,
+                 prclPointer,
+                 &ptlSrc,
+                 NULL,
+                 NULL,
+                 NULL,
+                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+
+    IntEngBitBlt(&pgp->psurfTemp->SurfObj,
+                 &pgp->psurfMask->SurfObj,
+                 NULL,
+                 NULL,
+                 NULL,
+                 prclPointer,
+                 &ptlSrc,
+                 NULL,
+                 NULL,
+                 NULL,
+                 ROP4_FROM_INDEX(R3_OPINDEX_SRCAND));
+
+    if (pgp->psurfColor)
+    {
+        IntEngBitBlt(&pgp->psurfTemp->SurfObj,
+                     &pgp->psurfColor->SurfObj,
+                     NULL,
+                     NULL,
+                     NULL,
+                     prclPointer,
+                     &ptlSrc,
+                     NULL,
+                     NULL,
+                     NULL,
+                     ROP4_FROM_INDEX(R3_OPINDEX_SRCINVERT));
+    }
+    else
+    {
+        /* The XOR mask is stored below the AND mask in the same bitmap */
+        ptlSrc.y += pgp->Size.cy;
+
+        IntEngBitBlt(&pgp->psurfTemp->SurfObj,
+                     &pgp->psurfMask->SurfObj,
+                     NULL,
+                     NULL,
+                     NULL,
+                     prclPointer,
+                     &ptlSrc,
+                     NULL,
+                     NULL,
+                     NULL,
+                     ROP4_FROM_INDEX(R3_OPINDEX_SRCINVERT));
+
+        ptlSrc.y = prclPointer->top;
+    }
+
+    /* Publish the finished pointer in one pass */
+    IntEngBitBlt(psoDest,
+                 &pgp->psurfTemp->SurfObj,
+                 NULL,
+                 NULL,
+                 NULL,
+                 prclSurf,
+                 &ptlSrc,
+                 NULL,
+                 NULL,
+                 NULL,
+                 ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
+}
+
 VOID
 NTAPI
 IntShowMousePointer(
@@ -245,80 +347,28 @@ IntShowMousePointer(
                  NULL,
                  ROP4_FROM_INDEX(R3_OPINDEX_SRCCOPY));
 
-    /* Blt the pointer on the screen. */
-    if (pgp->psurfColor)
+    /* Blt the pointer on the screen. An alpha pointer is a single operation
+       already, everything else goes through the off-screen composition. */
+    if (pgp->psurfColor && (pgp->flags & SPS_ALPHA))
     {
-        if(!(pgp->flags & SPS_ALPHA))
-        {
-            IntEngBitBlt(psoDest,
-                         &pgp->psurfMask->SurfObj,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &rclSurf,
-                         (POINTL*)&rclPointer,
-                         NULL,
-                         NULL,
-                         NULL,
-                         ROP4_SRCAND);
-
-            IntEngBitBlt(psoDest,
+        BLENDOBJ blendobj = { {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA } };
+        EXLATEOBJ exlo;
+        EXLATEOBJ_vInitialize(&exlo,
+            &gpalRGB,
+            ppdev->ppalSurf,
+            0, 0, 0);
+        IntEngAlphaBlend(psoDest,
                          &pgp->psurfColor->SurfObj,
                          NULL,
-                         NULL,
-                         NULL,
+                         &exlo.xlo,
                          &rclSurf,
-                         (POINTL*)&rclPointer,
-                         NULL,
-                         NULL,
-                         NULL,
-                         ROP4_SRCINVERT);
-         }
-         else
-         {
-            BLENDOBJ blendobj = { {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA } };
-            EXLATEOBJ exlo;
-            EXLATEOBJ_vInitialize(&exlo,
-                &gpalRGB,
-                ppdev->ppalSurf,
-                0, 0, 0);
-            IntEngAlphaBlend(psoDest,
-                             &pgp->psurfColor->SurfObj,
-                             NULL,
-                             &exlo.xlo,
-                             &rclSurf,
-                             &rclPointer,
-                             &blendobj);
-            EXLATEOBJ_vCleanup(&exlo);
-        }
+                         &rclPointer,
+                         &blendobj);
+        EXLATEOBJ_vCleanup(&exlo);
     }
     else
     {
-        IntEngBitBlt(psoDest,
-                     &pgp->psurfMask->SurfObj,
-                     NULL,
-                     NULL,
-                     NULL,
-                     &rclSurf,
-                     (POINTL*)&rclPointer,
-                     NULL,
-                     NULL,
-                     NULL,
-                     ROP4_FROM_INDEX(R3_OPINDEX_SRCAND));
-
-        rclPointer.top += pgp->Size.cy;
-
-        IntEngBitBlt(psoDest,
-                     &pgp->psurfMask->SurfObj,
-                     NULL,
-                     NULL,
-                     NULL,
-                     &rclSurf,
-                     (POINTL*)&rclPointer,
-                     NULL,
-                     NULL,
-                     NULL,
-                     ROP4_FROM_INDEX(R3_OPINDEX_SRCINVERT));
+        IntComposeMousePointer(pgp, psoDest, &rclSurf, &rclPointer);
     }
 }
 
@@ -342,8 +392,8 @@ EngSetPointerShape(
     PDEVOBJ *ppdev;
     GDIPOINTER *pgp;
     LONG lDelta = 0;
-    HBITMAP hbmSave = NULL, hbmColor = NULL, hbmMask = NULL;
-    PSURFACE psurfSave = NULL, psurfColor = NULL, psurfMask = NULL;
+    HBITMAP hbmSave = NULL, hbmTemp = NULL, hbmColor = NULL, hbmMask = NULL;
+    PSURFACE psurfSave = NULL, psurfTemp = NULL, psurfColor = NULL, psurfMask = NULL;
     RECTL rectl;
     SIZEL sizel = {0, 0};
 
@@ -388,6 +438,16 @@ EngSetPointerShape(
                                   NULL);
         psurfSave = SURFACE_ShareLockSurface(hbmSave);
         if (!psurfSave) goto failure;
+
+        /* Create a bitmap to compose the pointer on, so that the intermediate
+           result of the AND pass never reaches the visible surface. */
+        hbmTemp = EngCreateBitmap(sizel,
+                                  lDelta,
+                                  pso->iBitmapFormat,
+                                  BMF_TOPDOWN | BMF_NOZEROINIT,
+                                  NULL);
+        psurfTemp = SURFACE_ShareLockSurface(hbmTemp);
+        if (!psurfTemp) goto failure;
     }
 
     if (psoColor)
@@ -517,6 +577,14 @@ EngSetPointerShape(
         pgp->psurfSave = NULL;
     }
 
+    /* Free old compose bitmap */
+    if (pgp->psurfTemp)
+    {
+        EngDeleteSurface(pgp->psurfTemp->BaseObject.hHmgr);
+        SURFACE_ShareUnlockSurface(pgp->psurfTemp);
+        pgp->psurfTemp = NULL;
+    }
+
     /* See if we are being asked to hide the pointer. */
     if (psoMask == NULL && psoColor == NULL)
     {
@@ -528,6 +596,7 @@ EngSetPointerShape(
     pgp->psurfColor = psurfColor;
     pgp->psurfMask = psurfMask;
     pgp->psurfSave = psurfSave;
+    pgp->psurfTemp = psurfTemp;
     pgp->HotSpot.x = xHot;
     pgp->HotSpot.y = yHot;
     pgp->Size = sizel;
@@ -561,6 +630,8 @@ failure:
     if (psurfMask) SURFACE_ShareUnlockSurface(psurfMask);
     if (hbmColor) EngDeleteSurface((HSURF)hbmColor);
     if (psurfColor) SURFACE_ShareUnlockSurface(psurfColor);
+    if (hbmTemp) EngDeleteSurface((HSURF)hbmTemp);
+    if (psurfTemp) SURFACE_ShareUnlockSurface(psurfTemp);
     if (hbmSave) EngDeleteSurface((HSURF)hbmSave);
     if (psurfSave) SURFACE_ShareUnlockSurface(psurfSave);
 
