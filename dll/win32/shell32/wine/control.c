@@ -62,7 +62,7 @@ void Control_UnloadApplet(CPlApplet* applet)
     HeapFree(GetProcessHeap(), 0, applet);
 }
 
-CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
+CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel, BOOL* pbNotAnApplet)
 {
 #ifdef __REACTOS__
     ACTCTXW ActCtx = {sizeof(ACTCTX), ACTCTX_FLAG_RESOURCE_NAME_VALID};
@@ -76,6 +76,16 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
     unsigned 	i;
     CPLINFO	info;
     NEWCPLINFOW newinfo;
+
+#ifdef __REACTOS__
+    /* Tells the caller that the file was reached and asked, and simply is not
+     * (or no longer offers) a control panel applet - as opposed to a load that
+     * failed for a transient reason such as low memory.  Only the former is a
+     * property of the file itself and may therefore be remembered by a caller
+     * that caches applet metadata; see CControlPanelEnum::RegisterCPanelApp(). */
+    if (pbNotAnApplet)
+        *pbNotAnApplet = FALSE;
+#endif
 
     if (!(applet = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*applet))))
        return applet;
@@ -128,6 +138,10 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
     }
     if (!(applet->proc = (APPLET_PROC)GetProcAddress(applet->hModule, "CPlApplet"))) {
         WARN("Not a valid control panel applet %s\n", debugstr_w(applet->cmd));
+#ifdef __REACTOS__
+        if (pbNotAnApplet)
+            *pbNotAnApplet = TRUE;
+#endif
 	goto theError;
     }
     if (!applet->proc(hWnd, CPL_INIT, 0L, 0L)) {
@@ -137,6 +151,14 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
     if ((applet->count = applet->proc(hWnd, CPL_GETCOUNT, 0L, 0L)) == 0) {
         WARN("No subprogram in applet\n");
         applet->proc(applet->hWnd, CPL_EXIT, 0, 0);
+#ifdef __REACTOS__
+        /* The applet ran and said it has nothing to offer on this machine
+         * (bthprops.cpl does this when there is no Bluetooth radio).  That is
+         * a stable answer, so let the caller cache it rather than repeat the
+         * device enumeration behind it on every enumeration of the folder. */
+        if (pbNotAnApplet)
+            *pbNotAnApplet = TRUE;
+#endif
 	goto theError;
     }
 
@@ -144,6 +166,11 @@ CPlApplet*	Control_LoadApplet(HWND hWnd, LPCWSTR cmd, CPanel* panel)
                          FIELD_OFFSET( CPlApplet, info[applet->count] ));
 
     for (i = 0; i < applet->count; i++) {
+       /* A CPL_INQUIRE handler need not fill in every field, and the checks
+        * below draw their conclusions from what comes back, so start from a
+        * known state instead of from the previous iteration's leftovers (or,
+        * for i == 0, from whatever happened to be on the stack). */
+       ZeroMemory(&info, sizeof(info));
        ZeroMemory(&newinfo, sizeof(newinfo));
        newinfo.dwSize = sizeof(NEWCPLINFOA);
        applet->info[i].helpfile[0] = 0;
@@ -723,7 +750,7 @@ static void Control_RegisterRegistryApplets(HWND hWnd, CPanel *panel, HKEY hkey_
             if (RegEnumValueW(hkey, idx, name, &nameLen, NULL, NULL, (LPBYTE)value, &valueLen) != ERROR_SUCCESS)
                 break;
 
-            Control_LoadApplet(hWnd, value, panel);
+            Control_LoadApplet(hWnd, value, panel, NULL);
         }
         RegCloseKey(hkey);
     }
@@ -746,7 +773,7 @@ static	void	Control_DoWindow(CPanel* panel, HWND hWnd, HINSTANCE hInst)
     if ((h = FindFirstFileW(buffer, &fd)) != INVALID_HANDLE_VALUE) {
         do {
 	   lstrcpyW(p, fd.cFileName);
-	   Control_LoadApplet(hWnd, buffer, panel);
+	   Control_LoadApplet(hWnd, buffer, panel, NULL);
 	} while (FindNextFileW(h, &fd));
 	FindClose(h);
     }
@@ -980,7 +1007,7 @@ static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
 
     TRACE("cmd %s, extra %s, sp %d\n", debugstr_w(buffer), debugstr_w(extraPmts), sp);
 
-    applet = Control_LoadApplet(hWnd, buffer, panel);
+    applet = Control_LoadApplet(hWnd, buffer, panel, NULL);
     if (applet)
     {
         /* we've been given a textual parameter (or none at all) */
@@ -1114,7 +1141,7 @@ static	void	Control_DoLaunch(CPanel* panel, HWND hWnd, LPCWSTR wszCmd)
 
     TRACE("cmd %s, extra %s, sp %d\n", debugstr_w(buffer), debugstr_w(extraPmts), sp);
 
-    applet = Control_LoadApplet(hWnd, buffer, panel);
+    applet = Control_LoadApplet(hWnd, buffer, panel, NULL);
     if (applet)
     {
         ULONG_PTR cookie;
