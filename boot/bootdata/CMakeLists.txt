@@ -109,7 +109,12 @@ add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/unattend.inf DESTINAT
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/livecd/unattend.inf DESTINATION reactos NO_CAB FOR livecd)
 
 # LiveImage shortcuts
-add_custom_target(livecd_links)
+#
+# ALL, because the .lnk files are outputs of custom commands that nothing else
+# depends on: without it a plain `ninja` leaves them unbuilt, and anything that
+# consumes the livecd file list without building the livecd image itself sees a
+# manifest entry with no source behind it.
+add_custom_target(livecd_links ALL)
 function(add_livecd_shortcut name path)
     # Only handle DESTINATION; transfer all the other parameters verbatim to add_link()
     cmake_parse_arguments(_shortcut "" "" "DESTINATION" ${ARGN})
