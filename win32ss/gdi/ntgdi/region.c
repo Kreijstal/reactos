@@ -2322,11 +2322,30 @@ REGION_vSyncRegion(
 
     NT_ASSERT(prgn != NULL);
     NT_ASSERT(prgn->prgnattr != NULL);
-    NT_ASSERT((prgn->prgnattr == &prgn->rgnattr) ||
-              (prgn->prgnattr->AttrFlags & ATTR_RGN_VALID));
 
-    /* Get the region attribute and check if it's dirty (modified) */
+    /* Get the region attribute */
     prgnattr = prgn->prgnattr;
+
+    /* A region that was created from user mode keeps its attribute in the GDI
+     * pool of the process that created it, so that address is only mapped in
+     * that process. win32k walks lists that span the whole session and locks
+     * regions owned by other processes - DceResetActiveDCEs walks the global
+     * DCE list and locks every DCE->hrgnClip, VIS_ComputeVisibleRegion walks
+     * the sibling chain and locks every PWND->hrgnClip - so the attribute of a
+     * foreign region is simply not addressable here. There is nothing to sync
+     * in that case: only the owning process can have dirtied the attribute,
+     * and it flushes it on its own next GDI call. Touching it anyway faults in
+     * kernel mode and bugchecks the machine. */
+    if ((prgnattr != &prgn->rgnattr) &&
+        (GreGetObjectOwner(prgn->BaseObject.hHmgr) != GDI_OBJ_HMGR_POWNED))
+    {
+        return;
+    }
+
+    NT_ASSERT((prgnattr == &prgn->rgnattr) ||
+              (prgnattr->AttrFlags & ATTR_RGN_VALID));
+
+    /* Check if it's dirty (modified) */
     if (prgnattr->AttrFlags & ATTR_RGN_DIRTY)
     {
         NT_ASSERT(GreGetObjectOwner(prgn->BaseObject.hHmgr) == GDI_OBJ_HMGR_POWNED);
