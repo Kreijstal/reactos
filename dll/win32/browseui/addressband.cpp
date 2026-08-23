@@ -338,6 +338,14 @@ HRESULT STDMETHODCALLTYPE CAddressBand::TranslateAcceleratorIO(LPMSG lpMsg)
 
     if (lpMsg->hwnd == fEditControl)
     {
+        if (lpMsg->message == WM_KEYDOWN &&
+            lpMsg->wParam == L'A' &&
+            (::GetKeyState(VK_CONTROL) & 0x8000))
+        {
+            ::SendMessageW(fEditControl, EM_SETSEL, 0, -1);
+            return S_OK;
+        }
+
         switch (lpMsg->message)
         {
         case WM_SYSKEYDOWN:
