@@ -103,6 +103,7 @@ typedef struct _RAMDISK_DRIVE_EXTENSION
     LONG DiskOffset;
     WCHAR DriveLetter;
     ULONG BasePage;
+    PVOID VolatileBase;
 
     /* Data we get from the disk */
     ULONG BytesPerSector;
@@ -278,7 +279,15 @@ RamdiskMapPages(IN PRAMDISK_DRIVE_EXTENSION DeviceExtension,
     LARGE_INTEGER ActualOffset;
     LARGE_INTEGER ActualPages;
 
-    /* We only support boot disks for now */
+    if (DeviceExtension->DiskType == RAMDISK_VOLATILE_DISK)
+    {
+        if (Offset.QuadPart < 0 ||
+            Offset.QuadPart + Length > DeviceExtension->DiskLength.QuadPart)
+            return NULL;
+        *OutputLength = Length;
+        return (PVOID)((PUCHAR)DeviceExtension->VolatileBase + Offset.QuadPart);
+    }
+
     ASSERT(DeviceExtension->DiskType == RAMDISK_BOOT_DISK);
 
     /* Calculate the actual offset in the drive */
@@ -322,7 +331,9 @@ RamdiskUnmapPages(IN PRAMDISK_DRIVE_EXTENSION DeviceExtension,
     SIZE_T ActualLength;
     ULONG PageOffset;
 
-    /* We only support boot disks for now */
+    if (DeviceExtension->DiskType == RAMDISK_VOLATILE_DISK)
+        return;
+
     ASSERT(DeviceExtension->DiskType == RAMDISK_BOOT_DISK);
 
     /* Calculate the actual offset in the drive */
@@ -385,15 +396,8 @@ RamdiskCreateDiskDevice(IN PRAMDISK_BUS_EXTENSION DeviceExtension,
             Input->Options.NoDosDevice = FALSE;
             Input->Options.NoDriveLetter = IsWinPEBoot ? TRUE : FALSE;
         }
-        else
+        else if (DiskType == RAMDISK_WIM_DISK)
         {
-            /* The only other possibility is a WIM disk */
-            if (DiskType != RAMDISK_WIM_DISK)
-            {
-                /* Fail */
-                return STATUS_INVALID_PARAMETER;
-            }
-
             /* Read the view count instead */
             // ViewCount = Input->ViewCount;
 
@@ -403,6 +407,21 @@ RamdiskCreateDiskDevice(IN PRAMDISK_BUS_EXTENSION DeviceExtension,
             Input->Options.Readonly = FALSE;
             Input->Options.NoDriveLetter = TRUE;
             Input->Options.Fixed = TRUE;
+        }
+        else if (DiskType == RAMDISK_VOLATILE_DISK)
+        {
+            Input->Options.Hidden = FALSE;
+            Input->Options.NoDosDevice = FALSE;
+            Input->Options.Readonly = FALSE;
+            Input->Options.NoDriveLetter = FALSE;
+            /* This is a raw, super-floppy style volume with no partition
+             * table.  Advertising FixedMedia makes formatters query for
+             * partition information that does not exist. */
+            Input->Options.Fixed = FALSE;
+        }
+        else
+        {
+            return STATUS_INVALID_PARAMETER;
         }
 
         /* Are we just validating and returning to the user? */
@@ -483,7 +502,8 @@ RamdiskCreateDiskDevice(IN PRAMDISK_BUS_EXTENSION DeviceExtension,
             }
 
             /* Is this an ISO boot ramdisk? */
-            if (Input->DiskType == RAMDISK_BOOT_DISK)
+            if (Input->DiskType == RAMDISK_BOOT_DISK ||
+                Input->DiskType == RAMDISK_VOLATILE_DISK)
             {
                 /* Does it need a drive letter? */
                 if (!Input->Options.NoDriveLetter)
@@ -526,6 +546,23 @@ RamdiskCreateDiskDevice(IN PRAMDISK_BUS_EXTENSION DeviceExtension,
         DriveExtension->DiskLength = DiskLength;
         DriveExtension->DiskOffset = Input->DiskOffset;
         DriveExtension->BasePage = Input->BasePage;
+        DriveExtension->VolatileBase = NULL;
+        if (Input->DiskType == RAMDISK_VOLATILE_DISK)
+        {
+            if (DiskLength.HighPart || !DiskLength.LowPart)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto FailCreate;
+            }
+            DriveExtension->VolatileBase =
+                ExAllocatePoolWithTag(NonPagedPool, DiskLength.LowPart, 'vmaR');
+            if (!DriveExtension->VolatileBase)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto FailCreate;
+            }
+            RtlZeroMemory(DriveExtension->VolatileBase, DiskLength.LowPart);
+        }
         DriveExtension->BytesPerSector = 0;
         DriveExtension->SectorsPerTrack = 0;
         DriveExtension->NumberOfHeads = 0;
@@ -1315,8 +1352,14 @@ RamdiskDeviceControl(IN PDEVICE_OBJECT DeviceObject,
                 break;
             }
 
-            case IOCTL_DISK_GET_DRIVE_LAYOUT:
             case IOCTL_DISK_IS_WRITABLE:
+            {
+                Status = DriveExtension->DiskOptions.Readonly ?
+                         STATUS_MEDIA_WRITE_PROTECTED : STATUS_SUCCESS;
+                break;
+            }
+
+            case IOCTL_DISK_GET_DRIVE_LAYOUT:
             case IOCTL_SCSI_MINIPORT:
             case IOCTL_STORAGE_QUERY_PROPERTY:
             case IOCTL_MOUNTDEV_QUERY_UNIQUE_ID:
@@ -2454,6 +2497,13 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     /* Check for a loader block */
     if (KeLoaderBlock)
     {
+        CommandLine = KeLoaderBlock->LoadOptions;
+        if (CommandLine && strstr(CommandLine, "MININT"))
+        {
+            IsWinPEBoot = TRUE;
+            ReportDetectedDevice = TRUE;
+        }
+
         /* Get the boot device name */
         BootDeviceName = KeLoaderBlock->ArcBootDeviceName;
         if (BootDeviceName)
@@ -2466,7 +2516,6 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
                 ReportDetectedDevice = TRUE;
 
                 /* Check for a command line */
-                CommandLine = KeLoaderBlock->LoadOptions;
                 if (CommandLine)
                 {
                     /* Check if this is an ISO boot */

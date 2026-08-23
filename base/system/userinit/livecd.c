@@ -16,6 +16,7 @@ WCHAR Installer[MAX_PATH];
 typedef struct _LIVECD_UNATTEND
 {
     BOOL bEnabled;
+    BOOL bStartInstaller;
     LCID LocaleID;
 } LIVECD_UNATTEND;
 
@@ -749,8 +750,12 @@ StartDlgProc(
             }
             else if (pState->Unattend->bEnabled)
             {
-                /* Click on "Install" */
-                SendMessageW(hwndDlg, WM_COMMAND, MAKEWPARAM(IDC_INSTALL, BN_CLICKED), 0);
+                /* Select the requested unattended LiveCD action. */
+                SendMessageW(hwndDlg,
+                             WM_COMMAND,
+                             MAKEWPARAM(pState->Unattend->bStartInstaller ? IDC_INSTALL : IDC_RUN,
+                                        BN_CLICKED),
+                             0);
             }
             return TRUE;
         }
@@ -831,15 +836,19 @@ ParseUnattend(
         return;
     }
 
-    if (!GetPrivateProfileStringW(L"Unattend", L"UnattendSetupEnabled", L"", Buffer, _countof(Buffer), UnattendInf))
+    if (GetPrivateProfileStringW(L"Unattend", L"UnattendLiveCDEnabled", L"", Buffer, _countof(Buffer), UnattendInf) &&
+        _wcsicmp(Buffer, L"yes") == 0)
     {
-        ERR("Unable to parse UnattendSetupEnabled\n");
-        return;
+        pUnattend->bStartInstaller = FALSE;
     }
-
-    if (_wcsicmp(Buffer, L"yes") != 0)
+    else if (GetPrivateProfileStringW(L"Unattend", L"UnattendSetupEnabled", L"", Buffer, _countof(Buffer), UnattendInf) &&
+             _wcsicmp(Buffer, L"yes") == 0)
     {
-        TRACE("Unattended setup is not enabled\n");
+        pUnattend->bStartInstaller = TRUE;
+    }
+    else
+    {
+        TRACE("Unattended LiveCD startup is not enabled\n");
         return;
     }
     /* If the user presses Ctrl+Shift+F10, disable unattended setup */
@@ -999,23 +1008,10 @@ RunLiveCD(
     else
         WARN("Could not find the ReactOS Installer\n");
 
-    /* If the ReactOS Installer was located, use its path for the
-     * unattended file; otherwise, use the current ReactOS directory. */
-    StringCchCopyW(UnattendInf, _countof(UnattendInf), Installer);
-    if (*UnattendInf)
-    {
-        /* Find the last path separator and truncate the path there.
-         * If there is none, NUL the path. */
-        PWCHAR ptr = wcsrchr(UnattendInf, L'\\');
-        if (!ptr)
-            ptr = UnattendInf;
-        *ptr = UNICODE_NULL;
-    }
-    if (!*UnattendInf)
-    {
-        /* No actual path was found, fall back to the ReactOS directory */
-        GetWindowsDirectoryW(UnattendInf, _countof(UnattendInf));
-    }
+    /* LiveCD settings belong to the running ReactOS environment. The
+     * installer can reside beside a separate setup-specific unattend.inf
+     * when the LiveCD payload is embedded in boot media. */
+    GetWindowsDirectoryW(UnattendInf, _countof(UnattendInf));
     StringCchCatW(UnattendInf, _countof(UnattendInf), L"\\unattend.inf");
     ParseUnattend(UnattendInf, &Unattend);
     pState->Unattend = &Unattend;
