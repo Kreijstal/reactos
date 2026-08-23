@@ -13,6 +13,7 @@ list(APPEND SOURCE
     mouse.cpp
     power.cpp
     volume.cpp
+    wireless.cpp
     precomp.h)
 
 add_library(stobject MODULE
@@ -24,6 +25,7 @@ set_module_type(stobject win32dll UNICODE)
 target_link_libraries(stobject uuid wine cpprt atl_classes)
 
 add_importlibs(stobject
+    wlanapi
     setupapi
     advapi32
     winmm

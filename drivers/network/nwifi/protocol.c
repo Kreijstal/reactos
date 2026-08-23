@@ -302,8 +302,9 @@ NwifiBindAdapterEx(
         goto FailEarly;
     }
 
-    /* The bind parameters carry CurrentMacAddress, but re-query
-     * OID_DOT11_MAC_ADDRESS so the upper miniport reports what the radio uses. */
+    /* Require a mandatory Native Wi-Fi OID before publishing this binding.
+     * Some Ethernet miniports are exposed with an incorrect bind medium; they
+     * must not become phantom WLAN interfaces merely because they have a MAC. */
     RtlCopyMemory(Adapter->MacAddress,
                   BindParameters->CurrentMacAddress, IEEE80211_ADDR_LEN);
     {
@@ -312,11 +313,34 @@ NwifiBindAdapterEx(
         Status = NwifiProtocolDoRequest(Adapter, NdisRequestQueryInformation,
                                         OID_DOT11_MAC_ADDRESS,
                                         &QueriedMac, sizeof(QueriedMac), &Got);
-        if (Status == NDIS_STATUS_SUCCESS && Got >= IEEE80211_ADDR_LEN)
+        if (Status != NDIS_STATUS_SUCCESS || Got < IEEE80211_ADDR_LEN)
         {
-            RtlCopyMemory(Adapter->MacAddress, QueriedMac, IEEE80211_ADDR_LEN);
+            DPRINT1("NWIFI: lower adapter lacks OID_DOT11_MAC_ADDRESS "
+                    "(status 0x%08X, bytes %lu)\n", Status, Got);
+            Status = NDIS_STATUS_NOT_SUPPORTED;
+            goto FailAfterOpen;
         }
-        /* Non-fatal: fall back to the bind-parameters MAC. */
+        RtlCopyMemory(Adapter->MacAddress, QueriedMac, IEEE80211_ADDR_LEN);
+    }
+
+    /* A MAC address can be synthesized by an NDIS wrapper. Require the
+     * Native Wi-Fi operation-mode capability block and ExtSTA support. */
+    {
+        DOT11_OPERATION_MODE_CAPABILITY Capability;
+        ULONG Got = 0;
+
+        RtlZeroMemory(&Capability, sizeof(Capability));
+        Status = NwifiProtocolDoRequest(Adapter, NdisRequestQueryInformation,
+                                        OID_DOT11_OPERATION_MODE_CAPABILITY,
+                                        &Capability, sizeof(Capability), &Got);
+        if (Status != NDIS_STATUS_SUCCESS || Got < sizeof(Capability) ||
+            !(Capability.uOpModeCapability & DOT11_OPERATION_MODE_EXTENSIBLE_STATION))
+        {
+            DPRINT1("NWIFI: lower adapter lacks ExtSTA operation capability "
+                    "(status 0x%08X, bytes %lu)\n", Status, Got);
+            Status = NDIS_STATUS_NOT_SUPPORTED;
+            goto FailAfterOpen;
+        }
     }
 
     /* A Native-802.11 miniport has no operating mode until one is selected;
@@ -331,7 +355,10 @@ NwifiBindAdapterEx(
                                         &OpMode, sizeof(OpMode), &ExtStaOpMode);
         if (Status != NDIS_STATUS_SUCCESS)
         {
-            DPRINT1("NWIFI: set ExtSTA op-mode failed 0x%08X (continuing)\n", Status);
+            DPRINT1("NWIFI: lower adapter rejected mandatory ExtSTA op-mode "
+                    "(status 0x%08X)\n", Status);
+            Status = NDIS_STATUS_NOT_SUPPORTED;
+            goto FailAfterOpen;
         }
     }
 

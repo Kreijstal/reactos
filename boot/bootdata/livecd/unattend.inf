@@ -4,7 +4,10 @@ Signature = "$ReactOS$"
 ; Set UnattendSetupEnabled to yes in order to immediately start the ReactOS installer.
 ; yes - unattend setup enabled
 ; no - unattend setup disabled
-UnattendSetupEnabled = yes
+UnattendSetupEnabled = no
+
+; Skip the LiveCD welcome pages and boot directly to the desktop.
+UnattendLiveCDEnabled = yes
 
 ; Set this option to automatically specify language in the language setup.
 ; See hivesys.inf for available languages.
