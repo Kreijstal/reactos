@@ -1,5 +1,29 @@
 #reactos.dff
 
+set(WINE_GECKO_CAB_SOURCE "modules/optional/wine_gecko-2.40-x86.msi")
+if(DOWNLOAD_WINE_GECKO)
+    set(_wine_gecko_dir "${CMAKE_CURRENT_BINARY_DIR}/downloads")
+    set(WINE_GECKO_CAB_SOURCE "${_wine_gecko_dir}/wine_gecko-2.40-x86.msi")
+    file(MAKE_DIRECTORY "${_wine_gecko_dir}")
+    if(NOT EXISTS "${WINE_GECKO_CAB_SOURCE}")
+        message(STATUS "Downloading Wine Gecko 2.40 (x86)")
+        file(DOWNLOAD
+            "https://download.reactos.org/reactos/Wine-Gecko/wine_gecko-2.40-x86.msi"
+            "${WINE_GECKO_CAB_SOURCE}"
+            EXPECTED_HASH SHA1=8a3adedf3707973d1ed4ac3b2e791486abf814bd
+            TLS_VERIFY ON
+            SHOW_PROGRESS)
+    else()
+        file(SHA1 "${WINE_GECKO_CAB_SOURCE}" _wine_gecko_sha1)
+        if(NOT _wine_gecko_sha1 STREQUAL "8a3adedf3707973d1ed4ac3b2e791486abf814bd")
+            message(FATAL_ERROR "Cached Wine Gecko MSI has an unexpected SHA-1")
+        endif()
+    endif()
+    set_property(GLOBAL APPEND PROPERTY REACTOS_CAB_DEPENDS "${WINE_GECKO_CAB_SOURCE}")
+endif()
+
+configure_file(reactos.dff.in reactos.dff.static @ONLY)
+
 # reactos.dff is the concatenation of two files:
 # - reactos.dff.in, which is a static one and can be altered to
 #   add custom modules/files to reactos.cab
@@ -27,14 +51,14 @@ file(GENERATE
 # and also avoids rebuilding reactos.cab in case nothing changes after a cmake run
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff
-    COMMAND ${CMAKE_COMMAND} -D SRC1=${CMAKE_CURRENT_SOURCE_DIR}/reactos.dff.in
+    COMMAND ${CMAKE_COMMAND} -D SRC1=${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.static
                              -D SRC2=${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.$<CONFIG>.dyn
                              -D DST=${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.maydiff
                              -P ${CMAKE_CURRENT_BINARY_DIR}/concat.cmake
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                              ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.maydiff
                              ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/reactos.dff.in
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.static
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.dff.$<CONFIG>.dyn)
 
 add_custom_command(
