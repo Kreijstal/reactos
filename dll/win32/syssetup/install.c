@@ -23,6 +23,10 @@
 #include <shobjidl.h>
 #include <rpcproxy.h>
 #include <ndk/cmfuncs.h>
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
+#include <reactos/drivers/ntddrdsk.h>
+#include <reactos/libs/fmifs/fmifs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -32,6 +36,93 @@
 
 DWORD WINAPI
 SetupStartService(LPCWSTR lpServiceName, BOOL bWait);
+
+static BOOLEAN NTAPI
+LiveTempFormatCallback(CALLBACKCOMMAND Command, ULONG Modifier, PVOID Argument)
+{
+    UNREFERENCED_PARAMETER(Command);
+    UNREFERENCED_PARAMETER(Modifier);
+    UNREFERENCED_PARAMETER(Argument);
+    return TRUE;
+}
+
+static BOOL
+CreateLiveTempRamDisk(VOID)
+{
+    static const GUID TempDiskGuid =
+        {0x6e9f3f33, 0x8b24, 0x4f2a, {0xa8, 0x58, 0x93, 0x64, 0x63, 0x71, 0xe4, 0x12}};
+    RAMDISK_CREATE_INPUT Input;
+    UNICODE_STRING DeviceName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatus;
+    HANDLE hRamdisk;
+    NTSTATUS Status;
+    HKEY hKey;
+    DWORD Attempts;
+    const WCHAR TempPath[] = L"R:\\Temp";
+
+    RtlInitUnicodeString(&DeviceName, L"\\Device\\Ramdisk");
+    InitializeObjectAttributes(&ObjectAttributes, &DeviceName,
+                               OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&hRamdisk, FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE,
+                        &ObjectAttributes, &IoStatus,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Unable to open the LiveCD RAM-disk bus: 0x%lx\n", Status);
+        return FALSE;
+    }
+
+    ZeroMemory(&Input, sizeof(Input));
+    Input.Version = sizeof(Input);
+    Input.DiskGuid = TempDiskGuid;
+    Input.DiskType = RAMDISK_VOLATILE_DISK;
+    Input.DiskLength.QuadPart = 32 * 1024 * 1024;
+    Input.DriveLetter = L'R';
+    Status = NtDeviceIoControlFile(hRamdisk, NULL, NULL, NULL, &IoStatus,
+                                   FSCTL_CREATE_RAM_DISK,
+                                   &Input, sizeof(Input), NULL, 0);
+    NtClose(hRamdisk);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Unable to create the LiveCD temp RAM disk: 0x%lx\n", Status);
+        return FALSE;
+    }
+
+    for (Attempts = 0; Attempts != 100; ++Attempts)
+    {
+        if (GetDriveTypeW(L"R:\\") != DRIVE_NO_ROOT_DIR)
+            break;
+        Sleep(50);
+    }
+    if (Attempts == 100)
+        return FALSE;
+
+    FormatEx(L"R:\\", FMIFS_HARDDISK, L"FAT", L"RAMTEMP", TRUE, 0,
+             LiveTempFormatCallback);
+    if (!CreateDirectoryW(TempPath, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return FALSE;
+
+    SetEnvironmentVariableW(L"TEMP", TempPath);
+    SetEnvironmentVariableW(L"TMP", TempPath);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+                      0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        RegSetValueExW(hKey, L"TEMP", 0, REG_SZ, (const BYTE*)TempPath, sizeof(TempPath));
+        RegSetValueExW(hKey, L"TMP", 0, REG_SZ, (const BYTE*)TempPath, sizeof(TempPath));
+        RegCloseKey(hKey);
+    }
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS)
+    {
+        RegSetValueExW(hKey, L"TEMP", 0, REG_SZ, (const BYTE*)TempPath, sizeof(TempPath));
+        RegSetValueExW(hKey, L"TMP", 0, REG_SZ, (const BYTE*)TempPath, sizeof(TempPath));
+        RegCloseKey(hKey);
+    }
+    DPRINT1("LiveCD temp RAM disk ready at R:\\Temp\n");
+    return TRUE;
+}
 
 /* GLOBALS ******************************************************************/
 
@@ -1167,6 +1258,9 @@ InstallLiveCD(VOID)
     PreprocessUnattend(FALSE);
     if (!CommonInstall(FALSE))
         goto error;
+
+    if (!CreateLiveTempRamDisk())
+        DPRINT1("LiveCD is continuing without a writable temporary directory\n");
 
     /* Install the TCP/IP protocol driver */
     bRes = InstallNetworkComponent(L"MS_TCPIP");

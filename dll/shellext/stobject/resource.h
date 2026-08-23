@@ -57,6 +57,18 @@
 #define IDI_HOTPLUG_ERR           420
 #define IDI_HOTPLUG_OK            421
 
+#define IDI_WIRELESS_DISCONNECTED 430
+#define IDI_WIRELESS_1            431
+#define IDI_WIRELESS_2            432
+#define IDI_WIRELESS_3            433
+#define IDI_WIRELESS_4            434
+
+#define IDS_WIRELESS_NOT_CONNECTED   340
+#define IDS_WIRELESS_CONNECTED_TO    341
+#define IDS_WIRELESS_HIDDEN_NETWORK  342
+#define IDS_WIRELESS_VIEW_NETWORKS   343
+#define IDS_WIRELESS_OPEN_CONNECTIONS 344
+
 #define IDI_MOUSE_DISABLED        440
 #define IDI_MOUSE_NOBTN           441
 #define IDI_MOUSE_L_ACTIVE        442
