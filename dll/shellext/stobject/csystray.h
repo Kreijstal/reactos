@@ -25,6 +25,7 @@ class CSysTray :
     public IOleCommandTarget
 {
     CComPtr<IOleCommandTarget> pctNetShell;
+    HDEVNOTIFY m_hNetDeviceNotify;
 
     // TODO: keep icon handlers here
 

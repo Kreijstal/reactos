@@ -31,6 +31,12 @@ IDI_HOTPLUG_ERR ICON "resources/hotplug/0.ico"
 IDI_HOTPLUG_OK ICON  "resources/hotplug/1.ico"
 
 
+IDI_WIRELESS_DISCONNECTED ICON "resources/wireless/disconnected.ico"
+IDI_WIRELESS_1 ICON "resources/wireless/1.ico"
+IDI_WIRELESS_2 ICON "resources/wireless/2.ico"
+IDI_WIRELESS_3 ICON "resources/wireless/3.ico"
+IDI_WIRELESS_4 ICON "resources/wireless/4.ico"
+
 IDI_MOUSE_DISABLED ICON "resources/mouse/disabled.ico"
 IDI_MOUSE_NOBTN ICON "resources/mouse/none.ico"
 IDI_MOUSE_L_ACTIVE ICON "resources/mouse/left_active.ico"

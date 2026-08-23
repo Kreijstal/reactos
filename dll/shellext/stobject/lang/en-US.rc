@@ -45,6 +45,13 @@ BEGIN
     IDS_VOL_RUN "SNDVOL32.EXE"
     IDS_VOL_MUTED "Volume (muted)"
 
+    //Wireless network related strings
+    IDS_WIRELESS_NOT_CONNECTED "Wireless Network Connection (not connected)"
+    IDS_WIRELESS_CONNECTED_TO "Wireless Network Connection\nConnected to %s (signal %d%%)"
+    IDS_WIRELESS_HIDDEN_NETWORK "(unnamed network)"
+    IDS_WIRELESS_VIEW_NETWORKS "&View Available Wireless Networks"
+    IDS_WIRELESS_OPEN_CONNECTIONS "Open Network &Connections"
+
     //Keyboard-Mouse related strings
     IDS_KEYS_STICKY "StickyKeys"
     IDS_KEYS_MOUSE "MouseKeys"

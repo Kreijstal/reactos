@@ -9,6 +9,9 @@
 
 #include "precomp.h"
 
+#include <dbt.h>
+#include <ndisguid.h>
+
 #include <regstr.h>
 #include <undocshell.h>
 #include <shellutils.h>
@@ -16,6 +19,7 @@
 
 SysTrayIconHandlers_t g_IconHandlers [] = {
     { VOLUME_SERVICE_FLAG, Volume_Init, Volume_Shutdown, Volume_Update, Volume_Message },
+    { WIRELESS_SERVICE_FLAG, Wireless_Init, Wireless_Shutdown, Wireless_Update, Wireless_Message },
     { HOTPLUG_SERVICE_FLAG, Hotplug_Init, Hotplug_Shutdown, Hotplug_Update, Hotplug_Message },
     { POWER_SERVICE_FLAG, Power_Init, Power_Shutdown, Power_Update, Power_Message }
 };
@@ -25,7 +29,7 @@ SysTrayIconHandlers_t g_StandaloneHandlers[] = {
     { MOUSE_SERVICE_FLAG, MouseKeys_Init, MouseKeys_Shutdown, MouseKeys_Update, MouseKeys_Message },
 };
 
-CSysTray::CSysTray() : dwServicesEnabled(0)
+CSysTray::CSysTray() : m_hNetDeviceNotify(NULL), dwServicesEnabled(0)
 {
     wm_SHELLHOOK = RegisterWindowMessageW(L"SHELLHOOK");
 }
@@ -39,8 +43,9 @@ VOID CSysTray::GetServicesEnabled()
     HKEY hKey;
     DWORD dwSize;
 
-    /* Enable power, volume and hotplug by default */
-    this->dwServicesEnabled = POWER_SERVICE_FLAG | VOLUME_SERVICE_FLAG | HOTPLUG_SERVICE_FLAG;
+    /* Enable power, volume, hotplug and wireless by default */
+    this->dwServicesEnabled = POWER_SERVICE_FLAG | VOLUME_SERVICE_FLAG | HOTPLUG_SERVICE_FLAG |
+                              WIRELESS_SERVICE_FLAG;
 
     if (RegCreateKeyExW(HKEY_CURRENT_USER, REGSTR_PATH_SYSTRAY,
                         0,
@@ -115,9 +120,13 @@ void CSysTray::ConfigurePollTimer()
 
 HRESULT CSysTray::InitNetShell()
 {
-    HRESULT hr = CoCreateInstance(CLSID_ConnectionTray, 0, 1u, IID_PPV_ARG(IOleCommandTarget, &pctNetShell));
-    if (FAILED(hr))
-        return hr;
+    if (!pctNetShell)
+    {
+        HRESULT hr = CoCreateInstance(CLSID_ConnectionTray, 0, 1u,
+                                      IID_PPV_ARG(IOleCommandTarget, &pctNetShell));
+        if (FAILED(hr))
+            return hr;
+    }
 
     return pctNetShell->Exec(&CGID_ShellServiceObject,
                              OLECMDID_NEW,
@@ -373,11 +382,18 @@ BOOL CSysTray::ProcessWindowMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
         return DestroyWindow();
 
     case WM_CREATE:
+    {
+        DEV_BROADCAST_DEVICEINTERFACE_W Filter = { sizeof(Filter) };
+        Filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+        Filter.dbcc_classguid = GUID_DEVINTERFACE_NET;
+        m_hNetDeviceNotify = RegisterDeviceNotificationW(hWnd, &Filter,
+                                                          DEVICE_NOTIFY_WINDOW_HANDLE);
         GetServicesEnabled();
         InitIcons();
         RegisterShellHookWindow(hWnd);
         ConfigurePollTimer();
         return TRUE;
+    }
 
     case WM_TIMER:
         if (wParam == POLL_TIMER_ID)
@@ -393,8 +409,27 @@ BOOL CSysTray::ProcessWindowMessage(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM 
             MouseKeys_Update(this);
         break;
 
+    case WM_DEVICECHANGE:
+        if (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE)
+        {
+            PDEV_BROADCAST_HDR Header = reinterpret_cast<PDEV_BROADCAST_HDR>(lParam);
+            if (Header && Header->dbch_devicetype == DBT_DEVTYP_DEVICEINTERFACE)
+            {
+                PDEV_BROADCAST_DEVICEINTERFACE_W Interface =
+                    reinterpret_cast<PDEV_BROADCAST_DEVICEINTERFACE_W>(Header);
+                if (IsEqualGUID(Interface->dbcc_classguid, GUID_DEVINTERFACE_NET))
+                    InitNetShell();
+            }
+        }
+        break;
+
     case WM_DESTROY:
         KillTimer(POLL_TIMER_ID);
+        if (m_hNetDeviceNotify)
+        {
+            UnregisterDeviceNotification(m_hNetDeviceNotify);
+            m_hNetDeviceNotify = NULL;
+        }
         DeregisterShellHookWindow(hWnd);
         ShutdownIcons();
         PostQuitMessage(0);

@@ -116,6 +116,10 @@ cmake_dependent_option(ISAPNP_ENABLE "Whether to enable the ISA PnP support." ON
 set(GENERATE_DEPENDENCY_GRAPH FALSE CACHE BOOL
 "Whether to create a GraphML dependency graph of DLLs.")
 
+option(DOWNLOAD_WINE_GECKO
+       "Download and package the pinned Wine Gecko MSI for BootCD/LiveCD images"
+       OFF)
+
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     option(_PREFAST_ "Whether to enable PREFAST while compiling." OFF)
     option(_VS_ANALYZE_ "Whether to enable static analysis while compiling." OFF)
