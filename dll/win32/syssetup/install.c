@@ -21,6 +21,7 @@
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
+#include <strsafe.h>
 #include <rpcproxy.h>
 #include <ndk/cmfuncs.h>
 #include <ndk/iofuncs.h>
@@ -78,6 +79,7 @@ CreateLiveTempRamDisk(VOID)
     Input.Version = sizeof(Input);
     Input.DiskGuid = TempDiskGuid;
     Input.DiskType = RAMDISK_VOLATILE_DISK;
+    /* Writable workspace for LiveCD applications and profiles. */
     Input.DiskLength.QuadPart = 32 * 1024 * 1024;
     Input.DriveLetter = L'R';
     Status = NtDeviceIoControlFile(hRamdisk, NULL, NULL, NULL, &IoStatus,
@@ -121,6 +123,60 @@ CreateLiveTempRamDisk(VOID)
         RegCloseKey(hKey);
     }
     DPRINT1("LiveCD temp RAM disk ready at R:\\Temp\n");
+    return TRUE;
+}
+
+static BOOL
+ConfigureLiveGecko(VOID)
+{
+    WCHAR GeckoPath[MAX_PATH];
+    WCHAR Drive;
+    HKEY hKey;
+    static const PCWSTR SourceDirectories[] =
+    {
+        L"reactos", L"amd64", L"i386", L"arm", L"arm64"
+    };
+
+    GeckoPath[0] = UNICODE_NULL;
+    for (Drive = L'A'; Drive <= L'Z'; ++Drive)
+    {
+        WCHAR Root[] = L"A:\\";
+        Root[0] = Drive;
+        if (GetDriveTypeW(Root) != DRIVE_CDROM)
+            continue;
+        for (DWORD Index = 0; Index < ARRAYSIZE(SourceDirectories); ++Index)
+        {
+            if (FAILED(StringCchPrintfW(GeckoPath, ARRAYSIZE(GeckoPath),
+                                        L"%c:\\%s\\gecko\\2.40\\wine_gecko",
+                                        Drive, SourceDirectories[Index])))
+                return FALSE;
+            WCHAR VersionPath[MAX_PATH];
+            if (SUCCEEDED(StringCchPrintfW(VersionPath, ARRAYSIZE(VersionPath),
+                                           L"%s\\VERSION", GeckoPath)) &&
+                GetFileAttributesW(VersionPath) != INVALID_FILE_ATTRIBUTES)
+                break;
+            GeckoPath[0] = UNICODE_NULL;
+        }
+        if (GeckoPath[0])
+            break;
+    }
+
+    /* The package is optional when DOWNLOAD_WINE_GECKO is disabled. */
+    if (!GeckoPath[0])
+    {
+        DPRINT1("LiveCD Wine Gecko package is not present on the boot medium\n");
+        return FALSE;
+    }
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Wine\\MSHTML\\2.40",
+                        0, NULL, 0, KEY_SET_VALUE, NULL,
+                        &hKey, NULL) != ERROR_SUCCESS)
+        return FALSE;
+    RegSetValueExW(hKey, L"GeckoPath", 0, REG_SZ, (const BYTE*)GeckoPath,
+                   ((DWORD)wcslen(GeckoPath) + 1) * sizeof(WCHAR));
+    RegCloseKey(hKey);
+
+    DPRINT1("LiveCD Wine Gecko ready at %S\n", GeckoPath);
     return TRUE;
 }
 
@@ -1296,6 +1352,10 @@ InstallLiveCD(VOID)
     _SEH2_END;
 
     SetupCloseInfFile(hSysSetupInf);
+
+    /* Registration above runs in native syssetup.  Publish the x86 Gecko path
+     * only afterwards, before the WOW64 browser is launched. */
+    ConfigureLiveGecko();
 
     /* Run the shell only once the shell classes are registered */
     if (!StartUserinit())
