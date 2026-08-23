@@ -142,7 +142,9 @@ ConfigureLiveGecko(VOID)
     {
         WCHAR Root[] = L"A:\\";
         Root[0] = Drive;
-        if (GetDriveTypeW(Root) != DRIVE_CDROM)
+        /* The same LiveCD tree may be booted from optical or USB media. */
+        if (GetDriveTypeW(Root) == DRIVE_UNKNOWN ||
+            GetDriveTypeW(Root) == DRIVE_NO_ROOT_DIR)
             continue;
         for (DWORD Index = 0; Index < ARRAYSIZE(SourceDirectories); ++Index)
         {

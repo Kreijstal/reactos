@@ -49,7 +49,7 @@ if(DOWNLOAD_WINE_GECKO)
         get_filename_component(_wine_gecko_relative_dir "${_wine_gecko_relative}" DIRECTORY)
         add_cd_file(FILE "${_wine_gecko_file}"
                     DESTINATION "reactos/${_wine_gecko_relative_dir}"
-                    NO_CAB FOR bootcd)
+                    NO_CAB FOR livecd)
     endforeach()
 endif()
 
