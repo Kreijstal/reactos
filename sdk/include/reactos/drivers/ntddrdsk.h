@@ -51,6 +51,7 @@ DEFINE_GUID(GUID_BUS_TYPE_RAMDISK, 0x9D6D66A6, 0x0B0C, 0x4563, 0x90, 0x77, 0xA0,
 #define RAMDISK_MEMORY_MAPPED_DISK          2 // Loaded from a file and mapped in memory
 #define RAMDISK_BOOT_DISK                   3 // Used as a boot device "ramdisk(0)"
 #define RAMDISK_WIM_DISK                    4 // Used as an installation device
+#define RAMDISK_VOLATILE_DISK               5 // Empty writable disk backed by nonpaged RAM
 
 //
 // Options when creating a ramdisk

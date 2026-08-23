@@ -48,7 +48,7 @@ WlanSvcSynthesizeGuid(PNWIFI_INTERFACE_REF Ref, GUID *pGuid)
 }
 
 /* Pull the live link state from nwifi into an interface (lock held). */
-static VOID
+static BOOL
 WlanSvcSeedLinkState(PWLANSVC_INTERFACE Iface)
 {
     NWIFI_LINK_STATE ls;
@@ -58,7 +58,7 @@ WlanSvcSeedLinkState(PWLANSVC_INTERFACE Iface)
     {
         Iface->State = wlan_interface_state_disconnected;
         Iface->RadioOn = TRUE;
-        return;
+        return FALSE;
     }
 
     Iface->PhyType = (DOT11_PHY_TYPE)ls.PhyType;
@@ -73,6 +73,8 @@ WlanSvcSeedLinkState(PWLANSVC_INTERFACE Iface)
         Iface->ConnectedSsid = ls.Ssid;
         Iface->ConnectedBssid = ls.Bssid;
     }
+
+    return TRUE;
 }
 
 /*
@@ -131,7 +133,11 @@ WlanSvcPopulateInterfacesLocked(VOID)
         iface->State = wlan_interface_state_disconnected;
         iface->RadioOn = TRUE;
 
-        WlanSvcSeedLinkState(iface);
+        if (!WlanSvcSeedLinkState(iface))
+        {
+            HeapFree(GetProcessHeap(), 0, iface);
+            continue;
+        }
 
         InsertTailList(&WlanSvcInterfaceListHead, &iface->ListEntry);
         DPRINT("wlansvc: added interface '%S' (nwifi idx %lu)\n",

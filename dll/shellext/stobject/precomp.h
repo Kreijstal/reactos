@@ -34,10 +34,12 @@ extern HINSTANCE g_hInstance;
 #define ID_ICON_HOTPLUG (WM_APP + 0x4CC)
 #define ID_ICON_POWER   (WM_APP + 0x4CD)
 #define ID_ICON_MOUSE   (WM_APP + 0x4CE)
+#define ID_ICON_WIRELESS (WM_APP + 0x4CF)
 
 #define POWER_SERVICE_FLAG    0x00000001
 #define HOTPLUG_SERVICE_FLAG  0x00000002
 #define VOLUME_SERVICE_FLAG   0x00000004
+#define WIRELESS_SERVICE_FLAG 0x00000008
 #define SKEYS_SERVICE_FLAG    0x20000000
 #define FKEYS_SERVICE_FLAG    0x40000000
 #define MOUSE_SERVICE_FLAG    0x80000000
@@ -79,6 +81,11 @@ extern HRESULT STDMETHODCALLTYPE Power_Shutdown(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE Power_Update(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE Power_Message(_In_ CSysTray * pSysTray, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT &lResult);
 
+extern HRESULT STDMETHODCALLTYPE Wireless_Init(_In_ CSysTray * pSysTray);
+extern HRESULT STDMETHODCALLTYPE Wireless_Shutdown(_In_ CSysTray * pSysTray);
+extern HRESULT STDMETHODCALLTYPE Wireless_Update(_In_ CSysTray * pSysTray);
+extern HRESULT STDMETHODCALLTYPE Wireless_Message(_In_ CSysTray * pSysTray, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT &lResult);
+
 extern HRESULT STDMETHODCALLTYPE MouseKeys_Init(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE MouseKeys_Shutdown(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE MouseKeys_Update(_In_ CSysTray * pSysTray);
@@ -93,5 +100,6 @@ extern HRESULT STDMETHODCALLTYPE MouseKeys_Message(_In_ CSysTray * pSysTray, UIN
 #define VOLUME_TIMER_ID  3
 #define HOTPLUG_TIMER_ID 4
 #define HOTPLUG_DEVICE_TIMER_ID 5
+#define WIRELESS_TIMER_ID 6
 
 #endif /* _STOBJECT_PRECOMP_H_ */
