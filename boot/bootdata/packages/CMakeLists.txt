@@ -1,25 +1,56 @@
 #reactos.dff
 
-set(WINE_GECKO_CAB_SOURCE "modules/optional/wine_gecko-2.40-x86.msi")
+if(ARCH STREQUAL "amd64")
+    set(_wine_gecko_filename "wine_gecko-2.40-x86_64.msi")
+    set(_wine_gecko_url "https://dl.winehq.org/wine/wine-gecko/2.40/${_wine_gecko_filename}")
+    set(_wine_gecko_sha1_expected "356c414527b08b015b6dc53dbbf78d752320ae90")
+else()
+    set(_wine_gecko_filename "wine_gecko-2.40-x86.msi")
+    set(_wine_gecko_url "https://download.reactos.org/reactos/Wine-Gecko/${_wine_gecko_filename}")
+    set(_wine_gecko_sha1_expected "8a3adedf3707973d1ed4ac3b2e791486abf814bd")
+endif()
+set(WINE_GECKO_CAB_SOURCE "modules/optional/${_wine_gecko_filename}")
 if(DOWNLOAD_WINE_GECKO)
     set(_wine_gecko_dir "${CMAKE_CURRENT_BINARY_DIR}/downloads")
-    set(WINE_GECKO_CAB_SOURCE "${_wine_gecko_dir}/wine_gecko-2.40-x86.msi")
+    set(WINE_GECKO_CAB_SOURCE "${_wine_gecko_dir}/${_wine_gecko_filename}")
     file(MAKE_DIRECTORY "${_wine_gecko_dir}")
     if(NOT EXISTS "${WINE_GECKO_CAB_SOURCE}")
         message(STATUS "Downloading Wine Gecko 2.40 (x86)")
         file(DOWNLOAD
-            "https://download.reactos.org/reactos/Wine-Gecko/wine_gecko-2.40-x86.msi"
+            "${_wine_gecko_url}"
             "${WINE_GECKO_CAB_SOURCE}"
-            EXPECTED_HASH SHA1=8a3adedf3707973d1ed4ac3b2e791486abf814bd
+            EXPECTED_HASH SHA1=${_wine_gecko_sha1_expected}
             TLS_VERIFY ON
             SHOW_PROGRESS)
     else()
         file(SHA1 "${WINE_GECKO_CAB_SOURCE}" _wine_gecko_sha1)
-        if(NOT _wine_gecko_sha1 STREQUAL "8a3adedf3707973d1ed4ac3b2e791486abf814bd")
+        if(NOT _wine_gecko_sha1 STREQUAL "${_wine_gecko_sha1_expected}")
             message(FATAL_ERROR "Cached Wine Gecko MSI has an unexpected SHA-1")
         endif()
     endif()
     set_property(GLOBAL APPEND PROPERTY REACTOS_CAB_DEPENDS "${WINE_GECKO_CAB_SOURCE}")
+    # LiveCD cannot install into its read-only system directory.  Expand Gecko
+    # while assembling the image and run it directly from the boot medium.
+    find_program(MSIEXTRACT_EXECUTABLE msiextract REQUIRED)
+    set(_wine_gecko_image_dir "${_wine_gecko_dir}/image")
+    file(REMOVE_RECURSE "${_wine_gecko_image_dir}")
+    file(MAKE_DIRECTORY "${_wine_gecko_image_dir}")
+    execute_process(
+        COMMAND "${MSIEXTRACT_EXECUTABLE}" -C "${_wine_gecko_image_dir}" "${WINE_GECKO_CAB_SOURCE}"
+        RESULT_VARIABLE _wine_gecko_extract_result
+        OUTPUT_QUIET)
+    if(NOT _wine_gecko_extract_result EQUAL 0)
+        message(FATAL_ERROR "Unable to extract Wine Gecko MSI")
+    endif()
+    file(GLOB_RECURSE _wine_gecko_image_files LIST_DIRECTORIES FALSE
+         "${_wine_gecko_image_dir}/*")
+    foreach(_wine_gecko_file IN LISTS _wine_gecko_image_files)
+        file(RELATIVE_PATH _wine_gecko_relative "${_wine_gecko_image_dir}" "${_wine_gecko_file}")
+        get_filename_component(_wine_gecko_relative_dir "${_wine_gecko_relative}" DIRECTORY)
+        add_cd_file(FILE "${_wine_gecko_file}"
+                    DESTINATION "reactos/${_wine_gecko_relative_dir}"
+                    NO_CAB FOR bootcd)
+    endforeach()
 endif()
 
 configure_file(reactos.dff.in reactos.dff.static @ONLY)
