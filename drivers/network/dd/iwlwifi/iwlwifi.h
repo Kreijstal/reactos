@@ -47,6 +47,7 @@
 #define IWL_FLAG_HALTING            0x00000002
 #define IWL_FLAG_APM_UP             0x00000004
 #define IWL_FLAG_FW_LOADED          0x00000008
+#define IWL_FLAG_PNVM_LOADED        0x00000010
 
 /* NDIS carries an 802.3-form address even for a native-802.11 miniport. */
 #define IWL_MAC_ADDRESS_LENGTH      6
@@ -102,6 +103,17 @@ typedef struct _IWL_ADAPTER
     PVOID                   FwImage;
     ULONG                   FwImageLength;
     IWL_FW_PARSED          *FwParsed;
+
+    /* Platform NVM, AX210 and later only (IWL_CFG_NEEDS_PNVM).  Same
+     * ownership rule as the firmware: PnvmParsed's sections point into
+     * PnvmImage.  Which of its SKU blocks applies cannot be decided here -
+     * the SKU ID comes from the firmware's ALIVE response - so this stage
+     * only proves the blob is present and well formed and reports the
+     * blocks it offers. */
+    CHAR                    PnvmName[IWL_MAX_FW_NAME];
+    PVOID                   PnvmImage;
+    ULONG                   PnvmImageLength;
+    IWL_PNVM_PARSED        *PnvmParsed;
 
     /* Interrupt resource */
     ULONG                   InterruptVector;
@@ -208,6 +220,16 @@ IwlLoadFirmware(_In_ PIWL_ADAPTER Adapter);
 
 VOID
 IwlFreeFirmware(_In_ PIWL_ADAPTER Adapter);
+
+/*
+ * Read and parse iwlwifi-<pre>.pnvm for parts that need one.  Not called
+ * for parts without IWL_CFG_NEEDS_PNVM.  PASSIVE_LEVEL only.
+ */
+NDIS_STATUS
+IwlLoadPnvm(_In_ PIWL_ADAPTER Adapter);
+
+VOID
+IwlFreePnvm(_In_ PIWL_ADAPTER Adapter);
 
 /* ------------------------------------------------------------------ */
 /* driver.c                                                            */
