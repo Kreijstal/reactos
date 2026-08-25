@@ -53,6 +53,89 @@ if(DOWNLOAD_WINE_GECKO)
     endforeach()
 endif()
 
+# ---------------------------------------------------------------------------
+# Intel Wireless (iwlwifi) firmware
+#
+# Intel wireless parts from family 7000 on run signed device firmware that
+# does the PHY bring-up, calibration, scanning and association the host
+# driver would otherwise have to program register by register.  The blob is
+# therefore not an optional extra - without it the NIC does nothing at all.
+#
+# Fetched from linux-firmware at configure time and pinned by SHA-256,
+# exactly like DOWNLOAD_WINE_GECKO above.  Nothing is committed to this
+# tree.  Intel's linux-firmware licence permits verbatim binary
+# redistribution, so shipping what we download is fine; pinning the hash
+# is what makes the download reproducible rather than "whatever is on the
+# server today".
+#
+# NOTE ON THE PATH: linux-firmware moved these blobs out of the repository
+# root into intel/iwlwifi/ - the old root-level URLs now 404.
+#
+# One file per (MAC, RF) pair, at the newest API revision this driver
+# claims in hw/devices.c.  iwlwifi walks DOWN from UcodeApiMax, so a
+# missing newest blob is not fatal as long as an older one is present.
+if(DOWNLOAD_IWLWIFI_UCODE)
+    set(_iwlwifi_base
+        "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/intel/iwlwifi")
+    set(_iwlwifi_dir "${CMAKE_CURRENT_BINARY_DIR}/downloads/iwlwifi")
+
+    # filename|sha256 - "|" and not ";", because CMake would flatten a
+    # semicolon into two separate list elements and silently divorce every
+    # pin from its file.  Keep in step with UcodeApiMax in
+    # drivers/network/dd/iwlwifi/hw/devices.c.
+    set(_iwlwifi_blobs
+        "iwlwifi-5000-5.ucode|da259ae4b436f4d166aad2139f23694c2737e25288095140a1809d60fe676247"
+        "iwlwifi-6000g2a-6.ucode|9c435c7f413ff2ff1320604c68beb6e8239bb93522dc4b7c02c8cc94a393d88a"
+        "iwlwifi-7265D-29.ucode|c52bcaa0595f64d5fb32b7db3dd4b832ea7bf78f1037bcafc19d9c0f5c5c617e"
+        "iwlwifi-3168-29.ucode|3afae7bf4bb5fbb83a895ec7ad097b9fd20b7d8794f405c2823cbea5284e65c3"
+        "iwlwifi-8265-36.ucode|1336afcd028ed094d1fe33893c84c273bb5711be52970040344a75a12f276d56"
+        "iwlwifi-9260-th-b0-jf-b0-46.ucode|05f4c12514fddfd56fea660b3d2eb6b6e6f4a87a324d5d40464050312ddca911"
+        "iwlwifi-9000-pu-b0-jf-b0-46.ucode|9a0c5d938646942f9798e6212579c25771e4bb44301cd409b82abe361ca2c3e0"
+        "iwlwifi-cc-a0-77.ucode|94f5fb915f2074f98059365e11cca313e25a6fa3b7cd6772e80b3ba5edfb966b"
+        "iwlwifi-Qu-b0-hr-b0-77.ucode|2d3dd82853e1f5859de168fc4c3e2078703cb5c62c38ae39658c28ca5b664443"
+        "iwlwifi-ty-a0-gf-a0-89.ucode|cd4f8fe2242c115cf8687878c2534fbb436fbaa7172f49a1f69952a23c686ac9"
+        "iwlwifi-so-a0-gf-a0-89.ucode|698c913f938d9a8adce7ab9c049b1cd37daaa7473d8185f93e98f22733092f6b")
+
+    file(MAKE_DIRECTORY "${_iwlwifi_dir}")
+
+    foreach(_iwlwifi_entry IN LISTS _iwlwifi_blobs)
+        string(REGEX MATCH "^[^|]+"  _iwlwifi_name "${_iwlwifi_entry}")
+        string(REGEX MATCH "[^|]+$"  _iwlwifi_sha  "${_iwlwifi_entry}")
+        set(_iwlwifi_path "${_iwlwifi_dir}/${_iwlwifi_name}")
+
+        if(NOT EXISTS "${_iwlwifi_path}")
+            message(STATUS "Downloading Intel Wireless firmware ${_iwlwifi_name}")
+            file(DOWNLOAD
+                "${_iwlwifi_base}/${_iwlwifi_name}"
+                "${_iwlwifi_path}"
+                EXPECTED_HASH SHA256=${_iwlwifi_sha}
+                TLS_VERIFY ON
+                SHOW_PROGRESS)
+        else()
+            file(SHA256 "${_iwlwifi_path}" _iwlwifi_cached_sha)
+            if(NOT _iwlwifi_cached_sha STREQUAL "${_iwlwifi_sha}")
+                message(FATAL_ERROR
+                    "Cached ${_iwlwifi_name} has an unexpected SHA-256. "
+                    "Delete ${_iwlwifi_path} and re-configure.")
+            endif()
+        endif()
+
+        # Into reactos.cab, so the blob reaches an installed system and not
+        # just the boot medium.  The driver looks for it in
+        # \SystemRoot\System32\drivers\iwlwifi\ - see IWL_FW_DIRECTORY in
+        # drivers/network/dd/iwlwifi/fw/ucode_load.c.
+        add_cd_file(FILE "${_iwlwifi_path}"
+                    DESTINATION "reactos/system32/drivers/iwlwifi"
+                    FOR all)
+    endforeach()
+
+    if(NOT ENABLE_IWLWIFI)
+        message(STATUS
+            "DOWNLOAD_IWLWIFI_UCODE is on but ENABLE_IWLWIFI is off: "
+            "the firmware will be packaged with no driver to consume it.")
+    endif()
+endif()
+
 configure_file(reactos.dff.in reactos.dff.static @ONLY)
 
 # reactos.dff is the concatenation of two files:
