@@ -1,0 +1,219 @@
+; NETIWLWIFI.INF
+;
+; Installation file for Intel Wireless PCIe NICs (NDIS 6.20).
+;
+; The hardware-ID list below is generated from IwlDeviceTable in
+; hw/devices.c and MUST stay in step with it: an ID here that the table
+; does not know makes the driver bind and then refuse the device, and an ID
+; in the table that is missing here is simply never reached.
+;
+; Only 8086:51F1 has been exercised against real silicon.  Every other ID
+; is transcribed from the upstream iwlwifi PCI table - see the verification
+; note at the top of hw/devices.c.
+
+[Version]
+Signature  = "$Windows NT$"
+;Signature  = "$ReactOS$"
+LayoutFile = layout.inf
+Class      = Net
+ClassGUID  = {4D36E972-E325-11CE-BFC1-08002BE10318}
+Provider   = %ReactOS%
+DriverVer  = 08/25/2026,0.01
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[Manufacturer]
+%IntelMfg% = IntelMfg
+
+[IntelMfg]
+%IWL_4232.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4232
+%IWL_4235.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4235
+%IWL_4236.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4236
+%IWL_4237.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4237
+%IWL_423A.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_423A
+%IWL_423B.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_423B
+%IWL_0083.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0083
+%IWL_0084.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0084
+%IWL_08AE.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_08AE
+%IWL_08AF.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_08AF
+%IWL_0890.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0890
+%IWL_0891.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0891
+%IWL_0887.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0887
+%IWL_0888.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0888
+%IWL_0894.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0894
+%IWL_0895.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0895
+%IWL_0892.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0892
+%IWL_0893.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0893
+%IWL_422B.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_422B
+%IWL_422C.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_422C
+%IWL_4238.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4238
+%IWL_4239.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4239
+%IWL_0082.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0082
+%IWL_0085.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0085
+%IWL_008A.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_008A
+%IWL_008B.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_008B
+%IWL_0090.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0090
+%IWL_0091.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0091
+%IWL_0087.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0087
+%IWL_0089.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0089
+%IWL_0885.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0885
+%IWL_0886.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_0886
+%IWL_08B1.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_08B1
+%IWL_08B2.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_08B2
+%IWL_08B3.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_08B3
+%IWL_08B4.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_08B4
+%IWL_095A.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_095A
+%IWL_095B.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_095B
+%IWL_3165.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_3165
+%IWL_3166.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_3166
+%IWL_3167.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_3167
+%IWL_3168.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_3168
+%IWL_24F3.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_24F3
+%IWL_24F4.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_24F4
+%IWL_24F5.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_24F5
+%IWL_24F6.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_24F6
+%IWL_24FD.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_24FD
+%IWL_2526.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_2526
+%IWL_271B.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_271B
+%IWL_271C.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_271C
+%IWL_30DC.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_30DC
+%IWL_31DC.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_31DC
+%IWL_9DF0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_9DF0
+%IWL_A370.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_A370
+%IWL_2720.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_2720
+%IWL_2723.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_2723
+%IWL_02F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_02F0
+%IWL_06F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_06F0
+%IWL_34F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_34F0
+%IWL_3DF0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_3DF0
+%IWL_43F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_43F0
+%IWL_4DF0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4DF0
+%IWL_A0F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_A0F0
+%IWL_2725.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_2725
+%IWL_2726.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_2726
+%IWL_7A70.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_7A70
+%IWL_7AF0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_7AF0
+%IWL_7E40.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_7E40
+%IWL_54F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_54F0
+%IWL_51F0.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_51F0
+%IWL_51F1.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_51F1
+%IWL_272B.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_272B
+%IWL_A840.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_A840
+%IWL_7740.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_7740
+%IWL_4D40.DeviceDesc% = IWL_Inst.ndi,PCI\VEN_8086&DEV_4D40
+[IWL_Inst.ndi.NT]
+Characteristics = 0x84 ; NCF_PHYSICAL | NCF_HAS_UI
+BusType         = 5    ; PCIBus
+AddReg          = IWL_AddReg.NT
+CopyFiles       = IWL_CopyFiles.NT
+
+[IWL_Inst.ndi.NT.HW]
+AddReg = IWL_HwAddReg.NT
+
+[IWL_CopyFiles.NT]
+iwlwifi.sys
+
+[IWL_AddReg.NT]
+HKR, Ndi,            Service,    0, "iwlwifi"
+; Expose a Native Wi-Fi lower adapter to nwifi.  Advertising ndis5 here
+; would make the device look like an Ethernet miniport and stop the nwifi
+; intermediate driver from binding to it.
+HKR, Ndi\Interfaces, UpperRange, 0, "nativewifi"
+HKR, Ndi\Interfaces, LowerRange, 0, "wlan"
+
+[IWL_HwAddReg.NT]
+HKR, Interrupt Management,,0x00000010
+HKR, Interrupt Management\MessageSignaledInterruptProperties,,0x00000010
+HKR, Interrupt Management\MessageSignaledInterruptProperties,MSISupported,0x00010001,1
+
+[IWL_Inst.ndi.NT.Services]
+AddService = iwlwifi, 0x00000002, IWL_Service_Inst
+
+[IWL_Service_Inst]
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 0
+ServiceBinary  = %12%\iwlwifi.sys
+LoadOrderGroup = NDIS
+
+;----------------------------------- STRINGS -----------------------------
+
+[Strings]
+ReactOS   = "ReactOS Project"
+IntelMfg  = "Intel Corporation"
+IWL_4232.DeviceDesc = "Intel WiFi Link 5100"
+IWL_4235.DeviceDesc = "Intel Ultimate N WiFi Link 5300"
+IWL_4236.DeviceDesc = "Intel Ultimate N WiFi Link 5300"
+IWL_4237.DeviceDesc = "Intel WiFi Link 5100"
+IWL_423A.DeviceDesc = "Intel WiMAX/WiFi Link 5150"
+IWL_423B.DeviceDesc = "Intel WiMAX/WiFi Link 5150"
+IWL_0083.DeviceDesc = "Intel Centrino Wireless-N 1000"
+IWL_0084.DeviceDesc = "Intel Centrino Wireless-N 1000"
+IWL_08AE.DeviceDesc = "Intel Centrino Wireless-N 100"
+IWL_08AF.DeviceDesc = "Intel Centrino Wireless-N 100"
+IWL_0890.DeviceDesc = "Intel Centrino Wireless-N 2200"
+IWL_0891.DeviceDesc = "Intel Centrino Wireless-N 2200"
+IWL_0887.DeviceDesc = "Intel Centrino Wireless-N 2230"
+IWL_0888.DeviceDesc = "Intel Centrino Wireless-N 2230"
+IWL_0894.DeviceDesc = "Intel Centrino Wireless-N 105"
+IWL_0895.DeviceDesc = "Intel Centrino Wireless-N 105"
+IWL_0892.DeviceDesc = "Intel Centrino Wireless-N 135"
+IWL_0893.DeviceDesc = "Intel Centrino Wireless-N 135"
+IWL_422B.DeviceDesc = "Intel Centrino Ultimate-N 6300"
+IWL_422C.DeviceDesc = "Intel Centrino Advanced-N 6200"
+IWL_4238.DeviceDesc = "Intel Centrino Ultimate-N 6300"
+IWL_4239.DeviceDesc = "Intel Centrino Advanced-N 6200"
+IWL_0082.DeviceDesc = "Intel Centrino Advanced-N 6205"
+IWL_0085.DeviceDesc = "Intel Centrino Advanced-N 6205"
+IWL_008A.DeviceDesc = "Intel Centrino Wireless-N 6230"
+IWL_008B.DeviceDesc = "Intel Centrino Wireless-N 6230"
+IWL_0090.DeviceDesc = "Intel Centrino Advanced-N 6235"
+IWL_0091.DeviceDesc = "Intel Centrino Advanced-N 6235"
+IWL_0087.DeviceDesc = "Intel Centrino Advanced-N + WiMAX 6250"
+IWL_0089.DeviceDesc = "Intel Centrino Advanced-N + WiMAX 6250"
+IWL_0885.DeviceDesc = "Intel Centrino Wireless-N + WiMAX 6150"
+IWL_0886.DeviceDesc = "Intel Centrino Wireless-N + WiMAX 6150"
+IWL_08B1.DeviceDesc = "Intel Wireless-AC 7260"
+IWL_08B2.DeviceDesc = "Intel Wireless-AC 7260"
+IWL_08B3.DeviceDesc = "Intel Wireless-N 3160"
+IWL_08B4.DeviceDesc = "Intel Wireless-N 3160"
+IWL_095A.DeviceDesc = "Intel Wireless-AC 7265"
+IWL_095B.DeviceDesc = "Intel Wireless-AC 7265"
+IWL_3165.DeviceDesc = "Intel Wireless-AC 3165"
+IWL_3166.DeviceDesc = "Intel Wireless-AC 3165"
+IWL_3167.DeviceDesc = "Intel Wireless-AC 3168"
+IWL_3168.DeviceDesc = "Intel Wireless-AC 3168"
+IWL_24F3.DeviceDesc = "Intel Wireless-AC 8260"
+IWL_24F4.DeviceDesc = "Intel Wireless-AC 8260"
+IWL_24F5.DeviceDesc = "Intel Wireless-AC 4165"
+IWL_24F6.DeviceDesc = "Intel Wireless-AC 4165"
+IWL_24FD.DeviceDesc = "Intel Wireless-AC 8265"
+IWL_2526.DeviceDesc = "Intel Wireless-AC 9260"
+IWL_271B.DeviceDesc = "Intel Wireless-AC 9160"
+IWL_271C.DeviceDesc = "Intel Wireless-AC 9160"
+IWL_30DC.DeviceDesc = "Intel Wireless-AC 9560"
+IWL_31DC.DeviceDesc = "Intel Wireless-AC 9560"
+IWL_9DF0.DeviceDesc = "Intel Wireless-AC 9560"
+IWL_A370.DeviceDesc = "Intel Wireless-AC 9560"
+IWL_2720.DeviceDesc = "Intel Wireless-AC 9560"
+IWL_2723.DeviceDesc = "Intel Wi-Fi 6 AX200"
+IWL_02F0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_06F0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_34F0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_3DF0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_43F0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_4DF0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_A0F0.DeviceDesc = "Intel Wi-Fi 6 AX201"
+IWL_2725.DeviceDesc = "Intel Wi-Fi 6E AX210"
+IWL_2726.DeviceDesc = "Intel Wi-Fi 6E AX211"
+IWL_7A70.DeviceDesc = "Intel Wi-Fi 6E AX211"
+IWL_7AF0.DeviceDesc = "Intel Wi-Fi 6E AX211"
+IWL_7E40.DeviceDesc = "Intel Wi-Fi 6E AX211"
+IWL_54F0.DeviceDesc = "Intel Wi-Fi 6E AX211"
+IWL_51F0.DeviceDesc = "Intel Wi-Fi 6E AX211"
+IWL_51F1.DeviceDesc = "Intel Wi-Fi 6E AX211 (Raptor Lake CNVi)"
+IWL_272B.DeviceDesc = "Intel Wi-Fi 7 BE200"
+IWL_A840.DeviceDesc = "Intel Wi-Fi 7 BE201"
+IWL_7740.DeviceDesc = "Intel Wi-Fi 7 BE201"
+IWL_4D40.DeviceDesc = "Intel Wi-Fi 7 BE201"
