@@ -120,6 +120,22 @@ option(DOWNLOAD_WINE_GECKO
        "Download and package the pinned Wine Gecko MSI for BootCD/LiveCD images"
        OFF)
 
+# iwlwifi Phase 1a identifies the part, powers the transport up and
+# validates the firmware container, then deliberately refuses to present an
+# adapter - there is no NVM address and no data path yet.  On by default it
+# would turn every Intel wireless machine into a device that binds and
+# fails, so it stays a bring-up switch until the data path lands.
+option(ENABLE_IWLWIFI
+       "Build and package the Intel Wireless (iwlwifi) miniport"
+       OFF)
+
+# The firmware blobs are ~15 MiB and are fetched from linux-firmware at
+# configure time, pinned by SHA-256, the same way DOWNLOAD_WINE_GECKO
+# fetches the Gecko MSI.  Nothing is committed to this tree.
+option(DOWNLOAD_IWLWIFI_UCODE
+       "Download and package the pinned Intel Wireless firmware blobs"
+       OFF)
+
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     option(_PREFAST_ "Whether to enable PREFAST while compiling." OFF)
     option(_VS_ANALYZE_ "Whether to enable static analysis while compiling." OFF)
