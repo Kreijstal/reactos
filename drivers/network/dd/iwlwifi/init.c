@@ -142,6 +142,13 @@ IwlMiniportInitializeEx(
         goto Fail;
     }
 
+    if (Adapter->Cfg->Flags & IWL_CFG_NEEDS_PNVM)
+    {
+        Status = IwlLoadPnvm(Adapter);
+        if (Status != NDIS_STATUS_SUCCESS)
+            goto Fail;
+    }
+
     DPRINT1("iwlwifi: ================ identification complete ============\n");
     DPRINT1("iwlwifi:   part      : %s (8086:%04x subsys %04x rev %02x)\n",
             Adapter->Cfg->Name, Adapter->DeviceId,
@@ -161,6 +168,12 @@ IwlMiniportInitializeEx(
                 CSR_HW_RF_ID_TYPE_DASH(Adapter->HwRfId));
     }
     DPRINT1("iwlwifi:   firmware  : %s\n", Adapter->FwName);
+    if (Adapter->Cfg->Flags & IWL_CFG_NEEDS_PNVM)
+    {
+        DPRINT1("iwlwifi:   pnvm      : %s, %u SKU block(s) - the one that "
+                "applies is chosen from the firmware's ALIVE response\n",
+                Adapter->PnvmName, Adapter->PnvmParsed->BlockCount);
+    }
     DPRINT1("iwlwifi: =====================================================\n");
 
     /*
@@ -210,6 +223,7 @@ IwlCleanupAdapter(_In_ PIWL_ADAPTER Adapter)
     if (Adapter->InterruptHandle != NULL)
         IwlUnregisterInterrupt(Adapter);
 
+    IwlFreePnvm(Adapter);
     IwlFreeFirmware(Adapter);
 
     if (Adapter->IoBase != NULL)
