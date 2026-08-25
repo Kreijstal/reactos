@@ -260,6 +260,73 @@ typedef struct _IWL_FW_PARSED
     iwl_u32      TlvCount;
 } IWL_FW_PARSED;
 
+/*
+ * Platform NVM (.pnvm) - AX210 and later.
+ *
+ * The file is a BARE TLV stream: no 88-byte container header, the first
+ * byte is the first TLV.  It is a sequence of blocks, each opened by an
+ * IWL_UCODE_TLV_PNVM_SKU carrying a 3-word SKU ID; the HW_TYPE,
+ * PNVM_VERSION and SEC_RT TLVs that follow belong to that block until the
+ * next PNVM_SKU.  The device picks a block by matching the SKU ID the
+ * firmware reports in its ALIVE response, which is why the PNVM can only
+ * be pushed after the ucode is running.
+ */
+
+/*
+ * Measured with fw/harness/ucode_parse_test.c against linux-firmware
+ * (2026-08-25), blocks per file / sections per block:
+ *
+ *   iwlwifi-so-a0-gf-a0.pnvm    4 blocks, 2 sections each
+ *   iwlwifi-ty-a0-gf-a0.pnvm    4 blocks, 2 sections each
+ *   iwlwifi-gl-c0-fm-c0.pnvm   16 blocks, 2 sections each
+ *   iwlwifi-bz-b0-fm-c0.pnvm   16 blocks, 2 sections each
+ *
+ * A dropped block is NOT harmless the way a dropped ucode section would
+ * be: the one block that matters is whichever matches this board's SKU,
+ * and it could be any of them.  32 is 2x the largest file shipping today.
+ */
+#ifndef IWL_PNVM_MAX_BLOCKS
+#define IWL_PNVM_MAX_BLOCKS         32
+#endif
+#ifndef IWL_PNVM_MAX_SECTIONS
+#define IWL_PNVM_MAX_SECTIONS       16
+#endif
+
+/* Deprecated in-band separator upstream still skips over. */
+#define IWL_PNVM_SKIP_SECTION       0xddddeeee
+
+typedef struct _IWL_PNVM_BLOCK
+{
+    iwl_u32        SkuId[3];
+
+    iwl_bool       HasHwType;
+    iwl_u16        MacType;
+    iwl_u16        RfId;
+
+    iwl_bool       HasVersion;
+    iwl_u32        Version;
+
+    IWL_FW_SECTION Section[IWL_PNVM_MAX_SECTIONS];
+    iwl_u32        SectionCount;
+    /* Sum of the section payloads - what a DMA buffer would have to hold. */
+    iwl_u32        TotalDataLength;
+} IWL_PNVM_BLOCK;
+
+typedef struct _IWL_PNVM_PARSED
+{
+    IWL_PNVM_BLOCK Block[IWL_PNVM_MAX_BLOCKS];
+    iwl_u32        BlockCount;
+
+    iwl_u32        TlvCount;
+    iwl_u32        UnknownTlvCount;
+    /* Blocks past IWL_PNVM_MAX_BLOCKS.  Skipped rather than fatal, because
+     * a file describes many SKUs and this board is only ever one of them -
+     * but if the board's own SKU was in the dropped set, the later
+     * IwlPnvmSelectBlock() returns NULL and the caller must say so rather
+     * than silently pushing the wrong block. */
+    iwl_u32        TruncatedBlockCount;
+} IWL_PNVM_PARSED;
+
 /* Parser result codes.  Distinct values so a failure names its own cause
  * in the log rather than collapsing to "bad firmware". */
 typedef enum _IWL_FW_PARSE_STATUS
@@ -271,7 +338,9 @@ typedef enum _IWL_FW_PARSE_STATUS
     IwlFwParseTruncatedTlv,         /* a TLV header runs past end of file */
     IwlFwParseTlvLengthOverflow,    /* a TLV claims more data than remains */
     IwlFwParseTooManySections,
-    IwlFwParseBadSectionLength      /* SEC_* payload smaller than its offset word */
+    IwlFwParseBadSectionLength,     /* SEC_* payload smaller than its offset word */
+    IwlFwParseTooManyPnvmSections,
+    IwlFwParseSectionOutsideBlock   /* PNVM data before any PNVM_SKU opened a block */
 } IWL_FW_PARSE_STATUS;
 
 /*
@@ -286,5 +355,25 @@ IwlParseUcodeFile(
 
 const char *
 IwlFwParseStatusName(IWL_FW_PARSE_STATUS Status);
+
+/*
+ * Parse a .pnvm container.  Image must outlive Parsed - the sections point
+ * into it, exactly as for IwlParseUcodeFile().
+ */
+IWL_FW_PARSE_STATUS
+IwlParsePnvmFile(
+    const void *Image,
+    iwl_size_t Length,
+    IWL_PNVM_PARSED *Parsed);
+
+/*
+ * Pick the block matching a SKU ID (as reported by the firmware's ALIVE
+ * response).  Returns NULL when the file describes no such SKU, which is a
+ * real and reportable condition - the blob is for a different board.
+ */
+const IWL_PNVM_BLOCK *
+IwlPnvmSelectBlock(
+    const IWL_PNVM_PARSED *Parsed,
+    const iwl_u32 SkuId[3]);
 
 #endif /* _IWLWIFI_UCODE_FILE_H_ */

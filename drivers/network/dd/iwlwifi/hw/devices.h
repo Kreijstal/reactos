@@ -61,6 +61,12 @@ typedef enum _IWL_DEVICE_FAMILY
 /* Integrated CNVi part: the PCI function is only the MAC, the radio lives
  * on a separate CRF module across the CNVio link. */
 #define IWL_CFG_INTEGRATED              0x00000004
+/* Part needs a Platform NVM blob (iwlwifi-<pre>.pnvm) in addition to the
+ * .ucode container.  AX210 and later only - the earlier families carry the
+ * equivalent data on-die.  The blob is pushed AFTER the firmware reports
+ * ALIVE, because the SKU ID that selects the right section out of it comes
+ * from that ALIVE response. */
+#define IWL_CFG_NEEDS_PNVM              0x00000008
 
 typedef struct _IWL_DEVICE_CFG
 {
@@ -101,6 +107,18 @@ BOOLEAN
 IwlBuildFirmwareName(
     _In_ const IWL_DEVICE_CFG *Cfg,
     _In_ UCHAR Api,
+    _Out_writes_z_(BufferChars) PSTR Buffer,
+    _In_ SIZE_T BufferChars);
+
+/*
+ * Compose the Platform NVM file name:
+ *   iwlwifi-<FwNamePre>.pnvm
+ * Same base name as the ucode container but with no API revision - the
+ * PNVM is not versioned against the host API.
+ */
+BOOLEAN
+IwlBuildPnvmName(
+    _In_ const IWL_DEVICE_CFG *Cfg,
     _Out_writes_z_(BufferChars) PSTR Buffer,
     _In_ SIZE_T BufferChars);
 
