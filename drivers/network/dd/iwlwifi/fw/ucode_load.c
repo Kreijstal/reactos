@@ -276,3 +276,106 @@ IwlFreeFirmware(_In_ PIWL_ADAPTER Adapter)
 
     InterlockedAnd(&Adapter->Flags, ~IWL_FLAG_FW_LOADED);
 }
+
+/* ------------------------------------------------------------------ */
+/* Platform NVM                                                        */
+/* ------------------------------------------------------------------ */
+
+NDIS_STATUS
+IwlLoadPnvm(_In_ PIWL_ADAPTER Adapter)
+{
+    PVOID Image;
+    ULONG Length;
+    NDIS_STATUS Status;
+    IWL_FW_PARSE_STATUS ParseStatus;
+    ULONG i;
+
+    NT_ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+    NT_ASSERT(Adapter->Cfg != NULL);
+    /* Callers must not ask for a PNVM on a part that has none - the file
+     * would not exist and the failure would read as a missing install. */
+    NT_ASSERT(Adapter->Cfg->Flags & IWL_CFG_NEEDS_PNVM);
+
+    if (!IwlBuildPnvmName(Adapter->Cfg, Adapter->PnvmName, sizeof(Adapter->PnvmName)))
+        return NDIS_STATUS_FAILURE;
+
+    Status = IwlReadFirmwareFile(Adapter->PnvmName, &Image, &Length);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        if (Status == NDIS_STATUS_FILE_NOT_FOUND)
+        {
+            DPRINT1("iwlwifi: %s is missing from %S.  AX210-class parts "
+                    "cannot run without it.\n",
+                    Adapter->PnvmName, IWL_FW_DIRECTORY);
+        }
+        return NDIS_STATUS_FAILURE;
+    }
+
+    Adapter->PnvmParsed = ExAllocatePoolWithTag(PagedPool,
+                                                sizeof(IWL_PNVM_PARSED),
+                                                IWL_TAG);
+    if (Adapter->PnvmParsed == NULL)
+    {
+        ExFreePoolWithTag(Image, IWL_TAG);
+        return NDIS_STATUS_RESOURCES;
+    }
+
+    ParseStatus = IwlParsePnvmFile(Image, Length, Adapter->PnvmParsed);
+    if (ParseStatus != IwlFwParseOk)
+    {
+        DPRINT1("iwlwifi: %s will not parse: %s\n",
+                Adapter->PnvmName, IwlFwParseStatusName(ParseStatus));
+        ExFreePoolWithTag(Adapter->PnvmParsed, IWL_TAG);
+        Adapter->PnvmParsed = NULL;
+        ExFreePoolWithTag(Image, IWL_TAG);
+        return NDIS_STATUS_FAILURE;
+    }
+
+    Adapter->PnvmImage       = Image;
+    Adapter->PnvmImageLength = Length;
+
+    DPRINT1("iwlwifi: loaded %s (%u bytes): %u SKU block(s)\n",
+            Adapter->PnvmName, Length, Adapter->PnvmParsed->BlockCount);
+    for (i = 0; i < Adapter->PnvmParsed->BlockCount; i++)
+    {
+        const IWL_PNVM_BLOCK *Block = &Adapter->PnvmParsed->Block[i];
+
+        DPRINT1("iwlwifi:   sku %08x-%08x-%08x mac 0x%04x rf 0x%04x "
+                "ver 0x%08x %u section(s) %u bytes\n",
+                Block->SkuId[0], Block->SkuId[1], Block->SkuId[2],
+                Block->MacType, Block->RfId, Block->Version,
+                Block->SectionCount, Block->TotalDataLength);
+    }
+
+    /* Not a defensive check - a truncated block set means the block this
+     * board needs may simply not be in the table, and the eventual
+     * IwlPnvmSelectBlock() NULL would otherwise look like a bad blob. */
+    if (Adapter->PnvmParsed->TruncatedBlockCount != 0)
+    {
+        DPRINT1("iwlwifi:   WARNING: %u further SKU block(s) were dropped; "
+                "raise IWL_PNVM_MAX_BLOCKS\n",
+                Adapter->PnvmParsed->TruncatedBlockCount);
+    }
+
+    InterlockedOr(&Adapter->Flags, IWL_FLAG_PNVM_LOADED);
+    return NDIS_STATUS_SUCCESS;
+}
+
+VOID
+IwlFreePnvm(_In_ PIWL_ADAPTER Adapter)
+{
+    if (Adapter->PnvmParsed != NULL)
+    {
+        ExFreePoolWithTag(Adapter->PnvmParsed, IWL_TAG);
+        Adapter->PnvmParsed = NULL;
+    }
+
+    if (Adapter->PnvmImage != NULL)
+    {
+        ExFreePoolWithTag(Adapter->PnvmImage, IWL_TAG);
+        Adapter->PnvmImage = NULL;
+        Adapter->PnvmImageLength = 0;
+    }
+
+    InterlockedAnd(&Adapter->Flags, ~IWL_FLAG_PNVM_LOADED);
+}

@@ -13,9 +13,11 @@ cc -std=c99 -Wall -Wextra -O1 -g -fsanitize=address,undefined \
 ```
 
 With no arguments it runs the synthetic cases (malformed, truncated,
-overflowing, and boundary containers). Pass real `.ucode` files and it
-parses and dumps each one as well, checking that every section it reports
-lies inside the buffer it was handed.
+overflowing, and boundary containers). Pass real `.ucode` or `.pnvm` files
+and it parses and dumps each one as well, checking that every section it
+reports lies inside the buffer it was handed. Both container flavours go
+through the same hardened TLV walker, so both are covered by the same
+bounds tests.
 
 ## Why this exists
 
@@ -31,8 +33,8 @@ the container format is identical whatever silicon it is destined for.
 
 ## What it has already caught
 
-Both of these were found by pointing the harness at a real AX211 blob, and
-neither would have been visible without one:
+Every one of these was found by pointing the harness at real blobs. None
+would have been visible from reading the format description alone:
 
 - **`IWL_NUM_API_WORDS` too small, and fatal.** Rejecting an API word past
   the end of our bitmap makes every firmware newer than the driver
@@ -41,12 +43,22 @@ neither would have been visible without one:
 - **`IWL_UCODE_SECTION_MAX` of 16.** Real firmware carries far more - see
   the measured table in `fw/ucode_file.h`. `iwlwifi-so-a0-gf-a0-89.ucode`
   has 60 sections in its regular image alone.
+- **`IWL_PNVM_MAX_BLOCKS` of 8**, against BZ/GL blobs that carry 16 SKU
+  blocks. This one is *not* the same kind of miss as a dropped ucode
+  section: the single block that matters is whichever matches this board's
+  SKU, so truncating could silently drop exactly the one needed.
+- **A firmware name that does not exist.** The device table claimed
+  `bz-a0-fm-b0`; linux-firmware ships `bz-b0-fm-c0` and `gl-c0-fm-c0`.
+  Listing the tree beats trusting the table.
+- **The `0xddddeeee` PNVM separator.** A deprecated in-band marker that
+  must be skipped, or it is pushed to the device as payload.
 
 ## Getting blobs
 
 ```sh
 BASE=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/intel/iwlwifi
 curl -LO $BASE/iwlwifi-so-a0-gf-a0-89.ucode
+curl -LO $BASE/iwlwifi-so-a0-gf-a0.pnvm
 ```
 
 Note the `intel/iwlwifi/` path: linux-firmware moved these out of the

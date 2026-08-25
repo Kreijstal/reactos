@@ -423,6 +423,190 @@ TestProgressiveTruncation(void)
     BuilderFree(&b);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* Platform NVM (.pnvm)                                                */
+/* ------------------------------------------------------------------ */
+
+static void
+BuilderPnvmSku(BUILDER *b, uint32_t a, uint32_t c, uint32_t d)
+{
+    unsigned char sku[12];
+    sku[0]=(unsigned char)(a); sku[1]=(unsigned char)(a>>8);
+    sku[2]=(unsigned char)(a>>16); sku[3]=(unsigned char)(a>>24);
+    sku[4]=(unsigned char)(c); sku[5]=(unsigned char)(c>>8);
+    sku[6]=(unsigned char)(c>>16); sku[7]=(unsigned char)(c>>24);
+    sku[8]=(unsigned char)(d); sku[9]=(unsigned char)(d>>8);
+    sku[10]=(unsigned char)(d>>16); sku[11]=(unsigned char)(d>>24);
+    BuilderTlv(b, IWL_UCODE_TLV_PNVM_SKU, sku, sizeof(sku));
+}
+
+static void
+BuilderPnvmSection(BUILDER *b, uint32_t marker, const void *data, uint32_t len)
+{
+    unsigned char *tmp = malloc(4 + len);
+    tmp[0]=(unsigned char)(marker); tmp[1]=(unsigned char)(marker>>8);
+    tmp[2]=(unsigned char)(marker>>16); tmp[3]=(unsigned char)(marker>>24);
+    if (len) memcpy(tmp + 4, data, len);
+    BuilderTlv(b, IWL_UCODE_TLV_SEC_RT, tmp, 4 + len);
+    free(tmp);
+}
+
+static void
+TestPnvmHappyPath(void)
+{
+    BUILDER b = {0};
+    IWL_PNVM_PARSED p;
+    IWL_FW_PARSE_STATUS s;
+    unsigned char payload[64];
+    unsigned char hw[12] = {0};
+    uint32_t want[3] = {0x000610d1, 0, 0};
+    uint32_t miss[3] = {0xdeadbeef, 0, 0};
+    const IWL_PNVM_BLOCK *sel;
+
+    printf("pnvm: two SKU blocks\n");
+    memset(payload, 0x77, sizeof(payload));
+
+    /* A .pnvm has NO container header - the first byte is a TLV. */
+    BuilderPnvmSku(&b, 0x000610d1, 0, 0);
+    hw[0] = 0x37; hw[1] = 0x00; hw[2] = 0x0d; hw[3] = 0x01;
+    BuilderTlv(&b, IWL_UCODE_TLV_HW_TYPE, hw, sizeof(hw));
+    BuilderTlv32(&b, IWL_UCODE_TLV_PNVM_VERSION, 0x12c849a2);
+    BuilderPnvmSection(&b, 0xcafedead, payload, sizeof(payload));
+    BuilderPnvmSection(&b, 0xcafedead, payload, 32);
+
+    BuilderPnvmSku(&b, 0x000610d2, 0, 0);
+    BuilderPnvmSection(&b, 0xcafedead, payload, 16);
+
+    s = IwlParsePnvmFile(b.Buf, b.Len, &p);
+    CheckStatus(s, IwlFwParseOk, "bare TLV stream parses without a header");
+    Check(p.BlockCount == 2, "two SKU blocks");
+    Check(p.Block[0].SkuId[0] == 0x000610d1, "block 0 sku id");
+    Check(p.Block[0].HasHwType && p.Block[0].MacType == 0x0037, "block 0 mac type");
+    Check(p.Block[0].RfId == 0x010d, "block 0 rf id");
+    Check(p.Block[0].HasVersion && p.Block[0].Version == 0x12c849a2, "block 0 version");
+    Check(p.Block[0].SectionCount == 2, "block 0 section count");
+    Check(p.Block[0].TotalDataLength == 64 + 32, "block 0 total length excludes marker words");
+    Check(p.Block[1].SectionCount == 1, "block 1 section count");
+
+    sel = IwlPnvmSelectBlock(&p, want);
+    Check(sel == &p.Block[0], "select by sku id finds block 0");
+    sel = IwlPnvmSelectBlock(&p, miss);
+    Check(sel == NULL, "unknown sku id selects nothing rather than block 0");
+
+    BuilderFree(&b);
+}
+
+static void
+TestPnvmSkipSection(void)
+{
+    BUILDER b = {0};
+    IWL_PNVM_PARSED p;
+    unsigned char payload[8] = {0};
+
+    printf("pnvm: deprecated 0xddddeeee separator\n");
+    BuilderPnvmSku(&b, 1, 2, 3);
+    BuilderPnvmSection(&b, IWL_PNVM_SKIP_SECTION, payload, sizeof(payload));
+    BuilderPnvmSection(&b, 0xcafedead, payload, sizeof(payload));
+
+    CheckStatus(IwlParsePnvmFile(b.Buf, b.Len, &p), IwlFwParseOk, "parses");
+    Check(p.Block[0].SectionCount == 1,
+          "separator skipped, not pushed to the device as payload");
+    BuilderFree(&b);
+}
+
+static void
+TestPnvmDataBeforeSku(void)
+{
+    BUILDER b = {0};
+    IWL_PNVM_PARSED p;
+    unsigned char payload[8] = {0};
+
+    printf("pnvm: data before any SKU block\n");
+    BuilderPnvmSection(&b, 0xcafedead, payload, sizeof(payload));
+    CheckStatus(IwlParsePnvmFile(b.Buf, b.Len, &p), IwlFwParseSectionOutsideBlock,
+                "orphan section rejected rather than written through a null block");
+    BuilderFree(&b);
+}
+
+static void
+TestPnvmShortSku(void)
+{
+    BUILDER b = {0};
+    IWL_PNVM_PARSED p;
+    unsigned char sku[8] = {0};
+
+    printf("pnvm: SKU TLV shorter than three words\n");
+    BuilderTlv(&b, IWL_UCODE_TLV_PNVM_SKU, sku, sizeof(sku));
+    CheckStatus(IwlParsePnvmFile(b.Buf, b.Len, &p), IwlFwParseBadSectionLength,
+                "8-byte SKU rejected");
+    BuilderFree(&b);
+}
+
+static void
+TestPnvmTooManyBlocks(void)
+{
+    BUILDER b = {0};
+    IWL_PNVM_PARSED p;
+    unsigned char payload[4] = {0};
+    int i;
+
+    printf("pnvm: more SKU blocks than IWL_PNVM_MAX_BLOCKS\n");
+    for (i = 0; i < IWL_PNVM_MAX_BLOCKS + 3; i++)
+    {
+        BuilderPnvmSku(&b, (uint32_t)(0x1000 + i), 0, 0);
+        BuilderPnvmSection(&b, 0xcafedead, payload, sizeof(payload));
+    }
+
+    CheckStatus(IwlParsePnvmFile(b.Buf, b.Len, &p), IwlFwParseOk,
+                "excess SKUs skipped, not fatal - the board is only ever one of them");
+    Check(p.BlockCount == IWL_PNVM_MAX_BLOCKS, "kept up to the cap");
+    Check(p.TruncatedBlockCount == 3, "and counted the ones it dropped");
+    BuilderFree(&b);
+}
+
+static void
+DumpPnvm(const char *Path)
+{
+    FILE *f;
+    long size;
+    unsigned char *buf;
+    IWL_PNVM_PARSED p;
+    IWL_FW_PARSE_STATUS s;
+    uint32_t i, j;
+
+    f = fopen(Path, "rb");
+    if (!f) { printf("  cannot open %s\n", Path); g_Failures++; return; }
+    fseek(f, 0, SEEK_END); size = ftell(f); fseek(f, 0, SEEK_SET);
+    buf = malloc((size_t)size);
+    if (fread(buf, 1, (size_t)size, f) != (size_t)size)
+    { printf("  short read\n"); g_Failures++; fclose(f); free(buf); return; }
+    fclose(f);
+
+    s = IwlParsePnvmFile(buf, (size_t)size, &p);
+    printf("%s (%ld bytes)\n", Path, size);
+    printf("  status         : %s\n", IwlFwParseStatusName(s));
+    CheckStatus(s, IwlFwParseOk, "real pnvm parses");
+    if (s != IwlFwParseOk) { free(buf); return; }
+
+    printf("  TLVs           : %u (%u unrecognised)\n", p.TlvCount, p.UnknownTlvCount);
+    printf("  SKU blocks     : %u (%u past the cap)\n", p.BlockCount, p.TruncatedBlockCount);
+    for (i = 0; i < p.BlockCount; i++)
+    {
+        const IWL_PNVM_BLOCK *b = &p.Block[i];
+        printf("    sku %08x-%08x-%08x  mac 0x%04x rf 0x%04x  ver 0x%08x  "
+               "%u section(s), %u bytes\n",
+               b->SkuId[0], b->SkuId[1], b->SkuId[2],
+               b->MacType, b->RfId, b->Version,
+               b->SectionCount, b->TotalDataLength);
+        for (j = 0; j < b->SectionCount; j++)
+            Check(b->Section[j].Data >= buf &&
+                  b->Section[j].Data + b->Section[j].Length <= buf + size,
+                  "pnvm section lies inside the container");
+    }
+    free(buf);
+}
+
 /* ------------------------------------------------------------------ */
 
 static void
@@ -531,8 +715,20 @@ main(int argc, char **argv)
     TestShortApiPayload();
     TestProgressiveTruncation();
 
+    TestPnvmHappyPath();
+    TestPnvmSkipSection();
+    TestPnvmDataBeforeSku();
+    TestPnvmShortSku();
+    TestPnvmTooManyBlocks();
+
     for (i = 1; i < argc; i++)
-        DumpRealBlob(argv[i]);
+    {
+        size_t n = strlen(argv[i]);
+        if (n > 5 && strcmp(argv[i] + n - 5, ".pnvm") == 0)
+            DumpPnvm(argv[i]);
+        else
+            DumpRealBlob(argv[i]);
+    }
 
     printf("\n%d checks, %d failures\n", g_Checks, g_Failures);
     return g_Failures ? 1 : 0;

@@ -71,8 +71,9 @@ endif()
 # NOTE ON THE PATH: linux-firmware moved these blobs out of the repository
 # root into intel/iwlwifi/ - the old root-level URLs now 404.
 #
-# One file per (MAC, RF) pair, at the newest API revision this driver
-# claims in hw/devices.c.  iwlwifi walks DOWN from UcodeApiMax, so a
+# One .ucode per (MAC, RF) pair at the newest API revision this driver
+# claims in hw/devices.c, plus a .pnvm for every part flagged
+# IWL_CFG_NEEDS_PNVM.  iwlwifi walks DOWN from UcodeApiMax, so a
 # missing newest blob is not fatal as long as an older one is present.
 if(DOWNLOAD_IWLWIFI_UCODE)
     set(_iwlwifi_base
@@ -94,7 +95,19 @@ if(DOWNLOAD_IWLWIFI_UCODE)
         "iwlwifi-cc-a0-77.ucode|94f5fb915f2074f98059365e11cca313e25a6fa3b7cd6772e80b3ba5edfb966b"
         "iwlwifi-Qu-b0-hr-b0-77.ucode|2d3dd82853e1f5859de168fc4c3e2078703cb5c62c38ae39658c28ca5b664443"
         "iwlwifi-ty-a0-gf-a0-89.ucode|cd4f8fe2242c115cf8687878c2534fbb436fbaa7172f49a1f69952a23c686ac9"
-        "iwlwifi-so-a0-gf-a0-89.ucode|698c913f938d9a8adce7ab9c049b1cd37daaa7473d8185f93e98f22733092f6b")
+        "iwlwifi-so-a0-gf-a0-89.ucode|698c913f938d9a8adce7ab9c049b1cd37daaa7473d8185f93e98f22733092f6b"
+        "iwlwifi-gl-c0-fm-c0-101.ucode|6769d9ce002bb404fbd0c39e28f3c68af4ec1583343ac66a98ca957710c3473b"
+        "iwlwifi-bz-b0-fm-c0-101.ucode|f40a5186977d84cb6ef2834e4ab87fd915ea77899b8347c56f1f95e776359a41"
+
+        # Platform NVM.  AX210 and later only - the earlier families carry
+        # the equivalent data on-die.  Same base name as the ucode but with
+        # no API revision, and pushed to the device only AFTER the firmware
+        # reports ALIVE, because the SKU ID that picks the right block out
+        # of it comes from that response.
+        "iwlwifi-so-a0-gf-a0.pnvm|776606c7b5d0f582b5ec78a591fb1e5e621a6efa670e8261f29114bbf1b0f8d1"
+        "iwlwifi-ty-a0-gf-a0.pnvm|cc4c0de4593292490459f1aa8c1606ea370a0307f5be9089ef99a0aa8e36be7a"
+        "iwlwifi-gl-c0-fm-c0.pnvm|f481e3b0403ca43a0a444b01c04fa4d1582868afcb026b1e697905f0039ccfa3"
+        "iwlwifi-bz-b0-fm-c0.pnvm|2da92f02418fbde8d8210eb582d9697faa222f8ee2da229e29b8a108ea5c4c5c")
 
     file(MAKE_DIRECTORY "${_iwlwifi_dir}")
 

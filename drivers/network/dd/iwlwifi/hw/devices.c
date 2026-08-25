@@ -112,22 +112,22 @@ static const IWL_DEVICE_CFG IwlDeviceTable[] =
 { 0xA0F0, ANY, "Wi-Fi 6 AX201",                   IWL_DEVICE_FAMILY_22000, "Qu-b0-hr-b0",              77, 39, IWL_CFG_INTEGRATED },
 
 /* --- Family AX210. --- */
-{ 0x2725, ANY, "Wi-Fi 6E AX210",                  IWL_DEVICE_FAMILY_AX210, "ty-a0-gf-a0",              89, 59, 0 },
-{ 0x2726, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, 0 },
-{ 0x7A70, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED },
-{ 0x7AF0, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED },
-{ 0x7E40, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED },
-{ 0x54F0, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED },
-{ 0x51F0, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED },
+{ 0x2725, ANY, "Wi-Fi 6E AX210",                  IWL_DEVICE_FAMILY_AX210, "ty-a0-gf-a0",              89, 59, IWL_CFG_NEEDS_PNVM },
+{ 0x2726, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_NEEDS_PNVM },
+{ 0x7A70, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
+{ 0x7AF0, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
+{ 0x7E40, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
+{ 0x54F0, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
+{ 0x51F0, ANY, "Wi-Fi 6E AX211",                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
 /* The development host's own radio - the one row with hardware behind it. */
 { 0x51F1, ANY, "Wi-Fi 6E AX211 (Raptor Lake CNVi)",
-                                                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED },
+                                                  IWL_DEVICE_FAMILY_AX210, "so-a0-gf-a0",              89, 59, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
 
 /* --- Family BZ (Wi-Fi 7). --- */
-{ 0x272B, ANY, "Wi-Fi 7 BE200",                   IWL_DEVICE_FAMILY_BZ,    "gl-c0-fm-c0",              89, 80, 0 },
-{ 0xA840, ANY, "Wi-Fi 7 BE201",                   IWL_DEVICE_FAMILY_BZ,    "bz-a0-fm-b0",              89, 80, IWL_CFG_INTEGRATED },
-{ 0x7740, ANY, "Wi-Fi 7 BE201",                   IWL_DEVICE_FAMILY_BZ,    "bz-a0-fm-b0",              89, 80, IWL_CFG_INTEGRATED },
-{ 0x4D40, ANY, "Wi-Fi 7 BE201",                   IWL_DEVICE_FAMILY_BZ,    "bz-a0-fm-b0",              89, 80, IWL_CFG_INTEGRATED },
+{ 0x272B, ANY, "Wi-Fi 7 BE200",                   IWL_DEVICE_FAMILY_BZ,    "gl-c0-fm-c0",             101, 83, IWL_CFG_NEEDS_PNVM },
+{ 0xA840, ANY, "Wi-Fi 7 BE201",                   IWL_DEVICE_FAMILY_BZ,    "bz-b0-fm-c0",             101, 92, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
+{ 0x7740, ANY, "Wi-Fi 7 BE201",                   IWL_DEVICE_FAMILY_BZ,    "bz-b0-fm-c0",             101, 92, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
+{ 0x4D40, ANY, "Wi-Fi 7 BE201",                   IWL_DEVICE_FAMILY_BZ,    "bz-b0-fm-c0",             101, 92, IWL_CFG_INTEGRATED | IWL_CFG_NEEDS_PNVM },
 };
 
 const IWL_DEVICE_CFG *
@@ -176,6 +176,21 @@ IwlFamilyName(_In_ IWL_DEVICE_FAMILY Family)
         case IWL_DEVICE_FAMILY_SC:    return "SC";
         default:                      return "undefined";
     }
+}
+
+BOOLEAN
+IwlBuildPnvmName(
+    _In_ const IWL_DEVICE_CFG *Cfg,
+    _Out_writes_z_(BufferChars) PSTR Buffer,
+    _In_ SIZE_T BufferChars)
+{
+    NTSTATUS Status;
+
+    Status = RtlStringCbPrintfA(Buffer,
+                                BufferChars,
+                                "iwlwifi-%s.pnvm",
+                                Cfg->FwNamePre);
+    return NT_SUCCESS(Status);
 }
 
 BOOLEAN
