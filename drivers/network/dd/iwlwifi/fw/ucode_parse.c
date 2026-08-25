@@ -105,6 +105,80 @@ IwlStoreTlvSection(
     return IwlFwParseOk;
 }
 
+
+/*
+ * Shared TLV walker.
+ *
+ * Both container flavours - the .ucode file behind its 88-byte header, and
+ * the bare .pnvm stream - are the same TLV encoding, so they share one
+ * walker.  That is deliberate: the bounds arithmetic here is the only
+ * security-relevant code in this file, and having a second hand-rolled copy
+ * of it for PNVM would double the chance of getting it wrong.
+ */
+typedef struct _IWL_TLV_ITER
+{
+    const iwl_u8 *Data;
+    iwl_size_t    Remaining;
+
+    /* Valid only after IwlTlvIterNext() reported a TLV. */
+    iwl_u32       Type;
+    iwl_u32       Length;
+    const iwl_u8 *Payload;
+} IWL_TLV_ITER;
+
+static void
+IwlTlvIterInit(IWL_TLV_ITER *It, const void *Data, iwl_size_t Length)
+{
+    It->Data      = (const iwl_u8 *)Data;
+    It->Remaining = Length;
+    It->Type      = 0;
+    It->Length    = 0;
+    It->Payload   = 0;
+}
+
+/*
+ * Advance to the next TLV.  Returns IwlFwParseOk with *Have set when one
+ * was produced, IwlFwParseOk with *Have clear at a clean end of stream, or
+ * a failure status.
+ */
+static IWL_FW_PARSE_STATUS
+IwlTlvIterNext(IWL_TLV_ITER *It, iwl_bool *Have)
+{
+    iwl_u32 Advance;
+
+    *Have = IWL_FALSE;
+
+    if (It->Remaining < sizeof(IWL_UCODE_TLV))
+    {
+        /* A clean end, or trailing bytes that cannot be a TLV header. */
+        return (It->Remaining == 0) ? IwlFwParseOk : IwlFwParseTruncatedTlv;
+    }
+
+    It->Type    = IwlReadLe32(It->Data + 0);
+    It->Length  = IwlReadLe32(It->Data + 4);
+    It->Payload = It->Data + sizeof(IWL_UCODE_TLV);
+
+    It->Remaining -= sizeof(IWL_UCODE_TLV);
+
+    if (It->Length > It->Remaining)
+        return IwlFwParseTlvLengthOverflow;
+
+    /* TLVs are padded to a 4-byte boundary.  The final TLV in a file may
+     * legitimately stop short of its own padding, so clamp rather than
+     * letting the subtraction wrap - upstream's unclamped
+     * `len -= ALIGN(tlv_len, 4)` underflows a size_t on exactly that
+     * input. */
+    Advance = IWL_ALIGN4(It->Length);
+    if ((iwl_size_t)Advance > It->Remaining)
+        Advance = (iwl_u32)It->Remaining;
+
+    It->Data      += sizeof(IWL_UCODE_TLV) + Advance;
+    It->Remaining -= Advance;
+
+    *Have = IWL_TRUE;
+    return IwlFwParseOk;
+}
+
 IWL_FW_PARSE_STATUS
 IwlParseUcodeFile(
     const void *Image,
@@ -112,8 +186,7 @@ IwlParseUcodeFile(
     IWL_FW_PARSED *Parsed)
 {
     const iwl_u8 *Base = (const iwl_u8 *)Image;
-    const iwl_u8 *Data;
-    iwl_size_t Remaining;
+    IWL_TLV_ITER It;
     IWL_FW_PARSE_STATUS Status;
 
     IwlZeroBytes(Parsed, sizeof(*Parsed));
@@ -136,33 +209,26 @@ IwlParseUcodeFile(
     Parsed->UcodeVer = IwlReadLe32(Base + 8 + FW_VER_HUMAN_READABLE_SZ);
     Parsed->Build    = IwlReadLe32(Base + 8 + FW_VER_HUMAN_READABLE_SZ + 4);
 
-    Data      = Base + sizeof(IWL_TLV_UCODE_HEADER);
-    Remaining = Length - sizeof(IWL_TLV_UCODE_HEADER);
+    IwlTlvIterInit(&It,
+                   Base + sizeof(IWL_TLV_UCODE_HEADER),
+                   Length - sizeof(IWL_TLV_UCODE_HEADER));
 
-    while (Remaining >= sizeof(IWL_UCODE_TLV))
+    for (;;)
     {
+        iwl_bool Have;
         iwl_u32 TlvType;
         iwl_u32 TlvLength;
-        iwl_u32 Advance;
         const iwl_u8 *TlvData;
 
-        TlvType   = IwlReadLe32(Data + 0);
-        TlvLength = IwlReadLe32(Data + 4);
-        TlvData   = Data + sizeof(IWL_UCODE_TLV);
+        Status = IwlTlvIterNext(&It, &Have);
+        if (Status != IwlFwParseOk)
+            return Status;
+        if (!Have)
+            break;
 
-        Remaining -= sizeof(IWL_UCODE_TLV);
-
-        if (TlvLength > Remaining)
-            return IwlFwParseTlvLengthOverflow;
-
-        /* TLVs are padded to a 4-byte boundary.  The final TLV in a file
-         * may legitimately stop short of its own padding, so clamp rather
-         * than letting the subtraction wrap - upstream's unclamped
-         * `len -= ALIGN(tlv_len, 4)` underflows a size_t on exactly that
-         * input. */
-        Advance = IWL_ALIGN4(TlvLength);
-        if ((iwl_size_t)Advance > Remaining)
-            Advance = (iwl_u32)Remaining;
+        TlvType   = It.Type;
+        TlvLength = It.Length;
+        TlvData   = It.Payload;
 
         Parsed->TlvCount++;
 
@@ -318,15 +384,7 @@ IwlParseUcodeFile(
                 Parsed->UnknownTlvCount++;
                 break;
         }
-
-        Data      += sizeof(IWL_UCODE_TLV) + Advance;
-        Remaining -= Advance;
     }
-
-    /* Anything left over is not a short final TLV - that case was already
-     * absorbed by the Advance clamp - so it is a malformed file. */
-    if (Remaining != 0)
-        return IwlFwParseTruncatedTlv;
 
     return IwlFwParseOk;
 }
@@ -344,6 +402,168 @@ IwlFwParseStatusName(IWL_FW_PARSE_STATUS Status)
         case IwlFwParseTlvLengthOverflow:   return "TLV length past end of file";
         case IwlFwParseTooManySections:     return "more sections than IWL_UCODE_SECTION_MAX";
         case IwlFwParseBadSectionLength:    return "TLV payload too short for its type";
+        case IwlFwParseTooManyPnvmSections: return "more PNVM sections than IWL_PNVM_MAX_SECTIONS";
+        case IwlFwParseSectionOutsideBlock: return "PNVM data before any PNVM_SKU block";
         default:                            return "unknown";
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Platform NVM (.pnvm) - AX210 and later                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A .pnvm is a bare TLV stream - no container header - carrying one block
+ * per board SKU.  IWL_UCODE_TLV_PNVM_SKU opens a block; the HW_TYPE,
+ * PNVM_VERSION and SEC_RT TLVs that follow belong to it until the next
+ * PNVM_SKU.  Which block applies is decided later, against the SKU ID the
+ * firmware reports at ALIVE, so this only enumerates them.
+ */
+IWL_FW_PARSE_STATUS
+IwlParsePnvmFile(
+    const void *Image,
+    iwl_size_t Length,
+    IWL_PNVM_PARSED *Parsed)
+{
+    IWL_TLV_ITER It;
+    IWL_FW_PARSE_STATUS Status;
+    IWL_PNVM_BLOCK *Block = 0;
+    iwl_bool Overflowed = IWL_FALSE;
+
+    IwlZeroBytes(Parsed, sizeof(*Parsed));
+
+    IwlTlvIterInit(&It, Image, Length);
+
+    for (;;)
+    {
+        iwl_bool Have;
+
+        Status = IwlTlvIterNext(&It, &Have);
+        if (Status != IwlFwParseOk)
+            return Status;
+        if (!Have)
+            break;
+
+        Parsed->TlvCount++;
+
+        switch (It.Type)
+        {
+            case IWL_UCODE_TLV_PNVM_SKU:
+            {
+                /* struct iwl_sku_id { __le32 data[3]; } */
+                if (It.Length < 3 * sizeof(iwl_u32))
+                    return IwlFwParseBadSectionLength;
+
+                if (Parsed->BlockCount >= IWL_PNVM_MAX_BLOCKS)
+                {
+                    /* A file may describe SKUs this board will never be.
+                     * Skip the rest of that block rather than failing the
+                     * whole blob. */
+                    Parsed->TruncatedBlockCount++;
+                    Block = 0;
+                    Overflowed = IWL_TRUE;
+                    break;
+                }
+
+                Block = &Parsed->Block[Parsed->BlockCount];
+                Parsed->BlockCount++;
+
+                Block->SkuId[0] = IwlReadLe32(It.Payload + 0);
+                Block->SkuId[1] = IwlReadLe32(It.Payload + 4);
+                Block->SkuId[2] = IwlReadLe32(It.Payload + 8);
+                break;
+            }
+
+            case IWL_UCODE_TLV_HW_TYPE:
+                if (Block == 0)
+                {
+                    if (Overflowed)
+                        break;
+                    return IwlFwParseSectionOutsideBlock;
+                }
+                /* Upstream reads two 16-bit fields out of the front and
+                 * ignores the rest of the payload. */
+                if (It.Length < 2 * sizeof(iwl_u16))
+                    return IwlFwParseBadSectionLength;
+                Block->MacType   = (iwl_u16)(It.Payload[0] | (It.Payload[1] << 8));
+                Block->RfId      = (iwl_u16)(It.Payload[2] | (It.Payload[3] << 8));
+                Block->HasHwType = IWL_TRUE;
+                break;
+
+            case IWL_UCODE_TLV_PNVM_VERSION:
+                if (Block == 0)
+                {
+                    if (Overflowed)
+                        break;
+                    return IwlFwParseSectionOutsideBlock;
+                }
+                if (It.Length < sizeof(iwl_u32))
+                    return IwlFwParseBadSectionLength;
+                Block->Version    = IwlReadLe32(It.Payload);
+                Block->HasVersion = IWL_TRUE;
+                break;
+
+            case IWL_UCODE_TLV_SEC_RT:
+            {
+                iwl_u32 Marker;
+
+                if (Block == 0)
+                {
+                    if (Overflowed)
+                        break;
+                    return IwlFwParseSectionOutsideBlock;
+                }
+
+                if (It.Length < sizeof(iwl_u32))
+                    return IwlFwParseBadSectionLength;
+
+                Marker = IwlReadLe32(It.Payload);
+
+                /* Deprecated in-band separator; upstream steps over it and
+                 * so must we, or it would be pushed to the device as
+                 * payload. */
+                if (Marker == IWL_PNVM_SKIP_SECTION)
+                    break;
+
+                if (Block->SectionCount >= IWL_PNVM_MAX_SECTIONS)
+                    return IwlFwParseTooManyPnvmSections;
+
+                Block->Section[Block->SectionCount].Offset = Marker;
+                Block->Section[Block->SectionCount].Data   = It.Payload + sizeof(iwl_u32);
+                Block->Section[Block->SectionCount].Length =
+                    It.Length - (iwl_u32)sizeof(iwl_u32);
+                Block->SectionCount++;
+                Block->TotalDataLength += It.Length - (iwl_u32)sizeof(iwl_u32);
+                break;
+            }
+
+            default:
+                Parsed->UnknownTlvCount++;
+                break;
+        }
+    }
+
+    return IwlFwParseOk;
+}
+
+const IWL_PNVM_BLOCK *
+IwlPnvmSelectBlock(
+    const IWL_PNVM_PARSED *Parsed,
+    const iwl_u32 SkuId[3])
+{
+    iwl_u32 i;
+
+    for (i = 0; i < Parsed->BlockCount; i++)
+    {
+        const IWL_PNVM_BLOCK *Block = &Parsed->Block[i];
+
+        if (Block->SkuId[0] == SkuId[0] &&
+            Block->SkuId[1] == SkuId[1] &&
+            Block->SkuId[2] == SkuId[2])
+        {
+            return Block;
+        }
+    }
+
+    return 0;
 }
