@@ -39,7 +39,10 @@ function(add_d3dcompiler_target VERSION)
         ${REACTOS_BINARY_DIR}/sdk/include/wine
         ${_srcdir}
         ${CMAKE_CURRENT_BINARY_DIR}
-        ${VKD3D_INCLUDE_DIRS})
+        # DirectX is configured before sdk/lib/vkd3d initializes
+        # VKD3D_INCLUDE_DIRS, so use the stable source-tree paths here.
+        ${REACTOS_SOURCE_DIR}/sdk/lib/vkd3d/include
+        ${REACTOS_SOURCE_DIR}/sdk/lib/vkd3d/include/private)
 
     set_module_type(${_target} win32dll)
     target_link_libraries(${_target} wine dxguid uuid oldnames)
