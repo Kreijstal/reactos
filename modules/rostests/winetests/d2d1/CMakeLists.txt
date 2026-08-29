@@ -3,5 +3,14 @@ add_definitions(-DUSE_WINE_TODOS -D_USE_MATH_DEFINES -DWINETEST_USE_DBGSTR_LONGL
 add_executable(d2d1_winetest d2d1.c testlist.c)
 target_link_libraries(d2d1_winetest uuid dxguid dx10guid)
 set_module_type(d2d1_winetest win32cui)
+
+if(NOT MSVC)
+    # Imported Wine test sources; i386 builds with -Werror and these
+    # two are Wine's own style, not something to "fix" in a copy we
+    # want to keep diffable against upstream.
+    target_compile_options(d2d1_winetest PRIVATE
+        -Wno-error=discarded-qualifiers -Wno-error=sequence-point)
+endif()
+
 add_importlibs(d2d1_winetest d2d1 d3d10_1 d3d11 dwrite d3dcompiler_47 ole32 advapi32 gdi32 user32 msvcrt kernel32 ntdll)
 add_rostests_file(TARGET d2d1_winetest)
