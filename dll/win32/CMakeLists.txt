@@ -283,7 +283,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(avrt)
     add_subdirectory(bcryptprimitives)
     add_subdirectory(dwmapi)
-    add_subdirectory(dxgi)
+    #add_subdirectory(dxgi) #disabled, see dll/directx/wine
     add_subdirectory(ncrypt)
 endif()
 
@@ -291,7 +291,7 @@ if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
    add_subdirectory(rtworkq)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
-    add_subdirectory(d3d11)
-    add_subdirectory(d3d12)
-    add_subdirectory(dwrite)
+    #add_subdirectory(d3d11) #disabled, see dll/directx/wine
+    #add_subdirectory(d3d12) #disabled, see dll/directx/wine
+    #add_subdirectory(dwrite) #disabled, see dll/directx/wine
 endif()
