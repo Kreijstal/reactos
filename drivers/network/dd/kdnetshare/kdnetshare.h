@@ -23,6 +23,7 @@
  * keep doing so to work from inside a bugcheck. */
 #define KDNS_POLL_INTERVAL_MS       1
 #define KDNS_RX_DRAIN               32
+#define KDNS_DIAG_INTERVAL_100NS    (5ULL * 10 * 1000 * 1000)
 #define KDNS_RX_BUFFERS             64
 
 /* Receive slot ownership.  FREE and READY are handed back and forth between the
@@ -81,6 +82,13 @@ typedef struct _KDNS_ADAPTER
     ULONG64 RxCallbacks;
     ULONG64 PollDelivered;
     ULONG PollTicks;
+    /* Wall-clock base for the diagnostic line.  Counting DPC ticks was wrong:
+     * the period is `5000 / KDNS_POLL_INTERVAL_MS` ticks, which is five seconds
+     * only if the timer really runs at 1 kHz.  At a ~15 ms system tick it is
+     * ~75 s, and the 32 KB KDBUFFERED ring wraps long before that, so the line
+     * was effectively never in a harvest.  Interrupt time does not care how
+     * often the DPC actually fires. */
+    ULONG64 LastDiagTime;
 } KDNS_ADAPTER, *PKDNS_ADAPTER;
 
 #endif /* _KDNETSHARE_H_PRIVATE_ */
