@@ -2592,7 +2592,13 @@ struct wined3d_output
 HRESULT wined3d_output_get_gamma_ramp(struct wined3d_output *output, struct wined3d_gamma_ramp *ramp);
 
 #ifdef _WIN64
+#ifdef __REACTOS__
+/* I64_MAX is a Wine msvcrt-ism defined by Wine's own limits.h; the ReactOS
+ * SDK only provides the MSVC name.  Same value, no new macro. */
+#define MAX_PERSISTENT_MAPPED_BYTES _I64_MAX
+#else
 #define MAX_PERSISTENT_MAPPED_BYTES I64_MAX
+#endif
 #else
 #define MAX_PERSISTENT_MAPPED_BYTES (128 * 1024 * 1024)
 #endif
