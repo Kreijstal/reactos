@@ -441,8 +441,13 @@ NTSTATUS WINAPI wow64_NtAllocateLocallyUniqueId( UINT *args )
     return NtAllocateLocallyUniqueId( luid );
 }
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
 /**********************************************************************
  *           wow64_NtAllocateReserveObject
+ *
+ * ntdll.spec exports NtAllocateReserveObject as -version=0x601+, and nothing
+ * in Wow64SystemServiceEx() dispatches to this thunk yet, so below Windows 7
+ * it is dead code that would only fail to link.
  */
 NTSTATUS WINAPI wow64_NtAllocateReserveObject( UINT *args )
 {
@@ -458,6 +463,7 @@ NTSTATUS WINAPI wow64_NtAllocateReserveObject( UINT *args )
     put_handle( handle_ptr, handle );
     return status;
 }
+#endif /* NTDDI_VERSION >= NTDDI_WIN7 */
 
 /**********************************************************************
  *           wow64_NtAllocateUuids
