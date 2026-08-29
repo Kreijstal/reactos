@@ -280,10 +280,12 @@ KdnsPollTimerDpc(
             if (NT_SUCCESS(KdNetShareRingStats(&Ring)))
             {
                 DPRINT1("KDNETSHARE: ring rxCons=%lu/%lu rxOwn=%lu "
-                        "txProd=%lu/%lu txOwn=%lu cmd=%02lx is=%04lx rc=%08lx\n",
+                        "txProd=%lu/%lu txOwn=%lu cmd=%02lx is=%04lx rc=%08lx "
+                        "latch=%04lx ovr=%lu ren=%lu\n",
                         Ring.RxConsumer, Ring.RxDescCount, Ring.RxOwnedByNic,
                         Ring.TxProducer, Ring.TxDescCount, Ring.TxOwnedByNic,
-                        Ring.NicCommand, Ring.NicIntrStatus, Ring.NicRxConfig);
+                        Ring.NicCommand, Ring.NicIntrStatus, Ring.NicRxConfig,
+                        Ring.NicIntrLatch, Ring.RxOverflows, Ring.RxReenables);
             }
         }
     }
