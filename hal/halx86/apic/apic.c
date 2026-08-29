@@ -104,7 +104,9 @@ UCHAR ApicMaxIrq = APIC_DEFAULT_MAX_IRQ;
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
-FORCEINLINE
+/* Must be static: these touch the file-static HalpIoApicPolicyLock, and
+ * FORCEINLINE expands to `extern inline' for GCC, which may not. */
+static __inline
 ULONG_PTR
 HalpAcquireIoApicPolicyLock(VOID)
 {
@@ -118,7 +120,7 @@ HalpAcquireIoApicPolicyLock(VOID)
     return Flags;
 }
 
-FORCEINLINE
+static __inline
 VOID
 HalpReleaseIoApicPolicyLock(
     _In_ ULONG_PTR Flags)
