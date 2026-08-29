@@ -40,8 +40,14 @@ list(APPEND SOURCE
     ldr/ldrinit.c
     ldr/ldrpe.c
     ldr/ldrutils.c
-    rtl/thread.c
     ldr/verifier.c)
+
+# rtl/thread.c is the implementation of NtCreateThreadEx, which ntdll.spec
+# exports as -version=0x600+; below that the PS_ATTRIBUTE_LIST and
+# THREAD_CREATE_FLAGS_* it is written against do not exist either.
+if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
+    list(APPEND SOURCE rtl/thread.c)
+endif()
 
 if(ARCH STREQUAL "i386")
     list(APPEND ASM_SOURCE dispatch/i386/dispatch.S)

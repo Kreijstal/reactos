@@ -10,7 +10,10 @@ add_subdirectory(ntdll)
 add_subdirectory(opengl)
 add_subdirectory(shellext)
 add_subdirectory(win32)
-if(ARCH STREQUAL "amd64")
+# WoW64 is an NT6 subsystem here: Wow64LdrpInitialize calls RtlExitUserProcess,
+# which ntdll.spec exports as -version=0x600+, so wow64.dll cannot link below
+# that at all.
+if(ARCH STREQUAL "amd64" AND DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(wow64)
     add_subdirectory(wow64cpu)
     add_subdirectory(wow64win)
