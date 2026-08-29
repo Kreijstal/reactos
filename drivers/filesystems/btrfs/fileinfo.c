@@ -153,6 +153,12 @@ typedef struct _FILE_LINKS_FULL_ID_INFORMATION {
 #endif
 #endif
 
+#if defined(__REACTOS__) && (NTDDI_VERSION < NTDDI_WIN8)
+/* The SDK first declares this class for Windows 8; below that it has to be
+ * spelled out, exactly as the block above does for the pre-Win10 MinGW case. */
+#define FileDispositionInformationEx (enum _FILE_INFORMATION_CLASS)64
+#endif
+
 #if defined(__REACTOS__) && (NTDDI_VERSION < NTDDI_WIN10)
 typedef struct _FILE_RENAME_INFORMATION_EX {
     union {
@@ -185,6 +191,8 @@ typedef struct _FILE_LINK_INFORMATION_EX {
 #define FILE_DISPOSITION_DELETE                         0x1
 #define FILE_DISPOSITION_POSIX_SEMANTICS                0x2
 #define FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK      0x4
+#define FILE_DISPOSITION_ON_CLOSE                       0x8
+#define FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE      0x10
 
 #define FILE_LINK_REPLACE_IF_EXISTS                       0x001
 #define FILE_LINK_POSIX_SEMANTICS                         0x002
