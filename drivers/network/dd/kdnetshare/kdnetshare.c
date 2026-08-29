@@ -177,7 +177,8 @@ KdnsIndicateReadySlots(
     {
         NdisMIndicateReceiveNetBufferLists(Adapter->MiniportAdapterHandle,
                                            Chain, 0, Count,
-                                           NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL);
+                                           NDIS_RECEIVE_FLAGS_DISPATCH_LEVEL |
+                                           NDIS_RECEIVE_FLAGS_RESOURCES);
     }
 }
 
@@ -243,6 +244,8 @@ KdnsPollTimerDpc(
     if (Adapter->DataPathRunning && !Adapter->Halting)
     {
         ULONG Delivered = KdNetSharePoll(KDNS_RX_DRAIN);
+        KDNET_SHARE_RING_STATS Ring;
+        ULONG64 Now;
 
         Adapter->PollDelivered += Delivered;
 
@@ -252,17 +255,36 @@ KdnsPollTimerDpc(
         if (Delivered != 0 || Adapter->RxPending != 0)
             KdnsIndicateReadySlots(Adapter);
 
-        /* Once every five seconds, not a hot path.  Localises a receive
-         * failure to a stage: no callbacks means kdnet never handed anything
-         * over, callbacks without RxOk means indication is failing, and RxOk
-         * without a reply from the guest means the fault is above NDIS. */
-        if (++Adapter->PollTicks % (5000 / KDNS_POLL_INTERVAL_MS) == 0)
+        /* Once every five seconds of WALL CLOCK, not a hot path.  Localises a
+         * receive failure to a stage: no callbacks means kdnet never handed
+         * anything over, callbacks without RxOk means indication is failing,
+         * and RxOk without a reply from the guest means the fault is above
+         * NDIS.  See LastDiagTime for why this is not a tick count. */
+        ++Adapter->PollTicks;
+        Now = KeQueryInterruptTime();
+        if (Now - Adapter->LastDiagTime >= KDNS_DIAG_INTERVAL_100NS)
         {
+            Adapter->LastDiagTime = Now;
+
+            /* txErr as well as tx: boot 69 read tx=0 and the line could not
+             * say whether nothing was offered or everything failed. */
             DPRINT1("KDNETSHARE: ticks=%lu osPoll=%I64u cb=%I64u rxOk=%I64u "
-                    "noBuf=%I64u pending=%ld tx=%I64u\n",
+                    "noBuf=%I64u pending=%ld tx=%I64u txErr=%I64u\n",
                     Adapter->PollTicks, Adapter->PollDelivered,
                     Adapter->RxCallbacks, Adapter->RxOk,
-                    Adapter->RxNoBuffer, Adapter->RxPending, Adapter->TxOk);
+                    Adapter->RxNoBuffer, Adapter->RxPending,
+                    Adapter->TxOk, Adapter->TxError);
+
+            /* The ring's own state, which no harvest can report once receive
+             * has stopped - see the KDNET_SHARE_RING_STATS comment. */
+            if (NT_SUCCESS(KdNetShareRingStats(&Ring)))
+            {
+                DPRINT1("KDNETSHARE: ring rxCons=%lu/%lu rxOwn=%lu "
+                        "txProd=%lu/%lu txOwn=%lu cmd=%02lx is=%04lx rc=%08lx\n",
+                        Ring.RxConsumer, Ring.RxDescCount, Ring.RxOwnedByNic,
+                        Ring.TxProducer, Ring.TxDescCount, Ring.TxOwnedByNic,
+                        Ring.NicCommand, Ring.NicIntrStatus, Ring.NicRxConfig);
+            }
         }
     }
 
