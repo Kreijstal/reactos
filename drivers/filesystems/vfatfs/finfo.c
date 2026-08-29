@@ -1675,9 +1675,11 @@ VfatSetInformation(
                                                    SystemBuffer);
             break;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
         case FileDispositionInformationEx:
             Status = STATUS_INVALID_INFO_CLASS;
             break;
+#endif
 
         case FileAllocationInformation:
         case FileEndOfFileInformation:
