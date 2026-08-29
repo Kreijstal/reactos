@@ -26,7 +26,7 @@
 #ifndef _KDNETSHARE_H_
 #define _KDNETSHARE_H_
 
-#define KDNET_SHARE_INTERFACE_VERSION 1
+#define KDNET_SHARE_INTERFACE_VERSION 2
 
 /* An Ethernet frame is handed up exactly once, and only for the duration of
  * the callback: the buffer is KDNET's receive ring and is recycled as soon as
@@ -88,6 +88,14 @@ typedef struct _KDNET_SHARE_RING_STATS
     ULONG NicCommand;       /* RTL R_CMD; 0 on backends without it */
     ULONG NicIntrStatus;    /* RTL R_IS */
     ULONG NicRxConfig;      /* RTL R_RC */
+    /* Version 2.  NicIntrStatus alone became useless once the transport
+     * started acknowledging R_IS: it now reads what happened since the last
+     * poll instead of everything since boot.  NicIntrLatch is the accumulated
+     * history, RxOverflows the number of receive-overflow recoveries, and
+     * RxReenables the subset that also found RXENB cleared. */
+    ULONG NicIntrLatch;
+    ULONG RxOverflows;
+    ULONG RxReenables;
 } KDNET_SHARE_RING_STATS, *PKDNET_SHARE_RING_STATS;
 
 /* Exported by kdnet.dll.  A driver that imports these will fail to load when

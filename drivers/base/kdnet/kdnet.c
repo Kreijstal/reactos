@@ -220,6 +220,17 @@ typedef struct _KDNET_TRANSPORT
     ULONGLONG FramesReceived;
     ULONGLONG FramesDropped;
 
+    /* RTL8168 interrupt-status bookkeeping.  R_IS is write-1-to-clear and this
+     * transport runs with R_IM = 0 and polls, so before this nothing ever
+     * consumed those bits: they latched with the first frame and stayed set for
+     * the life of the boot (a healthy boot-71 sample reads is=00a5 forever, so
+     * the register could not report anything new).  Latch is what has ever been
+     * seen, kept because acknowledging destroys it; RxOverflows counts receive
+     * overflow recoveries and RxReenables the subset that also had to put
+     * RXENB back. */
+    ULONG Rtl8168IntrLatch;
+    ULONG Rtl8168RxOverflows;
+    ULONG Rtl8168RxReenables;
 
     CHAR TraceBuffer[KDNET_TRACE_BUFFER_SIZE];
     ULONG TraceLength;
@@ -697,6 +708,51 @@ KdNetRtl8168Send(_In_reads_bytes_(Length) const UCHAR *Frame, _In_ ULONG Length)
     return TRUE;
 }
 
+/*
+ * Acknowledge the adapter's interrupt status, and recover the receive unit if
+ * it reported an overflow.
+ *
+ * The in-tree NDIS driver for this same chip acknowledges R_IS on every
+ * interrupt (rtl8168/hardware.c, NICAcknowledgeInterrupts -- a plain
+ * write-back of the bits just read).  A polled transport has no interrupt to
+ * hang that off, and this one never did it at all: R_IS was read for the
+ * harvest and for the diagnostic line, and written by nobody.
+ *
+ * Called on the idle path, which is once per poll pass and is also exactly the
+ * state a wedged receiver is stuck in.  Costs one MMIO read while nothing is
+ * arriving, and that is the same rate a real driver's ISR pays.
+ */
+static VOID
+KdNetRtl8168AckInterrupts(VOID)
+{
+    USHORT Status = RtlReadReg16(&KdNet.Rtl8168, R_IS);
+    UCHAR Command;
+
+    if (Status == 0)
+        return;
+
+    KdNet.Rtl8168IntrLatch |= Status;
+    RtlWriteReg16(&KdNet.Rtl8168, R_IS, Status);
+
+    if ((Status & (R_I_RXOVRFLW | R_I_RXFIFOOVR)) == 0)
+        return;
+
+    /* Receive overflow: the ring ran dry, or the FIFO did.  The acknowledge
+     * above is the part the chip is owed.  A FIFO overflow can additionally
+     * drop RXENB, so put it back rather than assume it survived -- reading
+     * first keeps this a no-op in the common case.  Deliberately NOT rewriting
+     * R_RXDESC_LO/HI: that would reset the adapter's internal ring pointer to
+     * descriptor 0 while RxConsumer sits elsewhere, which is the desynchronised
+     * ring this transport already learned to fear. */
+    ++KdNet.Rtl8168RxOverflows;
+    Command = RtlReadReg8(&KdNet.Rtl8168, R_CMD);
+    if ((Command & B_CMD_RXENB) == 0)
+    {
+        RtlWriteReg8(&KdNet.Rtl8168, R_CMD, Command | B_CMD_RXENB);
+        ++KdNet.Rtl8168RxReenables;
+    }
+}
+
 static BOOLEAN
 KdNetRtl8168Receive(_Outptr_result_bytebuffer_(*Length) const UCHAR **Frame,
                     _Out_ PULONG Length)
@@ -708,7 +764,10 @@ KdNetRtl8168Receive(_Outptr_result_bytebuffer_(*Length) const UCHAR **Frame,
     Descriptor = &KdNet.Rtl8168.RxRing[Index];
     Options = *(volatile ULONG *)&Descriptor->opts1;
     if (Options & DESC_OWN)
+    {
+        KdNetRtl8168AckInterrupts();
         return FALSE;
+    }
 
     KeMemoryBarrier();
     FrameLength = Options & RXD_LEN_MASK;
@@ -1241,6 +1300,13 @@ KdNetHarvestNic(VOID)
 
     if (KdNet.Backend == KdNetBackendRtl8168)
     {
+        /* is= is now only what latched since the last poll; latch= is the
+         * boot-long history the transport keeps because acknowledging the
+         * register destroys it. */
+        KdNetHarvestPrintf("NIC rtl latch=%04lx ovr=%lu ren=%lu",
+                           KdNet.Rtl8168IntrLatch,
+                           KdNet.Rtl8168RxOverflows,
+                           KdNet.Rtl8168RxReenables);
         KdNetHarvestPrintf("NIC rtl cmd=%02x im=%04x is=%04x txcfg=%08lx rxcfg=%08lx cplus=%04x phy=%02x macver=%u",
                            RtlReadReg8(&KdNet.Rtl8168, R_CMD),
                            RtlReadReg16(&KdNet.Rtl8168, R_IM),
@@ -2336,6 +2402,9 @@ KdNetShareRingStats(_Out_ PKDNET_SHARE_RING_STATS Stats)
         Stats->NicCommand = RtlReadReg8(&KdNet.Rtl8168, R_CMD);
         Stats->NicIntrStatus = RtlReadReg16(&KdNet.Rtl8168, R_IS);
         Stats->NicRxConfig = RtlReadReg32(&KdNet.Rtl8168, R_RC);
+        Stats->NicIntrLatch = KdNet.Rtl8168IntrLatch;
+        Stats->RxOverflows = KdNet.Rtl8168RxOverflows;
+        Stats->RxReenables = KdNet.Rtl8168RxReenables;
     }
     else if (KdNet.Backend == KdNetBackendE1000)
     {
