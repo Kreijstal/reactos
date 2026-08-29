@@ -55,9 +55,17 @@ PrintUsage(const char *Program)
 static int
 ParseAddress(const char *Text, unsigned short Port, struct sockaddr_in *Address)
 {
+    /* inet_pton is a ws2_32 export only from Vista on (-version=0x600+), and
+     * this only ever parses a dotted-quad, which inet_addr has always done. */
+    unsigned long Parsed = inet_addr(Text);
+
+    if (Parsed == INADDR_NONE)
+        return 0;
+
     Address->sin_family = AF_INET;
     Address->sin_port = htons(Port);
-    return inet_pton(AF_INET, Text, &Address->sin_addr) == 1;
+    Address->sin_addr.s_addr = Parsed;
+    return 1;
 }
 
 static int
