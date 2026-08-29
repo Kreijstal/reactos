@@ -32,4 +32,13 @@ if(MSVC)
     add_importlibs(dwrite_winetest ntdll)
 endif()
 set_module_type(dwrite_winetest win32cui)
+
+if(NOT MSVC)
+    # Imported Wine test sources; i386 builds with -Werror and these
+    # two are Wine's own style, not something to "fix" in a copy we
+    # want to keep diffable against upstream.
+    target_compile_options(dwrite_winetest PRIVATE
+        -Wno-error=discarded-qualifiers -Wno-error=sequence-point)
+endif()
+
 add_rostests_file(TARGET dwrite_winetest)
