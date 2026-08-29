@@ -220,6 +220,7 @@ typedef struct _KDNET_TRANSPORT
     ULONGLONG FramesReceived;
     ULONGLONG FramesDropped;
 
+
     CHAR TraceBuffer[KDNET_TRACE_BUFFER_SIZE];
     ULONG TraceLength;
     ULONG TraceFlushed;
@@ -854,10 +855,47 @@ KdNetE1000ReleaseReceive(VOID)
     KdNet.E1000.RxConsumer = (Index + 1) % KDNET_E1000_DESC_COUNT;
 }
 
+/*
+ * The identity of a ring-lock owner.  ReactOS's ntoskrnl does not export
+ * KeGetCurrentProcessorNumberEx, so inside a kernel DLL the deprecated inline
+ * is the one actually available - and it is only a gs-relative byte read, which
+ * cannot fail and is safe at any IRQL, including the HIGH_LEVEL the ring lock
+ * runs at.
+ */
+FORCEINLINE
+LONG
+KdNetCurrentProcessor(VOID)
+{
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    return (LONG)KeGetCurrentProcessorNumber();
+#pragma GCC diagnostic pop
+}
+
+/* The ring lock, defined with the rest of the sharing code further down; the
+ * hardware paths below are its first users. */
+static BOOLEAN KdNetRingAcquireDebugger(_Out_ PKIRQL OldIrql, _Out_ PLONG Generation);
+static BOOLEAN KdNetRingTryAcquire(_Out_ PKIRQL OldIrql, _Out_ PLONG Generation);
+static VOID KdNetRingRelease(_In_ KIRQL OldIrql, _In_ LONG Generation);
+static BOOLEAN KdNetRingStolen(_In_ LONG Generation);
+
 static BOOLEAN
 KdNetHardwareSend(_In_reads_bytes_(Length) const UCHAR *Frame, _In_ ULONG Length)
 {
     BOOLEAN Sent;
+    KIRQL OldIrql;
+    LONG Generation;
+
+    /* Every transmit funnels through here, so this is where the transmit ring
+     * is serialised against the OS side.  The acquire is recursive, so the
+     * OS-side path that already holds the ring (KdNetShareTransmit) and the
+     * debugger's answer-ARP-from-inside-receive path both pass straight
+     * through. */
+    if (!KdNetRingAcquireDebugger(&OldIrql, &Generation))
+    {
+        ++KdNet.FramesDropped;
+        return FALSE;
+    }
 
     if (KdNet.Backend == KdNetBackendE1000)
         Sent = KdNetE1000Send(Frame, Length);
@@ -867,6 +905,8 @@ KdNetHardwareSend(_In_reads_bytes_(Length) const UCHAR *Frame, _In_ ULONG Length
         ++KdNet.FramesSent;
     else
         ++KdNet.FramesDropped;
+
+    KdNetRingRelease(OldIrql, Generation);
     return Sent;
 }
 
@@ -1739,38 +1779,232 @@ typedef struct _KDNET_SHARE_STATE
 } KDNET_SHARE_STATE, *PKDNET_SHARE_STATE;
 
 /*
- * The share lock.  It is deliberately hand-rolled rather than a KSPIN_LOCK,
- * because of an asymmetry that a normal lock cannot express:
+ * The ring lock.
  *
- *   - The OS side takes it at HIGH_LEVEL.  Raising to HIGH_LEVEL masks the
- *     freeze IPI, so KeFreezeExecution cannot complete while a processor is
- *     inside the critical section; a debugger break-in therefore always finds
- *     the descriptor rings in a consistent state, at the cost of waiting the
- *     few microseconds the section lasts.
+ * Every descriptor-ring access holds this: the OS side through KdNetSharePoll
+ * and KdNetShareTransmit, and the debugger side through KdNetPollDatagram and
+ * KdNetHardwareSend.  Both sides drive the same rings, and a ring update is not
+ * atomic - KdNetE1000ReleaseReceive clears a descriptor status, writes RDT and
+ * only then advances RxConsumer.  Two processors interleaving that hand the
+ * adapter a descriptor it still owns and reception stops for good.
  *
- *   - The debugger side does NOT take it, and must not: it runs with every
- *     other processor frozen, and one of those frozen processors could be the
- *     holder.  Exclusion comes from the freeze itself, which the rule above
- *     guarantees cannot land mid-section.
+ * THE RULE THIS REPLACES WAS UNSOUND.  The lock used to be taken by the OS side
+ * alone, justified as: "The OS side takes it at HIGH_LEVEL.  Raising to
+ * HIGH_LEVEL masks the freeze IPI, so KeFreezeExecution cannot complete while a
+ * processor is inside the critical section."  On x64 the freeze IPI is an NMI
+ * (KiIpiSend -> HalSendNMI for IPI_FREEZE, ntoskrnl/ke/amd64/ipi.c), and no
+ * IRQL masks an NMI, so the freeze lands mid-section whenever it feels like it.
+ * The same reasoning also left the break-in poll - which runs constantly on a
+ * live, unfrozen machine, see KdNetShareDeliverFromDebuggerPoll - racing the OS
+ * poll with no lock at all.  Measured cost of getting this wrong: ASUS boot 66
+ * (2026-08-27) announced a stop and then stopped servicing its packet loop,
+ * which is unrecoverable without a power cycle.
+ *
+ * The asymmetry that IS real is about waiting, not about taking:
+ *
+ *   - The debugger side must never wait while the machine is frozen.  Every
+ *     other processor is stopped, so a holder can never release, and waiting
+ *     for it is exactly the wedge described above.  It steals the ring instead
+ *     and bumps the generation to say so.
+ *
+ *   - The OS side must never wait either, so that it can never be the reason a
+ *     break-in is delayed.  A failed acquire is a dropped frame, and the sender
+ *     above us retransmits.
+ *
+ * A stolen section is a torn section: its owner was part way through a
+ * descriptor update.  Every OS-side section therefore rechecks the generation
+ * before it commits anything, and abandons the operation if it changed, rather
+ * than releasing a descriptor that now belongs to somebody else.  See
+ * KdNetRingStolen.
+ *
+ * The lock is recursive per processor: the debugger answers ARP inline, so it
+ * sends from inside its own receive section.
  *
  * Nothing inside the critical section may print.  DbgPrint reaches KdSendPacket
  * and would re-enter the transport whose ring is being manipulated.
  */
-static volatile LONG KdNetShareBusy;
+#define KDNET_RING_NO_OWNER  (-1L)
+
+/* How long the debugger spins for the ring on a LIVE machine before giving up.
+ * The holder cannot spin any more - every OS-side section is now non-blocking -
+ * so a section lasts microseconds and this is never reached in practice.  It
+ * exists so that a corrupt owner field can cost a dropped packet instead of the
+ * machine. */
+#define KDNET_RING_LIVE_SPIN  100000
+
+static volatile LONG KdNetRingOwner = KDNET_RING_NO_OWNER;
+static volatile LONG KdNetRingDepth;
+/*
+ * Which SIDE the current owner is, debugger or OS.  The owner processor number
+ * alone is not an identity: the freeze IPI is an NMI, so it can land on a
+ * processor already inside its own OS-side section, and the debugger then runs
+ * on that very processor.  Read as recursion, that would let the interrupted
+ * section resume and commit a half-written descriptor update - the exact
+ * corruption this lock exists to prevent.
+ *
+ * This field records the side; it does NOT by itself decide recursion-vs-theft.
+ * Sides differ perfectly legitimately during nesting (KdNetShareTransmit holds
+ * as OS and calls KdNetHardwareSend, which asks as debugger), so the test that
+ * matters is this field ANDed with KdNetDebuggerFrozenDepth - see
+ * KdNetRingAcquireInternal.
+ */
+static volatile LONG KdNetRingOwnerIsDebugger;
+static volatile LONG KdNetRingGeneration;
+
+/*
+ * Non-zero while the debugger owns the machine.  kd64 calls KdSave once it has
+ * frozen every other processor and KdRestore just before it thaws them, so this
+ * is exactly the window in which a lock holder can never make progress.  It is
+ * a counter because KdReportProcessorChange nests a second save/restore pair
+ * inside the KdEnterDebugger pair.
+ */
+static volatile LONG KdNetDebuggerFrozenDepth;
+
+static BOOLEAN
+KdNetRingAcquireInternal(_In_ BOOLEAN Debugger,
+                         _In_ ULONG SpinLimit,
+                         _Out_ PKIRQL OldIrql,
+                         _Out_ PLONG Generation)
+{
+    LONG Self;
+    ULONG Spin = 0;
+
+    KeRaiseIrql(HIGH_LEVEL, OldIrql);
+    Self = KdNetCurrentProcessor();
+
+    /*
+     * Already ours.  Two very different things look like this, and the SIDE OF
+     * THE REQUESTER DOES NOT TELL THEM APART - getting that wrong killed every
+     * OS transmit on boot 69:
+     *
+     *  - A genuine nested acquire, where the sides legitimately differ.
+     *    KdNetShareTransmit holds the ring as the OS side and then calls
+     *    KdNetHardwareSend, which asks as the debugger side; the debugger
+     *    likewise answers ARP from inside its own receive.  Both must pass
+     *    straight through.  Requiring the sides to match instead makes the CAS
+     *    below unsatisfiable, so KdNetShareTransmit spins out and fails on
+     *    EVERY frame: reception keeps working, transmission stops dead, and
+     *    the box has no OS network at all.
+     *
+     *  - The freeze IPI - an NMI - landing on a processor already inside its
+     *    own section.  That is not recursion: the interrupted section is half
+     *    way through a descriptor update and must be made to abandon it.
+     *
+     * What separates them is not who is asking but WHERE WE ARE.  The debugger
+     * only runs inside a frozen window, and KdSave has already raised
+     * KdNetDebuggerFrozenDepth by the time it touches the ring.  So a debugger
+     * request, inside a frozen window, against a section the OS side owns is
+     * the NMI case and must steal; everything else is ordinary recursion.
+     */
+    if (KdNetRingOwner == Self)
+    {
+        if (Debugger &&
+            (KdNetDebuggerFrozenDepth != 0) &&
+            (KdNetRingOwnerIsDebugger == 0))
+        {
+            /* We ARE the NMI that interrupted this processor's OS-side
+             * section.  Publish the theft before touching anything, so the
+             * victim abandons its half-written update when it thaws.  The
+             * owner is already us; only the generation, depth and side move. */
+            InterlockedIncrement(&KdNetRingGeneration);
+            KdNetRingDepth = 1;
+            InterlockedExchange(&KdNetRingOwnerIsDebugger, 1);
+            *Generation = KdNetRingGeneration;
+            return TRUE;
+        }
+
+        ++KdNetRingDepth;
+        *Generation = KdNetRingGeneration;
+        return TRUE;
+    }
+
+    for (;;)
+    {
+        if (InterlockedCompareExchange(&KdNetRingOwner,
+                                       Self,
+                                       KDNET_RING_NO_OWNER) == KDNET_RING_NO_OWNER)
+        {
+            break;
+        }
+
+        if (Debugger && (KdNetDebuggerFrozenDepth != 0))
+        {
+            /* The holder is frozen and will never release.  Take the ring and
+             * publish the theft before we touch anything, so that the victim
+             * sees it the moment it thaws. */
+            InterlockedIncrement(&KdNetRingGeneration);
+            InterlockedExchange(&KdNetRingOwner, Self);
+            break;
+        }
+
+        if (Spin >= SpinLimit)
+        {
+            KeLowerIrql(*OldIrql);
+            return FALSE;
+        }
+        ++Spin;
+        YieldProcessor();
+    }
+
+    KdNetRingDepth = 1;
+    InterlockedExchange(&KdNetRingOwnerIsDebugger, (LONG)(Debugger ? 1 : 0));
+    *Generation = KdNetRingGeneration;
+    return TRUE;
+}
+
+/* Debugger side: steals from a frozen holder, waits briefly for a live one. */
+static BOOLEAN
+KdNetRingAcquireDebugger(_Out_ PKIRQL OldIrql, _Out_ PLONG Generation)
+{
+    return KdNetRingAcquireInternal(TRUE, KDNET_RING_LIVE_SPIN, OldIrql, Generation);
+}
+
+/* OS data path: one attempt, and a miss is a dropped frame. */
+static BOOLEAN
+KdNetRingTryAcquire(_Out_ PKIRQL OldIrql, _Out_ PLONG Generation)
+{
+    return KdNetRingAcquireInternal(FALSE, 0, OldIrql, Generation);
+}
 
 static VOID
-KdNetShareEnter(_Out_ PKIRQL OldIrql)
+KdNetRingRelease(_In_ KIRQL OldIrql, _In_ LONG Generation)
 {
-    KeRaiseIrql(HIGH_LEVEL, OldIrql);
-    while (InterlockedCompareExchange(&KdNetShareBusy, 1, 0) != 0)
+    LONG Self = KdNetCurrentProcessor();
+
+    /* If the ring was stolen from us while we were frozen inside the section it
+     * belongs to whoever took it, and its depth is theirs too: touch neither. */
+    if ((KdNetRingOwner == Self) && (KdNetRingGeneration == Generation))
+    {
+        if (--KdNetRingDepth == 0)
+            InterlockedExchange(&KdNetRingOwner, KDNET_RING_NO_OWNER);
+    }
+    KeLowerIrql(OldIrql);
+}
+
+/* Did the debugger take the ring away from us while we were frozen inside the
+ * section?  If so nothing we were part way through may be committed. */
+static BOOLEAN
+KdNetRingStolen(_In_ LONG Generation)
+{
+    return (BOOLEAN)(KdNetRingGeneration != Generation);
+}
+
+/*
+ * Registration and teardown, which guard Share->Receive rather than a ring.
+ * They run at PASSIVE_LEVEL from miniport init and halt, never from a frozen
+ * machine, so waiting here is safe and there is no caller to hand a failure to.
+ */
+static VOID
+KdNetShareEnter(_Out_ PKIRQL OldIrql, _Out_ PLONG Generation)
+{
+    while (!KdNetRingAcquireInternal(FALSE, KDNET_RING_LIVE_SPIN, OldIrql, Generation))
         YieldProcessor();
 }
 
 static VOID
-KdNetShareLeave(_In_ KIRQL OldIrql)
+KdNetShareLeave(_In_ KIRQL OldIrql, _In_ LONG Generation)
 {
-    InterlockedExchange(&KdNetShareBusy, 0);
-    KeLowerIrql(OldIrql);
+    KdNetRingRelease(OldIrql, Generation);
 }
 
 static BOOLEAN
@@ -1790,12 +2024,14 @@ KdNetShareIsDebuggerFrame(_In_reads_bytes_(Length) const UCHAR *Frame,
  * the target's address produced ten releases here and not one indication to the
  * OS, so the guest answered nothing and inbound traffic was dead.
  *
- * No lock is taken and none may be.  This can run with every other processor
- * frozen, and one of them could be holding the share lock; that is the same
- * asymmetry the lock comment above describes.  The callback is safe under that
- * rule because it claims a receive slot with a single interlocked compare-
- * exchange and copies into non-paged memory - no allocation, no blocking, no
- * re-entry into the transport, and no printing.
+ * The caller holds the ring lock, so this runs at HIGH_LEVEL with the receive
+ * descriptor pinned.  The callback is safe under that: it claims a receive slot
+ * with a single interlocked compare-exchange and copies into non-paged memory -
+ * no allocation, no blocking, no re-entry into the transport, and no printing.
+ *
+ * It used to take no lock at all, on the reasoning that it "only ever runs with
+ * the machine frozen".  It does not - the break-in poll below runs constantly on
+ * a live machine - and that is one half of the race the ring lock now closes.
  */
 static volatile LONG KdNetShareCallbackDepth;
 
@@ -1841,14 +2077,31 @@ KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload
     ULONG Length, Poll;
     USHORT EtherType;
     BOOLEAN Received;
+    KIRQL OldIrql;
+    LONG Generation;
 
     /* No special case for adapter sharing: the OS-side poll leaves anything
      * that might be ours in the ring, so the hardware is still the one and only
-     * source of debugger frames, and they arrive here in wire order. */
+     * source of debugger frames, and they arrive here in wire order.
+     *
+     * The ring lock has to span receive .. release, because Frame points into
+     * the descriptor's buffer and stays valid only until it is released.  On a
+     * frozen machine this steals the ring from a frozen holder rather than
+     * waiting for it; on a live one - the break-in poll, which runs constantly -
+     * it is the exclusion that used to be missing entirely.
+     *
+     * It is taken per frame rather than around the whole loop on purpose.  This
+     * loop is also the wait for an acknowledgement, so holding across the stall
+     * below would lock the OS out of the adapter for a whole round trip on
+     * every debug print - and for the full timeout whenever the host is gone. */
     for (Poll = 0; Poll < PollCount; ++Poll)
     {
+        if (!KdNetRingAcquireDebugger(&OldIrql, &Generation))
+            return FALSE;
+
         if (!KdNetHardwareReceive(&Frame, &Length))
         {
+            KdNetRingRelease(OldIrql, Generation);
             KeStallExecutionProcessor(KDNET_POLL_DELAY_US);
             continue;
         }
@@ -1872,6 +2125,7 @@ KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload
                 KdNetShareDeliverFromDebuggerPoll(Frame, Length);
         }
         KdNetHardwareReleaseReceive();
+        KdNetRingRelease(OldIrql, Generation);
         if (Received)
             return TRUE;
     }
@@ -1884,9 +2138,11 @@ KdNetPollDatagram(_Out_writes_bytes_to_(Capacity, *PayloadLength) UCHAR *Payload
  * Note the asymmetry in what the two sides do with a frame that is not theirs.
  * The OS-side poll leaves debugger frames untouched in the ring, because the
  * debugger is free to be idle and must not lose a break-in - and because only
- * the hardware can preserve their order.  The debugger's own poll simply drops
- * OS frames, because it only ever runs with the machine frozen, where there is
- * no one to deliver them to and the sender will retransmit anyway.
+ * the hardware can preserve their order.  The debugger's own poll hands OS
+ * frames over rather than dropping them, through
+ * KdNetShareDeliverFromDebuggerPoll: it does NOT "only ever run with the machine
+ * frozen", it also runs as the break-in poll on a live machine, and dropping
+ * there is what used to make inbound traffic disappear.
  *
  * "Might be the debugger's" is deliberately generous.  Guessing wrong towards
  * the debugger costs one deferred OS frame; guessing wrong the other way costs
@@ -1947,6 +2203,7 @@ KdNetShareRegister(_In_ PKDNET_SHARE_REGISTRATION Registration)
 {
     PKDNET_SHARE_STATE Share;
     KIRQL OldIrql;
+    LONG Generation;
 
     if (Registration == NULL ||
         Registration->Version != KDNET_SHARE_INTERFACE_VERSION ||
@@ -1978,15 +2235,15 @@ KdNetShareRegister(_In_ PKDNET_SHARE_REGISTRATION Registration)
      * KdNetPollDatagram reads it from a bugcheck path with no lock and no way
      * to be told the memory went away, and a few kilobytes retained is a far
      * better trade than a use-after-free inside the debugger. */
-    KdNetShareEnter(&OldIrql);
+    KdNetShareEnter(&OldIrql, &Generation);
     if (KdNet.Share->Receive != NULL)
     {
-        KdNetShareLeave(OldIrql);
+        KdNetShareLeave(OldIrql, Generation);
         return STATUS_DEVICE_BUSY;
     }
     KdNet.Share->Context = Registration->Context;
     KdNet.Share->Receive = Registration->Receive;
-    KdNetShareLeave(OldIrql);
+    KdNetShareLeave(OldIrql, Generation);
 
     return STATUS_SUCCESS;
 }
@@ -1996,6 +2253,7 @@ NTAPI
 KdNetShareDeregister(VOID)
 {
     KIRQL OldIrql;
+    LONG Generation;
 
     if (KdNet.Share == NULL)
         return;
@@ -2003,10 +2261,10 @@ KdNetShareDeregister(VOID)
     /* The callback is only ever invoked with this lock held, so once we have
      * held it and cleared the pointer, no invocation is in progress and none
      * can begin.  That is the guarantee the caller frees its context on. */
-    KdNetShareEnter(&OldIrql);
+    KdNetShareEnter(&OldIrql, &Generation);
     KdNet.Share->Receive = NULL;
     KdNet.Share->Context = NULL;
-    KdNetShareLeave(OldIrql);
+    KdNetShareLeave(OldIrql, Generation);
 
     /* The lock alone is no longer proof of quiescence.  The debugger's poll
      * also invokes the callback and deliberately takes no lock, so wait for
@@ -2040,12 +2298,71 @@ KdNetShareQuery(_Out_ PKDNET_SHARE_INFO Info)
     return STATUS_SUCCESS;
 }
 
+/* See sdk/include/reactos/kdnetshare.h - lock-free by design. */
+NTSTATUS
+NTAPI
+KdNetShareRingStats(_Out_ PKDNET_SHARE_RING_STATS Stats)
+{
+    ULONG Index;
+
+    if (Stats == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (!KdNet.ShareEnabled)
+        return STATUS_NOT_SUPPORTED;
+    if (!KdNet.Initialized || KdNet.Backend == KdNetBackendNone)
+        return STATUS_DEVICE_NOT_READY;
+
+    RtlZeroMemory(Stats, sizeof(*Stats));
+    Stats->Version = KDNET_SHARE_INTERFACE_VERSION;
+
+    if (KdNet.Backend == KdNetBackendRtl8168)
+    {
+        Stats->RxConsumer = KdNet.Rtl8168.RxConsumer;
+        Stats->RxDescCount = RX_DESC_COUNT;
+        Stats->TxProducer = KdNet.Rtl8168.TxProducer;
+        Stats->TxDescCount = TX_DESC_COUNT;
+
+        for (Index = 0; Index < RX_DESC_COUNT; ++Index)
+        {
+            if (*(volatile ULONG *)&KdNet.Rtl8168.RxRing[Index].opts1 & DESC_OWN)
+                ++Stats->RxOwnedByNic;
+        }
+        for (Index = 0; Index < TX_DESC_COUNT; ++Index)
+        {
+            if (*(volatile ULONG *)&KdNet.Rtl8168.TxRing[Index].opts1 & DESC_OWN)
+                ++Stats->TxOwnedByNic;
+        }
+
+        Stats->NicCommand = RtlReadReg8(&KdNet.Rtl8168, R_CMD);
+        Stats->NicIntrStatus = RtlReadReg16(&KdNet.Rtl8168, R_IS);
+        Stats->NicRxConfig = RtlReadReg32(&KdNet.Rtl8168, R_RC);
+    }
+    else if (KdNet.Backend == KdNetBackendE1000)
+    {
+        Stats->RxConsumer = KdNet.E1000.RxConsumer;
+        Stats->RxDescCount = KDNET_E1000_DESC_COUNT;
+        Stats->TxProducer = KdNet.E1000.TxProducer;
+        Stats->TxDescCount = KDNET_E1000_DESC_COUNT;
+
+        /* The e1000 has no OWN bit; RDT/RDH carry the same information, and
+         * the head/tail gap is what "descriptors the adapter can still fill"
+         * means on this part. */
+        Stats->RxOwnedByNic = KdNetE1000Read(KDNET_E1000_REG_RDT);
+        Stats->TxOwnedByNic = KdNetE1000Read(KDNET_E1000_REG_TDT);
+        Stats->NicIntrStatus = KdNetE1000Read(KDNET_E1000_REG_ICR);
+        Stats->NicRxConfig = KdNetE1000Read(KDNET_E1000_REG_RCTL);
+    }
+
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 NTAPI
 KdNetShareTransmit(_In_reads_bytes_(Length) const UCHAR *Frame,
                    _In_ ULONG Length)
 {
     KIRQL OldIrql;
+    LONG Generation;
     BOOLEAN Sent;
     ULONG Poll;
 
@@ -2057,7 +2374,14 @@ KdNetShareTransmit(_In_reads_bytes_(Length) const UCHAR *Frame,
         return STATUS_INVALID_PARAMETER;
     }
 
-    KdNetShareEnter(&OldIrql);
+    /* One attempt only.  If the debugger has the ring we drop the frame and let
+     * the sender above us retransmit; waiting here at HIGH_LEVEL is what would
+     * hold off a break-in. */
+    if (!KdNetRingTryAcquire(&OldIrql, &Generation))
+    {
+        ++KdNet.Share->OsFramesDropped;
+        return STATUS_DEVICE_BUSY;
+    }
 
     /* See KdNetHardwareTxSlotFree: bound the wait to something an OS data path
      * can afford at HIGH_LEVEL, and report a full ring as a drop rather than
@@ -2072,7 +2396,16 @@ KdNetShareTransmit(_In_reads_bytes_(Length) const UCHAR *Frame,
     if (Poll == KDNET_SHARE_TX_POLLS)
     {
         ++KdNet.Share->OsFramesDropped;
-        KdNetShareLeave(OldIrql);
+        KdNetShareLeave(OldIrql, Generation);
+        return STATUS_DEVICE_BUSY;
+    }
+
+    /* The stall above is a window in which the freeze NMI can land and the
+     * debugger can take the ring.  If it did, the slot we just qualified is no
+     * longer ours to fill. */
+    if (KdNetRingStolen(Generation))
+    {
+        KdNetShareLeave(OldIrql, Generation);
         return STATUS_DEVICE_BUSY;
     }
 
@@ -2081,7 +2414,7 @@ KdNetShareTransmit(_In_reads_bytes_(Length) const UCHAR *Frame,
         ++KdNet.Share->OsFramesSent;
     else
         ++KdNet.Share->OsFramesDropped;
-    KdNetShareLeave(OldIrql);
+    KdNetShareLeave(OldIrql, Generation);
 
     return Sent ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
 }
@@ -2094,13 +2427,25 @@ KdNetSharePoll(_In_ ULONG MaxFrames)
     const UCHAR *Frame;
     ULONG Length, Polled = 0, Delivered = 0;
     KIRQL OldIrql;
+    LONG Generation;
 
     if (Share == NULL || !KdNet.Initialized || Share->Receive == NULL)
         return 0;
 
-    KdNetShareEnter(&OldIrql);
+    /* One attempt: see KdNetShareTransmit. */
+    if (!KdNetRingTryAcquire(&OldIrql, &Generation))
+        return 0;
+
     while (Polled < MaxFrames && Share->Receive != NULL)
     {
+        /* The freeze NMI can land anywhere in this loop and the debugger can
+         * take the ring from under us.  Stop before touching a descriptor that
+         * is no longer ours - releasing one the debugger has already advanced
+         * past is how RDT ends up behind the adapter's head, which stops
+         * reception permanently. */
+        if (KdNetRingStolen(Generation))
+            break;
+
         if (!KdNetHardwareReceive(&Frame, &Length))
             break;
         ++Polled;
@@ -2121,10 +2466,15 @@ KdNetSharePoll(_In_ ULONG MaxFrames)
             ++Delivered;
         }
 
+        /* Indicating to the OS above is not instantaneous, so recheck before
+         * the release commits an index. */
+        if (KdNetRingStolen(Generation))
+            break;
+
         KdNetHardwareReleaseReceive();
     }
     Share->OsFramesReceived += Delivered;
-    KdNetShareLeave(OldIrql);
+    KdNetShareLeave(OldIrql, Generation);
 
     return Delivered;
 }
@@ -3160,14 +3510,24 @@ NTSTATUS NTAPI KdD3Transition(VOID)
     return STATUS_SUCCESS;
 }
 
+/*
+ * kd64 calls KdSave once every other processor is frozen (KdEnterDebugger, and
+ * again from KdReportProcessorChange for a processor switch) and KdRestore just
+ * before it thaws them.  That is exactly the window in which a ring-lock holder
+ * can never make progress, so it is the window in which the debugger must steal
+ * the ring rather than wait for it.  See the ring lock commentary above.
+ */
 NTSTATUS NTAPI KdSave(_In_ BOOLEAN SleepTransition)
 {
     UNREFERENCED_PARAMETER(SleepTransition);
+    InterlockedIncrement(&KdNetDebuggerFrozenDepth);
     return STATUS_SUCCESS;
 }
 
 NTSTATUS NTAPI KdRestore(_In_ BOOLEAN SleepTransition)
 {
     UNREFERENCED_PARAMETER(SleepTransition);
+    if (KdNetDebuggerFrozenDepth > 0)
+        InterlockedDecrement(&KdNetDebuggerFrozenDepth);
     return STATUS_SUCCESS;
 }
