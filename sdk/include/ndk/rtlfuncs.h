@@ -2799,6 +2799,7 @@ RtlExitUserProcess(
     _In_ ULONG ExitStatus);
 
 NTSYSAPI
+DECLSPEC_NORETURN
 VOID
 NTAPI
 RtlExitUserThread(
