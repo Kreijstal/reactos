@@ -1,8 +1,6 @@
 
-set(VKD3D_INCLUDE_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/private
-    CACHE INTERNAL "vkd3d public and private include directories")
+# VKD3D_INCLUDE_DIRS is defined in the top-level CMakeLists.txt, because
+# dll/directx/wine/* is configured before this directory.
 
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}
