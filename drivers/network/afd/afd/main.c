@@ -1328,6 +1328,18 @@ AfdCancelHandler(PDEVICE_OBJECT DeviceObject,
 
         if (CurrentIrp == Irp)
         {
+            /* A buffered stream send owns bytes in FCB->Send.Window that the
+             * transport is still going to transmit and still going to report.
+             * Hand that ownership on before the IRP leaves the list, or
+             * SendComplete() will drain the queue empty with those bytes
+             * unaccounted for.  Sends that own no window bytes -- datagrams,
+             * and stream sends still waiting for space -- fall straight back
+             * out of it. */
+            if (Function == FUNCTION_SEND)
+            {
+                AfdReleaseSendWindowOwnership(FCB, Irp);
+            }
+
             RemoveEntryList(CurrentEntry);
             CleanupPendingIrp(FCB, Irp, IrpSp, NULL);
             UnlockAndMaybeComplete(FCB, STATUS_CANCELLED, Irp, 0);
