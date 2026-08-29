@@ -153,12 +153,6 @@ typedef struct _FILE_LINKS_FULL_ID_INFORMATION {
 #endif
 #endif
 
-#if defined(__REACTOS__) && (NTDDI_VERSION < NTDDI_WIN8)
-/* The SDK first declares this class for Windows 8; below that it has to be
- * spelled out, exactly as the block above does for the pre-Win10 MinGW case. */
-#define FileDispositionInformationEx (enum _FILE_INFORMATION_CLASS)64
-#endif
-
 #if defined(__REACTOS__) && (NTDDI_VERSION < NTDDI_WIN10)
 typedef struct _FILE_RENAME_INFORMATION_EX {
     union {
@@ -4032,6 +4026,7 @@ NTSTATUS __stdcall drv_set_information(IN PDEVICE_OBJECT DeviceObject, IN PIRP I
             break;
         }
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
         case FileDispositionInformationEx:
         {
             TRACE("FileDispositionInformationEx\n");
@@ -4046,6 +4041,7 @@ NTSTATUS __stdcall drv_set_information(IN PDEVICE_OBJECT DeviceObject, IN PIRP I
 
             break;
         }
+#endif /* NTDDI_VERSION >= NTDDI_WIN8 */
 
         case FileEndOfFileInformation:
         {
