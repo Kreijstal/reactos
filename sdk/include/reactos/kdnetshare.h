@@ -62,6 +62,34 @@ typedef struct _KDNET_SHARE_INFO
     ULONG LinkSpeedMbps;
 } KDNET_SHARE_INFO, *PKDNET_SHARE_INFO;
 
+/* Receive-ring health, for the OS miniport's periodic diagnostic line.
+ *
+ * This exists because the harvest dump cannot report this failure: harvesting
+ * needs a working receive path, and the failure being chased is precisely that
+ * the receive path has stopped.  Boot 69 wedged with KD transmit healthy and
+ * receive dead, and the partial harvest carried nothing.  The periodic line is
+ * the only channel that records the ring's state in the seconds BEFORE it dies.
+ *
+ * OwnedByNic is the count of descriptors whose OWN bit is set, i.e. handed to
+ * the adapter and not yet filled.  A healthy receive ring keeps nearly all of
+ * them owned by the NIC; the count collapsing towards zero while frames stop
+ * arriving is the ring running out of descriptors the driver never gave back.
+ * RxConsumer frozen while OwnedByNic stays high is the opposite fault - the
+ * driver looking at a descriptor the adapter has moved past. */
+typedef struct _KDNET_SHARE_RING_STATS
+{
+    ULONG Version;
+    ULONG RxConsumer;
+    ULONG RxDescCount;
+    ULONG RxOwnedByNic;
+    ULONG TxProducer;
+    ULONG TxDescCount;
+    ULONG TxOwnedByNic;
+    ULONG NicCommand;       /* RTL R_CMD; 0 on backends without it */
+    ULONG NicIntrStatus;    /* RTL R_IS */
+    ULONG NicRxConfig;      /* RTL R_RC */
+} KDNET_SHARE_RING_STATS, *PKDNET_SHARE_RING_STATS;
+
 /* Exported by kdnet.dll.  A driver that imports these will fail to load when
  * the debug transport is not kdnet.dll, which is the intended behaviour: the
  * sharing miniport is meaningful only on a KDNET boot. */
@@ -105,5 +133,17 @@ ULONG
 NTAPI
 KdNetSharePoll(
     _In_ ULONG MaxFrames);
+
+/* Samples the descriptor rings for diagnostics.  Deliberately takes NO lock:
+ * every field is a plain or volatile READ, so it cannot corrupt a concurrent
+ * descriptor update and cannot itself fail or block - which matters, because
+ * the state worth capturing is exactly the state in which the ring lock may be
+ * held by something that is no longer making progress.  The sample may
+ * therefore be slightly skewed across fields; it is a trend, not a snapshot.
+ * IRQL: any. */
+NTSTATUS
+NTAPI
+KdNetShareRingStats(
+    _Out_ PKDNET_SHARE_RING_STATS Stats);
 
 #endif /* _KDNETSHARE_H_ */
