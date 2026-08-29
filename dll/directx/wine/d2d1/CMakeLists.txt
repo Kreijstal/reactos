@@ -31,8 +31,10 @@ add_library(d2d1 MODULE
 
 if(MSVC)
     # C5286: implicit conversion between enum types
-	# Disable warning C4267: 'initializing': conversion from 'size_t' to 'UINT16', possible loss of data
+    # C4267: conversion from 'size_t' to 'UINT16', possible loss of data
     target_compile_options(d2d1 PRIVATE /wd5286 /wd4267)
+    # geometry.c allocates past the guard page, so MSVC emits a __chkstk call.
+    target_link_libraries(d2d1 chkstk)
 endif()
 
 set_module_type(d2d1 win32dll UNICODE ENTRYPOINT 0)
