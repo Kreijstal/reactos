@@ -204,6 +204,12 @@ typedef struct _AFD_FCB {
     AFD_TDI_OBJECT AddressFile, Connection;
     AFD_IN_FLIGHT_REQUEST ConnectIrp, ListenIrp, ReceiveIrp, SendIrp, DisconnectIrp;
     AFD_DATA_WINDOW Send, Recv;
+    /* Bytes sitting at the tail of Send.Window whose send IRP was
+     * cancelled after the payload had already been buffered.  Nobody is
+     * waiting for them any more, but the transport still transmits them
+     * and still counts them, so SendComplete() has to be able to balance
+     * them against what it is told was sent. */
+    UINT SendOrphanedBytes;
     KMUTEX Mutex;
     PKEVENT EventSelect;
     DWORD EventSelectTriggers;
@@ -382,5 +388,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 NTSTATUS NTAPI
 AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 			 PIO_STACK_LOCATION IrpSp);
+VOID
+AfdReleaseSendWindowOwnership(PAFD_FCB FCB, PIRP Irp);
 
 #endif /* _AFD_H */
