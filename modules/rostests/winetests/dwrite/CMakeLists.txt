@@ -1,7 +1,7 @@
 
 
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
-add_compile_definitions(-DWINETEST_USE_DBGSTR_LONGLONG)
+add_definitions(-DWINETEST_USE_DBGSTR_LONGLONG)
 
 list(APPEND SOURCE
     analyzer.c
@@ -25,5 +25,11 @@ endif()
 
 target_link_libraries(dwrite_winetest uuid dxguid)
 add_importlibs(dwrite_winetest ole32 gdi32 kernel32_vista dwrite user32 msvcrt kernel32)
+
+if(MSVC)
+    # wine_dbgstr_longlong shifts a 64-bit value; on i386 MSVC that pulls in
+    # the compiler helper __aullshr, which ntdll exports as _aullshr.
+    add_importlibs(dwrite_winetest ntdll)
+endif()
 set_module_type(dwrite_winetest win32cui)
 add_rostests_file(TARGET dwrite_winetest)

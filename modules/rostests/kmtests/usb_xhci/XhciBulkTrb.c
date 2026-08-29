@@ -13,15 +13,13 @@
 #include <usb/xhcispec.h>
 #include "hardware.h"
 
-#define XHCI_MAX_BULK_NORMAL_TRBS 255
-
-MPSTATUS
-NTAPI
-XHCI_BuildBulkNormalTrbs(IN PUSBPORT_SCATTER_GATHER_LIST SgList,
-                         IN ULONG TransferLength,
-                         OUT PXHCI_TRB Trbs,
-                         IN ULONG MaxTrbs,
-                         OUT PULONG TrbCount);
+/* Take the prototype and XHCI_MAX_BULK_NORMAL_TRBS from the driver's own
+ * header.  This used to be a hand-copied declaration, which silently went
+ * stale when the builder gained its MaxPacketSize and IsInTransfer
+ * parameters: on amd64 the wrong prototype still linked and the test then
+ * called the function with garbage in the two new arguments, and on i386 it
+ * only surfaced as an unresolved _XHCI_BuildBulkNormalTrbs@20. */
+#include "usbxhcip.h"
 
 #define TRB_TYPE(_Trb) (((_Trb).GenericTRB.Word3 >> 10) & 0x3F)
 #define TRB_CH(_Trb) (((_Trb).GenericTRB.Word3 & (1 << 4)) != 0)
@@ -80,7 +78,8 @@ START_TEST(XhciBulkTrb)
     RtlZeroMemory(&TestSgList, sizeof(TestSgList));
     RtlZeroMemory(Trbs, sizeof(XHCI_TRB) * XHCI_MAX_BULK_NORMAL_TRBS);
     TrbCount = 0xaaaaaaaa;
-    Status = XHCI_BuildBulkNormalTrbs(NULL, 0, Trbs, XHCI_MAX_BULK_NORMAL_TRBS, &TrbCount);
+    Status = XHCI_BuildBulkNormalTrbs(NULL, 0, 0, FALSE, Trbs,
+                                      XHCI_MAX_BULK_NORMAL_TRBS, &TrbCount);
     ok_eq_uint(Status, MP_STATUS_SUCCESS);
     ok_eq_uint(TrbCount, 1);
     CheckNormalTrb(&Trbs[0], 0, 0, FALSE, TRUE);
@@ -90,6 +89,8 @@ START_TEST(XhciBulkTrb)
     SetSgElement(&TestSgList.Header, 0, 0x12345000ULL, 4096, 0);
     Status = XHCI_BuildBulkNormalTrbs(&TestSgList.Header,
                                       4096,
+                                      0,
+                                      FALSE,
                                       Trbs,
                                       XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
@@ -110,6 +111,8 @@ START_TEST(XhciBulkTrb)
 
     Status = XHCI_BuildBulkNormalTrbs(&TestSgList.Header,
                                       16 * 4096,
+                                      0,
+                                      FALSE,
                                       Trbs,
                                       XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
@@ -131,6 +134,8 @@ START_TEST(XhciBulkTrb)
     SetSgElement(&TestSgList.Header, 2, 0x204000ULL, 0, 8192);
     Status = XHCI_BuildBulkNormalTrbs(&TestSgList.Header,
                                       8192,
+                                      0,
+                                      FALSE,
                                       Trbs,
                                       XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
@@ -146,6 +151,8 @@ START_TEST(XhciBulkTrb)
     TrbCount = 0xaaaaaaaa;
     Status = XHCI_BuildBulkNormalTrbs(&TestSgList.Header,
                                       12288,
+                                      0,
+                                      FALSE,
                                       Trbs,
                                       XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
@@ -155,6 +162,8 @@ START_TEST(XhciBulkTrb)
     TrbCount = 0xaaaaaaaa;
     Status = XHCI_BuildBulkNormalTrbs(NULL,
                                       4096,
+                                      0,
+                                      FALSE,
                                       Trbs,
                                       XHCI_MAX_BULK_NORMAL_TRBS,
                                       &TrbCount);
