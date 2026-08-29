@@ -37,6 +37,8 @@ add_library(d2d1 MODULE
 if(MSVC)
     # C5286: implicit conversion between enum types
     target_compile_options(d2d1 PRIVATE /wd5286)
+    # geometry.c allocates past the guard page, so MSVC emits a __chkstk call.
+    target_link_libraries(d2d1 chkstk)
 endif()
 
 set_module_type(d2d1 win32dll UNICODE ENTRYPOINT 0)

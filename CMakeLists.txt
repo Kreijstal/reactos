@@ -571,6 +571,17 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             USES_TERMINAL)
     endif()
 
+    # dll/directx/wine/* is configured long before sdk/lib/vkd3d, so it cannot
+    # wait for that directory to publish VKD3D_INCLUDE_DIRS.  The value is a
+    # pair of fixed source-tree paths, so define it here, once, where every
+    # consumer can see it.  (It used to be set only in sdk/lib/vkd3d as a cache
+    # variable, which made a *re*configure of an existing build tree work while
+    # a fresh one silently dropped the include path -- so the failure only ever
+    # showed up on CI.)
+    set(VKD3D_INCLUDE_DIRS
+        ${REACTOS_SOURCE_DIR}/sdk/lib/vkd3d/include
+        ${REACTOS_SOURCE_DIR}/sdk/lib/vkd3d/include/private)
+
     #begin with boot so reactos_cab target is defined before all other modules
     add_subdirectory(boot)
     add_subdirectory(base)
