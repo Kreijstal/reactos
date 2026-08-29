@@ -365,6 +365,12 @@ RtlExitUserThread(NTSTATUS Status)
     NtCurrentTeb()->FreeStackOnTermination = TRUE;
 #endif
     NtTerminateThread(NtCurrentThread(), Status);
+
+    /* NtTerminateThread does not return for the current thread.  Say so
+     * explicitly: this is DECLSPEC_NORETURN, and control falling off the end
+     * of a noreturn function is undefined, which GCC rejects outright. */
+    for (;;)
+        ;
 }
 
 /*

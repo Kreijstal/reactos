@@ -1546,7 +1546,7 @@
 @ stdcall ZwLoadDriver(ptr)
 @ stdcall ZwLoadKey2(ptr ptr long)
 @ stdcall ZwLoadKey(ptr ptr)
-@ stdcall ZwLoadKeyEx(ptr ptr long ptr)
+@ stdcall ZwLoadKeyEx(ptr ptr long ptr ptr long ptr ptr)
 @ stdcall ZwLockFile(long long ptr ptr ptr ptr ptr ptr long long)
 @ stdcall ZwLockProductActivationKeys(ptr ptr)
 @ stdcall ZwLockRegistryKey(ptr)
