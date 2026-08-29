@@ -681,7 +681,8 @@ QSI_DEF(SystemProcessorInformation)
     return STATUS_SUCCESS;
 }
 
-/* Class 154 - Processor Features Information */
+/* Class 154 - Processor Features Information (Windows 8.1 and later) */
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
 QSI_DEF(SystemProcessorFeaturesInformation)
 {
     typedef struct _SYSTEM_PROCESSOR_FEATURES_INFORMATION_COMPAT
@@ -702,6 +703,7 @@ QSI_DEF(SystemProcessorFeaturesInformation)
     Features->ProcessorFeatureBits = (ULONG)KeFeatureBits;
     return STATUS_SUCCESS;
 }
+#endif /* NTDDI_VERSION >= NTDDI_WINBLUE */
 
 /* Class 2 - Performance Information */
 QSI_DEF(SystemPerformanceInformation)
@@ -1929,7 +1931,8 @@ QSI_DEF(SystemKernelDebuggerInformation)
     return STATUS_SUCCESS;
 }
 
-/* Class 149 - Kernel Debugger Information Ex */
+/* Class 149 - Kernel Debugger Information Ex (Windows 8.1 and later) */
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
 QSI_DEF(SystemKernelDebuggerInformationEx)
 {
     typedef struct _SYSTEM_KERNEL_DEBUGGER_INFORMATION_EX_COMPAT
@@ -1952,6 +1955,7 @@ QSI_DEF(SystemKernelDebuggerInformationEx)
     DebuggerInfo->DebuggerPresent = !KD_DEBUGGER_NOT_PRESENT;
     return STATUS_SUCCESS;
 }
+#endif /* NTDDI_VERSION >= NTDDI_WINBLUE */
 
 /* Class 36 - Context Switch Information */
 QSI_DEF(SystemContextSwitchInformation)
@@ -3291,8 +3295,10 @@ CallQS[] =
     SI_QX(SystemExceptionInformation),
     SI_QX(SystemCrashDumpStateInformation),
     SI_QX(SystemKernelDebuggerInformation),
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
     SI_QX(SystemKernelDebuggerInformationEx),
     SI_QX(SystemProcessorFeaturesInformation),
+#endif
     SI_QX(SystemContextSwitchInformation),
     SI_QS(SystemRegistryQuotaInformation),
     SI_XS(SystemExtendServiceTableInformation),
