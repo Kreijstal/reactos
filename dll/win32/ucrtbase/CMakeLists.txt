@@ -53,8 +53,11 @@ target_link_libraries(ucrtbase
 target_link_libraries(libucrtbase INTERFACE vcstartup)
 
 # On x86, Clang emits calls to ceilf/floorf/sqrtf that ucrtbase.dll does not
-# export there - see sdk/lib/crt/ucrtex.cmake.
-if(TARGET ucrtex)
+# export there - see sdk/lib/crt/ucrtex.cmake. Spelled as the same condition
+# rather than if(TARGET ucrtex) because dll/ is configured before sdk/lib/,
+# so the target does not exist yet here (link targets resolve at generate
+# time, so the forward reference is fine).
+if(ARCH STREQUAL "i386" AND CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT MSVC)
     target_link_libraries(libucrtbase INTERFACE ucrtex)
 endif()
 
