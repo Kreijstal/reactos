@@ -52,6 +52,12 @@ target_link_libraries(ucrtbase
 # Implicitly link to vcstartup
 target_link_libraries(libucrtbase INTERFACE vcstartup)
 
+# On x86, Clang emits calls to ceilf/floorf/sqrtf that ucrtbase.dll does not
+# export there - see sdk/lib/crt/ucrtex.cmake.
+if(TARGET ucrtex)
+    target_link_libraries(libucrtbase INTERFACE ucrtex)
+endif()
+
 if(MSVC)
     target_link_libraries(ucrtbase runtmchk)
 endif()
