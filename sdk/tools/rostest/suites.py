@@ -36,7 +36,11 @@ SUMMARY_RE = re.compile(
 # kmtcdrunner end marker, e.g.  KMTCD-END Example exit=0 failures=0
 KMTCD_END_RE = re.compile(r"KMTCD-END\s+(\S+)\s+exit=(-?\d+)\s+failures=(-?\d+)")
 
-CRASH_SIGS = ("*** STOP:", "*** Fatal System Error", "*** Assertion failed:",
+# "*** Assertion failed:" is deliberately NOT a crash signature: on a KDBG
+# build a kernel ASSERT raises STATUS_ASSERTION_FAILURE into the caller and the
+# guest keeps running; only an actual debugger entry ("Entered debugger",
+# "kdb:>") or a bugcheck stops it.
+CRASH_SIGS = ("*** STOP:", "*** Fatal System Error",
               "Entered debugger", "kdb:>")
 
 
