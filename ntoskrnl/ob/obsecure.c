@@ -452,7 +452,9 @@ ObCheckObjectAccess(IN PVOID Object,
     BOOLEAN Result;
     ACCESS_MASK GrantedAccess;
     ACCESS_MASK DesiredAccess;
+#if (NTDDI_VERSION >= NTDDI_VISTA)
     ACCESS_MASK FullAccess;
+#endif
     PPRIVILEGE_SET Privileges = NULL;
     PAGED_CODE();
 
