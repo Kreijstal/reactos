@@ -45,6 +45,8 @@ endif()
 # kdnetshare lets the OS use the NIC the kernel debugger owns, so a machine
 # with a single adapter no longer has to choose between KDNET and a network.
 # NDIS 6.20, same NT 6.0+ gate; inert unless /KDNETSHARE is passed at boot.
-if(_E1000E_NT_NUM GREATER_EQUAL 1536)
+# It links the KdNetShare* exports of the WinKD kdcom/kdnet transports, which
+# the KDBG-only kdrosdbg build of kdcom.dll does not provide.
+if(_E1000E_NT_NUM GREATER_EQUAL 1536 AND _WINKD_)
     add_subdirectory(kdnetshare)
 endif()
