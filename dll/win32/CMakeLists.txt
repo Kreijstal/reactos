@@ -289,6 +289,7 @@ endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x603)
    add_subdirectory(rtworkq)
+endif()
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x601)
     #add_subdirectory(d3d11) #disabled, see dll/directx/wine
