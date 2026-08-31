@@ -358,8 +358,9 @@ _Pragma("GCC diagnostic pop") \
 
 
 #define _SEH3_TRY \
-    _SEH3$_PreventInlining(); \
-    /* Enter the outer scope */ \
+    /* Enter the outer scope (a single statement, so that _SEH3_TRY can \
+       be the body of an unbraced if/else/while without gcc's \
+       -Wmultistatement-macros firing) */ \
     if (1) { \
         /* Declare local labels */ \
         __label__ _SEH3$_l_BeforeTry; \
@@ -373,6 +374,8 @@ _Pragma("GCC diagnostic pop") \
         (void)&&_SEH3$_l_OnException; \
         (void)&&_SEH3$_l_BeforeFilterOrFinally; \
         (void)&&_SEH3$_l_FilterOrFinally; \
+\
+        _SEH3$_PreventInlining(); \
 \
         /* Count the try level. Outside of any __try, _SEH3$_TryLevel is -1 */ \
         enum { \
