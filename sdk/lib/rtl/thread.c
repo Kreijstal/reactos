@@ -299,10 +299,15 @@ RtlCreateUserThread(IN HANDLE ProcessHandle,
 
     /* Next, we'll set up the Initial Context */
 #ifdef _M_AMD64
+    /* The thread starts in RtlUserThreadStart, which expects the user
+       entry point in Rcx and its argument in Rdx, so the real StartAddress
+       travels through the ThreadStartParam slot (-> Rcx) and the wrapper
+       through the ThreadStartAddress slot (-> Rip). The casts express that
+       deliberate indirection. */
     RtlInitializeContext(ProcessHandle,
                          &Context,
-                         StartAddress,
-                         RtlUserThreadStart,
+                         (PVOID)StartAddress,
+                         (PTHREAD_START_ROUTINE)RtlUserThreadStart,
                          InitialTeb.StackBase);
     Context.Rdx = (ULONG_PTR)Parameter;
 #else
