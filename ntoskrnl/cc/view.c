@@ -40,6 +40,8 @@
 /* GLOBALS *******************************************************************/
 
 LIST_ENTRY DirtyVacbListHead;
+/* Pass counter for CcRosFlushDirtyPages; VACBs are stamped with it (see ROS_VACB::FlushPass). */
+static ULONGLONG CcRosFlushPassSequence = 0;
 static LIST_ENTRY VacbLruListHead;
 
 NPAGED_LOOKASIDE_LIST iBcbLookasideList;
@@ -177,6 +179,7 @@ CcRosFlushVacb (
     NTSTATUS Status;
     BOOLEAN HaveLock = FALSE;
     BOOLEAN WasMarked;
+    BOOLEAN Retry = TRUE;
     PROS_SHARED_CACHE_MAP SharedCacheMap = Vacb->SharedCacheMap;
 
     /*
@@ -204,6 +207,7 @@ CcRosFlushVacb (
                             &Vacb->FileOffset,
                             VACB_MAPPING_GRANULARITY,
                             Iosb);
+    Retry = CcRetryError(Status);
 
     if (HaveLock)
     {
@@ -211,16 +215,28 @@ CcRosFlushVacb (
     }
 
 quit:
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) && WasMarked)
     {
         /*
-         * Only re-mark dirty if we were the thread that removed it from the
-         * dirty list. If WasMarked is FALSE, another thread already removed it,
-         * so we must not change dirty tracking here (that thread will re-mark on failure).
-         * CcRosMarkDirtyVacb itself guards against double-insertion should
-         * another thread have concurrently re-marked the VACB dirty.
+         * We were the thread that took the VACB off the dirty list, so the
+         * decision whether it goes back is ours (if WasMarked is FALSE another
+         * thread removed it and decides for itself; CcRosMarkDirtyVacb guards
+         * against double insertion either way).
+         *
+         * Windows (CcFlushCache -> CcReleaseByteRangeFromWrite) puts the range
+         * back on the dirty list only for the RetryError() statuses, and when
+         * the file could not be acquired for the flush.  Any other failure
+         * means the write-behind data is LOST: the pages stay dirty in the
+         * section (MiFlushDirtySegmentRun re-marks them, and the segment
+         * teardown writes them back once more), but the cache manager stops
+         * retrying.  Re-dirtying unconditionally turns a permanent failure --
+         * STATUS_TOO_LATE from a volume fastfat has already shut down (a
+         * process still logging while NtShutdownSystem ran, X550DP boot 90) --
+         * into a lazy writer that spins on the same VACB forever, with
+         * PopGracefulShutdown blocked behind it in
+         * CcWaitForCurrentLazyWriterActivity.
          */
-        if (WasMarked)
+        if (Retry)
             CcRosMarkDirtyVacb(Vacb);
     }
     else
@@ -365,6 +381,8 @@ CcRosFlushDirtyPages (
     KIRQL OldIrql;
     BOOLEAN FlushAll = (Target == MAXULONG);
     BOOLEAN ProgressMade = FALSE;
+    ULONGLONG PassStart;
+    ULONG Deferred = 0;
 
     DPRINT("CcRosFlushDirtyPages(Target %lu)\n", Target);
 
@@ -372,6 +390,19 @@ CcRosFlushDirtyPages (
 
     KeEnterCriticalRegion();
     OldIrql = KeAcquireQueuedSpinLock(LockQueueMasterLock);
+
+    /*
+     * Number this pass.  Every VACB we take for a flush attempt is stamped
+     * with it, and a VACB stamped by this pass -- or by any pass that started
+     * after it -- is not taken again: the walk below restarts at the list head
+     * after each attempt (the saved Flink can be stale once the master lock
+     * was dropped), so without the stamp a VACB that lands back on the dirty
+     * list, because the write failed with a retryable status or a writer
+     * re-dirtied it during the I/O, is picked up again immediately and the
+     * pass never ends.  Windows visits each shared cache map once per lazy
+     * writer scan and comes back on the next tick.
+     */
+    PassStart = ++CcRosFlushPassSequence;
 
     current_entry = DirtyVacbListHead.Flink;
     if (current_entry == &DirtyVacbListHead)
@@ -389,6 +420,17 @@ CcRosFlushDirtyPages (
         {
             ASSERT(FlushAll);
             if (IsListEmpty(&DirtyVacbListHead))
+                break;
+
+            /*
+             * Every VACB still on the list has had its attempt this pass and
+             * nothing was deferred to another thread: the pass is complete.
+             * What is left is data whose write keeps failing (or was
+             * re-dirtied under us); a flush-everything caller gets one
+             * attempt per VACB, exactly like Windows, not a spin until the
+             * list is empty.
+             */
+            if (Deferred == 0)
                 break;
 
             /*
@@ -420,6 +462,7 @@ CcRosFlushDirtyPages (
                     break;
             }
             ProgressMade = FALSE;
+            Deferred = 0;
             current_entry = DirtyVacbListHead.Flink;
         }
 
@@ -431,6 +474,13 @@ CcRosFlushDirtyPages (
         CcRosVacbIncRefCount(current);
 
         SharedCacheMap = current->SharedCacheMap;
+
+        /* Already attempted by this pass (or a later one): once per pass. */
+        if (current->FlushPass >= PassStart)
+        {
+            CcRosVacbDecRefCount(current);
+            continue;
+        }
 
         /* When performing lazy write, don't handle temporary files */
         if (CalledFromLazy && BooleanFlagOn(SharedCacheMap->FileObject->Flags, FO_TEMPORARY_FILE))
@@ -451,11 +501,14 @@ CcRosFlushDirtyPages (
         /* Do not lazy-write the same file concurrently. Fastfat ASSERTS on that */
         if (SharedCacheMap->Flags & SHARED_CACHE_MAP_IN_LAZYWRITE)
         {
+            /* Left to the thread that owns the flag; revisit after it is done. */
+            Deferred++;
             CcRosVacbDecRefCount(current);
             continue;
         }
 
         SharedCacheMap->Flags |= SHARED_CACHE_MAP_IN_LAZYWRITE;
+        current->FlushPass = PassStart;
 
         /* Keep a ref on the shared cache map */
         SharedCacheMap->OpenCount++;
@@ -489,6 +542,19 @@ CcRosFlushDirtyPages (
         Status = CcRosFlushVacb(current, &Iosb);
 
         SharedCacheMap->Callbacks->ReleaseFromLazyWrite(SharedCacheMap->LazyWriteContext);
+
+        if (!NT_SUCCESS(Status) && CalledFromLazy && !CcRetryError(Status))
+        {
+            /*
+             * The write-behind data is gone: CcRosFlushVacb left the VACB
+             * clean.  Windows' CcWriteBehind reports this as the "Delayed
+             * Write Failed" informational hard error; do the same.  The
+             * OpenCount reference taken above keeps the file object alive.
+             */
+            IoRaiseInformationalHardError(STATUS_LOST_WRITEBEHIND_DATA,
+                                          &SharedCacheMap->FileObject->FileName,
+                                          NULL);
+        }
 
         /* We release the VACB before acquiring the lock again, because
          * CcRosVacbDecRefCount might free the VACB, as CcRosFlushVacb dropped a
@@ -952,6 +1018,7 @@ CcRosCreateVacb (
     current->BaseAddress = NULL;
     current->Dirty = FALSE;
     current->PageOut = FALSE;
+    current->FlushPass = 0;
     current->FileOffset.QuadPart = ROUND_DOWN(FileOffset, VACB_MAPPING_GRANULARITY);
     current->SharedCacheMap = SharedCacheMap;
     current->MappedCount = 0;
