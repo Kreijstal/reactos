@@ -22,7 +22,7 @@ MiShutdownSystem(VOID)
 {
     ULONG i;
     PFN_NUMBER Page;
-    BOOLEAN Dirty;
+    BOOLEAN Written;
 
     /* Loop through all the paging files */
     for (i = 0; i < MmNumberOfPagingFiles; i++)
@@ -41,11 +41,21 @@ MiShutdownSystem(VOID)
          * after the last of that work. */
     }
 
-    /* Loop through all the pages owned by the legacy Mm and page them out, if needed. */
-    /* We do it as long as there are dirty pages, since flushing can cause the FS to dirtify new ones. */
+    /*
+     * Loop through all the pages owned by the legacy Mm and page them out, if
+     * needed.  Repeat while a pass actually wrote something, since writing
+     * makes the file system dirty new (metadata) pages.  A page whose write
+     * FAILS stays dirty in its segment (MmCheckDirtySegment re-marks it) and
+     * is no reason for another pass: Windows' MiShutdownSystem flushes the
+     * modified pages once and moves on, it never spins until the system is
+     * clean.  Looping "while dirty" here hangs shutdown forever as soon as one
+     * page can no longer be written -- fastfat fails every write to a volume
+     * that has had its shutdown notification with STATUS_TOO_LATE, and
+     * IoShutdownSystem(0) runs before this with user processes still alive.
+     */
     do
     {
-        Dirty = FALSE;
+        Written = FALSE;
 
         Page = MmGetLRUFirstUserPage();
         while (Page)
@@ -63,8 +73,11 @@ MiShutdownSystem(VOID)
 
                     if (!IS_SWAP_FROM_SSE(Entry) && IS_DIRTY_SSE(Entry))
                     {
-                        Dirty = TRUE;
-                        MmCheckDirtySegment(Segment, &SegmentOffset, FALSE, TRUE, NULL);
+                        IO_STATUS_BLOCK Iosb;
+
+                        MmCheckDirtySegment(Segment, &SegmentOffset, FALSE, TRUE, &Iosb);
+                        if (NT_SUCCESS(Iosb.Status))
+                            Written = TRUE;
                     }
 
                     MmUnlockSectionSegment(Segment);
@@ -75,7 +88,7 @@ MiShutdownSystem(VOID)
 
             Page = MmGetLRUNextUserPage(Page, FALSE);
         }
-    } while (Dirty);
+    } while (Written);
 }
 
 VOID
