@@ -213,6 +213,10 @@ typedef struct _ROS_VACB
     /* Page out in progress */
     BOOLEAN PageOut;
     ULONG MappedCount;
+    /* CcRosFlushDirtyPages pass that last took this VACB for a flush attempt
+     * (0 = never).  A pass attempts each dirty VACB at most once, like the
+     * per-scan visit of a shared cache map in Windows' lazy writer. */
+    ULONGLONG FlushPass;
     /* Entry in the list of VACBs for this shared cache map. */
     LIST_ENTRY CacheMapVacbListEntry;
     /* Entry in the list of VACBs which are dirty. */
@@ -227,6 +231,16 @@ typedef struct _ROS_VACB
     PROS_SHARED_CACHE_MAP SharedCacheMap;
     /* Pointer to the next VACB in a chain. */
 } ROS_VACB, *PROS_VACB;
+
+/*
+ * Windows cc.h RetryError(): the only write-behind failures for which the
+ * cache manager keeps the data dirty and tries again.  Every other status
+ * means the write-behind data is lost (IO_LOST_DELAYED_WRITE /
+ * STATUS_LOST_WRITEBEHIND_DATA); retrying it forever hangs the lazy writer
+ * and everything that waits for it, shutdown included.
+ */
+#define CcRetryError(Status) \
+    ((Status) == STATUS_VERIFY_REQUIRED || (Status) == STATUS_FILE_LOCK_CONFLICT)
 
 typedef struct _INTERNAL_BCB
 {
