@@ -51,6 +51,11 @@ PVOID PspSystemDllEntryPoint;
 UNICODE_STRING PsNtDllPathName =
     RTL_CONSTANT_STRING(L"\\SystemRoot\\System32\\ntdll.dll");
 
+/* Windows publishes the system DLL in the loaded user-image list, where
+   SystemModuleInformation (and thus psapi's GetDeviceDriver*) finds it */
+static LDR_DATA_TABLE_ENTRY PspSystemDllLdrEntry;
+static WCHAR PspSystemDllNameBuffer[128];
+
 PHANDLE_TABLE PspCidTable;
 
 PEPROCESS PsInitialSystemProcess = NULL;
@@ -272,6 +277,46 @@ PsLocateSystemDll(VOID)
     {
         /* Failed, bugcheck */
         KeBugCheckEx(PROCESS1_INITIALIZATION_FAILED, Status, 5, 0, 0);
+    }
+
+    /* Publish ntdll in the loaded user-image list, as Windows does: the
+       entry appears in SystemModuleInformation after the kernel modules,
+       named by the system root without the drive letter (Windows reports
+       "\Windows\System32\ntdll.dll" there). */
+    {
+        UNICODE_STRING Name;
+        UNICODE_STRING SystemRoot = NtSystemRoot;
+        PIMAGE_NT_HEADERS NtHeaders;
+
+        /* Strip the drive letter, keep the root-relative path */
+        if ((SystemRoot.Length >= 2 * sizeof(WCHAR)) &&
+            (SystemRoot.Buffer[1] == L':'))
+        {
+            SystemRoot.Buffer += 2;
+            SystemRoot.Length -= 2 * sizeof(WCHAR);
+        }
+
+        RtlInitEmptyUnicodeString(&Name,
+                                  PspSystemDllNameBuffer,
+                                  sizeof(PspSystemDllNameBuffer));
+        RtlCopyUnicodeString(&Name, &SystemRoot);
+        RtlAppendUnicodeToString(&Name, L"\\System32\\ntdll.dll");
+
+        PspSystemDllLdrEntry.DllBase = PspSystemDllBase;
+        NtHeaders = RtlImageNtHeader(PspSystemDllBase);
+        if (NtHeaders)
+        {
+            PspSystemDllLdrEntry.SizeOfImage =
+                NtHeaders->OptionalHeader.SizeOfImage;
+        }
+        PspSystemDllLdrEntry.LoadCount = 1;
+        PspSystemDllLdrEntry.FullDllName = Name;
+        PspSystemDllLdrEntry.BaseDllName.Length = 9 * sizeof(WCHAR);
+        PspSystemDllLdrEntry.BaseDllName.MaximumLength = 10 * sizeof(WCHAR);
+        PspSystemDllLdrEntry.BaseDllName.Buffer =
+            &Name.Buffer[(Name.Length / sizeof(WCHAR)) - 9];
+        InsertTailList(&MmLoadedUserImageList,
+                       &PspSystemDllLdrEntry.InLoadOrderLinks);
     }
 
     /* Return status */
