@@ -8,7 +8,9 @@ size_t __cdecl _tcsnlen(const _TCHAR * str, size_t count)
 
  if(str == 0) return 0;
 
- for(s = str; *s && count; ++ s, -- count);
+ /* Check the count before dereferencing: reading one character past the
+    limit faults on an unterminated buffer that ends at a page boundary */
+ for(s = str; count && *s; ++ s, -- count);
 
  return s - str;
 }

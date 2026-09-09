@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <tchar.h>
 #include <strings.h>
 #include <math.h>
@@ -564,10 +565,22 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
                     flags &= ~FLAG_WIDECHAR;
                 }
 
+#ifdef _USER32_WSPRINTF
+                /* wsprintf scans the whole string first (faulting on
+                   unterminated input, like Windows) and only applies the
+                   precision to the output afterwards */
+                if (flags & FLAG_WIDECHAR)
+                    len = wcsnlen((wchar_t*)string, INT_MAX);
+                else
+                    len = strnlen((char*)string, INT_MAX);
+                if ((precision >= 0) && (len > (size_t)precision))
+                    len = (size_t)precision;
+#else
                 if (flags & FLAG_WIDECHAR)
                     len = wcsnlen((wchar_t*)string, (unsigned)precision);
                 else
                     len = strnlen((char*)string, (unsigned)precision);
+#endif
                 precision = 0;
                 break;
 
