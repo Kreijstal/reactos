@@ -36,10 +36,10 @@ endif()
 if(_E1000E_NT_NUM GREATER_EQUAL 1536 AND ENABLE_IWLWIFI)
     add_subdirectory(iwlwifi)
 endif()
-# vwifi is a software-only NDIS 6.20 native-802.11 miniport used for
-# wlan upper-stack development under QEMU when no real Wi-Fi silicon is
-# available. Same NT 6.0+ gate.
-if(_E1000E_NT_NUM GREATER_EQUAL 1536)
+# vwifi fabricates scan results and must never appear as detected hardware.
+# Keep it available for explicit WLAN-stack tests, but do not package it in
+# normal hardware or LiveCD builds.
+if(_E1000E_NT_NUM GREATER_EQUAL 1536 AND ENABLE_VWIFI_TEST_ADAPTER)
     add_subdirectory(vwifi)
 endif()
 # kdnetshare lets the OS use the NIC the kernel debugger owns, so a machine
