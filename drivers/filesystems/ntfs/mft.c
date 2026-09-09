@@ -5668,16 +5668,31 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
      * walk would then free) and before NtfsFreeAttributeListClusters (which
      * zeroes the list runlist this walk reads the child map from).  Without
      * this walk every delete leaked the file's entire data allocation in
-     * $Bitmap (offline chkdsk code 25). */
+     * $Bitmap (offline chkdsk code 25).
+     *
+     * Best-effort on purpose: every $I30 entry for this file is already gone,
+     * so the file is unreachable and the record HAS to be reclaimed.  Bailing
+     * out here (as this used to) leaves an MFT record that is still
+     * FRH_IN_USE with LinkCount 1 and an intact $FILE_NAME but no directory
+     * entry anywhere - an orphan that chkdsk has to reconnect - and, because
+     * NtfsRenameFileRecord aborts the whole rename on our error, the name we
+     * just removed is never recreated either.  A cluster-release failure is
+     * only a $Bitmap discrepancy (chkdsk code 25); it must not cost the
+     * caller its directory entry.  Remember the error and carry on. */
     Status = NtfsFreeFileClusters(DeviceExt, FileRecord);
     if (!NT_SUCCESS(Status))
     {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
+        DPRINT1("NtfsDeleteFileRecord: MFT %I64u clusters not released (0x%lx), "
+                "freeing the record anyway\n", Fcb->MFTIndex, Status);
+        NtfsMarkVolumeCorrupt(DeviceExt);
     }
 
     /* Drop the parent-directory index entries for any spilled names and free
-     * their child extension records before the base record is freed below. */
+     * their child extension records before the base record is freed below.
+     * Unlike the cluster walk above this one must NOT be forced through: a
+     * spilled name still has a live $I30 entry pointing at this record, and
+     * freeing the record under it would cross-link that directory to whatever
+     * file the record gets reused for. */
     Status = NtfsRemoveSpilledNames(DeviceExt, FileRecord, Fcb->MFTIndex, CaseSensitive);
     if (!NT_SUCCESS(Status))
     {
@@ -5687,12 +5702,15 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
 
     /* If the $ATTRIBUTE_LIST outgrew the record and went non-resident, its
      * cluster allocation dies with the record - free it here or the clusters
-     * leak (offline chkdsk reports code 25). */
+     * leak (offline chkdsk reports code 25).  Best-effort for the same reason
+     * as the $DATA walk above: the names are already gone, so the record must
+     * still be reclaimed. */
     Status = NtfsFreeAttributeListClusters(DeviceExt, FileRecord);
     if (!NT_SUCCESS(Status))
     {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
+        DPRINT1("NtfsDeleteFileRecord: MFT %I64u $ATTRIBUTE_LIST clusters not "
+                "released (0x%lx), freeing the record anyway\n", Fcb->MFTIndex, Status);
+        NtfsMarkVolumeCorrupt(DeviceExt);
     }
 
     ClearFlag(FileRecord->Flags, FRH_IN_USE);
@@ -5964,6 +5982,158 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
         goto Cleanup;
     }
 
+    /* Everything from here to the end of the new-directory-entry build is
+     * *preparation*: it can still fail, and none of it is visible in any
+     * directory.  It must all run BEFORE the ReplaceIfExists block below,
+     * which is the point of no return - that block unlinks (and usually
+     * frees) the file whose name we are taking over, and nothing can put it
+     * back.  When the preparation ran after the replace (as it used to), any
+     * of these failures - the parent record read, the $FILE_NAME lookup, a
+     * record too full for a longer name, a pool allocation - left the volume
+     * with the target's name deleted from the directory, the target's record
+     * leaked, and no new name created, while NtSetInformationFile reported
+     * failure.  Renaming a staged file over a system binary that way (smss's
+     * PendingFileRenameOperations does exactly that) makes the file vanish
+     * from its directory. */
+    ParentSequenceNumber = NTFS_FILE_ROOT;
+    if (NewParentMftIndex != NTFS_FILE_ROOT)
+    {
+        ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (!ParentFileRecord)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
+
+        Status = ReadFileRecord(DeviceExt, NewParentMftIndex, ParentFileRecord);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        ParentSequenceNumber = ParentFileRecord->SequenceNumber;
+    }
+
+    NewFileNameLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + NewFileName->Length;
+
+    /* A longer name needs a bigger $FILE_NAME attribute, and $FILE_NAME is one
+     * of the attributes that can never leave the file record.  If the record
+     * has no slack for that growth - the usual reason being a small file whose
+     * $DATA is still resident and fills it - free some by moving another
+     * attribute out, while nothing has been committed to the directory yet.
+     * Windows renames such a file happily; failing here escapes
+     * NtSetInformationFile() as STATUS_BUFFER_OVERFLOW, which POSIX emulation
+     * layers report as a nonsensical ERROR_MORE_DATA. */
+    Status = FindAttribute(DeviceExt,
+                           FileRecord,
+                           AttributeFileName,
+                           NULL,
+                           0,
+                           &FileNameContext,
+                           &FileNameOffset);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    /* FindAttribute falls back to the $ATTRIBUTE_LIST when the base record has
+     * no $FILE_NAME left (heavy hard-linking spills names to child records).
+     * It then reports an offset *into the child record* while we are holding
+     * the base record, so FileRecord + FileNameOffset addresses an unrelated
+     * attribute slot - InternalSetResidentAttributeLength and the name copy
+     * below would write the new name over whatever lives there and
+     * UpdateFileRecord would commit the wreckage.  Editing a spilled name
+     * needs the child-record machinery NtfsUnlinkSpilledName uses; until this
+     * path grows that, refuse rather than corrupt.  Same guard as
+     * NtfsSetSecurityOnRecord/objid/reparse, which all reject
+     * MigratedToMFTIndex != 0. */
+    if (FileNameContext->MigratedToMFTIndex != 0)
+    {
+        DPRINT1("Rename of MFT record %I64u: $FILE_NAME lives in child record %I64u, refusing\n",
+                Fcb->MFTIndex, FileNameContext->MigratedToMFTIndex);
+        Status = STATUS_NOT_IMPLEMENTED;
+        goto Cleanup;
+    }
+
+    FileNameRecord = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileNameOffset);
+    BytesNeeded = ALIGN_UP_BY(NewFileNameLength + FileNameRecord->Resident.ValueOffset,
+                              ATTR_RECORD_ALIGNMENT);
+    if (BytesNeeded > FileNameRecord->Length &&
+        DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse <
+            BytesNeeded - FileNameRecord->Length)
+    {
+        Status = NtfsMakeRoomInFileRecord(DeviceExt,
+                                          FileRecord,
+                                          BytesNeeded - FileNameRecord->Length);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Rename to '%wZ': can't fit the name in MFT record %I64u: 0x%lx\n",
+                    NewFileName, Fcb->MFTIndex, Status);
+            goto Cleanup;
+        }
+
+        /* The attributes moved: both the context and the name we captured from
+         * the record describe the old layout. */
+        ReleaseAttributeContext(FileNameContext);
+        FileNameContext = NULL;
+
+        CurrentName = GetBestFileNameFromRecord(DeviceExt,
+                                                FileRecord,
+                                                (PFILENAME_ATTRIBUTE)CurNameBuf);
+        if (CurrentName == NULL)
+        {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            goto Cleanup;
+        }
+
+        Status = FindAttribute(DeviceExt,
+                               FileRecord,
+                               AttributeFileName,
+                               NULL,
+                               0,
+                               &FileNameContext,
+                               &FileNameOffset);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+
+        MadeRoom = TRUE;
+    }
+
+    NewDirectoryEntry = ExAllocatePoolWithTag(NonPagedPool, NewFileNameLength, TAG_NTFS);
+    if (!NewDirectoryEntry)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+
+    RtlZeroMemory(NewDirectoryEntry, NewFileNameLength);
+    RtlCopyMemory(NewDirectoryEntry,
+                  CurrentName,
+                  min(GetFileNameAttributeLength(CurrentName),
+                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name)));
+    NewDirectoryEntry->DirectoryFileReferenceNumber = NewParentMftIndex;
+    if (NewParentMftIndex == NTFS_FILE_ROOT)
+        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)NTFS_FILE_ROOT << 48;
+    else
+        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)ParentSequenceNumber << 48;
+    NewDirectoryEntry->NameLength = NewFileName->Length / sizeof(WCHAR);
+    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3(NewFileName, NULL, NULL))
+        NewDirectoryEntry->NameType = NTFS_FILE_NAME_WIN32_AND_DOS;
+    else
+        NewDirectoryEntry->NameType = NTFS_FILE_NAME_POSIX;
+    RtlCopyMemory(NewDirectoryEntry->Name, NewFileName->Buffer, NewFileName->Length);
+
+    if (MadeRoom)
+    {
+        PNTFS_ATTR_CONTEXT DataContext;
+
+        /* Moving a value out of the record changed what the file has allocated,
+         * and the directory entry caches those sizes - it is where
+         * NtfsMakeFCBFromDirEntry() takes the FCB's allocation size from. */
+        if (NT_SUCCESS(FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0, &DataContext, NULL)))
+        {
+            NewDirectoryEntry->AllocatedSize = AttributeAllocatedLength(DataContext->pRecord);
+            NewDirectoryEntry->DataSize = AttributeDataLength(DataContext->pRecord);
+            ReleaseAttributeContext(DataContext);
+        }
+    }
+
     Status = NtfsLookupFileAt(DeviceExt,
                               NewFileName,
                               CaseSensitive,
@@ -6082,126 +6252,6 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     else if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
         goto Cleanup;
 
-    ParentSequenceNumber = NTFS_FILE_ROOT;
-    if (NewParentMftIndex != NTFS_FILE_ROOT)
-    {
-        ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
-        if (!ParentFileRecord)
-        {
-            Status = STATUS_INSUFFICIENT_RESOURCES;
-            goto Cleanup;
-        }
-
-        Status = ReadFileRecord(DeviceExt, NewParentMftIndex, ParentFileRecord);
-        if (!NT_SUCCESS(Status))
-            goto Cleanup;
-
-        ParentSequenceNumber = ParentFileRecord->SequenceNumber;
-    }
-
-    NewFileNameLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + NewFileName->Length;
-
-    /* A longer name needs a bigger $FILE_NAME attribute, and $FILE_NAME is one
-     * of the attributes that can never leave the file record.  If the record
-     * has no slack for that growth - the usual reason being a small file whose
-     * $DATA is still resident and fills it - free some by moving another
-     * attribute out, while nothing has been committed to the directory yet.
-     * Windows renames such a file happily; failing here escapes
-     * NtSetInformationFile() as STATUS_BUFFER_OVERFLOW, which POSIX emulation
-     * layers report as a nonsensical ERROR_MORE_DATA. */
-    Status = FindAttribute(DeviceExt,
-                           FileRecord,
-                           AttributeFileName,
-                           NULL,
-                           0,
-                           &FileNameContext,
-                           &FileNameOffset);
-    if (!NT_SUCCESS(Status))
-        goto Cleanup;
-
-    FileNameRecord = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileNameOffset);
-    BytesNeeded = ALIGN_UP_BY(NewFileNameLength + FileNameRecord->Resident.ValueOffset,
-                              ATTR_RECORD_ALIGNMENT);
-    if (BytesNeeded > FileNameRecord->Length &&
-        DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse <
-            BytesNeeded - FileNameRecord->Length)
-    {
-        Status = NtfsMakeRoomInFileRecord(DeviceExt,
-                                          FileRecord,
-                                          BytesNeeded - FileNameRecord->Length);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("Rename to '%wZ': can't fit the name in MFT record %I64u: 0x%lx\n",
-                    NewFileName, Fcb->MFTIndex, Status);
-            goto Cleanup;
-        }
-
-        /* The attributes moved: both the context and the name we captured from
-         * the record describe the old layout. */
-        ReleaseAttributeContext(FileNameContext);
-        FileNameContext = NULL;
-
-        CurrentName = GetBestFileNameFromRecord(DeviceExt,
-                                                FileRecord,
-                                                (PFILENAME_ATTRIBUTE)CurNameBuf);
-        if (CurrentName == NULL)
-        {
-            Status = STATUS_OBJECT_NAME_NOT_FOUND;
-            goto Cleanup;
-        }
-
-        Status = FindAttribute(DeviceExt,
-                               FileRecord,
-                               AttributeFileName,
-                               NULL,
-                               0,
-                               &FileNameContext,
-                               &FileNameOffset);
-        if (!NT_SUCCESS(Status))
-            goto Cleanup;
-
-        MadeRoom = TRUE;
-    }
-
-    NewDirectoryEntry = ExAllocatePoolWithTag(NonPagedPool, NewFileNameLength, TAG_NTFS);
-    if (!NewDirectoryEntry)
-    {
-        Status = STATUS_INSUFFICIENT_RESOURCES;
-        goto Cleanup;
-    }
-
-    RtlZeroMemory(NewDirectoryEntry, NewFileNameLength);
-    RtlCopyMemory(NewDirectoryEntry,
-                  CurrentName,
-                  min(GetFileNameAttributeLength(CurrentName),
-                      FIELD_OFFSET(FILENAME_ATTRIBUTE, Name)));
-    NewDirectoryEntry->DirectoryFileReferenceNumber = NewParentMftIndex;
-    if (NewParentMftIndex == NTFS_FILE_ROOT)
-        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)NTFS_FILE_ROOT << 48;
-    else
-        NewDirectoryEntry->DirectoryFileReferenceNumber |= (ULONGLONG)ParentSequenceNumber << 48;
-    NewDirectoryEntry->NameLength = NewFileName->Length / sizeof(WCHAR);
-    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3(NewFileName, NULL, NULL))
-        NewDirectoryEntry->NameType = NTFS_FILE_NAME_WIN32_AND_DOS;
-    else
-        NewDirectoryEntry->NameType = NTFS_FILE_NAME_POSIX;
-    RtlCopyMemory(NewDirectoryEntry->Name, NewFileName->Buffer, NewFileName->Length);
-
-    if (MadeRoom)
-    {
-        PNTFS_ATTR_CONTEXT DataContext;
-
-        /* Moving a value out of the record changed what the file has allocated,
-         * and the directory entry caches those sizes - it is where
-         * NtfsMakeFCBFromDirEntry() takes the FCB's allocation size from. */
-        if (NT_SUCCESS(FindAttribute(DeviceExt, FileRecord, AttributeData, L"", 0, &DataContext, NULL)))
-        {
-            NewDirectoryEntry->AllocatedSize = AttributeAllocatedLength(DataContext->pRecord);
-            NewDirectoryEntry->DataSize = AttributeDataLength(DataContext->pRecord);
-            ReleaseAttributeContext(DataContext);
-        }
-    }
-
     FileReferenceNumber = Fcb->MFTIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
     Status = NtfsAddFilenameToDirectory(DeviceExt,
                                         NewParentMftIndex,
@@ -6234,7 +6284,19 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
                                              &OldFileName,
                                              CaseSensitive);
     if (!NT_SUCCESS(Status))
+    {
+        /* The new name is in the index and in the record, but the old entry
+         * survives: the directory now has two entries for this record and one
+         * of them names something the record's $FILE_NAME no longer says.
+         * Undoing it from here is no safer than leaving it (the undo is just
+         * as fallible and would have to put the old name back into a record
+         * that has already been committed), so make the damage visible
+         * instead of letting it rot silently until something trips over it. */
+        DPRINT1("Rename of MFT record %I64u: old name '%wZ' left in directory %I64u (0x%lx)\n",
+                Fcb->MFTIndex, &OldFileName, OldParentMftIndex, Status);
+        NtfsMarkVolumeCorrupt(DeviceExt);
         goto Cleanup;
+    }
 
     RtlCopyMemory(&Fcb->Entry,
                   NewDirectoryEntry,
@@ -6246,11 +6308,28 @@ NtfsRenameFileRecord(PDEVICE_EXTENSION DeviceExt,
     goto Cleanup;
 
 RollbackNewName:
-    NtfsRemoveFilenameFromDirectory(DeviceExt,
-                                    NewParentMftIndex,
-                                    Fcb->MFTIndex,
-                                    NewFileName,
-                                    CaseSensitive);
+    /* The new directory entry was committed but the record was not (or not
+     * fully) rewritten, so the entry names a file whose $FILE_NAME still says
+     * the old name.  Take the entry back out.  If even that fails the two
+     * disagree on disk with nothing left to try, so flag the volume - a
+     * silently mismatched $I30 entry is exactly the kind of damage that only
+     * shows up much later, as a file that resolves to the wrong record. */
+    {
+        NTSTATUS RollbackStatus;
+
+        RollbackStatus = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                                         NewParentMftIndex,
+                                                         Fcb->MFTIndex,
+                                                         NewFileName,
+                                                         CaseSensitive);
+        if (!NT_SUCCESS(RollbackStatus))
+        {
+            DPRINT1("Rename of MFT record %I64u: could not withdraw '%wZ' from "
+                    "directory %I64u (0x%lx); index and $FILE_NAME now disagree\n",
+                    Fcb->MFTIndex, NewFileName, NewParentMftIndex, RollbackStatus);
+            NtfsMarkVolumeCorrupt(DeviceExt);
+        }
+    }
 
 Cleanup:
     if (TargetFcb)
