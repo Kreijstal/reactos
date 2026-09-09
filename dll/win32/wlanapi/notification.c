@@ -13,14 +13,22 @@
  * WLAN_NOTIFICATION_DATA to the callback.  Setting the source to NONE or
  * closing the handle stops the worker.
  *
- * The getter is a *synchronous* RPC call that blocks in the service until an
- * event is queued.  The RPC runtime serializes concurrent calls that share a
- * [context_handle] behind a per-handle lock held for the whole call, so a
- * getter parked on the application's handle would deadlock every later call
- * on it (WlanScan, WlanConnect, ...).  To keep the notification channel from
- * blocking control calls -- the isolation Windows gets from a true [async]
- * RPC getter -- each registration opens its *own* dedicated service handle and
- * parks the getter on that; the application handle is never used by the getter.
+ * The getter is a *synchronous* RPC call.  The RPC runtime serializes every
+ * call that touches one [context_handle] behind that handle's own lock, held
+ * for the whole stub, so two things are needed to keep it from deadlocking:
+ *
+ *   1. Each registration opens its *own* dedicated service handle and parks
+ *      the getter on that, so it never blocks the application handle's control
+ *      calls (WlanScan, WlanConnect, ...).
+ *   2. The service getter waits with a bounded timeout, returning ERROR_TIMEOUT
+ *      to be re-issued here (see the loop below).  Without this the getter
+ *      would hold its handle's lock forever, and even the teardown below --
+ *      _RpcRegisterNotification(NONE) on that same handle -- would deadlock
+ *      behind it, since its wake-up SetEvent runs only after it acquires the
+ *      lock the parked getter holds.  See docs/asus.txt entry 85.
+ *
+ * This is the pragmatic equivalent of the isolation Windows gets from a true
+ * [async] RPC getter.
  */
 
 #define WIN32_NO_STATUS
@@ -119,6 +127,15 @@ WlanNotifThread(LPVOID lpParameter)
             dwResult = RpcExceptionCode();
         }
         RpcEndExcept;
+
+        if (dwResult == ERROR_TIMEOUT)
+        {
+            /* The service getter polls with a bounded timeout so it never
+             * blocks forever under rpcrt4's per-context-handle lock; an empty
+             * interval comes back as ERROR_TIMEOUT with no data.  Re-issue.
+             * See base/services/wlansvc/notify.c (WLANSVC_NOTIF_POLL_MS). */
+            continue;
+        }
 
         if (dwResult != ERROR_SUCCESS || pData == NULL)
         {

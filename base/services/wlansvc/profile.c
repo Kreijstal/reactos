@@ -185,6 +185,8 @@ WlanSvcParseProfileXml(LPCWSTR Xml, PWLANSVC_PROFILE *ppProfile)
             prof->Auth = DOT11_AUTH_ALGO_RSNA_PSK;
         else if (_wcsicmp(buf, L"WPAPSK") == 0)
             prof->Auth = DOT11_AUTH_ALGO_WPA_PSK;
+        else if (_wcsicmp(buf, L"WPA3SAE") == 0)
+            prof->Auth = DOT11_AUTH_ALGO_WPA3_SAE;
         else if (_wcsicmp(buf, L"WPA2") == 0)
             prof->Auth = DOT11_AUTH_ALGO_RSNA;
         else if (_wcsicmp(buf, L"WPA") == 0)

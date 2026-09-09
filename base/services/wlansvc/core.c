@@ -118,8 +118,17 @@ WlanSvcPopulateInterfacesLocked(VOID)
         iface->UpperLuid = ref->UpperLuid;
         iface->MacAddress = ref->MacAddress;
         WlanSvcSynthesizeGuid(ref, &iface->InterfaceGuid);
-        _snwprintf(iface->Description, WLAN_MAX_NAME_LENGTH - 1,
-                   L"ReactOS Native WiFi Adapter #%lu", ref->InterfaceIndex + 1);
+        if (ref->Description[0] != UNICODE_NULL)
+        {
+            wcsncpy(iface->Description, ref->Description,
+                    WLAN_MAX_NAME_LENGTH - 1);
+            iface->Description[WLAN_MAX_NAME_LENGTH - 1] = UNICODE_NULL;
+        }
+        else
+        {
+            _snwprintf(iface->Description, WLAN_MAX_NAME_LENGTH - 1,
+                       L"Native Wi-Fi Adapter #%lu", ref->InterfaceIndex + 1);
+        }
         iface->PhyType = dot11_phy_type_erp;
         iface->AutoConfigEnabled = TRUE;
 
@@ -132,9 +141,16 @@ WlanSvcPopulateInterfacesLocked(VOID)
         iface->LinkQuality = 0;
         iface->State = wlan_interface_state_disconnected;
         iface->RadioOn = TRUE;
+        iface->ScanCompleteEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+        if (iface->ScanCompleteEvent == NULL)
+        {
+            HeapFree(GetProcessHeap(), 0, iface);
+            continue;
+        }
 
         if (!WlanSvcSeedLinkState(iface))
         {
+            CloseHandle(iface->ScanCompleteEvent);
             HeapFree(GetProcessHeap(), 0, iface);
             continue;
         }
@@ -236,6 +252,7 @@ WlanSvcCleanup(VOID)
             WlanSvcFreeProfile(prof);
         }
 
+        CloseHandle(iface->ScanCompleteEvent);
         HeapFree(GetProcessHeap(), 0, iface);
     }
     LeaveCriticalSection(&WlanSvcLock);
