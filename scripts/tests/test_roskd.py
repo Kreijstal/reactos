@@ -1057,6 +1057,16 @@ class PrcbCaptureTests(unittest.TestCase):
                 self.assertGreaterEqual(array, version["kernel_base"])
 
 
+class _NeverAnswers:
+    """A socket that accepts a timeout and never delivers a packet."""
+
+    def settimeout(self, _timeout: float) -> None:
+        return None
+
+    def recv(self, _size: int) -> bytes:
+        raise socket.timeout()
+
+
 class AutomationTests(unittest.TestCase):
     class FakeClient:
         def __init__(
@@ -1079,7 +1089,7 @@ class AutomationTests(unittest.TestCase):
         def _emit(self, kind: str, value: object) -> None:
             self.events.append((kind, str(value)))
 
-        def break_in(self, timeout: float) -> None:
+        def break_in(self, timeout: float = 0.0) -> None:
             self.calls.append(f"break:{timeout}")
             if self.break_error is not None:
                 raise self.break_error
@@ -1123,6 +1133,154 @@ class AutomationTests(unittest.TestCase):
             self.calls.append(f"poll-idle:{timeout}")
             if self.poll_error is not None:
                 raise self.poll_error
+
+    def test_a_timeout_while_stopped_is_reported_as_a_wedged_target(self) -> None:
+        # A stopped target that stops answering is the CPU-freeze deadlock,
+        # not a host-side timeout.  Saying "timed out waiting for KDNET
+        # packet" and nothing else sent a real session hunting the listener
+        # while the machine was gone.
+        client = KdNetClient.__new__(KdNetClient)
+        client.socket = _NeverAnswers()
+        client.stopped = True
+        client._wedge_reported = False
+        client.events = []
+        client._emit = lambda kind, value: client.events.append((kind, str(value)))
+
+        with self.assertRaises(KdTimeout):
+            client._receive_inner(0.01)
+
+        kinds = [kind for kind, _value in client.events]
+        self.assertEqual(kinds.count("target-wedged"), 1)
+
+        # Latched: a second timeout must not repeat the line.
+        with self.assertRaises(KdTimeout):
+            client._receive_inner(0.01)
+        kinds = [kind for kind, _value in client.events]
+        self.assertEqual(kinds.count("target-wedged"), 1)
+
+    def test_a_timeout_while_running_is_not_called_a_wedge(self) -> None:
+        client = KdNetClient.__new__(KdNetClient)
+        client.socket = _NeverAnswers()
+        client.stopped = False
+        client._wedge_reported = False
+        client.events = []
+        client._emit = lambda kind, value: client.events.append((kind, str(value)))
+
+        with self.assertRaises(KdTimeout):
+            client._receive_inner(0.01)
+
+        self.assertEqual(
+            [kind for kind, _value in client.events if kind == "target-wedged"], []
+        )
+
+    def test_stale_fifo_input_is_discarded_on_connect(self) -> None:
+        # A command queued while the listener had no target is addressed to a
+        # session that never existed.  Executing it against the NEXT session
+        # is how a `break` aimed at a wedged machine fires into an unrelated
+        # boot and freezes a healthy target.
+        client = self.FakeClient()
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda rlist, *_a: (list(rlist), [], [])
+        ), mock.patch.object(
+            roskd_cli.sys, "stdin", io.StringIO("break stale-one\nbogus\n")
+        ), mock.patch.object(roskd_cli.sys, "stderr", io.StringIO()):
+            roskd_cli._discard_stale_stdin(client)
+
+        discarded = [
+            value for kind, value in client.events if kind == "stdin-discarded"
+        ]
+        self.assertEqual(len(discarded), 2)
+        self.assertIn("'break stale-one'", discarded[0])
+        self.assertIn("'bogus'", discarded[1])
+        # Nothing may be executed on the way out.
+        self.assertEqual(client.calls, [])
+
+    def test_discarding_stale_input_is_a_no_op_when_the_fifo_is_empty(self) -> None:
+        client = self.FakeClient()
+
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda *_a: ([], [], [])
+        ), mock.patch.object(roskd_cli.sys, "stderr", io.StringIO()):
+            roskd_cli._discard_stale_stdin(client)
+
+        self.assertEqual(client.events, [])
+
+    def _fifo_client(self):
+        """A FakeClient whose wait_for_stop always times out, so _continue()
+        falls through to the stdin poll on every pass -- which is the only way
+        to exercise the FIFO command grammar."""
+
+        class TimingOut(self.FakeClient):
+            budget = 16
+
+            def wait_for_stop(self, *, auto_continue_modules: bool, timeout: float):
+                # Bounded: once the scripted FIFO input is exhausted the loop
+                # would otherwise spin forever on an empty readline().
+                if self.budget <= 0:
+                    self.stopped = True
+                    return
+                self.budget -= 1
+                raise KdTimeout("no stop")
+
+        return TimingOut()
+
+    def _drive_fifo(self, client, script: str) -> None:
+        with mock.patch.object(
+            roskd_cli.select, "select", lambda rlist, *_a: (list(rlist), [], [])
+        ), mock.patch.object(
+            roskd_cli.sys, "stdin", io.StringIO(script)
+        ), mock.patch.object(roskd_cli.sys, "stdout", io.StringIO()), mock.patch.object(
+            roskd_cli.sys, "stderr", io.StringIO()
+        ):
+            roskd_cli._continue(client, False, None, 0x1000, 5.0, 10.0, 5.0)
+
+    def test_fifo_break_accepts_a_transaction_id(self) -> None:
+        # The regression: `break` took no argument, so `break my-id` -- the
+        # obvious shape, given `stall-capture ID` right beside it -- fell
+        # through to the rejection path and no break was ever sent.  A real
+        # session lost two minutes to this, reading the silence as a dead
+        # listener.
+        client = self._fifo_client()
+
+        self._drive_fifo(client, "break boot-check\n")
+
+        self.assertTrue(any(call.startswith("break:") for call in client.calls))
+        self.assertIn(
+            ("transaction", "id=boot-check phase=break-requested"),
+            client.events,
+        )
+
+    def test_fifo_bare_break_still_works_and_is_logged(self) -> None:
+        client = self._fifo_client()
+
+        self._drive_fifo(client, "break\n")
+
+        self.assertTrue(any(call.startswith("break:") for call in client.calls))
+        self.assertIn(("break-requested", "source=stdin"), client.events)
+
+    def test_fifo_rejection_reaches_the_log_not_just_stderr(self) -> None:
+        # A refused command used to be written to stderr only.  A driver
+        # watching --log therefore saw an empty file and could not tell a
+        # refusal from a listener that had stopped reading the FIFO at all.
+        client = self._fifo_client()
+
+        self._drive_fifo(client, "brake\nbreak\n")
+
+        rejected = [value for kind, value in client.events if kind == "stdin-rejected"]
+        self.assertEqual(len(rejected), 1)
+        self.assertIn("'brake'", rejected[0])
+
+    def test_fifo_break_failure_is_logged_against_its_transaction(self) -> None:
+        client = self._fifo_client()
+        client.break_error = KdTimeout("no answer")
+
+        self._drive_fifo(client, "break wedged\n")
+
+        self.assertIn(
+            ("transaction", "id=wedged phase=break-failed error=no answer"),
+            client.events,
+        )
 
     def test_read_command_services_the_socket_while_waiting(self) -> None:
         # The REPL waits for its driver far longer than it runs commands.  If
