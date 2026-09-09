@@ -1317,7 +1317,7 @@ Wow64InitSysWow64Paths(VOID)
 }
 
 static
-VOID
+NTSTATUS
 Wow64InitProcess(PCONTEXT pContext)
 {
     NTSTATUS Status;
@@ -1329,15 +1329,19 @@ Wow64InitProcess(PCONTEXT pContext)
     Wow64InitSysWow64Paths();
 
     Status = Wow64InitEntrypointTranslation();
-    ASSERT(NT_SUCCESS(Status));
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("WOW64: entrypoint translation initialization failed: 0x%08lx\n", Status);
+        return Status;
+    }
 
     NtHeaders = (IMAGE_NT_HEADERS32 *)RtlImageNtHeader(Peb->ImageBaseAddress);
 
     Status = LdrLoadDll(NULL, 0, &NtDll32Str, &NtDll32);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("32 bit NTDLL.DLL could not be loaded.\n");
-        ASSERT(FALSE);
+        DPRINT1("WOW64: 32-bit ntdll.dll could not be loaded: 0x%08lx\n", Status);
+        return Status;
     }
 
     Status = NtQueryInformationProcess(NtCurrentProcess(),
@@ -1348,7 +1352,7 @@ Wow64InitProcess(PCONTEXT pContext)
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Getting PEB32 info failed: %lx\n", Status);
-        ASSERT(FALSE);
+        return Status;
     }
     
     ProcParams32 = build_wow64_parameters(Peb->ProcessParameters);
@@ -1386,8 +1390,9 @@ Wow64InitProcess(PCONTEXT pContext)
                                     &NtDll32LdrpRoutine);
     if (!NT_SUCCESS(Status)) 
     {
-        DPRINT1("Couldn't find LdrInitializeThunk in 32-bit ntdll.dll.\n");
-        ASSERT(FALSE);
+        DPRINT1("WOW64: couldn't find LdrInitializeThunk in 32-bit ntdll.dll: 0x%08lx\n",
+                Status);
+        return Status;
     }
     
     Status = LdrGetProcedureAddress(NtDll32,
@@ -1396,11 +1401,13 @@ Wow64InitProcess(PCONTEXT pContext)
                                     &NtDll32KiUserExceptionDispatcher);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Couldn't find KiUserExceptionDispatcher in 32-bit ntdll.dll.\n");
-        ASSERT(FALSE);
+        DPRINT1("WOW64: couldn't find KiUserExceptionDispatcher in 32-bit ntdll.dll: 0x%08lx\n",
+                Status);
+        return Status;
     }
     
     DPRINT("Getting init function ptr %p\n", NtDll32LdrpRoutine);
+    return STATUS_SUCCESS;
 }
 
 LONG
@@ -1554,12 +1561,19 @@ WINAPI
 Wow64LdrpInitialize(PCONTEXT pContext)
 {
     static LONG ProcessInitialized = 0;
+    NTSTATUS Status;
 
     if (InterlockedCompareExchange(&ProcessInitialized,
                                    1,
                                    0) == 0)
     {
-        Wow64InitProcess(pContext);
+        Status = Wow64InitProcess(pContext);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("WOW64: process initialization failed, terminating process: 0x%08lx\n",
+                    Status);
+            RtlExitUserProcess(Status);
+        }
     }
     
     Wow64InitThread(pContext);
