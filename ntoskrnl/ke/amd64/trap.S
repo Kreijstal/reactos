@@ -20,6 +20,9 @@ EXTERN KiGeneralProtectionFaultHandler:PROC
 EXTERN KiStackFaultHandler:PROC
 EXTERN KiXmmExceptionHandler:PROC
 EXTERN KiDeliverApc:PROC
+#if DBG
+EXTERN KiReportApcStateLeak:PROC
+#endif
 EXTERN KiDpcInterruptHandler:PROC
 EXTERN KiIpiInterruptHandler:PROC
 EXTERN PsConvertToGuiThread:PROC
@@ -978,6 +981,23 @@ GLOBAL_LABEL KiSystemServiceExit
     mov [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rbp], rbp
 
     ASSERT_TRAP_FRAME_INTS_ENABLED rsp + MAX_SYSCALL_PARAM_SIZE
+
+#if DBG
+    /* A system call must return to user mode with a balanced APC state:
+       no leaked critical region and no leaked process attach. Windows
+       bugchecks 0x1 (APC_INDEX_MISMATCH) here; we report the offending
+       call so the unbalanced path can be found. */
+    mov rcx, gs:[PcCurrentThread]
+    cmp word ptr [rcx + ThCombinedApcDisable], 0
+    jne .ApcStateLeak
+    cmp byte ptr [rcx + ThApcStateIndex], 0
+    je .NoApcStateLeak
+.ApcStateLeak:
+    lea rcx, [rsp + MAX_SYSCALL_PARAM_SIZE]
+    call KiReportApcStateLeak
+    mov rax, [rsp + MAX_SYSCALL_PARAM_SIZE + KTRAP_FRAME_Rax]
+.NoApcStateLeak:
+#endif
 
     /* Check for pending APCs that must be delivered before returning to user mode */
     mov rcx, gs:[PcCurrentThread]

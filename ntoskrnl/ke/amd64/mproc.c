@@ -78,6 +78,7 @@ KeStartAllProcessors(VOID)
     ULONG_PTR DoubleFaultStackTop;
     ULONG_PTR NmiStackTop;
     ULONG64 AlignedRsp;
+    ULONG_PTR BootPrcb, BootThread, BootKernelStack;
 
     /* NT6+ HAL exports HalEnumerateProcessors() / HalQueryMaximumProcessorCount()
      * that help determine the number of detected processors. ROS doesn't have
@@ -88,6 +89,20 @@ KeStartAllProcessors(VOID)
         MaximumProcessors = min(MaximumProcessors, KeNumprocSpecified);
     if (KeBootprocSpecified)
         MaximumProcessors = min(MaximumProcessors, KeBootprocSpecified);
+
+    /* Snapshot the boot CPU's context out of the loader block. The loop
+     * below repurposes Prcb/Thread/KernelStack as the hand-off slot for
+     * each AP in turn, so we have to put the P0 values back once we are
+     * done with them -- see the restore at the bottom of this function.
+     * These are the values KiInitializeP0BootStructures installed
+     * (&KiInitialPcr.Prcb, &KiInitialThread, KiP0BootStack), except that
+     * Prcb has since been zeroed by P0 itself on its way into the idle
+     * loop (ke/amd64/krnlinit.c:209), which is what the hand-off protocol
+     * means by "no processor start is pending". */
+    BootPrcb = KeLoaderBlock->Prcb;
+    BootThread = KeLoaderBlock->Thread;
+    BootKernelStack = KeLoaderBlock->KernelStack;
+    ASSERT(BootPrcb == 0);
 
     /* Snapshot the boot CPU's GDT and IDT descriptors once -- both are
      * shared by every CPU on amd64 today (the per-CPU copy here is
@@ -241,6 +256,22 @@ KeStartAllProcessors(VOID)
         MmDeleteKernelStack(KernelStack, FALSE);
     if (DpcStack)
         MmDeleteKernelStack(DpcStack, FALSE);
+
+    /* Put the boot CPU's context back into the loader block. The final
+     * iteration published pointers into APInfo / KernelStack / DpcStack
+     * and then -- on the normal exit path, where HalStartNextProcessor
+     * refuses to start a CPU past the MADT-reported count, which happens
+     * on every boot including uniprocessor -- freed them again. Leaving
+     * them behind would publish three dangling pointers in a global
+     * structure that the rest of Phase 1 still has a handle on. The break
+     * paths above are no better: there the fields would name the previous,
+     * still-live AP, which is not what these fields are supposed to
+     * describe either. Restoring makes the post-condition exactly the
+     * pre-condition: the loader block describes the boot CPU again and
+     * Prcb reads 0, i.e. no processor start is pending. */
+    KeLoaderBlock->Prcb = BootPrcb;
+    KeLoaderBlock->Thread = BootThread;
+    KeLoaderBlock->KernelStack = BootKernelStack;
 
     /* KeNumberProcessors is bumped from inside KiSystemStartup as each
      * AP comes online (kiinit.c:500), so by the time we exit the loop
