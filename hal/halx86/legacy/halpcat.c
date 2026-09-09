@@ -132,3 +132,11 @@ HalReportResourceUsage(VOID)
 }
 
 /* EOF */
+
+/* No ACPI tables in this HAL: there is no reset register to write */
+BOOLEAN
+NTAPI
+HalpAcpiWriteResetRegister(VOID)
+{
+    return FALSE;
+}

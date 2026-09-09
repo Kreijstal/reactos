@@ -823,6 +823,68 @@ HaliAcpiTimerInit(IN ULONG TimerPort,
 }
 
 CODE_SEG("INIT")
+/**
+ * @brief Resets the machine through the FADT RESET_REG, the way an ACPI 2.0+
+ * firmware asks to be reset. The keyboard-controller pulse the generic path
+ * uses is only a convention that PC firmware honours; on boards where the
+ * KBC is emulated by the EC (most laptops) it is acknowledged and ignored.
+ *
+ * @return TRUE if a reset register existed and was written (the write should
+ * not return), FALSE if the FADT does not advertise one.
+ */
+BOOLEAN
+NTAPI
+HalpAcpiWriteResetRegister(VOID)
+{
+    PGEN_ADDR ResetReg = &HalpFixedAcpiDescTable.reset_reg;
+    PHYSICAL_ADDRESS PhysicalAddress;
+    PUCHAR Mapping;
+    ULONG Address, Offset;
+
+    /* The reset register arrived with ACPI 2.0; older tables end before it */
+    if (HalpFixedAcpiDescTable.Header.Length <
+        FIELD_OFFSET(FADT, reset_val) + sizeof(UCHAR))
+    {
+        return FALSE;
+    }
+    if (!(HalpFixedAcpiDescTable.flags & ACPI_RESET_REG_SUP)) return FALSE;
+    if (ResetReg->Address.QuadPart == 0) return FALSE;
+
+    switch (ResetReg->AddressSpaceID)
+    {
+        case 1: /* System I/O */
+            WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)ResetReg->Address.LowPart,
+                             HalpFixedAcpiDescTable.reset_val);
+            break;
+
+        case 0: /* System memory */
+            Offset = ResetReg->Address.LowPart & (PAGE_SIZE - 1);
+            PhysicalAddress.QuadPart = ResetReg->Address.QuadPart - Offset;
+            Mapping = HalpMapPhysicalMemory64(PhysicalAddress, 1);
+            if (!Mapping) return FALSE;
+            WRITE_REGISTER_UCHAR(Mapping + Offset,
+                                 HalpFixedAcpiDescTable.reset_val);
+            break;
+
+        case 2: /* PCI configuration space, bus 0: dev[47:32] fn[31:16] reg[15:0] */
+            Address = 0x80000000 |
+                      ((ResetReg->Address.HighPart & 0x1F) << 11) |
+                      ((ResetReg->Address.LowPart >> 16 & 0x7) << 8) |
+                      (ResetReg->Address.LowPart & 0xFC);
+            WRITE_PORT_ULONG((PULONG)0xCF8, Address);
+            WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)(0xCFC + (ResetReg->Address.LowPart & 3)),
+                             HalpFixedAcpiDescTable.reset_val);
+            break;
+
+        default:
+            return FALSE;
+    }
+
+    /* Give the chipset time to act before the caller tries the next lever */
+    KeStallExecutionProcessor(100);
+    return TRUE;
+}
+
 NTSTATUS
 NTAPI
 HalpSetupAcpiPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)

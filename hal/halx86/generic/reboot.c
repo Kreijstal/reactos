@@ -16,8 +16,36 @@
 static VOID
 HalpWriteResetCommand(VOID)
 {
-    /* Generate RESET signal via keyboard controller */
+    /* Generate RESET signal via keyboard controller. This is the classic PC
+     * lever; on boards where the EC emulates the KBC it is acknowledged and
+     * ignored, so the levers below follow. */
     WRITE_PORT_UCHAR((PUCHAR)0x64, 0xFE);
+    KeStallExecutionProcessor(1000);
+
+#if defined(__GNUC__)
+    /* Force a triple fault: a fault with an empty IDT cannot be delivered
+     * and the CPU signals SHUTDOWN, which the chipset turns into a warm
+     * reset. Tried BEFORE the ACPI reset register on purpose: on the ASUS
+     * X550DP the FADT RESET_REG (FCH 0xCF9) powers the machine off instead
+     * of resetting it (docs/asus.txt 2.7, 08-29 boot 78), and a warm reset
+     * through the CPU never touches the FCH reset logic. */
+    {
+        static const struct
+        {
+            USHORT Limit;
+            ULONG_PTR Base;
+        } __attribute__((packed)) NullIdt = { 0, 0 };
+
+        __asm__ __volatile__("lidt %0" : : "m"(NullIdt));
+        __asm__ __volatile__("int3");
+    }
+#endif
+
+    /* The firmware's own lever last: the ACPI FADT reset register */
+    if (HalpAcpiWriteResetRegister())
+    {
+        KeStallExecutionProcessor(1000);
+    }
 };
 
 DECLSPEC_NORETURN
