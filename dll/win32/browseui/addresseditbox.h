@@ -39,6 +39,7 @@ private:
     HRESULT GetAbsolutePidl(PIDLIST_ABSOLUTE *pAbsolutePIDL);
     BOOL ExecuteCommandLine();
     BOOL GetComboBoxText(CComHeapPtr<WCHAR>& pszText);
+    HRESULT SetAddressDisplay(PIDLIST_ABSOLUTE pidl);
     HRESULT RefreshAddress();
 public:
     // *** IShellService methods ***

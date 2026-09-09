@@ -94,9 +94,13 @@ HRESULT CAddressEditBox::RefreshAddress()
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
-    /* Fill the combobox */
+    return SetAddressDisplay(absolutePIDL);
+}
+
+HRESULT CAddressEditBox::SetAddressDisplay(PIDLIST_ABSOLUTE absolutePIDL)
+{
     ATLASSERT(absolutePIDL != NULL);
-    PopulateComboBox(absolutePIDL);
+    HRESULT hr;
 
     /* Get pShellFolder and pidlChild */
     CComPtr<IShellFolder> pShellFolder;
@@ -119,8 +123,10 @@ HRESULT CAddressEditBox::RefreshAddress()
     if (SUCCEEDED(IEGetNameAndFlags(absolutePIDL, flags, szPathOrName, _countof(szPathOrName), NULL)))
         item.pszText = szPathOrName;
 
-    /* Ownership of absolutePIDL will be moved to fCombobox. See CBEN_DELETEITEM */
-    item.lParam = reinterpret_cast<LPARAM>(absolutePIDL.Detach());
+    /* Ownership of this clone is moved to fCombobox. See CBEN_DELETEITEM. */
+    item.lParam = reinterpret_cast<LPARAM>(ILClone(absolutePIDL));
+    if (!item.lParam)
+        return E_OUTOFMEMORY;
 
     fCombobox.SendMessage(CBEM_SETITEM, 0, reinterpret_cast<LPARAM>(&item)); /* Set it! */
     return S_OK;
@@ -392,7 +398,16 @@ HRESULT STDMETHODCALLTYPE CAddressEditBox::OnWinEvent(
     {
         case WM_COMMAND:
         {
-            if (HIWORD(wParam) == CBN_SELCHANGE && fCombobox == (HWND)lParam)
+            if (HIWORD(wParam) == CBN_DROPDOWN && fCombobox == (HWND)lParam)
+            {
+                CComHeapPtr<ITEMIDLIST> absolutePIDL;
+                if (SUCCEEDED(GetAbsolutePidl(&absolutePIDL)))
+                {
+                    PopulateComboBox(absolutePIDL);
+                    SetAddressDisplay(absolutePIDL);
+                }
+            }
+            else if (HIWORD(wParam) == CBN_SELCHANGE && fCombobox == (HWND)lParam)
             {
                 INT iItem = (INT)fCombobox.SendMessage(CB_GETCURSEL);
                 PIDLIST_ABSOLUTE pidl =
