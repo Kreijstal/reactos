@@ -60,6 +60,13 @@
 #define RSN_AKM_8021X               1
 #define RSN_AKM_PSK                 2
 
+/* WPA1 (pre-RSN) uses the Microsoft OUI 00-50-F2; the cipher/AKM selector
+ * numbers are the same as RSN (TKIP=2, CCMP=4, PSK AKM=2). */
+#define WPA_SUITE_OUI_0             0x00
+#define WPA_SUITE_OUI_1             0x50
+#define WPA_SUITE_OUI_2             0xf2
+#define WPA_IE_TYPE                 0x01
+
 /* ================================================================== *
  *  Small helpers
  * ================================================================== */
@@ -231,6 +238,19 @@ AR9485KeySetMac(
 static VOID
 AR9485KeyReset(_In_ PAR9485_ADAPTER Adapter, _In_ ULONG Index)
 {
+    ULONG KeyType = AR9485_READ_REG(Adapter, AR_KEYTABLE_TYPE(Index));
+
+    if (KeyType == AR_KEYTABLE_TYPE_TKIP)
+    {
+        ULONG MicIndex = Index + 64;
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(MicIndex), 0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(MicIndex), 0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(MicIndex), 0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY3(MicIndex), 0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY4(MicIndex), 0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_TYPE(MicIndex), AR_KEYTABLE_TYPE_CLR);
+    }
+
     AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(Index), 0);
     AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(Index), 0);
     AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(Index), 0);
@@ -260,9 +280,14 @@ AR9485SetCipherKey(
     {
         AR9485KeyReset(Adapter, Index);
         if (Index == AR9485_KEY_PAIRWISE)
+        {
             Adapter->PairwiseKeyValid = FALSE;
+        }
         else
+        {
             Adapter->GroupKeyValid = FALSE;
+            Adapter->GroupRxMicValid = FALSE;
+        }
         return NDIS_STATUS_SUCCESS;
     }
 
@@ -286,11 +311,17 @@ AR9485SetCipherKey(
             KeyType = AR_KEYTABLE_TYPE_104;
             break;
 
+        case DOT11_CIPHER_ALGO_TKIP:
+            /* TK(16) | authenticator TX MIC(8) | authenticator RX MIC(8),
+             * the order of the EAPOL key data. */
+            if (KeyLength != 32)
+                return NDIS_STATUS_INVALID_LENGTH;
+            if (Index + 64 >= AR9485_KEY_CACHE_SIZE)
+                return NDIS_STATUS_INVALID_PARAMETER;
+            KeyType = AR_KEYTABLE_TYPE_TKIP;
+            break;
+
         default:
-            /* TKIP needs a second cache entry for the Michael MIC keys and a
-             * software MIC on the transmit side; nwifi's supplicant
-             * negotiates CCMP, so nothing here has ever needed it.  Say so
-             * rather than install a key the hardware would misuse. */
             DPRINT1("AR9485: cipher 0x%08lx not implemented\n", CipherAlgorithm);
             return NDIS_STATUS_NOT_SUPPORTED;
     }
@@ -305,16 +336,66 @@ AR9485SetCipherKey(
     if (KeyType == AR_KEYTABLE_TYPE_40 || KeyType == AR_KEYTABLE_TYPE_104)
         Key4 &= 0xff;
 
-    AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(Index), Key0);
-    AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(Index), Key1);
-    AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(Index), Key2);
-    AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY3(Index), Key3);
-    AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY4(Index), Key4);
-    AR9485_WRITE_REG(Adapter, AR_KEYTABLE_TYPE(Index), KeyType);
-    AR9485KeySetMac(Adapter, Index, MacAddress);
+    if (KeyType == AR_KEYTABLE_TYPE_TKIP)
+    {
+        /*
+         * ath_hw_set_keycache_entry, AR_PCU_MIC_NEW_LOC_ENA layout: the
+         * Michael keys live in entry Index+64, RX key in key0/key2 and TX
+         * key split over key1/key3/key4.  The station's RX MIC key is the
+         * authenticator's TX key (offset 16), and vice versa.  key[47:0]
+         * goes in inverted first and correct last so the MAC cannot use a
+         * half-written entry (the cache needs paired 32-bit writes).
+         */
+        ULONG MicIndex = Index + 64;
+        const UCHAR *RxMic = Key + 16, *TxMic = Key + 24;
+
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(Index), ~Key0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(Index), ~Key1);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(Index), Key2);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY3(Index), Key3);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY4(Index), Key4);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_TYPE(Index), KeyType);
+        AR9485KeySetMac(Adapter, Index, MacAddress);
+
+        /* ath_setkey_tkip(): a STA group key is RX-only, so upstream writes
+         * the RX MIC into both halves of the MIC entry; only the pairwise
+         * entry carries a real TX MIC. */
+        const UCHAR *MicTx = (Index == AR9485_KEY_PAIRWISE) ? TxMic : RxMic;
+
+        if (Index != AR9485_KEY_PAIRWISE)
+        {
+            NdisMoveMemory(Adapter->GroupRxMicKey, RxMic, 8);
+            Adapter->GroupRxMicValid = TRUE;
+        }
+
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(MicIndex), AR9485ReadLe32(RxMic + 0));
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(MicIndex), AR9485ReadLe16(MicTx + 2));
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(MicIndex), AR9485ReadLe32(RxMic + 4));
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY3(MicIndex), AR9485ReadLe16(MicTx + 0));
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY4(MicIndex), AR9485ReadLe32(MicTx + 4));
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_TYPE(MicIndex), AR_KEYTABLE_TYPE_CLR);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_MAC0(MicIndex), 0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_MAC1(MicIndex), 0);
+
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(Index), Key0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(Index), Key1);
+    }
+    else
+    {
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY0(Index), Key0);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY1(Index), Key1);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY2(Index), Key2);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY3(Index), Key3);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_KEY4(Index), Key4);
+        AR9485_WRITE_REG(Adapter, AR_KEYTABLE_TYPE(Index), KeyType);
+        AR9485KeySetMac(Adapter, Index, MacAddress);
+    }
 
     if (Index == AR9485_KEY_PAIRWISE)
+    {
+        Adapter->PairwisePn = 1;
         Adapter->PairwiseKeyValid = TRUE;
+    }
     else
         Adapter->GroupKeyValid = TRUE;
 
@@ -422,33 +503,54 @@ AR9485IndicateAssociationCompletion(
     _In_ PAR9485_ADAPTER Adapter,
     _In_ ULONG Status)
 {
-    DOT11_ASSOCIATION_COMPLETION_PARAMETERS Parameters;
+    struct
+    {
+        DOT11_ASSOCIATION_COMPLETION_PARAMETERS Parameters;
+        UCHAR Bodies[sizeof(((PAR9485_ADAPTER)0)->AssocRequestBody) +
+                     sizeof(((PAR9485_ADAPTER)0)->AssocResponseBody)];
+    } Completion;
+    PDOT11_ASSOCIATION_COMPLETION_PARAMETERS Parameters = &Completion.Parameters;
+    ULONG Size = sizeof(*Parameters);
 
-    NdisZeroMemory(&Parameters, sizeof(Parameters));
-    Parameters.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
-    Parameters.Header.Revision = DOT11_ASSOCIATION_COMPLETION_PARAMETERS_REVISION_1;
-    Parameters.Header.Size = sizeof(Parameters);
-    NdisMoveMemory(Parameters.MacAddr, Adapter->Bssid, DOT11_ADDR_LEN);
-    Parameters.uStatus = Status;
-    Parameters.bPortAuthorized = FALSE;
+    NdisZeroMemory(&Completion, sizeof(Completion));
+    Parameters->Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    Parameters->Header.Revision = DOT11_ASSOCIATION_COMPLETION_PARAMETERS_REVISION_1;
+    Parameters->Header.Size = sizeof(*Parameters);
+    NdisMoveMemory(Parameters->MacAddr, Adapter->Bssid, DOT11_ADDR_LEN);
+    Parameters->uStatus = Status;
+    Parameters->bPortAuthorized = FALSE;
 
     if (Status == DOT11_ASSOC_STATUS_SUCCESS)
     {
-        Parameters.AuthAlgo = Adapter->AuthAlgorithm;
-        Parameters.UnicastCipher = Adapter->UnicastCipher;
-        Parameters.MulticastCipher = Adapter->MulticastCipher;
-        Parameters.DSInfo = DOT11_DS_UNKNOWN;
+        Parameters->AuthAlgo = Adapter->AuthAlgorithm;
+        Parameters->UnicastCipher = Adapter->UnicastCipher;
+        Parameters->MulticastCipher = Adapter->MulticastCipher;
+        Parameters->DSInfo = DOT11_DS_UNKNOWN;
     }
 
-    /*
-     * uIHVDataSize stays zero on purpose.  It is the only place an
-     * association completion can carry the AP's RSN element, and when it is
-     * empty nwifi's supplicant falls back to the copy it already holds in
-     * its own BSS cache - which came from the beacon this driver reported,
-     * so it is the same element by a shorter path.
-     */
+    /* The association request and response bodies follow the structure,
+     * as on Windows.  The request is what nwifi's supplicant needs: the
+     * RSN element in message 2 of the 4-way handshake must be the one we
+     * associated with, and only this driver knows what that was. */
+    if (Adapter->AssocRequestLength != 0)
+    {
+        Parameters->uAssocReqOffset = Size;
+        Parameters->uAssocReqSize = Adapter->AssocRequestLength;
+        NdisMoveMemory((PUCHAR)&Completion + Size, Adapter->AssocRequestBody,
+                       Adapter->AssocRequestLength);
+        Size += Adapter->AssocRequestLength;
+    }
+    if (Adapter->AssocResponseLength != 0)
+    {
+        Parameters->uAssocRespOffset = Size;
+        Parameters->uAssocRespSize = Adapter->AssocResponseLength;
+        NdisMoveMemory((PUCHAR)&Completion + Size, Adapter->AssocResponseBody,
+                       Adapter->AssocResponseLength);
+        Size += Adapter->AssocResponseLength;
+    }
+
     AR9485IndicateStatus(Adapter, NDIS_STATUS_DOT11_ASSOCIATION_COMPLETION,
-                         &Parameters, sizeof(Parameters));
+                         &Completion, Size);
 }
 
 static VOID
@@ -518,9 +620,13 @@ AR9485IsRsnaAuth(_In_ ULONG AuthAlgorithm)
 }
 
 /*
- * The RSN element we offer in the association request.  It is built from the
- * cipher pair nwifi programmed rather than copied out of the beacon: the AP
- * advertises what it will accept, and this says which of those we chose.
+ * The RSN element we offer in the association request.  The pairwise suite is
+ * ours to choose from what the AP offers, so it comes from the unicast cipher
+ * nwifi programmed.  The group suite is NOT ours to choose: 802.11 requires
+ * the request to echo the AP's advertised group cipher, so it comes from
+ * Adapter->MulticastCipher, which AR9485AdoptBss has already reconciled with
+ * the beacon.  Offering a group cipher the AP did not choose is refused with
+ * status 41 (invalid group cipher).
  */
 static ULONG
 AR9485BuildRsnIe(_In_ PAR9485_ADAPTER Adapter, _Out_writes_bytes_(22) PUCHAR Out)
@@ -549,6 +655,41 @@ AR9485BuildRsnIe(_In_ PAR9485_ADAPTER Adapter, _Out_writes_bytes_(22) PUCHAR Out
     return i;
 }
 
+/*
+ * The WPA1 information element (element 221, Microsoft OUI 00-50-F2 type 1).
+ * A pure-WPA AP (hostapd wpa=1) advertises only this element and rejects an
+ * association request that carries an RSN element (48) instead -- hostapd logs
+ * "No WPA/RSN IE in association request" and the STA never leaves AUTH.  So
+ * WPA-PSK must offer the vendor IE.  Suite selectors mirror the RSN numbering
+ * (AR9485RsnCipherSuite) under the WPA OUI; the group cipher again echoes the
+ * AP's, carried in Adapter->MulticastCipher.
+ */
+static ULONG
+AR9485BuildWpaIe(_In_ PAR9485_ADAPTER Adapter, _Out_writes_bytes_(24) PUCHAR Out)
+{
+    ULONG i = 0;
+
+    Out[i++] = DOT11_IE_VENDOR_SPECIFIC;
+    Out[i++] = 22;
+    Out[i++] = WPA_SUITE_OUI_0; Out[i++] = WPA_SUITE_OUI_1; Out[i++] = WPA_SUITE_OUI_2;
+    Out[i++] = WPA_IE_TYPE;
+    AR9485WriteLe16(&Out[i], 1);  i += 2;    /* WPA version */
+
+    Out[i++] = WPA_SUITE_OUI_0; Out[i++] = WPA_SUITE_OUI_1; Out[i++] = WPA_SUITE_OUI_2;
+    Out[i++] = AR9485RsnCipherSuite(Adapter->MulticastCipher);
+
+    AR9485WriteLe16(&Out[i], 1);  i += 2;    /* one pairwise suite */
+    Out[i++] = WPA_SUITE_OUI_0; Out[i++] = WPA_SUITE_OUI_1; Out[i++] = WPA_SUITE_OUI_2;
+    Out[i++] = AR9485RsnCipherSuite(Adapter->UnicastCipher);
+
+    AR9485WriteLe16(&Out[i], 1);  i += 2;    /* one AKM suite */
+    Out[i++] = WPA_SUITE_OUI_0; Out[i++] = WPA_SUITE_OUI_1; Out[i++] = WPA_SUITE_OUI_2;
+    Out[i++] = RSN_AKM_PSK;
+
+    NT_ASSERT(i == 24);
+    return i;
+}
+
 static NDIS_STATUS
 AR9485SendAuthenticate(_In_ PAR9485_ADAPTER Adapter)
 {
@@ -571,7 +712,7 @@ static NDIS_STATUS
 AR9485SendAssociate(_In_ PAR9485_ADAPTER Adapter)
 {
     UCHAR Frame[DOT11_MAC_HEADER_LEN + 4 + 2 + DOT11_SSID_MAX_LENGTH +
-                2 + sizeof(Adapter->BssRates) + 22];
+                2 + sizeof(Adapter->BssRates) + 24];
     ULONG Length;
     USHORT Capability;
     ULONG RateCount, Extended;
@@ -616,8 +757,17 @@ AR9485SendAssociate(_In_ PAR9485_ADAPTER Adapter)
 
     if (AR9485IsRsnaAuth(Adapter->AuthAlgorithm))
         Length += AR9485BuildRsnIe(Adapter, &Frame[Length]);
+    else if (Adapter->AuthAlgorithm == DOT11_AUTH_ALGO_WPA_PSK ||
+             Adapter->AuthAlgorithm == DOT11_AUTH_ALGO_WPA)
+        Length += AR9485BuildWpaIe(Adapter, &Frame[Length]);
 
     NT_ASSERT(Length <= sizeof(Frame));
+    C_ASSERT(sizeof(Frame) - DOT11_MAC_HEADER_LEN <=
+             sizeof(Adapter->AssocRequestBody));
+    Adapter->AssocRequestLength = Length - DOT11_MAC_HEADER_LEN;
+    NdisMoveMemory(Adapter->AssocRequestBody, Frame + DOT11_MAC_HEADER_LEN,
+                   Adapter->AssocRequestLength);
+    Adapter->AssocResponseLength = 0;
     return AR9485TransmitFrame(Adapter, Frame, Length, AR9485_KEY_NONE,
                                AR9485_RATE_1M, FALSE, NULL);
 }
@@ -692,6 +842,10 @@ AR9485MlmeReceiveManagement(
             Adapter->BssCapability = AR9485ReadLe16(Body);
             Adapter->AssocStatus = AR9485ReadLe16(Body + 2);
             Adapter->AssociationId = AR9485ReadLe16(Body + 4) & 0x3fff;
+            Adapter->AssocResponseLength =
+                min(BodyLength, (ULONG)sizeof(Adapter->AssocResponseBody));
+            NdisMoveMemory(Adapter->AssocResponseBody, Body,
+                           Adapter->AssocResponseLength);
             InterlockedExchange(&Adapter->AssocResponseSeen, 1);
             DPRINT1("AR9485: association response status %u AID %u\n",
                     Adapter->AssocStatus, Adapter->AssociationId);
@@ -759,6 +913,62 @@ AR9485WaitForResponse(
     }
 }
 
+/* The WPA1 vendor element: element 221 whose body opens with the Microsoft
+ * OUI 00-50-F2 and type 1.  Beacons carry several vendor elements (WMM, HT
+ * capabilities, ...), so the first 221 is not necessarily it. */
+static const UCHAR *
+AR9485FindWpaIe(
+    _In_reads_bytes_(Length) const UCHAR *Ies,
+    _In_ ULONG Length,
+    _Out_ PULONG IeLength)
+{
+    ULONG Offset = 0;
+
+    *IeLength = 0;
+    while (Offset + 2 <= Length)
+    {
+        UCHAR ThisId = Ies[Offset];
+        ULONG ThisLength = Ies[Offset + 1];
+        const UCHAR *Body = &Ies[Offset + 2];
+
+        if (Offset + 2 + ThisLength > Length)
+            break;
+        if (ThisId == DOT11_IE_VENDOR_SPECIFIC && ThisLength >= 4 &&
+            Body[0] == WPA_SUITE_OUI_0 && Body[1] == WPA_SUITE_OUI_1 &&
+            Body[2] == WPA_SUITE_OUI_2 && Body[3] == WPA_IE_TYPE)
+        {
+            *IeLength = ThisLength;
+            return Body;
+        }
+        Offset += 2 + ThisLength;
+    }
+    return NULL;
+}
+
+/* Map the AP's advertised group-suite selector onto Adapter->MulticastCipher;
+ * an unrecognised selector keeps what nwifi programmed. */
+static VOID
+AR9485AdoptGroupCipher(_In_ PAR9485_ADAPTER Adapter, _In_ UCHAR Selector)
+{
+    switch (Selector)
+    {
+        case RSN_CIPHER_TKIP:
+            Adapter->MulticastCipher = DOT11_CIPHER_ALGO_TKIP;
+            break;
+        case RSN_CIPHER_CCMP:
+            Adapter->MulticastCipher = DOT11_CIPHER_ALGO_CCMP;
+            break;
+        case RSN_CIPHER_WEP40:
+            Adapter->MulticastCipher = DOT11_CIPHER_ALGO_WEP40;
+            break;
+        case RSN_CIPHER_WEP104:
+            Adapter->MulticastCipher = DOT11_CIPHER_ALGO_WEP104;
+            break;
+        default:
+            break;
+    }
+}
+
 /* Pull the SSID, the supported-rate set and the channel out of a cached
  * beacon so the association request can echo them back. */
 static VOID
@@ -771,6 +981,38 @@ AR9485AdoptBss(_In_ PAR9485_ADAPTER Adapter, _In_ PAR9485_BSS Bss)
     Adapter->BssChannelMHz = (USHORT)Bss->ChannelMHz;
     Adapter->BssCapability = Bss->CapabilityInformation;
     Adapter->BssRateCount = 0;
+
+    /* The group cipher is the AP's to choose, not ours: whatever nwifi
+     * programmed as the multicast cipher from the profile, the value that
+     * must actually be used is the one the AP advertises in its beacon RSN
+     * element.  Adopt it here so both the association-request RSN IE
+     * (AR9485BuildRsnIe) and the group-frame receive path (which keys off
+     * Adapter->MulticastCipher) agree with the AP; a stale CCMP against a
+     * TKIP-group AP (e.g. FRITZ!Box 7330 mixed WPA/WPA2) is refused with
+     * status 41 on association and, if it associated at all, would drop every
+     * broadcast frame.  The RSN body is version(2) | group-suite
+     * OUI(3)+type(1) | ..., so the suite selector is body offset 5 when the
+     * OUI is the standard 00-0F-AC. */
+    Ie = AR9485FindIe(Bss->Ies, Bss->IeLength, DOT11_IE_RSN, &IeLength);
+    if (Ie != NULL && IeLength >= 6 &&
+        Ie[2] == RSN_SUITE_OUI_0 && Ie[3] == RSN_SUITE_OUI_1 &&
+        Ie[4] == RSN_SUITE_OUI_2)
+    {
+        AR9485AdoptGroupCipher(Adapter, Ie[5]);
+    }
+    else
+    {
+        /* A pre-RSN (WPA1-only) AP advertises the same thing in the vendor
+         * element instead: OUI(3)+type(1) | version(2) | group-suite
+         * OUI(3)+type(1) | ..., so the selector is body offset 9. */
+        Ie = AR9485FindWpaIe(Bss->Ies, Bss->IeLength, &IeLength);
+        if (Ie != NULL && IeLength >= 10 &&
+            Ie[6] == WPA_SUITE_OUI_0 && Ie[7] == WPA_SUITE_OUI_1 &&
+            Ie[8] == WPA_SUITE_OUI_2)
+        {
+            AR9485AdoptGroupCipher(Adapter, Ie[9]);
+        }
+    }
 
     Ie = AR9485FindIe(Bss->Ies, Bss->IeLength, DOT11_IE_SUPPORTED_RATES,
                       &IeLength);
@@ -943,7 +1185,27 @@ AR9485DoConnect(_In_ PAR9485_ADAPTER Adapter)
         if (AR9485WaitForResponse(Adapter, &Adapter->AuthResponseSeen,
                                   AR9485_MGMT_TIMEOUT_MS))
             break;
-        DPRINT1("AR9485: authentication attempt %lu timed out\n", Attempt + 1);
+        /*
+         * A silent timeout cannot distinguish "the frame never left" from
+         * "the AP did not answer", and those need opposite fixes.  The reap
+         * counters settle it: TxFrameCount rises only when the hardware
+         * wrote a status descriptor carrying AR_FrmXmitOK, so a frame that
+         * was really transmitted and acknowledged shows up here, while a
+         * TX path that is not running leaves TxPending stuck instead.
+         *
+         * Only the driver's own counters are read here.  AR_TFCNT and
+         * AR_ACK_FAIL would say the same thing straight from the hardware,
+         * but they are CLEAR-ON-READ: three back-to-back reads during
+         * bring-up returned 8, then 7, then 9.  Reading them from this path
+         * would silently zero them for every other observer -- including the
+         * user-mode lab, which is the only instrument on this board that can
+         * see them at all -- so the temptation is recorded and refused.
+         */
+        DPRINT1("AR9485: authentication attempt %lu timed out "
+                "(TxOk %I64u TxFail %I64u TxPending %lu)\n",
+                Attempt + 1,
+                Adapter->TxFrameCount, Adapter->TxFailureCount,
+                Adapter->TxPending);
     }
     if (!InterlockedCompareExchange(&Adapter->AuthResponseSeen, 0, 0))
     {

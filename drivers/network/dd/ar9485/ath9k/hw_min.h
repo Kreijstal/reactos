@@ -22,6 +22,7 @@
 #include "../linux-compat.h"
 #include "ath_reg.h"
 #include "reg.h"
+#include "ar9003_phy.h"
 #include "ar9003_eeprom_min.h"
 
 /* Verbatim copy of include/ath9k/hw.h:524 - struct ath9k_hw_version. */
@@ -45,6 +46,104 @@ struct ath_ops {
     void         (*write)(void *, u32 val, u32 reg_offset);
 };
 
+/* Verbatim upstream calib.h:30 - a register initialisation table.  The
+ * tables themselves live in ar9485_initvals.h as `const u32 [][N]'; the
+ * cast to `u32 *' in INIT_INI_ARRAY below is upstream's, and INI_RA does
+ * the row/column arithmetic by hand. */
+struct ar5416IniArray {
+    u32 *ia_array;
+    u32 ia_rows;
+    u32 ia_columns;
+};
+
+/* Verbatim upstream calib.h:42 and hw.h:117. */
+#define INIT_INI_ARRAY(iniarray, array) do {            \
+        (iniarray)->ia_array = (u32 *)(array);          \
+        (iniarray)->ia_rows = ARRAY_SIZE(array);        \
+        (iniarray)->ia_columns = ARRAY_SIZE(array[0]);  \
+    } while (0)
+
+#define INI_RA(iniarray, row, column) \
+    (((iniarray)->ia_array)[(row) * ((iniarray)->ia_columns) + (column)])
+
+/* Upstream ar9003_phy.c splits every subsystem's initvals into a pre /
+ * core / post triple (hw.h:1055, enum ath_ini_subsys). */
+#define ATH_INI_PRE          0
+#define ATH_INI_CORE         1
+#define ATH_INI_POST         2
+#define ATH_INI_NUM_SPLIT    3
+
+/* Upstream hw.h:1030 - reset granularity. */
+#define ATH9K_RESET_POWER_ON 0
+#define ATH9K_RESET_WARM     1
+#define ATH9K_RESET_COLD     2
+
+/* Upstream hw.h:98 - wake-up budget, microseconds. */
+#define POWER_UP_TIME        10000
+/* Upstream hw.h:180 - PLL settle, microseconds. */
+#define RTC_PLL_SETTLE_DELAY 1000
+
+/* --------------------------------------------------------------------
+ *  Channel description.
+ *
+ *  Upstream carries a fat struct ath9k_channel that points back into
+ *  mac80211's ieee80211_channel for the band and bandwidth.  The AR9485
+ *  is a single-band 2.4 GHz 1x1 802.11n part, so for this driver the
+ *  band predicates are compile-time constants and the HT40 ones are
+ *  constant-false: we bring the radio up HT20-only.  Keeping the
+ *  upstream macro spellings means the imported function bodies compile
+ *  unchanged and the dead arms fold away at build time.
+ *
+ *  Making HT40 real later means giving channelFlags actual bits and
+ *  turning IS_CHAN_HT40/IS_CHAN_HT40PLUS into tests on them; every
+ *  upstream call site that needs them is already present below.
+ * -------------------------------------------------------------------- */
+struct ath9k_channel {
+    u16 channel;        /* centre frequency in MHz */
+    u32 channelFlags;
+};
+
+#define IS_CHAN_2GHZ(_c)            (true)
+#define IS_CHAN_5GHZ(_c)            (false)
+#define IS_CHAN_HT40(_c)            (false)
+#define IS_CHAN_HT40PLUS(_c)        (false)
+#define IS_CHAN_HALF_RATE(_c)       (false)
+#define IS_CHAN_QUARTER_RATE(_c)    (false)
+#define IS_CHAN_A_FAST_CLOCK(_ah, _c) (false)
+
+/* Upstream hw.h - only the capability bits the imported bodies test. */
+#define ATH9K_HW_CAP_APM            BIT(4)
+
+/* Upstream hw.h:206 - ah->config.pll_pwrsave bits.  Left at 0 for a
+ * PC-OEM AR9485, which selects the clkreq-disable SerDes table. */
+#define AR_PCIE_PLL_PWRSAVE_CONTROL BIT(0)
+#define AR_PCIE_PLL_PWRSAVE_ON_D3   BIT(1)
+#define AR_PCIE_PLL_PWRSAVE_ON_D0   BIT(2)
+#define AR_PCIE_CDR_PWRSAVE_ON_D3   BIT(3)
+#define AR_PCIE_CDR_PWRSAVE_ON_D0   BIT(4)
+
+/* Upstream hw.h:164 - PHY activation settle floor, microseconds. */
+#define BASE_ACTIVATE_DELAY         100
+
+/* Upstream hw.h:175,176 - transmit power ceilings.  Both are in the
+ * hardware's "twice dBm" (half-dB) units: 63 == 31.5 dBm per rate, 254
+ * == 127 dBm combined.  Used by the Phase 2b transmit-power path. */
+#define MAX_RATE_POWER              63
+#define MAX_COMBINED_POWER          254 /* 128 dBm, chosen to fit in u8 */
+
+/* Upstream hw.h:763 - the calibration kinds ar9003_hw_override_ini()
+ * latches into ah->enabled_cals. */
+#define TX_IQ_CAL           BIT(0)
+#define TX_IQ_ON_AGC_CAL    BIT(1)
+#define TX_CL_CAL           BIT(2)
+
+/* Upstream funnels ath_dbg through a level-filtered printk.  Reset-path
+ * messages are cold and worth having on COM1/KDNET during bring-up, so
+ * they land in DbgPrint; the level token is dropped unevaluated. */
+#define ath_dbg(_common, _level, _fmt, ...) \
+    DbgPrint("ath9k_hw: " _fmt, ##__VA_ARGS__)
+
+
 /* Minimal stand-in for struct ath_hw.  Field names match upstream so the
  * verbatim function bodies compile.  Carries only what slices 2-3 need. */
 struct ath_hw {
@@ -66,6 +165,66 @@ struct ath_hw {
     union {
         struct ar9300_eeprom ar9300_eep;
     } eeprom;
+
+    /* Set once the union above holds a real image.  ar9485_hw_attach()
+     * zeroes the whole ath_hw and every channel change reattaches, so
+     * ar9485_hw_start() saves and restores both across the call rather
+     * than re-walking the OTP on each hop. */
+    bool           eeprom_valid;
+
+    /* ---- Phase 3b: PHY/MAC bring-up state -------------------------
+     * Register initialisation tables, wired by ar9485_hw_init_mode_regs()
+     * from the AR9485 1.1 arrays in ar9485_initvals.h.  Field names match
+     * upstream hw.h so the imported ar9003_hw_process_ini() body compiles
+     * unchanged. */
+    struct ar5416IniArray iniMac[ATH_INI_NUM_SPLIT];
+    struct ar5416IniArray iniBB[ATH_INI_NUM_SPLIT];
+    struct ar5416IniArray iniRadio[ATH_INI_NUM_SPLIT];
+    struct ar5416IniArray iniSOC[ATH_INI_NUM_SPLIT];
+    struct ar5416IniArray iniModesRxGain;
+    struct ar5416IniArray iniModesTxGain;
+    struct ar5416IniArray iniCckfirJapan2484;
+    struct ar5416IniArray iniAdditional;
+    struct ar5416IniArray iniPcieSerdes;
+    struct ar5416IniArray iniPcieSerdesLowPower;
+
+    u32            modes_index;
+    struct ath9k_channel *curchan;
+    /* Backing store for curchan; upstream's channel array is owned by
+     * mac80211's band description, which has no counterpart here. */
+    struct ath9k_channel  channel_store;
+
+    /* Upstream hw.h:824 - latched so a warm reset is only attempted once
+     * a power-on reset has actually succeeded. */
+    bool           reset_power_on;
+    bool           is_clk_25mhz;
+
+    u8             txchainmask;
+    u8             rxchainmask;
+    u32            enabled_cals;
+
+    struct {
+        u8  tx_chainmask;
+        u8  rx_chainmask;
+        u32 hw_caps;
+    } caps;
+
+    /* Upstream ath9k.h:51 enum ath9k_ant_div_comb_lna_conf.  Only the two
+     * values ar9003_hw_ant_ctrl_apply() programs are needed. */
+
+    struct {
+        int cwm_ignore_extcca;
+        u32 pll_pwrsave;
+    } config;
+
+    /* Upstream hw.h:944 - the AR9003 EDMA transmit status ring, published by
+     * the miniport once and re-programmed from ar9485_hw_set_dma() on every
+     * reset, exactly where ath9k_hw_set_dma() calls
+     * ath9k_hw_reset_txstatus_ring().  Zero means "no ring", which is what
+     * the reset leaves behind and what the hardware sees if nobody
+     * republishes it. */
+    u32            ts_paddr_start;
+    u32            ts_paddr_end;
 };
 
 /* Bounds guard on register access - a shim-layer addition with no
@@ -81,6 +240,13 @@ struct ath_hw {
  * log it instead of bugchecking.  The log is latched to one line per
  * ath_hw: ath9k_hw_wait() polls a register up to 10000 times, and a
  * DPRINT1 per poll would add minutes to a boot on the serial port. */
+#define ATH_ANT_DIV_COMB_LNA2       1
+#define ATH_ANT_DIV_COMB_LNA1       2
+
+/* Upstream hw.h:417 - the transmit I/Q calibration reports one set of
+ * coefficients per calibrated gain, up to this many. */
+#define MAX_IQCAL_MEASUREMENT       8
+
 #define AR9485_REG_OUT_OF_RANGE     0xFFFFFFFFu
 
 /* REG_READ / REG_WRITE - copy of hw.h:80,82 macros.  Upstream hands the
@@ -91,6 +257,37 @@ struct ath_hw {
     (_ah)->reg_ops.read((_ah), (_reg))
 #define REG_WRITE(_ah, _reg, _val) \
     (_ah)->reg_ops.write((_ah), (_val), (_reg))
+
+/* Upstream routes REG_RMW through a bus-op so the AHB parts can batch it;
+ * on PCIe it is a plain read-modify-write, which is what we provide.
+ * Declared here, defined in hw_chip.c beside the other reg_ops. */
+u32 ar9485_reg_rmw(struct ath_hw *ah, u32 reg, u32 set, u32 clr);
+
+#define REG_RMW(_ah, _reg, _set, _clr) \
+    ar9485_reg_rmw((_ah), (_reg), (_set), (_clr))
+#define REG_RMW_FIELD(_a, _r, _f, _v) \
+    REG_RMW(_a, _r, (((_v) << _f##_S) & _f), (_f))
+#define REG_READ_FIELD(_a, _r, _f) \
+    (((REG_READ(_a, _r) & _f) >> _f##_S))
+#define REG_SET_BIT(_a, _r, _f) \
+    REG_RMW(_a, _r, (_f), 0)
+#define REG_CLR_BIT(_a, _r, _f) \
+    REG_RMW(_a, _r, 0, (_f))
+
+/* Upstream buffers register writes on AHB-attached SoC parts.  The AR9485
+ * is PCIe and upstream's PCI bus-ops leave these hooks NULL, so the
+ * macros are genuine no-ops here, not a simplification. */
+#define ENABLE_REGWRITE_BUFFER(_ah)  do { } while (0)
+#define REGWRITE_BUFFER_FLUSH(_ah)   do { } while (0)
+
+/* Upstream hw.h:132.  The USB arm is unreachable for a PCIe part. */
+#define DO_DELAY(x) do {                    \
+        if (((++(x) % 64) == 0))            \
+            udelay(1);                      \
+    } while (0)
+
+#define REG_WRITE_ARRAY(iniarray, column, regWr) \
+    ath9k_hw_write_array(ah, iniarray, column, &(regWr))
 
 /* Verbatim upstream hw.h:177,179 - ath9k_hw_wait()'s poll granularity and
  * the generic register-settle timeout, both in microseconds. */
@@ -175,5 +372,81 @@ bool ar9485_hw_eeprom_get_macaddr(_In_ void *bar0_base,
                                   _Out_writes_bytes_(6) u8 *out_macaddr,
                                   _Out_ u8 *out_eepromVersion,
                                   _Out_ u8 *out_templateVersion);
+
+/* Verbatim upstream hw.c:180 - blast one initvals table at the chip. */
+void ath9k_hw_write_array(struct ath_hw *ah, const struct ar5416IniArray *array,
+                          int column, unsigned int *writecnt);
+
+/* --------------------------------------------------------------------
+ *  Phase 3b entry point: full PHY/MAC bring-up.
+ *
+ *  Runs the upstream reset sequence (power-on / warm reset, PLL, the
+ *  AR9485 1.1 initvals, synthesiser programming for `channel_mhz', and
+ *  baseband activation) against a caller-supplied ath_hw.  On success
+ *  the baseband is running and parked on the requested 2.4 GHz channel,
+ *  which is the precondition for the receive path.
+ *
+ *  The ath_hw must outlive the call - the RX path reads ah->curchan -
+ *  so the miniport keeps it in its adapter extension rather than on the
+ *  stack the way the earlier identification slices did.
+ * -------------------------------------------------------------------- */
+bool ar9485_hw_phy_bringup(_Inout_ struct ath_hw *ah, _In_ u16 channel_mhz);
+
+/* --------------------------------------------------------------------
+ *  Board configuration and the transmit half of the calibration, added
+ *  when association was found to transmit without ever being answered.
+ *  hw_board.c / hw_calib_tx.c.
+ * -------------------------------------------------------------------- */
+
+/* Apply every EEPROM-derived analog setting for `chan' - PA bias, RF
+ * switch table, attenuation, internal regulator, tuning caps. */
+void ath9k_hw_ar9300_set_board_values(struct ath_hw *ah,
+                                      struct ath9k_channel *chan);
+
+/* Read the transmit I/Q calibration the AGC calibration produced and
+ * program the correction coefficients.  Must run after the AGC cal. */
+void ar9003_hw_tx_iq_cal_post_proc(struct ath_hw *ah);
+
+/* Manual peak-detector calibration; runs after the AGC cal. */
+void ar9003_hw_do_pcoem_manual_peak_cal(struct ath_hw *ah,
+                                        struct ath9k_channel *chan);
+
+/* Which receive gain table the EEPROM selects (bits 3:0 of txrxgain). */
+s32 ar9003_hw_get_rx_gain_idx(struct ath_hw *ah);
+
+/* --------------------------------------------------------------------
+ *  Phase 2b: transmit power and the open-loop power-control calibration
+ *  apply.  hw_txpower.c.
+ *
+ *  Programs the per-rate target powers out of the EEPROM into
+ *  AR_PHY_POWER_TX_RATE*, the self-generated (ACK/CTS) power into
+ *  AR_TPC, and the pier-interpolated open-loop gain delta / thermal
+ *  compensation into AR_PHY_TPC_11_B0 / _6_B0 / _18 / _19.  Called from
+ *  the tail of ar9003_hw_process_ini(), where upstream calls it.
+ *
+ *  `test' is upstream's "compute but do not write" flag; there is no
+ *  caller for it here and it is ignored.  Requires ah->eeprom_valid.
+ * -------------------------------------------------------------------- */
+void ath9k_hw_apply_txpower(struct ath_hw *ah, struct ath9k_channel *chan,
+                            bool test);
+
+/* Restore the AR9300 EEPROM/OTP image into ah->eeprom.  Expensive - it
+ * walks the OTP a byte at a time - so the miniport does it once through
+ * ar9485_hw_context_init() and ar9485_hw_start() preserves the result
+ * across the reattach that each channel change performs. */
+bool ar9485_hw_eeprom_restore(struct ath_hw *ah);
+
+/* Opaque-context wrappers used by the miniport; see hw_reset.c. */
+SIZE_T ar9485_hw_context_size(void);
+
+/* One-time initialisation of the miniport's hardware context: attach and
+ * read the EEPROM.  Must be called once, on freshly allocated (and
+ * therefore uninitialised) storage, before the first ar9485_hw_start(). */
+bool ar9485_hw_context_init(_Out_ void *hwctx, _In_ void *bar0_base,
+                            _In_ u32 bar0_len, _In_ u16 devid,
+                            _In_ u32 macVersion, _In_ u16 macRev);
+bool ar9485_hw_start(_Out_ void *hwctx, _In_ void *bar0_base, _In_ u32 bar0_len,
+                     _In_ u16 devid, _In_ u32 macVersion, _In_ u16 macRev,
+                     _In_ u16 channel_mhz);
 
 #endif /* _AR9485_ATH9K_HW_MIN_H_ */

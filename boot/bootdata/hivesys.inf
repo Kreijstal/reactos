@@ -32,6 +32,13 @@ HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_0
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_002D","Service",0x00000000,"isapnp"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_002D","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
 
+; ASUS X550DP Atheros AR9485.  A service entry alone does not bind a PCI
+; devnode: LiveCD boot PnP needs this hardware-ID mapping in order to assign
+; the network class and call ar9485's NDIS MiniportInitializeEx with the BAR
+; and interrupt resources owned by the physical device.
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_168C&DEV_0032","Service",0x00000000,"ar9485"
+HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_168C&DEV_0032","ClassGUID",0x00000000,"{4D36E972-E325-11CE-BFC1-08002BE10318}"
+
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_003B","Service",0x00000000,"isapnp"
 HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_003B","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
 
@@ -1820,6 +1827,17 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","ErrorControl",0x00010001,0x00000
 HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","ImagePath",0x00020000,"system32\drivers\nwifi.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Group",0x00000000,"NDIS"
 HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","DisplayName",0x00000000,"ReactOS Native WiFi Service"
+
+; Make the physical AR9485 miniport available before LiveCD's asynchronous
+; desktop-time PnP installer runs.  PnP still owns creation of the hardware
+; devnode and supplies its resources; this only guarantees that the NDIS 6
+; miniport driver is registered in time for that enumeration.
+HKLM,"SYSTEM\CurrentControlSet\Services\ar9485","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ar9485","Start",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ar9485","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ar9485","ImagePath",0x00020000,"system32\drivers\ar9485.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\ar9485","Group",0x00000000,"NDIS"
+HKLM,"SYSTEM\CurrentControlSet\Services\ar9485","DisplayName",0x00000000,"Atheros AR9485 Wireless Network Adapter"
 
 ; Base Filtering Engine (BFE) - stub, dev-nt6-1 branch
 HKLM,"SYSTEM\CurrentControlSet\Services\BFE","DisplayName",0x00000000,"Base Filtering Engine"
