@@ -105,7 +105,8 @@ typedef struct _WLANSVC_BSS_ENTRY
     ULONGLONG          BeaconTimestamp;
     BOOL               SecurityEnabled;
     DOT11_AUTH_ALGORITHM   DefaultAuth;
-    DOT11_CIPHER_ALGORITHM DefaultCipher;
+    DOT11_CIPHER_ALGORITHM DefaultCipher;   /* pairwise cipher we would use */
+    DOT11_CIPHER_ALGORITHM GroupCipher;     /* group cipher the BSS uses */
     ULONG              RateCount;
     USHORT             Rates[DOT11_RATE_SET_MAX_LENGTH];
     ULONG              IeLength;
@@ -149,6 +150,9 @@ typedef struct _WLANSVC_INTERFACE
     /* Scan/BSS cache. */
     LIST_ENTRY            BssListHead;
     ULONG                 BssCount;
+    /* Set by the notify worker on NwifiNotifyScanComplete (auto-reset). */
+    HANDLE                ScanCompleteEvent;
+#define WLANSVC_SCAN_TIMEOUT_MS 15000
 
     /* Profile store. */
     LIST_ENTRY            ProfileListHead;
@@ -188,6 +192,16 @@ typedef struct _WLANSVCHANDLE
     /* Pending notifications + a signal the async getter parks on. */
     LIST_ENTRY NotificationQueue;
     HANDLE     hNotifyEvent;
+    /*
+     * _RpcAsyncGetNotification parks inside this handle for an unbounded time,
+     * so the handle is reference counted: one reference for the open handle
+     * itself, plus one for every getter currently parked on it.  Closing is
+     * set the moment the handle leaves WlanSvcHandleListHead, which is what
+     * tells a waking getter to give up.  Both fields are guarded by
+     * WlanSvcLock.
+     */
+    LONG       RefCount;
+    BOOL       Closing;
 } WLANSVCHANDLE, *PWLANSVCHANDLE;
 
 /* Globals; WlanSvcLock guards all of the above. */
