@@ -30,6 +30,12 @@ add_definitions(
     -Dasm_sqrtf=sqrtf
 )
 
+if(NOT DLL_EXPORT_VERSION LESS 0x600)
+    # Vista+ msvcrt validates NULL buffers/formats in the legacy printf
+    # entry points instead of faulting (apitests: msvcrt sprintf/_vsnprintf)
+    add_definitions(-DMSVCRT_NT6_PRINTF_VALIDATION)
+endif()
+
 if(ARCH STREQUAL "i386")
     add_definitions(
         -D__ASM_USE_THISCALL_WRAPPER
