@@ -500,8 +500,25 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     FrLdrDbgPrint = LoaderBlock->u.I386.CommonDataArea;
     //FrLdrDbgPrint("Hello from KiSystemStartup!!!\n");
 
-    /* Get the current CPU number */
-    Cpu = KeNumberProcessors++; // FIXME
+    /* Get the current CPU number.  This is deliberately NOT the old
+       "Cpu = KeNumberProcessors++": bumping the count here published this
+       processor before KiProcessorBlock[Cpu] had been filled in, and every
+       consumer in the kernel walks the array as
+
+           for (i = 0; i < KeNumberProcessors; i++) ... KiProcessorBlock[i] ...
+
+       (ke/ipi.c:83 and :120, ke/dpc.c:1036, ex/sysinfo.c, io/iomgr/iomgr.c:147,
+       config/i386/cmhardwr.c:346, ...).  A processor already inside the count
+       but not yet in the array is a NULL dereference on whichever CPU happens
+       to run one of those loops while an AP is coming up.  The count is the
+       thing that makes the slot reachable, so the slot has to be written
+       first.
+
+       i386 has always had this the right way round -- ke/i386/kiinit.c takes
+       Cpu = KeNumberProcessors at :768, publishes the slot from inside
+       KiInitializePcr at :327, and only bumps the count at :873.  amd64 is
+       the copy that diverged; this restores the same order. */
+    Cpu = KeNumberProcessors;
 
     /* LoaderBlock initialization for Cpu 0 */
     if (Cpu == 0)
@@ -519,6 +536,19 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     /* Set the PRCB for this Processor */
     KiProcessorBlock[Cpu] = &Pcr->Prcb;
 
+    /* Publish the PRCB before the count that makes it reachable.  Only after
+       this store is visible may another processor see KeNumberProcessors
+       include us and index the array.
+
+       This does NOT make KeActiveProcessors redundant, and ke/amd64/freeze.c
+       must keep using it: a processor whose PRCB is published still has no
+       initialized local APIC until HalInitializeProcessor runs further down,
+       so it can be *named* safely but cannot answer an IPI.  The two masks
+       answer different questions -- "is the pointer valid" and "can it be
+       talked to" -- and both are needed. */
+    KeMemoryBarrier();
+    KeNumberProcessors++;
+
     /* Save the initial thread */
     InitialThread = (PKTHREAD)LoaderBlock->Thread;
 
@@ -527,6 +557,17 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     /* Initialize the CPU features */
     KiInitializeCpu(Pcr);
+
+    /* KiInitializeCpu has just pointed GS at this processor's own PCR, so
+       KeGetCurrentPrcb() (which reads gs:[CurrentPrcb]) now resolves through
+       it.  It must name the very PRCB we just published.  If these two ever
+       disagree, every KiProcessorBlock[] consumer -- the scheduler in
+       thrdschd.c, the DPC and IPI paths, KxFreezeExecution -- silently
+       operates on a PRCB that no processor is running on, and the first
+       visible symptom is a freeze that never completes, hours later and with
+       nothing left pointing at the cause.  Fail here instead, where the
+       processor number is still in hand. */
+    ASSERT(KiProcessorBlock[Cpu] == KeGetCurrentPrcb());
 
     /* Initial setup for the boot CPU */
     if (Cpu == 0)

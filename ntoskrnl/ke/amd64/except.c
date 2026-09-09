@@ -318,6 +318,28 @@ KiDispatchException(IN PEXCEPTION_RECORD ExceptionRecord,
         /* Check if this is a first-chance exception */
         if (FirstChance)
         {
+#if DBG
+            /* Report first-chance kernel-mode access violations with the APC
+               state at fault time: an AV whose SEH handler sits above a
+               KeEnterCriticalRegion unwinds past the matching leave and leaks
+               the critical region (caught later by KiReportApcStateLeak). */
+            if (ExceptionRecord->ExceptionCode == STATUS_ACCESS_VIOLATION)
+            {
+                static LONG KiKmAvReports = 0;
+                PKTHREAD Thread = KeGetCurrentThread();
+                if (InterlockedIncrement(&KiKmAvReports) <= 32)
+                {
+                    DbgPrint("KM AV: Rip=%p Va=%p Write=%Ix "
+                             "CombinedApcDisable=0x%x ApcStateIndex=%u Process=%s\n",
+                             (PVOID)TrapFrame->Rip,
+                             (PVOID)ExceptionRecord->ExceptionInformation[1],
+                             ExceptionRecord->ExceptionInformation[0],
+                             Thread->CombinedApcDisable,
+                             Thread->ApcStateIndex,
+                             PsGetCurrentProcess()->ImageFileName);
+                }
+            }
+#endif
             /* Break into the debugger for the first time */
             if (KiDebugRoutine(TrapFrame,
                                ExceptionFrame,
