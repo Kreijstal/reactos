@@ -662,6 +662,19 @@ NwifiReceiveFromLower(
             }
 
             Adapter->RxOk++;
+            /* The 802.3 header this NBL carries starts with the DA. */
+            {
+                const UCHAR *Da = NWIFI_NBL_CTX(UpNbl)->DataBuffer;
+                if (Da[0] & 0x01)
+                {
+                    static const UCHAR Bcast[ETH_ADDR_LEN] =
+                        { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+                    if (RtlCompareMemory(Da, Bcast, ETH_ADDR_LEN) == ETH_ADDR_LEN)
+                        Adapter->RxBroadcast++;
+                    else
+                        Adapter->RxMulticast++;
+                }
+            }
             Adapter->RxBytes += NWIFI_NBL_CTX(UpNbl)->DataLength;
             InterlockedIncrement(&Adapter->PendingReceives);
 
@@ -671,9 +684,11 @@ NwifiReceiveFromLower(
                                                UpNbl, NDIS_DEFAULT_PORT_NUMBER, 1,
                                                ReceiveFlags |
                                                NDIS_RECEIVE_FLAGS_RESOURCES);
-            /* With RESOURCES set, the NBL is owned by us again on return. */
-            NwifiMiniportReturnNetBufferLists(Adapter->MiniportAdapterHandle,
-                                              UpNbl, ReturnFlags);
+            /* ReactOS NDIS calls ReturnNetBufferLists synchronously even for
+             * a RESOURCES indication.  That callback is intentionally a
+             * no-op; reclaim exactly once here after indication returns. */
+            NwifiFreeBuiltNbl(UpNbl);
+            InterlockedDecrement(&Adapter->PendingReceives);
         }
 
         Nbl = NextNbl;
@@ -696,21 +711,13 @@ NwifiMiniportReturnNetBufferLists(
     _In_ PNET_BUFFER_LIST NetBufferLists,
     _In_ ULONG ReturnFlags)
 {
-    PNWIFI_ADAPTER Adapter = (PNWIFI_ADAPTER)MiniportAdapterContext;
-    PNET_BUFFER_LIST Nbl = NetBufferLists;
-
+    UNREFERENCED_PARAMETER(MiniportAdapterContext);
+    UNREFERENCED_PARAMETER(NetBufferLists);
     UNREFERENCED_PARAMETER(ReturnFlags);
 
-    while (Nbl != NULL)
-    {
-        PNET_BUFFER_LIST NextNbl = NET_BUFFER_LIST_NEXT_NBL(Nbl);
-
-        NET_BUFFER_LIST_NEXT_NBL(Nbl) = NULL;
-        NwifiFreeBuiltNbl(Nbl);
-        InterlockedDecrement(&Adapter->PendingReceives);
-
-        Nbl = NextNbl;
-    }
+    /* Every upper indication uses RESOURCES and is reclaimed by its
+     * indication site.  ReactOS still invokes this callback on that path, so
+     * ownership must not be released here as well. */
 }
 
 /* ===========================================================================
