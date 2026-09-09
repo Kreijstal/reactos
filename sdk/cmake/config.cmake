@@ -120,11 +120,13 @@ option(DOWNLOAD_WINE_GECKO
        "Download and package the pinned Wine Gecko MSI for BootCD/LiveCD images"
        OFF)
 
-# iwlwifi Phase 1a identifies the part, powers the transport up and
-# validates the firmware container, then deliberately refuses to present an
-# adapter - there is no NVM address and no data path yet.  On by default it
-# would turn every Intel wireless machine into a device that binds and
-# fails, so it stays a bring-up switch until the data path lands.
+option(ENABLE_VWIFI_TEST_ADAPTER
+       "Build and package the software-only virtual Wi-Fi test adapter"
+       OFF)
+
+# The AX211 path has a functional Native Wi-Fi data path, but the wider PCI-ID
+# table has not been validated on equivalent hardware.  Keep the driver an
+# explicit opt-in until that coverage is broad enough for release images.
 option(ENABLE_IWLWIFI
        "Build and package the Intel Wireless (iwlwifi) miniport"
        OFF)
@@ -134,6 +136,18 @@ option(ENABLE_IWLWIFI
 # fetches the Gecko MSI.  Nothing is committed to this tree.
 option(DOWNLOAD_IWLWIFI_UCODE
        "Download and package the pinned Intel Wireless firmware blobs"
+       OFF)
+
+# rospoke is a bring-up instrument, not a component of the OS.  It maps any
+# physical address, allocates DMA buffers and reads/writes PCI config space on
+# behalf of whoever can open its device -- that is unrestricted kernel access
+# handed to user mode, by design, because that is what makes it possible to
+# iterate on a hardware bring-up sequence without rebooting.  A PnP driver
+# image can never be unloaded at run time, so the alternative is one reboot per
+# attempt; this is the trade, and it is only ever worth making on a machine you
+# are already debugging.  Never enable it in a build anyone else will run.
+option(ENABLE_ROSPOKE
+       "Build the rospoke hardware bring-up driver (GIVES USER MODE FULL KERNEL ACCESS)"
        OFF)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
