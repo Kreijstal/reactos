@@ -3113,7 +3113,11 @@ NdisMSleep(
 
   PAGED_CODE();
 
-  DueTime.QuadPart = (-1) * 10 * MicrosecondsToSleep;
+  /* Cast before negating.  MicrosecondsToSleep is unsigned; the old
+   * expression wrapped to a positive absolute time in 1601, so waits such as
+   * Native Wi-Fi channel dwell expired immediately instead of being relative
+   * to the current time. */
+  DueTime.QuadPart = -((LONGLONG)MicrosecondsToSleep * 10);
 
   KeInitializeTimer(&Timer);
   KeSetTimer(&Timer, DueTime, 0);
