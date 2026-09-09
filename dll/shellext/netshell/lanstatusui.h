@@ -39,6 +39,7 @@ class CLanStatus:
 {
     public:
         CLanStatus();
+        ~CLanStatus();
 
         // IOleCommandTarget
         STDMETHOD(QueryStatus)(const GUID *pguidCmdGroup, ULONG cCmds, OLECMD *prgCmds, OLECMDTEXT *pCmdText) override;
@@ -46,10 +47,13 @@ class CLanStatus:
 
     private:
         HRESULT InitializeNetTaskbarNotifications();
+        HRESULT EnsureDeviceChangeWindow();
         HRESULT ShowStatusDialogByCLSID(const GUID *pguidCmdGroup);
+        static LRESULT CALLBACK DeviceChangeWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
         CComPtr<INetConnectionManager> m_lpNetMan;
         NOTIFICATION_ITEM *m_pHead;
+        HWND m_hwndDeviceChange;
 
     public:
         DECLARE_NO_REGISTRY()
