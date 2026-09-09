@@ -242,17 +242,25 @@ IopInstallCriticalDevice(PDEVICE_NODE DeviceNode)
                         continue;
                     }
 
-                    /* Check if there's already a driver installed */
+                    /*
+                     * A class GUID only classifies the devnode; bus drivers
+                     * may provide one before a function driver is installed.
+                     * The Service value is what proves that a driver is
+                     * actually bound.  Checking ClassGUID here caused CDDB
+                     * mappings to be skipped for such devices, leaving their
+                     * PDO started without the critical function driver.
+                     */
                     Status = ZwQueryValueKey(InstanceKey,
-                                             &ClassGuidU,
+                                             &ServiceU,
                                              KeyValuePartialInformation,
                                              NULL,
                                              0,
                                              &NeededLength);
                     if (Status == STATUS_BUFFER_OVERFLOW || Status == STATUS_BUFFER_TOO_SMALL)
                     {
-                        DPRINT("CDDB-DIAG: '%wZ' matched but instance already has ClassGUID, skipping\n", &ChildIdNameU);
+                        DPRINT("CDDB-DIAG: '%wZ' matched but instance already has Service, skipping\n", &ChildIdNameU);
                         ExFreePool(BasicInfo);
+                        ZwClose(ChildKeyHandle);
                         continue;
                     }
 
