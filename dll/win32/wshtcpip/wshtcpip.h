@@ -53,6 +53,7 @@ typedef struct _SOCKET_CONTEXT {
     PQUEUED_REQUEST RequestQueue;
     BOOL DontRoute;
     BOOL KeepAlive;
+    DWORD UnicastIf;   /* IP_UNICAST_IF value as given by the caller (network byte order) */
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
 INT

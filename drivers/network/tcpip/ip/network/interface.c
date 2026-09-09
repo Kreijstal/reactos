@@ -108,6 +108,36 @@ PIP_INTERFACE AddrLocateInterface(
     return RetIF;
 }
 
+PIP_INTERFACE GetInterfaceByIndex(
+    UINT Index)
+/*
+ * FUNCTION: Locates the interface registered with the given index
+ * ARGUMENTS:
+ *     Index = Interface index as reported to IP helper (never zero)
+ * RETURNS:
+ *     Pointer to interface, NULL if no interface uses that index
+ */
+{
+    KIRQL OldIrql;
+    PIP_INTERFACE RetIF = NULL;
+    IF_LIST_ITER(CurrentIF);
+
+    ASSERT(Index != 0);
+
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+
+    ForEachInterface(CurrentIF) {
+        if (CurrentIF->Index == Index) {
+            RetIF = CurrentIF;
+            break;
+        }
+    } EndFor(CurrentIF);
+
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    return RetIF;
+}
+
 BOOLEAN HasPrefix(
     PIP_ADDRESS Address,
     PIP_ADDRESS Prefix,
@@ -221,6 +251,23 @@ HasLoopbackPrefix(
     return FALSE;
 }
 
+BOOLEAN IsOnLinkInterface(
+    PIP_ADDRESS Address,
+    PIP_INTERFACE Interface)
+/*
+ * FUNCTION: Determines whether an address can be reached directly over an interface
+ * ARGUMENTS:
+ *     Address   = Pointer to address to check
+ *     Interface = Pointer to interface the address would be sent over
+ * RETURNS:
+ *     TRUE if the address is on-link, FALSE if it has to go through a router
+ */
+{
+    return HasLoopbackPrefix(Address, &Interface->Unicast) ||
+           HasPrefix(Address, &Interface->Unicast,
+                     AddrCountPrefixBits(&Interface->Netmask));
+}
+
 PIP_INTERFACE FindOnLinkInterface(PIP_ADDRESS Address)
 /*
  * FUNCTION: Checks all on-link prefixes to find out if an address is on-link
@@ -242,8 +289,7 @@ PIP_INTERFACE FindOnLinkInterface(PIP_ADDRESS Address)
     TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
 
     ForEachInterface(CurrentIF) {
-        if (HasLoopbackPrefix(Address, &CurrentIF->Unicast) ||
-            HasPrefix(Address, &CurrentIF->Unicast, AddrCountPrefixBits(&CurrentIF->Netmask)))
+        if (IsOnLinkInterface(Address, CurrentIF))
         {
             TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
             return CurrentIF;
