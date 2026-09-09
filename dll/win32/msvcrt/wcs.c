@@ -892,6 +892,15 @@ int CDECL _vsnprintf( char *str, size_t len, const char *format, va_list valist 
     struct _str_ctx_a ctx = {len, str};
     int ret;
 
+#ifdef MSVCRT_NT6_PRINTF_VALIDATION
+    /* Vista+ msvcrt: a NULL buffer (unless len == 0, the length probe) or
+       a NULL format fails with EINVAL instead of faulting */
+    if ((!str && len) || !format)
+    {
+        *_errno() = EINVAL;
+        return -1;
+    }
+#endif
     ret = pf_printf_a(puts_clbk_str_a, &ctx, format, NULL, 0,
             arg_clbk_valist, NULL, &valist);
     puts_clbk_str_a(&ctx, 1, &nullbyte);
@@ -1169,6 +1178,14 @@ int CDECL __stdio_common_vsprintf_s( unsigned __int64 options,
  */
 int CDECL vsprintf( char *str, const char *format, va_list valist)
 {
+#ifdef MSVCRT_NT6_PRINTF_VALIDATION
+    /* Vista+ msvcrt fails NULL arguments instead of faulting */
+    if (!str || !format)
+    {
+        *_errno() = EINVAL;
+        return -1;
+    }
+#endif
     return vsnprintf(str, INT_MAX, format, valist);
 }
 
@@ -1378,6 +1395,15 @@ int CDECL _vsnwprintf(wchar_t *str, size_t len,
     struct _str_ctx_w ctx = {len, str};
     int ret;
 
+#ifdef MSVCRT_NT6_PRINTF_VALIDATION
+    /* Vista+ msvcrt: a NULL buffer (unless len == 0, the length probe) or
+       a NULL format fails with EINVAL instead of faulting */
+    if ((!str && len) || !format)
+    {
+        *_errno() = EINVAL;
+        return -1;
+    }
+#endif
     ret = pf_printf_w(puts_clbk_str_w, &ctx, format, NULL, 0,
             arg_clbk_valist, NULL, &valist);
     puts_clbk_str_w(&ctx, 1, L"");
@@ -1613,6 +1639,14 @@ int WINAPIV sprintf( char *str, const char *format, ... )
     va_list ap;
     int r;
 
+#ifdef MSVCRT_NT6_PRINTF_VALIDATION
+    /* Vista+ msvcrt fails NULL arguments instead of faulting */
+    if (!str || !format)
+    {
+        *_errno() = EINVAL;
+        return -1;
+    }
+#endif
     va_start( ap, format );
     r = vsnprintf( str, INT_MAX, format, ap );
     va_end( ap );
@@ -1686,7 +1720,7 @@ int WINAPIV _scwprintf( const wchar_t *format, ... )
     int r;
 
     va_start( ap, format );
-    r = _vsnwprintf( NULL, INT_MAX, format, ap );
+    r = _vsnwprintf_l( NULL, INT_MAX, format, NULL, ap );
     va_end( ap );
     return r;
 }
@@ -1791,7 +1825,9 @@ int CDECL _vswprintf_l( wchar_t* str, const wchar_t* format,
  */
 int CDECL _vscwprintf( const wchar_t *format, va_list args )
 {
-    return _vsnwprintf( NULL, INT_MAX, format, args );
+    /* The length probe has no buffer by design: it must not go through the
+       public _vsnwprintf entry, whose NULL-buffer validation would reject it. */
+    return _vsnwprintf_l( NULL, INT_MAX, format, NULL, args );
 }
 
 /*********************************************************************

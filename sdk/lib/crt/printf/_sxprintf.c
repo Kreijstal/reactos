@@ -57,6 +57,23 @@ _sxprintf(
     int result;
     FILE stream;
 
+#if (_WIN32_WINNT >= 0x600) && !defined(USER32_WSPRINTF) && !IS_SECAPI
+    /* Since Vista the CRT fails these calls instead of faulting: a NULL
+       buffer (except for the count == 0 length probe) and a NULL format
+       return -1. ntdll leaves errno alone, which is all libcntpr has.
+       The volatile probes stop GCC from deleting these comparisons in the
+       variants it knows as builtins with nonnull-attributed arguments
+       (sprintf, vsprintf). */
+    {
+        _TCHAR * volatile buffer_probe = buffer;
+        const _TCHAR * volatile format_probe = format;
+        if (((buffer_probe == NULL) && (count != 0)) || (format_probe == NULL))
+        {
+            return -1;
+        }
+    }
+#endif
+
 #if IS_SECAPI
     /* Validate parameters */
     if (MSVCRT_CHECK_PMT(((buffer == NULL) || (format == NULL) || (sizeOfBuffer <= 0))))
@@ -111,9 +128,16 @@ _sxprintf(
     /* Null-terminate the buffer after the string */
     buffer[result] = _T('\0');
 #else
+#if defined(USER32_WSPRINTF)
+    /* wsprintf always terminates - with a NULL buffer this faults, exactly
+       like on Windows */
+    if (stream._cnt >= sizeof(_TCHAR))
+        *(_TCHAR*)stream._ptr = _T('\0');
+#else
     /* Only zero terminate if there is enough space left */
     if ((stream._cnt >= sizeof(_TCHAR)) && (stream._ptr))
         *(_TCHAR*)stream._ptr = _T('\0');
+#endif
 #endif
 
     return result;
