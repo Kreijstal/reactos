@@ -345,6 +345,8 @@ Ndis6FilterTerminalReceive(
     if (Ext == NULL)
         return;
 
+    ResourcesFlag = (ReceiveFlags & NDIS_RECEIVE_FLAGS_RESOURCES) != 0;
+
     /* If a native NDIS 6 protocol is bound, deliver the NBLs (still
      * miniport-owned) straight to its ReceiveNetBufferListsHandler instead of
      * the legacy NDIS_PACKET wrap. Indicate outside the lock since the handler
@@ -396,11 +398,25 @@ Ndis6FilterTerminalReceive(
                     NumberOfNetBufferLists,
                     ReceiveFlags);
             }
+
+            /* A resources indication only lends the NBLs to protocols for
+             * the duration of their receive callbacks.  Protocols must not
+             * retain or return them, so return ownership to the miniport
+             * synchronously after the last callback. */
+            if (ResourcesFlag)
+            {
+                for (CurrentNbl = NetBufferLists;
+                     CurrentNbl != NULL;
+                     CurrentNbl = NextNbl)
+                {
+                    NextNbl = NET_BUFFER_LIST_NEXT_NBL(CurrentNbl);
+                    NET_BUFFER_LIST_NEXT_NBL(CurrentNbl) = NULL;
+                    Ndis6FilterDispatchReturn(Adapter, CurrentNbl, 0);
+                }
+            }
             return;
         }
     }
-
-    ResourcesFlag = (ReceiveFlags & NDIS_RECEIVE_FLAGS_RESOURCES) != 0;
 
     for (CurrentNbl = NetBufferLists; CurrentNbl != NULL; CurrentNbl = NextNbl)
     {
