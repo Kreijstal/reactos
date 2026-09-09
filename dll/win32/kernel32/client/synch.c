@@ -585,6 +585,50 @@ CreateMutexW(IN LPSECURITY_ATTRIBUTES lpMutexAttributes  OPTIONAL,
 HANDLE
 WINAPI
 DECLSPEC_HOTPATCH
+CreateMutexExW(IN LPSECURITY_ATTRIBUTES lpMutexAttributes OPTIONAL,
+               IN LPCWSTR lpName OPTIONAL,
+               IN DWORD dwFlags,
+               IN DWORD dwDesiredAccess)
+{
+    CreateNtObjectFromWin32Api(Mutex, Mutant, dwDesiredAccess,
+                               lpMutexAttributes,
+                               lpName,
+                               (dwFlags & CREATE_MUTEX_INITIAL_OWNER) != 0);
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+DECLSPEC_HOTPATCH
+CreateMutexExA(IN LPSECURITY_ATTRIBUTES lpMutexAttributes OPTIONAL,
+               IN LPCSTR lpName OPTIONAL,
+               IN DWORD dwFlags,
+               IN DWORD dwDesiredAccess)
+{
+    ConvertAnsiToUnicodePrologue
+
+    if (!lpName)
+        return CreateMutexExW(lpMutexAttributes, NULL, dwFlags, dwDesiredAccess);
+
+    ConvertAnsiToUnicodeBody(lpName)
+
+    if (NT_SUCCESS(Status))
+        return CreateMutexExW(lpMutexAttributes,
+                              UnicodeCache->Buffer,
+                              dwFlags,
+                              dwDesiredAccess);
+
+    ConvertAnsiToUnicodeEpilogue
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
+DECLSPEC_HOTPATCH
 OpenMutexW(IN DWORD dwDesiredAccess,
            IN BOOL bInheritHandle,
            IN LPCWSTR lpName)

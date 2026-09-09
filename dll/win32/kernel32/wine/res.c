@@ -552,6 +552,43 @@ LPVOID WINAPI LockResource( HGLOBAL handle )
     return handle;
 }
 
+INT WINAPI LoadStringW(HINSTANCE instance, UINT resource_id, LPWSTR buffer, INT buflen)
+{
+    HGLOBAL resource_data;
+    HRSRC handle;
+    const WCHAR *string;
+    UINT index;
+    INT length;
+
+    if (!buffer)
+        return 0;
+
+    handle = FindResourceW(instance,
+                           MAKEINTRESOURCEW((LOWORD(resource_id) >> 4) + 1),
+                           (LPCWSTR)RT_STRING);
+    if (!handle || !(resource_data = LoadResource(instance, handle)))
+    {
+        if (buflen > 0)
+            buffer[0] = UNICODE_NULL;
+        return 0;
+    }
+
+    string = LockResource(resource_data);
+    for (index = 0; index < (resource_id & 0xf); ++index)
+        string += *string + 1;
+
+    if (!buflen)
+    {
+        *(const WCHAR **)buffer = string + 1;
+        return *string;
+    }
+
+    length = min(buflen - 1, *string);
+    memcpy(buffer, string + 1, length * sizeof(*buffer));
+    buffer[length] = UNICODE_NULL;
+    return length;
+}
+
 
 /**********************************************************************
  *	    FreeResource     (KERNEL32.@)
