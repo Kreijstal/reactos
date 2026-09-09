@@ -95,7 +95,12 @@ dispatch(HANDLE hStopEvent)
             if (timeouts->when <= cur_time) {
                 t = timeouts;
                 timeouts = timeouts->next;
+                /* Boot 80: a thread waited 2 x 150 s for ApiCriticalSection
+                 * and the deadlock detector's DbgBreakPoint froze the box.
+                 * These markers name the callback that held the lock. */
+                DPRINT1("dhcp: timeout cb %p(%p) enter\n", t->func, t->what);
                 (*(t->func))(t->what);
+                DPRINT1("dhcp: timeout cb %p leave\n", t->func);
                 t->next = free_timeouts;
                 free_timeouts = t;
                 continue;
@@ -177,8 +182,9 @@ dispatch(HANDLE hStopEvent)
             ip = l->local;
             if (ip && (l->handler != got_one ||
                         !ip->dead)) {
-                DH_DbgPrint(MID_TRACE,("Handling %x\n", l));
+                DPRINT1("dhcp: handler %p(%s) enter\n", l->handler, ip->name);
                 (*(l->handler))(l);
+                DPRINT1("dhcp: handler %p leave\n", l->handler);
             }
         }
     } while (1);
@@ -210,18 +216,26 @@ got_one(struct protocol *l)
 
     if ((result = receive_packet(ip, u.packbuf, sizeof(u), &from,
                                  &hfrom)) == -1) {
-        warning("receive_packet failed on %s: %d", ip->name,
-                WSAGetLastError());
+        int error = WSAGetLastError();
+
+        /* Every adapter shares the one DhcpSocket, and the dispatch loop
+           calls each protocol's handler on every FD_READ.  The first
+           handler drains the datagram, so the others read an empty
+           non-blocking socket: that is not a failing interface. */
+        if (error == WSAEWOULDBLOCK)
+            return;
+
+        warning("receive_packet failed on %s: %d", ip->name, error);
         ip->errors++;
         if (ip->errors > 20) {
             /* our interface has gone away. */
             warning("Interface %s no longer appears valid.",
                     ip->name);
             ip->dead = 1;
-            closesocket(l->fd);
             remove_protocol(l);
             adapter = AdapterFindInfo(ip);
             if (adapter) {
+                cancel_timeouts_for(ip);
                 RemoveEntryList(&adapter->ListEntry);
                 free(adapter);
             }
@@ -230,6 +244,7 @@ got_one(struct protocol *l)
     }
     if (result == 0)
         return;
+    ip->errors = 0;
 
     if (bootp_packet_handler) {
         ifrom.len = 4;
@@ -243,6 +258,7 @@ got_one(struct protocol *l)
             warning("Discarding packet with a non-matching target physical address\n");
             return;
         }
+
 
         (*bootp_packet_handler)(&adapter->DhclientInfo, &u.packet, result,
                                 from.sin_port, ifrom, &hfrom);
@@ -334,6 +350,31 @@ cancel_timeout(void (*where)(void *), void *what)
     if (q) {
         q->next = free_timeouts;
         free_timeouts = q;
+    }
+}
+
+/* Drop every timeout that would call back with WHAT.  An adapter is freed
+   from three places (link loss, a dead interface, service stop) and each of
+   them used to leave its send_discover/state_bound/... timeouts queued,
+   so the next dispatch pass called into the freed DHCP_ADAPTER. */
+void
+cancel_timeouts_for(void *what)
+{
+    struct timeout *t, *q, *next;
+
+    t = NULL;
+    for (q = timeouts; q; q = next) {
+        next = q->next;
+        if (q->what == what) {
+            if (t)
+                t->next = next;
+            else
+                timeouts = next;
+            q->next = free_timeouts;
+            free_timeouts = q;
+        } else {
+            t = q;
+        }
     }
 }
 

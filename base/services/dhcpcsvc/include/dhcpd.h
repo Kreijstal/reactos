@@ -358,6 +358,7 @@ void dispatch(HANDLE hStopEvent);
 void got_one(struct protocol *);
 void add_timeout(time_t, void (*)(void *), void *);
 void cancel_timeout(void (*)(void *), void *);
+void cancel_timeouts_for(void *);
 void add_protocol(char *, int, void (*)(struct protocol *), void *);
 void remove_protocol(struct protocol *);
 struct protocol *find_protocol_by_adapter( struct interface_info * );
