@@ -598,6 +598,31 @@ getLabelForDriveFromAutoRun(PCWSTR wszPath, LPWSTR szLabel, UINT cchMax)
     return E_FAIL;
 }
 
+struct DRIVE_DETAILS_CACHE
+{
+    volatile LONG IconState; /* 0 = empty, 1 = worker active, 2 = complete */
+    volatile LONG LabelState;
+    volatile LONG SpaceState;
+    HRESULT IconResult;
+    WCHAR IconFile[MAX_PATH];
+    INT IconIndex;
+    UINT IconFlags;
+    HRESULT LabelResult;
+    WCHAR Label[MAX_PATH];
+    BOOL SpaceValid;
+    ULARGE_INTEGER TotalBytes;
+    ULARGE_INTEGER FreeBytes;
+};
+
+static DRIVE_DETAILS_CACHE g_DriveDetails[26];
+
+enum DRIVE_DETAIL_KIND
+{
+    DRIVE_DETAIL_ICON,
+    DRIVE_DETAIL_LABEL,
+    DRIVE_DETAIL_SPACE
+};
+
 static inline HRESULT GetRawDriveLabel(PCWSTR DrivePath, LPWSTR szLabel, UINT cchMax)
 {
     if (GetVolumeInformationW(DrivePath, szLabel, cchMax, NULL, NULL, NULL, NULL, 0))
@@ -605,10 +630,89 @@ static inline HRESULT GetRawDriveLabel(PCWSTR DrivePath, LPWSTR szLabel, UINT cc
     return HResultFromWin32(GetLastError());
 }
 
-static HRESULT GetDriveLabel(PCWSTR DrivePath, LPWSTR szLabel, UINT cchMax)
+static HRESULT GetDriveLabelSync(PCWSTR DrivePath, LPWSTR szLabel, UINT cchMax)
 {
     HRESULT hr = getLabelForDriveFromAutoRun(DrivePath, szLabel, cchMax);
     return hr == S_OK ? S_OK : GetRawDriveLabel(DrivePath, szLabel, cchMax);
+}
+
+static DWORD WINAPI DriveDetailsWorker(PVOID Parameter)
+{
+    ULONG_PTR Value = PtrToUlong(Parameter);
+    INT Drive = Value & 0xff;
+    DRIVE_DETAIL_KIND Kind = (DRIVE_DETAIL_KIND)(Value >> 8);
+    DRIVE_DETAILS_CACHE &Cache = g_DriveDetails[Drive];
+    WCHAR DrivePath[] = { WCHAR(L'A' + Drive), L':', L'\\', UNICODE_NULL };
+
+    switch (Kind)
+    {
+        case DRIVE_DETAIL_ICON:
+            Cache.IconFile[0] = UNICODE_NULL;
+            Cache.IconResult = getIconLocationForDrive(DrivePath, Cache.IconFile,
+                                                       _countof(Cache.IconFile),
+                                                       &Cache.IconIndex,
+                                                       &Cache.IconFlags);
+            InterlockedExchange(&Cache.IconState, 2);
+            break;
+        case DRIVE_DETAIL_LABEL:
+            Cache.Label[0] = UNICODE_NULL;
+            Cache.LabelResult = GetDriveLabelSync(DrivePath, Cache.Label,
+                                                  _countof(Cache.Label));
+            InterlockedExchange(&Cache.LabelState, 2);
+            break;
+        case DRIVE_DETAIL_SPACE:
+            Cache.SpaceValid = GetVolumeInformationW(DrivePath, NULL, 0, NULL, NULL,
+                                                     NULL, NULL, 0) &&
+                               GetDiskFreeSpaceExW(DrivePath, &Cache.FreeBytes,
+                                                  &Cache.TotalBytes, NULL);
+            InterlockedExchange(&Cache.SpaceState, 2);
+            break;
+    }
+
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                   DrivePath, NULL);
+    return 0;
+}
+
+static DRIVE_DETAILS_CACHE *GetDriveDetailsAsync(PCWSTR DrivePath, DRIVE_DETAIL_KIND Kind)
+{
+    INT8 Drive = GetDriveNumber(DrivePath);
+    if (Drive < 0)
+        return NULL;
+
+    DRIVE_DETAILS_CACHE &Cache = g_DriveDetails[Drive];
+    volatile LONG *State = Kind == DRIVE_DETAIL_ICON ? &Cache.IconState :
+                           Kind == DRIVE_DETAIL_LABEL ? &Cache.LabelState :
+                                                       &Cache.SpaceState;
+    if (InterlockedCompareExchange(State, 1, 0) == 0 &&
+        !SHCreateThread(DriveDetailsWorker,
+                        UlongToPtr(Drive | ((ULONG)Kind << 8)),
+                        CTF_PROCESS_REF, NULL))
+    {
+        InterlockedExchange(State, 0);
+    }
+    return InterlockedCompareExchange(State, 0, 0) == 2 ? &Cache : NULL;
+}
+
+static HRESULT GetDriveLabel(PCWSTR DrivePath, LPWSTR szLabel, UINT cchMax)
+{
+    DRIVE_DETAILS_CACHE *Cache = GetDriveDetailsAsync(DrivePath, DRIVE_DETAIL_LABEL);
+    if (!Cache)
+        return E_PENDING;
+    if (Cache->LabelResult == S_OK)
+        return StringCchCopyW(szLabel, cchMax, Cache->Label);
+    return Cache->LabelResult;
+}
+
+static void InvalidateDriveDetails(PCIDLIST_ABSOLUTE Pidl)
+{
+    INT8 Drive = GetDriveNumber(Pidl);
+    if (Drive >= 0)
+    {
+        InterlockedExchange(&g_DriveDetails[Drive].IconState, 0);
+        InterlockedExchange(&g_DriveDetails[Drive].LabelState, 0);
+        InterlockedExchange(&g_DriveDetails[Drive].SpaceState, 0);
+    }
 }
 
 static bool GetRegCustomizedDriveIcon(
@@ -670,11 +774,11 @@ HRESULT CDrivesExtractIcon_CreateInstance(IShellFolder * psf, LPCITEMIDLIST pidl
             break;
     }
 
-    hr = getIconLocationForDrive(szDrive, wTemp, _countof(wTemp),
-                                 &icon_idx, &GilOut);
+    DRIVE_DETAILS_CACHE *Cache = GetDriveDetailsAsync(szDrive, DRIVE_DETAIL_ICON);
+    hr = Cache ? Cache->IconResult : E_PENDING;
     if (SUCCEEDED(hr))
     {
-        initIcon->SetNormalIcon(wTemp, icon_idx);
+        initIcon->SetNormalIcon(Cache->IconFile, Cache->IconIndex);
     }
     else if (DriveType > DRIVE_NO_ROOT_DIR &&
              GetRegCustomizedDriveIcon(DriveNum, wTemp, _countof(wTemp), &icon_idx, &GilOut))
@@ -970,18 +1074,25 @@ HRESULT WINAPI CDrivesFolder::CompareIDs(LPARAM lParam, PCUIDLIST_RELATIVE pidl1
                 break;
             }
 
-            ULARGE_INTEGER Drive1Available, Drive1Total, Drive2Available, Drive2Total;
-            BOOL bValid1 = FALSE, bValid2 = FALSE;
+            WCHAR DrivePath1[] = { (WCHAR)pszDrive1[0], L':', L'\\', UNICODE_NULL };
+            WCHAR DrivePath2[] = { (WCHAR)pszDrive2[0], L':', L'\\', UNICODE_NULL };
+            DRIVE_DETAILS_CACHE *Cache1 = GetDriveDetailsAsync(DrivePath1, DRIVE_DETAIL_SPACE);
+            DRIVE_DETAILS_CACHE *Cache2 = GetDriveDetailsAsync(DrivePath2, DRIVE_DETAIL_SPACE);
+            BOOL bValid1 = Cache1 && Cache1->SpaceValid;
+            BOOL bValid2 = Cache2 && Cache2->SpaceValid;
+            ULARGE_INTEGER Drive1Available = {}, Drive1Total = {};
+            ULARGE_INTEGER Drive2Available = {}, Drive2Total = {};
 
-            if (GetVolumeInformationA(pszDrive1, NULL, 0, NULL, NULL, NULL, NULL, 0))
-                bValid1 = GetDiskFreeSpaceExA(pszDrive1, &Drive1Available, &Drive1Total, NULL);
-            else
-                Drive1Available.QuadPart = Drive1Total.QuadPart = 0;
-
-            if (GetVolumeInformationA(pszDrive2, NULL, 0, NULL, NULL, NULL, NULL, 0))
-                bValid2 = GetDiskFreeSpaceExA(pszDrive2, &Drive2Available, &Drive2Total, NULL);
-            else
-                Drive2Available.QuadPart = Drive2Total.QuadPart = 0;
+            if (bValid1)
+            {
+                Drive1Available = Cache1->FreeBytes;
+                Drive1Total = Cache1->TotalBytes;
+            }
+            if (bValid2)
+            {
+                Drive2Available = Cache2->FreeBytes;
+                Drive2Total = Cache2->TotalBytes;
+            }
 
             LARGE_INTEGER Diff;
             if (MyComputerSFHeader[iColumn].colnameid == IDS_SHV_COLUMN_DISK_CAPACITY) /* Size */
@@ -1217,7 +1328,10 @@ HRESULT WINAPI CDrivesFolder::GetDisplayNameOf(PCUITEMID_CHILD pidl, DWORD dwFla
                 pszLabel += wsprintfW(pszPath, L"(%c:) ", szDrive[0]);
         }
 
-        if (GetDriveLabel(szDrive, pszLabel, MAX_PATH - 7) != S_OK && !bEditLabel)
+        HRESULT LabelHr = bEditLabel
+            ? GetDriveLabelSync(szDrive, pszLabel, MAX_PATH - 7)
+            : GetDriveLabel(szDrive, pszLabel, MAX_PATH - 7);
+        if (LabelHr != S_OK && !bEditLabel)
         {
             UINT ResId = 0, DrvType = GetCachedDriveType(szDrive);
             if (DrvType == DRIVE_REMOVABLE)
@@ -1383,7 +1497,6 @@ HRESULT WINAPI CDrivesFolder::GetDetailsOf(PCUITEMID_CHILD pidl, UINT iColumn, S
     }
     else
     {
-        ULARGE_INTEGER ulTotalBytes, ulFreeBytes;
         WCHAR szDrive[8];
         INT8 DriveNum = GetDrivePath(pidl, szDrive);
         UINT DriveType = GetCachedDriveType(DriveNum);
@@ -1407,13 +1520,15 @@ HRESULT WINAPI CDrivesFolder::GetDetailsOf(PCUITEMID_CHILD pidl, UINT iColumn, S
             case IDS_SHV_COLUMN_DISK_AVAILABLE:
                 psd->str.cStr[0] = 0x00;
                 psd->str.uType = STRRET_CSTR;
-                if (GetVolumeInformationW(szDrive, NULL, 0, NULL, NULL, NULL, NULL, 0))
+                if (DRIVE_DETAILS_CACHE *Cache = GetDriveDetailsAsync(szDrive, DRIVE_DETAIL_SPACE))
                 {
-                    GetDiskFreeSpaceExW(szDrive, &ulFreeBytes, &ulTotalBytes, NULL);
-                    if (iColumn == 2)
-                        StrFormatByteSize64A(ulTotalBytes.QuadPart, psd->str.cStr, MAX_PATH);
-                    else
-                        StrFormatByteSize64A(ulFreeBytes.QuadPart, psd->str.cStr, MAX_PATH);
+                    if (Cache->SpaceValid)
+                    {
+                        if (iColumn == 2)
+                            StrFormatByteSize64A(Cache->TotalBytes.QuadPart, psd->str.cStr, MAX_PATH);
+                        else
+                            StrFormatByteSize64A(Cache->FreeBytes.QuadPart, psd->str.cStr, MAX_PATH);
+                    }
                 }
                 hr = S_OK;
                 break;
@@ -1494,6 +1609,11 @@ STDMETHODIMP CDrivesFolder::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam
     switch (uMsg)
     {
         case SFVM_FSNOTIFY:
+            if ((lParam == SHCNE_DRIVEADD || lParam == SHCNE_DRIVEREMOVED ||
+                 lParam == SHCNE_MEDIAINSERTED || lParam == SHCNE_MEDIAREMOVED) && wParam)
+            {
+                InvalidateDriveDetails(((PIDLIST_ABSOLUTE*)wParam)[0]);
+            }
             if (lParam == SHCNE_DRIVEADD && wParam)
             {
                 g_IsFloppyCache = 0;
