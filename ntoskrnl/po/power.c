@@ -28,6 +28,20 @@ POP_POWER_ACTION PopAction;
 WORK_QUEUE_ITEM PopShutdownWorkItem;
 SYSTEM_POWER_CAPABILITIES PopCapabilities;
 
+/* SystemBatteryState is polled by several shell components.  ACPI firmware
+ * methods may be slow, and some machines return a permanent AML error from
+ * _BIF/_BIX.  Serialize the underlying CompositeBattery transaction and cache
+ * both success and failure so those callers cannot execute the same firmware
+ * method concurrently or turn a firmware bug into a tight polling storm. */
+static KGUARDED_MUTEX PopBatteryQueryLock;
+static SYSTEM_BATTERY_STATE PopCachedBatteryState;
+static NTSTATUS PopCachedBatteryStatus;
+static ULONGLONG PopBatteryQueryTime;
+static BOOLEAN PopBatteryQueryValid;
+
+#define POP_BATTERY_SUCCESS_CACHE_TIME (1ULL * 10 * 1000 * 1000)
+#define POP_BATTERY_FAILURE_CACHE_TIME (30ULL * 10 * 1000 * 1000)
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 static WORKER_THREAD_ROUTINE PopPassivePowerCall;
@@ -475,6 +489,9 @@ PoInitSystem(IN ULONG BootPhase)
     /* Initialize support for shutdown waits and work-items */
     PopInitShutdownList();
 
+    KeInitializeGuardedMutex(&PopBatteryQueryLock);
+    PopBatteryQueryValid = FALSE;
+
     return TRUE;
 }
 
@@ -892,6 +909,39 @@ Exit:
     return Status;
 }
 
+static
+NTSTATUS
+PopQueryBatteryStateCached(
+    _Out_ PSYSTEM_BATTERY_STATE BatteryState)
+{
+    ULONGLONG Now, MaxAge;
+    NTSTATUS Status;
+
+    KeAcquireGuardedMutex(&PopBatteryQueryLock);
+
+    Now = KeQueryInterruptTime();
+    MaxAge = (PopBatteryQueryValid && NT_SUCCESS(PopCachedBatteryStatus))
+                 ? POP_BATTERY_SUCCESS_CACHE_TIME
+                 : POP_BATTERY_FAILURE_CACHE_TIME;
+
+    if (!PopBatteryQueryValid ||
+        Now < PopBatteryQueryTime ||
+        Now - PopBatteryQueryTime >= MaxAge)
+    {
+        Status = PopQueryBatteryState(&PopCachedBatteryState);
+        PopCachedBatteryStatus = Status;
+        PopBatteryQueryTime = KeQueryInterruptTime();
+        PopBatteryQueryValid = TRUE;
+    }
+
+    Status = PopCachedBatteryStatus;
+    if (NT_SUCCESS(Status))
+        RtlCopyMemory(BatteryState, &PopCachedBatteryState, sizeof(*BatteryState));
+
+    KeReleaseGuardedMutex(&PopBatteryQueryLock);
+    return Status;
+}
+
 
 /*
  * @unimplemented
@@ -949,7 +999,7 @@ NtPowerInformation(IN POWER_INFORMATION_LEVEL PowerInformationLevel,
             if (PopCapabilities.SystemBatteriesPresent)
             {
                 /* Open the battery driver and query the battery state */
-                Status = PopQueryBatteryState(&BatteryState);
+                Status = PopQueryBatteryStateCached(&BatteryState);
                 if (!NT_SUCCESS(Status))
                 {
                     DPRINT1("Failed to query battery state: Status: 0x%08X\n", Status);
