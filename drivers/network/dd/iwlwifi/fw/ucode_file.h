@@ -85,6 +85,7 @@ typedef BOOLEAN   iwl_bool;
  */
 #define IWL_NUM_API_WORDS           4
 #define IWL_NUM_CAPA_WORDS          4
+#define IWL_MAX_CMD_VERSIONS        256
 
 #ifdef IWL_HOST_HARNESS
 #pragma pack(push, 1)
@@ -191,6 +192,7 @@ enum
     IWL_UCODE_TLV_CMD_VERSIONS          = 48,
     IWL_UCODE_TLV_FW_GSCAN_CAPA         = 50,
     IWL_UCODE_TLV_FW_MEM_SEG            = 51,
+    IWL_UCODE_TLV_IML                   = 52,
     IWL_UCODE_TLV_UMAC_DEBUG_ADDRS      = 54,
     IWL_UCODE_TLV_LMAC_DEBUG_ADDRS      = 55,
     IWL_UCODE_TLV_FW_RECOVERY_INFO      = 57,
@@ -242,6 +244,13 @@ typedef struct _IWL_FW_PARSED
 
     iwl_u32      ApiFlags[IWL_NUM_API_WORDS];
     iwl_u32      CapaFlags[IWL_NUM_CAPA_WORDS];
+    struct {
+        iwl_u8 Command;
+        iwl_u8 Group;
+        iwl_u8 CommandVersion;
+        iwl_u8 NotificationVersion;
+    } CommandVersion[IWL_MAX_CMD_VERSIONS];
+    iwl_u32      CommandVersionCount;
 
     iwl_u32      Flags;                 /* IWL_UCODE_TLV_FLAGS payload */
     iwl_u32      NumOfCpus;
@@ -249,6 +258,11 @@ typedef struct _IWL_FW_PARSED
     iwl_u32      NScanChannels;
     iwl_u32      ProbeMaxLength;
     iwl_u32      PhySku;
+
+    /* Initial microcode loader consumed by Gen3 context-info boot.  Like
+     * sections, this points into the caller-owned firmware container. */
+    const iwl_u8 *ImlData;
+    iwl_u32       ImlLength;
 
     /* TLV types this build does not recognise.  Not an error: it is the
      * expected state when the pinned blob is newer than the driver. */
@@ -375,5 +389,19 @@ const IWL_PNVM_BLOCK *
 IwlPnvmSelectBlock(
     const IWL_PNVM_PARSED *Parsed,
     const iwl_u32 SkuId[3]);
+
+iwl_u8
+IwlFwLookupCommandVersion(
+    const IWL_FW_PARSED *Parsed,
+    iwl_u8 Group,
+    iwl_u8 Command,
+    iwl_u8 Fallback);
+
+iwl_u8
+IwlFwLookupNotificationVersion(
+    const IWL_FW_PARSED *Parsed,
+    iwl_u8 Group,
+    iwl_u8 Command,
+    iwl_u8 Fallback);
 
 #endif /* _IWLWIFI_UCODE_FILE_H_ */

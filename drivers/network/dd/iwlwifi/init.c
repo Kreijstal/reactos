@@ -3,23 +3,16 @@
  * LICENSE:     GPL-2.0-or-later
  * PURPOSE:     MiniportInitializeEx / HaltEx.
  *
- * Phase 1a runs the full identification chain and stops there:
+ * Initializes the AX210-family transport and Native Wi-Fi scan interface:
  *
  *   read PCI config -> match hw/devices.c -> map BAR0 -> mask interrupts
  *   -> prepare-card-hw -> APM init -> read CSR_HW_REV / CSR_HW_RF_ID
- *   -> locate and parse the matching .ucode container
+ *   -> locate and load firmware/PNVM -> query NVM and permanent MAC
+ *   -> configure regulatory/MAC/link scan contexts -> register with NDIS.
  *
- * and then DELIBERATELY FAILS.  A native-802.11 miniport with no permanent
- * address and no data path is not a network adapter, and presenting one to
- * NDIS would be worse than presenting none.  The permanent address on
- * family 9000 and later comes out of NVM through a firmware command, which
- * needs the ucode actually running - Phase 2's job.
- *
- * What Phase 1a is FOR is the log it produces: drop this driver on any
- * Intel wireless machine and it will say which part it is, whether the
- * transport powers up, and whether a usable firmware blob is installed.
- * That is the information every later phase depends on, and it is
- * collectable on hardware we do not otherwise have.
+ * Association and the data path build on the same persistent firmware and
+ * RX queues; initialization succeeds only after those queues and the real
+ * permanent address are available.
  */
 
 /* This is the one translation unit that references
@@ -38,6 +31,8 @@
 
 static NDIS_STATUS
 IwlSetRegistrationAttributes(_In_ PIWL_ADAPTER Adapter);
+static NDIS_STATUS
+IwlSetGeneralAttributes(_In_ PIWL_ADAPTER Adapter);
 static NDIS_STATUS
 IwlQueryBusInterface(_In_ PIWL_ADAPTER Adapter);
 static NDIS_STATUS
@@ -59,6 +54,8 @@ IwlMiniportInitializeEx(
 {
     PIWL_ADAPTER Adapter;
     NDIS_STATUS Status;
+    NET_BUFFER_LIST_POOL_PARAMETERS PoolParameters;
+    NDIS_TIMER_CHARACTERISTICS TimerCharacteristics;
 
     UNREFERENCED_PARAMETER(MiniportDriverContext);
 
@@ -77,6 +74,34 @@ IwlMiniportInitializeEx(
     NdisZeroMemory(Adapter, sizeof(*Adapter));
     Adapter->MiniportAdapterHandle    = NdisMiniportHandle;
     Adapter->NdisMiniportDriverHandle = g_NdisMiniportDriverHandle;
+    NdisAllocateSpinLock(&Adapter->TxLock);
+    NdisZeroMemory(&PoolParameters, sizeof(PoolParameters));
+    PoolParameters.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+    PoolParameters.Header.Revision =
+        NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+    PoolParameters.Header.Size = sizeof(PoolParameters);
+    PoolParameters.ProtocolId = NDIS_PROTOCOL_ID_DEFAULT;
+    PoolParameters.fAllocateNetBuffer = TRUE;
+    PoolParameters.PoolTag = IWL_TAG;
+    Adapter->RxNblPool = NdisAllocateNetBufferListPool(
+        NdisMiniportHandle, &PoolParameters);
+    if (Adapter->RxNblPool == NULL)
+    {
+        Status = NDIS_STATUS_RESOURCES;
+        goto Fail;
+    }
+    NdisZeroMemory(&TimerCharacteristics, sizeof(TimerCharacteristics));
+    TimerCharacteristics.Header.Type = NDIS_OBJECT_TYPE_TIMER_CHARACTERISTICS;
+    TimerCharacteristics.Header.Revision = NDIS_TIMER_CHARACTERISTICS_REVISION_1;
+    TimerCharacteristics.Header.Size =
+        NDIS_SIZEOF_TIMER_CHARACTERISTICS_REVISION_1;
+    TimerCharacteristics.TimerFunction = IwlRxPollTimerDpc;
+    TimerCharacteristics.FunctionContext = Adapter;
+    Status = NdisAllocateTimerObject(NdisMiniportHandle,
+                                     &TimerCharacteristics,
+                                     &Adapter->RxPollTimer);
+    if (Status != NDIS_STATUS_SUCCESS)
+        goto Fail;
 
     NdisMGetDeviceProperty(NdisMiniportHandle,
                            &Adapter->PhysicalDeviceObject,
@@ -115,14 +140,19 @@ IwlMiniportInitializeEx(
         goto Fail;
     }
 
-    /* Mask everything before the device is allowed to do anything.  The
-     * line may be shared, and a part left in an odd state by platform
-     * firmware can assert immediately. */
-    IwlDisableInterrupts(Adapter);
+    /* Before ownership only CSR_INT_MASK is safe to touch.  In particular,
+     * acknowledging FH_INT_STATUS while an AX211 is still in D0U can wedge
+     * its MMIO path.  This matches iwl_trans_pcie_start_fw(): prepare the
+     * card first, then clear latched interrupt state. */
+    DPRINT1("iwlwifi: masking interrupts before ownership\n");
+    IwlWrite32(Adapter, CSR_INT_MASK, 0);
+    DPRINT1("iwlwifi: interrupt mask written, preparing hardware\n");
 
     Status = IwlPrepareCardHw(Adapter);
     if (Status != NDIS_STATUS_SUCCESS)
         goto Fail;
+
+    IwlDisableInterrupts(Adapter);
 
     /* A software reset from a known-owned state, then power up. */
     IwlSwReset(Adapter);
@@ -148,6 +178,41 @@ IwlMiniportInitializeEx(
         if (Status != NDIS_STATUS_SUCCESS)
             goto Fail;
     }
+
+    Status = IwlGen3AllocateFirmwareDma(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+        goto Fail;
+
+    Status = IwlRegisterInterrupt(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("iwlwifi: interrupt registration failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    Status = IwlGen3StartFirmware(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+        goto Fail;
+
+    if (!Adapter->MacAddressValid)
+    {
+        DPRINT1("iwlwifi: firmware started without a valid permanent MAC\n");
+        Status = NDIS_STATUS_INVALID_DATA;
+        goto Fail;
+    }
+
+    Adapter->CurrentOperationMode =
+        DOT11_OPERATION_MODE_EXTENSIBLE_STATION;
+    Adapter->DesiredBssType = dot11_BSS_type_infrastructure;
+    Adapter->AuthenticationAlgorithm = DOT11_AUTH_ALGO_80211_OPEN;
+    Adapter->UnicastCipher = DOT11_CIPHER_ALGO_NONE;
+    Adapter->MulticastCipher = DOT11_CIPHER_ALGO_NONE;
+    Status = IwlInitializeScan(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+        goto Fail;
+    Status = IwlSetGeneralAttributes(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+        goto Fail;
 
     DPRINT1("iwlwifi: ================ identification complete ============\n");
     DPRINT1("iwlwifi:   part      : %s (8086:%04x subsys %04x rev %02x)\n",
@@ -176,18 +241,17 @@ IwlMiniportInitializeEx(
     }
     DPRINT1("iwlwifi: =====================================================\n");
 
-    /*
-     * Everything Phase 1a set out to prove is proven.  Refuse to expose an
-     * adapter we cannot give a permanent address or a data path - see the
-     * file header.  This is not an error path; it is the end of the phase.
-     */
-    DPRINT1("iwlwifi: Phase 1a stops here: no NVM address and no data path "
-            "yet, so this part is NOT presented to NDIS as a usable "
-            "adapter.  The identification above is the deliverable.\n");
-    Status = NDIS_STATUS_NOT_SUPPORTED;
+    DPRINT1("iwlwifi: Native Wi-Fi miniport ready, initial scan has %lu BSSes\n",
+            Adapter->BssCount);
+    return NDIS_STATUS_SUCCESS;
 
 Fail:
     IwlCleanupAdapter(Adapter);
+    if (Adapter->RxPollTimer != NULL)
+        NdisFreeTimerObject(Adapter->RxPollTimer);
+    if (Adapter->RxNblPool != NULL)
+        NdisFreeNetBufferListPool(Adapter->RxNblPool);
+    NdisFreeSpinLock(&Adapter->TxLock);
     NdisFreeMemory(Adapter, sizeof(*Adapter), 0);
     return Status;
 }
@@ -208,6 +272,11 @@ IwlMiniportHaltEx(
     InterlockedOr(&Adapter->Flags, IWL_FLAG_HALTING);
 
     IwlCleanupAdapter(Adapter);
+    if (Adapter->RxPollTimer != NULL)
+        NdisFreeTimerObject(Adapter->RxPollTimer);
+    if (Adapter->RxNblPool != NULL)
+        NdisFreeNetBufferListPool(Adapter->RxNblPool);
+    NdisFreeSpinLock(&Adapter->TxLock);
     NdisFreeMemory(Adapter, sizeof(*Adapter), 0);
 }
 
@@ -220,10 +289,18 @@ IwlMiniportHaltEx(
 static VOID
 IwlCleanupAdapter(_In_ PIWL_ADAPTER Adapter)
 {
+    if (Adapter->RxPollTimer != NULL)
+    {
+        InterlockedExchange(&Adapter->DataPathReady, 0);
+        NdisCancelTimerObject(Adapter->RxPollTimer);
+    }
+    IwlShutdownScan(Adapter);
+
     if (Adapter->InterruptHandle != NULL)
         IwlUnregisterInterrupt(Adapter);
 
     IwlFreePnvm(Adapter);
+    IwlGen3FreeFirmwareDma(Adapter);
     IwlFreeFirmware(Adapter);
 
     if (Adapter->IoBase != NULL)
@@ -240,6 +317,52 @@ IwlCleanupAdapter(_In_ PIWL_ADAPTER Adapter)
             Adapter->BusInterface.InterfaceDereference(Adapter->BusInterface.Context);
         Adapter->BusInterfaceValid = FALSE;
     }
+}
+
+static NDIS_STATUS
+IwlSetGeneralAttributes(_In_ PIWL_ADAPTER Adapter)
+{
+    NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES Attributes;
+    NdisZeroMemory(&Attributes, sizeof(Attributes));
+    Attributes.Header.Type =
+        NDIS_OBJECT_TYPE_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES;
+    Attributes.Header.Revision =
+        NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES_REVISION_2;
+    Attributes.Header.Size = sizeof(Attributes);
+    Attributes.MediaType = NdisMediumNative802_11;
+    Attributes.PhysicalMediumType = NdisPhysicalMediumNative802_11;
+    Attributes.MtuSize = 1500;
+    Attributes.MaxXmitLinkSpeed = 2400000000ULL;
+    Attributes.MaxRcvLinkSpeed = 2400000000ULL;
+    Attributes.XmitLinkSpeed = NDIS_LINK_SPEED_UNKNOWN;
+    Attributes.RcvLinkSpeed = NDIS_LINK_SPEED_UNKNOWN;
+    Attributes.MediaConnectState = MediaConnectStateDisconnected;
+    Attributes.MediaDuplexState = MediaDuplexStateUnknown;
+    Attributes.LookaheadSize = 2304;
+    Attributes.MacOptions = NDIS_MAC_OPTION_NO_LOOPBACK |
+                            NDIS_MAC_OPTION_TRANSFERS_NOT_PEND |
+                            NDIS_MAC_OPTION_RECEIVE_SERIALIZED;
+    Attributes.SupportedPacketFilters = NDIS_PACKET_TYPE_DIRECTED |
+                                        NDIS_PACKET_TYPE_BROADCAST |
+                                        NDIS_PACKET_TYPE_MULTICAST;
+    Attributes.MaxMulticastListSize = 32;
+    Attributes.MacAddressLength = IWL_MAC_ADDRESS_LENGTH;
+    NdisMoveMemory(Attributes.PermanentMacAddress,
+                   Adapter->PermanentMacAddress, IWL_MAC_ADDRESS_LENGTH);
+    NdisMoveMemory(Attributes.CurrentMacAddress,
+                   Adapter->CurrentMacAddress, IWL_MAC_ADDRESS_LENGTH);
+    Attributes.AccessType = NET_IF_ACCESS_BROADCAST;
+    Attributes.DirectionType = NET_IF_DIRECTION_SENDRECEIVE;
+    Attributes.ConnectionType = NET_IF_CONNECTION_DEDICATED;
+    Attributes.IfType = IF_TYPE_IEEE80211;
+    Attributes.IfConnectorPresent = TRUE;
+    Attributes.SupportedPauseFunctions = NdisPauseFunctionsUnsupported;
+    Attributes.SupportedOidList = (PNDIS_OID)IwlSupportedOids;
+    Attributes.SupportedOidListLength =
+        IwlSupportedOidCount * sizeof(NDIS_OID);
+
+    return NdisMSetMiniportAttributes(Adapter->MiniportAdapterHandle,
+        (PNDIS_MINIPORT_ADAPTER_ATTRIBUTES)&Attributes);
 }
 
 NDIS_STATUS NTAPI
