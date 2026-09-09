@@ -415,12 +415,56 @@ GetTokenInformation(HANDLE TokenHandle,
                     PDWORD ReturnLength)
 {
     NTSTATUS Status;
+    HANDLE OpenedToken = NULL;
+
+    /* Windows 8 introduced pseudo token handles alongside the process and
+     * thread pseudo handles.  The NT token syscalls do not interpret these;
+     * expand them in the Win32 wrapper before querying the token. */
+    if (TokenHandle == (HANDLE)(LONG_PTR)-4)
+    {
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &OpenedToken))
+            return FALSE;
+        TokenHandle = OpenedToken;
+    }
+    else if (TokenHandle == (HANDLE)(LONG_PTR)-5)
+    {
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &OpenedToken))
+            return FALSE;
+        TokenHandle = OpenedToken;
+    }
+    else if (TokenHandle == (HANDLE)(LONG_PTR)-6)
+    {
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &OpenedToken))
+        {
+            if (GetLastError() != ERROR_NO_TOKEN ||
+                !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &OpenedToken))
+                return FALSE;
+        }
+        TokenHandle = OpenedToken;
+    }
 
     Status = NtQueryInformationToken(TokenHandle,
                                      TokenInformationClass,
                                      TokenInformation,
                                      TokenInformationLength,
                                      (PULONG)ReturnLength);
+    if (OpenedToken) CloseHandle(OpenedToken);
+    if ((Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_INVALID_PARAMETER) &&
+        TokenInformationClass == TokenElevationType &&
+        TokenInformationLength >= sizeof(TOKEN_ELEVATION_TYPE))
+    {
+        *(PTOKEN_ELEVATION_TYPE)TokenInformation = TokenElevationTypeDefault;
+        *ReturnLength = sizeof(TOKEN_ELEVATION_TYPE);
+        return TRUE;
+    }
+    if ((Status == STATUS_INVALID_INFO_CLASS || Status == STATUS_INVALID_PARAMETER) &&
+        TokenInformationClass == TokenElevation &&
+        TokenInformationLength >= sizeof(TOKEN_ELEVATION))
+    {
+        ((PTOKEN_ELEVATION)TokenInformation)->TokenIsElevated = FALSE;
+        *ReturnLength = sizeof(TOKEN_ELEVATION);
+        return TRUE;
+    }
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));

@@ -1451,13 +1451,16 @@ INT WINAPI GetNumberFormatW(LCID lcid, DWORD dwFlags,
     LPCWSTR int_start = (dwState & NF_ISNEGATIVE) ? lpszValue + 1 : lpszValue;
     DWORD int_len = (szSrc >= int_start) ? szSrc - int_start + 1 : 0;
 
+    /* When no decimals are printed at all, a zero integer part must still
+       come out as "0" - LeadingZero only controls the zero in front of a
+       decimal separator. */
     szOut = NLS_WriteGroupedInteger(szOut + 1,
                                     int_start,
                                     int_len,
                                     lpFormat->lpThousandSep,
                                     lpszGrouping,
                                     &dwState,
-                                    lpFormat->LeadingZero) - 1;
+                                    lpFormat->LeadingZero || !lpFormat->NumDigits) - 1;
   }
 
   /* Add any leading negative sign */
