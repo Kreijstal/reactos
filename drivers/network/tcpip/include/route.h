@@ -15,5 +15,7 @@
 #include <arp.h>
 
 PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination);
+PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestinationOnInterface(PIP_ADDRESS Destination,
+                                                            PIP_INTERFACE Interface);
 
 /* EOF */
