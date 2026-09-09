@@ -52,6 +52,8 @@
 #define KEYINFO_VER_AES_CMAC_AES    3
 
 #define KEYINFO_KEY_TYPE        0x0008  /* 1 = Pairwise, 0 = Group           */
+#define KEYINFO_KEY_INDEX_MASK  0x0030  /* WPA (desc 254) group key index    */
+#define KEYINFO_KEY_INDEX_S     4
 #define KEYINFO_INSTALL         0x0040  /* Install                            */
 #define KEYINFO_KEY_ACK         0x0080  /* Key Ack (AP -> STA expects reply)  */
 #define KEYINFO_KEY_MIC         0x0100  /* Key MIC present                    */
