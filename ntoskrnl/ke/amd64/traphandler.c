@@ -147,6 +147,46 @@ NtSyscallFailure(void)
     return (NTSTATUS)KeGetCurrentThread()->TrapFrame->Rax;
 }
 
+
+#if DBG
+/* Called from KiSystemServiceExit when a system call is about to return to
+   user mode with CombinedApcDisable != 0 or ApcStateIndex != 0. Windows
+   bugchecks APC_INDEX_MISMATCH for this; we report the offender instead so
+   the unbalanced KeEnterCriticalRegion/KeStackAttachProcess path can be
+   identified. */
+VOID
+NTAPI
+KiReportApcStateLeak(
+    _In_ PKTRAP_FRAME TrapFrame)
+{
+    static LONG ReportCount = 0;
+    PKTHREAD Thread = KeGetCurrentThread();
+    ULONG64 UserReturn = 0;
+
+    if (InterlockedIncrement(&ReportCount) > 16) return;
+
+    _SEH2_TRY
+    {
+        ProbeForRead((PVOID)TrapFrame->Rsp, sizeof(ULONG64), sizeof(ULONG64));
+        UserReturn = *(PULONG64)TrapFrame->Rsp;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        UserReturn = 0;
+    }
+    _SEH2_END;
+
+    DbgPrint("KiSystemServiceExit: APC state leak! CombinedApcDisable=0x%x "
+             "ApcStateIndex=%u Thread=%p Process=%s UserRip=%p UserRet=%p\n",
+             Thread->CombinedApcDisable,
+             Thread->ApcStateIndex,
+             Thread,
+             PsGetCurrentProcess()->ImageFileName,
+             (PVOID)TrapFrame->Rip,
+             (PVOID)UserReturn);
+}
+#endif
+
 PVOID
 KiSystemCallHandler(
     VOID)
