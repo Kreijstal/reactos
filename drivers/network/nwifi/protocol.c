@@ -323,6 +323,33 @@ NwifiBindAdapterEx(
         RtlCopyMemory(Adapter->MacAddress, QueriedMac, IEEE80211_ADDR_LEN);
     }
 
+    /* Preserve the physical miniport identity for WLAN clients.  The upper
+     * intermediate miniport is an implementation detail, not the adapter name
+     * users should see.  OID_GEN_VENDOR_DESCRIPTION is an ANSI byte string. */
+    {
+        CHAR LowerDescription[128];
+        ULONG Got = 0, i;
+
+        RtlZeroMemory(LowerDescription, sizeof(LowerDescription));
+        Status = NwifiProtocolDoRequest(Adapter, NdisRequestQueryInformation,
+                                        OID_GEN_VENDOR_DESCRIPTION,
+                                        LowerDescription,
+                                        sizeof(LowerDescription) - 1,
+                                        &Got);
+        if (Status == NDIS_STATUS_SUCCESS && Got != 0)
+        {
+            for (i = 0; i < min(Got, (ULONG)RTL_NUMBER_OF(Adapter->Description) - 1) &&
+                        LowerDescription[i] != '\0'; ++i)
+                Adapter->Description[i] = (UCHAR)LowerDescription[i];
+            Adapter->Description[i] = UNICODE_NULL;
+        }
+        else
+        {
+            static const WCHAR Fallback[] = L"Native Wi-Fi Adapter";
+            RtlCopyMemory(Adapter->Description, Fallback, sizeof(Fallback));
+        }
+    }
+
     /* A MAC address can be synthesized by an NDIS wrapper. Require the
      * Native Wi-Fi operation-mode capability block and ExtSTA support. */
     {

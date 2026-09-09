@@ -207,6 +207,12 @@ VOID NwifiSupplicantSetApAddr(
     _In_ PNWIFI_MSM Msm,
     _In_reads_bytes_(6) PUCHAR ApMac);
 
+VOID NwifiSupplicantSelectRsnIe(
+    _In_ PNWIFI_MSM Msm,
+    _In_reads_bytes_(6) PUCHAR Bssid,
+    _In_reads_bytes_opt_(IeLength) PUCHAR SelectedIes,
+    _In_ ULONG IeLength);
+
 /* Feed an EAPOL-Key frame to the supplicant; transmits any reply and, on
  * COMPLETED, installs the derived PTK/GTK.  Returns TRUE if consumed. */
 BOOLEAN NwifiSupplicantRxEapol(
