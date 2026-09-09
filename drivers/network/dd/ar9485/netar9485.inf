@@ -36,7 +36,10 @@ ar9485.sys
 
 [AR9485_AddReg.NT]
 HKR, Ndi,            Service,    0, "ar9485"
-HKR, Ndi\Interfaces, UpperRange, 0, "ndis5"
+; Expose a Native Wi-Fi lower adapter to nwifi.  Advertising ndis5 here
+; makes the device look like an Ethernet miniport and prevents the nwifi
+; intermediate driver from binding to it.
+HKR, Ndi\Interfaces, UpperRange, 0, "nativewifi"
 HKR, Ndi\Interfaces, LowerRange, 0, "wlan"
 
 [AR9485_HwAddReg.NT]

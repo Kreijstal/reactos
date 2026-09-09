@@ -250,33 +250,41 @@ static bool ar9300_uncompress_block(struct ath_hw *ah,
 }
 
 /*
- * ADAPTED from ar9003_eeprom.c:3180, ar9300_compress_decision().
+ * VERBATIM from ar9003_eeprom.c:3180, ar9300_compress_decision().
  *
- * The one upstream behaviour dropped here is the reference-template
- * restore.  Upstream seeds mptr with ar9300_default and, for a
- * _CompressBlock with a non-zero reference, re-seeds it from one of five
- * ~1100-line const templates (ar9300_default / _x112 / _h116 / _h112 /
- * _x113) before applying the diff.  Those templates exist to supply
- * calibration and target-power tables that no phase before the PHY
- * bring-up consumes, and importing them here would be actively dangerous
- * for this phase's one output: ar9300_default.macAddr is the placeholder
- * {0, 2, 3, 4, 5, 6} (ar9003_eeprom.c:49), i.e. exactly the kind of
+ * HISTORY, because the reasoning that used to live here was sound and is
+ * now wrong.  Phase 2a dropped the reference-template restore: upstream
+ * seeds mptr with ar9300_default and, for a _CompressBlock with a
+ * non-zero reference, re-seeds from one of five templates before applying
+ * the diff.  The argument for dropping it was that the templates supply
+ * "calibration and target-power tables that no phase before the PHY
+ * bring-up consumes", against a real hazard -- ar9300_default.macAddr is
+ * the placeholder {0, 2, 3, 4, 5, 6} (ar9003_eeprom.c:49), a
  * plausible-looking wrong MAC that must never reach NDIS.
  *
- * Leaving the base image zeroed is safe for MAC recovery because the
- * compressed diff addresses its targets by a running offset, never by
- * content: ar9300_uncompress_block() walks (offset, length, bytes)
- * triples and accumulates `spot', so the bytes it writes and where it
- * writes them do not depend on what was underneath.  A per-card MAC
- * cannot equal the template placeholder, so it is always carried by the
- * diff.  If some card ever does not carry it, the MAC reads back as all
- * zeroes and ar9485_hw_eeprom_get_macaddr() fails loudly - which is the
- * intended outcome.
+ * Both halves have since changed.  hw_board.c IS a consumer: it reads
+ * antCtrlCommon, antCtrlCommon2, antCtrlChain[] and xpaBiasLvl, none of
+ * which this card's diff carries, so over a zeroed base all four came
+ * back 0 and were written to the PHY -- AR_PHY_SWITCH_CHAIN_0 measured
+ * 0x000002a0 -> 0x00000000 on the metal on 2026-08-26.  And the MAC
+ * hazard is now covered: ar9485_is_valid_mac() rejects that exact
+ * placeholder, and its comment says it was written for this moment.
  *
- * Phase 2b, which needs the calibration tables, is where the templates
- * have to be imported; the reference id is logged here so that phase
- * knows which one this card wants.
+ * The uncompress reasoning still holds and is worth keeping: the diff
+ * addresses targets by a running offset, never by content, so a per-card
+ * MAC is always carried by the diff and a template underneath cannot
+ * corrupt it.
+ *
+ * Phase 2b has since landed (hw_txpower.c) and it is the consumer that
+ * needed the calibration tables: calFreqPier2G / calPierData2G and the
+ * calTargetPower* / calTarget_freqbin_* target-power piers all come
+ * from the template underneath the diff.  The templates are imported --
+ * the include below -- and ar9003_eeprom_struct_find_by_id() is wired,
+ * so nothing here is outstanding.  The reference id is still logged
+ * because it names which template a given card's diff was cut against.
  */
+#include "ar9003_eeprom_templates.h"
+
 static int ar9300_compress_decision(struct ath_hw *ah,
                                     int it,
                                     int code,
@@ -296,8 +304,18 @@ static int ar9300_compress_decision(struct ath_hw *ah,
                 it, length);
         break;
     case _CompressBlock:
-        DPRINT1("AR9485: restore eeprom %d: block, reference %d, length %d "
-                "(reference template not applied - Phase 2a reads the MAC only)\n",
+        if (reference != 0) {
+            const struct ar9300_eeprom *eep =
+                ar9003_eeprom_struct_find_by_id(reference);
+
+            if (eep == NULL) {
+                DPRINT1("AR9485: can't find reference eeprom struct %d\n",
+                        reference);
+                return -1;
+            }
+            RtlCopyMemory(mptr, eep, mdata_size);
+        }
+        DPRINT1("AR9485: restore eeprom %d: block, reference %d, length %d\n",
                 it, reference, length);
         ar9300_uncompress_block(ah, mptr, mdata_size,
                                 (word + COMP_HDR_LEN), length);
@@ -331,9 +349,9 @@ static bool ar9300_check_eeprom_header(struct ath_hw *ah, eeprom_read_op read,
 
 /*
  * VERBATIM from ar9003_eeprom.c:3266, ar9300_eeprom_restore_internal(),
- * minus the ath9k_hw_use_flash() arm (AHB parts only) and minus the
- * `memcpy(mptr, &ar9300_default, mdata_size)' seed - see
- * ar9300_compress_decision() above for why the templates stay out.
+ * minus the ath9k_hw_use_flash() arm (AHB parts only).  The
+ * `memcpy(mptr, &ar9300_default, mdata_size)' seed is back - see
+ * ar9300_compress_decision() above for why it had to be.
  *
  * Read the configuration data from the eeprom.
  * The data can be put in any specified memory buffer.
@@ -358,7 +376,17 @@ static int ar9300_eeprom_restore_internal(struct ath_hw *ah,
     if (!word)
         return -ENOMEM;
 
-    RtlZeroMemory(mptr, mdata_size);
+    /* VERBATIM from ar9003_eeprom.c:3299.  This was RtlZeroMemory() through
+     * Phase 2a, on the reasoning that the compressed diff addresses its
+     * targets by running offset rather than by content, so a per-card MAC is
+     * always carried by the diff and never inherited.  That is true, and it is
+     * only about the MAC.  Every field the card's diff does NOT carry is
+     * inherited -- and hw_board.c reads four of them.  Zeroing here is what
+     * made ar9003_hw_ant_ctrl_apply() write 0 over AR_PHY_SWITCH_CHAIN_0's
+     * working initval default (0x2a0 -> 0, observed 2026-08-26).
+     * ar9485_is_valid_mac() rejects ar9300_default's {0,2,3,4,5,6} placeholder,
+     * which is what makes seeding safe for the MAC path. */
+    RtlCopyMemory(mptr, &ar9300_default, mdata_size);
 
     read = ar9300_read_eeprom;
     if (AR_SREV_9485(ah))
@@ -477,6 +505,51 @@ ar9485_is_valid_mac(const u8 *addr)
 }
 
 /* --------------------------------------------------------------------
+ *  Restore the EEPROM image into an already-attached ath_hw.
+ *
+ *  Split out of the MAC-address wrapper below once the board-value and
+ *  transmit-calibration ports (hw_board.c, hw_calib_tx.c) needed the
+ *  calibration data at reset time and not just the six bytes of MAC.
+ *  Before that split the whole image was restored into a scratch ath_hw
+ *  that was freed on the way out, so every EEPROM field except the MAC
+ *  was read off the card and then thrown away.
+ * -------------------------------------------------------------------- */
+bool
+ar9485_hw_eeprom_restore(struct ath_hw *ah)
+{
+    struct ar9300_eeprom *eep = &ah->eeprom.ar9300_eep;
+    int cptr;
+
+    /* Upstream ath9k_hw_ar9300_fill_eeprom() (ar9003_eeprom.c:3390) hands
+     * the restore the address of the in-hw EEPROM union and its exact
+     * size; mdata_size is load-bearing for both the _CompressNone length
+     * equality test and the _CompressBlock bounds check. */
+    cptr = ar9300_eeprom_restore_internal(ah, (u8 *)eep, sizeof(*eep));
+    if (cptr < 0)
+    {
+        DPRINT1("AR9485: EEPROM/OTP restore failed - no readable image via "
+                "EEPROM at 0x%04x/0x%04x or OTP at 0x%04x/0x%04x\n",
+                AR9300_BASE_ADDR_4K, AR9300_BASE_ADDR_512,
+                AR9300_BASE_ADDR, AR9300_BASE_ADDR_512);
+        ah->eeprom_valid = false;
+        return false;
+    }
+
+    ah->eeprom_valid = true;
+
+    DPRINT1("AR9485: EEPROM restore finished at 0x%04x: eepromVersion=%u "
+            "templateVersion=%u featureEnable=0x%02x miscConfiguration=0x%02x "
+            "txrxgain=0x%02x xpaBiasLvl=%u\n",
+            cptr, eep->eepromVersion, eep->templateVersion,
+            eep->baseEepHeader.featureEnable,
+            eep->baseEepHeader.miscConfiguration,
+            eep->baseEepHeader.txrxgain,
+            eep->modalHeader2G.xpaBiasLvl);
+
+    return true;
+}
+
+/* --------------------------------------------------------------------
  *  Miniport-side wrapper.  struct ath_hw now embeds the 1088-byte EEPROM
  *  image, so it comes out of the pool rather than off the stack.
  * -------------------------------------------------------------------- */
@@ -493,7 +566,6 @@ ar9485_hw_eeprom_get_macaddr(_In_ void *bar0_base,
 {
     struct ath_hw *ah;
     struct ar9300_eeprom *eep;
-    int cptr;
     bool ok = false;
 
     RtlZeroMemory(out_macaddr, 6);
@@ -511,24 +583,10 @@ ar9485_hw_eeprom_get_macaddr(_In_ void *bar0_base,
 
     ar9485_hw_attach(ah, bar0_base, bar0_len, devid, macVersion, macRev);
 
-    /* Upstream ath9k_hw_ar9300_fill_eeprom() (ar9003_eeprom.c:3390) hands
-     * the restore the address of the in-hw EEPROM union and its exact
-     * size; mdata_size is load-bearing for both the _CompressNone length
-     * equality test and the _CompressBlock bounds check. */
-    eep = &ah->eeprom.ar9300_eep;
-    cptr = ar9300_eeprom_restore_internal(ah, (u8 *)eep, sizeof(*eep));
-    if (cptr < 0)
-    {
-        DPRINT1("AR9485: EEPROM/OTP restore failed - no readable image via "
-                "EEPROM at 0x%04x/0x%04x or OTP at 0x%04x/0x%04x\n",
-                AR9300_BASE_ADDR_4K, AR9300_BASE_ADDR_512,
-                AR9300_BASE_ADDR, AR9300_BASE_ADDR_512);
+    if (!ar9485_hw_eeprom_restore(ah))
         goto Cleanup;
-    }
 
-    DPRINT1("AR9485: EEPROM restore finished at 0x%04x: eepromVersion=%u "
-            "templateVersion=%u\n",
-            cptr, eep->eepromVersion, eep->templateVersion);
+    eep = &ah->eeprom.ar9300_eep;
 
     /* Upstream ath9k_hw_init_macaddr() (hw.c:270) assembles the address
      * from EEP_MAC_LSW/MID/MSW, which ar9003_hw_get_eeprom() answers with
