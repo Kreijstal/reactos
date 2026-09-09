@@ -66,6 +66,21 @@ typedef int     bool;
 
 #define ARRAY_SIZE(a)    (sizeof(a) / sizeof((a)[0]))
 
+/* The AR9300 EEPROM image is little-endian on the wire and __le16/__le32
+ * above are plain integers, so on the little-endian targets this driver
+ * builds for these are the identity.  They exist so the imported ath9k
+ * bodies read exactly as upstream does. */
+#define le16_to_cpu(v)   ((u16)(v))
+#define le32_to_cpu(v)   ((u32)(v))
+#define cpu_to_le16(v)   ((__le16)(v))
+#define cpu_to_le32(v)   ((__le32)(v))
+
+/* Upstream uses the kernel's abs().  ROS' ntddk.h has no such macro and
+ * <stdlib.h> is not available to a driver, so the ath9k bodies that need
+ * it use this instead; the name is deliberately not `abs' so it cannot
+ * collide with a future CRT declaration. */
+#define ATH_ABS(x)       ((x) < 0 ? -(x) : (x))
+
 #ifndef min
 #define min(a, b)        ((a) < (b) ? (a) : (b))
 #endif
