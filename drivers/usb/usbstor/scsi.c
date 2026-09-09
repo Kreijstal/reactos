@@ -320,11 +320,14 @@ ResetRecovery:
 
     Context->Srb = Request;
     Irp->IoStatus.Information = 0;
-    Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
-    Request->SrbStatus = SRB_STATUS_BUS_RESET;
+    Irp->IoStatus.Status = Context->WatchdogTimedOut ?
+                           STATUS_IO_TIMEOUT : STATUS_IO_DEVICE_ERROR;
+    Request->SrbStatus = Context->WatchdogTimedOut ?
+                         SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
 
     USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
-    USBSTOR_QueueResetDevice(FDODeviceExtension);
+    if (!Context->WatchdogTimedOut)
+        USBSTOR_QueueResetDevice(FDODeviceExtension);
 
     /*
      * Release the started packet before the IRP is completed up the stack.
@@ -418,11 +421,14 @@ USBSTOR_DataCompletionRoutine(
     else
     {
         Irp->IoStatus.Information = 0;
-        Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
-        Request->SrbStatus = SRB_STATUS_BUS_RESET;
+        Irp->IoStatus.Status = Context->WatchdogTimedOut ?
+                               STATUS_IO_TIMEOUT : STATUS_IO_DEVICE_ERROR;
+        Request->SrbStatus = Context->WatchdogTimedOut ?
+                             SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
 
         USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
-        USBSTOR_QueueResetDevice(FDODeviceExtension);
+        if (!Context->WatchdogTimedOut)
+            USBSTOR_QueueResetDevice(FDODeviceExtension);
 
         /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
         USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
@@ -554,11 +560,14 @@ ResetRecovery:
 
     Context->Srb = Request;
     Irp->IoStatus.Information = 0;
-    Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
-    Request->SrbStatus = SRB_STATUS_BUS_RESET;
+    Irp->IoStatus.Status = Context->WatchdogTimedOut ?
+                           STATUS_IO_TIMEOUT : STATUS_IO_DEVICE_ERROR;
+    Request->SrbStatus = Context->WatchdogTimedOut ?
+                         SRB_STATUS_TIMEOUT : SRB_STATUS_BUS_RESET;
 
     USBSTOR_QueueTerminateRequest(PDODeviceExtension->LowerDeviceObject, Irp);
-    USBSTOR_QueueResetDevice(FDODeviceExtension);
+    if (!Context->WatchdogTimedOut)
+        USBSTOR_QueueResetDevice(FDODeviceExtension);
 
     /* Release the started packet, as in USBSTOR_CSWCompletionRoutine. */
     USBSTOR_QueueNextRequest(PDODeviceExtension->LowerDeviceObject);
@@ -615,6 +624,7 @@ USBSTOR_SendCBWRequest(
     Context->PDODeviceObject = IoStack->DeviceObject;
     Context->Srb = Request;
     Context->StallRetryCount = 0;
+    Context->WatchdogTimedOut = FALSE;
 
     USBSTOR_Trace(UsbStorTraceCbwSend,
                   (ULONG_PTR)Irp,

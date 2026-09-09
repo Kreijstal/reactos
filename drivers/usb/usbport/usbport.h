@@ -675,6 +675,39 @@ USBPORT_CompleteTransfer(
   IN PURB Urb,
   IN USBD_STATUS TransferStatus);
 
+/* --- reboot-flush claim-window instrumentation (temporary; read at a KD break) ---
+ * A shutdown dirty-page flush to the boot USB stick can wedge when an active
+ * transfer's IRP is inserted into the ActiveIrpTable and then never completed
+ * up to usbstor.  The two removers/completers (USBPORT_DoneTransfer and
+ * USBPORT_FlushCancelList) each defer to the other on a NULL remove; if both
+ * defer, nobody completes the IRP and usbstor's ActiveSrb is orphaned.
+ * These records let us reconstruct, per IRP, the exact claim sequence at the
+ * wedge without live DPRINT (which the ASUS rig cannot capture at runtime). */
+#define USBPORT_CLAIM_SITE_INSERT       1  /* IRP put into ActiveIrpTable (FlushPendingTransfers) */
+#define USBPORT_CLAIM_SITE_DONE         2  /* DoneTransfer claim;      Aux: 1=won->completes, 0=deferred(NULL) */
+#define USBPORT_CLAIM_SITE_FLUSHCANCEL  3  /* FlushCancelList claim;   Aux: 1=won->detached, 0=deferred(NULL) */
+#define USBPORT_CLAIM_SITE_CANCELREQ    4  /* CancelActiveTransferIrp flagged the transfer (no complete here) */
+#define USBPORT_CLAIM_SITE_IOCOMPLETE   5  /* CompleteTransfer -> IoCompleteRequest; Aux: NTSTATUS */
+
+#define USBPORT_CLAIM_TRACE_COUNT 128
+
+typedef struct _USBPORT_CLAIM_TRACE_ENTRY
+{
+    LONG  Seq;        /* absolute monotonic order (from UsbPortClaimTraceSeq) */
+    ULONG Site;       /* one of USBPORT_CLAIM_SITE_* */
+    ULONG Aux;        /* per-site payload (see above) */
+    PVOID Transfer;   /* transfer pointer (identity only; may be freed) */
+    PVOID Irp;        /* IRP pointer (identity; correlate with usbstor ActiveSrb->Irp) */
+} USBPORT_CLAIM_TRACE_ENTRY, *PUSBPORT_CLAIM_TRACE_ENTRY;
+
+VOID
+NTAPI
+USBPORT_ClaimTrace(
+  IN ULONG Site,
+  IN ULONG Aux,
+  IN PVOID Transfer,
+  IN PVOID Irp);
+
 VOID
 NTAPI
 USBPORT_DpcHandler(

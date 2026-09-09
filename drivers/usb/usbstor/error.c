@@ -132,7 +132,7 @@ USBSTOR_DumpTrace(
     KeQuerySystemTime(&Now);
 
     DPRINT1("[USBSTOR-TRACE] %s: fdo %p active %p ctxsrb %p irp %p flags %lx "
-            "pending %lu stallretry %lu errhandling %lu ticks %lu\n",
+            "pending %lu stallretry %lu errhandling %lu ticks %lu done %lu\n",
             Reason,
             FDODeviceExtension,
             FDODeviceExtension->ActiveSrb,
@@ -142,7 +142,8 @@ USBSTOR_DumpTrace(
             FDODeviceExtension->IrpPendingCount,
             Context->StallRetryCount,
             FDODeviceExtension->SrbErrorHandlingActive,
-            FDODeviceExtension->TimerTicksOnActiveSrb);
+            FDODeviceExtension->TimerTicksOnActiveSrb,
+            FDODeviceExtension->SrbCompletionCount);
 
     DPRINT1("[USBSTOR-TRACE] recovery: rstpipe q=%ld r=%ld | rstdev q=%ld r=%ld | "
             "abort q=%ld r=%ld | urb.func %x urb.status %x urb.len %lx\n",
@@ -334,7 +335,12 @@ USBSTOR_ResetDeviceWorkItemRoutine(
                   (ULONG_PTR)Status,
                   (ULONG_PTR)FDODeviceExtension->ActiveSrb);
 
-    USBSTOR_QueueNextRequest(FdoDevice);
+    /* The failing transfer's completion path already terminated the SRB and
+     * released the started packet before queuing this asynchronous reset.
+     * Advancing again here races shutdown/removal and calls
+     * IoStartNextPacket on an idle KDEVICE_QUEUE (DeviceQueue->Busy == FALSE),
+     * which asserts in KeRemoveDeviceQueue.  Reset completion only clears the
+     * reset flag; it does not own a packet-queue advancement. */
 }
 
 VOID
@@ -391,10 +397,27 @@ USBSTOR_TimerWorkerRoutine(
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)WorkItemData->DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
 
+    /* The work item is asynchronous.  If the timed-out transaction completed
+     * before this worker ran, do not mark or abort whichever SRB followed it. */
+    if (WorkItemData->Context != &FDODeviceExtension->CurrentIrpContext ||
+        WorkItemData->Irp != FDODeviceExtension->CurrentIrpContext.Irp ||
+        WorkItemData->Srb != FDODeviceExtension->ActiveSrb)
+    {
+        InterlockedExchange(&FDODeviceExtension->SrbErrorHandlingActive, FALSE);
+        ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
+        return;
+    }
+
     InterlockedIncrement(&UsbStorAbortRan);
     USBSTOR_Trace(UsbStorTraceTimerAbortRun,
                   (ULONG_PTR)FDODeviceExtension->ActiveSrb,
                   (ULONG_PTR)FDODeviceExtension->Flags);
+
+    /* Mark the transaction before aborting its pipes.  The resulting
+     * completion must report a timeout, not SRB_STATUS_BUS_RESET: classpnp
+     * retries a bus reset and can otherwise submit the same dead request
+     * forever, starving unrelated LiveCD PnP installs (including Wi-Fi). */
+    FDODeviceExtension->CurrentIrpContext.WatchdogTimedOut = TRUE;
 
     /*
      * Abort the bulk pipes and stop there.
@@ -424,8 +447,15 @@ USBSTOR_TimerWorkerRoutine(
                   (ULONG_PTR)Status,
                   (ULONG_PTR)FDODeviceExtension->ActiveSrb);
 
+    /* A successful abort completes the transfer and QueueTerminateRequest
+     * releases ownership.  If the abort itself failed, permit the watchdog to
+     * make one later recovery attempt instead of wedging the gate forever. */
+    if (!NT_SUCCESS(Status))
+        InterlockedExchange(&FDODeviceExtension->SrbErrorHandlingActive, FALSE);
+
     // clear timer srb
     FDODeviceExtension->LastTimerActiveSrb = NULL;
+    FDODeviceExtension->LastTimerCompletionCount = FDODeviceExtension->SrbCompletionCount;
     FDODeviceExtension->TimerTicksOnActiveSrb = 0;
 
     ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
@@ -439,7 +469,6 @@ USBSTOR_TimerRoutine(
 {
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     BOOLEAN ResetDevice = FALSE;
-    BOOLEAN DumpTrace = FALSE;
     PERRORHANDLER_WORKITEM_DATA WorkItemData;
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Context;
@@ -480,7 +509,22 @@ USBSTOR_TimerRoutine(
     // is there an active srb and no global reset is in progress
     if (FDODeviceExtension->ActiveSrb && /* FDODeviceExtension->ResetInProgress == FALSE && */ FDODeviceExtension->TimerWorkQueueEnabled)
     {
-        if (FDODeviceExtension->LastTimerActiveSrb != NULL && FDODeviceExtension->LastTimerActiveSrb == FDODeviceExtension->ActiveSrb)
+        /*
+         * "Same SRB pointer as last tick" is NOT evidence of a hang.  classpnp
+         * recycles its transfer packets, so consecutive, unrelated requests
+         * routinely arrive at the same address; on the ASUS X550DP that made
+         * this watchdog fire after ten ticks while the device was completing a
+         * full CBW/DATA/CSW cycle every few milliseconds with urb.status 0.
+         * Each false timeout reset the pipe, classpnp retried, and the boot
+         * never finished loading the shell.
+         *
+         * Judge progress by a monotonic count of terminated requests instead:
+         * only when nothing at all has completed since the previous tick is the
+         * active SRB genuinely outstanding.
+         */
+        if (FDODeviceExtension->LastTimerActiveSrb != NULL &&
+            FDODeviceExtension->LastTimerActiveSrb == FDODeviceExtension->ActiveSrb &&
+            FDODeviceExtension->LastTimerCompletionCount == FDODeviceExtension->SrbCompletionCount)
         {
             /*
              * Time the request out against the SRB's own TimeOutValue rather
@@ -499,16 +543,14 @@ USBSTOR_TimerRoutine(
 
             if (++FDODeviceExtension->TimerTicksOnActiveSrb >= Timeout)
             {
-                DPRINT1("[USBSTOR] ActiveSrb %p timed out after %lu seconds\n",
-                        FDODeviceExtension->ActiveSrb, Timeout);
                 ResetDevice = TRUE;
-                DumpTrace = TRUE;
             }
         }
         else
         {
-            // update pointer
+            // update pointer and the progress watermark
             FDODeviceExtension->LastTimerActiveSrb = FDODeviceExtension->ActiveSrb;
+            FDODeviceExtension->LastTimerCompletionCount = FDODeviceExtension->SrbCompletionCount;
             FDODeviceExtension->TimerTicksOnActiveSrb = 0;
         }
     }
@@ -516,18 +558,22 @@ USBSTOR_TimerRoutine(
     {
         // reset srb
         FDODeviceExtension->LastTimerActiveSrb = NULL;
+        FDODeviceExtension->LastTimerCompletionCount = FDODeviceExtension->SrbCompletionCount;
         FDODeviceExtension->TimerTicksOnActiveSrb = 0;
     }
 
     KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
 
-    if (DumpTrace)
+    if (ResetDevice && FDODeviceExtension->TimerWorkQueueEnabled &&
+        InterlockedCompareExchange(&FDODeviceExtension->SrbErrorHandlingActive,
+                                   TRUE, FALSE) == FALSE)
     {
+        DPRINT1("[USBSTOR] ActiveSrb %p timed out after %lu seconds\n",
+                FDODeviceExtension->ActiveSrb,
+                FDODeviceExtension->ActiveSrb->TimeOutValue ?
+                    FDODeviceExtension->ActiveSrb->TimeOutValue : 10);
         USBSTOR_DumpTrace(FDODeviceExtension, "ActiveSrb timed out");
-    }
 
-    if (ResetDevice && FDODeviceExtension->TimerWorkQueueEnabled && FDODeviceExtension->SrbErrorHandlingActive == FALSE)
-    {
         WorkItemData = ExAllocatePoolWithTag(NonPagedPool,
                                              sizeof(ERRORHANDLER_WORKITEM_DATA),
                                              USB_STOR_TAG);
@@ -539,6 +585,9 @@ USBSTOR_TimerRoutine(
                                  WorkItemData);
 
            WorkItemData->DeviceObject = FDODeviceExtension->FunctionalDeviceObject;
+           WorkItemData->Context = &FDODeviceExtension->CurrentIrpContext;
+           WorkItemData->Irp = FDODeviceExtension->CurrentIrpContext.Irp;
+           WorkItemData->Srb = FDODeviceExtension->ActiveSrb;
 
            DPRINT1("[USBSTOR] Queing Timer WorkItem\n");
            InterlockedIncrement(&UsbStorAbortQueued);
@@ -546,6 +595,10 @@ USBSTOR_TimerRoutine(
                          (ULONG_PTR)FDODeviceExtension->ActiveSrb,
                          (ULONG_PTR)FDODeviceExtension->Flags);
            ExQueueWorkItem(&WorkItemData->WorkQueueItem, DelayedWorkQueue);
+        }
+        else
+        {
+            InterlockedExchange(&FDODeviceExtension->SrbErrorHandlingActive, FALSE);
         }
      }
 }
