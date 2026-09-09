@@ -1,6 +1,6 @@
 [FREELOADER]
 DefaultOS=ASUS_KDNET
-TimeOut=10
+TimeOut=3
 
 [Display]
 TitleText=ReactOS NT10 AMD64 USB Debug Boot
@@ -15,6 +15,9 @@ ASUS_KDNET_HARVEST="ReactOS NT10 - hardware Ethernet KDNET (verbose harvest)"
 QEMU_KDNET="ReactOS NT10 - QEMU e1000 KDNET"
 NORMAL="ReactOS NT10 - no debugger"
 QEMU_KDNET_SHARE="ReactOS NT10 - QEMU e1000 KDNET + shared NIC"
+SETUP_TXT="ReactOS Setup (Text Mode) - in-place upgrade"
+SETUP_KDNET="ReactOS Setup (Text Mode) - KDNET debug"
+QEMU_LIVE_KDBG_COM1="LOCAL TEST - Live env, KDBG on COM1"
 
 [LOCAL_KDBG]
 BootType=Windows2003
@@ -29,17 +32,17 @@ Options=/KERNEL=ntkrnlk.exe /DEBUG /DEBUGPORT=FILE:\SystemRoot\debug.log /NOGUIB
 [ASUS_KDNET]
 BootType=Windows2003
 SystemPath=\reactos
-Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=@KDNET_BOOT_HOST_IP@ @KDNET_BOOT_HOST_MAC_OPTION@ /TARGETIP=@KDNET_BOOT_TARGET_IP@ /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDBUFFERED /SOS /FASTDETECT /MININT
+Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=@KDNET_BOOT_HOST_IP@ @KDNET_BOOT_HOST_MAC_OPTION@ /TARGETIP=@KDNET_BOOT_TARGET_IP@ /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDNETSHARE /KDNET-HARVEST=COMMANDS,NIC,STATUS /KDBUFFERED /SOS /FASTDETECT /MININT
 
 [ASUS_KDNET_ONECPU]
 BootType=Windows2003
 SystemPath=\reactos
-Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=@KDNET_BOOT_HOST_IP@ @KDNET_BOOT_HOST_MAC_OPTION@ /TARGETIP=@KDNET_BOOT_TARGET_IP@ /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDBUFFERED /SOS /ONECPU /FASTDETECT /MININT
+Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=@KDNET_BOOT_HOST_IP@ @KDNET_BOOT_HOST_MAC_OPTION@ /TARGETIP=@KDNET_BOOT_TARGET_IP@ /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDNETSHARE /KDBUFFERED /SOS /ONECPU /FASTDETECT /MININT
 
 [ASUS_KDNET_HARVEST]
 BootType=Windows2003
 SystemPath=\reactos
-Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=@KDNET_BOOT_HOST_IP@ @KDNET_BOOT_HOST_MAC_OPTION@ /TARGETIP=@KDNET_BOOT_TARGET_IP@ /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDNET-HARVEST=ALL /PNP-HARVEST /SOS /FASTDETECT /MININT
+Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=@KDNET_BOOT_HOST_IP@ @KDNET_BOOT_HOST_MAC_OPTION@ /TARGETIP=@KDNET_BOOT_TARGET_IP@ /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDNETSHARE /KDNET-HARVEST=ALL /PNP-HARVEST /SOS /FASTDETECT /MININT
 
 [QEMU_KDNET]
 BootType=Windows2003
@@ -58,3 +61,32 @@ Options=/KERNEL=ntkrnlk.exe /NODEBUG /FASTDETECT /MININT
 BootType=Windows2003
 SystemPath=\reactos
 Options=/KERNEL=ntkrnlmp.exe /DEBUG /DEBUGPORT=NET /HOSTIP=10.0.2.2 /HOSTMAC=52-55-0A-00-02-02 /TARGETIP=10.0.2.15 /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /KDNETSHARE /SOS /FASTDETECT /MININT
+
+; Text-mode usetup.  Every other entry here is a /MININT live entry, so this
+; media could not run setup at all - which is what an in-place upgrade of an
+; existing installation needs.  No /DEBUG on purpose: the setup kernel is built
+; with WinKD, so /DEBUGPORT=COM1 retransmits every line while no debugger is
+; attached, and /DEBUGPORT=SCREEN paints over usetup's own text UI.  This is a
+; DBG build, where setupldr.c:598 ALWAYS merges SetupDebugOptions from
+; txtsetup.sif and always strips NODEBUG, so the SIF's own "/NODEBUG" is not
+; enough - /SIFOPTIONSOVERRIDE is the only way to keep the debugger off.
+; setupldr.c:691 appends TEXTSETUP itself, so it must not be listed here.
+; Listed last so the position of every existing entry - and DefaultOS - is
+; unchanged.
+[SETUP_TXT]
+BootType=ReactOSSetup
+Options=/FASTDETECT /NOGUIBOOT /NODEBUG /SIFOPTIONSOVERRIDE
+
+; Same as SETUP_TXT but with a real kernel debugger attached over KDNET.
+; Needed because first-stage setup hits an ASSERT: with /NODEBUG that becomes
+; bugcheck 0x1E (STATUS_BREAKPOINT at DebugService+19) with no message, and
+; with /DEBUGPORT=COM1 and nothing listening kddll.c:380 retransmits the
+; exception state-change packet forever (only DbgKdPrintStringApi and
+; DbgKdLoadSymbolsStateChange are allowed to time out), so the target hangs.
+; An attached debugger is the only way to read the assertion text.
+; Drive with: cd scripts && python3 -m roskd.cli --host 10.0.2.2 \
+;   --target 10.0.2.15 --port @KDNET_BOOT_PORT@ --key @KDNET_BOOT_KEY@
+[SETUP_KDNET]
+BootType=ReactOSSetup
+Options=/FASTDETECT /NOGUIBOOT /DEBUG /DEBUGPORT=NET /HOSTIP=10.0.2.2 /HOSTMAC=52-55-0A-00-02-02 /TARGETIP=10.0.2.15 /PORT=@KDNET_BOOT_PORT@ /KEY=@KDNET_BOOT_KEY@ /SIFOPTIONSOVERRIDE
+
