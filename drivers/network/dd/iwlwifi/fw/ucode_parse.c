@@ -307,6 +307,30 @@ IwlParseUcodeFile(
                     return Status;
                 break;
 
+            case IWL_UCODE_TLV_IML:
+                Parsed->ImlData = TlvData;
+                Parsed->ImlLength = TlvLength;
+                break;
+
+            case IWL_UCODE_TLV_CMD_VERSIONS:
+            {
+                iwl_u32 EntryCount = TlvLength / 4;
+                iwl_u32 j;
+                if ((TlvLength & 3) != 0)
+                    return IwlFwParseBadSectionLength;
+                if (EntryCount > IWL_MAX_CMD_VERSIONS)
+                    EntryCount = IWL_MAX_CMD_VERSIONS;
+                for (j = 0; j < EntryCount; j++)
+                {
+                    Parsed->CommandVersion[j].Command = TlvData[j * 4];
+                    Parsed->CommandVersion[j].Group = TlvData[j * 4 + 1];
+                    Parsed->CommandVersion[j].CommandVersion = TlvData[j * 4 + 2];
+                    Parsed->CommandVersion[j].NotificationVersion = TlvData[j * 4 + 3];
+                }
+                Parsed->CommandVersionCount = EntryCount;
+                break;
+            }
+
             case IWL_UCODE_TLV_API_CHANGES_SET:
             {
                 iwl_u32 ApiIndex;
@@ -566,4 +590,42 @@ IwlPnvmSelectBlock(
     }
 
     return 0;
+}
+
+iwl_u8
+IwlFwLookupCommandVersion(
+    const IWL_FW_PARSED *Parsed,
+    iwl_u8 Group,
+    iwl_u8 Command,
+    iwl_u8 Fallback)
+{
+    iwl_u32 i;
+    if (Parsed == NULL)
+        return Fallback;
+    for (i = 0; i < Parsed->CommandVersionCount; i++)
+    {
+        if (Parsed->CommandVersion[i].Group == Group &&
+            Parsed->CommandVersion[i].Command == Command)
+            return Parsed->CommandVersion[i].CommandVersion;
+    }
+    return Fallback;
+}
+
+iwl_u8
+IwlFwLookupNotificationVersion(
+    const IWL_FW_PARSED *Parsed,
+    iwl_u8 Group,
+    iwl_u8 Command,
+    iwl_u8 Fallback)
+{
+    iwl_u32 i;
+    if (Parsed == NULL)
+        return Fallback;
+    for (i = 0; i < Parsed->CommandVersionCount; i++)
+    {
+        if (Parsed->CommandVersion[i].Group == Group &&
+            Parsed->CommandVersion[i].Command == Command)
+            return Parsed->CommandVersion[i].NotificationVersion;
+    }
+    return Fallback;
 }

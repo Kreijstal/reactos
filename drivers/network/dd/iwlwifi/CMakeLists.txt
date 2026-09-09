@@ -1,17 +1,11 @@
 #
 # iwlwifi - Intel Wireless PCIe NDIS 6.20 miniport
 #
-# Phase 1a delivers the identification chain only: bind the PCI IDs in
-# hw/devices.c, map BAR0, run the documented transport power-up, decode
-# CSR_HW_REV / CSR_HW_RF_ID, and locate + parse the matching .ucode
-# container.  MiniportInitializeEx then deliberately fails, because a
-# native-802.11 miniport with no NVM address and no data path is not a
-# network adapter (see the header of init.c).
-#
-# That is why this driver is OFF by default.  Turning it on would make
-# every Intel wireless machine show a device that binds and then fails,
-# in exchange for a diagnostic log.  That trade is right for bring-up
-# work and wrong for a release image, so it is a switch:
+# This remains opt-in while hardware coverage is limited.  The implemented
+# AX211 path loads firmware/PNVM, scans, associates, installs CCMP/TKIP keys,
+# and carries an 802.11 data path through the Native Wi-Fi translation layer.
+# Other PCI IDs in the identification table have not received equivalent
+# hardware validation, so release images should enable it deliberately:
 #
 #   -DENABLE_IWLWIFI=ON              build and package the driver
 #   -DDOWNLOAD_IWLWIFI_UCODE=ON      fetch the pinned firmware blobs
@@ -42,6 +36,7 @@ list(APPEND SOURCE
     hw/trans.c
     fw/ucode_parse.c
     fw/ucode_load.c
+    fw/gen3.c
     iwlwifi.h
     hw/csr.h
     hw/devices.h

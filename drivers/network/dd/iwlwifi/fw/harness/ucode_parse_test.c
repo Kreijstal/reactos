@@ -150,6 +150,7 @@ TestHappyPath(void)
     IWL_FW_PARSE_STATUS s;
     unsigned char sec[4 + 16];
     unsigned char api[8];
+    unsigned char iml[12];
 
     printf("happy path\n");
 
@@ -159,6 +160,9 @@ TestHappyPath(void)
     memset(sec, 0xAB, sizeof(sec));
     sec[0] = 0x00; sec[1] = 0x00; sec[2] = 0x80; sec[3] = 0x00;
     BuilderTlv(&b, IWL_UCODE_TLV_SEC_RT, sec, sizeof(sec));
+
+    memset(iml, 0x5a, sizeof(iml));
+    BuilderTlv(&b, IWL_UCODE_TLV_IML, iml, sizeof(iml));
 
     /* API bitmap word 1. */
     api[0] = 1; api[1] = api[2] = api[3] = 0;
@@ -179,11 +183,13 @@ TestHappyPath(void)
     Check(p.Image[IWL_UCODE_REGULAR].Section[0].Offset == 0x00800000, "section dest offset");
     Check(p.Image[IWL_UCODE_REGULAR].Section[0].Length == 16, "section length excludes offset word");
     Check(p.Image[IWL_UCODE_REGULAR].Section[0].Data[0] == 0xAB, "section data points past offset word");
+    Check(p.ImlLength == sizeof(iml), "IML length");
+    Check(p.ImlData != NULL && p.ImlData[0] == 0x5a, "IML points into container");
     Check(p.ApiFlags[1] == 0x1234, "api bitmap word 1");
     Check(p.NumOfCpus == 2, "num of cpus");
     Check(p.NScanChannels == 40, "n scan channels");
     Check(p.UnknownTlvCount == 1, "unknown TLV counted, not fatal");
-    Check(p.TlvCount == 5, "total TLV count");
+    Check(p.TlvCount == 6, "total TLV count");
 
     BuilderFree(&b);
 }
@@ -661,10 +667,30 @@ DumpRealBlob(const char *Path)
     printf("  scan channels  : %u\n", p.NScanChannels);
     printf("  probe max len  : %u\n", p.ProbeMaxLength);
     printf("  phy calib size : %u\n", p.PhyCalibrationSize);
+    printf("  IML size       : %u\n", p.ImlLength);
     printf("  api flags      : %08x %08x %08x %08x\n",
            p.ApiFlags[0], p.ApiFlags[1], p.ApiFlags[2], p.ApiFlags[3]);
     printf("  capa flags     : %08x %08x %08x %08x\n",
            p.CapaFlags[0], p.CapaFlags[1], p.CapaFlags[2], p.CapaFlags[3]);
+    printf("  command vers   : %u entries; NVM_GET_INFO=%u "
+           "SCAN_CFG=%u SCAN_REQ_UMAC=%u PHY_CONTEXT=%u MAC_CONFIG=%u "
+           "LINK_CONFIG=%u STA_CONFIG=%u SCD_QUEUE_CONFIG=%u "
+           "SEC_KEY=%u TX=%u MCC_UPDATE=%u\n",
+           p.CommandVersionCount,
+           IwlFwLookupCommandVersion(&p, 0x0c, 0x02, 99),
+           IwlFwLookupCommandVersion(&p, 0x01, 0x0c, 99),
+           IwlFwLookupCommandVersion(&p, 0x01, 0x0d, 99),
+           IwlFwLookupCommandVersion(&p, 0x01, 0x08, 99),
+           IwlFwLookupCommandVersion(&p, 0x03, 0x08, 99),
+           IwlFwLookupCommandVersion(&p, 0x03, 0x09, 99),
+           IwlFwLookupCommandVersion(&p, 0x03, 0x0a, 99),
+           IwlFwLookupCommandVersion(&p, 0x05, 0x17, 99),
+           IwlFwLookupCommandVersion(&p, 0x05, 0x18, 99),
+           IwlFwLookupCommandVersion(&p, 0x00, 0x1c, 99),
+           IwlFwLookupCommandVersion(&p, 0x01, 0xc8, 99));
+    printf("  notification  : RX_MPDU=%u SCAN_COMPLETE=%u\n",
+           IwlFwLookupNotificationVersion(&p, 0x00, 0xc1, 99),
+           IwlFwLookupNotificationVersion(&p, 0x01, 0x0f, 99));
 
     for (i = 0; i < IWL_UCODE_TYPE_MAX; i++)
     {
