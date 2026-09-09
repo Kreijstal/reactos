@@ -114,6 +114,24 @@ INT CommandPushd (LPTSTR rest)
         return 0;
     }
 
+    /* Windows' PUSHD parses a forward slash outside quotes as the start of
+       a switch, and no switch is valid here */
+    {
+        BOOL bInQuote = FALSE;
+        LPTSTR p;
+
+        for (p = rest; *p; ++p)
+        {
+            if (*p == _T('"'))
+                bInQuote = !bInQuote;
+            else if (!bInQuote && *p == _T('/'))
+            {
+                error_invalid_switch(_totupper(p[1]));
+                return 1;
+            }
+        }
+    }
+
     GetCurrentDirectory (MAX_PATH, curPath);
 
     if (rest[0] != _T('\0'))
