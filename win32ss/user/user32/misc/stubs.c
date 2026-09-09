@@ -628,6 +628,25 @@ BOOL WINAPI SystemParametersInfoForDpi(UINT uiAction, UINT uiParam, PVOID pvPara
  * detect touch/pen capability; reporting failure makes it fall back to
  * mouse-only input. */
 
+static LONG mouse_in_pointer = -1;
+
+BOOL WINAPI EnableMouseInPointer(BOOL enable)
+{
+    LONG value = !!enable;
+    LONG previous = InterlockedCompareExchange(&mouse_in_pointer, value, -1);
+
+    if (previous == -1 || previous == value)
+        return TRUE;
+
+    SetLastError(ERROR_ACCESS_DENIED);
+    return FALSE;
+}
+
+BOOL WINAPI IsMouseInPointerEnabled(VOID)
+{
+    return InterlockedCompareExchange(&mouse_in_pointer, -1, -1) == TRUE;
+}
+
 BOOL WINAPI GetPointerDeviceRects(HANDLE device, RECT *pointerDeviceRect, RECT *displayRect)
 {
     UNREFERENCED_PARAMETER(device);
