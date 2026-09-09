@@ -867,6 +867,14 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* An empty name can never match an SxS key. Windows checks this before
+       validating the output buffers - RtlDosSearchPath_Ustr calls us with
+       no buffers at all and relies on getting SXS_KEY_NOT_FOUND here. */
+    if (!OriginalName->Buffer || OriginalName->Length == 0)
+    {
+        return STATUS_SXS_KEY_NOT_FOUND;
+    }
+
     if (!DynamicString && !StaticString)
     {
         return STATUS_INVALID_PARAMETER;
@@ -875,11 +883,6 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
     if ((DynamicString) && (StaticString) && !(NewName))
     {
         return STATUS_INVALID_PARAMETER;
-    }
-
-    if (!OriginalName->Buffer || OriginalName->Length == 0)
-    {
-        return STATUS_SXS_KEY_NOT_FOUND;
     }
 
     if (StaticString && (OriginalName == StaticString || OriginalName->Buffer == StaticString->Buffer))
