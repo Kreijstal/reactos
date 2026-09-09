@@ -7,11 +7,13 @@
 
 #include "precomp.h"
 
+#include <dbt.h>
 #include <winsock.h>
 
 #define NETTIMERID 0xFABC
 #define NETTIMERINTERVAL 1000
 #define WPARAM_MAGIC MAKELONG(MAKEWORD('L', 'S'), MAKEWORD('T', 'I')) // "LanStatusTrayIcon" (Arbitrary)
+#define NET_DEVICECHANGE_CLASS L"ReactOS_NetShell_DeviceChange"
 
 static void
 EnumNotificationIconWindows(
@@ -30,8 +32,59 @@ EnumNotificationIconWindows(
 
 CLanStatus::CLanStatus() :
     m_lpNetMan(NULL),
-    m_pHead(NULL)
+    m_pHead(NULL),
+    m_hwndDeviceChange(NULL)
 {
+}
+
+CLanStatus::~CLanStatus()
+{
+    if (m_hwndDeviceChange)
+        DestroyWindow(m_hwndDeviceChange);
+}
+
+LRESULT CALLBACK
+CLanStatus::DeviceChangeWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    CLanStatus *pThis = reinterpret_cast<CLanStatus *>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+    if (uMsg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *pcs = reinterpret_cast<CREATESTRUCTW *>(lParam);
+        pThis = static_cast<CLanStatus *>(pcs->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
+    }
+
+    if (pThis)
+    {
+        if (uMsg == WM_DEVICECHANGE && wParam == DBT_DEVNODES_CHANGED)
+        {
+            pThis->InitializeNetTaskbarNotifications();
+            return TRUE;
+        }
+    }
+
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+}
+
+HRESULT
+CLanStatus::EnsureDeviceChangeWindow()
+{
+    if (m_hwndDeviceChange)
+        return S_OK;
+
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = DeviceChangeWndProc;
+    wc.hInstance = netshell_hInstance;
+    wc.lpszClassName = NET_DEVICECHANGE_CLASS;
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    /* A message-only window does not receive HWND_BROADCAST device changes. */
+    m_hwndDeviceChange = CreateWindowExW(0, NET_DEVICECHANGE_CLASS, NULL, WS_POPUP,
+                                         0, 0, 0, 0, NULL, NULL,
+                                         netshell_hInstance, this);
+    return m_hwndDeviceChange ? S_OK : HRESULT_FROM_WIN32(GetLastError());
 }
 
 VOID
@@ -1161,9 +1214,9 @@ CLanStatus::InitializeNetTaskbarNotifications()
                 Shell_NotifyIconW(NIM_MODIFY, &nid);
                 NcFreeNetconProperties(pProps);
            }
+           pLast = pItem;
            pItem = pItem->pNext;
        }
-       return S_OK;
     }
     /* get an instance to of IConnectionManager */
     hr = CNetConnectionManager_CreateInstance(IID_PPV_ARG(INetConnectionManager, &pNetConMan));
@@ -1174,13 +1227,34 @@ CLanStatus::InitializeNetTaskbarNotifications()
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
-    Index = 1;
+    Index = pLast ? pLast->uID + 1 : 1;
     while (TRUE)
     {
         pNetCon.Release();
         hr = pEnumCon->Next(1, &pNetCon, &Count);
         if (hr != S_OK)
             break;
+
+        /* Refreshes are driven by PnP broadcasts.  Retain existing tray
+         * entries and add only connections which arrived since the previous
+         * enumeration. */
+        NETCON_PROPERTIES *pCandidateProps = NULL;
+        hr = pNetCon->GetProperties(&pCandidateProps);
+        if (FAILED(hr))
+            continue;
+
+        BOOL bKnown = FALSE;
+        for (pItem = m_pHead; pItem; pItem = pItem->pNext)
+        {
+            if (IsEqualGUID(pItem->guidItem, pCandidateProps->guidId))
+            {
+                bKnown = TRUE;
+                break;
+            }
+        }
+        NcFreeNetconProperties(pCandidateProps);
+        if (bKnown)
+            continue;
 
         TRACE("new connection\n");
         pItem = static_cast<NOTIFICATION_ITEM*>(CoTaskMemAlloc(sizeof(NOTIFICATION_ITEM)));
@@ -1262,7 +1336,6 @@ CLanStatus::InitializeNetTaskbarNotifications()
                 m_pHead = pItem;
 
             pLast = pItem;
-            Index++;
         }
         else
         {
@@ -1323,6 +1396,7 @@ CLanStatus::Exec(
     {
         if (IsEqualGUID(*pguidCmdGroup, CGID_ShellServiceObject))
         {
+            EnsureDeviceChangeWindow();
             return InitializeNetTaskbarNotifications();
         }
         else
