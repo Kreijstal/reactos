@@ -219,6 +219,7 @@
 @ stdcall EditWndProc(long long long long) EditWndProcA
 @ stdcall EmptyClipboard() NtUserEmptyClipboard
 @ stdcall EnableMenuItem(long long long)
+@ stdcall -version=0x602+ EnableMouseInPointer(long)
 @ stdcall EnableScrollBar(long long long)
 @ stdcall EnableWindow(long long)
 @ stdcall EndDeferWindowPos(long)
@@ -472,6 +473,7 @@
 @ stdcall IsHungAppWindow(long)
 @ stdcall IsIconic(long)
 @ stdcall IsMenu(long)
+@ stdcall -version=0x602+ IsMouseInPointerEnabled()
 @ stdcall -stub IsProcess16Bit()
 @ stdcall -version=0x600+ IsProcessDPIAware()
 @ stdcall IsRectEmpty(ptr)
