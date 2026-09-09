@@ -16,5 +16,6 @@ add_subdirectory(tracert)
 add_subdirectory(whois)
 add_subdirectory(wlanconf)
 add_subdirectory(wlanscan)
+add_subdirectory(ifstats)
 add_subdirectory(wlanui)
 
