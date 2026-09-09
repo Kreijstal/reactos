@@ -266,11 +266,12 @@ PFIB_ENTRY RouterAddRoute(
 }
 
 
-PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
+PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination, PIP_INTERFACE Interface)
 /*
  * FUNCTION: Finds a router to use to get to Destination
  * ARGUMENTS:
  *     Destination = Pointer to destination address (NULL means don't care)
+ *     Interface   = Interface the router must be reachable on (NULL means any)
  * RETURNS:
  *     Pointer to NCE for router, NULL if none was found
  * NOTES:
@@ -298,6 +299,11 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
 
         NCE   = Current->Router;
         State = NCE->State;
+
+        if (Interface != NULL && NCE->Interface != Interface) {
+            CurrentEntry = NextEntry;
+            continue;
+        }
 
 	Length = CommonPrefixLength(Destination, &Current->NetworkAddress);
 	MaskLength = AddrCountPrefixBits(&Current->Netmask);
@@ -359,13 +365,46 @@ PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination)
 	NCE = NBFindOrCreateNeighbor(Interface, Destination, FALSE);
     } else {
 	/* Destination is not on any subnets we're on. Find a router to use */
-	NCE = RouterGetRoute(Destination);
+	NCE = RouterGetRoute(Destination, NULL);
     }
 
     if( NCE )
 	TI_DbgPrint(DEBUG_ROUTER,("Interface->MTU: %d\n", NCE->Interface->MTU));
 
     return NCE;
+}
+
+PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestinationOnInterface(PIP_ADDRESS Destination,
+                                                            PIP_INTERFACE Interface)
+/*
+ * FUNCTION: Locates an NCE describing the next hop to a destination, forced to
+ *           leave through a specific interface (IP_UNICAST_IF)
+ * ARGUMENTS:
+ *     Destination = Pointer to destination address to find a route to
+ *     Interface   = Interface the packet must be sent from
+ * RETURNS:
+ *     Pointer to NCE for the next hop, NULL if the destination cannot be
+ *     reached over this interface
+ * NOTES:
+ *     The NCE is referenced for the caller. The caller is responsible
+ *     for dereferencing it after use
+ */
+{
+    ASSERT(Interface != NULL);
+
+    /* A broadcast or an on-link destination is sent directly from the interface.
+     * Note that an interface without an address (netmask 0.0.0.0) treats every
+     * destination as on-link, which is what a DHCP client needs */
+    if (AddrIsUnspecified(Destination) ||
+        Destination->Address.IPv4Address == IP_BCASTADDR_IPv4 ||
+        AddrIsEqual(Destination, &Interface->Broadcast) ||
+        IsOnLinkInterface(Destination, Interface))
+    {
+        return NBFindOrCreateNeighbor(Interface, Destination, FALSE);
+    }
+
+    /* Otherwise the packet needs a router that lives on this interface */
+    return RouterGetRoute(Destination, Interface);
 }
 
 VOID RouterRemoveRoutesForInterface(PIP_INTERFACE Interface)

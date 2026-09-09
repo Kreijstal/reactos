@@ -198,7 +198,29 @@ NTSTATUS UDPSendDatagram(
     }
 
     LocalAddress = AddrFile->Address;
-    if (AddrIsUnspecified(&LocalAddress))
+    if (AddrFile->UnicastIfIndex != 0)
+    {
+        /* IP_UNICAST_IF pins this address file to one outgoing interface */
+        PIP_INTERFACE Interface = GetInterfaceByIndex(AddrFile->UnicastIfIndex);
+        if (!Interface) {
+            UnlockObject(AddrFile);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if(!(NCE = RouteGetRouteToDestinationOnInterface( &RemoteAddress, Interface ))) {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
+        }
+
+        if (AddrIsUnspecified(&LocalAddress))
+        {
+            /* Use the address of the interface we were told to send from.
+             * This is still 0.0.0.0 while the interface is unconfigured,
+             * which is exactly what a DHCP DISCOVER has to carry */
+            LocalAddress = Interface->Unicast;
+        }
+    }
+    else if (AddrIsUnspecified(&LocalAddress))
     {
         /* If the local address is unspecified (0),
          * then use the unicast address of the

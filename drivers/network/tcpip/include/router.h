@@ -26,7 +26,7 @@ PFIB_ENTRY RouterAddRoute(
     PNEIGHBOR_CACHE_ENTRY Router,
     UINT Metric);
 
-PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination);
+PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination, PIP_INTERFACE Interface);
 
 NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router);
 

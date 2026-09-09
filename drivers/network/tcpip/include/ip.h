@@ -188,6 +188,9 @@ typedef VOID (*IP_PROTOCOL_HANDLER)(
 #define LOOPBACK_BCASTADDR_IPv4 ((IPv4_RAW_ADDRESS)DH2N(0x7FFFFFFF))
 #define LOOPBACK_ADDRMASK_IPv4  ((IPv4_RAW_ADDRESS)DH2N(0xFF000000))
 
+/* Limited broadcast address (255.255.255.255); byte order agnostic */
+#define IP_BCASTADDR_IPv4       ((IPv4_RAW_ADDRESS)0xFFFFFFFF)
+
 /* Protocol definitions */
 #ifndef IPPROTO_RAW
 #define IPPROTO_RAW     0   /* Raw IP */
