@@ -27,3 +27,9 @@ if(NOT ARCH STREQUAL "arm")
 add_subdirectory(nmidebug)
 endif()
 add_subdirectory(null)
+
+# Debug-only: hands arbitrary MMIO, DMA and PCI config access to user mode.
+# Off by default and must never be enabled in a build other people will run.
+if(ENABLE_ROSPOKE)
+    add_subdirectory(rospoke)
+endif()
