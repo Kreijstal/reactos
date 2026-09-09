@@ -229,6 +229,42 @@ HalStartNextProcessor(
     if (HalpStartedProcessorCount == HalpApicInfoTable.ProcessorCount)
         return FALSE;
 
+    /* The loader or an earlier HAL path can provide the low-stub physical
+     * address without leaving a virtual mapping behind.  Do not derive the
+     * page-table pointers from a NULL HalpLowStub: that turns the PML4 copy
+     * below into a write to virtual address 0x1000. */
+    if (!HalpLowStub)
+    {
+        if (HalpLowStubPhysicalAddress.QuadPart)
+        {
+            HalpLowStub = HalpMapPhysicalMemory64(HalpLowStubPhysicalAddress,
+                                                  HALP_LOW_STUB_SIZE_IN_PAGES);
+        }
+        else
+        {
+            PHYSICAL_ADDRESS LowestAddress = {{0}};
+            PHYSICAL_ADDRESS HighestAddress;
+            PHYSICAL_ADDRESS BoundaryAddress = {{0}};
+
+            /* Some UEFI memory maps contain no LoaderFree range below 1 MiB,
+             * so the phase-0 loader-descriptor allocation cannot reserve a
+             * SIPI page.  By this point Mm is initialized; ask it for the
+             * required contiguous low pages instead. */
+            HighestAddress.QuadPart = 0xFFFFF;
+            HalpLowStub = MmAllocateContiguousMemorySpecifyCache(
+                              HALP_LOW_STUB_SIZE_IN_PAGES * PAGE_SIZE,
+                              LowestAddress,
+                              HighestAddress,
+                              BoundaryAddress,
+                              MmCached);
+            if (HalpLowStub)
+                HalpLowStubPhysicalAddress = MmGetPhysicalAddress(HalpLowStub);
+        }
+
+        if (!HalpLowStub)
+            return FALSE;
+    }
+
     /* Build the temp page tables the trampoline will run on. */
     TempPml4Pa = HalpSetupTemporaryMappings();
     if (!TempPml4Pa.QuadPart)
