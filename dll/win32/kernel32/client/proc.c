@@ -4770,6 +4770,34 @@ CreateProcessW(LPCWSTR lpApplicationName,
                                   NULL);
 }
 
+BOOL
+WINAPI
+CreateProcessAsUserW(HANDLE hToken,
+                     LPCWSTR lpApplicationName,
+                     LPWSTR lpCommandLine,
+                     LPSECURITY_ATTRIBUTES lpProcessAttributes,
+                     LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                     BOOL bInheritHandles,
+                     DWORD dwCreationFlags,
+                     LPVOID lpEnvironment,
+                     LPCWSTR lpCurrentDirectory,
+                     LPSTARTUPINFOW lpStartupInfo,
+                     LPPROCESS_INFORMATION lpProcessInformation)
+{
+    return CreateProcessInternalW(hToken,
+                                  lpApplicationName,
+                                  lpCommandLine,
+                                  lpProcessAttributes,
+                                  lpThreadAttributes,
+                                  bInheritHandles,
+                                  dwCreationFlags,
+                                  lpEnvironment,
+                                  lpCurrentDirectory,
+                                  lpStartupInfo,
+                                  lpProcessInformation,
+                                  NULL);
+}
+
 /* Process/thread attribute lists ********************************************/
 
 struct _proc_thread_attr
