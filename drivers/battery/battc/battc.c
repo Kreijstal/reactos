@@ -165,6 +165,19 @@ BatteryClassInitializeDevice(PBATTERY_MINIPORT_INFO MiniportInfo,
 
     ExInitializeFastMutex(&BattClass->Mutex);
 
+    /*
+     * Publish the class data to the caller BEFORE advertising the device
+     * interface below. IoSetDeviceInterfaceState(..., TRUE) fires a PnP
+     * interface-arrival notification, and a consumer (e.g. compbatt or the
+     * power manager) can immediately open the interface and send an IOCTL
+     * (IOCTL_BATTERY_QUERY_TAG) back to the miniport. The miniport dispatch
+     * (CmBattIoctl) forwards it here via BatteryClassIoctl(ClassData, ...),
+     * so ClassData must already be visible or that call dereferences NULL
+     * (KM AV at offset 8 -> bugcheck 0x7E). Storing it first closes the
+     * window; the object is fully constructed at this point.
+     */
+    *ClassData = BattClass;
+
     if (MiniportInfo->Pdo != NULL)
     {
         Status = IoRegisterDeviceInterface(MiniportInfo->Pdo,
@@ -186,8 +199,6 @@ BatteryClassInitializeDevice(PBATTERY_MINIPORT_INFO MiniportInfo,
             DPRINT1("IoRegisterDeviceInterface failed (0x%x)\n", Status);
         }
     }
-
-    *ClassData = BattClass;
 
     return STATUS_SUCCESS;
 }

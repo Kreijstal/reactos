@@ -94,6 +94,20 @@ Bus_FDO_Power (
       ASSERT(FALSE);
       break;
     }
+      /* S5 is power-off.  A shutdown IRP whose ShutdownType is a RESET
+       * (NtShutdownSystem(ShutdownReboot) -> PopSetSystemPowerState with
+       * PowerActionShutdownReset) must NOT enter S5: the machine would be
+       * switched off instead of rebooted -- which is exactly what happened
+       * on every software reboot of the ASUS X550DP (docs/asus.txt 2.7).
+       * Windows' acpi.sys sleeps only for a power-off; for a reset it lets
+       * the HAL reset the machine. */
+      if (AcpiState == ACPI_STATE_S5 &&
+          stack->Parameters.Power.ShutdownType == PowerActionShutdownReset)
+      {
+          DPRINT1("ACPI: shutdown for reset -- leaving S5 to the HAL\n");
+      }
+      else
+      {
       oldPowerState = Data->Common.SystemPowerState;
       Data->Common.SystemPowerState = powerState.SystemState;
       AcpiStatus = acpi_suspend(AcpiState);
@@ -102,6 +116,7 @@ Bus_FDO_Power (
           AcpiState, AcpiStatus);
         Data->Common.SystemPowerState = oldPowerState;
         status = STATUS_UNSUCCESSFUL;
+      }
       }
   }
     }
