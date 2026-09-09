@@ -14,3 +14,4 @@
 @ stdcall KdNetShareQuery(ptr)
 @ stdcall KdNetShareTransmit(ptr long)
 @ stdcall KdNetSharePoll(long)
+@ stdcall KdNetShareRingStats(ptr)

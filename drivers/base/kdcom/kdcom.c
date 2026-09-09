@@ -361,4 +361,12 @@ KdNetSharePoll(_In_ ULONG MaxFrames)
     return 0;
 }
 
+NTSTATUS
+NTAPI
+KdNetShareRingStats(_Out_ PKDNET_SHARE_RING_STATS Stats)
+{
+    UNREFERENCED_PARAMETER(Stats);
+    return STATUS_NOT_SUPPORTED;
+}
+
 /* EOF */

@@ -10,6 +10,13 @@
 
 /* GLOBALS ********************************************************************/
 
+/*
+ * Fallback for KD_CONTEXT::KdpDefaultRetries, used to bound how long
+ * KdReceivePacket() keeps listening to a completely silent line before it
+ * tells its caller to re-announce itself. See KdReceivePacket().
+ */
+#define KDP_DEFAULT_SILENT_RETRIES 20
+
 ULONG CurrentPacketId = INITIAL_PACKET_ID | SYNC_PACKET_ID;
 ULONG RemotePacketId  = INITIAL_PACKET_ID;
 
@@ -88,12 +95,37 @@ KdReceivePacket(
     KDP_STATUS KdStatus;
     KD_PACKET Packet;
     ULONG Checksum;
+    ULONG SilentRetries, MaxSilentRetries;
 
     /* Special handling for breakin packet */
     if (PacketType == PACKET_TYPE_KD_POLL_BREAKIN)
     {
         return KdpPollBreakIn();
     }
+
+    /*
+     * Bound how long we are willing to listen to a completely silent line.
+     *
+     * When we are waiting for an acknowledge, KdSendPacket() owns the retry
+     * budget and is the only place allowed to conclude that the debugger is
+     * gone, so we must keep reporting KDP_PACKET_TIMEOUT to it unchanged.
+     *
+     * For every other packet type the caller is one of the kernel's "wait for
+     * the debugger to answer" loops (KdpSendWaitContinue(), KdpPromptString()),
+     * and those re-enter us for as long as we answer KDP_PACKET_TIMEOUT,
+     * without transmitting anything in between. If the host disappears while
+     * we sit there, the machine goes silent forever: it never re-announces
+     * itself, so a reconnecting debugger cannot pick it up, and KdSendPacket()
+     * - the only code that can set KdDebuggerNotPresent - is never reached
+     * again. Instead, after this many consecutive silent receive attempts we
+     * answer KDP_PACKET_RESEND, which makes those callers re-send their last
+     * packet. That puts bytes back on the wire and hands control back to
+     * KdSendPacket() and its retry budget.
+     */
+    MaxSilentRetries = (KdContext ? KdContext->KdpDefaultRetries : 0);
+    if (MaxSilentRetries == 0)
+        MaxSilentRetries = KDP_DEFAULT_SILENT_RETRIES;
+    SilentRetries = 0;
 
     for (;;)
     {
@@ -105,15 +137,39 @@ KdReceivePacket(
             if (KdStatus == KDP_PACKET_RESEND)
             {
                 KdContext->KdpControlCPending = TRUE;
+                return KdStatus;
             }
-            return KdStatus;
+
+            /* Nothing at all arrived. Let KdSendPacket() count its own tries */
+            if (PacketType == PACKET_TYPE_KD_ACKNOWLEDGE)
+                return KdStatus;
+
+            /* Give up on the silence and let the caller re-announce itself */
+            if (++SilentRetries >= MaxSilentRetries)
+                return KDP_PACKET_RESEND;
+
+            /*
+             * Halfway through, poke the host once. A debugger that is merely
+             * idle - sitting at its prompt while the user thinks - answers
+             * this, which resets the count below and keeps us waiting for it
+             * indefinitely, exactly as before. A debugger that is gone does
+             * not, and we run out the rest of the budget.
+             */
+            if (SilentRetries == MaxSilentRetries / 2)
+                KdpSendControlPacket(PACKET_TYPE_KD_RESEND, 0);
+
+            continue;
         }
+
+        /* Somebody is talking to us, so the line is not silent after all */
+        SilentRetries = 0;
 
         /* Step 2 - Read PacketType */
         KdStatus = KdpReceiveBuffer(&Packet.PacketType, sizeof(USHORT));
         if (KdStatus != KDP_PACKET_RECEIVED)
         {
-            /* Didn't receive a PacketType. */
+            /* Didn't receive a PacketType. Ask for the packet again. */
+            KdpSendControlPacket(PACKET_TYPE_KD_RESEND, 0);
             return KdStatus;
         }
 
@@ -128,7 +184,8 @@ KdReceivePacket(
         KdStatus = KdpReceiveBuffer(&Packet.ByteCount, sizeof(USHORT));
         if (KdStatus != KDP_PACKET_RECEIVED)
         {
-            /* Didn't receive ByteCount. */
+            /* Didn't receive ByteCount. Ask for the packet again. */
+            KdpSendControlPacket(PACKET_TYPE_KD_RESEND, 0);
             return KdStatus;
         }
 
@@ -136,7 +193,8 @@ KdReceivePacket(
         KdStatus = KdpReceiveBuffer(&Packet.PacketId, sizeof(ULONG));
         if (KdStatus != KDP_PACKET_RECEIVED)
         {
-            /* Didn't receive PacketId. */
+            /* Didn't receive PacketId. Ask for the packet again. */
+            KdpSendControlPacket(PACKET_TYPE_KD_RESEND, 0);
             return KdStatus;
         }
 
@@ -152,7 +210,8 @@ KdReceivePacket(
         KdStatus = KdpReceiveBuffer(&Packet.Checksum, sizeof(ULONG));
         if (KdStatus != KDP_PACKET_RECEIVED)
         {
-            /* Didn't receive Checksum. */
+            /* Didn't receive Checksum. Ask for the packet again. */
+            KdpSendControlPacket(PACKET_TYPE_KD_RESEND, 0);
             return KdStatus;
         }
 
