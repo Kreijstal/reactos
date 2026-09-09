@@ -44,6 +44,28 @@
 #define CSR_LED_REG                 0x094
 #define CSR_DRAM_INT_TBL_REG        0x0A0
 #define CSR_MAC_SHADOW_REG_CTRL     0x0A8
+#define CSR_CTXT_INFO_ADDR          0x118
+#define CSR_IML_DATA_ADDR           0x120
+#define CSR_IML_SIZE_ADDR           0x128
+#define CSR_CTXT_INFO_BOOT_CTRL     0x000
+#define CSR_AUTO_FUNC_BOOT_ENA      (1 << 1)
+
+#define HBUS_BASE                   0x400
+#define HBUS_TARG_PRPH_WADDR        (HBUS_BASE + 0x044)
+#define HBUS_TARG_PRPH_WDAT         (HBUS_BASE + 0x04c)
+#define HBUS_TARG_WRPTR             (HBUS_BASE + 0x060)
+#define UREG_CPU_INIT_RUN           0x00a05c44
+#define AX210_UMAC_PRPH_OFFSET      0x00300000
+#define UREG_DOORBELL_TO_ISR6       0x00a05c04
+#define UREG_DOORBELL_TO_ISR6_PNVM  (1 << 20)
+#define CSR_LTR_LAST_MSG            0x0dc
+#define CSR_MSIX_HW_INT_CAUSES_AD   0x2808
+#define MSIX_HW_INT_CAUSES_REG_IML  (1 << 1)
+#define RFH_Q0_FRBDCB_WIDX_TRG      0x1c80
+#define CSR_MAC_ADDR0_OTP           0x380
+#define CSR_MAC_ADDR1_OTP           0x384
+#define CSR_MAC_ADDR0_STRAP         0x388
+#define CSR_MAC_ADDR1_STRAP         0x38c
 
 /* GIO Chicken Bits (PCI Express bus link power management) */
 #define CSR_GIO_CHICKEN_BITS        0x100
