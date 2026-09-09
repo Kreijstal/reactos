@@ -14,6 +14,18 @@ if(ARCH STREQUAL "i386")
     #list(APPEND CRT_MEM_ASM_SOURCE
     #    ${LIBCNTPR_MEM_ASM_SOURCE}
     #)
+elseif(ARCH STREQUAL "amd64")
+    list(APPEND LIBCNTPR_MEM_ASM_SOURCE
+        mem/amd64/memmove_asm.S
+    )
+    list(APPEND LIBCNTPR_MEM_SOURCE
+        mem/memchr.c
+        mem/memset.c
+    )
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+        set_source_files_properties(mem/memset.c
+            PROPERTIES COMPILE_FLAGS "-fno-tree-loop-distribute-patterns")
+    endif()
 else()
     list(APPEND LIBCNTPR_MEM_SOURCE
         mem/memchr.c
