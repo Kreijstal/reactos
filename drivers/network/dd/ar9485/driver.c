@@ -63,6 +63,14 @@ DriverEntry(
 
     DPRINT1("AR9485: registered NDIS 6.%u miniport, handle=%p\n",
             NDIS_MINIPORT_MINOR_VERSION, g_NdisMiniportDriverHandle);
+
+    /* The bring-up lab's control device is created here rather than at adapter
+     * init so it exists even with no AR9485 in the machine.  That is what lets
+     * the whole harness -- encoding, bounds, marshalling, transport -- be
+     * proven under QEMU against a scratch page before the one install boot is
+     * spent on real hardware.  A failure here is not fatal to the miniport. */
+    (VOID)AR9485LabCreateControlDevice(g_NdisMiniportDriverHandle);
+
     return STATUS_SUCCESS;
 }
 
@@ -72,6 +80,7 @@ AR9485MiniportDriverUnload(
 {
     UNREFERENCED_PARAMETER(DriverObject);
     DPRINT1("AR9485: DriverUnload\n");
+    AR9485LabDeleteControlDevice();
     if (g_NdisMiniportDriverHandle != NULL)
     {
         NdisMDeregisterMiniportDriver(g_NdisMiniportDriverHandle);

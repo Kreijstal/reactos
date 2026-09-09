@@ -64,6 +64,22 @@ ar9485_reg_write(void *ctx, u32 val, u32 reg_offset)
     WRITE_REGISTER_ULONG((PULONG)((PUCHAR)ah->reg_ctx + reg_offset), val);
 }
 
+/* Upstream reaches REG_RMW through a bus-op so AHB-attached SoC parts can
+ * batch it.  On a PCIe part upstream's own ath_pci bus-ops do exactly the
+ * plain read-modify-write below. */
+u32
+ar9485_reg_rmw(struct ath_hw *ah, u32 reg, u32 set, u32 clr)
+{
+    u32 val;
+
+    val = REG_READ(ah, reg);
+    val &= ~clr;
+    val |= set;
+    REG_WRITE(ah, reg, val);
+
+    return val;
+}
+
 void
 ar9485_hw_attach(_Out_ struct ath_hw *ah,
                  _In_ void *bar0_base,

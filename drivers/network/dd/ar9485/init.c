@@ -106,6 +106,56 @@ AR9485MiniportInitializeEx(
         goto Fail;
     }
 
+    /* Phase 3b: bring the PHY up.  ar9485_hw_start() runs the upstream
+     * reset sequence - wake, reset, PLL, AR9485 1.1 initvals, synthesiser,
+     * baseband activate - and leaves the radio parked on the default
+     * channel.  The context outlives the call because the receive path
+     * reads the current channel back out of it. */
+    Adapter->HwContext = NdisAllocateMemoryWithTagPriority(NdisMiniportHandle,
+                                                           (UINT)ar9485_hw_context_size(),
+                                                           AR9485_TAG,
+                                                           NormalPoolPriority);
+    if (Adapter->HwContext == NULL)
+    {
+        DPRINT1("AR9485: out of memory allocating hardware context\n");
+        Status = NDIS_STATUS_RESOURCES;
+        goto Fail;
+    }
+
+    /* Recover the EEPROM/OTP image into the context once, before the
+     * first bring-up.  ar9485_hw_start() needs it on every reset to apply
+     * the board's analog configuration (PA bias, RF switch, attenuation)
+     * and carries it across the reattach each channel change performs, so
+     * the expensive OTP walk happens exactly here.  A card whose EEPROM
+     * will not read is not fatal: the PHY still comes up on initval
+     * defaults, which is what every boot before this change ran on, and
+     * ar9485_hw_eeprom_restore() has already said why. */
+    if (!ar9485_hw_context_init(Adapter->HwContext,
+                                Adapter->IoBase,
+                                Adapter->IoLength,
+                                Adapter->DeviceId,
+                                Adapter->MacVersion,
+                                (USHORT)Adapter->MacRevision))
+    {
+        DPRINT1("AR9485: continuing without EEPROM board values\n");
+    }
+
+    if (!ar9485_hw_start(Adapter->HwContext,
+                         Adapter->IoBase,
+                         Adapter->IoLength,
+                         Adapter->DeviceId,
+                         Adapter->MacVersion,
+                         (USHORT)Adapter->MacRevision,
+                         AR9485_DEFAULT_CHANNEL_MHZ))
+    {
+        /* ar9485_hw_start() has already named the failing step. */
+        Status = NDIS_STATUS_FAILURE;
+        goto Fail;
+    }
+
+    Adapter->PhyUp = TRUE;
+    Adapter->CurrentChannelMHz = AR9485_DEFAULT_CHANNEL_MHZ;
+
     Status = AR9485RegisterInterrupt(Adapter);
     if (Status != NDIS_STATUS_SUCCESS)
     {
@@ -120,17 +170,66 @@ AR9485MiniportInitializeEx(
         goto Fail;
     }
 
+    Status = AR9485InitializeReceiver(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: InitializeReceiver failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    Status = AR9485InitializeTransmitter(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: InitializeTransmitter failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
+    /* Until an upper layer asks for something else, the station is an open
+     * one: nwifi replaces all three before it issues a connect request. */
+    Adapter->AuthAlgorithm = DOT11_AUTH_ALGO_80211_OPEN;
+    Adapter->UnicastCipher = DOT11_CIPHER_ALGO_NONE;
+    Adapter->MulticastCipher = DOT11_CIPHER_ALGO_NONE;
+
+    /* ar9485_hw_start() brings the PHY up but leaves the MAC without an
+     * address, the DCUs mapped to no queue and the transmit ring unarmed;
+     * see AR9485ProgramMacState(). */
+    AR9485ProgramMacState(Adapter);
+    AR9485ArmReceiver(Adapter);
+
+    Status = AR9485StartChipWorker(Adapter);
+    if (Status != NDIS_STATUS_SUCCESS)
+    {
+        DPRINT1("AR9485: StartChipWorker failed 0x%08x\n", Status);
+        goto Fail;
+    }
+
     DPRINT1("AR9485: initialized: SREV=0x%08x version=0x%03x rev=%u "
             "MAC=%02x:%02x:%02x:%02x:%02x:%02x\n",
             Adapter->SregRaw, Adapter->MacVersion, Adapter->MacRevision,
             Adapter->PermanentMacAddress[0], Adapter->PermanentMacAddress[1],
             Adapter->PermanentMacAddress[2], Adapter->PermanentMacAddress[3],
             Adapter->PermanentMacAddress[4], Adapter->PermanentMacAddress[5]);
+
+    /* Publish the adapter to the bring-up lab only now: everything it hands a
+     * script -- BAR mapping, RX pool, hw context -- has to be valid first. */
+    AR9485LabAttachAdapter(Adapter);
+
     return NDIS_STATUS_SUCCESS;
 
 Fail:
+    AR9485StopChipWorker(Adapter);
+    AR9485ShutdownTransmitter(Adapter);
+    AR9485ShutdownReceiver(Adapter);
     if (Adapter->InterruptHandle != NULL)
         AR9485UnregisterInterrupt(Adapter);
+    if (Adapter->HwContext != NULL)
+    {
+        NdisFreeMemory(Adapter->HwContext,
+                       (UINT)ar9485_hw_context_size(),
+                       0);
+        Adapter->HwContext = NULL;
+    }
+
     if (Adapter->IoBase != NULL)
         MmUnmapIoSpace(Adapter->IoBase, Adapter->IoLength);
     NdisFreeMemory(Adapter, sizeof(*Adapter), 0);
@@ -152,8 +251,28 @@ AR9485MiniportHaltEx(
     DPRINT1("AR9485: MiniportHaltEx\n");
     InterlockedOr(&Adapter->Flags, AR9485_FLAG_HALTING);
 
+    /* The chip worker touches the BAR, the DMA rings and the adapter itself,
+     * so it has to be gone before any of them are. */
+    AR9485StopChipWorker(Adapter);
+
+    /* Before anything is freed: the lab stops the chip and drops its runtime
+     * DMA while the BAR and the RX pool are still mapped.  Doing this after
+     * ShutdownReceiver would leave the chip mastering into freed pages. */
+    AR9485LabDetachAdapter(Adapter);
+
+    AR9485ShutdownTransmitter(Adapter);
+    AR9485ShutdownReceiver(Adapter);
+
     if (Adapter->InterruptHandle != NULL)
         AR9485UnregisterInterrupt(Adapter);
+    if (Adapter->HwContext != NULL)
+    {
+        NdisFreeMemory(Adapter->HwContext,
+                       (UINT)ar9485_hw_context_size(),
+                       0);
+        Adapter->HwContext = NULL;
+    }
+
     if (Adapter->IoBase != NULL)
     {
         MmUnmapIoSpace(Adapter->IoBase, Adapter->IoLength);
@@ -254,6 +373,25 @@ AR9485SetGeneralAttributes(_In_ PAR9485_ADAPTER Adapter)
         OID_GEN_INTERRUPT_MODERATION,
         OID_GEN_PHYSICAL_MEDIUM,
         OID_GEN_STATISTICS,
+        OID_DOT11_MAC_ADDRESS,
+        OID_DOT11_PERMANENT_ADDRESS,
+        OID_DOT11_CURRENT_ADDRESS,
+        OID_DOT11_OPERATION_MODE_CAPABILITY,
+        OID_DOT11_CURRENT_OPERATION_MODE,
+        OID_DOT11_SCAN_REQUEST,
+        OID_DOT11_ENUM_BSS_LIST,
+        OID_DOT11_DESIRED_SSID_LIST,
+        OID_DOT11_DESIRED_BSSID_LIST,
+        OID_DOT11_DESIRED_BSS_TYPE,
+        OID_DOT11_ENABLED_AUTHENTICATION_ALGORITHM,
+        OID_DOT11_ENABLED_UNICAST_CIPHER_ALGORITHM,
+        OID_DOT11_ENABLED_MULTICAST_CIPHER_ALGORITHM,
+        OID_DOT11_CURRENT_PACKET_FILTER,
+        OID_DOT11_CONNECT_REQUEST,
+        OID_DOT11_DISCONNECT_REQUEST,
+        OID_DOT11_CIPHER_DEFAULT_KEY,
+        OID_DOT11_CIPHER_DEFAULT_KEY_ID,
+        OID_DOT11_CIPHER_KEY_MAPPING_KEY,
     };
 
     NdisZeroMemory(&GenAttrs, sizeof(GenAttrs));

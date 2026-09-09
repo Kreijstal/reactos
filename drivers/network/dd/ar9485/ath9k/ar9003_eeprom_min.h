@@ -107,6 +107,88 @@
 #define AR9300_OTP_READ_DATA(_ah) \
 		((AR_SREV_9340(_ah) || AR_SREV_9550(_ah)) ? 0x3101c : 0x15f1c)
 
+/* ---------------- VERBATIM ar9003_eeprom.h:117-165 ------------------
+ *
+ * The rate-group indices the Phase 2b transmit-power path (hw_txpower.c)
+ * addresses the EEPROM target-power tables and the per-rate power
+ * registers with.  Copied whole rather than trimmed to the 2.4 GHz HT20
+ * subset: ar9300RateSize is the size of the array
+ * ath9k_hw_ar9300_set_txpower() builds and every ALL_TARGET_HT40_*
+ * index is still written (as a zero) by ar9003_hw_tx_power_regwrite(),
+ * exactly as upstream does on an HT20 channel.
+ */
+
+enum targetPowerHTRates {
+	HT_TARGET_RATE_0_8_16,
+	HT_TARGET_RATE_1_3_9_11_17_19,
+	HT_TARGET_RATE_4,
+	HT_TARGET_RATE_5,
+	HT_TARGET_RATE_6,
+	HT_TARGET_RATE_7,
+	HT_TARGET_RATE_12,
+	HT_TARGET_RATE_13,
+	HT_TARGET_RATE_14,
+	HT_TARGET_RATE_15,
+	HT_TARGET_RATE_20,
+	HT_TARGET_RATE_21,
+	HT_TARGET_RATE_22,
+	HT_TARGET_RATE_23
+};
+
+enum targetPowerLegacyRates {
+	LEGACY_TARGET_RATE_6_24,
+	LEGACY_TARGET_RATE_36,
+	LEGACY_TARGET_RATE_48,
+	LEGACY_TARGET_RATE_54
+};
+
+enum targetPowerCckRates {
+	LEGACY_TARGET_RATE_1L_5L,
+	LEGACY_TARGET_RATE_5S,
+	LEGACY_TARGET_RATE_11L,
+	LEGACY_TARGET_RATE_11S
+};
+
+enum ar9300_Rates {
+	ALL_TARGET_LEGACY_6_24,
+	ALL_TARGET_LEGACY_36,
+	ALL_TARGET_LEGACY_48,
+	ALL_TARGET_LEGACY_54,
+	ALL_TARGET_LEGACY_1L_5L,
+	ALL_TARGET_LEGACY_5S,
+	ALL_TARGET_LEGACY_11L,
+	ALL_TARGET_LEGACY_11S,
+	ALL_TARGET_HT20_0_8_16,
+	ALL_TARGET_HT20_1_3_9_11_17_19,
+	ALL_TARGET_HT20_4,
+	ALL_TARGET_HT20_5,
+	ALL_TARGET_HT20_6,
+	ALL_TARGET_HT20_7,
+	ALL_TARGET_HT20_12,
+	ALL_TARGET_HT20_13,
+	ALL_TARGET_HT20_14,
+	ALL_TARGET_HT20_15,
+	ALL_TARGET_HT20_20,
+	ALL_TARGET_HT20_21,
+	ALL_TARGET_HT20_22,
+	ALL_TARGET_HT20_23,
+	ALL_TARGET_HT40_0_8_16,
+	ALL_TARGET_HT40_1_3_9_11_17_19,
+	ALL_TARGET_HT40_4,
+	ALL_TARGET_HT40_5,
+	ALL_TARGET_HT40_6,
+	ALL_TARGET_HT40_7,
+	ALL_TARGET_HT40_12,
+	ALL_TARGET_HT40_13,
+	ALL_TARGET_HT40_14,
+	ALL_TARGET_HT40_15,
+	ALL_TARGET_HT40_20,
+	ALL_TARGET_HT40_21,
+	ALL_TARGET_HT40_22,
+	ALL_TARGET_HT40_23,
+	ar9300RateSize,
+};
+
 /* ---------------- VERBATIM ar9003_eeprom.h:168-357 ----------------- */
 
 /* The upstream structures below are all __packed.  ReactOS builds with
