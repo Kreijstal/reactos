@@ -1,4 +1,6 @@
 #include <rosdhcp.h>
+#include <ws2tcpip.h>
+#include <reactos/debug.h>
 
 SOCKET ServerSocket;
 
@@ -13,9 +15,27 @@ ssize_t send_packet( struct interface_info *ip,
                      struct sockaddr_in *broadcast,
                      struct hardware *hardware ) {
     int result;
+    PDHCP_ADAPTER Adapter;
+    DWORD IfIndex;
 
     if (size > INT_MAX)
         return WSAEMSGSIZE;
+
+    /* Every adapter shares one socket, so the outgoing interface has to be
+     * selected for each packet. Without this a limited broadcast (255.255.255.255)
+     * has no route of its own and leaves through whichever adapter the stack
+     * picks by default, which is not necessarily the one we are configuring */
+    Adapter = AdapterFindInfo( ip );
+    ASSERT(Adapter != NULL);
+
+    IfIndex = htonl(Adapter->IfMib.dwIndex);
+    if (setsockopt( ip->wfdesc, IPPROTO_IP, IP_UNICAST_IF,
+                    (const char *)&IfIndex, sizeof(IfIndex) ) != 0) {
+        result = WSAGetLastError();
+        note ("send_packet: cannot bind the send to interface %lu: %d",
+              Adapter->IfMib.dwIndex, result);
+        return -1;
+    }
 
     result =
         sendto( ip->wfdesc, (char *)p, (int)size, 0,

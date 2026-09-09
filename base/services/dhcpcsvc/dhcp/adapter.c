@@ -437,7 +437,11 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
             ApiLock();
 
-            if ((Adapter = AdapterFindByHardwareAddress(Table->table[i].bPhysAddr, Table->table[i].dwPhysAddrLen)))
+            /* A layered miniport and its lower physical miniport can expose
+             * the same hardware address.  They are distinct IP interfaces,
+             * so track discovery state by the stable interface index rather
+             * than deleting one when the other changes media state. */
+            if ((Adapter = AdapterFindIndex(Table->table[i].dwIndex)))
             {
                 proto = find_protocol_by_adapter(&Adapter->DhclientInfo);
 
@@ -472,6 +476,7 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
                         remove_protocol(proto);
 
                     /* We've lost our link so out we go */
+                    cancel_timeouts_for(&Adapter->DhclientInfo);
                     RemoveEntryList(&Adapter->ListEntry);
                     free(Adapter);
                 }
@@ -552,6 +557,18 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
                     read_client_conf(&Adapter->DhclientInfo);
 
+                    /* The adapter must be in AdapterList before the state
+                     * machine runs: state_init() sends the first DHCPDISCOVER
+                     * synchronously and the send/bind paths look the adapter
+                     * up with AdapterFindInfo().  Hold the API lock across
+                     * state_init() so the api/dispatch threads cannot act on
+                     * a half-started adapter (they run the state machine
+                     * under the same lock). */
+                    ApiLock();
+                    InsertTailList( &AdapterList, &Adapter->ListEntry );
+                    AdapterCount++;
+                    SetEvent(hAdapterStateChangedEvent);
+
                     if (Adapter->DhclientInfo.client->state == S_INIT)
                     {
                         add_protocol(Adapter->DhclientInfo.name,
@@ -560,11 +577,6 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
                         state_init(&Adapter->DhclientInfo);
                     }
-
-                    ApiLock();
-                    InsertTailList( &AdapterList, &Adapter->ListEntry );
-                    AdapterCount++;
-                    SetEvent(hAdapterStateChangedEvent);
                     ApiUnlock();
                 } else { FreeAdapter( Adapter ); Adapter = 0; }
             } else { FreeAdapter( Adapter ); Adapter = 0; }
@@ -616,6 +628,7 @@ void AdapterStop() {
     while( !IsListEmpty( &AdapterList ) ) {
         ListEntry = (PLIST_ENTRY)RemoveHeadList( &AdapterList );
         Adapter = CONTAINING_RECORD( ListEntry, DHCP_ADAPTER, ListEntry );
+        cancel_timeouts_for( &Adapter->DhclientInfo );
         FreeAdapter( Adapter );
     }
     ApiUnlock();

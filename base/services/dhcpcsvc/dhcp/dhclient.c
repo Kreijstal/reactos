@@ -1634,7 +1634,13 @@ make_discover(struct interface_info *ip, struct client_lease *lease)
 	ip->client->packet.hops = 0;
 	ip->client->packet.xid = RtlRandom(&foo);
 	ip->client->packet.secs = 0; /* filled in by send_discover. */
-	ip->client->packet.flags = 0;
+	/*
+	 * We do not have an IPv4 address while selecting a lease, so request a
+	 * broadcast reply.  Otherwise a server may unicast DHCPOFFER to yiaddr;
+	 * the IP stack cannot deliver that packet to our socket until yiaddr has
+	 * actually been configured.
+	 */
+	ip->client->packet.flags = htons(BOOTP_BROADCAST);
 
 	memset(&(ip->client->packet.ciaddr),
 	    0, sizeof(ip->client->packet.ciaddr));
@@ -1738,7 +1744,7 @@ make_request(struct interface_info *ip, struct client_lease * lease)
 	} else {
 		memset(&ip->client->packet.ciaddr, 0,
 		    sizeof(ip->client->packet.ciaddr));
-		ip->client->packet.flags = 0;
+		ip->client->packet.flags = htons(BOOTP_BROADCAST);
 	}
 
 	memset(&ip->client->packet.yiaddr, 0,
