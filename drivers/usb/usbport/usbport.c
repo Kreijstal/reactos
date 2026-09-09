@@ -22,6 +22,72 @@ LIST_ENTRY USBPORT_USB2FdoList = {NULL, NULL};
 KSPIN_LOCK USBPORT_SpinLock;
 BOOLEAN USBPORT_Initialized = FALSE;
 
+/* --- reboot-flush claim-window instrumentation (temporary) ---------------
+ * Ring + balance counters, read at a KD break during a wedged shutdown flush.
+ * See usbport.h for the site codes and the failure it is meant to catch.     */
+USBPORT_CLAIM_TRACE_ENTRY UsbPortClaimTrace[USBPORT_CLAIM_TRACE_COUNT];
+LONG volatile UsbPortClaimTraceSeq = 0;
+
+/* At a fully-drained endpoint these agree:
+ *   Inserted == DoneWon + FlushCancelWon   (every active IRP got claimed once)
+ *   IoCompleted >= DoneWon + FlushCancelWon (claims plus pending-path completes)
+ * A wedge shows Inserted > (DoneWon + FlushCancelWon) -- an IRP inserted and
+ * never claimed -- or a claim win with no matching IoComplete.               */
+LONG volatile UsbPortActiveInserted = 0;
+LONG volatile UsbPortDoneWon = 0;
+LONG volatile UsbPortDoneDeferred = 0;
+LONG volatile UsbPortFlushCancelWon = 0;
+LONG volatile UsbPortFlushCancelDeferred = 0;
+LONG volatile UsbPortCancelReq = 0;
+LONG volatile UsbPortIoCompleted = 0;
+
+VOID
+NTAPI
+USBPORT_ClaimTrace(IN ULONG Site,
+                   IN ULONG Aux,
+                   IN PVOID Transfer,
+                   IN PVOID Irp)
+{
+    LONG Seq;
+    ULONG Index;
+    PUSBPORT_CLAIM_TRACE_ENTRY Entry;
+
+    Seq = InterlockedIncrement(&UsbPortClaimTraceSeq);
+    Index = ((ULONG)Seq - 1) & (USBPORT_CLAIM_TRACE_COUNT - 1);
+    Entry = &UsbPortClaimTrace[Index];
+
+    Entry->Seq = Seq;
+    Entry->Site = Site;
+    Entry->Aux = Aux;
+    Entry->Transfer = Transfer;
+    Entry->Irp = Irp;
+
+    switch (Site)
+    {
+        case USBPORT_CLAIM_SITE_INSERT:
+            InterlockedIncrement(&UsbPortActiveInserted);
+            break;
+        case USBPORT_CLAIM_SITE_DONE:
+            if (Aux)
+                InterlockedIncrement(&UsbPortDoneWon);
+            else
+                InterlockedIncrement(&UsbPortDoneDeferred);
+            break;
+        case USBPORT_CLAIM_SITE_FLUSHCANCEL:
+            if (Aux)
+                InterlockedIncrement(&UsbPortFlushCancelWon);
+            else
+                InterlockedIncrement(&UsbPortFlushCancelDeferred);
+            break;
+        case USBPORT_CLAIM_SITE_CANCELREQ:
+            InterlockedIncrement(&UsbPortCancelReq);
+            break;
+        case USBPORT_CLAIM_SITE_IOCOMPLETE:
+            InterlockedIncrement(&UsbPortIoCompleted);
+            break;
+    }
+}
+
 #if DBG
 static
 VOID
@@ -789,6 +855,8 @@ USBPORT_DoneTransfer(IN PUSBPORT_TRANSFER Transfer)
 
         if (USBPORT_RemoveActiveTransferIrp(FdoDevice, Irp) == NULL)
         {
+            USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_DONE, 0, Transfer, Irp);
+
             /* The IRP was not in the active table, so this transfer does not
              * own it any more.  An IRP is inserted there in exactly one place
              * (USBPORT_FlushPendingTransfers) and removed in exactly two -
@@ -811,6 +879,10 @@ USBPORT_DoneTransfer(IN PUSBPORT_TRANSFER Transfer)
 
             Transfer->Irp = NULL;
             Irp = NULL;
+        }
+        else
+        {
+            USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_DONE, 1, Transfer, Irp);
         }
     }
 
@@ -2785,6 +2857,8 @@ USBPORT_CompleteTransfer(IN PURB Urb,
 
         Irp->IoStatus.Status = Status;
         Irp->IoStatus.Information = 0;
+
+        USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_IOCOMPLETE, (ULONG)Status, Transfer, Irp);
 
         KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
         IoCompleteRequest(Irp, IO_NO_INCREMENT);

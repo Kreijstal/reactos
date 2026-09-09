@@ -101,6 +101,7 @@ typedef struct
     PSCSI_REQUEST_BLOCK Srb;
     ULONG ErrorIndex;
     ULONG StallRetryCount;                                            // the number of retries after receiving USBD_STATUS_STALL_PID status
+    BOOLEAN WatchdogTimedOut;                                         // watchdog aborted this BOT transaction
     CBW cbw;
     CSW csw;
     URB Urb;
@@ -141,7 +142,9 @@ typedef struct
     KEVENT NoPendingRequests;                                                            // set if no pending or in progress requests
     PSCSI_REQUEST_BLOCK LastTimerActiveSrb;                                              // last timer tick active srb
     ULONG TimerTicksOnActiveSrb;                                                         // 1 second ticks the active srb has been outstanding
-    ULONG SrbErrorHandlingActive;                                                        // error handling of srb is activated
+    ULONG SrbCompletionCount;                                                            // monotonic count of requests that reached QueueTerminateRequest
+    ULONG LastTimerCompletionCount;                                                      // SrbCompletionCount as of the last timer tick
+    volatile LONG SrbErrorHandlingActive;                                                // one watchdog recovery owns the active SRB
     ULONG TimerWorkQueueEnabled;                                                         // timer work queue enabled
     ULONG InstanceCount;                                                                 // pdo instance count
     KSPIN_LOCK CommonLock;
@@ -167,6 +170,7 @@ typedef struct _ERRORHANDLER_WORKITEM_DATA
 {
     PDEVICE_OBJECT DeviceObject;
     PIRP_CONTEXT Context;
+    PSCSI_REQUEST_BLOCK Srb;
     WORK_QUEUE_ITEM WorkQueueItem;
     PIRP Irp;
 } ERRORHANDLER_WORKITEM_DATA, *PERRORHANDLER_WORKITEM_DATA;

@@ -217,12 +217,21 @@ USBSTOR_QueueTerminateRequest(
 
     FDODeviceExtension->IrpPendingCount--;
 
+    /*
+     * Forward-progress tick for the hung-SRB watchdog.  Only a request that
+     * actually terminates counts: the park-and-retry path further down puts an
+     * IRP back on IrpListHead without finishing it, and counting that would let
+     * a reset/retry loop masquerade as progress and silence the watchdog.
+     */
+    FDODeviceExtension->SrbCompletionCount++;
+
     // check if this was our current active SRB
     if (FDODeviceExtension->ActiveSrb == Request ||
         (Context->Irp == Irp && FDODeviceExtension->ActiveSrb == Context->Srb))
     {
         // indicate processing is completed
         FDODeviceExtension->ActiveSrb = NULL;
+        InterlockedExchange(&FDODeviceExtension->SrbErrorHandlingActive, FALSE);
     }
 
     // Set the event if nothing else is pending

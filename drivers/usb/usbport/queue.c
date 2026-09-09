@@ -567,6 +567,8 @@ USBPORT_CancelActiveTransferIrp(IN PDEVICE_OBJECT DeviceObject,
                 Urb,
                 Transfer);
 
+    USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_CANCELREQ, 0, Transfer, Irp);
+
     KeAcquireSpinLockAtDpcLevel(&Endpoint->EndpointSpinLock);
 
     Transfer->Flags |= TRANSFER_FLAG_CANCELED;
@@ -748,6 +750,8 @@ USBPORT_FlushCancelList(IN PUSBPORT_ENDPOINT Endpoint)
 
             if (USBPORT_RemoveActiveTransferIrp(FdoDevice, Irp) == NULL)
             {
+                USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_FLUSHCANCEL, 0, Transfer, Irp);
+
                 /* Not in the active table: USBPORT_DoneTransfer - the only
                  * other remover - has already claimed this IRP and will
                  * complete it.  Detaching it here keeps the teardown below
@@ -759,6 +763,10 @@ USBPORT_FlushCancelList(IN PUSBPORT_ENDPOINT Endpoint)
                         "owned elsewhere, not completing\n", Irp);
 
                 Transfer->Irp = NULL;
+            }
+            else
+            {
+                USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_FLUSHCANCEL, 1, Transfer, Irp);
             }
         }
 
@@ -982,6 +990,7 @@ USBPORT_FlushPendingTransfers(IN PUSBPORT_ENDPOINT Endpoint)
 
             USBPORT_FindUrbInIrpTable(FdoExtension->ActiveIrpTable, Urb, Irp);
             USBPORT_InsertIrpInTable(FdoExtension->ActiveIrpTable, Irp);
+            USBPORT_ClaimTrace(USBPORT_CLAIM_SITE_INSERT, 0, Transfer, Irp);
         }
 
         IsMapTransfer = USBPORT_QueueActiveUrbToEndpoint(Endpoint, Urb);
