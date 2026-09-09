@@ -15,6 +15,14 @@
 
 #define EAPOL_ETHERTYPE     0x888E
 
+static const UCHAR NwifiDefaultRsnIe[22] = {
+    0x30, 0x14, 0x01, 0x00,
+    0x00, 0x0F, 0xAC, 0x04,
+    0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,
+    0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02,
+    0x00, 0x00
+};
+
 /* Per-interface supplicant session.  Keeps a copy of the seeded passphrase
  * so a session can be re-initialised per SSID (the PMK is SSID-dependent). */
 typedef struct _NWIFI_SUPPLICANT
@@ -26,6 +34,7 @@ typedef struct _NWIFI_SUPPLICANT
     ULONG     PassphraseLen;
     UCHAR     OwnMac[IEEE80211_ADDR_LEN];
     BOOLEAN   KeysInstalled;
+    ULONG     GtkGenInstalled;      /* RsnaGetGtkGeneration() last installed    */
 
     /* The handshake completes in the RX path (possibly DISPATCH_LEVEL), but
      * key install is a blocking OID needing PASSIVE_LEVEL, so it is deferred
@@ -228,16 +237,10 @@ NwifiSupplicantStart(
         return NDIS_STATUS_FAILURE;
     }
 
-    {
-        static const UCHAR RsnIe[22] = {
-            0x30, 0x14, 0x01, 0x00,
-            0x00, 0x0F, 0xAC, 0x04,
-            0x01, 0x00, 0x00, 0x0F, 0xAC, 0x04,
-            0x01, 0x00, 0x00, 0x0F, 0xAC, 0x02,
-            0x00, 0x00
-        };
-        RsnaSetRsnIe(&Sup->Ctx, RsnIe, sizeof(RsnIe));
-    }
+    /* CONNECT can precede completion of the lower scan.  Seed a valid IE;
+     * association completion replaces it with the selected BSS's exact IE
+     * before EAPOL processing starts. */
+    RsnaSetRsnIe(&Sup->Ctx, NwifiDefaultRsnIe, sizeof(NwifiDefaultRsnIe));
 
     /* The supplicant is the station (SPA == our MAC). */
     RtlCopyMemory(Sup->OwnMac, Adapter->MacAddress, IEEE80211_ADDR_LEN);
@@ -266,6 +269,93 @@ NwifiSupplicantStart(
     Sup->InstallQueued = 0;
     DPRINT1("NWIFI: supplicant started for SSID len %u\n", Ssid->uSSIDLength);
     return NDIS_STATUS_SUCCESS;
+}
+
+/*
+ * Pick the security element out of an IE blob for msg2's Key Data.  The AP
+ * compares that byte for byte with the element in our association request:
+ * the RSN element (48) for WPA2, the WPA vendor element (221, 00-50-F2 type
+ * 1) for WPA1.  'PreferWpa' breaks the tie when a blob (a beacon of a mixed
+ * AP) carries both.  Returns the element length including its header, 0 if
+ * none.
+ */
+static ULONG
+NwifiFindSecurityIe(
+    _In_reads_bytes_(IeLength) PUCHAR Ies,
+    _In_ ULONG IeLength,
+    _In_ BOOLEAN PreferWpa,
+    _Out_writes_bytes_(NWIFI_MAX_BSS_IE) PUCHAR Out)
+{
+    static const UCHAR WpaOui[4] = { 0x00, 0x50, 0xF2, 0x01 };
+    PUCHAR Ie = Ies, End = Ies + IeLength;
+    PUCHAR Rsn = NULL, Wpa = NULL, Pick;
+
+    while (Ie + 2 <= End && Ie + 2 + Ie[1] <= End)
+    {
+        if (Ie[0] == 48 && Rsn == NULL)
+            Rsn = Ie;
+        else if (Ie[0] == 221 && Ie[1] >= 4 && Wpa == NULL &&
+                 RtlCompareMemory(Ie + 2, WpaOui, 4) == 4)
+            Wpa = Ie;
+        Ie += 2 + Ie[1];
+    }
+
+    Pick = (PreferWpa && Wpa != NULL) ? Wpa : (Rsn != NULL) ? Rsn : Wpa;
+    if (Pick == NULL || 2UL + Pick[1] > NWIFI_MAX_BSS_IE)
+        return 0;
+    RtlCopyMemory(Out, Pick, 2UL + Pick[1]);
+    return 2UL + Pick[1];
+}
+
+VOID
+NwifiSupplicantSelectRsnIe(
+    _In_ PNWIFI_MSM Msm,
+    _In_reads_bytes_(6) PUCHAR Bssid,
+    _In_reads_bytes_opt_(IeLength) PUCHAR SelectedIes,
+    _In_ ULONG IeLength)
+{
+    PNWIFI_SUPPLICANT Sup = Msm->Supplicant;
+    UCHAR RsnIe[NWIFI_MAX_BSS_IE];
+    ULONG RsnIeLength = 0, Index, CacheCount;
+    BOOLEAN PreferWpa;
+
+    if (Sup == NULL || !Sup->Initialised)
+        return;
+
+    PreferWpa = (Msm->Connect.AuthAlgorithm == DOT11_AUTH_ALGO_WPA_PSK ||
+                 Msm->Connect.AuthAlgorithm == DOT11_AUTH_ALGO_WPA);
+
+    CacheCount = Msm->BssCount;
+    if (SelectedIes != NULL && IeLength != 0)
+    {
+        /* Our own association request: whichever element it carries. */
+        RsnIeLength = NwifiFindSecurityIe(SelectedIes, IeLength, PreferWpa,
+                                          RsnIe);
+    }
+    else
+    {
+        NdisAcquireSpinLock(&Msm->Lock);
+        CacheCount = Msm->BssCount;
+        for (Index = 0; Index < CacheCount; Index++)
+        {
+            PNWIFI_BSS_CACHE_ENTRY Bss = &Msm->BssCache[Index];
+
+            if (!Bss->Valid ||
+                RtlCompareMemory(Bss->Bssid, Bssid, IEEE80211_ADDR_LEN) !=
+                    IEEE80211_ADDR_LEN)
+                continue;
+            RsnIeLength = NwifiFindSecurityIe(Bss->Ie, Bss->IeLength,
+                                              PreferWpa, RsnIe);
+            break;
+        }
+        NdisReleaseSpinLock(&Msm->Lock);
+    }
+
+    if (RsnIeLength != 0)
+        RsnaSetRsnIe(&Sup->Ctx, RsnIe, RsnIeLength);
+    DPRINT1("NWIFI: selected BSS %s IE length %lu (cache count %lu)\n",
+            (RsnIeLength != 0 && RsnIe[0] == 221) ? "WPA" : "RSN",
+            RsnIeLength, CacheCount);
 }
 
 VOID
@@ -353,6 +443,7 @@ NwifiSupplicantInstallKeysWorker(
     PNWIFI_ADAPTER Adapter;
     RSNA_KEYS Keys;
     DOT11_CIPHER_ALGORITHM Cipher;
+    NDIS_STATUS PairwiseStatus, GroupStatus = NDIS_STATUS_SUCCESS;
 
     UNREFERENCED_PARAMETER(NdisIoWorkItemHandle);
 
@@ -366,7 +457,7 @@ NwifiSupplicantInstallKeysWorker(
      * supplicant between queueing and running this item. */
     NdisAcquireSpinLock(&Msm->Lock);
     Sup = Msm->Supplicant;
-    if (Sup == NULL || !Sup->Initialised || Sup->KeysInstalled)
+    if (Sup == NULL || !Sup->Initialised)
     {
         NdisReleaseSpinLock(&Msm->Lock);
         return;
@@ -376,19 +467,64 @@ NwifiSupplicantInstallKeysWorker(
         NdisReleaseSpinLock(&Msm->Lock);
         return;
     }
+    if (Sup->KeysInstalled)
+    {
+        /* Already up: this run is a group-key rekey.  Install ONLY the new
+         * GTK -- re-installing the pairwise key would reset its packet
+         * numbers and turn our next frames into replays. */
+        ULONG Gen = RsnaGetGtkGeneration(&Sup->Ctx);
+        if (Gen == Sup->GtkGenInstalled || Keys.gtkLen == 0)
+        {
+            NdisReleaseSpinLock(&Msm->Lock);
+            return;
+        }
+        NdisReleaseSpinLock(&Msm->Lock);
+
+        {
+            DOT11_CIPHER_ALGORITHM GroupCipher =
+                (Keys.gtkLen == 32) ? DOT11_CIPHER_ALGO_TKIP
+                                    : NwifiDot11CipherFromRsna(Keys.pairwiseCipher);
+            GroupStatus = NwifiInstallGroupKey(Adapter, GroupCipher,
+                                               Keys.gtkKeyId, (PUCHAR)Keys.gtk,
+                                               (ULONG)Keys.gtkLen);
+        }
+        NdisAcquireSpinLock(&Msm->Lock);
+        if (GroupStatus == NDIS_STATUS_SUCCESS && Msm->Supplicant == Sup)
+            Sup->GtkGenInstalled = Gen;
+        NdisReleaseSpinLock(&Msm->Lock);
+        DPRINT1("NWIFI: group rekey: GTK gen %lu install -> 0x%08X\n",
+                Gen, GroupStatus);
+        return;
+    }
     Sup->KeysInstalled = TRUE;
+    Sup->GtkGenInstalled = RsnaGetGtkGeneration(&Sup->Ctx);
     NdisReleaseSpinLock(&Msm->Lock);
 
     Cipher = NwifiDot11CipherFromRsna(Keys.pairwiseCipher);
 
     /* Pairwise temporal key (PTK TK) for the AP, then the group key (GTK). */
-    NwifiInstallPairwiseKey(Adapter, Cipher, Msm->CurrentBssid,
-                            (PUCHAR)Keys.tk, (ULONG)Keys.tkLen);
+    PairwiseStatus = NwifiInstallPairwiseKey(Adapter, Cipher,
+                                             Msm->CurrentBssid,
+                                             (PUCHAR)Keys.tk,
+                                             (ULONG)Keys.tkLen);
 
     if (Keys.gtkLen != 0)
     {
-        NwifiInstallGroupKey(Adapter, Cipher, Keys.gtkKeyId,
-                             (PUCHAR)Keys.gtk, (ULONG)Keys.gtkLen);
+        DOT11_CIPHER_ALGORITHM GroupCipher =
+            (Keys.gtkLen == 32) ? DOT11_CIPHER_ALGO_TKIP : Cipher;
+        GroupStatus = NwifiInstallGroupKey(Adapter, GroupCipher,
+                                           Keys.gtkKeyId, (PUCHAR)Keys.gtk,
+                                           (ULONG)Keys.gtkLen);
+    }
+
+    if (PairwiseStatus != NDIS_STATUS_SUCCESS ||
+        GroupStatus != NDIS_STATUS_SUCCESS)
+    {
+        NdisAcquireSpinLock(&Msm->Lock);
+        Sup->KeysInstalled = FALSE;
+        NdisReleaseSpinLock(&Msm->Lock);
+        DPRINT1("NWIFI: key installation failed; secure link remains down\n");
+        return;
     }
 
     /* Handshake done and keys installed: bring the secure link up. */
@@ -452,10 +588,13 @@ NwifiSupplicantRxEapol(
                            OutFrame, (ULONG)OutLen, TRUE);
     }
 
-    if (NewState == RSNA_STATE_COMPLETED && !Sup->KeysInstalled)
+    if (NewState == RSNA_STATE_COMPLETED &&
+        (!Sup->KeysInstalled ||
+         RsnaGetGtkGeneration(&Sup->Ctx) != Sup->GtkGenInstalled))
     {
-        /* Install the derived keys at PASSIVE_LEVEL via the work item;
-         * queue exactly once. */
+        /* Initial install after the 4-way handshake, or a group-key rekey
+         * that must reach the hardware.  Runs at PASSIVE_LEVEL via the work
+         * item; queue exactly once (the worker re-checks the generation). */
         if (Sup->InstallWorkItem != NULL &&
             InterlockedCompareExchange(&Sup->InstallQueued, 1, 0) == 0)
         {

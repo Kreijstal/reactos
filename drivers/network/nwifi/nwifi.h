@@ -195,6 +195,7 @@ typedef struct _NWIFI_ADAPTER
 
     /* ---- Shared identity / state ---- */
     UCHAR         MacAddress[IEEE80211_ADDR_LEN];   /* lower MAC == upper MAC */
+    WCHAR         Description[128];          /* lower physical adapter name */
     NWIFI_STATE   State;
     ULONG         CurrentPacketFilter;
     ULONG         CurrentLookahead;
@@ -223,6 +224,13 @@ typedef struct _NWIFI_ADAPTER
     /* ---- Statistics ---- */
     ULONG64       TxOk;
     ULONG64       RxOk;
+    /* RxOk counts every frame indicated up; these split it by destination so
+     * OID_GEN_STATISTICS can report ifHCInMulticastPkts/ifHCInBroadcastPkts
+     * instead of reporting everything as directed.  Reporting everything as
+     * directed makes "InBc = 0" true by construction, which is exactly the
+     * false evidence that made the AR9485 group-RX hunt chase a phantom. */
+    ULONG64       RxMulticast;
+    ULONG64       RxBroadcast;
     ULONG64       TxError;
     ULONG64       RxError;
     ULONG64       TxBytes;

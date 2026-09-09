@@ -739,6 +739,38 @@ NwifiMsmIndicateStatus(
 
                         if (Msm->Supplicant != NULL)
                         {
+                            PUCHAR SelectedIes = NULL;
+                            ULONG SelectedIeLength = 0;
+                            /* Message 2 of the 4-way handshake must carry
+                             * the RSN element from OUR association request,
+                             * byte for byte; the AP compares them.  The
+                             * miniport reports that request body here
+                             * (capability 2 + listen interval 2, then IEs;
+                             * a reassociation adds the current AP address). */
+                            if (P->uAssocReqSize > 4 &&
+                                P->uAssocReqOffset <= BufferSize &&
+                                P->uAssocReqSize <=
+                                    BufferSize - P->uAssocReqOffset)
+                            {
+                                ULONG Fixed = P->bReAssocReq ? 10 : 4;
+                                if (P->uAssocReqSize > Fixed)
+                                {
+                                    SelectedIes = (PUCHAR)P +
+                                                  P->uAssocReqOffset + Fixed;
+                                    SelectedIeLength = P->uAssocReqSize - Fixed;
+                                }
+                            }
+                            else if (P->uIHVDataSize != 0 &&
+                                P->uIHVDataOffset <= BufferSize &&
+                                P->uIHVDataSize <=
+                                    BufferSize - P->uIHVDataOffset)
+                            {
+                                SelectedIes = (PUCHAR)P + P->uIHVDataOffset;
+                                SelectedIeLength = P->uIHVDataSize;
+                            }
+                            NwifiSupplicantSelectRsnIe(Msm, P->MacAddr,
+                                                       SelectedIes,
+                                                       SelectedIeLength);
                             NwifiSupplicantSetApAddr(Msm, P->MacAddr);
                         }
 
