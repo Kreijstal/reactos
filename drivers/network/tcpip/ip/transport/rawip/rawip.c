@@ -227,7 +227,28 @@ NTSTATUS RawIPSendDatagram(
     TI_DbgPrint(MID_TRACE,("About to get route to destination\n"));
 
     LocalAddress = AddrFile->Address;
-    if (AddrIsUnspecified(&LocalAddress))
+    if (AddrFile->UnicastIfIndex != 0)
+    {
+        /* IP_UNICAST_IF pins this address file to one outgoing interface */
+        PIP_INTERFACE Interface = GetInterfaceByIndex(AddrFile->UnicastIfIndex);
+        if (!Interface) {
+            UnlockObject(AddrFile);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        NCE = RouteGetRouteToDestinationOnInterface( &RemoteAddress, Interface );
+        if (!NCE) {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
+        }
+
+        if (AddrIsUnspecified(&LocalAddress))
+        {
+            /* Use the address of the interface we were told to send from */
+            LocalAddress = Interface->Unicast;
+        }
+    }
+    else if (AddrIsUnspecified(&LocalAddress))
     {
         /* If the local address is unspecified (0),
          * then use the unicast address of the

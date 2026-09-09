@@ -200,6 +200,10 @@ GetTdiTypeId(
                  *TdiId = AO_OPTION_IP_HDRINCL;
                  return;
 
+             case IP_UNICAST_IF:
+                 *TdiId = AO_OPTION_IP_UCASTIF;
+                 return;
+
              default:
                 break;
           }
@@ -268,6 +272,23 @@ WSHGetSocketInformation(
 
                     *(BOOL*)OptionValue = Context->KeepAlive;
                     *OptionLength = sizeof(BOOL);
+                    return NO_ERROR;
+            }
+            break;
+
+        case IPPROTO_IP:
+            switch (OptionName)
+            {
+                case IP_UNICAST_IF:
+                    if (*OptionLength < sizeof(DWORD))
+                    {
+                        *OptionLength = sizeof(DWORD);
+                        return WSAEFAULT;
+                    }
+
+                    /* Returned exactly as it was set: network byte order */
+                    *(DWORD*)OptionValue = Context->UnicastIf;
+                    *OptionLength = sizeof(DWORD);
                     return NO_ERROR;
             }
             break;
@@ -850,6 +871,15 @@ WSHSetSocketInformation(
                     /* Send these to TCPIP */
                     break;
 
+                case IP_UNICAST_IF:
+                    if (OptionLength < sizeof(DWORD))
+                    {
+                        return WSAEFAULT;
+                    }
+                    /* Remember it for WSHGetSocketInformation and send it to TCPIP */
+                    Context->UnicastIf = *(DWORD*)OptionValue;
+                    break;
+
                 default:
                     /* Invalid option -- FIXME */
                     DPRINT1("Set: Received unsupported IPPROTO_IP option %d\n", OptionName);
@@ -894,6 +924,14 @@ WSHSetSocketInformation(
     Info->ID.toi_id = TdiId;
     Info->BufferSize = OptionLength;
     memcpy(Info->Buffer, OptionValue, OptionLength);
+
+    if (Level == IPPROTO_IP && OptionName == IP_UNICAST_IF)
+    {
+        /* Windows takes the interface index in network byte order here.
+         * TCPIP stores and compares it in host byte order */
+        Info->BufferSize = sizeof(ULONG);
+        *(PULONG)Info->Buffer = RtlUlongByteSwap(*(PULONG)OptionValue);
+    }
 
     if (Context->SocketState == SocketStateCreated)
     {
