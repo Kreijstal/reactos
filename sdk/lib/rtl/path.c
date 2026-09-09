@@ -760,19 +760,27 @@ RtlGetFullPathName_Ustr(
     ULONG  SourceLength;
 
 
-    /* For now, assume the name is valid */
     DPRINT("Filename: %wZ\n", FileName);
     DPRINT("Size and buffer: %lx %p\n", Size, Buffer);
-    if (InvalidName) *InvalidName = FALSE;
 
-    /* Handle initial path type and failure case */
-    *PathType = RtlPathTypeUnknown;
-    if ((FileName->Length == 0) || (FileName->Buffer[0] == UNICODE_NULL)) return 0;
+    /* Windows touches the arguments in a fixed order that callers can
+       observe through the faults (the apitest does): PathType is read
+       first (a NULL PathType faults here, leaving it unmodified), then
+       the optional InvalidName is cleared, then the name is dereferenced,
+       and only then is PathType actually written. */
+    (void)*(volatile RTL_PATH_TYPE *)PathType;
+
+    /* For now, assume the name is valid */
+    if (InvalidName) *InvalidName = FALSE;
 
     /* Break filename into component parts */
     FileNameBuffer = FileName->Buffer;
     FileNameLength = FileName->Length;
     FileNameChars  = FileNameLength / sizeof(WCHAR);
+
+    /* Handle initial path type and failure case */
+    *PathType = RtlPathTypeUnknown;
+    if ((FileNameLength == 0) || (FileNameBuffer[0] == UNICODE_NULL)) return 0;
 
     /* Kill trailing spaces */
     c = FileNameBuffer[FileNameChars - 1];

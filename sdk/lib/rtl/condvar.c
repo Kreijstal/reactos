@@ -357,6 +357,9 @@ NTAPI
 RtlReleaseSRWLockShared(IN OUT PRTL_SRWLOCK SRWLock);
 
 static
+#if defined(__GNUC__) && defined(_M_AMD64)
+__attribute__((force_align_arg_pointer))
+#endif
 NTSTATUS
 InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
               IN OUT PRTL_CRITICAL_SECTION CriticalSection OPTIONAL,
@@ -368,15 +371,18 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
        These caller provided lock must be held on entry and will be
        held again on return. */
 
-    COND_VAR_WAIT_ENTRY OwnEntry;
+    PCOND_VAR_WAIT_ENTRY OwnEntry;
     NTSTATUS Status;
 
     ASSERT((CriticalSection == NULL) != (SRWLock == NULL));
 
-    RtlZeroMemory(&OwnEntry, sizeof(OwnEntry));
+    OwnEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY,
+                               sizeof(*OwnEntry));
+    if (!OwnEntry)
+        return STATUS_NO_MEMORY;
 
     /* Put OwnEntry on the list. */
-    InternalLockCondVar(ConditionVariable, &OwnEntry, NULL);
+    InternalLockCondVar(ConditionVariable, OwnEntry, NULL);
     InternalUnlockCondVar(ConditionVariable, NULL);
 
     /* We can now drop the caller provided lock as a preparation for
@@ -399,32 +405,32 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
 
     /* Now sleep using the caller provided timeout. */
     Status = NtWaitForKeyedEvent(NULL,
-                                 &OwnEntry.WaitKey,
+                                 &OwnEntry->WaitKey,
                                  FALSE,
                                  (PLARGE_INTEGER)TimeOut);
 
     ASSERT(STATUS_INVALID_HANDLE != Status);
 
-    if (!*InternalGetListRemovalHandledFlag(&OwnEntry))
+    if (!*InternalGetListRemovalHandledFlag(OwnEntry))
     {
         /* Remove OwnEntry from the list again, since it still seems to
            be on the list. We will know for sure once we've acquired
            the lock. */
         if (InternalLockCondVar(ConditionVariable,
                                 NULL,
-                                InternalGetListRemovalHandledFlag(&OwnEntry)))
+                                InternalGetListRemovalHandledFlag(OwnEntry)))
         {
             /* Unlock and potentially remove OwnEntry. Self-removal is
                usually only necessary when a timeout occurred. */
             InternalUnlockCondVar(ConditionVariable,
-                                  !OwnEntry.ListRemovalHandled ?
-                                  &OwnEntry : NULL);
+                                  !OwnEntry->ListRemovalHandled ?
+                                  OwnEntry : NULL);
         }
     }
 
 #ifdef _DEBUG
     /* Clear OwnEntry to aid in detecting bugs. */
-    RtlZeroMemory(&OwnEntry, sizeof(OwnEntry));
+    RtlZeroMemory(OwnEntry, sizeof(*OwnEntry));
 #endif
 
     /* Reacquire the caller provided lock, as we are about to return. */
@@ -443,6 +449,8 @@ InternalSleep(IN OUT PRTL_CONDITION_VARIABLE ConditionVariable,
     {
         RtlEnterCriticalSection(CriticalSection);
     }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, OwnEntry);
 
     /* Return whatever NtWaitForKeyedEvent returned. */
     return Status;
