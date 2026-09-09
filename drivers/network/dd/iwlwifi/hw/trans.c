@@ -27,22 +27,18 @@
  * datasheet asks for.  Anything longer yields, which MiniportInitializeEx
  * (PASSIVE_LEVEL) is allowed to do.
  */
-#define IWL_STALL_MAX_US    100
+#define IWL_STALL_MAX_US    1000
 
 VOID
 IwlDelayUs(_In_ ULONG Microseconds)
 {
-    LARGE_INTEGER Interval;
-
     if (Microseconds <= IWL_STALL_MAX_US || KeGetCurrentIrql() > PASSIVE_LEVEL)
     {
         KeStallExecutionProcessor(Microseconds);
         return;
     }
 
-    /* Relative interval, 100 ns units. */
-    Interval.QuadPart = -((LONGLONG)Microseconds * 10);
-    KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+    NdisMSleep(Microseconds);
 }
 
 BOOLEAN
@@ -77,6 +73,11 @@ IwlSetHwReady(_In_ PIWL_ADAPTER Adapter)
 {
     ULONG Elapsed = 0;
 
+    /* iwl_pcie_set_hw_ready(): request the PCI ownership semaphore before
+     * polling it.  Merely polling leaves NIC_READY clear forever. */
+    IwlSetBit(Adapter, CSR_HW_IF_CONFIG_REG,
+              CSR_HW_IF_CONFIG_REG_BIT_NIC_READY);
+
     do
     {
         if (IwlRead32(Adapter, CSR_HW_IF_CONFIG_REG) &
@@ -97,6 +98,12 @@ NDIS_STATUS
 IwlPrepareCardHw(_In_ PIWL_ADAPTER Adapter)
 {
     ULONG Attempt;
+    ULONG HwIfConfig;
+
+    DPRINT1("iwlwifi: prepare-card-hw: reading HW_IF_CONFIG\n");
+    HwIfConfig = IwlRead32(Adapter, CSR_HW_IF_CONFIG_REG);
+    DPRINT1("iwlwifi: prepare-card-hw: initial HW_IF_CONFIG=0x%08x\n",
+            HwIfConfig);
 
     /* Common case: nobody else holds the device. */
     if (IwlSetHwReady(Adapter))
@@ -107,16 +114,22 @@ IwlPrepareCardHw(_In_ PIWL_ADAPTER Adapter)
 
     /* Otherwise the link power-management state can keep the device from
      * answering; disable it before asking again. */
-    IwlSetBit(Adapter, CSR_DBG_LINK_PWR_MGMT_REG,
-              CSR_RESET_LINK_PWR_MGMT_DISABLED);
+    DPRINT1("iwlwifi: prepare-card-hw: disabling link power management\n");
+    HwIfConfig = IwlRead32(Adapter, CSR_DBG_LINK_PWR_MGMT_REG);
+    DPRINT1("iwlwifi: prepare-card-hw: DBG_LINK_PWR=0x%08x\n", HwIfConfig);
+    IwlWrite32(Adapter, CSR_DBG_LINK_PWR_MGMT_REG,
+               HwIfConfig | CSR_RESET_LINK_PWR_MGMT_DISABLED);
+    DPRINT1("iwlwifi: prepare-card-hw: link power management disabled\n");
     IwlDelayUs(2000);
 
     for (Attempt = 0; Attempt < IWL_PREPARE_ATTEMPTS; Attempt++)
     {
         ULONG Elapsed = 0;
 
+        DPRINT1("iwlwifi: prepare-card-hw: PREPARE attempt %u\n", Attempt + 1);
         IwlSetBit(Adapter, CSR_HW_IF_CONFIG_REG,
                   CSR_HW_IF_CONFIG_REG_PREPARE);
+        DPRINT1("iwlwifi: prepare-card-hw: PREPARE written\n");
 
         do
         {
