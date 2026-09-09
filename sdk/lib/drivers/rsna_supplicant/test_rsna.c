@@ -499,6 +499,86 @@ static void TestHandshake(void)
             Check("msg3 retransmit stays COMPLETED", st == RSNA_STATE_COMPLETED, NULL, NULL, 0);
             Check("msg3 retransmit re-emits msg4", replyLen >= EAPOL_KEY_FRAME_FIXED_LEN, NULL, NULL, 0);
         }
+
+        /* ---- group-key rekey (RSN): AP sends group msg1 with a NEW GTK,
+         *      wrapped with the KEK and MIC'd with the KCK.  The supplicant
+         *      must verify, store the new GTK, bump the generation, and
+         *      reply with group msg2 (Group + MIC + Secure, empty Key Data). */
+        {
+            rsna_u8 gtk2[16];
+            rsna_u8 gtkKde[2 + 6 + 16];
+            rsna_u8 plainKd[64];
+            rsna_size plainKdLen;
+            rsna_u8 wrapped[64];
+            const rsna_u8 *kck = apPtk;
+            const rsna_u8 *kek = apPtk + 16;
+            rsna_u16 gInfo;
+            rsna_u32 genBefore = RsnaGetGtkGeneration(&ctx);
+
+            for (i = 0; i < 16; i++) gtk2[i] = (rsna_u8)(0xC0 + i);
+            gtkKde[0] = KDE_IE_VENDOR;
+            gtkKde[1] = (rsna_u8)(4 + 2 + 16);
+            gtkKde[2] = KDE_OUI_0; gtkKde[3] = KDE_OUI_1; gtkKde[4] = KDE_OUI_2;
+            gtkKde[5] = KDE_TYPE_GTK;
+            gtkKde[6] = 0x02;                 /* KeyID=2 */
+            gtkKde[7] = 0x00;
+            memcpy(&gtkKde[8], gtk2, 16);
+            memcpy(plainKd, gtkKde, sizeof(gtkKde));
+            plainKdLen = sizeof(gtkKde);
+            while ((plainKdLen % 8) != 0) plainKd[plainKdLen++] = 0x00;
+            RsnaAesWrap(kek, 128, plainKd, plainKdLen / 8, wrapped);
+
+            replay[7] = 3;                    /* strictly greater than msg3 */
+            gInfo = KEYINFO_VER_HMAC_SHA1_AES | KEYINFO_KEY_ACK |
+                    KEYINFO_KEY_MIC | KEYINFO_SECURE | KEYINFO_ENCRYPTED_DATA;
+            frameLen = ApBuildKeyFrame(frame, gInfo, replay, anonce,
+                                       kck, NULL, wrapped,
+                                       (plainKdLen / 8 + 1) * 8);
+            replyLen = sizeof(reply);
+            st = RsnaRxEapol(&ctx, frame, frameLen, reply, &replyLen);
+            Check("group rekey stays COMPLETED", st == RSNA_STATE_COMPLETED, NULL, NULL, 0);
+            Check("group rekey emits group msg2",
+                  replyLen >= EAPOL_KEY_FRAME_FIXED_LEN, NULL, NULL, 0);
+            Check("group rekey bumps generation",
+                  RsnaGetGtkGeneration(&ctx) == genBefore + 1, NULL, NULL, 0);
+            {
+                RSNA_KEYS keys;
+                RsnaGetKeys(&ctx, &keys);
+                CheckBytes("rekey GTK matches AP GTK", keys.gtk, gtk2, 16);
+                Check("rekey GTK id == 2", keys.gtkKeyId == 2, NULL, NULL, 0);
+                CheckBytes("rekey leaves PTK untouched", keys.ptk, apPtk, 48);
+            }
+            /* group msg2 must have Group type (KEY_TYPE clear) and carry a MIC
+             * the AP can verify. */
+            {
+                rsna_u16 r2 = (rsna_u16)((reply[EAPOL_HDR_LEN + KEYDESC_OFF_KEYINFO] << 8) |
+                                          reply[EAPOL_HDR_LEN + KEYDESC_OFF_KEYINFO + 1]);
+                rsna_u8 full[RSNA_SHA1_DIGEST_LEN];
+                rsna_u8 rxMic[KEYDESC_MIC_LEN];
+                rsna_u8 m2copy[512];
+                Check("group msg2 is Group-type", (r2 & KEYINFO_KEY_TYPE) == 0, NULL, NULL, 0);
+                memcpy(m2copy, reply, replyLen);
+                memcpy(rxMic, &m2copy[EAPOL_HDR_LEN + KEYDESC_OFF_MIC], KEYDESC_MIC_LEN);
+                memset(&m2copy[EAPOL_HDR_LEN + KEYDESC_OFF_MIC], 0, KEYDESC_MIC_LEN);
+                RsnaHmacSha1(apPtk, RSNA_KCK_LEN, m2copy, replyLen, full);
+                Check("AP verifies group msg2 MIC",
+                      memcmp(full, rxMic, KEYDESC_MIC_LEN) == 0, NULL, NULL, 0);
+            }
+
+            /* Retransmit of the SAME group msg1 (our msg2 lost): equal counter,
+             * must re-emit msg2 and NOT bump the generation again. */
+            {
+                rsna_u32 g = RsnaGetGtkGeneration(&ctx);
+                replyLen = sizeof(reply);
+                st = RsnaRxEapol(&ctx, frame, frameLen, reply, &replyLen);
+                Check("group msg1 retransmit stays COMPLETED",
+                      st == RSNA_STATE_COMPLETED, NULL, NULL, 0);
+                Check("group msg1 retransmit re-emits msg2",
+                      replyLen >= EAPOL_KEY_FRAME_FIXED_LEN, NULL, NULL, 0);
+                Check("group msg1 retransmit does not re-bump generation",
+                      RsnaGetGtkGeneration(&ctx) == g, NULL, NULL, 0);
+            }
+        }
     }
 
     /* ---- negative tests ---- */
@@ -651,6 +731,176 @@ static void TestHandshakeTkip(void)
     }
 }
 
+/*
+ * WPA1 (pre-RSN, descriptor type 254) as hostapd wpa=1 speaks it:
+ *   msg3 carries the AP's WPA vendor IE in the CLEAR and no GTK, msg4 has
+ *   Secure clear, and the GTK arrives afterwards in a group-key handshake
+ *   whose Key Data is the RC4-encrypted raw GTK with the index in Key
+ *   Information bits 4-5.  Every reply must echo descriptor 254.
+ */
+static void TestHandshakeWpa1(void)
+{
+    RSNA_CTX ctx;
+    rsna_u8 ssid[] = { 'R','O','S','-','W','P','A','-','T','K','I','P' };
+    rsna_u8 aa[6]  = { 0xb0,0xdc,0xef,0x9e,0x2b,0x31 };
+    rsna_u8 spa[6] = { 0x6c,0x71,0xd9,0x68,0x9c,0x6d };
+    /* WPA IE: 221 22 | 00-50-F2 01 | v1 | group TKIP | 1 pairwise TKIP | 1 AKM PSK */
+    static const rsna_u8 wpaIe[24] = {
+        0xdd, 0x16, 0x00, 0x50, 0xf2, 0x01, 0x01, 0x00,
+        0x00, 0x50, 0xf2, 0x02,
+        0x01, 0x00, 0x00, 0x50, 0xf2, 0x02,
+        0x01, 0x00, 0x00, 0x50, 0xf2, 0x02
+    };
+    rsna_u8 anonce[32], replay[8], iv[16];
+    rsna_u8 frame[512], reply[512];
+    rsna_size frameLen, replyLen;
+    rsna_u8 apPtk[64];
+    rsna_u8 pmk[RSNA_PMK_LEN];
+    const rsna_u8 *kck = apPtk;
+    const rsna_u8 *kek = apPtk + 16;
+    RSNA_STATE st;
+    int i;
+
+    printf("\n--- Simulated WPA1 (descriptor 254) handshake + group-key delivery ---\n");
+
+    RsnaInit(&ctx, ssid, sizeof(ssid), "reactos123", 10);
+    RsnaSetApAddr(&ctx, aa);
+    RsnaSetStaAddr(&ctx, spa);
+    RsnaSetRsnIe(&ctx, wpaIe, sizeof(wpaIe));
+    RsnaGetPmk(&ctx, pmk);
+
+    /* msg1: descriptor 254, ver 1, Pairwise + Ack, no MIC. */
+    for (i = 0; i < 32; i++) anonce[i] = (rsna_u8)(0x70 + i);
+    memset(replay, 0, 8); replay[7] = 1;
+    frameLen = ApBuildKeyFrame(frame,
+                               KEYINFO_VER_HMAC_MD5_RC4 | KEYINFO_KEY_TYPE | KEYINFO_KEY_ACK,
+                               replay, anonce, NULL, NULL, NULL, 0);
+    frame[EAPOL_HDR_LEN + KEYDESC_OFF_TYPE] = EAPOL_KEY_DESC_WPA;
+    replyLen = sizeof(reply);
+    st = RsnaRxEapol(&ctx, frame, frameLen, reply, &replyLen);
+    Check("WPA1 msg1 -> PTK_NEGOTIATING", st == RSNA_STATE_PTK_NEGOTIATING, NULL, NULL, 0);
+    {
+        const rsna_u8 *m2body = reply + EAPOL_HDR_LEN;
+        rsna_u16 kdLen = (rsna_u16)((m2body[KEYDESC_OFF_DATALEN] << 8) |
+                                    m2body[KEYDESC_OFF_DATALEN + 1]);
+        Check("WPA1 msg2 echoes descriptor 254",
+              m2body[KEYDESC_OFF_TYPE] == EAPOL_KEY_DESC_WPA, NULL, NULL, 0);
+        Check("WPA1 msg2 Key Data is the WPA IE",
+              kdLen == sizeof(wpaIe) &&
+              memcmp(&m2body[KEYDESC_OFF_DATA], wpaIe, sizeof(wpaIe)) == 0,
+              &m2body[KEYDESC_OFF_DATA], wpaIe, sizeof(wpaIe));
+        RsnaDerivePtk(pmk, aa, spa, anonce, &m2body[KEYDESC_OFF_NONCE],
+                      apPtk, sizeof(apPtk));
+    }
+
+    /* msg3: Pairwise + Ack + MIC + Install; Secure and Encrypted CLEAR; Key
+     * Data = the AP's WPA IE in plaintext, no GTK. */
+    {
+        rsna_u8 full[RSNA_MD5_DIGEST_LEN];
+        rsna_u8 *body;
+        rsna_u16 m3info = KEYINFO_VER_HMAC_MD5_RC4 | KEYINFO_KEY_TYPE |
+                          KEYINFO_KEY_ACK | KEYINFO_KEY_MIC | KEYINFO_INSTALL;
+
+        replay[7] = 2;
+        frameLen = ApBuildKeyFrame(frame, m3info, replay, anonce,
+                                   NULL, NULL, wpaIe, sizeof(wpaIe));
+        body = frame + EAPOL_HDR_LEN;
+        body[KEYDESC_OFF_TYPE] = EAPOL_KEY_DESC_WPA;
+        RsnaHmacMd5(kck, RSNA_KCK_LEN, frame, frameLen, full);
+        memcpy(&body[KEYDESC_OFF_MIC], full, KEYDESC_MIC_LEN);
+
+        replyLen = sizeof(reply);
+        st = RsnaRxEapol(&ctx, frame, frameLen, reply, &replyLen);
+        Check("WPA1 msg3 (no GTK) -> COMPLETED", st == RSNA_STATE_COMPLETED, NULL, NULL, 0);
+        if (st != RSNA_STATE_COMPLETED)
+            printf("    (RsnaLastError = %d)\n", (int)RsnaLastError(&ctx));
+        Check("WPA1 msg4 emitted", replyLen != 0, NULL, NULL, 0);
+        if (replyLen != 0)
+        {
+            const rsna_u8 *m4body = reply + EAPOL_HDR_LEN;
+            rsna_u16 r4 = (rsna_u16)((m4body[KEYDESC_OFF_KEYINFO] << 8) |
+                                     m4body[KEYDESC_OFF_KEYINFO + 1]);
+            rsna_u8 rxMic[KEYDESC_MIC_LEN], calc[RSNA_MD5_DIGEST_LEN];
+            rsna_u8 copy[512];
+            Check("WPA1 msg4 echoes descriptor 254",
+                  m4body[KEYDESC_OFF_TYPE] == EAPOL_KEY_DESC_WPA, NULL, NULL, 0);
+            Check("WPA1 msg4 Secure clear (echoes msg3)",
+                  (r4 & KEYINFO_SECURE) == 0, NULL, NULL, 0);
+            memcpy(copy, reply, replyLen);
+            memcpy(rxMic, &m4body[KEYDESC_OFF_MIC], KEYDESC_MIC_LEN);
+            memset(copy + EAPOL_HDR_LEN + KEYDESC_OFF_MIC, 0, KEYDESC_MIC_LEN);
+            RsnaHmacMd5(kck, RSNA_KCK_LEN, copy, replyLen, calc);
+            Check("AP verifies WPA1 msg4 MIC (HMAC-MD5)",
+                  memcmp(rxMic, calc, KEYDESC_MIC_LEN) == 0, rxMic, calc, KEYDESC_MIC_LEN);
+        }
+        {
+            RSNA_KEYS keys;
+            Check("WPA1 keys available", RsnaGetKeys(&ctx, &keys) == RSNA_OK, NULL, NULL, 0);
+            Check("WPA1 no GTK yet", keys.gtkLen == 0, NULL, NULL, 0);
+            Check("WPA1 GTK generation still 0", RsnaGetGtkGeneration(&ctx) == 0, NULL, NULL, 0);
+            Check("WPA1 cipher == TKIP", keys.pairwiseCipher == RSNA_CIPHER_TKIP, NULL, NULL, 0);
+        }
+    }
+
+    /* Group-key handshake msg1: Group + Ack + MIC + Secure, index 1 in bits
+     * 4-5, Key Length 32, Key Data = RC4(IV || KEK)(raw GTK). */
+    {
+        rsna_u8 gtk[32], encKd[32];
+        rsna_u8 rc4key[32];
+        rsna_u8 full[RSNA_MD5_DIGEST_LEN];
+        rsna_u8 *body;
+        RSNA_RC4_CTX rc4;
+        rsna_u16 g1info = KEYINFO_VER_HMAC_MD5_RC4 | KEYINFO_KEY_ACK |
+                          KEYINFO_KEY_MIC | KEYINFO_SECURE |
+                          (1 << KEYINFO_KEY_INDEX_S);
+        rsna_u8 zeroNonce[32];
+
+        for (i = 0; i < 32; i++) gtk[i] = (rsna_u8)(0xa0 + i);
+        for (i = 0; i < 16; i++) iv[i] = (rsna_u8)(0x30 + i);
+        memset(zeroNonce, 0, sizeof(zeroNonce));
+        memcpy(rc4key, iv, 16);
+        memcpy(rc4key + 16, kek, 16);
+        RsnaRc4Init(&rc4, rc4key, sizeof(rc4key));
+        RsnaRc4Skip(&rc4, 256);
+        RsnaRc4Crypt(&rc4, gtk, encKd, sizeof(gtk));
+
+        replay[7] = 3;
+        frameLen = ApBuildKeyFrame(frame, g1info, replay, zeroNonce,
+                                   NULL, iv, encKd, sizeof(encKd));
+        body = frame + EAPOL_HDR_LEN;
+        body[KEYDESC_OFF_TYPE] = EAPOL_KEY_DESC_WPA;
+        body[KEYDESC_OFF_KEYLEN] = 0; body[KEYDESC_OFF_KEYLEN + 1] = 32;
+        RsnaHmacMd5(kck, RSNA_KCK_LEN, frame, frameLen, full);
+        memcpy(&body[KEYDESC_OFF_MIC], full, KEYDESC_MIC_LEN);
+
+        replyLen = sizeof(reply);
+        st = RsnaRxEapol(&ctx, frame, frameLen, reply, &replyLen);
+        Check("WPA1 group msg1 stays COMPLETED", st == RSNA_STATE_COMPLETED, NULL, NULL, 0);
+        if (RsnaLastError(&ctx) != RSNA_OK)
+            printf("    (RsnaLastError = %d)\n", (int)RsnaLastError(&ctx));
+        Check("WPA1 group msg2 emitted", replyLen != 0, NULL, NULL, 0);
+        Check("WPA1 GTK generation now 1", RsnaGetGtkGeneration(&ctx) == 1, NULL, NULL, 0);
+        {
+            RSNA_KEYS keys;
+            RsnaGetKeys(&ctx, &keys);
+            CheckBytes("WPA1 GTK delivered", keys.gtk, gtk, 32);
+            Check("WPA1 GTK length == 32", keys.gtkLen == 32, NULL, NULL, 0);
+            Check("WPA1 GTK key index == 1", keys.gtkKeyId == 1, NULL, NULL, 0);
+        }
+        if (replyLen != 0)
+        {
+            const rsna_u8 *g2body = reply + EAPOL_HDR_LEN;
+            rsna_u16 r2 = (rsna_u16)((g2body[KEYDESC_OFF_KEYINFO] << 8) |
+                                     g2body[KEYDESC_OFF_KEYINFO + 1]);
+            Check("WPA1 group msg2 echoes descriptor 254",
+                  g2body[KEYDESC_OFF_TYPE] == EAPOL_KEY_DESC_WPA, NULL, NULL, 0);
+            Check("WPA1 group msg2 is Group-type + Secure",
+                  (r2 & KEYINFO_KEY_TYPE) == 0 && (r2 & KEYINFO_SECURE) != 0,
+                  NULL, NULL, 0);
+        }
+    }
+}
+
 /* ================================================================== */
 
 int main(void)
@@ -671,6 +921,7 @@ int main(void)
 
     TestHandshake();
     TestHandshakeTkip();
+    TestHandshakeWpa1();
 
     printf("\n=== RESULT: %d passed, %d failed ===\n", g_pass, g_fail);
     return (g_fail == 0) ? 0 : 1;

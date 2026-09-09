@@ -325,6 +325,11 @@ RSNA_STATUS RsnaGetKeys(const RSNA_CTX *ctx, RSNA_KEYS *keys)
     return RSNA_OK;
 }
 
+rsna_u32 RsnaGetGtkGeneration(const RSNA_CTX *ctx)
+{
+    return (ctx == RSNA_NULL) ? 0 : ctx->gtkGeneration;
+}
+
 /* ------------------------------------------------------------------ */
 /* MIC computation                                                   */
 /* ------------------------------------------------------------------ */
@@ -489,9 +494,11 @@ static rsna_size RsnaBuildReply(RSNA_CTX *ctx,
 
     body = out + EAPOL_HDR_LEN;
 
-    /* Descriptor type matches the negotiated descriptor. */
-    body[KEYDESC_OFF_TYPE] = (ctx->keyDescVer == KEYINFO_VER_HMAC_MD5_RC4)
-                                 ? EAPOL_KEY_DESC_WPA : EAPOL_KEY_DESC_RSN;
+    /* Descriptor Type echoes the authenticator's: WPA (254) for a WPA1 AP,
+     * RSN (2) for WPA2 -- a WPA2 AP running TKIP still speaks RSN. */
+    body[KEYDESC_OFF_TYPE] = (ctx->descType != 0)
+                                 ? (rsna_u8)ctx->descType
+                                 : EAPOL_KEY_DESC_RSN;
 
     RsnaPutU16(&body[KEYDESC_OFF_KEYINFO], keyInfo);
 
@@ -596,10 +603,15 @@ static RSNA_STATE RsnaHandleMsg1(RSNA_CTX *ctx,
 /*
  * msg3 (ANonce, Pairwise, Ack, Install, MIC, encrypted Key Data): verify the
  * MIC, decrypt and extract the GTK, build msg4.
+ *
+ * WPA (descriptor 254) differs: msg3's Key Data is the AP's WPA IE in the
+ * clear and carries no GTK; the GTK arrives in the group-key handshake the
+ * AP starts right after msg4, once the pairwise key is in place.
  */
 static RSNA_STATE RsnaHandleMsg3(RSNA_CTX *ctx,
                                  const rsna_u8 *frame, rsna_size frameLen,
                                  const rsna_u8 *body, rsna_u16 keyInfo,
+                                 rsna_u8 descType,
                                  rsna_u8 *out, rsna_size *outLen)
 {
     rsna_size cap = (out != RSNA_NULL) ? *outLen : 0;
@@ -683,11 +695,21 @@ static RSNA_STATE RsnaHandleMsg3(RSNA_CTX *ctx,
         plainLen = kdLen;
     }
 
-    st = RsnaExtractGtk(ctx, plainKd, plainLen);
-    if (st != RSNA_OK)
+    if (descType == EAPOL_KEY_DESC_WPA && !(keyInfo & KEYINFO_ENCRYPTED_DATA))
     {
-        ctx->lastError = st;
-        return (ctx->state = RSNA_STATE_FAILED);
+        /* WPA: no GTK here (see above); keys.gtkLen stays 0 and the
+         * generation stays put until the group-key handshake delivers it. */
+    }
+    else
+    {
+        st = RsnaExtractGtk(ctx, plainKd, plainLen);
+        if (st != RSNA_OK)
+        {
+            ctx->lastError = st;
+            return (ctx->state = RSNA_STATE_FAILED);
+        }
+
+        ctx->gtkGeneration++;
     }
 
     /* Wipe the decrypted key data buffer. */
@@ -698,9 +720,11 @@ static RSNA_STATE RsnaHandleMsg3(RSNA_CTX *ctx,
     ctx->keys.kek = ctx->keys.ptk + RSNA_KCK_LEN;
     ctx->keys.tk  = ctx->keys.ptk + RSNA_KCK_LEN + RSNA_KEK_LEN;
 
-    /* ---- build msg4: Pairwise + MIC + Secure, empty Key Data ---- */
+    /* ---- build msg4: Pairwise + MIC, empty Key Data.  Secure echoes msg3:
+     * set for RSN, clear for WPA (which turns it on only once the GTK is
+     * delivered by the group-key handshake). ---- */
     replyInfo = (rsna_u16)(ctx->keyDescVer & KEYINFO_VERSION_MASK);
-    replyInfo |= KEYINFO_KEY_TYPE | KEYINFO_KEY_MIC | KEYINFO_SECURE;
+    replyInfo |= KEYINFO_KEY_TYPE | KEYINFO_KEY_MIC | (keyInfo & KEYINFO_SECURE);
 
     /* msg4 carries an all-zero Key Nonce. */
     n = RsnaBuildReply(ctx, replyInfo, RSNA_NULL, RSNA_NULL, 0, out, cap);
@@ -714,6 +738,136 @@ static RSNA_STATE RsnaHandleMsg3(RSNA_CTX *ctx,
 
     ctx->lastError = RSNA_OK;
     ctx->state = RSNA_STATE_COMPLETED;
+    return ctx->state;
+}
+
+
+/*
+ * Group-key handshake message 1 (Group, Ack, MIC, Secure; Key Data carries
+ * the new GTK -- RSN: an AES-keywrapped GTK KDE; WPA: the RC4-encrypted raw
+ * GTK with the key index in Key Information bits 4-5).  Verify the MIC,
+ * decrypt, store the GTK, reply with message 2 (Group + MIC + Secure, empty
+ * Key Data).  The session stays COMPLETED; errors here drop the frame
+ * without failing the association (the AP retransmits).
+ */
+static RSNA_STATE RsnaHandleGroupMsg1(RSNA_CTX *ctx,
+                                      const rsna_u8 *frame, rsna_size frameLen,
+                                      const rsna_u8 *body, rsna_u16 keyInfo,
+                                      rsna_u8 descType,
+                                      rsna_u8 *out, rsna_size *outLen)
+{
+    rsna_size cap = (out != RSNA_NULL) ? *outLen : 0;
+    rsna_u8 rxMic[KEYDESC_MIC_LEN];
+    rsna_u8 calcMic[KEYDESC_MIC_LEN];
+    rsna_u8 frameBuf[512];
+    rsna_u16 kdLen;
+    const rsna_u8 *kd;
+    rsna_u8 plainKd[512];
+    rsna_size plainLen = 0;
+    rsna_u8 oldGtk[RSNA_GTK_MAX_LEN];
+    rsna_size oldLen;
+    rsna_u8 oldId;
+    RSNA_STATUS st;
+    rsna_size n;
+    rsna_u16 replyInfo;
+
+    *outLen = 0;
+
+    /* Only meaningful once the PTK exists. */
+    if (ctx->state != RSNA_STATE_COMPLETED)
+    {
+        ctx->lastError = RSNA_ERR_STATE;
+        return ctx->state;
+    }
+
+    /* ---- verify the Key MIC (KCK) over the frame with the field zeroed ---- */
+    if (frameLen > sizeof(frameBuf))
+    {
+        ctx->lastError = RSNA_ERR_MALFORMED;
+        return ctx->state;
+    }
+    RsnaMemcpy(frameBuf, frame, frameLen);
+    RsnaMemcpy(rxMic, &body[KEYDESC_OFF_MIC], KEYDESC_MIC_LEN);
+    RsnaMemset(frameBuf + EAPOL_HDR_LEN + KEYDESC_OFF_MIC, 0, KEYDESC_MIC_LEN);
+    RsnaComputeMic(ctx->keyDescVer, ctx->keys.ptk, frameBuf, frameLen, calcMic);
+    if (!RsnaSecureEqual(rxMic, calcMic, KEYDESC_MIC_LEN))
+    {
+        ctx->lastError = RSNA_ERR_MIC;
+        return ctx->state;          /* drop; the AP will retransmit */
+    }
+
+    /* Commit the replay counter only after MIC verification. */
+    RsnaMemcpy(ctx->replayCounter, &body[KEYDESC_OFF_REPLAY], 8);
+    ctx->haveReplay = 1;
+
+    /* ---- decrypt Key Data ---- */
+    kdLen = RsnaGetU16(&body[KEYDESC_OFF_DATALEN]);
+    kd = &body[KEYDESC_OFF_DATA];
+    if ((rsna_size)(KEYDESC_OFF_DATA + kdLen) > (frameLen - EAPOL_HDR_LEN) ||
+        kdLen > sizeof(plainKd) || kdLen == 0)
+    {
+        ctx->lastError = RSNA_ERR_MALFORMED;
+        return ctx->state;
+    }
+
+    st = RsnaDecryptKeyData(ctx, &body[KEYDESC_OFF_IV], kd, kdLen,
+                            plainKd, &plainLen);
+    if (st != RSNA_OK)
+    {
+        ctx->lastError = st;
+        return ctx->state;
+    }
+
+    /* ---- extract the GTK; bump the generation only if it changed ---- */
+    RsnaMemcpy(oldGtk, ctx->keys.gtk, RSNA_GTK_MAX_LEN);
+    oldLen = ctx->keys.gtkLen;
+    oldId = ctx->keys.gtkKeyId;
+
+    if (descType == EAPOL_KEY_DESC_WPA)
+    {
+        /* WPA: Key Data IS the GTK; index lives in Key Information. */
+        rsna_u16 keyLen = RsnaGetU16(&body[KEYDESC_OFF_KEYLEN]);
+        if (keyLen == 0 || keyLen > RSNA_GTK_MAX_LEN || keyLen > plainLen)
+        {
+            ctx->lastError = RSNA_ERR_MALFORMED;
+            RsnaMemset(plainKd, 0, sizeof(plainKd));
+            return ctx->state;
+        }
+        RsnaMemcpy(ctx->keys.gtk, plainKd, keyLen);
+        ctx->keys.gtkLen = keyLen;
+        ctx->keys.gtkKeyId =
+            (rsna_u8)((keyInfo & KEYINFO_KEY_INDEX_MASK) >> KEYINFO_KEY_INDEX_S);
+    }
+    else
+    {
+        st = RsnaExtractGtk(ctx, plainKd, plainLen);
+        if (st != RSNA_OK)
+        {
+            ctx->lastError = st;
+            RsnaMemset(plainKd, 0, sizeof(plainKd));
+            return ctx->state;
+        }
+    }
+    RsnaMemset(plainKd, 0, sizeof(plainKd));
+
+    if (ctx->keys.gtkLen != oldLen || ctx->keys.gtkKeyId != oldId ||
+        RsnaMemcmp(ctx->keys.gtk, oldGtk, ctx->keys.gtkLen) != 0)
+    {
+        ctx->gtkGeneration++;
+    }
+
+    /* ---- reply: Group + MIC + Secure (echoed), empty Key Data ---- */
+    replyInfo = (rsna_u16)(ctx->keyDescVer & KEYINFO_VERSION_MASK);
+    replyInfo |= KEYINFO_KEY_MIC | (keyInfo & KEYINFO_SECURE);
+    n = RsnaBuildReply(ctx, replyInfo, RSNA_NULL, RSNA_NULL, 0, out, cap);
+    if (n == 0 && out != RSNA_NULL)
+    {
+        ctx->lastError = RSNA_ERR_TOO_SMALL;
+        return ctx->state;
+    }
+    *outLen = n;
+
+    ctx->lastError = RSNA_OK;
     return ctx->state;
 }
 
@@ -774,6 +928,7 @@ RSNA_STATE RsnaRxEapol(RSNA_CTX *ctx,
 
     keyInfo = RsnaGetU16(&body[KEYDESC_OFF_KEYINFO]);
     ctx->keyDescVer = keyInfo & KEYINFO_VERSION_MASK;
+    ctx->descType = descType;
 
     isPairwise   = (keyInfo & KEYINFO_KEY_TYPE) ? 1 : 0;
     hasMic       = (keyInfo & KEYINFO_KEY_MIC) ? 1 : 0;
@@ -803,7 +958,8 @@ RSNA_STATE RsnaRxEapol(RSNA_CTX *ctx,
         {
             rsna_u16 replyInfo = (rsna_u16)(ctx->keyDescVer & KEYINFO_VERSION_MASK);
             rsna_size n;
-            replyInfo |= KEYINFO_KEY_TYPE | KEYINFO_KEY_MIC | KEYINFO_SECURE;
+            replyInfo |= KEYINFO_KEY_TYPE | KEYINFO_KEY_MIC |
+                         (keyInfo & KEYINFO_SECURE);
             n = RsnaBuildReply(ctx, replyInfo, RSNA_NULL, RSNA_NULL, 0,
                                out, (out != RSNA_NULL) ? *outLen : 0);
             *outLen = n;
@@ -811,8 +967,12 @@ RSNA_STATE RsnaRxEapol(RSNA_CTX *ctx,
             return ctx->state;
         }
 
-        if (cmp <= 0)
+        if (cmp <= 0 && !(cmp == 0 && !isPairwise &&
+                          ctx->state == RSNA_STATE_COMPLETED))
         {
+            /* An equal-counter GROUP message while COMPLETED is the AP
+             * retransmitting group msg1 (our reply was lost): fall through
+             * to the handler, which re-verifies the MIC and replies again. */
             ctx->lastError = RSNA_ERR_REPLAY;
             *outLen = 0;
             return ctx->state;      /* silently drop the replay */
@@ -832,10 +992,17 @@ RSNA_STATE RsnaRxEapol(RSNA_CTX *ctx,
          * verified, so a forged msg3 cannot lock out the legitimate one. */
         (void)hasInstall;
         return RsnaHandleMsg3(ctx, in, EAPOL_HDR_LEN + bodyLen,
-                              body, keyInfo, out, outLen);
+                              body, keyInfo, descType, out, outLen);
     }
 
-    /* Group-key handshake and other messages are not handled. */
+    if (!isPairwise && hasAck && hasMic)
+    {
+        /* Group-key handshake message 1. */
+        return RsnaHandleGroupMsg1(ctx, in, EAPOL_HDR_LEN + bodyLen,
+                                   body, keyInfo, descType, out, outLen);
+    }
+
+    /* Other messages (SMK, requests) are not handled. */
     ctx->lastError = RSNA_ERR_STATE;
     *outLen = 0;
     return ctx->state;

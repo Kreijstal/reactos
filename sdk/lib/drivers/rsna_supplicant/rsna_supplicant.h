@@ -112,11 +112,15 @@ typedef struct _RSNA_CTX
     /* Negotiated cipher (drives PRF length, MIC algorithm, keywrap method). */
     RSNA_CIPHER cipher;
     int         keyDescVer;                 /* from Key Information field       */
+    int         descType;                   /* Descriptor Type the AP uses:
+                                               RSN (2) or WPA (254); echoed in
+                                               every reply                      */
 
     /* Handshake transient state. */
     RSNA_STATE  state;
     RSNA_STATUS lastError;                  /* detail behind RSNA_STATE_FAILED  */
     rsna_u8     anonce[RSNA_NONCE_LEN];     /* AP nonce (from msg1)             */
+    rsna_u32    gtkGeneration;              /* distinct GTKs accepted so far    */
     rsna_u8     snonce[RSNA_NONCE_LEN];     /* STA nonce                        */
     int         haveAnonce;
     int         haveSnonce;
@@ -184,6 +188,13 @@ RSNA_STATE RsnaGetState(const RSNA_CTX *ctx);
  * RSNA_ERR_STATE if the handshake has not completed.
  */
 RSNA_STATUS RsnaGetKeys(const RSNA_CTX *ctx, RSNA_KEYS *keys);
+
+/*
+ * Monotonic count of distinct GTKs accepted (1 after the initial 4-way
+ * handshake, +1 per group-key rekey).  Lets the caller notice a rekey and
+ * re-install the group key without disturbing the pairwise key.
+ */
+rsna_u32 RsnaGetGtkGeneration(const RSNA_CTX *ctx);
 
 /* Read just the PMK (e.g. for caching). Returns RSNA_ERR_STATE if not derived. */
 RSNA_STATUS RsnaGetPmk(const RSNA_CTX *ctx, rsna_u8 pmk[RSNA_PMK_LEN]);
