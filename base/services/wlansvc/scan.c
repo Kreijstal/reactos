@@ -37,6 +37,59 @@ WlanSvcRssiToQuality(LONG Rssi)
     return (ULONG)(2 * (Rssi + 100));
 }
 
+/* Suite selector type -> dot11 cipher (IEEE 802.11 table 9-131). */
+static DOT11_CIPHER_ALGORITHM
+WlanSvcCipherFromSuite(UCHAR suiteType)
+{
+    switch (suiteType)
+    {
+        case 1:  return DOT11_CIPHER_ALGO_WEP40;
+        case 2:  return DOT11_CIPHER_ALGO_TKIP;
+        case 4:  return DOT11_CIPHER_ALGO_CCMP;
+        case 5:  return DOT11_CIPHER_ALGO_WEP104;
+        default: return DOT11_CIPHER_ALGO_NONE;
+    }
+}
+
+/*
+ * Parse the cipher suites of an RSN or WPA element body starting at 'pos'
+ * (just before the group cipher suite): group suite(4), pairwise count(2),
+ * pairwise suites(4 each).  The group cipher is taken verbatim; for the
+ * pairwise cipher the strongest offered one is chosen, CCMP over TKIP.
+ */
+static VOID
+WlanSvcParseCipherSuites(PWLANSVC_BSS_ENTRY bss, const UCHAR *body, ULONG len,
+                         ULONG pos)
+{
+    ULONG count, k;
+
+    bss->GroupCipher = DOT11_CIPHER_ALGO_CCMP;
+    bss->DefaultCipher = DOT11_CIPHER_ALGO_CCMP;
+
+    if (pos + 4 > len)
+        return;
+    bss->GroupCipher = WlanSvcCipherFromSuite(body[pos + 3]);
+    pos += 4;
+
+    if (pos + 2 > len)
+        return;
+    count = body[pos] | (body[pos + 1] << 8);
+    pos += 2;
+
+    bss->DefaultCipher = DOT11_CIPHER_ALGO_NONE;
+    for (k = 0; k < count && pos + 4 <= len; k++, pos += 4)
+    {
+        DOT11_CIPHER_ALGORITHM c = WlanSvcCipherFromSuite(body[pos + 3]);
+        if (c == DOT11_CIPHER_ALGO_CCMP)
+            bss->DefaultCipher = c;
+        else if (c == DOT11_CIPHER_ALGO_TKIP &&
+                 bss->DefaultCipher != DOT11_CIPHER_ALGO_CCMP)
+            bss->DefaultCipher = c;
+    }
+    if (bss->DefaultCipher == DOT11_CIPHER_ALGO_NONE)
+        bss->DefaultCipher = bss->GroupCipher;
+}
+
 /*
  * Decode the security summary (auth + cipher) and supported rates from a BSS's
  * raw beacon/probe IE blob.  The capability Privacy bit is the fallback
@@ -46,6 +99,7 @@ static VOID
 WlanSvcParseBssIes(PWLANSVC_BSS_ENTRY bss, const UCHAR *ie, ULONG ieLen)
 {
     ULONG pos = 0;
+    BOOL haveRsn = FALSE;
 
     /* Default: open unless an RSN/WPA IE (or the Privacy bit) says otherwise. */
     if (bss->CapabilityInformation & 0x0010 /* Privacy */)
@@ -53,12 +107,14 @@ WlanSvcParseBssIes(PWLANSVC_BSS_ENTRY bss, const UCHAR *ie, ULONG ieLen)
         bss->SecurityEnabled = TRUE;
         bss->DefaultAuth = DOT11_AUTH_ALGO_80211_OPEN;   /* WEP-era default */
         bss->DefaultCipher = DOT11_CIPHER_ALGO_WEP;
+        bss->GroupCipher = DOT11_CIPHER_ALGO_WEP;
     }
     else
     {
         bss->SecurityEnabled = FALSE;
         bss->DefaultAuth = DOT11_AUTH_ALGO_80211_OPEN;
         bss->DefaultCipher = DOT11_CIPHER_ALGO_NONE;
+        bss->GroupCipher = DOT11_CIPHER_ALGO_NONE;
     }
 
     while (pos + 2 <= ieLen)
@@ -83,32 +139,31 @@ WlanSvcParseBssIes(PWLANSVC_BSS_ENTRY bss, const UCHAR *ie, ULONG ieLen)
 
             case 48:  /* RSN (WPA2) */
             {
-                /* Minimal RSN parse: presence => RSNA; pick the group cipher
-                 * suite type to distinguish CCMP(4) from TKIP(2). */
+                /* Presence => RSNA.  The group cipher is whatever the AP
+                 * says it is (a WPA/WPA2 mixed-mode AP runs TKIP group with
+                 * CCMP pairwise, and refuses association with status 41 if
+                 * the station proposes anything else); the pairwise cipher
+                 * is our pick from the list it offers. */
                 bss->SecurityEnabled = TRUE;
+                haveRsn = TRUE;
                 bss->DefaultAuth = DOT11_AUTH_ALGO_RSNA_PSK;
-                bss->DefaultCipher = DOT11_CIPHER_ALGO_CCMP;
-                if (len >= 8)
-                {
-                    /* version(2) + group suite OUI(3) + group suite type(1) */
-                    UCHAR groupType = body[2 + 3];
-                    if (groupType == 2)
-                        bss->DefaultCipher = DOT11_CIPHER_ALGO_TKIP;
-                    else if (groupType == 4)
-                        bss->DefaultCipher = DOT11_CIPHER_ALGO_CCMP;
-                }
+                WlanSvcParseCipherSuites(bss, body, len, 2);
                 break;
             }
 
             case 221: /* Vendor Specific -- WPA(1) uses OUI 00:50:F2 type 1 */
             {
                 static const UCHAR WpaOui[4] = { 0x00, 0x50, 0xF2, 0x01 };
-                if (len >= 4 && memcmp(body, WpaOui, 4) == 0 &&
-                    !bss->SecurityEnabled)   /* RSN, if present, wins */
+                /* RSN, if present, wins.  The Privacy bit alone must not
+                 * veto this branch: a WPA1 AP sets it too, and without the
+                 * element it would be listed as WEP with a WEP group cipher
+                 * that the association request would then offer. */
+                if (len >= 4 && memcmp(body, WpaOui, 4) == 0 && !haveRsn)
                 {
                     bss->SecurityEnabled = TRUE;
                     bss->DefaultAuth = DOT11_AUTH_ALGO_WPA_PSK;
-                    bss->DefaultCipher = DOT11_CIPHER_ALGO_TKIP;
+                    /* Same suite layout as RSN after the OUI/type prefix. */
+                    WlanSvcParseCipherSuites(bss, body, len, 4 + 2);
                 }
                 break;
             }
@@ -208,17 +263,41 @@ WlanSvcRefreshBssCache(PWLANSVC_INTERFACE Iface)
 
 /*
  * Issue a scan and refresh the BSS cache.  The scan IOCTL only kicks
- * OID_DOT11_SCAN_REQUEST; the cache is seeded with whatever the driver already
- * holds and refreshed again on the scan-complete notification.
+ * OID_DOT11_SCAN_REQUEST; the miniport walks the channels for several
+ * seconds and nwifi reports completion on the notify channel, where the
+ * worker refreshes the cache and signals ScanCompleteEvent.  Wait for that
+ * (bounded) with WlanSvcLock released so the worker can run; this is what
+ * makes both WlanScan() and a connect against an unscanned SSID see the
+ * BSS -- a connect that cannot see the BSS cannot learn its group cipher.
+ *
+ * Called with WlanSvcLock held; the lock is released for the wait and
+ * re-taken.  Returns ERROR_DEVICE_NOT_CONNECTED if the interface vanished
+ * meanwhile, in which case Iface must not be touched again.
  */
 DWORD
 WlanSvcDoScan(PWLANSVC_INTERFACE Iface, PDOT11_SSID pSsid)
 {
     DWORD dwResult;
+    ULONG index = Iface->NwifiIndex;
+    HANDLE event = Iface->ScanCompleteEvent;
+    BOOL kicked;
 
-    dwResult = NwifiScan(Iface->NwifiIndex, pSsid, dot11_BSS_type_any);
+    dwResult = NwifiScan(index, pSsid, dot11_BSS_type_any);
     if (dwResult != ERROR_SUCCESS && dwResult != ERROR_NOT_READY)
         return dwResult;
+    kicked = (dwResult == ERROR_SUCCESS);
+
+    if (kicked)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        if (WaitForSingleObject(event, WLANSVC_SCAN_TIMEOUT_MS) != WAIT_OBJECT_0)
+            DPRINT1("WLANSVC: scan on ifidx %lu did not complete within %u ms\n",
+                    index, WLANSVC_SCAN_TIMEOUT_MS);
+        EnterCriticalSection(&WlanSvcLock);
+
+        if (WlanSvcFindInterfaceByIndex(index) != Iface)
+            return ERROR_DEVICE_NOT_CONNECTED;
+    }
 
     return WlanSvcRefreshBssCache(Iface);
 }
@@ -363,7 +442,8 @@ WlanSvcBuildBssList(PWLANSVC_INTERFACE Iface,
     PWLAN_BSS_LIST list;
     PLIST_ENTRY entry;
     DWORD count = 0;
-    SIZE_T size;
+    SIZE_T size, ieTotal = 0;
+    PUCHAR ieCursor;
     BOOL filterSsid = (pSsid != NULL && pSsid->uSSIDLength != 0);
     BOOL filterType = (BssType != dot11_BSS_type_any);
 
@@ -388,10 +468,13 @@ WlanSvcBuildBssList(PWLANSVC_INTERFACE Iface,
             continue;
 
         count++;
+        ieTotal += bss->IeLength;
     }
 
+    /* Entry array first, then every entry's raw IE blob; each entry's
+     * ulIeOffset is relative to that entry, as WLAN_BSS_ENTRY documents. */
     size = FIELD_OFFSET(WLAN_BSS_LIST, wlanBssEntries) +
-           (SIZE_T)(count == 0 ? 1 : count) * sizeof(WLAN_BSS_ENTRY);
+           (SIZE_T)(count == 0 ? 1 : count) * sizeof(WLAN_BSS_ENTRY) + ieTotal;
 
     list = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
     if (!list)
@@ -399,6 +482,7 @@ WlanSvcBuildBssList(PWLANSVC_INTERFACE Iface,
 
     list->dwTotalSize = (DWORD)size;
     list->dwNumberOfItems = count;
+    ieCursor = (PUCHAR)&list->wlanBssEntries[count == 0 ? 1 : count];
 
     count = 0;
     for (entry = Iface->BssListHead.Flink;
@@ -436,9 +520,10 @@ WlanSvcBuildBssList(PWLANSVC_INTERFACE Iface,
         out->wlanRateSet.uRateSetLength = bss->RateCount;
         for (r = 0; r < bss->RateCount; r++)
             out->wlanRateSet.usRateSet[r] = bss->Rates[r];
-        /* No IE blob is appended after the entry array; report it as empty. */
-        out->ulIeOffset = 0;
-        out->ulIeSize = 0;
+        out->ulIeSize = bss->IeLength;
+        out->ulIeOffset = (ULONG)(ieCursor - (PUCHAR)out);
+        memcpy(ieCursor, bss->IeData, bss->IeLength);
+        ieCursor += bss->IeLength;
     }
 
     *ppList = list;
