@@ -21,7 +21,9 @@
 @ stdcall PathCchSkipRoot(wstr ptr)
 @ stdcall PathCchStripPrefix(wstr long)
 @ stdcall PathCchStripToRoot(wstr long)
+@ stdcall PathIsUNCEx(wstr ptr)
 @ stdcall SetThreadDescription(ptr wstr)
+@ stdcall IsWow64Process2(ptr ptr ptr)
 @ stdcall VirtualAlloc2(ptr ptr long long long ptr long)
 @ stdcall -version=0x602+ WaitOnAddress(ptr ptr long long)
 @ stdcall -version=0x602+ WakeByAddressAll(ptr) ntdll.RtlWakeAddressAll
