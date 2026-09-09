@@ -17,6 +17,10 @@
 #include <ndk/kefuncs.h>
 #include <ndk/rtlfuncs.h>
 
+NTSYSAPI NTSTATUS WINAPI RtlWow64GetProcessMachines(HANDLE Process,
+                                                     USHORT *ProcessMachine,
+                                                     USHORT *NativeMachine);
+
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
 {
     if (reason == DLL_PROCESS_ATTACH)
@@ -76,6 +80,20 @@ HRESULT WINAPI SetThreadDescription(HANDLE hThread, PCWSTR lpThreadDescription)
     (void)hThread;
     (void)lpThreadDescription;
     return E_NOTIMPL;
+}
+
+BOOL WINAPI IsWow64Process2(HANDLE Process, USHORT *ProcessMachine,
+                            USHORT *NativeMachine)
+{
+    NTSTATUS Status;
+
+    Status = RtlWow64GetProcessMachines(Process, ProcessMachine, NativeMachine);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+    return TRUE;
 }
 
 /*
