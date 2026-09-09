@@ -413,6 +413,7 @@ class KdNetClient:
         self._request_in_flight = False
         self.last_harvest_complete: bool | None = None
         self._owns_log = False
+        self._wedge_reported = False
         self._log: TextIO | None = None
         if isinstance(log, (str, Path)):
             self._log = Path(log).open("a", encoding="utf-8")
@@ -604,6 +605,24 @@ class KdNetClient:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                # A timeout while the target is STOPPED is a different animal
+                # from a timeout while it runs, and saying so is the whole
+                # point: "timed out waiting for KDNET packet" reads as a host
+                # fault, and a real session lost time chasing the listener
+                # when the target had announced a stop and then stopped
+                # servicing its packet loop -- the CPU-freeze deadlock.  The
+                # stub gets far enough to transmit the state change and no
+                # further, so this is what that looks like from here.
+                # Latched: one line per wedge, cleared by the next packet.
+                if self.stopped and not self._wedge_reported:
+                    self._wedge_reported = True
+                    self._emit(
+                        "target-wedged",
+                        "target announced a stop and then stopped answering; "
+                        "its packet loop is not running (CPU-freeze deadlock "
+                        "looks exactly like this).  Nothing the host sends "
+                        "will be read -- recovery is a power cycle.",
+                    )
                 raise KdTimeout("timed out waiting for KDNET packet")
             self.socket.settimeout(min(remaining, 1.0))
             try:
@@ -624,6 +643,7 @@ class KdNetClient:
                 continue
             if outer.packet_type != KDNET_TYPE_DATA:
                 continue
+            self._wedge_reported = False
             return decode_kd_packet(outer.payload)
 
     def _send_inner_data(self, packet_type: int, payload: bytes) -> int:
@@ -660,10 +680,11 @@ class KdNetClient:
             )
             self._emit("debug-output", prompt)
 
-            # 'o' means break once and then ignore the assertion. This gives
-            # the debugger a real exception stop without leaving the target
-            # blocked forever in DbgPrompt.
-            response = b"o"[:maximum]
+            # 'i' means ignore the assertion and keep running. A break ('o')
+            # gives a real exception stop, but on the ASUS the freeze wedges
+            # the target (boot 87) and costs the whole boot; the assert text
+            # plus the KM-AV / APC-leak DbgPrints already carry the evidence.
+            response = b"i"[:maximum]
             response_header = struct.pack(
                 "<IHHII",
                 DBGKD_GET_STRING_API,
@@ -673,7 +694,7 @@ class KdNetClient:
                 len(response),
             )
             self._send_inner_data(KD_TYPE_DEBUG_IO, response_header + response)
-            self._emit("debug-input", "replied 'o' (break once) to target prompt")
+            self._emit("debug-input", "replied 'i' (ignore) to target prompt")
             return
         else:
             self._emit("debug-io", f"unsupported API 0x{api:x}")

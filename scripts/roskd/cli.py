@@ -58,8 +58,10 @@ def _print_registers(registers: dict[str, int]) -> None:
 
 HELP = """Commands:
   c | continue                 continue and wait for the next real stop
-  break                        send a KD break-in and wait for a stop
+  break [ID]                   send a KD break-in and wait for a stop; ID,
+                               if given, tags the log with transaction events
   peek ADDRESS SIZE [PATH]     bounded break/read/resume; print or save bytes
+  script PATH OUTDIR [SECS]    one bounded break; run python (read/read_pointer/save/log)
   watch ADDRESS SIZE [LABEL]   register a memory region for `sample` dumps
   unwatch                      clear all watched regions
   sample [COUNT [INTERVAL]]    break, dump per-CPU RIP/RSP and watched
@@ -84,9 +86,49 @@ HELP = """Commands:
   quit                         exit while leaving the target stopped
 
 Ctrl-C while `continue` is waiting sends a KD break-in. Writing `break` (or
-a blank line) to stdin while the target runs does the same, which is how a
-scripted driver on a FIFO breaks in without signals.
+`break ID`, or a blank line) to stdin while the target runs does the same,
+which is how a scripted driver on a FIFO breaks in without signals. Anything
+the FIFO refuses is written to --log as a `stdin-rejected` event, so a driver
+that only watches the log can tell a refusal from a dead listener.
 """
+
+
+def _discard_stale_stdin(client: KdNetClient) -> None:
+    """Drop FIFO input that was queued before this session came up.
+
+    A scripted driver writes commands into the FIFO whenever it likes, but the
+    listener only reads them once it has reached the command loop.  Anything
+    written while it was still waiting for a target therefore sits in the pipe
+    and is executed against whatever session arrives NEXT -- which is how a
+    `break` typed at a wedged machine ends up firing into an unrelated boot
+    minutes later, freezing a freshly started target for no reason.
+
+    Commands are addressed to the session in front of them, so on connect the
+    backlog is stale by definition.  Discard it, and say what was discarded:
+    silently eating a driver's command would trade one confusing failure for
+    another.
+    """
+    while True:
+        try:
+            if not select.select([sys.stdin], [], [], 0)[0]:
+                return
+            line = sys.stdin.readline()
+        except (OSError, ValueError):
+            return
+        if not line:
+            return
+        stale = line.strip()
+        if not stale:
+            continue
+        client._emit(
+            "stdin-discarded",
+            f"command={stale!r} reason=queued-before-this-session",
+        )
+        print(
+            f"[KD] discarded stale FIFO command {stale!r} "
+            "(queued before this session connected)",
+            file=sys.stderr,
+        )
 
 
 def _continue(
@@ -139,6 +181,40 @@ def _continue(
                         print(f"roskd: stall-capture failed: {error}",
                               file=sys.stderr)
                     continue
+                if len(words) == 1 and words[0] == "force-reboot":
+                    try:
+                        _force_reboot(client, break_timeout)
+                    except KdSessionChanged:
+                        raise
+                    except (KdRequestError, KdTimeout, ProtocolError,
+                            RuntimeError, ValueError) as error:
+                        print(f"roskd: force-reboot failed: {error}",
+                              file=sys.stderr)
+                    continue
+                if 3 <= len(words) <= 4 and words[0] == "script":
+                    # `script PATH OUTDIR [SECONDS]`: one bounded break, run
+                    # a python file with read()/read_pointer()/save()/log()
+                    # bound, then resume.  A list walk needs many dependent
+                    # reads and every break is a wedge risk, so do them all
+                    # inside a single stop.
+                    try:
+                        script_timeout = (
+                            float(words[3]) if len(words) == 4 else capture_timeout
+                        )
+                        _bounded_script(
+                            client,
+                            Path(words[1]),
+                            Path(words[2]),
+                            break_timeout,
+                            script_timeout,
+                            resume_timeout,
+                        )
+                    except KdSessionChanged:
+                        raise
+                    except (KdRequestError, KdTimeout, ProtocolError,
+                            RuntimeError, ValueError, OSError) as error:
+                        print(f"roskd: script failed: {error}", file=sys.stderr)
+                    continue
                 if 3 <= len(words) <= 4 and words[0] == "peek":
                     try:
                         address = _integer(words[1])
@@ -163,26 +239,111 @@ def _continue(
                             RuntimeError, ValueError) as error:
                         print(f"roskd: peek failed: {error}", file=sys.stderr)
                     continue
-                if command in ("break", ""):
+                # `break` takes an OPTIONAL transaction id, the same shape as
+                # `stall-capture ID`.  It used to take none, so `break my-id`
+                # fell through to the rejection below -- and because that
+                # rejection only ever reached stderr, a scripted driver
+                # tailing --log saw an empty file and read a working listener
+                # as a dead one.  Both halves of that are fixed here.
+                if command == "" or (words[0] == "break" and len(words) <= 2):
+                    transaction_id = words[1] if len(words) == 2 else None
                     print("[KD] break-in requested via stdin", file=sys.stderr)
+                    if transaction_id is not None:
+                        _transaction_event(
+                            client, transaction_id, "break-requested"
+                        )
+                    else:
+                        client._emit("break-requested", "source=stdin")
                     try:
                         client.break_in()
                     except KdSessionChanged:
                         raise
                     except (KdRequestError, KdTimeout, ProtocolError) as error:
+                        if transaction_id is not None:
+                            _transaction_event(
+                                client, transaction_id, "break-failed",
+                                f"error={error}",
+                            )
+                        else:
+                            client._emit("break-failed", f"error={error}")
                         print(f"roskd: break-in failed: {error}",
                               file=sys.stderr)
                         continue
                     return
+                # A rejected command is a diagnostic event, not just console
+                # noise: it is the difference between "the listener is deaf"
+                # and "the listener refused what I typed".  It belongs in the
+                # log with everything else.
+                client._emit(
+                    "stdin-rejected",
+                    f"command={command!r} reason=unknown-or-malformed-verb",
+                )
                 print(
                     f"[KD] target running; ignored {command!r} "
-                    "(write 'break', 'peek ADDRESS SIZE [PATH]', or "
-                    "'stall-capture ID')",
+                    "(write 'break [ID]', 'peek ADDRESS SIZE [PATH]', "
+                    "'stall-capture ID', or 'force-reboot')",
                     file=sys.stderr,
                 )
     except KeyboardInterrupt:
         print("\n[KD] break-in requested", file=sys.stderr)
         client.break_in()
+
+
+def _force_reboot(client: KdNetClient, break_timeout: float) -> None:
+    """Force a hardware reset through KDNET's I/O-space write primitive.
+
+    This client implements no DbgKdRebootApi, and a target whose user mode is
+    hung cannot be asked politely anyway -- that is the whole point of the
+    command: reset a wedged box over the wire instead of walking to it and
+    holding the power button.  So stop the target and poke the platform reset
+    registers directly.
+
+    Two methods are tried, cheapest first: the legacy keyboard-controller
+    pulse, then the chipset reset-control register (0xCF9, implemented by the
+    AMD FCH as well as Intel).
+
+    THE WRITE THAT WORKS NEVER GETS AN ACK.  The machine is already resetting
+    when the reply would have been sent, so a timeout here is SUCCESS, and it
+    is the only success signal there is.  Treating it as a failure -- and
+    falling through to the next method -- would be wrong on the happy path,
+    so each method returns as soon as its ACK goes missing.
+    """
+    if not client.stopped:
+        print("[KD] force-reboot: stopping the target", file=sys.stderr)
+        with client.operation_deadline(time.monotonic() + break_timeout):
+            client.break_in(timeout=break_timeout)
+
+    methods = (
+        ("kbc 0x64<-0xFE", ((0x64, 1, 0xFE),)),
+        ("fch 0xCF9<-0x02,0x06", ((0xCF9, 1, 0x02), (0xCF9, 1, 0x06))),
+    )
+    for label, writes in methods:
+        print(f"[KD] force-reboot: trying {label}", file=sys.stderr)
+        _transaction_event(client, "force-reboot", "attempt", f"method={label}")
+        try:
+            for address, size, value in writes:
+                with client.operation_deadline(
+                    time.monotonic() + break_timeout
+                ):
+                    client.write_io(address, size, value)
+        except (KdTimeout, ProtocolError, KdRequestError) as error:
+            _transaction_event(
+                client, "force-reboot", "no-ack",
+                f"method={label} error={error} (expected when the reset lands)",
+            )
+            print(
+                f"[KD] force-reboot: no ACK after {label} -- "
+                "the target is resetting",
+                file=sys.stderr,
+            )
+            return
+
+    _transaction_event(client, "force-reboot", "all-acked")
+    print(
+        "[KD] force-reboot: every reset write was ACKed and the target is "
+        "still alive -- neither reset port took effect",
+        file=sys.stderr,
+    )
 
 
 def _harvest_path(root: Path) -> Path:
@@ -372,6 +533,83 @@ def _bounded_peek(
     print(f"peek: target resumed after {stopped_ms:.0f} ms")
     return data
 
+
+
+def _bounded_script(
+    client: KdNetClient,
+    script_path: Path,
+    out_dir: Path,
+    break_timeout: float,
+    script_timeout: float,
+    resume_timeout: float,
+) -> None:
+    """Run a python file against the stopped target inside ONE break."""
+    source = script_path.read_text()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    transaction_id = f"script-{time.monotonic_ns():x}"
+    stopped_by_transaction = False
+    started = time.monotonic()
+    log_file = (out_dir / "script.log").open("a")
+
+    def log(message: str) -> None:
+        log_file.write(f"{message}\n")
+        log_file.flush()
+
+    def save(name: str, data: bytes) -> None:
+        (out_dir / name).write_bytes(data)
+
+    _transaction_event(client, transaction_id, "break-requested")
+    try:
+        try:
+            with client.operation_deadline(time.monotonic() + break_timeout):
+                client.break_in(timeout=break_timeout)
+        except KdTimeout as error:
+            _transaction_event(
+                client, transaction_id, "break-uncertain", f"error={error}"
+            )
+            with client.operation_deadline(time.monotonic() + resume_timeout):
+                client.wait_for_stop(
+                    auto_continue_modules=True, timeout=resume_timeout
+                )
+            client._manual_break_stop = True
+            _transaction_event(client, transaction_id, "stopped-late")
+        stopped_by_transaction = True
+        _transaction_event(client, transaction_id, "stopped")
+        with client.operation_deadline(time.monotonic() + script_timeout):
+            namespace = {
+                "read": client.read_virtual,
+                "read_pointer": client.read_pointer,
+                "get_registers": client.get_registers,
+                "save": save,
+                "log": log,
+                "out_dir": out_dir,
+                "client": client,
+            }
+            exec(compile(source, str(script_path), "exec"), namespace)
+        _transaction_event(client, transaction_id, "script-finished")
+    except Exception as error:
+        phase = "script-failed" if stopped_by_transaction else "break-failed"
+        _transaction_event(client, transaction_id, phase, f"error={error!r}")
+        log(f"FAILED: {error!r}")
+        raise
+    finally:
+        log_file.close()
+        if stopped_by_transaction and client.stopped:
+            try:
+                with client.operation_deadline(time.monotonic() + resume_timeout):
+                    client.drain_pending_request(timeout=resume_timeout)
+                    client.continue_execution()
+            except Exception as error:
+                phase = "resume-uncertain" if not client.stopped else "resume-failed"
+                _transaction_event(
+                    client, transaction_id, phase, f"error={error}"
+                )
+                raise
+            else:
+                _transaction_event(client, transaction_id, "resume-sent")
+
+    stopped_ms = (time.monotonic() - started) * 1000.0
+    print(f"script: target resumed after {stopped_ms:.0f} ms; output in {out_dir}")
 
 def _sample_once(
     client: KdNetClient, watches: list[tuple[int, int, str]]
@@ -745,6 +983,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     client.connect(args.timeout)
                     print(f"[KDNET] connected: {client.version}", file=sys.stderr)
+                    _discard_stale_stdin(client)
                     if not args.no_auto_continue:
                         _continue(
                             client,
