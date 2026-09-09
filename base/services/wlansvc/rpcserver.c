@@ -120,6 +120,7 @@ DWORD _RpcOpenHandle(
     if (dwClientVersion < 1)
         dwClientVersion = 1;
 
+    lpWlanSvcHandle->RefCount = 1;      /* the open handle's own reference */
     lpWlanSvcHandle->dwClientVersion = dwClientVersion;
     lpWlanSvcHandle->dwNotifSource = WLAN_NOTIFICATION_SOURCE_NONE;
     InitializeListHead(&lpWlanSvcHandle->NotificationQueue);
@@ -135,14 +136,39 @@ DWORD _RpcOpenHandle(
     return ERROR_SUCCESS;
 }
 
-DWORD _RpcCloseHandle(
-    LPWLANSVC_RPC_HANDLE phClientHandle)
+/*
+ * Drop one reference and free the handle when the last one goes.  The event is
+ * closed here rather than at close time because a getter parked in
+ * WaitForSingleObject() is still using it.  Lock must be held by the caller,
+ * which must not touch the handle again once this returns TRUE.
+ */
+static BOOL WlanSvcReleaseHandleLocked(PWLANSVCHANDLE lpWlanSvcHandle)
+{
+    if (--lpWlanSvcHandle->RefCount > 0)
+        return FALSE;
+
+    if (lpWlanSvcHandle->hNotifyEvent != NULL)
+    {
+        CloseHandle(lpWlanSvcHandle->hNotifyEvent);
+        lpWlanSvcHandle->hNotifyEvent = NULL;
+    }
+
+    WlanSvcDrainHandleQueue(lpWlanSvcHandle);
+    HeapFree(GetProcessHeap(), 0, lpWlanSvcHandle);
+    return TRUE;
+}
+
+/*
+ * Retire one client handle: unlink it, wake everything parked on it, and drop
+ * the reference the open handle held.  Shared by _RpcCloseHandle and by the
+ * rundown that fires when a client dies without closing.
+ */
+static DWORD WlanSvcTeardownHandle(WLANSVC_RPC_HANDLE ClientHandle)
 {
     PWLANSVCHANDLE lpWlanSvcHandle;
-    HANDLE hEvent;
 
     EnterCriticalSection(&WlanSvcLock);
-    lpWlanSvcHandle = WlanSvcGetHandleEntry(*phClientHandle);
+    lpWlanSvcHandle = WlanSvcGetHandleEntry(ClientHandle);
     if (!lpWlanSvcHandle)
     {
         LeaveCriticalSection(&WlanSvcLock);
@@ -151,21 +177,28 @@ DWORD _RpcCloseHandle(
 
     RemoveEntryList(&lpWlanSvcHandle->WlanSvcHandleListEntry);
     WlanSvcDrainHandleQueue(lpWlanSvcHandle);
-    hEvent = lpWlanSvcHandle->hNotifyEvent;
-    lpWlanSvcHandle->hNotifyEvent = NULL;
+    lpWlanSvcHandle->Closing = TRUE;
+
+    /* Wake every parked getter so each observes Closing and drops its
+     * reference; the last one out frees the handle. */
+    if (lpWlanSvcHandle->hNotifyEvent != NULL)
+        SetEvent(lpWlanSvcHandle->hNotifyEvent);
+
+    WlanSvcReleaseHandleLocked(lpWlanSvcHandle);
     LeaveCriticalSection(&WlanSvcLock);
 
-    /* Release any async getter parked on this handle, then tear it down. */
-    if (hEvent != NULL)
-    {
-        SetEvent(hEvent);
-        CloseHandle(hEvent);
-    }
-
-    HeapFree(GetProcessHeap(), 0, lpWlanSvcHandle);
-    *phClientHandle = NULL;
-
     return ERROR_SUCCESS;
+}
+
+DWORD _RpcCloseHandle(
+    LPWLANSVC_RPC_HANDLE phClientHandle)
+{
+    DWORD dwResult = WlanSvcTeardownHandle(*phClientHandle);
+
+    if (dwResult == ERROR_SUCCESS)
+        *phClientHandle = NULL;
+
+    return dwResult;
 }
 
 DWORD _RpcEnumInterfaces(
@@ -344,8 +377,15 @@ DWORD _RpcScan(
     }
 
     dwResult = WlanSvcDoScan(iface, pDot11Ssid);
+    if (dwResult == ERROR_DEVICE_NOT_CONNECTED)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        return ERROR_NOT_FOUND;
+    }
 
-    /* Tell subscribers the scan finished (Windows raises this on completion). */
+    /* WlanSvcDoScan() waited for the miniport's scan-complete and refreshed
+     * the cache, so the client that wakes on this indication enumerates THIS
+     * scan (boot 66/83: it used to see the previous, often empty, cache). */
     if (dwResult == ERROR_SUCCESS)
         WlanSvcIndicateAcm(iface, wlan_notification_acm_scan_complete);
     else
@@ -379,8 +419,12 @@ DWORD _RpcGetAvailableNetworkList(
 
     /* If nothing has been scanned yet, do an implicit scan so the caller gets
      * a populated list (matches WlanGetAvailableNetworkList behaviour). */
-    if (iface->BssCount == 0)
-        WlanSvcDoScan(iface, NULL);
+    if (iface->BssCount == 0 &&
+        WlanSvcDoScan(iface, NULL) == ERROR_DEVICE_NOT_CONNECTED)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        return ERROR_NOT_FOUND;
+    }
 
     dwResult = WlanSvcBuildAvailableNetworkList(iface, dwFlags,
                                                 ppAvailableNetworkList);
@@ -415,8 +459,12 @@ DWORD _RpcGetNetworkBssList(
         return ERROR_NOT_FOUND;
     }
 
-    if (iface->BssCount == 0)
-        WlanSvcDoScan(iface, pDot11Ssid);
+    if (iface->BssCount == 0 &&
+        WlanSvcDoScan(iface, pDot11Ssid) == ERROR_DEVICE_NOT_CONNECTED)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
+        return ERROR_NOT_FOUND;
+    }
 
     dwResult = WlanSvcBuildBssList(iface, pDot11Ssid,
                                    (DOT11_BSS_TYPE)dot11BssType,
@@ -531,17 +579,42 @@ DWORD _RpcAsyncGetNotification(
 {
     PWLANSVCHANDLE h;
 
+    DWORD dwResult;
+
     *NotificationData = NULL;
 
-    /* The client's notification worker blocks here; WlanSvcDequeueNotification
-     * waits internally and copes with the handle closing meanwhile. */
+    /*
+     * The client's notification worker parks in WlanSvcDequeueNotification for
+     * as long as it takes an event to arrive, so it must hold a reference to
+     * the handle across that wait.  Without one, a client that closes its
+     * handle -- or simply dies, see WLANSVC_RPC_HANDLE_rundown -- freed the
+     * WLANSVCHANDLE under this thread while it was still parked inside it.
+     *
+     * That use-after-free is not theoretical: it was measured on the ASUS
+     * X550DP on 2026-08-27.  wlanscan.exe waited its full 15 s for a
+     * scan_complete that never came and exited with a getter still parked;
+     * the freed block was reused, the service heap was corrupted, and wlansvc
+     * later deadlocked inside RtlAllocateHeap -- RtlpWaitForCriticalSection
+     * gave up on the process heap lock and broke into the kernel debugger,
+     * taking the machine down with it.  See docs/asus.txt, boot 66.
+     */
     EnterCriticalSection(&WlanSvcLock);
     h = WlanSvcGetHandleEntry(hClientHandle);
-    LeaveCriticalSection(&WlanSvcLock);
     if (h == NULL)
+    {
+        LeaveCriticalSection(&WlanSvcLock);
         return ERROR_INVALID_HANDLE;
+    }
+    h->RefCount++;
+    LeaveCriticalSection(&WlanSvcLock);
 
-    return WlanSvcDequeueNotification(h, NotificationData);
+    dwResult = WlanSvcDequeueNotification(h, NotificationData);
+
+    EnterCriticalSection(&WlanSvcLock);
+    WlanSvcReleaseHandleLocked(h);
+    LeaveCriticalSection(&WlanSvcLock);
+
+    return dwResult;
 }
 
 DWORD _RpcSetProfileEapUserData(
@@ -952,7 +1025,14 @@ void __RPC_USER midl_user_free(void __RPC_FAR * ptr)
 }
 
 
+/*
+ * Fires when a client's binding dies without _RpcCloseHandle: a crashed client,
+ * or one that gave up on a call and exited.  Leaving this empty leaked the
+ * WLANSVCHANDLE and, worse, left any getter parked on it parked forever,
+ * holding an RPC worker thread for the life of the service.
+ */
 void __RPC_USER WLANSVC_RPC_HANDLE_rundown(WLANSVC_RPC_HANDLE hClientHandle)
 {
+    WlanSvcTeardownHandle(hClientHandle);
 }
 
