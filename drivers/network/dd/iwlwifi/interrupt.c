@@ -3,9 +3,9 @@
  * LICENSE:     GPL-2.0-or-later
  * PURPOSE:     Interrupt scaffolding.
  *
- * Phase 1a never unmasks a single CSR_INT_MASK bit, so the device cannot
- * raise an interrupt of its own.  The ISR therefore claims nothing - on a
- * shared line that is what lets the real owner see the assertion.
+ * Gen3 firmware self-load reports ROM/firmware progress through the legacy
+ * CSR causes when MSI-X is unavailable.  Claim only causes asserted by this
+ * device, acknowledge them immediately, and leave parsing to the DPC.
  */
 
 #include "iwlwifi.h"
@@ -52,11 +52,27 @@ IwlIsr(
     _Out_ PBOOLEAN QueueDefaultInterruptDpc,
     _Out_ PULONG TargetProcessors)
 {
-    UNREFERENCED_PARAMETER(MiniportInterruptContext);
+    PIWL_ADAPTER Adapter = (PIWL_ADAPTER)MiniportInterruptContext;
+    ULONG Cause;
 
     *QueueDefaultInterruptDpc = FALSE;
     *TargetProcessors = 0;
-    return FALSE;
+    if (Adapter == NULL || Adapter->IoBase == NULL)
+        return FALSE;
+
+    Cause = IwlRead32(Adapter, CSR_INT) &
+            (CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX |
+             CSR_INT_BIT_SW_RX | CSR_INT_BIT_HW_ERR |
+             CSR_INT_BIT_SW_ERR);
+    if (Cause == 0 || Cause == 0xffffffff)
+        return FALSE;
+
+    IwlWrite32(Adapter, CSR_INT, Cause);
+    Adapter->LastInterruptCause |= Cause;
+    if (Cause & CSR_INT_BIT_ALIVE)
+        InterlockedExchange(&Adapter->FirmwareAlive, 1);
+    *QueueDefaultInterruptDpc = TRUE;
+    return TRUE;
 }
 
 VOID NTAPI
@@ -66,10 +82,18 @@ IwlInterruptDpc(
     _In_ PVOID ReceiveThrottleParameters,
     _In_ PVOID NdisReserved2)
 {
-    UNREFERENCED_PARAMETER(MiniportInterruptContext);
+    PIWL_ADAPTER Adapter = (PIWL_ADAPTER)MiniportInterruptContext;
     UNREFERENCED_PARAMETER(MiniportDpcContext);
     UNREFERENCED_PARAMETER(ReceiveThrottleParameters);
     UNREFERENCED_PARAMETER(NdisReserved2);
+    if (Adapter != NULL)
+    {
+        DPRINT1("iwlwifi: interrupt cause(s) 0x%08x%s\n",
+                Adapter->LastInterruptCause,
+                Adapter->FirmwareAlive ? " (ALIVE)" : "");
+        if (InterlockedCompareExchange(&Adapter->DataPathReady, 0, 0))
+            IwlProcessReceiveCompletions(Adapter, TRUE);
+    }
 }
 
 VOID NTAPI
@@ -84,6 +108,10 @@ IwlDisableInterruptHandler(_In_ NDIS_HANDLE MiniportInterruptContext)
 VOID NTAPI
 IwlEnableInterruptHandler(_In_ NDIS_HANDLE MiniportInterruptContext)
 {
-    /* Nothing to re-enable: Phase 1a keeps CSR_INT_MASK at zero. */
-    UNREFERENCED_PARAMETER(MiniportInterruptContext);
+    PIWL_ADAPTER Adapter = (PIWL_ADAPTER)MiniportInterruptContext;
+    if (Adapter != NULL && Adapter->IoBase != NULL)
+        IwlWrite32(Adapter, CSR_INT_MASK,
+                   CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX |
+                   CSR_INT_BIT_SW_RX | CSR_INT_BIT_HW_ERR |
+                   CSR_INT_BIT_SW_ERR);
 }

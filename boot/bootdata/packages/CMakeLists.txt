@@ -135,10 +135,10 @@ if(DOWNLOAD_IWLWIFI_UCODE)
 
         # Into reactos.cab, so the blob reaches an installed system and not
         # just the boot medium.  The driver looks for it in
-        # \SystemRoot\System32\drivers\iwlwifi\ - see IWL_FW_DIRECTORY in
+        # \SystemRoot\System32\drivers\ - see IWL_FW_DIRECTORY in
         # drivers/network/dd/iwlwifi/fw/ucode_load.c.
         add_cd_file(FILE "${_iwlwifi_path}"
-                    DESTINATION "reactos/system32/drivers/iwlwifi"
+                    DESTINATION "reactos/system32/drivers"
                     FOR all)
     endforeach()
 

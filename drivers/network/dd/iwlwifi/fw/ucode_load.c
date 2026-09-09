@@ -19,7 +19,7 @@
 #include <debug.h>
 
 /* Where the CMake DOWNLOAD_IWLWIFI_UCODE option lands the pinned blobs. */
-#define IWL_FW_DIRECTORY    L"\\SystemRoot\\System32\\drivers\\iwlwifi\\"
+#define IWL_FW_DIRECTORY    L"\\SystemRoot\\System32\\drivers\\"
 
 /*
  * A firmware container larger than this is not something we are going to

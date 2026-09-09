@@ -15,13 +15,10 @@
  * archaeology - which is why it is the better vehicle for broad device
  * coverage.
  *
- * PHASE 1a SCOPE (this file set): register the miniport, bind the PCI IDs
- * in hw/devices.c, map BAR0, run the documented transport power-up
- * (prepare-card-hw -> APM init -> finish-nic-init), read and decode
- * CSR_HW_REV / CSR_HW_RF_ID, locate and parse the matching .ucode
- * container, then report identification OIDs.  No ucode is pushed to the
- * device, no rings are built, no scan or association.  The datapath and
- * the firmware command API land in later phases.
+ * The current transport loads signed firmware and PNVM, builds Gen3 command
+ * and RX rings, reads NVM/regulatory data, performs firmware scans, and
+ * exposes the results through the Native Wi-Fi OID surface.  Association,
+ * key programming and the normal data TX/RX path remain separate layers.
  */
 
 #ifndef _IWLWIFI_H_
@@ -48,12 +45,41 @@
 #define IWL_FLAG_APM_UP             0x00000004
 #define IWL_FLAG_FW_LOADED          0x00000008
 #define IWL_FLAG_PNVM_LOADED        0x00000010
+#define IWL_FLAG_FW_DMA_READY       0x00000020
+#define IWL_FLAG_GEN3_BOOT_READY    0x00000040
 
 /* NDIS carries an 802.3-form address even for a native-802.11 miniport. */
 #define IWL_MAC_ADDRESS_LENGTH      6
 
 /* Longest "iwlwifi-<pre>-<api>.ucode" we will ever build. */
 #define IWL_MAX_FW_NAME             64
+#define IWL_MAX_FW_DMA_BLOCKS       IWL_UCODE_SECTION_MAX
+#define IWL_GEN3_RX_QUEUE_SIZE      4096
+#define IWL_GEN3_RX_BUFFER_SIZE     4096
+#define IWL_GEN3_CMD_QUEUE_SIZE     128
+#define IWL_GEN3_TFD_SIZE           256
+#define IWL_GEN3_TX_QUEUE_SIZE      128
+#define IWL_GEN3_TX_BC_ENTRIES      1024
+#define IWL_MAX_BSS                 64
+#define IWL_MAX_BSS_IE_SIZE         512
+
+typedef struct _IWL_DMA_BLOCK
+{
+    PVOID             VirtualAddress;
+    PHYSICAL_ADDRESS  PhysicalAddress;
+    ULONG             Length;
+} IWL_DMA_BLOCK, *PIWL_DMA_BLOCK;
+
+typedef struct _IWL_BSS
+{
+    DOT11_MAC_ADDRESS Bssid;
+    ULONG ChannelFrequency;
+    LONG Rssi;
+    USHORT BeaconPeriod;
+    USHORT CapabilityInformation;
+    ULONG IeLength;
+    UCHAR Ies[IWL_MAX_BSS_IE_SIZE];
+} IWL_BSS, *PIWL_BSS;
 
 typedef struct _IWL_ADAPTER
 {
@@ -104,6 +130,49 @@ typedef struct _IWL_ADAPTER
     ULONG                   FwImageLength;
     IWL_FW_PARSED          *FwParsed;
 
+    /* Gen3 self-init consumes one coherent DMA allocation per firmware
+     * section plus the initial microcode loader. */
+    IWL_DMA_BLOCK           FwDma[IWL_MAX_FW_DMA_BLOCKS];
+    ULONG                   FwDmaCount;
+    ULONG                   FwLmacCount;
+    ULONG                   FwUmacCount;
+    ULONG                   FwPagingCount;
+    IWL_DMA_BLOCK           ImlDma;
+
+    /* AX210 Gen3 self-load context and the rings the boot ROM may DMA to.
+     * Every address published in the context owns a real coherent backing
+     * allocation; zero/dummy bus addresses are not safe on physical HW. */
+    IWL_DMA_BLOCK           RxTransferRing;
+    IWL_DMA_BLOCK           RxCompletionRing;
+    IWL_DMA_BLOCK           RxStatus;
+    USHORT                  RxReadIndex;
+    volatile LONG           DataPathReady;
+    NDIS_HANDLE             RxNblPool;
+    NDIS_HANDLE             RxPollTimer;
+    PIWL_DMA_BLOCK          RxBuffers;
+    ULONG                   RxBufferCount;
+    ULONG                   RxTransferWriteIndex;
+    ULONG                   RxTransferWriteActual;
+    IWL_DMA_BLOCK           CommandRing;
+    IWL_DMA_BLOCK           CommandFirstTb;
+    IWL_DMA_BLOCK           CommandData;
+    ULONG                   CommandWriteIndex;
+    IWL_DMA_BLOCK           TxQueueRing;
+    IWL_DMA_BLOCK           TxQueueFirstTb;
+    IWL_DMA_BLOCK           TxQueueData;
+    IWL_DMA_BLOCK           TxByteCount;
+    USHORT                  TxQueueId;
+    USHORT                  TxWriteIndex;
+    BOOLEAN                 TxQueueValid;
+    NDIS_SPIN_LOCK          TxLock;
+    UCHAR                   CommandResponse[IWL_GEN3_RX_BUFFER_SIZE];
+    IWL_DMA_BLOCK           PrphScratch;
+    IWL_DMA_BLOCK           PrphInfoPage;
+    IWL_DMA_BLOCK           ContextInfo;
+    IWL_DMA_BLOCK           PnvmDma[IWL_PNVM_MAX_SECTIONS];
+    ULONG                   PnvmDmaCount;
+    IWL_DMA_BLOCK           PnvmDescriptor;
+
     /* Platform NVM, AX210 and later only (IWL_CFG_NEEDS_PNVM).  Same
      * ownership rule as the firmware: PnvmParsed's sections point into
      * PnvmImage.  Which of its SKU blocks applies cannot be decided here -
@@ -123,6 +192,15 @@ typedef struct _IWL_ADAPTER
     BOOLEAN                 InterruptShared;
     BOOLEAN                 HasMessageInterrupt;
     NDIS_HANDLE             InterruptHandle;
+    volatile ULONG          LastInterruptCause;
+    volatile LONG           FirmwareAlive;
+    ULONG                   FirmwareSkuId[3];
+    BOOLEAN                 FirmwareSkuValid;
+    ULONG                   NvmChannelFlags[110];
+    ULONG                   NvmChannelCount;
+    USHORT                  NvmVersion;
+    UCHAR                   ValidTxAntennas;
+    UCHAR                   ValidRxAntennas;
 
     /* Permanent address.  Family 9000+ reports it through the firmware's
      * NVM access command, which Phase 2 introduces; until then the
@@ -131,6 +209,32 @@ typedef struct _IWL_ADAPTER
     UCHAR                   PermanentMacAddress[IWL_MAC_ADDRESS_LENGTH];
     UCHAR                   CurrentMacAddress[IWL_MAC_ADDRESS_LENGTH];
     BOOLEAN                 MacAddressValid;
+
+    /* Native Wi-Fi scan state.  Firmware owns the RF scan; the work item
+     * merely keeps the blocking command/notification exchange off the OID
+     * call path. */
+    NDIS_HANDLE             ScanWorkItem;
+    volatile LONG           ScanQueued;
+    KEVENT                  ScanIdleEvent;
+    NDIS_HANDLE             ConnectWorkItem;
+    volatile LONG           ConnectQueued;
+    KEVENT                  ConnectIdleEvent;
+    IWL_BSS                 Bss[IWL_MAX_BSS];
+    ULONG                   BssCount;
+    ULONG                   CurrentOperationMode;
+
+    /* Connection policy supplied by nwifi before OID_DOT11_CONNECT_REQUEST.
+     * Keep this distinct from link state: accepting these OIDs only records
+     * the requested network; it does not imply that firmware authenticated
+     * or associated. */
+    DOT11_BSS_TYPE          DesiredBssType;
+    DOT11_SSID              DesiredSsid;
+    DOT11_MAC_ADDRESS       DesiredBssid;
+    BOOLEAN                 DesiredBssidValid;
+    DOT11_AUTH_ALGORITHM    AuthenticationAlgorithm;
+    DOT11_CIPHER_ALGORITHM  UnicastCipher;
+    DOT11_CIPHER_ALGORITHM  MulticastCipher;
+    ULONG                   DefaultKeyId;
 
     LONG                    Flags;
 } IWL_ADAPTER, *PIWL_ADAPTER;
@@ -231,11 +335,56 @@ IwlLoadPnvm(_In_ PIWL_ADAPTER Adapter);
 VOID
 IwlFreePnvm(_In_ PIWL_ADAPTER Adapter);
 
+NDIS_STATUS
+IwlGen3AllocateFirmwareDma(_In_ PIWL_ADAPTER Adapter);
+
+VOID
+IwlGen3FreeFirmwareDma(_In_ PIWL_ADAPTER Adapter);
+
+NDIS_STATUS
+IwlGen3StartFirmware(_In_ PIWL_ADAPTER Adapter);
+
+NDIS_STATUS
+IwlInitializeScan(_In_ PIWL_ADAPTER Adapter);
+
+VOID
+IwlShutdownScan(_In_ PIWL_ADAPTER Adapter);
+
+NDIS_STATUS
+IwlStartScan(_In_ PIWL_ADAPTER Adapter);
+
+NDIS_STATUS
+IwlStartConnect(_In_ PIWL_ADAPTER Adapter);
+
+BOOLEAN
+IwlTransmitFrame(
+    _In_ PIWL_ADAPTER Adapter,
+    _In_reads_bytes_(FrameLength) const UCHAR *Frame,
+    _In_ USHORT FrameLength,
+    _In_ BOOLEAN Encrypt,
+    _Out_opt_ PUSHORT RxBefore);
+
+NDIS_STATUS
+IwlInstallKey(
+    _In_ PIWL_ADAPTER Adapter,
+    _In_ ULONG KeyId,
+    _In_ DOT11_CIPHER_ALGORITHM Algorithm,
+    _In_reads_bytes_(KeyLength) const UCHAR *Key,
+    _In_ ULONG KeyLength,
+    _In_ BOOLEAN Multicast);
+
+NDIS_STATUS
+IwlBuildBssList(
+    _In_ PIWL_ADAPTER Adapter,
+    _In_ PNDIS_OID_REQUEST Request);
+
 /* ------------------------------------------------------------------ */
 /* driver.c                                                            */
 /* ------------------------------------------------------------------ */
 
 extern NDIS_HANDLE g_NdisMiniportDriverHandle;
+extern const NDIS_OID IwlSupportedOids[];
+extern const ULONG IwlSupportedOidCount;
 
 /* ------------------------------------------------------------------ */
 /* init.c                                                              */
@@ -304,6 +453,17 @@ IwlDisableInterruptHandler(_In_ NDIS_HANDLE MiniportInterruptContext);
 
 VOID NTAPI
 IwlEnableInterruptHandler(_In_ NDIS_HANDLE MiniportInterruptContext);
+
+VOID
+IwlProcessReceiveCompletions(_In_ PIWL_ADAPTER Adapter,
+                             _In_ BOOLEAN AtDispatchLevel);
+
+VOID NTAPI
+IwlRxPollTimerDpc(_In_ PVOID SystemSpecific1, _In_ PVOID FunctionContext,
+                  _In_ PVOID SystemSpecific2, _In_ PVOID SystemSpecific3);
+
+VOID
+IwlRecycleRxBuffer(_In_ PIWL_ADAPTER Adapter, _In_ USHORT Rbid);
 
 /* ------------------------------------------------------------------ */
 /* oid.c                                                               */
