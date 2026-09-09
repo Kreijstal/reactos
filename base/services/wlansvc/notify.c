@@ -10,7 +10,9 @@
  * _RpcAsyncGetNotification, which returns one notification per call.
  *
  * Indicate routines run with WlanSvcLock held by the caller; the async getter
- * holds the lock only while touching the queue, never while waiting.
+ * holds the lock only while touching the queue, never while waiting -- but it
+ * does hold a reference on the handle for the whole call, so the handle and
+ * its event outlive the wait even if the client closes or dies meanwhile.
  */
 
 #include "precomp.h"
@@ -107,9 +109,22 @@ WlanSvcIndicateConnection(PWLANSVC_INTERFACE Iface,
 }
 
 /*
+ * How long the getter parks on the handle's event before returning
+ * ERROR_TIMEOUT so the RPC runtime can release the per-context-handle lock and
+ * the client can re-issue.  Bounds worst-case unsubscribe/teardown latency; a
+ * real notification wakes the wait immediately, so this never delays delivery.
+ */
+#define WLANSVC_NOTIF_POLL_MS 2000
+
+/*
  * Pop the oldest queued notification into an RPC-allocated buffer, waiting on
  * the handle's event if the queue is empty.  The payload is a separate RPC
  * allocation referenced by pData ([unique, size_is(dwDataSize)] in the IDL).
+ *
+ * Returns ERROR_TIMEOUT when the poll interval elapses with nothing queued and
+ * the client still subscribed: the caller must return this to the client so
+ * the stub (and rpcrt4's per-handle lock) unwinds; the client's worker loops
+ * and calls again.
  */
 DWORD
 WlanSvcDequeueNotification(PWLANSVCHANDLE Handle, PWLAN_NOTIFICATION_DATA *ppData)
@@ -117,12 +132,23 @@ WlanSvcDequeueNotification(PWLANSVCHANDLE Handle, PWLAN_NOTIFICATION_DATA *ppDat
     PWLAN_NOTIFICATION_DATA out;
     PWLANSVC_NOTIFICATION notif = NULL;
     PLIST_ENTRY entry;
+    HANDLE hEvent;
 
     *ppData = NULL;
 
     for (;;)
     {
         EnterCriticalSection(&WlanSvcLock);
+
+        /* Torn down while we were parked (client closed, or its binding ran
+         * down).  Our caller's reference keeps the memory alive long enough to
+         * read this and leave. */
+        if (Handle->Closing)
+        {
+            LeaveCriticalSection(&WlanSvcLock);
+            return ERROR_INVALID_HANDLE;
+        }
+
         if (!IsListEmpty(&Handle->NotificationQueue))
         {
             entry = RemoveHeadList(&Handle->NotificationQueue);
@@ -139,25 +165,33 @@ WlanSvcDequeueNotification(PWLANSVCHANDLE Handle, PWLAN_NOTIFICATION_DATA *ppDat
             LeaveCriticalSection(&WlanSvcLock);
             return ERROR_INVALID_STATE;
         }
+
+        /* Read the event under the lock and wait on that copy: the field is
+         * cleared by the final release, and only the reference we hold keeps
+         * that from happening while we are in the wait below. */
+        hEvent = Handle->hNotifyEvent;
         LeaveCriticalSection(&WlanSvcLock);
 
         if (notif != NULL)
             break;
 
-        if (Handle->hNotifyEvent == NULL)
+        if (hEvent == NULL)
             return ERROR_INVALID_STATE;
 
-        /* Park until an event is queued (or the handle is torn down). */
-        WaitForSingleObject(Handle->hNotifyEvent, INFINITE);
-
-        /* Re-validate: the handle may have been closed while we waited. */
-        EnterCriticalSection(&WlanSvcLock);
-        if (WlanSvcGetHandleEntry((WLANSVC_RPC_HANDLE)Handle) != Handle)
-        {
-            LeaveCriticalSection(&WlanSvcLock);
-            return ERROR_INVALID_HANDLE;
-        }
-        LeaveCriticalSection(&WlanSvcLock);
+        /*
+         * Wait with a bounded timeout, never INFINITE.  rpcrt4 holds this
+         * handle's own per-context-handle CRITICAL_SECTION (RpcContextHandle.lock)
+         * across the entire _RpcAsyncGetNotification stub, so parking here
+         * forever pins that lock and deadlocks every other call that touches
+         * the handle -- including the client's own _RpcRegisterNotification(NONE)
+         * that is trying to wake us: a circular wait (see docs/asus.txt 85).
+         * On timeout we return to the RPC runtime, which drops the lock, and
+         * the client's worker re-issues the getter.  A real notification or an
+         * unsubscribe signals hEvent and wakes us at once, so this costs a
+         * single idle round-trip per interval and nothing on the hot path.
+         */
+        if (WaitForSingleObject(hEvent, WLANSVC_NOTIF_POLL_MS) == WAIT_TIMEOUT)
+            return ERROR_TIMEOUT;
     }
 
     out = midl_user_allocate(sizeof(*out));

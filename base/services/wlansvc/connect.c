@@ -127,7 +127,8 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     bss = WlanSvcPickBss(Iface, &ssid, bssType);
     if (bss == NULL)
     {
-        WlanSvcDoScan(Iface, &ssid);
+        if (WlanSvcDoScan(Iface, &ssid) == ERROR_DEVICE_NOT_CONNECTED)
+            return ERROR_DEVICE_NOT_CONNECTED;
         bss = WlanSvcPickBss(Iface, &ssid, bssType);
     }
 
@@ -151,7 +152,12 @@ WlanSvcConnect(PWLANSVC_INTERFACE Iface, const PWLAN_CONNECTION_PARAMETERS pPara
     req.BssType = bssType;
     req.AuthAlgorithm = auth;
     req.UnicastCipher = cipher;
+    /* The group cipher is the AP's choice, not ours: the association
+     * request must name the one its beacon advertises. */
     req.MulticastCipher = cipher;
+    if (bss != NULL && bss->SecurityEnabled &&
+        bss->GroupCipher != DOT11_CIPHER_ALGO_NONE)
+        req.MulticastCipher = bss->GroupCipher;
     if (bss != NULL)
         req.DesiredBssid = bss->Bssid;  /* all-zero => any BSSID for the SSID */
 

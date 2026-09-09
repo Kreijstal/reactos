@@ -326,12 +326,16 @@ NwifiDispatchNotification(const NWIFI_NOTIFICATION *pNotif)
 
     iface = WlanSvcFindInterfaceByIndex(pNotif->InterfaceIndex);
 
+    DPRINT1("WLANSVC: dispatch code=%d ifidx=%lu iface=%p\n",
+            (int)pNotif->Code, (ULONG)pNotif->InterfaceIndex, iface);
+
     switch (pNotif->Code)
     {
         case NwifiNotifyScanComplete:
             if (iface != NULL)
             {
                 WlanSvcRefreshBssCache(iface);
+                SetEvent(iface->ScanCompleteEvent);
                 WlanSvcIndicateAcm(iface, wlan_notification_acm_scan_complete);
             }
             break;
@@ -424,6 +428,9 @@ NwifiNotifyWorker(LPVOID lpParameter)
 
         if (InterlockedCompareExchange(&NwifiNotifyRun, 1, 1) == 0)
             break;      /* shutting down */
+
+        DPRINT1("WLANSVC: notify worker woke err=%lu ret=%lu code=%d ifidx=%lu\n",
+                err, ret, (int)notif.Code, (ULONG)notif.InterfaceIndex);
 
         if (err == ERROR_SUCCESS && ret >= sizeof(NWIFI_NOTIFICATION))
         {
