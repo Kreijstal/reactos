@@ -35,6 +35,13 @@ add_subdirectory(rapps)
 add_subdirectory(rapps_com)
 add_subdirectory(regedit)
 add_subdirectory(regedt32)
+
+# Front end for the rospoke bring-up driver; only useful if that driver
+# was built, and it is off by default for good reason.
+if(ENABLE_ROSPOKE)
+    add_subdirectory(rospoke)
+endif()
+
 add_subdirectory(runas)
 add_subdirectory(sc)
 add_subdirectory(screensavers)
