@@ -2303,6 +2303,26 @@ static struct list *threadpool_get_next_item( const struct threadpool *pool )
     return ptr;
 }
 
+#if defined(__GNUC__) && defined(_M_AMD64)
+/* ReactOS starts AMD64 user threads at a 16-byte-aligned RSP rather than at
+ * the CALL-shaped RSP expected by GCC.  This dispatcher gives external simple
+ * callbacks the Windows ABI layout.  Callbacks must not unwind through the
+ * threadpool API. */
+__attribute__((naked, noinline))
+static void call_simple_callback( PTP_SIMPLE_CALLBACK callback,
+                                  TP_CALLBACK_INSTANCE *instance, void *userdata )
+{
+    __asm__ volatile(
+        "movq %rcx, %rax\n\t"
+        "movq %rdx, %rcx\n\t"
+        "movq %r8, %rdx\n\t"
+        "subq $32, %rsp\n\t"
+        "call *%rax\n\t"
+        "addq $32, %rsp\n\t"
+        "ret\n\t");
+}
+#endif
+
 /***********************************************************************
  *           tp_object_execute    (internal)
  *
@@ -2357,7 +2377,12 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
         {
             TRACE( "executing simple callback %p(%p, %p)\n",
                    object->u.simple.callback, callback_instance, object->userdata );
+#if defined(__GNUC__) && defined(_M_AMD64)
+            call_simple_callback( object->u.simple.callback, callback_instance,
+                                  object->userdata );
+#else
             object->u.simple.callback( callback_instance, object->userdata );
+#endif
             TRACE( "callback %p returned\n", object->u.simple.callback );
             break;
         }
