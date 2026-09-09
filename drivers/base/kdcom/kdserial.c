@@ -8,6 +8,12 @@
 
 #include "kddll.h"
 
+/*
+ * Upper bound on the number of bytes KdpReceivePacketLeader() will consume
+ * while hunting for a packet leader. See the comment in that function.
+ */
+#define KDP_LEADER_SCAN_LIMIT 65536
+
 /* FUNCTIONS ******************************************************************/
 
 /******************************************************************************
@@ -77,12 +83,26 @@ KdpReceivePacketLeader(
 {
     UCHAR Index = 0, Byte, Buffer[4];
     KDP_STATUS KdStatus;
+    ULONG ScanLimit = KDP_LEADER_SCAN_LIMIT;
 
     /* Set first character to 0 */
     Buffer[0] = 0;
 
     do
     {
+        /*
+         * Bound the scan. This loop only ever terminates on a receive timeout,
+         * and KdpReceiveByte() only times out when the line is silent. A line
+         * that keeps handing us bytes we cannot use - a host streaming garbage,
+         * or a UART that reports a line error without draining the offending
+         * byte, as happens under a permanent break condition - would otherwise
+         * pin us here forever: no timeout, no return, and nothing transmitted.
+         * Report a timeout instead, so that the caller's normal timeout and
+         * retry handling gets a chance to run.
+         */
+        if (ScanLimit-- == 0)
+            return KDP_PACKET_TIMEOUT;
+
         /* Receive a single byte */
         KdStatus = KdpReceiveByte(&Byte);
 
