@@ -82,4 +82,3 @@ RtlQueueApcWow64Thread(
     UNIMPLEMENTED;
     return STATUS_NOT_IMPLEMENTED;
 }
-
