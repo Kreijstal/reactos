@@ -429,6 +429,15 @@ HalpWriteCmos(
 );
 
 //
+// ACPI FADT RESET_REG (acpi component; the legacy component stubs it)
+//
+BOOLEAN
+NTAPI
+HalpAcpiWriteResetRegister(
+    VOID
+);
+
+//
 // Spinlock for protecting CMOS access
 //
 _Acquires_lock_(HalpSystemHardwareLock)
