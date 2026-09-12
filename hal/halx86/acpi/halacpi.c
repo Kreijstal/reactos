@@ -822,7 +822,6 @@ HaliAcpiTimerInit(IN ULONG TimerPort,
     //HalaAcpiTimerInit(TimerPort, TimerValExt);
 }
 
-CODE_SEG("INIT")
 /**
  * @brief Resets the machine through the FADT RESET_REG, the way an ACPI 2.0+
  * firmware asks to be reset. The keyboard-controller pulse the generic path
@@ -885,6 +884,7 @@ HalpAcpiWriteResetRegister(VOID)
     return TRUE;
 }
 
+CODE_SEG("INIT")
 NTSTATUS
 NTAPI
 HalpSetupAcpiPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
