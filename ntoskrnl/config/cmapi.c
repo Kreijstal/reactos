@@ -1836,24 +1836,6 @@ Quickie:
     return Status;
 }
 
-static BOOLEAN
-CmpIsProtectedRegistryKey(IN PCM_KEY_CONTROL_BLOCK Kcb)
-{
-    static const UNICODE_STRING ClassesInterface =
-        RTL_CONSTANT_STRING(L"\\Registry\\Machine\\Software\\Classes\\Interface");
-    PUNICODE_STRING KeyName;
-    BOOLEAN Protected = FALSE;
-
-    KeyName = CmpConstructName(Kcb);
-    if (KeyName)
-    {
-        Protected = RtlEqualUnicodeString(KeyName, &ClassesInterface, TRUE);
-        CmpFree(KeyName, 0);
-    }
-
-    return Protected;
-}
-
 NTSTATUS
 NTAPI
 CmRenameKey(IN PCM_KEY_BODY KeyBody,
@@ -2054,29 +2036,13 @@ CmDeleteKey(IN PCM_KEY_BODY KeyBody)
     Node = (PCM_KEY_NODE)HvGetCell(Hive, Cell);
     ASSERT(Node);
 
-    /*
-     * A key control block caches the cell index of its key node.  If that
-     * cell no longer holds a key node, this KCB has been orphaned: the key
-     * was freed through some other path and the cell storage has since been
-     * reused.  Editing it would corrupt whatever now lives in the cell, and
-     * comparing its bytes against Kcb->Flags is meaningless.  Report the key
-     * as deleted, which is what a caller racing a delete would observe.
-     */
-    if ((Node->Signature != CM_KEY_NODE_SIGNATURE) &&
-        (Node->Signature != CM_LINK_NODE_SIGNATURE))
-    {
-        DPRINT1("CmDeleteKey: stale KCB %p: cell 0x%x of hive %p holds no key "
-                "node (signature 0x%x)\n", Kcb, Cell, Hive, Node->Signature);
-        Kcb->Delete = TRUE;
-        Status = STATUS_KEY_DELETED;
-    }
-    /* Check if we don't have any children */
-    else if (!(Node->Flags & KEY_NO_DELETE) &&
-             !CmpIsProtectedRegistryKey(Kcb))
-    {
-        /* Sanity check */
-        ASSERT(Node->Flags == Kcb->Flags);
+    /* Sanity check */
+    ASSERT(Node->Flags == Kcb->Flags);
 
+    /* Check if we don't have any children */
+    if (!(Node->SubKeyCounts[Stable] + Node->SubKeyCounts[Volatile]) &&
+        !(Node->Flags & KEY_NO_DELETE))
+    {
         /* Send notification to registered callbacks */
         CmpReportNotify(Kcb, Hive, Cell, REG_NOTIFY_CHANGE_NAME);
 
@@ -2085,7 +2051,6 @@ CmDeleteKey(IN PCM_KEY_BODY KeyBody)
         Status = CmpFreeKeyByCell(Hive, Cell, TRUE);
         if (NT_SUCCESS(Status))
         {
-            DPRINT1("CMDELDIAG: freed hive=%p cell=0x%x kcb=%p\n", Hive, Cell, Kcb);
             /* Flush any notifications */
             CmpFlushNotifiesOnKeyBodyList(Kcb, FALSE);
 
