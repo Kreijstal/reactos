@@ -325,7 +325,12 @@ static BOOL do_reg_operation( HKEY hkey, const WCHAR *value, INFCONTEXT *context
             }
             else RegDeleteValueW( hkey, value );
         }
-        else NtDeleteKey( hkey );
+        else
+        {
+            /* A DelReg key entry removes the whole subtree */
+            RegDeleteTreeW( hkey, NULL );
+            NtDeleteKey( hkey );
+        }
         return TRUE;
     }
 
