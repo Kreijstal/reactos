@@ -16,6 +16,7 @@
 #include <advapi32.h>
 
 #include <ndk/cmfuncs.h>
+#include <ndk/kefuncs.h>
 #include <pseh/pseh2.h>
 
 #include "reg.h"
@@ -49,6 +50,17 @@ static VOID CloseDefaultKeys(VOID);
     (((ULONG_PTR)(HKey) & 0xF0000000) == 0x80000000)
 #define GetPredefKeyIndex(HKey)                                                \
     ((ULONG_PTR)(HKey) & 0x0FFFFFFF)
+
+/* HKEY_PERFORMANCE_DATA / _TEXT / _NLSTEXT are pseudo keys with no key object
+ * behind them: only value queries work, every other operation on them fails
+ * with ERROR_INVALID_HANDLE (see query_perf_data). */
+static __inline BOOL
+is_perf_key(HKEY hKey)
+{
+    return HandleToUlong(hKey) == HandleToUlong(HKEY_PERFORMANCE_DATA) ||
+           HandleToUlong(hKey) == HandleToUlong(HKEY_PERFORMANCE_TEXT) ||
+           HandleToUlong(hKey) == HandleToUlong(HKEY_PERFORMANCE_NLSTEXT);
+}
 
 static NTSTATUS OpenClassesRootKey(PHANDLE KeyHandle);
 static NTSTATUS OpenLocalMachineKey (PHANDLE KeyHandle);
@@ -164,6 +176,12 @@ MapDefaultKey(OUT PHANDLE RealKey,
     {
         *RealKey = (HANDLE)((ULONG_PTR)Key & ~0x1);
         return STATUS_SUCCESS;
+    }
+
+    /* The performance pseudo keys have no key object to map to */
+    if (is_perf_key(Key))
+    {
+        return STATUS_INVALID_HANDLE;
     }
 
     /* Handle special cases here */
@@ -2147,6 +2165,11 @@ RegSetKeyValueW(IN HKEY hKey,
     NTSTATUS Status;
     LONG Ret;
 
+    if (hKey == HKEY_PERFORMANCE_TEXT || hKey == HKEY_PERFORMANCE_NLSTEXT)
+    {
+        return ERROR_BADKEY;
+    }
+
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
     if (!NT_SUCCESS(Status))
@@ -2532,6 +2555,12 @@ RegEnumKeyExW(
     HANDLE KeyHandle;
     LONG ErrorCode = ERROR_SUCCESS;
     NTSTATUS Status;
+
+    /* The counter text pseudo keys enumerate as empty */
+    if (hKey == HKEY_PERFORMANCE_TEXT || hKey == HKEY_PERFORMANCE_NLSTEXT)
+    {
+        return ERROR_NO_MORE_ITEMS;
+    }
 
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
@@ -3364,6 +3393,11 @@ RegOpenKeyExW(HKEY hKey,
         return ERROR_INVALID_HANDLE;
     }
 
+    if (is_perf_key(hKey))
+    {
+        return ERROR_INVALID_HANDLE;
+    }
+
     if (IsPredefKey(hKey) && (!lpSubKey || !*lpSubKey))
     {
         *phkResult = hKey;
@@ -3989,6 +4023,321 @@ RegQueryReflectionKey(IN HKEY hBase,
 }
 
 
+
+/************************************************************************
+ *  Performance-data pseudo keys
+ *
+ *  HKEY_PERFORMANCE_DATA / _TEXT / _NLSTEXT are not registry keys at all:
+ *  a value query collects a PERF_DATA_BLOCK from every registered
+ *  performance provider ("Counter" and "Help" return the counter name and
+ *  help text tables instead).  Ported from Wine's kernelbase.
+ */
+
+/* FIXME: we should read data from system32/perf009c.dat (or perf###c depending
+ * on locale) instead */
+static DWORD
+query_perf_names(DWORD *type, void *data, DWORD *ret_size, BOOL unicode)
+{
+    static const WCHAR names[] = L"1\0" "1847\0" "1846\0End Marker\0";
+    DWORD size = *ret_size;
+
+    if (type) *type = REG_MULTI_SZ;
+    *ret_size = sizeof(names);
+    if (!unicode) *ret_size /= sizeof(WCHAR);
+
+    if (!data) return ERROR_SUCCESS;
+    if (size < *ret_size) return ERROR_MORE_DATA;
+
+    if (unicode)
+        memcpy(data, names, sizeof(names));
+    else
+        RtlUnicodeToMultiByteN(data, size, NULL, names, sizeof(names));
+    return ERROR_SUCCESS;
+}
+
+/* FIXME: we should read data from system32/perf009h.dat (or perf###h depending
+ * on locale) instead */
+static DWORD
+query_perf_help(DWORD *type, void *data, DWORD *ret_size, BOOL unicode)
+{
+    static const WCHAR names[] = L"1847\0End Marker\0";
+    DWORD size = *ret_size;
+
+    if (type) *type = REG_MULTI_SZ;
+    *ret_size = sizeof(names);
+    if (!unicode) *ret_size /= sizeof(WCHAR);
+
+    if (!data) return ERROR_SUCCESS;
+    if (size < *ret_size) return ERROR_MORE_DATA;
+
+    if (unicode)
+        memcpy(data, names, sizeof(names));
+    else
+        RtlUnicodeToMultiByteN(data, size, NULL, names, sizeof(names));
+    return ERROR_SUCCESS;
+}
+
+struct perf_provider
+{
+    HMODULE perflib;
+    WCHAR linkage[MAX_PATH];
+    WCHAR objects[MAX_PATH];
+    PM_OPEN_PROC *pOpen;
+    PM_CLOSE_PROC *pClose;
+    PM_COLLECT_PROC *pCollect;
+};
+
+static void *
+get_provider_entry(HKEY perf, HMODULE perflib, const char *name)
+{
+    char buf[MAX_PATH];
+    DWORD err, type, len;
+
+    len = sizeof(buf) - 1;
+    err = RegQueryValueExA(perf, name, NULL, &type, (BYTE *)buf, &len);
+    if (err != ERROR_SUCCESS || type != REG_SZ)
+        return NULL;
+
+    buf[len] = 0;
+    TRACE("Loading function pointer for %s: %s\n", name, debugstr_a(buf));
+
+    return GetProcAddress(perflib, buf);
+}
+
+static BOOL
+load_provider(HKEY root, const WCHAR *name, struct perf_provider *provider)
+{
+    WCHAR buf[MAX_PATH], buf2[MAX_PATH];
+    DWORD err, type, len;
+    HKEY service, perf;
+
+    err = RegOpenKeyExW(root, name, 0, KEY_READ, &service);
+    if (err != ERROR_SUCCESS)
+        return FALSE;
+
+    provider->linkage[0] = 0;
+    err = RegOpenKeyExW(service, L"Linkage", 0, KEY_READ, &perf);
+    if (err == ERROR_SUCCESS)
+    {
+        len = sizeof(buf) - sizeof(WCHAR);
+        err = RegQueryValueExW(perf, L"Export", NULL, &type, (BYTE *)buf, &len);
+        if (err == ERROR_SUCCESS && (type == REG_SZ || type == REG_MULTI_SZ))
+        {
+            memcpy(provider->linkage, buf, len);
+            provider->linkage[len / sizeof(WCHAR)] = 0;
+            TRACE("Export: %s\n", debugstr_w(provider->linkage));
+        }
+        RegCloseKey(perf);
+    }
+
+    err = RegOpenKeyExW(service, L"Performance", 0, KEY_READ, &perf);
+    RegCloseKey(service);
+    if (err != ERROR_SUCCESS)
+        return FALSE;
+
+    provider->objects[0] = 0;
+    len = sizeof(buf) - sizeof(WCHAR);
+    err = RegQueryValueExW(perf, L"Object List", NULL, &type, (BYTE *)buf, &len);
+    if (err == ERROR_SUCCESS && (type == REG_SZ || type == REG_MULTI_SZ))
+    {
+        memcpy(provider->objects, buf, len);
+        provider->objects[len / sizeof(WCHAR)] = 0;
+        TRACE("Object List: %s\n", debugstr_w(provider->objects));
+    }
+
+    len = sizeof(buf) - sizeof(WCHAR);
+    err = RegQueryValueExW(perf, L"Library", NULL, &type, (BYTE *)buf, &len);
+    if (err != ERROR_SUCCESS || !(type == REG_SZ || type == REG_EXPAND_SZ))
+        goto error;
+
+    buf[len / sizeof(WCHAR)] = 0;
+    if (type == REG_EXPAND_SZ)
+    {
+        len = ExpandEnvironmentStringsW(buf, buf2, MAX_PATH);
+        if (!len || len > MAX_PATH) goto error;
+        wcscpy(buf, buf2);
+    }
+
+    if (!(provider->perflib = LoadLibraryW(buf)))
+    {
+        WARN("Failed to load %s\n", debugstr_w(buf));
+        goto error;
+    }
+
+    GetModuleFileNameW(provider->perflib, buf, MAX_PATH);
+    TRACE("Loaded provider %s\n", debugstr_w(buf));
+
+    provider->pOpen = get_provider_entry(perf, provider->perflib, "Open");
+    provider->pClose = get_provider_entry(perf, provider->perflib, "Close");
+    provider->pCollect = get_provider_entry(perf, provider->perflib, "Collect");
+    if (provider->pOpen && provider->pClose && provider->pCollect)
+    {
+        RegCloseKey(perf);
+        return TRUE;
+    }
+
+    TRACE("Provider is missing required exports\n");
+    FreeLibrary(provider->perflib);
+
+error:
+    RegCloseKey(perf);
+    return FALSE;
+}
+
+static DWORD
+collect_data(struct perf_provider *provider, const WCHAR *query, void **data, DWORD *size, DWORD *obj_count)
+{
+    WCHAR *linkage = provider->linkage[0] ? provider->linkage : NULL;
+    DWORD err;
+
+    if (!query || !query[0])
+        query = L"Global";
+
+    err = provider->pOpen(linkage);
+    if (err != ERROR_SUCCESS)
+    {
+        TRACE("Open(%s) error %lu (%#lx)\n", debugstr_w(linkage), err, err);
+        return err;
+    }
+
+    *obj_count = 0;
+    err = provider->pCollect((WCHAR *)query, data, size, obj_count);
+    if (err != ERROR_SUCCESS)
+    {
+        TRACE("Collect error %lu (%#lx)\n", err, err);
+        *obj_count = 0;
+    }
+
+    provider->pClose();
+    return err;
+}
+
+#define MAX_SERVICE_NAME 260
+
+static DWORD
+query_perf_data(const WCHAR *query, DWORD *type, void *data, DWORD *ret_size, BOOL unicode)
+{
+    DWORD err, i, data_size;
+    HKEY root;
+    PERF_DATA_BLOCK *pdb;
+
+    if (!ret_size)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!query)
+        query = L"";
+
+    if (!_wcsnicmp(query, L"counter", 7))
+        return query_perf_names(type, data, ret_size, unicode);
+    if (!_wcsnicmp(query, L"help", 4))
+        return query_perf_help(type, data, ret_size, unicode);
+
+    data_size = *ret_size;
+
+    if (type)
+        *type = REG_BINARY;
+
+    if (!data || data_size < sizeof(*pdb))
+        return ERROR_MORE_DATA;
+
+    pdb = data;
+
+    pdb->Signature[0] = 'P';
+    pdb->Signature[1] = 'E';
+    pdb->Signature[2] = 'R';
+    pdb->Signature[3] = 'F';
+    pdb->LittleEndian = TRUE;
+    pdb->Version = PERF_DATA_VERSION;
+    pdb->Revision = PERF_DATA_REVISION;
+    pdb->TotalByteLength = 0;
+    pdb->HeaderLength = sizeof(*pdb);
+    pdb->NumObjectTypes = 0;
+    pdb->DefaultObject = 238; /* System */
+    NtQueryPerformanceCounter(&pdb->PerfTime, &pdb->PerfFreq);
+
+    data = pdb + 1;
+    pdb->SystemNameOffset = sizeof(*pdb);
+    pdb->SystemNameLength = (data_size - sizeof(*pdb)) / sizeof(WCHAR);
+    if (!GetComputerNameExW(ComputerNameNetBIOS, data, &pdb->SystemNameLength))
+        return ERROR_MORE_DATA;
+
+    pdb->SystemNameLength++;
+    pdb->SystemNameLength *= sizeof(WCHAR);
+
+    pdb->HeaderLength += pdb->SystemNameLength;
+
+    /* align to 8 bytes */
+    if (pdb->SystemNameLength & 7)
+        pdb->HeaderLength += 8 - (pdb->SystemNameLength & 7);
+
+    if (data_size < pdb->HeaderLength)
+        return ERROR_MORE_DATA;
+
+    pdb->TotalByteLength = pdb->HeaderLength;
+
+    data_size -= pdb->HeaderLength;
+    data = (char *)data + pdb->HeaderLength;
+
+    err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Services", 0, KEY_READ, &root);
+    if (err != ERROR_SUCCESS)
+        return err;
+
+    i = 0;
+    for (;;)
+    {
+        DWORD collected_size = data_size, obj_count = 0;
+        struct perf_provider provider;
+        WCHAR name[MAX_SERVICE_NAME];
+        DWORD len = ARRAYSIZE(name);
+        void *collected_data = data;
+
+        err = RegEnumKeyExW(root, i++, name, &len, NULL, NULL, NULL, NULL);
+        if (err == ERROR_NO_MORE_ITEMS)
+        {
+            err = ERROR_SUCCESS;
+            break;
+        }
+
+        if (err != ERROR_SUCCESS)
+            continue;
+
+        if (!load_provider(root, name, &provider))
+            continue;
+
+        err = collect_data(&provider, query, &collected_data, &collected_size, &obj_count);
+        FreeLibrary(provider.perflib);
+
+        if (err == ERROR_MORE_DATA)
+            break;
+
+        if (err == ERROR_SUCCESS)
+        {
+            PERF_OBJECT_TYPE *obj = (PERF_OBJECT_TYPE *)data;
+
+            TRACE("Collect: obj->TotalByteLength %lu, collected_size %lu\n",
+                  obj->TotalByteLength, collected_size);
+
+            data_size -= collected_size;
+            data = collected_data;
+
+            pdb->TotalByteLength += collected_size;
+            pdb->NumObjectTypes += obj_count;
+        }
+    }
+
+    RegCloseKey(root);
+
+    if (err == ERROR_SUCCESS)
+    {
+        *ret_size = pdb->TotalByteLength;
+
+        GetSystemTime(&pdb->SystemTime);
+        GetSystemTimeAsFileTime((FILETIME *)&pdb->PerfTime100nSec);
+    }
+
+    return err;
+}
+
 /******************************************************************************
  * RegQueryValueExA   [ADVAPI32.@]
  *
@@ -4041,6 +4390,13 @@ RegQueryValueExA(
     }
     else
         RtlInitEmptyUnicodeString(&nameW, NULL, 0);
+
+    if (is_perf_key(hkeyorg))
+    {
+        ErrorCode = query_perf_data(nameW.Buffer, type, data, count, FALSE);
+        RtlFreeUnicodeString(&nameW);
+        return ErrorCode;
+    }
 
     ErrorCode = RegQueryValueExW(hkeyorg, nameW.Buffer, NULL, &LocalType, NULL, &BufferSize);
     if (ErrorCode != ERROR_SUCCESS)
@@ -4129,6 +4485,9 @@ RegQueryValueExW(
           (count && data) ? *count : 0 );
 
     if ((data && !count) || reserved) return ERROR_INVALID_PARAMETER;
+
+    if (is_perf_key(hkeyorg))
+        return query_perf_data(name, type, data, count, TRUE);
 
     status = MapDefaultKey(&hkey, hkeyorg);
     if (!NT_SUCCESS(status))
@@ -4898,6 +5257,12 @@ RegSetValueExW(
     UNICODE_STRING ValueName;
     HANDLE KeyHandle;
     NTSTATUS Status;
+
+    /* The counter text pseudo keys are read-only, the data one is no key at all */
+    if (hKey == HKEY_PERFORMANCE_TEXT || hKey == HKEY_PERFORMANCE_NLSTEXT)
+    {
+        return ERROR_BADKEY;
+    }
 
     Status = MapDefaultKey(&KeyHandle,
                            hKey);

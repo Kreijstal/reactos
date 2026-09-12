@@ -23,6 +23,7 @@
 #define _WMI_SOURCE_
 #include <aclapi.h>
 #include <winsafer.h>
+#include <winperf.h>
 
 #define NTOS_MODE_USER
 #include <ndk/iofuncs.h>
