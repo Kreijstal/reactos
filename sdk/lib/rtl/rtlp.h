@@ -143,6 +143,15 @@ BOOLEAN
 NTAPI
 RtlpCheckForActiveDebugger(VOID);
 
+/* RtlAssert's unattended (FLG_DISABLE_DEBUG_PROMPTS) outcome */
+DECLSPEC_NORETURN
+VOID
+NTAPI
+RtlpUnattendedAssertionFailure(
+    _In_ PVOID FailedAssertion,
+    _In_ PVOID FileName,
+    _In_ ULONG LineNumber);
+
 BOOLEAN
 NTAPI
 RtlpHandleDpcStackException(IN PEXCEPTION_REGISTRATION_RECORD RegistrationFrame,

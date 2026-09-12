@@ -34,6 +34,18 @@ RtlpCheckForActiveDebugger(VOID)
     return NtCurrentPeb()->BeingDebugged;
 }
 
+DECLSPEC_NORETURN
+VOID
+NTAPI
+RtlpUnattendedAssertionFailure(
+    _In_ PVOID FailedAssertion,
+    _In_ PVOID FileName,
+    _In_ ULONG LineNumber)
+{
+    /* Let the exception take the process down */
+    RtlRaiseStatus(STATUS_ASSERTION_FAILURE);
+}
+
 BOOLEAN
 NTAPI
 RtlpSetInDbgPrint(VOID)
