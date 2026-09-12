@@ -79,6 +79,29 @@ RtlpCheckForActiveDebugger(VOID)
     return FALSE;
 }
 
+DECLSPEC_NORETURN
+VOID
+NTAPI
+RtlpUnattendedAssertionFailure(
+    _In_ PVOID FailedAssertion,
+    _In_ PVOID FileName,
+    _In_ ULONG LineNumber)
+{
+    /*
+     * Raising STATUS_ASSERTION_FAILURE here would let RtlDispatchException
+     * unwind every frame between the ASSERT and the nearest SEH handler
+     * (typically the system call's user-buffer guard) without running the
+     * lock releases those frames still owe, so one failed invariant turns
+     * into a system-wide deadlock a long way from its cause.  Stop right
+     * here instead, with the assertion text still on the debug output.
+     */
+    KeBugCheckEx(KMODE_EXCEPTION_NOT_HANDLED,
+                 STATUS_ASSERTION_FAILURE,
+                 (ULONG_PTR)FailedAssertion,
+                 (ULONG_PTR)FileName,
+                 LineNumber);
+}
+
 BOOLEAN
 NTAPI
 RtlpSetInDbgPrint(VOID)
