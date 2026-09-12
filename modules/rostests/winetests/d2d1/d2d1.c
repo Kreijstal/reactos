@@ -17,11 +17,6 @@
  */
 
 #define COBJMACROS
-#ifdef __REACTOS__
-#ifndef __MINGW32__
-#define WIDL_C_INLINE_WRAPPERS
-#endif
-#endif
 #include <limits.h>
 #include <math.h>
 #include <float.h>
