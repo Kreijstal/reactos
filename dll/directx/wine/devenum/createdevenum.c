@@ -656,7 +656,11 @@ static void register_midiout_devices(void)
 
 static void register_vfw_codecs(void)
 {
+#if defined(__REACTOS__) && defined(_MSC_VER)
+    REGFILTERPINS2 rgpins[2] = {0};
+#else
     REGFILTERPINS2 rgpins[2] = {};
+#endif
     IPropertyBag *prop_bag = NULL;
     REGPINTYPES rgtypes[2];
     REGFILTER2 rgf;
