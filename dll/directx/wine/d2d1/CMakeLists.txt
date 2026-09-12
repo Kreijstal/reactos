@@ -36,7 +36,8 @@ add_library(d2d1 MODULE
 
 if(MSVC)
     # C5286: implicit conversion between enum types
-    target_compile_options(d2d1 PRIVATE /wd5286)
+    # C4267: geometry.c narrows size_t vertex indices into UINT16 face slots.
+    target_compile_options(d2d1 PRIVATE /wd5286 /wd4267)
     # geometry.c allocates past the guard page, so MSVC emits a __chkstk call.
     target_link_libraries(d2d1 chkstk)
 endif()
