@@ -107,15 +107,15 @@ typedef struct STRUCT(_AFD_ACCEPT_DATA)
     HANDLE  ListenHandle;
 } STRUCT(AFD_ACCEPT_DATA), *STRUCT(PAFD_ACCEPT_DATA);
 
-typedef struct _AFD_SUPER_ACCEPT_INFO
+typedef struct STRUCT(_AFD_SUPER_ACCEPT_INFO)
 {
     BOOLEAN SanActive;
     BOOLEAN FixAddressAlignment;
-    HANDLE AcceptHandle;
+    PTR(HANDLE) AcceptHandle;
     ULONG ReceiveDataLength;
     ULONG LocalAddressLength;
     ULONG RemoteAddressLength;
-} AFD_SUPER_ACCEPT_INFO, *PAFD_SUPER_ACCEPT_INFO;
+} STRUCT(AFD_SUPER_ACCEPT_INFO), *STRUCT(PAFD_SUPER_ACCEPT_INFO);
 
 typedef struct STRUCT(_AFD_RECEIVED_ACCEPT_DATA)
 {
