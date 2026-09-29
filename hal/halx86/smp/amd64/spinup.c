@@ -16,7 +16,6 @@
 /* GLOBALS *******************************************************************/
 
 extern BOOLEAN HalpOnlyBootProcessor;
-extern PPROCESSOR_IDENTITY HalpProcessorIdentity;
 extern PHYSICAL_ADDRESS HalpLowStubPhysicalAddress;
 extern PVOID HalpLowStub;
 extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
