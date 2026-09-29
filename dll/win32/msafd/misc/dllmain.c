@@ -3493,7 +3493,6 @@ WSPSetSockOpt(
 
               return NO_ERROR;
 
-           case SO_UPDATE_ACCEPT_CONTEXT:
            case SO_UPDATE_CONNECT_CONTEXT:
            case SO_UPDATE_ACCEPT_CONTEXT:
               return MsafdUpdateConnectionContext(s, lpErrno);
