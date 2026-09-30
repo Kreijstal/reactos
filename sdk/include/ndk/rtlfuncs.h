@@ -4504,6 +4504,7 @@ RtlIpv4AddressToStringExA(
     _Inout_ PULONG AddressStringLength
 );
 
+NTSYSAPI
 NTSTATUS
 NTAPI
 RtlIpv4AddressToStringExW(
