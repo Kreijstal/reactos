@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_USE_MATH_DEFINES -D_WIN32_WINNT=0x0600 -DWINVER=0x0600)
 
 include_directories(${VKD3D_INCLUDE_DIRS})

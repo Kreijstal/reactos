@@ -18,6 +18,7 @@ add_definitions(
     -DNTDDI_VERSION=0x06010000)
 
 if(REACTOS_TARGET_NT LESS 0x601)
+    remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
     add_definitions(-D_WIN32_WINNT=0x0601)
 endif()
 
@@ -40,10 +41,12 @@ set_module_type(usbrndis kernelmodedriver)
 target_link_libraries(usbrndis ${PSEH_LIB})
 
 # Suppress warnings during development
-target_compile_options(usbrndis PRIVATE
-    -Wno-unused-function
-    -Wno-unused-variable
-    -Wno-unused-but-set-variable)
+if(NOT MSVC)
+    target_compile_options(usbrndis PRIVATE
+        -Wno-unused-function
+        -Wno-unused-variable
+        -Wno-unused-but-set-variable)
+endif()
 
 add_importlibs(usbrndis ndis ntoskrnl hal usbd)
 add_pch(usbrndis usbrndis.h "${PCH_SKIP_SOURCE}")

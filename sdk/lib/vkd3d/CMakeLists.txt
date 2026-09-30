@@ -10,7 +10,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/libs/vkd3d-shader
     ${CMAKE_CURRENT_BINARY_DIR})
 
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(
     -D_WIN32_WINNT=0x0600
     -DWINVER=0x0600
