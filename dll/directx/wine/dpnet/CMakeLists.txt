@@ -1,6 +1,6 @@
 
 # dpnet_main.c guards its one-time init with InitOnceExecuteOnce.
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(
     -D__WINESRC__
     -D__ROS_LONG64__

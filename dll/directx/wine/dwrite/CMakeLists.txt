@@ -1,5 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502 -D_CRT_NON_CONFORMING_SWPRINTFS)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -D_CRT_NON_CONFORMING_SWPRINTFS)
 add_definitions(-D_WIN32_WINNT=0x600 -D__WINESRC__)
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
 include_directories(${REACTOS_SOURCE_DIR}/sdk/lib/3rdparty/freetype/include)
