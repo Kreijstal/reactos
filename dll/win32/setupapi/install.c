@@ -24,6 +24,11 @@
 #include <winsvc.h>
 #include <ndk/cmfuncs.h>
 
+#if (_WIN32_WINNT < 0x0600)
+/* Exported by advapi32_vista on NT5.2 targets */
+LSTATUS WINAPI RegDeleteTreeW(_In_ HKEY, _In_opt_ LPCWSTR);
+#endif
+
 /* Unicode constants */
 static const WCHAR BackSlash[] = {'\\',0};
 static const WCHAR GroupOrderListKey[] = {'S','Y','S','T','E','M','\\','C','u','r','r','e','n','t','C','o','n','t','r','o','l','S','e','t','\\','C','o','n','t','r','o','l','\\','G','r','o','u','p','O','r','d','e','r','L','i','s','t',0};
