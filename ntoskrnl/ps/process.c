@@ -2771,6 +2771,13 @@ NtGetNextThread(
             ObDereferenceObject(Process);
             return Status;
         }
+
+        if (THREAD_TO_PROCESS(Thread) != Process)
+        {
+            ObDereferenceObject(Thread);
+            ObDereferenceObject(Process);
+            return STATUS_INVALID_HANDLE;
+        }
     }
     else
     {

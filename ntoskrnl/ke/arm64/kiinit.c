@@ -491,7 +491,9 @@ KiInitializeKernel(_Inout_ PKPROCESS InitProcess,
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ((PETHREAD)InitThread)->Tcb.Process = InitProcess;
 #else
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
     ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
+#endif
 #endif
     /* quiet */
 
