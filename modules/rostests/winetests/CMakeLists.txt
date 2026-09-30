@@ -33,7 +33,6 @@ add_subdirectory(credui)
 add_subdirectory(crypt32)
 add_subdirectory(cryptnet)
 add_subdirectory(cryptui)
-add_subdirectory(d2d1)
 add_subdirectory(d3dcompiler_43)
 #add_subdirectory(d3drm) #OpenGL 2.0+ Required
 #add_subdirectory(d3dx9_36) #OpenGL 2.0+ Required
@@ -150,6 +149,7 @@ add_subdirectory(xinput1_3)
 add_subdirectory(xmllite)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
+    add_subdirectory(d2d1)
     add_subdirectory(uiautomationcore)
 endif()
 

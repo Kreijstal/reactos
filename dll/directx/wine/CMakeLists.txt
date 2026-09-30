@@ -10,7 +10,6 @@ set(VKD3D_INCLUDE_DIRS
     ${REACTOS_SOURCE_DIR}/sdk/lib/vkd3d/include/private)
 
 add_subdirectory(amstream)
-add_subdirectory(d2d1)
 add_subdirectory(d3d8)
 add_subdirectory(d3d9)
 add_subdirectory(d3dcompiler_33)
@@ -80,6 +79,7 @@ add_subdirectory(quartz)
 add_subdirectory(wined3d)
 
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
+    add_subdirectory(d2d1)
     add_subdirectory(d3d10)
     add_subdirectory(d3d10_1)
     add_subdirectory(d3d10core)
