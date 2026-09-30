@@ -165,7 +165,15 @@ endif()
 set(USE_DUMMY_PSEH FALSE CACHE BOOL
 "Whether to disable PSEH support.")
 
-set(REACTOS_TARGET_NT "0x502" CACHE STRING
+# DLL_EXPORT_VERSION is derived from REACTOS_TARGET_NT below, but the CI
+# matrix (like upstream) still selects the target with -DDLL_EXPORT_VERSION.
+# Let that seed the default instead of being silently overridden.
+if(DEFINED CACHE{DLL_EXPORT_VERSION} AND NOT DEFINED CACHE{REACTOS_TARGET_NT})
+    set(_default_target_nt "${DLL_EXPORT_VERSION}")
+else()
+    set(_default_target_nt "0x502")
+endif()
+set(REACTOS_TARGET_NT "${_default_target_nt}" CACHE STRING
 "Target NT version (e.g. 0x502, 0x600, 0x601)")
 
 # Service Pack level reported through the registry CSDVersion value, which
