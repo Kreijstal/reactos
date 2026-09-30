@@ -763,7 +763,7 @@
 @ stdcall IsDBCSLeadByteEx(long long)
 @ stdcall IsDebuggerPresent()
 @ stdcall IsNLSDefinedString(long long ptr long long)
-@ stdcall -version=0x600+ IsNormalizedString(long wstr long) normaliz.IsNormalizedString
+@ stdcall -version=0x600+ IsNormalizedString(long wstr long)
 @ stdcall IsProcessInJob(long long ptr)
 @ stdcall IsProcessorFeaturePresent(long)
 @ stdcall IsSystemResumeAutomatic()
@@ -873,7 +873,7 @@
 @ stub -version=0x600+ NlsUpdateLocale
 @ stub -version=0x600+ NlsUpdateSystemLocale
 @ stub -version=0x600+ NlsWriteEtwEvent
-@ stdcall -version=0x600+ NormalizeString(long wstr long ptr long) normaliz.NormalizeString
+@ stdcall -version=0x600+ NormalizeString(long wstr long ptr long)
 @ stdcall -stub -version=0x600+ NotifyUILanguageChange(long wstr wstr long ptr)
 @ stdcall OpenConsoleW(wstr long long long)
 @ stdcall -version=0x500-0x502 OpenDataFile(long long)

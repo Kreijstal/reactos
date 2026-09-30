@@ -8,8 +8,13 @@ list(APPEND SOURCE
     IdnToAscii.c
     IdnToUnicode.c
     nameprep.c
-    normalize.c
     ${CMAKE_CURRENT_BINARY_DIR}/normaliz.def)
+
+# NT6 kernel32 implements NormalizeString/IsNormalizedString and normaliz
+# only forwards them there, as on Windows.
+if(DLL_EXPORT_VERSION LESS 0x600)
+    list(APPEND SOURCE normalize.c)
+endif()
 
 add_library(normaliz MODULE ${SOURCE})
 set_module_type(normaliz win32dll ENTRYPOINT 0)
