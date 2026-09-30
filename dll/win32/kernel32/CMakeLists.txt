@@ -116,6 +116,7 @@ list(APPEND SOURCE
     winnls/string/lcformatansi.c
     winnls/string/lstring.c
     winnls/string/nls.c
+    winnls/string/normalize.c
     winnls/string/sortkey.c
     ${SORTDEFAULT_NLS_C}
     k32.h)
