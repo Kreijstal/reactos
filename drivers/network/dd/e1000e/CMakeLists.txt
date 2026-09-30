@@ -41,12 +41,14 @@ add_library(e1000e MODULE ${SOURCE} e1000e.rc)
 add_pch(e1000e e1000.h SOURCE)
 set_module_type(e1000e kernelmodedriver)
 
-target_compile_options(e1000e PRIVATE
-    -Wno-unused-function
-    -Wno-unused-variable
-    -Wno-unused-but-set-variable
-    -Wno-address
-    -Wno-enum-compare)
+if(NOT MSVC)
+    target_compile_options(e1000e PRIVATE
+        -Wno-unused-function
+        -Wno-unused-variable
+        -Wno-unused-but-set-variable
+        -Wno-address
+        -Wno-enum-compare)
+endif()
 
 add_importlibs(e1000e ndis ntoskrnl hal)
 add_cd_file(TARGET e1000e DESTINATION reactos/system32/drivers FOR all)
