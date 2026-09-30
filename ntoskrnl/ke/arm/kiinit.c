@@ -129,7 +129,9 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitProcess->ActiveProcessors = 1 << Number;
 
     /* HACK for MmUpdatePageDir */
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
     ((PETHREAD)InitThread)->ThreadsProcess = (PEPROCESS)InitProcess;
+#endif
 
     /* Set up the thread-related fields in the PRCB */
     Prcb->CurrentThread = InitThread;

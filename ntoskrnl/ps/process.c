@@ -2643,7 +2643,7 @@ NtGetNextThread(IN HANDLE ProcessHandle,
             return Status;
         }
 
-        if (Thread->ThreadsProcess != Process)
+        if (THREAD_TO_PROCESS(Thread) != Process)
         {
             ObDereferenceObject(Thread);
             ObDereferenceObject(Process);

@@ -265,7 +265,7 @@ NtAlertThreadByThreadId(IN HANDLE ThreadId)
 
     /* This syscall takes a bare TID with no handle and therefore no access
        check, so it must not reach outside the caller's process. */
-    if (Thread->ThreadsProcess != PsGetCurrentProcess())
+    if (THREAD_TO_PROCESS(Thread) != PsGetCurrentProcess())
     {
         ObDereferenceObject(Thread);
         return STATUS_ACCESS_DENIED;
