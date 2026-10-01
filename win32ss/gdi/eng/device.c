@@ -208,6 +208,36 @@ EngpUnlinkGraphicsDevice(
     }
 }
 
+/* Returns TRUE if the video device pwszNtDeviceName (\Device\VideoN) is
+ * already registered, either in the global list or as the VGA device that
+ * was detached from it and attached to another device. */
+static
+BOOLEAN
+EngpIsVideoDeviceRegistered(
+    _In_ PCWSTR pwszNtDeviceName)
+{
+    PGRAPHICS_DEVICE pGraphicsDevice;
+    BOOLEAN bFound = FALSE;
+
+    EngAcquireSemaphoreShared(ghsemGraphicsDeviceList);
+
+    for (pGraphicsDevice = gpGraphicsDeviceFirst;
+         pGraphicsDevice && !bFound;
+         pGraphicsDevice = pGraphicsDevice->pNextGraphicsDevice)
+    {
+        if (_wcsicmp(pGraphicsDevice->szNtDeviceName, pwszNtDeviceName) == 0 ||
+            (pGraphicsDevice->pVgaDevice &&
+             _wcsicmp(pGraphicsDevice->pVgaDevice->szNtDeviceName, pwszNtDeviceName) == 0))
+        {
+            bFound = TRUE;
+        }
+    }
+
+    EngReleaseSemaphore(ghsemGraphicsDeviceList);
+
+    return bFound;
+}
+
 /* Goal of this function is to:
  * - detect new graphic devices (from registry) and initialize them
  * - link primary device and VGA device (if available) using pVgaDevice field
@@ -220,8 +250,7 @@ NTSTATUS
 EngpUpdateGraphicsDeviceList(VOID)
 {
     ULONG iDevNum, ulMaxObjectNumber = 0;
-    WCHAR awcDeviceName[20], awcWinDeviceName[20];
-    UNICODE_STRING ustrDeviceName;
+    WCHAR awcDeviceName[20];
     WCHAR awcBuffer[256];
     NTSTATUS Status;
     PGRAPHICS_DEVICE pGraphicsDevice, pNewPrimaryGraphicsDevice = NULL;
@@ -250,13 +279,10 @@ EngpUpdateGraphicsDeviceList(VOID)
         /* Create the adapter's key name */
         _swprintf(awcDeviceName, L"\\Device\\Video%lu", iDevNum);
 
-        /* Create the display device name */
-        _swprintf(awcWinDeviceName, L"\\\\.\\DISPLAY%lu", iDevNum + 1);
-        RtlInitUnicodeString(&ustrDeviceName, awcWinDeviceName);
-
-        /* Check if the device exists already */
-        pGraphicsDevice = EngpFindGraphicsDevice(&ustrDeviceName, iDevNum);
-        if (pGraphicsDevice != NULL)
+        /* Check if the device exists already. Match on the NT device name:
+         * the \\.\DISPLAYn names are handed out in registration order and
+         * need not follow the \Device\VideoN numbering. */
+        if (EngpIsVideoDeviceRegistered(awcDeviceName))
         {
             continue;
         }
@@ -356,11 +382,17 @@ EngpUpdateGraphicsDeviceList(VOID)
         gpPrimaryGraphicsDevice != gpVgaGraphicsDevice &&
         !gpPrimaryGraphicsDevice->pVgaDevice)
     {
-        /* Yes. Remove VGA device from global list, and attach it to primary device */
-        TRACE("Linking VGA device %S to primary device %S\n", gpVgaGraphicsDevice->szNtDeviceName, gpPrimaryGraphicsDevice->szNtDeviceName);
+        /* Yes. Remove VGA device from global list, and attach it to primary device.
+         * EngpUnlinkGraphicsDevice() clears gpVgaGraphicsDevice, so keep our own
+         * pointer and restore it: dropping it would leak the device with its
+         * exclusive video port handle still open. */
+        PGRAPHICS_DEVICE pVgaDevice = gpVgaGraphicsDevice;
+
+        TRACE("Linking VGA device %S to primary device %S\n", pVgaDevice->szNtDeviceName, gpPrimaryGraphicsDevice->szNtDeviceName);
         EngAcquireSemaphore(ghsemGraphicsDeviceList);
-        EngpUnlinkGraphicsDevice(gpVgaGraphicsDevice);
-        gpPrimaryGraphicsDevice->pVgaDevice = gpVgaGraphicsDevice;
+        EngpUnlinkGraphicsDevice(pVgaDevice);
+        gpPrimaryGraphicsDevice->pVgaDevice = pVgaDevice;
+        gpVgaGraphicsDevice = pVgaDevice;
         EngReleaseSemaphore(ghsemGraphicsDeviceList);
     }
 
