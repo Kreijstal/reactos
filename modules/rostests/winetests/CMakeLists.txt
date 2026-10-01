@@ -148,6 +148,13 @@ add_subdirectory(xcopy)
 add_subdirectory(xinput1_3)
 add_subdirectory(xmllite)
 
+if(ENABLE_OPENGL2_WINETESTS)
+    add_subdirectory(amstream)
+    add_subdirectory(d3drm)
+    add_subdirectory(d3dx9_36)
+    add_subdirectory(quartz)
+endif()
+
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     add_subdirectory(d2d1)
     add_subdirectory(uiautomationcore)
