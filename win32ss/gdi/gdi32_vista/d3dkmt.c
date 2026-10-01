@@ -41,9 +41,18 @@ typedef struct _D3DKMT_QUERYVIDEOMEMORYINFO
 #define D3DKMT_EMU_DEVICE_TAG   0x0de00000u
 #define D3DKMT_EMU_INDEX_MASK   0x0000ffffu
 
-#define D3DKMT_EMU_MAX_ADAPTERS 16
-#define D3DKMT_EMU_MAX_DEVICES  64
+/*
+ * The emulated handles carry a 1-based slot number in their low 16 bits, so
+ * both tables can hold up to D3DKMT_EMU_INDEX_MASK entries. The slots live in
+ * chunks that are allocated the first time they are needed: a process can
+ * keep an adapter open for every wined3d object it holds, and there is no
+ * small per-process limit on real Windows.
+ */
+#define D3DKMT_EMU_CHUNK_SLOTS  256
+#define D3DKMT_EMU_MAX_SLOTS    D3DKMT_EMU_INDEX_MASK
+#define D3DKMT_EMU_MAX_CHUNKS   ((D3DKMT_EMU_MAX_SLOTS + D3DKMT_EMU_CHUNK_SLOTS - 1) / D3DKMT_EMU_CHUNK_SLOTS)
 
+/* Both slot types start with the InUse field */
 typedef struct _D3DKMT_EMU_ADAPTER
 {
     LONG InUse;
@@ -57,27 +66,99 @@ typedef struct _D3DKMT_EMU_DEVICE
     D3DKMT_HANDLE hAdapter;
 } D3DKMT_EMU_DEVICE;
 
-static D3DKMT_EMU_ADAPTER D3DKMTEmuAdapters[D3DKMT_EMU_MAX_ADAPTERS];
-static D3DKMT_EMU_DEVICE D3DKMTEmuDevices[D3DKMT_EMU_MAX_DEVICES];
+static PVOID D3DKMTEmuAdapterChunks[D3DKMT_EMU_MAX_CHUNKS];
+static PVOID D3DKMTEmuDeviceChunks[D3DKMT_EMU_MAX_CHUNKS];
+
+/* Returns the in-use slot that a handle refers to, or NULL */
+static
+PVOID
+D3DKMTEmuLookupSlot(
+    _In_ PVOID* Chunks,
+    _In_ SIZE_T SlotSize,
+    _In_ ULONG Tag,
+    _In_ D3DKMT_HANDLE hObject)
+{
+    ULONG Index;
+    PUCHAR Chunk;
+    PLONG InUse;
+
+    if ((hObject & ~D3DKMT_EMU_INDEX_MASK) != Tag)
+        return NULL;
+
+    Index = hObject & D3DKMT_EMU_INDEX_MASK;
+    if (Index == 0)
+        return NULL;
+    Index--;
+
+    Chunk = Chunks[Index / D3DKMT_EMU_CHUNK_SLOTS];
+    if (!Chunk)
+        return NULL;
+
+    InUse = (PLONG)(Chunk + (Index % D3DKMT_EMU_CHUNK_SLOTS) * SlotSize);
+    if (!*InUse)
+        return NULL;
+
+    return InUse;
+}
+
+/* Claims a free slot and returns its handle, or 0 when all are taken */
+static
+D3DKMT_HANDLE
+D3DKMTEmuAllocateSlot(
+    _In_ PVOID* Chunks,
+    _In_ SIZE_T SlotSize,
+    _In_ ULONG Tag,
+    _Out_ PVOID* Slot)
+{
+    ULONG Index;
+    PUCHAR Chunk, NewChunk;
+    PLONG InUse;
+
+    for (Index = 0; Index < D3DKMT_EMU_MAX_SLOTS; Index++)
+    {
+        Chunk = Chunks[Index / D3DKMT_EMU_CHUNK_SLOTS];
+        if (!Chunk)
+        {
+            NewChunk = HeapAlloc(GetProcessHeap(),
+                                 HEAP_ZERO_MEMORY,
+                                 D3DKMT_EMU_CHUNK_SLOTS * SlotSize);
+            if (!NewChunk)
+                return 0;
+
+            Chunk = InterlockedCompareExchangePointer(&Chunks[Index / D3DKMT_EMU_CHUNK_SLOTS],
+                                                      NewChunk,
+                                                      NULL);
+            if (Chunk)
+            {
+                /* Another thread added this chunk first */
+                HeapFree(GetProcessHeap(), 0, NewChunk);
+            }
+            else
+            {
+                Chunk = NewChunk;
+            }
+        }
+
+        InUse = (PLONG)(Chunk + (Index % D3DKMT_EMU_CHUNK_SLOTS) * SlotSize);
+        if (InterlockedCompareExchange(InUse, 1, 0) == 0)
+        {
+            *Slot = InUse;
+            return Tag | (Index + 1);
+        }
+    }
+
+    return 0;
+}
 
 static
 D3DKMT_EMU_ADAPTER*
 D3DKMTEmuGetAdapter(
     _In_ D3DKMT_HANDLE hAdapter)
 {
-    ULONG Index;
-
-    if ((hAdapter & ~D3DKMT_EMU_INDEX_MASK) != D3DKMT_EMU_ADAPTER_TAG)
-        return NULL;
-
-    Index = hAdapter & D3DKMT_EMU_INDEX_MASK;
-    if (Index == 0 || Index > D3DKMT_EMU_MAX_ADAPTERS)
-        return NULL;
-
-    if (!D3DKMTEmuAdapters[Index - 1].InUse)
-        return NULL;
-
-    return &D3DKMTEmuAdapters[Index - 1];
+    return D3DKMTEmuLookupSlot(D3DKMTEmuAdapterChunks,
+                               sizeof(D3DKMT_EMU_ADAPTER),
+                               D3DKMT_EMU_ADAPTER_TAG,
+                               hAdapter);
 }
 
 static
@@ -85,19 +166,10 @@ D3DKMT_EMU_DEVICE*
 D3DKMTEmuGetDevice(
     _In_ D3DKMT_HANDLE hDevice)
 {
-    ULONG Index;
-
-    if ((hDevice & ~D3DKMT_EMU_INDEX_MASK) != D3DKMT_EMU_DEVICE_TAG)
-        return NULL;
-
-    Index = hDevice & D3DKMT_EMU_INDEX_MASK;
-    if (Index == 0 || Index > D3DKMT_EMU_MAX_DEVICES)
-        return NULL;
-
-    if (!D3DKMTEmuDevices[Index - 1].InUse)
-        return NULL;
-
-    return &D3DKMTEmuDevices[Index - 1];
+    return D3DKMTEmuLookupSlot(D3DKMTEmuDeviceChunks,
+                               sizeof(D3DKMT_EMU_DEVICE),
+                               D3DKMT_EMU_DEVICE_TAG,
+                               hDevice);
 }
 
 static
@@ -106,19 +178,20 @@ D3DKMTEmuOpenAdapter(
     _In_ const LUID* AdapterLuid,
     _In_ D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId)
 {
-    ULONG Index;
+    D3DKMT_EMU_ADAPTER* Adapter;
+    D3DKMT_HANDLE hAdapter;
 
-    for (Index = 0; Index < D3DKMT_EMU_MAX_ADAPTERS; Index++)
-    {
-        if (InterlockedCompareExchange(&D3DKMTEmuAdapters[Index].InUse, 1, 0) == 0)
-        {
-            D3DKMTEmuAdapters[Index].AdapterLuid = *AdapterLuid;
-            D3DKMTEmuAdapters[Index].VidPnSourceId = VidPnSourceId;
-            return D3DKMT_EMU_ADAPTER_TAG | (Index + 1);
-        }
-    }
+    hAdapter = D3DKMTEmuAllocateSlot(D3DKMTEmuAdapterChunks,
+                                     sizeof(D3DKMT_EMU_ADAPTER),
+                                     D3DKMT_EMU_ADAPTER_TAG,
+                                     (PVOID*)&Adapter);
+    if (!hAdapter)
+        return 0;
 
-    return 0;
+    Adapter->AdapterLuid = *AdapterLuid;
+    Adapter->VidPnSourceId = VidPnSourceId;
+
+    return hAdapter;
 }
 
 /* fake LUID */
@@ -238,8 +311,9 @@ NTSTATUS
 WINAPI
 D3DKMTCreateDevice(_Inout_ D3DKMT_CREATEDEVICE* unnamedParam1)
 {
+    D3DKMT_EMU_DEVICE* Device;
+    D3DKMT_HANDLE hDevice;
     NTSTATUS Status;
-    ULONG Index;
 
     if (!unnamedParam1)
         return STATUS_INVALID_PARAMETER;
@@ -251,25 +325,24 @@ D3DKMTCreateDevice(_Inout_ D3DKMT_CREATEDEVICE* unnamedParam1)
     if (!D3DKMTEmuGetAdapter(unnamedParam1->hAdapter))
         return STATUS_INVALID_PARAMETER;
 
-    for (Index = 0; Index < D3DKMT_EMU_MAX_DEVICES; Index++)
-    {
-        if (InterlockedCompareExchange(&D3DKMTEmuDevices[Index].InUse, 1, 0) == 0)
-        {
-            D3DKMTEmuDevices[Index].hAdapter = unnamedParam1->hAdapter;
+    hDevice = D3DKMTEmuAllocateSlot(D3DKMTEmuDeviceChunks,
+                                    sizeof(D3DKMT_EMU_DEVICE),
+                                    D3DKMT_EMU_DEVICE_TAG,
+                                    (PVOID*)&Device);
+    if (!hDevice)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
-            unnamedParam1->hDevice = D3DKMT_EMU_DEVICE_TAG | (Index + 1);
-            unnamedParam1->pCommandBuffer = NULL;
-            unnamedParam1->CommandBufferSize = 0;
-            unnamedParam1->pAllocationList = NULL;
-            unnamedParam1->AllocationListSize = 0;
-            unnamedParam1->pPatchLocationList = NULL;
-            unnamedParam1->PatchLocationListSize = 0;
+    Device->hAdapter = unnamedParam1->hAdapter;
 
-            return STATUS_SUCCESS;
-        }
-    }
+    unnamedParam1->hDevice = hDevice;
+    unnamedParam1->pCommandBuffer = NULL;
+    unnamedParam1->CommandBufferSize = 0;
+    unnamedParam1->pAllocationList = NULL;
+    unnamedParam1->AllocationListSize = 0;
+    unnamedParam1->pPatchLocationList = NULL;
+    unnamedParam1->PatchLocationListSize = 0;
 
-    return STATUS_INSUFFICIENT_RESOURCES;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
