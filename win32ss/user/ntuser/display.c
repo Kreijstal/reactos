@@ -730,7 +730,7 @@ UserChangeDisplaySettings(
     LONG lResult = DISP_CHANGE_SUCCESSFUL;
     HKEY hkey;
     NTSTATUS Status;
-    PPDEVOBJ ppdev;
+    PPDEVOBJ ppdev, ppdevPrimary;
     WORD OrigBC;
     //PDESKTOP pdesk;
     PDEVMODEW newDevMode = NULL;
@@ -870,14 +870,17 @@ UserChangeDisplaySettings(
             /* Set new size of the monitor */
             UserUpdateMonitorSize((HDEV)ppdev);
 
-            /* Update the SERVERINFO */
-            gpsi->dmLogPixels = ppdev->gdiinfo.ulLogPixelsY;
-            gpsi->Planes      = ppdev->gdiinfo.cPlanes;
-            gpsi->BitsPixel   = ppdev->gdiinfo.cBitsPixel;
+            /* Update the SERVERINFO. It describes the primary display, which
+             * the desktop is drawn on: taking the values of a secondary
+             * display would size the desktop beyond the primary surface. */
+            ppdevPrimary = gpmdev->ppdevGlobal;
+            gpsi->dmLogPixels = ppdevPrimary->gdiinfo.ulLogPixelsY;
+            gpsi->Planes      = ppdevPrimary->gdiinfo.cPlanes;
+            gpsi->BitsPixel   = ppdevPrimary->gdiinfo.cBitsPixel;
             gpsi->BitCount    = gpsi->Planes * gpsi->BitsPixel;
-            gpsi->aiSysMet[SM_CXSCREEN] = ppdev->gdiinfo.ulHorzRes;
-            gpsi->aiSysMet[SM_CYSCREEN] = ppdev->gdiinfo.ulVertRes;
-            if (ppdev->gdiinfo.flRaster & RC_PALETTE)
+            gpsi->aiSysMet[SM_CXSCREEN] = ppdevPrimary->gdiinfo.ulHorzRes;
+            gpsi->aiSysMet[SM_CYSCREEN] = ppdevPrimary->gdiinfo.ulVertRes;
+            if (ppdevPrimary->gdiinfo.flRaster & RC_PALETTE)
             {
                 gpsi->PUSIFlags |= PUSIF_PALETTEDISPLAY;
             }
