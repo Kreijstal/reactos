@@ -37,6 +37,12 @@ typedef enum {
     IFDEVENT_TEST4     = 0x4,
 } FileDialogEventsTest;
 
+#ifdef __REACTOS__
+/* The dialog is closed from IFileDialogEvents::OnFolderChange, which is only
+ * raised by the ExplorerBrowser control. Without it Show() never returns. */
+static BOOL have_explorerbrowser;
+#endif
+
 static HRESULT (WINAPI *pSHCreateShellItem)(LPCITEMIDLIST,IShellFolder*,LPCITEMIDLIST,IShellItem**);
 static HRESULT (WINAPI *pSHGetIDListFromObject)(IUnknown*, PIDLIST_ABSOLUTE*);
 static HRESULT (WINAPI *pSHCreateItemFromParsingName)(PCWSTR,IBindCtx*,REFIID,void**);
@@ -1991,8 +1997,17 @@ static void test_customize(void)
     hr = IFileDialog_Advise(pfod, pfde, &cookie);
     ok(hr == S_OK, "Got 0x%08lx\n", hr);
 
+#ifdef __REACTOS__
+    if (!have_explorerbrowser)
+        skip("No ExplorerBrowser, not showing the dialog.\n");
+    else
+    {
+#endif
     hr = IFileDialog_Show(pfod, NULL);
     ok(hr == HRESULT_FROM_WIN32(ERROR_CANCELLED), "Got 0x%08lx\n", hr);
+#ifdef __REACTOS__
+    }
+#endif
 
     hr = IFileDialog_Unadvise(pfod, cookie);
     ok(hr == S_OK, "Got 0x%08lx\n", hr);
@@ -2595,6 +2610,9 @@ START_TEST(itemdlg)
         DWORD result_tmpdir;
         BOOL result_set_dir;
         WCHAR tmpdir[MAX_PATH];
+#ifdef __REACTOS__
+        IUnknown *peb;
+#endif
 
         /* Windows refuses to open a dialog for C:\Users\Public\Documents, so change to tmp */
         result_tmpdir = GetTempPathW(MAX_PATH, tmpdir);
@@ -2602,14 +2620,38 @@ START_TEST(itemdlg)
         result_set_dir = SetCurrentDirectoryW(tmpdir);
         ok(result_set_dir, "failed to set dir\n");
 
+#ifdef __REACTOS__
+        if (SUCCEEDED(CoCreateInstance(&CLSID_ExplorerBrowser, NULL, CLSCTX_INPROC_SERVER,
+                                       &IID_IUnknown, (void**)&peb)))
+        {
+            have_explorerbrowser = TRUE;
+            IUnknown_Release(peb);
+        }
+        if (!have_explorerbrowser)
+            skip("No ExplorerBrowser, skipping the tests that show the dialog.\n");
+#endif
+
         test_basics();
         test_advise();
+#ifdef __REACTOS__
+        if (have_explorerbrowser)
+        {
+#endif
         test_events();
         test_filename();
+#ifdef __REACTOS__
+        }
+#endif
         test_customize();
         test_persistent_state();
+#ifdef __REACTOS__
+        if (have_explorerbrowser)
+#endif
         test_overwrite();
         test_customize_remove_from_empty_combobox();
+#ifdef __REACTOS__
+        if (have_explorerbrowser)
+#endif
         test_double_show();
     }
     else
