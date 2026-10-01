@@ -150,6 +150,13 @@ option(ENABLE_ROSPOKE
        "Build the rospoke hardware bring-up driver (GIVES USER MODE FULL KERNEL ACCESS)"
        OFF)
 
+# amstream, d3drm, d3dx9_36 and quartz winetests are left out by default since
+# the upstream testbots have no OpenGL 2.0. Where the tests can run, turn this
+# on so that they are part of the rostest inventory.
+option(ENABLE_OPENGL2_WINETESTS
+       "Build the winetests that need OpenGL 2.0 or later"
+       OFF)
+
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     option(_PREFAST_ "Whether to enable PREFAST while compiling." OFF)
     option(_VS_ANALYZE_ "Whether to enable static analysis while compiling." OFF)
