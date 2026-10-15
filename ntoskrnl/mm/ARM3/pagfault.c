@@ -3051,7 +3051,11 @@ ExitUser:
     if (Status == STATUS_NO_MEMORY)
     {
         /* Don't wait on the balancer while holding AddressCreationLock (CORE-20761) */
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+        if (ExPushLockIsOwnedByCurrentThread(&CurrentProcess->AddressCreationLock))
+#else
         if (CurrentProcess->AddressCreationLock.Owner == KeGetCurrentThread())
+#endif
         {
             static LARGE_INTEGER TinyTime = {{-1L, -1L}};
             MmRebalanceMemoryConsumers();
