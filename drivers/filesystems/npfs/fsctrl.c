@@ -937,12 +937,7 @@ NpCommonFileSystemControl(IN PDEVICE_OBJECT DeviceObject,
             if (FileType == NPFS_NTC_VCB || FileType == NPFS_NTC_ROOT_DCB)
                 Status = STATUS_INVALID_PARAMETER;
             else
-                Status = STATUS_NOT_SUPPORTED;
-            break;
-
-        case FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE:
-            NpAcquireSharedVcb();
-            Status = NpGetConnectionAttribute(DeviceObject, Irp);
+                Status = NpGetConnectionAttribute(DeviceObject, Irp);
             break;
 
         default:
