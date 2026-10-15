@@ -36,14 +36,14 @@
 @ stdcall HalGetBusData(long long long ptr long)
 @ stdcall HalGetBusDataByOffset(long long long ptr long long)
 @ stdcall -version=0x0601+ HalGetEnvironmentVariableEx(ptr ptr ptr ptr ptr)
-@ stdcall -version=0x0601+ HalGetInterruptTargetInformation(ptr)
+@ stdcall -version=0x0601+ HalGetInterruptTargetInformation(ptr) HalpGetInterruptTargetInformation
 @ stdcall HalGetEnvironmentVariable(str long str)
 @ stdcall -arch=arm64 HalGetMsiMessageAddressEx(long int64 int64 ptr ptr ptr)
 @ fastcall -arch=arm HalGetInterruptSource()
 @ stdcall HalGetInterruptVector(long long long long ptr ptr)
-@ stdcall -version=0x0601+ HalGetVectorInput(long ptr ptr ptr ptr)
+@ stdcall -version=0x0601+ HalGetVectorInput(long ptr ptr ptr ptr) HalpGetVectorInput
 @ stdcall -version=0x0601+ HalGetMemoryCachingRequirements(int64 long ptr)
-@ stdcall -version=0x0601+ HalGetMessageRoutingInfo(ptr)
+@ stdcall -version=0x0601+ HalGetMessageRoutingInfo(ptr) HalpGetMessageRoutingInfo
 @ stdcall -version=0x0601+ HalGetProcessorIdByNtNumber(long ptr)
 ;@ stdcall -arch=x86_64 HalHandleMcheck()
 @ stdcall -arch=i386,x86_64 HalHandleNMI(ptr)

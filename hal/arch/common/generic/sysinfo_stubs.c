@@ -225,7 +225,7 @@ HalDisableInterrupt(
 
 NTSTATUS
 NTAPI
-HalGetVectorInput(
+HalpGetVectorInput(
     _In_ ULONG Vector,
     _In_ PGROUP_AFFINITY Affinity,
     _Out_ PULONG Input,
@@ -257,7 +257,7 @@ HalConvertDeviceIdtToIrql(
 
 NTSTATUS
 NTAPI
-HalGetInterruptTargetInformation(
+HalpGetInterruptTargetInformation(
     _Inout_ PHAL_INTERRUPT_TARGET_INFORMATION TargetInformation)
 {
     KAFFINITY Mask;
@@ -288,7 +288,7 @@ HalGetInterruptTargetInformation(
 
 NTSTATUS
 NTAPI
-HalGetMessageRoutingInfo(
+HalpGetMessageRoutingInfo(
     _Inout_ PHAL_MESSAGE_ROUTING_INFO RoutingInfo)
 {
     HAL_INTERRUPT_TARGET_INFORMATION TargetInfo;
@@ -334,7 +334,7 @@ HalGetMessageRoutingInfo(
     TargetInfo.TargetProcessors = RoutingInfo->TargetProcessors;
     TargetInfo.ProcessorNumber = 0;
     TargetInfo.DestinationId = 0;
-    Status = HalGetInterruptTargetInformation(&TargetInfo);
+    Status = HalpGetInterruptTargetInformation(&TargetInfo);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -352,24 +352,6 @@ HalGetMessageRoutingInfo(
 #endif
     return STATUS_SUCCESS;
 }
-
-#if !defined(_M_ARM64)
-NTSTATUS
-NTAPI
-HalpGetInterruptTargetInformation(
-    _Inout_ PHAL_INTERRUPT_TARGET_INFORMATION TargetInformation)
-{
-    return HalGetInterruptTargetInformation(TargetInformation);
-}
-
-NTSTATUS
-NTAPI
-HalpGetMessageRoutingInfo(
-    _Inout_ PHAL_MESSAGE_ROUTING_INFO RoutingInfo)
-{
-    return HalGetMessageRoutingInfo(RoutingInfo);
-}
-#endif
 
 NTSTATUS
 NTAPI
