@@ -3990,7 +3990,11 @@ NtQueryInformationThread(
             }
 
             Status = ObReferenceObjectByHandle(ThreadHandle,
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+                                               THREAD_QUERY_LIMITED_INFORMATION,
+#else
                                                Access,
+#endif
                                                PsThreadType,
                                                PreviousMode,
                                                (PVOID*)&Thread,
