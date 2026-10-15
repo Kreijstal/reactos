@@ -191,25 +191,11 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->RefCount--;
-    if (Fcb->RefCount <= 0 && (!NtfsFCBIsDirectory(Fcb) || (Fcb->Flags & FCB_DELETED)))
+    if (Fcb->RefCount <= 0 && !NtfsFCBIsDirectory(Fcb))
     {
+        RemoveEntryList(&Fcb->FcbListEntry);
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-
         CcUninitializeCacheMap(Fcb->FileObject, NULL, NULL);
-
-        if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
-            Fcb->SectionObjectPointers.ImageSectionObject != NULL)
-        {
-            DPRINT("Keeping FCB %p (%S): still mapped\n", Fcb, Fcb->PathName);
-            return;
-        }
-
-        /* A deleted FCB already left the table */
-        KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
-        if (!(Fcb->Flags & FCB_DELETED))
-            RemoveEntryList(&Fcb->FcbListEntry);
-        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-
         NtfsDestroyFCB(Fcb);
     }
     else
@@ -229,34 +215,6 @@ NtfsAddFCBToTable(PNTFS_VCB Vcb,
     Fcb->Vcb = Vcb;
     InsertTailList(&Vcb->FcbListHead, &Fcb->FcbListEntry);
     KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-}
-
-
-/**
-* @name NtfsRemoveFCBFromTable
-*
-* Takes the FCB of a deleted file or directory out of the table, so a later
-* open of the same path goes to the disk instead of finding it. The FCB lives
-* on until its last reference is released.
-*/
-VOID
-NtfsRemoveFCBFromTable(
-    _In_ PNTFS_VCB Vcb,
-    _In_ PNTFS_FCB Fcb)
-{
-    KIRQL OldIrql;
-
-    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
-
-    /* FCB_DELETED tells NtfsReleaseFCB() the entry is already unlinked */
-    if (!(Fcb->Flags & FCB_DELETED))
-    {
-        RemoveEntryList(&Fcb->FcbListEntry);
-        InitializeListHead(&Fcb->FcbListEntry);
-        Fcb->Flags |= FCB_DELETED;
-    }
-
-    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
 }
 
 
@@ -526,9 +484,7 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     newCCB->PtrFileObject = FileObject;
     Fcb->Vcb = Vcb;
 
-    /* Directories are excluded: they have no $DATA to map, and a data section on one gives Mm
-     * pages to fault in that we can never satisfy. */
-    if (!(Fcb->Flags & FCB_CACHE_INITIALIZED) && !NtfsFCBIsDirectory(Fcb))
+    if (!(Fcb->Flags & FCB_CACHE_INITIALIZED))
     {
         _SEH2_TRY
         {
@@ -607,7 +563,7 @@ NtfsDirFindFile(PNTFS_VCB Vcb,
 
         /* Skip colon */
         ++Colon;
-        DPRINT("Will now look for file '%wZ' with stream '%S'\n", &File, Colon);
+        DPRINT1("Will now look for file '%wZ' with stream '%S'\n", &File, Colon);
     }
 
     Status = NtfsLookupFileAt(Vcb, &File, CaseSensitive, &FileRecord, &MFTIndex, CurrentDir);
