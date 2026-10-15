@@ -71,11 +71,6 @@ RtlpClearInDbgPrint(VOID)
 {
 #if (NTDDI_VERSION < NTDDI_LONGHORN)
     /* Clear the flag */
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    NtCurrentTeb()->ReservedPad0 = FALSE;
-#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
-    NtCurrentTeb()->SpareBool0 = FALSE;
-#else
     NtCurrentTeb()->InDbgPrint = FALSE;
 #else
     NtCurrentTeb()->DbgInDebugPrint = FALSE;
