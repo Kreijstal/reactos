@@ -1086,6 +1086,21 @@ NtfsRemoveKey(PB_TREE Tree,
               PB_TREE_KEY SearchKey,
               BOOLEAN CaseSensitive);
 
+typedef BOOLEAN (*PNTFS_INDEX_VISITOR)(PINDEX_ENTRY_ATTRIBUTE Entry, PVOID Context);
+
+NTSTATUS
+NtfsFindLastKey(PB_TREE Tree,
+                PB_TREE_KEY *LastKey);
+
+NTSTATUS
+NtfsVisitKeys(PB_TREE Tree,
+              PB_TREE_FILENAME_NODE Node,
+              PB_TREE_KEY Low,
+              PB_TREE_KEY High,
+              PNTFS_INDEX_VISITOR Visitor,
+              PVOID Context,
+              PBOOLEAN Stopped);
+
 NTSTATUS
 NtfsFindKey(PB_TREE Tree,
             PB_TREE_FILENAME_NODE Node,
@@ -1375,6 +1390,23 @@ NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
                    ULONG IndexNameLength,
                    PINDEX_ENTRY_ATTRIBUTE SearchEntry,
                    PINDEX_ENTRY_ATTRIBUTE *FoundEntry);
+
+NTSTATUS
+NtfsFindLastIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                       ULONGLONG MftIndex,
+                       PCWSTR IndexName,
+                       ULONG IndexNameLength,
+                       PINDEX_ENTRY_ATTRIBUTE *FoundEntry);
+
+NTSTATUS
+NtfsVisitIndexEntries(PDEVICE_EXTENSION DeviceExt,
+                      ULONGLONG MftIndex,
+                      PCWSTR IndexName,
+                      ULONG IndexNameLength,
+                      PINDEX_ENTRY_ATTRIBUTE LowEntry,
+                      PINDEX_ENTRY_ATTRIBUTE HighEntry,
+                      PNTFS_INDEX_VISITOR Visitor,
+                      PVOID Context);
 
 NTSTATUS
 FreeMftEntry(PDEVICE_EXTENSION DeviceExt,
