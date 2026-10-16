@@ -133,6 +133,12 @@ typedef struct
     /* $Extend\$ObjId, whose $O indexes the object IDs; 0 on a volume without one */
     ULONGLONG ObjectIdIndexMftIndex;
 
+    /* $Secure, 0 on a volume before NTFS 3.0, and where its next descriptor goes.
+     * IndexResource guards the two. */
+    ULONGLONG SecureMftIndex;
+    ULONG NextSecurityId;
+    ULONGLONG SdsEnd;
+
     NPAGED_LOOKASIDE_LIST FileRecLookasideList;
 
     /* $UpCase, one upcased code point per UCS-2 value. NTFS defines its
@@ -227,6 +233,7 @@ typedef enum
 #define NTFS_FILE_BOOT                7
 #define NTFS_FILE_BADCLUS            8
 #define NTFS_FILE_QUOTA                9
+#define NTFS_FILE_SECURE            9   /* NTFS 3.0 and later */
 #define NTFS_FILE_UPCASE            10
 #define NTFS_FILE_EXTEND            11
 #define NTFS_FILE_FIRST_USER_FILE   16
@@ -373,13 +380,15 @@ typedef struct
     ULONGLONG LastAccessTime;
     ULONG FileAttribute;
     ULONG AlignmentOrReserved[3];
-#if 0
+    /* NTFS 3.0 and later: a record written by earlier versions ends here */
     ULONG QuotaId;
     ULONG SecurityId;
     ULONGLONG QuotaCharge;
-    USN Usn;
-#endif
+    LONGLONG Usn;
 } STANDARD_INFORMATION, *PSTANDARD_INFORMATION;
+
+/* The $STANDARD_INFORMATION of NTFS 1.x and 2.x */
+#define NTFS_STANDARD_INFORMATION_V1_SIZE FIELD_OFFSET(STANDARD_INFORMATION, QuotaId)
 
 
 typedef struct
@@ -1160,6 +1169,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PCUNICODE_STRING Name,
                      ULONG FileAttributes,
                      BOOLEAN IsDirectory,
+                     ULONG SecurityId,
                      BOOLEAN CaseSensitive,
                      BOOLEAN CanWait);
 
@@ -1843,6 +1853,30 @@ NTSTATUS
 NtfsFindFileByObjectId(PDEVICE_EXTENSION DeviceExt,
                        PUCHAR ObjectId,
                        PULONGLONG MftIndex);
+
+
+/* secure.c */
+
+VOID
+NtfsInitializeSecurity(PDEVICE_EXTENSION DeviceExt);
+
+NTSTATUS
+NtfsReadFileSecurity(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG MftIndex,
+                     PSECURITY_DESCRIPTOR *Sd);
+
+NTSTATUS
+NtfsAssignSecurity(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG ParentMftIndex,
+                   PACCESS_STATE AccessState,
+                   BOOLEAN IsDirectory,
+                   PULONG SecurityId);
+
+NTSTATUS
+NtfsQuerySecurity(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext);
 
 
 /* reparse.c */

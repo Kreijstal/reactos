@@ -23,6 +23,7 @@ list(APPEND SOURCE
     objid.c
     reparse.c
     rw.c
+    secure.c
     volinfo.c
     ntfs.h)
 
