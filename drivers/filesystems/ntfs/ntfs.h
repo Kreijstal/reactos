@@ -1314,6 +1314,11 @@ NtfsTrimAllocation(
     _In_ PNTFS_FCB Fcb);
 
 NTSTATUS
+NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
+                         PFILE_RECORD_HEADER FileRecord,
+                         ULONG BytesNeeded);
+
+NTSTATUS
 SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                                PNTFS_ATTR_CONTEXT AttrContext,
                                ULONG AttrOffset,

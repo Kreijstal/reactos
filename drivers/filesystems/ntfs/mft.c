@@ -988,38 +988,281 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 }
 
 /**
-* @name SetResidentAttributeDataLength
+* @name ConvertResidentAttributeToNonResident
 * @implemented
 *
-* Called by SetAttributeDataLength() to set the size of a non-resident attribute. Doesn't update the file record.
+* Moves the value of a resident attribute into clusters of its own and sizes it to DataSize.
 *
 * @param Vcb
 * Pointer to a DEVICE_EXTENSION describing the target disk.
 *
 * @param AttrContext
-* PNTFS_ATTR_CONTEXT describing the location of the attribute whose size is being set.
+* Context of the resident attribute. Describes the non-resident attribute on return.
 *
 * @param AttrOffset
-* Offset, from the beginning of the record, of the attribute being sized.
+* Offset of the attribute in FileRecord.
 *
 * @param FileRecord
-* Pointer to a file record containing the attribute to be resized. Must be a complete file record,
-* not just the header.
+* The complete file record holding the attribute. Written back to disk.
 *
 * @param DataSize
-* Pointer to a LARGE_INTEGER describing the new size of the attribute's data.
+* The size the attribute's value is to have, at least its current one.
 *
 * @return
-* STATUS_SUCCESS on success;
-* STATUS_INSUFFICIENT_RESOURCES if an allocation fails.
-* STATUS_INVALID_PARAMETER if AttrContext describes a non-resident attribute.
-* STATUS_NOT_IMPLEMENTED if requested to decrease the size of an attribute that isn't the
-* last attribute listed in the file record.
+* STATUS_SUCCESS, STATUS_DISK_FULL if the record can't hold the non-resident header, or an
+* allocation or I/O error.
 *
 * @remarks
-* Called by SetAttributeDataLength() and IncreaseMftSize(). Use SetAttributeDataLength() unless you have a good
-* reason to use this. Doesn't update the file record on disk. Doesn't inform the cache controller of changes with
-* any associated files. Synchronization is the callers responsibility.
+* The attribute need not be the last in the record: a named stream sorts wherever its name
+* falls, and an unnamed $DATA has the named ones behind it. Whatever follows it is moved to
+* follow the new, non-resident header.
+*/
+static
+NTSTATUS
+ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
+                                      PNTFS_ATTR_CONTEXT AttrContext,
+                                      ULONG AttrOffset,
+                                      PFILE_RECORD_HEADER FileRecord,
+                                      PLARGE_INTEGER DataSize)
+{
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    PNTFS_ATTR_RECORD NewRecord;
+    ULONG AttribDataSize;
+    PVOID AttribData = NULL;
+    ULONG NewRecordLength;
+    ULONG OldRecordLength = Destination->Length;
+    ULONG TailLength;
+    ULONG LengthWritten;
+    NTSTATUS Status;
+
+    ASSERT(!AttrContext->pRecord->IsNonResident);
+    ASSERT((ULONGLONG)DataSize->QuadPart >= AttrContext->pRecord->Resident.ValueLength);
+
+    DPRINT("Converting attribute to non-resident.\n");
+
+    // The size of a 0-length, non-resident attribute will be 0x41 + the size of the attribute name, aligned to an 8-byte boundary
+    NewRecordLength = ALIGN_UP_BY(0x41 + (AttrContext->pRecord->NameLength * sizeof(WCHAR)), ATTR_RECORD_ALIGNMENT);
+
+    if (NewRecordLength > OldRecordLength &&
+        FileRecord->BytesInUse + (NewRecordLength - OldRecordLength) > Vcb->NtfsInfo.BytesPerFileRecord)
+    {
+        DPRINT1("ERROR: No room to convert attribute to non-resident!\n");
+        return STATUS_DISK_FULL;
+    }
+
+    // Is there existing data we need to back-up?
+    AttribDataSize = AttrContext->pRecord->Resident.ValueLength;
+    if (AttribDataSize > 0)
+    {
+        AttribData = ExAllocatePoolWithTag(NonPagedPool, AttribDataSize, TAG_NTFS);
+        if (AttribData == NULL)
+        {
+            DPRINT1("ERROR: Couldn't allocate memory for attribute data. Can't migrate to non-resident!\n");
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlCopyMemory(AttribData,
+                      (PUCHAR)Destination + Destination->Resident.ValueOffset,
+                      AttribDataSize);
+    }
+
+    // Create a new attribute record that will store the 0-length, non-resident attribute
+    NewRecord = ExAllocatePoolWithTag(NonPagedPool, NewRecordLength, TAG_NTFS);
+    if (NewRecord == NULL)
+    {
+        if (AttribData != NULL)
+            ExFreePoolWithTag(AttribData, TAG_NTFS);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(NewRecord, NewRecordLength);
+
+    // Copy the data that's common to both non-resident and resident attributes
+    RtlCopyMemory(NewRecord, AttrContext->pRecord, FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.ValueLength));
+
+    // The name follows the non-resident header, and the (empty) mapping pairs follow the name
+    NewRecord->NameOffset = 0x40;
+    RtlCopyMemory((PCHAR)NewRecord + NewRecord->NameOffset,
+                  (PCHAR)Destination + Destination->NameOffset,
+                  Destination->NameLength * sizeof(WCHAR));
+    NewRecord->NonResident.MappingPairsOffset = 0x40 + (AttrContext->pRecord->NameLength * sizeof(WCHAR));
+    NewRecord->Length = NewRecordLength;
+
+    // Initialize the MCB, potentially catch an exception
+    _SEH2_TRY
+    {
+        FsRtlInitializeLargeMcb(&AttrContext->DataRunsMCB, NonPagedPool);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DPRINT1("Unable to create LargeMcb!\n");
+        if (AttribData != NULL)
+            ExFreePoolWithTag(AttribData, TAG_NTFS);
+        ExFreePoolWithTag(NewRecord, TAG_NTFS);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    } _SEH2_END;
+
+    NewRecord->IsNonResident = 1;
+
+    // Slide what follows the attribute (up to and including the end markers) to where the
+    // new header ends, then put the header in place
+    TailLength = FileRecord->BytesInUse - (AttrOffset + OldRecordLength);
+    RtlMoveMemory((PUCHAR)Destination + NewRecordLength,
+                  (PUCHAR)Destination + OldRecordLength,
+                  TailLength);
+    FileRecord->BytesInUse = FileRecord->BytesInUse - OldRecordLength + NewRecordLength;
+    RtlCopyMemory(Destination, NewRecord, NewRecordLength);
+
+    // Update file record on disk
+    Status = UpdateFileRecord(Vcb, AttrContext->FileMFTIndex, FileRecord);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Couldn't update file record to continue migration!\n");
+        if (AttribData != NULL)
+            ExFreePoolWithTag(AttribData, TAG_NTFS);
+        ExFreePoolWithTag(NewRecord, TAG_NTFS);
+        return Status;
+    }
+
+    // Now we need to free the old copy of the attribute record in the context and replace it with the new one
+    ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
+    AttrContext->pRecord = NewRecord;
+
+    // Now we can treat the attribute as non-resident and enlarge it normally
+    Status = SetNonResidentAttributeDataLength(Vcb, AttrContext, AttrOffset, FileRecord, DataSize);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("ERROR: Unable to migrate resident attribute!\n");
+        if (AttribData != NULL)
+            ExFreePoolWithTag(AttribData, TAG_NTFS);
+        return Status;
+    }
+
+    // restore the back-up attribute, if we made one
+    if (AttribData != NULL)
+    {
+        Status = WriteAttribute(Vcb, AttrContext, 0, AttribData, AttribDataSize, &LengthWritten, FileRecord);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("ERROR: Unable to write attribute data to non-resident clusters during migration!\n");
+            // TODO: Reverse migration so no data is lost
+        }
+
+        ExFreePoolWithTag(AttribData, TAG_NTFS);
+    }
+
+    return Status;
+}
+
+/*
+ * NTFS keeps $STANDARD_INFORMATION, $FILE_NAME, $OBJECT_ID, $INDEX_ROOT,
+ * $VOLUME_NAME, $VOLUME_INFORMATION and $EA_INFORMATION resident at all times;
+ * everything else may have its value moved into clusters of its own.
+ */
+static
+BOOLEAN
+NtfsAttributeCanBeNonResident(ULONG Type)
+{
+    switch (Type)
+    {
+        case AttributeSecurityDescriptor:
+        case AttributeData:
+        case AttributeBitmap:
+        case AttributeReparsePoint:
+        case AttributeEA:
+        case AttributeLoggedUtilityStream:
+            return TRUE;
+
+        default:
+            return FALSE;
+    }
+}
+
+/**
+* @name NtfsMakeRoomInFileRecord
+* @implemented
+*
+* Frees space in a file record by moving resident values out into clusters of their own,
+* biggest gain first, until the record has BytesNeeded bytes free.
+*
+* @param DeviceExt
+* Pointer to a DEVICE_EXTENSION describing the target disk.
+*
+* @param FileRecord
+* The complete base file record. Updated in place and on disk; attribute offsets the caller
+* held are stale afterwards.
+*
+* @param BytesNeeded
+* Number of free bytes the record needs to end up with.
+*
+* @return
+* STATUS_SUCCESS once the record has the room, STATUS_DISK_FULL if no resident value is
+* left to move out, or the status of a conversion that failed.
+*/
+NTSTATUS
+NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
+                         PFILE_RECORD_HEADER FileRecord,
+                         ULONG BytesNeeded)
+{
+    while (DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < BytesNeeded)
+    {
+        PNTFS_ATTR_CONTEXT AttrContext;
+        PNTFS_ATTR_RECORD Attribute;
+        LARGE_INTEGER AttributeSize;
+        ULONG Offset = FileRecord->AttributeOffset;
+        ULONG BestOffset = 0;
+        ULONG BestGain = 0;
+        NTSTATUS Status;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        while (Attribute->Type != AttributeEnd)
+        {
+            /* Compressed, encrypted and sparse values would need their own conversion */
+            if (!Attribute->IsNonResident &&
+                Attribute->Flags == 0 &&
+                NtfsAttributeCanBeNonResident(Attribute->Type))
+            {
+                ULONG NonResidentLength = ALIGN_UP_BY(0x41 + Attribute->NameLength * sizeof(WCHAR),
+                                                      ATTR_RECORD_ALIGNMENT);
+
+                if (Attribute->Length > NonResidentLength &&
+                    Attribute->Length - NonResidentLength > BestGain)
+                {
+                    BestGain = Attribute->Length - NonResidentLength;
+                    BestOffset = Offset;
+                }
+            }
+
+            Offset += Attribute->Length;
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        }
+
+        if (BestGain == 0)
+            return STATUS_DISK_FULL;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + BestOffset);
+        AttrContext = PrepareAttributeContext(Attribute);
+        if (AttrContext == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        AttrContext->FileMFTIndex = FileRecord->MFTRecordNumber;
+        AttributeSize.QuadPart = Attribute->Resident.ValueLength;
+
+        Status = ConvertResidentAttributeToNonResident(DeviceExt, AttrContext, BestOffset, FileRecord, &AttributeSize);
+        ReleaseAttributeContext(AttrContext);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name SetResidentAttributeDataLength
+* @implemented
+*
+* Called by SetAttributeDataLength() to set the size of a resident attribute, moving it out
+* of the record when the record can't hold it.
 */
 NTSTATUS
 SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
@@ -1029,163 +1272,26 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
                                PLARGE_INTEGER DataSize)
 {
     NTSTATUS Status;
-
-    // find the next attribute
-    ULONG NextAttributeOffset = AttrOffset + AttrContext->pRecord->Length;
-    PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((PCHAR)FileRecord + NextAttributeOffset);
+    ULONG FreeBytes = Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse;
+    ULONG MaxValueLength;
 
     ASSERT(!AttrContext->pRecord->IsNonResident);
 
-    //NtfsDumpFileAttributes(Vcb, FileRecord);
+    // The value can grow into the attribute's own padding and whatever the record has free;
+    // the attributes behind it move along (InternalSetResidentAttributeLength)
+    MaxValueLength = AttrContext->pRecord->Length - AttrContext->pRecord->Resident.ValueOffset + FreeBytes;
 
-    // Do we need to increase the data length?
-    if (DataSize->QuadPart > AttrContext->pRecord->Resident.ValueLength)
+    if (DataSize->QuadPart > AttrContext->pRecord->Resident.ValueLength &&
+        (ULONGLONG)DataSize->QuadPart > MaxValueLength)
     {
-        // There's usually padding at the end of a record. Do we need to extend past it?
-        ULONG MaxValueLength = AttrContext->pRecord->Length - AttrContext->pRecord->Resident.ValueOffset;
-        if (MaxValueLength < DataSize->LowPart)
-        {
-            // If this is the last attribute, we could move the end marker to the very end of the file record
-            MaxValueLength += Vcb->NtfsInfo.BytesPerFileRecord - NextAttributeOffset - (sizeof(ULONG) * 2);
-
-            if (MaxValueLength < DataSize->LowPart || NextAttribute->Type != AttributeEnd)
-            {
-                // convert attribute to non-resident
-                PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
-                PNTFS_ATTR_RECORD NewRecord;
-                LARGE_INTEGER AttribDataSize;
-                PVOID AttribData;
-                ULONG NewRecordLength;
-                ULONG EndAttributeOffset;
-                ULONG LengthWritten;
-
-                DPRINT("Converting attribute to non-resident.\n");
-
-                AttribDataSize.QuadPart = AttrContext->pRecord->Resident.ValueLength;
-
-                // Is there existing data we need to back-up?
-                if (AttribDataSize.QuadPart > 0)
-                {
-                    AttribData = ExAllocatePoolWithTag(NonPagedPool, AttribDataSize.QuadPart, TAG_NTFS);
-                    if (AttribData == NULL)
-                    {
-                        DPRINT1("ERROR: Couldn't allocate memory for attribute data. Can't migrate to non-resident!\n");
-                        return STATUS_INSUFFICIENT_RESOURCES;
-                    }
-
-                    // read data to temp buffer
-                    Status = ReadAttribute(Vcb, AttrContext, 0, AttribData, AttribDataSize.QuadPart);
-                    if (!NT_SUCCESS(Status))
-                    {
-                        DPRINT1("ERROR: Unable to read attribute before migrating!\n");
-                        ExFreePoolWithTag(AttribData, TAG_NTFS);
-                        return Status;
-                    }
-                }
-
-                // Start by turning this attribute into a 0-length, non-resident attribute, then enlarge it.
-
-                // The size of a 0-length, non-resident attribute will be 0x41 + the size of the attribute name, aligned to an 8-byte boundary
-                NewRecordLength = ALIGN_UP_BY(0x41 + (AttrContext->pRecord->NameLength * sizeof(WCHAR)), ATTR_RECORD_ALIGNMENT);
-
-                // Create a new attribute record that will store the 0-length, non-resident attribute
-                NewRecord = ExAllocatePoolWithTag(NonPagedPool, NewRecordLength, TAG_NTFS);
-
-                // Zero out the NonResident structure
-                RtlZeroMemory(NewRecord, NewRecordLength);
-
-                // Copy the data that's common to both non-resident and resident attributes
-                RtlCopyMemory(NewRecord, AttrContext->pRecord, FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.ValueLength));
-
-                // if there's a name
-                if (AttrContext->pRecord->NameLength != 0)
-                {
-                    // copy the name
-                    // An attribute name will be located at offset 0x18 for a resident attribute, 0x40 for non-resident
-                    RtlCopyMemory((PCHAR)((ULONG_PTR)NewRecord + 0x40),
-                                  (PCHAR)((ULONG_PTR)AttrContext->pRecord + 0x18),
-                                  AttrContext->pRecord->NameLength * sizeof(WCHAR));
-                }
-
-                // update the mapping pairs offset, which will be 0x40 (size of a non-resident header) + length in bytes of the name
-                NewRecord->NonResident.MappingPairsOffset = 0x40 + (AttrContext->pRecord->NameLength * sizeof(WCHAR));
-
-                // update the end of the file record
-                // calculate position of end markers (1 byte for empty data run)
-                EndAttributeOffset = AttrOffset + NewRecord->NonResident.MappingPairsOffset + 1;
-                EndAttributeOffset = ALIGN_UP_BY(EndAttributeOffset, ATTR_RECORD_ALIGNMENT);
-
-                // Update the length
-                NewRecord->Length = EndAttributeOffset - AttrOffset;
-
-                ASSERT(NewRecord->Length == NewRecordLength);
-
-                // Copy the new attribute record into the file record
-                RtlCopyMemory(Destination, NewRecord, NewRecord->Length);
-
-                // Update the file record end
-                SetFileRecordEnd(FileRecord,
-                                 (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + EndAttributeOffset),
-                                 FILE_RECORD_END);
-
-                // Initialize the MCB, potentially catch an exception
-                _SEH2_TRY
-                {
-                    FsRtlInitializeLargeMcb(&AttrContext->DataRunsMCB, NonPagedPool);
-                }
-                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                {
-                    DPRINT1("Unable to create LargeMcb!\n");
-                    if (AttribDataSize.QuadPart > 0)
-                        ExFreePoolWithTag(AttribData, TAG_NTFS);
-                    ExFreePoolWithTag(NewRecord, TAG_NTFS);
-                    _SEH2_YIELD(return _SEH2_GetExceptionCode());
-                } _SEH2_END;
-
-                // Mark the attribute as non-resident (we wait until after we know the LargeMcb was initialized)
-                NewRecord->IsNonResident = Destination->IsNonResident = 1;
-
-                // Update file record on disk
-                Status = UpdateFileRecord(Vcb, AttrContext->FileMFTIndex, FileRecord);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("ERROR: Couldn't update file record to continue migration!\n");
-                    if (AttribDataSize.QuadPart > 0)
-                        ExFreePoolWithTag(AttribData, TAG_NTFS);
-                    ExFreePoolWithTag(NewRecord, TAG_NTFS);
-                    return Status;
-                }
-
-                // Now we need to free the old copy of the attribute record in the context and replace it with the new one
-                ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
-                AttrContext->pRecord = NewRecord;
-
-                // Now we can treat the attribute as non-resident and enlarge it normally
-                Status = SetNonResidentAttributeDataLength(Vcb, AttrContext, AttrOffset, FileRecord, DataSize);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("ERROR: Unable to migrate resident attribute!\n");
-                    if (AttribDataSize.QuadPart > 0)
-                        ExFreePoolWithTag(AttribData, TAG_NTFS);
-                    return Status;
-                }
-
-                // restore the back-up attribute, if we made one
-                if (AttribDataSize.QuadPart > 0)
-                {
-                    Status = WriteAttribute(Vcb, AttrContext, 0, AttribData, AttribDataSize.QuadPart, &LengthWritten, FileRecord);
-                    if (!NT_SUCCESS(Status))
-                    {
-                        DPRINT1("ERROR: Unable to write attribute data to non-resident clusters during migration!\n");
-                        // TODO: Reverse migration so no data is lost
-                        ExFreePoolWithTag(AttribData, TAG_NTFS);
-                        return Status;
-                    }
-
-                    ExFreePoolWithTag(AttribData, TAG_NTFS);
-                }
-            }
-        }
+        // The data no longer fits in the file record: push the attribute out of it
+        Status = ConvertResidentAttributeToNonResident(Vcb,
+                                                       AttrContext,
+                                                       AttrOffset,
+                                                       FileRecord,
+                                                       DataSize);
+        if (!NT_SUCCESS(Status))
+            return Status;
     }
 
     // set the new length of the resident attribute (if we didn't migrate it)
