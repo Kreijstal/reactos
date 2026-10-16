@@ -34,6 +34,32 @@
 /* FUNCTIONS ****************************************************************/
 
 /**
+* @name NtfsUncountOpen
+*
+* Takes a handle out of its FCB's and its volume's open handle counts, if its open was
+* counted. A stream file object the driver made for itself never was.
+*/
+static
+VOID
+NtfsUncountOpen(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+
+    if (Ccb == NULL || !BooleanFlagOn(Ccb->Flags, CCB_COUNTED))
+        return;
+
+    ASSERT(Fcb->OpenHandleCount != 0);
+    ASSERT(DeviceExt->OpenHandleCount != 0);
+
+    Ccb->Flags &= ~CCB_COUNTED;
+    Fcb->OpenHandleCount--;
+    DeviceExt->OpenHandleCount--;
+}
+
+/**
 * @name NtfsApplyDeleteOnClose
 *
 * A handle opened with FILE_DELETE_ON_CLOSE marks its file for deletion when it's cleaned
@@ -94,12 +120,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
-        Fcb->OpenHandleCount--;
-
-        if (Fcb->OpenHandleCount != 0)
-        {
-            // Remove share access when handled
-        }
+        NtfsUncountOpen(DeviceExt, Fcb, FileObject);
     }
     else
     {
@@ -110,7 +131,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         NtfsApplyDeleteOnClose(DeviceExt, Fcb, FileObject);
 
-        Fcb->OpenHandleCount--;
+        NtfsUncountOpen(DeviceExt, Fcb, FileObject);
 
         if (Fcb->ShareAccess.OpenCount > 0)
         {
