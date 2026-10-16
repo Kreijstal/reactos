@@ -2879,23 +2879,23 @@ GetMaxIndexRootSize(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
-* @name NtfsAddFilenameToDirectory
+* @name InsertIndexEntryWorker
 * @implemented
 *
-* Adds a $FILE_NAME attribute to a given directory index.
+* Adds an entry to an index of a file record: a $FILE_NAME to a directory's $I30, or a view
+* index entry, such as an object ID to $O of $Extend\$ObjId.
 *
 * @param DeviceExt
 * Points to the target disk's DEVICE_EXTENSION.
 *
 * @param DirectoryMftIndex
-* Mft index of the parent directory which will receive the file.
+* Mft index of the file record holding the index.
 *
-* @param FileReferenceNumber
-* File reference of the file to be added to the directory. This is a combination of the
-* Mft index and sequence number.
+* @param IndexName
+* Name of the index ($I30, $O, ...), IndexNameLength characters long.
 *
-* @param FilenameAttribute
-* Pointer to the FILENAME_ATTRIBUTE of the file being added to the directory.
+* @param Entry
+* The index entry to add, without a child. A copy is made.
 *
 * @param CaseSensitive
 * Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
@@ -2914,11 +2914,12 @@ GetMaxIndexRootSize(PDEVICE_EXTENSION DeviceExt,
 */
 static
 NTSTATUS
-AddFilenameToDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
-                             ULONGLONG DirectoryMftIndex,
-                             ULONGLONG FileReferenceNumber,
-                             PFILENAME_ATTRIBUTE FilenameAttribute,
-                             BOOLEAN CaseSensitive)
+InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
+                       ULONGLONG DirectoryMftIndex,
+                       PCWSTR IndexName,
+                       ULONG IndexNameLength,
+                       PINDEX_ENTRY_ATTRIBUTE Entry,
+                       BOOLEAN CaseSensitive)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_RECORD_HEADER ParentFileRecord;
@@ -2961,18 +2962,18 @@ AddFilenameToDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
     NtfsDumpFileRecord(DeviceExt, ParentFileRecord);
 #endif
 
-    // Find the index root attribute for the directory
+    // Find the index root attribute for the index
     Status = FindAttribute(DeviceExt,
                            ParentFileRecord,
                            AttributeIndexRoot,
-                           L"$I30",
-                           4,
+                           IndexName,
+                           IndexNameLength,
                            &IndexRootContext,
                            &IndexRootOffset);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ERROR: Couldn't find $I30 $INDEX_ROOT attribute for parent directory with MFT #: %I64u!\n",
-                DirectoryMftIndex);
+        DPRINT1("ERROR: Couldn't find %.*S $INDEX_ROOT attribute in MFT #: %I64u!\n",
+                IndexNameLength, IndexName, DirectoryMftIndex);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3021,21 +3022,20 @@ AddFilenameToDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
     DumpBTree(NewTree);
 #endif
 
-    // Insert the key for the file we're adding
-    Status = NtfsInsertKey(NewTree,
-                           FileReferenceNumber,
-                           FilenameAttribute,
-                           NewTree->RootNode,
-                           CaseSensitive,
-                           MaxIndexRootSize,
-                           I30IndexRoot->SizeOfEntry,
-                           &NewLeftKey,
-                           &NewRightHandNode);
+    // Insert the key for the entry we're adding
+    Status = NtfsInsertIndexKey(NewTree,
+                                Entry,
+                                NewTree->RootNode,
+                                CaseSensitive,
+                                MaxIndexRootSize,
+                                I30IndexRoot->SizeOfEntry,
+                                &NewLeftKey,
+                                &NewRightHandNode);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ERROR: Failed to insert '%.*S' into the index of MFT record %I64u (Status %lx)\n",
-                FilenameAttribute->NameLength,
-                FilenameAttribute->Name,
+        DPRINT1("ERROR: Failed to insert into index %.*S of MFT record %I64u (Status %lx)\n",
+                IndexNameLength,
+                IndexName,
                 DirectoryMftIndex,
                 Status);
         DestroyBTree(NewTree);
@@ -3256,8 +3256,48 @@ AddFilenameToDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
-/* The worker rewrites the directory record from a copy it reads, so it
- * must not overlap any other update of a directory index */
+/* The worker rewrites the record from a copy it reads, so it must not
+ * overlap any other update of an index */
+NTSTATUS
+NtfsInsertIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG MftIndex,
+                     PCWSTR IndexName,
+                     ULONG IndexNameLength,
+                     PINDEX_ENTRY_ATTRIBUTE Entry,
+                     BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    Status = InsertIndexEntryWorker(DeviceExt, MftIndex, IndexName, IndexNameLength, Entry, CaseSensitive);
+    ExReleaseResourceLite(&DeviceExt->IndexResource);
+    KeLeaveCriticalRegion();
+
+    return Status;
+}
+
+/**
+* @name NtfsAddFilenameToDirectory
+* @implemented
+*
+* Adds a $FILE_NAME attribute to a given directory index.
+*
+* @param DirectoryMftIndex
+* Mft index of the parent directory which will receive the file.
+*
+* @param FileReferenceNumber
+* File reference of the file to be added to the directory. This is a combination of the
+* Mft index and sequence number.
+*
+* @param FilenameAttribute
+* Pointer to the FILENAME_ATTRIBUTE of the file being added to the directory.
+*
+* @remarks
+* One FILENAME_ATTRIBUTE is added to the directory's index for each link to that file. So, each
+* file which contains one FILENAME_ATTRIBUTE for a long name and another for the 8.3 name, will
+* get both attributes added to its parent directory.
+*/
 NTSTATUS
 NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
                            ULONGLONG DirectoryMftIndex,
@@ -3266,12 +3306,14 @@ NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
                            BOOLEAN CaseSensitive)
 {
     NTSTATUS Status;
+    PB_TREE_KEY FileNameKey = CreateBTreeKeyFromFilename(FileReferenceNumber, FilenameAttribute);
 
-    KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
-    Status = AddFilenameToDirectoryWorker(DeviceExt, DirectoryMftIndex, FileReferenceNumber, FilenameAttribute, CaseSensitive);
-    ExReleaseResourceLite(&DeviceExt->IndexResource);
-    KeLeaveCriticalRegion();
+    if (!FileNameKey)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = NtfsInsertIndexEntry(DeviceExt, DirectoryMftIndex, L"$I30", 4, FileNameKey->IndexEntry, CaseSensitive);
+
+    DestroyBTreeKey(FileNameKey);
 
     return Status;
 }
@@ -3306,10 +3348,12 @@ NtfsAddFilenameToDirectory(PDEVICE_EXTENSION DeviceExt,
 */
 static
 NTSTATUS
-RemoveFilenameFromDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
-                                  ULONGLONG DirectoryMftIndex,
-                                  PFILENAME_ATTRIBUTE FilenameAttribute,
-                                  BOOLEAN CaseSensitive)
+RemoveIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
+                       ULONGLONG DirectoryMftIndex,
+                       PCWSTR IndexName,
+                       ULONG IndexNameLength,
+                       PINDEX_ENTRY_ATTRIBUTE Entry,
+                       BOOLEAN CaseSensitive)
 {
     NTSTATUS Status;
     PFILE_RECORD_HEADER ParentFileRecord;
@@ -3325,8 +3369,8 @@ RemoveFilenameFromDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
     PB_TREE Tree;
     PB_TREE_KEY SearchKey;
 
-    DPRINT("NtfsRemoveFilenameFromDirectory(%p, %I64u, %p, %s)\n",
-           DeviceExt, DirectoryMftIndex, FilenameAttribute, CaseSensitive ? "TRUE" : "FALSE");
+    DPRINT("RemoveIndexEntryWorker(%p, %I64u, %.*S, %p, %s)\n",
+           DeviceExt, DirectoryMftIndex, IndexNameLength, IndexName, Entry, CaseSensitive ? "TRUE" : "FALSE");
 
     ParentFileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (!ParentFileRecord)
@@ -3346,14 +3390,14 @@ RemoveFilenameFromDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
     Status = FindAttribute(DeviceExt,
                            ParentFileRecord,
                            AttributeIndexRoot,
-                           L"$I30",
-                           4,
+                           IndexName,
+                           IndexNameLength,
                            &IndexRootContext,
                            &IndexRootOffset);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ERROR: Couldn't find $I30 $INDEX_ROOT attribute for parent directory with MFT #: %I64u!\n",
-                DirectoryMftIndex);
+        DPRINT1("ERROR: Couldn't find %.*S $INDEX_ROOT attribute in MFT #: %I64u!\n",
+                IndexNameLength, IndexName, DirectoryMftIndex);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, ParentFileRecord);
         return Status;
     }
@@ -3388,8 +3432,8 @@ RemoveFilenameFromDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
-    // NtfsRemoveKey() compares filenames, so the file reference here is only a placeholder
-    SearchKey = CreateBTreeKeyFromFilename(0, FilenameAttribute);
+    // NtfsRemoveKey() compares only the key, so a $FILE_NAME's file reference is only a placeholder
+    SearchKey = CreateBTreeKeyFromEntry(Entry);
     if (!SearchKey)
     {
         DestroyBTree(Tree);
@@ -3405,9 +3449,9 @@ RemoveFilenameFromDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
 
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ERROR: Failed to remove '%.*S' from the index of MFT record %I64u (Status %lx)\n",
-                FilenameAttribute->NameLength,
-                FilenameAttribute->Name,
+        DPRINT1("ERROR: Failed to remove a key from index %.*S of MFT record %I64u (Status %lx)\n",
+                IndexNameLength,
+                IndexName,
                 DirectoryMftIndex,
                 Status);
         DestroyBTree(Tree);
@@ -3504,8 +3548,27 @@ RemoveFilenameFromDirectoryWorker(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
-/* The worker rewrites the directory record from a copy it reads, so it
- * must not overlap any other update of a directory index */
+/* The worker rewrites the record from a copy it reads, so it must not
+ * overlap any other update of an index */
+NTSTATUS
+NtfsRemoveIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG MftIndex,
+                     PCWSTR IndexName,
+                     ULONG IndexNameLength,
+                     PINDEX_ENTRY_ATTRIBUTE Entry,
+                     BOOLEAN CaseSensitive)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
+    Status = RemoveIndexEntryWorker(DeviceExt, MftIndex, IndexName, IndexNameLength, Entry, CaseSensitive);
+    ExReleaseResourceLite(&DeviceExt->IndexResource);
+    KeLeaveCriticalRegion();
+
+    return Status;
+}
+
 NTSTATUS
 NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
                                 ULONGLONG DirectoryMftIndex,
@@ -3513,12 +3576,142 @@ NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
                                 BOOLEAN CaseSensitive)
 {
     NTSTATUS Status;
+    PB_TREE_KEY FileNameKey = CreateBTreeKeyFromFilename(0, FilenameAttribute);
+
+    if (!FileNameKey)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = NtfsRemoveIndexEntry(DeviceExt, DirectoryMftIndex, L"$I30", 4, FileNameKey->IndexEntry, CaseSensitive);
+
+    DestroyBTreeKey(FileNameKey);
+
+    return Status;
+}
+
+/**
+* @name NtfsFindIndexEntry
+* @implemented
+*
+* Looks a key up in an index of a file record.
+*
+* @param MftIndex
+* Mft index of the file record holding the index.
+*
+* @param SearchEntry
+* An entry carrying the key to look up, as NtfsAllocateViewIndexEntry() builds it.
+*
+* @param FoundEntry
+* Receives a copy of the matching entry, which the caller frees with ExFreePoolWithTag(TAG_NTFS).
+*
+* @return
+* STATUS_SUCCESS if the key is in the index, STATUS_OBJECT_NAME_NOT_FOUND if it isn't.
+*/
+static
+NTSTATUS
+CopyFoundIndexEntry(PB_TREE Tree,
+                    PINDEX_ENTRY_ATTRIBUTE SearchEntry,
+                    PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+{
+    NTSTATUS Status;
+    PB_TREE_KEY SearchKey, FoundKey;
+    USHORT Length;
+
+    SearchKey = CreateBTreeKeyFromEntry(SearchEntry);
+    if (!SearchKey)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = NtfsFindKey(Tree, Tree->RootNode, SearchKey, FALSE, &FoundKey);
+    DestroyBTreeKey(SearchKey);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    // The VCN of a child isn't part of what callers look at
+    Length = FoundKey->IndexEntry->Length;
+    if (BooleanFlagOn(FoundKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        Length -= sizeof(ULONGLONG);
+
+    *FoundEntry = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_NTFS);
+    if (!*FoundEntry)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlCopyMemory(*FoundEntry, FoundKey->IndexEntry, Length);
+    (*FoundEntry)->Length = Length;
+    (*FoundEntry)->Flags = 0;
+
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+FindIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
+                     PFILE_RECORD_HEADER FileRecord,
+                     PCWSTR IndexName,
+                     ULONG IndexNameLength,
+                     PINDEX_ENTRY_ATTRIBUTE SearchEntry,
+                     PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+{
+    NTSTATUS Status;
+    PNTFS_ATTR_CONTEXT IndexRootContext;
+    PINDEX_ROOT_ATTRIBUTE IndexRoot;
+    ULONG IndexRootLength;
+    PB_TREE Tree;
+
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexRoot, IndexName, IndexNameLength, &IndexRootContext, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    IndexRootLength = AttributeDataLength(IndexRootContext->pRecord);
+    IndexRoot = ExAllocatePoolWithTag(NonPagedPool, IndexRootLength, TAG_NTFS);
+    if (!IndexRoot)
+    {
+        ReleaseAttributeContext(IndexRootContext);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (ReadAttribute(DeviceExt, IndexRootContext, 0, (PCHAR)IndexRoot, IndexRootLength) != IndexRootLength)
+        Status = STATUS_FILE_CORRUPT_ERROR;
+    else
+        Status = CreateBTreeFromIndex(DeviceExt, FileRecord, IndexRootContext, IndexRoot, &Tree);
+
+    if (NT_SUCCESS(Status))
+    {
+        Status = CopyFoundIndexEntry(Tree, SearchEntry, FoundEntry);
+        DestroyBTree(Tree);
+    }
+
+    ExFreePoolWithTag(IndexRoot, TAG_NTFS);
+    ReleaseAttributeContext(IndexRootContext);
+    return Status;
+}
+
+NTSTATUS
+NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   PCWSTR IndexName,
+                   ULONG IndexNameLength,
+                   PINDEX_ENTRY_ATTRIBUTE SearchEntry,
+                   PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+{
+    NTSTATUS Status;
+    PFILE_RECORD_HEADER FileRecord;
+
+    *FoundEntry = NULL;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (!FileRecord)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     KeEnterCriticalRegion();
-    ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
-    Status = RemoveFilenameFromDirectoryWorker(DeviceExt, DirectoryMftIndex, FilenameAttribute, CaseSensitive);
+    ExAcquireResourceSharedLite(&DeviceExt->IndexResource, TRUE);
+
+    Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = FindIndexEntryWorker(DeviceExt, FileRecord, IndexName, IndexNameLength, SearchEntry, FoundEntry);
+
     ExReleaseResourceLite(&DeviceExt->IndexResource);
     KeLeaveCriticalRegion();
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;
 }
