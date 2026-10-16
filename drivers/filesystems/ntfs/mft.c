@@ -66,13 +66,14 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         LONGLONG DataRunOffset;
         ULONGLONG DataRunLength;
         ULONGLONG NextVBN = 0;
+        BOOLEAN IsSparse;
         PUCHAR DataRun = (PUCHAR)((ULONG_PTR)Context->pRecord + Context->pRecord->NonResident.MappingPairsOffset);
 
         Context->CacheRun = DataRun;
         Context->CacheRunOffset = 0;
-        Context->CacheRun = DecodeRun(Context->CacheRun, &DataRunOffset, &DataRunLength);
+        Context->CacheRun = DecodeRun(Context->CacheRun, &DataRunOffset, &DataRunLength, &IsSparse);
         Context->CacheRunLength = DataRunLength;
-        if (DataRunOffset != -1)
+        if (!IsSparse)
         {
             /* Normal run. */
             Context->CacheRunStartLCN =
@@ -1241,6 +1242,7 @@ NtfsMapAttributeRuns(PDEVICE_EXTENSION Vcb,
     LONGLONG DataRunOffset;
     ULONGLONG DataRunLength = 0;
     LONGLONG DataRunStartLCN = -1;
+    BOOLEAN IsSparse;
     ULONG RunLength;
     ULONG Mapped = 0;
     ULONG UsedBufferSize;
@@ -1271,8 +1273,8 @@ NtfsMapAttributeRuns(PDEVICE_EXTENSION Vcb,
     // I. Walk forward to the data run that holds Offset.
     while (1)
     {
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-        if (DataRunOffset != (LONGLONG)-1)
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+        if (!IsSparse)
         {
             /* Normal data run. */
             DataRunStartLCN = LastLCN + DataRunOffset;
@@ -1323,8 +1325,8 @@ NtfsMapAttributeRuns(PDEVICE_EXTENSION Vcb,
             goto Cleanup;
 
         CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-        if (DataRunOffset != (LONGLONG)-1)
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+        if (!IsSparse)
         {
             DataRunStartLCN = LastLCN + DataRunOffset;
             LastLCN = DataRunStartLCN;
@@ -1356,8 +1358,8 @@ NtfsMapAttributeRuns(PDEVICE_EXTENSION Vcb,
             break;
 
         CurrentOffset += DataRunLength * Vcb->NtfsInfo.BytesPerCluster;
-        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength);
-        if (DataRunOffset != (LONGLONG)-1)
+        DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
+        if (!IsSparse)
         {
             /* Normal data run. */
             DataRunStartLCN = LastLCN + DataRunOffset;
