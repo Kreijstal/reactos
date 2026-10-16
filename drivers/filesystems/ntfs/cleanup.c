@@ -33,6 +33,45 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/**
+* @name NtfsApplyDeleteOnClose
+*
+* A handle opened with FILE_DELETE_ON_CLOSE marks its file for deletion when it's cleaned
+* up; the file goes once its last handle is. A directory that isn't empty by then stays.
+*/
+static
+VOID
+NtfsApplyDeleteOnClose(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+
+    if (Ccb == NULL || !BooleanFlagOn(Ccb->Flags, CCB_DELETE_ON_CLOSE))
+        return;
+
+    Ccb->Flags &= ~CCB_DELETE_ON_CLOSE;
+
+    if (NtfsFCBIsDirectory(Fcb))
+    {
+        BOOLEAN Empty;
+        NTSTATUS Status;
+
+        KeEnterCriticalRegion();
+        ExAcquireResourceSharedLite(&DeviceExt->IndexResource, TRUE);
+        Status = NtfsIsDirectoryEmpty(DeviceExt, Fcb->MFTIndex, &Empty);
+        ExReleaseResourceLite(&DeviceExt->IndexResource);
+        KeLeaveCriticalRegion();
+
+        if (!NT_SUCCESS(Status) || !Empty)
+            return;
+    }
+
+    Fcb->Flags |= FCB_DELETE_PENDING;
+    FileObject->DeletePending = TRUE;
+}
+
 /*
  * FUNCTION: Cleans up a file
  */
@@ -68,6 +107,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         {
             return STATUS_PENDING;
         }
+
+        NtfsApplyDeleteOnClose(DeviceExt, Fcb, FileObject);
 
         Fcb->OpenHandleCount--;
 
