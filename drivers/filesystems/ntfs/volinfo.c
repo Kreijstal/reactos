@@ -289,49 +289,57 @@ Quit:
     return Status;
 }
 
+/**
+* @name NtfsCopyVariablePart
+*
+* Copies as much of a query's variable-length tail as the buffer holds after its fixed
+* part, the way every NTFS query does: the fixed part is always complete, a tail that
+* doesn't fit is cut short and the query answers STATUS_BUFFER_OVERFLOW.
+*
+* @return
+* The number of bytes copied.
+*/
+static
+ULONG
+NtfsCopyVariablePart(
+    _Out_writes_bytes_(Room) PVOID Destination,
+    _In_ ULONG Room,
+    _In_reads_bytes_(Length) const VOID *Source,
+    _In_ ULONG Length)
+{
+    ULONG BytesToCopy = min(Room, Length);
+
+    RtlCopyMemory(Destination, Source, BytesToCopy);
+    return BytesToCopy;
+}
+
 static
 NTSTATUS
 NtfsGetFsVolumeInformation(PDEVICE_OBJECT DeviceObject,
                            PFILE_FS_VOLUME_INFORMATION FsVolumeInfo,
                            PULONG BufferLength)
 {
+    ULONG Fixed = FIELD_OFFSET(FILE_FS_VOLUME_INFORMATION, VolumeLabel);
+    ULONG Copied;
+
     DPRINT("NtfsGetFsVolumeInformation() called\n");
-    DPRINT("FsVolumeInfo = %p\n", FsVolumeInfo);
-    DPRINT("BufferLength %lu\n", *BufferLength);
 
-    DPRINT("Vpb %p\n", DeviceObject->Vpb);
-
-    DPRINT("Required length %lu\n",
-           sizeof(FILE_FS_VOLUME_INFORMATION) + DeviceObject->Vpb->VolumeLabelLength);
-    DPRINT("LabelLength %hu\n",
-           DeviceObject->Vpb->VolumeLabelLength);
-    DPRINT("Label %.*S\n",
-           DeviceObject->Vpb->VolumeLabelLength / sizeof(WCHAR),
-           DeviceObject->Vpb->VolumeLabel);
-
-    if (*BufferLength < sizeof(FILE_FS_VOLUME_INFORMATION))
+    if (*BufferLength < Fixed)
         return STATUS_INFO_LENGTH_MISMATCH;
 
-    if (*BufferLength < (sizeof(FILE_FS_VOLUME_INFORMATION) + DeviceObject->Vpb->VolumeLabelLength))
-        return STATUS_BUFFER_OVERFLOW;
-
-    /* valid entries */
     FsVolumeInfo->VolumeSerialNumber = DeviceObject->Vpb->SerialNumber;
-    FsVolumeInfo->VolumeLabelLength = DeviceObject->Vpb->VolumeLabelLength;
-    memcpy(FsVolumeInfo->VolumeLabel,
-           DeviceObject->Vpb->VolumeLabel,
-           DeviceObject->Vpb->VolumeLabelLength);
-
-    /* dummy entries */
     FsVolumeInfo->VolumeCreationTime.QuadPart = 0;
     FsVolumeInfo->SupportsObjects = FALSE;
 
-    *BufferLength -= (sizeof(FILE_FS_VOLUME_INFORMATION) + DeviceObject->Vpb->VolumeLabelLength);
+    Copied = NtfsCopyVariablePart(FsVolumeInfo->VolumeLabel,
+                                  *BufferLength - Fixed,
+                                  DeviceObject->Vpb->VolumeLabel,
+                                  DeviceObject->Vpb->VolumeLabelLength);
+    FsVolumeInfo->VolumeLabelLength = Copied;
 
-    DPRINT("BufferLength %lu\n", *BufferLength);
-    DPRINT("NtfsGetFsVolumeInformation() done\n");
+    *BufferLength -= Fixed + Copied;
 
-    return STATUS_SUCCESS;
+    return (Copied < DeviceObject->Vpb->VolumeLabelLength) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 }
 
 
@@ -341,35 +349,31 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
                               PFILE_FS_ATTRIBUTE_INFORMATION FsAttributeInfo,
                               PULONG BufferLength)
 {
+    ULONG Fixed = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName);
+    ULONG Copied;
+
     UNREFERENCED_PARAMETER(DeviceExt);
 
     DPRINT("NtfsGetFsAttributeInformation()\n");
-    DPRINT("FsAttributeInfo = %p\n", FsAttributeInfo);
-    DPRINT("BufferLength %lu\n", *BufferLength);
-    DPRINT("Required length %lu\n", (sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 8));
 
-    if (*BufferLength < sizeof (FILE_FS_ATTRIBUTE_INFORMATION))
+    if (*BufferLength < Fixed)
         return STATUS_INFO_LENGTH_MISMATCH;
 
-    if (*BufferLength < (sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 8))
-        return STATUS_BUFFER_OVERFLOW;
-
+    /* What this driver implements of what Windows' NTFS reports */
     FsAttributeInfo->FileSystemAttributes =
-        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK;
+        FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
+        FILE_SUPPORTS_OPEN_BY_FILE_ID;
     /* Writes are refused everywhere unless write support was enabled */
     if (!NtfsGlobalData->EnableWriteSupport)
         FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
-    FsAttributeInfo->MaximumComponentNameLength = 255;
-    FsAttributeInfo->FileSystemNameLength = 8;
+    FsAttributeInfo->MaximumComponentNameLength = NTFS_MAX_NAME_LENGTH;
 
-    memcpy(FsAttributeInfo->FileSystemName, L"NTFS", 8);
+    Copied = NtfsCopyVariablePart(FsAttributeInfo->FileSystemName, *BufferLength - Fixed, L"NTFS", 8);
+    FsAttributeInfo->FileSystemNameLength = Copied;
 
-    DPRINT("Finished NtfsGetFsAttributeInformation()\n");
+    *BufferLength -= Fixed + Copied;
 
-    *BufferLength -= (sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 8);
-    DPRINT("BufferLength %lu\n", *BufferLength);
-
-    return STATUS_SUCCESS;
+    return (Copied < 8) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
 }
 
 
@@ -379,27 +383,49 @@ NtfsGetFsSizeInformation(PDEVICE_OBJECT DeviceObject,
                          PFILE_FS_SIZE_INFORMATION FsSizeInfo,
                          PULONG BufferLength)
 {
-    PDEVICE_EXTENSION DeviceExt;
-    NTSTATUS Status = STATUS_SUCCESS;
+    PDEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
 
     DPRINT("NtfsGetFsSizeInformation()\n");
-    DPRINT("FsSizeInfo = %p\n", FsSizeInfo);
 
     if (*BufferLength < sizeof(FILE_FS_SIZE_INFORMATION))
-        return STATUS_BUFFER_OVERFLOW;
-
-    DeviceExt = DeviceObject->DeviceExtension;
+        return STATUS_INFO_LENGTH_MISMATCH;
 
     FsSizeInfo->AvailableAllocationUnits.QuadPart = NtfsGetFreeClusters(DeviceExt);
     FsSizeInfo->TotalAllocationUnits.QuadPart = DeviceExt->NtfsInfo.ClusterCount;
     FsSizeInfo->SectorsPerAllocationUnit = DeviceExt->NtfsInfo.SectorsPerCluster;
     FsSizeInfo->BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
 
-    DPRINT("Finished NtfsGetFsSizeInformation()\n");
-    if (NT_SUCCESS(Status))
-        *BufferLength -= sizeof(FILE_FS_SIZE_INFORMATION);
+    *BufferLength -= sizeof(FILE_FS_SIZE_INFORMATION);
 
-    return Status;
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
+NtfsGetFsFullSizeInformation(PDEVICE_OBJECT DeviceObject,
+                             PFILE_FS_FULL_SIZE_INFORMATION FsFullSizeInfo,
+                             PULONG BufferLength)
+{
+    PDEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
+    ULONGLONG FreeClusters;
+
+    DPRINT("NtfsGetFsFullSizeInformation()\n");
+
+    if (*BufferLength < sizeof(FILE_FS_FULL_SIZE_INFORMATION))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    /* No quotas are enforced, so the caller can have every free cluster */
+    FreeClusters = NtfsGetFreeClusters(DeviceExt);
+    FsFullSizeInfo->TotalAllocationUnits.QuadPart = DeviceExt->NtfsInfo.ClusterCount;
+    FsFullSizeInfo->CallerAvailableAllocationUnits.QuadPart = FreeClusters;
+    FsFullSizeInfo->ActualAvailableAllocationUnits.QuadPart = FreeClusters;
+    FsFullSizeInfo->SectorsPerAllocationUnit = DeviceExt->NtfsInfo.SectorsPerCluster;
+    FsFullSizeInfo->BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
+
+    *BufferLength -= sizeof(FILE_FS_FULL_SIZE_INFORMATION);
+
+    return STATUS_SUCCESS;
 }
 
 
@@ -415,7 +441,7 @@ NtfsGetFsDeviceInformation(PDEVICE_OBJECT DeviceObject,
     DPRINT("Required length %lu\n", sizeof(FILE_FS_DEVICE_INFORMATION));
 
     if (*BufferLength < sizeof(FILE_FS_DEVICE_INFORMATION))
-        return STATUS_BUFFER_OVERFLOW;
+        return STATUS_INFO_LENGTH_MISMATCH;
 
     FsDeviceInfo->DeviceType = FILE_DEVICE_DISK;
     FsDeviceInfo->Characteristics = DeviceObject->Characteristics;
@@ -490,13 +516,20 @@ NtfsQueryVolumeInformation(PNTFS_IRP_CONTEXT IrpContext)
                                                 &BufferLength);
             break;
 
+        case FileFsFullSizeInformation:
+            Status = NtfsGetFsFullSizeInformation(DeviceObject,
+                                                  SystemBuffer,
+                                                  &BufferLength);
+            break;
+
         default:
             Status = STATUS_NOT_SUPPORTED;
     }
 
     ExReleaseResourceLite(&DeviceExt->DirResource);
 
-    if (NT_SUCCESS(Status))
+    /* An overflow still filled the fixed part, which the caller gets back */
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
         Irp->IoStatus.Information =
             Stack->Parameters.QueryVolume.Length - BufferLength;
     else
