@@ -2263,17 +2263,31 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
 {
     ULONG BytesWritten;
     NTSTATUS Status = STATUS_SUCCESS;
+    PFILE_RECORD_HEADER WriteImage;
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
 
+    // Stamp the fixup array into a private copy: the caller's record may be
+    // shared, like Vcb->MasterFileTable, and must never hold the on-disk form
+    WriteImage = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (WriteImage == NULL)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(WriteImage, FileRecord, Vcb->NtfsInfo.BytesPerFileRecord);
+
     // Add the fixup array to prepare the data for writing to disk
-    AddFixupArray(Vcb, &FileRecord->Ntfs);
+    AddFixupArray(Vcb, &WriteImage->Ntfs);
+
+    // Keep the caller's update sequence number in step with the disk
+    ((PFIXUP_ARRAY)((ULONG_PTR)FileRecord + FileRecord->Ntfs.UsaOffset))->USN =
+        ((PFIXUP_ARRAY)((ULONG_PTR)WriteImage + WriteImage->Ntfs.UsaOffset))->USN;
 
     // write the file record to the master file table
     Status = WriteAttribute(Vcb,
                             Vcb->MFTContext,
                             MftIndex * Vcb->NtfsInfo.BytesPerFileRecord,
-                            (const PUCHAR)FileRecord,
+                            (const PUCHAR)WriteImage,
                             Vcb->NtfsInfo.BytesPerFileRecord,
                             &BytesWritten,
                             FileRecord);
@@ -2283,8 +2297,7 @@ UpdateFileRecord(PDEVICE_EXTENSION Vcb,
         DPRINT1("UpdateFileRecord failed: %lu written, %lu expected\n", BytesWritten, Vcb->NtfsInfo.BytesPerFileRecord);
     }
 
-    // remove the fixup array (so the file record pointer can still be used)
-    FixupUpdateSequenceArray(Vcb, &FileRecord->Ntfs);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, WriteImage);
 
     return Status;
 }
