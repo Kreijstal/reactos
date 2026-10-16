@@ -988,6 +988,110 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     return STATUS_SUCCESS;
 }
 
+/* The flags of $VOLUME_INFORMATION */
+#define NTFS_VOLUME_FLAG_DIRTY              0x0001
+#define NTFS_VOLUME_FLAG_UPGRADE_ON_MOUNT   0x0004
+
+/**
+* @name NtfsSetVolumeFlags
+*
+* Sets flags in the volume's $VOLUME_INFORMATION, on disk and in the VCB.
+*/
+static
+NTSTATUS
+NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
+                   USHORT Flags)
+{
+    PFILE_RECORD_HEADER VolumeRecord;
+    PNTFS_ATTR_CONTEXT AttrContext;
+    PNTFS_ATTR_RECORD Attribute;
+    PVOLINFO_ATTRIBUTE VolumeInfo;
+    ULONG AttrOffset;
+    NTSTATUS Status;
+
+    VolumeRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (VolumeRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, NTFS_FILE_VOLUME, VolumeRecord);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(DeviceExt, VolumeRecord, AttributeVolumeInformation, L"", 0, &AttrContext, &AttrOffset);
+
+    if (NT_SUCCESS(Status))
+    {
+        /* $VOLUME_INFORMATION is always resident */
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)VolumeRecord + AttrOffset);
+        ASSERT(!Attribute->IsNonResident);
+        VolumeInfo = (PVOLINFO_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
+        VolumeInfo->Flags |= Flags;
+
+        Status = UpdateFileRecord(DeviceExt, NTFS_FILE_VOLUME, VolumeRecord);
+        if (NT_SUCCESS(Status))
+            DeviceExt->NtfsInfo.Flags = VolumeInfo->Flags;
+
+        ReleaseAttributeContext(AttrContext);
+    }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, VolumeRecord);
+
+    return Status;
+}
+
+/**
+* @name NtfsIsVolumeDirty
+*
+* FSCTL_IS_VOLUME_DIRTY: whether chkdsk is due (VOLUME_IS_DIRTY) or the volume is to be
+* upgraded (VOLUME_UPGRADE_SCHEDULED). Only a volume handle can ask.
+*/
+static
+NTSTATUS
+NtfsIsVolumeDirty(PDEVICE_EXTENSION DeviceExt,
+                  PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    PULONG State = Irp->AssociatedIrp.SystemBuffer;
+
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(ULONG))
+        return STATUS_INVALID_PARAMETER;
+
+    *State = 0;
+    if (DeviceExt->NtfsInfo.Flags & NTFS_VOLUME_FLAG_DIRTY)
+        *State |= VOLUME_IS_DIRTY;
+    if (DeviceExt->NtfsInfo.Flags & NTFS_VOLUME_FLAG_UPGRADE_ON_MOUNT)
+        *State |= VOLUME_UPGRADE_SCHEDULED;
+
+    Irp->IoStatus.Information = sizeof(ULONG);
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsMarkVolumeDirty
+*
+* FSCTL_MARK_VOLUME_DIRTY: makes chkdsk run on the next mount. The volume stays writable
+* meanwhile. Only a volume handle can ask.
+*/
+static
+NTSTATUS
+NtfsMarkVolumeDirty(PDEVICE_EXTENSION DeviceExt,
+                    PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+
+    if (!(Fcb->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    return NtfsSetVolumeFlags(DeviceExt, NTFS_VOLUME_FLAG_DIRTY);
+}
+
 static
 NTSTATUS
 NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
@@ -1044,6 +1148,14 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_GET_VOLUME_BITMAP:
             Status = GetVolumeBitmap(DeviceExt, Irp);
+            break;
+
+        case FSCTL_IS_VOLUME_DIRTY:
+            Status = NtfsIsVolumeDirty(DeviceExt, Irp);
+            break;
+
+        case FSCTL_MARK_VOLUME_DIRTY:
+            Status = NtfsMarkVolumeDirty(DeviceExt, Irp);
             break;
 
         default:
