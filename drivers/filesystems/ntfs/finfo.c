@@ -825,6 +825,17 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 
     // set the attribute data length
     Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, NewFileSize);
+
+    /* The range the file grew by reads as zeros */
+    if (NT_SUCCESS(Status) && NewFileSize->QuadPart > CurrentFileSize.QuadPart)
+    {
+        Status = NtfsZeroAttributeRange(DeviceExt,
+                                        DataContext,
+                                        FileRecord,
+                                        CurrentFileSize.QuadPart,
+                                        NewFileSize->QuadPart);
+    }
+
     if (!NT_SUCCESS(Status))
     {
         ReleaseAttributeContext(DataContext);
@@ -879,6 +890,81 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 * All other information classes are TODO.
 *
 */
+/**
+* @name NtfsSetAllocationInformation
+* @implemented
+*
+* FileAllocationInformation: sets how much space a stream holds on disk. Growing it
+* leaves the end of file alone; shrinking it below the end of file truncates the file
+* (MS-FSA 2.1.5.15.1).
+*/
+static
+NTSTATUS
+NtfsSetAllocationInformation(PNTFS_FCB Fcb,
+                             PFILE_OBJECT FileObject,
+                             PDEVICE_EXTENSION DeviceExt,
+                             ULONG IrpFlags,
+                             BOOLEAN CaseSensitive,
+                             PFILE_ALLOCATION_INFORMATION AllocationInfo)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PNTFS_ATTR_CONTEXT DataContext;
+    ULONG AttributeOffset;
+    NTSTATUS Status;
+
+    if (AllocationInfo->AllocationSize.QuadPart < 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if ((Fcb->Flags & FCB_IS_VOLUME) || (IrpFlags & IRP_PAGING_IO))
+        return STATUS_ACCESS_DENIED;
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+        return STATUS_ACCESS_DENIED;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &DataContext, &AttributeOffset);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    if ((ULONGLONG)AllocationInfo->AllocationSize.QuadPart < AttributeDataLength(DataContext->pRecord) &&
+        !MmCanFileBeTruncated(FileObject->SectionObjectPointer, &AllocationInfo->AllocationSize))
+    {
+        Status = STATUS_USER_MAPPED_FILE;
+    }
+    else
+    {
+        Status = NtfsSetAllocationSize(FileObject,
+                                       Fcb,
+                                       DataContext,
+                                       AttributeOffset,
+                                       FileRecord,
+                                       AllocationInfo->AllocationSize.QuadPart);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsUpdateDuplicatedInformation(DeviceExt,
+                                                 FileRecord,
+                                                 Fcb->MFTIndex,
+                                                 NTFS_FILENAME_UPDATE_SIZES,
+                                                 CaseSensitive);
+    }
+
+    ReleaseAttributeContext(DataContext);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
 /**
 * @name NtfsSetBasicInformation
 * @implemented
@@ -1914,10 +2000,21 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             KeLeaveCriticalRegion();
             break;
 
-        /* TODO: Allocation size is not actually the same as file end for NTFS,
-           however, few applications are likely to make the distinction. */
         case FileAllocationInformation:
-            DPRINT1("FIXME: Using hacky method of setting FileAllocationInformation.\n");
+            if (BufferLength < sizeof(FILE_ALLOCATION_INFORMATION))
+            {
+                Status = STATUS_INFO_LENGTH_MISMATCH;
+                break;
+            }
+
+            Status = NtfsSetAllocationInformation(Fcb,
+                                                  FileObject,
+                                                  DeviceExt,
+                                                  Irp->Flags,
+                                                  BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                                  (PFILE_ALLOCATION_INFORMATION)SystemBuffer);
+            break;
+
         case FileEndOfFileInformation:
             EndOfFileInfo = (PFILE_END_OF_FILE_INFORMATION)SystemBuffer;
             Status = NtfsSetEndOfFile(Fcb,
