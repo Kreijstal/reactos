@@ -1344,6 +1344,21 @@ NtfsTrimAllocation(
     _In_ PNTFS_FCB Fcb);
 
 NTSTATUS
+NtfsSetAllocationSize(PFILE_OBJECT FileObject,
+                      PNTFS_FCB Fcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      ULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord,
+                      ULONGLONG AllocationSize);
+
+NTSTATUS
+NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
+                       PNTFS_ATTR_CONTEXT AttrContext,
+                       PFILE_RECORD_HEADER FileRecord,
+                       ULONGLONG Start,
+                       ULONGLONG End);
+
+NTSTATUS
 NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
                  ULONGLONG MftIndex,
                  PCWSTR StreamName);
