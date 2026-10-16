@@ -13,6 +13,7 @@
  */
 
 #include <kmt_test.h>
+#include "NtfsKmt.h"
 
 #define FILE_COUNT       1500
 
@@ -64,59 +65,6 @@ BuildName(
     tail[tailLen] = UNICODE_NULL;
 
     RtlStringCchPrintfW(Path, MAX_PATH, L"%ls\\curs_%ls_%ls.3x.gz", Dir, word, tail);
-}
-
-static
-BOOLEAN
-FindWritableNtfsVolume(
-    _Out_writes_(MAX_PATH) PWCHAR RootPath)
-{
-    NTSTATUS Status;
-    WCHAR letter;
-    WCHAR path[16];
-    UNICODE_STRING name;
-    OBJECT_ATTRIBUTES oa;
-    IO_STATUS_BLOCK iosb;
-    HANDLE handle;
-    UCHAR buffer[sizeof(FILE_FS_ATTRIBUTE_INFORMATION) + 32 * sizeof(WCHAR)];
-    PFILE_FS_ATTRIBUTE_INFORMATION fsAttr = (PFILE_FS_ATTRIBUTE_INFORMATION)buffer;
-
-    for (letter = L'D'; letter <= L'Z'; letter++)
-    {
-        RtlStringCchPrintfW(path, RTL_NUMBER_OF(path), L"\\??\\%c:\\", letter);
-        RtlInitUnicodeString(&name, path);
-        InitializeObjectAttributes(&oa, &name,
-                                   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
-                                   NULL, NULL);
-        Status = ZwOpenFile(&handle,
-                            FILE_LIST_DIRECTORY | SYNCHRONIZE,
-                            &oa, &iosb,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
-        if (!NT_SUCCESS(Status))
-            continue;
-
-        RtlZeroMemory(buffer, sizeof(buffer));
-        Status = ZwQueryVolumeInformationFile(handle, &iosb, fsAttr,
-                                              sizeof(buffer),
-                                              FileFsAttributeInformation);
-        ZwClose(handle);
-        if (!NT_SUCCESS(Status))
-            continue;
-
-        if (fsAttr->FileSystemNameLength == 4 * sizeof(WCHAR) &&
-            fsAttr->FileSystemName[0] == L'N' &&
-            fsAttr->FileSystemName[1] == L'T' &&
-            fsAttr->FileSystemName[2] == L'F' &&
-            fsAttr->FileSystemName[3] == L'S')
-        {
-            RtlStringCchPrintfW(RootPath, MAX_PATH, L"\\??\\%c:\\", letter);
-            trace("Found writable NTFS volume at %c:\n", (CHAR)letter);
-            return TRUE;
-        }
-    }
-
-    return FALSE;
 }
 
 static
@@ -325,7 +273,7 @@ NtfsDirIndexTest(VOID)
     ULONG created = 0, createFail = 0;
     ULONG missing = 0, collisionOk = 0, collisionBad = 0;
 
-    if (!FindWritableNtfsVolume(root))
+    if (!NtfsKmtFindVolume(root, NULL))
     {
         ok(FALSE, "No writable NTFS volume found (attach an NTFS data disk)\n");
         return;
