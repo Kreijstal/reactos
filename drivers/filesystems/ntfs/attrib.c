@@ -190,6 +190,22 @@ AddData(PFILE_RECORD_HEADER FileRecord,
     return STATUS_SUCCESS;
 }
 
+/* A colon starts a stream name (MS-FSA 2.1.5.1), so no file or directory
+ * name ever contains one. */
+BOOLEAN
+NtfsNameHasStreamPart(PCUNICODE_STRING Name)
+{
+    USHORT i;
+
+    for (i = 0; i < Name->Length / sizeof(WCHAR); i++)
+    {
+        if (Name->Buffer[i] == L':')
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
 /**
 * @name AddFileName
 * @implemented
@@ -300,6 +316,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
 
     /* Whatever is left over is the file's own name */
     FilenameNoPath = Current;
+    ASSERT(!NtfsNameHasStreamPart(&FilenameNoPath));
 
     DPRINT("MFT Index of parent: %I64u\n", CurrentMFTIndex);
 

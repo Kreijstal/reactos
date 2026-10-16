@@ -694,6 +694,9 @@ AddIndexRoot(PNTFS_VCB Vcb,
              PCWSTR Name,
              USHORT NameLength);
 
+BOOLEAN
+NtfsNameHasStreamPart(PCUNICODE_STRING Name);
+
 NTSTATUS
 AddFileName(PFILE_RECORD_HEADER FileRecord,
             PNTFS_ATTR_RECORD AttributeAddress,
