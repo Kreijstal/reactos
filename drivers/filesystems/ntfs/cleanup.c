@@ -42,8 +42,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                 BOOLEAN CanWait)
 {
     PNTFS_FCB Fcb;
-    PNTFS_CCB Ccb;
-    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN DeletePending = FALSE;
 
     DPRINT("NtfsCleanupFile(DeviceExt %p, FileObject %p, CanWait %u)\n",
            DeviceExt,
@@ -51,53 +50,17 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
            CanWait);
 
     Fcb = (PNTFS_FCB)(FileObject->FsContext);
-    Ccb = (PNTFS_CCB)(FileObject->FsContext2);
-    if (!Fcb || Ccb == NULL || !BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_COUNTED))
+    if (!Fcb)
         return STATUS_SUCCESS;
-
-    /* DeviceExt->OpenHandleCount is decremented at the end of this function,
-     * not here -- see the comment there. */
-
-    /* Complete and remove any directory-change-notification watches that
-     * were registered through this handle (see NtfsDirectoryControl).  The
-     * Ccb is the same subject context passed to FsRtlNotifyFullChangeDirectory.
-     * Safe to call even when none were registered; matches FastFat/CDFS.  Done
-     * before the MainResource acquire below so it still runs on the
-     * STATUS_PENDING retry path (a second call is a harmless no-op). */
-    if (NtfsFCBIsDirectory(Fcb))
-    {
-        FsRtlNotifyCleanup(DeviceExt->NotifySync, &DeviceExt->NotifyList, Ccb);
-    }
-
-    /* Emit USN_REASON_CLOSE if this volume has an active journal and we
-     * aren't looking at the volume-stream FCB.  Gated so un-journalled
-     * volumes stay on the fast path.  Per-handle CCB-cached reasons
-     * (OR'd into the close record) are a follow-up slice -- for now we
-     * just announce the close itself so the basic read-back contract
-     * holds.  Kreijstal/reactos#33. */
-    if (DeviceExt->UsnJournalFcb != NULL &&
-        !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME) &&
-        !BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME_STREAM))
-    {
-        ULONGLONG FileRef =
-            ((ULONGLONG)Fcb->Entry.DirectoryFileReferenceNumber != 0)
-                ? ((ULONGLONG)Fcb->Entry.DirectoryFileReferenceNumber & NTFS_MFT_MASK)
-                : 0;
-        /* Build the child FileRef: Fcb->MFTIndex is just the index,
-         * combine with the FCB's own sequence number if available via
-         * its parent's $FILE_NAME.DirectoryFileReferenceNumber. */
-        (void)NtfsUsnEmitRecord(DeviceExt,
-                                Fcb->MFTIndex,
-                                FileRef,
-                                USN_REASON_CLOSE,
-                                0,
-                                Fcb->Entry.Name,
-                                Fcb->Entry.NameLength);
-    }
 
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Fcb->OpenHandleCount--;
+
+        if (Fcb->OpenHandleCount != 0)
+        {
+            // Remove share access when handled
+        }
     }
     else
     {
@@ -108,74 +71,92 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         Fcb->OpenHandleCount--;
 
-        /* Commit the implicit timestamp update for a handle that wrote to the
-         * file: Windows stamps LastWriteTime/ChangeTime once at cleanup,
-         * unless the user pinned the times via FileBasicInformation.  Skip a
-         * file that is about to be deleted anyway. */
-        if (BooleanFlagOn(FileObject->Flags, FO_FILE_MODIFIED) &&
-            !BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING))
+        if (Fcb->ShareAccess.OpenCount > 0)
         {
-            LARGE_INTEGER Now;
-            KeQuerySystemTime(&Now);
-            if (!BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_LAST_WRITE))
-                Fcb->Entry.LastWriteTime = Now.QuadPart;
-            if (!BooleanFlagOn(Ccb->Flags, NTFS_CCB_FLAG_USER_SET_CHANGE))
-                Fcb->Entry.ChangeTime = Now.QuadPart;
-            ClearFlag(FileObject->Flags, FO_FILE_MODIFIED);
-            NtfsStampFileTimes(DeviceExt, Fcb);
+            IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
         }
 
-        /* Flush any dirty data from the cache to disk before uninitializing.
-         * This is critical because FsRtlCopyWrite may have put data into the
-         * cache (even for FILE_NO_INTERMEDIATE_BUFFERING opens, due to the
-         * shared cache map from the internal stream file object). Without an
-         * explicit flush, the paging writeback may never complete before the
-         * cache map is torn down. */
-        if (FileObject->SectionObjectPointer->SharedCacheMap)
-        {
-            IO_STATUS_BLOCK FlushIoStatus;
-            CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &FlushIoStatus);
-        }
-
-        DPRINT("NtfsCleanupFile: calling CcUninitializeCacheMap for FCB %p FileSize=%I64d\n", Fcb, Fcb->RFCB.FileSize.QuadPart);
-        CcUninitializeCacheMap(FileObject, &Fcb->RFCB.FileSize, NULL);
-        DPRINT("NtfsCleanupFile: CcUninitializeCacheMap returned\n");
-
-        /* Drop this file object's contribution to the FCB's share access.
-         * IoRemoveShareAccess decrements the relevant Readers/Writers/
-         * Deleters counts that IoSetShareAccess/IoUpdateShareAccess
-         * established at create time, allowing later opens with otherwise
-         * incompatible share modes once all current handles have been
-         * cleaned up. */
-        IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
-
-        /* Delete a delete-pending file once its last handle is cleaned up.
-         * We just flushed (CcFlushCache) and tore down this file object's cache
-         * map (CcUninitializeCacheMap) above, so the data stream is consistent;
-         * the data section / shared cache map pointers can still linger because
-         * MM releases them lazily, and waiting for them to reach NULL means
-         * FILE_DELETE_ON_CLOSE (and a deferred FileDispositionInformation
-         * delete) essentially never fire after any cached I/O.  Only a live
-         * image section must block the delete - removing the record out from
-         * under a running mapped image would be unsafe.  This matches the
-         * unconditional delete the FileDispositionInformation path performs. */
+        /* A file marked for deletion goes on the last handle. Truncate it first, so the cache
+         * manager drops its pages while there are still clusters to write them back to. */
         if (Fcb->OpenHandleCount == 0 &&
-            BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
-            (Fcb->SectionObjectPointers == NULL ||
-             Fcb->SectionObjectPointers->ImageSectionObject == NULL))
+            BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING))
         {
-            /* A delete on an alternate-data-stream handle removes just that
-             * named $DATA attribute; the base file and its other streams
-             * survive (Windows semantics).  Only a plain (default-stream)
-             * handle deletes the file record itself. */
-            if (Fcb->Stream[0] != UNICODE_NULL)
-                Status = NtfsDeleteStream(DeviceExt, Fcb);
+            DeletePending = TRUE;
+
+            if (!NtfsFCBIsDirectory(Fcb))
+            {
+                Fcb->RFCB.FileSize.QuadPart = 0;
+                Fcb->RFCB.ValidDataLength.QuadPart = 0;
+                CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+            }
+        }
+
+        /* Give back what writes reserved past the end of the file */
+        if (Fcb->OpenHandleCount == 0 &&
+            !DeletePending &&
+            !NtfsFCBIsDirectory(Fcb) &&
+            !(DeviceExt->Flags & VCB_VOLUME_DISMOUNTED) &&
+            Fcb->RFCB.AllocationSize.QuadPart > (LONGLONG)ROUND_UP(Fcb->RFCB.FileSize.QuadPart, DeviceExt->NtfsInfo.BytesPerCluster))
+        {
+            NTSTATUS Status;
+
+            Status = NtfsTrimAllocation(Fcb);
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("Couldn't trim the allocation of '%wS' (Status %lx)\n", Fcb->ObjectName, Status);
+            }
             else
-                Status = NtfsDeleteFileRecord(DeviceExt, Fcb, NULL, 0, FALSE);
+            {
+                CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+            }
+        }
+
+        CcUninitializeCacheMap(FileObject, &Fcb->RFCB.FileSize, NULL);
+
+        /* Only once the cache map is gone. Freeing the record while a section still refers to
+         * it faults Mm on the next page-in. */
+        if (DeletePending)
+        {
+            NTSTATUS Status;
+
+            MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForDelete);
+
+            /* Something may have been created in the directory since the delete
+             * was requested; freeing it now would orphan that child */
+            Status = STATUS_SUCCESS;
+            if (NtfsFCBIsDirectory(Fcb))
+            {
+                BOOLEAN Empty;
+
+                KeEnterCriticalRegion();
+                ExAcquireResourceSharedLite(&DeviceExt->IndexResource, TRUE);
+                Status = NtfsIsDirectoryEmpty(DeviceExt, Fcb->MFTIndex, &Empty);
+                ExReleaseResourceLite(&DeviceExt->IndexResource);
+                KeLeaveCriticalRegion();
+
+                if (NT_SUCCESS(Status) && !Empty)
+                    Status = STATUS_DIRECTORY_NOT_EMPTY;
+            }
+
             if (NT_SUCCESS(Status))
-                ClearFlag(Fcb->Flags, FCB_DELETE_PENDING);
-            else
-                DPRINT1("NtfsCleanupFile: delete of '%S' failed with 0x%lx\n", Fcb->PathName, Status);
+                Status = NtfsDeleteFileRecord(DeviceExt, Fcb->MFTIndex, FALSE);
+
+            /* A cached FCB for a path that no longer exists would make it look present */
+            if (NT_SUCCESS(Status))
+                NtfsRemoveFCBFromTable(DeviceExt, Fcb);
+
+            if (!NT_SUCCESS(Status))
+            {
+                DPRINT1("ERROR: Failed to delete '%wS' (MFT record %I64u), Status %lx\n",
+                        Fcb->ObjectName, Fcb->MFTIndex, Status);
+            }
+
+            Fcb->Flags &= ~FCB_DELETE_PENDING;
+        }
+
+        if (Fcb->OpenHandleCount != 0)
+        {
+            // Remove share access when handled
         }
 
         FileObject->Flags |= FO_CLEANUP_COMPLETE;
@@ -183,19 +164,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         ExReleaseResourceLite(&Fcb->MainResource);
     }
 
-    /* Drop the device-wide handle count only once the cleanup has actually
-     * committed.  The MainResource acquire above is the single step that can
-     * fail and requeue this IRP (STATUS_PENDING -> NtfsMarkIrpContextForQueue),
-     * and NTFS_CCB_FLAG_COUNTED is what gates re-entry, so a decrement placed
-     * before it ran twice for one handle: once on the attempt that bailed out
-     * and again on the retry.  That drove the counter below the true number of
-     * open handles, tripping the ASSERT below or wrapping the unsigned value.
-     * Clearing the flag as the counters drop keeps the accounting idempotent. */
-    ASSERT(DeviceExt->OpenHandleCount > 0);
-    DeviceExt->OpenHandleCount--;
-    ClearFlag(Ccb->Flags, NTFS_CCB_FLAG_COUNTED);
-
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -226,10 +195,8 @@ NtfsCleanup(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     Status = NtfsCleanupFile(DeviceExtension, FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
-    DPRINT("NtfsCleanup: NtfsCleanupFile returned 0x%lx\n", Status);
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
-    DPRINT("NtfsCleanup: DirResource released\n");
 
     if (Status == STATUS_PENDING)
     {
