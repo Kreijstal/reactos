@@ -391,13 +391,6 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     FileInformationClass = Stack->Parameters.QueryDirectory.FileInformationClass;
     FileIndex = Stack->Parameters.QueryDirectory.FileIndex;
 
-    if (NtfsFCBIsCompressed(Fcb))
-    {
-        DPRINT1("Compressed directory!\n");
-        UNIMPLEMENTED;
-        return STATUS_NOT_IMPLEMENTED;
-    }
-
     if (!ExAcquireResourceSharedLite(&Fcb->MainResource,
                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {

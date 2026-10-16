@@ -190,6 +190,20 @@ NtfsGetCompressionInformation(PNTFS_FCB Fcb,
         {
             Info->CompressedFileSize.QuadPart = AttributeDataLength(Context->pRecord);
         }
+
+        /* LZNT1 in 64 KiB units of 4 KiB chunks */
+        if (NtfsAttributeIsCompressed(Context))
+        {
+            ULONG ClusterShift = 0;
+
+            while ((1UL << ClusterShift) < Vcb->NtfsInfo.BytesPerCluster)
+                ClusterShift++;
+
+            Info->CompressionFormat = COMPRESSION_FORMAT_LZNT1;
+            Info->CompressionUnitShift = (UCHAR)(ClusterShift + Context->pRecord->NonResident.CompressionUnit);
+            Info->ChunkShift = 12;
+            Info->ClusterShift = (UCHAR)ClusterShift;
+        }
         ReleaseAttributeContext(Context);
     }
 
@@ -1067,11 +1081,12 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     /* The range the file grew by reads as zeros */
     if (NT_SUCCESS(Status) && NewFileSize->QuadPart > CurrentFileSize.QuadPart)
     {
-        Status = NtfsZeroAttributeRange(DeviceExt,
-                                        DataContext,
-                                        Holder,
-                                        CurrentFileSize.QuadPart,
-                                        NewFileSize->QuadPart);
+        Status = NtfsZeroStreamRange(DeviceExt,
+                                     DataContext,
+                                     AttributeOffset,
+                                     Holder,
+                                     CurrentFileSize.QuadPart,
+                                     NewFileSize->QuadPart);
     }
 
     if (!NT_SUCCESS(Status))
