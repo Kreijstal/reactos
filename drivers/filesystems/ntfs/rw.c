@@ -236,14 +236,9 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     if ((ReadOffset % DeviceExt->NtfsInfo.BytesPerSector) != 0 || (ToRead % DeviceExt->NtfsInfo.BytesPerSector) != 0)
     {
         RealReadOffset = ROUND_DOWN(ReadOffset, DeviceExt->NtfsInfo.BytesPerSector);
-        RealLength = ROUND_UP(ToRead, DeviceExt->NtfsInfo.BytesPerSector);
-        /* do we need to extend RealLength by one sector? */
-        if (RealLength + RealReadOffset < ReadOffset + Length)
-        {
-            if (RealReadOffset + RealLength + DeviceExt->NtfsInfo.BytesPerSector <= AttributeAllocatedLength(DataContext->pRecord))
-                RealLength += DeviceExt->NtfsInfo.BytesPerSector;
-        }
-
+        /* The aligned window must cover all of [ReadOffset, ReadOffset + ToRead),
+         * including the sectors the unaligned start pulls in */
+        RealLength = ROUND_UP(ReadOffset + ToRead, DeviceExt->NtfsInfo.BytesPerSector) - RealReadOffset;
 
         ReadBuffer = ExAllocatePoolWithTag(NonPagedPool, RealLength, TAG_NTFS);
         if (ReadBuffer == NULL)
@@ -287,6 +282,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     if (AllocatedBuffer)
     {
+        ASSERT(RealLengthRead >= (ReadOffset - RealReadOffset) + ToRead);
         RtlCopyMemory(Buffer, ReadBuffer + (ReadOffset - RealReadOffset), ToRead);
     }
 
