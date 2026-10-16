@@ -2069,6 +2069,27 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
         }
         _SEH2_END;
     }
+    else if (FileName)
+    {
+        /* A kernel-mode caller's name needs no probing, but the file system
+         * still has to get it: the IRP carries its own copy either way */
+        AuxBuffer = ExAllocatePoolWithTag(NonPagedPool,
+                                          FileName->Length +
+                                          sizeof(UNICODE_STRING),
+                                          TAG_IOBUF);
+        if (!AuxBuffer) return STATUS_INSUFFICIENT_RESOURCES;
+        RtlCopyMemory((PVOID)((ULONG_PTR)AuxBuffer +
+                              sizeof(UNICODE_STRING)),
+                      FileName->Buffer,
+                      FileName->Length);
+
+        /* Setup the search pattern */
+        SearchPattern = (PUNICODE_STRING)AuxBuffer;
+        SearchPattern->Buffer = (PWCHAR)((ULONG_PTR)AuxBuffer +
+                                         sizeof(UNICODE_STRING));
+        SearchPattern->Length = FileName->Length;
+        SearchPattern->MaximumLength = FileName->Length;
+    }
 
     /* Check input parameters */
 
@@ -2077,7 +2098,10 @@ NtQueryDirectoryFile(IN HANDLE FileHandle,
 #define CHECK_LENGTH(class, struct)                      \
         case class:                                 \
             if (Length < sizeof(struct))                         \
+            {                                       \
+                if (AuxBuffer) ExFreePoolWithTag(AuxBuffer, TAG_IOBUF); \
                 return STATUS_INFO_LENGTH_MISMATCH; \
+            }                                       \
             break
         CHECK_LENGTH(FileDirectoryInformation, FILE_DIRECTORY_INFORMATION);
         CHECK_LENGTH(FileFullDirectoryInformation, FILE_FULL_DIR_INFORMATION);
