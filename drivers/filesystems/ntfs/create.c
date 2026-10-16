@@ -507,6 +507,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     NTSTATUS Status;
     UNICODE_STRING FullPath;
     PIRP Irp = IrpContext->Irp;
+    ULONG_PTR Information = FILE_OPENED;
 
     DPRINT("NtfsCreateFile(%p, %p) called\n", DeviceObject, IrpContext);
 
@@ -535,8 +536,6 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     /* The I/O manager opening a rename's destination directory */
     if (Stack->Flags & SL_OPEN_TARGET_DIRECTORY)
     {
-        ULONG_PTR Information;
-
         if (RequestedOptions & FILE_OPEN_BY_FILE_ID)
             return STATUS_INVALID_PARAMETER;
 
@@ -733,14 +732,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 return Status;
             }
 
-            if (RequestedDisposition == FILE_SUPERSEDE)
-            {
-                Irp->IoStatus.Information = FILE_SUPERSEDED;
-            }
-            else
-            {
-                Irp->IoStatus.Information = FILE_OVERWRITTEN;
-            }
+            Information = (RequestedDisposition == FILE_SUPERSEDE) ? FILE_SUPERSEDED : FILE_OVERWRITTEN;
         }
     }
     else
@@ -810,11 +802,8 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         }
     }
 
-    /*
-     * If the directory containing the file to open doesn't exist then
-     * fail immediately
-     */
-    Irp->IoStatus.Information = (NT_SUCCESS(Status)) ? FILE_OPENED : 0;
+    /* Report what happened to an existing file: opened, overwritten or superseded */
+    Irp->IoStatus.Information = (NT_SUCCESS(Status)) ? Information : 0;
 
     return Status;
 }
