@@ -355,7 +355,10 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
         return STATUS_BUFFER_OVERFLOW;
 
     FsAttributeInfo->FileSystemAttributes =
-        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK | FILE_READ_ONLY_VOLUME;
+        FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK;
+    /* Writes are refused everywhere unless write support was enabled */
+    if (!NtfsGlobalData->EnableWriteSupport)
+        FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
     FsAttributeInfo->MaximumComponentNameLength = 255;
     FsAttributeInfo->FileSystemNameLength = 8;
 
