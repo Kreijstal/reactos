@@ -60,286 +60,143 @@ NtfsGetFileSize(PDEVICE_EXTENSION DeviceExt,
 }
 
 
-#define ULONG_ROUND_UP(x)   ROUND_UP((x), (sizeof(ULONG)))
-
-
-static NTSTATUS
-NtfsGetNamesInformation(PDEVICE_EXTENSION DeviceExt,
-                        PFILE_RECORD_HEADER FileRecord,
-                        ULONGLONG MFTIndex,
-                        PFILE_NAMES_INFORMATION Info,
-                        ULONG BufferLength,
-                        PULONG Written,
-                        BOOLEAN First,
-                        PCUNICODE_STRING OverrideName)
+/**
+* @name NtfsDirEntryNameOffset
+*
+* Offset of FileName in an entry of a directory information class, or 0 for a class
+* this driver doesn't enumerate.
+*/
+static
+ULONG
+NtfsDirEntryNameOffset(
+    _In_ FILE_INFORMATION_CLASS FileInformationClass)
 {
-    ULONG Length;
-    NTSTATUS Status;
-    ULONG BytesToCopy = 0;
-    PFILENAME_ATTRIBUTE FileName;
-    PCWSTR NameBuffer;
-
-    DPRINT("NtfsGetNamesInformation() called\n");
-
-    *Written = 0;
-    Status = STATUS_BUFFER_OVERFLOW;
-    if (FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName) > BufferLength)
+    switch (FileInformationClass)
     {
-        return Status;
+        case FileNamesInformation:
+            return FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName);
+        case FileDirectoryInformation:
+            return FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName);
+        case FileFullDirectoryInformation:
+            return FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName);
+        case FileBothDirectoryInformation:
+            return FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName);
+        case FileIdFullDirectoryInformation:
+            return FIELD_OFFSET(FILE_ID_FULL_DIR_INFORMATION, FileName);
+        case FileIdBothDirectoryInformation:
+            return FIELD_OFFSET(FILE_ID_BOTH_DIR_INFORMATION, FileName);
+        default:
+            return 0;
     }
-
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
-    if (FileName == NULL)
-    {
-        DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
-        NtfsDumpFileAttributes(DeviceExt, FileRecord);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    if (OverrideName != NULL)
-    {
-        NameBuffer = OverrideName->Buffer;
-        Length = OverrideName->Length;
-    }
-    else
-    {
-        NameBuffer = FileName->Name;
-        Length = FileName->NameLength * sizeof (WCHAR);
-    }
-
-    if (First || (BufferLength >= FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName) + Length))
-    {
-        Info->FileNameLength = Length;
-
-        *Written = FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName);
-        Info->NextEntryOffset = 0;
-        if (BufferLength > FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName))
-        {
-            BytesToCopy = min(Length, BufferLength - FIELD_OFFSET(FILE_NAMES_INFORMATION, FileName));
-            RtlCopyMemory(Info->FileName, NameBuffer, BytesToCopy);
-            *Written += BytesToCopy;
-
-            if (BytesToCopy == Length)
-            {
-                Info->NextEntryOffset = ULONG_ROUND_UP(sizeof(FILE_NAMES_INFORMATION) +
-                                                       BytesToCopy);
-                Status = STATUS_SUCCESS;
-            }
-        }
-    }
-
-    return Status;
 }
 
-
-static NTSTATUS
-NtfsGetDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
-                            PFILE_RECORD_HEADER FileRecord,
-                            ULONGLONG MFTIndex,
-                            PFILE_DIRECTORY_INFORMATION Info,
-                            ULONG BufferLength,
-                            PULONG Written,
-                            BOOLEAN First,
-                        PCUNICODE_STRING OverrideName)
+/**
+* @name NtfsFillDirEntryFixedPart
+*
+* Fills what every class but FileNamesInformation reports about a file, all of it laid
+* out the same way FILE_DIRECTORY_INFORMATION lays it out, plus the class's own fields.
+*/
+static
+VOID
+NtfsFillDirEntryFixedPart(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass,
+    _In_ PFILE_RECORD_HEADER FileRecord,
+    _In_ ULONGLONG MFTIndex,
+    _In_ PFILENAME_ATTRIBUTE FileName,
+    _In_ BOOLEAN ReportShortName,
+    _Out_ PVOID Buffer)
 {
-    ULONG Length;
-    NTSTATUS Status;
-    ULONG BytesToCopy = 0;
-    PFILENAME_ATTRIBUTE FileName;
-    PCWSTR NameBuffer;
+    PFILE_DIRECTORY_INFORMATION Info = Buffer;
     PSTANDARD_INFORMATION StdInfo;
-
-    DPRINT("NtfsGetDirectoryInformation() called\n");
-
-    *Written = 0;
-    Status = STATUS_BUFFER_OVERFLOW;
-    if (FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName) > BufferLength)
-    {
-        return Status;
-    }
-
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
-    if (FileName == NULL)
-    {
-        DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
-        NtfsDumpFileAttributes(DeviceExt, FileRecord);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
+    PFILENAME_ATTRIBUTE ShortName;
+    LARGE_INTEGER FileId;
 
     StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
     ASSERT(StdInfo != NULL);
 
-    if (OverrideName != NULL)
-    {
-        NameBuffer = OverrideName->Buffer;
-        Length = OverrideName->Length;
-    }
-    else
-    {
-        NameBuffer = FileName->Name;
-        Length = FileName->NameLength * sizeof (WCHAR);
-    }
+    Info->CreationTime.QuadPart = StdInfo->CreationTime;
+    Info->LastAccessTime.QuadPart = StdInfo->LastAccessTime;
+    Info->LastWriteTime.QuadPart = StdInfo->LastWriteTime;
+    Info->ChangeTime.QuadPart = StdInfo->ChangeTime;
+    NtfsFileFlagsToAttributes(FileName->FileAttributes | StdInfo->FileAttribute, &Info->FileAttributes);
+    Info->EndOfFile.QuadPart = NtfsGetFileSize(DeviceExt, FileRecord, L"", 0, (PULONGLONG)&Info->AllocationSize.QuadPart);
 
-    if (First || (BufferLength >= FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName) + Length))
-    {
-        Info->FileNameLength = Length;
+    /* The file reference, as FileInternalInformation reports it */
+    FileId.QuadPart = MFTIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
 
-        *Written = FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName);
-        Info->NextEntryOffset = 0;
-        if (BufferLength > FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName))
+    /* EaSize stays 0: there are no extended attributes. A short name is only reported
+     * for a real entry, not for "." or "..". */
+    ShortName = ReportShortName ? GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS) : NULL;
+    if (ShortName != NULL && ShortName->NameType == NTFS_FILE_NAME_DOS)
+    {
+        PFILE_BOTH_DIR_INFORMATION Both = Buffer;
+
+        ASSERT(ShortName->NameLength <= RTL_NUMBER_OF(Both->ShortName));
+        if (FileInformationClass == FileBothDirectoryInformation ||
+            FileInformationClass == FileIdBothDirectoryInformation)
         {
-            BytesToCopy = min(Length, BufferLength - FIELD_OFFSET(FILE_DIRECTORY_INFORMATION, FileName));
-            RtlCopyMemory(Info->FileName, NameBuffer, BytesToCopy);
-            *Written += BytesToCopy;
-
-            if (BytesToCopy == Length)
-            {
-                Info->NextEntryOffset = ULONG_ROUND_UP(sizeof(FILE_DIRECTORY_INFORMATION) +
-                                                       BytesToCopy);
-                Status = STATUS_SUCCESS;
-            }
+            Both->ShortNameLength = ShortName->NameLength * sizeof(WCHAR);
+            RtlCopyMemory(Both->ShortName, ShortName->Name, Both->ShortNameLength);
         }
-
-        Info->CreationTime.QuadPart = FileName->CreationTime;
-        Info->LastAccessTime.QuadPart = FileName->LastAccessTime;
-        Info->LastWriteTime.QuadPart = FileName->LastWriteTime;
-        Info->ChangeTime.QuadPart = FileName->ChangeTime;
-
-        /* Convert file flags */
-        NtfsFileFlagsToAttributes(FileName->FileAttributes | StdInfo->FileAttribute, &Info->FileAttributes);
-
-        Info->EndOfFile.QuadPart = NtfsGetFileSize(DeviceExt, FileRecord, L"", 0, (PULONGLONG)&Info->AllocationSize.QuadPart);
-
-        Info->FileIndex = MFTIndex;
     }
 
-    return Status;
+    if (FileInformationClass == FileIdFullDirectoryInformation)
+        ((PFILE_ID_FULL_DIR_INFORMATION)Buffer)->FileId = FileId;
+    else if (FileInformationClass == FileIdBothDirectoryInformation)
+        ((PFILE_ID_BOTH_DIR_INFORMATION)Buffer)->FileId = FileId;
 }
 
-
+/**
+* @name NtfsGetDirEntryInformation
+*
+* Describes one file as an entry of a directory information class.
+*
+* @param OverrideName
+* The name to report ("." or ".."), or NULL to report the file's own.
+*
+* @param Written
+* Receives the bytes of Buffer the entry takes, name included.
+*
+* @param First
+* TRUE for the first entry of a query, which is returned cut short if the buffer can't
+* hold its name; later entries that don't fit are left for the next query.
+*
+* @return
+* STATUS_SUCCESS, STATUS_BUFFER_OVERFLOW if the entry doesn't fit, or
+* STATUS_INVALID_INFO_CLASS.
+*/
 static NTSTATUS
-NtfsGetFullDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
-                                PFILE_RECORD_HEADER FileRecord,
-                                ULONGLONG MFTIndex,
-                                PFILE_FULL_DIRECTORY_INFORMATION Info,
-                                ULONG BufferLength,
-                                PULONG Written,
-                                BOOLEAN First,
-                        PCUNICODE_STRING OverrideName)
+NtfsGetDirEntryInformation(PDEVICE_EXTENSION DeviceExt,
+                           FILE_INFORMATION_CLASS FileInformationClass,
+                           PFILE_RECORD_HEADER FileRecord,
+                           ULONGLONG MFTIndex,
+                           PCUNICODE_STRING OverrideName,
+                           PVOID Buffer,
+                           ULONG BufferLength,
+                           PULONG Written,
+                           BOOLEAN First)
 {
-    ULONG Length;
-    NTSTATUS Status;
-    ULONG BytesToCopy = 0;
+    ULONG NameOffset = NtfsDirEntryNameOffset(FileInformationClass);
     PFILENAME_ATTRIBUTE FileName;
     PCWSTR NameBuffer;
-    PSTANDARD_INFORMATION StdInfo;
-
-    DPRINT("NtfsGetFullDirectoryInformation() called\n");
-
-    *Written = 0;
-    Status = STATUS_BUFFER_OVERFLOW;
-    if (FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName) > BufferLength)
-    {
-        return Status;
-    }
-
-    FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
-    if (FileName == NULL)
-    {
-        DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
-        NtfsDumpFileAttributes(DeviceExt, FileRecord);
-        return STATUS_OBJECT_NAME_NOT_FOUND;
-    }
-
-    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
-    ASSERT(StdInfo != NULL);
-
-    if (OverrideName != NULL)
-    {
-        NameBuffer = OverrideName->Buffer;
-        Length = OverrideName->Length;
-    }
-    else
-    {
-        NameBuffer = FileName->Name;
-        Length = FileName->NameLength * sizeof (WCHAR);
-    }
-
-    if (First || (BufferLength >= FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName) + Length))
-    {
-        Info->FileNameLength = Length;
-
-        *Written = FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName);
-        Info->NextEntryOffset = 0;
-        if (BufferLength > FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName))
-        {
-            BytesToCopy = min(Length, BufferLength - FIELD_OFFSET(FILE_FULL_DIR_INFORMATION, FileName));
-            RtlCopyMemory(Info->FileName, NameBuffer, BytesToCopy);
-            *Written += BytesToCopy;
-
-            if (BytesToCopy == Length)
-            {
-                Info->NextEntryOffset = ULONG_ROUND_UP(sizeof(FILE_FULL_DIR_INFORMATION) +
-                                                       BytesToCopy);
-                Status = STATUS_SUCCESS;
-            }
-        }
-
-        Info->CreationTime.QuadPart = FileName->CreationTime;
-        Info->LastAccessTime.QuadPart = FileName->LastAccessTime;
-        Info->LastWriteTime.QuadPart = FileName->LastWriteTime;
-        Info->ChangeTime.QuadPart = FileName->ChangeTime;
-
-        /* Convert file flags */
-        NtfsFileFlagsToAttributes(FileName->FileAttributes | StdInfo->FileAttribute, &Info->FileAttributes);
-
-        Info->EndOfFile.QuadPart = NtfsGetFileSize(DeviceExt, FileRecord, L"", 0, (PULONGLONG)&Info->AllocationSize.QuadPart);
-
-        Info->FileIndex = MFTIndex;
-        Info->EaSize = 0;
-    }
-
-    return Status;
-}
-
-
-static NTSTATUS
-NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
-                                PFILE_RECORD_HEADER FileRecord,
-                                ULONGLONG MFTIndex,
-                                PFILE_BOTH_DIR_INFORMATION Info,
-                                ULONG BufferLength,
-                                PULONG Written,
-                                BOOLEAN First,
-                        PCUNICODE_STRING OverrideName)
-{
     ULONG Length;
-    NTSTATUS Status;
-    ULONG BytesToCopy = 0;
-    PFILENAME_ATTRIBUTE FileName, ShortFileName;
-    PCWSTR NameBuffer;
-    PSTANDARD_INFORMATION StdInfo;
-
-    DPRINT("NtfsGetBothDirectoryInformation() called\n");
+    ULONG BytesToCopy;
 
     *Written = 0;
-    Status = STATUS_BUFFER_OVERFLOW;
-    if (FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName) > BufferLength)
-    {
-        return Status;
-    }
+
+    if (NameOffset == 0)
+        return STATUS_INVALID_INFO_CLASS;
+
+    if (BufferLength < NameOffset)
+        return STATUS_BUFFER_OVERFLOW;
 
     FileName = GetBestFileNameFromRecord(DeviceExt, FileRecord);
     if (FileName == NULL)
     {
         DPRINT1("No name information for file ID: %#I64x\n", MFTIndex);
-        NtfsDumpFileAttributes(DeviceExt, FileRecord);
         return STATUS_OBJECT_NAME_NOT_FOUND;
     }
-    ShortFileName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
-
-    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
-    ASSERT(StdInfo != NULL);
 
     if (OverrideName != NULL)
     {
@@ -349,60 +206,37 @@ NtfsGetBothDirectoryInformation(PDEVICE_EXTENSION DeviceExt,
     else
     {
         NameBuffer = FileName->Name;
-        Length = FileName->NameLength * sizeof (WCHAR);
+        Length = FileName->NameLength * sizeof(WCHAR);
     }
 
-    if (First || (BufferLength >= FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName) + Length))
+    if (!First && BufferLength < NameOffset + Length)
+        return STATUS_BUFFER_OVERFLOW;
+
+    RtlZeroMemory(Buffer, NameOffset);
+
+    if (FileInformationClass == FileNamesInformation)
     {
-        Info->FileNameLength = Length;
-
-        *Written = FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName);
-        Info->NextEntryOffset = 0;
-        if (BufferLength > FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName))
-        {
-            BytesToCopy = min(Length, BufferLength - FIELD_OFFSET(FILE_BOTH_DIR_INFORMATION, FileName));
-            RtlCopyMemory(Info->FileName, NameBuffer, BytesToCopy);
-            *Written += BytesToCopy;
-
-            if (BytesToCopy == Length)
-            {
-                Info->NextEntryOffset = ULONG_ROUND_UP(sizeof(FILE_BOTH_DIR_INFORMATION) +
-                                                       BytesToCopy);
-                Status = STATUS_SUCCESS;
-            }
-        }
-
-        if (ShortFileName && OverrideName == NULL)
-        {
-            /* Should we upcase the filename? */
-            ASSERT(ShortFileName->NameLength <= ARRAYSIZE(Info->ShortName));
-            Info->ShortNameLength = ShortFileName->NameLength * sizeof(WCHAR);
-            RtlCopyMemory(Info->ShortName, ShortFileName->Name, Info->ShortNameLength);
-        }
-        else
-        {
-            Info->ShortName[0] = 0;
-            Info->ShortNameLength = 0;
-        }
-
-        Info->CreationTime.QuadPart = FileName->CreationTime;
-        Info->LastAccessTime.QuadPart = FileName->LastAccessTime;
-        Info->LastWriteTime.QuadPart = FileName->LastWriteTime;
-        Info->ChangeTime.QuadPart = FileName->ChangeTime;
-
-        /* Convert file flags */
-        NtfsFileFlagsToAttributes(FileName->FileAttributes | StdInfo->FileAttribute, &Info->FileAttributes);
-
-        Info->EndOfFile.QuadPart = NtfsGetFileSize(DeviceExt, FileRecord, L"", 0, (PULONGLONG)&Info->AllocationSize.QuadPart);
-
-        Info->FileIndex = MFTIndex;
-        Info->EaSize = 0;
+        ((PFILE_NAMES_INFORMATION)Buffer)->FileNameLength = Length;
+    }
+    else
+    {
+        NtfsFillDirEntryFixedPart(DeviceExt, FileInformationClass, FileRecord, MFTIndex,
+                                  FileName, OverrideName == NULL, Buffer);
+        ((PFILE_DIRECTORY_INFORMATION)Buffer)->FileNameLength = Length;
     }
 
-    return Status;
+    BytesToCopy = min(Length, BufferLength - NameOffset);
+    RtlCopyMemory((PUCHAR)Buffer + NameOffset, NameBuffer, BytesToCopy);
+    *Written = NameOffset + BytesToCopy;
+
+    if (BytesToCopy < Length)
+        return STATUS_BUFFER_OVERFLOW;
+
+    /* Entries start on 8-byte boundaries, as the classes hold LARGE_INTEGERs */
+    ((PFILE_NAMES_INFORMATION)Buffer)->NextEntryOffset = ALIGN_UP_BY(NameOffset + Length, sizeof(LONGLONG));
+
+    return STATUS_SUCCESS;
 }
-
-
 
 /*
  * NTFS keeps no "." or ".." entries in its indices, so enumeration has to make
@@ -438,44 +272,6 @@ NtfsDotNameMatches(PUNICODE_STRING Pattern,
     RtlFreeUnicodeString(&Upcased);
 
     return Ret;
-}
-
-static NTSTATUS
-NtfsGetDirEntryInformation(PDEVICE_EXTENSION DeviceExt,
-                           FILE_INFORMATION_CLASS FileInformationClass,
-                           PFILE_RECORD_HEADER FileRecord,
-                           ULONGLONG MFTIndex,
-                           PCUNICODE_STRING OverrideName,
-                           PVOID Buffer,
-                           ULONG BufferLength,
-                           PULONG Written,
-                           BOOLEAN First)
-{
-    switch (FileInformationClass)
-    {
-        case FileNamesInformation:
-            return NtfsGetNamesInformation(DeviceExt, FileRecord, MFTIndex,
-                                           (PFILE_NAMES_INFORMATION)Buffer,
-                                           BufferLength, Written, First, OverrideName);
-
-        case FileDirectoryInformation:
-            return NtfsGetDirectoryInformation(DeviceExt, FileRecord, MFTIndex,
-                                               (PFILE_DIRECTORY_INFORMATION)Buffer,
-                                               BufferLength, Written, First, OverrideName);
-
-        case FileFullDirectoryInformation:
-            return NtfsGetFullDirectoryInformation(DeviceExt, FileRecord, MFTIndex,
-                                                   (PFILE_FULL_DIRECTORY_INFORMATION)Buffer,
-                                                   BufferLength, Written, First, OverrideName);
-
-        case FileBothDirectoryInformation:
-            return NtfsGetBothDirectoryInformation(DeviceExt, FileRecord, MFTIndex,
-                                                   (PFILE_BOTH_DIR_INFORMATION)Buffer,
-                                                   BufferLength, Written, First, OverrideName);
-
-        default:
-            return STATUS_INVALID_INFO_CLASS;
-    }
 }
 
 /* Describes MFTIndex under the given name. "." reports the directory itself,
@@ -546,7 +342,8 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
     PDEVICE_EXTENSION DeviceExtension;
-    LONG BufferLength = 0;
+    ULONG BufferLength = 0;
+    ULONG Offset = 0, LastOffset = 0, LastWritten = 0;
     PUNICODE_STRING SearchPattern = NULL;
     FILE_INFORMATION_CLASS FileInformationClass;
     ULONG FileIndex = 0;
@@ -657,8 +454,10 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     Written = 0;
-    while (Status == STATUS_SUCCESS && BufferLength > 0)
+    while (Status == STATUS_SUCCESS && Offset < BufferLength)
     {
+        PUCHAR Entry = Buffer + Offset;
+
         if (!BooleanFlagOn(Ccb->Flags, CCB_RETURNED_DOT) ||
             !BooleanFlagOn(Ccb->Flags, CCB_RETURNED_DOTDOT))
         {
@@ -679,7 +478,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                               : Fcb->MFTIndex;
 
             Status = NtfsGetDotEntry(DeviceExtension, DotIndex, &DotName,
-                                     FileInformationClass, Buffer, BufferLength,
+                                     FileInformationClass, Entry, BufferLength - Offset,
                                      &Written, Buffer0 == NULL);
 
             /* The entry did not fit. Leave the flag alone so the next call,
@@ -697,30 +496,22 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                 Status = STATUS_SUCCESS;
                 continue;
             }
-
-            Buffer0 = (PFILE_NAMES_INFORMATION)Buffer;
-            Buffer0->FileIndex = FileIndex++;
-            BufferLength -= Buffer0->NextEntryOffset;
-
-            if (Stack->Flags & SL_RETURN_SINGLE_ENTRY)
+        }
+        else
+        {
+            Status = NtfsFindFileAt(DeviceExtension,
+                                    &Pattern,
+                                    &Ccb->Entry,
+                                    &FileRecord,
+                                    &MFTRecord,
+                                    Fcb->MFTIndex,
+                                    BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+            if (!NT_SUCCESS(Status))
             {
+                Status = (First ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
                 break;
             }
 
-            Buffer += Buffer0->NextEntryOffset;
-            continue;
-        }
-
-        Status = NtfsFindFileAt(DeviceExtension,
-                                &Pattern,
-                                &Ccb->Entry,
-                                &FileRecord,
-                                &MFTRecord,
-                                Fcb->MFTIndex,
-                                BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
-
-        if (NT_SUCCESS(Status))
-        {
             /* HACK: files with both a short name and a long name are present twice in the index.
              * Ignore the second entry, if it is immediately following the first one.
              */
@@ -738,48 +529,47 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
                                                 FileRecord,
                                                 MFTRecord,
                                                 NULL,
-                                                Buffer,
-                                                BufferLength,
+                                                Entry,
+                                                BufferLength - Offset,
                                                 &Written,
                                                 Buffer0 == NULL);
+
+            ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
 
             if (Status == STATUS_BUFFER_OVERFLOW || Status == STATUS_INVALID_INFO_CLASS)
             {
                 break;
             }
-        }
-        else
-        {
-            Status = (First ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
-            break;
+
+            Ccb->Entry++;
         }
 
-        Buffer0 = (PFILE_NAMES_INFORMATION)Buffer;
+        Buffer0 = (PFILE_NAMES_INFORMATION)Entry;
         Buffer0->FileIndex = FileIndex++;
-        Ccb->Entry++;
-        BufferLength -= Buffer0->NextEntryOffset;
-
-        ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
+        LastOffset = Offset;
+        LastWritten = Written;
 
         if (Stack->Flags & SL_RETURN_SINGLE_ENTRY)
         {
             break;
         }
 
-        Buffer += Buffer0->NextEntryOffset;
+        Offset += Buffer0->NextEntryOffset;
     }
 
     if (Buffer0)
     {
+        /* Whatever stopped the scan, what was already returned stands */
         Buffer0->NextEntryOffset = 0;
         Status = STATUS_SUCCESS;
-        IrpContext->Irp->IoStatus.Information = Stack->Parameters.QueryDirectory.Length - BufferLength;
+        IrpContext->Irp->IoStatus.Information = LastOffset + LastWritten;
     }
     else
     {
-        ASSERT(Status != STATUS_SUCCESS || BufferLength == 0);
-        ASSERT(Written <= Stack->Parameters.QueryDirectory.Length);
-        IrpContext->Irp->IoStatus.Information = Written;
+        /* Nothing returned: a first entry too big for the buffer comes back cut short */
+        ASSERT(Status != STATUS_SUCCESS);
+        ASSERT(Written <= BufferLength);
+        IrpContext->Irp->IoStatus.Information = (Status == STATUS_BUFFER_OVERFLOW) ? Written : 0;
     }
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);

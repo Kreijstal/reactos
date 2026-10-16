@@ -225,7 +225,7 @@ NtfsGetInternalInformation(PNTFS_FCB Fcb,
                            PFILE_INTERNAL_INFORMATION InternalInfo,
                            PULONG BufferLength)
 {
-    DPRINT1("NtfsGetInternalInformation(%p, %p, %p)\n", Fcb, InternalInfo, BufferLength);
+    DPRINT("NtfsGetInternalInformation(%p, %p, %p)\n", Fcb, InternalInfo, BufferLength);
 
     ASSERT(InternalInfo);
     ASSERT(Fcb);
@@ -233,7 +233,8 @@ NtfsGetInternalInformation(PNTFS_FCB Fcb,
     if (*BufferLength < sizeof(FILE_INTERNAL_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
 
-    InternalInfo->IndexNumber.QuadPart = Fcb->MFTIndex;
+    /* The file reference: MFT index and sequence number, which is what FileId means too */
+    InternalInfo->IndexNumber.QuadPart = Fcb->MFTIndex | ((ULONGLONG)Fcb->SequenceNumber << 48);
 
     *BufferLength -= sizeof(FILE_INTERNAL_INFORMATION);
 
@@ -335,6 +336,104 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
 
     FindCloseAttribute(&Context);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    return Status;
+}
+
+/**
+* @name NtfsGetAlternateNameInformation
+*
+* FileAlternateNameInformation: the file's 8.3 name, which is its DOS $FILE_NAME or a
+* name valid in both namespaces. A file with neither has no short name.
+*/
+static
+NTSTATUS
+NtfsGetAlternateNameInformation(PNTFS_FCB Fcb,
+                                PDEVICE_EXTENSION DeviceExt,
+                                PFILE_NAME_INFORMATION NameInfo,
+                                PULONG BufferLength)
+{
+    ULONG Fixed = FIELD_OFFSET(FILE_NAME_INFORMATION, FileName);
+    PFILE_RECORD_HEADER FileRecord;
+    PFILENAME_ATTRIBUTE ShortName;
+    ULONG NameBytes, BytesToCopy;
+    NTSTATUS Status;
+
+    if (*BufferLength < Fixed)
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        ShortName = GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS);
+        if (ShortName == NULL)
+        {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+        else
+        {
+            NameBytes = ShortName->NameLength * sizeof(WCHAR);
+            BytesToCopy = min(NameBytes, *BufferLength - Fixed);
+
+            NameInfo->FileNameLength = NameBytes;
+            RtlCopyMemory(NameInfo->FileName, ShortName->Name, BytesToCopy);
+
+            *BufferLength -= Fixed + BytesToCopy;
+            Status = (BytesToCopy < NameBytes) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+        }
+    }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+/**
+* @name NtfsGetAllInformation
+*
+* FileAllInformation: every fixed-size class the file system keeps, then the name. The
+* fixed part is always filled; a name that doesn't fit is cut short with
+* STATUS_BUFFER_OVERFLOW, as FileNameInformation does.
+*/
+static
+NTSTATUS
+NtfsGetAllInformation(PFILE_OBJECT FileObject,
+                      PNTFS_FCB Fcb,
+                      PDEVICE_OBJECT DeviceObject,
+                      PFILE_ALL_INFORMATION AllInfo,
+                      PULONG BufferLength)
+{
+    ULONG NameOffset = FIELD_OFFSET(FILE_ALL_INFORMATION, NameInformation);
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (*BufferLength < NameOffset + FIELD_OFFSET(FILE_NAME_INFORMATION, FileName))
+        return STATUS_INFO_LENGTH_MISMATCH;
+
+    RtlZeroMemory(AllInfo, NameOffset);
+
+    Length = sizeof(FILE_BASIC_INFORMATION);
+    NtfsGetBasicInformation(FileObject, Fcb, DeviceObject, &AllInfo->BasicInformation, &Length);
+    Length = sizeof(FILE_STANDARD_INFORMATION);
+    NtfsGetStandardInformation(Fcb, DeviceObject, &AllInfo->StandardInformation, &Length);
+    Length = sizeof(FILE_INTERNAL_INFORMATION);
+    NtfsGetInternalInformation(Fcb, &AllInfo->InternalInformation, &Length);
+    Length = sizeof(FILE_EA_INFORMATION);
+    NtfsGetEaInformation(Fcb, &AllInfo->EaInformation, &Length);
+    Length = sizeof(FILE_POSITION_INFORMATION);
+    NtfsGetPositionInformation(FileObject, &AllInfo->PositionInformation, &Length);
+
+    /* Access, mode and alignment belong to the handle and the device; the I/O
+     * manager reports those */
+
+    Length = *BufferLength - NameOffset;
+    Status = NtfsGetNameInformation(FileObject, Fcb, DeviceObject, &AllInfo->NameInformation, &Length);
+
+    *BufferLength = Length;
+
     return Status;
 }
 
@@ -558,9 +657,18 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case FileAlternateNameInformation:
+            Status = NtfsGetAlternateNameInformation(Fcb,
+                                                     DeviceObject->DeviceExtension,
+                                                     SystemBuffer,
+                                                     &BufferLength);
+            break;
+
         case FileAllInformation:
-            DPRINT1("Unimplemented information class: %s\n", GetInfoClassName(FileInformationClass));
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = NtfsGetAllInformation(FileObject,
+                                           Fcb,
+                                           DeviceObject,
+                                           SystemBuffer,
+                                           &BufferLength);
             break;
 
         default:
@@ -570,7 +678,8 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
 
     ExReleaseResourceLite(&Fcb->MainResource);
 
-    if (NT_SUCCESS(Status))
+    /* An overflow still filled the fixed part and what fit of the rest */
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
         Irp->IoStatus.Information =
             Stack->Parameters.QueryFile.Length - BufferLength;
     else
