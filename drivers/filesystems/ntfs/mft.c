@@ -3588,67 +3588,122 @@ NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* What a read-only walk of an index is after */
+typedef enum _NTFS_INDEX_QUERY_KIND
+{
+    NtfsIndexFindKey,
+    NtfsIndexFindLastKey,
+    NtfsIndexVisitRange
+} NTFS_INDEX_QUERY_KIND;
+
+typedef struct _NTFS_INDEX_QUERY
+{
+    NTFS_INDEX_QUERY_KIND Kind;
+    PINDEX_ENTRY_ATTRIBUTE SearchEntry;     /* the key, or the low end of the range */
+    PINDEX_ENTRY_ATTRIBUTE HighEntry;       /* the high end of the range */
+    PNTFS_INDEX_VISITOR Visitor;
+    PVOID Context;
+    PINDEX_ENTRY_ATTRIBUTE FoundEntry;      /* a copy of the entry found */
+} NTFS_INDEX_QUERY, *PNTFS_INDEX_QUERY;
+
 /**
-* @name NtfsFindIndexEntry
-* @implemented
+* @name CopyIndexEntry
 *
-* Looks a key up in an index of a file record.
+* A pool copy of an index entry without the VCN of its child, which callers don't look at.
+*/
+static
+PINDEX_ENTRY_ATTRIBUTE
+CopyIndexEntry(PINDEX_ENTRY_ATTRIBUTE Entry)
+{
+    PINDEX_ENTRY_ATTRIBUTE Copy;
+    USHORT Length = Entry->Length;
+
+    if (BooleanFlagOn(Entry->Flags, NTFS_INDEX_ENTRY_NODE))
+        Length -= sizeof(ULONGLONG);
+
+    Copy = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_NTFS);
+    if (!Copy)
+        return NULL;
+
+    RtlCopyMemory(Copy, Entry, Length);
+    Copy->Length = Length;
+    Copy->Flags = 0;
+
+    return Copy;
+}
+
+/**
+* @name QueryIndexTree
 *
-* @param MftIndex
-* Mft index of the file record holding the index.
-*
-* @param SearchEntry
-* An entry carrying the key to look up, as NtfsAllocateViewIndexEntry() builds it.
-*
-* @param FoundEntry
-* Receives a copy of the matching entry, which the caller frees with ExFreePoolWithTag(TAG_NTFS).
-*
-* @return
-* STATUS_SUCCESS if the key is in the index, STATUS_OBJECT_NAME_NOT_FOUND if it isn't.
+* Answers an index query from the B-Tree of the index.
 */
 static
 NTSTATUS
-CopyFoundIndexEntry(PB_TREE Tree,
-                    PINDEX_ENTRY_ATTRIBUTE SearchEntry,
-                    PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+QueryIndexTree(PB_TREE Tree,
+               PNTFS_INDEX_QUERY Query)
 {
+    PB_TREE_KEY SearchKey = NULL, HighKey = NULL, FoundKey = NULL;
+    BOOLEAN Stopped = FALSE;
     NTSTATUS Status;
-    PB_TREE_KEY SearchKey, FoundKey;
-    USHORT Length;
 
-    SearchKey = CreateBTreeKeyFromEntry(SearchEntry);
-    if (!SearchKey)
-        return STATUS_INSUFFICIENT_RESOURCES;
+    if (Query->SearchEntry)
+    {
+        SearchKey = CreateBTreeKeyFromEntry(Query->SearchEntry);
+        if (!SearchKey)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-    Status = NtfsFindKey(Tree, Tree->RootNode, SearchKey, FALSE, &FoundKey);
-    DestroyBTreeKey(SearchKey);
-    if (!NT_SUCCESS(Status))
-        return Status;
+    switch (Query->Kind)
+    {
+        case NtfsIndexFindKey:
+            Status = NtfsFindKey(Tree, Tree->RootNode, SearchKey, FALSE, &FoundKey);
+            break;
 
-    // The VCN of a child isn't part of what callers look at
-    Length = FoundKey->IndexEntry->Length;
-    if (BooleanFlagOn(FoundKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
-        Length -= sizeof(ULONGLONG);
+        case NtfsIndexFindLastKey:
+            Status = NtfsFindLastKey(Tree, &FoundKey);
+            if (NT_SUCCESS(Status) && FoundKey == NULL)
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+            break;
 
-    *FoundEntry = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_NTFS);
-    if (!*FoundEntry)
-        return STATUS_INSUFFICIENT_RESOURCES;
+        default:
+            ASSERT(Query->Kind == NtfsIndexVisitRange);
+            HighKey = CreateBTreeKeyFromEntry(Query->HighEntry);
+            if (!HighKey)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+            Status = NtfsVisitKeys(Tree, Tree->RootNode, SearchKey, HighKey, Query->Visitor, Query->Context, &Stopped);
+            break;
+    }
 
-    RtlCopyMemory(*FoundEntry, FoundKey->IndexEntry, Length);
-    (*FoundEntry)->Length = Length;
-    (*FoundEntry)->Flags = 0;
+    if (NT_SUCCESS(Status) && FoundKey)
+    {
+        Query->FoundEntry = CopyIndexEntry(FoundKey->IndexEntry);
+        if (!Query->FoundEntry)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-    return STATUS_SUCCESS;
+    if (SearchKey)
+        DestroyBTreeKey(SearchKey);
+    if (HighKey)
+        DestroyBTreeKey(HighKey);
+
+    return Status;
 }
 
+/**
+* @name QueryIndexWorker
+*
+* Builds the B-Tree of an index of a file record and answers a query from it.
+*/
 static
 NTSTATUS
-FindIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
-                     PFILE_RECORD_HEADER FileRecord,
-                     PCWSTR IndexName,
-                     ULONG IndexNameLength,
-                     PINDEX_ENTRY_ATTRIBUTE SearchEntry,
-                     PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+QueryIndexWorker(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER FileRecord,
+                 PCWSTR IndexName,
+                 ULONG IndexNameLength,
+                 PNTFS_INDEX_QUERY Query)
 {
     NTSTATUS Status;
     PNTFS_ATTR_CONTEXT IndexRootContext;
@@ -3675,7 +3730,7 @@ FindIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
 
     if (NT_SUCCESS(Status))
     {
-        Status = CopyFoundIndexEntry(Tree, SearchEntry, FoundEntry);
+        Status = QueryIndexTree(Tree, Query);
         DestroyBTree(Tree);
     }
 
@@ -3684,18 +3739,21 @@ FindIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/**
+* @name QueryIndex
+*
+* Answers a query about an index of the file record MftIndex, with the index held still.
+*/
+static
 NTSTATUS
-NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
-                   ULONGLONG MftIndex,
-                   PCWSTR IndexName,
-                   ULONG IndexNameLength,
-                   PINDEX_ENTRY_ATTRIBUTE SearchEntry,
-                   PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+QueryIndex(PDEVICE_EXTENSION DeviceExt,
+           ULONGLONG MftIndex,
+           PCWSTR IndexName,
+           ULONG IndexNameLength,
+           PNTFS_INDEX_QUERY Query)
 {
     NTSTATUS Status;
     PFILE_RECORD_HEADER FileRecord;
-
-    *FoundEntry = NULL;
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (!FileRecord)
@@ -3706,7 +3764,7 @@ NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
 
     Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
     if (NT_SUCCESS(Status))
-        Status = FindIndexEntryWorker(DeviceExt, FileRecord, IndexName, IndexNameLength, SearchEntry, FoundEntry);
+        Status = QueryIndexWorker(DeviceExt, FileRecord, IndexName, IndexNameLength, Query);
 
     ExReleaseResourceLite(&DeviceExt->IndexResource);
     KeLeaveCriticalRegion();
@@ -3714,6 +3772,86 @@ NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;
+}
+
+/**
+* @name NtfsFindIndexEntry
+* @implemented
+*
+* Looks a key up in an index of a file record.
+*
+* @param MftIndex
+* Mft index of the file record holding the index.
+*
+* @param SearchEntry
+* An entry carrying the key to look up, as NtfsAllocateViewIndexEntry() builds it.
+*
+* @param FoundEntry
+* Receives a copy of the matching entry, which the caller frees with ExFreePoolWithTag(TAG_NTFS).
+*
+* @return
+* STATUS_SUCCESS if the key is in the index, STATUS_OBJECT_NAME_NOT_FOUND if it isn't.
+*/
+NTSTATUS
+NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   PCWSTR IndexName,
+                   ULONG IndexNameLength,
+                   PINDEX_ENTRY_ATTRIBUTE SearchEntry,
+                   PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+{
+    NTFS_INDEX_QUERY Query = {NtfsIndexFindKey, SearchEntry, NULL, NULL, NULL, NULL};
+    NTSTATUS Status;
+
+    Status = QueryIndex(DeviceExt, MftIndex, IndexName, IndexNameLength, &Query);
+    *FoundEntry = Query.FoundEntry;
+
+    return Status;
+}
+
+/**
+* @name NtfsFindLastIndexEntry
+* @implemented
+*
+* Like NtfsFindIndexEntry(), for the greatest key of the index: STATUS_OBJECT_NAME_NOT_FOUND
+* if the index is empty.
+*/
+NTSTATUS
+NtfsFindLastIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                       ULONGLONG MftIndex,
+                       PCWSTR IndexName,
+                       ULONG IndexNameLength,
+                       PINDEX_ENTRY_ATTRIBUTE *FoundEntry)
+{
+    NTFS_INDEX_QUERY Query = {NtfsIndexFindLastKey, NULL, NULL, NULL, NULL, NULL};
+    NTSTATUS Status;
+
+    Status = QueryIndex(DeviceExt, MftIndex, IndexName, IndexNameLength, &Query);
+    *FoundEntry = Query.FoundEntry;
+
+    return Status;
+}
+
+/**
+* @name NtfsVisitIndexEntries
+* @implemented
+*
+* Calls Visitor, in key order, for each entry of an index whose key is between the keys of
+* LowEntry and HighEntry, inclusive, until it returns FALSE. The index can't change meanwhile.
+*/
+NTSTATUS
+NtfsVisitIndexEntries(PDEVICE_EXTENSION DeviceExt,
+                      ULONGLONG MftIndex,
+                      PCWSTR IndexName,
+                      ULONG IndexNameLength,
+                      PINDEX_ENTRY_ATTRIBUTE LowEntry,
+                      PINDEX_ENTRY_ATTRIBUTE HighEntry,
+                      PNTFS_INDEX_VISITOR Visitor,
+                      PVOID Context)
+{
+    NTFS_INDEX_QUERY Query = {NtfsIndexVisitRange, LowEntry, HighEntry, Visitor, Context, NULL};
+
+    return QueryIndex(DeviceExt, MftIndex, IndexName, IndexNameLength, &Query);
 }
 
 /**

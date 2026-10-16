@@ -2455,6 +2455,90 @@ NtfsFindKey(PB_TREE Tree,
 }
 
 /**
+* @name NtfsFindLastKey
+* @implemented
+*
+* Finds the greatest key of a B-Tree, NULL if the tree holds none.
+*/
+NTSTATUS
+NtfsFindLastKey(PB_TREE Tree,
+                PB_TREE_KEY *LastKey)
+{
+    PB_TREE_FILENAME_NODE OwnerNode;
+    PB_TREE_KEY PreviousKey;
+
+    return FindLargestKeyInSubtree(Tree, Tree->RootNode, &OwnerNode, &PreviousKey, LastKey);
+}
+
+/**
+* @name NtfsVisitKeys
+* @implemented
+*
+* Calls Visitor, in order, for each key of a B-Tree from Low to High inclusive, reading only
+* the nodes that can hold such keys.
+*
+* @param Low
+* Key no visited key sorts before.
+*
+* @param High
+* Key no visited key sorts after.
+*
+* @param Visitor
+* Called with each key's index entry. Returning FALSE ends the walk.
+*
+* @param Stopped
+* Set when the walk is over: Visitor returned FALSE, or a key past High was reached.
+*/
+NTSTATUS
+NtfsVisitKeys(PB_TREE Tree,
+              PB_TREE_FILENAME_NODE Node,
+              PB_TREE_KEY Low,
+              PB_TREE_KEY High,
+              PNTFS_INDEX_VISITOR Visitor,
+              PVOID Context,
+              PBOOLEAN Stopped)
+{
+    PB_TREE_KEY CurrentKey;
+    NTSTATUS Status;
+
+    for (CurrentKey = Node->FirstKey; CurrentKey != NULL; CurrentKey = CurrentKey->NextKey)
+    {
+        BOOLEAN IsEnd = BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_END);
+        LONG LowComparison = IsEnd ? -1 : CompareTreeKeys(Low, CurrentKey, Tree->CollationRule, FALSE);
+
+        // The keys beneath a key sort before it, so they can be in range only if Low does
+        if (LowComparison < 0)
+        {
+            Status = NtfsLoadChildNode(Tree, CurrentKey);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            if (CurrentKey->LesserChild != NULL)
+            {
+                Status = NtfsVisitKeys(Tree, CurrentKey->LesserChild, Low, High, Visitor, Context, Stopped);
+                if (!NT_SUCCESS(Status) || *Stopped)
+                    return Status;
+            }
+        }
+
+        if (IsEnd)
+            break;
+
+        if (LowComparison <= 0)
+        {
+            if (CompareTreeKeys(High, CurrentKey, Tree->CollationRule, FALSE) < 0 ||
+                !Visitor(CurrentKey->IndexEntry, Context))
+            {
+                *Stopped = TRUE;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
 * @name SplitBTreeNode
 * @implemented
 *
