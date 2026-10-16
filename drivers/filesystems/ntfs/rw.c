@@ -880,6 +880,8 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     }
     else
     {
+        LONGLONG OldSize = Fcb->RFCB.FileSize.QuadPart;
+
         Status = NtfsWriteFile(DeviceExt,
                                FileObject,
                                Buffer,
@@ -889,6 +891,16 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
                                BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
                                Irp,
                                &ReturnedWriteLength);
+
+        /* Paging I/O only writes back what a write already told the journal about */
+        if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO) && ReturnedWriteLength != 0)
+        {
+            NtfsPostUsnChange(DeviceExt,
+                              Fcb,
+                              NtfsUsnDataReason(Fcb,
+                                                ByteOffset.QuadPart + ReturnedWriteLength > OldSize ?
+                                                USN_REASON_DATA_EXTEND : USN_REASON_DATA_OVERWRITE));
+        }
     }
 
     IrpContext->Irp->IoStatus.Status = Status;

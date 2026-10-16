@@ -1482,6 +1482,92 @@ NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsGrowStream
+*
+* Makes a stream of a file at least Size bytes long; what it grows by reads as zeros.
+*/
+static
+NTSTATUS
+NtfsGrowStream(PDEVICE_EXTENSION Vcb,
+               PNTFS_ATTR_CONTEXT AttrContext,
+               ULONG AttrOffset,
+               PFILE_RECORD_HEADER Holder,
+               ULONGLONG Size)
+{
+    ULONGLONG OldSize = AttributeDataLength(AttrContext->pRecord);
+    LARGE_INTEGER NewSize;
+    NTSTATUS Status;
+
+    if (Size <= OldSize)
+        return STATUS_SUCCESS;
+
+    NewSize.QuadPart = Size;
+    if (AttrContext->pRecord->IsNonResident)
+        Status = SetNonResidentAttributeDataLength(Vcb, AttrContext, AttrOffset, Holder, &NewSize);
+    else
+        Status = SetResidentAttributeDataLength(Vcb, AttrContext, AttrOffset, Holder, &NewSize);
+
+    if (NT_SUCCESS(Status))
+        Status = UpdateFileRecord(Vcb, AttrContext->FileMFTIndex & NTFS_MFT_MASK, Holder);
+    if (NT_SUCCESS(Status))
+        Status = NtfsZeroAttributeRange(Vcb, AttrContext, Holder, OldSize, Size);
+
+    return Status;
+}
+
+/**
+* @name NtfsWriteStreamAt
+* @implemented
+*
+* Writes to a stream of a metadata file ($SDS of $Secure, $J of $UsnJrnl, ...) that has no
+* FCB, growing it as needed. The caller serializes the writes to the stream.
+*
+* @param MftIndex
+* The file's base record.
+*/
+NTSTATUS
+NtfsWriteStreamAt(PDEVICE_EXTENSION Vcb,
+                  ULONGLONG MftIndex,
+                  PCWSTR StreamName,
+                  ULONG StreamNameLength,
+                  ULONGLONG Offset,
+                  PVOID Buffer,
+                  ULONG Length)
+{
+    PFILE_RECORD_HEADER BaseRecord, Holder = NULL;
+    PNTFS_ATTR_CONTEXT AttrContext;
+    ULONG AttrOffset, Written;
+    NTSTATUS Status;
+
+    BaseRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (BaseRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(Vcb, MftIndex, BaseRecord);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, BaseRecord, AttributeData, StreamName, StreamNameLength, &AttrContext, &AttrOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BaseRecord);
+        return Status;
+    }
+
+    Status = NtfsReadAttributeHolder(Vcb, AttrContext, BaseRecord, &Holder);
+    if (NT_SUCCESS(Status))
+        Status = NtfsGrowStream(Vcb, AttrContext, AttrOffset, Holder, Offset + Length);
+    if (NT_SUCCESS(Status))
+        Status = WriteAttribute(Vcb, AttrContext, Offset, Buffer, Length, &Written, Holder);
+    if (NT_SUCCESS(Status) && Written != Length)
+        Status = STATUS_UNEXPECTED_IO_ERROR;
+
+    NtfsReleaseAttributeHolder(Vcb, BaseRecord, Holder);
+    ReleaseAttributeContext(AttrContext);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, BaseRecord);
+
+    return Status;
+}
+
+/**
 * @name NtfsMakeRoomToConvert
 *
 * Makes sure a record has room for a resident attribute to become non-resident, whose header

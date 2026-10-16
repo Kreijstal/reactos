@@ -3222,6 +3222,29 @@ ULONG GetFileNameAttributeLength(PFILENAME_ATTRIBUTE FileNameAttribute)
     return Length;
 }
 
+/**
+* @name NtfsHasNtfs3StandardInformation
+* @implemented
+*
+* Whether a file's $STANDARD_INFORMATION has the NTFS 3.0 fields: owner, SecurityId, quota
+* and USN. One written by NTFS before 3.0 ends before them.
+*/
+BOOLEAN
+NtfsHasNtfs3StandardInformation(PDEVICE_EXTENSION Vcb,
+                                PFILE_RECORD_HEADER FileRecord)
+{
+    PNTFS_ATTR_CONTEXT Context;
+    BOOLEAN Has;
+
+    if (!NT_SUCCESS(FindAttribute(Vcb, FileRecord, AttributeStandardInformation, L"", 0, &Context, NULL)))
+        return FALSE;
+
+    Has = AttributeDataLength(Context->pRecord) >= sizeof(STANDARD_INFORMATION);
+    ReleaseAttributeContext(Context);
+
+    return Has;
+}
+
 PFILENAME_ATTRIBUTE
 GetBestFileNameFromRecord(PDEVICE_EXTENSION Vcb,
                           PFILE_RECORD_HEADER FileRecord)
