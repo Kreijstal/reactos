@@ -667,7 +667,8 @@ SeQuerySecurityDescriptorInfo(
             DaclLength = ROUND_UP((ULONG)Dacl->AclSize, 4);
         }
 
-        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT |
+                                         SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED));
     }
 
     if ((*SecurityInformation & SACL_SECURITY_INFORMATION) &&
@@ -679,7 +680,8 @@ SeQuerySecurityDescriptorInfo(
             SaclLength = ROUND_UP(Sacl->AclSize, 4);
         }
 
-        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT |
+                                         SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED));
     }
 
     SdLength = OwnerLength + GroupLength + DaclLength +
@@ -937,12 +939,14 @@ SeSetSecurityDescriptorInfoEx(
     if (SecurityInformation & DACL_SECURITY_INFORMATION)
     {
         Dacl = SepGetDaclFromDescriptor(SecurityDescriptor);
-        Control |= (SecurityDescriptor->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (SecurityDescriptor->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT |
+                                                   SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED));
     }
     else
     {
         Dacl = SepGetDaclFromDescriptor(ObjectSd);
-        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_DACL_DEFAULTED | SE_DACL_PRESENT |
+                                         SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED));
     }
     DaclLength = Dacl ? ROUND_UP((ULONG)Dacl->AclSize, 4) : 0;
 
@@ -950,12 +954,14 @@ SeSetSecurityDescriptorInfoEx(
     if (SecurityInformation & SACL_SECURITY_INFORMATION)
     {
         Sacl = SepGetSaclFromDescriptor(SecurityDescriptor);
-        Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (SecurityDescriptor->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT |
+                                                   SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED));
     }
     else
     {
         Sacl = SepGetSaclFromDescriptor(ObjectSd);
-        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT));
+        Control |= (ObjectSd->Control & (SE_SACL_DEFAULTED | SE_SACL_PRESENT |
+                                         SE_SACL_PROTECTED | SE_SACL_AUTO_INHERITED));
     }
     SaclLength = Sacl ? ROUND_UP((ULONG)Sacl->AclSize, 4) : 0;
 
@@ -1224,6 +1230,30 @@ SeDeassignSecurity(
 
 /**
  * @brief
+ * Marks every ACE of an ACL inherited, as auto-inheritance
+ * (SEF_DACL_AUTO_INHERIT, SEF_SACL_AUTO_INHERIT) records the ACEs
+ * an object got from its parent.
+ *
+ * @param[in,out] Acl
+ * The ACL whose ACEs were all inherited.
+ */
+static
+VOID
+SepMarkAclInherited(
+    _Inout_ PACL Acl)
+{
+    PACE_HEADER Ace = (PACE_HEADER)(Acl + 1);
+    USHORT i;
+
+    for (i = 0; i < Acl->AceCount; i++)
+    {
+        Ace->AceFlags |= INHERITED_ACE;
+        Ace = (PACE_HEADER)((PUCHAR)Ace + Ace->AceSize);
+    }
+}
+
+/**
+ * @brief
  * An extended function that assigns a security descriptor for a new
  * object.
  *
@@ -1315,7 +1345,6 @@ SeAssignSecurityEx(
     NTSTATUS Status;
 
     DBG_UNREFERENCED_PARAMETER(ObjectType);
-    DBG_UNREFERENCED_PARAMETER(AutoInheritFlags);
     UNREFERENCED_PARAMETER(PoolType);
 
     PAGED_CODE();
@@ -1516,8 +1545,19 @@ SeAssignSecurityEx(
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_SUCCESS);
+        if (SaclIsInherited && (AutoInheritFlags & SEF_SACL_AUTO_INHERIT))
+        {
+            SepMarkAclInherited((PACL)((PUCHAR)Descriptor + Current));
+            Descriptor->Control |= SE_SACL_AUTO_INHERITED;
+        }
         Descriptor->Sacl = Current;
         Current += SaclLength;
+    }
+
+    if (!SaclIsInherited && ExplicitDescriptor != NULL &&
+        (ExplicitDescriptor->Control & SE_SACL_PRESENT))
+    {
+        Descriptor->Control |= ExplicitDescriptor->Control & SE_SACL_PROTECTED;
     }
 
     if (DaclLength != 0)
@@ -1531,8 +1571,20 @@ SeAssignSecurityEx(
                                  IsDirectoryObject,
                                  GenericMapping);
         ASSERT(Status == STATUS_SUCCESS);
+        if (DaclIsInherited && (AutoInheritFlags & SEF_DACL_AUTO_INHERIT))
+        {
+            SepMarkAclInherited((PACL)((PUCHAR)Descriptor + Current));
+            Descriptor->Control |= SE_DACL_AUTO_INHERITED;
+        }
         Descriptor->Dacl = Current;
         Current += DaclLength;
+    }
+
+    /* An explicit DACL that blocks inheritance keeps blocking it */
+    if (!DaclIsInherited && ExplicitDescriptor != NULL &&
+        (ExplicitDescriptor->Control & SE_DACL_PRESENT))
+    {
+        Descriptor->Control |= ExplicitDescriptor->Control & SE_DACL_PROTECTED;
     }
 
     if (OwnerLength != 0)
