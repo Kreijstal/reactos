@@ -20,6 +20,7 @@ list(APPEND SOURCE
     mft.c
     misc.c
     ntfs.c
+    reparse.c
     rw.c
     volinfo.c
     ntfs.h)

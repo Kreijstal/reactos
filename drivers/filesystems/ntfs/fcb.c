@@ -894,7 +894,8 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
                   PNTFS_FCB *pParentFCB,
                   PNTFS_FCB *pFCB,
                   PCWSTR pFileName,
-                  BOOLEAN CaseSensitive)
+                  BOOLEAN CaseSensitive,
+                  PULONG ReparseOffset)
 {
     NTSTATUS Status;
     PWCHAR pathName;
@@ -986,6 +987,15 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
             NtfsReleaseFCB(Vcb, FCB);
             FCB = NULL;
             Status = STATUS_OBJECT_PATH_NOT_FOUND;
+            break;
+        }
+
+        /* A reparse point on the way (a mount point) sends the rest of the path
+         * elsewhere: hand it back with where the unparsed rest starts */
+        if (NtfsFCBIsReparsePoint(FCB))
+        {
+            *ReparseOffset = (ULONG)(currentElement - 1 - pFileName);
+            Status = STATUS_REPARSE;
             break;
         }
 

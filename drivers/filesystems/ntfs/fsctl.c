@@ -988,6 +988,65 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     return STATUS_SUCCESS;
 }
 
+/**
+* @name NtfsReparsePointRequest
+*
+* FSCTL_SET_REPARSE_POINT, FSCTL_GET_REPARSE_POINT and FSCTL_DELETE_REPARSE_POINT, all
+* METHOD_BUFFERED, on a file or directory (not the volume, not a named stream).
+*/
+static
+NTSTATUS
+NtfsReparsePointRequest(PDEVICE_EXTENSION DeviceExt,
+                        PIRP Irp,
+                        ULONG Code)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
+    ULONG Copied;
+    NTSTATUS Status;
+
+    /* No buffer to return the data in reaches no further */
+    if (Code == FSCTL_GET_REPARSE_POINT &&
+        (Stack->Parameters.FileSystemControl.OutputBufferLength == 0 || Buffer == NULL))
+    {
+        return STATUS_INVALID_USER_BUFFER;
+    }
+
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM) || Fcb->Stream[0] != UNICODE_NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (Code != FSCTL_GET_REPARSE_POINT && !NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+
+    switch (Code)
+    {
+        case FSCTL_SET_REPARSE_POINT:
+            Status = NtfsWriteReparsePoint(DeviceExt, Fcb, Buffer,
+                                           Stack->Parameters.FileSystemControl.InputBufferLength);
+            break;
+
+        case FSCTL_GET_REPARSE_POINT:
+            Status = NtfsQueryReparsePoint(DeviceExt, Fcb, Buffer,
+                                           Stack->Parameters.FileSystemControl.OutputBufferLength,
+                                           &Copied);
+            if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+                Irp->IoStatus.Information = Copied;
+            break;
+
+        default:
+            Status = NtfsRemoveReparsePoint(DeviceExt, Fcb, Buffer,
+                                            Stack->Parameters.FileSystemControl.InputBufferLength);
+            break;
+    }
+
+    ExReleaseResourceLite(&Fcb->MainResource);
+
+    return Status;
+}
+
 /* The flags of $VOLUME_INFORMATION */
 #define NTFS_VOLUME_FLAG_DIRTY              0x0001
 #define NTFS_VOLUME_FLAG_UPGRADE_ON_MOUNT   0x0004
@@ -1148,6 +1207,12 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_GET_VOLUME_BITMAP:
             Status = GetVolumeBitmap(DeviceExt, Irp);
+            break;
+
+        case FSCTL_SET_REPARSE_POINT:
+        case FSCTL_GET_REPARSE_POINT:
+        case FSCTL_DELETE_REPARSE_POINT:
+            Status = NtfsReparsePointRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
             break;
 
         case FSCTL_IS_VOLUME_DIRTY:
