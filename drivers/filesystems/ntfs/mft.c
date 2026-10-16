@@ -769,6 +769,25 @@ NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
         ULONG Length = (ULONG)min(End - Start, ChunkSize);
         ULONG Written;
 
+        /* The holes of a sparse stream read as zeros already */
+        if (NtfsAttributeIsSparse(AttrContext))
+        {
+            ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
+            LONGLONG Lbn, Count;
+            ULONGLONG RunEnd;
+
+            if (!FsRtlLookupLargeMcbEntry(&AttrContext->DataRunsMCB, Start / BytesPerCluster, &Lbn, &Count, NULL, NULL, NULL))
+                break;
+
+            RunEnd = (Start / BytesPerCluster + Count) * BytesPerCluster;
+            if (Lbn == -1)
+            {
+                Start = min(RunEnd, End);
+                continue;
+            }
+            Length = (ULONG)min(Length, RunEnd - Start);
+        }
+
         Status = WriteAttribute(Vcb, AttrContext, Start, Zeros, Length, &Written, FileRecord);
         if (NT_SUCCESS(Status) && Written != Length)
             Status = STATUS_UNEXPECTED_IO_ERROR;
@@ -780,14 +799,6 @@ NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
 
     return Status;
 }
-
-static
-NTSTATUS
-ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
-                                      PNTFS_ATTR_CONTEXT AttrContext,
-                                      ULONG AttrOffset,
-                                      PFILE_RECORD_HEADER FileRecord,
-                                      PLARGE_INTEGER DataSize);
 
 /**
 * @name NtfsSetAllocationSize
@@ -1124,6 +1135,39 @@ Quit:
 }
 
 /**
+* @name NtfsResizeSparseAllocation
+*
+* Sizes the allocation of a sparse attribute for DataSize bytes, in whole units: growth is a
+* hole, and the units a shrink leaves past the end give their clusters back.
+*/
+static
+NTSTATUS
+NtfsResizeSparseAllocation(PDEVICE_EXTENSION Vcb,
+                           PNTFS_ATTR_CONTEXT AttrContext,
+                           ULONG AttrOffset,
+                           PFILE_RECORD_HEADER FileRecord,
+                           ULONGLONG DataSize)
+{
+    ULONG UnitBytes = NtfsSparseUnitClusters(AttrContext) * Vcb->NtfsInfo.BytesPerCluster;
+    ULONGLONG NewVcns = ROUND_UP(DataSize, UnitBytes) / Vcb->NtfsInfo.BytesPerCluster;
+    ULONGLONG OldVcns = AttrContext->pRecord->NonResident.AllocatedSize / Vcb->NtfsInfo.BytesPerCluster;
+    NTSTATUS Status;
+
+    if (NewVcns == OldVcns)
+        return STATUS_SUCCESS;
+
+    if (NewVcns < OldVcns)
+    {
+        Status = NtfsDeallocateSparseRange(Vcb, AttrContext, AttrOffset, FileRecord, NewVcns, OldVcns - NewVcns);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        FsRtlTruncateLargeMcb(&AttrContext->DataRunsMCB, NewVcns);
+    }
+
+    return NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord, NewVcns);
+}
+
+/**
 * @name SetNonResidentAttributeDataLength
 * @implemented
 *
@@ -1172,8 +1216,15 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
     ASSERT(AttrContext->pRecord->IsNonResident);
 
+    /* A sparse stream grows by a hole, and shrinks by giving back its units past the end */
+    if (NtfsAttributeIsSparse(AttrContext))
+    {
+        Status = NtfsResizeSparseAllocation(Vcb, AttrContext, AttrOffset, FileRecord, DataSize->QuadPart);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
     // do we need to increase the allocation size?
-    if (AttrContext->pRecord->NonResident.AllocatedSize < AllocationSize)
+    else if (AttrContext->pRecord->NonResident.AllocatedSize < AllocationSize)
     {
         Status = NtfsExtendAllocation(Vcb, AttrContext, AttrOffset, FileRecord, AllocationSize);
         if (!NT_SUCCESS(Status))
@@ -1236,7 +1287,6 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 * falls, and an unnamed $DATA has the named ones behind it. Whatever follows it is moved to
 * follow the new, non-resident header.
 */
-static
 NTSTATUS
 ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
                                       PNTFS_ATTR_CONTEXT AttrContext,
@@ -1986,6 +2036,83 @@ ReadAttribute(PDEVICE_EXTENSION Vcb,
 
 
 /**
+* @name NtfsFillHolesForWrite
+*
+* Gives the holes of a sparse attribute that a write of Length bytes at Offset lands in
+* their clusters, in whole allocation units, and writes the record holding the attribute.
+*
+* @param FileRecord
+* The record holding the attribute, or NULL to read it.
+*/
+static
+NTSTATUS
+NtfsFillHolesForWrite(PDEVICE_EXTENSION Vcb,
+                      PNTFS_ATTR_CONTEXT Context,
+                      PFILE_RECORD_HEADER FileRecord,
+                      ULONGLONG Offset,
+                      ULONG Length)
+{
+    ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
+    ULONG Unit = NtfsAttributeIsSparse(Context) ? NtfsSparseUnitClusters(Context) : 1;
+    ULONGLONG TotalVcns = Context->pRecord->NonResident.HighestVCN + 1;
+    ULONGLONG StartVcn = (Offset / BytesPerCluster) / Unit * Unit;
+    ULONGLONG EndVcn = min(ALIGN_UP_BY((Offset + Length + BytesPerCluster - 1) / BytesPerCluster, Unit), TotalVcns);
+    ULONGLONG Vcn;
+    PFILE_RECORD_HEADER Holder = FileRecord;
+    PNTFS_ATTR_RECORD Attribute;
+    ULONG AttrOffset;
+    NTSTATUS Status;
+
+    /* Nothing to do unless part of the range is a hole */
+    for (Vcn = StartVcn; Vcn < EndVcn; )
+    {
+        LONGLONG Lbn, Count;
+
+        if (!FsRtlLookupLargeMcbEntry(&Context->DataRunsMCB, Vcn, &Lbn, &Count, NULL, NULL, NULL) || Lbn == -1)
+            break;
+        Vcn += Count;
+    }
+    if (Vcn >= EndVcn)
+        return STATUS_SUCCESS;
+
+    if (Holder == NULL)
+    {
+        Holder = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+        if (Holder == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Status = ReadFileRecord(Vcb, Context->FileMFTIndex & NTFS_MFT_MASK, Holder);
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Holder);
+            return Status;
+        }
+    }
+
+    /* The attribute is the one of the record with its instance number */
+    for (AttrOffset = Holder->AttributeOffset; ; AttrOffset += Attribute->Length)
+    {
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Holder + AttrOffset);
+        ASSERT(Attribute->Type != AttributeEnd);
+        if (Attribute->Type == AttributeEnd || Attribute->Instance == Context->pRecord->Instance)
+            break;
+    }
+
+    if (Attribute->Type == AttributeEnd)
+        Status = STATUS_FILE_CORRUPT_ERROR;
+    else
+        Status = NtfsAllocateSparseRange(Vcb, Context, AttrOffset, Holder, StartVcn, EndVcn - StartVcn);
+
+    if (NT_SUCCESS(Status))
+        Status = UpdateFileRecord(Vcb, Context->FileMFTIndex & NTFS_MFT_MASK, Holder);
+
+    if (Holder != FileRecord)
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Holder);
+
+    return Status;
+}
+
+/**
 * @name WriteAttribute
 * @implemented
 *
@@ -2132,6 +2259,15 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
     // This is a non-resident attribute: map the requested range onto the
     // volume, then issue every run it spans in a single parallel batch.
 
+    /* A write into a hole gives the attribute clusters first. Holes belong to sparse
+     * attributes; a compressed one stores its units differently. */
+    if (!(Context->pRecord->Flags & NTFS_ATTR_COMPRESSION_MASK))
+    {
+        Status = NtfsFillHolesForWrite(Vcb, Context, FileRecord, Offset, Length);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
     Status = NtfsMapAttributeRuns(Vcb, Context, Offset, Length, &RunList, &MappedLength);
 
     if (NT_SUCCESS(Status) && MappedLength < Length)
@@ -2146,8 +2282,8 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
 
     if (NT_SUCCESS(Status))
     {
-        // Writing into a hole would mean allocating clusters, which we cannot
-        // do here; NtfsPerformIrpIoRuns() rejects sparse runs on IRP_MJ_WRITE.
+        /* NtfsPerformIrpIoRuns() rejects sparse runs on IRP_MJ_WRITE: holes are
+         * filled above, and only a compressed attribute still has them */
         Status = NtfsPerformIrpIoRuns(Vcb->StorageDevice,
                                       IRP_MJ_WRITE,
                                       Vcb->NtfsInfo.BytesPerSector,

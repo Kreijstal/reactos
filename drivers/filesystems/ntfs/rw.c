@@ -571,6 +571,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
              * without touching the bitmap or the run list. Cleanup gives back
              * what's left over. */
             if (DataContext->pRecord->IsNonResident &&
+                !NtfsAttributeIsSparse(DataContext) &&
                 (ULONGLONG)DataSize.QuadPart > DataContext->pRecord->NonResident.AllocatedSize)
             {
                 ULONGLONG Ahead;

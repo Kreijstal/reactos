@@ -147,6 +147,60 @@ NtfsGetAttributeTagInformation(PNTFS_FCB Fcb,
 }
 
 
+/**
+* @name NtfsGetCompressionInformation
+*
+* FileCompressionInformation (MS-FSA 2.1.5.11.7): a compressed or sparse stream reports the
+* clusters it really has, any other its size. No stream is compressed by this driver.
+*/
+static
+NTSTATUS
+NtfsGetCompressionInformation(PNTFS_FCB Fcb,
+                              PFILE_COMPRESSION_INFORMATION Info,
+                              PULONG BufferLength)
+{
+    PDEVICE_EXTENSION Vcb = Fcb->Vcb;
+    PFILE_RECORD_HEADER FileRecord;
+    PNTFS_ATTR_CONTEXT Context;
+    NTSTATUS Status;
+
+    if (*BufferLength < sizeof(FILE_COMPRESSION_INFORMATION))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    if (NtfsFCBIsDirectory(Fcb) || (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
+        return STATUS_INVALID_PARAMETER;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlZeroMemory(Info, sizeof(*Info));
+
+    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, FileRecord, AttributeData, Fcb->Stream, (ULONG)wcslen(Fcb->Stream), &Context, NULL);
+    if (NT_SUCCESS(Status))
+    {
+        if (Context->pRecord->IsNonResident &&
+            (Context->pRecord->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE)))
+        {
+            Info->CompressedFileSize.QuadPart = Context->pRecord->NonResident.CompressedSize;
+        }
+        else
+        {
+            Info->CompressedFileSize.QuadPart = AttributeDataLength(Context->pRecord);
+        }
+        ReleaseAttributeContext(Context);
+    }
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, FileRecord);
+
+    if (NT_SUCCESS(Status))
+        *BufferLength -= sizeof(FILE_COMPRESSION_INFORMATION);
+
+    return Status;
+}
+
 static
 NTSTATUS
 NtfsGetEaInformation(PNTFS_FCB Fcb,
@@ -781,6 +835,12 @@ NtfsQueryInformation(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsGetPositionInformation(FileObject,
                                                 SystemBuffer,
                                                 &BufferLength);
+            break;
+
+        case FileCompressionInformation:
+            Status = NtfsGetCompressionInformation(Fcb,
+                                                   SystemBuffer,
+                                                   &BufferLength);
             break;
 
         case FileBasicInformation:
