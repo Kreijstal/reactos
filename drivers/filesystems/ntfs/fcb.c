@@ -69,6 +69,82 @@ NtfsWSubString(PWCHAR pTarget,
 }
 
 
+/**
+* @name NtfsSetFCBPath
+*
+* Gives Fcb a pool copy of Path, of any length, and frees the one it had.
+*
+* @return
+* STATUS_SUCCESS, or STATUS_INSUFFICIENT_RESOURCES with the old path kept.
+*/
+NTSTATUS
+NtfsSetFCBPath(
+    _Inout_ PNTFS_FCB Fcb,
+    _In_ PCWSTR Path)
+{
+    SIZE_T Size = (wcslen(Path) + 1) * sizeof(WCHAR);
+    PWCHAR Buffer;
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_NTFS);
+    if (Buffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlCopyMemory(Buffer, Path, Size);
+    NtfsReplaceFCBPath(Fcb, Buffer);
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsReplaceFCBPath
+*
+* Makes Path, a NUL-terminated pool buffer, the path of Fcb, and frees the one it had.
+*/
+VOID
+NtfsReplaceFCBPath(
+    _Inout_ PNTFS_FCB Fcb,
+    _In_ __drv_aliasesMem PWCHAR Path)
+{
+    PWCHAR OldPath = Fcb->PathName;
+
+    Fcb->PathName = Path;
+    Fcb->ObjectName = wcsrchr(Path, L'\\');
+    if (Fcb->ObjectName == NULL)
+        Fcb->ObjectName = Path;
+
+    if (OldPath != NULL)
+        ExFreePoolWithTag(OldPath, TAG_NTFS);
+}
+
+/**
+* @name NtfsBuildChildPath
+*
+* Returns a pool copy (TAG_NTFS) of the path of Name in the directory at DirectoryPath.
+*/
+PWCHAR
+NtfsBuildChildPath(
+    _In_ PCWSTR DirectoryPath,
+    _In_ PCWSTR Name)
+{
+    SIZE_T DirectoryLength = wcslen(DirectoryPath);
+    SIZE_T NameLength = wcslen(Name);
+    PWCHAR Path;
+
+    /* The root directory already ends with the separator */
+    if (DirectoryLength == 1 && DirectoryPath[0] == L'\\')
+        DirectoryLength = 0;
+
+    Path = ExAllocatePoolWithTag(NonPagedPool, (DirectoryLength + 1 + NameLength + 1) * sizeof(WCHAR), TAG_NTFS);
+    if (Path == NULL)
+        return NULL;
+
+    RtlCopyMemory(Path, DirectoryPath, DirectoryLength * sizeof(WCHAR));
+    Path[DirectoryLength] = L'\\';
+    RtlCopyMemory(Path + DirectoryLength + 1, Name, (NameLength + 1) * sizeof(WCHAR));
+
+    return Path;
+}
+
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
               PCWSTR Stream,
@@ -92,17 +168,11 @@ NtfsCreateFCB(PCWSTR FileName,
 
     Fcb->Vcb = Vcb;
 
-    if (FileName)
+    /* An FCB without a name (the volume's stream) still has a path, an empty one */
+    if (!NT_SUCCESS(NtfsSetFCBPath(Fcb, FileName ? FileName : L"")))
     {
-        wcscpy(Fcb->PathName, FileName);
-        if (wcsrchr(Fcb->PathName, '\\') != 0)
-        {
-            Fcb->ObjectName = wcsrchr(Fcb->PathName, '\\');
-        }
-        else
-        {
-            Fcb->ObjectName = Fcb->PathName;
-        }
+        ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
+        return NULL;
     }
 
     if (Stream)
@@ -130,6 +200,7 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
 
     ExDeleteResourceLite(&Fcb->MainResource);
 
+    ExFreePoolWithTag(Fcb->PathName, TAG_NTFS);
     ExFreeToNPagedLookasideList(&NtfsGlobalData->FcbLookasideList, Fcb);
 }
 
@@ -443,7 +514,7 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
                         ULONGLONG MFTIndex,
                         PNTFS_FCB * fileFCB)
 {
-    WCHAR pathName[MAX_PATH];
+    PWCHAR pathName;
     PFILENAME_ATTRIBUTE FileName;
     PSTANDARD_INFORMATION StdInfo;
     PNTFS_FCB rcFCB;
@@ -457,30 +528,29 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
         return STATUS_OBJECT_NAME_NOT_FOUND; // Not sure that's the best here
     }
 
+    /* Name->Buffer is NUL-terminated and goes on past Name->Length with the
+     * stream part, if any, which is part of the FCB's path */
     if (DirectoryFCB && Name)
     {
-        if (Name->Buffer[0] != 0 && wcslen(DirectoryFCB->PathName) +
-            sizeof(WCHAR) + Name->Length / sizeof(WCHAR) > MAX_PATH)
-        {
-            return STATUS_OBJECT_NAME_INVALID;
-        }
-
-        wcscpy(pathName, DirectoryFCB->PathName);
-        if (!NtfsFCBIsRoot(DirectoryFCB))
-        {
-            wcscat(pathName, L"\\");
-        }
-        wcscat(pathName, Name->Buffer);
+        pathName = NtfsBuildChildPath(DirectoryFCB->PathName, Name->Buffer);
     }
     else
     {
-        RtlCopyMemory(pathName, FileName->Name, FileName->NameLength * sizeof (WCHAR));
-        pathName[FileName->NameLength] = UNICODE_NULL;
+        pathName = ExAllocatePoolWithTag(NonPagedPool, (FileName->NameLength + 1) * sizeof(WCHAR), TAG_NTFS);
+        if (pathName != NULL)
+        {
+            RtlCopyMemory(pathName, FileName->Name, FileName->NameLength * sizeof(WCHAR));
+            pathName[FileName->NameLength] = UNICODE_NULL;
+        }
     }
+
+    if (pathName == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
     Size = NtfsGetFileSize(Vcb, Record, (Stream ? Stream : L""), (Stream ? wcslen(Stream) : 0), &AllocatedSize);
 
     rcFCB = NtfsCreateFCB(pathName, Stream, Vcb);
+    ExFreePoolWithTag(pathName, TAG_NTFS);
     if (!rcFCB)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
@@ -659,8 +729,9 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
                   BOOLEAN CaseSensitive)
 {
     NTSTATUS Status;
-    WCHAR pathName [MAX_PATH];
-    WCHAR elementName [MAX_PATH];
+    PWCHAR pathName;
+    PWCHAR elementName;
+    SIZE_T pathCount;
     PCWSTR currentElement;
     PNTFS_FCB FCB;
     PNTFS_FCB parentFCB;
@@ -692,17 +763,38 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
     else
     {
         currentElement = pFileName + 1;
-        wcscpy (pathName, L"\\");
         FCB = NtfsOpenRootFCB (Vcb);
     }
 
+    if (FCB == NULL)
+    {
+        *pFCB = NULL;
+        *pParentFCB = NULL;
+        return STATUS_OBJECT_PATH_NOT_FOUND;
+    }
+
+    /* Each holds at most the whole path */
+    pathCount = wcslen(pFileName) + 1;
+    pathName = ExAllocatePoolWithTag(NonPagedPool, 2 * pathCount * sizeof(WCHAR), TAG_NTFS);
+    if (pathName == NULL)
+    {
+        NtfsReleaseFCB(Vcb, FCB);
+        *pFCB = NULL;
+        *pParentFCB = NULL;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    elementName = pathName + pathCount;
+
     parentFCB = NULL;
+    Status = STATUS_SUCCESS;
 
     /* Parse filename and check each path element for existence and access */
     while (NtfsGetNextPathElement(currentElement) != 0)
     {
+        PCWSTR nextElement = NtfsGetNextPathElement(currentElement);
+
         /* Skip blank directory levels */
-        if ((NtfsGetNextPathElement(currentElement) - currentElement) == 0)
+        if (nextElement == currentElement)
         {
             currentElement++;
             continue;
@@ -724,75 +816,53 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
             DPRINT("Element in requested path is not a directory\n");
 
             NtfsReleaseFCB(Vcb, FCB);
-            FCB = 0;
-            *pParentFCB = NULL;
-            *pFCB = NULL;
-
-            return STATUS_OBJECT_PATH_NOT_FOUND;
+            FCB = NULL;
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
+            break;
         }
 
         parentFCB = FCB;
 
-        /* Extract next directory level into dirName */
-        if (!NtfsWSubString(pathName,
-                            RTL_NUMBER_OF(pathName),
-                            pFileName,
-                            NtfsGetNextPathElement(currentElement) - pFileName))
-        {
-            DPRINT1("Path is longer than MAX_PATH\n");
-
-            NtfsReleaseFCB(Vcb, parentFCB);
-            *pParentFCB = NULL;
-            *pFCB = NULL;
-
-            return STATUS_OBJECT_NAME_INVALID;
-        }
+        /* Extract next directory level into pathName */
+        NtfsWSubString(pathName, pathCount, pFileName, nextElement - pFileName);
         DPRINT("  pathName:%S\n", pathName);
 
         FCB = NtfsGrabFCBFromTable(Vcb, pathName);
         if (FCB == NULL)
         {
-            /* The element is the tail of pathName, which fit */
-            ASSERT(NtfsGetNextPathElement(currentElement) - currentElement < RTL_NUMBER_OF(elementName));
-            NtfsWSubString(elementName,
-                           RTL_NUMBER_OF(elementName),
-                           currentElement,
-                           NtfsGetNextPathElement(currentElement) - currentElement);
+            NtfsWSubString(elementName, pathCount, currentElement, nextElement - currentElement);
             DPRINT("  elementName:%S\n", elementName);
 
             Status = NtfsDirFindFile(Vcb, parentFCB, elementName, CaseSensitive, &FCB);
             if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
             {
-                *pParentFCB = parentFCB;
-                *pFCB = NULL;
-                currentElement = NtfsGetNextPathElement(currentElement);
-                if (*currentElement == L'\0' || NtfsGetNextPathElement(currentElement + 1) == 0)
-                {
-                    return STATUS_OBJECT_NAME_NOT_FOUND;
-                }
-                else
-                {
-                    return STATUS_OBJECT_PATH_NOT_FOUND;
-                }
+                /* Only the last element missing is a missing name; the parent is handed back
+                 * for a create */
+                if (*nextElement != L'\0' && NtfsGetNextPathElement(nextElement + 1) != 0)
+                    Status = STATUS_OBJECT_PATH_NOT_FOUND;
+
+                FCB = NULL;
+                break;
             }
             else if (!NT_SUCCESS(Status))
             {
                 NtfsReleaseFCB(Vcb, parentFCB);
-                *pParentFCB = NULL;
-                *pFCB = NULL;
-
-                return Status;
+                parentFCB = NULL;
+                FCB = NULL;
+                break;
             }
         }
 
-        currentElement = NtfsGetNextPathElement(currentElement);
+        currentElement = nextElement;
     }
+
+    ExFreePoolWithTag(pathName, TAG_NTFS);
 
     *pParentFCB = parentFCB;
     *pFCB = FCB;
 #endif
 
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 
