@@ -724,6 +724,19 @@ BOOLEAN
 NtfsNameHasStreamPart(PCUNICODE_STRING Name);
 
 NTSTATUS
+AddResidentAttribute(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     ULONG Type,
+                     PCWSTR Name,
+                     USHORT NameLength,
+                     const VOID *Data,
+                     ULONG DataLength);
+
+VOID
+NtfsRemoveAttribute(PFILE_RECORD_HEADER FileRecord,
+                    ULONG AttrOffset);
+
+NTSTATUS
 AddFileName(PFILE_RECORD_HEADER FileRecord,
             PNTFS_ATTR_RECORD AttributeAddress,
             ULONGLONG ParentReference,
@@ -1092,6 +1105,13 @@ NtfsBuildChildPath(
     _In_ PCWSTR DirectoryPath,
     _In_ PCWSTR Name);
 
+NTSTATUS
+NtfsMakeStreamFCB(
+    _In_ PNTFS_VCB Vcb,
+    _In_ PNTFS_FCB BaseFcb,
+    _In_ PCUNICODE_STRING StreamName,
+    _Out_ PNTFS_FCB *StreamFcb);
+
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
               PCWSTR Stream,
@@ -1322,6 +1342,11 @@ NtfsExtendAllocation(
 NTSTATUS
 NtfsTrimAllocation(
     _In_ PNTFS_FCB Fcb);
+
+NTSTATUS
+NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
+                 ULONGLONG MftIndex,
+                 PCWSTR StreamName);
 
 NTSTATUS
 NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,

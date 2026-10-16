@@ -190,6 +190,176 @@ AddData(PFILE_RECORD_HEADER FileRecord,
     return STATUS_SUCCESS;
 }
 
+/**
+* @name NtfsCompareAttributeOrder
+*
+* Orders attributes the way NTFS keeps them in a file record: by type code, then by
+* name, compared without regard to case.
+*
+* @return
+* Less than, equal to or greater than 0 as the first attribute sorts before, with or after
+* the second.
+*/
+static
+LONG
+NtfsCompareAttributeOrder(
+    _In_ PNTFS_VCB Vcb,
+    _In_ ULONG Type1,
+    _In_ PCWSTR Name1,
+    _In_ ULONG NameLength1,
+    _In_ ULONG Type2,
+    _In_ PCWSTR Name2,
+    _In_ ULONG NameLength2)
+{
+    ULONG i;
+
+    if (Type1 != Type2)
+        return (Type1 < Type2) ? -1 : 1;
+
+    for (i = 0; i < min(NameLength1, NameLength2); i++)
+    {
+        WCHAR Char1 = NtfsUpcaseChar(Vcb, Name1[i]);
+        WCHAR Char2 = NtfsUpcaseChar(Vcb, Name2[i]);
+
+        if (Char1 != Char2)
+            return (Char1 < Char2) ? -1 : 1;
+    }
+
+    if (NameLength1 != NameLength2)
+        return (NameLength1 < NameLength2) ? -1 : 1;
+
+    return 0;
+}
+
+/**
+* @name AddResidentAttribute
+* @implemented
+*
+* Adds a resident attribute to a file record, where its type and name sort it.
+*
+* @param Vcb
+* Pointer to the NTFS_VCB of the volume.
+*
+* @param FileRecord
+* The complete base file record. Modified in place; the caller writes it back.
+*
+* @param Type
+* The attribute type code.
+*
+* @param Name
+* The attribute's name, or NULL when NameLength is 0.
+*
+* @param NameLength
+* Number of WCHARs in Name, at most 255.
+*
+* @param Data
+* The value, or NULL when DataLength is 0.
+*
+* @param DataLength
+* Size of the value in bytes.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_COLLISION if an attribute of that type and name is
+* already there, STATUS_DISK_FULL if the record has no room for it, STATUS_NOT_IMPLEMENTED
+* for a record with an $ATTRIBUTE_LIST, whose entries this doesn't maintain.
+*/
+NTSTATUS
+AddResidentAttribute(PNTFS_VCB Vcb,
+                     PFILE_RECORD_HEADER FileRecord,
+                     ULONG Type,
+                     PCWSTR Name,
+                     USHORT NameLength,
+                     const VOID *Data,
+                     ULONG DataLength)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    PNTFS_ATTR_RECORD Attribute;
+    PNTFS_ATTR_RECORD InsertPoint = NULL;
+    ULONG ValueOffset;
+    ULONG AttributeLength;
+    ULONG InsertOffset;
+
+    ASSERT(NameLength <= NTFS_MAX_NAME_LENGTH);
+
+    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+    while (Attribute->Type != AttributeEnd)
+    {
+        LONG Order;
+
+        ASSERT((ULONG_PTR)Attribute + Attribute->Length <= (ULONG_PTR)FileRecord + FileRecord->BytesInUse);
+
+        if (Attribute->Type == AttributeAttributeList)
+        {
+            DPRINT1("Adding an attribute to a record with an $ATTRIBUTE_LIST isn't implemented\n");
+            return STATUS_NOT_IMPLEMENTED;
+        }
+
+        Order = NtfsCompareAttributeOrder(Vcb,
+                                          Type, Name, NameLength,
+                                          Attribute->Type,
+                                          (PCWSTR)((ULONG_PTR)Attribute + Attribute->NameOffset),
+                                          Attribute->NameLength);
+        if (Order == 0)
+            return STATUS_OBJECT_NAME_COLLISION;
+
+        if (Order < 0 && InsertPoint == NULL)
+            InsertPoint = Attribute;
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+    }
+
+    if (InsertPoint == NULL)
+        InsertPoint = Attribute;
+
+    ValueOffset = ALIGN_UP_BY(ResidentHeaderLength + NameLength * sizeof(WCHAR), ATTR_RECORD_ALIGNMENT);
+    AttributeLength = ALIGN_UP_BY(ValueOffset + DataLength, ATTR_RECORD_ALIGNMENT);
+
+    if (Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < AttributeLength)
+        return STATUS_DISK_FULL;
+
+    // Make room: everything from the insertion point on, end markers included, moves back
+    InsertOffset = (ULONG)((ULONG_PTR)InsertPoint - (ULONG_PTR)FileRecord);
+    RtlMoveMemory((PUCHAR)InsertPoint + AttributeLength, InsertPoint, FileRecord->BytesInUse - InsertOffset);
+    FileRecord->BytesInUse += AttributeLength;
+
+    RtlZeroMemory(InsertPoint, AttributeLength);
+    InsertPoint->Type = Type;
+    InsertPoint->Length = AttributeLength;
+    InsertPoint->NameLength = (UCHAR)NameLength;
+    InsertPoint->NameOffset = (USHORT)ResidentHeaderLength;
+    InsertPoint->Instance = FileRecord->NextAttributeNumber++;
+    InsertPoint->Resident.ValueLength = DataLength;
+    InsertPoint->Resident.ValueOffset = (USHORT)ValueOffset;
+    RtlCopyMemory((PUCHAR)InsertPoint + ResidentHeaderLength, Name, NameLength * sizeof(WCHAR));
+    if (DataLength != 0)
+        RtlCopyMemory((PUCHAR)InsertPoint + ValueOffset, Data, DataLength);
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsRemoveAttribute
+* @implemented
+*
+* Takes the attribute at AttrOffset out of a file record. A non-resident attribute's
+* clusters must already have been freed.
+*/
+VOID
+NtfsRemoveAttribute(PFILE_RECORD_HEADER FileRecord,
+                    ULONG AttrOffset)
+{
+    PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONG Length = Attribute->Length;
+
+    ASSERT(Attribute->Type != AttributeEnd);
+    ASSERT(AttrOffset + Length < FileRecord->BytesInUse);
+
+    RtlMoveMemory(Attribute,
+                  (PUCHAR)Attribute + Length,
+                  FileRecord->BytesInUse - AttrOffset - Length);
+    FileRecord->BytesInUse -= Length;
+}
+
 /* A colon starts a stream name (MS-FSA 2.1.5.1), so no file or directory
  * name ever contains one. */
 BOOLEAN
