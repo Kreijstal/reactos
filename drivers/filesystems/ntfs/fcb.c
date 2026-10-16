@@ -103,7 +103,7 @@ NtfsSetFCBPath(
 VOID
 NtfsReplaceFCBPath(
     _Inout_ PNTFS_FCB Fcb,
-    _In_ __drv_aliasesMem PWCHAR Path)
+    _In_ PWCHAR Path)
 {
     PWCHAR OldPath = Fcb->PathName;
 
@@ -323,6 +323,9 @@ NtfsRemoveFCBFromTable(
 {
     KIRQL OldIrql;
 
+    PLIST_ENTRY Entry;
+    SIZE_T PathLength = wcslen(Fcb->PathName);
+
     KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
 
     /* FCB_DELETED tells NtfsReleaseFCB() the entry is already unlinked */
@@ -331,6 +334,25 @@ NtfsRemoveFCBFromTable(
         RemoveEntryList(&Fcb->FcbListEntry);
         InitializeListHead(&Fcb->FcbListEntry);
         Fcb->Flags |= FCB_DELETED;
+    }
+
+    /* The named streams of a deleted file went with it */
+    Entry = Vcb->FcbListHead.Flink;
+    while (Fcb->Stream[0] == UNICODE_NULL && Entry != &Vcb->FcbListHead)
+    {
+        PNTFS_FCB Other = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
+
+        Entry = Entry->Flink;
+
+        if (Other->MFTIndex == Fcb->MFTIndex &&
+            Other->Stream[0] != UNICODE_NULL &&
+            _wcsnicmp(Other->PathName, Fcb->PathName, PathLength) == 0 &&
+            Other->PathName[PathLength] == L':')
+        {
+            RemoveEntryList(&Other->FcbListEntry);
+            InitializeListHead(&Other->FcbListEntry);
+            Other->Flags |= FCB_DELETED;
+        }
     }
 
     KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
@@ -575,6 +597,119 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     rcFCB->LinkCount = Record->LinkCount;
     NtfsAddFCBToTable(Vcb, rcFCB);
     *fileFCB = rcFCB;
+
+    return STATUS_SUCCESS;
+}
+
+
+/**
+* @name NtfsMakeStreamFCB
+*
+* Makes the FCB of a named data stream of the file BaseFcb is open on, and puts it in the
+* FCB table under "path:stream".
+*
+* @param StreamName
+* The stream's name, at most 255 characters.
+*
+* @param StreamFcb
+* Receives the FCB, referenced.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND if the file has no such stream, or an
+* allocation or I/O error.
+*/
+NTSTATUS
+NtfsMakeStreamFCB(
+    _In_ PNTFS_VCB Vcb,
+    _In_ PNTFS_FCB BaseFcb,
+    _In_ PCUNICODE_STRING StreamName,
+    _Out_ PNTFS_FCB *StreamFcb)
+{
+    WCHAR Stream[NTFS_MAX_NAME_LENGTH + 1];
+    PFILE_RECORD_HEADER Record;
+    PNTFS_ATTR_CONTEXT DataContext;
+    ULONGLONG AllocatedSize;
+    SIZE_T BaseLength;
+    PWCHAR Path;
+    PNTFS_FCB Fcb;
+    NTSTATUS Status;
+
+    ASSERT(StreamName->Length != 0 && StreamName->Length <= NTFS_MAX_NAME_LENGTH * sizeof(WCHAR));
+    ASSERT(BaseFcb->Stream[0] == UNICODE_NULL);
+
+    *StreamFcb = NULL;
+
+    RtlCopyMemory(Stream, StreamName->Buffer, StreamName->Length);
+    Stream[StreamName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(Vcb, BaseFcb->MFTIndex, Record);
+    if (NT_SUCCESS(Status))
+    {
+        Status = FindAttribute(Vcb, Record, AttributeData, Stream, StreamName->Length / sizeof(WCHAR), &DataContext, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            /* Keep the stream's name as the disk has it */
+            RtlCopyMemory(Stream,
+                          (PUCHAR)DataContext->pRecord + DataContext->pRecord->NameOffset,
+                          StreamName->Length);
+            ReleaseAttributeContext(DataContext);
+        }
+        else if (Status == STATUS_NOT_FOUND || Status == STATUS_END_OF_FILE)
+        {
+            Status = STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        return Status;
+    }
+
+    BaseLength = wcslen(BaseFcb->PathName);
+    Path = ExAllocatePoolWithTag(NonPagedPool, (BaseLength + 1 + wcslen(Stream) + 1) * sizeof(WCHAR), TAG_NTFS);
+    if (Path == NULL)
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlCopyMemory(Path, BaseFcb->PathName, BaseLength * sizeof(WCHAR));
+    Path[BaseLength] = L':';
+    wcscpy(Path + BaseLength + 1, Stream);
+
+    Fcb = NtfsCreateFCB(Path, Stream, Vcb);
+    ExFreePoolWithTag(Path, TAG_NTFS);
+    if (Fcb == NULL)
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* A stream is a file's data, even when the file is a directory */
+    RtlCopyMemory(&Fcb->Entry, &BaseFcb->Entry, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
+    Fcb->Entry.FileAttributes &= ~NTFS_FILE_TYPE_DIRECTORY;
+    Fcb->Entry.NameType = BaseFcb->Entry.NameType;
+
+    Fcb->RFCB.FileSize.QuadPart = NtfsGetFileSize(Vcb, Record, Stream, wcslen(Stream), &AllocatedSize);
+    Fcb->RFCB.ValidDataLength = Fcb->RFCB.FileSize;
+    Fcb->RFCB.AllocationSize.QuadPart = AllocatedSize;
+
+    Fcb->RefCount = 1;
+    Fcb->MFTIndex = BaseFcb->MFTIndex;
+    Fcb->SequenceNumber = BaseFcb->SequenceNumber;
+    Fcb->LinkCount = BaseFcb->LinkCount;
+
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+
+    NtfsFCBInitializeCache(Vcb, Fcb);
+    NtfsAddFCBToTable(Vcb, Fcb);
+
+    *StreamFcb = Fcb;
 
     return STATUS_SUCCESS;
 }

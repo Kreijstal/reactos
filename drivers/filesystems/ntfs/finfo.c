@@ -276,12 +276,14 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
                          PFILE_STREAM_INFORMATION StreamInfo,
                          PULONG BufferLength)
 {
-    ULONG CurrentSize;
+    static const WCHAR DataSuffix[] = L":$DATA";
     FIND_ATTR_CONTXT Context;
     PNTFS_ATTR_RECORD Attribute;
-    NTSTATUS Status, BrowseStatus;
+    NTSTATUS Status = STATUS_SUCCESS, BrowseStatus;
     PFILE_RECORD_HEADER FileRecord;
-    PFILE_STREAM_INFORMATION CurrentInfo = StreamInfo, Previous = NULL;
+    PFILE_STREAM_INFORMATION Previous = NULL;
+    ULONG Offset = 0;
+    ULONG Used = 0;
 
     if (*BufferLength < sizeof(FILE_STREAM_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
@@ -301,38 +303,45 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
         return Status;
     }
 
+    /* One entry per $DATA attribute, ":name:$DATA", the unnamed one "::$DATA" */
     BrowseStatus = FindFirstAttribute(&Context, DeviceExt, FileRecord, FALSE, &Attribute);
     while (NT_SUCCESS(BrowseStatus))
     {
         if (Attribute->Type == AttributeData)
         {
-            CurrentSize = FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName) + Attribute->NameLength * sizeof(WCHAR) + wcslen(L"::$DATA") * sizeof(WCHAR);
+            PFILE_STREAM_INFORMATION CurrentInfo = (PFILE_STREAM_INFORMATION)((ULONG_PTR)StreamInfo + Offset);
+            ULONG NameBytes = Attribute->NameLength * sizeof(WCHAR);
+            ULONG StreamNameLength = sizeof(WCHAR) + NameBytes + sizeof(DataSuffix) - sizeof(UNICODE_NULL);
+            ULONG CurrentSize = FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName) + StreamNameLength;
 
-            if (CurrentSize > *BufferLength)
+            /* An entry that doesn't fit isn't returned at all */
+            if (Offset > *BufferLength || CurrentSize > *BufferLength - Offset)
             {
                 Status = STATUS_BUFFER_OVERFLOW;
                 break;
             }
 
             CurrentInfo->NextEntryOffset = 0;
-            CurrentInfo->StreamNameLength = (Attribute->NameLength + wcslen(L"::$DATA")) * sizeof(WCHAR);
+            CurrentInfo->StreamNameLength = StreamNameLength;
             CurrentInfo->StreamSize.QuadPart = AttributeDataLength(Attribute);
             CurrentInfo->StreamAllocationSize.QuadPart = AttributeAllocatedLength(Attribute);
             CurrentInfo->StreamName[0] = L':';
-            RtlMoveMemory(&CurrentInfo->StreamName[1], (PWCHAR)((ULONG_PTR)Attribute + Attribute->NameOffset), CurrentInfo->StreamNameLength);
-            RtlMoveMemory(&CurrentInfo->StreamName[Attribute->NameLength + 1], L":$DATA", sizeof(L":$DATA") - sizeof(UNICODE_NULL));
+            RtlCopyMemory(&CurrentInfo->StreamName[1], (PWCHAR)((ULONG_PTR)Attribute + Attribute->NameOffset), NameBytes);
+            RtlCopyMemory(&CurrentInfo->StreamName[1 + Attribute->NameLength], DataSuffix, sizeof(DataSuffix) - sizeof(UNICODE_NULL));
 
+            /* Entries start on 8-byte boundaries */
             if (Previous != NULL)
-            {
-                Previous->NextEntryOffset = (ULONG_PTR)CurrentInfo - (ULONG_PTR)Previous;
-            }
+                Previous->NextEntryOffset = (ULONG)((ULONG_PTR)CurrentInfo - (ULONG_PTR)Previous);
+
             Previous = CurrentInfo;
-            CurrentInfo = (PFILE_STREAM_INFORMATION)((ULONG_PTR)CurrentInfo + CurrentSize);
-            *BufferLength -= CurrentSize;
+            Used = Offset + CurrentSize;
+            Offset += ALIGN_UP_BY(CurrentSize, sizeof(LONGLONG));
         }
 
         BrowseStatus = FindNextAttribute(&Context, &Attribute);
     }
+
+    *BufferLength -= Used;
 
     FindCloseAttribute(&Context);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
