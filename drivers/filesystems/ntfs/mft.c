@@ -3589,6 +3589,76 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     return FreeMftEntry(DeviceExt, MftIndex);
 }
 
+/**
+* @name NtfsDeleteStream
+* @implemented
+*
+* Deletes a named data stream, leaving the file and its other streams alone.
+*
+* @param DeviceExt
+* Points to the target disk's DEVICE_EXTENSION.
+*
+* @param MftIndex
+* MFT index of the file the stream belongs to.
+*
+* @param StreamName
+* Name of the stream, NUL-terminated.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND if the file has no such stream, or an
+* allocation or I/O error.
+*/
+NTSTATUS
+NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
+                 ULONGLONG MftIndex,
+                 PCWSTR StreamName)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PNTFS_ATTR_CONTEXT DataContext;
+    ULONG AttrOffset;
+    NTSTATUS Status;
+
+    ASSERT(StreamName[0] != UNICODE_NULL);
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(DeviceExt, FileRecord, AttributeData, StreamName, wcslen(StreamName), &DataContext, &AttrOffset);
+
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
+    /* The record is the base record: an attribute in a child record isn't freed here */
+    ASSERT((DataContext->FileMFTIndex & NTFS_MFT_MASK) == MftIndex);
+
+    // Give back the stream's clusters first
+    if (DataContext->pRecord->IsNonResident &&
+        DataContext->pRecord->NonResident.HighestVCN != (ULONGLONG)-1)
+    {
+        ULONGLONG ClusterCount = DataContext->pRecord->NonResident.HighestVCN + 1;
+
+        Status = FreeClusters(DeviceExt, DataContext, AttrOffset, FileRecord, (ULONG)ClusterCount);
+    }
+
+    ReleaseAttributeContext(DataContext);
+
+    if (NT_SUCCESS(Status))
+    {
+        NtfsRemoveAttribute(FileRecord, AttrOffset);
+        Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
+    }
+
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
 NTSTATUS
 AddFixupArray(PDEVICE_EXTENSION Vcb,
               PNTFS_RECORD_HEADER Record)

@@ -179,8 +179,14 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                     Status = STATUS_DIRECTORY_NOT_EMPTY;
             }
 
+            /* Deleting a named stream takes only that stream */
             if (NT_SUCCESS(Status))
-                Status = NtfsDeleteFileRecord(DeviceExt, Fcb->MFTIndex, FALSE);
+            {
+                if (Fcb->Stream[0] != UNICODE_NULL)
+                    Status = NtfsDeleteStream(DeviceExt, Fcb->MFTIndex, Fcb->Stream);
+                else
+                    Status = NtfsDeleteFileRecord(DeviceExt, Fcb->MFTIndex, FALSE);
+            }
 
             /* A cached FCB for a path that no longer exists would make it look present */
             if (NT_SUCCESS(Status))
