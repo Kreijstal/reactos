@@ -670,6 +670,16 @@ NtfsMarkIrpContextForQueue(PNTFS_IRP_CONTEXT IrpContext)
     return STATUS_PENDING;
 }
 
+/* NTFS's case folding: the volume's $UpCase once it's loaded */
+FORCEINLINE
+WCHAR
+NtfsUpcaseChar(
+    _In_ PDEVICE_EXTENSION Vcb,
+    _In_ WCHAR Char)
+{
+    return (Vcb != NULL && Vcb->UpCaseTable != NULL) ? Vcb->UpCaseTable[Char] : RtlUpcaseUnicodeChar(Char);
+}
+
 /* attrib.c */
 
 //VOID
@@ -1405,6 +1415,13 @@ NTSTATUS
 UpdateFileRecord(PDEVICE_EXTENSION Vcb,
                  ULONGLONG MftIndex,
                  PFILE_RECORD_HEADER FileRecord);
+
+BOOLEAN
+NtfsAttributeNamesEqual(
+    _In_ PDEVICE_EXTENSION Vcb,
+    _In_ PCWSTR Name1,
+    _In_ PCWSTR Name2,
+    _In_ ULONG Length);
 
 NTSTATUS
 FindAttribute(PDEVICE_EXTENSION Vcb,
