@@ -4280,6 +4280,11 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
         Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex);
         if (!NT_SUCCESS(Status))
         {
+            /* The index walk reports a miss as a missing path. A missing last
+             * component is a missing name (MS-FSA 2.1.5.1). */
+            if (Status == STATUS_OBJECT_PATH_NOT_FOUND && Remaining.Length == 0)
+                Status = STATUS_OBJECT_NAME_NOT_FOUND;
+
             return Status;
         }
 
