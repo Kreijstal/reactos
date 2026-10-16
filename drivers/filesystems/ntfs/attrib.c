@@ -2553,18 +2553,20 @@ NtfsStoreMappingPairs(PNTFS_VCB Vcb,
 }
 
 /**
-* @name NtfsMakeAttributeSparse
+* @name NtfsSetAttributeUnits
 * @implemented
 *
-* Turns a non-resident, not compressed attribute into a sparse one: its header gains the
-* total allocated size, its allocation unit becomes 16 clusters, and its allocation is
-* rounded up to whole units with a hole. The caller writes FileRecord back.
+* Makes a non-resident attribute sparse (NTFS_ATTR_SPARSE) or LZNT1-compressed
+* (NTFS_ATTR_COMPRESSED_LZNT1): it gets the long header that counts the clusters it really
+* has, an allocation unit of 16 clusters, and its allocation rounded up to whole units with
+* a hole. The caller writes FileRecord back.
 */
 NTSTATUS
-NtfsMakeAttributeSparse(PNTFS_VCB Vcb,
-                        PNTFS_ATTR_CONTEXT AttrContext,
-                        ULONG AttrOffset,
-                        PFILE_RECORD_HEADER FileRecord)
+NtfsSetAttributeUnits(PNTFS_VCB Vcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      ULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord,
+                      USHORT Flag)
 {
     const ULONG ShortHeader = FIELD_OFFSET(NTFS_ATTR_RECORD, NonResident.CompressedSize);
     const ULONG LongHeader = sizeof(NTFS_ATTR_RECORD);
@@ -2576,33 +2578,97 @@ NtfsMakeAttributeSparse(PNTFS_VCB Vcb,
     NTSTATUS Status;
 
     ASSERT(AttrContext->pRecord->IsNonResident);
-    ASSERT(!(Destination->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE)));
-    ASSERT(Destination->NonResident.MappingPairsOffset >= ShortHeader);
+    ASSERT(Flag == NTFS_ATTR_SPARSE || Flag == NTFS_ATTR_COMPRESSED_LZNT1);
 
-    Status = NtfsResizeAttributeRecord(Vcb, AttrContext, AttrOffset, FileRecord, OldLength + (LongHeader - ShortHeader));
-    if (!NT_SUCCESS(Status))
-        return Status;
-
-    /* The name and runs move behind the longer header */
-    RtlMoveMemory((PUCHAR)Destination + LongHeader, (PUCHAR)Destination + ShortHeader, OldLength - ShortHeader);
-    if (Destination->NameLength != 0 && Destination->NameOffset >= ShortHeader)
-        Destination->NameOffset += (LongHeader - ShortHeader);
-    Destination->NonResident.MappingPairsOffset += (LongHeader - ShortHeader);
-
-    for (i = 0; FsRtlGetNextLargeMcbEntry(&AttrContext->DataRunsMCB, i, &Vbn, &Lbn, &Count); i++)
+    /* An attribute that has units already has the long header */
+    if (!(Destination->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE)))
     {
-        if (Lbn != -1)
-            Allocated += Count;
+        ASSERT(Destination->NonResident.MappingPairsOffset >= ShortHeader);
+
+        Status = NtfsResizeAttributeRecord(Vcb, AttrContext, AttrOffset, FileRecord, OldLength + (LongHeader - ShortHeader));
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        /* The name and runs move behind the longer header */
+        RtlMoveMemory((PUCHAR)Destination + LongHeader, (PUCHAR)Destination + ShortHeader, OldLength - ShortHeader);
+        if (Destination->NameLength != 0 && Destination->NameOffset >= ShortHeader)
+            Destination->NameOffset += (LongHeader - ShortHeader);
+        Destination->NonResident.MappingPairsOffset += (LongHeader - ShortHeader);
+
+        for (i = 0; FsRtlGetNextLargeMcbEntry(&AttrContext->DataRunsMCB, i, &Vbn, &Lbn, &Count); i++)
+        {
+            if (Lbn != -1)
+                Allocated += Count;
+        }
+        Destination->NonResident.CompressedSize = Allocated * Vcb->NtfsInfo.BytesPerCluster;
     }
 
-    Destination->Flags |= NTFS_ATTR_SPARSE;
+    Destination->Flags |= Flag;
     Destination->NonResident.CompressionUnit = NTFS_SPARSE_UNIT_SHIFT;
-    Destination->NonResident.CompressedSize = Allocated * Vcb->NtfsInfo.BytesPerCluster;
     RtlCopyMemory(AttrContext->pRecord, Destination, Destination->Length);
 
     Clusters = Destination->NonResident.AllocatedSize / Vcb->NtfsInfo.BytesPerCluster;
     return NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord,
                                  ALIGN_UP_BY(Clusters, NtfsSparseUnitClusters(AttrContext)));
+}
+
+/**
+* @name NtfsClearAttributeUnits
+* @implemented
+*
+* Undoes NtfsSetAttributeUnits() for one flag: once neither is left, the attribute gets back
+* the short header and no allocation unit. Only an attribute without clusters may lose its
+* units. The caller writes FileRecord back.
+*/
+NTSTATUS
+NtfsClearAttributeUnits(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord,
+                        USHORT Flag)
+{
+    const ULONG ShortHeader = FIELD_OFFSET(NTFS_ATTR_RECORD, NonResident.CompressedSize);
+    const ULONG LongHeader = sizeof(NTFS_ATTR_RECORD);
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONG OldLength = Destination->Length;
+
+    ASSERT(AttrContext->pRecord->IsNonResident);
+
+    Destination->Flags &= ~Flag;
+    if (Destination->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE))
+    {
+        RtlCopyMemory(AttrContext->pRecord, Destination, Destination->Length);
+        return STATUS_SUCCESS;
+    }
+
+    ASSERT(Destination->NonResident.CompressedSize == 0);
+
+    /* The name and runs move in behind the shorter header */
+    RtlMoveMemory((PUCHAR)Destination + ShortHeader, (PUCHAR)Destination + LongHeader, OldLength - LongHeader);
+    if (Destination->NameLength != 0 && Destination->NameOffset >= LongHeader)
+        Destination->NameOffset -= (LongHeader - ShortHeader);
+    Destination->NonResident.MappingPairsOffset -= (LongHeader - ShortHeader);
+    Destination->NonResident.CompressionUnit = 0;
+    RtlCopyMemory(AttrContext->pRecord, Destination, OldLength - (LongHeader - ShortHeader));
+
+    return NtfsResizeAttributeRecord(Vcb, AttrContext, AttrOffset, FileRecord, OldLength - (LongHeader - ShortHeader));
+}
+
+/**
+* @name NtfsMakeAttributeSparse
+* @implemented
+*
+* Makes a non-resident attribute sparse; see NtfsSetAttributeUnits().
+*/
+NTSTATUS
+NtfsMakeAttributeSparse(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord)
+{
+    ASSERT(!(AttrContext->pRecord->Flags & NTFS_ATTR_COMPRESSION_MASK));
+
+    return NtfsSetAttributeUnits(Vcb, AttrContext, AttrOffset, FileRecord, NTFS_ATTR_SPARSE);
 }
 
 /**
@@ -2661,7 +2727,6 @@ NtfsAllocateSparseRange(PNTFS_VCB Vcb,
     BOOLEAN Changed = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    ASSERT(!(Destination->Flags & NTFS_ATTR_COMPRESSION_MASK));
     ASSERT(End <= TotalVcns);
 
     while (Vcn < End && NT_SUCCESS(Status))
@@ -2692,8 +2757,8 @@ NtfsAllocateSparseRange(PNTFS_VCB Vcb,
 
         if (NT_SUCCESS(Status))
         {
-            /* Only the long header of a sparse attribute counts what it has */
-            if (Destination->Flags & NTFS_ATTR_SPARSE)
+            /* Only the long header of a sparse or compressed attribute counts what it has */
+            if (Destination->Flags & (NTFS_ATTR_SPARSE | NTFS_ATTR_COMPRESSION_MASK))
             {
                 Destination->NonResident.CompressedSize += (ULONGLONG)Assigned * Vcb->NtfsInfo.BytesPerCluster;
                 AttrContext->pRecord->NonResident.CompressedSize = Destination->NonResident.CompressedSize;
@@ -2735,7 +2800,7 @@ NtfsDeallocateSparseRange(PNTFS_VCB Vcb,
     BOOLEAN Changed = FALSE;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    ASSERT(Destination->Flags & NTFS_ATTR_SPARSE);
+    ASSERT(Destination->Flags & (NTFS_ATTR_SPARSE | NTFS_ATTR_COMPRESSION_MASK));
 
     while (Vcn < End && NT_SUCCESS(Status))
     {

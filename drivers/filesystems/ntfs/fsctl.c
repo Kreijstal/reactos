@@ -1483,6 +1483,59 @@ NtfsSparseRequest(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsCompressionRequest
+*
+* FSCTL_GET_COMPRESSION and FSCTL_SET_COMPRESSION, METHOD_BUFFERED, on a file or directory.
+*/
+static
+NTSTATUS
+NtfsCompressionRequest(PDEVICE_EXTENSION DeviceExt,
+                       PIRP Irp,
+                       ULONG Code)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    USHORT Format;
+    NTSTATUS Status;
+
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+        return STATUS_INVALID_PARAMETER;
+
+    if (Code == FSCTL_GET_COMPRESSION)
+    {
+        if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(USHORT))
+            return STATUS_INVALID_PARAMETER;
+
+        ExAcquireResourceSharedLite(&Fcb->MainResource, TRUE);
+        Status = NtfsGetCompression(DeviceExt, Fcb, &Format);
+        ExReleaseResourceLite(&Fcb->MainResource);
+
+        if (NT_SUCCESS(Status))
+            Status = NtfsReturnFsctlOutput(Irp, &Format, sizeof(Format));
+        return Status;
+    }
+
+    Status = NtfsCaptureFsctlInput(Irp, &Format, sizeof(Format));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+    Status = NtfsSetCompression(DeviceExt, Fcb, Format);
+    ExReleaseResourceLite(&Fcb->PagingIoResource);
+
+    if (NT_SUCCESS(Status))
+        NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_COMPRESSION_CHANGE);
+
+    ExReleaseResourceLite(&Fcb->MainResource);
+
+    return Status;
+}
+
+/**
 * @name NtfsUsnRequest
 *
 * The change journal FSCTLs: CREATE, DELETE, QUERY and READ_USN_JOURNAL and ENUM_USN_DATA on
@@ -1765,6 +1818,11 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_GET_RETRIEVAL_POINTERS:
             Status = NtfsGetRetrievalPointers(DeviceExt, Irp);
+            break;
+
+        case FSCTL_GET_COMPRESSION:
+        case FSCTL_SET_COMPRESSION:
+            Status = NtfsCompressionRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
             break;
 
         case FSCTL_SET_SPARSE:

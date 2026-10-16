@@ -154,13 +154,6 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     Fcb = (PNTFS_FCB)FileObject->FsContext;
 
-    if (NtfsFCBIsCompressed(Fcb))
-    {
-        DPRINT1("Compressed file!\n");
-        UNIMPLEMENTED;
-        return STATUS_NOT_IMPLEMENTED;
-    }
-
     if (NtfsFCBIsEncrypted(Fcb))
     {
         DPRINT1("Encrypted file!\n");
@@ -229,6 +222,21 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     ToRead = Length;
     if (ReadOffset + Length > StreamSize)
         ToRead = (ULONG)(StreamSize - ReadOffset);
+
+    /* A compressed stream is read unit by unit */
+    if (NtfsAttributeIsCompressed(DataContext))
+    {
+        Status = NtfsReadCompressed(DeviceExt, DataContext, ReadOffset, Buffer, ToRead);
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        if (ToRead != Length)
+            RtlZeroMemory(Buffer + ToRead, Length - ToRead);
+        *LengthRead = ToRead;
+        return STATUS_SUCCESS;
+    }
 
     RealReadOffset = ReadOffset;
     RealLength = ToRead;
@@ -474,14 +482,6 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     DPRINT("Fcb->PathName: %wS\n", Fcb->PathName);
     DPRINT("Fcb->ObjectName: %wS\n", Fcb->ObjectName);
 
-    // we don't yet handle compression
-    if (NtfsFCBIsCompressed(Fcb))
-    {
-        DPRINT("Compressed file!\n");
-        UNIMPLEMENTED;
-        return STATUS_NOT_IMPLEMENTED;
-    }
-
     // allocate non-paged memory for the FILE_RECORD_HEADER
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -571,7 +571,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
              * without touching the bitmap or the run list. Cleanup gives back
              * what's left over. */
             if (DataContext->pRecord->IsNonResident &&
-                !NtfsAttributeIsSparse(DataContext) &&
+                !NtfsAttributeHasUnits(DataContext) &&
                 (ULONGLONG)DataSize.QuadPart > DataContext->pRecord->NonResident.AllocatedSize)
             {
                 ULONGLONG Ahead;
@@ -594,7 +594,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
 
             /* What lies between the old end and the write reads as zeros */
             if (NT_SUCCESS(Status) && WriteOffset > StreamSize)
-                Status = NtfsZeroAttributeRange(DeviceExt, DataContext, Holder, StreamSize, WriteOffset);
+                Status = NtfsZeroStreamRange(DeviceExt, DataContext, AttributeOffset, Holder, StreamSize, WriteOffset);
 
             if (!NT_SUCCESS(Status))
             {
@@ -653,7 +653,17 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     /* Buffer is the system mapping of this IRP's MDL, so hand the IRP down too
      * and let the run layer borrow it instead of locking these pages twice,
      * which the paging path forbids */
-    Status = WriteAttributeFromIrp(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, Holder, Irp);
+    if (NtfsAttributeIsCompressed(DataContext))
+    {
+        /* A compressed stream is written unit by unit */
+        Status = NtfsWriteCompressed(DeviceExt, DataContext, AttributeOffset, Holder, WriteOffset, Buffer, Length);
+        if (NT_SUCCESS(Status))
+            *LengthWritten = Length;
+    }
+    else
+    {
+        Status = WriteAttributeFromIrp(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, Holder, Irp);
+    }
 
     // Did the write fail?
     if (!NT_SUCCESS(Status))

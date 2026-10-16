@@ -289,6 +289,7 @@ typedef enum
 /* NTFS_ATTR_RECORD Flags */
 #define NTFS_ATTR_COMPRESSION_MASK 0x00FF
 #define NTFS_ATTR_SPARSE           0x8000
+#define NTFS_ATTR_COMPRESSED_LZNT1 0x0001
 /* A sparse stream is allocated in units of 1 << NTFS_SPARSE_UNIT_SHIFT clusters, like Windows' */
 #define NTFS_SPARSE_UNIT_SHIFT     4
 
@@ -938,6 +939,20 @@ NtfsStoreMappingPairs(PNTFS_VCB Vcb,
                       ULONGLONG VcnCount);
 
 NTSTATUS
+NtfsSetAttributeUnits(PNTFS_VCB Vcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      ULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord,
+                      USHORT Flag);
+
+NTSTATUS
+NtfsClearAttributeUnits(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord,
+                        USHORT Flag);
+
+NTSTATUS
 NtfsMakeAttributeSparse(PNTFS_VCB Vcb,
                         PNTFS_ATTR_CONTEXT AttrContext,
                         ULONG AttrOffset,
@@ -967,13 +982,30 @@ NtfsSparseUnitClusters(PNTFS_ATTR_CONTEXT AttrContext)
     return 1UL << AttrContext->pRecord->NonResident.CompressionUnit;
 }
 
-/* Whether a non-resident attribute can have holes */
+/* Whether a non-resident attribute is sparse */
 FORCEINLINE
 BOOLEAN
 NtfsAttributeIsSparse(PNTFS_ATTR_CONTEXT AttrContext)
 {
     return AttrContext->pRecord->IsNonResident &&
            (AttrContext->pRecord->Flags & NTFS_ATTR_SPARSE) != 0;
+}
+
+/* Whether a non-resident attribute is compressed */
+FORCEINLINE
+BOOLEAN
+NtfsAttributeIsCompressed(PNTFS_ATTR_CONTEXT AttrContext)
+{
+    return AttrContext->pRecord->IsNonResident &&
+           (AttrContext->pRecord->Flags & NTFS_ATTR_COMPRESSION_MASK) != 0;
+}
+
+/* Whether a non-resident attribute is allocated in units, with holes: sparse or compressed */
+FORCEINLINE
+BOOLEAN
+NtfsAttributeHasUnits(PNTFS_ATTR_CONTEXT AttrContext)
+{
+    return NtfsAttributeIsSparse(AttrContext) || NtfsAttributeIsCompressed(AttrContext);
 }
 
 NTSTATUS
@@ -2027,6 +2059,43 @@ NtfsEnumUsnData(PDEVICE_EXTENSION Vcb,
                 PUCHAR Output,
                 ULONG OutputLength,
                 PULONG Returned);
+
+
+/* compressed.c */
+
+NTSTATUS
+NtfsReadCompressed(PDEVICE_EXTENSION Vcb,
+                   PNTFS_ATTR_CONTEXT Context,
+                   ULONGLONG Offset,
+                   PUCHAR Buffer,
+                   ULONG Length);
+
+NTSTATUS
+NtfsWriteCompressed(PDEVICE_EXTENSION Vcb,
+                    PNTFS_ATTR_CONTEXT Context,
+                    ULONG AttrOffset,
+                    PFILE_RECORD_HEADER Holder,
+                    ULONGLONG Offset,
+                    const UCHAR *Buffer,
+                    ULONG Length);
+
+NTSTATUS
+NtfsZeroStreamRange(PDEVICE_EXTENSION Vcb,
+                    PNTFS_ATTR_CONTEXT Context,
+                    ULONG AttrOffset,
+                    PFILE_RECORD_HEADER Holder,
+                    ULONGLONG Start,
+                    ULONGLONG End);
+
+NTSTATUS
+NtfsGetCompression(PDEVICE_EXTENSION Vcb,
+                   PNTFS_FCB Fcb,
+                   PUSHORT Format);
+
+NTSTATUS
+NtfsSetCompression(PDEVICE_EXTENSION Vcb,
+                   PNTFS_FCB Fcb,
+                   USHORT Format);
 
 
 /* sparse.c */

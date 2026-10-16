@@ -197,7 +197,7 @@ NtfsZeroRange(PDEVICE_EXTENSION Vcb,
         return Status;
     }
 
-    return NtfsZeroAttributeRange(Vcb, Edit->Context, Edit->Holder, Start, End);
+    return NtfsZeroStreamRange(Vcb, Edit->Context, Edit->Offset, Edit->Holder, Start, End);
 }
 
 /**
@@ -341,7 +341,7 @@ NtfsQueryAllocatedRanges(PDEVICE_EXTENSION Vcb,
     {
         End = min(End, AttributeDataLength(Edit.Context->pRecord));
 
-        if (!NtfsAttributeIsSparse(Edit.Context))
+        if (!NtfsAttributeHasUnits(Edit.Context))
         {
             NtfsAddRange(&Output, Start, End);
         }

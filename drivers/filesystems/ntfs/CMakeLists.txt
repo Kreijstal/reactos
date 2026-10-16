@@ -8,6 +8,7 @@ list(APPEND SOURCE
     btree.c
     cleanup.c
     close.c
+    compressed.c
     create.c
     devctl.c
     ea.c
