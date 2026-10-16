@@ -2150,6 +2150,15 @@ ConvertLargeMCBToDataRuns(PLARGE_MCB DataRunsMCB,
             Count = VcnCount - NextVcn;
             Tail = TRUE;
         }
+        else if (Vbn > (LONGLONG)NextVcn)
+        {
+            /* FsRtl reports a hole between two runs as a run with no LBN, but encode one
+             * that isn't reported the same way; the next entry comes round again */
+            Count = Vbn - NextVcn;
+            Vbn = NextVcn;
+            Lbn = -1;
+            i--;
+        }
 
         // [vbn, lbn, count]
         DPRINT("\t[%I64d, %I64d,%I64d]\n", Vbn, Lbn, Count);
@@ -2437,6 +2446,330 @@ FreeClusters(PNTFS_VCB Vcb,
 #if NTFS_DUMP_DATA_RUNS
     NtfsDumpDataRuns((PUCHAR)((ULONG_PTR)DestinationAttribute + DestinationAttribute->NonResident.MappingPairsOffset), 0);
 #endif
+
+    return Status;
+}
+
+/**
+* @name NtfsResizeAttributeRecord
+*
+* Gives an attribute record a new length in place, moving the attributes behind it. The
+* bytes it grows by are left for the caller to fill; AttrContext's copy follows.
+*/
+static
+NTSTATUS
+NtfsResizeAttributeRecord(PNTFS_VCB Vcb,
+                          PNTFS_ATTR_CONTEXT AttrContext,
+                          ULONG AttrOffset,
+                          PFILE_RECORD_HEADER FileRecord,
+                          ULONG NewLength)
+{
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONG OldLength = Destination->Length;
+    PNTFS_ATTR_RECORD Next = (PNTFS_ATTR_RECORD)((ULONG_PTR)Destination + OldLength);
+    PNTFS_ATTR_RECORD Copy;
+
+    ASSERT(NewLength % ATTR_RECORD_ALIGNMENT == 0);
+
+    if (NewLength == OldLength)
+        return STATUS_SUCCESS;
+
+    if (NewLength > OldLength && FileRecord->BytesInUse + (NewLength - OldLength) > Vcb->NtfsInfo.BytesPerFileRecord)
+        return STATUS_DISK_FULL;
+
+    Copy = ExAllocatePoolWithTag(NonPagedPool, NewLength, TAG_NTFS);
+    if (Copy == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    if (Next->Type != AttributeEnd)
+    {
+        PNTFS_ATTR_RECORD Final = MoveAttributes(Vcb, Next, AttrOffset + OldLength, (ULONG_PTR)Destination + NewLength);
+        SetFileRecordEnd(FileRecord, Final, FILE_RECORD_END);
+    }
+    else
+    {
+        SetFileRecordEnd(FileRecord, (PNTFS_ATTR_RECORD)((ULONG_PTR)Destination + NewLength), FILE_RECORD_END);
+    }
+
+    Destination->Length = NewLength;
+
+    RtlZeroMemory(Copy, NewLength);
+    RtlCopyMemory(Copy, AttrContext->pRecord, min(OldLength, NewLength));
+    Copy->Length = NewLength;
+    ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
+    AttrContext->pRecord = Copy;
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsStoreMappingPairs
+* @implemented
+*
+* Writes the runs of AttrContext's MCB into the attribute, VcnCount clusters of it with any
+* trailing hole, resizing the record as needed, and sets HighestVCN and AllocatedSize to
+* match. The caller writes FileRecord back.
+*/
+NTSTATUS
+NtfsStoreMappingPairs(PNTFS_VCB Vcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      ULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord,
+                      ULONGLONG VcnCount)
+{
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    PUCHAR RunBuffer;
+    ULONG RunBufferSize;
+    ULONG NewLength;
+    NTSTATUS Status;
+
+    ASSERT(AttrContext->pRecord->IsNonResident);
+
+    RunBuffer = ExAllocatePoolWithTag(NonPagedPool, Vcb->NtfsInfo.BytesPerFileRecord, TAG_NTFS);
+    if (RunBuffer == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ConvertLargeMCBToDataRuns(&AttrContext->DataRunsMCB, VcnCount, RunBuffer,
+                                       Vcb->NtfsInfo.BytesPerFileRecord, &RunBufferSize);
+    if (NT_SUCCESS(Status))
+    {
+        NewLength = ALIGN_UP_BY(Destination->NonResident.MappingPairsOffset + RunBufferSize, ATTR_RECORD_ALIGNMENT);
+        Status = NtfsResizeAttributeRecord(Vcb, AttrContext, AttrOffset, FileRecord, NewLength);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Destination->NonResident.HighestVCN = VcnCount - 1;
+        Destination->NonResident.AllocatedSize = VcnCount * Vcb->NtfsInfo.BytesPerCluster;
+        RtlCopyMemory((PUCHAR)Destination + Destination->NonResident.MappingPairsOffset, RunBuffer, RunBufferSize);
+
+        /* The copy follows the record, header and runs alike */
+        RtlCopyMemory(AttrContext->pRecord, Destination, Destination->Length);
+    }
+
+    ExFreePoolWithTag(RunBuffer, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsMakeAttributeSparse
+* @implemented
+*
+* Turns a non-resident, not compressed attribute into a sparse one: its header gains the
+* total allocated size, its allocation unit becomes 16 clusters, and its allocation is
+* rounded up to whole units with a hole. The caller writes FileRecord back.
+*/
+NTSTATUS
+NtfsMakeAttributeSparse(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord)
+{
+    const ULONG ShortHeader = FIELD_OFFSET(NTFS_ATTR_RECORD, NonResident.CompressedSize);
+    const ULONG LongHeader = sizeof(NTFS_ATTR_RECORD);
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONG OldLength = Destination->Length;
+    ULONGLONG Allocated = 0, Clusters;
+    LONGLONG Vbn, Lbn, Count;
+    ULONG i;
+    NTSTATUS Status;
+
+    ASSERT(AttrContext->pRecord->IsNonResident);
+    ASSERT(!(Destination->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE)));
+    ASSERT(Destination->NonResident.MappingPairsOffset >= ShortHeader);
+
+    Status = NtfsResizeAttributeRecord(Vcb, AttrContext, AttrOffset, FileRecord, OldLength + (LongHeader - ShortHeader));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The name and runs move behind the longer header */
+    RtlMoveMemory((PUCHAR)Destination + LongHeader, (PUCHAR)Destination + ShortHeader, OldLength - ShortHeader);
+    if (Destination->NameLength != 0 && Destination->NameOffset >= ShortHeader)
+        Destination->NameOffset += (LongHeader - ShortHeader);
+    Destination->NonResident.MappingPairsOffset += (LongHeader - ShortHeader);
+
+    for (i = 0; FsRtlGetNextLargeMcbEntry(&AttrContext->DataRunsMCB, i, &Vbn, &Lbn, &Count); i++)
+    {
+        if (Lbn != -1)
+            Allocated += Count;
+    }
+
+    Destination->Flags |= NTFS_ATTR_SPARSE;
+    Destination->NonResident.CompressionUnit = NTFS_SPARSE_UNIT_SHIFT;
+    Destination->NonResident.CompressedSize = Allocated * Vcb->NtfsInfo.BytesPerCluster;
+    RtlCopyMemory(AttrContext->pRecord, Destination, Destination->Length);
+
+    Clusters = Destination->NonResident.AllocatedSize / Vcb->NtfsInfo.BytesPerCluster;
+    return NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord,
+                                 ALIGN_UP_BY(Clusters, NtfsSparseUnitClusters(AttrContext)));
+}
+
+/**
+* @name NtfsZeroClusters
+*
+* Writes zeros over clusters on the volume.
+*/
+static
+NTSTATUS
+NtfsZeroClusters(PNTFS_VCB Vcb,
+                 ULONGLONG Lcn,
+                 ULONGLONG Count)
+{
+    const ULONG ChunkSize = 64 * 1024;
+    ULONGLONG Offset = Lcn * Vcb->NtfsInfo.BytesPerCluster;
+    ULONGLONG End = (Lcn + Count) * Vcb->NtfsInfo.BytesPerCluster;
+    PUCHAR Zeros;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    Zeros = ExAllocatePoolWithTag(NonPagedPool, ChunkSize, TAG_NTFS);
+    if (Zeros == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Zeros, ChunkSize);
+
+    for (; Offset < End && NT_SUCCESS(Status); Offset += ChunkSize)
+    {
+        Status = NtfsWriteDisk(Vcb->StorageDevice, Offset, (ULONG)min(ChunkSize, End - Offset),
+                               Vcb->NtfsInfo.BytesPerSector, Zeros);
+    }
+
+    ExFreePoolWithTag(Zeros, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsAllocateSparseRange
+* @implemented
+*
+* Gives the holes of an attribute in [StartVcn, StartVcn + VcnCount) clusters, which read as
+* zeros like the holes did. Holes belong to sparse attributes, but one without the flag that
+* has them is filled the same way. The caller writes FileRecord back.
+*/
+NTSTATUS
+NtfsAllocateSparseRange(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord,
+                        ULONGLONG StartVcn,
+                        ULONGLONG VcnCount)
+{
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONGLONG TotalVcns = Destination->NonResident.HighestVCN + 1;
+    ULONGLONG Vcn = StartVcn, End = StartVcn + VcnCount;
+    ULONG Desired = 0;
+    BOOLEAN Changed = FALSE;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(!(Destination->Flags & NTFS_ATTR_COMPRESSION_MASK));
+    ASSERT(End <= TotalVcns);
+
+    while (Vcn < End && NT_SUCCESS(Status))
+    {
+        LONGLONG Lbn, Length;
+        ULONG Assigned, First;
+
+        if (!FsRtlLookupLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, &Lbn, &Length, NULL, NULL, NULL))
+        {
+            /* Past the last mapping, the rest is a hole */
+            Lbn = -1;
+            Length = TotalVcns - Vcn;
+        }
+        Length = min(Length, (LONGLONG)(End - Vcn));
+
+        if (Lbn != -1)
+        {
+            Desired = (ULONG)(Lbn + Length);
+            Vcn += Length;
+            continue;
+        }
+
+        Status = NtfsAllocateClusters(Vcb, Desired, (ULONG)Length, &First, &Assigned);
+        if (NT_SUCCESS(Status))
+            Status = NtfsZeroClusters(Vcb, First, Assigned);
+        if (NT_SUCCESS(Status) && !FsRtlAddLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, First, Assigned))
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+
+        if (NT_SUCCESS(Status))
+        {
+            /* Only the long header of a sparse attribute counts what it has */
+            if (Destination->Flags & NTFS_ATTR_SPARSE)
+            {
+                Destination->NonResident.CompressedSize += (ULONGLONG)Assigned * Vcb->NtfsInfo.BytesPerCluster;
+                AttrContext->pRecord->NonResident.CompressedSize = Destination->NonResident.CompressedSize;
+            }
+            Desired = First + Assigned;
+            Vcn += Assigned;
+            Changed = TRUE;
+        }
+    }
+
+    if (Changed)
+    {
+        NTSTATUS StoreStatus = NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord, TotalVcns);
+        if (NT_SUCCESS(Status))
+            Status = StoreStatus;
+    }
+
+    return Status;
+}
+
+/**
+* @name NtfsDeallocateSparseRange
+* @implemented
+*
+* Gives back the clusters a sparse attribute has in [StartVcn, StartVcn + VcnCount), which
+* become a hole. The caller writes FileRecord back.
+*/
+NTSTATUS
+NtfsDeallocateSparseRange(PNTFS_VCB Vcb,
+                          PNTFS_ATTR_CONTEXT AttrContext,
+                          ULONG AttrOffset,
+                          PFILE_RECORD_HEADER FileRecord,
+                          ULONGLONG StartVcn,
+                          ULONGLONG VcnCount)
+{
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONGLONG TotalVcns = Destination->NonResident.HighestVCN + 1;
+    ULONGLONG Vcn = StartVcn, End = min(StartVcn + VcnCount, TotalVcns);
+    BOOLEAN Changed = FALSE;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(Destination->Flags & NTFS_ATTR_SPARSE);
+
+    while (Vcn < End && NT_SUCCESS(Status))
+    {
+        LONGLONG Lbn, Length;
+
+        if (!FsRtlLookupLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, &Lbn, &Length, NULL, NULL, NULL))
+            break;
+        Length = min(Length, (LONGLONG)(End - Vcn));
+
+        if (Lbn != -1)
+        {
+            KeEnterCriticalRegion();
+            ExAcquireResourceExclusiveLite(&Vcb->BitmapResource, TRUE);
+            RtlClearBits(&Vcb->ClusterBitmap, (ULONG)Lbn, (ULONG)Length);
+            Vcb->FreeClusterCount += Length;
+            Status = NtfsWriteVolumeBitmap(Vcb, (ULONG)Lbn, (ULONG)Length);
+            ExReleaseResourceLite(&Vcb->BitmapResource);
+            KeLeaveCriticalRegion();
+
+            FsRtlRemoveLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, Length);
+            Destination->NonResident.CompressedSize -= (ULONGLONG)Length * Vcb->NtfsInfo.BytesPerCluster;
+            AttrContext->pRecord->NonResident.CompressedSize = Destination->NonResident.CompressedSize;
+            Changed = TRUE;
+        }
+
+        Vcn += Length;
+    }
+
+    if (Changed)
+    {
+        NTSTATUS StoreStatus = NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord, TotalVcns);
+        if (NT_SUCCESS(Status))
+            Status = StoreStatus;
+    }
 
     return Status;
 }
