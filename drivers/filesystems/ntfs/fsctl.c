@@ -1537,6 +1537,197 @@ NtfsCompressionRequest(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsMoveClusters
+*
+* Moves VCNs [Vcn, Vcn + Count) of a stream, all of them in one run of clusters, to the free
+* clusters from Lcn on: copies the data, maps the VCNs there, and frees the old clusters.
+*/
+static
+NTSTATUS
+NtfsMoveClusters(PDEVICE_EXTENSION DeviceExt,
+                 PNTFS_ATTR_CONTEXT Context,
+                 ULONG AttrOffset,
+                 PFILE_RECORD_HEADER Holder,
+                 ULONGLONG Vcn,
+                 ULONGLONG Lcn,
+                 ULONG Count)
+{
+    ULONG BytesPerCluster = DeviceExt->NtfsInfo.BytesPerCluster;
+    LONGLONG OldLcn, InRun;
+    PUCHAR Data;
+    NTSTATUS Status;
+
+    if (!FsRtlLookupLargeMcbEntry(&Context->DataRunsMCB, Vcn, &OldLcn, &InRun, NULL, NULL, NULL) ||
+        OldLcn == -1 || InRun < Count)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Status = NtfsAllocateClusterRange(DeviceExt, (ULONG)Lcn, Count);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Data = ExAllocatePoolWithTag(NonPagedPool, Count * BytesPerCluster, TAG_NTFS);
+    if (Data == NULL)
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    else
+        Status = NtfsReadDisk(DeviceExt->StorageDevice, OldLcn * BytesPerCluster, Count * BytesPerCluster,
+                              DeviceExt->NtfsInfo.BytesPerSector, Data, FALSE);
+    if (NT_SUCCESS(Status))
+        Status = NtfsWriteDisk(DeviceExt->StorageDevice, Lcn * BytesPerCluster, Count * BytesPerCluster,
+                               DeviceExt->NtfsInfo.BytesPerSector, Data);
+
+    if (NT_SUCCESS(Status))
+    {
+        FsRtlRemoveLargeMcbEntry(&Context->DataRunsMCB, Vcn, Count);
+        if (!FsRtlAddLargeMcbEntry(&Context->DataRunsMCB, Vcn, Lcn, Count))
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (NT_SUCCESS(Status))
+        Status = NtfsStoreMappingPairs(DeviceExt, Context, AttrOffset, Holder,
+                                       Context->pRecord->NonResident.HighestVCN + 1);
+    if (NT_SUCCESS(Status))
+        Status = UpdateFileRecord(DeviceExt, Context->FileMFTIndex & NTFS_MFT_MASK, Holder);
+
+    /* Only once the file maps the new clusters do the old ones go */
+    if (NT_SUCCESS(Status))
+        Status = NtfsFreeClusterRange(DeviceExt, (ULONG)OldLcn, Count);
+    else
+        NtfsFreeClusterRange(DeviceExt, (ULONG)Lcn, Count);
+
+    if (Data != NULL)
+        ExFreePoolWithTag(Data, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsMoveFile
+*
+* Moves ClusterCount clusters of the file Fcb is open on, from StartingVcn, to the free
+* clusters from StartingLcn on, run by run.
+*/
+static
+NTSTATUS
+NtfsMoveFile(PDEVICE_EXTENSION DeviceExt,
+             PNTFS_FCB Fcb,
+             PMOVE_FILE_DATA Move)
+{
+    PFILE_RECORD_HEADER FileRecord, Holder = NULL;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    ULONGLONG Vcn = Move->StartingVcn.QuadPart;
+    ULONGLONG Lcn = Move->StartingLcn.QuadPart;
+    ULONG Left = Move->ClusterCount;
+    ULONG AttrOffset;
+    NTSTATUS Status;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        if (NtfsFCBIsDirectory(Fcb))
+            Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexAllocation, L"$I30", 4, &Context, &AttrOffset);
+        else
+            Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, (ULONG)wcslen(Fcb->Stream), &Context, &AttrOffset);
+    }
+    if (NT_SUCCESS(Status))
+        Status = NtfsReadAttributeHolder(DeviceExt, Context, FileRecord, &Holder);
+
+    /* Only clusters a stream owns move; compressed units have their own layout */
+    if (NT_SUCCESS(Status) &&
+        (!Context->pRecord->IsNonResident || NtfsAttributeIsCompressed(Context) ||
+         Vcn + Left > (ULONGLONG)Context->pRecord->NonResident.HighestVCN + 1))
+    {
+        Status = STATUS_INVALID_PARAMETER;
+    }
+
+    while (NT_SUCCESS(Status) && Left != 0)
+    {
+        LONGLONG OldLcn, InRun;
+        ULONG Piece;
+
+        if (!FsRtlLookupLargeMcbEntry(&Context->DataRunsMCB, Vcn, &OldLcn, &InRun, NULL, NULL, NULL) || OldLcn == -1)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        Piece = (ULONG)min((LONGLONG)Left, InRun);
+        Status = NtfsMoveClusters(DeviceExt, Context, AttrOffset, Holder, Vcn, Lcn, Piece);
+
+        Vcn += Piece;
+        Lcn += Piece;
+        Left -= Piece;
+    }
+
+    if (Holder != NULL)
+        NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+    if (Context != NULL)
+        ReleaseAttributeContext(Context);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+/**
+* @name NtfsMoveFileRequest
+*
+* FSCTL_MOVE_FILE on a volume handle: moves clusters of the file MOVE_FILE_DATA names, which
+* must be on this volume, to free clusters of the caller's choosing.
+*/
+static
+NTSTATUS
+NtfsMoveFileRequest(PDEVICE_EXTENSION DeviceExt,
+                    PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB VolumeFcb = Stack->FileObject->FsContext;
+    MOVE_FILE_DATA Move;
+    PFILE_OBJECT FileObject;
+    PNTFS_FCB Fcb;
+    NTSTATUS Status;
+
+    if (!(VolumeFcb->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+    if (!NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    Status = NtfsCaptureFsctlInput(Irp, &Move, sizeof(Move));
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Move.StartingVcn.QuadPart < 0 || Move.StartingLcn.QuadPart < 0 || Move.ClusterCount == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = ObReferenceObjectByHandle(Move.FileHandle, 0, *IoFileObjectType, Irp->RequestorMode,
+                                       (PVOID *)&FileObject, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Fcb = FileObject->FsContext;
+    if (IoGetRelatedDeviceObject(FileObject) != IoGetRelatedDeviceObject(Stack->FileObject) ||
+        Fcb == NULL || (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
+    {
+        Status = STATUS_INVALID_PARAMETER;
+    }
+    else
+    {
+        /* Nothing may map the runs while they change */
+        ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+        ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+        Status = NtfsMoveFile(DeviceExt, Fcb, &Move);
+        ExReleaseResourceLite(&Fcb->PagingIoResource);
+        ExReleaseResourceLite(&Fcb->MainResource);
+    }
+
+    ObDereferenceObject(FileObject);
+
+    return Status;
+}
+
+/**
 * @name NtfsUsnRequest
 *
 * The change journal FSCTLs: CREATE, DELETE, QUERY and READ_USN_JOURNAL and ENUM_USN_DATA on
@@ -1771,7 +1962,6 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
         //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
-        case FSCTL_MOVE_FILE:
         //case FSCTL_SHRINK_VOLUME:
         case FSCTL_WRITE_USN_CLOSE_RECORD:
             UNIMPLEMENTED;
@@ -1819,6 +2009,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_GET_RETRIEVAL_POINTERS:
             Status = NtfsGetRetrievalPointers(DeviceExt, Irp);
+            break;
+
+        case FSCTL_MOVE_FILE:
+            Status = NtfsMoveFileRequest(DeviceExt, Irp);
             break;
 
         case FSCTL_GET_COMPRESSION:

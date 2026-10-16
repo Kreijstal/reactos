@@ -2210,6 +2210,16 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext);
 /* volinfo.c */
 
 NTSTATUS
+NtfsAllocateClusterRange(PDEVICE_EXTENSION DeviceExt,
+                         ULONG FirstCluster,
+                         ULONG ClusterCount);
+
+NTSTATUS
+NtfsFreeClusterRange(PDEVICE_EXTENSION DeviceExt,
+                     ULONG FirstCluster,
+                     ULONG ClusterCount);
+
+NTSTATUS
 NtfsAllocateClusters(PDEVICE_EXTENSION DeviceExt,
                      ULONG FirstDesiredCluster,
                      ULONG DesiredClusters,
