@@ -483,6 +483,8 @@ CompareTreeKeys(PB_TREE_KEY Key1, PB_TREE_KEY Key2, ULONG CollationRule, BOOLEAN
     switch (CollationRule)
     {
         case COLLATION_BINARY:
+        case COLLATION_NTOFS_SID:
+            /* A SID in $O of $Quota compares as bytes */
             return CollateBinary(Key1Bytes, Key1->IndexEntry->KeyLength,
                                  Key2Bytes, Key2->IndexEntry->KeyLength);
 

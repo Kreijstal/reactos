@@ -368,6 +368,8 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
         FsAttributeInfo->FileSystemAttributes |= FILE_PERSISTENT_ACLS;
     if (DeviceExt->NtfsInfo.MajorVersion >= 3)
         FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_USN_JOURNAL;
+    if (DeviceExt->QuotaMftIndex != 0)
+        FsAttributeInfo->FileSystemAttributes |= FILE_VOLUME_QUOTAS;
     FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_EXTENDED_ATTRIBUTES | FILE_SUPPORTS_SPARSE_FILES |
                                                  FILE_FILE_COMPRESSION;
     /* Writes are refused everywhere unless write support was enabled */
@@ -529,6 +531,10 @@ NtfsQueryVolumeInformation(PNTFS_IRP_CONTEXT IrpContext)
                                                   &BufferLength);
             break;
 
+        case FileFsControlInformation:
+            Status = NtfsQueryFsControl(DeviceExt, SystemBuffer, &BufferLength);
+            break;
+
         default:
             Status = STATUS_NOT_SUPPORTED;
     }
@@ -550,16 +556,34 @@ NTSTATUS
 NtfsSetVolumeInformation(PNTFS_IRP_CONTEXT IrpContext)
 {
     PIRP Irp;
+    PIO_STACK_LOCATION Stack;
+    PDEVICE_EXTENSION DeviceExt;
+    NTSTATUS Status;
 
     DPRINT("NtfsSetVolumeInformation() called\n");
 
     ASSERT(IrpContext);
 
     Irp = IrpContext->Irp;
-    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    Stack = IrpContext->Stack;
+    DeviceExt = IrpContext->DeviceObject->DeviceExtension;
     Irp->IoStatus.Information = 0;
 
-    return STATUS_NOT_SUPPORTED;
+    if (IrpContext->DeviceObject == NtfsGlobalData->DeviceObject)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    switch (Stack->Parameters.SetVolume.FsInformationClass)
+    {
+        case FileFsControlInformation:
+            Status = NtfsSetFsControl(DeviceExt, Irp->AssociatedIrp.SystemBuffer, Stack->Parameters.SetVolume.Length);
+            break;
+
+        default:
+            Status = STATUS_NOT_SUPPORTED;
+            break;
+    }
+
+    return Status;
 }
 
 /* EOF */

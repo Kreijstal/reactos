@@ -149,6 +149,11 @@ typedef struct
     USN UsnLowestValidUsn;
     USN UsnNextUsn;
 
+    /* $Extend\$Quota, 0 while there is none, and the owner ID the next new owner gets.
+     * IndexResource guards the latter. */
+    ULONGLONG QuotaMftIndex;
+    ULONG NextQuotaOwnerId;
+
     NPAGED_LOOKASIDE_LIST FileRecLookasideList;
 
     /* $UpCase, one upcased code point per UCS-2 value. NTFS defines its
@@ -181,6 +186,8 @@ typedef struct
     ULONG Flags;
     /* IRP_MJ_QUERY_EA: one-based index of the EA the next query returns, 0 before the first */
     ULONG EaIndex;
+    /* IRP_MJ_QUERY_QUOTA: the owner ID an enumeration goes on from */
+    ULONG QuotaOwnerId;
 } NTFS_CCB, *PNTFS_CCB;
 
 /* NTFS has no "." or ".." in its indices, so directory enumeration makes them
@@ -2117,6 +2124,28 @@ NtfsQueryAllocatedRanges(PDEVICE_EXTENSION Vcb,
                          PFILE_ALLOCATED_RANGE_BUFFER Ranges,
                          ULONG RangesLength,
                          PULONG Returned);
+
+
+/* quotas.c */
+
+VOID
+NtfsLoadQuota(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsQueryQuota(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsSetQuota(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsQueryFsControl(PDEVICE_EXTENSION Vcb,
+                   PFILE_FS_CONTROL_INFORMATION Info,
+                   PULONG BufferLength);
+
+NTSTATUS
+NtfsSetFsControl(PDEVICE_EXTENSION Vcb,
+                 PFILE_FS_CONTROL_INFORMATION Info,
+                 ULONG BufferLength);
 
 
 /* secure.c */
