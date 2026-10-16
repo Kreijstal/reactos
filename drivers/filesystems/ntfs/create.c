@@ -1135,6 +1135,19 @@ NtfsCreateNewFile(
 
     Attributes = NtfsNewFileAttributes(Stack->Parameters.Create.FileAttributes, IsDirectory);
 
+    /* EAs given with the create go on the new file; a bad list fails it first */
+    if (Stack->Parameters.Create.EaLength != 0)
+    {
+        ULONG ErrorOffset;
+
+        Status = NtfsCheckEaList(Irp->AssociatedIrp.SystemBuffer, Stack->Parameters.Create.EaLength, &ErrorOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            Irp->IoStatus.Information = ErrorOffset;
+            return Status;
+        }
+    }
+
     if (BooleanFlagOn(Options, FILE_DELETE_ON_CLOSE) &&
         BooleanFlagOn(Attributes, FILE_ATTRIBUTE_READONLY))
     {
@@ -1170,6 +1183,19 @@ NtfsCreateNewFile(
     ASSERT(NT_SUCCESS(Status));
     if (!NT_SUCCESS(Status))
         return Status;
+
+    if (Stack->Parameters.Create.EaLength != 0)
+    {
+        ULONG ErrorOffset;
+
+        Status = NtfsSetEas(DeviceExt, Fcb, Irp->AssociatedIrp.SystemBuffer, Stack->Parameters.Create.EaLength, &ErrorOffset);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Couldn't give '%wZ' its EAs (Status %lx)\n", Path, Status);
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return Status;
+        }
+    }
 
     Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
     if (!NT_SUCCESS(Status))

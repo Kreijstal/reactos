@@ -153,15 +153,30 @@ NtfsGetEaInformation(PNTFS_FCB Fcb,
                      PFILE_EA_INFORMATION EaInfo,
                      PULONG BufferLength)
 {
-    UNREFERENCED_PARAMETER(Fcb);
+    PFILE_RECORD_HEADER FileRecord;
+    NTSTATUS Status;
 
     DPRINT("NtfsGetEaInformation(%p, %p, %p)\n", Fcb, EaInfo, BufferLength);
 
     if (*BufferLength < sizeof(FILE_EA_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
 
-    /* We do not support extended attributes yet, so there are none */
+    /* A volume open has no EAs */
     EaInfo->EaSize = 0;
+    if (!(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
+    {
+        FileRecord = ExAllocateFromNPagedLookasideList(&Fcb->Vcb->FileRecLookasideList);
+        if (FileRecord == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        Status = ReadFileRecord(Fcb->Vcb, Fcb->MFTIndex, FileRecord);
+        if (NT_SUCCESS(Status))
+            EaInfo->EaSize = NtfsGetEaSize(Fcb->Vcb, FileRecord);
+
+        ExFreeToNPagedLookasideList(&Fcb->Vcb->FileRecLookasideList, FileRecord);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     *BufferLength -= sizeof(FILE_EA_INFORMATION);
 

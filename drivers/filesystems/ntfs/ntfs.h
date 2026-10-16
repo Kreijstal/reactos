@@ -179,6 +179,8 @@ typedef struct
     ULONG LastCluster;
     ULONG LastOffset;
     ULONG Flags;
+    /* IRP_MJ_QUERY_EA: one-based index of the EA the next query returns, 0 before the first */
+    ULONG EaIndex;
 } NTFS_CCB, *PNTFS_CCB;
 
 /* NTFS has no "." or ".." in its indices, so directory enumeration makes them
@@ -1887,6 +1889,31 @@ NTSTATUS
 NtfsFindFileByObjectId(PDEVICE_EXTENSION DeviceExt,
                        PUCHAR ObjectId,
                        PULONGLONG MftIndex);
+
+
+/* ea.c */
+
+ULONG
+NtfsGetEaSize(PDEVICE_EXTENSION Vcb,
+              PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsCheckEaList(PFILE_FULL_EA_INFORMATION Eas,
+                ULONG Length,
+                PULONG ErrorOffset);
+
+NTSTATUS
+NtfsSetEas(PDEVICE_EXTENSION Vcb,
+           PNTFS_FCB Fcb,
+           PFILE_FULL_EA_INFORMATION Changes,
+           ULONG ChangesLength,
+           PULONG ErrorOffset);
+
+NTSTATUS
+NtfsQueryEa(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsSetEa(PNTFS_IRP_CONTEXT IrpContext);
 
 
 /* usnjrnl.c */
