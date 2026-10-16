@@ -298,6 +298,18 @@ NtfsGetVolumeData(PDEVICE_OBJECT DeviceObject,
         return Status;
     }
 
+    /* The raw read bypasses ReadFileRecord, so restore the update sequence
+     * array here. Every later lookup walks this cached record, and $MFT's
+     * own mapping pairs may run across a sector tail. */
+    Status = FixupUpdateSequenceArray(DeviceExt, &DeviceExt->MasterFileTable->Ntfs);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Invalid update sequence array in MFT record 0.\n");
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, DeviceExt->MasterFileTable);
+        ExDeleteNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        return Status;
+    }
+
     Status = FindAttribute(DeviceExt,
                            DeviceExt->MasterFileTable,
                            AttributeData,
