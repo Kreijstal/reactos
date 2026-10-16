@@ -1044,7 +1044,7 @@ CreateIndexBufferFromBTreeNode(PDEVICE_EXTENSION DeviceExt,
         // Would adding the current entry to the index increase the node size beyond the allocation size?
         ULONG IndexSize = FIELD_OFFSET(INDEX_BUFFER, Header)
             + IndexBuffer->Header.TotalSizeOfEntries
-            + CurrentNodeEntry->Length;
+            + CurrentKey->IndexEntry->Length;
         if (IndexSize > BufferSize)
         {
             DPRINT1("TODO: Adding file would require creating a new node!\n");
@@ -1498,8 +1498,8 @@ CreateBTreeKeyFromFilename(ULONGLONG FileReference, PFILENAME_ATTRIBUTE FileName
         ExFreePoolWithTag(NewEntry, TAG_NTFS);
         return NULL;
     }
+    RtlZeroMemory(NewKey, sizeof(B_TREE_KEY));
     NewKey->IndexEntry = NewEntry;
-    NewKey->NextKey = NULL;
 
     return NewKey;
 }
@@ -1774,10 +1774,12 @@ NtfsInsertKey(PB_TREE Tree,
                                        IndexRecordSize,
                                        &NewLeftKey,
                                        &NewChild);
+                // The child made its own key for the name; this level's isn't needed
+                DestroyBTreeKey(NewKey);
+
                 if (!NT_SUCCESS(Status))
                 {
                     DPRINT1("ERROR: Failed to insert key.\n");
-                    ExFreePoolWithTag(NewKey, TAG_NTFS);
                     return Status;
                 }
 
