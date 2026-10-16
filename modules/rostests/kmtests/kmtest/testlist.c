@@ -27,6 +27,22 @@ KMT_TESTFUNC Test_MmPageoutSysView;
 KMT_TESTFUNC Test_MmProcessChurnStress;
 KMT_TESTFUNC Test_NtCreateSection;
 KMT_TESTFUNC Test_NtfsDirIndex;
+KMT_TESTFUNC Test_NtfsCompression;
+KMT_TESTFUNC Test_NtfsCreateSemantics;
+KMT_TESTFUNC Test_NtfsDataPath;
+KMT_TESTFUNC Test_NtfsEa;
+KMT_TESTFUNC Test_NtfsFsctl;
+KMT_TESTFUNC Test_NtfsInfoClasses;
+KMT_TESTFUNC Test_NtfsLinks;
+KMT_TESTFUNC Test_NtfsObjectId;
+KMT_TESTFUNC Test_NtfsQuota;
+KMT_TESTFUNC Test_NtfsReparse;
+KMT_TESTFUNC Test_NtfsSecurity;
+KMT_TESTFUNC Test_NtfsSparse;
+KMT_TESTFUNC Test_NtfsStreams;
+KMT_TESTFUNC Test_NtfsUsn;
+KMT_TESTFUNC Test_NtfsVolumeControl;
+KMT_TESTFUNC Test_NtfsVolumeDirty;
 KMT_TESTFUNC Test_NtSystemDebugControl;
 KMT_TESTFUNC Test_PoIrp;
 KMT_TESTFUNC Test_RtlAvlTree;
@@ -67,6 +83,22 @@ const KMT_TEST TestList[] =
     { "MmProcessChurnStress",         Test_MmProcessChurnStress },
     { "NtCreateSection",              Test_NtCreateSection },
     { "NtfsDirIndex",                 Test_NtfsDirIndex },
+    { "NtfsCompression",               Test_NtfsCompression },
+    { "NtfsCreateSemantics",           Test_NtfsCreateSemantics },
+    { "NtfsDataPath",                  Test_NtfsDataPath },
+    { "NtfsEa",                        Test_NtfsEa },
+    { "NtfsFsctl",                     Test_NtfsFsctl },
+    { "NtfsInfoClasses",               Test_NtfsInfoClasses },
+    { "NtfsLinks",                     Test_NtfsLinks },
+    { "NtfsObjectId",                  Test_NtfsObjectId },
+    { "NtfsQuota",                     Test_NtfsQuota },
+    { "NtfsReparse",                   Test_NtfsReparse },
+    { "NtfsSecurity",                  Test_NtfsSecurity },
+    { "NtfsSparse",                    Test_NtfsSparse },
+    { "NtfsStreams",                   Test_NtfsStreams },
+    { "NtfsUsn",                       Test_NtfsUsn },
+    { "NtfsVolumeControl",             Test_NtfsVolumeControl },
+    { "NtfsVolumeDirty",               Test_NtfsVolumeDirty },
     { "NtSystemDebugControl",         Test_NtSystemDebugControl },
     { "PoIrp",                        Test_PoIrp },
     { "RtlAvlTree",                   Test_RtlAvlTree },
