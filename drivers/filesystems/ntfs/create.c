@@ -1197,6 +1197,17 @@ NtfsCreateNewFile(
         }
     }
 
+    /* A file created in a compressed directory starts compressed (MS-FSA 2.1.5.1.1) */
+    if (NtfsFCBIsCompressed(ParentFcb))
+    {
+        Status = NtfsSetCompression(DeviceExt, Fcb, COMPRESSION_FORMAT_LZNT1);
+        if (!NT_SUCCESS(Status))
+        {
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return Status;
+        }
+    }
+
     Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
     if (!NT_SUCCESS(Status))
     {

@@ -755,6 +755,9 @@ NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
 
     ASSERT(End <= AttributeDataLength(AttrContext->pRecord));
 
+    /* A compressed stream is zeroed unit by unit, NtfsZeroStreamRange() */
+    ASSERT(!NtfsAttributeIsCompressed(AttrContext));
+
     if (Start >= End || !AttrContext->pRecord->IsNonResident)
         return STATUS_SUCCESS;
 
@@ -1216,8 +1219,9 @@ SetNonResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
 
     ASSERT(AttrContext->pRecord->IsNonResident);
 
-    /* A sparse stream grows by a hole, and shrinks by giving back its units past the end */
-    if (NtfsAttributeIsSparse(AttrContext))
+    /* A sparse or compressed stream grows by a hole, and shrinks by giving back its units
+     * past the end */
+    if (NtfsAttributeHasUnits(AttrContext))
     {
         Status = NtfsResizeSparseAllocation(Vcb, AttrContext, AttrOffset, FileRecord, DataSize->QuadPart);
         if (!NT_SUCCESS(Status))
