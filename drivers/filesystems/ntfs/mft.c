@@ -578,6 +578,7 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Destination + Destination->Length);
     PNTFS_ATTR_RECORD FinalAttribute;
     ULONG OldAttributeLength = Destination->Length;
+    ULONG OldValueLength = Destination->Resident.ValueLength;
     ULONG NextAttributeOffset;
 
     DPRINT("InternalSetResidentAttributeLength( %p, %p, %p, %lu, %lu )\n", DeviceExt, AttrContext, FileRecord, AttrOffset, DataSize);
@@ -621,6 +622,13 @@ InternalSetResidentAttributeLength(PDEVICE_EXTENSION DeviceExt,
     {
         // advance to the final "attribute," adjust for the changed length of the attribute we're resizing
         FinalAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute - OldAttributeLength + Destination->Length);
+    }
+
+    // A value that grew reads as zeros past its old end
+    if (DataSize > OldValueLength)
+    {
+        RtlZeroMemory((PUCHAR)Destination + Destination->Resident.ValueOffset + OldValueLength,
+                      DataSize - OldValueLength);
     }
 
     // Update pRecord's length
@@ -708,7 +716,177 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
         CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
     }
 
-    return STATUS_SUCCESS;
+    return Status;
+}
+
+/**
+* @name NtfsZeroAttributeRange
+* @implemented
+*
+* Makes [Start, End) of an attribute's value read as zeros: the range a file grows by,
+* which would otherwise show whatever its clusters held before.
+*
+* @param Vcb
+* Pointer to a DEVICE_EXTENSION describing the target disk.
+*
+* @param AttrContext
+* Context of the attribute, already sized to at least End.
+*
+* @param FileRecord
+* The complete file record holding the attribute.
+*
+* @return
+* STATUS_SUCCESS, or the status of an allocation or write that failed.
+*
+* @remarks
+* A resident value is zeroed by InternalSetResidentAttributeLength() as it grows. A sparse
+* stream's holes read as zeros already; its allocated runs are written over like any other.
+*/
+NTSTATUS
+NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
+                       PNTFS_ATTR_CONTEXT AttrContext,
+                       PFILE_RECORD_HEADER FileRecord,
+                       ULONGLONG Start,
+                       ULONGLONG End)
+{
+    const ULONG ChunkSize = 64 * 1024;
+    PUCHAR Zeros;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(End <= AttributeDataLength(AttrContext->pRecord));
+
+    if (Start >= End || !AttrContext->pRecord->IsNonResident)
+        return STATUS_SUCCESS;
+
+    Zeros = ExAllocatePoolWithTag(NonPagedPool, ChunkSize, TAG_NTFS);
+    if (Zeros == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlZeroMemory(Zeros, ChunkSize);
+
+    while (Start < End && NT_SUCCESS(Status))
+    {
+        ULONG Length = (ULONG)min(End - Start, ChunkSize);
+        ULONG Written;
+
+        Status = WriteAttribute(Vcb, AttrContext, Start, Zeros, Length, &Written, FileRecord);
+        if (NT_SUCCESS(Status) && Written != Length)
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+
+        Start += Length;
+    }
+
+    ExFreePoolWithTag(Zeros, TAG_NTFS);
+
+    return Status;
+}
+
+static
+NTSTATUS
+ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
+                                      PNTFS_ATTR_CONTEXT AttrContext,
+                                      ULONG AttrOffset,
+                                      PFILE_RECORD_HEADER FileRecord,
+                                      PLARGE_INTEGER DataSize);
+
+/**
+* @name NtfsSetAllocationSize
+* @implemented
+*
+* FileAllocationInformation: gives a stream at least AllocationSize bytes of clusters, or
+* gives back what it has beyond that. An allocation below the end of file moves the end of
+* file down to it; one above leaves the end of file alone (MS-FSA 2.1.5.15.1).
+*
+* @param FileObject
+* File object the request came on.
+*
+* @param Fcb
+* FCB of the stream.
+*
+* @param AttrContext
+* Context of the stream's $DATA attribute.
+*
+* @param AttrOffset
+* Offset of the attribute in FileRecord.
+*
+* @param FileRecord
+* The complete file record. Written back to disk.
+*
+* @param AllocationSize
+* The allocation asked for.
+*/
+NTSTATUS
+NtfsSetAllocationSize(PFILE_OBJECT FileObject,
+                      PNTFS_FCB Fcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      ULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord,
+                      ULONGLONG AllocationSize)
+{
+    PDEVICE_EXTENSION Vcb = Fcb->Vcb;
+    ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
+    ULONGLONG DataSize = AttributeDataLength(AttrContext->pRecord);
+    ULONGLONG Wanted;
+    PNTFS_ATTR_RECORD Destination;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (AllocationSize < DataSize)
+    {
+        LARGE_INTEGER NewSize;
+
+        NewSize.QuadPart = AllocationSize;
+        return SetAttributeDataLength(FileObject, Fcb, AttrContext, AttrOffset, FileRecord, &NewSize);
+    }
+
+    if (!AttrContext->pRecord->IsNonResident)
+    {
+        LARGE_INTEGER CurrentSize;
+
+        /* A resident value has no allocation of its own to grow */
+        if (AllocationSize <= DataSize)
+            return STATUS_SUCCESS;
+
+        CurrentSize.QuadPart = DataSize;
+        Status = ConvertResidentAttributeToNonResident(Vcb, AttrContext, AttrOffset, FileRecord, &CurrentSize);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* Compressed and sparse streams count their allocation differently; leave them be */
+    if (AttrContext->pRecord->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE))
+        return STATUS_SUCCESS;
+
+    Wanted = ROUND_UP(AllocationSize, BytesPerCluster);
+    Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+
+    if (Wanted > AttrContext->pRecord->NonResident.AllocatedSize)
+    {
+        Status = NtfsExtendAllocation(Vcb, AttrContext, AttrOffset, FileRecord, Wanted);
+    }
+    else if (Wanted < AttrContext->pRecord->NonResident.AllocatedSize)
+    {
+        Status = FreeClusters(Vcb,
+                              AttrContext,
+                              AttrOffset,
+                              FileRecord,
+                              (ULONG)((AttrContext->pRecord->NonResident.AllocatedSize - Wanted) / BytesPerCluster));
+        if (NT_SUCCESS(Status))
+            AttrContext->pRecord->NonResident.AllocatedSize = Wanted;
+    }
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Destination->NonResident.AllocatedSize = AttrContext->pRecord->NonResident.AllocatedSize;
+
+    Status = UpdateFileRecord(Vcb, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        Fcb->RFCB.AllocationSize.QuadPart = AttrContext->pRecord->NonResident.AllocatedSize;
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+    }
+
+    return Status;
 }
 
 /**
@@ -790,6 +968,7 @@ NtfsExtendAllocation(
     ULONG BytesPerCluster = Vcb->NtfsInfo.BytesPerCluster;
     PNTFS_ATTR_RECORD DestinationAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
     ULONGLONG ExistingClusters = AttrContext->pRecord->NonResident.AllocatedSize / BytesPerCluster;
+    ULONGLONG TotalNeeded;
     ULONG ClustersNeeded;
     ULONG DesiredCluster = 0;
     LONGLONG LastVbn;
@@ -803,7 +982,12 @@ NtfsExtendAllocation(
     if (AttrContext->pRecord->NonResident.AllocatedSize >= AllocationSize)
         return STATUS_SUCCESS;
 
-    ClustersNeeded = (ULONG)(AllocationSize / BytesPerCluster - ExistingClusters);
+    /* The cluster bitmap is indexed by ULONG; no volume has more free clusters than that */
+    TotalNeeded = AllocationSize / BytesPerCluster - ExistingClusters;
+    if (TotalNeeded > MAXULONG)
+        return STATUS_DISK_FULL;
+
+    ClustersNeeded = (ULONG)TotalNeeded;
 
     /* Ask for the clusters right after the last one the stream owns. The
      * tail of a sparse stream is a hole, so look at the last mapping, not
