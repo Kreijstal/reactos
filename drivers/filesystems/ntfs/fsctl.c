@@ -567,6 +567,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     NtfsFindObjectIdIndex(Vcb);
     NtfsInitializeSecurity(Vcb);
+    NtfsLoadUsnJournal(Vcb);
 
     /* Get serial number */
     NewDeviceObject->Vpb->SerialNumber = Vcb->NtfsInfo.SerialNumber;
@@ -1045,6 +1046,9 @@ NtfsReparsePointRequest(PDEVICE_EXTENSION DeviceExt,
             break;
     }
 
+    if (NT_SUCCESS(Status) && Code != FSCTL_GET_REPARSE_POINT)
+        NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_REPARSE_POINT_CHANGE);
+
     ExReleaseResourceLite(&Fcb->MainResource);
 
     return Status;
@@ -1133,6 +1137,10 @@ NtfsObjectIdRequest(PDEVICE_EXTENSION DeviceExt,
         }
     }
 
+    /* CREATE_OR_GET too, which may have made one */
+    if (NT_SUCCESS(Status) && Code != FSCTL_GET_OBJECT_ID)
+        NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_OBJECT_ID_CHANGE);
+
     ExReleaseResourceLite(&Fcb->MainResource);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
@@ -1141,6 +1149,202 @@ NtfsObjectIdRequest(PDEVICE_EXTENSION DeviceExt,
         RtlCopyMemory(Buffer, &ObjectId, sizeof(ObjectId));
         Irp->IoStatus.Information = sizeof(ObjectId);
     }
+
+    return Status;
+}
+
+/**
+* @name NtfsCaptureFsctlInput
+*
+* Copies the input of an FSCTL, METHOD_BUFFERED or METHOD_NEITHER, to Input. Exactly
+* Length bytes are wanted; a shorter input is STATUS_INVALID_PARAMETER.
+*/
+static
+NTSTATUS
+NtfsCaptureFsctlInput(PIRP Irp,
+                      PVOID Input,
+                      ULONG Length)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG Code = Stack->Parameters.FileSystemControl.FsControlCode;
+    PVOID Source;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Stack->Parameters.FileSystemControl.InputBufferLength < Length)
+        return STATUS_INVALID_PARAMETER;
+
+    if (METHOD_FROM_CTL_CODE(Code) != METHOD_NEITHER)
+    {
+        RtlCopyMemory(Input, Irp->AssociatedIrp.SystemBuffer, Length);
+        return STATUS_SUCCESS;
+    }
+
+    Source = Stack->Parameters.FileSystemControl.Type3InputBuffer;
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForRead(Source, Length, sizeof(UCHAR));
+        RtlCopyMemory(Input, Source, Length);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+/**
+* @name NtfsReturnFsctlOutput
+*
+* Copies Length bytes of an FSCTL's output to the caller's buffer.
+*/
+static
+NTSTATUS
+NtfsReturnFsctlOutput(PIRP Irp,
+                      PVOID Output,
+                      ULONG Length)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG Code = Stack->Parameters.FileSystemControl.FsControlCode;
+    PVOID Destination;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(Length <= Stack->Parameters.FileSystemControl.OutputBufferLength);
+
+    if (METHOD_FROM_CTL_CODE(Code) == METHOD_BUFFERED)
+    {
+        RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, Output, Length);
+        Irp->IoStatus.Information = Length;
+        return STATUS_SUCCESS;
+    }
+
+    Destination = Irp->UserBuffer;
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForWrite(Destination, Length, sizeof(UCHAR));
+        RtlCopyMemory(Destination, Output, Length);
+        Irp->IoStatus.Information = Length;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
+}
+
+/**
+* @name NtfsUsnRequest
+*
+* The change journal FSCTLs: CREATE, DELETE, QUERY and READ_USN_JOURNAL and ENUM_USN_DATA on
+* the volume, READ_FILE_USN_DATA on a file.
+*/
+static
+NTSTATUS
+NtfsUsnRequest(PDEVICE_EXTENSION DeviceExt,
+               PIRP Irp,
+               ULONG Code)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    ULONG OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    BOOLEAN OnVolume = BooleanFlagOn(Fcb->Flags, FCB_IS_VOLUME);
+    union
+    {
+        CREATE_USN_JOURNAL_DATA Create;
+        DELETE_USN_JOURNAL_DATA Delete;
+        READ_USN_JOURNAL_DATA Read;
+        MFT_ENUM_DATA Enum;
+        USN_JOURNAL_DATA Journal;
+    } Input;
+    PUCHAR Output = NULL;
+    ULONG Returned = 0;
+    NTSTATUS Status;
+
+    if ((Code == FSCTL_READ_FILE_USN_DATA) == OnVolume)
+        return STATUS_INVALID_PARAMETER;
+
+    switch (Code)
+    {
+        case FSCTL_CREATE_USN_JOURNAL:
+        case FSCTL_DELETE_USN_JOURNAL:
+            if (!NtfsGlobalData->EnableWriteSupport)
+                return STATUS_MEDIA_WRITE_PROTECTED;
+
+            if (Code == FSCTL_CREATE_USN_JOURNAL)
+                Status = NtfsCaptureFsctlInput(Irp, &Input.Create, sizeof(Input.Create));
+            else
+                Status = NtfsCaptureFsctlInput(Irp, &Input.Delete, sizeof(Input.Delete));
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            /* Making or deleting $UsnJrnl changes $Extend like any create or delete */
+            ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
+            if (Code == FSCTL_CREATE_USN_JOURNAL)
+                Status = NtfsCreateUsnJournal(DeviceExt, &Input.Create);
+            else
+                Status = NtfsDeleteUsnJournal(DeviceExt, &Input.Delete);
+            ExReleaseResourceLite(&DeviceExt->DirResource);
+            return Status;
+
+        case FSCTL_QUERY_USN_JOURNAL:
+            if (OutputLength < sizeof(USN_JOURNAL_DATA))
+                return STATUS_BUFFER_TOO_SMALL;
+            Status = NtfsQueryUsnJournal(DeviceExt, &Input.Journal);
+            if (NT_SUCCESS(Status))
+                Status = NtfsReturnFsctlOutput(Irp, &Input.Journal, sizeof(Input.Journal));
+            return Status;
+
+        case FSCTL_READ_USN_JOURNAL:
+            Status = NtfsCaptureFsctlInput(Irp, &Input.Read, sizeof(Input.Read));
+            break;
+
+        case FSCTL_ENUM_USN_DATA:
+            Status = NtfsCaptureFsctlInput(Irp, &Input.Enum, sizeof(Input.Enum));
+            break;
+
+        default:
+            Status = STATUS_SUCCESS;
+            break;
+    }
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* The records are put together here and copied out at once */
+    if (OutputLength != 0)
+    {
+        Output = ExAllocatePoolWithTag(PagedPool, OutputLength, TAG_NTFS);
+        if (Output == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    switch (Code)
+    {
+        case FSCTL_READ_USN_JOURNAL:
+            Status = NtfsReadUsnJournal(DeviceExt, &Input.Read, Output, OutputLength, &Returned);
+            break;
+
+        case FSCTL_ENUM_USN_DATA:
+            Status = NtfsEnumUsnData(DeviceExt, &Input.Enum, Output, OutputLength, &Returned);
+            break;
+
+        default:
+            ExAcquireResourceSharedLite(&Fcb->MainResource, TRUE);
+            Status = NtfsReadFileUsnData(DeviceExt, Fcb, Output, OutputLength, &Returned);
+            ExReleaseResourceLite(&Fcb->MainResource);
+            break;
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsReturnFsctlOutput(Irp, Output, Returned);
+
+    if (Output != NULL)
+        ExFreePoolWithTag(Output, TAG_NTFS);
 
     return Status;
 }
@@ -1264,18 +1468,12 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     DeviceExt = DeviceObject->DeviceExtension;
     switch (Stack->Parameters.FileSystemControl.FsControlCode)
     {
-        case FSCTL_CREATE_USN_JOURNAL:
-        case FSCTL_DELETE_USN_JOURNAL:
-        case FSCTL_ENUM_USN_DATA:
         case FSCTL_EXTEND_VOLUME:
         //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
         case FSCTL_GET_RETRIEVAL_POINTERS:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
         case FSCTL_MOVE_FILE:
-        case FSCTL_QUERY_USN_JOURNAL:
-        case FSCTL_READ_FILE_USN_DATA:
-        case FSCTL_READ_USN_JOURNAL:
         //case FSCTL_SHRINK_VOLUME:
         case FSCTL_WRITE_USN_CLOSE_RECORD:
             UNIMPLEMENTED;
@@ -1319,6 +1517,15 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
         case FSCTL_CREATE_OR_GET_OBJECT_ID:
         case FSCTL_DELETE_OBJECT_ID:
             Status = NtfsObjectIdRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
+            break;
+
+        case FSCTL_CREATE_USN_JOURNAL:
+        case FSCTL_DELETE_USN_JOURNAL:
+        case FSCTL_QUERY_USN_JOURNAL:
+        case FSCTL_READ_USN_JOURNAL:
+        case FSCTL_ENUM_USN_DATA:
+        case FSCTL_READ_FILE_USN_DATA:
+            Status = NtfsUsnRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
             break;
 
         case FSCTL_IS_VOLUME_DIRTY:

@@ -24,6 +24,7 @@ list(APPEND SOURCE
     reparse.c
     rw.c
     secure.c
+    usnjrnl.c
     volinfo.c
     ntfs.h)
 

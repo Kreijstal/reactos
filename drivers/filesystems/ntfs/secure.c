@@ -358,60 +358,23 @@ NtfsFindStoredDescriptor(PDEVICE_EXTENSION DeviceExt,
 /**
 * @name NtfsWriteSds
 *
-* Writes a descriptor with its header to $SDS, and its mirror copy, growing the stream as
-* needed. What the stream grows by reads as zeros.
+* Writes a descriptor with its header to $SDS, and its mirror copy.
 */
 static
 NTSTATUS
 NtfsWriteSds(PDEVICE_EXTENSION DeviceExt,
              PNTFS_SECURITY_HEADER Entry)
 {
-    PFILE_RECORD_HEADER SecureRecord, Holder = NULL;
-    PNTFS_ATTR_CONTEXT SdsContext;
-    ULONG SdsOffset, Written;
-    ULONGLONG OldSize, NewSize;
-    LARGE_INTEGER Size;
     NTSTATUS Status;
 
-    SecureRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
-    if (SecureRecord == NULL)
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    Status = ReadFileRecord(DeviceExt, DeviceExt->SecureMftIndex, SecureRecord);
-    if (NT_SUCCESS(Status))
-        Status = FindAttribute(DeviceExt, SecureRecord, AttributeData, L"$SDS", 4, &SdsContext, &SdsOffset);
+    /* The mirror first: it grows the stream to its new end in one go */
+    Status = NtfsWriteStreamAt(DeviceExt, DeviceExt->SecureMftIndex, L"$SDS", 4,
+                               Entry->Offset + NTFS_SDS_BLOCK_SIZE, Entry, Entry->Length);
     if (!NT_SUCCESS(Status))
-    {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, SecureRecord);
         return Status;
-    }
 
-    Status = NtfsReadAttributeHolder(DeviceExt, SdsContext, SecureRecord, &Holder);
-
-    OldSize = AttributeDataLength(SdsContext->pRecord);
-    NewSize = Entry->Offset + NTFS_SDS_BLOCK_SIZE + Entry->Length;
-    if (NT_SUCCESS(Status) && NewSize > OldSize)
-    {
-        ASSERT(SdsContext->pRecord->IsNonResident);
-
-        Size.QuadPart = NewSize;
-        Status = SetNonResidentAttributeDataLength(DeviceExt, SdsContext, SdsOffset, Holder, &Size);
-        if (NT_SUCCESS(Status))
-            Status = UpdateFileRecord(DeviceExt, SdsContext->FileMFTIndex & NTFS_MFT_MASK, Holder);
-        if (NT_SUCCESS(Status))
-            Status = NtfsZeroAttributeRange(DeviceExt, SdsContext, Holder, OldSize, NewSize);
-    }
-
-    if (NT_SUCCESS(Status))
-        Status = WriteAttribute(DeviceExt, SdsContext, Entry->Offset, (PUCHAR)Entry, Entry->Length, &Written, Holder);
-    if (NT_SUCCESS(Status))
-        Status = WriteAttribute(DeviceExt, SdsContext, Entry->Offset + NTFS_SDS_BLOCK_SIZE, (PUCHAR)Entry, Entry->Length, &Written, Holder);
-
-    NtfsReleaseAttributeHolder(DeviceExt, SecureRecord, Holder);
-    ReleaseAttributeContext(SdsContext);
-    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, SecureRecord);
-
-    return Status;
+    return NtfsWriteStreamAt(DeviceExt, DeviceExt->SecureMftIndex, L"$SDS", 4,
+                             Entry->Offset, Entry, Entry->Length);
 }
 
 /**
@@ -530,23 +493,13 @@ ULONG
 NtfsGetSecurityId(PDEVICE_EXTENSION DeviceExt,
                   PFILE_RECORD_HEADER FileRecord)
 {
-    PNTFS_ATTR_CONTEXT Context;
     PSTANDARD_INFORMATION StdInfo;
-    ULONG SecurityId = 0;
 
-    if (!NT_SUCCESS(FindAttribute(DeviceExt, FileRecord, AttributeStandardInformation, L"", 0, &Context, NULL)))
+    if (!NtfsHasNtfs3StandardInformation(DeviceExt, FileRecord))
         return 0;
 
-    if (AttributeDataLength(Context->pRecord) >= sizeof(STANDARD_INFORMATION))
-    {
-        StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
-        if (StdInfo != NULL)
-            SecurityId = StdInfo->SecurityId;
-    }
-
-    ReleaseAttributeContext(Context);
-
-    return SecurityId;
+    StdInfo = GetStandardInformationFromRecord(DeviceExt, FileRecord);
+    return StdInfo != NULL ? StdInfo->SecurityId : 0;
 }
 
 /**
@@ -920,6 +873,9 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsWriteFileSecurity(DeviceExt, MftIndex, NewSd);
             ExFreePool(NewSd);
         }
+
+        if (NT_SUCCESS(Status))
+            NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_SECURITY_CHANGE);
 
         ExFreePoolWithTag(OldSd, TAG_NTFS);
     }
