@@ -422,7 +422,6 @@ LONG
 CompareTreeKeys(PB_TREE_KEY Key1, PB_TREE_KEY Key2, BOOLEAN CaseSensitive)
 {
     UNICODE_STRING Key1Name, Key2Name;
-    LONG Comparison;
 
     // Key1 must not be the final key (AKA the dummy key)
     ASSERT(!(Key1->IndexEntry->Flags & NTFS_INDEX_ENTRY_END));
@@ -439,36 +438,41 @@ CompareTreeKeys(PB_TREE_KEY Key1, PB_TREE_KEY Key2, BOOLEAN CaseSensitive)
     Key2Name.Length = Key2Name.MaximumLength
         = Key2->IndexEntry->FileName.NameLength * sizeof(WCHAR);
 
-    // Are the two keys the same length?
-    if (Key1Name.Length == Key2Name.Length)
-        return RtlCompareUnicodeString(&Key1Name, &Key2Name, !CaseSensitive);
+    return CollateFileNames(&Key1Name, &Key2Name, CaseSensitive);
+}
 
-    // Is Key1 shorter?
-    if (Key1Name.Length < Key2Name.Length)
-    {
-        // Truncate KeyName2 to be the same length as KeyName1
-        Key2Name.Length = Key1Name.Length;
+/**
+* @name CollateFileNames
+* @implemented
+*
+* Orders two file names the way a $I30 index (COLLATION_FILE_NAME) stores them.
+*
+* @param Name1
+* Pointer to the first name.
+*
+* @param Name2
+* Pointer to the second name.
+*
+* @param CaseSensitive
+* TRUE if names that differ only in case are different names (POSIX semantics).
+*
+* @returns
+* 0 if the names are the same key, < 0 if Name1 sorts first, > 0 if Name2 sorts first.
+*
+* @remarks
+* The on-disk order is fixed by the volume and never depends on how a name is being
+* created or looked up: the primary order is always the upcased one (a common prefix
+* first, then the shorter name). CaseSensitive only orders names inside a run that
+* upcases equal, so POSIX case variants can coexist; it must never change the primary
+* order, or a case-sensitive insert lands in a node where a lookup won't descend.
+*/
+LONG
+CollateFileNames(PUNICODE_STRING Name1, PUNICODE_STRING Name2, BOOLEAN CaseSensitive)
+{
+    LONG Comparison = RtlCompareUnicodeString(Name1, Name2, TRUE);
 
-        // Compare the names of the same length
-        Comparison = RtlCompareUnicodeString(&Key1Name, &Key2Name, !CaseSensitive);
-
-        // If the truncated names are the same length, the shorter one comes first
-        if (Comparison == 0)
-            return -1;
-    }
-    else
-    {
-        // Key2 is shorter
-        // Truncate KeyName1 to be the same length as KeyName2
-        Key1Name.Length = Key2Name.Length;
-
-        // Compare the names of the same length
-        Comparison = RtlCompareUnicodeString(&Key1Name, &Key2Name, !CaseSensitive);
-
-        // If the truncated names are the same length, the shorter one comes first
-        if (Comparison == 0)
-            return 1;
-    }
+    if (Comparison == 0 && CaseSensitive)
+        Comparison = RtlCompareUnicodeString(Name1, Name2, FALSE);
 
     return Comparison;
 }
