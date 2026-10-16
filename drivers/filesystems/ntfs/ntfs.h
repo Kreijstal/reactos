@@ -491,11 +491,19 @@ typedef struct _B_TREE_FILENAME_NODE
  * entry has NTFS_INDEX_ENTRY_NODE set but no LesserChild has its child still
  * on disk, at the VCN its entry records; NtfsLoadChildNode() reads it from
  * IndexAllocationContext on the first descent. */
+#define NTFS_MAX_INDEX_NAME_LENGTH 8
+
+/* A tree describes one index of a file record: $I30 of a directory, or a view
+ * index such as $O of $Extend\$ObjId. Keys are ordered by CollationRule. */
 typedef struct
 {
     PB_TREE_FILENAME_NODE RootNode;
     PDEVICE_EXTENSION Vcb;
     struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
+    ULONG IndexedAttributeType;
+    ULONG CollationRule;
+    ULONG IndexNameLength;
+    WCHAR IndexName[NTFS_MAX_INDEX_NAME_LENGTH];
 } B_TREE, *PB_TREE;
 
 typedef struct
@@ -971,6 +979,7 @@ NtfsDeviceIoControl(IN PDEVICE_OBJECT DeviceObject,
 LONG
 CompareTreeKeys(PB_TREE_KEY Key1,
                 PB_TREE_KEY Key2,
+                ULONG CollationRule,
                 BOOLEAN CaseSensitive);
 
 LONG
@@ -999,6 +1008,15 @@ DemoteBTreeRoot(PB_TREE Tree);
 PB_TREE_KEY
 CreateBTreeKeyFromFilename(ULONGLONG FileReference,
                            PFILENAME_ATTRIBUTE FileNameAttribute);
+
+PB_TREE_KEY
+CreateBTreeKeyFromEntry(PINDEX_ENTRY_ATTRIBUTE Entry);
+
+PINDEX_ENTRY_ATTRIBUTE
+NtfsAllocateViewIndexEntry(PVOID Key,
+                           USHORT KeyLength,
+                           PVOID Data,
+                           USHORT DataLength);
 
 VOID
 DestroyBTree(PB_TREE Tree);
@@ -1050,10 +1068,27 @@ NtfsInsertKey(PB_TREE Tree,
               PB_TREE_FILENAME_NODE *NewRightHandSibling);
 
 NTSTATUS
+NtfsInsertIndexKey(PB_TREE Tree,
+                   PINDEX_ENTRY_ATTRIBUTE Entry,
+                   PB_TREE_FILENAME_NODE Node,
+                   BOOLEAN CaseSensitive,
+                   ULONG MaxIndexRootSize,
+                   ULONG IndexRecordSize,
+                   PB_TREE_KEY *MedianKey,
+                   PB_TREE_FILENAME_NODE *NewRightHandSibling);
+
+NTSTATUS
 NtfsRemoveKey(PB_TREE Tree,
               PB_TREE_FILENAME_NODE Node,
               PB_TREE_KEY SearchKey,
               BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsFindKey(PB_TREE Tree,
+            PB_TREE_FILENAME_NODE Node,
+            PB_TREE_KEY SearchKey,
+            BOOLEAN CaseSensitive,
+            PB_TREE_KEY *FoundKey);
 
 NTSTATUS
 SplitBTreeNode(PB_TREE Tree,
@@ -1070,6 +1105,7 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
 
 NTSTATUS
 UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
+                PB_TREE Tree,
                 PFILE_RECORD_HEADER FileRecord,
                 PB_TREE_FILENAME_NODE Node,
                 ULONG IndexBufferSize,
@@ -1312,6 +1348,30 @@ NtfsRemoveFilenameFromDirectory(PDEVICE_EXTENSION DeviceExt,
                                 ULONGLONG DirectoryMftIndex,
                                 PFILENAME_ATTRIBUTE FilenameAttribute,
                                 BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsInsertIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG MftIndex,
+                     PCWSTR IndexName,
+                     ULONG IndexNameLength,
+                     PINDEX_ENTRY_ATTRIBUTE Entry,
+                     BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsRemoveIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                     ULONGLONG MftIndex,
+                     PCWSTR IndexName,
+                     ULONG IndexNameLength,
+                     PINDEX_ENTRY_ATTRIBUTE Entry,
+                     BOOLEAN CaseSensitive);
+
+NTSTATUS
+NtfsFindIndexEntry(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   PCWSTR IndexName,
+                   ULONG IndexNameLength,
+                   PINDEX_ENTRY_ATTRIBUTE SearchEntry,
+                   PINDEX_ENTRY_ATTRIBUTE *FoundEntry);
 
 NTSTATUS
 FreeMftEntry(PDEVICE_EXTENSION DeviceExt,
