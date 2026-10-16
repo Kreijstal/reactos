@@ -1598,7 +1598,8 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
 NTSTATUS
 NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
                          PFILE_RECORD_HEADER FileRecord,
-                         ULONG BytesNeeded);
+                         ULONG BytesNeeded,
+                         ULONG KeepInstance);
 
 NTSTATUS
 SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
