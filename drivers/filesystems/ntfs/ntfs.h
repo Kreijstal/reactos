@@ -721,7 +721,8 @@ ConvertLargeMCBToDataRuns(PLARGE_MCB DataRunsMCB,
 PUCHAR
 DecodeRun(PUCHAR DataRun,
           LONGLONG *DataRunOffset,
-          ULONGLONG *DataRunLength);
+          ULONGLONG *DataRunLength,
+          PBOOLEAN IsSparse);
 
 ULONG GetFileNameAttributeLength(PFILENAME_ATTRIBUTE FileNameAttribute);
 
