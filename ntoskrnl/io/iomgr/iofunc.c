@@ -3302,7 +3302,7 @@ NtReadFileScatter(IN HANDLE FileHandle,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 NTSTATUS
 NTAPI
@@ -3311,8 +3311,120 @@ NtSetEaFile(IN HANDLE FileHandle,
             IN PVOID EaBuffer,
             IN ULONG EaBufferSize)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject;
+    PIO_STACK_LOCATION StackPtr;
+    KPROCESSOR_MODE PreviousMode = ExGetPreviousMode();
+    PVOID SystemBuffer = NULL;
+    BOOLEAN LockedForSynch = FALSE;
+    ULONG ErrorOffset;
+    PIRP Irp;
+    NTSTATUS Status;
+    PAGED_CODE();
+
+    /* The file system gets its own copy of the list, checked here first */
+    if (EaBufferSize == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    SystemBuffer = ExAllocatePoolWithTag(NonPagedPool, EaBufferSize, TAG_IOBUF);
+    if (!SystemBuffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    _SEH2_TRY
+    {
+        if (PreviousMode != KernelMode)
+        {
+            ProbeForWriteIoStatusBlock(IoStatusBlock);
+            ProbeForRead(EaBuffer, EaBufferSize, sizeof(ULONG));
+        }
+        RtlCopyMemory(SystemBuffer, EaBuffer, EaBufferSize);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
+    Status = IoCheckEaBufferValidity(SystemBuffer, EaBufferSize, &ErrorOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        _SEH2_TRY
+        {
+            IoStatusBlock->Status = Status;
+            IoStatusBlock->Information = ErrorOffset;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        return Status;
+    }
+
+    Status = ObReferenceObjectByHandle(FileHandle,
+                                       FILE_WRITE_EA,
+                                       IoFileObjectType,
+                                       PreviousMode,
+                                       (PVOID *)&FileObject,
+                                       NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        return Status;
+    }
+
+    if (FileObject->Flags & FO_SYNCHRONOUS_IO)
+    {
+        Status = IopLockFileObject(FileObject, PreviousMode);
+        if (!NT_SUCCESS(Status))
+        {
+            ObDereferenceObject(FileObject);
+            ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+            return Status;
+        }
+        LockedForSynch = TRUE;
+    }
+
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    KeClearEvent(&FileObject->Event);
+
+    Irp = IoAllocateIrp(DeviceObject->StackSize, TRUE);
+    if (!Irp)
+    {
+        if (LockedForSynch) IopUnlockFileObject(FileObject);
+        ObDereferenceObject(FileObject);
+        ExFreePoolWithTag(SystemBuffer, TAG_IOBUF);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Irp->RequestorMode = PreviousMode;
+    Irp->UserIosb = IoStatusBlock;
+    Irp->UserEvent = NULL;
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->Tail.Overlay.OriginalFileObject = FileObject;
+    Irp->Overlay.AsynchronousParameters.UserApcRoutine = NULL;
+    Irp->Overlay.AsynchronousParameters.UserApcContext = NULL;
+    Irp->MdlAddress = NULL;
+    Irp->UserBuffer = EaBuffer;
+
+    /* The I/O manager frees the copy when the IRP completes */
+    Irp->AssociatedIrp.SystemBuffer = SystemBuffer;
+    Irp->Flags = IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER | IRP_DEFER_IO_COMPLETION;
+
+    StackPtr = IoGetNextIrpStackLocation(Irp);
+    StackPtr->FileObject = FileObject;
+    StackPtr->MajorFunction = IRP_MJ_SET_EA;
+    StackPtr->Parameters.SetEa.Length = EaBufferSize;
+
+    return IopPerformSynchronousRequest(DeviceObject,
+                                        Irp,
+                                        FileObject,
+                                        TRUE,
+                                        PreviousMode,
+                                        LockedForSynch,
+                                        IopOtherTransfer);
 }
 
 /*
