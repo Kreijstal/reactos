@@ -185,6 +185,7 @@ NtfsCreateFCB(PCWSTR FileName,
     }
 
     ExInitializeResourceLite(&Fcb->MainResource);
+    ExInitializeResourceLite(&Fcb->PagingIoResource);
 
     Fcb->RFCB.Resource = &(Fcb->MainResource);
 
@@ -198,6 +199,7 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb);
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
 
+    ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
 
     ExFreePoolWithTag(Fcb->PathName, TAG_NTFS);
