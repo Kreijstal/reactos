@@ -1392,6 +1392,97 @@ NtfsGetRetrievalPointers(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsSparseRequest
+*
+* FSCTL_SET_SPARSE, FSCTL_SET_ZERO_DATA and FSCTL_QUERY_ALLOCATED_RANGES on a file.
+*/
+static
+NTSTATUS
+NtfsSparseRequest(PDEVICE_EXTENSION DeviceExt,
+                  PIRP Irp,
+                  ULONG Code)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    ULONG InputLength = Stack->Parameters.FileSystemControl.InputBufferLength;
+    ULONG OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    FILE_ALLOCATED_RANGE_BUFFER Query;
+    FILE_ZERO_DATA_INFORMATION Zero;
+    PFILE_ALLOCATED_RANGE_BUFFER Ranges;
+    BOOLEAN SetSparse = TRUE;
+    ULONG Returned;
+    NTSTATUS Status;
+
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+        return STATUS_INVALID_PARAMETER;
+
+    if (Code == FSCTL_QUERY_ALLOCATED_RANGES)
+    {
+        Status = NtfsCaptureFsctlInput(Irp, &Query, sizeof(Query));
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (OutputLength < sizeof(FILE_ALLOCATED_RANGE_BUFFER))
+            return STATUS_BUFFER_TOO_SMALL;
+
+        Ranges = ExAllocatePoolWithTag(PagedPool, OutputLength, TAG_NTFS);
+        if (Ranges == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+
+        ExAcquireResourceSharedLite(&Fcb->MainResource, TRUE);
+        Status = NtfsQueryAllocatedRanges(DeviceExt, Fcb, &Query, Ranges, OutputLength, &Returned);
+        ExReleaseResourceLite(&Fcb->MainResource);
+
+        if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+        {
+            NTSTATUS CopyStatus = NtfsReturnFsctlOutput(Irp, Ranges, Returned);
+            if (!NT_SUCCESS(CopyStatus))
+                Status = CopyStatus;
+        }
+
+        ExFreePoolWithTag(Ranges, TAG_NTFS);
+        return Status;
+    }
+
+    if (!NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    if (Code == FSCTL_SET_ZERO_DATA)
+    {
+        Status = NtfsCaptureFsctlInput(Irp, &Zero, sizeof(Zero));
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    else if (InputLength != 0)
+    {
+        /* FILE_SET_SPARSE_BUFFER, optional */
+        Status = NtfsCaptureFsctlInput(Irp, &SetSparse, sizeof(SetSparse));
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* Paging I/O maps the runs too; keep it out while they change */
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+
+    if (Code == FSCTL_SET_ZERO_DATA)
+        Status = NtfsSetZeroData(DeviceExt, Fcb, &Zero);
+    else
+        Status = NtfsSetSparse(DeviceExt, Fcb, SetSparse);
+
+    ExReleaseResourceLite(&Fcb->PagingIoResource);
+
+    if (NT_SUCCESS(Status))
+    {
+        NtfsPostUsnChange(DeviceExt, Fcb, (Code == FSCTL_SET_ZERO_DATA) ?
+                          NtfsUsnDataReason(Fcb, USN_REASON_DATA_OVERWRITE) : USN_REASON_BASIC_INFO_CHANGE);
+    }
+
+    ExReleaseResourceLite(&Fcb->MainResource);
+
+    return Status;
+}
+
+/**
 * @name NtfsUsnRequest
 *
 * The change journal FSCTLs: CREATE, DELETE, QUERY and READ_USN_JOURNAL and ENUM_USN_DATA on
@@ -1674,6 +1765,12 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
 
         case FSCTL_GET_RETRIEVAL_POINTERS:
             Status = NtfsGetRetrievalPointers(DeviceExt, Irp);
+            break;
+
+        case FSCTL_SET_SPARSE:
+        case FSCTL_SET_ZERO_DATA:
+        case FSCTL_QUERY_ALLOCATED_RANGES:
+            Status = NtfsSparseRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
             break;
 
         case FSCTL_CREATE_USN_JOURNAL:

@@ -289,6 +289,8 @@ typedef enum
 /* NTFS_ATTR_RECORD Flags */
 #define NTFS_ATTR_COMPRESSION_MASK 0x00FF
 #define NTFS_ATTR_SPARSE           0x8000
+/* A sparse stream is allocated in units of 1 << NTFS_SPARSE_UNIT_SHIFT clusters, like Windows' */
+#define NTFS_SPARSE_UNIT_SHIFT     4
 
 /* Indexed Flag in Resident attributes - still somewhat speculative */
 #define RA_INDEXED    0x01
@@ -927,6 +929,52 @@ FindNextAttribute(PFIND_ATTR_CONTXT Context,
 
 VOID
 FindCloseAttribute(PFIND_ATTR_CONTXT Context);
+
+NTSTATUS
+NtfsStoreMappingPairs(PNTFS_VCB Vcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      ULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord,
+                      ULONGLONG VcnCount);
+
+NTSTATUS
+NtfsMakeAttributeSparse(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsAllocateSparseRange(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        ULONG AttrOffset,
+                        PFILE_RECORD_HEADER FileRecord,
+                        ULONGLONG StartVcn,
+                        ULONGLONG VcnCount);
+
+NTSTATUS
+NtfsDeallocateSparseRange(PNTFS_VCB Vcb,
+                          PNTFS_ATTR_CONTEXT AttrContext,
+                          ULONG AttrOffset,
+                          PFILE_RECORD_HEADER FileRecord,
+                          ULONGLONG StartVcn,
+                          ULONGLONG VcnCount);
+
+/* Clusters in a unit of allocation of a sparse or compressed attribute */
+FORCEINLINE
+ULONG
+NtfsSparseUnitClusters(PNTFS_ATTR_CONTEXT AttrContext)
+{
+    return 1UL << AttrContext->pRecord->NonResident.CompressionUnit;
+}
+
+/* Whether a non-resident attribute can have holes */
+FORCEINLINE
+BOOLEAN
+NtfsAttributeIsSparse(PNTFS_ATTR_CONTEXT AttrContext)
+{
+    return AttrContext->pRecord->IsNonResident &&
+           (AttrContext->pRecord->Flags & NTFS_ATTR_SPARSE) != 0;
+}
 
 NTSTATUS
 FreeClusters(PNTFS_VCB Vcb,
@@ -1622,6 +1670,13 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
                  PCWSTR StreamName);
 
 NTSTATUS
+ConvertResidentAttributeToNonResident(PDEVICE_EXTENSION Vcb,
+                                      PNTFS_ATTR_CONTEXT AttrContext,
+                                      ULONG AttrOffset,
+                                      PFILE_RECORD_HEADER FileRecord,
+                                      PLARGE_INTEGER DataSize);
+
+NTSTATUS
 NtfsWriteStreamAt(PDEVICE_EXTENSION Vcb,
                   ULONGLONG MftIndex,
                   PCWSTR StreamName,
@@ -1972,6 +2027,27 @@ NtfsEnumUsnData(PDEVICE_EXTENSION Vcb,
                 PUCHAR Output,
                 ULONG OutputLength,
                 PULONG Returned);
+
+
+/* sparse.c */
+
+NTSTATUS
+NtfsSetSparse(PDEVICE_EXTENSION Vcb,
+              PNTFS_FCB Fcb,
+              BOOLEAN SetSparse);
+
+NTSTATUS
+NtfsSetZeroData(PDEVICE_EXTENSION Vcb,
+                PNTFS_FCB Fcb,
+                PFILE_ZERO_DATA_INFORMATION Zero);
+
+NTSTATUS
+NtfsQueryAllocatedRanges(PDEVICE_EXTENSION Vcb,
+                         PNTFS_FCB Fcb,
+                         PFILE_ALLOCATED_RANGE_BUFFER Query,
+                         PFILE_ALLOCATED_RANGE_BUFFER Ranges,
+                         ULONG RangesLength,
+                         PULONG Returned);
 
 
 /* secure.c */
