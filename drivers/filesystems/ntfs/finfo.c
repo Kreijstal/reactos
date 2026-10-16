@@ -138,8 +138,8 @@ NtfsGetAttributeTagInformation(PNTFS_FCB Fcb,
 
     NtfsFileFlagsToAttributes(FileName->FileAttributes, &AttributeTagInfo->FileAttributes);
 
-    /* FIXME: Read the tag from $REPARSE_POINT for a reparse point */
-    AttributeTagInfo->ReparseTag = 0;
+    /* The FCB keeps the tag of a reparse point with its attributes */
+    AttributeTagInfo->ReparseTag = NtfsFCBIsReparsePoint(Fcb) ? FileName->Extended.ReparseTag : 0;
 
     *BufferLength -= sizeof(FILE_ATTRIBUTE_TAG_INFORMATION);
 

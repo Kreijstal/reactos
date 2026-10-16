@@ -4242,6 +4242,134 @@ NtfsDeleteExtensionRecords(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsDeleteAttributeFromFile
+* @implemented
+*
+* Takes an attribute out of a file, wherever it lives: its clusters go back to the volume,
+* and an extension record that held it leaves the $ATTRIBUTE_LIST if it's empty now.
+*
+* @param DeviceExt
+* Points to the target disk's DEVICE_EXTENSION.
+*
+* @param BaseRecord
+* The file's base record, in memory. The caller writes it back afterwards.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND if the file has no such attribute, or an
+* allocation or I/O error.
+*/
+NTSTATUS
+NtfsDeleteAttributeFromFile(PDEVICE_EXTENSION DeviceExt,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONG Type,
+                            PCWSTR Name,
+                            ULONG NameLength)
+{
+    PFILE_RECORD_HEADER Holder = NULL;
+    PNTFS_ATTR_CONTEXT AttrContext;
+    ULONG AttrOffset;
+    NTSTATUS Status;
+
+    Status = FindAttribute(DeviceExt, BaseRecord, Type, Name, NameLength, &AttrContext, &AttrOffset);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtfsReadAttributeHolder(DeviceExt, AttrContext, BaseRecord, &Holder);
+
+    // Give back the attribute's clusters first
+    if (NT_SUCCESS(Status) &&
+        AttrContext->pRecord->IsNonResident &&
+        AttrContext->pRecord->NonResident.HighestVCN != (ULONGLONG)-1)
+    {
+        ULONGLONG ClusterCount = AttrContext->pRecord->NonResident.HighestVCN + 1;
+
+        Status = FreeClusters(DeviceExt, AttrContext, AttrOffset, Holder, (ULONG)ClusterCount);
+    }
+
+    if (NT_SUCCESS(Status))
+        NtfsRemoveAttribute(Holder, AttrOffset);
+
+    /* An extension record is written here, and the list loses the attribute */
+    if (NT_SUCCESS(Status) && Holder != BaseRecord)
+    {
+        Status = UpdateFileRecord(DeviceExt, AttrContext->FileMFTIndex & NTFS_MFT_MASK, Holder);
+        if (NT_SUCCESS(Status))
+            Status = NtfsRebuildAttributeList(DeviceExt, BaseRecord, NULL, 0);
+    }
+
+    ReleaseAttributeContext(AttrContext);
+    NtfsReleaseAttributeHolder(DeviceExt, BaseRecord, Holder);
+
+    return Status;
+}
+
+/**
+* @name NtfsSetAttributeValue
+* @implemented
+*
+* Gives a file an attribute with the given value, replacing the one it has: resident while
+* the records have room, in clusters otherwise.
+*
+* @param BaseRecord
+* The file's base record, in memory. Written back.
+*/
+NTSTATUS
+NtfsSetAttributeValue(PDEVICE_EXTENSION DeviceExt,
+                      PFILE_RECORD_HEADER BaseRecord,
+                      ULONG Type,
+                      PCWSTR Name,
+                      USHORT NameLength,
+                      const VOID *Value,
+                      ULONG ValueLength)
+{
+    PFILE_RECORD_HEADER Holder;
+    PNTFS_ATTR_CONTEXT AttrContext;
+    ULONG AttrOffset, Written;
+    LARGE_INTEGER Size;
+    NTSTATUS Status;
+
+    Status = NtfsDeleteAttributeFromFile(DeviceExt, BaseRecord, Type, Name, NameLength);
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        return Status;
+
+    Status = NtfsAddResidentAttributeToFile(DeviceExt, BaseRecord, Type, Name, NameLength, Value, ValueLength);
+    if (NT_SUCCESS(Status) || Status != STATUS_DISK_FULL)
+    {
+        if (NT_SUCCESS(Status))
+            Status = UpdateFileRecord(DeviceExt, BaseRecord->MFTRecordNumber, BaseRecord);
+        return Status;
+    }
+
+    /* Too big for a record: add it empty, then size it, which moves it to clusters */
+    Status = NtfsAddResidentAttributeToFile(DeviceExt, BaseRecord, Type, Name, NameLength, NULL, 0);
+    if (NT_SUCCESS(Status))
+        Status = UpdateFileRecord(DeviceExt, BaseRecord->MFTRecordNumber, BaseRecord);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = FindAttribute(DeviceExt, BaseRecord, Type, Name, NameLength, &AttrContext, &AttrOffset);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtfsReadAttributeHolder(DeviceExt, AttrContext, BaseRecord, &Holder);
+    if (NT_SUCCESS(Status))
+    {
+        Size.QuadPart = ValueLength;
+        Status = SetResidentAttributeDataLength(DeviceExt, AttrContext, AttrOffset, Holder, &Size);
+        if (NT_SUCCESS(Status) && !AttrContext->pRecord->IsNonResident)
+            Status = UpdateFileRecord(DeviceExt, AttrContext->FileMFTIndex & NTFS_MFT_MASK, Holder);
+        if (NT_SUCCESS(Status))
+            Status = WriteAttribute(DeviceExt, AttrContext, 0, (PUCHAR)Value, ValueLength, &Written, Holder);
+
+        NtfsReleaseAttributeHolder(DeviceExt, BaseRecord, Holder);
+    }
+
+    ReleaseAttributeContext(AttrContext);
+
+    return Status;
+}
+
+/**
 * @name NtfsDeleteStream
 * @implemented
 *
@@ -4266,9 +4394,6 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
                  PCWSTR StreamName)
 {
     PFILE_RECORD_HEADER FileRecord;
-    PFILE_RECORD_HEADER Holder = NULL;
-    PNTFS_ATTR_CONTEXT DataContext;
-    ULONG AttrOffset;
     NTSTATUS Status;
 
     ASSERT(StreamName[0] != UNICODE_NULL);
@@ -4279,43 +4404,10 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
 
     Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
     if (NT_SUCCESS(Status))
-        Status = FindAttribute(DeviceExt, FileRecord, AttributeData, StreamName, wcslen(StreamName), &DataContext, &AttrOffset);
-
-    if (!NT_SUCCESS(Status))
-    {
-        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-        return Status;
-    }
-
-    /* The stream can live in an extension record */
-    Status = NtfsReadAttributeHolder(DeviceExt, DataContext, FileRecord, &Holder);
-
-    // Give back the stream's clusters first
-    if (NT_SUCCESS(Status) &&
-        DataContext->pRecord->IsNonResident &&
-        DataContext->pRecord->NonResident.HighestVCN != (ULONGLONG)-1)
-    {
-        ULONGLONG ClusterCount = DataContext->pRecord->NonResident.HighestVCN + 1;
-
-        Status = FreeClusters(DeviceExt, DataContext, AttrOffset, Holder, (ULONG)ClusterCount);
-    }
-
+        Status = NtfsDeleteAttributeFromFile(DeviceExt, FileRecord, AttributeData, StreamName, wcslen(StreamName));
     if (NT_SUCCESS(Status))
-    {
-        NtfsRemoveAttribute(Holder, AttrOffset);
-        Status = UpdateFileRecord(DeviceExt, DataContext->FileMFTIndex & NTFS_MFT_MASK, Holder);
-    }
+        Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
 
-    /* The list no longer has the stream, and loses an extension record it emptied */
-    if (NT_SUCCESS(Status) && Holder != FileRecord)
-    {
-        Status = NtfsRebuildAttributeList(DeviceExt, FileRecord, NULL, 0);
-        if (NT_SUCCESS(Status))
-            Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
-    }
-
-    ReleaseAttributeContext(DataContext);
-    NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;

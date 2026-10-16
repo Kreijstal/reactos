@@ -1251,7 +1251,8 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
                   PNTFS_FCB *pParentFCB,
                   PNTFS_FCB *pFCB,
                   PCWSTR pFileName,
-                  BOOLEAN CaseSensitive);
+                  BOOLEAN CaseSensitive,
+                  PULONG ReparseOffset);
 
 NTSTATUS
 NtfsReadFCBAttribute(PNTFS_VCB Vcb,
@@ -1467,6 +1468,22 @@ NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
 NTSTATUS
 NtfsDeleteExtensionRecords(PDEVICE_EXTENSION DeviceExt,
                            PFILE_RECORD_HEADER BaseRecord);
+
+NTSTATUS
+NtfsDeleteAttributeFromFile(PDEVICE_EXTENSION DeviceExt,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONG Type,
+                            PCWSTR Name,
+                            ULONG NameLength);
+
+NTSTATUS
+NtfsSetAttributeValue(PDEVICE_EXTENSION DeviceExt,
+                      PFILE_RECORD_HEADER BaseRecord,
+                      ULONG Type,
+                      PCWSTR Name,
+                      USHORT NameLength,
+                      const VOID *Value,
+                      ULONG ValueLength);
 
 NTSTATUS
 NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
@@ -1689,6 +1706,32 @@ CdfsSwapString(PWCHAR Out,
 VOID
 NtfsFileFlagsToAttributes(ULONG NtfsAttributes,
                           PULONG FileAttributes);
+
+
+/* reparse.c */
+
+ULONG
+NtfsGetReparseTag(PDEVICE_EXTENSION DeviceExt,
+                  PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsWriteReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                      PNTFS_FCB Fcb,
+                      PREPARSE_DATA_BUFFER Buffer,
+                      ULONG Length);
+
+NTSTATUS
+NtfsQueryReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                      PNTFS_FCB Fcb,
+                      PVOID Output,
+                      ULONG OutputLength,
+                      PULONG Copied);
+
+NTSTATUS
+NtfsRemoveReparsePoint(PDEVICE_EXTENSION DeviceExt,
+                       PNTFS_FCB Fcb,
+                       PREPARSE_DATA_BUFFER Request,
+                       ULONG Length);
 
 
 /* rw.c */
