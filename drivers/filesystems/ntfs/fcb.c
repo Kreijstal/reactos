@@ -406,6 +406,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     Fcb->RFCB.ValidDataLength.QuadPart = FileName->DataSize;
     Fcb->RFCB.AllocationSize.QuadPart = FileName->AllocatedSize;
     Fcb->MFTIndex = NTFS_FILE_ROOT;
+    Fcb->SequenceNumber = MftRecord->SequenceNumber;
     Fcb->LinkCount = MftRecord->LinkCount;
 
     NtfsFCBInitializeCache(Vcb, Fcb);
@@ -500,6 +501,7 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     NtfsFCBInitializeCache(Vcb, rcFCB);
     rcFCB->RefCount = 1;
     rcFCB->MFTIndex = MFTIndex;
+    rcFCB->SequenceNumber = Record->SequenceNumber;
     rcFCB->LinkCount = Record->LinkCount;
     NtfsAddFCBToTable(Vcb, rcFCB);
     *fileFCB = rcFCB;

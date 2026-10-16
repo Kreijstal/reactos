@@ -32,9 +32,6 @@
 #define NDEBUG
 #include <debug.h>
 
-/* Longest name a $FILE_NAME can hold, in characters */
-#define NTFS_MAX_NAME_LENGTH 255
-
 /* FUNCTIONS ****************************************************************/
 
 /*
@@ -967,42 +964,6 @@ NtfsSetDispositionInformation(PDEVICE_EXTENSION DeviceExt,
     FileObject->DeletePending = TRUE;
 
     return STATUS_SUCCESS;
-}
-
-/**
-* @name NtfsIsValidFileName
-*
-* Checks a single path component against what NTFS stores and Win32 can open.
-*/
-static
-BOOLEAN
-NtfsIsValidFileName(
-    _In_ PCUNICODE_STRING Name)
-{
-    USHORT i;
-
-    if (Name->Length == 0 ||
-        Name->Length > NTFS_MAX_NAME_LENGTH * sizeof(WCHAR) ||
-        (Name->Length % sizeof(WCHAR)) != 0)
-    {
-        return FALSE;
-    }
-
-    if ((Name->Length == sizeof(WCHAR) && Name->Buffer[0] == L'.') ||
-        (Name->Length == 2 * sizeof(WCHAR) && Name->Buffer[0] == L'.' && Name->Buffer[1] == L'.'))
-    {
-        return FALSE;
-    }
-
-    for (i = 0; i < Name->Length / sizeof(WCHAR); i++)
-    {
-        WCHAR Char = Name->Buffer[i];
-
-        if (Char < 0x20 || wcschr(L"\\/:*?\"<>|", Char) != NULL)
-            return FALSE;
-    }
-
-    return TRUE;
 }
 
 /**

@@ -166,6 +166,9 @@ typedef struct
  * up. These record which of the two a scan has already handed out. */
 #define CCB_RETURNED_DOT        0x0001
 #define CCB_RETURNED_DOTDOT     0x0002
+/* Opened with FILE_DELETE_ON_CLOSE: the file is marked for deletion when this
+ * handle is cleaned up */
+#define CCB_DELETE_ON_CLOSE     0x0004
 
 typedef struct
 {
@@ -593,6 +596,9 @@ typedef struct _NTFS_ATTR_CONTEXT
 #define FCB_DELETED             0x0010
 #define MAX_PATH                260
 
+/* Longest name a $FILE_NAME can hold, in characters */
+#define NTFS_MAX_NAME_LENGTH    255
+
 typedef struct _FCB
 {
     NTFSIDENTIFIER Identifier;
@@ -621,6 +627,7 @@ typedef struct _FCB
     SHARE_ACCESS ShareAccess;
 
     ULONGLONG MFTIndex;
+    USHORT SequenceNumber;  /* Of the file record; with MFTIndex, the file reference */
     USHORT LinkCount;
 
     FILENAME_ATTRIBUTE Entry;
@@ -706,14 +713,15 @@ NtfsNameHasStreamPart(PCUNICODE_STRING Name);
 NTSTATUS
 AddFileName(PFILE_RECORD_HEADER FileRecord,
             PNTFS_ATTR_RECORD AttributeAddress,
-            PDEVICE_EXTENSION DeviceExt,
-            PFILE_OBJECT FileObject,
+            ULONGLONG ParentReference,
+            PCUNICODE_STRING Name,
             BOOLEAN CaseSensitive,
-            PULONGLONG ParentMftIndex);
+            ULONG FileAttributes);
 
 NTSTATUS
 AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
-                       PNTFS_ATTR_RECORD AttributeAddress);
+                       PNTFS_ATTR_RECORD AttributeAddress,
+                       ULONG FileAttributes);
 
 NTSTATUS
 ConvertDataRunsToLargeMCB(PUCHAR DataRun,
@@ -994,18 +1002,15 @@ NtfsClose(PNTFS_IRP_CONTEXT IrpContext);
 NTSTATUS
 NtfsCreate(PNTFS_IRP_CONTEXT IrpContext);
 
-NTSTATUS
-NtfsCreateDirectory(PDEVICE_EXTENSION DeviceExt,
-                    PFILE_OBJECT FileObject,
-                    BOOLEAN CaseSensitive,
-                    BOOLEAN CanWait);
-
 PFILE_RECORD_HEADER
 NtfsCreateEmptyFileRecord(PDEVICE_EXTENSION DeviceExt);
 
 NTSTATUS
 NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
-                     PFILE_OBJECT FileObject,
+                     PNTFS_FCB ParentFcb,
+                     PCUNICODE_STRING Name,
+                     ULONG FileAttributes,
+                     BOOLEAN IsDirectory,
                      BOOLEAN CaseSensitive,
                      BOOLEAN CanWait);
 
@@ -1474,6 +1479,10 @@ NTSTATUS
 NtfsLockUserBuffer(IN PIRP Irp,
                    IN ULONG Length,
                    IN LOCK_OPERATION Operation);
+
+BOOLEAN
+NtfsIsValidFileName(
+    _In_ PCUNICODE_STRING Name);
 
 #if 0
 BOOLEAN
