@@ -53,13 +53,19 @@ NtfsGetNextPathElement(PCWSTR FileName)
 
 
 static
-VOID
+BOOLEAN
 NtfsWSubString(PWCHAR pTarget,
+               size_t pTargetCount,
                PCWSTR pSource,
                size_t pLength)
 {
+    /* pLength comes from the caller's path, not from the target's size */
+    if (pLength >= pTargetCount)
+        return FALSE;
+
     wcsncpy(pTarget, pSource, pLength);
     pTarget[pLength] = L'\0';
+    return TRUE;
 }
 
 
@@ -726,15 +732,28 @@ NtfsGetFCBForFile(PNTFS_VCB Vcb,
         parentFCB = FCB;
 
         /* Extract next directory level into dirName */
-        NtfsWSubString(pathName,
-                       pFileName,
-                       NtfsGetNextPathElement(currentElement) - pFileName);
+        if (!NtfsWSubString(pathName,
+                            RTL_NUMBER_OF(pathName),
+                            pFileName,
+                            NtfsGetNextPathElement(currentElement) - pFileName))
+        {
+            DPRINT1("Path is longer than MAX_PATH\n");
+
+            NtfsReleaseFCB(Vcb, parentFCB);
+            *pParentFCB = NULL;
+            *pFCB = NULL;
+
+            return STATUS_OBJECT_NAME_INVALID;
+        }
         DPRINT("  pathName:%S\n", pathName);
 
         FCB = NtfsGrabFCBFromTable(Vcb, pathName);
         if (FCB == NULL)
         {
+            /* The element is the tail of pathName, which fit */
+            ASSERT(NtfsGetNextPathElement(currentElement) - currentElement < RTL_NUMBER_OF(elementName));
             NtfsWSubString(elementName,
+                           RTL_NUMBER_OF(elementName),
                            currentElement,
                            NtfsGetNextPathElement(currentElement) - currentElement);
             DPRINT("  elementName:%S\n", elementName);
