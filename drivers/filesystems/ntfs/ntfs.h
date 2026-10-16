@@ -599,6 +599,9 @@ typedef struct _NTFS_ATTR_CONTEXT
 /* Longest name a $FILE_NAME can hold, in characters */
 #define NTFS_MAX_NAME_LENGTH    255
 
+/* Longest path a UNICODE_STRING can hold, in characters, with its terminator */
+#define NTFS_MAX_PATH_LENGTH    (MAXUSHORT / sizeof(WCHAR))
+
 typedef struct _FCB
 {
     NTFSIDENTIFIER Identifier;
@@ -611,7 +614,7 @@ typedef struct _FCB
 
     WCHAR Stream[MAX_PATH];
     WCHAR *ObjectName;		/* point on filename (250 chars max) in PathName */
-    WCHAR PathName[MAX_PATH];	/* path+filename 260 max */
+    PWCHAR PathName;		/* path+filename, NUL-terminated, from pool (TAG_NTFS) */
 
     ERESOURCE PagingIoResource;
     ERESOURCE MainResource;
@@ -1063,6 +1066,21 @@ FAST_IO_WRITE NtfsFastIoWrite;
 
 
 /* fcb.c */
+
+NTSTATUS
+NtfsSetFCBPath(
+    _Inout_ PNTFS_FCB Fcb,
+    _In_ PCWSTR Path);
+
+VOID
+NtfsReplaceFCBPath(
+    _Inout_ PNTFS_FCB Fcb,
+    _In_ PWCHAR Path);
+
+PWCHAR
+NtfsBuildChildPath(
+    _In_ PCWSTR DirectoryPath,
+    _In_ PCWSTR Name);
 
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,

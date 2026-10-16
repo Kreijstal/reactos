@@ -244,17 +244,27 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
     NTSTATUS Status;
     PFILE_RECORD_HEADER MftRecord;
     PFILENAME_ATTRIBUTE FileName;
-    WCHAR FullPath[MAX_PATH];
-    ULONG WritePosition = MAX_PATH - 1;
+    PWCHAR FullPath;
+    ULONG WritePosition;
 
     DPRINT("NtfsMoonWalkID(%p, %I64x, %p)\n", DeviceExt, Id, OutPath);
 
-    RtlZeroMemory(FullPath, sizeof(FullPath));
-    MftRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
-    if (MftRecord == NULL)
+    /* The path is assembled backwards from the end of a buffer as long as any path can be */
+    FullPath = ExAllocatePoolWithTag(NonPagedPool, NTFS_MAX_PATH_LENGTH * sizeof(WCHAR), TAG_NTFS);
+    if (FullPath == NULL)
     {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
+
+    MftRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (MftRecord == NULL)
+    {
+        ExFreePoolWithTag(FullPath, TAG_NTFS);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    WritePosition = NTFS_MAX_PATH_LENGTH - 1;
+    FullPath[WritePosition] = UNICODE_NULL;
 
     while (TRUE)
     {
@@ -277,11 +287,15 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
             break;
         }
 
+        if (WritePosition < FileName->NameLength + 1U)
+        {
+            Status = STATUS_OBJECT_NAME_INVALID;
+            break;
+        }
+
         WritePosition -= FileName->NameLength;
-        ASSERT(WritePosition < MAX_PATH);
         RtlCopyMemory(FullPath + WritePosition, FileName->Name, FileName->NameLength * sizeof(WCHAR));
         WritePosition -= 1;
-        ASSERT(WritePosition < MAX_PATH);
         FullPath[WritePosition] = L'\\';
 
         Id = FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK;
@@ -291,17 +305,18 @@ NtfsMoonWalkID(PDEVICE_EXTENSION DeviceExt,
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, MftRecord);
 
-    if (!NT_SUCCESS(Status))
-        return Status;
-
-    OutPath->Length = (MAX_PATH - WritePosition - 1) * sizeof(WCHAR);
-    OutPath->MaximumLength = (MAX_PATH - WritePosition) * sizeof(WCHAR);
-    OutPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, OutPath->MaximumLength, TAG_NTFS);
-    if (OutPath->Buffer == NULL)
+    if (NT_SUCCESS(Status))
     {
-        return STATUS_INSUFFICIENT_RESOURCES;
+        OutPath->Length = (USHORT)((NTFS_MAX_PATH_LENGTH - WritePosition - 1) * sizeof(WCHAR));
+        OutPath->MaximumLength = OutPath->Length + sizeof(WCHAR);
+        OutPath->Buffer = ExAllocatePoolWithTag(NonPagedPool, OutPath->MaximumLength, TAG_NTFS);
+        if (OutPath->Buffer == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            RtlCopyMemory(OutPath->Buffer, FullPath + WritePosition, OutPath->MaximumLength);
     }
-    RtlCopyMemory(OutPath->Buffer, FullPath + WritePosition, OutPath->MaximumLength);
+
+    ExFreePoolWithTag(FullPath, TAG_NTFS);
 
     return Status;
 }

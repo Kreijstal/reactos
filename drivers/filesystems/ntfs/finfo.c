@@ -1065,85 +1065,123 @@ NtfsSetFileNameAttribute(
     return Status;
 }
 
-/**
-* @name NtfsRenameFcbs
-*
-* Moves the FCB table over to NewPath: the renamed FCB, its other streams, and
-* for a directory every FCB cached beneath it.
-*/
+/* A path an FCB takes once a rename is committed */
+typedef struct _NTFS_RENAMED_FCB
+{
+    struct _NTFS_RENAMED_FCB *Next;
+    PNTFS_FCB Fcb;
+    PWCHAR NewPath;
+} NTFS_RENAMED_FCB, *PNTFS_RENAMED_FCB;
+
 static
 VOID
-NtfsRenameFcbs(
+NtfsFreeRenamedFcbs(
+    _In_opt_ PNTFS_RENAMED_FCB List)
+{
+    while (List != NULL)
+    {
+        PNTFS_RENAMED_FCB Next = List->Next;
+
+        if (List->NewPath != NULL)
+            ExFreePoolWithTag(List->NewPath, TAG_NTFS);
+        ExFreePoolWithTag(List, TAG_NTFS);
+        List = Next;
+    }
+}
+
+/**
+* @name NtfsPrepareRenamedFcbs
+*
+* Builds the path every FCB moved by renaming Fcb to NewPath takes: the renamed FCB, its
+* other streams, and for a directory every FCB cached beneath it. Done before the rename
+* is committed, so running out of memory can still fail it.
+*
+* @remarks
+* The caller holds DirResource exclusively, which keeps FCBs from entering or leaving
+* the table.
+*/
+static
+NTSTATUS
+NtfsPrepareRenamedFcbs(
     _In_ PDEVICE_EXTENSION DeviceExt,
     _In_ PNTFS_FCB Fcb,
-    _In_ PCWSTR NewPath)
+    _In_ PCWSTR NewPath,
+    _Out_ PNTFS_RENAMED_FCB *List)
 {
-    WCHAR OldPath[MAX_PATH];
-    WCHAR Rebuilt[MAX_PATH];
-    SIZE_T OldLength;
+    SIZE_T OldLength = wcslen(Fcb->PathName);
+    SIZE_T NewLength = wcslen(NewPath);
     PLIST_ENTRY Entry;
-    KIRQL OldIrql;
 
-    wcscpy(OldPath, Fcb->PathName);
-    OldLength = wcslen(OldPath);
-
-    KeAcquireSpinLock(&DeviceExt->FcbListLock, &OldIrql);
+    *List = NULL;
 
     for (Entry = DeviceExt->FcbListHead.Flink; Entry != &DeviceExt->FcbListHead; Entry = Entry->Flink)
     {
         PNTFS_FCB Other = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
+        PNTFS_RENAMED_FCB Renamed;
+        SIZE_T TailLength;
 
-        if (_wcsnicmp(Other->PathName, OldPath, OldLength) != 0 ||
+        if (_wcsnicmp(Other->PathName, Fcb->PathName, OldLength) != 0 ||
             (Other->PathName[OldLength] != UNICODE_NULL && Other->PathName[OldLength] != L'\\'))
         {
             continue;
         }
 
-        /* NtfsCheckRenamePaths() already made sure this fits */
-        wcscpy(Rebuilt, NewPath);
-        wcscat(Rebuilt, Other->PathName + OldLength);
-        wcscpy(Other->PathName, Rebuilt);
-        Other->ObjectName = wcsrchr(Other->PathName, L'\\');
+        TailLength = wcslen(Other->PathName + OldLength);
+        if (NewLength + TailLength >= NTFS_MAX_PATH_LENGTH)
+        {
+            NtfsFreeRenamedFcbs(*List);
+            *List = NULL;
+            return STATUS_NAME_TOO_LONG;
+        }
+
+        Renamed = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Renamed), TAG_NTFS);
+        if (Renamed != NULL)
+        {
+            Renamed->Next = *List;
+            Renamed->Fcb = Other;
+            Renamed->NewPath = ExAllocatePoolWithTag(NonPagedPool, (NewLength + TailLength + 1) * sizeof(WCHAR), TAG_NTFS);
+            *List = Renamed;
+        }
+
+        if (Renamed == NULL || Renamed->NewPath == NULL)
+        {
+            NtfsFreeRenamedFcbs(*List);
+            *List = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlCopyMemory(Renamed->NewPath, NewPath, NewLength * sizeof(WCHAR));
+        RtlCopyMemory(Renamed->NewPath + NewLength, Other->PathName + OldLength, (TailLength + 1) * sizeof(WCHAR));
     }
 
-    KeReleaseSpinLock(&DeviceExt->FcbListLock, OldIrql);
+    return STATUS_SUCCESS;
 }
 
 /**
-* @name NtfsCheckRenamePaths
+* @name NtfsRenameFcbs
 *
-* Fails if moving Fcb to NewPath would push any cached path past MAX_PATH.
+* Moves the FCBs NtfsPrepareRenamedFcbs() found to their new paths, and frees List.
 */
 static
-NTSTATUS
-NtfsCheckRenamePaths(
+VOID
+NtfsRenameFcbs(
     _In_ PDEVICE_EXTENSION DeviceExt,
-    _In_ PNTFS_FCB Fcb,
-    _In_ PCWSTR NewPath)
+    _In_ PNTFS_RENAMED_FCB List)
 {
-    SIZE_T OldLength = wcslen(Fcb->PathName);
-    SIZE_T NewLength = wcslen(NewPath);
-    NTSTATUS Status = STATUS_SUCCESS;
-    PLIST_ENTRY Entry;
+    PNTFS_RENAMED_FCB Renamed;
     KIRQL OldIrql;
 
     KeAcquireSpinLock(&DeviceExt->FcbListLock, &OldIrql);
 
-    for (Entry = DeviceExt->FcbListHead.Flink; Entry != &DeviceExt->FcbListHead; Entry = Entry->Flink)
+    for (Renamed = List; Renamed != NULL; Renamed = Renamed->Next)
     {
-        PNTFS_FCB Other = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
-
-        if (_wcsnicmp(Other->PathName, Fcb->PathName, OldLength) == 0 &&
-            (Other->PathName[OldLength] == UNICODE_NULL || Other->PathName[OldLength] == L'\\') &&
-            wcslen(Other->PathName) - OldLength + NewLength >= MAX_PATH)
-        {
-            Status = STATUS_NAME_TOO_LONG;
-            break;
-        }
+        NtfsReplaceFCBPath(Renamed->Fcb, Renamed->NewPath);
+        Renamed->NewPath = NULL;
     }
 
     KeReleaseSpinLock(&DeviceExt->FcbListLock, OldIrql);
-    return Status;
+
+    NtfsFreeRenamedFcbs(List);
 }
 
 /**
@@ -1208,7 +1246,7 @@ NtfsBuildRenamePath(
     _In_ PFILE_RENAME_INFORMATION RenameInfo,
     _In_ ULONG BufferLength,
     _Out_ PUNICODE_STRING NewName,
-    _Out_writes_z_(MAX_PATH) PWSTR NewPath,
+    _Outptr_ PWSTR *NewPath,
     _Out_ PULONGLONG TargetDirMft)
 {
     PCWSTR TargetDirPath;
@@ -1246,7 +1284,7 @@ NtfsBuildRenamePath(
         return STATUS_OBJECT_NAME_INVALID;
 
     NameLength = NewName->Length / sizeof(WCHAR);
-    if (TargetDirLength + 1 + NameLength >= MAX_PATH)
+    if (TargetDirLength + 1 + NameLength >= NTFS_MAX_PATH_LENGTH)
         return STATUS_NAME_TOO_LONG;
 
     /* A directory can't become its own descendant */
@@ -1262,10 +1300,14 @@ NtfsBuildRenamePath(
         }
     }
 
-    RtlCopyMemory(NewPath, TargetDirPath, TargetDirLength * sizeof(WCHAR));
-    NewPath[TargetDirLength] = L'\\';
-    RtlCopyMemory(NewPath + TargetDirLength + 1, NewName->Buffer, NewName->Length);
-    NewPath[TargetDirLength + 1 + NameLength] = UNICODE_NULL;
+    *NewPath = ExAllocatePoolWithTag(NonPagedPool, (TargetDirLength + 1 + NameLength + 1) * sizeof(WCHAR), TAG_NTFS);
+    if (*NewPath == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlCopyMemory(*NewPath, TargetDirPath, TargetDirLength * sizeof(WCHAR));
+    (*NewPath)[TargetDirLength] = L'\\';
+    RtlCopyMemory(*NewPath + TargetDirLength + 1, NewName->Buffer, NewName->Length);
+    (*NewPath)[TargetDirLength + 1 + NameLength] = UNICODE_NULL;
 
     return STATUS_SUCCESS;
 }
@@ -1591,7 +1633,8 @@ NtfsSetRenameInformation(
     _In_ ULONG BufferLength)
 {
     UNICODE_STRING NewName;
-    WCHAR NewPath[MAX_PATH];
+    PWSTR NewPath = NULL;
+    PNTFS_RENAMED_FCB RenamedFcbs = NULL;
     ULONGLONG TargetDirMft;
     ULONGLONG OldParentMft;
     PFILE_RECORD_HEADER FileRecord = NULL;
@@ -1611,13 +1654,16 @@ NtfsSetRenameInformation(
     if (Fcb->Stream[0] != UNICODE_NULL)
         return STATUS_NOT_IMPLEMENTED;
 
-    Status = NtfsBuildRenamePath(Fcb, TargetFileObject, RenameInfo, BufferLength, &NewName, NewPath, &TargetDirMft);
+    Status = NtfsBuildRenamePath(Fcb, TargetFileObject, RenameInfo, BufferLength, &NewName, &NewPath, &TargetDirMft);
     if (!NT_SUCCESS(Status))
         return Status;
 
-    Status = NtfsCheckRenamePaths(DeviceExt, Fcb, NewPath);
+    Status = NtfsPrepareRenamedFcbs(DeviceExt, Fcb, NewPath, &RenamedFcbs);
     if (!NT_SUCCESS(Status))
+    {
+        ExFreePoolWithTag(NewPath, TAG_NTFS);
         return Status;
+    }
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     Original = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
@@ -1661,12 +1707,15 @@ NtfsSetRenameInformation(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
-    NtfsRenameFcbs(DeviceExt, Fcb, NewPath);
+    NtfsRenameFcbs(DeviceExt, RenamedFcbs);
+    RenamedFcbs = NULL;
 
     RtlCopyMemory(&Fcb->Entry, NewValue, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
     Fcb->Entry.NameType = NewValue->NameType;
 
 Quit:
+    NtfsFreeRenamedFcbs(RenamedFcbs);
+    ExFreePoolWithTag(NewPath, TAG_NTFS);
     if (NewValue != NULL)
         ExFreePoolWithTag(NewValue, TAG_NTFS);
     if (Original != NULL)
