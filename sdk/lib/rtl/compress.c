@@ -242,28 +242,171 @@ out:
 }
 
 
+/* LZNT1 compression: what the workspace of a chunk holds */
+#define LZNT1_CHUNK_SIZE    0x1000
+#define LZNT1_HASH_SIZE     0x1000
+#define LZNT1_NO_POSITION   0xFFFF
+#define LZNT1_MAX_CHAIN     64
+
+typedef struct _LZNT1_WORKSPACE
+{
+    USHORT Head[LZNT1_HASH_SIZE];   /* last position with each hash */
+    USHORT Previous[LZNT1_CHUNK_SIZE]; /* the position before it with the same hash */
+} LZNT1_WORKSPACE, *PLZNT1_WORKSPACE;
+
+C_ASSERT(sizeof(LZNT1_WORKSPACE) <= 0x8010);
+
+static ULONG
+lznt1_hash(const UCHAR *p)
+{
+    return ((p[0] << 4) ^ (p[1] << 2) ^ p[2]) & (LZNT1_HASH_SIZE - 1);
+}
+
+/* The split of a back reference at chunk position pos, as the decompressor reads it */
+static ULONG
+lznt1_displacement_bits(ULONG pos)
+{
+    ULONG bits;
+
+    for (bits = 12; bits > 4; bits--)
+        if ((1UL << (bits - 1)) < pos) break;
+    return bits;
+}
+
+static VOID
+lznt1_insert(PLZNT1_WORKSPACE ws, const UCHAR *chunk, ULONG pos, ULONG size)
+{
+    ULONG hash;
+
+    if (pos + 3 > size)
+        return;
+    hash = lznt1_hash(chunk + pos);
+    ws->Previous[pos] = ws->Head[hash];
+    ws->Head[hash] = (USHORT)pos;
+}
+
+/* The longest earlier match for chunk + pos within reach of a back reference there */
+static ULONG
+lznt1_find_match(PLZNT1_WORKSPACE ws, const UCHAR *chunk, ULONG pos, ULONG size, ULONG *displacement)
+{
+    ULONG bits = lznt1_displacement_bits(pos);
+    ULONG max_displacement = 1UL << bits;
+    ULONG max_length = min((1UL << (16 - bits)) + 2, size - pos);
+    ULONG best = 0, steps = 0;
+    USHORT candidate;
+
+    if (max_length < 3)
+        return 0;
+
+    for (candidate = ws->Head[lznt1_hash(chunk + pos)];
+         candidate != LZNT1_NO_POSITION && steps < LZNT1_MAX_CHAIN;
+         candidate = ws->Previous[candidate], steps++)
+    {
+        ULONG length = 0;
+
+        if (pos - candidate > max_displacement)
+            break;
+
+        while (length < max_length && chunk[candidate + length] == chunk[pos + length])
+            length++;
+
+        if (length > best)
+        {
+            best = length;
+            *displacement = pos - candidate;
+            if (best == max_length)
+                break;
+        }
+    }
+
+    return (best >= 3) ? best : 0;
+}
+
+/* Compresses one chunk; returns the size of its data, or 0 if it doesn't get smaller */
+static ULONG
+lznt1_compress_chunk(PLZNT1_WORKSPACE ws, const UCHAR *chunk, ULONG size, UCHAR *out, ULONG out_size)
+{
+    ULONG pos = 0, used = 0;
+
+    memset(ws->Head, 0xFF, sizeof(ws->Head));
+
+    while (pos < size)
+    {
+        ULONG flag_byte = used++;
+        UCHAR flags = 0;
+        ULONG bit;
+
+        if (used > out_size)
+            return 0;
+
+        for (bit = 0; bit < 8 && pos < size; bit++)
+        {
+            ULONG displacement = 0;
+            ULONG length = lznt1_find_match(ws, chunk, pos, size, &displacement);
+
+            if (length != 0)
+            {
+                ULONG length_bits = 16 - lznt1_displacement_bits(pos);
+                USHORT token = (USHORT)(((displacement - 1) << length_bits) | (length - 3));
+
+                if (used + sizeof(USHORT) > out_size)
+                    return 0;
+                out[used++] = token & 0xFF;
+                out[used++] = token >> 8;
+                flags |= 1 << bit;
+
+                while (length--)
+                    lznt1_insert(ws, chunk, pos++, size);
+            }
+            else
+            {
+                if (used + 1 > out_size)
+                    return 0;
+                out[used++] = chunk[pos];
+                lznt1_insert(ws, chunk, pos++, size);
+            }
+        }
+
+        out[flag_byte] = flags;
+    }
+
+    return (used < size) ? used : 0;
+}
+
 static NTSTATUS
 RtlpCompressBufferLZNT1(UCHAR *src, ULONG src_size, UCHAR *dst, ULONG dst_size,
                         ULONG chunk_size, ULONG *final_size, UCHAR *workspace)
 {
         UCHAR *src_cur = src, *src_end = src + src_size;
         UCHAR *dst_cur = dst, *dst_end = dst + dst_size;
-        ULONG block_size;
+        ULONG block_size, compressed_size;
 
         while (src_cur < src_end)
         {
             /* determine size of current chunk */
-            block_size = min(0x1000, src_end - src_cur);
-            if (dst_cur + sizeof(WORD) + block_size > dst_end)
+            block_size = min(LZNT1_CHUNK_SIZE, src_end - src_cur);
+            if (dst_cur + sizeof(WORD) > dst_end)
                 return STATUS_BUFFER_TOO_SMALL;
 
-            /* write (uncompressed) chunk header */
-            *(WORD *)dst_cur = 0x3000 | (block_size - 1);
-            dst_cur += sizeof(WORD);
+            /* a chunk that compresses goes in compressed, any other as it is */
+            compressed_size = workspace ?
+                lznt1_compress_chunk((PLZNT1_WORKSPACE)workspace, src_cur, block_size,
+                                     dst_cur + sizeof(WORD), (ULONG)(dst_end - dst_cur - sizeof(WORD))) : 0;
+            if (compressed_size != 0)
+            {
+                *(WORD *)dst_cur = 0xB000 | (compressed_size - 1);
+                dst_cur += sizeof(WORD) + compressed_size;
+            }
+            else
+            {
+                if (dst_cur + sizeof(WORD) + block_size > dst_end)
+                    return STATUS_BUFFER_TOO_SMALL;
 
-            /* write chunk content */
-            memcpy(dst_cur, src_cur, block_size);
-            dst_cur += block_size;
+                *(WORD *)dst_cur = 0x3000 | (block_size - 1);
+                dst_cur += sizeof(WORD);
+                memcpy(dst_cur, src_cur, block_size);
+                dst_cur += block_size;
+            }
             src_cur += block_size;
         }
 
