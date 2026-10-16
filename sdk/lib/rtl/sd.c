@@ -1163,7 +1163,8 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
     }
 
     /* Is there a DACL? */
-    if ((Sd->Control & SE_DACL_PRESENT) == SE_DACL_PRESENT)
+    /* A present but NULL DACL (offset 0) is valid: it allows everything */
+    if ((Sd->Control & SE_DACL_PRESENT) == SE_DACL_PRESENT && Sd->Dacl != 0)
     {
         /* Try to access it */
         if (!RtlpValidateSDOffsetAndSize(Sd->Dacl,
@@ -1181,7 +1182,8 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
     }
 
     /* Is there a SACL? */
-    if ((Sd->Control & SE_SACL_PRESENT) == SE_SACL_PRESENT)
+    /* A present but NULL SACL (offset 0) is valid: it allows everything */
+    if ((Sd->Control & SE_SACL_PRESENT) == SE_SACL_PRESENT && Sd->Sacl != 0)
     {
         /* Try to access it */
         if (!RtlpValidateSDOffsetAndSize(Sd->Sacl,
