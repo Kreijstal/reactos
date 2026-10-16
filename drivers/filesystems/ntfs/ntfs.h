@@ -481,9 +481,15 @@ typedef struct _B_TREE_FILENAME_NODE
     PB_TREE_KEY FirstKey;
 } B_TREE_FILENAME_NODE, *PB_TREE_FILENAME_NODE;
 
+/* Only the root node is read when a tree is built from an index. A key whose
+ * entry has NTFS_INDEX_ENTRY_NODE set but no LesserChild has its child still
+ * on disk, at the VCN its entry records; NtfsLoadChildNode() reads it from
+ * IndexAllocationContext on the first descent. */
 typedef struct
 {
     PB_TREE_FILENAME_NODE RootNode;
+    PDEVICE_EXTENSION Vcb;
+    struct _NTFS_ATTR_CONTEXT *IndexAllocationContext;
 } B_TREE, *PB_TREE;
 
 typedef struct
@@ -941,7 +947,8 @@ NtfsInsertKey(PB_TREE Tree,
               PB_TREE_FILENAME_NODE *NewRightHandSibling);
 
 NTSTATUS
-NtfsRemoveKey(PB_TREE_FILENAME_NODE Node,
+NtfsRemoveKey(PB_TREE Tree,
+              PB_TREE_FILENAME_NODE Node,
               PB_TREE_KEY SearchKey,
               BOOLEAN CaseSensitive);
 
