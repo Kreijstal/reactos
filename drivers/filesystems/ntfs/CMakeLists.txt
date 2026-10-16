@@ -23,6 +23,7 @@ list(APPEND SOURCE
     misc.c
     ntfs.c
     objid.c
+    quotas.c
     reparse.c
     rw.c
     secure.c

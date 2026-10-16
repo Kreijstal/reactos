@@ -137,6 +137,14 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsFlushBuffers(IrpContext);
             break;
 
+        case IRP_MJ_QUERY_QUOTA:
+            Status = NtfsQueryQuota(IrpContext);
+            break;
+
+        case IRP_MJ_SET_QUOTA:
+            Status = NtfsSetQuota(IrpContext);
+            break;
+
         case IRP_MJ_QUERY_EA:
             Status = NtfsQueryEa(IrpContext);
             break;
