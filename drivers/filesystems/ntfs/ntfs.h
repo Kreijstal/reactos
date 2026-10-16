@@ -169,6 +169,9 @@ typedef struct
 /* Opened with FILE_DELETE_ON_CLOSE: the file is marked for deletion when this
  * handle is cleaned up */
 #define CCB_DELETE_ON_CLOSE     0x0004
+/* The open is counted in its FCB's and the volume's open handle counts, which the
+ * cleanup of the handle takes back */
+#define CCB_COUNTED             0x0008
 
 typedef struct
 {

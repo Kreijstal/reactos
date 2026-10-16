@@ -546,6 +546,26 @@ NtfsOpenFile(
 }
 
 /**
+* @name NtfsCountOpen
+*
+* Counts a successful open in its FCB's and its volume's open handle counts. The
+* cleanup of the handle takes it back; a volume can only be locked by its only handle.
+*/
+static
+VOID
+NtfsCountOpen(
+    _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PNTFS_FCB Fcb,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+
+    Fcb->OpenHandleCount++;
+    DeviceExt->OpenHandleCount++;
+    Ccb->Flags |= CCB_COUNTED;
+}
+
+/**
 * @name NtfsGrantShareAccess
 *
 * Records a new open of Fcb against its share access, or fails it with a
@@ -583,10 +603,7 @@ NtfsGrantShareAccess(
     }
 
     if (NT_SUCCESS(Status))
-    {
-        Fcb->OpenHandleCount++;
-        DeviceExt->OpenHandleCount++;
-    }
+        NtfsCountOpen(DeviceExt, Fcb, FileObject);
 
     return Status;
 }
@@ -1337,6 +1354,7 @@ NtfsOpenVolume(
         return Status;
 
     DeviceExt->VolumeFcb->RefCount++;
+    NtfsCountOpen(DeviceExt, DeviceExt->VolumeFcb, FileObject);
 
     Irp->IoStatus.Information = FILE_OPENED;
     return STATUS_SUCCESS;
