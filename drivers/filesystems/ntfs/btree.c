@@ -1292,19 +1292,15 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
         {
             if (!HasIndexAllocation)
             {
-                // We need to add an index allocation to the file record
-                PNTFS_ATTR_RECORD EndMarker = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->BytesInUse - (sizeof(ULONG) * 2));
+                // The index needs an allocation and its bitmap, where their types sort them
                 DPRINT("Adding index allocation...\n");
 
-                // Add index allocation to the very end of the file record
-                Status = AddIndexAllocation(DeviceExt,
-                                            FileRecord,
-                                            EndMarker,
-                                            Tree->IndexName,
-                                            Tree->IndexNameLength);
+                Status = AddIndexAllocation(DeviceExt, FileRecord, Tree->IndexName, Tree->IndexNameLength);
+                if (NT_SUCCESS(Status))
+                    Status = AddBitmap(DeviceExt, FileRecord, Tree->IndexName, Tree->IndexNameLength);
                 if (!NT_SUCCESS(Status))
                 {
-                    DPRINT1("ERROR: Failed to add index allocation!\n");
+                    DPRINT1("ERROR: Failed to add index allocation and bitmap!\n");
                     return Status;
                 }
 
@@ -1313,22 +1309,6 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
                 if (!NT_SUCCESS(Status))
                 {
                     DPRINT1("ERROR: Couldn't find newly-created index allocation!\n");
-                    return Status;
-                }
-
-                // Advance end marker
-                EndMarker = (PNTFS_ATTR_RECORD)((ULONG_PTR)EndMarker + EndMarker->Length);
-
-                // Add index bitmap to the very end of the file record
-                Status = AddBitmap(DeviceExt,
-                                   FileRecord,
-                                   EndMarker,
-                                   Tree->IndexName,
-                                   Tree->IndexNameLength);
-                if (!NT_SUCCESS(Status))
-                {
-                    DPRINT1("ERROR: Failed to add index bitmap!\n");
-                    ReleaseAttributeContext(IndexAllocationContext);
                     return Status;
                 }
 

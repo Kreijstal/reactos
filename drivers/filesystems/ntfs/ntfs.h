@@ -716,7 +716,6 @@ NtfsUpcaseChar(
 NTSTATUS
 AddBitmap(PNTFS_VCB Vcb,
           PFILE_RECORD_HEADER FileRecord,
-          PNTFS_ATTR_RECORD AttributeAddress,
           PCWSTR Name,
           USHORT NameLength);
 
@@ -735,7 +734,6 @@ AddRun(PNTFS_VCB Vcb,
 NTSTATUS
 AddIndexAllocation(PNTFS_VCB Vcb,
                    PFILE_RECORD_HEADER FileRecord,
-                   PNTFS_ATTR_RECORD AttributeAddress,
                    PCWSTR Name,
                    USHORT NameLength);
 
