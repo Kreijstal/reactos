@@ -352,8 +352,6 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
     ULONG Fixed = FIELD_OFFSET(FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName);
     ULONG Copied;
 
-    UNREFERENCED_PARAMETER(DeviceExt);
-
     DPRINT("NtfsGetFsAttributeInformation()\n");
 
     if (*BufferLength < Fixed)
@@ -364,6 +362,8 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
         FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
         FILE_SUPPORTS_OPEN_BY_FILE_ID | FILE_NAMED_STREAMS | FILE_SUPPORTS_HARD_LINKS |
         FILE_SUPPORTS_REPARSE_POINTS;
+    if (DeviceExt->ObjectIdIndexMftIndex != 0)
+        FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_OBJECT_IDS;
     /* Writes are refused everywhere unless write support was enabled */
     if (!NtfsGlobalData->EnableWriteSupport)
         FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;

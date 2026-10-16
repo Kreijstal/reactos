@@ -3922,6 +3922,10 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     if (Names != NULL)
         NtfsFreeFileNames(Names, NameCount);
 
+    // Its object ID is free for another file now
+    if (NT_SUCCESS(Status))
+        Status = NtfsReleaseObjectId(DeviceExt, FileRecord);
+
     if (!NT_SUCCESS(Status))
     {
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);

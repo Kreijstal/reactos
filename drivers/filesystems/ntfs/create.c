@@ -1407,7 +1407,8 @@ NtfsOpenVolume(
 /**
 * @name NtfsResolveFileId
 *
-* Turns a FILE_OPEN_BY_FILE_ID name into the FCB of a system file or the path of a user file.
+* Turns a FILE_OPEN_BY_FILE_ID name, a file ID or an object ID, into the FCB of a system file
+* or the path of a user file.
 */
 static
 NTSTATUS
@@ -1418,15 +1419,27 @@ NtfsResolveFileId(
     _Out_ PUNICODE_STRING Path)
 {
     ULONGLONG MftId;
+    NTSTATUS Status;
 
     *Fcb = NULL;
     Path->Buffer = NULL;
 
-    /* An object ID (16 bytes) needs the $ObjId index, which isn't read */
-    if (FileObject->FileName.Length != sizeof(ULONGLONG))
+    /* A file ID is 8 bytes, an object ID 16, which $O of $Extend\$ObjId maps to the file */
+    if (FileObject->FileName.Length == sizeof(ULONGLONG))
+    {
+        MftId = (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK;
+    }
+    else if (FileObject->FileName.Length == RTL_FIELD_SIZE(FILE_OBJECTID_BUFFER, ObjectId))
+    {
+        Status = NtfsFindFileByObjectId(DeviceExt, (PUCHAR)FileObject->FileName.Buffer, &MftId);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    else
+    {
         return STATUS_INVALID_PARAMETER;
+    }
 
-    MftId = (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK;
     if (MftId < NTFS_FILE_FIRST_USER_FILE)
         return NtfsOpenFileById(DeviceExt, MftId, Fcb);
 
