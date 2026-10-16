@@ -440,6 +440,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     PNTFS_FCB Fcb;
     PFILE_RECORD_HEADER FileRecord;
     PNTFS_ATTR_CONTEXT DataContext = NULL;
+    PFILE_RECORD_HEADER Holder;
     ULONG AttributeOffset;
     ULONGLONG StreamSize;
     ULONG RequestedLength = 0;
@@ -541,6 +542,15 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         return Status;
     }
 
+    /* Through an $ATTRIBUTE_LIST the stream can live in another record than the base */
+    Status = NtfsReadAttributeHolder(DeviceExt, DataContext, FileRecord, &Holder);
+    if (!NT_SUCCESS(Status))
+    {
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
 
@@ -569,7 +579,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                 Status = NtfsExtendAllocation(DeviceExt,
                                               DataContext,
                                               AttributeOffset,
-                                              FileRecord,
+                                              Holder,
                                               ROUND_UP(DataSize.QuadPart + Ahead, DeviceExt->NtfsInfo.BytesPerCluster));
                 if (!NT_SUCCESS(Status))
                 {
@@ -579,16 +589,17 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
             }
 
             // set the attribute data length
-            Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, &DataSize);
+            Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, Holder, &DataSize);
 
             /* What lies between the old end and the write reads as zeros */
             if (NT_SUCCESS(Status) && WriteOffset > StreamSize)
-                Status = NtfsZeroAttributeRange(DeviceExt, DataContext, FileRecord, StreamSize, WriteOffset);
+                Status = NtfsZeroAttributeRange(DeviceExt, DataContext, Holder, StreamSize, WriteOffset);
 
             if (!NT_SUCCESS(Status))
             {
                 ReleaseAttributeContext(DataContext);
-                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
                 *LengthWritten = 0;
                 return Status;
             }
@@ -612,7 +623,8 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                 DPRINT("Paging write entirely past the end of the stream; nothing to do\n");
 
                 ReleaseAttributeContext(DataContext);
-                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+                NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
                 *LengthWritten = Length;
                 return STATUS_SUCCESS;
             }
@@ -627,7 +639,8 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         {
             /* The volume stream is the size of the volume and cannot grow */
             ReleaseAttributeContext(DataContext);
-            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+            NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
             *LengthWritten = 0;
             return STATUS_ACCESS_DENIED;
         }
@@ -639,13 +652,14 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     /* Buffer is the system mapping of this IRP's MDL, so hand the IRP down too
      * and let the run layer borrow it instead of locking these pages twice,
      * which the paging path forbids */
-    Status = WriteAttributeFromIrp(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, FileRecord, Irp);
+    Status = WriteAttributeFromIrp(DeviceExt, DataContext, WriteOffset, Buffer, Length, LengthWritten, Holder, Irp);
 
     // Did the write fail?
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Write failure!\n");
         ReleaseAttributeContext(DataContext);
+        NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
         return Status;
@@ -665,7 +679,8 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         *LengthWritten = RequestedLength;
 
     ReleaseAttributeContext(DataContext);
-    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+    NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;
 }
