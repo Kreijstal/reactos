@@ -825,12 +825,17 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
 * @param DataRun
 * Pointer to the run data
 *
+* @param DataRunEnd
+* End of the buffer holding the run data, normally the end of the attribute
+* record. The runs and their terminator must lie entirely before it.
+*
 * @param DataRunsMCB
 * Pointer to an unitialized LARGE_MCB structure.
 *
 * @return
 * STATUS_SUCCESS on success, STATUS_INSUFFICIENT_RESOURCES or STATUS_UNSUCCESSFUL if we fail to
-* initialize the mcb or add an entry.
+* initialize the mcb or add an entry. STATUS_FILE_CORRUPT_ERROR if the runs reach past
+* DataRunEnd.
 *
 * @remarks
 * Initializes the LARGE_MCB pointed to by DataRunsMCB. If this function succeeds, you
@@ -840,6 +845,7 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
 */
 NTSTATUS
 ConvertDataRunsToLargeMCB(PUCHAR DataRun,
+                          PUCHAR DataRunEnd,
                           PLARGE_MCB DataRunsMCB,
                           PULONGLONG pNextVBN)
 {
@@ -856,8 +862,20 @@ ConvertDataRunsToLargeMCB(PUCHAR DataRun,
         _SEH2_YIELD(return _SEH2_GetExceptionCode());
     } _SEH2_END;
 
-    while (*DataRun != 0)
+    while (TRUE)
     {
+        // The header, the run it describes and the terminator must all be in the buffer
+        if (DataRun >= DataRunEnd ||
+            (*DataRun != 0 && DataRun + 1 + (*DataRun & 0xF) + ((*DataRun >> 4) & 0xF) >= DataRunEnd))
+        {
+            DPRINT1("Data runs reach past the end of the attribute\n");
+            FsRtlUninitializeLargeMcb(DataRunsMCB);
+            return STATUS_FILE_CORRUPT_ERROR;
+        }
+
+        if (*DataRun == 0)
+            break;
+
         DataRun = DecodeRun(DataRun, &DataRunOffset, &DataRunLength, &IsSparse);
 
         if (!IsSparse)

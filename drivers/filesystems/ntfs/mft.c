@@ -69,6 +69,19 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
         BOOLEAN IsSparse;
         PUCHAR DataRun = (PUCHAR)((ULONG_PTR)Context->pRecord + Context->pRecord->NonResident.MappingPairsOffset);
 
+        // Convert the data runs to a map control block. This also checks
+        // that they lie within the attribute, before anything decodes them.
+        if (!NT_SUCCESS(ConvertDataRunsToLargeMCB(DataRun,
+                                                  (PUCHAR)Context->pRecord + Context->pRecord->Length,
+                                                  &Context->DataRunsMCB,
+                                                  &NextVBN)))
+        {
+            DPRINT1("Unable to convert data runs to MCB!\n");
+            ExFreePoolWithTag(Context->pRecord, TAG_NTFS);
+            ExFreeToNPagedLookasideList(&NtfsGlobalData->AttrCtxtLookasideList, Context);
+            return NULL;
+        }
+
         Context->CacheRun = DataRun;
         Context->CacheRunOffset = 0;
         Context->CacheRun = DecodeRun(Context->CacheRun, &DataRunOffset, &DataRunLength, &IsSparse);
@@ -86,15 +99,6 @@ PrepareAttributeContext(PNTFS_ATTR_RECORD AttrRecord)
             Context->CacheRunLastLCN = 0;
         }
         Context->CacheRunCurrentOffset = 0;
-
-        // Convert the data runs to a map control block
-        if (!NT_SUCCESS(ConvertDataRunsToLargeMCB(DataRun, &Context->DataRunsMCB, &NextVBN)))
-        {
-            DPRINT1("Unable to convert data runs to MCB!\n");
-            ExFreePoolWithTag(Context->pRecord, TAG_NTFS);
-            ExFreeToNPagedLookasideList(&NtfsGlobalData->AttrCtxtLookasideList, Context);
-            return NULL;
-        }
     }
 
     return Context;
