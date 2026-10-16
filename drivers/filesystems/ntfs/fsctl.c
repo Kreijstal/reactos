@@ -643,12 +643,8 @@ GetNfsVolumeData(PDEVICE_EXTENSION DeviceExt,
     DataBuffer = (PNTFS_VOLUME_DATA_BUFFER)Irp->AssociatedIrp.SystemBuffer;
     Stack = IoGetCurrentIrpStackLocation(Irp);
 
-    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(NTFS_VOLUME_DATA_BUFFER) ||
-        Irp->UserBuffer == NULL)
-    {
-        DPRINT1("Invalid output! %d %p\n", Stack->Parameters.FileSystemControl.OutputBufferLength, Irp->UserBuffer);
-        return STATUS_INVALID_PARAMETER;
-    }
+    if (Stack->Parameters.FileSystemControl.OutputBufferLength < sizeof(NTFS_VOLUME_DATA_BUFFER))
+        return STATUS_BUFFER_TOO_SMALL;
 
     DataBuffer->VolumeSerialNumber.QuadPart = DeviceExt->NtfsInfo.SerialNumber;
     DataBuffer->NumberSectors.QuadPart = DeviceExt->NtfsInfo.SectorCount;
@@ -779,6 +775,10 @@ GetVolumeBitmap(PDEVICE_EXTENSION DeviceExt,
 
     Stack = IoGetCurrentIrpStackLocation(Irp);
 
+    /* The bitmap is a property of the volume, asked for on a volume handle */
+    if (!(((PNTFS_FCB)Stack->FileObject->FsContext)->Flags & FCB_IS_VOLUME))
+        return STATUS_INVALID_PARAMETER;
+
     if (Stack->Parameters.FileSystemControl.InputBufferLength < sizeof(STARTING_LCN_INPUT_BUFFER))
     {
         DPRINT1("Invalid input! %d\n", Stack->Parameters.FileSystemControl.InputBufferLength);
@@ -824,16 +824,17 @@ GetVolumeBitmap(PDEVICE_EXTENSION DeviceExt,
     }
 
     StartingLcn = ((PSTARTING_LCN_INPUT_BUFFER)Stack->Parameters.FileSystemControl.Type3InputBuffer)->StartingLcn.QuadPart;
-    if (StartingLcn > DeviceExt->NtfsInfo.ClusterCount)
+    if (StartingLcn < 0 || StartingLcn >= (LONGLONG)DeviceExt->NtfsInfo.ClusterCount)
     {
         DPRINT1("Requested bitmap start beyond partition end: %I64x %I64x\n", DeviceExt->NtfsInfo.ClusterCount, StartingLcn);
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Round down to a multiple of 8 */
+    /* Round down to a multiple of 8. BitmapSize is every cluster from there on, even when
+     * the buffer holds the bits of fewer (MS-FSCC 2.3.32). */
     StartingLcn = StartingLcn & ~7;
     TotalClusters = DeviceExt->NtfsInfo.ClusterCount - StartingLcn;
-    ToCopy = TotalClusters / 8;
+    ToCopy = (TotalClusters + 7) / 8;
     if ((ToCopy + FIELD_OFFSET(VOLUME_BITMAP_BUFFER, Buffer)) > Stack->Parameters.FileSystemControl.OutputBufferLength)
     {
         DPRINT1("Buffer too small: %x, needed: %x\n", Stack->Parameters.FileSystemControl.OutputBufferLength, (ToCopy + FIELD_OFFSET(VOLUME_BITMAP_BUFFER, Buffer)));
@@ -842,7 +843,7 @@ GetVolumeBitmap(PDEVICE_EXTENSION DeviceExt,
     }
 
     BitmapBuffer->StartingLcn.QuadPart = StartingLcn;
-    BitmapBuffer->BitmapSize.QuadPart = ToCopy * 8;
+    BitmapBuffer->BitmapSize.QuadPart = TotalClusters;
 
     Irp->IoStatus.Information = FIELD_OFFSET(VOLUME_BITMAP_BUFFER, Buffer);
 
@@ -1238,6 +1239,159 @@ NtfsReturnFsctlOutput(PIRP Irp,
 }
 
 /**
+* @name NtfsFillRetrievalPointers
+*
+* Fills Output with the extents of a non-resident attribute from the run holding StartingVcn
+* on: as many as fit, holes with an LCN of -1. STATUS_BUFFER_OVERFLOW if some didn't fit.
+*/
+static
+NTSTATUS
+NtfsFillRetrievalPointers(PNTFS_ATTR_CONTEXT Context,
+                          LONGLONG TotalVcns,
+                          LONGLONG StartingVcn,
+                          PRETRIEVAL_POINTERS_BUFFER Output,
+                          ULONG OutputLength,
+                          PULONG Returned)
+{
+    ULONG Room = (OutputLength - FIELD_OFFSET(RETRIEVAL_POINTERS_BUFFER, Extents)) / sizeof(Output->Extents[0]);
+    LONGLONG Vcn = 0, Lcn, Count;
+    BOOLEAN Started = FALSE;
+    ULONG Index;
+
+    Output->ExtentCount = 0;
+
+    for (Index = 0; Vcn < TotalVcns; Index++)
+    {
+        LONGLONG RunVcn, RunLcn;
+
+        if (!FsRtlGetNextLargeMcbEntry(&Context->DataRunsMCB, Index, &RunVcn, &RunLcn, &Count))
+        {
+            /* Past the last mapping: the rest of the allocation is a hole */
+            RunVcn = Vcn;
+            RunLcn = -1;
+            Count = TotalVcns - Vcn;
+        }
+
+        /* A gap before this run is a hole too */
+        if (RunVcn > Vcn)
+        {
+            Lcn = -1;
+            Count = RunVcn - Vcn;
+            Index--;
+        }
+        else
+        {
+            ASSERT(RunVcn == Vcn);
+            Lcn = RunLcn;
+        }
+        Count = min(Count, TotalVcns - Vcn);
+
+        if (!Started && Vcn + Count > StartingVcn)
+        {
+            Started = TRUE;
+            Output->StartingVcn.QuadPart = Vcn;
+        }
+
+        if (Started)
+        {
+            if (Output->ExtentCount == Room)
+                break;
+
+            Output->Extents[Output->ExtentCount].NextVcn.QuadPart = Vcn + Count;
+            Output->Extents[Output->ExtentCount].Lcn.QuadPart = (Lcn < 0) ? -1 : Lcn;
+            Output->ExtentCount++;
+        }
+
+        Vcn += Count;
+    }
+
+    *Returned = FIELD_OFFSET(RETRIEVAL_POINTERS_BUFFER, Extents) + Output->ExtentCount * sizeof(Output->Extents[0]);
+
+    return (Vcn < TotalVcns) ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsGetRetrievalPointers
+*
+* FSCTL_GET_RETRIEVAL_POINTERS: where the clusters of a stream, or of a directory's index,
+* are on the volume. A stream without clusters is STATUS_END_OF_FILE.
+*/
+static
+NTSTATUS
+NtfsGetRetrievalPointers(PDEVICE_EXTENSION DeviceExt,
+                         PIRP Irp)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    ULONG OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    STARTING_VCN_INPUT_BUFFER Input;
+    PRETRIEVAL_POINTERS_BUFFER Output = NULL;
+    PFILE_RECORD_HEADER FileRecord;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    LONGLONG TotalVcns = 0;
+    ULONG Returned = 0;
+    NTSTATUS Status;
+
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+        return STATUS_INVALID_PARAMETER;
+
+    Status = NtfsCaptureFsctlInput(Irp, &Input, sizeof(Input));
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (Input.StartingVcn.QuadPart < 0)
+        return STATUS_INVALID_PARAMETER;
+    if (OutputLength < sizeof(RETRIEVAL_POINTERS_BUFFER))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    Output = ExAllocatePoolWithTag(PagedPool, OutputLength, TAG_NTFS);
+    if (FileRecord == NULL || Output == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+    else
+    {
+        ExAcquireResourceSharedLite(&Fcb->MainResource, TRUE);
+
+        Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+        if (NT_SUCCESS(Status))
+        {
+            if (NtfsFCBIsDirectory(Fcb))
+                Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexAllocation, L"$I30", 4, &Context, NULL);
+            else
+                Status = FindAttribute(DeviceExt, FileRecord, AttributeData, Fcb->Stream, (ULONG)wcslen(Fcb->Stream), &Context, NULL);
+
+            /* No index allocation, a resident or an empty stream: no clusters */
+            if (NT_SUCCESS(Status) && Context->pRecord->IsNonResident)
+                TotalVcns = Context->pRecord->NonResident.AllocatedSize / DeviceExt->NtfsInfo.BytesPerCluster;
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Input.StartingVcn.QuadPart >= TotalVcns)
+                Status = STATUS_END_OF_FILE;
+        }
+
+        if (NT_SUCCESS(Status))
+            Status = NtfsFillRetrievalPointers(Context, TotalVcns, Input.StartingVcn.QuadPart, Output, OutputLength, &Returned);
+
+        ExReleaseResourceLite(&Fcb->MainResource);
+    }
+
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_OVERFLOW)
+    {
+        NTSTATUS CopyStatus = NtfsReturnFsctlOutput(Irp, Output, Returned);
+        if (!NT_SUCCESS(CopyStatus))
+            Status = CopyStatus;
+    }
+
+    if (Context != NULL)
+        ReleaseAttributeContext(Context);
+    if (Output != NULL)
+        ExFreePoolWithTag(Output, TAG_NTFS);
+    if (FileRecord != NULL)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+/**
 * @name NtfsUsnRequest
 *
 * The change journal FSCTLs: CREATE, DELETE, QUERY and READ_USN_JOURNAL and ENUM_USN_DATA on
@@ -1470,7 +1624,6 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
     {
         case FSCTL_EXTEND_VOLUME:
         //case FSCTL_GET_RETRIEVAL_POINTER_BASE:
-        case FSCTL_GET_RETRIEVAL_POINTERS:
         //case FSCTL_LOOKUP_STREAM_FROM_CLUSTER:
         case FSCTL_MARK_HANDLE:
         case FSCTL_MOVE_FILE:
@@ -1517,6 +1670,10 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
         case FSCTL_CREATE_OR_GET_OBJECT_ID:
         case FSCTL_DELETE_OBJECT_ID:
             Status = NtfsObjectIdRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
+            break;
+
+        case FSCTL_GET_RETRIEVAL_POINTERS:
+            Status = NtfsGetRetrievalPointers(DeviceExt, Irp);
             break;
 
         case FSCTL_CREATE_USN_JOURNAL:
