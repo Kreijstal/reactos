@@ -130,6 +130,9 @@ typedef struct
 
     NTFS_INFO NtfsInfo;
 
+    /* $Extend\$ObjId, whose $O indexes the object IDs; 0 on a volume without one */
+    ULONGLONG ObjectIdIndexMftIndex;
+
     NPAGED_LOOKASIDE_LIST FileRecLookasideList;
 
     /* $UpCase, one upcased code point per UCS-2 value. NTFS defines its
@@ -1766,6 +1769,48 @@ CdfsSwapString(PWCHAR Out,
 VOID
 NtfsFileFlagsToAttributes(ULONG NtfsAttributes,
                           PULONG FileAttributes);
+
+
+/* objid.c */
+
+VOID
+NtfsFindObjectIdIndex(PDEVICE_EXTENSION DeviceExt);
+
+NTSTATUS
+NtfsReleaseObjectId(PDEVICE_EXTENSION DeviceExt,
+                    PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsQueryObjectId(PDEVICE_EXTENSION DeviceExt,
+                  PFILE_RECORD_HEADER FileRecord,
+                  PFILE_OBJECTID_BUFFER Buffer);
+
+NTSTATUS
+NtfsSetObjectId(PDEVICE_EXTENSION DeviceExt,
+                PNTFS_FCB Fcb,
+                PFILE_RECORD_HEADER FileRecord,
+                PFILE_OBJECTID_BUFFER Buffer);
+
+NTSTATUS
+NtfsSetObjectIdExtended(PDEVICE_EXTENSION DeviceExt,
+                        PNTFS_FCB Fcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        PUCHAR ExtendedInfo);
+
+NTSTATUS
+NtfsCreateOrGetObjectId(PDEVICE_EXTENSION DeviceExt,
+                        PNTFS_FCB Fcb,
+                        PFILE_RECORD_HEADER FileRecord,
+                        PFILE_OBJECTID_BUFFER Buffer);
+
+NTSTATUS
+NtfsDeleteObjectId(PDEVICE_EXTENSION DeviceExt,
+                   PFILE_RECORD_HEADER FileRecord);
+
+NTSTATUS
+NtfsFindFileByObjectId(PDEVICE_EXTENSION DeviceExt,
+                       PUCHAR ObjectId,
+                       PULONGLONG MftIndex);
 
 
 /* reparse.c */

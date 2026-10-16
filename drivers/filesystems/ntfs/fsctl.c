@@ -565,6 +565,8 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
 
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
+    NtfsFindObjectIdIndex(Vcb);
+
     /* Get serial number */
     NewDeviceObject->Vpb->SerialNumber = Vcb->NtfsInfo.SerialNumber;
 
@@ -1047,6 +1049,101 @@ NtfsReparsePointRequest(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/**
+* @name NtfsObjectIdRequest
+*
+* FSCTL_GET_OBJECT_ID, FSCTL_SET_OBJECT_ID, FSCTL_SET_OBJECT_ID_EXTENDED,
+* FSCTL_CREATE_OR_GET_OBJECT_ID and FSCTL_DELETE_OBJECT_ID (MS-FSA 2.1.5.10), all
+* METHOD_BUFFERED, on a file or directory.
+*/
+static
+NTSTATUS
+NtfsObjectIdRequest(PDEVICE_EXTENSION DeviceExt,
+                    PIRP Irp,
+                    ULONG Code)
+{
+    PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
+    PNTFS_FCB Fcb = Stack->FileObject->FsContext;
+    PVOID Buffer = Irp->AssociatedIrp.SystemBuffer;
+    ULONG InputLength = Stack->Parameters.FileSystemControl.InputBufferLength;
+    ULONG OutputLength = Stack->Parameters.FileSystemControl.OutputBufferLength;
+    PFILE_RECORD_HEADER FileRecord;
+    FILE_OBJECTID_BUFFER ObjectId;
+    NTSTATUS Status;
+
+    if (DeviceExt->ObjectIdIndexMftIndex == 0)
+        return STATUS_VOLUME_NOT_UPGRADED;
+
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+        return STATUS_INVALID_PARAMETER;
+
+    switch (Code)
+    {
+        case FSCTL_GET_OBJECT_ID:
+        case FSCTL_CREATE_OR_GET_OBJECT_ID:
+            if (Buffer == NULL || OutputLength < sizeof(FILE_OBJECTID_BUFFER))
+                return STATUS_INVALID_PARAMETER;
+            break;
+
+        case FSCTL_SET_OBJECT_ID:
+            if (Buffer == NULL || InputLength != sizeof(FILE_OBJECTID_BUFFER))
+                return STATUS_INVALID_PARAMETER;
+            break;
+
+        case FSCTL_SET_OBJECT_ID_EXTENDED:
+            if (Buffer == NULL || InputLength != sizeof(ObjectId.ExtendedInfo))
+                return STATUS_INVALID_PARAMETER;
+            break;
+    }
+
+    if (Code != FSCTL_GET_OBJECT_ID && !NtfsGlobalData->EnableWriteSupport)
+        return STATUS_MEDIA_WRITE_PROTECTED;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+
+    Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+    {
+        switch (Code)
+        {
+            case FSCTL_GET_OBJECT_ID:
+                Status = NtfsQueryObjectId(DeviceExt, FileRecord, &ObjectId);
+                break;
+
+            case FSCTL_CREATE_OR_GET_OBJECT_ID:
+                Status = NtfsCreateOrGetObjectId(DeviceExt, Fcb, FileRecord, &ObjectId);
+                break;
+
+            case FSCTL_SET_OBJECT_ID:
+                Status = NtfsSetObjectId(DeviceExt, Fcb, FileRecord, Buffer);
+                break;
+
+            case FSCTL_SET_OBJECT_ID_EXTENDED:
+                Status = NtfsSetObjectIdExtended(DeviceExt, Fcb, FileRecord, Buffer);
+                break;
+
+            default:
+                Status = NtfsDeleteObjectId(DeviceExt, FileRecord);
+                break;
+        }
+    }
+
+    ExReleaseResourceLite(&Fcb->MainResource);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (NT_SUCCESS(Status) && (Code == FSCTL_GET_OBJECT_ID || Code == FSCTL_CREATE_OR_GET_OBJECT_ID))
+    {
+        RtlCopyMemory(Buffer, &ObjectId, sizeof(ObjectId));
+        Irp->IoStatus.Information = sizeof(ObjectId);
+    }
+
+    return Status;
+}
+
 /* The flags of $VOLUME_INFORMATION */
 #define NTFS_VOLUME_FLAG_DIRTY              0x0001
 #define NTFS_VOLUME_FLAG_UPGRADE_ON_MOUNT   0x0004
@@ -1213,6 +1310,14 @@ NtfsUserFsRequest(PDEVICE_OBJECT DeviceObject,
         case FSCTL_GET_REPARSE_POINT:
         case FSCTL_DELETE_REPARSE_POINT:
             Status = NtfsReparsePointRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
+            break;
+
+        case FSCTL_GET_OBJECT_ID:
+        case FSCTL_SET_OBJECT_ID:
+        case FSCTL_SET_OBJECT_ID_EXTENDED:
+        case FSCTL_CREATE_OR_GET_OBJECT_ID:
+        case FSCTL_DELETE_OBJECT_ID:
+            Status = NtfsObjectIdRequest(DeviceExt, Irp, Stack->Parameters.FileSystemControl.FsControlCode);
             break;
 
         case FSCTL_IS_VOLUME_DIRTY:
