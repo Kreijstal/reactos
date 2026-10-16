@@ -126,14 +126,13 @@ NtfsFillDirEntryFixedPart(
     FileId.QuadPart = MFTIndex | ((ULONGLONG)FileRecord->SequenceNumber << 48);
 
     /* A reparse point reports its tag where other files report their EA size */
-    if (FileInformationClass != FileDirectoryInformation &&
-        (StdInfo->FileAttribute & NTFS_FILE_TYPE_REPARSE))
+    if (FileInformationClass != FileDirectoryInformation)
     {
-        ((PFILE_FULL_DIR_INFORMATION)Buffer)->EaSize = NtfsGetReparseTag(DeviceExt, FileRecord);
+        ((PFILE_FULL_DIR_INFORMATION)Buffer)->EaSize = (StdInfo->FileAttribute & NTFS_FILE_TYPE_REPARSE) ?
+            NtfsGetReparseTag(DeviceExt, FileRecord) : NtfsGetEaSize(DeviceExt, FileRecord);
     }
 
-    /* EaSize stays 0: there are no extended attributes. A short name is only reported
-     * for a real entry, not for "." or "..". */
+    /* A short name is only reported for a real entry, not for "." or "..". */
     ShortName = ReportShortName ? GetFileNameFromRecord(DeviceExt, FileRecord, NTFS_FILE_NAME_DOS) : NULL;
     if (ShortName != NULL && ShortName->NameType == NTFS_FILE_NAME_DOS)
     {

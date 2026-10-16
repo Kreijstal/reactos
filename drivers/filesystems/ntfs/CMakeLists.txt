@@ -10,6 +10,7 @@ list(APPEND SOURCE
     close.c
     create.c
     devctl.c
+    ea.c
     dirctl.c
     dispatch.c
     fastio.c

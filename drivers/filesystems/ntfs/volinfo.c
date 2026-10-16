@@ -368,6 +368,7 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
         FsAttributeInfo->FileSystemAttributes |= FILE_PERSISTENT_ACLS;
     if (DeviceExt->NtfsInfo.MajorVersion >= 3)
         FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_USN_JOURNAL;
+    FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_EXTENDED_ATTRIBUTES;
     /* Writes are refused everywhere unless write support was enabled */
     if (!NtfsGlobalData->EnableWriteSupport)
         FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
