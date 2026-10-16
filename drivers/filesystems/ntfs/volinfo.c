@@ -290,6 +290,75 @@ Quit:
 }
 
 /**
+* @name NtfsAllocateClusterRange
+* @implemented
+*
+* Marks exactly [FirstCluster, FirstCluster + ClusterCount) in use: STATUS_ALREADY_COMMITTED
+* if any of them is, STATUS_INVALID_PARAMETER if they aren't on the volume.
+*/
+NTSTATUS
+NtfsAllocateClusterRange(PDEVICE_EXTENSION DeviceExt,
+                         ULONG FirstCluster,
+                         ULONG ClusterCount)
+{
+    PRTL_BITMAP Bitmap = &DeviceExt->ClusterBitmap;
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&DeviceExt->BitmapResource, TRUE);
+
+    if (ClusterCount == 0 || FirstCluster >= Bitmap->SizeOfBitMap ||
+        ClusterCount > Bitmap->SizeOfBitMap - FirstCluster)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+    }
+    else if (!RtlAreBitsClear(Bitmap, FirstCluster, ClusterCount))
+    {
+        Status = STATUS_ALREADY_COMMITTED;
+    }
+    else
+    {
+        RtlSetBits(Bitmap, FirstCluster, ClusterCount);
+        Status = NtfsWriteVolumeBitmap(DeviceExt, FirstCluster, ClusterCount);
+        if (NT_SUCCESS(Status))
+            DeviceExt->FreeClusterCount -= ClusterCount;
+        else
+            RtlClearBits(Bitmap, FirstCluster, ClusterCount);
+    }
+
+    ExReleaseResourceLite(&DeviceExt->BitmapResource);
+    KeLeaveCriticalRegion();
+
+    return Status;
+}
+
+/**
+* @name NtfsFreeClusterRange
+* @implemented
+*
+* Gives [FirstCluster, FirstCluster + ClusterCount) back to the volume.
+*/
+NTSTATUS
+NtfsFreeClusterRange(PDEVICE_EXTENSION DeviceExt,
+                     ULONG FirstCluster,
+                     ULONG ClusterCount)
+{
+    NTSTATUS Status;
+
+    KeEnterCriticalRegion();
+    ExAcquireResourceExclusiveLite(&DeviceExt->BitmapResource, TRUE);
+
+    RtlClearBits(&DeviceExt->ClusterBitmap, FirstCluster, ClusterCount);
+    DeviceExt->FreeClusterCount += ClusterCount;
+    Status = NtfsWriteVolumeBitmap(DeviceExt, FirstCluster, ClusterCount);
+
+    ExReleaseResourceLite(&DeviceExt->BitmapResource);
+    KeLeaveCriticalRegion();
+
+    return Status;
+}
+
+/**
 * @name NtfsCopyVariablePart
 *
 * Copies as much of a query's variable-length tail as the buffer holds after its fixed
