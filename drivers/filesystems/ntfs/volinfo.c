@@ -364,6 +364,8 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
         FILE_SUPPORTS_REPARSE_POINTS;
     if (DeviceExt->ObjectIdIndexMftIndex != 0)
         FsAttributeInfo->FileSystemAttributes |= FILE_SUPPORTS_OBJECT_IDS;
+    if (DeviceExt->SecureMftIndex != 0)
+        FsAttributeInfo->FileSystemAttributes |= FILE_PERSISTENT_ACLS;
     /* Writes are refused everywhere unless write support was enabled */
     if (!NtfsGlobalData->EnableWriteSupport)
         FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
