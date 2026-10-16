@@ -289,12 +289,16 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     FileNameAttribute->NameLength = Name->Length / sizeof(WCHAR);
     RtlCopyMemory(FileNameAttribute->Name, Name->Buffer, Name->Length);
 
-    // For now, we're emulating the way Windows behaves when 8.3 name generation is disabled
+    // For now, we're emulating the way Windows behaves when 8.3 name generation is disabled:
+    // a name valid in both namespaces is marked as such, any other is a Win32 name, and only
+    // a case-sensitive create makes a POSIX one.
     // TODO: add DOS Filename as needed
-    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3((PUNICODE_STRING)Name, NULL, NULL))
+    if (CaseSensitive)
+        FileNameAttribute->NameType = NTFS_FILE_NAME_POSIX;
+    else if (RtlIsNameLegalDOS8Dot3((PUNICODE_STRING)Name, NULL, NULL))
         FileNameAttribute->NameType = NTFS_FILE_NAME_WIN32_AND_DOS;
     else
-        FileNameAttribute->NameType = NTFS_FILE_NAME_POSIX;
+        FileNameAttribute->NameType = NTFS_FILE_NAME_WIN32;
 
     FileRecord->LinkCount++;
 
