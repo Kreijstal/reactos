@@ -2077,6 +2077,8 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
     AttributeAddress->Resident.ValueOffset = ResidentHeaderLength;
     AttributeAddress->Instance = FileRecord->NextAttributeNumber++;
 
+    RtlZeroMemory(StandardInfo, sizeof(STANDARD_INFORMATION));
+
     // set dates and times
     KeQuerySystemTime(&SystemTime);
     StandardInfo->CreationTime = SystemTime.QuadPart;

@@ -1107,7 +1107,7 @@ NtfsCreateNewFile(
     BOOLEAN IsDirectory = BooleanFlagOn(Options, FILE_DIRECTORY_FILE);
     UNICODE_STRING FinalName;
     PNTFS_FCB Fcb, UnusedParent;
-    ULONG Attributes;
+    ULONG Attributes, SecurityId;
     NTSTATUS Status;
 
     if (!NtfsGlobalData->EnableWriteSupport)
@@ -1141,11 +1141,20 @@ NtfsCreateNewFile(
         return STATUS_CANNOT_DELETE;
     }
 
+    Status = NtfsAssignSecurity(DeviceExt,
+                                ParentFcb->MFTIndex,
+                                Stack->Parameters.Create.SecurityContext->AccessState,
+                                IsDirectory,
+                                &SecurityId);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     Status = NtfsCreateFileRecord(DeviceExt,
                                   ParentFcb,
                                   &FinalName,
                                   Attributes,
                                   IsDirectory,
+                                  SecurityId,
                                   CaseSensitive,
                                   BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
     if (!NT_SUCCESS(Status))
@@ -1240,6 +1249,7 @@ NtfsOpenBaseOfStream(
     BOOLEAN CaseSensitive = BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE);
     UNICODE_STRING FinalName;
     PNTFS_FCB ParentFcb;
+    ULONG SecurityId;
     NTSTATUS Status;
 
     *Created = FALSE;
@@ -1261,13 +1271,22 @@ NtfsOpenBaseOfStream(
     }
 
     NtfsGetFinalComponent(Path, &FinalName);
-    Status = NtfsCreateFileRecord(DeviceExt,
-                                  ParentFcb,
-                                  &FinalName,
-                                  NtfsNewFileAttributes(Stack->Parameters.Create.FileAttributes, FALSE),
-                                  FALSE,
-                                  CaseSensitive,
-                                  BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    Status = NtfsAssignSecurity(DeviceExt,
+                                ParentFcb->MFTIndex,
+                                Stack->Parameters.Create.SecurityContext->AccessState,
+                                FALSE,
+                                &SecurityId);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsCreateFileRecord(DeviceExt,
+                                      ParentFcb,
+                                      &FinalName,
+                                      NtfsNewFileAttributes(Stack->Parameters.Create.FileAttributes, FALSE),
+                                      FALSE,
+                                      SecurityId,
+                                      CaseSensitive,
+                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    }
     NtfsReleaseFCB(DeviceExt, ParentFcb);
     if (!NT_SUCCESS(Status))
         return Status;
@@ -1784,6 +1803,9 @@ NtfsAddEmptyIndex(
 * @param IsDirectory
 * TRUE to create a directory (an empty $I30 index), FALSE for a file (an empty $DATA).
 *
+* @param SecurityId
+* The SecurityId of the file's descriptor in $Secure, from NtfsAssignSecurity().
+*
 * @param CaseSensitive
 * Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
 * if an application created the file with the FILE_FLAG_POSIX_SEMANTICS flag.
@@ -1804,6 +1826,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
                      PCUNICODE_STRING Name,
                      ULONG FileAttributes,
                      BOOLEAN IsDirectory,
+                     ULONG SecurityId,
                      BOOLEAN CaseSensitive,
                      BOOLEAN CanWait)
 {
@@ -1841,6 +1864,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
 
     // add first attribute, $STANDARD_INFORMATION
     AddStandardInformation(FileRecord, NextAttribute, FileAttributes);
+    ((PSTANDARD_INFORMATION)((ULONG_PTR)NextAttribute + NextAttribute->Resident.ValueOffset))->SecurityId = SecurityId;
 
     // advance NextAttribute pointer to the next attribute
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);

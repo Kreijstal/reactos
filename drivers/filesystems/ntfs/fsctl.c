@@ -566,6 +566,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
     NtfsFindObjectIdIndex(Vcb);
+    NtfsInitializeSecurity(Vcb);
 
     /* Get serial number */
     NewDeviceObject->Vpb->SerialNumber = Vcb->NtfsInfo.SerialNumber;
