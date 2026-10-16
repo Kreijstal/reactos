@@ -689,7 +689,7 @@ NtfsOpenTargetDirectory(
         return STATUS_OBJECT_PATH_NOT_FOUND;
     }
 
-    Status = NtfsFindMftRecord(DeviceExt, Fcb->MFTIndex, &FinalName, &FirstEntry, FALSE, CaseSensitive, &ExistingMft);
+    Status = NtfsFindMftRecord(DeviceExt, Fcb->MFTIndex, &FinalName, &FirstEntry, FALSE, CaseSensitive, &ExistingMft, NULL);
     *Information = NT_SUCCESS(Status) ? FILE_EXISTS : FILE_DOES_NOT_EXIST;
 
     Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);

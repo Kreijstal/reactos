@@ -153,7 +153,8 @@ NtfsFillDirEntryFixedPart(
 * Describes one file as an entry of a directory information class.
 *
 * @param OverrideName
-* The name to report ("." or ".."), or NULL to report the file's own.
+* The name to report: the one the index entry holds, or "." or "..". NULL reports the
+* file's best name.
 *
 * @param Written
 * Receives the bytes of Buffer the entry takes, name included.
@@ -161,6 +162,9 @@ NtfsFillDirEntryFixedPart(
 * @param First
 * TRUE for the first entry of a query, which is returned cut short if the buffer can't
 * hold its name; later entries that don't fit are left for the next query.
+*
+* @param IsDotEntry
+* TRUE for "." and "..", which have no short name.
 *
 * @return
 * STATUS_SUCCESS, STATUS_BUFFER_OVERFLOW if the entry doesn't fit, or
@@ -175,7 +179,8 @@ NtfsGetDirEntryInformation(PDEVICE_EXTENSION DeviceExt,
                            PVOID Buffer,
                            ULONG BufferLength,
                            PULONG Written,
-                           BOOLEAN First)
+                           BOOLEAN First,
+                           BOOLEAN IsDotEntry)
 {
     ULONG NameOffset = NtfsDirEntryNameOffset(FileInformationClass);
     PFILENAME_ATTRIBUTE FileName;
@@ -221,7 +226,7 @@ NtfsGetDirEntryInformation(PDEVICE_EXTENSION DeviceExt,
     else
     {
         NtfsFillDirEntryFixedPart(DeviceExt, FileInformationClass, FileRecord, MFTIndex,
-                                  FileName, OverrideName == NULL, Buffer);
+                                  FileName, !IsDotEntry, Buffer);
         ((PFILE_DIRECTORY_INFORMATION)Buffer)->FileNameLength = Length;
     }
 
@@ -300,7 +305,7 @@ NtfsGetDotEntry(PDEVICE_EXTENSION DeviceExt,
     {
         Status = NtfsGetDirEntryInformation(DeviceExt, FileInformationClass, FileRecord,
                                             MFTIndex, Name, Buffer, BufferLength,
-                                            Written, First);
+                                            Written, First, TRUE);
     }
 
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
@@ -356,7 +361,8 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     PFILE_OBJECT FileObject;
     NTSTATUS Status = STATUS_SUCCESS;
     PFILE_RECORD_HEADER FileRecord;
-    ULONGLONG MFTRecord, OldMFTRecord = 0;
+    ULONGLONG MFTRecord;
+    PFILENAME_ATTRIBUTE FoundName;
     UNICODE_STRING Pattern;
     ULONG Written;
 
@@ -444,11 +450,19 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
     /* Get Buffer for result */
     Buffer = NtfsGetUserBuffer(Irp, FALSE);
 
+    FoundName = ExAllocatePoolWithTag(NonPagedPool, NTFS_FOUND_NAME_SIZE, TAG_NTFS);
+    if (FoundName == NULL)
+    {
+        ExReleaseResourceLite(&Fcb->MainResource);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
     DPRINT("Buffer=%p tofind=%S\n", Buffer, Ccb->DirectorySearchPattern);
 
     if (!ExAcquireResourceExclusiveLite(&DeviceExtension->DirResource,
                                         BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)))
     {
+        ExFreePoolWithTag(FoundName, TAG_NTFS);
         ExReleaseResourceLite(&Fcb->MainResource);
         return STATUS_PENDING;
     }
@@ -499,40 +513,38 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         }
         else
         {
+            UNICODE_STRING EntryName;
+
+            /* The index has one entry per name; a DOS-only name is skipped by the
+             * search, and every other entry is reported under the name it holds,
+             * which for a file with several links is that link's */
             Status = NtfsFindFileAt(DeviceExtension,
                                     &Pattern,
                                     &Ccb->Entry,
                                     &FileRecord,
                                     &MFTRecord,
                                     Fcb->MFTIndex,
-                                    BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE));
+                                    BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
+                                    FoundName);
             if (!NT_SUCCESS(Status))
             {
                 Status = (First ? STATUS_NO_SUCH_FILE : STATUS_NO_MORE_FILES);
                 break;
             }
 
-            /* HACK: files with both a short name and a long name are present twice in the index.
-             * Ignore the second entry, if it is immediately following the first one.
-             */
-            if (MFTRecord == OldMFTRecord)
-            {
-                DPRINT1("Ignoring duplicate MFT entry 0x%x\n", MFTRecord);
-                Ccb->Entry++;
-                ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
-                continue;
-            }
-            OldMFTRecord = MFTRecord;
+            EntryName.Buffer = FoundName->Name;
+            EntryName.Length = EntryName.MaximumLength = FoundName->NameLength * sizeof(WCHAR);
 
             Status = NtfsGetDirEntryInformation(DeviceExtension,
                                                 FileInformationClass,
                                                 FileRecord,
                                                 MFTRecord,
-                                                NULL,
+                                                &EntryName,
                                                 Entry,
                                                 BufferLength - Offset,
                                                 &Written,
-                                                Buffer0 == NULL);
+                                                Buffer0 == NULL,
+                                                FALSE);
 
             ExFreeToNPagedLookasideList(&DeviceExtension->FileRecLookasideList, FileRecord);
 
@@ -572,6 +584,7 @@ NtfsQueryDirectory(PNTFS_IRP_CONTEXT IrpContext)
         IrpContext->Irp->IoStatus.Information = (Status == STATUS_BUFFER_OVERFLOW) ? Written : 0;
     }
 
+    ExFreePoolWithTag(FoundName, TAG_NTFS);
     ExReleaseResourceLite(&DeviceExtension->DirResource);
     ExReleaseResourceLite(&Fcb->MainResource);
 

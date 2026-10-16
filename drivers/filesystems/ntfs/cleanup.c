@@ -179,13 +179,29 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                     Status = STATUS_DIRECTORY_NOT_EMPTY;
             }
 
-            /* Deleting a named stream takes only that stream */
+            /* Deleting a named stream takes only that stream, deleting a name only that
+             * name while the file has others */
             if (NT_SUCCESS(Status))
             {
                 if (Fcb->Stream[0] != UNICODE_NULL)
+                {
                     Status = NtfsDeleteStream(DeviceExt, Fcb->MFTIndex, Fcb->Stream);
+                }
                 else
-                    Status = NtfsDeleteFileRecord(DeviceExt, Fcb->MFTIndex, FALSE);
+                {
+                    UNICODE_STRING Name;
+                    USHORT LinksLeft;
+
+                    RtlInitUnicodeString(&Name, Fcb->ObjectName + 1);
+                    Status = NtfsDeleteFileLink(DeviceExt,
+                                                Fcb->MFTIndex,
+                                                Fcb->ParentMFTIndex,
+                                                &Name,
+                                                FALSE,
+                                                &LinksLeft);
+                    if (NT_SUCCESS(Status) && LinksLeft != 0)
+                        NtfsSetLinkCount(DeviceExt, Fcb->MFTIndex, LinksLeft);
+                }
             }
 
             /* A cached FCB for a path that no longer exists would make it look present */
