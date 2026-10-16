@@ -849,6 +849,14 @@ NtfsOverwriteFile(
         Status = FindAttribute(Fcb->Vcb, FileRecord, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &DataContext, &DataAttributeOffset);
     }
 
+    /* Only the record holding the stream changes; read it if that isn't the base */
+    if (NT_SUCCESS(Status) && (DataContext->FileMFTIndex & NTFS_MFT_MASK) != Fcb->MFTIndex)
+    {
+        Status = ReadFileRecord(Fcb->Vcb, DataContext->FileMFTIndex & NTFS_MFT_MASK, FileRecord);
+        if (!NT_SUCCESS(Status))
+            ReleaseAttributeContext(DataContext);
+    }
+
     if (NT_SUCCESS(Status))
     {
         Status = SetAttributeDataLength(FileObject, Fcb, DataContext, DataAttributeOffset, FileRecord, &Zero);
@@ -1146,17 +1154,8 @@ NtfsAddStream(
     Status = ReadFileRecord(DeviceExt, BaseFcb->MFTIndex, FileRecord);
     if (NT_SUCCESS(Status))
     {
-        Status = AddResidentAttribute(DeviceExt, FileRecord, AttributeData, StreamName->Buffer, NameLength, NULL, 0);
-        if (Status == STATUS_DISK_FULL)
-        {
-            /* A full record makes room by moving values out to clusters, then takes the stream */
-            ULONG Needed = ALIGN_UP_BY(FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR) +
-                                       StreamName->Length, ATTR_RECORD_ALIGNMENT);
-
-            Status = NtfsMakeRoomInFileRecord(DeviceExt, FileRecord, Needed);
-            if (NT_SUCCESS(Status))
-                Status = AddResidentAttribute(DeviceExt, FileRecord, AttributeData, StreamName->Buffer, NameLength, NULL, 0);
-        }
+        /* Past what the base record holds, the stream goes into an extension record */
+        Status = NtfsAddResidentAttributeToFile(DeviceExt, FileRecord, AttributeData, StreamName->Buffer, NameLength, NULL, 0);
     }
 
     if (NT_SUCCESS(Status))
