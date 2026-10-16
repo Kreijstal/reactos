@@ -3699,6 +3699,59 @@ DumpIndexEntry(PINDEX_ENTRY_ATTRIBUTE IndexEntry)
 }
 #endif
 
+/* An exact-name lookup matches one entry: the file's own long name, never a
+ * DOS-only alias nor a system file's entry. */
+static
+BOOLEAN
+IsLookupMatch(PINDEX_ENTRY_ATTRIBUTE IndexEntry)
+{
+    return (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK) >= NTFS_FILE_FIRST_USER_FILE &&
+           IndexEntry->FileName.NameType != NTFS_FILE_NAME_DOS;
+}
+
+/* Exact-name lookups follow the $I30 B-tree by collation instead of visiting
+ * every node: an entry's sub-node holds the keys that sort before it, the END
+ * entry's sub-node those that sort after every real entry. Returns the entry
+ * holding FileName (*Found = TRUE), or else the first entry that sorts after
+ * it, whose sub-node is the only place left that can hold the name. */
+static
+PINDEX_ENTRY_ATTRIBUTE
+SeekIndexEntry(PUNICODE_STRING FileName,
+               PINDEX_ENTRY_ATTRIBUTE FirstEntry,
+               PINDEX_ENTRY_ATTRIBUTE LastEntry,
+               BOOLEAN CaseSensitive,
+               PBOOLEAN Found)
+{
+    PINDEX_ENTRY_ATTRIBUTE IndexEntry;
+    UNICODE_STRING EntryName;
+    LONG Comparison;
+
+    *Found = FALSE;
+
+    for (IndexEntry = FirstEntry;
+         !(IndexEntry->Flags & NTFS_INDEX_ENTRY_END);
+         IndexEntry = (PINDEX_ENTRY_ATTRIBUTE)((PCHAR)IndexEntry + IndexEntry->Length))
+    {
+        ASSERT(IndexEntry < LastEntry);
+        ASSERT(IndexEntry->Length >= sizeof(INDEX_ENTRY_ATTRIBUTE));
+
+        EntryName.Buffer = IndexEntry->FileName.Name;
+        EntryName.Length = EntryName.MaximumLength = IndexEntry->FileName.NameLength * sizeof(WCHAR);
+
+        Comparison = CollateFileNames(FileName, &EntryName, CaseSensitive);
+        if (Comparison < 0)
+            break;
+
+        if (Comparison == 0 && IsLookupMatch(IndexEntry))
+        {
+            *Found = TRUE;
+            break;
+        }
+    }
+
+    return IndexEntry;
+}
+
 NTSTATUS
 BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER MftRecord,
@@ -3799,6 +3852,40 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
     FirstEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&IndexRecord->Header + IndexRecord->Header.FirstEntryOffset);
     LastEntry = (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)&IndexRecord->Header + IndexRecord->Header.TotalSizeOfEntries);
     ASSERT(LastEntry <= (PINDEX_ENTRY_ATTRIBUTE)((ULONG_PTR)IndexRecord + IndexBlockSize));
+
+    if (!DirSearch)
+    {
+        BOOLEAN Found;
+
+        IndexEntry = SeekIndexEntry(FileName, FirstEntry, LastEntry, CaseSensitive, &Found);
+        if (Found)
+        {
+            *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            Status = STATUS_SUCCESS;
+        }
+        else if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
+        {
+            Status = BrowseSubNodeIndexEntries(Vcb,
+                                               MftRecord,
+                                               IndexBlockSize,
+                                               FileName,
+                                               IndexAllocationContext,
+                                               Bitmap,
+                                               GetIndexEntryVCN(IndexEntry),
+                                               StartEntry,
+                                               CurrentEntry,
+                                               DirSearch,
+                                               CaseSensitive,
+                                               OutMFTIndex);
+        }
+        else
+        {
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+
+        ExFreePoolWithTag(IndexRecord, TAG_NTFS);
+        return Status;
+    }
 
     // Loop through all Index Entries of index, starting with FirstEntry
     IndexEntry = FirstEntry;
@@ -3947,6 +4034,50 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
     {
         // Couldn't find an index allocation
         IndexAllocationContext = NULL;
+    }
+
+    if (!DirSearch)
+    {
+        BOOLEAN Found;
+
+        // Exact lookups always start from the first entry
+        ASSERT(*StartEntry == 0);
+
+        IndexEntry = SeekIndexEntry(FileName, FirstEntry, LastEntry, CaseSensitive, &Found);
+        if (Found)
+        {
+            *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            Status = STATUS_SUCCESS;
+        }
+        else if ((IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) && IndexAllocationContext)
+        {
+            Status = BrowseSubNodeIndexEntries(Vcb,
+                                               MftRecord,
+                                               IndexBlockSize,
+                                               FileName,
+                                               IndexAllocationContext,
+                                               &Bitmap,
+                                               GetIndexEntryVCN(IndexEntry),
+                                               StartEntry,
+                                               CurrentEntry,
+                                               DirSearch,
+                                               CaseSensitive,
+                                               OutMFTIndex);
+        }
+        else
+        {
+            if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
+                DPRINT1("Filesystem corruption detected, index root points at a sub-node but there is no $INDEX_ALLOCATION!\n");
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+
+        if (IndexAllocationContext)
+        {
+            ExFreePoolWithTag(BitmapMem, TAG_NTFS);
+            ReleaseAttributeContext(BitmapContext);
+            ReleaseAttributeContext(IndexAllocationContext);
+        }
+        return Status;
     }
 
 
