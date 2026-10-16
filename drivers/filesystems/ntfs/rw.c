@@ -125,7 +125,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
              PFILE_OBJECT FileObject,
              PUCHAR Buffer,
              ULONG Length,
-             ULONG ReadOffset,
+             ULONGLONG ReadOffset,
              ULONG IrpFlags,
              PIRP Irp,
              PULONG LengthRead)
@@ -135,14 +135,14 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
     PFILE_RECORD_HEADER FileRecord;
     PNTFS_ATTR_CONTEXT DataContext = NULL;
     ULONG RealLength;
-    ULONG RealReadOffset;
+    ULONGLONG RealReadOffset;
     ULONG RealLengthRead;
     ULONG ToRead;
     BOOLEAN AllocatedBuffer = FALSE;
     PCHAR ReadBuffer = (PCHAR)Buffer;
     ULONGLONG StreamSize;
 
-    DPRINT("NtfsReadFile(%p, %p, %p, %lu, %lu, %lx, %p)\n", DeviceExt, FileObject, Buffer, Length, ReadOffset, IrpFlags, LengthRead);
+    DPRINT("NtfsReadFile(%p, %p, %p, %lu, %I64u, %lx, %p)\n", DeviceExt, FileObject, Buffer, Length, ReadOffset, IrpFlags, LengthRead);
 
     *LengthRead = 0;
 
@@ -228,7 +228,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
 
     ToRead = Length;
     if (ReadOffset + Length > StreamSize)
-        ToRead = StreamSize - ReadOffset;
+        ToRead = (ULONG)(StreamSize - ReadOffset);
 
     RealReadOffset = ReadOffset;
     RealLength = ToRead;
@@ -238,7 +238,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         RealReadOffset = ROUND_DOWN(ReadOffset, DeviceExt->NtfsInfo.BytesPerSector);
         /* The aligned window must cover all of [ReadOffset, ReadOffset + ToRead),
          * including the sectors the unaligned start pulls in */
-        RealLength = ROUND_UP(ReadOffset + ToRead, DeviceExt->NtfsInfo.BytesPerSector) - RealReadOffset;
+        RealLength = (ULONG)(ROUND_UP(ReadOffset + ToRead, DeviceExt->NtfsInfo.BytesPerSector) - RealReadOffset);
 
         ReadBuffer = ExAllocatePoolWithTag(NonPagedPool, RealLength, TAG_NTFS);
         if (ReadBuffer == NULL)
@@ -251,7 +251,7 @@ NtfsReadFile(PDEVICE_EXTENSION DeviceExt,
         AllocatedBuffer = TRUE;
     }
 
-    DPRINT("Effective read: %lu at %lu for stream '%S'\n", RealLength, RealReadOffset, Fcb->Stream);
+    DPRINT("Effective read: %lu at %I64u for stream '%S'\n", RealLength, RealReadOffset, Fcb->Stream);
     /* Only hand the IRP down when reading straight into its buffer: a
      * forwarded transfer lands at the start of the IRP's MDL, so a bounced
      * read would end up in the wrong place */
@@ -358,7 +358,7 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
                               FileObject,
                               Buffer,
                               ReadLength,
-                              ReadOffset.u.LowPart,
+                              ReadOffset.QuadPart,
                               Irp->Flags,
                               Irp,
                               &ReturnedReadLength);
@@ -430,7 +430,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                        PFILE_OBJECT FileObject,
                        const PUCHAR Buffer,
                        ULONG Length,
-                       ULONG WriteOffset,
+                       ULONGLONG WriteOffset,
                        ULONG IrpFlags,
                        BOOLEAN CaseSensitive,
                        PIRP Irp,
@@ -444,7 +444,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     ULONGLONG StreamSize;
     ULONG RequestedLength = 0;
 
-    DPRINT("NtfsWriteFile(%p, %p, %p, %lu, %lu, %x, %s, %p)\n",
+    DPRINT("NtfsWriteFile(%p, %p, %p, %lu, %I64u, %x, %s, %p)\n",
            DeviceExt,
            FileObject,
            Buffer,
@@ -544,7 +544,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
     // Get the size of the stream on disk
     StreamSize = AttributeDataLength(DataContext->pRecord);
 
-    DPRINT("WriteOffset: %lu\tStreamSize: %I64u\n", WriteOffset, StreamSize);
+    DPRINT("WriteOffset: %I64u\tStreamSize: %I64u\n", WriteOffset, StreamSize);
 
     // Are we trying to write beyond the end of the stream?
     if (WriteOffset + Length > StreamSize)
@@ -580,6 +580,11 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
 
             // set the attribute data length
             Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, &DataSize);
+
+            /* What lies between the old end and the write reads as zeros */
+            if (NT_SUCCESS(Status) && WriteOffset > StreamSize)
+                Status = NtfsZeroAttributeRange(DeviceExt, DataContext, FileRecord, StreamSize, WriteOffset);
+
             if (!NT_SUCCESS(Status))
             {
                 ReleaseAttributeContext(DataContext);
@@ -612,7 +617,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
                 return STATUS_SUCCESS;
             }
 
-            DPRINT("Clamping paging write of %lu bytes at %lu to stream size %I64u\n",
+            DPRINT("Clamping paging write of %lu bytes at %I64u to stream size %I64u\n",
                    Length, WriteOffset, StreamSize);
 
             RequestedLength = Length;
@@ -628,7 +633,7 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         }
     }
 
-    DPRINT("Length: %lu\tWriteOffset: %lu\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
+    DPRINT("Length: %lu\tWriteOffset: %I64u\tStreamSize: %I64u\n", Length, WriteOffset, StreamSize);
 
     // Write the data to the attribute
     /* Buffer is the system mapping of this IRP's MDL, so hand the IRP down too
@@ -743,19 +748,12 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     DPRINT("ByteOffset: %I64u\tLength: %lu\tBytes per sector: %lu\n", ByteOffset.QuadPart,
         Length, BytesPerSector);
 
-    if (ByteOffset.u.HighPart && !(Fcb->Flags & FCB_IS_VOLUME))
-    {
-        // TODO: Support large files
-        DPRINT1("FIXME: Writing to large files is not yet supported at this time.\n");
-        return STATUS_INVALID_PARAMETER;
-    }
-
     // Is this a non-cached write? A non-buffered write?
     if (IrpContext->Irp->Flags & (IRP_PAGING_IO | IRP_NOCACHE) || (Fcb->Flags & FCB_IS_VOLUME) ||
         IrpContext->FileObject->Flags & FILE_NO_INTERMEDIATE_BUFFERING)
     {
         // non-cached and non-buffered writes must be sector aligned
-        if (ByteOffset.u.LowPart % BytesPerSector != 0 || Length % BytesPerSector != 0)
+        if (ByteOffset.QuadPart % BytesPerSector != 0 || Length % BytesPerSector != 0)
         {
             DPRINT1("Non-cached writes and non-buffered writes must be sector aligned!\n");
             return STATUS_INVALID_PARAMETER;
@@ -837,8 +835,6 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     DPRINT("Existing File Size(Fcb->RFCB.FileSize.QuadPart): %I64u\n", Fcb->RFCB.FileSize.QuadPart);
     DPRINT("About to write the data. Length: %lu\n", Length);
 
-    // TODO: handle HighPart of ByteOffset (large files)
-
     /* See NtfsRead() */
     if ((DeviceExt->Flags & VCB_VOLUME_DISMOUNTED) &&
         !(Fcb->Flags & FCB_IS_VOLUME))
@@ -873,7 +869,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
                                FileObject,
                                Buffer,
                                Length,
-                               ByteOffset.LowPart,
+                               ByteOffset.QuadPart,
                                Irp->Flags,
                                BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
                                Irp,
