@@ -269,6 +269,56 @@ NtfsGetNetworkOpenInformation(PNTFS_FCB Fcb,
     return STATUS_SUCCESS;
 }
 
+/**
+* @name NtfsAppendStreamEntry
+*
+* Adds the FILE_STREAM_INFORMATION entry of one $DATA attribute at *Offset, if it fits.
+*/
+static
+NTSTATUS
+NtfsAppendStreamEntry(PFILE_STREAM_INFORMATION StreamInfo,
+                      ULONG BufferLength,
+                      PNTFS_ATTR_RECORD Attribute,
+                      PFILE_STREAM_INFORMATION *Previous,
+                      PULONG Offset,
+                      PULONG Used)
+{
+    static const WCHAR DataSuffix[] = L":$DATA";
+    PFILE_STREAM_INFORMATION CurrentInfo = (PFILE_STREAM_INFORMATION)((ULONG_PTR)StreamInfo + *Offset);
+    ULONG NameBytes = Attribute->NameLength * sizeof(WCHAR);
+    ULONG StreamNameLength = sizeof(WCHAR) + NameBytes + sizeof(DataSuffix) - sizeof(UNICODE_NULL);
+    ULONG CurrentSize = FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName) + StreamNameLength;
+
+    /* An entry that doesn't fit isn't returned at all */
+    if (*Offset > BufferLength || CurrentSize > BufferLength - *Offset)
+        return STATUS_BUFFER_OVERFLOW;
+
+    CurrentInfo->NextEntryOffset = 0;
+    CurrentInfo->StreamNameLength = StreamNameLength;
+    CurrentInfo->StreamSize.QuadPart = AttributeDataLength(Attribute);
+    CurrentInfo->StreamAllocationSize.QuadPart = AttributeAllocatedLength(Attribute);
+    CurrentInfo->StreamName[0] = L':';
+    RtlCopyMemory(&CurrentInfo->StreamName[1], (PWCHAR)((ULONG_PTR)Attribute + Attribute->NameOffset), NameBytes);
+    RtlCopyMemory(&CurrentInfo->StreamName[1 + Attribute->NameLength], DataSuffix, sizeof(DataSuffix) - sizeof(UNICODE_NULL));
+
+    /* Entries start on 8-byte boundaries */
+    if (*Previous != NULL)
+        (*Previous)->NextEntryOffset = (ULONG)((ULONG_PTR)CurrentInfo - (ULONG_PTR)*Previous);
+
+    *Previous = CurrentInfo;
+    *Used = *Offset + CurrentSize;
+    *Offset += ALIGN_UP_BY(CurrentSize, sizeof(LONGLONG));
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsGetStreamInformation
+*
+* FileStreamInformation: one entry per $DATA attribute, ":name:$DATA", the unnamed one
+* "::$DATA". A file with an $ATTRIBUTE_LIST is enumerated in list order, which puts the
+* unnamed stream first and takes in the streams in extension records.
+*/
 static
 NTSTATUS
 NtfsGetStreamInformation(PNTFS_FCB Fcb,
@@ -276,14 +326,13 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
                          PFILE_STREAM_INFORMATION StreamInfo,
                          PULONG BufferLength)
 {
-    static const WCHAR DataSuffix[] = L":$DATA";
-    FIND_ATTR_CONTXT Context;
-    PNTFS_ATTR_RECORD Attribute;
-    NTSTATUS Status = STATUS_SUCCESS, BrowseStatus;
     PFILE_RECORD_HEADER FileRecord;
     PFILE_STREAM_INFORMATION Previous = NULL;
+    PNTFS_ATTRIBUTE_LIST_ITEM List = NULL;
+    ULONG ListLength = 0;
     ULONG Offset = 0;
     ULONG Used = 0;
+    NTSTATUS Status;
 
     if (*BufferLength < sizeof(FILE_STREAM_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
@@ -296,54 +345,66 @@ NtfsGetStreamInformation(PNTFS_FCB Fcb,
     }
 
     Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
+    if (NT_SUCCESS(Status) && NtfsRecordHasAttributeList(FileRecord))
+        Status = NtfsReadAttributeList(DeviceExt, FileRecord, &List, &ListLength);
+
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("Can't find record!\n");
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
     }
 
-    /* One entry per $DATA attribute, ":name:$DATA", the unnamed one "::$DATA" */
-    BrowseStatus = FindFirstAttribute(&Context, DeviceExt, FileRecord, FALSE, &Attribute);
-    while (NT_SUCCESS(BrowseStatus))
+    if (List != NULL)
     {
-        if (Attribute->Type == AttributeData)
-        {
-            PFILE_STREAM_INFORMATION CurrentInfo = (PFILE_STREAM_INFORMATION)((ULONG_PTR)StreamInfo + Offset);
-            ULONG NameBytes = Attribute->NameLength * sizeof(WCHAR);
-            ULONG StreamNameLength = sizeof(WCHAR) + NameBytes + sizeof(DataSuffix) - sizeof(UNICODE_NULL);
-            ULONG CurrentSize = FIELD_OFFSET(FILE_STREAM_INFORMATION, StreamName) + StreamNameLength;
+        ULONG ItemOffset;
+        PNTFS_ATTRIBUTE_LIST_ITEM Item;
 
-            /* An entry that doesn't fit isn't returned at all */
-            if (Offset > *BufferLength || CurrentSize > *BufferLength - Offset)
+        for (ItemOffset = 0; NT_SUCCESS(Status) && ItemOffset < ListLength; ItemOffset += Item->Length)
+        {
+            PNTFS_ATTR_CONTEXT DataContext;
+
+            Item = (PNTFS_ATTRIBUTE_LIST_ITEM)((ULONG_PTR)List + ItemOffset);
+            if (Item->Length == 0)
             {
-                Status = STATUS_BUFFER_OVERFLOW;
+                Status = STATUS_FILE_CORRUPT_ERROR;
                 break;
             }
 
-            CurrentInfo->NextEntryOffset = 0;
-            CurrentInfo->StreamNameLength = StreamNameLength;
-            CurrentInfo->StreamSize.QuadPart = AttributeDataLength(Attribute);
-            CurrentInfo->StreamAllocationSize.QuadPart = AttributeAllocatedLength(Attribute);
-            CurrentInfo->StreamName[0] = L':';
-            RtlCopyMemory(&CurrentInfo->StreamName[1], (PWCHAR)((ULONG_PTR)Attribute + Attribute->NameOffset), NameBytes);
-            RtlCopyMemory(&CurrentInfo->StreamName[1 + Attribute->NameLength], DataSuffix, sizeof(DataSuffix) - sizeof(UNICODE_NULL));
+            /* A stream split over records is listed once per extent; report it once */
+            if (Item->Type != AttributeData || Item->StartingVCN != 0)
+                continue;
 
-            /* Entries start on 8-byte boundaries */
-            if (Previous != NULL)
-                Previous->NextEntryOffset = (ULONG)((ULONG_PTR)CurrentInfo - (ULONG_PTR)Previous);
-
-            Previous = CurrentInfo;
-            Used = Offset + CurrentSize;
-            Offset += ALIGN_UP_BY(CurrentSize, sizeof(LONGLONG));
+            Status = FindAttribute(DeviceExt,
+                                   FileRecord,
+                                   AttributeData,
+                                   (PCWSTR)((ULONG_PTR)Item + Item->NameOffset),
+                                   Item->NameLength,
+                                   &DataContext,
+                                   NULL);
+            if (NT_SUCCESS(Status))
+            {
+                Status = NtfsAppendStreamEntry(StreamInfo, *BufferLength, DataContext->pRecord, &Previous, &Offset, &Used);
+                ReleaseAttributeContext(DataContext);
+            }
         }
 
-        BrowseStatus = FindNextAttribute(&Context, &Attribute);
+        ExFreePoolWithTag(List, TAG_NTFS);
+    }
+    else
+    {
+        PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+
+        while (NT_SUCCESS(Status) && Attribute->Type != AttributeEnd)
+        {
+            if (Attribute->Type == AttributeData)
+                Status = NtfsAppendStreamEntry(StreamInfo, *BufferLength, Attribute, &Previous, &Offset, &Used);
+
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+        }
     }
 
     *BufferLength -= Used;
 
-    FindCloseAttribute(&Context);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
     return Status;
 }
@@ -746,6 +807,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
 {
     LARGE_INTEGER CurrentFileSize;
     PFILE_RECORD_HEADER FileRecord;
+    PFILE_RECORD_HEADER Holder;
     PNTFS_ATTR_CONTEXT DataContext;
     ULONG AttributeOffset;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -809,6 +871,15 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     // Get the size of the data attribute
     CurrentFileSize.QuadPart = AttributeDataLength(DataContext->pRecord);
 
+    /* Through an $ATTRIBUTE_LIST the stream can live in another record than the base */
+    Status = NtfsReadAttributeHolder(DeviceExt, DataContext, FileRecord, &Holder);
+    if (!NT_SUCCESS(Status))
+    {
+        ReleaseAttributeContext(DataContext);
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
+    }
+
     // Are we enlarging the attribute?
     if (NewFileSize->QuadPart > CurrentFileSize.QuadPart)
     {
@@ -818,20 +889,21 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
         {
             // TODO - just fail for now
             ReleaseAttributeContext(DataContext);
+            NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
             ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
             return STATUS_ACCESS_DENIED;
         }
     }
 
     // set the attribute data length
-    Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, FileRecord, NewFileSize);
+    Status = SetAttributeDataLength(FileObject, Fcb, DataContext, AttributeOffset, Holder, NewFileSize);
 
     /* The range the file grew by reads as zeros */
     if (NT_SUCCESS(Status) && NewFileSize->QuadPart > CurrentFileSize.QuadPart)
     {
         Status = NtfsZeroAttributeRange(DeviceExt,
                                         DataContext,
-                                        FileRecord,
+                                        Holder,
                                         CurrentFileSize.QuadPart,
                                         NewFileSize->QuadPart);
     }
@@ -839,6 +911,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     if (!NT_SUCCESS(Status))
     {
         ReleaseAttributeContext(DataContext);
+        NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return Status;
     }
@@ -850,6 +923,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     {
         DPRINT1("Unable to find FileName attribute associated with file!\n");
         ReleaseAttributeContext(DataContext);
+        NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
         return STATUS_INVALID_PARAMETER;
     }
@@ -861,6 +935,7 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
                                              CaseSensitive);
 
     ReleaseAttributeContext(DataContext);
+    NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;
@@ -942,12 +1017,19 @@ NtfsSetAllocationInformation(PNTFS_FCB Fcb,
     }
     else
     {
-        Status = NtfsSetAllocationSize(FileObject,
-                                       Fcb,
-                                       DataContext,
-                                       AttributeOffset,
-                                       FileRecord,
-                                       AllocationInfo->AllocationSize.QuadPart);
+        PFILE_RECORD_HEADER Holder;
+
+        Status = NtfsReadAttributeHolder(DeviceExt, DataContext, FileRecord, &Holder);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtfsSetAllocationSize(FileObject,
+                                           Fcb,
+                                           DataContext,
+                                           AttributeOffset,
+                                           Holder,
+                                           AllocationInfo->AllocationSize.QuadPart);
+            NtfsReleaseAttributeHolder(DeviceExt, FileRecord, Holder);
+        }
     }
 
     if (NT_SUCCESS(Status))

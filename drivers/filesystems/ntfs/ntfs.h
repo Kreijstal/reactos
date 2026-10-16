@@ -737,6 +737,59 @@ NtfsRemoveAttribute(PFILE_RECORD_HEADER FileRecord,
                     ULONG AttrOffset);
 
 NTSTATUS
+NtfsInsertAttributeRecord(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER FileRecord,
+                          PNTFS_ATTR_RECORD Attribute,
+                          PUSHORT Instance);
+
+BOOLEAN
+NtfsRecordHasAttributeList(PFILE_RECORD_HEADER Record);
+
+NTSTATUS
+NtfsReadAttributeList(PNTFS_VCB Vcb,
+                      PFILE_RECORD_HEADER BaseRecord,
+                      PNTFS_ATTRIBUTE_LIST_ITEM *List,
+                      PULONG Length);
+
+NTSTATUS
+NtfsGetExtensionRecords(PNTFS_ATTRIBUTE_LIST_ITEM List,
+                        ULONG Length,
+                        ULONGLONG BaseIndex,
+                        PULONGLONG *Indices,
+                        PULONG Count);
+
+NTSTATUS
+NtfsRebuildAttributeList(PNTFS_VCB Vcb,
+                         PFILE_RECORD_HEADER BaseRecord,
+                         PULONGLONG NewIndices,
+                         ULONG NewCount);
+
+NTSTATUS
+NtfsAddAttributeToFile(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseRecord,
+                       PNTFS_ATTR_RECORD Attribute);
+
+NTSTATUS
+NtfsAddResidentAttributeToFile(PNTFS_VCB Vcb,
+                               PFILE_RECORD_HEADER BaseRecord,
+                               ULONG Type,
+                               PCWSTR Name,
+                               USHORT NameLength,
+                               const VOID *Data,
+                               ULONG DataLength);
+
+NTSTATUS
+NtfsReadAttributeHolder(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        PFILE_RECORD_HEADER BaseRecord,
+                        PFILE_RECORD_HEADER *Holder);
+
+VOID
+NtfsReleaseAttributeHolder(PNTFS_VCB Vcb,
+                           PFILE_RECORD_HEADER BaseRecord,
+                           PFILE_RECORD_HEADER Holder);
+
+NTSTATUS
 AddFileName(PFILE_RECORD_HEADER FileRecord,
             PNTFS_ATTR_RECORD AttributeAddress,
             ULONGLONG ParentReference,
@@ -1357,6 +1410,10 @@ NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
                        PFILE_RECORD_HEADER FileRecord,
                        ULONGLONG Start,
                        ULONGLONG End);
+
+NTSTATUS
+NtfsDeleteExtensionRecords(PDEVICE_EXTENSION DeviceExt,
+                           PFILE_RECORD_HEADER BaseRecord);
 
 NTSTATUS
 NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,

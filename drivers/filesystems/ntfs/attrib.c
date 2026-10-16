@@ -232,6 +232,123 @@ NtfsCompareAttributeOrder(
 }
 
 /**
+* @name NtfsInsertAttributeRecord
+* @implemented
+*
+* Copies an attribute record into a file record, where its type and name sort it, and
+* gives it the record's next instance number.
+*
+* @param Vcb
+* Pointer to the NTFS_VCB of the volume.
+*
+* @param FileRecord
+* The complete file record. Modified in place; the caller writes it back.
+*
+* @param Attribute
+* The attribute to insert, its Length set.
+*
+* @param Instance
+* Optionally receives the instance number the attribute got.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_COLLISION if the record already has an attribute of
+* that type and name (more than one $FILE_NAME is allowed: one per link), or STATUS_DISK_FULL
+* if the record has no room for it.
+*/
+NTSTATUS
+NtfsInsertAttributeRecord(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER FileRecord,
+                          PNTFS_ATTR_RECORD Attribute,
+                          PUSHORT Instance)
+{
+    PNTFS_ATTR_RECORD Current;
+    PNTFS_ATTR_RECORD InsertPoint = NULL;
+    ULONG InsertOffset;
+
+    ASSERT(Attribute->Length % ATTR_RECORD_ALIGNMENT == 0);
+
+    Current = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
+    while (Current->Type != AttributeEnd)
+    {
+        LONG Order;
+
+        ASSERT((ULONG_PTR)Current + Current->Length <= (ULONG_PTR)FileRecord + FileRecord->BytesInUse);
+
+        Order = NtfsCompareAttributeOrder(Vcb,
+                                          Attribute->Type,
+                                          (PCWSTR)((ULONG_PTR)Attribute + Attribute->NameOffset),
+                                          Attribute->NameLength,
+                                          Current->Type,
+                                          (PCWSTR)((ULONG_PTR)Current + Current->NameOffset),
+                                          Current->NameLength);
+        if (Order == 0 && Attribute->Type != AttributeFileName)
+            return STATUS_OBJECT_NAME_COLLISION;
+
+        if (Order < 0 && InsertPoint == NULL)
+            InsertPoint = Current;
+
+        Current = (PNTFS_ATTR_RECORD)((ULONG_PTR)Current + Current->Length);
+    }
+
+    if (InsertPoint == NULL)
+        InsertPoint = Current;
+
+    if (Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < Attribute->Length)
+        return STATUS_DISK_FULL;
+
+    // Make room: everything from the insertion point on, end markers included, moves back
+    InsertOffset = (ULONG)((ULONG_PTR)InsertPoint - (ULONG_PTR)FileRecord);
+    RtlMoveMemory((PUCHAR)InsertPoint + Attribute->Length, InsertPoint, FileRecord->BytesInUse - InsertOffset);
+    FileRecord->BytesInUse += Attribute->Length;
+
+    RtlCopyMemory(InsertPoint, Attribute, Attribute->Length);
+    InsertPoint->Instance = FileRecord->NextAttributeNumber++;
+
+    if (Instance != NULL)
+        *Instance = InsertPoint->Instance;
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsBuildResidentAttribute
+*
+* Builds a resident attribute record in a pool buffer the caller frees.
+*/
+static
+PNTFS_ATTR_RECORD
+NtfsBuildResidentAttribute(ULONG Type,
+                           PCWSTR Name,
+                           USHORT NameLength,
+                           const VOID *Data,
+                           ULONG DataLength)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    ULONG ValueOffset = ALIGN_UP_BY(ResidentHeaderLength + NameLength * sizeof(WCHAR), ATTR_RECORD_ALIGNMENT);
+    ULONG AttributeLength = ALIGN_UP_BY(ValueOffset + DataLength, ATTR_RECORD_ALIGNMENT);
+    PNTFS_ATTR_RECORD Attribute;
+
+    ASSERT(NameLength <= NTFS_MAX_NAME_LENGTH);
+
+    Attribute = ExAllocatePoolWithTag(NonPagedPool, AttributeLength, TAG_NTFS);
+    if (Attribute == NULL)
+        return NULL;
+
+    RtlZeroMemory(Attribute, AttributeLength);
+    Attribute->Type = Type;
+    Attribute->Length = AttributeLength;
+    Attribute->NameLength = (UCHAR)NameLength;
+    Attribute->NameOffset = (USHORT)ResidentHeaderLength;
+    Attribute->Resident.ValueLength = DataLength;
+    Attribute->Resident.ValueOffset = (USHORT)ValueOffset;
+    RtlCopyMemory((PUCHAR)Attribute + ResidentHeaderLength, Name, NameLength * sizeof(WCHAR));
+    if (DataLength != 0)
+        RtlCopyMemory((PUCHAR)Attribute + ValueOffset, Data, DataLength);
+
+    return Attribute;
+}
+
+/**
 * @name AddResidentAttribute
 * @implemented
 *
@@ -241,7 +358,7 @@ NtfsCompareAttributeOrder(
 * Pointer to the NTFS_VCB of the volume.
 *
 * @param FileRecord
-* The complete base file record. Modified in place; the caller writes it back.
+* The complete file record. Modified in place; the caller writes it back.
 *
 * @param Type
 * The attribute type code.
@@ -260,8 +377,11 @@ NtfsCompareAttributeOrder(
 *
 * @return
 * STATUS_SUCCESS, STATUS_OBJECT_NAME_COLLISION if an attribute of that type and name is
-* already there, STATUS_DISK_FULL if the record has no room for it, STATUS_NOT_IMPLEMENTED
-* for a record with an $ATTRIBUTE_LIST, whose entries this doesn't maintain.
+* already there, STATUS_DISK_FULL if the record has no room for it.
+*
+* @remarks
+* Only this record changes. For a file with an $ATTRIBUTE_LIST, NtfsAddAttributeToFile()
+* keeps the list in step.
 */
 NTSTATUS
 AddResidentAttribute(PNTFS_VCB Vcb,
@@ -272,69 +392,18 @@ AddResidentAttribute(PNTFS_VCB Vcb,
                      const VOID *Data,
                      ULONG DataLength)
 {
-    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
     PNTFS_ATTR_RECORD Attribute;
-    PNTFS_ATTR_RECORD InsertPoint = NULL;
-    ULONG ValueOffset;
-    ULONG AttributeLength;
-    ULONG InsertOffset;
+    NTSTATUS Status;
 
-    ASSERT(NameLength <= NTFS_MAX_NAME_LENGTH);
+    Attribute = NtfsBuildResidentAttribute(Type, Name, NameLength, Data, DataLength);
+    if (Attribute == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
 
-    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
-    while (Attribute->Type != AttributeEnd)
-    {
-        LONG Order;
+    Status = NtfsInsertAttributeRecord(Vcb, FileRecord, Attribute, NULL);
 
-        ASSERT((ULONG_PTR)Attribute + Attribute->Length <= (ULONG_PTR)FileRecord + FileRecord->BytesInUse);
+    ExFreePoolWithTag(Attribute, TAG_NTFS);
 
-        if (Attribute->Type == AttributeAttributeList)
-        {
-            DPRINT1("Adding an attribute to a record with an $ATTRIBUTE_LIST isn't implemented\n");
-            return STATUS_NOT_IMPLEMENTED;
-        }
-
-        Order = NtfsCompareAttributeOrder(Vcb,
-                                          Type, Name, NameLength,
-                                          Attribute->Type,
-                                          (PCWSTR)((ULONG_PTR)Attribute + Attribute->NameOffset),
-                                          Attribute->NameLength);
-        if (Order == 0)
-            return STATUS_OBJECT_NAME_COLLISION;
-
-        if (Order < 0 && InsertPoint == NULL)
-            InsertPoint = Attribute;
-
-        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
-    }
-
-    if (InsertPoint == NULL)
-        InsertPoint = Attribute;
-
-    ValueOffset = ALIGN_UP_BY(ResidentHeaderLength + NameLength * sizeof(WCHAR), ATTR_RECORD_ALIGNMENT);
-    AttributeLength = ALIGN_UP_BY(ValueOffset + DataLength, ATTR_RECORD_ALIGNMENT);
-
-    if (Vcb->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < AttributeLength)
-        return STATUS_DISK_FULL;
-
-    // Make room: everything from the insertion point on, end markers included, moves back
-    InsertOffset = (ULONG)((ULONG_PTR)InsertPoint - (ULONG_PTR)FileRecord);
-    RtlMoveMemory((PUCHAR)InsertPoint + AttributeLength, InsertPoint, FileRecord->BytesInUse - InsertOffset);
-    FileRecord->BytesInUse += AttributeLength;
-
-    RtlZeroMemory(InsertPoint, AttributeLength);
-    InsertPoint->Type = Type;
-    InsertPoint->Length = AttributeLength;
-    InsertPoint->NameLength = (UCHAR)NameLength;
-    InsertPoint->NameOffset = (USHORT)ResidentHeaderLength;
-    InsertPoint->Instance = FileRecord->NextAttributeNumber++;
-    InsertPoint->Resident.ValueLength = DataLength;
-    InsertPoint->Resident.ValueOffset = (USHORT)ValueOffset;
-    RtlCopyMemory((PUCHAR)InsertPoint + ResidentHeaderLength, Name, NameLength * sizeof(WCHAR));
-    if (DataLength != 0)
-        RtlCopyMemory((PUCHAR)InsertPoint + ValueOffset, Data, DataLength);
-
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 /**
@@ -358,6 +427,846 @@ NtfsRemoveAttribute(PFILE_RECORD_HEADER FileRecord,
                   (PUCHAR)Attribute + Length,
                   FileRecord->BytesInUse - AttrOffset - Length);
     FileRecord->BytesInUse -= Length;
+}
+
+/*
+ * $ATTRIBUTE_LIST
+ *
+ * A file whose attributes don't fit its base record keeps some of them in extension
+ * records, file records whose BaseFileRecord points back at the base. The base then holds an
+ * $ATTRIBUTE_LIST: one entry per attribute of the file, wherever it lives, sorted by type,
+ * name and starting VCN. Lookups follow it (FindAttribute); this keeps it up to date.
+ *
+ * The list is rebuilt from the records whenever an attribute enters or leaves an extension
+ * record, rather than edited in place, so it can't drift from what the records hold.
+ */
+
+/* An entry's fixed part; the name follows it */
+#define NTFS_LIST_ENTRY_NAME_OFFSET     0x1A
+
+static
+ULONG
+NtfsListEntryLength(UCHAR NameLength)
+{
+    return ALIGN_UP_BY(NTFS_LIST_ENTRY_NAME_OFFSET + NameLength * sizeof(WCHAR), ATTR_RECORD_ALIGNMENT);
+}
+
+/* The file reference of a record: its index and sequence number */
+static
+ULONGLONG
+NtfsRecordReference(PFILE_RECORD_HEADER Record)
+{
+    return Record->MFTRecordNumber | ((ULONGLONG)Record->SequenceNumber << 48);
+}
+
+/**
+* @name NtfsFindAttributeListRecord
+*
+* Finds the $ATTRIBUTE_LIST of a base record. FindAttribute() can't: the attribute walk it
+* uses steps over the list, reading it in.
+*
+* @return
+* The offset of the attribute in Record, or 0 when the record has none.
+*/
+static
+ULONG
+NtfsFindAttributeListRecord(PFILE_RECORD_HEADER Record)
+{
+    PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Record + Record->AttributeOffset);
+
+    while (Attribute->Type != AttributeEnd && Attribute->Type <= AttributeAttributeList)
+    {
+        if (Attribute->Type == AttributeAttributeList)
+            return (ULONG)((ULONG_PTR)Attribute - (ULONG_PTR)Record);
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+    }
+
+    return 0;
+}
+
+/**
+* @name NtfsRecordHasAttributeList
+*
+* Whether a base record carries an $ATTRIBUTE_LIST.
+*/
+BOOLEAN
+NtfsRecordHasAttributeList(PFILE_RECORD_HEADER Record)
+{
+    return NtfsFindAttributeListRecord(Record) != 0;
+}
+
+/**
+* @name NtfsGetAttributeListContext
+*
+* Makes an attribute context for the $ATTRIBUTE_LIST of a base record.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND if the record has no list, or
+* STATUS_INSUFFICIENT_RESOURCES.
+*/
+static
+NTSTATUS
+NtfsGetAttributeListContext(PFILE_RECORD_HEADER BaseRecord,
+                            PNTFS_ATTR_CONTEXT *ListContext,
+                            PULONG ListOffset)
+{
+    *ListOffset = NtfsFindAttributeListRecord(BaseRecord);
+    if (*ListOffset == 0)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    *ListContext = PrepareAttributeContext((PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + *ListOffset));
+    if (*ListContext == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    (*ListContext)->FileMFTIndex = BaseRecord->MFTRecordNumber;
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsReadAttributeList
+*
+* Reads the value of a base record's $ATTRIBUTE_LIST into a pool buffer the caller frees.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_NOT_FOUND if the record has no list, or an error.
+*/
+NTSTATUS
+NtfsReadAttributeList(PNTFS_VCB Vcb,
+                      PFILE_RECORD_HEADER BaseRecord,
+                      PNTFS_ATTRIBUTE_LIST_ITEM *List,
+                      PULONG Length)
+{
+    PNTFS_ATTR_CONTEXT ListContext;
+    ULONGLONG ListLength;
+    ULONG ListOffset;
+    NTSTATUS Status;
+
+    *List = NULL;
+    *Length = 0;
+
+    Status = NtfsGetAttributeListContext(BaseRecord, &ListContext, &ListOffset);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    ListLength = AttributeDataLength(ListContext->pRecord);
+    if (ListLength > MAXULONG)
+    {
+        ReleaseAttributeContext(ListContext);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+
+    /* An empty list still gets a buffer, so the caller can always free it */
+    *List = ExAllocatePoolWithTag(NonPagedPool, max((ULONG)ListLength, sizeof(ULONG)), TAG_NTFS);
+    if (*List == NULL)
+    {
+        ReleaseAttributeContext(ListContext);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (ReadAttribute(Vcb, ListContext, 0, (PCHAR)*List, (ULONG)ListLength) != ListLength)
+    {
+        ExFreePoolWithTag(*List, TAG_NTFS);
+        *List = NULL;
+        ReleaseAttributeContext(ListContext);
+        return STATUS_FILE_CORRUPT_ERROR;
+    }
+
+    ReleaseAttributeContext(ListContext);
+    *Length = (ULONG)ListLength;
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsGetExtensionRecords
+*
+* Collects, without duplicates, the MFT indices of the extension records a list names.
+*
+* @param Indices
+* Receives a pool array (TAG_NTFS) of at least one element, which the caller frees.
+*/
+NTSTATUS
+NtfsGetExtensionRecords(PNTFS_ATTRIBUTE_LIST_ITEM List,
+                        ULONG Length,
+                        ULONGLONG BaseIndex,
+                        PULONGLONG *Indices,
+                        PULONG Count)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM Item;
+    ULONG Offset, i;
+
+    *Count = 0;
+
+    /* Every entry is at least NTFS_LIST_ENTRY_NAME_OFFSET long, so this bounds the count */
+    *Indices = ExAllocatePoolWithTag(NonPagedPool,
+                                     (Length / NTFS_LIST_ENTRY_NAME_OFFSET + 1) * sizeof(ULONGLONG),
+                                     TAG_NTFS);
+    if (*Indices == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (Offset = 0; Offset + NTFS_LIST_ENTRY_NAME_OFFSET <= Length; Offset += Item->Length)
+    {
+        ULONGLONG Index;
+
+        Item = (PNTFS_ATTRIBUTE_LIST_ITEM)((ULONG_PTR)List + Offset);
+        if (Item->Length < NTFS_LIST_ENTRY_NAME_OFFSET || Offset + Item->Length > Length)
+            return STATUS_FILE_CORRUPT_ERROR;
+
+        Index = Item->MFTIndex & NTFS_MFT_MASK;
+        if (Index == BaseIndex)
+            continue;
+
+        for (i = 0; i < *Count && (*Indices)[i] != Index; i++)
+            ;
+        if (i == *Count)
+            (*Indices)[(*Count)++] = Index;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsAppendListEntries
+*
+* Describes every attribute of Record in list entries at Buffer + *Used, but the
+* $ATTRIBUTE_LIST itself. With Buffer NULL, only counts the bytes they take.
+*/
+static
+VOID
+NtfsAppendListEntries(PFILE_RECORD_HEADER Record,
+                      PUCHAR Buffer,
+                      PULONG Used)
+{
+    PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Record + Record->AttributeOffset);
+    ULONGLONG Reference = NtfsRecordReference(Record);
+
+    while (Attribute->Type != AttributeEnd)
+    {
+        if (Attribute->Type != AttributeAttributeList)
+        {
+            ULONG EntryLength = NtfsListEntryLength(Attribute->NameLength);
+
+            if (Buffer != NULL)
+            {
+                PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)(Buffer + *Used);
+
+                RtlZeroMemory(Item, EntryLength);
+                Item->Type = Attribute->Type;
+                Item->Length = (USHORT)EntryLength;
+                Item->NameLength = Attribute->NameLength;
+                Item->NameOffset = NTFS_LIST_ENTRY_NAME_OFFSET;
+                Item->StartingVCN = Attribute->IsNonResident ? Attribute->NonResident.LowestVCN : 0;
+                Item->MFTIndex = Reference;
+                Item->Instance = Attribute->Instance;
+                RtlCopyMemory((PUCHAR)Item + NTFS_LIST_ENTRY_NAME_OFFSET,
+                              (PUCHAR)Attribute + Attribute->NameOffset,
+                              Attribute->NameLength * sizeof(WCHAR));
+            }
+
+            *Used += EntryLength;
+        }
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+    }
+}
+
+/* Orders list entries by type, name and starting VCN */
+static
+LONG
+NtfsCompareListEntries(PNTFS_VCB Vcb,
+                       PNTFS_ATTRIBUTE_LIST_ITEM Item1,
+                       PNTFS_ATTRIBUTE_LIST_ITEM Item2)
+{
+    LONG Order = NtfsCompareAttributeOrder(Vcb,
+                                           Item1->Type,
+                                           (PCWSTR)((ULONG_PTR)Item1 + Item1->NameOffset),
+                                           Item1->NameLength,
+                                           Item2->Type,
+                                           (PCWSTR)((ULONG_PTR)Item2 + Item2->NameOffset),
+                                           Item2->NameLength);
+    if (Order != 0)
+        return Order;
+
+    if (Item1->StartingVCN != Item2->StartingVCN)
+        return (Item1->StartingVCN < Item2->StartingVCN) ? -1 : 1;
+
+    return 0;
+}
+
+/**
+* @name NtfsSortListEntries
+*
+* Sorts the entries of a list value in place. Lists are short; an insertion sort through a
+* scratch copy does.
+*/
+static
+NTSTATUS
+NtfsSortListEntries(PNTFS_VCB Vcb,
+                    PUCHAR List,
+                    ULONG Length)
+{
+    PUCHAR Sorted;
+    ULONG Offset, SortedLength = 0;
+
+    Sorted = ExAllocatePoolWithTag(NonPagedPool, Length, TAG_NTFS);
+    if (Sorted == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    for (Offset = 0; Offset < Length; )
+    {
+        PNTFS_ATTRIBUTE_LIST_ITEM Item = (PNTFS_ATTRIBUTE_LIST_ITEM)(List + Offset);
+        ULONG Position = 0;
+
+        // Find where it goes among the ones already sorted
+        while (Position < SortedLength &&
+               NtfsCompareListEntries(Vcb, (PNTFS_ATTRIBUTE_LIST_ITEM)(Sorted + Position), Item) <= 0)
+        {
+            Position += ((PNTFS_ATTRIBUTE_LIST_ITEM)(Sorted + Position))->Length;
+        }
+
+        RtlMoveMemory(Sorted + Position + Item->Length, Sorted + Position, SortedLength - Position);
+        RtlCopyMemory(Sorted + Position, Item, Item->Length);
+        SortedLength += Item->Length;
+        Offset += Item->Length;
+    }
+
+    RtlCopyMemory(List, Sorted, Length);
+    ExFreePoolWithTag(Sorted, TAG_NTFS);
+
+    return STATUS_SUCCESS;
+}
+
+/**
+* @name NtfsWriteAttributeList
+*
+* Makes List the value of the base record's $ATTRIBUTE_LIST, adding the attribute if the
+* record has none. A list that outgrows the record moves to clusters.
+*
+* @remarks
+* BaseRecord is written back when the list is resident or changes residency; otherwise the
+* caller writes it.
+*/
+static
+NTSTATUS
+NtfsWriteAttributeList(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseRecord,
+                       PUCHAR List,
+                       ULONG Length)
+{
+    PNTFS_ATTR_CONTEXT ListContext;
+    ULONG ListOffset;
+    LARGE_INTEGER NewLength;
+    ULONG Written;
+    NTSTATUS Status;
+
+    /* A new list starts empty and is grown like an existing one, which moves it to
+     * clusters when the record can't hold it */
+    Status = NtfsGetAttributeListContext(BaseRecord, &ListContext, &ListOffset);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        Status = AddResidentAttribute(Vcb, BaseRecord, AttributeAttributeList, NULL, 0, NULL, 0);
+        if (NT_SUCCESS(Status))
+            Status = NtfsGetAttributeListContext(BaseRecord, &ListContext, &ListOffset);
+    }
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    NewLength.QuadPart = Length;
+    if (ListContext->pRecord->IsNonResident)
+        Status = SetNonResidentAttributeDataLength(Vcb, ListContext, ListOffset, BaseRecord, &NewLength);
+    else
+        Status = SetResidentAttributeDataLength(Vcb, ListContext, ListOffset, BaseRecord, &NewLength);
+
+    if (NT_SUCCESS(Status) && Length != 0)
+    {
+        PNTFS_ATTR_RECORD ListAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + ListOffset);
+
+        /* WriteAttribute() looks a resident attribute up by type, which can't find the list */
+        if (!ListAttribute->IsNonResident)
+            RtlCopyMemory((PUCHAR)ListAttribute + ListAttribute->Resident.ValueOffset, List, Length);
+        else
+            Status = WriteAttribute(Vcb, ListContext, 0, List, Length, &Written, BaseRecord);
+    }
+
+    ReleaseAttributeContext(ListContext);
+
+    return Status;
+}
+
+/**
+* @name NtfsRebuildAttributeList
+* @implemented
+*
+* Rewrites a file's $ATTRIBUTE_LIST from the attributes its records hold.
+*
+* @param Vcb
+* Pointer to the NTFS_VCB of the volume.
+*
+* @param BaseRecord
+* The file's base record, in memory. The caller writes it back afterwards.
+*
+* @param NewIndices
+* Extension records the current list doesn't name yet, or NULL.
+*
+* @param NewCount
+* Number of entries in NewIndices.
+*
+* @return
+* STATUS_SUCCESS, or an allocation or I/O error.
+*
+* @remarks
+* An extension record left without attributes goes back to the MFT and out of the list.
+*/
+NTSTATUS
+NtfsRebuildAttributeList(PNTFS_VCB Vcb,
+                         PFILE_RECORD_HEADER BaseRecord,
+                         PULONGLONG NewIndices,
+                         ULONG NewCount)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM OldList = NULL;
+    ULONG OldLength = 0;
+    PULONGLONG Indices = NULL;
+    PFILE_RECORD_HEADER *Records = NULL;
+    ULONG Count = 0, i, j;
+    PUCHAR List = NULL;
+    ULONG ListLength = 0;
+    NTSTATUS Status;
+
+    // The extension records the list names now, and the new ones
+    Status = NtfsReadAttributeList(Vcb, BaseRecord, &OldList, &OldLength);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        Status = STATUS_SUCCESS;
+
+    if (NT_SUCCESS(Status))
+    {
+        Indices = ExAllocatePoolWithTag(NonPagedPool,
+                                        (OldLength / NTFS_LIST_ENTRY_NAME_OFFSET + NewCount + 1) * sizeof(ULONGLONG),
+                                        TAG_NTFS);
+        if (Indices == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (NT_SUCCESS(Status) && OldList != NULL)
+    {
+        PULONGLONG Named;
+        ULONG NamedCount;
+
+        Status = NtfsGetExtensionRecords(OldList, OldLength, BaseRecord->MFTRecordNumber, &Named, &NamedCount);
+        if (NT_SUCCESS(Status))
+        {
+            RtlCopyMemory(Indices, Named, NamedCount * sizeof(ULONGLONG));
+            Count = NamedCount;
+        }
+        if (Named != NULL)
+            ExFreePoolWithTag(Named, TAG_NTFS);
+    }
+
+    for (i = 0; NT_SUCCESS(Status) && i < NewCount; i++)
+    {
+        for (j = 0; j < Count && Indices[j] != NewIndices[i]; j++)
+            ;
+        if (j == Count)
+            Indices[Count++] = NewIndices[i];
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Records = ExAllocatePoolWithTag(NonPagedPool, (Count + 1) * sizeof(PFILE_RECORD_HEADER), TAG_NTFS);
+        if (Records == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        else
+            RtlZeroMemory(Records, (Count + 1) * sizeof(PFILE_RECORD_HEADER));
+    }
+
+    // Read them, giving back the ones that are empty now
+    for (i = 0, j = 0; NT_SUCCESS(Status) && i < Count; i++)
+    {
+        PFILE_RECORD_HEADER Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+
+        if (Record == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        Status = ReadFileRecord(Vcb, Indices[i], Record);
+        if (NT_SUCCESS(Status) &&
+            ((PNTFS_ATTR_RECORD)((ULONG_PTR)Record + Record->AttributeOffset))->Type == AttributeEnd)
+        {
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+            Status = FreeMftEntry(Vcb, Indices[i]);
+            continue;
+        }
+
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+            break;
+        }
+
+        Records[j++] = Record;
+    }
+    Count = j;
+
+    // Describe every attribute of every record, in order
+    if (NT_SUCCESS(Status))
+    {
+        NtfsAppendListEntries(BaseRecord, NULL, &ListLength);
+        for (i = 0; i < Count; i++)
+            NtfsAppendListEntries(Records[i], NULL, &ListLength);
+
+        List = ExAllocatePoolWithTag(NonPagedPool, max(ListLength, sizeof(ULONG)), TAG_NTFS);
+        if (List == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        ListLength = 0;
+        NtfsAppendListEntries(BaseRecord, List, &ListLength);
+        for (i = 0; i < Count; i++)
+            NtfsAppendListEntries(Records[i], List, &ListLength);
+
+        Status = NtfsSortListEntries(Vcb, List, ListLength);
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsWriteAttributeList(Vcb, BaseRecord, List, ListLength);
+
+    if (List != NULL)
+        ExFreePoolWithTag(List, TAG_NTFS);
+    if (Records != NULL)
+    {
+        for (i = 0; Records[i] != NULL; i++)
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Records[i]);
+        ExFreePoolWithTag(Records, TAG_NTFS);
+    }
+    if (Indices != NULL)
+        ExFreePoolWithTag(Indices, TAG_NTFS);
+    if (OldList != NULL)
+        ExFreePoolWithTag(OldList, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsCreateExtensionRecord
+*
+* Makes a new, empty extension record of the file BaseRecord is the base record of, and
+* writes it to the MFT.
+*
+* @param Record
+* Receives the record, from the file record lookaside list.
+*
+* @param Index
+* Receives its MFT index.
+*/
+static
+NTSTATUS
+NtfsCreateExtensionRecord(PNTFS_VCB Vcb,
+                          PFILE_RECORD_HEADER BaseRecord,
+                          PFILE_RECORD_HEADER *Record,
+                          PULONGLONG Index)
+{
+    NTSTATUS Status;
+
+    *Record = NtfsCreateEmptyFileRecord(Vcb);
+    if (*Record == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    (*Record)->BaseFileRecord = NtfsRecordReference(BaseRecord);
+
+    Status = AddNewMftEntry(*Record, Vcb, Index, TRUE);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, *Record);
+        *Record = NULL;
+    }
+
+    return Status;
+}
+
+/* Attributes that stay in the base record: the ones every file has and finds there */
+static
+BOOLEAN
+NtfsAttributeCanLeaveBaseRecord(ULONG Type)
+{
+    return (Type != AttributeStandardInformation &&
+            Type != AttributeAttributeList &&
+            Type != AttributeFileName);
+}
+
+/**
+* @name NtfsCreateAttributeList
+*
+* Gives a full base record an $ATTRIBUTE_LIST: moves its largest attributes out into
+* extension records until the list fits, then adds the list.
+*/
+static
+NTSTATUS
+NtfsCreateAttributeList(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER BaseRecord)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    PFILE_RECORD_HEADER Extension = NULL;
+    ULONGLONG Indices[8];
+    ULONG Count = 0;
+    ULONG Needed = 0;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    // The list describes every attribute, the moved ones too, so its size is known now
+    NtfsAppendListEntries(BaseRecord, NULL, &Needed);
+    Needed = ALIGN_UP_BY(ResidentHeaderLength + Needed, ATTR_RECORD_ALIGNMENT);
+
+    while (Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse < Needed)
+    {
+        PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BaseRecord->AttributeOffset);
+        ULONG Offset = BaseRecord->AttributeOffset;
+        ULONG BestOffset = 0, BestLength = 0;
+
+        while (Attribute->Type != AttributeEnd)
+        {
+            if (NtfsAttributeCanLeaveBaseRecord(Attribute->Type) && Attribute->Length > BestLength)
+            {
+                BestLength = Attribute->Length;
+                BestOffset = Offset;
+            }
+
+            Offset += Attribute->Length;
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+        }
+
+        /* With nothing left to move the list can still go to clusters, if the record
+         * holds its header */
+        if (BestLength == 0)
+        {
+            if (Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse < ResidentHeaderLength)
+                Status = STATUS_DISK_FULL;
+            break;
+        }
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BestOffset);
+
+        // A full extension record is done with; the next attribute starts another
+        if (Extension != NULL &&
+            Vcb->NtfsInfo.BytesPerFileRecord - Extension->BytesInUse < Attribute->Length)
+        {
+            Status = UpdateFileRecord(Vcb, Indices[Count - 1], Extension);
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
+            Extension = NULL;
+            if (!NT_SUCCESS(Status))
+                break;
+        }
+
+        if (Extension == NULL)
+        {
+            if (Count == RTL_NUMBER_OF(Indices))
+            {
+                Status = STATUS_DISK_FULL;
+                break;
+            }
+
+            Status = NtfsCreateExtensionRecord(Vcb, BaseRecord, &Extension, &Indices[Count]);
+            if (!NT_SUCCESS(Status))
+                break;
+            Count++;
+        }
+
+        Status = NtfsInsertAttributeRecord(Vcb, Extension, Attribute, NULL);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        NtfsRemoveAttribute(BaseRecord, BestOffset);
+    }
+
+    if (Extension != NULL)
+    {
+        NTSTATUS WriteStatus = UpdateFileRecord(Vcb, Indices[Count - 1], Extension);
+
+        if (NT_SUCCESS(Status))
+            Status = WriteStatus;
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsRebuildAttributeList(Vcb, BaseRecord, Indices, Count);
+
+    return Status;
+}
+
+/**
+* @name NtfsAddAttributeToFile
+* @implemented
+*
+* Adds an attribute to a file. It goes into the base record while that has room; after
+* that, into an extension record through the file's $ATTRIBUTE_LIST, which this creates
+* if the file has none.
+*
+* @param Vcb
+* Pointer to the NTFS_VCB of the volume.
+*
+* @param BaseRecord
+* The file's base record, in memory. The caller writes it back afterwards.
+*
+* @param Attribute
+* The attribute to add, a complete attribute record.
+*
+* @return
+* STATUS_SUCCESS, STATUS_OBJECT_NAME_COLLISION if the base record already has it,
+* STATUS_DISK_FULL if no record can take it, or an allocation or I/O error.
+*/
+NTSTATUS
+NtfsAddAttributeToFile(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseRecord,
+                       PNTFS_ATTR_RECORD Attribute)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM List;
+    PULONGLONG Indices = NULL;
+    PFILE_RECORD_HEADER Extension;
+    ULONG ListLength, Count = 0, i;
+    ULONGLONG ExtensionIndex = 0;
+    ULONG Needed;
+    NTSTATUS Status;
+
+    if (!NtfsRecordHasAttributeList(BaseRecord))
+    {
+        Status = NtfsInsertAttributeRecord(Vcb, BaseRecord, Attribute, NULL);
+        if (Status != STATUS_DISK_FULL)
+            return Status;
+
+        Status = NtfsCreateAttributeList(Vcb, BaseRecord);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    /* Find an extension record with room for it, or make one. The room has to hold the
+     * attribute once it's non-resident too: a resident value that outgrows the record
+     * moves its value to clusters, and must not be stuck because the header can't. */
+    Needed = max(Attribute->Length,
+                 ALIGN_UP_BY(0x48 + Attribute->NameLength * sizeof(WCHAR), ATTR_RECORD_ALIGNMENT));
+
+    Status = NtfsReadAttributeList(Vcb, BaseRecord, &List, &ListLength);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtfsGetExtensionRecords(List, ListLength, BaseRecord->MFTRecordNumber, &Indices, &Count);
+    ExFreePoolWithTag(List, TAG_NTFS);
+
+    Extension = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Extension == NULL)
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+
+    for (i = 0; NT_SUCCESS(Status) && i < Count; i++)
+    {
+        Status = ReadFileRecord(Vcb, Indices[i], Extension);
+        if (NT_SUCCESS(Status) &&
+            Vcb->NtfsInfo.BytesPerFileRecord - Extension->BytesInUse >= Needed)
+        {
+            ExtensionIndex = Indices[i];
+            break;
+        }
+    }
+
+    if (NT_SUCCESS(Status) && ExtensionIndex == 0)
+    {
+        if (Extension != NULL)
+            ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
+        Status = NtfsCreateExtensionRecord(Vcb, BaseRecord, &Extension, &ExtensionIndex);
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsInsertAttributeRecord(Vcb, Extension, Attribute, NULL);
+
+    if (NT_SUCCESS(Status))
+        Status = UpdateFileRecord(Vcb, ExtensionIndex, Extension);
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsRebuildAttributeList(Vcb, BaseRecord, &ExtensionIndex, 1);
+
+    if (Extension != NULL)
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
+    if (Indices != NULL)
+        ExFreePoolWithTag(Indices, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsAddResidentAttributeToFile
+* @implemented
+*
+* NtfsAddAttributeToFile() for an attribute described by its parts, resident.
+*/
+NTSTATUS
+NtfsAddResidentAttributeToFile(PNTFS_VCB Vcb,
+                               PFILE_RECORD_HEADER BaseRecord,
+                               ULONG Type,
+                               PCWSTR Name,
+                               USHORT NameLength,
+                               const VOID *Data,
+                               ULONG DataLength)
+{
+    PNTFS_ATTR_RECORD Attribute;
+    NTSTATUS Status;
+
+    Attribute = NtfsBuildResidentAttribute(Type, Name, NameLength, Data, DataLength);
+    if (Attribute == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = NtfsAddAttributeToFile(Vcb, BaseRecord, Attribute);
+
+    ExFreePoolWithTag(Attribute, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsReadAttributeHolder
+*
+* A lookup through the $ATTRIBUTE_LIST finds an attribute in an extension record: its
+* context and offset describe that record, not the base record that was searched. Anything
+* that changes the attribute has to change that record. This returns it: BaseRecord itself
+* when the attribute is there, otherwise the extension record, read into a buffer the
+* caller gives back with NtfsReleaseAttributeHolder().
+*/
+NTSTATUS
+NtfsReadAttributeHolder(PNTFS_VCB Vcb,
+                        PNTFS_ATTR_CONTEXT AttrContext,
+                        PFILE_RECORD_HEADER BaseRecord,
+                        PFILE_RECORD_HEADER *Holder)
+{
+    NTSTATUS Status;
+
+    if ((AttrContext->FileMFTIndex & NTFS_MFT_MASK) == BaseRecord->MFTRecordNumber)
+    {
+        *Holder = BaseRecord;
+        return STATUS_SUCCESS;
+    }
+
+    *Holder = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (*Holder == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(Vcb, AttrContext->FileMFTIndex & NTFS_MFT_MASK, *Holder);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, *Holder);
+        *Holder = NULL;
+    }
+
+    return Status;
+}
+
+VOID
+NtfsReleaseAttributeHolder(PNTFS_VCB Vcb,
+                           PFILE_RECORD_HEADER BaseRecord,
+                           PFILE_RECORD_HEADER Holder)
+{
+    if (Holder != NULL && Holder != BaseRecord)
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Holder);
 }
 
 /* A colon starts a stream name (MS-FSA 2.1.5.1), so no file or directory
@@ -1438,6 +2347,13 @@ InternalReadNonResidentAttributes(PFIND_ATTR_CONTXT Context)
     {
         ReleaseAttributeContext(ListContext);
         return STATUS_BUFFER_OVERFLOW;
+    }
+
+    /* A list being built starts empty: no entries to walk */
+    if (ListSize < sizeof(NTFS_ATTRIBUTE_LIST_ITEM))
+    {
+        ReleaseAttributeContext(ListContext);
+        return STATUS_SUCCESS;
     }
 
     Context->NonResidentStart = ExAllocatePoolWithTag(NonPagedPool, (ULONG)ListSize, TAG_NTFS);
