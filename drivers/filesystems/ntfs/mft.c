@@ -1414,6 +1414,9 @@ NtfsAttributeCanBeNonResident(ULONG Type)
 * @param BytesNeeded
 * Number of free bytes the record needs to end up with.
 *
+* @param KeepInstance
+* Instance of an attribute to leave resident, MAXULONG for none.
+*
 * @return
 * STATUS_SUCCESS once the record has the room, STATUS_DISK_FULL if no resident value is
 * left to move out, or the status of a conversion that failed.
@@ -1421,7 +1424,8 @@ NtfsAttributeCanBeNonResident(ULONG Type)
 NTSTATUS
 NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
                          PFILE_RECORD_HEADER FileRecord,
-                         ULONG BytesNeeded)
+                         ULONG BytesNeeded,
+                         ULONG KeepInstance)
 {
     while (DeviceExt->NtfsInfo.BytesPerFileRecord - FileRecord->BytesInUse < BytesNeeded)
     {
@@ -1439,6 +1443,7 @@ NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
             /* Compressed, encrypted and sparse values would need their own conversion */
             if (!Attribute->IsNonResident &&
                 Attribute->Flags == 0 &&
+                Attribute->Instance != KeepInstance &&
                 NtfsAttributeCanBeNonResident(Attribute->Type))
             {
                 ULONG NonResidentLength = ALIGN_UP_BY(0x41 + Attribute->NameLength * sizeof(WCHAR),
@@ -1477,6 +1482,63 @@ NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
+* @name NtfsMakeRoomToConvert
+*
+* Makes sure a record has room for a resident attribute to become non-resident, whose header
+* is bigger than an empty value's: other values move out to clusters of their own first.
+*
+* @param AttrOffset
+* Offset of the attribute in FileRecord. Updated, along with AttrContext's copy of the
+* attribute, when other attributes move.
+*/
+static
+NTSTATUS
+NtfsMakeRoomToConvert(PDEVICE_EXTENSION Vcb,
+                      PNTFS_ATTR_CONTEXT AttrContext,
+                      PULONG AttrOffset,
+                      PFILE_RECORD_HEADER FileRecord)
+{
+    PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + *AttrOffset);
+    ULONG NewRecordLength = ALIGN_UP_BY(0x41 + Attribute->NameLength * sizeof(WCHAR), ATTR_RECORD_ALIGNMENT);
+    USHORT Instance = Attribute->Instance;
+    PNTFS_ATTR_RECORD Copy;
+    ULONG Offset;
+    NTSTATUS Status;
+
+    if (NewRecordLength <= Attribute->Length ||
+        FileRecord->BytesInUse + (NewRecordLength - Attribute->Length) <= Vcb->NtfsInfo.BytesPerFileRecord)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    Status = NtfsMakeRoomInFileRecord(Vcb, FileRecord, NewRecordLength - Attribute->Length, Instance);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    // Find the attribute again: what was before it may have shrunk
+    for (Offset = FileRecord->AttributeOffset; ; Offset += Attribute->Length)
+    {
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + Offset);
+        ASSERT(Attribute->Type != AttributeEnd);
+        if (Attribute->Instance == Instance)
+            break;
+    }
+
+    ASSERT(!Attribute->IsNonResident);
+
+    Copy = ExAllocatePoolWithTag(NonPagedPool, Attribute->Length, TAG_NTFS);
+    if (Copy == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    RtlCopyMemory(Copy, Attribute, Attribute->Length);
+    ExFreePoolWithTag(AttrContext->pRecord, TAG_NTFS);
+    AttrContext->pRecord = Copy;
+    *AttrOffset = Offset;
+
+    return STATUS_SUCCESS;
+}
+
+/**
 * @name SetResidentAttributeDataLength
 * @implemented
 *
@@ -1503,7 +1565,12 @@ SetResidentAttributeDataLength(PDEVICE_EXTENSION Vcb,
     if (DataSize->QuadPart > AttrContext->pRecord->Resident.ValueLength &&
         (ULONGLONG)DataSize->QuadPart > MaxValueLength)
     {
-        // The data no longer fits in the file record: push the attribute out of it
+        // The data no longer fits in the file record: push the attribute out of it, after
+        // moving other values out if even its non-resident header doesn't fit
+        Status = NtfsMakeRoomToConvert(Vcb, AttrContext, &AttrOffset, FileRecord);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
         Status = ConvertResidentAttributeToNonResident(Vcb,
                                                        AttrContext,
                                                        AttrOffset,
