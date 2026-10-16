@@ -503,6 +503,10 @@ NtfsOpenFileById(PDEVICE_EXTENSION DeviceExt,
 * @param ParentFcb
 * Receives the FCB of the directory that would hold the file, referenced, when the
 * last component is all that's missing (STATUS_OBJECT_NAME_NOT_FOUND); NULL otherwise.
+*
+* @param ReparseOffset
+* With STATUS_REPARSE, receives the number of characters of FileName up to the end of
+* the reparse point the walk ran into, whose FCB FoundFcb receives.
 */
 static
 NTSTATUS
@@ -511,10 +515,12 @@ NtfsOpenFile(
     _In_ PCWSTR FileName,
     _In_ BOOLEAN CaseSensitive,
     _Out_ PNTFS_FCB *FoundFcb,
-    _Out_ PNTFS_FCB *ParentFcb)
+    _Out_ PNTFS_FCB *ParentFcb,
+    _Out_opt_ PULONG ReparseOffset)
 {
     PNTFS_FCB Parent = NULL;
     PNTFS_FCB Fcb;
+    ULONG Offset = 0;
     NTSTATUS Status;
 
     DPRINT("NtfsOpenFile(%p, %S, %s)\n", DeviceExt, FileName, CaseSensitive ? "TRUE" : "FALSE");
@@ -529,7 +535,7 @@ NtfsOpenFile(
         return STATUS_SUCCESS;
     }
 
-    Status = NtfsGetFCBForFile(DeviceExt, &Parent, &Fcb, FileName, CaseSensitive);
+    Status = NtfsGetFCBForFile(DeviceExt, &Parent, &Fcb, FileName, CaseSensitive, &Offset);
     if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
     {
         *ParentFcb = Parent;
@@ -538,6 +544,19 @@ NtfsOpenFile(
 
     if (Parent != NULL)
         NtfsReleaseFCB(DeviceExt, Parent);
+
+    /* A walk that ran into a reparse point returns it, with where the rest of the path
+     * starts. A caller that can't follow it finds no path. */
+    if (Status == STATUS_REPARSE)
+    {
+        if (ReparseOffset == NULL)
+        {
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+
+        *ReparseOffset = Offset;
+    }
 
     if (NT_SUCCESS(Status))
         *FoundFcb = Fcb;
@@ -688,9 +707,18 @@ NtfsOpenTargetDirectory(
     Fcb = NtfsGrabFCBFromTable(DeviceExt, DirectoryPath);
     if (Fcb == NULL)
     {
-        Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &Fcb, DirectoryPath, CaseSensitive);
+        ULONG ReparseOffset;
+
+        Status = NtfsGetFCBForFile(DeviceExt, &ParentFcb, &Fcb, DirectoryPath, CaseSensitive, &ReparseOffset);
         if (ParentFcb != NULL)
             NtfsReleaseFCB(DeviceExt, ParentFcb);
+
+        /* A rename target behind a reparse point isn't followed */
+        if (Status == STATUS_REPARSE)
+        {
+            NtfsReleaseFCB(DeviceExt, Fcb);
+            Status = STATUS_OBJECT_PATH_NOT_FOUND;
+        }
 
         if (!NT_SUCCESS(Status))
         {
@@ -919,45 +947,55 @@ NtfsFinishOpen(
 }
 
 /**
-* @name NtfsOpenReparsePoint
+* @name NtfsReparseOpen
 *
-* Hands the I/O manager the target of a mount point, the only reparse point
-* that is followed. Consumes the open of FileObject.
+* Answers an open that reached a reparse point it isn't to open itself: STATUS_REPARSE with
+* the tag, and the reparse data for the I/O manager to act on. A mount point it follows by
+* putting its target in front of the part of the name not parsed yet; any other tag goes
+* to whoever handles it, or fails with STATUS_IO_REPARSE_TAG_NOT_HANDLED. Consumes the
+* reference on Fcb.
+*
+* @param UnparsedBytes
+* Bytes at the end of the file object's name past the reparse point.
+*
+* @param UnparsedHasSeparator
+* Whether those bytes start with a path separator.
 */
 static
 NTSTATUS
-NtfsOpenReparsePoint(
+NtfsReparseOpen(
     _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
     _In_ PNTFS_FCB Fcb,
-    _In_ PFILE_OBJECT FileObject,
-    _In_ PIRP Irp)
+    _In_ ULONG UnparsedBytes,
+    _In_ BOOLEAN UnparsedHasSeparator)
 {
-    PREPARSE_DATA_BUFFER ReparseData = NULL;
+    PREPARSE_DATA_BUFFER ReparseData;
     NTSTATUS Status;
 
-    Status = NtfsReadFCBAttribute(DeviceExt, Fcb,
-                                  AttributeReparsePoint, L"", 0,
-                                  (PVOID *)&Irp->Tail.Overlay.AuxiliaryBuffer);
-    if (NT_SUCCESS(Status))
+    Status = NtfsReadFCBAttribute(DeviceExt, Fcb, AttributeReparsePoint, L"", 0, (PVOID *)&ReparseData);
+    NtfsReleaseFCB(DeviceExt, Fcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    /* A target naming a directory with a trailing separator takes the rest without one */
+    if (ReparseData->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT && UnparsedHasSeparator)
     {
-        ReparseData = (PREPARSE_DATA_BUFFER)Irp->Tail.Overlay.AuxiliaryBuffer;
-        if (ReparseData->ReparseTag == IO_REPARSE_TAG_MOUNT_POINT)
-        {
-            Status = STATUS_REPARSE;
-        }
-        else
-        {
-            Status = STATUS_NOT_IMPLEMENTED;
-            ExFreePoolWithTag(ReparseData, TAG_NTFS);
-            Irp->Tail.Overlay.AuxiliaryBuffer = NULL;
-        }
+        PCWSTR Target = (PCWSTR)((ULONG_PTR)ReparseData->MountPointReparseBuffer.PathBuffer +
+                                 ReparseData->MountPointReparseBuffer.SubstituteNameOffset);
+        USHORT TargetLength = ReparseData->MountPointReparseBuffer.SubstituteNameLength / sizeof(WCHAR);
+
+        if (TargetLength != 0 && Target[TargetLength - 1] == L'\\')
+            UnparsedBytes -= sizeof(WCHAR);
     }
 
-    Irp->IoStatus.Information = ((Status == STATUS_REPARSE) ? ReparseData->ReparseTag : 0);
+    ASSERT(UnparsedBytes < MAXUSHORT);
+    ReparseData->Reserved = (USHORT)UnparsedBytes;
 
-    NtfsCloseFile(DeviceExt, FileObject);
+    Irp->Tail.Overlay.AuxiliaryBuffer = (PVOID)ReparseData;
+    Irp->IoStatus.Information = ReparseData->ReparseTag;
 
-    return Status;
+    return STATUS_REPARSE;
 }
 
 /**
@@ -972,7 +1010,8 @@ NtfsOpenExistingFile(
     _In_ PIRP Irp,
     _In_ PIO_STACK_LOCATION Stack,
     _In_ PNTFS_FCB Fcb,
-    _In_ BOOLEAN TrailingBackslash)
+    _In_ BOOLEAN TrailingBackslash,
+    _In_ ULONG UnparsedBytes)
 {
     PFILE_OBJECT FileObject = Stack->FileObject;
     ULONG Disposition = (Stack->Parameters.Create.Options >> 24) & 0xff;
@@ -980,6 +1019,10 @@ NtfsOpenExistingFile(
     ACCESS_MASK DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
     ULONG_PTR Information = FILE_OPENED;
     NTSTATUS Status;
+
+    /* A reparse point is opened itself only with FILE_OPEN_REPARSE_POINT */
+    if (NtfsFCBIsReparsePoint(Fcb) && !BooleanFlagOn(Options, FILE_OPEN_REPARSE_POINT))
+        return NtfsReparseOpen(DeviceExt, Irp, Fcb, UnparsedBytes, TrailingBackslash);
 
     Status = NtfsCheckExistingFile(Fcb, DesiredAccess, Options, Disposition, TrailingBackslash);
     if (NT_SUCCESS(Status))
@@ -993,15 +1036,6 @@ NtfsOpenExistingFile(
         NtfsReleaseFCB(DeviceExt, Fcb);
         return Status;
     }
-
-    /*
-     * If it is a reparse point & FILE_OPEN_REPARSE_POINT, then allow opening it
-     * as a normal file.
-     * Otherwise, attempt to read reparse data and hand them to the Io manager
-     * with status reparse to force a reparse.
-     */
-    if (NtfsFCBIsReparsePoint(Fcb) && !BooleanFlagOn(Options, FILE_OPEN_REPARSE_POINT))
-        return NtfsOpenReparsePoint(DeviceExt, Fcb, FileObject, Irp);
 
     /* A file mapped as a running image can't be written or deleted */
     if (!NtfsFCBIsDirectory(Fcb) &&
@@ -1121,7 +1155,7 @@ NtfsCreateNewFile(
     }
 
     /* The caller holds DirResource exclusively, so the name is still there */
-    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, &Fcb, &UnusedParent);
+    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, &Fcb, &UnusedParent, NULL);
     ASSERT(NT_SUCCESS(Status));
     if (!NT_SUCCESS(Status))
         return Status;
@@ -1198,7 +1232,8 @@ NtfsOpenBaseOfStream(
     _In_ PNTFS_IRP_CONTEXT IrpContext,
     _In_ PCUNICODE_STRING Path,
     _Out_ PNTFS_FCB *BaseFcb,
-    _Out_ PBOOLEAN Created)
+    _Out_ PBOOLEAN Created,
+    _Out_ PULONG ReparseOffset)
 {
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(IrpContext->Irp);
     ULONG Disposition = (Stack->Parameters.Create.Options >> 24) & 0xff;
@@ -1209,7 +1244,7 @@ NtfsOpenBaseOfStream(
 
     *Created = FALSE;
 
-    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb);
+    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb, ReparseOffset);
     if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
         return Status;
 
@@ -1239,7 +1274,7 @@ NtfsOpenBaseOfStream(
 
     *Created = TRUE;
 
-    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb);
+    Status = NtfsOpenFile(DeviceExt, Path->Buffer, CaseSensitive, BaseFcb, &ParentFcb, NULL);
     ASSERT(NT_SUCCESS(Status));
 
     return Status;
@@ -1263,7 +1298,8 @@ NtfsOpenStream(
     _In_ PDEVICE_EXTENSION DeviceExt,
     _In_ PNTFS_IRP_CONTEXT IrpContext,
     _In_ PCUNICODE_STRING Path,
-    _In_ PCUNICODE_STRING StreamName)
+    _In_ PCUNICODE_STRING StreamName,
+    _In_ ULONG NameLength)
 {
     PIRP Irp = IrpContext->Irp;
     PIO_STACK_LOCATION Stack = IoGetCurrentIrpStackLocation(Irp);
@@ -1271,15 +1307,23 @@ NtfsOpenStream(
     ULONG Options = Stack->Parameters.Create.Options & FILE_VALID_OPTION_FLAGS;
     PNTFS_FCB BaseFcb, Fcb;
     BOOLEAN BaseCreated;
+    ULONG ReparseOffset;
     NTSTATUS Status;
 
     /* A stream is never a directory */
     if (BooleanFlagOn(Options, FILE_DIRECTORY_FILE))
         return STATUS_NOT_A_DIRECTORY;
 
-    Status = NtfsOpenBaseOfStream(DeviceExt, IrpContext, Path, &BaseFcb, &BaseCreated);
+    Status = NtfsOpenBaseOfStream(DeviceExt, IrpContext, Path, &BaseFcb, &BaseCreated, &ReparseOffset);
+    if (Status == STATUS_REPARSE)
+        return NtfsReparseOpen(DeviceExt, Irp, BaseFcb, (NameLength - ReparseOffset) * sizeof(WCHAR), TRUE);
+
     if (!NT_SUCCESS(Status))
         return Status;
+
+    /* The stream of a reparse point is past it, like a path through it */
+    if (NtfsFCBIsReparsePoint(BaseFcb) && !BooleanFlagOn(Options, FILE_OPEN_REPARSE_POINT))
+        return NtfsReparseOpen(DeviceExt, Irp, BaseFcb, NameLength * sizeof(WCHAR) - Path->Length, FALSE);
 
     if (BooleanFlagOn(BaseFcb->Flags, FCB_DELETE_PENDING))
     {
@@ -1324,7 +1368,7 @@ NtfsOpenStream(
 
     ASSERT(!BaseCreated);
 
-    return NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, FALSE);
+    return NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, FALSE, 0);
 }
 
 /**
@@ -1456,6 +1500,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     UNICODE_STRING StreamName;
     NTFS_STREAM_KIND StreamKind = NtfsNoStream;
     BOOLEAN TrailingBackslash = FALSE;
+    ULONG NameLength = 0, ReparseOffset = 0;
     ULONG_PTR Information = 0;
     NTSTATUS Status;
 
@@ -1501,7 +1546,7 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             return Status;
 
         if (Fcb != NULL)
-            return NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, FALSE);
+            return NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, FALSE, 0);
 
         DPRINT("Open by ID: %I64x -> %wZ\n", (*(PULONGLONG)FileObject->FileName.Buffer) & NTFS_MFT_MASK, &Path);
     }
@@ -1520,6 +1565,9 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
             return Status;
     }
 
+    /* What follows a reparse point in the name is measured against the whole of it */
+    NameLength = Path.Length / sizeof(WCHAR);
+
     Status = NtfsCheckCreatePath(&Path, Options, &TrailingBackslash);
     if (NT_SUCCESS(Status))
         Status = NtfsSplitStreamName(&Path, &StreamName, &StreamKind);
@@ -1529,18 +1577,23 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         Status = NtfsApplyStreamKind(Stack, StreamKind, TrailingBackslash, &Options);
         if (NT_SUCCESS(Status) && StreamKind == NtfsNamedStream)
         {
-            Status = NtfsOpenStream(DeviceExt, IrpContext, &Path, &StreamName);
+            Status = NtfsOpenStream(DeviceExt, IrpContext, &Path, &StreamName, NameLength);
             ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
             return Status;
         }
     }
 
     if (NT_SUCCESS(Status))
-        Status = NtfsOpenFile(DeviceExt, Path.Buffer, CaseSensitive, &Fcb, &ParentFcb);
+        Status = NtfsOpenFile(DeviceExt, Path.Buffer, CaseSensitive, &Fcb, &ParentFcb, &ReparseOffset);
 
-    if (NT_SUCCESS(Status))
+    if (Status == STATUS_REPARSE)
     {
-        Status = NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, TrailingBackslash);
+        Status = NtfsReparseOpen(DeviceExt, Irp, Fcb, (NameLength - ReparseOffset) * sizeof(WCHAR), TRUE);
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        Status = NtfsOpenExistingFile(DeviceExt, Irp, Stack, Fcb, TrailingBackslash,
+                                      NameLength * sizeof(WCHAR) - Path.Length);
     }
     else if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
     {
