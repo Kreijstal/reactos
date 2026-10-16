@@ -184,6 +184,8 @@ NtfsInitializeFunctionPointers(PDRIVER_OBJECT DriverObject)
     DriverObject->MajorFunction[IRP_MJ_FLUSH_BUFFERS]            = NtfsFsdDispatch;
     DriverObject->MajorFunction[IRP_MJ_QUERY_SECURITY]           = NtfsFsdDispatch;
     DriverObject->MajorFunction[IRP_MJ_QUERY_EA]                 = NtfsFsdDispatch;
+    DriverObject->MajorFunction[IRP_MJ_QUERY_QUOTA]              = NtfsFsdDispatch;
+    DriverObject->MajorFunction[IRP_MJ_SET_QUOTA]                = NtfsFsdDispatch;
     DriverObject->MajorFunction[IRP_MJ_SET_EA]                   = NtfsFsdDispatch;
     DriverObject->MajorFunction[IRP_MJ_SET_SECURITY]             = NtfsFsdDispatch;
 
