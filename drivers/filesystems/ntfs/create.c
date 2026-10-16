@@ -750,6 +750,17 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
                 return STATUS_ACCESS_DENIED;
             }
 
+            /* Creating a stream means adding a named $DATA attribute to a
+             * record, which isn't implemented: the volume doesn't report
+             * FILE_NAMED_STREAMS. Answer the way a volume without named streams
+             * does, rather than making "file:stream" the name of a new file
+             * that no open could ever reach again. */
+            if (NtfsNameHasStreamPart(&FileObject->FileName))
+            {
+                DPRINT1("Creating stream '%wZ' is not supported\n", &FileObject->FileName);
+                return STATUS_OBJECT_NAME_INVALID;
+            }
+
             // Was the user trying to create a directory?
             if (RequestedOptions & FILE_DIRECTORY_FILE)
             {
