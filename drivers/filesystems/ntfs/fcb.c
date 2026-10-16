@@ -501,6 +501,7 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
     Fcb->RFCB.ValidDataLength.QuadPart = FileName->DataSize;
     Fcb->RFCB.AllocationSize.QuadPart = FileName->AllocatedSize;
     Fcb->MFTIndex = NTFS_FILE_ROOT;
+    Fcb->ParentMFTIndex = NTFS_FILE_ROOT;
     Fcb->SequenceNumber = MftRecord->SequenceNumber;
     Fcb->LinkCount = MftRecord->LinkCount;
 
@@ -595,6 +596,7 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     NtfsFCBInitializeCache(Vcb, rcFCB);
     rcFCB->RefCount = 1;
     rcFCB->MFTIndex = MFTIndex;
+    rcFCB->ParentMFTIndex = DirectoryFCB ? DirectoryFCB->MFTIndex : (FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
     rcFCB->SequenceNumber = Record->SequenceNumber;
     rcFCB->LinkCount = Record->LinkCount;
     NtfsAddFCBToTable(Vcb, rcFCB);
@@ -603,6 +605,34 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     return STATUS_SUCCESS;
 }
 
+
+/**
+* @name NtfsSetLinkCount
+*
+* Gives every cached FCB of a file - one per name it was opened by, and its streams - the
+* link count its record has now.
+*/
+VOID
+NtfsSetLinkCount(
+    _In_ PNTFS_VCB Vcb,
+    _In_ ULONGLONG MftIndex,
+    _In_ USHORT LinkCount)
+{
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+
+    for (Entry = Vcb->FcbListHead.Flink; Entry != &Vcb->FcbListHead; Entry = Entry->Flink)
+    {
+        PNTFS_FCB Fcb = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
+
+        if (Fcb->MFTIndex == MftIndex)
+            Fcb->LinkCount = LinkCount;
+    }
+
+    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+}
 
 /**
 * @name NtfsMakeStreamFCB
@@ -703,6 +733,7 @@ NtfsMakeStreamFCB(
 
     Fcb->RefCount = 1;
     Fcb->MFTIndex = BaseFcb->MFTIndex;
+    Fcb->ParentMFTIndex = BaseFcb->ParentMFTIndex;
     Fcb->SequenceNumber = BaseFcb->SequenceNumber;
     Fcb->LinkCount = BaseFcb->LinkCount;
 

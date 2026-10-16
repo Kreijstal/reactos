@@ -349,6 +349,24 @@ NtfsBuildResidentAttribute(ULONG Type,
 }
 
 /**
+* @name NtfsBuildFileNameAttribute
+*
+* Builds the resident, indexed $FILE_NAME attribute holding Value, in a pool buffer the
+* caller frees.
+*/
+PNTFS_ATTR_RECORD
+NtfsBuildFileNameAttribute(PFILENAME_ATTRIBUTE Value,
+                           ULONG ValueLength)
+{
+    PNTFS_ATTR_RECORD Attribute = NtfsBuildResidentAttribute(AttributeFileName, NULL, 0, Value, ValueLength);
+
+    if (Attribute != NULL)
+        Attribute->Resident.Flags = RA_INDEXED;
+
+    return Attribute;
+}
+
+/**
 * @name AddResidentAttribute
 * @implemented
 *
@@ -443,6 +461,9 @@ NtfsRemoveAttribute(PFILE_RECORD_HEADER FileRecord,
 
 /* An entry's fixed part; the name follows it */
 #define NTFS_LIST_ENTRY_NAME_OFFSET     0x1A
+
+/* A non-resident attribute header without a name, aligned */
+#define NTFS_NONRESIDENT_HEADER_LENGTH  0x48
 
 static
 ULONG
@@ -820,11 +841,12 @@ NtfsWriteAttributeList(PNTFS_VCB Vcb,
 * @remarks
 * An extension record left without attributes goes back to the MFT and out of the list.
 */
+static
 NTSTATUS
-NtfsRebuildAttributeList(PNTFS_VCB Vcb,
-                         PFILE_RECORD_HEADER BaseRecord,
-                         PULONGLONG NewIndices,
-                         ULONG NewCount)
+NtfsRebuildAttributeListOnce(PNTFS_VCB Vcb,
+                             PFILE_RECORD_HEADER BaseRecord,
+                             PULONGLONG NewIndices,
+                             ULONG NewCount)
 {
     PNTFS_ATTRIBUTE_LIST_ITEM OldList = NULL;
     ULONG OldLength = 0;
@@ -952,6 +974,56 @@ NtfsRebuildAttributeList(PNTFS_VCB Vcb,
     return Status;
 }
 
+static
+NTSTATUS
+NtfsMoveAttributesOutOfBase(PNTFS_VCB Vcb,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONG BytesNeeded,
+                            PULONGLONG Indices,
+                            ULONG MaxIndices,
+                            PULONG Count);
+
+NTSTATUS
+NtfsRebuildAttributeList(PNTFS_VCB Vcb,
+                         PFILE_RECORD_HEADER BaseRecord,
+                         PULONGLONG NewIndices,
+                         ULONG NewCount)
+{
+    ULONGLONG Indices[16];
+    ULONG Count, Moved, i;
+    NTSTATUS Status;
+
+    Status = NtfsRebuildAttributeListOnce(Vcb, BaseRecord, NewIndices, NewCount);
+    if (Status != STATUS_DISK_FULL)
+        return Status;
+
+    /* The list grew past what the base record holds and has no room to move to clusters
+     * either: make room by moving attributes out, and build it again */
+    if (NewCount > RTL_NUMBER_OF(Indices) / 2)
+        return Status;
+
+    for (i = 0; i < NewCount; i++)
+        Indices[i] = NewIndices[i];
+    Count = NewCount;
+
+    Status = NtfsMoveAttributesOutOfBase(Vcb,
+                                         BaseRecord,
+                                         2 * NTFS_NONRESIDENT_HEADER_LENGTH,
+                                         Indices + Count,
+                                         RTL_NUMBER_OF(Indices) - Count,
+                                         &Moved);
+    if (Status == STATUS_DISK_FULL &&
+        Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse >= NTFS_NONRESIDENT_HEADER_LENGTH)
+    {
+        Status = STATUS_SUCCESS;
+    }
+
+    if (NT_SUCCESS(Status))
+        Status = NtfsRebuildAttributeListOnce(Vcb, BaseRecord, Indices, Count + Moved);
+
+    return Status;
+}
+
 /**
 * @name NtfsCreateExtensionRecord
 *
@@ -989,47 +1061,70 @@ NtfsCreateExtensionRecord(PNTFS_VCB Vcb,
     return Status;
 }
 
-/* Attributes that stay in the base record: the ones every file has and finds there */
+/* What stays in the base record: $STANDARD_INFORMATION, the $ATTRIBUTE_LIST, and one
+ * $FILE_NAME, which the code that reads a file's record without its list expects there.
+ * Further names, one per link, may leave it. */
 static
 BOOLEAN
-NtfsAttributeCanLeaveBaseRecord(ULONG Type)
+NtfsAttributeCanLeaveBaseRecord(ULONG Type,
+                                ULONG FileNameCount)
 {
+    if (Type == AttributeFileName)
+        return FileNameCount > 1;
+
     return (Type != AttributeStandardInformation &&
-            Type != AttributeAttributeList &&
-            Type != AttributeFileName);
+            Type != AttributeAttributeList);
 }
 
 /**
-* @name NtfsCreateAttributeList
+* @name NtfsMoveAttributesOutOfBase
 *
-* Gives a full base record an $ATTRIBUTE_LIST: moves its largest attributes out into
-* extension records until the list fits, then adds the list.
+* Moves a base record's largest movable attributes into new extension records until the
+* base has BytesNeeded bytes free.
+*
+* @param Indices
+* Receives the MFT indices of the extension records made, Count of them.
+*
+* @return
+* STATUS_SUCCESS once the room is there, STATUS_DISK_FULL when nothing is left to move
+* first, or an allocation or I/O error.
+*
+* @remarks
+* The extension records are written; the base record is only changed in memory.
 */
 static
 NTSTATUS
-NtfsCreateAttributeList(PNTFS_VCB Vcb,
-                        PFILE_RECORD_HEADER BaseRecord)
+NtfsMoveAttributesOutOfBase(PNTFS_VCB Vcb,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONG BytesNeeded,
+                            PULONGLONG Indices,
+                            ULONG MaxIndices,
+                            PULONG Count)
 {
-    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
     PFILE_RECORD_HEADER Extension = NULL;
-    ULONGLONG Indices[8];
-    ULONG Count = 0;
-    ULONG Needed = 0;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    // The list describes every attribute, the moved ones too, so its size is known now
-    NtfsAppendListEntries(BaseRecord, NULL, &Needed);
-    Needed = ALIGN_UP_BY(ResidentHeaderLength + Needed, ATTR_RECORD_ALIGNMENT);
+    *Count = 0;
 
-    while (Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse < Needed)
+    while (Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse < BytesNeeded)
     {
-        PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BaseRecord->AttributeOffset);
+        PNTFS_ATTR_RECORD Attribute;
         ULONG Offset = BaseRecord->AttributeOffset;
         ULONG BestOffset = 0, BestLength = 0;
+        ULONG FileNameCount = 0;
 
+        for (Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BaseRecord->AttributeOffset);
+             Attribute->Type != AttributeEnd;
+             Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length))
+        {
+            if (Attribute->Type == AttributeFileName)
+                FileNameCount++;
+        }
+
+        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BaseRecord->AttributeOffset);
         while (Attribute->Type != AttributeEnd)
         {
-            if (NtfsAttributeCanLeaveBaseRecord(Attribute->Type) && Attribute->Length > BestLength)
+            if (NtfsAttributeCanLeaveBaseRecord(Attribute->Type, FileNameCount) && Attribute->Length > BestLength)
             {
                 BestLength = Attribute->Length;
                 BestOffset = Offset;
@@ -1039,12 +1134,9 @@ NtfsCreateAttributeList(PNTFS_VCB Vcb,
             Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
         }
 
-        /* With nothing left to move the list can still go to clusters, if the record
-         * holds its header */
         if (BestLength == 0)
         {
-            if (Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse < ResidentHeaderLength)
-                Status = STATUS_DISK_FULL;
+            Status = STATUS_DISK_FULL;
             break;
         }
 
@@ -1054,7 +1146,7 @@ NtfsCreateAttributeList(PNTFS_VCB Vcb,
         if (Extension != NULL &&
             Vcb->NtfsInfo.BytesPerFileRecord - Extension->BytesInUse < Attribute->Length)
         {
-            Status = UpdateFileRecord(Vcb, Indices[Count - 1], Extension);
+            Status = UpdateFileRecord(Vcb, Indices[*Count - 1], Extension);
             ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
             Extension = NULL;
             if (!NT_SUCCESS(Status))
@@ -1063,16 +1155,16 @@ NtfsCreateAttributeList(PNTFS_VCB Vcb,
 
         if (Extension == NULL)
         {
-            if (Count == RTL_NUMBER_OF(Indices))
+            if (*Count == MaxIndices)
             {
                 Status = STATUS_DISK_FULL;
                 break;
             }
 
-            Status = NtfsCreateExtensionRecord(Vcb, BaseRecord, &Extension, &Indices[Count]);
+            Status = NtfsCreateExtensionRecord(Vcb, BaseRecord, &Extension, &Indices[*Count]);
             if (!NT_SUCCESS(Status))
                 break;
-            Count++;
+            (*Count)++;
         }
 
         Status = NtfsInsertAttributeRecord(Vcb, Extension, Attribute, NULL);
@@ -1084,15 +1176,143 @@ NtfsCreateAttributeList(PNTFS_VCB Vcb,
 
     if (Extension != NULL)
     {
-        NTSTATUS WriteStatus = UpdateFileRecord(Vcb, Indices[Count - 1], Extension);
+        NTSTATUS WriteStatus = UpdateFileRecord(Vcb, Indices[*Count - 1], Extension);
 
         if (NT_SUCCESS(Status))
             Status = WriteStatus;
         ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
     }
 
+    return Status;
+}
+
+/**
+* @name NtfsCreateAttributeList
+*
+* Gives a full base record an $ATTRIBUTE_LIST: moves its largest attributes out into
+* extension records until the list fits resident, or at least as a non-resident header,
+* then adds the list.
+*/
+static
+NTSTATUS
+NtfsCreateAttributeList(PNTFS_VCB Vcb,
+                        PFILE_RECORD_HEADER BaseRecord)
+{
+    ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
+    ULONGLONG Indices[8];
+    ULONG Count = 0;
+    ULONG Needed = 0;
+    NTSTATUS Status;
+
+    // The list describes every attribute, the moved ones too, so its size is known now
+    NtfsAppendListEntries(BaseRecord, NULL, &Needed);
+    Needed = ALIGN_UP_BY(ResidentHeaderLength + Needed, ATTR_RECORD_ALIGNMENT);
+
+    Status = NtfsMoveAttributesOutOfBase(Vcb, BaseRecord, Needed, Indices, RTL_NUMBER_OF(Indices), &Count);
+
+    /* With nothing left to move the list can still go to clusters */
+    if (Status == STATUS_DISK_FULL &&
+        Vcb->NtfsInfo.BytesPerFileRecord - BaseRecord->BytesInUse >= NTFS_NONRESIDENT_HEADER_LENGTH)
+    {
+        Status = STATUS_SUCCESS;
+    }
+
     if (NT_SUCCESS(Status))
         Status = NtfsRebuildAttributeList(Vcb, BaseRecord, Indices, Count);
+
+    return Status;
+}
+
+/**
+* @name NtfsKeepFileNameInBase
+* @implemented
+*
+* Brings a $FILE_NAME back into a base record that lost its last one while the file still
+* has names in extension records: code that reads a file's record without its list finds
+* the file's name and duplicated information in the base.
+*
+* @remarks
+* The base record is changed in memory; the caller writes it back.
+*/
+NTSTATUS
+NtfsKeepFileNameInBase(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseRecord)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM List;
+    PULONGLONG Indices = NULL;
+    PFILE_RECORD_HEADER Extension = NULL;
+    PNTFS_ATTR_RECORD Attribute;
+    ULONG ListLength, Count = 0, i;
+    NTSTATUS Status;
+
+    for (Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)BaseRecord + BaseRecord->AttributeOffset);
+         Attribute->Type != AttributeEnd;
+         Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length))
+    {
+        if (Attribute->Type == AttributeFileName)
+            return STATUS_SUCCESS;
+    }
+
+    if (!NtfsRecordHasAttributeList(BaseRecord))
+        return STATUS_SUCCESS;
+
+    Status = NtfsReadAttributeList(Vcb, BaseRecord, &List, &ListLength);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtfsGetExtensionRecords(List, ListLength, BaseRecord->MFTRecordNumber, &Indices, &Count);
+    ExFreePoolWithTag(List, TAG_NTFS);
+
+    if (NT_SUCCESS(Status))
+    {
+        Extension = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+        if (Extension == NULL)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    for (i = 0; NT_SUCCESS(Status) && i < Count; i++)
+    {
+        Status = ReadFileRecord(Vcb, Indices[i], Extension);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        for (Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Extension + Extension->AttributeOffset);
+             Attribute->Type != AttributeEnd && Attribute->Type != AttributeFileName;
+             Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length))
+            ;
+
+        if (Attribute->Type != AttributeFileName)
+            continue;
+
+        Status = NtfsInsertAttributeRecord(Vcb, BaseRecord, Attribute, NULL);
+        if (Status == STATUS_DISK_FULL)
+        {
+            ULONGLONG Moved[4];
+            ULONG MovedCount;
+
+            /* Something else makes way for it */
+            Status = NtfsMoveAttributesOutOfBase(Vcb, BaseRecord, Attribute->Length, Moved, RTL_NUMBER_OF(Moved), &MovedCount);
+            if (NT_SUCCESS(Status))
+                Status = NtfsInsertAttributeRecord(Vcb, BaseRecord, Attribute, NULL);
+            if (NT_SUCCESS(Status))
+                Status = NtfsRebuildAttributeList(Vcb, BaseRecord, Moved, MovedCount);
+        }
+
+        if (NT_SUCCESS(Status))
+        {
+            NtfsRemoveAttribute(Extension, (ULONG)((ULONG_PTR)Attribute - (ULONG_PTR)Extension));
+            Status = UpdateFileRecord(Vcb, Indices[i], Extension);
+        }
+
+        if (NT_SUCCESS(Status))
+            Status = NtfsRebuildAttributeList(Vcb, BaseRecord, NULL, 0);
+        break;
+    }
+
+    if (Extension != NULL)
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Extension);
+    if (Indices != NULL)
+        ExFreePoolWithTag(Indices, TAG_NTFS);
 
     return Status;
 }

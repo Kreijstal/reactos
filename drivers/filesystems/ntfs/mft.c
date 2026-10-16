@@ -3689,6 +3689,8 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     PNTFS_ATTR_RECORD Attribute;
     PNTFS_ATTR_CONTEXT AttributeContext;
     ULONG AttributeOffset;
+    PFILENAME_ATTRIBUTE *Names = NULL;
+    ULONG NameCount = 0, i;
 
     DPRINT("NtfsDeleteFileRecord(%p, %I64u, %s)\n", DeviceExt, MftIndex, CaseSensitive ? "TRUE" : "FALSE");
 
@@ -3706,39 +3708,31 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
 
     // Remove every name this file has from its parent's index before anything is freed, so a
     // failure leaves the file whole instead of an entry pointing at a released record. A file
-    // with both a long name and an 8.3 name is indexed twice, and both parents are named by
-    // the attributes themselves.
-    Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + FileRecord->AttributeOffset);
-    AttributeOffset = FileRecord->AttributeOffset;
-
-    while (AttributeOffset < DeviceExt->NtfsInfo.BytesPerFileRecord &&
-           Attribute->Type != AttributeEnd)
+    // with both a long name and an 8.3 name is indexed twice, a file with several links once
+    // per link, and the names can be in extension records.
+    Status = NtfsGetFileNames(DeviceExt, FileRecord, &Names, &NameCount);
+    for (i = 0; NT_SUCCESS(Status) && i < NameCount; i++)
     {
-        if (Attribute->Type == AttributeFileName && !Attribute->IsNonResident)
+        Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
+                                                 Names[i]->DirectoryFileReferenceNumber & NTFS_MFT_MASK,
+                                                 Names[i],
+                                                 CaseSensitive);
+        if (!NT_SUCCESS(Status))
         {
-            PFILENAME_ATTRIBUTE FileName =
-                (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
-
-            Status = NtfsRemoveFilenameFromDirectory(DeviceExt,
-                                                     FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK,
-                                                     FileName,
-                                                     CaseSensitive);
-            if (!NT_SUCCESS(Status))
-            {
-                DPRINT1("ERROR: Failed to remove '%.*S' from directory %I64u!\n",
-                        FileName->NameLength,
-                        FileName->Name,
-                        FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
-                ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
-                return Status;
-            }
+            DPRINT1("ERROR: Failed to remove '%.*S' from directory %I64u!\n",
+                    Names[i]->NameLength,
+                    Names[i]->Name,
+                    Names[i]->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
         }
+    }
 
-        if (Attribute->Length == 0)
-            break;
+    if (Names != NULL)
+        NtfsFreeFileNames(Names, NameCount);
 
-        AttributeOffset += Attribute->Length;
-        Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttributeOffset);
+    if (!NT_SUCCESS(Status))
+    {
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+        return Status;
     }
 
     // Release the clusters held by every non-resident attribute
@@ -3792,6 +3786,374 @@ NtfsDeleteFileRecord(PDEVICE_EXTENSION DeviceExt,
     ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return FreeMftEntry(DeviceExt, MftIndex);
+}
+
+/**
+* @name NtfsGetFileNames
+* @implemented
+*
+* Collects copies of every $FILE_NAME of a file, in its base record and, through its
+* $ATTRIBUTE_LIST, its extension records: one per link, plus a DOS name where the file
+* has one.
+*
+* @param Names
+* Receives a pool array (TAG_NTFS) of pool copies, freed with NtfsFreeFileNames().
+*
+* @param Count
+* Receives the number of names.
+*/
+NTSTATUS
+NtfsGetFileNames(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER BaseRecord,
+                 PFILENAME_ATTRIBUTE **Names,
+                 PULONG Count)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM List = NULL;
+    PULONGLONG Indices = NULL;
+    PFILE_RECORD_HEADER Record = BaseRecord;
+    ULONG ListLength = 0, ExtensionCount = 0, RecordIndex = 0;
+    ULONG Capacity = 16;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *Count = 0;
+    *Names = ExAllocatePoolWithTag(NonPagedPool, Capacity * sizeof(PFILENAME_ATTRIBUTE), TAG_NTFS);
+    if (*Names == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    if (NtfsRecordHasAttributeList(BaseRecord))
+    {
+        Status = NtfsReadAttributeList(DeviceExt, BaseRecord, &List, &ListLength);
+        if (NT_SUCCESS(Status))
+            Status = NtfsGetExtensionRecords(List, ListLength, BaseRecord->MFTRecordNumber, &Indices, &ExtensionCount);
+    }
+
+    while (NT_SUCCESS(Status))
+    {
+        PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Record + Record->AttributeOffset);
+
+        while (Attribute->Type != AttributeEnd && NT_SUCCESS(Status))
+        {
+            if (Attribute->Type == AttributeFileName && !Attribute->IsNonResident)
+            {
+                PFILENAME_ATTRIBUTE Copy;
+
+                if (*Count == Capacity)
+                {
+                    PFILENAME_ATTRIBUTE *Bigger = ExAllocatePoolWithTag(NonPagedPool, 2 * Capacity * sizeof(PFILENAME_ATTRIBUTE), TAG_NTFS);
+
+                    if (Bigger == NULL)
+                    {
+                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                        break;
+                    }
+
+                    RtlCopyMemory(Bigger, *Names, Capacity * sizeof(PFILENAME_ATTRIBUTE));
+                    ExFreePoolWithTag(*Names, TAG_NTFS);
+                    *Names = Bigger;
+                    Capacity *= 2;
+                }
+
+                Copy = ExAllocatePoolWithTag(NonPagedPool, Attribute->Resident.ValueLength, TAG_NTFS);
+                if (Copy == NULL)
+                {
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+
+                RtlCopyMemory(Copy, (PUCHAR)Attribute + Attribute->Resident.ValueOffset, Attribute->Resident.ValueLength);
+                (*Names)[(*Count)++] = Copy;
+            }
+
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+        }
+
+        if (!NT_SUCCESS(Status) || RecordIndex == ExtensionCount)
+            break;
+
+        // On to the next extension record
+        if (Record == BaseRecord)
+        {
+            Record = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+            if (Record == NULL)
+            {
+                Record = BaseRecord;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+        }
+
+        Status = ReadFileRecord(DeviceExt, Indices[RecordIndex++], Record);
+    }
+
+    if (Record != BaseRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, Record);
+    if (Indices != NULL)
+        ExFreePoolWithTag(Indices, TAG_NTFS);
+    if (List != NULL)
+        ExFreePoolWithTag(List, TAG_NTFS);
+
+    if (!NT_SUCCESS(Status))
+    {
+        NtfsFreeFileNames(*Names, *Count);
+        *Names = NULL;
+        *Count = 0;
+    }
+
+    return Status;
+}
+
+VOID
+NtfsFreeFileNames(PFILENAME_ATTRIBUTE *Names,
+                  ULONG Count)
+{
+    ULONG i;
+
+    for (i = 0; i < Count; i++)
+        ExFreePoolWithTag(Names[i], TAG_NTFS);
+
+    ExFreePoolWithTag(Names, TAG_NTFS);
+}
+
+/* Whether a $FILE_NAME is Name in the directory ParentIndex */
+static
+BOOLEAN
+NtfsFileNameMatches(PDEVICE_EXTENSION DeviceExt,
+                    PFILENAME_ATTRIBUTE FileName,
+                    ULONGLONG ParentIndex,
+                    PCUNICODE_STRING Name)
+{
+    return ((FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK) == ParentIndex &&
+            FileName->NameLength * sizeof(WCHAR) == Name->Length &&
+            NtfsAttributeNamesEqual(DeviceExt, FileName->Name, Name->Buffer, FileName->NameLength));
+}
+
+/**
+* @name NtfsRemoveFileNameAttribute
+*
+* Takes a file's $FILE_NAME that is Name in the directory ParentIndex out of the record
+* holding it, and out of the $ATTRIBUTE_LIST if that's an extension record.
+*/
+NTSTATUS
+NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONGLONG ParentIndex,
+                            PCUNICODE_STRING Name)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM List = NULL;
+    PULONGLONG Indices = NULL;
+    PFILE_RECORD_HEADER Record = BaseRecord;
+    ULONG ListLength = 0, ExtensionCount = 0, RecordIndex = 0;
+    ULONGLONG RecordNumber = BaseRecord->MFTRecordNumber;
+    NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN Removed = FALSE;
+
+    if (NtfsRecordHasAttributeList(BaseRecord))
+    {
+        Status = NtfsReadAttributeList(DeviceExt, BaseRecord, &List, &ListLength);
+        if (NT_SUCCESS(Status))
+            Status = NtfsGetExtensionRecords(List, ListLength, BaseRecord->MFTRecordNumber, &Indices, &ExtensionCount);
+    }
+
+    while (NT_SUCCESS(Status) && !Removed)
+    {
+        PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Record + Record->AttributeOffset);
+
+        while (Attribute->Type != AttributeEnd)
+        {
+            if (Attribute->Type == AttributeFileName &&
+                NtfsFileNameMatches(DeviceExt,
+                                    (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset),
+                                    ParentIndex,
+                                    Name))
+            {
+                NtfsRemoveAttribute(Record, (ULONG)((ULONG_PTR)Attribute - (ULONG_PTR)Record));
+                Removed = TRUE;
+                break;
+            }
+
+            Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
+        }
+
+        if (Removed || RecordIndex == ExtensionCount)
+            break;
+
+        if (Record == BaseRecord)
+        {
+            Record = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+            if (Record == NULL)
+            {
+                Record = BaseRecord;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+        }
+
+        RecordNumber = Indices[RecordIndex++];
+        Status = ReadFileRecord(DeviceExt, RecordNumber, Record);
+    }
+
+    if (NT_SUCCESS(Status) && !Removed)
+        Status = STATUS_OBJECT_NAME_NOT_FOUND;
+
+    /* An extension record changed: write it, and rebuild the list it's in */
+    if (NT_SUCCESS(Status) && Record != BaseRecord)
+    {
+        Status = UpdateFileRecord(DeviceExt, RecordNumber, Record);
+        if (NT_SUCCESS(Status))
+            Status = NtfsRebuildAttributeList(DeviceExt, BaseRecord, NULL, 0);
+    }
+
+    if (Record != BaseRecord)
+        ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, Record);
+    if (Indices != NULL)
+        ExFreePoolWithTag(Indices, TAG_NTFS);
+    if (List != NULL)
+        ExFreePoolWithTag(List, TAG_NTFS);
+
+    return Status;
+}
+
+/**
+* @name NtfsUnlinkFileName
+* @implemented
+*
+* Removes one name of a file that has others: the index entry in its directory and the
+* $FILE_NAME, and the DOS name paired with it, if it has one. The file, its data and its
+* other names stay.
+*
+* @param DeviceExt
+* Points to the target disk's DEVICE_EXTENSION.
+*
+* @param MftIndex
+* MFT index of the file.
+*
+* @param ParentIndex
+* MFT index of the directory holding the name.
+*
+* @param Name
+* The name.
+*
+* @param CaseSensitive
+* TRUE for a POSIX-semantics lookup of the index entry.
+*/
+NTSTATUS
+NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   ULONGLONG ParentIndex,
+                   PCUNICODE_STRING Name,
+                   BOOLEAN CaseSensitive)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    PFILENAME_ATTRIBUTE *Names = NULL;
+    ULONG Count = 0, i;
+    NTSTATUS Status;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
+    if (NT_SUCCESS(Status))
+        Status = NtfsGetFileNames(DeviceExt, FileRecord, &Names, &Count);
+
+    for (i = 0; NT_SUCCESS(Status) && i < Count; i++)
+    {
+        UNICODE_STRING DosName;
+
+        if (!NtfsFileNameMatches(DeviceExt, Names[i], ParentIndex, Name))
+            continue;
+
+        Status = NtfsRemoveFilenameFromDirectory(DeviceExt, ParentIndex, Names[i], CaseSensitive);
+        if (NT_SUCCESS(Status))
+            Status = NtfsRemoveFileNameAttribute(DeviceExt, FileRecord, ParentIndex, Name);
+
+        /* A Win32 name with an 8.3 name of its own counts as one link with it */
+        if (NT_SUCCESS(Status) && Names[i]->NameType == NTFS_FILE_NAME_WIN32)
+        {
+            ULONG j;
+
+            for (j = 0; j < Count; j++)
+            {
+                if (Names[j]->NameType != NTFS_FILE_NAME_DOS ||
+                    (Names[j]->DirectoryFileReferenceNumber & NTFS_MFT_MASK) != ParentIndex)
+                {
+                    continue;
+                }
+
+                DosName.Buffer = Names[j]->Name;
+                DosName.Length = DosName.MaximumLength = Names[j]->NameLength * sizeof(WCHAR);
+                Status = NtfsRemoveFilenameFromDirectory(DeviceExt, ParentIndex, Names[j], CaseSensitive);
+                if (NT_SUCCESS(Status))
+                    Status = NtfsRemoveFileNameAttribute(DeviceExt, FileRecord, ParentIndex, &DosName);
+                break;
+            }
+        }
+
+        if (NT_SUCCESS(Status))
+            Status = NtfsKeepFileNameInBase(DeviceExt, FileRecord);
+
+        if (NT_SUCCESS(Status))
+        {
+            ASSERT(FileRecord->LinkCount > 1);
+            FileRecord->LinkCount--;
+            Status = UpdateFileRecord(DeviceExt, MftIndex, FileRecord);
+        }
+        break;
+    }
+
+    if (NT_SUCCESS(Status) && i == Count)
+        Status = STATUS_OBJECT_NAME_NOT_FOUND;
+
+    if (Names != NULL)
+        NtfsFreeFileNames(Names, Count);
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    return Status;
+}
+
+/**
+* @name NtfsDeleteFileLink
+* @implemented
+*
+* Deletes the name a file was opened by: only that name while the file has others, the
+* whole file with its last one.
+*
+* @param LinksLeft
+* Receives the number of links the file has left.
+*/
+NTSTATUS
+NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   ULONGLONG ParentIndex,
+                   PCUNICODE_STRING Name,
+                   BOOLEAN CaseSensitive,
+                   PUSHORT LinksLeft)
+{
+    PFILE_RECORD_HEADER FileRecord;
+    USHORT LinkCount;
+    NTSTATUS Status;
+
+    *LinksLeft = 0;
+
+    FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+    if (FileRecord == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Status = ReadFileRecord(DeviceExt, MftIndex, FileRecord);
+    LinkCount = FileRecord->LinkCount;
+    ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (LinkCount <= 1)
+        return NtfsDeleteFileRecord(DeviceExt, MftIndex, CaseSensitive);
+
+    Status = NtfsUnlinkFileName(DeviceExt, MftIndex, ParentIndex, Name, CaseSensitive);
+    if (NT_SUCCESS(Status))
+        *LinksLeft = LinkCount - 1;
+
+    return Status;
 }
 
 /**
@@ -4252,6 +4614,20 @@ SeekIndexEntry(PUNICODE_STRING FileName,
     return IndexEntry;
 }
 
+/* Copies the $FILE_NAME key of a matched index entry for a caller that wants the name it
+ * matched, which for a file with several links is that link's own name */
+static
+VOID
+NtfsCopyFoundName(PINDEX_ENTRY_ATTRIBUTE IndexEntry,
+                  PFILENAME_ATTRIBUTE OutFoundName)
+{
+    if (OutFoundName == NULL)
+        return;
+
+    ASSERT(IndexEntry->KeyLength <= NTFS_FOUND_NAME_SIZE);
+    RtlCopyMemory(OutFoundName, &IndexEntry->FileName, min(IndexEntry->KeyLength, NTFS_FOUND_NAME_SIZE));
+}
+
 NTSTATUS
 BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER MftRecord,
@@ -4264,7 +4640,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                           PULONG CurrentEntry,
                           BOOLEAN DirSearch,
                           BOOLEAN CaseSensitive,
-                          ULONGLONG *OutMFTIndex)
+                          ULONGLONG *OutMFTIndex,
+                          PFILENAME_ATTRIBUTE OutFoundName)
 {
     PINDEX_BUFFER IndexRecord;
     ULONGLONG Offset;
@@ -4361,6 +4738,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         if (Found)
         {
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            NtfsCopyFoundName(IndexEntry, OutFoundName);
             Status = STATUS_SUCCESS;
         }
         else if (IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE)
@@ -4376,7 +4754,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                CurrentEntry,
                                                DirSearch,
                                                CaseSensitive,
-                                               OutMFTIndex);
+                                               OutMFTIndex,
+                                               OutFoundName);
         }
         else
         {
@@ -4411,7 +4790,8 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
                                                    CurrentEntry,
                                                    DirSearch,
                                                    CaseSensitive,
-                                                   OutMFTIndex);
+                                                   OutMFTIndex,
+                                               OutFoundName);
                 if (NT_SUCCESS(Status))
                 {
                     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
@@ -4432,6 +4812,7 @@ BrowseSubNodeIndexEntries(PNTFS_VCB Vcb,
         {
             *StartEntry = *CurrentEntry;
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            NtfsCopyFoundName(IndexEntry, OutFoundName);
             ExFreePoolWithTag(IndexRecord, TAG_NTFS);
             return STATUS_SUCCESS;
         }
@@ -4459,7 +4840,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                    PULONG CurrentEntry,
                    BOOLEAN DirSearch,
                    BOOLEAN CaseSensitive,
-                   ULONGLONG *OutMFTIndex)
+                   ULONGLONG *OutMFTIndex,
+                   PFILENAME_ATTRIBUTE OutFoundName)
 {
     NTSTATUS Status;
     PINDEX_ENTRY_ATTRIBUTE IndexEntry;
@@ -4547,6 +4929,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         if (Found)
         {
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            NtfsCopyFoundName(IndexEntry, OutFoundName);
             Status = STATUS_SUCCESS;
         }
         else if ((IndexEntry->Flags & NTFS_INDEX_ENTRY_NODE) && IndexAllocationContext)
@@ -4562,7 +4945,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                CurrentEntry,
                                                DirSearch,
                                                CaseSensitive,
-                                               OutMFTIndex);
+                                               OutMFTIndex,
+                                               OutFoundName);
         }
         else
         {
@@ -4605,7 +4989,8 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
                                                    CurrentEntry,
                                                    DirSearch,
                                                    CaseSensitive,
-                                                   OutMFTIndex);
+                                                   OutMFTIndex,
+                                               OutFoundName);
 
                 /* Anything other than "not in this subtree" means we gave up on
                  * a subtree that may well have held the entry */
@@ -4637,6 +5022,7 @@ BrowseIndexEntries(PDEVICE_EXTENSION Vcb,
         {
             *StartEntry = *CurrentEntry;
             *OutMFTIndex = (IndexEntry->Data.Directory.IndexedFile & NTFS_MFT_MASK);
+            NtfsCopyFoundName(IndexEntry, OutFoundName);
             if (IndexAllocationContext)
             {
                 ExFreePoolWithTag(BitmapMem, TAG_NTFS);
@@ -4673,7 +5059,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                   PULONG FirstEntry,
                   BOOLEAN DirSearch,
                   BOOLEAN CaseSensitive,
-                  ULONGLONG *OutMFTIndex)
+                  ULONGLONG *OutMFTIndex,
+                  PFILENAME_ATTRIBUTE OutFoundName)
 {
     PFILE_RECORD_HEADER MftRecord;
     PNTFS_ATTR_CONTEXT IndexRootCtx;
@@ -4743,7 +5130,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                                 &CurrentEntry,
                                 DirSearch,
                                 CaseSensitive,
-                                OutMFTIndex);
+                                OutMFTIndex,
+                                OutFoundName);
 
     ExFreePoolWithTag(IndexRecord, TAG_NTFS);
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
@@ -4777,7 +5165,7 @@ NtfsLookupFileAt(PDEVICE_EXTENSION Vcb,
     {
         DPRINT("Current: %wZ\n", &Current);
 
-        Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex);
+        Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, &Current, &FirstEntry, FALSE, CaseSensitive, &CurrentMFTIndex, NULL);
         if (!NT_SUCCESS(Status))
         {
             /* The index walk reports a miss as a missing path. A missing last
@@ -4890,7 +5278,8 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                PFILE_RECORD_HEADER *FileRecord,
                PULONGLONG MFTIndex,
                ULONGLONG CurrentMFTIndex,
-               BOOLEAN CaseSensitive)
+               BOOLEAN CaseSensitive,
+               PFILENAME_ATTRIBUTE OutFoundName)
 {
     NTSTATUS Status;
 
@@ -4903,7 +5292,7 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
            CurrentMFTIndex,
            (CaseSensitive ? "TRUE" : "FALSE"));
 
-    Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &CurrentMFTIndex);
+    Status = NtfsFindMftRecord(Vcb, CurrentMFTIndex, SearchPattern, FirstEntry, TRUE, CaseSensitive, &CurrentMFTIndex, OutFoundName);
     if (!NT_SUCCESS(Status))
     {
         DPRINT("NtfsFindFileAt: NtfsFindMftRecord() failed with status 0x%08lx\n", Status);

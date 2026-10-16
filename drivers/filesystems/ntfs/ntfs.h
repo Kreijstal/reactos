@@ -599,6 +599,10 @@ typedef struct _NTFS_ATTR_CONTEXT
 /* Longest name a $FILE_NAME can hold, in characters */
 #define NTFS_MAX_NAME_LENGTH    255
 
+/* Size of a buffer that holds any $FILE_NAME: fixed part and longest name */
+#define NTFS_FOUND_NAME_SIZE \
+    (FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + NTFS_MAX_NAME_LENGTH * sizeof(WCHAR))
+
 /* Longest path a UNICODE_STRING can hold, in characters, with its terminator */
 #define NTFS_MAX_PATH_LENGTH    (MAXUSHORT / sizeof(WCHAR))
 
@@ -630,6 +634,7 @@ typedef struct _FCB
     SHARE_ACCESS ShareAccess;
 
     ULONGLONG MFTIndex;
+    ULONGLONG ParentMFTIndex;  /* The directory holding the name the FCB was opened by */
     USHORT SequenceNumber;  /* Of the file record; with MFTIndex, the file reference */
     USHORT LinkCount;
 
@@ -736,6 +741,10 @@ VOID
 NtfsRemoveAttribute(PFILE_RECORD_HEADER FileRecord,
                     ULONG AttrOffset);
 
+PNTFS_ATTR_RECORD
+NtfsBuildFileNameAttribute(PFILENAME_ATTRIBUTE Value,
+                           ULONG ValueLength);
+
 NTSTATUS
 NtfsInsertAttributeRecord(PNTFS_VCB Vcb,
                           PFILE_RECORD_HEADER FileRecord,
@@ -763,6 +772,10 @@ NtfsRebuildAttributeList(PNTFS_VCB Vcb,
                          PFILE_RECORD_HEADER BaseRecord,
                          PULONGLONG NewIndices,
                          ULONG NewCount);
+
+NTSTATUS
+NtfsKeepFileNameInBase(PNTFS_VCB Vcb,
+                       PFILE_RECORD_HEADER BaseRecord);
 
 NTSTATUS
 NtfsAddAttributeToFile(PNTFS_VCB Vcb,
@@ -1158,6 +1171,12 @@ NtfsBuildChildPath(
     _In_ PCWSTR DirectoryPath,
     _In_ PCWSTR Name);
 
+VOID
+NtfsSetLinkCount(
+    _In_ PNTFS_VCB Vcb,
+    _In_ ULONGLONG MftIndex,
+    _In_ USHORT LinkCount);
+
 NTSTATUS
 NtfsMakeStreamFCB(
     _In_ PNTFS_VCB Vcb,
@@ -1412,6 +1431,37 @@ NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
                        ULONGLONG End);
 
 NTSTATUS
+NtfsGetFileNames(PDEVICE_EXTENSION DeviceExt,
+                 PFILE_RECORD_HEADER BaseRecord,
+                 PFILENAME_ATTRIBUTE **Names,
+                 PULONG Count);
+
+VOID
+NtfsFreeFileNames(PFILENAME_ATTRIBUTE *Names,
+                  ULONG Count);
+
+NTSTATUS
+NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   ULONGLONG ParentIndex,
+                   PCUNICODE_STRING Name,
+                   BOOLEAN CaseSensitive,
+                   PUSHORT LinksLeft);
+
+NTSTATUS
+NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONGLONG ParentIndex,
+                            PCUNICODE_STRING Name);
+
+NTSTATUS
+NtfsUnlinkFileName(PDEVICE_EXTENSION DeviceExt,
+                   ULONGLONG MftIndex,
+                   ULONGLONG ParentIndex,
+                   PCUNICODE_STRING Name,
+                   BOOLEAN CaseSensitive);
+
+NTSTATUS
 NtfsDeleteExtensionRecords(PDEVICE_EXTENSION DeviceExt,
                            PFILE_RECORD_HEADER BaseRecord);
 
@@ -1582,7 +1632,8 @@ NtfsFindFileAt(PDEVICE_EXTENSION Vcb,
                PFILE_RECORD_HEADER *FileRecord,
                PULONGLONG MFTIndex,
                ULONGLONG CurrentMFTIndex,
-               BOOLEAN CaseSensitive);
+               BOOLEAN CaseSensitive,
+               PFILENAME_ATTRIBUTE OutFoundName);
 
 NTSTATUS
 NtfsIsDirectoryEmpty(
@@ -1597,7 +1648,8 @@ NtfsFindMftRecord(PDEVICE_EXTENSION Vcb,
                   PULONG FirstEntry,
                   BOOLEAN DirSearch,
                   BOOLEAN CaseSensitive,
-                  ULONGLONG *OutMFTIndex);
+                  ULONGLONG *OutMFTIndex,
+                  PFILENAME_ATTRIBUTE OutFoundName);
 
 /* misc.c */
 

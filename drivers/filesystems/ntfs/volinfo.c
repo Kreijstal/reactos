@@ -362,7 +362,7 @@ NtfsGetFsAttributeInformation(PDEVICE_EXTENSION DeviceExt,
     /* What this driver implements of what Windows' NTFS reports */
     FsAttributeInfo->FileSystemAttributes =
         FILE_CASE_SENSITIVE_SEARCH | FILE_CASE_PRESERVED_NAMES | FILE_UNICODE_ON_DISK |
-        FILE_SUPPORTS_OPEN_BY_FILE_ID;
+        FILE_SUPPORTS_OPEN_BY_FILE_ID | FILE_NAMED_STREAMS | FILE_SUPPORTS_HARD_LINKS;
     /* Writes are refused everywhere unless write support was enabled */
     if (!NtfsGlobalData->EnableWriteSupport)
         FsAttributeInfo->FileSystemAttributes |= FILE_READ_ONLY_VOLUME;
