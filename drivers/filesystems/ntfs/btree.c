@@ -115,6 +115,7 @@ PrintAllVCNs(PDEVICE_EXTENSION Vcb,
 */
 NTSTATUS
 AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
+                  PB_TREE Tree,
                   PFILE_RECORD_HEADER FileRecord,
                   ULONG IndexBufferSize,
                   PNTFS_ATTR_CONTEXT IndexAllocationCtx,
@@ -147,8 +148,8 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     Status = FindAttribute(DeviceExt,
                            FileRecord,
                            AttributeBitmap,
-                           L"$I30",
-                           4,
+                           Tree->IndexName,
+                           Tree->IndexNameLength,
                            &BitmapCtx,
                            &BitmapOffset);
     if (!NT_SUCCESS(Status))
@@ -260,7 +261,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
                             FileRecord);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("ERROR: Unable to write to $I30 bitmap attribute!\n");
+        DPRINT1("ERROR: Unable to write to the index bitmap attribute!\n");
     }
 
     // Calculate VCN of new node number. An index record smaller than a cluster is addressed
@@ -338,6 +339,28 @@ CreateDummyKey(BOOLEAN HasChildNode)
 }
 
 /**
+* @name SetBTreeIndex
+* @implemented
+*
+* Records which index of its file record a tree describes and how its keys are ordered.
+*/
+static
+VOID
+SetBTreeIndex(PB_TREE Tree,
+              PCWSTR IndexName,
+              ULONG IndexNameLength,
+              ULONG IndexedAttributeType,
+              ULONG CollationRule)
+{
+    ASSERT(IndexNameLength <= NTFS_MAX_INDEX_NAME_LENGTH);
+
+    RtlCopyMemory(Tree->IndexName, IndexName, IndexNameLength * sizeof(WCHAR));
+    Tree->IndexNameLength = IndexNameLength;
+    Tree->IndexedAttributeType = IndexedAttributeType;
+    Tree->CollationRule = CollationRule;
+}
+
+/**
 * @name CreateEmptyBTree
 * @implemented
 *
@@ -381,11 +404,12 @@ CreateEmptyBTree(PB_TREE *NewTree)
     RtlZeroMemory(Tree, sizeof(B_TREE));
     RtlZeroMemory(RootNode, sizeof(B_TREE_FILENAME_NODE));
 
-    // Setup the Tree
+    // Setup the Tree. Only directories get new indexes, so it's a $I30 index.
     RootNode->FirstKey = DummyKey;
     RootNode->KeyCount = 1;
     RootNode->DiskNeedsUpdating = TRUE;
     Tree->RootNode = RootNode;
+    SetBTreeIndex(Tree, L"$I30", 4, AttributeFileName, COLLATION_FILE_NAME);
 
     *NewTree = Tree;
 
@@ -393,6 +417,10 @@ CreateEmptyBTree(PB_TREE *NewTree)
 
     return STATUS_SUCCESS;
 }
+
+static LONG CollateBinary(PVOID Key1, ULONG Key1Length, PVOID Key2, ULONG Key2Length);
+static LONG CollateUlongs(PVOID Key1, ULONG Key1Length, PVOID Key2, ULONG Key2Length);
+static PB_TREE_KEY CreateBTreeKeyForEntry(PINDEX_ENTRY_ATTRIBUTE Entry);
 
 /**
 * @name CompareTreeKeys
@@ -405,6 +433,9 @@ CreateEmptyBTree(PB_TREE *NewTree)
 *
 * @param Key2
 * Pointer to the other B_TREE_KEY that will be compared.
+*
+* @param CollationRule
+* The COLLATION_* rule of the index the keys belong to.
 *
 * @param CaseSensitive
 * Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
@@ -419,9 +450,9 @@ CreateEmptyBTree(PB_TREE *NewTree)
 * Any other key is always less than the final (dummy) key in a node. Key1 must not be the dummy node.
 */
 LONG
-CompareTreeKeys(PB_TREE_KEY Key1, PB_TREE_KEY Key2, BOOLEAN CaseSensitive)
+CompareTreeKeys(PB_TREE_KEY Key1, PB_TREE_KEY Key2, ULONG CollationRule, BOOLEAN CaseSensitive)
 {
-    UNICODE_STRING Key1Name, Key2Name;
+    PVOID Key1Bytes, Key2Bytes;
 
     // Key1 must not be the final key (AKA the dummy key)
     ASSERT(!(Key1->IndexEntry->Flags & NTFS_INDEX_ENTRY_END));
@@ -430,15 +461,100 @@ CompareTreeKeys(PB_TREE_KEY Key1, PB_TREE_KEY Key2, BOOLEAN CaseSensitive)
     if (Key2->NextKey == NULL)
         return -1;
 
-    Key1Name.Buffer = Key1->IndexEntry->FileName.Name;
-    Key1Name.Length = Key1Name.MaximumLength
-        = Key1->IndexEntry->FileName.NameLength * sizeof(WCHAR);
+    if (CollationRule == COLLATION_FILE_NAME)
+    {
+        UNICODE_STRING Key1Name, Key2Name;
 
-    Key2Name.Buffer = Key2->IndexEntry->FileName.Name;
-    Key2Name.Length = Key2Name.MaximumLength
-        = Key2->IndexEntry->FileName.NameLength * sizeof(WCHAR);
+        Key1Name.Buffer = Key1->IndexEntry->FileName.Name;
+        Key1Name.Length = Key1Name.MaximumLength
+            = Key1->IndexEntry->FileName.NameLength * sizeof(WCHAR);
 
-    return CollateFileNames(&Key1Name, &Key2Name, CaseSensitive);
+        Key2Name.Buffer = Key2->IndexEntry->FileName.Name;
+        Key2Name.Length = Key2Name.MaximumLength
+            = Key2->IndexEntry->FileName.NameLength * sizeof(WCHAR);
+
+        return CollateFileNames(&Key1Name, &Key2Name, CaseSensitive);
+    }
+
+    // A view index key is raw bytes right after the entry header
+    Key1Bytes = &Key1->IndexEntry->FileName;
+    Key2Bytes = &Key2->IndexEntry->FileName;
+
+    switch (CollationRule)
+    {
+        case COLLATION_BINARY:
+            return CollateBinary(Key1Bytes, Key1->IndexEntry->KeyLength,
+                                 Key2Bytes, Key2->IndexEntry->KeyLength);
+
+        case COLLATION_NTOFS_ULONG:
+            ASSERT(Key1->IndexEntry->KeyLength == sizeof(ULONG));
+            ASSERT(Key2->IndexEntry->KeyLength == sizeof(ULONG));
+            return CollateUlongs(Key1Bytes, sizeof(ULONG), Key2Bytes, sizeof(ULONG));
+
+        case COLLATION_NTOFS_ULONGS:
+        case COLLATION_NTOFS_SECURITY_HASH:
+            // A security hash key is the hash, then the security ID: two ULONGs
+            return CollateUlongs(Key1Bytes, Key1->IndexEntry->KeyLength,
+                                 Key2Bytes, Key2->IndexEntry->KeyLength);
+
+        default:
+            DPRINT1("Collation rule 0x%lx isn't implemented\n", CollationRule);
+            ASSERT(FALSE);
+            return CollateBinary(Key1Bytes, Key1->IndexEntry->KeyLength,
+                                 Key2Bytes, Key2->IndexEntry->KeyLength);
+    }
+}
+
+/**
+* @name CollateBinary
+* @implemented
+*
+* COLLATION_BINARY: byte by byte, then the shorter key first.
+*/
+static
+LONG
+CollateBinary(PVOID Key1, ULONG Key1Length, PVOID Key2, ULONG Key2Length)
+{
+    PUCHAR Bytes1 = Key1, Bytes2 = Key2;
+    ULONG i;
+
+    for (i = 0; i < min(Key1Length, Key2Length); i++)
+    {
+        if (Bytes1[i] != Bytes2[i])
+            return Bytes1[i] < Bytes2[i] ? -1 : 1;
+    }
+
+    if (Key1Length == Key2Length)
+        return 0;
+    return Key1Length < Key2Length ? -1 : 1;
+}
+
+/**
+* @name CollateUlongs
+* @implemented
+*
+* COLLATION_NTOFS_ULONGS: an array of ULONGs, compared as numbers one by one, then the shorter
+* key first. An object ID (a GUID) in $O is collated this way.
+*/
+static
+LONG
+CollateUlongs(PVOID Key1, ULONG Key1Length, PVOID Key2, ULONG Key2Length)
+{
+    PULONG Ulongs1 = Key1, Ulongs2 = Key2;
+    ULONG i;
+
+    ASSERT(Key1Length % sizeof(ULONG) == 0);
+    ASSERT(Key2Length % sizeof(ULONG) == 0);
+
+    for (i = 0; i < min(Key1Length, Key2Length) / sizeof(ULONG); i++)
+    {
+        if (Ulongs1[i] != Ulongs2[i])
+            return Ulongs1[i] < Ulongs2[i] ? -1 : 1;
+    }
+
+    if (Key1Length == Key2Length)
+        return 0;
+    return Key1Length < Key2Length ? -1 : 1;
 }
 
 /**
@@ -704,12 +820,19 @@ CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
     RtlZeroMemory(RootNode, sizeof(B_TREE_FILENAME_NODE));
     RtlZeroMemory(CurrentKey, sizeof(B_TREE_KEY));
 
+    // The tree describes the index the root belongs to
+    SetBTreeIndex(Tree,
+                  (PWCHAR)((ULONG_PTR)IndexRootContext->pRecord + IndexRootContext->pRecord->NameOffset),
+                  IndexRootContext->pRecord->NameLength,
+                  IndexRoot->AttributeType,
+                  IndexRoot->CollationRule);
+
     // See if the file record has an attribute allocation
     Status = FindAttribute(Vcb,
                            FileRecordWithIndex,
                            AttributeIndexAllocation,
-                           L"$I30",
-                           4,
+                           Tree->IndexName,
+                           Tree->IndexNameLength,
                            &IndexAllocationContext,
                            NULL);
     if (!NT_SUCCESS(Status))
@@ -888,8 +1011,8 @@ CreateIndexRootFromBTree(PDEVICE_EXTENSION DeviceExt,
     // Setup the new index root
     RtlZeroMemory(NewIndexRoot, DeviceExt->NtfsInfo.BytesPerFileRecord);
 
-    NewIndexRoot->AttributeType = AttributeFileName;
-    NewIndexRoot->CollationRule = COLLATION_FILE_NAME;
+    NewIndexRoot->AttributeType = Tree->IndexedAttributeType;
+    NewIndexRoot->CollationRule = Tree->CollationRule;
     NewIndexRoot->SizeOfEntry = DeviceExt->NtfsInfo.BytesPerIndexRecord;
     // If Bytes per index record is less than cluster size, clusters per index record becomes sectors per index
     if (NewIndexRoot->SizeOfEntry < DeviceExt->NtfsInfo.BytesPerCluster)
@@ -1150,7 +1273,7 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
 
     DPRINT("UpdateIndexAllocation() called.\n");
 
-    Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexAllocation, L"$I30", 4, &IndexAllocationContext, &IndexAllocationOffset);
+    Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexAllocation, Tree->IndexName, Tree->IndexNameLength, &IndexAllocationContext, &IndexAllocationOffset);
     if (NT_SUCCESS(Status))
     {
         HasIndexAllocation = TRUE;
@@ -1177,8 +1300,8 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
                 Status = AddIndexAllocation(DeviceExt,
                                             FileRecord,
                                             EndMarker,
-                                            L"$I30",
-                                            4);
+                                            Tree->IndexName,
+                                            Tree->IndexNameLength);
                 if (!NT_SUCCESS(Status))
                 {
                     DPRINT1("ERROR: Failed to add index allocation!\n");
@@ -1186,7 +1309,7 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
                 }
 
                 // Find the new attribute
-                Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexAllocation, L"$I30", 4, &IndexAllocationContext, &IndexAllocationOffset);
+                Status = FindAttribute(DeviceExt, FileRecord, AttributeIndexAllocation, Tree->IndexName, Tree->IndexNameLength, &IndexAllocationContext, &IndexAllocationOffset);
                 if (!NT_SUCCESS(Status))
                 {
                     DPRINT1("ERROR: Couldn't find newly-created index allocation!\n");
@@ -1200,8 +1323,8 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
                 Status = AddBitmap(DeviceExt,
                                    FileRecord,
                                    EndMarker,
-                                   L"$I30",
-                                   4);
+                                   Tree->IndexName,
+                                   Tree->IndexNameLength);
                 if (!NT_SUCCESS(Status))
                 {
                     DPRINT1("ERROR: Failed to add index bitmap!\n");
@@ -1240,7 +1363,7 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
             }
 
             // Update the sub-node
-            Status = UpdateIndexNode(DeviceExt, FileRecord, CurrentKey->LesserChild, IndexBufferSize, IndexAllocationContext, IndexAllocationOffset);
+            Status = UpdateIndexNode(DeviceExt, Tree, FileRecord, CurrentKey->LesserChild, IndexBufferSize, IndexAllocationContext, IndexAllocationOffset);
             if (!NT_SUCCESS(Status))
             {
                 DPRINT1("ERROR: Failed to update index node!\n");
@@ -1273,6 +1396,7 @@ UpdateIndexAllocation(PDEVICE_EXTENSION DeviceExt,
 
 NTSTATUS
 UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
+                PB_TREE Tree,
                 PFILE_RECORD_HEADER FileRecord,
                 PB_TREE_FILENAME_NODE Node,
                 ULONG IndexBufferSize,
@@ -1305,7 +1429,7 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
             HasChildren = TRUE;
 
             // Update the child node on disk
-            Status = UpdateIndexNode(DeviceExt, FileRecord, CurrentKey->LesserChild, IndexBufferSize, IndexAllocationContext, IndexAllocationOffset);
+            Status = UpdateIndexNode(DeviceExt, Tree, FileRecord, CurrentKey->LesserChild, IndexBufferSize, IndexAllocationContext, IndexAllocationOffset);
             if (!NT_SUCCESS(Status))
             {
                 DPRINT1("ERROR: Failed to update child node!\n");
@@ -1363,6 +1487,7 @@ UpdateIndexNode(PDEVICE_EXTENSION DeviceExt,
         {
             // Allocate the node
             Status = AllocateIndexNode(DeviceExt,
+                                       Tree,
                                        FileRecord,
                                        IndexBufferSize,
                                        IndexAllocationContext,
@@ -1442,18 +1567,111 @@ CreateBTreeKeyFromFilename(ULONGLONG FileReference, PFILENAME_ATTRIBUTE FileName
     // Copy the FileNameAttribute
     RtlCopyMemory(&NewEntry->FileName, FileNameAttribute, AttributeSize);
 
-    // Setup the New Key
-    NewKey = ExAllocatePoolWithTag(NonPagedPool, sizeof(B_TREE_KEY), TAG_NTFS);
+    NewKey = CreateBTreeKeyForEntry(NewEntry);
+    if (!NewKey)
+        ExFreePoolWithTag(NewEntry, TAG_NTFS);
+
+    return NewKey;
+}
+
+/**
+* @name CreateBTreeKeyForEntry
+* @implemented
+*
+* Wraps an index entry in a new key. The key owns Entry from then on.
+*/
+static
+PB_TREE_KEY
+CreateBTreeKeyForEntry(PINDEX_ENTRY_ATTRIBUTE Entry)
+{
+    PB_TREE_KEY NewKey = ExAllocatePoolWithTag(NonPagedPool, sizeof(B_TREE_KEY), TAG_NTFS);
     if (!NewKey)
     {
         DPRINT1("ERROR: Failed to allocate memory for new key!\n");
-        ExFreePoolWithTag(NewEntry, TAG_NTFS);
         return NULL;
     }
+
     RtlZeroMemory(NewKey, sizeof(B_TREE_KEY));
-    NewKey->IndexEntry = NewEntry;
+    NewKey->IndexEntry = Entry;
 
     return NewKey;
+}
+
+/**
+* @name CreateBTreeKeyFromEntry
+* @implemented
+*
+* Creates a key holding a copy of an index entry that has no child.
+*
+* @param Entry
+* The index entry to copy, as NtfsAllocateViewIndexEntry() or CreateBTreeKeyFromFilename() built it.
+*
+* @return
+* The new key, or NULL if an allocation fails.
+*/
+PB_TREE_KEY
+CreateBTreeKeyFromEntry(PINDEX_ENTRY_ATTRIBUTE Entry)
+{
+    PINDEX_ENTRY_ATTRIBUTE NewEntry;
+    PB_TREE_KEY NewKey;
+
+    ASSERT(!BooleanFlagOn(Entry->Flags, NTFS_INDEX_ENTRY_NODE | NTFS_INDEX_ENTRY_END));
+
+    NewEntry = ExAllocatePoolWithTag(NonPagedPool, Entry->Length, TAG_NTFS);
+    if (!NewEntry)
+    {
+        DPRINT1("ERROR: Failed to allocate memory for Index Entry!\n");
+        return NULL;
+    }
+    RtlCopyMemory(NewEntry, Entry, Entry->Length);
+
+    NewKey = CreateBTreeKeyForEntry(NewEntry);
+    if (!NewKey)
+        ExFreePoolWithTag(NewEntry, TAG_NTFS);
+
+    return NewKey;
+}
+
+/**
+* @name NtfsAllocateViewIndexEntry
+* @implemented
+*
+* Builds the index entry of a view index ($O, $Q, $SII, $SDH, ...): the key bytes follow the
+* entry header, and the data follows the key.
+*
+* @param Key
+* The key bytes, compared under the index's collation rule.
+*
+* @param Data
+* The data the entry carries, or NULL for an entry that's only used to search by Key.
+*
+* @return
+* The entry, which the caller frees with ExFreePoolWithTag(TAG_NTFS), or NULL if the allocation fails.
+*/
+PINDEX_ENTRY_ATTRIBUTE
+NtfsAllocateViewIndexEntry(PVOID Key,
+                           USHORT KeyLength,
+                           PVOID Data,
+                           USHORT DataLength)
+{
+    PINDEX_ENTRY_ATTRIBUTE Entry;
+    USHORT DataOffset = FIELD_OFFSET(INDEX_ENTRY_ATTRIBUTE, FileName) + KeyLength;
+    USHORT EntrySize = ALIGN_UP_BY(DataOffset + DataLength, 8);
+
+    Entry = ExAllocatePoolWithTag(NonPagedPool, EntrySize, TAG_NTFS);
+    if (!Entry)
+        return NULL;
+
+    RtlZeroMemory(Entry, EntrySize);
+    Entry->Data.ViewIndex.DataOffset = DataOffset;
+    Entry->Data.ViewIndex.DataLength = DataLength;
+    Entry->Length = EntrySize;
+    Entry->KeyLength = KeyLength;
+    RtlCopyMemory(&Entry->FileName, Key, KeyLength);
+    if (Data)
+        RtlCopyMemory((PUCHAR)Entry + DataOffset, Data, DataLength);
+
+    return Entry;
 }
 
 VOID
@@ -1516,7 +1734,11 @@ DumpBTreeKey(PB_TREE Tree, PB_TREE_KEY Key, ULONG Number, ULONG Depth)
         DbgPrint(" ");
     DbgPrint(" Key #%d", Number);
 
-    if (!(Key->IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
+    if (!(Key->IndexEntry->Flags & NTFS_INDEX_ENTRY_END) && Tree->CollationRule != COLLATION_FILE_NAME)
+    {
+        DbgPrint(" (%u-byte key)\n", Key->IndexEntry->KeyLength);
+    }
+    else if (!(Key->IndexEntry->Flags & NTFS_INDEX_ENTRY_END))
     {
         UNICODE_STRING FileName;
         FileName.Length = Key->IndexEntry->FileName.NameLength * sizeof(WCHAR);
@@ -1647,19 +1869,16 @@ NtfsLoadChildNode(PB_TREE Tree, PB_TREE_KEY Key)
 }
 
 /**
-* @name NtfsInsertKey
+* @name NtfsInsertIndexKey
 * @implemented
 *
-* Inserts a FILENAME_ATTRIBUTE into a B-Tree node.
+* Inserts a copy of an index entry into a B-Tree node.
 *
 * @param Tree
 * Pointer to the B_TREE the key (filename attribute) is being inserted into.
 *
-* @param FileReference
-* Reference number to the file being added. This will be a combination of the MFT index and update sequence number.
-*
-* @param FileNameAttribute
-* Pointer to a FILENAME_ATTRIBUTE which is the data for the key that will be added to the tree. A copy will be made.
+* @param Entry
+* The index entry to add, without a child. A copy will be made.
 *
 * @param Node
 * Pointer to a B_TREE_FILENAME_NODE into which a new key will be inserted, in order.
@@ -1687,15 +1906,14 @@ NtfsLoadChildNode(PB_TREE Tree, PB_TREE_KEY Key)
 * A node is always sorted, with the least comparable filename stored first and a dummy key to mark the end.
 */
 NTSTATUS
-NtfsInsertKey(PB_TREE Tree,
-              ULONGLONG FileReference,
-              PFILENAME_ATTRIBUTE FileNameAttribute,
-              PB_TREE_FILENAME_NODE Node,
-              BOOLEAN CaseSensitive,
-              ULONG MaxIndexRootSize,
-              ULONG IndexRecordSize,
-              PB_TREE_KEY *MedianKey,
-              PB_TREE_FILENAME_NODE *NewRightHandSibling)
+NtfsInsertIndexKey(PB_TREE Tree,
+                   PINDEX_ENTRY_ATTRIBUTE Entry,
+                   PB_TREE_FILENAME_NODE Node,
+                   BOOLEAN CaseSensitive,
+                   ULONG MaxIndexRootSize,
+                   ULONG IndexRecordSize,
+                   PB_TREE_KEY *MedianKey,
+                   PB_TREE_FILENAME_NODE *NewRightHandSibling)
 {
     PB_TREE_KEY NewKey, CurrentKey, PreviousKey;
     NTSTATUS Status = STATUS_SUCCESS;
@@ -1707,10 +1925,9 @@ NtfsInsertKey(PB_TREE Tree,
     *MedianKey = NULL;
     *NewRightHandSibling = NULL;
 
-    DPRINT("NtfsInsertKey(%p, 0x%I64x, %p, %p, %s, %lu, %lu, %p, %p)\n",
+    DPRINT("NtfsInsertIndexKey(%p, %p, %p, %s, %lu, %lu, %p, %p)\n",
            Tree,
-           FileReference,
-           FileNameAttribute,
+           Entry,
            Node,
            CaseSensitive ? "TRUE" : "FALSE",
            MaxIndexRootSize,
@@ -1718,8 +1935,8 @@ NtfsInsertKey(PB_TREE Tree,
            MedianKey,
            NewRightHandSibling);
 
-    // Create the key for the filename attribute
-    NewKey = CreateBTreeKeyFromFilename(FileReference, FileNameAttribute);
+    // Create the key for the entry
+    NewKey = CreateBTreeKeyFromEntry(Entry);
     if (!NewKey)
         return STATUS_INSUFFICIENT_RESOURCES;
 
@@ -1729,16 +1946,13 @@ NtfsInsertKey(PB_TREE Tree,
     for (i = 0; i < Node->KeyCount; i++)
     {
         // Should the New Key go before the current key?
-        LONG Comparison = CompareTreeKeys(NewKey, CurrentKey, CaseSensitive);
+        LONG Comparison = CompareTreeKeys(NewKey, CurrentKey, Tree->CollationRule, CaseSensitive);
 
-        /* The name is already in this index. Inserting it again would leave
+        /* The key is already in this index. Inserting it again would leave
          * two entries the lookup code can never tell apart, so refuse. */
         if (Comparison == 0)
         {
-            DPRINT1("Refusing duplicate index entry '%.*S' (existing file reference 0x%I64x)\n",
-                    NewKey->IndexEntry->FileName.NameLength,
-                    NewKey->IndexEntry->FileName.Name,
-                    CurrentKey->IndexEntry->Data.Directory.IndexedFile);
+            DPRINT1("Refusing duplicate key in index %.*S\n", Tree->IndexNameLength, Tree->IndexName);
 
             DestroyBTreeKey(NewKey);
 
@@ -1762,16 +1976,15 @@ NtfsInsertKey(PB_TREE Tree,
                 PB_TREE_FILENAME_NODE NewChild;
 
                 // Insert the key into the child node
-                Status = NtfsInsertKey(Tree,
-                                       FileReference,
-                                       FileNameAttribute,
-                                       CurrentKey->LesserChild,
-                                       CaseSensitive,
-                                       MaxIndexRootSize,
-                                       IndexRecordSize,
-                                       &NewLeftKey,
-                                       &NewChild);
-                // The child made its own key for the name; this level's isn't needed
+                Status = NtfsInsertIndexKey(Tree,
+                                            Entry,
+                                            CurrentKey->LesserChild,
+                                            CaseSensitive,
+                                            MaxIndexRootSize,
+                                            IndexRecordSize,
+                                            &NewLeftKey,
+                                            &NewChild);
+                // The child made its own key for the entry; this level's isn't needed
                 DestroyBTreeKey(NewKey);
 
                 if (!NT_SUCCESS(Status))
@@ -1861,6 +2074,56 @@ NtfsInsertKey(PB_TREE Tree,
 }
 
 /**
+* @name NtfsInsertKey
+* @implemented
+*
+* Inserts a FILENAME_ATTRIBUTE into a B-Tree node of a $I30 index. See NtfsInsertIndexKey().
+*
+* @param FileReference
+* Reference number to the file being added. This will be a combination of the MFT index and update sequence number.
+*
+* @param FileNameAttribute
+* Pointer to a FILENAME_ATTRIBUTE which is the data for the key that will be added to the tree. A copy will be made.
+*/
+NTSTATUS
+NtfsInsertKey(PB_TREE Tree,
+              ULONGLONG FileReference,
+              PFILENAME_ATTRIBUTE FileNameAttribute,
+              PB_TREE_FILENAME_NODE Node,
+              BOOLEAN CaseSensitive,
+              ULONG MaxIndexRootSize,
+              ULONG IndexRecordSize,
+              PB_TREE_KEY *MedianKey,
+              PB_TREE_FILENAME_NODE *NewRightHandSibling)
+{
+    NTSTATUS Status;
+    PB_TREE_KEY FileNameKey;
+
+    ASSERT(Tree->CollationRule == COLLATION_FILE_NAME);
+
+    FileNameKey = CreateBTreeKeyFromFilename(FileReference, FileNameAttribute);
+    if (!FileNameKey)
+    {
+        *MedianKey = NULL;
+        *NewRightHandSibling = NULL;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Status = NtfsInsertIndexKey(Tree,
+                                FileNameKey->IndexEntry,
+                                Node,
+                                CaseSensitive,
+                                MaxIndexRootSize,
+                                IndexRecordSize,
+                                MedianKey,
+                                NewRightHandSibling);
+
+    DestroyBTreeKey(FileNameKey);
+
+    return Status;
+}
+
+/**
 * @name FindLargestKeyInSubtree
 * @implemented
 *
@@ -1944,7 +2207,7 @@ FindLargestKeyInSubtree(PB_TREE Tree,
 * Key whose index entry will be replaced. It keeps whatever child it had.
 *
 * @param Source
-* Key to copy the file reference and $FILE_NAME from.
+* Key to copy the entry from: its file reference and $FILE_NAME, or its view key and data.
 *
 * @return
 * STATUS_SUCCESS on success, STATUS_INSUFFICIENT_RESOURCES if the allocation fails.
@@ -1959,10 +2222,14 @@ NTSTATUS
 ReplaceKeyIndexEntry(PB_TREE_KEY Key, PB_TREE_KEY Source)
 {
     PINDEX_ENTRY_ATTRIBUTE NewEntry;
-    ULONG AttributeSize = GetFileNameAttributeLength(&Source->IndexEntry->FileName);
-    ULONG EntrySize = ALIGN_UP_BY(AttributeSize + FIELD_OFFSET(INDEX_ENTRY_ATTRIBUTE, FileName), 8);
+    ULONG SourceSize = Source->IndexEntry->Length;
+    ULONG EntrySize;
 
-    EntrySize += sizeof(ULONGLONG); // for the VCN of the child Key retains
+    // Source's own VCN, if it has a child, isn't part of what moves
+    if (BooleanFlagOn(Source->IndexEntry->Flags, NTFS_INDEX_ENTRY_NODE))
+        SourceSize -= sizeof(ULONGLONG);
+
+    EntrySize = SourceSize + sizeof(ULONGLONG); // for the VCN of the child Key retains
 
     NewEntry = ExAllocatePoolWithTag(NonPagedPool, EntrySize, TAG_NTFS);
     if (!NewEntry)
@@ -1971,12 +2238,10 @@ ReplaceKeyIndexEntry(PB_TREE_KEY Key, PB_TREE_KEY Source)
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RtlZeroMemory(NewEntry, EntrySize);
-    NewEntry->Data.Directory.IndexedFile = Source->IndexEntry->Data.Directory.IndexedFile;
+    // The header (file reference or view data location), key and data all come along
+    RtlCopyMemory(NewEntry, Source->IndexEntry, SourceSize);
     NewEntry->Length = EntrySize;
-    NewEntry->KeyLength = AttributeSize;
     NewEntry->Flags = NTFS_INDEX_ENTRY_NODE;
-    RtlCopyMemory(&NewEntry->FileName, &Source->IndexEntry->FileName, AttributeSize);
     SetIndexEntryVCN(NewEntry, GetIndexEntryVCN(Key->IndexEntry));
 
     ExFreePoolWithTag(Key->IndexEntry, TAG_NTFS);
@@ -2104,7 +2369,7 @@ NtfsRemoveKey(PB_TREE Tree,
         if (BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_END))
             break;
 
-        Comparison = CompareTreeKeys(SearchKey, CurrentKey, CaseSensitive);
+        Comparison = CompareTreeKeys(SearchKey, CurrentKey, Tree->CollationRule, CaseSensitive);
 
         if (Comparison == 0)
             return RemoveKeyFromNode(Tree, Node, PreviousKey, CurrentKey);
@@ -2130,6 +2395,64 @@ NtfsRemoveKey(PB_TREE Tree,
     return STATUS_OBJECT_NAME_NOT_FOUND;
 }
 
+
+/**
+* @name NtfsFindKey
+* @implemented
+*
+* Finds the key matching SearchKey in a B-Tree.
+*
+* @param Node
+* Node to search. Callers start at the root node of the tree.
+*
+* @param SearchKey
+* Key describing what to find. Only its key bytes are compared.
+*
+* @param FoundKey
+* Receives the matching key, which stays owned by the tree.
+*
+* @return
+* STATUS_SUCCESS if a key matches, STATUS_OBJECT_NAME_NOT_FOUND if none does, or the error
+* reading a node returned.
+*/
+NTSTATUS
+NtfsFindKey(PB_TREE Tree,
+            PB_TREE_FILENAME_NODE Node,
+            PB_TREE_KEY SearchKey,
+            BOOLEAN CaseSensitive,
+            PB_TREE_KEY *FoundKey)
+{
+    PB_TREE_KEY CurrentKey = Node->FirstKey;
+    NTSTATUS Status;
+
+    *FoundKey = NULL;
+
+    // Everything that sorts before a key is beneath it, and the end marker covers the rest
+    while (!BooleanFlagOn(CurrentKey->IndexEntry->Flags, NTFS_INDEX_ENTRY_END))
+    {
+        LONG Comparison = CompareTreeKeys(SearchKey, CurrentKey, Tree->CollationRule, CaseSensitive);
+
+        if (Comparison == 0)
+        {
+            *FoundKey = CurrentKey;
+            return STATUS_SUCCESS;
+        }
+
+        if (Comparison < 0)
+            break;
+
+        CurrentKey = CurrentKey->NextKey;
+    }
+
+    Status = NtfsLoadChildNode(Tree, CurrentKey);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (CurrentKey->LesserChild == NULL)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    return NtfsFindKey(Tree, CurrentKey->LesserChild, SearchKey, CaseSensitive, FoundKey);
+}
 
 /**
 * @name SplitBTreeNode
