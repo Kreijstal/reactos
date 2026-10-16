@@ -861,6 +861,11 @@ CompareTreeKeys(PB_TREE_KEY Key1,
                 PB_TREE_KEY Key2,
                 BOOLEAN CaseSensitive);
 
+LONG
+CollateFileNames(PUNICODE_STRING Name1,
+                 PUNICODE_STRING Name2,
+                 BOOLEAN CaseSensitive);
+
 NTSTATUS
 CreateBTreeFromIndex(PDEVICE_EXTENSION Vcb,
                      PFILE_RECORD_HEADER FileRecordWithIndex,
