@@ -123,6 +123,30 @@ ReleaseAttributeContext(PNTFS_ATTR_CONTEXT Context)
 
 
 /**
+* @name NtfsAttributeNamesEqual
+*
+* Attribute names, stream names among them, compare without regard to case, the way
+* NTFS folds it.
+*/
+BOOLEAN
+NtfsAttributeNamesEqual(
+    _In_ PDEVICE_EXTENSION Vcb,
+    _In_ PCWSTR Name1,
+    _In_ PCWSTR Name2,
+    _In_ ULONG Length)
+{
+    ULONG i;
+
+    for (i = 0; i < Length; i++)
+    {
+        if (NtfsUpcaseChar(Vcb, Name1[i]) != NtfsUpcaseChar(Vcb, Name2[i]))
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+/**
 * @name FindAttribute
 * @implemented
 *
@@ -161,7 +185,7 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
 
                 AttrName = (PWCHAR)((PCHAR)Attribute + Attribute->NameOffset);
                 DPRINT("%.*S, %.*S\n", Attribute->NameLength, AttrName, NameLength, Name);
-                if (RtlCompareMemory(AttrName, Name, NameLength * sizeof(WCHAR)) == (NameLength  * sizeof(WCHAR)))
+                if (NtfsAttributeNamesEqual(Vcb, AttrName, Name, NameLength))
                 {
                     Found = TRUE;
                 }
@@ -202,7 +226,7 @@ FindAttribute(PDEVICE_EXTENSION Vcb,
 
                 AttrName = (PWCHAR)((PCHAR)AttrListItem + AttrListItem->NameOffset);
                 DPRINT("%.*S, %.*S\n", AttrListItem->NameLength, AttrName, NameLength, Name);
-                if (RtlCompareMemory(AttrName, Name, NameLength * sizeof(WCHAR)) == (NameLength  * sizeof(WCHAR)))
+                if (NtfsAttributeNamesEqual(Vcb, AttrName, Name, NameLength))
                 {
                     Found = TRUE;
                 }
