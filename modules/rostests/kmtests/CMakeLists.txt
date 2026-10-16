@@ -88,7 +88,22 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/IoVolume.c
     ntos_io/FatPerf.c
     ntos_io/NtfsDirIndex.c
+    ntos_io/NtfsCompression.c
+    ntos_io/NtfsCreateSemantics.c
+    ntos_io/NtfsDataPath.c
+    ntos_io/NtfsEa.c
+    ntos_io/NtfsFsctl.c
+    ntos_io/NtfsInfoClasses.c
     ntos_io/NtfsKmt.c
+    ntos_io/NtfsLinks.c
+    ntos_io/NtfsObjectId.c
+    ntos_io/NtfsQuota.c
+    ntos_io/NtfsReparse.c
+    ntos_io/NtfsSecurity.c
+    ntos_io/NtfsSparse.c
+    ntos_io/NtfsStreams.c
+    ntos_io/NtfsUsn.c
+    ntos_io/NtfsVolume.c
     ntos_io/UsbStorageRead.c
     ntos_kd/KdSystemDebugControl.c
     ntos_ke/KeApc.c
@@ -197,6 +212,7 @@ list(APPEND KMTEST_SOURCE
     ntos_io/IoDeviceObject_user.c
     ntos_io/IoReadWrite_user.c
     ntos_io/NtfsDirIndex_user.c
+    ntos_io/NtfsFeatures_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/MmPageoutSysView_user.c
