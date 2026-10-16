@@ -884,11 +884,16 @@ LockOrUnlockVolume(PDEVICE_EXTENSION DeviceExt,
         return STATUS_ACCESS_DENIED;
     }
 
-    /* Bail out if it's already in the demanded state */
-    if (((DeviceExt->Flags & VCB_VOLUME_LOCKED) && Lock) ||
-        (!(DeviceExt->Flags & VCB_VOLUME_LOCKED) && !Lock))
+    /* Locking a locked volume is refused; unlocking one that isn't locked is
+     * STATUS_NOT_LOCKED */
+    if ((DeviceExt->Flags & VCB_VOLUME_LOCKED) && Lock)
     {
         return STATUS_ACCESS_DENIED;
+    }
+
+    if (!(DeviceExt->Flags & VCB_VOLUME_LOCKED) && !Lock)
+    {
+        return STATUS_NOT_LOCKED;
     }
 
     /* Deny locking if we're not alone */
