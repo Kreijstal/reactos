@@ -204,6 +204,11 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
              * name while the file has others */
             if (NT_SUCCESS(Status))
             {
+                NtfsPostUsnClose(DeviceExt,
+                                 Fcb,
+                                 (Fcb->Stream[0] != UNICODE_NULL) ? USN_REASON_STREAM_CHANGE :
+                                 (Fcb->LinkCount > 1) ? USN_REASON_HARD_LINK_CHANGE : USN_REASON_FILE_DELETE);
+
                 if (Fcb->Stream[0] != UNICODE_NULL)
                 {
                     Status = NtfsDeleteStream(DeviceExt, Fcb->MFTIndex, Fcb->Stream);
@@ -237,6 +242,10 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
             Fcb->Flags &= ~FCB_DELETE_PENDING;
         }
+
+        /* The last handle closes the file for the change journal */
+        if (Fcb->OpenHandleCount == 0 && !DeletePending && Fcb->UsnReasons != 0)
+            NtfsPostUsnClose(DeviceExt, Fcb, 0);
 
         if (Fcb->OpenHandleCount != 0)
         {

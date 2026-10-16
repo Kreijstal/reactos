@@ -2059,6 +2059,9 @@ NtfsSetRenameInformation(
         goto Quit;
     }
 
+    /* The journal hears the old name before the change, the new one after */
+    NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_OLD_NAME);
+
     Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
     if (!NT_SUCCESS(Status))
         goto Quit;
@@ -2099,6 +2102,8 @@ NtfsSetRenameInformation(
 
     RtlCopyMemory(&Fcb->Entry, NewValue, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
     Fcb->Entry.NameType = NewValue->NameType;
+
+    NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_NEW_NAME);
 
 Quit:
     NtfsFreeRenamedFcbs(RenamedFcbs);
@@ -2250,6 +2255,44 @@ NtfsSetLinkInformation(
     return Status;
 }
 
+/**
+* @name NtfsJournalSetInformation
+*
+* Tells the change journal what a successful IRP_MJ_SET_INFORMATION changed. A rename
+* reports its old and new names itself, a delete when it happens.
+*/
+static
+VOID
+NtfsJournalSetInformation(PDEVICE_EXTENSION DeviceExt,
+                          PNTFS_FCB Fcb,
+                          FILE_INFORMATION_CLASS FileInformationClass,
+                          LONGLONG OldSize)
+{
+    LONGLONG NewSize = Fcb->RFCB.FileSize.QuadPart;
+
+    switch (FileInformationClass)
+    {
+        case FileBasicInformation:
+            NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_BASIC_INFO_CHANGE);
+            break;
+
+        case FileAllocationInformation:
+        case FileEndOfFileInformation:
+            if (NewSize < OldSize)
+                NtfsPostUsnChange(DeviceExt, Fcb, NtfsUsnDataReason(Fcb, USN_REASON_DATA_TRUNCATION));
+            else if (NewSize > OldSize)
+                NtfsPostUsnChange(DeviceExt, Fcb, NtfsUsnDataReason(Fcb, USN_REASON_DATA_EXTEND));
+            break;
+
+        case FileLinkInformation:
+            NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_HARD_LINK_CHANGE);
+            break;
+
+        default:
+            break;
+    }
+}
+
 NTSTATUS
 NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
 {
@@ -2263,6 +2306,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     PIRP Irp;
     PDEVICE_OBJECT DeviceObject;
     BOOLEAN NeedDirResource;
+    LONGLONG OldSize;
     NTSTATUS Status = STATUS_NOT_IMPLEMENTED;
 
     DPRINT("NtfsSetInformation(%p)\n", IrpContext);
@@ -2299,6 +2343,8 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
 
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
+
+    OldSize = Fcb->RFCB.FileSize.QuadPart;
 
     switch (FileInformationClass)
     {
@@ -2400,6 +2446,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             DPRINT1("FIXME: Unimplemented information class: %s\n", GetInfoClassName(FileInformationClass));
             Status = STATUS_NOT_IMPLEMENTED;
     }
+
+    if (NT_SUCCESS(Status))
+        NtfsJournalSetInformation(DeviceExt, Fcb, FileInformationClass, OldSize);
 
     ExReleaseResourceLite(&Fcb->MainResource);
 

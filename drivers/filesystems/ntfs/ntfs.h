@@ -139,6 +139,16 @@ typedef struct
     ULONG NextSecurityId;
     ULONGLONG SdsEnd;
 
+    /* The change journal, $Extend\$UsnJrnl; 0 while there is none. UsnResource guards
+     * these and the journal's records. Taken after FCB resources, before IndexResource. */
+    ERESOURCE UsnResource;
+    ULONGLONG UsnJournalMftIndex;
+    ULONGLONG UsnJournalId;
+    ULONGLONG UsnMaximumSize;
+    ULONGLONG UsnAllocationDelta;
+    USN UsnLowestValidUsn;
+    USN UsnNextUsn;
+
     NPAGED_LOOKASIDE_LIST FileRecLookasideList;
 
     /* $UpCase, one upcased code point per UCS-2 value. NTFS defines its
@@ -661,6 +671,9 @@ typedef struct _FCB
     USHORT SequenceNumber;  /* Of the file record; with MFTIndex, the file reference */
     USHORT LinkCount;
 
+    /* USN_REASON_* the change journal recorded since the last close; Vcb->UsnResource */
+    ULONG UsnReasons;
+
     FILENAME_ATTRIBUTE Entry;
 
 } NTFS_FCB, *PNTFS_FCB;
@@ -882,6 +895,10 @@ NTSTATUS
 GetLastClusterInDataRun(PDEVICE_EXTENSION Vcb,
                         PNTFS_ATTR_RECORD Attribute,
                         PULONGLONG LastCluster);
+
+BOOLEAN
+NtfsHasNtfs3StandardInformation(PDEVICE_EXTENSION Vcb,
+                                PFILE_RECORD_HEADER FileRecord);
 
 PFILENAME_ATTRIBUTE
 GetBestFileNameFromRecord(PDEVICE_EXTENSION Vcb,
@@ -1163,13 +1180,22 @@ NtfsCreateEmptyFileRecord(PDEVICE_EXTENSION DeviceExt);
 
 NTSTATUS
 NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
-                     PNTFS_FCB ParentFcb,
+                     ULONGLONG ParentReference,
                      PCUNICODE_STRING Name,
                      ULONG FileAttributes,
                      BOOLEAN IsDirectory,
                      ULONG SecurityId,
                      BOOLEAN CaseSensitive,
-                     BOOLEAN CanWait);
+                     BOOLEAN CanWait,
+                     PULONGLONG NewFileReference);
+
+/* The file reference of the file an FCB is open on: its MFT index and sequence number */
+FORCEINLINE
+ULONGLONG
+NtfsFileReference(PNTFS_FCB Fcb)
+{
+    return Fcb->MFTIndex | ((ULONGLONG)Fcb->SequenceNumber << 48);
+}
 
 /* devctl.c */
 
@@ -1594,6 +1620,15 @@ NtfsDeleteStream(PDEVICE_EXTENSION DeviceExt,
                  PCWSTR StreamName);
 
 NTSTATUS
+NtfsWriteStreamAt(PDEVICE_EXTENSION Vcb,
+                  ULONGLONG MftIndex,
+                  PCWSTR StreamName,
+                  ULONG StreamNameLength,
+                  ULONGLONG Offset,
+                  PVOID Buffer,
+                  ULONG Length);
+
+NTSTATUS
 NtfsMakeRoomInFileRecord(PDEVICE_EXTENSION DeviceExt,
                          PFILE_RECORD_HEADER FileRecord,
                          ULONG BytesNeeded,
@@ -1852,6 +1887,64 @@ NTSTATUS
 NtfsFindFileByObjectId(PDEVICE_EXTENSION DeviceExt,
                        PUCHAR ObjectId,
                        PULONGLONG MftIndex);
+
+
+/* usnjrnl.c */
+
+VOID
+NtfsLoadUsnJournal(PDEVICE_EXTENSION Vcb);
+
+VOID
+NtfsPostUsnChange(PDEVICE_EXTENSION Vcb,
+                  PNTFS_FCB Fcb,
+                  ULONG Reason);
+
+/* A change to a stream's data: the named-stream reason for a named stream */
+FORCEINLINE
+ULONG
+NtfsUsnDataReason(PNTFS_FCB Fcb,
+                  ULONG Reason)
+{
+    return (Fcb->Stream[0] != UNICODE_NULL) ? Reason << 4 : Reason;
+}
+
+VOID
+NtfsPostUsnClose(PDEVICE_EXTENSION Vcb,
+                 PNTFS_FCB Fcb,
+                 ULONG Reason);
+
+NTSTATUS
+NtfsQueryUsnJournal(PDEVICE_EXTENSION Vcb,
+                    PUSN_JOURNAL_DATA Data);
+
+NTSTATUS
+NtfsCreateUsnJournal(PDEVICE_EXTENSION Vcb,
+                     PCREATE_USN_JOURNAL_DATA Create);
+
+NTSTATUS
+NtfsDeleteUsnJournal(PDEVICE_EXTENSION Vcb,
+                     PDELETE_USN_JOURNAL_DATA Delete);
+
+NTSTATUS
+NtfsReadUsnJournal(PDEVICE_EXTENSION Vcb,
+                   PREAD_USN_JOURNAL_DATA Request,
+                   PUCHAR Output,
+                   ULONG OutputLength,
+                   PULONG Returned);
+
+NTSTATUS
+NtfsReadFileUsnData(PDEVICE_EXTENSION Vcb,
+                    PNTFS_FCB Fcb,
+                    PUCHAR Output,
+                    ULONG OutputLength,
+                    PULONG Returned);
+
+NTSTATUS
+NtfsEnumUsnData(PDEVICE_EXTENSION Vcb,
+                PMFT_ENUM_DATA Enum,
+                PUCHAR Output,
+                ULONG OutputLength,
+                PULONG Returned);
 
 
 /* secure.c */

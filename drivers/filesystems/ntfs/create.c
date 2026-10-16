@@ -1149,14 +1149,16 @@ NtfsCreateNewFile(
     if (!NT_SUCCESS(Status))
         return Status;
 
+    ASSERT(NtfsFCBIsDirectory(ParentFcb));
     Status = NtfsCreateFileRecord(DeviceExt,
-                                  ParentFcb,
+                                  NtfsFileReference(ParentFcb),
                                   &FinalName,
                                   Attributes,
                                   IsDirectory,
                                   SecurityId,
                                   CaseSensitive,
-                                  BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+                                  BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT),
+                                  NULL);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Couldn't create '%wZ' (Status %lx)\n", Path, Status);
@@ -1178,7 +1180,10 @@ NtfsCreateNewFile(
 
     Status = NtfsFinishOpen(DeviceExt, FileObject, Stack);
     if (NT_SUCCESS(Status))
+    {
         Irp->IoStatus.Information = FILE_CREATED;
+        NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_FILE_CREATE);
+    }
 
     return Status;
 }
@@ -1279,13 +1284,14 @@ NtfsOpenBaseOfStream(
     if (NT_SUCCESS(Status))
     {
         Status = NtfsCreateFileRecord(DeviceExt,
-                                      ParentFcb,
+                                      NtfsFileReference(ParentFcb),
                                       &FinalName,
                                       NtfsNewFileAttributes(Stack->Parameters.Create.FileAttributes, FALSE),
                                       FALSE,
                                       SecurityId,
                                       CaseSensitive,
-                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+                                      BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT),
+                                      NULL);
     }
     NtfsReleaseFCB(DeviceExt, ParentFcb);
     if (!NT_SUCCESS(Status))
@@ -1791,8 +1797,8 @@ NtfsAddEmptyIndex(
 * @param DeviceExt
 * Points to the target disk's DEVICE_EXTENSION
 *
-* @param ParentFcb
-* FCB of the directory the file is created in.
+* @param ParentReference
+* File reference of the directory the file is created in.
 *
 * @param Name
 * Name of the new file, a single path component.
@@ -1814,6 +1820,9 @@ NtfsAddEmptyIndex(
 * Boolean indicating if the function is allowed to wait for exclusive access to the master file table.
 * This will only be relevant if the MFT doesn't have any free file records and needs to be enlarged.
 *
+* @param FileReference
+* Optionally receives the file reference of the new file.
+*
 * @return
 * STATUS_SUCCESS on success.
 * STATUS_INSUFFICIENT_RESOURCES if unable to allocate memory for the file record.
@@ -1822,32 +1831,30 @@ NtfsAddEmptyIndex(
 */
 NTSTATUS
 NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
-                     PNTFS_FCB ParentFcb,
+                     ULONGLONG ParentReference,
                      PCUNICODE_STRING Name,
                      ULONG FileAttributes,
                      BOOLEAN IsDirectory,
                      ULONG SecurityId,
                      BOOLEAN CaseSensitive,
-                     BOOLEAN CanWait)
+                     BOOLEAN CanWait,
+                     PULONGLONG NewFileReference)
 {
     NTSTATUS Status;
     PFILE_RECORD_HEADER FileRecord;
     PNTFS_ATTR_RECORD NextAttribute;
     PFILENAME_ATTRIBUTE FilenameAttribute;
-    ULONGLONG ParentReference;
     ULONGLONG FileMftIndex;
     ULONGLONG FileReference;
 
-    DPRINT("NtfsCreateFileRecord(%p, %p, '%wZ', 0x%lx, %s, %s, %s)\n",
+    DPRINT("NtfsCreateFileRecord(%p, 0x%I64x, '%wZ', 0x%lx, %s, %s, %s)\n",
            DeviceExt,
-           ParentFcb,
+           ParentReference,
            Name,
            FileAttributes,
            IsDirectory ? "TRUE" : "FALSE",
            CaseSensitive ? "TRUE" : "FALSE",
            CanWait ? "TRUE" : "FALSE");
-
-    ASSERT(NtfsFCBIsDirectory(ParentFcb));
 
     FileRecord = NtfsCreateEmptyFileRecord(DeviceExt);
     if (!FileRecord)
@@ -1870,7 +1877,6 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
     NextAttribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)NextAttribute + (ULONG_PTR)NextAttribute->Length);
 
     // Add the $FILE_NAME attribute
-    ParentReference = ParentFcb->MFTIndex | ((ULONGLONG)ParentFcb->SequenceNumber << 48);
     Status = AddFileName(FileRecord, NextAttribute, ParentReference, Name, CaseSensitive, FileAttributes);
     if (!NT_SUCCESS(Status))
     {
@@ -1912,7 +1918,7 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
 
         // Add the filename attribute to the filename-index of the parent directory
         Status = NtfsAddFilenameToDirectory(DeviceExt,
-                                            ParentFcb->MFTIndex,
+                                            ParentReference & NTFS_MFT_MASK,
                                             FileReference,
                                             FilenameAttribute,
                                             CaseSensitive);
@@ -1920,6 +1926,10 @@ NtfsCreateFileRecord(PDEVICE_EXTENSION DeviceExt,
         {
             /* Nothing refers to the record, so give it back */
             FreeMftEntry(DeviceExt, FileMftIndex);
+        }
+        else if (NewFileReference != NULL)
+        {
+            *NewFileReference = FileReference;
         }
     }
 
