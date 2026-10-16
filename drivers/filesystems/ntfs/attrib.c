@@ -220,19 +220,19 @@ NtfsNameHasStreamPart(PCUNICODE_STRING Name)
 * Pointer to the region of memory that will receive the $FILE_NAME attribute.
 * This address must reside within FileRecord. Must be aligned to an 8-byte boundary (relative to FileRecord).
 *
-* @param DeviceExt
-* Points to the target disk's DEVICE_EXTENSION.
+* @param ParentReference
+* File reference (MFT index and sequence number) of the directory the name is in.
 *
-* @param FileObject
-* Pointer to the FILE_OBJECT which represents the new name.
-* This parameter is used to determine the filename and parent directory.
+* @param Name
+* The name, a single path component.
 *
 * @param CaseSensitive
 * Boolean indicating if the function should operate in case-sensitive mode. This will be TRUE
 * if an application opened the file with the FILE_FLAG_POSIX_SEMANTICS flag.
 *
-* @param ParentMftIndex
-* Pointer to a ULONGLONG which will receive the index of the parent directory.
+* @param FileAttributes
+* The attributes $STANDARD_INFORMATION was given, duplicated here as directory listings
+* report them from the index entry.
 *
 * @return
 * STATUS_SUCCESS on success. STATUS_NOT_IMPLEMENTED if target address isn't at the end
@@ -249,19 +249,18 @@ NtfsNameHasStreamPart(PCUNICODE_STRING Name)
 NTSTATUS
 AddFileName(PFILE_RECORD_HEADER FileRecord,
             PNTFS_ATTR_RECORD AttributeAddress,
-            PDEVICE_EXTENSION DeviceExt,
-            PFILE_OBJECT FileObject,
+            ULONGLONG ParentReference,
+            PCUNICODE_STRING Name,
             BOOLEAN CaseSensitive,
-            PULONGLONG ParentMftIndex)
+            ULONG FileAttributes)
 {
     ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
     PFILENAME_ATTRIBUTE FileNameAttribute;
     LARGE_INTEGER SystemTime;
     ULONG FileRecordEnd = AttributeAddress->Length;
-    ULONGLONG CurrentMFTIndex = NTFS_FILE_ROOT;
-    UNICODE_STRING Current, Remaining, FilenameNoPath;
-    NTSTATUS Status = STATUS_SUCCESS;
-    ULONG FirstEntry;
+
+    ASSERT(Name->Length != 0 && Name->Length <= NTFS_MAX_NAME_LENGTH * sizeof(WCHAR));
+    ASSERT(!NtfsNameHasStreamPart(Name));
 
     if (AttributeAddress->Type != AttributeEnd)
     {
@@ -281,65 +280,18 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     FileNameAttribute->LastWriteTime = SystemTime.QuadPart;
     FileNameAttribute->LastAccessTime = SystemTime.QuadPart;
 
-    // Is this a directory?
-    if(FileRecord->Flags & FRH_DIRECTORY)
-        FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_DIRECTORY;
-    else
-        FileNameAttribute->FileAttributes = NTFS_FILE_TYPE_ARCHIVE;
+    FileNameAttribute->FileAttributes = FileAttributes;
+    if (FileRecord->Flags & FRH_DIRECTORY)
+        FileNameAttribute->FileAttributes |= NTFS_FILE_TYPE_DIRECTORY;
 
-    // we need to extract the filename from the path
-    DPRINT("Pathname: %wZ\n", &FileObject->FileName);
+    FileNameAttribute->DirectoryFileReferenceNumber = ParentReference;
 
-    FsRtlDissectName(FileObject->FileName, &Current, &Remaining);
-
-    while (Remaining.Length != 0)
-    {
-        DPRINT("Current: %wZ\n", &Current);
-
-        FirstEntry = 0;
-        Status = NtfsFindMftRecord(DeviceExt,
-                                   CurrentMFTIndex,
-                                   &Current,
-                                   &FirstEntry,
-                                   FALSE,
-                                   CaseSensitive,
-                                   &CurrentMFTIndex);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("Path component '%wZ' of '%wZ' not found (Status %lx)\n",
-                    &Current, &FileObject->FileName, Status);
-            return Status;
-        }
-
-        FsRtlDissectName(Remaining, &Current, &Remaining);
-    }
-
-    /* Whatever is left over is the file's own name */
-    FilenameNoPath = Current;
-    ASSERT(!NtfsNameHasStreamPart(&FilenameNoPath));
-
-    DPRINT("MFT Index of parent: %I64u\n", CurrentMFTIndex);
-
-    // set reference to parent directory
-    FileNameAttribute->DirectoryFileReferenceNumber = CurrentMFTIndex;
-    *ParentMftIndex = CurrentMFTIndex;
-
-    DPRINT("SequenceNumber: 0x%02x\n", FileRecord->SequenceNumber);
-
-    // The highest 2 bytes should be the sequence number, unless the parent happens to be root
-    if (CurrentMFTIndex == NTFS_FILE_ROOT)
-        FileNameAttribute->DirectoryFileReferenceNumber |= (ULONGLONG)NTFS_FILE_ROOT << 48;
-    else
-        FileNameAttribute->DirectoryFileReferenceNumber |= (ULONGLONG)FileRecord->SequenceNumber << 48;
-
-    DPRINT("FileNameAttribute->DirectoryFileReferenceNumber: 0x%016I64x\n", FileNameAttribute->DirectoryFileReferenceNumber);
-
-    FileNameAttribute->NameLength = FilenameNoPath.Length / sizeof(WCHAR);
-    RtlCopyMemory(FileNameAttribute->Name, FilenameNoPath.Buffer, FilenameNoPath.Length);
+    FileNameAttribute->NameLength = Name->Length / sizeof(WCHAR);
+    RtlCopyMemory(FileNameAttribute->Name, Name->Buffer, Name->Length);
 
     // For now, we're emulating the way Windows behaves when 8.3 name generation is disabled
     // TODO: add DOS Filename as needed
-    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3(&FilenameNoPath, NULL, NULL))
+    if (!CaseSensitive && RtlIsNameLegalDOS8Dot3((PUNICODE_STRING)Name, NULL, NULL))
         FileNameAttribute->NameType = NTFS_FILE_NAME_WIN32_AND_DOS;
     else
         FileNameAttribute->NameType = NTFS_FILE_NAME_POSIX;
@@ -347,10 +299,10 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     FileRecord->LinkCount++;
 
     AttributeAddress->Length = ResidentHeaderLength +
-        FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + FilenameNoPath.Length;
+        FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + Name->Length;
     AttributeAddress->Length = ALIGN_UP_BY(AttributeAddress->Length, ATTR_RECORD_ALIGNMENT);
 
-    AttributeAddress->Resident.ValueLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + FilenameNoPath.Length;
+    AttributeAddress->Resident.ValueLength = FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) + Name->Length;
     AttributeAddress->Resident.ValueOffset = ResidentHeaderLength;
     AttributeAddress->Resident.Flags = RA_INDEXED;
 
@@ -358,7 +310,7 @@ AddFileName(PFILE_RECORD_HEADER FileRecord,
     AttributeAddress = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttributeAddress + AttributeAddress->Length);
     SetFileRecordEnd(FileRecord, AttributeAddress, FileRecordEnd);
 
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -784,6 +736,9 @@ AddRun(PNTFS_VCB Vcb,
 * Pointer to the region of memory that will receive the $STANDARD_INFORMATION attribute.
 * This address must reside within FileRecord. Must be aligned to an 8-byte boundary (relative to FileRecord).
 *
+* @param FileAttributes
+* The FILE_ATTRIBUTE_* flags the file starts with.
+*
 * @return
 * STATUS_SUCCESS on success. STATUS_NOT_IMPLEMENTED if target address isn't at the end
 * of the given file record.
@@ -798,7 +753,8 @@ AddRun(PNTFS_VCB Vcb,
 */
 NTSTATUS
 AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
-                       PNTFS_ATTR_RECORD AttributeAddress)
+                       PNTFS_ATTR_RECORD AttributeAddress,
+                       ULONG FileAttributes)
 {
     ULONG ResidentHeaderLength = FIELD_OFFSET(NTFS_ATTR_RECORD, Resident.Reserved) + sizeof(UCHAR);
     PSTANDARD_INFORMATION StandardInfo = (PSTANDARD_INFORMATION)((LONG_PTR)AttributeAddress + ResidentHeaderLength);
@@ -824,7 +780,7 @@ AddStandardInformation(PFILE_RECORD_HEADER FileRecord,
     StandardInfo->ChangeTime = SystemTime.QuadPart;
     StandardInfo->LastWriteTime = SystemTime.QuadPart;
     StandardInfo->LastAccessTime = SystemTime.QuadPart;
-    StandardInfo->FileAttribute = NTFS_FILE_TYPE_ARCHIVE;
+    StandardInfo->FileAttribute = FileAttributes;
 
     // move the attribute-end and file-record-end markers to the end of the file record
     AttributeAddress = (PNTFS_ATTR_RECORD)((ULONG_PTR)AttributeAddress + AttributeAddress->Length);
