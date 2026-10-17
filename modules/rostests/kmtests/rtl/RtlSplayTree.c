@@ -87,8 +87,70 @@ static void RtlSplayTreeTest()
     ok(IsListEmpty(&Allocations), "Didn't free all memory\n");
 }
 
+#ifndef RTL_USE_AVL_TABLES
+/* Indexed enumeration is in insertion order, independently of the previous
+ * index queried, tree rotations, deletion, or a repeated insertion. */
+static VOID
+TestIndexedElements(VOID)
+{
+    RTL_GENERIC_TABLE Table;
+    CHAR Values[] = "hdbfaceg";
+    CHAR Remaining[] = "hdbaceg";
+    PCHAR Element;
+    ULONG i, j;
+    BOOLEAN Inserted, Deleted;
+
+    RtlInitializeGenericTable(&Table, CompareCharTable, AllocRoutine, FreeRoutine, NULL);
+    for (i = 0; i < sizeof(Values) - 1; ++i)
+    {
+        Element = RtlInsertElementGenericTable(&Table, &Values[i], sizeof(CHAR), &Inserted);
+        ok(Element != NULL && Inserted, "failed to insert element %lu\n", i);
+    }
+    for (i = 0; i < sizeof(Values) - 1; ++i)
+    {
+        Element = RtlGetElementGenericTable(&Table, i);
+        ok(Element != NULL && *Element == Values[i], "wrong forward element %lu\n", i);
+    }
+    for (i = 0; i < sizeof(Values) - 1; ++i)
+    {
+        for (j = 0; j < sizeof(Values) - 1; ++j)
+        {
+            Element = RtlGetElementGenericTable(&Table, i);
+            ok(Element != NULL && *Element == Values[i], "wrong index %lu before %lu\n", i, j);
+            Element = RtlGetElementGenericTable(&Table, j);
+            ok(Element != NULL && *Element == Values[j], "wrong index %lu after %lu\n", j, i);
+        }
+    }
+    Element = RtlGetElementGenericTable(&Table, sizeof(Values) - 1);
+    ok(Element == NULL, "out-of-range index returned %p\n", Element);
+    Element = RtlGetElementGenericTable(&Table, MAXULONG);
+    ok(Element == NULL, "MAXULONG index returned %p\n", Element);
+
+    Deleted = RtlDeleteElementGenericTable(&Table, &Values[3]);
+    ok(Deleted, "failed to delete middle acquisition\n");
+    for (i = 0; i < sizeof(Remaining) - 1; ++i)
+    {
+        Element = RtlGetElementGenericTable(&Table, i);
+        ok(Element != NULL && *Element == Remaining[i], "wrong index %lu after deletion\n", i);
+    }
+    Element = RtlInsertElementGenericTable(&Table, &Values[3], sizeof(CHAR), &Inserted);
+    ok(Element != NULL && Inserted, "failed to reinsert removed element\n");
+    Element = RtlGetElementGenericTable(&Table, sizeof(Values) - 2);
+    ok(Element != NULL && *Element == Values[3], "reinserted element was not appended\n");
+    for (i = 0; i < sizeof(Values) - 1; ++i)
+    {
+        Deleted = RtlDeleteElementGenericTable(&Table, &Values[i]);
+        ok(Deleted, "failed to delete element %lu\n", i);
+    }
+    ok(IsListEmpty(&Allocations), "indexed enumeration leaked allocations\n");
+}
+#endif
+
 START_TEST(RtlSplayTree)
 {
     InitializeListHead(&Allocations);
     RtlSplayTreeTest();
+#ifndef RTL_USE_AVL_TABLES
+    TestIndexedElements();
+#endif
 }
