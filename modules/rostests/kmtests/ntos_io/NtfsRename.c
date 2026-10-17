@@ -42,7 +42,7 @@ static VOID
 TestLinks(PCWSTR Dir)
 {
     WCHAR Path[MAX_PATH], NewPath[MAX_PATH], Alias[MAX_PATH], Moved[MAX_PATH];
-    WCHAR Child[MAX_PATH], StreamPath[MAX_PATH], Name[40];
+    WCHAR Child[MAX_PATH], StreamPath[MAX_PATH], CasePath[MAX_PATH], Name[40];
     HANDLE File = NULL, Stream = NULL;
     ULONGLONG Id;
     NTSTATUS Status;
@@ -74,6 +74,23 @@ TestLinks(PCWSTR Dir)
     Status = NtfsKmtRename(File, NewPath, FALSE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = NtfsKmtRename(File, NewPath, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    NtfsKmtJoin(CasePath, RTL_NUMBER_OF(CasePath), Dir, L"GoNe.bin");
+    Status = NtfsKmtRename(File, CasePath, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtQueryInfo(File, FileName, sizeof(NameBuffer), FileNameInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        PCWSTR Suffix = L"\\GoNe.bin";
+        ULONG Bytes = (ULONG)(wcslen(Suffix) * sizeof(WCHAR));
+        ok(FileName->FileNameLength >= Bytes &&
+           RtlEqualMemory((PUCHAR)FileName->FileName + FileName->FileNameLength - Bytes,
+                          Suffix, Bytes), "case-only rename did not retain the requested spelling\n");
+    }
+    Status = NtfsKmtRename(File, NewPath, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
     ZwClose(File); File = NULL;
     CheckMissing(Path);
     CheckFile(NewPath, Id, 26, "data");
@@ -86,7 +103,8 @@ TestLinks(PCWSTR Dir)
 
     /* This name is beyond the base record. Rename must update that owner,
      * retaining both the file's reference sequence and its other names. */
-    NtfsKmtJoin(Moved, RTL_NUMBER_OF(Moved), Dir, L"moved-024.dat");
+    NtfsKmtJoin(Alias, RTL_NUMBER_OF(Alias), Dir, L"alias-000.dat");
+    NtfsKmtJoin(Moved, RTL_NUMBER_OF(Moved), Dir, L"moved-000.dat");
     Status = NtfsKmtOpen(&File, Alias, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
@@ -102,13 +120,109 @@ TestLinks(PCWSTR Dir)
     Status = NtfsKmtOpen(&Stream, StreamPath, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
-    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Child, L"moved-024.dat");
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Child, L"moved-000.dat");
     Status = NtfsKmtRename(File, Path, FALSE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) goto Cleanup;
     CheckMissing(Moved);
     CheckFile(Path, Id, 26, "data");
     CheckFile(NewPath, Id, 26, "data");
+    /* The selected filename's extension record is crowded. A longer name
+     * must be able to move to another record without losing any alias. */
+    {
+        WCHAR LongPath[MAX_PATH + 256], Leaf[256];
+        for (i = 0; i < 255; i++) Leaf[i] = L'h';
+        Leaf[255] = UNICODE_NULL;
+        NtfsKmtJoin(LongPath, RTL_NUMBER_OF(LongPath), Child, Leaf);
+        Status = NtfsKmtRename(File, LongPath, FALSE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            CheckMissing(Path);
+            CheckFile(LongPath, Id, 26, "data");
+            /* Return to the short name for the stream-path checks below. */
+            Status = NtfsKmtRename(File, Path, FALSE);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+        }
+    }
+    /* A denied replacement after staging a large filename must restore
+     * the old name metadata, not merely leave its old index entry present. */
+    {
+        WCHAR Protected[MAX_PATH + 256], Leaf[256], OldAlias[MAX_PATH];
+        HANDLE Target = NULL, Rename = NULL;
+        FILE_BASIC_INFORMATION Basic;
+        PFILE_LINKS_INFORMATION Links;
+        PUCHAR LinkBuffer;
+        const ULONG BufferSize = 4096;
+        PFILE_LINK_ENTRY_INFORMATION Entry;
+        ULONGLONG TargetId;
+        BOOLEAN Found = FALSE, Ghost = FALSE;
+        ULONG Offset;
+
+        for (i = 0; i < 255; i++) Leaf[i] = L'h';
+        Leaf[255] = UNICODE_NULL;
+        NtfsKmtJoin(Protected, RTL_NUMBER_OF(Protected), Child, Leaf);
+        NtfsKmtJoin(OldAlias, RTL_NUMBER_OF(OldAlias), Dir, L"alias-001.dat");
+        Status = NtfsKmtCreateFileWithData(Protected, "lock", 4);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtOpen(&Target, Protected, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            TargetId = NtfsKmtQueryFileId(Target);
+            RtlZeroMemory(&Basic, sizeof(Basic));
+            Basic.FileAttributes = FILE_ATTRIBUTE_READONLY;
+            Status = NtfsKmtSetInfo(Target, &Basic, sizeof(Basic), FileBasicInformation);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            ZwClose(Target); Target = NULL;
+            Status = NtfsKmtOpen(&Rename, OldAlias, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                LinkBuffer = ExAllocatePoolWithTag(PagedPool, BufferSize, 'RtfN');
+                ok(LinkBuffer != NULL, "allocating link query buffer failed\n");
+                if (LinkBuffer == NULL)
+                {
+                    ZwClose(Rename);
+                    goto Cleanup;
+                }
+                Links = (PFILE_LINKS_INFORMATION)LinkBuffer;
+                Status = NtfsKmtRename(Rename, Protected, TRUE);
+                ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+                CheckFile(OldAlias, Id, 26, "data");
+                CheckFile(Protected, TargetId, 1, "lock");
+                Status = NtfsKmtQueryInfo(Rename, Links, BufferSize, FileHardLinkInformation, NULL);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                if (NT_SUCCESS(Status))
+                {
+                    ok_eq_ulong(Links->EntriesReturned, 26);
+                    Offset = FIELD_OFFSET(FILE_LINKS_INFORMATION, Entry);
+                    for (i = 0; i < Links->EntriesReturned; i++)
+                    {
+                        if (Offset + FIELD_OFFSET(FILE_LINK_ENTRY_INFORMATION, FileName) > BufferSize)
+                            break;
+                        Entry = (PFILE_LINK_ENTRY_INFORMATION)(LinkBuffer + Offset);
+                        if (Entry->FileNameLength > (BufferSize - Offset -
+                                                     FIELD_OFFSET(FILE_LINK_ENTRY_INFORMATION, FileName)) / sizeof(WCHAR))
+                            break;
+                        if (Entry->FileNameLength == RTL_NUMBER_OF(L"alias-001.dat") - 1 &&
+                            RtlEqualMemory(Entry->FileName, L"alias-001.dat", Entry->FileNameLength * sizeof(WCHAR)))
+                            Found = TRUE;
+                        if (Entry->FileNameLength == 255 && Entry->FileName[0] == L'h')
+                            Ghost = TRUE;
+                        if (Entry->NextEntryOffset == 0) break;
+                        Offset += Entry->NextEntryOffset;
+                    }
+                    ok(Found, "denied rename lost the old filename attribute\n");
+                    ok(!Ghost, "denied rename left a staged filename attribute\n");
+                }
+                ExFreePoolWithTag(LinkBuffer, 'RtfN');
+                ZwClose(Rename);
+            }
+            Status = NtfsKmtDelete(Protected);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+        }
+    }
     Status = NtfsKmtRead(Stream, 0, StreamData, sizeof(StreamData), &Read);
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulongptr(Read, sizeof(StreamData));
@@ -117,7 +231,7 @@ TestLinks(PCWSTR Dir)
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status))
     {
-        PCWSTR Suffix = L"\\child\\moved-024.dat:keep";
+        PCWSTR Suffix = L"\\child\\moved-000.dat:keep";
         ULONG SuffixBytes = (ULONG)(wcslen(Suffix) * sizeof(WCHAR));
         ok(FileName->FileNameLength >= SuffixBytes &&
            RtlEqualMemory((PUCHAR)FileName->FileName + FileName->FileNameLength - SuffixBytes,
@@ -230,6 +344,45 @@ Cleanup:
     if (File != NULL) ZwClose(File);
 }
 
+static VOID
+TestLongName(PCWSTR Dir)
+{
+    WCHAR Source[MAX_PATH], Target[MAX_PATH + 256], Leaf[256];
+    HANDLE File = NULL;
+    UCHAR Data[600], ReadBack[600];
+    ULONGLONG Id;
+    ULONG_PTR Read;
+    ULONG i;
+    NTSTATUS Status;
+
+    NtfsKmtJoin(Source, RTL_NUMBER_OF(Source), Dir, L"grow.bin");
+    for (i = 0; i < 255; i++) Leaf[i] = L'g';
+    Leaf[255] = UNICODE_NULL;
+    NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), Dir, Leaf);
+    for (i = 0; i < sizeof(Data); i++) Data[i] = (UCHAR)(i * 13 + 7);
+    Status = NtfsKmtCreateFileWithData(Source, Data, sizeof(Data));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Id = NtfsKmtQueryFileId(File);
+    Status = NtfsKmtRename(File, Target, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    CheckMissing(Source);
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtOpen(&File, Target, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    ok_eq_longlong(NtfsKmtQueryFileId(File), Id);
+    Status = NtfsKmtRead(File, 0, ReadBack, sizeof(ReadBack), &Read);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulongptr(Read, sizeof(ReadBack));
+    ok(RtlEqualMemory(Data, ReadBack, sizeof(Data)), "making room for a long name changed data\n");
+Cleanup:
+    if (File != NULL) ZwClose(File);
+}
+
 START_TEST(NtfsRename)
 {
     WCHAR Root[MAX_PATH], Dir[MAX_PATH];
@@ -241,6 +394,7 @@ START_TEST(NtfsRename)
     if (!NT_SUCCESS(Status)) return;
     TestLinks(Dir);
     TestReplacement(Dir);
+    TestLongName(Dir);
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
 }
