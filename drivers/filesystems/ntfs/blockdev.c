@@ -48,6 +48,9 @@ NtfsReadDiskCached(PDEVICE_EXTENSION Vcb,
     ULONG Piece;
     NTSTATUS Status = STATUS_SUCCESS;
 
+    if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        return STATUS_DEVICE_REMOVED;
+
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL)
     {
@@ -95,6 +98,9 @@ NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
 {
     LARGE_INTEGER Offset;
     NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        return STATUS_DEVICE_REMOVED;
 
     if (Vcb->StreamFileObject == NULL ||
         Vcb->StreamFileObject->PrivateCacheMap == NULL)

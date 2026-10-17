@@ -131,7 +131,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
 
-        NtfsApplyDeleteOnClose(DeviceExt, Fcb, FileObject);
+        if (!(DeviceExt->Flags & VCB_DEVICE_REMOVED))
+            NtfsApplyDeleteOnClose(DeviceExt, Fcb, FileObject);
 
         NtfsUncountOpen(DeviceExt, Fcb, FileObject);
 
@@ -143,7 +144,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         /* A file marked for deletion goes on the last handle. Truncate it first, so the cache
          * manager drops its pages while there are still clusters to write them back to. */
         if (Fcb->OpenHandleCount == 0 &&
-            BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING))
+            BooleanFlagOn(Fcb->Flags, FCB_DELETE_PENDING) &&
+            !(DeviceExt->Flags & VCB_DEVICE_REMOVED))
         {
             DeletePending = TRUE;
 
@@ -159,7 +161,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         if (Fcb->OpenHandleCount == 0 &&
             !DeletePending &&
             !NtfsFCBIsDirectory(Fcb) &&
-            !(DeviceExt->Flags & VCB_VOLUME_DISMOUNTED) &&
+            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED)) &&
             Fcb->RFCB.AllocationSize.QuadPart > (LONGLONG)ROUND_UP(Fcb->RFCB.FileSize.QuadPart, DeviceExt->NtfsInfo.BytesPerCluster))
         {
             NTSTATUS Status;
@@ -246,7 +248,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
         }
 
         /* The last handle closes the file for the change journal */
-        if (Fcb->OpenHandleCount == 0 && !DeletePending && Fcb->UsnReasons != 0)
+        if (Fcb->OpenHandleCount == 0 && !DeletePending && Fcb->UsnReasons != 0 &&
+            !(DeviceExt->Flags & VCB_DEVICE_REMOVED))
             NtfsPostUsnClose(DeviceExt, Fcb, 0);
 
         if (Fcb->OpenHandleCount != 0)
