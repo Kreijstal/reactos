@@ -30,10 +30,44 @@ typedef struct _LOCK_INFORMATION
     IO_CSQ Csq;
     KSPIN_LOCK CsqLock;
     LIST_ENTRY CsqList;
-    PFILE_LOCK BelongsTo;
+    PCOMPLETE_LOCK_IRP_ROUTINE CompleteRoutine;
+    LONG References;
     ULONGLONG NextSequence;
     ULONG Generation;
 } LOCK_INFORMATION, *PLOCK_INFORMATION;
+
+/* One reference belongs to FILE_LOCK, another to every queued or dequeued
+ * request until its completion/reattempt returns. Cancellation can complete
+ * outside the queue lock while the filesystem uninitializes the FILE_LOCK. */
+typedef struct _PENDING_FILE_LOCK
+{
+    PLOCK_INFORMATION Info;
+    FILE_LOCK_INFO Request;
+    PVOID Context;
+    PVOID SavedDriverContext;
+    ULONG Generation;
+    WORK_QUEUE_ITEM WorkItem;
+    PIRP Irp;
+    NTSTATUS Status;
+} PENDING_FILE_LOCK, *PPENDING_FILE_LOCK;
+
+static VOID
+LockDereferenceInfo(PLOCK_INFORMATION Info)
+{
+    ASSERT(Info->References > 0);
+    if (InterlockedDecrement(&Info->References) == 0)
+        ExFreePoolWithTag(Info, TAG_FLOCK);
+}
+
+static PPENDING_FILE_LOCK
+LockTakePending(PIRP Irp)
+{
+    PPENDING_FILE_LOCK Pending = Irp->Tail.Overlay.DriverContext[0];
+
+    ASSERT(Pending != NULL);
+    Irp->Tail.Overlay.DriverContext[0] = Pending->SavedDriverContext;
+    return Pending;
+}
 
 /* A wakeup selects overlapping ranges; cleanup selects the pending locks of
  * one open. Both selections must stay inside the cancel-safe queue lock. */
@@ -56,6 +90,9 @@ FsRtlCompleteLockIrpReal(IN PCOMPLETE_LOCK_IRP_ROUTINE CompleteRoutine,
                          IN NTSTATUS Status,
                          OUT PNTSTATUS NewStatus,
                          IN PFILE_OBJECT FileObject OPTIONAL);
+
+static VOID
+LockWakeWaiters(PFILE_LOCK FileLock, PLOCK_INFORMATION Info, PCOMBINED_LOCK_ELEMENT Range);
 
 /* Generic table methods */
 
@@ -131,6 +168,11 @@ static NTSTATUS NTAPI LockInsertIrpEx
  PVOID InsertContext)
 {
     PLOCK_INFORMATION LockInfo = CONTAINING_RECORD(Csq, LOCK_INFORMATION, Csq);
+    PPENDING_FILE_LOCK Pending = InsertContext;
+
+    ASSERT(Pending != NULL && Pending->Info == LockInfo);
+    InterlockedIncrement(&LockInfo->References);
+    Irp->Tail.Overlay.DriverContext[0] = Pending;
     InsertTailList(&LockInfo->CsqList, &Irp->Tail.Overlay.ListEntry);
     return STATUS_SUCCESS;
 }
@@ -148,25 +190,22 @@ static PIRP NTAPI LockPeekNextIrp(PIO_CSQ Csq, PIRP Irp, PVOID PeekContext)
 
     for (; Entry != &LockInfo->CsqList; Entry = Entry->Flink)
     {
-        PIO_STACK_LOCATION Stack;
-        COMBINED_LOCK_ELEMENT Range;
+        PPENDING_FILE_LOCK Pending;
 
         Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
         if (Filter == NULL)
             return Irp;
-        Stack = IoGetCurrentIrpStackLocation(Irp);
+        Pending = Irp->Tail.Overlay.DriverContext[0];
         if (Filter->FileObject != NULL)
         {
-            if (Stack->FileObject == Filter->FileObject &&
-                IoGetRequestorProcess(Irp) == Filter->Process &&
-                (!Filter->MatchKey || Stack->Parameters.LockControl.Key == Filter->Key))
+            if (Pending->Request.FileObject == Filter->FileObject &&
+                Pending->Request.ProcessId == Filter->Process &&
+                (!Filter->MatchKey || Pending->Request.Key == Filter->Key))
                 return Irp;
         }
         else
         {
-            Range.Exclusive.FileLock.StartingByte = Stack->Parameters.LockControl.ByteOffset;
-            Range.Exclusive.FileLock.Length = *Stack->Parameters.LockControl.Length;
-            if (LockRangesOverlap(&Range.Exclusive.FileLock, &Filter->Range->Exclusive.FileLock))
+            if (LockRangesOverlap(&Pending->Request, &Filter->Range->Exclusive.FileLock))
                 return Irp;
         }
     }
@@ -188,18 +227,43 @@ LockReleaseQueueLock(PIO_CSQ Csq, KIRQL Irql)
 }
 
 static VOID NTAPI
+LockCompletePendingWorker(PVOID Parameter)
+{
+    PPENDING_FILE_LOCK Pending = Parameter;
+    PLOCK_INFORMATION Info = Pending->Info;
+    NTSTATUS Status;
+
+    FsRtlCompleteLockIrpReal(Info->CompleteRoutine, Pending->Context, Pending->Irp,
+                             Pending->Status, &Status, NULL);
+    ExFreePoolWithTag(Pending, TAG_FLOCK);
+    LockDereferenceInfo(Info);
+}
+
+static VOID
+LockCompletePending(PIRP Irp, NTSTATUS Status)
+{
+    PPENDING_FILE_LOCK Pending = LockTakePending(Irp);
+
+    Pending->Irp = Irp;
+    Pending->Status = Status;
+    /* The CSQ can invoke cancellation with its spin lock held. The file-lock
+     * completion callback runs at <= APC_LEVEL and may close a file object. */
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        ExInitializeWorkItem(&Pending->WorkItem, LockCompletePendingWorker, Pending);
+        ExQueueWorkItem(&Pending->WorkItem, DelayedWorkQueue);
+    }
+    else
+    {
+        LockCompletePendingWorker(Pending);
+    }
+}
+
+static VOID NTAPI
 LockCompleteCanceledIrp(PIO_CSQ Csq, PIRP Irp)
 {
-    NTSTATUS Status;
-    PLOCK_INFORMATION LockInfo = CONTAINING_RECORD(Csq, LOCK_INFORMATION, Csq);
-    DPRINT("Complete cancelled IRP %p Status %x\n", Irp, STATUS_CANCELLED);
-    FsRtlCompleteLockIrpReal
-        (LockInfo->BelongsTo->CompleteLockIrpRoutine,
-         NULL,
-         Irp,
-         STATUS_CANCELLED,
-         &Status,
-         NULL);
+    UNREFERENCED_PARAMETER(Csq);
+    LockCompletePending(Irp, STATUS_CANCELLED);
 }
 
 VOID
@@ -271,7 +335,7 @@ FsRtlPrivateLock(IN PFILE_LOCK FileLock,
     COMBINED_LOCK_ELEMENT ToInsert = {0};
     PCOMBINED_LOCK_ELEMENT Entry;
     PFILE_LOCK_INFO Request = &ToInsert.Exclusive.FileLock;
-    BOOLEAN InsertedNew;
+    BOOLEAN InsertedNew, Granted = FALSE;
     NTSTATUS Status;
     ULONGLONG Start = FileOffset->QuadPart, Size = Length->QuadPart;
 
@@ -291,7 +355,8 @@ FsRtlPrivateLock(IN PFILE_LOCK FileLock,
             goto Complete;
         }
         RtlZeroMemory(LockInfo, sizeof(*LockInfo));
-        LockInfo->BelongsTo = FileLock;
+        LockInfo->CompleteRoutine = FileLock->CompleteLockIrpRoutine;
+        LockInfo->References = 1;
         RtlInitializeGenericTable(&LockInfo->RangeTable, LockCompare, LockAllocate, LockFree, NULL);
         KeInitializeSpinLock(&LockInfo->CsqLock);
         InitializeListHead(&LockInfo->CsqList);
@@ -317,8 +382,20 @@ FsRtlPrivateLock(IN PFILE_LOCK FileLock,
         IoStatus->Status = STATUS_PENDING;
         if (Irp != NULL)
         {
-            Irp->IoStatus.Information = LockInfo->Generation;
-            IoCsqInsertIrpEx(&LockInfo->Csq, Irp, NULL, NULL);
+            PPENDING_FILE_LOCK Pending;
+
+            Pending = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Pending), TAG_FLOCK);
+            if (Pending == NULL)
+            {
+                IoStatus->Status = STATUS_NO_MEMORY;
+                goto Complete;
+            }
+            Pending->Info = LockInfo;
+            Pending->Request = *Request;
+            Pending->Context = Context;
+            Pending->SavedDriverContext = Irp->Tail.Overlay.DriverContext[0];
+            Pending->Generation = LockInfo->Generation;
+            IoCsqInsertIrpEx(&LockInfo->Csq, Irp, NULL, Pending);
         }
         return FALSE;
     }
@@ -332,6 +409,7 @@ FsRtlPrivateLock(IN PFILE_LOCK FileLock,
         goto Complete;
     }
     ASSERT(InsertedNew);
+    Granted = TRUE;
     FileLock->FastIoIsQuestionable = TRUE;
     IoStatus->Status = STATUS_SUCCESS;
 Complete:
@@ -340,8 +418,15 @@ Complete:
         FsRtlCompleteLockIrpReal(FileLock->CompleteLockIrpRoutine, Context, Irp,
                                  IoStatus->Status, &Status, FileObject);
         IoStatus->Status = Status;
+        if (Granted && !NT_SUCCESS(Status) && FileLock->LockInformation == LockInfo &&
+            RtlDeleteElementGenericTable(&LockInfo->RangeTable, &ToInsert))
+        {
+            /* Reject only this acquisition, preserving older identical shared
+             * ranges and their ownership. The callback has completed the IRP. */
+            LockWakeWaiters(FileLock, LockInfo, &ToInsert);
+        }
     }
-    return IoStatus->Status == STATUS_SUCCESS;
+    return NT_SUCCESS(IoStatus->Status) && IoStatus->Status != STATUS_PENDING;
 }
 
 static BOOLEAN
@@ -418,6 +503,41 @@ FsRtlFastCheckLockForWrite(IN PFILE_LOCK FileLock, IN PLARGE_INTEGER FileOffset,
     return FsRtlpCheckLockAccess(FileLock, FileOffset, Length, Key, FileObject, Process, TRUE);
 }
 
+static VOID
+LockWakeWaiters(PFILE_LOCK FileLock, PLOCK_INFORMATION Info, PCOMBINED_LOCK_ELEMENT Range)
+{
+    LOCK_QUEUE_FILTER Filter = {0};
+    PIRP NextMatchingLockIrp;
+
+    FileLock->FastIoIsQuestionable = (RtlNumberGenericTableElements(&Info->RangeTable) != 0);
+    Info->Generation++;
+    Filter.Range = Range;
+    while ((NextMatchingLockIrp = IoCsqRemoveNextIrp(&Info->Csq, &Filter)))
+    {
+        PPENDING_FILE_LOCK Pending = LockTakePending(NextMatchingLockIrp);
+        IO_STATUS_BLOCK IoStatus;
+        BOOLEAN Granted;
+
+        if (Pending->Generation == Info->Generation)
+        {
+            /* All matching requests have been attempted in this pass. */
+            IoCsqInsertIrpEx(&Info->Csq, NextMatchingLockIrp, NULL, Pending);
+            LockDereferenceInfo(Info);
+            break;
+        }
+        Granted = FsRtlPrivateLock(FileLock, Pending->Request.FileObject,
+                                   &Pending->Request.StartingByte, &Pending->Request.Length,
+                                   Pending->Request.ProcessId, Pending->Request.Key, FALSE,
+                                   Pending->Request.ExclusiveLock, &IoStatus,
+                                   NextMatchingLockIrp, Pending->Context, TRUE);
+        ASSERT(Granted == (NT_SUCCESS(IoStatus.Status) && IoStatus.Status != STATUS_PENDING));
+        (void)Granted;
+        ExFreePoolWithTag(Pending, TAG_FLOCK);
+        LockDereferenceInfo(Info);
+    }
+
+}
+
 /*
  * @implemented
  */
@@ -436,8 +556,6 @@ FsRtlFastUnlockSingle(IN PFILE_LOCK FileLock,
     PCOMBINED_LOCK_ELEMENT Entry;
     COMBINED_LOCK_ELEMENT Find;
     PFILE_LOCK_INFO Lock;
-    LOCK_QUEUE_FILTER Filter = {0};
-    PIRP NextMatchingLockIrp;
     ULONG i;
     BOOLEAN Found = FALSE;
 
@@ -467,32 +585,7 @@ FsRtlFastUnlockSingle(IN PFILE_LOCK FileLock,
     FileObject->LastLock = NULL;
     if (FileLock->UnlockRoutine != NULL)
         FileLock->UnlockRoutine(Context, &Find.Exclusive.FileLock);
-    FileLock->FastIoIsQuestionable = (RtlNumberGenericTableElements(&InternalInfo->RangeTable) != 0);
-    InternalInfo->Generation++;
-    Filter.Range = &Find;
-    while ((NextMatchingLockIrp = IoCsqRemoveNextIrp(&InternalInfo->Csq, &Filter)))
-    {
-        NTSTATUS Status;
-        if (NextMatchingLockIrp->IoStatus.Information == InternalInfo->Generation)
-        {
-            // We've already looked at this one, meaning that we looped.
-            // Put it back and exit.
-            IoCsqInsertIrpEx
-                (&InternalInfo->Csq,
-                 NextMatchingLockIrp,
-                 NULL,
-                 NULL);
-            break;
-        }
-        // Got a new lock irp... try to do the new lock operation
-        // Note that we pick an operation that would succeed at the time
-        // we looked, but can't guarantee that it won't just be re-queued
-        // because somebody else snatched part of the range in a new thread.
-        DPRINT("Locking another IRP %p for %p %wZ\n",
-               NextMatchingLockIrp, FileLock, &FileObject->FileName);
-        Status = FsRtlProcessFileLock(InternalInfo->BelongsTo, NextMatchingLockIrp, NULL);
-        UNREFERENCED_PARAMETER(Status);
-    }
+    LockWakeWaiters(FileLock, InternalInfo, &Find);
 
     DPRINT("Success %wZ\n", &FileObject->FileName);
     return STATUS_SUCCESS;
@@ -521,8 +614,7 @@ FsRtlpUnlockAll(PFILE_LOCK FileLock, PFILE_OBJECT FileObject, PEPROCESS Process,
     Filter.MatchKey = MatchKey;
     Filter.Key = Key;
     while ((Irp = IoCsqRemoveNextIrp(&Info->Csq, &Filter)) != NULL)
-        FsRtlCompleteLockIrpReal(FileLock->CompleteLockIrpRoutine, Context, Irp,
-                                 STATUS_CANCELLED, &Status, FileObject);
+        LockCompletePending(Irp, STATUS_CANCELLED);
     for (;;)
     {
         Found = FALSE;
@@ -618,7 +710,7 @@ FsRtlProcessFileLock(IN PFILE_LOCK FileLock,
                                           FALSE);
         /* FsRtlPrivateLock has _Must_inspect_result_. Just check this is consistent on debug builds */
         /* FALSE also means queued: STATUS_PENDING is not a granted lock. */
-        NT_ASSERT(Result == (IoStatusBlock.Status == STATUS_SUCCESS));
+        NT_ASSERT(Result == (NT_SUCCESS(IoStatusBlock.Status) && IoStatusBlock.Status != STATUS_PENDING));
         (void)Result;
         return IoStatusBlock.Status;
     }
@@ -714,19 +806,15 @@ FsRtlUninitializeFileLock(IN PFILE_LOCK FileLock)
         PIRP Irp;
         PLOCK_INFORMATION InternalInfo = FileLock->LockInformation;
         PCOMBINED_LOCK_ELEMENT Entry;
+
+        FileLock->LockInformation = NULL;
         while ((Entry = RtlGetElementGenericTable(&InternalInfo->RangeTable, 0)) != NULL)
         {
             RtlDeleteElementGenericTable(&InternalInfo->RangeTable, Entry);
         }
         while ((Irp = IoCsqRemoveNextIrp(&InternalInfo->Csq, NULL)) != NULL)
-        {
-            NTSTATUS Status;
-            FsRtlCompleteLockIrpReal(FileLock->CompleteLockIrpRoutine, NULL,
-                                     Irp, STATUS_CANCELLED, &Status,
-                                     IoGetCurrentIrpStackLocation(Irp)->FileObject);
-        }
-        ExFreePoolWithTag(InternalInfo, TAG_FLOCK);
-        FileLock->LockInformation = NULL;
+            LockCompletePending(Irp, STATUS_CANCELLED);
+        LockDereferenceInfo(InternalInfo);
     }
     FileLock->FastIoIsQuestionable = FALSE;
 }

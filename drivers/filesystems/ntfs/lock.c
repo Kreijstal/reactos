@@ -131,6 +131,7 @@ NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext)
 {
     PFILE_OBJECT FileObject = IrpContext->FileObject;
     PNTFS_FCB Fcb;
+    PNTFS_VCB Vcb;
     PNTFS_FILE_LOCK FileLock;
     NTSTATUS Status;
 
@@ -146,6 +147,10 @@ NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext)
     if (FileObject->Flags & FO_CLEANUP_COMPLETE)
         return STATUS_FILE_CLOSED;
 
+    Vcb = Fcb->Vcb;
+    /* Completion may close the last file object. Keep the same ordering as
+     * cleanup/removal, including any recursive close from the callback. */
+    ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
     FileLock = Fcb->FileLock;
     ASSERT(FileLock != NULL);
     /* Completion can release the last file-object/FCB reference before the
@@ -164,5 +169,6 @@ NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext)
 Unlock:
     ExReleaseResourceLite(&FileLock->Resource);
     NtfsReleaseFileLock(FileLock);
+    ExReleaseResourceLite(&Vcb->DirResource);
     return Status;
 }
