@@ -344,6 +344,69 @@ Cleanup:
     if (File != NULL) ZwClose(File);
 }
 
+/* Replacing the last name retires every target stream, but keeps the source
+ * file ID, data, and alternate streams under the destination key. */
+static VOID
+TestReplacementStreams(PCWSTR Dir)
+{
+    WCHAR Source[MAX_PATH], Target[MAX_PATH], StreamPath[MAX_PATH], WorkDir[MAX_PATH];
+    HANDLE File = NULL, Other = NULL;
+    FILE_ALLOCATION_INFORMATION Allocation;
+    FILE_FS_SIZE_INFORMATION Before, After;
+    IO_STATUS_BLOCK IoStatus;
+    ULONGLONG Id;
+    NTSTATUS Status;
+
+    /* Keep this directory resident; TestReplacement above exercises the
+     * allocated index of the directory containing all of the hard links. */
+    NtfsKmtJoin(WorkDir, RTL_NUMBER_OF(WorkDir), Dir, L"replace-small");
+    Status = NtfsKmtCreateDirectory(WorkDir);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    NtfsKmtJoin(Source, RTL_NUMBER_OF(Source), WorkDir, L"replace-src.bin");
+    NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), WorkDir, L"replace-dst.bin");
+    Status = NtfsKmtCreateFileWithData(Source, "data", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtCreateFileWithData(Target, "old!", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    RtlStringCchPrintfW(StreamPath, RTL_NUMBER_OF(StreamPath), L"%ls:old", Target);
+    Status = NtfsKmtCreateFileWithData(StreamPath, "gone", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&Other, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Allocation.AllocationSize.QuadPart = 1024 * 1024;
+    Status = NtfsKmtSetInfo(Other, &Allocation, sizeof(Allocation), FileAllocationInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ZwQueryVolumeInformationFile(Other, &IoStatus, &Before, sizeof(Before), FileFsSizeInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(Other); Other = NULL;
+    RtlStringCchPrintfW(StreamPath, RTL_NUMBER_OF(StreamPath), L"%ls:keep", Source);
+    Status = NtfsKmtCreateFileWithData(StreamPath, "keep", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Id = NtfsKmtQueryFileId(File);
+    Status = NtfsKmtRename(File, Target, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckMissing(Source);
+        CheckFile(Target, Id, 1, "data");
+        RtlStringCchPrintfW(StreamPath, RTL_NUMBER_OF(StreamPath), L"%ls:old", Target);
+        CheckMissing(StreamPath);
+        RtlStringCchPrintfW(StreamPath, RTL_NUMBER_OF(StreamPath), L"%ls:keep", Target);
+        CheckFile(StreamPath, Id, 1, "keep");
+        Status = ZwQueryVolumeInformationFile(File, &IoStatus, &After, sizeof(After), FileFsSizeInformation);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ok(After.AvailableAllocationUnits.QuadPart > Before.AvailableAllocationUnits.QuadPart,
+               "last-link replacement did not reclaim target allocation\n");
+    }
+    ZwClose(File);
+}
+
 static VOID
 TestLongName(PCWSTR Dir)
 {
@@ -394,6 +457,7 @@ START_TEST(NtfsRename)
     if (!NT_SUCCESS(Status)) return;
     TestLinks(Dir);
     TestReplacement(Dir);
+    TestReplacementStreams(Dir);
     TestLongName(Dir);
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);

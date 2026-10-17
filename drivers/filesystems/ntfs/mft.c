@@ -2911,6 +2911,17 @@ UpdateIndexEntryFileName(PDEVICE_EXTENSION Vcb,
         {
             *StartEntry = *CurrentEntry;
 
+            if (Update->Flags & NTFS_FILENAME_UPDATE_REPLACE)
+            {
+                /* The name collates to the existing key, so its place and
+                 * length in the index do not change. */
+                ASSERT(IndexEntry->FileName.NameLength == Update->FileName->NameLength);
+                IndexEntry->Data.Directory.IndexedFile = Update->FileReference;
+                RtlCopyMemory(&IndexEntry->FileName, Update->FileName,
+                              FIELD_OFFSET(FILENAME_ATTRIBUTE, Name) +
+                              Update->FileName->NameLength * sizeof(WCHAR));
+            }
+
             if (Update->Flags & NTFS_FILENAME_UPDATE_SIZES)
             {
                 IndexEntry->FileName.DataSize = Update->DataSize;
@@ -5035,9 +5046,11 @@ NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION Vcb,
     if (Holder != BaseRecord)
     {
         Status = UpdateFileRecord(Vcb, Holder->MFTRecordNumber, Holder);
-        if (NT_SUCCESS(Status))
-            Status = NtfsRebuildAttributeList(Vcb, BaseRecord, NULL, 0);
     }
+    /* Base-record names also have list entries. Removing one invalidates
+     * its instance entry even when an extension record did not change. */
+    if (NT_SUCCESS(Status) && NtfsRecordHasAttributeList(BaseRecord))
+        Status = NtfsRebuildAttributeList(Vcb, BaseRecord, NULL, 0);
     NtfsReleaseAttributeHolder(Vcb, BaseRecord, Holder);
     return Status;
 }
