@@ -62,6 +62,12 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
     /* SectionObjectPointer is deliberately left alone. Mm reaches the file's section object
      * pointers through it for as long as a section exists, which outlasts the handle. */
 
+    if (Ccb->Flags & CCB_EXTERNAL_FILE_OBJECT)
+    {
+        ASSERT(DeviceExt->FileObjectCount > 0);
+        DeviceExt->FileObjectCount--;
+    }
+
     if (Ccb->Flags & CCB_FCB_REFERENCE)
     {
         /* Both an external open and an internal cache stream own a reference.

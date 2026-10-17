@@ -360,7 +360,17 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
 
         CacheFile = Fcb->FileObject;
         KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
-        Status = NtfsFlushFileCache(CacheFile, TRUE);
+        if (Vcb->Flags & VCB_DEVICE_REMOVED)
+        {
+            /* Surprise removal makes dirty data unrecoverable. Do not issue
+             * writeback to a device that has already left the stack. */
+            CcPurgeCacheSection(&Fcb->SectionObjectPointers, NULL, 0, FALSE);
+            Status = STATUS_SUCCESS;
+        }
+        else
+        {
+            Status = NtfsFlushFileCache(CacheFile, TRUE);
+        }
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("Cache teardown failed for %wS: %lx\n", Fcb->PathName, Status);
@@ -523,6 +533,10 @@ NtfsFCBInitializeCache(PNTFS_VCB Vcb,
         return STATUS_SUCCESS;
 
     FileObject = IoCreateStreamFileObject(NULL, Vcb->StorageDevice);
+    /* The stream owns the VPB reference taken by IoCreateStreamFileObject.
+     * Keep the original filesystem reachable after storage removal or a VPB
+     * replacement, so its eventual close releases the FCB pin here. */
+    FileObject->Vpb = Vcb->Vpb;
 
     newCCB = ExAllocatePoolWithTag(NonPagedPool, sizeof(NTFS_CCB), TAG_CCB);
     if (newCCB == NULL)
@@ -620,7 +634,8 @@ NtfsMakeRootFCB(PNTFS_VCB Vcb)
 
     NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);
-    NtfsGrabFCB(Vcb, Fcb);
+    /* RefCount already includes the caller. Directories remain in the table
+     * at zero; another reference here would permanently veto query-remove. */
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, MftRecord);
 
@@ -886,7 +901,8 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
-    newCCB->Flags |= CCB_FCB_REFERENCE;
+    newCCB->Flags |= CCB_FCB_REFERENCE | CCB_EXTERNAL_FILE_OBJECT;
+    Vcb->FileObjectCount++;
     Fcb->Vcb = Vcb;
 
     /* Cached reads initialize this file object's private map under main

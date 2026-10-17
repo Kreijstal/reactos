@@ -26,6 +26,8 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include <ntddstor.h>
+#include <ntdddisk.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -38,11 +40,13 @@ NtfsDeviceControl(PNTFS_IRP_CONTEXT IrpContext)
     PDEVICE_EXTENSION DeviceExt;
     PIRP Irp = IrpContext->Irp;
 
+    if (IrpContext->DeviceObject == NtfsGlobalData->DeviceObject)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
     DeviceExt = IrpContext->DeviceObject->DeviceExtension;
-    IoSkipCurrentIrpStackLocation(Irp);
+    if (IrpContext->Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_STORAGE_EJECT_MEDIA ||
+        IrpContext->Stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_DISK_EJECT_MEDIA)
+        return NtfsEjectMedia(IrpContext);
 
-    /* Lower driver will complete - we don't have to */
-    IrpContext->Flags &= ~IRPCONTEXT_COMPLETE;
-
-    return IoCallDriver(DeviceExt->StorageDevice, Irp);
+    return NtfsForwardIrpSynchronous(DeviceExt->StorageDevice, Irp);
 }

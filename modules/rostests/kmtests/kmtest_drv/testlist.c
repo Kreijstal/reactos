@@ -82,6 +82,10 @@ KMT_TESTFUNC Test_NtfsObjectId;
 KMT_TESTFUNC Test_NtfsQuota;
 KMT_TESTFUNC Test_NtfsReparse;
 KMT_TESTFUNC Test_NtfsSecurity;
+KMT_TESTFUNC Test_NtfsEject;
+KMT_TESTFUNC Test_NtfsRemove;
+KMT_TESTFUNC Test_NtfsPnp;
+KMT_TESTFUNC Test_NtfsSurpriseRemove;
 KMT_TESTFUNC Test_NtfsShutdown;
 KMT_TESTFUNC Test_NtfsSparse;
 KMT_TESTFUNC Test_NtfsStreams;
@@ -200,6 +204,10 @@ const KMT_TEST TestList[] =
     { "NtfsQuota",                           Test_NtfsQuota },
     { "NtfsReparse",                         Test_NtfsReparse },
     { "NtfsSecurity",                        Test_NtfsSecurity },
+    { "NtfsEject",                           Test_NtfsEject },
+    { "NtfsRemove",                          Test_NtfsRemove },
+    { "NtfsPnp",                             Test_NtfsPnp },
+    { "NtfsSurpriseRemove",                  Test_NtfsSurpriseRemove },
     { "NtfsShutdown",                        Test_NtfsShutdown },
     { "NtfsSparse",                          Test_NtfsSparse },
     { "NtfsStreams",                         Test_NtfsStreams },

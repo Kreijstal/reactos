@@ -101,6 +101,11 @@ typedef struct
 {
     NTFSIDENTIFIER Identifier;
 
+    /* Removal drains ordinary requests first, then paging requests after
+     * making the removed state visible. Paging must remain available while
+     * the first phase flushes Cc. Cleanup and close use DirResource instead. */
+    ERESOURCE IoResource;
+    ERESOURCE PagingResource;
     ERESOURCE DirResource;
 //    ERESOURCE FatResource;
 
@@ -165,12 +170,18 @@ typedef struct
     ULONG MftDataOffset;
     ULONG Flags;
     ULONG OpenHandleCount;
+    /* External file objects, including those retained by MM after cleanup.
+     * DirResource serializes attachment and close. Internal streams do not
+     * count, and deleting a pathname does not hide a live file object. */
+    ULONG FileObjectCount;
 
 } DEVICE_EXTENSION, *PDEVICE_EXTENSION, NTFS_VCB, *PNTFS_VCB;
 
-#define VCB_VOLUME_LOCKED       0x0001
+#define VCB_VOLUME_LOCKED        0x0001
 /* Volume dismounted: everything but raw volume access is refused */
-#define VCB_VOLUME_DISMOUNTED   0x0002
+#define VCB_VOLUME_DISMOUNTED    0x0002
+#define VCB_QUERY_REMOVE_PENDING 0x0004
+#define VCB_DEVICE_REMOVED       0x0008
 
 typedef struct
 {
@@ -204,6 +215,7 @@ typedef struct
 
 /* This file object owns one FCB reference, independently of handle counts. */
 #define CCB_FCB_REFERENCE       0x0010
+#define CCB_EXTERNAL_FILE_OBJECT 0x0020
 
 typedef struct
 {
@@ -1049,6 +1061,16 @@ NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
                     LONGLONG StartingOffset,
                     ULONG Length,
                     const PUCHAR Buffer);
+
+/* pnp.c */
+NTSTATUS
+NtfsPnp(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsEjectMedia(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NtfsForwardIrpSynchronous(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 
 /* shutdown.c */
 NTSTATUS

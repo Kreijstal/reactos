@@ -100,6 +100,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/NtfsQuota.c
     ntos_io/NtfsReparse.c
     ntos_io/NtfsSecurity.c
+    ntos_io/NtfsPnp.c
     ntos_io/NtfsShutdown.c
     ntos_io/NtfsSparse.c
     ntos_io/NtfsStreams.c

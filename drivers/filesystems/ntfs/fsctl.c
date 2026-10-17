@@ -486,8 +486,15 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         goto ByeBye;
 
     Lookaside = TRUE;
+    ExInitializeResourceLite(&Vcb->IoResource);
+    ExInitializeResourceLite(&Vcb->PagingResource);
+    ExInitializeResourceLite(&Vcb->DirResource);
+    ExInitializeResourceLite(&Vcb->IndexResource);
+    ExInitializeResourceLite(&Vcb->BitmapResource);
+    KeInitializeSpinLock(&Vcb->FcbListLock);
 
     NewDeviceObject->Vpb = DeviceToMount->Vpb;
+    Vcb->Vpb = NewDeviceObject->Vpb;
 
     Vcb->StorageDevice = DeviceToMount;
     Vcb->StorageDevice->Vpb->DeviceObject = NewDeviceObject;
@@ -562,11 +569,6 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     if (!NT_SUCCESS(Status))
         goto ByeBye;
 
-    ExInitializeResourceLite(&Vcb->DirResource);
-    ExInitializeResourceLite(&Vcb->IndexResource);
-    ExInitializeResourceLite(&Vcb->BitmapResource);
-
-    KeInitializeSpinLock(&Vcb->FcbListLock);
 
     NtfsFindObjectIdIndex(Vcb);
     NtfsInitializeSecurity(Vcb);
@@ -591,7 +593,26 @@ ByeBye:
     {
         /* Cleanup */
         if (Vcb && Vcb->StreamFileObject)
+        {
+            if (Vcb->StreamFileObject->PrivateCacheMap != NULL)
+            {
+                CcPurgeCacheSection(Vcb->StreamFileObject->SectionObjectPointer, NULL, 0, FALSE);
+                CcUninitializeCacheMap(Vcb->StreamFileObject, NULL, NULL);
+            }
+            /* Fcb and Ccb are freed below, not by this file object's close. */
+            Vcb->StreamFileObject->FsContext = NULL;
+            Vcb->StreamFileObject->FsContext2 = NULL;
             ObDereferenceObject(Vcb->StreamFileObject);
+        }
+        if (Vcb != NULL && Vcb->Vpb != NULL)
+        {
+            KIRQL OldIrql;
+
+            IoAcquireVpbSpinLock(&OldIrql);
+            Vcb->Vpb->Flags &= ~VPB_MOUNTED;
+            Vcb->Vpb->DeviceObject = NULL;
+            IoReleaseVpbSpinLock(OldIrql);
+        }
 
         if (Fcb)
             NtfsDestroyFCB(Fcb);
@@ -612,7 +633,14 @@ ByeBye:
         }
 
         if (Lookaside)
+        {
+            ExDeleteResourceLite(&Vcb->BitmapResource);
+            ExDeleteResourceLite(&Vcb->IndexResource);
+            ExDeleteResourceLite(&Vcb->DirResource);
+            ExDeleteResourceLite(&Vcb->PagingResource);
+            ExDeleteResourceLite(&Vcb->IoResource);
             ExDeleteNPagedLookasideList(&Vcb->FileRecLookasideList);
+        }
 
         if (NewDeviceObject)
             IoDeleteDevice(NewDeviceObject);
