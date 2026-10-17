@@ -33,6 +33,93 @@
 
 /* FUNCTIONS ****************************************************************/
 
+/* The volume stream is the single cache for attribute I/O. Its paging requests
+ * go straight to NtfsPerformIrpIoRuns, so a cache fault cannot recurse here.
+ * Once initialized, a cache failure must be returned: bypassing dirty pages
+ * would read stale data or let a later writeback overwrite a direct write. */
+NTSTATUS
+NtfsReadDiskCached(PDEVICE_EXTENSION Vcb,
+                   LONGLONG StartingOffset,
+                   ULONG Length,
+                   PUCHAR Buffer)
+{
+    LARGE_INTEGER Offset;
+    PVOID Bcb, Data;
+    ULONG Piece;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Vcb->StreamFileObject == NULL ||
+        Vcb->StreamFileObject->PrivateCacheMap == NULL)
+    {
+        return NtfsReadDisk(Vcb->StorageDevice, StartingOffset, Length,
+                            Vcb->NtfsInfo.BytesPerSector, Buffer, FALSE);
+    }
+
+    while (Length != 0)
+    {
+        Offset.QuadPart = StartingOffset;
+        Piece = min(Length, VACB_MAPPING_GRANULARITY -
+                    (ULONG)(StartingOffset % VACB_MAPPING_GRANULARITY));
+        _SEH2_TRY
+        {
+            if (!CcMapData(Vcb->StreamFileObject, &Offset, Piece, MAP_WAIT, &Bcb, &Data))
+            {
+                Status = STATUS_CANT_WAIT;
+            }
+            else
+            {
+                RtlCopyMemory(Buffer, Data, Piece);
+                CcUnpinData(Bcb);
+            }
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        StartingOffset += Piece;
+        Buffer += Piece;
+        Length -= Piece;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
+                    LONGLONG StartingOffset,
+                    ULONG Length,
+                    const PUCHAR Buffer)
+{
+    LARGE_INTEGER Offset;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (Vcb->StreamFileObject == NULL ||
+        Vcb->StreamFileObject->PrivateCacheMap == NULL)
+    {
+        return NtfsWriteDisk(Vcb->StorageDevice, StartingOffset, Length,
+                             Vcb->NtfsInfo.BytesPerSector, Buffer);
+    }
+
+    Offset.QuadPart = StartingOffset;
+    ASSERT(StartingOffset >= 0);
+    ASSERT(StartingOffset + Length <= CcGetFileSizePointer(Vcb->StreamFileObject)->QuadPart);
+    _SEH2_TRY
+    {
+        if (!CcCopyWrite(Vcb->StreamFileObject, &Offset, Length, TRUE, Buffer))
+            Status = STATUS_CANT_WAIT;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    return Status;
+}
+
+
 /* The run list uses storage embedded in the caller's stack frame and only
  * spills into pool for heavily fragmented files. */
 

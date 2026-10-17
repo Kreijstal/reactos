@@ -994,6 +994,14 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
     PFILENAME_ATTRIBUTE FileNameAttribute;
 
 
+    /* Flush before reading the record: a resident paging write updates it. */
+    if (NewFileSize->QuadPart < Fcb->RFCB.FileSize.QuadPart)
+    {
+        Status = NtfsFlushFileCache(FileObject, TRUE);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
     // Allocate non-paged memory for the file record
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
@@ -1097,6 +1105,10 @@ NtfsSetEndOfFile(PNTFS_FCB Fcb,
         return Status;
     }
 
+    /* Zeroing has completed; only now can Cc treat the new tail as valid. */
+    Fcb->RFCB.ValidDataLength = Fcb->RFCB.FileSize;
+    CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+
     // now we need to update this file's size in every directory index entry that references it
     // TODO: expand to work with every filename / hardlink stored in the file record.
     FileNameAttribute = GetBestFileNameFromRecord(Fcb->Vcb, FileRecord);
@@ -1176,6 +1188,13 @@ NtfsSetAllocationInformation(PNTFS_FCB Fcb,
 
     if (!NtfsGlobalData->EnableWriteSupport)
         return STATUS_ACCESS_DENIED;
+
+    if (AllocationInfo->AllocationSize.QuadPart < Fcb->RFCB.FileSize.QuadPart)
+    {
+        Status = NtfsFlushFileCache(FileObject, TRUE);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
