@@ -1811,12 +1811,6 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
 
     DPRINT("NtfsCreateFile(%p, %p) called\n", DeviceObject, IrpContext);
 
-    if ((DeviceExt->Flags & VCB_VOLUME_READ_ONLY) &&
-        ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) || (Options & FILE_DELETE_ON_CLOSE) ||
-         (DesiredAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
-                           FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))))
-        return STATUS_MEDIA_WRITE_PROTECTED;
-
     ASSERT(DeviceExt);
 
     Status = NtfsCheckCreateParameters(Disposition, Options, DesiredAccess);
@@ -1828,6 +1822,21 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     {
         return STATUS_ACCESS_DENIED;
     }
+
+    /* Raw volume access is authorized by the device's security descriptor.
+     * Offline format/repair must be able to lock and dismount even when
+     * ordinary file mutations are refused by the log-recovery gate. */
+    if (!(Options & FILE_OPEN_BY_FILE_ID) && !(Stack->Flags & SL_OPEN_TARGET_DIRECTORY) &&
+        FileObject->FileName.Length == 0 &&
+        (FileObject->RelatedFileObject == NULL ||
+         BooleanFlagOn(((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Flags, FCB_IS_VOLUME)))
+        return NtfsOpenVolume(DeviceExt, Irp, FileObject, Disposition, Options);
+
+    if ((DeviceExt->Flags & VCB_VOLUME_READ_ONLY) &&
+        ((Disposition != FILE_OPEN && Disposition != FILE_OPEN_IF) || (Options & FILE_DELETE_ON_CLOSE) ||
+         (DesiredAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+                           FILE_WRITE_ATTRIBUTES | DELETE | WRITE_DAC | WRITE_OWNER))))
+        return STATUS_MEDIA_WRITE_PROTECTED;
 
     /* The I/O manager opening a rename's destination directory */
     if (Stack->Flags & SL_OPEN_TARGET_DIRECTORY)
@@ -1873,14 +1882,6 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     }
     else
     {
-        /* This a open operation for the volume itself */
-        if (FileObject->FileName.Length == 0 &&
-            (FileObject->RelatedFileObject == NULL ||
-             BooleanFlagOn(((PNTFS_FCB)FileObject->RelatedFileObject->FsContext)->Flags, FCB_IS_VOLUME)))
-        {
-            return NtfsOpenVolume(DeviceExt, Irp, FileObject, Disposition, Options);
-        }
-
         Status = NtfsBuildCreatePath(FileObject, &Path);
         if (!NT_SUCCESS(Status))
             return Status;
