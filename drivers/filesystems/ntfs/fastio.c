@@ -43,8 +43,12 @@ NtfsAcqLazyWrite(PVOID Context,
 
     DPRINT("NtfsAcqLazyWrite(%p, %u)\n", Context, Wait);
 
+    /* Match the main -> paging order used by ordinary writes and Cc flushes. */
+    if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, Wait))
+        return FALSE;
     if (!ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, Wait))
     {
+        ExReleaseResourceLite(&Fcb->MainResource);
         return FALSE;
     }
 
@@ -65,6 +69,7 @@ NtfsRelLazyWrite(PVOID Context)
     IoSetTopLevelIrp(NULL);
 
     ExReleaseResourceLite(&Fcb->PagingIoResource);
+    ExReleaseResourceLite(&Fcb->MainResource);
 }
 
 

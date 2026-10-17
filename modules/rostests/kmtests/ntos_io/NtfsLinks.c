@@ -495,6 +495,81 @@ TestLinkGroups(
     NtfsKmtFree(Data);
 }
 
+/* Alternate writes through two live names, then return to a single name.
+ * A clean private cache from before the link must not overwrite a later
+ * write through the other name when the last alias goes away. */
+static
+VOID
+TestLiveLinkData(
+    _In_ PCWSTR Dir)
+{
+    WCHAR A[MAX_PATH], B[MAX_PATH];
+    HANDLE First, Second;
+    UCHAR Data[6];
+    ULONG_PTR Read;
+    NTSTATUS Status;
+
+    NtfsKmtJoin(A, RTL_NUMBER_OF(A), Dir, L"live-cache-a");
+    NtfsKmtJoin(B, RTL_NUMBER_OF(B), Dir, L"live-cache-b");
+    Status = NtfsKmtCreateFileWithData(A, "abcdef", sizeof(Data));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&First, A, GENERIC_READ | GENERIC_WRITE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Status = NtfsKmtRead(First, 0, Data, sizeof(Data), &Read);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = LinkPath(A, B, FALSE);
+    if (skip(!NtfsKmtIsUnimplemented(Status), "FileLinkInformation not supported (0x%lx)\n", Status))
+    {
+        ZwClose(First);
+        return;
+    }
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&Second, B, GENERIC_READ | GENERIC_WRITE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtWrite(Second, 1, "B", 1, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(Second);
+    }
+    Status = NtfsKmtDelete(B);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtWrite(First, 2, "C", 1, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtRead(First, 0, Data, sizeof(Data), &Read);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(Read == sizeof(Data) && RtlCompareMemory(Data, "aBCdef", sizeof(Data)) == sizeof(Data),
+       "last-link transition lost the alias write\n");
+
+    Status = LinkPath(A, B, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&Second, B, GENERIC_READ | GENERIC_WRITE, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtWrite(First, 3, "D", 1, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtWrite(Second, 4, "E", 1, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtWrite(First, 5, "F", 1, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtRead(Second, 0, Data, sizeof(Data), &Read);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok(Read == sizeof(Data) && RtlCompareMemory(Data, "aBCDEF", sizeof(Data)) == sizeof(Data),
+           "alternating alias writes lost data\n");
+        ZwClose(Second);
+    }
+    Status = NtfsKmtDelete(B);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtRead(First, 0, Data, sizeof(Data), &Read);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(Read == sizeof(Data) && RtlCompareMemory(Data, "aBCDEF", sizeof(Data)) == sizeof(Data),
+       "last-link read returned a stale private cache\n");
+    ZwClose(First);
+}
+
 START_TEST(NtfsLinks)
 {
     WCHAR Root[MAX_PATH];
@@ -513,6 +588,7 @@ START_TEST(NtfsLinks)
         return;
 
     TestBasicLinks(Dir);
+    TestLiveLinkData(Dir);
     TestLinkGroups(Dir);
 
     Status = NtfsKmtDeleteTree(Dir);

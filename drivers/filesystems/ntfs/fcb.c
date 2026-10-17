@@ -52,6 +52,59 @@ NtfsGetNextPathElement(PCWSTR FileName)
 }
 
 
+/* Match _wcsicmp's folding: a name equal in the table must hash equally. */
+static
+ULONG
+NtfsComputePathNameHash(PCWSTR Path)
+{
+    ULONG Hash = 2166136261u;
+    WCHAR Character;
+
+    while ((Character = *Path++) != UNICODE_NULL)
+    {
+        if (Character >= L'A' && Character <= L'Z')
+            Character += L'a' - L'A';
+        Hash = (Hash ^ Character) * 16777619u;
+    }
+    return Hash;
+}
+
+NTSTATUS
+NtfsInitializeFcbHash(PNTFS_VCB Vcb)
+{
+    ULONG Index;
+
+    Vcb->FcbHashBuckets = ExAllocatePoolWithTag(NonPagedPool,
+                                               NTFS_FCB_HASH_BUCKETS * sizeof(LIST_ENTRY),
+                                               TAG_NTFS);
+    if (Vcb->FcbHashBuckets == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    for (Index = 0; Index < NTFS_FCB_HASH_BUCKETS; Index++)
+        InitializeListHead(&Vcb->FcbHashBuckets[Index]);
+    return STATUS_SUCCESS;
+}
+
+VOID
+NtfsUninitializeFcbHash(PNTFS_VCB Vcb)
+{
+    if (Vcb->FcbHashBuckets != NULL)
+    {
+        ExFreePoolWithTag(Vcb->FcbHashBuckets, TAG_NTFS);
+        Vcb->FcbHashBuckets = NULL;
+    }
+}
+
+/* FcbListLock protects both indexes. Fresh and unlinked entries are self-linked. */
+static
+VOID
+NtfsRemoveFCBFromHash(PNTFS_FCB Fcb)
+{
+    /* Deletion already unlinks the entry before the final reference goes. */
+    if (!IsListEmpty(&Fcb->FcbHashEntry))
+        RemoveEntryList(&Fcb->FcbHashEntry);
+    InitializeListHead(&Fcb->FcbHashEntry);
+}
+
 static
 BOOLEAN
 NtfsWSubString(PWCHAR pTarget,
@@ -107,6 +160,18 @@ NtfsReplaceFCBPath(
 {
     PWCHAR OldPath = Fcb->PathName;
 
+    /* Rename holds FcbListLock; creation has not published the FCB yet. */
+    if (!IsListEmpty(&Fcb->FcbHashEntry))
+    {
+        NtfsRemoveFCBFromHash(Fcb);
+        Fcb->PathNameHash = NtfsComputePathNameHash(Path);
+        InsertHeadList(&Fcb->Vcb->FcbHashBuckets[Fcb->PathNameHash & (NTFS_FCB_HASH_BUCKETS - 1)],
+                       &Fcb->FcbHashEntry);
+    }
+    else
+    {
+        Fcb->PathNameHash = NtfsComputePathNameHash(Path);
+    }
     Fcb->PathName = Path;
     Fcb->ObjectName = wcsrchr(Path, L'\\');
     if (Fcb->ObjectName == NULL)
@@ -167,6 +232,7 @@ NtfsCreateFCB(PCWSTR FileName,
     Fcb->Identifier.Size = sizeof(NTFS_TYPE_FCB);
 
     Fcb->Vcb = Vcb;
+    InitializeListHead(&Fcb->FcbHashEntry);
 
     /* An FCB without a name (the volume's stream) still has a path, an empty one */
     if (!NT_SUCCESS(NtfsSetFCBPath(Fcb, FileName ? FileName : L"")))
@@ -187,7 +253,11 @@ NtfsCreateFCB(PCWSTR FileName,
     ExInitializeResourceLite(&Fcb->MainResource);
     ExInitializeResourceLite(&Fcb->PagingIoResource);
 
+    Fcb->RFCB.NodeTypeCode = (USHORT)NTFS_TYPE_FCB;
+    Fcb->RFCB.NodeByteSize = sizeof(NTFS_FCB);
     Fcb->RFCB.Resource = &(Fcb->MainResource);
+    Fcb->RFCB.PagingIoResource = &Fcb->PagingIoResource;
+    InitializeListHead(&Fcb->FcbListEntry);
 
     return Fcb;
 }
@@ -198,6 +268,12 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
 {
     ASSERT(Fcb);
     ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
+
+    MmFlushImageSection(&Fcb->SectionObjectPointers, MmFlushForWrite);
+    MmForceSectionClosed(&Fcb->SectionObjectPointers, TRUE);
+    ASSERT(Fcb->SectionObjectPointers.DataSectionObject == NULL);
+    ASSERT(Fcb->SectionObjectPointers.ImageSectionObject == NULL);
+    ASSERT(Fcb->SectionObjectPointers.SharedCacheMap == NULL);
 
     ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
@@ -261,45 +337,56 @@ VOID
 NtfsReleaseFCB(PNTFS_VCB Vcb,
                PNTFS_FCB Fcb)
 {
-    KIRQL oldIrql;
+    KIRQL OldIrql;
+    PFILE_OBJECT CacheFile;
 
-    DPRINT("releasing FCB at %p: %S, refCount:%d\n",
-           Fcb,
-           Fcb->PathName,
-           Fcb->RefCount);
-
-    KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+    ASSERT(Fcb->RefCount > 0);
     Fcb->RefCount--;
-    if (Fcb->RefCount <= 0 && (!NtfsFCBIsDirectory(Fcb) || (Fcb->Flags & FCB_DELETED)))
+
+    /* Volume objects live for the mount, even with no open handles. */
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
     {
-        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
+        KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+        return;
+    }
 
-        /* CcCopyWrite populated this data section. Drain and purge it before
-         * dropping the private cache map, or a closed file stays mapped and
-         * its cached FCB can incorrectly prevent replacement of its name. */
-        if (!NT_SUCCESS(NtfsFlushFileCache(Fcb->FileObject, TRUE)))
-            return;
-        CcUninitializeCacheMap(Fcb->FileObject, NULL, NULL);
+    /* The internal stream pins the FCB until MM has dropped its file object.
+     * With only that reference left, detach its private cache map. Close may
+     * run synchronously inside CcUninitializeCacheMap and free the FCB. */
+    if (Fcb->RefCount == 1 && Fcb->FileObject != NULL)
+    {
+        NTSTATUS Status;
 
-        if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
-            Fcb->SectionObjectPointers.ImageSectionObject != NULL)
+        CacheFile = Fcb->FileObject;
+        KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+        Status = NtfsFlushFileCache(CacheFile, TRUE);
+        if (!NT_SUCCESS(Status))
         {
-            DPRINT("Keeping FCB %p (%S): still mapped\n", Fcb, Fcb->PathName);
+            DPRINT1("Cache teardown failed for %wS: %lx\n", Fcb->PathName, Status);
             return;
         }
 
-        /* A deleted FCB already left the table */
-        KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
+        KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+        Fcb->FileObject = NULL;
+        Fcb->Flags &= ~FCB_CACHE_INITIALIZED;
+        KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+        CcUninitializeCacheMap(CacheFile, NULL, NULL);
+        return;
+    }
+
+    if (Fcb->RefCount == 0 &&
+        (!NtfsFCBIsDirectory(Fcb) || (Fcb->Flags & FCB_DELETED)))
+    {
         if (!(Fcb->Flags & FCB_DELETED))
             RemoveEntryList(&Fcb->FcbListEntry);
-        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-
+        InitializeListHead(&Fcb->FcbListEntry);
+        NtfsRemoveFCBFromHash(Fcb);
+        KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
         NtfsDestroyFCB(Fcb);
+        return;
     }
-    else
-    {
-        KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
-    }
+    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
 }
 
 
@@ -311,7 +398,14 @@ NtfsAddFCBToTable(PNTFS_VCB Vcb,
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
     Fcb->Vcb = Vcb;
+    ASSERT(Fcb->PathNameHash == NtfsComputePathNameHash(Fcb->PathName));
     InsertTailList(&Vcb->FcbListHead, &Fcb->FcbListEntry);
+    /* The list remains authoritative before the optional index exists. */
+    if (Vcb->FcbHashBuckets != NULL)
+    {
+        InsertHeadList(&Vcb->FcbHashBuckets[Fcb->PathNameHash & (NTFS_FCB_HASH_BUCKETS - 1)],
+                       &Fcb->FcbHashEntry);
+    }
     KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
 }
 
@@ -340,6 +434,7 @@ NtfsRemoveFCBFromTable(
     {
         RemoveEntryList(&Fcb->FcbListEntry);
         InitializeListHead(&Fcb->FcbListEntry);
+        NtfsRemoveFCBFromHash(Fcb);
         Fcb->Flags |= FCB_DELETED;
     }
 
@@ -358,6 +453,7 @@ NtfsRemoveFCBFromTable(
         {
             RemoveEntryList(&Other->FcbListEntry);
             InitializeListHead(&Other->FcbListEntry);
+            NtfsRemoveFCBFromHash(Other);
             Other->Flags |= FCB_DELETED;
         }
     }
@@ -373,6 +469,8 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
     KIRQL oldIrql;
     PNTFS_FCB Fcb;
     PLIST_ENTRY current_entry;
+    PLIST_ENTRY Head;
+    ULONG Hash = FileName ? NtfsComputePathNameHash(FileName) : 0;
 
     KeAcquireSpinLock(&Vcb->FcbListLock, &oldIrql);
 
@@ -385,13 +483,17 @@ NtfsGrabFCBFromTable(PNTFS_VCB Vcb,
         return Fcb;
     }
 
-    current_entry = Vcb->FcbListHead.Flink;
-    while (current_entry != &Vcb->FcbListHead)
+    Head = Vcb->FcbHashBuckets ?
+           &Vcb->FcbHashBuckets[Hash & (NTFS_FCB_HASH_BUCKETS - 1)] : &Vcb->FcbListHead;
+    current_entry = Head->Flink;
+    while (current_entry != Head)
     {
-        Fcb = CONTAINING_RECORD(current_entry, NTFS_FCB, FcbListEntry);
+        Fcb = Vcb->FcbHashBuckets ?
+              CONTAINING_RECORD(current_entry, NTFS_FCB, FcbHashEntry) :
+              CONTAINING_RECORD(current_entry, NTFS_FCB, FcbListEntry);
 
         DPRINT("Comparing '%S' and '%S'\n", FileName, Fcb->PathName);
-        if (_wcsicmp(FileName, Fcb->PathName) == 0)
+        if (Fcb->PathNameHash == Hash && _wcsicmp(FileName, Fcb->PathName) == 0)
         {
             Fcb->RefCount++;
             KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
@@ -417,11 +519,15 @@ NtfsFCBInitializeCache(PNTFS_VCB Vcb,
     NTSTATUS Status;
     PNTFS_CCB newCCB;
 
+    if (NtfsFCBIsDirectory(Fcb))
+        return STATUS_SUCCESS;
+
     FileObject = IoCreateStreamFileObject(NULL, Vcb->StorageDevice);
 
     newCCB = ExAllocatePoolWithTag(NonPagedPool, sizeof(NTFS_CCB), TAG_CCB);
     if (newCCB == NULL)
     {
+        ObDereferenceObject(FileObject);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
@@ -456,8 +562,10 @@ NtfsFCBInitializeCache(PNTFS_VCB Vcb,
     }
     _SEH2_END;
 
-    ObDereferenceObject(FileObject);
+    NtfsGrabFCB(Vcb, Fcb);
+    newCCB->Flags |= CCB_FCB_REFERENCE;
     Fcb->Flags |= FCB_CACHE_INITIALIZED;
+    ObDereferenceObject(FileObject);
 
     return Status;
 }
@@ -598,12 +706,12 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
         rcFCB->Entry.FileAttributes |= StdInfo->FileAttribute;
     }
 
-    NtfsFCBInitializeCache(Vcb, rcFCB);
     rcFCB->RefCount = 1;
     rcFCB->MFTIndex = MFTIndex;
     rcFCB->ParentMFTIndex = DirectoryFCB ? DirectoryFCB->MFTIndex : (FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
     rcFCB->SequenceNumber = Record->SequenceNumber;
     rcFCB->LinkCount = Record->LinkCount;
+    NtfsFCBInitializeCache(Vcb, rcFCB);
     NtfsAddFCBToTable(Vcb, rcFCB);
     *fileFCB = rcFCB;
 
@@ -632,8 +740,11 @@ NtfsSetLinkCount(
     {
         PNTFS_FCB Fcb = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
 
-        if (Fcb->MFTIndex == MftIndex)
+        if (Fcb->MFTIndex == MftIndex && Fcb->LinkCount != LinkCount)
+        {
             Fcb->LinkCount = LinkCount;
+            Fcb->CacheGeneration++;
+        }
     }
 
     KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
@@ -775,30 +886,11 @@ NtfsAttachFCBToFileObject(PNTFS_VCB Vcb,
     FileObject->FsContext = Fcb;
     FileObject->FsContext2 = newCCB;
     newCCB->PtrFileObject = FileObject;
+    newCCB->Flags |= CCB_FCB_REFERENCE;
     Fcb->Vcb = Vcb;
 
-    /* Directories are excluded: they have no $DATA to map, and a data section on one gives Mm
-     * pages to fault in that we can never satisfy. */
-    if (!(Fcb->Flags & FCB_CACHE_INITIALIZED) && !NtfsFCBIsDirectory(Fcb))
-    {
-        _SEH2_TRY
-        {
-            CcInitializeCacheMap(FileObject,
-                                 (PCC_FILE_SIZES)(&Fcb->RFCB.AllocationSize),
-                                 FALSE,
-                                 &(NtfsGlobalData->CacheMgrCallbacks),
-                                 Fcb);
-        }
-        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-        {
-            FileObject->FsContext2 = NULL;
-            ExFreePoolWithTag(newCCB, TAG_CCB);
-            return _SEH2_GetExceptionCode();
-        }
-        _SEH2_END;
-
-        Fcb->Flags |= FCB_CACHE_INITIALIZED;
-    }
+    /* Cached reads initialize this file object's private map under main
+     * exclusive. Directories and raw volume handles never need a data map. */
 
     //DPRINT("file open: fcb:%x file size: %d\n", Fcb, Fcb->Entry.DataLengthL);
 
