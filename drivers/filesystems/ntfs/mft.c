@@ -834,8 +834,8 @@ NtfsZeroAttributeRange(PDEVICE_EXTENSION Vcb,
 * @implemented
 *
 * FileAllocationInformation: gives a stream at least AllocationSize bytes of clusters, or
-* gives back what it has beyond that. An allocation below the end of file moves the end of
-* file down to it; one above leaves the end of file alone (MS-FSA 2.1.5.15.1).
+* gives back what it has beyond that. NTFS rounds the request to clusters before
+* deciding whether EOF must move down (MS-FSA 2.1.5.15.1, footnote 178).
 *
 * @param FileObject
 * File object the request came on.
@@ -869,11 +869,12 @@ NtfsSetAllocationSize(PFILE_OBJECT FileObject,
     ULONGLONG Wanted;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    if (AllocationSize < DataSize)
+    Wanted = ROUND_UP(AllocationSize, BytesPerCluster);
+    if (Wanted < DataSize)
     {
         LARGE_INTEGER NewSize;
 
-        NewSize.QuadPart = AllocationSize;
+        NewSize.QuadPart = Wanted;
         return SetAttributeDataLength(FileObject, Fcb, AttrContext, AttrOffset, FileRecord, &NewSize);
     }
 
@@ -894,8 +895,6 @@ NtfsSetAllocationSize(PFILE_OBJECT FileObject,
     /* Compressed and sparse streams count their allocation differently; leave them be */
     if (AttrContext->pRecord->Flags & (NTFS_ATTR_COMPRESSION_MASK | NTFS_ATTR_SPARSE))
         return STATUS_SUCCESS;
-
-    Wanted = ROUND_UP(AllocationSize, BytesPerCluster);
 
     if (Wanted > AttrContext->pRecord->NonResident.AllocatedSize)
     {
