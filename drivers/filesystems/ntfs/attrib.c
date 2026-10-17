@@ -29,6 +29,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include "sparse.h"
 #include <ntintsafe.h>
 
 #define NDEBUG
@@ -2883,13 +2884,98 @@ NtfsAllocateSparseRange(PNTFS_VCB Vcb,
     return Status;
 }
 
-/**
-* @name NtfsDeallocateSparseRange
-* @implemented
-*
-* Gives back the clusters a sparse attribute has in [StartVcn, StartVcn + VcnCount), which
-* become a hole. The caller writes FileRecord back.
-*/
+/* A range remains allocated until its new mapping is committed. A caller
+ * that needs a durable barrier (journal trimming) supplies one before the
+ * bitmap can expose the clusters to another file. Failed edits are discarded
+ * by the caller; failure never makes a still-referenced cluster reusable. */
+NTSTATUS
+NtfsDeallocateSparseRangeEx(PDEVICE_EXTENSION Vcb,
+                            PNTFS_ATTR_CONTEXT AttrContext,
+                            ULONG AttrOffset,
+                            PFILE_RECORD_HEADER FileRecord,
+                            ULONGLONG StartVcn,
+                            ULONGLONG VcnCount,
+                            PNTFS_SPARSE_COMMIT_BARRIER Barrier)
+{
+    typedef struct
+    {
+        ULONG Lcn;
+        ULONG Count;
+    } NTFS_RELEASED_RUN;
+    NTFS_RELEASED_RUN *Runs;
+    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
+    ULONGLONG TotalVcns = Destination->NonResident.HighestVCN + 1;
+    ULONGLONG Vcn = StartVcn, End;
+    ULONG Capacity, Count = 0, i;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    ASSERT(Destination->Flags & (NTFS_ATTR_SPARSE | NTFS_ATTR_COMPRESSION_MASK));
+    if (StartVcn >= TotalVcns || VcnCount == 0)
+        return STATUS_SUCCESS;
+    End = StartVcn + min(VcnCount, TotalVcns - StartVcn);
+    Capacity = FsRtlNumberOfRunsInLargeMcb(&AttrContext->DataRunsMCB);
+    if (Capacity == 0)
+        return STATUS_SUCCESS;
+    ASSERT(Capacity <= MAXULONG / sizeof(*Runs));
+    Runs = ExAllocatePoolWithTag(NonPagedPool, Capacity * sizeof(*Runs), TAG_NTFS);
+    if (Runs == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    while (Vcn < End)
+    {
+        LONGLONG Lbn, Length;
+
+        if (!FsRtlLookupLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, &Lbn, &Length, NULL, NULL, NULL))
+            break;
+        Length = min(Length, (LONGLONG)(End - Vcn));
+        ASSERT(Length > 0);
+        if (Lbn != -1)
+        {
+            ASSERT(Count < Capacity);
+            ASSERT((ULONGLONG)Lbn + Length <= Vcb->ClusterBitmap.SizeOfBitMap);
+            Runs[Count].Lcn = (ULONG)Lbn;
+            Runs[Count++].Count = (ULONG)Length;
+            FsRtlRemoveLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, Length);
+            ASSERT(Destination->NonResident.CompressedSize >= (ULONGLONG)Length * Vcb->NtfsInfo.BytesPerCluster);
+            Destination->NonResident.CompressedSize -= (ULONGLONG)Length * Vcb->NtfsInfo.BytesPerCluster;
+            AttrContext->pRecord->NonResident.CompressedSize = Destination->NonResident.CompressedSize;
+        }
+        Vcn += Length;
+    }
+
+    if (Count != 0)
+    {
+        Status = NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord, TotalVcns);
+        if (NT_SUCCESS(Status))
+            Status = NtfsCommitAttributeContext(Vcb, AttrContext, FileRecord);
+        if (NT_SUCCESS(Status) && Barrier != NULL)
+            Status = Barrier(Vcb);
+        if (NT_SUCCESS(Status))
+        {
+            KeEnterCriticalRegion();
+            ExAcquireResourceExclusiveLite(&Vcb->BitmapResource, TRUE);
+            for (i = 0; i < Count; i++)
+            {
+                RtlClearBits(&Vcb->ClusterBitmap, Runs[i].Lcn, Runs[i].Count);
+                Vcb->FreeClusterCount += Runs[i].Count;
+                Status = NtfsWriteVolumeBitmap(Vcb, Runs[i].Lcn, Runs[i].Count);
+                if (!NT_SUCCESS(Status))
+                {
+                    /* Keep a failed release unavailable in memory. Its new
+                     * mapping is already safe; repair can reclaim the leak. */
+                    RtlSetBits(&Vcb->ClusterBitmap, Runs[i].Lcn, Runs[i].Count);
+                    Vcb->FreeClusterCount -= Runs[i].Count;
+                    break;
+                }
+            }
+            ExReleaseResourceLite(&Vcb->BitmapResource);
+            KeLeaveCriticalRegion();
+        }
+    }
+    ExFreePoolWithTag(Runs, TAG_NTFS);
+    return Status;
+}
+
 NTSTATUS
 NtfsDeallocateSparseRange(PNTFS_VCB Vcb,
                           PNTFS_ATTR_CONTEXT AttrContext,
@@ -2898,49 +2984,8 @@ NtfsDeallocateSparseRange(PNTFS_VCB Vcb,
                           ULONGLONG StartVcn,
                           ULONGLONG VcnCount)
 {
-    PNTFS_ATTR_RECORD Destination = (PNTFS_ATTR_RECORD)((ULONG_PTR)FileRecord + AttrOffset);
-    ULONGLONG TotalVcns = Destination->NonResident.HighestVCN + 1;
-    ULONGLONG Vcn = StartVcn, End = min(StartVcn + VcnCount, TotalVcns);
-    BOOLEAN Changed = FALSE;
-    NTSTATUS Status = STATUS_SUCCESS;
-
-    ASSERT(Destination->Flags & (NTFS_ATTR_SPARSE | NTFS_ATTR_COMPRESSION_MASK));
-
-    while (Vcn < End && NT_SUCCESS(Status))
-    {
-        LONGLONG Lbn, Length;
-
-        if (!FsRtlLookupLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, &Lbn, &Length, NULL, NULL, NULL))
-            break;
-        Length = min(Length, (LONGLONG)(End - Vcn));
-
-        if (Lbn != -1)
-        {
-            KeEnterCriticalRegion();
-            ExAcquireResourceExclusiveLite(&Vcb->BitmapResource, TRUE);
-            RtlClearBits(&Vcb->ClusterBitmap, (ULONG)Lbn, (ULONG)Length);
-            Vcb->FreeClusterCount += Length;
-            Status = NtfsWriteVolumeBitmap(Vcb, (ULONG)Lbn, (ULONG)Length);
-            ExReleaseResourceLite(&Vcb->BitmapResource);
-            KeLeaveCriticalRegion();
-
-            FsRtlRemoveLargeMcbEntry(&AttrContext->DataRunsMCB, Vcn, Length);
-            Destination->NonResident.CompressedSize -= (ULONGLONG)Length * Vcb->NtfsInfo.BytesPerCluster;
-            AttrContext->pRecord->NonResident.CompressedSize = Destination->NonResident.CompressedSize;
-            Changed = TRUE;
-        }
-
-        Vcn += Length;
-    }
-
-    if (Changed)
-    {
-        NTSTATUS StoreStatus = NtfsStoreMappingPairs(Vcb, AttrContext, AttrOffset, FileRecord, TotalVcns);
-        if (NT_SUCCESS(Status))
-            Status = StoreStatus;
-    }
-
-    return Status;
+    return NtfsDeallocateSparseRangeEx(Vcb, AttrContext, AttrOffset, FileRecord,
+                                      StartVcn, VcnCount, NULL);
 }
 
 static
