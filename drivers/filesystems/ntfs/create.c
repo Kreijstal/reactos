@@ -1220,6 +1220,9 @@ NtfsCreateNewFile(
     {
         Irp->IoStatus.Information = FILE_CREATED;
         NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_FILE_CREATE);
+        NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                              NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                              FILE_ACTION_ADDED);
     }
 
     return Status;

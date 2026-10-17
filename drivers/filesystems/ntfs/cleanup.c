@@ -118,6 +118,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
     if (!Fcb)
         return STATUS_SUCCESS;
 
+    FsRtlNotifyCleanup(DeviceExt->NotifySync, &DeviceExt->NotifyList, FileObject->FsContext2);
+
     if (Fcb->Flags & FCB_IS_VOLUME)
     {
         NtfsUncountOpen(DeviceExt, Fcb, FileObject);
@@ -247,7 +249,13 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
             /* A cached FCB for a path that no longer exists would make it look present */
             if (NT_SUCCESS(Status))
+            {
+                if (Fcb->Stream[0] == UNICODE_NULL)
+                    NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                                          NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                                          FILE_ACTION_REMOVED);
                 NtfsRemoveFCBFromTable(DeviceExt, Fcb);
+            }
 
             if (!NT_SUCCESS(Status))
             {

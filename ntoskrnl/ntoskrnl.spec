@@ -279,6 +279,7 @@
 @ stdcall FsRtlNormalizeNtstatus(long long)
 @ stdcall FsRtlNotifyChangeDirectory(ptr ptr ptr ptr long long ptr)
 @ stdcall FsRtlNotifyCleanup(ptr ptr ptr)
+@ stdcall FsRtlNotifyCleanupAll(ptr ptr)
 @ stdcall FsRtlNotifyFilterChangeDirectory(ptr ptr ptr ptr long long long ptr ptr ptr ptr)
 @ stdcall FsRtlNotifyFilterReportChange(ptr ptr ptr long ptr ptr long long ptr ptr)
 @ stdcall FsRtlNotifyFullChangeDirectory(ptr ptr ptr ptr long long long ptr ptr ptr)
