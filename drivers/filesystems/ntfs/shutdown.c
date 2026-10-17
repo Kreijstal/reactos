@@ -60,14 +60,19 @@ NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext)
             continue;
         Vcb = DeviceObject->DeviceExtension;
         ASSERT(Vcb->Identifier.Type == NTFS_TYPE_VCB);
-        if (Vcb->Flags & VCB_VOLUME_DISMOUNTED)
+        ExAcquireResourceSharedLite(&Vcb->IoResource, TRUE);
+        if (Vcb->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_QUERY_REMOVE_PENDING))
+        {
+            ExReleaseResourceLite(&Vcb->IoResource);
             continue;
+        }
 
         /* Flush file data before the volume-stream metadata. Shutdown must
          * leave sections intact: eviction can re-enter MM during rundown. */
         VolumeStatus = NtfsFlushVolume(Vcb);
         if (NT_SUCCESS(VolumeStatus))
             VolumeStatus = NtfsShutdownStorageDevice(Vcb->StorageDevice);
+        ExReleaseResourceLite(&Vcb->IoResource);
         if (!NT_SUCCESS(VolumeStatus))
         {
             DPRINT1("Shutdown flush failed for volume %p: %lx\n", Vcb, VolumeStatus);
