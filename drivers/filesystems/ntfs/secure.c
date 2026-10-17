@@ -906,6 +906,7 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
     if (!NtfsGlobalData->EnableWriteSupport)
         return STATUS_MEDIA_WRITE_PROTECTED;
 
+    ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
     ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
 
     Status = NtfsReadFileSecurity(DeviceExt, MftIndex, &OldSd);
@@ -931,6 +932,7 @@ NtfsSetSecurity(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     ExReleaseResourceLite(&Fcb->MainResource);
+    ExReleaseResourceLite(&DeviceExt->DirResource);
 
     if (NT_SUCCESS(Status))
         NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_SECURITY, FILE_ACTION_MODIFIED);
