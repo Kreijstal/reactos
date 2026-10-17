@@ -100,21 +100,45 @@ NtfsGetBasicInformation(PFILE_OBJECT FileObject,
                         PFILE_BASIC_INFORMATION BasicInfo,
                         PULONG BufferLength)
 {
-    PFILENAME_ATTRIBUTE FileName = &Fcb->Entry;
-
-    DPRINT("NtfsGetBasicInformation(%p, %p, %p, %p, %p)\n", FileObject, Fcb, DeviceObject, BasicInfo, BufferLength);
+    PDEVICE_EXTENSION Vcb = Fcb->Vcb;
+    PFILE_RECORD_HEADER Record;
+    PSTANDARD_INFORMATION Info;
+    NTSTATUS Status;
 
     if (*BufferLength < sizeof(FILE_BASIC_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
-
-    RtlZeroMemory(BasicInfo, sizeof(FILE_BASIC_INFORMATION));
-
-    BasicInfo->CreationTime.QuadPart = FileName->CreationTime;
-    BasicInfo->LastAccessTime.QuadPart = FileName->LastAccessTime;
-    BasicInfo->LastWriteTime.QuadPart = FileName->LastWriteTime;
-    BasicInfo->ChangeTime.QuadPart = FileName->ChangeTime;
-
-    NtfsFileFlagsToAttributes(FileName->FileAttributes, &BasicInfo->FileAttributes);
+    RtlZeroMemory(BasicInfo, sizeof(*BasicInfo));
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
+    {
+        BasicInfo->CreationTime.QuadPart = Fcb->Entry.CreationTime;
+        BasicInfo->LastAccessTime.QuadPart = Fcb->Entry.LastAccessTime;
+        BasicInfo->LastWriteTime.QuadPart = Fcb->Entry.LastWriteTime;
+        BasicInfo->ChangeTime.QuadPart = Fcb->Entry.ChangeTime;
+        NtfsFileFlagsToAttributes(Fcb->Entry.FileAttributes, &BasicInfo->FileAttributes);
+    }
+    else
+    {
+        /* Hard-link and stream FCBs share the stored basic information. */
+        Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+        if (Record == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        Status = ReadFileRecord(Vcb, Fcb->MFTIndex, Record);
+        if (NT_SUCCESS(Status))
+        {
+            Info = GetStandardInformationFromRecord(Vcb, Record);
+            ASSERT(Info != NULL);
+            BasicInfo->CreationTime.QuadPart = Info->CreationTime;
+            BasicInfo->LastAccessTime.QuadPart = Info->LastAccessTime;
+            BasicInfo->LastWriteTime.QuadPart = Info->LastWriteTime;
+            BasicInfo->ChangeTime.QuadPart = Info->ChangeTime;
+            NtfsFileFlagsToAttributes(Info->FileAttribute |
+                                      (NtfsFCBIsDirectory(Fcb) ? NTFS_FILE_TYPE_DIRECTORY : 0),
+                                      &BasicInfo->FileAttributes);
+        }
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     *BufferLength -= sizeof(FILE_BASIC_INFORMATION);
 
@@ -331,22 +355,22 @@ NtfsGetNetworkOpenInformation(PNTFS_FCB Fcb,
                               PFILE_NETWORK_OPEN_INFORMATION NetworkInfo,
                               PULONG BufferLength)
 {
-    PFILENAME_ATTRIBUTE FileName = &Fcb->Entry;
-
-    DPRINT("NtfsGetNetworkOpenInformation(%p, %p, %p, %p)\n", Fcb, DeviceExt, NetworkInfo, BufferLength);
+    FILE_BASIC_INFORMATION Basic;
+    ULONG BasicLength = sizeof(Basic);
+    NTSTATUS Status;
 
     if (*BufferLength < sizeof(FILE_NETWORK_OPEN_INFORMATION))
         return STATUS_BUFFER_TOO_SMALL;
-
-    NetworkInfo->CreationTime.QuadPart = FileName->CreationTime;
-    NetworkInfo->LastAccessTime.QuadPart = FileName->LastAccessTime;
-    NetworkInfo->LastWriteTime.QuadPart = FileName->LastWriteTime;
-    NetworkInfo->ChangeTime.QuadPart = FileName->ChangeTime;
-
+    Status = NtfsGetBasicInformation(NULL, Fcb, NULL, &Basic, &BasicLength);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    NetworkInfo->CreationTime = Basic.CreationTime;
+    NetworkInfo->LastAccessTime = Basic.LastAccessTime;
+    NetworkInfo->LastWriteTime = Basic.LastWriteTime;
+    NetworkInfo->ChangeTime = Basic.ChangeTime;
+    NetworkInfo->FileAttributes = Basic.FileAttributes;
     NetworkInfo->EndOfFile = Fcb->RFCB.FileSize;
     NetworkInfo->AllocationSize = Fcb->RFCB.AllocationSize;
-
-    NtfsFileFlagsToAttributes(FileName->FileAttributes, &NetworkInfo->FileAttributes);
 
     *BufferLength -= sizeof(FILE_NETWORK_OPEN_INFORMATION);
     return STATUS_SUCCESS;
@@ -1272,9 +1296,9 @@ NtfsSetAllocationInformation(PNTFS_FCB Fcb,
 * $STANDARD_INFORMATION, or whatever status reading or writing the file record
 * returned.
 *
-* @remarks A timestamp of zero means "leave as is" and -1 means "stop
-* maintaining automatically"; both are treated as no change, as the driver
-* doesn't yet update timestamps on I/O. FileAttributes of zero means no change.
+* @remarks Zero leaves a timestamp unchanged. -1 suppresses automatic updates
+* through this open, -2 resumes them, and an explicit positive value also pins
+* the time until updates are resumed. FileAttributes of zero means no change.
 *
 * NTFS keeps a second copy of these in $FILE_NAME and a third in the parent
 * directory's index entry; all three are updated here.
@@ -1284,17 +1308,29 @@ static
 NTSTATUS
 NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
                         PNTFS_FCB Fcb,
+                        PFILE_OBJECT FileObject,
                         BOOLEAN CaseSensitive,
                         PFILE_BASIC_INFORMATION BasicInfo,
                         PULONG NotifyFilter)
 {
     PFILE_RECORD_HEADER FileRecord;
     PSTANDARD_INFORMATION StdInfo;
-    ULONG OldAttributes;
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+    ULONG OldAttributes, UserSetFlags = Ccb->Flags;
+    ULONG ValidAttributes = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN |
+                            FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_ARCHIVE |
+                            FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE |
+                            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+    LARGE_INTEGER Now;
     NTSTATUS Status;
 
-    DPRINT("NtfsSetBasicInformation(%p, %p, %p)\n", DeviceExt, Fcb, BasicInfo);
+    if (BasicInfo->CreationTime.QuadPart < -2 || BasicInfo->LastAccessTime.QuadPart < -2 ||
+        BasicInfo->LastWriteTime.QuadPart < -2 || BasicInfo->ChangeTime.QuadPart < -2 ||
+        (!NtfsFCBIsDirectory(Fcb) && (BasicInfo->FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) ||
+        (NtfsFCBIsDirectory(Fcb) && (BasicInfo->FileAttributes & FILE_ATTRIBUTE_TEMPORARY)))
+        return STATUS_INVALID_PARAMETER;
 
+    KeQuerySystemTime(&Now);
     FileRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
     if (FileRecord == NULL)
     {
@@ -1319,31 +1355,43 @@ NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
     }
 
     OldAttributes = StdInfo->FileAttribute;
-    if (BasicInfo->CreationTime.QuadPart > 0)
-        StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
+    if (BasicInfo->FileAttributes != 0)
+    {
+        if (Fcb->MFTIndex == NTFS_FILE_ROOT)
+            ValidAttributes &= ~(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+        StdInfo->FileAttribute = (OldAttributes & ~ValidAttributes & ~FILE_ATTRIBUTE_NORMAL) |
+                                (BasicInfo->FileAttributes & ValidAttributes);
+        if (StdInfo->FileAttribute != OldAttributes &&
+            !(UserSetFlags & CCB_USER_SET_CHANGE_TIME) && BasicInfo->ChangeTime.QuadPart != -1)
+            StdInfo->ChangeTime = Now.QuadPart;
+    }
 
-    if (BasicInfo->LastAccessTime.QuadPart > 0)
-        StdInfo->LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
-
-    if (BasicInfo->LastWriteTime.QuadPart > 0)
-        StdInfo->LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
-
+    if (BasicInfo->ChangeTime.QuadPart == -2)
+        UserSetFlags &= ~CCB_USER_SET_CHANGE_TIME;
+    else if (BasicInfo->ChangeTime.QuadPart != 0)
+        UserSetFlags |= CCB_USER_SET_CHANGE_TIME;
     if (BasicInfo->ChangeTime.QuadPart > 0)
         StdInfo->ChangeTime = BasicInfo->ChangeTime.QuadPart;
 
-    if (BasicInfo->FileAttributes != 0)
-    {
-        ULONG Attributes = BasicInfo->FileAttributes;
+    if (BasicInfo->CreationTime.QuadPart > 0)
+        StdInfo->CreationTime = BasicInfo->CreationTime.QuadPart;
+    if (BasicInfo->LastAccessTime.QuadPart == -2)
+        UserSetFlags &= ~CCB_USER_SET_ACCESS_TIME;
+    else if (BasicInfo->LastAccessTime.QuadPart != 0)
+        UserSetFlags |= CCB_USER_SET_ACCESS_TIME;
+    if (BasicInfo->LastAccessTime.QuadPart > 0)
+        StdInfo->LastAccessTime = BasicInfo->LastAccessTime.QuadPart;
+    if (BasicInfo->LastWriteTime.QuadPart == -2)
+        UserSetFlags &= ~CCB_USER_SET_WRITE_TIME;
+    else if (BasicInfo->LastWriteTime.QuadPart != 0)
+        UserSetFlags |= CCB_USER_SET_WRITE_TIME;
+    if (BasicInfo->LastWriteTime.QuadPart > 0)
+        StdInfo->LastWriteTime = BasicInfo->LastWriteTime.QuadPart;
 
-        /* Whether this is a directory isn't the caller's to say */
-        Attributes &= ~(FILE_ATTRIBUTE_DIRECTORY | NTFS_FILE_TYPE_DIRECTORY);
-
-        /* NORMAL only means anything on its own */
-        if ((Attributes & FILE_ATTRIBUTE_NORMAL) && Attributes != FILE_ATTRIBUTE_NORMAL)
-            Attributes &= ~FILE_ATTRIBUTE_NORMAL;
-
-        StdInfo->FileAttribute = Attributes;
-    }
+    if ((BasicInfo->CreationTime.QuadPart > 0 || BasicInfo->LastAccessTime.QuadPart > 0 ||
+         BasicInfo->LastWriteTime.QuadPart > 0) &&
+        !(UserSetFlags & CCB_USER_SET_CHANGE_TIME) && BasicInfo->ChangeTime.QuadPart != -1)
+        StdInfo->ChangeTime = Now.QuadPart;
 
     /* Everything else NTFS keeps a second and third copy of goes out through the one funnel,
      * which also writes the file record back. */
@@ -1360,6 +1408,13 @@ NtfsSetBasicInformation(PDEVICE_EXTENSION DeviceExt,
     }
     else
     {
+        Ccb->Flags = UserSetFlags;
+        Fcb->Entry.CreationTime = StdInfo->CreationTime;
+        Fcb->Entry.LastAccessTime = StdInfo->LastAccessTime;
+        Fcb->Entry.LastWriteTime = StdInfo->LastWriteTime;
+        Fcb->Entry.ChangeTime = StdInfo->ChangeTime;
+        Fcb->Entry.FileAttributes = StdInfo->FileAttribute |
+                                   (NtfsFCBIsDirectory(Fcb) ? NTFS_FILE_TYPE_DIRECTORY : 0);
         if (BasicInfo->CreationTime.QuadPart > 0)
             *NotifyFilter |= FILE_NOTIFY_CHANGE_CREATION;
         if (BasicInfo->LastAccessTime.QuadPart > 0)
@@ -2495,6 +2550,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             ExAcquireResourceExclusiveLite(&DeviceExt->IndexResource, TRUE);
             Status = NtfsSetBasicInformation(DeviceExt,
                                              Fcb,
+                                             FileObject,
                                              BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),
                                              (PFILE_BASIC_INFORMATION)SystemBuffer,
                                              &NotifyFilter);
@@ -2583,6 +2639,11 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     if (NT_SUCCESS(Status))
     {
         NtfsJournalSetInformation(DeviceExt, Fcb, FileInformationClass, OldSize);
+        if (FileInformationClass == FileEndOfFileInformation ||
+            (FileInformationClass == FileAllocationInformation && OldSize != Fcb->RFCB.FileSize.QuadPart))
+            FileObject->Flags |= FO_FILE_MODIFIED;
+        else if (FileInformationClass == FileAllocationInformation)
+            ((PNTFS_CCB)FileObject->FsContext2)->Flags |= CCB_UPDATE_CHANGE_TIME;
         if ((FileInformationClass == FileEndOfFileInformation ||
              FileInformationClass == FileAllocationInformation) &&
             OldSize != Fcb->RFCB.FileSize.QuadPart)

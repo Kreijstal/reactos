@@ -798,7 +798,12 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     StdInfo = GetStandardInformationFromRecord(Vcb, Record);
     if (StdInfo != NULL)
     {
-        rcFCB->Entry.FileAttributes |= StdInfo->FileAttribute;
+        rcFCB->Entry.FileAttributes = StdInfo->FileAttribute |
+                                     (FileName->FileAttributes & NTFS_FILE_TYPE_DIRECTORY);
+        rcFCB->Entry.CreationTime = StdInfo->CreationTime;
+        rcFCB->Entry.LastAccessTime = StdInfo->LastAccessTime;
+        rcFCB->Entry.LastWriteTime = StdInfo->LastWriteTime;
+        rcFCB->Entry.ChangeTime = StdInfo->ChangeTime;
     }
 
     rcFCB->RefCount = 1;
