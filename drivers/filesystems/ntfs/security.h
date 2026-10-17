@@ -13,4 +13,3 @@ NtfsCheckAccess(PDEVICE_EXTENSION Vcb,
                  ACCESS_MASK PreviouslyGranted,
                  KPROCESSOR_MODE AccessMode,
                  PACCESS_MASK GrantedAccess);
-

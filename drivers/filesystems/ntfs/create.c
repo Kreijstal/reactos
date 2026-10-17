@@ -1020,6 +1020,63 @@ NtfsCheckParentAccess(PDEVICE_EXTENSION Vcb,
     return NtfsCheckAccess(Vcb, Parent, AccessState, Desired, 0, Mode, &Granted);
 }
 
+/* A cached target FCB does not authorize its ancestors. Check the path before
+ * consulting the FCB table when the effective token lacks traverse bypass. */
+static NTSTATUS
+NtfsCheckCreateTraverse(PDEVICE_EXTENSION Vcb,
+                         PCUNICODE_STRING Path,
+                         PACCESS_STATE AccessState,
+                         KPROCESSOR_MODE Mode,
+                         BOOLEAN CaseSensitive)
+{
+    ULONGLONG Parent = NTFS_FILE_ROOT, Index;
+    ULONG Position = 1, End = Path->Length / sizeof(WCHAR), Next;
+    UNICODE_STRING Name;
+    PFILE_RECORD_HEADER Record;
+    PSTANDARD_INFORMATION Info;
+    ACCESS_MASK Granted;
+    BOOLEAN Directory, Reparse;
+    NTSTATUS Status;
+
+    if (Mode == KernelMode || (AccessState->Flags & TOKEN_HAS_TRAVERSE_PRIVILEGE) ||
+        (AccessState->PreviouslyGrantedAccess & FILE_TRAVERSE))
+        return STATUS_SUCCESS;
+    while (Position < End)
+    {
+        Status = NtfsCheckAccess(Vcb, Parent, AccessState, FILE_TRAVERSE, 0, Mode, &Granted);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        for (Next = Position; Next < End && Path->Buffer[Next] != L'\\'; Next++)
+            ;
+        if (Next == End)
+            return STATUS_SUCCESS;
+        if (Next == Position)
+        {
+            Position++;
+            continue;
+        }
+        Name.Buffer = Path->Buffer + Position;
+        Name.Length = Name.MaximumLength = (USHORT)((Next - Position) * sizeof(WCHAR));
+        Status = NtfsLookupFileAt(Vcb, &Name, CaseSensitive, &Record, &Index, Parent);
+        if (!NT_SUCCESS(Status))
+            return Status == STATUS_OBJECT_NAME_NOT_FOUND ? STATUS_OBJECT_PATH_NOT_FOUND : Status;
+        Info = GetStandardInformationFromRecord(Vcb, Record);
+        ASSERT(Info != NULL);
+        Reparse = BooleanFlagOn(Info->FileAttribute, FILE_ATTRIBUTE_REPARSE_POINT);
+        Directory = BooleanFlagOn(Record->Flags, FRH_DIRECTORY);
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+        /* The I/O manager reparses the redirected path with the same access
+         * state. Do not interpret a reparse point's contents as an index. */
+        if (Reparse)
+            return STATUS_SUCCESS;
+        if (!Directory)
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+        Parent = Index;
+        Position = Next + 1;
+    }
+    return STATUS_SUCCESS;
+}
+
 /* A parent can independently authorize deletion and reading attributes
  * (MS-FSA 2.1.5.1.2.1), even when the file's DACL denies those rights. */
 static NTSTATUS
@@ -1277,6 +1334,13 @@ NtfsCreateNewFile(
         return STATUS_CANNOT_DELETE;
     }
 
+    Status = NtfsCheckParentAccess(DeviceExt, ParentFcb->MFTIndex,
+                                    Stack->Parameters.Create.SecurityContext->AccessState,
+                                    IsDirectory ? FILE_ADD_SUBDIRECTORY : FILE_ADD_FILE,
+                                    NtfsCreateAccessMode(Irp, Stack));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
     Status = NtfsAssignSecurity(DeviceExt,
                                 ParentFcb->MFTIndex,
                                 Stack->Parameters.Create.SecurityContext->AccessState,
@@ -1440,6 +1504,14 @@ NtfsOpenBaseOfStream(
     }
 
     NtfsGetFinalComponent(Path, &FinalName);
+    Status = NtfsCheckParentAccess(DeviceExt, ParentFcb->MFTIndex,
+                                    Stack->Parameters.Create.SecurityContext->AccessState,
+                                    FILE_ADD_FILE, NtfsCreateAccessMode(IrpContext->Irp, Stack));
+    if (!NT_SUCCESS(Status))
+    {
+        NtfsReleaseFCB(DeviceExt, ParentFcb);
+        return Status;
+    }
     Status = NtfsAssignSecurity(DeviceExt,
                                 ParentFcb->MFTIndex,
                                 Stack->Parameters.Create.SecurityContext->AccessState,
@@ -1739,11 +1811,21 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
         if (Options & FILE_OPEN_BY_FILE_ID)
             return STATUS_INVALID_PARAMETER;
 
+        Status = NtfsBuildCreatePath(FileObject, &Path);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Status = NtfsCheckCreateTraverse(DeviceExt, &Path, Stack->Parameters.Create.SecurityContext->AccessState,
+                                          NtfsCreateAccessMode(Irp, Stack), CaseSensitive);
+        ExFreePoolWithTag(Path.Buffer, TAG_NTFS);
+        if (!NT_SUCCESS(Status))
+            return Status;
         Status = NtfsOpenTargetDirectory(DeviceExt, FileObject, CaseSensitive, &Information);
         if (!NT_SUCCESS(Status))
             return Status;
 
-        Status = NtfsGrantShareAccess(DeviceExt, FileObject->FsContext, FileObject, Stack);
+        Status = NtfsAuthorizeOpen(DeviceExt, FileObject->FsContext, Irp, Stack, TRUE);
+        if (NT_SUCCESS(Status))
+            Status = NtfsGrantShareAccess(DeviceExt, FileObject->FsContext, FileObject, Stack);
         if (!NT_SUCCESS(Status))
         {
             NtfsCloseFile(DeviceExt, FileObject);
@@ -1786,6 +1868,10 @@ NtfsCreateFile(PDEVICE_OBJECT DeviceObject,
     Status = NtfsCheckCreatePath(&Path, Options, &TrailingBackslash);
     if (NT_SUCCESS(Status))
         Status = NtfsSplitStreamName(&Path, &StreamName, &StreamKind);
+
+    if (NT_SUCCESS(Status) && !(Options & FILE_OPEN_BY_FILE_ID))
+        Status = NtfsCheckCreateTraverse(DeviceExt, &Path, Stack->Parameters.Create.SecurityContext->AccessState,
+                                          NtfsCreateAccessMode(Irp, Stack), CaseSensitive);
 
     if (NT_SUCCESS(Status) && StreamKind != NtfsNoStream)
     {
