@@ -37,6 +37,116 @@ PNTFS_GLOBAL_DATA NtfsGlobalData = NULL;
 
 /* FUNCTIONS ****************************************************************/
 
+/* Section creation and the matching release must acquire the same resource.
+ * Report existing writers to MM, as required by the section synchronization
+ * callback contract. Control-device file objects have no FCB. */
+static
+VOID
+NTAPI
+NtfsAcquireFileForCreateSection(PFILE_OBJECT FileObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    if (Fcb == NULL)
+        return;
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
+    ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+}
+
+static
+VOID
+NTAPI
+NtfsReleaseFileForCreateSection(PFILE_OBJECT FileObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    if (Fcb == NULL)
+        return;
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
+    ExReleaseResourceLite(&Fcb->MainResource);
+}
+
+static
+NTSTATUS
+NTAPI
+NtfsAcquireForSectionSynchronization(PFS_FILTER_CALLBACK_DATA Data,
+                                     PVOID *CompletionContext)
+{
+    PNTFS_FCB Fcb = Data->FileObject->FsContext;
+
+    UNREFERENCED_PARAMETER(CompletionContext);
+    ASSERT(Data->Operation == FS_FILTER_ACQUIRE_FOR_SECTION_SYNCHRONIZATION);
+    NtfsAcquireFileForCreateSection(Data->FileObject);
+    if (Fcb == NULL ||
+        Data->Parameters.AcquireForSectionSynchronization.SyncType != SyncTypeCreateSection)
+    {
+        return STATUS_FSFILTER_OP_COMPLETED_SUCCESSFULLY;
+    }
+    return Fcb->ShareAccess.Writers ? STATUS_FILE_LOCKED_WITH_WRITERS :
+                                     STATUS_FILE_LOCKED_WITH_ONLY_READERS;
+}
+
+/* Paging writes take the paging resource exclusively. Acquiring it shared
+ * in the default FsRtl callbacks would require an unsupported lock upgrade. */
+static
+NTSTATUS
+NTAPI
+NtfsAcquireForCcFlush(PFILE_OBJECT FileObject, PDEVICE_OBJECT DeviceObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
+    if (ExIsResourceAcquiredSharedLite(&Fcb->MainResource))
+        ExAcquireResourceSharedLite(&Fcb->MainResource, TRUE);
+    else
+        ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
+    ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
+NtfsReleaseForCcFlush(PFILE_OBJECT FileObject, PDEVICE_OBJECT DeviceObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    ExReleaseResourceLite(&Fcb->PagingIoResource);
+    ExReleaseResourceLite(&Fcb->MainResource);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+NTAPI
+NtfsAcquireForModWrite(PFILE_OBJECT FileObject,
+                       PLARGE_INTEGER EndingOffset,
+                       PERESOURCE *ResourceToRelease,
+                       PDEVICE_OBJECT DeviceObject)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+
+    UNREFERENCED_PARAMETER(EndingOffset);
+    UNREFERENCED_PARAMETER(DeviceObject);
+    ASSERT(Fcb->Identifier.Type == NTFS_TYPE_FCB);
+    *ResourceToRelease = NULL;
+    /* An explicit flush can be called by a reader already holding main
+     * shared. Recurse in that mode instead of attempting a lock upgrade. */
+    if (ExIsResourceAcquiredSharedLite(&Fcb->MainResource))
+    {
+        if (!ExAcquireResourceSharedLite(&Fcb->MainResource, FALSE))
+            return STATUS_CANT_WAIT;
+    }
+    else if (!ExAcquireResourceExclusiveLite(&Fcb->MainResource, FALSE))
+    {
+        return STATUS_CANT_WAIT;
+    }
+    *ResourceToRelease = &Fcb->MainResource;
+    return STATUS_SUCCESS;
+}
+
 /*
  * FUNCTION: Called by the system to initialize the driver
  * ARGUMENTS:
@@ -123,6 +233,22 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     /* Initialize IRP functions array */
     NtfsInitializeFunctionPointers(DriverObject);
 
+    {
+        FS_FILTER_CALLBACKS Callbacks;
+
+        RtlZeroMemory(&Callbacks, sizeof(Callbacks));
+        Callbacks.SizeOfFsFilterCallbacks = sizeof(Callbacks);
+        Callbacks.PreAcquireForSectionSynchronization = NtfsAcquireForSectionSynchronization;
+        Status = FsRtlRegisterFileSystemFilterCallbacks(DriverObject, &Callbacks);
+        if (!NT_SUCCESS(Status))
+        {
+            ExDeleteResourceLite(&NtfsGlobalData->Resource);
+            IoDeleteDevice(DeviceObject);
+            NtfsGlobalData = NULL;
+            return Status;
+        }
+    }
+
     /* Initialize CC functions array */
     NtfsGlobalData->CacheMgrCallbacks.AcquireForLazyWrite = NtfsAcqLazyWrite;
     NtfsGlobalData->CacheMgrCallbacks.ReleaseFromLazyWrite = NtfsRelLazyWrite;
@@ -133,6 +259,11 @@ DriverEntry(PDRIVER_OBJECT DriverObject,
     NtfsGlobalData->FastIoDispatch.FastIoCheckIfPossible = NtfsFastIoCheckIfPossible;
     NtfsGlobalData->FastIoDispatch.FastIoRead = NtfsFastIoRead;
     NtfsGlobalData->FastIoDispatch.FastIoWrite = NtfsFastIoWrite;
+    NtfsGlobalData->FastIoDispatch.AcquireFileForNtCreateSection = NtfsAcquireFileForCreateSection;
+    NtfsGlobalData->FastIoDispatch.ReleaseFileForNtCreateSection = NtfsReleaseFileForCreateSection;
+    NtfsGlobalData->FastIoDispatch.AcquireForCcFlush = NtfsAcquireForCcFlush;
+    NtfsGlobalData->FastIoDispatch.ReleaseForCcFlush = NtfsReleaseForCcFlush;
+    NtfsGlobalData->FastIoDispatch.AcquireForModWrite = NtfsAcquireForModWrite;
     DriverObject->FastIoDispatch = &NtfsGlobalData->FastIoDispatch;
 
     /* Initialize lookaside list for IRP contexts */

@@ -62,11 +62,10 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
     /* SectionObjectPointer is deliberately left alone. Mm reaches the file's section object
      * pointers through it for as long as a section exists, which outlasts the handle. */
 
-    if (FileObject->FileName.Buffer)
+    if (Ccb->Flags & CCB_FCB_REFERENCE)
     {
-        // This a FO, that was created outside from FSD.
-        // Some FO's are created with IoCreateStreamFileObject() insid from FSD.
-        // This FO's don't have a FileName.
+        /* Both an external open and an internal cache stream own a reference.
+         * MM keeps the stream file object alive until its sections are gone. */
         NtfsReleaseFCB(DeviceExt, Fcb);
     }
 

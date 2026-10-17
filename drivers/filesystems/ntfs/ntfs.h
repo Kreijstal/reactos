@@ -119,6 +119,7 @@ typedef struct
 
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
+    PLIST_ENTRY FcbHashBuckets;
 
     PVPB Vpb;
     PDEVICE_OBJECT StorageDevice;
@@ -200,6 +201,9 @@ typedef struct
 /* The open is counted in its FCB's and the volume's open handle counts, which the
  * cleanup of the handle takes back */
 #define CCB_COUNTED             0x0008
+
+/* This file object owns one FCB reference, independently of handle counts. */
+#define CCB_FCB_REFERENCE       0x0010
 
 typedef struct
 {
@@ -653,9 +657,9 @@ typedef struct _NTFS_ATTR_CONTEXT
 
 typedef struct _FCB
 {
-    NTFSIDENTIFIER Identifier;
-
+    /* Cc and FsRtl access this header through FileObject->FsContext. */
     FSRTL_COMMON_FCB_HEADER RFCB;
+    NTFSIDENTIFIER Identifier;
     SECTION_OBJECT_POINTERS SectionObjectPointers;
 
     PFILE_OBJECT FileObject;
@@ -669,6 +673,8 @@ typedef struct _FCB
     ERESOURCE MainResource;
 
     LIST_ENTRY FcbListEntry;
+    LIST_ENTRY FcbHashEntry;
+    ULONG PathNameHash;
     struct _FCB* ParentFcb;
 
     ULONG DirIndex;
@@ -683,12 +689,19 @@ typedef struct _FCB
     USHORT SequenceNumber;  /* Of the file record; with MFTIndex, the file reference */
     USHORT LinkCount;
 
+    /* Path FCBs cannot retain a private data view across changes to the
+     * hard-link set. The table lock protects generation increments. */
+    ULONG CacheGeneration;
+    ULONG DataCacheGeneration;
+
     /* USN_REASON_* the change journal recorded since the last close; Vcb->UsnResource */
     ULONG UsnReasons;
 
     FILENAME_ATTRIBUTE Entry;
 
 } NTFS_FCB, *PNTFS_FCB;
+
+C_ASSERT(FIELD_OFFSET(NTFS_FCB, RFCB) == 0);
 
 typedef struct _FIND_ATTR_CONTXT
 {
@@ -1355,6 +1368,14 @@ FAST_IO_WRITE NtfsFastIoWrite;
 
 
 /* fcb.c */
+
+#define NTFS_FCB_HASH_BUCKETS 256
+
+NTSTATUS
+NtfsInitializeFcbHash(PNTFS_VCB Vcb);
+
+VOID
+NtfsUninitializeFcbHash(PNTFS_VCB Vcb);
 
 NTSTATUS
 NtfsSetFCBPath(

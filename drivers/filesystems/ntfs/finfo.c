@@ -2453,6 +2453,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
 
+    ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
     OldSize = Fcb->RFCB.FileSize.QuadPart;
 
     switch (FileInformationClass)
@@ -2559,6 +2560,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
     if (NT_SUCCESS(Status))
         NtfsJournalSetInformation(DeviceExt, Fcb, FileInformationClass, OldSize);
 
+    ExReleaseResourceLite(&Fcb->PagingIoResource);
     ExReleaseResourceLite(&Fcb->MainResource);
 
     if (NeedDirResource)

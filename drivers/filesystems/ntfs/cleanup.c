@@ -129,6 +129,8 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
             return STATUS_PENDING;
         }
 
+        ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+
         NtfsApplyDeleteOnClose(DeviceExt, Fcb, FileObject);
 
         NtfsUncountOpen(DeviceExt, Fcb, FileObject);
@@ -254,6 +256,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         FileObject->Flags |= FO_CLEANUP_COMPLETE;
 
+        ExReleaseResourceLite(&Fcb->PagingIoResource);
         ExReleaseResourceLite(&Fcb->MainResource);
     }
 

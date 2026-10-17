@@ -500,6 +500,9 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
                                                      Vcb->StorageDevice);
 
     InitializeListHead(&Vcb->FcbListHead);
+    Status = NtfsInitializeFcbHash(Vcb);
+    if (!NT_SUCCESS(Status))
+        goto ByeBye;
 
     Fcb = NtfsCreateFCB(NULL, NULL, Vcb);
     if (Fcb == NULL)
@@ -597,7 +600,10 @@ ByeBye:
             ExFreePool(Ccb);
 
         if (Vcb != NULL)
+        {
+            NtfsUninitializeFcbHash(Vcb);
             NtfsFreeVolumeBitmap(Vcb);
+        }
 
         if (Vcb != NULL && Vcb->UpCaseTable != NULL)
         {
@@ -1477,10 +1483,15 @@ NtfsSparseRequest(PDEVICE_EXTENSION DeviceExt,
     ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
     ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
 
-    if (Code == FSCTL_SET_ZERO_DATA)
-        Status = NtfsSetZeroData(DeviceExt, Fcb, &Zero);
-    else
-        Status = NtfsSetSparse(DeviceExt, Fcb, SetSparse);
+    /* These workers change data and mappings through the volume cache. */
+    Status = NtfsFlushFileCache(Stack->FileObject, TRUE);
+    if (NT_SUCCESS(Status))
+    {
+        if (Code == FSCTL_SET_ZERO_DATA)
+            Status = NtfsSetZeroData(DeviceExt, Fcb, &Zero);
+        else
+            Status = NtfsSetSparse(DeviceExt, Fcb, SetSparse);
+    }
 
     ExReleaseResourceLite(&Fcb->PagingIoResource);
 
@@ -1537,7 +1548,9 @@ NtfsCompressionRequest(PDEVICE_EXTENSION DeviceExt,
 
     ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
     ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
-    Status = NtfsSetCompression(DeviceExt, Fcb, Format);
+    Status = NtfsFlushFileCache(Stack->FileObject, TRUE);
+    if (NT_SUCCESS(Status))
+        Status = NtfsSetCompression(DeviceExt, Fcb, Format);
     ExReleaseResourceLite(&Fcb->PagingIoResource);
 
     if (NT_SUCCESS(Status))
@@ -1727,7 +1740,9 @@ NtfsMoveFileRequest(PDEVICE_EXTENSION DeviceExt,
         /* Nothing may map the runs while they change */
         ExAcquireResourceExclusiveLite(&Fcb->MainResource, TRUE);
         ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
-        Status = NtfsMoveFile(DeviceExt, Fcb, &Move);
+        Status = NtfsFlushFileCache(FileObject, FALSE);
+        if (NT_SUCCESS(Status))
+            Status = NtfsMoveFile(DeviceExt, Fcb, &Move);
         ExReleaseResourceLite(&Fcb->PagingIoResource);
         ExReleaseResourceLite(&Fcb->MainResource);
     }
