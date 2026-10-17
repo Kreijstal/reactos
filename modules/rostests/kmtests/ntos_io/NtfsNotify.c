@@ -198,6 +198,76 @@ SetDelete(HANDLE Handle, BOOLEAN Delete)
     check_status(ZwSetInformationFile(Handle, &IoStatus, &Info, sizeof(Info), FileDispositionInformation), STATUS_SUCCESS);
 }
 
+static VOID
+TestReplacementNotify(PCWSTR Dir, BOOLEAN ChangeCase)
+{
+    WCHAR Source[MAX_PATH], Target[MAX_PATH], NewPath[MAX_PATH];
+    HANDLE File = NULL, Watch = NULL, Attributes = NULL;
+    PNOTIFY_REQUEST Request = NULL, AttributeRequest = NULL;
+    PFILE_NOTIFY_INFORMATION Info;
+    NTSTATUS Status;
+    ULONG i, Offset = 0;
+    const ULONG Actions[] = {FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_OLD_NAME, FILE_ACTION_RENAMED_NEW_NAME};
+    const PCWSTR Names[] = {L"MiXeD.bin", L"notify-src.bin", L"mixed.bin"};
+
+    NtfsKmtJoin(Source, RTL_NUMBER_OF(Source), Dir, L"notify-src.bin");
+    NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), Dir, ChangeCase ? L"MiXeD.bin" : L"notify-dst.bin");
+    NtfsKmtJoin(NewPath, RTL_NUMBER_OF(NewPath), Dir, ChangeCase ? L"mixed.bin" : L"notify-dst.bin");
+    check_status(NtfsKmtCreateFileWithData(Source, "data", 4), STATUS_SUCCESS);
+    check_status(NtfsKmtCreateFileWithData(Target, "old!", 4), STATUS_SUCCESS);
+    check_status(NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE), STATUS_SUCCESS);
+    Watch = OpenDirectory(Dir, FALSE);
+    if (File == NULL || Watch == NULL) goto CleanupReplace;
+    check_status(StartNotify(Watch, FILE_NOTIFY_CHANGE_FILE_NAME, FALSE, 1024, FALSE, &Request), STATUS_PENDING);
+    if (!ChangeCase)
+    {
+        Attributes = OpenDirectory(Dir, FALSE);
+        if (Attributes == NULL) goto CleanupReplace;
+        check_status(StartNotify(Attributes, FILE_NOTIFY_CHANGE_ATTRIBUTES, FALSE, 1024, FALSE,
+                                 &AttributeRequest), STATUS_PENDING);
+    }
+    check_status(NtfsKmtRename(File, NewPath, TRUE), STATUS_SUCCESS);
+    if (!ChangeCase)
+    {
+        /* An exact-case replacement removes the source name and modifies
+         * the destination. It is not an old/new rename-name pair. */
+        CheckSingle(Request, FILE_ACTION_REMOVED, L"notify-src.bin"); Request = NULL;
+        CheckSingle(AttributeRequest, FILE_ACTION_MODIFIED, L"notify-dst.bin"); AttributeRequest = NULL;
+    }
+    else
+    {
+        /* Preserve ordering across completions: FsRtl can complete the first
+         * removal separately and buffer the following old/new name pair. */
+        for (i = 0; i < RTL_NUMBER_OF(Actions); i++)
+        {
+            if (Request == NULL)
+            {
+                Status = StartNotify(Watch, FILE_NOTIFY_CHANGE_FILE_NAME, FALSE, 1024, FALSE, &Request);
+                ok(Status == STATUS_PENDING || Status == STATUS_SUCCESS, "notify status %lx\n", Status);
+                Offset = 0;
+            }
+            if (!WaitNotify(Request, STATUS_SUCCESS)) break;
+            Info = CheckRecord(Request, Offset, Actions[i], Names[i]);
+            if (Info == NULL) break;
+            if (Info->NextEntryOffset != 0)
+            {
+                ok(i + 1 < RTL_NUMBER_OF(Actions), "unexpected extra replacement notification\n");
+                Offset += Info->NextEntryOffset;
+            }
+            else
+            {
+                FreeNotify(Request); Request = NULL;
+            }
+        }
+    }
+CleanupReplace:
+    if (Request != NULL) { IoCancelIrp(Request->Irp); FreeNotify(Request); }
+    if (AttributeRequest != NULL) { IoCancelIrp(AttributeRequest->Irp); FreeNotify(AttributeRequest); }
+    if (Attributes != NULL) ZwClose(Attributes);
+    if (Watch != NULL) ZwClose(Watch);
+    if (File != NULL) ZwClose(File);
+}
+
 START_TEST(NtfsNotify)
 {
     WCHAR Root[MAX_PATH], Dir[MAX_PATH], Path[MAX_PATH], Target[MAX_PATH];
@@ -212,6 +282,8 @@ START_TEST(NtfsNotify)
     Status = NtfsKmtPrepareDirectory(Root, L"KMT_NTFS_NOTIFY", Dir);
     check_status(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) return;
+    TestReplacementNotify(Dir, FALSE);
+    TestReplacementNotify(Dir, TRUE);
     NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"alpha.txt");
     NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), Dir, L"beta.txt");
     NtfsKmtJoin(Subdir, RTL_NUMBER_OF(Subdir), Dir, L"child");

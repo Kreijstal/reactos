@@ -2441,6 +2441,9 @@ NtfsCommitReplacingRename(PDEVICE_EXTENSION Vcb,
                            PFILENAME_ATTRIBUTE DosValue,
                            PFILENAME_ATTRIBUTE NewValue,
                            PUNICODE_STRING TargetName,
+                           PCWSTR NewPath,
+                           PWSTR *PreviousTargetPath,
+                           PBOOLEAN ExactCaseMatch,
                            BOOLEAN Expanded,
                            BOOLEAN CaseSensitive)
 {
@@ -2460,7 +2463,9 @@ NtfsCommitReplacingRename(PDEVICE_EXTENSION Vcb,
         if ((Names[i]->DirectoryFileReferenceNumber & NTFS_MFT_MASK) != Parent)
             continue;
         if (Names[i]->NameLength * sizeof(WCHAR) == TargetName->Length &&
-            NtfsAttributeNamesEqual(Vcb, Names[i]->Name, TargetName->Buffer, Names[i]->NameLength))
+            NtfsAttributeNamesEqual(Vcb, Names[i]->Name, TargetName->Buffer, Names[i]->NameLength) &&
+            (TargetValue == NULL || RtlCompareMemory(Names[i]->Name, TargetName->Buffer,
+                                                      TargetName->Length) == TargetName->Length))
             TargetValue = Names[i];
         if (Names[i]->NameType == NTFS_FILE_NAME_DOS)
             TargetDos = Names[i];
@@ -2468,6 +2473,18 @@ NtfsCommitReplacingRename(PDEVICE_EXTENSION Vcb,
     ASSERT(TargetValue != NULL);
     if (TargetValue->NameType != NTFS_FILE_NAME_WIN32)
         TargetDos = NULL;
+    *ExactCaseMatch = RtlCompareMemory(TargetValue->Name, TargetName->Buffer,
+                                        TargetName->Length) == TargetName->Length;
+    *PreviousTargetPath = ExAllocatePoolWithTag(NonPagedPool,
+                                                (wcslen(NewPath) + 1) * sizeof(WCHAR), TAG_NTFS);
+    if (*PreviousTargetPath == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Restore;
+    }
+    RtlCopyMemory(*PreviousTargetPath, NewPath, (wcslen(NewPath) + 1) * sizeof(WCHAR));
+    RtlCopyMemory(*PreviousTargetPath + wcslen(NewPath) - TargetValue->NameLength,
+                  TargetValue->Name, TargetName->Length);
     if (!Expanded)
     {
         Status = UpdateFileRecord(Vcb, NameRecord->MFTRecordNumber, NameRecord);
@@ -2538,6 +2555,36 @@ Cleanup:
     return Status;
 }
 
+/* NTFS defers the change timestamp until cleanup (MS-FSA Appendix A
+ * <187>). Archive is visible as soon as the namespace operation completes. */
+static VOID
+NtfsCompleteRename(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PNTFS_CCB Ccb)
+{
+    PFILE_RECORD_HEADER Record;
+    PSTANDARD_INFORMATION Info;
+    NTSTATUS Status;
+
+    Ccb->Flags |= CCB_UPDATE_CHANGE_TIME;
+    if (NtfsFCBIsDirectory(Fcb))
+        return;
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL)
+        return; /* Cleanup will persist the pending attributes and timestamp. */
+    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, Record);
+    if (NT_SUCCESS(Status))
+    {
+        Info = GetStandardInformationFromRecord(Vcb, Record);
+        ASSERT(Info != NULL);
+        Info->FileAttribute |= FILE_ATTRIBUTE_ARCHIVE;
+        Status = NtfsUpdateDuplicatedInformation(Vcb, Record, Fcb->MFTIndex,
+                                                 NTFS_FILENAME_UPDATE_ATTRS, FALSE);
+        Fcb->Entry.FileAttributes |= FILE_ATTRIBUTE_ARCHIVE;
+    }
+    if (!NT_SUCCESS(Status))
+        NtfsMarkVolumeCorrupt(Vcb);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+}
+
 /**
 * @name NtfsSetRenameInformation
 * @implemented
@@ -2579,6 +2626,7 @@ NTSTATUS
 NtfsSetRenameInformation(
     _In_ PDEVICE_EXTENSION DeviceExt,
     _In_ PNTFS_FCB Fcb,
+    _In_ PNTFS_CCB Ccb,
     _In_opt_ PFILE_OBJECT TargetFileObject,
     _In_ BOOLEAN ReplaceIfExists,
     _In_ BOOLEAN CaseSensitive,
@@ -2586,7 +2634,7 @@ NtfsSetRenameInformation(
     _In_ ULONG BufferLength)
 {
     UNICODE_STRING NewName;
-    PWSTR NewPath = NULL;
+    PWSTR NewPath = NULL, PreviousTargetPath = NULL;
     PNTFS_RENAMED_FCB RenamedFcbs = NULL;
     ULONGLONG TargetDirMft;
     ULONGLONG OldParentMft;
@@ -2598,7 +2646,7 @@ NtfsSetRenameInformation(
     ULONG NameOffset, FirstEntry = 0;
     ULONGLONG ExistingMft, ReplacementMft = 0;
     USHORT Instance;
-    BOOLEAN RemoveDos, Expanded = FALSE;
+    BOOLEAN RemoveDos, Expanded = FALSE, ExactCaseMatch = FALSE;
     PFILENAME_ATTRIBUTE *Names = NULL, OldValue = NULL, DosValue = NULL;
     ULONG NameCount = 0, i;
     PFILENAME_ATTRIBUTE OldName;
@@ -2677,6 +2725,7 @@ NtfsSetRenameInformation(
             NtfsReportPathChange(DeviceExt, Fcb->PathName, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_REMOVED);
             NtfsRenameFcbs(DeviceExt, RenamedFcbs, Fcb->MFTIndex, TargetDirMft);
             RenamedFcbs = NULL;
+            NtfsCompleteRename(DeviceExt, Fcb, Ccb);
             NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_NEW_NAME);
         }
         goto Quit;
@@ -2691,6 +2740,8 @@ NtfsSetRenameInformation(
         goto Quit;
     if (OldName->NameType == NTFS_FILE_NAME_POSIX)
         NewValue->NameType = NTFS_FILE_NAME_POSIX;
+    if (!NtfsFCBIsDirectory(Fcb))
+        NewValue->FileAttributes |= FILE_ATTRIBUTE_ARCHIVE;
     Status = NtfsGetFileNames(DeviceExt, FileRecord, &Names, &NameCount);
     if (!NT_SUCCESS(Status))
         goto Quit;
@@ -2751,8 +2802,8 @@ NtfsSetRenameInformation(
 
     if (ReplacementMft != 0)
         Status = NtfsCommitReplacingRename(DeviceExt, Fcb, NameRecord, Original, Scratch,
-                                            OldValue, DosValue, NewValue, &NewName,
-                                            Expanded, CaseSensitive);
+                                            OldValue, DosValue, NewValue, &NewName, NewPath,
+                                            &PreviousTargetPath, &ExactCaseMatch, Expanded, CaseSensitive);
     else if (Expanded)
         Status = NtfsCommitExpandedRename(DeviceExt, Fcb, OldValue, DosValue, NewValue, CaseSensitive);
     else
@@ -2769,9 +2820,12 @@ NtfsSetRenameInformation(
     if (!NT_SUCCESS(Status))
         goto Quit;
 
+    if (ReplacementMft != 0 && !ExactCaseMatch)
+        NtfsReportPathChange(DeviceExt, PreviousTargetPath, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_ACTION_REMOVED);
     NtfsReportPathChange(DeviceExt, Fcb->PathName,
                           NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                          OldParentMft == TargetDirMft ? FILE_ACTION_RENAMED_OLD_NAME : FILE_ACTION_REMOVED);
+                          OldParentMft != TargetDirMft || (ReplacementMft != 0 && ExactCaseMatch) ?
+                          FILE_ACTION_REMOVED : FILE_ACTION_RENAMED_OLD_NAME);
     NtfsRenameFcbs(DeviceExt, RenamedFcbs, Fcb->MFTIndex, TargetDirMft);
     RenamedFcbs = NULL;
     Fcb->ParentMFTIndex = TargetDirMft;
@@ -2779,12 +2833,22 @@ NtfsSetRenameInformation(
     RtlCopyMemory(&Fcb->Entry, NewValue, FIELD_OFFSET(FILENAME_ATTRIBUTE, NameLength));
     Fcb->Entry.NameType = NewValue->NameType;
 
+    NtfsCompleteRename(DeviceExt, Fcb, Ccb);
     NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_NEW_NAME);
-    NtfsReportPathChange(DeviceExt, Fcb->PathName,
-                          NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
-                          OldParentMft == TargetDirMft ? FILE_ACTION_RENAMED_NEW_NAME : FILE_ACTION_ADDED);
+    if (ReplacementMft != 0 && ExactCaseMatch)
+        NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                              FILE_NOTIFY_CHANGE_ATTRIBUTES | FILE_NOTIFY_CHANGE_SIZE |
+                              FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_LAST_ACCESS |
+                              FILE_NOTIFY_CHANGE_CREATION | FILE_NOTIFY_CHANGE_SECURITY | FILE_NOTIFY_CHANGE_EA,
+                              FILE_ACTION_MODIFIED);
+    else
+        NtfsReportPathChange(DeviceExt, Fcb->PathName,
+                              NtfsFCBIsDirectory(Fcb) ? FILE_NOTIFY_CHANGE_DIR_NAME : FILE_NOTIFY_CHANGE_FILE_NAME,
+                              OldParentMft == TargetDirMft ? FILE_ACTION_RENAMED_NEW_NAME : FILE_ACTION_ADDED);
 
 Quit:
+    if (PreviousTargetPath != NULL)
+        ExFreePoolWithTag(PreviousTargetPath, TAG_NTFS);
     if (Names != NULL)
         NtfsFreeFileNames(Names, NameCount);
     NtfsFreeRenamedFcbs(RenamedFcbs);
@@ -3123,6 +3187,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
 
             Status = NtfsSetRenameInformation(DeviceExt,
                                               Fcb,
+                                              FileObject->FsContext2,
                                               Stack->Parameters.SetFile.FileObject,
                                               Stack->Parameters.SetFile.ReplaceIfExists,
                                               BooleanFlagOn(Stack->Flags, SL_CASE_SENSITIVE),

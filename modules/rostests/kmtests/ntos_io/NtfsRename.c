@@ -446,6 +446,81 @@ Cleanup:
     if (File != NULL) ZwClose(File);
 }
 
+static VOID
+TestRenameTimes(PCWSTR Dir)
+{
+    WCHAR Source[MAX_PATH], Target[MAX_PATH];
+    HANDLE File = NULL;
+    FILE_BASIC_INFORMATION Basic, Before, After;
+    NTSTATUS Status;
+    const LONGLONG OldTime = 130000000000000000LL;
+
+    NtfsKmtJoin(Source, RTL_NUMBER_OF(Source), Dir, L"time-src.bin");
+    NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), Dir, L"time-dst.bin");
+    Status = NtfsKmtCreateFileWithData(Source, "time", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    Basic.ChangeTime.QuadPart = OldTime;
+    Basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    Status = NtfsKmtSetInfo(File, &Basic, sizeof(Basic), FileBasicInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtQueryInfo(File, &Before, sizeof(Before), FileBasicInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtRename(File, Target, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtQueryInfo(File, &After, sizeof(After), FileBasicInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok_eq_longlong(After.ChangeTime.QuadPart, OldTime);
+        ok(After.FileAttributes & FILE_ATTRIBUTE_ARCHIVE, "rename did not set archive\n");
+    }
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtOpen(&File, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtQueryInfo(File, &After, sizeof(After), FileBasicInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(After.ChangeTime.QuadPart > OldTime, "cleanup did not stamp rename change time\n");
+        ok_eq_longlong(After.LastWriteTime.QuadPart, Before.LastWriteTime.QuadPart);
+    }
+    /* A rename to precisely the same name changes no timestamp. */
+    Before = After;
+    Status = NtfsKmtRename(File, Target, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtOpen(&File, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtQueryInfo(File, &After, sizeof(After), FileBasicInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) ok_eq_longlong(After.ChangeTime.QuadPart, Before.ChangeTime.QuadPart);
+    /* Explicit per-open timestamp policy survives the rename. */
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    Basic.ChangeTime.QuadPart = OldTime;
+    Status = NtfsKmtSetInfo(File, &Basic, sizeof(Basic), FileBasicInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtRename(File, Source, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtOpen(&File, Source, FILE_READ_ATTRIBUTES, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtQueryInfo(File, &After, sizeof(After), FileBasicInformation, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) ok_eq_longlong(After.ChangeTime.QuadPart, OldTime);
+    ZwClose(File);
+}
+
 START_TEST(NtfsRename)
 {
     WCHAR Root[MAX_PATH], Dir[MAX_PATH];
@@ -459,6 +534,7 @@ START_TEST(NtfsRename)
     TestReplacement(Dir);
     TestReplacementStreams(Dir);
     TestLongName(Dir);
+    TestRenameTimes(Dir);
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
 }
