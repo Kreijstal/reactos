@@ -1099,6 +1099,12 @@ VOID
 NtfsReportPathChange(PNTFS_VCB Vcb, PCWSTR Path, ULONG Filter, ULONG Action);
 
 VOID
+NtfsReportChange(PNTFS_FCB Fcb, ULONG Filter, ULONG Action);
+
+VOID
+NtfsReportDataChange(PNTFS_FCB Fcb, ULONG Filter);
+
+VOID
 NtfsNotifyDirectoryDeleted(PNTFS_FCB Fcb);
 
 /* lock.c / shared stream-lock lifetime in fcb.c */

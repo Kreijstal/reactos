@@ -961,6 +961,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     NTSTATUS Status = STATUS_SUCCESS;
     ULONG Length = 0;
     ULONG ReturnedWriteLength = 0;
+    ULONG NotifyFilter = 0;
     PDEVICE_OBJECT DeviceObject = NULL;
     PDEVICE_EXTENSION DeviceExt = NULL;
     PFILE_OBJECT FileObject = NULL;
@@ -1172,6 +1173,9 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         /* Paging I/O only writes back what a write already told the journal about */
         if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO) && ReturnedWriteLength != 0)
         {
+            NotifyFilter = FILE_NOTIFY_CHANGE_LAST_WRITE;
+            if (Fcb->RFCB.FileSize.QuadPart != OldSize)
+                NotifyFilter |= FILE_NOTIFY_CHANGE_SIZE;
             NtfsPostUsnChange(DeviceExt,
                               Fcb,
                               NtfsUsnDataReason(Fcb,
@@ -1207,6 +1211,9 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     if (PagingResourceAcquired)
         ExReleaseResourceLite(&Fcb->PagingIoResource);
     ExReleaseResourceLite(Resource);
+
+    if (NotifyFilter != 0)
+        NtfsReportDataChange(Fcb, NotifyFilter);
 
     if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO))
     {

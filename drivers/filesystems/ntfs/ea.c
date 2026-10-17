@@ -671,6 +671,8 @@ NtfsSetEa(PNTFS_IRP_CONTEXT IrpContext)
 
     if (!NT_SUCCESS(Status))
         Irp->IoStatus.Information = ErrorOffset;
+    else
+        NtfsReportChange(Fcb, FILE_NOTIFY_CHANGE_EA | FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
 
     return Status;
 }
