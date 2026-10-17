@@ -240,7 +240,7 @@ AllocateIndexNode(PDEVICE_EXTENSION DeviceExt,
     }
 
     // Update file record on disk
-    Status = UpdateFileRecord(DeviceExt, IndexAllocationCtx->FileMFTIndex, FileRecord);
+    Status = NtfsCommitAttributeContext(DeviceExt, IndexAllocationCtx, FileRecord);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR: Failed to update file record!\n");
