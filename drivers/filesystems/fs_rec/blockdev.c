@@ -25,7 +25,7 @@ FsRecGetDeviceSectors(IN PDEVICE_OBJECT DeviceObject,
                       IN ULONG SectorSize,
                       OUT PLARGE_INTEGER SectorCount)
 {
-    PARTITION_INFORMATION PartitionInfo;
+    GET_LENGTH_INFORMATION LengthInfo;
     IO_STATUS_BLOCK IoStatusBlock;
     KEVENT Event;
     PIRP Irp;
@@ -36,14 +36,15 @@ FsRecGetDeviceSectors(IN PDEVICE_OBJECT DeviceObject,
     /* Only needed for disks */
     if (DeviceObject->DeviceType != FILE_DEVICE_DISK) return FALSE;
 
-    /* Build the information IRP */
+    /* Only the partition length is needed. The legacy partition-information
+     * query rejects GPT before the NTFS driver can recognize its boot sector. */
     KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-    Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_PARTITION_INFO,
+    Irp = IoBuildDeviceIoControlRequest(IOCTL_DISK_GET_LENGTH_INFO,
                                         DeviceObject,
                                         NULL,
                                         0,
-                                        &PartitionInfo,
-                                        sizeof(PARTITION_INFORMATION),
+                                        &LengthInfo,
+                                        sizeof(LengthInfo),
                                         FALSE,
                                         &Event,
                                         &IoStatusBlock);
@@ -69,7 +70,7 @@ FsRecGetDeviceSectors(IN PDEVICE_OBJECT DeviceObject,
     if (!NT_SUCCESS(Status)) return FALSE;
 
     /* Otherwise, return the number of sectors */
-    *SectorCount = RtlExtendedLargeIntegerDivide(PartitionInfo.PartitionLength,
+    *SectorCount = RtlExtendedLargeIntegerDivide(LengthInfo.Length,
                                                  SectorSize,
                                                  &Remainder);
     return TRUE;
