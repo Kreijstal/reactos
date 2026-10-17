@@ -98,6 +98,7 @@ NtfsMarkDeviceRemoved(PNTFS_VCB Vcb)
     ExAcquireResourceExclusiveLite(&Vcb->PagingResource, TRUE);
     ExReleaseResourceLite(&Vcb->PagingResource);
     NtfsRemoveFileLocks(Vcb);
+    FsRtlNotifyCleanupAll(Vcb->NotifySync, &Vcb->NotifyList);
 
     Stream = Vcb->StreamFileObject;
     if (Stream != NULL)

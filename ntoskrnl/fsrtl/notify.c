@@ -12,41 +12,98 @@
 #define NDEBUG
 #include <debug.h>
 
-/* INLINED FUNCTIONS *********************************************************/
-
-/*
- * @implemented
- */
-FORCEINLINE
-VOID
-FsRtlNotifyAcquireFastMutex(IN PREAL_NOTIFY_SYNC RealNotifySync)
+/* Completion callbacks run after dropping the notify mutex. In particular,
+ * a completion can close its file object and reenter notification cleanup. */
+typedef struct _NOTIFY_IRP_CONTEXT
 {
-    ULONG_PTR CurrentThread = (ULONG_PTR)KeGetCurrentThread();
+    WORK_QUEUE_ITEM WorkItem;
+    PNOTIFY_CHANGE Change;
+    PIRP Irp;
+    PVOID SavedDriverContext;
+} NOTIFY_IRP_CONTEXT, *PNOTIFY_IRP_CONTEXT;
 
-    /* Only acquire fast mutex if it's not already acquired by the current thread */
-    if (RealNotifySync->OwningThread != CurrentThread)
-    {
-        ExAcquireFastMutexUnsafe(&(RealNotifySync->FastMutex));
-        RealNotifySync->OwningThread = CurrentThread;
-    }
-    /* Whatever the case, keep trace of the attempt to acquire fast mutex */
-    RealNotifySync->OwnerCount++;
+static VOID
+FsRtlNotifyDereferenceSync(PREAL_NOTIFY_SYNC Sync)
+{
+    ASSERT(Sync->References > 0);
+    if (InterlockedDecrement(&Sync->References) == 0)
+        ExFreePoolWithTag(Sync, 'SNSF');
 }
 
-/*
- * @implemented
- */
-FORCEINLINE
-VOID
-FsRtlNotifyReleaseFastMutex(IN PREAL_NOTIFY_SYNC RealNotifySync)
+FORCEINLINE VOID
+FsRtlNotifyAcquireFastMutex(PREAL_NOTIFY_SYNC Sync)
 {
-    RealNotifySync->OwnerCount--;
-    /* Release the fast mutex only if no other instance needs it */
-    if (!RealNotifySync->OwnerCount)
+    ULONG_PTR Thread = (ULONG_PTR)KeGetCurrentThread();
+
+    InterlockedIncrement(&Sync->References);
+    if (Sync->OwningThread != Thread)
     {
-        ExReleaseFastMutexUnsafe(&(RealNotifySync->FastMutex));
-        RealNotifySync->OwningThread = (ULONG_PTR)0;
+        ExAcquireFastMutexUnsafe(&Sync->FastMutex);
+        Sync->OwningThread = Thread;
     }
+    Sync->OwnerCount++;
+}
+
+FORCEINLINE VOID
+FsRtlNotifyReleaseFastMutex(PREAL_NOTIFY_SYNC Sync)
+{
+    LIST_ENTRY Completions;
+    PIRP Irp;
+
+    ASSERT(Sync->OwnerCount != 0 && Sync->OwningThread == (ULONG_PTR)KeGetCurrentThread());
+    InitializeListHead(&Completions);
+    if (--Sync->OwnerCount == 0)
+    {
+        if (!IsListEmpty(&Sync->Completions))
+        {
+            Completions = Sync->Completions;
+            Completions.Flink->Blink = &Completions;
+            Completions.Blink->Flink = &Completions;
+            InitializeListHead(&Sync->Completions);
+        }
+        Sync->OwningThread = 0;
+        ExReleaseFastMutexUnsafe(&Sync->FastMutex);
+        while (!IsListEmpty(&Completions))
+        {
+            Irp = CONTAINING_RECORD(RemoveHeadList(&Completions), IRP, Tail.Overlay.ListEntry);
+            IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+        }
+    }
+    FsRtlNotifyDereferenceSync(Sync);
+}
+
+static VOID
+FsRtlNotifyQueueCompletion(PNOTIFY_SYNC NotifySync, PIRP Irp)
+{
+    PREAL_NOTIFY_SYNC Sync = NotifySync;
+
+    ASSERT(Sync->OwnerCount != 0 && Sync->OwningThread == (ULONG_PTR)KeGetCurrentThread());
+    InsertTailList(&Sync->Completions, &Irp->Tail.Overlay.ListEntry);
+}
+
+/* The list owns one reference, each pending IRP another. Cleanup detaches
+ * the list reference; an in-flight cancel retains the entry and its sync. */
+static VOID
+FsRtlNotifyDereference(PNOTIFY_CHANGE Change,
+                       PSECURITY_SUBJECT_CONTEXT *Subject,
+                       PEPROCESS *Process)
+{
+    PREAL_NOTIFY_SYNC Sync;
+
+    ASSERT(Change->ReferenceCount > 0);
+    if (InterlockedDecrement((PLONG)&Change->ReferenceCount) != 0)
+        return;
+    ASSERT(Change->NotifyList.Flink == NULL && IsListEmpty(&Change->NotifyIrps));
+    if (Change->AllocatedBuffer != NULL)
+    {
+        PsReturnProcessPagedPoolQuota(Change->OwningProcess, Change->ThisBufferLength);
+        ExFreePoolWithTag(Change->AllocatedBuffer, TAG_FS_NOTIFICATIONS);
+    }
+    *Subject = Change->SubjectContext;
+    *Process = Change->OwningProcess;
+    Sync = Change->NotifySync;
+    ExFreePoolWithTag(Change, 'NrSF');
+    FsRtlNotifyDereferenceSync(Sync);
 }
 
 #define FsRtlNotifyGetLastPartOffset(FullLen, TargLen, Type, Chr)                 \
@@ -74,30 +131,25 @@ FsRtlNotifySetCancelRoutine(IN PIRP Irp,
 /*
  * @implemented
  */
-VOID
-NTAPI
-FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
-                  IN PIRP Irp)
+static VOID NTAPI
+FsRtlCancelNotifyWorker(PVOID Parameter)
 {
+    PNOTIFY_IRP_CONTEXT Pending = Parameter;
+    PIRP Irp = Pending->Irp;
+    PNOTIFY_CHANGE NotifyChange = Pending->Change;
+    PREAL_NOTIFY_SYNC RealNotifySync = NotifyChange->NotifySync;
     PVOID Buffer;
     PIRP NotifyIrp;
     ULONG BufferLength;
     PIO_STACK_LOCATION Stack;
-    PNOTIFY_CHANGE NotifyChange;
-    PREAL_NOTIFY_SYNC RealNotifySync;
     BOOLEAN PoolQuotaCharged;
     PSECURITY_SUBJECT_CONTEXT _SEH2_VOLATILE SubjectContext = NULL;
+    PEPROCESS _SEH2_VOLATILE Process = NULL;
 
-    /* Get the NOTIFY_CHANGE struct and reset it */
-    NotifyChange = (PNOTIFY_CHANGE)Irp->IoStatus.Information;
+    Irp->Tail.Overlay.DriverContext[0] = Pending->SavedDriverContext;
     Irp->IoStatus.Information = 0;
-    /* Reset the cancel routine */
-    IoSetCancelRoutine(Irp, NULL);
-    /* And release lock */
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
-    /* Get REAL_NOTIFY_SYNC struct */
-    RealNotifySync = NotifyChange->NotifySync;
-
+    ExFreePoolWithTag(Pending, TAG_FS_NOTIFICATIONS);
+    KeEnterCriticalRegion();
     FsRtlNotifyAcquireFastMutex(RealNotifySync);
 
    _SEH2_TRY
@@ -198,6 +250,11 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
                    }
                    _SEH2_END;
                }
+               else
+               {
+                   RtlMoveMemory(Buffer, NotifyChange->Buffer, NotifyChange->DataLength);
+                   NotifyChange->Buffer = Buffer;
+               }
            }
 
            /* If we have to notify immediately, ensure that any buffer is 0-ed out */
@@ -215,41 +272,46 @@ FsRtlCancelNotify(IN PDEVICE_OBJECT DeviceObject,
 
        /* Set appropriate status and complete */
        Irp->IoStatus.Status = STATUS_CANCELLED;
-       IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+       FsRtlNotifyQueueCompletion(NotifyChange->NotifySync, Irp);
 
-       /* If that notification isn't referenced any longer, drop it */
-       if (!InterlockedDecrement((PLONG)&(NotifyChange->ReferenceCount)))
-       {
-           /* If it had an allocated buffer, delete */
-           if (NotifyChange->AllocatedBuffer)
-           {
-               PsReturnProcessPagedPoolQuota(NotifyChange->OwningProcess, NotifyChange->ThisBufferLength);
-               ExFreePoolWithTag(NotifyChange->AllocatedBuffer, TAG_FS_NOTIFICATIONS);
-           }
-
-           /* In case of full name, remember subject context for later deletion */
-           if (NotifyChange->FullDirectoryName)
-           {
-               SubjectContext = NotifyChange->SubjectContext;
-           }
-
-           /* We mustn't have ANY change left anymore */
-           ASSERT(NotifyChange->NotifyList.Flink == NULL);
-           ExFreePoolWithTag(NotifyChange, 0);
-       }
+       FsRtlNotifyDereference(NotifyChange, (PSECURITY_SUBJECT_CONTEXT *)&SubjectContext,
+                               (PEPROCESS *)&Process);
     }
     _SEH2_FINALLY
     {
         FsRtlNotifyReleaseFastMutex(RealNotifySync);
 
+        if (Process != NULL)
+            ObDereferenceObject(Process);
         /* If the subject security context was captured, release and free it */
         if (SubjectContext)
         {
             SeReleaseSubjectContext(SubjectContext);
             ExFreePool(SubjectContext);
         }
+        KeLeaveCriticalRegion();
     }
     _SEH2_END;
+}
+
+VOID NTAPI
+FsRtlCancelNotify(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    PNOTIFY_IRP_CONTEXT Pending = Irp->Tail.Overlay.DriverContext[0];
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    ASSERT(Pending != NULL && Pending->Irp == Irp);
+    IoSetCancelRoutine(Irp, NULL);
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        ExInitializeWorkItem(&Pending->WorkItem, FsRtlCancelNotifyWorker, Pending);
+        ExQueueWorkItem(&Pending->WorkItem, DelayedWorkQueue);
+    }
+    else
+    {
+        FsRtlCancelNotifyWorker(Pending);
+    }
 }
 
 /*
@@ -259,22 +321,16 @@ VOID
 FsRtlCheckNotifyForDelete(IN PLIST_ENTRY NotifyList,
                           IN PVOID FsContext)
 {
-    PLIST_ENTRY NextEntry;
-    PNOTIFY_CHANGE NotifyChange;
+    PLIST_ENTRY Entry;
+    PNOTIFY_CHANGE Change;
 
-    if (!IsListEmpty(NotifyList))
+    for (Entry = NotifyList->Flink; Entry != NotifyList; Entry = Entry->Flink)
     {
-        /* Browse the notifications list to find the matching entry */
-        for (NextEntry = NotifyList->Flink;
-             NextEntry != NotifyList;
-             NextEntry = NextEntry->Flink)
+        Change = CONTAINING_RECORD(Entry, NOTIFY_CHANGE, NotifyList);
+        if (Change->StreamID == FsContext)
         {
-            NotifyChange = CONTAINING_RECORD(NextEntry, NOTIFY_CHANGE, NotifyList);
-            /* If the current record matches with the given context, it's the good one */
-            if (NotifyChange->FsContext == FsContext && !IsListEmpty(&(NotifyChange->NotifyIrps)))
-            {
-                FsRtlNotifyCompleteIrpList(NotifyChange, STATUS_DELETE_PENDING);
-            }
+            Change->Flags |= DELETE_IN_PROCESS;
+            FsRtlNotifyCompleteIrpList(Change, STATUS_DELETE_PENDING);
         }
     }
 }
@@ -323,7 +379,7 @@ FsRtlNotifyCompleteIrp(IN PIRP Irp,
     PAGED_CODE();
 
     /* Check if we need to complete */
-    if (!FsRtlNotifySetCancelRoutine(Irp, NotifyChange) && SkipCompletion)
+    if (SkipCompletion && !FsRtlNotifySetCancelRoutine(Irp, NotifyChange))
     {
         return;
     }
@@ -345,7 +401,34 @@ FsRtlNotifyCompleteIrp(IN PIRP Irp,
     /* Ensture there's a buffer where to find data */
     if (!NotifyChange->AllocatedBuffer)
     {
-        Irp->IoStatus.Information = DataLength;
+        /* The shared direct buffer can belong to a different pending IRP,
+         * notably one whose cancellation already owns its cancel routine. */
+        if (Irp->AssociatedIrp.SystemBuffer != NULL)
+            Buffer = Irp->AssociatedIrp.SystemBuffer;
+        else if (Irp->MdlAddress != NULL)
+            Buffer = MmGetSystemAddressForMdl(Irp->MdlAddress);
+        else if (!(Stack->Control & SL_PENDING_RETURNED))
+            Buffer = Irp->UserBuffer;
+        else
+        {
+            Buffer = ExAllocatePoolWithTag(PagedPool, DataLength, TAG_FS_NOTIFICATIONS);
+            if (Buffer != NULL)
+            {
+                Irp->AssociatedIrp.SystemBuffer = Buffer;
+                Irp->Flags |= IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER | IRP_SYNCHRONOUS_PAGING_IO;
+            }
+        }
+        if (Buffer == NULL)
+        {
+            Status = STATUS_NOTIFY_ENUM_DIR;
+            Irp->IoStatus.Information = 0;
+        }
+        else
+        {
+            if (Buffer != NotifyChange->Buffer)
+                RtlCopyMemory(Buffer, NotifyChange->Buffer, DataLength);
+            Irp->IoStatus.Information = DataLength;
+        }
         NotifyChange->Buffer = NULL;
         goto Completion;
     }
@@ -408,7 +491,7 @@ ReleaseAndComplete:
 Completion:
     IoMarkIrpPending(Irp);
     Irp->IoStatus.Status = Status;
-    IoCompleteRequest(Irp, IO_DISK_INCREMENT);
+    FsRtlNotifyQueueCompletion(NotifyChange->NotifySync, Irp);
 }
 
 /*
@@ -419,23 +502,22 @@ FsRtlNotifyCompleteIrpList(IN PNOTIFY_CHANGE NotifyChange,
                            IN NTSTATUS Status)
 {
     PIRP Irp;
-    ULONG DataLength;
-    PLIST_ENTRY NextEntry;
+    ULONG DataLength = NotifyChange->DataLength;
+    PLIST_ENTRY Entry, Next;
 
-    DataLength = NotifyChange->DataLength;
-
-    NotifyChange->Flags &= (NOTIFY_IMMEDIATELY | WATCH_TREE);
+    NotifyChange->Flags &= ~(NOTIFY_IMMEDIATELY | NOTIFY_LATER);
     NotifyChange->DataLength = 0;
     NotifyChange->LastEntry = 0;
-
-    while (!IsListEmpty(&(NotifyChange->NotifyIrps)))
+    for (Entry = NotifyChange->NotifyIrps.Flink;
+         Entry != &NotifyChange->NotifyIrps;
+         Entry = Next)
     {
-        /* We take the first entry */
-        NextEntry = RemoveHeadList(&(NotifyChange->NotifyIrps));
-        Irp = CONTAINING_RECORD(NextEntry, IRP, Tail.Overlay.ListEntry);
-        /* We complete it */
-        FsRtlNotifyCompleteIrp(Irp, NotifyChange, DataLength, Status, TRUE);
-        /* If we're notifying success, just notify first one */
+        Next = Entry->Flink;
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        if (!FsRtlNotifySetCancelRoutine(Irp, NotifyChange))
+            continue; /* Cancellation owns both the IRP and its list entry. */
+        RemoveEntryList(Entry);
+        FsRtlNotifyCompleteIrp(Irp, NotifyChange, DataLength, Status, FALSE);
         if (Status == STATUS_SUCCESS)
             break;
     }
@@ -458,17 +540,19 @@ FsRtlNotifySetCancelRoutine(IN PIRP Irp,
     {
         /* First get cancel routine */
         CancelRoutine = IoSetCancelRoutine(Irp, NULL);
-        Irp->IoStatus.Information = 0;
-        /* Release cancel lock */
-        IoReleaseCancelSpinLock(Irp->CancelIrql);
-        /* If there was a cancel routine */
-        if (CancelRoutine)
+        if (CancelRoutine != NULL)
         {
-            /* Decrease reference count */
+            PNOTIFY_IRP_CONTEXT Pending = Irp->Tail.Overlay.DriverContext[0];
+
+            Irp->IoStatus.Information = 0;
+            IoReleaseCancelSpinLock(Irp->CancelIrql);
+            ASSERT(Pending != NULL && Pending->Change == NotifyChange);
+            Irp->Tail.Overlay.DriverContext[0] = Pending->SavedDriverContext;
+            ExFreePoolWithTag(Pending, TAG_FS_NOTIFICATIONS);
             InterlockedDecrement((PLONG)&NotifyChange->ReferenceCount);
-            /* Notify that we removed cancel routine */
             return TRUE;
         }
+        IoReleaseCancelSpinLock(Irp->CancelIrql);
     }
     else
     {
@@ -663,6 +747,7 @@ FsRtlNotifyCleanup(IN PNOTIFY_SYNC NotifySync,
     PNOTIFY_CHANGE NotifyChange;
     PREAL_NOTIFY_SYNC RealNotifySync;
     PSECURITY_SUBJECT_CONTEXT _SEH2_VOLATILE SubjectContext = NULL;
+    PEPROCESS _SEH2_VOLATILE Process = NULL;
 
     /* Get real structure hidden behind the opaque pointer */
     RealNotifySync = (PREAL_NOTIFY_SYNC)NotifySync;
@@ -676,37 +761,13 @@ FsRtlNotifyCleanup(IN PNOTIFY_SYNC NotifySync,
         NotifyChange = FsRtlIsNotifyOnList(NotifyList, FsContext);
         if (NotifyChange)
         {
-            /* Mark it as to know that cleanup is in process */
             NotifyChange->Flags |= CLEANUP_IN_PROCESS;
-
-            /* If there are pending IRPs, complete them using the STATUS_NOTIFY_CLEANUP status */
-            if (!IsListEmpty(&NotifyChange->NotifyIrps))
-            {
-                FsRtlNotifyCompleteIrpList(NotifyChange, STATUS_NOTIFY_CLEANUP);
-            }
-
-            /* Decrease reference number and if 0 is reached, it's time to do complete cleanup */
-            if (!InterlockedDecrement((PLONG)&(NotifyChange->ReferenceCount)))
-            {
-                /* Remove it from the notifications list */
-                RemoveEntryList(&NotifyChange->NotifyList);
-
-                /* In case there was an allocated buffer, free it */
-                if (NotifyChange->AllocatedBuffer)
-                {
-                    PsReturnProcessPagedPoolQuota(NotifyChange->OwningProcess, NotifyChange->ThisBufferLength);
-                    ExFreePool(NotifyChange->AllocatedBuffer);
-                }
-
-                /* In case there the string was set, get the captured subject security context */
-                if (NotifyChange->FullDirectoryName)
-                {
-                    SubjectContext = NotifyChange->SubjectContext;
-                }
-
-                /* Finally, free the notification, as it's not needed anymore */
-                ExFreePoolWithTag(NotifyChange, 'NrSF');
-            }
+            RemoveEntryList(&NotifyChange->NotifyList);
+            NotifyChange->NotifyList.Flink = NULL;
+            NotifyChange->NotifyList.Blink = NULL;
+            FsRtlNotifyCompleteIrpList(NotifyChange, STATUS_NOTIFY_CLEANUP);
+            FsRtlNotifyDereference(NotifyChange, (PSECURITY_SUBJECT_CONTEXT *)&SubjectContext,
+                                   (PEPROCESS *)&Process);
         }
     }
     _SEH2_FINALLY
@@ -714,6 +775,8 @@ FsRtlNotifyCleanup(IN PNOTIFY_SYNC NotifySync,
         /* Release fast mutex */
         FsRtlNotifyReleaseFastMutex(RealNotifySync);
 
+        if (Process != NULL)
+            ObDereferenceObject(Process);
         /* If the subject security context was captured, release and free it */
         if (SubjectContext)
         {
@@ -722,6 +785,24 @@ FsRtlNotifyCleanup(IN PNOTIFY_SYNC NotifySync,
         }
     }
     _SEH2_END;
+}
+
+/*
+ * @implemented
+ */
+VOID NTAPI
+FsRtlNotifyCleanupAll(PNOTIFY_SYNC NotifySync, PLIST_ENTRY NotifyList)
+{
+    PREAL_NOTIFY_SYNC Sync = NotifySync;
+    PNOTIFY_CHANGE Change;
+
+    FsRtlNotifyAcquireFastMutex(Sync);
+    while (!IsListEmpty(NotifyList))
+    {
+        Change = CONTAINING_RECORD(NotifyList->Flink, NOTIFY_CHANGE, NotifyList);
+        FsRtlNotifyCleanup(NotifySync, NotifyList, Change->FsContext);
+    }
+    FsRtlNotifyReleaseFastMutex(Sync);
 }
 
 /*++
@@ -783,6 +864,8 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
                                  IN PFILTER_REPORT_CHANGE FilterCallback OPTIONAL)
 {
     ULONG SavedLength;
+    BOOLEAN _SEH2_VOLATILE SubjectTransferred = FALSE;
+    PNOTIFY_IRP_CONTEXT Pending;
     PIO_STACK_LOCATION Stack;
     PNOTIFY_CHANGE NotifyChange = NULL;
     PREAL_NOTIFY_SYNC RealNotifySync;
@@ -818,7 +901,7 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
         {
             IoMarkIrpPending(NotifyIrp);
             NotifyIrp->IoStatus.Status = STATUS_NOTIFY_CLEANUP;
-            IoCompleteRequest(NotifyIrp, IO_DISK_INCREMENT);
+            FsRtlNotifyQueueCompletion(NotifySync, NotifyIrp);
             _SEH2_LEAVE;
         }
 
@@ -831,14 +914,16 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
             {
                 IoMarkIrpPending(NotifyIrp);
                 NotifyIrp->IoStatus.Status = STATUS_NOTIFY_CLEANUP;
-                IoCompleteRequest(NotifyIrp, IO_DISK_INCREMENT);
+                FsRtlNotifyQueueCompletion(NotifySync, NotifyIrp);
+                _SEH2_LEAVE;
             }
             /* Or if it's about to be deleted, complete */
             else if (NotifyChange->Flags & DELETE_IN_PROCESS)
             {
                 IoMarkIrpPending(NotifyIrp);
                 NotifyIrp->IoStatus.Status = STATUS_DELETE_PENDING;
-                IoCompleteRequest(NotifyIrp, IO_DISK_INCREMENT);
+                FsRtlNotifyQueueCompletion(NotifySync, NotifyIrp);
+                _SEH2_LEAVE;
             }
             /* Complete now if asked to (and not asked to notify later on) */
             if ((NotifyChange->Flags & NOTIFY_IMMEDIATELY) && !(NotifyChange->Flags & NOTIFY_LATER))
@@ -846,7 +931,7 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
                 NotifyChange->Flags &= ~NOTIFY_IMMEDIATELY;
                 IoMarkIrpPending(NotifyIrp);
                 NotifyIrp->IoStatus.Status = STATUS_NOTIFY_ENUM_DIR;
-                IoCompleteRequest(NotifyIrp, IO_DISK_INCREMENT);
+                FsRtlNotifyQueueCompletion(NotifySync, NotifyIrp);
             }
             /* If no data yet, or asked to notify later on, handle */
             else if (NotifyChange->DataLength == 0 || (NotifyChange->Flags & NOTIFY_LATER))
@@ -875,6 +960,8 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
         NotifyChange->StreamID = Stack->FileObject->FsContext;
         NotifyChange->TraverseCallback = TraverseCallback;
         NotifyChange->SubjectContext = SubjectContext;
+        SubjectTransferred = TRUE;
+        InterlockedIncrement(&RealNotifySync->References);
         NotifyChange->FullDirectoryName = FullDirectoryName;
         NotifyChange->FilterCallback = FilterCallback;
         InitializeListHead(&(NotifyChange->NotifyIrps));
@@ -918,6 +1005,7 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
         }
 
         NotifyChange->OwningProcess = (PEPROCESS)NotifyIrp->Tail.Overlay.Thread->ThreadsProcess;
+        ObReferenceObject(NotifyChange->OwningProcess);
 
         /* Insert the notification into the notification list */
         InsertTailList(NotifyList, &(NotifyChange->NotifyList));
@@ -925,6 +1013,12 @@ FsRtlNotifyFilterChangeDirectory(IN PNOTIFY_SYNC NotifySync,
         NotifyChange->ReferenceCount = 1;
 
 HandleIRP:
+        Pending = ExAllocatePoolWithTag(NonPagedPool | POOL_RAISE_IF_ALLOCATION_FAILURE,
+                                        sizeof(*Pending), TAG_FS_NOTIFICATIONS);
+        Pending->Irp = NotifyIrp;
+        Pending->Change = NotifyChange;
+        Pending->SavedDriverContext = NotifyIrp->Tail.Overlay.DriverContext[0];
+        NotifyIrp->Tail.Overlay.DriverContext[0] = Pending;
         /* Associate the notification to the IRP */
         NotifyIrp->IoStatus.Information = (ULONG_PTR)NotifyChange;
         /* The IRP is pending */
@@ -942,7 +1036,7 @@ HandleIRP:
         FsRtlNotifyReleaseFastMutex(RealNotifySync);
 
         /* If the subject security context was captured and there's no notify */
-        if (SubjectContext && (!NotifyChange || NotifyChange->FullDirectoryName))
+        if (SubjectContext && !SubjectTransferred)
         {
             SeReleaseSubjectContext(SubjectContext);
             ExFreePool(SubjectContext);
@@ -1216,6 +1310,7 @@ FsRtlNotifyFilterReportChange(IN PNOTIFY_SYNC NotifySync,
                                 }
                                 /* Now, we start looking for matching parts (unless we watch root) */
                                 TargetNumberOfParts = 0;
+                                LastPartOffset = 0;
                                 if (!(NotifyChange->Flags & WATCH_ROOT))
                                 {
                                     FullNumberOfParts = 1;
@@ -1598,6 +1693,8 @@ FsRtlNotifyInitializeSync(IN PNOTIFY_SYNC *NotifySync)
     ExInitializeFastMutex(&(RealNotifySync->FastMutex));
     RealNotifySync->OwningThread = 0;
     RealNotifySync->OwnerCount = 0;
+    RealNotifySync->References = 1;
+    InitializeListHead(&RealNotifySync->Completions);
 
     *NotifySync = RealNotifySync;
 }
@@ -1669,8 +1766,10 @@ FsRtlNotifyUninitializeSync(IN PNOTIFY_SYNC *NotifySync)
 {
     if (*NotifySync)
     {
-        ExFreePoolWithTag(*NotifySync, 'SNSF');
+        PREAL_NOTIFY_SYNC Sync = *NotifySync;
+
         *NotifySync = NULL;
+        FsRtlNotifyDereferenceSync(Sync);
     }
 }
 

@@ -126,6 +126,8 @@ typedef struct
     LIST_ENTRY FcbListHead;
     LIST_ENTRY FileLockList;
     PLIST_ENTRY FcbHashBuckets;
+    PNOTIFY_SYNC NotifySync;
+    LIST_ENTRY NotifyList;
 
     PVPB Vpb;
     PDEVICE_OBJECT StorageDevice;
@@ -706,6 +708,7 @@ typedef struct _FCB
     WCHAR Stream[MAX_PATH];
     WCHAR *ObjectName;		/* point on filename (250 chars max) in PathName */
     PWCHAR PathName;		/* path+filename, NUL-terminated, from pool (TAG_NTFS) */
+    UNICODE_STRING NotifyName; /* stable string descriptor; DirResource guards its buffer */
 
     ERESOURCE PagingIoResource;
     ERESOURCE MainResource;
@@ -1087,6 +1090,16 @@ NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
                     LONGLONG StartingOffset,
                     ULONG Length,
                     const PUCHAR Buffer);
+
+/* notify.c */
+NTSTATUS
+NtfsNotifyChangeDirectory(PNTFS_IRP_CONTEXT IrpContext);
+
+VOID
+NtfsReportPathChange(PNTFS_VCB Vcb, PCWSTR Path, ULONG Filter, ULONG Action);
+
+VOID
+NtfsNotifyDirectoryDeleted(PNTFS_FCB Fcb);
 
 /* lock.c / shared stream-lock lifetime in fcb.c */
 NTSTATUS
