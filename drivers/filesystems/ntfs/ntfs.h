@@ -1936,6 +1936,7 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb,
 #define NTFS_FILENAME_UPDATE_SIZES  0x1
 #define NTFS_FILENAME_UPDATE_TIMES  0x2
 #define NTFS_FILENAME_UPDATE_ATTRS  0x4
+#define NTFS_FILENAME_UPDATE_REPLACE 0x8
 
 typedef struct _NTFS_FILENAME_UPDATE
 {
@@ -1953,6 +1954,10 @@ typedef struct _NTFS_FILENAME_UPDATE
 
     /* NTFS_FILENAME_UPDATE_ATTRS */
     ULONG FileAttributes;
+
+    /* NTFS_FILENAME_UPDATE_REPLACE: same collated key, new owner and value */
+    ULONGLONG FileReference;
+    PFILENAME_ATTRIBUTE FileName;
 } NTFS_FILENAME_UPDATE, *PNTFS_FILENAME_UPDATE;
 
 NTSTATUS
@@ -1975,6 +1980,9 @@ NtfsUpdateDuplicatedInformation(PDEVICE_EXTENSION Vcb,
                                 ULONGLONG MFTIndex,
                                 ULONG Flags,
                                 BOOLEAN CaseSensitive);
+
+VOID
+NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb);
 
 NTSTATUS
 UpdateFileNameRecord(PDEVICE_EXTENSION Vcb,
