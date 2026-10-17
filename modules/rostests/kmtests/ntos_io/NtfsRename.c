@@ -523,13 +523,20 @@ TestRenameTimes(PCWSTR Dir)
 
 START_TEST(NtfsRename)
 {
-    WCHAR Root[MAX_PATH], Dir[MAX_PATH];
+    WCHAR Root[MAX_PATH], Dir[MAX_PATH], Letter;
+    HANDLE Volume;
+    ULONG BeforeDirty = 0, AfterDirty = 0;
     NTSTATUS Status;
 
-    if (!NtfsKmtFindVolume(Root, NULL)) return;
+    if (!NtfsKmtFindVolume(Root, &Letter)) return;
     Status = NtfsKmtPrepareDirectory(Root, L"KMT_NTFS_RENAME", Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &BeforeDirty, sizeof(BeforeDirty), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
     TestLinks(Dir);
     TestReplacement(Dir);
     TestReplacementStreams(Dir);
@@ -537,4 +544,8 @@ START_TEST(NtfsRename)
     TestRenameTimes(Dir);
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &AfterDirty, sizeof(AfterDirty), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(AfterDirty, BeforeDirty);
+    ZwClose(Volume);
 }
