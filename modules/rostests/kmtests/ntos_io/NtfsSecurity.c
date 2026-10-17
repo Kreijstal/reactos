@@ -453,13 +453,238 @@ TestInheritance(
     }
 }
 
+static NTSTATUS
+ForceOpen(PHANDLE Handle, PCWSTR Path, ACCESS_MASK Desired, ULONG Disposition, BOOLEAN Synchronous)
+{
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK IoStatus;
+    ULONG Options = FILE_NON_DIRECTORY_FILE;
+
+    *Handle = NULL;
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&Attributes, &Name,
+                                OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_FORCE_ACCESS_CHECK, NULL, NULL);
+    if (Synchronous)
+    {
+        Desired |= SYNCHRONIZE;
+        Options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    }
+    return ZwCreateFile(Handle, Desired, &Attributes, &IoStatus, NULL, FILE_ATTRIBUTE_NORMAL,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         Disposition, Options, NULL, 0);
+}
+
+static VOID
+CheckGranted(HANDLE Handle, ACCESS_MASK Required, ACCESS_MASK Forbidden)
+{
+    OBJECT_BASIC_INFORMATION Basic;
+    NTSTATUS Status;
+
+    Status = ZwQueryObject(Handle, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok((Basic.GrantedAccess & Required) == Required, "missing rights: granted %lx, required %lx\n",
+           Basic.GrantedAccess, Required);
+        ok(!(Basic.GrantedAccess & Forbidden), "excess rights: granted %lx, forbidden %lx\n",
+           Basic.GrantedAccess, Forbidden);
+    }
+}
+
+static VOID
+ReplaceAccessDacl(HANDLE Handle, PSECURITY_DESCRIPTOR Sd)
+{
+    NTSTATUS Status;
+
+    if (Sd == NULL) return;
+    Status = ZwSetSecurityObject(Handle, DACL_SECURITY_INFORMATION, Sd);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    NtfsKmtFree(Sd);
+}
+
+static VOID
+TestStoredAccess(PCWSTR Dir, WCHAR Letter)
+{
+    WCHAR Path[MAX_PATH], Alias[MAX_PATH], Stream[MAX_PATH], Missing[MAX_PATH];
+    HANDLE Control = NULL, File = NULL, Volume = NULL, Blocker = NULL;
+    PSECURITY_DESCRIPTOR Sd;
+    TEST_ACE Ace;
+    FILE_STANDARD_INFORMATION Standard;
+    FILE_BASIC_INFORMATION Basic;
+    OBJECT_ATTRIBUTES Attributes;
+    UNICODE_STRING IdName;
+    IO_STATUS_BLOCK IoStatus;
+    ULONGLONG Id;
+    NTSTATUS Status;
+    PACL Empty;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"access.bin");
+    NtfsKmtJoin(Alias, RTL_NUMBER_OF(Alias), Dir, L"access-link.bin");
+    RtlStringCchPrintfW(Stream, RTL_NUMBER_OF(Stream), L"%ls:private", Path);
+    RtlStringCchPrintfW(Missing, RTL_NUMBER_OF(Missing), L"%ls:new", Path);
+    Status = NtfsKmtCreateFileWithData(Path, "read", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtCreateFileWithData(Stream, "ads!", 4);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&Control, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Id = NtfsKmtQueryFileId(Control);
+    Status = NtfsKmtLink(Control, Alias, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Ace.Sid = SeExports->SeWorldSid;
+    Ace.Mask = FILE_GENERIC_READ;
+    Ace.Flags = 0;
+    ReplaceAccessDacl(Control, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+
+    Status = ForceOpen(&File, Path, FILE_READ_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { CheckGranted(File, FILE_READ_DATA, FILE_WRITE_DATA); ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Path, FILE_WRITE_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Path, MAXIMUM_ALLOWED, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { CheckGranted(File, FILE_READ_DATA, FILE_WRITE_DATA | FILE_APPEND_DATA); ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Alias, FILE_WRITE_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Stream, FILE_READ_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Stream, FILE_WRITE_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Missing, FILE_READ_DATA, FILE_CREATE, TRUE);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = NtfsKmtOpen(&File, Missing, FILE_READ_ATTRIBUTES, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_OBJECT_NAME_NOT_FOUND);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        IdName.Buffer = (PWCHAR)&Id;
+        IdName.Length = IdName.MaximumLength = sizeof(Id);
+        InitializeObjectAttributes(&Attributes, &IdName,
+                                    OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_FORCE_ACCESS_CHECK, Volume, NULL);
+        Status = ZwCreateFile(&File, FILE_WRITE_DATA | SYNCHRONIZE, &Attributes, &IoStatus,
+                               NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_OPEN_BY_FILE_ID |
+                               FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+        ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+        if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+        ZwClose(Volume); Volume = NULL;
+    }
+    Status = ForceOpen(&File, Path, FILE_READ_DATA, FILE_OVERWRITE, TRUE);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = NtfsKmtQueryStandard(Control, &Standard);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) ok_eq_longlong(Standard.EndOfFile.QuadPart, 4);
+
+    /* MAXIMUM_ALLOWED must participate in sharing with its granted read
+     * rights, rather than being treated as a metadata-only open. */
+    ZwClose(Control); Control = NULL;
+    Status = NtfsKmtCreate(&Blocker, NULL, Path, FILE_WRITE_DATA, FILE_ATTRIBUTE_NORMAL,
+                            FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+                            NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ForceOpen(&File, Path, MAXIMUM_ALLOWED, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_SHARING_VIOLATION);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    if (Blocker != NULL) { ZwClose(Blocker); Blocker = NULL; }
+    Status = NtfsKmtOpen(&Control, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+
+    /* An empty DACL denies data, but the parent can grant attribute reads. */
+    Sd = BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, NULL, 0, TRUE);
+    if (Sd != NULL)
+    {
+        Empty = (PACL)((PUCHAR)Sd + sizeof(SECURITY_DESCRIPTOR));
+        Status = RtlCreateAcl(Empty, sizeof(ACL), ACL_REVISION);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = RtlSetDaclSecurityDescriptor(Sd, TRUE, Empty, FALSE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ReplaceAccessDacl(Control, Sd);
+    }
+    Status = ForceOpen(&File, Path, FILE_READ_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Path, FILE_READ_ATTRIBUTES, FILE_OPEN, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { CheckGranted(File, FILE_READ_ATTRIBUTES, FILE_READ_DATA | FILE_WRITE_DATA); ZwClose(File); File = NULL; }
+    Status = ForceOpen(&File, Path, 0, FILE_OPEN, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { CheckGranted(File, 0, FILE_READ_DATA | FILE_WRITE_DATA); ZwClose(File); File = NULL; }
+    /* Kernel-mode opens without FORCE_ACCESS_CHECK retain their bypass. */
+    Status = NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+
+    Ace.Mask = FILE_ALL_ACCESS;
+    ReplaceAccessDacl(Control, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+    Status = ForceOpen(&File, Alias, FILE_WRITE_DATA, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    /* Overwrite implies write access. A sharing denial must leave data
+     * intact even when the explicit desired-access mask only asks to read. */
+    ZwClose(Control); Control = NULL;
+    Status = NtfsKmtCreate(&Blocker, NULL, Path, FILE_READ_DATA, FILE_ATTRIBUTE_NORMAL,
+                            FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+                            NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ForceOpen(&File, Path, FILE_READ_DATA, FILE_OVERWRITE, TRUE);
+    ok_eq_hex(Status, STATUS_SHARING_VIOLATION);
+    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    if (Blocker != NULL)
+    {
+        Status = NtfsKmtQueryStandard(Blocker, &Standard);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status)) ok_eq_longlong(Standard.EndOfFile.QuadPart, 4);
+        ZwClose(Blocker); Blocker = NULL;
+    }
+    Status = NtfsKmtOpen(&Control, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    RtlZeroMemory(&Basic, sizeof(Basic));
+    Basic.FileAttributes = FILE_ATTRIBUTE_READONLY;
+    Status = NtfsKmtSetInfo(Control, &Basic, sizeof(Basic), FileBasicInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ForceOpen(&File, Path, MAXIMUM_ALLOWED, FILE_OPEN, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckGranted(File, FILE_READ_DATA, FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD);
+        ZwClose(File); File = NULL;
+    }
+    Basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    Status = NtfsKmtSetInfo(Control, &Basic, sizeof(Basic), FileBasicInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ForceOpen(&File, Path, FILE_READ_DATA, FILE_OVERWRITE, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        CheckGranted(File, FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA, 0);
+        Status = NtfsKmtQueryStandard(File, &Standard);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status)) ok_eq_longlong(Standard.EndOfFile.QuadPart, 0);
+        ZwClose(File);
+    }
+    ZwClose(Control);
+}
+
 START_TEST(NtfsSecurity)
 {
     WCHAR Root[MAX_PATH];
-    WCHAR Dir[MAX_PATH];
+    WCHAR Dir[MAX_PATH], Letter;
     NTSTATUS Status;
 
-    if (!NtfsKmtFindVolume(Root, NULL))
+    if (!NtfsKmtFindVolume(Root, &Letter))
     {
         ok(FALSE, "No writable NTFS volume found (attach an NTFS data disk)\n");
         return;
@@ -472,6 +697,7 @@ START_TEST(NtfsSecurity)
 
     TestDefaultAndRoundTrip(Dir);
     TestInheritance(Dir);
+    TestStoredAccess(Dir, Letter);
 
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);

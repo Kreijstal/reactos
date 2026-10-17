@@ -27,6 +27,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include "security.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -998,6 +999,110 @@ NtfsReparseOpen(
     return STATUS_REPARSE;
 }
 
+static KPROCESSOR_MODE
+NtfsCreateAccessMode(PIRP Irp, PIO_STACK_LOCATION Stack)
+{
+    return (Stack->Flags & SL_FORCE_ACCESS_CHECK) ? UserMode : Irp->RequestorMode;
+}
+
+static NTSTATUS
+NtfsCheckParentAccess(PDEVICE_EXTENSION Vcb,
+                       ULONGLONG Parent,
+                       PACCESS_STATE AccessState,
+                       ACCESS_MASK Desired,
+                       KPROCESSOR_MODE Mode)
+{
+    ACCESS_MASK Granted;
+
+    if ((AccessState->Flags & TOKEN_HAS_RESTORE_PRIVILEGE) &&
+        !(Desired & ~(FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD)))
+        return STATUS_SUCCESS;
+    return NtfsCheckAccess(Vcb, Parent, AccessState, Desired, 0, Mode, &Granted);
+}
+
+/* A parent can independently authorize deletion and reading attributes
+ * (MS-FSA 2.1.5.1.2.1), even when the file's DACL denies those rights. */
+static NTSTATUS
+NtfsCheckOpenAccess(PDEVICE_EXTENSION Vcb,
+                     PNTFS_FCB Fcb,
+                     PACCESS_STATE AccessState,
+                     ACCESS_MASK Desired,
+                     ACCESS_MASK Previous,
+                     KPROCESSOR_MODE Mode,
+                     PACCESS_MASK Granted)
+{
+    ACCESS_MASK ParentGranted = 0;
+    NTSTATUS Status;
+
+    Status = NtfsCheckAccess(Vcb, Fcb->MFTIndex, AccessState, Desired, Previous, Mode, Granted);
+    if ((Status == STATUS_ACCESS_DENIED || NT_SUCCESS(Status)) &&
+        (Desired & (DELETE | MAXIMUM_ALLOWED)) &&
+        (!NT_SUCCESS(Status) || !(*Granted & DELETE)) &&
+        NT_SUCCESS(NtfsCheckParentAccess(Vcb, Fcb->ParentMFTIndex, AccessState, FILE_DELETE_CHILD, Mode)))
+        ParentGranted |= DELETE;
+    if ((Status == STATUS_ACCESS_DENIED || NT_SUCCESS(Status)) &&
+        (Desired & (FILE_READ_ATTRIBUTES | MAXIMUM_ALLOWED)) &&
+        (!NT_SUCCESS(Status) || !(*Granted & FILE_READ_ATTRIBUTES)) &&
+        NT_SUCCESS(NtfsCheckParentAccess(Vcb, Fcb->ParentMFTIndex, AccessState, FILE_LIST_DIRECTORY, Mode)))
+        ParentGranted |= FILE_READ_ATTRIBUTES;
+    if (ParentGranted != 0)
+        Status = NtfsCheckAccess(Vcb, Fcb->MFTIndex, AccessState, Desired & ~ParentGranted,
+                                  Previous | ParentGranted, Mode, Granted);
+    return Status;
+}
+
+static NTSTATUS
+NtfsAuthorizeOpen(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PIRP Irp,
+                   PIO_STACK_LOCATION Stack, BOOLEAN ExistingStream)
+{
+    PIO_SECURITY_CONTEXT Security = Stack->Parameters.Create.SecurityContext;
+    PACCESS_STATE AccessState = Security->AccessState;
+    KPROCESSOR_MODE Mode = NtfsCreateAccessMode(Irp, Stack);
+    ULONG Disposition = Stack->Parameters.Create.Options >> 24;
+    ACCESS_MASK Desired = AccessState->RemainingDesiredAccess;
+    ACCESS_MASK Granted = 0, Extra = 0;
+    NTSTATUS Status;
+
+    if (!ExistingStream)
+        Extra = FILE_WRITE_DATA;
+    else if (Disposition == FILE_SUPERSEDE || Disposition == FILE_OVERWRITE || Disposition == FILE_OVERWRITE_IF)
+    {
+        Extra = (Disposition == FILE_SUPERSEDE) ? DELETE : FILE_WRITE_DATA;
+        if (Fcb->Stream[0] == UNICODE_NULL)
+            Extra |= FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES;
+    }
+    Desired |= Extra & ~AccessState->PreviouslyGrantedAccess;
+    Status = NtfsCheckOpenAccess(Vcb, Fcb, AccessState, Desired,
+                                  AccessState->PreviouslyGrantedAccess, Mode, &Granted);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if ((Desired & MAXIMUM_ALLOWED) && (Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_READ_ONLY))
+        Granted &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_DELETE_CHILD);
+    if (Desired & ~(Granted | MAXIMUM_ALLOWED))
+        return STATUS_ACCESS_DENIED;
+    AccessState->PreviouslyGrantedAccess = Granted;
+    AccessState->RemainingDesiredAccess = 0;
+    Security->DesiredAccess = Granted;
+    return STATUS_SUCCESS;
+}
+
+/* Creating a new file grants the requested access before its new DACL takes
+ * effect on subsequent opens (MS-FSA 2.1.5.1.1). */
+static VOID
+NtfsGrantCreatedAccess(PIO_STACK_LOCATION Stack)
+{
+    PIO_SECURITY_CONTEXT Security = Stack->Parameters.Create.SecurityContext;
+    PACCESS_STATE AccessState = Security->AccessState;
+    ACCESS_MASK Desired = AccessState->RemainingDesiredAccess;
+
+    AccessState->PreviouslyGrantedAccess |= Desired & ~MAXIMUM_ALLOWED;
+    if (Desired & MAXIMUM_ALLOWED)
+        AccessState->PreviouslyGrantedAccess |= FILE_ALL_ACCESS;
+    AccessState->RemainingDesiredAccess = 0;
+    Security->DesiredAccess = AccessState->PreviouslyGrantedAccess;
+}
+
 /**
 * @name NtfsOpenExistingFile
 *
@@ -1026,6 +1131,8 @@ NtfsOpenExistingFile(
 
     Status = NtfsCheckExistingFile(Fcb, DesiredAccess, Options, Disposition, TrailingBackslash);
     if (NT_SUCCESS(Status))
+        Status = NtfsAuthorizeOpen(DeviceExt, Fcb, Irp, Stack, TRUE);
+    if (NT_SUCCESS(Status))
         Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
 
     if (!NT_SUCCESS(Status))
@@ -1036,6 +1143,8 @@ NtfsOpenExistingFile(
         NtfsReleaseFCB(DeviceExt, Fcb);
         return Status;
     }
+
+    DesiredAccess = Stack->Parameters.Create.SecurityContext->DesiredAccess;
 
     /* A file mapped as a running image can't be written or deleted */
     if (!NtfsFCBIsDirectory(Fcb) &&
@@ -1048,6 +1157,15 @@ NtfsOpenExistingFile(
 
     if (NtfsDispositionOverwrites(Disposition))
     {
+        /* Check the final granted rights before any destructive operation.
+         * DirResource keeps the share state fixed until FinishOpen commits it. */
+        Status = IoCheckShareAccess(DesiredAccess, Stack->Parameters.Create.ShareAccess,
+                                     FileObject, &Fcb->ShareAccess, FALSE);
+        if (!NT_SUCCESS(Status))
+        {
+            NtfsCloseFile(DeviceExt, FileObject);
+            return Status;
+        }
         Status = NtfsOverwriteFile(Fcb, FileObject);
         if (!NT_SUCCESS(Status))
         {
@@ -1059,6 +1177,7 @@ NtfsOpenExistingFile(
     }
 
     Status = NtfsFinishOpen(DeviceExt, FileObject, Stack);
+    ASSERT(!NtfsDispositionOverwrites(Disposition) || NT_SUCCESS(Status));
     if (NT_SUCCESS(Status))
     {
         Irp->IoStatus.Information = Information;
@@ -1212,6 +1331,7 @@ NtfsCreateNewFile(
         }
     }
 
+    NtfsGrantCreatedAccess(Stack);
     Status = NtfsAttachFCBToFileObject(DeviceExt, Fcb, FileObject);
     if (!NT_SUCCESS(Status))
     {
@@ -1411,7 +1531,15 @@ NtfsOpenStream(
             return Status;
         }
 
-        Status = NtfsAddStream(DeviceExt, BaseFcb, StreamName);
+        if (!BaseCreated)
+            Status = NtfsAuthorizeOpen(DeviceExt, BaseFcb, Irp, Stack, FALSE);
+        else
+        {
+            NtfsGrantCreatedAccess(Stack);
+            Status = STATUS_SUCCESS;
+        }
+        if (NT_SUCCESS(Status))
+            Status = NtfsAddStream(DeviceExt, BaseFcb, StreamName);
         if (NT_SUCCESS(Status))
             Status = NtfsMakeStreamFCB(DeviceExt, BaseFcb, StreamName, &Fcb);
 
