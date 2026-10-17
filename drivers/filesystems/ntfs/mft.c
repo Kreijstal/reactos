@@ -3703,7 +3703,6 @@ InsertIndexEntryWorker(PDEVICE_EXTENSION DeviceExt,
 
     // Temporarily shrink the index root to it's minimal size
     AttributeLength = MinIndexRootSize.LowPart;
-    AttributeLength += sizeof(INDEX_ROOT_ATTRIBUTE);
 
 
     // Update the length of the attribute in the file record of the parent directory
