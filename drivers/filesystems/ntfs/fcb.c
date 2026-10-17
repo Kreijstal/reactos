@@ -210,6 +210,82 @@ NtfsBuildChildPath(
     return Path;
 }
 
+NTSTATUS
+NtfsInitializeFcbLock(PNTFS_FCB Fcb)
+{
+    PNTFS_VCB Vcb = Fcb->Vcb;
+    PNTFS_FILE_LOCK NewLock, FileLock;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    ASSERT(Fcb->FileLock == NULL);
+    if (NtfsFCBIsDirectory(Fcb))
+        return STATUS_SUCCESS;
+
+    NewLock = ExAllocatePoolWithTag(NonPagedPool, sizeof(*NewLock), TAG_NTFS);
+    if (NewLock == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(NewLock, sizeof(*NewLock));
+    NewLock->Vcb = Vcb;
+    NewLock->FileReference = NtfsFileReference(Fcb);
+    wcscpy(NewLock->Stream, Fcb->Stream);
+    ExInitializeResourceLite(&NewLock->Resource);
+    FsRtlInitializeFileLock(&NewLock->Lock, NtfsCompleteLockIrp, NULL);
+
+    KeAcquireSpinLock(&Vcb->FcbListLock, &OldIrql);
+    for (Entry = Vcb->FileLockList.Flink; Entry != &Vcb->FileLockList; Entry = Entry->Flink)
+    {
+        FileLock = CONTAINING_RECORD(Entry, NTFS_FILE_LOCK, ListEntry);
+        if (FileLock->FileReference == NewLock->FileReference &&
+            _wcsicmp(FileLock->Stream, NewLock->Stream) == 0)
+        {
+            FileLock->References++;
+            Fcb->FileLock = FileLock;
+            KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+            FsRtlUninitializeFileLock(&NewLock->Lock);
+            ExDeleteResourceLite(&NewLock->Resource);
+            ExFreePoolWithTag(NewLock, TAG_NTFS);
+            return STATUS_SUCCESS;
+        }
+    }
+    NewLock->References = 1;
+    InsertTailList(&Vcb->FileLockList, &NewLock->ListEntry);
+    Fcb->FileLock = NewLock;
+    KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
+    return STATUS_SUCCESS;
+}
+
+VOID
+NtfsReferenceFileLock(PNTFS_FILE_LOCK FileLock)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&FileLock->Vcb->FcbListLock, &OldIrql);
+    ASSERT(FileLock->References > 0);
+    FileLock->References++;
+    KeReleaseSpinLock(&FileLock->Vcb->FcbListLock, OldIrql);
+}
+
+VOID
+NtfsReleaseFileLock(PNTFS_FILE_LOCK FileLock)
+{
+    KIRQL OldIrql;
+    BOOLEAN Last;
+
+    KeAcquireSpinLock(&FileLock->Vcb->FcbListLock, &OldIrql);
+    ASSERT(FileLock->References > 0);
+    Last = (--FileLock->References == 0);
+    if (Last)
+        RemoveEntryList(&FileLock->ListEntry);
+    KeReleaseSpinLock(&FileLock->Vcb->FcbListLock, OldIrql);
+    if (Last)
+    {
+        FsRtlUninitializeFileLock(&FileLock->Lock);
+        ExDeleteResourceLite(&FileLock->Resource);
+        ExFreePoolWithTag(FileLock, TAG_NTFS);
+    }
+}
+
 PNTFS_FCB
 NtfsCreateFCB(PCWSTR FileName,
               PCWSTR Stream,
@@ -275,6 +351,8 @@ NtfsDestroyFCB(PNTFS_FCB Fcb)
     ASSERT(Fcb->SectionObjectPointers.ImageSectionObject == NULL);
     ASSERT(Fcb->SectionObjectPointers.SharedCacheMap == NULL);
 
+    if (Fcb->FileLock != NULL)
+        NtfsReleaseFileLock(Fcb->FileLock);
     ExDeleteResourceLite(&Fcb->PagingIoResource);
     ExDeleteResourceLite(&Fcb->MainResource);
 
@@ -667,6 +745,7 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
                         ULONGLONG MFTIndex,
                         PNTFS_FCB * fileFCB)
 {
+    NTSTATUS Status;
     PWCHAR pathName;
     PFILENAME_ATTRIBUTE FileName;
     PSTANDARD_INFORMATION StdInfo;
@@ -726,6 +805,12 @@ NtfsMakeFCBFromDirEntry(PNTFS_VCB Vcb,
     rcFCB->ParentMFTIndex = DirectoryFCB ? DirectoryFCB->MFTIndex : (FileName->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
     rcFCB->SequenceNumber = Record->SequenceNumber;
     rcFCB->LinkCount = Record->LinkCount;
+    Status = NtfsInitializeFcbLock(rcFCB);
+    if (!NT_SUCCESS(Status))
+    {
+        NtfsDestroyFCB(rcFCB);
+        return Status;
+    }
     NtfsFCBInitializeCache(Vcb, rcFCB);
     NtfsAddFCBToTable(Vcb, rcFCB);
     *fileFCB = rcFCB;
@@ -870,6 +955,12 @@ NtfsMakeStreamFCB(
 
     ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
 
+    Status = NtfsInitializeFcbLock(Fcb);
+    if (!NT_SUCCESS(Status))
+    {
+        NtfsDestroyFCB(Fcb);
+        return Status;
+    }
     NtfsFCBInitializeCache(Vcb, Fcb);
     NtfsAddFCBToTable(Vcb, Fcb);
 
