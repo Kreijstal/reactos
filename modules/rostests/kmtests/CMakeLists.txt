@@ -90,6 +90,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/FatPerf.c
     ntos_io/NtfsAllocation.c
     ntos_io/NtfsTimes.c
+    ntos_io/NtfsRename.c
     ntos_io/NtfsDirIndex.c
     ntos_io/NtfsCompression.c
     ntos_io/NtfsCreateSemantics.c
