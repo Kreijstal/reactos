@@ -702,6 +702,7 @@ typedef struct _NTFS_FILE_LOCK
     LIST_ENTRY ListEntry;
     LONG References;
     BOOLEAN Removed;
+    BOOLEAN MultipleFcbs; /* sticky until this shared stream state is released */
     ULONGLONG FileReference;
     WCHAR Stream[MAX_PATH];
     PNTFS_VCB Vcb;
@@ -1831,6 +1832,14 @@ NtfsDeleteFileLink(PDEVICE_EXTENSION DeviceExt,
                    PCUNICODE_STRING Name,
                    BOOLEAN CaseSensitive,
                    PUSHORT LinksLeft);
+
+NTSTATUS
+NtfsFindFileNameRecord(PDEVICE_EXTENSION Vcb,
+                       PFILE_RECORD_HEADER BaseRecord,
+                       ULONGLONG ParentIndex,
+                       PCUNICODE_STRING Name,
+                       PFILE_RECORD_HEADER *Holder,
+                       PULONG Offset);
 
 NTSTATUS
 NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,

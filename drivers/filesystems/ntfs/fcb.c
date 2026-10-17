@@ -241,6 +241,7 @@ NtfsInitializeFcbLock(PNTFS_FCB Fcb)
             _wcsicmp(FileLock->Stream, NewLock->Stream) == 0)
         {
             FileLock->References++;
+            FileLock->MultipleFcbs = TRUE;
             Fcb->FileLock = FileLock;
             KeReleaseSpinLock(&Vcb->FcbListLock, OldIrql);
             FsRtlUninitializeFileLock(&NewLock->Lock);

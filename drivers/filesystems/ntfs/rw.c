@@ -327,12 +327,14 @@ BOOLEAN
 NtfsUseDataCache(PNTFS_FCB Fcb, PFILE_OBJECT FileObject, PIRP Irp)
 {
     /* Separate path FCBs of hard links do not own a shared stream cache.
-     * Their I/O stays coherent through the common volume cache instead. */
+     * Their I/O stays coherent through the common volume cache instead,
+     * including after an unlink leaves one name but several live path FCBs. */
+    ASSERT(Fcb->FileLock != NULL);
     return !(Irp->Flags & (IRP_PAGING_IO | IRP_NOCACHE)) &&
            !(FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) &&
            !NtfsFCBIsCompressed(Fcb) && !NtfsFCBIsEncrypted(Fcb) &&
            !(Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_SPARSE) &&
-           Fcb->LinkCount == 1;
+           Fcb->LinkCount == 1 && !Fcb->FileLock->MultipleFcbs;
 }
 
 static

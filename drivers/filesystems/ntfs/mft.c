@@ -4911,24 +4911,27 @@ NtfsFileNameMatches(PDEVICE_EXTENSION DeviceExt,
 }
 
 /**
-* @name NtfsRemoveFileNameAttribute
+* @name NtfsFindFileNameRecord
 *
-* Takes a file's $FILE_NAME that is Name in the directory ParentIndex out of the record
-* holding it, and out of the $ATTRIBUTE_LIST if that's an extension record.
+* Finds the record and attribute offset of a particular link. Release Holder with
+* NtfsReleaseAttributeHolder; the base record is borrowed, extension buffers are owned.
 */
 NTSTATUS
-NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
-                            PFILE_RECORD_HEADER BaseRecord,
-                            ULONGLONG ParentIndex,
-                            PCUNICODE_STRING Name)
+NtfsFindFileNameRecord(PDEVICE_EXTENSION DeviceExt,
+                       PFILE_RECORD_HEADER BaseRecord,
+                       ULONGLONG ParentIndex,
+                       PCUNICODE_STRING Name,
+                       PFILE_RECORD_HEADER *Holder,
+                       PULONG Offset)
 {
     PNTFS_ATTRIBUTE_LIST_ITEM List = NULL;
     PULONGLONG Indices = NULL;
     PFILE_RECORD_HEADER Record = BaseRecord;
     ULONG ListLength = 0, ExtensionCount = 0, RecordIndex = 0;
-    ULONGLONG RecordNumber = BaseRecord->MFTRecordNumber;
     NTSTATUS Status = STATUS_SUCCESS;
-    BOOLEAN Removed = FALSE;
+    BOOLEAN Found = FALSE;
+
+    *Holder = NULL;
 
     if (NtfsRecordHasAttributeList(BaseRecord))
     {
@@ -4937,7 +4940,7 @@ NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
             Status = NtfsGetExtensionRecords(List, ListLength, BaseRecord->MFTRecordNumber, &Indices, &ExtensionCount);
     }
 
-    while (NT_SUCCESS(Status) && !Removed)
+    while (NT_SUCCESS(Status) && !Found)
     {
         PNTFS_ATTR_RECORD Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Record + Record->AttributeOffset);
 
@@ -4949,15 +4952,15 @@ NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
                                     ParentIndex,
                                     Name))
             {
-                NtfsRemoveAttribute(Record, (ULONG)((ULONG_PTR)Attribute - (ULONG_PTR)Record));
-                Removed = TRUE;
+                *Offset = (ULONG)((PUCHAR)Attribute - (PUCHAR)Record);
+                Found = TRUE;
                 break;
             }
 
             Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)Attribute + Attribute->Length);
         }
 
-        if (Removed || RecordIndex == ExtensionCount)
+        if (Found || RecordIndex == ExtensionCount)
             break;
 
         if (Record == BaseRecord)
@@ -4971,19 +4974,16 @@ NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
             }
         }
 
-        RecordNumber = Indices[RecordIndex++];
-        Status = ReadFileRecord(DeviceExt, RecordNumber, Record);
+        Status = ReadFileRecord(DeviceExt, Indices[RecordIndex++], Record);
     }
 
-    if (NT_SUCCESS(Status) && !Removed)
+    if (NT_SUCCESS(Status) && !Found)
         Status = STATUS_OBJECT_NAME_NOT_FOUND;
 
-    /* An extension record changed: write it, and rebuild the list it's in */
-    if (NT_SUCCESS(Status) && Record != BaseRecord)
+    if (NT_SUCCESS(Status))
     {
-        Status = UpdateFileRecord(DeviceExt, RecordNumber, Record);
-        if (NT_SUCCESS(Status))
-            Status = NtfsRebuildAttributeList(DeviceExt, BaseRecord, NULL, 0);
+        *Holder = Record;
+        Record = BaseRecord; /* The caller owns an extension buffer on success. */
     }
 
     if (Record != BaseRecord)
@@ -4993,6 +4993,30 @@ NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION DeviceExt,
     if (List != NULL)
         ExFreePoolWithTag(List, TAG_NTFS);
 
+    return Status;
+}
+
+NTSTATUS
+NtfsRemoveFileNameAttribute(PDEVICE_EXTENSION Vcb,
+                            PFILE_RECORD_HEADER BaseRecord,
+                            ULONGLONG ParentIndex,
+                            PCUNICODE_STRING Name)
+{
+    PFILE_RECORD_HEADER Holder;
+    ULONG Offset;
+    NTSTATUS Status;
+
+    Status = NtfsFindFileNameRecord(Vcb, BaseRecord, ParentIndex, Name, &Holder, &Offset);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    NtfsRemoveAttribute(Holder, Offset);
+    if (Holder != BaseRecord)
+    {
+        Status = UpdateFileRecord(Vcb, Holder->MFTRecordNumber, Holder);
+        if (NT_SUCCESS(Status))
+            Status = NtfsRebuildAttributeList(Vcb, BaseRecord, NULL, 0);
+    }
+    NtfsReleaseAttributeHolder(Vcb, BaseRecord, Holder);
     return Status;
 }
 
