@@ -2010,7 +2010,7 @@ NtfsClearRenameTarget(
     {
         USHORT LinksLeft;
 
-        Status = NtfsDeleteFileLink(DeviceExt, ExistingMft, TargetDirMft, NewName, CaseSensitive, &LinksLeft);
+        Status = NtfsDeleteUserFileLink(DeviceExt, ExistingMft, TargetDirMft, NewName, CaseSensitive, &LinksLeft);
         if (NT_SUCCESS(Status) && LinksLeft != 0)
             NtfsSetLinkCount(DeviceExt, ExistingMft, LinksLeft);
     }
@@ -2440,7 +2440,11 @@ NtfsRetireReplacedLink(PDEVICE_EXTENSION Vcb,
         return Status;
     NtfsSetLinkCount(Vcb, Target->MFTRecordNumber, Target->LinkCount);
     if (Target->LinkCount == 0)
+    {
         Status = NtfsDeleteFileRecord(Vcb, Target->MFTRecordNumber, CaseSensitive);
+        if (NT_SUCCESS(Status))
+            NtfsReleaseFileQuota(Vcb, Target);
+    }
     return Status;
 }
 
@@ -3165,6 +3169,9 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             break;
 
         case FileEndOfFileInformation:
+            Status = NtfsCheckQuotaGrowth(IrpContext);
+            if (!NT_SUCCESS(Status))
+                break;
             EndOfFileInfo = (PFILE_END_OF_FILE_INFORMATION)SystemBuffer;
             Status = NtfsSetEndOfFile(Fcb,
                                       FileObject,

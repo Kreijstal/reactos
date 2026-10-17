@@ -265,6 +265,359 @@ Close:
     ZwClose(Volume);
 }
 
+static NTSTATUS
+QuotaTestLock(HANDLE Handle, UCHAR Minor)
+{
+    PFILE_OBJECT File;
+    PDEVICE_OBJECT Device;
+    PIO_STACK_LOCATION Stack;
+    PIRP Irp;
+    KEVENT Event;
+    LARGE_INTEGER Length;
+    NTSTATUS Status;
+
+    Status = ObReferenceObjectByHandle(Handle, 0, *IoFileObjectType, KernelMode, (PVOID *)&File, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Device = IoGetRelatedDeviceObject(File);
+    Irp = IoAllocateIrp(Device->StackSize, FALSE);
+    if (Irp == NULL) { ObDereferenceObject(File); return STATUS_INSUFFICIENT_RESOURCES; }
+    Length.QuadPart = 10;
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->RequestorMode = KernelMode;
+    Stack = IoGetNextIrpStackLocation(Irp);
+    Stack->MajorFunction = IRP_MJ_LOCK_CONTROL;
+    Stack->MinorFunction = Minor;
+    Stack->Flags = SL_EXCLUSIVE_LOCK | SL_FAIL_IMMEDIATELY;
+    Stack->FileObject = File;
+    Stack->Parameters.LockControl.ByteOffset.QuadPart = 0;
+    Stack->Parameters.LockControl.Length = &Length;
+    Stack->Parameters.LockControl.Key = 17;
+    IoSetCompletionRoutine(Irp, QuotaIrpCompletion, &Event, TRUE, TRUE, TRUE);
+    Status = IoCallDriver(Device, Irp);
+    if (Status == STATUS_PENDING)
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+    Status = Irp->IoStatus.Status;
+    IoFreeIrp(Irp);
+    ObDereferenceObject(File);
+    return Status;
+}
+
+/* An immediate native error may leave the caller's IOSB untouched. Observe
+ * the completed public IRP for the driver's zero-transfer error contract. */
+static VOID
+CheckRejectedWriteIrp(HANDLE Handle, LONGLONG Position)
+{
+    PFILE_OBJECT File;
+    PDEVICE_OBJECT Device;
+    PIO_STACK_LOCATION Stack;
+    PIRP Irp;
+    KEVENT Event;
+    NTSTATUS Status;
+    CHAR Data = 'f';
+
+    Status = ObReferenceObjectByHandle(Handle, FILE_WRITE_DATA, *IoFileObjectType, KernelMode, (PVOID *)&File, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Device = IoGetRelatedDeviceObject(File);
+    Irp = IoAllocateIrp(Device->StackSize, FALSE);
+    ok(Irp != NULL, "could not allocate write IRP\n");
+    if (Irp == NULL) { ObDereferenceObject(File); return; }
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->RequestorMode = KernelMode;
+    Irp->Flags = IRP_WRITE_OPERATION;
+    Irp->UserBuffer = &Data;
+    IoAllocateMdl(&Data, sizeof(Data), FALSE, FALSE, Irp);
+    ok(Irp->MdlAddress != NULL, "could not allocate write MDL\n");
+    if (Irp->MdlAddress == NULL) { IoFreeIrp(Irp); ObDereferenceObject(File); return; }
+    MmProbeAndLockPages(Irp->MdlAddress, KernelMode, IoReadAccess);
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    Irp->IoStatus.Information = 0xfeedface;
+    Stack = IoGetNextIrpStackLocation(Irp);
+    Stack->MajorFunction = IRP_MJ_WRITE;
+    Stack->FileObject = File;
+    Stack->Parameters.Write.Length = 1;
+    Stack->Parameters.Write.ByteOffset.QuadPart = Position;
+    IoSetCompletionRoutine(Irp, QuotaIrpCompletion, &Event, TRUE, TRUE, TRUE);
+    Status = IoCallDriver(Device, Irp);
+    if (Status == STATUS_PENDING)
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+    ok_eq_hex(Irp->IoStatus.Status, STATUS_DISK_FULL);
+    ok_eq_ulongptr(Irp->IoStatus.Information, 0);
+    if (Irp->MdlAddress != NULL)
+    {
+        MmUnlockPages(Irp->MdlAddress);
+        IoFreeMdl(Irp->MdlAddress);
+    }
+    IoFreeIrp(Irp);
+    ObDereferenceObject(File);
+}
+
+static LONGLONG
+QueryUsed(HANDLE Volume, PSID Sid)
+{
+    UCHAR List[FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) + SECURITY_MAX_SID_SIZE];
+    UCHAR Buffer[FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) + SECURITY_MAX_SID_SIZE];
+    PFILE_GET_QUOTA_INFORMATION Get = (PVOID)List;
+    PFILE_QUOTA_INFORMATION Quota = (PVOID)Buffer;
+    NTSTATUS Status;
+    ULONG_PTR Information;
+
+    RtlZeroMemory(List, sizeof(List));
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Get->SidLength = RtlLengthSid(Sid);
+    RtlCopySid(Get->SidLength, &Get->Sid, Sid);
+    Status = SendQuotaIrp(Volume, IRP_MJ_QUERY_QUOTA, Buffer, sizeof(Buffer), TRUE,
+                          Get, FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) + Get->SidLength, TRUE, &Information);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return -1;
+    ok(RtlEqualSid(&Quota->Sid, Sid), "wrong quota owner\n");
+    return Quota->QuotaUsed.QuadPart;
+}
+
+static VOID
+SetOwner(HANDLE File, PSID Sid)
+{
+    SECURITY_DESCRIPTOR Sd;
+    NTSTATUS Status;
+
+    RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    RtlSetOwnerSecurityDescriptor(&Sd, Sid, FALSE);
+    Status = ZwSetSecurityObject(File, OWNER_SECURITY_INFORMATION, &Sd);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
+static VOID
+TestCharging(PCWSTR Root, WCHAR Letter)
+{
+    WCHAR Dir[MAX_PATH], Path[MAX_PATH], Stream[MAX_PATH], Alias[MAX_PATH], Padding[161];
+    HANDLE Volume = NULL, File = NULL, Ads = NULL;
+    IO_STATUS_BLOCK IoStatus;
+    FILE_FS_CONTROL_INFORMATION Saved, Control;
+    FILE_END_OF_FILE_INFORMATION Eof;
+    FILE_SET_SPARSE_BUFFER Sparse;
+    PUCHAR Buffer = NULL;
+    ULONG Length, i;
+    NTSTATUS Status;
+    LONGLONG Baseline, OtherBaseline;
+    BOOLEAN Restore = FALSE;
+    LARGE_INTEGER Offset;
+
+    Status = NtfsKmtPrepareDirectory(Root, L"kmt_ntfs_charging", Dir);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"owner.bin");
+    NtfsKmtJoin(Alias, RTL_NUMBER_OF(Alias), Dir, L"alias.bin");
+    RtlStringCchPrintfW(Stream, RTL_NUMBER_OF(Stream), L"%ls:extra", Path);
+    Status = NtfsKmtCreateFileWithData(Path, "abc", 3);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    SetOwner(File, SeExports->SeWorldSid);
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = ZwQueryVolumeInformationFile(Volume, &IoStatus, &Saved, sizeof(Saved), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Buffer = NtfsKmtAlloc(QUOTA_BUFFER_SIZE);
+    if (Buffer == NULL) goto Cleanup;
+    Control = Saved;
+    Control.FileSystemControlFlags &= ~(FILE_VC_QUOTA_TRACK | FILE_VC_QUOTA_ENFORCE);
+    Status = ZwSetVolumeInformationFile(Volume, &IoStatus, &Control, sizeof(Control), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Restore = TRUE;
+    /* Enabling tracking must include a file created before it was enabled. */
+    Control.FileSystemControlFlags |= FILE_VC_QUOTA_TRACK;
+    Status = ZwSetVolumeInformationFile(Volume, &IoStatus, &Control, sizeof(Control), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Baseline = QueryUsed(Volume, SeExports->SeWorldSid);
+    ok(Baseline >= 3, "pre-existing resident data was not charged: %I64d\n", Baseline);
+    OtherBaseline = QueryUsed(Volume, SeExports->SeAliasUsersSid);
+
+    Status = NtfsKmtCreateFileWithData(Stream, "extra", 5);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 5);
+    for (i = 0; i < RTL_NUMBER_OF(Padding) - 1; i++) Padding[i] = L'q';
+    Padding[RTL_NUMBER_OF(Padding) - 1] = UNICODE_NULL;
+    for (i = 0; i < 12; i++)
+    {
+        RtlStringCchPrintfW(Stream, RTL_NUMBER_OF(Stream), L"%ls:spill%02lu-%ls", Path, i, Padding);
+        Status = NtfsKmtCreateFileWithData(Stream, "ads", 3);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 5 + (i + 1) * 3);
+    }
+    for (i = 0; i < 12; i++)
+    {
+        RtlStringCchPrintfW(Stream, RTL_NUMBER_OF(Stream), L"%ls:spill%02lu-%ls", Path, i, Padding);
+        Status = NtfsKmtDeleteTree(Stream);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 5 + (11 - i) * 3);
+    }
+    RtlStringCchPrintfW(Stream, RTL_NUMBER_OF(Stream), L"%ls:extra", Path);
+    Status = NtfsKmtLink(File, Alias, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 5);
+    Offset.QuadPart = 3;
+    Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, "defg", 4, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 9);
+    Eof.EndOfFile.QuadPart = 1;
+    Status = ZwSetInformationFile(File, &IoStatus, &Eof, sizeof(Eof), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 3);
+
+    SetOwner(File, SeExports->SeAliasUsersSid);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 3);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeAliasUsersSid), OtherBaseline + 6);
+    SetOwner(File, SeExports->SeWorldSid);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 3);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeAliasUsersSid), OtherBaseline);
+
+    /* Sparse holes are charged by logical length, not allocated clusters. */
+    Status = NtfsKmtOpen(&Ads, Stream, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Sparse.SetSparse = TRUE;
+        Status = NtfsKmtFsctl(Ads, FSCTL_SET_SPARSE, &Sparse, sizeof(Sparse), NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Eof.EndOfFile.QuadPart = 1024 * 1024 + 7;
+        Status = ZwSetInformationFile(Ads, &IoStatus, &Eof, sizeof(Eof), FileEndOfFileInformation);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 2 + Eof.EndOfFile.QuadPart);
+        ZwClose(Ads); Ads = NULL;
+    }
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtDeleteTree(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 2 + Eof.EndOfFile.QuadPart);
+    Status = NtfsKmtDeleteTree(Alias);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 3);
+    /* Caller-supplied QuotaUsed never overwrites measured usage. */
+    Length = BuildQuotaEntry(Buffer, SeExports->SeWorldSid, -1, -1);
+    ((PFILE_QUOTA_INFORMATION)Buffer)->QuotaUsed.QuadPart = 123456;
+    Status = SendQuotaIrp(Volume, IRP_MJ_SET_QUOTA, Buffer, Length, FALSE, NULL, 0, FALSE, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 3);
+
+    Status = NtfsKmtCreateFileWithData(Path, "abc", 3);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    SetOwner(File, SeExports->SeWorldSid);
+    Length = BuildQuotaEntry(Buffer, SeExports->SeWorldSid, Baseline + 2, Baseline + 2);
+    Status = SendQuotaIrp(Volume, IRP_MJ_SET_QUOTA, Buffer, Length, FALSE, NULL, 0, FALSE, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Control.FileSystemControlFlags = (Control.FileSystemControlFlags & ~FILE_VC_QUOTA_MASK) | FILE_VC_QUOTA_ENFORCE;
+    Status = ZwSetVolumeInformationFile(Volume, &IoStatus, &Control, sizeof(Control), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ZwQueryVolumeInformationFile(Volume, &IoStatus, &Control, sizeof(Control), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(Control.FileSystemControlFlags & FILE_VC_QUOTA_MASK, FILE_VC_QUOTA_ENFORCE);
+    Offset.QuadPart = 3;
+    Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, "de", 2, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 2);
+    {
+        Status = QuotaTestLock(File, IRP_MN_LOCK);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Offset.QuadPart = 5;
+        Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, "f", 1, &Offset, NULL);
+        ok_eq_hex(Status, STATUS_FILE_LOCK_CONFLICT);
+        Status = QuotaTestLock(File, IRP_MN_UNLOCK_SINGLE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    Offset.QuadPart = 5;
+    Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, "f", 1, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_DISK_FULL);
+    CheckRejectedWriteIrp(File, 5);
+    Offset.QuadPart = -1; /* FILE_WRITE_TO_END_OF_FILE */
+    Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, "f", 1, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_DISK_FULL);
+    CheckRejectedWriteIrp(File, -1);
+    Eof.EndOfFile.QuadPart = 6;
+    Status = ZwSetInformationFile(File, &IoStatus, &Eof, sizeof(Eof), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_DISK_FULL);
+    {
+        FILE_STANDARD_INFORMATION Standard;
+        Status = ZwQueryInformationFile(File, &IoStatus, &Standard, sizeof(Standard), FileStandardInformation);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_longlong(Standard.EndOfFile.QuadPart, 5);
+    }
+    Offset.QuadPart = 0;
+    Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, "A", 1, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS); /* No growth; an exhausted quota permits it. */
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 2);
+    /* TRACK takes precedence when both state flags are requested (MS-FSCC). */
+    Control.FileSystemControlFlags |= FILE_VC_QUOTA_TRACK;
+    Status = ZwSetVolumeInformationFile(Volume, &IoStatus, &Control, sizeof(Control), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = ZwQueryVolumeInformationFile(Volume, &IoStatus, &Control, sizeof(Control), FileFsControlInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(Control.FileSystemControlFlags & FILE_VC_QUOTA_MASK, FILE_VC_QUOTA_TRACK);
+    Status = ZwSetInformationFile(File, &IoStatus, &Eof, sizeof(Eof), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 3);
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtDeleteTree(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 3);
+    Length = BuildQuotaEntry(Buffer, SeExports->SeWorldSid, -1, -1);
+    Status = SendQuotaIrp(Volume, IRP_MJ_SET_QUOTA, Buffer, Length, FALSE, NULL, 0, FALSE, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+
+    /* Persist both $Q usage and the per-file charge, then grow after remount.
+     * Losing the per-file baseline would charge the same bytes twice. */
+    Status = NtfsKmtCreateFileWithData(Path, "persistent", 10);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    SetOwner(File, SeExports->SeWorldSid);
+    ZwClose(File); File = NULL;
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 7);
+    Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtFsctl(Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    ZwClose(Volume); Volume = NULL;
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 7);
+    Status = NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Eof.EndOfFile.QuadPart = 11;
+    Status = ZwSetInformationFile(File, &IoStatus, &Eof, sizeof(Eof), FileEndOfFileInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline + 8);
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtDeleteTree(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(QueryUsed(Volume, SeExports->SeWorldSid), Baseline - 3);
+Cleanup:
+    if (Ads != NULL) ZwClose(Ads);
+    if (File != NULL) ZwClose(File);
+    if (Restore && Volume != NULL)
+    {
+        Status = ZwSetVolumeInformationFile(Volume, &IoStatus, &Saved, sizeof(Saved), FileFsControlInformation);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    if (Volume != NULL) ZwClose(Volume);
+    if (Buffer != NULL) NtfsKmtFree(Buffer);
+    Status = NtfsKmtDeleteTree(Dir);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtfsQuota)
 {
     WCHAR Root[MAX_PATH];
@@ -277,4 +630,5 @@ START_TEST(NtfsQuota)
     }
 
     TestQuota(Letter);
+    TestCharging(Root, Letter);
 }

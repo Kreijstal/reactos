@@ -1141,6 +1141,10 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     {
         LONGLONG OldSize = Fcb->RFCB.FileSize.QuadPart;
 
+        Status = NtfsCheckQuotaGrowth(IrpContext);
+        if (!NT_SUCCESS(Status))
+            goto WriteDone;
+
         if (NtfsUseDataCache(Fcb, FileObject, Irp))
         {
             Status = NtfsCachedWriteFile(DeviceExt, FileObject, Buffer, ByteOffset, Length,
@@ -1182,6 +1186,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         }
     }
 
+WriteDone:
     IrpContext->Irp->IoStatus.Status = Status;
 
     // was the write successful?

@@ -11,7 +11,9 @@
  * charged and, for a real owner, the SID again. Owner ID 1 is not an owner: its entry holds
  * the defaults and the volume's quota flags. Owners start at 0x100.
  *
- * What files charge to their owners isn't counted yet: BytesUsed stays where it was.
+ * Each base record stores its owner ID and the sum of its data-stream lengths.
+ * Hard links share that charge; sparse/compressed allocation and metadata do not
+ * affect it. QuotaResource serializes accounting with ordinary file mutations.
  */
 
 /* INCLUDES *****************************************************************/
@@ -55,6 +57,11 @@ C_ASSERT(sizeof(NTFS_QUOTA_CONTROL) == 48);
 
 /* FUNCTIONS ****************************************************************/
 
+static NTSTATUS
+NtfsReadQuotaEntry(PDEVICE_EXTENSION Vcb, ULONG OwnerId,
+                   PNTFS_QUOTA_CONTROL Control, PSID *Sid);
+
+
 /**
 * @name NtfsLoadQuota
 * @implemented
@@ -70,6 +77,8 @@ NtfsLoadQuota(PDEVICE_EXTENSION Vcb)
 
     Vcb->QuotaMftIndex = 0;
     Vcb->NextQuotaOwnerId = NTFS_QUOTA_FIRST_OWNER_ID;
+    Vcb->QuotaTracking = FALSE;
+    Vcb->QuotaRebuildRequired = FALSE;
 
     if (Vcb->NtfsInfo.MajorVersion < 3)
         return;
@@ -78,6 +87,17 @@ NtfsLoadQuota(PDEVICE_EXTENSION Vcb)
     {
         Vcb->QuotaMftIndex = 0;
         return;
+    }
+
+    {
+        NTFS_QUOTA_CONTROL Defaults;
+        if (NT_SUCCESS(NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Defaults, NULL)))
+        {
+            Vcb->QuotaTracking = BooleanFlagOn(Defaults.Flags, NTFS_QUOTA_FLAG_TRACKING_ENABLED |
+                                                               NTFS_QUOTA_FLAG_ENFORCEMENT_ENABLED);
+            Vcb->QuotaRebuildRequired = Vcb->QuotaTracking &&
+                                      BooleanFlagOn(Defaults.Flags, NTFS_QUOTA_FLAG_OUT_OF_DATE);
+        }
     }
 
     if (NT_SUCCESS(NtfsFindLastIndexEntry(Vcb, Vcb->QuotaMftIndex, L"$Q", 2, &Last)))
@@ -297,6 +317,523 @@ NtfsSetOwnerQuota(PDEVICE_EXTENSION Vcb,
     Control.HardLimit = Quota->QuotaLimit.QuadPart;
 
     return NtfsWriteQuotaEntry(Vcb, OwnerId, &Control, &Quota->Sid);
+}
+
+/* Called under QuotaResource before FCB or namespace resources. */
+BOOLEAN
+NtfsQuotaOperation(PNTFS_IRP_CONTEXT IrpContext)
+{
+    PNTFS_CCB Ccb;
+
+    if (IrpContext->Irp->Flags & IRP_PAGING_IO)
+        return FALSE;
+    if (IrpContext->MajorFunction == IRP_MJ_CLEANUP && IrpContext->FileObject != NULL)
+    {
+        Ccb = IrpContext->FileObject->FsContext2;
+        if (Ccb == NULL || !(Ccb->Flags & CCB_EXTERNAL_FILE_OBJECT))
+            return FALSE; /* Cache-map teardown must finish inside a tracked operation. */
+    }
+    switch (IrpContext->MajorFunction)
+    {
+        case IRP_MJ_CREATE:
+        case IRP_MJ_WRITE:
+        case IRP_MJ_CLEANUP:
+        case IRP_MJ_SET_INFORMATION:
+        case IRP_MJ_SET_SECURITY:
+        case IRP_MJ_SET_EA:
+        case IRP_MJ_FILE_SYSTEM_CONTROL:
+        case IRP_MJ_SET_VOLUME_INFORMATION:
+        case IRP_MJ_QUERY_QUOTA:
+        case IRP_MJ_SET_QUOTA:
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
+/* Metadata in $Extend is not charged, even when its record number is in the
+ * user range. A user file's SYSTEM attribute does not exempt its data. */
+static BOOLEAN
+NtfsQuotaUserRecord(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record)
+{
+    PFILENAME_ATTRIBUTE Name;
+
+    if (!(Record->Flags & FRH_IN_USE) || Record->BaseFileRecord != 0 ||
+        Record->MFTRecordNumber < NTFS_FILE_FIRST_USER_FILE)
+        return FALSE;
+    Name = GetBestFileNameFromRecord(Vcb, Record);
+    return Name != NULL && (Name->DirectoryFileReferenceNumber & NTFS_MFT_MASK) != NTFS_FILE_EXTEND;
+}
+
+/* Count each data stream once, including attributes in extension records.
+ * Continuation extents repeat DataSize and must not add another charge. */
+static NTSTATUS
+NtfsFileQuotaCharge(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Base, PULONGLONG Charge)
+{
+    PNTFS_ATTRIBUTE_LIST_ITEM List = NULL;
+    PULONGLONG Indices = NULL;
+    PFILE_RECORD_HEADER Record = Base;
+    PNTFS_ATTR_RECORD Attribute;
+    ULONG ListLength, Count = 0, i = 0, Offset;
+    ULONGLONG Length;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *Charge = 0;
+    if (NtfsRecordHasAttributeList(Base))
+    {
+        Status = NtfsReadAttributeList(Vcb, Base, &List, &ListLength);
+        if (NT_SUCCESS(Status))
+            Status = NtfsGetExtensionRecords(List, ListLength, Base->MFTRecordNumber, &Indices, &Count);
+    }
+    while (NT_SUCCESS(Status))
+    {
+        Offset = Record->AttributeOffset;
+        while (Offset + sizeof(ULONG) <= Record->BytesInUse)
+        {
+            Attribute = (PNTFS_ATTR_RECORD)((PUCHAR)Record + Offset);
+            if (Attribute->Type == AttributeEnd)
+                break;
+            if (Attribute->Length == 0 || Attribute->Length > Record->BytesInUse - Offset)
+            {
+                Status = STATUS_FILE_CORRUPT_ERROR;
+                break;
+            }
+            if (Attribute->Type == AttributeData &&
+                (!Attribute->IsNonResident || Attribute->NonResident.LowestVCN == 0))
+            {
+                Length = AttributeDataLength(Attribute);
+                if (Length > MAXLONGLONG - *Charge)
+                {
+                    Status = STATUS_FILE_CORRUPT_ERROR;
+                    break;
+                }
+                *Charge += Length;
+            }
+            Offset += Attribute->Length;
+        }
+        if (!NT_SUCCESS(Status) || i == Count)
+            break;
+        if (Record == Base)
+        {
+            Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+            if (Record == NULL)
+            {
+                Record = Base;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+        }
+        Status = ReadFileRecord(Vcb, Indices[i++], Record);
+    }
+    if (Record != Base) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    if (Indices != NULL) ExFreePoolWithTag(Indices, TAG_NTFS);
+    if (List != NULL) ExFreePoolWithTag(List, TAG_NTFS);
+    return Status;
+}
+
+static NTSTATUS
+NtfsEnsureQuotaOwner(PDEVICE_EXTENSION Vcb, PSID Sid, PULONG OwnerId)
+{
+    NTFS_QUOTA_CONTROL Defaults;
+    PFILE_QUOTA_INFORMATION Entry;
+    ULONG Length;
+    NTSTATUS Status;
+
+    Status = NtfsFindQuotaOwner(Vcb, Sid, OwnerId);
+    if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        return Status;
+    Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Defaults, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Length = FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) + RtlLengthSid(Sid);
+    Entry = ExAllocatePoolWithTag(PagedPool, Length, TAG_NTFS);
+    if (Entry == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Entry, Length);
+    Entry->SidLength = RtlLengthSid(Sid);
+    RtlCopySid(Entry->SidLength, &Entry->Sid, Sid);
+    Entry->QuotaThreshold.QuadPart = Defaults.WarningLimit;
+    Entry->QuotaLimit.QuadPart = RtlEqualSid(Sid, SeExports->SeAliasAdminsSid) ? -1 : Defaults.HardLimit;
+    Status = NtfsSetOwnerQuota(Vcb, Entry);
+    ExFreePoolWithTag(Entry, TAG_NTFS);
+    if (NT_SUCCESS(Status)) Status = NtfsFindQuotaOwner(Vcb, Sid, OwnerId);
+    if (NT_SUCCESS(Status) && !RtlEqualSid(Sid, SeExports->SeAliasAdminsSid))
+    {
+        Status = NtfsReadQuotaEntry(Vcb, *OwnerId, &Defaults, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            Defaults.Flags |= NTFS_QUOTA_FLAG_DEFAULT_LIMITS;
+            Status = NtfsWriteQuotaEntry(Vcb, *OwnerId, &Defaults, Sid);
+        }
+    }
+    return Status;
+}
+
+/* Reconcile against the last persisted charge rather than the pathname or
+ * FCB's cached size: two aliases must not charge the same stream twice. */
+static NTSTATUS
+NtfsReconcileQuotaRecord(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record, BOOLEAN Rebuilding)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PSID Owner, OldSid = NULL;
+    BOOLEAN Defaulted;
+    PNTFS_ATTR_CONTEXT Context;
+    PSTANDARD_INFORMATION Info;
+    NTFS_QUOTA_CONTROL OldControl, NewControl;
+    ULONG OldId, NewId, Offset;
+    ULONGLONG OldCharge, NewCharge;
+    NTSTATUS Status;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->QuotaResource));
+    if (!NtfsQuotaUserRecord(Vcb, Record)) return STATUS_SUCCESS;
+    Status = NtfsFileQuotaCharge(Vcb, Record, &NewCharge);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = FindAttribute(Vcb, Record, AttributeStandardInformation, L"", 0, &Context, &Offset);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (AttributeDataLength(Context->pRecord) < sizeof(STANDARD_INFORMATION))
+        Status = InternalSetResidentAttributeLength(Vcb, Context, Record, Offset, sizeof(STANDARD_INFORMATION));
+    ReleaseAttributeContext(Context);
+    if (!NT_SUCCESS(Status)) return Status;
+    Info = GetStandardInformationFromRecord(Vcb, Record);
+    ASSERT(Info != NULL);
+    OldId = Rebuilding ? 0 : Info->QuotaId;
+    OldCharge = Rebuilding ? 0 : Info->QuotaCharge;
+    Status = NtfsReadFileSecurity(Vcb, Record->MFTRecordNumber, &Sd);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = RtlGetOwnerSecurityDescriptor(Sd, &Owner, &Defaulted);
+    if (NT_SUCCESS(Status) && Owner == NULL) Status = STATUS_FILE_CORRUPT_ERROR;
+    if (NT_SUCCESS(Status)) Status = NtfsEnsureQuotaOwner(Vcb, Owner, &NewId);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    if (OldId == NewId && OldCharge == NewCharge) goto Cleanup;
+    Status = NtfsReadQuotaEntry(Vcb, NewId, &NewControl, NULL);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    if (OldId != 0 && OldId != NewId && OldCharge != 0)
+    {
+        Status = NtfsReadQuotaEntry(Vcb, OldId, &OldControl, &OldSid);
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+            Status = STATUS_SUCCESS; /* An explicitly removed quota entry. */
+        else if (NT_SUCCESS(Status))
+        {
+            ASSERT(OldControl.BytesUsed >= OldCharge);
+            OldControl.BytesUsed -= OldCharge;
+            Status = NtfsWriteQuotaEntry(Vcb, OldId, &OldControl, OldSid);
+        }
+        if (!NT_SUCCESS(Status)) goto Cleanup;
+    }
+    if (OldId == NewId)
+    {
+        ASSERT(NewControl.BytesUsed >= OldCharge);
+        NewControl.BytesUsed -= OldCharge;
+    }
+    if (NewCharge > MAXLONGLONG - NewControl.BytesUsed)
+    {
+        Status = STATUS_FILE_CORRUPT_ERROR;
+        goto Cleanup;
+    }
+    NewControl.BytesUsed += NewCharge;
+    Status = NtfsWriteQuotaEntry(Vcb, NewId, &NewControl, Owner);
+    if (NT_SUCCESS(Status))
+    {
+        Info->QuotaId = NewId;
+        Info->QuotaCharge = NewCharge;
+        Status = UpdateFileRecord(Vcb, Record->MFTRecordNumber, Record);
+    }
+Cleanup:
+    if (OldSid != NULL) ExFreePoolWithTag(OldSid, TAG_NTFS);
+    ExFreePoolWithTag(Sd, TAG_NTFS);
+    return Status;
+}
+
+/* Paging writes can persist resident data or initialization metadata after
+ * the ordinary request has returned. Exclude every cached alias while editing
+ * the same base record's quota fields; never lock the volume paging backend. */
+static VOID
+NtfsQuotaRecordResources(PDEVICE_EXTENSION Vcb, ULONGLONG Index, BOOLEAN All, BOOLEAN Acquire)
+{
+    PLIST_ENTRY Entry;
+    PNTFS_FCB Fcb;
+
+    if (Acquire) ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
+    for (Entry = Vcb->FcbListHead.Flink; Entry != &Vcb->FcbListHead; Entry = Entry->Flink)
+    {
+        Fcb = CONTAINING_RECORD(Entry, NTFS_FCB, FcbListEntry);
+        if ((Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) || (!All && Fcb->MFTIndex != Index))
+            continue;
+        if (Acquire) ExAcquireResourceExclusiveLite(&Fcb->PagingIoResource, TRUE);
+        else ExReleaseResourceLite(&Fcb->PagingIoResource);
+    }
+    if (!Acquire) ExReleaseResourceLite(&Vcb->DirResource);
+}
+
+NTSTATUS
+NtfsUpdateFileQuota(PDEVICE_EXTENSION Vcb, ULONGLONG MftIndex)
+{
+    PFILE_RECORD_HEADER Record;
+    NTSTATUS Status;
+
+    if (!Vcb->QuotaTracking) return STATUS_SUCCESS;
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+    NtfsQuotaRecordResources(Vcb, MftIndex, FALSE, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Status = ReadFileRecord(Vcb, MftIndex, Record);
+    if (NT_SUCCESS(Status)) Status = NtfsReconcileQuotaRecord(Vcb, Record, FALSE);
+    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsQuotaRecordResources(Vcb, MftIndex, FALSE, FALSE);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    return Status;
+}
+
+/* QuotaResource stays exclusive until growth and accounting finish, preventing
+ * concurrent writers from spending the same remaining allowance. */
+NTSTATUS
+NtfsCheckQuotaGrowth(PNTFS_IRP_CONTEXT IrpContext)
+{
+    PDEVICE_EXTENSION Vcb = IrpContext->DeviceObject->DeviceExtension;
+    PIO_STACK_LOCATION Stack = IrpContext->Stack;
+    PNTFS_FCB Fcb = IrpContext->FileObject != NULL ? IrpContext->FileObject->FsContext : NULL;
+    PFILE_RECORD_HEADER Record = NULL;
+    PNTFS_ATTR_CONTEXT Attribute = NULL;
+    PSTANDARD_INFORMATION Info;
+    NTFS_QUOTA_CONTROL Defaults, Control;
+    ULONGLONG OldSize, NewSize, Offset;
+    NTSTATUS Status;
+
+    if (!Vcb->QuotaTracking || (IrpContext->Irp->Flags & IRP_PAGING_IO) ||
+        Fcb == NULL || (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)))
+        return STATUS_SUCCESS;
+    if (IrpContext->MajorFunction != IRP_MJ_WRITE &&
+        !(IrpContext->MajorFunction == IRP_MJ_SET_INFORMATION &&
+          Stack->Parameters.SetFile.FileInformationClass == FileEndOfFileInformation &&
+          Stack->Parameters.SetFile.Length >= sizeof(FILE_END_OF_FILE_INFORMATION)))
+        return STATUS_SUCCESS;
+    if (IrpContext->MajorFunction == IRP_MJ_WRITE && Stack->Parameters.Write.Length == 0)
+        return STATUS_SUCCESS;
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->QuotaResource));
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Defaults, NULL);
+    if (!NT_SUCCESS(Status) || !(Defaults.Flags & NTFS_QUOTA_FLAG_ENFORCEMENT_ENABLED))
+        goto Cleanup;
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL) { Status = STATUS_INSUFFICIENT_RESOURCES; goto Cleanup; }
+    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, Record);
+    if (!NT_SUCCESS(Status) || !NtfsQuotaUserRecord(Vcb, Record)) goto Cleanup;
+    Status = FindAttribute(Vcb, Record, AttributeData, Fcb->Stream, wcslen(Fcb->Stream), &Attribute, NULL);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    OldSize = AttributeDataLength(Attribute->pRecord);
+    if (IrpContext->MajorFunction == IRP_MJ_WRITE)
+    {
+        Offset = Stack->Parameters.Write.ByteOffset.QuadPart;
+        if (Stack->Parameters.Write.ByteOffset.LowPart == FILE_WRITE_TO_END_OF_FILE &&
+            Stack->Parameters.Write.ByteOffset.HighPart == -1)
+            Offset = OldSize;
+        if (Offset > MAXLONGLONG - Stack->Parameters.Write.Length)
+            goto Cleanup; /* The write path diagnoses invalid offsets. */
+        NewSize = Offset + Stack->Parameters.Write.Length;
+    }
+    else
+        NewSize = ((PFILE_END_OF_FILE_INFORMATION)IrpContext->Irp->AssociatedIrp.SystemBuffer)->EndOfFile.QuadPart;
+    if (NewSize > MAXLONGLONG || NewSize <= OldSize) goto Cleanup;
+    Info = GetStandardInformationFromRecord(Vcb, Record);
+    ASSERT(Info != NULL && Info->QuotaId != 0);
+    Status = NtfsReadQuotaEntry(Vcb, Info->QuotaId, &Control, NULL);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    if (Control.Flags & NTFS_QUOTA_FLAG_DEFAULT_LIMITS)
+        Control.HardLimit = Defaults.HardLimit;
+    if (Control.HardLimit >= 0 &&
+        (Control.BytesUsed >= Control.HardLimit || NewSize - OldSize > Control.HardLimit - Control.BytesUsed))
+        Status = STATUS_DISK_FULL;
+Cleanup:
+    if (Attribute != NULL) ReleaseAttributeContext(Attribute);
+    if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    ExReleaseResourceLite(&Vcb->IndexResource);
+    return Status;
+}
+
+/* A failed accounting write is repaired by a complete scan before the next
+ * tracked operation. Persist the need for that scan across a remount too. */
+VOID
+NtfsInvalidateQuota(PDEVICE_EXTENSION Vcb)
+{
+    NTFS_QUOTA_CONTROL Control;
+    NTSTATUS Status;
+
+    Vcb->QuotaRebuildRequired = TRUE;
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
+    if (NT_SUCCESS(Status))
+    {
+        Control.Flags |= NTFS_QUOTA_FLAG_OUT_OF_DATE;
+        Status = NtfsWriteQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
+    }
+    ExReleaseResourceLite(&Vcb->IndexResource);
+    if (!NT_SUCCESS(Status)) NtfsMarkVolumeCorrupt(Vcb);
+}
+
+VOID
+NtfsReleaseFileQuota(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record)
+{
+    PSTANDARD_INFORMATION Info;
+    NTFS_QUOTA_CONTROL Control;
+    PSID Sid = NULL;
+    NTSTATUS Status;
+
+    if (!Vcb->QuotaTracking || Record->BaseFileRecord != 0 ||
+        Record->MFTRecordNumber < NTFS_FILE_FIRST_USER_FILE) return;
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->QuotaResource));
+    Info = GetStandardInformationFromRecord(Vcb, Record);
+    ASSERT(Info != NULL);
+    if (Info->QuotaId == 0 || Info->QuotaCharge == 0) return;
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Status = NtfsReadQuotaEntry(Vcb, Info->QuotaId, &Control, &Sid);
+    if (NT_SUCCESS(Status))
+    {
+        ASSERT(Control.BytesUsed >= Info->QuotaCharge);
+        Control.BytesUsed -= Info->QuotaCharge;
+        Status = NtfsWriteQuotaEntry(Vcb, Info->QuotaId, &Control, Sid);
+    }
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
+        NtfsInvalidateQuota(Vcb);
+    if (Sid != NULL) ExFreePoolWithTag(Sid, TAG_NTFS);
+    ExReleaseResourceLite(&Vcb->IndexResource);
+}
+
+/* Namespace deletion owns the quota operation; the low-level MFT allocator
+ * remains independent of quota accounting (it also frees metadata children). */
+NTSTATUS
+NtfsDeleteUserFileLink(PDEVICE_EXTENSION Vcb,
+                       ULONGLONG MftIndex,
+                       ULONGLONG ParentIndex,
+                       PCUNICODE_STRING Name,
+                       BOOLEAN CaseSensitive,
+                       PUSHORT LinksLeft)
+{
+    PFILE_RECORD_HEADER Record;
+    NTSTATUS Status;
+
+    if (!Vcb->QuotaTracking)
+        return NtfsDeleteFileLink(Vcb, MftIndex, ParentIndex, Name, CaseSensitive, LinksLeft);
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+    Status = ReadFileRecord(Vcb, MftIndex, Record);
+    if (NT_SUCCESS(Status))
+        Status = NtfsDeleteFileLink(Vcb, MftIndex, ParentIndex, Name, CaseSensitive, LinksLeft);
+    if (NT_SUCCESS(Status) && *LinksLeft == 0)
+        NtfsReleaseFileQuota(Vcb, Record);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    return Status;
+}
+
+/* Collect IDs before modifying $Q; changing a tree during its visitor would
+ * invalidate the cursor. Defaults are outside this range. */
+typedef struct _NTFS_QUOTA_IDS
+{
+    PULONG Ids;
+    ULONG Count, Capacity;
+    NTSTATUS Status;
+} NTFS_QUOTA_IDS;
+
+static BOOLEAN
+NtfsCollectQuotaIds(PINDEX_ENTRY_ATTRIBUTE Entry, PVOID Context)
+{
+    NTFS_QUOTA_IDS *Ids = Context;
+    PULONG Bigger;
+
+    if (Ids->Count == Ids->Capacity)
+    {
+        Bigger = ExAllocatePoolWithTag(PagedPool, (Ids->Capacity + 32) * sizeof(ULONG), TAG_NTFS);
+        if (Bigger == NULL) { Ids->Status = STATUS_INSUFFICIENT_RESOURCES; return FALSE; }
+        if (Ids->Ids != NULL)
+        {
+            RtlCopyMemory(Bigger, Ids->Ids, Ids->Count * sizeof(ULONG));
+            ExFreePoolWithTag(Ids->Ids, TAG_NTFS);
+        }
+        Ids->Ids = Bigger;
+        Ids->Capacity += 32;
+    }
+    Ids->Ids[Ids->Count++] = *(PULONG)&Entry->FileName;
+    return TRUE;
+}
+
+NTSTATUS
+NtfsRebuildQuota(PDEVICE_EXTENSION Vcb)
+{
+    NTFS_QUOTA_IDS Ids = {0};
+    NTFS_QUOTA_CONTROL Control;
+    PINDEX_ENTRY_ATTRIBUTE LowEntry = NULL, HighEntry = NULL;
+    PFILE_RECORD_HEADER Record = NULL;
+    PNTFS_ATTR_CONTEXT BitmapContext = NULL;
+    PUCHAR Bitmap = NULL;
+    ULONGLONG BitmapLength;
+    PSID Sid = NULL;
+    ULONG Low = NTFS_QUOTA_FIRST_OWNER_ID, High = MAXULONG, i;
+    ULONGLONG Index, Count;
+    NTSTATUS Status;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->QuotaResource));
+    NtfsQuotaRecordResources(Vcb, 0, TRUE, TRUE);
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    LowEntry = NtfsAllocateViewIndexEntry(&Low, sizeof(Low), NULL, 0);
+    HighEntry = NtfsAllocateViewIndexEntry(&High, sizeof(High), NULL, 0);
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (LowEntry == NULL || HighEntry == NULL || Record == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+    Status = NtfsVisitIndexEntries(Vcb, Vcb->QuotaMftIndex, L"$Q", 2, LowEntry, HighEntry,
+                                   NtfsCollectQuotaIds, &Ids);
+    if (NT_SUCCESS(Status)) Status = Ids.Status;
+    for (i = 0; NT_SUCCESS(Status) && i < Ids.Count; i++)
+    {
+        Status = NtfsReadQuotaEntry(Vcb, Ids.Ids[i], &Control, &Sid);
+        if (NT_SUCCESS(Status))
+        {
+            Control.BytesUsed = 0;
+            Status = NtfsWriteQuotaEntry(Vcb, Ids.Ids[i], &Control, Sid);
+        }
+        if (Sid != NULL) { ExFreePoolWithTag(Sid, TAG_NTFS); Sid = NULL; }
+    }
+    Count = AttributeDataLength(Vcb->MFTContext->pRecord) / Vcb->NtfsInfo.BytesPerFileRecord;
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Vcb->MasterFileTable, AttributeBitmap, L"", 0, &BitmapContext, NULL);
+    if (NT_SUCCESS(Status))
+    {
+        BitmapLength = AttributeDataLength(BitmapContext->pRecord);
+        if (BitmapLength < (Count + 7) / 8 || BitmapLength > MAXULONG)
+            Status = STATUS_FILE_CORRUPT_ERROR;
+        else
+        {
+            Bitmap = ExAllocatePoolWithTag(PagedPool, (ULONG)BitmapLength, TAG_NTFS);
+            if (Bitmap == NULL) Status = STATUS_INSUFFICIENT_RESOURCES;
+            else if (ReadAttribute(Vcb, BitmapContext, 0, (PCHAR)Bitmap, (ULONG)BitmapLength) != BitmapLength)
+                Status = STATUS_UNEXPECTED_IO_ERROR;
+        }
+    }
+    for (Index = NTFS_FILE_FIRST_USER_FILE; NT_SUCCESS(Status) && Index < Count; Index++)
+    {
+        if (!(Bitmap[Index / 8] & (1 << (Index % 8)))) continue;
+        Status = ReadFileRecord(Vcb, Index, Record);
+        if (NT_SUCCESS(Status)) Status = NtfsReconcileQuotaRecord(Vcb, Record, TRUE);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            Control.Flags &= ~NTFS_QUOTA_FLAG_OUT_OF_DATE;
+            Status = NtfsWriteQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
+        }
+    }
+    Vcb->QuotaRebuildRequired = !NT_SUCCESS(Status);
+Cleanup:
+    if (BitmapContext != NULL) ReleaseAttributeContext(BitmapContext);
+    if (Bitmap != NULL) ExFreePoolWithTag(Bitmap, TAG_NTFS);
+    if (Ids.Ids != NULL) ExFreePoolWithTag(Ids.Ids, TAG_NTFS);
+    if (LowEntry != NULL) ExFreePoolWithTag(LowEntry, TAG_NTFS);
+    if (HighEntry != NULL) ExFreePoolWithTag(HighEntry, TAG_NTFS);
+    if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    ExReleaseResourceLite(&Vcb->IndexResource);
+    NtfsQuotaRecordResources(Vcb, 0, TRUE, FALSE);
+    return Status;
 }
 
 /**
@@ -645,6 +1182,8 @@ NtfsQueryFsControl(PDEVICE_EXTENSION Vcb,
             Info->FileSystemControlFlags |= NtfsQuotaFlagMap[i].ControlFlag;
     }
 
+    if (Info->FileSystemControlFlags & FILE_VC_QUOTA_ENFORCE)
+        Info->FileSystemControlFlags &= ~FILE_VC_QUOTA_TRACK;
     *BufferLength -= sizeof(FILE_FS_CONTROL_INFORMATION);
 
     return STATUS_SUCCESS;
@@ -679,21 +1218,37 @@ NtfsSetFsControl(PDEVICE_EXTENSION Vcb,
     Status = NtfsReadQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
     if (NT_SUCCESS(Status))
     {
+        ULONG Flags = Info->FileSystemControlFlags;
+        if (Flags & FILE_VC_QUOTA_TRACK)
+            Flags &= ~FILE_VC_QUOTA_ENFORCE;
         KeQuerySystemTime(&Now);
         for (i = 0; i < RTL_NUMBER_OF(NtfsQuotaFlagMap); i++)
         {
-            if (Info->FileSystemControlFlags & NtfsQuotaFlagMap[i].ControlFlag)
+            if (NtfsQuotaFlagMap[i].ControlFlag == FILE_VC_QUOTAS_INCOMPLETE) continue;
+            if (Flags & NtfsQuotaFlagMap[i].ControlFlag)
                 Control.Flags |= NtfsQuotaFlagMap[i].QuotaFlag;
             else
                 Control.Flags &= ~NtfsQuotaFlagMap[i].QuotaFlag;
         }
+        if (Control.Flags & NTFS_QUOTA_FLAG_ENFORCEMENT_ENABLED)
+            Control.Flags |= NTFS_QUOTA_FLAG_TRACKING_ENABLED;
         Control.WarningLimit = Info->DefaultQuotaThreshold.QuadPart;
         Control.HardLimit = Info->DefaultQuotaLimit.QuadPart;
         Control.ChangeTime = Now.QuadPart;
+        if (!Vcb->QuotaTracking && (Control.Flags & NTFS_QUOTA_FLAG_TRACKING_ENABLED))
+            Control.Flags |= NTFS_QUOTA_FLAG_OUT_OF_DATE;
         Status = NtfsWriteQuotaEntry(Vcb, NTFS_QUOTA_DEFAULTS_ID, &Control, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            Vcb->QuotaTracking = BooleanFlagOn(Control.Flags, NTFS_QUOTA_FLAG_TRACKING_ENABLED);
+            Vcb->QuotaRebuildRequired = Vcb->QuotaTracking &&
+                                      BooleanFlagOn(Control.Flags, NTFS_QUOTA_FLAG_OUT_OF_DATE);
+        }
     }
 
     ExReleaseResourceLite(&Vcb->IndexResource);
+    if (NT_SUCCESS(Status) && Vcb->QuotaRebuildRequired)
+        Status = NtfsRebuildQuota(Vcb);
     KeLeaveCriticalRegion();
 
     return Status;
