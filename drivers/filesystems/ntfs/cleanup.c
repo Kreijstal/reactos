@@ -123,7 +123,8 @@ NtfsStampWriteTimes(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PFILE_OBJECT FileObjec
             Info->LastWriteTime = Now.QuadPart;
         if (!(Ccb->Flags & CCB_USER_SET_CHANGE_TIME))
             Info->ChangeTime = Now.QuadPart;
-        Info->FileAttribute |= FILE_ATTRIBUTE_ARCHIVE;
+        if (!NtfsFCBIsDirectory(Fcb))
+            Info->FileAttribute |= FILE_ATTRIBUTE_ARCHIVE;
         Status = NtfsUpdateDuplicatedInformation(Vcb, Record, Fcb->MFTIndex,
                                                  NTFS_FILENAME_UPDATE_TIMES |
                                                  NTFS_FILENAME_UPDATE_ATTRS, FALSE);
