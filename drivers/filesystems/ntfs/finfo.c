@@ -28,6 +28,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include "security.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -1924,6 +1925,7 @@ static
 NTSTATUS
 NtfsClearRenameTarget(
     _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
     _In_ PNTFS_FCB Fcb,
     _In_ ULONGLONG TargetDirMft,
     _In_ PUNICODE_STRING NewName,
@@ -1970,6 +1972,10 @@ NtfsClearRenameTarget(
     ASSERT(Info != NULL);
     if (Info->FileAttribute & FILE_ATTRIBUTE_READONLY)
         return STATUS_ACCESS_DENIED;
+
+    Status = NtfsCheckNamespaceAccess(DeviceExt, ExistingMft, TargetDirMft, DELETE, Irp);
+    if (!NT_SUCCESS(Status))
+        return Status;
 
     /* An open through any hard link or named stream keeps the target open. */
     KeAcquireSpinLock(&DeviceExt->FcbListLock, &OldIrql);
@@ -2632,6 +2638,7 @@ static
 NTSTATUS
 NtfsSetRenameInformation(
     _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
     _In_ PNTFS_FCB Fcb,
     _In_ PNTFS_CCB Ccb,
     _In_opt_ PFILE_OBJECT TargetFileObject,
@@ -2741,6 +2748,17 @@ NtfsSetRenameInformation(
         Status != STATUS_OBJECT_PATH_NOT_FOUND)
         goto Quit;
 
+    /* Absolute targets were opened with the add right by the I/O manager.
+     * A relative rename must authorize adding the new link here. Exact
+     * no-ops and removal of the source in a same-file rename returned above. */
+    if (TargetFileObject == NULL)
+    {
+        Status = NtfsCheckNamespaceAccess(DeviceExt, TargetDirMft, 0,
+                                           NtfsFCBIsDirectory(Fcb) ? FILE_ADD_SUBDIRECTORY : FILE_ADD_FILE, Irp);
+        if (!NT_SUCCESS(Status))
+            goto Quit;
+    }
+
     Status = NtfsBuildRenamedFileName(DeviceExt, OldName, TargetDirMft, &NewName,
                                      CaseSensitive, Scratch, &NewValue, &NewValueLength);
     if (!NT_SUCCESS(Status))
@@ -2797,7 +2815,7 @@ NtfsSetRenameInformation(
     }
 
     /* Allocate the new record image before removing a replacement target. */
-    Status = NtfsClearRenameTarget(DeviceExt, Fcb, TargetDirMft, &NewName, NewPath,
+    Status = NtfsClearRenameTarget(DeviceExt, Irp, Fcb, TargetDirMft, &NewName, NewPath,
                                    ReplaceIfExists, CaseSensitive, &ReplacementMft, Scratch);
     if (!NT_SUCCESS(Status))
     {
@@ -2893,6 +2911,7 @@ static
 NTSTATUS
 NtfsSetLinkInformation(
     _In_ PDEVICE_EXTENSION DeviceExt,
+    _In_ PIRP Irp,
     _In_ PNTFS_FCB Fcb,
     _In_opt_ PFILE_OBJECT TargetFileObject,
     _In_ BOOLEAN ReplaceIfExists,
@@ -2944,7 +2963,7 @@ NtfsSetLinkInformation(
         Status = STATUS_INSUFFICIENT_RESOURCES;
 
     if (NT_SUCCESS(Status))
-        Status = NtfsClearRenameTarget(DeviceExt, Fcb, TargetDirMft, &NewName, NewPath, ReplaceIfExists, CaseSensitive, NULL, Scratch);
+        Status = NtfsClearRenameTarget(DeviceExt, Irp, Fcb, TargetDirMft, &NewName, NewPath, ReplaceIfExists, CaseSensitive, NULL, Scratch);
 
     if (NT_SUCCESS(Status))
         Status = ReadFileRecord(DeviceExt, Fcb->MFTIndex, FileRecord);
@@ -3177,6 +3196,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             }
 
             Status = NtfsSetLinkInformation(DeviceExt,
+                                            Irp,
                                             Fcb,
                                             Stack->Parameters.SetFile.FileObject,
                                             Stack->Parameters.SetFile.ReplaceIfExists,
@@ -3193,6 +3213,7 @@ NtfsSetInformation(PNTFS_IRP_CONTEXT IrpContext)
             }
 
             Status = NtfsSetRenameInformation(DeviceExt,
+                                              Irp,
                                               Fcb,
                                               FileObject->FsContext2,
                                               Stack->Parameters.SetFile.FileObject,

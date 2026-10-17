@@ -679,6 +679,53 @@ NtfsCheckAccess(PDEVICE_EXTENSION Vcb,
     return Status;
 }
 
+/* Namespace changes use the requesting thread even when posted to a worker.
+ * A replacement can be authorized by DELETE on the target or DELETE_CHILD
+ * on its parent. An add check supplies no parent fallback. */
+NTSTATUS
+NtfsCheckNamespaceAccess(PDEVICE_EXTENSION Vcb,
+                         ULONGLONG MftIndex,
+                         ULONGLONG Parent,
+                         ACCESS_MASK DesiredAccess,
+                         PIRP Irp)
+{
+    SECURITY_SUBJECT_CONTEXT Subject;
+    PSECURITY_DESCRIPTOR Sd;
+    PPRIVILEGE_SET Privileges;
+    ACCESS_MASK Desired, Granted;
+    NTSTATUS Status;
+    ULONG i;
+    BOOLEAN CopyOnOpen, EffectiveOnly;
+
+    if (Irp->RequestorMode == KernelMode)
+        return STATUS_SUCCESS;
+    ASSERT(Irp->Tail.Overlay.Thread != NULL);
+    Subject.ClientToken = PsReferenceImpersonationToken(Irp->Tail.Overlay.Thread,
+                                                        &CopyOnOpen, &EffectiveOnly,
+                                                        &Subject.ImpersonationLevel);
+    Subject.PrimaryToken = PsReferencePrimaryToken(IoGetRequestorProcess(Irp));
+    Subject.ProcessAuditId = PsGetProcessId(IoGetRequestorProcess(Irp));
+    SeLockSubjectContext(&Subject);
+    for (i = 0; i < (Parent != 0 ? 2 : 1); i++)
+    {
+        Desired = i == 0 ? DesiredAccess : FILE_DELETE_CHILD;
+        Status = NtfsReadFileSecurity(Vcb, i == 0 ? MftIndex : Parent, &Sd);
+        if (!NT_SUCCESS(Status))
+            break;
+        Privileges = NULL;
+        SeAccessCheck(Sd, &Subject, TRUE, Desired, 0, &Privileges,
+                       IoGetFileObjectGenericMapping(), UserMode, &Granted, &Status);
+        if (Privileges != NULL)
+            SeFreePrivileges(Privileges);
+        ExFreePoolWithTag(Sd, TAG_NTFS);
+        if (Status != STATUS_ACCESS_DENIED)
+            break;
+    }
+    SeUnlockSubjectContext(&Subject);
+    SeReleaseSubjectContext(&Subject);
+    return Status;
+}
+
 /**
 * @name NtfsSetSecurityIdOnRecord
 *
