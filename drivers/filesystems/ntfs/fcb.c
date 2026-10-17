@@ -274,6 +274,11 @@ NtfsReleaseFCB(PNTFS_VCB Vcb,
     {
         KeReleaseSpinLock(&Vcb->FcbListLock, oldIrql);
 
+        /* CcCopyWrite populated this data section. Drain and purge it before
+         * dropping the private cache map, or a closed file stays mapped and
+         * its cached FCB can incorrectly prevent replacement of its name. */
+        if (!NT_SUCCESS(NtfsFlushFileCache(Fcb->FileObject, TRUE)))
+            return;
         CcUninitializeCacheMap(Fcb->FileObject, NULL, NULL);
 
         if (Fcb->SectionObjectPointers.DataSectionObject != NULL ||
