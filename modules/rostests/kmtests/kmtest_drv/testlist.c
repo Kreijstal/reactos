@@ -77,6 +77,8 @@ KMT_TESTFUNC Test_NtfsDataPath;
 KMT_TESTFUNC Test_NtfsEa;
 KMT_TESTFUNC Test_NtfsFsctl;
 KMT_TESTFUNC Test_NtfsInfoClasses;
+KMT_TESTFUNC Test_NtfsLockRemove;
+KMT_TESTFUNC Test_NtfsLocks;
 KMT_TESTFUNC Test_NtfsLinks;
 KMT_TESTFUNC Test_NtfsObjectId;
 KMT_TESTFUNC Test_NtfsQuota;
@@ -199,6 +201,8 @@ const KMT_TEST TestList[] =
     { "NtfsEa",                              Test_NtfsEa },
     { "NtfsFsctl",                           Test_NtfsFsctl },
     { "NtfsInfoClasses",                     Test_NtfsInfoClasses },
+    { "NtfsLockRemove",                      Test_NtfsLockRemove },
+    { "NtfsLocks",                           Test_NtfsLocks },
     { "NtfsLinks",                           Test_NtfsLinks },
     { "NtfsObjectId",                        Test_NtfsObjectId },
     { "NtfsQuota",                           Test_NtfsQuota },
