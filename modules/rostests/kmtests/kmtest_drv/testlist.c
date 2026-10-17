@@ -82,6 +82,7 @@ KMT_TESTFUNC Test_NtfsLockRemove;
 KMT_TESTFUNC Test_NtfsLocks;
 KMT_TESTFUNC Test_NtfsAllocation;
 KMT_TESTFUNC Test_NtfsTimes;
+KMT_TESTFUNC Test_NtfsRename;
 KMT_TESTFUNC Test_NtfsNotify;
 KMT_TESTFUNC Test_NtfsChangeData;
 KMT_TESTFUNC Test_NtfsWatchRemove;
@@ -212,6 +213,7 @@ const KMT_TEST TestList[] =
     { "NtfsLocks",                           Test_NtfsLocks },
     { "NtfsAllocation",                      Test_NtfsAllocation },
     { "NtfsTimes",                           Test_NtfsTimes },
+    { "NtfsRename",                          Test_NtfsRename },
     { "NtfsNotify",                          Test_NtfsNotify },
     { "NtfsChangeData",                      Test_NtfsChangeData },
     { "NtfsWatchRemove",                    Test_NtfsWatchRemove },
