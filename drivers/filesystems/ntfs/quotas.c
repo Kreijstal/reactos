@@ -259,12 +259,16 @@ NtfsSetOwnerQuota(PDEVICE_EXTENSION Vcb,
     ULONG OwnerId;
     NTSTATUS Status;
 
+    if (RtlEqualSid(&Quota->Sid, SeExports->SeAliasAdminsSid) &&
+        Quota->QuotaLimit.QuadPart != -1)
+        return STATUS_ACCESS_DENIED;
+
     Status = NtfsFindQuotaOwner(Vcb, &Quota->Sid, &OwnerId);
 
     if (Quota->QuotaLimit.QuadPart == NTFS_QUOTA_DELETE)
     {
         if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
-            return STATUS_SUCCESS;
+            return STATUS_NO_MATCH;
         if (!NT_SUCCESS(Status))
             return Status;
 
@@ -847,23 +851,22 @@ NTSTATUS
 NtfsCheckQuotaList(PFILE_QUOTA_INFORMATION List,
                    ULONG Length)
 {
-    PUCHAR End = (PUCHAR)List + Length;
-    PFILE_QUOTA_INFORMATION Quota = List;
+    ULONG Size, Next;
 
     for (;;)
     {
-        if ((PUCHAR)Quota + FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) > End ||
-            (PUCHAR)&Quota->Sid + Quota->SidLength > End ||
-            Quota->SidLength < FIELD_OFFSET(SID, SubAuthority) ||
-            !RtlValidSid(&Quota->Sid) ||
-            RtlLengthSid(&Quota->Sid) != Quota->SidLength)
-        {
+        if (Length < FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) + FIELD_OFFSET(SID, SubAuthority) ||
+            List->SidLength > Length - FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) ||
+            List->SidLength < FIELD_OFFSET(SID, SubAuthority) ||
+            !RtlValidSid(&List->Sid) || RtlLengthSid(&List->Sid) != List->SidLength)
             return STATUS_INVALID_PARAMETER;
-        }
-
-        if (Quota->NextEntryOffset == 0)
-            return STATUS_SUCCESS;
-        Quota = (PFILE_QUOTA_INFORMATION)((PUCHAR)Quota + Quota->NextEntryOffset);
+        Size = FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) + List->SidLength;
+        Next = List->NextEntryOffset;
+        if (Next == 0) return STATUS_SUCCESS;
+        if (Next < Size || Next >= Length || (Next & (TYPE_ALIGNMENT(FILE_QUOTA_INFORMATION) - 1)))
+            return STATUS_INVALID_PARAMETER;
+        Length -= Next;
+        List = (PVOID)((PUCHAR)List + Next);
     }
 }
 
@@ -999,8 +1002,8 @@ NtfsQuotaVisitor(PINDEX_ENTRY_ATTRIBUTE Entry,
 /**
 * @name NtfsQueryQuotaBySid
 *
-* Answers a query that names its SIDs: their entries in the list's order, the defaults for
-* an owner without one.
+* Answers a query that names its SIDs: their entries in the list's order,
+* with zero usage and limits for an owner without one.
 */
 static
 NTSTATUS
@@ -1011,12 +1014,13 @@ NtfsQueryQuotaBySid(PDEVICE_EXTENSION Vcb,
 {
     PFILE_GET_QUOTA_INFORMATION Get = List;
     NTFS_QUOTA_CONTROL Control;
-    ULONG OwnerId;
+    ULONG OwnerId, Size, Next;
     NTSTATUS Status;
 
     for (;;)
     {
-        if ((PUCHAR)&Get->Sid + Get->SidLength > (PUCHAR)List + ListLength ||
+        if (ListLength < FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) + FIELD_OFFSET(SID, SubAuthority) ||
+            Get->SidLength > ListLength - FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) ||
             Get->SidLength < FIELD_OFFSET(SID, SubAuthority) ||
             !RtlValidSid(&Get->Sid) || RtlLengthSid(&Get->Sid) != Get->SidLength)
         {
@@ -1029,13 +1033,12 @@ NtfsQueryQuotaBySid(PDEVICE_EXTENSION Vcb,
         else if (!NT_SUCCESS(Status))
             return Status;
 
-        Status = NtfsReadQuotaEntry(Vcb, OwnerId, &Control, NULL);
-        if (!NT_SUCCESS(Status))
-            return Status;
         if (OwnerId == NTFS_QUOTA_DEFAULTS_ID)
+            RtlZeroMemory(&Control, sizeof(Control));
+        else
         {
-            Control.BytesUsed = 0;
-            Control.ChangeTime = 0;
+            Status = NtfsReadQuotaEntry(Vcb, OwnerId, &Control, NULL);
+            if (!NT_SUCCESS(Status)) return Status;
         }
 
         if (!NtfsReturnQuota(Output, &Get->Sid, &Control))
@@ -1043,7 +1046,12 @@ NtfsQueryQuotaBySid(PDEVICE_EXTENSION Vcb,
 
         if (Get->NextEntryOffset == 0 || Output->Single)
             return STATUS_SUCCESS;
-        Get = (PFILE_GET_QUOTA_INFORMATION)((PUCHAR)Get + Get->NextEntryOffset);
+        Size = FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) + Get->SidLength;
+        Next = Get->NextEntryOffset;
+        if (Next < Size || Next >= ListLength || (Next & (sizeof(ULONG) - 1)))
+            return STATUS_INVALID_PARAMETER;
+        ListLength -= Next;
+        Get = (PVOID)((PUCHAR)Get + Next);
     }
 }
 
@@ -1087,7 +1095,14 @@ NtfsQueryQuota(PNTFS_IRP_CONTEXT IrpContext)
     }
     else
     {
-        if (Stack->Flags & SL_RESTART_SCAN)
+        if ((Stack->Flags & SL_INDEX_SPECIFIED) && Stack->Parameters.QueryQuota.StartSid != NULL)
+        {
+            Status = NtfsFindQuotaOwner(Vcb, Stack->Parameters.QueryQuota.StartSid, &Low);
+            if (Status == STATUS_OBJECT_NAME_NOT_FOUND) Status = STATUS_INVALID_PARAMETER;
+            if (!NT_SUCCESS(Status)) goto Cleanup;
+            Ccb->QuotaOwnerId = Low;
+        }
+        else if (Stack->Flags & SL_RESTART_SCAN)
             Ccb->QuotaOwnerId = NTFS_QUOTA_FIRST_OWNER_ID;
         Low = max(Ccb->QuotaOwnerId, NTFS_QUOTA_FIRST_OWNER_ID);
         Output.NextOwnerId = Low;
@@ -1125,6 +1140,7 @@ NtfsQueryQuota(PNTFS_IRP_CONTEXT IrpContext)
         _SEH2_END;
     }
 
+Cleanup:
     if (LowEntry != NULL)
         ExFreePoolWithTag(LowEntry, TAG_NTFS);
     if (HighEntry != NULL)

@@ -8,10 +8,9 @@
  * IRP_MJ_SET_QUOTA and IRP_MJ_QUERY_QUOTA for one SID (by SID list and by a
  * full restart scan).
  *
- * The quota IRPs are built here and sent straight to the file system device
- * below the volume handle: that is exactly what NtSetQuotaInformationFile /
- * NtQueryQuotaInformationFile send, but ReactOS' I/O manager still has both
- * as UNIMPLEMENTED stubs, and this test is about the file system.
+ * Native entry-point tests use user handles and user virtual memory to cover
+ * I/O-manager probing, input capture and access checks. Direct IRPs also
+ * exercise file-system completion and quota accounting independently.
  *
  * Replaces the host tests test_quota_roundtrip and test_quota_kernel ($Q/$O
  * view indexes driven through the quota.c workers) and the quota part of
@@ -618,6 +617,204 @@ Cleanup:
     ok_eq_hex(Status, STATUS_SUCCESS);
 }
 
+static
+NTSTATUS
+OpenNativeQuotaVolume(WCHAR Letter, ACCESS_MASK Access, BOOLEAN Synchronous, PHANDLE Handle)
+{
+    WCHAR Path[16];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK IoStatus;
+    HANDLE Original;
+    NTSTATUS Status;
+
+    RtlStringCchPrintfW(Path, RTL_NUMBER_OF(Path), L"\\??\\%c:", Letter);
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    /* Attribute-only opens of a bare device bypass its file system in the
+     * I/O manager. Open through the file system first, then reduce the user
+     * handle's granted access while retaining that file object. */
+    Status = ZwOpenFile(&Original, Access | FILE_READ_EA | SYNCHRONIZE, &Attributes, &IoStatus,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       Synchronous ? FILE_SYNCHRONOUS_IO_NONALERT : 0);
+    if (!NT_SUCCESS(Status)) return Status;
+    Status = ZwDuplicateObject(NtCurrentProcess(), Original, NtCurrentProcess(), Handle,
+                                Access | SYNCHRONIZE, 0, 0);
+    ZwClose(Original);
+    return Status;
+}
+
+static
+VOID
+TestNativeQuota(WCHAR Letter)
+{
+    PVOID Memory = NULL;
+    SIZE_T RegionSize = 4 * PAGE_SIZE;
+    PUCHAR Buffer;
+    PFILE_GET_QUOTA_INFORMATION Get;
+    PFILE_QUOTA_INFORMATION Entry;
+    PIO_STATUS_BLOCK IoStatus;
+    PSID StartSid;
+    SID_IDENTIFIER_AUTHORITY Authority = SECURITY_NT_AUTHORITY;
+    HANDLE Volume = NULL, ReadOnly = NULL, Async = NULL;
+    NTSTATUS Status;
+    ULONG Length, Offset, ErrorOffset;
+
+    ok_eq_uint(ExGetPreviousMode(), UserMode);
+    if (ExGetPreviousMode() != UserMode) return;
+    Status = ZwAllocateVirtualMemory(NtCurrentProcess(), &Memory, 0, &RegionSize,
+                                      MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Buffer = Memory;
+    Get = (PVOID)(Buffer + PAGE_SIZE);
+    IoStatus = (PVOID)(Buffer + 2 * PAGE_SIZE);
+    StartSid = Buffer + 3 * PAGE_SIZE;
+    RtlInitializeSid(StartSid, &Authority, 2);
+    *RtlSubAuthoritySid(StartSid, 0) = 21;
+    *RtlSubAuthoritySid(StartSid, 1) = 0x4E544653;
+    Get->SidLength = RtlLengthSid(StartSid);
+    RtlCopySid(Get->SidLength, &Get->Sid, StartSid);
+    Length = FIELD_OFFSET(FILE_GET_QUOTA_INFORMATION, Sid) + Get->SidLength;
+    Status = OpenNativeQuotaVolume(Letter, FILE_WRITE_DATA, TRUE, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = OpenNativeQuotaVolume(Letter, FILE_READ_ATTRIBUTES, TRUE, &ReadOnly);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+
+    Offset = BuildQuotaEntry(Buffer, StartSid, TEST_THRESHOLD, TEST_LIMIT);
+    Status = IoCheckQuotaBufferValidity((PVOID)Buffer, Offset, &ErrorOffset);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, Offset);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_hex(IoStatus->Status, STATUS_SUCCESS);
+    Status = NtSetQuotaInformationFile(ReadOnly, IoStatus, Buffer, Offset);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+
+    /* Query requires no data access. A SID list also suppresses StartSid,
+     * including an inaccessible StartSid pointer. */
+    Status = NtQueryQuotaInformationFile(ReadOnly, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, (PSID)1, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Entry = (PVOID)Buffer;
+        ok_eq_hex(IoStatus->Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(IoStatus->Information,
+                        FIELD_OFFSET(FILE_QUOTA_INFORMATION, Sid) + RtlLengthSid(StartSid));
+        ok(RtlEqualSid(&Entry->Sid, StartSid), "native query returned wrong SID\n");
+        ok_eq_longlong(Entry->QuotaThreshold.QuadPart, TEST_THRESHOLD);
+        ok_eq_longlong(Entry->QuotaLimit.QuadPart, TEST_LIMIT);
+    }
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, NULL, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_ACCESS_VIOLATION);
+    Status = NtQueryQuotaInformationFile(Volume, NULL, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_ACCESS_VIOLATION);
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, NULL, PAGE_SIZE);
+    ok_eq_hex(Status, STATUS_ACCESS_VIOLATION);
+    Get->NextEntryOffset = 1;
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_QUOTA_LIST_INCONSISTENT);
+    Get->NextEntryOffset = Length + 4;
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_QUOTA_LIST_INCONSISTENT);
+    Get->NextEntryOffset = 0;
+    Get->SidLength--;
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_QUOTA_LIST_INCONSISTENT);
+    Get->SidLength++;
+    ((PISID)StartSid)->Revision = 0;
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, NULL, 0, StartSid, TRUE);
+    ok_eq_hex(Status, STATUS_INVALID_SID);
+    ((PISID)StartSid)->Revision = SID_REVISION;
+
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, 0);
+    ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, NULL, 0, StartSid, TRUE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok(RtlEqualSid(&((PFILE_QUOTA_INFORMATION)Buffer)->Sid, StartSid),
+           "StartSid did not override RestartScan\n");
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, NULL, 0, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_NO_MORE_ENTRIES);
+
+    /* Validate the whole set list before dispatch: a malformed second entry
+     * must leave the first entry unchanged and identify the offending offset. */
+    Offset = BuildQuotaEntry(Buffer, StartSid, 33, 44);
+    Offset = ALIGN_UP_BY(Offset, sizeof(ULONGLONG));
+    RtlCopyMemory(Buffer + Offset, Buffer, Offset);
+    ((PFILE_QUOTA_INFORMATION)Buffer)->NextEntryOffset = Offset;
+    ((PFILE_QUOTA_INFORMATION)(Buffer + Offset))->SidLength = MAXULONG;
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, 2 * Offset);
+    ok_eq_hex(Status, STATUS_QUOTA_LIST_INCONSISTENT);
+    ok_eq_hex(IoStatus->Status, STATUS_QUOTA_LIST_INCONSISTENT);
+    ok_eq_ulongptr(IoStatus->Information, Offset);
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok_eq_longlong(((PFILE_QUOTA_INFORMATION)Buffer)->QuotaLimit.QuadPart, TEST_LIMIT);
+
+    Status = OpenNativeQuotaVolume(Letter, 0, FALSE, &Async);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        IoStatus->Status = STATUS_PENDING;
+        Status = NtQueryQuotaInformationFile(Async, IoStatus, Buffer, PAGE_SIZE,
+                                              TRUE, Get, Length, NULL, FALSE);
+        if (Status == STATUS_PENDING)
+        {
+            Status = ZwWaitForSingleObject(Async, FALSE, NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            Status = IoStatus->Status;
+        }
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ok_eq_longlong(((PFILE_QUOTA_INFORMATION)Buffer)->QuotaLimit.QuadPart, TEST_LIMIT);
+    }
+    Offset = BuildQuotaEntry(Buffer, SeExports->SeAliasAdminsSid, 100, 200);
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, Offset);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    Offset = BuildQuotaEntry(Buffer, SeExports->SeAliasAdminsSid, -1, -2);
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, Offset);
+    ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+    Offset = BuildQuotaEntry(Buffer, StartSid, -1, -2);
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, Offset);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtSetQuotaInformationFile(Volume, IoStatus, Buffer, Offset);
+    ok_eq_hex(Status, STATUS_NO_MATCH);
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, NULL, 0, StartSid, TRUE);
+    ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+    Status = NtQueryQuotaInformationFile(Volume, IoStatus, Buffer, PAGE_SIZE,
+                                          TRUE, Get, Length, NULL, FALSE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Entry = (PVOID)Buffer;
+        ok_eq_longlong(Entry->QuotaUsed.QuadPart, 0);
+        ok_eq_longlong(Entry->QuotaThreshold.QuadPart, 0);
+        ok_eq_longlong(Entry->QuotaLimit.QuadPart, 0);
+        ok_eq_longlong(Entry->ChangeTime.QuadPart, 0);
+    }
+Cleanup:
+    if (Async) ZwClose(Async);
+    if (ReadOnly) ZwClose(ReadOnly);
+    if (Volume) ZwClose(Volume);
+    RegionSize = 0;
+    Status = ZwFreeVirtualMemory(NtCurrentProcess(), &Memory, &RegionSize, MEM_RELEASE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtfsQuota)
 {
     WCHAR Root[MAX_PATH];
@@ -631,4 +828,5 @@ START_TEST(NtfsQuota)
 
     TestQuota(Letter);
     TestCharging(Root, Letter);
+    TestNativeQuota(Letter);
 }
