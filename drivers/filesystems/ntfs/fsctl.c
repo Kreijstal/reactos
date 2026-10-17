@@ -2104,7 +2104,12 @@ NtfsFileSystemControl(PNTFS_IRP_CONTEXT IrpContext)
 
         case IRP_MN_MOUNT_VOLUME:
             DPRINT("NTFS: IRP_MN_MOUNT_VOLUME\n");
-            Status = NtfsMountVolume(DeviceObject, Irp);
+            ExAcquireResourceExclusiveLite(&NtfsGlobalData->Resource, TRUE);
+            if (NtfsGlobalData->ShutdownStarted)
+                Status = STATUS_SYSTEM_SHUTDOWN;
+            else
+                Status = NtfsMountVolume(DeviceObject, Irp);
+            ExReleaseResourceLite(&NtfsGlobalData->Resource);
             break;
 
         case IRP_MN_VERIFY_VOLUME:
