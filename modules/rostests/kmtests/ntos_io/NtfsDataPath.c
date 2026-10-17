@@ -185,6 +185,54 @@ TestUnalignedReads(
     }
 }
 
+/* Exercise a transfer larger than a VACB and an overwrite crossing its edge.
+ * Reopen through a noncached handle before and after an explicit flush. */
+static
+VOID
+TestCacheBoundaries(
+    _In_ PCWSTR Dir)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE Handle;
+    NTSTATUS Status;
+    ULONG Pass;
+    const ULONG Size = 3 * 256 * KB + 123;
+    const ULONG Edge = 256 * KB - 513;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, L"cache-boundary.bin");
+    Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ | GENERIC_WRITE, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_CREATE,
+                           FILE_NON_DIRECTORY_FILE, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = WritePattern(Handle, 0, Size, 20);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ReadCheck(Handle, 0, Size, STATUS_SUCCESS, Size, 20, "large cached transfer");
+    Status = WritePattern(Handle, Edge, 4096, 21);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ReadCheck(Handle, Edge, 4096, STATUS_SUCCESS, 4096, 21, "overwrite across cache boundary");
+    Status = NtfsKmtFlush(Handle);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(Handle);
+
+    for (Pass = 0; Pass < 2; Pass++)
+    {
+        Status = NtfsKmtCreate(&Handle, NULL, Path, GENERIC_READ, 0,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_OPEN,
+                               FILE_NON_DIRECTORY_FILE | (Pass ? FILE_NO_INTERMEDIATE_BUFFERING : 0),
+                               NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            continue;
+        ReadCheck(Handle, 0, 4096, STATUS_SUCCESS, 4096, 20, "head after cache flush");
+        ReadCheck(Handle, 256 * KB, 3072, STATUS_SUCCESS, 3072, 21, "overwritten range after cache flush");
+        ReadCheck(Handle, 512 * KB, 4096, STATUS_SUCCESS, 4096, 20, "next cache view after flush");
+        ZwClose(Handle);
+    }
+}
+
 static
 VOID
 TestGrowAndTruncate(
@@ -458,12 +506,12 @@ TestManyLinks(
 
 START_TEST(NtfsDataPath)
 {
+    IO_STATUS_BLOCK IoStatus;
     WCHAR Root[MAX_PATH];
     WCHAR Dir[MAX_PATH];
     NTSTATUS Status;
     HANDLE Handle;
     FILE_FS_SIZE_INFORMATION Size;
-    IO_STATUS_BLOCK IoStatus;
 
     if (!NtfsKmtFindVolume(Root, NULL))
     {
@@ -484,6 +532,7 @@ START_TEST(NtfsDataPath)
     }
 
     TestUnalignedReads(Dir);
+    TestCacheBoundaries(Dir);
     TestGrowAndTruncate(Dir);
     TestManyStreams(Dir);
     TestManyLinks(Dir);

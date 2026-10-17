@@ -712,7 +712,8 @@ SetAttributeDataLength(PFILE_OBJECT FileObject,
         else
             Fcb->RFCB.AllocationSize = *DataSize;
         Fcb->RFCB.FileSize = *DataSize;
-        Fcb->RFCB.ValidDataLength = *DataSize;
+        if (Fcb->RFCB.ValidDataLength.QuadPart > DataSize->QuadPart)
+            Fcb->RFCB.ValidDataLength = *DataSize;
         CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
     }
 
@@ -1959,6 +1960,53 @@ Cleanup:
 * lands at the beginning of the IRP's MDL.
 *
 */
+/* Keep attribute reads and writes coherent with metadata in the volume cache.
+ * Before mount has initialized that cache, retain the IO-run bootstrap path. */
+static
+NTSTATUS
+NtfsTransferAttributeRuns(PDEVICE_EXTENSION Vcb,
+                          UCHAR MajorFunction,
+                          PIRP Irp,
+                          PUCHAR Buffer,
+                          PNTFS_IO_RUN_LIST RunList,
+                          PULONG Transferred)
+{
+    ULONG Index;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *Transferred = 0;
+    if (Vcb->StreamFileObject == NULL)
+    {
+        return NtfsPerformIrpIoRuns(Vcb->StorageDevice, MajorFunction,
+                                    Vcb->NtfsInfo.BytesPerSector, Irp, Buffer,
+                                    RunList, FALSE, Transferred);
+    }
+
+    for (Index = 0; Index < RunList->Count; Index++)
+    {
+        PNTFS_IO_RUN Run = &RunList->Runs[Index];
+        PUCHAR Data = Buffer + Run->BufferOffset;
+
+        if (Run->Lbo == NTFS_SPARSE_LBO)
+        {
+            ASSERT(MajorFunction == IRP_MJ_READ);
+            RtlZeroMemory(Data, Run->ByteCount);
+        }
+        else if (MajorFunction == IRP_MJ_READ)
+        {
+            Status = NtfsReadDiskCached(Vcb, Run->Lbo, Run->ByteCount, Data);
+        }
+        else
+        {
+            Status = NtfsWriteDiskCached(Vcb, Run->Lbo, Run->ByteCount, Data);
+        }
+        if (!NT_SUCCESS(Status))
+            break;
+        *Transferred += Run->ByteCount;
+    }
+    return Status;
+}
+
 ULONG
 ReadAttributeToIrp(PDEVICE_EXTENSION Vcb,
                    PNTFS_ATTR_CONTEXT Context,
@@ -1999,14 +2047,8 @@ ReadAttributeToIrp(PDEVICE_EXTENSION Vcb,
 
     if (NT_SUCCESS(Status) && AlreadyRead != 0)
     {
-        Status = NtfsPerformIrpIoRuns(Vcb->StorageDevice,
-                                      IRP_MJ_READ,
-                                      Vcb->NtfsInfo.BytesPerSector,
-                                      Irp,
-                                      (PUCHAR)Buffer,
-                                      &RunList,
-                                      FALSE,
-                                      &Transferred);
+        Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_READ, Irp, (PUCHAR)Buffer,
+                                            &RunList, &Transferred);
     }
 
     NtfsFreeIoRunList(&RunList);
@@ -2288,14 +2330,8 @@ WriteAttributeFromIrp(PDEVICE_EXTENSION Vcb,
     {
         /* NtfsPerformIrpIoRuns() rejects sparse runs on IRP_MJ_WRITE: holes are
          * filled above, and only a compressed attribute still has them */
-        Status = NtfsPerformIrpIoRuns(Vcb->StorageDevice,
-                                      IRP_MJ_WRITE,
-                                      Vcb->NtfsInfo.BytesPerSector,
-                                      Irp,
-                                      Buffer,
-                                      &RunList,
-                                      FALSE,
-                                      &Transferred);
+        Status = NtfsTransferAttributeRuns(Vcb, IRP_MJ_WRITE, Irp, (PUCHAR)Buffer,
+                                            &RunList, &Transferred);
     }
 
     NtfsFreeIoRunList(&RunList);

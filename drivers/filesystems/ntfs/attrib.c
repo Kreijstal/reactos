@@ -2695,8 +2695,7 @@ NtfsZeroClusters(PNTFS_VCB Vcb,
 
     for (; Offset < End && NT_SUCCESS(Status); Offset += ChunkSize)
     {
-        Status = NtfsWriteDisk(Vcb->StorageDevice, Offset, (ULONG)min(ChunkSize, End - Offset),
-                               Vcb->NtfsInfo.BytesPerSector, Zeros);
+        Status = NtfsWriteDiskCached(Vcb, Offset, (ULONG)min(ChunkSize, End - Offset), Zeros);
     }
 
     ExFreePoolWithTag(Zeros, TAG_NTFS);
