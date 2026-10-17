@@ -4,7 +4,7 @@
  * PURPOSE:     Flush mounted volumes at system shutdown
  */
 
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -60,7 +60,7 @@ NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext)
             continue;
         Vcb = DeviceObject->DeviceExtension;
         ASSERT(Vcb->Identifier.Type == NTFS_TYPE_VCB);
-        ExAcquireResourceSharedLite(&Vcb->IoResource, TRUE);
+        ExAcquireResourceExclusiveLite(&Vcb->IoResource, TRUE);
         if (Vcb->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED | VCB_QUERY_REMOVE_PENDING))
         {
             ExReleaseResourceLite(&Vcb->IoResource);
@@ -69,7 +69,11 @@ NtfsShutdown(PNTFS_IRP_CONTEXT IrpContext)
 
         /* Flush file data before the volume-stream metadata. Shutdown must
          * leave sections intact: eviction can re-enter MM during rundown. */
+        ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
         VolumeStatus = NtfsFlushVolume(Vcb);
+        if (NT_SUCCESS(VolumeStatus))
+            VolumeStatus = NtfsLfsFinishWriter(Vcb->LfsWriter);
+        ExReleaseResourceLite(&Vcb->DirResource);
         if (NT_SUCCESS(VolumeStatus))
             VolumeStatus = NtfsShutdownStorageDevice(Vcb->StorageDevice);
         ExReleaseResourceLite(&Vcb->IoResource);

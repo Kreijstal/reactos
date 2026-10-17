@@ -194,6 +194,7 @@ typedef struct
     USHORT LogFileMajorVersion;
     USHORT LogFileMinorVersion;
     ULONGLONG LogFileLsn;
+    PVOID LfsWriter;
 
     ULONG FileObjectCount;
 
@@ -205,6 +206,7 @@ typedef struct
 #define VCB_QUERY_REMOVE_PENDING 0x0004
 #define VCB_DEVICE_REMOVED       0x0008
 #define VCB_VOLUME_READ_ONLY     0x0010
+#define VCB_VOLUME_CORRUPT       0x0020
 
 /* A final file-object cleanup can run attached to the system process when
  * closing a kernel handle. Retain every process that submitted locks through

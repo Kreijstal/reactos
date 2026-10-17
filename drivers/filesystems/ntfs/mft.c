@@ -29,7 +29,7 @@
 
 /* INCLUDES *****************************************************************/
 
-#include "ntfs.h"
+#include "lfswrite.h"
 #include <ntintsafe.h>
 
 #define NDEBUG
@@ -3061,6 +3061,9 @@ UpdateFileRecordInternal(PDEVICE_EXTENSION Vcb,
     PFILE_RECORD_HEADER WriteImage;
 
     DPRINT("UpdateFileRecord(%p, 0x%I64x, %p)\n", Vcb, MftIndex, FileRecord);
+
+    Status = NtfsLfsLogFileRecord(Vcb->LfsWriter, MftIndex, FileRecord);
+    if (!NT_SUCCESS(Status)) return Status;
 
     // Stamp the fixup array into a private copy: the caller's record may be
     // shared, like Vcb->MasterFileTable, and must never hold the on-disk form
