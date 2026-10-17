@@ -22,6 +22,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include "security.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -626,6 +627,55 @@ NtfsReadFileSecurity(PDEVICE_EXTENSION DeviceExt,
     if (Status == STATUS_NO_SECURITY_ON_OBJECT)
         Status = NtfsBuildOpenDescriptor(Sd);
 
+    return Status;
+}
+
+/* Evaluate file rights independently so parent checks do not consume the
+ * access mask of the handle being opened. */
+NTSTATUS
+NtfsCheckAccess(PDEVICE_EXTENSION Vcb,
+                 ULONGLONG MftIndex,
+                 PACCESS_STATE AccessState,
+                 ACCESS_MASK DesiredAccess,
+                 ACCESS_MASK PreviouslyGranted,
+                 KPROCESSOR_MODE AccessMode,
+                 PACCESS_MASK GrantedAccess)
+{
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    PPRIVILEGE_SET Privileges = NULL;
+    PGENERIC_MAPPING Mapping = IoGetFileObjectGenericMapping();
+    NTSTATUS Status, AppendStatus;
+    BOOLEAN Granted;
+
+    RtlMapGenericMask(&DesiredAccess, Mapping);
+    RtlMapGenericMask(&PreviouslyGranted, Mapping);
+    *GrantedAccess = 0;
+    DesiredAccess &= ~PreviouslyGranted;
+    if (DesiredAccess == 0)
+    {
+        *GrantedAccess = PreviouslyGranted;
+        return STATUS_SUCCESS;
+    }
+    if (AccessMode != KernelMode)
+    {
+        Status = NtfsReadFileSecurity(Vcb, MftIndex, &Sd);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    SeLockSubjectContext(&AccessState->SubjectSecurityContext);
+    Granted = SeAccessCheck(Sd, &AccessState->SubjectSecurityContext, TRUE,
+                            DesiredAccess, PreviouslyGranted, &Privileges, Mapping,
+                            AccessMode, GrantedAccess, &Status);
+    SeUnlockSubjectContext(&AccessState->SubjectSecurityContext);
+    if (Privileges != NULL)
+    {
+        AppendStatus = SeAppendPrivileges(AccessState, Privileges);
+        SeFreePrivileges(Privileges);
+        if (Granted && !NT_SUCCESS(AppendStatus))
+            Status = AppendStatus;
+    }
+    if (Sd != NULL)
+        ExFreePoolWithTag(Sd, TAG_NTFS);
     return Status;
 }
 
