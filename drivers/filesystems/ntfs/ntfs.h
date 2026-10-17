@@ -161,6 +161,7 @@ typedef struct
     ULONGLONG UsnMaximumSize;
     ULONGLONG UsnAllocationDelta;
     USN UsnLowestValidUsn;
+    USN UsnFirstUsn;
     USN UsnNextUsn;
 
     /* $Extend\$Quota, 0 while there is none, and the owner ID the next new owner gets.
@@ -2200,6 +2201,9 @@ NtfsSetEa(PNTFS_IRP_CONTEXT IrpContext);
 
 VOID
 NtfsLoadUsnJournal(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsCheckpointUsnJournal(PDEVICE_EXTENSION Vcb);
 
 VOID
 NtfsPostUsnChange(PDEVICE_EXTENSION Vcb,
