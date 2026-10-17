@@ -21,6 +21,33 @@
 
 #include <kmt_test.h>
 #include "NtfsKmt.h"
+#include <ntdddisk.h>
+
+/* The same entry runs against MBR and GPT fixtures. Only the NTFS data
+ * disk is writable, so finding and using it also exercises mount recognition. */
+static VOID
+TestPartitionInformation(HANDLE Volume)
+{
+    PARTITION_INFORMATION_EX Partition;
+    IO_STATUS_BLOCK IoStatus;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&Partition, sizeof(Partition));
+    Status = ZwDeviceIoControlFile(Volume, NULL, NULL, NULL, &IoStatus,
+                                   IOCTL_DISK_GET_PARTITION_INFO_EX, NULL, 0,
+                                   &Partition, sizeof(Partition));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    ok(Partition.PartitionStyle == PARTITION_STYLE_MBR ||
+       Partition.PartitionStyle == PARTITION_STYLE_GPT,
+       "unexpected partition style %u\n", Partition.PartitionStyle);
+    ok(Partition.PartitionLength.QuadPart > 0, "partition has no length\n");
+    if (Partition.PartitionStyle == PARTITION_STYLE_MBR)
+        ok_eq_uint(Partition.Mbr.PartitionType, PARTITION_IFS);
+    trace("NTFS mounted on %s partition, length %I64d\n",
+          Partition.PartitionStyle == PARTITION_STYLE_GPT ? "GPT" : "MBR",
+          Partition.PartitionLength.QuadPart);
+}
 
 START_TEST(NtfsVolumeControl)
 {
@@ -50,6 +77,8 @@ START_TEST(NtfsVolumeControl)
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status))
         return;
+
+    TestPartitionInformation(Volume);
 
     /* Another open handle on the volume blocks the lock. */
     Status = NtfsKmtOpen(&File, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
