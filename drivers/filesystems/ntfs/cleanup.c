@@ -98,6 +98,50 @@ NtfsApplyDeleteOnClose(
     FileObject->DeletePending = TRUE;
 }
 
+/* The caller owns DirResource, MainResource and PagingIoResource. Cleanup
+ * stamps the final times once cached writes through this open are complete. */
+static NTSTATUS
+NtfsStampWriteTimes(PDEVICE_EXTENSION Vcb, PNTFS_FCB Fcb, PFILE_OBJECT FileObject)
+{
+    PNTFS_CCB Ccb = FileObject->FsContext2;
+    PFILE_RECORD_HEADER Record;
+    PSTANDARD_INFORMATION Info;
+    LARGE_INTEGER Now;
+    NTSTATUS Status;
+
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Status = ReadFileRecord(Vcb, Fcb->MFTIndex, Record);
+    if (NT_SUCCESS(Status))
+    {
+        Info = GetStandardInformationFromRecord(Vcb, Record);
+        ASSERT(Info != NULL);
+        KeQuerySystemTime(&Now);
+        if ((FileObject->Flags & FO_FILE_MODIFIED) && !(Ccb->Flags & CCB_USER_SET_WRITE_TIME))
+            Info->LastWriteTime = Now.QuadPart;
+        if (!(Ccb->Flags & CCB_USER_SET_CHANGE_TIME))
+            Info->ChangeTime = Now.QuadPart;
+        Info->FileAttribute |= FILE_ATTRIBUTE_ARCHIVE;
+        Status = NtfsUpdateDuplicatedInformation(Vcb, Record, Fcb->MFTIndex,
+                                                 NTFS_FILENAME_UPDATE_TIMES |
+                                                 NTFS_FILENAME_UPDATE_ATTRS, FALSE);
+        if (NT_SUCCESS(Status))
+        {
+            Fcb->Entry.LastWriteTime = Info->LastWriteTime;
+            Fcb->Entry.ChangeTime = Info->ChangeTime;
+            Fcb->Entry.FileAttributes = Info->FileAttribute |
+                                       (Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_DIRECTORY);
+            FileObject->Flags &= ~FO_FILE_MODIFIED;
+            Ccb->Flags &= ~CCB_UPDATE_CHANGE_TIME;
+        }
+    }
+    ExReleaseResourceLite(&Vcb->IndexResource);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    return Status;
+}
+
 /*
  * FUNCTION: Cleans up a file
  */
@@ -168,6 +212,16 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                 Fcb->RFCB.ValidDataLength.QuadPart = 0;
                 CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
             }
+        }
+
+        if (!DeletePending &&
+            ((FileObject->Flags & FO_FILE_MODIFIED) ||
+             (((PNTFS_CCB)FileObject->FsContext2)->Flags & CCB_UPDATE_CHANGE_TIME)) &&
+            !(DeviceExt->Flags & (VCB_VOLUME_DISMOUNTED | VCB_DEVICE_REMOVED)))
+        {
+            NTSTATUS Status = NtfsStampWriteTimes(DeviceExt, Fcb, FileObject);
+            if (!NT_SUCCESS(Status))
+                DPRINT1("Unable to stamp write times for '%wS': %lx\n", Fcb->PathName, Status);
         }
 
         /* Give back what writes reserved past the end of the file */

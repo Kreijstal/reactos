@@ -1185,8 +1185,6 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     // was the write successful?
     if (NT_SUCCESS(Status))
     {
-        // TODO: Update timestamps
-
         if (FileObject->Flags & FO_SYNCHRONOUS_IO)
         {
             // advance the file pointer
@@ -1211,7 +1209,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     if (NotifyFilter != 0)
         NtfsReportDataChange(Fcb, NotifyFilter);
 
-    if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO))
+    if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO) && ReturnedWriteLength != 0)
     {
         FileObject->Flags |= FO_FILE_MODIFIED;
         if (FileObject->Flags & FO_WRITE_THROUGH)

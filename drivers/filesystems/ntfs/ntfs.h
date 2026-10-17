@@ -234,6 +234,12 @@ typedef struct
 #define CCB_FCB_REFERENCE       0x0010
 #define CCB_EXTERNAL_FILE_OBJECT 0x0020
 
+/* MS-FSA UserSet*Time state belongs to the open, not the FCB. */
+#define CCB_USER_SET_WRITE_TIME  0x0040
+#define CCB_USER_SET_CHANGE_TIME 0x0080
+#define CCB_USER_SET_ACCESS_TIME 0x0100
+#define CCB_UPDATE_CHANGE_TIME   0x0200
+
 typedef struct
 {
     NTFSIDENTIFIER Identifier;
