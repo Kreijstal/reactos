@@ -864,6 +864,166 @@ CleanupParent:
     if (Directory != NULL) ZwClose(Directory);
 }
 
+/* Build the public set-information IRP with a user requestor so the driver
+ * checks the caller, while the kernel test retains kernel handles/buffers. */
+static NTSTATUS NTAPI
+NamespaceCompletion(PDEVICE_OBJECT Device, PIRP Irp, PVOID Context)
+{
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
+    KeSetEvent(Context, IO_NO_INCREMENT, FALSE);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+static NTSTATUS
+ReplaceNamespace(HANDLE Handle, FILE_INFORMATION_CLASS Class, PCWSTR Leaf)
+{
+    UCHAR Buffer[FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + 64 * sizeof(WCHAR)];
+    PFILE_RENAME_INFORMATION Info = (PVOID)Buffer;
+    PFILE_OBJECT File;
+    PDEVICE_OBJECT Device;
+    PIO_STACK_LOCATION Stack;
+    PIRP Irp;
+    KEVENT Event;
+    NTSTATUS Status;
+
+    Status = ObReferenceObjectByHandle(Handle, DELETE, *IoFileObjectType, KernelMode, (PVOID *)&File, NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+    Device = IoGetRelatedDeviceObject(File);
+    Irp = IoAllocateIrp(Device->StackSize, FALSE);
+    if (Irp == NULL) { ObDereferenceObject(File); return STATUS_INSUFFICIENT_RESOURCES; }
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Info->ReplaceIfExists = TRUE;
+    Info->FileNameLength = (ULONG)wcslen(Leaf) * sizeof(WCHAR);
+    ASSERT(Info->FileNameLength <= 64 * sizeof(WCHAR));
+    RtlCopyMemory(Info->FileName, Leaf, Info->FileNameLength);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+    Irp->RequestorMode = UserMode;
+    Irp->AssociatedIrp.SystemBuffer = Info;
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    Stack = IoGetNextIrpStackLocation(Irp);
+    Stack->MajorFunction = IRP_MJ_SET_INFORMATION;
+    Stack->FileObject = File;
+    Stack->Parameters.SetFile.FileInformationClass = Class;
+    Stack->Parameters.SetFile.Length = FIELD_OFFSET(FILE_RENAME_INFORMATION, FileName) + Info->FileNameLength;
+    Stack->Parameters.SetFile.ReplaceIfExists = TRUE;
+    IoSetCompletionRoutine(Irp, NamespaceCompletion, &Event, TRUE, TRUE, TRUE);
+    Status = IoCallDriver(Device, Irp);
+    if (Status == STATUS_PENDING)
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+    Status = Irp->IoStatus.Status;
+    IoFreeIrp(Irp);
+    ObDereferenceObject(File);
+    return Status;
+}
+
+static VOID
+TestReplacementAccess(PCWSTR Dir)
+{
+    WCHAR Parent[MAX_PATH], Source[MAX_PATH], Target[MAX_PATH];
+    HANDLE Directory = NULL, File = NULL, Victim = NULL;
+    TEST_ACE Ace;
+    ULONGLONG SourceId, TargetId;
+    NTSTATUS Status;
+    ULONG i;
+
+    NtfsKmtJoin(Parent, RTL_NUMBER_OF(Parent), Dir, L"replace-access");
+    Status = NtfsKmtCreateDirectory(Parent);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtOpen(&Directory, Parent, FILE_ALL_ACCESS, FILE_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    NtfsKmtJoin(Source, RTL_NUMBER_OF(Source), Parent, L"source.bin");
+    NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), Parent, L"victim.bin");
+    Ace.Sid = SeExports->SeWorldSid;
+    Ace.Flags = 0;
+    for (i = 0; i < 3; i++)
+    {
+        Ace.Mask = FILE_GENERIC_READ | FILE_TRAVERSE | FILE_ADD_FILE;
+        ReplaceAccessDacl(Directory, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+        Status = NtfsKmtCreateFileWithData(Source, "source", 6);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtCreateFileWithData(Target, "target", 6);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+        SourceId = NtfsKmtQueryFileId(File);
+        Status = NtfsKmtOpen(&Victim, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+        TargetId = NtfsKmtQueryFileId(Victim);
+        Ace.Mask = FILE_GENERIC_READ;
+        ReplaceAccessDacl(Victim, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+        ZwClose(Victim); Victim = NULL;
+        Status = ReplaceNamespace(File, i == 2 ? FileLinkInformation : FileRenameInformation, L"victim.bin");
+        ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+        Status = NtfsKmtOpen(&Victim, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+        ok(NtfsKmtQueryFileId(Victim) == TargetId, "denied replacement changed the target identity\n");
+        ok(NtfsKmtQueryFileId(File) == SourceId, "denied replacement changed the source identity\n");
+        if (i == 0)
+        {
+            Ace.Mask = FILE_GENERIC_READ | DELETE;
+            ReplaceAccessDacl(Victim, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+        }
+        else
+        {
+            Ace.Mask = FILE_GENERIC_READ | FILE_TRAVERSE | FILE_ADD_FILE | FILE_DELETE_CHILD;
+            ReplaceAccessDacl(Directory, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+        }
+        ZwClose(Victim); Victim = NULL;
+        Status = ReplaceNamespace(File, i == 2 ? FileLinkInformation : FileRenameInformation, L"victim.bin");
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(File); File = NULL;
+        Status = NtfsKmtOpen(&Victim, Target, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+        ok(NtfsKmtQueryFileId(Victim) == SourceId, "authorized replacement did not install source\n");
+        ZwClose(Victim); Victim = NULL;
+        if (i != 2) CheckAccessMissing(Source);
+        Status = NtfsKmtDeleteTree(Target);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    /* A relative rename creates a new link without a target-directory open
+     * from the I/O manager. File and directory add rights remain distinct. */
+    for (i = 0; i < 2; i++)
+    {
+        NtfsKmtJoin(Source, RTL_NUMBER_OF(Source), Parent, i == 0 ? L"source.bin" : L"source-dir");
+        NtfsKmtJoin(Target, RTL_NUMBER_OF(Target), Parent, L"new-name");
+        if (i != 0)
+        {
+            Status = NtfsKmtCreateDirectory(Source);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+        }
+        Status = NtfsKmtOpen(&File, Source, FILE_ALL_ACCESS,
+                              i == 0 ? FILE_NON_DIRECTORY_FILE : FILE_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) break;
+        Ace.Mask = FILE_GENERIC_READ | FILE_TRAVERSE |
+                   (i == 0 ? FILE_ADD_SUBDIRECTORY : FILE_ADD_FILE);
+        ReplaceAccessDacl(Directory, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+        Status = ReplaceNamespace(File, FileRenameInformation, i == 0 ? L"source.bin" : L"source-dir");
+        ok_eq_hex(Status, STATUS_SUCCESS); /* Exact no-op needs no add right. */
+        Status = ReplaceNamespace(File, FileRenameInformation, L"new-name");
+        ok_eq_hex(Status, STATUS_ACCESS_DENIED);
+        CheckAccessMissing(Target);
+        Ace.Mask |= FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+        ReplaceAccessDacl(Directory, BuildSd(SeExports->SeAliasAdminsSid, NULL, TRUE, &Ace, 1, TRUE));
+        Status = ReplaceNamespace(File, FileRenameInformation, L"new-name");
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(File); File = NULL;
+        CheckAccessMissing(Source);
+        Status = NtfsKmtDeleteTree(Target);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    if (Victim != NULL) ZwClose(Victim);
+    if (File != NULL) ZwClose(File);
+    ZwClose(Directory);
+}
+
 START_TEST(NtfsSecurity)
 {
     WCHAR Root[MAX_PATH];
@@ -885,6 +1045,7 @@ START_TEST(NtfsSecurity)
     TestInheritance(Dir);
     TestStoredAccess(Dir, Letter);
     TestParentAccess(Dir, Letter);
+    TestReplacementAccess(Dir);
 
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
