@@ -27,12 +27,15 @@
 
 /* INCLUDES *****************************************************************/
 
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #include <ntdddisk.h>
 
 #define NDEBUG
 #include <debug.h>
+
+static NTSTATUS NtfsFlushVolumeStream(PDEVICE_EXTENSION Vcb);
+static NTSTATUS NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty);
 
 /* FUNCTIONS ****************************************************************/
 
@@ -603,6 +606,13 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
         DPRINT1("Mounting read-only: $LogFile requires recovery or an unsupported format (%lx)\n", Status);
     }
 
+    if (!(Vcb->Flags & VCB_VOLUME_READ_ONLY))
+    {
+        Status = NtfsLfsCreateWriter(Vcb, NtfsWriteDiskCached, NtfsFlushVolumeStream,
+                                     NtfsLogSetDirty, &Vcb->LfsWriter);
+        if (!NT_SUCCESS(Status)) goto ByeBye;
+    }
+
     NtfsFindObjectIdIndex(Vcb);
     NtfsInitializeSecurity(Vcb);
     NtfsLoadUsnJournal(Vcb);
@@ -652,6 +662,12 @@ ByeBye:
 
         if (Ccb)
             ExFreePool(Ccb);
+
+        if (Vcb != NULL)
+        {
+            NtfsLfsDestroyWriter(Vcb->LfsWriter);
+            Vcb->LfsWriter = NULL;
+        }
 
         if (Vcb != NULL)
         {
@@ -1049,6 +1065,9 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
         return STATUS_VOLUME_DISMOUNTED;
     }
 
+    if (NtfsLfsWriterEnabled(DeviceExt->LfsWriter) && !(DeviceExt->Flags & VCB_VOLUME_LOCKED))
+        return STATUS_ACCESS_DENIED;
+
     DPRINT1("Dismounting volume\n");
 
     FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
@@ -1056,6 +1075,13 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
 
     Status = NtfsFlushVolume(DeviceExt);
+    if (!NT_SUCCESS(Status))
+    {
+        ExReleaseResourceLite(&DeviceExt->DirResource);
+        return Status;
+    }
+
+    Status = NtfsLfsFinishWriter(DeviceExt->LfsWriter);
     if (!NT_SUCCESS(Status))
     {
         ExReleaseResourceLite(&DeviceExt->DirResource);
@@ -1972,7 +1998,8 @@ NtfsUsnRequest(PDEVICE_EXTENSION DeviceExt,
 static
 NTSTATUS
 NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
-                   USHORT Flags)
+                   USHORT Flags,
+                   BOOLEAN Set)
 {
     PFILE_RECORD_HEADER VolumeRecord;
     PNTFS_ATTR_CONTEXT AttrContext;
@@ -1995,7 +2022,8 @@ NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
         Attribute = (PNTFS_ATTR_RECORD)((ULONG_PTR)VolumeRecord + AttrOffset);
         ASSERT(!Attribute->IsNonResident);
         VolumeInfo = (PVOLINFO_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset);
-        VolumeInfo->Flags |= Flags;
+        if (Set) VolumeInfo->Flags |= Flags;
+        else VolumeInfo->Flags &= ~Flags;
 
         Status = UpdateFileRecord(DeviceExt, NTFS_FILE_VOLUME, VolumeRecord);
         if (NT_SUCCESS(Status))
@@ -2009,6 +2037,12 @@ NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+static NTSTATUS
+NtfsLogSetDirty(PDEVICE_EXTENSION Vcb, BOOLEAN Dirty)
+{
+    return NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY, Dirty);
+}
+
 /* A failed rollback leaves on-disk metadata inconsistent. Keep that fact
  * visible to chkdsk even if the attempted dirty-bit write also fails. */
 VOID
@@ -2016,9 +2050,10 @@ NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb)
 {
     NTSTATUS Status;
 
+    Vcb->Flags |= VCB_VOLUME_CORRUPT;
     if (Vcb->Flags & VCB_VOLUME_READ_ONLY)
         return;
-    Status = NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY);
+    Status = NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY, TRUE);
     SetFlag(Vcb->NtfsInfo.Flags, NTFS_VOLUME_FLAG_DIRTY);
     if (!NT_SUCCESS(Status))
         DPRINT1("Couldn't persist the volume dirty flag: %lx\n", Status);
@@ -2076,7 +2111,8 @@ NtfsMarkVolumeDirty(PDEVICE_EXTENSION DeviceExt,
     if (!NtfsGlobalData->EnableWriteSupport)
         return STATUS_MEDIA_WRITE_PROTECTED;
 
-    return NtfsSetVolumeFlags(DeviceExt, NTFS_VOLUME_FLAG_DIRTY);
+    DeviceExt->Flags |= VCB_VOLUME_CORRUPT;
+    return NtfsSetVolumeFlags(DeviceExt, NTFS_VOLUME_FLAG_DIRTY, TRUE);
 }
 
 static NTSTATUS

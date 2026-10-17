@@ -252,7 +252,19 @@ CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted)
     }
     Status = NtfsKmtOpen(&File, Path, FILE_WRITE_DATA, 0);
     ok_eq_hex(Status, ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_SUCCESS);
-    if (NT_SUCCESS(Status)) { ZwClose(File); File = NULL; }
+    if (NT_SUCCESS(Status))
+    {
+        if (!ReadOnly)
+        {
+            /* Normal data and MFT updates must leave the existing log
+             * untouched while experimental emission is disabled. */
+            Status = NtfsKmtWrite(File, 0, "L", 1, NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            Status = NtfsKmtFlush(File);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+        }
+        ZwClose(File); File = NULL;
+    }
     if (ReadOnly)
     {
         RtlStringCchPrintfW(NewPath, RTL_NUMBER_OF(NewPath), L"%ls.new", Path);
