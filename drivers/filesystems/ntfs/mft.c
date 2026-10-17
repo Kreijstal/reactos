@@ -4916,13 +4916,14 @@ NtfsFileNameMatches(PDEVICE_EXTENSION DeviceExt,
 * Finds the record and attribute offset of a particular link. Release Holder with
 * NtfsReleaseAttributeHolder; the base record is borrowed, extension buffers are owned.
 */
-NTSTATUS
-NtfsFindFileNameRecord(PDEVICE_EXTENSION DeviceExt,
+static NTSTATUS
+NtfsFindFileNameRecordInternal(PDEVICE_EXTENSION DeviceExt,
                        PFILE_RECORD_HEADER BaseRecord,
                        ULONGLONG ParentIndex,
                        PCUNICODE_STRING Name,
                        PFILE_RECORD_HEADER *Holder,
-                       PULONG Offset)
+                       PULONG Offset,
+                       BOOLEAN ExactCase)
 {
     PNTFS_ATTRIBUTE_LIST_ITEM List = NULL;
     PULONGLONG Indices = NULL;
@@ -4950,7 +4951,10 @@ NtfsFindFileNameRecord(PDEVICE_EXTENSION DeviceExt,
                 NtfsFileNameMatches(DeviceExt,
                                     (PFILENAME_ATTRIBUTE)((ULONG_PTR)Attribute + Attribute->Resident.ValueOffset),
                                     ParentIndex,
-                                    Name))
+                                    Name) &&
+                (!ExactCase || RtlCompareMemory((PUCHAR)Attribute + Attribute->Resident.ValueOffset +
+                                               FIELD_OFFSET(FILENAME_ATTRIBUTE, Name),
+                                              Name->Buffer, Name->Length) == Name->Length))
             {
                 *Offset = (ULONG)((PUCHAR)Attribute - (PUCHAR)Record);
                 Found = TRUE;
@@ -4993,6 +4997,24 @@ NtfsFindFileNameRecord(PDEVICE_EXTENSION DeviceExt,
     if (List != NULL)
         ExFreePoolWithTag(List, TAG_NTFS);
 
+    return Status;
+}
+
+NTSTATUS
+NtfsFindFileNameRecord(PDEVICE_EXTENSION Vcb,
+                       PFILE_RECORD_HEADER BaseRecord,
+                       ULONGLONG ParentIndex,
+                       PCUNICODE_STRING Name,
+                       PFILE_RECORD_HEADER *Holder,
+                       PULONG Offset)
+{
+    NTSTATUS Status;
+
+    /* During a case-only rename both spellings can be staged in the list.
+     * Prefer the counted exact spelling across all records before folding. */
+    Status = NtfsFindFileNameRecordInternal(Vcb, BaseRecord, ParentIndex, Name, Holder, Offset, TRUE);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        Status = NtfsFindFileNameRecordInternal(Vcb, BaseRecord, ParentIndex, Name, Holder, Offset, FALSE);
     return Status;
 }
 
