@@ -205,6 +205,219 @@ CollectRecords(
     NtfsKmtFree(Buffer);
 }
 
+/* Locate the journal through the documented MFT enumeration, then inspect
+ * its data attribute through GET_NTFS_FILE_RECORD. No pathname access to
+ * hidden NTFS metadata or estimate of unrelated allocations is needed. */
+static VOID
+CheckJournalAllocation(HANDLE Volume, PUSN_JOURNAL_DATA Journal, ULONG RecordBytes, ULONGLONG Unit)
+{
+    MFT_ENUM_DATA Enum;
+    PNTFS_FILE_RECORD_OUTPUT_BUFFER Output = NULL;
+    NTFS_FILE_RECORD_INPUT_BUFFER Input;
+    PUCHAR Buffer = NULL, Cursor, Attribute;
+    ULONG_PTR Returned;
+    ULONG Calls = 0, Offset, Type, Length;
+    USHORT AttributeOffset, NameOffset, Flags;
+    ULONGLONG Reference = 0, Size, Allocated;
+    BOOLEAN Found = FALSE;
+    NTSTATUS Status;
+
+    Buffer = NtfsKmtAlloc(READ_BUFFER_SIZE);
+    if (Buffer == NULL) return;
+    RtlZeroMemory(&Enum, sizeof(Enum));
+    Enum.HighUsn = MAXLONGLONG;
+    while (Calls++ < 1000 && Reference == 0)
+    {
+        Status = NtfsKmtFsctl(Volume, FSCTL_ENUM_USN_DATA, &Enum, sizeof(Enum), Buffer, READ_BUFFER_SIZE, &Returned);
+        if (Status == STATUS_END_OF_FILE || Status == STATUS_NO_MORE_FILES) break;
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status) || Returned <= sizeof(ULONGLONG)) break;
+        for (Cursor = Buffer + sizeof(ULONGLONG); Cursor < Buffer + Returned;)
+        {
+            PUSN_RECORD Record = (PVOID)Cursor;
+            if (Record->RecordLength < FIELD_OFFSET(USN_RECORD, FileName) ||
+                Record->RecordLength > (ULONG_PTR)(Buffer + Returned - Cursor)) break;
+            if (NameIs(Record, L"$UsnJrnl"))
+            {
+                Reference = Record->FileReferenceNumber & 0x0000ffffffffffffULL;
+                break;
+            }
+            Cursor += Record->RecordLength;
+        }
+        Enum.StartFileReferenceNumber = *(PULONGLONG)Buffer;
+    }
+    ok(Reference != 0, "journal file missing from MFT enumeration\n");
+    if (Reference == 0) goto CleanupAllocation;
+    Length = FIELD_OFFSET(NTFS_FILE_RECORD_OUTPUT_BUFFER, FileRecordBuffer) + RecordBytes;
+    Output = NtfsKmtAlloc(Length);
+    if (Output == NULL) goto CleanupAllocation;
+    Input.FileReferenceNumber.QuadPart = Reference;
+    Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_FILE_RECORD, &Input, sizeof(Input), Output, Length, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto CleanupAllocation;
+    ok(Output->FileRecordLength >= 24 && Output->FileRecordLength <= RecordBytes, "invalid journal record length\n");
+    if (Output->FileRecordLength < 24 || Output->FileRecordLength > RecordBytes) goto CleanupAllocation;
+    RtlCopyMemory(&AttributeOffset, Output->FileRecordBuffer + 20, sizeof(AttributeOffset));
+    for (Offset = AttributeOffset; Offset + 16 <= Output->FileRecordLength; Offset += Length)
+    {
+        Attribute = Output->FileRecordBuffer + Offset;
+        RtlCopyMemory(&Type, Attribute, sizeof(Type));
+        if (Type == MAXULONG) break;
+        RtlCopyMemory(&Length, Attribute + 4, sizeof(Length));
+        ok(Length >= 16 && Length <= Output->FileRecordLength - Offset, "invalid journal attribute\n");
+        if (Length < 16 || Length > Output->FileRecordLength - Offset) break;
+        RtlCopyMemory(&NameOffset, Attribute + 10, sizeof(NameOffset));
+        if (Type != 0x80 || Attribute[9] != 2 || NameOffset > Length ||
+            Length - NameOffset < 2 * sizeof(WCHAR) || !RtlEqualMemory(Attribute + NameOffset, L"$J", 2 * sizeof(WCHAR)))
+            continue;
+        Found = TRUE;
+        RtlCopyMemory(&Flags, Attribute + 12, sizeof(Flags));
+        ok(Attribute[8] != 0 && Length >= 72 && (Flags & 0x8000), "$J is not nonresident sparse data\n");
+        if (Attribute[8] != 0 && Length >= 72 && (Flags & 0x8000))
+        {
+            RtlCopyMemory(&Size, Attribute + 48, sizeof(Size));
+            RtlCopyMemory(&Allocated, Attribute + 64, sizeof(Allocated));
+            ok_eq_ulonglong(Size, Journal->NextUsn);
+            ok(Allocated <= max(Journal->MaximumSize, Unit) + Journal->AllocationDelta + Unit,
+               "journal backing allocation is unbounded: %I64u bytes\n", Allocated);
+        }
+        break;
+    }
+    ok(Found, "journal record has no $J stream\n");
+CleanupAllocation:
+    if (Output != NULL) NtfsKmtFree(Output);
+    NtfsKmtFree(Buffer);
+}
+
+static VOID
+TestJournalTrimming(PCWSTR Root, WCHAR Letter)
+{
+    WCHAR Dir[MAX_PATH], Path[MAX_PATH], Name[181];
+    HANDLE Volume = NULL, File = NULL;
+    CREATE_USN_JOURNAL_DATA Create;
+    DELETE_USN_JOURNAL_DATA Delete;
+    USN_JOURNAL_DATA Before = {0}, After, Reloaded;
+    NTFS_VOLUME_DATA_BUFFER OldData;
+    READ_USN_JOURNAL_DATA Read;
+    USN_SEEN Seen;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset;
+    UCHAR Out[64];
+    ULONGLONG Unit;
+    ULONG i, Iterations, OldDirty, NewDirty;
+    CHAR Byte;
+    BOOLEAN Created = FALSE;
+    NTSTATUS Status;
+
+    Status = NtfsKmtPrepareDirectory(Root, L"kmt_ntfs_usn_trim", Dir);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &OldDirty, sizeof(OldDirty), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = NtfsKmtFsctl(Volume, FSCTL_GET_NTFS_VOLUME_DATA, NULL, 0, &OldData, sizeof(OldData), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Create.MaximumSize = 64 * 1024;
+    Create.AllocationDelta = 64 * 1024;
+    Status = NtfsKmtFsctl(Volume, FSCTL_CREATE_USN_JOURNAL, &Create, sizeof(Create), NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Created = TRUE;
+    Status = NtfsKmtFsctl(Volume, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &Before, sizeof(Before), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    for (i = 0; i < RTL_NUMBER_OF(Name) - 1; i++) Name[i] = L'T';
+    Name[RTL_NUMBER_OF(Name) - 1] = UNICODE_NULL;
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Dir, Name);
+    Status = NtfsKmtCreateFileWithData(Path, "x", 1);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Offset.QuadPart = 0;
+    Unit = max((ULONGLONG)OldData.BytesPerCluster * 16, 4096);
+    Iterations = (ULONG)((Before.MaximumSize + Before.AllocationDelta + Unit) /
+                         ALIGN_UP_BY(FIELD_OFFSET(USN_RECORD, FileName) + (RTL_NUMBER_OF(Name) - 1) * sizeof(WCHAR), 8)) + 32;
+    for (i = 0; i < Iterations; i++)
+    {
+        Status = NtfsKmtOpen(&File, Path, FILE_WRITE_DATA, FILE_NON_DIRECTORY_FILE);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) goto Cleanup;
+        Byte = 'a' + i % 26;
+        Status = ZwWriteFile(File, NULL, NULL, NULL, &IoStatus, &Byte, 1, &Offset, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ZwClose(File); File = NULL;
+        if (!NT_SUCCESS(Status)) goto Cleanup;
+    }
+    Status = NtfsKmtFlush(Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    Status = NtfsKmtFsctl(Volume, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &After, sizeof(After), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Unit = max((ULONGLONG)OldData.BytesPerCluster * 16, 4096);
+    ok(After.FirstUsn > Before.FirstUsn, "journal never trimmed: first %I64d next %I64d\n", After.FirstUsn, After.NextUsn);
+    ok(After.NextUsn > Before.NextUsn, "journal USNs did not advance\n");
+    ok_eq_longlong(After.UsnJournalID, Before.UsnJournalID);
+    ok_eq_longlong(After.LowestValidUsn, Before.LowestValidUsn);
+    ok(After.NextUsn - After.FirstUsn <= max(After.MaximumSize, Unit),
+       "retained journal exceeds checkpoint target: %I64d bytes\n", After.NextUsn - After.FirstUsn);
+    ok(After.FirstUsn % Unit == 0, "trim split an allocation unit\n");
+    RtlZeroMemory(&Read, sizeof(Read));
+    Read.StartUsn = Before.FirstUsn;
+    Read.ReasonMask = MAXULONG;
+    Read.UsnJournalID = After.UsnJournalID;
+    Status = NtfsKmtFsctl(Volume, FSCTL_READ_USN_JOURNAL, &Read, sizeof(Read), Out, sizeof(Out), NULL);
+    ok_eq_hex(Status, STATUS_JOURNAL_ENTRY_DELETED);
+    RtlZeroMemory(&Seen, sizeof(Seen));
+    CollectRecords(Volume, After.UsnJournalID, After.FirstUsn, Name, Name, &Seen);
+    ok(Seen.Records != 0, "no retained records for the active file\n");
+    ok(Seen.ReasonsOld & USN_REASON_DATA_OVERWRITE, "lost retained overwrite records\n");
+    ok(Seen.ReasonsOld & USN_REASON_CLOSE, "lost retained close records\n");
+    ok(!Seen.UsnNotIncreasing && !Seen.FileRefMismatch, "invalid retained journal sequence\n");
+
+    CheckJournalAllocation(Volume, &After, OldData.BytesPerFileRecordSegment, Unit);
+    Status = NtfsKmtFsctl(Volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0, &NewDirty, sizeof(NewDirty), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(NewDirty, OldDirty);
+
+    Status = NtfsKmtFsctl(Volume, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtfsKmtFsctl(Volume, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    ZwClose(Volume); Volume = NULL;
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = NtfsKmtFsctl(Volume, FSCTL_QUERY_USN_JOURNAL, NULL, 0, &Reloaded, sizeof(Reloaded), NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    ok_eq_longlong(Reloaded.UsnJournalID, After.UsnJournalID);
+    ok_eq_longlong(Reloaded.LowestValidUsn, After.LowestValidUsn);
+    ok_eq_longlong(Reloaded.FirstUsn, After.FirstUsn);
+    ok_eq_longlong(Reloaded.NextUsn, After.NextUsn);
+    Status = NtfsKmtFsctl(Volume, FSCTL_READ_USN_JOURNAL, &Read, sizeof(Read), Out, sizeof(Out), NULL);
+    ok_eq_hex(Status, STATUS_JOURNAL_ENTRY_DELETED);
+    RtlZeroMemory(&Seen, sizeof(Seen));
+    CollectRecords(Volume, Reloaded.UsnJournalID, Reloaded.FirstUsn, Name, Name, &Seen);
+    ok(Seen.Records != 0 && !Seen.UsnNotIncreasing, "lost retained journal across remount\n");
+Cleanup:
+    if (File != NULL) ZwClose(File);
+    if (Created && Volume != NULL)
+    {
+        Delete.UsnJournalID = Before.UsnJournalID;
+        Delete.DeleteFlags = USN_DELETE_FLAG_DELETE | USN_DELETE_FLAG_NOTIFY;
+        Status = NtfsKmtFsctl(Volume, FSCTL_DELETE_USN_JOURNAL, &Delete, sizeof(Delete), NULL, 0, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
+    if (Volume != NULL) ZwClose(Volume);
+    Status = NtfsKmtDeleteTree(Dir);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtfsUsn)
 {
     WCHAR Root[MAX_PATH];
@@ -389,4 +602,6 @@ START_TEST(NtfsUsn)
     ZwClose(Volume);
     Status = NtfsKmtDeleteTree(Dir);
     ok_eq_hex(Status, STATUS_SUCCESS);
+    if (HaveJournal && !JournalWasActive)
+        TestJournalTrimming(Root, Letter);
 }

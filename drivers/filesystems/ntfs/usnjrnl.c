@@ -15,12 +15,15 @@
  * USN_REASON_CLOSE, after which the file starts over. Every record's USN also goes into
  * the file's $STANDARD_INFORMATION.
  *
- * The journal is never trimmed yet: $J only grows, and FirstUsn stays at LowestValidUsn.
+ * $J retains monotonically increasing USNs while old allocation units become
+ * sparse holes. FirstUsn follows the retained mapping; LowestValidUsn names
+ * the journal instance and is not advanced by trimming.
  */
 
 /* INCLUDES *****************************************************************/
 
 #include "ntfs.h"
+#include "sparse.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -65,7 +68,9 @@ NtfsReadUsnMax(PDEVICE_EXTENSION Vcb,
     PFILE_RECORD_HEADER Record;
     PNTFS_ATTR_CONTEXT Context;
     NTFS_USN_MAX Max;
-    ULONGLONG JSize = 0;
+    ULONGLONG JSize = 0, First = 0;
+    LONGLONG Vcn, Lcn, Length;
+    ULONG i;
     NTSTATUS Status;
 
     Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
@@ -90,6 +95,18 @@ NtfsReadUsnMax(PDEVICE_EXTENSION Vcb,
         if (NT_SUCCESS(Status))
         {
             JSize = AttributeDataLength(Context->pRecord);
+            if (Context->pRecord->IsNonResident)
+            {
+                First = JSize;
+                for (i = 0; FsRtlGetNextLargeMcbEntry(&Context->DataRunsMCB, i, &Vcn, &Lcn, &Length); i++)
+                {
+                    if (Lcn != -1)
+                    {
+                        First = min((ULONGLONG)Vcn * Vcb->NtfsInfo.BytesPerCluster, JSize);
+                        break;
+                    }
+                }
+            }
             ReleaseAttributeContext(Context);
         }
     }
@@ -104,6 +121,7 @@ NtfsReadUsnMax(PDEVICE_EXTENSION Vcb,
     Vcb->UsnMaximumSize = Max.MaximumSize;
     Vcb->UsnAllocationDelta = Max.AllocationDelta;
     Vcb->UsnLowestValidUsn = Max.LowestValidUsn;
+    Vcb->UsnFirstUsn = First;
     Vcb->UsnNextUsn = max(JSize, (ULONGLONG)Max.LowestValidUsn);
 
     return STATUS_SUCCESS;
@@ -234,6 +252,99 @@ NtfsBuildUsnRecord(PDEVICE_EXTENSION Vcb,
     RtlCopyMemory(Buffer->FileName, Name->Buffer, Name->Length);
 }
 
+static NTSTATUS
+NtfsUsnMappingBarrier(PDEVICE_EXTENSION Vcb)
+{
+    IO_STATUS_BLOCK IoStatus;
+
+    CcFlushCache(Vcb->StreamFileObject->SectionObjectPointer, NULL, 0, &IoStatus);
+    if (!NT_SUCCESS(IoStatus.Status)) return IoStatus.Status;
+    return NtfsFlushDevice(Vcb->StorageDevice);
+}
+
+static NTSTATUS
+NtfsTrimUsnJournalLocked(PDEVICE_EXTENSION Vcb, BOOLEAN Checkpoint)
+{
+    PFILE_RECORD_HEADER Record = NULL, Holder = NULL;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    PSTANDARD_INFORMATION Info;
+    LARGE_INTEGER Size;
+    ULONG Offset;
+    ULONGLONG Unit, Maximum, Retained, First;
+    NTSTATUS Status;
+
+    ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->UsnResource));
+    if (Vcb->UsnJournalMftIndex == 0 || Vcb->UsnMaximumSize == 0)
+        return STATUS_SUCCESS;
+    ASSERT(Vcb->UsnNextUsn >= Vcb->UsnFirstUsn);
+    Unit = max((ULONGLONG)Vcb->NtfsInfo.BytesPerCluster << NTFS_SPARSE_UNIT_SHIFT, USN_PAGE_SIZE);
+    Maximum = max(Vcb->UsnMaximumSize, Unit);
+    Retained = Vcb->UsnNextUsn - Vcb->UsnFirstUsn;
+    if (Retained <= Maximum || (!Checkpoint && Retained - Maximum <= Vcb->UsnAllocationDelta))
+        return STATUS_SUCCESS;
+    /* Whole allocation units, also page aligned: a USN record cannot straddle
+     * the cut. Keeping at least one unit preserves the most recent record. */
+    First = ALIGN_UP_BY((ULONGLONG)Vcb->UsnNextUsn - Maximum, Unit);
+    if (First <= Vcb->UsnFirstUsn)
+        return STATUS_SUCCESS;
+
+    ExAcquireResourceExclusiveLite(&Vcb->IndexResource, TRUE);
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL) { Status = STATUS_INSUFFICIENT_RESOURCES; goto Cleanup; }
+    Status = ReadFileRecord(Vcb, Vcb->UsnJournalMftIndex, Record);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Record, AttributeData, L"$J", 2, &Context, &Offset);
+    if (NT_SUCCESS(Status))
+        Status = NtfsResolveAttributeHolder(Vcb, Context, Record, &Holder, &Offset);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    if (!Context->pRecord->IsNonResident)
+    {
+        Size.QuadPart = AttributeDataLength(Context->pRecord);
+        Status = ConvertResidentAttributeToNonResident(Vcb, Context, Offset, Holder, &Size);
+    }
+    if (NT_SUCCESS(Status) && !NtfsAttributeIsSparse(Context))
+    {
+        Status = NtfsMakeAttributeSparse(Vcb, Context, Offset, Holder);
+        if (NT_SUCCESS(Status))
+        {
+            Info = GetStandardInformationFromRecord(Vcb, Record);
+            ASSERT(Info != NULL);
+            Info->FileAttribute |= FILE_ATTRIBUTE_SPARSE_FILE;
+            Status = NtfsUpdateDuplicatedInformation(Vcb, Record, Vcb->UsnJournalMftIndex,
+                                                     NTFS_FILENAME_UPDATE_ATTRS, FALSE);
+            if (NT_SUCCESS(Status) && Holder != Record)
+                Status = UpdateFileRecord(Vcb, Vcb->UsnJournalMftIndex, Record);
+        }
+    }
+    if (NT_SUCCESS(Status))
+        Status = NtfsDeallocateSparseRangeEx(Vcb, Context, Offset, Holder, 0,
+                                              First / Vcb->NtfsInfo.BytesPerCluster,
+                                              NtfsUsnMappingBarrier);
+    if (NT_SUCCESS(Status))
+        Vcb->UsnFirstUsn = First;
+Cleanup:
+    if (Holder != NULL) NtfsReleaseAttributeHolder(Vcb, Record, Holder);
+    if (Context != NULL) ReleaseAttributeContext(Context);
+    if (Record != NULL) ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    ExReleaseResourceLite(&Vcb->IndexResource);
+    return Status;
+}
+
+NTSTATUS
+NtfsCheckpointUsnJournal(PDEVICE_EXTENSION Vcb)
+{
+    NTSTATUS Status;
+
+    if (!NtfsGlobalData->EnableWriteSupport || Vcb->UsnJournalMftIndex == 0 ||
+        (Vcb->Flags & VCB_DEVICE_REMOVED))
+        return STATUS_SUCCESS;
+    ExAcquireResourceExclusiveLite(&Vcb->UsnResource, TRUE);
+    Status = NtfsTrimUsnJournalLocked(Vcb, TRUE);
+    ExReleaseResourceLite(&Vcb->UsnResource);
+    if (!NT_SUCCESS(Status)) NtfsMarkVolumeCorrupt(Vcb);
+    return Status;
+}
+
 /**
 * @name NtfsAppendUsnRecord
 *
@@ -245,7 +356,7 @@ NtfsAppendUsnRecord(PDEVICE_EXTENSION Vcb,
                     PUSN_RECORD Record)
 {
     USN Usn = Vcb->UsnNextUsn;
-    NTSTATUS Status;
+    NTSTATUS Status, TrimStatus;
 
     ASSERT(Record->RecordLength <= USN_PAGE_SIZE);
 
@@ -253,10 +364,16 @@ NtfsAppendUsnRecord(PDEVICE_EXTENSION Vcb,
     if ((Usn % USN_PAGE_SIZE) + Record->RecordLength > USN_PAGE_SIZE)
         Usn = ALIGN_UP_BY(Usn, USN_PAGE_SIZE);
 
+    TrimStatus = NtfsTrimUsnJournalLocked(Vcb, FALSE);
+    if (!NT_SUCCESS(TrimStatus)) NtfsMarkVolumeCorrupt(Vcb);
     Record->Usn = Usn;
     Status = NtfsWriteStreamAt(Vcb, Vcb->UsnJournalMftIndex, L"$J", 2, Usn, Record, Record->RecordLength);
     if (NT_SUCCESS(Status))
+    {
         Vcb->UsnNextUsn = Usn + Record->RecordLength;
+        TrimStatus = NtfsTrimUsnJournalLocked(Vcb, FALSE);
+        if (!NT_SUCCESS(TrimStatus)) NtfsMarkVolumeCorrupt(Vcb);
+    }
 
     return Status;
 }
@@ -405,7 +522,7 @@ NtfsQueryUsnJournal(PDEVICE_EXTENSION Vcb,
     else
     {
         Data->UsnJournalID = Vcb->UsnJournalId;
-        Data->FirstUsn = Vcb->UsnLowestValidUsn;
+        Data->FirstUsn = Vcb->UsnFirstUsn;
         Data->NextUsn = Vcb->UsnNextUsn;
         Data->LowestValidUsn = Vcb->UsnLowestValidUsn;
         Data->MaxUsn = MAXLONGLONG & ~(USN_PAGE_SIZE - 1);
@@ -417,6 +534,26 @@ NtfsQueryUsnJournal(PDEVICE_EXTENSION Vcb,
     KeLeaveCriticalRegion();
 
     return Status;
+}
+
+static NTSTATUS
+NtfsAddUsnDataStream(PDEVICE_EXTENSION Vcb, PFILE_RECORD_HEADER Record)
+{
+    UCHAR Buffer[ALIGN_UP_BY(sizeof(NTFS_ATTR_RECORD) + 2 * sizeof(WCHAR) + 1, ATTR_RECORD_ALIGNMENT)];
+    PNTFS_ATTR_RECORD Attribute = (PVOID)Buffer;
+
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Attribute->Type = AttributeData;
+    Attribute->Length = sizeof(Buffer);
+    Attribute->IsNonResident = TRUE;
+    Attribute->NameLength = 2;
+    Attribute->NameOffset = sizeof(NTFS_ATTR_RECORD);
+    Attribute->Flags = NTFS_ATTR_SPARSE;
+    Attribute->NonResident.HighestVCN = (ULONGLONG)-1;
+    Attribute->NonResident.MappingPairsOffset = Attribute->NameOffset + 2 * sizeof(WCHAR);
+    Attribute->NonResident.CompressionUnit = NTFS_SPARSE_UNIT_SHIFT;
+    RtlCopyMemory(Buffer + Attribute->NameOffset, L"$J", 2 * sizeof(WCHAR));
+    return NtfsAddAttributeToFile(Vcb, Record, Attribute);
 }
 
 /**
@@ -451,7 +588,7 @@ NtfsMakeUsnJournalFile(PDEVICE_EXTENSION Vcb,
             SecurityId = StdInfo->SecurityId;
 
         Status = NtfsCreateFileRecord(Vcb, ExtendReference, &Name,
-                                      FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM,
+                                      FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_SPARSE_FILE,
                                       FALSE, SecurityId, FALSE, TRUE, &Reference);
     }
 
@@ -464,7 +601,7 @@ NtfsMakeUsnJournalFile(PDEVICE_EXTENSION Vcb,
     if (NT_SUCCESS(Status))
         Status = NtfsDeleteAttributeFromFile(Vcb, Record, AttributeData, L"", 0);
     if (NT_SUCCESS(Status))
-        Status = NtfsAddResidentAttributeToFile(Vcb, Record, AttributeData, L"$J", 2, NULL, 0);
+        Status = NtfsAddUsnDataStream(Vcb, Record);
     if (NT_SUCCESS(Status))
         Status = NtfsAddResidentAttributeToFile(Vcb, Record, AttributeData, L"$Max", 4, Max, sizeof(*Max));
     if (NT_SUCCESS(Status))
@@ -682,7 +819,7 @@ NtfsReadUsnJournal(PDEVICE_EXTENSION Vcb,
         Status = STATUS_JOURNAL_NOT_ACTIVE;
     else if (Request->UsnJournalID != Vcb->UsnJournalId)
         Status = STATUS_INVALID_PARAMETER;
-    else if (Request->StartUsn < Vcb->UsnLowestValidUsn)
+    else if (Request->StartUsn < max(Vcb->UsnFirstUsn, Vcb->UsnLowestValidUsn))
         Status = STATUS_JOURNAL_ENTRY_DELETED;
     else
         Status = ReadFileRecord(Vcb, Vcb->UsnJournalMftIndex, Record);

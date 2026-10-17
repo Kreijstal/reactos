@@ -17,8 +17,11 @@ NtfsFlushVolume(PDEVICE_EXTENSION Vcb)
     PLIST_ENTRY Entry;
     PNTFS_FCB Fcb;
     IO_STATUS_BLOCK IoStatus;
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS Status;
 
+    Status = NtfsCheckpointUsnJournal(Vcb);
+    if (!NT_SUCCESS(Status))
+        return Status;
     ExAcquireResourceExclusiveLite(&Vcb->DirResource, TRUE);
     for (Entry = Vcb->FcbListHead.Flink;
          Entry != &Vcb->FcbListHead;
