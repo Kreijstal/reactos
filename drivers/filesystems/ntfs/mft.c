@@ -2564,9 +2564,11 @@ NtfsLoadUpCaseTable(PDEVICE_EXTENSION Vcb)
 static NTSTATUS
 ReadFileRecordInternal(PDEVICE_EXTENSION Vcb,
                ULONGLONG index,
-               PFILE_RECORD_HEADER file)
+               PFILE_RECORD_HEADER file,
+               BOOLEAN AllowUnused)
 {
     ULONGLONG BytesRead;
+    ULONG i, RecordSize = Vcb->NtfsInfo.BytesPerFileRecord;
 
     DPRINT("ReadFileRecord(%p, %I64x, %p)\n", Vcb, index, file);
 
@@ -2577,13 +2579,32 @@ ReadFileRecordInternal(PDEVICE_EXTENSION Vcb,
         return STATUS_PARTIAL_COPY;
     }
 
+    /* A bitmap-selected free slot can be uninitialized. It has no sequence
+     * number or update sequence array to recover yet. */
+    if (AllowUnused)
+    {
+        for (i = 0; i < RecordSize; ++i)
+            if (((PUCHAR)file)[i] != 0)
+                break;
+        if (i == RecordSize)
+            return STATUS_SUCCESS;
+    }
+
+    ASSERT(Vcb->NtfsInfo.BytesPerSector != 0);
+    if (file->Ntfs.Type != NRH_FILE_TYPE ||
+        file->Ntfs.UsaCount != RecordSize / Vcb->NtfsInfo.BytesPerSector + 1 ||
+        file->Ntfs.UsaOffset < sizeof(NTFS_RECORD_HEADER) ||
+        (ULONG)file->Ntfs.UsaOffset + file->Ntfs.UsaCount * sizeof(USHORT) > RecordSize)
+        return STATUS_FILE_CORRUPT_ERROR;
+
     /* Apply update sequence array fixups. */
     DPRINT("Sequence number: %u\n", file->SequenceNumber);
     return FixupUpdateSequenceArray(Vcb, &file->Ntfs);
 }
 
-NTSTATUS
-ReadFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Record)
+static NTSTATUS
+NtfsReadFileRecordEx(PDEVICE_EXTENSION Vcb, ULONGLONG Index,
+                     PFILE_RECORD_HEADER Record, BOOLEAN AllowUnused)
 {
     NTSTATUS Status;
 
@@ -2591,7 +2612,7 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Recor
     ExAcquireResourceSharedLite(&Vcb->MftContextResource, TRUE);
     _SEH2_TRY
     {
-        Status = ReadFileRecordInternal(Vcb, Index, Record);
+        Status = ReadFileRecordInternal(Vcb, Index, Record, AllowUnused);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -2606,6 +2627,11 @@ ReadFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Recor
     return Status;
 }
 
+NTSTATUS
+ReadFileRecord(PDEVICE_EXTENSION Vcb, ULONGLONG Index, PFILE_RECORD_HEADER Record)
+{
+    return NtfsReadFileRecordEx(Vcb, Index, Record, FALSE);
+}
 
 /**
 * @name NtfsUpdateDuplicatedInformation
@@ -3301,7 +3327,7 @@ AddNewMftEntryInternal(PFILE_RECORD_HEADER FileRecord,
         }
         else
         {
-            Status = ReadFileRecord(DeviceExt, MftIndex, PreviousRecord);
+            Status = NtfsReadFileRecordEx(DeviceExt, MftIndex, PreviousRecord, TRUE);
             if (NT_SUCCESS(Status))
             {
                 FileRecord->SequenceNumber = PreviousRecord->SequenceNumber;
