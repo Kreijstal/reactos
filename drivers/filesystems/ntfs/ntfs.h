@@ -107,6 +107,10 @@ typedef struct
     ERESOURCE IoResource;
     ERESOURCE PagingResource;
     ERESOURCE DirResource;
+    /* Slot allocation/growth never acquires DirResource. The context lock
+     * protects the shared $MFT mapping, after physical cluster allocation. */
+    ERESOURCE MftAllocationResource;
+    ERESOURCE MftContextResource;
 //    ERESOURCE FatResource;
 
     /* Serializes every read-modify-write of a directory's file record and
@@ -286,6 +290,10 @@ typedef enum
 #define NTFS_FILE_UPCASE            10
 #define NTFS_FILE_EXTEND            11
 #define NTFS_FILE_FIRST_USER_FILE   16
+
+/* Bounds on allocation headroom for growing data and directory indexes. */
+#define NTFS_GROW_AHEAD_MIN (64 * 1024)
+#define NTFS_GROW_AHEAD_MAX (4 * 1024 * 1024)
 
 #define NTFS_MFT_MASK 0x0000FFFFFFFFFFFFULL
 
@@ -897,6 +905,18 @@ NtfsReadAttributeHolder(PNTFS_VCB Vcb,
                         PNTFS_ATTR_CONTEXT AttrContext,
                         PFILE_RECORD_HEADER BaseRecord,
                         PFILE_RECORD_HEADER *Holder);
+
+NTSTATUS
+NtfsCommitAttributeContext(PDEVICE_EXTENSION Vcb,
+                           PNTFS_ATTR_CONTEXT Context,
+                           PFILE_RECORD_HEADER Record);
+
+NTSTATUS
+NtfsResolveAttributeHolder(PNTFS_VCB Vcb,
+                           PNTFS_ATTR_CONTEXT Context,
+                           PFILE_RECORD_HEADER Record,
+                           PFILE_RECORD_HEADER *Holder,
+                           PULONG Offset);
 
 VOID
 NtfsReleaseAttributeHolder(PNTFS_VCB Vcb,

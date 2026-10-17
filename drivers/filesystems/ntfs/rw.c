@@ -33,10 +33,6 @@
 #define NDEBUG
 #include <debug.h>
 
-/* Bounds on how far a growing file is allocated past its end */
-#define NTFS_GROW_AHEAD_MIN (64 * 1024)
-#define NTFS_GROW_AHEAD_MAX (4 * 1024 * 1024)
-
 /* FUNCTIONS ****************************************************************/
 
 /**
