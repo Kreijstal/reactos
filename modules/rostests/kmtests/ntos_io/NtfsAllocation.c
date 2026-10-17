@@ -174,11 +174,63 @@ Cleanup:
     ok_eq_hex(Status, STATUS_SUCCESS);
 }
 
+static VOID
+TestFailedResidentGrowth(PCWSTR Root)
+{
+    WCHAR Path[MAX_PATH];
+    HANDLE File = NULL;
+    FILE_FS_SIZE_INFORMATION Size;
+    FILE_STANDARD_INFORMATION Standard;
+    IO_STATUS_BLOCK IoStatus;
+    UCHAR Data[600], ReadBack[600];
+    ULONG_PTR Read;
+    NTSTATUS Status;
+    ULONG i;
+
+    NtfsKmtJoin(Path, RTL_NUMBER_OF(Path), Root, L"KMT_NTFS_RESIDENT_FULL.bin");
+    for (i = 0; i < sizeof(Data); i++) Data[i] = (UCHAR)(i * 37 + 11);
+    Status = NtfsKmtCreateFileWithData(Path, Data, sizeof(Data));
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = NtfsKmtOpen(&File, Path, FILE_ALL_ACCESS, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = ZwQueryVolumeInformationFile(File, &IoStatus, &Size, sizeof(Size), FileFsSizeInformation);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = SetSize(File, ((ULONGLONG)Size.TotalAllocationUnits.QuadPart + 1) *
+                           Size.SectorsPerAllocationUnit * Size.BytesPerSector);
+    ok_eq_hex(Status, STATUS_DISK_FULL);
+    Status = NtfsKmtQueryStandard(File, &Standard);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(Standard.EndOfFile.QuadPart, sizeof(Data));
+    Status = NtfsKmtRead(File, 0, ReadBack, sizeof(ReadBack), &Read);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulongptr(Read, sizeof(ReadBack));
+    ok(RtlEqualMemory(Data, ReadBack, sizeof(Data)), "failed growth lost the resident value\n");
+    ZwClose(File); File = NULL;
+    Status = NtfsKmtOpen(&File, Path, GENERIC_READ, FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) goto Cleanup;
+    Status = NtfsKmtQueryStandard(File, &Standard);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_longlong(Standard.EndOfFile.QuadPart, sizeof(Data));
+    Status = NtfsKmtRead(File, 0, ReadBack, sizeof(ReadBack), &Read);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulongptr(Read, sizeof(ReadBack));
+    ok(RtlEqualMemory(Data, ReadBack, sizeof(Data)), "resident data was lost after reopen\n");
+Cleanup:
+    if (File != NULL) ZwClose(File);
+    Status = NtfsKmtDelete(Path);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtfsAllocation)
 {
     WCHAR Root[MAX_PATH];
 
     if (!NtfsKmtFindVolume(Root, NULL)) return;
+    TestFailedResidentGrowth(Root);
     TestCrowdedGrowth(Root, 8);
     TestCrowdedGrowth(Root, 30);
 }
