@@ -210,6 +210,53 @@ START_TEST(NtfsLocks)
     check_status(Lock(A, IRP_MN_LOCK, 0x100000000ULL, 8, 0, TRUE), STATUS_SUCCESS);
     check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 0x100000000ULL, 8, 0, FALSE), STATUS_SUCCESS);
 
+    /* MS-FSA 2.1.5.8 and 2.1.4.10: unsigned offsets, including
+     * zero-length ranges and the last representable byte. */
+    check_status(Lock(A, IRP_MN_LOCK, 0, 0, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_LOCK, 0, 0, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(C, IRP_MN_LOCK, 0, 1, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 0, 0, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_UNLOCK_SINGLE, 0, 0, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(C, IRP_MN_UNLOCK_SINGLE, 0, 1, 0, FALSE), STATUS_SUCCESS);
+
+    check_status(Lock(A, IRP_MN_LOCK, 32, 0, 0, TRUE), STATUS_SUCCESS);
+    check_status(NtfsKmtRead(C, 32, Buffer, 1, &Transferred), STATUS_SUCCESS);
+    check_status(NtfsKmtRead(C, 31, Buffer, 2, &Transferred), STATUS_FILE_LOCK_CONFLICT);
+    check_status(Lock(B, IRP_MN_LOCK, 32, 0, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 32, 0, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_UNLOCK_SINGLE, 32, 0, 0, FALSE), STATUS_SUCCESS);
+
+    check_status(Lock(A, IRP_MN_LOCK, MAXULONGLONG, 1, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_LOCK, MAXULONGLONG, 1, 0, TRUE), STATUS_LOCK_NOT_GRANTED);
+    check_status(Lock(B, IRP_MN_LOCK, MAXULONGLONG - 1, 1, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_UNLOCK_SINGLE, MAXULONGLONG - 1, 1, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, MAXULONGLONG, 1, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(A, IRP_MN_LOCK, MAXULONGLONG, 2, 0, TRUE), STATUS_INVALID_LOCK_RANGE);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, MAXULONGLONG, 2, 0, FALSE), STATUS_INVALID_LOCK_RANGE);
+    check_status(Lock(A, IRP_MN_LOCK, 0, MAXULONGLONG, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_LOCK, MAXULONGLONG, 1, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_LOCK, MAXULONGLONG - 1, 1, 0, TRUE), STATUS_LOCK_NOT_GRANTED);
+    check_status(Lock(B, IRP_MN_UNLOCK_SINGLE, MAXULONGLONG, 1, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 0, MAXULONGLONG, 0, FALSE), STATUS_SUCCESS);
+
+    /* The owner/key can add a shared lock over its exclusive lock. Exact
+     * unlock removes the exclusive acquisition, preserving the shared one. */
+    check_status(Lock(A, IRP_MN_LOCK, 16, 16, 0, TRUE), STATUS_SUCCESS);
+    check_status(Lock(A, IRP_MN_LOCK, 16, 16, 1, FALSE), STATUS_LOCK_NOT_GRANTED);
+    check_status(Lock(A, IRP_MN_LOCK, 16, 16, 0, FALSE), STATUS_SUCCESS);
+    check_status(NtfsKmtWrite(A, 16, Buffer, 1, &Transferred), STATUS_FILE_LOCK_CONFLICT);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 16, 16, 0, FALSE), STATUS_SUCCESS);
+    check_status(NtfsKmtRead(C, 16, Buffer, 1, &Transferred), STATUS_SUCCESS);
+    check_status(NtfsKmtWrite(C, 16, Buffer, 1, &Transferred), STATUS_FILE_LOCK_CONFLICT);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 16, 16, 0, FALSE), STATUS_SUCCESS);
+    check_status(NtfsKmtWrite(C, 16, Buffer, 1, &Transferred), STATUS_SUCCESS);
+
+    check_status(Lock(A, IRP_MN_LOCK, 0, 8, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_LOCK, 16, 8, 0, TRUE), STATUS_SUCCESS);
+    check_status(NtfsKmtRead(C, 0, Buffer, 24, &Transferred), STATUS_FILE_LOCK_CONFLICT);
+    check_status(Lock(A, IRP_MN_UNLOCK_SINGLE, 0, 8, 0, FALSE), STATUS_SUCCESS);
+    check_status(Lock(B, IRP_MN_UNLOCK_SINGLE, 16, 8, 0, FALSE), STATUS_SUCCESS);
+
     Status = NtfsKmtLink(A, Alias, FALSE);
     check_status(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status))
