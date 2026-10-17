@@ -64,7 +64,9 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PNTFS_VCB Vcb;
     PERESOURCE IoResource = NULL;
+    PERESOURCE QuotaResource = NULL;
     BOOLEAN PromotedTopLevel;
+    BOOLEAN QuotaExclusive;
 
     TRACE_(NTFS, "NtfsDispatch()\n");
 
@@ -116,6 +118,52 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
         {
             Irp->IoStatus.Information = 0;
             goto Complete;
+        }
+    }
+
+    if (IrpContext->DeviceObject != NtfsGlobalData->DeviceObject && NtfsQuotaOperation(IrpContext))
+    {
+        Vcb = IrpContext->DeviceObject->DeviceExtension;
+        QuotaExclusive = Vcb->QuotaTracking ||
+                         IrpContext->MajorFunction == IRP_MJ_SET_VOLUME_INFORMATION ||
+                         IrpContext->MajorFunction == IRP_MJ_QUERY_QUOTA ||
+                         IrpContext->MajorFunction == IRP_MJ_SET_QUOTA;
+        if (QuotaExclusive && !(IrpContext->Flags & IRPCONTEXT_CANWAIT))
+        {
+            if (IrpContext->MajorFunction == IRP_MJ_WRITE)
+            {
+                Status = NtfsLockUserBuffer(Irp, IrpContext->Stack->Parameters.Write.Length, IoReadAccess);
+                if (!NT_SUCCESS(Status)) goto Complete;
+            }
+            Status = NtfsMarkIrpContextForQueue(IrpContext);
+            goto Complete;
+        }
+        for (;;)
+        {
+            BOOLEAN Acquired = QuotaExclusive ?
+                ExAcquireResourceExclusiveLite(&Vcb->QuotaResource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT)) :
+                ExAcquireResourceSharedLite(&Vcb->QuotaResource, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+            if (!Acquired)
+            {
+                if (IrpContext->MajorFunction == IRP_MJ_WRITE)
+                {
+                    Status = NtfsLockUserBuffer(Irp, IrpContext->Stack->Parameters.Write.Length, IoReadAccess);
+                    if (!NT_SUCCESS(Status)) goto Complete;
+                }
+                Status = NtfsMarkIrpContextForQueue(IrpContext);
+                goto Complete;
+            }
+            if (QuotaExclusive || !Vcb->QuotaTracking)
+                break;
+            ExReleaseResourceLite(&Vcb->QuotaResource);
+            QuotaExclusive = TRUE;
+        }
+        QuotaResource = &Vcb->QuotaResource;
+        if (Vcb->QuotaTracking && Vcb->QuotaRebuildRequired && NtfsGlobalData->EnableWriteSupport &&
+            !(Vcb->Flags & VCB_DEVICE_REMOVED))
+        {
+            Status = NtfsRebuildQuota(Vcb);
+            if (!NT_SUCCESS(Status)) goto Complete;
         }
     }
 
@@ -227,6 +275,22 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
     }
 
 Complete:
+    if (QuotaResource != NULL)
+    {
+        PNTFS_FCB Fcb = IrpContext->FileObject != NULL ? IrpContext->FileObject->FsContext : NULL;
+        if (Vcb->QuotaTracking && NtfsGlobalData->EnableWriteSupport &&
+            !(Vcb->Flags & VCB_DEVICE_REMOVED) && Fcb != NULL &&
+            !(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
+            !(IrpContext->Flags & IRPCONTEXT_QUEUE))
+        {
+            NTSTATUS QuotaStatus = NtfsUpdateFileQuota(Vcb, Fcb->MFTIndex);
+            if (!NT_SUCCESS(QuotaStatus))
+            {
+                NtfsInvalidateQuota(Vcb);
+            }
+        }
+        ExReleaseResourceLite(QuotaResource);
+    }
     if (IoResource != NULL)
         ExReleaseResourceLite(IoResource);
 

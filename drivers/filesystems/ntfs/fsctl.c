@@ -498,6 +498,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     ExInitializeResourceLite(&Vcb->DirResource);
     ExInitializeResourceLite(&Vcb->IndexResource);
     ExInitializeResourceLite(&Vcb->BitmapResource);
+    ExInitializeResourceLite(&Vcb->QuotaResource);
     KeInitializeSpinLock(&Vcb->FcbListLock);
 
     InitializeListHead(&Vcb->NotifyList);
@@ -667,6 +668,7 @@ ByeBye:
         if (Lookaside)
         {
             ExDeleteResourceLite(&Vcb->BitmapResource);
+            ExDeleteResourceLite(&Vcb->QuotaResource);
             ExDeleteResourceLite(&Vcb->IndexResource);
             ExDeleteResourceLite(&Vcb->DirResource);
             ExDeleteResourceLite(&Vcb->PagingResource);

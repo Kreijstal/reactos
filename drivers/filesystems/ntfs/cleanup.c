@@ -291,7 +291,7 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
                     USHORT LinksLeft;
 
                     RtlInitUnicodeString(&Name, Fcb->ObjectName + 1);
-                    Status = NtfsDeleteFileLink(DeviceExt,
+                    Status = NtfsDeleteUserFileLink(DeviceExt,
                                                 Fcb->MFTIndex,
                                                 Fcb->ParentMFTIndex,
                                                 &Name,
