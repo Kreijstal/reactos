@@ -1818,6 +1818,7 @@ NtfsRelinkFileNames(
             {
                 DPRINT1("Couldn't restore '%.*S' in directory %I64u\n",
                         Name->NameLength, Name->Name, Name->DirectoryFileReferenceNumber & NTFS_MFT_MASK);
+                NtfsMarkVolumeCorrupt(DeviceExt);
             }
 
             Count--;
@@ -2258,7 +2259,10 @@ NtfsPrepareExpandedRename(PDEVICE_EXTENSION Vcb,
     {
         NTSTATUS RestoreStatus = NtfsRestoreExpandedRename(Vcb, Fcb, OldValue, DosValue, NewValue);
         if (!NT_SUCCESS(RestoreStatus))
+        {
             DPRINT1("Couldn't restore names after rename preparation: %lx\n", RestoreStatus);
+            NtfsMarkVolumeCorrupt(Vcb);
+        }
     }
     return Status;
 }
@@ -2304,7 +2308,10 @@ NtfsCommitExpandedRename(PDEVICE_EXTENSION Vcb,
                                                        DosValue->DirectoryFileReferenceNumber & NTFS_MFT_MASK,
                                                        Reference, DosValue, CaseSensitive);
         if (!NT_SUCCESS(RestoreStatus))
+        {
             DPRINT1("Couldn't restore directory entries after rename: %lx\n", RestoreStatus);
+            NtfsMarkVolumeCorrupt(Vcb);
+        }
     }
     return Status;
 }
@@ -2356,8 +2363,8 @@ NtfsCommitRename(
     if (!NT_SUCCESS(Status))
     {
         /* Put the old record back, then the names that were taken out */
-        if (RecordChanged)
-            UpdateFileRecord(DeviceExt, Original->MFTRecordNumber, Original);
+        if (RecordChanged && !NT_SUCCESS(UpdateFileRecord(DeviceExt, Original->MFTRecordNumber, Original)))
+            NtfsMarkVolumeCorrupt(DeviceExt);
 
         NtfsRelinkFileNames(DeviceExt, Original, FileReference, Removed, CaseSensitive, Instance, OldParentMft, RemoveDos);
     }
@@ -2794,8 +2801,8 @@ NtfsSetRenameInformation(
                                    ReplaceIfExists, CaseSensitive, &ReplacementMft, Scratch);
     if (!NT_SUCCESS(Status))
     {
-        if (Expanded)
-            (VOID)NtfsRestoreExpandedRename(DeviceExt, Fcb, OldValue, DosValue, NewValue);
+        if (Expanded && !NT_SUCCESS(NtfsRestoreExpandedRename(DeviceExt, Fcb, OldValue, DosValue, NewValue)))
+            NtfsMarkVolumeCorrupt(DeviceExt);
         goto Quit;
     }
     NtfsPostUsnChange(DeviceExt, Fcb, USN_REASON_RENAME_OLD_NAME);
