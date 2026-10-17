@@ -4,7 +4,7 @@
  * PURPOSE:     Storage removal and PnP forwarding
  */
 
-#include "ntfs.h"
+#include "lfswrite.h"
 
 #define NDEBUG
 #include <debug.h>
@@ -75,7 +75,11 @@ NtfsPrepareForRemoval(PNTFS_VCB Vcb, ULONG AllowedHandles)
         return STATUS_ACCESS_DENIED;
     if (Vcb->Flags & VCB_VOLUME_DISMOUNTED)
         return STATUS_SUCCESS;
-    return NtfsFlushVolume(Vcb);
+    {
+        NTSTATUS Status = NtfsFlushVolume(Vcb);
+        if (NT_SUCCESS(Status)) Status = NtfsLfsSuspendWriter(Vcb->LfsWriter);
+        return Status;
+    }
 }
 
 static
@@ -97,6 +101,8 @@ NtfsMarkDeviceRemoved(PNTFS_VCB Vcb)
     Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
     ExAcquireResourceExclusiveLite(&Vcb->PagingResource, TRUE);
     ExReleaseResourceLite(&Vcb->PagingResource);
+    NtfsLfsDestroyWriter(Vcb->LfsWriter);
+    Vcb->LfsWriter = NULL;
     NtfsRemoveFileLocks(Vcb);
     FsRtlNotifyCleanupAll(Vcb->NotifySync, &Vcb->NotifyList);
 
@@ -180,7 +186,14 @@ NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
             ExReleaseResourceLite(&Vcb->PagingResource);
             Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
             if (!NT_SUCCESS(Status) && !WasPending)
+            {
                 Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
+                if (!NT_SUCCESS(NtfsLfsResumeWriter(Vcb->LfsWriter)))
+                {
+                    NtfsMarkVolumeCorrupt(Vcb);
+                    Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+                }
+            }
             else if (NT_SUCCESS(Status) && IrpContext->MinorFunction == IRP_MN_EJECT)
             {
                 NtfsMarkDeviceRemoved(Vcb);
@@ -198,12 +211,22 @@ NtfsPnp(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsForwardIrpSynchronous(StorageDevice, Irp);
             /* Cancellation is not resurrection after surprise removal. */
             Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
+            {
+                NTSTATUS ResumeStatus = NtfsLfsResumeWriter(Vcb->LfsWriter);
+                if (!NT_SUCCESS(ResumeStatus))
+                {
+                    NtfsMarkVolumeCorrupt(Vcb);
+                    Vcb->Flags |= VCB_VOLUME_READ_ONLY;
+                    if (NT_SUCCESS(Status)) Status = ResumeStatus;
+                }
+            }
             break;
 
         case IRP_MN_REMOVE_DEVICE:
             if (!(Vcb->Flags & (VCB_DEVICE_REMOVED | VCB_QUERY_REMOVE_PENDING | VCB_VOLUME_DISMOUNTED)))
             {
                 Status = NtfsFlushVolume(Vcb);
+                if (NT_SUCCESS(Status)) Status = NtfsLfsFinishWriter(Vcb->LfsWriter);
                 if (!NT_SUCCESS(Status))
                     DPRINT1("Removal flush failed: %lx\n", Status);
             }
