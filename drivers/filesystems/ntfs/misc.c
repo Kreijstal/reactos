@@ -92,6 +92,7 @@ NtfsAllocateIrpContext(PDEVICE_OBJECT DeviceObject,
         IrpContext->MajorFunction == IRP_MJ_DEVICE_CONTROL ||
         IrpContext->MajorFunction == IRP_MJ_SHUTDOWN ||
         IrpContext->MajorFunction == IRP_MJ_PNP ||
+        IrpContext->MajorFunction == IRP_MJ_LOCK_CONTROL ||
         (IrpContext->MajorFunction != IRP_MJ_CLEANUP &&
          IrpContext->MajorFunction != IRP_MJ_CLOSE &&
          IoIsOperationSynchronous(Irp)))

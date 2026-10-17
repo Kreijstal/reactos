@@ -507,6 +507,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
                                                      Vcb->StorageDevice);
 
     InitializeListHead(&Vcb->FcbListHead);
+    InitializeListHead(&Vcb->FileLockList);
     Status = NtfsInitializeFcbHash(Vcb);
     if (!NT_SUCCESS(Status))
         goto ByeBye;

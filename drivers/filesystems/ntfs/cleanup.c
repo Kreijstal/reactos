@@ -136,6 +136,17 @@ NtfsCleanupFile(PDEVICE_EXTENSION DeviceExt,
 
         NtfsUncountOpen(DeviceExt, Fcb, FileObject);
 
+        if (Fcb->FileLock != NULL)
+        {
+            PNTFS_CCB Ccb = FileObject->FsContext2;
+            PNTFS_LOCK_OWNER Owner;
+
+            ExAcquireResourceExclusiveLite(&Fcb->FileLock->Resource, TRUE);
+            for (Owner = Ccb->LockOwners; Owner != NULL; Owner = Owner->Next)
+                (VOID)FsRtlFastUnlockAll(&Fcb->FileLock->Lock, FileObject, Owner->Process, NULL);
+            ExReleaseResourceLite(&Fcb->FileLock->Resource);
+        }
+
         if (Fcb->ShareAccess.OpenCount > 0)
         {
             IoRemoveShareAccess(FileObject, &Fcb->ShareAccess);
@@ -293,7 +304,8 @@ NtfsCleanup(PNTFS_IRP_CONTEXT IrpContext)
         return NtfsMarkIrpContextForQueue(IrpContext);
     }
 
-    Status = NtfsCleanupFile(DeviceExtension, FileObject, BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
+    Status = NtfsCleanupFile(DeviceExtension, FileObject,
+                              BooleanFlagOn(IrpContext->Flags, IRPCONTEXT_CANWAIT));
 
     ExReleaseResourceLite(&DeviceExtension->DirResource);
 

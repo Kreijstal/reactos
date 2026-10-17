@@ -124,6 +124,7 @@ typedef struct
 
     KSPIN_LOCK FcbListLock;
     LIST_ENTRY FcbListHead;
+    LIST_ENTRY FileLockList;
     PLIST_ENTRY FcbHashBuckets;
 
     PVPB Vpb;
@@ -183,11 +184,21 @@ typedef struct
 #define VCB_QUERY_REMOVE_PENDING 0x0004
 #define VCB_DEVICE_REMOVED       0x0008
 
+/* A final file-object cleanup can run attached to the system process when
+ * closing a kernel handle. Retain every process that submitted locks through
+ * this open, so cleanup releases this open's locks in all process contexts. */
+typedef struct _NTFS_LOCK_OWNER
+{
+    struct _NTFS_LOCK_OWNER *Next;
+    struct _EPROCESS *Process;
+} NTFS_LOCK_OWNER, *PNTFS_LOCK_OWNER;
+
 typedef struct
 {
     NTFSIDENTIFIER Identifier;
     LIST_ENTRY     NextCCB;
     PFILE_OBJECT   PtrFileObject;
+    PNTFS_LOCK_OWNER LockOwners;
     LARGE_INTEGER  CurrentByteOffset;
     /* for DirectoryControl */
     ULONG Entry;
@@ -668,6 +679,20 @@ typedef struct _NTFS_ATTR_CONTEXT
 /* Longest path a UNICODE_STRING can hold, in characters, with its terminator */
 #define NTFS_MAX_PATH_LENGTH    (MAXUSHORT / sizeof(WCHAR))
 
+/* Byte locks belong to a data stream, independently of which hard-link path
+ * produced its FCB. FcbListLock guards this list and its reference counts. */
+typedef struct _NTFS_FILE_LOCK
+{
+    LIST_ENTRY ListEntry;
+    LONG References;
+    BOOLEAN Removed;
+    ULONGLONG FileReference;
+    WCHAR Stream[MAX_PATH];
+    PNTFS_VCB Vcb;
+    ERESOURCE Resource;
+    FILE_LOCK Lock;
+} NTFS_FILE_LOCK, *PNTFS_FILE_LOCK;
+
 typedef struct _FCB
 {
     /* Cc and FsRtl access this header through FileObject->FsContext. */
@@ -696,6 +721,7 @@ typedef struct _FCB
     ULONG Flags;
     ULONG OpenHandleCount;
     SHARE_ACCESS ShareAccess;
+    PNTFS_FILE_LOCK FileLock;
 
     ULONGLONG MFTIndex;
     ULONGLONG ParentMFTIndex;  /* The directory holding the name the FCB was opened by */
@@ -1061,6 +1087,29 @@ NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
                     LONGLONG StartingOffset,
                     ULONG Length,
                     const PUCHAR Buffer);
+
+/* lock.c / shared stream-lock lifetime in fcb.c */
+NTSTATUS
+NtfsLockControl(PNTFS_IRP_CONTEXT IrpContext);
+
+NTSTATUS
+NTAPI
+NtfsCompleteLockIrp(PVOID Context, PIRP Irp);
+
+VOID
+NtfsRemoveFileLocks(PNTFS_VCB Vcb);
+
+NTSTATUS
+NtfsInitializeFcbLock(PNTFS_FCB Fcb);
+
+VOID
+NtfsReferenceFileLock(PNTFS_FILE_LOCK FileLock);
+
+VOID
+NtfsReleaseFileLock(PNTFS_FILE_LOCK FileLock);
+
+BOOLEAN
+NtfsCheckFileLock(PNTFS_FCB Fcb, PIRP Irp, PLARGE_INTEGER Offset, ULONG Length, BOOLEAN Write);
 
 /* pnp.c */
 NTSTATUS

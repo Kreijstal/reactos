@@ -97,6 +97,7 @@ NtfsMarkDeviceRemoved(PNTFS_VCB Vcb)
     Vcb->Flags &= ~VCB_QUERY_REMOVE_PENDING;
     ExAcquireResourceExclusiveLite(&Vcb->PagingResource, TRUE);
     ExReleaseResourceLite(&Vcb->PagingResource);
+    NtfsRemoveFileLocks(Vcb);
 
     Stream = Vcb->StreamFileObject;
     if (Stream != NULL)

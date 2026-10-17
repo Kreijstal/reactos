@@ -436,6 +436,12 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
                               &Fcb->PagingIoResource : &Fcb->MainResource;
         IO_STATUS_BLOCK IoStatus;
 
+        if (!NtfsCheckFileLock(Fcb, Irp, &ReadOffset, ReadLength, FALSE))
+        {
+            Irp->IoStatus.Information = 0;
+            return STATUS_FILE_LOCK_CONFLICT;
+        }
+
         /* Serialize private-map creation before taking main shared. Different
          * reads on the same file object may arrive concurrently. */
         if (NtfsUseDataCache(Fcb, FileObject, Irp) &&
@@ -1069,16 +1075,15 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
         PagingResourceAcquired = TRUE;
     }
 
-    /* From VfatWrite(). Todo: Handle file locks
-    if (!(IrpContext->Irp->Flags & IRP_PAGING_IO) &&
-    FsRtlAreThereCurrentFileLocks(&Fcb->FileLock))
+    if (!(Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM)) &&
+        !NtfsCheckFileLock(Fcb, Irp, &ByteOffset, Length, TRUE))
     {
-    if (!FsRtlCheckLockForWriteAccess(&Fcb->FileLock, IrpContext->Irp))
-    {
-    Status = STATUS_FILE_LOCK_CONFLICT;
-    goto ByeBye;
+        if (PagingResourceAcquired)
+            ExReleaseResourceLite(&Fcb->PagingIoResource);
+        ExReleaseResourceLite(Resource);
+        Irp->IoStatus.Information = 0;
+        return STATUS_FILE_LOCK_CONFLICT;
     }
-    }*/
 
     // get the buffer of data the user is trying to write
     Buffer = NtfsGetUserBuffer(Irp, BooleanFlagOn(Irp->Flags, IRP_PAGING_IO));

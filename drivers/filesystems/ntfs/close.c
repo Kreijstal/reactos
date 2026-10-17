@@ -75,6 +75,16 @@ NtfsCloseFile(PDEVICE_EXTENSION DeviceExt,
         NtfsReleaseFCB(DeviceExt, Fcb);
     }
 
+    while (Ccb->LockOwners != NULL)
+    {
+        PNTFS_LOCK_OWNER Owner = Ccb->LockOwners;
+
+        Ccb->LockOwners = Owner->Next;
+        if (Owner->Process != NULL)
+            ObDereferenceObject(Owner->Process);
+        ExFreePoolWithTag(Owner, TAG_CCB);
+    }
+
     if (Ccb->DirectorySearchPattern)
     {
         ExFreePool(Ccb->DirectorySearchPattern);

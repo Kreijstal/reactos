@@ -95,6 +95,7 @@ list(APPEND KMTEST_DRV_SOURCE
     ntos_io/NtfsFsctl.c
     ntos_io/NtfsInfoClasses.c
     ntos_io/NtfsKmt.c
+    ntos_io/NtfsLocks.c
     ntos_io/NtfsLinks.c
     ntos_io/NtfsObjectId.c
     ntos_io/NtfsQuota.c

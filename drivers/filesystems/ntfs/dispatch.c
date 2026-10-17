@@ -184,6 +184,10 @@ NtfsDispatch(PNTFS_IRP_CONTEXT IrpContext)
             Status = NtfsFileSystemControl(IrpContext);
             break;
 
+        case IRP_MJ_LOCK_CONTROL:
+            Status = NtfsLockControl(IrpContext);
+            break;
+
         case IRP_MJ_PNP:
             Status = NtfsPnp(IrpContext);
             break;
