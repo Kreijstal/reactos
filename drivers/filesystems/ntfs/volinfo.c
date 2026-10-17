@@ -120,6 +120,126 @@ Fail:
     return Status;
 }
 
+/* $BadClus:$Bad covers every VCN in the volume. Its holes are valid without
+ * NTFS_ATTR_SPARSE, so the ordinary nonresident resize would allocate them.
+ * Retain actual bad-cluster mappings and only extend the trailing hole. */
+static NTSTATUS
+NtfsExtendBadClusters(PDEVICE_EXTENSION Vcb, ULONG NewClusterCount)
+{
+    PFILE_RECORD_HEADER Record, Holder = NULL;
+    PNTFS_ATTR_CONTEXT Context = NULL;
+    PNTFS_ATTR_RECORD Attribute;
+    ULONG Offset;
+    NTSTATUS Status;
+
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Record == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    Status = ReadFileRecord(Vcb, NTFS_FILE_BADCLUS, Record);
+    if (NT_SUCCESS(Status))
+        Status = FindAttribute(Vcb, Record, AttributeData, L"$Bad", 4, &Context, NULL);
+    if (NT_SUCCESS(Status))
+        Status = NtfsResolveAttributeHolder(Vcb, Context, Record, &Holder, &Offset);
+    if (NT_SUCCESS(Status))
+    {
+        ASSERT(Context->pRecord->IsNonResident);
+        Status = NtfsStoreMappingPairs(Vcb, Context, Offset, Holder, NewClusterCount);
+        if (NT_SUCCESS(Status))
+        {
+            Attribute = (PNTFS_ATTR_RECORD)((PUCHAR)Holder + Offset);
+            Attribute->NonResident.DataSize = (ULONGLONG)NewClusterCount * Vcb->NtfsInfo.BytesPerCluster;
+            Context->pRecord->NonResident.DataSize = Attribute->NonResident.DataSize;
+            Status = NtfsCommitAttributeContext(Vcb, Context, Holder);
+        }
+    }
+    NtfsReleaseAttributeHolder(Vcb, Record, Holder);
+    if (Context != NULL)
+        ReleaseAttributeContext(Context);
+    ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    return Status;
+}
+
+/* The caller owns MftAllocationResource and BitmapResource exclusively.
+ * Recursive metadata allocations may use the new range while writeback of
+ * allocation bits is deferred until $Bitmap can hold those bits itself.
+ * Restore the old allocation bound on return; the request publishes the
+ * larger bound only after committing the primary boot sector. */
+NTSTATUS
+NtfsExtendVolumeBitmap(PDEVICE_EXTENSION Vcb, ULONG NewClusterCount, PBOOLEAN MetadataTouched)
+{
+    PFILE_RECORD_HEADER Record = NULL, Holder = NULL;
+    PULONG Buffer = NULL, OldBuffer;
+    LARGE_INTEGER Size;
+    ULONG Offset, Written, OldSize = Vcb->BitmapSize;
+    ULONG OldClusterCount = (ULONG)Vcb->NtfsInfo.ClusterCount;
+    ULONGLONG OldFreeClusters = Vcb->FreeClusterCount;
+    NTSTATUS Status;
+
+    *MetadataTouched = FALSE;
+    ASSERT(NewClusterCount > OldClusterCount);
+    ASSERT(!Vcb->DeferVolumeBitmapWrites);
+    Size.QuadPart = ALIGN_UP_BY(max(OldSize, ((ULONGLONG)NewClusterCount + 7) / 8),
+                                Vcb->NtfsInfo.BytesPerSector);
+    if (Size.QuadPart > MAXULONG)
+        return STATUS_FILE_CORRUPT_ERROR;
+    Buffer = ExAllocatePoolWithTag(PagedPool, (ULONG)Size.QuadPart, TAG_NTFS);
+    Record = ExAllocateFromNPagedLookasideList(&Vcb->FileRecLookasideList);
+    if (Buffer == NULL || Record == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Cleanup;
+    }
+    Status = ReadFileRecord(Vcb, NTFS_FILE_BITMAP, Record);
+    if (NT_SUCCESS(Status))
+        Status = NtfsResolveAttributeHolder(Vcb, Vcb->BitmapContext, Record, &Holder, &Offset);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    ASSERT(Vcb->BitmapContext->pRecord->IsNonResident);
+
+    RtlFillMemory(Buffer, (ULONG)Size.QuadPart, 0xff);
+    RtlCopyMemory(Buffer, Vcb->BitmapBuffer, OldSize);
+    OldBuffer = Vcb->BitmapBuffer;
+    Vcb->BitmapBuffer = Buffer;
+    Buffer = NULL;
+    RtlInitializeBitMap(&Vcb->ClusterBitmap, Vcb->BitmapBuffer, NewClusterCount);
+    RtlClearBits(&Vcb->ClusterBitmap, OldClusterCount, NewClusterCount - OldClusterCount);
+    Vcb->FreeClusterCount = OldFreeClusters + NewClusterCount - OldClusterCount;
+    Vcb->DeferVolumeBitmapWrites = TRUE;
+    *MetadataTouched = TRUE;
+    Status = SetNonResidentAttributeDataLength(Vcb, Vcb->BitmapContext, Offset, Holder, &Size);
+    if (NT_SUCCESS(Status))
+        Status = NtfsCommitAttributeContext(Vcb, Vcb->BitmapContext, Holder);
+    if (NT_SUCCESS(Status))
+        Status = NtfsExtendBadClusters(Vcb, NewClusterCount);
+    if (NT_SUCCESS(Status))
+    {
+        Status = WriteAttribute(Vcb, Vcb->BitmapContext, 0, (PUCHAR)Vcb->BitmapBuffer,
+                                 (ULONG)Size.QuadPart, &Written, Holder);
+        if (NT_SUCCESS(Status) && Written != Size.QuadPart)
+            Status = STATUS_UNEXPECTED_IO_ERROR;
+    }
+    Vcb->DeferVolumeBitmapWrites = FALSE;
+    Vcb->BitmapSize = (ULONG)AttributeDataLength(Vcb->BitmapContext->pRecord);
+    RtlInitializeBitMap(&Vcb->ClusterBitmap, Vcb->BitmapBuffer, OldClusterCount);
+    Vcb->FreeClusterCount = RtlNumberOfClearBits(&Vcb->ClusterBitmap);
+    if (!NT_SUCCESS(Status))
+    {
+        /* A failed resize may have reserved old-range clusters for metadata.
+         * Keep those claims in memory and attempt to persist them as well;
+         * returning the old snapshot would make their owners cross-linked. */
+        (VOID)WriteAttribute(Vcb, Vcb->BitmapContext, 0, (PUCHAR)Vcb->BitmapBuffer,
+                             min(OldSize, Vcb->BitmapSize), &Written, Holder);
+    }
+    ExFreePoolWithTag(OldBuffer, TAG_NTFS);
+Cleanup:
+    NtfsReleaseAttributeHolder(Vcb, Record, Holder);
+    if (Record != NULL)
+        ExFreeToNPagedLookasideList(&Vcb->FileRecLookasideList, Record);
+    if (Buffer != NULL)
+        ExFreePoolWithTag(Buffer, TAG_NTFS);
+    return Status;
+}
+
 /**
 * @name NtfsFreeVolumeBitmap
 *
@@ -175,6 +295,8 @@ NtfsWriteVolumeBitmap(
     ULONG LengthWritten;
 
     ASSERT(ClusterCount != 0);
+    if (DeviceExt->DeferVolumeBitmapWrites)
+        return STATUS_SUCCESS;
 
     Start = ROUND_DOWN(FirstCluster / 8, SectorSize);
     End = ROUND_UP((FirstCluster + ClusterCount - 1) / 8 + 1, SectorSize);
@@ -452,10 +574,12 @@ NtfsGetFsSizeInformation(PDEVICE_OBJECT DeviceObject,
     if (*BufferLength < sizeof(FILE_FS_SIZE_INFORMATION))
         return STATUS_INFO_LENGTH_MISMATCH;
 
+    ExAcquireResourceSharedLite(&DeviceExt->BitmapResource, TRUE);
     FsSizeInfo->AvailableAllocationUnits.QuadPart = NtfsGetFreeClusters(DeviceExt);
     FsSizeInfo->TotalAllocationUnits.QuadPart = DeviceExt->NtfsInfo.ClusterCount;
     FsSizeInfo->SectorsPerAllocationUnit = DeviceExt->NtfsInfo.SectorsPerCluster;
     FsSizeInfo->BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
+    ExReleaseResourceLite(&DeviceExt->BitmapResource);
 
     *BufferLength -= sizeof(FILE_FS_SIZE_INFORMATION);
 
@@ -478,12 +602,14 @@ NtfsGetFsFullSizeInformation(PDEVICE_OBJECT DeviceObject,
         return STATUS_INFO_LENGTH_MISMATCH;
 
     /* No quotas are enforced, so the caller can have every free cluster */
+    ExAcquireResourceSharedLite(&DeviceExt->BitmapResource, TRUE);
     FreeClusters = NtfsGetFreeClusters(DeviceExt);
     FsFullSizeInfo->TotalAllocationUnits.QuadPart = DeviceExt->NtfsInfo.ClusterCount;
     FsFullSizeInfo->CallerAvailableAllocationUnits.QuadPart = FreeClusters;
     FsFullSizeInfo->ActualAvailableAllocationUnits.QuadPart = FreeClusters;
     FsFullSizeInfo->SectorsPerAllocationUnit = DeviceExt->NtfsInfo.SectorsPerCluster;
     FsFullSizeInfo->BytesPerSector = DeviceExt->NtfsInfo.BytesPerSector;
+    ExReleaseResourceLite(&DeviceExt->BitmapResource);
 
     *BufferLength -= sizeof(FILE_FS_FULL_SIZE_INFORMATION);
 
