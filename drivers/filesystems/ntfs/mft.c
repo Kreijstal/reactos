@@ -3127,8 +3127,38 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
     // Restore the system reserved bits
     BitmapData[2] = SystemReservedBits;
 
+    /* FreeMftEntry already advanced this slot's sequence number. Preserve it
+     * rather than the new-record template's 1, without advancing it twice. */
+    {
+        PFILE_RECORD_HEADER PreviousRecord;
+
+        PreviousRecord = ExAllocateFromNPagedLookasideList(&DeviceExt->FileRecLookasideList);
+        if (PreviousRecord == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else
+        {
+            Status = ReadFileRecord(DeviceExt, MftIndex, PreviousRecord);
+            if (NT_SUCCESS(Status))
+            {
+                FileRecord->SequenceNumber = PreviousRecord->SequenceNumber;
+                if (FileRecord->SequenceNumber == 0)
+                    FileRecord->SequenceNumber = 1;
+            }
+            ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, PreviousRecord);
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
+            ReleaseAttributeContext(BitmapContext);
+            return Status;
+        }
+    }
+
     // write the bitmap back to the MFT's $Bitmap attribute
-    Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize, &LengthWritten, FileRecord);
+    Status = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize,
+                             &LengthWritten, DeviceExt->MasterFileTable);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("ERROR encountered when writing $Bitmap attribute!\n");
@@ -3142,7 +3172,14 @@ AddNewMftEntry(PFILE_RECORD_HEADER FileRecord,
 
     if (!NT_SUCCESS(Status))
     {
+        NTSTATUS RollbackStatus;
+
         DPRINT1("ERROR: Unable to write file record!\n");
+        RtlClearBits(&Bitmap, (ULONG)MftIndex, 1);
+        RollbackStatus = WriteAttribute(DeviceExt, BitmapContext, 0, BitmapData, BitmapDataSize,
+                                        &LengthWritten, DeviceExt->MasterFileTable);
+        if (!NT_SUCCESS(RollbackStatus))
+            DPRINT1("Couldn't roll back MFT bitmap allocation %I64u (Status %lx)\n", MftIndex, RollbackStatus);
         ExFreePoolWithTag(BitmapBuffer, TAG_NTFS);
         ReleaseAttributeContext(BitmapContext);
         return Status;
