@@ -1992,6 +1992,19 @@ NtfsSetVolumeFlags(PDEVICE_EXTENSION DeviceExt,
     return Status;
 }
 
+/* A failed rollback leaves on-disk metadata inconsistent. Keep that fact
+ * visible to chkdsk even if the attempted dirty-bit write also fails. */
+VOID
+NtfsMarkVolumeCorrupt(PDEVICE_EXTENSION Vcb)
+{
+    NTSTATUS Status;
+
+    Status = NtfsSetVolumeFlags(Vcb, NTFS_VOLUME_FLAG_DIRTY);
+    SetFlag(Vcb->NtfsInfo.Flags, NTFS_VOLUME_FLAG_DIRTY);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("Couldn't persist the volume dirty flag: %lx\n", Status);
+}
+
 /**
 * @name NtfsIsVolumeDirty
 *
