@@ -98,6 +98,16 @@ NtfsFlushBuffers(PNTFS_IRP_CONTEXT IrpContext)
 
     if (DeviceExt->Flags & VCB_VOLUME_DISMOUNTED)
     {
+        /* Offline format/repair writes use the existing raw volume handle.
+         * Its flush must reach storage without revisiting stale metadata. */
+        if (IrpContext->FileObject != NULL)
+        {
+            PNTFS_FCB Fcb = IrpContext->FileObject->FsContext;
+
+            ASSERT(Fcb != NULL);
+            if (Fcb->Flags & FCB_IS_VOLUME)
+                return NtfsFlushDevice(DeviceExt->StorageDevice);
+        }
         return STATUS_VOLUME_DISMOUNTED;
     }
 

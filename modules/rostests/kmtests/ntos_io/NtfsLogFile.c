@@ -172,7 +172,8 @@ DismountLogVolume(HANDLE Volume)
 }
 
 static BOOLEAN
-CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted)
+CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted,
+              PLARGE_INTEGER LogOffset, PUCHAR Pages)
 {
     HANDLE Volume, File = NULL;
     WCHAR NewPath[MAX_PATH];
@@ -188,7 +189,7 @@ CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted)
     LARGE_INTEGER Zero = {{0}};
     CHAR Value = 0;
 
-    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA, &Volume);
+    Status = NtfsKmtOpenVolume(Letter, FILE_READ_DATA | FILE_WRITE_DATA, &Volume);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status)) { *Dismounted = FALSE; return FALSE; }
     *Dismounted = FALSE;
@@ -198,6 +199,11 @@ CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted)
     if (NT_SUCCESS(Status))
         ok(!!(Info->FileSystemAttributes & FILE_READ_ONLY_VOLUME) == ReadOnly,
            "read-only mount: got %lx, expected %u\n", Info->FileSystemAttributes, ReadOnly);
+    if (ReadOnly)
+    {
+        Status = ZwWriteFile(Volume, NULL, NULL, NULL, &IoStatus, Pages, LOG_PAIR, LogOffset, NULL);
+        ok_eq_hex(Status, STATUS_MEDIA_WRITE_PROTECTED);
+    }
     Status = NtfsKmtOpen(&File, Path, FILE_READ_DATA, 0);
     ok_eq_hex(Status, STATUS_SUCCESS);
     if (NT_SUCCESS(Status))
@@ -299,6 +305,15 @@ CheckLogMount(WCHAR Letter, PCWSTR Path, BOOLEAN ReadOnly, PBOOLEAN Dismounted)
         ok(!(Dirty & VOLUME_IS_DIRTY), "read-only mount wrote the dirty flag\n");
     }
     *Dismounted = DismountLogVolume(Volume);
+    if (*Dismounted)
+    {
+        /* Identical log bytes, written through the same volume handle only
+         * after the filesystem is dismounted. No boot sector is touched. */
+        Status = ZwWriteFile(Volume, NULL, NULL, NULL, &IoStatus, Pages, LOG_PAIR, LogOffset, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        Status = NtfsKmtFlush(Volume);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+    }
     ZwClose(Volume);
     return *Dismounted;
 }
@@ -378,7 +393,7 @@ START_TEST(NtfsLogFile)
         ok_eq_hex(Status, STATUS_SUCCESS);
         if (!NT_SUCCESS(Status)) break;
         if (!CheckLogMount(Letter, Path, Case == 1 || Case == 2 || Case == 4 ||
-                             Case == 5 || Case == 7 || Case == 8, &Dismounted)) break;
+                             Case == 5 || Case == 7 || Case == 8, &Dismounted, &Offset, Pages)) break;
         Status = ZwReadFile(Raw, NULL, NULL, NULL, &IoStatus, Verify, LOG_PAIR, &Offset, NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
         if (NT_SUCCESS(Status))
