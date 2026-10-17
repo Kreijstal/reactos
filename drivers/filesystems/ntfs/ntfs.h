@@ -1024,6 +1024,26 @@ FreeClusters(PNTFS_VCB Vcb,
 
 /* blockdev.c */
 
+NTSTATUS
+NtfsReadDiskCached(PDEVICE_EXTENSION Vcb,
+                   LONGLONG StartingOffset,
+                   ULONG Length,
+                   PUCHAR Buffer);
+
+NTSTATUS
+NtfsWriteDiskCached(PDEVICE_EXTENSION Vcb,
+                    LONGLONG StartingOffset,
+                    ULONG Length,
+                    const PUCHAR Buffer);
+
+/* flush.c */
+NTSTATUS
+NtfsFlushVolume(PDEVICE_EXTENSION Vcb);
+
+NTSTATUS
+NtfsFlushFileCache(PFILE_OBJECT FileObject, BOOLEAN Purge);
+
+
 VOID
 NtfsInitIoRunList(OUT PNTFS_IO_RUN_LIST RunList);
 

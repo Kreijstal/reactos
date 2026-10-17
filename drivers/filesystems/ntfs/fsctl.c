@@ -529,7 +529,7 @@ NtfsMountVolume(PDEVICE_OBJECT DeviceObject,
     Vcb->StreamFileObject->Vpb = Vcb->Vpb;
     Ccb->PtrFileObject = Vcb->StreamFileObject;
     Fcb->FileObject = Vcb->StreamFileObject;
-    Fcb->Vcb = (PDEVICE_EXTENSION)Vcb->StorageDevice;
+    Fcb->Vcb = Vcb;
 
     Fcb->Flags = FCB_IS_VOLUME_STREAM;
 
@@ -955,6 +955,7 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     PFILE_OBJECT FileObject;
     PNTFS_FCB Fcb;
     KIRQL SavedIrql;
+    NTSTATUS Status;
 
     Stack = IoGetCurrentIrpStackLocation(Irp);
     FileObject = Stack->FileObject;
@@ -976,6 +977,17 @@ NtfsDismountVolume(PDEVICE_EXTENSION DeviceExt,
     FsRtlNotifyVolumeEvent(FileObject, FSRTL_VOLUME_DISMOUNT);
 
     ExAcquireResourceExclusiveLite(&DeviceExt->DirResource, TRUE);
+
+    Status = NtfsFlushVolume(DeviceExt);
+    if (!NT_SUCCESS(Status))
+    {
+        ExReleaseResourceLite(&DeviceExt->DirResource);
+        return Status;
+    }
+
+    /* Dirty pages must reach disk before the cache is discarded. */
+    CcPurgeCacheSection(DeviceExt->StreamFileObject->SectionObjectPointer, NULL, 0, FALSE);
+    CcUninitializeCacheMap(DeviceExt->StreamFileObject, NULL, NULL);
 
     DeviceExt->Flags |= VCB_VOLUME_DISMOUNTED;
 
@@ -1571,11 +1583,9 @@ NtfsMoveClusters(PDEVICE_EXTENSION DeviceExt,
     if (Data == NULL)
         Status = STATUS_INSUFFICIENT_RESOURCES;
     else
-        Status = NtfsReadDisk(DeviceExt->StorageDevice, OldLcn * BytesPerCluster, Count * BytesPerCluster,
-                              DeviceExt->NtfsInfo.BytesPerSector, Data, FALSE);
+        Status = NtfsReadDiskCached(DeviceExt, OldLcn * BytesPerCluster, Count * BytesPerCluster, Data);
     if (NT_SUCCESS(Status))
-        Status = NtfsWriteDisk(DeviceExt->StorageDevice, Lcn * BytesPerCluster, Count * BytesPerCluster,
-                               DeviceExt->NtfsInfo.BytesPerSector, Data);
+        Status = NtfsWriteDiskCached(DeviceExt, Lcn * BytesPerCluster, Count * BytesPerCluster, Data);
 
     if (NT_SUCCESS(Status))
     {

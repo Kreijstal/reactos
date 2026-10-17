@@ -96,6 +96,24 @@ NtfsReadWriteVolume(PDEVICE_EXTENSION DeviceExt,
     if (Length == 0)
         return STATUS_SUCCESS;
 
+    /* A raw handle must observe dirty metadata too. Paging I/O on the
+     * internal volume stream is the cache's recursion terminator. */
+    if (!(Irp->Flags & IRP_PAGING_IO) &&
+        !(DeviceExt->Flags & VCB_VOLUME_DISMOUNTED))
+    {
+        if (MajorFunction == IRP_MJ_READ)
+            Status = NtfsReadDiskCached(DeviceExt, Offset, Length, Buffer);
+        else
+        {
+            Status = NtfsWriteDiskCached(DeviceExt, Offset, Length, Buffer);
+            if (NT_SUCCESS(Status))
+                Status = NtfsFlushVolume(DeviceExt);
+        }
+        if (NT_SUCCESS(Status))
+            *LengthTransferred = Length;
+        return Status;
+    }
+
     NtfsInitIoRunList(&RunList);
 
     Status = NtfsAddIoRun(&RunList, Offset, Length);
@@ -344,7 +362,7 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     /* A handle on the volume itself is raw access to the partition. */
-    if (((PNTFS_FCB)FileObject->FsContext)->Flags & FCB_IS_VOLUME)
+    if (((PNTFS_FCB)FileObject->FsContext)->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
     {
         Status = NtfsReadWriteVolume(DeviceExt,
                                      IRP_MJ_READ,
@@ -362,6 +380,19 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
     }
     else
     {
+        PNTFS_FCB Fcb = FileObject->FsContext;
+        PERESOURCE Resource = (Irp->Flags & IRP_PAGING_IO) ?
+                              &Fcb->PagingIoResource : &Fcb->MainResource;
+        IO_STATUS_BLOCK IoStatus;
+
+        ExAcquireResourceSharedLite(Resource, TRUE);
+        if (!(Irp->Flags & IRP_PAGING_IO))
+        {
+            CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &IoStatus);
+            Status = IoStatus.Status;
+        }
+        if (NT_SUCCESS(Status))
+        {
         Status = NtfsReadFile(DeviceExt,
                               FileObject,
                               Buffer,
@@ -370,6 +401,8 @@ NtfsRead(PNTFS_IRP_CONTEXT IrpContext)
                               Irp->Flags,
                               Irp,
                               &ReturnedReadLength);
+        }
+        ExReleaseResourceLite(Resource);
     }
     if (NT_SUCCESS(Status))
     {
@@ -684,6 +717,13 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         Status = STATUS_UNEXPECTED_IO_ERROR;
     }
 
+    if (NT_SUCCESS(Status) && !(IrpFlags & IRP_PAGING_IO) &&
+        WriteOffset + Length > (ULONGLONG)Fcb->RFCB.ValidDataLength.QuadPart)
+    {
+        Fcb->RFCB.ValidDataLength.QuadPart = WriteOffset + Length;
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+    }
+
     // A clamped paging write stored all the stream had room for, so as far as
     // Mm is concerned the whole page is done
     if (RequestedLength != 0 && NT_SUCCESS(Status))
@@ -694,6 +734,64 @@ NTSTATUS NtfsWriteFile(PDEVICE_EXTENSION DeviceExt,
         ExFreeToNPagedLookasideList(&DeviceExt->FileRecLookasideList, FileRecord);
 
     return Status;
+}
+
+/* Preserve our cached-write path while keeping reads on the attribute path.
+ * Flush each copy before reporting completion, as on the source branch; the
+ * volume cache still coalesces the resulting data and metadata writes. */
+static
+NTSTATUS
+NtfsCachedWriteFile(PDEVICE_EXTENSION Vcb,
+                    PFILE_OBJECT FileObject,
+                    PUCHAR Buffer,
+                    LARGE_INTEGER Offset,
+                    ULONG Length,
+                    BOOLEAN CaseSensitive,
+                    PULONG Written)
+{
+    PNTFS_FCB Fcb = FileObject->FsContext;
+    LARGE_INTEGER End;
+    IO_STATUS_BLOCK IoStatus;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    *Written = 0;
+    End.QuadPart = Offset.QuadPart + Length;
+    if (End.QuadPart > Fcb->RFCB.FileSize.QuadPart)
+    {
+        Status = NtfsSetEndOfFile(Fcb, FileObject, Vcb, 0, CaseSensitive, &End);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    _SEH2_TRY
+    {
+        if (FileObject->PrivateCacheMap == NULL)
+        {
+            CcInitializeCacheMap(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize,
+                                 FALSE, &NtfsGlobalData->CacheMgrCallbacks, Fcb);
+        }
+        if (!CcCopyWrite(FileObject, &Offset, Length, TRUE, Buffer))
+            Status = STATUS_CANT_WAIT;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    CcFlushCache(FileObject->SectionObjectPointer, &Offset, Length, &IoStatus);
+    if (!NT_SUCCESS(IoStatus.Status))
+        return IoStatus.Status;
+
+    if (End.QuadPart > Fcb->RFCB.ValidDataLength.QuadPart)
+    {
+        Fcb->RFCB.ValidDataLength = End;
+        CcSetFileSizes(FileObject, (PCC_FILE_SIZES)&Fcb->RFCB.AllocationSize);
+    }
+    *Written = Length;
+    return STATUS_SUCCESS;
 }
 
 /**
@@ -812,7 +910,11 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     // get the Resource
-    if (Fcb->Flags & FCB_IS_VOLUME)
+    if (Fcb->Flags & FCB_IS_VOLUME_STREAM)
+    {
+        Resource = &Fcb->PagingIoResource;
+    }
+    else if (Fcb->Flags & FCB_IS_VOLUME)
     {
         Resource = &DeviceExt->DirResource;
     }
@@ -871,7 +973,7 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     }
 
     // write the file
-    if (Fcb->Flags & FCB_IS_VOLUME)
+    if (Fcb->Flags & (FCB_IS_VOLUME | FCB_IS_VOLUME_STREAM))
     {
         /* Raw access to the partition, including after a dismount. */
         Status = NtfsReadWriteVolume(DeviceExt,
@@ -893,15 +995,35 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
     {
         LONGLONG OldSize = Fcb->RFCB.FileSize.QuadPart;
 
-        Status = NtfsWriteFile(DeviceExt,
-                               FileObject,
-                               Buffer,
-                               Length,
-                               ByteOffset.QuadPart,
-                               Irp->Flags,
-                               BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
-                               Irp,
-                               &ReturnedWriteLength);
+        if (!(Irp->Flags & (IRP_PAGING_IO | IRP_NOCACHE)) &&
+            !(FileObject->Flags & FO_NO_INTERMEDIATE_BUFFERING) &&
+            !NtfsFCBIsCompressed(Fcb) &&
+            !(Fcb->Entry.FileAttributes & NTFS_FILE_TYPE_SPARSE))
+        {
+            Status = NtfsCachedWriteFile(DeviceExt, FileObject, Buffer, ByteOffset, Length,
+                                         BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
+                                         &ReturnedWriteLength);
+        }
+        else
+        {
+            /* Direct writes must invalidate the file cache after flushing it.
+             * Paging writes are themselves that flush, and must never purge. */
+            if (!(Irp->Flags & IRP_PAGING_IO))
+            {
+                IO_STATUS_BLOCK IoStatus;
+                CcFlushCache(FileObject->SectionObjectPointer, NULL, 0, &IoStatus);
+                Status = IoStatus.Status;
+                if (NT_SUCCESS(Status))
+                    CcPurgeCacheSection(FileObject->SectionObjectPointer, NULL, 0, FALSE);
+            }
+            if (NT_SUCCESS(Status))
+            {
+                Status = NtfsWriteFile(DeviceExt, FileObject, Buffer, Length,
+                                       ByteOffset.QuadPart, Irp->Flags,
+                                       BooleanFlagOn(IrpContext->Stack->Flags, SL_CASE_SENSITIVE),
+                                       Irp, &ReturnedWriteLength);
+            }
+        }
 
         /* Paging I/O only writes back what a write already told the journal about */
         if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO) && ReturnedWriteLength != 0)
@@ -940,6 +1062,12 @@ NtfsWrite(PNTFS_IRP_CONTEXT IrpContext)
 
     ExReleaseResourceLite(Resource);
 
+    if (NT_SUCCESS(Status) && !(Irp->Flags & IRP_PAGING_IO))
+    {
+        FileObject->Flags |= FO_FILE_MODIFIED;
+        if (FileObject->Flags & FO_WRITE_THROUGH)
+            Status = NtfsFlushVolume(DeviceExt);
+    }
     return Status;
 }
 
